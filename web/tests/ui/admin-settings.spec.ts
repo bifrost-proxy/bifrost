@@ -603,6 +603,300 @@ test("AI 一级页整合 Agent 子导航并按 URL 切换独立编辑卡片", as
   await expect(page.getByTestId("agent-settings-section-runtime")).toBeVisible();
 });
 
+test("AI Agent Session 详情默认展示 Messages Tab 且内容区可真实滚动", async ({ page }) => {
+  await page.setViewportSize({ width: 1180, height: 520 });
+
+  const agentConfig = {
+    enabled: true,
+    work_dir: "/tmp/agent-ui",
+    model: "gpt-test",
+    model_provider: "mock",
+    max_history_messages: 20,
+    model_providers: {
+      mock: {
+        api_key: "$MODEL_API_KEY",
+      },
+    },
+    mcp_servers: {},
+  };
+  const historyPath = "/tmp/bifrost-agent-session-history.jsonl";
+  const now = Math.floor(Date.now() / 1000);
+  const events = Array.from({ length: 36 }, (_, index) => ({
+    event_type: index % 3 === 0 ? "user_message" : index % 3 === 1 ? "assistant_message" : "tool_call",
+    timestamp: now + index,
+    content:
+      index % 3 === 2
+        ? {
+            tool_name: `mock_tool_${index}`,
+            arguments: `{"index":${index},"payload":"${"tool argument ".repeat(10)}"}`,
+          }
+        : {
+            message: `Session event ${index + 1}: ${"message body ".repeat(12)}`,
+          },
+  }));
+
+  await page.route("**/_bifrost/api/im-gateway/agent", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(agentConfig),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/providers", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([{ id: "mock", name: "Mock Provider" }]),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/history/*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ events, count: events.length }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        work_dir: "/tmp/agent-ui",
+        content: "AGENTS.md instructions for session detail settings.",
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/skills", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        work_dir: "/tmp/agent-ui",
+        home_dir: "/tmp",
+        skills: [
+          {
+            name: "repo-skill",
+            scope: "repo",
+            path: "/tmp/agent-ui/.agents/skills/repo-skill/SKILL.md",
+            description: "Repo skill",
+          },
+        ],
+      }),
+    });
+  });
+
+  await openPage(
+    page,
+    `ai?aiSection=agent-sessions&agentSection=sessions&session=weixin%3Atab-scroll%40im.wechat&view=history&historyPath=${encodeURIComponent(historyPath)}`,
+  );
+
+  await expect(page.getByRole("tab", { name: /Messages/ })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("tab", { name: /Settings/ })).toBeVisible();
+  await expect(page.getByText("Event Timeline")).toBeVisible();
+
+  const scrollRegion = page.getByTestId("agent-session-messages-scroll");
+  await expect(scrollRegion).toBeVisible();
+  const beforeScroll = await scrollRegion.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+    overflowY: window.getComputedStyle(element).overflowY,
+    scrollTop: element.scrollTop,
+  }));
+  expect(beforeScroll.scrollHeight).toBeGreaterThan(beforeScroll.clientHeight);
+  expect(beforeScroll.overflowY).toBe("auto");
+
+  await scrollRegion.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  const afterScrollTop = await scrollRegion.evaluate((element) => element.scrollTop);
+  expect(afterScrollTop).toBeGreaterThan(beforeScroll.scrollTop);
+  await expect(page.getByText("mock_tool_35")).toBeVisible();
+
+  await page.getByRole("tab", { name: /Settings/ }).click();
+  await expect(page.getByRole("tab", { name: /Settings/ })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByTestId("agent-session-settings-panel")).toBeVisible();
+  await expect(page.getByText("Session Info")).toBeVisible();
+  await expect(page.getByText("AGENTS.md Instructions", { exact: true })).toBeVisible();
+  await expect(page.getByText("repo-skill")).toBeVisible();
+});
+
+test("AI Agent Sessions 列表支持点击 title 或整行进入详情", async ({ page }) => {
+  const agentConfig = {
+    enabled: true,
+    work_dir: "/tmp/agent-ui",
+    model: "gpt-test",
+    model_provider: "mock",
+    max_history_messages: 20,
+    model_providers: {
+      mock: {
+        api_key: "$MODEL_API_KEY",
+      },
+    },
+    mcp_servers: {},
+  };
+  const now = Math.floor(Date.now() / 1000);
+  const historyPath = "/tmp/clickable-history.jsonl";
+  const historySessionKey = "weixin:row-click@im.wechat";
+  const activeSessionKey = "api-active-row";
+
+  await page.route("**/_bifrost/api/im-gateway/agent", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(agentConfig),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/providers", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([{ id: "mock", name: "Mock Provider" }]),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessions: [
+          {
+            session_key: historySessionKey,
+            status: "ended",
+            source: "api",
+            work_dir: "/tmp/agent-ui",
+            turns: 4,
+            tokens: 128,
+            start_time: now - 120,
+            last_active_time: now - 60,
+            duration_secs: 60,
+            title: "Clickable history title",
+            history_path: historyPath,
+          },
+          {
+            session_key: activeSessionKey,
+            status: "active",
+            source: "api",
+            work_dir: "/tmp/agent-ui",
+            turns: 2,
+            tokens: 64,
+            start_time: now - 30,
+            last_active_time: now,
+            duration_secs: 30,
+            title: "Clickable active title",
+          },
+        ],
+        total: 2,
+        active_count: 1,
+        history_count: 1,
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/history/*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        events: [
+          {
+            event_type: "session_start",
+            timestamp: now - 120,
+            content: { model: "gpt-test", provider: "mock" },
+          },
+          {
+            event_type: "user_message",
+            timestamp: now - 90,
+            content: { message: "Open history from title" },
+          },
+          {
+            event_type: "assistant_message",
+            timestamp: now - 60,
+            content: { message: "History detail opened" },
+          },
+        ],
+        count: 3,
+      }),
+    });
+  });
+  await page.route(
+    `**/_bifrost/api/im-gateway/agent/sessions/${encodeURIComponent(activeSessionKey)}`,
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          session_key: activeSessionKey,
+          source: "api",
+          work_dir: "/tmp/agent-ui",
+          message_count: 2,
+          total_tokens_used: 64,
+          created_at: now - 30,
+          last_active_at: now,
+          compaction_count: 0,
+          estimated_tokens: 32,
+          messages: [
+            { role: "user", content: "Open active from row" },
+            { role: "assistant", content: "Active detail opened" },
+          ],
+        }),
+      });
+    },
+  );
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        work_dir: "/tmp/agent-ui",
+        content: "AGENTS.md instructions for sessions list click test.",
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/skills", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        work_dir: "/tmp/agent-ui",
+        home_dir: "/tmp",
+        skills: [],
+      }),
+    });
+  });
+
+  await openPage(page, "ai?aiSection=agent-sessions&agentSection=sessions");
+
+  await expect(page.locator(".anticon-eye")).toHaveCount(0);
+  await expect(
+    page.getByTestId("agent-session-row").filter({ hasText: "Clickable history title" }),
+  ).toBeVisible();
+  await page.getByTestId("theme-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(
+    page.getByTestId("agent-session-row").filter({ hasText: "Clickable history title" }),
+  ).toBeVisible();
+
+  await page
+    .getByTestId("agent-session-title")
+    .filter({ hasText: "Clickable history title" })
+    .click();
+  await expect(page).toHaveURL(/session=weixin%3Arow-click%40im\.wechat/);
+  await expect(page).toHaveURL(/view=history/);
+  await expect(page).toHaveURL(new RegExp(`historyPath=${encodeURIComponent(historyPath)}`));
+  await expect(page.getByRole("tab", { name: /Messages/ })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByText("History detail opened")).toBeVisible();
+
+  await openPage(page, "ai?aiSection=agent-sessions&agentSection=sessions");
+  await expect(page.locator(".anticon-eye")).toHaveCount(0);
+  await page
+    .getByTestId("agent-session-row")
+    .filter({ hasText: "Clickable active title" })
+    .click();
+  await expect(page).toHaveURL(/session=api-active-row/);
+  await expect(page).toHaveURL(/view=active/);
+  await expect(page.getByRole("tab", { name: /Messages/ })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByText("Active detail opened")).toBeVisible();
+});
+
 test("Settings Agent 模型配置支持关闭 reasoning 参数", async ({ page }) => {
   const agentConfig = {
     enabled: true,

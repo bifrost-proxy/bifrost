@@ -86,11 +86,30 @@ export interface AsrTaskSummary {
   processed: number;
   pending: number;
   failed: number;
+  partial_success: number;
+  failed_chunk_count: number;
   deleted_after_processing: number;
   running: boolean;
 }
 
-export type AsrTaskFileStatus = "pending" | "processing" | "success" | "failed";
+export type AsrRuntimeStrategy =
+  | "fork_per_chunk"
+  | "reuse_server"
+  | "reuse_per_file"
+  | "auto"
+  | "compare";
+
+export type AsrTaskFileStatus = "pending" | "processing" | "success" | "partial_success" | "failed";
+
+export interface AsrFailedChunkRecord {
+  chunk_index: number;
+  offset_secs: number;
+  duration_secs: number;
+  error: string;
+  attempts: number;
+  energy_rms?: number;
+  is_silent?: boolean;
+}
 
 export interface AsrTaskFileRecord {
   key: string;
@@ -107,8 +126,30 @@ export interface AsrTaskFileRecord {
   output_timeline_path?: string;
   text_chars: number;
   error?: string;
+  runtime_strategy?: AsrRuntimeStrategy;
+  fallback_reason?: string;
+  chunk_metrics?: AsrChunkMetric[];
   started_at_ms?: number;
   finished_at_ms?: number;
+  progress_current?: number;
+  progress_total?: number;
+  failed_chunks?: AsrFailedChunkRecord[];
+}
+
+export interface AsrChunkMetric {
+  chunk_index: number;
+  offset_secs: number;
+  duration_secs: number;
+  runner: string;
+  status: string;
+  elapsed_ms: number;
+  rtf: number;
+  text_chars: number;
+  text_sha1: string;
+  server_url?: string;
+  fallback_reason?: string;
+  error?: string;
+  recorded_at_ms: number;
 }
 
 export interface AsrTimelineSegment {
@@ -135,6 +176,20 @@ export interface AsrTranscriptTimeline {
   segments: AsrTimelineSegment[];
 }
 
+export interface AsrTaskDailyDocument {
+  date: string;
+  path: string;
+  size?: number;
+  modified_ms?: number;
+  text_chars: number;
+}
+
+export interface AsrTaskDailyDocumentDetail extends AsrTaskDailyDocument {
+  task_id: string;
+  task_name: string;
+  content: string;
+}
+
 export type AsrTaskSchedule =
   | { kind: "hourly"; minute: number }
   | { kind: "daily"; hour: number; minute: number }
@@ -147,19 +202,54 @@ export interface AsrDirectoryTask {
   audio_dir: string;
   recursive: boolean;
   enabled: boolean;
+  paused?: boolean;
+  paused_at_ms?: number;
   schedule: AsrTaskSchedule;
   language: string;
   model: string;
+  runtime_strategy: AsrRuntimeStrategy;
   created_at_ms: number;
   updated_at_ms: number;
   last_run_at_ms?: number;
   next_run_at_ms?: number;
   last_error?: string;
   summary: AsrTaskSummary;
+  bulk_retry?: AsrBulkRetryState;
 }
 
 export interface AsrDirectoryTaskDetail extends AsrDirectoryTask {
   files: AsrTaskFileRecord[];
+  daily_documents?: AsrTaskDailyDocument[];
+}
+
+export interface AsrBulkRetryFileResult {
+  file_key: string;
+  source_path: string;
+  failed_before: number;
+  recovered: number;
+  still_failed: number;
+  status: string;
+  elapsed_ms: number;
+  message: string;
+  daily_documents_refreshed?: string[];
+  persist_warnings?: string[];
+}
+
+export interface AsrBulkRetryState {
+  task_id: string;
+  status: "queued" | "running" | "completed" | "failed";
+  queued_files: number;
+  processed_files: number;
+  total_failed_chunks: number;
+  recovered_chunks: number;
+  still_failed_chunks: number;
+  started_at_ms?: number;
+  updated_at_ms: number;
+  finished_at_ms?: number;
+  current_file_key?: string;
+  current_source_path?: string;
+  message: string;
+  results: AsrBulkRetryFileResult[];
 }
 
 export interface CreateAsrTaskRequest {
@@ -170,6 +260,7 @@ export interface CreateAsrTaskRequest {
   schedule?: AsrTaskSchedule;
   language?: string;
   model?: string;
+  runtime_strategy?: AsrRuntimeStrategy;
 }
 
 export interface RunAsrTaskResult {
@@ -177,6 +268,29 @@ export interface RunAsrTaskResult {
   processed_now: number;
   failed_now: number;
   message: string;
+}
+
+export interface ControlAsrTaskResult {
+  task: AsrDirectoryTask;
+  paused: boolean;
+  running: boolean;
+  force?: boolean;
+  message: string;
+}
+
+export interface RetryChunksResult {
+  message: string;
+  recovered: number;
+  still_failed: number;
+  still_failed_chunks: AsrFailedChunkRecord[];
+  status?: AsrTaskFileStatus;
+  daily_documents_refreshed?: string[];
+  persist_warnings?: string[];
+}
+
+export interface RetryAllFailedChunksResult {
+  message: string;
+  retry: AsrBulkRetryState;
 }
 
 export type AsrStreamEvent =
@@ -266,6 +380,21 @@ export async function getAsrTaskFileTimeline(
   );
 }
 
+export async function getAsrTaskDailyDocument(
+  taskId: string,
+  date: string,
+): Promise<AsrTaskDailyDocumentDetail> {
+  return get<AsrTaskDailyDocumentDetail>(
+    `/asr/tasks/${encodeURIComponent(taskId)}/daily/${encodeURIComponent(date)}`,
+  );
+}
+
+export function buildAsrTaskFileSourceUrl(taskId: string, fileKey: string): string {
+  return buildApiUrl(
+    `/asr/tasks/${encodeURIComponent(taskId)}/files/${encodeURIComponent(fileKey)}/source`,
+  );
+}
+
 export async function createAsrTask(
   request: CreateAsrTaskRequest,
 ): Promise<AsrDirectoryTask> {
@@ -288,12 +417,61 @@ export async function runAsrTask(id: string): Promise<RunAsrTaskResult> {
   return readJsonResponse<RunAsrTaskResult>(response);
 }
 
+export async function pauseAsrTask(
+  id: string,
+  options?: { force?: boolean },
+): Promise<ControlAsrTaskResult> {
+  const query = options?.force ? "?force=true" : "";
+  const response = await fetch(buildApiUrl(`/asr/tasks/${encodeURIComponent(id)}/pause${query}`), {
+    method: "POST",
+    headers: buildStreamHeaders(),
+  });
+  return readJsonResponse<ControlAsrTaskResult>(response);
+}
+
+export async function resumeAsrTask(id: string): Promise<ControlAsrTaskResult> {
+  const response = await fetch(buildApiUrl(`/asr/tasks/${encodeURIComponent(id)}/resume`), {
+    method: "POST",
+    headers: buildStreamHeaders(),
+  });
+  return readJsonResponse<ControlAsrTaskResult>(response);
+}
+
 export async function deleteAsrTask(id: string): Promise<void> {
   const response = await fetch(buildApiUrl(`/asr/tasks/${encodeURIComponent(id)}`), {
     method: "DELETE",
     headers: buildStreamHeaders(),
   });
   await readJsonResponse<{ ok: boolean }>(response);
+}
+
+export async function retryFailedChunks(
+  taskId: string,
+  fileKey: string,
+): Promise<RetryChunksResult> {
+  const response = await fetch(
+    buildApiUrl(
+      `/asr/tasks/${encodeURIComponent(taskId)}/files/${encodeURIComponent(fileKey)}/retry-chunks`,
+    ),
+    {
+      method: "POST",
+      headers: buildStreamHeaders(),
+    },
+  );
+  return readJsonResponse<RetryChunksResult>(response);
+}
+
+export async function retryAllFailedChunks(
+  taskId: string,
+): Promise<RetryAllFailedChunksResult> {
+  const response = await fetch(
+    buildApiUrl(`/asr/tasks/${encodeURIComponent(taskId)}/retry-failed-chunks`),
+    {
+      method: "POST",
+      headers: buildStreamHeaders(),
+    },
+  );
+  return readJsonResponse<RetryAllFailedChunksResult>(response);
 }
 
 export async function streamAsrInitialization(
@@ -442,4 +620,164 @@ function emitSsePart(
   } else if (eventName === "done") {
     onEvent({ type: "done", ...payload });
   }
+}
+
+// ─── Daily Agent Types ────────────────────────────────────────────────────────
+
+export interface AsrDailyAgentConfig {
+  enabled: boolean;
+  runner: string;
+  timeout_ms: number;
+  trigger_policy: "after_asr_run" | "manual_only";
+  session_key?: string;
+  instructions_source: "default" | "custom";
+  im_delivery: AsrDailyAgentImDeliveryConfig;
+  last_run_at_ms?: number;
+  last_status?: string;
+  last_error?: string;
+  last_run_id?: string;
+}
+
+export interface AsrDailyAgentImDeliveryConfig {
+  enabled: boolean;
+  channel?: string;
+  mode: "full_report" | "summary";
+  send_policy: "on_success_with_report" | "on_success" | "always";
+  last_sent_at_ms?: number;
+  last_send_error?: string;
+}
+
+export interface AsrDailyAgentWorkspaceStatus {
+  daily_dir: string;
+  report_dir: string;
+  agents_path: string;
+  agents_exists: boolean;
+  git_available: boolean;
+  git_initialized: boolean;
+  git_error?: string;
+  report_count: number;
+}
+
+export interface AsrDailyAgentConfigResponse {
+  task_id: string;
+  config: AsrDailyAgentConfig;
+  workspace?: AsrDailyAgentWorkspaceStatus;
+  last_run: {
+    run_id?: string;
+    status?: string;
+    error?: string;
+    last_run_at_ms?: number;
+  };
+}
+
+export interface AsrDailyAgentInstructionsResponse {
+  task_id: string;
+  content: string;
+  source: "file" | "default";
+}
+
+export interface AsrDailyAgentProcessedDocument {
+  date: string;
+  source_sha256: string;
+  source_len_bytes: number;
+  processed_at_ms: number;
+  runner: string;
+  report_path?: string;
+  last_run_id: string;
+}
+
+export interface AsrDailyAgentRunsResponse {
+  task_id: string;
+  processed_documents: AsrDailyAgentProcessedDocument[];
+}
+
+// ─── Daily Agent API Functions ────────────────────────────────────────────────
+
+export async function getDailyAgentConfig(
+  taskId: string,
+): Promise<AsrDailyAgentConfigResponse> {
+  const url = buildApiUrl(`/asr/tasks/${taskId}/daily-agent`);
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${getAdminToken()}` },
+  });
+  return readJsonResponse(response);
+}
+
+export async function updateDailyAgentConfig(
+  taskId: string,
+  config: Partial<AsrDailyAgentConfig>,
+): Promise<{ ok: boolean; config: AsrDailyAgentConfig }> {
+  const url = buildApiUrl(`/asr/tasks/${taskId}/daily-agent`);
+  const response = await fetch(url, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${getAdminToken()}`,
+    },
+    body: JSON.stringify(config),
+  });
+  return readJsonResponse(response);
+}
+
+export async function getDailyAgentInstructions(
+  taskId: string,
+): Promise<AsrDailyAgentInstructionsResponse> {
+  const url = buildApiUrl(`/asr/tasks/${taskId}/daily-agent/agents`);
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${getAdminToken()}` },
+  });
+  return readJsonResponse(response);
+}
+
+export async function updateDailyAgentInstructions(
+  taskId: string,
+  content: string,
+): Promise<{ ok: boolean }> {
+  const url = buildApiUrl(`/asr/tasks/${taskId}/daily-agent/agents`);
+  const response = await fetch(url, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${getAdminToken()}`,
+    },
+    body: JSON.stringify({ content }),
+  });
+  return readJsonResponse(response);
+}
+
+export async function triggerDailyAgentRun(
+  taskId: string,
+  options?: { force?: boolean; date?: string },
+): Promise<{ status: string; message: string }> {
+  const params = new URLSearchParams();
+  if (options?.force) params.set("force", "1");
+  if (options?.date) params.set("date", options.date);
+  const query = params.toString() ? `?${params.toString()}` : "";
+  const url = buildApiUrl(`/asr/tasks/${taskId}/daily-agent/run${query}`);
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${getAdminToken()}` },
+  });
+  return readJsonResponse(response);
+}
+
+export async function sendDailyAgentReport(
+  taskId: string,
+): Promise<{ ok: boolean; sent_reports: string[] }> {
+  const url = buildApiUrl(`/asr/tasks/${taskId}/daily-agent/send`);
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${getAdminToken()}` },
+  });
+  return readJsonResponse(response);
+}
+
+export async function getDailyAgentRuns(
+  taskId: string,
+): Promise<AsrDailyAgentRunsResponse> {
+  const url = buildApiUrl(`/asr/tasks/${taskId}/daily-agent/runs`);
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${getAdminToken()}` },
+  });
+  return readJsonResponse(response);
 }

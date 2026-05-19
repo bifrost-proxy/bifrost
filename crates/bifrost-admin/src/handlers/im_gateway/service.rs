@@ -53,6 +53,41 @@ impl ImProviderClient {
         }
     }
 
+    pub(super) async fn upload_image(
+        &self,
+        config: &ImProviderConfig,
+        image_type: &str,
+        file_name: &str,
+        bytes: Vec<u8>,
+        mime_type: Option<&str>,
+    ) -> bifrost_core::Result<crate::im_gateway::types::UploadedImage> {
+        match self {
+            Self::Feishu(provider) => {
+                provider
+                    .upload_image(config, image_type, file_name, bytes, mime_type)
+                    .await
+            }
+            Self::Weixin(provider) => {
+                provider
+                    .upload_image(config, image_type, file_name, bytes, mime_type)
+                    .await
+            }
+        }
+    }
+
+    pub(super) async fn send_image(
+        &self,
+        config: &ImProviderConfig,
+        target: &ImTarget,
+        image_key: &str,
+        uuid: Option<&str>,
+    ) -> bifrost_core::Result<crate::im_gateway::types::SendResult> {
+        match self {
+            Self::Feishu(provider) => provider.send_image(config, target, image_key, uuid).await,
+            Self::Weixin(provider) => provider.send_image(config, target, image_key, uuid).await,
+        }
+    }
+
     pub(super) async fn add_reaction(
         &self,
         config: &ImProviderConfig,
@@ -107,8 +142,10 @@ pub struct ImGatewayService {
     pub agent_client: Arc<ImAgentClient>,
     pub agent_tools: Arc<ImAgentToolRegistry>,
     pub agent_session_manager: Arc<ImAgentSessionManager>,
+    pub external_cli_config_store: Arc<crate::im_gateway::external_cli::ExternalCliConfigStore>,
     pub queue_manager: Arc<SessionQueueManager>,
     pub progress_registry: Arc<ImAgentProgressRegistry>,
+    pub(super) mock_event_sinks: Arc<RwLock<HashMap<String, mpsc::UnboundedSender<ImEvent>>>>,
     pub(super) weixin_login_pending: Arc<RwLock<HashMap<String, PendingWeixinLogin>>>,
 }
 
@@ -158,8 +195,12 @@ impl ImGatewayService {
             agent_session_manager: Arc::new(ImAgentSessionManager::new(
                 agent_config.get_session_ttl_secs(),
             )),
+            external_cli_config_store: Arc::new(
+                crate::im_gateway::external_cli::ExternalCliConfigStore::new(data_dir),
+            ),
             queue_manager: Arc::new(SessionQueueManager::new()),
             progress_registry: Arc::new(ImAgentProgressRegistry::new()),
+            mock_event_sinks: Arc::new(RwLock::new(HashMap::new())),
             weixin_login_pending: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -276,6 +317,7 @@ impl ImGatewayService {
             let target_store = self.target_store.clone();
             let connection_manager = self.connection_manager.clone();
             let agent_session_manager = self.agent_session_manager.clone();
+            let external_cli_config_store = self.external_cli_config_store.clone();
             let queue_manager = self.queue_manager.clone();
             let progress_registry = self.progress_registry.clone();
             tokio::spawn(async move {
@@ -295,6 +337,7 @@ impl ImGatewayService {
                     target_store,
                     connection_manager,
                     agent_session_manager,
+                    external_cli_config_store,
                     queue_manager,
                     progress_registry,
                 )
@@ -454,6 +497,7 @@ impl ImGatewayService {
                             let target_store = self.target_store.clone();
                             let connection_manager = self.connection_manager.clone();
                             let agent_session_manager = self.agent_session_manager.clone();
+                            let external_cli_config_store = self.external_cli_config_store.clone();
                             let queue_manager = self.queue_manager.clone();
                             let progress_registry = self.progress_registry.clone();
                             tokio::spawn(async move {
@@ -473,6 +517,7 @@ impl ImGatewayService {
                                     target_store,
                                     connection_manager,
                                     agent_session_manager,
+                                    external_cli_config_store,
                                     queue_manager,
                                     progress_registry,
                                 )

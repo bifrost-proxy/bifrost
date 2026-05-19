@@ -6,7 +6,7 @@
 
 ## 前置条件
 
-1. 当前工作目录为仓库根目录：`/Users/eden/work/github/bifrost`
+1. 当前工作目录为仓库根目录：`~/work/github/bifrost`
 2. 已完成本次文档修改：
    - `AGENTS.md`
    - `design/agent-development-review-loop.md`

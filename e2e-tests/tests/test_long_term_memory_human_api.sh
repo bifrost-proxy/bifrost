@@ -108,7 +108,7 @@ class Handler(BaseHTTPRequestHandler):
             content = json.dumps({
                 "rollout_summary": "# Human memory source\n\n## Task 1: remember user name\nOutcome: success\n\nReusable knowledge:\n- 用户自称是独孤怼怼。",
                 "rollout_slug": "human-memory-source",
-                "raw_memory": "---\ndescription: 用户自称是独孤怼怼。\ntask: remember_user_name\ntask_group: long_term_memory_human_api\ntask_outcome: success\ncwd: /Users/eden/work/github/bifrost\nkeywords: 独孤怼怼, human memory, bifrost\n---\n\n### Task 1: remember user name\n\ntask: remember_user_name\ntask_group: long_term_memory_human_api\ntask_outcome: success\n\nReusable knowledge:\n- 用户自称是独孤怼怼。\n",
+                "raw_memory": "---\ndescription: 用户自称是独孤怼怼。\ntask: remember_user_name\ntask_group: long_term_memory_human_api\ntask_outcome: success\ncwd: /home/user/work/project\nkeywords: 独孤怼怼, human memory, bifrost\n---\n\n### Task 1: remember user name\n\ntask: remember_user_name\ntask_group: long_term_memory_human_api\ntask_outcome: success\n\nReusable knowledge:\n- 用户自称是独孤怼怼。\n",
             }, ensure_ascii=False)
         elif "Memory Writing Agent: Phase 2" in joined:
             content = json.dumps({

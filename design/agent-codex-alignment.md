@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-本模块用于把 Bifrost Agent 的 agent loop、prompt 分层和核心工具面持续对齐 `/Users/eden/work/github/codex` 的 Codex 设计风格。对齐目标不是照搬 Responses API，而是在 Bifrost 当前 Chat Completions 架构下保证模型看到的行为契约、工具命名、上下文边界和错误提示尽量一致。
+本模块用于把 Bifrost Agent 的 agent loop、prompt 分层和核心工具面持续对齐 `~/work/github/codex` 的 Codex 设计风格。对齐目标不是照搬 Responses API，而是在 Bifrost 当前 Chat Completions 架构下保证模型看到的行为契约、工具命名、上下文边界和错误提示尽量一致。
 
 本轮明确排除本地权限升级、OS sandbox 和审批工作流。Bifrost 暂时不实现这些能力；相关字段不进入工具 schema，也不把这类实现说明写进默认 prompt。
 

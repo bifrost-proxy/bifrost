@@ -343,32 +343,84 @@ pub(super) async fn handle_busy_message(
         return;
     }
 
-    // Default: guide mode — inject into the guide channel
-    let pending_guide_count = queue_manager.inject_guide(session_key, trimmed.to_string());
-    let reply = if pending_guide_count > 1 {
-        format!(
-            "🔀 已追加引导消息（当前 {} 条尚未进入 loop，将合并后生效）",
-            pending_guide_count
-        )
-    } else {
-        "🔀 已注入引导消息，将在当前工具调用完成后生效".to_string()
-    };
-    info!(
-        session_key = %session_key,
-        guide_msg_len = trimmed.len(),
-        pending_guide_count = pending_guide_count,
-        "guide message injected via IM"
-    );
-    let updated = progress_registry
-        .update_queue_state(
-            session_key,
-            queue_manager.queue_status(session_key),
-            true,
-            Some(format!("已收到引导：{}", truncate_str(trimmed, 48))),
-        )
-        .await;
-    if !updated {
-        send_agent_reply(client, provider, event, &reply, message_log_store).await;
+    // /g <text> — guide injection (inject message into running agent context)
+    if let Some(rest) = trimmed.strip_prefix("/g ") {
+        let guide_text = rest.trim();
+        if guide_text.is_empty() {
+            send_agent_reply(
+                client,
+                provider,
+                event,
+                "用法: /g <引导内容>",
+                message_log_store,
+            )
+            .await;
+            return;
+        }
+        let pending_guide_count = queue_manager.inject_guide(session_key, guide_text.to_string());
+        let reply = if pending_guide_count > 1 {
+            format!(
+                "🔀 已追加引导消息（当前 {} 条尚未进入 loop，将合并后生效）",
+                pending_guide_count
+            )
+        } else {
+            "🔀 已注入引导消息，将在当前工具调用完成后生效".to_string()
+        };
+        info!(
+            session_key = %session_key,
+            guide_msg_len = guide_text.len(),
+            pending_guide_count = pending_guide_count,
+            "guide message injected via IM /g command"
+        );
+        let updated = progress_registry
+            .update_queue_state(
+                session_key,
+                queue_manager.queue_status(session_key),
+                true,
+                Some(format!("已收到引导：{}", truncate_str(guide_text, 48))),
+            )
+            .await;
+        if !updated {
+            send_agent_reply(client, provider, event, &reply, message_log_store).await;
+        }
+        return;
+    }
+
+    // Default: queue the message for processing after the current run completes
+    match queue_manager.push_queue(session_key, trimmed.to_string()) {
+        Ok(items) => {
+            let updated = progress_registry
+                .update_queue_state(
+                    session_key,
+                    items.clone(),
+                    false,
+                    Some(format!("消息已排队：{}", truncate_str(trimmed, 48))),
+                )
+                .await;
+            if !updated {
+                send_agent_reply(
+                    client,
+                    provider,
+                    event,
+                    &format!(
+                        "⏳ 消息已收到，将在当前任务完成后处理（排队 {} 条）",
+                        items.len()
+                    ),
+                    message_log_store,
+                )
+                .await;
+            }
+        }
+        Err(err) => {
+            send_agent_reply(
+                client,
+                provider,
+                event,
+                &format!("排队失败: {err}"),
+                message_log_store,
+            )
+            .await;
+        }
     }
 }
 
@@ -1159,6 +1211,12 @@ pub(super) async fn process_agent_chat(
     // deliberately so a new file will be created for the fresh session).
     if recorder.is_some() && !session.memory_cleared {
         session.recorder = recorder;
+    }
+
+    // If the session was cleared (via /clear or /reset), also clear the
+    // ChatGPT Web conversation mapping so the next runner message starts fresh.
+    if session.memory_cleared {
+        crate::im_gateway::chatgpt_web::clear_session_conversation(session_key).await;
     }
 
     // Extract session title before returning the session

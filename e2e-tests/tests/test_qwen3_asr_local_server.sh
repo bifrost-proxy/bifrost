@@ -124,6 +124,7 @@ curl -fsS -X POST "http://127.0.0.1:${ADMIN_PORT}/_bifrost/api/asr/tasks" \
   --data "$TASK_JSON" \
   | tee "$ASR_DIR/e2e-admin-task-create.json" \
   | grep -q '"pending":1'
+grep -q '"runtime_strategy":"reuse_per_file"' "$ASR_DIR/e2e-admin-task-create.json"
 TASK_ID="$(python3 - "$ASR_DIR/e2e-admin-task-create.json" <<'PY'
 import json, sys
 with open(sys.argv[1], "r", encoding="utf-8") as f:

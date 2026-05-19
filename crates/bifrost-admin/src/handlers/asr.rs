@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use tokio::process::{Child, Command};
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::debug;
+use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::asr_runtime::{
@@ -26,10 +26,12 @@ use crate::asr_runtime::{
     stop_pid, write_service_state, AsrServiceState, DEFAULT_ASR_HOST, DEFAULT_ASR_LANGUAGE,
     DEFAULT_ASR_MODEL,
 };
+use crate::handlers::asr_cli_invoke::{
+    default_footprint_limit_bytes, physical_footprint_sample_interval, read_process_footprint_bytes,
+};
 use crate::handlers::asr_jobs::handle_asr_tasks;
 use crate::handlers::asr_streaming::{
-    append_transcript_delta, build_stream_windows, call_asr_text_endpoint, dedupe_increment,
-    extract_wav_segment, normalize_asr_text, parse_wav_pcm_i16, stream_options_from_query,
+    append_transcript_delta, call_asr_whole_file_endpoint, dedupe_increment,
 };
 use crate::handlers::asr_ws::handle_asr_ws_upgrade;
 use crate::handlers::{error_response, json_response, method_not_allowed, BoxBody};
@@ -37,6 +39,8 @@ use crate::resource_download::{download_with_resume, DownloadProgress, DownloadR
 
 const SERVICE_START_TIMEOUT_SECS: u64 = 180;
 const MAX_ASR_UPLOAD_BYTES: usize = 512 * 1024 * 1024;
+const ASR_UPLOAD_CHUNK_DURATION_SECS: u64 = 30;
+const ASR_UPLOAD_CHUNK_OVERLAP_SECS: u64 = 2;
 const ASR_RELEASE_REPO: &str = "second-state/qwen3_asr_rs";
 const ASR_SAMPLE_BASE_URL: &str =
     "https://raw.githubusercontent.com/second-state/qwen3_asr_rs/main/test_audio";
@@ -65,6 +69,8 @@ struct ManagedAsrService {
     target: AsrTarget,
     child: Child,
 }
+
+const SERVICE_FOOTPRINT_MAX_SAMPLE_FAILURES: u32 = 3;
 
 #[derive(Clone)]
 struct AsrInitTask {
@@ -392,10 +398,6 @@ async fn handle_transcribe_stream(req: Request<Incoming>) -> Response<BoxBody> {
         Ok(target) => target,
         Err(message) => return error_response(StatusCode::BAD_REQUEST, &message),
     };
-    let stream_options = match stream_options_from_query(req.uri().query()) {
-        Ok(options) => options,
-        Err(message) => return error_response(StatusCode::BAD_REQUEST, &message),
-    };
     let target = resolve_managed_target(requested_target).await;
     let content_type = match req
         .headers()
@@ -504,7 +506,7 @@ async fn handle_transcribe_stream(req: Request<Incoming>) -> Response<BoxBody> {
             Err(error) => {
                 send_error(
                     &tx,
-                    "Failed to create ASR streaming temp directory.",
+                    "Failed to create ASR temp directory.",
                     Some(&error.to_string()),
                 )
                 .await;
@@ -522,162 +524,39 @@ async fn handle_transcribe_stream(req: Request<Incoming>) -> Response<BoxBody> {
             return;
         }
 
-        let audio = match parse_wav_pcm_i16(&wav_bytes) {
-            Ok(audio) => audio,
+        let approx_duration_ms = wav_pcm_duration_ms(&wav_bytes);
+
+        match transcribe_uploaded_wav_in_chunks(
+            &tx,
+            &server_url,
+            &target.language,
+            &source_wav,
+            approx_duration_ms,
+        )
+        .await
+        {
+            Ok(text) => {
+                send_progress(
+                    &tx,
+                    AsrStreamPayload {
+                        phase: "transcribe",
+                        status: "done",
+                        progress: 98,
+                        message: "Chunked transcription completed.",
+                        detail: Some("model window: 30s"),
+                        file: None,
+                        server_url: Some(target.server_url_display()),
+                    },
+                )
+                .await;
+                send_text(&tx, text.trim()).await;
+            }
             Err(error) => {
-                send_error(&tx, "Failed to inspect normalized WAV audio.", Some(&error)).await;
+                send_error(&tx, "ASR transcription failed.", Some(&error)).await;
                 return;
             }
-        };
-        let windows = build_stream_windows(&audio, stream_options);
-        if windows.is_empty() {
-            send_progress(
-                &tx,
-                AsrStreamPayload {
-                    phase: "done",
-                    status: "done",
-                    progress: 100,
-                    message: "Uploaded audio did not contain enough decodable samples.",
-                    detail: Some("empty audio"),
-                    file: None,
-                    server_url: Some(target.server_url_display()),
-                },
-            )
-            .await;
-            send_text(&tx, "").await;
-            send_done(&tx).await;
-            return;
         }
 
-        send_progress(
-            &tx,
-            AsrStreamPayload {
-                phase: "stream",
-                status: "running",
-                progress: 60,
-                message: "Streaming transcription in 2 second windows with overlap context.",
-                detail: Some(&format!(
-                    "windows: {}; window_ms: {}; overlap_ms: {}",
-                    windows.len(),
-                    stream_options.window_ms,
-                    stream_options.overlap_ms
-                )),
-                file: Some("upload.wav"),
-                server_url: Some(target.server_url_display()),
-            },
-        )
-        .await;
-
-        let mut committed = String::new();
-        let mut any_model_error = None::<String>;
-        for window in windows.iter() {
-            let segment_path = tmp_dir
-                .path()
-                .join(format!("segment-{:04}.wav", window.index));
-            if let Err(error) = extract_wav_segment(&source_wav, &segment_path, window).await {
-                send_error(&tx, "Failed to slice ASR streaming window.", Some(&error)).await;
-                return;
-            }
-
-            match call_asr_text_endpoint(&server_url, &target.language, &segment_path).await {
-                Ok(text) => {
-                    let text = normalize_asr_text(&text);
-                    let delta = dedupe_increment(&committed, &text);
-                    send_asr_segment(
-                        &tx,
-                        "partial",
-                        AsrSegmentPayload {
-                            index: window.index,
-                            start_ms: window.start_ms,
-                            end_ms: window.end_ms,
-                            stable_start_ms: window.stable_start_ms,
-                            stable_end_ms: window.stable_end_ms,
-                            text: &text,
-                            delta: &delta,
-                            committed: &committed,
-                        },
-                    )
-                    .await;
-
-                    if !delta.is_empty() {
-                        append_transcript_delta(&mut committed, &delta);
-                    }
-                    send_asr_segment(
-                        &tx,
-                        "final",
-                        AsrSegmentPayload {
-                            index: window.index,
-                            start_ms: window.start_ms,
-                            end_ms: window.end_ms,
-                            stable_start_ms: window.stable_start_ms,
-                            stable_end_ms: window.stable_end_ms,
-                            text: &text,
-                            delta: &delta,
-                            committed: &committed,
-                        },
-                    )
-                    .await;
-                }
-                Err(error) => {
-                    any_model_error = Some(error.clone());
-                    send_error(
-                        &tx,
-                        "ASR model temporarily failed for a streaming window.",
-                        Some(&format!("window {}: {error}", window.index)),
-                    )
-                    .await;
-                }
-            }
-
-            let progress =
-                60u8 + (((window.index + 1) as f32 / windows.len() as f32) * 35.0).round() as u8;
-            send_progress(
-                &tx,
-                AsrStreamPayload {
-                    phase: "stream",
-                    status: "running",
-                    progress: progress.min(95),
-                    message: "Processed ASR streaming window.",
-                    detail: Some(&format!(
-                        "window {}: {}-{} ms, stable {}-{} ms",
-                        window.index,
-                        window.start_ms,
-                        window.end_ms,
-                        window.stable_start_ms,
-                        window.stable_end_ms
-                    )),
-                    file: segment_path.file_name().and_then(|name| name.to_str()),
-                    server_url: Some(target.server_url_display()),
-                },
-            )
-            .await;
-            let _ = std::fs::remove_file(segment_path);
-        }
-
-        if committed.is_empty() && any_model_error.is_some() {
-            send_error(
-                &tx,
-                "ASR streaming transcription did not produce text.",
-                any_model_error.as_deref(),
-            )
-            .await;
-            return;
-        }
-
-        send_progress(
-            &tx,
-            AsrStreamPayload {
-                phase: "transcribe",
-                status: "done",
-                progress: 98,
-                message: "ASR streaming transcription produced stable text.",
-                detail: None,
-                file: None,
-                server_url: Some(target.server_url_display()),
-            },
-        )
-        .await;
-        send_text(&tx, committed.trim()).await;
         send_progress(
             &tx,
             AsrStreamPayload {
@@ -693,6 +572,227 @@ async fn handle_transcribe_stream(req: Request<Incoming>) -> Response<BoxBody> {
         .await;
         send_done(&tx).await;
     })
+}
+
+async fn transcribe_uploaded_wav_in_chunks(
+    tx: &tokio::sync::mpsc::Sender<Bytes>,
+    server_url: &str,
+    language: &str,
+    source_wav: &Path,
+    media_duration_ms: Option<u64>,
+) -> Result<String, String> {
+    let Some(media_duration_ms) = media_duration_ms else {
+        send_progress(
+            tx,
+            AsrStreamPayload {
+                phase: "transcribe",
+                status: "running",
+                progress: 60,
+                message: "Sending audio to Qwen3-ASR model.",
+                detail: Some("duration unavailable; using one bounded request"),
+                file: Some("upload.wav"),
+                server_url: Some(server_url.to_string()),
+            },
+        )
+        .await;
+        let result = call_asr_whole_file_endpoint(server_url, language, source_wav, None).await?;
+        return Ok(result.text);
+    };
+
+    let boundaries = plan_upload_chunk_boundaries(media_duration_ms);
+    send_progress(
+        tx,
+        AsrStreamPayload {
+            phase: "transcribe",
+            status: "running",
+            progress: 60,
+            message: "Sending audio to Qwen3-ASR model in 30 second chunks.",
+            detail: Some(&format!(
+                "chunks: {}; chunk_duration_secs: {}; overlap_secs: {}",
+                boundaries.len(),
+                ASR_UPLOAD_CHUNK_DURATION_SECS,
+                ASR_UPLOAD_CHUNK_OVERLAP_SECS
+            )),
+            file: Some("upload.wav"),
+            server_url: Some(server_url.to_string()),
+        },
+    )
+    .await;
+
+    let temp =
+        tempfile::tempdir().map_err(|error| format!("create ASR chunk temp dir: {error}"))?;
+    let mut committed = String::new();
+    let mut segment_index = 0usize;
+
+    for (chunk_index, (offset_secs, duration_secs)) in boundaries.iter().copied().enumerate() {
+        let chunk_path = if boundaries.len() == 1 {
+            source_wav.to_path_buf()
+        } else {
+            let path = temp
+                .path()
+                .join(format!("upload-chunk-{chunk_index:04}.wav"));
+            ffmpeg_split_upload_chunk(source_wav, &path, offset_secs, duration_secs).await?;
+            path
+        };
+
+        let chunk_duration_ms = duration_secs * 1000;
+        let result = call_asr_whole_file_endpoint(
+            server_url,
+            language,
+            &chunk_path,
+            Some(chunk_duration_ms),
+        )
+        .await
+        .map_err(|error| format!("chunk {} at {}s: {error}", chunk_index + 1, offset_secs))?;
+
+        let chunk_offset_ms = offset_secs * 1000;
+        for (local_start_ms, local_end_ms, seg_text) in result.segments.iter() {
+            let start_ms = chunk_offset_ms.saturating_add(*local_start_ms);
+            let end_ms = chunk_offset_ms.saturating_add(*local_end_ms);
+            let delta = if committed.is_empty() {
+                seg_text.clone()
+            } else {
+                dedupe_increment(&committed, seg_text)
+            };
+            if !delta.is_empty() {
+                append_transcript_delta(&mut committed, &delta);
+            }
+            send_asr_segment(
+                tx,
+                "final",
+                AsrSegmentPayload {
+                    index: segment_index,
+                    start_ms,
+                    end_ms,
+                    stable_start_ms: start_ms,
+                    stable_end_ms: end_ms,
+                    text: seg_text,
+                    delta: &delta,
+                    committed: &committed,
+                },
+            )
+            .await;
+            segment_index += 1;
+        }
+
+        if result.segments.is_empty() && !result.text.trim().is_empty() {
+            let delta = if committed.is_empty() {
+                result.text.clone()
+            } else {
+                dedupe_increment(&committed, &result.text)
+            };
+            if !delta.is_empty() {
+                append_transcript_delta(&mut committed, &delta);
+            }
+            let start_ms = chunk_offset_ms;
+            let end_ms = chunk_offset_ms.saturating_add(chunk_duration_ms);
+            send_asr_segment(
+                tx,
+                "final",
+                AsrSegmentPayload {
+                    index: segment_index,
+                    start_ms,
+                    end_ms,
+                    stable_start_ms: start_ms,
+                    stable_end_ms: end_ms,
+                    text: &result.text,
+                    delta: &delta,
+                    committed: &committed,
+                },
+            )
+            .await;
+            segment_index += 1;
+        }
+
+        let _ = std::fs::remove_file(&chunk_path);
+        let progress = 60 + (((chunk_index + 1) as u64 * 35) / boundaries.len() as u64) as u8;
+        send_progress(
+            tx,
+            AsrStreamPayload {
+                phase: "transcribe",
+                status: "running",
+                progress: progress.min(95),
+                message: "Processed ASR upload chunk.",
+                detail: Some(&format!(
+                    "chunk: {}/{}; offset_secs: {}; duration_secs: {}",
+                    chunk_index + 1,
+                    boundaries.len(),
+                    offset_secs,
+                    duration_secs
+                )),
+                file: chunk_path.file_name().and_then(|name| name.to_str()),
+                server_url: Some(server_url.to_string()),
+            },
+        )
+        .await;
+    }
+
+    Ok(committed)
+}
+
+fn wav_pcm_duration_ms(wav_bytes: &[u8]) -> Option<u64> {
+    // prepare_audio_for_asr always emits 16 kHz mono 16-bit PCM WAV:
+    // 16000 samples/s * 2 bytes = 32000 bytes/s, plus a small RIFF header.
+    (wav_bytes.len() > 44).then(|| ((wav_bytes.len() - 44) as u64 * 1000) / 32000)
+}
+
+fn plan_upload_chunk_boundaries(media_duration_ms: u64) -> Vec<(u64, u64)> {
+    let duration_secs = media_duration_ms.div_ceil(1000).max(1);
+    if duration_secs <= ASR_UPLOAD_CHUNK_DURATION_SECS {
+        return vec![(0, duration_secs)];
+    }
+    let step_secs = ASR_UPLOAD_CHUNK_DURATION_SECS
+        .saturating_sub(ASR_UPLOAD_CHUNK_OVERLAP_SECS)
+        .max(1);
+    let mut boundaries = Vec::new();
+    let mut offset = 0u64;
+    while offset < duration_secs {
+        let remaining = duration_secs - offset;
+        let this_chunk = remaining.min(ASR_UPLOAD_CHUNK_DURATION_SECS);
+        boundaries.push((offset, this_chunk));
+        offset += step_secs;
+        if offset < duration_secs && duration_secs - offset <= ASR_UPLOAD_CHUNK_OVERLAP_SECS {
+            if let Some(last) = boundaries.last_mut() {
+                last.1 = duration_secs - last.0;
+            }
+            break;
+        }
+    }
+    boundaries
+}
+
+async fn ffmpeg_split_upload_chunk(
+    source: &Path,
+    output: &Path,
+    offset_secs: u64,
+    duration_secs: u64,
+) -> Result<(), String> {
+    let output = Command::new("ffmpeg")
+        .arg("-nostdin")
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-y")
+        .arg("-ss")
+        .arg(offset_secs.to_string())
+        .arg("-t")
+        .arg(duration_secs.to_string())
+        .arg("-i")
+        .arg(source)
+        .arg("-c")
+        .arg("copy")
+        .arg(output)
+        .output()
+        .await
+        .map_err(|error| format!("run ffmpeg upload chunk split: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "ffmpeg upload chunk split failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
 }
 
 fn sse_response<F, Fut>(run: F) -> Response<BoxBody>
@@ -822,7 +922,8 @@ pub(crate) async fn start_managed_service(
         detail: Some(error.to_string()),
     })?;
 
-    let mut child = Command::new(target.install_dir().join("asr-server"))
+    let mut command = Command::new(target.install_dir().join("asr-server"));
+    command
         .arg("--model-dir")
         .arg(target.model_dir())
         .arg("--host")
@@ -838,19 +939,20 @@ pub(crate) async fn start_managed_service(
         .arg(&target.language)
         .kill_on_drop(true)
         .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
-        .spawn()
-        .map_err(|error| AsrServiceResponse {
-            ready: false,
-            managed: false,
-            server_url: target.server_url_display(),
-            message: "Failed to start Qwen3-ASR model service.".to_string(),
-            detail: Some(error.to_string()),
-        })?;
+        .stderr(Stdio::from(stderr));
+    configure_service_process_group(&mut command);
+    let mut child = command.spawn().map_err(|error| AsrServiceResponse {
+        ready: false,
+        managed: false,
+        server_url: target.server_url_display(),
+        message: "Failed to start Qwen3-ASR model service.".to_string(),
+        detail: Some(error.to_string()),
+    })?;
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(SERVICE_START_TIMEOUT_SECS);
     loop {
         if probe_asr_health(&target).await.is_ok() {
+            let service_pid = child.id();
             let _ = write_service_state(
                 &bifrost_storage::data_dir(),
                 &AsrServiceState {
@@ -868,6 +970,9 @@ pub(crate) async fn start_managed_service(
                 target: target.clone(),
                 child,
             });
+            if let Some(pid) = service_pid {
+                spawn_service_footprint_watchdog(target.clone(), pid, log_path.clone());
+            }
             return Ok(AsrServiceResponse {
                 ready: true,
                 managed: true,
@@ -1068,15 +1173,194 @@ pub(crate) async fn resolve_managed_target(target: AsrTarget) -> AsrTarget {
 
 pub(crate) async fn stop_any_managed_service() {
     if let Some(mut managed) = MANAGED_SERVICE.lock().await.take() {
+        terminate_service_process_group(managed.child.id());
         let _ = managed.child.kill().await;
     }
     if let Some(state) = read_service_state(&bifrost_storage::data_dir()) {
         if let Some(pid) = state.pid {
+            terminate_service_process_group(Some(pid));
             let _ = stop_pid(pid);
         }
         let _ = clear_service_state(&bifrost_storage::data_dir());
     }
 }
+
+fn spawn_service_footprint_watchdog(target: AsrTarget, pid: u32, log_path: PathBuf) {
+    let Some(limit) = default_footprint_limit_bytes(&target.model_dir()) else {
+        return;
+    };
+    tokio::spawn(async move {
+        let mut peak = 0u64;
+        let mut sample_failures = 0u32;
+        let sample_interval = physical_footprint_sample_interval();
+        loop {
+            let sample = tokio::task::spawn_blocking(move || read_process_footprint_bytes(pid))
+                .await
+                .unwrap_or_else(|error| Err(format!("join footprint sampler: {error}")));
+            match sample {
+                Ok((footprint, reliable)) => {
+                    if reliable {
+                        sample_failures = 0;
+                    } else {
+                        sample_failures += 1;
+                        warn!(
+                            pid,
+                            sample_failures,
+                            rss_mb = footprint / 1024 / 1024,
+                            "ASR service physical footprint sampling fell back to RSS"
+                        );
+                    }
+                    peak = peak.max(footprint);
+                    if footprint > limit {
+                        warn!(
+                            pid,
+                            model = %target.model,
+                            footprint_mb = footprint / 1024 / 1024,
+                            limit_mb = limit / 1024 / 1024,
+                            peak_mb = peak / 1024 / 1024,
+                            "ASR managed service exceeded footprint limit; terminating"
+                        );
+                        append_service_watchdog_log(
+                            &log_path,
+                            format!(
+                                "Bifrost ASR service watchdog killed pid={pid}: footprint_mb={} limit_mb={} peak_mb={}\n",
+                                footprint / 1024 / 1024,
+                                limit / 1024 / 1024,
+                                peak / 1024 / 1024
+                            ),
+                        );
+                        terminate_service_process_group(Some(pid));
+                        clear_managed_service_for_pid(pid).await;
+                        break;
+                    }
+                    if !reliable && sample_failures >= SERVICE_FOOTPRINT_MAX_SAMPLE_FAILURES {
+                        warn!(
+                            pid,
+                            model = %target.model,
+                            sample_failures,
+                            limit_mb = limit / 1024 / 1024,
+                            peak_mb = peak / 1024 / 1024,
+                            "ASR service physical footprint unavailable repeatedly; terminating"
+                        );
+                        append_service_watchdog_log(
+                            &log_path,
+                            format!(
+                                "Bifrost ASR service watchdog killed pid={pid}: physical footprint unavailable {sample_failures} times; limit_mb={} peak_mb={}\n",
+                                limit / 1024 / 1024,
+                                peak / 1024 / 1024
+                            ),
+                        );
+                        terminate_service_process_group(Some(pid));
+                        clear_managed_service_for_pid(pid).await;
+                        break;
+                    }
+                }
+                Err(error) => {
+                    if !process_is_alive(pid) {
+                        clear_managed_service_for_pid(pid).await;
+                        break;
+                    }
+                    sample_failures += 1;
+                    warn!(
+                        pid,
+                        sample_failures,
+                        %error,
+                        "ASR service footprint sampling failed"
+                    );
+                    if sample_failures >= SERVICE_FOOTPRINT_MAX_SAMPLE_FAILURES {
+                        warn!(
+                            pid,
+                            model = %target.model,
+                            sample_failures,
+                            limit_mb = limit / 1024 / 1024,
+                            peak_mb = peak / 1024 / 1024,
+                            "ASR service footprint sampling failed repeatedly; terminating"
+                        );
+                        append_service_watchdog_log(
+                            &log_path,
+                            format!(
+                                "Bifrost ASR service watchdog killed pid={pid}: footprint sampling failed {sample_failures} times; limit_mb={} peak_mb={}\n",
+                                limit / 1024 / 1024,
+                                peak / 1024 / 1024
+                            ),
+                        );
+                        terminate_service_process_group(Some(pid));
+                        clear_managed_service_for_pid(pid).await;
+                        break;
+                    }
+                }
+            }
+            tokio::time::sleep(sample_interval).await;
+        }
+    });
+}
+
+async fn clear_managed_service_for_pid(pid: u32) {
+    let mut managed = MANAGED_SERVICE.lock().await;
+    if managed
+        .as_ref()
+        .and_then(|service| service.child.id())
+        .is_some_and(|managed_pid| managed_pid == pid)
+    {
+        *managed = None;
+    }
+    if read_service_state(&bifrost_storage::data_dir())
+        .and_then(|state| state.pid)
+        .is_some_and(|stored_pid| stored_pid == pid)
+    {
+        let _ = clear_service_state(&bifrost_storage::data_dir());
+    }
+}
+
+fn append_service_watchdog_log(log_path: &Path, line: String) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+    {
+        use std::io::Write;
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
+fn process_is_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}")])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).contains(&pid.to_string()))
+            .unwrap_or(false)
+    }
+}
+
+#[cfg(unix)]
+fn configure_service_process_group(command: &mut Command) {
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_service_process_group(_command: &mut Command) {}
+
+#[cfg(unix)]
+fn terminate_service_process_group(pid: Option<u32>) {
+    let Some(pid) = pid else {
+        return;
+    };
+    use nix::sys::signal::{killpg, Signal};
+    use nix::unistd::Pid;
+
+    let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
+}
+
+#[cfg(not(unix))]
+fn terminate_service_process_group(_pid: Option<u32>) {}
 
 fn same_target(left: &AsrTarget, right: &AsrTarget) -> bool {
     left.host == right.host
@@ -1122,6 +1406,11 @@ async fn run_initializer_silent(target: AsrTarget) -> Result<(), String> {
     let result = run_initializer(target, tx).await;
     let _ = drain.await;
     result
+}
+
+/// Public wrapper around `run_initializer_silent` for use by `asr_jobs`.
+pub(crate) async fn run_initializer_silent_pub(target: AsrTarget) -> Result<(), String> {
+    run_initializer_silent(target).await
 }
 
 async fn ensure_asr_init_task(target: AsrTarget) -> AsrInitTask {
@@ -1847,7 +2136,10 @@ fn required_model_files(model: &str) -> &'static [&'static str] {
 
 #[cfg(test)]
 mod tests {
-    use super::{asr_download_requests, default_home, target_from_query, validate_loopback_host};
+    use super::{
+        asr_download_requests, default_home, plan_upload_chunk_boundaries, target_from_query,
+        validate_loopback_host, wav_pcm_duration_ms, ASR_UPLOAD_CHUNK_DURATION_SECS,
+    };
 
     #[test]
     fn asr_target_rejects_remote_hosts() {
@@ -1892,5 +2184,29 @@ mod tests {
         assert!(labels.contains(&"Qwen3-ASR-1.7B/config.json"));
         assert!(labels.contains(&"Qwen3-ASR-1.7B/model-00001-of-00002.safetensors"));
         assert!(labels.contains(&"sample3.wav"));
+    }
+
+    #[test]
+    fn upload_transcribe_boundaries_are_thirty_second_windows() {
+        let boundaries = plan_upload_chunk_boundaries(180_015);
+        assert_eq!(
+            boundaries.first(),
+            Some(&(0, ASR_UPLOAD_CHUNK_DURATION_SECS))
+        );
+        assert!(boundaries
+            .iter()
+            .all(|&(offset, duration)| duration <= 30 && offset + duration <= 181));
+        assert_eq!(boundaries[1].0, 28);
+        assert_eq!(boundaries.last(), Some(&(168, 13)));
+
+        assert_eq!(plan_upload_chunk_boundaries(30_000), vec![(0, 30)]);
+        assert_eq!(plan_upload_chunk_boundaries(30_001), vec![(0, 30), (28, 3)]);
+    }
+
+    #[test]
+    fn normalized_wav_duration_uses_sixteen_k_mono_pcm_size() {
+        let wav = vec![0u8; 44 + 32_000 * 30 + 16_000];
+        assert_eq!(wav_pcm_duration_ms(&wav), Some(30_500));
+        assert_eq!(wav_pcm_duration_ms(&[0u8; 44]), None);
     }
 }

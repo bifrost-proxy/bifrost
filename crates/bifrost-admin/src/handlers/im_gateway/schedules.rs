@@ -188,17 +188,7 @@ pub(super) async fn handle_schedule_run(
 
     send_schedule_run_notification(service, &schedule, &task_run).await;
 
-    json_response(&serde_json::json!({
-        "success": true,
-        "run_id": run_id,
-        "schedule_id": schedule.id,
-        "status": format!("{:?}", task_run.status),
-        "duration_ms": task_run.duration_ms,
-        "exit_code": task_run.exit_code,
-        "stdout_preview": task_run.stdout_preview,
-        "stderr_preview": task_run.stderr_preview,
-        "error": task_run.error,
-    }))
+    json_response(&task_run)
 }
 
 pub(super) async fn execute_schedule_once(
@@ -223,17 +213,21 @@ pub(super) async fn execute_script_schedule_once(
     run_id: String,
     trigger_source: crate::im_gateway::types::TriggerSource,
 ) -> crate::im_gateway::types::ImTaskRun {
-    let Some(target) = service.target_store.get(&schedule.target_id) else {
+    let (target, provider) = resolve_schedule_message_target(service, schedule);
+    let Some(target) = target else {
         return failed_schedule_run(
             run_id,
             trigger_source,
             &schedule.id,
             None,
-            Some(schedule.target_id.clone()),
-            format!("Target '{}' not found", schedule.target_id),
+            schedule
+                .message_channel
+                .as_ref()
+                .map(|channel| channel.target_id.clone()),
+            "schedule target not found".to_string(),
         );
     };
-    let Some(provider) = service.provider_store.get(&target.provider_id) else {
+    let Some(provider) = provider else {
         return failed_schedule_run(
             run_id,
             trigger_source,
@@ -311,16 +305,7 @@ fn resolve_schedule_message_target(
         return (target, Some(provider));
     }
 
-    if schedule.target_id.trim().is_empty() {
-        return (None, None);
-    }
-    match service.target_store.get(&schedule.target_id) {
-        Some(target) => {
-            let provider = service.provider_store.get(&target.provider_id);
-            (Some(target), provider)
-        }
-        None => (None, None),
-    }
+    (None, None)
 }
 
 fn owner_schedule_target(provider: &ImProviderConfig) -> Option<ImTarget> {
@@ -378,12 +363,17 @@ pub(super) async fn execute_agent_schedule_once(
         ended_at: None,
         duration_ms: None,
         exit_code: None,
+        input_preview: None,
         stdout_preview: None,
         stderr_preview: None,
         stdout_digest: None,
         stderr_digest: None,
         error: None,
         task_type: Some(crate::im_gateway::types::ScheduleTaskType::Agent),
+        runner_id: schedule
+            .agent
+            .as_ref()
+            .and_then(|agent| normalize_schedule_runner_id(agent.runner_id.as_deref())),
         agent_final_response: None,
         agent_tool_calls: Vec::new(),
         agent_plan_steps: None,
@@ -400,20 +390,36 @@ pub(super) async fn execute_agent_schedule_once(
         );
         return run;
     }
+    run.input_preview = Some(agent_schedule_input_preview(
+        agent_task.initial_prompt.as_deref(),
+        &agent_task.prompt,
+    ));
 
-    let mut config = provider
-        .as_ref()
-        .map(|provider| {
-            effective_agent_config_for_provider(&service.agent_config_store.load(), provider)
-        })
-        .unwrap_or_else(|| service.agent_config_store.load());
-    if let Some(work_dir) = agent_task
-        .work_dir
-        .as_ref()
-        .filter(|value| !value.trim().is_empty())
-    {
-        config.work_dir = Some(work_dir.clone());
+    let Some(target) = target else {
+        finish_failed_run(&mut run, "agent schedule target not found".to_string());
+        return run;
+    };
+    let Some(provider) = provider else {
+        finish_failed_run(&mut run, "agent schedule provider not found".to_string());
+        return run;
+    };
+    run.provider_id = Some(provider.id.clone());
+    run.target_id = Some(target.id.clone());
+
+    let runner_id = normalize_schedule_runner_id(agent_task.runner_id.as_deref());
+    run.runner_id = runner_id.clone();
+    if let Some(runner_id) = runner_id.as_deref() {
+        return execute_external_runner_schedule_once(
+            service, schedule, agent_task, run, runner_id,
+        )
+        .await;
     }
+
+    let mut config =
+        effective_agent_config_for_provider(&service.agent_config_store.load(), &provider);
+    let schedule_work_dir =
+        schedule_agent_effective_work_dir(agent_task, config.work_dir.as_deref());
+    config.work_dir = schedule_work_dir.clone();
     let session_key = agent_task
         .session_key
         .as_deref()
@@ -422,7 +428,7 @@ pub(super) async fn execute_agent_schedule_once(
         .unwrap_or_else(|| format!("schedule:{}", schedule.id));
     let mut session = service
         .agent_session_manager
-        .take_session_with_work_dir(&session_key, agent_task.work_dir.clone());
+        .take_session_with_work_dir(&session_key, schedule_work_dir);
     session.source = "schedule".to_string();
 
     let turn = tokio::time::timeout(
@@ -466,6 +472,442 @@ pub(super) async fn execute_agent_schedule_once(
     run
 }
 
+fn normalize_schedule_runner_id(runner_id: Option<&str>) -> Option<String> {
+    runner_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "bifrost_agent")
+        .map(str::to_string)
+}
+
+async fn execute_external_runner_schedule_once(
+    service: &ImGatewayService,
+    schedule: &ImSchedule,
+    agent_task: &crate::im_gateway::types::ScheduleAgentTask,
+    mut run: crate::im_gateway::types::ImTaskRun,
+    runner_id: &str,
+) -> crate::im_gateway::types::ImTaskRun {
+    let config = service.external_cli_config_store.load();
+    if !config.runners.contains_key(runner_id) {
+        finish_failed_run(&mut run, format!("runner '{runner_id}' not found"));
+        return run;
+    }
+    let effective = crate::im_gateway::external_cli::effective_config_for_provider_and_runner(
+        &config,
+        run.provider_id.as_deref(),
+        Some(runner_id),
+    );
+    let mut settings = effective.settings;
+    let schedule_work_dir = external_schedule_effective_work_dir(service, agent_task, &run);
+    let initial_prompt = agent_task
+        .initial_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let is_chatgpt_web = settings.adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID;
+    if !is_chatgpt_web {
+        if let Some(initial_prompt) = initial_prompt {
+            settings.instructions = match settings.instructions.take() {
+                Some(existing) if !existing.trim().is_empty() => {
+                    Some(format!("{}\n\n{}", existing.trim(), initial_prompt))
+                }
+                _ => Some(initial_prompt.to_string()),
+            };
+        }
+    }
+    let session_key = agent_task
+        .session_key
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("schedule:{}", schedule.id));
+    let schedule_conversation_ref = schedule_conversation_ref_for_adapter(
+        &settings.adapter,
+        agent_task.conversation_ref.as_ref(),
+    );
+    let initialized = if schedule_conversation_ref.is_some() {
+        true
+    } else if is_chatgpt_web {
+        crate::im_gateway::chatgpt_web::session_conversation_exists(&session_key).await
+    } else {
+        false
+    };
+    let messages = schedule_external_runner_messages(
+        &settings.adapter,
+        initial_prompt,
+        initialized,
+        &agent_task.prompt,
+    );
+    run.input_preview = Some(external_schedule_input_preview(
+        settings.instructions.as_deref(),
+        &messages,
+    ));
+    let runtime = crate::im_gateway::external_cli::ExternalCliRuntime::new(
+        crate::im_gateway::external_cli::default_runs_root(),
+    );
+    let mut final_result = None;
+    for (idx, message) in messages.iter().enumerate() {
+        let request = external_schedule_run_request(ExternalScheduleRunRequestParams {
+            message: message.clone(),
+            provider_id: run.provider_id.clone(),
+            session_key: Some(session_key.clone()),
+            runner_id: &effective.runner_id,
+            settings: &settings,
+            work_dir: schedule_work_dir.as_deref(),
+            schedule_id: &schedule.id,
+            conversation_ref: schedule_conversation_ref,
+        });
+        let run_future = Box::pin(runtime.run(request));
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(schedule.timeout_ms),
+            run_future,
+        )
+        .await;
+        match result {
+            Ok(Ok(result)) if idx + 1 < messages.len() => {
+                if result.status != crate::im_gateway::external_cli::ExternalCliRunStatus::Succeeded
+                {
+                    finish_failed_run(
+                        &mut run,
+                        format!(
+                            "runner initial prompt finished with status {:?}",
+                            result.status
+                        ),
+                    );
+                    return run;
+                }
+                if let Some(conversation_ref) =
+                    schedule_conversation_ref_from_external_result(&settings.adapter, &result)
+                {
+                    persist_schedule_conversation_ref(service, &schedule.id, conversation_ref);
+                }
+            }
+            other => {
+                final_result = Some(other);
+                break;
+            }
+        }
+    }
+
+    match final_result {
+        None => finish_failed_run(&mut run, "runner did not produce a result".to_string()),
+        Some(Ok(Ok(result))) => {
+            if let Some(conversation_ref) =
+                schedule_conversation_ref_from_external_result(&settings.adapter, &result)
+            {
+                persist_schedule_conversation_ref(service, &schedule.id, conversation_ref);
+            }
+            let ended = now_ms();
+            run.status = match result.status {
+                crate::im_gateway::external_cli::ExternalCliRunStatus::Succeeded => {
+                    crate::im_gateway::types::TaskRunStatus::Success
+                }
+                crate::im_gateway::external_cli::ExternalCliRunStatus::TimedOut => {
+                    crate::im_gateway::types::TaskRunStatus::Timeout
+                }
+                crate::im_gateway::external_cli::ExternalCliRunStatus::Stopped => {
+                    crate::im_gateway::types::TaskRunStatus::Cancelled
+                }
+                crate::im_gateway::external_cli::ExternalCliRunStatus::Failed => {
+                    crate::im_gateway::types::TaskRunStatus::Failed
+                }
+            };
+            run.exit_code = result.exit_code;
+            run.stdout_preview = Some(truncate_str(
+                &result.response,
+                schedule.max_output_bytes.min(4096) as usize,
+            ));
+            run.agent_final_response = Some(result.response);
+            run.ended_at = Some(ended);
+            run.duration_ms = Some(ended.saturating_sub(run.started_at));
+            if run.status != crate::im_gateway::types::TaskRunStatus::Success {
+                run.error = Some(format!("runner finished with status {:?}", run.status));
+            }
+        }
+        Some(Ok(Err(error))) => finish_failed_run(&mut run, error),
+        Some(Err(_)) => {
+            let ended = now_ms();
+            run.status = crate::im_gateway::types::TaskRunStatus::Timeout;
+            run.error = Some(format!("timeout after {}ms", schedule.timeout_ms));
+            run.ended_at = Some(ended);
+            run.duration_ms = Some(ended.saturating_sub(run.started_at));
+        }
+    }
+
+    run
+}
+
+pub(super) fn schedule_agent_effective_work_dir(
+    agent_task: &crate::im_gateway::types::ScheduleAgentTask,
+    inherited_work_dir: Option<&str>,
+) -> Option<String> {
+    agent_task
+        .work_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            inherited_work_dir
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+}
+
+fn external_schedule_effective_work_dir(
+    service: &ImGatewayService,
+    agent_task: &crate::im_gateway::types::ScheduleAgentTask,
+    run: &crate::im_gateway::types::ImTaskRun,
+) -> Option<String> {
+    if let Some(work_dir) = agent_task
+        .work_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(work_dir.to_string());
+    }
+    let provider_id = run.provider_id.as_deref()?;
+    let provider = service.provider_store.get(provider_id)?;
+    effective_agent_work_dir_for_provider(&service.agent_config_store.load(), &provider)
+        .map(|path| path.display().to_string())
+}
+
+pub(super) fn schedule_external_runner_messages(
+    adapter: &str,
+    initial_prompt: Option<&str>,
+    initialized: bool,
+    prompt: &str,
+) -> Vec<String> {
+    let prompt = prompt.trim().to_string();
+    if adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID && !initialized {
+        if let Some(initial_prompt) = initial_prompt
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return vec![initial_prompt.to_string(), prompt];
+        }
+    }
+    vec![prompt]
+}
+
+fn agent_schedule_input_preview(initial_prompt: Option<&str>, prompt: &str) -> String {
+    let mut parts = Vec::new();
+    if let Some(initial_prompt) = initial_prompt
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        parts.push(format!("First-round Prompt:\n{initial_prompt}"));
+    }
+    parts.push(format!("Preset Prompt:\n{}", prompt.trim()));
+    parts.join("\n\n")
+}
+
+fn external_schedule_input_preview(instructions: Option<&str>, messages: &[String]) -> String {
+    let mut parts = Vec::new();
+    if let Some(instructions) = instructions
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        parts.push(format!("Instructions:\n{instructions}"));
+    }
+    parts.extend(
+        messages
+            .iter()
+            .enumerate()
+            .map(|(idx, message)| format!("Message {}:\n{}", idx + 1, message.trim())),
+    );
+    parts.join("\n\n")
+}
+
+struct ExternalScheduleRunRequestParams<'a> {
+    message: String,
+    provider_id: Option<String>,
+    session_key: Option<String>,
+    runner_id: &'a str,
+    settings: &'a crate::im_gateway::external_cli::ExternalCliAgentSettings,
+    work_dir: Option<&'a str>,
+    schedule_id: &'a str,
+    conversation_ref: Option<&'a crate::im_gateway::types::ScheduleConversationRef>,
+}
+
+fn external_schedule_run_request(
+    params: ExternalScheduleRunRequestParams<'_>,
+) -> crate::im_gateway::external_cli::ExternalCliRunRequest {
+    let mut request = crate::im_gateway::external_cli::run_request_from_settings(
+        params.message,
+        params.provider_id,
+        params.session_key,
+        params.settings,
+    );
+    request.runner_id = Some(params.runner_id.to_string());
+    apply_schedule_conversation_ref_to_request(
+        &mut request,
+        &params.settings.adapter,
+        params.conversation_ref,
+    );
+    if let Some(work_dir) = params
+        .work_dir
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        request.work_dir = Some(PathBuf::from(work_dir));
+    }
+    if request.allow_work_dirs.is_empty() {
+        if let Some(work_dir) = request.work_dir.as_ref() {
+            request.allow_work_dirs = vec![work_dir.display().to_string()];
+        }
+    }
+    if let Some(work_dir) = request.work_dir.as_ref() {
+        tracing::debug!(
+            work_dir = %work_dir.display(),
+            schedule_id = %params.schedule_id,
+            runner_id = %params.runner_id,
+            "schedule external runner will execute from configured work_dir"
+        );
+    }
+    request
+}
+
+fn schedule_conversation_ref_for_adapter<'a>(
+    adapter: &str,
+    conversation_ref: Option<&'a crate::im_gateway::types::ScheduleConversationRef>,
+) -> Option<&'a crate::im_gateway::types::ScheduleConversationRef> {
+    let conversation_ref = conversation_ref?;
+    if conversation_ref.adapter != adapter {
+        return None;
+    }
+    if adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID {
+        return conversation_ref
+            .conversation_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|_| conversation_ref);
+    }
+    if adapter == "codex" {
+        return conversation_ref
+            .thread_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|_| conversation_ref);
+    }
+    None
+}
+
+fn apply_schedule_conversation_ref_to_request(
+    request: &mut crate::im_gateway::external_cli::ExternalCliRunRequest,
+    adapter: &str,
+    conversation_ref: Option<&crate::im_gateway::types::ScheduleConversationRef>,
+) {
+    let Some(conversation_ref) = schedule_conversation_ref_for_adapter(adapter, conversation_ref)
+    else {
+        return;
+    };
+    if adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID {
+        if let Some(conversation_id) = conversation_ref
+            .conversation_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            request.params = serde_json::json!({ "conversationId": conversation_id });
+        }
+    } else if adapter == "codex" {
+        if let Some(thread_id) = conversation_ref
+            .thread_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            request.params = serde_json::json!({ "threadId": thread_id });
+        }
+    }
+}
+
+pub(super) fn schedule_conversation_ref_from_external_result(
+    adapter: &str,
+    result: &crate::im_gateway::external_cli::ExternalCliRunResult,
+) -> Option<crate::im_gateway::types::ScheduleConversationRef> {
+    let now = now_ms();
+    if adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID {
+        let conversation_id = result_string_field(
+            result,
+            &["conversationId", "conversation_id", "conversationID"],
+        )?;
+        return Some(crate::im_gateway::types::ScheduleConversationRef {
+            adapter: adapter.to_string(),
+            conversation_id: Some(conversation_id),
+            thread_id: None,
+            updated_at: now,
+        });
+    }
+    if adapter == "codex" {
+        let thread_id = result_string_field(result, &["threadId", "thread_id"])?;
+        return Some(crate::im_gateway::types::ScheduleConversationRef {
+            adapter: adapter.to_string(),
+            conversation_id: None,
+            thread_id: Some(thread_id),
+            updated_at: now,
+        });
+    }
+    None
+}
+
+fn result_string_field(
+    result: &crate::im_gateway::external_cli::ExternalCliRunResult,
+    keys: &[&str],
+) -> Option<String> {
+    for key in keys {
+        if let Some(value) = result
+            .metadata
+            .get(*key)
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Some(value.to_string());
+        }
+    }
+    result.events.iter().find_map(|event| {
+        keys.iter().find_map(|key| {
+            event
+                .raw
+                .get(*key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+    })
+}
+
+fn persist_schedule_conversation_ref(
+    service: &ImGatewayService,
+    schedule_id: &str,
+    conversation_ref: crate::im_gateway::types::ScheduleConversationRef,
+) {
+    let Some(mut latest) = service.schedule_store.get(schedule_id) else {
+        return;
+    };
+    let Some(agent) = latest.agent.as_mut() else {
+        return;
+    };
+    if agent.conversation_ref.as_ref() == Some(&conversation_ref) {
+        return;
+    }
+    agent.conversation_ref = Some(conversation_ref);
+    latest.updated_at = now_ms();
+    if let Err(error) = service.schedule_store.update(latest) {
+        tracing::warn!(
+            schedule_id = %schedule_id,
+            error = %error,
+            "failed to persist schedule conversation reference"
+        );
+    }
+}
+
 pub(super) fn failed_schedule_run(
     run_id: String,
     trigger_source: crate::im_gateway::types::TriggerSource,
@@ -487,12 +929,14 @@ pub(super) fn failed_schedule_run(
         ended_at: Some(now),
         duration_ms: Some(0),
         exit_code: None,
+        input_preview: None,
         stdout_preview: None,
         stderr_preview: None,
         stdout_digest: None,
         stderr_digest: None,
         error: Some(error),
         task_type: None,
+        runner_id: None,
         agent_final_response: None,
         agent_tool_calls: Vec::new(),
         agent_plan_steps: None,
@@ -520,19 +964,24 @@ pub(super) async fn send_schedule_run_notification(
         return;
     };
 
-    let stdout = task_run.stdout_preview.as_deref().unwrap_or("(no output)");
-    let status_icon = if task_run.status == crate::im_gateway::types::TaskRunStatus::Success {
-        "✅"
+    let output = task_run
+        .agent_final_response
+        .as_deref()
+        .or(task_run.stdout_preview.as_deref())
+        .unwrap_or("(no output)");
+    let output = truncate_str(output, schedule.max_output_bytes.min(4096) as usize);
+    let status_label = if task_run.status == crate::im_gateway::types::TaskRunStatus::Success {
+        "SUCCESS"
     } else {
-        "❌"
+        "FAILED"
     };
     let msg = format!(
-        "{} Schedule '{}' executed\nStatus: {:?}\nDuration: {}ms\nOutput:\n{}",
-        status_icon,
+        "Schedule '{}' executed\nStatus: {} ({:?})\nDuration: {}ms\nOutput:\n{}",
         schedule.id,
+        status_label,
         task_run.status,
         task_run.duration_ms.unwrap_or(0),
-        stdout
+        output
     );
     let client = service.provider_client(&provider);
     let send_result = client.send_text(&provider, &target, &msg).await;

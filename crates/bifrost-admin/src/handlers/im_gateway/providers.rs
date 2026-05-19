@@ -414,6 +414,7 @@ pub(super) async fn handle_provider_connect(
     let target_store = service.target_store.clone();
     let connection_manager = service.connection_manager.clone();
     let agent_session_manager = service.agent_session_manager.clone();
+    let external_cli_config_store = service.external_cli_config_store.clone();
     let queue_manager = service.queue_manager.clone();
     let progress_registry = service.progress_registry.clone();
     tokio::spawn(async move {
@@ -433,6 +434,7 @@ pub(super) async fn handle_provider_connect(
             target_store,
             connection_manager,
             agent_session_manager,
+            external_cli_config_store,
             queue_manager,
             progress_registry,
         )
@@ -544,6 +546,9 @@ pub(super) fn effective_agent_config_for_provider(
 ) -> crate::im_gateway::agent::ImAgentConfig {
     let mut config = base.clone();
     if let Some(agent_config) = provider.agent_config.as_ref() {
+        if let Some(runner) = agent_config.runner.as_ref() {
+            config.runner = Some(runner.clone());
+        }
         if let Some(work_dir) = agent_config
             .work_dir
             .as_deref()
@@ -578,6 +583,16 @@ pub(super) fn effective_agent_config_for_provider(
         }
     }
     config
+}
+
+pub(super) fn effective_agent_work_dir_for_provider(
+    base: &crate::im_gateway::agent::ImAgentConfig,
+    provider: &ImProviderConfig,
+) -> Option<std::path::PathBuf> {
+    effective_agent_config_for_provider(base, provider)
+        .work_dir
+        .filter(|value| !value.trim().is_empty())
+        .map(std::path::PathBuf::from)
 }
 
 // ---------------------------------------------------------------------------

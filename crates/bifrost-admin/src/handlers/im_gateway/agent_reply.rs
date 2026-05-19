@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashSet;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(super) struct AgentReplyImageCacheKey {
@@ -6,6 +7,12 @@ pub(super) struct AgentReplyImageCacheKey {
     path: PathBuf,
     len: u64,
     modified_ms: u128,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct AgentReplyLocalImage {
+    pub(super) alt: String,
+    pub(super) path: PathBuf,
 }
 
 /// Convert agent Markdown before it is placed into a Feishu card.
@@ -139,6 +146,143 @@ pub(super) fn local_image_fallback_markdown(alt: &str, _url: &str) -> String {
     format!("[{} 未能上传]", label)
 }
 
+pub(super) fn collect_agent_reply_local_images(
+    markdown: &str,
+    base_dir: Option<&Path>,
+) -> Vec<AgentReplyLocalImage> {
+    if !markdown.contains("![") {
+        return Vec::new();
+    }
+
+    let mut images = Vec::new();
+    let mut seen = HashSet::new();
+    let mut inside_code_block = false;
+    let mut code_fence: Option<String> = None;
+
+    for line in markdown.split('\n') {
+        let trimmed = line.trim_start();
+        if inside_code_block {
+            if let Some(ref fence) = code_fence {
+                if trimmed.starts_with(fence.as_str()) && trimmed[fence.len()..].trim().is_empty() {
+                    inside_code_block = false;
+                    code_fence = None;
+                }
+            }
+            continue;
+        }
+
+        if let Some(fence) = detect_markdown_code_fence(trimmed) {
+            inside_code_block = true;
+            code_fence = Some(fence);
+            continue;
+        }
+
+        let mut pos = 0;
+        while pos < line.len() {
+            if line.as_bytes()[pos] == b'!'
+                && pos + 1 < line.len()
+                && line.as_bytes()[pos + 1] == b'['
+            {
+                if let Some((alt, url, end)) =
+                    crate::im_gateway::markdown_converter::parse_image_syntax(line, pos + 2)
+                {
+                    if let Some(image_path) = resolve_agent_reply_image_path(&url, base_dir) {
+                        let dedupe_key = image_path
+                            .canonicalize()
+                            .unwrap_or_else(|_| image_path.clone());
+                        if seen.insert(dedupe_key) {
+                            images.push(AgentReplyLocalImage {
+                                alt,
+                                path: image_path,
+                            });
+                        }
+                    }
+                    pos = end;
+                    continue;
+                }
+            }
+
+            let ch = line[pos..].chars().next().unwrap();
+            pos += ch.len_utf8();
+        }
+    }
+
+    images
+}
+
+pub(super) fn strip_agent_reply_local_images(markdown: &str, base_dir: Option<&Path>) -> String {
+    if !markdown.contains("![") {
+        return markdown.to_string();
+    }
+
+    let mut output = String::with_capacity(markdown.len());
+    let mut inside_code_block = false;
+    let mut code_fence: Option<String> = None;
+
+    for line in markdown.split('\n') {
+        let trimmed = line.trim_start();
+        if inside_code_block {
+            output.push_str(line);
+            output.push('\n');
+            if let Some(ref fence) = code_fence {
+                if trimmed.starts_with(fence.as_str()) && trimmed[fence.len()..].trim().is_empty() {
+                    inside_code_block = false;
+                    code_fence = None;
+                }
+            }
+            continue;
+        }
+
+        if let Some(fence) = detect_markdown_code_fence(trimmed) {
+            inside_code_block = true;
+            code_fence = Some(fence);
+            output.push_str(line);
+            output.push('\n');
+            continue;
+        }
+
+        output.push_str(&strip_agent_reply_local_images_in_line(line, base_dir));
+        output.push('\n');
+    }
+
+    if output.ends_with('\n') && !markdown.ends_with('\n') {
+        output.pop();
+    }
+    let stripped = output.trim();
+    if stripped.is_empty() {
+        "已生成图片，正在发送原图。".to_string()
+    } else {
+        stripped.to_string()
+    }
+}
+
+fn strip_agent_reply_local_images_in_line(line: &str, base_dir: Option<&Path>) -> String {
+    if !line.contains("![") {
+        return line.to_string();
+    }
+
+    let mut result = String::with_capacity(line.len());
+    let mut pos = 0;
+    while pos < line.len() {
+        if line.as_bytes()[pos] == b'!' && pos + 1 < line.len() && line.as_bytes()[pos + 1] == b'['
+        {
+            if let Some((_alt, url, end)) =
+                crate::im_gateway::markdown_converter::parse_image_syntax(line, pos + 2)
+            {
+                if resolve_agent_reply_image_path(&url, base_dir).is_some() {
+                    pos = end;
+                    continue;
+                }
+            }
+        }
+
+        let ch = line[pos..].chars().next().unwrap();
+        result.push(ch);
+        pos += ch.len_utf8();
+    }
+    result
+}
+
 pub(super) async fn upload_agent_reply_image_cached(
     feishu: &crate::im_gateway::feishu::FeishuProvider,
     provider: &ImProviderConfig,
@@ -205,6 +349,88 @@ pub(super) async fn upload_agent_reply_image_cached(
         .and_then(|name| name.to_str())
         .unwrap_or("agent-reply-image.png");
     let uploaded = feishu
+        .upload_image(
+            provider,
+            "message",
+            file_name,
+            bytes,
+            mime_type_for_image_path(image_path),
+        )
+        .await?;
+    let image_key = uploaded.image_key;
+
+    if let Ok(mut cache) = agent_reply_image_cache().lock() {
+        cache.insert(cache_key, image_key.clone());
+    }
+    Ok(image_key)
+}
+
+pub(super) async fn upload_agent_reply_image_for_im(
+    client: &ImProviderClient,
+    provider: &ImProviderConfig,
+    image_path: &Path,
+) -> bifrost_core::Result<String> {
+    let metadata = tokio::fs::metadata(image_path).await.map_err(|error| {
+        bifrost_core::BifrostError::Io(std::io::Error::new(
+            error.kind(),
+            format!(
+                "failed to stat agent reply image '{}': {}",
+                image_path.display(),
+                error
+            ),
+        ))
+    })?;
+    if !metadata.is_file() {
+        return Err(bifrost_core::BifrostError::Config(format!(
+            "agent reply image is not a file: {}",
+            image_path.display()
+        )));
+    }
+    if metadata.len() > MAX_AGENT_REPLY_IMAGE_BYTES {
+        return Err(bifrost_core::BifrostError::Config(format!(
+            "agent reply image exceeds {} bytes: {}",
+            MAX_AGENT_REPLY_IMAGE_BYTES,
+            image_path.display()
+        )));
+    }
+
+    let cache_key = AgentReplyImageCacheKey {
+        provider_id: provider.id.clone(),
+        path: image_path
+            .canonicalize()
+            .unwrap_or_else(|_| image_path.to_path_buf()),
+        len: metadata.len(),
+        modified_ms: metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis())
+            .unwrap_or_default(),
+    };
+
+    if let Some(image_key) = agent_reply_image_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&cache_key).cloned())
+    {
+        return Ok(image_key);
+    }
+
+    let bytes = tokio::fs::read(image_path).await.map_err(|error| {
+        bifrost_core::BifrostError::Io(std::io::Error::new(
+            error.kind(),
+            format!(
+                "failed to read agent reply image '{}': {}",
+                image_path.display(),
+                error
+            ),
+        ))
+    })?;
+    let file_name = image_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("agent-reply-image.png");
+    let uploaded = client
         .upload_image(
             provider,
             "message",
@@ -374,6 +600,14 @@ pub(super) async fn send_agent_reply_with_title(
     message_log_store: &Arc<ImMessageLogStore>,
     title: Option<&str>,
 ) {
+    let image_base_dir = provider_agent_work_dir(provider);
+    let reply_images = collect_agent_reply_local_images(reply_text, image_base_dir.as_deref());
+    let reply_text_for_card = if reply_images.is_empty() {
+        reply_text.to_string()
+    } else {
+        strip_agent_reply_local_images(reply_text, image_base_dir.as_deref())
+    };
+
     let Some(reply_target) = build_agent_reply_target(
         provider,
         event,
@@ -390,12 +624,12 @@ pub(super) async fn send_agent_reply_with_title(
         render_agent_markdown_for_feishu(
             &feishu,
             provider,
-            reply_text,
-            provider_agent_work_dir(provider).as_deref(),
+            &reply_text_for_card,
+            image_base_dir.as_deref(),
         )
         .await
     } else {
-        reply_text.to_string()
+        reply_text_for_card.clone()
     };
     let converted_text =
         crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&rendered_text);
@@ -446,7 +680,7 @@ pub(super) async fn send_agent_reply_with_title(
         target_name: Some(reply_target.display_name.clone()),
         message_id,
         msg_type: Some("interactive".to_string()),
-        content_preview: Some(truncate_str(reply_text, 200)),
+        content_preview: Some(truncate_str(&reply_text_for_card, 200)),
         trigger: Some("agent".to_string()),
         error: error_msg,
         sender_open_id: None,
@@ -460,6 +694,87 @@ pub(super) async fn send_agent_reply_with_title(
     match send_result {
         Ok(_) => debug!("agent reply sent successfully"),
         Err(e) => error!(error = %e, "failed to send agent reply"),
+    }
+
+    if !reply_images.is_empty() {
+        send_agent_reply_images(
+            client,
+            provider,
+            event,
+            &reply_target,
+            &reply_images,
+            message_log_store,
+        )
+        .await;
+    }
+}
+
+pub(super) async fn send_agent_reply_images(
+    client: &ImProviderClient,
+    provider: &ImProviderConfig,
+    event: &ImEvent,
+    reply_target: &crate::im_gateway::types::ImTarget,
+    images: &[AgentReplyLocalImage],
+    message_log_store: &Arc<ImMessageLogStore>,
+) {
+    let image_target = crate::im_gateway::types::ImTarget {
+        default_msg_type: "image".to_string(),
+        ..reply_target.clone()
+    };
+    for image in images {
+        let file_name = image
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("agent-reply-image")
+            .to_string();
+        let send_uuid = uuid_short();
+        let send_result = match upload_agent_reply_image_for_im(client, provider, &image.path).await
+        {
+            Ok(image_key) => {
+                client
+                    .send_image(provider, &image_target, &image_key, Some(&send_uuid))
+                    .await
+            }
+            Err(error) => Err(error),
+        };
+
+        let (status, message_id, error_msg) = match &send_result {
+            Ok(r) => (MessageStatus::Success, r.message_id.clone(), None),
+            Err(e) => (MessageStatus::Failed, None, Some(e.to_string())),
+        };
+        let label = if image.alt.trim().is_empty() {
+            file_name.clone()
+        } else {
+            format!("{} ({})", image.alt.trim(), file_name)
+        };
+        let log = ImMessageLog {
+            id: uuid_short(),
+            provider_id: provider.id.clone(),
+            direction: MessageDirection::Outbound,
+            status,
+            timestamp: now_ms(),
+            target_id: Some(image_target.receive_id.clone()),
+            target_name: Some(image_target.display_name.clone()),
+            message_id,
+            msg_type: Some("image".to_string()),
+            content_preview: Some(format!("[image:{label}]")),
+            trigger: Some("agent".to_string()),
+            error: error_msg,
+            sender_open_id: None,
+            event_id: Some(event.event_id.clone()),
+            reaction_added: None,
+        };
+        if let Err(e) = message_log_store.add(log) {
+            error!(error = %e, "failed to store agent outbound image message log");
+        }
+
+        match send_result {
+            Ok(_) => debug!(path = %image.path.display(), "agent reply image sent successfully"),
+            Err(e) => {
+                error!(path = %image.path.display(), error = %e, "failed to send agent reply image")
+            }
+        }
     }
 }
 

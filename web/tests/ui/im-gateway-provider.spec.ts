@@ -85,3 +85,82 @@ test("IM Gateway Provider 编辑时可以补填 App Secret 并显示后端错误
     await request.delete(`${apiBase}/im-gateway/providers/${providerId}`);
   }
 });
+
+test("IM Gateway Provider 卡片单列展示并支持复制关键字段", async ({
+  page,
+  request,
+  context,
+}) => {
+  const providerId = uniqueName("im-provider-copy-fields");
+  const appId = "cli_copyable_provider_id";
+  const ownerOpenId = "ou_copyable_provider_owner";
+  const workDir = "/tmp/test-bifrost-workdir";
+
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+
+  try {
+    const seedResponse = await request.post(`${apiBase}/im-gateway/providers`, {
+      data: {
+        id: providerId,
+        provider_type: "feishu",
+        display_name: "Copyable Provider",
+        enabled: true,
+        event_connection_enabled: true,
+        app_id: appId,
+        owner_open_id: ownerOpenId,
+        agent_config: {
+          work_dir: workDir,
+        },
+      },
+    });
+    expect(seedResponse.ok()).toBeTruthy();
+
+    await openPage(page, "ai?aiSection=im-gateway-connections&imGatewaySection=connections");
+    const card = page.getByTestId(`settings-im-provider-card-${providerId}`);
+    const header = card.locator(".ant-card-head");
+    await expect(card).toBeVisible();
+    await expect(header).toContainText("Copyable Provider");
+    await expect(header).toContainText(/Connected|Unknown|Disconnected|Failed|connecting|reconnecting/);
+    await expect(header).toContainText("Enabled");
+    await expect(header).toContainText("Long Connection");
+
+    const appIdField = page.getByTestId(`settings-im-provider-${providerId}-app-id`);
+    const ownerField = page.getByTestId(`settings-im-provider-${providerId}-owner-id`);
+    const workDirField = page.getByTestId(`settings-im-provider-${providerId}-work-dir`);
+    await expect(appIdField).toBeVisible();
+    await expect(ownerField).toBeVisible();
+    await expect(workDirField).toBeVisible();
+
+    const appIdBox = await appIdField.boundingBox();
+    const ownerBox = await ownerField.boundingBox();
+    const workDirBox = await workDirField.boundingBox();
+    expect(appIdBox).toBeTruthy();
+    expect(ownerBox).toBeTruthy();
+    expect(workDirBox).toBeTruthy();
+    expect(ownerBox!.y).toBeGreaterThan(appIdBox!.y);
+    expect(workDirBox!.y).toBeGreaterThan(ownerBox!.y);
+
+    const appIdCopy = page.getByTestId(`settings-im-provider-${providerId}-app-id-copy`);
+    await expect(appIdCopy).toHaveCSS("opacity", "0");
+    await appIdField.hover();
+    await expect(appIdCopy).toHaveCSS("opacity", "1");
+    await appIdCopy.click();
+    await expect
+      .poll(async () => page.evaluate(async () => navigator.clipboard.readText()))
+      .toBe(appId);
+
+    await ownerField.hover();
+    await page.getByTestId(`settings-im-provider-${providerId}-owner-id-copy`).click();
+    await expect
+      .poll(async () => page.evaluate(async () => navigator.clipboard.readText()))
+      .toBe(ownerOpenId);
+
+    await workDirField.hover();
+    await page.getByTestId(`settings-im-provider-${providerId}-work-dir-copy`).click();
+    await expect
+      .poll(async () => page.evaluate(async () => navigator.clipboard.readText()))
+      .toBe(workDir);
+  } finally {
+    await request.delete(`${apiBase}/im-gateway/providers/${providerId}`);
+  }
+});

@@ -10,7 +10,7 @@ use serde_json::Value;
 use super::schedule_store::ImScheduleStore;
 use super::scheduler::ImScheduler;
 use super::target_store::ImTargetStore;
-use super::types::{ImMessageChannelBinding, ImSchedule, MessageTargetMode, ScheduleTaskType};
+use super::types::{ImMessageChannelBinding, ImSchedule, ScheduleTaskType};
 
 #[derive(Clone, Debug, Default)]
 pub struct ScheduleToolContext {
@@ -128,7 +128,7 @@ impl ToolHandler for ScheduleCreateTool {
     }
 
     fn description(&self) -> &str {
-        "Create a scheduled task. Supports script schedules and agent schedules with a preset prompt. Use task_type=\"agent\" with agent.prompt for Agent tasks."
+        "Create a scheduled task. Supports script schedules and agent schedules with a preset prompt. Use task_type=\"agent\" with agent.prompt for Agent tasks. Schedules send results to message_channel."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -304,7 +304,6 @@ fn schedule_write_schema(create: bool) -> Value {
             "id": {"type": "string", "description": "Stable schedule id. Omit on create to generate one."},
             "name": {"type": "string"},
             "enabled": {"type": "boolean"},
-            "target_id": {"type": "string", "description": "Configured IM target id. Required for script schedules. For agent schedules this is accepted as a compatibility shortcut for message_channel."},
             "message_channel": {
                 "type": "object",
                 "description": "IM channel binding used for notifications and send_msg defaults. If omitted by an injected agent tool, the current IM source/default channel is used.",
@@ -340,6 +339,8 @@ fn schedule_write_schema(create: bool) -> Value {
                 "type": "object",
                 "properties": {
                     "prompt": {"type": "string", "description": "Preset prompt sent to the agent"},
+                    "runner_id": {"type": "string", "description": "Optional runner id. Use bifrost_agent or omit for the built-in Bifrost Agent; use a configured external runner id such as a ChatGPT Web Runner to run externally."},
+                    "initial_prompt": {"type": "string", "description": "Optional first-round/persona prompt prepended as runner instructions for external runners."},
                     "session_key": {"type": "string"},
                     "work_dir": {"type": "string"},
                     "system_prompt": {"type": "string"}
@@ -379,7 +380,7 @@ pub fn normalize_schedule_with_context(
 
 fn bind_schedule_message_channel(
     schedule: &mut ImSchedule,
-    target_store: Option<&ImTargetStore>,
+    _target_store: Option<&ImTargetStore>,
     context: Option<&ScheduleToolContext>,
 ) -> Result<(), String> {
     if let Some(channel) = schedule.message_channel.as_mut() {
@@ -391,26 +392,6 @@ fn bind_schedule_message_channel(
                     .to_string(),
             );
         }
-        if schedule.target_id.trim().is_empty()
-            && matches!(channel.target_mode, MessageTargetMode::ConfiguredTarget)
-        {
-            schedule.target_id = channel.target_id.clone();
-        }
-        return Ok(());
-    }
-
-    if !schedule.target_id.trim().is_empty() {
-        if let Some(store) = target_store {
-            let target_id = schedule.target_id.trim();
-            let Some(target) = store.get(target_id) else {
-                return Err(format!("target '{target_id}' not found"));
-            };
-            schedule.message_channel = Some(ImMessageChannelBinding {
-                provider_id: target.provider_id,
-                target_id: target.id,
-                target_mode: MessageTargetMode::ConfiguredTarget,
-            });
-        }
         return Ok(());
     }
 
@@ -419,9 +400,12 @@ fn bind_schedule_message_channel(
         return Ok(());
     }
 
-    if schedule.task_type == ScheduleTaskType::Agent {
+    if matches!(
+        schedule.task_type,
+        ScheduleTaskType::Agent | ScheduleTaskType::Script
+    ) {
         return Err(
-            "agent schedule requires message_channel or target_id unless an agent turn provides an IM source/default channel"
+            "schedule requires message_channel unless an agent turn provides an IM source/default channel"
                 .to_string(),
         );
     }
@@ -486,7 +470,7 @@ mod tests {
             message_channel: Some(ImMessageChannelBinding {
                 provider_id: "weixin-test".to_string(),
                 target_id: "owner-user".to_string(),
-                target_mode: MessageTargetMode::Owner,
+                target_mode: crate::im_gateway::types::MessageTargetMode::Owner,
             }),
         };
         let create = ScheduleCreateTool::new(

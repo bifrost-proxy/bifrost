@@ -380,6 +380,32 @@
 - `SKILL.md` 能指导用户用一个主代理进程灵活绑定多个临时端口。
 - 命令示例与当前 CLI 实现一致，不使用旧命名或错误子命令。
 
+### TC-TPRB-16：status 底部独立展示临时端口绑定规则
+
+**操作步骤**：
+1. 使用临时数据目录启动主服务：
+   ```bash
+   TEST_DIR="$(mktemp -d)"
+   BIFROST_DATA_DIR="$TEST_DIR" ./target/debug/bifrost rule add temp-status-rule -c "temp-status.test status://218 resBody://(temp-status)"
+   BIFROST_DATA_DIR="$TEST_DIR" ./target/debug/bifrost -p 18991 start --skip-cert-check --unsafe-ssl --no-system-proxy >"$TEST_DIR/proxy.log" 2>&1 &
+   BIFROST_PID=$!
+   ```
+2. 等待 Admin API ready 后绑定临时端口：
+   ```bash
+   curl -fsS http://127.0.0.1:18991/_bifrost/api/system
+   BIFROST_DATA_DIR="$TEST_DIR" ./target/debug/bifrost -p 18991 port bind --port 18992 --name "status temp port" --rule temp-status-rule
+   ```
+3. 执行 status：
+   ```bash
+   BIFROST_DATA_DIR="$TEST_DIR" ./target/debug/bifrost -p 18991 status
+   ```
+
+**预期结果**：
+- 输出最底部包含独立的 `Temporary Port Bindings` 区块。
+- 区块中包含 `:18992 [running] (status temp port)`，host 与临时端口监听 host 保持一致。
+- 区块中 `Rules:` 下包含 `local:temp-status-rule`。
+- 默认端口规则区块仍显示为 `Default Port Rule Groups: 18991` / `Default Port Active Rules: 18991`，不会和临时端口规则混淆。
+
 ## 清理步骤
 
 ```bash
@@ -389,6 +415,15 @@ rm -rf "$TEST_DIR"
 ```
 
 ## 执行记录
+
+2026-05-18 status 临时端口绑定展示执行记录：
+
+- 已执行命令：使用临时 `BIFROST_DATA_DIR` 启动 `target/debug/bifrost -p 18991 start --skip-cert-check --unsafe-ssl --no-system-proxy`，再执行 `target/debug/bifrost -p 18991 port bind --port 18992 --name "status temp port" --rule status-active-1` 和 `target/debug/bifrost -p 18991 status`。
+- 使用隔离数据目录：脚本通过 `mktemp -d` 创建临时目录，结束后执行 `bifrost stop` 并删除目录。
+- 端口要求：使用 `18991` / `18992`，未使用 `9900`，未修改系统代理。
+- 实际结果：`status` 最底部包含 `Temporary Port Bindings`，临时端口行包含 `:18992 [running] (status temp port)`，`Rules:` 下包含 `local:status-active-1`；默认端口规则区块显示 `Default Port Rule Groups: 18991` 和 `Default Port Active Rules: 18991`，与临时端口规则明显分区。
+- 脚本级 E2E：`BIFROST_BIN=~/work/github/bifrost/target/debug/bifrost SKIP_BUILD=true PROXY_PORT=18991 TEMP_PORT=18992 e2e-tests/tests/test_cli_online_commands_e2e.sh` 通过，汇总 `87/87`。
+- 结论：`TC-TPRB-16` 已按文档完成执行并通过。
 
 2026-05-08 Skill 与 CLI 手册补充检查执行记录：
 

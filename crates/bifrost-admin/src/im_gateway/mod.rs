@@ -1,7 +1,9 @@
 pub mod agent;
+pub mod chatgpt_web;
 pub mod connection;
 pub mod event_router;
 pub mod event_store;
+pub mod external_cli;
 pub mod feishu;
 pub mod markdown_converter;
 pub mod message_log_store;

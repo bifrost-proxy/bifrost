@@ -233,6 +233,27 @@ pub(super) fn truncate_str(s: &str, max_len: usize) -> String {
     }
 }
 
+/// Extract a diagnostic screenshot path from an error string.
+///
+/// The send layer appends `\n[diagnostic_screenshot:/path/to/file.png]` to errors
+/// when a screenshot was captured. This function splits the marker out and returns
+/// the clean error string plus an optional PathBuf.
+pub(super) fn extract_diagnostic_screenshot_path(error: &str) -> (String, Option<PathBuf>) {
+    const MARKER: &str = "[diagnostic_screenshot:";
+    if let Some(idx) = error.find(MARKER) {
+        let before = error[..idx].trim_end().to_string();
+        let after = &error[idx + MARKER.len()..];
+        let path_str = after.trim_end_matches(']').trim();
+        if path_str.is_empty() {
+            (before, None)
+        } else {
+            (before, Some(PathBuf::from(path_str)))
+        }
+    } else {
+        (error.to_string(), None)
+    }
+}
+
 /// Parse URL query string into key-value pairs.
 pub(super) fn parse_query_params(query: &str) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
@@ -361,11 +382,21 @@ pub(super) fn apply_provider_patch(provider: &mut ImProviderConfig, patch: &serd
             provider.agent_config = None;
         } else if let Some(agent_config_obj) = agent_config_value.as_object() {
             let agent_config = provider.agent_config.get_or_insert(ImProviderAgentConfig {
+                runner: None,
                 work_dir: None,
                 base_instructions: None,
                 developer_instructions: None,
                 user_instructions: None,
             });
+            if let Some(runner_value) = agent_config_obj.get("runner") {
+                if runner_value.is_null() {
+                    agent_config.runner = None;
+                } else if let Ok(runner) =
+                    serde_json::from_value::<bifrost_agent::AgentRunnerMode>(runner_value.clone())
+                {
+                    agent_config.runner = Some(runner);
+                }
+            }
             if let Some(work_dir_value) = agent_config_obj.get("work_dir") {
                 if work_dir_value.is_null() {
                     agent_config.work_dir = None;
@@ -387,6 +418,7 @@ pub(super) fn apply_provider_patch(provider: &mut ImProviderConfig, patch: &serd
                 agent_config_obj.get("user_instructions"),
             );
             if agent_config.work_dir.is_none()
+                && agent_config.runner.is_none()
                 && agent_config.base_instructions.is_none()
                 && agent_config.developer_instructions.is_none()
                 && agent_config.user_instructions.is_none()
@@ -419,6 +451,7 @@ pub(super) fn persist_provider_agent_work_dir(
     };
 
     let agent_config = provider.agent_config.get_or_insert(ImProviderAgentConfig {
+        runner: None,
         work_dir: None,
         base_instructions: None,
         developer_instructions: None,
@@ -468,6 +501,7 @@ pub(super) fn normalize_provider_agent_config(provider: &mut ImProviderConfig) {
         .filter(|value| !value.is_empty())
         .map(ToString::to_string);
     if agent_config.work_dir.is_none()
+        && agent_config.runner.is_none()
         && agent_config.base_instructions.is_none()
         && agent_config.developer_instructions.is_none()
         && agent_config.user_instructions.is_none()
@@ -550,8 +584,12 @@ pub(super) fn apply_schedule_patch(schedule: &mut ImSchedule, patch: &serde_json
     if let Some(enabled) = patch.get("enabled").and_then(|v| v.as_bool()) {
         schedule.enabled = enabled;
     }
-    if let Some(target_id) = patch.get("target_id").and_then(|v| v.as_str()) {
-        schedule.target_id = target_id.to_string();
+    if let Some(channel) = patch.get("message_channel") {
+        if channel.is_null() {
+            schedule.message_channel = None;
+        } else if let Ok(binding) = serde_json::from_value(channel.clone()) {
+            schedule.message_channel = Some(binding);
+        }
     }
     if let Some(timeout) = patch.get("timeout_ms").and_then(|v| v.as_u64()) {
         schedule.timeout_ms = timeout;

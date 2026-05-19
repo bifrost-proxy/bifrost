@@ -56,9 +56,9 @@ pub mod types;
 pub use client::AgentClient;
 pub use compact::CompactionResult;
 pub use config::{
-    list_builtin_providers, AgentConfig, AgentConfigStore, HistoryConfig, HistoryPersistence,
-    ImMessageChannelBinding, McpServerConfig, MemoriesConfig, MessageTargetMode,
-    ModelProviderConfig, ProviderInfo, ToolConfig,
+    list_builtin_providers, AgentConfig, AgentConfigStore, AgentRunnerMode, HistoryConfig,
+    HistoryPersistence, ImMessageChannelBinding, McpServerConfig, MemoriesConfig,
+    MessageTargetMode, ModelProviderConfig, ProviderInfo, ToolConfig,
 };
 pub use session::{
     handle_session_free_command, AgentSession, AgentSessionManager, SessionDetail, SessionInfo,

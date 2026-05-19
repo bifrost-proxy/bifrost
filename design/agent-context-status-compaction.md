@@ -6,7 +6,7 @@
 
 本轮修复目标是完善核心语义：压缩后 replacement history 的末尾边界、mid-turn initial context reinjection 位置、自动压缩触发的 token 口径、guide / pending continuation 的压缩边界，以及 history rewrite 后的 active status 同步。
 
-2026-05-08 补充修复目标是把 Bifrost local compaction 与 `/Users/eden/work/github/codex` 的 Codex local compaction 策略继续对齐，重点处理压缩后保留内容、summary 模板、summary 生成请求形态、user message 预算、token snapshot 重算和自动压缩触发时机的细节差异。
+2026-05-08 补充修复目标是把 Bifrost local compaction 与 `~/work/github/codex` 的 Codex local compaction 策略继续对齐，重点处理压缩后保留内容、summary 模板、summary 生成请求形态、user message 预算、token snapshot 重算和自动压缩触发时机的细节差异。
 
 ## 现状核查与根因
 

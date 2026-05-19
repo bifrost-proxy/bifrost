@@ -6,7 +6,7 @@
 
 ## 前置条件
 
-- 在仓库根目录 `/Users/eden/work/github/bifrost` 执行。
+- 在仓库根目录 `~/work/github/bifrost` 执行。
 - 每条 shell 命令先执行 `source ~/.zshrc`。
 - 不使用 9900 端口，不修改系统代理；启动 Bifrost 必须使用临时 `BIFROST_DATA_DIR` 和 `--no-system-proxy`。
 - 使用最新源码构建的 `target/release/bifrost`。
@@ -129,7 +129,7 @@
 ### TC-BP-06 使用 next_agent PSM 验证 `build_in_bp.js` 的 BAM 调用路径
 
 操作步骤：
-1. 执行 `source ~/.zshrc && grep -n "namespace go\\|service NextAgentService\\|Healthz" /Users/eden/work/code/nextoncall/next_agent/idl/flow.devops.next_agent.thrift`，确认 IDL 中存在 `flow.devops.next_agent` 命名空间和 `Healthz` 接口。
+1. 执行 `source ~/.zshrc && grep -n "namespace go\\|service NextAgentService\\|Healthz" ~/work/code/nextoncall/next_agent/idl/flow.devops.next_agent.thrift`，确认 IDL 中存在 `flow.devops.next_agent` 命名空间和 `Healthz` 接口。
 2. 使用 `HealthzRequest` 的空 Thrift struct body（单字节 `0x00`，base64 为 `AA==`），执行 Node sandbox harness 调用 `assets/scripts/parser/build_in_bp.js`：
 
 ```bash
@@ -167,7 +167,7 @@ NODE
 ```
 
 预期结果：
-- 第 1 步确认 `/Users/eden/work/code/nextoncall/next_agent/idl/flow.devops.next_agent.thrift` 是 Thrift IDL，包含 `namespace go flow.devops.next_agent`、`service NextAgentService` 和 `Healthz`。
+- 第 1 步确认 `~/work/code/nextoncall/next_agent/idl/flow.devops.next_agent.thrift` 是 Thrift IDL，包含 `namespace go flow.devops.next_agent`、`service NextAgentService` 和 `Healthz`。
 - 因 `build_in_bp.js` 的本地 IDL 分支只实现 protobuf wire decode，next_agent Thrift IDL 必须通过 `psm=flow.devops.next_agent` 走 BAM binary_tools parse。
 - 若未配置 `bamToken` 或 `bamTokenFile`，BAM 调用应返回明确的登录态错误（例如 `401 需要登陆`），不能假装解析成功。
 - 配置有效 BAM cookie 后，同一 harness 应进入 `code: "0"` 并返回 BAM 的 `parse_result`。
@@ -333,8 +333,8 @@ bp-real-next-agent-binary.test decode://bp
 ```txt
 bp-validate-local.test bp://build_in_bp?protocol=thrift decode://bp
 bp-validate-remote.test bp://https://example.com/parser/build_in_bp.js?sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef decode://bp
-bp-validate-file-url.test bp://file:///Users/eden/parser/build_in_bp.js decode://bp
-bp-validate-abs.test bp:///Users/eden/parser/build_in_bp.js decode://bp
+bp-validate-file-url.test bp://file://~/parser/build_in_bp.js decode://bp
+bp-validate-abs.test bp://~/parser/build_in_bp.js decode://bp
 ```
 
 预期结果：

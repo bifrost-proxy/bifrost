@@ -781,15 +781,13 @@ jobs:
       - name: Verify Rust tool paths
         shell: bash
         run: |
-          "$(rustup which cargo)" --version
-          "$(rustup which rustc)" --version
+          cargo --version
+          rustc --version
       - name: Build macOS desktop bundle
         shell: bash
         env:
           APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
         run: |
-          export CARGO="$(rustup which cargo)"
-          export RUSTC="$(rustup which rustc)"
           pnpm exec tauri build --config desktop/src-tauri/tauri.conf.json --target ${{ matrix.target }} --bundles app
       - name: Re-sign macOS app bundle
         shell: bash
@@ -1070,6 +1068,8 @@ jobs:
         run: pnpm install --frozen-lockfile
         working-directory: web
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rust-src
       - uses: Swatinem/rust-cache@v2
         with:
           key: e2e-${{ matrix.target }}

@@ -163,7 +163,7 @@ ctx.output = {
 如果 parser 需要 IDL 文件，推荐把 IDL 作为脚本参数传入。Bifrost 只负责加载 `?` 前面的 parser 脚本，完整引用会保留在 `ctx.scriptName`，由脚本自己解析参数。
 
 ```bash
-api.example.com bp://build_in_bp?idl=file:///Users/eden/work/code/nextoncall/next_agent/idl/order.thrift&service=OrderService&method=GetOrder decode://bp
+api.example.com bp://build_in_bp?idl=file:///path/to/project/idl/order.thrift&service=OrderService&method=GetOrder decode://bp
 ```
 
 适合场景：
@@ -281,7 +281,7 @@ bifrost search "order_id" --res-body --format json
 
 ```bash
 api.example.com host://127.0.0.1:8080
-api.example.com bp://build_in_bp?idl=file:///Users/eden/work/code/nextoncall/next_agent/idl/order.thrift&service=OrderService&method=GetOrder
+api.example.com bp://build_in_bp?idl=file:///path/to/project/idl/order.thrift&service=OrderService&method=GetOrder
 api.example.com decode://bp
 ```
 

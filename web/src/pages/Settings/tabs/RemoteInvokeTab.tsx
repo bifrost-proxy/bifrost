@@ -2672,7 +2672,12 @@ export default function RemoteInvokeTab({
               <List
                 dataSource={grants}
                 size="small"
-                pagination={{ pageSize: 10, size: "small", hideOnSinglePage: true }}
+                pagination={{
+                  pageSize: 10,
+                  size: "small",
+                  hideOnSinglePage: true,
+                  showSizeChanger: false,
+                }}
                 renderItem={(g) => {
                   const authMethod = describeGrantAuthMethod(g);
                   return (
@@ -2832,7 +2837,12 @@ export default function RemoteInvokeTab({
               <List
                 dataSource={calls}
                 size="small"
-                pagination={{ pageSize: 10, size: "small", hideOnSinglePage: true }}
+                pagination={{
+                  pageSize: 10,
+                  size: "small",
+                  hideOnSinglePage: true,
+                  showSizeChanger: false,
+                }}
                 renderItem={(c) => {
                   const argsPreviewSource = getCallArgsPreviewSource(c);
                   const argsPreview = formatArgsPreview(argsPreviewSource);
@@ -4541,7 +4551,7 @@ export default function RemoteInvokeTab({
               <TextArea
                 autoSize={{ minRows: 3, maxRows: 6 }}
                 value={sshFilePolicyRoots}
-                placeholder="/Users/eden/work/code/nextoncall/next_agent"
+                placeholder="~/work/code/my-project"
                 onChange={(e) => setSshFilePolicyRoots(e.target.value)}
               />
             </div>
@@ -4623,7 +4633,7 @@ export default function RemoteInvokeTab({
             name="seed_roots"
             tooltip="Comma-separated absolute paths. Leave empty to default to $HOME on the target machine."
           >
-            <Input placeholder="/Users/eden/work, /opt/projects" />
+            <Input placeholder="~/work, /opt/projects" />
           </Form.Item>
           <Form.Item
             label="Allowed file operations"

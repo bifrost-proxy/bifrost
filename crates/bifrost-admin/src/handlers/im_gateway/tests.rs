@@ -6,17 +6,26 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 pub(super) struct EnvGuard {
     old_data_dir: Option<String>,
+    _lock: MutexGuard<'static, ()>,
 }
 
 impl EnvGuard {
     pub(super) fn set_data_dir(data_dir: &std::path::Path) -> Self {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let lock = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("BIFROST_DATA_DIR test env lock poisoned");
         let old_data_dir = std::env::var("BIFROST_DATA_DIR").ok();
         std::env::set_var("BIFROST_DATA_DIR", data_dir);
-        Self { old_data_dir }
+        Self {
+            old_data_dir,
+            _lock: lock,
+        }
     }
 }
 
@@ -33,6 +42,7 @@ impl Drop for EnvGuard {
 pub(super) fn online_notification_message_uses_provider_work_dir_override() {
     let mut provider = test_provider();
     provider.agent_config = Some(ImProviderAgentConfig {
+        runner: None,
         work_dir: Some("/custom/im-provider-workdir".to_string()),
         base_instructions: None,
         developer_instructions: None,
@@ -145,6 +155,53 @@ pub(super) fn local_markdown_image_candidate_filters_remote_and_existing_keys() 
     ));
     assert!(!is_local_markdown_image_candidate("img_v3_chart"));
     assert!(!is_local_markdown_image_candidate(" "));
+}
+
+#[test]
+pub(super) fn agent_reply_collects_and_strips_generated_local_images() {
+    let base = std::path::Path::new("/tmp/im-agent-workdir");
+    let markdown = concat!(
+        "生成好了\n",
+        "![cat one](./cat-1.png)\n",
+        "![cat two](/tmp/cat-2.jpg \"cute\")\n",
+        "```md\n",
+        "![skip](./inside-code.png)\n",
+        "```\n",
+        "![remote](https://example.com/cat.png)\n",
+        "![feishu](img_v3_existing)\n",
+    );
+
+    let images = collect_agent_reply_local_images(markdown, Some(base));
+
+    assert_eq!(images.len(), 2);
+    assert_eq!(images[0].alt, "cat one");
+    assert_eq!(
+        images[0].path.as_path(),
+        std::path::Path::new("/tmp/im-agent-workdir/./cat-1.png")
+    );
+    assert_eq!(images[1].alt, "cat two");
+    assert_eq!(
+        images[1].path.as_path(),
+        std::path::Path::new("/tmp/cat-2.jpg")
+    );
+
+    let stripped = strip_agent_reply_local_images(markdown, Some(base));
+    assert!(!stripped.contains("./cat-1.png"));
+    assert!(!stripped.contains("/tmp/cat-2.jpg"));
+    assert!(stripped.contains("![skip](./inside-code.png)"));
+    assert!(stripped.contains("![remote](https://example.com/cat.png)"));
+    assert!(stripped.contains("![feishu](img_v3_existing)"));
+}
+
+#[test]
+pub(super) fn agent_reply_dedupes_generated_local_images() {
+    let base = std::path::Path::new("/tmp/im-agent-workdir");
+    let markdown = "![cat](./cat.png)\n![same cat](./cat.png)\n";
+
+    let images = collect_agent_reply_local_images(markdown, Some(base));
+
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0].alt, "cat");
 }
 
 #[test]
@@ -344,6 +401,449 @@ pub(super) fn test_provider() -> ImProviderConfig {
 }
 
 #[test]
+pub(super) fn schedule_chatgpt_web_initial_prompt_is_sent_as_first_message_only() {
+    assert_eq!(
+        schedule_external_runner_messages(
+            crate::im_gateway::chatgpt_web::ADAPTER_ID,
+            Some("INIT_MARKER"),
+            false,
+            "TASK_MARKER",
+        ),
+        vec!["INIT_MARKER".to_string(), "TASK_MARKER".to_string()]
+    );
+    assert_eq!(
+        schedule_external_runner_messages(
+            crate::im_gateway::chatgpt_web::ADAPTER_ID,
+            Some("INIT_MARKER"),
+            true,
+            "TASK_MARKER",
+        ),
+        vec!["TASK_MARKER".to_string()]
+    );
+    assert_eq!(
+        schedule_external_runner_messages("mock", Some("INIT_MARKER"), false, "TASK_MARKER"),
+        vec!["TASK_MARKER".to_string()]
+    );
+}
+
+#[test]
+pub(super) fn schedule_agent_work_dir_prefers_schedule_then_inherited_default() {
+    let mut agent_task = crate::im_gateway::types::ScheduleAgentTask {
+        prompt: "TASK".to_string(),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        schedule_agent_effective_work_dir(&agent_task, Some(" /repo/default ")).as_deref(),
+        Some("/repo/default")
+    );
+
+    agent_task.work_dir = Some(" /repo/schedule ".to_string());
+    assert_eq!(
+        schedule_agent_effective_work_dir(&agent_task, Some("/repo/default")).as_deref(),
+        Some("/repo/schedule")
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn schedule_chatgpt_web_session_exists_requires_non_empty_conversation() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let sessions_path = bifrost_agent::config::agent_home_dir()
+        .join("im_gateway")
+        .join("chatgpt_web")
+        .join("sessions.json");
+    tokio::fs::create_dir_all(sessions_path.parent().expect("sessions parent"))
+        .await
+        .expect("create sessions parent");
+    tokio::fs::write(
+        &sessions_path,
+        r#"{"schedule:empty":"  ","schedule:ready":"conv-ready"}"#,
+    )
+    .await
+    .expect("write sessions map");
+
+    assert!(crate::im_gateway::chatgpt_web::session_conversation_exists("schedule:ready").await);
+    assert!(!crate::im_gateway::chatgpt_web::session_conversation_exists("schedule:empty").await);
+    assert!(!crate::im_gateway::chatgpt_web::session_conversation_exists("schedule:missing").await);
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn schedule_agent_can_run_selected_external_runner_with_initial_prompt() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = ImGatewayService::new(temp_dir.path());
+
+    let provider = test_provider();
+    service
+        .provider_store
+        .add(provider.clone())
+        .expect("add provider");
+    service
+        .target_store
+        .add(ImTarget {
+            id: "target-main".to_string(),
+            provider_id: provider.id.clone(),
+            display_name: "Target Main".to_string(),
+            receive_id_type: "open_id".to_string(),
+            receive_id: "ou-target".to_string(),
+            default_msg_type: "text".to_string(),
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
+        })
+        .expect("add target");
+
+    let mut external_cli_config =
+        crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+    external_cli_config.runners.insert(
+        "chatgpt-test".to_string(),
+        crate::im_gateway::external_cli::ExternalCliAgentSettings {
+            enabled: false,
+            adapter: "mock".to_string(),
+            instructions: None,
+            adapter_config: crate::im_gateway::external_cli::ExternalCliAdapterConfig {
+                executable: Some("sh".to_string()),
+                args: vec![
+                    "-c".to_string(),
+                    "input=$(cat); if printf '%s' \"$input\" | grep -q INIT_MARKER && printf '%s' \"$input\" | grep -q TASK_MARKER; then printf '%s\n' '{\"type\":\"assistant_final\",\"content\":\"SCHEDULE_RUNNER_OK\"}'; else printf '%s\n' '{\"type\":\"assistant_final\",\"content\":\"SCHEDULE_RUNNER_MISSING_PROMPT\"}'; fi".to_string(),
+                ],
+                ..Default::default()
+            },
+            inject_bifrost_tools: false,
+            skill_paths: Vec::new(),
+            delivery_mode: crate::im_gateway::external_cli::ExternalCliDeliveryMode::FinalReply,
+        },
+    );
+    service
+        .external_cli_config_store
+        .save(external_cli_config)
+        .expect("save external config");
+
+    let schedule = ImSchedule {
+        id: "schedule-runner".to_string(),
+        name: "Schedule Runner".to_string(),
+        enabled: true,
+        message_channel: Some(crate::im_gateway::types::ImMessageChannelBinding {
+            provider_id: provider.id.clone(),
+            target_id: "target-main".to_string(),
+            target_mode: crate::im_gateway::types::MessageTargetMode::ConfiguredTarget,
+        }),
+        trigger: crate::im_gateway::types::ScheduleTrigger::Interval { every_ms: 60_000 },
+        task_type: crate::im_gateway::types::ScheduleTaskType::Agent,
+        script: Default::default(),
+        agent: Some(crate::im_gateway::types::ScheduleAgentTask {
+            prompt: "TASK_MARKER".to_string(),
+            runner_id: Some("chatgpt-test".to_string()),
+            initial_prompt: Some("INIT_MARKER".to_string()),
+            session_key: Some("schedule-runner-test".to_string()),
+            work_dir: None,
+            system_prompt: None,
+            conversation_ref: None,
+        }),
+        timeout_ms: 10_000,
+        max_output_bytes: 1024,
+        concurrency_policy: Default::default(),
+        retry: Default::default(),
+        next_run_at: None,
+        last_run_at: None,
+        created_at: 0,
+        updated_at: 0,
+    };
+
+    let run = execute_schedule_once(
+        &service,
+        &schedule,
+        "run-selected-runner".to_string(),
+        crate::im_gateway::types::TriggerSource::ManualRun,
+    )
+    .await;
+
+    assert_eq!(run.status, crate::im_gateway::types::TaskRunStatus::Success);
+    assert_eq!(run.runner_id.as_deref(), Some("chatgpt-test"));
+    assert_eq!(run.provider_id.as_deref(), Some("feishu-main"));
+    assert_eq!(run.target_id.as_deref(), Some("target-main"));
+    assert!(run
+        .input_preview
+        .as_deref()
+        .unwrap_or_default()
+        .contains("INIT_MARKER"));
+    assert!(run
+        .input_preview
+        .as_deref()
+        .unwrap_or_default()
+        .contains("TASK_MARKER"));
+    assert_eq!(
+        run.agent_final_response.as_deref(),
+        Some("SCHEDULE_RUNNER_OK")
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn schedule_external_runner_executes_from_configured_work_dir() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = ImGatewayService::new(temp_dir.path());
+    let work_dir = temp_dir.path().join("runner-workdir");
+    std::fs::create_dir_all(&work_dir).expect("create runner workdir");
+    let expected_pwd = std::fs::canonicalize(&work_dir)
+        .expect("canonical workdir")
+        .display()
+        .to_string();
+
+    let provider = test_provider();
+    service
+        .provider_store
+        .add(provider.clone())
+        .expect("add provider");
+    service
+        .target_store
+        .add(ImTarget {
+            id: "target-main".to_string(),
+            provider_id: provider.id.clone(),
+            display_name: "Target Main".to_string(),
+            receive_id_type: "open_id".to_string(),
+            receive_id: "ou-target".to_string(),
+            default_msg_type: "text".to_string(),
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
+        })
+        .expect("add target");
+
+    let mut external_cli_config =
+        crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+    external_cli_config.runners.insert(
+        "codex-workdir-test".to_string(),
+        crate::im_gateway::external_cli::ExternalCliAgentSettings {
+            enabled: false,
+            adapter: "mock".to_string(),
+            instructions: None,
+            adapter_config: crate::im_gateway::external_cli::ExternalCliAdapterConfig {
+                executable: Some("sh".to_string()),
+                args: vec![
+                    "-c".to_string(),
+                    "cat >/dev/null; if [ \"$(pwd -P)\" = \"$EXPECTED_PWD\" ]; then printf '%s\n' '{\"type\":\"assistant_final\",\"content\":\"WORKDIR_OK\"}'; else printf '%s\n' '{\"type\":\"assistant_final\",\"content\":\"WORKDIR_MISMATCH\"}'; fi".to_string(),
+                ],
+                env: std::collections::BTreeMap::from([(
+                    "EXPECTED_PWD".to_string(),
+                    expected_pwd,
+                )]),
+                ..Default::default()
+            },
+            inject_bifrost_tools: false,
+            skill_paths: Vec::new(),
+            delivery_mode: crate::im_gateway::external_cli::ExternalCliDeliveryMode::FinalReply,
+        },
+    );
+    service
+        .external_cli_config_store
+        .save(external_cli_config)
+        .expect("save external config");
+
+    let schedule = ImSchedule {
+        id: "schedule-workdir".to_string(),
+        name: "Schedule Workdir".to_string(),
+        enabled: true,
+        message_channel: Some(crate::im_gateway::types::ImMessageChannelBinding {
+            provider_id: provider.id.clone(),
+            target_id: "target-main".to_string(),
+            target_mode: crate::im_gateway::types::MessageTargetMode::ConfiguredTarget,
+        }),
+        trigger: crate::im_gateway::types::ScheduleTrigger::Interval { every_ms: 60_000 },
+        task_type: crate::im_gateway::types::ScheduleTaskType::Agent,
+        script: Default::default(),
+        agent: Some(crate::im_gateway::types::ScheduleAgentTask {
+            prompt: "TASK_MARKER".to_string(),
+            runner_id: Some("codex-workdir-test".to_string()),
+            initial_prompt: None,
+            session_key: Some("schedule-workdir".to_string()),
+            work_dir: Some(work_dir.display().to_string()),
+            system_prompt: None,
+            conversation_ref: None,
+        }),
+        timeout_ms: 10_000,
+        max_output_bytes: 1024,
+        concurrency_policy: Default::default(),
+        retry: Default::default(),
+        next_run_at: None,
+        last_run_at: None,
+        created_at: 0,
+        updated_at: 0,
+    };
+
+    let run = execute_schedule_once(
+        &service,
+        &schedule,
+        "run-workdir".to_string(),
+        crate::im_gateway::types::TriggerSource::ManualRun,
+    )
+    .await;
+
+    assert_eq!(run.status, crate::im_gateway::types::TaskRunStatus::Success);
+    assert_eq!(run.agent_final_response.as_deref(), Some("WORKDIR_OK"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn schedule_agent_persists_codex_thread_id_for_next_run() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = ImGatewayService::new(temp_dir.path());
+
+    let provider = test_provider();
+    service
+        .provider_store
+        .add(provider.clone())
+        .expect("add provider");
+    service
+        .target_store
+        .add(ImTarget {
+            id: "target-main".to_string(),
+            provider_id: provider.id.clone(),
+            display_name: "Target Main".to_string(),
+            receive_id_type: "open_id".to_string(),
+            receive_id: "ou-target".to_string(),
+            default_msg_type: "text".to_string(),
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
+        })
+        .expect("add target");
+
+    let mut external_cli_config =
+        crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+    external_cli_config.runners.insert(
+        "codex-thread-test".to_string(),
+        crate::im_gateway::external_cli::ExternalCliAgentSettings {
+            enabled: false,
+            adapter: "codex".to_string(),
+            instructions: None,
+            adapter_config: crate::im_gateway::external_cli::ExternalCliAdapterConfig {
+                executable: Some("sh".to_string()),
+                args: vec![
+                    "-c".to_string(),
+                    "cat >/dev/null; printf '%s\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-schedule-1\"}' '{\"type\":\"assistant_final\",\"content\":\"THREAD_OK\"}'".to_string(),
+                ],
+                ..Default::default()
+            },
+            inject_bifrost_tools: false,
+            skill_paths: Vec::new(),
+            delivery_mode: crate::im_gateway::external_cli::ExternalCliDeliveryMode::FinalReply,
+        },
+    );
+    service
+        .external_cli_config_store
+        .save(external_cli_config)
+        .expect("save external config");
+
+    let schedule = ImSchedule {
+        id: "schedule-codex-thread".to_string(),
+        name: "Schedule Codex Thread".to_string(),
+        enabled: true,
+        message_channel: Some(crate::im_gateway::types::ImMessageChannelBinding {
+            provider_id: provider.id.clone(),
+            target_id: "target-main".to_string(),
+            target_mode: crate::im_gateway::types::MessageTargetMode::ConfiguredTarget,
+        }),
+        trigger: crate::im_gateway::types::ScheduleTrigger::Interval { every_ms: 60_000 },
+        task_type: crate::im_gateway::types::ScheduleTaskType::Agent,
+        script: Default::default(),
+        agent: Some(crate::im_gateway::types::ScheduleAgentTask {
+            prompt: "TASK_MARKER".to_string(),
+            runner_id: Some("codex-thread-test".to_string()),
+            initial_prompt: None,
+            session_key: Some("schedule-codex-thread".to_string()),
+            work_dir: None,
+            system_prompt: None,
+            conversation_ref: None,
+        }),
+        timeout_ms: 10_000,
+        max_output_bytes: 1024,
+        concurrency_policy: Default::default(),
+        retry: Default::default(),
+        next_run_at: None,
+        last_run_at: None,
+        created_at: 0,
+        updated_at: 0,
+    };
+    service
+        .schedule_store
+        .add(schedule.clone())
+        .expect("store schedule");
+
+    let run = execute_schedule_once(
+        &service,
+        &schedule,
+        "run-codex-thread".to_string(),
+        crate::im_gateway::types::TriggerSource::ManualRun,
+    )
+    .await;
+
+    assert_eq!(run.status, crate::im_gateway::types::TaskRunStatus::Success);
+    assert_eq!(run.agent_final_response.as_deref(), Some("THREAD_OK"));
+    let stored = service
+        .schedule_store
+        .get("schedule-codex-thread")
+        .expect("stored schedule");
+    let conversation_ref = stored
+        .agent
+        .expect("agent task")
+        .conversation_ref
+        .expect("conversation ref");
+    assert_eq!(conversation_ref.adapter, "codex");
+    assert_eq!(
+        conversation_ref.thread_id.as_deref(),
+        Some("thread-schedule-1")
+    );
+}
+
+#[test]
+pub(super) fn schedule_external_result_extracts_chatgpt_conversation_id() {
+    let result = crate::im_gateway::external_cli::ExternalCliRunResult {
+        run_id: "run-1".to_string(),
+        session_key: Some("schedule:one".to_string()),
+        runtime: "external_cli".to_string(),
+        adapter: crate::im_gateway::chatgpt_web::ADAPTER_ID.to_string(),
+        status: crate::im_gateway::external_cli::ExternalCliRunStatus::Succeeded,
+        exit_code: Some(0),
+        response: "ok".to_string(),
+        responses: vec!["ok".to_string()],
+        started_at: 1,
+        finished_at: 2,
+        duration_ms: 1,
+        artifacts: crate::im_gateway::external_cli::ExternalCliRunArtifacts {
+            run_dir: "".to_string(),
+            prompt: "".to_string(),
+            command_snapshot: "".to_string(),
+            stdout: "".to_string(),
+            stderr: "".to_string(),
+            normalized_events: "".to_string(),
+            last_message: "".to_string(),
+        },
+        events: Vec::new(),
+        metadata: std::collections::BTreeMap::from([(
+            "conversationId".to_string(),
+            "conv-schedule-1".to_string(),
+        )]),
+    };
+
+    let conversation_ref = schedule_conversation_ref_from_external_result(
+        crate::im_gateway::chatgpt_web::ADAPTER_ID,
+        &result,
+    )
+    .expect("conversation ref");
+
+    assert_eq!(
+        conversation_ref.conversation_id.as_deref(),
+        Some("conv-schedule-1")
+    );
+    assert_eq!(
+        conversation_ref.adapter,
+        crate::im_gateway::chatgpt_web::ADAPTER_ID
+    );
+}
+
+#[test]
 pub(super) fn send_message_request_resolves_owner_target_from_provider() {
     let temp_dir = tempfile::tempdir().expect("temp data dir");
     let service = ImGatewayService::new(temp_dir.path());
@@ -454,6 +954,7 @@ pub(super) fn provider_agent_config_patch_sets_and_clears_overrides() {
         &mut provider,
         &serde_json::json!({
             "agent_config": {
+                "runner": "codex",
                 "work_dir": " /tmp/bifrost-im ",
                 "base_instructions": " Provider prompt "
             }
@@ -461,6 +962,10 @@ pub(super) fn provider_agent_config_patch_sets_and_clears_overrides() {
     );
 
     let agent_config = provider.agent_config.as_ref().expect("agent_config");
+    assert_eq!(
+        agent_config.runner,
+        Some(bifrost_agent::AgentRunnerMode::Custom("codex".to_string()))
+    );
     assert_eq!(agent_config.work_dir.as_deref(), Some("/tmp/bifrost-im"));
     assert_eq!(
         agent_config.base_instructions.as_deref(),
@@ -471,6 +976,7 @@ pub(super) fn provider_agent_config_patch_sets_and_clears_overrides() {
         &mut provider,
         &serde_json::json!({
             "agent_config": {
+                "runner": null,
                 "work_dir": null,
                 "base_instructions": ""
             }
@@ -536,6 +1042,7 @@ pub(super) fn provider_agent_config_overrides_base_agent_config() {
 
     let mut provider = test_provider();
     provider.agent_config = Some(ImProviderAgentConfig {
+        runner: Some(bifrost_agent::AgentRunnerMode::Custom("codex".to_string())),
         work_dir: Some("/provider".to_string()),
         base_instructions: Some("provider prompt".to_string()),
         developer_instructions: Some("provider developer".to_string()),
@@ -543,6 +1050,10 @@ pub(super) fn provider_agent_config_overrides_base_agent_config() {
     });
 
     let effective = effective_agent_config_for_provider(&base, &provider);
+    assert_eq!(
+        effective.runner,
+        Some(bifrost_agent::AgentRunnerMode::Custom("codex".to_string()))
+    );
     assert_eq!(effective.work_dir.as_deref(), Some("/provider"));
     assert_eq!(
         effective.base_instructions.as_deref(),
@@ -565,6 +1076,7 @@ pub(super) fn provider_switch_workdir_persists_provider_agent_override() {
     let mut provider = test_provider();
     provider.id = "persist-workdir-provider".to_string();
     provider.agent_config = Some(ImProviderAgentConfig {
+        runner: None,
         work_dir: Some("/old".to_string()),
         base_instructions: Some("keep provider prompt".to_string()),
         developer_instructions: None,
@@ -672,6 +1184,7 @@ pub(super) async fn im_event_loop_uses_provider_agent_config_for_agent_chat() {
     provider.base_url = Some("http://127.0.0.1:9".to_string());
     let mut provider_in_store = provider.clone();
     provider_in_store.agent_config = Some(ImProviderAgentConfig {
+        runner: None,
         work_dir: Some(std::env::current_dir().unwrap().display().to_string()),
         base_instructions: Some("IM_PROVIDER_BASE_OK: answer IM_PROVIDER_CONFIG_OK".to_string()),
         developer_instructions: Some("IM_PROVIDER_DEV_OK".to_string()),
@@ -699,6 +1212,7 @@ pub(super) async fn im_event_loop_uses_provider_agent_config_for_agent_chat() {
         Arc::clone(&service.target_store),
         Arc::clone(&service.connection_manager),
         Arc::clone(&service.agent_session_manager),
+        Arc::clone(&service.external_cli_config_store),
         Arc::clone(&service.queue_manager),
         Arc::clone(&service.progress_registry),
     ));
@@ -751,6 +1265,314 @@ pub(super) async fn im_event_loop_uses_provider_agent_config_for_agent_chat() {
         request,
         "GLOBAL_USER_SHOULD_NOT_APPEAR"
     ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn im_event_loop_provider_external_cli_runner_bypasses_disabled_default_flag() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = ImGatewayService::new(temp_dir.path());
+
+    let mut base_config = service.agent_config_store.load();
+    base_config.enabled = true;
+    base_config.runner = Some(bifrost_agent::AgentRunnerMode::Custom("codex".to_string()));
+    service
+        .agent_config_store
+        .save(&base_config)
+        .expect("save base agent config");
+
+    let mut external_cli_config =
+        crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+    let runner = external_cli_config
+        .runners
+        .get_mut("codex")
+        .expect("default codex runner");
+    runner.enabled = false;
+    runner.adapter = "mock".to_string();
+    runner.inject_bifrost_tools = false;
+    runner.adapter_config =
+        crate::im_gateway::external_cli::ExternalCliAdapterConfig {
+            executable: Some("sh".to_string()),
+            args: vec![
+                "-c".to_string(),
+                "cat >/dev/null; printf '%s\n' '{\"type\":\"assistant_final\",\"content\":\"EXTERNAL_RUNNER_OK\"}'".to_string(),
+            ],
+            ..Default::default()
+        };
+    service
+        .external_cli_config_store
+        .save(external_cli_config)
+        .expect("save external cli config");
+
+    let mut provider = test_provider();
+    provider.id = "external-runner-provider".to_string();
+    provider.owner_open_id = Some("owner-open-id".to_string());
+    provider.base_url = Some("http://127.0.0.1:9".to_string());
+    service
+        .provider_store
+        .add(provider.clone())
+        .expect("add provider");
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    let handle = tokio::spawn(run_event_loop(
+        rx,
+        ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider())),
+        provider.clone(),
+        Arc::clone(&service.event_store),
+        Arc::clone(&service.message_log_store),
+        Arc::clone(&service.route_store),
+        Arc::clone(&service.provider_store),
+        Arc::clone(&service.agent_config_store),
+        Arc::clone(&service.agent_client),
+        Arc::clone(&service.agent_tools),
+        Arc::clone(&service.schedule_store),
+        Arc::clone(&service.scheduler),
+        Arc::clone(&service.target_store),
+        Arc::clone(&service.connection_manager),
+        Arc::clone(&service.agent_session_manager),
+        Arc::clone(&service.external_cli_config_store),
+        Arc::clone(&service.queue_manager),
+        Arc::clone(&service.progress_registry),
+    ));
+
+    tx.send(ImEvent {
+        event_id: "evt-external-runner".to_string(),
+        provider_id: provider.id.clone(),
+        provider_type: ImProviderType::Feishu,
+        event_type: "message.receive".to_string(),
+        source: crate::im_gateway::types::ImEventSource {
+            chat_id: Some("chat-id".to_string()),
+            user_id: Some("owner-open-id".to_string()),
+            message_id: None,
+        },
+        message: Some(crate::im_gateway::types::ImEventMessage {
+            text: "run external cli".to_string(),
+            mentions: Vec::new(),
+            images: Vec::new(),
+            raw_type: Some("text".to_string()),
+        }),
+        received_at: now_ms(),
+        raw_digest: None,
+    })
+    .expect("send IM event");
+    drop(tx);
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+        .await
+        .expect("event loop timed out")
+        .expect("event loop task panicked");
+
+    let runs_root = crate::im_gateway::external_cli::default_runs_root();
+    let mut found = false;
+    for entry in std::fs::read_dir(runs_root).expect("runs dir") {
+        let result_path = entry.expect("run dir").path().join("result.json");
+        if !result_path.exists() {
+            continue;
+        }
+        let result = std::fs::read_to_string(result_path).expect("result json");
+        if result.contains("EXTERNAL_RUNNER_OK") {
+            found = true;
+            break;
+        }
+    }
+    assert!(
+        found,
+        "external runner should execute even when defaults.enabled is false"
+    );
+
+    let session_key = build_session_key(&provider.id, Some("owner-open-id"));
+    let detail = service
+        .agent_session_manager
+        .get_session_detail(&session_key)
+        .expect("external runner session detail should be visible in WebUI");
+    assert_eq!(detail.source, "mock");
+    assert_eq!(detail.message_count, 2);
+    assert_eq!(detail.messages[0].role, "user");
+    assert_eq!(detail.messages[0].content, "run external cli");
+    assert_eq!(detail.messages[1].role, "assistant");
+    assert_eq!(detail.messages[1].content, "EXTERNAL_RUNNER_OK");
+
+    let files = bifrost_agent::persistence::list_conversations(
+        &bifrost_agent::config::agent_home_dir(),
+        Some(&session_key),
+    );
+    assert_eq!(
+        files.len(),
+        1,
+        "external runner should persist one session file"
+    );
+    let events = bifrost_agent::persistence::load_conversation_events(&files[0])
+        .expect("load external runner session events");
+    assert!(events
+        .iter()
+        .any(|event| event.event_type == "session_start"
+            && event
+                .content
+                .get("adapter")
+                .and_then(|value| value.as_str())
+                == Some("mock")));
+    assert!(events.iter().any(|event| event.event_type == "user_message"
+        && event
+            .content
+            .get("message")
+            .and_then(|value| value.as_str())
+            == Some("run external cli")));
+    assert!(events.iter().any(|event| event.event_type == "tool_call"
+        && event
+            .content
+            .get("tool_name")
+            .and_then(|value| value.as_str())
+            == Some("mock")));
+    assert!(events.iter().any(|event| event.event_type == "tool_result"
+        && event
+            .content
+            .get("success")
+            .and_then(|value| value.as_bool())
+            == Some(true)));
+    assert!(events
+        .iter()
+        .any(|event| event.event_type == "assistant_message"
+            && event
+                .content
+                .get("message")
+                .and_then(|value| value.as_str())
+                == Some("EXTERNAL_RUNNER_OK")));
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn im_event_loop_external_cli_session_records_runner_failure() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = ImGatewayService::new(temp_dir.path());
+
+    let mut base_config = service.agent_config_store.load();
+    base_config.enabled = true;
+    base_config.runner = Some(bifrost_agent::AgentRunnerMode::Custom(
+        "broken-runner".to_string(),
+    ));
+    service
+        .agent_config_store
+        .save(&base_config)
+        .expect("save base agent config");
+
+    let mut external_cli_config =
+        crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+    external_cli_config.runners.insert(
+        "broken-runner".to_string(),
+        crate::im_gateway::external_cli::ExternalCliAgentSettings {
+            enabled: true,
+            adapter: "mock".to_string(),
+            inject_bifrost_tools: false,
+            adapter_config: crate::im_gateway::external_cli::ExternalCliAdapterConfig {
+                executable: Some("/definitely/missing/bifrost-runner".to_string()),
+                timeout_secs: Some(1),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    service
+        .external_cli_config_store
+        .save(external_cli_config)
+        .expect("save external cli config");
+
+    let mut provider = test_provider();
+    provider.id = "external-runner-failure-provider".to_string();
+    provider.owner_open_id = Some("owner-open-id".to_string());
+    provider.base_url = Some("http://127.0.0.1:9".to_string());
+    service
+        .provider_store
+        .add(provider.clone())
+        .expect("add provider");
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    let handle = tokio::spawn(run_event_loop(
+        rx,
+        ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider())),
+        provider.clone(),
+        Arc::clone(&service.event_store),
+        Arc::clone(&service.message_log_store),
+        Arc::clone(&service.route_store),
+        Arc::clone(&service.provider_store),
+        Arc::clone(&service.agent_config_store),
+        Arc::clone(&service.agent_client),
+        Arc::clone(&service.agent_tools),
+        Arc::clone(&service.schedule_store),
+        Arc::clone(&service.scheduler),
+        Arc::clone(&service.target_store),
+        Arc::clone(&service.connection_manager),
+        Arc::clone(&service.agent_session_manager),
+        Arc::clone(&service.external_cli_config_store),
+        Arc::clone(&service.queue_manager),
+        Arc::clone(&service.progress_registry),
+    ));
+
+    tx.send(ImEvent {
+        event_id: "evt-external-runner-failure".to_string(),
+        provider_id: provider.id.clone(),
+        provider_type: ImProviderType::Feishu,
+        event_type: "message.receive".to_string(),
+        source: crate::im_gateway::types::ImEventSource {
+            chat_id: Some("chat-id".to_string()),
+            user_id: Some("owner-open-id".to_string()),
+            message_id: None,
+        },
+        message: Some(crate::im_gateway::types::ImEventMessage {
+            text: "trigger broken external cli".to_string(),
+            mentions: Vec::new(),
+            images: Vec::new(),
+            raw_type: Some("text".to_string()),
+        }),
+        received_at: now_ms(),
+        raw_digest: None,
+    })
+    .expect("send IM event");
+    drop(tx);
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+        .await
+        .expect("event loop timed out")
+        .expect("event loop task panicked");
+
+    let session_key = build_session_key(&provider.id, Some("owner-open-id"));
+    let detail = service
+        .agent_session_manager
+        .get_session_detail(&session_key)
+        .expect("failed external runner session detail should be visible in WebUI");
+    assert_eq!(detail.message_count, 2);
+    assert_eq!(detail.messages[0].content, "trigger broken external cli");
+    assert!(detail.messages[1].content.starts_with("Runner failed:"));
+
+    let files = bifrost_agent::persistence::list_conversations(
+        &bifrost_agent::config::agent_home_dir(),
+        Some(&session_key),
+    );
+    assert_eq!(
+        files.len(),
+        1,
+        "failed external runner should persist one session file"
+    );
+    let events = bifrost_agent::persistence::load_conversation_events(&files[0])
+        .expect("load failed external runner session events");
+    assert!(events.iter().any(|event| event.event_type == "tool_result"
+        && event
+            .content
+            .get("success")
+            .and_then(|value| value.as_bool())
+            == Some(false)
+        && event
+            .content
+            .get("result")
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| value.contains("spawn external cli failed"))));
+    assert!(events
+        .iter()
+        .any(|event| event.event_type == "assistant_message"
+            && event
+                .content
+                .get("message")
+                .and_then(|value| value.as_str())
+                .is_some_and(|value| value.starts_with("Runner failed:"))));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -814,6 +1636,7 @@ pub(super) async fn im_event_loop_forwards_image_attachment_to_agent_chat() {
         Arc::clone(&service.target_store),
         Arc::clone(&service.connection_manager),
         Arc::clone(&service.agent_session_manager),
+        Arc::clone(&service.external_cli_config_store),
         Arc::clone(&service.queue_manager),
         Arc::clone(&service.progress_registry),
     ));

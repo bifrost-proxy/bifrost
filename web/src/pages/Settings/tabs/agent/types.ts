@@ -7,6 +7,7 @@ export const BASE = "/im-gateway";
 
 // Defaults matching Rust AgentConfig::default()
 export const DEFAULTS = {
+  runner: "bifrost_agent",
   model: "gpt-5.4-2026-03-05",
   model_provider: "aidp_crawl",
   model_reasoning_effort: "medium",
@@ -95,6 +96,7 @@ export interface MemoryStats {
 
 export interface AgentConfig {
   enabled: boolean;
+  runner?: string;
   model?: string;
   model_provider?: string;
   model_providers: Record<string, Record<string, unknown>>;

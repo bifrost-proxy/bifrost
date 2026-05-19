@@ -1,35 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  Alert,
-  Button,
-  Card,
-  Col,
-  Descriptions,
-  Drawer,
-  Form,
-  Input,
-  InputNumber,
-  Popconfirm,
-  Progress,
-  Row,
-  Select,
-  Space,
-  Switch,
-  Table,
-  Tag,
-  Timeline as AntTimeline,
-  Typography,
-  message,
-  theme,
-} from "antd";
-import {
-  AudioOutlined,
-  InboxOutlined,
-  LoadingOutlined,
-  PlayCircleOutlined,
-  StopOutlined,
-  UploadOutlined,
-} from "@ant-design/icons";
+import { useSearchParams } from "react-router-dom";
+import { Form, message, theme } from "antd";
 import {
   ASR_PARAMS_CHANGED_EVENT,
   ASR_STATUS_CHANGED_EVENT,
@@ -38,40 +9,54 @@ import {
   deleteAsrTask,
   getAsrStatus,
   getAsrTask,
+  getAsrTaskDailyDocument,
   getAsrTaskFileTimeline,
   listAsrTasks,
   loadAsrParams,
+  pauseAsrTask,
+  resumeAsrTask,
   runAsrTask,
   streamAsrTranscription,
   type AsrDirectoryTask,
   type AsrDirectoryTaskDetail,
   type AsrStatus,
   type AsrStreamEvent,
+  type AsrTaskDailyDocumentDetail,
   type AsrTaskFileRecord,
-  type AsrTaskSchedule,
   type AsrTranscriptTimeline,
 } from "../../api/asr";
 import SpeechTab from "../Settings/tabs/SpeechTab";
-
-const { Text, Paragraph } = Typography;
-
-type WorkState = "idle" | "recording" | "transcribing" | "error";
-const MIC_WINDOW_MS = 1000;
-const MIC_METER_BARS = 40;
-const EMPTY_MIC_LEVELS = Array.from({ length: MIC_METER_BARS }, () => 0);
+import {
+  appendTranscriptDelta,
+  buildTaskSchedule,
+  dedupeTranscript,
+  EMPTY_MIC_LEVELS,
+  MIC_METER_BARS,
+  MIC_WINDOW_MS,
+  type WorkState,
+} from "./asrUtils";
+import DirectoryTaskDetailPage from "./components/DirectoryTaskDetailPage";
+import DirectoryTasksPanel from "./components/DirectoryTasksPanel";
+import SpeechWorkbench from "./components/SpeechWorkbench";
 
 export default function ASR() {
   const { token } = theme.useToken();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [taskForm] = Form.useForm();
   const taskScheduleKind = Form.useWatch("schedule_kind", taskForm) ?? "daily";
+  const selectedTaskId = searchParams.get("asrTask");
+  const selectedFileKey = searchParams.get("asrFile");
+  const selectedDailyDate = searchParams.get("asrDay");
   const [status, setStatus] = useState<AsrStatus | null>(null);
   const [tasks, setTasks] = useState<AsrDirectoryTask[]>([]);
   const [tasksLoading, setTasksLoading] = useState(false);
   const [taskDetail, setTaskDetail] = useState<AsrDirectoryTaskDetail | null>(null);
-  const [taskDetailOpen, setTaskDetailOpen] = useState(false);
   const [taskDetailLoading, setTaskDetailLoading] = useState(false);
   const [taskTimeline, setTaskTimeline] = useState<AsrTranscriptTimeline | null>(null);
   const [taskTimelineLoading, setTaskTimelineLoading] = useState(false);
+  const [taskDailyDocument, setTaskDailyDocument] =
+    useState<AsrTaskDailyDocumentDetail | null>(null);
+  const [taskDailyDocumentLoading, setTaskDailyDocumentLoading] = useState(false);
   const [workState, setWorkState] = useState<WorkState>("idle");
   const [progress, setProgress] = useState(0);
   const [selectedName, setSelectedName] = useState("");
@@ -437,6 +422,26 @@ export default function ASR() {
     appendEvent("recording: microphone capture stopped");
   }, [appendEvent, stopMicMeter]);
 
+  const cancelWork = useCallback(() => {
+    abortRef.current?.abort();
+    recordingActiveRef.current = false;
+    if (recorderRef.current?.state === "recording") {
+      recorderRef.current.stop();
+      recorderRef.current = null;
+    }
+    stopMicMeter();
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "cancel" }));
+    }
+    wsRef.current?.close();
+    wsRef.current = null;
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+    setWorkState("idle");
+    setProgress(0);
+    appendEvent("transcription stopped by user");
+  }, [appendEvent, stopMicMeter]);
+
   const createDirectoryTask = useCallback(async () => {
     try {
       const values = await taskForm.validateFields();
@@ -448,55 +453,38 @@ export default function ASR() {
         schedule: buildTaskSchedule(values),
         language: getCurrentAsrParams().language,
         model: getCurrentAsrParams().model,
+        runtime_strategy: values.runtime_strategy,
       });
       taskForm.resetFields();
       await refreshTasks();
       message.success("ASR directory task created");
+      return true;
     } catch (error) {
       if (error && typeof error === "object" && "errorFields" in error) {
-        return;
+        return false;
       }
       message.error(error instanceof Error ? error.message : "Failed to create ASR task");
+      return false;
     }
   }, [getCurrentAsrParams, refreshTasks, taskForm]);
 
-  const openTaskDetail = useCallback(
-    async (id: string, keepDrawerOpen = false) => {
-      if (!keepDrawerOpen) {
-        setTaskDetailOpen(true);
-        setTaskTimeline(null);
-      }
-      setTaskDetailLoading(true);
-      try {
-        const nextDetail = await getAsrTask(id);
-        setTaskDetail(nextDetail);
-        const firstTimelineFile = nextDetail.files.find((file) => Boolean(file.output_timeline_path));
-        if (firstTimelineFile) {
-          setTaskTimelineLoading(true);
-          try {
-            setTaskTimeline(await getAsrTaskFileTimeline(firstTimelineFile.task_id, firstTimelineFile.key));
-          } catch (error) {
-            setTaskTimeline(null);
-            message.error(error instanceof Error ? error.message : "Failed to load ASR timeline");
-          } finally {
-            setTaskTimelineLoading(false);
-          }
-        } else {
-          setTaskTimeline(null);
-        }
-      } catch (error) {
-        message.error(error instanceof Error ? error.message : "Failed to load ASR task");
-      } finally {
-        setTaskDetailLoading(false);
-      }
-    },
-    [],
-  );
+  const loadTaskDetail = useCallback(async (id: string) => {
+    setTaskDetail(null);
+    setTaskDetailLoading(true);
+    try {
+      setTaskDetail(await getAsrTask(id));
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "Failed to load ASR task");
+    } finally {
+      setTaskDetailLoading(false);
+    }
+  }, []);
 
-  const openTaskTimeline = useCallback(async (file: AsrTaskFileRecord) => {
+  const loadTaskTimeline = useCallback(async (taskId: string, fileKey: string) => {
+    setTaskTimeline(null);
     setTaskTimelineLoading(true);
     try {
-      setTaskTimeline(await getAsrTaskFileTimeline(file.task_id, file.key));
+      setTaskTimeline(await getAsrTaskFileTimeline(taskId, fileKey));
     } catch (error) {
       message.error(error instanceof Error ? error.message : "Failed to load ASR timeline");
     } finally {
@@ -504,38 +492,228 @@ export default function ASR() {
     }
   }, []);
 
+  const loadTaskDailyDocument = useCallback(async (taskId: string, date: string) => {
+    setTaskDailyDocument(null);
+    setTaskDailyDocumentLoading(true);
+    try {
+      setTaskDailyDocument(await getAsrTaskDailyDocument(taskId, date));
+    } catch (error) {
+      message.error(
+        error instanceof Error ? error.message : "Failed to load ASR daily document",
+      );
+    } finally {
+      setTaskDailyDocumentLoading(false);
+    }
+  }, []);
+
+  const openTaskDetail = useCallback(
+    (id: string) => {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          next.set("aiSection", "tools-asr");
+          next.set("asrTask", id);
+          next.delete("asrFile");
+          next.delete("asrDay");
+          return next;
+        },
+        { replace: false },
+      );
+    },
+    [setSearchParams],
+  );
+
+  const closeTaskDetail = useCallback(() => {
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete("asrTask");
+        next.delete("asrFile");
+        next.delete("asrDay");
+        return next;
+      },
+      { replace: false },
+    );
+  }, [setSearchParams]);
+
+  const openTaskFile = useCallback(
+    (file: AsrTaskFileRecord) => {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          next.set("aiSection", "tools-asr");
+          next.set("asrTask", file.task_id);
+          next.set("asrFile", file.key);
+          next.delete("asrDay");
+          return next;
+        },
+        { replace: false },
+      );
+    },
+    [setSearchParams],
+  );
+
+  const closeTaskFile = useCallback(() => {
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete("asrFile");
+        return next;
+      },
+      { replace: false },
+    );
+  }, [setSearchParams]);
+
+  const openTaskDailyDocument = useCallback(
+    (date: string) => {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          next.set("aiSection", "tools-asr");
+          if (selectedTaskId) {
+            next.set("asrTask", selectedTaskId);
+          }
+          next.set("asrDay", date);
+          next.delete("asrFile");
+          return next;
+        },
+        { replace: false },
+      );
+    },
+    [selectedTaskId, setSearchParams],
+  );
+
+  const closeTaskDailyDocument = useCallback(() => {
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete("asrDay");
+        return next;
+      },
+      { replace: false },
+    );
+  }, [setSearchParams]);
+
+  useEffect(() => {
+    if (!selectedTaskId) {
+      setTaskDetail(null);
+      setTaskTimeline(null);
+      setTaskDailyDocument(null);
+      return;
+    }
+    void loadTaskDetail(selectedTaskId);
+  }, [loadTaskDetail, selectedTaskId]);
+
+  useEffect(() => {
+    if (!selectedTaskId || !selectedFileKey) {
+      setTaskTimeline(null);
+      return;
+    }
+    void loadTaskTimeline(selectedTaskId, selectedFileKey);
+  }, [loadTaskTimeline, selectedFileKey, selectedTaskId]);
+
+  useEffect(() => {
+    if (!selectedTaskId || !selectedDailyDate) {
+      setTaskDailyDocument(null);
+      return;
+    }
+    void loadTaskDailyDocument(selectedTaskId, selectedDailyDate);
+  }, [loadTaskDailyDocument, selectedDailyDate, selectedTaskId]);
+
+  // Auto-refresh task detail every 3 seconds while the task or bulk chunk retry is running.
+  useEffect(() => {
+    const bulkRetryActive =
+      taskDetail?.bulk_retry?.status === "queued" ||
+      taskDetail?.bulk_retry?.status === "running";
+    if ((!taskDetail?.summary?.running && !bulkRetryActive) || !taskDetail?.id) return;
+    const timer = setInterval(() => {
+      void (async () => {
+        try {
+          const updated = await getAsrTask(taskDetail.id);
+          setTaskDetail(updated);
+          const updatedBulkRetryActive =
+            updated.bulk_retry?.status === "queued" ||
+            updated.bulk_retry?.status === "running";
+          if (!updated.summary.running && !updatedBulkRetryActive) {
+            // Task finished — also refresh the task list.
+            void refreshTasks();
+          }
+        } catch {
+          // Ignore refresh errors silently.
+        }
+      })();
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [
+    taskDetail?.summary?.running,
+    taskDetail?.bulk_retry?.status,
+    taskDetail?.id,
+    refreshTasks,
+  ]);
+
   const runDirectoryTask = useCallback(
     async (id: string) => {
-      setTasksLoading(true);
       try {
-        const result = await runAsrTask(id);
-        message.success(
-          `Processed ${result.processed_now}, failed ${result.failed_now}`,
-        );
+        await runAsrTask(id);
+        message.info("ASR task started");
+        // Immediately refresh to show running state.
         if (taskDetail?.id === id) {
-          void openTaskDetail(id, true);
+          void loadTaskDetail(id);
         }
         await refreshTasks();
       } catch (error) {
         message.error(error instanceof Error ? error.message : "Failed to run ASR task");
-      } finally {
-        setTasksLoading(false);
       }
     },
-    [openTaskDetail, refreshTasks, taskDetail?.id],
+    [loadTaskDetail, refreshTasks, taskDetail?.id],
+  );
+
+  const pauseDirectoryTask = useCallback(
+    async (id: string, force = false) => {
+      try {
+        const result = await pauseAsrTask(id, { force });
+        message.info(result.message);
+        if (taskDetail?.id === id) {
+          void loadTaskDetail(id);
+        }
+        await refreshTasks();
+      } catch (error) {
+        message.error(error instanceof Error ? error.message : "Failed to pause ASR task");
+      }
+    },
+    [loadTaskDetail, refreshTasks, taskDetail?.id],
+  );
+
+  const resumeDirectoryTask = useCallback(
+    async (id: string) => {
+      try {
+        const result = await resumeAsrTask(id);
+        message.success(result.message);
+        if (taskDetail?.id === id) {
+          void loadTaskDetail(id);
+        }
+        await refreshTasks();
+      } catch (error) {
+        message.error(error instanceof Error ? error.message : "Failed to resume ASR task");
+      }
+    },
+    [loadTaskDetail, refreshTasks, taskDetail?.id],
   );
 
   const removeDirectoryTask = useCallback(
     async (id: string) => {
       try {
         await deleteAsrTask(id);
+        if (taskDetail?.id === id) {
+          closeTaskDetail();
+        }
         await refreshTasks();
         message.success("ASR directory task deleted");
       } catch (error) {
         message.error(error instanceof Error ? error.message : "Failed to delete ASR task");
       }
     },
-    [refreshTasks],
+    [closeTaskDetail, refreshTasks, taskDetail?.id],
   );
 
   const ready = status?.ready;
@@ -545,851 +723,66 @@ export default function ASR() {
     workState !== "recording" &&
     (workState === "transcribing" || workState === "error" || progress > 0);
 
+  if (selectedTaskId) {
+    return (
+      <DirectoryTaskDetailPage
+        token={token}
+        taskDetail={taskDetail}
+        taskDetailLoading={taskDetailLoading}
+        selectedFileKey={selectedFileKey}
+        selectedDailyDate={selectedDailyDate}
+        taskTimeline={taskTimeline}
+        taskTimelineLoading={taskTimelineLoading}
+        taskDailyDocument={taskDailyDocument}
+        taskDailyDocumentLoading={taskDailyDocumentLoading}
+        onBackToTasks={closeTaskDetail}
+        onBackToTaskFiles={closeTaskFile}
+        onBackToDailyDocuments={closeTaskDailyDocument}
+        onRefreshTask={(id) => void loadTaskDetail(id)}
+        onRunTask={(id) => void runDirectoryTask(id)}
+        onPauseTask={(id, force) => void pauseDirectoryTask(id, force)}
+        onResumeTask={(id) => void resumeDirectoryTask(id)}
+        onOpenFile={openTaskFile}
+        onOpenDailyDocument={openTaskDailyDocument}
+      />
+    );
+  }
+
   return (
     <div style={{ height: "100%", overflow: "auto" }}>
       <SpeechTab />
-      <Card
-        data-testid="asr-workbench-card"
-        title={
-          <Space>
-            <AudioOutlined />
-            <span>Speech to Text</span>
-            {ready ? <Tag color="success">Ready</Tag> : <Tag color="warning">Not Ready</Tag>}
-          </Space>
-        }
-      >
-        <Space direction="vertical" size={16} style={{ width: "100%" }}>
-          <section aria-label="Audio Input">
-            <Space style={{ marginBottom: 12 }}>
-              <AudioOutlined />
-              <Text strong>Audio Input</Text>
-            </Space>
-            {!ready ? (
-              <Alert
-                type="warning"
-                showIcon
-                message="Speech converter is not ready"
-                description={
-                  status?.message ||
-                  "Initialize Qwen3-ASR from AI > Tools > ASR before transcribing audio."
-                }
-                style={{ marginBottom: 16 }}
-              />
-            ) : null}
-
-            <div
-              onDragOver={(event) => {
-                event.preventDefault();
-              }}
-              onDrop={(event) => {
-                event.preventDefault();
-                const file = event.dataTransfer.files.item(0);
-                if (file) {
-                  handleFile(file);
-                }
-              }}
-              style={{
-                minHeight: 180,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                flexDirection: "column",
-                gap: 12,
-                border: `1px dashed ${token.colorBorder}`,
-                borderRadius: 6,
-                background: token.colorFillQuaternary,
-                color: token.colorTextSecondary,
-                cursor: "pointer",
-              }}
-              onClick={() => fileInputRef.current?.click()}
-            >
-              <InboxOutlined style={{ fontSize: 32, color: token.colorPrimary }} />
-              <Text>Drop an audio file here</Text>
-              <Button icon={<UploadOutlined />}>Choose File</Button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="audio/*,.wav,.mp3,.m4a,.webm,.ogg,.flac"
-                style={{ display: "none" }}
-                onChange={(event) => {
-                  const file = event.target.files?.item(0);
-                  if (file) {
-                    handleFile(file);
-                    event.currentTarget.value = "";
-                  }
-                }}
-              />
-            </div>
-
-            <Space style={{ marginTop: 16 }} wrap>
-              {workState === "recording" ? (
-                <Button
-                  danger
-                  icon={<StopOutlined />}
-                  onClick={stopRecording}
-                >
-                  Stop Mic
-                </Button>
-              ) : (
-                <Button
-                  type="primary"
-                  icon={<PlayCircleOutlined />}
-                  onClick={startRecording}
-                  disabled={!ready || workState === "transcribing"}
-                >
-                  Start Mic
-                </Button>
-              )}
-              <Button
-                onClick={() => {
-                  abortRef.current?.abort();
-                  recordingActiveRef.current = false;
-                  if (recorderRef.current?.state === "recording") {
-                    recorderRef.current.stop();
-                    recorderRef.current = null;
-                  }
-                  stopMicMeter();
-                  if (wsRef.current?.readyState === WebSocket.OPEN) {
-                    wsRef.current.send(JSON.stringify({ type: "cancel" }));
-                  }
-                  wsRef.current?.close();
-                  wsRef.current = null;
-                  streamRef.current?.getTracks().forEach((track) => track.stop());
-                  streamRef.current = null;
-                  setWorkState("idle");
-                  setProgress(0);
-                  appendEvent("transcription stopped by user");
-                }}
-                disabled={!busy}
-              >
-                Cancel
-              </Button>
-            </Space>
-
-            <div
-              aria-label="Microphone input level"
-              style={{
-                marginTop: 16,
-                minHeight: 76,
-                padding: "12px 14px",
-                border: `1px solid ${token.colorBorderSecondary}`,
-                borderRadius: 6,
-                background: token.colorFillQuaternary,
-              }}
-            >
-              <div
-                style={{
-                  height: 42,
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 3,
-                }}
-              >
-                {micLevels.map((level, index) => {
-                  const active = workState === "recording";
-                  const height = active ? Math.max(4, 6 + level * 36) : 4;
-                  return (
-                    <span
-                      key={index}
-                      style={{
-                        flex: "1 1 0",
-                        height,
-                        minWidth: 3,
-                        borderRadius: 3,
-                        background: active
-                          ? `linear-gradient(180deg, ${token.colorPrimary}, ${token.colorSuccess})`
-                          : token.colorFillSecondary,
-                        opacity: active ? 0.45 + level * 0.55 : 0.7,
-                        transition: "height 80ms ease, opacity 80ms ease",
-                      }}
-                    />
-                  );
-                })}
-              </div>
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  marginTop: 8,
-                  color: token.colorTextSecondary,
-                  fontSize: 12,
-                }}
-              >
-                <span>{workState === "recording" ? "Live microphone level" : "Mic level"}</span>
-                <span>{Math.round(micPeak * 100)}%</span>
-              </div>
-            </div>
-
-            {showFileProgress ? (
-              <div
-                aria-label="File transcription progress"
-                data-testid="asr-file-progress"
-                style={{ marginTop: 16 }}
-              >
-                <Progress
-                  percent={progress}
-                  status={
-                    workState === "error"
-                      ? "exception"
-                      : workState === "transcribing"
-                        ? "active"
-                        : progress === 100
-                          ? "success"
-                          : "normal"
-                  }
-                />
-                <Text type="secondary">
-                  {workState === "transcribing"
-                    ? "Streaming file transcription status"
-                    : selectedName}
-                </Text>
-              </div>
-            ) : null}
-          </section>
-
-          <section
-            aria-label="Transcript"
-            style={{
-              borderTop: `1px solid ${token.colorBorderSecondary}`,
-              paddingTop: 16,
-            }}
-          >
-            <Space style={{ marginBottom: 12 }}>
-              {workState === "transcribing" ? <LoadingOutlined /> : <AudioOutlined />}
-              <Text strong>Transcript</Text>
-            </Space>
-            {errorText ? (
-              <Alert
-                type="error"
-                showIcon
-                message="Transcription failed"
-                description={errorText}
-                style={{ marginBottom: 16, whiteSpace: "pre-wrap" }}
-              />
-            ) : null}
-            <Paragraph
-              style={{
-                minHeight: 220,
-                padding: 12,
-                background: token.colorFillTertiary,
-                border: `1px solid ${token.colorBorderSecondary}`,
-                borderRadius: 6,
-                whiteSpace: "pre-wrap",
-                color: token.colorText,
-              }}
-            >
-              {transcript || "Waiting for transcription text."}
-            </Paragraph>
-            <div
-              style={{
-                minHeight: 140,
-                maxHeight: 220,
-                overflow: "auto",
-                padding: 12,
-                background: token.colorFillQuaternary,
-                border: `1px solid ${token.colorBorderSecondary}`,
-                borderRadius: 6,
-                fontFamily:
-                  "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-                fontSize: 12,
-                whiteSpace: "pre-wrap",
-              }}
-            >
-              {events.length ? events.join("\n") : "No stream events yet."}
-            </div>
-          </section>
-        </Space>
-      </Card>
-      <Card
-        title={
-          <Space>
-            <AudioOutlined />
-            <span>Directory Tasks</span>
-            <Tag>{tasks.length}</Tag>
-          </Space>
-        }
-        style={{ marginTop: 16 }}
-      >
-        <Form
-          form={taskForm}
-          layout="vertical"
-          initialValues={{
-            recursive: true,
-            enabled: true,
-            schedule_kind: "daily",
-            schedule_time: "02:00",
-            schedule_weekday: 1,
-            schedule_day: 1,
-            schedule_minute: 0,
-          }}
-        >
-          <Row gutter={[12, 0]} align="bottom">
-            <Col xs={24} md={5}>
-              <Form.Item name="name" label="Name">
-                <Input placeholder="Meeting audio watcher" />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={7}>
-              <Form.Item
-                name="audio_dir"
-                label="Audio Directory"
-                rules={[{ required: true, message: "Enter a local directory path" }]}
-              >
-                <Input placeholder="/Users/eden/Recordings" />
-              </Form.Item>
-            </Col>
-            <Col xs={12} md={3}>
-              <Form.Item name="schedule_kind" label="Cycle">
-                <Select
-                  options={[
-                    { value: "hourly", label: "Hourly" },
-                    { value: "daily", label: "Daily" },
-                    { value: "weekly", label: "Weekly" },
-                    { value: "monthly", label: "Monthly" },
-                  ]}
-                />
-              </Form.Item>
-            </Col>
-            {taskScheduleKind === "hourly" ? (
-              <Col xs={12} md={3}>
-                <Form.Item name="schedule_minute" label="Minute">
-                  <InputNumber min={0} max={59} style={{ width: "100%" }} />
-                </Form.Item>
-              </Col>
-            ) : null}
-            {taskScheduleKind === "daily" ? (
-              <Col xs={12} md={3}>
-                <Form.Item name="schedule_time" label="Time">
-                  <Input type="time" />
-                </Form.Item>
-              </Col>
-            ) : null}
-            {taskScheduleKind === "weekly" ? (
-              <>
-                <Col xs={12} md={3}>
-                  <Form.Item name="schedule_weekday" label="Weekday">
-                    <Select
-                      options={[
-                        { value: 1, label: "Mon" },
-                        { value: 2, label: "Tue" },
-                        { value: 3, label: "Wed" },
-                        { value: 4, label: "Thu" },
-                        { value: 5, label: "Fri" },
-                        { value: 6, label: "Sat" },
-                        { value: 7, label: "Sun" },
-                      ]}
-                    />
-                  </Form.Item>
-                </Col>
-                <Col xs={12} md={3}>
-                  <Form.Item name="schedule_time" label="Time">
-                    <Input type="time" />
-                  </Form.Item>
-                </Col>
-              </>
-            ) : null}
-            {taskScheduleKind === "monthly" ? (
-              <>
-                <Col xs={12} md={2}>
-                  <Form.Item name="schedule_day" label="Day">
-                    <InputNumber min={1} max={31} style={{ width: "100%" }} />
-                  </Form.Item>
-                </Col>
-                <Col xs={12} md={3}>
-                  <Form.Item name="schedule_time" label="Time">
-                    <Input type="time" />
-                  </Form.Item>
-                </Col>
-              </>
-            ) : null}
-            <Col xs={6} md={2}>
-              <Form.Item name="recursive" label="Recursive" valuePropName="checked">
-                <Switch />
-              </Form.Item>
-            </Col>
-            <Col xs={6} md={2}>
-              <Form.Item name="enabled" label="Enabled" valuePropName="checked">
-                <Switch />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={1}>
-              <Form.Item label=" ">
-                <Button type="primary" onClick={createDirectoryTask}>
-                  Add
-                </Button>
-              </Form.Item>
-            </Col>
-          </Row>
-        </Form>
-        <Table
-          rowKey="id"
-          size="small"
-          loading={tasksLoading}
-          dataSource={tasks}
-          pagination={false}
-          columns={[
-            {
-              title: "Task",
-              dataIndex: "name",
-              render: (_value, record) => (
-                <Space direction="vertical" size={0}>
-                  <Text strong>{record.name}</Text>
-                  <Button
-                    type="link"
-                    size="small"
-                    style={{ padding: 0, height: "auto", alignSelf: "flex-start" }}
-                    onClick={() => void openTaskDetail(record.id)}
-                  >
-                    View details
-                  </Button>
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    {record.audio_dir}
-                  </Text>
-                </Space>
-              ),
-            },
-            {
-              title: "Progress",
-              render: (_value, record) => {
-                const total = record.summary.processed + record.summary.pending;
-                const percent = total
-                  ? Math.round((record.summary.processed / total) * 100)
-                  : 0;
-                return (
-                  <Space direction="vertical" style={{ width: "100%" }} size={0}>
-                    <Progress percent={percent} size="small" />
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      processed {record.summary.processed}, pending {record.summary.pending},
-                      failed {record.summary.failed}, deleted after processing{" "}
-                      {record.summary.deleted_after_processing}
-                    </Text>
-                  </Space>
-                );
-              },
-            },
-            {
-              title: "Schedule",
-              render: (_value, record) => (
-                <Space direction="vertical" size={0}>
-                  <Text>{record.enabled ? formatSchedule(record.schedule) : "Paused"}</Text>
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    next {formatTime(record.next_run_at_ms)}
-                  </Text>
-                </Space>
-              ),
-            },
-            {
-              title: "Status",
-              render: (_value, record) => (
-                <Space direction="vertical" size={0}>
-                  <Tag color={record.last_error ? "error" : "success"}>
-                    {record.last_error ? "Error" : "Ready"}
-                  </Tag>
-                  {record.last_error ? (
-                    <Text type="danger" style={{ fontSize: 12 }}>
-                      {record.last_error}
-                    </Text>
-                  ) : null}
-                </Space>
-              ),
-            },
-            {
-              title: "Actions",
-              render: (_value, record) => (
-                <Space>
-                  <Button size="small" onClick={() => void runDirectoryTask(record.id)}>
-                    Run
-                  </Button>
-                  <Popconfirm
-                    title="Delete this ASR task?"
-                    onConfirm={() => void removeDirectoryTask(record.id)}
-                  >
-                    <Button size="small" danger>
-                      Delete
-                    </Button>
-                  </Popconfirm>
-                </Space>
-              ),
-            },
-          ]}
-        />
-      </Card>
-      <Drawer
-        title={taskDetail ? `Directory Task: ${taskDetail.name}` : "Directory Task"}
-        open={taskDetailOpen}
-        onClose={() => setTaskDetailOpen(false)}
-        width={860}
-      >
-        {taskDetail ? (
-          <Space direction="vertical" size={16} style={{ width: "100%" }}>
-            <Descriptions size="small" bordered column={2}>
-              <Descriptions.Item label="Directory" span={2}>
-                {taskDetail.audio_dir}
-              </Descriptions.Item>
-              <Descriptions.Item label="Schedule">
-                {taskDetail.enabled ? formatSchedule(taskDetail.schedule) : "Paused"}
-              </Descriptions.Item>
-              <Descriptions.Item label="Next Run">
-                {formatTime(taskDetail.next_run_at_ms)}
-              </Descriptions.Item>
-              <Descriptions.Item label="Last Run">
-                {formatTime(taskDetail.last_run_at_ms)}
-              </Descriptions.Item>
-              <Descriptions.Item label="Mode">
-                {taskDetail.recursive ? "Recursive" : "Flat"}
-              </Descriptions.Item>
-              <Descriptions.Item label="Processed">
-                {taskDetail.summary.processed}
-              </Descriptions.Item>
-              <Descriptions.Item label="Pending">
-                {taskDetail.summary.pending}
-              </Descriptions.Item>
-              <Descriptions.Item label="Failed">{taskDetail.summary.failed}</Descriptions.Item>
-              <Descriptions.Item label="Deleted After Processing">
-                {taskDetail.summary.deleted_after_processing}
-              </Descriptions.Item>
-              <Descriptions.Item label="Last Error" span={2}>
-                {taskDetail.last_error || "-"}
-              </Descriptions.Item>
-            </Descriptions>
-            <Table<AsrTaskFileRecord>
-              rowKey="key"
-              size="small"
-              tableLayout="fixed"
-              loading={taskDetailLoading}
-              dataSource={taskDetail.files}
-              pagination={{ pageSize: 8, hideOnSinglePage: true }}
-              columns={[
-                {
-                  title: "File",
-                  dataIndex: "source_path",
-                  width: 360,
-                  render: (value, record) => (
-                    <Space direction="vertical" size={2} style={{ width: 320 }}>
-                      <Text style={{ width: 320, fontSize: 12 }} ellipsis={{ tooltip: value }}>
-                        {value}
-                      </Text>
-                      {record.output_timeline_path ? (
-                        <Button
-                          type="link"
-                          size="small"
-                          style={{ padding: 0, height: "auto", alignSelf: "flex-start" }}
-                          loading={taskTimelineLoading}
-                          onClick={() => void openTaskTimeline(record)}
-                        >
-                          Open timeline
-                        </Button>
-                      ) : null}
-                    </Space>
-                  ),
-                },
-                {
-                  title: "Status",
-                  dataIndex: "status",
-                  width: 120,
-                  render: (value) => <Tag color={fileStatusColor(value)}>{value}</Tag>,
-                },
-                {
-                  title: "Text",
-                  dataIndex: "text_chars",
-                  width: 90,
-                  render: (value) => `${value} chars`,
-                },
-                {
-                  title: "Recorded",
-                  dataIndex: "source_created_at_ms",
-                  width: 190,
-                  render: (value, record) => (
-                    <Space direction="vertical" size={0}>
-                      <Text style={{ fontSize: 12 }}>{formatTime(value)}</Text>
-                      {record.source_created_at_source ? (
-                        <Text type="secondary" style={{ fontSize: 11 }}>
-                          {record.source_created_at_source}
-                        </Text>
-                      ) : null}
-                    </Space>
-                  ),
-                },
-                {
-                  title: "Duration",
-                  dataIndex: "media_duration_ms",
-                  width: 110,
-                  render: (value) => formatDuration(value),
-                },
-                {
-                  title: "Finished",
-                  dataIndex: "finished_at_ms",
-                  width: 180,
-                  render: (value) => formatTime(value),
-                },
-                {
-                  title: "Result",
-                  width: 260,
-                  render: (_value, record) => (
-                    <Space direction="vertical" size={0}>
-                      <Text
-                        style={{ width: 240, fontSize: 12 }}
-                        ellipsis={{ tooltip: record.output_text_path }}
-                      >
-                        {record.output_text_path || "-"}
-                      </Text>
-                      {record.error ? (
-                        <Text type="danger" style={{ fontSize: 12 }}>
-                          {record.error}
-                        </Text>
-                      ) : null}
-                    </Space>
-                  ),
-                },
-              ]}
-            />
-            {taskTimeline ? (
-              <section
-                aria-label="Transcript timeline"
-                style={{
-                  border: `1px solid ${token.colorBorderSecondary}`,
-                  borderRadius: 6,
-                  padding: 16,
-                  background: token.colorFillQuaternary,
-                }}
-              >
-                <Space
-                  align="center"
-                  style={{ width: "100%", justifyContent: "space-between", marginBottom: 12 }}
-                >
-                  <Typography.Title level={5} style={{ margin: 0 }}>
-                    File Timeline
-                  </Typography.Title>
-                  <Tag color="blue">{taskTimeline.segments.length} segments</Tag>
-                </Space>
-                <Descriptions size="small" bordered column={2} style={{ marginBottom: 12 }}>
-                  <Descriptions.Item label="File" span={2}>
-                    {taskTimeline.source_path}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="Recorded">
-                    {formatTime(taskTimeline.source_created_at_ms)}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="Source">
-                    {taskTimeline.source_created_at_source || "-"}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="Duration">
-                    {formatDuration(taskTimeline.media_duration_ms)}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="Segments">
-                    {taskTimeline.segments.length}
-                  </Descriptions.Item>
-                </Descriptions>
-                <Row gutter={16}>
-                  <Col xs={24} lg={11}>
-                    <Text strong>Segments</Text>
-                    <div
-                      style={{
-                        marginTop: 12,
-                        maxHeight: 420,
-                        overflow: "auto",
-                        paddingRight: 8,
-                      }}
-                    >
-                      {taskTimeline.segments.length > 0 ? (
-                        <AntTimeline
-                          mode="left"
-                          items={taskTimeline.segments.map((segment) => ({
-                            label: (
-                              <Space direction="vertical" size={0}>
-                                <Text code>
-                                  {formatDuration(segment.audio_start_ms)} -{" "}
-                                  {formatDuration(segment.audio_end_ms)}
-                                </Text>
-                                <Text type="secondary" style={{ fontSize: 12 }}>
-                                  {segment.absolute_start_ms !== undefined &&
-                                  segment.absolute_end_ms !== undefined
-                                    ? `${formatTime(segment.absolute_start_ms)} - ${formatTime(segment.absolute_end_ms)}`
-                                    : "No wall-clock time"}
-                                </Text>
-                              </Space>
-                            ),
-                            children: (
-                              <Paragraph style={{ marginBottom: 0, whiteSpace: "pre-wrap" }}>
-                                {segment.text}
-                              </Paragraph>
-                            ),
-                          }))}
-                        />
-                      ) : (
-                        <Text type="secondary">No transcript segments were produced.</Text>
-                      )}
-                    </div>
-                  </Col>
-                  <Col xs={24} lg={13}>
-                    <Text strong>Full Transcript</Text>
-                    <Paragraph
-                      style={{
-                        minHeight: 180,
-                        maxHeight: 420,
-                        overflow: "auto",
-                        marginTop: 12,
-                        marginBottom: 0,
-                        padding: 12,
-                        whiteSpace: "pre-wrap",
-                        background: token.colorBgContainer,
-                        border: `1px solid ${token.colorBorderSecondary}`,
-                        borderRadius: 6,
-                      }}
-                    >
-                      {taskTimeline.segments.length > 0
-                        ? taskTimeline.segments.map((segment) => segment.text).join("\n")
-                        : "No transcript text."}
-                    </Paragraph>
-                  </Col>
-                </Row>
-              </section>
-            ) : null}
-          </Space>
-        ) : (
-          <Text type="secondary">Select a task to view progress and file results.</Text>
-        )}
-      </Drawer>
+      <SpeechWorkbench
+        token={token}
+        ready={ready}
+        status={status}
+        workState={workState}
+        progress={progress}
+        selectedName={selectedName}
+        transcript={transcript}
+        events={events}
+        errorText={errorText}
+        micLevels={micLevels}
+        micPeak={micPeak}
+        fileInputRef={fileInputRef}
+        busy={busy}
+        showFileProgress={showFileProgress}
+        onFile={handleFile}
+        onStartRecording={() => void startRecording()}
+        onStopRecording={stopRecording}
+        onCancel={cancelWork}
+      />
+      <DirectoryTasksPanel
+        taskForm={taskForm}
+        taskScheduleKind={taskScheduleKind}
+        tasks={tasks}
+        tasksLoading={tasksLoading}
+        onCreateTask={createDirectoryTask}
+        onOpenTask={openTaskDetail}
+        onRunTask={(id) => void runDirectoryTask(id)}
+        onPauseTask={(id, force) => void pauseDirectoryTask(id, force)}
+        onResumeTask={(id) => void resumeDirectoryTask(id)}
+        onRemoveTask={(id) => void removeDirectoryTask(id)}
+      />
     </div>
   );
-}
-
-function buildTaskSchedule(values: Record<string, unknown>): AsrTaskSchedule {
-  const kind = String(values.schedule_kind ?? "daily");
-  const { hour, minute } = parseTimeInput(values.schedule_time);
-  if (kind === "hourly") {
-    return {
-      kind: "hourly",
-      minute: Number(values.schedule_minute ?? 0),
-    };
-  }
-  if (kind === "weekly") {
-    return {
-      kind: "weekly",
-      weekday: Number(values.schedule_weekday ?? 1),
-      hour,
-      minute,
-    };
-  }
-  if (kind === "monthly") {
-    return {
-      kind: "monthly",
-      day: Number(values.schedule_day ?? 1),
-      hour,
-      minute,
-    };
-  }
-  return { kind: "daily", hour, minute };
-}
-
-function parseTimeInput(value: unknown): { hour: number; minute: number } {
-  if (typeof value !== "string") {
-    return { hour: 2, minute: 0 };
-  }
-  const [hour, minute] = value.split(":").map((part) => Number(part));
-  if (
-    Number.isInteger(hour) &&
-    Number.isInteger(minute) &&
-    hour >= 0 &&
-    hour <= 23 &&
-    minute >= 0 &&
-    minute <= 59
-  ) {
-    return { hour, minute };
-  }
-  return { hour: 2, minute: 0 };
-}
-
-function formatSchedule(schedule?: AsrTaskSchedule): string {
-  if (!schedule) {
-    return "Daily at 02:00";
-  }
-  switch (schedule.kind) {
-    case "hourly":
-      return `Hourly at minute ${padTime(schedule.minute)}`;
-    case "daily":
-      return `Daily at ${padTime(schedule.hour)}:${padTime(schedule.minute)}`;
-    case "weekly":
-      return `Weekly ${weekdayLabel(schedule.weekday)} ${padTime(schedule.hour)}:${padTime(schedule.minute)}`;
-    case "monthly":
-      return `Monthly day ${schedule.day} ${padTime(schedule.hour)}:${padTime(schedule.minute)}`;
-  }
-}
-
-function padTime(value: number): string {
-  return String(value).padStart(2, "0");
-}
-
-function weekdayLabel(value: number): string {
-  return ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][value - 1] ?? "Mon";
-}
-
-function fileStatusColor(status: AsrTaskFileRecord["status"]): string {
-  if (status === "success") {
-    return "success";
-  }
-  if (status === "failed") {
-    return "error";
-  }
-  if (status === "processing") {
-    return "processing";
-  }
-  return "default";
-}
-
-function formatTime(value?: number): string {
-  if (!value) {
-    return "-";
-  }
-  return new Date(value).toLocaleString();
-}
-
-function formatDuration(value?: number): string {
-  if (value === undefined || value === null) {
-    return "-";
-  }
-  const millis = Math.max(0, Math.round(value));
-  const ms = millis % 1000;
-  const totalSeconds = Math.floor(millis / 1000);
-  const seconds = totalSeconds % 60;
-  const totalMinutes = Math.floor(totalSeconds / 60);
-  const minutes = totalMinutes % 60;
-  const hours = Math.floor(totalMinutes / 60);
-  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(ms).padStart(3, "0")}`;
-}
-
-function dedupeTranscript(committed: string, candidate: string): string {
-  const base = committed.trim();
-  const next = candidate.trim();
-  if (!next || base.includes(next)) {
-    return "";
-  }
-  if (!base) {
-    return next;
-  }
-  const max = Math.min(base.length, next.length);
-  for (let len = max; len > 0; len -= 1) {
-    if (base.slice(base.length - len) === next.slice(0, len)) {
-      return next.slice(len);
-    }
-  }
-  return next;
-}
-
-function appendTranscriptDelta(committed: string, delta: string): string {
-  delta = delta.trim();
-  if (!delta) {
-    return committed;
-  }
-  if (!committed) {
-    return delta;
-  }
-  const first = delta[0];
-  const last = committed[committed.length - 1];
-  const cjk = /[\u3400-\u9fff\uf900-\ufaff]/;
-  const punctuation = /^[\p{P}\p{S}]/u;
-  if (punctuation.test(delta) || cjk.test(first) || cjk.test(last)) {
-    return `${committed}${delta}`;
-  }
-  return `${committed} ${delta}`;
 }

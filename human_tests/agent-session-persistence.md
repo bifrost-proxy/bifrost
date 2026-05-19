@@ -6,6 +6,8 @@
 - 通过飞书机器人或 `/agent/chat` API 发送消息后，session 事件自动写入 `~/.bifrost/agent/sessions/` 目录的 JSONL 文件
 - JSONL 文件包含完整执行过程（session_start、user_message、tool_call、tool_result、assistant_message、compaction、session_end 等）
 - WebUI 可查看 session 历史文件列表、查看详细事件时间线、删除 session 文件
+- WebUI Sessions 列表可通过点击 title 或整行进入 session 详情，不再依赖单独的查看 icon 按钮
+- WebUI Session 详情页默认展示 Messages Tab，Settings Tab 承载 session metadata、AGENTS.md 和 Skills，长消息/事件列表在内容区域内真实滚动
 - 跨 turn 复用同一 recorder（同一 session 多次对话写入同一文件）
 - 受 `ephemeral` 和 `history.persistence` 配置控制
 
@@ -115,16 +117,17 @@
 **预期结果**：
 - 表格展示持久化的 session 文件列表
 - 每行显示 session key、时间戳等信息
-- 有"查看"和"删除"操作按钮
+- 点击 session title 或当前行可进入详情
+- 列表不再展示单独的"查看"小按钮，仅保留删除操作
 
 ### TC-ASP-10：WebUI 查看 Session 详情事件时间线
 
 **操作步骤**：
-1. 在 Session History 列表中点击某条 session 的"查看"按钮
-2. 弹出详情模态框
+1. 在 Session History 列表中点击某条 session 的 title 或当前行
+2. 进入 Session 详情页，保持 URL 中的 `session`、`view`、`historyPath` 参数
 
 **预期结果**：
-- 模态框展示事件时间线
+- Session 详情页默认在 Messages Tab 展示事件时间线
 - 不同事件类型有不同的视觉样式（颜色、图标）
 - session_start 显示 model/provider 信息
 - user_message 显示用户消息内容
@@ -170,6 +173,44 @@
 - 第二轮恢复后工具调用成功执行
 - 不出现 `messages with role 'tool' must be a response to a preceeding message with 'tool_calls'`
 - 不出现 orphan `tool` message 或不完整 tool-call suffix
+
+### TC-ASP-14：WebUI Session 详情 Messages/Settings Tab 与右侧内容滚动回归
+
+**操作步骤**：
+1. 使用临时数据目录启动 Bifrost，端口为 `$MAIN_PORT`，启动参数必须包含 `--no-system-proxy`。
+2. 准备包含 30 条以上事件的 session history JSONL 文件，或用 Playwright mock `GET /_bifrost/api/im-gateway/agent/sessions/history/{path}` 返回 30 条以上 `user_message`、`assistant_message`、`tool_call` 事件。
+3. 在浏览器中打开：
+   ```text
+   http://localhost:$MAIN_PORT/_bifrost/ai?aiSection=agent-sessions&agentSection=sessions&session=test-scroll&view=history&historyPath=<url-encoded-path>
+   ```
+4. 确认详情页默认选中 `Messages` Tab，右侧显示 `Event Timeline`。
+5. 在 Messages 内容区域向下滚动到最底部，确认最后一条事件可见。
+6. 点击 `Settings` Tab。
+
+**预期结果**：
+- 详情页默认展示 `Messages` Tab，而不是把 Messages 与 Settings 从上到下平铺。
+- Messages 内容区域自身可滚动，`scrollHeight > clientHeight`，滚动后能看到最后一条事件；页面外层不需要靠整体下滚才能看完内容。
+- `Settings` Tab 展示 Session Info、AGENTS.md Instructions 和 Skills。
+- 亮色和暗色主题下两个 Tab、事件卡片和 Settings 内容均可读。
+
+### TC-ASP-15：WebUI Sessions 列表 title/整行点击进入详情回归
+
+**操作步骤**：
+1. 使用临时数据目录启动 Bifrost，端口为 `$MAIN_PORT`，启动参数必须包含 `--no-system-proxy`。
+2. 准备至少一条 ended session history 记录和一条 active session 记录，或用 Playwright mock `GET /_bifrost/api/im-gateway/agent/sessions/all` 返回两类记录。
+3. 在浏览器中打开：
+   ```text
+   http://localhost:$MAIN_PORT/_bifrost/ai?aiSection=agent-sessions&agentSection=sessions
+   ```
+4. 确认 Sessions 列表没有单独的查看 icon 按钮。
+5. 点击 ended session 的 title。
+6. 返回 Sessions 列表后，点击 active session 的当前行。
+
+**预期结果**：
+- 点击 ended session title 后进入 history 详情页，URL 包含对应 `session`、`view=history`、`historyPath`，并默认选中 `Messages` Tab。
+- 点击 active session 当前行后进入 active 详情页，URL 包含对应 `session`、`view=active`，并默认选中 `Messages` Tab。
+- 删除按钮仍然只触发删除确认，不会因为事件冒泡而打开详情页。
+- 亮色和暗色主题下行 hover、title 可点击状态和删除按钮均清晰可辨。
 
 ## 清理步骤
 

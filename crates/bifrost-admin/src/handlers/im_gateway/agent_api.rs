@@ -566,6 +566,11 @@ pub(super) async fn handle_agent(
         if recorder.is_some() && !session.memory_cleared {
             session.recorder = recorder;
         }
+        // If the session was cleared (via /clear or /reset), also clear the
+        // ChatGPT Web conversation mapping so the next runner message starts fresh.
+        if session.memory_cleared {
+            crate::im_gateway::chatgpt_web::clear_session_conversation(&session_key).await;
+        }
         service.agent_session_manager.return_session(session);
         match result {
             Ok(turn_result) => {
@@ -643,6 +648,15 @@ pub(super) fn apply_agent_config_patch(
 ) {
     if let Some(enabled) = patch.get("enabled").and_then(|v| v.as_bool()) {
         config.enabled = enabled;
+    }
+    if let Some(runner) = patch.get("runner") {
+        if runner.is_null() {
+            config.runner = None;
+        } else if let Ok(value) =
+            serde_json::from_value::<bifrost_agent::AgentRunnerMode>(runner.clone())
+        {
+            config.runner = Some(value);
+        }
     }
     if let Some(model) = patch.get("model").and_then(|v| v.as_str()) {
         config.model = Some(model.to_string());

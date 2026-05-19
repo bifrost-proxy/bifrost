@@ -104,9 +104,11 @@ impl ImRouteStore {
             ));
         }
 
-        // V1: RunScriptAndReply and AgentChat are allowed
+        // V1: RunScriptAndReply, AgentChat and ExternalCliAgentChat are allowed
         match &route.action {
-            ImRouteAction::RunScriptAndReply { .. } | ImRouteAction::AgentChat { .. } => {}
+            ImRouteAction::RunScriptAndReply { .. }
+            | ImRouteAction::AgentChat { .. }
+            | ImRouteAction::ExternalCliAgentChat { .. } => {}
         }
 
         Ok(())

@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-本文档验证 Bifrost 的原生 `weixin` IM provider：WebUI 创建连接、自动二维码登录、连接状态、微信消息触发 Agent、即时反馈/guide/queue/slash 命令、最终回复回写，以及微信图片下载后传给多模态模型。
+本文档验证 Bifrost 的原生 `weixin` IM provider：WebUI 创建连接、自动二维码登录、连接状态、微信消息触发 Agent、即时反馈/guide/queue/slash 命令、最终回复回写、微信图片下载后传给多模态模型，以及 Agent 生成图片通过微信独立发送原图。
 
 对应设计文档：`design/weixin-provider.md`
 
@@ -160,6 +160,28 @@
 **实际执行结果：**
 
 - 已执行真实链路：2026-05-12 10:09:35 收到微信图片事件 `7459907566129128968`，日志显示 `image_count=1`；10:09:36 下载图片成功，`mime_type=image/png`、`byte_len=230451`；随后 Agent 发起多模态模型请求并完成回复。10:09:45 第二张图片事件 `7459907662434641032` 也完成下载与 Agent turn。
+
+### TC-WIP-08：Agent 生成图片通过 Weixin 独立发送原图
+
+**操作步骤：**
+
+1. 使用已扫码授权的 `weixin` provider，确保 Agent runner 指向 ChatGPT Web 或其他会生成本地图片文件并返回 Markdown 图片引用的 runner。
+2. 从微信 ClawBot 发送：`帮我生成4张可爱的小猫咪`。
+3. 等待 Agent 最终回复完成，观察 Bifrost 日志、消息日志和微信侧收到的消息。
+4. 如无真实微信环境，使用 Weixin mock 服务执行 provider 图片发送子路径，记录 mock `getuploadurl`、CDN upload 和 `sendmessage` 请求。
+
+**预期结果：**
+
+- Agent 最终文本回复不暴露 `./*.png`、`file://` 或本机绝对路径。
+- Bifrost 从回复 Markdown 中解析出 4 张本地图片，逐张上传并发送。
+- Weixin 图片发送使用 `getuploadurl` 获取上传参数，上传内容为原图字节经 AES-128-ECB + PKCS7 加密后的密文；解密后与原图字节一致。
+- 最终 `sendmessage` payload 中每张图片均为 `item_list[0].type == 2`，并包含 `image_item.media.encrypt_query_param`、`image_item.media.aes_key` 和 `image_item.aeskey`。
+- Message History 中每张图片都有一条 outbound 记录，`msg_type=image`、`status=success`；如果 provider 返回错误，记录明确错误，不影响 active run 释放。
+
+**实际执行结果：**
+
+- 已执行代码级 mock 回归：`cargo test -p bifrost-admin weixin::weixin_tests::send_image_uploads_original_bytes_to_cdn_and_sends_image_item -- --nocapture` 通过。测试中原始字节 `original-cat-bytes` 先经 Weixin provider 保存，再在 `send_image` 时调用 mock `getuploadurl`；mock CDN 收到非空密文，使用 payload 中的 AES key 解密后等于原图字节；最终 mock `sendmessage` 收到 `item_list[0].type == 2` 和 `image_item.media.encrypt_query_param == download-param`。
+- 已执行未知 key 回归：`cargo test -p bifrost-admin weixin::weixin_tests::send_image_returns_config_error_for_unknown_image_key -- --nocapture` 通过，确认不会发送缺失图片内容的空图片消息。
 
 ## 清理步骤
 

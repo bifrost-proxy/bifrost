@@ -2,7 +2,8 @@ use std::fs;
 use std::process::Command;
 
 use bifrost_cli::cli::{
-    AiAsrCommands, AiCommands, Cli, Commands, RemoteCommands, SettingCommands, SyncCommands,
+    AiAsrCommands, AiAsrTaskCommands, AiAsrTaskDailyCommands, AiCommands, Cli, Commands,
+    RemoteCommands, SettingCommands, SyncCommands,
 };
 use clap::Parser;
 
@@ -55,6 +56,7 @@ fn ai_asr_commands_parse() {
         help.contains("stream-file"),
         "ai asr help should contain stream-file"
     );
+    assert!(help.contains("task"), "ai asr help should contain task");
 
     let cli = Cli::try_parse_from([
         "bifrost",
@@ -78,6 +80,46 @@ fn ai_asr_commands_parse() {
                 assert_eq!(language, "chinese");
             }
             _ => panic!("unexpected ai asr action"),
+        },
+        _ => panic!("unexpected command"),
+    }
+
+    let cli = Cli::try_parse_from([
+        "bifrost",
+        "ai",
+        "asr",
+        "task",
+        "daily",
+        "show",
+        "task-123",
+        "2026-05-17",
+        "--output",
+        "/tmp/asr-day.md",
+    ])
+    .expect("ai asr task daily show should parse");
+
+    match cli.command.expect("command should exist") {
+        Commands::Ai {
+            action: AiCommands::Asr { action },
+        } => match action {
+            AiAsrCommands::Task {
+                action:
+                    AiAsrTaskCommands::Daily {
+                        action:
+                            AiAsrTaskDailyCommands::Show {
+                                task_id,
+                                date,
+                                output,
+                                json,
+                            },
+                    },
+            } => {
+                assert_eq!(task_id, "task-123");
+                assert_eq!(date, "2026-05-17");
+                assert_eq!(output, Some(std::path::PathBuf::from("/tmp/asr-day.md")));
+                assert!(!json);
+            }
+            _ => panic!("unexpected ai asr task action"),
         },
         _ => panic!("unexpected command"),
     }

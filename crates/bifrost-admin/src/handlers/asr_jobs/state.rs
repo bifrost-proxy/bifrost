@@ -1,0 +1,519 @@
+static ASR_JOB_RUN_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static ASR_SCHEDULER_STARTED: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
+/// Tracks which task IDs are currently being executed (manual or scheduled).
+/// Uses std::sync::Mutex for access from both sync and async contexts.
+static RUNNING_TASKS: Lazy<StdMutex<HashSet<String>>> = Lazy::new(|| StdMutex::new(HashSet::new()));
+static FORCE_PAUSED_TASKS: Lazy<StdMutex<HashSet<String>>> =
+    Lazy::new(|| StdMutex::new(HashSet::new()));
+static BULK_CHUNK_RETRY_JOBS: Lazy<StdMutex<BTreeMap<String, BulkChunkRetryState>>> =
+    Lazy::new(|| StdMutex::new(BTreeMap::new()));
+
+const TASK_STORE_VERSION: u32 = 1;
+const ASR_TASK_PAUSED_MESSAGE: &str = "ASR task paused by request";
+const ASR_TASK_SEGMENT_MAX_MS: u64 = 30_000;
+const ASR_AUTO_FALLBACK_RTF_MULTIPLIER: f64 = 1.5;
+const MIN_BISECT_SECS: u64 = 2;
+const FFMPEG_NORMALIZE_MIN_TIMEOUT_SECS: u64 = 120;
+const FFMPEG_NORMALIZE_MAX_TIMEOUT_SECS: u64 = 30 * 60;
+const FFMPEG_CHUNK_SPLIT_TIMEOUT_SECS: u64 = 60;
+const AUDIO_EXTENSIONS: &[&str] = &[
+    "aac", "aiff", "aif", "flac", "m4a", "mp3", "mp4", "ogg", "opus", "wav", "webm",
+];
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AsrDirectoryTask {
+    pub id: String,
+    pub name: String,
+    pub audio_dir: PathBuf,
+    pub recursive: bool,
+    pub enabled: bool,
+    #[serde(default)]
+    pub paused: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_at_ms: Option<u64>,
+    #[serde(default = "default_task_schedule")]
+    pub schedule: AsrTaskSchedule,
+    pub language: String,
+    pub model: String,
+    #[serde(default)]
+    pub runtime_strategy: AsrRuntimeStrategy,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub last_run_at_ms: Option<u64>,
+    pub next_run_at_ms: Option<u64>,
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub daily_agent: AsrDailyAgentConfig,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AsrRuntimeStrategy {
+    /// Conservative isolation: every chunk gets a fresh native `asr` process.
+    ForkPerChunk,
+    /// Experimental: reuse one managed `asr-server` across chunks.
+    ReuseServer,
+    /// Production default: reuse one managed server inside a file, then restart at file boundaries.
+    #[default]
+    ReusePerFile,
+    /// Try server reuse first; fall back to fork-per-chunk on errors or RTF drift.
+    Auto,
+    /// Run both server reuse and fork-per-chunk for the same chunk, keep fork output.
+    Compare,
+}
+
+impl AsrRuntimeStrategy {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ForkPerChunk => "fork_per_chunk",
+            Self::ReuseServer => "reuse_server",
+            Self::ReusePerFile => "reuse_per_file",
+            Self::Auto => "auto",
+            Self::Compare => "compare",
+        }
+    }
+
+    fn uses_task_lifetime_server(self) -> bool {
+        matches!(self, Self::ReuseServer | Self::Auto | Self::Compare)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum AsrTaskSchedule {
+    Hourly {
+        minute: u32,
+    },
+    Daily {
+        hour: u32,
+        minute: u32,
+    },
+    Weekly {
+        weekday: u32,
+        hour: u32,
+        minute: u32,
+    },
+    Monthly {
+        day: u32,
+        hour: u32,
+        minute: u32,
+    },
+}
+
+impl AsrTaskSchedule {
+    fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Hourly { minute } if *minute <= 59 => Ok(()),
+            Self::Daily { hour, minute } if *hour <= 23 && *minute <= 59 => Ok(()),
+            Self::Weekly {
+                weekday,
+                hour,
+                minute,
+            } if (1..=7).contains(weekday) && *hour <= 23 && *minute <= 59 => Ok(()),
+            Self::Monthly { day, hour, minute }
+                if (1..=31).contains(day) && *hour <= 23 && *minute <= 59 =>
+            {
+                Ok(())
+            }
+            _ => Err(
+                "ASR task schedule is invalid; use hourly minute 0-59, daily/weekly/monthly wall-clock values"
+                    .to_string(),
+            ),
+        }
+    }
+
+    fn initial_next_run_at_ms(&self, now_ms: u64) -> Option<u64> {
+        self.next_run_at_ms(now_ms, true)
+    }
+
+    fn next_run_at_ms(&self, now_ms: u64, include_current_minute: bool) -> Option<u64> {
+        let now = Local.timestamp_millis_opt(now_ms as i64).earliest()?;
+        match self {
+            Self::Hourly { minute } => {
+                for hour_offset in 0..=24 {
+                    let candidate_base = now + ChronoDuration::hours(hour_offset);
+                    let candidate = local_datetime(
+                        candidate_base.date_naive(),
+                        candidate_base.hour(),
+                        *minute,
+                    )?;
+                    if is_due_candidate(candidate, now, include_current_minute) {
+                        return Some(candidate.timestamp_millis().max(now_ms as i64) as u64);
+                    }
+                }
+                None
+            }
+            Self::Daily { hour, minute } => {
+                for day_offset in 0..=7 {
+                    let date = now.date_naive() + ChronoDuration::days(day_offset);
+                    let candidate = local_datetime(date, *hour, *minute)?;
+                    if is_due_candidate(candidate, now, include_current_minute) {
+                        return Some(candidate.timestamp_millis().max(now_ms as i64) as u64);
+                    }
+                }
+                None
+            }
+            Self::Weekly {
+                weekday,
+                hour,
+                minute,
+            } => {
+                for day_offset in 0..=14 {
+                    let date = now.date_naive() + ChronoDuration::days(day_offset);
+                    if date.weekday().number_from_monday() != *weekday {
+                        continue;
+                    }
+                    let candidate = local_datetime(date, *hour, *minute)?;
+                    if is_due_candidate(candidate, now, include_current_minute) {
+                        return Some(candidate.timestamp_millis().max(now_ms as i64) as u64);
+                    }
+                }
+                None
+            }
+            Self::Monthly { day, hour, minute } => {
+                for month_offset in 0..=13 {
+                    let (year, month) = add_months(now.year(), now.month(), month_offset);
+                    let clamped_day = (*day).min(last_day_of_month(year, month)?);
+                    let date = NaiveDate::from_ymd_opt(year, month, clamped_day)?;
+                    let candidate = local_datetime(date, *hour, *minute)?;
+                    if is_due_candidate(candidate, now, include_current_minute) {
+                        return Some(candidate.timestamp_millis().max(now_ms as i64) as u64);
+                    }
+                }
+                None
+            }
+        }
+    }
+}
+
+fn default_task_schedule() -> AsrTaskSchedule {
+    AsrTaskSchedule::Daily { hour: 2, minute: 0 }
+}
+
+fn is_due_candidate(
+    candidate: DateTime<Local>,
+    now: DateTime<Local>,
+    include_current_minute: bool,
+) -> bool {
+    candidate >= now
+        || (include_current_minute
+            && candidate.year() == now.year()
+            && candidate.month() == now.month()
+            && candidate.day() == now.day()
+            && candidate.hour() == now.hour()
+            && candidate.minute() == now.minute())
+}
+
+fn local_datetime(date: NaiveDate, hour: u32, minute: u32) -> Option<DateTime<Local>> {
+    let naive = date.and_hms_opt(hour, minute, 0)?;
+    match Local.from_local_datetime(&naive) {
+        LocalResult::Single(value) => Some(value),
+        LocalResult::Ambiguous(first, second) => Some(first.min(second)),
+        LocalResult::None => {
+            // DST gaps are rare but real. Move forward up to three hours and pick
+            // the first representable local instant instead of dropping the task.
+            for offset in 1..=180 {
+                let shifted = naive + ChronoDuration::minutes(offset);
+                match Local.from_local_datetime(&shifted) {
+                    LocalResult::Single(value) => return Some(value),
+                    LocalResult::Ambiguous(first, second) => return Some(first.min(second)),
+                    LocalResult::None => {}
+                }
+            }
+            None
+        }
+    }
+}
+
+fn add_months(year: i32, month: u32, offset: u32) -> (i32, u32) {
+    let month_zero = month - 1 + offset;
+    (year + (month_zero / 12) as i32, month_zero % 12 + 1)
+}
+
+fn last_day_of_month(year: i32, month: u32) -> Option<u32> {
+    let (next_year, next_month) = add_months(year, month, 1);
+    let first_next_month = NaiveDate::from_ymd_opt(next_year, next_month, 1)?;
+    Some(first_next_month.pred_opt()?.day())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TaskStore {
+    version: u32,
+    tasks: Vec<AsrDirectoryTask>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum FileStatus {
+    Pending,
+    Processing,
+    Success,
+    /// Some chunks failed but the rest succeeded. The file has partial text.
+    PartialSuccess,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FileRecord {
+    task_id: String,
+    source_path: PathBuf,
+    source_size: Option<u64>,
+    source_modified_ms: Option<u64>,
+    source_created_at_ms: Option<u64>,
+    source_created_at_source: Option<String>,
+    media_duration_ms: Option<u64>,
+    status: FileStatus,
+    output_text_path: Option<PathBuf>,
+    output_metadata_path: Option<PathBuf>,
+    output_timeline_path: Option<PathBuf>,
+    text_chars: usize,
+    error: Option<String>,
+    #[serde(default)]
+    runtime_strategy: AsrRuntimeStrategy,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    chunk_metrics: Vec<AsrChunkMetric>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fallback_reason: Option<String>,
+    started_at_ms: Option<u64>,
+    finished_at_ms: Option<u64>,
+    /// Number of audio windows processed so far (for in-progress files).
+    #[serde(default)]
+    progress_current: Option<usize>,
+    /// Total number of audio windows for this file.
+    #[serde(default)]
+    progress_total: Option<usize>,
+    /// Chunks that failed all retries + bisect. Each entry records the chunk
+    /// offset/duration so it can be retried individually later.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    failed_chunks: Vec<FailedChunkRecord>,
+    /// Memory-limit fallback hints learned from previous runs. A matching
+    /// chunk starts directly at the remembered safe window instead of first
+    /// retrying the full 30-second chunk that previously blew up Metal memory.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    memory_limit_hints: Vec<AsrChunkMemoryHint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AsrChunkMetric {
+    chunk_index: usize,
+    offset_secs: u64,
+    duration_secs: u64,
+    runner: String,
+    status: String,
+    elapsed_ms: u64,
+    rtf: f64,
+    text_chars: usize,
+    text_sha1: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    server_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fallback_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    recorded_at_ms: u64,
+}
+
+/// Record of a chunk that failed all retry and bisect attempts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FailedChunkRecord {
+    /// Chunk index within the original file split.
+    chunk_index: usize,
+    /// Offset in seconds from the start of the normalized WAV.
+    offset_secs: u64,
+    /// Duration in seconds of this chunk.
+    duration_secs: u64,
+    /// Last error message.
+    error: String,
+    /// Number of retry attempts (including bisect sub-attempts).
+    attempts: u32,
+    /// RMS energy of the chunk WAV (16-bit PCM scale). None if not computed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    energy_rms: Option<f64>,
+    /// Whether this chunk was detected as silence (below threshold).
+    #[serde(default)]
+    is_silent: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct AsrChunkMemoryHint {
+    model: String,
+    offset_secs: u64,
+    duration_secs: u64,
+    preferred_chunk_secs: u64,
+    trigger_count: u32,
+    last_triggered_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct AsrMemoryLimitEvent {
+    offset_secs: u64,
+    duration_secs: u64,
+    suggested_chunk_secs: u64,
+    error: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct FileStore {
+    version: u32,
+    files: BTreeMap<String, FileRecord>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TaskSummary {
+    discovered: usize,
+    processed: usize,
+    pending: usize,
+    failed: usize,
+    /// Files that completed but have some failed chunks.
+    partial_success: usize,
+    /// Total number of failed chunks across all files.
+    failed_chunk_count: usize,
+    deleted_after_processing: usize,
+    running: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TaskWithSummary {
+    #[serde(flatten)]
+    task: AsrDirectoryTask,
+    summary: TaskSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bulk_retry: Option<BulkChunkRetryState>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FileRecordWithKey {
+    key: String,
+    #[serde(flatten)]
+    record: FileRecord,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TaskDetail {
+    #[serde(flatten)]
+    task: AsrDirectoryTask,
+    summary: TaskSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bulk_retry: Option<BulkChunkRetryState>,
+    files: Vec<FileRecordWithKey>,
+    daily_documents: Vec<AsrDailyDocumentSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum BulkChunkRetryStatus {
+    Queued,
+    Running,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BulkChunkRetryFileResult {
+    file_key: String,
+    source_path: String,
+    failed_before: usize,
+    recovered: usize,
+    still_failed: usize,
+    status: String,
+    elapsed_ms: u64,
+    message: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    daily_documents_refreshed: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    persist_warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BulkChunkRetryState {
+    task_id: String,
+    status: BulkChunkRetryStatus,
+    queued_files: usize,
+    processed_files: usize,
+    total_failed_chunks: usize,
+    recovered_chunks: usize,
+    still_failed_chunks: usize,
+    started_at_ms: Option<u64>,
+    updated_at_ms: u64,
+    finished_at_ms: Option<u64>,
+    current_file_key: Option<String>,
+    current_source_path: Option<String>,
+    message: String,
+    #[serde(default)]
+    results: Vec<BulkChunkRetryFileResult>,
+}
+
+#[derive(Debug, Clone)]
+struct BulkChunkRetryFileTarget {
+    file_key: String,
+    source_path: String,
+    failed_chunks: usize,
+}
+
+#[derive(Debug)]
+struct RetryFileChunksOutcome {
+    status: FileStatus,
+    total: usize,
+    recovered: usize,
+    still_failed_chunks: Vec<FailedChunkRecord>,
+    daily_documents_refreshed: Vec<String>,
+    persist_warnings: Vec<String>,
+}
+
+#[derive(Debug)]
+enum RetryFileChunksError {
+    TaskNotFound,
+    FileNotFound,
+    NoFailedChunks(FileStatus),
+    Internal(String),
+}
+
+struct TranscriptionOutput {
+    text: String,
+    text_path: PathBuf,
+    metadata_path: PathBuf,
+    timeline_path: PathBuf,
+    timeline: TranscriptTimeline,
+    /// Chunks that failed all retries (empty for short files or full success).
+    failed_chunks: Vec<FailedChunkRecord>,
+    memory_limit_hints: Vec<AsrChunkMemoryHint>,
+    chunk_metrics: Vec<AsrChunkMetric>,
+    fallback_reason: Option<String>,
+}
+
+type ChunkProgressCallback<'a> = dyn Fn(usize, usize) + Send + Sync + 'a;
+type ChunkMetricCallback<'a> = dyn Fn(AsrChunkMetric) + Send + Sync + 'a;
+type PauseCheckCallback<'a> = dyn Fn() -> bool + Send + Sync + 'a;
+
+struct TaskTranscribeHooks<'a> {
+    on_chunk_progress: Option<&'a ChunkProgressCallback<'a>>,
+    on_chunk_metric: Option<&'a ChunkMetricCallback<'a>>,
+    pause_check: Option<&'a PauseCheckCallback<'a>>,
+    force_pause_task_id: Option<&'a str>,
+    memory_limit_hints: &'a [AsrChunkMemoryHint],
+    server_url: Option<&'a str>,
+    startup_fallback_reason: Option<&'a str>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateTaskRequest {
+    name: Option<String>,
+    audio_dir: PathBuf,
+    recursive: Option<bool>,
+    enabled: Option<bool>,
+    schedule: Option<AsrTaskSchedule>,
+    language: Option<String>,
+    model: Option<String>,
+    runtime_strategy: Option<AsrRuntimeStrategy>,
+}
+
+#[derive(Debug, Serialize)]
+struct RunTaskResponse {
+    task: TaskWithSummary,
+    processed_now: usize,
+    failed_now: usize,
+    message: String,
+}
+

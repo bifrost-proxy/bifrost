@@ -1818,7 +1818,7 @@ impl ChatCompletionMock {
                                 let content = json!({
                                     "rollout_summary": "# Auto memory source\n\n## Task 1: remember project code\nOutcome: success\n\nReusable knowledge:\n- User's Bifrost project code is MEM-AUTO-42.",
                                     "rollout_slug": "auto-memory-source",
-                                    "raw_memory": "---\ndescription: User's Bifrost project code is MEM-AUTO-42.\ntask: remember_project_code\ntask_group: /Users/eden/work/github/bifrost\ntask_outcome: success\ncwd: /Users/eden/work/github/bifrost\nkeywords: MEM-AUTO-42, auto memory, bifrost\n---\n\n### Task 1: remember project code\n\ntask: remember_project_code\ntask_group: bifrost agent memory\ntask_outcome: success\n\nReusable knowledge:\n- User's Bifrost project code is MEM-AUTO-42.\n"
+                                    "raw_memory": "---\ndescription: User's Bifrost project code is MEM-AUTO-42.\ntask: remember_project_code\ntask_group: /home/user/work/project\ntask_outcome: success\ncwd: /home/user/work/project\nkeywords: MEM-AUTO-42, auto memory, bifrost\n---\n\n### Task 1: remember project code\n\ntask: remember_project_code\ntask_group: bifrost agent memory\ntask_outcome: success\n\nReusable knowledge:\n- User's Bifrost project code is MEM-AUTO-42.\n"
                                 })
                                 .to_string();
                                 json!({

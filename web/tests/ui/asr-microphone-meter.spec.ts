@@ -472,24 +472,48 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
           deleted_after_processing: 1,
           running: false,
         },
-        files: [
+        daily_documents: [
           {
-            key: "file-1",
-            task_id: "task-1",
-            source_path: "/tmp/asr-audio/sample.wav",
-            source_size: 1234,
-            source_modified_ms: Date.now() - 60000,
-            source_created_at_ms: new Date("2026-05-14T11:44:33+08:00").getTime(),
-            source_created_at_source: "ffprobe.date_creation_time",
-            media_duration_ms: 2000,
-            status: "success",
-            output_text_path: "/tmp/bifrost/asr/data/text/task-1/file-1.txt",
-            output_metadata_path: "/tmp/bifrost/asr/data/text/task-1/file-1.json",
-            output_timeline_path: "/tmp/bifrost/asr/data/text/task-1/file-1.timeline.json",
-            text_chars: 4,
-            finished_at_ms: Date.now() - 30000,
+            date: "2026-05-14",
+            path: "/tmp/bifrost/asr/data/text/task-1/daily/2026-05-14.md",
+            size: 256,
+            modified_ms: Date.now() - 5000,
+            text_chars: 42,
           },
         ],
+        files: Array.from({ length: 20 }, (_item, index) => ({
+          key: `file-${index + 1}`,
+          task_id: "task-1",
+          source_path: `/tmp/asr-audio/sample-${index + 1}.wav`,
+          source_size: 1234 + index,
+          source_modified_ms: Date.now() - 60000,
+          source_created_at_ms: new Date("2026-05-14T11:44:33+08:00").getTime() + index * 1000,
+          source_created_at_source: "ffprobe.date_creation_time",
+          media_duration_ms: 12000,
+          status: "success",
+          output_text_path: `/tmp/bifrost/asr/data/text/task-1/file-${index + 1}.txt`,
+          output_metadata_path: `/tmp/bifrost/asr/data/text/task-1/file-${index + 1}.json`,
+          output_timeline_path: `/tmp/bifrost/asr/data/text/task-1/file-${index + 1}.timeline.json`,
+          text_chars: 4,
+          finished_at_ms: Date.now() - 30000,
+        })),
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/asr/tasks/task-1/daily/2026-05-14", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        task_id: "task-1",
+        task_name: "Recordings",
+        date: "2026-05-14",
+        path: "/tmp/bifrost/asr/data/text/task-1/daily/2026-05-14.md",
+        size: 256,
+        modified_ms: Date.now() - 5000,
+        text_chars: 42,
+        content:
+          "# Recordings — 2026-05-14\n\n## sample-1\n\n**[2026-05-14 11:44:33.000 → 2026-05-14 11:44:45.000]**  \n完整按天整理内容\n",
       }),
     });
   });
@@ -505,52 +529,423 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
         source_modified_ms: Date.now() - 60000,
         source_created_at_ms: new Date("2026-05-14T11:44:33+08:00").getTime(),
         source_created_at_source: "ffprobe.date_creation_time",
-        media_duration_ms: 2000,
+        media_duration_ms: 12000,
         model: "Qwen3-ASR-1.7B",
         language: "chinese",
         processed_at_ms: Date.now(),
-        segments: [
-          {
-            index: 0,
-            audio_start_ms: 0,
-            audio_end_ms: 2000,
-            absolute_start_ms: new Date("2026-05-14T11:44:33+08:00").getTime(),
-            absolute_end_ms: new Date("2026-05-14T11:44:35+08:00").getTime(),
-            text: "时间线文本",
-          },
-        ],
+        segments: Array.from({ length: 12 }, (_item, index) => ({
+          index,
+          audio_start_ms: index * 1000,
+          audio_end_ms: (index + 1) * 1000,
+          absolute_start_ms:
+            new Date("2026-05-14T11:44:33+08:00").getTime() + index * 1000,
+          absolute_end_ms:
+            new Date("2026-05-14T11:44:33+08:00").getTime() + (index + 1) * 1000,
+          text:
+            index === 0 ? "时间线文本" : index === 1 ? "第二段文本" : `第${index + 1}段文本`,
+        })),
       }),
+    });
+  });
+  await page.route("**/_bifrost/api/asr/tasks/task-1/files/file-1/source", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "audio/wav",
+      body: Buffer.from("RIFF....WAVEfmt "),
     });
   });
 
   await openPage(page, "ai?aiSection=tools-asr");
   await expect(page.getByText("Directory Tasks")).toBeVisible();
-  await page.getByPlaceholder("Meeting audio watcher").fill("Recordings");
-  await page.getByPlaceholder("/Users/eden/Recordings").fill("/tmp/asr-audio");
-  await page.getByRole("button", { name: "Add" }).click();
+  await expect(page.getByPlaceholder("Meeting audio watcher")).toHaveCount(0);
+  await page.getByRole("button", { name: "New" }).click();
+  const createDialog = page.getByRole("dialog", { name: "New Directory Task" });
+  await expect(createDialog).toBeVisible();
+  await createDialog.getByPlaceholder("Meeting audio watcher").fill("Recordings");
+  await createDialog.getByPlaceholder("~/Recordings").fill("/tmp/asr-audio");
+  await createDialog.getByRole("button", { name: "Create" }).click();
+  await expect(createDialog).toHaveCount(0);
   await expect(page.getByText("Recordings")).toBeVisible();
   await expect(page.getByText("/tmp/asr-audio")).toBeVisible();
   await expect(page.getByText("Daily at 02:00")).toBeVisible();
   await expect(page.getByText(/processed 1, pending 0/)).toBeVisible();
   await expect(page.getByText(/deleted after processing 1/)).toBeVisible();
   await page.getByRole("button", { name: "View details" }).click();
-  const taskDialog = page.getByRole("dialog", { name: "Directory Task: Recordings" });
-  await expect(taskDialog).toBeVisible();
-  await expect(taskDialog.getByText("/tmp/asr-audio/sample.wav")).toHaveCount(2);
-  await expect(taskDialog.getByText("/tmp/bifrost/asr/data/text/task-1/file-1.txt")).toBeVisible();
-  await expect(taskDialog.getByText("success")).toBeVisible();
-  await expect(taskDialog.getByText("File Timeline")).toBeVisible();
-  await expect(taskDialog.getByText("Full Transcript")).toBeVisible();
-  await page.getByRole("button", { name: "Open timeline" }).click();
-  await expect(taskDialog.getByText("ffprobe.date_creation_time").last()).toBeVisible();
-  await expect(taskDialog.getByText("00:00:00.000 - 00:00:02.000")).toBeVisible();
-  await expect(taskDialog.getByText("时间线文本")).toHaveCount(2);
-  await page.keyboard.press("Escape");
-  await expect(page.getByRole("dialog", { name: "Directory Task: Recordings" })).toBeHidden();
+  await expect(page).toHaveURL(/asrTask=task-1/);
+  await expect(page.getByRole("dialog", { name: "Directory Task: Recordings" })).toHaveCount(0);
+  const taskPage = page.getByTestId("asr-task-detail-page");
+  await expect(taskPage).toBeVisible();
+  await expect(taskPage.getByText("Directory Task: Recordings")).toBeVisible();
+  await expect(taskPage.getByText("/tmp/asr-audio/sample-1.wav")).toBeVisible();
+  await expect(taskPage.getByText("/tmp/bifrost/asr/data/text/task-1/file-1.txt")).toBeVisible();
+  const filesTable = taskPage.getByTestId("asr-task-files-table");
+  await expect(filesTable.getByText("success").first()).toBeVisible();
+  await expect(filesTable.locator(".ant-table-content")).toHaveCSS("overflow-x", "auto");
+  expect(
+    await filesTable.locator(".ant-table-content").evaluate((element) => element.scrollWidth),
+  ).toBeGreaterThan(
+    await filesTable.locator(".ant-table-content").evaluate((element) => element.clientWidth),
+  );
+  await expect(filesTable.locator(".ant-table-tbody tr.ant-table-row")).toHaveCount(8);
+  await filesTable.locator(".ant-pagination-options-size-changer").click();
+  await page
+    .locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)")
+    .getByText("20 / page", { exact: true })
+    .click();
+  await expect(filesTable.locator(".ant-table-tbody tr.ant-table-row")).toHaveCount(20);
+  await taskPage.getByRole("tab", { name: /Daily Docs/ }).click();
+  const dailyDocs = taskPage.getByTestId("asr-task-daily-docs-tab");
+  await expect(dailyDocs.getByText("2026-05-14", { exact: true })).toBeVisible();
+  await expect(
+    dailyDocs.getByText("/tmp/bifrost/asr/data/text/task-1/daily/2026-05-14.md"),
+  ).toBeVisible();
+  await dailyDocs.getByRole("button", { name: "Open document" }).click();
+  await expect(page).toHaveURL(/asrDay=2026-05-14/);
+  const dailyDocumentPage = page.getByTestId("asr-task-daily-document-page");
+  await expect(dailyDocumentPage).toBeVisible();
+  await expect(page.getByTestId("asr-daily-document-content")).toContainText(
+    "完整按天整理内容",
+  );
+  await page.getByRole("button", { name: "Back to daily docs" }).click();
+  await expect(page).not.toHaveURL(/asrDay=2026-05-14/);
+  await taskPage.getByRole("tab", { name: /Files/ }).click();
+  await page.getByRole("button", { name: "Open transcript" }).first().click();
+  await expect(page).toHaveURL(/asrFile=file-1/);
+  const filePage = page.getByTestId("asr-task-file-detail-page");
+  await expect(filePage).toBeVisible();
+  await expect(filePage.getByText("Original Audio")).toBeVisible();
+  const audio = filePage.locator('audio[aria-label="Original audio player"]');
+  await expect(audio).toBeVisible();
+  await expect(audio).toHaveAttribute("src", /\/asr\/tasks\/task-1\/files\/file-1\/source/);
+  await audio.evaluate((element) => {
+    Object.defineProperty(element, "currentTime", {
+      value: 0,
+      writable: true,
+      configurable: true,
+    });
+    (element as HTMLAudioElement).play = () => Promise.resolve();
+  });
+  await expect(filePage.getByText("File Timeline")).toBeVisible();
+  await expect(filePage.getByText("Full Transcript")).toBeVisible();
+  await expect(filePage.getByText("ffprobe.date_creation_time")).toBeVisible();
+  await filePage.getByRole("button", { name: "00:00:01.000" }).click();
+  await expect(filePage.getByText("时间线文本")).toHaveCount(2);
+  await expect(filePage.getByText("第二段文本")).toHaveCount(2);
+  await expect(filePage.getByTestId("asr-transcript-segment-1")).toHaveAttribute(
+    "aria-current",
+    "true",
+  );
+  const jumpedMs = await audio.evaluate((element) =>
+    Math.round((element as HTMLAudioElement).currentTime * 1000),
+  );
+  expect(jumpedMs).toBe(1000);
+
+  const segments = filePage.getByTestId("asr-transcript-segments");
+  await page.waitForTimeout(150);
+  await segments.evaluate((element) => {
+    element.scrollTop = 0;
+    element.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: -120 }));
+    element.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+  await audio.evaluate((element) => {
+    (element as HTMLAudioElement).currentTime = 10;
+    element.dispatchEvent(new Event("timeupdate", { bubbles: true }));
+  });
+  await expect(filePage.getByTestId("asr-transcript-segment-10")).toHaveAttribute(
+    "aria-current",
+    "true",
+  );
+  await page.waitForTimeout(300);
+  expect(await segments.evaluate((element) => element.scrollTop)).toBe(0);
+
+  await audio.evaluate((element) => {
+    (element as HTMLAudioElement).currentTime = 10;
+    element.dispatchEvent(new Event("seeking", { bubbles: true }));
+    element.dispatchEvent(new Event("seeked", { bubbles: true }));
+  });
+  await expect(filePage.getByTestId("asr-transcript-segment-10")).toHaveAttribute(
+    "aria-current",
+    "true",
+  );
+  if (await segments.evaluate((element) => element.scrollHeight > element.clientHeight)) {
+    await expect
+      .poll(async () => segments.evaluate((element) => element.scrollTop), { timeout: 1000 })
+      .toBeGreaterThan(0);
+  }
+
+  await page.waitForTimeout(150);
+  await segments.evaluate((element) => {
+    element.scrollTop = 0;
+    element.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: -120 }));
+    element.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+  await audio.evaluate((element) => {
+    (element as HTMLAudioElement).currentTime = 10;
+    element.dispatchEvent(new Event("timeupdate", { bubbles: true }));
+  });
+  await expect(filePage.getByTestId("asr-transcript-segment-10")).toHaveAttribute(
+    "aria-current",
+    "true",
+  );
+  await page.waitForTimeout(300);
+  expect(await segments.evaluate((element) => element.scrollTop)).toBe(0);
+  if (await segments.evaluate((element) => element.scrollHeight > element.clientHeight)) {
+    await expect
+      .poll(async () => segments.evaluate((element) => element.scrollTop), { timeout: 8000 })
+      .toBeGreaterThan(0);
+  }
+
+  await audio.evaluate((element) => {
+    (element as HTMLAudioElement).currentTime = 5;
+    element.dispatchEvent(new Event("seeked", { bubbles: true }));
+  });
+  await expect(filePage.getByTestId("asr-transcript-segment-5")).toHaveAttribute(
+    "aria-current",
+    "true",
+  );
+  await page.getByRole("button", { name: "Back to task files" }).click();
+  await expect(page).not.toHaveURL(/asrFile=file-1/);
+  await page.getByRole("button", { name: "Back to directory tasks" }).click();
+  await expect(page).not.toHaveURL(/asrTask=task-1/);
+  await expect(page.getByText("Directory Tasks")).toBeVisible();
 
   await page
     .getByTestId("ai-section-content")
     .getByRole("button", { name: "Run" })
     .click();
-  await expect(page.getByText(/Processed 1, failed 0/)).toBeVisible();
+  await expect(page.getByText("ASR task started")).toBeVisible();
+});
+
+test("ASR task detail can queue bulk retry for all failed chunks", async ({ page }) => {
+  await installAsrMicrophoneMocks(page);
+  let bulkRetryRequested = 0;
+  let bulkRetryState: Record<string, unknown> | undefined;
+
+  await page.route("**/_bifrost/api/asr/tasks", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        tasks: [
+          {
+            id: "task-bulk",
+            name: "Bulk retry task",
+            audio_dir: "/tmp/asr-audio",
+            recursive: true,
+            enabled: true,
+            schedule: { kind: "daily", hour: 2, minute: 0 },
+            language: "chinese",
+            model: "Qwen3-ASR-1.7B",
+            runtime_strategy: "reuse_per_file",
+            created_at_ms: Date.now(),
+            updated_at_ms: Date.now(),
+            summary: {
+              discovered: 2,
+              processed: 2,
+              pending: 0,
+              failed: 0,
+              partial_success: 2,
+              failed_chunk_count: 3,
+              deleted_after_processing: 0,
+              running: false,
+            },
+          },
+        ],
+      }),
+    });
+  });
+
+  await page.route("**/_bifrost/api/asr/tasks/task-bulk/retry-failed-chunks", async (route) => {
+    bulkRetryRequested += 1;
+    bulkRetryState = {
+      task_id: "task-bulk",
+      status: "queued",
+      queued_files: 2,
+      processed_files: 0,
+      total_failed_chunks: 3,
+      recovered_chunks: 0,
+      still_failed_chunks: 0,
+      updated_at_ms: Date.now(),
+      message: "Queued 2 files with 3 failed chunks for retry",
+      results: [],
+    };
+    await route.fulfill({
+      status: 202,
+      contentType: "application/json",
+      body: JSON.stringify({
+        message: "Queued 2 files with 3 failed chunks for retry",
+        retry: bulkRetryState,
+      }),
+    });
+  });
+
+  await page.route("**/_bifrost/api/asr/tasks/task-bulk", async (route) => {
+    if (route.request().method() !== "GET") {
+      await route.fallback();
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        id: "task-bulk",
+        name: "Bulk retry task",
+        audio_dir: "/tmp/asr-audio",
+        recursive: true,
+        enabled: true,
+        schedule: { kind: "daily", hour: 2, minute: 0 },
+        language: "chinese",
+        model: "Qwen3-ASR-1.7B",
+        runtime_strategy: "reuse_per_file",
+        created_at_ms: Date.now(),
+        updated_at_ms: Date.now(),
+        summary: {
+          discovered: 2,
+          processed: 2,
+          pending: 0,
+          failed: 0,
+          partial_success: 2,
+          failed_chunk_count: 3,
+          deleted_after_processing: 0,
+          running: false,
+        },
+        bulk_retry: bulkRetryState,
+        daily_documents: [],
+        files: [
+          {
+            key: "file-a",
+            task_id: "task-bulk",
+            source_path: "/tmp/asr-audio/a.wav",
+            media_duration_ms: 60000,
+            status: "partial_success",
+            text_chars: 128,
+            failed_chunks: [
+              {
+                chunk_index: 1,
+                offset_secs: 28,
+                duration_secs: 30,
+                error: "asr-server disconnected",
+                attempts: 3,
+              },
+            ],
+          },
+          {
+            key: "file-b",
+            task_id: "task-bulk",
+            source_path: "/tmp/asr-audio/b.wav",
+            media_duration_ms: 90000,
+            status: "partial_success",
+            text_chars: 256,
+            failed_chunks: [
+              {
+                chunk_index: 2,
+                offset_secs: 56,
+                duration_secs: 30,
+                error: "memory footprint limit",
+                attempts: 3,
+              },
+              {
+                chunk_index: 3,
+                offset_secs: 84,
+                duration_secs: 30,
+                error: "memory footprint limit",
+                attempts: 3,
+              },
+            ],
+          },
+        ],
+      }),
+    });
+  });
+
+  await openPage(page, "ai?aiSection=tools-asr&asrTask=task-bulk");
+  const taskPage = page.getByTestId("asr-task-detail-page");
+  await expect(taskPage.getByText("Directory Task: Bulk retry task")).toBeVisible();
+  await expect(taskPage.getByText("(3 failed chunks)")).toBeVisible();
+
+  await taskPage.getByRole("button", { name: "Retry all failed chunks" }).click();
+  await page.getByRole("button", { name: "OK" }).click();
+  await expect.poll(() => bulkRetryRequested).toBe(1);
+  await expect(page.getByTestId("asr-bulk-retry-status")).toContainText(
+    "Bulk chunk retry",
+  );
+  await expect(page.getByTestId("asr-bulk-retry-status")).toContainText("queued");
+  await expect(page.getByTestId("asr-bulk-retry-status")).toContainText("0/2 files");
+  await expect(page.getByTestId("asr-bulk-retry-status")).toContainText(
+    "0/3 chunks recovered",
+  );
+});
+
+test("ASR task detail tolerates older responses without daily documents", async ({ page }) => {
+  await installAsrMicrophoneMocks(page);
+  await page.route("**/_bifrost/api/asr/tasks", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        tasks: [
+          {
+            id: "legacy-task",
+            name: "Legacy task",
+            audio_dir: "/tmp/asr-audio",
+            recursive: true,
+            enabled: true,
+            schedule: { kind: "daily", hour: 2, minute: 0 },
+            language: "chinese",
+            model: "Qwen3-ASR-1.7B",
+            created_at_ms: Date.now(),
+            updated_at_ms: Date.now(),
+            next_run_at_ms: Date.now() + 60000,
+            summary: {
+              discovered: 0,
+              processed: 0,
+              pending: 0,
+              failed: 0,
+              deleted_after_processing: 0,
+              running: false,
+            },
+          },
+        ],
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/asr/tasks/legacy-task", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        id: "legacy-task",
+        name: "Legacy task",
+        audio_dir: "/tmp/asr-audio",
+        recursive: true,
+        enabled: true,
+        schedule: { kind: "daily", hour: 2, minute: 0 },
+        language: "chinese",
+        model: "Qwen3-ASR-1.7B",
+        created_at_ms: Date.now(),
+        updated_at_ms: Date.now(),
+        last_run_at_ms: Date.now() - 30000,
+        next_run_at_ms: Date.now() + 86400000,
+        summary: {
+          discovered: 0,
+          processed: 0,
+          pending: 0,
+          failed: 0,
+          deleted_after_processing: 0,
+          running: false,
+        },
+        files: [],
+      }),
+    });
+  });
+
+  await openPage(page, "ai?aiSection=tools-asr&asrTask=legacy-task");
+  const taskPage = page.getByTestId("asr-task-detail-page");
+  await expect(taskPage).toBeVisible();
+  await expect(taskPage.getByText("Directory Task: Legacy task")).toBeVisible();
+  await expect(taskPage.getByRole("tab", { name: "Daily Docs (0)" })).toBeVisible();
+  await taskPage.getByRole("tab", { name: "Daily Docs (0)" }).click();
+  await expect(
+    taskPage.getByText("Daily documents are available after the ASR backend is updated"),
+  ).toBeVisible();
 });

@@ -17,8 +17,8 @@ describe('bp parser references', () => {
   it('does not treat remote URLs or absolute paths as local parser scripts', () => {
     expect(localBpParserScriptName('https://example.com/parser.js?sha256=abc')).toBeNull();
     expect(localBpParserScriptName('http://127.0.0.1:8080/parser.js?sha256=abc')).toBeNull();
-    expect(localBpParserScriptName('file:///Users/eden/parser.js')).toBeNull();
-    expect(localBpParserScriptName('/Users/eden/parser.js')).toBeNull();
+    expect(localBpParserScriptName('file:///tmp/parser.js')).toBeNull();
+    expect(localBpParserScriptName('/tmp/parser.js')).toBeNull();
     expect(localBpParserScriptName('../evil')).toBeNull();
     expect(localBpParserScriptName('team/../evil')).toBeNull();
   });

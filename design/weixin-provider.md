@@ -17,6 +17,7 @@
 - Weixin provider 入站消息不使用 owner 过滤器；`owner_open_id` 只记录扫码登录账号。Feishu provider 继续保持 owner 安全边界。
 - 微信通道支持所有 Agent `/xxx` 命令，行为与飞书 IM 通道一致。
 - 微信图片消息需要解析 `image_item/media`，下载图片，必要时解密，并以多模态图片输入传给模型。
+- Agent / ChatGPT Web 生成的本地图片需要按原图通过微信通道独立发送为图片消息，不能只退化为 Markdown 文本或卡片正文。
 - 最终回复直接发送模型最终文本，不添加 `Bifrost AI`、`等待任务说明` 等卡片前缀。
 
 ### 必须不破坏
@@ -73,6 +74,8 @@ Weixin 没有 Feishu CardKit 进度卡能力，因此默认 Agent chat 进入真
 
 图片下载走 `ImProviderClient::download_message_image_resource`：优先使用服务端返回的 `full_url`，没有时使用 `https://novac2c.cdn.weixin.qq.com/c2c/download?encrypted_query_param=...` 作为 CDN fallback；如果 `image_item.aeskey` 或 `media.aes_key` 存在，则按 OpenClaw Weixin 协议使用 AES-128-ECB + PKCS7 解密后，再以 base64 data URL 形式传给模型。
 
+出站图片走同一 `ImProviderClient` 抽象。Agent 回复解析到本地 Markdown 图片（例如 `![cat](./cat.png)`）时，先从文本回复中移除本地图片引用，再逐张调用 provider `upload_image/send_image` 独立发送原图。Weixin 的 `upload_image` 在进程内保存待发送原始字节；`send_image` 拿到目标用户后按 OpenClaw Weixin 协议调用 `getuploadurl`，使用随机 16 字节 AES key 执行 AES-128-ECB + PKCS7 加密，把密文上传 CDN，并用返回的 `x-encrypted-param` 构造 `sendmessage` 的 `image_item.media`。消息日志必须记录 `msg_type=image`、目标用户、发送状态和错误，但不能记录图片原始字节。
+
 ## 测试方案
 
 ### 单元测试
@@ -81,6 +84,8 @@ Weixin 没有 Feishu CardKit 进度卡能力，因此默认 Agent chat 进入真
 - `normalize_update_extracts_ilink_image_item_for_multimodal_agent`：验证图片附件提取。
 - `download_message_image_resource_fetches_plain_full_url`：验证图片下载。
 - `decrypt_aes_128_ecb_accepts_base64_raw_key`：验证 AES-128-ECB 解密。
+- `send_image_uploads_original_bytes_to_cdn_and_sends_image_item`：验证出站图片原始字节被加密上传到 CDN，并以 `image_item.media` 独立发送。
+- `send_image_returns_config_error_for_unknown_image_key`：验证未知图片 key 不会发送空消息。
 - `agent_reply_target_uses_weixin_sender_instead_of_owner`：验证回复目标使用微信发送方。
 - `im_event_loop_forwards_image_attachment_to_agent_chat`：验证 IM 图片传入 Agent 多模态请求。
 
@@ -94,10 +99,11 @@ Weixin 没有 Feishu CardKit 进度卡能力，因此默认 Agent chat 进入真
 4. 连接 provider，mock `getupdates` 返回真实形态 `msgs/sync_buf/item_list` 文本和图片消息，断言 `history/events` 出现 `provider_type == weixin` 的 `message.receive`。
 5. 断言图片事件包含 `message.images[0].download_url` 和 file key。
 6. 调用 `messages/send`，断言 mock `sendmessage` 收到目标用户、文本、`context_token` 和官方 `base_info`。
+7. 调用 Weixin provider 图片发送路径，断言 mock `getuploadurl` 收到原始大小、MD5、目标用户和 AES key，mock CDN 收到非空密文，解密后等于原图字节，最终 mock `sendmessage` 收到 `item_list[].type=2` 与 `image_item.media.encrypt_query_param`。
 
 ### human_tests
 
-`human_tests/weixin-provider.md` 覆盖 WebUI 创建 Weixin provider、自动二维码、扫码登录、消息触发 Agent、即时反馈、guide/queue/slash 命令、最终纯正文回写、图片下载和模型多模态输入。
+`human_tests/weixin-provider.md` 覆盖 WebUI 创建 Weixin provider、自动二维码、扫码登录、消息触发 Agent、即时反馈、guide/queue/slash 命令、最终纯正文回写、图片下载和模型多模态输入，以及 Agent 生成图片经 Weixin 独立发送原图。
 
 ## Review/Fix/Test 闭环方案
 

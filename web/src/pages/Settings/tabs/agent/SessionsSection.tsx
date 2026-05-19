@@ -214,7 +214,7 @@ export default function SessionsSection({ onOpenSession }: SessionsSectionProps)
         rowKey="session_key"
         size="small"
         loading={loading}
-        pagination={{ pageSize: 10, size: "small" }}
+        pagination={{ pageSize: 10, size: "small", showSizeChanger: false }}
         locale={{ emptyText: <Empty description="No active sessions" /> }}
         scroll={{ x: 1100 }}
       />

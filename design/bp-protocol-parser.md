@@ -27,7 +27,7 @@
 用户侧保持 `bp://` 只表达“使用一个 parser 脚本”，业务协议输入作为脚本参数：
 
 ```txt
-api.example.com bp://build_in_bp?idl=file:///Users/eden/work/code/nextoncall/next_agent/idl/order.thrift&service=OrderService&method=GetOrder
+api.example.com bp://build_in_bp?idl=file://~/work/code/nextoncall/next_agent/idl/order.thrift&service=OrderService&method=GetOrder
 api.example.com decode://bp
 
 api.example.com bp://build_in_bp?psm=foo.bar.order&service=OrderService&method=GetOrder&idlSource=bam

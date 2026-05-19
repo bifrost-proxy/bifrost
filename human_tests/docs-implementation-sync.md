@@ -6,7 +6,7 @@
 
 ## 前置条件
 
-- 工作目录为仓库根目录 `/Users/eden/work/github/bifrost`。
+- 工作目录为仓库根目录 `~/work/github/bifrost`。
 - 执行任何 shell 命令前先运行 `source ~/.zshrc`。
 - 不启动正式 9900 测试服务；涉及 CLI help 的命令使用临时 `BIFROST_DATA_DIR="$(mktemp -d)"`。
 - 不修改系统代理。
