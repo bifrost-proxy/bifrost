@@ -166,7 +166,9 @@ export function recordToHAREntry(record: TrafficRecord): HAREntry {
   const receiveTime = timing?.receive_ms ?? 0;
 
   return {
-    startedDateTime: record.start_time || new Date().toISOString(),
+    startedDateTime: record.timestamp
+      ? new Date(record.timestamp).toISOString()
+      : new Date().toISOString(),
     time: record.duration_ms,
     request: {
       method: record.method,

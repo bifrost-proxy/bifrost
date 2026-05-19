@@ -23,6 +23,7 @@ import {
   getEffectiveDurationMs,
   isLiveStreamingTraffic,
 } from "../../utils/duration";
+import { formatTimestamp } from "../../utils/datetime";
 import { useLiveNow } from "../../hooks/useLiveNow";
 import AppIcon from "../AppIcon";
 import TrafficContextMenu from "./TrafficContextMenu";
@@ -322,27 +323,36 @@ const columns: ColumnDef[] = [
     key: "start_time",
     title: "Start Time",
     width: 160,
-    render: (record, textSecondary) => (
-      <span
-        style={{ fontSize: 11, fontFamily: "monospace", color: textSecondary }}
-        title={record.start_time}
-      >
-        {record.start_time || "-"}
-      </span>
-    ),
+    render: (record, textSecondary) => {
+      const time = formatTimestamp(record.timestamp);
+      return (
+        <span
+          style={{ fontSize: 11, fontFamily: "monospace", color: textSecondary }}
+          title={time}
+        >
+          {time}
+        </span>
+      );
+    },
   },
   {
     key: "end_time",
     title: "End Time",
     width: 160,
-    render: (record, textSecondary) => (
-      <span
-        style={{ fontSize: 11, fontFamily: "monospace", color: textSecondary }}
-        title={record.end_time || "-"}
-      >
-        {record.end_time || "-"}
-      </span>
-    ),
+    render: (record, textSecondary) => {
+      const time =
+        record.duration_ms > 0
+          ? formatTimestamp(record.timestamp + record.duration_ms)
+          : "-";
+      return (
+        <span
+          style={{ fontSize: 11, fontFamily: "monospace", color: textSecondary }}
+          title={time}
+        >
+          {time}
+        </span>
+      );
+    },
   },
 ];
 

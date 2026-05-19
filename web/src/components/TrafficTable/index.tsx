@@ -8,6 +8,7 @@ import {
   getEffectiveDurationMs,
   isLiveStreamingTraffic,
 } from "../../utils/duration";
+import { formatTimestamp } from "../../utils/datetime";
 import { useLiveNow } from "../../hooks/useLiveNow";
 
 const { Text } = Typography;
@@ -246,29 +247,38 @@ export default function TrafficTable({
     },
     {
       title: "Start Time",
-      dataIndex: "start_time",
+      dataIndex: "timestamp",
       key: "start_time",
       width: 160,
-      render: (time: string) => (
-        <Tooltip title={time}>
-          <Text type="secondary" style={{ fontSize: 11, fontFamily: "monospace" }}>
-            {time || "-"}
-          </Text>
-        </Tooltip>
-      ),
+      render: (_: number, record: TrafficSummary) => {
+        const time = formatTimestamp(record.timestamp);
+        return (
+          <Tooltip title={time}>
+            <Text type="secondary" style={{ fontSize: 11, fontFamily: "monospace" }}>
+              {time}
+            </Text>
+          </Tooltip>
+        );
+      },
     },
     {
       title: "End Time",
-      dataIndex: "end_time",
+      dataIndex: "timestamp",
       key: "end_time",
       width: 160,
-      render: (time: string | null) => (
-        <Tooltip title={time || "-"}>
-          <Text type="secondary" style={{ fontSize: 11, fontFamily: "monospace" }}>
-            {time || "-"}
-          </Text>
-        </Tooltip>
-      ),
+      render: (_: number, record: TrafficSummary) => {
+        const time =
+          record.duration_ms > 0
+            ? formatTimestamp(record.timestamp + record.duration_ms)
+            : "-";
+        return (
+          <Tooltip title={time}>
+            <Text type="secondary" style={{ fontSize: 11, fontFamily: "monospace" }}>
+              {time}
+            </Text>
+          </Tooltip>
+        );
+      },
     },
   ];
 
