@@ -26,10 +26,71 @@ hljs.registerLanguage('javascript', javascript);
 hljs.registerLanguage('css', css);
 hljs.registerLanguage('plaintext', plaintext);
 
+/**
+ * Pretty-print a JSON string by re-indenting the original text.
+ *
+ * Crucially, this never feeds numbers through `JSON.parse`/`JSON.stringify`:
+ * a `JSON.parse` round-trip silently rounds any integer beyond 2^53-1 (int64
+ * IDs, trace IDs, snowflake IDs) to the nearest double. By walking the source
+ * text and only adjusting whitespace outside of strings, every literal —
+ * numbers included — is preserved byte-for-byte.
+ *
+ * The input is assumed to be valid JSON (callers gate on `JSON.parse`).
+ */
+const reindentJson = (text: string): string => {
+  const INDENT = '  ';
+  let out = '';
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  const isWhitespace = (c: string) => c === ' ' || c === '\t' || c === '\n' || c === '\r';
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+
+    if (inString) {
+      out += ch;
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+      out += ch;
+    } else if (ch === '{' || ch === '[') {
+      let j = i + 1;
+      while (j < text.length && isWhitespace(text[j])) j++;
+      // Keep empty containers on one line: {} / [].
+      if (text[j] === '}' || text[j] === ']') {
+        out += ch + text[j];
+        i = j;
+      } else {
+        depth++;
+        out += ch + '\n' + INDENT.repeat(depth);
+      }
+    } else if (ch === '}' || ch === ']') {
+      depth--;
+      out += '\n' + INDENT.repeat(depth) + ch;
+    } else if (ch === ',') {
+      out += ',\n' + INDENT.repeat(depth);
+    } else if (ch === ':') {
+      out += ': ';
+    } else if (!isWhitespace(ch)) {
+      out += ch;
+    }
+  }
+  return out;
+};
+
 const formatJsonContent = (text: string): { formatted: string; isJson: boolean } => {
   try {
-    const parsed = JSON.parse(text);
-    return { formatted: JSON.stringify(parsed, null, 2), isJson: true };
+    // Validity check only — the parsed value is discarded so that large
+    // integers never lose precision through the number conversion.
+    JSON.parse(text);
+    return { formatted: reindentJson(text), isJson: true };
   } catch {
     return { formatted: text, isJson: false };
   }
