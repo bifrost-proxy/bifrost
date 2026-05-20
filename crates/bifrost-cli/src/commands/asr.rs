@@ -14,7 +14,7 @@ use bifrost_admin::asr_streaming::{
     append_transcript_delta, call_asr_whole_file_endpoint, dedupe_increment, WholeFileTranscription,
 };
 use bifrost_admin::resource_download::{download_with_resume, DownloadProgress, DownloadRequest};
-use bifrost_core::{BifrostError, Result};
+use bifrost_core::{direct_reqwest_client_builder, BifrostError, Result};
 use chrono::{Local, TimeZone};
 use serde::Deserialize;
 use serde_json::Value;
@@ -1489,7 +1489,7 @@ fn prepare_cli_assets(home: &Path, model: &str) -> Result<()> {
 }
 
 async fn download_cli_assets(home: PathBuf, model: String) -> Result<()> {
-    let client = reqwest::Client::builder()
+    let client = direct_reqwest_client_builder()
         .build()
         .map_err(|error| BifrostError::Config(format!("build ASR downloader client: {error}")))?;
     let requests = cli_download_requests(&home, &model)?;

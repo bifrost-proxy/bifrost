@@ -451,6 +451,35 @@
 - 非 macOS Apple Silicon 平台 WebUI/API/CLI 均直接提示 unsupported，不执行下载或启动模型服务。
 - 测试结束后固定目录中的模型文件完整恢复。
 
+### TC-QASR-20 Qwen3-ASR-0.6B 初始化下载绕过环境代理
+
+操作步骤：
+
+1. 确认 Hugging Face 上游 0.6B 配置文件真实可达：
+   ```bash
+   curl -I -L --max-time 20 \
+     https://huggingface.co/Qwen/Qwen3-ASR-0.6B/resolve/main/config.json
+   ```
+2. 在故意设置无效环境代理的 shell 中执行 ASR 下载 client 回归测试：
+   ```bash
+   HTTP_PROXY=http://127.0.0.1:1 \
+   HTTPS_PROXY=http://127.0.0.1:1 \
+   ALL_PROXY=http://127.0.0.1:1 \
+   NO_PROXY= \
+   cargo test -p bifrost-admin asr_download_client_bypasses_proxy_env --lib
+   ```
+3. 执行 0.6B 下载请求清单回归：
+   ```bash
+   cargo test -p bifrost-admin asr_download_requests_include_qwen3_asr_0_6b_files --lib
+   ```
+
+预期结果：
+
+- `Qwen/Qwen3-ASR-0.6B` 的 `config.json` 返回 200/307 后成功解析到真实文件，而不是 404。
+- ASR 下载 client 在 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 指向不可达代理时仍能直连本地测试服务器，证明初始化下载不会被当前 shell 或 Bifrost 自身代理劫持。
+- 0.6B 请求清单包含 `Qwen3-ASR-0.6B/config.json` 和 `Qwen3-ASR-0.6B/model.safetensors`。
+- 本用例不下载完整 0.6B 权重；完整模型初始化仍由 TC-QASR-02 / TC-QASR-15 的真实初始化链路覆盖。
+
 ### TC-QASR-17 ASR 任务详情原音频占用与一键清理
 
 操作步骤：
@@ -586,3 +615,4 @@
 | 2026-05-20 | TC-QASR-17 / ASR 任务详情原音频占用与一键清理 | `e2e-tests/tests/test_asr_task_cli.sh`；`pnpm --dir web exec playwright test tests/ui/asr-microphone-meter.spec.ts --grep "ASR directory tasks"` | PASS：E2E 使用临时 `BIFROST_DATA_DIR` 和临时音频目录，通过真实 Admin API 构造 success/partial_success 文件记录，确认任务详情 summary 返回 `audio_source_bytes=done+partial`、`cleanable_source_bytes=done`；调用 `POST /cleanup-source-audio` 后 success 源音频删除、partial_success 源音频保留、transcript/timeline 产物保留，二次调用 `deleted_files=0`。Playwright 真实浏览器验证任务详情展示 `Audio Files` 和 `Cleanable Originals`、点击 `Clean originals` 确认后占用下降并保留后续任务详情能力。 |
 | 2026-05-20 | TC-QASR-18 / Daily Agent 配置与运行记录拆分为平级 tab | `pnpm --dir web exec playwright test tests/ui/asr-daily-agent-runner.spec.ts`；`pnpm --dir web exec playwright test tests/ui/asr-microphone-meter.spec.ts --grep "ASR directory tasks"` | PASS：Daily Agent Runner 专项套件验证 `Daily Agent` tab 仍可编辑 AGENTS.md、选择 Runner/IM Channel，并确认 processed report 从 `Daily Agent Records` tab 打开；目录任务 Playwright 回归验证 `Daily Agent` tab 不再展示 `Processed Documents`，`Daily Agent Records` tab 展示 `Run Results` 和 report 链接，点击 report 后 URL 包含 `asrTaskTab=daily-agent-records&asrDailyReport=2026-05-14`，返回后仍停留在 records tab。 |
 | 2026-05-20 | TC-QASR-19 / Directory Tasks 首页位置前移 | `pnpm --dir web exec playwright test tests/ui/asr-microphone-meter.spec.ts --grep "ASR directory tasks"` | PASS：Playwright 真实浏览器验证 AI -> Tools -> ASR 首页中 `Speech Converter` 位于 `Directory Tasks` 上方，`Directory Tasks` 位于 `Speech to Text` 上方；随后继续创建 Directory Task、进入任务详情、执行原音频清理、验证 Daily Agent Records，不影响既有目录任务操作链路。 |
+| 2026-05-20 | TC-QASR-20 / Qwen3-ASR-0.6B 初始化下载绕过环境代理 | `curl -I -L --max-time 20 https://huggingface.co/Qwen/Qwen3-ASR-0.6B/resolve/main/config.json`；`HTTP_PROXY=http://127.0.0.1:1 HTTPS_PROXY=http://127.0.0.1:1 ALL_PROXY=http://127.0.0.1:1 NO_PROXY= cargo test -p bifrost-admin asr_download_client_bypasses_proxy_env --lib`；`cargo test -p bifrost-admin asr_download_requests_include_qwen3_asr_0_6b_files --lib` | PASS：Hugging Face 返回 `307` 并带 `x-repo-commit: 5eb144179a02acc5e5ba31e748d22b0cf3e303b0`，确认 `config.json` 真实存在；无效代理环境下 direct reqwest 下载 client 仍能访问本地测试 HTTP server；0.6B 请求清单包含 `Qwen3-ASR-0.6B/config.json` 与 `Qwen3-ASR-0.6B/model.safetensors` |

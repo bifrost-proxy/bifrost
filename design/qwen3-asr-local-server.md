@@ -24,7 +24,7 @@ Qwen3-ASR-1.7B + qwen3_asr_rs + MLX/Metal + 本地 OpenAI-compatible API Server
   - `--home` 和 `QWEN3_ASR_HOME` 不改变安装目录，避免测试或 WebUI 使用不同目录导致重复下载；
   - 默认模型为 `Qwen3-ASR-1.7B`；
   - 通过 Rust 通用下载模块下载 qwen3_asr_rs 最新 release 二进制；
-  - 通过 Rust 通用下载模块下载 Hugging Face 权重文件；
+  - 通过 Rust 通用下载模块下载 Hugging Face 权重文件；下载 client 必须使用 `bifrost_core::direct_reqwest_client_builder()` 绕过 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 环境代理，避免用户当前 shell 或正在运行的 Bifrost 代理反向影响 `Qwen3-ASR-0.6B` / `Qwen3-ASR-1.7B` 初始化；
   - 从 release 内置 tokenizer 复制对应 `tokenizer.json`；
   - 下载上游 sample 音频，其中 `sample3.wav` 是中文验证样例。
 - Rust 初始化流程直接调用下载后的 `asr` 二进制做中文样例转写验证。
@@ -41,12 +41,12 @@ Qwen3-ASR-1.7B + qwen3_asr_rs + MLX/Metal + 本地 OpenAI-compatible API Server
   - 初始化流程只准备和验证本地资产：Rust 模块完成预检、断点续传下载、release zip 解压、runtime 安装、tokenizer 复制和 CLI 中文样例验证，不启动常驻模型服务。
   - 后台 API 和 CLI 都固定使用 `~/.bifrost/asr`，不接受 WebUI 或 API 指定其它模型目录。
   - 初始化失败时把依赖缺失、模型下载失败、解压/安装失败、验证退出码、外部源不可达等信息作为 `error` 事件返回给 WebUI。
-  - `POST /api/asr/service/start` 启动前执行同一套自检：平台不支持时直接返回 unsupported；模型、runtime 或样例文件缺失时自动复用 Rust 断点续传下载与安装流程补齐；`ffmpeg` 缺失时自动尝试 Homebrew 安装。自检通过后再从 `~/.bifrost/asr/qwen3_asr_rs/asr-server` 启动 Bifrost 托管模型服务，等待 `/health` ready 后返回；托管进程日志写入固定 ASR 目录。托管 `asr-server` 进程同样被放入独立进程组，并注册 Bifrost 外层 physical-footprint watchdog，避免 Start Service 后长驻模型服务绕过目录任务的内存保护。
+  - `POST /api/asr/service/start` 启动前执行同一套自检：平台不支持时直接返回 unsupported；模型、runtime 或样例文件缺失时自动复用 Rust 断点续传下载与安装流程补齐；模型下载同样绕过环境代理；`ffmpeg` 缺失时自动尝试 Homebrew 安装。自检通过后再从 `~/.bifrost/asr/qwen3_asr_rs/asr-server` 启动 Bifrost 托管模型服务，等待 `/health` ready 后返回；托管进程日志写入固定 ASR 目录。托管 `asr-server` 进程同样被放入独立进程组，并注册 Bifrost 外层 physical-footprint watchdog，避免 Start Service 后长驻模型服务绕过目录任务的内存保护。
   - `POST /api/asr/service/stop` 只停止当前 Bifrost 实例启动的托管服务，用于释放内存和 GPU 资源；如果端口上是用户外部启动的进程，页面明确提示不能由 Bifrost 停止。
   - WebUI 默认不传端口；状态查询、转写和停止都解析当前 Bifrost 托管进程的动态端口，停止后页面显示“动态端口，启动时选择”，避免刷新后探测旧固定端口。
   - `POST /api/asr/transcribe-stream` 接收 WebUI multipart 音频上传，先用 FFmpeg 转为 16kHz mono WAV，再由 Bifrost 按 30 秒窗口、2 秒 overlap 顺序切片调用本地 qwen3_asr_rs OpenAI-compatible `/v1/audio/transcriptions`，并以 SSE 输出 `progress`、`final`、`text`、`error`、`done` 事件。`text` 是整次请求结束后的稳定文本汇总；如果模型返回 timestamp segments，`final` 会把 chunk 内时间平移到整段音频时间线。
 - Bifrost CLI 新增 `bifrost ai asr`：
-  - `bifrost ai asr start` 在启动前执行平台、模型/runtime 和 `ffmpeg` 自检；缺模型或 runtime 时直接使用 Rust 通用下载模块断点续传补齐，缺 `ffmpeg` 时自动尝试 Homebrew 安装。自检通过后从固定 `~/.bifrost/asr/qwen3_asr_rs/asr-server` 启动模型服务，动态选择 loopback 端口，把 `pid/host/port/model/language/home/managed_by` 写入 `BIFROST_DATA_DIR/asr/service.json`。
+  - `bifrost ai asr start` 在启动前执行平台、模型/runtime 和 `ffmpeg` 自检；缺模型或 runtime 时直接使用 Rust 通用下载模块断点续传补齐，下载 client 绕过环境代理，缺 `ffmpeg` 时自动尝试 Homebrew 安装。自检通过后从固定 `~/.bifrost/asr/qwen3_asr_rs/asr-server` 启动模型服务，动态选择 loopback 端口，把 `pid/host/port/model/language/home/managed_by` 写入 `BIFROST_DATA_DIR/asr/service.json`。
   - `bifrost ai asr stop` 读取同一个 service state，停止对应 pid 并删除状态文件。
   - `bifrost ai asr status --json` 输出 CLI 和 WebUI 共享的模型服务状态。
   - `bifrost ai asr stream-file <audio>` 确保资产可用后默认启动或复用本地 `asr-server`，按 30 秒窗口顺序发送 chunk 并输出 CLI JSON Lines；如果命令临时启动了模型服务，结束后恢复为停止状态。临时启动前同样执行自检与自动修复。
