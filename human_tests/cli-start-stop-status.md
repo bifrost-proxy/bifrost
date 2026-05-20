@@ -697,6 +697,46 @@ PY
 
 ---
 
+### TC-CSS-29：daemon 启动在非交互缺失 CA 时必须阻断（回归）
+
+**前置条件**：服务未运行，端口 `18892` 未被占用。
+
+**操作步骤**：
+1. 创建临时数据目录，确保该目录下没有已安装到系统信任的 CA：
+   ```bash
+   TEST_DATA_DIR="$(mktemp -d)"
+   ```
+2. 在无交互 stdin 的场景启动 daemon，模拟脚本/异步启动：
+   ```bash
+   BIFROST_DATA_DIR="$TEST_DATA_DIR" target/release/bifrost -p 18892 start --daemon --unsafe-ssl --no-system-proxy </dev/null
+   ```
+3. 记录命令退出码和输出。
+4. 验证 daemon 没有启动：
+   ```bash
+   curl --connect-timeout 1 --max-time 2 -fsS http://127.0.0.1:18892/_bifrost/api/proxy/address
+   ```
+5. 使用新的临时数据目录显式跳过证书检查，确认 escape hatch 仍可用：
+   ```bash
+   TEST_DATA_DIR_SKIP="$(mktemp -d)"
+   BIFROST_DATA_DIR="$TEST_DATA_DIR_SKIP" target/release/bifrost -p 18892 start --daemon --skip-cert-check --unsafe-ssl --no-system-proxy
+   curl -fsS http://127.0.0.1:18892/_bifrost/api/proxy/address
+   BIFROST_DATA_DIR="$TEST_DATA_DIR_SKIP" target/release/bifrost -p 18892 stop
+   ```
+6. 删除临时目录。
+
+**预期结果**：
+- 步骤 2 返回非零退出码。
+- 输出明确说明 CA 未安装或未信任，且无交互式终端可用。
+- 输出提示可使用 `--yes` 自动安装/信任、先执行 `bifrost ca install`，或显式传入 `--skip-cert-check`。
+- 步骤 2 输出不包含 `Daemon started with PID`，Admin API 不可达。
+- 步骤 5 在显式 `--skip-cert-check` 下仍可启动 daemon，Admin API 可访问，说明跳过参数没有被破坏。
+- 全流程不修改系统代理，因为所有启动命令都包含 `--no-system-proxy`。
+
+**执行记录**：
+- 2026-05-20 执行 `bash e2e-tests/tests/test_daemon_cert_check_e2e.sh` 覆盖本用例。脚本使用临时 `BIFROST_DATA_DIR` 和端口 `18892`；第一段通过 `</dev/null` 模拟非交互 daemon 启动，断言命令非零退出、输出包含 `no interactive terminal is available` 和 `--yes`、输出不包含 `Daemon started with PID`、本地 CA 文件已生成但 Admin API 不可达；第二段执行 `--skip-cert-check --daemon --no-system-proxy`，断言 daemon 启动成功且 Admin API ready，随后停止服务并删除临时目录。
+
+---
+
 
 ## 清理
 

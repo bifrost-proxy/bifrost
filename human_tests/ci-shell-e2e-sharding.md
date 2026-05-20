@@ -524,6 +524,48 @@
 - 脚本结束后清理临时 `docs/future-docs-sync-probe.md` 与 `site/dist`，不会遗留探针文档。
 - 该回归不启动 Bifrost，不使用 9900，不修改系统代理。
 
+### TC-CS-27: Linux shell E2E 非交互 CA gate 回归
+
+**操作步骤**：
+1. 对本轮涉及的 shell E2E 脚本执行语法检查：
+   ```bash
+   bash -n \
+     e2e-tests/tests/test_asr_task_cli.sh \
+     e2e-tests/tests/test_agent_builtin_status_runtime.sh \
+     e2e-tests/tests/test_agent_codex_alignment_chat_api.sh \
+     e2e-tests/tests/test_agent_send_msg_default_channel.sh \
+     e2e-tests/tests/test_body_replace.sh \
+     e2e-tests/tests/test_im_guide_queue_human_api.sh \
+     e2e-tests/tests/test_long_term_memory_human_api.sh \
+     e2e-tests/tests/test_req_res_script_e2e.sh \
+     e2e-tests/tests/test_res_body_override_large.sh \
+     e2e-tests/tests/test_rule_match_logging_noise.sh \
+     e2e-tests/tests/test_rules_hot_reload.sh \
+     e2e-tests/tests/test_values_hot_reload.sh \
+     e2e-tests/tests/test_weixin_provider_e2e.sh
+   ```
+2. 静态检查这些脚本中非交互 `start --no-system-proxy` 的 Bifrost 启动路径均显式包含 `--skip-cert-check`，且 `test_asr_task_cli.sh` 支持 `SKIP_BUILD=true` 复用 CI 预构建 release binary。
+3. 使用已构建的 release binary 真实执行 ASR task CLI 回归：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_asr_task_cli.sh
+   ```
+4. 使用已构建的 release binary 真实执行一个普通规则启动回归：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_values_hot_reload.sh
+   ```
+5. 使用已构建的 release binary 真实执行 proxy chain 回归：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_proxy_chain_auth_e2e.sh
+   ```
+
+**预期结果**：
+- 所有脚本语法检查通过。
+- 静态检查不会发现 CI 非交互启动路径缺少 `--skip-cert-check`。
+- ASR task CLI 输出 `[asr-task-cli-e2e] skipping build, using .../target/release/bifrost` 与 `[asr-task-cli-e2e] PASS`，不会在 shell shard 中重新 debug build。
+- Values hot reload 汇总 `Total: 5 / Passed: 5 / Failed: 0`。
+- Proxy chain auth 汇总 `Total: 11 / Passed: 11 / Failed: 0`，包含 absolute-form URL 与 `Proxy-Authorization` 断言。
+- 所有真实执行均使用临时数据目录、`--no-system-proxy` 与非 9900 端口。
+
 ## 本轮执行记录
 
 测试日期：2026-05-09
@@ -547,6 +589,7 @@
 | TC-CS-24 | 通过 | 2026-05-07 本轮执行：`tail -n 16 scripts/run_all_e2e.sh` 显示 final status 循环后存在显式 `exit 0`；`bash -n scripts/run_all_e2e.sh` 通过；随后使用 `BIFROST_UI_TEST_RUNNER_PORT=18080 BIFROST_E2E_SHARD_INDEX=3 BIFROST_E2E_SHARD_TOTAL=999 BIFROST_E2E_SHELL_JOBS=4 TIMEOUT=90 bash scripts/ci/run-e2e-shell.sh` 执行最小 shard，选中 `test_badge_injection_e2e.sh`，最终报告 `Total suites : 1`、`Passed : 1`、`Failed : 0`，外层退出码 0。该回归使用临时数据目录、`--no-system-proxy` 与非 9900 端口。 |
 | TC-CS-25 | 通过 | 2026-05-09 本轮执行：`rg -n 'CARGO_BIN="\$\{CARGO_BIN:-\$\(resolve_non_shim_command cargo\)\}"' scripts/run_all_e2e.sh` 定位到默认 Cargo 解析逻辑；`bash -n scripts/run_all_e2e.sh` 通过；`which cargo` 输出 `/opt/homebrew/bin/cargo`；`CARGO_BIN="$(which cargo)" bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests` 只列出 shell tests，未构建、未启动 Bifrost、未使用 9900、未修改系统代理。随后完整本地 shell CI 由 `bash scripts/ci/local-ci.sh --skip-static --e2e-only shell` 验证。 |
 | TC-CS-26 | 通过 | 2026-05-12 本轮执行：CI run `25725290679` 的 `E2E Shell (Linux, shard 3/3)` 失败日志显示 `sh: 1: astro: not found` 与 `Local package.json exists, but node_modules missing`，`E2E Shell (aarch64-apple-darwin, shard 3/3)` 同 shard 上传失败 artifact；修复后执行 `rm -rf site/node_modules` 模拟缺失依赖，`bash -n e2e-tests/tests/test_site_docs_sync.sh` 通过，随后使用本机可用新版 Node 执行 `PATH="/opt/homebrew/bin:$PATH" bash e2e-tests/tests/test_site_docs_sync.sh`，输出 `Installing site dependencies for docs sync E2E...`、`Docs sync verification passed for 27 docs pages.`、探针文档加入后的 `Docs sync verification passed for 28 docs pages.`、`Site link verification passed.`、`Site docs sync E2E passed.`，确认缺少 site 依赖时会自举安装并完成 Astro build。该回归未启动 Bifrost，未使用 9900，未修改系统代理。 |
+| TC-CS-27 | 通过 | 2026-05-20 本轮执行：`bash -n` 覆盖 13 个本轮涉及的 shell E2E 脚本并通过；静态检查确认这些脚本中 `start --no-system-proxy` 的 Bifrost 启动窗口均包含 `--skip-cert-check`，且 `test_asr_task_cli.sh` 包含 `SKIP_BUILD=true` 复用 `target/release/bifrost` 的路径。随后使用 release binary 执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_asr_task_cli.sh`，输出 `skipping build, using .../target/release/bifrost` 与 `[asr-task-cli-e2e] PASS`；执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_values_hot_reload.sh`，汇总 `Total: 5 / Passed: 5 / Failed: 0`；执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_proxy_chain_auth_e2e.sh`，汇总 `Total: 11 / Passed: 11 / Failed: 0`，包含 absolute-form 与 `Proxy-Authorization` 断言。全部真实执行使用临时数据目录、`--no-system-proxy` 与非 9900 端口。 |
 
 ## 清理步骤
 

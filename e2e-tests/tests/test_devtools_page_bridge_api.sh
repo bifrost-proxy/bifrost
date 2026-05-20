@@ -437,7 +437,7 @@ fi
 
 export BIFROST_DATA_DIR="$TEST_ROOT/data"
 mkdir -p "$BIFROST_DATA_DIR"
-BIFROST_DEVTOOLS_EVALUATE_AUDIT_CAPACITY=5 "$BIFROST_BIN" start -p "$PROXY_PORT" --unsafe-ssl --no-system-proxy >"$TEST_ROOT/bifrost.log" 2>&1 &
+BIFROST_DEVTOOLS_EVALUATE_AUDIT_CAPACITY=5 "$BIFROST_BIN" start -p "$PROXY_PORT" --unsafe-ssl --skip-cert-check --no-system-proxy >"$TEST_ROOT/bifrost.log" 2>&1 &
 BIFROST_PID=$!
 
 for _ in $(seq 1 120); do

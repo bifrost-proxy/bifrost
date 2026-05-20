@@ -45,6 +45,7 @@ echo "[asr-task-pause-resume] start bifrost on ${PORT}"
 BIFROST_DATA_DIR="$DATA_DIR" "$ROOT_DIR/target/debug/bifrost" start \
   -p "$PORT" \
   --unsafe-ssl \
+  --skip-cert-check \
   --no-system-proxy \
   >"$LOG_FILE" 2>&1 &
 PID="$!"

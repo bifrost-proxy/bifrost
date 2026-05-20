@@ -67,6 +67,7 @@ BIFROST_DATA_DIR="${TEST_ROOT}/data-info" \
     --host 127.0.0.1 \
     -p 18887 \
     --unsafe-ssl \
+    --skip-cert-check \
     --no-system-proxy \
     --rules-file "$RULES_FILE" \
     >"${TEST_ROOT}/info.log" 2>&1 &
@@ -91,6 +92,7 @@ BIFROST_DATA_DIR="${TEST_ROOT}/data-debug" \
     --host 127.0.0.1 \
     -p 18888 \
     --unsafe-ssl \
+    --skip-cert-check \
     --no-system-proxy \
     --rules-file "$RULES_FILE" \
     >"${TEST_ROOT}/debug.log" 2>&1 &
