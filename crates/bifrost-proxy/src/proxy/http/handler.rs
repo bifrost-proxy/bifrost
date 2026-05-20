@@ -4254,6 +4254,7 @@ mod tests {
                     rule_count: 1,
                     group_id: None,
                     group_name: None,
+                    content: Some("badge-temp.test status://221".to_string()),
                 }],
                 merged_content: "badge-temp.test status://221".to_string(),
             },

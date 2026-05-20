@@ -1,9 +1,10 @@
 use bifrost_core::bifrost_file::{
-    BifrostFileParser, BifrostFileType, BifrostFileWriter, KeyValueItemExport, MatchedRuleExport,
-    NetworkRecord, ReplayBodyExport, ReplayGroupExport, ReplayRequestExport, ScriptItem,
-    TemplateContent, ValuesContent,
+    ActiveRuleExport, ActiveRuleSource, ActiveRulesExport, BifrostFileParser, BifrostFileType,
+    BifrostFileWriter, KeyValueItemExport, MatchedRuleExport, NetworkRecord, ReplayBodyExport,
+    ReplayGroupExport, ReplayRequestExport, ScriptItem, TemplateContent, ValuesContent,
 };
 use bifrost_core::normalize_rule_content;
+use bifrost_storage::{RuleFile, RulesStorage};
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use super::{error_response, full_body, json_response, method_not_allowed, BoxBody};
 use crate::state::SharedAdminState;
 use crate::traffic::TrafficRecord;
+
+const EMPTY_NETWORK_IMPORT_ERROR: &str = "Network file contains 0 records; nothing to import. Re-export from Network after selecting at least one visible request.";
 
 #[derive(Debug, Serialize)]
 pub struct DetectResponse {
@@ -255,6 +258,10 @@ async fn import_network(content: &str, state: &SharedAdminState) -> Response<Box
 
     let mut warnings: Vec<String> = Vec::new();
     let mut record_count = 0;
+
+    if let Err(message) = validate_network_import_records(file.content.len()) {
+        return error_response(StatusCode::BAD_REQUEST, message);
+    }
 
     for network_record in &file.content {
         let traffic_record = network_record_to_traffic_record(network_record);
@@ -700,6 +707,14 @@ async fn handle_export_network(
 
     let include_body = request.include_body.unwrap_or(true);
     let mut records: Vec<NetworkRecord> = Vec::new();
+    let mut missing_ids: Vec<String> = Vec::new();
+
+    if request.record_ids.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "Select at least one Network record before exporting a .bifrost file",
+        );
+    }
 
     for id in &request.record_ids {
         let traffic = if let Some(ref db_store) = state.traffic_db_store {
@@ -710,7 +725,15 @@ async fn handle_export_network(
 
         if let Some(traffic) = traffic {
             records.push(traffic_to_network_record(&traffic, include_body, &state).await);
+        } else {
+            missing_ids.push(id.clone());
         }
+    }
+
+    if let Err(message) =
+        validate_network_export_records(&request.record_ids, &missing_ids, records.len())
+    {
+        return error_response(StatusCode::BAD_REQUEST, &message);
     }
 
     let export_name = format!("network-export-{}", records.len());
@@ -734,6 +757,40 @@ async fn handle_export_network(
         .header("Content-Type", "text/plain; charset=utf-8")
         .body(full_body(output))
         .unwrap()
+}
+
+fn validate_network_import_records(record_count: usize) -> Result<(), &'static str> {
+    if record_count == 0 {
+        Err(EMPTY_NETWORK_IMPORT_ERROR)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_network_export_records(
+    requested_ids: &[String],
+    missing_ids: &[String],
+    exported_count: usize,
+) -> Result<(), String> {
+    if requested_ids.is_empty() {
+        return Err(
+            "Select at least one Network record before exporting a .bifrost file".to_string(),
+        );
+    }
+
+    if !missing_ids.is_empty() {
+        return Err(format!(
+            "Failed to export network file: {} selected record(s) no longer exist: {}",
+            missing_ids.len(),
+            missing_ids.join(", ")
+        ));
+    }
+
+    if exported_count == 0 {
+        return Err("Network export produced 0 records; nothing to write".to_string());
+    }
+
+    Ok(())
 }
 
 async fn traffic_to_network_record(
@@ -789,7 +846,189 @@ async fn traffic_to_network_record(
         duration_ms: traffic.duration_ms,
         timestamp: traffic.timestamp,
         matched_rules,
+        active_rules: Some(build_active_rules_export(traffic.listener_port, state).await),
     }
+}
+
+async fn build_active_rules_export(
+    listener_port: u16,
+    state: &SharedAdminState,
+) -> ActiveRulesExport {
+    let admin_port = state.port();
+    if listener_port != 0 && listener_port != admin_port {
+        return build_custom_port_active_rules_export(listener_port, state).await;
+    }
+    build_default_port_active_rules_export(state)
+}
+
+async fn build_custom_port_active_rules_export(
+    listener_port: u16,
+    state: &SharedAdminState,
+) -> ActiveRulesExport {
+    let admin_port = state.port();
+    let Some(manager) = state.temporary_port_manager() else {
+        return unavailable_active_rules_export(
+            ActiveRuleSource::CustomPort,
+            admin_port,
+            listener_port,
+            "Temporary port manager is not configured",
+        );
+    };
+
+    match manager.active_summary(listener_port).await {
+        Ok(summary) => {
+            let rules = summary
+                .rules
+                .into_iter()
+                .map(|rule| ActiveRuleExport {
+                    name: rule.name,
+                    rule_count: rule.rule_count,
+                    group_id: rule.group_id,
+                    group_name: rule.group_name,
+                    content: rule.content,
+                })
+                .collect();
+            ActiveRulesExport {
+                source: ActiveRuleSource::CustomPort,
+                admin_port,
+                listener_port: summary.port,
+                total: summary.total,
+                rules,
+                merged_content: summary.merged_content,
+                unavailable_reason: None,
+            }
+        }
+        Err(error) => unavailable_active_rules_export(
+            ActiveRuleSource::CustomPort,
+            admin_port,
+            listener_port,
+            error.message,
+        ),
+    }
+}
+
+fn build_default_port_active_rules_export(state: &SharedAdminState) -> ActiveRulesExport {
+    let admin_port = state.port();
+    match collect_default_active_rules(state) {
+        Ok((rules, merged_content)) => ActiveRulesExport {
+            source: ActiveRuleSource::DefaultPort,
+            admin_port,
+            listener_port: admin_port,
+            total: rules.len(),
+            rules,
+            merged_content,
+            unavailable_reason: None,
+        },
+        Err(error) => unavailable_active_rules_export(
+            ActiveRuleSource::DefaultPort,
+            admin_port,
+            admin_port,
+            error,
+        ),
+    }
+}
+
+fn unavailable_active_rules_export(
+    source: ActiveRuleSource,
+    admin_port: u16,
+    listener_port: u16,
+    reason: impl Into<String>,
+) -> ActiveRulesExport {
+    ActiveRulesExport {
+        source,
+        admin_port,
+        listener_port,
+        total: 0,
+        rules: Vec::new(),
+        merged_content: String::new(),
+        unavailable_reason: Some(reason.into()),
+    }
+}
+
+fn collect_default_active_rules(
+    state: &SharedAdminState,
+) -> Result<(Vec<ActiveRuleExport>, String), String> {
+    let mut rules = Vec::new();
+    let mut content_parts = Vec::new();
+    let base_dir = state.rules_storage.base_dir();
+
+    if !base_dir.exists() {
+        return Ok((rules, String::new()));
+    }
+
+    collect_enabled_rule_files(
+        &state.rules_storage,
+        None,
+        None,
+        &mut rules,
+        &mut content_parts,
+    )
+    .map_err(|e| format!("Failed to load default enabled rules: {e}"))?;
+
+    let entries =
+        std::fs::read_dir(base_dir).map_err(|e| format!("Failed to read rule directories: {e}"))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let dir_name = entry.file_name().to_string_lossy().to_string();
+        let group_id = {
+            let cache = state.group_name_cache();
+            cache.reverse_lookup(&dir_name)
+        };
+        let group_storage = RulesStorage::with_dir(path)
+            .map_err(|e| format!("Failed to open group rule directory '{dir_name}': {e}"))?;
+        collect_enabled_rule_files(
+            &group_storage,
+            group_id.as_deref(),
+            Some(&dir_name),
+            &mut rules,
+            &mut content_parts,
+        )
+        .map_err(|e| format!("Failed to load enabled rules from '{dir_name}': {e}"))?;
+    }
+
+    Ok((rules, content_parts.join("\n")))
+}
+
+fn collect_enabled_rule_files(
+    storage: &RulesStorage,
+    group_id: Option<&str>,
+    group_name: Option<&str>,
+    rules: &mut Vec<ActiveRuleExport>,
+    content_parts: &mut Vec<String>,
+) -> Result<(), String> {
+    let enabled = storage.load_enabled().map_err(|e| e.to_string())?;
+    for rule in enabled {
+        content_parts.push(rule.content.clone());
+        rules.push(active_rule_from_file(rule, group_id, group_name));
+    }
+    Ok(())
+}
+
+fn active_rule_from_file(
+    rule: RuleFile,
+    group_id: Option<&str>,
+    group_name: Option<&str>,
+) -> ActiveRuleExport {
+    ActiveRuleExport {
+        name: rule.name,
+        rule_count: count_rules(&rule.content),
+        group_id: group_id.map(str::to_string),
+        group_name: group_name.map(str::to_string),
+        content: Some(rule.content),
+    }
+}
+
+fn count_rules(content: &str) -> usize {
+    content
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.is_empty() && !trimmed.starts_with('#')
+        })
+        .count()
 }
 
 async fn handle_export_scripts(
@@ -1178,6 +1417,8 @@ fn toml_to_json(toml_val: toml::Value) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use std::sync::Arc;
 
     #[test]
     fn network_record_import_preserves_routing_diagnostics() {
@@ -1207,6 +1448,7 @@ mod tests {
                 protocol: "Host".to_string(),
                 value: "10.37.102.138:8081".to_string(),
             }]),
+            active_rules: None,
         };
 
         let traffic = network_record_to_traffic_record(&record);
@@ -1236,5 +1478,202 @@ mod tests {
                 "10.37.102.138:8081"
             ))
         );
+    }
+
+    #[test]
+    fn network_import_rejects_empty_package() {
+        let err = validate_network_import_records(0).unwrap_err();
+        assert_eq!(err, EMPTY_NETWORK_IMPORT_ERROR);
+    }
+
+    #[test]
+    fn network_export_rejects_empty_selection() {
+        let err = validate_network_export_records(&[], &[], 0).unwrap_err();
+        assert!(err.contains("Select at least one Network record"));
+    }
+
+    #[test]
+    fn network_export_rejects_missing_selected_records() {
+        let requested = vec!["A".to_string(), "B".to_string()];
+        let missing = vec!["B".to_string()];
+
+        let err = validate_network_export_records(&requested, &missing, 1).unwrap_err();
+
+        assert!(err.contains("1 selected record(s) no longer exist"));
+        assert!(err.contains("B"));
+    }
+
+    #[test]
+    fn network_export_allows_resolved_records() {
+        let requested = vec!["A".to_string()];
+
+        validate_network_export_records(&requested, &[], 1).unwrap();
+    }
+
+    #[tokio::test]
+    async fn network_export_attaches_default_port_active_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RulesStorage::with_dir(dir.path().to_path_buf()).unwrap();
+        storage
+            .save(&RuleFile::new(
+                "default-rule",
+                "default.example.test status://209",
+            ))
+            .unwrap();
+        storage
+            .save(
+                &RuleFile::new("disabled-rule", "disabled.example.test status://500")
+                    .with_enabled(false),
+            )
+            .unwrap();
+        let state = Arc::new(crate::state::AdminState::new_for_test(9900, storage));
+        let mut traffic = TrafficRecord::new(
+            "REQ-1".to_string(),
+            "GET".to_string(),
+            "http://default.example.test/".to_string(),
+        );
+        traffic.listener_port = 9900;
+
+        let record = traffic_to_network_record(&traffic, false, &state).await;
+        let active_rules = record.active_rules.expect("active rules snapshot");
+
+        assert_eq!(record.listener_port, Some(9900));
+        assert_eq!(active_rules.source, ActiveRuleSource::DefaultPort);
+        assert_eq!(active_rules.listener_port, 9900);
+        assert_eq!(active_rules.total, 1);
+        assert_eq!(active_rules.rules[0].name, "default-rule");
+        assert_eq!(
+            active_rules.rules[0].content.as_deref(),
+            Some("default.example.test status://209")
+        );
+        assert!(active_rules
+            .merged_content
+            .contains("default.example.test status://209"));
+        assert!(!active_rules
+            .merged_content
+            .contains("disabled.example.test"));
+    }
+
+    #[tokio::test]
+    async fn network_export_reports_empty_default_rules_when_rule_dir_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RulesStorage::with_dir(dir.path().join("missing-rules")).unwrap();
+        let state = Arc::new(crate::state::AdminState::new_for_test(9900, storage));
+        let mut traffic = TrafficRecord::new(
+            "REQ-empty".to_string(),
+            "GET".to_string(),
+            "http://empty.example.test/".to_string(),
+        );
+        traffic.listener_port = 9900;
+
+        let record = traffic_to_network_record(&traffic, false, &state).await;
+        let active_rules = record.active_rules.expect("active rules snapshot");
+
+        assert_eq!(active_rules.source, ActiveRuleSource::DefaultPort);
+        assert_eq!(active_rules.total, 0);
+        assert!(active_rules.rules.is_empty());
+        assert!(active_rules.merged_content.is_empty());
+        assert!(active_rules.unavailable_reason.is_none());
+    }
+
+    #[tokio::test]
+    async fn network_export_uses_custom_port_active_rules_for_request_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RulesStorage::with_dir(dir.path().to_path_buf()).unwrap();
+        storage
+            .save(&RuleFile::new(
+                "default-rule",
+                "default.example.test status://209",
+            ))
+            .unwrap();
+        let state = Arc::new(crate::state::AdminState::new_for_test(9900, storage));
+        state.set_temporary_port_manager(Arc::new(FakeTemporaryPortManager));
+        let mut traffic = TrafficRecord::new(
+            "REQ-2".to_string(),
+            "GET".to_string(),
+            "http://custom.example.test/".to_string(),
+        );
+        traffic.listener_port = 19090;
+
+        let record = traffic_to_network_record(&traffic, false, &state).await;
+        let active_rules = record.active_rules.expect("active rules snapshot");
+
+        assert_eq!(record.listener_port, Some(19090));
+        assert_eq!(active_rules.source, ActiveRuleSource::CustomPort);
+        assert_eq!(active_rules.admin_port, 9900);
+        assert_eq!(active_rules.listener_port, 19090);
+        assert_eq!(active_rules.total, 1);
+        assert_eq!(active_rules.rules[0].name, "custom-port-rule");
+        assert_eq!(
+            active_rules.rules[0].content.as_deref(),
+            Some("custom.example.test status://210")
+        );
+        assert!(active_rules
+            .merged_content
+            .contains("custom.example.test status://210"));
+        assert!(!active_rules.merged_content.contains("default.example.test"));
+    }
+
+    struct FakeTemporaryPortManager;
+
+    #[async_trait]
+    impl crate::temp_ports::TemporaryPortManager for FakeTemporaryPortManager {
+        async fn bind(
+            &self,
+            _req: crate::temp_ports::TemporaryPortBindRequest,
+        ) -> Result<crate::temp_ports::TemporaryPortBinding, crate::temp_ports::TemporaryPortError>
+        {
+            unreachable!("bind is not used by this test")
+        }
+
+        async fn update(
+            &self,
+            _port: u16,
+            _req: crate::temp_ports::TemporaryPortUpdateRequest,
+        ) -> Result<crate::temp_ports::TemporaryPortBinding, crate::temp_ports::TemporaryPortError>
+        {
+            unreachable!("update is not used by this test")
+        }
+
+        async fn destroy(
+            &self,
+            _port: u16,
+        ) -> Result<crate::temp_ports::TemporaryPortBinding, crate::temp_ports::TemporaryPortError>
+        {
+            unreachable!("destroy is not used by this test")
+        }
+
+        async fn list(&self) -> Vec<crate::temp_ports::TemporaryPortBinding> {
+            Vec::new()
+        }
+
+        async fn show(
+            &self,
+            _port: u16,
+        ) -> Result<crate::temp_ports::TemporaryPortBinding, crate::temp_ports::TemporaryPortError>
+        {
+            unreachable!("show is not used by this test")
+        }
+
+        async fn active_summary(
+            &self,
+            port: u16,
+        ) -> Result<
+            crate::temp_ports::TemporaryPortActiveSummary,
+            crate::temp_ports::TemporaryPortError,
+        > {
+            Ok(crate::temp_ports::TemporaryPortActiveSummary {
+                port,
+                total: 1,
+                rules: vec![crate::temp_ports::TemporaryPortRuleItem {
+                    name: "custom-port-rule".to_string(),
+                    rule_count: 1,
+                    group_id: None,
+                    group_name: None,
+                    content: Some("custom.example.test status://210".to_string()),
+                }],
+                merged_content: "custom.example.test status://210".to_string(),
+            })
+        }
     }
 }

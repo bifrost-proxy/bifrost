@@ -35,7 +35,8 @@
 |------|---------|-----------|------|
 | [remote-access-web-ui.md](./remote-access-web-ui.md) | 远程访问管理 Web UI | 17 | 远程访问配置、登录、会话管理、登录记录展示 |
 | [remote-access-brute-force-protection.md](./remote-access-brute-force-protection.md) | 远程访问暴力破解防护 | 13 | 登录失败计数、自动锁定、密码强度校验、本机恢复、前端锁定提示 |
-| [webui-traffic.md](./webui-traffic.md) | Web UI Traffic 页面 | 48 | 流量表格、详情面板、Tab 切换、Body 视图、筛选过滤（含主筛选器按代理端口过滤与临时停用单条条件）、右键菜单、WebSocket/SSE、搜索、高并发 CONNECT 压力 |
+| [webui-traffic.md](./webui-traffic.md) | Web UI Traffic 页面 | 50 | 流量表格、详情面板、Tab 切换、Body 视图、筛选过滤（含主筛选器按代理端口过滤与临时停用单条条件）、右键菜单、Network .bifrost 导入导出空包防误报、WebSocket/SSE、搜索、高并发 CONNECT 压力 |
+| [network-export.md](./network-export.md) | Network 导出生效规则快照 | 4 | 默认端口与自定义端口 Network `.bifrost` 导出携带对应端口生效规则快照，保持空选择防护和旧文件导入兼容 |
 | [webui-rules.md](./webui-rules.md) | Web UI Rules 页面 | 40 | 规则列表、创建/编辑/删除、排序方式 UI 配置持久化、语法高亮、自动补全、树形视图、Dynamic Island、Merged Rules 一键复制、导入导出、桌面端编辑器快捷键回归、Undo 后保存清理黄点、编辑器内容恢复原文后 Save 按钮禁用回归 |
 | [webui-scripts.md](./webui-scripts.md) | Web UI Scripts 页面 | 25 | 脚本创建（Req/Res/Dec/Parser）、顶部 + 创建菜单、... 更多操作菜单、真实 Import 文件选择器、编辑、保存、测试运行、日志查看、名称校验、树形目录、Parser/Decode 运行时上下文字段补全、桌面端编辑器快捷键回归、Undo 后保存清理黄点 |
 | [webui-values.md](./webui-values.md) | Web UI Values 页面 | 20 | Value 列表、创建/编辑/删除、编辑器、规则引用、导入导出、桌面端编辑器快捷键回归、Undo 后保存清理黄点 |
@@ -181,7 +182,7 @@
 
 ---
 
-**总计：99 个测试文件，1683 个测试用例**
+**总计：100 个测试文件，1687 个测试用例**
 
 ## 工作流程
 

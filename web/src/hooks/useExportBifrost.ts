@@ -6,24 +6,21 @@ import {
   exportScripts,
   exportValues,
   exportTemplates,
+  formatBifrostFileError,
+  getEmptyExportMessage,
+  getExportItemCount,
   downloadFile,
   formatExportFilename,
 } from '../api/bifrost-file';
 import type {
   BifrostFileType,
+  ExportRequest,
   ExportRulesRequest,
   ExportNetworkRequest,
   ExportScriptRequest,
   ExportValuesRequest,
   ExportTemplateRequest,
 } from '../api/bifrost-file';
-
-type ExportRequest =
-  | ExportRulesRequest
-  | ExportNetworkRequest
-  | ExportScriptRequest
-  | ExportValuesRequest
-  | ExportTemplateRequest;
 
 export function useExportBifrost() {
   const exportFile = useCallback(
@@ -34,32 +31,32 @@ export function useExportBifrost() {
     ) => {
       try {
         let content: string;
-        let count: number | undefined;
+        const emptyExportMessage = getEmptyExportMessage(fileType, request);
+        if (emptyExportMessage) {
+          message.warning(emptyExportMessage);
+          return;
+        }
+
+        const count = getExportItemCount(fileType, request);
 
         switch (fileType) {
           case 'rules':
             content = await exportRules(request as ExportRulesRequest);
-            count = (request as ExportRulesRequest).rule_names.length;
             break;
           case 'network':
             content = await exportNetwork(request as ExportNetworkRequest);
-            count = (request as ExportNetworkRequest).record_ids.length;
             break;
           case 'script':
             content = await exportScripts(request as ExportScriptRequest);
-            count = (request as ExportScriptRequest).script_names.length;
             break;
           case 'values': {
             const valuesReq = request as ExportValuesRequest;
             content = await exportValues(valuesReq);
-            count = valuesReq.value_names?.length;
             break;
           }
           case 'template': {
             const templateReq = request as ExportTemplateRequest;
             content = await exportTemplates(templateReq);
-            count =
-              templateReq.request_ids?.length || templateReq.group_ids?.length;
             break;
           }
           default:
@@ -70,7 +67,7 @@ export function useExportBifrost() {
         downloadFile(content, filename);
         message.success(`Exported as ${filename}`);
       } catch (error) {
-        message.error(`Export failed: ${error}`);
+        message.error(`Export failed: ${formatBifrostFileError(error)}`);
       }
     },
     []

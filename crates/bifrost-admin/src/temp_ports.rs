@@ -60,6 +60,8 @@ pub struct TemporaryPortRuleItem {
     pub group_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

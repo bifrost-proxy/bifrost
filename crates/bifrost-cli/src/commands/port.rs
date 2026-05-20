@@ -259,6 +259,7 @@ impl CliTemporaryPortManager {
                 rule_count: count_rules(&rule_file.content),
                 group_id,
                 group_name,
+                content: Some(rule_file.content),
             });
         }
         Ok(TemporaryPortActiveSummary {

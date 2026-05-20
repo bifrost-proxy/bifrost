@@ -678,4 +678,36 @@ example.com proxy://localhost:3000
             BifrostFileType::Template
         );
     }
+
+    #[test]
+    fn parse_network_accepts_legacy_record_without_active_rules() {
+        let content = r#"01 network
+
+[meta]
+name = "legacy-network"
+version = "1.0.0"
+created_at = "2026-05-20T00:00:00Z"
+
+[options]
+count = 1
+
+---
+[
+  {
+    "id": "REQ-legacy",
+    "method": "GET",
+    "url": "http://legacy.example.test/",
+    "status": 200,
+    "duration_ms": 1,
+    "timestamp": 1760000000000
+  }
+]
+"#;
+
+        let file = BifrostFileParser::parse_network(content).unwrap();
+
+        assert_eq!(file.content.len(), 1);
+        assert_eq!(file.content[0].listener_port, None);
+        assert!(file.content[0].active_rules.is_none());
+    }
 }

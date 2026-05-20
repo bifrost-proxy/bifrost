@@ -183,7 +183,7 @@ pub struct NetworkRecord {
     pub actual_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub actual_host: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listener_port: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub has_rule_hit: Option<bool>,
@@ -205,6 +205,8 @@ pub struct NetworkRecord {
     pub timestamp: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matched_rules: Option<Vec<MatchedRuleExport>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_rules: Option<ActiveRulesExport>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,6 +214,37 @@ pub struct MatchedRuleExport {
     pub pattern: String,
     pub protocol: String,
     pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActiveRuleSource {
+    DefaultPort,
+    CustomPort,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActiveRuleExport {
+    pub name: String,
+    pub rule_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActiveRulesExport {
+    pub source: ActiveRuleSource,
+    pub admin_port: u16,
+    pub listener_port: u16,
+    pub total: usize,
+    pub rules: Vec<ActiveRuleExport>,
+    pub merged_content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

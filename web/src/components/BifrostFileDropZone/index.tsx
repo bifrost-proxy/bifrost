@@ -2,7 +2,12 @@ import { useCallback, useEffect, useState } from "react";
 import { Modal, Spin, message } from "antd";
 import { useNavigate } from "react-router-dom";
 import { UploadOutlined } from "@ant-design/icons";
-import { importFile } from "../../api/bifrost-file";
+import {
+  formatBifrostFileError,
+  formatImportSuccessMessage,
+  getImportedItemCount,
+  importFile,
+} from "../../api/bifrost-file";
 import type { BifrostFileType } from "../../api/bifrost-file";
 import { useValuesStore } from "../../stores/useValuesStore";
 import { useScriptsStore } from "../../stores/useScriptsStore";
@@ -106,13 +111,17 @@ export const BifrostFileDropZone: React.FC<DropZoneProps> = ({
         for (const file of bifrostFiles) {
           const content = await file.text();
           const result = await importFile(content);
+          const importedCount = getImportedItemCount(result);
 
-          if (result.warnings && result.warnings.length > 0) {
+          if (importedCount === 0) {
+            message.warning(formatImportSuccessMessage(result, file.name));
+            continue;
+          } else if (result.warnings && result.warnings.length > 0) {
             message.warning(
               `Imported ${file.name} with ${result.warnings.length} warning(s)`,
             );
           } else {
-            message.success(`Imported ${file.name} successfully`);
+            message.success(formatImportSuccessMessage(result, file.name));
           }
 
           await refreshStoreByType(result.file_type);
@@ -124,7 +133,7 @@ export const BifrostFileDropZone: React.FC<DropZoneProps> = ({
           }
         }
       } catch (error) {
-        message.error(`Import failed: ${error}`);
+        message.error(`Import failed: ${formatBifrostFileError(error)}`);
       } finally {
         setIsImporting(false);
       }
