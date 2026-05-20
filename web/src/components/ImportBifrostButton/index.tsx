@@ -3,7 +3,13 @@ import { Button, Upload, message } from 'antd';
 import { ImportOutlined } from '@ant-design/icons';
 import type { UploadProps, ButtonProps } from 'antd';
 import type { RcFile } from 'antd/es/upload';
-import { importFile, detectType } from '../../api/bifrost-file';
+import {
+  detectType,
+  formatBifrostFileError,
+  formatImportSuccessMessage,
+  getImportedItemCount,
+  importFile,
+} from '../../api/bifrost-file';
 import type { BifrostFileType, ImportResponse } from '../../api/bifrost-file';
 import { useTrafficStore } from '../../stores/useTrafficStore';
 
@@ -47,11 +53,15 @@ export const ImportBifrostButton: React.FC<ImportBifrostButtonProps> = ({
         }
 
         const result = await importFile(content);
+        const importedCount = getImportedItemCount(result);
 
-        if (result.warnings && result.warnings.length > 0) {
+        if (importedCount === 0) {
+          message.warning(formatImportSuccessMessage(result, file.name));
+          return Upload.LIST_IGNORE;
+        } else if (result.warnings && result.warnings.length > 0) {
           message.warning(`Import completed with ${result.warnings.length} warning(s)`);
         } else {
-          message.success('Import successful');
+          message.success(formatImportSuccessMessage(result, file.name));
         }
 
         if (result.file_type === 'network') {
@@ -64,7 +74,7 @@ export const ImportBifrostButton: React.FC<ImportBifrostButtonProps> = ({
 
         onImportSuccess?.(result);
       } catch (error) {
-        message.error(`Import failed: ${error}`);
+        message.error(`Import failed: ${formatBifrostFileError(error)}`);
       }
 
       return Upload.LIST_IGNORE;

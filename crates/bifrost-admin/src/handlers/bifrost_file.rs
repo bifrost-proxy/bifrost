@@ -12,6 +12,8 @@ use super::{error_response, full_body, json_response, method_not_allowed, BoxBod
 use crate::state::SharedAdminState;
 use crate::traffic::TrafficRecord;
 
+const EMPTY_NETWORK_IMPORT_ERROR: &str = "Network file contains 0 records; nothing to import. Re-export from Network after selecting at least one visible request.";
+
 #[derive(Debug, Serialize)]
 pub struct DetectResponse {
     pub file_type: BifrostFileType,
@@ -255,6 +257,10 @@ async fn import_network(content: &str, state: &SharedAdminState) -> Response<Box
 
     let mut warnings: Vec<String> = Vec::new();
     let mut record_count = 0;
+
+    if let Err(message) = validate_network_import_records(file.content.len()) {
+        return error_response(StatusCode::BAD_REQUEST, message);
+    }
 
     for network_record in &file.content {
         let traffic_record = network_record_to_traffic_record(network_record);
@@ -697,6 +703,14 @@ async fn handle_export_network(
 
     let include_body = request.include_body.unwrap_or(true);
     let mut records: Vec<NetworkRecord> = Vec::new();
+    let mut missing_ids: Vec<String> = Vec::new();
+
+    if request.record_ids.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "Select at least one Network record before exporting a .bifrost file",
+        );
+    }
 
     for id in &request.record_ids {
         let traffic = if let Some(ref db_store) = state.traffic_db_store {
@@ -707,7 +721,15 @@ async fn handle_export_network(
 
         if let Some(traffic) = traffic {
             records.push(traffic_to_network_record(&traffic, include_body, &state).await);
+        } else {
+            missing_ids.push(id.clone());
         }
+    }
+
+    if let Err(message) =
+        validate_network_export_records(&request.record_ids, &missing_ids, records.len())
+    {
+        return error_response(StatusCode::BAD_REQUEST, &message);
     }
 
     let export_name = format!("network-export-{}", records.len());
@@ -731,6 +753,40 @@ async fn handle_export_network(
         .header("Content-Type", "text/plain; charset=utf-8")
         .body(full_body(output))
         .unwrap()
+}
+
+fn validate_network_import_records(record_count: usize) -> Result<(), &'static str> {
+    if record_count == 0 {
+        Err(EMPTY_NETWORK_IMPORT_ERROR)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_network_export_records(
+    requested_ids: &[String],
+    missing_ids: &[String],
+    exported_count: usize,
+) -> Result<(), String> {
+    if requested_ids.is_empty() {
+        return Err(
+            "Select at least one Network record before exporting a .bifrost file".to_string(),
+        );
+    }
+
+    if !missing_ids.is_empty() {
+        return Err(format!(
+            "Failed to export network file: {} selected record(s) no longer exist: {}",
+            missing_ids.len(),
+            missing_ids.join(", ")
+        ));
+    }
+
+    if exported_count == 0 {
+        return Err("Network export produced 0 records; nothing to write".to_string());
+    }
+
+    Ok(())
 }
 
 async fn traffic_to_network_record(
@@ -1159,5 +1215,40 @@ fn toml_to_json(toml_val: toml::Value) -> serde_json::Value {
             serde_json::Value::Object(map)
         }
         toml::Value::Datetime(dt) => serde_json::Value::String(dt.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn network_import_rejects_empty_package() {
+        let err = validate_network_import_records(0).unwrap_err();
+        assert_eq!(err, EMPTY_NETWORK_IMPORT_ERROR);
+    }
+
+    #[test]
+    fn network_export_rejects_empty_selection() {
+        let err = validate_network_export_records(&[], &[], 0).unwrap_err();
+        assert!(err.contains("Select at least one Network record"));
+    }
+
+    #[test]
+    fn network_export_rejects_missing_selected_records() {
+        let requested = vec!["A".to_string(), "B".to_string()];
+        let missing = vec!["B".to_string()];
+
+        let err = validate_network_export_records(&requested, &missing, 1).unwrap_err();
+
+        assert!(err.contains("1 selected record(s) no longer exist"));
+        assert!(err.contains("B"));
+    }
+
+    #[test]
+    fn network_export_allows_resolved_records() {
+        let requested = vec!["A".to_string()];
+
+        validate_network_export_records(&requested, &[], 1).unwrap();
     }
 }
