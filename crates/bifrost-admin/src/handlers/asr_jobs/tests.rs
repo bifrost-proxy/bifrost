@@ -436,6 +436,130 @@ mod tests {
     }
 
     #[test]
+    fn summary_reports_cleanable_source_audio_usage() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let done = audio_dir.join("done.wav");
+        let pending = audio_dir.join("pending.wav");
+        std::fs::write(&done, b"audio").unwrap();
+        std::fs::write(&pending, b"pending-audio").unwrap();
+        let task = AsrDirectoryTask {
+            id: "task-cleanable-summary".to_string(),
+            name: "Task".to_string(),
+            audio_dir: audio_dir.clone(),
+            recursive: true,
+            enabled: true,
+            paused: false,
+            paused_at_ms: None,
+            schedule: default_task_schedule(),
+            language: "chinese".to_string(),
+            model: "Qwen3-ASR-1.7B".to_string(),
+            runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+            last_run_at_ms: None,
+            next_run_at_ms: None,
+            last_error: None,
+            daily_agent: AsrDailyAgentConfig::default(),
+        };
+        let (text_path, _metadata_path, timeline_path) =
+            output_paths_in(temp.path(), &task.id, &done, &audio_dir);
+        std::fs::create_dir_all(text_path.parent().unwrap()).unwrap();
+        std::fs::write(&text_path, "done").unwrap();
+        std::fs::write(&timeline_path, "{}").unwrap();
+        let mut store = FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::new(),
+        };
+        let mut done_record = pending_record(&task.id, &done);
+        done_record.status = FileStatus::Success;
+        done_record.output_text_path = Some(text_path);
+        done_record.output_timeline_path = Some(timeline_path);
+        store.files.insert(source_key(&done), done_record);
+        store
+            .files
+            .insert(source_key(&pending), pending_record(&task.id, &pending));
+        save_file_store(&task.id, &store).unwrap();
+
+        let summary = task_with_summary(task).summary;
+        assert_eq!(summary.audio_source_file_count, 2);
+        assert_eq!(summary.audio_source_bytes, 18);
+        assert_eq!(summary.cleanable_source_file_count, 1);
+        assert_eq!(summary.cleanable_source_bytes, 5);
+    }
+
+    #[test]
+    fn cleanup_source_audio_deletes_only_successful_records_with_outputs() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        let outside_dir = temp.path().join("outside");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        let done = audio_dir.join("done.wav");
+        let partial = audio_dir.join("partial.wav");
+        let outside = outside_dir.join("outside.wav");
+        std::fs::write(&done, b"done-audio").unwrap();
+        std::fs::write(&partial, b"partial-audio").unwrap();
+        std::fs::write(&outside, b"outside-audio").unwrap();
+        let task = AsrDirectoryTask {
+            id: "task-cleanup".to_string(),
+            name: "Task".to_string(),
+            audio_dir: audio_dir.clone(),
+            recursive: true,
+            enabled: true,
+            paused: false,
+            paused_at_ms: None,
+            schedule: default_task_schedule(),
+            language: "chinese".to_string(),
+            model: "Qwen3-ASR-1.7B".to_string(),
+            runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+            last_run_at_ms: None,
+            next_run_at_ms: None,
+            last_error: None,
+            daily_agent: AsrDailyAgentConfig::default(),
+        };
+        let mut store = FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::new(),
+        };
+        for (path, status) in [
+            (&done, FileStatus::Success),
+            (&partial, FileStatus::PartialSuccess),
+            (&outside, FileStatus::Success),
+        ] {
+            let (text_path, _metadata_path, timeline_path) =
+                output_paths_in(temp.path(), &task.id, path, &audio_dir);
+            std::fs::create_dir_all(text_path.parent().unwrap()).unwrap();
+            std::fs::write(&text_path, "transcript").unwrap();
+            std::fs::write(&timeline_path, "{}").unwrap();
+            let mut record = pending_record(&task.id, path);
+            record.status = status;
+            record.output_text_path = Some(text_path);
+            record.output_timeline_path = Some(timeline_path);
+            store.files.insert(source_key(path), record);
+        }
+        save_file_store(&task.id, &store).unwrap();
+
+        let result = cleanup_task_source_audio(&task);
+
+        assert!(result.ok);
+        assert_eq!(result.deleted_files, 1);
+        assert_eq!(result.deleted_bytes, 10);
+        assert!(!done.exists());
+        assert!(partial.exists());
+        assert!(outside.exists());
+        assert_eq!(result.summary.deleted_after_processing, 2);
+        assert_eq!(result.summary.cleanable_source_file_count, 0);
+    }
+
+    #[test]
     fn summary_counts_failed_files_separately_from_pending() {
         let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
@@ -1340,162 +1464,5 @@ mod tests {
         drop(lock);
     }
 
-    #[test]
-    fn daily_agent_prompt_uses_file_list_for_file_capable_runners() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
-        let temp = TempDir::new().unwrap();
-        let _guard = EnvGuard::set_data_dir(temp.path());
-        let audio_dir = temp.path().join("audio");
-        std::fs::create_dir_all(&audio_dir).unwrap();
-        let mut task = AsrDirectoryTask {
-            id: "daily-agent-prompt-task".to_string(),
-            name: "Daily Agent Prompt Task".to_string(),
-            audio_dir,
-            recursive: true,
-            enabled: true,
-            paused: false,
-            paused_at_ms: None,
-            schedule: AsrTaskSchedule::Hourly { minute: 0 },
-            language: "chinese".to_string(),
-            model: "Qwen3-ASR-1.7B".to_string(),
-            runtime_strategy: AsrRuntimeStrategy::ReusePerFile,
-            created_at_ms: 1,
-            updated_at_ms: 1,
-            last_run_at_ms: None,
-            next_run_at_ms: Some(1),
-            last_error: None,
-            daily_agent: AsrDailyAgentConfig::default(),
-        };
-        task.daily_agent.runner = "codex-runner".to_string();
-        ensure_asr_daily_workspace(&task).unwrap();
-        std::fs::write(
-            daily_dir_for_task(&task.id).join("2026-05-19.md"),
-            "今日新增转写内容",
-        )
-        .unwrap();
-
-        let plan = build_daily_agent_change_plan(&task, "test", None, false).unwrap();
-        let codex_prompt = build_daily_agent_prompt(&task, &plan, "codex", false).unwrap();
-        assert!(codex_prompt.contains("2026-05-19.md"));
-        assert!(codex_prompt.contains("change_kind=NewFile"));
-        assert!(!codex_prompt.contains("AGENTS.md 内容"));
-        assert!(!codex_prompt.contains("变更文件内容"));
-
-        let chatgpt_first =
-            build_daily_agent_prompt(&task, &plan, "chatgpt_web", true).unwrap();
-        assert!(chatgpt_first.contains("AGENTS.md 内容"));
-        assert!(chatgpt_first.contains("今日新增转写内容"));
-
-        let chatgpt_next =
-            build_daily_agent_prompt(&task, &plan, "chatgpt_web", false).unwrap();
-        assert!(!chatgpt_next.contains("AGENTS.md 内容"));
-        assert!(chatgpt_next.contains("后续轮次"));
-        assert!(chatgpt_next.contains("今日新增转写内容"));
-    }
-
-    #[test]
-    fn daily_agent_report_gate_requires_report_before_processed_state() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
-        let temp = TempDir::new().unwrap();
-        let _guard = EnvGuard::set_data_dir(temp.path());
-        let audio_dir = temp.path().join("audio");
-        std::fs::create_dir_all(&audio_dir).unwrap();
-        let task = AsrDirectoryTask {
-            id: "daily-agent-report-gate-task".to_string(),
-            name: "Daily Agent Report Gate Task".to_string(),
-            audio_dir,
-            recursive: true,
-            enabled: true,
-            paused: false,
-            paused_at_ms: None,
-            schedule: AsrTaskSchedule::Hourly { minute: 0 },
-            language: "chinese".to_string(),
-            model: "Qwen3-ASR-1.7B".to_string(),
-            runtime_strategy: AsrRuntimeStrategy::ReusePerFile,
-            created_at_ms: 1,
-            updated_at_ms: 1,
-            last_run_at_ms: None,
-            next_run_at_ms: Some(1),
-            last_error: None,
-            daily_agent: AsrDailyAgentConfig::default(),
-        };
-        ensure_asr_daily_workspace(&task).unwrap();
-        std::fs::write(daily_dir_for_task(&task.id).join("2026-05-19.md"), "text").unwrap();
-
-        let plan = build_daily_agent_change_plan(&task, "test", None, false).unwrap();
-        let (generated, missing) = collect_report_outputs_for_plan(&plan);
-        assert!(generated.is_empty());
-        assert_eq!(missing.len(), 1);
-
-        std::fs::write(&missing[0], "# report").unwrap();
-        let (generated, missing) = collect_report_outputs_for_plan(&plan);
-        assert_eq!(generated.len(), 1);
-        assert!(missing.is_empty());
-    }
-
-    #[test]
-    fn daily_agent_runner_is_single_required_value() {
-        let mut task = AsrDirectoryTask {
-            id: "daily-agent-ready-task".to_string(),
-            name: "Daily Agent Ready Task".to_string(),
-            audio_dir: PathBuf::from("/tmp"),
-            recursive: true,
-            enabled: true,
-            paused: false,
-            paused_at_ms: None,
-            schedule: AsrTaskSchedule::Hourly { minute: 0 },
-            language: "chinese".to_string(),
-            model: "Qwen3-ASR-1.7B".to_string(),
-            runtime_strategy: AsrRuntimeStrategy::ReusePerFile,
-            created_at_ms: 1,
-            updated_at_ms: 1,
-            last_run_at_ms: None,
-            next_run_at_ms: Some(1),
-            last_error: None,
-            daily_agent: AsrDailyAgentConfig::default(),
-        };
-        task.daily_agent.runner = String::new();
-        assert!(!daily_agent_runner_ready(&task));
-
-        task.daily_agent.runner = "bifrost_agent".to_string();
-        assert!(daily_agent_runner_ready(&task));
-
-        task.daily_agent.runner = "codex-runner".to_string();
-        assert!(daily_agent_runner_ready(&task));
-        assert_eq!(daily_agent_external_runner_id(&task), Some("codex-runner"));
-    }
-
-    #[test]
-    fn daily_agent_im_self_call_uses_admin_prefix() {
-        assert_eq!(
-            daily_agent_im_send_url(9900),
-            "http://127.0.0.1:9900/_bifrost/api/im-gateway/messages/send"
-        );
-    }
-
-    #[test]
-    fn daily_agent_im_self_call_discovers_runtime_port() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
-        let temp = TempDir::new().unwrap();
-        let _guard = EnvGuard::set_data_dir(temp.path());
-        std::fs::write(
-            temp.path().join("runtime.json"),
-            r#"{"pid":1234,"port":18896,"host":"127.0.0.1"}"#,
-        )
-        .unwrap();
-
-        assert_eq!(discover_admin_port(), 18896);
-    }
-
-    #[test]
-    fn daily_agent_im_splits_full_report_without_summary_fallback() {
-        let content = "明".repeat(DAILY_AGENT_IM_TEXT_CHUNK_CHARS + 3);
-        let chunks = split_daily_agent_im_content(&content);
-
-        assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].chars().count(), DAILY_AGENT_IM_TEXT_CHUNK_CHARS);
-        assert_eq!(chunks[1], "明明明");
-        assert!(decorate_daily_agent_im_chunk(&chunks[0], 0, chunks.len())
-            .starts_with("ASR Daily Agent Report 1/2\n\n"));
-    }
+    include!("daily_agent_tests.rs");
 }

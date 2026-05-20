@@ -76,6 +76,111 @@ mark.mark-current {
   background-color: #874d00;
 }
 
+.asr-markdown-content {
+  min-height: 420px;
+  max-height: calc(100vh - 300px);
+  overflow: auto;
+  padding: 18px;
+  border: 1px solid var(--asr-markdown-border);
+  border-radius: 6px;
+  background: var(--asr-markdown-fill);
+  color: var(--asr-markdown-text);
+  font-size: 14px;
+  line-height: 1.75;
+}
+
+.asr-markdown-content > *:first-child {
+  margin-top: 0;
+}
+
+.asr-markdown-content > *:last-child {
+  margin-bottom: 0;
+}
+
+.asr-markdown-content h1,
+.asr-markdown-content h2,
+.asr-markdown-content h3,
+.asr-markdown-content h4 {
+  margin: 1.35em 0 0.65em;
+  color: var(--asr-markdown-text);
+  line-height: 1.3;
+}
+
+.asr-markdown-content h1 {
+  font-size: 26px;
+}
+
+.asr-markdown-content h2 {
+  font-size: 21px;
+}
+
+.asr-markdown-content h3 {
+  font-size: 17px;
+}
+
+.asr-markdown-content p,
+.asr-markdown-content ul,
+.asr-markdown-content ol,
+.asr-markdown-content blockquote,
+.asr-markdown-content pre,
+.asr-markdown-content table {
+  margin: 0 0 1em;
+}
+
+.asr-markdown-content ul,
+.asr-markdown-content ol {
+  padding-left: 1.6em;
+}
+
+.asr-markdown-content a {
+  color: var(--asr-markdown-link);
+}
+
+.asr-markdown-content blockquote {
+  padding: 8px 12px;
+  border-left: 3px solid var(--asr-markdown-border);
+  color: var(--asr-markdown-text-secondary);
+  background: var(--asr-markdown-fill-strong);
+}
+
+.asr-markdown-content code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--asr-markdown-fill-strong);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.92em;
+}
+
+.asr-markdown-content pre {
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--asr-markdown-border);
+  border-radius: 6px;
+  background: var(--asr-markdown-fill-strong);
+}
+
+.asr-markdown-content pre code {
+  padding: 0;
+  background: transparent;
+}
+
+.asr-markdown-content table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.asr-markdown-content th,
+.asr-markdown-content td {
+  padding: 8px 10px;
+  border: 1px solid var(--asr-markdown-border);
+  vertical-align: top;
+}
+
+.asr-markdown-content th {
+  background: var(--asr-markdown-fill-strong);
+  text-align: left;
+}
+
 .ant-spin-nested-loading,
 .ant-spin-container {
   height: 100%;

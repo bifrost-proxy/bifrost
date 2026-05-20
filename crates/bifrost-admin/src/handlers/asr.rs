@@ -1632,9 +1632,7 @@ async fn download_asr_assets(
         return Ok(());
     }
 
-    let client = reqwest::Client::builder()
-        .build()
-        .map_err(|error| format!("build downloader client: {error}"))?;
+    let client = build_asr_download_client()?;
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<DownloadProgress>();
     let progress_event_tx = tx.clone();
     let server_url = target.server_url_display();
@@ -1650,6 +1648,12 @@ async fn download_asr_assets(
     drop(progress_tx);
     let _ = progress_task.await;
     Ok(())
+}
+
+fn build_asr_download_client() -> Result<reqwest::Client, String> {
+    bifrost_core::direct_reqwest_client_builder()
+        .build()
+        .map_err(|error| format!("build downloader client: {error}"))
 }
 
 async fn send_download_progress(
@@ -2136,10 +2140,83 @@ fn required_model_files(model: &str) -> &'static [&'static str] {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Mutex as StdMutex, OnceLock};
+    use std::thread;
+    use std::time::Duration;
+
     use super::{
-        asr_download_requests, default_home, plan_upload_chunk_boundaries, target_from_query,
-        validate_loopback_host, wav_pcm_duration_ms, ASR_UPLOAD_CHUNK_DURATION_SECS,
+        asr_download_requests, build_asr_download_client, default_home,
+        plan_upload_chunk_boundaries, target_from_query, validate_loopback_host,
+        wav_pcm_duration_ms, ASR_UPLOAD_CHUNK_DURATION_SECS,
     };
+
+    fn proxy_env_lock() -> &'static StdMutex<()> {
+        static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| StdMutex::new(()))
+    }
+
+    struct ProxyEnvGuard {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl Drop for ProxyEnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.saved.drain(..) {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    fn install_invalid_proxy_env() -> ProxyEnvGuard {
+        let vars = [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+            "no_proxy",
+        ];
+        let saved: Vec<(&'static str, Option<String>)> = vars
+            .iter()
+            .map(|key| (*key, std::env::var(key).ok()))
+            .collect();
+
+        for key in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
+            std::env::set_var(key, "http://127.0.0.1:1");
+        }
+        std::env::remove_var("NO_PROXY");
+        std::env::remove_var("no_proxy");
+
+        ProxyEnvGuard { saved }
+    }
+
+    fn spawn_local_http_server() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0_u8; 1024];
+            let _ = stream.read(&mut buffer);
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+            let _ = stream.flush();
+        });
+        format!("http://{addr}")
+    }
 
     #[test]
     fn asr_target_rejects_remote_hosts() {
@@ -2184,6 +2261,51 @@ mod tests {
         assert!(labels.contains(&"Qwen3-ASR-1.7B/config.json"));
         assert!(labels.contains(&"Qwen3-ASR-1.7B/model-00001-of-00002.safetensors"));
         assert!(labels.contains(&"sample3.wav"));
+    }
+
+    #[test]
+    fn asr_download_requests_include_qwen3_asr_0_6b_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut target = target_from_query(Some("model=Qwen3-ASR-0.6B")).unwrap();
+        target.home = temp.path().to_path_buf();
+        std::fs::create_dir_all(target.install_dir()).unwrap();
+        std::fs::write(target.install_dir().join("asr"), "").unwrap();
+        std::fs::write(target.install_dir().join("asr-server"), "").unwrap();
+        let requests = asr_download_requests(&target).unwrap();
+        let labels = requests
+            .iter()
+            .map(|request| request.label.as_str())
+            .collect::<Vec<_>>();
+        assert!(labels.contains(&"Qwen3-ASR-0.6B/config.json"));
+        assert!(labels.contains(&"Qwen3-ASR-0.6B/model.safetensors"));
+        assert!(requests.iter().any(|request| {
+            request
+                .url
+                .contains("https://huggingface.co/Qwen/Qwen3-ASR-0.6B/resolve/main/config.json")
+        }));
+    }
+
+    #[test]
+    fn asr_download_client_bypasses_proxy_env() {
+        let _lock = proxy_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _env_guard = install_invalid_proxy_env();
+        let url = spawn_local_http_server();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let body = runtime.block_on(async {
+            build_asr_download_client()
+                .unwrap()
+                .get(url)
+                .timeout(Duration::from_secs(2))
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap()
+        });
+        assert_eq!(body, "ok");
     }
 
     #[test]

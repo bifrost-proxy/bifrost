@@ -285,17 +285,10 @@ async fn post_daily_agent_send_response(task_id: &str) -> Response<BoxBody> {
         return error_response(StatusCode::BAD_REQUEST, "IM channel not configured");
     }
 
-    let daily_dir = daily_dir_for_task(task_id);
-    let report_dir = daily_dir.join("report");
     let mut reports: Vec<String> = Vec::new();
 
-    if let Ok(entries) = std::fs::read_dir(&report_dir) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            let path = entry.path();
-            if path.extension().map(|e| e == "md").unwrap_or(false) {
-                reports.push(path.to_string_lossy().to_string());
-            }
-        }
+    for path in list_daily_agent_report_files(task_id) {
+        reports.push(path.to_string_lossy().to_string());
     }
 
     reports.sort();
@@ -321,10 +314,173 @@ fn get_daily_agent_runs_response(task_id: &str) -> Response<BoxBody> {
     };
 
     let processed = load_daily_agent_processed_state(task_id);
-    let documents: Vec<_> = processed.documents.values().collect();
+    let documents = build_daily_agent_records(task_id, &processed);
 
     json_response(&serde_json::json!({
         "task_id": task_id,
         "processed_documents": documents,
+    }))
+}
+
+fn daily_agent_report_dirs_for_task(task_id: &str) -> Vec<PathBuf> {
+    let daily_dir = daily_dir_for_task(task_id);
+    let mut exact_lower = Vec::new();
+    let mut case_compat = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&daily_dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if name == "report" {
+                exact_lower.push(path);
+            } else if name.eq_ignore_ascii_case("report") {
+                case_compat.push(path);
+            }
+        }
+    }
+
+    exact_lower.sort();
+    case_compat.sort();
+    let mut dirs = exact_lower;
+    dirs.extend(case_compat);
+    if dirs.is_empty() {
+        dirs.push(daily_dir.join("report"));
+    }
+    dirs
+}
+
+fn daily_agent_report_date_from_path(path: &Path) -> Option<String> {
+    let filename = path.file_name()?.to_str()?;
+    let date = filename.strip_suffix("-report.md")?;
+    if NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok() {
+        Some(date.to_string())
+    } else {
+        None
+    }
+}
+
+fn list_daily_agent_report_files(task_id: &str) -> Vec<PathBuf> {
+    let mut reports = Vec::new();
+    for report_dir in daily_agent_report_dirs_for_task(task_id) {
+        let Ok(entries) = std::fs::read_dir(&report_dir) else {
+            continue;
+        };
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.is_file() && daily_agent_report_date_from_path(&path).is_some() {
+                reports.push(path);
+            }
+        }
+    }
+    reports.sort();
+    reports
+}
+
+fn build_daily_agent_records(
+    task_id: &str,
+    processed: &AsrDailyAgentProcessedState,
+) -> Vec<AsrDailyAgentProcessedDocument> {
+    let mut documents = processed.documents.clone();
+
+    for report_path in list_daily_agent_report_files(task_id) {
+        let Some(date) = daily_agent_report_date_from_path(&report_path) else {
+            continue;
+        };
+        let report_path_string = report_path.to_string_lossy().to_string();
+        if let Some(document) = documents.get_mut(&date) {
+            if document
+                .report_path
+                .as_ref()
+                .map(|path| !Path::new(path).exists())
+                .unwrap_or(true)
+            {
+                document.report_path = Some(report_path_string);
+            }
+            continue;
+        }
+
+        let daily_source_path = daily_dir_for_task(task_id).join(format!("{date}.md"));
+        let (source_sha256, source_len_bytes) = if daily_source_path.exists() {
+            (
+                compute_sha256(&daily_source_path).unwrap_or_default(),
+                source_size(&daily_source_path).unwrap_or_default(),
+            )
+        } else {
+            (String::new(), 0)
+        };
+
+        documents.insert(
+            date.clone(),
+            AsrDailyAgentProcessedDocument {
+                date,
+                source_sha256,
+                source_len_bytes,
+                processed_at_ms: source_modified_ms(&report_path).unwrap_or_default(),
+                runner: "filesystem".to_string(),
+                report_path: Some(report_path_string),
+                last_run_id: "filesystem-scan".to_string(),
+            },
+        );
+    }
+
+    documents.into_values().collect()
+}
+
+fn daily_agent_report_path_for_date(task_id: &str, date: &str) -> Result<PathBuf, String> {
+    if NaiveDate::parse_from_str(date, "%Y-%m-%d").is_err() {
+        return Err("ASR Daily Agent report date must use YYYY-MM-DD".to_string());
+    }
+
+    for path in list_daily_agent_report_files(task_id) {
+        if daily_agent_report_date_from_path(&path).as_deref() == Some(date) {
+            return Ok(path);
+        }
+    }
+
+    Ok(daily_dir_for_task(task_id)
+        .join("report")
+        .join(format!("{date}-report.md")))
+}
+
+fn get_daily_agent_report_response(task_id: &str, date: &str) -> Response<BoxBody> {
+    let Some(task) = find_task(task_id) else {
+        return error_response(StatusCode::NOT_FOUND, "ASR task not found");
+    };
+
+    let report_path = match daily_agent_report_path_for_date(task_id, date) {
+        Ok(path) => path,
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error),
+    };
+    if !report_path.exists() {
+        return error_response(StatusCode::NOT_FOUND, "ASR Daily Agent report not found");
+    }
+
+    let processed = load_daily_agent_processed_state(task_id);
+    let processed_document = processed.documents.get(date);
+    let content = match std::fs::read_to_string(&report_path) {
+        Ok(content) => content,
+        Err(error) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("read ASR Daily Agent report {}: {error}", report_path.display()),
+            );
+        }
+    };
+
+    json_response(&serde_json::json!({
+        "task_id": task.id,
+        "task_name": task.name,
+        "date": date,
+        "path": report_path.to_string_lossy(),
+        "size": source_size(&report_path),
+        "modified_ms": source_modified_ms(&report_path),
+        "content": content,
+        "processed_at_ms": processed_document.map(|document| document.processed_at_ms),
+        "runner": processed_document.map(|document| document.runner.as_str()),
+        "last_run_id": processed_document.map(|document| document.last_run_id.as_str()),
     }))
 }

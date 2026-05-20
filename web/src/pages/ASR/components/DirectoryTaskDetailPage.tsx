@@ -19,6 +19,7 @@ import {
 } from "antd";
 import {
   ArrowLeftOutlined,
+  DeleteOutlined,
   LoadingOutlined,
   PauseCircleOutlined,
   PlayCircleOutlined,
@@ -28,12 +29,17 @@ import {
 } from "@ant-design/icons";
 import type {
   AsrDirectoryTaskDetail,
+  AsrDailyAgentReportDetail,
   AsrTaskDailyDocument,
   AsrTaskDailyDocumentDetail,
   AsrTaskFileRecord,
   AsrTranscriptTimeline,
 } from "../../../api/asr";
-import { retryAllFailedChunks, retryFailedChunks } from "../../../api/asr";
+import {
+  cleanupAsrSourceAudio,
+  retryAllFailedChunks,
+  retryFailedChunks,
+} from "../../../api/asr";
 import {
   fileStatusColor,
   fileStatusLabel,
@@ -42,12 +48,17 @@ import {
   formatTime,
 } from "../asrUtils";
 import TaskFileTranscriptPage from "./TaskFileTranscriptPage";
-import DailyAgentTab from "./DailyAgentTab";
+import DailyAgentTab, { DailyAgentRecordsTab } from "./DailyAgentTab";
+import MarkdownContent from "./MarkdownContent";
+import {
+  isDirectoryTaskDetailTabKey,
+  type DirectoryTaskDetailTabKey,
+} from "./taskDetailRoute";
 
 const { Text } = Typography;
 const DEFAULT_TASK_FILE_PAGE_SIZE = 8;
 const TASK_FILE_PAGE_SIZE_OPTIONS = ["8", "10", "20", "50", "100"];
-const TASK_FILE_TABLE_SCROLL_X = 1640;
+const TASK_FILE_TABLE_SCROLL_X = 1750;
 const DAILY_DOCUMENT_PAGE_SIZE = 8;
 
 type FileStatusFilter = "processing" | "pending" | "completed" | "failed" | "all";
@@ -104,19 +115,26 @@ interface DirectoryTaskDetailPageProps {
   taskDetailLoading: boolean;
   selectedFileKey: string | null;
   selectedDailyDate: string | null;
+  selectedDailyAgentReportDate: string | null;
+  selectedTaskTab: DirectoryTaskDetailTabKey;
   taskTimeline: AsrTranscriptTimeline | null;
   taskTimelineLoading: boolean;
   taskDailyDocument: AsrTaskDailyDocumentDetail | null;
   taskDailyDocumentLoading: boolean;
+  taskDailyAgentReport: AsrDailyAgentReportDetail | null;
+  taskDailyAgentReportLoading: boolean;
   onBackToTasks: () => void;
   onBackToTaskFiles: () => void;
   onBackToDailyDocuments: () => void;
+  onBackToDailyAgentReports: () => void;
   onRefreshTask: (id: string) => void;
   onRunTask: (id: string) => void;
   onPauseTask: (id: string, force?: boolean) => void;
   onResumeTask: (id: string) => void;
   onOpenFile: (file: AsrTaskFileRecord) => void;
   onOpenDailyDocument: (date: string) => void;
+  onOpenDailyAgentReport: (date: string) => void;
+  onChangeTaskTab: (tab: DirectoryTaskDetailTabKey) => void;
 }
 
 export default function DirectoryTaskDetailPage({
@@ -125,22 +143,30 @@ export default function DirectoryTaskDetailPage({
   taskDetailLoading,
   selectedFileKey,
   selectedDailyDate,
+  selectedDailyAgentReportDate,
+  selectedTaskTab,
   taskTimeline,
   taskTimelineLoading,
   taskDailyDocument,
   taskDailyDocumentLoading,
+  taskDailyAgentReport,
+  taskDailyAgentReportLoading,
   onBackToTasks,
   onBackToTaskFiles,
   onBackToDailyDocuments,
+  onBackToDailyAgentReports,
   onRefreshTask,
   onRunTask,
   onPauseTask,
   onResumeTask,
   onOpenFile,
   onOpenDailyDocument,
+  onOpenDailyAgentReport,
+  onChangeTaskTab,
 }: DirectoryTaskDetailPageProps) {
   const [retryingFileKey, setRetryingFileKey] = useState<string | null>(null);
   const [startingBulkRetry, setStartingBulkRetry] = useState(false);
+  const [cleaningSourceAudio, setCleaningSourceAudio] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [fileStatusFilter, setFileStatusFilter] = useState<FileStatusFilter>("all");
   const [fileTablePagination, setFileTablePagination] = useState({
@@ -240,6 +266,32 @@ export default function DirectoryTaskDetailPage({
     }
   }, [taskDetail, onRefreshTask]);
 
+  const handleCleanupSourceAudio = useCallback(async () => {
+    if (!taskDetail) return;
+    setCleaningSourceAudio(true);
+    try {
+      const result = await cleanupAsrSourceAudio(taskDetail.id);
+      if (result.failed_files.length > 0) {
+        message.warning(
+          `Deleted ${result.deleted_files} source file(s), ${result.failed_files.length} failed`,
+        );
+      } else {
+        message.success(
+          `Deleted ${result.deleted_files} source file(s), freed ${formatBytes(
+            result.deleted_bytes,
+          )}`,
+        );
+      }
+      onRefreshTask(taskDetail.id);
+    } catch (error) {
+      message.error(
+        error instanceof Error ? error.message : "Failed to clean source audio",
+      );
+    } finally {
+      setCleaningSourceAudio(false);
+    }
+  }, [taskDetail, onRefreshTask]);
+
   if (selectedFileKey) {
     return (
       <div data-testid="asr-task-detail-page" style={{ height: "100%", overflow: "auto" }}>
@@ -323,11 +375,81 @@ export default function DirectoryTaskDetailPage({
     );
   }
 
+  if (selectedDailyAgentReportDate) {
+    return (
+      <div
+        data-testid="asr-daily-agent-report-page"
+        style={{ height: "100%", overflow: "auto" }}
+      >
+        <Card
+          title={
+            <Space>
+              <Button
+                icon={<ArrowLeftOutlined />}
+                onClick={onBackToDailyAgentReports}
+                aria-label="Back to Daily Agent reports"
+              />
+              <span>{selectedDailyAgentReportDate}-report.md</span>
+            </Space>
+          }
+          loading={taskDailyAgentReportLoading}
+        >
+          {taskDailyAgentReport ? (
+            <Space direction="vertical" size={12} style={{ width: "100%" }}>
+              <Descriptions size="small" bordered column={2}>
+                <Descriptions.Item label="Task">
+                  {taskDailyAgentReport.task_name}
+                </Descriptions.Item>
+                <Descriptions.Item label="Date">
+                  {taskDailyAgentReport.date}
+                </Descriptions.Item>
+                <Descriptions.Item label="Path" span={2}>
+                  <Text style={{ fontSize: 12 }} ellipsis={{ tooltip: taskDailyAgentReport.path }}>
+                    {taskDailyAgentReport.path}
+                  </Text>
+                </Descriptions.Item>
+                <Descriptions.Item label="Size">
+                  {formatBytes(taskDailyAgentReport.size)}
+                </Descriptions.Item>
+                <Descriptions.Item label="Modified">
+                  {formatTime(taskDailyAgentReport.modified_ms)}
+                </Descriptions.Item>
+                <Descriptions.Item label="Processed At">
+                  {formatTime(taskDailyAgentReport.processed_at_ms)}
+                </Descriptions.Item>
+                <Descriptions.Item label="Runner">
+                  {taskDailyAgentReport.runner ? (
+                    <Tag>{taskDailyAgentReport.runner}</Tag>
+                  ) : (
+                    "-"
+                  )}
+                </Descriptions.Item>
+              </Descriptions>
+              <MarkdownContent
+                token={token}
+                content={taskDailyAgentReport.content}
+                testId="asr-daily-agent-report-content"
+              />
+            </Space>
+          ) : (
+            <Text type="secondary">
+              {taskDailyAgentReportLoading
+                ? "Loading Daily Agent report..."
+                : "Daily Agent report not found."}
+            </Text>
+          )}
+        </Card>
+      </div>
+    );
+  }
+
   const summary = taskDetail?.summary;
   const bulkRetry = taskDetail?.bulk_retry;
   const bulkRetryActive =
     bulkRetry?.status === "queued" || bulkRetry?.status === "running";
   const failedChunkCount = summary?.failed_chunk_count ?? 0;
+  const cleanableSourceFileCount = summary?.cleanable_source_file_count ?? 0;
+  const cleanableSourceBytes = summary?.cleanable_source_bytes ?? 0;
   const bulkRetryPercent =
     bulkRetry && bulkRetry.queued_files > 0
       ? Math.round((bulkRetry.processed_files / bulkRetry.queued_files) * 100)
@@ -352,6 +474,31 @@ export default function DirectoryTaskDetailPage({
               <Button size="small" onClick={() => onRefreshTask(taskDetail.id)}>
                 Refresh
               </Button>
+              <Popconfirm
+                title={`Delete ${cleanableSourceFileCount} completed source audio file${cleanableSourceFileCount === 1 ? "" : "s"}?`}
+                description="Transcript and timeline outputs are kept. Partial-success files are not deleted so failed chunks can still be retried."
+                disabled={
+                  cleanableSourceFileCount === 0 ||
+                  cleaningSourceAudio ||
+                  taskDetail.summary.running ||
+                  bulkRetryActive
+                }
+                onConfirm={handleCleanupSourceAudio}
+              >
+                <Button
+                  size="small"
+                  danger
+                  icon={cleaningSourceAudio ? <LoadingOutlined /> : <DeleteOutlined />}
+                  disabled={
+                    cleanableSourceFileCount === 0 ||
+                    cleaningSourceAudio ||
+                    taskDetail.summary.running ||
+                    bulkRetryActive
+                  }
+                >
+                  Clean originals
+                </Button>
+              </Popconfirm>
               <Popconfirm
                 title={`Retry all ${failedChunkCount} failed chunk${failedChunkCount > 1 ? "s" : ""}?`}
                 description="Files are queued and retried one at a time."
@@ -460,6 +607,22 @@ export default function DirectoryTaskDetailPage({
                 {taskDetail.summary.pending}
               </Descriptions.Item>
               <Descriptions.Item label="Failed">{taskDetail.summary.failed}</Descriptions.Item>
+              <Descriptions.Item label="Audio Files">
+                <Space>
+                  <Text>{formatBytes(taskDetail.summary.audio_source_bytes)}</Text>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    ({taskDetail.summary.audio_source_file_count} files)
+                  </Text>
+                </Space>
+              </Descriptions.Item>
+              <Descriptions.Item label="Cleanable Originals">
+                <Space>
+                  <Text>{formatBytes(cleanableSourceBytes)}</Text>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    ({cleanableSourceFileCount} files)
+                  </Text>
+                </Space>
+              </Descriptions.Item>
               {summary && summary.partial_success > 0 ? (
                 <Descriptions.Item label="Partial Success">
                   <Space>
@@ -547,7 +710,12 @@ export default function DirectoryTaskDetailPage({
               />
             ) : null}
             <Tabs
-              defaultActiveKey="files"
+              activeKey={selectedTaskTab}
+              onChange={(key) => {
+                if (isDirectoryTaskDetailTabKey(key)) {
+                  onChangeTaskTab(key);
+                }
+              }}
               items={[
                 {
                   key: "files",
@@ -758,6 +926,12 @@ export default function DirectoryTaskDetailPage({
                     render: (value) => formatDuration(value),
                   },
                   {
+                    title: "Source Size",
+                    dataIndex: "source_size",
+                    width: 110,
+                    render: (value) => formatBytes(value),
+                  },
+                  {
                     title: "Started",
                     dataIndex: "started_at_ms",
                     width: 180,
@@ -876,6 +1050,16 @@ export default function DirectoryTaskDetailPage({
                   label: "Daily Agent",
                   children: taskDetail ? (
                     <DailyAgentTab taskId={taskDetail.id} />
+                  ) : null,
+                },
+                {
+                  key: "daily-agent-records",
+                  label: "Daily Agent Records",
+                  children: taskDetail ? (
+                    <DailyAgentRecordsTab
+                      taskId={taskDetail.id}
+                      onOpenReport={onOpenDailyAgentReport}
+                    />
                   ) : null,
                 },
               ]}

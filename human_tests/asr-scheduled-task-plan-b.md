@@ -787,6 +787,41 @@
 - `full_report` 发送失败时不再降级成 `ASR Daily Agent 完成报告整理` 摘要；超长报告按 `ASR Daily Agent Report X/N` 分片发送，失败时 `last_send_error` 指向具体分片。
 - 如果 Weixin provider 返回 `ret=-2`，任务本身仍可为 `success`，但 `daily_agent.im_delivery.last_send_error` 必须保留真实 IM 失败原因，message log 预览必须是原文报告分片而不是摘要。
 
+### TC-ASPB-35 Daily Agent Processed Documents report 全屏 Markdown 详情
+
+操作步骤：
+
+1. 使用默认数据目录源码服务打开真实页面：
+   ```bash
+   BIFROST_DATA_DIR=/Users/eden/.bifrost cargo run --bin bifrost -- start -p 9900 --unsafe-ssl --no-system-proxy
+   ```
+2. 在浏览器中打开：
+   ```text
+   http://localhost:9900/_bifrost/ai?aiSection=tools-asr&asrTask=76612de33e9740bc92440ce64a98a4cb
+   ```
+3. 进入 `Daily Agent` tab，确认 `Processed Documents` 表格中每一行 `Report` 列的 `YYYY-MM-DD-report.md` 是可点击入口。
+4. 检查 URL 包含 `asrTaskTab=daily-agent`；刷新浏览器页面后，确认仍然停留在 `Daily Agent` tab，不需要重新点击 tab。
+5. 点击任意一个 report，例如 `2026-05-14-report.md`。
+6. 检查页面切换为全屏 report 详情，而不是在表格内展开或弹小浮层。
+7. 检查详情页顶部展示返回按钮、文件名、任务名、日期、路径、大小、修改时间、处理时间和 Runner。
+8. 检查正文通过 Markdown 渲染器展示：标题渲染为标题样式，列表/表格/代码块按 Markdown 语义排版，不是原始纯文本 `<pre>`。
+9. 刷新浏览器页面，确认 URL 仍包含 `asrDailyReport=2026-05-14` 且页面直接恢复全屏 report 详情与 Markdown 正文。
+10. 点击返回按钮，确认回到 ASR 任务详情页、URL 中移除 `asrDailyReport`，并仍保留 `asrTaskTab=daily-agent`。
+11. 直接访问非法日期 API：
+   ```bash
+   curl -i 'http://127.0.0.1:9900/_bifrost/api/asr/tasks/76612de33e9740bc92440ce64a98a4cb/daily-agent/reports/../secret'
+   ```
+
+预期结果：
+
+- `Report` 列中所有已生成 report 的文件名均为可点击按钮。
+- 点击任意 report 后进入 `data-testid=asr-daily-agent-report-page` 的全屏详情页。
+- 正文位于 `data-testid=asr-daily-agent-report-content`，并由 Markdown 渲染器渲染为结构化 HTML。
+- Daily Agent tab 和 report 全屏详情都通过 URL 参数保持状态，刷新页面后仍恢复到同一视图。
+- 详情页元信息与对应 report 文件一致，内容包含实际 report Markdown。
+- 返回按钮回到任务详情页，不影响任务文件详情和 Daily Docs 详情 URL。
+- 非法日期或路径穿越不会读取任意文件，返回 400/404。
+
 ## 清理步骤
 
 ```bash
@@ -820,3 +855,4 @@ rm -rf ./.bifrost-test-planb
 | 2026-05-20 | TC-ASPB-32 Directory Tasks 新建弹窗回归 | `pnpm --dir web exec tsc -b --pretty false`；`pnpm --dir web exec eslint src/pages/ASR/components/DirectoryTasksPanel.tsx src/pages/ASR/index.tsx tests/ui/asr-microphone-meter.spec.ts`；`pnpm --dir web exec playwright test tests/ui/asr-microphone-meter.spec.ts -g "ASR directory tasks can be created and refreshed in the tools panel"` | PASS：`/_bifrost/ai?aiSection=tools-asr` 的 Directory Tasks 卡片正文不再常驻展示 Name / Audio Directory 创建表单；右上角只展示 `New` 按钮；点击 `New` 后弹出 `New Directory Task` Modal，填写 Name 和 Audio Directory 后点击 `Create` 成功创建任务并关闭弹窗，任务列表仍展示 `Recordings`、`/tmp/asr-audio`、`Daily at 02:00` 和处理进度 |
 | 2026-05-20 | TC-ASPB-33 Daily Agent Instructions 自适应高度回归 | `pnpm --dir web exec tsc -b --pretty false`；`pnpm --dir web exec eslint src/pages/ASR/components/DailyAgentTab.tsx tests/ui/asr-daily-agent-runner.spec.ts`；`pnpm --dir web exec playwright test tests/ui/asr-daily-agent-runner.spec.ts` | PASS：mock 返回 36 段长 `AGENTS.md` 后，`Agent Instructions (AGENTS.md)` 编辑框 `clientHeight + 2 >= scrollHeight` 且 `overflow-y=hidden`；编辑框自适应撑高，内部不出现独立滚动条，Runner / IM Channel 单下拉回归仍通过 |
 | 2026-05-20 | TC-ASPB-34 默认目录多文件 ChatGPT Web Daily Agent 与 FullReport IM 分片回归 | `BIFROST_DATA_DIR=/Users/eden/.bifrost cargo run --bin bifrost -- start -p 9900 --unsafe-ssl --no-system-proxy`；`curl -sS -X POST 'http://127.0.0.1:9900/_bifrost/api/asr/tasks/76612de33e9740bc92440ce64a98a4cb/daily-agent/run?force=true'`；轮询任务详情；检查 `/Users/eden/.bifrost/im_gateway/runs/1779216503662-*`、`1779216632038-*`、`1779216764881-*`、`1779216872746-*`；检查 `/Users/eden/.bifrost/asr/data/text/76612de33e9740bc92440ce64a98a4cb/daily/report/*-report.md`；查询 `/_bifrost/api/im-gateway/providers/acc/messages` | PASS/PARTIAL：默认任务 `day` 配置为 `runner=web`、`channel=owner:acc`、`mode=full_report`；daily 目录包含 `2026-05-14.md`、`2026-05-15.md`、`2026-05-16.md`、`2026-05-17.md` 四个源文件；force run 生成四个 ChatGPT Web run，prompt 分别只包含单日文件且按日期升序处理，大小约 217KB、262KB、267KB、149KB；四个 run 的 `result.json.status=succeeded`，四个 report 均生成（约 24.7KB、23.5KB、25.6KB、21.6KB）；ASR Daily Agent `last_status=success`。IM provider `acc` 当前即使发送短文本和上线通知也返回 `weixin sendmessage failed: ret=-2`，因此 FullReport 分片第 1/4 条发送失败；message log 预览为 `ASR Daily Agent Report 1/4` 加报告原文，确认不再降级为摘要。 |
+| 2026-05-20 | TC-ASPB-35 Daily Agent Processed Documents report 全屏 Markdown 详情 | `BIFROST_DATA_DIR=/Users/eden/.bifrost cargo run --bin bifrost -- start -p 9900 --unsafe-ssl --no-system-proxy --daemon -y`；`curl -sS 'http://127.0.0.1:9900/_bifrost/api/asr/tasks/76612de33e9740bc92440ce64a98a4cb/daily-agent/reports/2026-05-14'`；`curl -i 'http://127.0.0.1:9900/_bifrost/api/asr/tasks/76612de33e9740bc92440ce64a98a4cb/daily-agent/reports/%2E%2E%2Fsecret'`；`pnpm --dir web exec node --input-type=module` 使用 Playwright 打开真实 9900 页面、进入 Daily Agent、刷新 tab、点击 `2026-05-14-report.md`、刷新 report 详情、检查 Markdown DOM 并返回 | PASS：真实 API 返回 `runner=web`、report 路径 `/Users/eden/.bifrost/asr/data/text/76612de33e9740bc92440ce64a98a4cb/daily/report/2026-05-14-report.md` 和 Markdown 正文；路径穿越日期返回 400；真实页面进入 Daily Agent 后 URL 增加 `asrTaskTab=daily-agent`，刷新后 tab 仍选中；点击 report 后 URL 增加 `asrDailyReport=2026-05-14`，出现 `asr-daily-agent-report-page` 和 `asr-daily-agent-report-content`；刷新 report 详情后仍恢复全屏 Markdown；Markdown 渲染出 H1 `2026-05-14 日报（Force 更新版）`、多级标题与 140 个列表项，`preCount=0`；点击返回后 URL 移除 `asrDailyReport` 并保留 `asrTaskTab=daily-agent` |
