@@ -56,6 +56,16 @@
 - 如果实际端口与请求端口不同，输出 fallback 日志，并更新后续 Recent Calls 流量使用的 `MOCK_HTTP_PORT`。
 - 保持 `http_echo_server.py --retries 5` 行为不变，避免影响其他复用该 fixture 的测试。
 
+### 改进 5：未登录 sync session 时的 relay 注册日志降噪
+
+**现状**：Remote Invoke worker 会随 Bifrost 启动自动启动。用户尚未登录 sync session、`sync-state.json` 中没有 token 时，worker 仍进入 relay 注册流程，并把“缺少 sync session token”当作 `ERROR failed to register with relay` 周期性输出。该状态不是 relay 网络故障，而是“等待用户登录/配置 token”，持续刷 ERROR 会遮蔽真正问题。
+
+**改进**：
+- 在进入 relay 注册前先检查 sync session token，空 token 或纯空白 token 均视为缺失。
+- 缺 token 时 worker 保持 `Disconnected`，只输出一次 `INFO remote invoke relay registration waiting for sync session token`。
+- 保留原有退避唤醒机制，后续一旦 token 可用，worker 会重新进入正常注册流程。
+- 真正的 relay 网络错误、401 后重新注册失败、SSE 失败仍按原有 `ERROR` / `WARN` 级别输出，避免把真实故障静默掉。
+
 ## 测试方案
 
 ### 单元测试
@@ -64,12 +74,16 @@
 - `test_sse_reconcile_purges_stale_grants`: 验证对账逻辑
 - `test_validate_grant_accepts_active_permanent`: 验证有效 grant 执行命令时同步写入 `last_command_at`
 - `test_validate_grant_accepts_once_and_consumes`: 验证 once grant 消耗时也写入 `last_command_at`
+- `test_normalize_registration_session_token_rejects_missing_or_empty`: 验证缺失或纯空白 token 不会进入 relay 注册。
+- `test_normalize_registration_session_token_trims_valid_token`: 验证有效 token 会被 trim 后继续注册。
 
 ### E2E 测试
 - 使用 e2e-test 技能验证 SSE 重连对账
 - 更新 `e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh`：pair-code 授权后先断言 Grants API 有 `first_connected_at` 且 `last_command_at` 为空；执行一次远程搜索命令后断言 `last_command_at` 非空且不早于 `first_connected_at`。
 - 更新 `e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh`：当本地 echo fixture 请求端口被占用并 fallback 到新端口时，脚本必须解析实际端口、使用实际端口生成 Recent Calls 流量，并完整通过参数预览、长参数截断、落盘恢复与清理断言。
+- 新增 `e2e-tests/tests/test_remote_invoke_missing_sync_token_log_e2e.sh`：使用空临时数据目录启动 Bifrost，断言日志只出现一次等待 sync session token 的 INFO，且不再出现缺 token 导致的 `failed to register with relay` ERROR。
 
 ### 真实场景测试
 - 更新 `human_tests/remote-invoke.md`，新增 Grants 时间字段回归用例，并按文档逐条执行：进入 discovery、批准授权、查看 Grants、执行远程命令、再次查看 Grants。
 - 更新 `human_tests/remote-invoke.md`，新增 Recent Calls fixture 端口 fallback 回归用例，并按文档执行：预占 mock 请求端口、运行脚本、确认脚本切换到实际端口且 Recent Calls 断言全部通过。
+- 更新 `human_tests/remote-invoke.md`，新增缺 sync session token 日志降噪回归用例，并按文档执行：使用空临时数据目录启动 Bifrost，确认只输出一次等待登录提示且没有重复 ERROR。

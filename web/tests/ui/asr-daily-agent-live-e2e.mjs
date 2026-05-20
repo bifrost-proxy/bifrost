@@ -195,7 +195,9 @@ async function runWebUiConfigE2e(chatConfig, providers) {
       waitUntil: "domcontentloaded",
       timeout: 120000,
     });
-    await page.getByRole("tab", { name: "Daily Agent" }).click({ timeout: 120000 });
+    await page
+      .getByRole("tab", { name: "Daily Agent", exact: true })
+      .click({ timeout: 120000 });
     await page.getByTestId("asr-daily-agent-runner-select").click();
     await clickVisibleOption("codex");
     await page.waitForFunction(

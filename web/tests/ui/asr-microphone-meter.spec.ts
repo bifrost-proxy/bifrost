@@ -342,6 +342,7 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
 }) => {
   await installAsrMicrophoneMocks(page);
   let created = false;
+  let cleanedSourceAudio = false;
   await page.route("**/_bifrost/api/asr/tasks", async (route) => {
     if (route.request().method() === "POST") {
       created = true;
@@ -372,7 +373,13 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
             processed: 0,
             pending: 1,
             failed: 0,
+            partial_success: 0,
+            failed_chunk_count: 0,
             deleted_after_processing: 0,
+            audio_source_bytes: 0,
+            audio_source_file_count: 1,
+            cleanable_source_bytes: 0,
+            cleanable_source_file_count: 0,
             running: false,
           },
         }),
@@ -402,7 +409,13 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
                   processed: 1,
                   pending: 0,
                   failed: 0,
+                  partial_success: 0,
+                  failed_chunk_count: 0,
                   deleted_after_processing: 1,
+                  audio_source_bytes: 0,
+                  audio_source_file_count: 0,
+                  cleanable_source_bytes: 0,
+                  cleanable_source_file_count: 0,
                   running: false,
                 },
               },
@@ -436,9 +449,45 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
             processed: 1,
             pending: 0,
             failed: 0,
+            partial_success: 0,
+            failed_chunk_count: 0,
             deleted_after_processing: 1,
+            audio_source_bytes: 0,
+            audio_source_file_count: 0,
+            cleanable_source_bytes: 0,
+            cleanable_source_file_count: 0,
             running: false,
           },
+        },
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/asr/tasks/task-1/cleanup-source-audio", async (route) => {
+    cleanedSourceAudio = true;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        ok: true,
+        deleted_files: 1,
+        deleted_bytes: 1234,
+        skipped_files: 19,
+        skipped_bytes: 23456,
+        failed_files: [],
+        message: "Deleted 1 ASR source audio file(s).",
+        summary: {
+          discovered: 19,
+          processed: 1,
+          pending: 0,
+          failed: 0,
+          partial_success: 0,
+          failed_chunk_count: 0,
+          deleted_after_processing: 2,
+          audio_source_bytes: 23456,
+          audio_source_file_count: 19,
+          cleanable_source_bytes: 0,
+          cleanable_source_file_count: 0,
+          running: false,
         },
       }),
     });
@@ -469,7 +518,13 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
           processed: 1,
           pending: 0,
           failed: 0,
+          partial_success: 0,
+          failed_chunk_count: 0,
           deleted_after_processing: 1,
+          audio_source_bytes: cleanedSourceAudio ? 23456 : 24690,
+          audio_source_file_count: cleanedSourceAudio ? 19 : 20,
+          cleanable_source_bytes: cleanedSourceAudio ? 0 : 1234,
+          cleanable_source_file_count: cleanedSourceAudio ? 0 : 1,
           running: false,
         },
         daily_documents: [
@@ -554,9 +609,127 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
       body: Buffer.from("RIFF....WAVEfmt "),
     });
   });
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ runners: {} }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/providers", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([]),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/targets", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([]),
+    });
+  });
+  await page.route("**/_bifrost/api/asr/tasks/task-1/daily-agent", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        task_id: "task-1",
+        config: {
+          enabled: true,
+          runner: "bifrost_agent",
+          timeout_ms: 7200000,
+          trigger_policy: "after_asr_run",
+          instructions_source: "default",
+          im_delivery: {
+            enabled: false,
+            mode: "summary",
+            send_policy: "on_success_with_report",
+          },
+        },
+        workspace: {
+          daily_dir: "/tmp/bifrost/asr/data/text/task-1/daily",
+          report_dir: "/tmp/bifrost/asr/data/text/task-1/daily/report",
+          agents_path: "/tmp/bifrost/asr/data/text/task-1/daily/AGENTS.md",
+          agents_exists: true,
+          git_available: true,
+          git_initialized: true,
+          report_count: 1,
+        },
+        last_run: {
+          run_id: "run-20260514",
+          status: "success",
+          last_run_at_ms: Date.now() - 1000,
+        },
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/asr/tasks/task-1/daily-agent/agents", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        task_id: "task-1",
+        content: "# Daily Agent instructions\n",
+        source: "file",
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/asr/tasks/task-1/daily-agent/runs", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        task_id: "task-1",
+        processed_documents: [
+          {
+            date: "2026-05-14",
+            source_sha256: "abcdef1234567890",
+            source_len_bytes: 256,
+            processed_at_ms: Date.now() - 1000,
+            runner: "bifrost_agent",
+            report_path:
+              "/tmp/bifrost/asr/data/text/task-1/daily/report/2026-05-14-report.md",
+            last_run_id: "run-20260514",
+          },
+        ],
+      }),
+    });
+  });
+  await page.route(
+    "**/_bifrost/api/asr/tasks/task-1/daily-agent/reports/2026-05-14",
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          task_id: "task-1",
+          task_name: "Recordings",
+          date: "2026-05-14",
+          path: "/tmp/bifrost/asr/data/text/task-1/daily/report/2026-05-14-report.md",
+          size: 128,
+          modified_ms: Date.now() - 500,
+          content: "# Daily Agent Report\n\n运行记录内容",
+          processed_at_ms: Date.now() - 1000,
+          runner: "bifrost_agent",
+          last_run_id: "run-20260514",
+        }),
+      });
+    },
+  );
 
   await openPage(page, "ai?aiSection=tools-asr");
   await expect(page.getByText("Directory Tasks")).toBeVisible();
+  const speechConverterTop = await page
+    .getByText("Speech Converter", { exact: true })
+    .boundingBox();
+  const directoryTasksTop = await page
+    .getByText("Directory Tasks", { exact: true })
+    .boundingBox();
+  const speechToTextTop = await page.getByText("Speech to Text", { exact: true }).boundingBox();
+  expect(speechConverterTop?.y).toBeLessThan(directoryTasksTop?.y ?? Infinity);
+  expect(directoryTasksTop?.y).toBeLessThan(speechToTextTop?.y ?? Infinity);
   await expect(page.getByPlaceholder("Meeting audio watcher")).toHaveCount(0);
   await page.getByRole("button", { name: "New" }).click();
   const createDialog = page.getByRole("dialog", { name: "New Directory Task" });
@@ -576,6 +749,14 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
   const taskPage = page.getByTestId("asr-task-detail-page");
   await expect(taskPage).toBeVisible();
   await expect(taskPage.getByText("Directory Task: Recordings")).toBeVisible();
+  await expect(taskPage.getByText("Audio Files")).toBeVisible();
+  await expect(taskPage.getByText(/24\.1 KB/)).toBeVisible();
+  await expect(taskPage.getByText("Cleanable Originals")).toBeVisible();
+  await expect(taskPage.getByText(/1\.21 KB/).first()).toBeVisible();
+  await taskPage.getByRole("button", { name: "Clean originals" }).click();
+  await page.getByRole("button", { name: "OK" }).click();
+  await expect(page.getByText(/Deleted 1 source file/)).toBeVisible();
+  await expect(taskPage.getByText(/22\.9 KB/)).toBeVisible();
   await expect(taskPage.getByText("/tmp/asr-audio/sample-1.wav")).toBeVisible();
   await expect(taskPage.getByText("/tmp/bifrost/asr/data/text/task-1/file-1.txt")).toBeVisible();
   const filesTable = taskPage.getByTestId("asr-task-files-table");
@@ -608,6 +789,25 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
   );
   await page.getByRole("button", { name: "Back to daily docs" }).click();
   await expect(page).not.toHaveURL(/asrDay=2026-05-14/);
+  await taskPage.getByRole("tab", { name: "Daily Agent", exact: true }).click();
+  await expect(taskPage.getByText("Configuration")).toBeVisible();
+  await expect(taskPage.getByText("Agent Instructions (AGENTS.md)")).toBeVisible();
+  await expect(taskPage.getByText("Processed Documents")).toHaveCount(0);
+  await taskPage.getByRole("tab", { name: "Daily Agent Records", exact: true }).click();
+  await expect(taskPage.getByText("Run Results")).toBeVisible();
+  const reportLink = page.getByTestId("asr-daily-agent-report-link-2026-05-14");
+  await expect(reportLink).toBeVisible();
+  await reportLink.click();
+  await expect(page).toHaveURL(/asrTaskTab=daily-agent-records/);
+  await expect(page).toHaveURL(/asrDailyReport=2026-05-14/);
+  await expect(page.getByTestId("asr-daily-agent-report-content")).toContainText(
+    "运行记录内容",
+  );
+  await page.getByRole("button", { name: "Back to Daily Agent reports" }).click();
+  await expect(page).not.toHaveURL(/asrDailyReport=2026-05-14/);
+  await expect(
+    taskPage.getByRole("tab", { name: "Daily Agent Records", exact: true }),
+  ).toHaveAttribute("aria-selected", "true");
   await taskPage.getByRole("tab", { name: /Files/ }).click();
   await page.getByRole("button", { name: "Open transcript" }).first().click();
   await expect(page).toHaveURL(/asrFile=file-1/);

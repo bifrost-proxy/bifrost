@@ -4892,6 +4892,40 @@ PY
 
 ---
 
+### TC-RI-回归-146：未登录 sync session 时 Remote Invoke 注册日志不刷 ERROR
+
+**背景**：用户反馈前台启动日志中持续出现 `failed to register with relay error=Network error: remote invoke client registration requires a sync session token`。该状态发生在本地尚未登录 sync session 或临时数据目录没有 token 时，本质是等待用户登录，不应该按 relay 故障反复输出 ERROR。
+
+**前置条件**：
+- 使用空的隔离 `BIFROST_DATA_DIR`
+- Bifrost 使用随机端口启动
+- 启动参数包含 `--no-system-proxy`
+- 本地具备 `cargo`、`curl`、`python3`
+
+**操作步骤**：
+1. 执行：
+   ```bash
+   source ~/.zshrc
+   bash e2e-tests/tests/test_remote_invoke_missing_sync_token_log_e2e.sh
+   ```
+2. 脚本使用空临时数据目录启动 `target/debug/bifrost start -p <随机端口> --yes --skip-cert-check --unsafe-ssl --no-system-proxy`。
+3. 等待管理端 API 就绪后继续观察日志 5 秒。
+4. 检查日志中的 Remote Invoke 注册相关输出。
+
+**预期结果**：
+- 日志包含且只包含一次 `remote invoke relay registration waiting for sync session token`
+- 日志不包含 `failed to register with relay`
+- 真实 relay/network 失败的 ERROR 行为不被该用例静默
+- 全流程使用隔离数据目录与随机端口，不使用 `9900`，不修改系统代理
+
+### TC-RI-回归-146 执行结果（2026-05-20，未登录 sync session 日志降噪）
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-146 | ✅ PASS | 2026-05-20 在当前 checkout 执行 `bash e2e-tests/tests/test_remote_invoke_missing_sync_token_log_e2e.sh`。脚本先构建最新 `target/debug/bifrost`，再使用空临时 `BIFROST_DATA_DIR` 和随机端口前台启动 `bifrost start --yes --skip-cert-check --unsafe-ssl --no-system-proxy`。管理端 API 就绪后继续观察日志 5 秒，断言只出现一次 `remote invoke relay registration waiting for sync session token`，且未出现 `failed to register with relay`。最终 3 条断言全部通过。测试使用隔离数据目录和随机端口，未使用 `9900`，未修改系统代理。 |
+
+---
+
 ## 清理
 
 测试完成后清理本地临时数据：

@@ -451,13 +451,122 @@
 - 非 macOS Apple Silicon 平台 WebUI/API/CLI 均直接提示 unsupported，不执行下载或启动模型服务。
 - 测试结束后固定目录中的模型文件完整恢复。
 
+### TC-QASR-20 Qwen3-ASR-0.6B 初始化下载绕过环境代理
+
+操作步骤：
+
+1. 确认 Hugging Face 上游 0.6B 配置文件真实可达：
+   ```bash
+   curl -I -L --max-time 20 \
+     https://huggingface.co/Qwen/Qwen3-ASR-0.6B/resolve/main/config.json
+   ```
+2. 在故意设置无效环境代理的 shell 中执行 ASR 下载 client 回归测试：
+   ```bash
+   HTTP_PROXY=http://127.0.0.1:1 \
+   HTTPS_PROXY=http://127.0.0.1:1 \
+   ALL_PROXY=http://127.0.0.1:1 \
+   NO_PROXY= \
+   cargo test -p bifrost-admin asr_download_client_bypasses_proxy_env --lib
+   ```
+3. 执行 0.6B 下载请求清单回归：
+   ```bash
+   cargo test -p bifrost-admin asr_download_requests_include_qwen3_asr_0_6b_files --lib
+   ```
+
+预期结果：
+
+- `Qwen/Qwen3-ASR-0.6B` 的 `config.json` 返回 200/307 后成功解析到真实文件，而不是 404。
+- ASR 下载 client 在 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 指向不可达代理时仍能直连本地测试服务器，证明初始化下载不会被当前 shell 或 Bifrost 自身代理劫持。
+- 0.6B 请求清单包含 `Qwen3-ASR-0.6B/config.json` 和 `Qwen3-ASR-0.6B/model.safetensors`。
+- 本用例不下载完整 0.6B 权重；完整模型初始化仍由 TC-QASR-02 / TC-QASR-15 的真实初始化链路覆盖。
+
+### TC-QASR-17 ASR 任务详情原音频占用与一键清理
+
+操作步骤：
+
+1. 使用临时数据目录启动 Bifrost，必须带 `--no-system-proxy`：
+   ```bash
+   BIFROST_DATA_DIR="$(mktemp -d /tmp/bifrost-asr-source-cleanup.XXXXXX)" \
+     cargo run --bin bifrost -- start -p 18886 --unsafe-ssl --no-system-proxy
+   ```
+2. 创建一个绑定临时音频目录的 ASR Directory Task，向该目录写入两个音频文件：一个模拟 `success`，一个模拟 `partial_success`。
+3. 在 `BIFROST_DATA_DIR/asr/tasks/<task_id>/files.json` 写入对应 file records，并给 success/partial-success 都写入 transcript 与 timeline 产物。
+4. 打开 `http://127.0.0.1:18886/_bifrost/ai?aiSection=tools-asr&asrTask=<task_id>`，查看任务详情页。
+5. 确认页面展示 `Audio Files` 当前原音频总占用和 `Cleanable Originals` 可清理占用。
+6. 点击 `Clean originals`，确认弹窗文案说明 transcript/timeline 会保留，且 partial-success 文件不会删除。
+7. 确认清理后刷新任务详情，并检查磁盘文件：
+   ```bash
+   test ! -f "$AUDIO_DIR/done.wav"
+   test -f "$AUDIO_DIR/partial.wav"
+   test -f "$BIFROST_DATA_DIR/asr/data/text/<task_id>/done.txt"
+   test -f "$BIFROST_DATA_DIR/asr/data/text/<task_id>/done.timeline.json"
+   ```
+8. 再次点击或调用清理接口：
+   ```bash
+   curl -fsS -X POST http://127.0.0.1:18886/_bifrost/api/asr/tasks/<task_id>/cleanup-source-audio
+   ```
+
+预期结果：
+
+- 任务详情 summary 返回并展示 `audio_source_bytes/audio_source_file_count` 和 `cleanable_source_bytes/cleanable_source_file_count`。
+- 清理前 `Audio Files` 包含两个仍存在的原音频，`Cleanable Originals` 只包含 success 文件。
+- 清理接口只删除 `success + transcript/timeline 已存在 + audio_dir 内` 的源音频；`partial_success` 文件保留，避免破坏 failed chunk retry。
+- transcript、timeline、metadata、daily docs 和 file store 记录都不被删除。
+- 清理后 `Audio Files` 占用下降，`Cleanable Originals` 变为 0，`deleted_after_processing` 增加。
+- 第二次清理幂等返回 `deleted_files=0`，不报错。
+
+### TC-QASR-18 Daily Agent 配置与运行记录拆分为平级 tab
+
+操作步骤：
+
+1. 使用已有 ASR Directory Task 或临时任务打开：
+   ```text
+   http://127.0.0.1:<port>/_bifrost/ai?aiSection=tools-asr&asrTask=<task_id>
+   ```
+2. 点击任务详情页的 `Daily Agent` tab。
+3. 检查该 tab 内容。
+4. 点击同级 `Daily Agent Records` tab。
+5. 如果存在 report 链接，点击某条 report；如果没有记录，使用测试 fixture 或 API 写入一条 processed document 后刷新。
+6. 在 report 详情页点击返回。
+
+预期结果：
+
+- `Daily Agent` tab 只展示配置、IM Delivery、Last Run Status、Run Now/Force Run/Send Report/Refresh、AGENTS.md 指令编辑等配置和执行入口。
+- `Daily Agent` tab 不展示 `Processed Documents` 或运行结果表。
+- `Daily Agent Records` tab 展示 Daily Agent 已处理文档/运行结果表、report 链接和独立 Refresh。
+- 点击 report 链接进入 `asrDailyReport=<date>` 详情时，URL 中 `asrTaskTab=daily-agent-records`；从详情返回后仍停留在 `Daily Agent Records` tab。
+- 该拆分不影响 Run Now、Force Run、Send Report 和 AGENTS.md 保存。
+
+### TC-QASR-19 Directory Tasks 首页位置前移
+
+操作步骤：
+
+1. 使用临时数据目录启动 Bifrost，必须带 `--no-system-proxy`：
+   ```bash
+   BIFROST_DATA_DIR="$(mktemp -d /tmp/bifrost-asr-layout.XXXXXX)" \
+     cargo run --bin bifrost -- start -p 18887 --unsafe-ssl --no-system-proxy
+   ```
+2. 打开 AI -> Tools -> ASR 首页：
+   ```text
+   http://127.0.0.1:18887/_bifrost/ai?aiSection=tools-asr
+   ```
+3. 在页面首屏确认 `Speech Converter`、`Directory Tasks` 和 `Speech to Text` 三个区域的垂直顺序。
+4. 在 Directory Tasks 区域创建一个临时目录任务，点击 `View details` 进入任务详情，再返回 ASR 首页。
+5. 点击任务列表中的 `Run`，确认排序调整不影响任务操作。
+
+预期结果：
+
+- `Directory Tasks` 位于 `Speech Converter` 下方、`Speech to Text` 上方，不再处于页面尾部。
+- Directory Tasks 移动位置后仍能创建任务、进入详情、返回首页和手动 Run。
+- 页面在亮色和暗色主题下区域标题与操作按钮均可读、无遮挡。
+
 ## 清理步骤
 
 - 停止测试启动的 `asr-server` 进程。
 - 停止测试启动的 Bifrost 进程。
 - 删除临时切片和转写文件：
   ```bash
-  rm -rf /tmp/bifrost-qwen3-asr-chunks /tmp/bifrost-qwen3-asr-transcript.txt /tmp/bifrost-qwen3-asr-web.* /tmp/bifrost-qwen3-asr-model-backup
+  rm -rf /tmp/bifrost-qwen3-asr-chunks /tmp/bifrost-qwen3-asr-transcript.txt /tmp/bifrost-qwen3-asr-web.* /tmp/bifrost-qwen3-asr-model-backup /tmp/bifrost-asr-source-cleanup.* /tmp/bifrost-asr-layout.*
   rm -f /tmp/bifrost-qwen3-asr-stream.jsonl
   ```
 - 保留 `~/.bifrost/asr` 模型目录供后续本地使用；不要在清理测试时删除固定模型目录。
@@ -503,3 +612,7 @@
 | 2026-05-18 | TC-QASR-14 / ASR timeline segment 最大 30 秒回归 | 复现：`curl -s http://127.0.0.1:3000/_bifrost/api/asr/tasks/76612de33e9740bc92440ce64a98a4cb/files/8dc2c4875e95b4c8aac6b131fd9e2fed5a33aef8/timeline` 显示旧服务返回 1 个 segment，`audio_end_ms - audio_start_ms = 230015`；修复后执行 `cargo test -p bifrost-admin asr_jobs --lib` 覆盖 chunk plain-text fallback 与旧 timeline 读取兼容拆分 | PASS：单测证明目录任务原生 CLI 只返回纯文本时会按 30 秒 chunk window 合成多个 timeline segments，且 timeline 读取会把旧版本遗留的超长单段拆成最大 30 秒窗口；当前运行中的 9900 服务需重启/升级后才会暴露新 API 行为，已有旧转写文件无需强制重跑即可在读取时被兼容拆分 |
 | 2026-05-18 | TC-QASR-05B / TC-QASR-07 非实时链路 30 秒窗口回归 | `cargo test -p bifrost-admin asr::tests --lib`；`cargo test -p bifrost-admin asr_streaming::tests --lib`；`cargo test -p bifrost-admin asr_ws::tests --lib`；`cargo test -p bifrost-cli commands::asr::tests --lib`；`target/debug/bifrost ai asr stream-file ~/Downloads/we/TX01_MIC007_20260514_183241_orig.wav --model Qwen3-ASR-1.7B --language chinese` | PASS：WebUI 文件上传服务端 chunk planner 对 180.015s 音频生成 30 秒窗口、2 秒 overlap，短音频保留单窗口；CLI 对 1801s 真实录音输出 `Split into 65 chunks (30s each, 2s overlap)`，总耗时 real 216.77s、RTF 0.117；WebSocket/mic 测试保持 1 秒实时窗口和 800ms flush，不纳入 30 秒批处理窗口 |
 | 2026-05-19 | TC-QASR-16 / ASR 定时任务 CLI 与按日文档检查 | `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli ai_asr_commands_parse --test cli_commands`；`e2e-tests/tests/test_asr_task_cli.sh`；`target/debug/bifrost ai asr task show 76612de33e9740bc92440ce64a98a4cb`；`target/debug/bifrost ai asr task daily list 76612de33e9740bc92440ce64a98a4cb`；`target/debug/bifrost ai asr task daily show 76612de33e9740bc92440ce64a98a4cb 2026-05-17` | PASS：CLI 解析覆盖 `task daily show --output`；E2E 使用临时 `BIFROST_DATA_DIR` 和 runtime port 验证不传 `-p` 的 `task list/show/files/daily list/daily show/run --wait`，且无 pending 文件时 `run --wait` 不要求 ASR 模型；真实 9900 任务显示 `Daily documents: 4`，daily list 展示 2026-05-14 到 2026-05-17 四份 Markdown，2026-05-17 完整内容可从 stdout 读取 |
+| 2026-05-20 | TC-QASR-17 / ASR 任务详情原音频占用与一键清理 | `e2e-tests/tests/test_asr_task_cli.sh`；`pnpm --dir web exec playwright test tests/ui/asr-microphone-meter.spec.ts --grep "ASR directory tasks"` | PASS：E2E 使用临时 `BIFROST_DATA_DIR` 和临时音频目录，通过真实 Admin API 构造 success/partial_success 文件记录，确认任务详情 summary 返回 `audio_source_bytes=done+partial`、`cleanable_source_bytes=done`；调用 `POST /cleanup-source-audio` 后 success 源音频删除、partial_success 源音频保留、transcript/timeline 产物保留，二次调用 `deleted_files=0`。Playwright 真实浏览器验证任务详情展示 `Audio Files` 和 `Cleanable Originals`、点击 `Clean originals` 确认后占用下降并保留后续任务详情能力。 |
+| 2026-05-20 | TC-QASR-18 / Daily Agent 配置与运行记录拆分为平级 tab | `pnpm --dir web exec playwright test tests/ui/asr-daily-agent-runner.spec.ts`；`pnpm --dir web exec playwright test tests/ui/asr-microphone-meter.spec.ts --grep "ASR directory tasks"` | PASS：Daily Agent Runner 专项套件验证 `Daily Agent` tab 仍可编辑 AGENTS.md、选择 Runner/IM Channel，并确认 processed report 从 `Daily Agent Records` tab 打开；目录任务 Playwright 回归验证 `Daily Agent` tab 不再展示 `Processed Documents`，`Daily Agent Records` tab 展示 `Run Results` 和 report 链接，点击 report 后 URL 包含 `asrTaskTab=daily-agent-records&asrDailyReport=2026-05-14`，返回后仍停留在 records tab。 |
+| 2026-05-20 | TC-QASR-19 / Directory Tasks 首页位置前移 | `pnpm --dir web exec playwright test tests/ui/asr-microphone-meter.spec.ts --grep "ASR directory tasks"` | PASS：Playwright 真实浏览器验证 AI -> Tools -> ASR 首页中 `Speech Converter` 位于 `Directory Tasks` 上方，`Directory Tasks` 位于 `Speech to Text` 上方；随后继续创建 Directory Task、进入任务详情、执行原音频清理、验证 Daily Agent Records，不影响既有目录任务操作链路。 |
+| 2026-05-20 | TC-QASR-20 / Qwen3-ASR-0.6B 初始化下载绕过环境代理 | `curl -I -L --max-time 20 https://huggingface.co/Qwen/Qwen3-ASR-0.6B/resolve/main/config.json`；`HTTP_PROXY=http://127.0.0.1:1 HTTPS_PROXY=http://127.0.0.1:1 ALL_PROXY=http://127.0.0.1:1 NO_PROXY= cargo test -p bifrost-admin asr_download_client_bypasses_proxy_env --lib`；`cargo test -p bifrost-admin asr_download_requests_include_qwen3_asr_0_6b_files --lib` | PASS：Hugging Face 返回 `307` 并带 `x-repo-commit: 5eb144179a02acc5e5ba31e748d22b0cf3e303b0`，确认 `config.json` 真实存在；无效代理环境下 direct reqwest 下载 client 仍能访问本地测试 HTTP server；0.6B 请求清单包含 `Qwen3-ASR-0.6B/config.json` 与 `Qwen3-ASR-0.6B/model.safetensors` |

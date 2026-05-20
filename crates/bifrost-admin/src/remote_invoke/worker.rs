@@ -58,6 +58,12 @@ const GRANT_CLEANUP_INTERVAL_SECS: u64 = 60;
 const PENDING_PAIRING_POLL_SECS: u64 = 5;
 const ACTIVE_CALL_RECONCILE_INTERVAL_MS: u64 = 1000;
 
+fn normalize_registration_session_token(token: Option<String>) -> Option<String> {
+    token
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 struct TimestampedPairing {
     request: PairingRequest,
     received_at: u64,
@@ -994,6 +1000,7 @@ impl RemoteInvokeWorker {
 
     async fn run_loop(&self) {
         let mut reconnect_delay = INITIAL_RECONNECT_DELAY_MS;
+        let mut missing_session_token_logged = false;
 
         loop {
             if self.shutdown.load(Ordering::SeqCst) {
@@ -1002,6 +1009,18 @@ impl RemoteInvokeWorker {
                 return;
             }
 
+            if self.registration_session_token().is_none() {
+                *self.state.write() = WorkerState::Disconnected;
+                if !missing_session_token_logged {
+                    info!("remote invoke relay registration waiting for sync session token");
+                    missing_session_token_logged = true;
+                }
+                self.sleep_with_shutdown_check(reconnect_delay).await;
+                reconnect_delay = (reconnect_delay * 2).min(MAX_RECONNECT_DELAY_MS);
+                continue;
+            }
+
+            missing_session_token_logged = false;
             *self.state.write() = WorkerState::Registering;
 
             match self.register_with_relay().await {
@@ -1041,14 +1060,19 @@ impl RemoteInvokeWorker {
         }
     }
 
+    fn registration_session_token(&self) -> Option<String> {
+        normalize_registration_session_token(
+            self.sync_manager
+                .as_ref()
+                .and_then(|manager| manager.session_token()),
+        )
+    }
+
     async fn register_with_relay(&self) -> Result<()> {
         let now = now_millis() / 1000;
-        let user_auth_token = self
-            .sync_manager
-            .as_ref()
-            .and_then(|manager| manager.session_token());
+        let user_auth_token = self.registration_session_token();
         let Some(user_auth_token) = user_auth_token else {
-            return Err(BifrostError::Network(
+            return Err(BifrostError::Config(
                 "remote invoke client registration requires a sync session token".to_string(),
             ));
         };
@@ -4128,6 +4152,23 @@ mod tests {
     use ring::rand::SystemRandom;
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
+
+    #[test]
+    fn test_normalize_registration_session_token_rejects_missing_or_empty() {
+        assert_eq!(normalize_registration_session_token(None), None);
+        assert_eq!(
+            normalize_registration_session_token(Some("   \t\n".to_string())),
+            None
+        );
+    }
+
+    #[test]
+    fn test_normalize_registration_session_token_trims_valid_token() {
+        assert_eq!(
+            normalize_registration_session_token(Some("  sync-token  ".to_string())),
+            Some("sync-token".to_string())
+        );
+    }
 
     fn make_active_grant(grant_id: &str, mode: GrantMode) -> GrantInfo {
         GrantInfo {

@@ -75,6 +75,7 @@ echo "[qwen3-asr-e2e] start Bifrost admin on ${ADMIN_PORT}"
 BIFROST_DATA_DIR="$ADMIN_DATA_DIR" cargo run --bin bifrost -- start \
   -p "$ADMIN_PORT" \
   --unsafe-ssl \
+  --skip-cert-check \
   --no-system-proxy >"$ADMIN_DATA_DIR/bifrost.log" 2>&1 &
 ADMIN_PID=$!
 

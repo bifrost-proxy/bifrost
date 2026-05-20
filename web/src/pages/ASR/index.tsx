@@ -7,6 +7,7 @@ import {
   buildAsrRealtimeUrl,
   createAsrTask,
   deleteAsrTask,
+  getDailyAgentReport,
   getAsrStatus,
   getAsrTask,
   getAsrTaskDailyDocument,
@@ -19,6 +20,7 @@ import {
   streamAsrTranscription,
   type AsrDirectoryTask,
   type AsrDirectoryTaskDetail,
+  type AsrDailyAgentReportDetail,
   type AsrStatus,
   type AsrStreamEvent,
   type AsrTaskDailyDocumentDetail,
@@ -36,6 +38,10 @@ import {
   type WorkState,
 } from "./asrUtils";
 import DirectoryTaskDetailPage from "./components/DirectoryTaskDetailPage";
+import {
+  isDirectoryTaskDetailTabKey,
+  type DirectoryTaskDetailTabKey,
+} from "./components/taskDetailRoute";
 import DirectoryTasksPanel from "./components/DirectoryTasksPanel";
 import SpeechWorkbench from "./components/SpeechWorkbench";
 
@@ -47,6 +53,20 @@ export default function ASR() {
   const selectedTaskId = searchParams.get("asrTask");
   const selectedFileKey = searchParams.get("asrFile");
   const selectedDailyDate = searchParams.get("asrDay");
+  const selectedDailyAgentReportDate = searchParams.get("asrDailyReport");
+  const selectedTaskTabParam = searchParams.get("asrTaskTab");
+  const selectedTaskTab: DirectoryTaskDetailTabKey = (() => {
+    if (isDirectoryTaskDetailTabKey(selectedTaskTabParam)) {
+      return selectedTaskTabParam;
+    }
+    if (selectedDailyAgentReportDate) {
+      return "daily-agent-records";
+    }
+    if (selectedDailyDate) {
+      return "daily";
+    }
+    return "files";
+  })();
   const [status, setStatus] = useState<AsrStatus | null>(null);
   const [tasks, setTasks] = useState<AsrDirectoryTask[]>([]);
   const [tasksLoading, setTasksLoading] = useState(false);
@@ -57,6 +77,9 @@ export default function ASR() {
   const [taskDailyDocument, setTaskDailyDocument] =
     useState<AsrTaskDailyDocumentDetail | null>(null);
   const [taskDailyDocumentLoading, setTaskDailyDocumentLoading] = useState(false);
+  const [taskDailyAgentReport, setTaskDailyAgentReport] =
+    useState<AsrDailyAgentReportDetail | null>(null);
+  const [taskDailyAgentReportLoading, setTaskDailyAgentReportLoading] = useState(false);
   const [workState, setWorkState] = useState<WorkState>("idle");
   const [progress, setProgress] = useState(0);
   const [selectedName, setSelectedName] = useState("");
@@ -506,6 +529,20 @@ export default function ASR() {
     }
   }, []);
 
+  const loadDailyAgentReport = useCallback(async (taskId: string, date: string) => {
+    setTaskDailyAgentReport(null);
+    setTaskDailyAgentReportLoading(true);
+    try {
+      setTaskDailyAgentReport(await getDailyAgentReport(taskId, date));
+    } catch (error) {
+      message.error(
+        error instanceof Error ? error.message : "Failed to load Daily Agent report",
+      );
+    } finally {
+      setTaskDailyAgentReportLoading(false);
+    }
+  }, []);
+
   const openTaskDetail = useCallback(
     (id: string) => {
       setSearchParams(
@@ -515,6 +552,8 @@ export default function ASR() {
           next.set("asrTask", id);
           next.delete("asrFile");
           next.delete("asrDay");
+          next.delete("asrDailyReport");
+          next.delete("asrTaskTab");
           return next;
         },
         { replace: false },
@@ -530,6 +569,8 @@ export default function ASR() {
         next.delete("asrTask");
         next.delete("asrFile");
         next.delete("asrDay");
+        next.delete("asrDailyReport");
+        next.delete("asrTaskTab");
         return next;
       },
       { replace: false },
@@ -545,6 +586,8 @@ export default function ASR() {
           next.set("asrTask", file.task_id);
           next.set("asrFile", file.key);
           next.delete("asrDay");
+          next.delete("asrDailyReport");
+          next.delete("asrTaskTab");
           return next;
         },
         { replace: false },
@@ -573,8 +616,10 @@ export default function ASR() {
           if (selectedTaskId) {
             next.set("asrTask", selectedTaskId);
           }
+          next.set("asrTaskTab", "daily");
           next.set("asrDay", date);
           next.delete("asrFile");
+          next.delete("asrDailyReport");
           return next;
         },
         { replace: false },
@@ -588,17 +633,74 @@ export default function ASR() {
       (prev) => {
         const next = new URLSearchParams(prev);
         next.delete("asrDay");
+        next.set("asrTaskTab", "daily");
         return next;
       },
       { replace: false },
     );
   }, [setSearchParams]);
 
+  const openDailyAgentReport = useCallback(
+    (date: string) => {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          next.set("aiSection", "tools-asr");
+          if (selectedTaskId) {
+            next.set("asrTask", selectedTaskId);
+          }
+          next.set("asrTaskTab", "daily-agent-records");
+          next.set("asrDailyReport", date);
+          next.delete("asrFile");
+          next.delete("asrDay");
+          return next;
+        },
+        { replace: false },
+      );
+    },
+    [selectedTaskId, setSearchParams],
+  );
+
+  const closeDailyAgentReport = useCallback(() => {
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete("asrDailyReport");
+        next.set("asrTaskTab", "daily-agent-records");
+        return next;
+      },
+      { replace: false },
+    );
+  }, [setSearchParams]);
+
+  const changeTaskTab = useCallback(
+    (tab: DirectoryTaskDetailTabKey) => {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          next.set("aiSection", "tools-asr");
+          if (tab === "files") {
+            next.delete("asrTaskTab");
+          } else {
+            next.set("asrTaskTab", tab);
+          }
+          next.delete("asrFile");
+          next.delete("asrDay");
+          next.delete("asrDailyReport");
+          return next;
+        },
+        { replace: false },
+      );
+    },
+    [setSearchParams],
+  );
+
   useEffect(() => {
     if (!selectedTaskId) {
       setTaskDetail(null);
       setTaskTimeline(null);
       setTaskDailyDocument(null);
+      setTaskDailyAgentReport(null);
       return;
     }
     void loadTaskDetail(selectedTaskId);
@@ -619,6 +721,14 @@ export default function ASR() {
     }
     void loadTaskDailyDocument(selectedTaskId, selectedDailyDate);
   }, [loadTaskDailyDocument, selectedDailyDate, selectedTaskId]);
+
+  useEffect(() => {
+    if (!selectedTaskId || !selectedDailyAgentReportDate) {
+      setTaskDailyAgentReport(null);
+      return;
+    }
+    void loadDailyAgentReport(selectedTaskId, selectedDailyAgentReportDate);
+  }, [loadDailyAgentReport, selectedDailyAgentReportDate, selectedTaskId]);
 
   // Auto-refresh task detail every 3 seconds while the task or bulk chunk retry is running.
   useEffect(() => {
@@ -731,19 +841,26 @@ export default function ASR() {
         taskDetailLoading={taskDetailLoading}
         selectedFileKey={selectedFileKey}
         selectedDailyDate={selectedDailyDate}
+        selectedDailyAgentReportDate={selectedDailyAgentReportDate}
+        selectedTaskTab={selectedTaskTab}
         taskTimeline={taskTimeline}
         taskTimelineLoading={taskTimelineLoading}
         taskDailyDocument={taskDailyDocument}
         taskDailyDocumentLoading={taskDailyDocumentLoading}
+        taskDailyAgentReport={taskDailyAgentReport}
+        taskDailyAgentReportLoading={taskDailyAgentReportLoading}
         onBackToTasks={closeTaskDetail}
         onBackToTaskFiles={closeTaskFile}
         onBackToDailyDocuments={closeTaskDailyDocument}
+        onBackToDailyAgentReports={closeDailyAgentReport}
         onRefreshTask={(id) => void loadTaskDetail(id)}
         onRunTask={(id) => void runDirectoryTask(id)}
         onPauseTask={(id, force) => void pauseDirectoryTask(id, force)}
         onResumeTask={(id) => void resumeDirectoryTask(id)}
         onOpenFile={openTaskFile}
         onOpenDailyDocument={openTaskDailyDocument}
+        onOpenDailyAgentReport={openDailyAgentReport}
+        onChangeTaskTab={changeTaskTab}
       />
     );
   }
@@ -751,6 +868,18 @@ export default function ASR() {
   return (
     <div style={{ height: "100%", overflow: "auto" }}>
       <SpeechTab />
+      <DirectoryTasksPanel
+        taskForm={taskForm}
+        taskScheduleKind={taskScheduleKind}
+        tasks={tasks}
+        tasksLoading={tasksLoading}
+        onCreateTask={createDirectoryTask}
+        onOpenTask={openTaskDetail}
+        onRunTask={(id) => void runDirectoryTask(id)}
+        onPauseTask={(id, force) => void pauseDirectoryTask(id, force)}
+        onResumeTask={(id) => void resumeDirectoryTask(id)}
+        onRemoveTask={(id) => void removeDirectoryTask(id)}
+      />
       <SpeechWorkbench
         token={token}
         ready={ready}
@@ -770,18 +899,6 @@ export default function ASR() {
         onStartRecording={() => void startRecording()}
         onStopRecording={stopRecording}
         onCancel={cancelWork}
-      />
-      <DirectoryTasksPanel
-        taskForm={taskForm}
-        taskScheduleKind={taskScheduleKind}
-        tasks={tasks}
-        tasksLoading={tasksLoading}
-        onCreateTask={createDirectoryTask}
-        onOpenTask={openTaskDetail}
-        onRunTask={(id) => void runDirectoryTask(id)}
-        onPauseTask={(id, force) => void pauseDirectoryTask(id, force)}
-        onResumeTask={(id) => void resumeDirectoryTask(id)}
-        onRemoveTask={(id) => void removeDirectoryTask(id)}
       />
     </div>
   );

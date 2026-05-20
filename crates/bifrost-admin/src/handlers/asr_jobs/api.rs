@@ -16,6 +16,9 @@ pub async fn handle_asr_tasks(req: Request<Incoming>, path: &str) -> Response<Bo
                     get_daily_agent_instructions_response(task_id).await
                 }
                 [task_id, "daily-agent", "runs"] => get_daily_agent_runs_response(task_id),
+                [task_id, "daily-agent", "reports", date] => {
+                    get_daily_agent_report_response(task_id, date)
+                }
                 _ => error_response(StatusCode::NOT_FOUND, "ASR task endpoint not found"),
             }
         }
@@ -102,6 +105,15 @@ pub async fn handle_asr_tasks(req: Request<Incoming>, path: &str) -> Response<Bo
                 return error_response(StatusCode::NOT_FOUND, "ASR task endpoint not found");
             };
             delete_task_response(id)
+        }
+        (&Method::POST, _)
+            if path.starts_with("/api/asr/tasks/") && path.ends_with("/cleanup-source-audio") =>
+        {
+            let id = path
+                .trim_start_matches("/api/asr/tasks/")
+                .trim_end_matches("/cleanup-source-audio")
+                .trim_end_matches('/');
+            cleanup_task_source_audio_response(id)
         }
         (&Method::POST, _) if path.starts_with("/api/asr/tasks/") && path.ends_with("/run") => {
             let id = path
@@ -326,6 +338,35 @@ fn delete_task_response(id: &str) -> Response<BoxBody> {
         }
         Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
     }
+}
+
+fn cleanup_task_source_audio_response(id: &str) -> Response<BoxBody> {
+    let Some(task) = find_task(id) else {
+        return error_response(StatusCode::NOT_FOUND, "ASR task not found");
+    };
+    if RUNNING_TASKS.lock().unwrap().contains(id) {
+        return json_response_with_status(
+            StatusCode::CONFLICT,
+            &serde_json::json!({
+                "message": "ASR task is running; pause or wait for it to finish before cleaning source audio",
+                "running": true,
+            }),
+        );
+    }
+    let bulk_retry_active = bulk_chunk_retry_state(id)
+        .map(|retry| matches!(retry.status, BulkChunkRetryStatus::Queued | BulkChunkRetryStatus::Running))
+        .unwrap_or(false);
+    if bulk_retry_active {
+        return json_response_with_status(
+            StatusCode::CONFLICT,
+            &serde_json::json!({
+                "message": "ASR failed-chunk retry is running; wait for it to finish before cleaning source audio",
+                "running": true,
+            }),
+        );
+    }
+
+    json_response(&cleanup_task_source_audio(&task))
 }
 
 async fn run_task_response(id: &str) -> Response<BoxBody> {

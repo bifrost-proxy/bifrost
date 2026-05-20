@@ -37,12 +37,12 @@ import type {
 } from "../../../api/imGateway";
 import {
   getDailyAgentConfig,
-  updateDailyAgentConfig,
-  getDailyAgentInstructions,
-  updateDailyAgentInstructions,
-  triggerDailyAgentRun,
-  sendDailyAgentReport,
   getDailyAgentRuns,
+  getDailyAgentInstructions,
+  sendDailyAgentReport,
+  triggerDailyAgentRun,
+  updateDailyAgentConfig,
+  updateDailyAgentInstructions,
 } from "../../../api/asr";
 
 const { Text } = Typography;
@@ -50,6 +50,7 @@ const { TextArea } = Input;
 
 interface DailyAgentTabProps {
   taskId: string;
+  onOpenReport?: (date: string) => void;
 }
 
 interface ImChannelOption {
@@ -66,9 +67,6 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
     useState<AsrDailyAgentConfigResponse | null>(null);
   const [instructions, setInstructions] =
     useState<AsrDailyAgentInstructionsResponse | null>(null);
-  const [runsData, setRunsData] = useState<AsrDailyAgentRunsResponse | null>(
-    null
-  );
   const [runnerConfig, setRunnerConfig] =
     useState<ExternalCliGatewayConfig | null>(null);
   const [imProviders, setImProviders] = useState<ImProviderConfig[]>([]);
@@ -82,10 +80,9 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
   const fetchAll = useCallback(async () => {
     setLoading(true);
     try {
-      const [config, instr, runs, runners, providers, targets] = await Promise.all([
+      const [config, instr, runners, providers, targets] = await Promise.all([
         getDailyAgentConfig(taskId),
         getDailyAgentInstructions(taskId),
-        getDailyAgentRuns(taskId),
         imGatewayApi.getExternalCliConfig(),
         imGatewayApi.listProviders(),
         imGatewayApi.listTargets(),
@@ -94,7 +91,6 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
       setInstructions(instr);
       setInstructionsText(instr.content);
       setInstructionsDirty(false);
-      setRunsData(runs);
       setRunnerConfig(runners);
       setImProviders(providers);
       setImTargets(targets);
@@ -511,67 +507,105 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
           </Text>
         )}
       </Card>
-
-      {/* Run History */}
-      <Card size="small" title="Processed Documents">
-        {runsData && runsData.processed_documents.length > 0 ? (
-          <Table<AsrDailyAgentProcessedDocument>
-            rowKey="date"
-            size="small"
-            dataSource={runsData.processed_documents}
-            pagination={{ pageSize: 10, hideOnSinglePage: true }}
-            columns={[
-              { title: "Date", dataIndex: "date", width: 120 },
-              {
-                title: "Processed At",
-                dataIndex: "processed_at_ms",
-                width: 180,
-                render: (v) => (v ? new Date(v).toLocaleString() : "-"),
-              },
-              {
-                title: "SHA256",
-                dataIndex: "source_sha256",
-                width: 100,
-                render: (v) => (
-                  <Text code style={{ fontSize: 10 }}>
-                    {v?.slice(0, 8)}
-                  </Text>
-                ),
-              },
-              {
-                title: "Size",
-                dataIndex: "source_len_bytes",
-                width: 80,
-                render: (v: number) =>
-                  v < 1024
-                    ? `${v} B`
-                    : v < 1024 * 1024
-                      ? `${(v / 1024).toFixed(1)} KB`
-                      : `${(v / 1024 / 1024).toFixed(1)} MB`,
-              },
-              {
-                title: "Runner",
-                dataIndex: "runner",
-                width: 100,
-                render: (v) => <Tag>{v}</Tag>,
-              },
-              {
-                title: "Report",
-                dataIndex: "report_path",
-                ellipsis: true,
-                render: (v) =>
-                  v ? (
-                    <Text style={{ fontSize: 11 }}>{v.split("/").pop()}</Text>
-                  ) : (
-                    "-"
-                  ),
-              },
-            ]}
-          />
-        ) : (
-          <Empty description="No processed documents yet" />
-        )}
-      </Card>
     </Space>
+  );
+}
+
+export function DailyAgentRecordsTab({ taskId, onOpenReport }: DailyAgentTabProps) {
+  const [runsData, setRunsData] = useState<AsrDailyAgentRunsResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const fetchRuns = useCallback(async () => {
+    setLoading(true);
+    try {
+      setRunsData(await getDailyAgentRuns(taskId));
+    } catch (error: unknown) {
+      message.error(`Failed to load Daily Agent records: ${errorMessage(error)}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [taskId]);
+
+  useEffect(() => {
+    fetchRuns();
+  }, [fetchRuns]);
+
+  return (
+    <Card
+      size="small"
+      title="Run Results"
+      loading={loading && !runsData}
+      extra={
+        <Button icon={<ReloadOutlined />} onClick={fetchRuns} loading={loading}>
+          Refresh
+        </Button>
+      }
+    >
+      {runsData && runsData.processed_documents.length > 0 ? (
+        <Table<AsrDailyAgentProcessedDocument>
+          rowKey="date"
+          size="small"
+          dataSource={runsData.processed_documents}
+          pagination={{ pageSize: 10, hideOnSinglePage: true }}
+          columns={[
+            { title: "Date", dataIndex: "date", width: 120 },
+            {
+              title: "Processed At",
+              dataIndex: "processed_at_ms",
+              width: 180,
+              render: (v) => (v ? new Date(v).toLocaleString() : "-"),
+            },
+            {
+              title: "SHA256",
+              dataIndex: "source_sha256",
+              width: 100,
+              render: (v) => (
+                <Text code style={{ fontSize: 10 }}>
+                  {v?.slice(0, 8)}
+                </Text>
+              ),
+            },
+            {
+              title: "Size",
+              dataIndex: "source_len_bytes",
+              width: 80,
+              render: (v: number) =>
+                v < 1024
+                  ? `${v} B`
+                  : v < 1024 * 1024
+                    ? `${(v / 1024).toFixed(1)} KB`
+                    : `${(v / 1024 / 1024).toFixed(1)} MB`,
+            },
+            {
+              title: "Runner",
+              dataIndex: "runner",
+              width: 100,
+              render: (v) => <Tag>{v}</Tag>,
+            },
+            {
+              title: "Report",
+              dataIndex: "report_path",
+              ellipsis: true,
+              render: (v, record) =>
+                v ? (
+                  <Button
+                    type="link"
+                    size="small"
+                    data-testid={`asr-daily-agent-report-link-${record.date}`}
+                    style={{ padding: 0, height: "auto", fontSize: 11 }}
+                    onClick={() => onOpenReport?.(record.date)}
+                  >
+                    {v.split("/").pop()}
+                  </Button>
+                ) : (
+                  "-"
+                ),
+            },
+          ]}
+        />
+      ) : (
+        <Empty description="No Daily Agent records yet" />
+      )}
+    </Card>
   );
 }

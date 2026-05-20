@@ -268,6 +268,13 @@ fn summarize_task(task: &AsrDirectoryTask) -> TaskSummary {
         .map(|path| source_key(path))
         .collect::<HashSet<_>>();
     let file_store = load_file_store(&task.id);
+    let audio_source_file_count = discovered.len();
+    let audio_source_bytes = discovered
+        .iter()
+        .filter_map(|path| source_size(path))
+        .sum::<u64>();
+    let (cleanable_source_file_count, cleanable_source_bytes) =
+        cleanable_source_audio_totals(task, &file_store);
     let processed = file_store
         .files
         .values()
@@ -313,7 +320,102 @@ fn summarize_task(task: &AsrDirectoryTask) -> TaskSummary {
         partial_success,
         failed_chunk_count,
         deleted_after_processing,
+        audio_source_bytes,
+        audio_source_file_count,
+        cleanable_source_bytes,
+        cleanable_source_file_count,
         running: RUNNING_TASKS.lock().unwrap().contains(&task.id),
+    }
+}
+
+fn cleanable_source_audio_totals(task: &AsrDirectoryTask, store: &FileStore) -> (usize, u64) {
+    store
+        .files
+        .values()
+        .filter(|record| is_cleanable_source_audio_record(task, record))
+        .fold((0usize, 0u64), |(count, bytes), record| {
+            (
+                count + 1,
+                bytes + source_size(&record.source_path).or(record.source_size).unwrap_or(0),
+            )
+        })
+}
+
+fn is_cleanable_source_audio_record(task: &AsrDirectoryTask, record: &FileRecord) -> bool {
+    record.status == FileStatus::Success
+        && record.source_path.is_file()
+        && source_path_is_under_audio_dir(&task.audio_dir, &record.source_path)
+        && record
+            .output_text_path
+            .as_ref()
+            .is_some_and(|path| path.is_file())
+        && record
+            .output_timeline_path
+            .as_ref()
+            .is_some_and(|path| path.is_file())
+}
+
+fn source_path_is_under_audio_dir(audio_dir: &Path, source_path: &Path) -> bool {
+    match (audio_dir.canonicalize(), source_path.canonicalize()) {
+        (Ok(audio_root), Ok(source)) => source.starts_with(audio_root),
+        _ => false,
+    }
+}
+
+fn cleanup_task_source_audio(task: &AsrDirectoryTask) -> CleanupSourceAudioResponse {
+    let store = load_file_store(&task.id);
+    let mut deleted_files = 0usize;
+    let mut deleted_bytes = 0u64;
+    let mut skipped_files = 0usize;
+    let mut skipped_bytes = 0u64;
+    let mut failed_files = Vec::new();
+
+    for record in store.files.values() {
+        if !record.source_path.exists() {
+            continue;
+        }
+        let size = source_size(&record.source_path)
+            .or(record.source_size)
+            .unwrap_or(0);
+        if !is_cleanable_source_audio_record(task, record) {
+            if record.source_path.is_file() && is_audio_file(&record.source_path) {
+                skipped_files += 1;
+                skipped_bytes += size;
+            }
+            continue;
+        }
+        match std::fs::remove_file(&record.source_path) {
+            Ok(()) => {
+                deleted_files += 1;
+                deleted_bytes += size;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => failed_files.push(CleanupSourceAudioFailure {
+                source_path: record.source_path.display().to_string(),
+                error: error.to_string(),
+            }),
+        }
+    }
+
+    let summary = summarize_task(task);
+    let ok = failed_files.is_empty();
+    let message = if failed_files.is_empty() {
+        format!("Deleted {deleted_files} ASR source audio file(s).")
+    } else {
+        format!(
+            "Deleted {deleted_files} ASR source audio file(s); {} file(s) failed.",
+            failed_files.len()
+        )
+    };
+    CleanupSourceAudioResponse {
+        ok,
+        deleted_files,
+        deleted_bytes,
+        skipped_files,
+        skipped_bytes,
+        failed_files,
+        summary,
+        message,
     }
 }
 
