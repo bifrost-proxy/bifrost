@@ -35,7 +35,7 @@
 | [remote-access-web-ui.md](./remote-access-web-ui.md) | 远程访问管理 Web UI | 17 | 远程访问配置、登录、会话管理、登录记录展示 |
 | [remote-access-brute-force-protection.md](./remote-access-brute-force-protection.md) | 远程访问暴力破解防护 | 13 | 登录失败计数、自动锁定、密码强度校验、本机恢复、前端锁定提示 |
 | [webui-traffic.md](./webui-traffic.md) | Web UI Traffic 页面 | 48 | 流量表格、详情面板、Tab 切换、Body 视图、筛选过滤（含主筛选器按代理端口过滤与临时停用单条条件）、右键菜单、WebSocket/SSE、搜索、高并发 CONNECT 压力 |
-| [webui-rules.md](./webui-rules.md) | Web UI Rules 页面 | 40 | 规则列表、创建/编辑/删除、排序方式 UI 配置持久化、语法高亮、自动补全、树形视图、Dynamic Island、Merged Rules 一键复制、导入导出、桌面端编辑器快捷键回归、Undo 后保存清理黄点、编辑器内容恢复原文后 Save 按钮禁用回归 |
+| [webui-rules.md](./webui-rules.md) | Web UI Rules 页面 | 43 | 规则列表、创建/编辑/删除、排序方式 UI 配置持久化、语法高亮、自动补全、树形视图、Dynamic Island、Merged Rules 一键复制、Group active summary 与代理运行时本地 fallback、远端失败和快速本地变更稳定性、Group name 深链不返回 502、导入导出、桌面端编辑器快捷键回归、Undo 后保存清理黄点、编辑器内容恢复原文后 Save 按钮禁用回归 |
 | [webui-scripts.md](./webui-scripts.md) | Web UI Scripts 页面 | 25 | 脚本创建（Req/Res/Dec/Parser）、顶部 + 创建菜单、... 更多操作菜单、真实 Import 文件选择器、编辑、保存、测试运行、日志查看、名称校验、树形目录、Parser/Decode 运行时上下文字段补全、桌面端编辑器快捷键回归、Undo 后保存清理黄点 |
 | [webui-values.md](./webui-values.md) | Web UI Values 页面 | 20 | Value 列表、创建/编辑/删除、编辑器、规则引用、导入导出、桌面端编辑器快捷键回归、Undo 后保存清理黄点 |
 | [webui-replay.md](./webui-replay.md) | Web UI Replay 页面 | 23 | HTTP 请求重放、集合管理、SSE/WebSocket 重放、curl 导入、多种 Body 类型、localhost 转发与 passthrough 优先级回归 |
@@ -121,7 +121,7 @@
 
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
-| [badge-hover-panel.md](./badge-hover-panel.md) | Badge Hover 规则详情面板 | 11 | Badge hover 展开面板、规则列表展示、Merged Rules 折叠与一键复制、规则行跳转编辑页、高 z-index 浮层覆盖回归、暗色模式、缓存性能、禁用验证、Merged Rules HTML/Script 标签片段通用转义、误标 HTML 响应头的 JSON 数据接口不注入 |
+| [badge-hover-panel.md](./badge-hover-panel.md) | Badge Hover 规则详情面板 | 13 | Badge hover 展开面板、规则列表展示、Merged Rules 折叠与一键复制、规则行跳转编辑页、高 z-index 浮层覆盖回归、暗色模式、缓存性能、禁用验证、Merged Rules HTML/Script 标签片段通用转义、误标 HTML 响应头的 JSON 数据接口不注入、Group 规则启用后缓存与代理运行时刷新、快速启停最终一致性 |
 
 ### 性能与内存优化测试
 
@@ -181,7 +181,7 @@
 
 ---
 
-**总计：98 个测试文件，1680 个测试用例**
+**总计：98 个测试文件，1685 个测试用例**
 
 ## 工作流程
 

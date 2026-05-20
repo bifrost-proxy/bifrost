@@ -927,6 +927,10 @@ impl AdminState {
         self.group_cache_resolved.store(true, Ordering::Relaxed);
     }
 
+    pub fn clear_group_cache_resolved(&self) {
+        self.group_cache_resolved.store(false, Ordering::Relaxed);
+    }
+
     fn group_cache_path(&self) -> PathBuf {
         self.rules_storage.base_dir().join(".group_cache.json")
     }
@@ -1540,6 +1544,42 @@ mod tests {
             !rules_dir.join(".group_cache.json").exists(),
             "empty cache should not create file"
         );
+
+        cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn badge_rules_cache_preserves_group_navigation_mapping() {
+        let dir = create_test_dir();
+        let rules_dir = dir.join("rules");
+        let group_dir = rules_dir.join("TeamAlpha");
+        let _ = fs::create_dir_all(&group_dir);
+        let storage = RulesStorage::with_dir(rules_dir).unwrap();
+        let group_storage = RulesStorage::with_dir(group_dir).unwrap();
+
+        let mut group_rule =
+            bifrost_storage::RuleFile::new("team-rule", "team.example.com status://200");
+        group_rule.enabled = true;
+        group_rule.group = Some("TeamAlpha".to_string());
+        group_storage.save(&group_rule).unwrap();
+
+        let state = AdminState::new_for_test(19903, storage);
+        {
+            let mut cache = state.group_name_cache();
+            cache.insert("gid-alpha".to_string(), "TeamAlpha".to_string());
+        }
+
+        state.refresh_badge_rules_cache();
+        let json: serde_json::Value = serde_json::from_str(&state.badge_rules_json()).unwrap();
+        let rule = json["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == "team-rule")
+            .expect("badge rule should exist");
+
+        assert_eq!(rule["group_id"], "TeamAlpha");
+        assert_eq!(rule["group_name"], "gid-alpha");
 
         cleanup_test_dir(&dir);
     }

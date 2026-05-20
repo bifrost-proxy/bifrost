@@ -16,6 +16,7 @@
   - CLI：启动命令提供 flag（例如 `--disable-badge-injection`）用于覆盖并持久化该配置。
 - Badge hover 弹窗的 `Merged Rules` 展开区域右上角提供复制按钮，一键复制当前合并规则文本。
 - Badge 与 hover 弹窗使用浏览器允许的最高 `z-index`，并加 `!important`，降低被业务页面高层级浮层遮挡的概率。
+- Group 规则通过 API 启用、禁用、创建、更新或删除后，后续代理页面中注入的 Badge 必须立即看到最新 active rules，不需要重启服务或再修改个人规则触发缓存刷新。
 
 ## 实现设计
 
@@ -47,6 +48,9 @@
 - Hover 弹窗同样固定定位，显示在 Badge 上方；面板、标题与 Merged Rules 内容均由内联脚本渲染。
 - Merged Rules 展开后，代码框右上角显示 `Copy` 按钮。点击后优先使用安全上下文下的 `navigator.clipboard.writeText`，失败或不可用时回退到隐藏 `textarea` + `copy` 事件 `clipboardData.setData('text/plain', text)` + `document.execCommand('copy')`；只有 fallback 真实触发 copy 事件并写入数据后才显示 `Copied`，否则显示 `Failed`，避免假阳性成功提示。
 - 规则数据以内联 JSON 形式进入 `<script>` 前，必须先解析为 JSON，再重新序列化，并统一转义 HTML/JS 敏感字符：`<` -> `\u003C`、`>` -> `\u003E`、`&` -> `\u0026`、U+2028/U+2029 -> `\u2028`/`\u2029`。原因是浏览器 HTML 解析器会在脚本文本中识别标签和脚本结束序列，即使它们位于合法 JS 字符串内部；例如 `htmlAppend://{vconsole-inject}` 的 value 中包含 `</script><script>new VConsole()</script>` 时，未转义会提前闭合 Badge 脚本并把规则文本提升为真实页面脚本。统一转义后，`<script>`、`</script>`、`<!--`、`<iframe srcdoc>`、`</textarea>` 等标签片段都不会以原始 HTML token 形态进入注入脚本。
+- Badge Group 数据保留既有导航契约：内联脚本使用当前字段组合来同时满足面板分组展示和 `/_bifrost/rules?group=...` 跳转定位，不按字段名做单纯重命名式改造。后续如要改字段语义，必须同步迁移注入脚本和跳转逻辑。
+- Group 规则变更时，`handlers/group_rules.rs` 的规则变更通知路径必须刷新 `AdminState.badge_rules_cache`，与个人规则变更路径保持一致。
+- Group 规则启用、禁用或更新已启用规则后，通知路径必须同时触发代理规则 hot reload；hot reload 的 Group 目录解析以本地规则目录为准，远端 group cache 不得成为 Badge 或代理运行时生效的前置条件。
 
 ### 4. Web UI / Admin API
 
@@ -70,6 +74,8 @@
   - `test_skip_badge_for_mislabeled_json_response`：验证 `Content-Type: text/html` 场景下传入 JSON object body 时不会注入 Badge。
   - `test_skip_badge_for_mislabeled_json_array_response`：验证 JSON array body 不会注入 Badge。
   - `test_inject_badge_for_html_like_fragment`：验证 `<main>...</main>` 这类非完整 HTML 文档但明显是标签内容的响应仍会注入 Badge。
+- `bifrost-admin`：
+  - `badge_rules_cache_preserves_group_navigation_mapping`：验证 Badge Group 字段组合仍保持现有跳转契约，避免修复缓存刷新时破坏 Group 规则定位。
 
 ### E2E 测试
 
@@ -85,6 +91,10 @@
 - 误标 JSON 回归用例：本地上游返回 `Content-Type: text/html; charset=utf-8` 但 body 为 `{"code":200,"data":...}`。
   - 通过启用 Badge 的 Bifrost 代理请求该接口。
   - 断言响应 body 保持 JSON 内容，不包含 `__bifrost_badge__`、`__bb_copy` 或任何 Badge 片段。
+- `crates/bifrost-e2e/src/tests/group_rules.rs`
+  - `group_rules_enable_refreshes_badge_cache`：通过 Group Rule enable API 开启规则后，直接检查 `badge_rules_json()` 已包含该规则，并保留既有 Group 跳转字段组合。
+  - `group_rules_rapid_toggle_keeps_active_summary_and_badge_consistent`：连续多次启用/停用同一 Group 规则，每次都轮询 active summary 与 Badge cache 到一致状态，覆盖本地刷新延迟和系统短暂卡顿下的最终一致性。
+  - `resolve_valid_group_dirs_uses_local_dirs_without_sync_session`：没有 active sync session 时，代理热重载仍加载本地 Group 规则目录。
 
 ### 真实场景测试
 
@@ -95,6 +105,8 @@
 - 在页面中放置高 z-index 覆盖层，确认 Badge 弹窗仍可显示在其上方。
 - 新增 `human_tests/badge-hover-panel.md` 的 `TC-BHP-10`：创建包含 vConsole 脚本片段、HTML 注释、事件属性、`srcdoc`、闭合标签等片段的 `htmlAppend://{vconsole-inject}` 规则，但请求不匹配该规则的普通 HTML 页面，确认规则文本只出现在 Badge 的 Merged Rules 展示中，不会逃逸为页面真实脚本或原始 HTML token。
 - 新增 `human_tests/badge-hover-panel.md` 的 `TC-BHP-11`：通过本地上游返回 `Content-Type: text/html` 但 body 为 JSON 的响应，确认启用 Badge 时客户端收到的仍是原始 JSON，不包含 Badge 注入片段。
+- 新增 `human_tests/badge-hover-panel.md` 的 `TC-BHP-12`：通过 Group Rule API 启用规则后，不重启服务直接请求代理 HTML，确认 Badge hover 面板 active 数量和规则列表立即更新，并确认 Group 规则链接仍能定位到对应 Rules 页面。
+- 新增 `human_tests/badge-hover-panel.md` 的 `TC-BHP-13`：连续快速启用/停用同一 Group 规则，允许短暂刷新延迟但要求 active summary 与 Badge cache 在限定时间内收敛到一致状态，防止系统卡顿或本地写入延迟导致长期显示旧规则。
 
 ## 校验要求
 

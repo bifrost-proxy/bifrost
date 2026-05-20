@@ -119,7 +119,6 @@ struct ValidateRuleResponse {
 }
 
 const BUILTIN_DECODE_SCRIPTS: &[&str] = &["utf8", "default", "bp"];
-
 pub async fn handle_rules(
     req: Request<Incoming>,
     state: SharedAdminState,
@@ -253,6 +252,20 @@ fn collect_enabled_from_storage(
     items
 }
 
+fn reverse_group_cache_for_dirs(
+    state: &SharedAdminState,
+    group_dirs: &[(String, std::path::PathBuf)],
+) -> HashMap<String, String> {
+    let cache = state.group_name_cache();
+    let mut map = HashMap::new();
+    for (dir_name, _) in group_dirs {
+        if let Some(gid) = cache.reverse_lookup(dir_name) {
+            map.insert(dir_name.clone(), gid);
+        }
+    }
+    map
+}
+
 async fn active_summary(state: SharedAdminState) -> Response<BoxBody> {
     let mut all_rules = Vec::new();
     let mut var_map: HashMap<String, Vec<InlineVarEntry>> = HashMap::new();
@@ -311,16 +324,7 @@ async fn active_summary(state: SharedAdminState) -> Response<BoxBody> {
         })
         .collect();
 
-    let reverse_cache: HashMap<String, String> = {
-        let cache = state.group_name_cache();
-        let mut map = HashMap::new();
-        for (dir_name, _) in &group_dirs {
-            if let Some(gid) = cache.reverse_lookup(dir_name) {
-                map.insert(dir_name.clone(), gid);
-            }
-        }
-        map
-    };
+    let reverse_cache = reverse_group_cache_for_dirs(&state, &group_dirs);
 
     let uncached_dirs: Vec<String> = group_dirs
         .iter()
@@ -328,77 +332,48 @@ async fn active_summary(state: SharedAdminState) -> Response<BoxBody> {
         .map(|(d, _)| d.clone())
         .collect();
 
-    let reverse_cache = if !uncached_dirs.is_empty() && !state.is_group_cache_resolved() {
-        if let Some(sm) = &state.sync_manager {
-            super::group_rules::resolve_missing_group_caches(sm, &state, &uncached_dirs).await;
-        }
-        state.set_group_cache_resolved();
-        let cache = state.group_name_cache();
-        let mut map = reverse_cache;
-        for dir_name in &uncached_dirs {
-            if let Some(gid) = cache.reverse_lookup(dir_name) {
-                map.insert(dir_name.clone(), gid);
-            }
-        }
-        map
-    } else {
-        reverse_cache
-    };
-
-    let still_orphaned: Vec<(String, std::path::PathBuf)> = group_dirs
-        .iter()
-        .filter(|(d, _)| !reverse_cache.contains_key(d))
-        .cloned()
-        .collect();
-
-    if !still_orphaned.is_empty() && state.is_group_cache_resolved() {
-        let mut any_had_enabled = false;
-
-        for (dir_name, dir_path) in &still_orphaned {
-            if let Ok(storage) = RulesStorage::with_dir(dir_path.clone()) {
-                if let Ok(rules) = storage.load_all() {
-                    let had_enabled = rules.iter().any(|r| r.enabled);
-                    if had_enabled {
-                        tracing::warn!(
-                            target: "bifrost_admin::rules",
-                            dir = %dir_name,
-                            "orphaned group directory has enabled rules, disabling and cleaning up"
-                        );
-                        for rule in &rules {
-                            if rule.enabled {
-                                let _ = storage.set_enabled(&rule.name, false);
-                            }
+    if !uncached_dirs.is_empty() {
+        tracing::debug!(
+            target: "bifrost_admin::rules",
+            dirs = ?uncached_dirs,
+            "active summary using local group directory names for uncached groups"
+        );
+        if !state.is_group_cache_resolved() {
+            if let Some(sm) = state.sync_manager.clone() {
+                if sm.has_session() {
+                    state.set_group_cache_resolved();
+                    let state_for_task = state.clone();
+                    let dirs_for_task = uncached_dirs.clone();
+                    tokio::spawn(async move {
+                        super::group_rules::resolve_missing_group_caches(
+                            &sm,
+                            &state_for_task,
+                            &dirs_for_task,
+                        )
+                        .await;
+                        let all_resolved = {
+                            let cache = state_for_task.group_name_cache();
+                            dirs_for_task
+                                .iter()
+                                .all(|dir| cache.reverse_lookup(dir).is_some())
+                        };
+                        if !all_resolved {
+                            state_for_task.clear_group_cache_resolved();
                         }
-                        any_had_enabled = true;
-                    }
+                        state_for_task.refresh_badge_rules_cache();
+                    });
+                } else {
+                    tracing::debug!(
+                        target: "bifrost_admin::rules",
+                        dirs = ?uncached_dirs,
+                        "active summary skipped group id resolution without active sync session"
+                    );
                 }
             }
-
-            tracing::info!(
-                target: "bifrost_admin::rules",
-                dir = %dir_name,
-                "removing orphaned group directory with no valid group mapping"
-            );
-            if let Err(e) = std::fs::remove_dir_all(dir_path) {
-                tracing::warn!(
-                    target: "bifrost_admin::rules",
-                    error = %e,
-                    dir = %dir_name,
-                    "failed to remove orphaned group directory"
-                );
-            }
-        }
-
-        if any_had_enabled {
-            notify_rules_changed(&state);
         }
     }
 
     for (dir_name, dir_path) in &group_dirs {
-        if !reverse_cache.contains_key(dir_name) {
-            continue;
-        }
-
         let group_storage = match RulesStorage::with_dir(dir_path.clone()) {
             Ok(s) => s,
             Err(e) => {
@@ -412,10 +387,13 @@ async fn active_summary(state: SharedAdminState) -> Response<BoxBody> {
             }
         };
 
-        let group_id = reverse_cache.get(dir_name).cloned();
+        let group_id = reverse_cache
+            .get(dir_name)
+            .map(String::as_str)
+            .unwrap_or(dir_name.as_str());
         let group_rules = collect_enabled_from_storage(
             &group_storage,
-            group_id.as_deref(),
+            Some(group_id),
             Some(dir_name),
             &mut var_map,
             &mut content_parts,

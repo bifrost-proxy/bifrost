@@ -2204,16 +2204,33 @@ fn resolve_valid_group_dirs(admin_state: &AdminState) -> std::collections::HashS
         .as_ref()
         .map(|sm| sm.has_session())
         .unwrap_or(false);
+    let mut dirs = admin_state.group_name_cache().all_dir_names();
 
-    if !has_session {
-        tracing::info!(
-            target: "bifrost_cli::rules",
-            "no active sync session, skipping group rules"
-        );
-        return std::collections::HashSet::new();
+    if let Ok(entries) = std::fs::read_dir(admin_state.rules_storage.base_dir()) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    dirs.insert(name.to_string());
+                }
+            }
+        }
     }
 
-    admin_state.group_name_cache().all_dir_names()
+    if !has_session && dirs.is_empty() {
+        tracing::info!(
+            target: "bifrost_cli::rules",
+            "no active sync session and no local group rule directories found"
+        );
+    } else if !has_session {
+        tracing::info!(
+            target: "bifrost_cli::rules",
+            count = dirs.len(),
+            "no active sync session, loading local group rule directories"
+        );
+    }
+
+    dirs
 }
 
 fn load_stored_rules(
@@ -2562,5 +2579,38 @@ mod tests {
         let port = allocate_loopback_port();
 
         assert!(!is_port_in_use("127.0.0.1", port));
+    }
+
+    #[test]
+    fn resolve_valid_group_dirs_uses_local_dirs_without_sync_session() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let rules_storage =
+            bifrost_storage::RulesStorage::with_dir(temp_dir.path().join("rules")).unwrap();
+        std::fs::create_dir_all(rules_storage.base_dir().join("local-group")).unwrap();
+
+        let admin_state = AdminState::new(0).with_rules_storage(rules_storage);
+
+        let dirs = resolve_valid_group_dirs(&admin_state);
+
+        assert!(dirs.contains("local-group"));
+    }
+
+    #[test]
+    fn resolve_valid_group_dirs_keeps_cached_and_uncached_local_dirs() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let rules_storage =
+            bifrost_storage::RulesStorage::with_dir(temp_dir.path().join("rules")).unwrap();
+        std::fs::create_dir_all(rules_storage.base_dir().join("uncached-group")).unwrap();
+
+        let admin_state = AdminState::new(0).with_rules_storage(rules_storage);
+        {
+            let mut cache = admin_state.group_name_cache();
+            cache.insert("gid-cached".to_string(), "cached-group".to_string());
+        }
+
+        let dirs = resolve_valid_group_dirs(&admin_state);
+
+        assert!(dirs.contains("cached-group"));
+        assert!(dirs.contains("uncached-group"));
     }
 }
