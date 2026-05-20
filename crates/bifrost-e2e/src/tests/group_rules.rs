@@ -531,6 +531,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     ProxyInstance::start_with_admin_sync(port, vec![], false, true)
                         .await
                         .map_err(|e| format!("Failed to start proxy: {}", e))?;
+                save_test_sync_token(&admin_state).await?;
 
                 let group_name = "test-active-summary-group";
                 let group_id = "grp-active-001";
@@ -634,6 +635,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     ProxyInstance::start_with_admin_sync(port, vec![], false, true)
                         .await
                         .map_err(|e| format!("Failed to start proxy: {}", e))?;
+                save_test_sync_token(&admin_state).await?;
 
                 let group_name = "test-toggle-summary-group";
                 let group_id = "grp-toggle-001";
@@ -753,13 +755,13 @@ pub fn get_all_tests() -> Vec<TestCase> {
             },
         ),
         TestCase::standalone(
-            "group_rules_active_summary_uses_uncached_local_group_dirs",
-            "Active summary remains available when a local group directory has no cached group id",
+            "group_rules_active_summary_skips_group_rules_without_login",
+            "Active summary does not consume enabled group rules without an active sync session",
             "group_rules",
             || async move {
                 let port = pick_unused_port()?;
                 let (_proxy, admin_state) =
-                    ProxyInstance::start_with_admin(port, vec![], false, true)
+                    ProxyInstance::start_with_admin_sync(port, vec![], false, true)
                         .await
                         .map_err(|e| format!("Failed to start proxy: {}", e))?;
 
@@ -794,28 +796,13 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     .get("rules")
                     .and_then(|v| v.as_array())
                     .ok_or("Missing 'rules' array")?;
-                let active_rule = rules
+                if rules
                     .iter()
-                    .find(|r| r.get("name").and_then(|n| n.as_str()) == Some("uncached-group-rule"))
-                    .ok_or_else(|| {
-                        format!(
-                            "Expected uncached-group-rule in active summary, got {:?}",
-                            rules
-                        )
-                    })?;
-
-                if active_rule.get("group_id").and_then(|v| v.as_str()) != Some(group_name) {
+                    .any(|r| r.get("name").and_then(|n| n.as_str()) == Some("uncached-group-rule"))
+                {
                     return Err(format!(
-                        "Expected group_id fallback '{}', got {:?}",
-                        group_name,
-                        active_rule.get("group_id")
-                    ));
-                }
-                if active_rule.get("group_name").and_then(|v| v.as_str()) != Some(group_name) {
-                    return Err(format!(
-                        "Expected group_name '{}', got {:?}",
-                        group_name,
-                        active_rule.get("group_name")
+                        "Group rule should not appear in active summary without login, got {:?}",
+                        rules
                     ));
                 }
 
@@ -833,6 +820,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     ProxyInstance::start_with_admin_sync(port, vec![], false, true)
                         .await
                         .map_err(|e| format!("Failed to start proxy: {}", e))?;
+                save_test_sync_token(&admin_state).await?;
 
                 let group_name = "badge-cache-group";
                 let group_id = "grp-badge-cache-001";
@@ -922,6 +910,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     ProxyInstance::start_with_admin_sync(port, vec![], false, true)
                         .await
                         .map_err(|e| format!("Failed to start proxy: {}", e))?;
+                save_test_sync_token(&admin_state).await?;
 
                 let group_name = "remote-cache-failure-group";
                 let group_storage = setup_group_storage(&admin_state, group_name)?;
@@ -988,6 +977,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     ProxyInstance::start_with_admin_sync(port, vec![], false, true)
                         .await
                         .map_err(|e| format!("Failed to start proxy: {}", e))?;
+                save_test_sync_token(&admin_state).await?;
 
                 let group_name = "rapid-toggle-stability-group";
                 let group_id = "grp-rapid-toggle-stability";
@@ -1062,6 +1052,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     ProxyInstance::start_with_admin_sync(port, vec![], false, true)
                         .await
                         .map_err(|e| format!("Failed to start proxy: {}", e))?;
+                save_test_sync_token(&admin_state).await?;
 
                 let group_name = "deeplink-name-group";
                 let group_id = "grp-deeplink-name";
@@ -1148,6 +1139,108 @@ pub fn get_all_tests() -> Vec<TestCase> {
             },
         ),
         TestCase::standalone(
+            "group_rules_logout_keeps_group_id_navigation_cache",
+            "Logout keeps persisted group id/name mapping so Dynamic Island and injected Badge links keep using the real group id after re-login",
+            "group_rules",
+            || async move {
+                let port = pick_unused_port()?;
+                let (_proxy, admin_state) =
+                    ProxyInstance::start_with_admin_sync(port, vec![], false, true)
+                        .await
+                        .map_err(|e| format!("Failed to start proxy: {}", e))?;
+                save_test_sync_token(&admin_state).await?;
+
+                let group_name = "logout-relogin-group";
+                let group_id = "grp-logout-relogin";
+                {
+                    let mut cache = admin_state.group_name_cache();
+                    cache.insert(group_id.to_string(), group_name.to_string());
+                }
+                admin_state.persist_group_name_cache();
+
+                let group_storage = setup_group_storage(&admin_state, group_name)?;
+                let mut rule = RuleFile::new(
+                    "logout-relogin-rule",
+                    "logout-relogin.example.com status://221",
+                );
+                rule.enabled = true;
+                rule.group = Some(group_name.to_string());
+                group_storage
+                    .save(&rule)
+                    .map_err(|e| format!("Failed to save logout relogin rule: {}", e))?;
+                admin_state.refresh_badge_rules_cache();
+
+                let client = build_client()?;
+                let before = fetch_active_summary(&client, port).await?;
+                assert_active_rule_present(
+                    &before,
+                    "logout-relogin-rule",
+                    Some(group_id),
+                    Some(group_name),
+                    Some("status://221"),
+                )?;
+                assert_badge_navigation_mapping(
+                    &admin_state.badge_rules_json(),
+                    "logout-relogin-rule",
+                    group_name,
+                    group_id,
+                )?;
+
+                let logout_resp = client
+                    .post(format!("http://127.0.0.1:{}/_bifrost/api/sync/logout", port))
+                    .send()
+                    .await
+                    .map_err(|e| format!("Logout request failed: {}", e))?;
+                assert_status(&logout_resp, 200)?;
+
+                let after_logout = fetch_active_summary(&client, port).await?;
+                if active_summary_has_rule(&after_logout, "logout-relogin-rule")? {
+                    return Err("Logged-out active summary must not consume group rules".to_string());
+                }
+                let after_logout_badge: serde_json::Value =
+                    serde_json::from_str(&admin_state.badge_rules_json())
+                        .map_err(|e| format!("Failed to parse logged-out badge JSON: {}", e))?;
+                if after_logout_badge
+                    .get("rules")
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|rules| {
+                        rules.iter().any(|r| {
+                            r.get("name").and_then(|n| n.as_str())
+                                == Some("logout-relogin-rule")
+                        })
+                    })
+                {
+                    return Err("Logged-out badge cache must not list active group rules".to_string());
+                }
+                {
+                    let cache = admin_state.group_name_cache();
+                    if cache.reverse_lookup(group_name) != Some(group_id.to_string()) {
+                        return Err("Logout should keep persisted group id/name cache".to_string());
+                    }
+                }
+
+                save_test_sync_token_via_public_callback(&client, port).await?;
+
+                let after = fetch_active_summary(&client, port).await?;
+                assert_active_rule_present(
+                    &after,
+                    "logout-relogin-rule",
+                    Some(group_id),
+                    Some(group_name),
+                    Some("status://221"),
+                )?;
+                assert_badge_navigation_mapping(
+                    &admin_state.badge_rules_json(),
+                    "logout-relogin-rule",
+                    group_name,
+                    group_id,
+                )?;
+
+                cleanup_group_storage(&admin_state, group_name);
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
             "group_rules_special_chars_in_group_name",
             "Group rules with special characters in group name are sanitized for directory names",
             "group_rules",
@@ -1210,6 +1303,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     ProxyInstance::start_with_admin_sync(port, vec![], false, true)
                         .await
                         .map_err(|e| format!("Failed to start proxy: {}", e))?;
+                save_test_sync_token(&admin_state).await?;
 
                 let group_a_name = "test-isolation-group-a";
                 let group_a_id = "grp-iso-a";
@@ -1460,6 +1554,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     ProxyInstance::start_with_admin_sync(port, vec![], false, true)
                         .await
                         .map_err(|e| format!("Failed to start proxy: {}", e))?;
+                save_test_sync_token(&admin_state).await?;
 
                 let group_name = "test-multi-rules-group";
                 let group_id = "grp-multi-001";
@@ -1644,6 +1739,41 @@ fn badge_has_rule(
     Ok(has_rule && merged.contains(expected_content))
 }
 
+fn assert_badge_navigation_mapping(
+    badge_json: &str,
+    rule_name: &str,
+    expected_local_group_name: &str,
+    expected_remote_group_id: &str,
+) -> Result<(), String> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(badge_json).map_err(|e| format!("Invalid badge JSON: {e}"))?;
+    let rules = parsed
+        .get("rules")
+        .and_then(|v| v.as_array())
+        .ok_or("Missing badge rules array")?;
+    let active_rule = rules
+        .iter()
+        .find(|r| r.get("name").and_then(|n| n.as_str()) == Some(rule_name))
+        .ok_or_else(|| format!("Expected {rule_name} in badge rules, got {rules:?}"))?;
+
+    if active_rule.get("group_id").and_then(|v| v.as_str()) != Some(expected_local_group_name) {
+        return Err(format!(
+            "Expected badge group_id/local dir {:?}, got {:?}",
+            expected_local_group_name,
+            active_rule.get("group_id")
+        ));
+    }
+    if active_rule.get("group_name").and_then(|v| v.as_str()) != Some(expected_remote_group_id) {
+        return Err(format!(
+            "Expected badge group_name/remote id {:?}, got {:?}",
+            expected_remote_group_id,
+            active_rule.get("group_name")
+        ));
+    }
+
+    Ok(())
+}
+
 async fn wait_for_rule_state(
     client: &reqwest::Client,
     admin_state: &Arc<bifrost_admin::AdminState>,
@@ -1687,6 +1817,33 @@ fn build_client() -> Result<reqwest::Client, String> {
         .no_proxy()
         .build()
         .map_err(|e| format!("Failed to create client: {}", e))
+}
+
+async fn save_test_sync_token(admin_state: &Arc<bifrost_admin::AdminState>) -> Result<(), String> {
+    let sync_manager = admin_state
+        .sync_manager
+        .as_ref()
+        .ok_or("Expected sync manager for group rule runtime test")?;
+    sync_manager
+        .save_token("bifrost-e2e-group-rule-token".to_string())
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("Failed to save test sync token: {}", e))
+}
+
+async fn save_test_sync_token_via_public_callback(
+    client: &reqwest::Client,
+    port: u16,
+) -> Result<(), String> {
+    let response = client
+        .get(format!(
+            "http://127.0.0.1:{}/_bifrost/public/sync-login?token=bifrost-e2e-group-rule-token",
+            port
+        ))
+        .send()
+        .await
+        .map_err(|e| format!("Public sync login callback failed: {}", e))?;
+    assert_status(&response, 200)
 }
 
 fn setup_group_storage(

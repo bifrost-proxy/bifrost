@@ -347,13 +347,17 @@ pub async fn handle_group_rules(
 
         if let Some(rule_name) = decoded.strip_suffix("/enable") {
             return match method {
-                Method::PUT => handle_enable_rule(state, &group_ref, rule_name, true).await,
+                Method::PUT => {
+                    handle_enable_rule(sync_manager, state, &group_ref, rule_name, true).await
+                }
                 _ => method_not_allowed(),
             };
         }
         if let Some(rule_name) = decoded.strip_suffix("/disable") {
             return match method {
-                Method::PUT => handle_enable_rule(state, &group_ref, rule_name, false).await,
+                Method::PUT => {
+                    handle_enable_rule(sync_manager, state, &group_ref, rule_name, false).await
+                }
                 _ => method_not_allowed(),
             };
         }
@@ -458,6 +462,9 @@ async fn resolve_group_ref(
     let Some(sm) = sync_manager else {
         return Err("Group not loaded yet, list first".to_string());
     };
+    if !sm.has_session() {
+        return Err("Group not loaded yet, list first".to_string());
+    }
     let group = fetch_group_info(sm, group_ref).await?;
     let name = group.name.clone();
     {
@@ -951,12 +958,13 @@ async fn handle_delete_rule(
 }
 
 async fn handle_enable_rule(
+    sync_manager: std::sync::Arc<bifrost_sync::SyncManager>,
     state: SharedAdminState,
     group_ref: &str,
     rule_name: &str,
     enabled: bool,
 ) -> Response<BoxBody> {
-    let group_name = match resolve_group_ref(None, &state, group_ref).await {
+    let group_name = match resolve_group_ref(Some(&sync_manager), &state, group_ref).await {
         Ok(r) => r.name,
         Err(e) => return error_response(StatusCode::BAD_REQUEST, &e),
     };

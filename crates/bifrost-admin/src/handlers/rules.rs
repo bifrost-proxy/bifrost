@@ -312,6 +312,11 @@ async fn active_summary(state: SharedAdminState) -> Response<BoxBody> {
     }
 
     let base_dir = state.rules_storage.base_dir();
+    let has_group_session = state
+        .sync_manager
+        .as_ref()
+        .map(|sm| sm.has_session())
+        .unwrap_or(false);
 
     let group_dirs: Vec<(String, std::path::PathBuf)> = std::fs::read_dir(base_dir)
         .into_iter()
@@ -323,6 +328,23 @@ async fn active_summary(state: SharedAdminState) -> Response<BoxBody> {
             (dir_name, e.path())
         })
         .collect();
+
+    if !has_group_session && !group_dirs.is_empty() {
+        tracing::info!(
+            target: "bifrost_admin::rules",
+            count = group_dirs.len(),
+            "active summary skipped group rules without active sync session"
+        );
+        let variable_conflicts = build_variable_conflicts(var_map);
+        let merged_content = content_parts.join("\n");
+        let resp = ActiveSummaryResponse {
+            total: all_rules.len(),
+            rules: all_rules,
+            variable_conflicts,
+            merged_content,
+        };
+        return json_response(&resp);
+    }
 
     let reverse_cache = reverse_group_cache_for_dirs(&state, &group_dirs);
 

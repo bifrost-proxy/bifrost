@@ -752,6 +752,34 @@
 
 ---
 
+### TC-WRU-44-回归：退出登录再重新登录后 Group 规则跳转仍使用真实 ID
+
+**前置条件**：
+1. 已登录 Bifrost Sync。
+2. 本地存在一个有远端 ID 映射的 Group，例如 `next-agent`。
+3. Group 下存在规则 `NextOncall双前端本地开发`，并可在 Rules 页面启用/停用。
+
+**操作步骤**：
+1. 打开 Rules 页面，切到目标 Group，启用 `NextOncall双前端本地开发`。
+2. 展开 Rules 页 Dynamic Island，点击该 Group 规则，确认 URL 的 `group` 参数为真实 group ID。
+3. 打开 Settings / Sync，执行退出登录。
+4. 重新登录 Sync。
+5. 回到 Rules 页面，再次启用或确认该 Group 规则处于启用状态。
+6. 再次展开 Dynamic Island 并点击该 Group 规则。
+7. 打开一个被代理注入 Bifrost Badge 的页面，展开 Badge 并点击同一 Group 规则。
+
+**预期结果**：
+- 退出登录不会删除本地 `.group_cache.json` 中的 group id/name 映射。
+- 退出登录后，Group 规则文件仍可作为本地缓存查看，但不会出现在 active summary、注入 Badge active 列表，也不会被代理规则引擎命中。
+- 重新登录后 active summary 返回真实 `group_id`，不是本地 group name。
+- Dynamic Island 点击后的 URL 为 `/_bifrost/rules?group=<真实group_id>&rule=...`。
+- 注入 Badge 保持历史 name/id 反向映射契约，点击后同样跳转到真实 group ID。
+- 启用/停用后代理运行时立即热更新，规则命中状态与本地 UI 一致，不依赖远端周期刷新。
+
+**回归目的**：覆盖 logout/login 循环导致 group cache 被清空、进而 Dynamic Island 或 Badge 回退为 `group={group_name}` 的问题。
+
+---
+
 ## 清理
 
 测试完成后清理临时数据：

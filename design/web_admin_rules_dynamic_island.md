@@ -14,6 +14,10 @@ Rules 页面顶部的 Dynamic Island 用于展示当前生效规则数量、规�
 
 2026-05-20 追加回归发现：Badge/Rules 深链可能生成 `/_bifrost/rules?group={group_name}&rule=...`，例如 `group=next-agent`。Web UI 会把该值作为 active group 传给 `/api/group-rules/{group}`，因此后端 Group Rules API 必须把 path segment 视为 group ref：既可能是远端 group id，也可能是本地 group name/目录名。不能把 group name 当成远端 id 直接请求，否则会在已登录但路径使用名字时返回 502。
 
+2026-05-20 退出/重新登录回归发现：`/api/sync/logout` 清空 `.group_cache.json` 后，重新登录再启用本地 Group 规则时，Dynamic Island 和注入 Badge 只能拿到本地目录名，点击后 URL 仍然是 `group={group_name}`。Group id/name cache 不是登录 token，必须作为本地规则导航索引跨 logout 保留；Group 规则启停在有登录态时也要 best-effort 补齐 id/name cache 后再刷新 active summary / Badge cache。
+
+2026-05-20 登录态边界补充：保留本地 Group 规则文件和 group cache 不等于允许代理继续消费 Group 规则。没有 active sync session 时，Group 规则只用于 Web UI 本地查看/恢复，不进入代理 resolver、active-summary 或注入 Badge 的 active 规则列表。
+
 ## 实现逻辑
 
 - 在 `web/src/pages/Rules/RulesDynamicIsland.tsx` 中复用现有 `copyToClipboard()` 工具，兼容桌面壳写入、Web 同步复制路径与 async Clipboard API fallback。
@@ -25,7 +29,8 @@ Rules 页面顶部的 Dynamic Island 用于展示当前生效规则数量、规�
 - 对已缓存 Group，active summary 返回真实 `group_id` 和目录名/组名；对未缓存 Group，`group_id` 先回退为本地目录名，确保预览和 merged content 不会因为远端不可用变成空。
 - 如果 sync manager 可用，未缓存 Group 的 ID/名称解析改为后台 best-effort 任务；解析成功后持久化 group cache 并刷新 badge 缓存。这样保留远端映射补全能力，但不阻塞 Web UI active 规则展示。
 - `/api/group-rules/{group}` 的 `{group}` 采用 group ref 解析：先按 group id 查 cache，再按 group name 反查 id，最后回退本地 group 目录。list/get/enable/disable 必须支持 group name 深链；create/update/delete 在需要远端写入时继续使用解析出的真实 group id 或规则文件中的 remote id。
-- 代理启动与热重载加载规则时同样以本地 Group 规则目录为准：`resolve_valid_group_dirs` 合并 group cache 与本地子目录，即使没有 active sync session，也不会把本地已启用的 Group 规则从代理处理链路剔除。
+- `/api/sync/logout` 只清登录态，不删除 `.group_cache.json`；该文件是本地规则目录到远端 group id 的导航索引。启停 Group 规则时，如果 sync manager 有登录态，则先尝试解析 group ref 并持久化 cache，再触发规则热更新和 Badge cache 刷新。
+- 代理启动与热重载加载规则时以登录态作为 Group 规则消费门禁：有 active sync session 时，`resolve_valid_group_dirs` 合并 group cache 与本地子目录，远端暂时失败也继续使用本地规则；没有 active sync session 时，返回空 group dir 集合，代理只加载个人规则。
 
 ## 依赖项
 
@@ -51,7 +56,9 @@ Rules 页面顶部的 Dynamic Island 用于展示当前生效规则数量、规�
   - `group_rules_active_summary_survives_remote_cache_resolution_failure`：有 sync manager 但登录态/远端 group cache 解析失败时，active summary 立即返回本地 Group 规则、不会删除本地目录，并在失败后清理 retry 标记，避免临时网络抖动后永久不再重试。
   - `group_rules_rapid_toggle_keeps_active_summary_and_badge_consistent`：连续启停同一 Group 规则时，active summary 与 Badge cache 必须在限定时间内收敛到相同状态。
   - `group_rules_deeplink_accepts_group_name`：`/api/group-rules/{group_name}` list/detail/enable 均可用，覆盖 Badge/Rules 深链传 group name 的路径。
-  - `resolve_valid_group_dirs_uses_local_dirs_without_sync_session` / `resolve_valid_group_dirs_keeps_cached_and_uncached_local_dirs`：代理启动与 hot reload 使用本地 Group 目录，不依赖远端刷新或登录态。
+  - `group_rules_logout_keeps_group_id_navigation_cache`：退出登录后 active summary / Badge / 代理运行时不消费 Group 规则，但 `.group_cache.json` 仍保留历史 name/id 反向映射，重新登录后 active summary 与 Badge 点击恢复使用真实 group id，避免重新登录后点击跳到 `group={group_name}`。
+  - `group_rules_active_summary_skips_group_rules_without_login`：未登录时本地启用的 Group 规则不进入 active summary。
+  - `resolve_valid_group_dirs_skips_local_dirs_without_sync_session` / `resolve_valid_group_dirs_skips_cached_and_uncached_local_dirs_without_sync_session`：代理启动与 hot reload 在未登录时不消费本地 Group 目录。
 
 ### 真实场景测试
 
@@ -60,6 +67,7 @@ Rules 页面顶部的 Dynamic Island 用于展示当前生效规则数量、规�
   - 新增 `TC-WRU-41`：Group 规则在远端 group 信息不可用时仍显示 active rules。
   - 新增 `TC-WRU-42`：远端 cache 解析失败、登录态短暂失效和快速本地启停时，Rules active summary 与 Badge cache 在限定时间内收敛，不出现长期 `0 active` 或旧规则残留。
   - 新增 `TC-WRU-43`：`group` URL 参数为本地 group name 时，Rules 页面能打开 Group 规则列表和规则详情，不返回 502。
+  - 新增 `TC-WRU-44`：退出登录再重新登录后，Group 规则启用状态和 Dynamic Island / Badge 点击跳转继续使用真实 group id。
   - 按用例真实执行：创建/启用规则，展开 Dynamic Island，展开 Merged Rules，点击复制按钮，粘贴或读取剪贴板验证内容一致。
 - 更新 `human_tests/readme.md` 中 WebUI Rules 用例数量与说明。
 

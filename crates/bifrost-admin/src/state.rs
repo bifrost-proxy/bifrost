@@ -1054,32 +1054,42 @@ impl AdminState {
         }
 
         let base_dir = self.rules_storage.base_dir();
-        if let Ok(entries) = std::fs::read_dir(base_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if !path.is_dir() {
-                    continue;
-                }
-                let dir_name = entry.file_name().to_string_lossy().to_string();
-                let group_name = {
-                    let cache = self.group_name_cache();
-                    cache
-                        .reverse_lookup(&dir_name)
-                        .unwrap_or_else(|| dir_name.clone())
-                };
-                if let Ok(sub_storage) = RulesStorage::with_dir(path) {
-                    if let Ok(sub_rules) = sub_storage.load_enabled() {
-                        for rule in sub_rules {
-                            let rule_count = rule
-                                .content
-                                .lines()
-                                .filter(|l| {
-                                    let t = l.trim();
-                                    !t.is_empty() && !t.starts_with('#')
-                                })
-                                .count();
-                            content_parts.push(rule.content.clone());
-                            items.push(format!(
+        let has_group_session = self
+            .sync_manager
+            .as_ref()
+            .map(|sm| sm.has_session())
+            .unwrap_or(false);
+        if has_group_session {
+            if let Ok(entries) = std::fs::read_dir(base_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if !path.is_dir() {
+                        continue;
+                    }
+                    let dir_name = entry.file_name().to_string_lossy().to_string();
+                    let group_name = {
+                        let cache = self.group_name_cache();
+                        // The injected Badge intentionally keeps the local directory name in
+                        // group_id and the remote id in group_name. Its script prefers
+                        // group_name for the URL parameter, preserving the historical
+                        // name/id reversal needed for correct Rules page routing.
+                        cache
+                            .reverse_lookup(&dir_name)
+                            .unwrap_or_else(|| dir_name.clone())
+                    };
+                    if let Ok(sub_storage) = RulesStorage::with_dir(path) {
+                        if let Ok(sub_rules) = sub_storage.load_enabled() {
+                            for rule in sub_rules {
+                                let rule_count = rule
+                                    .content
+                                    .lines()
+                                    .filter(|l| {
+                                        let t = l.trim();
+                                        !t.is_empty() && !t.starts_with('#')
+                                    })
+                                    .count();
+                                content_parts.push(rule.content.clone());
+                                items.push(format!(
                                 r#"{{"name":{},"rule_count":{},"group_id":{},"group_name":{}}}"#,
                                 serde_json::to_string(&rule.name)
                                     .unwrap_or_else(|_| "\"\"".to_string()),
@@ -1089,6 +1099,7 @@ impl AdminState {
                                 serde_json::to_string(&group_name)
                                     .unwrap_or_else(|_| "\"\"".to_string()),
                             ));
+                            }
                         }
                     }
                 }
@@ -1554,6 +1565,12 @@ mod tests {
         let rules_dir = dir.join("rules");
         let group_dir = rules_dir.join("TeamAlpha");
         let _ = fs::create_dir_all(&group_dir);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let config_manager = Arc::new(ConfigManager::new(dir.join("config")).unwrap());
+        let sync_manager = Arc::new(bifrost_sync::SyncManager::new(config_manager, 19903).unwrap());
+        runtime
+            .block_on(sync_manager.save_token("badge-test-token".to_string()))
+            .unwrap();
         let storage = RulesStorage::with_dir(rules_dir).unwrap();
         let group_storage = RulesStorage::with_dir(group_dir).unwrap();
 
@@ -1563,7 +1580,7 @@ mod tests {
         group_rule.group = Some("TeamAlpha".to_string());
         group_storage.save(&group_rule).unwrap();
 
-        let state = AdminState::new_for_test(19903, storage);
+        let state = AdminState::new_for_test(19903, storage).with_sync_manager_shared(sync_manager);
         {
             let mut cache = state.group_name_cache();
             cache.insert("gid-alpha".to_string(), "TeamAlpha".to_string());

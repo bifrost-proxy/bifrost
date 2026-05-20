@@ -26,7 +26,9 @@ use bifrost_tls::{get_platform_name, CertInstaller, CertStatus};
 use parking_lot::RwLock as ParkingRwLock;
 use tracing::info;
 
-use crate::commands::ca::{check_and_install_certificate, load_tls_config};
+use crate::commands::ca::{
+    check_and_install_certificate, load_tls_config, CertificateCheckOptions,
+};
 use crate::config::get_bifrost_dir;
 use crate::help::print_startup_help;
 use crate::parsing::{parse_cli_rules, DynamicRulesResolver, SharedDynamicRulesResolver};
@@ -553,8 +555,11 @@ pub fn run_start(
         }
     }
 
-    if !daemon && !skip_cert_check {
-        check_and_install_certificate()?;
+    if !skip_cert_check {
+        check_and_install_certificate(CertificateCheckOptions {
+            auto_yes: yes,
+            allow_prompt: io::stdin().is_terminal(),
+        })?;
     }
 
     check_and_resolve_port_conflict(&host, port, yes)?;
@@ -2204,7 +2209,17 @@ fn resolve_valid_group_dirs(admin_state: &AdminState) -> std::collections::HashS
         .as_ref()
         .map(|sm| sm.has_session())
         .unwrap_or(false);
-    let mut dirs = admin_state.group_name_cache().all_dir_names();
+    let mut dirs = std::collections::HashSet::new();
+
+    if !has_session {
+        tracing::info!(
+            target: "bifrost_cli::rules",
+            "no active sync session, skipping group rule directories for proxy runtime"
+        );
+        return dirs;
+    }
+
+    dirs.extend(admin_state.group_name_cache().all_dir_names());
 
     if let Ok(entries) = std::fs::read_dir(admin_state.rules_storage.base_dir()) {
         for entry in entries.flatten() {
@@ -2215,19 +2230,6 @@ fn resolve_valid_group_dirs(admin_state: &AdminState) -> std::collections::HashS
                 }
             }
         }
-    }
-
-    if !has_session && dirs.is_empty() {
-        tracing::info!(
-            target: "bifrost_cli::rules",
-            "no active sync session and no local group rule directories found"
-        );
-    } else if !has_session {
-        tracing::info!(
-            target: "bifrost_cli::rules",
-            count = dirs.len(),
-            "no active sync session, loading local group rule directories"
-        );
     }
 
     dirs
@@ -2582,7 +2584,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_valid_group_dirs_uses_local_dirs_without_sync_session() {
+    fn resolve_valid_group_dirs_skips_local_dirs_without_sync_session() {
         let temp_dir = tempfile::tempdir().unwrap();
         let rules_storage =
             bifrost_storage::RulesStorage::with_dir(temp_dir.path().join("rules")).unwrap();
@@ -2592,11 +2594,11 @@ mod tests {
 
         let dirs = resolve_valid_group_dirs(&admin_state);
 
-        assert!(dirs.contains("local-group"));
+        assert!(dirs.is_empty());
     }
 
     #[test]
-    fn resolve_valid_group_dirs_keeps_cached_and_uncached_local_dirs() {
+    fn resolve_valid_group_dirs_skips_cached_and_uncached_local_dirs_without_sync_session() {
         let temp_dir = tempfile::tempdir().unwrap();
         let rules_storage =
             bifrost_storage::RulesStorage::with_dir(temp_dir.path().join("rules")).unwrap();
@@ -2610,7 +2612,6 @@ mod tests {
 
         let dirs = resolve_valid_group_dirs(&admin_state);
 
-        assert!(dirs.contains("cached-group"));
-        assert!(dirs.contains("uncached-group"));
+        assert!(dirs.is_empty());
     }
 }
