@@ -161,6 +161,37 @@ fn get_traffic_type_from_url(url: &str) -> TrafficType {
     }
 }
 
+fn annotate_actual_upstream(
+    record: &mut TrafficRecord,
+    processed_uri: &Uri,
+    original: (&str, u16),
+    upstream: (&str, u16, &str),
+    use_tls: bool,
+) {
+    let (original_host, original_port) = original;
+    let (upstream_host, upstream_port, upstream_path) = upstream;
+    let original_path_and_query = processed_uri
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/");
+    if upstream_host != original_host
+        || upstream_port != original_port
+        || upstream_path != original_path_and_query
+    {
+        let actual_scheme = if use_tls { "https" } else { "http" };
+        let actual_url = if (use_tls && upstream_port == 443) || (!use_tls && upstream_port == 80) {
+            format!("{}://{}{}", actual_scheme, upstream_host, upstream_path)
+        } else {
+            format!(
+                "{}://{}:{}{}",
+                actual_scheme, upstream_host, upstream_port, upstream_path
+            )
+        };
+        record.actual_url = Some(actual_url);
+        record.actual_host = Some(upstream_host.to_string());
+    }
+}
+
 pub(crate) fn headers_pairs_equal_ignore_order(
     a: &[(String, String)],
     b: &[(String, String)],
@@ -461,6 +492,8 @@ fn build_upstream_pool_partition(
     });
     partition.push_str("|ignored_host=");
     partition.push(if rules.ignored.host { '1' } else { '0' });
+    partition.push_str("|upstream_unsafe_ssl=");
+    partition.push(if rules.upstream_unsafe_ssl { '1' } else { '0' });
     partition
 }
 
@@ -738,30 +771,15 @@ pub struct ConnectionErrorInfo {
 }
 
 pub fn build_error_body(status_code: u16, error_info: &ConnectionErrorInfo) -> Bytes {
-    let hostname = gethostname::gethostname().to_string_lossy().to_string();
-    let now = chrono::Local::now();
-    let date_str = now.format("%m/%d/%Y, %I:%M:%S %p").to_string();
-
-    Bytes::from(format!(
-        "Status: {}\nError: {}\nFrom: Bifrost@{}\nHost: {}\nDate: {}\nURL: {}",
-        status_code,
-        error_info.error_message,
-        hostname,
-        error_info.host,
-        date_str,
-        error_info.request_url,
-    ))
+    Bytes::from(build_error_body_text(status_code, error_info))
 }
 
-pub fn build_connection_error_response(
-    status_code: u16,
-    error_info: &ConnectionErrorInfo,
-) -> Response<BoxBody> {
+fn build_error_body_text(status_code: u16, error_info: &ConnectionErrorInfo) -> String {
     let hostname = gethostname::gethostname().to_string_lossy().to_string();
     let now = chrono::Local::now();
     let date_str = now.format("%m/%d/%Y, %I:%M:%S %p").to_string();
 
-    let body = format!(
+    let mut body = format!(
         "Status: {}\nError: {}\nFrom: Bifrost@{}\nHost: {}\nDate: {}\nURL: {}",
         status_code,
         error_info.error_message,
@@ -770,6 +788,28 @@ pub fn build_connection_error_response(
         date_str,
         error_info.request_url,
     );
+    if let Some(suggestion) = connection_error_suggestion(error_info) {
+        body.push_str("\nSuggestion: ");
+        body.push_str(suggestion);
+    }
+    body
+}
+
+fn connection_error_suggestion(error_info: &ConnectionErrorInfo) -> Option<&'static str> {
+    if error_info.error_type == "REQUEST_TLS_FAILED" {
+        Some(
+            "If the upstream HTTPS certificate is self-signed or otherwise untrusted, add upstreamUnsafeSsl://true to the matching rule instead of enabling global --unsafe-ssl.",
+        )
+    } else {
+        None
+    }
+}
+
+pub fn build_connection_error_response(
+    status_code: u16,
+    error_info: &ConnectionErrorInfo,
+) -> Response<BoxBody> {
+    let body = build_error_body_text(status_code, error_info);
 
     Response::builder()
         .status(hyper::StatusCode::from_u16(status_code).unwrap_or(hyper::StatusCode::BAD_GATEWAY))
@@ -792,20 +832,7 @@ pub fn build_overridden_error_response(
     let body = if let Some(ref res_body) = rules.res_body {
         res_body.clone()
     } else {
-        let hostname = gethostname::gethostname().to_string_lossy().to_string();
-        let now = chrono::Local::now();
-        let date_str = now.format("%m/%d/%Y, %I:%M:%S %p").to_string();
-
-        let body_str = format!(
-            "Status: {}\nError: {}\nFrom: Bifrost@{}\nHost: {}\nDate: {}\nURL: {}",
-            status_code,
-            error_info.error_message,
-            hostname,
-            error_info.host,
-            date_str,
-            error_info.request_url,
-        );
-        Bytes::from(body_str)
+        Bytes::from(build_error_body_text(status_code, error_info))
     };
 
     let mut response = Response::builder()
@@ -897,6 +924,7 @@ pub async fn handle_http_request(
         &incoming_headers,
         &incoming_cookies,
     );
+    let upstream_unsafe_ssl = unsafe_ssl || resolved_rules.upstream_unsafe_ssl;
 
     // 解压输出上限：用于防御压缩炸弹。优先读取配置，否则使用默认 10MiB。
     let max_decompress_output_bytes = if let Some(ref state) = admin_state {
@@ -1698,7 +1726,7 @@ pub async fn handle_http_request(
                     &host,
                     port,
                     h3_req,
-                    unsafe_ssl,
+                    upstream_unsafe_ssl,
                     dns_resolver.as_ref().unwrap().as_ref(),
                     &resolved_rules.dns_servers,
                 )
@@ -1792,7 +1820,7 @@ pub async fn handle_http_request(
             let send_start = Instant::now();
             let res = match send_pooled_request(
                 outgoing_req,
-                unsafe_ssl,
+                upstream_unsafe_ssl,
                 &resolved_rules.dns_servers,
                 &pool_partition,
             )
@@ -1811,7 +1839,7 @@ pub async fn handle_http_request(
                             ctx.id_str()
                         );
                         mark_http1_upstream_fallback(
-                            unsafe_ssl,
+                            upstream_unsafe_ssl,
                             &resolved_rules.dns_servers,
                             &pool_partition,
                         );
@@ -1821,7 +1849,7 @@ pub async fn handle_http_request(
                             .build()?;
                         match send_pooled_request_http1_only(
                             retry_request,
-                            unsafe_ssl,
+                            upstream_unsafe_ssl,
                             &resolved_rules.dns_servers,
                             &pool_partition,
                         )
@@ -1919,7 +1947,7 @@ pub async fn handle_http_request(
             let send_start = Instant::now();
             let res = match send_pooled_request(
                 outgoing_req,
-                unsafe_ssl,
+                upstream_unsafe_ssl,
                 &resolved_rules.dns_servers,
                 &pool_partition,
             )
@@ -1992,7 +2020,7 @@ pub async fn handle_http_request(
                         e
                     );
                     mark_http1_upstream_fallback(
-                        unsafe_ssl,
+                        upstream_unsafe_ssl,
                         &resolved_rules.dns_servers,
                         &pool_partition,
                     );
@@ -2003,7 +2031,7 @@ pub async fn handle_http_request(
                     let retry_start = Instant::now();
                     match send_pooled_request_http1_only(
                         retry_request,
-                        unsafe_ssl,
+                        upstream_unsafe_ssl,
                         &resolved_rules.dns_servers,
                         &pool_partition,
                     )
@@ -2046,7 +2074,11 @@ pub async fn handle_http_request(
                 "[{}] Upstream HTTP/2 response is a large or unknown-size binary body; retrying with HTTP/1.1 fallback before streaming",
                 ctx.id_str()
             );
-            mark_http1_upstream_fallback(unsafe_ssl, &resolved_rules.dns_servers, &pool_partition);
+            mark_http1_upstream_fallback(
+                upstream_unsafe_ssl,
+                &resolved_rules.dns_servers,
+                &pool_partition,
+            );
             let retry_request = retry_blueprint
                 .as_ref()
                 .expect("retry blueprint exists for H2 body fallback")
@@ -2054,7 +2086,7 @@ pub async fn handle_http_request(
             let retry_start = Instant::now();
             match send_pooled_request_http1_only(
                 retry_request,
-                unsafe_ssl,
+                upstream_unsafe_ssl,
                 &resolved_rules.dns_servers,
                 &pool_partition,
             )
@@ -2342,6 +2374,13 @@ pub async fn handle_http_request(
                 if res_headers != *original_res_headers {
                     record.response_headers = Some(res_headers.clone());
                 }
+                annotate_actual_upstream(
+                    &mut record,
+                    &processed_uri,
+                    (&original_host, original_port),
+                    (&host, port, &path),
+                    use_tls,
+                );
                 record.has_rule_hit = has_rules;
                 record.matched_rules = crate::utils::build_matched_rules(&resolved_rules);
                 record.request_content_type = req_headers
@@ -2789,20 +2828,13 @@ pub async fn handle_http_request(
                 record.original_request_headers = Some(orig.clone());
             }
         }
-        let original_path_and_query = processed_uri
-            .path_and_query()
-            .map(|pq| pq.as_str())
-            .unwrap_or("/");
-        if host != original_host || port != original_port || path != original_path_and_query {
-            let actual_scheme = if use_tls { "https" } else { "http" };
-            let actual_url = if (use_tls && port == 443) || (!use_tls && port == 80) {
-                format!("{}://{}{}", actual_scheme, host, path)
-            } else {
-                format!("{}://{}:{}{}", actual_scheme, host, port, path)
-            };
-            record.actual_url = Some(actual_url);
-            record.actual_host = Some(host.clone());
-        }
+        annotate_actual_upstream(
+            &mut record,
+            &processed_uri,
+            (&original_host, original_port),
+            (&host, port, &path),
+            use_tls,
+        );
         record.has_rule_hit = has_rules;
         record.matched_rules = crate::utils::build_matched_rules(&resolved_rules);
         record.request_content_type = req_headers
@@ -3888,6 +3920,39 @@ mod tests {
             build_upstream_pool_partition("example.com", "127.0.0.1", 9999, false, &proxy_rules);
 
         assert_ne!(host_partition, proxy_partition);
+    }
+
+    #[test]
+    fn test_upstream_pool_partition_separates_unsafe_ssl_rules() {
+        let safe_rules = ResolvedRules::default();
+        let unsafe_rules = ResolvedRules {
+            upstream_unsafe_ssl: true,
+            ..Default::default()
+        };
+
+        let safe_partition =
+            build_upstream_pool_partition("example.com", "127.0.0.1", 443, true, &safe_rules);
+        let unsafe_partition =
+            build_upstream_pool_partition("example.com", "127.0.0.1", 443, true, &unsafe_rules);
+
+        assert_ne!(safe_partition, unsafe_partition);
+    }
+
+    #[test]
+    fn test_tls_connection_error_suggests_per_rule_unsafe_ssl() {
+        let error_info = ConnectionErrorInfo {
+            error_type: "REQUEST_TLS_FAILED",
+            error_message: "Request Failed: invalid peer certificate: UnknownIssuer".to_string(),
+            host: "strict-upstream.local".to_string(),
+            request_url: "http://strict-upstream.local/unsafe-cert".to_string(),
+        };
+
+        let body = build_error_body(502, &error_info);
+        let body = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(body.contains("Suggestion:"));
+        assert!(body.contains("upstreamUnsafeSsl://true"));
+        assert!(body.contains("global --unsafe-ssl"));
     }
 
     #[test]

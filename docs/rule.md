@@ -165,6 +165,19 @@ api.example.com h3://
 - 对浏览器常见的 HTTPS `CONNECT` 流量，通常需要启用 TLS interception 后，代理才能在解密后的上游转发阶段尝试 H3
 - 纯 `CONNECT` 透传隧道不会把上游 TCP 连接自动切换成 QUIC/H3
 
+### 上游不安全 HTTPS 证书规则
+
+`upstreamUnsafeSsl://true` 仅对命中的规则允许 Bifrost 到上游 HTTPS 服务时跳过证书校验。它用于某个测试环境、内网服务或自签名上游，不需要在启动整个代理时使用全局 `--unsafe-ssl`。
+
+```txt
+internal-api.example.test https://10.37.102.138:8080 upstreamUnsafeSsl://true
+```
+
+- 该规则只影响代理到上游的 HTTPS 连接，不会改变客户端到 Bifrost 的 TLS 信任关系。
+- 没有命中该规则的请求仍按默认安全证书校验执行。
+- 如果上游证书不可信且没有配置该规则，默认错误响应 body 会提示在匹配规则中追加 `upstreamUnsafeSsl://true`。
+- 如果目标上游证书可信，应不要使用该规则；它是针对单个连接/规则的显式例外。
+
 ## 扩展阅读
 
 - [规则协议手册](./rules/README.md)：按协议查看各能力说明与示例

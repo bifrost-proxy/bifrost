@@ -417,14 +417,15 @@ fn build_upstream_pool_partition(
     rules: &ResolvedRules,
 ) -> String {
     format!(
-        "orig={original_host}|target={}://{}:{}|host={:?}|proxy={:?}|proto={:?}|ignored_host={}",
+        "orig={original_host}|target={}://{}:{}|host={:?}|proxy={:?}|proto={:?}|ignored_host={}|upstream_unsafe_ssl={}",
         if use_http { "http" } else { "https" },
         target_host,
         target_port,
         rules.host,
         rules.proxy,
         rules.host_protocol,
-        rules.ignored.host
+        rules.ignored.host,
+        rules.upstream_unsafe_ssl
     )
 }
 
@@ -446,6 +447,7 @@ fn merge_connect_resolved_rules(
     if tunnel_specific.sni_callback.is_some() {
         base.sni_callback = tunnel_specific.sni_callback;
     }
+    base.upstream_unsafe_ssl = base.upstream_unsafe_ssl || tunnel_specific.upstream_unsafe_ssl;
 
     if !tunnel_specific.rules.is_empty() {
         base.rules.extend(tunnel_specific.rules);
@@ -541,6 +543,7 @@ pub async fn handle_connect(
     if tunnel_rules.host.is_some()
         || tunnel_rules.tls_intercept.is_some()
         || tunnel_rules.tls_options.is_some()
+        || tunnel_rules.upstream_unsafe_ssl
         || tunnel_rules.sni_callback.is_some()
         || !tunnel_rules.rules.is_empty()
     {
@@ -1859,6 +1862,7 @@ async fn handle_intercepted_request_with_protocol(
         &incoming_headers,
         &incoming_cookies,
     );
+    let upstream_unsafe_ssl = unsafe_ssl || resolved_rules.upstream_unsafe_ssl;
 
     let has_rules = !resolved_rules.rules.is_empty()
         || resolved_rules.host.is_some()
@@ -2665,7 +2669,7 @@ async fn handle_intercepted_request_with_protocol(
                     &actual_target_host,
                     actual_target_port,
                     h3_req,
-                    unsafe_ssl,
+                    upstream_unsafe_ssl,
                     &h3_dns_resolver,
                     &resolved_rules.dns_servers,
                 )
@@ -2732,7 +2736,7 @@ async fn handle_intercepted_request_with_protocol(
         let send_start = Instant::now();
         let response = match send_pooled_request(
             upstream_req,
-            unsafe_ssl,
+            upstream_unsafe_ssl,
             &resolved_rules.dns_servers,
             &pool_partition,
         )
@@ -2749,7 +2753,11 @@ async fn handle_intercepted_request_with_protocol(
                         "[{}] Upstream HTTP/2 request failed; retrying with HTTP/1.1 fallback",
                         req_id
                     );
-                    mark_http1_fallback(unsafe_ssl, &resolved_rules.dns_servers, &pool_partition);
+                    mark_http1_fallback(
+                        upstream_unsafe_ssl,
+                        &resolved_rules.dns_servers,
+                        &pool_partition,
+                    );
                     let retry_request = match retry_blueprint
                         .as_ref()
                         .expect("retry blueprint exists for retryable request")
@@ -2766,7 +2774,7 @@ async fn handle_intercepted_request_with_protocol(
                     };
                     match send_pooled_request_http1_only(
                         retry_request,
-                        unsafe_ssl,
+                        upstream_unsafe_ssl,
                         &resolved_rules.dns_servers,
                         &pool_partition,
                     )
@@ -2816,7 +2824,7 @@ async fn handle_intercepted_request_with_protocol(
         let send_start = Instant::now();
         let response = match send_pooled_request(
             upstream_req,
-            unsafe_ssl,
+            upstream_unsafe_ssl,
             &resolved_rules.dns_servers,
             &pool_partition,
         )
@@ -2833,7 +2841,11 @@ async fn handle_intercepted_request_with_protocol(
                         "[{}] Upstream HTTP/2 request failed; retrying with HTTP/1.1 fallback",
                         req_id
                     );
-                    mark_http1_fallback(unsafe_ssl, &resolved_rules.dns_servers, &pool_partition);
+                    mark_http1_fallback(
+                        upstream_unsafe_ssl,
+                        &resolved_rules.dns_servers,
+                        &pool_partition,
+                    );
                     let retry_request = match retry_blueprint
                         .as_ref()
                         .expect("retry blueprint exists for retryable request")
@@ -2850,7 +2862,7 @@ async fn handle_intercepted_request_with_protocol(
                     };
                     match send_pooled_request_http1_only(
                         retry_request,
-                        unsafe_ssl,
+                        upstream_unsafe_ssl,
                         &resolved_rules.dns_servers,
                         &pool_partition,
                     )
@@ -2935,7 +2947,11 @@ async fn handle_intercepted_request_with_protocol(
                         "[{}] Upstream HTTP/2 response body failed while probing response; retrying with HTTP/1.1 fallback: {}",
                         req_id, e
                     );
-                    mark_http1_fallback(unsafe_ssl, &resolved_rules.dns_servers, &pool_partition);
+                    mark_http1_fallback(
+                        upstream_unsafe_ssl,
+                        &resolved_rules.dns_servers,
+                        &pool_partition,
+                    );
                     let retry_request = match retry_blueprint
                         .as_ref()
                         .expect("retry blueprint exists for H2 body fallback")
@@ -2953,7 +2969,7 @@ async fn handle_intercepted_request_with_protocol(
                     let retry_start = Instant::now();
                     match send_pooled_request_http1_only(
                         retry_request,
-                        unsafe_ssl,
+                        upstream_unsafe_ssl,
                         &resolved_rules.dns_servers,
                         &pool_partition,
                     )
@@ -2992,7 +3008,11 @@ async fn handle_intercepted_request_with_protocol(
                 "[{}] Upstream HTTP/2 response is a large or unknown-size binary body; retrying with HTTP/1.1 fallback before streaming",
                 req_id
             );
-            mark_http1_fallback(unsafe_ssl, &resolved_rules.dns_servers, &pool_partition);
+            mark_http1_fallback(
+                upstream_unsafe_ssl,
+                &resolved_rules.dns_servers,
+                &pool_partition,
+            );
             let retry_request = match retry_blueprint
                 .as_ref()
                 .expect("retry blueprint exists for H2 body fallback")
@@ -3010,7 +3030,7 @@ async fn handle_intercepted_request_with_protocol(
             let retry_start = Instant::now();
             match send_pooled_request_http1_only(
                 retry_request,
-                unsafe_ssl,
+                upstream_unsafe_ssl,
                 &resolved_rules.dns_servers,
                 &pool_partition,
             )

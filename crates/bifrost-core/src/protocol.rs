@@ -88,6 +88,7 @@ pub enum Protocol {
     TlsIntercept,
     TlsPassthrough,
     TlsOptions,
+    UpstreamUnsafeSsl,
     SniCallback,
     DevTools,
 
@@ -354,6 +355,7 @@ impl Protocol {
             "tlsIntercept" => Some(Protocol::TlsIntercept),
             "tlsPassthrough" => Some(Protocol::TlsPassthrough),
             "tlsOptions" => Some(Protocol::TlsOptions),
+            "upstreamUnsafeSsl" => Some(Protocol::UpstreamUnsafeSsl),
             "sniCallback" => Some(Protocol::SniCallback),
             "devtools" => Some(Protocol::DevTools),
             "passthrough" => Some(Protocol::Passthrough),
@@ -434,6 +436,7 @@ impl Protocol {
             Protocol::TlsIntercept => "tlsIntercept",
             Protocol::TlsPassthrough => "tlsPassthrough",
             Protocol::TlsOptions => "tlsOptions",
+            Protocol::UpstreamUnsafeSsl => "upstreamUnsafeSsl",
             Protocol::SniCallback => "sniCallback",
             Protocol::DevTools => "devtools",
             Protocol::Passthrough => "passthrough",
@@ -446,6 +449,7 @@ impl Protocol {
             Protocol::TlsIntercept
             | Protocol::TlsPassthrough
             | Protocol::TlsOptions
+            | Protocol::UpstreamUnsafeSsl
             | Protocol::SniCallback
             | Protocol::DevTools
             | Protocol::Passthrough
@@ -558,7 +562,7 @@ impl std::fmt::Display for Protocol {
     }
 }
 
-pub const ALL_PROTOCOLS: [Protocol; 74] = [
+pub const ALL_PROTOCOLS: [Protocol; 75] = [
     Protocol::Host,
     Protocol::XHost,
     Protocol::Http,
@@ -629,6 +633,7 @@ pub const ALL_PROTOCOLS: [Protocol; 74] = [
     Protocol::TlsIntercept,
     Protocol::TlsPassthrough,
     Protocol::TlsOptions,
+    Protocol::UpstreamUnsafeSsl,
     Protocol::SniCallback,
     Protocol::DevTools,
     Protocol::Passthrough,
@@ -641,7 +646,7 @@ mod tests {
 
     #[test]
     fn test_protocol_count() {
-        assert_eq!(ALL_PROTOCOLS.len(), 74);
+        assert_eq!(ALL_PROTOCOLS.len(), 75);
     }
 
     #[test]
@@ -717,6 +722,7 @@ mod tests {
             "tlsIntercept",
             "tlsPassthrough",
             "tlsOptions",
+            "upstreamUnsafeSsl",
             "sniCallback",
             "devtools",
             "passthrough",
@@ -728,7 +734,7 @@ mod tests {
             assert!(result.is_some(), "Failed to parse protocol: {}", name);
         }
 
-        assert_eq!(protocol_names.len(), 74);
+        assert_eq!(protocol_names.len(), 75);
     }
 
     #[test]

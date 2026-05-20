@@ -174,6 +174,26 @@ pub struct NetworkRecord {
     pub url: String,
     pub status: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub listener_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_rule_hit: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_app: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub request_headers: Option<Vec<(String, String)>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_headers: Option<Vec<(String, String)>>,

@@ -494,6 +494,7 @@ pub struct ResolvedRules {
 
     pub tls_intercept: Option<bool>,
     pub tls_options: Option<String>,
+    pub upstream_unsafe_ssl: bool,
     pub sni_callback: Option<String>,
 
     pub req_scripts: Vec<String>,

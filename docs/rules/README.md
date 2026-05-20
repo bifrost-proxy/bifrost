@@ -35,6 +35,7 @@
 - `http` / `https`
 - `ws` / `wss`
 - `http3` / `h3`
+- `upstreamUnsafeSsl`
 - `proxy` / `pac`
 - `redirect`
 - `file` / `tpl` / `rawfile`
@@ -81,11 +82,11 @@
 ### 6) TLS / DevTools / 控制规则
 
 - `tlsIntercept` / `tlsPassthrough`
-- `tlsOptions` / `sniCallback`
+- `tlsOptions` / `upstreamUnsafeSsl` / `sniCallback`
 - `passthrough` / `tunnel`
 - `devtools`
 
-详见：[../operation.md](../operation.md) 与 [filters.md](./filters.md)
+详见：[routing.md](./routing.md)、[../operation.md](../operation.md) 与 [filters.md](./filters.md)
 
 ### 7) WebSocket
 

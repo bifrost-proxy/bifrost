@@ -1148,6 +1148,135 @@ mod tests {
     }
 
     #[test]
+    fn test_long_exclude_filter_chain_uses_regular_prefix_matching() {
+        let excludes = [
+            "/account/page/cooperate/qianchuan",
+            "/garrmodlistv3",
+            "/vmok-modules",
+            "/qc_main_mono",
+            "/qcServiceWorker",
+            "/promotion-v2",
+            "/product",
+            "/nbs",
+            "/finance",
+            "/creative_config",
+            "/check_login",
+            "/brand_main",
+            "/brand",
+            "/aweme",
+            "/apps",
+            "/api",
+            "/ad",
+            "/account",
+            "/_AMapService",
+            "/zhitui",
+            "/uni-prom",
+            "/trident_v2",
+            "/star",
+            "/promotion",
+            "/notify",
+            "/mp",
+            "/magic",
+            "/home",
+            "/doris/ad_v2",
+            "/doris-report",
+            "/docs",
+            "/dataV2",
+            "/creative-preview-apps",
+            "/creation",
+            "/createV2",
+            "/copilot",
+            "/cg_trade",
+            "/cf/ml",
+            "/brand_shop_window",
+            "/brand_pre_sales",
+            "/brand_pre_review",
+            "/brand_inquiry_tool",
+            "/bp",
+            "/arcosite-api",
+            "/alpha_sw",
+            "/ttwid",
+            "/webcast",
+            "/uni-creation",
+            "/support",
+            "/sta_statement",
+            "/sta_invoice",
+            "/sta_deposit",
+            "/sso",
+            "/site",
+            "/selfcreative",
+            "/rule",
+            "/risk-control",
+            "/refund",
+            "/passport",
+            "/openapi",
+            "/ocic",
+            "/mobile",
+            "/marketing",
+            "/jarvis",
+            "/im-linkchat",
+            "/help",
+            "/growth",
+            "/fund_report",
+            "/fund_refund",
+            "/fund_recharge",
+            "/ecp",
+            "/e_adv",
+            "/draft",
+            "/doushop",
+            "/credit",
+            "/community_security",
+            "/cognition",
+            "/cip_invoice",
+            "/cg_project/backend/open",
+            "/cg_detain",
+            "/cg_deposit/backend",
+            "/cg_cont",
+            "/cg_charge",
+            "/cg_cert_center/back_end",
+            "/cg_cert",
+            "/cc-external",
+            "/brand_node",
+            "/brand_fe",
+            "/board-next",
+            "/board",
+            "/app",
+            "/advocacy",
+            "/adstyle",
+            "/account_security",
+            "/account_info_help",
+            "/login",
+            "/tools",
+            "/creative",
+            "/star-pages",
+        ];
+        let filter_chain = excludes
+            .iter()
+            .map(|path| format!("excludeFilter://{}", path))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let rule_text = format!("qianchuan.jinritemai.com 10.37.102.138:8080 {filter_chain}");
+        let rules = crate::parse_rules(&rule_text).unwrap();
+        assert_eq!(rules[0].exclude_filters.len(), excludes.len());
+        let resolver = RulesResolver::new(rules);
+
+        for (idx, path) in excludes.iter().enumerate() {
+            let url = format!("https://qianchuan.jinritemai.com{}-suffix?case={idx}", path);
+            let result = resolver.resolve(&RequestContext::from_url(&url));
+            assert!(
+                result.is_empty(),
+                "excludeFilter://{path} should exclude prefix URL {url}"
+            );
+        }
+
+        let result = resolver.resolve(&RequestContext::from_url(
+            "https://qianchuan.jinritemai.com/not-listed/path?case=allowed",
+        ));
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.rules[0].resolved_value, "10.37.102.138:8080");
+    }
+
+    #[test]
     fn test_combined_include_exclude_filters() {
         let include_filters = vec![parse_filter("m:GET,POST").unwrap()];
         let exclude_filters = vec![parse_filter("/health/").unwrap()];

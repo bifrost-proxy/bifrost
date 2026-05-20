@@ -75,7 +75,7 @@ impl UrlMatcher {
                     return false;
                 }
                 if let Some(fp) = filter_path {
-                    path.starts_with(fp.as_str())
+                    path.starts_with(fp)
                 } else {
                     true
                 }
@@ -239,7 +239,7 @@ pub fn parse_filter(filter_str: &str) -> Option<Filter> {
     }
 
     if filter_str.starts_with('/') {
-        return Some(Filter::Path(PathMatcher::Contains(filter_str.to_string())));
+        return Some(Filter::Path(PathMatcher::Prefix(filter_str.to_string())));
     }
 
     if looks_like_url_pattern(filter_str) {
@@ -444,6 +444,20 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_plain_path_filter_matches_prefix() {
+        let filter = parse_filter("/account").unwrap();
+        if let Filter::Path(matcher) = filter {
+            assert!(matcher.matches("/account"));
+            assert!(matcher.matches("/account/profile"));
+            assert!(matcher.matches("/account?tab=security"));
+            assert!(matcher.matches("/account-center/account-assistant"));
+            assert!(!matcher.matches("/v1/account"));
+        } else {
+            panic!("Expected Path filter");
+        }
+    }
+
+    #[test]
     fn test_parse_body_filter() {
         let filter = parse_filter("b:/error/").unwrap();
         if let Filter::Body(regex) = filter {
@@ -498,6 +512,16 @@ mod tests {
                 "https://m.bifrost.local/api/v1",
                 "m.bifrost.local",
                 "/api/v1"
+            ));
+            assert!(matcher.matches(
+                "https://m.bifrost.local/api?debug=1",
+                "m.bifrost.local",
+                "/api?debug=1"
+            ));
+            assert!(matcher.matches(
+                "https://m.bifrost.local/apiary",
+                "m.bifrost.local",
+                "/apiary"
             ));
             assert!(!matcher.matches("https://m.bifrost.local/page", "m.bifrost.local", "/page"));
             assert!(!matcher.matches("https://other.example.com/api", "other.example.com", "/api"));

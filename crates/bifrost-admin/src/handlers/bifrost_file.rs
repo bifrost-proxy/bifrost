@@ -282,12 +282,12 @@ async fn import_network(content: &str, state: &SharedAdminState) -> Response<Box
 
 fn network_record_to_traffic_record(record: &NetworkRecord) -> TrafficRecord {
     let parsed_url = url::Url::parse(&record.url).ok();
-    let host = parsed_url
+    let fallback_host = parsed_url
         .as_ref()
         .and_then(|u| u.host_str())
         .map(|h| h.to_string())
         .unwrap_or_default();
-    let path = parsed_url
+    let fallback_path = parsed_url
         .as_ref()
         .map(|u| {
             let p = u.path();
@@ -298,7 +298,7 @@ fn network_record_to_traffic_record(record: &NetworkRecord) -> TrafficRecord {
             }
         })
         .unwrap_or_default();
-    let protocol = parsed_url
+    let fallback_protocol = parsed_url
         .as_ref()
         .map(|u| u.scheme().to_uppercase())
         .unwrap_or_else(|| "HTTP".to_string());
@@ -333,7 +333,7 @@ fn network_record_to_traffic_record(record: &NetworkRecord) -> TrafficRecord {
         request_size: record.request_body.as_ref().map_or(0, |b| b.len()),
         response_size: record.response_body.as_ref().map_or(0, |b| b.len()),
         duration_ms: record.duration_ms,
-        listener_port: 0,
+        listener_port: record.listener_port.unwrap_or(0),
         timing: None,
         request_headers: record.request_headers.clone(),
         original_response_headers: record.response_headers.clone(),
@@ -343,18 +343,21 @@ fn network_record_to_traffic_record(record: &NetworkRecord) -> TrafficRecord {
         raw_request_body_ref: None,
         raw_response_body_ref: None,
         client_ip: "imported".to_string(),
-        client_app: Some("Bifrost Import".to_string()),
+        client_app: record
+            .client_app
+            .clone()
+            .or_else(|| Some("Bifrost Import".to_string())),
         client_pid: None,
-        client_path: None,
-        host,
-        path,
-        protocol,
-        actual_url: None,
-        actual_host: None,
+        client_path: record.client_path.clone(),
+        host: record.host.clone().unwrap_or(fallback_host),
+        path: record.path.clone().unwrap_or(fallback_path),
+        protocol: record.protocol.clone().unwrap_or(fallback_protocol),
+        actual_url: record.actual_url.clone(),
+        actual_host: record.actual_host.clone(),
         original_request_headers: None,
         response_headers: None,
         is_tunnel: false,
-        has_rule_hit,
+        has_rule_hit: record.has_rule_hit.unwrap_or(has_rule_hit),
         matched_rules,
         request_content_type: None,
         is_websocket: false,
@@ -364,7 +367,7 @@ fn network_record_to_traffic_record(record: &NetworkRecord) -> TrafficRecord {
         socket_status: None,
         frame_count: 0,
         last_frame_id: 0,
-        error_message: None,
+        error_message: record.error_message.clone(),
         req_script_results: None,
         res_script_results: None,
         decode_req_script_results: None,
@@ -769,6 +772,16 @@ async fn traffic_to_network_record(
         method: traffic.method.clone(),
         url: traffic.url.clone(),
         status: traffic.status,
+        host: Some(traffic.host.clone()),
+        path: Some(traffic.path.clone()),
+        protocol: Some(traffic.protocol.clone()),
+        actual_url: traffic.actual_url.clone(),
+        actual_host: traffic.actual_host.clone(),
+        listener_port: Some(traffic.listener_port),
+        has_rule_hit: Some(traffic.has_rule_hit),
+        error_message: traffic.error_message.clone(),
+        client_app: traffic.client_app.clone(),
+        client_path: traffic.client_path.clone(),
         request_headers: traffic.request_headers.clone(),
         response_headers: traffic.original_response_headers.clone(),
         request_body,
@@ -1159,5 +1172,69 @@ fn toml_to_json(toml_val: toml::Value) -> serde_json::Value {
             serde_json::Value::Object(map)
         }
         toml::Value::Datetime(dt) => serde_json::Value::String(dt.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn network_record_import_preserves_routing_diagnostics() {
+        let record = NetworkRecord {
+            id: "REQ-exported".to_string(),
+            method: "GET".to_string(),
+            url: "https://lf6-cdn2-tos.bytegoofy.com/index.html".to_string(),
+            status: 502,
+            host: Some("lf6-cdn2-tos.bytegoofy.com".to_string()),
+            path: Some("/index.html".to_string()),
+            protocol: Some("https".to_string()),
+            actual_url: Some("http://10.37.102.138:8081/index.html".to_string()),
+            actual_host: Some("10.37.102.138".to_string()),
+            listener_port: Some(9900),
+            has_rule_hit: Some(true),
+            error_message: Some("Request Failed".to_string()),
+            client_app: Some("Google Chrome".to_string()),
+            client_path: Some("/Applications/Google Chrome.app".to_string()),
+            request_headers: None,
+            response_headers: None,
+            request_body: None,
+            response_body: None,
+            duration_ms: 78,
+            timestamp: 1779283635053,
+            matched_rules: Some(vec![MatchedRuleExport {
+                pattern: "lf6-cdn2-tos.bytegoofy.com/index.html".to_string(),
+                protocol: "Host".to_string(),
+                value: "10.37.102.138:8081".to_string(),
+            }]),
+        };
+
+        let traffic = network_record_to_traffic_record(&record);
+
+        assert_eq!(traffic.id, "OUT-REQ-exported");
+        assert_eq!(traffic.host, "lf6-cdn2-tos.bytegoofy.com");
+        assert_eq!(traffic.path, "/index.html");
+        assert_eq!(traffic.protocol, "https");
+        assert_eq!(
+            traffic.actual_url.as_deref(),
+            Some("http://10.37.102.138:8081/index.html")
+        );
+        assert_eq!(traffic.actual_host.as_deref(), Some("10.37.102.138"));
+        assert_eq!(traffic.listener_port, 9900);
+        assert!(traffic.has_rule_hit);
+        assert_eq!(traffic.error_message.as_deref(), Some("Request Failed"));
+        assert_eq!(traffic.client_app.as_deref(), Some("Google Chrome"));
+        assert_eq!(
+            traffic
+                .matched_rules
+                .as_ref()
+                .and_then(|rules| rules.first())
+                .map(|r| { (r.pattern.as_str(), r.protocol.as_str(), r.value.as_str(),) }),
+            Some((
+                "lf6-cdn2-tos.bytegoofy.com/index.html",
+                "Host",
+                "10.37.102.138:8081"
+            ))
+        );
     }
 }
