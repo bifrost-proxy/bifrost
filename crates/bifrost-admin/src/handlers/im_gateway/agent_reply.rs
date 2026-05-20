@@ -1,5 +1,9 @@
 use super::*;
 use std::collections::HashSet;
+use std::time::Duration;
+
+use sha1::{Digest, Sha1};
+use url::Url;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(super) struct AgentReplyImageCacheKey {
@@ -210,6 +214,7 @@ pub(super) fn collect_agent_reply_local_images(
     images
 }
 
+#[cfg(test)]
 pub(super) fn strip_agent_reply_local_images(markdown: &str, base_dir: Option<&Path>) -> String {
     if !markdown.contains("![") {
         return markdown.to_string();
@@ -256,6 +261,404 @@ pub(super) fn strip_agent_reply_local_images(markdown: &str, base_dir: Option<&P
     }
 }
 
+#[cfg(test)]
+pub(super) fn prepare_agent_reply_text_and_images(
+    markdown: &str,
+    base_dir: Option<&Path>,
+) -> (String, Vec<AgentReplyLocalImage>) {
+    let images = collect_agent_reply_local_images(markdown, base_dir);
+    let text = if images.is_empty() {
+        markdown.to_string()
+    } else {
+        strip_agent_reply_local_images(markdown, base_dir)
+    };
+    (text, images)
+}
+
+pub(super) async fn prepare_agent_reply_text_and_images_with_downloads(
+    markdown: &str,
+    base_dir: Option<&Path>,
+) -> (
+    String,
+    Vec<AgentReplyLocalImage>,
+    Vec<AgentReplyLocalAttachment>,
+) {
+    let mut images = collect_agent_reply_local_images(markdown, base_dir);
+    let mut attachments = Vec::new();
+    let mut remote_urls_to_strip = HashSet::new();
+    let mut linked_image_urls_to_strip = HashSet::new();
+    collect_agent_reply_local_attachment_links(markdown, base_dir, &mut images, &mut attachments);
+    for remote_image in collect_agent_reply_remote_image_links(markdown) {
+        match download_agent_reply_remote_image(&remote_image).await {
+            Ok(local_image) => {
+                remote_urls_to_strip.insert(remote_image.url);
+                images.push(local_image);
+            }
+            Err(error) => {
+                warn!(
+                    image_url = %remote_image.url,
+                    error = %error,
+                    "failed to download remote image referenced by agent markdown"
+                );
+            }
+        }
+    }
+    for remote_attachment in collect_agent_reply_remote_attachment_links(markdown) {
+        match download_agent_reply_remote_attachment(&remote_attachment).await {
+            Ok(downloaded) => {
+                if is_image_mime_or_path(downloaded.mime_type.as_deref(), &downloaded.path) {
+                    linked_image_urls_to_strip.insert(remote_attachment.url);
+                    images.push(AgentReplyLocalImage {
+                        alt: remote_attachment.label,
+                        path: downloaded.path,
+                    });
+                } else {
+                    attachments.push(AgentReplyLocalAttachment {
+                        label: remote_attachment.label,
+                        path: downloaded.path,
+                        mime_type: downloaded.mime_type,
+                    });
+                }
+            }
+            Err(error) => {
+                warn!(
+                    attachment_url = %remote_attachment.url,
+                    error = %error,
+                    "failed to download remote attachment referenced by agent markdown"
+                );
+            }
+        }
+    }
+
+    let text = if images.is_empty() {
+        markdown.to_string()
+    } else {
+        strip_agent_reply_resolved_images(
+            markdown,
+            base_dir,
+            &remote_urls_to_strip,
+            &linked_image_urls_to_strip,
+        )
+    };
+    (text, images, attachments)
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(super) struct AgentReplyRemoteImage {
+    pub(super) alt: String,
+    pub(super) url: String,
+}
+
+pub(super) fn collect_agent_reply_remote_image_links(markdown: &str) -> Vec<AgentReplyRemoteImage> {
+    if !markdown.contains("![") {
+        return Vec::new();
+    }
+
+    let mut images = Vec::new();
+    let mut seen = HashSet::new();
+    let mut inside_code_block = false;
+    let mut code_fence: Option<String> = None;
+
+    for line in markdown.split('\n') {
+        let trimmed = line.trim_start();
+        if inside_code_block {
+            if let Some(ref fence) = code_fence {
+                if trimmed.starts_with(fence.as_str()) && trimmed[fence.len()..].trim().is_empty() {
+                    inside_code_block = false;
+                    code_fence = None;
+                }
+            }
+            continue;
+        }
+
+        if let Some(fence) = detect_markdown_code_fence(trimmed) {
+            inside_code_block = true;
+            code_fence = Some(fence);
+            continue;
+        }
+
+        let mut pos = 0;
+        while pos < line.len() {
+            if line.as_bytes()[pos] == b'!'
+                && pos + 1 < line.len()
+                && line.as_bytes()[pos + 1] == b'['
+            {
+                if let Some((alt, url, end)) =
+                    crate::im_gateway::markdown_converter::parse_image_syntax(line, pos + 2)
+                {
+                    let destination = markdown_image_destination(&url).to_string();
+                    if is_remote_markdown_image_attachment_candidate(&destination)
+                        && seen.insert(destination.clone())
+                    {
+                        images.push(AgentReplyRemoteImage {
+                            alt,
+                            url: destination,
+                        });
+                    }
+                    pos = end;
+                    continue;
+                }
+            }
+
+            let ch = line[pos..].chars().next().unwrap();
+            pos += ch.len_utf8();
+        }
+    }
+
+    images
+}
+
+pub(super) fn is_remote_markdown_image_attachment_candidate(raw_url: &str) -> bool {
+    let destination = markdown_image_destination(raw_url);
+    let Ok(parsed) = Url::parse(destination) else {
+        return false;
+    };
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return false;
+    }
+    let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
+    let path = parsed.path().to_ascii_lowercase();
+    if host == "www.google.com" && path == "/s2/favicons" {
+        return false;
+    }
+    if host.ends_with("chatgpt.com") && path.contains("/backend-api/estuary/content") {
+        return true;
+    }
+    if host.ends_with("files.oaiusercontent.com")
+        || host.ends_with("oaidalleapiprodscus.blob.core.windows.net")
+        || host.ends_with("cdn.openai.com")
+    {
+        return true;
+    }
+    if image_extension_from_path(&path).is_some() {
+        return true;
+    }
+    parsed.query_pairs().any(|(key, value)| {
+        let key = key.to_ascii_lowercase();
+        (key == "filename" || key == "file" || key == "name")
+            && image_extension_from_path(&value.to_ascii_lowercase()).is_some()
+    })
+}
+
+async fn download_agent_reply_remote_image(
+    image: &AgentReplyRemoteImage,
+) -> bifrost_core::Result<AgentReplyLocalImage> {
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| {
+            bifrost_core::BifrostError::Network(format!(
+                "build agent reply image downloader failed: {error}"
+            ))
+        })?;
+    let response = http.get(&image.url).send().await.map_err(|error| {
+        bifrost_core::BifrostError::Network(format!("download agent reply image failed: {error}"))
+    })?;
+    if !response.status().is_success() {
+        return Err(bifrost_core::BifrostError::Network(format!(
+            "download agent reply image returned HTTP {}",
+            response.status()
+        )));
+    }
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.split(';').next().unwrap_or(value).trim().to_string());
+    let bytes = response.bytes().await.map_err(|error| {
+        bifrost_core::BifrostError::Network(format!("read agent reply image body failed: {error}"))
+    })?;
+    if bytes.is_empty() {
+        return Err(bifrost_core::BifrostError::Network(
+            "download agent reply image returned empty body".to_string(),
+        ));
+    }
+    if bytes.len() as u64 > MAX_AGENT_REPLY_IMAGE_BYTES {
+        return Err(bifrost_core::BifrostError::Config(format!(
+            "downloaded agent reply image exceeds {MAX_AGENT_REPLY_IMAGE_BYTES} bytes"
+        )));
+    }
+    if let Some(ref content_type) = content_type {
+        if !content_type.starts_with("image/") {
+            return Err(bifrost_core::BifrostError::Network(format!(
+                "download agent reply attachment is not an image: {content_type}"
+            )));
+        }
+    }
+
+    let mut hasher = Sha1::new();
+    hasher.update(image.url.as_bytes());
+    hasher.update(&bytes);
+    let digest = format!("{:x}", hasher.finalize());
+    let ext = content_type
+        .as_deref()
+        .and_then(image_extension_from_content_type)
+        .or_else(|| {
+            Url::parse(&image.url)
+                .ok()
+                .and_then(|url| image_extension_from_path(url.path()))
+        })
+        .unwrap_or("bin");
+    let dir = bifrost_storage::data_dir()
+        .join("agent")
+        .join("im_gateway")
+        .join("attachments")
+        .join("agent_reply_markdown");
+    tokio::fs::create_dir_all(&dir).await.map_err(|error| {
+        bifrost_core::BifrostError::Io(std::io::Error::new(
+            error.kind(),
+            format!("create agent reply markdown attachment dir failed: {error}"),
+        ))
+    })?;
+    let path = dir.join(format!("agent-reply-image-{digest}.{ext}"));
+    tokio::fs::write(&path, &bytes).await.map_err(|error| {
+        bifrost_core::BifrostError::Io(std::io::Error::new(
+            error.kind(),
+            format!(
+                "write agent reply markdown attachment '{}' failed: {error}",
+                path.display()
+            ),
+        ))
+    })?;
+    Ok(AgentReplyLocalImage {
+        alt: image.alt.clone(),
+        path,
+    })
+}
+
+fn strip_agent_reply_resolved_images(
+    markdown: &str,
+    base_dir: Option<&Path>,
+    remote_urls: &HashSet<String>,
+    linked_image_urls: &HashSet<String>,
+) -> String {
+    if !markdown.contains('[') {
+        return markdown.to_string();
+    }
+
+    let mut output = String::with_capacity(markdown.len());
+    let mut inside_code_block = false;
+    let mut code_fence: Option<String> = None;
+
+    for line in markdown.split('\n') {
+        let trimmed = line.trim_start();
+        if inside_code_block {
+            output.push_str(line);
+            output.push('\n');
+            if let Some(ref fence) = code_fence {
+                if trimmed.starts_with(fence.as_str()) && trimmed[fence.len()..].trim().is_empty() {
+                    inside_code_block = false;
+                    code_fence = None;
+                }
+            }
+            continue;
+        }
+
+        if let Some(fence) = detect_markdown_code_fence(trimmed) {
+            inside_code_block = true;
+            code_fence = Some(fence);
+            output.push_str(line);
+            output.push('\n');
+            continue;
+        }
+
+        output.push_str(&strip_agent_reply_resolved_images_in_line(
+            line,
+            base_dir,
+            remote_urls,
+            linked_image_urls,
+        ));
+        output.push('\n');
+    }
+
+    if output.ends_with('\n') && !markdown.ends_with('\n') {
+        output.pop();
+    }
+    let stripped = output.trim();
+    if stripped.is_empty() {
+        "已生成图片，正在发送原图。".to_string()
+    } else {
+        stripped.to_string()
+    }
+}
+
+fn strip_agent_reply_resolved_images_in_line(
+    line: &str,
+    base_dir: Option<&Path>,
+    remote_urls: &HashSet<String>,
+    linked_image_urls: &HashSet<String>,
+) -> String {
+    if !line.contains('[') {
+        return line.to_string();
+    }
+
+    let mut result = String::with_capacity(line.len());
+    let mut pos = 0;
+    while pos < line.len() {
+        if line.as_bytes()[pos] == b'!' && pos + 1 < line.len() && line.as_bytes()[pos + 1] == b'['
+        {
+            if let Some((_alt, url, end)) =
+                crate::im_gateway::markdown_converter::parse_image_syntax(line, pos + 2)
+            {
+                let destination = markdown_image_destination(&url);
+                if resolve_agent_reply_image_path(destination, base_dir).is_some()
+                    || remote_urls.contains(destination)
+                {
+                    pos = end;
+                    continue;
+                }
+            }
+        }
+        if line.as_bytes()[pos] == b'['
+            && (pos == 0 || line.as_bytes()[pos.saturating_sub(1)] != b'!')
+        {
+            if let Some((_label, url, end)) =
+                crate::im_gateway::markdown_converter::parse_image_syntax(line, pos + 1)
+            {
+                let destination = markdown_image_destination(&url);
+                if linked_image_urls.contains(destination) {
+                    pos = end;
+                    continue;
+                }
+            }
+        }
+
+        let ch = line[pos..].chars().next().unwrap();
+        result.push(ch);
+        pos += ch.len_utf8();
+    }
+    result
+}
+
+pub(super) fn image_extension_from_content_type(content_type: &str) -> Option<&'static str> {
+    match content_type.to_ascii_lowercase().as_str() {
+        "image/png" => Some("png"),
+        "image/jpeg" | "image/jpg" => Some("jpg"),
+        "image/gif" => Some("gif"),
+        "image/webp" => Some("webp"),
+        "image/bmp" => Some("bmp"),
+        _ => None,
+    }
+}
+
+pub(super) fn image_extension_from_path(path: &str) -> Option<&'static str> {
+    let path = path.split('?').next().unwrap_or(path);
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => Some("png"),
+        "jpg" | "jpeg" => Some("jpg"),
+        "gif" => Some("gif"),
+        "webp" => Some("webp"),
+        "bmp" => Some("bmp"),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
 fn strip_agent_reply_local_images_in_line(line: &str, base_dir: Option<&Path>) -> String {
     if !line.contains("![") {
         return line.to_string();
@@ -601,12 +1004,9 @@ pub(super) async fn send_agent_reply_with_title(
     title: Option<&str>,
 ) {
     let image_base_dir = provider_agent_work_dir(provider);
-    let reply_images = collect_agent_reply_local_images(reply_text, image_base_dir.as_deref());
-    let reply_text_for_card = if reply_images.is_empty() {
-        reply_text.to_string()
-    } else {
-        strip_agent_reply_local_images(reply_text, image_base_dir.as_deref())
-    };
+    let (reply_text_for_card, reply_images, reply_attachments) =
+        prepare_agent_reply_text_and_images_with_downloads(reply_text, image_base_dir.as_deref())
+            .await;
 
     let Some(reply_target) = build_agent_reply_target(
         provider,
@@ -696,17 +1096,16 @@ pub(super) async fn send_agent_reply_with_title(
         Err(e) => error!(error = %e, "failed to send agent reply"),
     }
 
-    if !reply_images.is_empty() {
-        send_agent_reply_images(
-            client,
-            provider,
-            event,
-            &reply_target,
-            &reply_images,
-            message_log_store,
-        )
-        .await;
-    }
+    send_agent_reply_assets(
+        client,
+        provider,
+        event,
+        &reply_target,
+        &reply_images,
+        &reply_attachments,
+        message_log_store,
+    )
+    .await;
 }
 
 pub(super) async fn send_agent_reply_images(
@@ -791,6 +1190,10 @@ pub(super) async fn send_agent_reply_with_plan(
     title: Option<&str>,
     message_log_store: &Arc<ImMessageLogStore>,
 ) {
+    let image_base_dir = provider_agent_work_dir(provider);
+    let (reply_text_for_card, reply_images, reply_attachments) =
+        prepare_agent_reply_text_and_images_with_downloads(reply_text, image_base_dir.as_deref())
+            .await;
     let Some(reply_target) = build_agent_reply_target(
         provider,
         event,
@@ -806,12 +1209,12 @@ pub(super) async fn send_agent_reply_with_plan(
         render_agent_markdown_for_feishu(
             &feishu,
             provider,
-            reply_text,
-            provider_agent_work_dir(provider).as_deref(),
+            &reply_text_for_card,
+            image_base_dir.as_deref(),
         )
         .await
     } else {
-        reply_text.to_string()
+        reply_text_for_card.clone()
     };
     let converted_text =
         crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&rendered_text);
@@ -921,7 +1324,7 @@ pub(super) async fn send_agent_reply_with_plan(
         target_name: Some(reply_target.display_name.clone()),
         message_id,
         msg_type: Some("interactive".to_string()),
-        content_preview: Some(truncate_str(reply_text, 200)),
+        content_preview: Some(truncate_str(&reply_text_for_card, 200)),
         trigger: Some("agent_continuation".to_string()),
         error: error_msg,
         sender_open_id: None,
@@ -936,6 +1339,17 @@ pub(super) async fn send_agent_reply_with_plan(
         Ok(_) => debug!("agent reply with plan sent successfully"),
         Err(e) => error!(error = %e, "failed to send agent reply with plan"),
     }
+
+    send_agent_reply_assets(
+        client,
+        provider,
+        event,
+        &reply_target,
+        &reply_images,
+        &reply_attachments,
+        message_log_store,
+    )
+    .await;
 }
 
 /// Best-effort helper to send an error notification card to the provider owner.

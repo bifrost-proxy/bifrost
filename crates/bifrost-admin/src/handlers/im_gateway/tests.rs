@@ -205,6 +205,139 @@ pub(super) fn agent_reply_dedupes_generated_local_images() {
 }
 
 #[test]
+pub(super) fn agent_reply_prepare_text_and_images_splits_markdown_local_images() {
+    let base = std::path::Path::new("/tmp/im-agent-workdir");
+    let markdown = concat!(
+        "生成好了\n",
+        "![cat one](./cat-1.png)\n",
+        "保留远端 favicon ![remote](https://example.com/favicon.png)\n",
+    );
+
+    let (text, images) = prepare_agent_reply_text_and_images(markdown, Some(base));
+
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0].alt, "cat one");
+    assert!(!text.contains("./cat-1.png"));
+    assert!(text.contains("![remote](https://example.com/favicon.png)"));
+}
+
+#[test]
+pub(super) fn agent_reply_collects_remote_attachment_images_but_skips_favicons() {
+    let markdown = concat!(
+        "![download](https://files.oaiusercontent.com/file-1.png)\n",
+        "[![](https://www.google.com/s2/favicons?domain=https://www.reuters.com&sz=32)Reuters](https://www.reuters.com)\n",
+        "```md\n",
+        "![skip](https://files.oaiusercontent.com/inside-code.png)\n",
+        "```\n",
+    );
+
+    let images = collect_agent_reply_remote_image_links(markdown);
+
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0].alt, "download");
+    assert_eq!(images[0].url, "https://files.oaiusercontent.com/file-1.png");
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn agent_reply_downloads_remote_markdown_image_to_local_attachment() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind image server");
+    let port = listener.local_addr().expect("image server addr").port();
+    tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let io = TokioIo::new(stream);
+        let service = service_fn(move |_req: Request<Incoming>| async move {
+            Ok::<_, hyper::Error>(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("Content-Type", "image/png")
+                    .body(Full::new(Bytes::from_static(b"remote png bytes")))
+                    .unwrap(),
+            )
+        });
+        let _ = http1::Builder::new().serve_connection(io, service).await;
+    });
+    let markdown = format!("图片如下：\n![chart](http://127.0.0.1:{port}/chart.png)\n正文保留。");
+
+    let (text, images, attachments) =
+        prepare_agent_reply_text_and_images_with_downloads(&markdown, None).await;
+
+    assert_eq!(images.len(), 1);
+    assert!(attachments.is_empty());
+    assert_eq!(images[0].alt, "chart");
+    assert!(images[0].path.exists());
+    assert_eq!(
+        std::fs::read(&images[0].path).expect("read downloaded image"),
+        b"remote png bytes"
+    );
+    assert!(!text.contains("http://127.0.0.1"));
+    assert!(text.contains("正文保留"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn agent_reply_download_link_with_image_content_type_uses_image_channel() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind image download server");
+    let port = listener.local_addr().expect("image download addr").port();
+    tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let io = TokioIo::new(stream);
+        let service = service_fn(move |_req: Request<Incoming>| async move {
+            Ok::<_, hyper::Error>(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("Content-Type", "image/png")
+                    .body(Full::new(Bytes::from_static(b"download image bytes")))
+                    .unwrap(),
+            )
+        });
+        let _ = http1::Builder::new().serve_connection(io, service).await;
+    });
+    let markdown = format!("这是下载链接：[下载图片](http://127.0.0.1:{port}/download)\n正文。");
+
+    let (text, images, attachments) =
+        prepare_agent_reply_text_and_images_with_downloads(&markdown, None).await;
+
+    assert_eq!(images.len(), 1);
+    assert!(attachments.is_empty());
+    assert_eq!(images[0].alt, "下载图片");
+    assert_eq!(
+        std::fs::read(&images[0].path).expect("read downloaded image link"),
+        b"download image bytes"
+    );
+    assert!(!text.contains("http://127.0.0.1"));
+    assert!(text.contains("正文"));
+}
+
+#[test]
+pub(super) fn agent_reply_collects_remote_file_attachments_from_explicit_links() {
+    let markdown = concat!(
+        "[报告附件](https://files.oaiusercontent.com/report.pdf)\n",
+        "[普通新闻](https://example.com/news/story)\n",
+        "[图片下载](https://files.oaiusercontent.com/render.png)\n",
+        "```md\n",
+        "[跳过附件](https://files.oaiusercontent.com/inside.pdf)\n",
+        "```\n",
+    );
+
+    let attachments = collect_agent_reply_remote_attachment_links(markdown);
+
+    assert_eq!(attachments.len(), 2);
+    assert_eq!(attachments[0].label, "报告附件");
+    assert_eq!(attachments[1].label, "图片下载");
+}
+
+#[test]
 pub(super) fn agent_reply_target_keeps_feishu_owner_boundary() {
     let mut provider = test_provider();
     provider.owner_open_id = Some("owner-ou".to_string());
@@ -248,12 +381,17 @@ pub(super) struct TestChatCompletionMock {
 
 impl TestChatCompletionMock {
     pub(super) async fn start() -> Self {
+        Self::start_with_content("IM_PROVIDER_CONFIG_OK").await
+    }
+
+    pub(super) async fn start_with_content(content: &str) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind mock chat server");
         let port = listener.local_addr().expect("mock local addr").port();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let requests_for_server = Arc::clone(&requests);
+        let content = content.to_string();
 
         tokio::spawn(async move {
             loop {
@@ -262,9 +400,11 @@ impl TestChatCompletionMock {
                 };
                 let io = TokioIo::new(stream);
                 let requests = Arc::clone(&requests_for_server);
+                let content = content.clone();
                 tokio::spawn(async move {
                     let service = service_fn(move |req: Request<Incoming>| {
                         let requests = Arc::clone(&requests);
+                        let content = content.clone();
                         async move {
                             let body_bytes = req
                                 .into_body()
@@ -279,7 +419,7 @@ impl TestChatCompletionMock {
                                 "choices": [{
                                     "message": {
                                         "role": "assistant",
-                                        "content": "IM_PROVIDER_CONFIG_OK"
+                                        "content": content
                                     },
                                     "finish_reason": "stop"
                                 }],
@@ -1573,6 +1713,110 @@ pub(super) async fn im_event_loop_external_cli_session_records_runner_failure() 
                 .get("message")
                 .and_then(|value| value.as_str())
                 .is_some_and(|value| value.starts_with("Runner failed:"))));
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn agent_chat_final_reply_sends_local_markdown_images_as_im_images() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let image_path = temp_dir.path().join("chatgpt-web-image-1.png");
+    std::fs::write(&image_path, b"fake png bytes").expect("write image");
+    let response = format!(
+        "已生成图片，正在发送原图。\n\n![ChatGPT 生成图片 1]({})\n\n正文继续。",
+        image_path.display()
+    );
+    let mock = TestChatCompletionMock::start_with_content(&response).await;
+    let service = ImGatewayService::new(temp_dir.path());
+
+    let mut agent_config = service.agent_config_store.load();
+    agent_config.enabled = true;
+    agent_config.model = Some("mock-model".to_string());
+    agent_config.model_provider = Some("mock".to_string());
+    agent_config.work_dir = Some(temp_dir.path().display().to_string());
+    agent_config.max_turn_iterations = Some(1);
+    agent_config.model_providers.insert(
+        "mock".to_string(),
+        bifrost_agent::config::ModelProviderConfig {
+            name: Some("Mock".to_string()),
+            base_url: Some(mock.url()),
+            env_key: None,
+            api_key: None,
+            http_headers: Some(HashMap::from([(
+                "Authorization".to_string(),
+                "Bearer test".to_string(),
+            )])),
+            env_http_headers: None,
+            request_max_retries: None,
+            stream_idle_timeout_ms: None,
+            stream_max_retries: None,
+        },
+    );
+
+    let mut provider = test_provider();
+    provider.id = "weixin-image-reply-provider".to_string();
+    provider.provider_type = ImProviderType::Weixin;
+    provider.owner_open_id = Some("owner@im.wechat".to_string());
+    provider.base_url = Some("http://127.0.0.1:9".to_string());
+    provider.secret_ref = Some("test-token".to_string());
+    service
+        .provider_store
+        .add(provider.clone())
+        .expect("add provider");
+
+    let event = ImEvent {
+        event_id: "evt-weixin-generated-image".to_string(),
+        provider_id: provider.id.clone(),
+        provider_type: ImProviderType::Weixin,
+        event_type: "message.receive".to_string(),
+        source: crate::im_gateway::types::ImEventSource {
+            chat_id: Some("sender@im.wechat".to_string()),
+            user_id: Some("sender@im.wechat".to_string()),
+            message_id: Some("msg-1".to_string()),
+        },
+        message: None,
+        received_at: 0,
+        raw_digest: None,
+    };
+
+    process_agent_chat(
+        &ImProviderClient::Weixin(Arc::clone(service.connection_manager.weixin_provider())),
+        &provider,
+        &service.provider_store,
+        &event,
+        &service.agent_client,
+        &agent_config,
+        &service.agent_tools,
+        &service.schedule_store,
+        &service.scheduler,
+        &service.target_store,
+        &service.connection_manager,
+        &service.agent_session_manager,
+        &service.progress_registry,
+        "weixin:image-reply-test",
+        "生成图片",
+        &[],
+        None,
+        None,
+        &service.message_log_store,
+        None,
+    )
+    .await;
+
+    let logs = service.message_log_store.list_by_provider(&provider.id);
+    assert!(logs.iter().any(|log| {
+        log.msg_type.as_deref() == Some("image")
+            && log
+                .content_preview
+                .as_deref()
+                .is_some_and(|preview| preview.contains("ChatGPT 生成图片 1"))
+    }));
+    assert!(logs.iter().any(|log| {
+        log.msg_type.as_deref() == Some("interactive")
+            && log
+                .content_preview
+                .as_deref()
+                .is_some_and(|preview| !preview.contains("chatgpt-web-image-1.png"))
+    }));
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -415,7 +415,7 @@ class Handler(BaseHTTPRequestHandler):
         elif request_no == 3:
             messages = payload.get("messages", [])
             tool_outputs = [message_text(message) for message in messages if message.get("role") == "tool"]
-            if not tool_outputs or "\"session_id\":" not in tool_outputs[-1] or "WATCH_BEGIN" not in tool_outputs[-1]:
+            if not tool_outputs or "\"session_id\":" not in tool_outputs[-1]:
                 self.send_response(500)
                 self.end_headers()
                 self.wfile.write(
@@ -452,7 +452,13 @@ class Handler(BaseHTTPRequestHandler):
         else:
             messages = payload.get("messages", [])
             tool_outputs = [message_text(message) for message in messages if message.get("role") == "tool"]
-            if not tool_outputs or "WATCH_DONE" not in tool_outputs[-1] or "\"exit_code\":0" not in tool_outputs[-1].replace(" ", ""):
+            recent_background_outputs = "\n".join(tool_outputs[-2:])
+            if (
+                not tool_outputs
+                or "WATCH_BEGIN" not in recent_background_outputs
+                or "WATCH_DONE" not in recent_background_outputs
+                or "\"exit_code\":0" not in tool_outputs[-1].replace(" ", "")
+            ):
                 self.send_response(500)
                 self.end_headers()
                 self.wfile.write(

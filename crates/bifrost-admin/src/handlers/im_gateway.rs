@@ -34,6 +34,7 @@ use bifrost_agent::{PlanStep, SessionDetail, ToolCallLog};
 mod agent_api;
 mod agent_chat;
 mod agent_reply;
+mod agent_reply_attachments;
 mod chat_gateway;
 mod debug_inbound;
 mod event_loop;
@@ -50,6 +51,7 @@ mod tests;
 use agent_api::*;
 use agent_chat::*;
 use agent_reply::*;
+use agent_reply_attachments::*;
 use event_loop::*;
 #[allow(unused_imports)]
 use messages::*;
@@ -58,7 +60,7 @@ use schedules::*;
 pub use service::{ImGatewayService, SharedImGatewayService};
 use service::{
     ImProviderClient, PendingWeixinLogin, AGENT_REPLY_IMAGE_UPLOAD_CACHE, IMAGE_ONLY_AGENT_PROMPT,
-    MAX_AGENT_IMAGES_PER_MESSAGE, MAX_AGENT_REPLY_IMAGE_BYTES,
+    MAX_AGENT_IMAGES_PER_MESSAGE, MAX_AGENT_REPLY_ATTACHMENT_BYTES, MAX_AGENT_REPLY_IMAGE_BYTES,
 };
 use utils::*;
 

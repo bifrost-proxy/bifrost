@@ -212,23 +212,27 @@ IM Gateway
    - message log 只记录 `[image:<image_key>]` 或卡片标题 preview
    - provider secret 仍只通过本地配置读取，所有响应保持脱敏
    - 未支持的 `msg_type` 明确拒绝，避免默默当作卡片发送
-6. Agent 最终输出 Markdown 图片：
-   - Agent final reply / session-free reply / continuation reply / streaming progress final flush 在进入 Feishu 卡片前扫描非代码块 Markdown 图片
-   - 本地绝对路径、`file://`、以及相对 Provider `agent_config.work_dir` 的图片会上传到 Feishu，并把 `![alt](path)` 改写为 `![alt](image_key)`
+6. Agent 最终输出 Markdown 图片与附件：
+   - Agent final reply / session-free reply / continuation reply / streaming progress final flush 在进入 IM 卡片前扫描非代码块 Markdown 图片
+   - 本地绝对路径、`file://`、以及相对 Provider `agent_config.work_dir` 的图片会从正文中剥离，并通过 provider 的 `send_image` 独立发送；Feishu 走 `image_key`，Weixin 走 CDN `image_item`
+   - ChatGPT Web / OpenAI 生成图下载地址、路径或 `filename` 明确带图片扩展名的 HTTP/HTTPS Markdown 图片，会先下载到 `agent/im_gateway/attachments/agent_reply_markdown/`，再按本地图片发送；如果 IM 通道发送失败，已下载文件仍保留在本地，message log 记录失败原因
+   - 非图片 Markdown 链接只有在链接文案或路径明确是附件/下载文件时才下载到 `agent/im_gateway/attachments/agent_reply_files/`；Feishu 支持上传后通过 `msg_type=file` 发送，Weixin 当前没有通用文件发送接口时记录失败并保留本地文件
+   - 普通 Markdown 链接和引用来源链接不视为附件，避免误下载网页；普通链接若下载后响应为图片类型，则仍按图片通道发送
+   - 引用卡片里的 favicon（例如 `google.com/s2/favicons`）不视为附件图，避免把新闻来源小图标当成用户要的图片发送
    - 上传缓存按 `provider_id + canonical path + size + mtime` 命中，避免流式输出或重复回复时反复上传同一张图片造成卡顿
-   - HTTP/HTTPS 图片按链接文本降级；本地图片上传失败时降级为文本占位，禁止把本地路径 Markdown 图片原样送入 Feishu card，避免卡片整体发送失败
+   - 本地图片上传失败时降级为文本占位；远端附件下载失败时保留原 Markdown 链接作为兜底，禁止把本地路径 Markdown 图片原样送入 IM card，避免卡片整体发送失败
 
 验证计划：
 
 - 单元测试：
   - CLI build send body 覆盖 `--image-key` 和图文卡片参数
   - Admin handler 覆盖 image payload 归一化、rich card 构造
-  - Agent reply Markdown 图片路径解析、上传失败 fallback、缓存 key 行为
+  - Agent reply Markdown 图片路径解析、远端附件识别/下载、普通链接排除、favicon 排除、上传失败 fallback、缓存 key 行为
   - Feishu provider 编译覆盖 multipart 上传和 `msg_type=image` 发送路径
 - E2E 测试：
   - 更新 `e2e-tests/tests/test_im_cli_provider_selection_send_owner.sh`，fake Feishu 同时覆盖 token、图片上传、图片消息发送、图文卡片发送
 - human_tests：
-  - 在 `human_tests/im-gateway.md` 增加图片消息、图片上传图文卡片、原始 card JSON 兼容、Agent Markdown 图片自动上传和缓存回归用例，并立即按用例执行
+  - 在 `human_tests/im-gateway.md` 增加图片消息、图片上传图文卡片、原始 card JSON 兼容、Agent Markdown 图片自动上传、远端附件下载/保留和缓存回归用例，并立即按用例执行
 - Review/Fix/Test：
   - 第 1 轮复查 provider/API/CLI/doc/test 对齐，复跑 IM 单元与 E2E
   - 第 2 轮复查兼容性、secret 不泄露、message log preview 和 human_tests 索引，复跑受影响测试
