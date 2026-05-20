@@ -163,6 +163,51 @@ traffic_detail_json() {
     curl -fsS "http://127.0.0.1:${MAIN_PORT}/_bifrost/api/traffic/${id}"
 }
 
+export_network_file() {
+    local id="$1"
+    local output="$2"
+    curl -fsS \
+        -H 'Content-Type: application/json' \
+        -X POST \
+        "http://127.0.0.1:${MAIN_PORT}/_bifrost/api/bifrost-file/export/network" \
+        --data "{\"record_ids\":[\"${id}\"],\"include_body\":true}" \
+        > "${output}"
+}
+
+assert_network_export_active_rules() {
+    local file="$1"
+    local expected_source="$2"
+    local expected_listener_port="$3"
+    local expected_rule="$4"
+    local forbidden_rule="$5"
+    python3 - "$file" "$expected_source" "$expected_listener_port" "$expected_rule" "$forbidden_rule" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path, expected_source, expected_port, expected_rule, forbidden_rule = sys.argv[1:]
+text = Path(path).read_text()
+try:
+    payload = text.split("\n---\n", 1)[1]
+except IndexError:
+    raise SystemExit(f"{path} is not a .bifrost network export")
+records = json.loads(payload)
+assert len(records) == 1, records
+record = records[0]
+assert record["listener_port"] == int(expected_port), record
+active = record["active_rules"]
+assert active["source"] == expected_source, active
+assert active["listener_port"] == int(expected_port), active
+assert active["unavailable_reason"] is None if "unavailable_reason" in active else True
+merged = active["merged_content"]
+assert expected_rule in merged, active
+assert forbidden_rule not in merged, active
+contents = [item.get("content", "") for item in active["rules"]]
+assert any(expected_rule in content for content in contents), active
+assert all(forbidden_rule not in content for content in contents), active
+PY
+}
+
 record_id_for_path_and_port() {
     local path="$1"
     local port="$2"
@@ -392,6 +437,14 @@ main() {
     _log_pass "CLI traffic search excludes main listener port when filtering temporary port"
     "$BIFROST_BIN" traffic get --port "${MAIN_PORT}" "${temp_record_id}" --format json > "${TEST_DATA_DIR}/traffic-get.json"
     assert_body_contains "\"listener_port\":${TEMP_PORT}" "$(cat "${TEST_DATA_DIR}/traffic-get.json")" "CLI traffic get JSON includes temporary listener port"
+
+    export_network_file "${main_record_id}" "${TEST_DATA_DIR}/main-network-export.bifrost"
+    assert_network_export_active_rules "${TEST_DATA_DIR}/main-network-export.bifrost" "default_port" "${MAIN_PORT}" "main-only.test status://209" "temp-only.test status://210"
+    _log_pass "Network export includes default-port active rules for main listener traffic"
+
+    export_network_file "${temp_record_id}" "${TEST_DATA_DIR}/temp-network-export.bifrost"
+    assert_network_export_active_rules "${TEST_DATA_DIR}/temp-network-export.bifrost" "custom_port" "${TEMP_PORT}" "temp-only.test status://210" "main-only.test status://209"
+    _log_pass "Network export includes custom-port active rules for temporary listener traffic"
 
     "$BIFROST_BIN" port destroy "${TEMP_PORT}"
     if curl -sS --max-time 2 -x "http://127.0.0.1:${TEMP_PORT}" "http://temp-only.test/" >/dev/null 2>&1; then

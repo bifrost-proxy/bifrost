@@ -271,6 +271,7 @@ mod tests {
                 protocol: "Host".to_string(),
                 value: "10.37.102.138:8081".to_string(),
             }]),
+            active_rules: None,
         }];
 
         let output = BifrostFileWriter::write_network("network-export-test", None, &records)

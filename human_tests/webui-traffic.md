@@ -680,6 +680,64 @@ wait
 
 ---
 
+### TC-WTR-48：Network 空 .bifrost 包导入必须明确失败
+
+**操作步骤**：
+1. 启动 Bifrost 服务（必须使用临时数据目录和 `--no-system-proxy`）：
+   ```bash
+   BIFROST_DATA_DIR=/tmp/bifrost-network-import-empty cargo run --bin bifrost -- start -p 18892 --unsafe-ssl --no-system-proxy
+   ```
+2. 使用空 Network 包调用导入 API：
+   ```bash
+   curl -sS -i -X POST \
+     -H 'Content-Type: text/plain' \
+     --data-binary @e2e-tests/test_data/bifrost-file/network-empty.bifrost \
+     http://127.0.0.1:18892/_bifrost/api/bifrost-file/import
+   ```
+3. 打开 `http://127.0.0.1:18892/_bifrost/traffic`，将 `e2e-tests/test_data/bifrost-file/network-empty.bifrost` 拖到页面中。
+
+**预期结果**：
+- API 返回 HTTP `400`。
+- 响应体包含 `Network file contains 0 records; nothing to import`。
+- WebUI 不显示 `Imported ... successfully`。
+- WebUI 不自动套用 Imported 筛选并制造“导入成功但列表为空”的错觉。
+
+---
+
+### TC-WTR-49：Network 导出不能生成 0 条记录的 .bifrost 包
+
+**操作步骤**：
+1. 启动 Bifrost 服务（必须使用临时数据目录和 `--no-system-proxy`）：
+   ```bash
+   BIFROST_DATA_DIR=/tmp/bifrost-network-import-empty cargo run --bin bifrost -- start -p 18892 --unsafe-ssl --no-system-proxy
+   ```
+2. 直接调用 Network 导出 API，传入空选中列表：
+   ```bash
+   curl -sS -i -X POST \
+     -H 'Content-Type: application/json' \
+     -d '{"record_ids":[],"include_body":true}' \
+     http://127.0.0.1:18892/_bifrost/api/bifrost-file/export/network
+   ```
+3. 在 WebUI 导出公共入口层验证空选中列表：
+   ```bash
+   pnpm --dir web test:unit src/api/bifrost-file.test.ts
+   ```
+4. 再调用 Network 导出 API，传入不存在的 Traffic ID：
+   ```bash
+   curl -sS -i -X POST \
+     -H 'Content-Type: application/json' \
+     -d '{"record_ids":["REQ-NOT-EXIST"],"include_body":true}' \
+     http://127.0.0.1:18892/_bifrost/api/bifrost-file/export/network
+   ```
+
+**预期结果**：
+- 空选中列表返回 HTTP `400`，响应体包含 `Select at least one Network record`。
+- WebUI 导出公共入口在 `record_ids: []` 时返回同一条用户提示，不调用导出下载流程。
+- 不存在 ID 返回 HTTP `400`，响应体包含 `selected record(s) no longer exist`。
+- 两种情况都不会下载或生成 `count = 0`、正文为 `[]` 的 `.bifrost` 文件。
+
+---
+
 ### TC-WTR-39：详情面板 Request/Response 区域折叠
 
 **操作步骤**：
@@ -969,6 +1027,19 @@ rm -f /tmp/bifrost-mock-test.json
 ```
 
 ## 执行记录
+
+2026-05-20 Network `.bifrost` 空包导入/导出防误报执行记录：
+
+- 已执行用例：`TC-WTR-48`、`TC-WTR-49`
+- 使用隔离数据目录：`/tmp/bifrost-network-import-debug-data`
+- 使用端口：`18892`，未使用 `9900`；启动命令包含 `--no-system-proxy --skip-cert-check`
+- 已执行命令：`source ~/.zshrc; BIFROST_DATA_DIR=/tmp/bifrost-network-import-debug-data cargo run --bin bifrost -- start -p 18892 --unsafe-ssl --no-system-proxy --skip-cert-check`
+- `TC-WTR-48` API 实际结果：对 `e2e-tests/test_data/bifrost-file/network-empty.bifrost`（内容等同用户提供的空 Network 包：`01 network ... count = 0 ... --- []`）执行 `POST /_bifrost/api/bifrost-file/import`，返回 HTTP `400`，响应体包含 `Network file contains 0 records; nothing to import`。
+- `TC-WTR-48` WebUI 实际结果：Playwright 打开 `http://127.0.0.1:18892/_bifrost/traffic` 并模拟拖入 `e2e-tests/test_data/bifrost-file/network-empty.bifrost`，导入 API 返回 `400`，Toast 显示 `Import failed: Network file contains 0 records; nothing to import. Re-export from Network after selecting at least one visible request.`，未出现 `successfully` 成功 Toast。
+- `TC-WTR-49` 空选中导出实际结果：`POST /_bifrost/api/bifrost-file/export/network` 请求体 `{"record_ids":[],"include_body":true}` 返回 HTTP `400`，响应体包含 `Select at least one Network record`。
+- `TC-WTR-49` WebUI 导出入口实际结果：`pnpm --dir web test:unit src/api/bifrost-file.test.ts` 覆盖 `record_ids: []`，前端公共导出校验返回 `Select at least one Network record before exporting a .bifrost file`；`record_ids: ["REQ-1"]` 不返回阻断消息。
+- `TC-WTR-49` 不存在 ID 导出实际结果：请求体 `{"record_ids":["REQ-NOT-EXIST"],"include_body":true}` 返回 HTTP `400`，响应体包含 `selected record(s) no longer exist: REQ-NOT-EXIST`。
+- 结论：两个用例均通过；空 Network 包不会再被提示为导入成功，导出端也不会静默生成 `count = 0` / `[]` 的 `.bifrost` 文件。
 
 2026-05-09 Traffic 主筛选器临时停用单条条件执行记录：
 

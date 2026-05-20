@@ -28,6 +28,60 @@ export interface ImportedData {
   request_count?: number;
 }
 
+export function getImportedItemCount(result: ImportResponse): number | undefined {
+  switch (result.file_type) {
+    case 'rules':
+      return result.data.rule_count;
+    case 'network':
+      return result.data.record_count;
+    case 'script':
+      return result.data.script_count;
+    case 'values':
+      return result.data.value_count;
+    case 'template':
+      return (result.data.group_count ?? 0) + (result.data.request_count ?? 0);
+    default:
+      return undefined;
+  }
+}
+
+export function formatImportSuccessMessage(result: ImportResponse, filename?: string): string {
+  const count = getImportedItemCount(result);
+  const target = filename ? `${filename} ` : '';
+
+  if (count === undefined) {
+    return `Imported ${target}successfully`;
+  }
+
+  if (count === 0) {
+    return `${target || 'File '}contains no ${result.file_type} items to import`;
+  }
+
+  const item = count === 1 ? 'item' : 'items';
+  return `Imported ${target}successfully (${count} ${item})`;
+}
+
+export function formatBifrostFileError(error: unknown): string {
+  if (axios.isAxiosError(error)) {
+    const data = error.response?.data;
+    if (data && typeof data === 'object' && 'error' in data) {
+      const message = (data as { error?: unknown }).error;
+      if (typeof message === 'string' && message.trim()) {
+        return message;
+      }
+    }
+    if (error.message) {
+      return error.message;
+    }
+  }
+
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return String(error);
+}
+
 export interface ExportRulesRequest {
   rule_names: string[];
   description?: string;
@@ -53,6 +107,58 @@ export interface ExportTemplateRequest {
   group_ids?: string[];
   request_ids?: string[];
   description?: string;
+}
+
+export type ExportRequest =
+  | ExportRulesRequest
+  | ExportNetworkRequest
+  | ExportScriptRequest
+  | ExportValuesRequest
+  | ExportTemplateRequest;
+
+export function getExportItemCount(
+  fileType: BifrostFileType,
+  request: ExportRequest,
+): number | undefined {
+  switch (fileType) {
+    case 'rules':
+      return (request as ExportRulesRequest).rule_names.length;
+    case 'network':
+      return (request as ExportNetworkRequest).record_ids.length;
+    case 'script':
+      return (request as ExportScriptRequest).script_names.length;
+    case 'values':
+      return (request as ExportValuesRequest).value_names?.length;
+    case 'template': {
+      const templateReq = request as ExportTemplateRequest;
+      return (templateReq.request_ids?.length || 0) + (templateReq.group_ids?.length || 0);
+    }
+    default:
+      return undefined;
+  }
+}
+
+export function getEmptyExportMessage(
+  fileType: BifrostFileType,
+  request: ExportRequest,
+): string | undefined {
+  const count = getExportItemCount(fileType, request);
+  if (count !== 0) {
+    return undefined;
+  }
+
+  switch (fileType) {
+    case 'network':
+      return 'Select at least one Network record before exporting a .bifrost file';
+    case 'rules':
+      return 'Select at least one rule before exporting a .bifrost file';
+    case 'script':
+      return 'Select at least one script before exporting a .bifrost file';
+    case 'template':
+      return 'Select at least one replay item before exporting a .bifrost file';
+    default:
+      return undefined;
+  }
 }
 
 export async function detectType(content: string): Promise<DetectResponse> {
