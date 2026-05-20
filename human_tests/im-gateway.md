@@ -792,3 +792,36 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   - 删除测试 schedule。
   - 如启动了临时 Bifrost/Vite 服务，停止进程并删除临时数据目录。
 - **执行记录（2026-05-19）**: PASS — 执行 `pnpm --dir web exec tsc -b --pretty false` 通过，确认 SchedulesPanel 类型接入 `ExternalCliGatewayConfig`、Agent 表单包含 Runner、`Default Execution Directory` 与 ChatGPT Web `First-round Prompt` 条件展示，`IM Channel` 下拉直接使用 Connections；执行 `cargo test -p bifrost-admin schedule_agent_can_run_selected_external_runner_with_initial_prompt -- --nocapture` 通过，mock 外部 Runner 断言输入同时包含 `INIT_MARKER` 和 `TASK_MARKER`，run 记录为 `status=Success`、`runner_id=chatgpt-test`、`provider_id=feishu-main`、`input_preview` 包含实际发送消息、`agent_final_response=SCHEDULE_RUNNER_OK`。第二轮 review 补充 `schedule_chatgpt_web_initial_prompt_is_sent_as_first_message_only`，覆盖 ChatGPT Web 初始 Prompt 仅在没有 conversation 绑定时作为第一条消息发送，已有 conversation 后只发送 preset prompt。后续增强执行 `cargo test -p bifrost-admin schedule_agent_persists_codex_thread_id_for_next_run -- --nocapture`、`cargo test -p bifrost-admin schedule_external_result_extracts_chatgpt_conversation_id -- --nocapture`、`cargo test -p bifrost-admin schedule_agent_work_dir_prefers_schedule_then_inherited_default -- --nocapture`、`cargo test -p bifrost-admin schedule_external_runner_executes_from_configured_work_dir -- --nocapture` 通过，验证 schedule 持久化 ChatGPT/Codex 对话引用，并且 Bifrost Agent/Codex Runner 使用 schedule 或继承的默认执行目录。
+
+### TC-IMG-55: Agent Markdown 图片附件通过 IM 图片通道发送
+
+- **前置条件**:
+  - 使用临时 `BIFROST_DATA_DIR`，避免污染默认用户数据。
+  - 准备一个 mock Chat Completions 服务，返回内容包含：
+    - 本地图片 Markdown：`![ChatGPT 生成图片 1](/tmp/.../chatgpt-web-image-1.png)`。
+    - 远端图片附件 Markdown：`![远端附件](http://127.0.0.1:<port>/chart.png)`，HTTP 响应 `Content-Type=image/png`。
+    - 普通下载链接 Markdown：`[下载图片](http://127.0.0.1:<port>/download)`，URL 不带图片扩展名但 HTTP 响应 `Content-Type=image/png`。
+    - 明确文件附件链接：`[报告附件](https://files.oaiusercontent.com/report.pdf)`。
+    - 一条 ChatGPT 引用卡片风格 favicon：`[![](https://www.google.com/s2/favicons?...)](...)`。
+  - 准备 Weixin provider 配置，`base_url` 指向不可达测试地址即可；本用例验证发送层会尝试走 image 通道并记录 message log，不依赖真实微信外网成功。
+- **操作步骤**:
+  1. 运行 E2E wrapper：
+     `e2e-tests/tests/test_im_agent_markdown_image_reply.sh`
+  2. 该 wrapper 内部运行 Markdown 图片拆分与远端附件下载单元测试：
+     `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin agent_reply_ --lib`
+  3. 该 wrapper 内部运行主 Agent Chat 回归测试：
+     `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin agent_chat_final_reply_sends_local_markdown_images_as_im_images --lib`
+  4. 检查测试日志或 `ImMessageLogStore` 断言，确认生成了 `msg_type=image` 的 outbound 记录。
+  5. 确认 interactive 文本预览不再包含本地图片路径，避免把 `![...](本地路径)` 作为纯文本发给用户。
+  6. 确认远端附件图已下载到 `agent/im_gateway/attachments/agent_reply_markdown/` 后再进入发送流程。
+  7. 确认普通下载链接若响应为 `image/*`，下载后会进入图片发送列表，而不是文件附件列表。
+  8. 确认明确文件附件链接会被收集为待下载附件，普通新闻链接不会被误收集。
+  9. 确认 `google.com/s2/favicons` 引用图不会被收集为待发送图片。
+- **预期结果**:
+  - Agent final reply / continuation reply / streaming final flush 中的本地图片 Markdown 会被剥离出正文，并通过 provider `send_image` 独立发送。
+  - 明确的远端图片附件会先下载成本地附件文件；如果 IM 通道发送失败，文件仍保留在本地，message log 保留失败原因。
+  - Markdown 普通下载链接本身若返回图片类型，即使不是 `![...](...)` 图片语法，也必须通过图片通道发送。
+  - 明确的非图片附件会下载到 `agent/im_gateway/attachments/agent_reply_files/`；支持文件消息的通道发送 `msg_type=file`，不支持时记录失败并保留本地文件。
+  - favicon / 引用卡片小图标不会被误发为用户图片。
+  - 文字卡片仍发送剩余正文，图片通过 IM 图片消息逐张发送。
+- **执行记录（2026-05-20）**: PASS — 执行 `e2e-tests/tests/test_im_agent_markdown_image_reply.sh` 通过。wrapper 内部执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin agent_reply_ --lib`，10 个 Agent reply 图片/附件解析、下载和目标选择测试全部通过，覆盖本地路径、远端附件下载、普通下载链接按 `Content-Type=image/png` 转图片通道、非图片附件识别、普通链接排除、favicon 排除、代码块保护和去重；执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin agent_chat_final_reply_sends_local_markdown_images_as_im_images --lib` 通过，mock 模型返回 `![ChatGPT 生成图片 1](<本地图片路径>)` 后，主 Agent Chat 链路产生 `msg_type=image` outbound message log，interactive preview 不再包含本地图片路径。

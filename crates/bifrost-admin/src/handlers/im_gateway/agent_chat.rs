@@ -1280,16 +1280,22 @@ pub(super) async fn process_agent_chat(
     };
 
     let reply_image_base_dir = agent_config.work_dir.as_deref().map(PathBuf::from);
+    let (main_response_for_card, reply_images, reply_attachments) =
+        prepare_agent_reply_text_and_images_with_downloads(
+            &main_response,
+            reply_image_base_dir.as_deref(),
+        )
+        .await;
     let rendered_main_response = if let Some(feishu) = client.feishu() {
         render_agent_markdown_for_feishu(
             &feishu,
             provider,
-            &main_response,
+            &main_response_for_card,
             reply_image_base_dir.as_deref(),
         )
         .await
     } else {
-        main_response.clone()
+        main_response_for_card.clone()
     };
 
     if progress_enabled {
@@ -1332,7 +1338,7 @@ pub(super) async fn process_agent_chat(
             target_name: Some("Agent Progress".to_string()),
             message_id: progress_message_info.and_then(|info| info.message_id),
             msg_type: Some("interactive".to_string()),
-            content_preview: Some(truncate_str(&main_response, 200)),
+            content_preview: Some(truncate_str(&main_response_for_card, 200)),
             trigger: Some("agent_streaming".to_string()),
             error: None,
             sender_open_id: None,
@@ -1342,6 +1348,15 @@ pub(super) async fn process_agent_chat(
         if let Err(e) = message_log_store.add(log) {
             error!(error = %e, "failed to store agent streaming outbound message log");
         }
+        send_agent_reply_images_for_event(
+            client,
+            provider,
+            event,
+            &reply_images,
+            &reply_attachments,
+            message_log_store,
+        )
+        .await;
         return;
     }
 
@@ -1455,7 +1470,7 @@ pub(super) async fn process_agent_chat(
         target_name: Some(reply_target.display_name.clone()),
         message_id,
         msg_type: Some("interactive".to_string()),
-        content_preview: Some(truncate_str(&main_response, 200)),
+        content_preview: Some(truncate_str(&main_response_for_card, 200)),
         trigger: Some("agent".to_string()),
         error: error_msg,
         sender_open_id: None,
@@ -1470,4 +1485,15 @@ pub(super) async fn process_agent_chat(
         Ok(_) => info!(session_key = %session_key, "agent reply sent successfully"),
         Err(e) => error!(session_key = %session_key, error = %e, "failed to send agent reply"),
     }
+
+    send_agent_reply_assets(
+        client,
+        provider,
+        event,
+        &reply_target,
+        &reply_images,
+        &reply_attachments,
+        message_log_store,
+    )
+    .await;
 }

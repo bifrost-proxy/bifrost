@@ -3,6 +3,7 @@ use super::*;
 pub(super) const IMAGE_ONLY_AGENT_PROMPT: &str = "请理解这张图片，并根据图片内容回答。";
 pub(super) const MAX_AGENT_IMAGES_PER_MESSAGE: usize = 6;
 pub(super) const MAX_AGENT_REPLY_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+pub(super) const MAX_AGENT_REPLY_ATTACHMENT_BYTES: u64 = 50 * 1024 * 1024;
 
 pub(super) static AGENT_REPLY_IMAGE_UPLOAD_CACHE: OnceLock<
     Mutex<HashMap<AgentReplyImageCacheKey, String>>,
@@ -85,6 +86,40 @@ impl ImProviderClient {
         match self {
             Self::Feishu(provider) => provider.send_image(config, target, image_key, uuid).await,
             Self::Weixin(provider) => provider.send_image(config, target, image_key, uuid).await,
+        }
+    }
+
+    pub(super) async fn upload_file(
+        &self,
+        config: &ImProviderConfig,
+        file_name: &str,
+        bytes: Vec<u8>,
+        mime_type: Option<&str>,
+    ) -> bifrost_core::Result<String> {
+        match self {
+            Self::Feishu(provider) => {
+                provider
+                    .upload_file(config, file_name, bytes, mime_type)
+                    .await
+            }
+            Self::Weixin(_) => Err(bifrost_core::BifrostError::Config(
+                "weixin provider does not support generic file attachments yet".to_string(),
+            )),
+        }
+    }
+
+    pub(super) async fn send_file(
+        &self,
+        config: &ImProviderConfig,
+        target: &ImTarget,
+        file_key: &str,
+        uuid: Option<&str>,
+    ) -> bifrost_core::Result<crate::im_gateway::types::SendResult> {
+        match self {
+            Self::Feishu(provider) => provider.send_file(config, target, file_key, uuid).await,
+            Self::Weixin(_) => Err(bifrost_core::BifrostError::Config(
+                "weixin provider does not support generic file attachments yet".to_string(),
+            )),
         }
     }
 

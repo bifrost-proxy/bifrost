@@ -611,6 +611,109 @@ impl FeishuProvider {
         })
     }
 
+    pub async fn upload_file(
+        &self,
+        config: &ImProviderConfig,
+        file_name: &str,
+        bytes: Vec<u8>,
+        mime_type: Option<&str>,
+    ) -> Result<String> {
+        let base_url = Self::base_url(config);
+        let app_secret = config.secret_ref.as_deref().unwrap_or_default();
+        let token = self.get_tenant_token(config, app_secret).await?;
+        let url = format!("{}/im/v1/files", base_url);
+
+        #[derive(Deserialize)]
+        struct UploadResponse {
+            code: Option<i64>,
+            msg: Option<String>,
+            data: Option<UploadResponseData>,
+        }
+
+        #[derive(Deserialize)]
+        struct UploadResponseData {
+            file_key: Option<String>,
+        }
+
+        let mut part = reqwest::multipart::Part::bytes(bytes).file_name(file_name.to_string());
+        if let Some(mime_type) = mime_type.filter(|value| !value.trim().is_empty()) {
+            part = part.mime_str(mime_type).map_err(|e| {
+                bifrost_core::BifrostError::Config(format!(
+                    "invalid file mime type '{}': {}",
+                    mime_type, e
+                ))
+            })?;
+        }
+
+        let form = reqwest::multipart::Form::new()
+            .text(
+                "file_type",
+                feishu_file_type_for_name(file_name).to_string(),
+            )
+            .text("file_name", file_name.to_string())
+            .part("file", part);
+
+        debug!(file_name = file_name, "uploading feishu file");
+
+        let resp = self
+            .http
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| {
+                bifrost_core::BifrostError::Network(format!("feishu file upload failed: {}", e))
+            })?;
+
+        let body: UploadResponse = resp.json().await.map_err(|e| {
+            bifrost_core::BifrostError::Network(format!(
+                "feishu file upload response parse failed: {}",
+                e
+            ))
+        })?;
+
+        if let Some(code) = body.code {
+            if code != 0 {
+                let msg = body.msg.unwrap_or_default();
+                return Err(bifrost_core::BifrostError::Network(format!(
+                    "feishu file upload error: code={}, msg={}",
+                    code, msg
+                )));
+            }
+        }
+
+        body.data.and_then(|data| data.file_key).ok_or_else(|| {
+            bifrost_core::BifrostError::Network(
+                "feishu file upload response missing file_key".to_string(),
+            )
+        })
+    }
+
+    pub async fn send_file(
+        &self,
+        config: &ImProviderConfig,
+        target: &ImTarget,
+        file_key: &str,
+        uuid: Option<&str>,
+    ) -> Result<SendResult> {
+        let content = serde_json::json!({ "file_key": file_key }).to_string();
+        let base_url = Self::base_url(config);
+        let app_secret = config.secret_ref.as_deref().unwrap_or_default();
+        let token = self.get_tenant_token(config, app_secret).await?;
+
+        self.send_message_internal(
+            base_url,
+            &token,
+            &target.receive_id_type,
+            &target.receive_id,
+            "file",
+            &content,
+            uuid,
+        )
+        .await
+    }
+
     /// Update an existing interactive card message.
     ///
     /// Uses Feishu PATCH /im/v1/messages/{message_id} API to update card content.
@@ -1773,6 +1876,22 @@ fn ws_domain(config: &ImProviderConfig) -> String {
     base.trim_end_matches('/')
         .trim_end_matches("/open-apis")
         .to_string()
+}
+
+fn feishu_file_type_for_name(file_name: &str) -> &'static str {
+    match std::path::Path::new(file_name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "pdf" => "pdf",
+        "doc" | "docx" => "doc",
+        "xls" | "xlsx" | "csv" => "xls",
+        "ppt" | "pptx" => "ppt",
+        _ => "stream",
+    }
 }
 
 async fn fetch_ws_endpoint(
