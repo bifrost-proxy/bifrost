@@ -328,3 +328,52 @@ fn get_daily_agent_runs_response(task_id: &str) -> Response<BoxBody> {
         "processed_documents": documents,
     }))
 }
+
+fn daily_agent_report_path_for_date(task_id: &str, date: &str) -> Result<PathBuf, String> {
+    if NaiveDate::parse_from_str(date, "%Y-%m-%d").is_err() {
+        return Err("ASR Daily Agent report date must use YYYY-MM-DD".to_string());
+    }
+
+    Ok(daily_dir_for_task(task_id)
+        .join("report")
+        .join(format!("{date}-report.md")))
+}
+
+fn get_daily_agent_report_response(task_id: &str, date: &str) -> Response<BoxBody> {
+    let Some(task) = find_task(task_id) else {
+        return error_response(StatusCode::NOT_FOUND, "ASR task not found");
+    };
+
+    let report_path = match daily_agent_report_path_for_date(task_id, date) {
+        Ok(path) => path,
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error),
+    };
+    if !report_path.exists() {
+        return error_response(StatusCode::NOT_FOUND, "ASR Daily Agent report not found");
+    }
+
+    let processed = load_daily_agent_processed_state(task_id);
+    let processed_document = processed.documents.get(date);
+    let content = match std::fs::read_to_string(&report_path) {
+        Ok(content) => content,
+        Err(error) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("read ASR Daily Agent report {}: {error}", report_path.display()),
+            );
+        }
+    };
+
+    json_response(&serde_json::json!({
+        "task_id": task.id,
+        "task_name": task.name,
+        "date": date,
+        "path": report_path.to_string_lossy(),
+        "size": source_size(&report_path),
+        "modified_ms": source_modified_ms(&report_path),
+        "content": content,
+        "processed_at_ms": processed_document.map(|document| document.processed_at_ms),
+        "runner": processed_document.map(|document| document.runner.as_str()),
+        "last_run_id": processed_document.map(|document| document.last_run_id.as_str()),
+    }))
+}

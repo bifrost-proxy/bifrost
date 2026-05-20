@@ -371,6 +371,12 @@ struct TaskSummary {
     /// Total number of failed chunks across all files.
     failed_chunk_count: usize,
     deleted_after_processing: usize,
+    /// Current disk usage of audio files still present under this task's audio directory.
+    audio_source_bytes: u64,
+    audio_source_file_count: usize,
+    /// Subset of source audio files that are safe to delete because ASR outputs exist.
+    cleanable_source_bytes: u64,
+    cleanable_source_file_count: usize,
     running: bool,
 }
 
@@ -517,3 +523,20 @@ struct RunTaskResponse {
     message: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct CleanupSourceAudioFailure {
+    source_path: String,
+    error: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CleanupSourceAudioResponse {
+    ok: bool,
+    deleted_files: usize,
+    deleted_bytes: u64,
+    skipped_files: usize,
+    skipped_bytes: u64,
+    failed_files: Vec<CleanupSourceAudioFailure>,
+    summary: TaskSummary,
+    message: String,
+}

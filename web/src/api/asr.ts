@@ -89,6 +89,10 @@ export interface AsrTaskSummary {
   partial_success: number;
   failed_chunk_count: number;
   deleted_after_processing: number;
+  audio_source_bytes: number;
+  audio_source_file_count: number;
+  cleanable_source_bytes: number;
+  cleanable_source_file_count: number;
   running: boolean;
 }
 
@@ -293,6 +297,22 @@ export interface RetryAllFailedChunksResult {
   retry: AsrBulkRetryState;
 }
 
+export interface CleanupAsrSourceAudioFailure {
+  source_path: string;
+  error: string;
+}
+
+export interface CleanupAsrSourceAudioResult {
+  ok: boolean;
+  deleted_files: number;
+  deleted_bytes: number;
+  skipped_files: number;
+  skipped_bytes: number;
+  failed_files: CleanupAsrSourceAudioFailure[];
+  summary: AsrTaskSummary;
+  message: string;
+}
+
 export type AsrStreamEvent =
   | AsrProgressEvent
   | AsrTextEvent
@@ -472,6 +492,19 @@ export async function retryAllFailedChunks(
     },
   );
   return readJsonResponse<RetryAllFailedChunksResult>(response);
+}
+
+export async function cleanupAsrSourceAudio(
+  taskId: string,
+): Promise<CleanupAsrSourceAudioResult> {
+  const response = await fetch(
+    buildApiUrl(`/asr/tasks/${encodeURIComponent(taskId)}/cleanup-source-audio`),
+    {
+      method: "POST",
+      headers: buildStreamHeaders(),
+    },
+  );
+  return readJsonResponse<CleanupAsrSourceAudioResult>(response);
 }
 
 export async function streamAsrInitialization(
@@ -691,6 +724,19 @@ export interface AsrDailyAgentRunsResponse {
   processed_documents: AsrDailyAgentProcessedDocument[];
 }
 
+export interface AsrDailyAgentReportDetail {
+  task_id: string;
+  task_name: string;
+  date: string;
+  path: string;
+  size?: number;
+  modified_ms?: number;
+  content: string;
+  processed_at_ms?: number;
+  runner?: string;
+  last_run_id?: string;
+}
+
 // ─── Daily Agent API Functions ────────────────────────────────────────────────
 
 export async function getDailyAgentConfig(
@@ -776,6 +822,19 @@ export async function getDailyAgentRuns(
   taskId: string,
 ): Promise<AsrDailyAgentRunsResponse> {
   const url = buildApiUrl(`/asr/tasks/${taskId}/daily-agent/runs`);
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${getAdminToken()}` },
+  });
+  return readJsonResponse(response);
+}
+
+export async function getDailyAgentReport(
+  taskId: string,
+  date: string,
+): Promise<AsrDailyAgentReportDetail> {
+  const url = buildApiUrl(
+    `/asr/tasks/${encodeURIComponent(taskId)}/daily-agent/reports/${encodeURIComponent(date)}`,
+  );
   const response = await fetch(url, {
     headers: { Authorization: `Bearer ${getAdminToken()}` },
   });

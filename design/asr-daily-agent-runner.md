@@ -887,6 +887,7 @@ build_daily_agent_change_plan(task, trigger, date, force)
 | 12 | 服务重启 orphan detection + re-enqueue | `asr_jobs/daily_agent.rs` |
 | 13 | WebUI: ASR 创建/编辑页 Daily Agent 配置区 | WebUI |
 | 14 | WebUI: Task Detail Daily Agent Tab | WebUI |
+| 15 | WebUI: Daily Agent report 可点击全屏 Markdown 详情 | WebUI + `/daily-agent/reports/{date}` |
 
 ---
 
@@ -925,6 +926,7 @@ build_daily_agent_change_plan(task, trigger, date, force)
 | 追加内容后再触发 | ChatGPT Web 只收新增 tail |
 | IM delivery 绑定 | 保存 `channel/mode/policy` |
 | 手动 Run now | report/ 生成文件 |
+| 打开 report 详情 | `/daily-agent/reports/{date}` 返回 report Markdown 全文，非法日期拒绝，缺失 report 返回 404 |
 | 自动 completion hook | run detail 记录 trigger_source=asr_completion |
 | 未绑定 IM | 不发送，记录 skipped |
 | git 不存在 | 创建任务和保存 AGENTS.md 仍成功 |
@@ -940,6 +942,9 @@ build_daily_agent_change_plan(task, trigger, date, force)
 - IM delivery 开关联动通道选择/mode/policy
 - 默认指导手册在 editor 中可见
 - 保存后 Daily Agent tab 读取到 custom AGENTS.md
+- Processed Documents 中任一 report 文件名可点击，进入全屏详情页并使用 Markdown 渲染器展示正文
+- report 详情页展示任务、日期、路径、大小、修改时间、处理时间和 Runner，并支持返回 Daily Agent 列表
+- 任务详情 tab 使用 URL 参数保持状态；刷新 `Daily Agent` tab 或 report 全屏详情页时，页面必须从 `asrTaskTab=daily-agent` / `asrDailyReport=YYYY-MM-DD` 恢复，不要求用户重新点击切换
 - 亮色/暗色主题下均可读可操作
 
 ### 16.4 human_tests
@@ -951,6 +956,7 @@ build_daily_agent_change_plan(task, trigger, date, force)
 | TC-ASPB-27 | WebUI 配置 Runner 并编辑 AGENTS.md |
 | TC-ASPB-28 | ASR 音频处理完成后自动触发 Daily Agent 生成 report 并写入 Git 历史 |
 | TC-ASPB-29 | 绑定 IM 通道后 Daily Agent 发送处理结论 |
+| TC-ASPB-35 | Daily Agent Processed Documents report 全屏 Markdown 详情 |
 
 ---
 
