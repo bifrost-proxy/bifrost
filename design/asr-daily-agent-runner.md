@@ -927,6 +927,7 @@ build_daily_agent_change_plan(task, trigger, date, force)
 | IM delivery 绑定 | 保存 `channel/mode/policy` |
 | 手动 Run now | report/ 生成文件 |
 | 打开 report 详情 | `/daily-agent/reports/{date}` 返回 report Markdown 全文，非法日期拒绝，缺失 report 返回 404 |
+| 历史 report 发现 | `/daily-agent/runs` 合并 `daily_agent_processed.json` 与磁盘 `daily/report/`、兼容 `daily/Report/` 下的 `YYYY-MM-DD-report.md`；即使 processed state 缺失，Daily Agent Records 也必须展示已有报告 |
 | 自动 completion hook | run detail 记录 trigger_source=asr_completion |
 | 未绑定 IM | 不发送，记录 skipped |
 | git 不存在 | 创建任务和保存 AGENTS.md 仍成功 |
@@ -943,6 +944,7 @@ build_daily_agent_change_plan(task, trigger, date, force)
 - 默认指导手册在 editor 中可见
 - 保存后 Daily Agent tab 读取到 custom AGENTS.md
 - Processed Documents 中任一 report 文件名可点击，进入全屏详情页并使用 Markdown 渲染器展示正文
+- Daily Agent Records 不只依赖 `daily_agent_processed.json`：页面刷新时必须通过 `/daily-agent/runs` 展示磁盘中已存在的 `YYYY-MM-DD-report.md`，兼容历史任务里的 `Report` 大写目录；从该兜底记录打开详情时 `/daily-agent/reports/{date}` 必须读取同一真实文件。
 - report 详情页展示任务、日期、路径、大小、修改时间、处理时间和 Runner，并支持返回 Daily Agent 列表
 - 任务详情 tab 使用 URL 参数保持状态；刷新 `Daily Agent` tab 或 report 全屏详情页时，页面必须从 `asrTaskTab=daily-agent` / `asrDailyReport=YYYY-MM-DD` 恢复，不要求用户重新点击切换
 - 亮色/暗色主题下均可读可操作
@@ -957,6 +959,7 @@ build_daily_agent_change_plan(task, trigger, date, force)
 | TC-ASPB-28 | ASR 音频处理完成后自动触发 Daily Agent 生成 report 并写入 Git 历史 |
 | TC-ASPB-29 | 绑定 IM 通道后 Daily Agent 发送处理结论 |
 | TC-ASPB-35 | Daily Agent Processed Documents report 全屏 Markdown 详情 |
+| TC-DAR-01 | Daily Agent Records 从已有 Report 目录兜底发现历史报告 |
 
 ---
 
