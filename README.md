@@ -66,7 +66,7 @@ bifrost install-skill -y
 
 - 高性能代理内核：基于 Tokio + Hyper，支持高并发与连接复用
 - 多协议支持：HTTP/1.1、HTTP/2、HTTP/3、HTTPS、SOCKS5、WebSocket、SSE、gRPC
-- TLS 拦截能力：支持 CA 证书生成、按域名动态签发证书、按规则选择拦截或透传
+- TLS 拦截能力：支持 CA 证书生成、按域名动态签发证书、按规则选择拦截/透传，并可对单条上游 HTTPS 规则显式允许不安全证书
 - 规则引擎：支持路由、请求/响应改写、注入、延迟、限速、Mock、脚本处理
 - 管理界面：内置 Web UI，支持规则编辑、流量查看、脚本管理、请求重放
 - 资源风险告警：Performance 页与 `/_bifrost/api/system/memory` 会显示 body/ws 文件 writer 占用及接近句柄上限的告警状态
@@ -128,6 +128,7 @@ bifrost rule add local-dev --content "example.com host://127.0.0.1:3000"
 example.com host://127.0.0.1:3000
 api.example.com reqHeaders://x-debug=1
 chatgpt.com http3://
+internal-api.example.test https://10.37.102.138:8080 upstreamUnsafeSsl://true
 ```
 
 ## 文档索引

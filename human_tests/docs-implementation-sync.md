@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证 `docs/` 中的 CLI、Scripts、规则协议说明与当前工程实现保持一致。重点覆盖当前源码 `bifrost --help` 暴露的命令表面、Scripts parser 类型的真实 API/运行时支持、规则协议索引中 `bp` / `devtools` 的可发现性，以及规则语法示例与当前 parser/template 行为一致。
+验证 `docs/` 中的 CLI、Scripts、规则协议说明与当前工程实现保持一致。重点覆盖当前源码 `bifrost --help` 暴露的命令表面、Scripts parser 类型的真实 API/运行时支持、规则协议索引中 `bp` / `devtools` / `upstreamUnsafeSsl` 的可发现性，以及规则语法示例与当前 parser/template 行为一致。
 
 ## 前置条件
 
@@ -116,6 +116,22 @@
 - 快速开始里的普通 curl 示例使用默认主端口 `9900`，不会引用尚未绑定的临时端口。
 - 文档不再出现已失效的 `--scope shell` 或不存在的 `remote file write --content` 示例。
 
+### TC-DIS-08 新增规则协议文档同步覆盖
+
+操作步骤：
+
+1. 执行 `source ~/.zshrc && rg -n "UpstreamUnsafeSsl|upstreamUnsafeSsl|Allow insecure upstream HTTPS certificates" crates/bifrost-core/src/protocol.rs crates/bifrost-core/src/syntax.rs crates/bifrost-cli/src/parsing/rules.rs crates/bifrost-proxy/src/proxy/http/handler.rs`。
+2. 执行 `source ~/.zshrc && rg -n "upstreamUnsafeSsl" README.md docs/operation.md docs/rule.md docs/rules/README.md docs/rules/routing.md human_tests/rule-filter-routing-diagnostics.md`。
+3. 执行 `source ~/.zshrc && rg -n "upstreamUnsafeSsl://true" e2e-tests/rules/regression/rule_filter_routing_diagnostics.txt e2e-tests/tests/test_rule_filter_routing_diagnostics.sh`。
+4. 打开 `docs/operation.md` 与 `docs/rules/routing.md`，确认文档说明该协议是按规则跳过上游 HTTPS 证书校验，而不是全局 `--unsafe-ssl` 或客户端信任配置。
+
+预期结果：
+
+- 源码中存在 `upstreamUnsafeSsl` 协议解析、语法元数据、规则合并和代理报错提示实现。
+- README、规则语法、operation 总表、规则协议手册和 routing 专页均能发现 `upstreamUnsafeSsl`。
+- E2E 规则文件和脚本覆盖自签名上游成功、未配置时失败、错误响应建议 `upstreamUnsafeSsl://true` 三个场景。
+- 文档明确该协议只影响 Bifrost 到上游 HTTPS 的证书校验，不改变客户端到 Bifrost 的 TLS 信任关系。
+
 ## 本次执行记录
 
 执行日期：2026-05-09。
@@ -129,6 +145,7 @@
 | TC-DIS-05 | 通过。docs 相对链接检查无缺失；架构文档覆盖 `bifrost-command`、`bifrost-power`、`agent`、`skills`；概览文档覆盖临时端口、remote-invoke、Agent Skill。 |
 | TC-DIS-06 | 通过。源码对照确认 `Filter::Body(_regex) => false`；文档不再推荐 `p:`、大写 `H:` 响应头过滤或 `s:4` 这类错误写法，并明确 body filter 当前边界。 |
 | TC-DIS-07 | 通过。`traffic list --help`、`search --help`、`remote file --help` 与文档中的参数/子命令一致；失效示例扫描无命中。 |
+| TC-DIS-08 | 通过。源码、README、规则语法、operation 总表、规则协议手册、routing 专页、E2E 规则和 human_tests 均包含 `upstreamUnsafeSsl`；文档明确它是按规则跳过上游 HTTPS 证书校验，并记录失败响应中的修复建议。 |
 
 ## 清理步骤
 

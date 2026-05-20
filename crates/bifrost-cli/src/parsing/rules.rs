@@ -685,6 +685,9 @@ fn convert_core_result_to_proxy(core_result: &bifrost_core::ResolvedRules) -> Pr
             Protocol::TlsOptions => {
                 result.tls_options = Some(value.to_string());
             }
+            Protocol::UpstreamUnsafeSsl => {
+                result.upstream_unsafe_ssl = parse_rule_bool(value, true);
+            }
             Protocol::SniCallback => {
                 result.sni_callback = Some(value.to_string());
             }
@@ -729,6 +732,18 @@ fn convert_core_result_to_proxy(core_result: &bifrost_core::ResolvedRules) -> Pr
     }
 
     result
+}
+
+fn parse_rule_bool(value: &str, default_when_empty: bool) -> bool {
+    let value = value.trim();
+    if value.is_empty() {
+        return default_when_empty;
+    }
+
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on" | "allow" | "allowed" | "enable" | "enabled"
+    )
 }
 
 struct ParsedDeleteValue {
@@ -2248,6 +2263,23 @@ wss://app.example.test/ ws://localhost:8000/
             &HashMap::new(),
         );
         assert_eq!(resolved.tls_options.as_deref(), Some("tls1.3"));
+    }
+
+    #[test]
+    fn test_merge_upstream_unsafe_ssl() {
+        let parser = bifrost_core::RuleParser::new();
+        let rules = parser
+            .parse_rules("example.com upstreamUnsafeSsl://true")
+            .unwrap();
+        let resolver = CoreRulesResolver::new(rules);
+        let resolved = resolve_rules_impl(
+            &resolver,
+            "https://example.com/api",
+            "GET",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert!(resolved.upstream_unsafe_ssl);
     }
 
     #[test]

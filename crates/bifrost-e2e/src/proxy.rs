@@ -458,6 +458,9 @@ impl ProxyRulesResolverTrait for RulesResolverAdapter {
                 Protocol::TlsPassthrough => {
                     result.tls_intercept = Some(false);
                 }
+                Protocol::UpstreamUnsafeSsl => {
+                    result.upstream_unsafe_ssl = parse_rule_bool(value, true);
+                }
                 Protocol::DevTools => {
                     result.devtools = Some(parse_devtools_rule(value));
                 }
@@ -490,6 +493,18 @@ impl ProxyRulesResolverTrait for RulesResolverAdapter {
 
         result
     }
+}
+
+fn parse_rule_bool(value: &str, default_when_empty: bool) -> bool {
+    let value = value.trim();
+    if value.is_empty() {
+        return default_when_empty;
+    }
+
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on" | "allow" | "allowed" | "enable" | "enabled"
+    )
 }
 
 struct ParsedDeleteValue {

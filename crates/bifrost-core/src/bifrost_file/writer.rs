@@ -244,6 +244,46 @@ mod tests {
     }
 
     #[test]
+    fn test_write_network_preserves_routing_diagnostics() {
+        let records = vec![NetworkRecord {
+            id: "REQ-test".to_string(),
+            method: "GET".to_string(),
+            url: "https://lf6-cdn2-tos.bytegoofy.com/index.html".to_string(),
+            status: 502,
+            host: Some("lf6-cdn2-tos.bytegoofy.com".to_string()),
+            path: Some("/index.html".to_string()),
+            protocol: Some("https".to_string()),
+            actual_url: Some("http://10.37.102.138:8081/index.html".to_string()),
+            actual_host: Some("10.37.102.138".to_string()),
+            listener_port: Some(9900),
+            has_rule_hit: Some(true),
+            error_message: Some("Request Failed".to_string()),
+            client_app: Some("Google Chrome".to_string()),
+            client_path: Some("/Applications/Google Chrome.app".to_string()),
+            request_headers: None,
+            response_headers: None,
+            request_body: None,
+            response_body: None,
+            duration_ms: 78,
+            timestamp: 1779283635053,
+            matched_rules: Some(vec![MatchedRuleExport {
+                pattern: "lf6-cdn2-tos.bytegoofy.com/index.html".to_string(),
+                protocol: "Host".to_string(),
+                value: "10.37.102.138:8081".to_string(),
+            }]),
+        }];
+
+        let output = BifrostFileWriter::write_network("network-export-test", None, &records)
+            .expect("network export should serialize");
+
+        assert!(output.contains("\"actual_url\": \"http://10.37.102.138:8081/index.html\""));
+        assert!(output.contains("\"actual_host\": \"10.37.102.138\""));
+        assert!(output.contains("\"has_rule_hit\": true"));
+        assert!(output.contains("\"error_message\": \"Request Failed\""));
+        assert!(output.contains("\"listener_port\": 9900"));
+    }
+
+    #[test]
     fn test_escape_toml_string() {
         assert_eq!(escape_toml_string("hello"), "hello");
         assert_eq!(escape_toml_string("hello\"world"), "hello\\\"world");
