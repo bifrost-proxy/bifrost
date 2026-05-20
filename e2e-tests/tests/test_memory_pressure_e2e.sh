@@ -91,6 +91,7 @@ EOF
         start \
         --intercept \
         --unsafe-ssl \
+        --skip-cert-check \
         --no-system-proxy \
         --rules-file "$rules_file" \
         > "$PROXY_LOG_FILE" 2>&1 &

@@ -4,7 +4,7 @@
 
 1. 启动 Bifrost 服务（使用临时数据目录避免污染正式环境）：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl
+   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl --no-system-proxy
    ```
 2. 使用 Chrome 浏览器访问 `http://127.0.0.1:8800/_bifrost/`
 3. 确保服务正常运行且无其他规则文件残留（如有必要可先清理 `.bifrost-test` 目录重新启动）
@@ -673,6 +673,115 @@
 - 第 6 步保存成功，显示 Toast 消息 "Saved"，规则内容已持久化
 
 **回归目的**：验证修复后，打字再回退到原文时 Save 按钮正确禁用，避免误启用的"无操作保存"导致用户困惑。
+
+---
+
+### TC-WRU-41-回归：Group 规则 active summary 不依赖远端 group 信息
+
+**前置条件**：
+1. 使用临时数据目录和非 9900 端口启动 Bifrost，带 `--no-system-proxy`。
+2. 准备一个本地 Group 规则目录，目录下至少有一条启用规则。
+3. 断开或模拟远端 group/peer 接口不可用。
+
+**操作步骤**：
+1. 打开 `http://127.0.0.1:8800/_bifrost/rules?group={group_id}&rule={rule_name}`。
+2. 观察页面顶部 Dynamic Island。
+3. 点击 Dynamic Island 胶囊展开详情。
+4. 直接请求 `http://127.0.0.1:8800/_bifrost/api/rules/active-summary`。
+
+**预期结果**：
+- Dynamic Island 不应长时间卡在 `0 active`。
+- 展开面板中显示本地已启用的 Group 规则。
+- API 返回 200，`rules` 数组包含该 Group 规则，`merged_content` 包含该规则文本。
+- 即使远端 group/peer 接口不可用，active summary 仍以本地目录名作为 fallback 展示规则，不把本地启用规则清空或删除。
+- 代理运行时规则加载同样包含该本地 Group 目录；在 Web UI 中启用/禁用该 Group 规则后，代理无需等待远端刷新即可通过规则 hot reload 使用最新本地状态。
+
+**回归目的**：防止 Rules 预览链路或代理处理链路因远端 group cache 解析失败而把已启用规则展示为 0 或跳过本地 Group 规则。
+
+---
+
+### TC-WRU-42-稳定性：远端失败和快速本地变更下 active summary 保持可靠
+
+**前置条件**：
+1. 使用临时数据目录和非 9900 端口启动 Bifrost，带 `--no-system-proxy --enable-badge-injection`。
+2. 准备一个未缓存 group id 的本地 Group 规则目录，目录下有一条启用规则。
+3. 准备一个已缓存 group id 的 Group 规则 `rapid-toggle-rule`，初始为 disabled。
+4. 让 sync session 缺失、失效或远端 group/peer 接口返回错误，模拟临时登录态失效或网络抖动。
+
+**操作步骤**：
+1. 连续请求 `/_bifrost/api/rules/active-summary` 两次，第二次请求应在第一次后台 group cache 解析失败后执行。
+2. 检查本地 Group 规则目录仍存在，没有被 active summary 当作 orphan 删除。
+3. 对 `rapid-toggle-rule` 连续执行 3 轮 enable/disable。
+4. 每次 enable/disable 后轮询 `/_bifrost/api/rules/active-summary` 和代理页面中注入的 Badge 内联数据，最长等待 2 秒。
+
+**预期结果**：
+- 未缓存 Group 在远端解析失败时仍出现在 active summary 中，`merged_content` 包含规则内容。
+- 远端解析失败或请求短暂卡住后不会把 cache-resolved 状态永久卡住；后续请求仍可继续尝试补全远端映射。
+- active summary 不删除本地 Group 规则目录。
+- 快速 enable 后，active summary 与 Badge 都包含该规则；快速 disable 后，二者都移除该规则。
+- 代理 runtime 使用的规则状态与 active summary 保持一致，不依赖远端 group 刷新。
+
+**回归目的**：把网络抖动、临时登录态失效、系统短暂卡顿和本地修改延迟作为一等稳定性风险覆盖，避免再次出现页面和代理链路长期显示 `0 active` 或旧规则残留。
+
+**执行结果（2026-05-20，CI Runner 本地 sync-server 回归）**：
+- ✅ PASS：执行 `BIFROST_DATA_DIR=$(mktemp -d) BIFROST_E2E_REPORT_DIR=$(mktemp -d) BIFROST_E2E_RUNNER_JOBS=8 BIFROST_E2E_RETRY_FAILED_ONCE=1 BIFROST_E2E_HTTP_RETRIES=2 TIMEOUT=90 bash scripts/ci/run-e2e-runner.sh`。
+- 脚本启动仓库内置 `packages/bifrost-sync-server` 本地测试服务并注册测试用户，Rust E2E 通过 `BIFROST_E2E_SYNC_BASE_URL` / `BIFROST_E2E_SYNC_TOKEN` 使用该服务。
+- `bifrost-e2e` 共运行 363 个用例，结果 `358 passed / 0 failed / 5 skipped`，覆盖 `group_rules_active_summary_survives_remote_cache_resolution_failure` 和快速启停相关回归。
+
+---
+
+### TC-WRU-43-回归：Group URL 参数为本地组名时不返回 502
+
+**前置条件**：
+1. 已登录 Bifrost Sync，且本地存在一个 Group 规则目录，例如 `next-agent`。
+2. `group_name_cache` 中存在或曾经存在该 Group 的 id/name 映射；如果映射暂时缺失，本地目录仍存在。
+3. 该 Group 下存在一条规则，例如 `NextOncall双前端本地开发`。
+
+**操作步骤**：
+1. 在浏览器打开：
+   ```text
+   http://127.0.0.1:9900/_bifrost/rules?group=next-agent&rule=NextOncall%E5%8F%8C%E5%89%8D%E7%AB%AF%E6%9C%AC%E5%9C%B0%E5%BC%80%E5%8F%91
+   ```
+2. 观察 Rules 页面是否能进入 Group 模式。
+3. 检查 Network 中的 `/_bifrost/api/group-rules/next-agent` 和规则详情请求。
+4. 在同一页面尝试启用/停用该 Group 规则。
+
+**预期结果**：
+- 页面不显示 502 错误。
+- `/_bifrost/api/group-rules/next-agent` 返回 200，并返回本地 Group 规则列表。
+- 规则详情请求返回 200，编辑器展示目标规则内容。
+- 如果 cache 已能反查真实 group id，响应里的 `group_id` 为真实 id；如果远端或 cache 临时不可用，也至少返回本地目录规则并保持只读/本地可启停能力。
+- 启用/停用后 active summary、Badge 和代理运行时按本地最新状态刷新。
+
+**回归目的**：覆盖 Badge/Rules 深链历史契约中 `group` 参数使用本地 group name 的情况，防止后端把该值误当远端 group id 而请求失败。
+
+---
+
+### TC-WRU-44-回归：退出登录再重新登录后 Group 规则跳转仍使用真实 ID
+
+**前置条件**：
+1. 已登录 Bifrost Sync。
+2. 本地存在一个有远端 ID 映射的 Group，例如 `next-agent`。
+3. Group 下存在规则 `NextOncall双前端本地开发`，并可在 Rules 页面启用/停用。
+
+**操作步骤**：
+1. 打开 Rules 页面，切到目标 Group，启用 `NextOncall双前端本地开发`。
+2. 展开 Rules 页 Dynamic Island，点击该 Group 规则，确认 URL 的 `group` 参数为真实 group ID。
+3. 打开 Settings / Sync，执行退出登录。
+4. 重新登录 Sync。
+5. 回到 Rules 页面，再次启用或确认该 Group 规则处于启用状态。
+6. 再次展开 Dynamic Island 并点击该 Group 规则。
+7. 打开一个被代理注入 Bifrost Badge 的页面，展开 Badge 并点击同一 Group 规则。
+
+**预期结果**：
+- 退出登录不会删除本地 `.group_cache.json` 中的 group id/name 映射。
+- 退出登录后，Group 规则文件仍可作为本地缓存查看，但不会出现在 active summary、注入 Badge active 列表，也不会被代理规则引擎命中。
+- 重新登录后 active summary 返回真实 `group_id`，不是本地 group name。
+- Dynamic Island 点击后的 URL 为 `/_bifrost/rules?group=<真实group_id>&rule=...`。
+- 注入 Badge 保持历史 name/id 反向映射契约，点击后同样跳转到真实 group ID。
+- 启用/停用后代理运行时立即热更新，规则命中状态与本地 UI 一致，不依赖远端周期刷新。
+
+**回归目的**：覆盖 logout/login 循环导致 group cache 被清空、进而 Dynamic Island 或 Badge 回退为 `group={group_name}` 的问题。
 
 ---
 

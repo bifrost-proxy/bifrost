@@ -278,6 +278,57 @@ curl -x http://127.0.0.1:8800 http://httpbin.org/html -s | grep "__bb_panel__"
 
 ---
 
+### TC-BHP-12：回归 - Group 规则启用后 Badge active rules 立即刷新
+
+**操作步骤**：
+1. 使用临时数据目录和非 9900 端口启动 Bifrost，带 `--no-system-proxy --enable-badge-injection`。
+2. 准备一个 Group 规则 `badge-cache-rule`，初始为 disabled。
+3. 通过 Group Rule API 启用该规则：
+   ```bash
+   curl -X PUT http://127.0.0.1:8800/_bifrost/api/group-rules/{group_id}/badge-cache-rule/enable -s
+   ```
+4. 不重启 Bifrost，立即通过代理请求一个 HTML 页面：
+   ```bash
+   curl -x http://127.0.0.1:8800 http://httpbin.org/html -s -o /tmp/bifrost-badge-group-cache.html
+   ```
+5. 检查注入脚本内联数据和规则行链接。
+
+**预期结果**：
+- HTML 中包含 `__bifrost_badge__` 和 `__bb_panel__`。
+- 内联 `rules` 数组包含 `badge-cache-rule`。
+- Hover 面板标题 active 数量包含该 Group 规则，不需要重启服务或再创建本地个人规则触发刷新。
+- 代理处理链路也使用本地 Group 目录重新加载规则；启用或修改已启用 Group 规则后，不需要等待远端 group 列表刷新才生效。
+- Group 规则行链接仍使用可被 Rules 页面识别的 `group` 参数，点击后能定位到对应 Group 规则页面。
+
+**回归目的**：防止 Group 规则 enable/disable 后 Badge 预览缓存或代理处理链路任一侧没有实时刷新；同时保护历史 Group 跳转字段契约。
+
+---
+
+### TC-BHP-13：稳定性 - Group 规则快速启停后 Badge 与 active summary 最终一致
+
+**操作步骤**：
+1. 使用临时数据目录和非 9900 端口启动 Bifrost，带 `--no-system-proxy --enable-badge-injection`。
+2. 准备 Group 规则 `badge-rapid-toggle-rule`，内容使用唯一 host 和状态码，初始为 disabled。
+3. 连续执行 3 轮启用与停用：
+   ```bash
+   curl -X PUT http://127.0.0.1:8800/_bifrost/api/group-rules/{group_id}/badge-rapid-toggle-rule/enable -s
+   curl http://127.0.0.1:8800/_bifrost/api/rules/active-summary -s
+   curl -x http://127.0.0.1:8800 http://badge-rapid-toggle.example.test/ -s -o /tmp/bifrost-badge-rapid-toggle-enabled.txt
+   curl -X PUT http://127.0.0.1:8800/_bifrost/api/group-rules/{group_id}/badge-rapid-toggle-rule/disable -s
+   curl http://127.0.0.1:8800/_bifrost/api/rules/active-summary -s
+   ```
+4. 每次 enable/disable 后允许最多 2 秒轮询 active summary 和新代理 HTML 中的 Badge 内联数据。
+
+**预期结果**：
+- 每次 enable 后，active summary 和 Badge 内联 `rules` 都包含 `badge-rapid-toggle-rule`，`merged_content` 包含该规则内容。
+- 每次 disable 后，active summary 和 Badge 内联 `rules` 都不再包含 `badge-rapid-toggle-rule`。
+- 即使本地写入、配置通知或页面请求存在短暂延迟，2 秒轮询窗口内必须收敛到一致状态。
+- 代理命中结果与 active summary 一致，不出现 Badge 已刷新但代理仍使用旧规则，或代理已变更但 Badge 仍显示旧规则。
+
+**回归目的**：覆盖系统短暂卡顿、本地修改延迟较高、连续快速操作导致的 Badge cache 与 runtime rules 不一致风险。
+
+---
+
 ## 清理步骤
 
 ```bash
@@ -285,5 +336,5 @@ curl -X DELETE http://127.0.0.1:8800/_bifrost/api/rules/test-badge-rule -s
 curl -X DELETE http://127.0.0.1:18880/_bifrost/api/rules/badge-html-tag-escaping-regression -s
 curl -X PUT http://127.0.0.1:8800/_bifrost/api/config/performance \
   -H "Content-Type: application/json" -d '{"inject_bifrost_badge":true}' -s
-rm -f /tmp/bifrost-badge-escape-rule.json /tmp/bifrost-badge-escape.html /tmp/bifrost-badge-mislabeled-json.txt
+rm -f /tmp/bifrost-badge-escape-rule.json /tmp/bifrost-badge-escape.html /tmp/bifrost-badge-mislabeled-json.txt /tmp/bifrost-badge-group-cache.html /tmp/bifrost-badge-rapid-toggle-enabled.txt
 ```

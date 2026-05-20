@@ -11,6 +11,40 @@ use dialoguer::{Confirm, Select};
 use crate::cli::CaCommands;
 use crate::config::get_bifrost_dir;
 
+#[derive(Debug, Clone, Copy)]
+pub struct CertificateCheckOptions {
+    pub auto_yes: bool,
+    pub allow_prompt: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CertificateResolution {
+    AlreadyTrusted,
+    AutoInstallAndTrust,
+    PromptInstall,
+    PromptTrust,
+    BlockNonInteractive,
+}
+
+fn certificate_resolution(
+    status: &CertStatus,
+    options: CertificateCheckOptions,
+) -> CertificateResolution {
+    match status {
+        CertStatus::InstalledAndTrusted => CertificateResolution::AlreadyTrusted,
+        CertStatus::NotInstalled | CertStatus::InstalledNotTrusted if options.auto_yes => {
+            CertificateResolution::AutoInstallAndTrust
+        }
+        CertStatus::NotInstalled if options.allow_prompt => CertificateResolution::PromptInstall,
+        CertStatus::InstalledNotTrusted if options.allow_prompt => {
+            CertificateResolution::PromptTrust
+        }
+        CertStatus::NotInstalled | CertStatus::InstalledNotTrusted => {
+            CertificateResolution::BlockNonInteractive
+        }
+    }
+}
+
 pub fn handle_ca_command(action: CaCommands) -> bifrost_core::Result<()> {
     let cert_dir = get_bifrost_dir()?.join("certs");
     std::fs::create_dir_all(&cert_dir)?;
@@ -239,7 +273,7 @@ pub fn load_tls_config(config: &ProxyConfig) -> bifrost_core::Result<Arc<TlsConf
     }))
 }
 
-pub fn check_and_install_certificate() -> bifrost_core::Result<()> {
+pub fn check_and_install_certificate(options: CertificateCheckOptions) -> bifrost_core::Result<()> {
     let cert_dir = get_bifrost_dir()?.join("certs");
     let ca_key_path = cert_dir.join("ca.key");
     let ca_cert_path = cert_dir.join("ca.crt");
@@ -249,20 +283,40 @@ pub fn check_and_install_certificate() -> bifrost_core::Result<()> {
     let installer = CertInstaller::new(&ca_cert_path);
     let status = installer.check_status()?;
 
-    match status {
-        CertStatus::InstalledAndTrusted => {
+    match certificate_resolution(&status, options) {
+        CertificateResolution::AlreadyTrusted => {
             println!("✓ CA certificate is installed and trusted.");
             Ok(())
         }
-        CertStatus::InstalledNotTrusted => {
+        CertificateResolution::AutoInstallAndTrust => {
+            println!("> yes (auto-confirmed by --yes)");
+            installer.install_and_trust()?;
+            println!("✓ CA certificate installed and trusted.");
+            Ok(())
+        }
+        CertificateResolution::PromptTrust => {
             println!("⚠ CA certificate is installed but not trusted.");
             println!();
             prompt_trust_certificate(&installer)
         }
-        CertStatus::NotInstalled => {
+        CertificateResolution::PromptInstall => {
             println!("⚠ CA certificate is not installed in system trust store.");
             println!();
             prompt_install_certificate(&installer)
+        }
+        CertificateResolution::BlockNonInteractive => {
+            let state = match status {
+                CertStatus::NotInstalled => "not installed in the system trust store",
+                CertStatus::InstalledNotTrusted => "installed but not trusted by the system",
+                CertStatus::InstalledAndTrusted => {
+                    unreachable!("trusted status is handled earlier")
+                }
+            };
+            Err(bifrost_core::BifrostError::Config(format!(
+                "CA certificate is {state}, and no interactive terminal is available. \
+                 Re-run with --yes to install and trust it automatically, run 'bifrost ca install' first, \
+                 or pass --skip-cert-check if you intentionally want to start without a trusted CA."
+            )))
         }
     }
 }
@@ -359,5 +413,57 @@ fn prompt_trust_certificate(installer: &CertInstaller) -> bifrost_core::Result<(
             Ok(())
         }
         Err(_) => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn opts(auto_yes: bool, allow_prompt: bool) -> CertificateCheckOptions {
+        CertificateCheckOptions {
+            auto_yes,
+            allow_prompt,
+        }
+    }
+
+    #[test]
+    fn certificate_resolution_blocks_non_interactive_missing_ca_without_yes() {
+        assert_eq!(
+            certificate_resolution(&CertStatus::NotInstalled, opts(false, false)),
+            CertificateResolution::BlockNonInteractive
+        );
+    }
+
+    #[test]
+    fn certificate_resolution_auto_installs_when_yes() {
+        assert_eq!(
+            certificate_resolution(&CertStatus::NotInstalled, opts(true, false)),
+            CertificateResolution::AutoInstallAndTrust
+        );
+        assert_eq!(
+            certificate_resolution(&CertStatus::InstalledNotTrusted, opts(true, false)),
+            CertificateResolution::AutoInstallAndTrust
+        );
+    }
+
+    #[test]
+    fn certificate_resolution_prompts_when_terminal_available() {
+        assert_eq!(
+            certificate_resolution(&CertStatus::NotInstalled, opts(false, true)),
+            CertificateResolution::PromptInstall
+        );
+        assert_eq!(
+            certificate_resolution(&CertStatus::InstalledNotTrusted, opts(false, true)),
+            CertificateResolution::PromptTrust
+        );
+    }
+
+    #[test]
+    fn certificate_resolution_keeps_trusted_status_ready() {
+        assert_eq!(
+            certificate_resolution(&CertStatus::InstalledAndTrusted, opts(false, false)),
+            CertificateResolution::AlreadyTrusted
+        );
     }
 }

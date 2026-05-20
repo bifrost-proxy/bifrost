@@ -1,5 +1,6 @@
 use std::net::TcpListener;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use bifrost_storage::{RuleFile, RulesStorage};
 
@@ -530,6 +531,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     ProxyInstance::start_with_admin_sync(port, vec![], false, true)
                         .await
                         .map_err(|e| format!("Failed to start proxy: {}", e))?;
+                save_test_sync_token(&admin_state).await?;
 
                 let group_name = "test-active-summary-group";
                 let group_id = "grp-active-001";
@@ -633,6 +635,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     ProxyInstance::start_with_admin_sync(port, vec![], false, true)
                         .await
                         .map_err(|e| format!("Failed to start proxy: {}", e))?;
+                save_test_sync_token(&admin_state).await?;
 
                 let group_name = "test-toggle-summary-group";
                 let group_id = "grp-toggle-001";
@@ -752,6 +755,492 @@ pub fn get_all_tests() -> Vec<TestCase> {
             },
         ),
         TestCase::standalone(
+            "group_rules_active_summary_skips_group_rules_without_login",
+            "Active summary does not consume enabled group rules without an active sync session",
+            "group_rules",
+            || async move {
+                let port = pick_unused_port()?;
+                let (_proxy, admin_state) =
+                    ProxyInstance::start_with_admin_sync(port, vec![], false, true)
+                        .await
+                        .map_err(|e| format!("Failed to start proxy: {}", e))?;
+
+                let group_name = "uncached-active-summary-group";
+                let group_storage = setup_group_storage(&admin_state, group_name)?;
+
+                let mut rule = RuleFile::new(
+                    "uncached-group-rule",
+                    "uncached-active.example.com host://127.0.0.1:5100",
+                );
+                rule.enabled = true;
+                rule.group = Some(group_name.to_string());
+                group_storage
+                    .save(&rule)
+                    .map_err(|e| format!("Failed to save uncached group rule: {}", e))?;
+
+                let client = build_client()?;
+                let resp = client
+                    .get(format!(
+                        "http://127.0.0.1:{}/_bifrost/api/rules/active-summary",
+                        port
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| format!("Request failed: {}", e))?;
+                assert_status(&resp, 200)?;
+                let json: serde_json::Value = resp
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse JSON: {}", e))?;
+                let rules = json
+                    .get("rules")
+                    .and_then(|v| v.as_array())
+                    .ok_or("Missing 'rules' array")?;
+                if rules
+                    .iter()
+                    .any(|r| r.get("name").and_then(|n| n.as_str()) == Some("uncached-group-rule"))
+                {
+                    return Err(format!(
+                        "Group rule should not appear in active summary without login, got {:?}",
+                        rules
+                    ));
+                }
+
+                cleanup_group_storage(&admin_state, group_name);
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
+            "group_rules_enable_refreshes_badge_cache",
+            "Enabling a group rule refreshes proxy badge active-rule data",
+            "group_rules",
+            || async move {
+                let port = pick_unused_port()?;
+                let (_proxy, admin_state) =
+                    ProxyInstance::start_with_admin_sync(port, vec![], false, true)
+                        .await
+                        .map_err(|e| format!("Failed to start proxy: {}", e))?;
+                save_test_sync_token(&admin_state).await?;
+
+                let group_name = "badge-cache-group";
+                let group_id = "grp-badge-cache-001";
+                {
+                    let mut cache = admin_state.group_name_cache();
+                    cache.insert(group_id.to_string(), group_name.to_string());
+                }
+
+                let group_storage = setup_group_storage(&admin_state, group_name)?;
+                let mut rule =
+                    RuleFile::new("badge-cache-rule", "badge-cache.example.com status://200");
+                rule.enabled = false;
+                rule.group = Some(group_name.to_string());
+                group_storage
+                    .save(&rule)
+                    .map_err(|e| format!("Failed to save badge cache rule: {}", e))?;
+
+                admin_state.refresh_badge_rules_cache();
+                let before: serde_json::Value =
+                    serde_json::from_str(&admin_state.badge_rules_json())
+                        .map_err(|e| format!("Failed to parse initial badge JSON: {}", e))?;
+                if before
+                    .get("rules")
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|rules| {
+                        rules.iter().any(|r| {
+                            r.get("name").and_then(|n| n.as_str()) == Some("badge-cache-rule")
+                        })
+                    })
+                {
+                    return Err("Disabled group rule should not be in badge cache".to_string());
+                }
+
+                let client = build_client()?;
+                let enable_resp = client
+                    .put(format!(
+                        "http://127.0.0.1:{}/_bifrost/api/group-rules/{}/badge-cache-rule/enable",
+                        port, group_id
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| format!("Enable request failed: {}", e))?;
+                assert_status(&enable_resp, 200)?;
+
+                let after: serde_json::Value =
+                    serde_json::from_str(&admin_state.badge_rules_json())
+                        .map_err(|e| format!("Failed to parse updated badge JSON: {}", e))?;
+                let rules = after
+                    .get("rules")
+                    .and_then(|v| v.as_array())
+                    .ok_or("Missing badge rules array")?;
+                let badge_rule = rules
+                    .iter()
+                    .find(|r| r.get("name").and_then(|n| n.as_str()) == Some("badge-cache-rule"))
+                    .ok_or_else(|| {
+                        format!(
+                            "Expected badge-cache-rule in badge cache after enable, got {:?}",
+                            rules
+                        )
+                    })?;
+                if badge_rule.get("group_id").and_then(|v| v.as_str()) != Some(group_name) {
+                    return Err(format!(
+                        "Expected badge group_id navigation label '{}', got {:?}",
+                        group_name,
+                        badge_rule.get("group_id")
+                    ));
+                }
+                if badge_rule.get("group_name").and_then(|v| v.as_str()) != Some(group_id) {
+                    return Err(format!(
+                        "Expected badge group_name navigation id '{}', got {:?}",
+                        group_id,
+                        badge_rule.get("group_name")
+                    ));
+                }
+
+                cleanup_group_storage(&admin_state, group_name);
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
+            "group_rules_active_summary_survives_remote_cache_resolution_failure",
+            "Active summary keeps local group rules when remote cache resolution cannot complete",
+            "group_rules",
+            || async move {
+                let port = pick_unused_port()?;
+                let (_proxy, admin_state) =
+                    ProxyInstance::start_with_admin_sync(port, vec![], false, true)
+                        .await
+                        .map_err(|e| format!("Failed to start proxy: {}", e))?;
+                save_test_sync_token(&admin_state).await?;
+
+                let group_name = "remote-cache-failure-group";
+                let group_storage = setup_group_storage(&admin_state, group_name)?;
+
+                let mut rule = RuleFile::new(
+                    "remote-cache-failure-rule",
+                    "remote-cache-failure.example.com status://218",
+                );
+                rule.enabled = true;
+                rule.group = Some(group_name.to_string());
+                group_storage
+                    .save(&rule)
+                    .map_err(|e| format!("Failed to save remote-cache-failure rule: {}", e))?;
+
+                let client = build_client()?;
+                let first = fetch_active_summary(&client, port).await?;
+                assert_active_rule_present(
+                    &first,
+                    "remote-cache-failure-rule",
+                    Some(group_name),
+                    Some(group_name),
+                    Some("status://218"),
+                )?;
+
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while admin_state.is_group_cache_resolved() && Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                if admin_state.is_group_cache_resolved() {
+                    return Err(
+                        "group cache resolution flag stayed set after remote resolution failure"
+                            .to_string(),
+                    );
+                }
+
+                let second = fetch_active_summary(&client, port).await?;
+                assert_active_rule_present(
+                    &second,
+                    "remote-cache-failure-rule",
+                    Some(group_name),
+                    Some(group_name),
+                    Some("status://218"),
+                )?;
+                if !admin_state
+                    .rules_storage
+                    .base_dir()
+                    .join(group_name)
+                    .is_dir()
+                {
+                    return Err("active-summary must not delete local group rule directory".into());
+                }
+
+                cleanup_group_storage(&admin_state, group_name);
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
+            "group_rules_rapid_toggle_keeps_active_summary_and_badge_consistent",
+            "Rapid group rule toggles converge active-summary and badge cache to the same state",
+            "group_rules",
+            || async move {
+                let port = pick_unused_port()?;
+                let (_proxy, admin_state) =
+                    ProxyInstance::start_with_admin_sync(port, vec![], false, true)
+                        .await
+                        .map_err(|e| format!("Failed to start proxy: {}", e))?;
+                save_test_sync_token(&admin_state).await?;
+
+                let group_name = "rapid-toggle-stability-group";
+                let group_id = "grp-rapid-toggle-stability";
+                {
+                    let mut cache = admin_state.group_name_cache();
+                    cache.insert(group_id.to_string(), group_name.to_string());
+                }
+
+                let group_storage = setup_group_storage(&admin_state, group_name)?;
+                let mut rule = RuleFile::new(
+                    "rapid-toggle-stability-rule",
+                    "rapid-toggle-stability.example.com status://219",
+                );
+                rule.enabled = false;
+                rule.group = Some(group_name.to_string());
+                group_storage
+                    .save(&rule)
+                    .map_err(|e| format!("Failed to save rapid toggle rule: {}", e))?;
+
+                let client = build_client()?;
+                for i in 0..3 {
+                    let enable_resp = client
+                        .put(format!(
+                            "http://127.0.0.1:{}/_bifrost/api/group-rules/{}/rapid-toggle-stability-rule/enable",
+                            port, group_id
+                        ))
+                        .send()
+                        .await
+                        .map_err(|e| format!("Enable request {i} failed: {e}"))?;
+                    assert_status(&enable_resp, 200)?;
+                    wait_for_rule_state(
+                        &client,
+                        &admin_state,
+                        port,
+                        "rapid-toggle-stability-rule",
+                        true,
+                        "status://219",
+                    )
+                    .await?;
+
+                    let disable_resp = client
+                        .put(format!(
+                            "http://127.0.0.1:{}/_bifrost/api/group-rules/{}/rapid-toggle-stability-rule/disable",
+                            port, group_id
+                        ))
+                        .send()
+                        .await
+                        .map_err(|e| format!("Disable request {i} failed: {e}"))?;
+                    assert_status(&disable_resp, 200)?;
+                    wait_for_rule_state(
+                        &client,
+                        &admin_state,
+                        port,
+                        "rapid-toggle-stability-rule",
+                        false,
+                        "status://219",
+                    )
+                    .await?;
+                }
+
+                cleanup_group_storage(&admin_state, group_name);
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
+            "group_rules_deeplink_accepts_group_name",
+            "Group rules API accepts the local group name used by badge and Rules deep links",
+            "group_rules",
+            || async move {
+                let port = pick_unused_port()?;
+                let (_proxy, admin_state) =
+                    ProxyInstance::start_with_admin_sync(port, vec![], false, true)
+                        .await
+                        .map_err(|e| format!("Failed to start proxy: {}", e))?;
+                save_test_sync_token(&admin_state).await?;
+
+                let group_name = "deeplink-name-group";
+                let group_id = "grp-deeplink-name";
+                {
+                    let mut cache = admin_state.group_name_cache();
+                    cache.insert(group_id.to_string(), group_name.to_string());
+                }
+
+                let group_storage = setup_group_storage(&admin_state, group_name)?;
+                let mut rule = RuleFile::new(
+                    "deeplink-name-rule",
+                    "deeplink-name.example.com status://220",
+                );
+                rule.enabled = false;
+                rule.group = Some(group_name.to_string());
+                group_storage
+                    .save(&rule)
+                    .map_err(|e| format!("Failed to save deeplink rule: {}", e))?;
+
+                let client = build_client()?;
+                let list_resp = client
+                    .get(format!(
+                        "http://127.0.0.1:{}/_bifrost/api/group-rules/{}",
+                        port, group_name
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| format!("List by group name failed: {}", e))?;
+                assert_status(&list_resp, 200)?;
+                let list_json: serde_json::Value = list_resp
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse list JSON: {}", e))?;
+                assert_json_field(&list_json, "group_id", group_id)?;
+                assert_json_field(&list_json, "group_name", group_name)?;
+                let rules = list_json
+                    .get("rules")
+                    .and_then(|v| v.as_array())
+                    .ok_or("Missing group rules array")?;
+                if !rules
+                    .iter()
+                    .any(|r| r.get("name").and_then(|n| n.as_str()) == Some("deeplink-name-rule"))
+                {
+                    return Err(format!(
+                        "Expected deeplink-name-rule in list, got {rules:?}"
+                    ));
+                }
+
+                let detail_resp = client
+                    .get(format!(
+                        "http://127.0.0.1:{}/_bifrost/api/group-rules/{}/deeplink-name-rule",
+                        port, group_name
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| format!("Detail by group name failed: {}", e))?;
+                assert_status(&detail_resp, 200)?;
+                let detail_json: serde_json::Value = detail_resp
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse detail JSON: {}", e))?;
+                assert_json_field(&detail_json, "name", "deeplink-name-rule")?;
+
+                let enable_resp = client
+                    .put(format!(
+                        "http://127.0.0.1:{}/_bifrost/api/group-rules/{}/deeplink-name-rule/enable",
+                        port, group_name
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| format!("Enable by group name failed: {}", e))?;
+                assert_status(&enable_resp, 200)?;
+                let summary = fetch_active_summary(&client, port).await?;
+                assert_active_rule_present(
+                    &summary,
+                    "deeplink-name-rule",
+                    Some(group_id),
+                    Some(group_name),
+                    Some("status://220"),
+                )?;
+
+                cleanup_group_storage(&admin_state, group_name);
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
+            "group_rules_logout_keeps_group_id_navigation_cache",
+            "Logout keeps persisted group id/name mapping so Dynamic Island and injected Badge links keep using the real group id after re-login",
+            "group_rules",
+            || async move {
+                let port = pick_unused_port()?;
+                let (_proxy, admin_state) =
+                    ProxyInstance::start_with_admin_sync(port, vec![], false, true)
+                        .await
+                        .map_err(|e| format!("Failed to start proxy: {}", e))?;
+                save_test_sync_token(&admin_state).await?;
+
+                let group_name = "logout-relogin-group";
+                let group_id = "grp-logout-relogin";
+                {
+                    let mut cache = admin_state.group_name_cache();
+                    cache.insert(group_id.to_string(), group_name.to_string());
+                }
+                admin_state.persist_group_name_cache();
+
+                let group_storage = setup_group_storage(&admin_state, group_name)?;
+                let mut rule = RuleFile::new(
+                    "logout-relogin-rule",
+                    "logout-relogin.example.com status://221",
+                );
+                rule.enabled = true;
+                rule.group = Some(group_name.to_string());
+                group_storage
+                    .save(&rule)
+                    .map_err(|e| format!("Failed to save logout relogin rule: {}", e))?;
+                admin_state.refresh_badge_rules_cache();
+
+                let client = build_client()?;
+                let before = fetch_active_summary(&client, port).await?;
+                assert_active_rule_present(
+                    &before,
+                    "logout-relogin-rule",
+                    Some(group_id),
+                    Some(group_name),
+                    Some("status://221"),
+                )?;
+                assert_badge_navigation_mapping(
+                    &admin_state.badge_rules_json(),
+                    "logout-relogin-rule",
+                    group_name,
+                    group_id,
+                )?;
+
+                let logout_resp = client
+                    .post(format!("http://127.0.0.1:{}/_bifrost/api/sync/logout", port))
+                    .send()
+                    .await
+                    .map_err(|e| format!("Logout request failed: {}", e))?;
+                assert_status(&logout_resp, 200)?;
+
+                let after_logout = fetch_active_summary(&client, port).await?;
+                if active_summary_has_rule(&after_logout, "logout-relogin-rule")? {
+                    return Err("Logged-out active summary must not consume group rules".to_string());
+                }
+                let after_logout_badge: serde_json::Value =
+                    serde_json::from_str(&admin_state.badge_rules_json())
+                        .map_err(|e| format!("Failed to parse logged-out badge JSON: {}", e))?;
+                if after_logout_badge
+                    .get("rules")
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|rules| {
+                        rules.iter().any(|r| {
+                            r.get("name").and_then(|n| n.as_str())
+                                == Some("logout-relogin-rule")
+                        })
+                    })
+                {
+                    return Err("Logged-out badge cache must not list active group rules".to_string());
+                }
+                {
+                    let cache = admin_state.group_name_cache();
+                    if cache.reverse_lookup(group_name) != Some(group_id.to_string()) {
+                        return Err("Logout should keep persisted group id/name cache".to_string());
+                    }
+                }
+
+                save_test_sync_token_via_public_callback(&client, port).await?;
+
+                let after = fetch_active_summary(&client, port).await?;
+                assert_active_rule_present(
+                    &after,
+                    "logout-relogin-rule",
+                    Some(group_id),
+                    Some(group_name),
+                    Some("status://221"),
+                )?;
+                assert_badge_navigation_mapping(
+                    &admin_state.badge_rules_json(),
+                    "logout-relogin-rule",
+                    group_name,
+                    group_id,
+                )?;
+
+                cleanup_group_storage(&admin_state, group_name);
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
             "group_rules_special_chars_in_group_name",
             "Group rules with special characters in group name are sanitized for directory names",
             "group_rules",
@@ -814,6 +1303,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     ProxyInstance::start_with_admin_sync(port, vec![], false, true)
                         .await
                         .map_err(|e| format!("Failed to start proxy: {}", e))?;
+                save_test_sync_token(&admin_state).await?;
 
                 let group_a_name = "test-isolation-group-a";
                 let group_a_id = "grp-iso-a";
@@ -1064,6 +1554,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     ProxyInstance::start_with_admin_sync(port, vec![], false, true)
                         .await
                         .map_err(|e| format!("Failed to start proxy: {}", e))?;
+                save_test_sync_token(&admin_state).await?;
 
                 let group_name = "test-multi-rules-group";
                 let group_id = "grp-multi-001";
@@ -1154,12 +1645,220 @@ fn pick_unused_port() -> Result<u16, String> {
         .map_err(|e| format!("Failed to read ephemeral port: {}", e))
 }
 
+async fn fetch_active_summary(
+    client: &reqwest::Client,
+    port: u16,
+) -> Result<serde_json::Value, String> {
+    let resp = client
+        .get(format!(
+            "http://127.0.0.1:{}/_bifrost/api/rules/active-summary",
+            port
+        ))
+        .send()
+        .await
+        .map_err(|e| format!("Active summary request failed: {}", e))?;
+    assert_status(&resp, 200)?;
+    resp.json()
+        .await
+        .map_err(|e| format!("Failed to parse active summary JSON: {}", e))
+}
+
+fn active_summary_has_rule(summary: &serde_json::Value, rule_name: &str) -> Result<bool, String> {
+    let rules = summary
+        .get("rules")
+        .and_then(|v| v.as_array())
+        .ok_or("Missing 'rules' array")?;
+    Ok(rules
+        .iter()
+        .any(|r| r.get("name").and_then(|n| n.as_str()) == Some(rule_name)))
+}
+
+fn assert_active_rule_present(
+    summary: &serde_json::Value,
+    rule_name: &str,
+    expected_group_id: Option<&str>,
+    expected_group_name: Option<&str>,
+    expected_merged_content: Option<&str>,
+) -> Result<(), String> {
+    let rules = summary
+        .get("rules")
+        .and_then(|v| v.as_array())
+        .ok_or("Missing 'rules' array")?;
+    let active_rule = rules
+        .iter()
+        .find(|r| r.get("name").and_then(|n| n.as_str()) == Some(rule_name))
+        .ok_or_else(|| format!("Expected {rule_name} in active summary, got {rules:?}"))?;
+
+    if active_rule.get("group_id").and_then(|v| v.as_str()) != expected_group_id {
+        return Err(format!(
+            "Expected group_id {:?}, got {:?}",
+            expected_group_id,
+            active_rule.get("group_id")
+        ));
+    }
+    if active_rule.get("group_name").and_then(|v| v.as_str()) != expected_group_name {
+        return Err(format!(
+            "Expected group_name {:?}, got {:?}",
+            expected_group_name,
+            active_rule.get("group_name")
+        ));
+    }
+    if let Some(expected) = expected_merged_content {
+        let merged = summary
+            .get("merged_content")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if !merged.contains(expected) {
+            return Err(format!(
+                "Expected active summary merged_content to contain '{expected}', got '{merged}'"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn badge_has_rule(
+    admin_state: &Arc<bifrost_admin::AdminState>,
+    rule_name: &str,
+    expected_content: &str,
+) -> Result<bool, String> {
+    let badge: serde_json::Value = serde_json::from_str(&admin_state.badge_rules_json())
+        .map_err(|e| format!("Failed to parse badge JSON: {}", e))?;
+    let has_rule = badge
+        .get("rules")
+        .and_then(|v| v.as_array())
+        .is_some_and(|rules| {
+            rules
+                .iter()
+                .any(|r| r.get("name").and_then(|n| n.as_str()) == Some(rule_name))
+        });
+    let merged = badge
+        .get("merged_content")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    Ok(has_rule && merged.contains(expected_content))
+}
+
+fn assert_badge_navigation_mapping(
+    badge_json: &str,
+    rule_name: &str,
+    expected_local_group_name: &str,
+    expected_remote_group_id: &str,
+) -> Result<(), String> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(badge_json).map_err(|e| format!("Invalid badge JSON: {e}"))?;
+    let rules = parsed
+        .get("rules")
+        .and_then(|v| v.as_array())
+        .ok_or("Missing badge rules array")?;
+    let active_rule = rules
+        .iter()
+        .find(|r| r.get("name").and_then(|n| n.as_str()) == Some(rule_name))
+        .ok_or_else(|| format!("Expected {rule_name} in badge rules, got {rules:?}"))?;
+
+    if active_rule.get("group_id").and_then(|v| v.as_str()) != Some(expected_local_group_name) {
+        return Err(format!(
+            "Expected badge group_id/local dir {:?}, got {:?}",
+            expected_local_group_name,
+            active_rule.get("group_id")
+        ));
+    }
+    if active_rule.get("group_name").and_then(|v| v.as_str()) != Some(expected_remote_group_id) {
+        return Err(format!(
+            "Expected badge group_name/remote id {:?}, got {:?}",
+            expected_remote_group_id,
+            active_rule.get("group_name")
+        ));
+    }
+
+    Ok(())
+}
+
+async fn wait_for_rule_state(
+    client: &reqwest::Client,
+    admin_state: &Arc<bifrost_admin::AdminState>,
+    port: u16,
+    rule_name: &str,
+    expected_enabled: bool,
+    expected_content: &str,
+) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+
+    loop {
+        let summary = fetch_active_summary(client, port).await?;
+        let active_has_rule = active_summary_has_rule(&summary, rule_name)?;
+        let active_merged = summary
+            .get("merged_content")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .contains(expected_content);
+        let badge_has_rule = badge_has_rule(admin_state, rule_name, expected_content)?;
+
+        if active_has_rule == expected_enabled
+            && active_merged == expected_enabled
+            && badge_has_rule == expected_enabled
+        {
+            return Ok(());
+        }
+
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "Timed out waiting for {rule_name} enabled={expected_enabled}; last_summary={summary:?}; last_badge={}",
+                admin_state.badge_rules_json()
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 fn build_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .no_proxy()
         .build()
         .map_err(|e| format!("Failed to create client: {}", e))
+}
+
+async fn save_test_sync_token(admin_state: &Arc<bifrost_admin::AdminState>) -> Result<(), String> {
+    let sync_manager = admin_state
+        .sync_manager
+        .as_ref()
+        .ok_or("Expected sync manager for group rule runtime test")?;
+    let sync_base_url = std::env::var("BIFROST_E2E_SYNC_BASE_URL").ok();
+    let sync_token = std::env::var("BIFROST_E2E_SYNC_TOKEN").ok();
+
+    if let (Some(base_url), Some(token)) = (sync_base_url, sync_token) {
+        let base_url = base_url.trim();
+        let token = token.trim();
+        if !base_url.is_empty() && !token.is_empty() {
+            return sync_manager
+                .save_login_session(token.to_string(), base_url.to_string())
+                .await
+                .map(|_| ())
+                .map_err(|e| format!("Failed to save test sync session: {}", e));
+        }
+    }
+
+    sync_manager
+        .save_token("bifrost-e2e-group-rule-token".to_string())
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("Failed to save test sync token: {}", e))
+}
+
+async fn save_test_sync_token_via_public_callback(
+    client: &reqwest::Client,
+    port: u16,
+) -> Result<(), String> {
+    let response = client
+        .get(format!(
+            "http://127.0.0.1:{}/_bifrost/public/sync-login?token=bifrost-e2e-group-rule-token",
+            port
+        ))
+        .send()
+        .await
+        .map_err(|e| format!("Public sync login callback failed: {}", e))?;
+    assert_status(&response, 200)
 }
 
 fn setup_group_storage(

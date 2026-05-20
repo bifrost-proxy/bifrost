@@ -11,6 +11,54 @@ fn is_group_list_request(method: &Method, api_path: &str) -> bool {
     *method == Method::GET && (api_path == "/api/group" || api_path == "/api/group/")
 }
 
+fn cache_group_ids_from_response(state: &SharedAdminState, response_body: &[u8]) {
+    let parsed: serde_json::Value = match serde_json::from_slice(response_body) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    let mut entries = Vec::new();
+    if let Some(list) = parsed
+        .pointer("/data/list")
+        .and_then(|v| v.as_array())
+        .or_else(|| parsed.pointer("/data").and_then(|v| v.as_array()))
+    {
+        for group in list {
+            if let (Some(id), Some(name)) = (
+                group
+                    .get("id")
+                    .or_else(|| group.get("group_id"))
+                    .and_then(|v| v.as_str()),
+                group.get("name").and_then(|v| v.as_str()),
+            ) {
+                entries.push((id.to_string(), name.to_string()));
+            }
+        }
+    } else if let Some(group) = parsed.pointer("/data").and_then(|v| v.as_object()) {
+        if let (Some(id), Some(name)) = (
+            group
+                .get("id")
+                .or_else(|| group.get("group_id"))
+                .and_then(|v| v.as_str()),
+            group.get("name").and_then(|v| v.as_str()),
+        ) {
+            entries.push((id.to_string(), name.to_string()));
+        }
+    }
+
+    if entries.is_empty() {
+        return;
+    }
+
+    {
+        let mut cache = state.group_name_cache();
+        for (id, name) in entries {
+            cache.insert(id, name);
+        }
+    }
+    state.persist_group_name_cache();
+}
+
 fn cleanup_orphaned_group_dirs(state: &SharedAdminState, response_body: &[u8]) {
     let local_entries: Vec<(String, String)> = {
         let cache = state.group_name_cache();
@@ -224,6 +272,9 @@ pub async fn handle_group(
                     response_body =
                         enrich_group_detail(&sync_manager, group_id, response_body).await;
                 }
+                if is_list_request || detail_group_id.is_some() {
+                    cache_group_ids_from_response(&state, &response_body);
+                }
                 if is_list_request {
                     cleanup_orphaned_group_dirs(&state, &response_body);
                 }
@@ -241,5 +292,41 @@ pub async fn handle_group(
             StatusCode::BAD_GATEWAY,
             &format!("Failed to proxy group request: {error}"),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::AdminState;
+    use std::sync::Arc;
+
+    #[test]
+    fn cache_group_ids_from_response_persists_to_rules_data_dir() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let rules_dir = temp_dir.path().join("rules");
+        let storage = RulesStorage::with_dir(rules_dir.clone()).unwrap();
+        let state = Arc::new(AdminState::new_for_test(19910, storage));
+
+        cache_group_ids_from_response(
+            &state,
+            br#"{"code":0,"data":{"list":[{"id":"gid-next","name":"next-agent"}],"total":1}}"#,
+        );
+
+        let cache_file = rules_dir.join(".group_cache.json");
+        assert!(cache_file.exists(), "group cache should be persisted");
+
+        let reloaded = Arc::new(AdminState::new_for_test(
+            19911,
+            RulesStorage::with_dir(rules_dir).unwrap(),
+        ));
+        reloaded.load_group_name_cache();
+
+        let cache = reloaded.group_name_cache();
+        assert_eq!(cache.get("gid-next"), Some("next-agent".to_string()));
+        assert_eq!(
+            cache.reverse_lookup("next-agent"),
+            Some("gid-next".to_string())
+        );
     }
 }

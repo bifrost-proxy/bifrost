@@ -26,7 +26,9 @@ use bifrost_tls::{get_platform_name, CertInstaller, CertStatus};
 use parking_lot::RwLock as ParkingRwLock;
 use tracing::info;
 
-use crate::commands::ca::{check_and_install_certificate, load_tls_config};
+use crate::commands::ca::{
+    check_and_install_certificate, load_tls_config, CertificateCheckOptions,
+};
 use crate::config::get_bifrost_dir;
 use crate::help::print_startup_help;
 use crate::parsing::{parse_cli_rules, DynamicRulesResolver, SharedDynamicRulesResolver};
@@ -553,8 +555,11 @@ pub fn run_start(
         }
     }
 
-    if !daemon && !skip_cert_check {
-        check_and_install_certificate()?;
+    if !skip_cert_check {
+        check_and_install_certificate(CertificateCheckOptions {
+            auto_yes: yes,
+            allow_prompt: io::stdin().is_terminal(),
+        })?;
     }
 
     check_and_resolve_port_conflict(&host, port, yes)?;
@@ -2204,16 +2209,30 @@ fn resolve_valid_group_dirs(admin_state: &AdminState) -> std::collections::HashS
         .as_ref()
         .map(|sm| sm.has_session())
         .unwrap_or(false);
+    let mut dirs = std::collections::HashSet::new();
 
     if !has_session {
         tracing::info!(
             target: "bifrost_cli::rules",
-            "no active sync session, skipping group rules"
+            "no active sync session, skipping group rule directories for proxy runtime"
         );
-        return std::collections::HashSet::new();
+        return dirs;
     }
 
-    admin_state.group_name_cache().all_dir_names()
+    dirs.extend(admin_state.group_name_cache().all_dir_names());
+
+    if let Ok(entries) = std::fs::read_dir(admin_state.rules_storage.base_dir()) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    dirs.insert(name.to_string());
+                }
+            }
+        }
+    }
+
+    dirs
 }
 
 fn load_stored_rules(
@@ -2562,5 +2581,37 @@ mod tests {
         let port = allocate_loopback_port();
 
         assert!(!is_port_in_use("127.0.0.1", port));
+    }
+
+    #[test]
+    fn resolve_valid_group_dirs_skips_local_dirs_without_sync_session() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let rules_storage =
+            bifrost_storage::RulesStorage::with_dir(temp_dir.path().join("rules")).unwrap();
+        std::fs::create_dir_all(rules_storage.base_dir().join("local-group")).unwrap();
+
+        let admin_state = AdminState::new(0).with_rules_storage(rules_storage);
+
+        let dirs = resolve_valid_group_dirs(&admin_state);
+
+        assert!(dirs.is_empty());
+    }
+
+    #[test]
+    fn resolve_valid_group_dirs_skips_cached_and_uncached_local_dirs_without_sync_session() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let rules_storage =
+            bifrost_storage::RulesStorage::with_dir(temp_dir.path().join("rules")).unwrap();
+        std::fs::create_dir_all(rules_storage.base_dir().join("uncached-group")).unwrap();
+
+        let admin_state = AdminState::new(0).with_rules_storage(rules_storage);
+        {
+            let mut cache = admin_state.group_name_cache();
+            cache.insert("gid-cached".to_string(), "cached-group".to_string());
+        }
+
+        let dirs = resolve_valid_group_dirs(&admin_state);
+
+        assert!(dirs.is_empty());
     }
 }

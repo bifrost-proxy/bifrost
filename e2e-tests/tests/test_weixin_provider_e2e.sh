@@ -45,6 +45,7 @@ start_bifrost() {
     --host 127.0.0.1 \
     -p "$BIFROST_PORT" \
     --unsafe-ssl \
+    --skip-cert-check \
     --no-system-proxy \
     >"$BIFROST_LOG" 2>&1 &
   BIFROST_PID=$!

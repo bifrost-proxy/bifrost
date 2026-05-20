@@ -329,7 +329,9 @@ pub async fn handle_group_rules(
         return error_response(StatusCode::BAD_REQUEST, "group_id is required");
     }
 
-    let group_id = parts[0];
+    let group_ref = urlencoding::decode(parts[0])
+        .map(|v| v.into_owned())
+        .unwrap_or_else(|_| parts[0].to_string());
     let rule_name_segment = if parts.len() > 1 {
         Some(parts[1..].join("/"))
     } else {
@@ -345,13 +347,17 @@ pub async fn handle_group_rules(
 
         if let Some(rule_name) = decoded.strip_suffix("/enable") {
             return match method {
-                Method::PUT => handle_enable_rule(state, group_id, rule_name, true).await,
+                Method::PUT => {
+                    handle_enable_rule(sync_manager, state, &group_ref, rule_name, true).await
+                }
                 _ => method_not_allowed(),
             };
         }
         if let Some(rule_name) = decoded.strip_suffix("/disable") {
             return match method {
-                Method::PUT => handle_enable_rule(state, group_id, rule_name, false).await,
+                Method::PUT => {
+                    handle_enable_rule(sync_manager, state, &group_ref, rule_name, false).await
+                }
                 _ => method_not_allowed(),
             };
         }
@@ -359,26 +365,26 @@ pub async fn handle_group_rules(
 
     match method {
         Method::GET if rule_name_segment.is_none() => {
-            handle_list_and_sync(sync_manager, state, group_id).await
+            handle_list_and_sync(sync_manager, state, &group_ref).await
         }
         Method::GET if rule_name_segment.is_some() => {
             let rule_name = urlencoding::decode(rule_name_segment.as_ref().unwrap())
                 .map(|v| v.into_owned())
                 .unwrap_or_else(|_| rule_name_segment.unwrap());
-            handle_get_rule(state, group_id, &rule_name).await
+            handle_get_rule(state, &group_ref, &rule_name).await
         }
-        Method::POST => handle_create_rule(req, sync_manager, state, group_id).await,
+        Method::POST => handle_create_rule(req, sync_manager, state, &group_ref).await,
         Method::PUT if rule_name_segment.is_some() => {
             let rule_name = urlencoding::decode(rule_name_segment.as_ref().unwrap())
                 .map(|v| v.into_owned())
                 .unwrap_or_else(|_| rule_name_segment.unwrap());
-            handle_update_rule(req, sync_manager, state, group_id, &rule_name).await
+            handle_update_rule(req, sync_manager, state, &group_ref, &rule_name).await
         }
         Method::DELETE if rule_name_segment.is_some() => {
             let rule_name = urlencoding::decode(rule_name_segment.as_ref().unwrap())
                 .map(|v| v.into_owned())
                 .unwrap_or_else(|_| rule_name_segment.unwrap());
-            handle_delete_rule(sync_manager, state, group_id, &rule_name).await
+            handle_delete_rule(sync_manager, state, &group_ref, &rule_name).await
         }
         _ => method_not_allowed(),
     }
@@ -393,25 +399,83 @@ fn get_group_rules_storage(
     RulesStorage::with_dir(dir).map_err(|e| format!("Failed to create group rules dir: {e}"))
 }
 
-async fn resolve_group_name(
-    sync_manager: &bifrost_sync::SyncManager,
+struct ResolvedGroupRef {
+    id: Option<String>,
+    name: String,
+}
+
+fn local_group_dir_exists(state: &SharedAdminState, group_name: &str) -> bool {
+    state
+        .rules_storage
+        .base_dir()
+        .join(sanitize_group_dir_name(group_name))
+        .is_dir()
+}
+
+async fn resolve_group_ref(
+    sync_manager: Option<&bifrost_sync::SyncManager>,
     state: &SharedAdminState,
-    group_id: &str,
-) -> Result<String, String> {
+    group_ref: &str,
+) -> Result<ResolvedGroupRef, String> {
     {
         let cache = state.group_name_cache();
-        if let Some(name) = cache.get(group_id) {
-            return Ok(name);
+        if let Some(name) = cache.get(group_ref) {
+            return Ok(ResolvedGroupRef {
+                id: Some(group_ref.to_string()),
+                name: name.clone(),
+            });
+        }
+        if let Some(id) = cache.reverse_lookup(group_ref) {
+            return Ok(ResolvedGroupRef {
+                id: Some(id),
+                name: group_ref.to_string(),
+            });
         }
     }
-    let group = fetch_group_info(sync_manager, group_id).await?;
+
+    if local_group_dir_exists(state, group_ref) {
+        if let Some(sm) = sync_manager {
+            let dir_name = sanitize_group_dir_name(group_ref);
+            resolve_missing_group_caches(sm, state, std::slice::from_ref(&dir_name)).await;
+            let cache = state.group_name_cache();
+            if let Some(id) = cache.reverse_lookup(group_ref) {
+                return Ok(ResolvedGroupRef {
+                    id: Some(id),
+                    name: group_ref.to_string(),
+                });
+            }
+            if dir_name != group_ref {
+                if let Some(id) = cache.reverse_lookup(&dir_name) {
+                    return Ok(ResolvedGroupRef {
+                        id: Some(id),
+                        name: group_ref.to_string(),
+                    });
+                }
+            }
+        }
+        return Ok(ResolvedGroupRef {
+            id: None,
+            name: group_ref.to_string(),
+        });
+    }
+
+    let Some(sm) = sync_manager else {
+        return Err("Group not loaded yet, list first".to_string());
+    };
+    if !sm.has_session() {
+        return Err("Group not loaded yet, list first".to_string());
+    }
+    let group = fetch_group_info(sm, group_ref).await?;
     let name = group.name.clone();
     {
         let mut cache = state.group_name_cache();
-        cache.insert(group_id.to_string(), name.clone());
+        cache.insert(group_ref.to_string(), name.clone());
     }
     state.persist_group_name_cache();
-    Ok(name)
+    Ok(ResolvedGroupRef {
+        id: Some(group_ref.to_string()),
+        name,
+    })
 }
 
 pub(crate) async fn resolve_missing_group_caches(
@@ -526,18 +590,46 @@ async fn ensure_virtual_user(sync_manager: &bifrost_sync::SyncManager, group_id:
 async fn handle_list_and_sync(
     sync_manager: std::sync::Arc<bifrost_sync::SyncManager>,
     state: SharedAdminState,
-    group_id: &str,
+    group_ref: &str,
 ) -> Response<BoxBody> {
-    let group_name = match resolve_group_name(&sync_manager, &state, group_id).await {
-        Ok(n) => n,
+    let resolved = match resolve_group_ref(Some(&sync_manager), &state, group_ref).await {
+        Ok(r) => r,
         Err(e) => return error_response(StatusCode::BAD_GATEWAY, &e),
+    };
+    let group_name = resolved.name.clone();
+
+    let group_storage = match get_group_rules_storage(&state, &group_name) {
+        Ok(s) => s,
+        Err(e) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+
+    let Some(group_id) = resolved.id.as_deref() else {
+        let rules = build_rule_info_from_storage(&group_storage);
+        return json_response(&GroupRulesResponse {
+            group_id: group_ref.to_string(),
+            group_name,
+            writable: false,
+            rules,
+        });
     };
 
     let mut peers = match fetch_peers(&sync_manager).await {
         Ok(p) => p,
         Err(e) => {
-            tracing::warn!(error = %e, "Failed to fetch peers");
-            return error_response(StatusCode::BAD_GATEWAY, &e);
+            tracing::warn!(
+                error = %e,
+                group_ref = %group_ref,
+                group_id = %group_id,
+                group_name = %group_name,
+                "Failed to fetch peers, using local group rules only"
+            );
+            let rules = build_rule_info_from_storage(&group_storage);
+            return json_response(&GroupRulesResponse {
+                group_id: group_id.to_string(),
+                group_name,
+                writable: false,
+                rules,
+            });
         }
     };
 
@@ -578,11 +670,6 @@ async fn handle_list_and_sync(
         "Fetching group envs via virtual user"
     );
 
-    let group_storage = match get_group_rules_storage(&state, &group_name) {
-        Ok(s) => s,
-        Err(e) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
-    };
-
     match fetch_user_envs(&sync_manager, &virtual_user_id).await {
         Ok(envs) => {
             if let Err(e) = sync_envs_to_local(&group_storage, &envs, &group_name) {
@@ -611,17 +698,12 @@ async fn handle_list_and_sync(
 
 async fn handle_get_rule(
     state: SharedAdminState,
-    group_id: &str,
+    group_ref: &str,
     rule_name: &str,
 ) -> Response<BoxBody> {
-    let group_name = {
-        let cache = state.group_name_cache();
-        match cache.get(group_id) {
-            Some(n) => n.clone(),
-            None => {
-                return error_response(StatusCode::BAD_REQUEST, "Group not loaded yet, list first")
-            }
-        }
+    let group_name = match resolve_group_ref(None, &state, group_ref).await {
+        Ok(r) => r.name,
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, &e),
     };
 
     let group_storage = match get_group_rules_storage(&state, &group_name) {
@@ -651,12 +733,19 @@ async fn handle_create_rule(
     req: Request<Incoming>,
     sync_manager: std::sync::Arc<bifrost_sync::SyncManager>,
     state: SharedAdminState,
-    group_id: &str,
+    group_ref: &str,
 ) -> Response<BoxBody> {
-    let group_name = match resolve_group_name(&sync_manager, &state, group_id).await {
-        Ok(n) => n,
+    let resolved = match resolve_group_ref(Some(&sync_manager), &state, group_ref).await {
+        Ok(r) => r,
         Err(e) => return error_response(StatusCode::BAD_GATEWAY, &e),
     };
+    let Some(group_id) = resolved.id.as_deref() else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "Group id is not resolved yet; reload group list before creating remote group rules",
+        );
+    };
+    let group_name = resolved.name;
 
     let mut peers = match fetch_peers(&sync_manager).await {
         Ok(p) => p,
@@ -744,11 +833,11 @@ async fn handle_update_rule(
     req: Request<Incoming>,
     sync_manager: std::sync::Arc<bifrost_sync::SyncManager>,
     state: SharedAdminState,
-    group_id: &str,
+    group_ref: &str,
     rule_name: &str,
 ) -> Response<BoxBody> {
-    let group_name = match resolve_group_name(&sync_manager, &state, group_id).await {
-        Ok(n) => n,
+    let group_name = match resolve_group_ref(Some(&sync_manager), &state, group_ref).await {
+        Ok(r) => r.name,
         Err(e) => return error_response(StatusCode::BAD_GATEWAY, &e),
     };
 
@@ -827,11 +916,11 @@ async fn handle_update_rule(
 async fn handle_delete_rule(
     sync_manager: std::sync::Arc<bifrost_sync::SyncManager>,
     state: SharedAdminState,
-    group_id: &str,
+    group_ref: &str,
     rule_name: &str,
 ) -> Response<BoxBody> {
-    let group_name = match resolve_group_name(&sync_manager, &state, group_id).await {
-        Ok(n) => n,
+    let group_name = match resolve_group_ref(Some(&sync_manager), &state, group_ref).await {
+        Ok(r) => r.name,
         Err(e) => return error_response(StatusCode::BAD_GATEWAY, &e),
     };
 
@@ -850,7 +939,7 @@ async fn handle_delete_rule(
             tracing::warn!(
                 target: "bifrost_admin::group_rules",
                 rule = %rule_name,
-                group = %group_id,
+                group = %group_ref,
                 error = %e,
                 "failed to delete remote rule, proceeding with local delete"
             );
@@ -869,19 +958,15 @@ async fn handle_delete_rule(
 }
 
 async fn handle_enable_rule(
+    sync_manager: std::sync::Arc<bifrost_sync::SyncManager>,
     state: SharedAdminState,
-    group_id: &str,
+    group_ref: &str,
     rule_name: &str,
     enabled: bool,
 ) -> Response<BoxBody> {
-    let group_name = {
-        let cache = state.group_name_cache();
-        match cache.get(group_id) {
-            Some(n) => n.clone(),
-            None => {
-                return error_response(StatusCode::BAD_REQUEST, "Group not loaded yet, list first")
-            }
-        }
+    let group_name = match resolve_group_ref(Some(&sync_manager), &state, group_ref).await {
+        Ok(r) => r.name,
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, &e),
     };
 
     let group_storage = match get_group_rules_storage(&state, &group_name) {
@@ -895,7 +980,7 @@ async fn handle_enable_rule(
             let action = if enabled { "enabled" } else { "disabled" };
             tracing::info!(
                 target: "bifrost_admin::group_rules",
-                group_id = %group_id,
+                group = %group_ref,
                 group_name = %group_name,
                 rule_name = %rule_name,
                 enabled = %enabled,
@@ -911,6 +996,7 @@ async fn handle_enable_rule(
 }
 
 fn notify_rules_changed(state: &SharedAdminState) {
+    state.refresh_badge_rules_cache();
     if let Some(ref config_manager) = state.config_manager {
         match config_manager.notify(ConfigChangeEvent::RulesChanged) {
             Ok(count) => {

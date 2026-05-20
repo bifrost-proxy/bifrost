@@ -927,6 +927,10 @@ impl AdminState {
         self.group_cache_resolved.store(true, Ordering::Relaxed);
     }
 
+    pub fn clear_group_cache_resolved(&self) {
+        self.group_cache_resolved.store(false, Ordering::Relaxed);
+    }
+
     fn group_cache_path(&self) -> PathBuf {
         self.rules_storage.base_dir().join(".group_cache.json")
     }
@@ -1050,32 +1054,42 @@ impl AdminState {
         }
 
         let base_dir = self.rules_storage.base_dir();
-        if let Ok(entries) = std::fs::read_dir(base_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if !path.is_dir() {
-                    continue;
-                }
-                let dir_name = entry.file_name().to_string_lossy().to_string();
-                let group_name = {
-                    let cache = self.group_name_cache();
-                    cache
-                        .reverse_lookup(&dir_name)
-                        .unwrap_or_else(|| dir_name.clone())
-                };
-                if let Ok(sub_storage) = RulesStorage::with_dir(path) {
-                    if let Ok(sub_rules) = sub_storage.load_enabled() {
-                        for rule in sub_rules {
-                            let rule_count = rule
-                                .content
-                                .lines()
-                                .filter(|l| {
-                                    let t = l.trim();
-                                    !t.is_empty() && !t.starts_with('#')
-                                })
-                                .count();
-                            content_parts.push(rule.content.clone());
-                            items.push(format!(
+        let has_group_session = self
+            .sync_manager
+            .as_ref()
+            .map(|sm| sm.has_session())
+            .unwrap_or(false);
+        if has_group_session {
+            if let Ok(entries) = std::fs::read_dir(base_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if !path.is_dir() {
+                        continue;
+                    }
+                    let dir_name = entry.file_name().to_string_lossy().to_string();
+                    let group_name = {
+                        let cache = self.group_name_cache();
+                        // The injected Badge intentionally keeps the local directory name in
+                        // group_id and the remote id in group_name. Its script prefers
+                        // group_name for the URL parameter, preserving the historical
+                        // name/id reversal needed for correct Rules page routing.
+                        cache
+                            .reverse_lookup(&dir_name)
+                            .unwrap_or_else(|| dir_name.clone())
+                    };
+                    if let Ok(sub_storage) = RulesStorage::with_dir(path) {
+                        if let Ok(sub_rules) = sub_storage.load_enabled() {
+                            for rule in sub_rules {
+                                let rule_count = rule
+                                    .content
+                                    .lines()
+                                    .filter(|l| {
+                                        let t = l.trim();
+                                        !t.is_empty() && !t.starts_with('#')
+                                    })
+                                    .count();
+                                content_parts.push(rule.content.clone());
+                                items.push(format!(
                                 r#"{{"name":{},"rule_count":{},"group_id":{},"group_name":{}}}"#,
                                 serde_json::to_string(&rule.name)
                                     .unwrap_or_else(|_| "\"\"".to_string()),
@@ -1085,6 +1099,7 @@ impl AdminState {
                                 serde_json::to_string(&group_name)
                                     .unwrap_or_else(|_| "\"\"".to_string()),
                             ));
+                            }
                         }
                     }
                 }
@@ -1540,6 +1555,48 @@ mod tests {
             !rules_dir.join(".group_cache.json").exists(),
             "empty cache should not create file"
         );
+
+        cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn badge_rules_cache_preserves_group_navigation_mapping() {
+        let dir = create_test_dir();
+        let rules_dir = dir.join("rules");
+        let group_dir = rules_dir.join("TeamAlpha");
+        let _ = fs::create_dir_all(&group_dir);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let config_manager = Arc::new(ConfigManager::new(dir.join("config")).unwrap());
+        let sync_manager = Arc::new(bifrost_sync::SyncManager::new(config_manager, 19903).unwrap());
+        runtime
+            .block_on(sync_manager.save_token("badge-test-token".to_string()))
+            .unwrap();
+        let storage = RulesStorage::with_dir(rules_dir).unwrap();
+        let group_storage = RulesStorage::with_dir(group_dir).unwrap();
+
+        let mut group_rule =
+            bifrost_storage::RuleFile::new("team-rule", "team.example.com status://200");
+        group_rule.enabled = true;
+        group_rule.group = Some("TeamAlpha".to_string());
+        group_storage.save(&group_rule).unwrap();
+
+        let state = AdminState::new_for_test(19903, storage).with_sync_manager_shared(sync_manager);
+        {
+            let mut cache = state.group_name_cache();
+            cache.insert("gid-alpha".to_string(), "TeamAlpha".to_string());
+        }
+
+        state.refresh_badge_rules_cache();
+        let json: serde_json::Value = serde_json::from_str(&state.badge_rules_json()).unwrap();
+        let rule = json["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == "team-rule")
+            .expect("badge rule should exist");
+
+        assert_eq!(rule["group_id"], "TeamAlpha");
+        assert_eq!(rule["group_name"], "gid-alpha");
 
         cleanup_test_dir(&dir);
     }

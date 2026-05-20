@@ -105,7 +105,7 @@ start_proxy() {
 
     RUST_LOG=info "$BIFROST_BIN" \
         -p "$PROXY_PORT" \
-        start --unsafe-ssl --no-system-proxy \
+        start --unsafe-ssl --skip-cert-check --no-system-proxy \
         > "$DATA_DIR/proxy.log" 2>&1 &
     PROXY_PID=$!
 

@@ -91,14 +91,14 @@ pub async fn handle_sync(
 
     if path == "/api/sync/login" || path == "/api/sync/login/" {
         return match req.method() {
-            &Method::POST => login(req, sync_manager).await,
+            &Method::POST => login(req, sync_manager, state).await,
             _ => method_not_allowed(),
         };
     }
 
     if path == "/api/sync/session" || path == "/api/sync/session/" {
         return match req.method() {
-            &Method::POST => save_session(req, sync_manager).await,
+            &Method::POST => save_session(req, sync_manager, state).await,
             _ => method_not_allowed(),
         };
     }
@@ -107,7 +107,11 @@ pub async fn handle_sync(
         return match req.method() {
             &Method::POST => match sync_manager.logout().await {
                 Ok(status) => {
-                    state.clear_group_name_cache();
+                    // The group id/name cache is a local navigation index for persisted
+                    // group rule directories, not an auth credential. Keep it across
+                    // logout so Badge and Rules deep links can still target the real
+                    // group id after a logout/login cycle.
+                    state.clear_group_cache_resolved();
                     super::rules::notify_rules_changed_pub(&state);
                     json_response(&status)
                 }
@@ -153,6 +157,7 @@ pub async fn handle_sync_public(
             let html = if let Some(token) = parsed.token.filter(|value| !value.trim().is_empty()) {
                 match sync_manager.save_token(token).await {
                     Ok(()) => {
+                        notify_sync_session_saved(&state);
                         let status = sync_manager.status().await;
                         render_sync_login_result_html(
                             true,
@@ -203,6 +208,7 @@ pub async fn handle_sync_login_callback(
     let html = if let Some(token) = parsed.token.filter(|value| !value.trim().is_empty()) {
         match sync_manager.save_token(token).await {
             Ok(()) => {
+                notify_sync_session_saved(&state);
                 let status = sync_manager.status().await;
                 render_sync_login_result_html(
                     true,
@@ -320,6 +326,7 @@ async fn get_login_url(
 async fn save_session(
     req: Request<Incoming>,
     sync_manager: bifrost_sync::SharedSyncManager,
+    state: SharedAdminState,
 ) -> Response<BoxBody> {
     let body = match req.collect().await {
         Ok(collected) => collected.to_bytes(),
@@ -340,7 +347,10 @@ async fn save_session(
         return error_response(StatusCode::BAD_REQUEST, "token is required");
     }
     match sync_manager.save_token(request.token).await {
-        Ok(status) => json_response(&status),
+        Ok(status) => {
+            notify_sync_session_saved(&state);
+            json_response(&status)
+        }
         Err(error) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("Failed to save sync session: {error}"),
@@ -351,6 +361,7 @@ async fn save_session(
 async fn login(
     req: Request<Incoming>,
     sync_manager: bifrost_sync::SharedSyncManager,
+    state: SharedAdminState,
 ) -> Response<BoxBody> {
     let body = match req.collect().await {
         Ok(collected) => collected.to_bytes(),
@@ -378,7 +389,10 @@ async fn login(
                 .save_login_session(token, remote_base_url)
                 .await
             {
-                Ok(()) => json_response(&sync_manager.status().await),
+                Ok(()) => {
+                    notify_sync_session_saved(&state);
+                    json_response(&sync_manager.status().await)
+                }
                 Err(error) => error_response(
                     StatusCode::BAD_REQUEST,
                     &format!("Failed to save sync login session: {error}"),
@@ -397,6 +411,11 @@ async fn login(
             "token and remote_base_url must be provided together",
         ),
     }
+}
+
+fn notify_sync_session_saved(state: &SharedAdminState) {
+    state.clear_group_cache_resolved();
+    super::rules::notify_rules_changed_pub(state);
 }
 
 async fn get_remote_sample(
