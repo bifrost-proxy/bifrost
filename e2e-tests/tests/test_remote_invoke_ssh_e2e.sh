@@ -371,8 +371,22 @@ with open(sys.argv[1], "r", encoding="utf-8") as fh:
     content = fh.read().strip()
 obj = json.loads(content)
 assert obj["version"]
+assert obj["device_name"]
 assert obj["os"]
 assert obj["arch"]
+assert isinstance(obj["cpu_logical_cores"], int)
+assert obj["cpu_logical_cores"] > 0
+assert isinstance(obj["memory_total_bytes"], int)
+assert obj["memory_total_bytes"] > 0
+assert isinstance(obj["memory_available_bytes"], int)
+assert obj["memory_available_bytes"] <= obj["memory_total_bytes"]
+assert isinstance(obj["storage_total_bytes"], int)
+assert obj["storage_total_bytes"] > 0
+assert isinstance(obj["storage_available_bytes"], int)
+assert obj["storage_available_bytes"] <= obj["storage_total_bytes"]
+assert isinstance(obj["storage_mount_point"], str)
+assert obj["storage_mount_point"]
+assert "rust_version" not in obj
 assert isinstance(obj["uptime_secs"], int)
 PY
 

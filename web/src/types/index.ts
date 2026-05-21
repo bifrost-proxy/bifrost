@@ -522,9 +522,16 @@ export interface HostMetrics {
 
 export interface SystemInfo {
   version: string;
-  rust_version: string;
+  device_name: string;
   os: string;
   arch: string;
+  cpu_logical_cores: number;
+  cpu_physical_cores?: number;
+  memory_total_bytes: number;
+  memory_available_bytes: number;
+  storage_total_bytes?: number;
+  storage_available_bytes?: number;
+  storage_mount_point?: string;
   uptime_secs: number;
   pid: number;
 }

@@ -1,11 +1,12 @@
 use std::collections::VecDeque;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use sysinfo::{Pid, ProcessesToUpdate, System};
+use sysinfo::{Disks, Pid, ProcessesToUpdate, System};
 use tokio::task::JoinHandle;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -563,9 +564,20 @@ pub fn start_metrics_collector_task(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemInfo {
     pub version: String,
-    pub rust_version: String,
+    pub device_name: String,
     pub os: String,
     pub arch: String,
+    pub cpu_logical_cores: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_physical_cores: Option<usize>,
+    pub memory_total_bytes: u64,
+    pub memory_available_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage_total_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage_available_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage_mount_point: Option<String>,
     pub uptime_secs: u64,
     pub pid: u32,
 }
@@ -573,21 +585,61 @@ pub struct SystemInfo {
 impl SystemInfo {
     pub fn new(start_time: u64) -> Self {
         let now = chrono::Utc::now().timestamp() as u64;
+        let mut system = System::new_all();
+        system.refresh_memory();
+        let storage = current_storage_info(std::env::current_dir().ok().as_deref());
         Self {
             version: env!("CARGO_PKG_VERSION").to_string(),
-            rust_version: rustc_version(),
+            device_name: System::host_name().unwrap_or_else(|| "unknown".to_string()),
             os: std::env::consts::OS.to_string(),
             arch: std::env::consts::ARCH.to_string(),
+            cpu_logical_cores: system.cpus().len(),
+            cpu_physical_cores: system.physical_core_count(),
+            memory_total_bytes: system.total_memory(),
+            memory_available_bytes: system.available_memory(),
+            storage_total_bytes: storage.as_ref().map(|s| s.total_bytes),
+            storage_available_bytes: storage.as_ref().map(|s| s.available_bytes),
+            storage_mount_point: storage.map(|s| s.mount_point),
             uptime_secs: now.saturating_sub(start_time),
             pid: std::process::id(),
         }
     }
 }
 
-fn rustc_version() -> String {
-    option_env!("RUSTC_VERSION")
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "unknown".to_string())
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StorageInfo {
+    total_bytes: u64,
+    available_bytes: u64,
+    mount_point: String,
+}
+
+fn current_storage_info(current_dir: Option<&Path>) -> Option<StorageInfo> {
+    let disks = Disks::new_with_refreshed_list();
+    select_storage_disk(disks.list(), current_dir).map(|disk| StorageInfo {
+        total_bytes: disk.total_space(),
+        available_bytes: disk.available_space(),
+        mount_point: disk.mount_point().display().to_string(),
+    })
+}
+
+fn select_storage_disk<'a>(
+    disks: &'a [sysinfo::Disk],
+    current_dir: Option<&Path>,
+) -> Option<&'a sysinfo::Disk> {
+    if let Some(path) = current_dir {
+        if let Some(disk) = disks
+            .iter()
+            .filter(|disk| path.starts_with(disk.mount_point()))
+            .max_by_key(|disk| disk.mount_point().components().count())
+        {
+            return Some(disk);
+        }
+    }
+
+    disks
+        .iter()
+        .find(|disk| disk.mount_point() == Path::new("/"))
+        .or_else(|| disks.first())
 }
 
 #[cfg(test)]
@@ -645,7 +697,15 @@ mod tests {
         let info = SystemInfo::new(start_time);
 
         assert!(!info.version.is_empty());
+        assert!(!info.device_name.is_empty());
         assert!(!info.os.is_empty());
+        assert!(info.cpu_logical_cores > 0);
+        assert!(info.memory_total_bytes > 0);
+        assert!(info.memory_available_bytes <= info.memory_total_bytes);
+        if let Some(total) = info.storage_total_bytes {
+            assert!(total > 0);
+            assert!(info.storage_available_bytes.unwrap_or_default() <= total);
+        }
         assert!(info.uptime_secs >= 60);
     }
 
