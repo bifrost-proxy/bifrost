@@ -471,13 +471,26 @@ if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
 else
     STATUS_OUTPUT=$(BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote conn status \
         --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" 2>&1) || true
-    if echo "$STATUS_OUTPUT" | grep -qiE "proxy_address|instance_id|platform|version"; then
-        _log_pass "TC-RI-02: remote conn status 返回了设备信息"
+    if echo "$STATUS_OUTPUT" | jq -e '
+        .version
+        and .device_name
+        and .os
+        and .arch
+        and (.cpu_logical_cores | type == "number")
+        and (.memory_total_bytes | type == "number")
+        and (.memory_available_bytes | type == "number")
+        and (.storage_total_bytes | type == "number")
+        and (.storage_available_bytes | type == "number")
+        and (.storage_available_bytes <= .storage_total_bytes)
+        and (.storage_mount_point | type == "string")
+        and (has("rust_version") | not)
+    ' >/dev/null 2>&1; then
+        _log_pass "TC-RI-02: remote conn status 返回了可区分设备的状态信息"
     elif is_caller_conn_error "$STATUS_OUTPUT"; then
         CALLER_CONN_OK=0
         _log_warning "TC-RI-02: caller 连接失效: $(echo "$STATUS_OUTPUT" | head -1)"
     else
-        _log_fail "TC-RI-02: remote conn status 未返回预期的设备信息" "包含 proxy_address/instance_id" "$STATUS_OUTPUT"
+        _log_fail "TC-RI-02: remote conn status 未返回预期的设备信息" "包含 version/device_name/cpu/memory/storage 且不包含 rust_version" "$STATUS_OUTPUT"
     fi
 fi
 

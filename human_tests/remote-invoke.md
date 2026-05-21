@@ -4926,6 +4926,62 @@ PY
 
 ---
 
+### TC-RI-回归-147：remote conn status 返回可区分设备的状态信息
+
+**背景**：多台远端设备都保存连接时，旧版 `bifrost remote conn status` 只返回版本、系统、架构、uptime、pid 和无助于识别设备的 `rust_version`，不足以快速区分目标设备。本用例验证 Remote state 输出补充设备名称、CPU、内存和存储信息，并移除 `rust_version`。
+
+**前置条件**：
+- 本机存在至少一个可复用的 Remote Invoke saved connection，或按本文前置条件启动本地 relay、target client 与 caller 数据目录完成一次配对。
+- 使用最新构建的 `target/release/bifrost` 或当前源码 `cargo run --bin bifrost -- remote conn status`。
+- 如启动测试 target，必须使用隔离 `BIFROST_DATA_DIR`、随机端口，并带 `--no-system-proxy`。
+
+**操作步骤**：
+1. 执行：
+   ```bash
+   source ~/.zshrc
+   bifrost remote conn status
+   ```
+   如存在多个 saved connection，根据提示选择目标设备。
+2. 将输出保存为 JSON 并检查字段：
+   ```bash
+   bifrost remote conn status > /tmp/bifrost-remote-state.json
+   jq '{version,device_name,os,arch,cpu_logical_cores,cpu_physical_cores,memory_total_bytes,memory_available_bytes,storage_total_bytes,storage_available_bytes,storage_mount_point,uptime_secs,pid,rust_version}' /tmp/bifrost-remote-state.json
+   ```
+3. 验证数值字段：
+   ```bash
+   jq -e '
+     .version and .device_name and .os and .arch
+     and (.cpu_logical_cores | type == "number")
+     and (.cpu_logical_cores > 0)
+     and (.memory_total_bytes | type == "number")
+     and (.memory_total_bytes > 0)
+     and (.memory_available_bytes | type == "number")
+     and (.memory_available_bytes <= .memory_total_bytes)
+     and (.storage_total_bytes | type == "number")
+     and (.storage_total_bytes > 0)
+     and (.storage_available_bytes | type == "number")
+     and (.storage_available_bytes <= .storage_total_bytes)
+     and (.storage_mount_point | type == "string")
+     and (has("rust_version") | not)
+   ' /tmp/bifrost-remote-state.json
+   ```
+
+**预期结果**：
+- 输出 JSON 包含 `device_name`，值为非空字符串。
+- 输出 JSON 包含 `cpu_logical_cores`，且值大于 0；如果平台可获取物理核心数，则包含 `cpu_physical_cores`。
+- 输出 JSON 包含 `memory_total_bytes` 和 `memory_available_bytes`，且可用内存不超过总内存。
+- 平台可获取存储卷时，输出 JSON 包含 `storage_total_bytes`、`storage_available_bytes` 和 `storage_mount_point`。
+- 输出 JSON 仍包含 `version`、`os`、`arch`、`uptime_secs`、`pid`。
+- 输出 JSON 不包含 `rust_version`。
+
+### TC-RI-回归-147 执行结果（2026-05-21，Remote state 设备信息）
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-147 | ✅ PASS | 2026-05-21 在独立 worktree `/Users/eden/work/github/bifrost-remote-state-device-info` 执行 `bash e2e-tests/tests/test_remote_invoke_e2e.sh`。首次执行因新 worktree 未安装 `packages/bifrost-sync-server` 依赖而在 relay 启动阶段失败，错误为 `Command "tsx" not found`；执行 `pnpm --dir packages/bifrost-sync-server install` 后原命令重跑通过。脚本使用随机 relay 端口 `51744`、target admin 端口 `51743`、隔离数据目录和 `--no-system-proxy` 启动真实 target client，通过 pair-code 建立 caller saved connection 后执行 `bifrost remote conn status --relay-url ... --client-id ...`。`TC-RI-02` 断言输出包含 `version/device_name/os/arch/cpu_logical_cores/memory_total_bytes/memory_available_bytes/storage_total_bytes/storage_available_bytes/storage_mount_point`，且不包含 `rust_version`；随后 remote traffic/search/cancel/disconnect 等回归全部通过，最终 `All assertions: total=73 passed=73 failed=0`。第 1 轮 review 后补强脚本中的 storage 字段断言，并以 `SKIP_BUILD=true bash e2e-tests/tests/test_remote_invoke_e2e.sh` 复测，同样通过 `All assertions: total=73 passed=73 failed=0`。 |
+
+---
+
 ## 清理
 
 测试完成后清理本地临时数据：

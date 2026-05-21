@@ -24,11 +24,19 @@
 - HTTP 状态码为 200
 - 返回 JSON 对象包含以下字段：
   - `version`（字符串，如 `"0.x.x"`，与 Cargo.toml 版本一致）
-  - `rust_version`（字符串，Rust 编译器版本）
+  - `device_name`（字符串，设备名称 / hostname，用于区分多台设备）
   - `os`（字符串，如 `"macos"`、`"linux"`、`"windows"`）
   - `arch`（字符串，如 `"aarch64"`、`"x86_64"`）
+  - `cpu_logical_cores`（数字，逻辑 CPU 核心数，> 0）
+  - `cpu_physical_cores`（可选数字，物理 CPU 核心数）
+  - `memory_total_bytes`（数字，总内存字节数，> 0）
+  - `memory_available_bytes`（数字，可用内存字节数，>= 0 且 <= `memory_total_bytes`）
+  - `storage_total_bytes`（可选数字，当前工作目录所在存储卷总容量字节数）
+  - `storage_available_bytes`（可选数字，当前工作目录所在存储卷可用容量字节数）
+  - `storage_mount_point`（可选字符串，当前工作目录所在存储卷挂载点）
   - `uptime_secs`（数字，服务运行秒数，>= 0）
   - `pid`（数字，进程 ID，> 0）
+  - 不包含 `rust_version`
 
 ---
 
@@ -119,8 +127,13 @@
 
 **预期结果**：
 - `.system.version` 为非空字符串
+- `.system.device_name` 为非空字符串
 - `.system.os` 为当前操作系统名称
 - `.system.arch` 为当前 CPU 架构
+- `.system.cpu_logical_cores` > 0
+- `.system.memory_total_bytes` > 0
+- `.system.memory_available_bytes` <= `.system.memory_total_bytes`
+- `.system` 不包含 `rust_version`
 - `.system.uptime_secs` >= 0
 - `.system.pid` > 0
 

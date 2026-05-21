@@ -644,9 +644,16 @@ GET /api/system
 ```json
 {
   "version": "0.1.0",
-  "rust_version": "1.75.0",
+  "device_name": "eden-work",
   "os": "macos",
   "arch": "aarch64",
+  "cpu_logical_cores": 12,
+  "cpu_physical_cores": 12,
+  "memory_total_bytes": 51539607552,
+  "memory_available_bytes": 17179869184,
+  "storage_total_bytes": 994662584320,
+  "storage_available_bytes": 412316860416,
+  "storage_mount_point": "/",
   "uptime_secs": 3600,
   "pid": 12345
 }
@@ -664,9 +671,16 @@ GET /api/system/overview
 {
   "system": {
     "version": "0.1.0",
-    "rust_version": "1.75.0",
+    "device_name": "eden-work",
     "os": "macos",
     "arch": "aarch64",
+    "cpu_logical_cores": 12,
+    "cpu_physical_cores": 12,
+    "memory_total_bytes": 51539607552,
+    "memory_available_bytes": 17179869184,
+    "storage_total_bytes": 994662584320,
+    "storage_available_bytes": 412316860416,
+    "storage_mount_point": "/",
     "uptime_secs": 3600,
     "pid": 12345
   },
