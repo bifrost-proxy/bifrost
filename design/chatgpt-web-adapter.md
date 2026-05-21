@@ -118,6 +118,7 @@ ChatGPT Web 页面可能把一次回答渲染成多条 assistant message：前�
 - 图片结果：ChatGPT 生成图会先缓存到本机附件目录。IM 文本卡片会移除本地图片 Markdown，随后按图片出现顺序逐张发送图片消息；CLI JSON 保留最终文本中的本地图片 Markdown，便于调用方读取附件路径。
 - DOM fallback 不能只凭文本判断最终态。文本只作为候选内容；真正允许重新提取最新消息并返回前，必须确认页面控制态已经恢复：stop/cancel 按钮消失、composer 可见且可用，且当 composer 内仍有待发送文本时提交按钮必须可见。空 composer 下 ChatGPT 会把发送位切回语音/提交控制，不能要求 send button 仍显示或处于 disabled 状态，否则会把已完成回答误判为仍在输出。“正在创建图片 / 正在生成图片 / 正在打草稿 / Drafting / Thinking”等状态文案只是额外保护，不能取代按钮状态判定。若用户 prompt 中明确要求 `N` 张图片，下载阶段以 `N` 作为最低期望数量；首次 DOM 只看到较少图片时继续滚动/监听网络补齐，避免页面懒加载导致少发最后几张。
 - ChatGPT Web 的生成图结果有时不会出现在 `data-message-author-role="assistant"` 节点中，而是渲染成后续 `section[data-testid^="conversation-turn-"]`，正文只有 `ChatGPT 说：`，图片在 section 内的 `estuary/content` URL。DOM fallback 必须把最后一个 user turn 之后的这类 image-only section 当作 assistant 结果处理，否则 CLI/IM 会一直等待，或漏发最后一张图片；但如果 section 还只是空壳 `ChatGPT 说：` 或 `最后微调一下...`，且图片数为 0，必须继续等待。
+- DOM 提取和 `allMarkdownTexts` 自然批次必须保存完整文本，不允许使用固定字符数截断；`textLength` 只用于诊断，`response`、`last_message.md` 和 `result.json` 必须能保留长任务最终输出全文。
 
 ## 配置模型
 
@@ -820,6 +821,7 @@ Schedule 选择 runner，由 runner 的 adapter 决定执行实现：
 - `generated_image_assets_without_finished_path_list_are_final_when_not_streaming` / `generated_image_assets_wait_when_any_message_is_in_progress` 覆盖 asset-only 图片结果：无 `in_progress` 时可直接用 `image_asset_pointer` 完成，仍有消息生成中时不得提前结束。
 - `chatgpt_web_delivery_uses_final_response_when_images_are_appended` 覆盖本地图片 Markdown 已追加到最终 `response` 时，IM 投递必须使用该最终 response，而不是下载前的 `all_texts`。
 - `chatgpt_web_delivery_preserves_natural_process_batches` 覆盖 ChatGPT Web 多段文本投递：页面自然分批出现的过程/思考消息按批次分别投递，最后最终结论作为最后一批；图片场景仍强制使用带图片 Markdown 的最终 response。
+- `chatgpt_web_dom_extraction_does_not_truncate_response_text` 覆盖 DOM 提取脚本不得对最终 `text` 或 `allMarkdownTexts` 执行固定 10000 字符截断，保证长结果 artifact 和 IM 最终输出使用全文。
 - `agent_reply_collects_and_strips_generated_local_images`、`send_image_uploads_original_bytes_to_cdn_and_sends_image_item` 覆盖 ChatGPT Web / external runner 返回本地图片 Markdown 时，IM 回复文本剥离本地路径，并通过各 IM provider 的图片发送模式投递原图；Weixin 路径会先用 provider 返回的 `upload_param` 以 `POST` 上传原图密文字节到 Weixin CDN，再发送 `image_item`。
 
 ### Human Tests

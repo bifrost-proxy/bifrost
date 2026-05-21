@@ -8,6 +8,19 @@ fn chatgpt_web_browser_defaults_to_headed_mode() {
 }
 
 #[test]
+fn im_long_reply_delivery_chatgpt_web_dom_extraction_does_not_truncate_response_text() {
+    let source = include_str!("interaction.rs");
+    assert!(
+        !source.contains("text.slice(0, 10000)"),
+        "ChatGPT Web DOM extraction must persist the full final response text"
+    );
+    assert!(
+        !source.contains("t.slice(0, 10000)"),
+        "ChatGPT Web DOM extraction must preserve full natural response batches"
+    );
+}
+
+#[test]
 fn composer_text_injection_uses_paste_only_above_threshold() {
     assert_eq!(
         composer_text_injection_mode(&"a".repeat(120)),

@@ -24,6 +24,8 @@ use crate::im_gateway::types::{
 const DEFAULT_BASE_URL: &str = "https://ilinkai.weixin.qq.com";
 const DEFAULT_CDN_BASE_URL: &str = "https://novac2c.cdn.weixin.qq.com/c2c";
 const DEFAULT_POLL_INTERVAL_MS: u64 = 3_000;
+const TEXT_RETRY_CHUNK_MAX_CHARS: usize = 1_000;
+const TEXT_RETRY_CHUNK_MAX_BYTES: usize = 3_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -629,6 +631,119 @@ impl WeixinProvider {
         })
     }
 
+    fn split_text_for_retry(text: &str) -> Vec<String> {
+        if text.is_empty() {
+            return Vec::new();
+        }
+
+        let mut chunks = Vec::new();
+        let mut current = String::new();
+        let mut current_chars = 0usize;
+        let mut current_bytes = 0usize;
+
+        for ch in text.chars() {
+            let ch_bytes = ch.len_utf8();
+            if !current.is_empty()
+                && (current_chars + 1 > TEXT_RETRY_CHUNK_MAX_CHARS
+                    || current_bytes + ch_bytes > TEXT_RETRY_CHUNK_MAX_BYTES)
+            {
+                chunks.push(std::mem::take(&mut current));
+                current_chars = 0;
+                current_bytes = 0;
+            }
+            current.push(ch);
+            current_chars += 1;
+            current_bytes += ch_bytes;
+        }
+
+        if !current.is_empty() {
+            chunks.push(current);
+        }
+
+        chunks
+    }
+
+    fn split_text_messages_for_retry(text: &str) -> Vec<String> {
+        let chunks = Self::split_text_for_retry(text);
+        if chunks.len() <= 1 {
+            return chunks;
+        }
+        let total = chunks.len();
+        chunks
+            .into_iter()
+            .enumerate()
+            .map(|(idx, chunk)| format!("[{}/{}]\n{}", idx + 1, total, chunk))
+            .collect()
+    }
+
+    async fn send_text_once(
+        &self,
+        config: &ImProviderConfig,
+        target: &ImTarget,
+        text: &str,
+        client_msg_id: String,
+    ) -> Result<SendResult> {
+        let base_url = Self::base_url(config);
+        let account_id = Self::account_id(config);
+        let bot_token = Self::bot_token(config)?;
+        let mut msg = serde_json::json!({
+            "from_user_id": "",
+            "to_user_id": target.receive_id,
+            "client_id": client_msg_id,
+            "message_type": 2,
+            "message_state": 2,
+            "item_list": [{
+                "type": 1,
+                "text_item": {
+                    "text": text
+                }
+            }],
+        });
+        if let Some(context_token) = self
+            .runtime
+            .read()
+            .get(account_id)
+            .and_then(|runtime| runtime.context_tokens.get(&target.receive_id).cloned())
+        {
+            msg["context_token"] = serde_json::Value::String(context_token);
+        }
+        let payload = serde_json::json!({
+            "msg": msg,
+            "base_info": {
+                "channel_version": "1.0.3"
+            }
+        });
+        let response = Self::with_common_headers(
+            self.http.post(format!("{base_url}/ilink/bot/sendmessage")),
+            bot_token,
+        )
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| {
+            bifrost_core::BifrostError::Network(format!("weixin sendmessage failed: {e}"))
+        })?;
+        let response = Self::read_json_response_or_empty(response, "sendmessage").await?;
+        if let Some(error) = Self::send_error_message(&response) {
+            return Err(bifrost_core::BifrostError::Network(format!(
+                "weixin sendmessage failed: {error}"
+            )));
+        }
+        debug!(provider_id = %config.id, target = %target.receive_id, "weixin message sent");
+        Ok(SendResult {
+            message_id: response
+                .get("message_id")
+                .or_else(|| response.get("msgid"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .or(Some(client_msg_id)),
+            request_id: response
+                .get("request_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+        })
+    }
+
     fn encrypt_aes_128_ecb(plaintext: &[u8], aes_key: &[u8; 16]) -> Result<Vec<u8>> {
         type Aes128EcbEnc = ecb::Encryptor<aes::Aes128>;
         Ok(Aes128EcbEnc::new_from_slice(aes_key)
@@ -1009,66 +1124,63 @@ impl ImProvider for WeixinProvider {
         target: &ImTarget,
         text: &str,
     ) -> Result<SendResult> {
-        let base_url = Self::base_url(config);
-        let account_id = Self::account_id(config);
-        let bot_token = Self::bot_token(config)?;
         let client_msg_id = format!("bifrost-weixin-{}-{}", now_ms(), uuid::Uuid::new_v4());
-        let mut msg = serde_json::json!({
-            "from_user_id": "",
-            "to_user_id": target.receive_id,
-            "client_id": client_msg_id,
-            "message_type": 2,
-            "message_state": 2,
-            "item_list": [{
-                "type": 1,
-                "text_item": {
-                    "text": text
-                }
-            }],
-        });
-        if let Some(context_token) = self
-            .runtime
-            .read()
-            .get(account_id)
-            .and_then(|runtime| runtime.context_tokens.get(&target.receive_id).cloned())
+        match self
+            .send_text_once(config, target, text, client_msg_id)
+            .await
         {
-            msg["context_token"] = serde_json::Value::String(context_token);
-        }
-        let payload = serde_json::json!({
-            "msg": msg,
-            "base_info": {
-                "channel_version": "1.0.3"
+            Ok(result) => Ok(result),
+            Err(original_error) => {
+                let chunks = Self::split_text_messages_for_retry(text);
+                if chunks.len() <= 1 {
+                    return Err(original_error);
+                }
+
+                let original_error_text = original_error.to_string();
+                warn!(
+                    provider_id = %config.id,
+                    target = %target.receive_id,
+                    text_chars = text.chars().count(),
+                    text_bytes = text.len(),
+                    chunk_count = chunks.len(),
+                    error = %original_error_text,
+                    "weixin sendmessage failed; retrying as split text messages"
+                );
+                let mut first_message_id = None;
+                let mut first_request_id = None;
+                let fallback_run_id = uuid::Uuid::new_v4();
+                for (idx, chunk) in chunks.iter().enumerate() {
+                    let chunk_msg_id = format!(
+                        "bifrost-weixin-{}-{}-part-{}",
+                        now_ms(),
+                        fallback_run_id,
+                        idx + 1
+                    );
+                    let result = self
+                        .send_text_once(config, target, chunk, chunk_msg_id)
+                        .await
+                        .map_err(|chunk_error| {
+                            bifrost_core::BifrostError::Network(format!(
+                                "weixin sendmessage split fallback failed at chunk {}/{}: {}; original error: {}",
+                                idx + 1,
+                                chunks.len(),
+                                chunk_error,
+                                original_error_text
+                            ))
+                        })?;
+                    if first_message_id.is_none() {
+                        first_message_id = result.message_id;
+                    }
+                    if first_request_id.is_none() {
+                        first_request_id = result.request_id;
+                    }
+                }
+                Ok(SendResult {
+                    message_id: first_message_id,
+                    request_id: first_request_id,
+                })
             }
-        });
-        let response = Self::with_common_headers(
-            self.http.post(format!("{base_url}/ilink/bot/sendmessage")),
-            bot_token,
-        )
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|e| {
-            bifrost_core::BifrostError::Network(format!("weixin sendmessage failed: {e}"))
-        })?;
-        let response = Self::read_json_response_or_empty(response, "sendmessage").await?;
-        if let Some(error) = Self::send_error_message(&response) {
-            return Err(bifrost_core::BifrostError::Network(format!(
-                "weixin sendmessage failed: {error}"
-            )));
         }
-        debug!(provider_id = %config.id, target = %target.receive_id, "weixin message sent");
-        Ok(SendResult {
-            message_id: response
-                .get("message_id")
-                .or_else(|| response.get("msgid"))
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-                .or(Some(client_msg_id)),
-            request_id: response
-                .get("request_id")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-        })
     }
 
     async fn upload_image(

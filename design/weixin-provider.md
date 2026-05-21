@@ -19,6 +19,7 @@
 - 微信图片消息需要解析 `image_item/media`，下载图片，必要时解密，并以多模态图片输入传给模型。
 - Agent / ChatGPT Web 生成的本地图片需要按原图通过微信通道独立发送为图片消息，不能只退化为 Markdown 文本或卡片正文。
 - 最终回复直接发送模型最终文本，不添加 `Bifrost AI`、`等待任务说明` 等卡片前缀。
+- 当 Weixin `sendmessage` 对长文本返回失败时，必须自动把原文切成多条较小文本按顺序补发，不能丢弃最终回复。
 
 ### 必须不破坏
 
@@ -64,6 +65,8 @@ Feishu 入站继续按 `owner_open_id` 过滤非 owner 消息；Weixin 入站不
 
 `ImProviderClient` 抽象 Feishu/Weixin 发送能力。Weixin 的 `send_text` 调 `sendmessage`，payload 使用官方 `msg + base_info` 结构，`msg.item_list[].text_item.text` 承载文本；`send_card` 只把卡片正文降级为文本后调 `send_text`。poll 到消息时保存 `context_token`，后续向同一用户发送时会带上该 token。
 
+`send_text` 保持“先按原始完整文本发送”的默认路径；只有原始 `sendmessage` 返回网络错误或非零 `ret/errcode` 时，才按字符边界把文本切成多条小消息并追加 `[i/N]` 顺序前缀逐条重试。切分必须保留全部 Unicode 内容和换行，任一补发分片失败时返回包含原始错误与分片序号的错误，便于从消息日志定位失败点。
+
 Agent 回复目标按 provider 区分：Weixin 优先回写本次入站事件的 `source.chat_id/source.user_id`，不会优先发给 `owner_open_id`；Feishu 继续优先发给 owner。消息日志记录真实目标 ID，避免只显示内部 `__agent_reply__` 占位符。
 
 Weixin 没有 Feishu CardKit 进度卡能力，因此默认 Agent chat 进入真实 turn loop 前会先向消息发送方发送一条纯文本即时反馈；运行中再次收到同一会话消息时沿用 guide/queue 逻辑并立即回执“已注入引导消息”或排队状态。`/status`、`/stop`、session-free 命令以及其余 Agent slash 命令都走和 Feishu 相同的 IM 事件入口。
@@ -86,6 +89,8 @@ Weixin 没有 Feishu CardKit 进度卡能力，因此默认 Agent chat 进入真
 - `decrypt_aes_128_ecb_accepts_base64_raw_key`：验证 AES-128-ECB 解密。
 - `send_image_uploads_original_bytes_to_cdn_and_sends_image_item`：验证出站图片原始字节被加密上传到 CDN，并以 `image_item.media` 独立发送。
 - `send_image_returns_config_error_for_unknown_image_key`：验证未知图片 key 不会发送空消息。
+- `send_text_retries_failed_long_message_as_split_messages`：验证长文本首次 `sendmessage` 失败后，Weixin provider 会按顺序补发带 `[i/N]` 前缀的小文本，并且拼回后等于原文。
+- `split_text_for_retry_preserves_multibyte_content`：验证中文、多字节字符和换行在切分后不丢失、不破坏字符边界。
 - `agent_reply_target_uses_weixin_sender_instead_of_owner`：验证回复目标使用微信发送方。
 - `im_event_loop_forwards_image_attachment_to_agent_chat`：验证 IM 图片传入 Agent 多模态请求。
 
@@ -100,6 +105,8 @@ Weixin 没有 Feishu CardKit 进度卡能力，因此默认 Agent chat 进入真
 5. 断言图片事件包含 `message.images[0].download_url` 和 file key。
 6. 调用 `messages/send`，断言 mock `sendmessage` 收到目标用户、文本、`context_token` 和官方 `base_info`。
 7. 调用 Weixin provider 图片发送路径，断言 mock `getuploadurl` 收到原始大小、MD5、目标用户和 AES key，mock CDN 收到非空密文，解密后等于原图字节，最终 mock `sendmessage` 收到 `item_list[].type=2` 与 `image_item.media.encrypt_query_param`。
+
+`e2e-tests/tests/test_im_gateway_long_reply_delivery_regression.sh` 覆盖长回复回归：执行 ChatGPT Web DOM 提取不截断保护测试，以及 Weixin 长文本首次失败后拆分补发测试。
 
 ### human_tests
 

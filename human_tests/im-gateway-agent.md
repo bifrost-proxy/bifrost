@@ -1814,3 +1814,22 @@ rm -rf ./.bifrost-test
   - 停止测试 Bifrost 进程。
   - 删除临时 `BIFROST_DATA_DIR`。
 - **执行记录（2026-05-13）**: PASS — 真实启动当前源码 Bifrost，预检直发 Feishu `bifrost` provider 成功，返回 `om_x100b6f744c70b93cc32aa02b96e1ea3`；首次 `/agent/chat` 暴露 AIDP schema 兼容问题（`send_msg` 顶层 `anyOf` 被拒绝），修复 schema 后重启复测通过。chat 返回 `tool_calls[0].tool_name=send_msg`、`success=true`，工具结果包含真实 `message_id=om_x100b6f74423a54a0c2945f565987a08`；消息日志记录 `trigger=agent_tool:send_msg`、`status=success`、文本 `Bifrost agent chat send_msg real test 20260513-124040`。
+
+### TC-IMA-96: ChatGPT Web 长回复经 Weixin 失败后拆分补发
+
+- **前置条件**:
+  - 当前源码已包含 ChatGPT Web DOM 提取不截断修复。
+  - 使用 Weixin mock `sendmessage` 服务模拟首次长文本发送返回 `ret=-2`，后续分片发送返回成功。
+  - 不需要启动系统代理；自动化脚本只运行 provider/adapter 回归测试。
+- **操作步骤**:
+  1. 执行 `e2e-tests/tests/test_im_gateway_long_reply_delivery_regression.sh`。
+  2. 检查脚本中的 `chatgpt_web_dom_extraction_does_not_truncate_response_text` 断言。
+  3. 检查脚本中的 `send_text_retries_failed_long_message_as_split_messages` 断言。
+- **预期结果**:
+  - ChatGPT Web DOM 提取脚本中不存在 `text.slice(0, 10000)` 或 `t.slice(0, 10000)`，长回复 artifact 可保存全文。
+  - Weixin mock 收到的第 1 条 `sendmessage` 为完整原文；该请求失败后，provider 继续发送多条带 `[i/N]` 前缀的小文本。
+  - 去掉分片前缀后按顺序拼接，内容与完整原文完全一致，中文和换行不被破坏。
+  - 补发成功后 `send_text` 返回成功，不把最终回复整体标记为失败。
+- **清理步骤**:
+  - 自动化脚本退出后 mock server 随测试进程释放，无需保留临时数据。
+- **执行记录（2026-05-22）**: PASS — 执行 `source ~/.zshrc && e2e-tests/tests/test_im_gateway_long_reply_delivery_regression.sh` 通过：`chatgpt_web_dom_extraction_does_not_truncate_response_text` 确认 DOM 提取脚本不存在固定 10000 字符截断；`send_text_retries_failed_long_message_as_split_messages` 使用 Weixin mock 首次返回 `ret=-2`，随后收到多条 `[i/N]` 分片，去前缀后拼接等于完整原文。补充执行 `source ~/.zshrc && cargo test -p bifrost-admin split_text_for_retry_preserves_multibyte_content --lib -- --nocapture` 通过，确认中文、多字节字符和换行切分保真。
