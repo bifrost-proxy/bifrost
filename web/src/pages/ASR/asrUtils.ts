@@ -2,9 +2,57 @@ import type { AsrTaskFileRecord, AsrTaskSchedule } from "../../api/asr";
 
 export type WorkState = "idle" | "recording" | "transcribing" | "error";
 
-export const MIC_WINDOW_MS = 1000;
+export const VOICE_REALTIME_SAMPLE_RATE = 16_000;
+export const VOICE_REALTIME_CHUNK_MS = 1000;
 export const MIC_METER_BARS = 40;
 export const EMPTY_MIC_LEVELS = Array.from({ length: MIC_METER_BARS }, () => 0);
+
+export function resampleFloat32Linear(
+  samples: Float32Array,
+  sourceSampleRate: number,
+  targetSampleRate = VOICE_REALTIME_SAMPLE_RATE,
+): Float32Array {
+  if (
+    !Number.isFinite(sourceSampleRate) ||
+    sourceSampleRate <= 0 ||
+    Math.round(sourceSampleRate) === targetSampleRate
+  ) {
+    return samples;
+  }
+  if (samples.length === 0) {
+    return samples;
+  }
+  const outputLength = Math.max(1, Math.round((samples.length * targetSampleRate) / sourceSampleRate));
+  const output = new Float32Array(outputLength);
+  const scale = sourceSampleRate / targetSampleRate;
+  for (let index = 0; index < outputLength; index += 1) {
+    const position = index * scale;
+    const left = Math.min(samples.length - 1, Math.floor(position));
+    const right = Math.min(samples.length - 1, left + 1);
+    const ratio = position - left;
+    output[index] = samples[left] + (samples[right] - samples[left]) * ratio;
+  }
+  return output;
+}
+
+export function encodePcm16Chunk(
+  samples: Float32Array,
+  sourceSampleRate = VOICE_REALTIME_SAMPLE_RATE,
+): ArrayBuffer {
+  const normalized = resampleFloat32Linear(
+    samples,
+    sourceSampleRate,
+    VOICE_REALTIME_SAMPLE_RATE,
+  );
+  const buffer = new ArrayBuffer(normalized.length * 2);
+  const view = new DataView(buffer);
+  for (let index = 0; index < normalized.length; index += 1) {
+    const clamped = Math.max(-1, Math.min(1, normalized[index]));
+    const value = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
+    view.setInt16(index * 2, value, true);
+  }
+  return buffer;
+}
 
 export function buildTaskSchedule(values: Record<string, unknown>): AsrTaskSchedule {
   const kind = String(values.schedule_kind ?? "daily");

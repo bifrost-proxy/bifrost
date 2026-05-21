@@ -29,6 +29,7 @@ mod traffic;
 mod update_check;
 mod upgrade;
 mod value;
+mod voice;
 mod whitelist;
 
 use colored::Colorize;

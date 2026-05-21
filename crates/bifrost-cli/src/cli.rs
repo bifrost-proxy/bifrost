@@ -605,6 +605,95 @@ pub enum AiCommands {
         #[command(subcommand)]
         action: AiAsrCommands,
     },
+    #[command(about = "Run local voice input runtime")]
+    Voice {
+        #[command(subcommand)]
+        action: AiVoiceCommands,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum AiVoiceCommands {
+    #[command(about = "List local voice input sources and capability state")]
+    Sources {
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+    },
+    #[command(about = "Listen to a local voice source and print transcript events")]
+    Listen {
+        #[arg(long, default_value = "mic", value_parser = ["mic", "system", "app", "file"], help = "Voice source kind")]
+        source: String,
+        #[arg(long, help = "Application name or bundle id for --source app")]
+        app: Option<String>,
+        #[arg(long, value_hint = ValueHint::FilePath, help = "Audio file to stream in realtime when --source file")]
+        input_file: Option<PathBuf>,
+        #[arg(long, default_value_t = 5, help = "Capture duration in seconds")]
+        duration: u64,
+        #[arg(
+            long,
+            default_value_t = 1000,
+            help = "Stateful streaming ASR chunk size in milliseconds"
+        )]
+        chunk_ms: u64,
+        #[arg(
+            long,
+            default_value = "Qwen3-ASR-0.6B",
+            help = "Local ASR model for Voice service"
+        )]
+        model: String,
+        #[arg(
+            long,
+            default_value = "qwen3_stateful_streaming",
+            value_parser = ["qwen3_stateful_streaming"],
+            help = "Local Voice ASR provider"
+        )]
+        provider: String,
+        #[arg(long, default_value = "chinese", help = "ASR language")]
+        language: String,
+        #[arg(long, default_value = "jsonl", value_parser = ["jsonl", "text"], help = "Output format")]
+        format: String,
+        #[arg(
+            long,
+            help = "Allow stateful streaming to load large local models such as Qwen3-ASR-1.7B"
+        )]
+        allow_stateful_large_model: bool,
+        #[arg(long, help = "Emit deterministic local events without recording audio")]
+        dry_run: bool,
+        #[arg(long, default_value = "你好 Bifrost", help = "Dry-run transcript text")]
+        text: String,
+    },
+    #[command(hide = true, about = "Run stateful ASR worker over stdio")]
+    Worker {
+        #[arg(long)]
+        model: String,
+        #[arg(long, value_hint = ValueHint::DirPath)]
+        model_dir: PathBuf,
+        #[arg(long, default_value = "chinese")]
+        language: String,
+        #[arg(long, default_value_t = 1.0)]
+        chunk_size_sec: f32,
+        #[arg(long)]
+        initial_text: Option<String>,
+    },
+    #[command(about = "Manage local voice vocabulary")]
+    Vocabulary {
+        #[command(subcommand)]
+        action: AiVoiceVocabularyCommands,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum AiVoiceVocabularyCommands {
+    #[command(about = "List local voice vocabulary")]
+    List {
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+    },
+    #[command(about = "Import vocabulary aliases from a text file")]
+    Import {
+        #[arg(value_hint = ValueHint::FilePath, help = "Terms file, one canonical=alias1,alias2 per line")]
+        file: PathBuf,
+    },
 }
 
 #[derive(Subcommand, Clone)]

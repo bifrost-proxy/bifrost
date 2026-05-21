@@ -146,6 +146,7 @@ export default async () => {
       String(backendPort),
       "--unsafe-ssl",
       "--no-system-proxy",
+      "--skip-cert-check",
       "--access-mode",
       "allow_all",
     ], {

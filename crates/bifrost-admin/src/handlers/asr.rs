@@ -365,7 +365,6 @@ async fn handle_service_stop(req: Request<Incoming>) -> Response<BoxBody> {
             if let Some(state) = read_service_state(&bifrost_storage::data_dir()) {
                 if state.host == target.host
                     && state.model == target.model
-                    && state.language == target.language
                     && state.home == target.home
                     && target.port.is_none_or(|port| port == state.port)
                 {
@@ -1023,7 +1022,6 @@ async fn managed_service_matches(target: &AsrTarget) -> bool {
             state.host == target.host
                 && target.port == Some(state.port)
                 && state.model == target.model
-                && state.language == target.language
                 && state.home == target.home
         })
         .unwrap_or(false)
@@ -1158,11 +1156,7 @@ pub(crate) async fn resolve_managed_target(target: AsrTarget) -> AsrTarget {
     let Some(state) = read_service_state(&bifrost_storage::data_dir()) else {
         return target;
     };
-    if state.host == target.host
-        && state.model == target.model
-        && state.language == target.language
-        && state.home == target.home
-    {
+    if state.host == target.host && state.model == target.model && state.home == target.home {
         let persisted = target.with_port(state.port);
         if probe_asr_health(&persisted).await.is_ok() {
             return persisted;
@@ -1366,15 +1360,11 @@ fn same_target(left: &AsrTarget, right: &AsrTarget) -> bool {
     left.host == right.host
         && left.port == right.port
         && left.model == right.model
-        && left.language == right.language
         && left.home == right.home
 }
 
 fn same_logical_target(left: &AsrTarget, right: &AsrTarget) -> bool {
-    left.host == right.host
-        && left.model == right.model
-        && left.language == right.language
-        && left.home == right.home
+    left.host == right.host && left.model == right.model && left.home == right.home
 }
 
 fn target_matches_request(managed: &AsrTarget, requested: &AsrTarget) -> bool {
@@ -2108,7 +2098,7 @@ impl AsrTarget {
         model_dir(&self.home, &self.model)
     }
 
-    fn assets_installed(&self) -> bool {
+    pub(crate) fn assets_installed(&self) -> bool {
         self.install_dir().join("asr").is_file()
             && self.install_dir().join("asr-server").is_file()
             && self.model_dir().join("tokenizer.json").is_file()
@@ -2148,8 +2138,8 @@ mod tests {
 
     use super::{
         asr_download_requests, build_asr_download_client, default_home,
-        plan_upload_chunk_boundaries, target_from_query, validate_loopback_host,
-        wav_pcm_duration_ms, ASR_UPLOAD_CHUNK_DURATION_SECS,
+        plan_upload_chunk_boundaries, target_from_query, target_matches_request,
+        validate_loopback_host, wav_pcm_duration_ms, ASR_UPLOAD_CHUNK_DURATION_SECS,
     };
 
     fn proxy_env_lock() -> &'static StdMutex<()> {
@@ -2306,6 +2296,15 @@ mod tests {
                 .unwrap()
         });
         assert_eq!(body, "ok");
+    }
+
+    #[test]
+    fn qwen3_service_reuse_ignores_request_language() {
+        let managed =
+            target_from_query(Some("model=Qwen3-ASR-0.6B&language=chinese&port=18080")).unwrap();
+        let requested = target_from_query(Some("model=Qwen3-ASR-0.6B&language=english")).unwrap();
+
+        assert!(target_matches_request(&managed, &requested));
     }
 
     #[test]

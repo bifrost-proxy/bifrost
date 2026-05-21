@@ -10,6 +10,10 @@ export interface AsrConnectionParams {
   model?: string;
 }
 
+export interface VoiceRealtimeParams extends AsrConnectionParams {
+  chunkMs?: number;
+}
+
 export interface AsrStatus {
   status: "unsupported" | "missing" | "installed" | "ready";
   ready: boolean;
@@ -383,6 +387,34 @@ export type AsrStreamEvent =
   | AsrErrorEvent
   | AsrDoneEvent;
 
+export type VoiceRealtimeEventType =
+  | "connected"
+  | "source_ready"
+  | "asr_partial"
+  | "asr_stable_delta"
+  | "asr_final_utterance"
+  | "worker_idle_unloaded"
+  | "error"
+  | "done";
+
+export interface VoiceRealtimeEvent {
+  type: VoiceRealtimeEventType;
+  session_id?: string;
+  source?: string;
+  text?: string;
+  raw_text?: string;
+  delta?: string;
+  committed?: string;
+  window_start_ms?: number;
+  window_end_ms?: number;
+  window_index?: number;
+  captured_at_ms?: number;
+  emitted_at_ms?: number;
+  inference_ms?: number;
+  message?: string;
+  detail?: string;
+}
+
 const ASR_LEGACY_PARAMS_STORAGE_KEYS = [
   "bifrost.asr.connection",
   "bifrost.asr.connection.v2",
@@ -401,6 +433,17 @@ export function defaultAsrParams(): Required<
   };
 }
 
+export function defaultVoiceRealtimeParams(): Required<
+  Pick<VoiceRealtimeParams, "host" | "language" | "model" | "chunkMs">
+> {
+  return {
+    host: "127.0.0.1",
+    language: "chinese",
+    model: "Qwen3-ASR-0.6B",
+    chunkMs: 1000,
+  };
+}
+
 export function loadAsrParams(): AsrConnectionParams {
   try {
     const raw = window.localStorage.getItem(ASR_PARAMS_STORAGE_KEY);
@@ -411,6 +454,23 @@ export function loadAsrParams(): AsrConnectionParams {
     return { ...defaultAsrParams(), ...JSON.parse(raw) };
   } catch {
     return defaultAsrParams();
+  }
+}
+
+export function loadVoiceRealtimeParams(): VoiceRealtimeParams {
+  try {
+    const raw = window.localStorage.getItem(ASR_PARAMS_STORAGE_KEY);
+    if (!raw) {
+      return defaultVoiceRealtimeParams();
+    }
+    const saved = JSON.parse(raw) as AsrConnectionParams;
+    return {
+      ...defaultVoiceRealtimeParams(),
+      host: saved.host || defaultVoiceRealtimeParams().host,
+      language: saved.language || defaultVoiceRealtimeParams().language,
+    };
+  } catch {
+    return defaultVoiceRealtimeParams();
   }
 }
 
@@ -651,13 +711,27 @@ export async function streamAsrTranscription(
   await readSseResponse(response, onEvent);
 }
 
-export function buildAsrRealtimeUrl(params: AsrConnectionParams): string {
-  const query = new URLSearchParams(buildAsrQuery(params));
+export function buildVoiceRealtimeUrl(params: VoiceRealtimeParams): string {
+  const defaults = defaultVoiceRealtimeParams();
+  const query = new URLSearchParams();
+  query.set("source", "web_mic");
+  query.set("provider", "qwen3_stateful_streaming");
+  query.set("host", params.host || defaults.host);
+  if (params.port) {
+    query.set("port", String(params.port));
+  }
+  query.set("language", params.language || defaults.language);
+  const model = params.model || defaults.model;
+  query.set("model", model);
+  query.set("chunk_ms", String(params.chunkMs || defaults.chunkMs));
+  if (model === "Qwen3-ASR-1.7B") {
+    query.set("allow_stateful_17b", "1");
+  }
   const token = getAdminToken();
   if (token) {
     query.set("token", token);
   }
-  return buildWsUrl("/api/asr/transcribe-ws", query);
+  return buildWsUrl("/api/voice/listen-ws", query);
 }
 
 function buildAsrQuery(params: AsrConnectionParams): string {
