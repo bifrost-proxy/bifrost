@@ -809,6 +809,11 @@ tracing = "0.1"
 | Chat API runtime gate 回归 | 运行 `e2e-tests/tests/test_update_plan_human_api.sh`，验证 `/agent/chat` 路径下 update_plan runtime 收口提醒仍会强制模型在结束前补齐最终 plan 状态 |
 | Chat API runtime limits 回归 | 运行 `e2e-tests/tests/test_agent_loop_runtime_limits.sh`，验证默认 1000 次 turn 上限与 600 秒超时配置在 `/agent/chat` 黑盒链路中生效 |
 | Chat API 引导/排队注入回归 | 通过 `/api/im-gateway/agent/chat` 的测试专用字段 `guide_message` / `guide_messages` / `queue_messages`，验证 turn-end guide drain、多条 guide 在进入 loop 前通过 `/status` 展示明细并合并消费、queued FIFO drain、guide 优先于 queue，以及空白注入被忽略 |
+| IM busy runner-aware 默认策略回归 | 真实 IM/debug inbound busy 链路按 runner 能力分流：内置 Bifrost Agent 普通追加消息默认进入 guide channel，只有 `/q` 进入 queue；ChatGPT Web、Codex 和其他自定义 runner 普通追加消息默认进入 queue |
+| Codex Runner 排队续聊回归 | Codex CLI 当前支持 `codex exec resume <thread_id> [PROMPT]` 进行下一轮接续，不支持运行中追加 guide。外部 runner 队列 drain 时必须继承上一轮 Codex JSONL 解析出的 `threadId`，让排队消息通过 resume 续同一个 Codex session |
+| 飞书进度卡片与 `/status` 指标格式化回归 | progress card 折叠标题、展开状态区和 `/status` 中的 Token、Context 数字统一使用 K/M/B 单位，最多一位小数并去掉 `.0`，例如 `38634 -> 38.6K`、`19333 -> 19.3K`、`250000 -> 250K`、`1000000 -> 1M` |
+| `/status` runner 元信息回归 | IM `/status` 和 `/agent/chat` `/status` 展示当前 Agent 类型、Runner 类型、Runner ID、历史对话轮次、外部会话引用；Codex 展示 `threadId`，ChatGPT Web 展示 `conversationId` |
+| 压缩次数恢复回归 | session JSONL 中的 `compaction` 事件会恢复为 `SessionRuntimeState.compaction_count`，`/resume` 后 `/status` 不再把已发生的压缩次数重置为 0 |
 | Agent 模型请求默认代理回归 | `im_gateway_agent_model_request_uses_bifrost_proxy` 使用 `AgentClient::new_with_bifrost_proxy(port)` 调用 mock Chat Completions，断言请求经当前 Bifrost 端口转发并在 `/api/traffic` 中出现可查询记录 |
 | Chat API `/stop` 停止运行中 loop | `im_gateway_agent_chat_stop_active_loop` 启动真实 Admin + 慢速 mock Chat Completions，先发起长请求，再用同 session 的 `/stop` 立即停止 active turn，并验证后续 chat 可继续使用 |
 | WebUI instruction 大窗口编辑回归 | `Settings Agent 三层 instructions 使用大窗口编辑` 验证全局 Agent instruction 页面无行内 textarea、点击 Edit 打开大弹窗并 PATCH；`Settings IM Provider instructions 使用大窗口编辑后保存覆盖值` 验证 Provider Edit 弹窗中 instruction 通过嵌套大弹窗编辑并保存到 `agent_config` |
@@ -834,6 +839,10 @@ tracing = "0.1"
 | TC-GQ-05 | queued FIFO drain 黑盒回归 | 通过 `/agent/chat` 注入 `queue_messages`，验证在同一次 `run_turn_with_mcp` 中按 FIFO 逐条继续处理 |
 | TC-GQ-06 | guide 优先于 queue | 同时注入 `guide_message` 与 `queue_messages`，验证处理顺序为 initial → guide → queued FIFO |
 | TC-GQ-14 | 多 guide pending status 与合并消费 | 通过 `/agent/chat` 注入多条 `guide_messages`，运行中 `/status` 展示尚未进入 loop 的具体 guide 列表，随后 loop 将多条 guide 合并为一条 user message 继续处理 |
+| TC-GQ-15 | 内置 Agent busy 普通消息默认 guide | 通过 IM/debug inbound 在内置 Bifrost Agent active turn 期间发送普通消息，验证 `/status` 暴露 pending guide，且消息未进入 queue |
+| TC-GQ-16 | 自定义 Runner busy 普通消息默认 queue | 通过 IM/debug inbound 在自定义 runner active run 期间发送普通消息，验证消息等待当前 run 结束后再处理；Codex runner 若返回 `threadId`，下一条排队消息使用 `codex exec resume` 接续 |
+| TC-IMA-90A | 飞书流式进度卡片与 `/status` Token/Context KMB 格式化 | 构造百万级 Token 与几十万 Context 的 progress card，并调用 `/status`，验证折叠标题、展开状态区和状态文本均展示 `K/M/B` 单位，不再裸显长数字 |
+| TC-IMA-90B | `/status` runner 元信息与压缩次数回归 | 构造外部 runner session 和 compaction 记录，验证 `/status` 展示 Agent 类型、Runner 类型、Runner ID、历史对话轮次、`threadId` / `conversationId`，且恢复后压缩次数保持非 0 |
 | TC-LTM-09 | 长期记忆真实对话链路 | 真实 Bifrost + mock Chat API 环境下验证自动记忆、Phase 2 consolidation、跨 session 消费 |
 | TC-IMA-83 | Agent 模型请求默认进入 Traffic | 真实 Bifrost 监听端口启动后，Agent 底层 Chat Completions 请求默认经 `http://127.0.0.1:<port>` 代理发出；mock 模型 host 可查询到 POST 记录，真实模型域名在 `--intercept-include` 下可解包为 HTTPS POST 明文记录 |
 | TC-IMA-84 | Agent 设置页卡片导航 | Settings → Agent 左侧导航可见，点击 MCP Servers / Runtime 只渲染对应编辑卡片，URL `agentSection` 可刷新恢复，亮色与暗色主题下当前项高亮可读 |

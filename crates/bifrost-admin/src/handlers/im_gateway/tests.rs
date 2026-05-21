@@ -8,6 +8,8 @@ use hyper_util::rt::TokioIo;
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
+mod busy_message_mode_tests;
+
 pub(super) struct EnvGuard {
     old_data_dir: Option<String>,
     _lock: MutexGuard<'static, ()>,
@@ -1278,6 +1280,49 @@ pub(super) fn agent_api_status_detail_keeps_new_session_text_when_no_work_dir_re
     let detail = resolve_agent_api_status_detail(&manager, "status-no-workdir", None);
 
     assert!(detail.is_none());
+}
+
+#[test]
+pub(super) fn im_status_text_formats_metrics_and_runner_metadata() {
+    let manager = bifrost_agent::AgentSessionManager::new(3600);
+    let mut session = manager
+        .try_take_session_with_work_dir(
+            "status-runner-metadata",
+            Some("/tmp/status-runner".to_string()),
+        )
+        .expect("session should be available");
+    session.mark_external_runner_runtime("codex", "codex");
+    session.remember_external_conversation_ref(None, Some("thread-status-123".to_string()));
+    session
+        .history
+        .push(bifrost_agent::ChatMessage::user("first"));
+    session
+        .history
+        .push(bifrost_agent::ChatMessage::assistant("answer"));
+    session
+        .history
+        .push(bifrost_agent::ChatMessage::user("second"));
+    session.total_tokens_used = Some(38_634);
+    session.compaction_count = 2;
+    manager.return_session(session);
+
+    let detail = manager
+        .get_session_detail("status-runner-metadata")
+        .expect("detail");
+    let text = build_im_status_text(
+        Some(&detail),
+        &status_context_from_agent_runner(Some(&bifrost_agent::AgentRunnerMode::Custom(
+            "codex".to_string(),
+        ))),
+    );
+
+    assert!(text.contains("Agent 类型: External Runner Agent"));
+    assert!(text.contains("Runner 类型: codex"));
+    assert!(text.contains("Runner ID: codex"));
+    assert!(text.contains("外部会话: Codex threadId=thread-status-123"));
+    assert!(text.contains("历史对话轮次: 2"));
+    assert!(text.contains("API 累计 token: 38.6K"));
+    assert!(text.contains("压缩次数: 2"));
 }
 
 #[tokio::test(flavor = "current_thread")]

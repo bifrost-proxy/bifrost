@@ -220,16 +220,16 @@ BIFROST_DATA_DIR=./.bifrost-cmd-test cargo run --bin bifrost -- start -p 8801 --
 
 **预期结果**：
 - 运行中 `/status` 返回 `success: true`
-- response 包含"会话状态:"、"正在处理中"、"工作路径:"、"Loop:"、"实时 token:"、"Context 用量:"、"压缩次数:"
+- response 包含"会话状态:"、"正在处理中"、"工作路径:"、"Agent 类型:"、"Runner 类型:"、"历史对话轮次:"、"Loop:"、"实时 token:"、"Context 用量:"、"压缩次数:"
 - response 不再只是"Agent 正在处理中，请稍后再试。"
 - JSON 响应包含 `active_status` 对象，且 `active_status.current_loop_iteration >= 1`
 - `active_status.work_dir` 等于当前 session 的工作目录（未显式传入时允许为 `null`）
 - `active_status.max_loop_iterations` 等于当前 Agent 配置的迭代上限
 - 未显式配置 `model_context_window` 时，`active_status.context_window_tokens` 等于 `250000`
 - `active_status.context_usage_percent` 为可读数值或 `null`（仅当未配置 context window 时允许为 `null`）
-- 忙碌结束后的 `/status` 返回空闲会话状态，包含"API 累计 token"与"Context 用量"
+- 忙碌结束后的 `/status` 返回空闲会话状态，包含"API 累计 token"与"Context 用量"，数值使用 K/M/B 格式（例如 `250K` 而不是 `250000`）
 
-**本次执行结果**：通过。2026-05-10 针对 GitHub Actions Linux shard 1 竞态回归，执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" ADMIN_PORT=18121 MOCK_HTTP_PORT=18122 bash e2e-tests/tests/test_agent_builtin_status_runtime.sh`。脚本使用临时数据目录、非 9900 端口和 `--no-system-proxy` 启动当前源码版 Bifrost；首轮长模型请求期间轮询 `/status` 直到返回真实 `active_status`，断言 `active_status.session_key == "agent-status-runtime"`、`active_status.work_dir == <临时 workdir>`、`active_status.current_loop_iteration == 1`，随后空闲 `/status` 仍显示同一工作路径。该回归同时覆盖 `/agent/chat` 的 `/status` 纯读路径不会抢先创建空 session；即使已存在空 session，后续带 `work_dir` 的业务 turn 也会覆盖工作目录，不再显示 `N/A`。
+**本次执行结果**：通过。2026-05-21 执行 `bash e2e-tests/tests/test_agent_builtin_status_runtime.sh`。脚本使用临时数据目录、非 9900 端口和 `--no-system-proxy` 启动当前源码版 Bifrost；首轮长模型请求期间轮询 `/status` 直到返回真实 `active_status`，断言 `active_status.session_key == "agent-status-runtime"`、`active_status.work_dir == <临时 workdir>`、`active_status.current_loop_iteration == 1`，response 同时包含 `Agent 类型: Bifrost Agent`、`Runner 类型: bifrost_agent` 与 `历史对话轮次:`。随后空闲 `/status` 仍显示同一工作路径，并保留 K/M/B 状态格式。该回归同时覆盖 `/agent/chat` 的 `/status` 纯读路径不会抢先创建空 session；即使已存在空 session，后续带 `work_dir` 的业务 turn 也会覆盖工作目录，不再显示 `N/A`。
 
 ### TC-BC-21: 回归 - 工具结果追加后 /status 展示当前上下文估算
 
@@ -248,10 +248,10 @@ BIFROST_DATA_DIR=./.bifrost-cmd-test cargo run --bin bifrost -- start -p 8801 --
 - `active_status.current_loop_iteration == 2`。
 - `active_status.estimated_context_tokens > 10017`，能反映 `17 + 大体积工具结果估算` 已进入当前 context 口径。
 - `active_status.last_response_tokens == 17`，说明最近 API usage 被保留，并与新增 items 估算合并。
-- response 文本中的 `Context 用量: ~<estimated_context_tokens> / 250000` 与 JSON 字段一致。
-- response 文本中的 `实时 token` 仍展示累计 token，最近响应显示 `17`，`Context 用量` 不等于单独的 `17`。
+- response 文本中的 `Context 用量: ~<estimated_context_tokens 格式化值> / 250K` 与 JSON 字段一致。
+- response 文本中的 `实时 token` 仍展示累计 token，最近响应显示同一格式化值，`Context 用量` 不等于单独的旧 `17`。
 
-**本次执行结果**：通过。2026-05-09 执行 `ADMIN_PORT=18121 MOCK_HTTP_PORT=18122 bash e2e-tests/tests/test_agent_builtin_status_runtime.sh`，脚本使用临时数据目录、非 9900 端口和 `--no-system-proxy` 启动当前源码版 Bifrost；运行中 `/status` 在第二轮模型请求期间通过脚本断言：`active_status.current_loop_iteration == 2`、`estimated_context_tokens > 10017`、`last_response_tokens == 17`，文本中的 `Context 用量` 与 JSON 字段一致，最近响应显示 `17`；脚本输出 `[agent-builtin-status-runtime] PASS`。本次同时验证了 CI 高负载下的轮询加固：第二轮 mock 响应保留 8 秒采样窗口，脚本保存最后一次 `active_status` 响应用于最终断言，避免只捕获到 turn 完成后的空闲 `/status`。
+**本次执行结果**：通过。2026-05-21 执行 `bash e2e-tests/tests/test_agent_builtin_status_runtime.sh`，脚本使用临时数据目录、非 9900 端口和 `--no-system-proxy` 启动当前源码版 Bifrost；运行中 `/status` 在第二轮模型请求期间通过脚本断言：`active_status.current_loop_iteration == 2`、压缩后 `active_status.compaction_count == 1`、`estimated_context_tokens < 10000`、`last_response_tokens == estimated_context_tokens`，文本中的 `Context 用量: ~<formatted> / 250K` 与 JSON 字段一致，最近响应显示同一格式化值；脚本输出 `[agent-builtin-status-runtime] PASS`。本次同时验证了 CI 高负载下的轮询加固：第二轮 mock 响应保留 8 秒采样窗口，脚本保存最后一次 `active_status` 响应用于最终断言，避免只捕获到 turn 完成后的空闲 `/status`。
 
 ### TC-BC-22: 回归 - 自动压缩判断不被较小的旧响应 token 遮蔽
 

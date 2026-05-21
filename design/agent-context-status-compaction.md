@@ -222,10 +222,10 @@ post-sampling 路径仍使用 mid-turn `BeforeLastUserMessage` 注入非 system 
    - 首轮长模型请求启动后，脚本轮询到真实 `active_status` 再做断言，避免固定 sleep 在 CI 并发调度下抢跑。
    - 如果 `/status` 在业务请求之前误创建了空闲 session，后续带 `work_dir` 的 turn 必须覆盖该 session 的工作路径并重置上下文。
    - `active_status.current_loop_iteration == 2`
-   - `active_status.last_response_tokens == 17`
-   - `active_status.estimated_context_tokens > 10017`
-   - 文本 `Context 用量` 与 JSON 字段一致
-   - 文本最近响应显示 `17`
+   - 压缩前路径验证 `active_status.last_response_tokens == 17` 且 `active_status.estimated_context_tokens > 10017`
+   - 压缩后路径验证 `active_status.compaction_count == 1`
+   - 文本 `Context 用量` 与 JSON 字段一致，并使用 K/M/B 格式化窗口值（例如 `250K`）
+   - 文本最近响应显示与 JSON 字段一致的格式化值
 4. CI 高负载下第二轮模型请求保留足够长的 mock 延迟窗口，并在轮询期间保存最后一次 `active_status` 响应，避免因为采样窗口过短导致脚本只捕获到 turn 完成后的空闲 `/status`。
 
 由于本轮触达 guide / pending continuation，补跑 `e2e-tests/tests/test_im_guide_queue_human_api.sh`，验证 turn-end guide、FIFO queue、guide 优先级和空白忽略仍符合预期。

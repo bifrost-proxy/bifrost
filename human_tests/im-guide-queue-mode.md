@@ -4,15 +4,16 @@
 
 IM Gateway 消息处理的两种模式，用于处理 Agent 正在处理中（session busy）时用户发来的新消息：
 
-- **引导模式（默认）**：用户直接发送消息，消息被注入到 guide channel 中，在当前工具调用批次结束后追加到对话历史，进入下一个模型循环。多条尚未进入 loop 的引导消息会按到达顺序保留，并在消费时合并成一条 user message。
-- **排队模式**（`/q <消息>`）：消息加入 FIFO 队列，每个 turn 完成后按顺序处理队列消息。最多排队 10 条。
+- **引导模式（内置 Bifrost Agent 默认）**：用户直接发送消息，消息被注入到 guide channel 中，在当前工具调用批次结束后追加到对话历史，进入下一个模型循环。多条尚未进入 loop 的引导消息会按到达顺序保留，并在消费时合并成一条 user message。
+- **排队模式**（`/q <消息>` 或自定义 Runner 默认）：消息加入 FIFO 队列，每个 turn/run 完成后按顺序处理队列消息。最多排队 10 条。ChatGPT Web、Codex 和其他自定义 Runner 在 busy 时默认走排队，因为运行中没有内置 Agent 的 guide checkpoint；这些 Runner 收到 `/g <消息>` 时也会明确降级为排队消息。
 - **删除排队**（`/rq <序号>`）：通过序号删除指定的排队消息。
+- **Codex Runner 接续**：当前 Codex CLI 支持 `codex exec resume <thread_id> [PROMPT]` 做下一轮接续，但不支持运行中追加 guide；因此 busy 期间仍排队，队列 drain 时复用上一轮 `threadId` 接续同一个 Codex session。
 
 核心组件：
 - `SessionQueueManager`：管理引导通道和排队队列
 - `AgentSession.guide_channel`：mid-turn 注入共享通道
 - `run_agent_chat_with_interleave`：使用 `tokio::select!` 交错处理事件
-- `handle_busy_message`：路由 `/q`、`/rq` 和默认引导模式
+- `handle_busy_message`：路由 `/q`、`/rq`，并按 runner 能力选择默认引导或默认排队
 
 ## 前置条件
 
@@ -88,7 +89,8 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8801 --unsa
 - **预期结果**: 函数包含三个分支：
   1. `/q <text>` — 调用 `queue_manager.push_queue()` 并回复队列状态
   2. `/rq <N>` — 调用 `queue_manager.remove_queue()` 并回复更新后的队列状态
-  3. 默认 — 调用 `queue_manager.inject_guide()` 注入引导消息
+  3. 内置 Bifrost Agent 默认 — 调用 `queue_manager.inject_guide()` 注入引导消息
+  4. ChatGPT Web / Codex / 自定义 Runner 默认 — 调用 `queue_manager.push_queue()` 排队等待当前 run 结束
 
 ### TC-GQ-06: run_agent_chat_with_interleave 使用 tokio::select! 交错处理
 
@@ -199,6 +201,37 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8801 --unsa
   - 原 chat 完成后，模型请求历史中只新增一条合并后的 user message，内容包含 `引导消息 1` 和 `引导消息 2`
   - 最终响应包含 `GUIDES_MERGED: 第一条引导 -> 第二条引导`
 - **执行记录（2026-05-10）**: PASS — 执行 `source ~/.zshrc && SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" ADMIN_PORT=18131 MOCK_HTTP_PORT=18132 bash e2e-tests/tests/test_im_guide_queue_human_api.sh`，脚本启动临时 Bifrost 与 mock provider，通过 `/agent/chat` 注入两条 `guide_messages`，在首轮慢模型请求期间轮询 `/status` 并断言 pending guide JSON 与文案明细，随后断言最终模型请求收到合并后的单条 guide user message。
+
+### TC-GQ-15: 内置 Bifrost Agent busy 普通 IM 消息默认进入 guide
+
+- **操作步骤**:
+  ```bash
+  cargo test -p bifrost-admin busy_default_mode_is_guide_for_builtin_bifrost_agent --lib
+  cargo test -p bifrost-admin apply_busy_message_default_guides_builtin_messages_without_queueing --lib
+  ```
+- **预期结果**:
+  - `runner = null` 或 `runner = "bifrost_agent"` 时 busy 默认策略为 guide。
+  - 普通消息进入 `guide_status`，不会进入 `queue_status`。
+  - `/q <消息>` 仍显式进入 queue，不受默认 guide 策略影响。
+- **执行记录（2026-05-21）**: PASS — 执行 `cargo test -p bifrost-admin busy_default_mode --lib`、`cargo test -p bifrost-admin apply_busy_message_default --lib` 和 `BIFROST_PORT=18897 MOCK_PORT=18898 bash e2e-tests/tests/test_im_guide_queue_human_api.sh`。E2E 通过 `/_bifrost/api/im-gateway/debug/mock-inbound` 注入真实 IM inbound 事件，在内置 Bifrost Agent active turn 期间发送普通消息，`/agent/chat` 的 `/status` 返回 pending guide `["默认引导消息"]`，最终 mock 模型请求也收到该 guide。
+
+### TC-GQ-16: 自定义 Runner busy 普通 IM 消息默认进入 queue，Codex 用 resume 接续
+
+- **操作步骤**:
+  ```bash
+  cargo test -p bifrost-admin busy_default_mode_is_queue_for_custom_runner --lib
+  cargo test -p bifrost-admin apply_busy_message_default_queues_custom_runner_messages --lib
+  cargo test -p bifrost-admin codex_runner_metadata_resumes_queued_messages_after_current_run --lib
+  cargo test -p bifrost-admin codex_runner_metadata_does_not_override_explicit_thread --lib
+  codex exec --help | sed -n '1,120p'
+  codex exec resume --help | sed -n '1,120p'
+  ```
+- **预期结果**:
+  - `runner = "codex"`、`runner = "chatgpt-web"` 或其他自定义 runner 时 busy 默认策略为 queue。
+  - 普通消息进入 FIFO queue，不进入 guide；`/g <消息>` 不会伪装成运行中 guide，而是明确作为 queue 处理。
+  - Codex CLI help 只展示 `exec`/`resume` 的 prompt/stdin 接续能力，没有运行中追加 guide 的命令。
+  - 上一轮 Codex result metadata 中的 `threadId` 会注入下一条排队消息的 request params；显式传入的 `threadId` 不会被覆盖。
+- **执行记录（2026-05-21）**: PASS — 执行 `cargo test -p bifrost-admin busy_default_mode --lib`、`cargo test -p bifrost-admin apply_busy_message_default --lib`、`cargo test -p bifrost-admin codex_runner_metadata --lib`、`codex exec --help` 和 `codex exec resume --help`。本机 Codex CLI `0.132.0` 显示 `exec` 只接收初始 prompt/stdin，`resume` 支持按 session/thread 接续下一轮；未发现运行中追加 guide 的 CLI 命令。
 
 ## 清理步骤
 

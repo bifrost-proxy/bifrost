@@ -64,8 +64,9 @@ pub use session::{
     handle_session_free_command, AgentSession, AgentSessionManager, SessionDetail, SessionInfo,
 };
 pub use session_status::{
-    format_active_turn_status_text, ActiveTurnStatus, AgentTurnProgressEvent,
-    AgentTurnProgressSender,
+    format_active_turn_status_text, format_active_turn_status_text_with_context,
+    format_conversation_ref, format_status_metric_count, ActiveTurnStatus, AgentTurnProgressEvent,
+    AgentTurnProgressSender, StatusRuntimeContext,
 };
 pub use skills::{install_system_skills, SkillMetadata, SkillScope, SkillsManager};
 pub use tools::update_plan::{PlanStep, PlanStepStatus, UpdatePlanArgs};

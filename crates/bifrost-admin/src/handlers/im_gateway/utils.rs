@@ -134,13 +134,44 @@ pub(super) fn build_plan_card(
 
 /// Build a status text for IM display.
 /// Shows detailed status if session exists, otherwise shows a "new session" placeholder.
-pub(super) fn build_im_status_text(detail: Option<&SessionDetail>) -> String {
+pub(super) fn build_im_status_text(
+    detail: Option<&SessionDetail>,
+    context: &bifrost_agent::StatusRuntimeContext,
+) -> String {
     match detail {
         Some(d) => {
             let real = d
                 .total_tokens_used
-                .map(|t| t.to_string())
+                .map(bifrost_agent::format_status_metric_count)
                 .unwrap_or_else(|| "N/A".to_string());
+            let agent_type = d
+                .agent_type
+                .as_ref()
+                .or(context.agent_type.as_ref())
+                .map(String::as_str)
+                .unwrap_or("Bifrost Agent");
+            let runner_type = d
+                .runner_type
+                .as_ref()
+                .or(context.runner_type.as_ref())
+                .map(String::as_str)
+                .unwrap_or("bifrost_agent");
+            let runner_id = d
+                .runner_id
+                .as_ref()
+                .or(context.runner_id.as_ref())
+                .map(String::as_str)
+                .unwrap_or("N/A");
+            let conversation_ref = bifrost_agent::format_conversation_ref(
+                d.external_thread_id
+                    .as_ref()
+                    .or(context.external_thread_id.as_ref())
+                    .map(String::as_str),
+                d.external_conversation_id
+                    .as_ref()
+                    .or(context.external_conversation_id.as_ref())
+                    .map(String::as_str),
+            );
             let goal_info = match (&d.goal_status, &d.goal_objective) {
                 (Some(status), Some(objective)) => {
                     let obj_preview = truncate_str(objective, 80);
@@ -150,10 +181,15 @@ pub(super) fn build_im_status_text(detail: Option<&SessionDetail>) -> String {
             };
             let work_dir = d.work_dir.as_deref().unwrap_or("N/A");
             format!(
-                "会话状态:\n- 工作路径: {}\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- 压缩次数: {}\n- 历史版本: {}\n- 状态: 空闲{}",
+                "会话状态:\n- 工作路径: {}\n- Agent 类型: {}\n- Runner 类型: {}\n- Runner ID: {}\n- 外部会话: {}\n- 历史对话轮次: {}\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- 压缩次数: {}\n- 历史版本: {}\n- 状态: 空闲{}",
                 work_dir,
+                agent_type,
+                runner_type,
+                runner_id,
+                conversation_ref,
+                d.user_turn_count,
                 d.message_count,
-                d.estimated_tokens,
+                bifrost_agent::format_status_metric_count(d.estimated_tokens.into()),
                 real,
                 d.compaction_count,
                 d.history_version,
@@ -170,12 +206,41 @@ pub(super) fn build_agent_api_status_text(
     detail: Option<&SessionDetail>,
     config: &bifrost_agent::config::AgentConfig,
 ) -> String {
+    let context = status_context_from_agent_runner(config.runner.as_ref());
     match detail {
         Some(d) => {
             let real = d
                 .total_tokens_used
-                .map(|t| t.to_string())
+                .map(bifrost_agent::format_status_metric_count)
                 .unwrap_or_else(|| "N/A".to_string());
+            let agent_type = d
+                .agent_type
+                .as_ref()
+                .or(context.agent_type.as_ref())
+                .map(String::as_str)
+                .unwrap_or("Bifrost Agent");
+            let runner_type = d
+                .runner_type
+                .as_ref()
+                .or(context.runner_type.as_ref())
+                .map(String::as_str)
+                .unwrap_or("bifrost_agent");
+            let runner_id = d
+                .runner_id
+                .as_ref()
+                .or(context.runner_id.as_ref())
+                .map(String::as_str)
+                .unwrap_or("N/A");
+            let conversation_ref = bifrost_agent::format_conversation_ref(
+                d.external_thread_id
+                    .as_ref()
+                    .or(context.external_thread_id.as_ref())
+                    .map(String::as_str),
+                d.external_conversation_id
+                    .as_ref()
+                    .or(context.external_conversation_id.as_ref())
+                    .map(String::as_str),
+            );
             let context_window = config
                 .model_context_window
                 .and_then(|value| u32::try_from(value).ok())
@@ -185,13 +250,18 @@ pub(super) fn build_agent_api_status_text(
                 ((d.estimated_tokens as f64 / context_window as f64) * 1000.0).round() / 10.0;
             let work_dir = d.work_dir.as_deref().unwrap_or("N/A");
             format!(
-                "会话状态:\n- 工作路径: {}\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- Context 用量: ~{} / {} ({:.1}%)\n- 压缩次数: {}\n- 历史版本: {}\n- MCP 工具数: 0",
+                "会话状态:\n- 工作路径: {}\n- Agent 类型: {}\n- Runner 类型: {}\n- Runner ID: {}\n- 外部会话: {}\n- 历史对话轮次: {}\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- Context 用量: ~{} / {} ({:.1}%)\n- 压缩次数: {}\n- 历史版本: {}\n- MCP 工具数: 0",
                 work_dir,
+                agent_type,
+                runner_type,
+                runner_id,
+                conversation_ref,
+                d.user_turn_count,
                 d.message_count,
-                d.estimated_tokens,
+                bifrost_agent::format_status_metric_count(d.estimated_tokens.into()),
                 real,
-                d.estimated_tokens,
-                context_window,
+                bifrost_agent::format_status_metric_count(d.estimated_tokens.into()),
+                bifrost_agent::format_status_metric_count(context_window.into()),
                 context_percent,
                 d.compaction_count,
                 d.history_version,
@@ -200,6 +270,36 @@ pub(super) fn build_agent_api_status_text(
         None => {
             "会话状态:\n- 消息数: 0\n- 状态: 新会话\n\n提示: 发送消息即可开始对话。".to_string()
         }
+    }
+}
+
+pub(super) fn status_context_from_agent_runner(
+    runner: Option<&bifrost_agent::AgentRunnerMode>,
+) -> bifrost_agent::StatusRuntimeContext {
+    match runner {
+        Some(bifrost_agent::AgentRunnerMode::Custom(runner_id)) => {
+            status_context_from_external_runner(runner_id, runner_id)
+        }
+        _ => bifrost_agent::StatusRuntimeContext {
+            agent_type: Some("Bifrost Agent".to_string()),
+            runner_type: Some("bifrost_agent".to_string()),
+            runner_id: None,
+            external_conversation_id: None,
+            external_thread_id: None,
+        },
+    }
+}
+
+pub(super) fn status_context_from_external_runner(
+    runner_id: &str,
+    adapter: &str,
+) -> bifrost_agent::StatusRuntimeContext {
+    bifrost_agent::StatusRuntimeContext {
+        agent_type: Some("External Runner Agent".to_string()),
+        runner_type: Some(adapter.to_string()),
+        runner_id: Some(runner_id.to_string()),
+        external_conversation_id: None,
+        external_thread_id: None,
     }
 }
 

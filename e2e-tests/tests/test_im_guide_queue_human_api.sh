@@ -82,6 +82,12 @@ class Handler(BaseHTTPRequestHandler):
             import time
             time.sleep(3)
             content = "INITIAL_DONE"
+        elif any("DEFAULT_GUIDE_INITIAL" in t for t in user_texts):
+            import time
+            time.sleep(3)
+            content = "DEFAULT_GUIDE_INITIAL_DONE"
+        elif any("默认引导消息" in t for t in user_texts):
+            content = "DEFAULT_GUIDE_CONSUMED"
         elif any("初始消息" in t for t in user_texts):
             content = "ORDER: 初始消息 -> guide 插入 -> queue-1 -> queue-2"
         elif any("第一条" in t for t in user_texts):
@@ -151,6 +157,73 @@ curl -fsS --noproxy '*' -X PATCH "$BASE" \
       \"generate_memories\": false
     }
   }" >/dev/null
+
+GUIDE_PROVIDER_ID="mock-guide-default-provider"
+GUIDE_OWNER_ID="owner-guide-default"
+GUIDE_SESSION_KEY="$GUIDE_PROVIDER_ID:$GUIDE_OWNER_ID"
+echo "[im-guide-queue-human-api] verifying IM inbound default guide mode"
+curl -fsS --noproxy '*' -X POST "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/im-gateway/providers" \
+  -H 'Content-Type: application/json' \
+  -d "{
+    \"id\": \"$GUIDE_PROVIDER_ID\",
+    \"provider_type\": \"feishu\",
+    \"display_name\": \"Mock Guide Default Provider\",
+    \"enabled\": true,
+    \"app_id\": \"cli_mock_guide_default\",
+    \"owner_open_id\": \"$GUIDE_OWNER_ID\",
+    \"event_connection_enabled\": false
+  }" >/dev/null
+
+curl -fsS --noproxy '*' -X POST "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/im-gateway/debug/mock-inbound" \
+  -H 'Content-Type: application/json' \
+  -d "{
+    \"providerId\": \"$GUIDE_PROVIDER_ID\",
+    \"userId\": \"$GUIDE_OWNER_ID\",
+    \"chatId\": \"chat-guide-default\",
+    \"text\": \"DEFAULT_GUIDE_INITIAL\"
+  }" >/dev/null
+
+sleep 0.2
+
+curl -fsS --noproxy '*' -X POST "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/im-gateway/debug/mock-inbound" \
+  -H 'Content-Type: application/json' \
+  -d "{
+    \"providerId\": \"$GUIDE_PROVIDER_ID\",
+    \"userId\": \"$GUIDE_OWNER_ID\",
+    \"chatId\": \"chat-guide-default\",
+    \"text\": \"默认引导消息\"
+  }" >/dev/null
+
+DEFAULT_GUIDE_STATUS=""
+for _ in $(seq 1 40); do
+  candidate="$(curl -fsS --noproxy '*' -X POST "$BASE/chat" \
+    -H 'Content-Type: application/json' \
+    -d "{\"session_key\":\"$GUIDE_SESSION_KEY\",\"message\":\"/status\"}")"
+  if python3 - "$candidate" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+guides = payload.get("pending_guide_messages") or []
+text = payload.get("response", "")
+ok = (
+    payload.get("success") is True
+    and guides == ["默认引导消息"]
+    and "引导消息: 1 条尚未进入 loop" in text
+)
+raise SystemExit(0 if ok else 1)
+PY
+  then
+    DEFAULT_GUIDE_STATUS="$candidate"
+    break
+  fi
+  sleep 0.1
+done
+
+if [[ -z "$DEFAULT_GUIDE_STATUS" ]]; then
+  echo "[im-guide-queue-human-api] default IM inbound message did not become pending guide" >&2
+  exit 1
+fi
 
 GUIDE_RESPONSE="$(curl -fsS --noproxy '*' -X POST "$BASE/chat" \
   -H 'Content-Type: application/json' \
@@ -241,6 +314,7 @@ assert "第二条" in mock_log and "第三条" in mock_log, mock_log
 assert "guide 插入" in mock_log and "queue-1" in mock_log and "queue-2" in mock_log, mock_log
 assert "real queued" in mock_log, mock_log
 assert "引导消息 1:\\n第一条引导" in mock_log and "引导消息 2:\\n第二条引导" in mock_log, mock_log
+assert "默认引导消息" in mock_log, mock_log
 PY
 
 echo "[im-guide-queue-human-api] PASS"

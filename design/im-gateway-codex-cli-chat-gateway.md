@@ -893,7 +893,8 @@ V0 尚未落地的设计项：
 - Bifrost 自带工具集合 V0 通过 prompt 注入本地 `bifrost` CLI 使用约束；完整 MCP server 形式仍待补。
 - WebUI 已完成配置、测试入口和亮暗主题基础浏览器验证；更细的交互可用性走后续 UI 回归扩展。
 - Working directory 不属于自定义 runner。runner 运行时优先继承 IM Provider 的 Agent Working Directory，再降级到全局 Agent Working Directory；runner 自身只描述 CLI 可执行文件、参数、指令、skill 和 delivery 默认值。
-- `/` 命令兼容性当前分层处理：内置 Bifrost Agent runner 完整支持忙碌时默认 guide、`/q` 排队、`/rq` 移除、`/status` 和 `/stop`；自定义 runner 链路复用同一 busy-session 入口，`/q`/guide 会在当前 CLI turn 完成后进入后续队列，`/stop` 会映射到 active runner 进程，并在确认子进程组隔离后终止其进程组。
+- `/` 命令兼容性当前分层处理：内置 Bifrost Agent runner 完整支持忙碌时默认 guide、`/g` 显式 guide、`/q` 排队、`/rq` 移除、`/status` 和 `/stop`；自定义 runner 链路复用同一 busy-session 入口，但普通追加消息默认 queue，`/g` 会明确降级为 queue，`/stop` 会映射到 active runner 进程，并在确认子进程组隔离后终止其进程组。
+- Codex CLI 能力边界：当前使用的 `codex exec --json ... -` 只在启动时读取 prompt/stdin，不支持运行中追加 guide；`codex exec resume <thread_id> ... -` 支持当前 run 完成后的下一轮接续。因此 Codex Runner busy 期间仍按 queue 处理，队列 drain 时继承上一轮 JSONL 解析出的 `threadId`，用 resume 兼容“追加消息”的会话连续性。
 
 ## 待讨论问题
 

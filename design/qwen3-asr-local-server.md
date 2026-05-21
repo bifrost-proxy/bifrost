@@ -48,7 +48,7 @@ Qwen3-ASR-1.7B + qwen3_asr_rs + MLX/Metal + 本地 OpenAI-compatible API Server
 - Bifrost CLI 新增 `bifrost ai asr`：
   - `bifrost ai asr start` 在启动前执行平台、模型/runtime 和 `ffmpeg` 自检；缺模型或 runtime 时直接使用 Rust 通用下载模块断点续传补齐，下载 client 绕过环境代理，缺 `ffmpeg` 时自动尝试 Homebrew 安装。自检通过后从固定 `~/.bifrost/asr/qwen3_asr_rs/asr-server` 启动模型服务，动态选择 loopback 端口，把 `pid/host/port/model/language/home/managed_by` 写入 `BIFROST_DATA_DIR/asr/service.json`。
   - `bifrost ai asr stop` 读取同一个 service state，停止对应 pid 并删除状态文件。
-  - `bifrost ai asr status --json` 输出 CLI 和 WebUI 共享的模型服务状态。
+  - `bifrost ai asr status --json` 输出 CLI 和 WebUI 共享的模型服务状态；当下游命令（如 `grep -q`）命中后提前关闭 stdout 管道时，CLI 按普通 Unix 管道语义静默结束，不因 `Broken pipe` panic。
   - `bifrost ai asr stream-file <audio>` 确保资产可用后默认启动或复用本地 `asr-server`，按 30 秒窗口顺序发送 chunk 并输出 CLI JSON Lines；如果命令临时启动了模型服务，结束后恢复为停止状态。临时启动前同样执行自检与自动修复。
   - `bifrost ai asr task list|show|files|run|daily list|daily show` 通过当前 Bifrost Admin API 检查目录定时任务、任务文件和按日聚合 Markdown 文档；未显式传 `-p` 时沿用 CLI 的 runtime port 解析，读不到 runtime 时回退 9900。`daily show` 默认把完整 Markdown 输出到 stdout，`--output` 可写入文件；`run --wait` 用于触发任务并等待后台运行结束，即使没有 pending 文件也会走后端的 daily 文档刷新路径。
   - CLI 不依赖仓库脚本，不允许用户指定模型目录；除权重/runtime 下载外，启动、停止、状态和流式输出均由 Bifrost 内置命令编排。
@@ -130,7 +130,7 @@ Qwen3-ASR-1.7B + qwen3_asr_rs + MLX/Metal + 本地 OpenAI-compatible API Server
 - `cargo test -p bifrost-admin startup_recovery --lib` 覆盖 stale `run.lock` 启动恢复：enabled 未暂停任务会重置 `processing` 并加入恢复计划，paused 任务只清理状态不自动运行，仍存活 owner lock 不会被抢占。
 - `cargo test -p bifrost-admin asr_jobs --lib` 覆盖旧任务 JSON 缺少 `runtime_strategy` 时默认 `reuse_per_file`，以及 chunk metric 的 runner、RTF、文本 hash、fallback reason 和 error 记录。
 - `cargo test -p bifrost-admin asr_cli_invoke --lib` 覆盖 native ASR CLI 输出解析和 `vmmap` footprint 单位解析，保证 memory guard 的阈值计算可回归。
-- `cargo test -p bifrost-cli asr --lib` 覆盖 CLI 读取共享 ASR service state。
+- `cargo test -p bifrost-cli asr --lib` 覆盖 CLI 读取共享 ASR service state，以及 `status --json` 管道提前关闭时忽略 stdout `BrokenPipe`、其它 IO 错误仍返回。
 - `cargo test -p bifrost-cli ai_asr_commands_parse --test cli_commands` 覆盖 `bifrost ai asr` 子命令解析。
 - WebUI 类型检查或构建覆盖 AI -> Tools -> ASR 初始化面板和音频输入区编译。
 
@@ -157,7 +157,7 @@ Qwen3-ASR-1.7B + qwen3_asr_rs + MLX/Metal + 本地 OpenAI-compatible API Server
   - 通过 `/api/asr/transcribe-ws` 发起真实 WebSocket 握手，发送 `start` 控制帧、切成多个 binary frame 的 WebM 音频帧和 `finish` 控制帧，验证顶层 `type` 直接包含 `connected`、`stream`、`partial`、`final`、`text`、`done` 事件及中文文本，且事件 detail 包含递增的 `processed_ms`，避免实时阶段事件被统一折叠为 `progress` 或后续 WebM chunk 被当作独立文件解析失败；
   - 调用 `/api/asr/service/stop` 验证托管服务停止后状态变为 not ready；
   - 端口错误时验证 AI -> Tools -> ASR 可展示的错误事件。
-  - 验证 `bifrost ai asr --help`、`bifrost ai asr stream-file /missing.wav` 错误路径、`status --json` 共享状态输出。
+  - 验证 `bifrost ai asr --help`、`bifrost ai asr stream-file /missing.wav` 错误路径、`status --json` 共享状态输出，并覆盖 `status --json | grep -q '"ready"'` 这类管道消费者提前退出的回归路径。
   - 验证 `/api/asr/tasks` 在临时 `BIFROST_DATA_DIR` 下可以创建目录任务、列表展示 pending/processed 统计、手动 run 在模型不可用时返回明确错误且不会删除已保存文本元数据。
   - 验证 `/api/asr/tasks/<task_id>` summary 返回 `audio_source_bytes` 和 `cleanable_source_bytes`；调用 `/api/asr/tasks/<task_id>/cleanup-source-audio` 后，成功源音频被删除、text/timeline 产物仍存在、partial-success 源音频仍保留，二次调用删除数量为 0。
   - 验证 `/api/asr/tasks/<task_id>/daily` 可以列出已有按天 Markdown 文档，`/api/asr/tasks/<task_id>/daily/<YYYY-MM-DD>` 返回完整内容，非法日期返回可读错误。

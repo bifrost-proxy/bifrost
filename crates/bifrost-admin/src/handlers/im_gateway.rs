@@ -35,6 +35,7 @@ mod agent_api;
 mod agent_chat;
 mod agent_reply;
 mod agent_reply_attachments;
+mod busy_message_mode;
 mod chat_gateway;
 mod debug_inbound;
 mod event_loop;
@@ -52,6 +53,7 @@ use agent_api::*;
 use agent_chat::*;
 use agent_reply::*;
 use agent_reply_attachments::*;
+use busy_message_mode::*;
 use event_loop::*;
 #[allow(unused_imports)]
 use messages::*;

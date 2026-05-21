@@ -1254,6 +1254,50 @@ rm -rf ./.bifrost-test
   - 修复后复测：`bash e2e-tests/tests/test_im_agent_streaming_progress_card.sh` PASS，覆盖 guide/queue 状态进入同一卡片并在标题中给出可见 guide 提示。
   - 默认数据目录真实 Feishu 链路（端口 9900，`--no-system-proxy`）：已观察到 IM 消息到达后立即发送 `interactive` CardKit progress card，随后进入 Agent loop；旧问题 `uuid` 字段校验失败已消失。
 
+### TC-IMA-90A: 飞书流式进度卡片 - Token/Context 使用 K/M/B 格式化
+
+- **前置条件**:
+  - TC-IMA-90 的 progress card renderer 可运行。
+  - 构造的 Agent runtime 状态中包含大数值 Token 与 Context，例如累计 token `1000000`、最近响应 `1234567`、Context `260000 / 1000000`。
+- **操作步骤**:
+  1. 执行 progress card renderer 单元覆盖：
+     ```bash
+     cargo test -p bifrost-admin progress_card --lib
+     ```
+  2. 检查生成的 Feishu JSON 2.0 progress card 序列化内容。
+  3. 展开底部状态区，查看 `Context` 与 `Token` 行。
+- **预期结果**:
+  - 折叠标题展示 `Token：累计 1M · 最近 1.2M`。
+  - 展开状态区展示 `Context：~260K / 1M (26.0%)`。
+  - 展开状态区展示 `Token：累计 1M，最近 1.2M`。
+  - 卡片 JSON 中不再出现 `Token：累计 1000000`、`最近 1234567` 或 `Context：~260000 / 1000000` 这类裸长数字。
+- **执行记录（2026-05-21）**: PASS — 执行 `cargo test -p bifrost-admin progress_card --lib`，6 个 progress card 相关测试全部通过；新增断言覆盖 K/M/B formatter 和飞书卡片标题、展开状态区 Token/Context 字段。
+
+### TC-IMA-90B: `/status` 展示 runner 元信息、历史轮次与压缩次数
+
+- **前置条件**:
+  - 存在一个已有 Agent session，或可通过测试构造 session detail。
+  - 对外部 Runner session，已记录 Runner adapter、Runner ID、Codex `threadId` 或 ChatGPT Web `conversationId`。
+  - 对压缩恢复路径，session JSONL 中至少包含一条 `compaction` 事件。
+- **操作步骤**:
+  1. 执行 IM status 文本单元回归：
+     ```bash
+     cargo test -p bifrost-admin im_status_text_formats_metrics_and_runner_metadata --lib
+     ```
+  2. 执行 Agent status 与 compaction runtime state 回归：
+     ```bash
+     cargo test -p bifrost-agent session_status --lib
+     cargo test -p bifrost-agent runtime_state --lib
+     cargo test -p bifrost-agent record_compaction_event_round_trip --lib
+     ```
+  3. 在真实 IM 或 `/agent/chat` 中发送 `/status`。
+- **预期结果**:
+  - `/status` 展示 `Agent 类型`、`Runner 类型`、`Runner ID`、`外部会话`、`历史对话轮次`。
+  - Codex Runner session 展示 `Codex threadId=<id>`；ChatGPT Web session 展示 `conversationId=<id>`。
+  - `估算 token`、`API 累计 token`、`Context 用量` 使用 K/M/B 格式，例如 `19.3K`、`38.6K`、`250K`。
+  - 已发生 compaction 的 session 在恢复后 `/status` 展示非 0 `压缩次数`，不会因 `/resume` 或 runtime state reload 回到 0。
+- **执行记录（2026-05-21）**: PASS — `cargo test -p bifrost-admin im_status_text_formats_metrics_and_runner_metadata --lib` 通过，验证外部 Runner status 展示 `External Runner Agent`、`codex`、`Codex threadId=thread-status-123`、历史对话轮次 `2`、`API 累计 token: 38.6K` 和 `压缩次数: 2`。`cargo test -p bifrost-agent session_status --lib`、`cargo test -p bifrost-agent runtime_state --lib`、`cargo test -p bifrost-agent record_compaction_event_round_trip --lib`、`cargo test -p bifrost-agent scan_session_summary_uses_recorded_compaction_count_when_higher --lib` 均通过，验证 active `/status` K/M/B、compaction 事件恢复，并优先保留事件内已记录的更高压缩次数。
+
 ### TC-IMA-91: 飞书流式进度卡片 - guide 消息进入后同卡刷新
 
 - **前置条件**:

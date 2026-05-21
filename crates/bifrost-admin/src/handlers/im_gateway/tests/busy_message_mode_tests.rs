@@ -1,0 +1,143 @@
+use super::*;
+
+#[test]
+fn busy_default_mode_is_guide_for_builtin_bifrost_agent() {
+    assert_eq!(
+        busy_default_mode_for_agent_config(&bifrost_agent::AgentConfig {
+            runner: None,
+            ..Default::default()
+        }),
+        BusyMessageDefaultMode::Guide
+    );
+
+    assert_eq!(
+        busy_default_mode_for_agent_config(&bifrost_agent::AgentConfig {
+            runner: Some(bifrost_agent::AgentRunnerMode::BifrostAgent),
+            ..Default::default()
+        }),
+        BusyMessageDefaultMode::Guide
+    );
+}
+
+#[test]
+fn busy_default_mode_is_queue_for_custom_runner() {
+    assert_eq!(
+        busy_default_mode_for_agent_config(&bifrost_agent::AgentConfig {
+            runner: Some(bifrost_agent::AgentRunnerMode::Custom(
+                "chatgpt-web".to_string(),
+            )),
+            ..Default::default()
+        }),
+        BusyMessageDefaultMode::Queue
+    );
+}
+
+#[test]
+fn apply_busy_message_default_guides_builtin_messages_without_queueing() {
+    let manager = SessionQueueManager::new();
+
+    let result = apply_busy_message_default(
+        &manager,
+        "busy-default-guide",
+        "继续看最新日志",
+        BusyMessageDefaultMode::Guide,
+    )
+    .expect("guide default should be accepted");
+
+    assert_eq!(result, BusyMessageDefaultResult::Guide { pending_count: 1 });
+    assert_eq!(
+        manager.guide_status("busy-default-guide"),
+        vec!["继续看最新日志".to_string()]
+    );
+    assert!(manager.queue_status("busy-default-guide").is_empty());
+}
+
+#[test]
+fn apply_busy_message_default_queues_custom_runner_messages() {
+    let manager = SessionQueueManager::new();
+
+    let result = apply_busy_message_default(
+        &manager,
+        "busy-default-queue",
+        "下一条给 ChatGPT Web",
+        BusyMessageDefaultMode::Queue,
+    )
+    .expect("queue default should be accepted");
+
+    match result {
+        BusyMessageDefaultResult::Queue { items } => {
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].message, "下一条给 ChatGPT Web");
+        }
+        BusyMessageDefaultResult::Guide { .. } => panic!("custom runner default should queue"),
+    }
+    assert!(manager.guide_status("busy-default-queue").is_empty());
+    assert_eq!(
+        manager.pop_queue("busy-default-queue").as_deref(),
+        Some("下一条给 ChatGPT Web")
+    );
+}
+
+#[test]
+fn codex_runner_metadata_resumes_queued_messages_after_current_run() {
+    let mut request = crate::im_gateway::external_cli::ExternalCliRunRequest {
+        message: "queued continuation".to_string(),
+        operation: "chat".to_string(),
+        params: serde_json::Value::Null,
+        provider_id: Some("provider-a".to_string()),
+        runner_id: Some("codex".to_string()),
+        session_key: Some("im:provider-a:user-a".to_string()),
+        runtime: "external_cli".to_string(),
+        adapter: "codex".to_string(),
+        work_dir: None,
+        instructions: None,
+        adapter_config: Default::default(),
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: true,
+        skill_paths: Vec::new(),
+    };
+    let mut metadata = std::collections::BTreeMap::new();
+    metadata.insert("threadId".to_string(), "thread-existing".to_string());
+
+    apply_external_cli_resume_metadata(&mut request, &metadata);
+
+    assert_eq!(
+        request
+            .params
+            .get("threadId")
+            .and_then(|value| value.as_str()),
+        Some("thread-existing")
+    );
+}
+
+#[test]
+fn codex_runner_metadata_does_not_override_explicit_thread() {
+    let mut request = crate::im_gateway::external_cli::ExternalCliRunRequest {
+        message: "queued continuation".to_string(),
+        operation: "chat".to_string(),
+        params: serde_json::json!({ "threadId": "explicit-thread" }),
+        provider_id: Some("provider-a".to_string()),
+        runner_id: Some("codex".to_string()),
+        session_key: Some("im:provider-a:user-a".to_string()),
+        runtime: "external_cli".to_string(),
+        adapter: "codex".to_string(),
+        work_dir: None,
+        instructions: None,
+        adapter_config: Default::default(),
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: true,
+        skill_paths: Vec::new(),
+    };
+    let mut metadata = std::collections::BTreeMap::new();
+    metadata.insert("threadId".to_string(), "remembered-thread".to_string());
+
+    apply_external_cli_resume_metadata(&mut request, &metadata);
+
+    assert_eq!(
+        request
+            .params
+            .get("threadId")
+            .and_then(|value| value.as_str()),
+        Some("explicit-thread")
+    );
+}

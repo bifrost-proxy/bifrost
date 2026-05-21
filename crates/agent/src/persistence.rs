@@ -479,6 +479,7 @@ pub fn load_conversation_events(path: &Path) -> Result<Vec<ConversationEvent>, S
 pub struct SessionRuntimeState {
     pub current_goal: Option<GoalState>,
     pub total_tokens_used: Option<u64>,
+    pub compaction_count: u32,
     pub base_instructions: Option<String>,
 }
 
@@ -508,7 +509,9 @@ pub fn load_session_runtime_state(path: &Path) -> Result<SessionRuntimeState, St
         }
     }
 
-    state.total_tokens_used = Some(scan_session_summary(path).total_tokens);
+    let summary = scan_session_summary(path);
+    state.total_tokens_used = Some(summary.total_tokens);
+    state.compaction_count = summary.compaction_count;
 
     Ok(state)
 }
@@ -522,6 +525,7 @@ pub struct SessionFileSummary {
     pub user_turns: u32,
     pub assistant_turns: u32,
     pub tool_calls: u32,
+    pub compaction_count: u32,
     pub event_count: u32,
     pub work_dir: Option<String>,
     pub source: String,
@@ -590,7 +594,15 @@ pub fn scan_session_summary(path: &Path) -> SessionFileSummary {
                 }
             }
             "compaction" => {
+                summary.compaction_count = summary.compaction_count.saturating_add(1);
                 if let Some(obj) = event.content.as_object() {
+                    if let Some(count) = obj
+                        .get("compaction_count")
+                        .and_then(|value| value.as_u64())
+                        .and_then(|value| u32::try_from(value).ok())
+                    {
+                        summary.compaction_count = summary.compaction_count.max(count);
+                    }
                     if let Some(tokens) = obj.get("total_tokens").and_then(|v| v.as_u64()) {
                         summary.total_tokens = tokens; // Use the latest total from compaction
                     }
@@ -1127,7 +1139,9 @@ mod tests {
             r#"{"timestamp":1,"event_type":"assistant_message","session_key":"s","content":{"message":"done","tokens":120}}"#
                 .to_string()
                 + "\n"
-                + r#"{"timestamp":2,"event_type":"session_end","session_key":"s","content":{"total_tokens":150}}"#
+                + r#"{"timestamp":2,"event_type":"compaction","session_key":"s","content":{"total_tokens":140,"compaction_count":1}}"#
+                + "\n"
+                + r#"{"timestamp":3,"event_type":"session_end","session_key":"s","content":{"total_tokens":150}}"#
                 + "\n",
         )
         .unwrap();
@@ -1135,6 +1149,7 @@ mod tests {
         let state = load_session_runtime_state(&path).unwrap();
         assert_eq!(state.current_goal, None);
         assert_eq!(state.total_tokens_used, Some(150));
+        assert_eq!(state.compaction_count, 1);
     }
 
     #[test]
@@ -1148,6 +1163,7 @@ mod tests {
 
         let state = load_session_runtime_state(recorder.file_path()).unwrap();
         assert_eq!(state.total_tokens_used, Some(42));
+        assert_eq!(state.compaction_count, 0);
     }
 
     #[test]
@@ -1214,5 +1230,23 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, COMPACTION);
         assert_eq!(events[0].content["tokens_saved"], 42);
+        let state = load_session_runtime_state(recorder.file_path()).unwrap();
+        assert_eq!(state.compaction_count, 1);
+    }
+
+    #[test]
+    fn scan_session_summary_uses_recorded_compaction_count_when_higher() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"timestamp":1,"event_type":"compaction","session_key":"s","content":{"total_tokens":10,"compaction_count":3}}"#
+                .to_string()
+                + "\n",
+        )
+        .unwrap();
+
+        let state = load_session_runtime_state(&path).unwrap();
+        assert_eq!(state.compaction_count, 3);
     }
 }
