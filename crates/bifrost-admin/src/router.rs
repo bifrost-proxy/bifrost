@@ -37,6 +37,7 @@ use crate::handlers::{
     traffic::handle_traffic,
     user::handle_user,
     values::handle_values,
+    voice::handle_voice,
     websocket::handle_websocket_upgrade,
     whitelist::handle_whitelist_request,
     BoxBody,
@@ -126,6 +127,8 @@ impl AdminRouter {
             handle_agent_memories(req, path).await
         } else if path.starts_with("/api/asr") {
             handle_asr(req, path).await
+        } else if path.starts_with("/api/voice") {
+            handle_voice(req, state, path).await
         } else if path.starts_with("/api/rules") {
             handle_rules(req, state, push_manager.clone(), path).await
         } else if path.starts_with("/api/devtools") {
@@ -255,7 +258,7 @@ impl AdminRouter {
         }
 
         let token = extract_bearer_token(req).or_else(|| {
-            if path == "/api/asr/transcribe-ws" {
+            if path == "/api/asr/transcribe-ws" || path == "/api/voice/listen-ws" {
                 query_token(req.uri().query())
             } else {
                 None

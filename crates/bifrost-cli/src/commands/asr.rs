@@ -30,6 +30,9 @@ const ASR_SAMPLE_BASE_URL: &str =
 pub fn handle_ai_command(action: AiCommands, admin_host: &str, admin_port: u16) -> Result<()> {
     match action {
         AiCommands::Asr { action } => handle_asr_command(action, admin_host, admin_port),
+        AiCommands::Voice { action } => {
+            super::voice::handle_voice_command(action, admin_host, admin_port)
+        }
     }
 }
 
@@ -665,7 +668,7 @@ const VAD_THRESHOLD_MARGIN_DB: f64 = 8.0;
 /// we never accidentally skip a chunk whose edges contain speech onsets/offsets.
 const VAD_CHUNK_SAFETY_MARGIN_SECS: f64 = 1.0;
 
-fn stream_file(audio: &Path, model: &str, language: &str) -> Result<()> {
+pub(super) fn stream_file(audio: &Path, model: &str, language: &str) -> Result<()> {
     if !audio.is_file() {
         return Err(BifrostError::Config(format!(
             "audio file does not exist: {}",

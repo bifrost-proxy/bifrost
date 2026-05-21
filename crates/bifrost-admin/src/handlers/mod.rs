@@ -38,6 +38,8 @@ pub mod system;
 pub mod traffic;
 pub mod user;
 pub mod values;
+pub mod voice;
+pub mod voice_stateful;
 pub mod websocket;
 pub mod whitelist;
 

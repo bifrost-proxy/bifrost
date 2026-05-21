@@ -4,7 +4,7 @@ import { Form, message, theme } from "antd";
 import {
   ASR_PARAMS_CHANGED_EVENT,
   ASR_STATUS_CHANGED_EVENT,
-  buildAsrRealtimeUrl,
+  buildVoiceRealtimeUrl,
   createAsrTask,
   deleteAsrTask,
   getDailyAgentReport,
@@ -14,6 +14,7 @@ import {
   getAsrTaskFileTimeline,
   listAsrTasks,
   loadAsrParams,
+  loadVoiceRealtimeParams,
   pauseAsrTask,
   resumeAsrTask,
   runAsrExternalImport,
@@ -29,15 +30,18 @@ import {
   type AsrTaskDailyDocumentDetail,
   type AsrTaskFileRecord,
   type AsrTranscriptTimeline,
+  type VoiceRealtimeEvent,
 } from "../../api/asr";
 import SpeechTab from "../Settings/tabs/SpeechTab";
 import {
   appendTranscriptDelta,
   buildTaskSchedule,
   dedupeTranscript,
+  encodePcm16Chunk,
   EMPTY_MIC_LEVELS,
   MIC_METER_BARS,
-  MIC_WINDOW_MS,
+  VOICE_REALTIME_CHUNK_MS,
+  VOICE_REALTIME_SAMPLE_RATE,
   type WorkState,
 } from "./asrUtils";
 import DirectoryTaskDetailPage from "./components/DirectoryTaskDetailPage";
@@ -93,16 +97,19 @@ export default function ASR() {
   const [micPeak, setMicPeak] = useState(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
-  const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const voiceAudioContextRef = useRef<AudioContext | null>(null);
+  const voiceSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const voiceProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const voiceWorkletRef = useRef<AudioWorkletNode | null>(null);
   const micMeterRafRef = useRef<number | null>(null);
-  const micSendQueueRef = useRef(Promise.resolve());
   const committedTranscriptRef = useRef("");
   const partialTranscriptRef = useRef("");
   const recordingActiveRef = useRef(false);
   const getCurrentAsrParams = useCallback(() => loadAsrParams(), []);
+  const getCurrentVoiceParams = useCallback(() => loadVoiceRealtimeParams(), []);
 
   const appendEvent = useCallback((line: string) => {
     setEvents((prev) => [...prev.slice(-79), line]);
@@ -144,6 +151,17 @@ export default function ASR() {
     }
     setMicLevels(EMPTY_MIC_LEVELS);
     setMicPeak(0);
+  }, []);
+
+  const stopVoicePcmStreaming = useCallback(() => {
+    voiceWorkletRef.current?.disconnect();
+    voiceWorkletRef.current = null;
+    voiceProcessorRef.current?.disconnect();
+    voiceProcessorRef.current = null;
+    voiceSourceRef.current?.disconnect();
+    voiceSourceRef.current = null;
+    void voiceAudioContextRef.current?.close();
+    voiceAudioContextRef.current = null;
   }, []);
 
   const startMicMeter = useCallback(
@@ -230,9 +248,10 @@ export default function ASR() {
       abortRef.current?.abort();
       wsRef.current?.close();
       streamRef.current?.getTracks().forEach((track) => track.stop());
+      stopVoicePcmStreaming();
       stopMicMeter();
     };
-  }, [refreshStatus, refreshTasks, stopMicMeter]);
+  }, [refreshStatus, refreshTasks, stopMicMeter, stopVoicePcmStreaming]);
 
   const handleStreamEvent = useCallback(
     (event: AsrStreamEvent) => {
@@ -281,6 +300,73 @@ export default function ASR() {
         setWorkState("error");
         setErrorText(event.detail ? `${event.message}\n${event.detail}` : event.message);
         appendEvent(`error: ${event.message}`);
+      } else if (event.type === "done") {
+        setWorkState(recordingActiveRef.current ? "recording" : "idle");
+        setProgress(100);
+        appendEvent("done");
+        void refreshStatus();
+      }
+    },
+    [appendEvent, refreshStatus, renderTranscript],
+  );
+
+  const handleVoiceRealtimeEvent = useCallback(
+    (event: VoiceRealtimeEvent) => {
+      if (event.type === "connected" || event.type === "source_ready") {
+        setProgress(event.type === "source_ready" ? 5 : 1);
+        appendEvent(`${event.type}: ${event.message || event.detail || "voice stream ready"}`);
+      } else if (event.type === "asr_partial") {
+        if (event.committed !== undefined) {
+          committedTranscriptRef.current = event.committed;
+        }
+        partialTranscriptRef.current = event.text || event.delta || "";
+        appendEvent(
+          `partial[${event.window_index ?? 0}]: captured ${event.captured_at_ms ?? 0}ms`,
+        );
+        renderTranscript();
+      } else if (event.type === "asr_stable_delta") {
+        const delta = dedupeTranscript(
+          committedTranscriptRef.current,
+          event.delta || event.text || "",
+        );
+        if (delta) {
+          committedTranscriptRef.current = appendTranscriptDelta(
+            committedTranscriptRef.current,
+            delta,
+          );
+        }
+        partialTranscriptRef.current = "";
+        appendEvent(
+          `stable[${event.window_index ?? 0}]: emitted ${event.emitted_at_ms ?? 0}ms`,
+        );
+        renderTranscript();
+      } else if (event.type === "asr_final_utterance") {
+        if (event.committed !== undefined) {
+          committedTranscriptRef.current = event.committed;
+        } else {
+          const candidate = event.delta || event.text || "";
+          const delta = dedupeTranscript(committedTranscriptRef.current, candidate);
+          if (delta) {
+            committedTranscriptRef.current = appendTranscriptDelta(
+              committedTranscriptRef.current,
+              delta,
+            );
+          }
+        }
+        partialTranscriptRef.current = "";
+        appendEvent(`final: emitted ${event.emitted_at_ms ?? 0}ms`);
+        renderTranscript();
+      } else if (event.type === "worker_idle_unloaded") {
+        if (event.committed !== undefined) {
+          committedTranscriptRef.current = event.committed;
+        }
+        partialTranscriptRef.current = "";
+        appendEvent(event.message || "voice worker unloaded after idle timeout");
+        renderTranscript();
+      } else if (event.type === "error") {
+        setWorkState("error");
+        setErrorText(event.detail ? `${event.message}\n${event.detail}` : event.message || "");
+        appendEvent(`error: ${event.message || "voice stream failed"}`);
       } else if (event.type === "done") {
         setWorkState(recordingActiveRef.current ? "recording" : "idle");
         setProgress(100);
@@ -349,13 +435,18 @@ export default function ASR() {
       resetTranscript();
       setEvents([]);
       recordingActiveRef.current = true;
-      micSendQueueRef.current = Promise.resolve();
 
-      const ws = new WebSocket(buildAsrRealtimeUrl(getCurrentAsrParams()));
+      const voiceParams = getCurrentVoiceParams();
+      const ws = new WebSocket(
+        buildVoiceRealtimeUrl({
+          ...voiceParams,
+          chunkMs: VOICE_REALTIME_CHUNK_MS,
+        }),
+      );
       wsRef.current = ws;
       ws.onmessage = (event) => {
         try {
-          handleStreamEvent(JSON.parse(String(event.data)) as AsrStreamEvent);
+          handleVoiceRealtimeEvent(JSON.parse(String(event.data)) as VoiceRealtimeEvent);
         } catch (error) {
           appendEvent(
             `websocket parse error: ${error instanceof Error ? error.message : String(error)}`,
@@ -364,6 +455,7 @@ export default function ASR() {
       };
       ws.onerror = () => {
         recordingActiveRef.current = false;
+        stopVoicePcmStreaming();
         stopMicMeter();
         stream.getTracks().forEach((track) => track.stop());
         streamRef.current = null;
@@ -375,51 +467,138 @@ export default function ASR() {
         wsRef.current = null;
         if (recordingActiveRef.current) {
           recordingActiveRef.current = false;
+          stopVoicePcmStreaming();
+          stopMicMeter();
+          stream.getTracks().forEach((track) => track.stop());
+          streamRef.current = null;
           setWorkState("idle");
           appendEvent("websocket: microphone stream closed");
         }
       };
-      ws.onopen = () => {
-        const recorder = new MediaRecorder(stream);
-        recorderRef.current = recorder;
-        ws.send(
-          JSON.stringify({
-            type: "start",
-            mime_type: recorder.mimeType || "audio/webm",
-            file_name: "microphone.webm",
-          }),
-        );
-        recorder.ondataavailable = (event) => {
-          if (event.data.size > 0 && ws.readyState === WebSocket.OPEN) {
-            const audioBlob = event.data;
-            micSendQueueRef.current = micSendQueueRef.current.then(async () => {
-              const buffer = await audioBlob.arrayBuffer();
-              if (ws.readyState === WebSocket.OPEN) {
-                ws.send(buffer);
-              }
-            });
+      ws.onopen = async () => {
+        try {
+          const VoiceAudioContext =
+            window.AudioContext ||
+            (window as Window & { webkitAudioContext?: typeof AudioContext })
+              .webkitAudioContext;
+          if (!VoiceAudioContext) {
+            throw new Error("This browser does not expose WebAudio recording APIs.");
           }
-        };
-        recorder.onstop = () => {
-          void micSendQueueRef.current.finally(() => {
-            if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ type: "finish" }));
-            }
+          const voiceAudioContext = new VoiceAudioContext({
+            sampleRate: VOICE_REALTIME_SAMPLE_RATE,
           });
+          voiceAudioContextRef.current = voiceAudioContext;
+          const source = voiceAudioContext.createMediaStreamSource(stream);
+          voiceSourceRef.current = source;
+          ws.send(
+            JSON.stringify({
+              type: "start",
+              source: "web_mic",
+              sample_rate: VOICE_REALTIME_SAMPLE_RATE,
+              channels: 1,
+              format: "pcm_s16le",
+            }),
+          );
+          const WorkletNode =
+            (window as Window & { AudioWorkletNode?: typeof AudioWorkletNode })
+              .AudioWorkletNode;
+          if (voiceAudioContext.audioWorklet && WorkletNode) {
+            const workletUrl = URL.createObjectURL(
+              new Blob(
+                [
+                  `
+class BifrostVoicePcm16Processor extends AudioWorkletProcessor {
+  process(inputs, outputs) {
+    const input = inputs[0] && inputs[0][0];
+    const output = outputs[0] && outputs[0][0];
+    if (output) {
+      output.fill(0);
+    }
+    if (input && input.length > 0) {
+      const targetRate = ${VOICE_REALTIME_SAMPLE_RATE};
+      const sourceRate = typeof sampleRate === "number" && sampleRate > 0 ? sampleRate : targetRate;
+      const outputLength = Math.max(1, Math.round((input.length * targetRate) / sourceRate));
+      const buffer = new ArrayBuffer(outputLength * 2);
+      const view = new DataView(buffer);
+      const scale = sourceRate / targetRate;
+      for (let index = 0; index < outputLength; index += 1) {
+        const position = index * scale;
+        const left = Math.min(input.length - 1, Math.floor(position));
+        const right = Math.min(input.length - 1, left + 1);
+        const ratio = position - left;
+        const normalized = input[left] + (input[right] - input[left]) * ratio;
+        const sample = Math.max(-1, Math.min(1, normalized));
+        const value = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+        view.setInt16(index * 2, value, true);
+      }
+      this.port.postMessage(buffer, [buffer]);
+    }
+    return true;
+  }
+}
+registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
+`,
+                ],
+                { type: "application/javascript" },
+              ),
+            );
+            try {
+              await voiceAudioContext.audioWorklet.addModule(workletUrl);
+            } finally {
+              URL.revokeObjectURL(workletUrl);
+            }
+            const worklet = new WorkletNode(voiceAudioContext, "bifrost-voice-pcm16", {
+              numberOfInputs: 1,
+              numberOfOutputs: 1,
+              channelCount: 1,
+            });
+            worklet.port.onmessage = (message) => {
+              if (!recordingActiveRef.current || ws.readyState !== WebSocket.OPEN) {
+                return;
+              }
+              ws.send(message.data as ArrayBuffer);
+            };
+            voiceWorkletRef.current = worklet;
+            source.connect(worklet);
+            worklet.connect(voiceAudioContext.destination);
+            appendEvent("recording: microphone Voice stream opened with AudioWorklet");
+          } else {
+            const processor = voiceAudioContext.createScriptProcessor(4096, 1, 1);
+            voiceProcessorRef.current = processor;
+            processor.onaudioprocess = (event) => {
+              if (!recordingActiveRef.current || ws.readyState !== WebSocket.OPEN) {
+                return;
+              }
+              const input = event.inputBuffer.getChannelData(0);
+              const output = event.outputBuffer.getChannelData(0);
+              output.fill(0);
+              ws.send(encodePcm16Chunk(input, voiceAudioContext.sampleRate));
+            };
+            source.connect(processor);
+            processor.connect(voiceAudioContext.destination);
+            appendEvent("recording: microphone Voice stream opened");
+          }
+        } catch (error) {
+          const text = error instanceof Error ? error.message : String(error);
+          recordingActiveRef.current = false;
+          stopVoicePcmStreaming();
           stopMicMeter();
           stream.getTracks().forEach((track) => track.stop());
           streamRef.current = null;
-        };
-        recorder.start(MIC_WINDOW_MS);
-        appendEvent("recording: microphone WebSocket stream opened");
+          setWorkState("error");
+          setErrorText(`Microphone capture failed: ${text}`);
+          appendEvent(`microphone error: ${text}`);
+          ws.close();
+        }
       };
       setWorkState("recording");
       setProgress(0);
       setErrorText("");
       setSelectedName("");
-      appendEvent("recording: microphone capture started with WebSocket streaming");
+      appendEvent("recording: microphone capture started with Voice streaming");
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
+      stopVoicePcmStreaming();
       stopMicMeter();
       setWorkState("error");
       setErrorText(`Microphone capture failed: ${text}`);
@@ -427,34 +606,32 @@ export default function ASR() {
     }
   }, [
     appendEvent,
-    getCurrentAsrParams,
-    handleStreamEvent,
+    getCurrentVoiceParams,
+    handleVoiceRealtimeEvent,
     resetTranscript,
     startMicMeter,
     stopMicMeter,
+    stopVoicePcmStreaming,
   ]);
 
   const stopRecording = useCallback(() => {
     recordingActiveRef.current = false;
+    stopVoicePcmStreaming();
     stopMicMeter();
-    if (recorderRef.current?.state === "recording") {
-      recorderRef.current.stop();
-    } else if (wsRef.current?.readyState === WebSocket.OPEN) {
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: "finish" }));
     } else if (wsRef.current) {
       wsRef.current.close();
     }
-    recorderRef.current = null;
     appendEvent("recording: microphone capture stopped");
-  }, [appendEvent, stopMicMeter]);
+  }, [appendEvent, stopMicMeter, stopVoicePcmStreaming]);
 
   const cancelWork = useCallback(() => {
     abortRef.current?.abort();
     recordingActiveRef.current = false;
-    if (recorderRef.current?.state === "recording") {
-      recorderRef.current.stop();
-      recorderRef.current = null;
-    }
+    stopVoicePcmStreaming();
     stopMicMeter();
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: "cancel" }));
@@ -466,7 +643,7 @@ export default function ASR() {
     setWorkState("idle");
     setProgress(0);
     appendEvent("transcription stopped by user");
-  }, [appendEvent, stopMicMeter]);
+  }, [appendEvent, stopMicMeter, stopVoicePcmStreaming]);
 
   const createDirectoryTask = useCallback(async () => {
     try {

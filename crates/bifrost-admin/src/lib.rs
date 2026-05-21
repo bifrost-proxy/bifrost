@@ -80,6 +80,14 @@ pub mod asr_streaming {
 pub mod asr_cli_invoke {
     pub use crate::handlers::asr_cli_invoke::{parse_asr_cli_text, run_asr_cli};
 }
+pub mod voice {
+    pub use crate::handlers::voice::{
+        apply_voice_vocabulary, discover_voice_sources, load_voice_vocabulary,
+        save_voice_vocabulary, VoiceSource, VoiceSourceStatus, VoiceVocabulary,
+        VoiceVocabularyTerm,
+    };
+    pub use crate::handlers::voice_stateful::{run_stateful_worker_stdio, StatefulVoiceConfig};
+}
 pub use ip_tls_pending::{IpTlsPendingManager, PendingIpTls, PendingIpTlsEvent};
 pub use metrics::{
     start_metrics_collector_task, MetricsCollector, MetricsSnapshot, TrafficType,

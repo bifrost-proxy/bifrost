@@ -24,9 +24,12 @@ async function installAsrMicrophoneMocks(page: Page) {
   await page.addInitScript({
     content: `
       (() => {
+        window.localStorage.removeItem("bifrost.asr.connection.v3");
         window.__asrStoppedTracks = 0;
         window.__asrClosedAudioContexts = 0;
-        window.__asrRecorderIntervals = [];
+        window.__asrVoiceSocketUrls = [];
+        window.__asrVoiceStartMessages = [];
+        window.__asrVoiceBinaryBytes = [];
 
         class FakeAnalyser {
           constructor() {
@@ -45,15 +48,62 @@ async function installAsrMicrophoneMocks(page: Page) {
         }
 
         class FakeAudioContext {
+          constructor(options) {
+            this.sampleRate = options?.sampleRate || 16000;
+            this.destination = { kind: "destination" };
+            this._processors = new Set();
+          }
+
           createAnalyser() {
             return new FakeAnalyser();
           }
 
           createMediaStreamSource() {
-            return { connect() {} };
+            return {
+              connect: (target) => {
+                if (typeof target?.onaudioprocess !== "undefined") {
+                  const processor = target;
+                  processor._timer = window.setInterval(() => {
+                    const samples = new Float32Array(160);
+                    for (let index = 0; index < samples.length; index += 1) {
+                      samples[index] = Math.sin((index / samples.length) * Math.PI * 2) * 0.2;
+                    }
+                    processor.onaudioprocess?.({
+                      inputBuffer: {
+                        getChannelData: () => samples,
+                      },
+                      outputBuffer: {
+                        getChannelData: () => new Float32Array(samples.length),
+                      },
+                    });
+                  }, 40);
+                  this._processors.add(processor);
+                }
+              },
+              disconnect() {},
+            };
+          }
+
+          createScriptProcessor() {
+            const processor = {
+              onaudioprocess: null,
+              _timer: null,
+              connect() {},
+              disconnect() {
+                if (this._timer) {
+                  window.clearInterval(this._timer);
+                  this._timer = null;
+                }
+              },
+            };
+            return processor;
           }
 
           close() {
+            for (const processor of this._processors) {
+              processor.disconnect();
+            }
+            this._processors.clear();
             window.__asrClosedAudioContexts += 1;
             return Promise.resolve();
           }
@@ -82,40 +132,16 @@ async function installAsrMicrophoneMocks(page: Page) {
           configurable: true,
         });
 
-        class FakeMediaRecorder {
-          constructor() {
-            this.state = "inactive";
-            this.mimeType = "audio/webm";
-          }
-
-          start(intervalMs) {
-            this.state = "recording";
-            window.__asrRecorderIntervals.push(intervalMs);
-            this._timer = window.setInterval(() => {
-              this.ondataavailable?.({
-                data: new Blob(["asr-audio"], { type: "audio/webm" }),
-              });
-            }, Math.min(intervalMs || 1000, 200));
-          }
-
-          stop() {
-            if (this.state !== "recording") {
-              return;
-            }
-            this.state = "inactive";
-            window.clearInterval(this._timer);
-            this.onstop?.();
-          }
-        }
-
         class FakeWebSocket {
           static CONNECTING = 0;
           static OPEN = 1;
           static CLOSING = 2;
           static CLOSED = 3;
 
-          constructor() {
+          constructor(url) {
+            this.url = String(url);
             this.readyState = FakeWebSocket.CONNECTING;
+            window.__asrVoiceSocketUrls.push(this.url);
             window.setTimeout(() => {
               this.readyState = FakeWebSocket.OPEN;
               this.onopen?.();
@@ -133,22 +159,19 @@ async function installAsrMicrophoneMocks(page: Page) {
             if (typeof payload === "string") {
               const message = JSON.parse(payload);
               if (message.type === "start") {
+                window.__asrVoiceStartMessages.push(message);
                 this._emit({
-                  type: "stream",
-                  phase: "stream",
-                  status: "ok",
-                  progress: 50,
-                  message: "mock stream window",
-                  detail: "processed_ms=1000",
+                  type: "source_ready",
+                  source: "web_mic",
+                  message: "mock voice source started",
+                  detail: "sample_rate=16000; channels=1; format=pcm_s16le",
                 });
                 window.setTimeout(() => {
                   this._emit({
-                    type: "partial",
-                    index: 1,
-                    start_ms: 0,
-                    end_ms: 1000,
-                    stable_start_ms: 0,
-                    stable_end_ms: 800,
+                    type: "asr_partial",
+                    window_index: 1,
+                    captured_at_ms: 400,
+                    emitted_at_ms: 450,
                     text: "测试",
                     delta: "测试",
                     committed: "",
@@ -156,12 +179,9 @@ async function installAsrMicrophoneMocks(page: Page) {
                 }, 120);
               } else if (message.type === "finish") {
                 this._emit({
-                  type: "final",
-                  index: 1,
-                  start_ms: 0,
-                  end_ms: 1000,
-                  stable_start_ms: 0,
-                  stable_end_ms: 1000,
+                  type: "asr_final_utterance",
+                  window_index: 1,
+                  emitted_at_ms: 1000,
                   text: "测试",
                   delta: "测试",
                   committed: "测试",
@@ -174,13 +194,15 @@ async function installAsrMicrophoneMocks(page: Page) {
               return;
             }
 
+            window.__asrVoiceBinaryBytes.push(payload.byteLength || payload.size || 0);
             this._emit({
-              type: "stream",
-              phase: "stream",
-              status: "ok",
-              progress: 55,
-              message: "mock binary audio received",
-              detail: "processed_ms=4000",
+              type: "asr_partial",
+              window_index: 2,
+              captured_at_ms: 800,
+              emitted_at_ms: 850,
+              text: "测试",
+              delta: "测试",
+              committed: "",
             });
           }
 
@@ -200,10 +222,6 @@ async function installAsrMicrophoneMocks(page: Page) {
           }
         }
 
-        Object.defineProperty(window, "MediaRecorder", {
-          value: FakeMediaRecorder,
-          configurable: true,
-        });
         Object.defineProperty(window, "WebSocket", {
           value: FakeWebSocket,
           configurable: true,
@@ -280,7 +298,7 @@ test("ASR microphone input shows live level meter and resets on stop/cancel", as
   await expect(page.getByTestId("asr-file-progress")).toHaveCount(0);
   await expect(meter).toContainText("Live microphone level");
   await waitForLiveMeter(page);
-  await expect(page.getByText("partial[1]: 0-800ms")).toBeVisible();
+  await expect(page.getByText("partial[1]: captured 400ms")).toBeVisible();
 
   await page.getByRole("button", { name: "Stop Mic" }).click();
   await expect(meter).toContainText("Mic level");
@@ -297,13 +315,30 @@ test("ASR microphone input shows live level meter and resets on stop/cancel", as
       .__asrStoppedTracks,
     closedAudioContexts: (window as Window & { __asrClosedAudioContexts: number })
       .__asrClosedAudioContexts,
-    recorderIntervals: (
-      window as Window & { __asrRecorderIntervals: number[] }
-    ).__asrRecorderIntervals,
+    voiceSocketUrls: (window as Window & { __asrVoiceSocketUrls: string[] })
+      .__asrVoiceSocketUrls,
+    voiceStartMessages: (
+      window as Window & { __asrVoiceStartMessages: Array<Record<string, unknown>> }
+    ).__asrVoiceStartMessages,
+    voiceBinaryBytes: (window as Window & { __asrVoiceBinaryBytes: number[] })
+      .__asrVoiceBinaryBytes,
   }));
   expect(cleanupCounts.stoppedTracks).toBeGreaterThanOrEqual(2);
   expect(cleanupCounts.closedAudioContexts).toBeGreaterThanOrEqual(2);
-  expect(cleanupCounts.recorderIntervals).toContain(1000);
+  const voiceSocketUrl = cleanupCounts.voiceSocketUrls.find((url) =>
+    url.includes("/api/voice/listen-ws"),
+  );
+  expect(voiceSocketUrl).toBeTruthy();
+  expect(voiceSocketUrl).toContain("provider=qwen3_stateful_streaming");
+  expect(voiceSocketUrl).toContain("model=Qwen3-ASR-0.6B");
+  expect(cleanupCounts.voiceStartMessages[0]).toMatchObject({
+    type: "start",
+    source: "web_mic",
+    sample_rate: 16000,
+    channels: 1,
+    format: "pcm_s16le",
+  });
+  expect(cleanupCounts.voiceBinaryBytes.some((bytes) => bytes > 0)).toBe(true);
 
   await page.locator('input[type="file"]').setInputFiles({
     name: "sample.wav",
