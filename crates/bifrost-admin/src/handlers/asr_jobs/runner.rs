@@ -7,7 +7,32 @@ pub(crate) async fn ensure_scheduler_started() {
         return;
     }
     *started = true;
-    repair_interrupted_processing_records_on_startup();
+    let recovery_tasks = recover_interrupted_task_runs_on_startup();
+    start_external_device_event_watcher();
+    for task in recovery_tasks {
+        let task_id = task.id.clone();
+        match spawn_directory_task_run_background(task) {
+            Ok(()) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    "re-enqueued interrupted ASR directory task on scheduler startup"
+                );
+            }
+            Err(error) if error == "ASR task is already running" => {
+                tracing::debug!(
+                    task_id = %task_id,
+                    "skipped interrupted ASR directory task recovery because it is already running"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    error = %error,
+                    "failed to re-enqueue interrupted ASR directory task on scheduler startup"
+                );
+            }
+        }
+    }
     tokio::spawn(async {
         let mut interval = tokio::time::interval(Duration::from_secs(10));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -25,31 +50,111 @@ pub(crate) async fn ensure_scheduler_started() {
                 .collect::<Vec<_>>();
             for task in due {
                 let task_id = task.id.clone();
-                {
-                    let mut running = RUNNING_TASKS.lock().unwrap();
-                    if running.contains(&task_id) {
-                        continue; // skip if already running
+                if let Err(error) = spawn_directory_task_run_background(task) {
+                    if error != "ASR task is already running" {
+                        warn!(
+                            task_id = %task_id,
+                            error = %error,
+                            "failed to start due ASR scheduled directory task"
+                        );
                     }
-                    running.insert(task_id.clone());
                 }
-                tokio::spawn(async move {
-                    if let Err(error) = run_directory_task(task.clone()).await {
-                        if error == ASR_TASK_PAUSED_MESSAGE {
-                            tracing::info!(
-                                task_id = %task.id,
-                                "ASR scheduled directory task paused and released compute"
-                            );
-                        } else {
-                            warn!(task_id = %task.id, error = %error, "ASR scheduled directory task failed");
-                            update_task_after_run(&task.id, Some(error)).ok();
-                        }
-                    }
-                    RUNNING_TASKS.lock().unwrap().remove(&task_id);
-                });
             }
         }
     });
 }
+
+#[cfg(target_os = "macos")]
+async fn sync_external_device_tasks(trigger: &'static str) {
+    for task in load_tasks().tasks.into_iter().filter(|task| {
+        task.import_policy.enabled && !task.paused && !task.external_devices.is_empty()
+    }) {
+        sync_external_device_task(task, trigger).await;
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn sync_external_device_task(task: AsrDirectoryTask, trigger: &'static str) {
+    if RUNNING_TASKS.lock().unwrap().contains(&task.id) {
+        return;
+    }
+    match sync_external_devices_for_task(&task).await {
+        Ok(imported) if imported > 0 && task.import_policy.auto_run_after_import => {
+            tracing::info!(
+                task_id = %task.id,
+                imported,
+                trigger,
+                "external device sync imported files"
+            );
+            let _ = spawn_directory_task_run(task);
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(
+                task_id = %task.id,
+                error = %error,
+                trigger,
+                "external device sync failed"
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn start_external_device_event_watcher() {
+    tokio::spawn(async {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        let mut child = match Command::new("diskutil")
+            .arg("activity")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
+                tracing::warn!(%error, "failed to start macOS Disk Arbitration activity watcher");
+                return;
+            }
+        };
+        let Some(stdout) = child.stdout.take() else {
+            tracing::warn!("macOS Disk Arbitration activity watcher has no stdout");
+            let _ = child.kill().await;
+            return;
+        };
+        let mut lines = BufReader::new(stdout).lines();
+        let mut last_trigger_ms = 0u64;
+        while let Ok(Some(line)) = lines.next_line().await {
+            if !line.contains("DiskAppeared")
+                && !line.contains("DescriptionChanged")
+                && !line.contains("DiskDisappeared")
+            {
+                continue;
+            }
+            let now = now_ms();
+            if now.saturating_sub(last_trigger_ms) < 2_000 {
+                continue;
+            }
+            last_trigger_ms = now;
+            tokio::spawn(async {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                sync_external_device_tasks("macos_disk_arbitration").await;
+            });
+        }
+        match child.wait().await {
+            Ok(status) => {
+                tracing::warn!(%status, "macOS Disk Arbitration activity watcher exited");
+            }
+            Err(error) => {
+                tracing::warn!(%error, "macOS Disk Arbitration activity watcher wait failed");
+            }
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn start_external_device_event_watcher() {}
 
 async fn run_directory_task(
     task: AsrDirectoryTask,
@@ -76,6 +181,7 @@ async fn run_directory_task(
             .entry(key)
             .or_insert_with(|| pending_record(&task.id, path));
     }
+    apply_content_hash_dedupe(&task, &discovered, &mut files)?;
     save_file_store(&task.id, &files)?;
 
     // Only re-process files that are truly pending or failed outright.
@@ -226,6 +332,47 @@ async fn run_directory_task(
     Ok((updated, processed_now, failed_now))
 }
 
+fn spawn_directory_task_run_background(task: AsrDirectoryTask) -> Result<(), String> {
+    FORCE_PAUSED_TASKS.lock().unwrap().remove(&task.id);
+    let running_guard =
+        RunningTaskGuard::acquire(&task.id).map_err(|_| "ASR task is already running".to_string())?;
+
+    let task_id = task.id.clone();
+    let task_clone = task.clone();
+    tokio::spawn(async move {
+        let running_guard = running_guard;
+        let result = run_directory_task(task_clone.clone()).await;
+        match &result {
+            Ok((_updated, processed, failed)) => {
+                tracing::info!(
+                    task_id = %task_clone.id, processed = processed, failed = failed,
+                    "ASR directory task completed"
+                );
+            }
+            Err(error) if error == ASR_TASK_PAUSED_MESSAGE => {
+                tracing::info!(
+                    task_id = %task_clone.id,
+                    "ASR directory task paused and released compute"
+                );
+            }
+            Err(error) => {
+                let _ = update_task_after_run(&task_clone.id, Some(error.clone()));
+                tracing::warn!(
+                    task_id = %task_clone.id, error = %error,
+                    "ASR directory task failed"
+                );
+            }
+        }
+        drop(running_guard);
+        tracing::debug!(
+            task_id = %task_id,
+            "released ASR directory task running marker"
+        );
+    });
+
+    Ok(())
+}
+
 fn refresh_task_daily_summaries(task: &AsrDirectoryTask) -> Result<Vec<PathBuf>, String> {
     let task_output_dir = text_output_dir(&bifrost_storage::data_dir()).join(&task.id);
     let paths = generate_daily_summaries(&task_output_dir, &task.name)?;
@@ -313,6 +460,14 @@ async fn process_pending_files(
             return Err(ASR_TASK_PAUSED_MESSAGE.to_string());
         }
         let key = source_key(path);
+        let existing_content_hash = files
+            .files
+            .get(&key)
+            .and_then(|record| record.content_hash.clone());
+        let existing_hash_algorithm = files
+            .files
+            .get(&key)
+            .and_then(|record| record.content_hash_algorithm.clone());
         let existing_memory_limit_hints = files
             .files
             .get(&key)
@@ -428,6 +583,10 @@ async fn process_pending_files(
                         source_modified_ms: None,
                         source_created_at_ms: None,
                         source_created_at_source: None,
+                        content_hash: None,
+                        content_hash_algorithm: None,
+                        duplicate_of_source_key: None,
+                        transcript_alias: None,
                         media_duration_ms: None,
                         status: FileStatus::Processing,
                         output_text_path: None,
@@ -535,11 +694,14 @@ async fn process_pending_files(
                 record.output_text_path = Some(output.text_path);
                 record.output_metadata_path = Some(output.metadata_path);
                 record.output_timeline_path = Some(output.timeline_path);
+                record.content_hash = existing_content_hash.clone();
+                record.content_hash_algorithm = existing_hash_algorithm.clone();
                 record.text_chars = output.text.chars().count();
                 record.finished_at_ms = Some(now_ms());
                 record.progress_current = Some(file_index + 1);
                 record.progress_total = Some(total_pending);
-                files.files.insert(key, record);
+                files.files.insert(key.clone(), record.clone());
+                index_completed_file_hash(task, &key, &record);
                 processed_now += 1;
             }
             Err(error) if error == ASR_TASK_PAUSED_MESSAGE => {

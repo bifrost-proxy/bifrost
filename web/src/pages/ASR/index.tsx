@@ -16,11 +16,14 @@ import {
   loadAsrParams,
   pauseAsrTask,
   resumeAsrTask,
+  runAsrExternalImport,
   runAsrTask,
   streamAsrTranscription,
+  updateAsrTask,
   type AsrDirectoryTask,
   type AsrDirectoryTaskDetail,
   type AsrDailyAgentReportDetail,
+  type AsrExternalDeviceBinding,
   type AsrStatus,
   type AsrStreamEvent,
   type AsrTaskDailyDocumentDetail,
@@ -468,6 +471,7 @@ export default function ASR() {
   const createDirectoryTask = useCallback(async () => {
     try {
       const values = await taskForm.validateFields();
+      const externalDevices = parseExternalDeviceBindings(values.external_devices);
       await createAsrTask({
         name: values.name,
         audio_dir: values.audio_dir,
@@ -477,6 +481,19 @@ export default function ASR() {
         language: getCurrentAsrParams().language,
         model: getCurrentAsrParams().model,
         runtime_strategy: values.runtime_strategy,
+        external_devices: externalDevices,
+        import_policy: externalDevices.length
+          ? {
+              enabled: true,
+              file_stable_secs: 10,
+              min_free_bytes: 10 * 1024 * 1024 * 1024,
+              max_file_bytes: 50 * 1024 * 1024 * 1024,
+              auto_run_after_import: true,
+              content_hash_dedupe_enabled: true,
+              content_hash_algorithm: "sha256",
+              delete_source_after_import: false,
+            }
+          : undefined,
       });
       taskForm.resetFields();
       await refreshTasks();
@@ -490,6 +507,58 @@ export default function ASR() {
       return false;
     }
   }, [getCurrentAsrParams, refreshTasks, taskForm]);
+
+  const updateDirectoryTask = useCallback(
+    async (id: string) => {
+      try {
+        const values = await taskForm.validateFields();
+        const externalDevices = parseExternalDeviceBindings(values.external_devices);
+        const updated = await updateAsrTask(id, {
+          name: values.name,
+          audio_dir: values.audio_dir,
+          recursive: values.recursive,
+          enabled: values.enabled,
+          schedule: buildTaskSchedule(values),
+          language: getCurrentAsrParams().language,
+          model: getCurrentAsrParams().model,
+          runtime_strategy: values.runtime_strategy,
+          external_devices: externalDevices,
+          import_policy: externalDevices.length
+            ? {
+                enabled: true,
+                file_stable_secs: 10,
+                min_free_bytes: 10 * 1024 * 1024 * 1024,
+                max_file_bytes: 50 * 1024 * 1024 * 1024,
+                auto_run_after_import: true,
+                content_hash_dedupe_enabled: true,
+                content_hash_algorithm: "sha256",
+                delete_source_after_import: false,
+              }
+            : {
+                enabled: false,
+                file_stable_secs: 10,
+                min_free_bytes: 10 * 1024 * 1024 * 1024,
+                max_file_bytes: 50 * 1024 * 1024 * 1024,
+                auto_run_after_import: true,
+                content_hash_dedupe_enabled: true,
+                content_hash_algorithm: "sha256",
+                delete_source_after_import: false,
+              },
+        });
+        setTaskDetail((previous) => (previous?.id === id ? { ...previous, ...updated } : previous));
+        await refreshTasks();
+        message.success("ASR directory task updated");
+        return true;
+      } catch (error) {
+        if (error && typeof error === "object" && "errorFields" in error) {
+          return false;
+        }
+        message.error(error instanceof Error ? error.message : "Failed to update ASR task");
+        return false;
+      }
+    },
+    [getCurrentAsrParams, refreshTasks, taskForm],
+  );
 
   const loadTaskDetail = useCallback(async (id: string) => {
     setTaskDetail(null);
@@ -810,10 +879,28 @@ export default function ASR() {
     [loadTaskDetail, refreshTasks, taskDetail?.id],
   );
 
-  const removeDirectoryTask = useCallback(
+  const runExternalImport = useCallback(
     async (id: string) => {
       try {
-        await deleteAsrTask(id);
+        const result = await runAsrExternalImport(id);
+        message.success(result.message);
+        if (taskDetail?.id === id) {
+          void loadTaskDetail(id);
+        }
+        await refreshTasks();
+      } catch (error) {
+        message.error(
+          error instanceof Error ? error.message : "Failed to import external device data",
+        );
+      }
+    },
+    [loadTaskDetail, refreshTasks, taskDetail?.id],
+  );
+
+  const removeDirectoryTask = useCallback(
+    async (id: string, confirmName: string) => {
+      try {
+        await deleteAsrTask(id, confirmName);
         if (taskDetail?.id === id) {
           closeTaskDetail();
         }
@@ -874,11 +961,13 @@ export default function ASR() {
         tasks={tasks}
         tasksLoading={tasksLoading}
         onCreateTask={createDirectoryTask}
+        onUpdateTask={updateDirectoryTask}
+        onRunExternalImport={runExternalImport}
         onOpenTask={openTaskDetail}
         onRunTask={(id) => void runDirectoryTask(id)}
         onPauseTask={(id, force) => void pauseDirectoryTask(id, force)}
         onResumeTask={(id) => void resumeDirectoryTask(id)}
-        onRemoveTask={(id) => void removeDirectoryTask(id)}
+        onRemoveTask={(id, confirmName) => void removeDirectoryTask(id, confirmName)}
       />
       <SpeechWorkbench
         token={token}
@@ -902,4 +991,13 @@ export default function ASR() {
       />
     </div>
   );
+}
+
+function parseExternalDeviceBindings(value: unknown): AsrExternalDeviceBinding[] {
+  return String(value || "")
+    .split(/[,\n]/)
+    .map((name) => name.trim())
+    .filter(Boolean)
+    .filter((name, index, names) => names.indexOf(name) === index)
+    .map((name): AsrExternalDeviceBinding => ({ name, enabled: true }));
 }

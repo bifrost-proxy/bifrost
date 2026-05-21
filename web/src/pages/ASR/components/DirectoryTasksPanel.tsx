@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormInstance } from "antd";
 import {
   Button,
@@ -22,13 +22,53 @@ import {
   AudioOutlined,
   PauseCircleOutlined,
   PlayCircleOutlined,
+  SettingOutlined,
   PlusOutlined,
+  ImportOutlined,
   StopOutlined,
 } from "@ant-design/icons";
-import type { AsrDirectoryTask } from "../../../api/asr";
+import type { AsrDirectoryTask, AsrExternalVolume, AsrRuntimeStrategy } from "../../../api/asr";
+import { listAsrExternalVolumes } from "../../../api/asr";
 import { formatSchedule, formatTime } from "../asrUtils";
 
 const { Text } = Typography;
+
+const RUNTIME_STRATEGY_OPTIONS: Array<{
+  value: AsrRuntimeStrategy;
+  label: string;
+  description: string;
+}> = [
+  {
+    value: "reuse_per_file",
+    label: "Reuse / file",
+    description:
+      "Default for most offline tasks. Reuses one managed ASR server within each file, then releases it at the file boundary.",
+  },
+  {
+    value: "fork_per_chunk",
+    label: "Fork / chunk",
+    description:
+      "Most isolated mode. Starts a fresh ASR process for every chunk, which is slower but useful when debugging stability issues.",
+  },
+  {
+    value: "reuse_server",
+    label: "Reuse server",
+    description:
+      "Keeps one ASR server for the whole task run. Faster when stable, but can carry memory or server-state issues across files.",
+  },
+  {
+    value: "auto",
+    label: "Auto fallback",
+    description:
+      "Starts with server reuse and automatically falls back to isolated chunk processing after server errors or clear speed regression.",
+  },
+  {
+    value: "compare",
+    label: "Compare",
+    description:
+      "Diagnostic mode. Runs both isolated and server paths for each chunk, keeps the isolated output, and records performance differences.",
+  },
+];
 
 interface DirectoryTasksPanelProps {
   taskForm: FormInstance;
@@ -36,11 +76,13 @@ interface DirectoryTasksPanelProps {
   tasks: AsrDirectoryTask[];
   tasksLoading: boolean;
   onCreateTask: () => boolean | Promise<boolean>;
+  onUpdateTask: (id: string) => boolean | Promise<boolean>;
+  onRunExternalImport: (id: string) => void | Promise<void>;
   onOpenTask: (id: string) => void;
   onRunTask: (id: string) => void;
   onPauseTask: (id: string, force?: boolean) => void;
   onResumeTask: (id: string) => void;
-  onRemoveTask: (id: string) => void;
+  onRemoveTask: (id: string, confirmName: string) => void;
 }
 
 export default function DirectoryTasksPanel({
@@ -49,6 +91,8 @@ export default function DirectoryTasksPanel({
   tasks,
   tasksLoading,
   onCreateTask,
+  onUpdateTask,
+  onRunExternalImport,
   onOpenTask,
   onRunTask,
   onPauseTask,
@@ -56,17 +100,142 @@ export default function DirectoryTasksPanel({
   onRemoveTask,
 }: DirectoryTasksPanelProps) {
   const [createOpen, setCreateOpen] = useState(false);
+  const [editingTask, setEditingTask] = useState<AsrDirectoryTask | null>(null);
   const [creating, setCreating] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<AsrDirectoryTask | null>(null);
+  const [deleteConfirmName, setDeleteConfirmName] = useState("");
+  const [volumePrompt, setVolumePrompt] = useState<{
+    task: AsrDirectoryTask | null;
+    volumes: AsrExternalVolume[];
+  } | null>(null);
+  const [volumePromptLoading, setVolumePromptLoading] = useState(false);
+  const promptedVolumeKeysRef = useRef(new Set<string>());
+  const volumePromptOpenRef = useRef(false);
 
-  const handleCreate = async () => {
+  const configOpen = createOpen || Boolean(editingTask);
+  const configTitle = editingTask ? `Edit Directory Task: ${editingTask.name}` : "New Directory Task";
+
+  const openCreate = () => {
+    setEditingTask(null);
+    promptedVolumeKeysRef.current.clear();
+    taskForm.resetFields();
+    taskForm.setFieldsValue(defaultTaskFormValues());
+    setCreateOpen(true);
+  };
+
+  const openEdit = (task: AsrDirectoryTask) => {
+    setCreateOpen(false);
+    setEditingTask(task);
+    promptedVolumeKeysRef.current.clear();
+    taskForm.setFieldsValue(taskToFormValues(task));
+  };
+
+  const closeConfig = () => {
+    setCreateOpen(false);
+    setEditingTask(null);
+    setVolumePrompt(null);
+    setVolumePromptLoading(false);
+    volumePromptOpenRef.current = false;
+    promptedVolumeKeysRef.current.clear();
+  };
+
+  const promptForConnectedVolumes = useCallback(
+    async (task: AsrDirectoryTask | null) => {
+      if (volumePromptOpenRef.current) {
+        return;
+      }
+      let volumes: AsrExternalVolume[] = [];
+      try {
+        volumes = (await listAsrExternalVolumes()).filter(
+          (volume) => volume.kind === "external" && !volume.read_only,
+        );
+      } catch {
+        return;
+      }
+      const currentNames = new Set(
+        String(taskForm.getFieldValue("external_devices") || "")
+          .split(/[,\n]/)
+          .map((name) => name.trim())
+          .filter(Boolean),
+      );
+      const candidates = volumes.filter((volume) => {
+        const key = `${task?.id ?? "new"}:${volume.name}:${volume.volume_uuid ?? volume.mount_path}`;
+        return !currentNames.has(volume.name) && !promptedVolumeKeysRef.current.has(key);
+      });
+      if (candidates.length === 0) {
+        return;
+      }
+      candidates.forEach((volume) => {
+        const key = `${task?.id ?? "new"}:${volume.name}:${volume.volume_uuid ?? volume.mount_path}`;
+        promptedVolumeKeysRef.current.add(key);
+      });
+      volumePromptOpenRef.current = true;
+      setVolumePrompt({ task, volumes: candidates });
+    },
+    [taskForm],
+  );
+
+  useEffect(() => {
+    if (!configOpen) {
+      return;
+    }
+
+    let stopped = false;
+    const prompt = () => {
+      if (!stopped) {
+        void promptForConnectedVolumes(editingTask);
+      }
+    };
+
+    prompt();
+    const timer = window.setInterval(prompt, 2_000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [configOpen, editingTask, promptForConnectedVolumes]);
+
+  const handleSave = async () => {
     setCreating(true);
     try {
-      const ok = await onCreateTask();
+      const ok = editingTask ? await onUpdateTask(editingTask.id) : await onCreateTask();
       if (ok) {
-        setCreateOpen(false);
+        closeConfig();
       }
     } finally {
       setCreating(false);
+    }
+  };
+
+  const closeVolumePrompt = () => {
+    setVolumePrompt(null);
+    setVolumePromptLoading(false);
+    volumePromptOpenRef.current = false;
+  };
+
+  const addPromptedVolumes = async () => {
+    if (!volumePrompt) {
+      return;
+    }
+    setVolumePromptLoading(true);
+    try {
+      const existing = String(taskForm.getFieldValue("external_devices") || "")
+        .split(/[,\n]/)
+        .map((name) => name.trim())
+        .filter(Boolean);
+      const names = Array.from(
+        new Set([...existing, ...volumePrompt.volumes.map((volume) => volume.name)]),
+      );
+      taskForm.setFieldsValue({
+        external_devices: names.join("\n"),
+      });
+      if (volumePrompt.task) {
+        await onUpdateTask(volumePrompt.task.id);
+        await onRunExternalImport(volumePrompt.task.id);
+      }
+      closeVolumePrompt();
+    } finally {
+      setVolumePromptLoading(false);
     }
   };
 
@@ -83,7 +252,7 @@ export default function DirectoryTasksPanel({
         <Button
           type="primary"
           icon={<PlusOutlined />}
-          onClick={() => setCreateOpen(true)}
+          onClick={openCreate}
         >
           New
         </Button>
@@ -91,12 +260,12 @@ export default function DirectoryTasksPanel({
       style={{ marginTop: 16 }}
     >
       <Modal
-        title="New Directory Task"
-        open={createOpen}
-        okText="Create"
+        title={configTitle}
+        open={configOpen}
+        okText={editingTask ? "Save" : "Create"}
         confirmLoading={creating}
-        onOk={() => void handleCreate()}
-        onCancel={() => setCreateOpen(false)}
+        onOk={() => void handleSave()}
+        onCancel={closeConfig}
         destroyOnClose={false}
         width={860}
       >
@@ -196,14 +365,26 @@ export default function DirectoryTasksPanel({
             <Col xs={24} md={8}>
               <Form.Item name="runtime_strategy" label="Runtime">
                 <Select
-                  options={[
-                    { value: "reuse_per_file", label: "Reuse / file" },
-                    { value: "fork_per_chunk", label: "Fork / chunk" },
-                    { value: "reuse_server", label: "Reuse server" },
-                    { value: "auto", label: "Auto fallback" },
-                    { value: "compare", label: "Compare" },
-                  ]}
-                />
+                  data-testid="asr-runtime-strategy-select"
+                  listHeight={420}
+                  optionLabelProp="label"
+                  popupMatchSelectWidth={false}
+                >
+                  {RUNTIME_STRATEGY_OPTIONS.map((option) => (
+                    <Select.Option key={option.value} value={option.value} label={option.label}>
+                      <Space
+                        direction="vertical"
+                        size={2}
+                        style={{ maxWidth: 420, whiteSpace: "normal" }}
+                      >
+                        <Text strong>{option.label}</Text>
+                        <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.4 }}>
+                          {option.description}
+                        </Text>
+                      </Space>
+                    </Select.Option>
+                  ))}
+                </Select>
               </Form.Item>
             </Col>
             <Col xs={12} md={8}>
@@ -215,6 +396,18 @@ export default function DirectoryTasksPanel({
               <Form.Item name="enabled" label="Enabled" valuePropName="checked">
                 <Switch />
               </Form.Item>
+            </Col>
+            <Col xs={24}>
+              <Form.Item name="external_devices" label="External Devices">
+                <Input.TextArea
+                  rows={2}
+                  placeholder="Optional device names, one per line or comma-separated, e.g. LEFT, RIGHT"
+                />
+              </Form.Item>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                Matching mounted devices are imported into Audio Directory under a root folder with
+                the same device name. Imported files keep their original relative paths.
+              </Text>
             </Col>
           </Row>
         </Form>
@@ -322,6 +515,16 @@ export default function DirectoryTasksPanel({
                 >
                   {record.summary.running ? "Running..." : "Run"}
                 </Button>
+                {record.external_devices?.length ? (
+                  <Button
+                    size="small"
+                    icon={<ImportOutlined />}
+                    disabled={record.summary.running || Boolean(record.paused)}
+                    onClick={() => onRunExternalImport(record.id)}
+                  >
+                    Import External
+                  </Button>
+                ) : null}
                 {record.paused ? (
                   <Button
                     size="small"
@@ -351,19 +554,151 @@ export default function DirectoryTasksPanel({
                     </Button>
                   </Popconfirm>
                 ) : null}
-                <Popconfirm
-                  title="Delete this ASR task?"
-                  onConfirm={() => onRemoveTask(record.id)}
+                <Button
+                  size="small"
+                  icon={<SettingOutlined />}
+                  onClick={() => openEdit(record)}
                 >
-                  <Button size="small" danger>
-                    Delete
-                  </Button>
-                </Popconfirm>
+                  Edit
+                </Button>
+                <Button
+                  size="small"
+                  danger
+                  onClick={() => {
+                    setDeleteTarget(record);
+                    setDeleteConfirmName("");
+                  }}
+                >
+                  Delete
+                </Button>
               </Space>
             ),
           },
         ]}
       />
+      <Modal
+        title="Delete ASR task"
+        open={Boolean(deleteTarget)}
+        okText="Delete"
+        okButtonProps={{
+          danger: true,
+          disabled: !deleteTarget || deleteConfirmName !== deleteTarget.name,
+        }}
+        onOk={() => {
+          if (!deleteTarget) return;
+          onRemoveTask(deleteTarget.id, deleteConfirmName);
+          setDeleteTarget(null);
+          setDeleteConfirmName("");
+        }}
+        onCancel={() => {
+          setDeleteTarget(null);
+          setDeleteConfirmName("");
+        }}
+      >
+        <Space direction="vertical" style={{ width: "100%" }}>
+          <Text>
+            This is a destructive operation. Type the full task name to confirm.
+          </Text>
+          {deleteTarget ? (
+            <>
+              <Text strong>{deleteTarget.name}</Text>
+              <Text type="secondary">{deleteTarget.audio_dir}</Text>
+            </>
+          ) : null}
+          <Input
+            value={deleteConfirmName}
+            placeholder="Type task name"
+            onChange={(event) => setDeleteConfirmName(event.target.value)}
+          />
+        </Space>
+      </Modal>
+      <Modal
+        title={
+          volumePrompt && volumePrompt.volumes.length === 1
+            ? "External device detected"
+            : "External devices detected"
+        }
+        open={Boolean(volumePrompt)}
+        okText="Add"
+        cancelText="Skip"
+        confirmLoading={volumePromptLoading}
+        onOk={() => void addPromptedVolumes()}
+        onCancel={closeVolumePrompt}
+        destroyOnClose
+      >
+        {volumePrompt ? (
+          <Space direction="vertical" size={8} style={{ width: "100%" }}>
+            <Text type="secondary">
+              {volumePrompt.task
+                ? "Add the following device to this task and import its data."
+                : "Add the following device to this task configuration."}
+            </Text>
+            {volumePrompt.volumes.map((volume) => (
+              <Card key={`${volume.name}:${volume.mount_path}`} size="small">
+                <Space direction="vertical" size={2}>
+                  <Text strong>{volume.name}</Text>
+                  <Text type="secondary">{volume.mount_path}</Text>
+                </Space>
+              </Card>
+            ))}
+          </Space>
+        ) : null}
+      </Modal>
     </Card>
   );
+}
+
+function defaultTaskFormValues() {
+  return {
+    recursive: true,
+    enabled: true,
+    schedule_kind: "daily",
+    schedule_time: "02:00",
+    schedule_weekday: 1,
+    schedule_day: 1,
+    schedule_minute: 0,
+    runtime_strategy: "reuse_per_file",
+    external_devices: "",
+  };
+}
+
+function taskToFormValues(task: AsrDirectoryTask) {
+  const scheduleValues =
+    task.schedule.kind === "hourly"
+      ? {
+          schedule_kind: "hourly",
+          schedule_minute: task.schedule.minute,
+        }
+      : task.schedule.kind === "weekly"
+        ? {
+            schedule_kind: "weekly",
+            schedule_weekday: task.schedule.weekday,
+            schedule_time: `${String(task.schedule.hour).padStart(2, "0")}:${String(
+              task.schedule.minute,
+            ).padStart(2, "0")}`,
+          }
+        : task.schedule.kind === "monthly"
+          ? {
+              schedule_kind: "monthly",
+              schedule_day: task.schedule.day,
+              schedule_time: `${String(task.schedule.hour).padStart(2, "0")}:${String(
+                task.schedule.minute,
+              ).padStart(2, "0")}`,
+            }
+          : {
+              schedule_kind: "daily",
+              schedule_time: `${String(task.schedule.hour).padStart(2, "0")}:${String(
+                task.schedule.minute,
+              ).padStart(2, "0")}`,
+            };
+  return {
+    ...defaultTaskFormValues(),
+    ...scheduleValues,
+    name: task.name,
+    audio_dir: task.audio_dir,
+    recursive: task.recursive,
+    enabled: task.enabled,
+    runtime_strategy: task.runtime_strategy,
+    external_devices: (task.external_devices ?? []).map((device) => device.name).join("\n"),
+  };
 }

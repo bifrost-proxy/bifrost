@@ -6,6 +6,8 @@ async fn get_daily_agent_config_response(task_id: &str) -> Response<BoxBody> {
     };
 
     let workspace = read_workspace_status(&task);
+    let processed = load_daily_agent_processed_state(task_id);
+    let report_index_status = build_daily_agent_report_index_status(task_id, &processed);
 
     let response = serde_json::json!({
         "task_id": task.id,
@@ -19,6 +21,7 @@ async fn get_daily_agent_config_response(task_id: &str) -> Response<BoxBody> {
             "im_delivery": task.daily_agent.im_delivery,
         },
         "workspace": workspace,
+        "report_index_status": report_index_status,
         "last_run": {
             "run_id": task.daily_agent.last_run_id,
             "status": task.daily_agent.last_status,
@@ -322,64 +325,6 @@ fn get_daily_agent_runs_response(task_id: &str) -> Response<BoxBody> {
     }))
 }
 
-fn daily_agent_report_dirs_for_task(task_id: &str) -> Vec<PathBuf> {
-    let daily_dir = daily_dir_for_task(task_id);
-    let mut exact_lower = Vec::new();
-    let mut case_compat = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&daily_dir) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
-            if name == "report" {
-                exact_lower.push(path);
-            } else if name.eq_ignore_ascii_case("report") {
-                case_compat.push(path);
-            }
-        }
-    }
-
-    exact_lower.sort();
-    case_compat.sort();
-    let mut dirs = exact_lower;
-    dirs.extend(case_compat);
-    if dirs.is_empty() {
-        dirs.push(daily_dir.join("report"));
-    }
-    dirs
-}
-
-fn daily_agent_report_date_from_path(path: &Path) -> Option<String> {
-    let filename = path.file_name()?.to_str()?;
-    let date = filename.strip_suffix("-report.md")?;
-    if NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok() {
-        Some(date.to_string())
-    } else {
-        None
-    }
-}
-
-fn list_daily_agent_report_files(task_id: &str) -> Vec<PathBuf> {
-    let mut reports = Vec::new();
-    for report_dir in daily_agent_report_dirs_for_task(task_id) {
-        let Ok(entries) = std::fs::read_dir(&report_dir) else {
-            continue;
-        };
-        for entry in entries.filter_map(|e| e.ok()) {
-            let path = entry.path();
-            if path.is_file() && daily_agent_report_date_from_path(&path).is_some() {
-                reports.push(path);
-            }
-        }
-    }
-    reports.sort();
-    reports
-}
-
 fn build_daily_agent_records(
     task_id: &str,
     processed: &AsrDailyAgentProcessedState,
@@ -427,7 +372,13 @@ fn build_daily_agent_records(
         );
     }
 
-    documents.into_values().collect()
+    let mut records: Vec<_> = documents.into_values().collect();
+    records.sort_by(|a, b| {
+        b.date
+            .cmp(&a.date)
+            .then_with(|| b.processed_at_ms.cmp(&a.processed_at_ms))
+    });
+    records
 }
 
 fn daily_agent_report_path_for_date(task_id: &str, date: &str) -> Result<PathBuf, String> {

@@ -175,7 +175,7 @@ pub(crate) struct AsrErrorPayload<'a> {
 }
 
 pub async fn handle_asr(req: Request<Incoming>, path: &str) -> Response<BoxBody> {
-    if path.starts_with("/api/asr/tasks") {
+    if path.starts_with("/api/asr/tasks") || path == "/api/asr/external-volumes" {
         return handle_asr_tasks(req, path).await;
     }
 

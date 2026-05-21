@@ -70,8 +70,10 @@ Qwen3-ASR-1.7B + qwen3_asr_rs + MLX/Metal + 本地 OpenAI-compatible API Server
     - `reuse_server` 在一次任务运行内启动/复用一个 Bifrost 托管 `asr-server`，全部文件和 chunk 走同一个 server；
     - `auto` 先尝试 `reuse_server`，如果 server 启动失败、某个 chunk server 调用失败，或 server RTF 相对前三个稳定样本恶化超过 1.5 倍，则记录 fallback reason 并切到 `fork_per_chunk`；
     - `compare` 同一 chunk 同时运行 `fork_per_chunk` canonical 输出和 `reuse_server` shadow 输出，最终文本采用 fork 结果，但持久化两边的耗时、RTF、文本 hash 和错误，便于定位复用路径是否出现性能退化或内容差异。
+    WebUI 创建/编辑 Directory Task 时继续允许高级用户选择这些策略，但下拉菜单中每个选项必须直接展示简短说明：默认适用场景、性能/隔离取舍、fallback 行为或诊断用途；选中后输入框只显示短标题，避免把普通任务表单撑高。
   - 目录任务状态、单文件 metadata 和 WebUI 文件表会持久化 `runtime_strategy`、`fallback_reason` 和 `chunk_metrics`。每个 chunk metric 包含 `chunk_index`、offset/duration、runner、status、elapsed_ms、RTF、text_chars、text_sha1、server_url、fallback_reason、error 和 recorded_at_ms；后端同时输出 `ASR chunk metric` 日志。即使某个策略导致子进程或 server 被 watchdog kill、server 调用失败或整机任务异常中断，已写入的 `files.json`、metadata JSON 和日志仍能指出最后一个 chunk、runner、RTF、错误和 fallback 决策。
-  - 服务启动和任务每次真正进入运行前都会修复上一次进程中断遗留的文件级 `processing` 状态：如果没有当前进程内运行任务，且 `run.lock` 不属于仍存活的其它 Bifrost 进程，则把孤儿 `processing` 文件恢复为 `pending`，清空旧开始时间、旧进度和旧 transient error。这样 daemon 重启、用户手动重启或进程崩溃后不会在 WebUI 留下假 processing 文件，也不会因为当前文件没有回到 pending 而跳过继续处理。
+  - 服务启动和任务每次真正进入运行前都会修复上一次进程中断遗留的文件级 `processing` 状态：如果没有当前进程内运行任务，且 `run.lock` 不属于仍存活的其它 Bifrost 进程，则先删除 stale `run.lock`，再把孤儿 `processing` 文件恢复为 `pending`，清空旧开始时间、旧进度和旧 transient error。这样 daemon 重启、用户手动重启或进程崩溃后不会在 WebUI 留下假 processing 文件，也不会因为当前文件没有回到 pending 而跳过继续处理。
+  - 启动恢复不仅修文件状态，还会形成运行恢复计划：对 `enabled=true`、`paused=false` 且仍有 `pending/failed` 文件的中断任务，scheduler 启动后立即重新入队执行，不依赖下一次墙钟周期；对 `paused=true` 的任务只清理 stale lock 和 orphan processing，不自动恢复运行，避免绕过用户主动资源让路。运行中标记使用 RAII guard 持有，后台任务 panic、提前错误返回或被 stale `run.lock` 拒绝时都会释放进程内 `RUNNING_TASKS`，防止 UI 长期展示假 `Running`。
   - 目录任务支持资源让路暂停/继续：`POST /api/asr/tasks/<task_id>/pause` 持久化 `paused=true`、清空下一次调度时间，并让正在运行的任务在文件边界和长音频 chunk 边界检查暂停请求，当前未完成文件回到 pending 状态，释放全局 ASR job lock、任务 `run.lock` 和 fork-per-chunk ASR CLI 资源；`POST /api/asr/tasks/<task_id>/pause?force=true` 额外登记 force-pause 标记，正在执行的 native `asr` 子进程和当前 `ffmpeg` normalize/split 子进程都会被主动 kill，用于临时给大规模计算任务让资源；`POST /api/asr/tasks/<task_id>/resume` 清除暂停与 force-pause 状态，如果还有 pending/failed 文件则立即重新启动后台运行，否则只恢复后续调度。暂停期间 scheduler 不会自动拉起该任务，手动 Run 返回 409 并提示先 Resume。
   - 长音频仍以 30 秒为默认最大 chunk，但不再预先并发切出所有 chunk；后端现在按 `切当前 chunk -> ASR -> 删除当前 chunk -> 进入下一个 chunk` 的顺序流式处理，避免几小时录音一次性拉起大量 `ffmpeg` 进程或堆积临时 WAV 文件。normalize 与 split 均使用可中断子进程，force-pause 会尽快释放 CPU、磁盘 IO 和 Metal/MLX 计算资源。WebUI 文件上传链路也按 30 秒窗口顺序切片送 `asr-server`，不再 whole-file 推给模型。
   - 目录任务的 `fork_per_chunk` native `asr` CLI 调用和 WebUI/CLI 托管 `asr-server` 启动都带 macOS physical-footprint guard。1.7B 在特定 30 秒音频 chunk 上可能出现 `ps` RSS 只有 3-4 GiB、但 `vmmap` physical footprint 持续涨到 20 GiB+ 的 Metal/MLX 异常路径；后端优先按模型官方规模和实测 30 秒 chunk 峰值设定 footprint 上限：`Qwen3-ASR-0.6B` 默认 8192 MiB，`Qwen3-ASR-1.7B` 默认 18432 MiB，未知模型默认 12288 MiB，并用宿主机总内存的 90% 作为二级安全阀（所以 64GB 机器不会仅因内存更大就把 1.7B 放宽到 20GB+，16GB 机器也会收敛到约 14.4 GiB）。`BIFROST_ASR_MAX_FOOTPRINT_MB` 只能在安全上限内向下收紧；如果确实要关闭 watchdog，必须显式设置 `BIFROST_ASR_UNSAFE_DISABLE_FOOTPRINT_GUARD=1`。当前 second-state `qwen3_asr_rs` v0.2.0 release 自身没有设置 MLX memory/cache/wired limit：源码只调用 `init_mlx(true)`、`mlx_set_default_device` 和 stream 初始化，未暴露 `set_memory_limit` / `set_cache_limit` / `set_wired_limit` 参数；因此 qwen 二进制默认实际沿用 MLX runtime 策略（Metal memory limit 默认为 recommended working set size 的 1.5 倍，cache 默认跟随 memory limit，wired 默认不设）。Bifrost 不能只通过环境变量直接限制其内部 MLX allocator，因此生产防护采用外层 watchdog + chunk/input cap + 失败记忆三层策略。为避免 watchdog 自身拖慢 30 秒正常推理，force-pause/进程退出仍每 500ms 轮询，但重型 `vmmap -summary` physical-footprint 首次采样会延后一个采样周期，之后默认每 5 秒一次；`BIFROST_ASR_PHYSICAL_SAMPLE_INTERVAL_SECS` 可在 2-60 秒范围内调整。超限、physical footprint 连续采样不可用，或 force-pause 触发时都会 kill 当前 `asr`/`asr-server` 进程组并把错误交给 bisect/pause/status fallback；正常 chunk 仍保持 30 秒默认窗口，不改变最佳性能路径。`bifrost ai asr start` 直接拉起长驻 daemon 后 CLI 进程会退出，当前无法由同一 CLI 进程持续 watchdog；该入口后续应收敛到 Bifrost daemon/supervisor 托管。
@@ -125,6 +127,7 @@ Qwen3-ASR-1.7B + qwen3_asr_rs + MLX/Metal + 本地 OpenAI-compatible API Server
 - `cargo test -p bifrost-admin asr_jobs --lib` 覆盖递归音频发现、输出目录、源文件删除后仍保留已处理元数据、日文档从 timeline 产物聚合生成与日期路径校验。
 - `cargo test -p bifrost-admin asr_jobs --lib` 覆盖任务详情中的音频原文件磁盘占用统计、可清理字节统计，以及 `cleanup-source-audio` 只删除 `success + transcript/timeline 已存在 + audio_dir 内` 的源音频，保留 partial-success、pending/failed 和目录外文件。
 - `cargo test -p bifrost-admin asr_jobs --lib` 同时覆盖旧任务 JSON 缺少 pause 字段的兼容反序列化、pause/resume 对 `paused/paused_at_ms/next_run_at_ms/last_error` 的持久化影响。
+- `cargo test -p bifrost-admin startup_recovery --lib` 覆盖 stale `run.lock` 启动恢复：enabled 未暂停任务会重置 `processing` 并加入恢复计划，paused 任务只清理状态不自动运行，仍存活 owner lock 不会被抢占。
 - `cargo test -p bifrost-admin asr_jobs --lib` 覆盖旧任务 JSON 缺少 `runtime_strategy` 时默认 `reuse_per_file`，以及 chunk metric 的 runner、RTF、文本 hash、fallback reason 和 error 记录。
 - `cargo test -p bifrost-admin asr_cli_invoke --lib` 覆盖 native ASR CLI 输出解析和 `vmmap` footprint 单位解析，保证 memory guard 的阈值计算可回归。
 - `cargo test -p bifrost-cli asr --lib` 覆盖 CLI 读取共享 ASR service state。
@@ -135,6 +138,7 @@ Qwen3-ASR-1.7B + qwen3_asr_rs + MLX/Metal + 本地 OpenAI-compatible API Server
 
 - 新增 `e2e-tests/tests/test_qwen3_asr_local_server.sh`。
 - 新增 `e2e-tests/tests/test_asr_task_pause_resume.sh`，使用临时 `BIFROST_DATA_DIR` 和空音频目录覆盖不依赖模型下载的 pause/resume Admin API：创建任务、pause 后 `next_run_at_ms=null`、paused 状态下 Run 返回 409、resume 清除 paused 且无 pending/failed 文件时不启动模型资产检查。
+- 新增 `e2e-tests/tests/test_asr_task_startup_recovery.sh`，使用临时 `BIFROST_DATA_DIR` 预置 stale `run.lock` 和 orphan `processing` 文件，启动最新 bifrost 后访问 ASR API 触发 scheduler startup，断言 stale lock 被删除、文件状态恢复 `pending`、paused 任务不会展示 running。
 - 新增 `e2e-tests/tests/test_asr_task_cli.sh`，使用临时 `BIFROST_DATA_DIR` 启动当前 Bifrost 二进制，不下载 ASR 模型：创建空目录任务、写入 `asr/data/text/<task_id>/daily/<YYYY-MM-DD>.md`，验证 `bifrost ai asr task list` 不传 `-p` 能读取 runtime port，`show/files/daily list/daily show --output/run --wait` 均可通过真实 Admin API 返回预期结果。
 - 默认做离线结构验证：脚本语法、帮助输出、缺参失败、CI 模型运行时 guard、preflight 可执行；CI shard 缺少 `ffmpeg` 时验证依赖错误可读后跳过在线段。
 - CI 环境无条件跳过在线模型段，即使误设置 `BIFROST_QWEN3_ASR_E2E_ONLINE=1` 也不会下载权重、安装 runtime、启动 `asr-server` 或部署 Bifrost 托管 ASR 服务。
@@ -158,6 +162,7 @@ Qwen3-ASR-1.7B + qwen3_asr_rs + MLX/Metal + 本地 OpenAI-compatible API Server
   - 验证 `/api/asr/tasks/<task_id>` summary 返回 `audio_source_bytes` 和 `cleanable_source_bytes`；调用 `/api/asr/tasks/<task_id>/cleanup-source-audio` 后，成功源音频被删除、text/timeline 产物仍存在、partial-success 源音频仍保留，二次调用删除数量为 0。
   - 验证 `/api/asr/tasks/<task_id>/daily` 可以列出已有按天 Markdown 文档，`/api/asr/tasks/<task_id>/daily/<YYYY-MM-DD>` 返回完整内容，非法日期返回可读错误。
   - 验证目录任务创建响应默认包含 `runtime_strategy=reuse_per_file`；对 `auto`、`reuse_server`、`fork_per_chunk`、`compare` 的真实模型对照实验需要检查 `files.json`、metadata JSON 和 `ASR chunk metric` 日志中的 runner/RTF/text hash/fallback reason。
+  - 验证 WebUI Directory Task 创建/编辑弹窗展开 Runtime 下拉后，每个策略名称下方都有面向用户的说明，并且默认选中值仍为 `reuse_per_file`。
   - E2E 固定使用 `~/.bifrost/asr`，不再创建或传入临时模型 home。
 
 ### 真实场景测试

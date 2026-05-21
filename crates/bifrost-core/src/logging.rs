@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::OnceLock};
 
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -77,6 +77,8 @@ impl LogConfig {
 pub struct LogGuard {
     _file_guard: Option<tracing_appender::non_blocking::WorkerGuard>,
 }
+
+static DAEMON_LOG_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
 
 fn build_env_filter(level: &str) -> Result<EnvFilter> {
     if std::env::var("RUST_LOG").is_ok() {
@@ -392,9 +394,10 @@ pub fn reinit_logging_for_daemon(
         .max_log_files(retention_days as usize)
         .build(log_dir)
         .map_err(|e| BifrostError::Config(format!("Failed to create file appender: {}", e)))?;
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
     let file_layer = fmt::layer()
-        .with_writer(file_appender)
+        .with_writer(non_blocking)
         .with_ansi(false)
         .with_target(true)
         .with_file(true)
@@ -407,6 +410,7 @@ pub fn reinit_logging_for_daemon(
         .map_err(|e| {
             BifrostError::Config(format!("Failed to reinitialize logging for daemon: {}", e))
         })?;
+    let _ = DAEMON_LOG_GUARD.set(guard);
 
     let prefix = "bifrost".to_string();
     if let Err(e) = cleanup_old_logs(log_dir, &prefix, retention_days) {

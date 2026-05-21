@@ -822,6 +822,44 @@
 - 返回按钮回到任务详情页，不影响任务文件详情和 Daily Docs 详情 URL。
 - 非法日期或路径穿越不会读取任意文件，返回 400/404。
 
+### TC-ASPB-36 Directory Task Runtime 选项说明
+
+操作步骤：
+
+1. 启动 WebUI 或使用 Playwright mock 页面打开 `/_bifrost/ai?aiSection=tools-asr`。
+2. 点击 Directory Tasks 右上角 `New`。
+3. 在 `New Directory Task` 弹窗中展开 `Runtime` 下拉。
+4. 逐项查看 `Reuse / file`、`Fork / chunk`、`Reuse server`、`Auto fallback`、`Compare`。
+5. 关闭下拉后继续填写 `Name=Recordings`、`Audio Directory=/tmp/asr-audio` 并创建任务。
+
+预期结果：
+
+- Runtime 下拉中每个选项名称下面都展示明确说明。
+- `Reuse / file` 说明这是多数离线任务的默认策略，并描述文件内复用、文件边界释放。
+- `Fork / chunk` 说明这是最隔离策略、每个 chunk 新建 ASR 进程，适合稳定性排障但更慢。
+- `Reuse server` 说明整个任务 run 复用一个 ASR server，性能可能更好但会跨文件携带内存或 server 状态风险。
+- `Auto fallback` 说明先尝试 server 复用，遇到 server 错误或明显性能退化后自动切回隔离 chunk 处理。
+- `Compare` 说明这是诊断模式，会同时运行两条路径并记录性能差异，最终保留隔离路径输出。
+- 选中值仍以短标题显示，不把表单输入框撑高。
+- 创建任务提交的 `runtime_strategy` 默认仍为 `reuse_per_file`，不破坏原有任务创建流程。
+
+### TC-ASPB-37 服务重启后中断 ASR run 自动恢复且不假 Running
+
+操作步骤：
+
+1. 使用临时 `BIFROST_DATA_DIR` 预置一个目录任务，任务目录下包含 stale `run.lock`，`files.json` 中至少一个文件为 `status=processing`，且 `started_at_ms/progress_current/progress_total/error` 均有旧值。
+2. 启动最新 `target/debug/bifrost start -p <port> --unsafe-ssl --skip-cert-check --no-system-proxy`。
+3. 访问 `/_bifrost/api/asr/tasks/<task_id>` 触发 ASR scheduler startup。
+4. 对 paused 任务验证不会自动恢复运行；对 enabled 且未 paused 的中断任务，用单元测试或真实模型环境验证会被重新入队。
+
+预期结果：
+
+- stale `run.lock` 如果不属于仍存活的 Bifrost 进程，会在启动恢复阶段被删除。
+- orphan `processing` 文件恢复为 `pending`，旧 `started_at_ms`、旧进度和旧 transient error 被清空。
+- paused 任务不会自动 run，API `summary.running=false`，避免 UI 长期展示假 `Running`。
+- enabled 且未 paused、仍有 pending/failed 文件的中断任务会在 scheduler startup 后立即 re-enqueue，不等待下一次 daily/hourly 周期。
+- 如果 `run.lock` 指向仍存活的其它 Bifrost 进程，恢复逻辑不抢占、不重置文件状态。
+
 ## 清理步骤
 
 ```bash
@@ -856,3 +894,5 @@ rm -rf ./.bifrost-test-planb
 | 2026-05-20 | TC-ASPB-33 Daily Agent Instructions 自适应高度回归 | `pnpm --dir web exec tsc -b --pretty false`；`pnpm --dir web exec eslint src/pages/ASR/components/DailyAgentTab.tsx tests/ui/asr-daily-agent-runner.spec.ts`；`pnpm --dir web exec playwright test tests/ui/asr-daily-agent-runner.spec.ts` | PASS：mock 返回 36 段长 `AGENTS.md` 后，`Agent Instructions (AGENTS.md)` 编辑框 `clientHeight + 2 >= scrollHeight` 且 `overflow-y=hidden`；编辑框自适应撑高，内部不出现独立滚动条，Runner / IM Channel 单下拉回归仍通过 |
 | 2026-05-20 | TC-ASPB-34 默认目录多文件 ChatGPT Web Daily Agent 与 FullReport IM 分片回归 | `BIFROST_DATA_DIR=/Users/eden/.bifrost cargo run --bin bifrost -- start -p 9900 --unsafe-ssl --no-system-proxy`；`curl -sS -X POST 'http://127.0.0.1:9900/_bifrost/api/asr/tasks/76612de33e9740bc92440ce64a98a4cb/daily-agent/run?force=true'`；轮询任务详情；检查 `/Users/eden/.bifrost/im_gateway/runs/1779216503662-*`、`1779216632038-*`、`1779216764881-*`、`1779216872746-*`；检查 `/Users/eden/.bifrost/asr/data/text/76612de33e9740bc92440ce64a98a4cb/daily/report/*-report.md`；查询 `/_bifrost/api/im-gateway/providers/acc/messages` | PASS/PARTIAL：默认任务 `day` 配置为 `runner=web`、`channel=owner:acc`、`mode=full_report`；daily 目录包含 `2026-05-14.md`、`2026-05-15.md`、`2026-05-16.md`、`2026-05-17.md` 四个源文件；force run 生成四个 ChatGPT Web run，prompt 分别只包含单日文件且按日期升序处理，大小约 217KB、262KB、267KB、149KB；四个 run 的 `result.json.status=succeeded`，四个 report 均生成（约 24.7KB、23.5KB、25.6KB、21.6KB）；ASR Daily Agent `last_status=success`。IM provider `acc` 当前即使发送短文本和上线通知也返回 `weixin sendmessage failed: ret=-2`，因此 FullReport 分片第 1/4 条发送失败；message log 预览为 `ASR Daily Agent Report 1/4` 加报告原文，确认不再降级为摘要。 |
 | 2026-05-20 | TC-ASPB-35 Daily Agent Processed Documents report 全屏 Markdown 详情 | `BIFROST_DATA_DIR=/Users/eden/.bifrost cargo run --bin bifrost -- start -p 9900 --unsafe-ssl --no-system-proxy --daemon -y`；`curl -sS 'http://127.0.0.1:9900/_bifrost/api/asr/tasks/76612de33e9740bc92440ce64a98a4cb/daily-agent/reports/2026-05-14'`；`curl -i 'http://127.0.0.1:9900/_bifrost/api/asr/tasks/76612de33e9740bc92440ce64a98a4cb/daily-agent/reports/%2E%2E%2Fsecret'`；`pnpm --dir web exec node --input-type=module` 使用 Playwright 打开真实 9900 页面、进入 Daily Agent、刷新 tab、点击 `2026-05-14-report.md`、刷新 report 详情、检查 Markdown DOM 并返回 | PASS：真实 API 返回 `runner=web`、report 路径 `/Users/eden/.bifrost/asr/data/text/76612de33e9740bc92440ce64a98a4cb/daily/report/2026-05-14-report.md` 和 Markdown 正文；路径穿越日期返回 400；真实页面进入 Daily Agent 后 URL 增加 `asrTaskTab=daily-agent`，刷新后 tab 仍选中；点击 report 后 URL 增加 `asrDailyReport=2026-05-14`，出现 `asr-daily-agent-report-page` 和 `asr-daily-agent-report-content`；刷新 report 详情后仍恢复全屏 Markdown；Markdown 渲染出 H1 `2026-05-14 日报（Force 更新版）`、多级标题与 140 个列表项，`preCount=0`；点击返回后 URL 移除 `asrDailyReport` 并保留 `asrTaskTab=daily-agent` |
+| 2026-05-21 | TC-ASPB-36 Directory Task Runtime 选项说明 | `pnpm --dir web exec tsc -b --pretty false`；临时 `BIFROST_DATA_DIR=/tmp/bifrost-runtime-desc.stX3OY CARGO_TARGET_DIR=/tmp/bifrost-runtime-desc-target cargo run --bin bifrost -- start -p 18897 --unsafe-ssl --no-system-proxy --skip-cert-check --access-mode allow_all`；`BIFROST_UI_TEST_RUN_ID=manual-runtime-desc BIFROST_UI_TEST_PORT=18897 BACKEND_PORT=18897 WEB_PORT=53990 ... pnpm --dir web exec playwright test tests/ui/asr-microphone-meter.spec.ts -g "ASR directory tasks can be created and refreshed in the tools panel" --reporter=line --timeout=60000` | PASS：Runtime 下拉展示 `Reuse / file`、`Fork / chunk`、`Reuse server`、`Auto fallback`、`Compare` 及各自说明；下拉菜单加宽后五个策略均可直接看到；选中态保持短标题 `Reuse / file`；创建任务流程仍通过，默认提交 `runtime_strategy=reuse_per_file`；临时后端通过 `--no-system-proxy` 启动且由 Playwright teardown 停止 |
+| 2026-05-21 | TC-ASPB-37 服务重启后中断 ASR run 自动恢复且不假 Running | `cargo test -p bifrost-admin startup_recovery --lib`；`bash e2e-tests/tests/test_asr_task_startup_recovery.sh` | PASS：单测覆盖 enabled 未暂停任务从 stale run.lock + processing 恢复后进入 startup recovery 计划、paused 任务不自动 requeue、live owner lock 不被抢占、RAII running guard drop 后释放内存 running 标记；E2E 使用临时数据目录预置 paused stale run，启动最新 bifrost 后 API 返回文件 `pending`、旧进度清空、`summary.running=false` 且 run.lock 已删除 |

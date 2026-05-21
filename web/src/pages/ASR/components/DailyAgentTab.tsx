@@ -233,6 +233,7 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
   };
 
   const config = configData?.config;
+  const reportIndex = configData?.report_index_status;
 
   if (loading && !configData) {
     return (
@@ -426,28 +427,65 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
               </Descriptions.Item>
             </Descriptions>
           )}
+          {reportIndex && (
+            <>
+              <Descriptions column={3} size="small" style={{ marginTop: 8 }}>
+                <Descriptions.Item label="Indexed Reports">
+                  <Tag color={reportIndex.unindexed_reports > 0 ? "orange" : "green"}>
+                    {reportIndex.indexed_reports}/{reportIndex.report_files}
+                  </Tag>
+                </Descriptions.Item>
+                <Descriptions.Item label="Unindexed Reports">
+                  <Tag color={reportIndex.unindexed_reports > 0 ? "orange" : "green"}>
+                    {reportIndex.unindexed_reports}
+                  </Tag>
+                </Descriptions.Item>
+                <Descriptions.Item label="Missing Reports">
+                  <Tag color={reportIndex.processed_missing_report > 0 ? "red" : "green"}>
+                    {reportIndex.processed_missing_report}
+                  </Tag>
+                </Descriptions.Item>
+              </Descriptions>
+              {reportIndex.unindexed_reports > 0 && (
+                <Alert
+                  style={{ marginTop: 8 }}
+                  type="warning"
+                  showIcon
+                  message={`Unindexed report dates: ${reportIndex.unindexed_dates
+                    .slice(0, 5)
+                    .join(", ")}${
+                    reportIndex.unindexed_dates.length > 5 ? "..." : ""
+                  }`}
+                />
+              )}
+            </>
+          )}
         </Card>
       )}
 
       {/* Actions */}
       <Space>
-        <Button
-          type="primary"
-          icon={<PlayCircleOutlined />}
-          onClick={() => handleRun(false)}
-          loading={running}
-          disabled={!config?.enabled}
-        >
-          Run Now
-        </Button>
-        <Button
-          icon={<ThunderboltOutlined />}
-          onClick={() => handleRun(true)}
-          loading={running}
-          disabled={!config?.enabled}
-        >
-          Force Run
-        </Button>
+        <Tooltip title="Incremental run: only Daily Agent state changes are processed.">
+          <Button
+            type="primary"
+            icon={<PlayCircleOutlined />}
+            onClick={() => handleRun(false)}
+            loading={running}
+            disabled={!config?.enabled}
+          >
+            Run Now
+          </Button>
+        </Tooltip>
+        <Tooltip title="Force run: rebuild all matching daily reports.">
+          <Button
+            icon={<ThunderboltOutlined />}
+            onClick={() => handleRun(true)}
+            loading={running}
+            disabled={!config?.enabled}
+          >
+            Force Run
+          </Button>
+        </Tooltip>
         <Tooltip title="Send latest report via IM">
           <Button
             icon={<SendOutlined />}
@@ -530,6 +568,18 @@ export function DailyAgentRecordsTab({ taskId, onOpenReport }: DailyAgentTabProp
     fetchRuns();
   }, [fetchRuns]);
 
+  const processedDocuments = useMemo(
+    () =>
+      [...(runsData?.processed_documents ?? [])].sort((a, b) => {
+        const dateOrder = b.date.localeCompare(a.date);
+        if (dateOrder !== 0) {
+          return dateOrder;
+        }
+        return (b.processed_at_ms ?? 0) - (a.processed_at_ms ?? 0);
+      }),
+    [runsData],
+  );
+
   return (
     <Card
       size="small"
@@ -541,68 +591,70 @@ export function DailyAgentRecordsTab({ taskId, onOpenReport }: DailyAgentTabProp
         </Button>
       }
     >
-      {runsData && runsData.processed_documents.length > 0 ? (
-        <Table<AsrDailyAgentProcessedDocument>
-          rowKey="date"
-          size="small"
-          dataSource={runsData.processed_documents}
-          pagination={{ pageSize: 10, hideOnSinglePage: true }}
-          columns={[
-            { title: "Date", dataIndex: "date", width: 120 },
-            {
-              title: "Processed At",
-              dataIndex: "processed_at_ms",
-              width: 180,
-              render: (v) => (v ? new Date(v).toLocaleString() : "-"),
-            },
-            {
-              title: "SHA256",
-              dataIndex: "source_sha256",
-              width: 100,
-              render: (v) => (
-                <Text code style={{ fontSize: 10 }}>
-                  {v?.slice(0, 8)}
-                </Text>
-              ),
-            },
-            {
-              title: "Size",
-              dataIndex: "source_len_bytes",
-              width: 80,
-              render: (v: number) =>
-                v < 1024
-                  ? `${v} B`
-                  : v < 1024 * 1024
-                    ? `${(v / 1024).toFixed(1)} KB`
-                    : `${(v / 1024 / 1024).toFixed(1)} MB`,
-            },
-            {
-              title: "Runner",
-              dataIndex: "runner",
-              width: 100,
-              render: (v) => <Tag>{v}</Tag>,
-            },
-            {
-              title: "Report",
-              dataIndex: "report_path",
-              ellipsis: true,
-              render: (v, record) =>
-                v ? (
-                  <Button
-                    type="link"
-                    size="small"
-                    data-testid={`asr-daily-agent-report-link-${record.date}`}
-                    style={{ padding: 0, height: "auto", fontSize: 11 }}
-                    onClick={() => onOpenReport?.(record.date)}
-                  >
-                    {v.split("/").pop()}
-                  </Button>
-                ) : (
-                  "-"
+      {runsData && processedDocuments.length > 0 ? (
+        <div data-testid="asr-daily-agent-run-results-table">
+          <Table<AsrDailyAgentProcessedDocument>
+            rowKey="date"
+            size="small"
+            dataSource={processedDocuments}
+            pagination={{ pageSize: 10, hideOnSinglePage: true }}
+            columns={[
+              { title: "Date", dataIndex: "date", width: 120 },
+              {
+                title: "Processed At",
+                dataIndex: "processed_at_ms",
+                width: 180,
+                render: (v) => (v ? new Date(v).toLocaleString() : "-"),
+              },
+              {
+                title: "SHA256",
+                dataIndex: "source_sha256",
+                width: 100,
+                render: (v) => (
+                  <Text code style={{ fontSize: 10 }}>
+                    {v?.slice(0, 8)}
+                  </Text>
                 ),
-            },
-          ]}
-        />
+              },
+              {
+                title: "Size",
+                dataIndex: "source_len_bytes",
+                width: 80,
+                render: (v: number) =>
+                  v < 1024
+                    ? `${v} B`
+                    : v < 1024 * 1024
+                      ? `${(v / 1024).toFixed(1)} KB`
+                      : `${(v / 1024 / 1024).toFixed(1)} MB`,
+              },
+              {
+                title: "Runner",
+                dataIndex: "runner",
+                width: 100,
+                render: (v) => <Tag>{v}</Tag>,
+              },
+              {
+                title: "Report",
+                dataIndex: "report_path",
+                ellipsis: true,
+                render: (v, record) =>
+                  v ? (
+                    <Button
+                      type="link"
+                      size="small"
+                      data-testid={`asr-daily-agent-report-link-${record.date}`}
+                      style={{ padding: 0, height: "auto", fontSize: 11 }}
+                      onClick={() => onOpenReport?.(record.date)}
+                    >
+                      {v.split("/").pop()}
+                    </Button>
+                  ) : (
+                    "-"
+                  ),
+              },
+            ]}
+          />
+        </div>
       ) : (
         <Empty description="No Daily Agent records yet" />
       )}

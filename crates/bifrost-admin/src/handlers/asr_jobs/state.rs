@@ -7,6 +7,7 @@ static FORCE_PAUSED_TASKS: Lazy<StdMutex<HashSet<String>>> =
     Lazy::new(|| StdMutex::new(HashSet::new()));
 static BULK_CHUNK_RETRY_JOBS: Lazy<StdMutex<BTreeMap<String, BulkChunkRetryState>>> =
     Lazy::new(|| StdMutex::new(BTreeMap::new()));
+static EXTERNAL_IMPORT_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 const TASK_STORE_VERSION: u32 = 1;
 const ASR_TASK_PAUSED_MESSAGE: &str = "ASR task paused by request";
@@ -19,6 +20,33 @@ const FFMPEG_CHUNK_SPLIT_TIMEOUT_SECS: u64 = 60;
 const AUDIO_EXTENSIONS: &[&str] = &[
     "aac", "aiff", "aif", "flac", "m4a", "mp3", "mp4", "ogg", "opus", "wav", "webm",
 ];
+
+struct RunningTaskGuard {
+    task_id: String,
+}
+
+impl RunningTaskGuard {
+    fn acquire(task_id: &str) -> Result<Self, ()> {
+        let mut running = RUNNING_TASKS.lock().unwrap();
+        if running.contains(task_id) {
+            return Err(());
+        }
+        running.insert(task_id.to_string());
+        Ok(Self {
+            task_id: task_id.to_string(),
+        })
+    }
+}
+
+impl Drop for RunningTaskGuard {
+    fn drop(&mut self) {
+        RUNNING_TASKS.lock().unwrap().remove(&self.task_id);
+    }
+}
+
+fn task_is_running(task_id: &str) -> bool {
+    RUNNING_TASKS.lock().unwrap().contains(task_id)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct AsrDirectoryTask {
@@ -44,6 +72,88 @@ pub(crate) struct AsrDirectoryTask {
     pub last_error: Option<String>,
     #[serde(default)]
     pub daily_agent: AsrDailyAgentConfig,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_devices: Vec<AsrExternalDeviceBinding>,
+    #[serde(default)]
+    pub import_policy: AsrExternalImportPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct AsrExternalDeviceBinding {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume_uuid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_identifier: Option<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include_globs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude_globs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_import_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_status: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AsrExternalImportPolicy {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_external_file_stable_secs")]
+    pub file_stable_secs: u64,
+    #[serde(default = "default_external_min_free_bytes")]
+    pub min_free_bytes: u64,
+    #[serde(default = "default_external_max_file_bytes")]
+    pub max_file_bytes: u64,
+    #[serde(default = "default_true")]
+    pub auto_run_after_import: bool,
+    #[serde(default = "default_true")]
+    pub content_hash_dedupe_enabled: bool,
+    #[serde(default = "default_content_hash_algorithm")]
+    pub content_hash_algorithm: String,
+    #[serde(default)]
+    pub delete_source_after_import: bool,
+}
+
+impl Default for AsrExternalImportPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            file_stable_secs: default_external_file_stable_secs(),
+            min_free_bytes: default_external_min_free_bytes(),
+            max_file_bytes: default_external_max_file_bytes(),
+            auto_run_after_import: true,
+            content_hash_dedupe_enabled: true,
+            content_hash_algorithm: default_content_hash_algorithm(),
+            delete_source_after_import: false,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_external_file_stable_secs() -> u64 {
+    10
+}
+
+fn default_external_min_free_bytes() -> u64 {
+    10 * 1024 * 1024 * 1024
+}
+
+fn default_external_max_file_bytes() -> u64 {
+    50 * 1024 * 1024 * 1024
+}
+
+fn default_content_hash_algorithm() -> String {
+    "sha256".to_string()
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -261,6 +371,14 @@ struct FileRecord {
     source_modified_ms: Option<u64>,
     source_created_at_ms: Option<u64>,
     source_created_at_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    content_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    content_hash_algorithm: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    duplicate_of_source_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    transcript_alias: Option<String>,
     media_duration_ms: Option<u64>,
     status: FileStatus,
     output_text_path: Option<PathBuf>,
@@ -360,6 +478,83 @@ struct FileStore {
     files: BTreeMap<String, FileRecord>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct AsrExternalImportStore {
+    version: u32,
+    #[serde(default)]
+    devices: BTreeMap<String, AsrExternalDeviceState>,
+    #[serde(default)]
+    runs: Vec<AsrExternalImportRunSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct AsrExternalDeviceState {
+    binding_name: String,
+    last_seen_mount_path: Option<PathBuf>,
+    last_scan_at_ms: Option<u64>,
+    last_import_at_ms: Option<u64>,
+    last_status: Option<String>,
+    last_error: Option<String>,
+    #[serde(default)]
+    files: BTreeMap<String, AsrImportedFileRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AsrImportedFileRecord {
+    relative_path: PathBuf,
+    source_size: u64,
+    source_modified_ms: Option<u64>,
+    source_sha256: Option<String>,
+    target_path: PathBuf,
+    target_size: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    first_seen_at_ms: Option<u64>,
+    imported_at_ms: u64,
+    status: String,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AsrExternalImportRunSummary {
+    run_id: String,
+    device_name: Option<String>,
+    started_at_ms: u64,
+    finished_at_ms: u64,
+    imported: usize,
+    skipped: usize,
+    failed: usize,
+    status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct AsrContentHashIndex {
+    version: u32,
+    #[serde(default)]
+    hashes: BTreeMap<String, AsrContentHashRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AsrContentHashRecord {
+    algorithm: String,
+    hash: String,
+    size: u64,
+    canonical_source_key: String,
+    canonical_source_path: PathBuf,
+    transcript_artifacts: AsrTranscriptArtifacts,
+    model: String,
+    language: String,
+    runtime_strategy: AsrRuntimeStrategy,
+    completed_at_ms: u64,
+    duplicate_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AsrTranscriptArtifacts {
+    text_path: PathBuf,
+    metadata_path: PathBuf,
+    timeline_path: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct TaskSummary {
     discovered: usize,
@@ -394,6 +589,33 @@ struct FileRecordWithKey {
     key: String,
     #[serde(flatten)]
     record: FileRecord,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ExternalImportStatusResponse {
+    policy: AsrExternalImportPolicy,
+    devices: Vec<AsrExternalDeviceStatus>,
+    runs: Vec<AsrExternalImportRunSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AsrExternalDeviceStatus {
+    binding: AsrExternalDeviceBinding,
+    connected: bool,
+    mount_path: Option<PathBuf>,
+    status: String,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ExternalVolumeInfo {
+    name: String,
+    mount_path: PathBuf,
+    volume_uuid: Option<String>,
+    device_identifier: Option<String>,
+    kind: String,
+    read_only: bool,
+    available_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -513,6 +735,30 @@ struct CreateTaskRequest {
     language: Option<String>,
     model: Option<String>,
     runtime_strategy: Option<AsrRuntimeStrategy>,
+    external_devices: Option<Vec<AsrExternalDeviceBinding>>,
+    import_policy: Option<AsrExternalImportPolicy>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateTaskRequest {
+    name: Option<String>,
+    audio_dir: Option<PathBuf>,
+    recursive: Option<bool>,
+    enabled: Option<bool>,
+    paused: Option<bool>,
+    schedule: Option<AsrTaskSchedule>,
+    language: Option<String>,
+    model: Option<String>,
+    runtime_strategy: Option<AsrRuntimeStrategy>,
+    daily_agent: Option<AsrDailyAgentConfig>,
+    external_devices: Option<Vec<AsrExternalDeviceBinding>>,
+    import_policy: Option<AsrExternalImportPolicy>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExternalImportUpdateRequest {
+    external_devices: Option<Vec<AsrExternalDeviceBinding>>,
+    import_policy: Option<AsrExternalImportPolicy>,
 }
 
 #[derive(Debug, Serialize)]

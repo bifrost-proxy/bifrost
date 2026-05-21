@@ -130,6 +130,14 @@ async function installDailyAgentMocks(page: Page) {
           git_initialized: true,
           report_count: 0,
         },
+        report_index_status: {
+          report_files: 2,
+          processed_documents: 1,
+          indexed_reports: 1,
+          unindexed_reports: 1,
+          processed_missing_report: 0,
+          unindexed_dates: ["2026-05-15"],
+        },
         last_run: {},
       }),
     });
@@ -155,6 +163,15 @@ async function installDailyAgentMocks(page: Page) {
         task_id: taskId,
         processed_documents: [
           {
+            date: "2026-05-13",
+            source_sha256: "13ac5f76d34dbb35",
+            source_len_bytes: 128_000,
+            processed_at_ms: 1_779_126_000_000,
+            runner: "web",
+            report_path: `/tmp/bifrost-asr-runner-select/daily/report/2026-05-13-report.md`,
+            last_run_id: "daily-agent-older-report-run",
+          },
+          {
             date: reportDate,
             source_sha256: "43ac5f76d34dbb35",
             source_len_bytes: 190_512,
@@ -162,6 +179,15 @@ async function installDailyAgentMocks(page: Page) {
             runner: "web",
             report_path: reportPath,
             last_run_id: "daily-agent-report-run",
+          },
+          {
+            date: "2026-05-16",
+            source_sha256: "16ac5f76d34dbb35",
+            source_len_bytes: 220_000,
+            processed_at_ms: 1_779_385_600_000,
+            runner: "web",
+            report_path: `/tmp/bifrost-asr-runner-select/daily/report/2026-05-16-report.md`,
+            last_run_id: "daily-agent-newest-report-run",
           },
         ],
       }),
@@ -297,6 +323,10 @@ test("ASR Daily Agent uses simple Runner and IM Channel dropdowns", async ({ pag
 
   await expect(page.getByText("Runner Type")).toHaveCount(0);
   await expect(page.getByText("Runner ID")).toHaveCount(0);
+  await expect(page.getByText("Indexed Reports")).toBeVisible();
+  await expect(page.getByText("1/2")).toBeVisible();
+  await expect(page.getByText("Unindexed Reports")).toBeVisible();
+  await expect(page.getByText("Unindexed report dates: 2026-05-15")).toBeVisible();
   const runnerSelect = page.getByTestId("asr-daily-agent-runner-select");
   await expect(runnerSelect).toContainText("Bifrost Agent");
 
@@ -346,6 +376,10 @@ test("ASR Daily Agent opens processed reports as full-page Markdown details", as
   await page.getByRole("tab", { name: "Daily Agent", exact: true }).click();
   await expect(page.getByText("Processed Documents")).toHaveCount(0);
   await page.getByRole("tab", { name: "Daily Agent Records", exact: true }).click();
+  const runRows = page
+    .getByTestId("asr-daily-agent-run-results-table")
+    .locator(".ant-table-tbody tr.ant-table-row");
+  await expect(runRows.first().locator("td").first()).toHaveText("2026-05-16");
 
   const reportLink = page.getByTestId(`asr-daily-agent-report-link-${reportDate}`);
   await expect(reportLink).toHaveText(`${reportDate}-report.md`);
