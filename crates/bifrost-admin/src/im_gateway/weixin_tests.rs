@@ -18,6 +18,20 @@ fn test_provider() -> ImProviderConfig {
     }
 }
 
+fn test_target() -> ImTarget {
+    ImTarget {
+        id: "target-1".to_string(),
+        provider_id: "weixin-main".to_string(),
+        display_name: "Weixin User".to_string(),
+        receive_id_type: "open_id".to_string(),
+        receive_id: "user@im.wechat".to_string(),
+        default_msg_type: "text".to_string(),
+        enabled: true,
+        created_at: 0,
+        updated_at: 0,
+    }
+}
+
 #[test]
 fn normalize_login_account_uses_ilink_fields_and_redirected_base_url() {
     let account = WeixinProvider::normalize_login_account(
@@ -422,6 +436,129 @@ fn send_error_message_detects_non_zero_ilink_ret() {
 
     assert_eq!(error.as_deref(), Some("ret=-2: invalid payload"));
     assert!(WeixinProvider::send_error_message(&serde_json::json!({"ret": 0})).is_none());
+}
+
+#[test]
+fn split_text_for_retry_preserves_multibyte_content() {
+    let text = format!("开头\n{}{}", "训练基础设施".repeat(260), "\n结尾");
+    let chunks = WeixinProvider::split_text_for_retry(&text);
+
+    assert!(chunks.len() > 1);
+    assert_eq!(chunks.concat(), text);
+    assert!(chunks
+        .iter()
+        .all(|chunk| chunk.chars().count() <= TEXT_RETRY_CHUNK_MAX_CHARS));
+    assert!(chunks
+        .iter()
+        .all(|chunk| chunk.len() <= TEXT_RETRY_CHUNK_MAX_BYTES));
+}
+
+#[tokio::test]
+async fn im_long_reply_delivery_send_text_retries_failed_long_message_as_split_messages() {
+    use bytes::Bytes;
+    use http_body_util::{BodyExt, Full};
+    use hyper::body::Incoming;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper::{Request, Response};
+    use hyper_util::rt::TokioIo;
+    use std::sync::{Arc, Mutex};
+
+    let sendmessage_bodies = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock weixin server");
+    let port = listener.local_addr().expect("mock local addr").port();
+    let bodies_for_server = Arc::clone(&sendmessage_bodies);
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let io = TokioIo::new(stream);
+            let bodies = Arc::clone(&bodies_for_server);
+            tokio::spawn(async move {
+                let service = service_fn(move |req: Request<Incoming>| {
+                    let bodies = Arc::clone(&bodies);
+                    async move {
+                        let path = req.uri().path().to_string();
+                        let body = req
+                            .into_body()
+                            .collect()
+                            .await
+                            .expect("collect request body")
+                            .to_bytes();
+                        if path.ends_with("/ilink/bot/sendmessage") {
+                            let json: serde_json::Value =
+                                serde_json::from_slice(&body).expect("sendmessage json");
+                            let call_count = {
+                                let mut bodies = bodies.lock().expect("lock bodies");
+                                bodies.push(json);
+                                bodies.len()
+                            };
+                            let response = if call_count == 1 {
+                                r#"{"ret":-2,"errmsg":"unknown error"}"#.to_string()
+                            } else {
+                                format!(r#"{{"ret":0,"message_id":"chunk-{call_count}"}}"#)
+                            };
+                            return Ok::<_, hyper::Error>(
+                                Response::builder()
+                                    .status(200)
+                                    .body(Full::new(Bytes::from(response)))
+                                    .unwrap(),
+                            );
+                        }
+                        Ok::<_, hyper::Error>(
+                            Response::builder()
+                                .status(404)
+                                .body(Full::new(Bytes::from_static(b"not found")))
+                                .unwrap(),
+                        )
+                    }
+                });
+                let _ = http1::Builder::new().serve_connection(io, service).await;
+            });
+        }
+    });
+
+    let provider = WeixinProvider::new();
+    let mut config = test_provider();
+    config.base_url = Some(format!("http://127.0.0.1:{port}"));
+    let long_text = format!(
+        "{}\n{}",
+        "最近一周大模型训练进展".repeat(260),
+        "尾段必须保留"
+    );
+
+    let result = provider
+        .send_text(&config, &test_target(), &long_text)
+        .await
+        .expect("split retry should recover long sendmessage failure");
+
+    assert_eq!(result.message_id.as_deref(), Some("chunk-2"));
+    let bodies = sendmessage_bodies.lock().expect("lock bodies").clone();
+    assert!(
+        bodies.len() > 2,
+        "expected original send plus split retries"
+    );
+    assert_eq!(
+        bodies[0]["msg"]["item_list"][0]["text_item"]["text"],
+        long_text
+    );
+
+    let mut recovered = String::new();
+    let split_total = bodies.len() - 1;
+    for (idx, body) in bodies.iter().skip(1).enumerate() {
+        let text = body["msg"]["item_list"][0]["text_item"]["text"]
+            .as_str()
+            .expect("chunk text");
+        let prefix = format!("[{}/{}]\n", idx + 1, split_total);
+        assert!(text.starts_with(&prefix), "chunk must include order prefix");
+        assert!(text.len() <= TEXT_RETRY_CHUNK_MAX_BYTES + 64);
+        recovered.push_str(&text[prefix.len()..]);
+    }
+    assert_eq!(recovered, long_text);
 }
 
 #[test]

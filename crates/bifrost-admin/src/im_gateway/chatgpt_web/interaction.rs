@@ -1186,12 +1186,12 @@ async fn extract_latest_assistant_from_dom(cdp: &super::CdpClient) -> Option<Wai
             turnId: turnId,
             turnCount: allTurns.length,
             isStreaming: busy,
-            text: text.slice(0, 10000),
+            text: text,
             textLength: text.length,
             imageCount: images.length,
             images: images.slice(0, 10),
             domDebug: domDebug,
-            allMarkdownTexts: allMarkdownTexts.filter(t => t.length > 0).map(t => t.slice(0, 10000)),
+            allMarkdownTexts: allMarkdownTexts.filter(t => t.length > 0),
           });
         })()"#,
     )
@@ -1660,12 +1660,12 @@ async fn extract_dom_outcome_inner(cdp: &super::CdpClient) -> DomExtractOutcome 
             sendButtonVisible,
             sendButtonDisabled,
             pendingOutputStatusText,
-            text: text.slice(0, 10000),
+            text: text,
             textLength: text.length,
             imageCount: images.length,
             images: images.slice(0, 10),
             toolCalls: toolCalls.slice(0, 20),
-            allMarkdownTexts: allMarkdownTexts.filter(t => t.length > 0).map(t => t.slice(0, 10000)),
+            allMarkdownTexts: allMarkdownTexts.filter(t => t.length > 0),
           }});
         }})()"#,
         html_to_md = JS_HTML_TO_MD
@@ -1890,11 +1890,11 @@ async fn extract_latest_assistant_from_dom_ignore_streaming(
             found: true,
             turnId: turnId,
             turnCount: allTurns.length,
-            text: text.slice(0, 10000),
+            text: text,
             textLength: text.length,
             imageCount: images.length,
             images: images.slice(0, 10),
-            allMarkdownTexts: allMarkdownTexts.filter(t => t.length > 0).map(t => t.slice(0, 10000)),
+            allMarkdownTexts: allMarkdownTexts.filter(t => t.length > 0),
           }});
         }})()"#,
         html_to_md = JS_HTML_TO_MD
