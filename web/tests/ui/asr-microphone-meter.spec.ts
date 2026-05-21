@@ -684,6 +684,16 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
         task_id: "task-1",
         processed_documents: [
           {
+            date: "2026-05-13",
+            source_sha256: "old1234567890",
+            source_len_bytes: 128,
+            processed_at_ms: Date.now() - 3000,
+            runner: "bifrost_agent",
+            report_path:
+              "/tmp/bifrost/asr/data/text/task-1/daily/report/2026-05-13-report.md",
+            last_run_id: "run-20260513",
+          },
+          {
             date: "2026-05-14",
             source_sha256: "abcdef1234567890",
             source_len_bytes: 256,
@@ -692,6 +702,16 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
             report_path:
               "/tmp/bifrost/asr/data/text/task-1/daily/report/2026-05-14-report.md",
             last_run_id: "run-20260514",
+          },
+          {
+            date: "2026-05-15",
+            source_sha256: "new1234567890",
+            source_len_bytes: 512,
+            processed_at_ms: Date.now() - 500,
+            runner: "bifrost_agent",
+            report_path:
+              "/tmp/bifrost/asr/data/text/task-1/daily/report/2026-05-15-report.md",
+            last_run_id: "run-20260515",
           },
         ],
       }),
@@ -734,6 +754,19 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
   await page.getByRole("button", { name: "New" }).click();
   const createDialog = page.getByRole("dialog", { name: "New Directory Task" });
   await expect(createDialog).toBeVisible();
+  await createDialog.getByTestId("asr-runtime-strategy-select").click();
+  const runtimeDropdown = page.locator(".ant-select-dropdown:visible");
+  await expect(runtimeDropdown.getByText("Reuse / file")).toBeVisible();
+  await expect(runtimeDropdown.getByText("Default for most offline tasks.")).toBeVisible();
+  await expect(runtimeDropdown.getByText("Fork / chunk")).toBeVisible();
+  await expect(runtimeDropdown.getByText("fresh ASR process for every chunk")).toBeVisible();
+  await expect(runtimeDropdown.getByText("Reuse server")).toBeVisible();
+  await expect(runtimeDropdown.getByText("memory or server-state issues")).toBeVisible();
+  await expect(runtimeDropdown.getByText("Auto fallback")).toBeVisible();
+  await expect(runtimeDropdown.getByText("automatically falls back")).toBeVisible();
+  await expect(runtimeDropdown.getByText("Compare")).toBeVisible();
+  await expect(runtimeDropdown.getByText("Diagnostic mode.")).toBeVisible();
+  await page.keyboard.press("Escape");
   await createDialog.getByPlaceholder("Meeting audio watcher").fill("Recordings");
   await createDialog.getByPlaceholder("~/Recordings").fill("/tmp/asr-audio");
   await createDialog.getByRole("button", { name: "Create" }).click();
@@ -795,6 +828,10 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
   await expect(taskPage.getByText("Processed Documents")).toHaveCount(0);
   await taskPage.getByRole("tab", { name: "Daily Agent Records", exact: true }).click();
   await expect(taskPage.getByText("Run Results")).toBeVisible();
+  const runRows = taskPage
+    .getByTestId("asr-daily-agent-run-results-table")
+    .locator(".ant-table-tbody tr.ant-table-row");
+  await expect(runRows.first().locator("td").first()).toHaveText("2026-05-15");
   const reportLink = page.getByTestId("asr-daily-agent-report-link-2026-05-14");
   await expect(reportLink).toBeVisible();
   await reportLink.click();

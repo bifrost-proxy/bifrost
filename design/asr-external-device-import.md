@@ -1,0 +1,684 @@
+# ASR 外接设备自动导入方案
+
+## 背景与目标
+
+当前 ASR Directory Task 的核心模型是：用户创建任务并指定 `audio_dir`，调度器按 `schedule` 定时扫描这个本地目录，发现音频文件后写入 `files.json`，再执行转写和 Daily Docs 生成。
+
+新需求是在 ASR 任务上绑定一个或多个外接设备名称。设备连接并挂载后，Bifrost 自动扫描设备中的文件，并把差异文件导入到任务绑定的本地目录下。导入后的目录和文件名必须保持设备内原始结构；多个设备通过设备名称作为目标目录下的根目录隔离，避免重名冲突。
+
+示例：
+
+```text
+任务 audio_dir = /Users/eden/Recordings
+绑定设备 = TX_MIC001, TX_MIC002
+
+/Volumes/TX_MIC001/2026-05-20/A.wav
+  -> /Users/eden/Recordings/TX_MIC001/2026-05-20/A.wav
+
+/Volumes/TX_MIC002/2026-05-20/A.wav
+  -> /Users/eden/Recordings/TX_MIC002/2026-05-20/A.wav
+```
+
+用户目标验证清单：
+
+- 必须实现：ASR 任务可绑定多个外接设备名称。
+- 必须实现：设备连接/挂载后自动触发导入。
+- 必须实现：如果平台事件漏掉或设备已在启动前连接，WebUI 和 API 必须提供手动补跑入口发现已挂载设备。
+- 必须实现：按设备名称作为 `audio_dir` 下一级根目录导入。
+- 必须实现：导入保持设备内相对目录结构和文件名不变。
+- 必须实现：只导入差异文件，避免每次全量重复复制。
+- 必须实现：ASR 处理前做内容哈希去重；如果同一任务内已有相同内容文件完成转写且转写产物存在，后续重复文件跳过模型推理并复用转写结果。
+- 必须实现：导入时检查大小、稳定性和完整性，避免复制半写入文件。
+- 必须实现：容错、去重、断点/临时文件恢复、异常状态可见。
+- 必须实现：打开 ASR 任务配置页面时，如果当前已有未绑定设备连接，逐个弹窗确认是否监听该设备并导入；用户确认后立即加入绑定列表并开始导入。
+- 必须实现：ASR 定时任务创建后允许编辑所有配置，包括任务名称、数据源目录、递归开关、启停状态、启动时间、定时周期、模型/语言/runtime、外接设备绑定和导入策略。
+- 必须实现：切换数据源目录只影响后续扫描和导入；已经转写过的文件记录、转写文本、timeline、metadata、Daily Docs 和 Daily Agent report 不迁移、不删除、不重算。
+- 必须实现：删除 ASR 任务视为危险操作，必须弹窗明确确认，并要求用户输入完整任务名称后才允许删除。
+- 必须实现：首版 V1 只承诺 macOS，但 macOS 必须完整、全面、可靠、稳定，包含设备事件监听、手动补跑、配置页确认、差异导入和异常恢复；外接设备导入不做后台定时扫描。
+- 必须不破坏：现有只指定本地目录的 ASR Directory Task 行为不变。
+- 必须不破坏：现有 `files.json`、Daily Docs、retry chunks、pause/resume 和 task scheduler 主链路不被重写。
+- 必须真实验证：macOS 真实挂载卷或可替代 disk image 触发导入。
+- 必须交付：设计文档、human_tests 用例、后续实现时的单元/E2E/真实场景验证。
+
+## 调研结论
+
+### 当前代码基线
+
+现有 ASR 任务主链路位于 `crates/bifrost-admin/src/handlers/asr_jobs`：
+
+- `AsrDirectoryTask` 已持久化 `audio_dir`、`recursive`、`enabled`、`schedule`、`language`、`model`、`runtime_strategy`、`daily_agent`。
+- `ensure_scheduler_started()` 每 10 秒检查 `next_run_at_ms`，到期后启动 `run_directory_task()`。
+- `run_directory_task()` 先 `discover_audio_files(task.audio_dir, task.recursive)`，再把新文件写入 `FileStore`。
+- `source_key(path)` 当前由 canonical path + size + modified time 计算；同一路径文件 size/mtime 变化会变成新 key。
+- `output_paths()` 已按 `audio_dir` 的相对路径保留输出结构。
+- `discover_audio_files()` 只处理音频扩展名并跳过 0 字节文件。
+
+因此外接设备导入不应替代 ASR 转写逻辑，而应作为设备连接事件、用户确认或手动 API 触发的独立同步阶段：
+
+```text
+device event / user confirmation / manual import trigger
+  -> sync_external_devices_for_task(task)
+  -> discover_audio_files(task.audio_dir, task.recursive)
+  -> existing FileStore / transcription / Daily Docs / Daily Agent
+```
+
+这样导入后的文件成为普通本地 `audio_dir` 文件，后续 ASR 处理、WebUI 详情、CLI task show/files/daily 均复用现有逻辑。
+
+### macOS 设备监听
+
+V1 以 macOS 为第一优先级，因为当前 ASR 本地模型链路本身主要运行在 Apple Silicon macOS。
+
+官方 Disk Arbitration 适合监听磁盘/卷出现、消失、挂载路径变化和卷名变化。它支持 `DADiskAppearedCallback`、`DADiskDescriptionChangedCallback`、`DADiskDisappearedCallback`，并要求创建 `DASession` 后注册 callback，再绑定 run loop 或 dispatch queue。
+
+关键设计含义：
+
+- 事件源用 Disk Arbitration，而不是仅监听 `/Volumes` 目录。
+- 需要处理“出现”和“挂载路径后续变化”两个阶段；设备刚出现时未必已有 mount path。
+- 设备拔出、未安全弹出、卷名改动、多个分区等情况都要作为正常异常路径处理。
+- callback 只做轻量入队，不在 callback 中做扫描/复制。
+- V1 不做后台定时扫描；如果 Bifrost 启动前设备已经连接，用户可通过配置页确认或手动导入触发，后续重新插拔会由设备事件触发。
+
+### FSEvents / notify 的角色
+
+Apple FSEvents 是目录层级变化通知，适合在设备已挂载后观察设备目录是否继续写入。Rust `notify` 提供跨平台目录监听，macOS 默认可用 FSEvents backend，也提供 PollWatcher 作为限制场景下的替代。
+
+但目录监听不是设备连接真相源：
+
+- 设备未挂载时没有稳定目录可 watch。
+- 大目录事件可能丢失或合并。
+- Linux inotify 大目录递归会遇到 watch 数量限制。
+
+因此 V1 的可靠策略是“Disk Arbitration 触发 + 手动补跑兜底”，FSEvents/notify 只作为优化项：
+
+- V1 必做：设备事件监听、配置页确认和手动补跑。
+- 后续可选增强：对已匹配设备的 mount path 建立目录 watcher，发现新增/修改后 debounced 入队同步。
+- 即使目录 watcher 出错，也不能影响设备连接事件和手动补跑入口。
+
+### 平台边界与后续路线
+
+架构保留 `ExternalVolumeProvider` 抽象，避免后续支持 Linux/Windows 时重写 ASR 任务、导入和 UI 主链路。但首版 V1 的交付边界只覆盖 macOS：
+
+- V1 必须实现 macOS Disk Arbitration 事件源。当前实现通过 `diskutil activity` 订阅系统 Disk Arbitration 事件流，覆盖 `DiskAppeared`、`DescriptionChanged` 和 `DiskDisappeared`，事件只做 debounce 后入队，同步仍复用统一导入逻辑。
+- V1 不做 `PollingVolumeProvider` 后台定时扫描，避免设备长期连接时反复遍历和对比；Bifrost 启动前已挂载、事件监听权限/环境不可用等情况通过配置页确认和手动导入入口处理。
+- V1 必须在 macOS 上完整通过真实 disk image 或真实外接设备验证，不能把监听、确认弹窗、导入、去重、异常恢复中的任一关键路径留到后续。
+- Linux/Windows 只保留 provider 接口和设计说明，不作为 V1 可用能力宣传，也不作为 V1 验收门槛。
+
+后续跨平台 provider 路线：
+
+- Linux：优先 UDisks2 D-Bus 的 block device/filesystem 对象与 InterfacesAdded/PropertiesChanged。
+- Windows：GUI/desktop 进程可接收 `WM_DEVICECHANGE`/`DBT_DEVICEARRIVAL`/`DBT_DEVICEREMOVECOMPLETE`。
+- 各平台都应保留显式手动补跑入口，但不默认做后台定时扫描。
+
+### 内容哈希成本评估
+
+新增哈希去重是可以接受的，但必须设计成“顺手计算、只算一次、长期缓存”，不能让每次设备连接都全量重读所有文件。
+
+本机轻量基准：
+
+- `openssl speed -seconds 2 -evp sha256` 显示 SHA-256 大块吞吐约 2.3 GB/s。
+- `shasum -a 256` 对 512 MiB 临时文件完整哈希耗时约 1.84s，约 278 MiB/s。该命令包含用户态工具开销，低于纯 CPU 哈希吞吐。
+
+结论：
+
+- 对外接录音设备，实际瓶颈通常是设备顺序读取速度和 USB/存储介质 I/O，而不是 SHA-256 CPU 计算。
+- 导入时本来就要顺序读取源文件并写入目标文件，因此应在复制流中同时更新 SHA-256 digest，不额外再读一遍源设备。
+- 对已经在 `audio_dir` 中存在、但不是本轮导入产生的历史文件，ASR 阶段按需懒计算 hash；计算成功后写入 hash index，后续 run 不重复计算。
+- 哈希计算单任务并发默认限制为 1，使用流式 chunk 读取；不得把多个大音频文件并行 hash 到拖慢机器或外接设备。
+- 如果 hash 计算失败、文件超出 `max_file_bytes`、文件不稳定或设备断开，不能因为缺少 hash 阻塞正常 ASR；该文件退化为现有按路径的处理流程并记录 `hash_unavailable`。
+- V1 默认启用内容哈希去重，因为成本可控，收益明确：多个设备或不同目录下的重复录音不会重复跑 ASR 模型。
+
+## 数据模型
+
+### AsrDirectoryTask 扩展
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AsrDirectoryTask {
+    // existing fields...
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_devices: Vec<AsrExternalDeviceBinding>,
+    #[serde(default)]
+    pub import_policy: AsrExternalImportPolicy,
+}
+```
+
+### 设备绑定
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AsrExternalDeviceBinding {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume_uuid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_identifier: Option<String>,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include_globs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude_globs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_import_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_status: Option<AsrExternalImportStatus>,
+}
+```
+
+匹配规则：
+
+- `name` 是用户配置和目标目录根名，必须唯一。
+- 默认按卷名匹配；如果用户选择绑定时能拿到 `volume_uuid`，则优先用 UUID 精确匹配，卷名作为可读展示和目标目录名。
+- 多个已挂载卷同名时：
+  - 若 binding 有 `volume_uuid`，只匹配 UUID。
+  - 若只有 `name`，进入 ambiguous 状态，不导入，提示用户在 WebUI 选择具体卷并保存 UUID。
+
+### 导入策略
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AsrExternalImportPolicy {
+    #[serde(default = "default_external_import_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_external_file_stable_secs")]
+    pub file_stable_secs: u64,
+    #[serde(default = "default_external_min_free_bytes")]
+    pub min_free_bytes: u64,
+    #[serde(default = "default_external_max_file_bytes")]
+    pub max_file_bytes: u64,
+    #[serde(default = "default_external_auto_run_after_import")]
+    pub auto_run_after_import: bool,
+    #[serde(default = "default_content_hash_dedupe_enabled")]
+    pub content_hash_dedupe_enabled: bool,
+    #[serde(default = "default_content_hash_algorithm")]
+    pub content_hash_algorithm: String,
+    #[serde(default)]
+    pub delete_source_after_import: bool,
+}
+```
+
+默认值：
+
+| 字段 | 默认值 | 说明 |
+|---|---:|---|
+| `enabled` | `false` | 只有绑定设备后显式启用 |
+| `file_stable_secs` | `10` | size/mtime 连续稳定后才复制 |
+| `min_free_bytes` | `10 GiB` | 目标盘剩余空间安全阈值 |
+| `max_file_bytes` | `50 GiB` | 单文件上限，防误导入超大非音频文件 |
+| `auto_run_after_import` | `true` | 导入完成后触发 ASR task run |
+| `content_hash_dedupe_enabled` | `true` | ASR 处理前按内容哈希跳过已转写重复文件 |
+| `content_hash_algorithm` | `sha256` | V1 固定 SHA-256；后续如扩展必须带 algorithm 字段 |
+| `delete_source_after_import` | `false` | V1 不默认删除外接设备源文件 |
+
+### 导入状态文件与内容哈希索引
+
+每个任务一个导入状态：
+
+```text
+<BIFROST_DATA_DIR>/asr/tasks/<task_id>/external_imports.json
+<BIFROST_DATA_DIR>/asr/tasks/<task_id>/content_hash_index.json
+```
+
+```rust
+pub(crate) struct AsrExternalImportStore {
+    pub version: u32,
+    pub devices: BTreeMap<String, AsrExternalDeviceState>,
+}
+
+pub(crate) struct AsrExternalDeviceState {
+    pub binding_name: String,
+    pub last_seen_mount_path: Option<PathBuf>,
+    pub last_scan_at_ms: Option<u64>,
+    pub last_import_at_ms: Option<u64>,
+    pub last_error: Option<String>,
+    pub files: BTreeMap<String, AsrImportedFileRecord>,
+    pub runs: Vec<AsrExternalImportRunSummary>,
+}
+
+pub(crate) struct AsrImportedFileRecord {
+    pub relative_path: PathBuf,
+    pub source_size: u64,
+    pub source_modified_ms: Option<u64>,
+    pub source_sha256: Option<String>,
+    pub target_path: PathBuf,
+    pub target_size: u64,
+    pub imported_at_ms: u64,
+    pub status: AsrExternalImportedFileStatus,
+    pub error: Option<String>,
+}
+
+pub(crate) struct AsrContentHashIndex {
+    pub version: u32,
+    pub hashes: BTreeMap<String, AsrContentHashRecord>,
+}
+
+pub(crate) struct AsrContentHashRecord {
+    pub algorithm: String,
+    pub hash: String,
+    pub size: u64,
+    pub canonical_source_key: String,
+    pub canonical_source_path: PathBuf,
+    pub transcript_artifacts: AsrTranscriptArtifacts,
+    pub completed_at_ms: u64,
+    pub duplicate_count: u64,
+}
+
+pub(crate) struct AsrTranscriptArtifacts {
+    pub text_path: PathBuf,
+    pub metadata_path: PathBuf,
+    pub timeline_path: Option<PathBuf>,
+}
+```
+
+`files` key 使用 `relative_path` 的规范化字符串，不使用绝对源路径，避免同一设备挂载到不同 mount path 后被当成不同文件。
+
+`content_hash_index.json` 是 ASR task 级内容哈希索引，不放在 `external_imports.json` 里，避免把普通目录任务和数据源切换后的去重能力耦合到外接设备导入。`hashes` key 使用 `sha256:<hex>`；索引不跨 task 复用，避免不同任务的模型、语言、runtime、Daily Agent 配置不同却错误共享结果。
+
+状态保留目的：
+
+- 支持 UI 展示最近导入结果。
+- 支持崩溃后清理 `.bifrost-import-*` 临时文件。
+- 支持跳过 unchanged 文件。
+- `external_imports.json` 支持 UI 展示最近导入结果、崩溃恢复、跳过 unchanged 文件。
+- `content_hash_index.json` 支持 ASR 处理阶段按内容 hash 跳过已完成且产物存在的重复文件。
+
+## 导入路径规则
+
+目标根目录：
+
+```text
+task.audio_dir / sanitize_device_root(binding.name)
+```
+
+相对路径：
+
+```text
+source_relative = source_path.strip_prefix(mount_path)
+target_path = task.audio_dir / sanitize_device_root(binding.name) / source_relative
+```
+
+路径安全规则：
+
+- `binding.name` 必须经过文件名安全化，只允许普通目录名；原始名称保留在 config 中展示。
+- `source_relative` 必须是 normal relative path，拒绝 absolute、`..`、prefix escape、symlink escape。
+- 默认跳过 symlink，避免导入设备外文件或循环目录。
+- 隐藏系统目录默认排除：`.Spotlight-V100`、`.Trashes`、`.fseventsd`、`System Volume Information`、`$RECYCLE.BIN`。
+- 音频扩展名复用现有 `AUDIO_EXTENSIONS`。
+
+## 差异算法
+
+V1 用 “路径 + size + mtime” 判定导入差异，用 “SHA-256 内容 hash” 判定 ASR 处理去重。两者不要混在一起：导入仍然要保持设备目录结构，所以即使内容重复，也要把目标目录下对应文件补齐；去重发生在后续 ASR 模型处理阶段。
+
+1. 枚举设备文件，过滤非音频、0 字节、超过 `max_file_bytes`、隐藏系统目录和用户 exclude globs。
+2. 对每个候选文件读取 metadata。
+3. 稳定性检查：
+   - 第一次看到文件时记录 `size/mtime`，加入 `deferred`。
+   - 至少 `file_stable_secs` 后再次读取，若 `size/mtime` 不变才允许复制。
+   - 若设备已经断开，本轮标记 `device_disconnected`，下次重来。
+4. 目标文件不存在：复制。
+5. 目标文件存在且 size/mtime 与源一致：跳过 unchanged。
+6. 目标文件存在但不同：
+   - 如果状态里有同 relative path 的成功导入记录，且记录与源一致但目标不同，说明目标被用户修改；默认不覆盖，记录 `target_modified`。
+   - 如果目标是上次未完成的 temp 残留，清理 temp 后重试。
+   - 如后续增加 `overwrite_policy`，必须在 UI 中显式选择。
+7. 复制完成后做 size 校验；复制流同步计算 SHA-256，并写入 `source_sha256`。
+8. 成功后把目标文件 mtime 设置为源 mtime，便于现有 `source_key()` 稳定。
+
+不使用内容 hash 决定“是否复制目标文件”，原因是需求要求 `audio_dir/<device_name>/<relative_path>` 结构完整保留；重复文件也必须能在目标目录中看到。内容 hash 只决定“是否重复转写”。
+
+## ASR 内容哈希去重
+
+ASR run 的处理顺序调整为：
+
+```text
+sync_external_devices_for_task(task)
+  -> discover_audio_files(task.audio_dir, task.recursive)
+  -> ensure_content_hash_for_discovered_files(task, files)
+  -> apply_transcript_dedupe(task, files)
+  -> enqueue_only_files_without_completed_duplicate()
+```
+
+规则：
+
+1. 导入产生的新文件优先复用 `external_imports.json` 中的 `source_sha256`，不重新读取目标文件。
+2. 非导入文件或旧文件缺少 hash 时，在 ASR 发现后、进入模型推理前按需计算 SHA-256，并写回 file record 与 `content_hash_index.json`。
+3. hash 计算必须基于稳定文件：size/mtime 在 hash 前后不变；若不稳定，文件保持 pending，等待下一轮。
+4. 当 `content_hash_index.json` 中已存在同 hash、同 size 的记录，并且 canonical file 状态为 completed、`text_path`/`metadata_path`/`timeline_path` 等转写产物实际存在时：
+   - 当前文件不进入 ASR 模型推理队列。
+   - 当前 file record 标记为 `duplicate_completed`。
+   - 写入 `duplicate_of_source_key`、`content_hash`、`transcript_alias`。
+   - WebUI/CLI 展示当前文件时，通过 alias 读取 canonical transcript artifacts。
+   - Daily Docs 聚合时仍可列出当前文件名和路径，但正文内容来自 canonical transcript，并在 metadata 中标记 duplicate source。
+5. 如果 hash 命中但 canonical 文件尚未完成、产物缺失、产物损坏、模型/语言/runtime 不兼容，不能跳过；当前文件按普通文件进入 ASR。
+6. 如果两个重复文件在同一轮同时发现，只有第一个成功完成转写后才建立 canonical 记录；其它重复文件可以在本轮尾部再次检查 hash index，命中后跳过，否则下一轮跳过。
+7. 切换 `audio_dir` 后，旧 hash index 保留；新目录中相同内容文件可以复用旧转写产物，但必须满足产物存在和任务配置兼容检查。
+
+兼容检查：
+
+- V1 hash index 只在同一 task 内复用。
+- canonical record 必须记录 `model`、`language`、`runtime_strategy`、关键 ASR 参数版本；当前文件参数一致才允许复用。
+- Daily Agent report 不作为文件级转写产物复用依据；文件级 transcript/timeline/metadata 才是跳过 ASR 的必要条件。
+
+错误与降级：
+
+- `hash_unavailable`：hash 计算失败，继续普通 ASR，不做内容去重。
+- `hash_changed_during_read`：hash 前后 size/mtime 变化，延迟到下一轮。
+- `duplicate_artifacts_missing`：hash 命中但产物缺失，当前文件普通转写并刷新 hash index。
+- `duplicate_param_mismatch`：hash 命中但 ASR 参数不兼容，当前文件普通转写。
+
+## 复制与原子性
+
+复制流程：
+
+```text
+target_dir/.bifrost-import-<uuid>.part
+  -> fsync file where available
+  -> verify size
+  -> rename target_path
+  -> set mtime
+  -> update external_imports.json atomically
+```
+
+关键约束：
+
+- 同一 task 的导入 run 需要文件锁：`external-import:<task_id>`。
+- 同一设备同一目标路径不得并发复制。
+- 导入过程中设备断开时，当前文件标记 failed/interrupted，保留或清理 temp；不得写入半文件到最终路径。
+- 目标磁盘剩余空间不足时，本轮停止复制，记录 `insufficient_space`，不触发 ASR run。
+- 导入成功的文件才进入现有 ASR 发现流程；失败文件不写入 `FileStore`。
+
+## 调度与事件流
+
+### 新组件
+
+```text
+ExternalDeviceImportManager
+  - load tasks with external_devices/import_policy
+  - start providers
+  - maintain per-task queue
+  - debounce device events
+  - run event/manual reconcile
+
+ExternalVolumeProvider
+  - list_mounted_volumes()
+  - watch_volume_events()
+
+MacDiskArbitrationProvider
+```
+
+### 触发入口
+
+- Bifrost admin/server 启动：启动 ASR scheduler 时同时启动 import manager。
+- Provider 事件：设备 appeared/mounted/description changed/disappeared。
+- 手动入口：`POST /api/asr/tasks/{task_id}/external-import/run`。
+- ASR run 不隐式扫描外接设备；已经导入到目标目录的文件按普通目录任务处理。
+
+### 去抖与排队
+
+设备刚插入时可能连续出现 appeared、description changed、mounted 等多个事件。处理规则：
+
+- 事件按 `(task_id, binding_name, mount_path)` debounce 2 秒。
+- 同一任务已有 import run 时，新事件只设置 `rerun_requested=true`，当前 run 结束后再跑一次 reconcile。
+- 导入完成且 `auto_run_after_import=true` 且 `imported_count > 0` 时，触发现有 ASR task run。
+- 如果 task 当前 ASR 正在 running，不抢占；只记录 pending import 或等待本轮 ASR 后再触发。
+
+## API 设计
+
+```text
+GET  /api/asr/external-volumes
+PATCH /api/asr/tasks/{task_id}
+DELETE /api/asr/tasks/{task_id}?confirm_name=<task_name>
+GET  /api/asr/tasks/{task_id}/external-import
+PUT  /api/asr/tasks/{task_id}/external-import
+POST /api/asr/tasks/{task_id}/external-import/run
+GET  /api/asr/tasks/{task_id}/external-import/runs
+```
+
+说明：
+
+- `GET /api/asr/external-volumes` 返回当前 mounted volumes：`name`、`mount_path`、`volume_uuid`、`device_identifier`、`kind`、`read_only`、`available_bytes`。
+- `PUT` 保存 bindings 和 policy。
+- `run` 支持 `device_name` 可选参数；不传则同步所有绑定且当前已连接的设备。
+- 返回状态区分 `ready`、`not_connected`、`ambiguous`、`importing`、`insufficient_space`、`permission_denied`、`device_disconnected`、`completed_with_errors`。
+
+## WebUI 设计
+
+入口放在 ASR Directory Task 创建/编辑和任务详情页，不放到全局 Settings：
+
+- 创建任务 Modal 增加 “External Devices” 区域。
+- 用户可从当前已连接设备列表选择，也可手动输入设备名称。
+- 每个绑定展示：设备名、当前连接状态、上次看到时间、上次导入结果、UUID 是否已绑定。
+- 任务详情页新增 “External Import” tab，展示最近导入 run、导入文件列表、失败原因和手动 Run import 按钮。
+- 同名设备冲突时 UI 需要提示 “同名卷不唯一，请选择具体 UUID”。
+- 目标目录预览必须清楚显示：`<audio_dir>/<device_name>/...`。
+
+WebUI 双主题要求：
+
+- 颜色使用现有 CSS 变量或 Ant Design token。
+- Light/Dark 都验证连接状态 tag、错误提示、导入进度和文件表可读。
+
+### 配置页设备发现确认流
+
+打开 ASR Directory Task 创建/编辑配置页面时，页面进入“设备候选发现”模式：
+
+1. 页面先调用 `GET /api/asr/external-volumes` 拉取当前已挂载卷。
+2. 页面只把可读、已挂载、非系统卷、未绑定到当前 task 的设备作为 candidate。
+3. 页面停留期间继续监听设备连接事件；V1 可以通过轻量轮询 `GET /api/asr/external-volumes` 实现，后续可升级为 SSE。
+4. 每个 candidate 独立进入 `DeviceCandidatePromptQueue`，一次只展示一个确认弹窗。
+5. 弹窗文案必须明确：
+   - 设备名称。
+   - 挂载路径。
+   - 将导入到的目标根目录：`<audio_dir>/<device_name>/...`。
+   - 导入会保持设备内目录结构和文件名。
+6. 用户点击确认：
+   - 已有任务编辑页：前端立即调用 `PUT /api/asr/tasks/{task_id}/external-import`，把该设备加入 `external_devices`；保存成功后立即调用 `POST /api/asr/tasks/{task_id}/external-import/run?device_name=<device_name>`。
+   - 新建任务页面：由于还没有 `task_id`，前端先把该设备加入表单中的 pending `external_devices` 列表；用户点击 Create 并创建任务成功后，立即按用户已确认的设备逐个调用 `POST /api/asr/tasks/{new_task_id}/external-import/run?device_name=<device_name>`。
+   - 若 API 返回同名冲突或 UUID ambiguity，弹窗切换为选择具体卷/UUID 的确认态。
+   - 该设备在列表中显示 `importing` 或 `pending_import_after_create`，任务详情 External Import tab 同步刷新。
+7. 用户点击取消：
+   - 不保存 binding，不导入。
+   - 当前页面会话内记录 `dismissedCandidates`，避免同一设备反复弹出。
+   - 设备断开后重新连接或页面重新打开时可以再次提示。
+8. 如果同时发现多个 candidate，必须逐个弹窗确认；确认或取消当前设备后才弹出下一个，不允许一个总弹窗批量绑定全部设备。
+
+该流程是用户授权监听设备的入口：后台 import manager 只会自动导入已绑定设备；未绑定设备即使被页面发现，也必须等用户确认后才监听并导入。
+
+### ASR 任务配置编辑能力
+
+当前 ASR Directory Task 只有创建和删除，没有完整编辑能力。外接设备导入需要一个长期可维护的任务配置页，因此 V1 同时补齐“创建后可编辑”：
+
+可编辑字段：
+
+- `name`：任务名称，立即影响列表、详情页、后续 Daily Docs 标题展示。
+- `audio_dir`：本地数据源/导入目标根目录。
+- `recursive`：后续扫描是否递归。
+- `enabled` / `paused`：启停和暂停状态。
+- `schedule`：定时周期和启动时间，覆盖 hourly/daily/weekly/monthly。
+- `language`、`model`、`runtime_strategy`：后续新文件处理所用 ASR 参数。
+- `daily_agent`：Daily Agent Runner 配置。
+- `external_devices` 和 `import_policy`：外接设备绑定与导入策略。
+
+API：
+
+```text
+PATCH /api/asr/tasks/{task_id}
+```
+
+请求体采用 partial update；未传字段保持不变。服务端保存前必须完整校验：
+
+- `audio_dir` 保存时如果不存在，后端必须自动 `create_dir_all` 创建；如果路径已存在但不是目录，则返回明确错误。
+- `schedule` 必须通过现有 `AsrTaskSchedule::validate()`。
+- `name` 为空时保留原名称或回退为默认名称。
+- `external_devices` 内 `name` 去重，`volume_uuid` 冲突进入明确错误。
+- `import_policy` 的时间、大小和空间阈值必须在合理范围内。
+
+运行中编辑规则：
+
+- 如果 ASR task 当前 `summary.running=true`，涉及 `audio_dir`、`recursive`、`model`、`language`、`runtime_strategy`、`external_devices`、`import_policy` 的修改返回 `409 task_running`，避免一次 run 中途切换数据源或模型。
+- 运行中允许修改 `name`、`enabled=false`、`paused=true` 和下次 schedule；这些变更不影响当前正在处理的文件，只影响后续运行。
+- Force pause 仍按现有 pause/resume 语义释放资源；用户可 pause 后再修改数据源。
+
+切换 `audio_dir` 的核心语义：
+
+- 只更新任务配置和后续扫描根目录。
+- 不迁移旧 `audio_dir` 下的源文件。
+- 不删除 `<BIFROST_DATA_DIR>/asr/tasks/<task_id>/files.json` 中的既有记录。
+- 不删除 `<BIFROST_DATA_DIR>/asr/data/text/<task_id>/` 下已有 `.txt`、`.json`、`.timeline.json`、`daily/` 和 `daily/report/`。
+- 旧记录在详情页仍可展示历史转写结果；如果旧源文件不在新目录或已不存在，Source Audio 播放/API 按现有缺失源文件路径返回不可用状态。
+- 后续 run 只从新的 `audio_dir` 发现文件；如果新目录为空，则本轮 discovered/pending 不新增，只刷新已有 daily 状态或返回 no-op。
+- 新目录中与旧目录同名同 size/mtime 的文件，因为 absolute path 变了，按现有 `source_key()` 会成为新 source record；V1 使用 task 级 SHA-256 hash index 在 ASR 处理前识别内容重复，若旧记录已完成且转写产物存在，则新文件可跳过模型推理并复用转写结果。
+
+WebUI：
+
+- Directory Task 详情页增加 Edit action，打开与创建任务复用的配置表单。
+- 表单内所有字段都可编辑，保存后刷新任务详情。
+- 修改 `audio_dir` 时展示确认提示：历史转写数据保留，但后续只扫描新目录；新目录没有文件时不会删除历史结果。
+- 如果任务正在运行且用户修改受限字段，Save 按钮展示运行中不可修改原因，并提供 Pause/Force Pause 入口。
+- 配置页设备发现确认流复用同一个表单；新建任务使用 pending binding，已有任务保存后立即导入。
+
+### 删除任务危险确认
+
+删除 ASR task 是重操作：它会把任务从列表和 scheduler 中移除，外接设备绑定、定时配置、后续自动导入和 Daily Agent 触发都会停止。V1 删除任务不默认删除 `<BIFROST_DATA_DIR>/asr/data/text/<task_id>/` 下已生成的转写文件和报告；如果未来支持“同时删除生成数据”，必须作为单独危险选项再次确认。
+
+WebUI 删除流程：
+
+1. 列表和详情页的 Delete 不再使用轻量 `Popconfirm`。
+2. 点击 Delete 后打开危险确认 Modal。
+3. Modal 必须展示任务名称、`audio_dir`、最近运行状态、已发现/已处理/失败文件数量，以及删除后果。
+4. 用户必须在输入框中输入完整任务名称，且与当前 `task.name` 精确一致，Delete 按钮才启用。
+5. 如果任务正在运行，Modal 展示运行中不可删除，并提供 Pause/Force Pause 引导；真正删除必须等 `summary.running=false`。
+6. 删除成功后回到 Directory Tasks 列表，并清理 URL 中的 `asrTask/asrFile/asrDay`。
+
+API 删除确认：
+
+```text
+DELETE /api/asr/tasks/{task_id}?confirm_name=<urlencoded task.name>
+```
+
+服务端要求：
+
+- 找不到任务返回 404。
+- `confirm_name` 缺失或不等于当前任务名称时返回 400 `task_delete_confirmation_required`。
+- 任务正在 running 时返回 409 `task_running`。
+- 删除成功只移除 task 配置和运行中 bulk retry 状态，不隐式删除转写输出目录。
+
+## CLI 设计
+
+后续 CLI 扩展：
+
+```text
+bifrost ai asr task external-volumes
+bifrost ai asr task external-import get <task_id>
+bifrost ai asr task external-import set <task_id> --device TX_MIC001 --device TX_MIC002
+bifrost ai asr task external-import run <task_id> [--device TX_MIC001] [--wait]
+```
+
+CLI 和 WebUI 都调用同一 Admin API，不直接扫描设备。
+
+## 容错与边界
+
+| 场景 | 行为 |
+|---|---|
+| 设备连接但未挂载 | 状态为 `not_mounted`，等待 description changed；如果事件漏掉，用户可手动补跑 |
+| 设备中途拔出 | 当前文件失败，run 标记 `device_disconnected`，不触发 ASR |
+| 同名设备多个 | 无 UUID 时 `ambiguous`，不导入 |
+| 只读设备 | 允许读取导入；不执行源删除 |
+| 目标空间不足 | 停止本轮，记录 `insufficient_space` |
+| 目标已有不同文件 | 默认不覆盖，记录 `target_modified` |
+| 源文件正在写入 | size/mtime 未稳定，deferred 到后续 run |
+| 权限不足 | 记录 `permission_denied`，其它文件继续 |
+| 非音频/0 字节 | 跳过，不进入 ASR |
+| symlink | 默认跳过 |
+| 重复文件已转写 | 标记 `duplicate_completed`，复用 canonical transcript，不重复跑 ASR |
+| hash 命中但转写产物缺失 | 记录 `duplicate_artifacts_missing`，当前文件正常转写并刷新索引 |
+| hash 计算期间文件变化 | 记录 `hash_changed_during_read`，延迟到下一轮 |
+| Bifrost 重启且设备已连接 | 不自动扫盘；用户通过任务列表 `Import External` 或配置页确认触发，状态从 external_imports.json 恢复 |
+
+## 实施计划
+
+### Phase 1：V1 macOS 完整能力
+
+- 新增数据结构和持久化。
+- 新增导入差异算法、路径安全、原子复制、状态文件和内容 hash index。
+- 设备事件和手动入口同步已连接设备。
+- ASR 处理前计算/读取 SHA-256，命中已完成转写产物时跳过重复模型推理。
+- 新增手动 API 和单元测试。
+- 新增 Disk Arbitration provider。
+- 事件 debounce 入队。
+- 创建/编辑任务支持绑定设备。
+- 任务详情 External Import tab。
+- WebUI 展示连接状态、任务列表 `Import External` 手动导入按钮、确认弹窗、最近导入结果和错误状态。
+- CLI external-import 子命令。
+- E2E 覆盖 API、CLI、WebUI。
+- human_tests 用 disk image 或真实 U 盘验证目录结构保持、重复连接去重、内容哈希去重、半写入文件延迟、同名冲突和设备断开恢复。
+
+### Phase 2：跨平台增强
+
+- Linux UDisks2 provider。
+- Windows WM_DEVICECHANGE provider。
+- 可选目录 watcher 优化。
+
+## 测试计划
+
+### 单元测试
+
+- `sanitize_device_root`：特殊字符、空名、同名冲突后缀。
+- `safe_relative_path`：拒绝 absolute、`..`、symlink escape。
+- `diff_plan_skips_unchanged`：目标 size/mtime 一致跳过。
+- `diff_plan_detects_target_modified`：目标被用户改过时不覆盖。
+- `stable_file_gate_defers_changing_files`：size/mtime 未稳定时 deferred。
+- `external_import_store_roundtrip`：状态文件版本和原子写。
+- `volume_match_prefers_uuid`：UUID 优先、同名 ambiguity。
+- `hash_dedupe_reuses_completed_transcript`：同 hash 且产物存在时标记 duplicate，不进入 ASR 模型队列。
+- `hash_dedupe_requires_artifacts`：hash 命中但 transcript artifact 缺失时不跳过。
+- `hash_dedupe_param_mismatch_transcribes`：模型/语言/runtime 不兼容时不复用旧产物。
+- `hash_changed_during_read_defers`：hash 前后 size/mtime 变化时延迟处理。
+
+### E2E 测试
+
+- 新增 shell E2E：创建临时 source volume 目录模拟 provider，绑定 `TX_MIC001`，执行 manual import，断言目标结构和文件内容一致。
+- 新增 Admin API E2E：`GET external-volumes`、`PUT external-import`、`POST run`、`GET status/runs`。
+- 新增 CLI E2E：`external-import set/run --wait`。
+- 新增 ASR E2E：两个设备目录下放置同内容不同路径文件，断言两个目标文件都被导入，但只有 canonical 文件执行 ASR，duplicate 文件复用 transcript alias。
+- 新增 WebUI Playwright：创建任务时绑定设备，详情页展示 External Import tab，手动导入后列表刷新。
+- 新增 WebUI Playwright：打开已有任务配置页时 mock 当前已连接多个设备，断言逐个确认；确认的设备保存 binding 并立即导入，取消的设备不保存不导入。
+- 新增 WebUI Playwright：打开新建任务配置页时确认当前已连接设备，断言设备先进入 pending 列表，任务创建成功后立即触发导入。
+- 新增 WebUI/API E2E：编辑任务名称、`audio_dir`、schedule、runtime 和外接设备配置，断言旧转写结果保留，新目录为空时不删除历史文件记录。
+
+### human_tests
+
+- 新增 `human_tests/asr-external-device-import.md`。
+- 使用 macOS disk image 创建两个可挂载卷，模拟真实外接设备连接/断开。
+- 验证 `audio_dir/<device_name>/...` 结构保持。
+- 验证重复连接不重复复制。
+- 验证跨设备/跨目录同内容文件只转写一次，重复文件在详情页仍能展示复用的转写文本。
+- 验证同名冲突、半写入文件、目标空间不足或权限不足的用户可见状态。
+
+## Review/Fix/Test 闭环
+
+### 第 1 轮
+
+- 目标复核：逐条核对设备绑定、自动监听、手动补跑、差异导入、结构保持、容错、路径去重和内容 hash 去重。
+- 代码/文档 review：检查方案是否与现有 `AsrDirectoryTask`、`run_directory_task()`、`FileStore`、WebUI Directory Tasks 入口一致。
+- 测试运行：执行 design/human_tests 关键字检查，确认方案与测试文档互相覆盖。
+- 修复：补齐遗漏的 API、状态或测试项。
+
+### 第 2 轮
+
+- 再次目标复核：确认没有把设备连接监听误设计成仅目录 watcher；确认没有改变现有本地目录任务行为。
+- 再次变更范围复核：执行 `git status --short`、`git diff`，检查新增文档和索引。
+- 复跑测试：重复文档验收命令。
+- 结论：若仍有缺口，追加第 3 轮。
+
+## 参考资料
+
+- Apple Disk Arbitration Programming Guide: https://developer.apple.com/library/archive/documentation/DriversKernelHardware/Conceptual/DiskArbitrationProgGuide/Introduction/Introduction.html
+- Apple Disk Arbitration callbacks: https://developer.apple.com/library/archive/documentation/DriversKernelHardware/Conceptual/DiskArbitrationProgGuide/ArbitrationBasics/ArbitrationBasics.html
+- Apple File System Events: https://developer.apple.com/documentation/coreservices/file_system_events
+- Rust notify crate: https://docs.rs/notify/latest/notify/
+- UDisks2 block devices: https://storaged.org/doc/udisks2-api/latest/ref-dbus-block-devices.html
+- Windows WM_DEVICECHANGE: https://learn.microsoft.com/en-us/windows/win32/devio/detecting-media-insertion-or-removal

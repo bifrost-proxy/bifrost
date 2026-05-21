@@ -2,8 +2,41 @@ pub async fn handle_asr_tasks(req: Request<Incoming>, path: &str) -> Response<Bo
     ensure_scheduler_started().await;
 
     match (req.method(), path) {
+        (&Method::GET, "/api/asr/external-volumes") => {
+            json_response(&serde_json::json!({ "volumes": list_external_volumes() }))
+        }
         (&Method::GET, "/api/asr/tasks") => list_tasks_response(),
         (&Method::POST, "/api/asr/tasks") => create_task_response(req).await,
+        (&Method::PATCH, _) if path.starts_with("/api/asr/tasks/") => {
+            let Some(id) = path
+                .strip_prefix("/api/asr/tasks/")
+                .filter(|id| !id.contains('/'))
+            else {
+                return error_response(StatusCode::NOT_FOUND, "ASR task endpoint not found");
+            };
+            update_task_response(id, req).await
+        }
+        (&Method::GET, _) if path.starts_with("/api/asr/tasks/") && path.ends_with("/external-import") => {
+            let id = path
+                .trim_start_matches("/api/asr/tasks/")
+                .trim_end_matches("/external-import")
+                .trim_end_matches('/');
+            get_external_import_response(id)
+        }
+        (&Method::PUT, _) if path.starts_with("/api/asr/tasks/") && path.ends_with("/external-import") => {
+            let id = path
+                .trim_start_matches("/api/asr/tasks/")
+                .trim_end_matches("/external-import")
+                .trim_end_matches('/');
+            put_external_import_response(id, req).await
+        }
+        (&Method::POST, _) if path.starts_with("/api/asr/tasks/") && path.ends_with("/external-import/run") => {
+            let id = path
+                .trim_start_matches("/api/asr/tasks/")
+                .trim_end_matches("/external-import/run")
+                .trim_end_matches('/');
+            run_external_import_response(id).await
+        }
         (&Method::GET, _) if path.starts_with("/api/asr/tasks/") && path.contains("/daily-agent") => {
             let parts = path
                 .trim_start_matches("/api/asr/tasks/")
@@ -104,7 +137,7 @@ pub async fn handle_asr_tasks(req: Request<Incoming>, path: &str) -> Response<Bo
             else {
                 return error_response(StatusCode::NOT_FOUND, "ASR task endpoint not found");
             };
-            delete_task_response(id)
+            delete_task_response(id, req.uri().query())
         }
         (&Method::POST, _)
             if path.starts_with("/api/asr/tasks/") && path.ends_with("/cleanup-source-audio") =>
@@ -197,10 +230,10 @@ async fn create_task_response(req: Request<Incoming>) -> Response<BoxBody> {
             );
         }
     };
-    if !create.audio_dir.is_dir() {
+    if let Err(error) = ensure_task_audio_dir(&create.audio_dir) {
         return error_response(
             StatusCode::BAD_REQUEST,
-            "ASR task audio_dir must be an existing directory",
+            &error,
         );
     }
 
@@ -210,6 +243,17 @@ async fn create_task_response(req: Request<Incoming>) -> Response<BoxBody> {
         return error_response(StatusCode::BAD_REQUEST, &error);
     }
     let enabled = create.enabled.unwrap_or(true);
+    let external_devices = match normalize_bindings(create.external_devices.unwrap_or_default()) {
+        Ok(bindings) => bindings,
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error),
+    };
+    let mut import_policy = create.import_policy.unwrap_or_default();
+    if !external_devices.is_empty() {
+        import_policy.enabled = true;
+    }
+    if let Err(error) = validate_import_policy(&import_policy) {
+        return error_response(StatusCode::BAD_REQUEST, &error);
+    }
     let next_run_at_ms = enabled
         .then(|| schedule.initial_next_run_at_ms(now))
         .flatten();
@@ -234,6 +278,8 @@ async fn create_task_response(req: Request<Incoming>) -> Response<BoxBody> {
         next_run_at_ms,
         last_error: None,
         daily_agent: AsrDailyAgentConfig::default(),
+        external_devices,
+        import_policy,
     };
 
     if let Err(error) = ensure_asr_daily_workspace(&task) {
@@ -249,6 +295,126 @@ async fn create_task_response(req: Request<Incoming>) -> Response<BoxBody> {
     }
 }
 
+async fn update_task_response(id: &str, req: Request<Incoming>) -> Response<BoxBody> {
+    let body = match req.into_body().collect().await {
+        Ok(body) => body.to_bytes(),
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Failed to read ASR task update body: {error}"),
+            );
+        }
+    };
+    let update: UpdateTaskRequest = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Invalid ASR task update JSON: {error}"),
+            );
+        }
+    };
+    match update_task_config(id, update) {
+        Ok(task) => json_response(&task_with_summary(task)),
+        Err((status, error)) => error_response(status, &error),
+    }
+}
+
+fn update_task_config(
+    id: &str,
+    update: UpdateTaskRequest,
+) -> Result<AsrDirectoryTask, (StatusCode, String)> {
+    let running = RUNNING_TASKS.lock().unwrap().contains(id);
+    let high_risk = update.audio_dir.is_some()
+        || update.recursive.is_some()
+        || update.language.is_some()
+        || update.model.is_some()
+        || update.runtime_strategy.is_some()
+        || update.external_devices.is_some()
+        || update.import_policy.is_some();
+    if running && high_risk {
+        return Err((
+            StatusCode::CONFLICT,
+            "task_running: pause or wait for the ASR task before changing data source, model, runtime, or external import configuration".to_string(),
+        ));
+    }
+    let mut store = load_tasks();
+    let now = now_ms();
+    let Some(task) = store.tasks.iter_mut().find(|task| task.id == id) else {
+        return Err((StatusCode::NOT_FOUND, "ASR task not found".to_string()));
+    };
+    if let Some(audio_dir) = update.audio_dir {
+        ensure_task_audio_dir(&audio_dir).map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+        task.audio_dir = audio_dir;
+    }
+    if let Some(name) = update.name {
+        let name = name.trim();
+        if !name.is_empty() {
+            task.name = name.to_string();
+        }
+    }
+    if let Some(recursive) = update.recursive {
+        task.recursive = recursive;
+    }
+    if let Some(enabled) = update.enabled {
+        task.enabled = enabled;
+    }
+    if let Some(paused) = update.paused {
+        task.paused = paused;
+        task.paused_at_ms = paused.then_some(now);
+    }
+    if let Some(schedule) = update.schedule {
+        if let Err(error) = schedule.validate() {
+            return Err((StatusCode::BAD_REQUEST, error));
+        }
+        task.schedule = schedule;
+    }
+    if let Some(language) = update.language {
+        task.language = language;
+    }
+    if let Some(model) = update.model {
+        task.model = model;
+    }
+    if let Some(runtime_strategy) = update.runtime_strategy {
+        task.runtime_strategy = runtime_strategy;
+    }
+    if let Some(daily_agent) = update.daily_agent {
+        task.daily_agent = daily_agent;
+    }
+    if let Some(bindings) = update.external_devices {
+        task.external_devices =
+            normalize_bindings(bindings).map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    }
+    if let Some(policy) = update.import_policy {
+        validate_import_policy(&policy).map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+        task.import_policy = policy;
+    }
+    task.updated_at_ms = now;
+    task.next_run_at_ms = task
+        .enabled
+        .then_some(())
+        .filter(|_| !task.paused)
+        .and_then(|_| task.schedule.next_run_at_ms(now.saturating_add(60_000), false));
+    let updated = task.clone();
+    save_tasks(&store).map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    Ok(updated)
+}
+
+fn ensure_task_audio_dir(audio_dir: &Path) -> Result<(), String> {
+    if audio_dir.exists() && !audio_dir.is_dir() {
+        return Err(format!(
+            "ASR task audio_dir must be a directory: {}",
+            audio_dir.display()
+        ));
+    }
+    std::fs::create_dir_all(audio_dir).map_err(|error| {
+        format!(
+            "Failed to create ASR task audio_dir {}: {error}",
+            audio_dir.display()
+        )
+    })
+}
+
 fn list_tasks_response() -> Response<BoxBody> {
     let tasks = load_tasks()
         .tasks
@@ -262,6 +428,97 @@ fn get_task_response(id: &str) -> Response<BoxBody> {
     match find_task(id) {
         Some(task) => json_response(&task_detail(task)),
         None => error_response(StatusCode::NOT_FOUND, "ASR task not found"),
+    }
+}
+
+fn get_external_import_response(id: &str) -> Response<BoxBody> {
+    let Some(task) = find_task(id) else {
+        return error_response(StatusCode::NOT_FOUND, "ASR task not found");
+    };
+    let volumes = list_external_volumes();
+    let store = load_external_import_store(id);
+    let devices = task
+        .external_devices
+        .iter()
+        .cloned()
+        .map(|binding| {
+            let volume = volumes
+                .iter()
+                .find(|volume| external_volume_matches(&binding, volume));
+            let state = store.devices.get(&binding.name);
+            AsrExternalDeviceStatus {
+                binding,
+                connected: volume.is_some(),
+                mount_path: volume.map(|volume| volume.mount_path.clone()),
+                status: state
+                    .and_then(|state| state.last_status.clone())
+                    .unwrap_or_else(|| if volume.is_some() { "ready" } else { "not_connected" }.to_string()),
+                last_error: state.and_then(|state| state.last_error.clone()),
+            }
+        })
+        .collect::<Vec<_>>();
+    json_response(&ExternalImportStatusResponse {
+        policy: task.import_policy,
+        devices,
+        runs: store.runs,
+    })
+}
+
+async fn put_external_import_response(id: &str, req: Request<Incoming>) -> Response<BoxBody> {
+    let body = match req.into_body().collect().await {
+        Ok(body) => body.to_bytes(),
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Failed to read external import body: {error}"),
+            );
+        }
+    };
+    let update: ExternalImportUpdateRequest = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Invalid external import JSON: {error}"),
+            );
+        }
+    };
+    let task_update = UpdateTaskRequest {
+        name: None,
+        audio_dir: None,
+        recursive: None,
+        enabled: None,
+        paused: None,
+        schedule: None,
+        language: None,
+        model: None,
+        runtime_strategy: None,
+        daily_agent: None,
+        external_devices: update.external_devices,
+        import_policy: update.import_policy,
+    };
+    match update_task_config(id, task_update) {
+        Ok(task) => json_response(&task_with_summary(task)),
+        Err((status, error)) => error_response(status, &error),
+    }
+}
+
+async fn run_external_import_response(id: &str) -> Response<BoxBody> {
+    let Some(task) = find_task(id) else {
+        return error_response(StatusCode::NOT_FOUND, "ASR task not found");
+    };
+    match sync_external_devices_for_task(&task).await {
+        Ok(imported) => {
+            if imported > 0 && task.import_policy.auto_run_after_import && !task.paused {
+                let _ = spawn_directory_task_run(task.clone());
+            }
+            json_response(&serde_json::json!({
+                "task": task_with_summary(task),
+                "imported": imported,
+                "message": format!("External import completed; imported {imported} file(s)."),
+            }))
+        }
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
     }
 }
 
@@ -324,13 +581,24 @@ fn get_task_file_source_response(
     source_audio_response(path, range_header)
 }
 
-fn delete_task_response(id: &str) -> Response<BoxBody> {
+fn delete_task_response(id: &str, query: Option<&str>) -> Response<BoxBody> {
     let mut store = load_tasks();
-    let before = store.tasks.len();
-    store.tasks.retain(|task| task.id != id);
-    if before == store.tasks.len() {
+    let Some(index) = store.tasks.iter().position(|task| task.id == id) else {
         return error_response(StatusCode::NOT_FOUND, "ASR task not found");
+    };
+    if RUNNING_TASKS.lock().unwrap().contains(id) {
+        return error_response(StatusCode::CONFLICT, "task_running");
     }
+    let confirm_name = query
+        .and_then(|query| {
+            url::form_urlencoded::parse(query.as_bytes())
+                .find_map(|(key, value)| (key == "confirm_name").then(|| value.into_owned()))
+        })
+        .unwrap_or_default();
+    if confirm_name != store.tasks[index].name {
+        return error_response(StatusCode::BAD_REQUEST, "task_delete_confirmation_required");
+    }
+    store.tasks.remove(index);
     match save_tasks(&store) {
         Ok(()) => {
             BULK_CHUNK_RETRY_JOBS.lock().unwrap().remove(id);
@@ -471,50 +739,20 @@ async fn resume_task_response(id: &str) -> Response<BoxBody> {
 }
 
 fn spawn_directory_task_run(task: AsrDirectoryTask) -> Result<(), Box<Response<BoxBody>>> {
-    FORCE_PAUSED_TASKS.lock().unwrap().remove(&task.id);
-    // Prevent duplicate runs: check and mark as running atomically.
-    {
-        let mut running = RUNNING_TASKS.lock().unwrap();
-        if running.contains(&task.id) {
-            return Err(Box::new(json_response_with_status(
+    match spawn_directory_task_run_background(task) {
+        Ok(()) => Ok(()),
+        Err(error) if error == "ASR task is already running" => {
+            Err(Box::new(json_response_with_status(
                 StatusCode::CONFLICT,
                 &serde_json::json!({
                     "message": "ASR task is already running",
                     "running": true,
                 }),
-            )));
+            )))
         }
-        running.insert(task.id.clone());
+        Err(error) => Err(Box::new(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &error,
+        ))),
     }
-
-    // Spawn the task in background so the HTTP response returns immediately.
-    let task_id = task.id.clone();
-    let task_clone = task.clone();
-    tokio::spawn(async move {
-        let result = run_directory_task(task_clone.clone()).await;
-        match &result {
-            Ok((_updated, processed, failed)) => {
-                tracing::info!(
-                    task_id = %task_clone.id, processed = processed, failed = failed,
-                    "ASR directory task completed"
-                );
-            }
-            Err(error) if error == ASR_TASK_PAUSED_MESSAGE => {
-                tracing::info!(
-                    task_id = %task_clone.id,
-                    "ASR directory task paused and released compute"
-                );
-            }
-            Err(error) => {
-                let _ = update_task_after_run(&task_clone.id, Some(error.clone()));
-                tracing::warn!(
-                    task_id = %task_clone.id, error = %error,
-                    "ASR directory task failed"
-                );
-            }
-        }
-        RUNNING_TASKS.lock().unwrap().remove(&task_id);
-    });
-
-    Ok(())
 }

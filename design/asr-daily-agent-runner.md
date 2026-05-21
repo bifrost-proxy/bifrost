@@ -206,6 +206,34 @@ pub(crate) struct AsrDailyAgentConversationState {
 }
 ```
 
+### 3.7 Report 索引可见性
+
+Daily Agent 同时维护两类事实：
+
+- `daily_agent_processed.json`：系统内 Runner 成功处理后的增量索引，用于决定普通 `Run Now` 是否跳过或处理某个 `YYYY-MM-DD.md`。
+- `daily/report/*-report.md` / `daily/Report/*-report.md`：磁盘上已经存在的报告文件，可能由历史版本、外部 Agent 或人工流程生成。
+
+`GET /daily-agent` 返回 `report_index_status`，用于 UI 展示 report 文件与 processed state 的对齐状态：
+
+```json
+{
+  "report_files": 6,
+  "processed_documents": 5,
+  "indexed_reports": 5,
+  "unindexed_reports": 1,
+  "processed_missing_report": 0,
+  "unindexed_dates": ["2026-05-19"]
+}
+```
+
+约束：
+
+1. `report_index_status` 只做可见性提示，不自动写入 `daily_agent_processed.json`。
+2. 普通 `Run Now` 仍以 `daily_agent_processed.json` 中记录的 source hash/size 作为唯一增量判断依据。
+3. `Force Run` 仍显式绕过增量判断，刷新匹配日期。
+4. Records 页和配置页复用同一套 report 目录扫描逻辑，避免 `report/` 与历史 `Report/` 兼容行为漂移。
+5. `/daily-agent/runs` 返回的 Records 列表必须按 `date` 倒序排列；同一日期存在多条候选记录时按 `processed_at_ms` 倒序，确保 Run Results tab 首屏优先展示最新数据。
+
 ---
 
 ## 4. 并发控制
@@ -927,7 +955,7 @@ build_daily_agent_change_plan(task, trigger, date, force)
 | IM delivery 绑定 | 保存 `channel/mode/policy` |
 | 手动 Run now | report/ 生成文件 |
 | 打开 report 详情 | `/daily-agent/reports/{date}` 返回 report Markdown 全文，非法日期拒绝，缺失 report 返回 404 |
-| 历史 report 发现 | `/daily-agent/runs` 合并 `daily_agent_processed.json` 与磁盘 `daily/report/`、兼容 `daily/Report/` 下的 `YYYY-MM-DD-report.md`；即使 processed state 缺失，Daily Agent Records 也必须展示已有报告 |
+| 历史 report 发现 | `/daily-agent/runs` 合并 `daily_agent_processed.json` 与磁盘 `daily/report/`、兼容 `daily/Report/` 下的 `YYYY-MM-DD-report.md`；即使 processed state 缺失，Daily Agent Records 也必须展示已有报告，并按日期倒序返回 |
 | 自动 completion hook | run detail 记录 trigger_source=asr_completion |
 | 未绑定 IM | 不发送，记录 skipped |
 | git 不存在 | 创建任务和保存 AGENTS.md 仍成功 |
@@ -945,6 +973,7 @@ build_daily_agent_change_plan(task, trigger, date, force)
 - 保存后 Daily Agent tab 读取到 custom AGENTS.md
 - Processed Documents 中任一 report 文件名可点击，进入全屏详情页并使用 Markdown 渲染器展示正文
 - Daily Agent Records 不只依赖 `daily_agent_processed.json`：页面刷新时必须通过 `/daily-agent/runs` 展示磁盘中已存在的 `YYYY-MM-DD-report.md`，兼容历史任务里的 `Report` 大写目录；从该兜底记录打开详情时 `/daily-agent/reports/{date}` 必须读取同一真实文件。
+- Run Results 表格必须以最新数据优先展示，按 `date` 倒序排列；前端在消费 API 时保留同样的防御性排序，避免旧服务或 mock 数据无序导致用户先看到旧记录。
 - report 详情页展示任务、日期、路径、大小、修改时间、处理时间和 Runner，并支持返回 Daily Agent 列表
 - 任务详情 tab 使用 URL 参数保持状态；刷新 `Daily Agent` tab 或 report 全屏详情页时，页面必须从 `asrTaskTab=daily-agent` / `asrDailyReport=YYYY-MM-DD` 恢复，不要求用户重新点击切换
 - 亮色/暗色主题下均可读可操作

@@ -24,6 +24,30 @@ mod tests {
         }
     }
 
+    fn test_directory_task(id: &str, audio_dir: PathBuf) -> AsrDirectoryTask {
+        AsrDirectoryTask {
+            id: id.to_string(),
+            name: id.to_string(),
+            audio_dir,
+            recursive: true,
+            enabled: true,
+            paused: false,
+            paused_at_ms: None,
+            schedule: AsrTaskSchedule::Hourly { minute: 0 },
+            language: "chinese".to_string(),
+            model: "Qwen3-ASR-1.7B".to_string(),
+            runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+            last_run_at_ms: None,
+            next_run_at_ms: Some(1),
+            last_error: None,
+            daily_agent: AsrDailyAgentConfig::default(),
+            external_devices: Vec::new(),
+            import_policy: AsrExternalImportPolicy::default(),
+        }
+    }
+
     #[test]
     fn runtime_strategy_defaults_to_reuse_per_file_for_old_task_json() {
         let json = r#"{
@@ -240,6 +264,8 @@ mod tests {
             next_run_at_ms: Some(1),
             last_error: Some("old error".to_string()),
             daily_agent: AsrDailyAgentConfig::default(),
+            external_devices: Vec::new(),
+            import_policy: AsrExternalImportPolicy::default(),
         };
         save_tasks(&TaskStore {
             version: TASK_STORE_VERSION,
@@ -325,6 +351,8 @@ mod tests {
             next_run_at_ms: Some(1),
             last_error: None,
             daily_agent: AsrDailyAgentConfig::default(),
+            external_devices: Vec::new(),
+            import_policy: AsrExternalImportPolicy::default(),
         };
         save_tasks(&TaskStore {
             version: TASK_STORE_VERSION,
@@ -417,6 +445,8 @@ mod tests {
             next_run_at_ms: None,
             last_error: None,
             daily_agent: AsrDailyAgentConfig::default(),
+            external_devices: Vec::new(),
+            import_policy: AsrExternalImportPolicy::default(),
         };
         let mut store = FileStore {
             version: TASK_STORE_VERSION,
@@ -464,6 +494,8 @@ mod tests {
             next_run_at_ms: None,
             last_error: None,
             daily_agent: AsrDailyAgentConfig::default(),
+            external_devices: Vec::new(),
+            import_policy: AsrExternalImportPolicy::default(),
         };
         let (text_path, _metadata_path, timeline_path) =
             output_paths_in(temp.path(), &task.id, &done, &audio_dir);
@@ -524,6 +556,8 @@ mod tests {
             next_run_at_ms: None,
             last_error: None,
             daily_agent: AsrDailyAgentConfig::default(),
+            external_devices: Vec::new(),
+            import_policy: AsrExternalImportPolicy::default(),
         };
         let mut store = FileStore {
             version: TASK_STORE_VERSION,
@@ -586,6 +620,8 @@ mod tests {
             next_run_at_ms: None,
             last_error: None,
             daily_agent: AsrDailyAgentConfig::default(),
+            external_devices: Vec::new(),
+            import_policy: AsrExternalImportPolicy::default(),
         };
         let mut store = FileStore {
             version: TASK_STORE_VERSION,
@@ -631,6 +667,8 @@ mod tests {
             next_run_at_ms: None,
             last_error: None,
             daily_agent: AsrDailyAgentConfig::default(),
+            external_devices: Vec::new(),
+            import_policy: AsrExternalImportPolicy::default(),
         };
         let mut store = FileStore {
             version: TASK_STORE_VERSION,
@@ -677,6 +715,8 @@ mod tests {
             next_run_at_ms: None,
             last_error: None,
             daily_agent: AsrDailyAgentConfig::default(),
+            external_devices: Vec::new(),
+            import_policy: AsrExternalImportPolicy::default(),
         };
         let mut store = FileStore {
             version: TASK_STORE_VERSION,
@@ -727,6 +767,8 @@ mod tests {
             next_run_at_ms: None,
             last_error: None,
             daily_agent: AsrDailyAgentConfig::default(),
+            external_devices: Vec::new(),
+            import_policy: AsrExternalImportPolicy::default(),
         };
 
         let mut store = FileStore {
@@ -856,6 +898,8 @@ mod tests {
             next_run_at_ms: None,
             last_error: None,
             daily_agent: AsrDailyAgentConfig::default(),
+            external_devices: Vec::new(),
+            import_policy: AsrExternalImportPolicy::default(),
         };
         save_tasks(&TaskStore {
             version: TASK_STORE_VERSION,
@@ -1157,6 +1201,161 @@ mod tests {
         assert_eq!(parsed.pid, std::process::id());
         drop(lock);
         assert!(!lock_path.exists());
+    }
+
+    #[test]
+    fn startup_recovery_requeues_enabled_interrupted_task() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        RUNNING_TASKS.lock().unwrap().clear();
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let audio = audio_dir.join("interrupted.wav");
+        std::fs::write(&audio, b"audio").unwrap();
+        let task = test_directory_task("recover-task", audio_dir);
+        save_tasks(&TaskStore {
+            version: TASK_STORE_VERSION,
+            tasks: vec![task.clone()],
+        })
+        .unwrap();
+
+        let lock_path = task_run_lock_path(&task.id);
+        std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &lock_path,
+            serde_json::to_string(&TaskRunLockFile {
+                pid: u32::MAX,
+                process_start_time: 1,
+                acquired_at_ms: 1,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let key = source_key(&audio);
+        let mut record = pending_record(&task.id, &audio);
+        record.status = FileStatus::Processing;
+        record.started_at_ms = Some(123);
+        record.progress_current = Some(3);
+        record.progress_total = Some(9);
+        record.error = Some("old transient error".to_string());
+        save_file_store(
+            &task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(key.clone(), record)]),
+            },
+        )
+        .unwrap();
+
+        let recovery = recover_interrupted_task_runs_on_startup();
+        assert_eq!(recovery.len(), 1);
+        assert_eq!(recovery[0].id, task.id);
+        assert!(!lock_path.exists());
+
+        let store = load_file_store(&task.id);
+        let recovered = store.files.get(&key).unwrap();
+        assert_eq!(recovered.status, FileStatus::Pending);
+        assert_eq!(recovered.started_at_ms, None);
+        assert_eq!(recovered.progress_current, None);
+        assert_eq!(recovered.progress_total, None);
+        assert_eq!(recovered.error, None);
+    }
+
+    #[test]
+    fn startup_recovery_does_not_requeue_paused_task() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        RUNNING_TASKS.lock().unwrap().clear();
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let audio = audio_dir.join("paused.wav");
+        std::fs::write(&audio, b"audio").unwrap();
+        let mut task = test_directory_task("paused-recover-task", audio_dir);
+        task.paused = true;
+        task.paused_at_ms = Some(10);
+        task.next_run_at_ms = None;
+        save_tasks(&TaskStore {
+            version: TASK_STORE_VERSION,
+            tasks: vec![task.clone()],
+        })
+        .unwrap();
+
+        let lock_path = task_run_lock_path(&task.id);
+        std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        std::fs::write(&lock_path, b"{}").unwrap();
+        let key = source_key(&audio);
+        let mut record = pending_record(&task.id, &audio);
+        record.status = FileStatus::Processing;
+        save_file_store(
+            &task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(key.clone(), record)]),
+            },
+        )
+        .unwrap();
+
+        let recovery = recover_interrupted_task_runs_on_startup();
+        assert!(recovery.is_empty());
+        assert!(!lock_path.exists());
+        assert_eq!(
+            load_file_store(&task.id).files.get(&key).unwrap().status,
+            FileStatus::Pending
+        );
+    }
+
+    #[test]
+    fn startup_recovery_preserves_live_owner_lock() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        RUNNING_TASKS.lock().unwrap().clear();
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let audio = audio_dir.join("live.wav");
+        std::fs::write(&audio, b"audio").unwrap();
+        let task = test_directory_task("live-owner-task", audio_dir);
+        save_tasks(&TaskStore {
+            version: TASK_STORE_VERSION,
+            tasks: vec![task.clone()],
+        })
+        .unwrap();
+
+        let live_lock = TaskRunFileLock::acquire(&task.id).unwrap();
+        let key = source_key(&audio);
+        let mut record = pending_record(&task.id, &audio);
+        record.status = FileStatus::Processing;
+        save_file_store(
+            &task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(key.clone(), record)]),
+            },
+        )
+        .unwrap();
+
+        let recovery = recover_interrupted_task_runs_on_startup();
+        assert!(recovery.is_empty());
+        assert!(task_run_lock_path(&task.id).exists());
+        assert_eq!(
+            load_file_store(&task.id).files.get(&key).unwrap().status,
+            FileStatus::Processing
+        );
+        drop(live_lock);
+    }
+
+    #[test]
+    fn running_task_guard_releases_marker_on_drop() {
+        RUNNING_TASKS.lock().unwrap().clear();
+        {
+            let _guard = RunningTaskGuard::acquire("guard-task").unwrap();
+            assert!(task_is_running("guard-task"));
+            assert!(RunningTaskGuard::acquire("guard-task").is_err());
+        }
+        assert!(!task_is_running("guard-task"));
     }
 
     // ====================================================================
@@ -1465,4 +1664,159 @@ mod tests {
     }
 
     include!("daily_agent_tests.rs");
+
+    #[test]
+    fn external_import_normalizes_duplicate_device_names() {
+        let result = normalize_bindings(vec![
+            AsrExternalDeviceBinding {
+                name: "LEFT".to_string(),
+                ..Default::default()
+            },
+            AsrExternalDeviceBinding {
+                name: "LEFT".to_string(),
+                ..Default::default()
+            },
+        ]);
+        assert!(result.unwrap_err().contains("duplicate external device name"));
+        assert_eq!(sanitize_device_root("LEFT/RIGHT"), "LEFT_RIGHT");
+    }
+
+    #[test]
+    fn external_import_matches_uuid_without_crossing_device_names() {
+        let binding = AsrExternalDeviceBinding {
+            name: "RIGHT".to_string(),
+            volume_uuid: Some("SHARED-UUID".to_string()),
+            ..Default::default()
+        };
+        let left = ExternalVolumeInfo {
+            name: "LEFT".to_string(),
+            mount_path: PathBuf::from("/Volumes/LEFT"),
+            volume_uuid: Some("SHARED-UUID".to_string()),
+            device_identifier: None,
+            kind: "external".to_string(),
+            read_only: false,
+            available_bytes: Some(1024),
+        };
+        let right = ExternalVolumeInfo {
+            name: "RIGHT".to_string(),
+            mount_path: PathBuf::from("/Volumes/RIGHT"),
+            volume_uuid: Some("SHARED-UUID".to_string()),
+            device_identifier: None,
+            kind: "external".to_string(),
+            read_only: false,
+            available_bytes: Some(1024),
+        };
+
+        assert!(!external_volume_matches(&binding, &left));
+        assert!(external_volume_matches(&binding, &right));
+    }
+
+    #[test]
+    fn external_import_defers_recently_modified_files() {
+        let now = now_ms();
+        assert!(should_defer_unstable_source(
+            None,
+            128,
+            Some(now.saturating_sub(500)),
+            2
+        ));
+        assert!(!should_defer_unstable_source(
+            None,
+            128,
+            Some(now.saturating_sub(2_500)),
+            2
+        ));
+        assert!(!should_defer_unstable_source(None, 128, Some(now), 0));
+    }
+
+    #[test]
+    fn external_import_skips_macos_appledouble_metadata_files() {
+        assert!(is_macos_metadata_file("._auto-left.wav"));
+        assert!(is_macos_metadata_file("._duplicate.m4a"));
+        assert!(!is_macos_metadata_file("auto-left.wav"));
+        assert!(!is_macos_metadata_file("nested._audio.wav"));
+    }
+
+    #[test]
+    fn task_audio_dir_creation_allows_missing_nested_directory() {
+        let temp = TempDir::new().unwrap();
+        let audio_dir = temp.path().join("missing").join("nested").join("audio");
+
+        assert!(!audio_dir.exists());
+        ensure_task_audio_dir(&audio_dir).unwrap();
+        assert!(audio_dir.is_dir());
+    }
+
+    #[test]
+    fn task_audio_dir_creation_rejects_existing_file() {
+        let temp = TempDir::new().unwrap();
+        let audio_dir = temp.path().join("not-a-dir");
+        std::fs::write(&audio_dir, b"file").unwrap();
+
+        let error = ensure_task_audio_dir(&audio_dir).unwrap_err();
+        assert!(error.contains("must be a directory"));
+    }
+
+    #[test]
+    fn content_hash_dedupe_reuses_completed_transcript() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let first = audio_dir.join("LEFT").join("a.wav");
+        let second = audio_dir.join("RIGHT").join("copy.wav");
+        std::fs::create_dir_all(first.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(second.parent().unwrap()).unwrap();
+        std::fs::write(&first, b"same-audio").unwrap();
+        std::fs::write(&second, b"same-audio").unwrap();
+
+        let task = AsrDirectoryTask {
+            id: "hash-task".to_string(),
+            name: "Hash Task".to_string(),
+            audio_dir: audio_dir.clone(),
+            recursive: true,
+            enabled: true,
+            paused: false,
+            paused_at_ms: None,
+            schedule: AsrTaskSchedule::Hourly { minute: 0 },
+            language: "chinese".to_string(),
+            model: "Qwen3-ASR-1.7B".to_string(),
+            runtime_strategy: AsrRuntimeStrategy::ReusePerFile,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+            last_run_at_ms: None,
+            next_run_at_ms: Some(1),
+            last_error: None,
+            daily_agent: AsrDailyAgentConfig::default(),
+            external_devices: Vec::new(),
+            import_policy: AsrExternalImportPolicy::default(),
+        };
+
+        let text_path = temp.path().join("text.txt");
+        let metadata_path = temp.path().join("text.json");
+        std::fs::write(&text_path, "hello").unwrap();
+        std::fs::write(&metadata_path, "{}").unwrap();
+        let first_key = source_key(&first);
+        let second_key = source_key(&second);
+        let mut files = FileStore::default();
+        let mut first_record = pending_record(&task.id, &first);
+        first_record.status = FileStatus::Success;
+        first_record.output_text_path = Some(text_path.clone());
+        first_record.output_metadata_path = Some(metadata_path.clone());
+        first_record.content_hash = Some(sha256_file(&first).unwrap());
+        first_record.content_hash_algorithm = Some("sha256".to_string());
+        first_record.text_chars = 5;
+        first_record.finished_at_ms = Some(now_ms());
+        files.files.insert(first_key.clone(), first_record.clone());
+        files.files.insert(second_key.clone(), pending_record(&task.id, &second));
+        index_completed_file_hash(&task, &first_key, &first_record);
+
+        apply_content_hash_dedupe(&task, &[first, second], &mut files).unwrap();
+        let duplicate = files.files.get(&second_key).unwrap();
+        assert_eq!(duplicate.status, FileStatus::Success);
+        assert_eq!(duplicate.duplicate_of_source_key.as_deref(), Some(first_key.as_str()));
+        assert_eq!(duplicate.output_text_path.as_ref(), Some(&text_path));
+        assert_eq!(duplicate.text_chars, 5);
+    }
 }

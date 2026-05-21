@@ -160,6 +160,16 @@ struct AsrDailyAgentProcessedDocument {
     pub last_run_id: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct AsrDailyAgentReportIndexStatus {
+    report_files: usize,
+    processed_documents: usize,
+    indexed_reports: usize,
+    unindexed_reports: usize,
+    processed_missing_report: usize,
+    unindexed_dates: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct AsrDailyAgentConversationState {
     #[serde(default)]
@@ -508,6 +518,97 @@ fn compute_sha256_of_bytes(data: &[u8]) -> String {
     use sha2::{Digest as Sha2Digest, Sha256};
     let hash = Sha256::digest(data);
     format!("{:x}", hash)
+}
+
+fn daily_agent_report_dirs_for_task(task_id: &str) -> Vec<PathBuf> {
+    let daily_dir = daily_dir_for_task(task_id);
+    let mut exact_lower = Vec::new();
+    let mut case_compat = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&daily_dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if name == "report" {
+                exact_lower.push(path);
+            } else if name.eq_ignore_ascii_case("report") {
+                case_compat.push(path);
+            }
+        }
+    }
+
+    exact_lower.sort();
+    case_compat.sort();
+    let mut dirs = exact_lower;
+    dirs.extend(case_compat);
+    if dirs.is_empty() {
+        dirs.push(daily_dir.join("report"));
+    }
+    dirs
+}
+
+fn daily_agent_report_date_from_path(path: &Path) -> Option<String> {
+    let filename = path.file_name()?.to_str()?;
+    let date = filename.strip_suffix("-report.md")?;
+    if NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok() {
+        Some(date.to_string())
+    } else {
+        None
+    }
+}
+
+fn list_daily_agent_report_files(task_id: &str) -> Vec<PathBuf> {
+    let mut reports = Vec::new();
+    for report_dir in daily_agent_report_dirs_for_task(task_id) {
+        let Ok(entries) = std::fs::read_dir(&report_dir) else {
+            continue;
+        };
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.is_file() && daily_agent_report_date_from_path(&path).is_some() {
+                reports.push(path);
+            }
+        }
+    }
+    reports.sort();
+    reports
+}
+
+fn build_daily_agent_report_index_status(
+    task_id: &str,
+    processed: &AsrDailyAgentProcessedState,
+) -> AsrDailyAgentReportIndexStatus {
+    let report_files = list_daily_agent_report_files(task_id);
+    let report_dates: HashSet<String> = report_files
+        .iter()
+        .filter_map(|path| daily_agent_report_date_from_path(path))
+        .collect();
+
+    let mut unindexed_dates: Vec<String> = report_dates
+        .iter()
+        .filter(|date| !processed.documents.contains_key(*date))
+        .cloned()
+        .collect();
+    unindexed_dates.sort();
+
+    let processed_missing_report = processed
+        .documents
+        .keys()
+        .filter(|date| !report_dates.contains(*date))
+        .count();
+
+    AsrDailyAgentReportIndexStatus {
+        report_files: report_dates.len(),
+        processed_documents: processed.documents.len(),
+        indexed_reports: report_dates.len().saturating_sub(unindexed_dates.len()),
+        unindexed_reports: unindexed_dates.len(),
+        processed_missing_report,
+        unindexed_dates,
+    }
 }
 
 fn build_daily_agent_change_plan(

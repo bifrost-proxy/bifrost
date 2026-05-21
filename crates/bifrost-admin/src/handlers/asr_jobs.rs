@@ -12,6 +12,7 @@ use hyper::{body::Incoming, Method, Request, Response, StatusCode};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
+use sha2::Sha256;
 use std::sync::Mutex as StdMutex;
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use tokio::process::Command;
@@ -48,6 +49,7 @@ use crate::handlers::{
 // `include!` keeps these pieces in the same Rust module, preserving the
 // pre-refactor visibility model while making each file reviewable.
 include!("asr_jobs/state.rs");
+include!("asr_jobs/external_import.rs");
 include!("asr_jobs/api.rs");
 include!("asr_jobs/retry.rs");
 include!("asr_jobs/runner.rs");

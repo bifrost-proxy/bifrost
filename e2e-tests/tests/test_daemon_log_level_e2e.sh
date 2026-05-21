@@ -38,7 +38,7 @@ build_bifrost() {
 
 start_daemon() {
     export BIFROST_DATA_DIR="${TEST_DATA_DIR}"
-    "${BIFROST_BIN}" -l debug --log-dir "${LOG_DIR}" start \
+    RUST_LOG=debug "${BIFROST_BIN}" -l debug --log-dir "${LOG_DIR}" start \
         -p "${PROXY_PORT}" --skip-cert-check --unsafe-ssl --no-system-proxy --daemon \
         > "${TEST_DATA_DIR}/start.log" 2>&1
 }

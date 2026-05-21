@@ -23,6 +23,8 @@ fn daily_agent_prompt_uses_file_list_for_file_capable_runners() {
         next_run_at_ms: Some(1),
         last_error: None,
         daily_agent: AsrDailyAgentConfig::default(),
+        external_devices: Vec::new(),
+        import_policy: AsrExternalImportPolicy::default(),
     };
     task.daily_agent.runner = "codex-runner".to_string();
     ensure_asr_daily_workspace(&task).unwrap();
@@ -74,6 +76,8 @@ fn daily_agent_report_gate_requires_report_before_processed_state() {
         next_run_at_ms: Some(1),
         last_error: None,
         daily_agent: AsrDailyAgentConfig::default(),
+        external_devices: Vec::new(),
+        import_policy: AsrExternalImportPolicy::default(),
     };
     ensure_asr_daily_workspace(&task).unwrap();
     std::fs::write(daily_dir_for_task(&task.id).join("2026-05-19.md"), "text").unwrap();
@@ -134,6 +138,56 @@ fn daily_agent_records_include_existing_report_directory_without_processed_state
 }
 
 #[test]
+fn daily_agent_report_index_status_marks_unindexed_reports_without_backfill() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let task_id = "daily-agent-report-index-task";
+    let daily_dir = daily_dir_for_task(task_id);
+    let report_dir = daily_dir.join("report");
+    std::fs::create_dir_all(&report_dir).unwrap();
+    std::fs::write(daily_dir.join("2026-05-14.md"), "indexed source").unwrap();
+    std::fs::write(daily_dir.join("2026-05-15.md"), "external source").unwrap();
+    std::fs::write(report_dir.join("2026-05-14-report.md"), "# indexed report").unwrap();
+    std::fs::write(report_dir.join("2026-05-15-report.md"), "# external report").unwrap();
+
+    let mut processed = AsrDailyAgentProcessedState::default();
+    processed.documents.insert(
+        "2026-05-14".to_string(),
+        AsrDailyAgentProcessedDocument {
+            date: "2026-05-14".to_string(),
+            source_sha256: "abc123".to_string(),
+            source_len_bytes: 14,
+            processed_at_ms: 100,
+            runner: "web".to_string(),
+            report_path: Some(
+                report_dir
+                    .join("2026-05-14-report.md")
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+            last_run_id: "run-1".to_string(),
+        },
+    );
+
+    let state_path = daily_agent_processed_state_path(task_id);
+    assert!(!state_path.exists());
+
+    let status = build_daily_agent_report_index_status(task_id, &processed);
+
+    assert_eq!(status.report_files, 2);
+    assert_eq!(status.processed_documents, 1);
+    assert_eq!(status.indexed_reports, 1);
+    assert_eq!(status.unindexed_reports, 1);
+    assert_eq!(status.processed_missing_report, 0);
+    assert_eq!(status.unindexed_dates, vec!["2026-05-15".to_string()]);
+    assert!(
+        !state_path.exists(),
+        "report index status must not backfill processed state"
+    );
+}
+
+#[test]
 fn daily_agent_records_preserve_processed_metadata_and_repair_missing_report_path() {
     let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
     let temp = TempDir::new().unwrap();
@@ -172,6 +226,41 @@ fn daily_agent_records_preserve_processed_metadata_and_repair_missing_report_pat
 }
 
 #[test]
+fn daily_agent_records_are_returned_newest_date_first() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let task_id = "daily-agent-records-sort-task";
+    let mut processed = AsrDailyAgentProcessedState::default();
+
+    for (date, processed_at_ms) in [
+        ("2026-05-14", 100),
+        ("2026-05-16", 300),
+        ("2026-05-15", 200),
+    ] {
+        processed.documents.insert(
+            date.to_string(),
+            AsrDailyAgentProcessedDocument {
+                date: date.to_string(),
+                source_sha256: format!("hash-{date}"),
+                source_len_bytes: 42,
+                processed_at_ms,
+                runner: "web".to_string(),
+                report_path: None,
+                last_run_id: format!("run-{date}"),
+            },
+        );
+    }
+
+    let records = build_daily_agent_records(task_id, &processed);
+
+    assert_eq!(
+        records.iter().map(|record| record.date.as_str()).collect::<Vec<_>>(),
+        vec!["2026-05-16", "2026-05-15", "2026-05-14"]
+    );
+}
+
+#[test]
 fn daily_agent_runner_is_single_required_value() {
     let mut task = AsrDirectoryTask {
         id: "daily-agent-ready-task".to_string(),
@@ -191,6 +280,8 @@ fn daily_agent_runner_is_single_required_value() {
         next_run_at_ms: Some(1),
         last_error: None,
         daily_agent: AsrDailyAgentConfig::default(),
+        external_devices: Vec::new(),
+        import_policy: AsrExternalImportPolicy::default(),
     };
     task.daily_agent.runner = String::new();
     assert!(!daily_agent_runner_ready(&task));

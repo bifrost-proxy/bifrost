@@ -170,7 +170,53 @@
 
 ---
 
-### TC-LOD-07：start 默认 info 日志不刷常态连接生命周期噪声（回归验证）
+### TC-LOD-07：daemon 模式日志文件包含结构化 tracing 元数据
+
+**操作步骤**：
+1. 清理临时目录并构建当前 release 二进制：
+   ```bash
+   rm -rf /tmp/bifrost-human-daemon-log-level
+   mkdir -p /tmp/bifrost-human-daemon-log-level
+   source ~/.zshrc
+   cargo build --release --bin bifrost
+   ```
+2. 使用临时数据目录启动 daemon，必须禁用系统代理：
+   ```bash
+   RUST_LOG=debug BIFROST_DATA_DIR=/tmp/bifrost-human-daemon-log-level/data \
+   target/release/bifrost -l debug --log-dir /tmp/bifrost-human-daemon-log-level/logs \
+     start -p 18891 --skip-cert-check --unsafe-ssl --no-system-proxy --daemon
+   ```
+3. 等待管理端可用并发起一次代理请求：
+   ```bash
+   for i in {1..60}; do
+     curl -fsS http://127.0.0.1:18891/_bifrost/api/proxy/address >/dev/null && break
+     sleep 0.5
+   done
+   curl -sS -o /tmp/bifrost-human-daemon-log-level/response.html \
+     -x http://127.0.0.1:18891 http://example.com
+   ```
+4. 检查 daemon rolling log 是否包含带时间、级别、文件和行号的 tracing 日志：
+   ```bash
+   grep -R -nE '^[0-9T:\.-]+Z (TRACE|DEBUG|INFO|WARN|ERROR) .+\.rs:[0-9]+:' \
+     /tmp/bifrost-human-daemon-log-level/logs/bifrost*.log \
+     && echo "PASS: structured daemon tracing log exists" \
+     || echo "FAIL: structured daemon tracing log missing"
+   ```
+5. 停止服务并清理：
+   ```bash
+   BIFROST_DATA_DIR=/tmp/bifrost-human-daemon-log-level/data target/release/bifrost stop
+   rm -rf /tmp/bifrost-human-daemon-log-level
+   ```
+
+**预期结果**：
+- daemon 服务成功启动，且没有修改系统代理
+- 代理请求成功
+- 终端输出 `PASS: structured daemon tracing log exists`
+- 匹配到的日志行包含 `.rs:<line>:` 元数据，证明 daemon 子进程重建后的文件日志链路可用
+
+---
+
+### TC-LOD-08：start 默认 info 日志不刷常态连接生命周期噪声（回归验证）
 
 **操作步骤**：
 1. 清理临时数据目录并准备日志文件：
@@ -224,7 +270,7 @@ PY
 
 ---
 
-### TC-LOD-08：start 默认 info 日志不刷规则命中详情（回归验证）
+### TC-LOD-09：start 默认 info 日志不刷规则命中详情（回归验证）
 
 **操作步骤**：
 1. 清理临时数据目录并准备日志文件：

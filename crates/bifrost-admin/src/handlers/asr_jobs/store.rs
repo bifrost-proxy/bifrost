@@ -203,38 +203,77 @@ fn file_status_sort_rank(status: &FileStatus) -> u8 {
     }
 }
 
-fn repair_interrupted_processing_records_on_startup() {
+fn recover_interrupted_task_runs_on_startup() -> Vec<AsrDirectoryTask> {
+    let mut tasks_to_resume = Vec::new();
     for task in load_tasks().tasks {
-        if RUNNING_TASKS.lock().unwrap().contains(&task.id) {
+        if task_is_running(&task.id) {
             continue;
         }
         let lock_path = task_run_lock_path(&task.id);
-        if lock_path.exists() && !is_task_run_lock_stale(&lock_path) {
+        let lock_exists = lock_path.exists();
+        let stale_lock = lock_exists && is_task_run_lock_stale(&lock_path);
+        if lock_exists && !stale_lock {
             continue;
+        }
+        if stale_lock {
+            match std::fs::remove_file(&lock_path) {
+                Ok(()) => {
+                    tracing::warn!(
+                        task_id = %task.id,
+                        lock_path = %lock_path.display(),
+                        "removed stale ASR task run lock on scheduler startup"
+                    );
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    tracing::warn!(
+                        task_id = %task.id,
+                        lock_path = %lock_path.display(),
+                        error = %error,
+                        "failed to remove stale ASR task run lock on scheduler startup"
+                    );
+                    continue;
+                }
+            }
         }
         let mut files = load_file_store(&task.id);
         let reset_count = reset_interrupted_processing_records(&task.id, &mut files);
-        if reset_count == 0 {
-            continue;
-        }
-        match save_file_store(&task.id, &files) {
-            Ok(()) => {
-                tracing::warn!(
-                    task_id = %task.id,
-                    reset_count,
-                    "reset interrupted ASR processing records on scheduler startup"
-                );
+        if reset_count > 0 {
+            match save_file_store(&task.id, &files) {
+                Ok(()) => {
+                    tracing::warn!(
+                        task_id = %task.id,
+                        reset_count,
+                        "reset interrupted ASR processing records on scheduler startup"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        task_id = %task.id,
+                        reset_count,
+                        error = %error,
+                        "failed to persist interrupted ASR processing record reset"
+                    );
+                    continue;
+                }
             }
-            Err(error) => {
+        }
+        if (stale_lock || reset_count > 0) && task.enabled && !task.paused {
+            let summary = summarize_task(&task);
+            if summary.pending > 0 || summary.failed > 0 {
                 tracing::warn!(
                     task_id = %task.id,
+                    pending = summary.pending,
+                    failed = summary.failed,
+                    stale_lock,
                     reset_count,
-                    error = %error,
-                    "failed to persist interrupted ASR processing record reset"
+                    "interrupted ASR task is eligible for startup recovery"
                 );
+                tasks_to_resume.push(task);
             }
         }
     }
+    tasks_to_resume
 }
 
 fn reset_interrupted_processing_records(task_id: &str, files: &mut FileStore) -> usize {
@@ -497,6 +536,10 @@ fn file_record_from_info(task_id: &str, path: &Path, source_info: &SourceAudioIn
         source_modified_ms: source_info.source_modified_ms,
         source_created_at_ms: source_info.source_created_at_ms,
         source_created_at_source: source_info.source_created_at_source.clone(),
+        content_hash: None,
+        content_hash_algorithm: None,
+        duplicate_of_source_key: None,
+        transcript_alias: None,
         media_duration_ms: source_info.media_duration_ms,
         status: FileStatus::Pending,
         output_text_path: None,

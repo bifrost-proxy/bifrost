@@ -1753,6 +1753,12 @@ pub fn run_daemon(
                 bifrost_core::reinit_logging_for_daemon(&log_dir, log_retention_days, log_level)
             {
                 eprintln!("Warning: Failed to initialize logging for daemon: {}", e);
+            } else {
+                tracing::info!(
+                    port = config.port,
+                    log_dir = %log_dir.display(),
+                    "daemon logging initialized"
+                );
             }
 
             let err_log_dir = log_dir.clone();

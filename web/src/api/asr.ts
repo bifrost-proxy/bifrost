@@ -217,6 +217,8 @@ export interface AsrDirectoryTask {
   last_run_at_ms?: number;
   next_run_at_ms?: number;
   last_error?: string;
+  external_devices?: AsrExternalDeviceBinding[];
+  import_policy?: AsrExternalImportPolicy;
   summary: AsrTaskSummary;
   bulk_retry?: AsrBulkRetryState;
 }
@@ -265,6 +267,67 @@ export interface CreateAsrTaskRequest {
   language?: string;
   model?: string;
   runtime_strategy?: AsrRuntimeStrategy;
+  external_devices?: AsrExternalDeviceBinding[];
+  import_policy?: AsrExternalImportPolicy;
+}
+
+export interface UpdateAsrTaskRequest extends Partial<CreateAsrTaskRequest> {
+  paused?: boolean;
+}
+
+export interface AsrExternalDeviceBinding {
+  name: string;
+  display_name?: string;
+  volume_uuid?: string;
+  device_identifier?: string;
+  enabled?: boolean;
+  include_globs?: string[];
+  exclude_globs?: string[];
+  last_seen_at_ms?: number;
+  last_import_at_ms?: number;
+  last_status?: string;
+}
+
+export interface AsrExternalImportPolicy {
+  enabled: boolean;
+  file_stable_secs: number;
+  min_free_bytes: number;
+  max_file_bytes: number;
+  auto_run_after_import: boolean;
+  content_hash_dedupe_enabled: boolean;
+  content_hash_algorithm: string;
+  delete_source_after_import: boolean;
+}
+
+export interface AsrExternalVolume {
+  name: string;
+  mount_path: string;
+  volume_uuid?: string;
+  device_identifier?: string;
+  kind: string;
+  read_only: boolean;
+  available_bytes?: number;
+}
+
+export interface AsrExternalImportStatus {
+  policy: AsrExternalImportPolicy;
+  devices: Array<{
+    binding: AsrExternalDeviceBinding;
+    connected: boolean;
+    mount_path?: string;
+    status: string;
+    last_error?: string;
+  }>;
+  runs: Array<{
+    run_id: string;
+    device_name?: string;
+    started_at_ms: number;
+    finished_at_ms: number;
+    imported: number;
+    skipped: number;
+    failed: number;
+    status: string;
+  }>;
 }
 
 export interface RunAsrTaskResult {
@@ -429,6 +492,49 @@ export async function createAsrTask(
   return readJsonResponse<AsrDirectoryTask>(response);
 }
 
+export async function updateAsrTask(
+  id: string,
+  request: UpdateAsrTaskRequest,
+): Promise<AsrDirectoryTask> {
+  const response = await fetch(buildApiUrl(`/asr/tasks/${encodeURIComponent(id)}`), {
+    method: "PATCH",
+    headers: {
+      ...buildStreamHeaders(),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(request),
+  });
+  return readJsonResponse<AsrDirectoryTask>(response);
+}
+
+export async function listAsrExternalVolumes(): Promise<AsrExternalVolume[]> {
+  const response = await get<{ volumes: AsrExternalVolume[] }>("/asr/external-volumes");
+  return response.volumes;
+}
+
+export async function getAsrExternalImportStatus(
+  taskId: string,
+): Promise<AsrExternalImportStatus> {
+  return get<AsrExternalImportStatus>(
+    `/asr/tasks/${encodeURIComponent(taskId)}/external-import`,
+  );
+}
+
+export async function runAsrExternalImport(
+  taskId: string,
+): Promise<{ imported: number; message: string; task: AsrDirectoryTask }> {
+  const response = await fetch(
+    buildApiUrl(`/asr/tasks/${encodeURIComponent(taskId)}/external-import/run`),
+    {
+      method: "POST",
+      headers: buildStreamHeaders(),
+    },
+  );
+  return readJsonResponse<{ imported: number; message: string; task: AsrDirectoryTask }>(
+    response,
+  );
+}
+
 export async function runAsrTask(id: string): Promise<RunAsrTaskResult> {
   const response = await fetch(buildApiUrl(`/asr/tasks/${encodeURIComponent(id)}/run`), {
     method: "POST",
@@ -457,8 +563,9 @@ export async function resumeAsrTask(id: string): Promise<ControlAsrTaskResult> {
   return readJsonResponse<ControlAsrTaskResult>(response);
 }
 
-export async function deleteAsrTask(id: string): Promise<void> {
-  const response = await fetch(buildApiUrl(`/asr/tasks/${encodeURIComponent(id)}`), {
+export async function deleteAsrTask(id: string, confirmName: string): Promise<void> {
+  const query = new URLSearchParams({ confirm_name: confirmName });
+  const response = await fetch(buildApiUrl(`/asr/tasks/${encodeURIComponent(id)}?${query}`), {
     method: "DELETE",
     headers: buildStreamHeaders(),
   });
@@ -691,10 +798,20 @@ export interface AsrDailyAgentWorkspaceStatus {
   report_count: number;
 }
 
+export interface AsrDailyAgentReportIndexStatus {
+  report_files: number;
+  processed_documents: number;
+  indexed_reports: number;
+  unindexed_reports: number;
+  processed_missing_report: number;
+  unindexed_dates: string[];
+}
+
 export interface AsrDailyAgentConfigResponse {
   task_id: string;
   config: AsrDailyAgentConfig;
   workspace?: AsrDailyAgentWorkspaceStatus;
+  report_index_status?: AsrDailyAgentReportIndexStatus;
   last_run: {
     run_id?: string;
     status?: string;
