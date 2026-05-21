@@ -76,7 +76,7 @@ impl ImAgentProgressSnapshot {
     pub fn apply_event(&mut self, event: AgentTurnProgressEvent) {
         match event {
             AgentTurnProgressEvent::Status(status) => {
-                self.status = Some(status);
+                self.status = Some(*status);
             }
             AgentTurnProgressEvent::ToolStarted {
                 tool_name,
@@ -846,9 +846,23 @@ fn format_tool_panel_title(snapshot: &ImAgentProgressSnapshot) -> String {
 fn format_status_panel_title(snapshot: &ImAgentProgressSnapshot) -> String {
     let token_title = match snapshot.status.as_ref() {
         Some(status) => match (status.total_tokens_used, status.last_response_tokens) {
-            (Some(total), Some(last)) => format!("Token：累计 {} · 最近 {}", total, last),
-            (Some(total), None) => format!("Token：累计 {}", total),
-            (None, Some(last)) => format!("Token：最近 {}", last),
+            (Some(total), Some(last)) => format!(
+                "Token：累计 {} · 最近 {}",
+                bifrost_agent::format_status_metric_count(total),
+                bifrost_agent::format_status_metric_count(last)
+            ),
+            (Some(total), None) => {
+                format!(
+                    "Token：累计 {}",
+                    bifrost_agent::format_status_metric_count(total)
+                )
+            }
+            (None, Some(last)) => {
+                format!(
+                    "Token：最近 {}",
+                    bifrost_agent::format_status_metric_count(last)
+                )
+            }
             (None, None) => "Token：统计中".to_string(),
         },
         None => "Token：统计中".to_string(),
@@ -914,18 +928,26 @@ fn format_footer_markdown(snapshot: &ImAgentProgressSnapshot) -> String {
         Some(status) => {
             let token_text = status
                 .total_tokens_used
-                .map(|value| value.to_string())
+                .map(bifrost_agent::format_status_metric_count)
                 .unwrap_or_else(|| "N/A".to_string());
             let last_token_text = status
                 .last_response_tokens
-                .map(|value| value.to_string())
+                .map(bifrost_agent::format_status_metric_count)
                 .unwrap_or_else(|| "N/A".to_string());
             let context_text = match (status.context_window_tokens, status.context_usage_percent) {
                 (Some(window), Some(percent)) => format!(
                     "~{} / {} ({percent:.1}%)",
-                    status.estimated_context_tokens, window
+                    bifrost_agent::format_status_metric_count(
+                        status.estimated_context_tokens.into()
+                    ),
+                    bifrost_agent::format_status_metric_count(window.into())
                 ),
-                _ => format!("~{} / N/A", status.estimated_context_tokens),
+                _ => format!(
+                    "~{} / N/A",
+                    bifrost_agent::format_status_metric_count(
+                        status.estimated_context_tokens.into()
+                    )
+                ),
             };
             format!(
                 "{}状态：{} · Loop {}/{}（已完成 {}）\nContext：{}\nToken：累计 {}，最近 {}\n压缩：{} 次 · 队列：{} · 引导：{}\n工作路径：`{}`",
@@ -1046,6 +1068,65 @@ mod tests {
             snapshot.activity_notice.as_deref(),
             Some("已收到引导：prioritize logs")
         );
+    }
+
+    #[test]
+    fn card_metric_count_uses_readable_kmb_units() {
+        assert_eq!(bifrost_agent::format_status_metric_count(0), "0");
+        assert_eq!(bifrost_agent::format_status_metric_count(999), "999");
+        assert_eq!(bifrost_agent::format_status_metric_count(1_000), "1K");
+        assert_eq!(bifrost_agent::format_status_metric_count(9_999), "10K");
+        assert_eq!(bifrost_agent::format_status_metric_count(19_333), "19.3K");
+        assert_eq!(bifrost_agent::format_status_metric_count(38_634), "38.6K");
+        assert_eq!(bifrost_agent::format_status_metric_count(250_000), "250K");
+        assert_eq!(bifrost_agent::format_status_metric_count(999_950), "1M");
+        assert_eq!(bifrost_agent::format_status_metric_count(1_000_000), "1M");
+        assert_eq!(bifrost_agent::format_status_metric_count(1_234_567), "1.2M");
+        assert_eq!(
+            bifrost_agent::format_status_metric_count(1_280_000_000),
+            "1.3B"
+        );
+    }
+
+    #[test]
+    fn feishu_progress_card_formats_large_token_usage() {
+        let mut snapshot = ImAgentProgressSnapshot::new("s1", "token task");
+        snapshot.status = Some(ActiveTurnStatus {
+            session_key: "s1".to_string(),
+            state: "model_response".to_string(),
+            started_at: 1,
+            updated_at: 2,
+            current_loop_iteration: 2,
+            completed_loop_iterations: 1,
+            max_loop_iterations: 1000,
+            last_response_tokens: Some(1_234_567),
+            total_tokens_used: Some(1_000_000),
+            estimated_context_tokens: 260_000,
+            context_window_tokens: Some(1_000_000),
+            context_usage_percent: Some(26.0),
+            compaction_count: 1,
+            history_version: 7,
+            work_dir: Some("/tmp/bifrost-work".to_string()),
+            message_count: 9,
+            local_tool_count: 12,
+            mcp_tool_count: 5,
+            pending_guide_messages: Vec::new(),
+            user_turn_count: 2,
+            agent_type: Some("Bifrost Agent".to_string()),
+            runner_type: Some("bifrost_agent".to_string()),
+            runner_id: None,
+            external_conversation_id: None,
+            external_thread_id: None,
+        });
+
+        let card = build_feishu_progress_card(&snapshot, true);
+        let serialized = serde_json::to_string(&card).unwrap();
+        assert!(serialized.contains("Token：累计 1M · 最近 1.2M"));
+        assert!(serialized.contains("Context：~260K / 1M (26.0%)"));
+        assert!(serialized.contains("Token：累计 1M，最近 1.2M"));
+        assert!(!serialized.contains("Token：累计 1000000"));
+        assert!(!serialized.contains("最近 1234567"));
+        assert!(!serialized.contains("Context：~260000 / 1000000"));
     }
 
     #[test]

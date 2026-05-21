@@ -316,6 +316,9 @@ text = response.get("response", "")
 assert "会话状态:" in text, text
 assert "正在处理中" in text, text
 assert "工作路径:" in text, text
+assert "Agent 类型: Bifrost Agent" in text, text
+assert "Runner 类型: bifrost_agent" in text, text
+assert "历史对话轮次:" in text, text
 assert "Loop: 第 1 次" in text, text
 assert "实时 token:" in text, text
 assert "Context 用量:" in text, text
@@ -361,6 +364,9 @@ assert response.get("success") is True, response
 text = response.get("response", "")
 assert "会话状态:" in text, text
 assert f"工作路径: {sys.argv[2]}" in text, text
+assert "Agent 类型: Bifrost Agent" in text, text
+assert "Runner 类型: bifrost_agent" in text, text
+assert "历史对话轮次:" in text, text
 assert "API 累计 token:" in text, text
 assert "Context 用量:" in text, text
 PY
@@ -415,15 +421,33 @@ assert isinstance(active, dict), response
 assert active.get("session_key") == "agent-status-runtime-tool-growth", active
 assert active.get("current_loop_iteration") == 2, active
 estimated = active.get("estimated_context_tokens", 0)
+def fmt_metric(value):
+    units = [(1_000, "K"), (1_000_000, "M"), (1_000_000_000, "B")]
+    if value < units[0][0]:
+        return str(value)
+    idx = len(units) - 1
+    for i, (unit, _) in enumerate(units):
+        if value < unit:
+            idx = max(i - 1, 0)
+            break
+    def rounded_tenths(unit):
+        return (value * 10 + unit // 2) // unit
+    while idx + 1 < len(units) and rounded_tenths(units[idx][0]) >= 10000:
+        idx += 1
+    unit, suffix = units[idx]
+    scaled = rounded_tenths(unit)
+    whole, decimal = divmod(scaled, 10)
+    return f"{whole}{suffix}" if decimal == 0 else f"{whole}.{decimal}{suffix}"
 assert active.get("compaction_count") == 1, active
 assert estimated < 10000, active
 assert active.get("message_count", 0) < 10, active
 assert active.get("last_response_tokens", 0) == estimated, active
-assert f"Context 用量: ~{estimated} / 250000" in text, text
-assert "实时 token: 累计" in text and f"最近响应 {estimated}" in text, text
-match = re.search(r"Context 用量: ~(\d+) / 250000", text)
+estimated_text = fmt_metric(estimated)
+assert f"Context 用量: ~{estimated_text} / 250K" in text, text
+assert "实时 token: 累计" in text and f"最近响应 {estimated_text}" in text, text
+match = re.search(r"Context 用量: ~([0-9.]+[KMB]?) / 250K", text)
 assert match, text
-assert int(match.group(1)) == estimated, (text, active)
+assert match.group(1) == estimated_text, (text, active)
 assert "压缩次数: 1" in text, text
 PY
 

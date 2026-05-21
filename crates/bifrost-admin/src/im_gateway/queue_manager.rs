@@ -12,7 +12,7 @@ use std::sync::Arc;
 use bifrost_agent::session::GuideChannel;
 
 /// A queued message with a sequence number.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct QueueItem {
     pub seq: u64,
     pub message: String,

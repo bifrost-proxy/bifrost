@@ -391,9 +391,13 @@ pub(super) async fn handle_agent(
             {
                 let pending_guides = service.queue_manager.guide_status(&session_key);
                 status.pending_guide_messages = pending_guides.clone();
+                let status_context = status_context_from_agent_runner(config.runner.as_ref());
                 return json_response(&serde_json::json!({
                     "success": true,
-                    "response": bifrost_agent::format_active_turn_status_text(&status),
+                    "response": bifrost_agent::format_active_turn_status_text_with_context(
+                        &status,
+                        &status_context
+                    ),
                     "active_status": status,
                     "pending_guide_messages": pending_guides,
                     "tool_calls": [],
@@ -456,6 +460,7 @@ pub(super) async fn handle_agent(
             }
         };
         session.source = "api".to_string();
+        session.mark_bifrost_agent_runtime();
         // If guide messages are provided, inject into the shared guide channel
         // to simulate messages arriving before the next guide checkpoint.
         let mut has_guide_messages = false;

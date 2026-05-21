@@ -2,24 +2,6 @@ use super::*;
 
 // ---------------------------------------------------------------------------
 
-/// Handle an incoming message when the target session is already busy.
-///
-/// Behavior:
-/// - `/status`: show session status (simplified when busy) or busy status
-/// - `/stop`: request cooperative cancellation of the active turn loop
-/// - `/q <text>`: push message to FIFO queue, reply with queue status
-/// - `/rq <N>`: remove queued message #N, reply with updated queue status
-/// - Otherwise (guide mode): inject message into the guide channel for mid-turn consumption
-pub(super) struct BusyMessageContext<'a> {
-    pub(super) queue_manager: &'a Arc<SessionQueueManager>,
-    pub(super) client: &'a ImProviderClient,
-    pub(super) provider: &'a ImProviderConfig,
-    pub(super) event: &'a ImEvent,
-    pub(super) message_log_store: &'a Arc<ImMessageLogStore>,
-    pub(super) agent_session_manager: &'a Arc<ImAgentSessionManager>,
-    pub(super) progress_registry: &'a Arc<ImAgentProgressRegistry>,
-}
-
 pub(super) struct IdleImCommandContext<'a> {
     pub(super) client: &'a ImProviderClient,
     pub(super) provider: &'a ImProviderConfig,
@@ -37,7 +19,8 @@ pub(super) async fn handle_idle_im_command(
     let trimmed = msg_text.trim();
     if trimmed == "/status" {
         let detail = ctx.agent_session_manager.get_session_detail(session_key);
-        let reply = build_im_status_text(detail.as_ref());
+        let status_context = status_context_from_agent_runner(agent_config.runner.as_ref());
+        let reply = build_im_status_text(detail.as_ref(), &status_context);
         send_agent_reply(
             ctx.client,
             ctx.provider,
@@ -186,7 +169,7 @@ pub(super) async fn handle_busy_message(
     if trimmed == "/status" {
         // Try to get session detail from idle sessions
         if let Some(detail) = agent_session_manager.get_session_detail(session_key) {
-            let reply = build_im_status_text(Some(&detail));
+            let reply = build_im_status_text(Some(&detail), &ctx.status_context);
             send_agent_reply(client, provider, event, &reply, message_log_store).await;
         } else if let Some(mut status) = agent_session_manager.get_active_turn_status(session_key) {
             status.pending_guide_messages = queue_manager.guide_status(session_key);
@@ -198,7 +181,10 @@ pub(super) async fn handle_busy_message(
             };
             let reply = format!(
                 "{}\n- 排队: {}",
-                bifrost_agent::format_active_turn_status_text(&status),
+                bifrost_agent::format_active_turn_status_text_with_context(
+                    &status,
+                    &ctx.status_context
+                ),
                 queue_info
             );
             send_agent_reply(client, provider, event, &reply, message_log_store).await;
@@ -343,7 +329,7 @@ pub(super) async fn handle_busy_message(
         return;
     }
 
-    // /g <text> — guide injection (inject message into running agent context)
+    // /g <text> — guide injection when the active runtime supports it; otherwise queue.
     if let Some(rest) = trimmed.strip_prefix("/g ") {
         let guide_text = rest.trim();
         if guide_text.is_empty() {
@@ -357,106 +343,14 @@ pub(super) async fn handle_busy_message(
             .await;
             return;
         }
-        let pending_guide_count = queue_manager.inject_guide(session_key, guide_text.to_string());
-        let reply = if pending_guide_count > 1 {
-            format!(
-                "🔀 已追加引导消息（当前 {} 条尚未进入 loop，将合并后生效）",
-                pending_guide_count
-            )
-        } else {
-            "🔀 已注入引导消息，将在当前工具调用完成后生效".to_string()
-        };
-        info!(
-            session_key = %session_key,
-            guide_msg_len = guide_text.len(),
-            pending_guide_count = pending_guide_count,
-            "guide message injected via IM /g command"
-        );
-        let updated = progress_registry
-            .update_queue_state(
-                session_key,
-                queue_manager.queue_status(session_key),
-                true,
-                Some(format!("已收到引导：{}", truncate_str(guide_text, 48))),
-            )
-            .await;
-        if !updated {
-            send_agent_reply(client, provider, event, &reply, message_log_store).await;
-        }
+        handle_busy_guide_command(guide_text, session_key, &ctx).await;
         return;
     }
 
-    // Default: queue the message for processing after the current run completes
-    match queue_manager.push_queue(session_key, trimmed.to_string()) {
-        Ok(items) => {
-            let updated = progress_registry
-                .update_queue_state(
-                    session_key,
-                    items.clone(),
-                    false,
-                    Some(format!("消息已排队：{}", truncate_str(trimmed, 48))),
-                )
-                .await;
-            if !updated {
-                send_agent_reply(
-                    client,
-                    provider,
-                    event,
-                    &format!(
-                        "⏳ 消息已收到，将在当前任务完成后处理（排队 {} 条）",
-                        items.len()
-                    ),
-                    message_log_store,
-                )
-                .await;
-            }
-        }
-        Err(err) => {
-            send_agent_reply(
-                client,
-                provider,
-                event,
-                &format!("排队失败: {err}"),
-                message_log_store,
-            )
-            .await;
-        }
-    }
-}
-
-/// Format queue status as a user-friendly string.
-pub(super) fn format_queue_status(
-    header: &str,
-    items: &[crate::im_gateway::queue_manager::QueueItem],
-) -> String {
-    let mut text = header.to_string();
-    if items.is_empty() {
-        text.push_str("\n\n📋 排队已清空");
-    } else {
-        text.push_str(&format!("\n\n📋 当前排队（{}条）：", items.len()));
-        for item in items {
-            let preview = truncate_str(&item.message, 60);
-            text.push_str(&format!(
-                "\n{}. [#{}] {}",
-                items.iter().position(|i| i.seq == item.seq).unwrap_or(0) + 1,
-                item.seq,
-                preview
-            ));
-        }
-    }
-    text
-}
-
-pub(super) fn format_pending_guide_status(guides: &[String]) -> String {
-    if guides.is_empty() {
-        return "- 引导消息: 无".to_string();
-    }
-
-    let mut text = format!("- 引导消息: {} 条尚未进入 loop", guides.len());
-    for (idx, guide) in guides.iter().enumerate() {
-        text.push_str(&format!("\n  {}. {}", idx + 1, truncate_str(guide, 80)));
-    }
-    text
+    // Default behavior depends on the active runtime:
+    // - built-in Bifrost Agent supports mid-turn guide injection
+    // - external runners (ChatGPT Web / CLI runners) must queue until the run finishes
+    handle_busy_default_message(trimmed, session_key, &ctx).await;
 }
 
 pub(super) async fn run_progress_event_coalescer(
@@ -636,6 +530,7 @@ pub(super) async fn run_agent_chat_with_interleave(
                         agent_config_store,
                         provider_store,
                         event_store,
+                        BusyMessageDefaultMode::Guide,
                     )
                     .await;
                 }
@@ -701,6 +596,7 @@ pub(super) async fn handle_concurrent_event_during_chat(
     agent_config_store: &Arc<ImAgentConfigStore>,
     provider_store: &Arc<ImProviderStore>,
     event_store: &Arc<ImEventStore>,
+    active_session_default_mode: BusyMessageDefaultMode,
 ) {
     let provider = provider_store
         .get(&event.provider_id)
@@ -774,12 +670,16 @@ pub(super) async fn handle_concurrent_event_during_chat(
                 message_log_store,
                 agent_session_manager,
                 progress_registry,
+                default_mode: active_session_default_mode,
+                status_context: status_context_from_agent_runner(agent_config.runner.as_ref()),
             },
         )
         .await;
     } else {
         // Different session — check if it's also busy
         if agent_session_manager.is_session_active(&session_key) {
+            let agent_config =
+                effective_agent_config_for_provider(&agent_config_store.load(), &provider);
             handle_busy_message(
                 &msg_text,
                 &session_key,
@@ -791,6 +691,8 @@ pub(super) async fn handle_concurrent_event_during_chat(
                     message_log_store,
                     agent_session_manager,
                     progress_registry,
+                    default_mode: busy_default_mode_for_agent_config(&agent_config),
+                    status_context: status_context_from_agent_runner(agent_config.runner.as_ref()),
                 },
             )
             .await;
@@ -893,6 +795,7 @@ pub(super) async fn process_agent_chat(
         }
     }
     session.source = format!("{:?}", provider.provider_type).to_lowercase();
+    session.mark_bifrost_agent_runtime();
     session.guide_channel = guide_channel;
 
     let target_open_id = agent_reply_target_id(provider, event).unwrap_or_default();

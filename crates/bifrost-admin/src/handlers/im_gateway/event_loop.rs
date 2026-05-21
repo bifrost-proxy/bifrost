@@ -369,6 +369,10 @@ pub(super) async fn run_event_loop_with_options(
                         let session_key =
                             build_session_key(&event.provider_id, event.source.user_id.as_deref());
                         let agent_message = agent_message_text(msg);
+                        let effective_agent_config =
+                            effective_agent_config_for_provider(&agent_config, &provider);
+                        let busy_default_mode =
+                            busy_default_mode_for_agent_config(&effective_agent_config);
 
                         // ── Guide/Queue mode: check if session is busy ──
                         if agent_session_manager.is_session_active(&session_key) {
@@ -383,14 +387,16 @@ pub(super) async fn run_event_loop_with_options(
                                     message_log_store: &message_log_store,
                                     agent_session_manager: &agent_session_manager,
                                     progress_registry: &progress_registry,
+                                    default_mode: busy_default_mode,
+                                    status_context: status_context_from_agent_runner(
+                                        effective_agent_config.runner.as_ref(),
+                                    ),
                                 },
                             )
                             .await;
                             continue;
                         }
 
-                        let effective_agent_config =
-                            effective_agent_config_for_provider(&agent_config, &provider);
                         if handle_idle_im_command(
                             &agent_message,
                             &session_key,
@@ -509,6 +515,9 @@ pub(super) async fn run_event_loop_with_options(
                     .unwrap_or_else(|| raw_message_text.to_string());
                 let session_key =
                     build_session_key(&event.provider_id, event.source.user_id.as_deref());
+                let agent_config =
+                    effective_agent_config_for_provider(&agent_config_store.load(), &provider);
+                let busy_default_mode = busy_default_mode_for_agent_config(&agent_config);
 
                 // ── Guide/Queue mode: check if session is busy ──
                 if agent_session_manager.is_session_active(&session_key) {
@@ -523,14 +532,16 @@ pub(super) async fn run_event_loop_with_options(
                             message_log_store: &message_log_store,
                             agent_session_manager: &agent_session_manager,
                             progress_registry: &progress_registry,
+                            default_mode: busy_default_mode,
+                            status_context: status_context_from_agent_runner(
+                                agent_config.runner.as_ref(),
+                            ),
                         },
                     )
                     .await;
                     continue;
                 }
 
-                let agent_config =
-                    effective_agent_config_for_provider(&agent_config_store.load(), &provider);
                 if handle_idle_im_command(
                     &message_text,
                     &session_key,
@@ -766,6 +777,8 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
     }
 
     let delivery_mode = input.delivery_override.unwrap_or(settings.delivery_mode);
+    let status_context =
+        status_context_from_external_runner(&effective.runner_id, &settings.adapter);
 
     if matches!(
         delivery_mode,
@@ -796,6 +809,8 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                 message_log_store: ctx.message_log_store,
                 agent_session_manager: ctx.agent_session_manager,
                 progress_registry: ctx.progress_registry,
+                default_mode: BusyMessageDefaultMode::Queue,
+                status_context,
             },
         )
         .await;
@@ -807,6 +822,7 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
         .get_or_create_guide_channel(&input.session_key);
     let mut current_message = input.message_text;
     let mut recorder = session.recorder.take();
+    let mut runner_metadata = std::collections::BTreeMap::new();
 
     loop {
         if matches!(
@@ -829,6 +845,7 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
             Some(input.session_key.clone()),
             &settings,
         );
+        apply_external_cli_resume_metadata(&mut request, &runner_metadata);
         if request.work_dir.is_none() {
             request.work_dir =
                 effective_agent_work_dir_for_provider(&ctx.agent_config_store.load(), ctx.provider);
@@ -887,12 +904,14 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                         ctx.agent_config_store,
                         ctx.provider_store,
                         ctx.event_store,
+                        BusyMessageDefaultMode::Queue,
                     ).await;
                 }
             }
         };
         match result {
             Ok(result) => {
+                remember_external_cli_result_metadata(&mut runner_metadata, &result.metadata);
                 record_external_cli_result(
                     &mut session,
                     &mut recorder,
@@ -1019,6 +1038,65 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
     ctx.agent_session_manager.return_session(session);
 }
 
+pub(super) fn apply_external_cli_resume_metadata(
+    request: &mut crate::im_gateway::external_cli::ExternalCliRunRequest,
+    metadata: &std::collections::BTreeMap<String, String>,
+) {
+    if request.adapter != "codex" {
+        return;
+    }
+    if request
+        .params
+        .get("threadId")
+        .or_else(|| request.params.get("thread_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty())
+    {
+        return;
+    }
+    let Some(thread_id) = metadata
+        .get("threadId")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+    if !request.params.is_object() {
+        request.params = serde_json::json!({});
+    }
+    if let Some(params) = request.params.as_object_mut() {
+        params.insert(
+            "threadId".to_string(),
+            serde_json::Value::String(thread_id.to_string()),
+        );
+    }
+}
+
+pub(super) fn remember_external_cli_result_metadata(
+    metadata: &mut std::collections::BTreeMap<String, String>,
+    result_metadata: &std::collections::BTreeMap<String, String>,
+) {
+    if let Some(thread_id) = result_metadata
+        .get("threadId")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        metadata.insert("threadId".to_string(), thread_id.to_string());
+    }
+    if let Some(conversation_id) = result_metadata
+        .get("conversationId")
+        .or_else(|| result_metadata.get("conversation_id"))
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        metadata.insert("conversationId".to_string(), conversation_id.to_string());
+    }
+}
+
 fn ensure_external_cli_session_recorder(
     session: &mut bifrost_agent::session::AgentSession,
     recorder: &mut Option<ConversationRecorder>,
@@ -1031,6 +1109,8 @@ fn ensure_external_cli_session_recorder(
     if session.source == "unknown" {
         session.source = request.adapter.clone();
     }
+    session.mark_external_runner_runtime(runner_id, &request.adapter);
+    sync_external_cli_active_status(session);
     if session.title.is_none() {
         session.title = Some(format!(
             "{}: {}",
@@ -1079,6 +1159,7 @@ fn record_external_cli_input(
     request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
 ) {
     append_session_message(session, bifrost_agent::ChatMessage::user(&request.message));
+    sync_external_cli_active_status(session);
     if let Some(rec) = recorder.as_mut() {
         if let Err(error) = rec.record_user_message(session_key, &request.message) {
             warn!(error = %error, "failed to record external cli user message");
@@ -1107,10 +1188,24 @@ fn record_external_cli_result(
     session_key: &str,
     result: &crate::im_gateway::external_cli::ExternalCliRunResult,
 ) {
+    session.remember_external_conversation_ref(
+        result
+            .metadata
+            .get("conversationId")
+            .or_else(|| result.metadata.get("conversation_id"))
+            .cloned(),
+        result
+            .metadata
+            .get("threadId")
+            .or_else(|| result.metadata.get("thread_id"))
+            .cloned(),
+    );
+    sync_external_cli_active_status(session);
     append_session_message(
         session,
         bifrost_agent::ChatMessage::assistant(&result.response),
     );
+    sync_external_cli_active_status(session);
     if let Some(rec) = recorder.as_mut() {
         let tool_result = serde_json::json!({
             "run_id": result.run_id,
@@ -1184,6 +1279,27 @@ fn append_session_message(
     session.history.push(message);
     session.last_active_at = now_ms() / 1000;
     session.history_version = session.history_version.saturating_add(1);
+}
+
+fn sync_external_cli_active_status(session: &bifrost_agent::session::AgentSession) {
+    let Some(handle) = session.active_turn_status.as_ref() else {
+        return;
+    };
+    let Ok(mut status) = handle.lock() else {
+        return;
+    };
+    status.agent_type = session.agent_type.clone();
+    status.runner_type = session.runner_type.clone();
+    status.runner_id = session.runner_id.clone();
+    status.external_conversation_id = session.external_conversation_id.clone();
+    status.external_thread_id = session.external_thread_id.clone();
+    status.user_turn_count = session.user_turn_count();
+    status.message_count = session.history.len();
+    status.work_dir = session.work_dir.clone();
+    status.history_version = session.history_version;
+    status.compaction_count = session.compaction_count;
+    status.total_tokens_used = session.total_tokens_used;
+    status.estimated_context_tokens = session.effective_token_count();
 }
 
 fn external_cli_adapter_label(adapter: &str) -> &'static str {

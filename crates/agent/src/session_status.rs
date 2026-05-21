@@ -10,7 +10,7 @@ pub type AgentTurnProgressSender = tokio::sync::mpsc::UnboundedSender<AgentTurnP
 /// Provider-neutral progress events emitted by the turn loop for IM renderers.
 #[derive(Debug, Clone)]
 pub enum AgentTurnProgressEvent {
-    Status(ActiveTurnStatus),
+    Status(Box<ActiveTurnStatus>),
     ToolStarted {
         tool_name: String,
         arguments: String,
@@ -62,6 +62,12 @@ pub struct ActiveTurnStatus {
     pub local_tool_count: usize,
     pub mcp_tool_count: usize,
     pub pending_guide_messages: Vec<String>,
+    pub user_turn_count: usize,
+    pub agent_type: Option<String>,
+    pub runner_type: Option<String>,
+    pub runner_id: Option<String>,
+    pub external_conversation_id: Option<String>,
+    pub external_thread_id: Option<String>,
 }
 
 impl ActiveTurnStatus {
@@ -87,8 +93,23 @@ impl ActiveTurnStatus {
             local_tool_count: 0,
             mcp_tool_count: 0,
             pending_guide_messages: Vec::new(),
+            user_turn_count: 0,
+            agent_type: None,
+            runner_type: None,
+            runner_id: None,
+            external_conversation_id: None,
+            external_thread_id: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct StatusRuntimeContext {
+    pub agent_type: Option<String>,
+    pub runner_type: Option<String>,
+    pub runner_id: Option<String>,
+    pub external_conversation_id: Option<String>,
+    pub external_thread_id: Option<String>,
 }
 
 pub(crate) fn context_usage_percent(
@@ -122,7 +143,7 @@ where
         }
     }
     if let (Some(sender), Some(status)) = (&session.progress_sender, snapshot) {
-        let _ = sender.send(AgentTurnProgressEvent::Status(status));
+        let _ = sender.send(AgentTurnProgressEvent::Status(Box::new(status)));
     }
 }
 
@@ -167,6 +188,12 @@ pub(crate) fn refresh_active_turn_status(
         status.message_count = session.history.len();
         status.local_tool_count = progress.local_tool_count;
         status.mcp_tool_count = progress.mcp_tool_count;
+        status.user_turn_count = session.user_turn_count();
+        status.agent_type = session.agent_type.clone();
+        status.runner_type = session.runner_type.clone();
+        status.runner_id = session.runner_id.clone();
+        status.external_conversation_id = session.external_conversation_id.clone();
+        status.external_thread_id = session.external_thread_id.clone();
         status.pending_guide_messages = session
             .guide_channel
             .as_ref()
@@ -176,22 +203,63 @@ pub(crate) fn refresh_active_turn_status(
 }
 
 pub fn format_active_turn_status_text(status: &ActiveTurnStatus) -> String {
+    format_active_turn_status_text_with_context(status, &StatusRuntimeContext::default())
+}
+
+pub fn format_active_turn_status_text_with_context(
+    status: &ActiveTurnStatus,
+    context: &StatusRuntimeContext,
+) -> String {
     let token_text = status
         .total_tokens_used
-        .map(|value| value.to_string())
+        .map(format_status_metric_count)
         .unwrap_or_else(|| "N/A".to_string());
     let last_token_text = status
         .last_response_tokens
-        .map(|value| value.to_string())
+        .map(format_status_metric_count)
         .unwrap_or_else(|| "N/A".to_string());
     let context_text = match (status.context_window_tokens, status.context_usage_percent) {
         (Some(window), Some(percent)) => format!(
             "~{} / {} ({percent:.1}%)",
-            status.estimated_context_tokens, window
+            format_status_metric_count(status.estimated_context_tokens.into()),
+            format_status_metric_count(window.into())
         ),
-        _ => format!("~{} / N/A", status.estimated_context_tokens),
+        _ => format!(
+            "~{} / N/A",
+            format_status_metric_count(status.estimated_context_tokens.into())
+        ),
     };
     let work_dir_text = status.work_dir.as_deref().unwrap_or("N/A");
+    let agent_type = status
+        .agent_type
+        .as_ref()
+        .or(context.agent_type.as_ref())
+        .map(String::as_str)
+        .unwrap_or("Bifrost Agent");
+    let runner_type = status
+        .runner_type
+        .as_ref()
+        .or(context.runner_type.as_ref())
+        .map(String::as_str)
+        .unwrap_or("bifrost_agent");
+    let runner_id = status
+        .runner_id
+        .as_ref()
+        .or(context.runner_id.as_ref())
+        .map(String::as_str)
+        .unwrap_or("N/A");
+    let conversation_text = format_conversation_ref(
+        status
+            .external_thread_id
+            .as_ref()
+            .or(context.external_thread_id.as_ref())
+            .map(String::as_str),
+        status
+            .external_conversation_id
+            .as_ref()
+            .or(context.external_conversation_id.as_ref())
+            .map(String::as_str),
+    );
     let guide_text = if status.pending_guide_messages.is_empty() {
         "- 引导消息: 无".to_string()
     } else {
@@ -213,6 +281,11 @@ pub fn format_active_turn_status_text(status: &ActiveTurnStatus) -> String {
         "会话状态:\n\
          - 状态: 🔵 正在处理中\n\
          - 工作路径: {}\n\
+         - Agent 类型: {}\n\
+         - Runner 类型: {}\n\
+         - Runner ID: {}\n\
+         - 外部会话: {}\n\
+         - 历史对话轮次: {}\n\
          - Loop: 第 {} 次 / 最多 {} 次（已完成 {} 次）\n\
          - 实时 token: 累计 {}，最近响应 {}\n\
          - Context 用量: {}\n\
@@ -223,6 +296,11 @@ pub fn format_active_turn_status_text(status: &ActiveTurnStatus) -> String {
          - MCP 工具数: {}\n\
          - 本地工具数: {}",
         work_dir_text,
+        agent_type,
+        runner_type,
+        runner_id,
+        conversation_text,
+        status.user_turn_count,
         status.current_loop_iteration,
         status.max_loop_iterations,
         status.completed_loop_iterations,
@@ -236,6 +314,56 @@ pub fn format_active_turn_status_text(status: &ActiveTurnStatus) -> String {
         status.mcp_tool_count,
         status.local_tool_count
     )
+}
+
+pub fn format_status_metric_count(value: u64) -> String {
+    const UNITS: &[(u64, &str)] = &[(1_000, "K"), (1_000_000, "M"), (1_000_000_000, "B")];
+    if value < UNITS[0].0 {
+        return value.to_string();
+    }
+
+    let mut unit_index = UNITS.len() - 1;
+    for (index, (unit, _)) in UNITS.iter().enumerate() {
+        if value < *unit {
+            unit_index = index.saturating_sub(1);
+            break;
+        }
+    }
+    while unit_index + 1 < UNITS.len()
+        && rounded_metric_tenths(value, UNITS[unit_index].0) >= 10_000
+    {
+        unit_index += 1;
+    }
+
+    let (unit, suffix) = UNITS[unit_index];
+    let scaled_tenths = rounded_metric_tenths(value, unit);
+    let whole = scaled_tenths / 10;
+    let decimal = scaled_tenths % 10;
+    if decimal == 0 {
+        format!("{whole}{suffix}")
+    } else {
+        format!("{whole}.{decimal}{suffix}")
+    }
+}
+
+fn rounded_metric_tenths(value: u64, unit: u64) -> u128 {
+    ((value as u128 * 10) + (unit as u128 / 2)) / unit as u128
+}
+
+pub fn format_conversation_ref(thread_id: Option<&str>, conversation_id: Option<&str>) -> String {
+    if let Some(thread_id) = thread_id.map(str::trim).filter(|value| !value.is_empty()) {
+        return format!("Codex threadId={}", truncate_status_text(thread_id, 80));
+    }
+    if let Some(conversation_id) = conversation_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return format!(
+            "conversationId={}",
+            truncate_status_text(conversation_id, 80)
+        );
+    }
+    "N/A".to_string()
 }
 
 fn truncate_status_text(s: &str, max_chars: usize) -> String {
@@ -279,14 +407,24 @@ mod tests {
             local_tool_count: 12,
             mcp_tool_count: 5,
             pending_guide_messages: vec!["第一条引导".to_string(), "第二条引导".to_string()],
+            user_turn_count: 4,
+            agent_type: Some("Bifrost Agent".to_string()),
+            runner_type: Some("bifrost_agent".to_string()),
+            runner_id: None,
+            external_conversation_id: None,
+            external_thread_id: Some("thread-runtime".to_string()),
         };
 
         let text = format_active_turn_status_text(&status);
         assert!(text.contains("工作路径: /tmp/bifrost-work"));
+        assert!(text.contains("Agent 类型: Bifrost Agent"));
+        assert!(text.contains("Runner 类型: bifrost_agent"));
+        assert!(text.contains("外部会话: Codex threadId=thread-runtime"));
+        assert!(text.contains("历史对话轮次: 4"));
         assert!(text.contains("Loop: 第 3 次 / 最多 1000 次"));
         assert!(text.contains("已完成 2 次"));
         assert!(text.contains("实时 token: 累计 51，最近响应 17"));
-        assert!(text.contains("Context 用量: ~4000 / 250000 (1.6%)"));
+        assert!(text.contains("Context 用量: ~4K / 250K (1.6%)"));
         assert!(text.contains("压缩次数: 1"));
         assert!(text.contains("引导消息: 2 条尚未进入 loop"));
         assert!(text.contains("1. 第一条引导"));

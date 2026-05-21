@@ -134,6 +134,21 @@ pub struct AgentSession {
     /// Source of the session (e.g., "feishu", "api", "unknown").
     pub source: String,
 
+    /// User-visible agent runtime family used by status surfaces.
+    pub agent_type: Option<String>,
+
+    /// Runner adapter/runtime label, such as `bifrost_agent`, `codex`, or `chatgpt_web`.
+    pub runner_type: Option<String>,
+
+    /// Configured runner id for external runner sessions.
+    pub runner_id: Option<String>,
+
+    /// External web runner conversation id, when available.
+    pub external_conversation_id: Option<String>,
+
+    /// External Codex runner thread id, when available.
+    pub external_thread_id: Option<String>,
+
     /// Optional conversation recorder for session persistence.
     /// When set, events are recorded to a JSONL file across turns.
     pub recorder: Option<ConversationRecorder>,
@@ -237,6 +252,11 @@ impl AgentSession {
             history_version: 0,
             work_dir: None,
             source: "unknown".to_string(),
+            agent_type: None,
+            runner_type: None,
+            runner_id: None,
+            external_conversation_id: None,
+            external_thread_id: None,
             recorder: None,
             slash_router: SlashCommandRouter::with_default_builtins(),
             skill_registry: None,
@@ -329,6 +349,38 @@ impl AgentSession {
         self
     }
 
+    pub fn mark_bifrost_agent_runtime(&mut self) {
+        self.agent_type = Some("Bifrost Agent".to_string());
+        self.runner_type = Some("bifrost_agent".to_string());
+        self.runner_id = None;
+    }
+
+    pub fn mark_external_runner_runtime(&mut self, runner_id: &str, adapter: &str) {
+        self.agent_type = Some("External Runner Agent".to_string());
+        self.runner_type = Some(adapter.to_string());
+        self.runner_id = Some(runner_id.to_string());
+    }
+
+    pub fn remember_external_conversation_ref(
+        &mut self,
+        conversation_id: Option<String>,
+        thread_id: Option<String>,
+    ) {
+        if let Some(conversation_id) = conversation_id.filter(|value| !value.trim().is_empty()) {
+            self.external_conversation_id = Some(conversation_id);
+        }
+        if let Some(thread_id) = thread_id.filter(|value| !value.trim().is_empty()) {
+            self.external_thread_id = Some(thread_id);
+        }
+    }
+
+    pub fn user_turn_count(&self) -> usize {
+        self.history
+            .iter()
+            .filter(|message| message.role == "user")
+            .count()
+    }
+
     pub fn clear(&mut self) {
         if self.current_goal.is_some() {
             if let Some(recorder) = self.recorder.as_mut() {
@@ -344,6 +396,8 @@ impl AgentSession {
         self.history_version = self.history_version.saturating_add(1);
         self.current_plan = None;
         self.current_goal = None;
+        self.external_conversation_id = None;
+        self.external_thread_id = None;
         self.plan_repair_attempts = 0;
         // Invalidate cached user instructions so they are reloaded on next turn
         // (e.g. after switch_workdir changes the project context).
@@ -851,6 +905,7 @@ impl AgentSessionManager {
                     session_key: s.session_key.clone(),
                     user_id: s.user_id.clone(),
                     message_count: s.history.len(),
+                    user_turn_count: s.user_turn_count(),
                     created_at: s.created_at,
                     last_active_at: s.last_active_at,
                     compaction_count: s.compaction_count,
@@ -859,6 +914,11 @@ impl AgentSessionManager {
                     history_version: s.history_version,
                     work_dir: s.work_dir.clone(),
                     source: s.source.clone(),
+                    agent_type: s.agent_type.clone(),
+                    runner_type: s.runner_type.clone(),
+                    runner_id: s.runner_id.clone(),
+                    external_conversation_id: s.external_conversation_id.clone(),
+                    external_thread_id: s.external_thread_id.clone(),
                     title: s.title.clone(),
                 }
             })
@@ -914,6 +974,7 @@ impl AgentSessionManager {
                 session_key: s.session_key.clone(),
                 user_id: s.user_id.clone(),
                 message_count: s.history.len(),
+                user_turn_count: s.user_turn_count(),
                 created_at: s.created_at,
                 last_active_at: s.last_active_at,
                 compaction_count: s.compaction_count,
@@ -922,6 +983,11 @@ impl AgentSessionManager {
                 history_version: s.history_version,
                 work_dir: s.work_dir.clone(),
                 source: s.source.clone(),
+                agent_type: s.agent_type.clone(),
+                runner_type: s.runner_type.clone(),
+                runner_id: s.runner_id.clone(),
+                external_conversation_id: s.external_conversation_id.clone(),
+                external_thread_id: s.external_thread_id.clone(),
                 title: s.title.clone(),
                 messages: s
                     .history
@@ -953,6 +1019,7 @@ pub struct SessionInfo {
     pub session_key: String,
     pub user_id: Option<String>,
     pub message_count: usize,
+    pub user_turn_count: usize,
     pub created_at: u64,
     pub last_active_at: u64,
     pub compaction_count: u32,
@@ -961,6 +1028,11 @@ pub struct SessionInfo {
     pub history_version: u64,
     pub work_dir: Option<String>,
     pub source: String,
+    pub agent_type: Option<String>,
+    pub runner_type: Option<String>,
+    pub runner_id: Option<String>,
+    pub external_conversation_id: Option<String>,
+    pub external_thread_id: Option<String>,
     /// Session title (intent/topic) set by the agent via set_title tool.
     pub title: Option<String>,
 }
@@ -982,6 +1054,7 @@ pub struct SessionDetail {
     pub session_key: String,
     pub user_id: Option<String>,
     pub message_count: usize,
+    pub user_turn_count: usize,
     pub created_at: u64,
     pub last_active_at: u64,
     pub compaction_count: u32,
@@ -990,6 +1063,11 @@ pub struct SessionDetail {
     pub history_version: u64,
     pub work_dir: Option<String>,
     pub source: String,
+    pub agent_type: Option<String>,
+    pub runner_type: Option<String>,
+    pub runner_id: Option<String>,
+    pub external_conversation_id: Option<String>,
+    pub external_thread_id: Option<String>,
     /// Session title (intent/topic) set by the agent via set_title tool.
     pub title: Option<String>,
     pub messages: Vec<SessionMessage>,
@@ -1805,7 +1883,7 @@ pub async fn run_turn_with_mcp_multimodal(
         let context_tokens = session.effective_token_count();
         let real = session
             .total_tokens_used
-            .map(|t| t.to_string())
+            .map(crate::session_status::format_status_metric_count)
             .unwrap_or_else(|| "N/A".to_string());
         let mcp_tool_count = mcp.as_ref().map(|m| m.list_tools().len()).unwrap_or(0);
         let context_window = config_context_window_tokens(config);
@@ -1813,17 +1891,29 @@ pub async fn run_turn_with_mcp_multimodal(
             .map(|percent| format!("{percent:.1}%"))
             .unwrap_or_else(|| "N/A".to_string());
         let context_window_text = context_window
-            .map(|window| window.to_string())
+            .map(|window| crate::session_status::format_status_metric_count(window.into()))
             .unwrap_or_else(|| "N/A".to_string());
         let work_dir_text = session.work_dir.as_deref().unwrap_or("N/A");
+        let agent_type = session.agent_type.as_deref().unwrap_or("Bifrost Agent");
+        let runner_type = session.runner_type.as_deref().unwrap_or("bifrost_agent");
+        let runner_id = session.runner_id.as_deref().unwrap_or("N/A");
+        let conversation_ref = crate::session_status::format_conversation_ref(
+            session.external_thread_id.as_deref(),
+            session.external_conversation_id.as_deref(),
+        );
         return Ok(TurnResult {
             response: format!(
-                "会话状态:\n- 工作路径: {}\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- Context 用量: ~{} / {} ({})\n- 压缩次数: {}\n- 历史版本: {}\n- MCP 工具数: {}",
+                "会话状态:\n- 工作路径: {}\n- Agent 类型: {}\n- Runner 类型: {}\n- Runner ID: {}\n- 外部会话: {}\n- 历史对话轮次: {}\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- Context 用量: ~{} / {} ({})\n- 压缩次数: {}\n- 历史版本: {}\n- MCP 工具数: {}",
                 work_dir_text,
+                agent_type,
+                runner_type,
+                runner_id,
+                conversation_ref,
+                session.user_turn_count(),
                 session.history.len(),
-                est,
+                crate::session_status::format_status_metric_count(est.into()),
                 real,
-                context_tokens,
+                crate::session_status::format_status_metric_count(context_tokens.into()),
                 context_window_text,
                 context_usage,
                 session.compaction_count,
@@ -1864,6 +1954,7 @@ pub async fn run_turn_with_mcp_multimodal(
                     if let Ok(runtime_state) = persistence::load_session_runtime_state(&candidate) {
                         session.current_goal = runtime_state.current_goal;
                         session.total_tokens_used = runtime_state.total_tokens_used;
+                        session.compaction_count = runtime_state.compaction_count;
                         session.resolved_base_instructions = runtime_state.base_instructions;
                         crate::tools::goal::goal_runtime_apply(
                             session,

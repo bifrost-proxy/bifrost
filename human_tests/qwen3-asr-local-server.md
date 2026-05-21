@@ -560,13 +560,34 @@
 - Directory Tasks 移动位置后仍能创建任务、进入详情、返回首页和手动 Run。
 - 页面在亮色和暗色主题下区域标题与操作按钮均可读、无遮挡。
 
+### TC-QASR-21 CLI ASR status 管道关闭回归
+
+操作步骤：
+
+1. 在 Apple Silicon macOS 上使用临时数据目录执行：
+   ```bash
+   CLI_DATA_DIR="$(mktemp -d /tmp/bifrost-qwen3-asr-pipe.XXXXXX)"
+   BIFROST_DATA_DIR="$CLI_DATA_DIR" cargo run --quiet --bin bifrost -- ai asr status --json | grep -q '"ready"'
+   rm -rf "$CLI_DATA_DIR"
+   ```
+2. 在其它平台执行仓库离线结构 E2E：
+   ```bash
+   BIFROST_QWEN3_ASR_E2E_ONLINE=0 bash e2e-tests/tests/test_qwen3_asr_local_server.sh
+   ```
+
+预期结果：
+
+- Apple Silicon macOS 上 `grep` 命中 `"ready"` 后提前关闭管道时，`bifrost ai asr status --json` 不因 `Broken pipe` panic，整条管道退出码为 0。
+- 非 Apple Silicon 平台仍保持不支持提示，不下载模型、不启动 ASR server。
+- 修复不改变 `status --json` 的 JSON 字段，仍包含 `ready` 和 `service`。
+
 ## 清理步骤
 
 - 停止测试启动的 `asr-server` 进程。
 - 停止测试启动的 Bifrost 进程。
 - 删除临时切片和转写文件：
   ```bash
-  rm -rf /tmp/bifrost-qwen3-asr-chunks /tmp/bifrost-qwen3-asr-transcript.txt /tmp/bifrost-qwen3-asr-web.* /tmp/bifrost-qwen3-asr-model-backup /tmp/bifrost-asr-source-cleanup.* /tmp/bifrost-asr-layout.*
+  rm -rf /tmp/bifrost-qwen3-asr-chunks /tmp/bifrost-qwen3-asr-transcript.txt /tmp/bifrost-qwen3-asr-web.* /tmp/bifrost-qwen3-asr-model-backup /tmp/bifrost-asr-source-cleanup.* /tmp/bifrost-asr-layout.* /tmp/bifrost-qwen3-asr-pipe.*
   rm -f /tmp/bifrost-qwen3-asr-stream.jsonl
   ```
 - 保留 `~/.bifrost/asr` 模型目录供后续本地使用；不要在清理测试时删除固定模型目录。
@@ -616,3 +637,4 @@
 | 2026-05-20 | TC-QASR-18 / Daily Agent 配置与运行记录拆分为平级 tab | `pnpm --dir web exec playwright test tests/ui/asr-daily-agent-runner.spec.ts`；`pnpm --dir web exec playwright test tests/ui/asr-microphone-meter.spec.ts --grep "ASR directory tasks"` | PASS：Daily Agent Runner 专项套件验证 `Daily Agent` tab 仍可编辑 AGENTS.md、选择 Runner/IM Channel，并确认 processed report 从 `Daily Agent Records` tab 打开；目录任务 Playwright 回归验证 `Daily Agent` tab 不再展示 `Processed Documents`，`Daily Agent Records` tab 展示 `Run Results` 和 report 链接，点击 report 后 URL 包含 `asrTaskTab=daily-agent-records&asrDailyReport=2026-05-14`，返回后仍停留在 records tab。 |
 | 2026-05-20 | TC-QASR-19 / Directory Tasks 首页位置前移 | `pnpm --dir web exec playwright test tests/ui/asr-microphone-meter.spec.ts --grep "ASR directory tasks"` | PASS：Playwright 真实浏览器验证 AI -> Tools -> ASR 首页中 `Speech Converter` 位于 `Directory Tasks` 上方，`Directory Tasks` 位于 `Speech to Text` 上方；随后继续创建 Directory Task、进入任务详情、执行原音频清理、验证 Daily Agent Records，不影响既有目录任务操作链路。 |
 | 2026-05-20 | TC-QASR-20 / Qwen3-ASR-0.6B 初始化下载绕过环境代理 | `curl -I -L --max-time 20 https://huggingface.co/Qwen/Qwen3-ASR-0.6B/resolve/main/config.json`；`HTTP_PROXY=http://127.0.0.1:1 HTTPS_PROXY=http://127.0.0.1:1 ALL_PROXY=http://127.0.0.1:1 NO_PROXY= cargo test -p bifrost-admin asr_download_client_bypasses_proxy_env --lib`；`cargo test -p bifrost-admin asr_download_requests_include_qwen3_asr_0_6b_files --lib` | PASS：Hugging Face 返回 `307` 并带 `x-repo-commit: 5eb144179a02acc5e5ba31e748d22b0cf3e303b0`，确认 `config.json` 真实存在；无效代理环境下 direct reqwest 下载 client 仍能访问本地测试 HTTP server；0.6B 请求清单包含 `Qwen3-ASR-0.6B/config.json` 与 `Qwen3-ASR-0.6B/model.safetensors` |
+| 2026-05-21 | TC-QASR-21 / CLI ASR status 管道关闭回归 | `cargo test -p bifrost-cli asr_status_output --lib`；`BIFROST_QWEN3_ASR_E2E_ONLINE=0 bash e2e-tests/tests/test_qwen3_asr_local_server.sh` | PASS：单测覆盖 stdout `BrokenPipe` 被视为下游管道关闭且其它 IO 错误继续返回；离线结构 E2E 在当前平台通过，未下载模型、未启动 ASR server。 |

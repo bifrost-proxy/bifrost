@@ -400,12 +400,11 @@ fn parse_task(value: Value) -> Result<AsrTask> {
 }
 
 fn print_json(value: &Value) -> Result<()> {
-    println!(
-        "{}",
+    write_stdout_text(&format!(
+        "{}\n",
         serde_json::to_string_pretty(value)
             .map_err(|error| BifrostError::Config(error.to_string()))?
-    );
-    Ok(())
+    ))
 }
 
 fn print_task_list(tasks: &[AsrTask]) {
@@ -610,25 +609,39 @@ fn print_status(json: bool) -> Result<()> {
         .map(|state| probe_health_blocking(&state.host, state.port, Duration::from_secs(2)).is_ok())
         .unwrap_or(false);
     if json {
-        println!(
-            "{}",
+        write_stdout_text(&format!(
+            "{}\n",
             serde_json::to_string_pretty(&serde_json::json!({
                 "ready": ready,
                 "service": state,
             }))
             .map_err(|error| BifrostError::Config(error.to_string()))?
-        );
+        ))?;
     } else if let Some(state) = state {
-        println!("ready: {ready}");
-        println!("server: http://{}:{}", state.host, state.port);
-        println!("model: {}", state.model);
-        println!("language: {}", state.language);
-        println!("managed_by: {}", state.managed_by);
+        write_stdout_text(&format!(
+            "ready: {ready}\nserver: http://{}:{}\nmodel: {}\nlanguage: {}\nmanaged_by: {}\n",
+            state.host, state.port, state.model, state.language, state.managed_by
+        ))?;
     } else {
-        println!("ready: false");
-        println!("server: not running");
+        write_stdout_text("ready: false\nserver: not running\n")?;
     }
     Ok(())
+}
+
+fn write_stdout_text(text: &str) -> Result<()> {
+    let mut stdout = io::stdout().lock();
+    write_text_ignore_broken_pipe(&mut stdout, text)
+}
+
+fn write_text_ignore_broken_pipe(writer: &mut impl Write, text: &str) -> Result<()> {
+    match writer
+        .write_all(text.as_bytes())
+        .and_then(|_| writer.flush())
+    {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        Err(error) => Err(BifrostError::Io(error)),
+    }
 }
 
 /// Max seconds for a single native ASR inference.
@@ -1841,6 +1854,30 @@ mod tests {
         }
     }
 
+    struct BrokenPipeWriter;
+
+    impl Write for BrokenPipeWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::from(io::ErrorKind::BrokenPipe))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("disk output unavailable"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn status_reads_persisted_asr_service_state() {
         let temp = TempDir::new().unwrap();
@@ -1859,6 +1896,21 @@ mod tests {
         let loaded = read_service_state(temp.path()).unwrap();
         assert_eq!(loaded.port, 18080);
         assert_eq!(loaded.managed_by, "test");
+    }
+
+    #[test]
+    fn asr_status_output_ignores_broken_pipe() {
+        let mut writer = BrokenPipeWriter;
+        write_text_ignore_broken_pipe(&mut writer, "{\n  \"ready\": false\n}\n")
+            .expect("broken pipe should be treated as a closed downstream pipe");
+    }
+
+    #[test]
+    fn asr_status_output_keeps_real_io_errors() {
+        let mut writer = FailingWriter;
+        let error = write_text_ignore_broken_pipe(&mut writer, "ready: false\n")
+            .expect_err("non-broken-pipe errors should still be returned");
+        assert!(error.to_string().contains("disk output unavailable"));
     }
 
     #[test]
