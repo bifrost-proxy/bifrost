@@ -26,13 +26,13 @@
      cargo run --bin bifrost -- start -p 18883 --unsafe-ssl --no-system-proxy
    ```
 2. 在浏览器打开 `http://127.0.0.1:18883/_bifrost/ai?aiSection=tools-asr`。
-3. 在 Settings -> Speech Converter 模型下拉确认默认 `Qwen3-ASR-0.6B` 可用；如切换 `Qwen3-ASR-1.7B`，必须确认这是显式大模型 opt-in。
+3. 在 ASR 页面 Speech Workbench 模型下拉确认实时麦克风与文件上传共用同一个 Workbench 模型配置；默认跟随 Workbench 当前值，如选择 `Qwen3-ASR-1.7B`，WebSocket query 必须携带大模型 opt-in。
 4. 点击 Start Mic，说一段 5-8 秒中文，随后点击 Stop Mic。
 5. 观察实时事件和 Transcript。
 6. 使用浏览器开发者工具或 Playwright mock 检查实时麦克风 WebSocket URL 和帧：
    - URL 为 `/api/voice/listen-ws`。
    - query 包含 `provider=qwen3_stateful_streaming`、`source=web_mic`、`chunk_ms=1000`。
-   - 默认模型为 `Qwen3-ASR-0.6B`；选择 `Qwen3-ASR-1.7B` 时 query 包含 `allow_stateful_17b=1`。
+   - 实时模型跟随 Speech Workbench 当前模型；选择 `Qwen3-ASR-1.7B` 时 query 包含 `allow_stateful_17b=1`。
    - start message 为 `{"type":"start","source":"web_mic","sample_rate":16000,"channels":1,"format":"pcm_s16le"}`。
    - 后续音频帧为 binary PCM16 chunk，不是 `audio/webm` / `MediaRecorder` blob。
 
@@ -340,7 +340,7 @@
 
 预期结果：
 
-- 启动 Bifrost 时不会无提示拉起 1.7B ASR；默认使用 0.6B 或等待用户首次使用/显式 Start ASR。
+- 启动 Bifrost 时不会无提示拉起 1.7B ASR；实时麦克风等待用户首次使用/显式 Start ASR，并跟随 Speech Workbench 模型配置。
 - `Bifrost Voice.inputmethod` 安装到 `~/Library/Input Methods/`，状态区能区分 installed、enabled、active、loaded、client_attached。
 - 权限不足时 helper 返回明确 `needs_microphone_permission`、`needs_accessibility_permission` 或 `needs_input_monitoring_permission`，并提供打开系统设置的入口。
 - 权限满足且 ASR ready 时，热键录音后文本通过 InputMethodKit marked/commit 写入当前光标位置，不走剪贴板伪装。
@@ -467,10 +467,10 @@
 预期结果：
 
 - 离线 ASR 默认仍为 `Qwen3-ASR-1.7B`，目录任务和文件转写不被实时链路默认值降级。
-- Web/CLI 实时 Voice 默认使用 `Qwen3-ASR-0.6B`；保存离线 1.7B 不会让 Web realtime 自动继承 1.7B。
+- Web 实时 Voice 跟随 Speech Workbench 模型，文件上传与麦克风使用同一 Workbench 配置；CLI `ai voice listen` 仍通过显式 `--model` 或自身默认值独立选择。
 - WebSocket `start` 消息固定为 `sample_rate=16000`、`channels=1`、`format=pcm_s16le`；48kHz 输入被前端重采样，binary PCM16 字节数约为输入帧按 16k 归一化后的长度。
 - 后端拒绝非 16k mono PCM16 start/audio，不能静默把 48k 当 16k 喂给模型。
-- 默认 realtime session 缺少 0.6B 资产时复用既有 ASR 初始化链路准备 0.6B；显式 1.7B 未带 opt-in 时返回明确拒绝，带 opt-in 后才允许加载。
+- realtime session 缺少所选 Workbench 模型资产时复用既有 ASR 初始化链路准备对应模型；选择 1.7B 时必须携带 opt-in 后才允许加载。
 - Stateful 模型加载和推理运行在独立 worker 子进程中；Bifrost 代理主进程不直接持有模型 cache，session finish/cancel/断连后 worker 进程退出或被回收。
 - `asr_partial` 的 `text` 可以随上下文变长或变短，但 `committed` 在 partial 阶段保持稳定；UI 只用 partial 覆盖临时假设，不把它追加进正式 transcript。
 - 约 1 秒静音后输出 `asr_stable_delta`，其 `detail` 包含 `reason=silence; stable=true`，并把当前 partial 提交到 `committed`。

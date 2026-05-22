@@ -306,7 +306,7 @@ async fn stream_source_to_voice_service(args: VoiceListenArgs<'_>, chunk_ms: u64
 fn voice_ws_url(args: VoiceListenArgs<'_>, chunk_ms: u64) -> String {
     let chunk_size_sec = format!("{:.3}", chunk_ms as f32 / 1000.0);
     let mut url = format!(
-        "ws://{}:{}/_bifrost/api/voice/listen-ws?source={}&stateful_chunk_sec={}&model={}&provider={}&language={}",
+        "ws://{}:{}/_bifrost/api/voice/listen-ws?source={}&stateful_chunk_sec={}&model={}&provider={}&language={}&owner_module=cli",
         args.admin_host,
         args.admin_port,
         urlencoding::encode(args.source),
@@ -583,6 +583,7 @@ mod tests {
         assert!(url.contains("model=Qwen3-ASR-0.6B"));
         assert!(url.contains("provider=qwen3_stateful_streaming"));
         assert!(url.contains("language=chinese"));
+        assert!(url.contains("owner_module=cli"));
     }
 
     #[test]

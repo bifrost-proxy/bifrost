@@ -82,7 +82,10 @@ impl Drop for RunningExternalImportGuard {
 }
 
 fn external_import_is_running(task_id: &str) -> bool {
-    RUNNING_EXTERNAL_IMPORT_TASKS.lock().unwrap().contains(task_id)
+    RUNNING_EXTERNAL_IMPORT_TASKS
+        .lock()
+        .unwrap()
+        .contains(task_id)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -821,6 +824,8 @@ struct TaskTranscribeHooks<'a> {
     memory_limit_hints: &'a [AsrChunkMemoryHint],
     server_url: Option<&'a str>,
     startup_fallback_reason: Option<&'a str>,
+    server_state: Option<&'a mut Option<ServerRunnerState>>,
+    managed_server_restart: Option<ManagedServerRestartContext<'a>>,
 }
 
 #[derive(Debug, Deserialize)]

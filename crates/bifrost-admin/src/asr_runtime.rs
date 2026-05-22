@@ -17,7 +17,27 @@ pub struct AsrServiceState {
     pub home: PathBuf,
     pub pid: Option<u32>,
     pub managed_by: String,
+    #[serde(default)]
+    pub owner_module: Option<String>,
+    #[serde(default)]
+    pub owner_id: Option<String>,
     pub started_at_ms: u64,
+}
+
+impl AsrServiceState {
+    pub fn lease_owner_module(&self) -> &str {
+        self.owner_module
+            .as_deref()
+            .unwrap_or_else(|| legacy_owner_module(&self.managed_by))
+    }
+}
+
+fn legacy_owner_module(managed_by: &str) -> &str {
+    if managed_by == "webui" {
+        "speech_workbench"
+    } else {
+        managed_by
+    }
 }
 
 pub fn fixed_asr_home() -> PathBuf {

@@ -34,7 +34,9 @@ use crate::handlers::asr_streaming::{
     append_transcript_delta, call_asr_whole_file_endpoint, dedupe_increment,
 };
 use crate::handlers::asr_ws::handle_asr_ws_upgrade;
-use crate::handlers::{error_response, json_response, method_not_allowed, BoxBody};
+use crate::handlers::{
+    error_response, json_response, json_response_with_status, method_not_allowed, BoxBody,
+};
 use crate::resource_download::{download_with_resume, DownloadProgress, DownloadRequest};
 
 const SERVICE_START_TIMEOUT_SECS: u64 = 180;
@@ -54,6 +56,8 @@ struct AsrQuery {
     port: Option<u16>,
     language: Option<String>,
     model: Option<String>,
+    owner_module: Option<String>,
+    owner_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +67,8 @@ pub(crate) struct AsrTarget {
     pub(crate) language: String,
     pub(crate) model: String,
     pub(crate) home: PathBuf,
+    pub(crate) owner_module: String,
+    pub(crate) owner_id: Option<String>,
 }
 
 struct ManagedAsrService {
@@ -71,6 +77,14 @@ struct ManagedAsrService {
 }
 
 const SERVICE_FOOTPRINT_MAX_SAMPLE_FAILURES: u32 = 3;
+
+fn service_watchdog_should_kill_for_sample(
+    footprint: u64,
+    reliable_physical_footprint: bool,
+    limit: u64,
+) -> bool {
+    reliable_physical_footprint && footprint > limit
+}
 
 #[derive(Clone)]
 struct AsrInitTask {
@@ -95,6 +109,9 @@ struct AsrStatusResponse {
     model: String,
     language: String,
     managed: bool,
+    owner_module: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_id: Option<String>,
     message: String,
 }
 
@@ -194,11 +211,10 @@ pub async fn handle_asr(req: Request<Incoming>, path: &str) -> Response<BoxBody>
 }
 
 async fn handle_status(req: Request<Incoming>) -> Response<BoxBody> {
-    let requested_target = match target_from_query(req.uri().query()) {
+    let target = match target_from_query(req.uri().query()) {
         Ok(target) => target,
         Err(message) => return error_response(StatusCode::BAD_REQUEST, &message),
     };
-    let target = resolve_managed_target(requested_target).await;
 
     if let Err(reason) = detect_asr_release_asset() {
         return json_response(&AsrStatusResponse {
@@ -214,14 +230,18 @@ async fn handle_status(req: Request<Incoming>) -> Response<BoxBody> {
             model: target.model,
             language: target.language,
             managed: false,
+            owner_module: target.owner_module,
+            owner_id: target.owner_id,
             message: reason,
         });
     }
 
+    let resolved_target = resolve_managed_target(target.clone()).await;
     let installed = target.assets_installed();
-    let ready = probe_asr_health(&target).await.is_ok();
+    let ready = resolved_target.port.is_some() && probe_asr_health(&resolved_target).await.is_ok();
     let managed = managed_service_matches(&target).await;
     let ffmpeg_available = command_succeeds("ffmpeg", &["-version"]).await;
+    let status_target = if ready { &resolved_target } else { &target };
     let status = if ready {
         "ready"
     } else if installed {
@@ -237,12 +257,14 @@ async fn handle_status(req: Request<Incoming>) -> Response<BoxBody> {
         platform_supported: true,
         unsupported_reason: None,
         ffmpeg_available,
-        server_url: target.server_url_display(),
+        server_url: status_target.server_url_display(),
         install_dir: target.install_dir().display().to_string(),
         model_dir: target.model_dir().display().to_string(),
         model: target.model,
         language: target.language,
         managed,
+        owner_module: target.owner_module,
+        owner_id: target.owner_id,
         message: if ready {
             if managed {
                 "Qwen3-ASR service is running under Bifrost management.".to_string()
@@ -324,10 +346,13 @@ async fn handle_service_start(req: Request<Incoming>) -> Response<BoxBody> {
         Err(message) => return error_response(StatusCode::BAD_REQUEST, &message),
     };
 
-    let response = match start_managed_service(target).await {
-        Ok(response) | Err(response) => response,
-    };
-    json_response(&response)
+    match start_managed_service(target).await {
+        Ok(response) => json_response(&response),
+        Err(response) if is_service_busy(&response) => {
+            json_response_with_status(StatusCode::CONFLICT, &response)
+        }
+        Err(response) => json_response(&response),
+    }
 }
 
 async fn handle_service_stop(req: Request<Incoming>) -> Response<BoxBody> {
@@ -338,7 +363,10 @@ async fn handle_service_stop(req: Request<Incoming>) -> Response<BoxBody> {
 
     let existing = MANAGED_SERVICE.lock().await.take();
     match existing {
-        Some(mut managed) if target_matches_request(&managed.target, &target) => {
+        Some(mut managed)
+            if target_matches_request(&managed.target, &target)
+                && same_service_owner(&managed.target, &target) =>
+        {
             let _ = managed.child.kill().await;
             let _ = clear_service_state(&bifrost_storage::data_dir());
             json_response(&AsrServiceResponse {
@@ -367,6 +395,7 @@ async fn handle_service_stop(req: Request<Incoming>) -> Response<BoxBody> {
                     && state.model == target.model
                     && state.home == target.home
                     && target.port.is_none_or(|port| port == state.port)
+                    && target_matches_state_owner(&target, &state)
                 {
                     if let Some(pid) = state.pid {
                         let _ = stop_pid(pid);
@@ -397,6 +426,12 @@ async fn handle_transcribe_stream(req: Request<Incoming>) -> Response<BoxBody> {
         Ok(target) => target,
         Err(message) => return error_response(StatusCode::BAD_REQUEST, &message),
     };
+    if let Some(conflict) = find_conflicting_healthy_service(&requested_target).await {
+        let response = service_busy_response(&requested_target, &conflict);
+        return sse_response(move |tx| async move {
+            send_error(&tx, &response.message, response.detail.as_deref()).await;
+        });
+    }
     let target = resolve_managed_target(requested_target).await;
     let content_type = match req
         .headers()
@@ -828,6 +863,10 @@ pub(crate) async fn start_managed_service(
         });
     }
 
+    if let Some(conflict) = find_conflicting_healthy_service(&requested_target).await {
+        return Err(service_busy_response(&requested_target, &conflict));
+    }
+
     if let Some(existing) = find_managed_target(&requested_target).await {
         if probe_asr_health(&existing).await.is_ok() {
             return Ok(AsrServiceResponse {
@@ -838,7 +877,7 @@ pub(crate) async fn start_managed_service(
                 detail: None,
             });
         }
-        stop_any_managed_service().await;
+        stop_managed_service_for_target(&existing).await;
     }
 
     let target = match requested_target.port {
@@ -853,6 +892,10 @@ pub(crate) async fn start_managed_service(
             }
         })?),
     };
+
+    if let Some(conflict) = find_conflicting_healthy_service(&target).await {
+        return Err(service_busy_response(&target, &conflict));
+    }
 
     if !target.assets_installed() {
         run_initializer_silent(target.clone())
@@ -899,7 +942,9 @@ pub(crate) async fn start_managed_service(
         });
     }
 
-    stop_any_managed_service().await;
+    if let Some(conflict) = find_conflicting_healthy_service(&target).await {
+        return Err(service_busy_response(&target, &conflict));
+    }
 
     let log_path = target.install_dir().join("bifrost-managed-asr-server.log");
     let stdout = std::fs::OpenOptions::new()
@@ -961,7 +1006,9 @@ pub(crate) async fn start_managed_service(
                     language: target.language.clone(),
                     home: target.home.clone(),
                     pid: child.id(),
-                    managed_by: "webui".to_string(),
+                    managed_by: target.owner_module.clone(),
+                    owner_module: Some(target.owner_module.clone()),
+                    owner_id: target.owner_id.clone(),
                     started_at_ms: now_ms(),
                 },
             );
@@ -1012,7 +1059,9 @@ async fn managed_service_matches(target: &AsrTarget) -> bool {
         .lock()
         .await
         .as_ref()
-        .map(|service| same_target(&service.target, target))
+        .map(|service| {
+            same_target(&service.target, target) && same_service_owner(&service.target, target)
+        })
         .unwrap_or(false)
     {
         return true;
@@ -1023,6 +1072,7 @@ async fn managed_service_matches(target: &AsrTarget) -> bool {
                 && target.port == Some(state.port)
                 && state.model == target.model
                 && state.home == target.home
+                && target_matches_state_owner(target, &state)
         })
         .unwrap_or(false)
 }
@@ -1143,7 +1193,55 @@ async fn find_managed_target(target: &AsrTarget) -> Option<AsrTarget> {
         .await
         .as_ref()
         .filter(|service| target_matches_request(&service.target, target))
+        .filter(|service| same_service_owner(&service.target, target))
         .map(|service| service.target.clone())
+}
+
+async fn find_conflicting_healthy_service(target: &AsrTarget) -> Option<AsrTarget> {
+    let existing_managed = MANAGED_SERVICE
+        .lock()
+        .await
+        .as_ref()
+        .map(|service| service.target.clone());
+    if let Some(existing) = existing_managed {
+        if !same_service_owner(&existing, target) && probe_asr_health(&existing).await.is_ok() {
+            return Some(existing);
+        }
+        if same_service_owner(&existing, target)
+            && !target_matches_request(&existing, target)
+            && probe_asr_health(&existing).await.is_ok()
+        {
+            return Some(existing);
+        }
+    }
+
+    let state = read_service_state(&bifrost_storage::data_dir())?;
+    let existing = target.with_state(&state);
+    if target_matches_request(&existing, target) && same_service_owner(&existing, target) {
+        return None;
+    }
+    probe_asr_health(&existing).await.ok().map(|_| existing)
+}
+
+fn service_busy_response(target: &AsrTarget, existing: &AsrTarget) -> AsrServiceResponse {
+    AsrServiceResponse {
+        ready: false,
+        managed: true,
+        server_url: existing.server_url_display(),
+        message: "Qwen3-ASR service is busy.".to_string(),
+        detail: Some(format!(
+            "requested owner={} model={}; active owner={} model={} server={}",
+            target.owner_label(),
+            target.model,
+            existing.owner_label(),
+            existing.model,
+            existing.server_url_display()
+        )),
+    }
+}
+
+fn is_service_busy(response: &AsrServiceResponse) -> bool {
+    response.message == "Qwen3-ASR service is busy."
 }
 
 pub(crate) async fn resolve_managed_target(target: AsrTarget) -> AsrTarget {
@@ -1156,8 +1254,12 @@ pub(crate) async fn resolve_managed_target(target: AsrTarget) -> AsrTarget {
     let Some(state) = read_service_state(&bifrost_storage::data_dir()) else {
         return target;
     };
-    if state.host == target.host && state.model == target.model && state.home == target.home {
-        let persisted = target.with_port(state.port);
+    if state.host == target.host
+        && state.model == target.model
+        && state.home == target.home
+        && target_matches_state_owner(&target, &state)
+    {
+        let persisted = target.with_state(&state);
         if probe_asr_health(&persisted).await.is_ok() {
             return persisted;
         }
@@ -1165,17 +1267,39 @@ pub(crate) async fn resolve_managed_target(target: AsrTarget) -> AsrTarget {
     target
 }
 
-pub(crate) async fn stop_any_managed_service() {
-    if let Some(mut managed) = MANAGED_SERVICE.lock().await.take() {
+pub(crate) async fn stop_managed_service_for_target(target: &AsrTarget) {
+    let managed_to_stop = {
+        let mut guard = MANAGED_SERVICE.lock().await;
+        let should_stop = guard
+            .as_ref()
+            .map(|managed| {
+                target_matches_request(&managed.target, target)
+                    && same_service_owner(&managed.target, target)
+            })
+            .unwrap_or(false);
+        if should_stop {
+            guard.take()
+        } else {
+            None
+        }
+    };
+    if let Some(mut managed) = managed_to_stop {
         terminate_service_process_group(managed.child.id());
         let _ = managed.child.kill().await;
     }
     if let Some(state) = read_service_state(&bifrost_storage::data_dir()) {
-        if let Some(pid) = state.pid {
-            terminate_service_process_group(Some(pid));
-            let _ = stop_pid(pid);
+        if state.host == target.host
+            && state.model == target.model
+            && state.home == target.home
+            && target.port.is_none_or(|port| port == state.port)
+            && target_matches_state_owner(target, &state)
+        {
+            if let Some(pid) = state.pid {
+                terminate_service_process_group(Some(pid));
+                let _ = stop_pid(pid);
+            }
+            let _ = clear_service_state(&bifrost_storage::data_dir());
         }
-        let _ = clear_service_state(&bifrost_storage::data_dir());
     }
 }
 
@@ -1205,7 +1329,7 @@ fn spawn_service_footprint_watchdog(target: AsrTarget, pid: u32, log_path: PathB
                         );
                     }
                     peak = peak.max(footprint);
-                    if footprint > limit {
+                    if service_watchdog_should_kill_for_sample(footprint, reliable, limit) {
                         warn!(
                             pid,
                             model = %target.model,
@@ -1232,21 +1356,21 @@ fn spawn_service_footprint_watchdog(target: AsrTarget, pid: u32, log_path: PathB
                             pid,
                             model = %target.model,
                             sample_failures,
+                            rss_mb = footprint / 1024 / 1024,
                             limit_mb = limit / 1024 / 1024,
                             peak_mb = peak / 1024 / 1024,
-                            "ASR service physical footprint unavailable repeatedly; terminating"
+                            "ASR service physical footprint unavailable repeatedly; continuing with RSS-only advisory samples"
                         );
                         append_service_watchdog_log(
                             &log_path,
                             format!(
-                                "Bifrost ASR service watchdog killed pid={pid}: physical footprint unavailable {sample_failures} times; limit_mb={} peak_mb={}\n",
+                                "Bifrost ASR service watchdog warning pid={pid}: physical footprint unavailable {sample_failures} times; rss_mb={} limit_mb={} peak_mb={}; continuing\n",
+                                footprint / 1024 / 1024,
                                 limit / 1024 / 1024,
                                 peak / 1024 / 1024
                             ),
                         );
-                        terminate_service_process_group(Some(pid));
-                        clear_managed_service_for_pid(pid).await;
-                        break;
+                        sample_failures = 0;
                     }
                 }
                 Err(error) => {
@@ -1268,19 +1392,17 @@ fn spawn_service_footprint_watchdog(target: AsrTarget, pid: u32, log_path: PathB
                             sample_failures,
                             limit_mb = limit / 1024 / 1024,
                             peak_mb = peak / 1024 / 1024,
-                            "ASR service footprint sampling failed repeatedly; terminating"
+                            "ASR service footprint sampling failed repeatedly; continuing without killing service"
                         );
                         append_service_watchdog_log(
                             &log_path,
                             format!(
-                                "Bifrost ASR service watchdog killed pid={pid}: footprint sampling failed {sample_failures} times; limit_mb={} peak_mb={}\n",
+                                "Bifrost ASR service watchdog warning pid={pid}: footprint sampling failed {sample_failures} times; limit_mb={} peak_mb={}; continuing\n",
                                 limit / 1024 / 1024,
                                 peak / 1024 / 1024
                             ),
                         );
-                        terminate_service_process_group(Some(pid));
-                        clear_managed_service_for_pid(pid).await;
-                        break;
+                        sample_failures = 0;
                     }
                 }
             }
@@ -1373,6 +1495,14 @@ fn target_matches_request(managed: &AsrTarget, requested: &AsrTarget) -> bool {
             .port
             .map(|requested_port| managed.port == Some(requested_port))
             .unwrap_or(true)
+}
+
+fn same_service_owner(left: &AsrTarget, right: &AsrTarget) -> bool {
+    left.owner_module == right.owner_module && left.owner_id == right.owner_id
+}
+
+fn target_matches_state_owner(target: &AsrTarget, state: &AsrServiceState) -> bool {
+    target.owner_module == state.lease_owner_module() && target.owner_id == state.owner_id
 }
 
 async fn run_initializer(
@@ -2032,6 +2162,8 @@ pub(crate) fn target_from_query(query: Option<&str>) -> Result<AsrTarget, String
             port: None,
             language: None,
             model: None,
+            owner_module: None,
+            owner_id: None,
         });
     let host = params.host.unwrap_or_else(|| DEFAULT_ASR_HOST.to_string());
     validate_loopback_host(&host)?;
@@ -2051,6 +2183,11 @@ pub(crate) fn target_from_query(query: Option<&str>) -> Result<AsrTarget, String
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_ASR_MODEL.to_string()),
         home: default_home(),
+        owner_module: params
+            .owner_module
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "model_management".to_string()),
+        owner_id: params.owner_id.filter(|value| !value.trim().is_empty()),
     })
 }
 
@@ -2088,6 +2225,25 @@ impl AsrTarget {
         let mut target = self.clone();
         target.port = Some(port);
         target
+    }
+
+    fn with_state(&self, state: &AsrServiceState) -> Self {
+        let mut target = self.clone();
+        target.host = state.host.clone();
+        target.port = Some(state.port);
+        target.model = state.model.clone();
+        target.language = state.language.clone();
+        target.home = state.home.clone();
+        target.owner_module = state.lease_owner_module().to_string();
+        target.owner_id = state.owner_id.clone();
+        target
+    }
+
+    fn owner_label(&self) -> String {
+        match self.owner_id.as_deref() {
+            Some(owner_id) => format!("{}:{owner_id}", self.owner_module),
+            None => self.owner_module.clone(),
+        }
     }
 
     pub(crate) fn install_dir(&self) -> PathBuf {
@@ -2138,8 +2294,9 @@ mod tests {
 
     use super::{
         asr_download_requests, build_asr_download_client, default_home,
-        plan_upload_chunk_boundaries, target_from_query, target_matches_request,
-        validate_loopback_host, wav_pcm_duration_ms, ASR_UPLOAD_CHUNK_DURATION_SECS,
+        plan_upload_chunk_boundaries, same_service_owner, service_watchdog_should_kill_for_sample,
+        target_from_query, target_matches_request, validate_loopback_host, wav_pcm_duration_ms,
+        ASR_UPLOAD_CHUNK_DURATION_SECS,
     };
 
     fn proxy_env_lock() -> &'static StdMutex<()> {
@@ -2305,6 +2462,122 @@ mod tests {
         let requested = target_from_query(Some("model=Qwen3-ASR-0.6B&language=english")).unwrap();
 
         assert!(target_matches_request(&managed, &requested));
+    }
+
+    #[test]
+    fn qwen3_service_owner_isolation_blocks_other_modules() {
+        let workbench = target_from_query(Some(
+            "model=Qwen3-ASR-0.6B&owner_module=speech_workbench&port=18080",
+        ))
+        .unwrap();
+        let directory_task = target_from_query(Some(
+            "model=Qwen3-ASR-0.6B&owner_module=directory_task&owner_id=task-a",
+        ))
+        .unwrap();
+        let same_directory_task = target_from_query(Some(
+            "model=Qwen3-ASR-0.6B&owner_module=directory_task&owner_id=task-a",
+        ))
+        .unwrap();
+
+        assert!(!same_service_owner(&workbench, &directory_task));
+        assert!(same_service_owner(&directory_task, &same_directory_task));
+        assert!(target_matches_request(&workbench, &directory_task));
+    }
+
+    #[test]
+    fn qwen3_service_owner_id_must_match_within_same_module() {
+        let task_a = target_from_query(Some(
+            "model=Qwen3-ASR-1.7B&owner_module=directory_task&owner_id=task-a",
+        ))
+        .unwrap();
+        let task_b = target_from_query(Some(
+            "model=Qwen3-ASR-1.7B&owner_module=directory_task&owner_id=task-b",
+        ))
+        .unwrap();
+        let task_a_without_port = target_from_query(Some(
+            "model=Qwen3-ASR-1.7B&owner_module=directory_task&owner_id=task-a",
+        ))
+        .unwrap();
+
+        assert!(!same_service_owner(&task_a, &task_b));
+        assert!(same_service_owner(&task_a, &task_a_without_port));
+        assert!(target_matches_request(&task_a, &task_b));
+    }
+
+    #[test]
+    fn qwen3_default_owner_is_model_management() {
+        let target = target_from_query(Some("model=Qwen3-ASR-0.6B")).unwrap();
+
+        assert_eq!(target.owner_module, "model_management");
+        assert_eq!(target.owner_id, None);
+    }
+
+    #[test]
+    fn service_watchdog_kills_only_on_reliable_physical_footprint_over_limit() {
+        let limit = 10 * 1024 * 1024;
+
+        assert!(service_watchdog_should_kill_for_sample(
+            limit + 1,
+            true,
+            limit
+        ));
+        assert!(!service_watchdog_should_kill_for_sample(
+            limit + 1,
+            false,
+            limit
+        ));
+        assert!(!service_watchdog_should_kill_for_sample(limit, true, limit));
+    }
+
+    #[test]
+    fn qwen3_owner_scoped_status_does_not_probe_default_port() {
+        let target = target_from_query(Some(
+            "model=Qwen3-ASR-1.7B&owner_module=directory_task&owner_id=task-a",
+        ))
+        .unwrap();
+        let workbench =
+            target
+                .clone()
+                .with_port(18080)
+                .with_state(&crate::asr_runtime::AsrServiceState {
+                    host: "127.0.0.1".to_string(),
+                    port: 18080,
+                    model: "Qwen3-ASR-1.7B".to_string(),
+                    language: "chinese".to_string(),
+                    home: default_home(),
+                    pid: None,
+                    managed_by: "speech_workbench".to_string(),
+                    owner_module: Some("speech_workbench".to_string()),
+                    owner_id: None,
+                    started_at_ms: 1,
+                });
+
+        assert_eq!(target.port, None);
+        assert_eq!(workbench.port, Some(18080));
+        assert!(!same_service_owner(&target, &workbench));
+    }
+
+    #[test]
+    fn qwen3_resolved_state_preserves_owner_and_port() {
+        let requested =
+            target_from_query(Some("model=Qwen3-ASR-1.7B&owner_module=speech_workbench")).unwrap();
+        let resolved = requested.with_state(&crate::asr_runtime::AsrServiceState {
+            host: "127.0.0.1".to_string(),
+            port: 18081,
+            model: "Qwen3-ASR-1.7B".to_string(),
+            language: "chinese".to_string(),
+            home: default_home(),
+            pid: None,
+            managed_by: "speech_workbench".to_string(),
+            owner_module: Some("speech_workbench".to_string()),
+            owner_id: None,
+            started_at_ms: 1,
+        });
+
+        assert_eq!(requested.port, None);
+        assert_eq!(resolved.port, Some(18081));
+        assert_eq!(resolved.owner_module, "speech_workbench");
+        assert!(same_service_owner(&requested, &resolved));
     }
 
     #[test]

@@ -618,9 +618,16 @@ fn print_status(json: bool) -> Result<()> {
             .map_err(|error| BifrostError::Config(error.to_string()))?
         ))?;
     } else if let Some(state) = state {
+        let owner_id = state.owner_id.as_deref().unwrap_or("-");
         write_stdout_text(&format!(
-            "ready: {ready}\nserver: http://{}:{}\nmodel: {}\nlanguage: {}\nmanaged_by: {}\n",
-            state.host, state.port, state.model, state.language, state.managed_by
+            "ready: {ready}\nserver: http://{}:{}\nmodel: {}\nlanguage: {}\nmanaged_by: {}\nowner_module: {}\nowner_id: {}\n",
+            state.host,
+            state.port,
+            state.model,
+            state.language,
+            state.managed_by,
+            state.lease_owner_module(),
+            owner_id
         ))?;
     } else {
         write_stdout_text("ready: false\nserver: not running\n")?;
@@ -1384,6 +1391,19 @@ fn start_service(model: &str, language: &str) -> Result<AsrServiceState> {
         return Ok(state);
     }
 
+    if let Some(state) = read_service_state(&bifrost_storage::data_dir()) {
+        if probe_health_blocking(&state.host, state.port, Duration::from_secs(2)).is_ok() {
+            return Err(BifrostError::Config(format!(
+                "Qwen3-ASR service is busy: active owner={} model={} server=http://{}:{}; requested owner=cli model={}",
+                state.lease_owner_module(),
+                state.model,
+                state.host,
+                state.port,
+                model
+            )));
+        }
+    }
+
     let home = fixed_asr_home();
     let install = install_dir(&home);
     let model_path = model_dir(&home, model);
@@ -1441,6 +1461,8 @@ fn start_service(model: &str, language: &str) -> Result<AsrServiceState> {
         home,
         pid: Some(child.id()),
         managed_by: "cli".to_string(),
+        owner_module: Some("cli".to_string()),
+        owner_id: None,
         started_at_ms: now_ms(),
     };
     write_service_state(&bifrost_storage::data_dir(), &state).map_err(BifrostError::Config)?;
@@ -1462,6 +1484,12 @@ fn start_service(model: &str, language: &str) -> Result<AsrServiceState> {
 
 fn stop_service() -> Result<()> {
     if let Some(state) = read_service_state(&bifrost_storage::data_dir()) {
+        if state.lease_owner_module() != "cli" {
+            return Err(BifrostError::Config(format!(
+                "Refusing to stop ASR service owned by {}. Stop it from the owning module or use its API.",
+                state.lease_owner_module()
+            )));
+        }
         if let Some(pid) = state.pid {
             let _ = stop_pid(pid);
         }
@@ -1471,7 +1499,7 @@ fn stop_service() -> Result<()> {
 
 fn healthy_state(model: &str, language: &str) -> Option<AsrServiceState> {
     let state = read_service_state(&bifrost_storage::data_dir())?;
-    if state.model != model || state.language != language {
+    if state.model != model || state.language != language || state.lease_owner_module() != "cli" {
         return None;
     }
     probe_health_blocking(&state.host, state.port, Duration::from_secs(2))
@@ -1890,12 +1918,45 @@ mod tests {
             home: fixed_asr_home(),
             pid: Some(42),
             managed_by: "test".to_string(),
+            owner_module: Some("test".to_string()),
+            owner_id: Some("status-fixture".to_string()),
             started_at_ms: 1,
         };
         write_service_state(temp.path(), &state).unwrap();
         let loaded = read_service_state(temp.path()).unwrap();
         assert_eq!(loaded.port, 18080);
         assert_eq!(loaded.managed_by, "test");
+        assert_eq!(loaded.lease_owner_module(), "test");
+        assert_eq!(loaded.owner_id.as_deref(), Some("status-fixture"));
+    }
+
+    #[test]
+    fn status_reads_legacy_webui_service_state_as_workbench_owner() {
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let state_dir = temp.path().join("asr");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(
+            state_dir.join("service.json"),
+            serde_json::json!({
+                "host": "127.0.0.1",
+                "port": 18080,
+                "model": "Qwen3-ASR-1.7B",
+                "language": "chinese",
+                "home": fixed_asr_home(),
+                "pid": null,
+                "managed_by": "webui",
+                "started_at_ms": 1
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let loaded = read_service_state(temp.path()).unwrap();
+
+        assert_eq!(loaded.managed_by, "webui");
+        assert_eq!(loaded.lease_owner_module(), "speech_workbench");
+        assert_eq!(loaded.owner_id, None);
     }
 
     #[test]

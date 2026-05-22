@@ -133,12 +133,12 @@ Current Bifrost directory-task integration has an experiment switch so the faste
 - `reuse_per_file`: default production path after the 2026-05-18 same-file benchmark, one managed `asr-server` per source file, stopped after the file when Bifrost started it.
 - `fork_per_chunk`: conservative isolation baseline, native `asr` CLI per chunk.
 - `reuse_server`: one managed `asr-server` per task run.
-- `auto`: start with server reuse, then persist a fallback reason and switch remaining chunks to fork-per-chunk when startup fails, a server chunk fails, or RTF drifts above the threshold.
+- `auto`: start with server reuse; startup failure or RTF drift can switch the remaining chunks to fork-per-chunk, while a mid-run server request failure retries the current chunk through fork-per-chunk and schedules a managed server restart for later chunks.
 - `compare`: run fork output as canonical and server output as a shadow attempt for the same chunk; persist both metrics and log text hash differences.
 
 Every strategy must emit `ASR chunk metric` logs and persist `chunk_metrics` in `files.json` and metadata so a crash or watchdog kill still leaves enough evidence to attribute the bad run to a strategy, file, chunk, runner, RTF, text hash, server URL, and error.
 
-### 2026-05-19 reuse_per_file server-death fallback
+### 2026-05-19 reuse_per_file server-death recovery
 
 The live `a911c68b0f7a43afa29d1863cc02229a` directory run showed a failure mode specific to `reuse_per_file`: the Bifrost watchdog killed a file-scoped `asr-server` after physical footprint exceeded the configured limit, then the remaining chunks in that file kept calling the same dead port. That turned one server death into dozens of `connect_failed` chunks.
 
@@ -147,10 +147,38 @@ The Bifrost-side mitigation is:
 1. keep `reuse_per_file` as the default fast path;
 2. when a `reuse_per_file` or `reuse_server` chunk returns a server error, persist the failed server metric with `server_url` and error;
 3. retry the current chunk immediately through `fork_per_chunk`;
-4. mark the server runner state as `force_fork_for_remaining` so later chunks in the same file/task do not keep hitting the dead server;
-5. persist `fallback_reason` as `<strategy> strategy <transport|server> failure; switching remaining chunks to fork_per_chunk: <error>`.
+4. mark the server runner state as `restart_required` so the next server-eligible chunk first stops the stale managed service state and starts a fresh `asr-server` on a new loopback port;
+5. if that restart fails, run only the current chunk through `fork_per_chunk`, keep `restart_required=true`, and retry the server restart before the next server-eligible chunk;
+6. persist `fallback_reason` as `<strategy> strategy <transport|server> failure; retrying current chunk via fork_per_chunk and scheduling managed ASR server restart for later chunks: <error>`.
 
-This does not raise the memory ceiling. The watchdog remains the protection against MLX/Metal footprint runaway, while the fallback prevents one watchdog kill from becoming a large partial-success hole.
+This does not raise the memory ceiling. The watchdog remains the protection against MLX/Metal footprint runaway, while the recovery prevents one watchdog kill from becoming a large partial-success hole. Restarts are deliberately serialized at chunk boundaries: Bifrost never starts a replacement `asr-server` while the native/fork fallback for the failed chunk is still running, avoiding a forked `asr` process and server initialization competing for unified memory.
+
+### 2026-05-22 task-scoped server recovery state
+
+`reuse_server`, `auto`, and `compare` acquire a managed server at task-run scope. A server failure in `reuse_server` or `auto` must therefore update a task-scoped `ServerRunnerState`, not a per-file temporary state. Otherwise the current file can fall back, but the next file recreates a fresh state for the same dead `server_url` and repeats connection failures.
+
+The Bifrost-side mitigation is:
+
+1. create one `ServerRunnerState` next to the task-scoped managed server URL for strategies that use a task-lifetime server;
+2. pass that mutable state through each file transcription and chunk loop;
+3. when a server chunk fails, set `restart_required` and `fallback_reason` on that shared state;
+4. make later files and chunks in the same task run restart the managed server before the next server attempt instead of reusing the dead URL;
+5. continue using a file-scoped state for `reuse_per_file`, because that strategy intentionally starts and stops a server at file boundaries.
+
+This keeps the attribution accurate: the first server failure remains visible as a shadow metric, the immediate recovery chunk is visible as fork fallback, and later chunks show the new `server_url` if restart succeeds. If restart fails, only that chunk falls back and the next server-eligible chunk tries to restart again.
+
+### 2026-05-22 watchdog unreliable footprint handling
+
+`asr-server` watchdog sampling must distinguish reliable physical footprint samples from RSS-only fallbacks or sampler failures. When macOS cannot provide `physical footprint`, the watchdog may still see RSS, but RSS is not equivalent to Metal/MLX physical footprint and can be unavailable or noisy while the model is otherwise healthy.
+
+The Bifrost-side mitigation is:
+
+1. kill the managed `asr-server` only when a reliable physical footprint sample exceeds the model-aware limit;
+2. treat RSS-only fallback samples as advisory evidence and log repeated unavailable physical-footprint samples without killing the server;
+3. treat repeated sampler errors as warnings while the process is still alive, rather than killing a service whose peak reliable footprint has not exceeded the limit;
+4. keep clearing managed service state only when the process is already gone or when a reliable sample proves the service exceeded the footprint limit.
+
+This avoids turning a transient `physical footprint unavailable` condition into an unnecessary server death, which in turn reduces avoidable chunk fallback and repeated `error sending request for url (.../v1/audio/transcriptions)` metrics.
 
 When an existing `partial_success` file is repaired through `POST /api/asr/tasks/<task_id>/files/<file_key>/retry-chunks`, recovered chunks must be merged back into every user-visible artifact:
 

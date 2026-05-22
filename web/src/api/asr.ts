@@ -8,6 +8,8 @@ export interface AsrConnectionParams {
   port?: number;
   language?: string;
   model?: string;
+  ownerModule?: string;
+  ownerId?: string;
 }
 
 export interface VoiceRealtimeParams extends AsrConnectionParams {
@@ -27,6 +29,8 @@ export interface AsrStatus {
   model_dir: string;
   model: string;
   language: string;
+  owner_module: string;
+  owner_id?: string;
   message: string;
 }
 
@@ -36,6 +40,10 @@ export interface AsrServiceResult {
   server_url: string;
   message: string;
   detail?: string;
+}
+
+export function buildAsrQueryForTest(params: AsrConnectionParams): string {
+  return buildAsrQuery(params);
 }
 
 export interface AsrProgressEvent {
@@ -442,29 +450,45 @@ export interface VoiceRealtimeEvent {
 const ASR_LEGACY_PARAMS_STORAGE_KEYS = [
   "bifrost.asr.connection",
   "bifrost.asr.connection.v2",
+  "bifrost.asr.connection.v3",
 ];
-const ASR_PARAMS_STORAGE_KEY = "bifrost.asr.connection.v3";
+const ASR_PARAMS_STORAGE_KEY = "bifrost.asr.workbench.connection.v1";
+const ASR_MODEL_MANAGEMENT_PARAMS_STORAGE_KEY = "bifrost.asr.model-management.connection.v1";
 export const ASR_PARAMS_CHANGED_EVENT = "bifrost.asr.params.changed";
 export const ASR_STATUS_CHANGED_EVENT = "bifrost.asr.status.changed";
 
 export function defaultAsrParams(): Required<
-  Pick<AsrConnectionParams, "host" | "language" | "model">
+  Pick<AsrConnectionParams, "host" | "language" | "model" | "ownerModule">
 > {
   return {
     host: "127.0.0.1",
     language: "chinese",
     model: "Qwen3-ASR-1.7B",
+    ownerModule: "speech_workbench",
   };
 }
 
 export function defaultVoiceRealtimeParams(): Required<
-  Pick<VoiceRealtimeParams, "host" | "language" | "model" | "chunkMs">
+  Pick<VoiceRealtimeParams, "host" | "language" | "model" | "chunkMs" | "ownerModule">
+> {
+  const workbenchDefaults = defaultAsrParams();
+  return {
+    host: workbenchDefaults.host,
+    language: workbenchDefaults.language,
+    model: workbenchDefaults.model,
+    chunkMs: 1000,
+    ownerModule: "speech_workbench",
+  };
+}
+
+export function defaultModelManagementParams(): Required<
+  Pick<AsrConnectionParams, "host" | "language" | "model" | "ownerModule">
 > {
   return {
     host: "127.0.0.1",
     language: "chinese",
-    model: "Qwen3-ASR-0.6B",
-    chunkMs: 1000,
+    model: "Qwen3-ASR-1.7B",
+    ownerModule: "model_management",
   };
 }
 
@@ -481,17 +505,32 @@ export function loadAsrParams(): AsrConnectionParams {
   }
 }
 
+export function loadModelManagementParams(): AsrConnectionParams {
+  try {
+    const raw = window.localStorage.getItem(ASR_MODEL_MANAGEMENT_PARAMS_STORAGE_KEY);
+    if (!raw) {
+      return defaultModelManagementParams();
+    }
+    return { ...defaultModelManagementParams(), ...JSON.parse(raw) };
+  } catch {
+    return defaultModelManagementParams();
+  }
+}
+
 export function loadVoiceRealtimeParams(): VoiceRealtimeParams {
   try {
     const raw = window.localStorage.getItem(ASR_PARAMS_STORAGE_KEY);
     if (!raw) {
       return defaultVoiceRealtimeParams();
     }
-    const saved = JSON.parse(raw) as AsrConnectionParams;
+    const saved = JSON.parse(raw) as VoiceRealtimeParams;
     return {
       ...defaultVoiceRealtimeParams(),
       host: saved.host || defaultVoiceRealtimeParams().host,
       language: saved.language || defaultVoiceRealtimeParams().language,
+      model: saved.model || defaultVoiceRealtimeParams().model,
+      chunkMs: saved.chunkMs || defaultVoiceRealtimeParams().chunkMs,
+      ownerModule: "speech_workbench",
     };
   } catch {
     return defaultVoiceRealtimeParams();
@@ -499,8 +538,18 @@ export function loadVoiceRealtimeParams(): VoiceRealtimeParams {
 }
 
 export function saveAsrParams(params: AsrConnectionParams): void {
-  window.localStorage.setItem(ASR_PARAMS_STORAGE_KEY, JSON.stringify(params));
+  window.localStorage.setItem(
+    ASR_PARAMS_STORAGE_KEY,
+    JSON.stringify({ ...params, ownerModule: "speech_workbench" }),
+  );
   window.dispatchEvent(new Event(ASR_PARAMS_CHANGED_EVENT));
+}
+
+export function saveModelManagementParams(params: AsrConnectionParams): void {
+  window.localStorage.setItem(
+    ASR_MODEL_MANAGEMENT_PARAMS_STORAGE_KEY,
+    JSON.stringify({ ...params, ownerModule: "model_management" }),
+  );
 }
 
 export async function getAsrStatus(
@@ -516,7 +565,7 @@ export async function startAsrService(
     method: "POST",
     headers: buildStreamHeaders(),
   });
-  return readJsonResponse<AsrServiceResult>(response);
+  return readAsrServiceResponse(response);
 }
 
 export async function stopAsrService(
@@ -767,6 +816,10 @@ export function buildVoiceRealtimeUrl(params: VoiceRealtimeParams): string {
   query.set("language", params.language || defaults.language);
   const model = params.model || defaults.model;
   query.set("model", model);
+  query.set("owner_module", params.ownerModule || defaults.ownerModule);
+  if (params.ownerId) {
+    query.set("owner_id", params.ownerId);
+  }
   query.set("chunk_ms", String(params.chunkMs || defaults.chunkMs));
   if (model === "Qwen3-ASR-1.7B") {
     query.set("allow_stateful_17b", "1");
@@ -787,6 +840,10 @@ function buildAsrQuery(params: AsrConnectionParams): string {
   }
   query.set("language", params.language || defaults.language);
   query.set("model", params.model || defaults.model);
+  query.set("owner_module", params.ownerModule || defaults.ownerModule);
+  if (params.ownerId) {
+    query.set("owner_id", params.ownerId);
+  }
   return query.toString();
 }
 
@@ -841,6 +898,13 @@ async function readJsonResponse<T>(response: Response): Promise<T> {
     throw new Error(body || `ASR request failed with status ${response.status}`);
   }
   return response.json() as Promise<T>;
+}
+
+async function readAsrServiceResponse(response: Response): Promise<AsrServiceResult> {
+  if (response.ok || response.status === 409) {
+    return response.json() as Promise<AsrServiceResult>;
+  }
+  return readJsonResponse<AsrServiceResult>(response);
 }
 
 function emitSsePart(

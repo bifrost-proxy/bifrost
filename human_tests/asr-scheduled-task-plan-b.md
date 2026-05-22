@@ -199,7 +199,7 @@
 
 - 启动命令本身不依赖 qwen3_asr_rs 内部 MLX 限额；Bifrost 在服务健康后注册外层 watchdog。
 - `asr-server` 处于独立进程组，Stop Service 或 watchdog 终止时不会遗留子进程。
-- 如果 physical footprint 超过模型感知默认阈值（1.7B 默认 18432 MiB）或 footprint 连续采样不可用，Bifrost kill 当前 `asr-server` 进程组并清理 `service.json`。
+- 如果可靠 physical footprint 超过模型感知默认阈值（1.7B 默认 18432 MiB），Bifrost kill 当前 `asr-server` 进程组并清理 `service.json`；如果只是 footprint 连续采样不可用或 RSS-only fallback，则只记录 warning，不提前杀掉托管服务。
 - 正常情况下服务 `/health` 返回 ready，未触发 watchdog 时不影响 Start/Stop 基本能力。
 
 ### TC-ASPB-08 长音频逐 chunk 切片且可中断
@@ -510,21 +510,56 @@
 - 如果两边文本不同，日志包含 `ASR compare strategy produced different text hashes`，metadata 中可以通过 `text_sha1` 对照具体 chunk。
 - 最终 transcript 采用 fork canonical 输出，不被 shadow server 输出覆盖。
 
-### TC-ASPB-21 reuse_per_file 服务死亡后自动切到 fork_per_chunk
+### TC-ASPB-21 reuse_per_file 服务死亡后当前 chunk 降级并自动重启 server
 
 操作步骤：
 
 1. 启动 Bifrost，创建或复用一个 `runtime_strategy=reuse_per_file` 的真实目录任务。
 2. 在任务处理长音频时触发或模拟 file-scoped `asr-server` 死亡：例如降低 `BIFROST_ASR_MAX_FOOTPRINT_MB` 后运行 1.7B 长音频，或在 chunk 运行中终止当前 `asr-server` 进程。
-3. 继续观察任务日志、任务详情、`BIFROST_DATA_DIR/asr/tasks/<task_id>/files.json` 和单文件 metadata JSON。
+3. 继续观察任务日志、任务详情、`BIFROST_DATA_DIR/asr/tasks/<task_id>/files.json` 和单文件 metadata JSON，重点确认失败 chunk 的 fork 处理完成后才出现下一次 managed server restart。
 
 预期结果：
 
 - 日志先记录失败的 `reuse_server` chunk metric，包含原 `server_url` 和连接/服务错误。
-- 同一个 chunk 会立即以 `fork_per_chunk` 重试，并记录 `fallback_reason`：`reuse_per_file strategy transport failure; switching remaining chunks to fork_per_chunk: ...` 或 `reuse_per_file strategy server failure; ...`。
-- 同一文件后续 chunk 不再继续请求死掉的 `server_url`，而是全部走 `fork_per_chunk`。
+- 同一个 chunk 会立即以 `fork_per_chunk` 重试，并记录 `fallback_reason`：`reuse_per_file strategy transport failure; retrying current chunk via fork_per_chunk and scheduling managed ASR server restart for later chunks: ...` 或 `reuse_per_file strategy server failure; ...`。
+- 同一文件后续 server-eligible chunk 不再继续请求死掉的 `server_url`；后端先停止 stale managed service state，再同步启动新的 `asr-server` 和新端口，成功后后续 chunk 回到 `reuse_server` metric。
+- 如果重启失败，当前 chunk 只降级一次为 `fork_per_chunk`，`restart_required` 保留，下一次 server-eligible chunk 再重试重启。
+- 日志顺序必须体现串行资源占用：当前 chunk 的 fork fallback 完成后，才出现 `restarting managed ASR server before next chunk after prior server failure` / `managed ASR server restarted for later chunk`；不得在 fork/native chunk 运行期间并发启动 server。
 - 任务不因为单次 `asr-server` watchdog kill 产生连续大量 connect-failed chunks；如果 fork/bisect 仍失败，才以真实 chunk 错误记录 `failed_chunks`。
-- 任务详情和 metadata 保留两类证据：server 失败 metric 与 fork 恢复 metric，便于判断该策略是否适合当前机器和音频。
+- 任务详情和 metadata 保留三类证据：server 失败 metric、当前 chunk 的 fork 恢复 metric、后续新 `server_url` 的 server 成功 metric，便于判断该策略是否适合当前机器和音频。
+
+### TC-ASPB-21B reuse_server 跨文件复用失败后重启 task-scoped server
+
+操作步骤：
+
+1. 准备一个包含至少 2 个音频文件的 ASR Directory Task，并显式设置 `runtime_strategy=reuse_server`。
+2. 在第 1 个文件的第 1 个 chunk 触发或模拟 task-scoped `asr-server` 传输失败，例如让 managed server URL 指向已拒绝连接的端口，或在第 1 个 chunk 请求前终止该 task-scoped `asr-server`。
+3. 继续观察第 1 个文件后续 chunk 和第 2 个文件的 chunk metric、`fallback_reason` 与 `files.json`。
+4. 可用单元测试 `cargo test -p bifrost-admin reuse_server_fallback_schedules_restart_for_later_chunks --lib` 覆盖无需真实模型的回归路径。
+
+预期结果：
+
+- 第 1 个失败 chunk 先记录 `runner=reuse_server`、`status=error`、原始 `server_url` 和连接错误；随后同一 chunk 立即以 `runner=fork_per_chunk` 重试。
+- task-scoped recovery 状态被保存在同一次 run 的共享 `ServerRunnerState` 中，`fallback_reason` 为 `reuse_server strategy transport failure; retrying current chunk via fork_per_chunk and scheduling managed ASR server restart for later chunks: ...` 或 `reuse_server strategy server failure; ...`。
+- 后续 chunk 和后续文件不再重新请求同一个死掉的 task-scoped `server_url`；在没有 fork/native chunk 正在运行时，后端同步重启 task-scoped managed server 并使用新的 `server_url`。
+- 重启成功后，后续 chunk metric 回到 `runner=reuse_server`，`server_url` 为新端口且该成功 metric 不带旧 chunk 的 `fallback_reason`；重启失败时只当前 chunk 走 `fork_per_chunk`，下一次 server-eligible chunk 继续尝试重启。
+- `files.json` 和任务详情中的 `chunk_metrics` 足以区分首次 server 失败 metric 与后续 fork fallback metric，不会把整批慢处理误归因为 memory-limit exceedance。
+
+### TC-ASPB-21C watchdog 不因 physical footprint unavailable 误杀 asr-server
+
+操作步骤：
+
+1. 执行单元测试 `cargo test -p bifrost-admin service_watchdog_kills_only_on_reliable_physical_footprint_over_limit --lib`。
+2. 准备或模拟一个 `read_process_footprint_bytes` 返回 RSS fallback、`reliable=false` 且 RSS 高于模型阈值的场景。
+3. 观察 watchdog 决策与日志文案。
+4. 再准备一个可靠 physical footprint 样本高于模型阈值的场景作为对照。
+
+预期结果：
+
+- 当 `reliable=false` 时，watchdog 只记录 `physical footprint unavailable` / RSS-only advisory warning，不调用 kill，不清理 managed service state。
+- 当采样过程报错但进程仍存活时，连续失败只记录 warning，不杀掉 server。
+- 只有 `reliable=true` 且 physical footprint 明确超过模型阈值时，watchdog 才终止 `asr-server`。
+- 这避免一次采样不可用导致服务死亡，并减少后续 chunk 由于连接 dead server 而集体降级的概率。
 
 ### TC-ASPB-22 failed chunks 重试成功后刷新所有派生产物
 
@@ -937,6 +972,9 @@ rm -rf ./.bifrost-test-planb
 
 | 日期 | 用例 | 命令 / 操作 | 结果 |
 | --- | --- | --- | --- |
+| 2026-05-22 | TC-ASPB-21C watchdog 不因 physical footprint unavailable 误杀 asr-server | `cargo test -p bifrost-admin service_watchdog_kills_only_on_reliable_physical_footprint_over_limit --lib` | PASS：测试断言只有 `reliable=true` 且 footprint 超过阈值才触发 kill；RSS-only fallback 即使数值高于阈值也不触发 kill，等于阈值也不触发 kill。代码复核确认连续 `physical footprint unavailable` 或 sampler error 只写 warning 并继续，不清理 managed service state。 |
+| 2026-05-22 | TC-ASPB-21 reuse_per_file 服务死亡后当前 chunk 降级并自动重启 server | `cargo test -p bifrost-admin restart_failure_forks_only_current_chunk_and_keeps_retry_pending --lib` | PASS：测试模拟 managed server restart 失败后设置一次性 fork reason，即使 `server_url` 指向可成功的 test server，本 chunk 仍只走 `fork_per_chunk` 且没有 shadow server metric；状态保持 `restart_required=true`、`force_fork_for_remaining=false`，证明不会在 native/fork fallback 同时尝试 server 请求或重启，下一次 server-eligible chunk 才继续重启。 |
+| 2026-05-22 | TC-ASPB-21B reuse_server 跨文件复用失败后重启 task-scoped server | `cargo test -p bifrost-admin reuse_server_fallback_schedules_restart_for_later_chunks --lib` | PASS：测试模拟 task-scoped `reuse_server` 首个 chunk 连接失败后立即 fork fallback，断言共享 `ServerRunnerState.restart_required=true`、`force_fork_for_remaining=false` 且 `fallback_reason` 持久化；随后模拟 managed server 重启到 `test-ok:*` 并清除 restart flag，第二个 chunk 重新走 `reuse_server`、使用新 `server_url` 且不携带旧 fallback reason，证明后续 chunk/文件不会永久退化。 |
 | 2026-05-22 | TC-ASPB-10 / TC-ASPB-11 / TC-ASPB-39 | `bash e2e-tests/tests/test_asr_task_pause_resume.sh` | PASS：长期暂停使用 `pause?mode=long_term` 后 `pause_mode=long_term`、`next_run_at_ms=null`，paused 状态手动 Run 返回 409；临时暂停使用 `pause?mode=temporary` 后 `pause_mode=temporary` 且 `next_run_at_ms` 非空，将调度时间置为过去后 scheduler 自动清除 paused 并完成空目录后台 run；Resume 空目录任务仍快速进入后台并恢复 Ready |
 | 2026-05-18 | TC-ASPB-01 / TC-ASPB-07A / TC-ASPB-07B / TC-ASPB-10 / TC-ASPB-13 | `cargo test -p bifrost-admin asr_cli_invoke --lib`；`cargo test -p bifrost-admin asr_jobs --lib` | PASS：10 个 `asr_cli_invoke` 测试通过，覆盖模型感知 footprint 阈值、`vmmap` 单位解析、physical-footprint 采样间隔边界和 abort check kill 长跑 CLI 子进程；43 个 `asr_jobs` 测试通过，覆盖 force-pause 查询参数、force-pause 必须结合持久 paused 状态、memory-limit event 合并为 root chunk hint、30 秒 chunk/timeline 回归、可中断 ffmpeg 和 normalize/split timeout |
 | 2026-05-18 | TC-ASPB-14 真实 30 分钟 CLI 性能基准 | `cargo build --bin bifrost`；`/usr/bin/time -p target/debug/bifrost ai asr stream-file ~/Downloads/we/TX01_MIC007_20260514_183241_orig.wav --model Qwen3-ASR-1.7B --language chinese >/tmp/bifrost-asr-cli-bench-grace-20260518155114.jsonl 2>/tmp/bifrost-asr-cli-bench-grace-20260518155114.err`；`ps -axo ... | rg 'qwen3_asr_rs/asr|target/debug/bifrost ai asr stream-file'` | PASS：stderr 显示 `Split into 65 chunks (30s each, 2s overlap)`；1801s audio 处理为 65 chunks，内部统计 `210.2s total, RTF=0.117`，`/usr/bin/time` wall time `real 216.77`，低于 5 分钟目标；修复前旧逻辑同样 30s 窗口但第 1 个 chunk 因立即 `vmmap -summary` 采样从 3.5s 膨胀到 9.9s，现已通过首采样 grace 修复；结束后未发现遗留 ASR 子进程 |

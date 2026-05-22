@@ -244,9 +244,10 @@ async fn run_directory_task(
     }
 
     let target = target_from_query(Some(&format!(
-        "language={}&model={}",
+        "language={}&model={}&owner_module=directory_task&owner_id={}",
         urlencoding::encode(&task.language),
-        urlencoding::encode(&task.model)
+        urlencoding::encode(&task.model),
+        urlencoding::encode(&task.id)
     )))?;
     tracing::info!(
         task_id = %task.id,
@@ -302,6 +303,15 @@ async fn run_directory_task(
             Err(reason) => return Err(reason),
         }
     }
+    let mut task_server_state = server_url.as_ref().map(|url| ServerRunnerState {
+        server_url: url.clone(),
+        baseline_rtf: None,
+        baseline_samples: Vec::new(),
+        force_fork_for_remaining: startup_fallback_reason.is_some(),
+        restart_required: false,
+        fork_once_reason: None,
+        fallback_reason: startup_fallback_reason.clone(),
+    });
 
     let pause_check = || task_pause_requested(&task.id);
     let loop_result = process_pending_files(
@@ -314,6 +324,8 @@ async fn run_directory_task(
         &pending,
         &mut files,
         &pause_check,
+        &mut task_server_state,
+        &mut stop_task_server_after_use,
     )
     .await;
 
@@ -323,7 +335,7 @@ async fn run_directory_task(
             runtime_strategy = task.runtime_strategy.as_str(),
             "stopping ASR managed server after task-scoped runtime strategy"
         );
-        stop_any_managed_service().await;
+        stop_managed_service_for_target(&target).await;
     }
 
     let (processed_now, failed_now) = loop_result?;
@@ -357,8 +369,8 @@ async fn run_directory_task(
 
 fn spawn_directory_task_run_background(task: AsrDirectoryTask) -> Result<(), String> {
     FORCE_PAUSED_TASKS.lock().unwrap().remove(&task.id);
-    let running_guard =
-        RunningTaskGuard::acquire(&task.id).map_err(|_| "ASR task is already running".to_string())?;
+    let running_guard = RunningTaskGuard::acquire(&task.id)
+        .map_err(|_| "ASR task is already running".to_string())?;
 
     let task_id = task.id.clone();
     let task_clone = task.clone();
@@ -472,6 +484,8 @@ async fn process_pending_files(
     pending: &[PathBuf],
     files: &mut FileStore,
     pause_check: &(dyn Fn() -> bool + Send + Sync),
+    task_server_state: &mut Option<ServerRunnerState>,
+    stop_task_server_after_use: &mut bool,
 ) -> Result<(usize, usize), String> {
     let mut processed_now = 0usize;
     let mut failed_now = 0usize;
@@ -586,6 +600,15 @@ async fn process_pending_files(
 
         // Construct a progress callback that updates FileStore on each chunk,
         // so the WebUI can show live chunk-level progress.
+        let mut file_server_state = file_server_url.as_ref().map(|url| ServerRunnerState {
+            server_url: url.clone(),
+            baseline_rtf: None,
+            baseline_samples: Vec::new(),
+            force_fork_for_remaining: startup_fallback_reason.is_some(),
+            restart_required: false,
+            fork_once_reason: None,
+            fallback_reason: startup_fallback_reason.map(str::to_string),
+        });
         let chunk_progress_cb = {
             let task_id = task.id.clone();
             let key = key.clone();
@@ -672,25 +695,71 @@ async fn process_pending_files(
             }
         };
 
-        match transcribe_file_for_task_with_wav(
-            task,
-            asr_bin,
-            model_path,
-            path,
-            &wav_path,
-            &source_info,
-            TaskTranscribeHooks {
-                on_chunk_progress: Some(&chunk_progress_cb),
-                on_chunk_metric: Some(&chunk_metric_cb),
-                pause_check: Some(pause_check),
-                force_pause_task_id: Some(&task.id),
-                memory_limit_hints: &existing_memory_limit_hints,
-                server_url: file_server_url.as_deref(),
-                startup_fallback_reason,
-            },
-        )
-        .await
-        {
+        let use_task_lifetime_server = task.runtime_strategy.uses_task_lifetime_server();
+        let transcription_result = if use_task_lifetime_server {
+            transcribe_file_for_task_with_wav(
+                task,
+                asr_bin,
+                model_path,
+                path,
+                &wav_path,
+                &source_info,
+                TaskTranscribeHooks {
+                    on_chunk_progress: Some(&chunk_progress_cb),
+                    on_chunk_metric: Some(&chunk_metric_cb),
+                    pause_check: Some(pause_check),
+                    force_pause_task_id: Some(&task.id),
+                    memory_limit_hints: &existing_memory_limit_hints,
+                    server_url: file_server_url.as_deref(),
+                    startup_fallback_reason,
+                    server_state: Some(task_server_state),
+                    managed_server_restart: Some(ManagedServerRestartContext {
+                        task,
+                        target,
+                        scope: "task",
+                        stop_after_use: &mut *stop_task_server_after_use,
+                    }),
+                },
+            )
+            .await
+        } else {
+            transcribe_file_for_task_with_wav(
+                task,
+                asr_bin,
+                model_path,
+                path,
+                &wav_path,
+                &source_info,
+                TaskTranscribeHooks {
+                    on_chunk_progress: Some(&chunk_progress_cb),
+                    on_chunk_metric: Some(&chunk_metric_cb),
+                    pause_check: Some(pause_check),
+                    force_pause_task_id: Some(&task.id),
+                    memory_limit_hints: &existing_memory_limit_hints,
+                    server_url: file_server_url.as_deref(),
+                    startup_fallback_reason,
+                    server_state: Some(&mut file_server_state),
+                    managed_server_restart: Some(ManagedServerRestartContext {
+                        task,
+                        target,
+                        scope: "file",
+                        stop_after_use: &mut stop_file_server_after_use,
+                    }),
+                },
+            )
+            .await
+        };
+        let fallback_reason_after_transcription = if use_task_lifetime_server {
+            task_server_state
+                .as_ref()
+                .and_then(|state| state.fallback_reason.clone())
+        } else {
+            file_server_state
+                .as_ref()
+                .and_then(|state| state.fallback_reason.clone())
+        };
+
+        match transcription_result {
             Ok(output) => {
                 let mut record = file_record_from_info(&task.id, path, &source_info);
                 record.memory_limit_hints = merge_memory_limit_hints(
@@ -699,7 +768,9 @@ async fn process_pending_files(
                 );
                 record.runtime_strategy = task.runtime_strategy;
                 record.chunk_metrics = output.chunk_metrics;
-                record.fallback_reason = output.fallback_reason;
+                record.fallback_reason = output
+                    .fallback_reason
+                    .or_else(|| fallback_reason_after_transcription.clone());
                 record.started_at_ms = Some(file_started_at_ms);
                 // If some chunks failed, mark as partial_success instead of success.
                 if output.failed_chunks.is_empty() {
@@ -743,7 +814,7 @@ async fn process_pending_files(
                         runtime_strategy = task.runtime_strategy.as_str(),
                         "stopping ASR managed server after file-scoped runtime strategy"
                     );
-                    stop_any_managed_service().await;
+                    stop_managed_service_for_target(target).await;
                 }
                 save_file_store(&task.id, files)?;
                 return Err(error);
@@ -752,7 +823,9 @@ async fn process_pending_files(
                 let mut record = file_record_from_info(&task.id, path, &source_info);
                 record.memory_limit_hints = existing_memory_limit_hints.clone();
                 record.runtime_strategy = task.runtime_strategy;
-                record.fallback_reason = startup_fallback_reason.map(str::to_string);
+                record.fallback_reason = fallback_reason_after_transcription
+                    .clone()
+                    .or_else(|| startup_fallback_reason.map(str::to_string));
                 record.status = FileStatus::Failed;
                 record.started_at_ms = Some(file_started_at_ms);
                 record.error = Some(error);
@@ -770,7 +843,7 @@ async fn process_pending_files(
                 runtime_strategy = task.runtime_strategy.as_str(),
                 "stopping ASR managed server after file-scoped runtime strategy"
             );
-            stop_any_managed_service().await;
+            stop_managed_service_for_target(target).await;
         }
         // Clean up the temp dir BEFORE propagating save errors, so that a
         // save_file_store failure does not leak the normalize temp directory.
@@ -790,7 +863,7 @@ async fn transcribe_file_for_task_with_wav(
     path: &Path,
     wav: &Path,
     source_info: &SourceAudioInfo,
-    hooks: TaskTranscribeHooks<'_>,
+    mut hooks: TaskTranscribeHooks<'_>,
 ) -> Result<TranscriptionOutput, String> {
     let temp = tempfile::tempdir().map_err(|error| format!("create temp dir: {error}"))?;
 
@@ -829,6 +902,8 @@ async fn transcribe_file_for_task_with_wav(
             task.runtime_strategy,
             hooks.server_url,
             hooks.startup_fallback_reason,
+            hooks.server_state,
+            hooks.managed_server_restart,
             hooks.on_chunk_metric,
         )
         .await?;
@@ -843,13 +918,27 @@ async fn transcribe_file_for_task_with_wav(
         if hooks.pause_check.is_some_and(|check| check()) {
             return Err(ASR_TASK_PAUSED_MESSAGE.to_string());
         }
-        let mut server_state = hooks.server_url.map(|url| ServerRunnerState {
-            server_url: url.to_string(),
-            baseline_rtf: None,
-            baseline_samples: Vec::new(),
-            force_fork_for_remaining: hooks.startup_fallback_reason.is_some(),
-            fallback_reason: hooks.startup_fallback_reason.map(str::to_string),
-        });
+        let mut local_server_state;
+        let server_state = if let Some(server_state) = hooks.server_state {
+            server_state
+        } else {
+            local_server_state = hooks.server_url.map(|url| ServerRunnerState {
+                server_url: url.to_string(),
+                baseline_rtf: None,
+                baseline_samples: Vec::new(),
+                force_fork_for_remaining: hooks.startup_fallback_reason.is_some(),
+                restart_required: false,
+                fork_once_reason: None,
+                fallback_reason: hooks.startup_fallback_reason.map(str::to_string),
+            });
+            &mut local_server_state
+        };
+        prepare_managed_server_for_chunk(
+            task.runtime_strategy,
+            server_state,
+            hooks.managed_server_restart.as_mut(),
+        )
+        .await;
         let attempt = run_chunk_with_strategy(
             task.runtime_strategy,
             asr_bin,
@@ -861,7 +950,7 @@ async fn transcribe_file_for_task_with_wav(
             0,
             temp.path(),
             hooks.force_pause_task_id,
-            &mut server_state,
+            server_state,
             None,
         )
         .await?;
@@ -879,7 +968,8 @@ async fn transcribe_file_for_task_with_wav(
             Vec::new(),
             chunk_metrics,
             server_state
-                .and_then(|state| state.fallback_reason)
+                .as_ref()
+                .and_then(|state| state.fallback_reason.clone())
                 .or_else(|| hooks.startup_fallback_reason.map(str::to_string)),
         )
     };

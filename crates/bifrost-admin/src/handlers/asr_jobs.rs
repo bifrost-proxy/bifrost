@@ -25,7 +25,7 @@ use nix::unistd::Pid as NixPid;
 
 use crate::asr_runtime::{now_ms, read_service_state, text_output_dir, AsrServiceState};
 use crate::handlers::asr::{
-    start_managed_service, stop_any_managed_service, target_from_query, AsrTarget,
+    start_managed_service, stop_managed_service_for_target, target_from_query, AsrTarget,
 };
 use crate::handlers::asr_cli_invoke::{
     run_asr_cli_with_footprint_guard_and_abort, ASR_ABORTED_ERROR_MARKER,
@@ -39,7 +39,6 @@ use crate::handlers::asr_jobs_timeline::{
     generate_daily_summaries, inspect_source_audio, render_timeline_text, source_modified_ms,
     source_size, SourceAudioInfo, TimelineSegment, TranscriptTimeline,
 };
-use crate::handlers::asr_streaming::call_asr_whole_file_endpoint;
 use crate::handlers::{
     error_response, json_response, json_response_with_status, method_not_allowed, BoxBody,
 };
