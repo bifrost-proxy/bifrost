@@ -110,7 +110,6 @@ local-ip-address = "0.6"
 nix = { version = "0.28", features = ["net", "process", "signal"] }
 
 [dev-dependencies]
-tokio-test = "0.4"
 tempfile.workspace = true
 
 [build-dependencies]

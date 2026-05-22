@@ -13,6 +13,7 @@ NC='\033[0m'
 
 SKIP_E2E=0
 SKIP_STATIC=0
+SKIP_DEPS_AUDIT=0
 E2E_ONLY=""
 RUN_COVERAGE=0
 COVERAGE_FORMAT="text"
@@ -28,6 +29,7 @@ Run this before pushing to avoid CI failures.
 Options:
   --skip-e2e          Skip all E2E tests (only run fmt/clippy/test)
   --skip-static       Skip fmt/clippy/test (only run E2E)
+  --skip-deps-audit   Skip Rust dependency audit (cargo-deny + cargo-udeps)
   --e2e-only TYPE     Run only a specific E2E suite: rules, shell, runner, platform
   --shard N/M         Run only shard N of M for shell E2E (e.g. --shard 1/3)
   --coverage          Run unit-test coverage report after tests
@@ -47,6 +49,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --skip-e2e)     SKIP_E2E=1; shift ;;
     --skip-static)  SKIP_STATIC=1; shift ;;
+    --skip-deps-audit) SKIP_DEPS_AUDIT=1; shift ;;
     --e2e-only)     E2E_ONLY="$2"; shift 2 ;;
     --shard)
       if [[ -z "${2:-}" || ! "$2" =~ ^[0-9]+/[0-9]+$ ]]; then
@@ -134,11 +137,17 @@ if [[ "$SKIP_STATIC" -eq 0 ]]; then
   run_step "cargo fmt (desktop)" cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --all -- --check || HAD_FAILURE=1
   run_step "cargo clippy" cargo clippy --workspace --all-targets --all-features -- -D warnings || HAD_FAILURE=1
   run_step "cargo test (workspace)" cargo test --workspace --all-features || HAD_FAILURE=1
+  if [[ "$SKIP_DEPS_AUDIT" -eq 0 ]]; then
+    run_step "Rust dependency audit" bash scripts/ci/rust-dependency-audit.sh || HAD_FAILURE=1
+  else
+    register_result "Rust dependency audit" "SKIP"
+  fi
 else
   register_result "cargo fmt (workspace)" "SKIP"
   register_result "cargo fmt (desktop)" "SKIP"
   register_result "cargo clippy" "SKIP"
   register_result "cargo test (workspace)" "SKIP"
+  register_result "Rust dependency audit" "SKIP"
 fi
 
 if [[ "$SKIP_E2E" -eq 0 ]]; then

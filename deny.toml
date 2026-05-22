@@ -1,0 +1,7 @@
+[graph]
+all-features = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
