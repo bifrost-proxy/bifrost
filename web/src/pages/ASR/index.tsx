@@ -20,6 +20,9 @@ import {
   resumeAsrTask,
   runAsrExternalImport,
   runAsrTask,
+  saveAsrParams,
+  startAsrService,
+  stopAsrService,
   streamAsrTranscription,
   updateAsrTask,
   type AsrDirectoryTask,
@@ -30,6 +33,7 @@ import {
   type AsrPauseMode,
   type AsrStatus,
   type AsrStreamEvent,
+  type AsrConnectionParams,
   type AsrTaskDailyDocumentDetail,
   type AsrTaskFileRecord,
   type AsrTranscriptTimeline,
@@ -101,6 +105,8 @@ export default function ASR() {
   const [errorText, setErrorText] = useState("");
   const [micLevels, setMicLevels] = useState<number[]>(EMPTY_MIC_LEVELS);
   const [micPeak, setMicPeak] = useState(0);
+  const [workbenchParams, setWorkbenchParams] = useState(() => loadAsrParams());
+  const [serviceBusy, setServiceBusy] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -114,8 +120,23 @@ export default function ASR() {
   const committedTranscriptRef = useRef("");
   const partialTranscriptRef = useRef("");
   const recordingActiveRef = useRef(false);
-  const getCurrentAsrParams = useCallback(() => loadAsrParams(), []);
-  const getCurrentVoiceParams = useCallback(() => loadVoiceRealtimeParams(), []);
+  const getCurrentAsrParams = useCallback(
+    (): AsrConnectionParams => ({
+      ...workbenchParams,
+      ownerModule: "speech_workbench",
+    }),
+    [workbenchParams],
+  );
+  const getCurrentVoiceParams = useCallback(
+    () => ({
+      ...loadVoiceRealtimeParams(),
+      host: workbenchParams.host,
+      language: workbenchParams.language,
+      model: workbenchParams.model,
+      ownerModule: "speech_workbench",
+    }),
+    [workbenchParams],
+  );
 
   const appendEvent = useCallback((line: string) => {
     setEvents((prev) => [...prev.slice(-79), line]);
@@ -316,6 +337,57 @@ export default function ASR() {
       stopMicMeter();
     };
   }, [refreshStatus, refreshTasks, stopMicMeter, stopVoicePcmStreaming]);
+
+  useEffect(() => {
+    saveAsrParams(workbenchParams);
+  }, [workbenchParams]);
+
+  const updateWorkbenchParams = useCallback(
+    (next: Parameters<typeof setWorkbenchParams>[0]) => {
+      setWorkbenchParams((previous) => ({
+        ...(typeof next === "function" ? next(previous) : next),
+        ownerModule: "speech_workbench",
+      }));
+    },
+    [],
+  );
+
+  const startWorkbenchService = useCallback(async () => {
+    setServiceBusy(true);
+    setErrorText("");
+    try {
+      const result = await startAsrService({
+        ...getCurrentAsrParams(),
+        ownerModule: "speech_workbench",
+      });
+      if (!result.ready) {
+        setErrorText(result.detail || result.message);
+      }
+      window.dispatchEvent(new Event(ASR_STATUS_CHANGED_EVENT));
+      await refreshStatus();
+    } catch (error) {
+      setErrorText(error instanceof Error ? error.message : String(error));
+    } finally {
+      setServiceBusy(false);
+    }
+  }, [getCurrentAsrParams, refreshStatus]);
+
+  const stopWorkbenchService = useCallback(async () => {
+    setServiceBusy(true);
+    setErrorText("");
+    try {
+      await stopAsrService({
+        ...getCurrentAsrParams(),
+        ownerModule: "speech_workbench",
+      });
+      window.dispatchEvent(new Event(ASR_STATUS_CHANGED_EVENT));
+      await refreshStatus();
+    } catch (error) {
+      setErrorText(error instanceof Error ? error.message : String(error));
+    } finally {
+      setServiceBusy(false);
+    }
+  }, [getCurrentAsrParams, refreshStatus]);
 
   const handleStreamEvent = useCallback(
     (event: AsrStreamEvent) => {
@@ -719,8 +791,8 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
         recursive: values.recursive,
         enabled: values.enabled,
         schedule: buildTaskSchedule(values),
-        language: getCurrentAsrParams().language,
-        model: getCurrentAsrParams().model,
+        language: values.language,
+        model: values.model,
         runtime_strategy: values.runtime_strategy,
         external_devices: externalDevices,
         import_policy: externalDevices.length
@@ -747,7 +819,7 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
       message.error(error instanceof Error ? error.message : "Failed to create ASR task");
       return false;
     }
-  }, [getCurrentAsrParams, refreshTasks, taskForm]);
+  }, [refreshTasks, taskForm]);
 
   const updateDirectoryTask = useCallback(
     async (id: string) => {
@@ -760,8 +832,8 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
           recursive: values.recursive,
           enabled: values.enabled,
           schedule: buildTaskSchedule(values),
-          language: getCurrentAsrParams().language,
-          model: getCurrentAsrParams().model,
+          language: values.language,
+          model: values.model,
           runtime_strategy: values.runtime_strategy,
           external_devices: externalDevices,
           import_policy: externalDevices.length
@@ -798,7 +870,7 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
         return false;
       }
     },
-    [getCurrentAsrParams, refreshTasks, taskForm],
+    [refreshTasks, taskForm],
   );
 
   const loadTaskDetail = useCallback(async (id: string) => {
@@ -1292,6 +1364,9 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
         token={token}
         ready={ready}
         status={status}
+        params={workbenchParams}
+        onParamsChange={updateWorkbenchParams}
+        serviceBusy={serviceBusy}
         workState={workState}
         progress={progress}
         selectedName={selectedName}
@@ -1306,6 +1381,8 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
         onFile={handleFile}
         onStartRecording={() => void startRecording()}
         onStopRecording={stopRecording}
+        onStartService={() => void startWorkbenchService()}
+        onStopService={() => void stopWorkbenchService()}
         onCancel={cancelWork}
       />
     </div>

@@ -83,9 +83,10 @@ async fn retry_failed_chunks_for_file_locked(
 
     // 2. Resolve ASR binary and model.
     let target = match target_from_query(Some(&format!(
-        "language={}&model={}",
+        "language={}&model={}&owner_module=directory_task&owner_id={}",
         urlencoding::encode(&task.language),
-        urlencoding::encode(&task.model)
+        urlencoding::encode(&task.model),
+        urlencoding::encode(&task.id)
     ))) {
         Ok(t) => t,
         Err(e) => return Err(RetryFileChunksError::Internal(e)),

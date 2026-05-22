@@ -1,9 +1,11 @@
-import type { RefObject } from "react";
+import type { Dispatch, RefObject, SetStateAction } from "react";
 import {
   Alert,
   Button,
   Card,
+  Input,
   Progress,
+  Select,
   Space,
   Tag,
   Typography,
@@ -17,7 +19,7 @@ import {
   StopOutlined,
   UploadOutlined,
 } from "@ant-design/icons";
-import type { AsrStatus } from "../../../api/asr";
+import type { AsrConnectionParams, AsrStatus } from "../../../api/asr";
 import type { WorkState } from "../asrUtils";
 
 const { Text, Paragraph } = Typography;
@@ -26,6 +28,9 @@ interface SpeechWorkbenchProps {
   token: ReturnType<typeof theme.useToken>["token"];
   ready: boolean | undefined;
   status: AsrStatus | null;
+  params: AsrConnectionParams;
+  onParamsChange: Dispatch<SetStateAction<AsrConnectionParams>>;
+  serviceBusy: boolean;
   workState: WorkState;
   progress: number;
   selectedName: string;
@@ -40,6 +45,8 @@ interface SpeechWorkbenchProps {
   onFile: (file: File) => void;
   onStartRecording: () => void;
   onStopRecording: () => void;
+  onStartService: () => void;
+  onStopService: () => void;
   onCancel: () => void;
 }
 
@@ -47,6 +54,9 @@ export default function SpeechWorkbench({
   token,
   ready,
   status,
+  params,
+  onParamsChange,
+  serviceBusy,
   workState,
   progress,
   selectedName,
@@ -61,6 +71,8 @@ export default function SpeechWorkbench({
   onFile,
   onStartRecording,
   onStopRecording,
+  onStartService,
+  onStopService,
   onCancel,
 }: SpeechWorkbenchProps) {
   return (
@@ -75,6 +87,57 @@ export default function SpeechWorkbench({
       }
     >
       <Space direction="vertical" size={16} style={{ width: "100%" }}>
+        <section aria-label="Workbench ASR Service">
+          <Space style={{ marginBottom: 12 }}>
+            <AudioOutlined />
+            <Text strong>Workbench Model and Service</Text>
+          </Space>
+          <Space wrap style={{ width: "100%" }}>
+            <Select
+              aria-label="Workbench ASR model"
+              value={params.model || "Qwen3-ASR-1.7B"}
+              style={{ minWidth: 180 }}
+              options={[
+                { value: "Qwen3-ASR-1.7B", label: "Qwen3-ASR-1.7B" },
+                { value: "Qwen3-ASR-0.6B", label: "Qwen3-ASR-0.6B" },
+              ]}
+              onChange={(model) => onParamsChange((previous) => ({ ...previous, model }))}
+            />
+            <Select
+              aria-label="Workbench ASR language"
+              value={params.language || "chinese"}
+              style={{ minWidth: 140 }}
+              options={[
+                { value: "chinese", label: "Chinese" },
+                { value: "english", label: "English" },
+                { value: "auto", label: "Auto" },
+              ]}
+              onChange={(language) =>
+                onParamsChange((previous) => ({ ...previous, language }))
+              }
+            />
+            <Input
+              aria-label="Workbench ASR host"
+              value={params.host || "127.0.0.1"}
+              style={{ width: 150 }}
+              onChange={(event) =>
+                onParamsChange((previous) => ({ ...previous, host: event.target.value }))
+              }
+            />
+            <Button type="primary" loading={serviceBusy} onClick={onStartService}>
+              Start Service
+            </Button>
+            <Button danger loading={serviceBusy} disabled={!status?.managed} onClick={onStopService}>
+              Stop Service
+            </Button>
+            {status?.server_url ? <Tag>{status.server_url}</Tag> : null}
+          </Space>
+          <Text type="secondary" style={{ display: "block", marginTop: 8 }}>
+            Upload and microphone transcription share this workbench model. Directory Tasks and
+            CLI commands keep their own model selections.
+          </Text>
+        </section>
+
         <section aria-label="Audio Input">
           <Space style={{ marginBottom: 12 }}>
             <AudioOutlined />

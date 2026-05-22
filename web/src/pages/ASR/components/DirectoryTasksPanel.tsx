@@ -482,6 +482,27 @@ export default function DirectoryTasksPanel({
                 </Select>
               </Form.Item>
             </Col>
+            <Col xs={24} md={8}>
+              <Form.Item name="model" label="Task Model">
+                <Select
+                  options={[
+                    { value: "Qwen3-ASR-1.7B", label: "Qwen3-ASR-1.7B" },
+                    { value: "Qwen3-ASR-0.6B", label: "Qwen3-ASR-0.6B" },
+                  ]}
+                />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={8}>
+              <Form.Item name="language" label="Task Language">
+                <Select
+                  options={[
+                    { value: "chinese", label: "Chinese" },
+                    { value: "english", label: "English" },
+                    { value: "auto", label: "Auto" },
+                  ]}
+                />
+              </Form.Item>
+            </Col>
             <Col xs={12} md={8}>
               <Form.Item name="recursive" label="Recursive" valuePropName="checked">
                 <Switch />
@@ -531,6 +552,10 @@ export default function DirectoryTasksPanel({
                 <Text type="secondary" style={{ fontSize: 12 }}>
                   {record.audio_dir}
                 </Text>
+                <Space size={4} wrap>
+                  <Tag>{record.model}</Tag>
+                  <Tag>{record.language}</Tag>
+                </Space>
               </Space>
             ),
           },
@@ -810,6 +835,8 @@ function defaultTaskFormValues() {
     schedule_day: 1,
     schedule_minute: 0,
     runtime_strategy: "reuse_per_file",
+    model: "Qwen3-ASR-1.7B",
+    language: "chinese",
     external_devices: "",
   };
 }
@@ -850,6 +877,8 @@ function taskToFormValues(task: AsrDirectoryTask) {
     audio_dir: task.audio_dir,
     recursive: task.recursive,
     enabled: task.enabled,
+    model: task.model,
+    language: task.language,
     runtime_strategy: task.runtime_strategy,
     external_devices: (task.external_devices ?? []).map((device) => device.name).join("\n"),
   };

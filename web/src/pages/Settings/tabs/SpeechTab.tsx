@@ -18,13 +18,10 @@ import {
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import {
-  defaultAsrParams,
   ASR_STATUS_CHANGED_EVENT,
   getAsrStatus,
-  loadAsrParams,
-  saveAsrParams,
-  startAsrService,
-  stopAsrService,
+  loadModelManagementParams,
+  saveModelManagementParams,
   streamAsrInitialization,
   type AsrConnectionParams,
   type AsrProgressEvent,
@@ -47,14 +44,13 @@ interface DownloadState {
 }
 
 export default function SpeechTab() {
-  const defaults = useMemo(() => defaultAsrParams(), []);
-  const [params, setParams] = useState<AsrConnectionParams>(() => loadAsrParams());
+  const defaults = useMemo(() => loadModelManagementParams(), []);
+  const [params, setParams] = useState<AsrConnectionParams>(() => loadModelManagementParams());
   const [status, setStatus] = useState<AsrStatus | null>(null);
   const [phase, setPhase] = useState<RuntimePhase>("idle");
   const [download, setDownload] = useState<DownloadState | null>(null);
   const [errorText, setErrorText] = useState("");
   const [errorDetail, setErrorDetail] = useState("");
-  const [serviceBusy, setServiceBusy] = useState(false);
   const initAbortRef = useRef<AbortController | null>(null);
 
   const refreshStatus = useCallback(async () => {
@@ -87,7 +83,7 @@ export default function SpeechTab() {
   }, [refreshStatus]);
 
   useEffect(() => {
-    saveAsrParams(params);
+    saveModelManagementParams(params);
   }, [params]);
 
   const handleStreamEvent = useCallback(
@@ -142,47 +138,6 @@ export default function SpeechTab() {
     }
   }, [handleStreamEvent, params]);
 
-  const handleStartService = useCallback(async () => {
-    setServiceBusy(true);
-    setErrorText("");
-    setErrorDetail("");
-    try {
-      const result = await startAsrService(params);
-      if (!result.ready) {
-        setPhase("error");
-        setErrorText(result.message);
-        setErrorDetail(result.detail || "");
-      }
-      window.dispatchEvent(new Event(ASR_STATUS_CHANGED_EVENT));
-      await refreshStatus();
-    } catch (error) {
-      const text = error instanceof Error ? error.message : String(error);
-      setPhase("error");
-      setErrorText("Failed to start Qwen3-ASR model service.");
-      setErrorDetail(text);
-    } finally {
-      setServiceBusy(false);
-    }
-  }, [params, refreshStatus]);
-
-  const handleStopService = useCallback(async () => {
-    setServiceBusy(true);
-    setErrorText("");
-    setErrorDetail("");
-    try {
-      await stopAsrService(params);
-      window.dispatchEvent(new Event(ASR_STATUS_CHANGED_EVENT));
-      await refreshStatus();
-    } catch (error) {
-      const text = error instanceof Error ? error.message : String(error);
-      setPhase("error");
-      setErrorText("Failed to stop Qwen3-ASR model service.");
-      setErrorDetail(text);
-    } finally {
-      setServiceBusy(false);
-    }
-  }, [params, refreshStatus]);
-
   const statusTag = useMemo(() => {
     if (phase === "running" || phase === "checking") {
       return <Tag color="processing">Initializing</Tag>;
@@ -214,7 +169,7 @@ export default function SpeechTab() {
         title={
           <Space>
             <ThunderboltOutlined />
-            <span>Speech Converter</span>
+            <span>Model Management</span>
             {statusTag}
           </Space>
         }
@@ -237,21 +192,6 @@ export default function SpeechTab() {
                 </Button>
               )
             ) : null}
-            <Button
-              onClick={handleStartService}
-              loading={serviceBusy}
-              disabled={unsupported || phase === "running" || status?.ready}
-            >
-              Start Service
-            </Button>
-            <Button
-              danger
-              onClick={handleStopService}
-              loading={serviceBusy}
-              disabled={!status?.managed}
-            >
-              Stop Service
-            </Button>
           </Space>
         }
       >
@@ -259,8 +199,8 @@ export default function SpeechTab() {
           type="info"
           showIcon
           style={{ marginBottom: 16 }}
-        message="ASR runs as a Bifrost-managed local model service."
-        description="Initialization prepares files under ~/.bifrost/asr. Start Service dynamically selects a free local port and keeps the model service alive only while needed. It may need external network access for the native qwen3_asr_rs runtime on GitHub and Qwen model weights on Hugging Face; if either source is unreachable, the exact download or startup error is shown below."
+          message="ASR model assets are shared by all ASR entry points."
+          description="Initialization prepares files under ~/.bifrost/asr. This panel only downloads and initializes model assets; the Speech Workbench, Directory Tasks, and CLI each choose their own model and lease the shared ASR service independently."
         />
         {unsupported ? (
           <Alert
@@ -277,16 +217,7 @@ export default function SpeechTab() {
             showIcon
             style={{ marginBottom: 16 }}
             message="ffmpeg will be prepared during ASR self-check."
-            description="Initialize or Start Service will try to install ffmpeg with Homebrew. If automatic installation is unavailable, the error will include the manual install command and you can retry the same action afterward."
-          />
-        ) : null}
-        {status?.ready && !status.managed ? (
-          <Alert
-            type="warning"
-            showIcon
-            style={{ marginBottom: 16 }}
-            message="A Qwen3-ASR server is reachable but not managed by this Bifrost process."
-            description="Stop Service can only stop services started from this panel. To release resources, stop the external asr-server process or restart it with Start Service here."
+            description="Initialize will try to install ffmpeg with Homebrew when needed. If automatic installation is unavailable, the error will include the manual install command and you can retry initialization afterward."
           />
         ) : null}
         <Row gutter={[16, 16]}>
@@ -297,7 +228,7 @@ export default function SpeechTab() {
           <Col xs={24} md={8}>
             <Text type="secondary">Service Port</Text>
             <Input
-              value={status?.ready ? status.server_url : "Auto-select on Start Service"}
+              value={status?.ready ? status.server_url : "No service leased by model management"}
               disabled
             />
           </Col>

@@ -51,6 +51,135 @@ fn daily_agent_prompt_uses_file_list_for_file_capable_runners() {
     assert!(chatgpt_next.contains("今日新增转写内容"));
 }
 
+#[tokio::test]
+async fn reuse_server_fallback_schedules_restart_for_later_chunks() {
+    let temp = TempDir::new().unwrap();
+    let chunk_path = temp.path().join("chunk.wav");
+    std::fs::write(&chunk_path, make_wav(&[500i16; 16_000])).unwrap();
+
+    let mut server_state = Some(ServerRunnerState {
+        server_url: "test-error:connection refused by watchdog".to_string(),
+        baseline_rtf: None,
+        baseline_samples: Vec::new(),
+        force_fork_for_remaining: false,
+        restart_required: false,
+        fork_once_reason: None,
+        fallback_reason: None,
+    });
+
+    let first = run_chunk_with_strategy(
+        AsrRuntimeStrategy::ReuseServer,
+        Path::new("/nonexistent/asr"),
+        Path::new("/nonexistent/model"),
+        "chinese",
+        &chunk_path,
+        0,
+        1,
+        0,
+        temp.path(),
+        None,
+        &mut server_state,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let fallback_reason = server_state
+        .as_ref()
+        .and_then(|state| state.fallback_reason.as_deref())
+        .map(str::to_string)
+        .unwrap();
+    assert!(server_state
+        .as_ref()
+        .is_some_and(|state| !state.force_fork_for_remaining && state.restart_required));
+    assert!(fallback_reason.contains("reuse_server strategy transport failure"));
+    assert_eq!(first.metric.runner, "fork_per_chunk");
+    assert_eq!(
+        first.metric.fallback_reason.as_deref(),
+        Some(fallback_reason.as_str())
+    );
+    assert_eq!(first.shadow_metrics.len(), 1);
+    assert_eq!(first.shadow_metrics[0].runner, "reuse_server");
+    assert_eq!(first.shadow_metrics[0].status, "error");
+
+    if let Some(state) = server_state.as_mut() {
+        state.server_url = "test-ok:restarted-server".to_string();
+        state.restart_required = false;
+        state.fork_once_reason = None;
+    }
+    let second = run_chunk_with_strategy(
+        AsrRuntimeStrategy::ReuseServer,
+        Path::new("/nonexistent/asr"),
+        Path::new("/nonexistent/model"),
+        "chinese",
+        &chunk_path,
+        1,
+        1,
+        1,
+        temp.path(),
+        None,
+        &mut server_state,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(second.metric.runner, "reuse_server");
+    assert_eq!(second.metric.status, "ok");
+    assert_eq!(second.metric.server_url.as_deref(), Some("test-ok:restarted-server"));
+    assert_eq!(second.metric.fallback_reason.as_deref(), None);
+    assert!(second.shadow_metrics.is_empty());
+}
+
+#[tokio::test]
+async fn restart_failure_forks_only_current_chunk_and_keeps_retry_pending() {
+    let temp = TempDir::new().unwrap();
+    let chunk_path = temp.path().join("chunk.wav");
+    std::fs::write(&chunk_path, make_wav(&[500i16; 16_000])).unwrap();
+
+    let mut server_state = Some(ServerRunnerState {
+        server_url: "test-ok:must-not-be-called-during-fork-once".to_string(),
+        baseline_rtf: None,
+        baseline_samples: Vec::new(),
+        force_fork_for_remaining: false,
+        restart_required: true,
+        fork_once_reason: Some(
+            "reuse_per_file strategy managed ASR server restart failed; retrying current chunk via fork_per_chunk"
+                .to_string(),
+        ),
+        fallback_reason: None,
+    });
+
+    let attempt = run_chunk_with_strategy(
+        AsrRuntimeStrategy::ReusePerFile,
+        Path::new("/nonexistent/asr"),
+        Path::new("/nonexistent/model"),
+        "chinese",
+        &chunk_path,
+        0,
+        1,
+        0,
+        temp.path(),
+        None,
+        &mut server_state,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(attempt.metric.runner, "fork_per_chunk");
+    assert!(attempt.shadow_metrics.is_empty());
+    assert!(attempt
+        .metric
+        .fallback_reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("managed ASR server restart failed")));
+    let state = server_state.as_ref().unwrap();
+    assert!(state.restart_required);
+    assert!(!state.force_fork_for_remaining);
+    assert!(state.fork_once_reason.is_none());
+}
+
 #[test]
 fn daily_agent_report_gate_requires_report_before_processed_state() {
     let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
@@ -255,7 +384,10 @@ fn daily_agent_records_are_returned_newest_date_first() {
     let records = build_daily_agent_records(task_id, &processed);
 
     assert_eq!(
-        records.iter().map(|record| record.date.as_str()).collect::<Vec<_>>(),
+        records
+            .iter()
+            .map(|record| record.date.as_str())
+            .collect::<Vec<_>>(),
         vec!["2026-05-16", "2026-05-15", "2026-05-14"]
     );
 }

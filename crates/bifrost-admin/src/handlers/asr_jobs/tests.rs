@@ -122,6 +122,7 @@ mod tests {
             server_failure_fallback_reason(AsrRuntimeStrategy::ReusePerFile, connect_error);
         assert!(reason.contains("reuse_per_file strategy transport failure"));
         assert!(reason.contains("fork_per_chunk"));
+        assert!(reason.contains("scheduling managed ASR server restart"));
 
         let http_error = "status: 500 Internal Server Error; model panic";
         assert!(!is_server_transport_failure(http_error));
