@@ -511,11 +511,45 @@
 - 持续静音路径不输出 `asr_partial` / `asr_stable_delta`，Finish final 为空，证明卸载后不会被静音反复拉起。
 - 拆分后的 `voice/mod.rs`、`audio.rs`、`sources.rs`、`vocabulary.rs`、`voice_stateful.rs` 任一文件均小于 1500 行。
 
+### TC-VIR-19 stateful worker stdout 日志污染回归
+
+操作步骤：
+
+1. 执行 stateful worker IPC 单测，覆盖 stdout 先出现 ANSI tracing 日志、后出现 ready JSON 的场景：
+   ```bash
+   cargo test -p bifrost-admin voice_stateful --lib
+   ```
+2. 执行 CLI 隐藏 worker 日志隔离单测，确认 `ai voice worker` 即使全局传入 `--log-output console` 也会强制使用文件日志，stdout 只留给 JSONL IPC：
+   ```bash
+   cargo test -p bifrost-cli voice_worker_forces_logs_away_from_stdout_protocol --bin bifrost
+   ```
+3. 在有 `Qwen3-ASR-0.6B` 资源的本机执行真实实时文件源 smoke，确认 `qwen3_asr` 初始化日志不会再导致 `parse stateful ASR worker response`：
+   ```bash
+   BIFROST_DATA_DIR=/tmp/bifrost-voice-worker-log-data \
+     cargo run --bin bifrost -- start -p 18941 --unsafe-ssl --no-system-proxy --skip-cert-check
+   BIFROST_DATA_DIR=/tmp/bifrost-voice-worker-log-cli \
+     cargo run --quiet --bin bifrost -- -p 18941 ai voice listen \
+     --source file \
+     --input-file "$HOME/.bifrost/asr/qwen3_asr_rs/sample3.wav" \
+     --duration 3 \
+     --model Qwen3-ASR-0.6B \
+     --provider qwen3_stateful_streaming \
+     --language chinese \
+     --format jsonl
+   ```
+
+预期结果：
+
+- Worker stdout 中出现非 JSON 日志行时，父进程跳过日志并继续等待 JSON response，不再把日志行当成协议错误。
+- Hidden worker 的 console logging 被强制关闭，`qwen3_asr` 的 `Using Metal device` 类日志不进入 stdout。
+- 真实 realtime smoke 不再出现 `voice stateful ASR is not ready` / `parse stateful ASR worker response`，并输出 `connected/source_ready/asr_partial/asr_final_utterance/done`。
+
 ## 清理步骤
 
 ```bash
 rm -rf /tmp/bifrost-voice-web.* /tmp/bifrost-voice-cli.* /tmp/bifrost-voice-helper.* \
-  /tmp/bifrost-voice-boundary-* /tmp/bifrost-voice-terms.txt
+  /tmp/bifrost-voice-boundary-* /tmp/bifrost-voice-worker-log-data \
+  /tmp/bifrost-voice-worker-log-cli /tmp/bifrost-voice-terms.txt
 ```
 
 如测试中开启了 debug audio dump，必须删除对应路径并确认后续默认关闭。
@@ -537,3 +571,4 @@ rm -rf /tmp/bifrost-voice-web.* /tmp/bifrost-voice-cli.* /tmp/bifrost-voice-help
 | 2026-05-21 | TC-VIR-17 partial/stable/final 提交边界与 worker 回收回归 | `cargo test -p bifrost-admin voice --lib`；`npm --prefix web run test:unit -- asr.test.ts asrUtils.test.ts`；`BIFROST_VOICE_E2E_PORT=18887 e2e-tests/tests/test_voice_input_runtime.sh`；生成 `/tmp/bifrost-voice-boundary-test.wav`；`BIFROST_DATA_DIR=/tmp/bifrost-voice-boundary-data cargo run --bin bifrost -- start -p 18900 --unsafe-ssl --no-system-proxy --skip-cert-check`；`cargo run --quiet --bin bifrost -- -p 18900 ai voice listen --source file --input-file /tmp/bifrost-voice-boundary-test.wav --duration 5 --model Qwen3-ASR-0.6B --provider qwen3_stateful_streaming --language english --format jsonl`；`ps` 检查 worker | PASS：`asr_partial` 阶段 `committed` 保持空/稳定且 `detail` 标记 `stable=false`；静音后输出 `asr_stable_delta`，`detail` 包含 `reason=silence; stable=true` 并提交完整文本；Finish 后输出 `asr_final_utterance` 和 `done`，final 不重复追加已提交文本；listen 结束后没有残留 `bifrost ai voice worker` 子进程；旧测试遗留的 orphan `asr-server` 已清理，避免进程数和内存判断被污染 |
 | 2026-05-21 | TC-VIR-18 worker IPC 超时、最长 utterance、idle unload 与静音回归 | `cargo test -p bifrost-admin voice_stateful --lib`；`cargo test -p bifrost-admin voice --lib`；`BIFROST_VOICE_E2E_PORT=18887 e2e-tests/tests/test_voice_input_runtime.sh`；`wc -l crates/bifrost-admin/src/handlers/voice/mod.rs crates/bifrost-admin/src/handlers/voice/audio.rs crates/bifrost-admin/src/handlers/voice/sources.rs crates/bifrost-admin/src/handlers/voice/vocabulary.rs crates/bifrost-admin/src/handlers/voice_stateful.rs` | PASS：worker startup/feed/finish hung 单测均在超时后返回 `timed out` / `worker unloaded` 并 kill 测试子进程；Voice runtime 单测覆盖可缩短的 max utterance、silence commit、idle unload；E2E 使用 fake stateful worker 断言 `reason=max_utterance_duration`、`worker_idle_unloaded`、silence 后 final committed 保持完整、持续静音不输出 transcript；拆分后文件行数分别为 1391 / 181 / 144 / 80 / 569，均小于 1500 |
 | 2026-05-21 | TC-VIR-18 rebase 后 worker liveness/runtime boundary 复核 | `git rebase origin/main`；`cargo test -p bifrost-admin voice_stateful --lib`；`cargo test -p bifrost-admin voice --lib`；`BIFROST_VOICE_E2E_PORT=18887 e2e-tests/tests/test_voice_input_runtime.sh` | PASS：rebase 到 `origin/main` 后 worker startup/feed/finish hung timeout 单测 3/3 通过；Voice runtime 单测 13/13 通过；E2E 再次断言 max utterance、idle unload、silence final 保持 committed、持续静音不输出 transcript，确认 TC-VIR-18 语义在主干更新后仍保留 |
+| 2026-05-21 | TC-VIR-19 stateful worker stdout 日志污染回归 | `cargo test -p bifrost-admin voice_stateful --lib`；`cargo test -p bifrost-cli voice_worker_forces_logs_away_from_stdout_protocol --bin bifrost`；`BIFROST_DATA_DIR=/tmp/bifrost-voice-worker-log-data cargo run --bin bifrost -- start -p 18941 --unsafe-ssl --no-system-proxy --skip-cert-check`；`BIFROST_DATA_DIR=/tmp/bifrost-voice-worker-log-cli cargo run --quiet --bin bifrost -- -p 18941 ai voice listen --source file --input-file ~/.bifrost/asr/qwen3_asr_rs/sample3.wav --duration 3 --model Qwen3-ASR-0.6B --provider qwen3_stateful_streaming --language chinese --format jsonl` | PASS：新增 `worker_stdout_log_lines_are_ignored_before_json_response` 覆盖 `qwen3_asr: Using Metal device` 这类 ANSI stdout 日志先于 JSON ready 的路径，父进程跳过非 JSON 行后成功读取 `ready`；隐藏 `ai voice worker` 即使解析到 `--log-output console` 也强制 `LogOutput::File`，stdout 只留给 JSONL IPC；真实 0.6B smoke 输出 `connected/source_ready/asr_partial/asr_final_utterance/done`，不再出现 `voice stateful ASR is not ready` 或 `parse stateful ASR worker response`。 |

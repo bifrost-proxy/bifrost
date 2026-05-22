@@ -30,20 +30,28 @@ fn update_task_after_run(id: &str, error: Option<String>) -> Result<AsrDirectory
     task.last_run_at_ms = Some(now);
     task.updated_at_ms = now;
     task.last_error = error;
-    task.next_run_at_ms = task
-        .enabled
-        .then_some(())
-        .filter(|_| !task.paused)
-        .and_then(|_| {
-            task.schedule
-                .next_run_at_ms(now.saturating_add(60_000), false)
-        });
+    task.next_run_at_ms = if !task.enabled {
+        None
+    } else if task.paused {
+        task.next_run_at_ms
+    } else {
+        task.schedule
+            .next_run_at_ms(now.saturating_add(60_000), false)
+    };
     let updated = task.clone();
     save_tasks(&store)?;
     Ok(updated)
 }
 
 fn update_task_paused(id: &str, paused: bool) -> Result<AsrDirectoryTask, String> {
+    update_task_paused_with_mode(id, paused, AsrTaskPauseMode::LongTerm)
+}
+
+fn update_task_paused_with_mode(
+    id: &str,
+    paused: bool,
+    mode: AsrTaskPauseMode,
+) -> Result<AsrDirectoryTask, String> {
     let mut store = load_tasks();
     let now = now_ms();
     let Some(task) = store.tasks.iter_mut().find(|task| task.id == id) else {
@@ -53,7 +61,19 @@ fn update_task_paused(id: &str, paused: bool) -> Result<AsrDirectoryTask, String
     task.paused_at_ms = paused.then_some(now);
     task.updated_at_ms = now;
     if paused {
-        task.next_run_at_ms = None;
+        task.next_run_at_ms = match mode {
+            AsrTaskPauseMode::Temporary => {
+                task.next_run_at_ms.filter(|next| *next > now).or_else(|| {
+                    if task.enabled {
+                        task.schedule
+                            .next_run_at_ms(now.saturating_add(60_000), false)
+                    } else {
+                        None
+                    }
+                })
+            }
+            AsrTaskPauseMode::LongTerm => None,
+        };
         task.last_error = None;
     } else {
         task.next_run_at_ms = task
@@ -67,6 +87,32 @@ fn update_task_paused(id: &str, paused: bool) -> Result<AsrDirectoryTask, String
     let updated = task.clone();
     save_tasks(&store)?;
     Ok(updated)
+}
+
+fn resume_temporary_paused_task_for_schedule(
+    id: &str,
+    now: u64,
+) -> Result<Option<AsrDirectoryTask>, String> {
+    let mut store = load_tasks();
+    let Some(task) = store.tasks.iter_mut().find(|task| task.id == id) else {
+        return Err(format!("ASR task '{id}' not found"));
+    };
+    if !task.paused {
+        return Ok(Some(task.clone()));
+    }
+    if task
+        .next_run_at_ms
+        .is_none_or(|next_run_at_ms| next_run_at_ms > now)
+    {
+        return Ok(None);
+    }
+    task.paused = false;
+    task.paused_at_ms = None;
+    task.updated_at_ms = now;
+    task.last_error = None;
+    let updated = task.clone();
+    save_tasks(&store)?;
+    Ok(Some(updated))
 }
 
 fn task_pause_requested(id: &str) -> bool {
@@ -165,12 +211,34 @@ fn task_with_summary(task: AsrDirectoryTask) -> TaskWithSummary {
     }
 }
 
+fn task_with_control_summary(task: AsrDirectoryTask) -> TaskWithSummary {
+    let summary = summarize_task_from_store(&task);
+    let bulk_retry = bulk_chunk_retry_state(&task.id);
+    TaskWithSummary {
+        task,
+        summary,
+        bulk_retry,
+    }
+}
+
+fn task_with_list_summary(task: AsrDirectoryTask) -> TaskWithSummary {
+    if RUNNING_TASKS.lock().unwrap().contains(&task.id) {
+        task_with_control_summary(task)
+    } else {
+        task_with_summary(task)
+    }
+}
+
 fn find_task(id: &str) -> Option<AsrDirectoryTask> {
     load_tasks().tasks.into_iter().find(|task| task.id == id)
 }
 
 fn task_detail(task: AsrDirectoryTask) -> TaskDetail {
-    let summary = summarize_task(&task);
+    let summary = if RUNNING_TASKS.lock().unwrap().contains(&task.id) {
+        summarize_task_from_store(&task)
+    } else {
+        summarize_task(&task)
+    };
     let daily_documents =
         list_daily_documents_for_task(&bifrost_storage::data_dir(), &task.id, &task.name)
             .unwrap_or_default();
@@ -363,6 +431,92 @@ fn summarize_task(task: &AsrDirectoryTask) -> TaskSummary {
         audio_source_file_count,
         cleanable_source_bytes,
         cleanable_source_file_count,
+        running: RUNNING_TASKS.lock().unwrap().contains(&task.id),
+    }
+}
+
+fn summarize_task_from_store(task: &AsrDirectoryTask) -> TaskSummary {
+    let file_store = load_file_store(&task.id);
+    summarize_task_records(task, &file_store, None)
+}
+
+fn summarize_task_records(
+    task: &AsrDirectoryTask,
+    file_store: &FileStore,
+    discovered: Option<&[PathBuf]>,
+) -> TaskSummary {
+    let discovered_keys = discovered.map(|paths| {
+        paths
+            .iter()
+            .map(|path| source_key(path))
+            .collect::<HashSet<_>>()
+    });
+    let processed = file_store
+        .files
+        .values()
+        .filter(|record| {
+            record.status == FileStatus::Success || record.status == FileStatus::PartialSuccess
+        })
+        .count();
+    let failed = file_store
+        .files
+        .values()
+        .filter(|record| record.status == FileStatus::Failed)
+        .count();
+    let partial_success = file_store
+        .files
+        .values()
+        .filter(|record| record.status == FileStatus::PartialSuccess)
+        .count();
+    let failed_chunk_count: usize = file_store
+        .files
+        .values()
+        .map(|record| record.failed_chunks.len())
+        .sum();
+    let pending = match discovered {
+        Some(paths) => paths
+            .iter()
+            .filter(|path| {
+                file_store
+                    .files
+                    .get(&source_key(path))
+                    .map(|record| {
+                        matches!(record.status, FileStatus::Pending | FileStatus::Processing)
+                    })
+                    .unwrap_or(true)
+            })
+            .count(),
+        None => file_store
+            .files
+            .values()
+            .filter(|record| matches!(record.status, FileStatus::Pending | FileStatus::Processing))
+            .count(),
+    };
+    let deleted_after_processing = discovered_keys
+        .as_ref()
+        .map(|keys| {
+            file_store
+                .files
+                .keys()
+                .filter(|key| !keys.contains(*key))
+                .count()
+        })
+        .unwrap_or(0);
+
+    TaskSummary {
+        discovered: discovered.map(|paths| paths.len()).unwrap_or(file_store.files.len()),
+        processed,
+        pending,
+        failed,
+        partial_success,
+        failed_chunk_count,
+        deleted_after_processing,
+        audio_source_bytes: discovered
+            .map(|paths| paths.iter().filter_map(|path| source_size(path)).sum())
+            .unwrap_or(0),
+        audio_source_file_count: discovered.map(|paths| paths.len()).unwrap_or(0),
+        cleanable_source_bytes: 0,
+        cleanable_source_file_count: 0,
         running: RUNNING_TASKS.lock().unwrap().contains(&task.id),
     }
 }

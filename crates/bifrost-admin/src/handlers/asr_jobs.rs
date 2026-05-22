@@ -12,7 +12,6 @@ use hyper::{body::Incoming, Method, Request, Response, StatusCode};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
-use sha2::Sha256;
 use std::sync::Mutex as StdMutex;
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use tokio::process::Command;

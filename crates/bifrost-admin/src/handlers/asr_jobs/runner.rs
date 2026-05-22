@@ -44,12 +44,28 @@ pub(crate) async fn ensure_scheduler_started() {
                 .into_iter()
                 .filter(|task| {
                     task.enabled
-                        && !task.paused
                         && task.next_run_at_ms.is_some_and(|next| next <= now)
+                        && (!task.paused || task.next_run_at_ms.is_some())
                 })
                 .collect::<Vec<_>>();
             for task in due {
                 let task_id = task.id.clone();
+                let task = if task.paused {
+                    match resume_temporary_paused_task_for_schedule(&task.id, now) {
+                        Ok(Some(task)) => task,
+                        Ok(None) => continue,
+                        Err(error) => {
+                            warn!(
+                                task_id = %task_id,
+                                error = %error,
+                                "failed to auto-resume temporary paused ASR scheduled directory task"
+                            );
+                            continue;
+                        }
+                    }
+                } else {
+                    task
+                };
                 if let Err(error) = spawn_directory_task_run_background(task) {
                     if error != "ASR task is already running" {
                         warn!(
@@ -66,11 +82,18 @@ pub(crate) async fn ensure_scheduler_started() {
 
 #[cfg(target_os = "macos")]
 async fn sync_external_device_tasks(trigger: &'static str) {
-    for task in load_tasks().tasks.into_iter().filter(|task| {
-        task.import_policy.enabled && !task.paused && !task.external_devices.is_empty()
-    }) {
+    for task in load_tasks()
+        .tasks
+        .into_iter()
+        .filter(task_allows_external_device_event_import)
+    {
         sync_external_device_task(task, trigger).await;
     }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn task_allows_external_device_event_import(task: &AsrDirectoryTask) -> bool {
+    task.import_policy.enabled && !task.external_devices.is_empty()
 }
 
 #[cfg(target_os = "macos")]
@@ -78,17 +101,16 @@ async fn sync_external_device_task(task: AsrDirectoryTask, trigger: &'static str
     if RUNNING_TASKS.lock().unwrap().contains(&task.id) {
         return;
     }
-    match sync_external_devices_for_task(&task).await {
-        Ok(imported) if imported > 0 && task.import_policy.auto_run_after_import => {
+    match start_external_import_background(task.clone(), trigger) {
+        Ok(progress) => {
             tracing::info!(
                 task_id = %task.id,
-                imported,
+                run_id = %progress.run_id,
                 trigger,
-                "external device sync imported files"
+                "external device sync queued in background"
             );
-            let _ = spawn_directory_task_run(task);
         }
-        Ok(_) => {}
+        Err(error) if error == "ASR external import is already running" => {}
         Err(error) => {
             tracing::warn!(
                 task_id = %task.id,
@@ -181,6 +203,7 @@ async fn run_directory_task(
             .entry(key)
             .or_insert_with(|| pending_record(&task.id, path));
     }
+    apply_external_import_hashes_to_records(&task, &discovered, &mut files);
     apply_content_hash_dedupe(&task, &discovered, &mut files)?;
     save_file_store(&task.id, &files)?;
 

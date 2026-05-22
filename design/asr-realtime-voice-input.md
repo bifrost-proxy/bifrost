@@ -976,7 +976,7 @@ supports_timestamps: true | false
 ### Rust 后端
 
 - 新增 `crates/bifrost-admin/src/handlers/voice.rs`。
-- 新增 `crates/bifrost-admin/src/handlers/voice_stateful.rs`，封装 `qwen3-asr` crate 的 engine cache、session `StreamingState`、PCM16LE 转 f32 和 0.6B/1.7B 资源闸门。
+- 新增 `crates/bifrost-admin/src/handlers/voice_stateful.rs`，封装 `qwen3-asr` crate 的 engine cache、session `StreamingState`、PCM16LE 转 f32 和 0.6B/1.7B 资源闸门；worker stdout 只承载 JSONL IPC，父进程会忽略非 JSON stdout 日志行，隐藏 `ai voice worker` 命令强制日志写文件，避免 `qwen3_asr` 初始化日志污染实时转写协议。
 - 新增 voice session 管理：`VoiceInputSession`、`VoiceInputState`、`VoiceEvent`。
 - 新增 voice ime 管理：`VoiceImeStatus`、`VoiceImeSetup`、`VoiceImeClientSession`、`VoiceImeFeedbackRecord`。
 - 新增 microphone 管理：Core Audio device discovery、device selection、device disconnect fallback。
@@ -1217,9 +1217,9 @@ supports_timestamps: true | false
 
 验证计划：
 
-- 单元测试：`cargo test -p bifrost-admin voice_stateful --lib` 覆盖 startup/feed/finish hung worker timeout 和 kill；`cargo test -p bifrost-admin voice --lib` 覆盖 runtime tuning、VAD、transcript commit、provider selection、vocabulary。
+- 单元测试：`cargo test -p bifrost-admin voice_stateful --lib` 覆盖 startup/feed/finish hung worker timeout、stdout 日志行跳过和 kill；`cargo test -p bifrost-cli voice_worker_forces_logs_away_from_stdout_protocol --bin bifrost` 覆盖隐藏 worker 日志隔离；`cargo test -p bifrost-admin voice --lib` 覆盖 runtime tuning、VAD、transcript commit、provider selection、vocabulary。
 - E2E：`BIFROST_VOICE_E2E_PORT=18887 e2e-tests/tests/test_voice_input_runtime.sh` 覆盖 fake stateful worker 的 `reason=max_utterance_duration`、`worker_idle_unloaded`、silence/final committed、持续静音不输出 transcript。
-- human_tests：更新并执行 `human_tests/asr-realtime-voice-input.md` 的 TC-VIR-18，同时同步 `human_tests/readme.md` 索引。
+- human_tests：更新并执行 `human_tests/asr-realtime-voice-input.md` 的 TC-VIR-18/TC-VIR-19，同时同步 `human_tests/readme.md` 索引。
 - Review/Fix/Test：两轮均复核 `voice_stateful.rs`、`handlers/voice/*`、E2E、human_tests 和文件行数；发现遗漏后复跑相关单元/E2E/human_tests。
 - 收尾校验：E2E 之后执行 rust-project-validate 要求的 fmt、clippy、workspace all-features test，并按修改范围评估 local-ci。
 

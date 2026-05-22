@@ -160,11 +160,13 @@ pub async fn handle_asr_tasks(req: Request<Incoming>, path: &str) -> Response<Bo
                 .trim_start_matches("/api/asr/tasks/")
                 .trim_end_matches("/pause")
                 .trim_end_matches('/');
-            let force = req
-                .uri()
-                .query()
-                .is_some_and(|query| query_flag_enabled(query, "force"));
-            pause_task_response(id, force)
+            let query = req.uri().query().unwrap_or_default();
+            let force = query_flag_enabled(query, "force");
+            let pause_mode = match pause_mode_from_query(query) {
+                Ok(mode) => mode,
+                Err(message) => return error_response(StatusCode::BAD_REQUEST, message),
+            };
+            pause_task_response(id, force, pause_mode)
         }
         (&Method::POST, _) if path.starts_with("/api/asr/tasks/") && path.ends_with("/resume") => {
             let id = path
@@ -209,6 +211,20 @@ fn query_flag_enabled(query: &str, key: &str) -> bool {
     url::form_urlencoded::parse(query.as_bytes()).any(|(name, value)| {
         name == key && matches!(value.as_ref(), "" | "1" | "true" | "yes" | "on")
     })
+}
+
+fn query_param_value(query: &str, key: &str) -> Option<String> {
+    url::form_urlencoded::parse(query.as_bytes()).find_map(|(name, value)| {
+        (name == key).then(|| value.into_owned())
+    })
+}
+
+fn pause_mode_from_query(query: &str) -> Result<AsrTaskPauseMode, &'static str> {
+    let Some(value) = query_param_value(query, "mode") else {
+        return Ok(AsrTaskPauseMode::LongTerm);
+    };
+    AsrTaskPauseMode::from_query(&value)
+        .ok_or("invalid pause mode; use temporary or long_term")
 }
 
 async fn create_task_response(req: Request<Incoming>) -> Response<BoxBody> {
@@ -419,7 +435,7 @@ fn list_tasks_response() -> Response<BoxBody> {
     let tasks = load_tasks()
         .tasks
         .into_iter()
-        .map(task_with_summary)
+        .map(task_with_list_summary)
         .collect::<Vec<_>>();
     json_response(&serde_json::json!({ "tasks": tasks }))
 }
@@ -461,6 +477,7 @@ fn get_external_import_response(id: &str) -> Response<BoxBody> {
         policy: task.import_policy,
         devices,
         runs: store.runs,
+        current_run: normalize_external_import_progress(id),
     })
 }
 
@@ -507,16 +524,28 @@ async fn run_external_import_response(id: &str) -> Response<BoxBody> {
     let Some(task) = find_task(id) else {
         return error_response(StatusCode::NOT_FOUND, "ASR task not found");
     };
-    match sync_external_devices_for_task(&task).await {
-        Ok(imported) => {
-            if imported > 0 && task.import_policy.auto_run_after_import && !task.paused {
-                let _ = spawn_directory_task_run(task.clone());
-            }
-            json_response(&serde_json::json!({
+    match start_external_import_background(task.clone(), "manual_api") {
+        Ok(progress) => json_response_with_status(
+            StatusCode::ACCEPTED,
+            &serde_json::json!({
                 "task": task_with_summary(task),
-                "imported": imported,
-                "message": format!("External import completed; imported {imported} file(s)."),
-            }))
+                "imported": 0,
+                "running": true,
+                "progress": progress,
+                "message": "External import started in background.",
+            }),
+        ),
+        Err(error) if error == "ASR external import is already running" => {
+            json_response_with_status(
+                StatusCode::ACCEPTED,
+                &serde_json::json!({
+                    "task": task_with_summary(task),
+                    "imported": 0,
+                    "running": true,
+                    "progress": normalize_external_import_progress(id),
+                    "message": "External import is already running.",
+                }),
+            )
         }
         Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
     }
@@ -655,7 +684,7 @@ async fn run_task_response(id: &str) -> Response<BoxBody> {
 
     match spawn_directory_task_run(task.clone()) {
         Ok(()) => json_response(&RunTaskResponse {
-            task: task_with_summary(task),
+            task: task_with_control_summary(task),
             processed_now: 0,
             failed_now: 0,
             message: "ASR directory task started in background.".to_string(),
@@ -664,24 +693,27 @@ async fn run_task_response(id: &str) -> Response<BoxBody> {
     }
 }
 
-fn pause_task_response(id: &str, force: bool) -> Response<BoxBody> {
-    match update_task_paused(id, true) {
+fn pause_task_response(id: &str, force: bool, mode: AsrTaskPauseMode) -> Response<BoxBody> {
+    match update_task_paused_with_mode(id, true, mode) {
         Ok(task) => {
             let running = RUNNING_TASKS.lock().unwrap().contains(id);
             if force {
                 FORCE_PAUSED_TASKS.lock().unwrap().insert(id.to_string());
             }
             json_response(&serde_json::json!({
-                "task": task_with_summary(task),
+                "task": task_with_control_summary(task),
                 "paused": true,
                 "running": running,
                 "force": force,
+                "pause_mode": mode.as_str(),
                 "message": if running {
                     if force {
                         "ASR task force-pause requested. The running ASR process will be aborted promptly to release compute."
                     } else {
                         "ASR task pause requested. It will release compute after the current file or chunk boundary."
                     }
+                } else if mode == AsrTaskPauseMode::Temporary {
+                    "ASR task temporarily paused. It will resume automatically at the next scheduled run."
                 } else {
                     "ASR task paused. It will not run until resumed."
                 },
@@ -706,33 +738,19 @@ async fn resume_task_response(id: &str) -> Response<BoxBody> {
 
     if RUNNING_TASKS.lock().unwrap().contains(id) {
         return json_response(&serde_json::json!({
-            "task": task_with_summary(task),
+            "task": task_with_control_summary(task),
             "paused": false,
             "running": true,
             "message": "ASR task resume requested. The current run will continue at the next pause checkpoint.",
         }));
     }
 
-    let summary = summarize_task(&task);
-    if summary.pending == 0 && summary.failed == 0 {
-        return json_response(&serde_json::json!({
-            "task": TaskWithSummary {
-                bulk_retry: bulk_chunk_retry_state(&task.id),
-                task,
-                summary,
-            },
-            "paused": false,
-            "running": false,
-            "message": "ASR task resumed. No pending or failed files need processing.",
-        }));
-    }
-
     match spawn_directory_task_run(task.clone()) {
         Ok(()) => json_response(&serde_json::json!({
-            "task": task_with_summary(task),
+            "task": task_with_control_summary(task),
             "paused": false,
             "running": true,
-            "message": "ASR task resumed and started in background.",
+            "message": "ASR task resumed and queued for background processing.",
         })),
         Err(response) => *response,
     }

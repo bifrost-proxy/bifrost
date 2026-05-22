@@ -77,12 +77,13 @@ PY
 
 echo "[asr-task-pause-resume] pause task"
 PAUSE_JSON="$DATA_DIR/pause.json"
-curl -fsS -X POST "http://127.0.0.1:${PORT}/_bifrost/api/asr/tasks/${TASK_ID}/pause" >"$PAUSE_JSON"
+curl -fsS -X POST "http://127.0.0.1:${PORT}/_bifrost/api/asr/tasks/${TASK_ID}/pause?mode=long_term" >"$PAUSE_JSON"
 python3 - "$PAUSE_JSON" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1]))
 assert data["paused"] is True, data
 assert data["running"] is False, data
+assert data["pause_mode"] == "long_term", data
 assert data["task"]["paused"] is True, data
 assert data["task"]["next_run_at_ms"] is None, data
 PY
@@ -95,6 +96,78 @@ RUN_STATUS="$(
 [[ "$RUN_STATUS" == "409" ]] || fail "expected paused run HTTP 409, got ${RUN_STATUS}"
 grep -q '"paused":true' "$DATA_DIR/run-paused.json"
 
+echo "[asr-task-pause-resume] temporary pause auto-resumes at next schedule"
+TEMP_AUDIO_DIR="$DATA_DIR/temp-audio"
+mkdir -p "$TEMP_AUDIO_DIR"
+TEMP_CREATE_JSON="$DATA_DIR/temp-create.json"
+curl -fsS -X POST "http://127.0.0.1:${PORT}/_bifrost/api/asr/tasks" \
+  -H 'Content-Type: application/json' \
+  --data "$(
+    python3 - "$TEMP_AUDIO_DIR" <<'PY'
+import json, sys
+print(json.dumps({
+  "name": "Temporary Pause E2E",
+  "audio_dir": sys.argv[1],
+  "recursive": True,
+  "enabled": True,
+  "schedule": {"kind": "daily", "hour": 2, "minute": 0},
+  "language": "chinese",
+  "model": "Qwen3-ASR-1.7B",
+}))
+PY
+  )" >"$TEMP_CREATE_JSON"
+TEMP_TASK_ID="$(python3 - "$TEMP_CREATE_JSON" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1]))["id"])
+PY
+)"
+TEMP_PAUSE_JSON="$DATA_DIR/temp-pause.json"
+curl -fsS -X POST "http://127.0.0.1:${PORT}/_bifrost/api/asr/tasks/${TEMP_TASK_ID}/pause?mode=temporary" >"$TEMP_PAUSE_JSON"
+python3 - "$TEMP_PAUSE_JSON" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+assert data["paused"] is True, data
+assert data["pause_mode"] == "temporary", data
+assert data["task"]["paused"] is True, data
+assert data["task"]["next_run_at_ms"] is not None, data
+PY
+python3 - "$DATA_DIR/asr/tasks.json" "$TEMP_TASK_ID" <<'PY'
+import json, sys
+path, task_id = sys.argv[1], sys.argv[2]
+data = json.load(open(path))
+for task in data["tasks"]:
+    if task["id"] == task_id:
+        task["next_run_at_ms"] = 1
+        break
+else:
+    raise SystemExit("task not found")
+json.dump(data, open(path, "w"), indent=2)
+PY
+TEMP_LIST_JSON="$DATA_DIR/temp-list.json"
+for _ in {1..80}; do
+  curl -fsS "http://127.0.0.1:${PORT}/_bifrost/api/asr/tasks" >"$TEMP_LIST_JSON"
+  if python3 - "$TEMP_LIST_JSON" "$TEMP_TASK_ID" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+task_id = sys.argv[2]
+task = next(t for t in data["tasks"] if t["id"] == task_id)
+raise SystemExit(0 if not task["paused"] and not task["summary"]["running"] else 1)
+PY
+  then
+    break
+  fi
+  sleep 0.25
+done
+python3 - "$TEMP_LIST_JSON" "$TEMP_TASK_ID" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+task_id = sys.argv[2]
+task = next(t for t in data["tasks"] if t["id"] == task_id)
+assert task["paused"] is False, task
+assert task["summary"]["running"] is False, task
+assert task["summary"]["pending"] == 0, task
+PY
+
 echo "[asr-task-pause-resume] resume task without pending files"
 RESUME_JSON="$DATA_DIR/resume.json"
 curl -fsS -X POST "http://127.0.0.1:${PORT}/_bifrost/api/asr/tasks/${TASK_ID}/resume" >"$RESUME_JSON"
@@ -102,14 +175,27 @@ python3 - "$RESUME_JSON" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1]))
 assert data["paused"] is False, data
-assert data["running"] is False, data
+assert data["running"] is True, data
 assert data["task"]["paused"] is False, data
-assert "No pending or failed files" in data["message"], data
+assert "queued for background processing" in data["message"], data
 PY
 
-echo "[asr-task-pause-resume] list reflects resumed state"
+echo "[asr-task-pause-resume] empty background run quickly releases running state"
 LIST_JSON="$DATA_DIR/list.json"
-curl -fsS "http://127.0.0.1:${PORT}/_bifrost/api/asr/tasks" >"$LIST_JSON"
+for _ in {1..40}; do
+  curl -fsS "http://127.0.0.1:${PORT}/_bifrost/api/asr/tasks" >"$LIST_JSON"
+  if python3 - "$LIST_JSON" "$TASK_ID" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+task_id = sys.argv[2]
+task = next(t for t in data["tasks"] if t["id"] == task_id)
+raise SystemExit(0 if not task["summary"]["running"] else 1)
+PY
+  then
+    break
+  fi
+  sleep 0.25
+done
 python3 - "$LIST_JSON" "$TASK_ID" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1]))
@@ -117,6 +203,7 @@ task_id = sys.argv[2]
 task = next(t for t in data["tasks"] if t["id"] == task_id)
 assert task["paused"] is False, task
 assert task["summary"]["running"] is False, task
+assert task["summary"]["pending"] == 0, task
 PY
 
 echo "[asr-task-pause-resume] PASS"

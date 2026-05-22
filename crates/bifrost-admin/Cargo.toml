@@ -50,6 +50,7 @@ dashmap = "6"
 futures-util = { version = "0.3", features = ["sink"] }
 sha1 = "0.10"
 sha2 = "0.10"
+blake3 = "1"
 rusqlite = { version = "0.33", features = ["bundled", "backup"] }
 bincode = "1.3"
 lru.workspace = true

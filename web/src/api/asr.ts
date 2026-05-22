@@ -227,6 +227,8 @@ export interface AsrDirectoryTask {
   bulk_retry?: AsrBulkRetryState;
 }
 
+export type AsrPauseMode = "temporary" | "long_term";
+
 export interface AsrDirectoryTaskDetail extends AsrDirectoryTask {
   files: AsrTaskFileRecord[];
   daily_documents?: AsrTaskDailyDocument[];
@@ -332,6 +334,27 @@ export interface AsrExternalImportStatus {
     failed: number;
     status: string;
   }>;
+  current_run?: AsrExternalImportRunProgress;
+}
+
+export interface AsrExternalImportRunProgress {
+  run_id: string;
+  trigger: string;
+  started_at_ms: number;
+  updated_at_ms: number;
+  finished_at_ms?: number;
+  imported: number;
+  skipped: number;
+  processed_record_skipped: number;
+  failed: number;
+  status: string;
+  current_device?: string;
+  current_file?: string;
+  current_file_size?: number;
+  current_file_copied_bytes: number;
+  total_files_discovered: number;
+  processed_files: number;
+  message: string;
 }
 
 export interface RunAsrTaskResult {
@@ -346,6 +369,7 @@ export interface ControlAsrTaskResult {
   paused: boolean;
   running: boolean;
   force?: boolean;
+  pause_mode?: AsrPauseMode;
   message: string;
 }
 
@@ -582,7 +606,13 @@ export async function getAsrExternalImportStatus(
 
 export async function runAsrExternalImport(
   taskId: string,
-): Promise<{ imported: number; message: string; task: AsrDirectoryTask }> {
+): Promise<{
+  imported: number;
+  message: string;
+  task: AsrDirectoryTask;
+  running?: boolean;
+  progress?: AsrExternalImportRunProgress;
+}> {
   const response = await fetch(
     buildApiUrl(`/asr/tasks/${encodeURIComponent(taskId)}/external-import/run`),
     {
@@ -590,9 +620,13 @@ export async function runAsrExternalImport(
       headers: buildStreamHeaders(),
     },
   );
-  return readJsonResponse<{ imported: number; message: string; task: AsrDirectoryTask }>(
-    response,
-  );
+  return readJsonResponse<{
+    imported: number;
+    message: string;
+    task: AsrDirectoryTask;
+    running?: boolean;
+    progress?: AsrExternalImportRunProgress;
+  }>(response);
 }
 
 export async function runAsrTask(id: string): Promise<RunAsrTaskResult> {
@@ -605,13 +639,23 @@ export async function runAsrTask(id: string): Promise<RunAsrTaskResult> {
 
 export async function pauseAsrTask(
   id: string,
-  options?: { force?: boolean },
+  options?: { force?: boolean; mode?: AsrPauseMode },
 ): Promise<ControlAsrTaskResult> {
-  const query = options?.force ? "?force=true" : "";
-  const response = await fetch(buildApiUrl(`/asr/tasks/${encodeURIComponent(id)}/pause${query}`), {
-    method: "POST",
-    headers: buildStreamHeaders(),
-  });
+  const query = new URLSearchParams();
+  if (options?.force) {
+    query.set("force", "true");
+  }
+  if (options?.mode) {
+    query.set("mode", options.mode);
+  }
+  const queryString = query.toString() ? `?${query.toString()}` : "";
+  const response = await fetch(
+    buildApiUrl(`/asr/tasks/${encodeURIComponent(id)}/pause${queryString}`),
+    {
+      method: "POST",
+      headers: buildStreamHeaders(),
+    },
+  );
   return readJsonResponse<ControlAsrTaskResult>(response);
 }
 

@@ -4,6 +4,7 @@ import {
   Button,
   Card,
   Col,
+  Dropdown,
   Form,
   Input,
   InputNumber,
@@ -27,11 +28,27 @@ import {
   ImportOutlined,
   StopOutlined,
 } from "@ant-design/icons";
-import type { AsrDirectoryTask, AsrExternalVolume, AsrRuntimeStrategy } from "../../../api/asr";
+import type {
+  AsrDirectoryTask,
+  AsrExternalImportRunProgress,
+  AsrExternalVolume,
+  AsrPauseMode,
+  AsrRuntimeStrategy,
+} from "../../../api/asr";
 import { listAsrExternalVolumes } from "../../../api/asr";
 import { formatSchedule, formatTime } from "../asrUtils";
 
 const { Text } = Typography;
+
+function pauseStatusLabel(task: AsrDirectoryTask): string {
+  if (!task.paused) {
+    return task.summary.running ? "Running" : task.last_error ? "Error" : "Ready";
+  }
+  if (task.summary.running) {
+    return "Pausing";
+  }
+  return task.next_run_at_ms ? "Paused until schedule" : "Paused";
+}
 
 const RUNTIME_STRATEGY_OPTIONS: Array<{
   value: AsrRuntimeStrategy;
@@ -70,17 +87,86 @@ const RUNTIME_STRATEGY_OPTIONS: Array<{
   },
 ];
 
+function externalImportPercent(progress: AsrExternalImportRunProgress): number {
+  if (progress.status === "completed" || progress.status === "completed_with_errors") {
+    return 100;
+  }
+  if (progress.total_files_discovered > 0) {
+    return Math.max(
+      0,
+      Math.min(
+        99,
+        Math.round((progress.processed_files / progress.total_files_discovered) * 100),
+      ),
+    );
+  }
+  return progress.status === "importing" ? 5 : 0;
+}
+
+function externalImportProgressStatus(
+  progress: AsrExternalImportRunProgress,
+): "success" | "exception" | "active" | "normal" {
+  if (progress.status === "completed") return "success";
+  if (progress.status === "failed" || progress.status === "completed_with_errors") {
+    return "exception";
+  }
+  if (progress.status === "importing") return "active";
+  return "normal";
+}
+
+function externalImportProgressLabel(progress: AsrExternalImportRunProgress): string {
+  if (progress.status === "importing") {
+    if (progress.current_device) {
+      return `${progress.current_device}: processed ${progress.processed_files}/${progress.total_files_discovered}`;
+    }
+    return "Import queued";
+  }
+  return progress.message;
+}
+
+function shouldShowExternalImportProgress(progress: AsrExternalImportRunProgress): boolean {
+  if (progress.status === "importing") {
+    return true;
+  }
+  return Boolean(
+    progress.imported ||
+      progress.skipped ||
+      progress.processed_record_skipped ||
+      progress.failed,
+  );
+}
+
+function externalImportCurrentFileName(progress: AsrExternalImportRunProgress): string {
+  if (!progress.current_file) {
+    return "-";
+  }
+  return progress.current_file.split(/[\\/]/).filter(Boolean).pop() ?? progress.current_file;
+}
+
+function externalImportCurrentFileCopyLabel(progress: AsrExternalImportRunProgress): string | null {
+  if (!progress.current_file_size || progress.current_file_size <= 0) {
+    return null;
+  }
+  const copied = Math.min(progress.current_file_copied_bytes, progress.current_file_size);
+  const percent = Math.max(
+    0,
+    Math.min(100, Math.round((copied / progress.current_file_size) * 100)),
+  );
+  return `Current file ${percent}%`;
+}
+
 interface DirectoryTasksPanelProps {
   taskForm: FormInstance;
   taskScheduleKind: string;
   tasks: AsrDirectoryTask[];
   tasksLoading: boolean;
+  externalImportProgressByTask: Record<string, AsrExternalImportRunProgress>;
   onCreateTask: () => boolean | Promise<boolean>;
   onUpdateTask: (id: string) => boolean | Promise<boolean>;
   onRunExternalImport: (id: string) => void | Promise<void>;
   onOpenTask: (id: string) => void;
   onRunTask: (id: string) => void;
-  onPauseTask: (id: string, force?: boolean) => void;
+  onPauseTask: (id: string, force?: boolean, mode?: AsrPauseMode) => void;
   onResumeTask: (id: string) => void;
   onRemoveTask: (id: string, confirmName: string) => void;
 }
@@ -90,6 +176,7 @@ export default function DirectoryTasksPanel({
   taskScheduleKind,
   tasks,
   tasksLoading,
+  externalImportProgressByTask,
   onCreateTask,
   onUpdateTask,
   onRunExternalImport,
@@ -113,7 +200,15 @@ export default function DirectoryTasksPanel({
   const volumePromptOpenRef = useRef(false);
 
   const configOpen = createOpen || Boolean(editingTask);
-  const configTitle = editingTask ? `Edit Directory Task: ${editingTask.name}` : "New Directory Task";
+  const configTitle = editingTask
+    ? `Edit Directory Task: ${editingTask.name}`
+    : "New Directory Task";
+  const expandedImportTaskIds = tasks
+    .filter((task) => {
+      const progress = externalImportProgressByTask[task.id];
+      return progress ? shouldShowExternalImportProgress(progress) : false;
+    })
+    .map((task) => task.id);
 
   const openCreate = () => {
     setEditingTask(null);
@@ -486,15 +581,7 @@ export default function DirectoryTasksPanel({
                           : "success"
                   }
                 >
-                  {record.paused
-                    ? record.summary.running
-                      ? "Pausing"
-                      : "Paused"
-                    : record.summary.running
-                      ? "Running"
-                      : record.last_error
-                        ? "Error"
-                        : "Ready"}
+                  {pauseStatusLabel(record)}
                 </Tag>
                 {record.last_error ? (
                   <Text type="danger" style={{ fontSize: 12 }}>
@@ -506,75 +593,140 @@ export default function DirectoryTasksPanel({
           },
           {
             title: "Actions",
-            render: (_value, record) => (
-              <Space>
-                <Button
-                  size="small"
-                  disabled={record.summary.running || Boolean(record.paused)}
-                  onClick={() => onRunTask(record.id)}
-                >
-                  {record.summary.running ? "Running..." : "Run"}
-                </Button>
-                {record.external_devices?.length ? (
+            render: (_value, record) => {
+              const importProgress = externalImportProgressByTask[record.id];
+              const importing = importProgress?.status === "importing";
+              return (
+                <Space wrap>
                   <Button
                     size="small"
-                    icon={<ImportOutlined />}
                     disabled={record.summary.running || Boolean(record.paused)}
-                    onClick={() => onRunExternalImport(record.id)}
+                    onClick={() => onRunTask(record.id)}
                   >
-                    Import External
+                    {record.summary.running ? "Running..." : "Run"}
                   </Button>
-                ) : null}
-                {record.paused ? (
-                  <Button
-                    size="small"
-                    type="primary"
-                    icon={<PlayCircleOutlined />}
-                    onClick={() => onResumeTask(record.id)}
-                  >
-                    Resume
-                  </Button>
-                ) : (
-                  <Button
-                    size="small"
-                    icon={<PauseCircleOutlined />}
-                    onClick={() => onPauseTask(record.id)}
-                  >
-                    Pause
-                  </Button>
-                )}
-                {record.summary.running && !record.paused ? (
-                  <Popconfirm
-                    title="Force pause this ASR task?"
-                    description="The current native ASR process will be terminated and the file will resume from pending later."
-                    onConfirm={() => onPauseTask(record.id, true)}
-                  >
-                    <Button size="small" danger icon={<StopOutlined />}>
-                      Force Pause
+                  {record.external_devices?.length ? (
+                    <Button
+                      size="small"
+                      icon={<ImportOutlined />}
+                      loading={importing}
+                      disabled={record.summary.running || importing}
+                      title={
+                        record.summary.running
+                          ? "Pause the ASR run before importing external files."
+                          : undefined
+                      }
+                      onClick={() => onRunExternalImport(record.id)}
+                    >
+                      {importing ? "Importing" : "Import External"}
                     </Button>
-                  </Popconfirm>
-                ) : null}
-                <Button
-                  size="small"
-                  icon={<SettingOutlined />}
-                  onClick={() => openEdit(record)}
-                >
-                  Edit
-                </Button>
-                <Button
-                  size="small"
-                  danger
-                  onClick={() => {
-                    setDeleteTarget(record);
-                    setDeleteConfirmName("");
-                  }}
-                >
-                  Delete
-                </Button>
-              </Space>
-            ),
+                  ) : null}
+                  {record.paused ? (
+                    <Button
+                      size="small"
+                      type="primary"
+                      icon={<PlayCircleOutlined />}
+                      onClick={() => onResumeTask(record.id)}
+                    >
+                      Resume
+                    </Button>
+                  ) : (
+                    <Dropdown
+                      trigger={["click"]}
+                      menu={{
+                        items: [
+                          {
+                            key: "temporary",
+                            label: "Pause until next schedule",
+                            icon: <PauseCircleOutlined />,
+                          },
+                          {
+                            key: "long_term",
+                            label: "Pause indefinitely",
+                            icon: <StopOutlined />,
+                          },
+                        ],
+                        onClick: ({ key }) =>
+                          onPauseTask(record.id, false, key as AsrPauseMode),
+                      }}
+                    >
+                      <Button size="small" icon={<PauseCircleOutlined />}>
+                        Pause
+                      </Button>
+                    </Dropdown>
+                  )}
+                  {record.summary.running && !record.paused ? (
+                    <Popconfirm
+                      title="Force pause this ASR task?"
+                      description="The current native ASR process will be terminated and the file will resume from pending later."
+                      onConfirm={() => onPauseTask(record.id, true, "long_term")}
+                    >
+                      <Button size="small" danger icon={<StopOutlined />}>
+                        Force Pause
+                      </Button>
+                    </Popconfirm>
+                  ) : null}
+                  <Button
+                    size="small"
+                    icon={<SettingOutlined />}
+                    onClick={() => openEdit(record)}
+                  >
+                    Edit
+                  </Button>
+                  <Button
+                    size="small"
+                    danger
+                    onClick={() => {
+                      setDeleteTarget(record);
+                      setDeleteConfirmName("");
+                    }}
+                  >
+                    Delete
+                  </Button>
+                </Space>
+              );
+            },
           },
         ]}
+        expandable={{
+          expandedRowKeys: expandedImportTaskIds,
+          rowExpandable: (record) => Boolean(externalImportProgressByTask[record.id]),
+          showExpandColumn: false,
+          expandedRowRender: (record) => {
+            const importProgress = externalImportProgressByTask[record.id];
+            if (!importProgress) {
+              return null;
+            }
+            const currentFileCopy = externalImportCurrentFileCopyLabel(importProgress);
+            return (
+              <div style={{ padding: "8px 16px 12px" }}>
+                <Progress
+                  size="small"
+                  percent={externalImportPercent(importProgress)}
+                  status={externalImportProgressStatus(importProgress)}
+                />
+                <Space wrap size={[12, 6]} style={{ marginTop: 8 }}>
+                  <Text strong>{externalImportProgressLabel(importProgress)}</Text>
+                  <Text type="secondary">
+                    Current file: {externalImportCurrentFileName(importProgress)}
+                  </Text>
+                  <Tag>Scanned total: {importProgress.total_files_discovered}</Tag>
+                  <Tag color="success">Imported: {importProgress.imported}</Tag>
+                  {importProgress.processed_record_skipped > 0 ? (
+                    <Tag color="blue">
+                      Already processed: {importProgress.processed_record_skipped}
+                    </Tag>
+                  ) : null}
+                  <Tag>Processed: {importProgress.processed_files}</Tag>
+                  {importProgress.failed > 0 ? (
+                    <Tag color="error">Failed: {importProgress.failed}</Tag>
+                  ) : null}
+                  {currentFileCopy ? <Text type="secondary">{currentFileCopy}</Text> : null}
+                </Space>
+              </div>
+            );
+          },
+        }}
       />
       <Modal
         title="Delete ASR task"
