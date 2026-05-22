@@ -256,7 +256,7 @@
    ```
 3. 调用暂停接口：
    ```bash
-   curl -s -X POST http://127.0.0.1:8801/_bifrost/api/asr/tasks/<task_id>/pause
+   curl -s -X POST 'http://127.0.0.1:8801/_bifrost/api/asr/tasks/<task_id>/pause?mode=long_term'
    ```
 4. 暂停状态下调用手动 Run：
    ```bash
@@ -266,6 +266,7 @@
 预期结果：
 
 - pause 响应中 `paused=true`、`running=false`
+- pause 响应中 `pause_mode=long_term`
 - 返回的 task 中 `paused=true`、`next_run_at_ms=null`
 - paused 状态下手动 Run 返回 HTTP 409
 - Run 错误体包含 `paused=true` 和“resume it before starting a run”提示
@@ -285,10 +286,10 @@
 
 预期结果：
 
-- resume 响应中 `paused=false`、`running=false`
-- 响应 message 包含 `No pending or failed files`
+- resume 响应在请求线程内快速返回 `paused=false`
+- 响应 message 说明任务已排入后台恢复处理
 - 任务列表中该任务 `paused=false`
-- `summary.running=false`
+- 后台任务发现空目录后快速结束，后续任务列表中 `summary.running=false`
 - 因为空目录没有 pending/failed 文件，不会触发模型下载、初始化或 ASR CLI 运行
 
 ### TC-ASPB-12 运行中暂停后继续处理
@@ -860,6 +861,70 @@
 - enabled 且未 paused、仍有 pending/failed 文件的中断任务会在 scheduler startup 后立即 re-enqueue，不等待下一次 daily/hourly 周期。
 - 如果 `run.lock` 指向仍存活的其它 Bifrost 进程，恢复逻辑不抢占、不重置文件状态。
 
+### TC-ASPB-38 Resume 不阻塞主服务且后台恢复 ASR 处理
+
+操作步骤：
+
+1. 使用默认数据目录启动最新服务：
+   ```bash
+   cargo run --bin bifrost -- start -p 9900 --unsafe-ssl --no-system-proxy -y
+   ```
+2. 打开 `http://127.0.0.1:9900/_bifrost/ai?aiSection=tools-asr`，找到一个 `paused=true` 且有 pending/processing 文件的目录任务。
+3. 点击任务行 `Resume`，同时在另一个终端连续请求轻量接口：
+   ```bash
+   for i in $(seq 1 20); do
+     time curl -fsS http://127.0.0.1:9900/_bifrost/api/proxy/address >/dev/null
+     sleep 1
+   done
+   ```
+4. 继续观察任务列表和 `ps -axo pid,pcpu,command | rg 'bifrost|asr'`。
+
+预期结果：
+
+- 点击 `Resume` 后页面不会整页卡死，按钮状态快速变为 running。
+- `POST /api/asr/tasks/<task_id>/resume` 只负责取消 paused 状态并派发后台 run，不在请求线程内递归扫描音频目录或重建 heavy summary。
+- 任务列表在 `summary.running=true` 期间使用已持久化 `files.json` 的 cached summary，避免 10 秒自动刷新再次触发重型目录扫描。
+- Resume 和启动恢复不能在 ASR run 主流程同步补算历史大文件内容 hash；缺少 hash 时按普通文件处理，导入复制产生的 BLAKE3 只在后台内容哈希队列中串行执行。
+- `/api/proxy/address` 等主服务轻量接口在 ASR 恢复处理期间仍能快速响应。
+- ASR 文件解析继续在后台任务/子进程链路中推进，不阻塞 WebUI 主流程或管理端 API。
+
+### TC-ASPB-39 临时暂停在下一次调度自动恢复
+
+操作步骤：
+
+1. 使用临时数据目录启动服务：
+   ```bash
+   BIFROST_DATA_DIR=./.bifrost-test-planb cargo run --bin bifrost -- start -p 8801 --unsafe-ssl --skip-cert-check --no-system-proxy
+   ```
+2. 创建一个绑定空音频目录且 enabled=true 的 daily 任务。
+3. 调用临时暂停接口：
+   ```bash
+   curl -s -X POST 'http://127.0.0.1:8801/_bifrost/api/asr/tasks/<task_id>/pause?mode=temporary'
+   ```
+4. 检查任务仍保留 `next_run_at_ms`，并在测试数据目录中把该 task 的 `next_run_at_ms` 调整为过去时间，模拟下一次调度到点：
+   ```bash
+   python3 - <<'PY'
+   import json
+   path = './.bifrost-test-planb/asr/tasks.json'
+   data = json.load(open(path))
+   data['tasks'][0]['next_run_at_ms'] = 1
+   json.dump(data, open(path, 'w'), indent=2)
+   PY
+   ```
+5. 轮询任务列表：
+   ```bash
+   curl -s http://127.0.0.1:8801/_bifrost/api/asr/tasks
+   ```
+6. 在 WebUI 任务列表和任务详情页点击 `Pause` 下拉，分别确认存在 `Pause until next schedule` 和 `Pause indefinitely` 两个选项。
+
+预期结果：
+
+- 临时暂停响应中 `paused=true`、`pause_mode=temporary`，返回 task 中 `next_run_at_ms` 非空。
+- 调度到点后 scheduler 自动清除 `paused` 并派发后台 run；空目录任务会快速结束，最终任务列表中 `paused=false`、`summary.running=false`。
+- 临时暂停期间手动 Run 仍返回 HTTP 409，用户如需立刻继续必须点击 Resume。
+- 长期暂停仍清空 `next_run_at_ms`，不会被 scheduler 自动恢复，必须手动 Resume。
+- WebUI 的普通 Pause 操作提供临时暂停和长期暂停两个明确选项；Force Pause 保持长期暂停语义，用于立即释放运行中的 ASR/ffmpeg 子进程。
+
 ## 清理步骤
 
 ```bash
@@ -872,6 +937,7 @@ rm -rf ./.bifrost-test-planb
 
 | 日期 | 用例 | 命令 / 操作 | 结果 |
 | --- | --- | --- | --- |
+| 2026-05-22 | TC-ASPB-10 / TC-ASPB-11 / TC-ASPB-39 | `bash e2e-tests/tests/test_asr_task_pause_resume.sh` | PASS：长期暂停使用 `pause?mode=long_term` 后 `pause_mode=long_term`、`next_run_at_ms=null`，paused 状态手动 Run 返回 409；临时暂停使用 `pause?mode=temporary` 后 `pause_mode=temporary` 且 `next_run_at_ms` 非空，将调度时间置为过去后 scheduler 自动清除 paused 并完成空目录后台 run；Resume 空目录任务仍快速进入后台并恢复 Ready |
 | 2026-05-18 | TC-ASPB-01 / TC-ASPB-07A / TC-ASPB-07B / TC-ASPB-10 / TC-ASPB-13 | `cargo test -p bifrost-admin asr_cli_invoke --lib`；`cargo test -p bifrost-admin asr_jobs --lib` | PASS：10 个 `asr_cli_invoke` 测试通过，覆盖模型感知 footprint 阈值、`vmmap` 单位解析、physical-footprint 采样间隔边界和 abort check kill 长跑 CLI 子进程；43 个 `asr_jobs` 测试通过，覆盖 force-pause 查询参数、force-pause 必须结合持久 paused 状态、memory-limit event 合并为 root chunk hint、30 秒 chunk/timeline 回归、可中断 ffmpeg 和 normalize/split timeout |
 | 2026-05-18 | TC-ASPB-14 真实 30 分钟 CLI 性能基准 | `cargo build --bin bifrost`；`/usr/bin/time -p target/debug/bifrost ai asr stream-file ~/Downloads/we/TX01_MIC007_20260514_183241_orig.wav --model Qwen3-ASR-1.7B --language chinese >/tmp/bifrost-asr-cli-bench-grace-20260518155114.jsonl 2>/tmp/bifrost-asr-cli-bench-grace-20260518155114.err`；`ps -axo ... | rg 'qwen3_asr_rs/asr|target/debug/bifrost ai asr stream-file'` | PASS：stderr 显示 `Split into 65 chunks (30s each, 2s overlap)`；1801s audio 处理为 65 chunks，内部统计 `210.2s total, RTF=0.117`，`/usr/bin/time` wall time `real 216.77`，低于 5 分钟目标；修复前旧逻辑同样 30s 窗口但第 1 个 chunk 因立即 `vmmap -summary` 采样从 3.5s 膨胀到 9.9s，现已通过首采样 grace 修复；结束后未发现遗留 ASR 子进程 |
 | 2026-05-18 | TC-ASPB-07C 托管 asr-server 启动内存保护 | 默认服务 `target/debug/bifrost start -p 9900 --no-system-proxy`；`POST /api/asr/tasks/a911c68b0f7a43afa29d1863cc02229a/pause?force=true`；`POST /api/asr/service/start?model=Qwen3-ASR-1.7B&language=chinese`；检查 `~/.bifrost/asr/service.json` 与 `ps -o pid,pgid,rss,command -p <pid>`；`POST /api/asr/service/stop`；resume 目录任务 | PASS：目录任务 force-pause 后 running=false 且 processed=2/pending=40/failed=0；Start Service 返回 ready/managed=true，`service.json` 写入 pid=71667、port=51885、managed_by=webui；`ps` 显示 PGID=PID=71667，确认托管 `asr-server` 独立进程组；Stop Service 成功，随后目录任务 resume 为 running=true |

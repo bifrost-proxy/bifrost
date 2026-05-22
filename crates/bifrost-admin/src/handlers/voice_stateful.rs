@@ -13,6 +13,8 @@ use tokio::io::{AsyncWriteExt, BufReader, Lines};
 #[cfg(any(target_os = "macos", all(test, unix)))]
 use tokio::process::Command;
 use tokio::process::{Child, ChildStdin, ChildStdout};
+use tokio::time::Instant;
+use tracing::warn;
 
 pub(crate) const STATEFUL_PROVIDER_ID: &str = "qwen3_stateful_streaming";
 #[cfg(target_os = "macos")]
@@ -197,20 +199,41 @@ impl ProcessStatefulVoiceSession {
         operation: &str,
         timeout: Duration,
     ) -> Result<WorkerOutput, String> {
-        let line = match tokio::time::timeout(timeout, self.stdout.next_line()).await {
-            Ok(Ok(Some(line))) => line,
-            Ok(Ok(None)) => {
-                return Err("stateful ASR worker exited without a response".to_string());
-            }
-            Ok(Err(error)) => {
-                return Err(format!("read stateful ASR worker response: {error}"));
-            }
-            Err(_) => {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return Err(self.kill_timeout_error(operation, timeout));
+            };
+            if remaining.is_zero() {
                 return Err(self.kill_timeout_error(operation, timeout));
             }
-        };
-        serde_json::from_str(&line)
-            .map_err(|error| format!("parse stateful ASR worker response: {error}; line={line}"))
+
+            let line = match tokio::time::timeout(remaining, self.stdout.next_line()).await {
+                Ok(Ok(Some(line))) => line,
+                Ok(Ok(None)) => {
+                    return Err("stateful ASR worker exited without a response".to_string());
+                }
+                Ok(Err(error)) => {
+                    return Err(format!("read stateful ASR worker response: {error}"));
+                }
+                Err(_) => {
+                    return Err(self.kill_timeout_error(operation, timeout));
+                }
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            if !line.trim_start().starts_with('{') {
+                warn!(
+                    line = %line,
+                    "ignored non-JSON stateful ASR worker stdout line"
+                );
+                continue;
+            }
+            return serde_json::from_str(&line).map_err(|error| {
+                format!("parse stateful ASR worker response: {error}; line={line}")
+            });
+        }
     }
 
     fn kill_timeout_error(&mut self, operation: &str, timeout: Duration) -> String {
@@ -565,5 +588,19 @@ mod tests {
             .await
             .expect("hung worker should be killed after startup timeout")
             .expect("wait on killed worker");
+    }
+
+    #[tokio::test]
+    async fn worker_stdout_log_lines_are_ignored_before_json_response() {
+        let mut session = hung_process_session(
+            "printf '\\033[2m2026-05-21T16:26:10Z\\033[0m \\033[32m INFO\\033[0m qwen3_asr: Using Metal device\\n'; printf '{\"type\":\"ready\"}\\n'; sleep 60",
+        )
+        .await;
+        let output = session
+            .read_worker_output_with_timeout("startup response", Duration::from_secs(1))
+            .await
+            .expect("worker log line should not corrupt JSON protocol");
+
+        assert!(matches!(output, WorkerOutput::Ready));
     }
 }

@@ -13,7 +13,7 @@ mod help;
 mod parsing;
 mod process;
 
-use cli::{Cli, Commands, ImportArgs, TrafficCommands};
+use cli::{AiCommands, AiVoiceCommands, Cli, Commands, ImportArgs, TrafficCommands};
 use commands::{
     check_and_print_update_notice, handle_admin_command, handle_ai_command, handle_ca_command,
     handle_config_command, handle_export_command, handle_group_command, handle_import_command,
@@ -91,6 +91,25 @@ fn should_run_update_notice(stdout_is_terminal: bool, command: Option<&Commands>
     )
 }
 
+fn command_uses_stdout_protocol(command: Option<&Commands>) -> bool {
+    matches!(
+        command,
+        Some(Commands::Ai {
+            action: AiCommands::Voice {
+                action: AiVoiceCommands::Worker { .. }
+            }
+        })
+    )
+}
+
+fn effective_log_outputs(cli: &Cli) -> Vec<LogOutput> {
+    if command_uses_stdout_protocol(cli.command.as_ref()) {
+        vec![LogOutput::File]
+    } else {
+        LogOutput::parse(&cli.log_output)
+    }
+}
+
 fn main() {
     install_panic_hook();
     init_crypto_provider();
@@ -107,7 +126,7 @@ fn main() {
             .clone()
             .unwrap_or_else(|| data_dir().join("logs"));
 
-        let log_outputs = LogOutput::parse(&cli.log_output);
+        let log_outputs = effective_log_outputs(&cli);
 
         let log_config = LogConfig::new(cli.log_level.clone(), log_dir)
             .with_outputs(log_outputs)
@@ -655,5 +674,24 @@ mod tests {
             true,
             Some(&Commands::Status { tui: false })
         ));
+    }
+
+    #[test]
+    fn voice_worker_forces_logs_away_from_stdout_protocol() {
+        let cli = Cli::parse_from([
+            "bifrost",
+            "--log-output",
+            "console",
+            "ai",
+            "voice",
+            "worker",
+            "--model",
+            "Qwen3-ASR-0.6B",
+            "--model-dir",
+            "/tmp/qwen3",
+        ]);
+
+        assert!(command_uses_stdout_protocol(cli.command.as_ref()));
+        assert_eq!(effective_log_outputs(&cli), vec![LogOutput::File]);
     }
 }

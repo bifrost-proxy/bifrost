@@ -4,6 +4,7 @@ import {
   Button,
   Card,
   Descriptions,
+  Dropdown,
   Empty,
   message,
   Popconfirm,
@@ -30,6 +31,7 @@ import {
 import type {
   AsrDirectoryTaskDetail,
   AsrDailyAgentReportDetail,
+  AsrPauseMode,
   AsrTaskDailyDocument,
   AsrTaskDailyDocumentDetail,
   AsrTaskFileRecord,
@@ -60,6 +62,16 @@ const DEFAULT_TASK_FILE_PAGE_SIZE = 8;
 const TASK_FILE_PAGE_SIZE_OPTIONS = ["8", "10", "20", "50", "100"];
 const TASK_FILE_TABLE_SCROLL_X = 1750;
 const DAILY_DOCUMENT_PAGE_SIZE = 8;
+
+function pauseStatusLabel(task: AsrDirectoryTaskDetail): string {
+  if (!task.paused) {
+    return task.summary.running ? "Running" : task.last_error ? "Error" : "Ready";
+  }
+  if (task.summary.running) {
+    return "Pausing";
+  }
+  return task.next_run_at_ms ? "Paused until schedule" : "Paused";
+}
 
 type FileStatusFilter = "processing" | "pending" | "completed" | "failed" | "all";
 
@@ -129,7 +141,7 @@ interface DirectoryTaskDetailPageProps {
   onBackToDailyAgentReports: () => void;
   onRefreshTask: (id: string) => void;
   onRunTask: (id: string) => void;
-  onPauseTask: (id: string, force?: boolean) => void;
+  onPauseTask: (id: string, force?: boolean, mode?: AsrPauseMode) => void;
   onResumeTask: (id: string) => void;
   onOpenFile: (file: AsrTaskFileRecord) => void;
   onOpenDailyDocument: (date: string) => void;
@@ -537,19 +549,35 @@ export default function DirectoryTaskDetailPage({
                   Resume
                 </Button>
               ) : (
-                <Button
-                  size="small"
-                  icon={<PauseCircleOutlined />}
-                  onClick={() => onPauseTask(taskDetail.id)}
+                <Dropdown
+                  trigger={["click"]}
+                  menu={{
+                    items: [
+                      {
+                        key: "temporary",
+                        label: "Pause until next schedule",
+                        icon: <PauseCircleOutlined />,
+                      },
+                      {
+                        key: "long_term",
+                        label: "Pause indefinitely",
+                        icon: <StopOutlined />,
+                      },
+                    ],
+                    onClick: ({ key }) =>
+                      onPauseTask(taskDetail.id, false, key as AsrPauseMode),
+                  }}
                 >
-                  Pause
-                </Button>
+                  <Button size="small" icon={<PauseCircleOutlined />}>
+                    Pause
+                  </Button>
+                </Dropdown>
               )}
               {taskDetail.summary.running && !taskDetail.paused ? (
                 <Popconfirm
                   title="Force pause this ASR task?"
                   description="The current native ASR process will be terminated and the file will resume from pending later."
-                  onConfirm={() => onPauseTask(taskDetail.id, true)}
+                  onConfirm={() => onPauseTask(taskDetail.id, true, "long_term")}
                 >
                   <Button size="small" danger icon={<StopOutlined />}>
                     Force Pause
@@ -579,13 +607,7 @@ export default function DirectoryTaskDetailPage({
                         : "success"
                   }
                 >
-                  {taskDetail.paused
-                    ? taskDetail.summary.running
-                      ? "Pausing"
-                      : "Paused"
-                    : taskDetail.summary.running
-                      ? "Running"
-                      : "Ready"}
+                  {pauseStatusLabel(taskDetail)}
                 </Tag>
               </Descriptions.Item>
               <Descriptions.Item label="Next Run">

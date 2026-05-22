@@ -7,7 +7,10 @@ static FORCE_PAUSED_TASKS: Lazy<StdMutex<HashSet<String>>> =
     Lazy::new(|| StdMutex::new(HashSet::new()));
 static BULK_CHUNK_RETRY_JOBS: Lazy<StdMutex<BTreeMap<String, BulkChunkRetryState>>> =
     Lazy::new(|| StdMutex::new(BTreeMap::new()));
-static EXTERNAL_IMPORT_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static EXTERNAL_IMPORT_LOCK: Lazy<StdMutex<()>> = Lazy::new(|| StdMutex::new(()));
+static RUNNING_EXTERNAL_IMPORT_TASKS: Lazy<StdMutex<HashSet<String>>> =
+    Lazy::new(|| StdMutex::new(HashSet::new()));
+static CONTENT_HASH_QUEUE_LOCK: Lazy<StdMutex<()>> = Lazy::new(|| StdMutex::new(()));
 
 const TASK_STORE_VERSION: u32 = 1;
 const ASR_TASK_PAUSED_MESSAGE: &str = "ASR task paused by request";
@@ -17,6 +20,10 @@ const MIN_BISECT_SECS: u64 = 2;
 const FFMPEG_NORMALIZE_MIN_TIMEOUT_SECS: u64 = 120;
 const FFMPEG_NORMALIZE_MAX_TIMEOUT_SECS: u64 = 30 * 60;
 const FFMPEG_CHUNK_SPLIT_TIMEOUT_SECS: u64 = 60;
+#[cfg(not(test))]
+const ASR_PREFLIGHT_HASH_MAX_BYTES: u64 = 512 * 1024 * 1024;
+#[cfg(test)]
+const ASR_PREFLIGHT_HASH_MAX_BYTES: u64 = 1024;
 const AUDIO_EXTENSIONS: &[&str] = &[
     "aac", "aiff", "aif", "flac", "m4a", "mp3", "mp4", "ogg", "opus", "wav", "webm",
 ];
@@ -48,6 +55,36 @@ fn task_is_running(task_id: &str) -> bool {
     RUNNING_TASKS.lock().unwrap().contains(task_id)
 }
 
+struct RunningExternalImportGuard {
+    task_id: String,
+}
+
+impl RunningExternalImportGuard {
+    fn acquire(task_id: &str) -> Result<Self, ()> {
+        let mut running = RUNNING_EXTERNAL_IMPORT_TASKS.lock().unwrap();
+        if running.contains(task_id) {
+            return Err(());
+        }
+        running.insert(task_id.to_string());
+        Ok(Self {
+            task_id: task_id.to_string(),
+        })
+    }
+}
+
+impl Drop for RunningExternalImportGuard {
+    fn drop(&mut self) {
+        RUNNING_EXTERNAL_IMPORT_TASKS
+            .lock()
+            .unwrap()
+            .remove(&self.task_id);
+    }
+}
+
+fn external_import_is_running(task_id: &str) -> bool {
+    RUNNING_EXTERNAL_IMPORT_TASKS.lock().unwrap().contains(task_id)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct AsrDirectoryTask {
     pub id: String,
@@ -76,6 +113,29 @@ pub(crate) struct AsrDirectoryTask {
     pub external_devices: Vec<AsrExternalDeviceBinding>,
     #[serde(default)]
     pub import_policy: AsrExternalImportPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AsrTaskPauseMode {
+    Temporary,
+    LongTerm,
+}
+
+impl AsrTaskPauseMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Temporary => "temporary",
+            Self::LongTerm => "long_term",
+        }
+    }
+
+    fn from_query(value: &str) -> Option<Self> {
+        match value {
+            "temporary" | "temp" | "until_next_schedule" => Some(Self::Temporary),
+            "long_term" | "long-term" | "indefinite" | "manual" => Some(Self::LongTerm),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -153,7 +213,7 @@ fn default_external_max_file_bytes() -> u64 {
 }
 
 fn default_content_hash_algorithm() -> String {
-    "sha256".to_string()
+    "blake3".to_string()
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -504,7 +564,10 @@ struct AsrImportedFileRecord {
     relative_path: PathBuf,
     source_size: u64,
     source_modified_ms: Option<u64>,
-    source_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    source_hashes: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sample_fingerprint: Option<String>,
     target_path: PathBuf,
     target_size: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -522,8 +585,39 @@ struct AsrExternalImportRunSummary {
     finished_at_ms: u64,
     imported: usize,
     skipped: usize,
+    #[serde(default)]
+    processed_record_skipped: usize,
     failed: usize,
     status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AsrExternalImportRunProgress {
+    run_id: String,
+    trigger: String,
+    started_at_ms: u64,
+    updated_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    finished_at_ms: Option<u64>,
+    imported: usize,
+    skipped: usize,
+    #[serde(default)]
+    processed_record_skipped: usize,
+    failed: usize,
+    status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    current_device: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    current_file: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    current_file_size: Option<u64>,
+    #[serde(default)]
+    current_file_copied_bytes: u64,
+    #[serde(default)]
+    total_files_discovered: usize,
+    #[serde(default)]
+    processed_files: usize,
+    message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -537,6 +631,8 @@ struct AsrContentHashIndex {
 struct AsrContentHashRecord {
     algorithm: String,
     hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    canonical_audio_hash: Option<String>,
     size: u64,
     canonical_source_key: String,
     canonical_source_path: PathBuf,
@@ -596,6 +692,8 @@ struct ExternalImportStatusResponse {
     policy: AsrExternalImportPolicy,
     devices: Vec<AsrExternalDeviceStatus>,
     runs: Vec<AsrExternalImportRunSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_run: Option<AsrExternalImportRunProgress>,
 }
 
 #[derive(Debug, Clone, Serialize)]

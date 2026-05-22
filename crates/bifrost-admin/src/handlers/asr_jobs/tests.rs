@@ -70,6 +70,20 @@ mod tests {
     }
 
     #[test]
+    fn paused_task_still_allows_external_device_event_import() {
+        let mut task = test_directory_task("paused-import", PathBuf::from("/tmp/asr"));
+        task.paused = true;
+        task.import_policy.enabled = true;
+        task.external_devices = vec![AsrExternalDeviceBinding {
+            name: "RIGHT".to_string(),
+            enabled: true,
+            ..AsrExternalDeviceBinding::default()
+        }];
+
+        assert!(task_allows_external_device_event_import(&task));
+    }
+
+    #[test]
     fn chunk_metric_records_runner_rtf_hash_and_error() {
         let ok = Ok(WholeFileTranscription {
             text: "hello".to_string(),
@@ -288,12 +302,113 @@ mod tests {
     }
 
     #[test]
+    fn temporary_pause_keeps_next_schedule_and_auto_resumes_when_due() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let mut task = test_directory_task("temporary-pause-task", audio_dir);
+        let future_next_run_at_ms = now_ms().saturating_add(600_000);
+        task.next_run_at_ms = Some(future_next_run_at_ms);
+        save_tasks(&TaskStore {
+            version: TASK_STORE_VERSION,
+            tasks: vec![task],
+        })
+        .unwrap();
+
+        let paused =
+            update_task_paused_with_mode("temporary-pause-task", true, AsrTaskPauseMode::Temporary)
+                .unwrap();
+        assert!(paused.paused);
+        assert_eq!(paused.next_run_at_ms, Some(future_next_run_at_ms));
+
+        let mut store = load_tasks();
+        store.tasks[0].next_run_at_ms = Some(1);
+        save_tasks(&store).unwrap();
+
+        let resumed = resume_temporary_paused_task_for_schedule("temporary-pause-task", now_ms())
+            .unwrap()
+            .unwrap();
+        assert!(!resumed.paused);
+        assert_eq!(resumed.paused_at_ms, None);
+        assert_eq!(resumed.last_error, None);
+    }
+
+    #[test]
+    fn long_term_pause_does_not_auto_resume_for_scheduler() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let task = test_directory_task("long-pause-task", audio_dir);
+        save_tasks(&TaskStore {
+            version: TASK_STORE_VERSION,
+            tasks: vec![task],
+        })
+        .unwrap();
+
+        let paused =
+            update_task_paused_with_mode("long-pause-task", true, AsrTaskPauseMode::LongTerm)
+                .unwrap();
+        assert!(paused.paused);
+        assert_eq!(paused.next_run_at_ms, None);
+
+        let resumed = resume_temporary_paused_task_for_schedule("long-pause-task", now_ms())
+            .unwrap();
+        assert!(resumed.is_none());
+    }
+
+    #[test]
+    fn task_after_run_preserves_temporary_pause_schedule() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let mut task = test_directory_task("paused-after-run-task", audio_dir);
+        task.paused = true;
+        task.paused_at_ms = Some(10);
+        task.next_run_at_ms = Some(123_456);
+        save_tasks(&TaskStore {
+            version: TASK_STORE_VERSION,
+            tasks: vec![task],
+        })
+        .unwrap();
+
+        let updated = update_task_after_run("paused-after-run-task", None).unwrap();
+        assert!(updated.paused);
+        assert_eq!(updated.next_run_at_ms, Some(123_456));
+    }
+
+    #[test]
     fn query_flag_enabled_accepts_truthy_force_values() {
         assert!(query_flag_enabled("force=true", "force"));
         assert!(query_flag_enabled("force=1&other=false", "force"));
         assert!(query_flag_enabled("force", "force"));
         assert!(!query_flag_enabled("force=false", "force"));
         assert!(!query_flag_enabled("other=true", "force"));
+    }
+
+    #[test]
+    fn pause_mode_from_query_accepts_temporary_and_long_term_modes() {
+        assert_eq!(
+            pause_mode_from_query("mode=temporary").unwrap(),
+            AsrTaskPauseMode::Temporary
+        );
+        assert_eq!(
+            pause_mode_from_query("force=true&mode=long_term").unwrap(),
+            AsrTaskPauseMode::LongTerm
+        );
+        assert_eq!(
+            pause_mode_from_query("").unwrap(),
+            AsrTaskPauseMode::LongTerm
+        );
+        assert_eq!(
+            pause_mode_from_query("mode=unknown").unwrap_err(),
+            "invalid pause mode; use temporary or long_term"
+        );
     }
 
     #[tokio::test]
@@ -463,6 +578,65 @@ mod tests {
         assert_eq!(summary.processed, 1);
         assert_eq!(summary.pending, 0);
         assert_eq!(summary.deleted_after_processing, 1);
+    }
+
+    #[test]
+    fn control_summary_uses_file_store_without_live_discovery() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let known = audio_dir.join("known.wav");
+        let untracked = audio_dir.join("untracked.wav");
+        std::fs::write(&known, b"known").unwrap();
+        std::fs::write(&untracked, b"untracked").unwrap();
+        let task = test_directory_task("control-summary-task", audio_dir);
+        let mut store = FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::new(),
+        };
+        store
+            .files
+            .insert(source_key(&known), pending_record(&task.id, &known));
+        save_file_store(&task.id, &store).unwrap();
+
+        let live_summary = task_with_summary(task.clone()).summary;
+        assert_eq!(live_summary.discovered, 2);
+        assert_eq!(live_summary.pending, 2);
+
+        let control_summary = task_with_control_summary(task).summary;
+        assert_eq!(control_summary.discovered, 1);
+        assert_eq!(control_summary.pending, 1);
+        assert_eq!(control_summary.audio_source_file_count, 0);
+    }
+
+    #[test]
+    fn running_task_list_summary_uses_cached_counts() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let known = audio_dir.join("known.wav");
+        let untracked = audio_dir.join("untracked.wav");
+        std::fs::write(&known, b"known").unwrap();
+        std::fs::write(&untracked, b"untracked").unwrap();
+        let task = test_directory_task("running-list-summary-task", audio_dir);
+        let mut store = FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::new(),
+        };
+        store
+            .files
+            .insert(source_key(&known), pending_record(&task.id, &known));
+        save_file_store(&task.id, &store).unwrap();
+
+        let _running = RunningTaskGuard::acquire(&task.id).unwrap();
+        let summary = task_with_list_summary(task).summary;
+        assert_eq!(summary.discovered, 1);
+        assert_eq!(summary.pending, 1);
+        assert!(summary.running);
     }
 
     #[test]
@@ -1738,6 +1912,100 @@ mod tests {
     }
 
     #[test]
+    fn external_import_detects_completed_processing_record_for_removed_target() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let task = test_directory_task("processed-skip", temp.path().join("audio"));
+        let target = task.audio_dir.join("RIGHT").join("done.wav");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"processed-audio").unwrap();
+        let mut record = pending_record(&task.id, &target);
+        record.status = FileStatus::Success;
+        record.source_size = Some(15);
+        std::fs::remove_file(&target).unwrap();
+        save_file_store(
+            &task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([("processed".to_string(), record)]),
+            },
+        )
+        .unwrap();
+
+        assert!(has_completed_processing_record_for_import_target(
+            &task.id, &target, 15
+        ));
+        assert!(!has_completed_processing_record_for_import_target(
+            &task.id, &target, 16
+        ));
+        let mut legacy_record = pending_record(&task.id, &target);
+        legacy_record.status = FileStatus::PartialSuccess;
+        legacy_record.source_size = None;
+        save_file_store(
+            &task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([("legacy-processed".to_string(), legacy_record)]),
+            },
+        )
+        .unwrap();
+        assert!(has_completed_processing_record_for_import_target(
+            &task.id, &target, 16
+        ));
+    }
+
+    #[test]
+    fn external_import_progress_stale_importing_is_marked_failed() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let progress = AsrExternalImportRunProgress {
+            run_id: "run1".to_string(),
+            trigger: "test".to_string(),
+            started_at_ms: 1,
+            updated_at_ms: 1,
+            finished_at_ms: None,
+            imported: 0,
+            skipped: 0,
+            processed_record_skipped: 0,
+            failed: 0,
+            status: "importing".to_string(),
+            current_device: Some("LEFT".to_string()),
+            current_file: None,
+            current_file_size: None,
+            current_file_copied_bytes: 0,
+            total_files_discovered: 0,
+            processed_files: 0,
+            message: "running".to_string(),
+        };
+        save_external_import_progress("task1", &progress).unwrap();
+
+        let normalized = normalize_external_import_progress("task1").unwrap();
+        assert_eq!(normalized.status, "failed");
+        assert!(normalized.finished_at_ms.is_some());
+        assert!(normalized.message.contains("interrupted"));
+    }
+
+    #[test]
+    fn external_import_copy_reports_byte_progress() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("source.wav");
+        let target = temp.path().join("target.wav");
+        std::fs::write(&source, vec![7u8; 3 * 1024 * 1024 + 17]).unwrap();
+        let mut progress = Vec::new();
+
+        let hash = copy_with_content_hash_with_progress(&source, &target, "blake3", |copied| {
+            progress.push(copied);
+        })
+        .unwrap();
+
+        assert_eq!(target.metadata().unwrap().len(), source.metadata().unwrap().len());
+        assert_eq!(progress.last().copied(), Some(source.metadata().unwrap().len()));
+        assert_eq!(hash.hashes.get("blake3"), Some(&blake3_file(&source).unwrap()));
+    }
+
+    #[test]
     fn task_audio_dir_creation_allows_missing_nested_directory() {
         let temp = TempDir::new().unwrap();
         let audio_dir = temp.path().join("missing").join("nested").join("audio");
@@ -1804,12 +2072,15 @@ mod tests {
         first_record.status = FileStatus::Success;
         first_record.output_text_path = Some(text_path.clone());
         first_record.output_metadata_path = Some(metadata_path.clone());
-        first_record.content_hash = Some(sha256_file(&first).unwrap());
-        first_record.content_hash_algorithm = Some("sha256".to_string());
+        first_record.content_hash = Some(blake3_file(&first).unwrap());
+        first_record.content_hash_algorithm = Some("blake3".to_string());
         first_record.text_chars = 5;
         first_record.finished_at_ms = Some(now_ms());
         files.files.insert(first_key.clone(), first_record.clone());
-        files.files.insert(second_key.clone(), pending_record(&task.id, &second));
+        let mut second_record = pending_record(&task.id, &second);
+        second_record.content_hash = first_record.content_hash.clone();
+        second_record.content_hash_algorithm = first_record.content_hash_algorithm.clone();
+        files.files.insert(second_key.clone(), second_record);
         index_completed_file_hash(&task, &first_key, &first_record);
 
         apply_content_hash_dedupe(&task, &[first, second], &mut files).unwrap();
@@ -1818,5 +2089,197 @@ mod tests {
         assert_eq!(duplicate.duplicate_of_source_key.as_deref(), Some(first_key.as_str()));
         assert_eq!(duplicate.output_text_path.as_ref(), Some(&text_path));
         assert_eq!(duplicate.text_chars, 5);
+    }
+
+    #[test]
+    fn external_import_blake3_hashes_are_applied_to_asr_records() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        let imported = audio_dir.join("LEFT").join("a.wav");
+        std::fs::create_dir_all(imported.parent().unwrap()).unwrap();
+        std::fs::write(&imported, b"imported audio").unwrap();
+
+        let task = test_directory_task("import-hash-task", audio_dir);
+        let key = source_key(&imported);
+        let mut files = FileStore::default();
+        files.files.insert(key.clone(), pending_record(&task.id, &imported));
+        let mut hashes = BTreeMap::new();
+        hashes.insert("blake3".to_string(), blake3_file(&imported).unwrap());
+        let store = AsrExternalImportStore {
+            version: TASK_STORE_VERSION,
+            devices: BTreeMap::from([(
+                "LEFT".to_string(),
+                AsrExternalDeviceState {
+                    binding_name: "LEFT".to_string(),
+                    files: BTreeMap::from([(
+                        "a.wav".to_string(),
+                        AsrImportedFileRecord {
+                            relative_path: PathBuf::from("a.wav"),
+                            source_size: imported.metadata().unwrap().len(),
+                            source_modified_ms: source_modified_ms(&imported),
+                            source_hashes: hashes.clone(),
+                            sample_fingerprint: None,
+                            target_path: imported.clone(),
+                            target_size: imported.metadata().unwrap().len(),
+                            first_seen_at_ms: None,
+                            imported_at_ms: now_ms(),
+                            status: "imported".to_string(),
+                            error: None,
+                        },
+                    )]),
+                    ..Default::default()
+                },
+            )]),
+            runs: Vec::new(),
+        };
+        save_external_import_store(&task.id, &store).unwrap();
+
+        assert!(apply_external_import_hashes_to_records(
+            &task,
+            std::slice::from_ref(&imported),
+            &mut files
+        ));
+        let record = files.files.get(&key).unwrap();
+        assert_eq!(record.content_hash_algorithm.as_deref(), Some("blake3"));
+        assert_eq!(record.content_hash.as_deref(), hashes.get("blake3").map(String::as_str));
+    }
+
+    #[test]
+    fn content_hash_dedupe_hashes_manual_copy_when_candidate_exists() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        let first = audio_dir.join("done.wav");
+        let second = audio_dir.join("manual-copy.wav");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        std::fs::write(&first, b"same manual payload").unwrap();
+        std::fs::write(&second, b"same manual payload").unwrap();
+
+        let task = test_directory_task("manual-copy-hash-task", audio_dir);
+        let text_path = temp.path().join("done.txt");
+        let metadata_path = temp.path().join("done.json");
+        std::fs::write(&text_path, "manual transcript").unwrap();
+        std::fs::write(&metadata_path, "{}").unwrap();
+        let first_key = source_key(&first);
+        let second_key = source_key(&second);
+        let mut files = FileStore::default();
+        let mut first_record = pending_record(&task.id, &first);
+        first_record.status = FileStatus::Success;
+        first_record.output_text_path = Some(text_path.clone());
+        first_record.output_metadata_path = Some(metadata_path);
+        first_record.content_hash = Some(blake3_file(&first).unwrap());
+        first_record.content_hash_algorithm = Some("blake3".to_string());
+        first_record.finished_at_ms = Some(now_ms());
+        files.files.insert(first_key.clone(), first_record.clone());
+        files.files.insert(second_key.clone(), pending_record(&task.id, &second));
+
+        apply_content_hash_dedupe(&task, &[second, first], &mut files).unwrap();
+
+        let duplicate = files.files.get(&second_key).unwrap();
+        assert_eq!(duplicate.status, FileStatus::Success);
+        assert_eq!(duplicate.content_hash_algorithm.as_deref(), Some("blake3"));
+        assert_eq!(
+            duplicate.duplicate_of_source_key.as_deref(),
+            Some(first_key.as_str())
+        );
+        assert_eq!(duplicate.output_text_path.as_ref(), Some(&text_path));
+    }
+
+    #[test]
+    fn content_hash_dedupe_does_not_hash_large_manual_copy_in_preflight() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        let first = audio_dir.join("done.wav");
+        let second = audio_dir.join("large-manual-copy.wav");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let payload = vec![9u8; ASR_PREFLIGHT_HASH_MAX_BYTES as usize + 1];
+        std::fs::write(&first, &payload).unwrap();
+        std::fs::write(&second, &payload).unwrap();
+
+        let task = test_directory_task("large-manual-copy-hash-task", audio_dir);
+        let text_path = temp.path().join("done.txt");
+        let metadata_path = temp.path().join("done.json");
+        std::fs::write(&text_path, "large transcript").unwrap();
+        std::fs::write(&metadata_path, "{}").unwrap();
+        let first_key = source_key(&first);
+        let second_key = source_key(&second);
+        let mut files = FileStore::default();
+        let mut first_record = pending_record(&task.id, &first);
+        first_record.status = FileStatus::Success;
+        first_record.output_text_path = Some(text_path);
+        first_record.output_metadata_path = Some(metadata_path);
+        first_record.content_hash = Some(blake3_file(&first).unwrap());
+        first_record.content_hash_algorithm = Some("blake3".to_string());
+        first_record.finished_at_ms = Some(now_ms());
+        files.files.insert(first_key.clone(), first_record.clone());
+        files.files.insert(second_key.clone(), pending_record(&task.id, &second));
+        index_completed_file_hash(&task, &first_key, &first_record);
+
+        apply_content_hash_dedupe(&task, &[first, second], &mut files).unwrap();
+
+        let large_pending = files.files.get(&second_key).unwrap();
+        assert_eq!(large_pending.status, FileStatus::Pending);
+        assert!(large_pending.content_hash.is_none());
+        assert!(large_pending.duplicate_of_source_key.is_none());
+    }
+
+    #[test]
+    fn content_hash_dedupe_does_not_hash_unknown_records_on_resume() {
+        let temp = TempDir::new().unwrap();
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let done = audio_dir.join("done.wav");
+        let pending = audio_dir.join("pending.wav");
+        std::fs::write(&done, b"already processed").unwrap();
+        std::fs::write(&pending, b"new pending").unwrap();
+
+        let task = AsrDirectoryTask {
+            id: "hash-skip-task".to_string(),
+            name: "Hash Skip Task".to_string(),
+            audio_dir: audio_dir.clone(),
+            recursive: true,
+            enabled: true,
+            paused: false,
+            paused_at_ms: None,
+            schedule: AsrTaskSchedule::Hourly { minute: 0 },
+            language: "chinese".to_string(),
+            model: "Qwen3-ASR-1.7B".to_string(),
+            runtime_strategy: AsrRuntimeStrategy::ReusePerFile,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+            last_run_at_ms: None,
+            next_run_at_ms: Some(1),
+            last_error: None,
+            daily_agent: AsrDailyAgentConfig::default(),
+            external_devices: Vec::new(),
+            import_policy: AsrExternalImportPolicy::default(),
+        };
+
+        let done_key = source_key(&done);
+        let pending_key = source_key(&pending);
+        let mut files = FileStore::default();
+        let mut done_record = pending_record(&task.id, &done);
+        done_record.status = FileStatus::Success;
+        done_record.output_text_path = Some(temp.path().join("done.txt"));
+        done_record.output_metadata_path = Some(temp.path().join("done.json"));
+        done_record.finished_at_ms = Some(now_ms());
+        files.files.insert(done_key.clone(), done_record);
+        files.files.insert(pending_key.clone(), pending_record(&task.id, &pending));
+
+        apply_content_hash_dedupe(&task, &[done, pending], &mut files).unwrap();
+
+        let done_record = files.files.get(&done_key).unwrap();
+        assert_eq!(done_record.status, FileStatus::Success);
+        assert!(done_record.content_hash.is_none());
+        assert!(done_record.content_hash_algorithm.is_none());
+        let pending_record = files.files.get(&pending_key).unwrap();
+        assert_eq!(pending_record.status, FileStatus::Pending);
+        assert!(pending_record.content_hash.is_none());
+        assert!(pending_record.content_hash_algorithm.is_none());
     }
 }

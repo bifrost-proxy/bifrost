@@ -115,17 +115,71 @@ Apple FSEvents 是目录层级变化通知，适合在设备已挂载后观察�
 
 本机轻量基准：
 
-- `openssl speed -seconds 2 -evp sha256` 显示 SHA-256 大块吞吐约 2.3 GB/s。
-- `shasum -a 256` 对 512 MiB 临时文件完整哈希耗时约 1.84s，约 278 MiB/s。该命令包含用户态工具开销，低于纯 CPU 哈希吞吐。
+- 旧 SHA-256 基准只能作为历史对照；V1 实现不写入、不消费旧 SHA-256 索引。
+- BLAKE3 支持流式、SIMD 和多线程，但 Bifrost 在代理主服务内默认用全局串行队列流式计算，避免多个大文件并行 hash 抢占 CPU。
 
 结论：
 
-- 对外接录音设备，实际瓶颈通常是设备顺序读取速度和 USB/存储介质 I/O，而不是 SHA-256 CPU 计算。
-- 导入时本来就要顺序读取源文件并写入目标文件，因此应在复制流中同时更新 SHA-256 digest，不额外再读一遍源设备。
-- 对已经在 `audio_dir` 中存在、但不是本轮导入产生的历史文件，ASR 阶段按需懒计算 hash；计算成功后写入 hash index，后续 run 不重复计算。
-- 哈希计算单任务并发默认限制为 1，使用流式 chunk 读取；不得把多个大音频文件并行 hash 到拖慢机器或外接设备。
+- 对外接录音设备，实际瓶颈通常是设备顺序读取速度和 USB/存储介质 I/O，而不是 BLAKE3 CPU 计算。
+- 导入时本来就要顺序读取源文件并写入目标文件，因此应在复制流中同时更新 BLAKE3 digest，不额外再读一遍源设备。
+- 对已经在 `audio_dir` 中存在、但不是本轮导入产生的历史文件，ASR run 主流程不做同步全文件 hash；缺少 hash 时直接退化为路径级处理，避免 Resume、任务列表刷新或启动恢复把几十 GB 历史录音重新读一遍。
+- 需要补充内容 hash 的场景必须进入后台内容哈希队列：队列全局串行、低优先级、流式 chunk 读取，不能占用 Admin API 请求线程或 Tokio async worker，也不能把多个大音频文件并行 hash 到拖慢代理服务或外接设备。
 - 如果 hash 计算失败、文件超出 `max_file_bytes`、文件不稳定或设备断开，不能因为缺少 hash 阻塞正常 ASR；该文件退化为现有按路径的处理流程并记录 `hash_unavailable`。
 - V1 默认启用内容哈希去重，因为成本可控，收益明确：多个设备或不同目录下的重复录音不会重复跑 ASR 模型。
+
+### 高性能哈希算法选型
+
+算法选型必须先区分用途：有些算法适合做最终身份，有些只适合做候选筛选。Bifrost ASR 的跳过模型推理属于高风险决策，不能只看“快”，还必须保证不会因为碰撞或近似匹配导致漏转写。
+
+| 算法 / 指纹 | 性质 | 适合用途 | 不适合用途 | Bifrost 取舍 |
+|---|---|---|---|---|
+| BLAKE3-256 | 加密哈希，支持流式、SIMD 和多线程，默认输出 256 bit | 本地精确内容身份、后台补 hash、复制流顺手 hash | 跨系统兼容旧索引时的唯一格式 | 新增本地 `content_hash` 固定使用 `blake3:<hex>`；后台队列默认单文件流式计算，不在请求线程并行拉满 CPU |
+| SHA-256 | 加密哈希，生态兼容最好 | 只作为调研对照或外部系统互操作信息 | 新增本地大文件索引、ASR 跳过判定、历史兼容链路 | 当前实现不兼容旧 SHA-256 数据；本地精确去重统一使用 BLAKE3，旧数据可丢弃重建 |
+| XXH3 / XXH128 | 非加密哈希，接近内存速度 | `sample_fingerprint`、候选缩小、缓存失效检测、UI 风险提示 | 不能单独作为重复判定，不能直接跳过 ASR | 只用于轻量窗口指纹，例如首/中/尾若干 MiB + size/duration 组合；命中后仍需精确 hash 或可信产物记录 |
+| CRC32C | 非加密校验，硬件加速常见 | 复制传输错误的廉价校验、临时诊断 | 内容去重身份、ASR 跳过依据 | 可作为复制完整性辅助字段，不进入 dedupe index 主键 |
+| FastCDC / Rabin / Gear CDC | 内容定义分块，适合跨版本、跨偏移存储去重 | 未来录音仓库级 chunk 索引、备份/归档节省空间 | V1 导入、Resume、ASR 前置路径 | 暂不进入主链路；如果做，也必须是独立后台索引服务 |
+| Chromaprint / 声学指纹 | 近似音频指纹，需先解码为 PCM | 发现转码后“听起来相同”的候选、人工确认 | 自动跳过 ASR 的唯一依据 | 只生成候选；除非后续有 `canonical_audio_hash` 精确命中，否则不能自动复用 transcript |
+| `canonical_audio_hash` | 对规范化 PCM 帧做 BLAKE3 | 跨容器/转码后的精确音频内容身份 | 导入阶段默认计算 | 只在 ASR normalize/ffmpeg decode 已经发生时顺手计算；或后台对高价值候选计算 |
+
+参考调研：
+
+- BLAKE3 官方 README 强调其加密哈希属性、Merkle tree 带来的 SIMD/多线程能力，以及 Rust/C 官方实现的 CPU feature detection 和 streaming/incremental update 能力：https://github.com/BLAKE3-team/BLAKE3
+- xxHash 官方文档把 XXH3/XXH128 定位为极快的非加密哈希，适合性能敏感的候选指纹，但不能承担加密级身份判定：https://xxhash.com/
+- FastCDC 论文说明 CDC 能提升数据去重冗余检测能力，但传统 CDC 有较重 CPU 开销，FastCDC 通过 Gear hash 优化、跳过 sub-minimum cut-point 等手段加速：https://www.usenix.org/conference/atc16/technical-sessions/presentation/xia
+- Chromaprint/AcoustID 是从解码后的未压缩音频提取音频指纹，适合相似音频识别候选，不负责容器解码，也不是字节级精确内容 hash：https://acoustid.org/chromaprint
+
+### 行业方案调研与取舍
+
+公开同步、备份和去重系统通常把“快速判定”和“强一致去重”分开，而不是默认全量读取所有大文件：
+
+- `rsync` 默认 quick check 使用文件 size + modification time 判断是否需要传输，只有开启 checksum 模式才做更慢的内容校验。这类策略适合重复扫描同一目录或同一设备，因为绝大多数未变化文件可以只读目录元数据。
+- `rclone copy/sync` 的默认思路也是优先用 size + modtime，只有远端支持或用户开启 `--checksum` 时才用 hash；其文档也把 checksum 作为更贵但更强的比较方式。
+- `Syncthing` 为文件维护 block list，每个 block 有 size/hash；发生变化时比较 block 列表，只请求缺失或过期 block。这适合持续同步系统，但需要先为文件建立并维护 block 索引。
+- `restic`、`Borg`、`Kopia` 这类备份/归档系统会使用内容定义分块（CDC）和 chunk hash 做跨路径、跨版本去重。它们的目标是存储节省和版本化，愿意在备份窗口内付出 chunking/hash 成本，并且依赖本地缓存避免重复 chunk。
+- 研究和工业实现都把 CDC/hash 视为 CPU 密集路径，通常通过缓存、分阶段管线、限流或并行化处理；它不适合放在低延迟代理服务的请求线程或主 async worker 里。
+
+参考来源：rsync manpage quick check / `--checksum`、rclone docs `--checksum`/`--size-only`、Syncthing synchronization docs、restic design CDC、Borg internals deduplication、BLAKE3 official README、xxHash official docs、FastCDC USENIX paper、Chromaprint/AcoustID docs。
+
+对 Bifrost ASR 来说，最佳平衡不是追求“首次就识别所有跨路径重复”，而是：
+
+1. 外接设备导入以同步系统思路为主：同设备同相对路径优先用 metadata manifest 快速跳过，保证重复连接、重复扫描是零读取。
+2. ASR 转写以准确性为第一约束：只有已有可信内容 hash 且 transcript artifacts 仍存在时才跳过模型；轻量指纹不能单独导致漏转写。
+3. 内容 hash 作为增量增强能力：导入复制时顺手计算；历史文件的补 hash 进入后台队列，给下一轮和后续重复文件优化，不阻塞当前导入或转写。
+4. CDC/block 级去重暂不进入 V1 主链路：录音文件通常是完整文件粒度输入，ASR 输出按文件/timeline 管理；CDC 适合备份仓库省空间，但会显著增加索引复杂度和 CPU 压力。后续如要做“录音仓库级重复片段识别”，应作为独立后台索引服务，而不是导入/Resume 的同步前置步骤。
+
+### 大文件极致性能去重策略
+
+录音文件可能单个数百 MiB 到数 GiB、总量几十 GiB，因此去重必须分层，优先走“不读文件”的快路径，完整内容 hash 只能作为精确兜底。
+
+1. **T0 设备 manifest 去重**：外接设备导入首先用 `volume_uuid/device_identifier + relative_path + source_size + source_modified_ms` 判断同一设备同一路径是否已经导入且目标文件仍匹配。命中时直接 `unchanged/skipped`，不打开源文件、不计算 hash、不复制。
+2. **T1 已处理记录去重**：目标文件被用户清理后，如果 `files.json` 中已有相同目标路径或源记录的 `success/partial_success` 且 transcript artifacts 仍存在，导入阶段直接记为 `processed_record_skipped`，不再从外设拉回本地。
+3. **T2 轻量候选筛选**：跨路径或跨设备的“可能重复”先用 size、mtime、duration、codec、device relative path、已有 source key、已有 manifest hash 和 `sample_fingerprint` 缩小候选。`sample_fingerprint` 可用 XXH3/XXH128 或 BLAKE3 采样窗口计算，但只能减少候选和展示风险，不能单独作为“内容相同”并跳过 ASR 的最终依据，避免 partial fingerprint 误判导致漏转写。
+4. **T3 精确文件内容 hash**：只有两类场景做完整文件 hash：导入复制本来已经要顺序读源文件时顺手更新 BLAKE3 digest；或者用户/后台索引任务明确请求补齐当前目录文件 hash。完整 hash 必须进入全局后台内容哈希队列，串行、低优先级、流式读取，不能占用 Admin API 请求线程、Tokio async worker 或 ASR 模型处理锁。
+5. **T4 规范化音频 hash**：如果两个文件字节不同但可能是同一段录音的不同容器/码率版本，只在 ASR normalize/ffmpeg decode 已经发生时顺手计算 `canonical_audio_hash`，即对统一采样率、声道和 PCM sample format 后的 PCM frame 流做 BLAKE3。它用于识别转码后精确相同的音频内容，但不在导入阶段默认触发全量解码。
+6. **ASR 主流程不等待 hash**：ASR run 只消费已经存在的 `content_hash`、`canonical_audio_hash` 和相关索引。缺少 hash 的大文件按普通文件继续处理，不为了去重同步读完整音频；后台 hash 后续命中只能优化下一轮或后续重复文件。
+7. **算法演进**：V1 持久化字段保留 `content_hash_algorithm`，当前只写入和消费 `blake3`；旧 SHA-256 数据不做兼容，必要时重建索引。
+
+因此“重复的就不导入/不转写”分两种：同一设备同一路径、同 size/mtime 的重复连接导入必须零读取跳过；跨路径内容重复只有已有可信 hash 或已存在成功处理记录时才跳过，否则宁可正常导入/转写，也不能用高成本 hash 阻塞代理服务。
 
 ## 数据模型
 
@@ -211,7 +265,7 @@ pub(crate) struct AsrExternalImportPolicy {
 | `max_file_bytes` | `50 GiB` | 单文件上限，防误导入超大非音频文件 |
 | `auto_run_after_import` | `true` | 导入完成后触发 ASR task run |
 | `content_hash_dedupe_enabled` | `true` | ASR 处理前按内容哈希跳过已转写重复文件 |
-| `content_hash_algorithm` | `sha256` | V1 固定 SHA-256；后续如扩展必须带 algorithm 字段 |
+| `content_hash_algorithm` | `blake3` | 本地精确内容身份固定使用 BLAKE3；旧 SHA-256 数据不做兼容 |
 | `delete_source_after_import` | `false` | V1 不默认删除外接设备源文件 |
 
 ### 导入状态文件与内容哈希索引
@@ -243,7 +297,8 @@ pub(crate) struct AsrImportedFileRecord {
     pub relative_path: PathBuf,
     pub source_size: u64,
     pub source_modified_ms: Option<u64>,
-    pub source_sha256: Option<String>,
+    pub source_hashes: BTreeMap<String, String>,
+    pub sample_fingerprint: Option<String>,
     pub target_path: PathBuf,
     pub target_size: u64,
     pub imported_at_ms: u64,
@@ -259,6 +314,7 @@ pub(crate) struct AsrContentHashIndex {
 pub(crate) struct AsrContentHashRecord {
     pub algorithm: String,
     pub hash: String,
+    pub canonical_audio_hash: Option<String>,
     pub size: u64,
     pub canonical_source_key: String,
     pub canonical_source_path: PathBuf,
@@ -276,7 +332,7 @@ pub(crate) struct AsrTranscriptArtifacts {
 
 `files` key 使用 `relative_path` 的规范化字符串，不使用绝对源路径，避免同一设备挂载到不同 mount path 后被当成不同文件。
 
-`content_hash_index.json` 是 ASR task 级内容哈希索引，不放在 `external_imports.json` 里，避免把普通目录任务和数据源切换后的去重能力耦合到外接设备导入。`hashes` key 使用 `sha256:<hex>`；索引不跨 task 复用，避免不同任务的模型、语言、runtime、Daily Agent 配置不同却错误共享结果。
+`content_hash_index.json` 是 ASR task 级内容哈希索引，不放在 `external_imports.json` 里，避免把普通目录任务和数据源切换后的去重能力耦合到外接设备导入。`hashes` key 必须使用 `algorithm:<hex>`，当前实现只写入和消费 `blake3:<hex>`；索引不跨 task 复用，避免不同任务的模型、语言、runtime、Daily Agent 配置不同却错误共享结果。`sample_fingerprint` 只进入候选索引，不能进入 `hashes` 主键；`canonical_audio_hash` 只有在规范化音频内容精确一致且 ASR 参数兼容时，才允许参与 transcript 复用。
 
 状态保留目的：
 
@@ -311,7 +367,7 @@ target_path = task.audio_dir / sanitize_device_root(binding.name) / source_relat
 
 ## 差异算法
 
-V1 用 “路径 + size + mtime” 判定导入差异，用 “SHA-256 内容 hash” 判定 ASR 处理去重。两者不要混在一起：导入仍然要保持设备目录结构，所以即使内容重复，也要把目标目录下对应文件补齐；去重发生在后续 ASR 模型处理阶段。
+V1 用 “路径 + size + mtime” 判定导入差异，用 “已有处理记录 / 精确内容 hash / 规范化音频 hash” 判定 ASR 处理去重。两者不要混在一起：导入仍然要保持设备目录结构，所以即使内容重复，也要把目标目录下对应文件补齐；去重发生在后续 ASR 模型处理阶段。
 
 1. 枚举设备文件，过滤非音频、0 字节、超过 `max_file_bytes`、隐藏系统目录和用户 exclude globs。
 2. 对每个候选文件读取 metadata。
@@ -325,47 +381,77 @@ V1 用 “路径 + size + mtime” 判定导入差异，用 “SHA-256 内容 ha
    - 如果状态里有同 relative path 的成功导入记录，且记录与源一致但目标不同，说明目标被用户修改；默认不覆盖，记录 `target_modified`。
    - 如果目标是上次未完成的 temp 残留，清理 temp 后重试。
    - 如后续增加 `overwrite_policy`，必须在 UI 中显式选择。
-7. 复制完成后做 size 校验；复制流同步计算 SHA-256，并写入 `source_sha256`。
+7. 复制完成后做 size 校验；复制流同步计算 BLAKE3 内容 hash，并写入 `source_hashes["blake3"]`。
 8. 成功后把目标文件 mtime 设置为源 mtime，便于现有 `source_key()` 稳定。
 
 不使用内容 hash 决定“是否复制目标文件”，原因是需求要求 `audio_dir/<device_name>/<relative_path>` 结构完整保留；重复文件也必须能在目标目录中看到。内容 hash 只决定“是否重复转写”。
 
-## ASR 内容哈希去重
+## ASR 进入前置去重流程
+
+ASR 进入模型前必须有单独的去重闸口，覆盖用户手动把文件复制到 `audio_dir` 的场景。这个闸口不能假设所有文件都经过外接设备导入流程，也不能为了去重同步读取几十 GiB 历史音频。
 
 ASR run 的处理顺序调整为：
 
 ```text
-sync_external_devices_for_task(task)
-  -> discover_audio_files(task.audio_dir, task.recursive)
-  -> ensure_content_hash_for_discovered_files(task, files)
-  -> apply_transcript_dedupe(task, files)
-  -> enqueue_only_files_without_completed_duplicate()
+discover_audio_files(task.audio_dir, task.recursive)
+  -> stable_stat_filter(size/mtime unchanged enough for local files)
+  -> source_key / processed artifact hit
+  -> existing exact content_hash hit
+  -> existing canonical_audio_hash hit
+  -> load_or_create_lightweight_candidate_fingerprint()
+  -> candidate lookup by size/duration/codec/sample_fingerprint
+  -> decide_hash_cost_against_asr_cost()
+  -> enqueue_asr_or_mark_duplicate_completed()
 ```
 
 规则：
 
-1. 导入产生的新文件优先复用 `external_imports.json` 中的 `source_sha256`，不重新读取目标文件。
-2. 非导入文件或旧文件缺少 hash 时，在 ASR 发现后、进入模型推理前按需计算 SHA-256，并写回 file record 与 `content_hash_index.json`。
-3. hash 计算必须基于稳定文件：size/mtime 在 hash 前后不变；若不稳定，文件保持 pending，等待下一轮。
-4. 当 `content_hash_index.json` 中已存在同 hash、同 size 的记录，并且 canonical file 状态为 completed、`text_path`/`metadata_path`/`timeline_path` 等转写产物实际存在时：
+1. 导入产生的新文件优先复用 `external_imports.json` 中的 `source_hashes["blake3"]`，不重新读取目标文件。
+2. 用户手动复制到 `audio_dir` 的文件，先走 `source_key`、历史 file record、产物存在性和 metadata 候选筛选；如果已有相同 source_key 的 completed/partial_success 且 transcript artifacts 存在，直接标记重复或历史已处理，不进入模型。
+3. 非导入文件或旧文件缺少 hash 时，ASR run 不在同步路径补算完整 BLAKE3；文件按普通 pending/failed 进入模型处理，避免 Resume 或启动恢复卡住代理主服务。
+4. 如后续需要给历史文件补 hash，必须通过后台内容哈希队列执行；计算必须基于稳定文件：size/mtime 在 hash 前后不变；若不稳定，文件保持 pending 或跳过本次 hash，等待下一轮后台队列。
+5. `sample_fingerprint` 的计算只能读取少量窗口，例如首部、中部、尾部各 1-4 MiB，再结合 size、duration、codec 和 mtime 缩小候选。它不能单独导致 `duplicate_completed`，也不能单独跳过 ASR。
+6. 当 `content_hash_index.json` 中已存在同 algorithm-prefixed hash、同 size 的记录，并且 canonical file 状态为 completed、`text_path`/`metadata_path`/`timeline_path` 等转写产物实际存在时：
    - 当前文件不进入 ASR 模型推理队列。
    - 当前 file record 标记为 `duplicate_completed`。
    - 写入 `duplicate_of_source_key`、`content_hash`、`transcript_alias`。
    - WebUI/CLI 展示当前文件时，通过 alias 读取 canonical transcript artifacts。
    - Daily Docs 聚合时仍可列出当前文件名和路径，但正文内容来自 canonical transcript，并在 metadata 中标记 duplicate source。
-5. 如果 hash 命中但 canonical 文件尚未完成、产物缺失、产物损坏、模型/语言/runtime 不兼容，不能跳过；当前文件按普通文件进入 ASR。
-6. 如果两个重复文件在同一轮同时发现，只有第一个成功完成转写后才建立 canonical 记录；其它重复文件可以在本轮尾部再次检查 hash index，命中后跳过，否则下一轮跳过。
-7. 切换 `audio_dir` 后，旧 hash index 保留；新目录中相同内容文件可以复用旧转写产物，但必须满足产物存在和任务配置兼容检查。
+7. 当 `canonical_audio_hash` 命中时，只有在它来自可信规范化流程、ASR 参数兼容、产物存在且音频 normalize 参数版本一致时才允许跳过模型。它解决“用户手动拷贝了转码后文件”的场景，但不能在导入阶段强行解码全量音频。
+8. 如果 hash 命中但 canonical 文件尚未完成、产物缺失、产物损坏、模型/语言/runtime 不兼容，不能跳过；当前文件按普通文件进入 ASR。
+9. 如果两个重复文件在同一轮同时发现，只有第一个成功完成转写后才建立 canonical 记录；其它重复文件可以在本轮尾部再次检查 hash index，命中后跳过，否则下一轮跳过。
+10. 切换 `audio_dir` 后，旧 hash index 保留；新目录中相同内容文件可以复用旧转写产物，但必须满足产物存在和任务配置兼容检查。
+
+`decide_hash_cost_against_asr_cost()` 的策略：
+
+- 小文件或候选数量很少时，可以派发后台精确 hash 并给 ASR 前置闸口一个很小的等待预算；等待超时即继续 ASR，不阻塞任务。
+- 大文件、几十 GiB 批量导入、CPU/IO 繁忙或代理服务正在承压时，直接进入 ASR 队列，并把精确 hash/canonical audio hash 留给后台补齐，优化后续重复文件。
+- 如果 ASR normalize 阶段本来已经在读完整音频，顺手计算 `canonical_audio_hash`；如果 ASR 失败，不写入可复用 canonical record。
+
+允许跳过 ASR 的唯一条件：
+
+- 同 source_key 或同任务历史记录已 completed/partial_success，且转写产物实际存在。
+- 精确 `content_hash` 命中，size 一致，canonical 转写产物实际存在，ASR 参数兼容。
+- 精确 `canonical_audio_hash` 命中，normalize 参数版本和 ASR 参数兼容，canonical 转写产物实际存在。
+
+不允许跳过 ASR 的信号：
+
+- 仅 size/mtime 相同。
+- 仅 duration/codec 相同。
+- 仅 `sample_fingerprint` 或 XXH3/XXH128 采样窗口命中。
+- 仅 Chromaprint/声学指纹近似匹配。
+- hash 命中但 transcript/timeline/metadata 缺失、损坏或参数不兼容。
 
 兼容检查：
 
 - V1 hash index 只在同一 task 内复用。
 - canonical record 必须记录 `model`、`language`、`runtime_strategy`、关键 ASR 参数版本；当前文件参数一致才允许复用。
+- `canonical_audio_hash` 还必须记录 normalize pipeline 版本、采样率、声道、sample format 和 ffmpeg/decoder 策略版本；这些字段变化时不能复用。
 - Daily Agent report 不作为文件级转写产物复用依据；文件级 transcript/timeline/metadata 才是跳过 ASR 的必要条件。
 
 错误与降级：
 
-- `hash_unavailable`：hash 计算失败，继续普通 ASR，不做内容去重。
+- `hash_unavailable`：后台 hash 计算失败，继续普通 ASR，不做内容去重。
 - `hash_changed_during_read`：hash 前后 size/mtime 变化，延迟到下一轮。
 - `duplicate_artifacts_missing`：hash 命中但产物缺失，当前文件普通转写并刷新 hash index。
 - `duplicate_param_mismatch`：hash 命中但 ASR 参数不兼容，当前文件普通转写。
@@ -442,7 +528,10 @@ GET  /api/asr/tasks/{task_id}/external-import/runs
 
 - `GET /api/asr/external-volumes` 返回当前 mounted volumes：`name`、`mount_path`、`volume_uuid`、`device_identifier`、`kind`、`read_only`、`available_bytes`。
 - `PUT` 保存 bindings 和 policy。
-- `run` 支持 `device_name` 可选参数；不传则同步所有绑定且当前已连接的设备。
+- `run` 支持 `device_name` 可选参数；不传则导入所有绑定且当前已连接的设备。
+- `run` 必须后台执行：接口只负责创建导入 run、写入 `current_run` 进度并立即返回 HTTP 202，不能在请求处理链路中等待外接设备扫描和大文件复制完成。
+- 后台导入必须运行在独立阻塞任务/worker 中，文件遍历、读取、内容 hash 计算和复制不得占住 Admin API 主请求路径；完整文件 hash 计算还必须通过全局内容哈希队列串行化。导入期间 `GET /api/asr/tasks`、任务详情和状态接口必须持续响应。
+- `GET /api/asr/tasks/{task_id}/external-import` 返回 `current_run`：`run_id`、`status`、`current_device`、`current_file`、`current_file_size`、`current_file_copied_bytes`、`processed_files`、`total_files_discovered`、`imported/skipped/processed_record_skipped/failed`、`message`。如果服务重启导致 `current_run.status=importing` 但本进程无对应后台任务，状态归一为 `failed` 并提示用户重新导入。
 - 返回状态区分 `ready`、`not_connected`、`ambiguous`、`importing`、`insufficient_space`、`permission_denied`、`device_disconnected`、`completed_with_errors`。
 
 ## WebUI 设计
@@ -453,6 +542,9 @@ GET  /api/asr/tasks/{task_id}/external-import/runs
 - 用户可从当前已连接设备列表选择，也可手动输入设备名称。
 - 每个绑定展示：设备名、当前连接状态、上次看到时间、上次导入结果、UUID 是否已绑定。
 - 任务详情页新增 “External Import” tab，展示最近导入 run、导入文件列表、失败原因和手动 Run import 按钮。
+- 任务列表中的 `Import External` 点击后按钮进入 loading，但页面不能等待导入完成；前端轮询 `GET /external-import` 的 `current_run`，在任务行下方展示全宽总进度条、当前设备/文件、扫描总数、已处理数、已导入成功数、已有处理记录跳过数和失败数。后台导入必须先扫描出当前设备候选音频文件总数，再进入复制/导入循环；总进度条只表达整体文件处理进度（`processed_files / total_files_discovered`），不能误用当前单文件复制字节数作为主进度。
+- ASR 页面刷新或重新进入后，前端必须根据任务列表中的外接设备绑定重新拉取各任务 `current_run`，恢复正在导入的进度展示。
+- Paused 状态只阻止 ASR 转写和导入完成后的 auto-run，不阻止外接设备事件导入或手动 `Import External`；用户清理已导入的本地源音频后，如果该文件还没有成功或部分成功的 ASR 处理记录，重新插入设备必须能把缺失文件重新导入；如果同一路径已经有成功或部分成功的处理记录，则视为“已处理归档”，即使本地目标源文件已被清理，也不能再从外设重新导入，进度区必须展示已处理跳过数量。
 - 同名设备冲突时 UI 需要提示 “同名卷不唯一，请选择具体 UUID”。
 - 目标目录预览必须清楚显示：`<audio_dir>/<device_name>/...`。
 
@@ -530,7 +622,7 @@ PATCH /api/asr/tasks/{task_id}
 - 不删除 `<BIFROST_DATA_DIR>/asr/data/text/<task_id>/` 下已有 `.txt`、`.json`、`.timeline.json`、`daily/` 和 `daily/report/`。
 - 旧记录在详情页仍可展示历史转写结果；如果旧源文件不在新目录或已不存在，Source Audio 播放/API 按现有缺失源文件路径返回不可用状态。
 - 后续 run 只从新的 `audio_dir` 发现文件；如果新目录为空，则本轮 discovered/pending 不新增，只刷新已有 daily 状态或返回 no-op。
-- 新目录中与旧目录同名同 size/mtime 的文件，因为 absolute path 变了，按现有 `source_key()` 会成为新 source record；V1 使用 task 级 SHA-256 hash index 在 ASR 处理前识别内容重复，若旧记录已完成且转写产物存在，则新文件可跳过模型推理并复用转写结果。
+- 新目录中与旧目录同名同 size/mtime 的文件，因为 absolute path 变了，按现有 `source_key()` 会成为新 source record；V1 使用 task 级 algorithm-prefixed content hash index 在 ASR 处理前识别内容重复，若旧记录已完成且转写产物存在，则新文件可跳过模型推理并复用转写结果。
 
 WebUI：
 
@@ -605,7 +697,7 @@ CLI 和 WebUI 都调用同一 Admin API，不直接扫描设备。
 - 新增数据结构和持久化。
 - 新增导入差异算法、路径安全、原子复制、状态文件和内容 hash index。
 - 设备事件和手动入口同步已连接设备。
-- ASR 处理前计算/读取 SHA-256，命中已完成转写产物时跳过重复模型推理。
+- ASR 进入模型前只读取已有 source_key、content hash、canonical audio hash 和产物索引；缺少精确 hash 时不在同步路径补算，命中已完成转写产物时才跳过重复模型推理。
 - 新增手动 API 和单元测试。
 - 新增 Disk Arbitration provider。
 - 事件 debounce 入队。

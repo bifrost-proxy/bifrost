@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证 ASR Directory Task 绑定外接设备名称后，可以在设备连接/挂载时自动扫描设备文件，并把差异文件导入到任务 `audio_dir` 下。导入目录必须以设备名称为根目录，设备内相对路径、目录名和文件名保持不变；重复连接或重复扫描不会重复复制已导入文件；跨设备或跨目录的同内容文件通过 SHA-256 hash 识别，已完成转写且产物存在时不重复执行 ASR 模型。
+验证 ASR Directory Task 绑定外接设备名称后，可以在设备连接/挂载时自动扫描设备文件，并把差异文件导入到任务 `audio_dir` 下。导入目录必须以设备名称为根目录，设备内相对路径、目录名和文件名保持不变；重复连接或重复扫描不会重复复制已导入文件；跨设备或跨目录的同内容文件通过 BLAKE3 hash 识别，已完成转写且产物存在时不重复执行 ASR 模型。
 
 本文件用于实现验收。2026-05-21 已使用当前连接的两个真实 macOS 外接卷 `LEFT`、`RIGHT` 执行 API、真实文件导入和 WebUI 验证。
 
@@ -40,7 +40,7 @@
    ```
 5. 检查方案覆盖差异导入、去重和大小/稳定性检查：
    ```bash
-   rg -n "路径 \\+ size \\+ mtime|file_stable_secs|size 校验|unchanged|target_modified|0 字节|source_sha256" design/asr-external-device-import.md
+   rg -n "路径 \\+ size \\+ mtime|file_stable_secs|size 校验|unchanged|target_modified|0 字节|source_hashes" design/asr-external-device-import.md
    ```
 6. 检查方案覆盖容错状态：
    ```bash
@@ -65,9 +65,9 @@
    ```bash
    rg -n "asr-external-device-import.md|ASR 外接设备自动导入" human_tests/readme.md
    ```
-2. 检查索引用例数量为 11：
+2. 检查索引用例数量为 12：
    ```bash
-   rg -n "asr-external-device-import.md.*\\| 11 \\|" human_tests/readme.md
+   rg -n "asr-external-device-import.md.*\\| 12 \\|" human_tests/readme.md
    ```
 
 预期结果：
@@ -77,7 +77,7 @@
 
 执行结果：
 
-- 已执行，`human_tests/readme.md` 包含本文件，索引用例数为 11。
+- 已执行，`human_tests/readme.md` 包含本文件，索引用例数为 12。
 
 ### TC-AEDI-03 macOS 真实挂载卷自动导入回归
 
@@ -316,27 +316,47 @@
 
 - 已执行。macOS 事件监听通过 `diskutil activity` 订阅 Disk Arbitration 活动流；服务运行期间可看到 `diskutil activity` 子进程，服务停止后子进程退出。后台定时扫描已移除，兜底由配置页确认和手动导入入口承担。
 
-### TC-AEDI-11 内容哈希去重与成本边界
+### TC-AEDI-11 高性能哈希选型、导入去重与 ASR 前置去重
 
 操作步骤：
 
-1. 检查方案包含哈希成本评估和接受结论：
+1. 检查方案包含哈希成本评估、高性能算法选型和接受结论：
    ```bash
-   rg -n '内容哈希成本评估|2.3 GB/s|278 MiB/s|V1 默认启用内容哈希去重|顺手计算、只算一次、长期缓存' design/asr-external-device-import.md
+   rg -n '内容哈希成本评估|高性能哈希算法选型|行业方案调研与取舍|大文件极致性能去重策略|2.3 GB/s|278 MiB/s|顺手计算、只算一次、长期缓存|后台内容哈希队列' design/asr-external-device-import.md
    ```
-2. 检查方案明确导入复制流同步计算 SHA-256，不额外重读设备：
+2. 检查方案明确推荐算法和角色边界：
    ```bash
-   rg -n '复制流同步计算 SHA-256|不额外再读一遍源设备|source_sha256|content_hash_algorithm' design/asr-external-device-import.md
+   rg -n 'BLAKE3-256|blake3:<hex>|SHA-256|XXH3 / XXH128|CRC32C|FastCDC|Chromaprint|canonical_audio_hash' design/asr-external-device-import.md
    ```
-3. 检查方案明确 ASR 处理前应用 hash 去重：
+3. 检查方案明确导入复制流同步计算内容 hash，不额外重读设备：
    ```bash
-   rg -n 'content_hash_index.json|ensure_content_hash_for_discovered_files|apply_transcript_dedupe|duplicate_completed|duplicate_of_source_key|transcript_alias' design/asr-external-device-import.md
+   rg -n '复制流同步计算 BLAKE3 内容 hash|不额外再读一遍源设备|source_hashes\\[\"blake3\"\\]|content_hash_algorithm|blake3:<hex>' design/asr-external-device-import.md
    ```
-4. 检查方案明确跳过 ASR 的必要条件和降级路径：
+4. 检查方案明确 ASR 进入模型前置去重流程，覆盖手动拷贝文件：
    ```bash
-   rg -n '产物实际存在|duplicate_artifacts_missing|duplicate_param_mismatch|hash_unavailable|hash_changed_during_read|不能跳过' design/asr-external-device-import.md
+   rg -n 'ASR 进入前置去重流程|手动把文件复制到 `audio_dir`|discover_audio_files|stable_stat_filter|existing exact content_hash hit|existing canonical_audio_hash hit|candidate lookup|decide_hash_cost_against_asr_cost' design/asr-external-device-import.md
    ```
-5. 检查方案明确导入结构仍完整保留：
+5. 检查方案明确历史大文件缺少 hash 时不阻塞 ASR run 主流程：
+   ```bash
+   rg -n 'ASR run 不在同步路径补算完整 BLAKE3|Resume|启动恢复|几十 GB|后台内容哈希队列|ASR 主流程不等待 hash' design/asr-external-device-import.md
+   ```
+6. 检查方案明确外接设备导入优先用不读文件的快路径去重：
+   ```bash
+   rg -n 'T0 设备 manifest 去重|不打开源文件、不计算 hash、不复制|processed_record_skipped|ASR 主流程不等待 hash' design/asr-external-device-import.md
+   ```
+7. 检查方案明确行业方案取舍，不把 CDC/block hash 放进 V1 主链路：
+   ```bash
+   rg -n 'rsync|rclone|Syncthing|restic|Borg|CDC/block 级去重暂不进入 V1 主链路' design/asr-external-device-import.md
+   ```
+8. 检查方案明确跳过 ASR 的必要条件和降级路径：
+   ```bash
+   rg -n '允许跳过 ASR 的唯一条件|不允许跳过 ASR 的信号|duplicate_artifacts_missing|duplicate_param_mismatch|hash_unavailable|hash_changed_during_read|不能跳过' design/asr-external-device-import.md
+   ```
+9. 检查方案明确轻量指纹不能直接跳过 ASR：
+   ```bash
+   rg -n 'sample_fingerprint|XXH3/XXH128|只能减少候选|不能单独导致 `duplicate_completed`|仅 Chromaprint/声学指纹近似匹配' design/asr-external-device-import.md
+   ```
+10. 检查方案明确导入结构仍完整保留：
    ```bash
    rg -n '即使内容重复，也要把目标目录下对应文件补齐|内容 hash 只决定“是否重复转写”|两个目标文件都被导入' design/asr-external-device-import.md
    ```
@@ -344,14 +364,61 @@
 预期结果：
 
 - 方案接受哈希去重，并说明成本可控的依据。
-- 导入时复制和 hash 共用同一次顺序读取，不为 hash 额外读取外接设备。
-- 缺少 hash、hash 计算失败、文件变化、转写产物缺失或 ASR 参数不兼容时，不错误跳过 ASR。
+- 方案调研 BLAKE3、SHA-256、XXH3/XXH128、CRC32C、FastCDC/CDC、Chromaprint 和 `canonical_audio_hash`，并明确本地精确内容身份固定使用 BLAKE3，不兼容旧 SHA-256 数据。
+- 方案调研同步、块同步和备份去重系统，并明确 Bifrost ASR V1 采用同步系统快路径 + 后台 hash 增强，不把 CDC/block hash 放入导入/Resume 主链路。
+- 方案明确大文件去重优先走 T0/T1 零读取快路径，完整 hash 只做后台精确兜底；导入时复制和 hash 共用同一次顺序读取，不为 hash 额外读取外接设备。
+- ASR 进入模型前有独立去重闸口，覆盖用户手动拷贝文件到 `audio_dir` 的情况。
+- 历史大文件缺少 hash 时，ASR run、Resume 和启动恢复不在主流程同步补算；需要补 hash 时通过后台内容哈希队列串行执行。
+- 缺少 hash、hash 计算失败、文件变化、转写产物缺失或 ASR 参数不兼容时，不错误跳过 ASR；`sample_fingerprint`、XXH3/XXH128 采样窗口和 Chromaprint 近似指纹只能缩小候选，不能单独触发 `duplicate_completed`。
+- 精确 `content_hash` 或可信 `canonical_audio_hash` 命中且产物存在、参数兼容时，才允许跳过 ASR 模型推理。
 - 重复文件仍会保留在 `audio_dir/<device_name>/<relative_path>`，只是 ASR 模型推理阶段复用已完成转写产物。
 
 执行结果：
 
 - 已执行 `cargo test -p bifrost-admin content_hash_dedupe_reuses_completed_transcript`，同内容第二个文件被标记为 `success`，设置 `duplicate_of_source_key`，并复用既有 `output_text_path`。
 - 已执行真实设备导入验证，同内容测试文件仍分别导入到 `LEFT/.../duplicate.wav` 和 `RIGHT/.../duplicate-copy.wav`，目录结构完整保留。
+- 2026-05-22 已执行本用例文档检查命令，方案已覆盖高性能 hash 算法选型、手动拷贝文件的 ASR 前置去重、轻量指纹边界、后台队列和跳过 ASR 的严格条件。
+- 2026-05-22 已启动真实 Bifrost 服务并使用已挂载外接卷 `LEFT` 执行端到端验证：写入新设备文件后触发 `POST /external-import/run`，接口 4ms 返回，导入完成并在 `external_imports.json` 写入 `source_hashes["blake3"]`；随后手动复制同内容文件到任务 `audio_dir`，触发 `POST /run`，接口 2ms 返回，任务详情中手动文件被标记为 `success`，`duplicate_of_source_key` 指向 canonical 文件并复用既有 transcript artifact，证明 ASR 模型前置去重真实生效。
+
+### TC-AEDI-12 手动导入后台执行且主页面不被卡死
+
+操作步骤：
+
+1. 使用真实外接卷或 disk image 准备至少一个较大的音频文件。
+2. 启动最新本地构建的 Bifrost 服务，创建绑定该设备的 ASR Directory Task。
+3. 点击任务列表 `Import External`，或调用：
+   ```bash
+   curl -i -X POST http://127.0.0.1:18880/_bifrost/api/asr/tasks/<task_id>/external-import/run
+   ```
+4. 立即调用任务列表 API：
+   ```bash
+   curl -m 2 -sS http://127.0.0.1:18880/_bifrost/api/asr/tasks
+   ```
+5. 轮询导入状态：
+   ```bash
+   curl -sS http://127.0.0.1:18880/_bifrost/api/asr/tasks/<task_id>/external-import
+   ```
+6. 在 WebUI 观察 `Import External` 按钮和进度条。
+
+预期结果：
+
+- `POST /external-import/run` 立即返回 HTTP 202，不等待大文件复制完成。
+- 导入复制在后台任务中执行，任务列表 API 在导入期间 2 秒内有响应。
+- 状态响应包含 `current_run`，能看到 `status=importing`、当前设备、当前文件、已复制字节、已处理文件数。
+- 任务列表的导入进度展示在任务行下方的全宽区域，而不是 Actions 右侧窄列。
+- 后台导入先扫描当前设备候选音频文件总数，再执行复制/导入；主进度条表示整体文件处理进度（已处理文件数 / 扫描总数），不是当前单个文件复制字节进度。
+- 进度区域展示当前导入文件名、扫描总数、已导入成功数量、已处理数量、已有处理记录跳过数量和失败数量。
+- 刷新 ASR 页面后，仍能通过后端 `current_run` 恢复正在导入的进度展示。
+- 任务处于 Paused 状态时，重新插入外接设备或点击 `Import External` 仍会执行导入；Paused 只阻止导入完成后的自动 ASR 转写，不阻止文件重新导入。
+- 删除已成功导入到 `audio_dir` 的目标文件后，如果该文件还没有成功或部分成功的 ASR 处理记录，重新插入设备或手动导入会重新复制缺失文件，不能因为历史 imported 记录而跳过。
+- 删除已成功或部分成功转写过的本地源音频后，即使外设上仍保留原文件，重新插入设备或手动导入也不会再次复制该文件；导入说明展示已有处理记录跳过数量。
+- 导入完成后状态变为 `completed` 或 `completed_with_errors`，任务列表按钮结束 loading；成功导入的文件仍保持设备名根目录和相对路径。
+
+执行结果：
+
+- 已更新 E2E 脚本 `tests/asr_external_device_import_e2e.sh`：断言 `POST /external-import/run` 返回 202 且 1500ms 内完成响应，随后立即调用 `/tasks` 验证主 API 仍响应，再轮询 `current_run` 到完成并检查导入文件。
+- 已更新导入流程和 WebUI 任务列表：后台先扫描候选音频文件总数再导入；Paused 任务仍允许外接设备事件和手动导入，只是不触发自动 ASR 转写；没有 ASR 成功/部分成功处理记录的缺失目标会重新导入；已有成功/部分成功处理记录的缺失目标会跳过并计入 `processed_record_skipped`；导入进度从 Actions 列移到行下方，主进度按 `processed_files / total_files_discovered` 计算；当前文件名、扫描总数、成功导入数、已有处理记录跳过数、已处理数和失败数由 `current_run` 展示；页面刷新后会重新读取已绑定外设任务的 `current_run` 恢复展示。
+- 本轮真实执行记录见下方执行记录表。
 
 ## 清理步骤
 
@@ -364,7 +431,7 @@
 
 | 日期 | 用例 | 命令/场景 | 结果 |
 |---|---|---|---|
-| 2026-05-21 | TC-AEDI-01 / TC-AEDI-02 | `rg` 检查 `design/asr-external-device-import.md` 和 `human_tests/readme.md` | PASS：设计文档存在并覆盖用户目标；索引包含本文件且用例数为 11 |
+| 2026-05-21 | TC-AEDI-01 / TC-AEDI-02 | `rg` 检查 `design/asr-external-device-import.md` 和 `human_tests/readme.md` | PASS：设计文档存在并覆盖用户目标；索引包含本文件且用例数为 12 |
 | 2026-05-21 | TC-AEDI-03 / TC-AEDI-04 | 真实启动 `./target/debug/bifrost start -p 18880 --unsafe-ssl --no-system-proxy`；`GET /api/asr/external-volumes`；在 `/Volumes/LEFT`、`/Volumes/RIGHT` 写入测试音频；`POST /api/asr/tasks/{id}/external-import/run`；再次运行导入；`cmp` 校验源目标文件 | PASS：识别 `LEFT`/`RIGHT`；首次导入 `imported=9`，包含本轮 4 个新增测试文件；目标路径按设备名和相对目录保留；再次导入 `imported=0` |
 | 2026-05-21 | TC-AEDI-03 目录创建回归 | `BIFROST_ASR_E2E_REQUIRE_DEVICES=1 tests/asr_external_device_import_e2e.sh`，脚本传入创建前不存在的 `<temp_target_parent>/missing-target-dir` 作为 `audio_dir` | PASS：保存任务时自动创建缺失目录；真实 `LEFT`/`RIGHT` 导入 `imported=4`，再次导入 `repeatImported=0` |
 | 2026-05-21 | TC-AEDI-05 | `cargo test -p bifrost-admin external_import_defers_recently_modified_files` | PASS：最近修改文件会等待 `file_stable_secs`，超过稳定窗口后放行 |
@@ -376,4 +443,8 @@
 | 2026-05-21 | TC-AEDI-09 | API 删除 wrong confirm 与 exact confirm；Playwright 检查删除弹窗按钮禁用/启用 | PASS：错误 `confirm_name` 返回 400，完整任务名返回 200；WebUI 未输入完整任务名时 Delete 禁用，输入后启用 |
 | 2026-05-21 | TC-AEDI-10 | 服务运行时检查 `diskutil activity` 子进程；停止服务后复查 | PASS：macOS Disk Arbitration 活动流 watcher 启动；服务停止后 watcher 退出；后台定时扫描已移除 |
 | 2026-05-21 | TC-AEDI-11 | `cargo test -p bifrost-admin content_hash_dedupe_reuses_completed_transcript`；真实设备导入重复内容文件 | PASS：哈希命中后复用已完成 transcript；重复内容文件仍分别导入到各自设备目录 |
+| 2026-05-22 | TC-AEDI-11 方案回归 | `rg` 检查高性能 hash 算法选型、ASR 前置去重流程、手动拷贝覆盖、轻量指纹边界和跳过 ASR 的唯一条件 | PASS：方案明确本地精确内容身份固定使用 BLAKE3，不兼容旧 SHA-256 数据；手动复制文件由 ASR 前置去重覆盖；轻量指纹不能单独跳过 ASR |
 | 2026-05-21 | TC-AEDI-03 回归 | 创建绑定 `LEFT`、`RIGHT` 的任务后通过任务列表等价 API `POST /external-import/run` 手动补跑；检查 `find "$TARGET_DIR" -name '._*'` | PASS：手动补跑导入两个测试音频；目录结构保留；目标目录无 AppleDouble `._*` 元数据文件 |
+| 2026-05-21 | TC-AEDI-12 | `BIFROST_ASR_E2E_PORT=18882 BIFROST_ASR_E2E_DEVICES=RIGHT BIFROST_ASR_E2E_REQUIRE_DEVICES=1 tests/asr_external_device_import_e2e.sh`；`pnpm --dir web build` | PASS：真实 `RIGHT` 卷导入 `imported=2`，重复导入 `repeatImported=0`，`POST /external-import/run` 在 3ms 返回 202，导入期间 `/tasks` API 保持响应并可轮询 `current_run` 到完成；删除目标文件且任务 Paused 后重新导入 `reimportedAfterDelete=1`；写入成功处理记录后再次删除目标文件，重新导入不复制该文件且 `processedRecordSkipped=1`；WebUI 构建通过，进度 UI 使用行下方全宽展示和后端 `current_run` 恢复逻辑 |
+| 2026-05-22 | TC-AEDI-11 / TC-AEDI-12 真实端到端回归 | `bash tests/asr_external_device_import_e2e.sh`；临时数据目录启动 `./target/debug/bifrost start -p 18883 --unsafe-ssl --no-system-proxy --skip-cert-check --access-mode allow_all`，真实 `LEFT` 卷新增测试文件，API 触发导入，再手动复制重复文件到 `audio_dir` 后调用 `POST /tasks/{id}/run` | PASS：真实 `LEFT`/`RIGHT` 设备导入 `imported=4`、重复导入 `repeatImported=0`、删除后重新导入 `reimportedAfterDelete=1`、已处理记录跳过 `processedRecordSkipped=1`、导入启动 4ms 返回；ASR 前置去重真实服务验证中 `source_hashes["blake3"]` 写入成功，手动拷贝重复文件在 `/run` 后标记 `success`，设置 `duplicate_of_source_key` 并复用 canonical transcript，`/api/proxy/address` 同期保持响应 |
+| 2026-05-22 | TC-AEDI-11 扫描顺序回归 | `cargo test -p bifrost-admin content_hash_dedupe_hashes_manual_copy_when_candidate_exists --lib`；清理 `/Volumes/LEFT/codex-preflight*` 测试残留后，临时数据目录启动 `./target/debug/bifrost start -p 18887 --unsafe-ssl --no-system-proxy --skip-cert-check --access-mode allow_all`，真实 `LEFT` 卷导入 canonical 文件，再将同内容 `manual-copy.wav` 放在 `audio_dir` 根目录并调用 `POST /tasks/{id}/run` | PASS：单测覆盖 `manual-copy` 在扫描顺序中排在 canonical 之前的情况；真实服务验证 `manual-copy.wav` 在 ASR 前置阶段被标记为 `success`，`duplicate_of_source_key` 指向 canonical source key，复用 canonical transcript，`POST /run` 1ms 返回且代理 API 保持响应 |

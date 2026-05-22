@@ -12,6 +12,7 @@ import {
   getAsrTask,
   getAsrTaskDailyDocument,
   getAsrTaskFileTimeline,
+  getAsrExternalImportStatus,
   listAsrTasks,
   loadAsrParams,
   loadVoiceRealtimeParams,
@@ -25,6 +26,8 @@ import {
   type AsrDirectoryTaskDetail,
   type AsrDailyAgentReportDetail,
   type AsrExternalDeviceBinding,
+  type AsrExternalImportRunProgress,
+  type AsrPauseMode,
   type AsrStatus,
   type AsrStreamEvent,
   type AsrTaskDailyDocumentDetail,
@@ -87,6 +90,9 @@ export default function ASR() {
   const [taskDailyAgentReport, setTaskDailyAgentReport] =
     useState<AsrDailyAgentReportDetail | null>(null);
   const [taskDailyAgentReportLoading, setTaskDailyAgentReportLoading] = useState(false);
+  const [externalImportProgressByTask, setExternalImportProgressByTask] = useState<
+    Record<string, AsrExternalImportRunProgress>
+  >({});
   const [workState, setWorkState] = useState<WorkState>("idle");
   const [progress, setProgress] = useState(0);
   const [selectedName, setSelectedName] = useState("");
@@ -138,6 +144,64 @@ export default function ASR() {
       setTasksLoading(false);
     }
   }, [appendEvent]);
+
+  const applyTaskControlUpdate = useCallback((nextTask: AsrDirectoryTask) => {
+    setTasks((prev) =>
+      prev.map((task) =>
+        task.id === nextTask.id
+          ? {
+              ...task,
+              ...nextTask,
+              summary: {
+                ...task.summary,
+                ...nextTask.summary,
+              },
+              bulk_retry: nextTask.bulk_retry,
+            }
+          : task,
+      ),
+    );
+    setTaskDetail((prev) =>
+      prev?.id === nextTask.id
+        ? {
+            ...prev,
+            ...nextTask,
+            summary: {
+              ...prev.summary,
+              ...nextTask.summary,
+            },
+            bulk_retry: nextTask.bulk_retry,
+            files: prev.files,
+            daily_documents: prev.daily_documents,
+          }
+        : prev,
+    );
+  }, []);
+
+  const refreshExternalImportStatus = useCallback(
+    async (taskId: string) => {
+      try {
+        const status = await getAsrExternalImportStatus(taskId);
+        setExternalImportProgressByTask((prev) => {
+          if (!status.current_run) {
+            const next = { ...prev };
+            delete next[taskId];
+            return next;
+          }
+          return { ...prev, [taskId]: status.current_run };
+        });
+        return status.current_run;
+      } catch (error) {
+        appendEvent(
+          `external import status error: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        return undefined;
+      }
+    },
+    [appendEvent],
+  );
 
   const stopMicMeter = useCallback(() => {
     if (micMeterRafRef.current !== null) {
@@ -667,7 +731,7 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
               max_file_bytes: 50 * 1024 * 1024 * 1024,
               auto_run_after_import: true,
               content_hash_dedupe_enabled: true,
-              content_hash_algorithm: "sha256",
+              content_hash_algorithm: "blake3",
               delete_source_after_import: false,
             }
           : undefined,
@@ -708,7 +772,7 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
                 max_file_bytes: 50 * 1024 * 1024 * 1024,
                 auto_run_after_import: true,
                 content_hash_dedupe_enabled: true,
-                content_hash_algorithm: "sha256",
+                content_hash_algorithm: "blake3",
                 delete_source_after_import: false,
               }
             : {
@@ -718,7 +782,7 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
                 max_file_bytes: 50 * 1024 * 1024 * 1024,
                 auto_run_after_import: true,
                 content_hash_dedupe_enabled: true,
-                content_hash_algorithm: "sha256",
+                content_hash_algorithm: "blake3",
                 delete_source_after_import: false,
               },
         });
@@ -748,6 +812,86 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
       setTaskDetailLoading(false);
     }
   }, []);
+
+  useEffect(() => {
+    const taskIds = new Set(tasks.map((task) => task.id));
+    const externalTaskIds = tasks
+      .filter((task) => Boolean(task.external_devices?.length))
+      .map((task) => task.id);
+    if (tasks.length === 0) {
+      setExternalImportProgressByTask({});
+      return undefined;
+    }
+
+    let stopped = false;
+    void Promise.all(
+      externalTaskIds.map(async (taskId) => {
+        try {
+          const status = await getAsrExternalImportStatus(taskId);
+          return { taskId, progress: status.current_run };
+        } catch (error) {
+          appendEvent(
+            `external import status error: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+          return { taskId, progress: undefined };
+        }
+      }),
+    ).then((results) => {
+      if (stopped) {
+        return;
+      }
+      setExternalImportProgressByTask((prev) => {
+        const next: Record<string, AsrExternalImportRunProgress> = {};
+        Object.entries(prev).forEach(([taskId, progress]) => {
+          if (taskIds.has(taskId)) {
+            next[taskId] = progress;
+          }
+        });
+        results.forEach(({ taskId, progress }) => {
+          if (progress) {
+            next[taskId] = progress;
+          } else {
+            delete next[taskId];
+          }
+        });
+        return next;
+      });
+    });
+
+    return () => {
+      stopped = true;
+    };
+  }, [appendEvent, tasks]);
+
+  useEffect(() => {
+    const importingTaskIds = Object.entries(externalImportProgressByTask)
+      .filter(([, progress]) => progress.status === "importing")
+      .map(([taskId]) => taskId);
+    if (importingTaskIds.length === 0) {
+      return undefined;
+    }
+    const timer = window.setInterval(() => {
+      importingTaskIds.forEach((taskId) => {
+        void refreshExternalImportStatus(taskId).then((progress) => {
+          if (progress && progress.status !== "importing") {
+            void refreshTasks();
+            if (taskDetail?.id === taskId) {
+              void loadTaskDetail(taskId);
+            }
+          }
+        });
+      });
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [
+    externalImportProgressByTask,
+    loadTaskDetail,
+    refreshExternalImportStatus,
+    refreshTasks,
+    taskDetail?.id,
+  ]);
 
   const loadTaskTimeline = useCallback(async (taskId: string, fileKey: string) => {
     setTaskTimeline(null);
@@ -1010,34 +1154,27 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
   const runDirectoryTask = useCallback(
     async (id: string) => {
       try {
-        await runAsrTask(id);
+        const result = await runAsrTask(id);
         message.info("ASR task started");
-        // Immediately refresh to show running state.
-        if (taskDetail?.id === id) {
-          void loadTaskDetail(id);
-        }
-        await refreshTasks();
+        applyTaskControlUpdate(result.task);
       } catch (error) {
         message.error(error instanceof Error ? error.message : "Failed to run ASR task");
       }
     },
-    [loadTaskDetail, refreshTasks, taskDetail?.id],
+    [applyTaskControlUpdate],
   );
 
   const pauseDirectoryTask = useCallback(
-    async (id: string, force = false) => {
+    async (id: string, force = false, mode: AsrPauseMode = "long_term") => {
       try {
-        const result = await pauseAsrTask(id, { force });
+        const result = await pauseAsrTask(id, { force, mode });
         message.info(result.message);
-        if (taskDetail?.id === id) {
-          void loadTaskDetail(id);
-        }
-        await refreshTasks();
+        applyTaskControlUpdate(result.task);
       } catch (error) {
         message.error(error instanceof Error ? error.message : "Failed to pause ASR task");
       }
     },
-    [loadTaskDetail, refreshTasks, taskDetail?.id],
+    [applyTaskControlUpdate],
   );
 
   const resumeDirectoryTask = useCallback(
@@ -1045,33 +1182,37 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
       try {
         const result = await resumeAsrTask(id);
         message.success(result.message);
-        if (taskDetail?.id === id) {
-          void loadTaskDetail(id);
-        }
-        await refreshTasks();
+        applyTaskControlUpdate(result.task);
       } catch (error) {
         message.error(error instanceof Error ? error.message : "Failed to resume ASR task");
       }
     },
-    [loadTaskDetail, refreshTasks, taskDetail?.id],
+    [applyTaskControlUpdate],
   );
 
   const runExternalImport = useCallback(
     async (id: string) => {
       try {
         const result = await runAsrExternalImport(id);
-        message.success(result.message);
+        if (result.progress) {
+          setExternalImportProgressByTask((prev) => ({
+            ...prev,
+            [id]: result.progress!,
+          }));
+        }
+        message.info(result.message);
         if (taskDetail?.id === id) {
           void loadTaskDetail(id);
         }
         await refreshTasks();
+        void refreshExternalImportStatus(id);
       } catch (error) {
         message.error(
           error instanceof Error ? error.message : "Failed to import external device data",
         );
       }
     },
-    [loadTaskDetail, refreshTasks, taskDetail?.id],
+    [loadTaskDetail, refreshExternalImportStatus, refreshTasks, taskDetail?.id],
   );
 
   const removeDirectoryTask = useCallback(
@@ -1119,7 +1260,7 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
         onBackToDailyAgentReports={closeDailyAgentReport}
         onRefreshTask={(id) => void loadTaskDetail(id)}
         onRunTask={(id) => void runDirectoryTask(id)}
-        onPauseTask={(id, force) => void pauseDirectoryTask(id, force)}
+        onPauseTask={(id, force, mode) => void pauseDirectoryTask(id, force, mode)}
         onResumeTask={(id) => void resumeDirectoryTask(id)}
         onOpenFile={openTaskFile}
         onOpenDailyDocument={openTaskDailyDocument}
@@ -1137,12 +1278,13 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
         taskScheduleKind={taskScheduleKind}
         tasks={tasks}
         tasksLoading={tasksLoading}
+        externalImportProgressByTask={externalImportProgressByTask}
         onCreateTask={createDirectoryTask}
         onUpdateTask={updateDirectoryTask}
         onRunExternalImport={runExternalImport}
         onOpenTask={openTaskDetail}
         onRunTask={(id) => void runDirectoryTask(id)}
-        onPauseTask={(id, force) => void pauseDirectoryTask(id, force)}
+        onPauseTask={(id, force, mode) => void pauseDirectoryTask(id, force, mode)}
         onResumeTask={(id) => void resumeDirectoryTask(id)}
         onRemoveTask={(id, confirmName) => void removeDirectoryTask(id, confirmName)}
       />
