@@ -7,7 +7,6 @@ license.workspace = true
 description = "Power management (keep-awake) for Bifrost — macOS IOKit assertion based, stubs on other platforms"
 
 [dependencies]
-bifrost-core = { path = "../bifrost-core" }
 parking_lot.workspace = true
 serde.workspace = true
 tracing.workspace = true

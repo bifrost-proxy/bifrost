@@ -28,7 +28,6 @@ reqwest = { version = "0.12", default-features = false, features = [
 
 [dev-dependencies]
 futures-util = "0.3"
-tokio-test = "0.4"
 
 [[test]]
 name = "http_proxy_test"

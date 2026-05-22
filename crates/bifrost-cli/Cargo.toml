@@ -50,7 +50,6 @@ tempfile = "3"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 ratatui = "0.29"
 crossterm = "0.28"
-is-terminal = "0.4"
 tokio-tungstenite = "0.26"
 base64 = "0.22"
 ring = "0.17"
