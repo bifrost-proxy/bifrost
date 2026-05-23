@@ -4,6 +4,7 @@ pub use bifrost_agent::{AgentRunnerMode, ImMessageChannelBinding, MessageTargetM
 use bifrost_agent::{PlanStep, ToolCallLog};
 use serde::{Deserialize, Serialize};
 
+pub use super::external_cli::ExternalCliAdapterConfig;
 use super::external_cli::ExternalCliDeliveryMode;
 
 // ---------------------------------------------------------------------------
@@ -384,6 +385,8 @@ pub struct ScheduleAgentTask {
     pub work_dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter_config: Option<ExternalCliAdapterConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_ref: Option<ScheduleConversationRef>,
 }

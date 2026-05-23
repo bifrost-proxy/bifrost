@@ -22,6 +22,9 @@ static ACTIVE_RUNS: once_cell::sync::Lazy<dashmap::DashMap<String, u32>> =
 static ACTIVE_SESSIONS: once_cell::sync::Lazy<dashmap::DashMap<String, String>> =
     once_cell::sync::Lazy::new(dashmap::DashMap::new);
 
+mod command_spec;
+use command_spec::build_command_spec;
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExternalCliRunRequest {
@@ -66,16 +69,61 @@ pub struct ExternalCliAdapterConfig {
     #[serde(default)]
     pub profile: Option<String>,
     #[serde(default)]
+    pub profile_v2: Option<String>,
+    #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
     pub sandbox: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "approvalPolicy", alias = "approval-policy")]
     pub approval_policy: Option<String>,
+    #[serde(default, alias = "reasoningEffort", alias = "reasoning-effort")]
+    pub reasoning_effort: Option<String>,
+    #[serde(default, alias = "reasoningSummary", alias = "reasoning-summary")]
+    pub reasoning_summary: Option<String>,
+    #[serde(default, alias = "dangerFullAccess", alias = "danger-full-access")]
+    pub danger_full_access: Option<bool>,
+    #[serde(
+        default,
+        alias = "dangerouslyBypassHookTrust",
+        alias = "dangerously-bypass-hook-trust",
+        alias = "bypassHookTrust",
+        alias = "bypass-hook-trust"
+    )]
+    pub dangerously_bypass_hook_trust: Option<bool>,
+    #[serde(default, alias = "strictConfig", alias = "strict-config")]
+    pub strict_config: Option<bool>,
+    #[serde(default, alias = "skipGitRepoCheck", alias = "skip-git-repo-check")]
+    pub skip_git_repo_check: Option<bool>,
+    #[serde(default, alias = "ignoreUserConfig", alias = "ignore-user-config")]
+    pub ignore_user_config: Option<bool>,
+    #[serde(default, alias = "ignoreRules", alias = "ignore-rules")]
+    pub ignore_rules: Option<bool>,
+    #[serde(default)]
+    pub oss: Option<bool>,
+    #[serde(default, alias = "localProvider", alias = "local-provider")]
+    pub local_provider: Option<String>,
+    #[serde(default, alias = "outputSchema", alias = "output-schema")]
+    pub output_schema: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default, alias = "addDirs", alias = "add-dirs")]
+    pub add_dirs: Vec<String>,
+    #[serde(default, alias = "configOverrides", alias = "config-overrides")]
+    pub config_overrides: Vec<String>,
+    #[serde(default, alias = "enableFeatures", alias = "enable-features")]
+    pub enable_features: Vec<String>,
+    #[serde(default, alias = "disableFeatures", alias = "disable-features")]
+    pub disable_features: Vec<String>,
     #[serde(default)]
     pub search: Option<bool>,
     #[serde(default)]
     pub ephemeral: Option<bool>,
-    #[serde(default)]
+    #[serde(
+        default,
+        rename = "timeoutSecs",
+        alias = "timeout_secs",
+        alias = "timeout-secs"
+    )]
     pub timeout_secs: Option<u64>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
@@ -864,99 +912,6 @@ fn is_skill_path_allowed(
     false
 }
 
-fn build_command_spec(
-    request: &ExternalCliRunRequest,
-    last_message_path: &Path,
-) -> Result<CommandSpec, String> {
-    if request.adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID {
-        return Ok(CommandSpec {
-            executable: crate::im_gateway::chatgpt_web::ADAPTER_ID.to_string(),
-            args: vec![request.operation.clone()],
-            env: BTreeMap::new(),
-            work_dir: None,
-            timeout_secs: request.adapter_config.timeout_secs.unwrap_or(7200),
-        });
-    }
-    let config = &request.adapter_config;
-    let executable = config
-        .executable
-        .clone()
-        .unwrap_or_else(|| request.adapter.clone());
-    let mut args = config.args.clone();
-
-    if request.adapter == DEFAULT_ADAPTER {
-        if args.is_empty() {
-            if codex_thread_id_from_params(request).is_some() {
-                args = vec![
-                    "exec".to_string(),
-                    "resume".to_string(),
-                    "--json".to_string(),
-                ];
-            } else {
-                args = vec!["exec".to_string(), "--json".to_string()];
-            }
-        }
-        if let Some(work_dir) = request.work_dir.as_ref() {
-            ensure_codex_work_dir_arg(&mut args, work_dir);
-        }
-        ensure_codex_last_message_arg(&mut args, last_message_path);
-        if config.args.is_empty() {
-            let resume_thread_id = codex_thread_id_from_params(request);
-            let is_resume = resume_thread_id.is_some();
-            if let Some(profile) = config.profile.as_deref() {
-                if !is_resume {
-                    args.push("--profile".to_string());
-                    args.push(profile.to_string());
-                }
-            }
-            if let Some(model) = config.model.as_deref() {
-                args.push("--model".to_string());
-                args.push(model.to_string());
-            }
-            if let Some(sandbox) = config.sandbox.as_deref() {
-                if !is_resume {
-                    args.push("--sandbox".to_string());
-                    args.push(sandbox.to_string());
-                }
-            }
-            if !is_resume && config.search.unwrap_or(false) {
-                args.push("--search".to_string());
-            }
-            if config.ephemeral.unwrap_or(false) {
-                args.push("--ephemeral".to_string());
-            }
-            if let Some(thread_id) = resume_thread_id {
-                args.push(thread_id);
-            }
-            args.push("-".to_string());
-        }
-    } else if config.executable.is_none() && args.is_empty() {
-        return Err(format!(
-            "adapter '{}' requires explicit adapterConfig.args",
-            request.adapter
-        ));
-    }
-
-    Ok(CommandSpec {
-        executable,
-        args,
-        env: config.env.clone(),
-        work_dir: request.work_dir.clone(),
-        timeout_secs: config.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS),
-    })
-}
-
-fn codex_thread_id_from_params(request: &ExternalCliRunRequest) -> Option<String> {
-    request
-        .params
-        .get("threadId")
-        .or_else(|| request.params.get("thread_id"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
 fn append_external_cli_metadata(
     adapter: &str,
     events: &[ExternalCliProgressEvent],
@@ -979,37 +934,6 @@ fn append_external_cli_metadata(
     }) {
         metadata.insert("threadId".to_string(), thread_id.to_string());
     }
-}
-
-fn ensure_codex_work_dir_arg(args: &mut Vec<String>, work_dir: &Path) {
-    if args.iter().any(|arg| arg == "--cd" || arg == "-C") {
-        return;
-    }
-    let insert_at = match args.first().map(String::as_str) {
-        Some("exec" | "e") => 1,
-        _ => 0,
-    };
-    args.insert(insert_at, work_dir.display().to_string());
-    args.insert(insert_at, "--cd".to_string());
-}
-
-fn ensure_codex_last_message_arg(args: &mut Vec<String>, last_message_path: &Path) {
-    if !matches!(args.first().map(String::as_str), Some("exec" | "e")) {
-        return;
-    }
-    if args
-        .iter()
-        .any(|arg| arg == "--output-last-message" || arg == "-o")
-    {
-        return;
-    }
-    let insert_at = if args.last().map(String::as_str) == Some("-") {
-        args.len() - 1
-    } else {
-        args.len()
-    };
-    args.insert(insert_at, last_message_path.display().to_string());
-    args.insert(insert_at, "--output-last-message".to_string());
 }
 
 fn command_snapshot(request: &ExternalCliRunRequest, spec: &CommandSpec) -> CommandSnapshot {
