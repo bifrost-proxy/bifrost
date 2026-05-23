@@ -581,6 +581,59 @@
 - 非 Apple Silicon 平台仍保持不支持提示，不下载模型、不启动 ASR server。
 - 修复不改变 `status --json` 的 JSON 字段，仍包含 `ready` 和 `service`。
 
+### TC-QASR-22 Directory Task 重启后复用 persisted ASR server 并自动重试临时失败
+
+操作步骤：
+
+1. 使用默认数据目录的真实 Bifrost 服务和真实 ASR Directory Task，先确认任务存在可判定为临时服务获取失败的文件记录：
+   ```bash
+   curl -fsS http://127.0.0.1:9900/_bifrost/api/asr/tasks/<task_id>
+   ```
+2. 确认 `~/.bifrost/asr/service.json` 指向同一 `owner_module=directory_task`、同一 `owner_id=<task_id>` 的健康 ASR server，并确认 `/health` 返回 ok：
+   ```bash
+   curl -fsS http://127.0.0.1:<asr_port>/health
+   ```
+3. 只重启 Bifrost 本体，不停止 persisted ASR server：
+   ```bash
+   ./target/debug/bifrost stop
+   BIFROST_DATA_DIR="$HOME/.bifrost" ./target/debug/bifrost start -p 9900 --host 0.0.0.0 --no-system-proxy --daemon
+   ```
+4. 再次查询任务详情，观察 failed/pending/running 变化：
+   ```bash
+   curl -fsS http://127.0.0.1:9900/_bifrost/api/asr/tasks/<task_id>
+   ```
+5. 等待任务进入 processing 后检查 `files.json` 或任务详情中的 `chunk_metrics`。
+
+预期结果：
+
+- Bifrost 重启后不会把同 owner、同模型、同 home 的 persisted ASR server 判定为 busy。
+- 可判定为 `managed ASR server start failed: Qwen3-ASR service is busy` 的临时失败文件会从 `failed` 恢复为 `pending`，并在 scheduler startup 后自动进入运行，不需要等下一次墙钟调度。
+- 可重试失败被恢复后，任务顶层 `last_error` 同步清空，不再在 UI/API 中保留旧的 `71 file(s) failed` 误报。
+- 任务处理中的 chunk metric 使用 `runner=reuse_server` 且 `server_url` 指向 persisted server；不会再批量写入新的 `Qwen3-ASR service is busy` 错误。
+- 普通非临时失败文件不会因重启被无限自动重试。
+
+### TC-QASR-23 Daily Agent 不在 ASR 未完成时触发且中断报告不误显示 filesystem Runner
+
+操作步骤：
+
+1. 确认默认目录任务启用了 Daily Agent，且配置为 `trigger_policy=after_asr_run`、`runner=web`：
+   ```bash
+   curl -fsS http://127.0.0.1:9900/_bifrost/api/asr/tasks/<task_id>/daily-agent
+   ```
+2. 构造或复用一次 ASR run 结束后仍存在 `pending`、`failed`、`partial_success` 或 `failed_chunk_count` 的任务状态。
+3. 观察 Daily Agent 不会因为这次不完整 ASR run 自动派发新的 `asr_completion`。
+4. 对于已有 report 文件但 `daily_agent_processed.json` 中缺少 metadata 的日期，查询 Run Results：
+   ```bash
+   curl -fsS http://127.0.0.1:9900/_bifrost/api/asr/tasks/<task_id>/daily-agent/runs
+   ```
+5. 如果 Bifrost 曾在 Daily Agent 运行中重启，再查询 Daily Agent config。
+
+预期结果：
+
+- ASR summary 存在未完成或失败工作时，Daily Agent 不会自动基于不完整 daily markdown 生成报告。
+- 重启后旧进程留下的 `last_status=running` 对外显示为 `interrupted`，不再误导为当前仍有 Daily Agent 正在跑。
+- Run Results 中未索引 report 行的 `runner` 展示任务绑定的 runner（如 `web`），`last_run_id` 保持 `filesystem-scan`，用于区分“文件扫描补齐 metadata”与真实执行 run id。
+
 ## 清理步骤
 
 - 停止测试启动的 `asr-server` 进程。
@@ -638,3 +691,5 @@
 | 2026-05-20 | TC-QASR-19 / Directory Tasks 首页位置前移 | `pnpm --dir web exec playwright test tests/ui/asr-microphone-meter.spec.ts --grep "ASR directory tasks"` | PASS：Playwright 真实浏览器验证 AI -> Tools -> ASR 首页中 `Speech Converter` 位于 `Directory Tasks` 上方，`Directory Tasks` 位于 `Speech to Text` 上方；随后继续创建 Directory Task、进入任务详情、执行原音频清理、验证 Daily Agent Records，不影响既有目录任务操作链路。 |
 | 2026-05-20 | TC-QASR-20 / Qwen3-ASR-0.6B 初始化下载绕过环境代理 | `curl -I -L --max-time 20 https://huggingface.co/Qwen/Qwen3-ASR-0.6B/resolve/main/config.json`；`HTTP_PROXY=http://127.0.0.1:1 HTTPS_PROXY=http://127.0.0.1:1 ALL_PROXY=http://127.0.0.1:1 NO_PROXY= cargo test -p bifrost-admin asr_download_client_bypasses_proxy_env --lib`；`cargo test -p bifrost-admin asr_download_requests_include_qwen3_asr_0_6b_files --lib` | PASS：Hugging Face 返回 `307` 并带 `x-repo-commit: 5eb144179a02acc5e5ba31e748d22b0cf3e303b0`，确认 `config.json` 真实存在；无效代理环境下 direct reqwest 下载 client 仍能访问本地测试 HTTP server；0.6B 请求清单包含 `Qwen3-ASR-0.6B/config.json` 与 `Qwen3-ASR-0.6B/model.safetensors` |
 | 2026-05-21 | TC-QASR-21 / CLI ASR status 管道关闭回归 | `cargo test -p bifrost-cli asr_status_output --lib`；`BIFROST_QWEN3_ASR_E2E_ONLINE=0 bash e2e-tests/tests/test_qwen3_asr_local_server.sh` | PASS：单测覆盖 stdout `BrokenPipe` 被视为下游管道关闭且其它 IO 错误继续返回；离线结构 E2E 在当前平台通过，未下载模型、未启动 ASR server。 |
+| 2026-05-22 | TC-QASR-22 / 默认目录真实重启恢复 | `cargo build --bin bifrost`；`./target/debug/bifrost stop`；`BIFROST_DATA_DIR="$HOME/.bifrost" ./target/debug/bifrost start -p 9900 --host 0.0.0.0 --no-system-proxy --daemon`；查询 `/api/asr/tasks/76612de33e9740bc92440ce64a98a4cb` 与 `files.json` | PASS：重启前任务有 71 条 `managed ASR server start failed: Qwen3-ASR service is busy`；重启后自动恢复为 `pending=71 failed=0 running=true`，首个文件进入 `processing`，`chunk_metrics` 最近记录均为 `runner=reuse_server status=ok`，`files.json` 当前 `error_count=0 busy_errors=0`；补充单测验证恢复可重试失败时 task 顶层 `last_error` 会同步清空，非可重试失败仍保留错误。 |
+| 2026-05-22 | TC-QASR-23 / Daily Agent incomplete ASR gate 与未索引 report runner 展示 | `cargo test -p bifrost-admin daily_agent --lib`；默认 9900 查询 `/daily-agent` 和 `/daily-agent/runs` | PASS：单测覆盖 ASR summary 存在 pending/failed/partial/failed chunks 时不允许 after_asr_run 自动触发、stale running 对外转 interrupted、未索引 report 使用任务绑定 runner；重启最新二进制后默认 9900 显示 `last_run.status=interrupted`，2026-05-18/19 `last_run_id=filesystem-scan` 且 `runner=web`。 |

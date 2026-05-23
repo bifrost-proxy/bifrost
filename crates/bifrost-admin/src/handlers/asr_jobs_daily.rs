@@ -33,7 +33,7 @@ pub(super) fn list_daily_documents_for_task(
 ) -> Result<Vec<AsrDailyDocumentSummary>, String> {
     let task_output_dir = text_output_dir(data_dir).join(task_id);
     refresh_daily_documents(&task_output_dir, task_name)?;
-    let daily_dir = task_output_dir.join("daily");
+    let daily_dir = task_output_dir.join(".daily");
     let Ok(entries) = std::fs::read_dir(&daily_dir) else {
         return Ok(Vec::new());
     };
@@ -69,7 +69,7 @@ pub(super) fn read_daily_document_for_task(
     parse_daily_document_date(date)?;
     let task_output_dir = text_output_dir(data_dir).join(task_id);
     refresh_daily_documents(&task_output_dir, task_name)?;
-    let path = task_output_dir.join("daily").join(format!("{date}.md"));
+    let path = task_output_dir.join(".daily").join(format!("{date}.md"));
     if !path.is_file() {
         return Ok(None);
     }

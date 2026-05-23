@@ -84,8 +84,8 @@ with open(sys.argv[1], "r", encoding="utf-8") as f:
 PY
 )"
 
-mkdir -p "$ADMIN_DATA_DIR/asr/data/text/${TASK_ID}/daily"
-cat > "$ADMIN_DATA_DIR/asr/data/text/${TASK_ID}/daily/2026-05-17.md" <<'EOF'
+mkdir -p "$ADMIN_DATA_DIR/asr/data/text/${TASK_ID}/.daily"
+cat > "$ADMIN_DATA_DIR/asr/data/text/${TASK_ID}/.daily/2026-05-17.md" <<'EOF'
 # ASR CLI E2E task — 2026-05-17
 
 完整内容整理的文档展示。

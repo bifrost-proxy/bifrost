@@ -565,7 +565,7 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
         daily_documents: [
           {
             date: "2026-05-14",
-            path: "/tmp/bifrost/asr/data/text/task-1/daily/2026-05-14.md",
+            path: "/tmp/bifrost/asr/data/text/task-1/.daily/2026-05-14.md",
             size: 256,
             modified_ms: Date.now() - 5000,
             text_chars: 42,
@@ -598,7 +598,7 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
         task_id: "task-1",
         task_name: "Recordings",
         date: "2026-05-14",
-        path: "/tmp/bifrost/asr/data/text/task-1/daily/2026-05-14.md",
+        path: "/tmp/bifrost/asr/data/text/task-1/.daily/2026-05-14.md",
         size: 256,
         modified_ms: Date.now() - 5000,
         text_chars: 42,
@@ -684,9 +684,9 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
           },
         },
         workspace: {
-          daily_dir: "/tmp/bifrost/asr/data/text/task-1/daily",
-          report_dir: "/tmp/bifrost/asr/data/text/task-1/daily/report",
-          agents_path: "/tmp/bifrost/asr/data/text/task-1/daily/AGENTS.md",
+          daily_dir: "/tmp/bifrost/asr/data/text/task-1/.daily",
+          report_dir: "/tmp/bifrost/asr/data/text/task-1/.daily/report",
+          agents_path: "/tmp/bifrost/asr/data/text/task-1/.daily/AGENTS.md",
           agents_exists: true,
           git_available: true,
           git_initialized: true,
@@ -725,7 +725,7 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
             processed_at_ms: Date.now() - 3000,
             runner: "bifrost_agent",
             report_path:
-              "/tmp/bifrost/asr/data/text/task-1/daily/report/2026-05-13-report.md",
+              "/tmp/bifrost/asr/data/text/task-1/.daily/report/2026-05-13-report.md",
             last_run_id: "run-20260513",
           },
           {
@@ -735,7 +735,7 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
             processed_at_ms: Date.now() - 1000,
             runner: "bifrost_agent",
             report_path:
-              "/tmp/bifrost/asr/data/text/task-1/daily/report/2026-05-14-report.md",
+              "/tmp/bifrost/asr/data/text/task-1/.daily/report/2026-05-14-report.md",
             last_run_id: "run-20260514",
           },
           {
@@ -745,7 +745,7 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
             processed_at_ms: Date.now() - 500,
             runner: "bifrost_agent",
             report_path:
-              "/tmp/bifrost/asr/data/text/task-1/daily/report/2026-05-15-report.md",
+              "/tmp/bifrost/asr/data/text/task-1/.daily/report/2026-05-15-report.md",
             last_run_id: "run-20260515",
           },
         ],
@@ -762,7 +762,7 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
           task_id: "task-1",
           task_name: "Recordings",
           date: "2026-05-14",
-          path: "/tmp/bifrost/asr/data/text/task-1/daily/report/2026-05-14-report.md",
+          path: "/tmp/bifrost/asr/data/text/task-1/.daily/report/2026-05-14-report.md",
           size: 128,
           modified_ms: Date.now() - 500,
           content: "# Daily Agent Report\n\n运行记录内容",
@@ -846,7 +846,7 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
   const dailyDocs = taskPage.getByTestId("asr-task-daily-docs-tab");
   await expect(dailyDocs.getByText("2026-05-14", { exact: true })).toBeVisible();
   await expect(
-    dailyDocs.getByText("/tmp/bifrost/asr/data/text/task-1/daily/2026-05-14.md"),
+    dailyDocs.getByText("/tmp/bifrost/asr/data/text/task-1/.daily/2026-05-14.md"),
   ).toBeVisible();
   await dailyDocs.getByRole("button", { name: "Open document" }).click();
   await expect(page).toHaveURL(/asrDay=2026-05-14/);

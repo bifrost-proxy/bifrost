@@ -273,7 +273,9 @@ fn file_status_sort_rank(status: &FileStatus) -> u8 {
 
 fn recover_interrupted_task_runs_on_startup() -> Vec<AsrDirectoryTask> {
     let mut tasks_to_resume = Vec::new();
-    for task in load_tasks().tasks {
+    let mut task_store = load_tasks();
+    let mut task_store_changed = false;
+    for task in task_store.tasks.iter_mut() {
         if task_is_running(&task.id) {
             continue;
         }
@@ -306,28 +308,46 @@ fn recover_interrupted_task_runs_on_startup() -> Vec<AsrDirectoryTask> {
         }
         let mut files = load_file_store(&task.id);
         let reset_count = reset_interrupted_processing_records(&task.id, &mut files);
-        if reset_count > 0 {
+        let retryable_failed_count = reset_retryable_failed_records(&task.id, &mut files);
+        if reset_count > 0 || retryable_failed_count > 0 {
             match save_file_store(&task.id, &files) {
                 Ok(()) => {
                     tracing::warn!(
                         task_id = %task.id,
                         reset_count,
-                        "reset interrupted ASR processing records on scheduler startup"
+                        retryable_failed_count,
+                        "reset recoverable ASR records on scheduler startup"
                     );
                 }
                 Err(error) => {
                     tracing::warn!(
                         task_id = %task.id,
                         reset_count,
+                        retryable_failed_count,
                         error = %error,
-                        "failed to persist interrupted ASR processing record reset"
+                        "failed to persist recoverable ASR record reset"
                     );
                     continue;
                 }
             }
         }
-        if (stale_lock || reset_count > 0) && task.enabled && !task.paused {
-            let summary = summarize_task(&task);
+        if (reset_count > 0 || retryable_failed_count > 0) && task.last_error.is_some() {
+            task.last_error = None;
+            task.updated_at_ms = now_ms();
+            task_store_changed = true;
+        }
+        // 修正 daily_agent.last_status 残留的 "running" 状态：进程已重启，
+        // 不可能还有运行中的 daily agent，将其修正为 "interrupted"。
+        if task.daily_agent.last_status.as_deref() == Some("running") {
+            task.daily_agent.last_status = Some("interrupted".to_string());
+            task.updated_at_ms = now_ms();
+            task_store_changed = true;
+        }
+        if (stale_lock || reset_count > 0 || retryable_failed_count > 0)
+            && task.enabled
+            && !task.paused
+        {
+            let summary = summarize_task(task);
             if summary.pending > 0 || summary.failed > 0 {
                 tracing::warn!(
                     task_id = %task.id,
@@ -335,10 +355,19 @@ fn recover_interrupted_task_runs_on_startup() -> Vec<AsrDirectoryTask> {
                     failed = summary.failed,
                     stale_lock,
                     reset_count,
-                    "interrupted ASR task is eligible for startup recovery"
+                    retryable_failed_count,
+                    "ASR task is eligible for startup recovery"
                 );
-                tasks_to_resume.push(task);
+                tasks_to_resume.push(task.clone());
             }
+        }
+    }
+    if task_store_changed {
+        if let Err(error) = save_tasks(&task_store) {
+            tracing::warn!(
+                error = %error,
+                "failed to persist ASR task recovery metadata"
+            );
         }
     }
     tasks_to_resume
@@ -366,6 +395,44 @@ fn reset_interrupted_processing_records(task_id: &str, files: &mut FileStore) ->
         );
     }
     reset_count
+}
+
+fn reset_retryable_failed_records(task_id: &str, files: &mut FileStore) -> usize {
+    let mut reset_count = 0usize;
+    for record in files.files.values_mut() {
+        if record.status != FileStatus::Failed {
+            continue;
+        }
+        let Some(error) = record.error.as_deref() else {
+            continue;
+        };
+        if !is_retryable_asr_server_acquire_error(error) {
+            continue;
+        }
+        record.status = FileStatus::Pending;
+        record.started_at_ms = None;
+        record.finished_at_ms = None;
+        record.progress_current = None;
+        record.progress_total = None;
+        record.error = None;
+        reset_count += 1;
+    }
+    if reset_count > 0 {
+        tracing::debug!(
+            task_id = %task_id,
+            reset_count,
+            "reset retryable failed ASR records to pending"
+        );
+    }
+    reset_count
+}
+
+fn is_retryable_asr_server_acquire_error(error: &str) -> bool {
+    error.contains("managed ASR server start failed")
+        && (error.contains("Qwen3-ASR service is busy")
+            || error.contains("local server is reachable, but it is not managed by this Bifrost process")
+            || error.contains("Failed to allocate a dynamic ASR service port")
+            || error.contains("Timed out waiting for Qwen3-ASR model service to become healthy"))
 }
 
 fn summarize_task(task: &AsrDirectoryTask) -> TaskSummary {
@@ -649,6 +716,10 @@ fn discover_audio_files_inner(
             }
         };
         if file_type.is_dir() && recursive {
+            // Skip hidden .daily directory to avoid conflicts with daily reports.
+            if path.file_name().and_then(|n| n.to_str()) == Some(".daily") {
+                continue;
+            }
             // A single subdirectory failure should not abort the entire scan.
             if let Err(error) = discover_audio_files_inner(&path, recursive, out) {
                 tracing::warn!(dir = %path.display(), %error, "skipping unreadable subdirectory");

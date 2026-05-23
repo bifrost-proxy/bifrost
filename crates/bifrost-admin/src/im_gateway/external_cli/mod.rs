@@ -1128,6 +1128,23 @@ fn remove_active_sessions_for_run(run_id: &str) {
     }
 }
 
+/// 终止所有正在运行的 external CLI 子进程。在 Bifrost 进程退出时调用，
+/// 防止使用 `process_group(0)` 启动的子进程组变成孤儿进程。
+pub fn kill_all_active_runs() {
+    let entries: Vec<(String, u32)> = ACTIVE_RUNS
+        .iter()
+        .map(|entry| (entry.key().clone(), *entry.value()))
+        .collect();
+    for (run_id, pid) in entries {
+        tracing::info!(run_id, pid, "external_cli: killing active run on shutdown");
+        if let Err(error) = terminate_process(pid) {
+            tracing::warn!(run_id, pid, %error, "external_cli: failed to terminate on shutdown");
+        }
+        ACTIVE_RUNS.remove(&run_id);
+    }
+    ACTIVE_SESSIONS.clear();
+}
+
 fn terminate_process(pid: u32) -> Result<(), String> {
     if pid == 0 {
         return Err("refusing to terminate pid 0".to_string());

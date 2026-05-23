@@ -80,6 +80,7 @@ pub mod asr_streaming {
 pub mod asr_cli_invoke {
     pub use crate::handlers::asr_cli_invoke::{parse_asr_cli_text, run_asr_cli};
 }
+pub use handlers::asr::shutdown_managed_asr_service;
 pub mod voice {
     pub use crate::handlers::voice::{
         apply_voice_vocabulary, discover_voice_sources, load_voice_vocabulary,

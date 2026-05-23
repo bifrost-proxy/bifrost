@@ -1525,8 +1525,12 @@ pub fn run_foreground(
                 task.abort();
             }
 
+            // Kill managed ASR service to prevent orphan processes.
+            bifrost_admin::shutdown_managed_asr_service().await;
             // Kill all managed browser processes to prevent orphans.
             bifrost_admin::im_gateway::chatgpt_web::kill_all_managed_browsers();
+            // Kill all active external CLI runs to prevent orphan process groups.
+            bifrost_admin::im_gateway::external_cli::kill_all_active_runs();
 
             Ok(())
         }
@@ -2184,6 +2188,13 @@ pub fn run_daemon(
                 }
                 => result,
                 };
+
+                // Kill managed ASR service to prevent orphan processes.
+                bifrost_admin::shutdown_managed_asr_service().await;
+                // Kill all managed browser processes to prevent orphans.
+                bifrost_admin::im_gateway::chatgpt_web::kill_all_managed_browsers();
+                // Kill all active external CLI runs to prevent orphan process groups.
+                bifrost_admin::im_gateway::external_cli::kill_all_active_runs();
 
                 if let Err(e) = result {
                     eprintln!("Runtime error: {}", e);

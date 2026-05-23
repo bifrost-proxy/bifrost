@@ -24,7 +24,7 @@ async fn get_daily_agent_config_response(task_id: &str) -> Response<BoxBody> {
         "report_index_status": report_index_status,
         "last_run": {
             "run_id": task.daily_agent.last_run_id,
-            "status": task.daily_agent.last_status,
+            "status": daily_agent_effective_last_status(&task),
             "error": task.daily_agent.last_error,
             "last_run_at_ms": task.daily_agent.last_run_at_ms,
         },
@@ -312,12 +312,12 @@ async fn post_daily_agent_send_response(task_id: &str) -> Response<BoxBody> {
 }
 
 fn get_daily_agent_runs_response(task_id: &str) -> Response<BoxBody> {
-    let Some(_task) = find_task(task_id) else {
+    let Some(task) = find_task(task_id) else {
         return error_response(StatusCode::NOT_FOUND, "ASR task not found");
     };
 
     let processed = load_daily_agent_processed_state(task_id);
-    let documents = build_daily_agent_records(task_id, &processed);
+    let documents = build_daily_agent_records_for_task(&task, &processed);
 
     json_response(&serde_json::json!({
         "task_id": task_id,
@@ -325,9 +325,30 @@ fn get_daily_agent_runs_response(task_id: &str) -> Response<BoxBody> {
     }))
 }
 
+fn build_daily_agent_records_for_task(
+    task: &AsrDirectoryTask,
+    processed: &AsrDailyAgentProcessedState,
+) -> Vec<AsrDailyAgentProcessedDocument> {
+    let fallback_runner = task.daily_agent.runner.trim();
+    build_daily_agent_records_with_fallback_runner(
+        &task.id,
+        processed,
+        (!fallback_runner.is_empty()).then_some(fallback_runner),
+    )
+}
+
+#[cfg(test)]
 fn build_daily_agent_records(
     task_id: &str,
     processed: &AsrDailyAgentProcessedState,
+) -> Vec<AsrDailyAgentProcessedDocument> {
+    build_daily_agent_records_with_fallback_runner(task_id, processed, None)
+}
+
+fn build_daily_agent_records_with_fallback_runner(
+    task_id: &str,
+    processed: &AsrDailyAgentProcessedState,
+    fallback_runner: Option<&str>,
 ) -> Vec<AsrDailyAgentProcessedDocument> {
     let mut documents = processed.documents.clone();
 
@@ -365,7 +386,7 @@ fn build_daily_agent_records(
                 source_sha256,
                 source_len_bytes,
                 processed_at_ms: source_modified_ms(&report_path).unwrap_or_default(),
-                runner: "filesystem".to_string(),
+                runner: fallback_runner.unwrap_or("filesystem").to_string(),
                 report_path: Some(report_path_string),
                 last_run_id: "filesystem-scan".to_string(),
             },

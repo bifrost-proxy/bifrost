@@ -299,7 +299,7 @@ fn save_daily_agent_conversation_state(
 fn daily_dir_for_task(task_id: &str) -> PathBuf {
     text_output_dir(&bifrost_storage::data_dir())
         .join(task_id)
-        .join("daily")
+        .join(".daily")
 }
 
 /// Validate that a date string matches YYYY-MM-DD format.
@@ -887,6 +887,15 @@ async fn maybe_enqueue_daily_agent_after_asr_run(task: &AsrDirectoryTask) {
     if task.daily_agent.trigger_policy != AsrDailyAgentTriggerPolicy::AfterAsrRun {
         return;
     }
+    let summary = summarize_task_from_store(task);
+    if !daily_agent_asr_completion_ready(&summary) {
+        tracing::info!(
+            task_id = %task.id,
+            pending = summary.pending,
+            "skipped daily agent: ASR task still has pending/processing files"
+        );
+        return;
+    }
     if !daily_agent_runner_ready(task) {
         tracing::debug!(
             task_id = %task.id,
@@ -926,6 +935,25 @@ async fn maybe_enqueue_daily_agent_after_asr_run(task: &AsrDirectoryTask) {
     );
 }
 
+/// 判断 ASR 任务是否已完成所有待处理工作，可以触发 daily agent。
+/// 只检查是否还有尚未处理或正在处理中的文件（pending 包含 Pending + Processing 状态）。
+/// 失败或部分成功的文件不阻塞 daily agent 触发——因为这些文件可能永远无法成功。
+fn daily_agent_asr_completion_ready(summary: &TaskSummary) -> bool {
+    summary.pending == 0
+}
+
+fn daily_agent_effective_last_status(task: &AsrDirectoryTask) -> Option<String> {
+    if task.daily_agent.last_status.as_deref() == Some("running") {
+        let running = DAILY_AGENT_RUNNING_TASKS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !running.contains(&task.id) {
+            return Some("interrupted".to_string());
+        }
+    }
+    task.daily_agent.last_status.clone()
+}
+
 async fn run_daily_agent(
     task: &AsrDirectoryTask,
     trigger_source: &str,
@@ -936,6 +964,16 @@ async fn run_daily_agent(
     let run_id = format!("{}-{}", started_at_ms, uuid::Uuid::new_v4());
     let task_id = task.id.clone();
     let daily_dir = daily_dir_for_task(&task_id);
+
+    tracing::info!(
+        task_id = %task_id,
+        run_id = %run_id,
+        trigger_source,
+        runner = %task.daily_agent.runner,
+        force,
+        requested_date = ?requested_date,
+        "starting ASR daily agent run"
+    );
 
     // Mark as running
     {
@@ -1218,29 +1256,66 @@ async fn run_bifrost_agent_daily_runner(
         ));
     };
 
-    let result = tokio::time::timeout(
+    // 设置 session 来源标记，使其在 sessions 列表中可见
+    session.source = "daily_agent".to_string();
+    session.mark_bifrost_agent_runtime();
+
+    // 创建 ConversationRecorder 以持久化会话记录
+    let persist_data_dir = bifrost_agent::config::agent_home_dir();
+    let mut recorder = bifrost_agent::persistence::ConversationRecorder::new(
+        &persist_data_dir,
+        session_key,
+    );
+    let _ = recorder.record_session_start(
+        session_key,
+        serde_json::json!({
+            "source": "daily_agent",
+            "work_dir": daily_dir.to_string_lossy(),
+            "task_id": task.id,
+            "task_name": task.name,
+            "model": config.model,
+            "provider": config.model_provider,
+        }),
+    );
+
+    let timeout_result = tokio::time::timeout(
         Duration::from_millis(task.daily_agent.timeout_ms),
-        bifrost_agent::session::run_turn(
+        bifrost_agent::session::run_turn_with_mcp(
             &client,
             &config,
             &mut session,
             &tools,
+            None,
             prompt,
             None,
+            Some(&mut recorder),
         ),
     )
-    .await
-    .map_err(|_| {
-        format!(
-            "daily agent run timed out after {}ms",
-            task.daily_agent.timeout_ms
-        )
-    })?;
+    .await;
+
+    // 无论成功、失败还是超时，都记录 session 结束
+    let (status, final_result) = match timeout_result {
+        Ok(Ok(turn)) => ("success", Ok(turn.response)),
+        Ok(Err(e)) => ("failed", Err(format!("bifrost_agent run failed: {e}"))),
+        Err(_) => (
+            "timeout",
+            Err(format!(
+                "daily agent run timed out after {}ms",
+                task.daily_agent.timeout_ms
+            )),
+        ),
+    };
+
+    let _ = recorder.record_session_end(
+        session_key,
+        serde_json::json!({
+            "total_tokens": session.total_tokens_used.unwrap_or(0),
+            "status": status,
+        }),
+    );
 
     session_manager.return_session(session);
-    result
-        .map(|turn| turn.response)
-        .map_err(|error| format!("bifrost_agent run failed: {error}"))
+    final_result
 }
 
 async fn run_external_daily_agent_prompt(
