@@ -497,6 +497,9 @@ async fn execute_external_runner_schedule_once(
         Some(runner_id),
     );
     let mut settings = effective.settings;
+    if let Some(adapter_config) = agent_task.adapter_config.as_ref() {
+        merge_schedule_adapter_config(&mut settings.adapter_config, adapter_config);
+    }
     let schedule_work_dir = external_schedule_effective_work_dir(service, agent_task, &run);
     let initial_prompt = agent_task
         .initial_prompt
@@ -671,6 +674,104 @@ fn external_schedule_effective_work_dir(
     let provider = service.provider_store.get(provider_id)?;
     effective_agent_work_dir_for_provider(&service.agent_config_store.load(), &provider)
         .map(|path| path.display().to_string())
+}
+
+fn merge_schedule_adapter_config(
+    base: &mut crate::im_gateway::external_cli::ExternalCliAdapterConfig,
+    override_config: &crate::im_gateway::external_cli::ExternalCliAdapterConfig,
+) {
+    if override_config.executable.is_some() {
+        base.executable.clone_from(&override_config.executable);
+    }
+    if !override_config.args.is_empty() {
+        base.args.clone_from(&override_config.args);
+    }
+    if !override_config.env.is_empty() {
+        base.env.extend(override_config.env.clone());
+    }
+    if override_config.profile.is_some() {
+        base.profile.clone_from(&override_config.profile);
+    }
+    if override_config.profile_v2.is_some() {
+        base.profile_v2.clone_from(&override_config.profile_v2);
+    }
+    if override_config.model.is_some() {
+        base.model.clone_from(&override_config.model);
+    }
+    if override_config.sandbox.is_some() {
+        base.sandbox.clone_from(&override_config.sandbox);
+    }
+    if override_config.approval_policy.is_some() {
+        base.approval_policy
+            .clone_from(&override_config.approval_policy);
+    }
+    if override_config.reasoning_effort.is_some() {
+        base.reasoning_effort
+            .clone_from(&override_config.reasoning_effort);
+    }
+    if override_config.reasoning_summary.is_some() {
+        base.reasoning_summary
+            .clone_from(&override_config.reasoning_summary);
+    }
+    if override_config.danger_full_access.is_some() {
+        base.danger_full_access = override_config.danger_full_access;
+    }
+    if override_config.dangerously_bypass_hook_trust.is_some() {
+        base.dangerously_bypass_hook_trust = override_config.dangerously_bypass_hook_trust;
+    }
+    if override_config.strict_config.is_some() {
+        base.strict_config = override_config.strict_config;
+    }
+    if override_config.skip_git_repo_check.is_some() {
+        base.skip_git_repo_check = override_config.skip_git_repo_check;
+    }
+    if override_config.ignore_user_config.is_some() {
+        base.ignore_user_config = override_config.ignore_user_config;
+    }
+    if override_config.ignore_rules.is_some() {
+        base.ignore_rules = override_config.ignore_rules;
+    }
+    if override_config.oss.is_some() {
+        base.oss = override_config.oss;
+    }
+    if override_config.local_provider.is_some() {
+        base.local_provider
+            .clone_from(&override_config.local_provider);
+    }
+    if override_config.output_schema.is_some() {
+        base.output_schema
+            .clone_from(&override_config.output_schema);
+    }
+    if override_config.color.is_some() {
+        base.color.clone_from(&override_config.color);
+    }
+    if !override_config.add_dirs.is_empty() {
+        base.add_dirs.clone_from(&override_config.add_dirs);
+    }
+    if !override_config.config_overrides.is_empty() {
+        base.config_overrides
+            .clone_from(&override_config.config_overrides);
+    }
+    if !override_config.enable_features.is_empty() {
+        base.enable_features
+            .clone_from(&override_config.enable_features);
+    }
+    if !override_config.disable_features.is_empty() {
+        base.disable_features
+            .clone_from(&override_config.disable_features);
+    }
+    if override_config.search.is_some() {
+        base.search = override_config.search;
+    }
+    if override_config.ephemeral.is_some() {
+        base.ephemeral = override_config.ephemeral;
+    }
+    if override_config.timeout_secs.is_some() {
+        base.timeout_secs = override_config.timeout_secs;
+    }
+    if !override_config.extra.is_empty() {
+        base.extra.extend(override_config.extra.clone());
+    }
 }
 
 pub(super) fn schedule_external_runner_messages(

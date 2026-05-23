@@ -104,7 +104,7 @@
 预期结果：
 1. 测试通过。
 2. Codex adapter 默认命令包含 `codex exec --json --output-last-message <path> -`。
-3. 当配置 `workDir/profile/model/sandbox/search/ephemeral` 时，这些字段被映射为当前 Codex CLI 参数。
+3. 当配置 `workDir/profile/model/sandbox/enableFeatures/ephemeral` 时，这些字段被映射为当前 Codex CLI 参数；历史 `search:true` 仅作为兼容入口映射为 `--enable web_search`，不生成已废弃的 `--search`。
 4. 当前本机 Codex CLI `0.130.0` 不再支持旧 `--ask-for-approval` 参数，默认 Codex adapter 不应生成该参数。
 
 ### TC-IEC-06: Runtime 真实执行 mock CLI 并写入 artifacts
@@ -388,6 +388,47 @@
 4. Global run 的 `runtime_snapshot.args` 包含 `--cd ~/work/github/bifrost` 与 `--output-last-message <run>/last_message.md`，`workDir` 为全局 Agent 工作目录。
 5. Codex session 在 Codex Desktop 中归属到对应 `--cd` 项目目录，而不是 Bifrost 服务启动时的偶然 cwd。
 
+### TC-IEC-20: Schedule Agent 支持当前 Codex CLI 参数覆盖且保留 Runner 命令配置
+
+操作步骤：
+1. 执行单元测试，验证 Codex adapter 把当前 CLI 参数映射成真实 argv：
+   ```bash
+   cargo test -p bifrost-admin codex_adapter_ --lib -- --nocapture
+   ```
+2. 执行 CLI 参数解析测试，验证 schedule add/update 可把 agent 专用参数写入 `agent.adapter_config`：
+   ```bash
+   cargo test -p bifrost-cli parse_schedule_ --lib -- --nocapture
+   ```
+3. 执行 Schedule Runner 覆盖回归测试，验证 schedule 级 adapter_config 与 runner 默认 adapter_config 字段级合并，不会因为仅覆盖 model/env 等字段丢失 runner 的 executable/args：
+   ```bash
+   cargo test -p bifrost-admin schedule_agent_adapter_config_overrides_runner_without_dropping_command --lib -- --nocapture
+   ```
+4. 使用临时服务创建一个不会立即触发的 Agent schedule（避免实际调用真实 Codex）：
+   ```bash
+   BIFROST_DATA_DIR=/tmp/bifrost-schedule-agent-codex-args cargo run --bin bifrost -- start -p 18886 --unsafe-ssl --no-system-proxy
+   cargo run --bin bifrost -- im schedule add codex-args-human \
+     --target oc_human_test \
+     --cron '0 0 1 1 *' \
+     --agent-prompt 'Human test only' \
+     --agent-runner-id codex \
+     --agent-model gpt-5 \
+     --agent-profile-v2 team \
+     --agent-reasoning-effort high \
+     --agent-reasoning-summary auto \
+     --agent-add-dir /tmp/extra \
+     --agent-config 'shell_environment_policy.inherit=all' \
+     --agent-enable web_search \
+     --agent-danger-full-access
+   ```
+5. 调用 schedules API 读取 `codex-args-human`。
+
+预期结果：
+1. `codex_adapter_` 相关测试通过；其中 `codex_adapter_builds_current_cli_config_flags` 断言包含 `--profile-v2`、`--config model_reasoning_effort="high"`、`--config model_reasoning_summary="auto"`、`--skip-git-repo-check`、`--ignore-user-config`、`--ignore-rules`、`--add-dir`、`--enable`、`--disable`，且不生成当前 Codex CLI 不支持的 `--search`；`codex_adapter_applies_config_flags_to_custom_args` 断言 Runner 自定义 `args` 场景仍会注入 schedule 级 `--model`、reasoning `--config`、`--enable web_search`，并在 `--dangerously-bypass-approvals-and-sandbox` 存在时移除模板里的 `--sandbox`。
+2. `codex_adapter_danger_full_access_suppresses_sandbox` 通过，断言 `--dangerously-bypass-approvals-and-sandbox` 存在且不再同时生成 `--sandbox`。
+3. `parse_schedule_add_args_supports_agent_codex_flags` 与 `parse_schedule_update_args_supports_agent_codex_flags` 通过，断言 CLI 写入 `agent.runner_id="codex"` 与 `agent.adapter_config` 的 model/profileV2/reasoning/addDirs/configOverrides/enableFeatures/disableFeatures/dangerFullAccess/skipGitRepoCheck。
+4. `schedule_agent_adapter_config_overrides_runner_without_dropping_command` 通过；测试中的 mock runner 仍使用 runner 默认 `executable/args` 执行，同时能读取 schedule 覆盖的 env/model 相关配置，避免出现只传 schedule 专用参数导致 runner 命令配置被清空的回归。
+5. API 返回的 schedule 中 `task_type:"agent"`，`message_channel.provider_id:"feishu-main"`、`message_channel.target_id:"oc_human_test"`、`message_channel.target_mode:"configured_target"`，且 `agent.adapter_config` 保留上述字段，说明定时任务可覆盖 Runner 默认 Codex 参数并绑定明确投递通道。
+
 ## 最近执行记录
 
 - 2026-05-13：执行 TC-IEC-01/02/03/04/08/09/10/11/12/13，临时服务端口 `18880`，`BIFROST_DATA_DIR=/tmp/bifrost-im-external-cli-test`，均通过；TC-IEC-12 使用 `sleep 23` 慢进程验证 active run 可停止，run 收敛为 `status:"stopped"`，`response:"External CLI run was stopped by request."`，且未残留 `sleep 23` 测试进程。
@@ -400,6 +441,9 @@
 - 2026-05-13：执行 TC-IEC-19，临时服务端口 `18884`，`BIFROST_DATA_DIR=/tmp/bifrost-runner-workdir-real-3`；真实 Codex CLI provider run `1778669065397-60bc3fca-0b58-4aea-a6ba-48a59dc0ffbd` 返回 `WORKDIR_CHECK:~/work/github/bifrost/crates/bifrost-admin`，snapshot 显式包含 `--cd ~/work/github/bifrost/crates/bifrost-admin`；global fallback run `1778669086562-dfcbc5ec-e4d4-4e6a-9ed4-129a6d27e4aa` 返回 `GLOBAL_WORKDIR_CHECK:~/work/github/bifrost`，snapshot 显式包含 `--cd ~/work/github/bifrost`。
 - 2026-05-13：复测 TC-IEC-18，临时服务端口 `18884`，`BIFROST_DATA_DIR=/tmp/bifrost-runner-ui-real`；Playwright 打开 `/_bifrost/ai?agentSection=runners`，确认 Runners 在 Agent 板块、列表展示 `codex` runner、无 `Default Custom Runner`、无 runner 表格 `default` 标签、Channel Runner 文案为 `Inherit global runner`，`Add Runner` 弹窗包含 Runner ID / Adapter / Executable / Arguments / Skill Paths / Instructions；亮色截图 `/tmp/bifrost-runner-ui-modal-updated.png`，暗色截图 `/tmp/bifrost-runner-ui-runners-dark.png`。
 - 2026-05-13：WebUI build 已随 `cargo test -p bifrost-admin external_cli -- --nocapture`、`cargo clippy -p bifrost-admin --all-targets --all-features -- -D warnings` 和 `pnpm --dir web run build` 通过。
+- 2026-05-23：更新 TC-IEC-20，覆盖 Schedule Agent 对当前 Codex CLI 参数的独立配置：`model/profileV2/reasoningEffort/reasoningSummary/dangerFullAccess/skipGitRepoCheck/ignoreUserConfig/ignoreRules/addDirs/configOverrides/enableFeatures/disableFeatures`；同时新增字段级合并回归，确保 schedule 覆盖 model/env 等字段时不会丢失 runner 默认 executable/args，并确认历史 `search:true` 兼容映射为 `--enable web_search` 而不再生成废弃 `--search`。
+- 2026-05-23：执行 TC-IEC-20 的 CLI 解析与真实临时服务创建 schedule 链路，命令 `cargo test -p bifrost-cli parse_schedule_ --lib -- --nocapture` 与 `./e2e-tests/tests/test_im_schedule_agent_cli_args.sh` 均通过；确认 `bifrost im schedule add ... --target oc_human_test ...` 写入明确 `message_channel`，且 agent Codex adapter 参数完整保留。
+- 2026-05-23：复测 TC-IEC-20 的自定义 Runner args 覆盖回归，命令 `cargo test -p bifrost-admin codex_adapter_ --lib -- --nocapture`、`cargo test -p bifrost-cli parse_schedule_ --lib -- --nocapture`、`cargo test -p bifrost-admin schedule_agent_adapter_config_overrides_runner_without_dropping_command --lib -- --nocapture` 均通过；确认 `codex_adapter_applies_config_flags_to_custom_args` 覆盖自定义 `args` 仍注入 schedule 级 Codex 参数，并在 danger full access 下移除 `--sandbox`。
 
 ## 清理步骤
 

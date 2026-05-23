@@ -715,6 +715,8 @@ pub(super) fn apply_schedule_patch(schedule: &mut ImSchedule, patch: &serde_json
     if let Some(agent) = patch.get("agent") {
         if agent.is_null() {
             schedule.agent = None;
+        } else if let Some(existing_agent) = schedule.agent.as_mut() {
+            apply_schedule_agent_patch(existing_agent, agent);
         } else if let Ok(a) = serde_json::from_value(agent.clone()) {
             schedule.agent = Some(a);
         }
@@ -730,6 +732,82 @@ pub(super) fn apply_schedule_patch(schedule: &mut ImSchedule, patch: &serde_json
         }
     }
     schedule.updated_at = now_ms();
+}
+
+fn apply_schedule_agent_patch(
+    agent: &mut crate::im_gateway::types::ScheduleAgentTask,
+    patch: &serde_json::Value,
+) {
+    if let Some(prompt) = patch.get("prompt").and_then(|v| v.as_str()) {
+        agent.prompt = prompt.to_string();
+    }
+    if patch.get("runner_id").is_some() {
+        agent.runner_id = optional_string_patch(patch.get("runner_id"));
+    }
+    if patch.get("initial_prompt").is_some() {
+        agent.initial_prompt = optional_string_patch(patch.get("initial_prompt"));
+    }
+    if patch.get("session_key").is_some() {
+        agent.session_key = optional_string_patch(patch.get("session_key"));
+    }
+    if patch.get("work_dir").is_some() {
+        agent.work_dir = optional_string_patch(patch.get("work_dir"));
+    }
+    if patch.get("system_prompt").is_some() {
+        agent.system_prompt = optional_string_patch(patch.get("system_prompt"));
+    }
+    if let Some(adapter_config) = patch.get("adapter_config") {
+        if adapter_config.is_null() {
+            agent.adapter_config = None;
+        } else if let Ok(config) =
+            merge_schedule_adapter_config_patch(agent.adapter_config.as_ref(), adapter_config)
+        {
+            agent.adapter_config = Some(config);
+        }
+    }
+    if let Some(conversation_ref) = patch.get("conversation_ref") {
+        if conversation_ref.is_null() {
+            agent.conversation_ref = None;
+        } else if let Ok(ref_value) = serde_json::from_value(conversation_ref.clone()) {
+            agent.conversation_ref = Some(ref_value);
+        }
+    }
+}
+
+fn optional_string_patch(value: Option<&serde_json::Value>) -> Option<String> {
+    value.and_then(|value| {
+        if value.is_null() {
+            None
+        } else {
+            value.as_str().map(ToString::to_string)
+        }
+    })
+}
+
+fn merge_schedule_adapter_config_patch(
+    existing: Option<&crate::im_gateway::external_cli::ExternalCliAdapterConfig>,
+    patch: &serde_json::Value,
+) -> Result<crate::im_gateway::external_cli::ExternalCliAdapterConfig, serde_json::Error> {
+    let mut merged = existing
+        .map(serde_json::to_value)
+        .transpose()?
+        .unwrap_or_else(|| serde_json::json!({}));
+    merge_json_object(&mut merged, patch);
+    serde_json::from_value(merged)
+}
+
+fn merge_json_object(base: &mut serde_json::Value, patch: &serde_json::Value) {
+    let Some(base_object) = base.as_object_mut() else {
+        *base = serde_json::json!({});
+        merge_json_object(base, patch);
+        return;
+    };
+    let Some(patch_object) = patch.as_object() else {
+        return;
+    };
+    for (key, value) in patch_object {
+        base_object.insert(key.clone(), value.clone());
+    }
 }
 
 /// Parse a session filename like `session-{key}-{timestamp}.jsonl`

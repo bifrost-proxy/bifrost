@@ -218,10 +218,19 @@ manifest adapter 适合简单 CLI；复杂 CLI 仍通过 Rust 内置 adapter 实
   "adapter_config": {
     "adapter_id": "codex",
     "profile": "bifrost-im",
+    "profileV2": "team",
     "model": "gpt-5.4",
     "sandbox": "workspace-write",
     "approval_policy": "never",
-    "search": false,
+    "reasoningEffort": "high",
+    "reasoningSummary": "auto",
+    "skipGitRepoCheck": true,
+    "ignoreUserConfig": false,
+    "ignoreRules": false,
+    "addDirs": ["~/work/github/bifrost-tools"],
+    "configOverrides": ["shell_environment_policy.inherit=all"],
+    "enableFeatures": ["web_search"],
+    "disableFeatures": [],
     "ephemeral": false
   },
   "skills": {
@@ -354,7 +363,7 @@ profile = "bifrost-im"
 model = "gpt-5.4"
 sandbox = "workspace-write"
 approval_policy = "never"
-search = false
+enable_features = ["web_search"]
 
 [agent.instructions]
 developer = "你是通过 Bifrost IM Gateway 调度的 Codex Agent。"
@@ -429,6 +438,8 @@ progress_card = true
 - `instructions`：该通道特有的工程背景、输出风格、验证要求。
 - `skills.enabled/disabled`：该通道允许或禁用的 skill。
 - `adapters.<id>`：该通道特定的 adapter 参数，例如 Codex 的 profile/model/sandbox/approval_policy。
+- `adapter_config` 需覆盖当前 Codex CLI 常用参数映射：`profile` -> `--profile`、`profileV2` -> `--profile-v2`、`model` -> `--model`、`sandbox` -> `--sandbox`、`dangerFullAccess` -> `--dangerously-bypass-approvals-and-sandbox`（并抑制 `--sandbox`）、`reasoningEffort/reasoningSummary` -> `--config model_reasoning_*="..."`、`skipGitRepoCheck` -> `--skip-git-repo-check`、`ignoreUserConfig` -> `--ignore-user-config`、`ignoreRules` -> `--ignore-rules`、`addDirs[]` -> 重复 `--add-dir`、`configOverrides[]` -> 重复 `--config`、`enableFeatures[]` -> 重复 `--enable`、`disableFeatures[]` -> 重复 `--disable`。历史 `search:true` 配置只作为兼容入口，运行时映射为 `--enable web_search`，不再生成当前 Codex CLI 不支持的 `--search`。
+- Schedule Agent 允许在 `agent.adapter_config` 上设置同一组 Codex adapter 参数；运行时以 schedule 覆盖值覆盖 Runner 默认值，便于定时任务独立选择 model/reasoning/profile/sandbox，而不影响 IM 入站通道。即使 Runner 使用自定义 `adapter_config.args` 固定 Codex 子命令模板，运行时仍需注入 schedule 级 `model/reasoning/config/enable/dangerFullAccess` 等字段，并在 `dangerFullAccess=true` 时移除模板里已有的 `--sandbox`，防止自定义命令模板绕过 schedule 覆盖。CLI `bifrost im schedule add/update` 的 agent 示例必须同时展示 `--target` 或 `--provider/--target-mode`，确保用户创建的 schedule 有明确 `message_channel`，避免 agent 定时任务执行完成后无法投递结果。
 - `message.default_reply_mode/progress_card`：该通道默认是否真实回 IM、是否使用进度卡。
 
 ### 字段合并规则
@@ -630,7 +641,7 @@ codex exec \
   --json \
   --cd "$WORK_DIR" \
   --sandbox workspace-write \
-  --ask-for-approval never \
+  --enable web_search \
   --output-last-message "$RUN_DIR/last_message.md" \
   - < "$RUN_DIR/prompt.md"
 ```
@@ -723,7 +734,7 @@ Policy: work_dir constrained by global allowlist
 
 - `Mode`：启用/禁用 Agent、runtime、adapter、是否继承全局 runtime/adapter。
 - `Workspace`：默认 work_dir、可切换目录；显示 global allowlist 命中状态，不允许保存越界路径。
-- `Adapter`：profile、model 和 adapter-specific 参数。选择 Codex 时显示 sandbox、approval policy、search；其他 CLI 只显示其声明支持的字段。
+- `Adapter`：profile、model 和 adapter-specific 参数。选择 Codex 时显示 sandbox、approval policy、enable/disable features；其他 CLI 只显示其声明支持的字段。
 - `Instructions`：追加 developer/user instructions，提供“replace global instructions”高级开关，但默认是追加。
 - `Skills`：通道追加 enabled/disabled，禁用优先；展示最终 skill 清单和来源 scope。
 - `Messaging`：是否真实回 IM、是否启用 progress card、默认 target mode。

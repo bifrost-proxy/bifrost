@@ -94,7 +94,7 @@ fn codex_adapter_builds_exec_command_with_prompt_stdin() {
     assert!(has_arg_pair(&spec.args, "--model", "gpt-test"));
     assert!(has_arg_pair(&spec.args, "--sandbox", "workspace-write"));
     assert!(!spec.args.contains(&"--ask-for-approval".to_string()));
-    assert!(spec.args.contains(&"--search".to_string()));
+    assert!(has_arg_pair(&spec.args, "--enable", "web_search"));
     assert!(spec.args.contains(&"--ephemeral".to_string()));
     assert!(has_arg_pair(
         &spec.args,
@@ -102,6 +102,152 @@ fn codex_adapter_builds_exec_command_with_prompt_stdin() {
         "/tmp/last.md"
     ));
     assert_eq!(spec.args.last().map(String::as_str), Some("-"));
+}
+
+#[test]
+fn codex_adapter_builds_current_cli_config_flags() {
+    let request = ExternalCliRunRequest {
+        message: "hello".to_string(),
+        operation: default_operation(),
+        params: serde_json::Value::Null,
+        provider_id: Some("provider-a".to_string()),
+        runner_id: None,
+        session_key: Some("schedule:one".to_string()),
+        runtime: DEFAULT_RUNTIME.to_string(),
+        adapter: DEFAULT_ADAPTER.to_string(),
+        work_dir: Some(PathBuf::from("/tmp/work")),
+        instructions: None,
+        adapter_config: ExternalCliAdapterConfig {
+            executable: Some("codex".to_string()),
+            profile_v2: Some("team".to_string()),
+            model: Some("gpt-test".to_string()),
+            sandbox: Some("workspace-write".to_string()),
+            approval_policy: Some("never".to_string()),
+            reasoning_effort: Some("high".to_string()),
+            reasoning_summary: Some("auto".to_string()),
+            dangerously_bypass_hook_trust: Some(true),
+            strict_config: Some(true),
+            skip_git_repo_check: Some(true),
+            ignore_user_config: Some(true),
+            ignore_rules: Some(true),
+            oss: Some(true),
+            local_provider: Some("ollama".to_string()),
+            output_schema: Some("/tmp/schema.json".to_string()),
+            color: Some("never".to_string()),
+            add_dirs: vec!["/tmp/extra".to_string()],
+            config_overrides: vec!["shell_environment_policy.inherit=all".to_string()],
+            enable_features: vec!["web_search".to_string()],
+            disable_features: vec!["legacy_mode".to_string()],
+            ..Default::default()
+        },
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    };
+
+    let spec = build_command_spec(&request, Path::new("/tmp/last.md")).unwrap();
+
+    assert!(has_arg_pair(&spec.args, "--profile-v2", "team"));
+    assert!(has_arg_pair(
+        &spec.args,
+        "--config",
+        "shell_environment_policy.inherit=all"
+    ));
+    assert!(has_arg_pair(
+        &spec.args,
+        "--config",
+        "approval_policy=\"never\""
+    ));
+    assert!(has_arg_pair(
+        &spec.args,
+        "--config",
+        "model_reasoning_effort=\"high\""
+    ));
+    assert!(has_arg_pair(
+        &spec.args,
+        "--config",
+        "model_reasoning_summary=\"auto\""
+    ));
+    assert!(has_arg_pair(&spec.args, "--enable", "web_search"));
+    assert!(has_arg_pair(&spec.args, "--disable", "legacy_mode"));
+    assert!(has_arg_pair(&spec.args, "--add-dir", "/tmp/extra"));
+    assert!(spec
+        .args
+        .contains(&"--dangerously-bypass-hook-trust".to_string()));
+    assert!(spec.args.contains(&"--strict-config".to_string()));
+    assert!(spec.args.contains(&"--oss".to_string()));
+    assert!(has_arg_pair(&spec.args, "--local-provider", "ollama"));
+    assert!(has_arg_pair(
+        &spec.args,
+        "--output-schema",
+        "/tmp/schema.json"
+    ));
+    assert!(has_arg_pair(&spec.args, "--color", "never"));
+    assert!(spec.args.contains(&"--skip-git-repo-check".to_string()));
+    assert!(spec.args.contains(&"--ignore-user-config".to_string()));
+    assert!(spec.args.contains(&"--ignore-rules".to_string()));
+    assert!(!spec.args.contains(&"--search".to_string()));
+}
+
+#[test]
+fn codex_adapter_maps_legacy_search_to_web_search_feature() {
+    let request = ExternalCliRunRequest {
+        message: "hello".to_string(),
+        operation: default_operation(),
+        params: serde_json::Value::Null,
+        provider_id: Some("provider-a".to_string()),
+        runner_id: None,
+        session_key: Some("schedule:one".to_string()),
+        runtime: DEFAULT_RUNTIME.to_string(),
+        adapter: DEFAULT_ADAPTER.to_string(),
+        work_dir: None,
+        instructions: None,
+        adapter_config: ExternalCliAdapterConfig {
+            executable: Some("codex".to_string()),
+            search: Some(true),
+            ..Default::default()
+        },
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    };
+
+    let spec = build_command_spec(&request, Path::new("/tmp/last.md")).unwrap();
+
+    assert!(has_arg_pair(&spec.args, "--enable", "web_search"));
+    assert!(!spec.args.contains(&"--search".to_string()));
+}
+
+#[test]
+fn codex_adapter_danger_full_access_suppresses_sandbox() {
+    let request = ExternalCliRunRequest {
+        message: "hello".to_string(),
+        operation: default_operation(),
+        params: serde_json::Value::Null,
+        provider_id: Some("provider-a".to_string()),
+        runner_id: None,
+        session_key: Some("schedule:one".to_string()),
+        runtime: DEFAULT_RUNTIME.to_string(),
+        adapter: DEFAULT_ADAPTER.to_string(),
+        work_dir: Some(PathBuf::from("/tmp/work")),
+        instructions: None,
+        adapter_config: ExternalCliAdapterConfig {
+            executable: Some("codex".to_string()),
+            sandbox: Some("workspace-write".to_string()),
+            danger_full_access: Some(true),
+            ..Default::default()
+        },
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    };
+
+    let spec = build_command_spec(&request, Path::new("/tmp/last.md")).unwrap();
+
+    assert!(spec
+        .args
+        .contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
+    assert!(!spec.args.contains(&"--sandbox".to_string()));
 }
 
 #[test]
@@ -122,6 +268,8 @@ fn codex_adapter_builds_resume_command_from_thread_id() {
             profile: Some("not-supported-by-resume".to_string()),
             model: Some("gpt-test".to_string()),
             sandbox: Some("workspace-write".to_string()),
+            danger_full_access: Some(true),
+            add_dirs: vec!["/tmp/extra".to_string()],
             ephemeral: Some(true),
             ..Default::default()
         },
@@ -138,9 +286,13 @@ fn codex_adapter_builds_resume_command_from_thread_id() {
     assert!(has_arg_pair(&spec.args, "--cd", "/tmp/work"));
     assert!(has_arg_pair(&spec.args, "--model", "gpt-test"));
     assert!(spec.args.contains(&"--ephemeral".to_string()));
+    assert!(spec
+        .args
+        .contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
     assert!(spec.args.contains(&"thread-existing".to_string()));
     assert!(!spec.args.contains(&"--profile".to_string()));
     assert!(!spec.args.contains(&"--sandbox".to_string()));
+    assert!(!spec.args.contains(&"--add-dir".to_string()));
     assert_eq!(spec.args.last().map(String::as_str), Some("-"));
 }
 
@@ -177,6 +329,64 @@ fn codex_adapter_injects_work_dir_with_custom_args() {
         "/tmp/last.md"
     ));
     assert_eq!(spec.work_dir.as_deref(), Some(Path::new("/tmp/work")));
+}
+
+#[test]
+fn codex_adapter_applies_config_flags_to_custom_args() {
+    let request = ExternalCliRunRequest {
+        message: "hello".to_string(),
+        operation: default_operation(),
+        params: serde_json::Value::Null,
+        provider_id: Some("provider-a".to_string()),
+        runner_id: None,
+        session_key: Some("schedule:one".to_string()),
+        runtime: DEFAULT_RUNTIME.to_string(),
+        adapter: DEFAULT_ADAPTER.to_string(),
+        work_dir: Some(PathBuf::from("/tmp/work")),
+        instructions: None,
+        adapter_config: ExternalCliAdapterConfig {
+            executable: Some("codex".to_string()),
+            args: vec![
+                "exec".to_string(),
+                "--json".to_string(),
+                "--model".to_string(),
+                "gpt-runner".to_string(),
+                "--sandbox".to_string(),
+                "workspace-write".to_string(),
+                "-".to_string(),
+            ],
+            model: Some("gpt-schedule".to_string()),
+            reasoning_effort: Some("high".to_string()),
+            enable_features: vec!["web_search".to_string()],
+            danger_full_access: Some(true),
+            ..Default::default()
+        },
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    };
+
+    let spec = build_command_spec(&request, Path::new("/tmp/last.md")).unwrap();
+
+    assert!(has_arg_pair(&spec.args, "--cd", "/tmp/work"));
+    assert!(has_arg_pair(
+        &spec.args,
+        "--output-last-message",
+        "/tmp/last.md"
+    ));
+    assert!(has_arg_pair(&spec.args, "--model", "gpt-schedule"));
+    assert!(!has_arg_pair(&spec.args, "--model", "gpt-runner"));
+    assert!(has_arg_pair(
+        &spec.args,
+        "--config",
+        "model_reasoning_effort=\"high\""
+    ));
+    assert!(has_arg_pair(&spec.args, "--enable", "web_search"));
+    assert!(spec
+        .args
+        .contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
+    assert!(!spec.args.contains(&"--sandbox".to_string()));
+    assert_eq!(spec.args.last().map(String::as_str), Some("-"));
 }
 
 #[tokio::test]

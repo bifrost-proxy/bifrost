@@ -36,9 +36,26 @@ export interface ExternalCliAdapterConfig {
   args?: string[];
   env?: Record<string, string>;
   profile?: string;
+  profileV2?: string;
   model?: string;
   sandbox?: string;
   approvalPolicy?: string;
+  reasoningEffort?: string;
+  reasoningSummary?: string;
+  dangerFullAccess?: boolean;
+  dangerouslyBypassHookTrust?: boolean;
+  strictConfig?: boolean;
+  skipGitRepoCheck?: boolean;
+  ignoreUserConfig?: boolean;
+  ignoreRules?: boolean;
+  oss?: boolean;
+  localProvider?: string;
+  outputSchema?: string;
+  color?: string;
+  addDirs?: string[];
+  configOverrides?: string[];
+  enableFeatures?: string[];
+  disableFeatures?: string[];
   search?: boolean;
   ephemeral?: boolean;
   timeoutSecs?: number;
@@ -222,6 +239,7 @@ export interface ImSchedule {
     session_key?: string;
     work_dir?: string;
     system_prompt?: string;
+    adapter_config?: ExternalCliAdapterConfig;
     conversation_ref?: {
       adapter: string;
       conversationId?: string;

@@ -688,12 +688,15 @@ bifrost im send --image-file ./alert.png
 bifrost im send --card-title "Deploy report" --card-text "**Done**" --card-image-file ./chart.png
 bifrost im route add deploy --event message.receive --regex '^/deploy' --script-file ./deploy.sh
 bifrost im schedule add health --target oncall --cron '*/5 * * * *' --script-file ./check.sh
+bifrost im schedule add agent-daily --target oncall --cron '0 9 * * *' --agent-prompt 'Summarize traffic' --agent-runner-id codex --agent-model gpt-5 --agent-reasoning-effort high --agent-enable web_search
 bifrost im messages list --direction inbound
 ```
 
 需要 provider 的 IM 命令都支持 `--provider <id>` 显式指定。未提供 `--provider` 时，CLI 会复用统一选择逻辑：只有一个 enabled provider 时自动选择；多个 enabled provider 且处于交互式终端时展示列表让用户选择；多个 provider 且 stdin 非交互时会要求显式传 `--provider`。`bifrost im send` 未传 `--target` 时默认发送给所选 provider 的 owner，因此 provider 需要配置 `owner_open_id`（可在创建时用 `--owner-open-id`，或由后端连接飞书后自动检测）。
 
 Agent 配置支持 `default_message_channel`，用于给 turn 级 `send_msg` 工具和 Agent 创建的 schedule 提供默认 IM 发送目标。手动创建 schedule 时仍应显式绑定目标（例如 `--target oncall`，或 API 的 `message_channel`），避免任务执行时把通知发到最近一次对话；通过 IM 消息触发的 Agent 创建 schedule 时会自动继承当前来源通道，通过 `/agent/chat` 创建时会回退到 `default_message_channel`。
+
+`bifrost im schedule add/update` 创建 Agent schedule 时可用 `--agent-runner-id` 选择 Runner，并通过 `--agent-model`、`--agent-profile`、`--agent-profile-v2`、`--agent-sandbox`、`--agent-reasoning-effort`、`--agent-reasoning-summary`、`--agent-approval-policy`、`--agent-danger-full-access`、`--agent-bypass-hook-trust`、`--agent-skip-git-repo-check`、`--agent-ignore-user-config`、`--agent-ignore-rules`、`--agent-add-dir`、`--agent-config`、`--agent-enable`、`--agent-disable` 等参数写入 `agent.adapter_config`。这些 schedule 级参数会在运行时覆盖 Runner 默认 Codex adapter 配置；历史 `--agent-search` 仅作为兼容入口映射为 `--enable web_search`，不再生成当前 Codex CLI 不支持的 `--search`。
 
 ### 本地语音输入（ai voice）
 
