@@ -256,7 +256,7 @@ mod tests {
 
     #[test]
     fn update_task_paused_toggles_scheduler_state() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         let audio_dir = temp.path().join("audio");
@@ -304,7 +304,7 @@ mod tests {
 
     #[test]
     fn temporary_pause_keeps_next_schedule_and_auto_resumes_when_due() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         let audio_dir = temp.path().join("audio");
@@ -338,7 +338,7 @@ mod tests {
 
     #[test]
     fn long_term_pause_does_not_auto_resume_for_scheduler() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         let audio_dir = temp.path().join("audio");
@@ -363,7 +363,7 @@ mod tests {
 
     #[test]
     fn task_after_run_preserves_temporary_pause_schedule() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         let audio_dir = temp.path().join("audio");
@@ -444,7 +444,7 @@ mod tests {
 
     #[test]
     fn force_pause_requires_persisted_pause_state() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         let audio_dir = temp.path().join("audio");
@@ -536,7 +536,7 @@ mod tests {
 
     #[test]
     fn summary_keeps_processed_files_after_source_deletion() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         let audio_dir = temp.path().join("audio");
@@ -583,7 +583,7 @@ mod tests {
 
     #[test]
     fn control_summary_uses_file_store_without_live_discovery() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         let audio_dir = temp.path().join("audio");
@@ -614,7 +614,7 @@ mod tests {
 
     #[test]
     fn running_task_list_summary_uses_cached_counts() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         let audio_dir = temp.path().join("audio");
@@ -642,7 +642,7 @@ mod tests {
 
     #[test]
     fn summary_reports_cleanable_source_audio_usage() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         let audio_dir = temp.path().join("audio");
@@ -700,7 +700,7 @@ mod tests {
 
     #[test]
     fn cleanup_source_audio_deletes_only_successful_records_with_outputs() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         let audio_dir = temp.path().join("audio");
@@ -770,7 +770,7 @@ mod tests {
 
     #[test]
     fn summary_counts_failed_files_separately_from_pending() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         let audio_dir = temp.path().join("audio");
@@ -817,7 +817,7 @@ mod tests {
 
     #[test]
     fn summary_treats_recreated_same_path_audio_as_new_pending_file() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         let audio_dir = temp.path().join("audio");
@@ -865,7 +865,7 @@ mod tests {
 
     #[test]
     fn task_detail_includes_file_progress_records() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         let audio_dir = temp.path().join("audio");
@@ -919,7 +919,7 @@ mod tests {
 
     #[test]
     fn task_detail_sorts_unfinished_files_before_successes() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         let audio_dir = temp.path().join("audio");
@@ -1043,7 +1043,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn run_without_pending_files_refreshes_daily_summaries() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         let audio_dir = temp.path().join("audio");
@@ -1132,7 +1132,7 @@ mod tests {
         assert_eq!(failed_now, 0);
         let daily_path = temp
             .path()
-            .join("asr/data/text/task-daily-refresh/daily/2026-05-14.md");
+            .join("asr/data/text/task-daily-refresh/.daily/2026-05-14.md");
         let daily = std::fs::read_to_string(daily_path).unwrap();
         assert!(daily.contains("# Daily Refresh"));
         assert!(daily.contains("完整按天整理内容"));
@@ -1140,7 +1140,7 @@ mod tests {
 
     #[test]
     fn interrupted_processing_records_reset_to_pending_before_next_run() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         let audio_dir = temp.path().join("audio");
@@ -1348,7 +1348,7 @@ mod tests {
 
     #[test]
     fn task_run_lock_rejects_concurrent_runs_and_releases_after_drop() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
 
@@ -1363,7 +1363,7 @@ mod tests {
 
     #[test]
     fn task_run_lock_recovers_legacy_stale_lock_after_restart() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         let lock_path = temp.path().join("asr/tasks/task1/run.lock");
@@ -1380,8 +1380,8 @@ mod tests {
 
     #[test]
     fn startup_recovery_requeues_enabled_interrupted_task() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
-        RUNNING_TASKS.lock().unwrap().clear();
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        RUNNING_TASKS.lock().unwrap_or_else(|e| e.into_inner()).clear();
         let temp = TempDir::new().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         let audio_dir = temp.path().join("audio");
@@ -1440,8 +1440,8 @@ mod tests {
 
     #[test]
     fn startup_recovery_does_not_requeue_paused_task() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
-        RUNNING_TASKS.lock().unwrap().clear();
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        RUNNING_TASKS.lock().unwrap_or_else(|e| e.into_inner()).clear();
         let temp = TempDir::new().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         let audio_dir = temp.path().join("audio");
@@ -1483,9 +1483,108 @@ mod tests {
     }
 
     #[test]
+    fn startup_recovery_requeues_retryable_server_start_failures() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        RUNNING_TASKS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let audio = audio_dir.join("retryable.wav");
+        std::fs::write(&audio, b"audio").unwrap();
+        let mut task = test_directory_task("retryable-failed-task", audio_dir);
+        task.last_error = Some("71 file(s) failed".to_string());
+        save_tasks(&TaskStore {
+            version: TASK_STORE_VERSION,
+            tasks: vec![task.clone()],
+        })
+        .unwrap();
+
+        let key = source_key(&audio);
+        let mut record = pending_record(&task.id, &audio);
+        record.status = FileStatus::Failed;
+        record.started_at_ms = Some(123);
+        record.finished_at_ms = Some(456);
+        record.progress_current = Some(1);
+        record.progress_total = Some(1);
+        record.error = Some(
+            "managed ASR server start failed: Qwen3-ASR service is busy.; detail=requested owner=directory_task:retryable-failed-task model=Qwen3-ASR-1.7B; active owner=directory_task:retryable-failed-task model=Qwen3-ASR-1.7B server=http://127.0.0.1:60241"
+                .to_string(),
+        );
+        save_file_store(
+            &task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(key.clone(), record)]),
+            },
+        )
+        .unwrap();
+
+        let recovery = recover_interrupted_task_runs_on_startup();
+        assert_eq!(recovery.len(), 1);
+        assert_eq!(recovery[0].id, task.id);
+
+        let store = load_file_store(&task.id);
+        let recovered = store.files.get(&key).unwrap();
+        assert_eq!(recovered.status, FileStatus::Pending);
+        assert_eq!(recovered.started_at_ms, None);
+        assert_eq!(recovered.finished_at_ms, None);
+        assert_eq!(recovered.progress_current, None);
+        assert_eq!(recovered.progress_total, None);
+        assert_eq!(recovered.error, None);
+        assert_eq!(load_tasks().tasks[0].last_error, None);
+    }
+
+    #[test]
+    fn startup_recovery_does_not_requeue_non_retryable_failed_records() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        RUNNING_TASKS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let audio = audio_dir.join("bad-audio.wav");
+        std::fs::write(&audio, b"audio").unwrap();
+        let mut task = test_directory_task("non-retryable-failed-task", audio_dir);
+        task.last_error = Some("1 file(s) failed".to_string());
+        save_tasks(&TaskStore {
+            version: TASK_STORE_VERSION,
+            tasks: vec![task.clone()],
+        })
+        .unwrap();
+
+        let key = source_key(&audio);
+        let mut record = pending_record(&task.id, &audio);
+        record.status = FileStatus::Failed;
+        record.error = Some("ffmpeg normalize failed: invalid data found".to_string());
+        save_file_store(
+            &task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(key.clone(), record)]),
+            },
+        )
+        .unwrap();
+
+        let recovery = recover_interrupted_task_runs_on_startup();
+        assert!(recovery.is_empty());
+        let store = load_file_store(&task.id);
+        let unchanged = store.files.get(&key).unwrap();
+        assert_eq!(unchanged.status, FileStatus::Failed);
+        assert_eq!(
+            unchanged.error.as_deref(),
+            Some("ffmpeg normalize failed: invalid data found")
+        );
+        assert_eq!(
+            load_tasks().tasks[0].last_error.as_deref(),
+            Some("1 file(s) failed")
+        );
+    }
+
+    #[test]
     fn startup_recovery_preserves_live_owner_lock() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
-        RUNNING_TASKS.lock().unwrap().clear();
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        RUNNING_TASKS.lock().unwrap_or_else(|e| e.into_inner()).clear();
         let temp = TempDir::new().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         let audio_dir = temp.path().join("audio");
@@ -1524,7 +1623,7 @@ mod tests {
 
     #[test]
     fn running_task_guard_releases_marker_on_drop() {
-        RUNNING_TASKS.lock().unwrap().clear();
+        RUNNING_TASKS.lock().unwrap_or_else(|e| e.into_inner()).clear();
         {
             let _guard = RunningTaskGuard::acquire("guard-task").unwrap();
             assert!(task_is_running("guard-task"));
@@ -1815,7 +1914,7 @@ mod tests {
 
     #[test]
     fn task_run_lock_recovers_dead_owner_lock() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         let lock_path = temp.path().join("asr/tasks/task1/run.lock");
@@ -1914,7 +2013,7 @@ mod tests {
 
     #[test]
     fn external_import_detects_completed_processing_record_for_removed_target() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         let task = test_directory_task("processed-skip", temp.path().join("audio"));
@@ -1958,7 +2057,7 @@ mod tests {
 
     #[test]
     fn external_import_progress_stale_importing_is_marked_failed() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         let progress = AsrExternalImportRunProgress {
@@ -2028,7 +2127,7 @@ mod tests {
 
     #[test]
     fn content_hash_dedupe_reuses_completed_transcript() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         let audio_dir = temp.path().join("audio");
@@ -2094,7 +2193,7 @@ mod tests {
 
     #[test]
     fn external_import_blake3_hashes_are_applied_to_asr_records() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         let audio_dir = temp.path().join("audio");
@@ -2149,7 +2248,7 @@ mod tests {
 
     #[test]
     fn content_hash_dedupe_hashes_manual_copy_when_candidate_exists() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         let audio_dir = temp.path().join("audio");
@@ -2191,7 +2290,7 @@ mod tests {
 
     #[test]
     fn content_hash_dedupe_does_not_hash_large_manual_copy_in_preflight() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         let audio_dir = temp.path().join("audio");

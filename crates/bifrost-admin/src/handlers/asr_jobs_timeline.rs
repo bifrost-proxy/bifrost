@@ -235,7 +235,7 @@ pub(super) fn source_modified_ms(path: &Path) -> Option<u64> {
 
 /// Generate daily summary markdown files from all successful timeline.json files
 /// under the given task output directory. Each day produces a `YYYY-MM-DD.md` file
-/// inside `<task_output_dir>/daily/`, with all segments sorted chronologically.
+/// inside `<task_output_dir>/.daily/`, with all segments sorted chronologically.
 pub(super) fn generate_daily_summaries(
     task_output_dir: &Path,
     task_name: &str,
@@ -329,7 +329,7 @@ pub(super) fn generate_daily_summaries(
     }
 
     // Write daily markdown files.
-    let daily_dir = task_output_dir.join("daily");
+    let daily_dir = task_output_dir.join(".daily");
     std::fs::create_dir_all(&daily_dir).map_err(|e| format!("create daily dir: {e}"))?;
 
     let mut written = Vec::new();
@@ -387,7 +387,7 @@ fn collect_timeline_files(dir: &Path, out: &mut Vec<PathBuf>) {
         let path = entry.path();
         if path.is_dir() {
             // Skip the daily/ output directory to avoid reading our own output.
-            if path.file_name().and_then(|n| n.to_str()) == Some("daily") {
+            if path.file_name().and_then(|n| n.to_str()) == Some(".daily") {
                 continue;
             }
             collect_timeline_files(&path, out);

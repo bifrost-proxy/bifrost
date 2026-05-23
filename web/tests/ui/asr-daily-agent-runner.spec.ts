@@ -3,7 +3,7 @@ import { openPage, waitForToast } from "./helpers/admin-helpers";
 
 const taskId = "asr-runner-select-test";
 const reportDate = "2026-05-14";
-const reportPath = `/tmp/bifrost-asr-runner-select/daily/report/${reportDate}-report.md`;
+const reportPath = `/tmp/bifrost-asr-runner-select/.daily/report/${reportDate}-report.md`;
 const longInstructions = Array.from(
   { length: 36 },
   (_, index) =>
@@ -122,9 +122,9 @@ async function installDailyAgentMocks(page: Page) {
         task_id: taskId,
         config: dailyAgentConfig,
         workspace: {
-          daily_dir: "/tmp/bifrost-asr-runner-select/daily",
-          report_dir: "/tmp/bifrost-asr-runner-select/daily/report",
-          agents_path: "/tmp/bifrost-asr-runner-select/daily/AGENTS.md",
+          daily_dir: "/tmp/bifrost-asr-runner-select/.daily",
+          report_dir: "/tmp/bifrost-asr-runner-select/.daily/report",
+          agents_path: "/tmp/bifrost-asr-runner-select/.daily/AGENTS.md",
           agents_exists: true,
           git_available: true,
           git_initialized: true,
@@ -168,7 +168,7 @@ async function installDailyAgentMocks(page: Page) {
             source_len_bytes: 128_000,
             processed_at_ms: 1_779_126_000_000,
             runner: "web",
-            report_path: `/tmp/bifrost-asr-runner-select/daily/report/2026-05-13-report.md`,
+            report_path: `/tmp/bifrost-asr-runner-select/.daily/report/2026-05-13-report.md`,
             last_run_id: "daily-agent-older-report-run",
           },
           {
@@ -186,7 +186,7 @@ async function installDailyAgentMocks(page: Page) {
             source_len_bytes: 220_000,
             processed_at_ms: 1_779_385_600_000,
             runner: "web",
-            report_path: `/tmp/bifrost-asr-runner-select/daily/report/2026-05-16-report.md`,
+            report_path: `/tmp/bifrost-asr-runner-select/.daily/report/2026-05-16-report.md`,
             last_run_id: "daily-agent-newest-report-run",
           },
         ],

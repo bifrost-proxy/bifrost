@@ -239,7 +239,11 @@ async fn handle_status(req: Request<Incoming>) -> Response<BoxBody> {
     let resolved_target = resolve_managed_target(target.clone()).await;
     let installed = target.assets_installed();
     let ready = resolved_target.port.is_some() && probe_asr_health(&resolved_target).await.is_ok();
-    let managed = managed_service_matches(&target).await;
+    let managed = if ready {
+        managed_service_matches(&resolved_target).await
+    } else {
+        managed_service_matches(&target).await
+    };
     let ffmpeg_available = command_succeeds("ffmpeg", &["-version"]).await;
     let status_target = if ready { &resolved_target } else { &target };
     let status = if ready {
@@ -880,6 +884,19 @@ pub(crate) async fn start_managed_service(
         stop_managed_service_for_target(&existing).await;
     }
 
+    if let Some(existing) = find_reusable_persisted_target(&requested_target) {
+        if probe_asr_health(&existing).await.is_ok() {
+            return Ok(AsrServiceResponse {
+                ready: true,
+                managed: true,
+                server_url: existing.server_url_display(),
+                message: "Qwen3-ASR persisted model service is already running.".to_string(),
+                detail: None,
+            });
+        }
+        stop_managed_service_for_target(&existing).await;
+    }
+
     let target = match requested_target.port {
         Some(_) => requested_target,
         None => requested_target.with_port(allocate_loopback_port().map_err(|error| {
@@ -1197,6 +1214,12 @@ async fn find_managed_target(target: &AsrTarget) -> Option<AsrTarget> {
         .map(|service| service.target.clone())
 }
 
+fn find_reusable_persisted_target(target: &AsrTarget) -> Option<AsrTarget> {
+    let state = read_service_state(&bifrost_storage::data_dir())?;
+    let existing = target.with_state(&state);
+    persisted_target_matches_request(target, &existing).then_some(existing)
+}
+
 async fn find_conflicting_healthy_service(target: &AsrTarget) -> Option<AsrTarget> {
     let existing_managed = MANAGED_SERVICE
         .lock()
@@ -1265,6 +1288,23 @@ pub(crate) async fn resolve_managed_target(target: AsrTarget) -> AsrTarget {
         }
     }
     target
+}
+
+/// Shutdown the managed ASR service (if any). Called during Bifrost process exit
+/// to ensure the child ASR server doesn't become an orphan.
+pub async fn shutdown_managed_asr_service() {
+    let managed = MANAGED_SERVICE.lock().await.take();
+    if let Some(mut managed) = managed {
+        let pid = managed.child.id();
+        if let Some(pid) = pid {
+            tracing::info!(pid, "Shutting down managed ASR service on Bifrost exit");
+            terminate_service_process_group(Some(pid));
+            let _ = managed.child.kill().await;
+        } else {
+            tracing::info!("Managed ASR service already exited, cleaning up state");
+        }
+        let _ = crate::asr_runtime::clear_service_state(&bifrost_storage::data_dir());
+    }
 }
 
 pub(crate) async fn stop_managed_service_for_target(target: &AsrTarget) {
@@ -1503,6 +1543,13 @@ fn same_service_owner(left: &AsrTarget, right: &AsrTarget) -> bool {
 
 fn target_matches_state_owner(target: &AsrTarget, state: &AsrServiceState) -> bool {
     target.owner_module == state.lease_owner_module() && target.owner_id == state.owner_id
+}
+
+/// 检查持久化的 ASR target 是否匹配当前请求。
+/// 注意参数顺序：第一个是请求方的 target，第二个是从持久化 state 恢复的 target。
+/// 内部委托 target_matches_request(existing=persisted, requested=requested)。
+fn persisted_target_matches_request(requested: &AsrTarget, persisted: &AsrTarget) -> bool {
+    target_matches_request(persisted, requested) && same_service_owner(persisted, requested)
 }
 
 async fn run_initializer(
@@ -2294,9 +2341,9 @@ mod tests {
 
     use super::{
         asr_download_requests, build_asr_download_client, default_home,
-        plan_upload_chunk_boundaries, same_service_owner, service_watchdog_should_kill_for_sample,
-        target_from_query, target_matches_request, validate_loopback_host, wav_pcm_duration_ms,
-        ASR_UPLOAD_CHUNK_DURATION_SECS,
+        persisted_target_matches_request, plan_upload_chunk_boundaries, same_service_owner,
+        service_watchdog_should_kill_for_sample, target_from_query, target_matches_request,
+        validate_loopback_host, wav_pcm_duration_ms, ASR_UPLOAD_CHUNK_DURATION_SECS,
     };
 
     fn proxy_env_lock() -> &'static StdMutex<()> {
@@ -2578,6 +2625,38 @@ mod tests {
         assert_eq!(resolved.port, Some(18081));
         assert_eq!(resolved.owner_module, "speech_workbench");
         assert!(same_service_owner(&requested, &resolved));
+    }
+
+    #[test]
+    fn qwen3_dynamic_request_reuses_same_owner_persisted_service() {
+        let requested = target_from_query(Some(
+            "model=Qwen3-ASR-1.7B&owner_module=directory_task&owner_id=task-a",
+        ))
+        .unwrap();
+        let persisted = requested.with_state(&crate::asr_runtime::AsrServiceState {
+            host: "127.0.0.1".to_string(),
+            port: 60241,
+            model: "Qwen3-ASR-1.7B".to_string(),
+            language: "chinese".to_string(),
+            home: default_home(),
+            pid: Some(12345),
+            managed_by: "directory_task".to_string(),
+            owner_module: Some("directory_task".to_string()),
+            owner_id: Some("task-a".to_string()),
+            started_at_ms: 1,
+        });
+        let conflicting_task = target_from_query(Some(
+            "model=Qwen3-ASR-1.7B&owner_module=directory_task&owner_id=task-b",
+        ))
+        .unwrap();
+
+        assert_eq!(requested.port, None);
+        assert_eq!(persisted.port, Some(60241));
+        assert!(persisted_target_matches_request(&requested, &persisted));
+        assert!(!persisted_target_matches_request(
+            &conflicting_task,
+            &persisted
+        ));
     }
 
     #[test]

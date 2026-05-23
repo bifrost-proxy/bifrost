@@ -1,6 +1,6 @@
 #[test]
 fn daily_agent_prompt_uses_file_list_for_file_capable_runners() {
-    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp = TempDir::new().unwrap();
     let _guard = EnvGuard::set_data_dir(temp.path());
     let audio_dir = temp.path().join("audio");
@@ -182,7 +182,7 @@ async fn restart_failure_forks_only_current_chunk_and_keeps_retry_pending() {
 
 #[test]
 fn daily_agent_report_gate_requires_report_before_processed_state() {
-    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp = TempDir::new().unwrap();
     let _guard = EnvGuard::set_data_dir(temp.path());
     let audio_dir = temp.path().join("audio");
@@ -224,20 +224,20 @@ fn daily_agent_report_gate_requires_report_before_processed_state() {
 
 #[test]
 fn daily_agent_report_detail_path_is_date_scoped() {
-    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp = TempDir::new().unwrap();
     let _guard = EnvGuard::set_data_dir(temp.path());
 
     let report_path =
         daily_agent_report_path_for_date("daily-agent-report-task", "2026-05-14").unwrap();
-    assert!(report_path.ends_with("daily-agent-report-task/daily/report/2026-05-14-report.md"));
+    assert!(report_path.ends_with("daily-agent-report-task/.daily/report/2026-05-14-report.md"));
     assert!(daily_agent_report_path_for_date("daily-agent-report-task", "../secret").is_err());
     assert!(daily_agent_report_path_for_date("daily-agent-report-task", "2026-02-31").is_err());
 }
 
 #[test]
 fn daily_agent_records_include_existing_report_directory_without_processed_state() {
-    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp = TempDir::new().unwrap();
     let _guard = EnvGuard::set_data_dir(temp.path());
     let task_id = "daily-agent-records-report-dir-task";
@@ -260,15 +260,59 @@ fn daily_agent_records_include_existing_report_directory_without_processed_state
         .report_path
         .as_deref()
         .unwrap()
-        .ends_with("daily/Report/2026-05-14-report.md"));
+        .ends_with(".daily/Report/2026-05-14-report.md"));
 
     let detail_path = daily_agent_report_path_for_date(task_id, "2026-05-14").unwrap();
-    assert!(detail_path.ends_with("daily/Report/2026-05-14-report.md"));
+    assert!(detail_path.ends_with(".daily/Report/2026-05-14-report.md"));
+}
+
+#[test]
+fn daily_agent_records_for_task_use_configured_runner_for_unindexed_reports() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let task_id = "daily-agent-records-configured-runner-task";
+    let daily_dir = daily_dir_for_task(task_id);
+    let report_dir = daily_dir.join("report");
+    std::fs::create_dir_all(&report_dir).unwrap();
+    std::fs::write(daily_dir.join("2026-05-18.md"), "source text").unwrap();
+    std::fs::write(report_dir.join("2026-05-18-report.md"), "# report").unwrap();
+
+    let mut task = AsrDirectoryTask {
+        id: task_id.to_string(),
+        name: "Daily Agent Records Configured Runner Task".to_string(),
+        audio_dir: temp.path().join("audio"),
+        recursive: true,
+        enabled: true,
+        paused: false,
+        paused_at_ms: None,
+        schedule: AsrTaskSchedule::Hourly { minute: 0 },
+        language: "chinese".to_string(),
+        model: "Qwen3-ASR-1.7B".to_string(),
+        runtime_strategy: AsrRuntimeStrategy::ReusePerFile,
+        created_at_ms: 1,
+        updated_at_ms: 1,
+        last_run_at_ms: None,
+        next_run_at_ms: Some(1),
+        last_error: None,
+        daily_agent: AsrDailyAgentConfig::default(),
+        external_devices: Vec::new(),
+        import_policy: AsrExternalImportPolicy::default(),
+    };
+    task.daily_agent.runner = "web".to_string();
+
+    let processed = load_daily_agent_processed_state(task_id);
+    let records = build_daily_agent_records_for_task(&task, &processed);
+
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].date, "2026-05-18");
+    assert_eq!(records[0].runner, "web");
+    assert_eq!(records[0].last_run_id, "filesystem-scan");
 }
 
 #[test]
 fn daily_agent_report_index_status_marks_unindexed_reports_without_backfill() {
-    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp = TempDir::new().unwrap();
     let _guard = EnvGuard::set_data_dir(temp.path());
     let task_id = "daily-agent-report-index-task";
@@ -318,7 +362,7 @@ fn daily_agent_report_index_status_marks_unindexed_reports_without_backfill() {
 
 #[test]
 fn daily_agent_records_preserve_processed_metadata_and_repair_missing_report_path() {
-    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp = TempDir::new().unwrap();
     let _guard = EnvGuard::set_data_dir(temp.path());
     let task_id = "daily-agent-records-merge-task";
@@ -351,12 +395,12 @@ fn daily_agent_records_preserve_processed_metadata_and_repair_missing_report_pat
         .report_path
         .as_deref()
         .unwrap()
-        .ends_with("daily/report/2026-05-15-report.md"));
+        .ends_with(".daily/report/2026-05-15-report.md"));
 }
 
 #[test]
 fn daily_agent_records_are_returned_newest_date_first() {
-    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp = TempDir::new().unwrap();
     let _guard = EnvGuard::set_data_dir(temp.path());
     let task_id = "daily-agent-records-sort-task";
@@ -427,6 +471,92 @@ fn daily_agent_runner_is_single_required_value() {
 }
 
 #[test]
+fn daily_agent_after_asr_run_requires_no_pending_files() {
+    let clean = TaskSummary {
+        discovered: 1,
+        processed: 1,
+        pending: 0,
+        failed: 0,
+        partial_success: 0,
+        failed_chunk_count: 0,
+        deleted_after_processing: 0,
+        audio_source_bytes: 0,
+        audio_source_file_count: 0,
+        cleanable_source_bytes: 0,
+        cleanable_source_file_count: 0,
+        running: true,
+    };
+    assert!(daily_agent_asr_completion_ready(&clean));
+
+    let mut pending = clean.clone();
+    pending.pending = 1;
+    assert!(!daily_agent_asr_completion_ready(&pending));
+
+    // failed/partial_success/failed_chunk_count 不应阻止 daily agent 触发，
+    // 因为这些文件可能永远无法成功处理。
+    let mut failed = clean.clone();
+    failed.failed = 1;
+    assert!(daily_agent_asr_completion_ready(&failed));
+
+    let mut partial = clean.clone();
+    partial.partial_success = 1;
+    assert!(daily_agent_asr_completion_ready(&partial));
+
+    let mut failed_chunks = clean;
+    failed_chunks.failed_chunk_count = 1;
+    assert!(daily_agent_asr_completion_ready(&failed_chunks));
+}
+
+#[test]
+fn daily_agent_effective_status_marks_stale_running_as_interrupted() {
+    let task_id = "daily-agent-stale-running-task";
+    let mut task = AsrDirectoryTask {
+        id: task_id.to_string(),
+        name: "Daily Agent Stale Running Task".to_string(),
+        audio_dir: PathBuf::from("/tmp"),
+        recursive: true,
+        enabled: true,
+        paused: false,
+        paused_at_ms: None,
+        schedule: AsrTaskSchedule::Hourly { minute: 0 },
+        language: "chinese".to_string(),
+        model: "Qwen3-ASR-1.7B".to_string(),
+        runtime_strategy: AsrRuntimeStrategy::ReusePerFile,
+        created_at_ms: 1,
+        updated_at_ms: 1,
+        last_run_at_ms: None,
+        next_run_at_ms: Some(1),
+        last_error: None,
+        daily_agent: AsrDailyAgentConfig::default(),
+        external_devices: Vec::new(),
+        import_policy: AsrExternalImportPolicy::default(),
+    };
+    task.daily_agent.last_status = Some("running".to_string());
+
+    DAILY_AGENT_RUNNING_TASKS
+        .lock()
+        .unwrap()
+        .remove(task_id);
+    assert_eq!(
+        daily_agent_effective_last_status(&task).as_deref(),
+        Some("interrupted")
+    );
+
+    DAILY_AGENT_RUNNING_TASKS
+        .lock()
+        .unwrap()
+        .insert(task_id.to_string());
+    assert_eq!(
+        daily_agent_effective_last_status(&task).as_deref(),
+        Some("running")
+    );
+    DAILY_AGENT_RUNNING_TASKS
+        .lock()
+        .unwrap()
+        .remove(task_id);
+}
+
+#[test]
 fn daily_agent_im_self_call_uses_admin_prefix() {
     assert_eq!(
         daily_agent_im_send_url(9900),
@@ -436,7 +566,7 @@ fn daily_agent_im_self_call_uses_admin_prefix() {
 
 #[test]
 fn daily_agent_im_self_call_discovers_runtime_port() {
-    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp = TempDir::new().unwrap();
     let _guard = EnvGuard::set_data_dir(temp.path());
     std::fs::write(
