@@ -1665,6 +1665,38 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 
 ---
 
+### TC-PRA-40B：HTTPS 解包链路 `resScript` 回归
+
+**操作步骤**：
+1. 通过 API 创建响应脚本：
+   ```bash
+   curl -X POST http://127.0.0.1:8800/_bifrost/api/scripts \
+     -H "Content-Type: application/json" \
+     -d '{"name": "test-res-script-https", "type": "res", "content": "module.exports = function(req, res) { res.headers[\"X-Res-Script\"] = \"modified-by-script-https\"; return res; };"}'
+   ```
+2. 通过 API 创建规则：
+   ```bash
+   curl -X POST http://127.0.0.1:8800/_bifrost/api/rules \
+     -H "Content-Type: application/json" \
+     -d '{"name": "test-resscript-https", "content": "httpbin.org tlsIntercept://\nhttps://httpbin.org/get resScript://test-res-script-https", "enabled": true}'
+   ```
+3. 执行命令：
+   ```bash
+   curl -x http://127.0.0.1:8800 -k -sD - https://httpbin.org/get | grep "X-Res-Script"
+   ```
+4. 清理：
+   ```bash
+   curl -X DELETE http://127.0.0.1:8800/_bifrost/api/rules/test-resscript-https
+   curl -X DELETE http://127.0.0.1:8800/_bifrost/api/scripts/test-res-script-https
+   ```
+
+**预期结果**：
+- 响应头中包含 `X-Res-Script: modified-by-script-https`
+- `tlsIntercept://` 让 `httpbin.org` 的 HTTPS 流量进入解包链路后，`resScript` 仍会在最终响应返回给客户端前执行
+- 需要 `-k` 跳过证书验证（Bifrost 使用自签 CA）
+
+---
+
 ### 七、高级特性
 
 ### TC-PRA-41：Values 引用 — 在操作值中使用 {varName}

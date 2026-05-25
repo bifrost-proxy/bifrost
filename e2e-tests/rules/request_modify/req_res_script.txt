@@ -6,3 +6,5 @@ script-test.local host://127.0.0.1:__ECHO_HTTP_PORT__
 script-test.local reqScript://req_script
 script-test.local resScript://res_script
 script-test.local decode://decode_script
+http://httpbin.org/anything/http-repro resScript://res_script
+https://httpbin.org/anything/https-repro resScript://res_script

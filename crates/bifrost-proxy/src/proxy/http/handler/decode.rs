@@ -4,24 +4,14 @@ use std::time::Instant;
 
 use bifrost_admin::AdminState;
 use bifrost_core::text::truncate_bytes_with_suffix;
-use bifrost_script::{MatchedRuleInfo, RequestData, ResponseData, ScriptContext, ScriptType};
+use bifrost_script::{RequestData, ResponseData, ScriptContext, ScriptType};
 use bytes::Bytes;
 use tracing::warn;
 
 use crate::server::ResolvedRules;
 use crate::utils::logging::RequestContext;
 
-pub(super) fn build_matched_rules_info(resolved_rules: &ResolvedRules) -> Vec<MatchedRuleInfo> {
-    resolved_rules
-        .rules
-        .iter()
-        .map(|r| MatchedRuleInfo {
-            pattern: r.pattern.clone(),
-            protocol: r.protocol.to_string(),
-            value: r.value.clone(),
-        })
-        .collect()
-}
+use super::super::scripts::build_matched_rules_info;
 
 fn is_builtin_decoder(name: &str) -> bool {
     matches!(name.trim(), "utf8" | "default")
@@ -384,17 +374,6 @@ pub(super) async fn apply_decode_scripts_for_storage(
     DecodeForStorageResult {
         output: Bytes::from(current),
         results,
-    }
-}
-
-pub(super) fn parse_url_parts(url: &str) -> (String, String, String) {
-    if let Ok(parsed) = url::Url::parse(url) {
-        let host = parsed.host_str().unwrap_or("").to_string();
-        let path = parsed.path().to_string();
-        let protocol = parsed.scheme().to_string();
-        (host, path, protocol)
-    } else {
-        ("".to_string(), url.to_string(), "http".to_string())
     }
 }
 

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -41,6 +42,9 @@ pub use self::cert::SingleCertResolver;
 use self::host_rule::parse_host_rule;
 use self::io::{BufferedIo, CombinedAsyncRw};
 
+use super::body_metadata::{
+    normalize_res_headers, response_content_encoding, set_content_encoding_header, BodyMode,
+};
 use super::devtools::{
     attach_devtools_client_req_id, devtools_bridge_requested, is_devtools_client_req_id_header,
     maybe_inject_devtools_bridge_html, take_devtools_client_req_id,
@@ -50,6 +54,10 @@ use super::handler::{
     build_connection_error_response, build_error_body, build_overridden_error_response,
     needs_body_processing, needs_request_body_processing, needs_response_override,
     parse_and_record_sse_events, ConnectionErrorInfo,
+};
+use super::scripts::{
+    body_to_script_string, execute_response_scripts, header_map_to_hashmap,
+    header_pairs_to_hashmap, script_string_to_body,
 };
 use super::ws_handshake::{
     header_values, negotiate_extensions, negotiate_protocol, read_http1_response_with_leftover,
@@ -95,6 +103,17 @@ fn apply_listener_context(
     record.client_app = client_app.clone();
     record.client_pid = client_pid;
     record.client_path = client_path.clone();
+}
+
+async fn get_values_from_state(admin_state: &Option<Arc<AdminState>>) -> HashMap<String, String> {
+    use bifrost_core::ValueStore;
+    if let Some(state) = admin_state {
+        if let Some(values_storage) = &state.values_storage {
+            let storage = values_storage.read();
+            return storage.as_hashmap();
+        }
+    }
+    HashMap::new()
 }
 
 fn maybe_backfill_tunnel_client_process(
@@ -292,15 +311,6 @@ fn has_response_body_rules(rules: &ResolvedRules) -> bool {
         || !rules.res_replace.is_empty()
         || !rules.res_replace_regex.is_empty()
         || rules.res_merge.is_some()
-}
-
-fn set_content_encoding_header(headers: &mut hyper::HeaderMap, content_encoding: Option<&str>) {
-    headers.remove(hyper::header::CONTENT_ENCODING);
-    if let Some(content_encoding) = content_encoding {
-        if let Ok(value) = hyper::header::HeaderValue::from_str(content_encoding) {
-            headers.insert(hyper::header::CONTENT_ENCODING, value);
-        }
-    }
 }
 
 pub(super) fn sanitize_upstream_headers(headers: &mut hyper::HeaderMap) {
@@ -3723,7 +3733,7 @@ async fn handle_intercepted_request_with_protocol(
     );
     let final_body = injection_result.body;
 
-    let final_body = if devtools_bridge_requested(&resolved_rules)
+    let mut final_body = if devtools_bridge_requested(&resolved_rules)
         && res_content_type
             .to_ascii_lowercase()
             .starts_with("text/html")
@@ -3772,6 +3782,86 @@ async fn handle_intercepted_request_with_protocol(
         final_body
     };
 
+    let res_script_results = if !resolved_rules.res_scripts.is_empty() {
+        let mut res_script_status = res_parts.status.as_u16();
+        let mut res_script_status_text = res_parts
+            .status
+            .canonical_reason()
+            .unwrap_or("OK")
+            .to_string();
+        let mut res_script_headers = header_map_to_hashmap(&res_parts.headers);
+        let current_res_headers: Vec<(String, String)> = res_parts
+            .headers
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+        let mut res_script_body = body_to_script_string(
+            &final_body,
+            get_content_encoding(&current_res_headers).as_deref(),
+            max_decompress_output_bytes,
+        );
+        let req_script_headers = header_pairs_to_hashmap(&final_req_headers);
+        let mut values = resolved_rules.values.clone();
+        let state_values = get_values_from_state(&admin_state).await;
+        for (key, value) in state_values {
+            values.entry(key).or_insert(value);
+        }
+
+        let results = execute_response_scripts(
+            &admin_state,
+            &resolved_rules.res_scripts,
+            &ctx,
+            &resolved_rules,
+            &original_uri,
+            &method_str,
+            &req_script_headers,
+            &mut res_script_status,
+            &mut res_script_status_text,
+            &mut res_script_headers,
+            &mut res_script_body,
+            &values,
+        )
+        .await;
+
+        if results.iter().any(|result| result.success) {
+            if let Ok(new_status) = hyper::StatusCode::from_u16(res_script_status) {
+                res_parts.status = new_status;
+            }
+
+            let mut new_headers = hyper::HeaderMap::new();
+            for (key, value) in &res_script_headers {
+                if let (Ok(name), Ok(val)) = (
+                    hyper::header::HeaderName::from_bytes(key.as_bytes()),
+                    hyper::header::HeaderValue::from_str(value),
+                ) {
+                    new_headers.insert(name, val);
+                }
+            }
+            res_parts.headers = new_headers;
+
+            if let Some(ref new_body) = res_script_body {
+                let current_res_headers: Vec<(String, String)> = res_parts
+                    .headers
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                    .collect();
+                let encoded = script_string_to_body(
+                    new_body,
+                    get_content_encoding(&current_res_headers).as_deref(),
+                );
+                set_content_encoding_header(
+                    &mut res_parts.headers,
+                    encoded.content_encoding.as_deref(),
+                );
+                final_body = encoded.body;
+            }
+        }
+
+        results
+    } else {
+        Vec::new()
+    };
+
     let final_body = if inject_bifrost_badge {
         let badge_rules_json =
             super::handler::build_badge_rules_json(admin_state.as_deref(), listener_port).await;
@@ -3782,7 +3872,7 @@ async fn handle_intercepted_request_with_protocol(
             .unwrap_or("")
             .to_lowercase();
         if final_res_content_type.starts_with("text/html") {
-            if let Some(content_encoding) = get_content_encoding(&original_res_headers) {
+            if let Some(content_encoding) = response_content_encoding(&res_parts) {
                 match crate::transform::try_decompress_body_with_limit(
                     final_body.as_ref(),
                     &content_encoding,
@@ -3823,19 +3913,48 @@ async fn handle_intercepted_request_with_protocol(
         final_body
     };
 
-    if original_res_body_len != final_body.len() {
-        res_parts.headers.remove(hyper::header::CONTENT_LENGTH);
-        res_parts.headers.insert(
-            hyper::header::CONTENT_LENGTH,
-            hyper::header::HeaderValue::from_str(&final_body.len().to_string()).unwrap(),
+    normalize_res_headers(
+        &mut res_parts,
+        BodyMode::Known(final_body.len()),
+        &method_str,
+    );
+    if verbose_logging && original_res_body_len != final_body.len() {
+        info!(
+            "[{}] Updated Content-Length: {} -> {}",
+            req_id,
+            original_res_body_len,
+            final_body.len()
         );
-        if verbose_logging {
-            info!(
-                "[{}] Updated Content-Length: {} -> {}",
-                req_id,
-                original_res_body_len,
-                final_body.len()
-            );
+    }
+
+    if !res_script_results.is_empty() {
+        let final_status = res_parts.status.as_u16();
+        let final_content_type = res_parts
+            .headers
+            .get(hyper::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let final_res_headers: Vec<(String, String)> = res_parts
+            .headers
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+        let final_response_size =
+            calculate_response_size(final_status, &final_res_headers, final_body.len());
+        let original_res_headers_for_update = original_res_headers.clone();
+        let res_script_results_for_update = res_script_results.clone();
+        if let Some(ref state) = admin_state {
+            state.update_traffic_by_id(req_id, move |record| {
+                record.status = final_status;
+                record.content_type = final_content_type.clone();
+                record.response_size = final_response_size;
+                record.response_headers = if final_res_headers != original_res_headers_for_update {
+                    Some(final_res_headers.clone())
+                } else {
+                    None
+                };
+                record.res_script_results = Some(res_script_results_for_update.clone());
+            });
         }
     }
 
@@ -3848,9 +3967,10 @@ async fn handle_intercepted_request_with_protocol(
             };
 
             let store = body_store.read();
+            let final_res_content_encoding = response_content_encoding(&res_parts);
             let decompressed_res = crate::transform::decompress_body_with_limit(
                 &final_body,
-                res_content_encoding.as_deref(),
+                final_res_content_encoding.as_deref(),
                 max_decompress_output_bytes,
             );
             if let Some(body_ref) = store.store(req_id, "res", decompressed_res.as_ref()) {

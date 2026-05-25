@@ -15,7 +15,6 @@ use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use hyper::client::conn::http1;
 use hyper::header::HeaderValue;
-use hyper::http::response::Parts as ResponseParts;
 use hyper::{Request, Response, StatusCode, Uri};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
@@ -46,7 +45,7 @@ use crate::transform::decompress_body_with_limit;
 use crate::transform::{
     apply_body_rules_preserving_encoding, apply_content_injection_preserving_encoding,
     compress_body, maybe_inject_bifrost_badge_html, try_decompress_body_with_limit,
-    ContentInjectionEncoding, ContentInjectionResult, Phase,
+    ContentInjectionEncoding, Phase,
 };
 use crate::utils::bounded::{read_body_bounded, BoundedBody};
 use crate::utils::http_size::{
@@ -66,21 +65,26 @@ use crate::utils::url::{
 
 mod content_type;
 mod decode;
-mod scripts;
 
 use self::content_type::{
     get_content_type, is_likely_text_content_type, is_sse_response, is_streaming_response,
     should_use_binary_performance_mode,
 };
 use self::decode::{
-    apply_decode_scripts_for_storage, get_values_from_state, parse_url_parts,
-    DecodeForStorageResult,
+    apply_decode_scripts_for_storage, get_values_from_state, DecodeForStorageResult,
 };
-use self::scripts::{execute_request_scripts, execute_response_scripts, headers_to_hashmap};
+use super::body_metadata::{
+    header_content_encoding, is_no_body_response, normalize_req_headers, normalize_res_headers,
+    response_content_encoding, set_content_encoding_header, streaming_res_body_mode, BodyMode,
+};
 use super::devtools::{
     attach_devtools_client_req_id, devtools_bridge_requested, is_devtools_client_req_id_header,
     maybe_inject_devtools_bridge_html, strip_devtools_client_req_id_from_url,
     take_devtools_client_req_id, take_devtools_client_req_id_from_uri,
+};
+use super::scripts::{
+    body_to_script_string, execute_request_scripts, execute_response_scripts,
+    header_map_to_hashmap, headers_to_hashmap, parse_url_parts, script_string_to_body,
 };
 
 fn apply_request_context(record: &mut TrafficRecord, ctx: &RequestContext) {
@@ -365,14 +369,6 @@ async fn send_request_via_upstream_proxy(
         .map_err(|e| BifrostError::Network(format!("Upstream proxy request failed: {}", e)))
 }
 
-fn header_map_to_hashmap(headers: &hyper::HeaderMap) -> HashMap<String, String> {
-    let mut map = HashMap::with_capacity(headers.len());
-    for (key, value) in headers {
-        map.insert(key.to_string(), value.to_str().unwrap_or("").to_string());
-    }
-    map
-}
-
 fn cloned_headers_hashmap(
     cache: &mut Option<HashMap<String, String>>,
     headers: &[(String, String)],
@@ -384,73 +380,6 @@ fn cloned_headers_hashmap(
     let map = headers_to_hashmap(headers);
     *cache = Some(map.clone());
     map
-}
-
-fn response_content_encoding(parts: &ResponseParts) -> Option<String> {
-    parts
-        .headers
-        .get(hyper::header::CONTENT_ENCODING)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-}
-
-fn header_content_encoding(headers: &hyper::HeaderMap) -> Option<String> {
-    headers
-        .get(hyper::header::CONTENT_ENCODING)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-}
-
-fn set_content_encoding_header(headers: &mut hyper::HeaderMap, content_encoding: Option<&str>) {
-    headers.remove(hyper::header::CONTENT_ENCODING);
-    if let Some(content_encoding) = content_encoding {
-        if let Ok(value) = hyper::header::HeaderValue::from_str(content_encoding) {
-            headers.insert(hyper::header::CONTENT_ENCODING, value);
-        }
-    }
-}
-
-fn body_to_script_string(
-    body: &Bytes,
-    content_encoding: Option<&str>,
-    max_decompress_output_bytes: usize,
-) -> Option<String> {
-    if body.is_empty() {
-        return None;
-    }
-
-    let content_encoding =
-        content_encoding.filter(|encoding| !encoding.eq_ignore_ascii_case("identity"));
-    let decoded = if let Some(content_encoding) = content_encoding {
-        try_decompress_body_with_limit(body.as_ref(), content_encoding, max_decompress_output_bytes)
-            .ok()?
-    } else {
-        body.to_vec()
-    };
-
-    String::from_utf8(decoded).ok()
-}
-
-fn script_string_to_body(body: &str, content_encoding: Option<&str>) -> ContentInjectionResult {
-    let content_encoding =
-        content_encoding.filter(|encoding| !encoding.eq_ignore_ascii_case("identity"));
-    if let Some(content_encoding) = content_encoding {
-        match compress_body(body.as_bytes(), content_encoding) {
-            Ok(compressed) => ContentInjectionResult {
-                body: Bytes::from(compressed),
-                content_encoding: Some(content_encoding.to_string()),
-            },
-            Err(_) => ContentInjectionResult {
-                body: Bytes::from(body.to_string()),
-                content_encoding: None,
-            },
-        }
-    } else {
-        ContentInjectionResult {
-            body: Bytes::from(body.to_string()),
-            content_encoding: None,
-        }
-    }
 }
 
 fn build_upstream_pool_partition(
@@ -604,23 +533,6 @@ async fn apply_immediate_response_body_rules(
     ))
 }
 
-enum BodyMode {
-    Known(usize),
-    Stream,
-    StreamWithLength(usize),
-    StreamWithTrailers,
-}
-
-fn streaming_res_body_mode(content_length: Option<usize>, has_trailers: bool) -> BodyMode {
-    if has_trailers {
-        BodyMode::StreamWithTrailers
-    } else if let Some(len) = content_length {
-        BodyMode::StreamWithLength(len)
-    } else {
-        BodyMode::Stream
-    }
-}
-
 #[derive(Clone)]
 struct RetryableRequestBlueprint {
     method: hyper::Method,
@@ -642,13 +554,6 @@ impl RetryableRequestBlueprint {
             BifrostError::Network(format!("Failed to rebuild request for retry: {}", e))
         })
     }
-}
-
-fn is_no_body_response(status: StatusCode, method: &str) -> bool {
-    status.is_informational()
-        || status == StatusCode::NO_CONTENT
-        || status == StatusCode::NOT_MODIFIED
-        || method.eq_ignore_ascii_case("HEAD")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -700,67 +605,6 @@ fn should_use_metrics_only_forwarding_mode(
     is_sse: bool,
 ) -> bool {
     skip_binary_recording && !needs_processing && !is_websocket && !is_sse
-}
-
-fn normalize_req_headers(
-    parts: &mut hyper::http::request::Parts,
-    mode: BodyMode,
-    had_content_length: bool,
-) {
-    match mode {
-        BodyMode::Known(len) => {
-            parts.headers.remove(hyper::header::TRANSFER_ENCODING);
-            parts.headers.remove(hyper::header::CONTENT_LENGTH);
-            if len > 0 || had_content_length {
-                parts.headers.insert(
-                    hyper::header::CONTENT_LENGTH,
-                    HeaderValue::from_str(&len.to_string()).unwrap(),
-                );
-            }
-        }
-        BodyMode::Stream | BodyMode::StreamWithTrailers => {
-            parts.headers.remove(hyper::header::TRANSFER_ENCODING);
-            parts.headers.remove(hyper::header::CONTENT_LENGTH);
-        }
-        BodyMode::StreamWithLength(len) => {
-            parts.headers.remove(hyper::header::TRANSFER_ENCODING);
-            parts.headers.remove(hyper::header::CONTENT_LENGTH);
-            parts.headers.insert(
-                hyper::header::CONTENT_LENGTH,
-                HeaderValue::from_str(&len.to_string()).unwrap(),
-            );
-        }
-    }
-}
-
-fn normalize_res_headers(parts: &mut ResponseParts, mode: BodyMode, method: &str) {
-    if is_no_body_response(parts.status, method) {
-        parts.headers.remove(hyper::header::TRANSFER_ENCODING);
-        parts.headers.remove(hyper::header::CONTENT_LENGTH);
-        return;
-    }
-    match mode {
-        BodyMode::Known(len) => {
-            parts.headers.remove(hyper::header::TRANSFER_ENCODING);
-            parts.headers.remove(hyper::header::CONTENT_LENGTH);
-            parts.headers.insert(
-                hyper::header::CONTENT_LENGTH,
-                HeaderValue::from_str(&len.to_string()).unwrap(),
-            );
-        }
-        BodyMode::Stream | BodyMode::StreamWithTrailers => {
-            parts.headers.remove(hyper::header::TRANSFER_ENCODING);
-            parts.headers.remove(hyper::header::CONTENT_LENGTH);
-        }
-        BodyMode::StreamWithLength(len) => {
-            parts.headers.remove(hyper::header::TRANSFER_ENCODING);
-            parts.headers.remove(hyper::header::CONTENT_LENGTH);
-            parts.headers.insert(
-                hyper::header::CONTENT_LENGTH,
-                HeaderValue::from_str(&len.to_string()).unwrap(),
-            );
-        }
-    }
 }
 
 pub struct ConnectionErrorInfo {

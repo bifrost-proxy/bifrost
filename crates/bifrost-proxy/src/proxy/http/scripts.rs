@@ -2,14 +2,47 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bifrost_admin::AdminState;
-use bifrost_script::{RequestData, ResponseData, ScriptContext, ScriptType};
+use bifrost_script::{MatchedRuleInfo, RequestData, ResponseData, ScriptContext, ScriptType};
+use bytes::Bytes;
 
 use crate::server::ResolvedRules;
+use crate::transform::{compress_body, try_decompress_body_with_limit, ContentInjectionResult};
 use crate::utils::logging::RequestContext;
 
-use super::decode::{build_matched_rules_info, parse_url_parts};
+pub(in crate::proxy::http) fn build_matched_rules_info(
+    resolved_rules: &ResolvedRules,
+) -> Vec<MatchedRuleInfo> {
+    resolved_rules
+        .rules
+        .iter()
+        .map(|r| MatchedRuleInfo {
+            pattern: r.pattern.clone(),
+            protocol: r.protocol.to_string(),
+            value: r.value.clone(),
+        })
+        .collect()
+}
 
-pub(super) fn headers_to_hashmap(headers: &[(String, String)]) -> HashMap<String, String> {
+pub(in crate::proxy::http) fn parse_url_parts(url: &str) -> (String, String, String) {
+    if let Ok(parsed) = url::Url::parse(url) {
+        let host = parsed.host_str().unwrap_or("").to_string();
+        let path = parsed.path().to_string();
+        let protocol = parsed.scheme().to_string();
+        (host, path, protocol)
+    } else {
+        ("".to_string(), url.to_string(), "http".to_string())
+    }
+}
+
+pub(in crate::proxy::http) fn headers_to_hashmap(
+    headers: &[(String, String)],
+) -> HashMap<String, String> {
+    header_pairs_to_hashmap(headers)
+}
+
+pub(in crate::proxy::http) fn header_pairs_to_hashmap(
+    headers: &[(String, String)],
+) -> HashMap<String, String> {
     let mut map = HashMap::with_capacity(headers.len());
     for (key, value) in headers {
         map.insert(key.clone(), value.clone());
@@ -17,8 +50,64 @@ pub(super) fn headers_to_hashmap(headers: &[(String, String)]) -> HashMap<String
     map
 }
 
+pub(in crate::proxy::http) fn header_map_to_hashmap(
+    headers: &hyper::HeaderMap,
+) -> HashMap<String, String> {
+    let mut map = HashMap::with_capacity(headers.len());
+    for (key, value) in headers {
+        map.insert(key.to_string(), value.to_str().unwrap_or("").to_string());
+    }
+    map
+}
+
+pub(in crate::proxy::http) fn body_to_script_string(
+    body: &Bytes,
+    content_encoding: Option<&str>,
+    max_decompress_output_bytes: usize,
+) -> Option<String> {
+    if body.is_empty() {
+        return None;
+    }
+
+    let content_encoding =
+        content_encoding.filter(|encoding| !encoding.eq_ignore_ascii_case("identity"));
+    let decoded = if let Some(content_encoding) = content_encoding {
+        try_decompress_body_with_limit(body.as_ref(), content_encoding, max_decompress_output_bytes)
+            .ok()?
+    } else {
+        body.to_vec()
+    };
+
+    String::from_utf8(decoded).ok()
+}
+
+pub(in crate::proxy::http) fn script_string_to_body(
+    body: &str,
+    content_encoding: Option<&str>,
+) -> ContentInjectionResult {
+    let content_encoding =
+        content_encoding.filter(|encoding| !encoding.eq_ignore_ascii_case("identity"));
+    if let Some(content_encoding) = content_encoding {
+        match compress_body(body.as_bytes(), content_encoding) {
+            Ok(compressed) => ContentInjectionResult {
+                body: Bytes::from(compressed),
+                content_encoding: Some(content_encoding.to_string()),
+            },
+            Err(_) => ContentInjectionResult {
+                body: Bytes::from(body.to_string()),
+                content_encoding: None,
+            },
+        }
+    } else {
+        ContentInjectionResult {
+            body: Bytes::from(body.to_string()),
+            content_encoding: None,
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn execute_request_scripts(
+pub(in crate::proxy::http) async fn execute_request_scripts(
     admin_state: &Option<Arc<AdminState>>,
     script_names: &[String],
     ctx: &RequestContext,
@@ -48,7 +137,6 @@ pub(super) async fn execute_request_scripts(
     } else {
         None
     };
-
     let matched_rules = build_matched_rules_info(resolved_rules);
     let (host, path, protocol) = parse_url_parts(url);
 
@@ -91,7 +179,7 @@ pub(super) async fn execute_request_scripts(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn execute_response_scripts(
+pub(in crate::proxy::http) async fn execute_response_scripts(
     admin_state: &Option<Arc<AdminState>>,
     script_names: &[String],
     ctx: &RequestContext,
@@ -124,7 +212,6 @@ pub(super) async fn execute_response_scripts(
     } else {
         None
     };
-
     let matched_rules = build_matched_rules_info(resolved_rules);
     let (host, path, protocol) = parse_url_parts(request_url);
 

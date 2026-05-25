@@ -57,6 +57,12 @@ assert_body_contains_ci() {
     fi
 }
 
+skip_pass() {
+    local message="$1"
+    local reason="${2:-skipped}"
+    echo "[SKIP-PASS] ${message}: ${reason}"
+}
+
 start_mock_servers() {
     mkdir -p "$TEST_DATA_DIR"
 
@@ -90,6 +96,21 @@ EOF
 
     cat > "$TEST_DATA_DIR/scripts/response/res_script.js" <<'EOF'
 response.headers["X-ResScript"] = "enabled";
+if (response.request.path.indexOf("/anything/http-repro") >= 0 || response.request.path.indexOf("/anything/https-repro") >= 0) {
+  response.status = 218;
+  response.statusText = "This is fine";
+  response.headers["x-repro-script"] = "ran";
+  response.headers["content-type"] = "application/json;charset=utf-8";
+  delete response.headers["content-length"];
+  delete response.headers["Content-Length"];
+  response.body = JSON.stringify({
+    via: "resScript",
+    url: response.request.url || "",
+    path: response.request.path || "",
+    statusWas: 218
+  });
+  log.info("repro resScript applied");
+}
 if (response.request.path.indexOf("/res-body") >= 0 && response.body) {
   response.body = response.body + "::res-script";
 }
@@ -133,6 +154,7 @@ start_proxy() {
         --unsafe-ssl \
         --skip-cert-check \
         --no-system-proxy \
+        --intercept-include "httpbin.org" \
         --rules-file "$rules_file" \
         > "$PROXY_LOG_FILE" 2>&1 &
 
@@ -189,6 +211,43 @@ get_response_body_text() {
 get_response_body_text_raw() {
     local id="$1"
     admin_get "/api/traffic/${id}/response-body?raw=1" | jq -r '.data // ""'
+}
+
+httpbin_https_request() {
+    local url="$1"
+    local headers_file
+    local body_file
+    headers_file="$(mktemp)"
+    body_file="$(mktemp)"
+
+    HTTP_STATUS=$(NO_PROXY="" no_proxy="" HTTP_PROXY="" http_proxy="" HTTPS_PROXY="" https_proxy="" \
+        curl -s -k \
+        --connect-timeout 10 \
+        --max-time 20 \
+        --proxy "http://${PROXY_HOST}:${PROXY_PORT}" \
+        --noproxy "" \
+        -D "$headers_file" \
+        -o "$body_file" \
+        -w '%{http_code}' \
+        "$url" 2>/dev/null) || HTTP_STATUS="000"
+    HTTP_HEADERS="$(tr -d '\r' < "$headers_file")"
+    HTTP_BODY="$(cat "$body_file")"
+
+    rm -f "$headers_file" "$body_file"
+}
+
+httpbin_reachable_via_proxy() {
+    local status
+    status=$(NO_PROXY="" no_proxy="" HTTP_PROXY="" http_proxy="" HTTPS_PROXY="" https_proxy="" \
+        curl -s -k \
+        --connect-timeout 10 \
+        --max-time 20 \
+        --proxy "http://${PROXY_HOST}:${PROXY_PORT}" \
+        --noproxy "" \
+        -o /dev/null \
+        -w '%{http_code}' \
+        "https://httpbin.org/get" 2>/dev/null || true)
+    [[ "$status" =~ ^2 ]]
 }
 
 update_sandbox_limits() {
@@ -307,6 +366,39 @@ test_res_script_body() {
     assert_body_contains "::res-script" "$HTTP_BODY" "resScript should append response body"
 }
 
+test_https_res_script_httpbin() {
+    if ! httpbin_reachable_via_proxy; then
+        skip_pass "HTTPS intercepted resScript httpbin regression" "httpbin.org unreachable through proxy"
+        return 0
+    fi
+
+    local url="https://httpbin.org/anything/https-repro"
+    httpbin_https_request "$url"
+    assert_equals "218" "$HTTP_STATUS" "HTTPS resScript should override upstream status"
+    assert_header_value "x-repro-script" "ran" "$HTTP_HEADERS" "HTTPS resScript should add response header"
+    assert_body_contains 'resScript' "$HTTP_BODY" "HTTPS resScript should rewrite response body"
+    assert_body_contains '/anything/https-repro' "$HTTP_BODY" "HTTPS resScript response body should include request path"
+
+    sleep 2
+    local id
+    id=$(wait_for_traffic_id "/anything/https-repro" 30)
+    assert_not_empty "$id" "HTTPS resScript traffic should be recorded"
+
+    local detail
+    detail=$(admin_get "/api/traffic/${id}")
+    local recorded_status
+    recorded_status=$(echo "$detail" | jq -r '.status // 0')
+    assert_equals "218" "$recorded_status" "Traffic detail should record resScript-updated status"
+
+    local script_name
+    script_name=$(echo "$detail" | jq -r '.res_script_results[0].script_name // ""')
+    assert_equals "res_script" "$script_name" "Traffic detail should include resScript execution result"
+
+    local script_success
+    script_success=$(echo "$detail" | jq -r '.res_script_results[0].success // false')
+    assert_equals "true" "$script_success" "Traffic detail should mark HTTPS resScript as successful"
+}
+
 main() {
     start_mock_servers
     write_scripts
@@ -315,6 +407,7 @@ main() {
     sleep 1
     test_req_script
     test_res_script_body
+    test_https_res_script_httpbin
     test_decode_script_bodies
     test_max_decode_input_bytes_skip
     test_max_decompress_output_bytes_fallback
