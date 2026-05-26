@@ -8,6 +8,10 @@ network packages:
 - Bare path filters must keep regular prefix semantics so `/account` matches
   `/account-center/...`; callers that need path-segment boundaries should use
   regex filters.
+- Whistle-compatible URL wildcard filters such as `excludeFilter://*/api` and
+  `excludeFilter://*/alice/*` must be accepted. Whistle documents unprefixed
+  filters as request URL patterns and uses `excludeFilter://*/static
+  excludeFilter://*/api` for local forwarding exclusions.
 - Network `.bifrost` exports preserved `matched_rules`, but omitted routing
   diagnostics such as `actual_url`, `actual_host`, `has_rule_hit`, and
   `error_message`, making a matched-but-failed upstream route look like a rule
@@ -36,6 +40,11 @@ with `upstreamUnsafeSsl://true` instead of requiring global `--unsafe-ssl`.
   - do not match `/v1/account`
 - Keep regex path filters such as `/api/` unchanged for path-segment boundaries
   or other stricter matching.
+- Add Whistle-style wildcard URL filters for unprefixed filter values that
+  contain `*` or `?`:
+  - `*/alice/*` matches full request URLs containing `/alice/`
+  - `*/api` matches `/api`, `/api?...`, and `/api/...`, but not `/apiary`
+  - `?` matches exactly one URL character
 - Add `upstreamUnsafeSsl://true` as a control protocol that sets a per-rule
   upstream HTTPS certificate verification exception.
 - Extend `NetworkRecord` exports with optional diagnostic fields already stored
@@ -52,6 +61,7 @@ with `upstreamUnsafeSsl://true` instead of requiring global `--unsafe-ssl`.
 
 - Unit tests:
   - path filter segment boundaries in `bifrost-core`
+  - Whistle-style wildcard URL filters in `bifrost-core`
   - long `excludeFilter` chains parse every filter and exclude by regular
     prefix semantics
   - `upstreamUnsafeSsl://true` is parsed and merged into proxy resolved rules
@@ -62,6 +72,8 @@ with `upstreamUnsafeSsl://true` instead of requiring global `--unsafe-ssl`.
     `includeFilter:///account`
   - long qianchuan-style `excludeFilter` chain where excluded paths fall
     through to a later host rule
+  - Whistle-style `excludeFilter://*/api` and `excludeFilter://*/alice/*`
+    where excluded requests fall through to a later host rule
   - per-rule `upstreamUnsafeSsl://true` succeeds against a self-signed HTTPS
     upstream while the same target without the rule fails
   - traffic detail and bifrost-file network export include `actual_url`,

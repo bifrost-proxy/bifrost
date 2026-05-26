@@ -29,7 +29,7 @@
 | [asr-task-cli-tui.md](./asr-task-cli-tui.md) | ASR Task CLI TUI | 10 | `bifrost ai asr task watch/tui` 单任务自动进入、多任务交互选择、传 task 直接进入、运行进度/消耗信息、Daily/Jennie Agent 处理状态、Daily 文档交互选择、文件打开、刷新/运行/暂停/强制暂停动作、错误提示、窄终端降级和 read-only 模式 |
 | [docs-implementation-sync.md](./docs-implementation-sync.md) | Docs 与实现同步质检 | 8 | docs/CLI/Scripts/规则协议说明与当前 `bifrost --help`、traffic/search/remote file help、ScriptType::Parser、bp/devtools/upstreamUnsafeSsl 协议、过滤器 resolver 边界、workspace crate 架构索引、Markdown 相对链接，以及规则语法示例保持一致 |
 | [rust-dependency-audit-ci.md](./rust-dependency-audit-ci.md) | Rust Dependency Audit CI | 4 | 使用 cargo-deny 与 cargo-udeps 进行 Rust 重复依赖和未使用依赖审计，验证 CI/local-ci 接入、显式跳过参数和工具缺失错误提示 |
-| [rule-filter-routing-diagnostics.md](./rule-filter-routing-diagnostics.md) | 规则过滤与网络包诊断 | 7 | `includeFilter:///account` 按普通前缀匹配 `/account-center`，长 `excludeFilter` 链全部按前缀生效，`upstreamUnsafeSsl://true` 按规则放行不安全 HTTPS 上游，Traffic 详情与 network `.bifrost` 导出保留 `actual_url`、`actual_host`、`listener_port`、`has_rule_hit` 等实际转发诊断字段，专用回归 fixture 不被通用规则 runner 误收集 |
+| [rule-filter-routing-diagnostics.md](./rule-filter-routing-diagnostics.md) | 规则过滤与网络包诊断 | 8 | `includeFilter:///account` 按普通前缀匹配 `/account-center`，长 `excludeFilter` 链全部按前缀生效，Whistle 风格 `excludeFilter://*/api` / `excludeFilter://*/alice/*` URL 通配符过滤可跳过当前规则，`upstreamUnsafeSsl://true` 按规则放行不安全 HTTPS 上游，Traffic 详情与 network `.bifrost` 导出保留 `actual_url`、`actual_host`、`listener_port`、`has_rule_hit` 等实际转发诊断字段，专用回归 fixture 不被通用规则 runner 误收集 |
 
 ### Web UI 测试
 
