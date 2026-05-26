@@ -2114,6 +2114,14 @@ reqHeaders://{test=1}"#;
     }
 
     #[test]
+    fn test_parse_whistle_style_wildcard_include_filter() {
+        let rules = parse_line("example.com host://127.0.0.1 includeFilter://*/alice/*").unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].include_filters.len(), 1);
+        assert!(rules[0].exclude_filters.is_empty());
+    }
+
+    #[test]
     fn test_parse_multiple_filters() {
         let rules = parse_line(
             "example.com host://127.0.0.1 includeFilter://m:GET includeFilter:///api/ excludeFilter:///admin/",
