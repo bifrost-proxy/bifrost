@@ -138,6 +138,57 @@ Relay 的 reusable grant 索引是 `{client_instance_id, caller_fingerprint}`。
 
 ### 测试方案
 
+## 2026-05-26 本机 CLI 管理 SSH Key
+
+### 目标
+
+补齐 WebUI 之外的本机管理入口，让 target 机器可以用 CLI 快速生成并导出 remote-invoke SSH key 文件，再交给 caller 机器执行：
+
+```bash
+bifrost remote conn up --ssh-key ./bifrost-device.key
+```
+
+### 命令设计
+
+新增 `bifrost setting ssh-key ...`，归属 `setting` 而不是 `remote`：
+
+- `setting` 始终管理当前机器的数据目录，符合“在被控端生成 key”的安全模型。
+- `remote` 是 caller 操作另一台机器的入口，只消费 `--ssh-key`，不负责生成 target key。
+
+子命令：
+
+```bash
+bifrost setting ssh-key create --label dev-mac --output ./bifrost-device.key
+bifrost setting ssh-key export --output ./bifrost-device.key --force
+bifrost setting ssh-key status
+bifrost setting ssh-key revoke
+```
+
+实现策略：
+
+- 默认优先调用本机正在运行的 Admin API：`/_bifrost/api/remote-invoke/ssh-key`，让 worker 立即刷新 relay route。
+- 如果 Admin API 不可达，回退到直接写本机 `BIFROST_DATA_DIR` 下的 `SshKeyStore`；服务下次启动时会读取该 active key。
+- `create` 生成/替换 active key，输出 Bifrost key file；`--output` 写文件时使用 `0600` 权限并默认拒绝覆盖。
+- 离线生成时同步写入默认 SSH file-access policy，保持与 WebUI 创建 key 后默认可用的行为一致。
+
+### 测试方案
+
+- 单元测试：
+  - `parse_grant_mode` 覆盖 `once/30m/1h/1d/permanent`。
+  - `write_secret` 覆盖不带 `--force` 拒绝覆盖，以及 Unix 下 key 文件权限为 `0600`。
+  - Admin API fallback 只在连接不可达错误时触发。
+- E2E：
+  - 新增 `e2e-tests/tests/test_setting_ssh_key_cli.sh`，使用临时 `BIFROST_DATA_DIR` 验证 `create/export/status/revoke`。
+  - 验证生成文件包含 `BEGIN BIFROST KEY` 和 `Device-Code`，且 `remote conn up --ssh-key <file> --device-code BF-...` 能解析 key 并进入 relay challenge 路径。
+  - 将脚本加入 `scripts/run_all_e2e.sh` 的 stable shell test 集合；CI `--ci` / `--full-shell` 模式会通过 `find e2e-tests/tests/test_*.sh` 自动收集，stable 模式也会显式执行。
+- human_tests：
+  - 更新 `human_tests/remote-invoke-sshkey.md`，新增本机 CLI 生成 key 的真实场景用例。
+
+### Review/Fix/Test 闭环方案
+
+- 第 1 轮：复核 `setting` 命名、API 优先/离线 fallback、文件权限、文档和 E2E 覆盖；运行 CLI 单测与新增 E2E。
+- 第 2 轮：复核生成 key 是否能被 caller 侧 loader 接受、human_tests 索引是否同步、输出是否适合 shell 重定向；复跑受影响测试。
+
 - 单元测试：
   - `test_random_caller_fingerprint_has_expected_shape` 验证随机 caller ID 格式。
   - `test_load_or_create_caller_fingerprint_persists_per_data_dir` 验证同一数据目录复用。

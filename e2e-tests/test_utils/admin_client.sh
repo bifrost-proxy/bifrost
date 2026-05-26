@@ -193,7 +193,9 @@ admin_start_bifrost() {
     local bifrost_bin=""
     local unix_bin="$ADMIN_CLIENT_REPO_DIR/target/release/bifrost"
     local windows_bin="$ADMIN_CLIENT_REPO_DIR/target/release/bifrost.exe"
-    if [[ -x "$unix_bin" ]]; then
+    if [[ -n "${BIFROST_BIN:-}" && -x "$BIFROST_BIN" ]]; then
+        bifrost_bin="$BIFROST_BIN"
+    elif [[ -x "$unix_bin" ]]; then
         bifrost_bin="$unix_bin"
     elif [[ -f "$windows_bin" ]]; then
         bifrost_bin="$windows_bin"

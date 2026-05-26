@@ -37,6 +37,8 @@ STABLE_SHELL_TESTS=(
   "test_metrics_hosts_apps_admin_api.sh"
   "test_tls_intercept_mode_api.sh"
   "test_bifrost_file_syntax_admin_api.sh"
+  "test_sync_login_direct_e2e.sh"
+  "test_setting_ssh_key_cli.sh"
   "test_multiline_rule_filter_e2e.sh"
   "test_replay_rules.sh"
   "test_remote_file_api_e2e.sh"

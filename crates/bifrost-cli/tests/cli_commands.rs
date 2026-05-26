@@ -149,6 +149,26 @@ fn sync_login_direct_options_parse() {
     let help = run_help(&["sync", "login"]);
     assert!(help.contains("--token"), "sync login should have --token");
     assert!(help.contains("--url"), "sync login should have --url");
+    assert!(
+        help.contains("https://bifrost.bytedance.net/v4/sso/token-login"),
+        "sync login help should explain where to get a token"
+    );
+
+    let cli = Cli::try_parse_from(["bifrost", "sync", "login", "--token", "ci-token"])
+        .expect("sync login token-only options should parse");
+
+    match cli.command {
+        Some(Commands::Sync {
+            action:
+                SyncCommands::Login {
+                    token: Some(token),
+                    url: None,
+                },
+        }) => {
+            assert_eq!(token, "ci-token");
+        }
+        _ => panic!("expected sync login token-only command"),
+    }
 
     let cli = Cli::try_parse_from([
         "bifrost",

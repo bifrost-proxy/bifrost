@@ -91,10 +91,92 @@ pub enum SettingCommands {
         #[command(subcommand)]
         action: Box<RemoteShellCommands>,
     },
+    #[command(about = "Manage local remote-invoke SSH key for reusable remote access")]
+    SshKey {
+        #[command(subcommand)]
+        action: Box<RemoteSshKeyCommands>,
+    },
     #[command(about = "Manage local remote-invoke grants")]
     Grant {
         #[command(subcommand)]
         action: Box<RemoteGrantCommands>,
+    },
+}
+
+#[derive(Subcommand, Clone, Debug)]
+pub enum RemoteSshKeyCommands {
+    #[command(
+        about = "Create or replace the local remote-invoke SSH key and print/export the key file"
+    )]
+    Create {
+        #[arg(
+            long,
+            default_value = "bifrost-device",
+            help = "Label shown in remote management UI"
+        )]
+        label: String,
+        #[arg(
+            long,
+            default_value = "permanent",
+            value_parser = ["once", "30m", "1h", "1d", "permanent"],
+            help = "Default grant lifetime for callers using this key"
+        )]
+        grant_mode: String,
+        #[arg(
+            short,
+            long,
+            value_hint = ValueHint::FilePath,
+            help = "Write the generated key file to this path instead of stdout"
+        )]
+        output: Option<String>,
+        #[arg(long, help = "Overwrite --output if it already exists")]
+        force: bool,
+        #[arg(long, help = "Print JSON metadata instead of human output")]
+        json: bool,
+        #[arg(
+            long,
+            help = "Skip the running Admin API and write the local key store directly"
+        )]
+        offline: bool,
+    },
+    #[command(about = "Export the active local remote-invoke SSH key file")]
+    Export {
+        #[arg(
+            short,
+            long,
+            value_hint = ValueHint::FilePath,
+            help = "Write the key file to this path instead of stdout"
+        )]
+        output: Option<String>,
+        #[arg(long, help = "Overwrite --output if it already exists")]
+        force: bool,
+        #[arg(long, help = "Print JSON metadata instead of human output")]
+        json: bool,
+        #[arg(
+            long,
+            help = "Skip the running Admin API and read the local key store directly"
+        )]
+        offline: bool,
+    },
+    #[command(about = "Show the active local remote-invoke SSH key metadata")]
+    Status {
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+        #[arg(
+            long,
+            help = "Skip the running Admin API and read the local key store directly"
+        )]
+        offline: bool,
+    },
+    #[command(about = "Revoke the active local remote-invoke SSH key")]
+    Revoke {
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+        #[arg(
+            long,
+            help = "Skip the running Admin API and write the local key store directly"
+        )]
+        offline: bool,
     },
 }
 

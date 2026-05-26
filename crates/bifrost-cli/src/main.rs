@@ -347,6 +347,11 @@ fn main() {
             cli::SettingCommands::Shell { action } => {
                 commands::handle_remote_shell_command(*action)
             }
+            cli::SettingCommands::SshKey { action } => commands::handle_remote_ssh_key_command(
+                *action,
+                "127.0.0.1",
+                get_effective_port(cli.port),
+            ),
             cli::SettingCommands::Grant { action } => commands::handle_remote_grant_command(
                 *action,
                 "127.0.0.1",

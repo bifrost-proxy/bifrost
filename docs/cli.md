@@ -577,11 +577,14 @@ bifrost upgrade -y --restart
 ```bash
 bifrost sync status
 bifrost sync login
+bifrost sync login --token "$BIFROST_SYNC_TOKEN"
 bifrost sync login --token "$BIFROST_SYNC_TOKEN" --url https://bifrost.bytedance.net
 bifrost sync logout
 bifrost sync run
 bifrost sync config --enabled true --auto-sync true --remote-url https://example.com
 ```
+
+Headless/CI 登录 token 可从 `https://bifrost.bytedance.net/v4/sso/token-login` 获取；省略 `--url` 时使用当前同步配置的远端 URL，默认是内置 Bifrost Provider。
 
 ### 本机 remote-invoke 设置（setting）
 
@@ -598,6 +601,11 @@ bifrost setting grant list
 bifrost setting grant list --json
 bifrost setting grant update <grant-id> --scope remote_shell_exec --file-access read
 bifrost setting grant revoke --grant-id <grant-id>
+
+bifrost setting ssh-key create --label "dev-mac" --output ./bifrost-device.key
+bifrost setting ssh-key export --output ./bifrost-device.key --force
+bifrost setting ssh-key status
+bifrost setting ssh-key revoke
 ```
 
 | 子命令 | 说明 | 适用场景 |
@@ -606,6 +614,7 @@ bifrost setting grant revoke --grant-id <grant-id>
 | `setting shell profile add/delete/enable/disable` | 管理 shell 执行 profile | 约束 cwd、env、timeout 等执行环境 |
 | `setting shell policy add/update/delete/enable/disable` | 管理 shell 命令匹配策略 | 控制哪些 shell text 或 argv 可以被远程 grant 使用 |
 | `setting grant list/update/revoke` | 管理本机 remote-invoke grant | 调整或撤销远端调用本机的授权 |
+| `setting ssh-key create/export/status/revoke` | 管理本机 reusable remote-invoke SSH key | 在 target 机器上快速生成 key 文件并交给 caller 使用 |
 
 Shell Access policy 是远程执行的最后一道本机策略，不是普通 CLI alias。放宽 policy 前要确认 grant 的来源和 file access 范围。
 
@@ -614,6 +623,7 @@ Shell Access policy 是远程执行的最后一道本机策略，不是普通 CL
 `remote` 通过 relay 对另一台已授权的 Bifrost 实例执行操作。全局参数 `--relay-url` 的优先级为：命令行显式值 > 当前运行服务的 sync 配置 > 本地配置文件 > 内置默认值；`--client-id` 用于在多个已保存连接中选择目标前缀。
 
 ```bash
+bifrost setting ssh-key create --label "dev-mac" --output ./bifrost-device.key
 bifrost remote conn up <pair-code>
 bifrost remote conn up --ssh-key ./bifrost-device.key --label "dev-mac"
 bifrost remote conn status

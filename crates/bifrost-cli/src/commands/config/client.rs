@@ -250,6 +250,25 @@ impl ConfigApiClient {
         ))
     }
 
+    pub fn get_remote_invoke_ssh_key(&self) -> Result<serde_json::Value, String> {
+        self.get("/remote-invoke/ssh-key")
+    }
+
+    pub fn create_remote_invoke_ssh_key<R: Serialize>(
+        &self,
+        body: &R,
+    ) -> Result<serde_json::Value, String> {
+        self.post("/remote-invoke/ssh-key", body)
+    }
+
+    pub fn export_remote_invoke_ssh_key(&self) -> Result<serde_json::Value, String> {
+        self.get("/remote-invoke/ssh-key/private-key")
+    }
+
+    pub fn revoke_remote_invoke_ssh_key(&self) -> Result<serde_json::Value, String> {
+        self.delete("/remote-invoke/ssh-key")
+    }
+
     pub fn bifrost_file_detect(&self, content: &str) -> Result<serde_json::Value, String> {
         self.post_text("/bifrost-file/detect", content)
     }
