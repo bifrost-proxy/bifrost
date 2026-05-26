@@ -26,7 +26,7 @@ Agent Chat 输入框支持输入 `/` 后选择一个不同 Runner。选择后输
 ### 必须真实验证
 
 - Web UI 用真实 Playwright 操作验证 `/` 选择 Runner、chip 展示、发送和结果渲染。
-- API 用 mock 外部 Runner 验证 context bundle 包含当前会话 transcript。
+- API 用 mock 外部 Runner 验证 context bundle 包含当前会话 transcript，并验证内置 Bifrost Agent 可作为目标 Runner 被调用。
 - 后续普通发送的请求中包含 imported runner result。
 
 ## 数据模型
@@ -61,7 +61,7 @@ Agent Chat 输入框支持输入 `/` 后选择一个不同 Runner。选择后输
 - `response`
 - `createdAt`
 
-外部 Runner 在 `build_prompt` 前消费 pending context，并追加到 instructions 中。内置 Bifrost Agent 在 `/agent/chat` 取出 session 后消费 pending context，并追加为上下文消息。
+外部 Runner 在 `build_prompt` 前消费 pending context，并追加到 instructions 中。内置 Bifrost Agent 在 `/agent/chat` 取出 session 后消费 pending context，并追加为上下文消息。Slash Runner Call 的目标可以是外部 Runner，也可以是内置 Bifrost Agent；当目标是内置 Agent 时，后端使用独立的 `runner-call:<source>:bifrost_agent` 子会话执行，不切换当前会话默认 Runner。
 
 ## API 设计
 

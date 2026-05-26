@@ -433,6 +433,49 @@ struct RunnerCallMessage {
     content: String,
 }
 
+#[derive(Clone, Debug)]
+enum RunnerCallTarget {
+    BuiltinAgent,
+    External(Box<crate::im_gateway::external_cli::ExternalCliEffectiveConfig>),
+}
+
+impl RunnerCallTarget {
+    fn runner_id(&self) -> &str {
+        match self {
+            Self::BuiltinAgent => crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+            Self::External(effective) => &effective.runner_id,
+        }
+    }
+
+    fn adapter(&self) -> &str {
+        match self {
+            Self::BuiltinAgent => crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+            Self::External(effective) => &effective.settings.adapter,
+        }
+    }
+}
+
+fn resolve_runner_call_target(
+    config: &crate::im_gateway::external_cli::ExternalCliGatewayConfig,
+    target_runner_id: &str,
+) -> Result<RunnerCallTarget, String> {
+    if target_runner_id == crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER {
+        return Ok(RunnerCallTarget::BuiltinAgent);
+    }
+    if !config.runners.contains_key(target_runner_id) {
+        return Err(format!("runner '{target_runner_id}' not found"));
+    }
+    let effective = crate::im_gateway::external_cli::effective_config_for_provider_and_runner(
+        config,
+        None,
+        Some(target_runner_id),
+    );
+    if !effective.settings.enabled {
+        return Err(format!("runner '{}' is not enabled", effective.runner_id));
+    }
+    Ok(RunnerCallTarget::External(Box::new(effective)))
+}
+
 async fn runner_call_stream_response(
     service: &ImGatewayService,
     body: RunnerCallStreamRequest,
@@ -449,34 +492,41 @@ async fn runner_call_stream_response(
     if user_message.is_empty() {
         return Err("message is required".to_string());
     }
-    if target_runner_id == crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER {
-        return Err("slash Runner calls currently require an external target Runner".to_string());
-    }
 
     let config = service.external_cli_config_store.load();
-    if !config.runners.contains_key(&target_runner_id) {
-        return Err(format!("runner '{target_runner_id}' not found"));
-    }
-    let effective = crate::im_gateway::external_cli::effective_config_for_provider_and_runner(
-        &config,
-        None,
-        Some(&target_runner_id),
-    );
-    if !effective.settings.enabled {
-        return Err(format!("runner '{}' is not enabled", effective.runner_id));
-    }
+    let target = resolve_runner_call_target(&config, &target_runner_id)?;
 
     let call_id = format!("runner-call-{}", uuid::Uuid::new_v4());
     let child_session_key = format!("runner-call:{}:{}", caller_session_key, target_runner_id);
     let prompt = build_runner_call_prompt(
         &caller_session_key,
         body.caller_runner_id.as_deref(),
-        &target_runner_id,
-        &effective.settings.adapter,
+        target.runner_id(),
+        target.adapter(),
         body.history_path.as_deref(),
         &body.caller_messages,
         &user_message,
     );
+    if matches!(target, RunnerCallTarget::BuiltinAgent) {
+        return Ok(builtin_runner_call_stream_response(
+            service,
+            BuiltinRunnerCallStreamInput {
+                call_id,
+                caller_session_key,
+                caller_scope: caller_runner_scope(
+                    body.caller_runner_id.as_deref(),
+                    body.caller_runner_adapter.as_deref(),
+                ),
+                child_session_key,
+                prompt,
+                user_message,
+                work_dir: body.work_dir,
+            },
+        ));
+    }
+    let RunnerCallTarget::External(effective) = target else {
+        unreachable!("builtin target already returned")
+    };
     let mut request = crate::im_gateway::external_cli::run_request_from_settings(
         prompt,
         None,
@@ -560,6 +610,287 @@ async fn runner_call_stream_response(
         .header("Content-Type", "application/x-ndjson")
         .body(http_body_util::BodyExt::boxed(body))
         .unwrap())
+}
+
+struct BuiltinRunnerCallStreamInput {
+    call_id: String,
+    caller_session_key: String,
+    caller_scope: (String, Option<String>, String),
+    child_session_key: String,
+    prompt: String,
+    user_message: String,
+    work_dir: Option<PathBuf>,
+}
+
+fn builtin_runner_call_stream_response(
+    service: &ImGatewayService,
+    input: BuiltinRunnerCallStreamInput,
+) -> Response<BoxBody> {
+    let (tx, rx) =
+        tokio::sync::mpsc::channel::<Result<hyper::body::Frame<bytes::Bytes>, hyper::Error>>(16);
+    let agent_session_manager = service.agent_session_manager.clone();
+    let agent_client = service.agent_client.clone();
+    let config = service.agent_config_store.load();
+    let turn_tools = service.build_agent_tool_registry(config.default_message_channel.clone());
+    tokio::spawn(async move {
+        let started = serde_json::json!({
+            "eventType": "runner_call_started",
+            "callId": input.call_id.clone(),
+            "callerSessionKey": input.caller_session_key.clone(),
+            "childSessionKey": input.child_session_key.clone(),
+            "targetRunnerId": crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+            "targetAdapter": crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+        });
+        let _ = send_ndjson_event(&tx, &started).await;
+
+        let Some(mut session) = agent_session_manager.try_take_session_with_work_dir(
+            &input.child_session_key,
+            input
+                .work_dir
+                .as_ref()
+                .map(|path| path.display().to_string()),
+        ) else {
+            let failed = serde_json::json!({
+                "eventType": "runner_call_failed",
+                "callId": input.call_id,
+                "error": "target Bifrost Agent runner is already busy",
+            });
+            let _ = send_ndjson_event(&tx, &failed).await;
+            return;
+        };
+        session.source = "runner_call".to_string();
+        session.mark_bifrost_agent_runtime();
+        if session.title.is_none() {
+            session.title = Some("Runner Call".to_string());
+        }
+        let (progress_tx, mut progress_rx) =
+            tokio::sync::mpsc::unbounded_channel::<bifrost_agent::AgentTurnProgressEvent>();
+        session.progress_sender = Some(progress_tx);
+
+        let run_call_id = input.call_id.clone();
+        let run_caller_session_key = input.caller_session_key.clone();
+        let run_caller_scope = input.caller_scope.clone();
+        let run_child_session_key = input.child_session_key.clone();
+        let run_user_message = input.user_message.clone();
+        let run_started_at = now_ms();
+        let run_agent_session_manager = agent_session_manager.clone();
+        let mut run_task = tokio::spawn(async move {
+            let mut mcp_manager = ImMcpManager::new(&config.mcp_servers).await;
+            let has_mcp_tools = !mcp_manager.list_tools().is_empty();
+            let mcp_opt = if has_mcp_tools {
+                Some(&mut mcp_manager)
+            } else {
+                None
+            };
+            let result = bifrost_agent::session::run_turn_with_mcp_multimodal(
+                &agent_client,
+                &config,
+                &mut session,
+                &turn_tools,
+                mcp_opt,
+                &input.prompt,
+                &[],
+                None,
+                None,
+            )
+            .await;
+            mcp_manager.shutdown().await;
+            session.progress_sender = None;
+            remember_session_state_from_agent_session(
+                &session,
+                crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+                None,
+            );
+            run_agent_session_manager.return_session(session);
+            result
+        });
+
+        let mut progress_closed = false;
+        loop {
+            tokio::select! {
+                maybe_event = progress_rx.recv(), if !progress_closed => {
+                    match maybe_event {
+                        Some(event) => {
+                            let payload = builtin_runner_call_progress_event_payload(&run_child_session_key, event);
+                            let _ = send_ndjson_event(&tx, &payload).await;
+                        }
+                        None => {
+                            progress_closed = true;
+                        }
+                    }
+                }
+                result = &mut run_task => {
+                    while let Ok(event) = progress_rx.try_recv() {
+                        let payload = builtin_runner_call_progress_event_payload(&run_child_session_key, event);
+                        let _ = send_ndjson_event(&tx, &payload).await;
+                    }
+                    let finished_at = now_ms();
+                    match result {
+                        Ok(Ok(turn_result)) => {
+                            remember_runner_call_result_for_caller(
+                                &agent_session_manager,
+                                &run_caller_scope,
+                                &run_caller_session_key,
+                                &run_call_id,
+                                crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+                                crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+                                &run_user_message,
+                                &turn_result.response,
+                                run_started_at,
+                                finished_at,
+                            );
+                            let finished = serde_json::json!({
+                                "eventType": "runner_call_finished",
+                                "callId": run_call_id,
+                                "runId": run_child_session_key,
+                                "status": "success",
+                                "response": turn_result.response,
+                                "childSessionKey": run_child_session_key,
+                                "targetRunnerId": crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+                                "targetAdapter": crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+                                "planSteps": turn_result.plan_steps,
+                                "toolCalls": turn_result.tool_calls_log,
+                            });
+                            let _ = send_ndjson_event(&tx, &finished).await;
+                        }
+                        Ok(Err(error)) => {
+                            let failed = serde_json::json!({
+                                "eventType": "runner_call_failed",
+                                "callId": run_call_id,
+                                "error": error,
+                            });
+                            let _ = send_ndjson_event(&tx, &failed).await;
+                        }
+                        Err(error) => {
+                            agent_session_manager.release_active(&run_child_session_key);
+                            let failed = serde_json::json!({
+                                "eventType": "runner_call_failed",
+                                "callId": run_call_id,
+                                "error": format!("target Bifrost Agent task failed: {error}"),
+                            });
+                            let _ = send_ndjson_event(&tx, &failed).await;
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+    });
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+    let body = http_body_util::StreamBody::new(stream);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/x-ndjson")
+        .body(http_body_util::BodyExt::boxed(body))
+        .unwrap()
+}
+
+fn builtin_runner_call_progress_event_payload(
+    session_key: &str,
+    event: bifrost_agent::AgentTurnProgressEvent,
+) -> serde_json::Value {
+    match event {
+        bifrost_agent::AgentTurnProgressEvent::Status(status) => serde_json::json!({
+            "eventType": "status",
+            "sessionKey": session_key,
+            "status": status,
+        }),
+        bifrost_agent::AgentTurnProgressEvent::ContextUpdated { context } => serde_json::json!({
+            "eventType": "context_updated",
+            "sessionKey": session_key,
+            "context": context,
+        }),
+        bifrost_agent::AgentTurnProgressEvent::ToolStarted {
+            tool_name,
+            arguments,
+        } => serde_json::json!({
+            "eventType": "tool_started",
+            "sessionKey": session_key,
+            "toolName": tool_name,
+            "arguments": arguments,
+        }),
+        bifrost_agent::AgentTurnProgressEvent::ToolFinished { log, duration_ms } => {
+            serde_json::json!({
+                "eventType": "tool_finished",
+                "sessionKey": session_key,
+                "log": log,
+                "durationMs": duration_ms,
+            })
+        }
+        bifrost_agent::AgentTurnProgressEvent::PlanUpdated { steps, title } => serde_json::json!({
+            "eventType": "plan_updated",
+            "sessionKey": session_key,
+            "steps": steps,
+            "title": title,
+        }),
+        bifrost_agent::AgentTurnProgressEvent::TitleUpdated { title } => serde_json::json!({
+            "eventType": "title_updated",
+            "sessionKey": session_key,
+            "title": title,
+        }),
+        bifrost_agent::AgentTurnProgressEvent::AssistantDelta { content } => serde_json::json!({
+            "eventType": "assistant_delta",
+            "sessionKey": session_key,
+            "content": content,
+        }),
+        bifrost_agent::AgentTurnProgressEvent::AssistantFinal { content } => serde_json::json!({
+            "eventType": "assistant_final",
+            "sessionKey": session_key,
+            "content": content,
+        }),
+        bifrost_agent::AgentTurnProgressEvent::TurnFinished { content } => serde_json::json!({
+            "eventType": "turn_finished",
+            "sessionKey": session_key,
+            "content": content,
+        }),
+        bifrost_agent::AgentTurnProgressEvent::TurnFailed { error } => serde_json::json!({
+            "eventType": "turn_failed",
+            "sessionKey": session_key,
+            "error": error,
+        }),
+        bifrost_agent::AgentTurnProgressEvent::CompactionStarted { progress } => {
+            serde_json::json!({
+                "eventType": "compaction_started",
+                "sessionKey": session_key,
+                "compaction": progress,
+            })
+        }
+        bifrost_agent::AgentTurnProgressEvent::CompactionFinished { progress } => {
+            serde_json::json!({
+                "eventType": "compaction_finished",
+                "sessionKey": session_key,
+                "compaction": progress,
+            })
+        }
+        bifrost_agent::AgentTurnProgressEvent::CompactionFailed { progress, error } => {
+            serde_json::json!({
+                "eventType": "compaction_failed",
+                "sessionKey": session_key,
+                "compaction": progress,
+                "error": error,
+            })
+        }
+        bifrost_agent::AgentTurnProgressEvent::LongTaskStatus {
+            session_key: event_session_key,
+            session_id,
+            profile,
+            state,
+            elapsed_ms,
+            last_output_preview,
+            next_check_at_ms,
+            unchanged_heartbeats,
+        } => serde_json::json!({
+            "eventType": "long_task_status",
+            "sessionKey": event_session_key,
+            "sessionId": session_id,
+            "profile": profile,
+            "state": state,
+            "elapsedMs": elapsed_ms,
+            "lastOutputPreview": last_output_preview,
+            "nextCheckAtMs": next_check_at_ms,
+            "unchangedHeartbeats": unchanged_heartbeats,
+        }),
+    }
 }
 
 async fn send_ndjson_event(
@@ -692,6 +1023,37 @@ fn remember_runner_call_for_caller(
         .as_deref()
         .and_then(|key| key.rsplit_once(':').map(|(_, runner)| runner.to_string()))
         .unwrap_or_else(|| result.adapter.clone());
+    remember_runner_call_result_for_caller(
+        agent_session_manager,
+        caller_scope,
+        &source_session_key,
+        call_id,
+        &target_runner_id,
+        &result.adapter,
+        raw_user_message,
+        response,
+        result.started_at,
+        result.finished_at,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn remember_runner_call_result_for_caller(
+    agent_session_manager: &std::sync::Arc<bifrost_agent::AgentSessionManager>,
+    caller_scope: &(String, Option<String>, String),
+    source_session_key: &str,
+    call_id: &str,
+    target_runner_id: &str,
+    target_adapter: &str,
+    raw_user_message: &str,
+    response: &str,
+    started_at: u64,
+    finished_at: u64,
+) {
+    let response = response.trim();
+    if response.is_empty() {
+        return;
+    }
     let visible = format!(
         "Runner `{}` completed this call.\n\n{}",
         target_runner_id, response
@@ -699,17 +1061,17 @@ fn remember_runner_call_for_caller(
     let visible_user = format!("Run with {}: {}", target_runner_id, raw_user_message.trim());
     let imported = crate::im_gateway::session_state::ImImportedRunnerContext {
         call_id: call_id.to_string(),
-        source_session_key: source_session_key.clone(),
-        target_runner_id,
-        target_adapter: result.adapter.clone(),
+        source_session_key: source_session_key.to_string(),
+        target_runner_id: target_runner_id.to_string(),
+        target_adapter: target_adapter.to_string(),
         user_message: raw_user_message.to_string(),
         response: response.to_string(),
-        created_at: result.finished_at,
+        created_at: finished_at,
     };
     let (caller_adapter, caller_runner_id, _) = caller_scope;
     if caller_adapter == crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER {
         if let Some(mut session) =
-            agent_session_manager.try_take_session_with_work_dir(&source_session_key, None)
+            agent_session_manager.try_take_session_with_work_dir(source_session_key, None)
         {
             session
                 .history
@@ -717,10 +1079,10 @@ fn remember_runner_call_for_caller(
             session
                 .history
                 .push(bifrost_agent::ChatMessage::assistant(&visible));
-            session.last_active_at = result.finished_at / 1000;
+            session.last_active_at = finished_at / 1000;
             agent_session_manager.return_session(session);
         } else if let Err(error) = crate::im_gateway::session_state::push_imported_context(
-            &source_session_key,
+            source_session_key,
             caller_adapter,
             None,
             imported,
@@ -734,7 +1096,7 @@ fn remember_runner_call_for_caller(
         return;
     }
     if let Err(error) = crate::im_gateway::session_state::push_imported_context(
-        &source_session_key,
+        source_session_key,
         caller_adapter,
         caller_runner_id.as_deref(),
         imported,
@@ -748,7 +1110,7 @@ fn remember_runner_call_for_caller(
         );
     }
     if let Err(error) = crate::im_gateway::session_state::upsert_session_state(
-        &source_session_key,
+        source_session_key,
         caller_adapter,
         caller_runner_id.as_deref(),
         |state| {
@@ -757,14 +1119,14 @@ fn remember_runner_call_for_caller(
                 .push(crate::im_gateway::session_state::ImAgentSessionMessage {
                     role: "user".to_string(),
                     content: visible_user,
-                    timestamp: Some(result.started_at / 1000),
+                    timestamp: Some(started_at / 1000),
                 });
             state
                 .messages
                 .push(crate::im_gateway::session_state::ImAgentSessionMessage {
                     role: "assistant".to_string(),
                     content: visible,
-                    timestamp: Some(result.finished_at / 1000),
+                    timestamp: Some(finished_at / 1000),
                 });
         },
     ) {
@@ -1372,6 +1734,21 @@ mod tests {
         assert!(prompt.contains("User:\nOriginal question"));
         assert!(prompt.contains("Assistant:\nOriginal answer"));
         assert!(prompt.contains("Review this from another runner"));
+    }
+
+    #[test]
+    fn runner_call_target_accepts_builtin_agent() {
+        let config = crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+        let target = resolve_runner_call_target(
+            &config,
+            crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+        )
+        .expect("builtin target should be accepted");
+        assert!(matches!(target, RunnerCallTarget::BuiltinAgent));
+        assert_eq!(
+            target.adapter(),
+            crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER
+        );
     }
 
     #[test]
