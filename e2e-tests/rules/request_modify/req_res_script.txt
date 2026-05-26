@@ -1,10 +1,11 @@
 # 测试目标: 验证 reqScript、resScript 与 decode 规则能够在请求、响应和解码阶段串联生效，
 # 并覆盖 HTTPS intercepted path 命中 resScript 后的回归。
-# 说明: 此文件由 test_req_res_script_e2e.sh 驱动，脚本会在运行时写入对应的 JS 文件，
+# 说明: 此文件由 test_req_res_script_e2e.sh 驱动，脚本会在运行时替换
+# __ECHO_HTTP_PORT__ 和 __ECHO_HTTPS_PORT__ 占位符。
 
 script-test.local host://127.0.0.1:__ECHO_HTTP_PORT__
 script-test.local reqScript://req_script
 script-test.local resScript://res_script
 script-test.local decode://decode_script
-http://httpbin.org/anything/http-repro resScript://res_script
-https://httpbin.org/anything/https-repro resScript://res_script
+script-https.local tlsIntercept:// https://127.0.0.1:__ECHO_HTTPS_PORT__
+https://script-https.local/anything/https-repro resScript://res_script

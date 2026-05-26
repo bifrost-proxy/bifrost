@@ -17,6 +17,7 @@ export ADMIN_PORT="${ADMIN_PORT:-$PROXY_PORT}"
 export ADMIN_PATH_PREFIX="${ADMIN_PATH_PREFIX:-/_bifrost}"
 source "$E2E_DIR/test_utils/admin_client.sh"
 ECHO_HTTP_PORT="${ECHO_HTTP_PORT:-3000}"
+ECHO_HTTPS_PORT="${ECHO_HTTPS_PORT:-3443}"
 TEST_ID="${TEST_ID:-req_res_script}"
 export TEST_ID
 
@@ -31,7 +32,7 @@ cleanup() {
         safe_cleanup_proxy "$PROXY_PID"
     fi
 
-    MOCK_SERVERS=http HTTP_PORT="$ECHO_HTTP_PORT" \
+    MOCK_SERVERS=http,https HTTP_PORT="$ECHO_HTTP_PORT" HTTPS_PORT="$ECHO_HTTPS_PORT" \
     "$E2E_DIR/mock_servers/start_servers.sh" stop 2>/dev/null || true
 
     kill_bifrost_on_port "$PROXY_PORT"
@@ -66,10 +67,12 @@ skip_pass() {
 start_mock_servers() {
     mkdir -p "$TEST_DATA_DIR"
 
-    HTTP_PORT="$ECHO_HTTP_PORT" "$E2E_DIR/mock_servers/start_servers.sh" start-http > "$MOCK_LOG_FILE" 2>&1 &
+    MOCK_SERVERS=http,https HTTP_PORT="$ECHO_HTTP_PORT" HTTPS_PORT="$ECHO_HTTPS_PORT" \
+        "$E2E_DIR/mock_servers/start_servers.sh" start-bg > "$MOCK_LOG_FILE" 2>&1 &
 
     local count=0
-    while ! curl -s "http://127.0.0.1:${ECHO_HTTP_PORT}/health" >/dev/null 2>&1; do
+    while ! curl -s "http://127.0.0.1:${ECHO_HTTP_PORT}/health" >/dev/null 2>&1 \
+        || ! curl -sk "https://127.0.0.1:${ECHO_HTTPS_PORT}/health" >/dev/null 2>&1; do
         count=$((count + 1))
         if [[ $count -ge 30 ]]; then
             cat "$MOCK_LOG_FILE"
@@ -140,7 +143,9 @@ start_proxy() {
     mkdir -p "$TEST_DATA_DIR"
 
     local rules_file="$TEST_DATA_DIR/req_res_script.txt"
-    sed "s/__ECHO_HTTP_PORT__/${ECHO_HTTP_PORT}/g" "$RULE_FIXTURE" > "$rules_file"
+    sed -e "s/__ECHO_HTTP_PORT__/${ECHO_HTTP_PORT}/g" \
+        -e "s/__ECHO_HTTPS_PORT__/${ECHO_HTTPS_PORT}/g" \
+        "$RULE_FIXTURE" > "$rules_file"
 
     local bifrost_bin="$PROJECT_DIR/target/release/bifrost"
     if [[ ! -x "$bifrost_bin" ]]; then
@@ -154,7 +159,6 @@ start_proxy() {
         --unsafe-ssl \
         --skip-cert-check \
         --no-system-proxy \
-        --intercept-include "httpbin.org" \
         --rules-file "$rules_file" \
         > "$PROXY_LOG_FILE" 2>&1 &
 
@@ -213,7 +217,7 @@ get_response_body_text_raw() {
     admin_get "/api/traffic/${id}/response-body?raw=1" | jq -r '.data // ""'
 }
 
-httpbin_https_request() {
+https_request_via_proxy() {
     local url="$1"
     local headers_file
     local body_file
@@ -234,20 +238,6 @@ httpbin_https_request() {
     HTTP_BODY="$(cat "$body_file")"
 
     rm -f "$headers_file" "$body_file"
-}
-
-httpbin_reachable_via_proxy() {
-    local status
-    status=$(NO_PROXY="" no_proxy="" HTTP_PROXY="" http_proxy="" HTTPS_PROXY="" https_proxy="" \
-        curl -s -k \
-        --connect-timeout 10 \
-        --max-time 20 \
-        --proxy "http://${PROXY_HOST}:${PROXY_PORT}" \
-        --noproxy "" \
-        -o /dev/null \
-        -w '%{http_code}' \
-        "https://httpbin.org/get" 2>/dev/null || true)
-    [[ "$status" =~ ^2 ]]
 }
 
 update_sandbox_limits() {
@@ -366,14 +356,9 @@ test_res_script_body() {
     assert_body_contains "::res-script" "$HTTP_BODY" "resScript should append response body"
 }
 
-test_https_res_script_httpbin() {
-    if ! httpbin_reachable_via_proxy; then
-        skip_pass "HTTPS intercepted resScript httpbin regression" "httpbin.org unreachable through proxy"
-        return 0
-    fi
-
-    local url="https://httpbin.org/anything/https-repro"
-    httpbin_https_request "$url"
+test_https_res_script_local() {
+    local url="https://script-https.local/anything/https-repro"
+    https_request_via_proxy "$url"
     assert_equals "218" "$HTTP_STATUS" "HTTPS resScript should override upstream status"
     assert_header_value "x-repro-script" "ran" "$HTTP_HEADERS" "HTTPS resScript should add response header"
     assert_body_contains 'resScript' "$HTTP_BODY" "HTTPS resScript should rewrite response body"
@@ -407,7 +392,7 @@ main() {
     sleep 1
     test_req_script
     test_res_script_body
-    test_https_res_script_httpbin
+    test_https_res_script_local
     test_decode_script_bodies
     test_max_decode_input_bytes_skip
     test_max_decompress_output_bytes_fallback
