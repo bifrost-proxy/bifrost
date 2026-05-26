@@ -306,6 +306,9 @@ test("AI Agent Chat slash runner call selects a runner and renders the result", 
   await openPage(page, "ai?aiSection=agent-chat&agentSection=chat");
   await page.getByTestId("agent-chat-input").fill("/");
   await expect(page.getByTestId("agent-chat-slash-runner-panel")).toBeVisible();
+  await expect(page.getByTestId("agent-chat-slash-runner-panel")).toContainText(
+    "Bifrost Agent",
+  );
   await page
     .getByTestId("agent-chat-slash-runner-option")
     .filter({ hasText: "codex" })

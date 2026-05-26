@@ -29,13 +29,11 @@ export function useSlashRunnerSelection({
   draft,
   running,
   supplementSubmitting,
-  runnerId,
   runnerOptions,
 }: {
   draft: string;
   running: boolean;
   supplementSubmitting: boolean;
-  runnerId: string;
   runnerOptions: RunnerOption[];
 }) {
   const [slashRunner, setSlashRunner] = useState<RunnerOption | undefined>();
@@ -45,15 +43,13 @@ export function useSlashRunnerSelection({
       : "";
   const slashRunnerOptions = useMemo(
     () =>
-      runnerOptions
-        .filter((option) => option.value !== runnerId)
-        .filter((option) =>
-          slashQuery
-            ? option.label.toLowerCase().includes(slashQuery) ||
-              option.value.toLowerCase().includes(slashQuery)
-            : true,
-        ),
-    [runnerId, runnerOptions, slashQuery],
+      runnerOptions.filter((option) =>
+        slashQuery
+          ? option.label.toLowerCase().includes(slashQuery) ||
+            option.value.toLowerCase().includes(slashQuery)
+          : true,
+      ),
+    [runnerOptions, slashQuery],
   );
   const showSlashRunnerPanel =
     !running &&

@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-Agent Chat 输入框支持输入 `/` 后选择一个不同 Runner。选择后输入框展示 Runner 名称 chip，用户继续输入消息并发送。发送不会切换当前会话默认 Runner，而是发起一次用户主动触发的跨 Runner 调用：后端把当前会话上下文和用户消息打包给目标 Runner，目标 Runner 执行完成后，结果以一条 Runner Call 消息回到当前会话，并成为当前 Runner 后续对话可消费的上下文。
+Agent Chat 输入框支持输入 `/` 后选择任意 Runner。选择后输入框展示 Runner 名称 chip，用户继续输入消息并发送。发送不会切换当前会话默认 Runner，而是发起一次用户主动触发的 Runner 调用：后端把当前会话上下文和用户消息打包给目标 Runner，目标 Runner 执行完成后，结果以一条 Runner Call 消息回到当前会话，并成为当前 Runner 后续对话可消费的上下文。
 
 这类调用语义接近工具调用，但触发者是用户；调用结果既要可见，也要进入后续上下文。
 
@@ -111,7 +111,7 @@ V1 使用 UI 当前展示的 `callerMessages` 作为 transcript 来源；这能�
 ## UI 设计
 
 - 输入框输入 `/` 且没有选择 Runner 时展示 slash panel。
-- slash panel 只列出与当前 Runner 不同的 Runner。
+- slash panel 列出全部可用 Runner，包括当前 Runner 和内置 Bifrost Agent。
 - 选择后显示 chip：`Run with <runner>`。
 - 消息流中用户气泡显示 `Run with <runner>` chip 和用户输入。
 - assistant 区域显示目标 Runner 的过程步骤和最终输出。

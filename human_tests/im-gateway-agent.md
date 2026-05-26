@@ -2155,12 +2155,12 @@ rm -rf ./.bifrost-test
 
 - **前置条件**:
   - 使用当前源码启动 Bifrost Admin 与 WebUI。
-  - `GET /_bifrost/api/im-gateway/chat/config` 至少启用一个与当前会话 Runner 不同的 Runner，例如从外部 Runner 调用内置 `Bifrost Agent`，或从内置 `Bifrost Agent` 调用 `codex`。
+  - `GET /_bifrost/api/im-gateway/chat/config` 至少返回内置 `Bifrost Agent` 和任意已启用外部 Runner；slash 面板不按当前 Runner 过滤。
   - 使用新的临时 Agent Chat 会话，不复用用户重要历史。
 - **操作步骤**:
   1. 打开 `/_bifrost/ai?aiSection=agent-chat&agentSection=chat`。
   2. 在输入框输入 `/`。
-  3. 检查输入框上方出现 Runner 选择面板，面板列出不同于当前 Runner 的可用 Runner。
+  3. 检查输入框上方出现 Runner 选择面板，面板列出全部可用 Runner，包括当前 Runner 和内置 `Bifrost Agent`。
   4. 点击 `codex` Runner。
   5. 检查输入框内出现 `Run with codex` chip，且输入框可继续输入消息。
   6. 输入 `基于当前上下文给出实现建议` 并发送。
@@ -2173,7 +2173,7 @@ rm -rf ./.bifrost-test
   - 发送后刷新页面，旧会话仍能从后端持久化状态恢复 `Run with codex` 用户消息和目标 Runner running/完成状态。
   - `runner-call:*` 子会话不作为新线程展示在 Threads 列表。
   - 调用完成后 chip 自动清空，输入框恢复普通输入状态。
-- **执行记录（2026-05-26）**: PASS — 执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "slash runner" --reporter=line`，通过真实浏览器操作输入 `/`、选择 `codex`、检查 `Run with codex` chip、拦截并断言 `/_bifrost/api/im-gateway/chat/runner-calls/stream` 请求体包含 `callerSessionKey`、`callerRunnerId`、`targetRunnerId:"codex"`、`callerMessages` 和用户消息，mock NDJSON 流式返回后消息区展示 Runner Call 结果；同时断言顶部 Runner tag 仍为 `Runner: bifrost_agent`。
+- **执行记录（2026-05-26）**: PASS — 执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "slash runner" --reporter=line`，通过真实浏览器操作输入 `/`、确认 slash 面板同时展示内置 `Bifrost Agent` 与外部 `codex`、选择 `codex`、检查 `Run with codex` chip、拦截并断言 `/_bifrost/api/im-gateway/chat/runner-calls/stream` 请求体包含 `callerSessionKey`、`callerRunnerId`、`targetRunnerId:"codex"`、`callerMessages` 和用户消息，mock NDJSON 流式返回后消息区展示 Runner Call 结果；同时断言顶部 Runner tag 仍为 `Runner: bifrost_agent`。
 - **回归执行记录（2026-05-26）**: PASS — 针对从外部 Runner 选择 `Bifrost Agent` 会返回 `{"error":"slash Runner calls currently require an external target Runner","status":400}` 的回归，执行 `cargo test -p bifrost-admin runner_call_target_accepts_builtin_agent --lib -- --nocapture`，验证 `targetRunnerId:"bifrost_agent"` 会被解析为内置目标 Runner 而不是 400 拒绝；代码 review 确认内置目标通过 `runner-call:<source>:bifrost_agent` 子会话执行并仍返回 `runner_call_started` / `runner_call_finished` NDJSON。
 - **持久化回归执行记录（2026-05-26）**: PASS — 执行 `cargo test -p bifrost-admin runner_call_visible_messages_stay_on_source_thread --lib -- --nocapture`，验证 Runner Call started 时源会话持久化 user 消息和 running assistant 状态，finished 时同一源会话内原地更新 assistant 结果；执行 `cargo test -p bifrost-admin runner_call_child_session_keys_are_internal --lib -- --nocapture`，验证 `runner-call:*` 被识别为内部子会话；执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "slash runner" --reporter=line`，验证线程刷新返回 `runner-call:*` running 子会话时 UI 不展示新线程，并保留旧会话中的 Runner Call running/结果展示。
 

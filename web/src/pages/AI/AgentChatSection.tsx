@@ -119,7 +119,6 @@ export default function AgentChatSection() {
     draft,
     running,
     supplementSubmitting,
-    runnerId,
     runnerOptions,
   });
   const [planCollapsed, setPlanCollapsed] = useState(false);
