@@ -963,6 +963,8 @@ Threads 数据源使用 `/api/im-gateway/agent/sessions/all` 的 active + histor
 
 外部 Runner 的 session state 不能只保存最后一轮。Codex、ChatGPT Web、自定义 Runner 每次 run 完成后，都要把本轮 user/assistant message 追加到同一个 `session_key + adapter + runner_id` 的消息序列中，并保留 external `threadId` / `conversationId` 作为续聊引用。`/sessions/all` 的 turns、start_time、duration 以及 `/sessions/{session_key}` 的 messages 必须从这条消息序列生成，确保 5 轮及以上多轮对话仍完整挂在同一线程下，不因 latest run 或 conversation id 变化漂移成多个线程。
 
+ChatGPT Web Runner 的 DOM fallback 不能只识别传统 `<img>` 生成图。ChatGPT 可能把生成图片卡片、信息卡和 ZIP 打包下载渲染成 `button.behavior-btn` / `entity-underline` 行为按钮，按钮本身没有 `<a href>`，也不会出现在 `generatedImages`。DOM 提取需要在最终 assistant turn 内识别这些按钮，过滤复制、分享、来源、模型切换和输入文件 pill，把图片类按钮标记为 `kind=image`，把 `ZIP` / `打包下载` 上下文标记为 `kind=archive`，写入 `conversation_final.json.final.artifacts` / run raw `artifacts`。Runner 在 `ask` / `wait` 收尾时复用默认 ChatGPT Web 浏览器登录态，通过 CDP 打开 `/c/{conversationId}`：对 `kind=image` 按钮逐个点击并从图片 dialog / `estuary/content` URL 下载原图到 `attachments/chatgpt_web/<conversationId>/`，最终回复追加本地 Markdown 图片 `![label](path)`，由 IM 投递层拆出并按通道单独发图；对 `kind=archive` / ZIP / 压缩包按钮配置临时下载目录、监听下载完成事件并归档 ZIP，同时在最终回复和 run raw 中写入 `downloadedArtifacts`。如果某个行为按钮点击后没有暴露可下载图片或附件，则保留可点击下载项摘要，避免 IM 或 Agent Chat 里只看到 `打包下载：` 而不知道实际缺失了哪些产物。
+
 对话详情恢复必须带上运行元信息，而不仅恢复消息文本：
 
 1. active session 深链通过 `/api/im-gateway/agent/sessions/{session_key}` 恢复 messages、title、work_dir、message_count、token、compaction、runner 元信息。

@@ -52,7 +52,7 @@
 | [webui-notifications.md](./webui-notifications.md) | Web UI Notifications 页面 | 3 | 三个通知表顶部状态筛选、默认未读展示、固定分页无 page size 选择器 |
 | [webui-layout-navigation.md](./webui-layout-navigation.md) | Web UI 布局与导航 | 16 | 侧边栏导航、侧边栏小窗口滚动、分割面板、状态栏、Toolbar、主题切换、版本检查、升级命令复制、拖拽导入 |
 | [webui-ai-skill-assistant.md](./webui-ai-skill-assistant.md) | WebUI AI Skill Assistant | 6 | 全局右下角 AI skill 引导入口、hover 浮窗、hover 延迟关闭、安装命令复制、仓库 SKILL.md 链接、拖拽位置、点击隐藏，以及真实 Codex CLI 调用、亮色/暗色主题验证 |
-| [chatgpt-web-adapter.md](./chatgpt-web-adapter.md) | ChatGPT Web Adapter | 25 | IM Gateway Runner 内置 `chatgpt_web` adapter：WebUI 配置、登录态强校验、服务启动时扫描自定义 GPT Web runner 并在登录态缺失/失效时后台自动弹出登录浏览器、运行时自动弹出浏览器且无固定登录等待超时、Stop Login 主动停止、默认 headed 创建/追加对话并便于观察真实页面操作、追加消息必须进入稳定的新建页或目标 `/c/{conversationId}` 并通过浏览器 UI composer 发送、超过 120 字符的长输入使用系统剪贴板 + 浏览器原生粘贴快捷键路径避免 CDP `Input.insertText` 卡死、超长输入被 ChatGPT 文件化后不采样 composer 正文而是轮询发送按钮可用状态、mock IM 入站连续注入验证队列消费、handoff heartbeat 防静默卡住、list/get/wait、消息列表、长任务超时、run stop、SSE handoff 中断恢复、发送/等待性能回归、短文本回复不得被 DOM fallback 字符阈值丢弃，DOM fallback 必须等输出状态和 composer/send 控件恢复后才结束、CLI JSON 按 thinking/tool/final 输出 NDJSON，IM 只分批投递 thinking/final 且不投递工具调用、图片生成状态文案/空壳不能提前结束，role-less image section 也能作为最终图片结果，明确请求 N 张图片时继续补齐懒加载图片、Session 记录可在 WebUI 查看输入/输出/异常、生成图片原图解析并缓存到数据目录附件存储，再按 Weixin POST CDN `image_item` / Feishu `image_key` 等 IM 通道各自图片模式逐张发送、失败时在 chat_runs 写入 failure_diagnostics、page_dom 和 conversation_response 诊断、脱敏 artifacts 与登录失效反馈、过期 Authorization 与陈旧 browser accounts/check proof 不再把登录页误判为已登录、TC-CWA-19 ConversationTab 长驻池（容量 16，按 conversation_id 复用，服务重启后 attach 现有 conversation tab，LRU 淘汰，模式切换/进程死亡时清空） |
+| [chatgpt-web-adapter.md](./chatgpt-web-adapter.md) | ChatGPT Web Adapter | 26 | IM Gateway Runner 内置 `chatgpt_web` adapter：WebUI 配置、登录态强校验、服务启动时扫描自定义 GPT Web runner 并在登录态缺失/失效时后台自动弹出登录浏览器、运行时自动弹出浏览器且无固定登录等待超时、Stop Login 主动停止、默认 headed 创建/追加对话并便于观察真实页面操作、追加消息必须进入稳定的新建页或目标 `/c/{conversationId}` 并通过浏览器 UI composer 发送、超过 120 字符的长输入使用系统剪贴板 + 浏览器原生粘贴快捷键路径避免 CDP `Input.insertText` 卡死、超长输入被 ChatGPT 文件化后不采样 composer 正文而是轮询发送按钮可用状态、mock IM 入站连续注入验证队列消费、handoff heartbeat 防静默卡住、list/get/wait、消息列表、长任务超时、run stop、SSE handoff 中断恢复、发送/等待性能回归、短文本回复不得被 DOM fallback 字符阈值丢弃，DOM fallback 必须等输出状态和 composer/send 控件恢复后才结束、CLI JSON 按 thinking/tool/final 输出 NDJSON，IM 只分批投递 thinking/final 且不投递工具调用、图片生成状态文案/空壳不能提前结束，role-less image section 也能作为最终图片结果，明确请求 N 张图片时继续补齐懒加载图片、ChatGPT `behavior-btn` 图片/ZIP 下载项可见、图片与 ZIP 自动下载并写入 artifacts/downloadedArtifacts、Session 记录可在 WebUI 查看输入/输出/异常、生成图片原图解析并缓存到数据目录附件存储，再按 Weixin POST CDN `image_item` / Feishu `image_key` 等 IM 通道各自图片模式逐张发送、失败时在 chat_runs 写入 failure_diagnostics、page_dom 和 conversation_response 诊断、脱敏 artifacts 与登录失效反馈、过期 Authorization 与陈旧 browser accounts/check proof 不再把登录页误判为已登录、TC-CWA-19 ConversationTab 长驻池（容量 16，按 conversation_id 复用，服务重启后 attach 现有 conversation tab，LRU 淘汰，模式切换/进程死亡时清空） |
 | [webui-static-assets.md](./webui-static-assets.md) | WebUI Static Assets | 3 | WebUI 静态资源 gzip 嵌入发布、gzip 客户端直接接收压缩响应、非 gzip 客户端升级提示、SPA 深链 fallback |
 | [statusbar-proxy-popover.md](./statusbar-proxy-popover.md) | StatusBar Proxy Hover 面板 | 6 | 底部状态栏 Proxy 区域 hover 弹出 Popover，快速切换系统代理开关、地址显示、状态同步 |
 | [tls-passthrough-interactive.md](./tls-passthrough-interactive.md) | TLS 不信任域名交互式 Passthrough | 8 | TLS 不信任 Toast 弹窗交互、Passthrough / Ignore 按钮、Notifications 表格操作、域名排除列表联动 |
@@ -195,7 +195,7 @@
 
 ---
 
-**总计：125 个测试文件，2216 个测试用例**
+**总计：125 个测试文件，2217 个测试用例**
 
 ## 工作流程
 

@@ -20,6 +20,7 @@ use super::external_cli::{
     ExternalCliProgressEventType, ExternalCliRunRequest, ExternalCliRunStatus,
 };
 
+mod artifacts;
 mod browser;
 mod diagnostics;
 mod images;
@@ -30,6 +31,7 @@ mod storage;
 #[cfg(test)]
 mod tests;
 
+use artifacts::download_behavior_artifacts_for_conversation;
 pub use browser::kill_all_managed_browsers;
 use browser::{BrowserSession, CdpClient, CdpEvent};
 use diagnostics::{
@@ -910,16 +912,51 @@ async fn run_authenticated_operation(
                 Some(&config.profile_dir),
             )
             .await?;
-            let response = waited
+            let mut response = waited
                 .final_message
                 .get("text")
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
+            let downloaded_artifacts = match download_chatgpt_behavior_artifacts(
+                config,
+                auth,
+                &conversation_id,
+                &waited,
+                run_dir,
+                stop_marker_path,
+            )
+            .await
+            {
+                Ok(items) => items,
+                Err(error) => {
+                    warn!(
+                        conversation_id = %conversation_id,
+                        error = %error,
+                        "chatgpt_web wait: behavior artifact download failed"
+                    );
+                    if response.is_empty() {
+                        response = "ChatGPT Web 附件下载失败，请手动查看原对话。".to_string();
+                    } else {
+                        response.push_str("\n\n[ChatGPT Web 附件下载失败，请手动查看原对话]");
+                    }
+                    Vec::new()
+                }
+            };
+            append_downloaded_behavior_artifact_links(&mut response, &downloaded_artifacts);
+            let responses = chatgpt_web_responses_for_delivery(
+                &response,
+                &waited.all_texts,
+                !downloaded_artifacts.is_empty(),
+            );
             (
                 response,
-                json!({"operation": "wait", "conversation": waited.summary}),
-                waited.all_texts,
+                json!({
+                    "operation": "wait",
+                    "conversation": waited.summary,
+                    "downloadedArtifacts": downloaded_artifacts,
+                }),
+                responses,
             )
         }
         "create" | "send" | "ask" => {
@@ -1190,6 +1227,32 @@ async fn run_authenticated_operation(
                     }
                 }
             }
+            let downloaded_artifacts = match download_chatgpt_behavior_artifacts(
+                config,
+                auth,
+                &final_conversation_id,
+                &waited,
+                run_dir,
+                stop_marker_path,
+            )
+            .await
+            {
+                Ok(items) => items,
+                Err(error) => {
+                    warn!(
+                        conversation_id = %final_conversation_id,
+                        error = %error,
+                        "chatgpt_web ask: behavior artifact download failed"
+                    );
+                    if response.is_empty() {
+                        response = "ChatGPT Web 附件下载失败，请手动查看原对话。".to_string();
+                    } else {
+                        response.push_str("\n\n[ChatGPT Web 附件下载失败，请手动查看原对话]");
+                    }
+                    Vec::new()
+                }
+            };
+            append_downloaded_behavior_artifact_links(&mut response, &downloaded_artifacts);
             // Prepend a notice if we fell back to a new conversation.
             if fell_back_to_new {
                 let notice = "[由于原对话触发频率限制，已通过新建对话重新发送消息]\n\n";
@@ -1198,7 +1261,7 @@ async fn run_authenticated_operation(
             let responses = chatgpt_web_responses_for_delivery(
                 &response,
                 &waited.all_texts,
-                generated_image_count > 0 || fell_back_to_new,
+                generated_image_count > 0 || fell_back_to_new || !downloaded_artifacts.is_empty(),
             );
             (
                 response,
@@ -1208,7 +1271,9 @@ async fn run_authenticated_operation(
                     "fellBackToNew": fell_back_to_new,
                     "final": waited.summary,
                     "toolCalls": waited.summary.get("toolCalls").cloned().unwrap_or_else(|| json!([])),
+                    "artifacts": waited.summary.get("artifacts").cloned().unwrap_or_else(|| json!([])),
                     "generatedImages": downloaded_images,
+                    "downloadedArtifacts": downloaded_artifacts,
                 }),
                 responses,
             )
@@ -1217,6 +1282,168 @@ async fn run_authenticated_operation(
     };
 
     Ok(result)
+}
+
+fn chatgpt_behavior_artifacts(waited: &WaitedFinal) -> Vec<Value> {
+    let mut seen = BTreeSet::new();
+    let mut artifacts = Vec::new();
+    for value in [&waited.final_message, &waited.summary] {
+        let Some(items) = value.get("artifacts").and_then(Value::as_array) else {
+            continue;
+        };
+        for item in items {
+            let label = item
+                .get("label")
+                .or_else(|| item.get("buttonText"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim();
+            if label.is_empty() {
+                continue;
+            }
+            let kind = item
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or("artifact");
+            if seen.insert(format!("{kind}\n{label}")) {
+                artifacts.push(item.clone());
+            }
+        }
+    }
+    artifacts
+}
+
+async fn download_chatgpt_behavior_artifacts(
+    config: &RuntimeConfig,
+    auth: &AuthState,
+    conversation_id: &str,
+    waited: &WaitedFinal,
+    run_dir: &Path,
+    stop_marker_path: &Path,
+) -> Result<Vec<Value>, String> {
+    let artifacts = chatgpt_behavior_artifacts(waited);
+    if artifacts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let downloaded = download_behavior_artifacts_for_conversation(
+        config,
+        auth,
+        conversation_id,
+        &artifacts,
+        stop_marker_path,
+    )
+    .await?;
+    if !downloaded.is_empty() {
+        write_redacted_json(
+            &run_dir.join("behavior_artifacts.json"),
+            &json!({
+                "conversationId": conversation_id,
+                "artifacts": downloaded,
+            }),
+        )
+        .await?;
+    }
+    Ok(downloaded)
+}
+
+fn append_downloaded_behavior_artifact_links(response: &mut String, artifacts: &[Value]) {
+    if artifacts.is_empty() {
+        return;
+    }
+    let failure_items = artifacts
+        .iter()
+        .filter(|artifact| {
+            artifact.get("kind").and_then(Value::as_str) == Some("download_failures")
+        })
+        .flat_map(|artifact| {
+            artifact
+                .get("failures")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    let images = artifacts
+        .iter()
+        .filter(|artifact| artifact.get("kind").and_then(Value::as_str) == Some("image"))
+        .collect::<Vec<_>>();
+    let attachments = artifacts
+        .iter()
+        .filter(|artifact| {
+            let kind = artifact.get("kind").and_then(Value::as_str);
+            kind != Some("image") && kind != Some("download_failures")
+        })
+        .collect::<Vec<_>>();
+
+    if !images.is_empty() {
+        if response.trim().is_empty() {
+            response.push_str("已自动下载 ChatGPT Web 图片：");
+        }
+        for artifact in images {
+            let label = artifact
+                .get("label")
+                .or_else(|| artifact.get("fileName"))
+                .and_then(Value::as_str)
+                .unwrap_or("ChatGPT Web 图片");
+            if let Some(path) = artifact.get("path").and_then(Value::as_str) {
+                response.push_str(&format!("\n\n![{label}]({path})"));
+            }
+        }
+    }
+    if !attachments.is_empty() {
+        if response.trim().is_empty() {
+            response.push_str("已自动下载 ChatGPT Web 附件：");
+        } else {
+            response.push_str("\n\n已自动下载 ChatGPT Web 附件：");
+        }
+        for artifact in attachments {
+            let label = artifact
+                .get("label")
+                .or_else(|| artifact.get("fileName"))
+                .and_then(Value::as_str)
+                .unwrap_or("ChatGPT Web 附件");
+            if let Some(path) = artifact.get("path").and_then(Value::as_str) {
+                response.push_str(&format!("\n- [{label}]({path})"));
+            } else {
+                response.push_str(&format!("\n- {label}"));
+            }
+        }
+    }
+    if !failure_items.is_empty() {
+        if response.trim().is_empty() {
+            response.push_str("部分 ChatGPT Web 附件未能自动下载：");
+        } else {
+            response.push_str("\n\n部分 ChatGPT Web 附件未能自动下载：");
+        }
+        for failure in failure_items {
+            let kind = failure
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or("artifact");
+            let label = failure
+                .get("label")
+                .and_then(Value::as_str)
+                .unwrap_or("未命名附件");
+            let error = failure
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown error");
+            response.push_str(&format!(
+                "\n- {}: {} ({})",
+                artifact_kind_label(kind),
+                label,
+                truncate_for_log(error, 120)
+            ));
+        }
+    }
+}
+
+fn artifact_kind_label(kind: &str) -> &'static str {
+    match kind {
+        "image" => "图片",
+        "archive" => "压缩包",
+        _ => "附件",
+    }
 }
 
 fn chatgpt_web_responses_for_delivery(
