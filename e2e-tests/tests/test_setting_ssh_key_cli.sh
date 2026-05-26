@@ -28,6 +28,24 @@ trap cleanup EXIT
 
 log() { echo "[setting-ssh-key-e2e] $*"; }
 
+file_mode() {
+    local path="$1"
+    case "$(uname -s)" in
+        Darwin|FreeBSD)
+            stat -f '%Lp' "$path"
+            ;;
+        Linux)
+            stat -c '%a' "$path"
+            ;;
+        MINGW*|MSYS*|CYGWIN*|Windows_NT)
+            return 1
+            ;;
+        *)
+            stat -c '%a' "$path" 2>/dev/null || stat -f '%Lp' "$path"
+            ;;
+    esac
+}
+
 if [[ "$SKIP_BUILD" != "true" || ! -x "$BIFROST_BIN" ]]; then
     log "Building bifrost debug binary..."
     (cd "$REPO_DIR" && cargo build --bin bifrost)
@@ -53,8 +71,7 @@ assert_contains "$KEY_FILE" "BEGIN BIFROST KEY"
 assert_contains "$KEY_FILE" "Device-Code: BF-"
 grep -q "Use on caller: bifrost remote conn up --ssh-key $KEY_FILE" <<<"$create_output"
 
-if [[ "$(uname -s)" != "Windows_NT" ]]; then
-    mode="$(stat -f '%Lp' "$KEY_FILE" 2>/dev/null || stat -c '%a' "$KEY_FILE")"
+if mode="$(file_mode "$KEY_FILE")"; then
     if [[ "$mode" != "600" ]]; then
         echo "Expected key file mode 600, got $mode" >&2
         exit 1
