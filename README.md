@@ -25,6 +25,8 @@ Bifrost 是一个用 Rust 编写的高性能，AI 友好的代理服务器，灵
 curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash
 ```
 
+该脚本默认会继续安装并信任 CA 证书、安装所有 Bifrost AI skills，并以后台服务启动 Bifrost；安装完成后可直接访问管理端。
+
 安装指定版本
 
 ```bash
@@ -39,10 +41,10 @@ npm i -g @bifrost-proxy/bifrost
 
 更多安装方法：[`docs/getting-started.md`](docs/getting-started.md)
 
-启动代理：
+检查代理：
 
 ```bash
-bifrost start -d
+bifrost status
 ```
 
 启动后访问管理端：

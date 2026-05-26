@@ -82,7 +82,11 @@ export default function SpeechWorkbench({
         <Space>
           <AudioOutlined />
           <span>Speech to Text</span>
-          {ready ? <Tag color="success">Ready</Tag> : <Tag color="warning">Not Ready</Tag>}
+          {status?.installed ? (
+            ready ? <Tag color="success">Service Running</Tag> : <Tag color="processing">Model Installed</Tag>
+          ) : (
+            <Tag color="warning">Not Installed</Tag>
+          )}
         </Space>
       }
     >
@@ -95,11 +99,11 @@ export default function SpeechWorkbench({
           <Space wrap style={{ width: "100%" }}>
             <Select
               aria-label="Workbench ASR model"
-              value={params.model || "Qwen3-ASR-1.7B"}
+              value={params.model || "Qwen3-ASR-0.6B"}
               style={{ minWidth: 180 }}
               options={[
-                { value: "Qwen3-ASR-1.7B", label: "Qwen3-ASR-1.7B" },
                 { value: "Qwen3-ASR-0.6B", label: "Qwen3-ASR-0.6B" },
+                { value: "Qwen3-ASR-1.7B", label: "Qwen3-ASR-1.7B" },
               ]}
               onChange={(model) => onParamsChange((previous) => ({ ...previous, model }))}
             />
@@ -133,8 +137,8 @@ export default function SpeechWorkbench({
             {status?.server_url ? <Tag>{status.server_url}</Tag> : null}
           </Space>
           <Text type="secondary" style={{ display: "block", marginTop: 8 }}>
-            Upload and microphone transcription share this workbench model. Directory Tasks and
-            CLI commands keep their own model selections.
+            File upload transcription requires starting the ASR Service first. Realtime microphone
+            input works directly without starting the service (model will load on first use).
           </Text>
         </section>
 
@@ -143,15 +147,12 @@ export default function SpeechWorkbench({
             <AudioOutlined />
             <Text strong>Audio Input</Text>
           </Space>
-          {!ready ? (
+          {!status?.installed ? (
             <Alert
               type="warning"
               showIcon
-              message="Speech converter is not ready"
-              description={
-                status?.message ||
-                "Initialize Qwen3-ASR from AI > Tools > ASR before transcribing audio."
-              }
+              message="ASR model not installed"
+              description="Initialize Qwen3-ASR from AI > Tools > ASR before using speech features."
               style={{ marginBottom: 16 }}
             />
           ) : null}
@@ -162,6 +163,9 @@ export default function SpeechWorkbench({
             }}
             onDrop={(event) => {
               event.preventDefault();
+              if (!ready) {
+                return;
+              }
               const file = event.dataTransfer.files.item(0);
               if (file) {
                 onFile(file);
@@ -178,13 +182,18 @@ export default function SpeechWorkbench({
               borderRadius: 6,
               background: token.colorFillQuaternary,
               color: token.colorTextSecondary,
-              cursor: "pointer",
+              cursor: ready ? "pointer" : "not-allowed",
+              opacity: ready ? 1 : 0.6,
             }}
-            onClick={() => fileInputRef.current?.click()}
+            onClick={() => ready && fileInputRef.current?.click()}
           >
-            <InboxOutlined style={{ fontSize: 32, color: token.colorPrimary }} />
-            <Text>Drop an audio file here</Text>
-            <Button icon={<UploadOutlined />}>Choose File</Button>
+            <InboxOutlined style={{ fontSize: 32, color: ready ? token.colorPrimary : token.colorTextDisabled }} />
+            {ready ? (
+              <Text>Drop an audio file here</Text>
+            ) : (
+              <Text type="secondary">Start ASR Service above before uploading files</Text>
+            )}
+            <Button icon={<UploadOutlined />} disabled={!ready}>Choose File</Button>
             <input
               ref={fileInputRef}
               type="file"
@@ -210,7 +219,7 @@ export default function SpeechWorkbench({
                 type="primary"
                 icon={<PlayCircleOutlined />}
                 onClick={onStartRecording}
-                disabled={!ready || workState === "transcribing"}
+                disabled={!status?.installed || workState === "transcribing"}
               >
                 Start Mic
               </Button>

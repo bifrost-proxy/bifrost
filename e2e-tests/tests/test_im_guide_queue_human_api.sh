@@ -225,6 +225,20 @@ if [[ -z "$DEFAULT_GUIDE_STATUS" ]]; then
   exit 1
 fi
 
+DEFAULT_GUIDE_DRAINED=""
+for _ in $(seq 1 80); do
+  if [[ -f "$MOCK_LOG" ]] && grep -q "默认引导消息" "$MOCK_LOG"; then
+    DEFAULT_GUIDE_DRAINED="true"
+    break
+  fi
+  sleep 0.1
+done
+
+if [[ -z "$DEFAULT_GUIDE_DRAINED" ]]; then
+  echo "[im-guide-queue-human-api] default IM inbound guide was not consumed by the active loop" >&2
+  exit 1
+fi
+
 GUIDE_RESPONSE="$(curl -fsS --noproxy '*' -X POST "$BASE/chat" \
   -H 'Content-Type: application/json' \
   -d '{"session_key":"guide-end-test","message":"先处理 initial","guide_message":"这是 turn 结束前插入的 guide"}')"

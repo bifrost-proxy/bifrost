@@ -5,6 +5,7 @@ pub async fn handle_asr_tasks(req: Request<Incoming>, path: &str) -> Response<Bo
         (&Method::GET, "/api/asr/external-volumes") => {
             json_response(&serde_json::json!({ "volumes": list_external_volumes() }))
         }
+        (&Method::GET, "/api/asr/tasks/-/watch") => list_task_watch_response(),
         (&Method::GET, "/api/asr/tasks") => list_tasks_response(),
         (&Method::POST, "/api/asr/tasks") => create_task_response(req).await,
         (&Method::PATCH, _) if path.starts_with("/api/asr/tasks/") => {
@@ -78,6 +79,7 @@ pub async fn handle_asr_tasks(req: Request<Incoming>, path: &str) -> Response<Bo
             match parts.as_slice() {
                 [task_id, "daily-agent", "run"] => post_daily_agent_run_response(task_id, req).await,
                 [task_id, "daily-agent", "send"] => post_daily_agent_send_response(task_id).await,
+                [task_id, "daily-agent", "sync"] => post_daily_agent_sync_response(task_id).await,
                 _ => error_response(StatusCode::NOT_FOUND, "ASR task endpoint not found"),
             }
         }
@@ -120,6 +122,13 @@ pub async fn handle_asr_tasks(req: Request<Incoming>, path: &str) -> Response<Bo
                 return error_response(StatusCode::NOT_FOUND, "ASR task endpoint not found");
             }
             get_task_file_timeline_response(parts[0], parts[2])
+        }
+        (&Method::GET, _) if path.starts_with("/api/asr/tasks/") && path.ends_with("/watch") => {
+            let id = path
+                .trim_start_matches("/api/asr/tasks/")
+                .trim_end_matches("/watch")
+                .trim_end_matches('/');
+            get_task_watch_response(id)
         }
         (&Method::GET, _) if path.starts_with("/api/asr/tasks/") => {
             let Some(id) = path
@@ -443,6 +452,25 @@ fn list_tasks_response() -> Response<BoxBody> {
 fn get_task_response(id: &str) -> Response<BoxBody> {
     match find_task(id) {
         Some(task) => json_response(&task_detail(task)),
+        None => error_response(StatusCode::NOT_FOUND, "ASR task not found"),
+    }
+}
+
+fn list_task_watch_response() -> Response<BoxBody> {
+    let tasks = load_tasks()
+        .tasks
+        .into_iter()
+        .map(|task| task_watch_snapshot(task, false))
+        .collect::<Vec<_>>();
+    json_response(&TaskWatchListResponse {
+        tasks,
+        updated_at_ms: now_ms(),
+    })
+}
+
+fn get_task_watch_response(id: &str) -> Response<BoxBody> {
+    match find_task(id) {
+        Some(task) => json_response(&task_watch_snapshot(task, true)),
         None => error_response(StatusCode::NOT_FOUND, "ASR task not found"),
     }
 }

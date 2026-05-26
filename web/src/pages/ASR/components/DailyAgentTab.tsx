@@ -20,6 +20,7 @@ import {
   ReloadOutlined,
   SaveOutlined,
   SendOutlined,
+  SyncOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import type {
@@ -40,6 +41,7 @@ import {
   getDailyAgentRuns,
   getDailyAgentInstructions,
   sendDailyAgentReport,
+  syncDailyAgentReports,
   triggerDailyAgentRun,
   updateDailyAgentConfig,
   updateDailyAgentInstructions,
@@ -74,8 +76,11 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [running, setRunning] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const [instructionsText, setInstructionsText] = useState("");
   const [instructionsDirty, setInstructionsDirty] = useState(false);
+  const [reportSyncDir, setReportSyncDir] = useState("");
+  const [reportSyncDirDirty, setReportSyncDirDirty] = useState(false);
 
   const fetchAll = useCallback(async () => {
     setLoading(true);
@@ -91,6 +96,8 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
       setInstructions(instr);
       setInstructionsText(instr.content);
       setInstructionsDirty(false);
+      setReportSyncDir(config.config.report_sync_dir || "");
+      setReportSyncDirDirty(false);
       setRunnerConfig(runners);
       setImProviders(providers);
       setImTargets(targets);
@@ -189,6 +196,36 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
     }
   };
 
+  const handleSaveReportSyncDir = async () => {
+    setSaving(true);
+    try {
+      await updateDailyAgentConfig(taskId, { report_sync_dir: reportSyncDir });
+      message.success("Report sync directory saved");
+      setReportSyncDirDirty(false);
+      fetchAll();
+    } catch (error: unknown) {
+      message.error(`Failed to save sync directory: ${errorMessage(error)}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleSyncReports = async () => {
+    setSyncing(true);
+    try {
+      const result = await syncDailyAgentReports(taskId);
+      message.success(
+        `Synced ${result.sync.copied_files} copied, ${result.sync.skipped_files} skipped`
+      );
+      fetchAll();
+    } catch (error: unknown) {
+      message.error(`Sync failed: ${errorMessage(error)}`);
+      fetchAll();
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   const handleRun = async (force: boolean) => {
     setRunning(true);
     try {
@@ -234,6 +271,7 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
 
   const config = configData?.config;
   const reportIndex = configData?.report_index_status;
+  const reportSync = config?.last_report_sync;
 
   if (loading && !configData) {
     return (
@@ -291,7 +329,54 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
             <Descriptions.Item label="Session Key">
               <Text code>{config.session_key || "(auto)"}</Text>
             </Descriptions.Item>
+            <Descriptions.Item label="Report Sync Dir" span={2}>
+              <Space.Compact style={{ width: "100%" }}>
+                <Input
+                  data-testid="asr-daily-agent-report-sync-dir"
+                  size="small"
+                  value={reportSyncDir}
+                  placeholder="Optional directory for iCloud or external sync"
+                  onChange={(event) => {
+                    setReportSyncDir(event.target.value);
+                    setReportSyncDirDirty(true);
+                  }}
+                  onPressEnter={handleSaveReportSyncDir}
+                  disabled={saving}
+                />
+                <Button
+                  size="small"
+                  icon={<SaveOutlined />}
+                  onClick={handleSaveReportSyncDir}
+                  disabled={!reportSyncDirDirty}
+                  loading={saving}
+                >
+                  Save
+                </Button>
+              </Space.Compact>
+            </Descriptions.Item>
           </Descriptions>
+        )}
+        {config && (
+          <Space style={{ marginTop: 8 }}>
+            <Button
+              data-testid="asr-daily-agent-sync-reports-button"
+              icon={<SyncOutlined />}
+              onClick={handleSyncReports}
+              loading={syncing}
+              disabled={!config.report_sync_dir?.trim()}
+            >
+              Sync Reports
+            </Button>
+            {config.report_sync_dir?.trim() ? (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                Copies reports to the configured directory.
+              </Text>
+            ) : (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                Set a directory to enable manual report sync.
+              </Text>
+            )}
+          </Space>
         )}
       </Card>
 
@@ -426,6 +511,39 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
                 </Tag>
               </Descriptions.Item>
             </Descriptions>
+          )}
+          {reportSync && (
+            <>
+              <Descriptions column={3} size="small" style={{ marginTop: 8 }}>
+                <Descriptions.Item label="Report Sync">
+                  <Tag color={reportSync.failed_files > 0 ? "red" : "green"}>
+                    {reportSync.copied_files} copied / {reportSync.total_files} total
+                  </Tag>
+                </Descriptions.Item>
+                <Descriptions.Item label="Skipped">
+                  {reportSync.skipped_files}
+                </Descriptions.Item>
+                <Descriptions.Item label="Last Sync">
+                  {reportSync.synced_at_ms
+                    ? new Date(reportSync.synced_at_ms).toLocaleString()
+                    : "-"}
+                </Descriptions.Item>
+                <Descriptions.Item label="Sync Dir" span={3}>
+                  <Text code style={{ fontSize: 11 }}>
+                    {reportSync.target_dir}
+                  </Text>
+                </Descriptions.Item>
+              </Descriptions>
+              {reportSync.failed_files > 0 && (
+                <Alert
+                  style={{ marginTop: 8 }}
+                  type="error"
+                  showIcon
+                  message={`Report sync failed for ${reportSync.failed_files} file(s)`}
+                  description={(reportSync.errors || []).slice(0, 3).join("; ")}
+                />
+              )}
+            </>
           )}
           {reportIndex && (
             <>

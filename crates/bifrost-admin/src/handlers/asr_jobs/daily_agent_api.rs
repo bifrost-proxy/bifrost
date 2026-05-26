@@ -19,6 +19,8 @@ async fn get_daily_agent_config_response(task_id: &str) -> Response<BoxBody> {
             "session_key": task.daily_agent.session_key,
             "instructions_source": task.daily_agent.instructions_source,
             "im_delivery": task.daily_agent.im_delivery,
+            "report_sync_dir": task.daily_agent.report_sync_dir,
+            "last_report_sync": task.daily_agent.last_report_sync,
         },
         "workspace": workspace,
         "report_index_status": report_index_status,
@@ -56,6 +58,8 @@ async fn put_daily_agent_config_response(
         session_key: Option<String>,
         #[serde(default)]
         im_delivery: Option<UpdateImDeliveryConfig>,
+        #[serde(default)]
+        report_sync_dir: Option<String>,
     }
 
     #[derive(Deserialize)]
@@ -113,6 +117,10 @@ async fn put_daily_agent_config_response(
         if let Some(send_policy) = im.send_policy {
             task.daily_agent.im_delivery.send_policy = send_policy;
         }
+    }
+    if let Some(report_sync_dir) = update.report_sync_dir {
+        task.daily_agent.report_sync_dir =
+            Some(report_sync_dir.trim().to_string()).filter(|value| !value.is_empty());
     }
 
     if task.daily_agent.enabled && !daily_agent_runner_ready(task) {
@@ -311,6 +319,36 @@ async fn post_daily_agent_send_response(task_id: &str) -> Response<BoxBody> {
     }
 }
 
+async fn post_daily_agent_sync_response(task_id: &str) -> Response<BoxBody> {
+    let Some(task) = find_task(task_id) else {
+        return error_response(StatusCode::NOT_FOUND, "ASR task not found");
+    };
+
+    let sync_result = match sync_all_daily_agent_reports(&task) {
+        Ok(result) => result,
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error),
+    };
+
+    if let Err(error) = update_daily_agent_report_sync_status(task_id, sync_result.clone()) {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error);
+    }
+
+    if sync_result.failed_files > 0 {
+        return json_response_with_status(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &serde_json::json!({
+                "ok": false,
+                "sync": sync_result,
+            }),
+        );
+    }
+
+    json_response(&serde_json::json!({
+        "ok": true,
+        "sync": sync_result,
+    }))
+}
+
 fn get_daily_agent_runs_response(task_id: &str) -> Response<BoxBody> {
     let Some(task) = find_task(task_id) else {
         return error_response(StatusCode::NOT_FOUND, "ASR task not found");
@@ -402,9 +440,35 @@ fn build_daily_agent_records_with_fallback_runner(
     records
 }
 
+fn processed_report_path_for_date(task_id: &str, date: &str) -> Option<PathBuf> {
+    let processed = load_daily_agent_processed_state(task_id);
+    let report_path = processed.documents.get(date)?.report_path.as_deref()?;
+    let path = PathBuf::from(report_path);
+    if daily_agent_report_date_from_path(&path).as_deref() != Some(date) || !path.is_file() {
+        return None;
+    }
+
+    let task_output_dir = text_output_dir(&bifrost_storage::data_dir()).join(task_id);
+    let Ok(canonical_task_dir) = task_output_dir.canonicalize() else {
+        return None;
+    };
+    let Ok(canonical_report_path) = path.canonicalize() else {
+        return None;
+    };
+    if canonical_report_path.starts_with(canonical_task_dir) {
+        Some(path)
+    } else {
+        None
+    }
+}
+
 fn daily_agent_report_path_for_date(task_id: &str, date: &str) -> Result<PathBuf, String> {
     if NaiveDate::parse_from_str(date, "%Y-%m-%d").is_err() {
         return Err("ASR Daily Agent report date must use YYYY-MM-DD".to_string());
+    }
+
+    if let Some(path) = processed_report_path_for_date(task_id, date) {
+        return Ok(path);
     }
 
     for path in list_daily_agent_report_files(task_id) {

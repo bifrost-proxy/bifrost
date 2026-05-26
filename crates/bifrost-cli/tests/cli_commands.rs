@@ -107,15 +107,17 @@ fn ai_asr_commands_parse() {
                     AiAsrTaskCommands::Daily {
                         action:
                             AiAsrTaskDailyCommands::Show {
-                                task_id,
-                                date,
+                                first,
+                                second,
+                                task,
                                 output,
                                 json,
                             },
                     },
             } => {
-                assert_eq!(task_id, "task-123");
-                assert_eq!(date, "2026-05-17");
+                assert_eq!(first, "task-123");
+                assert_eq!(second.as_deref(), Some("2026-05-17"));
+                assert!(task.is_none());
                 assert_eq!(output, Some(std::path::PathBuf::from("/tmp/asr-day.md")));
                 assert!(!json);
             }

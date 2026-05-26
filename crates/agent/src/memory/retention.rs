@@ -1,9 +1,11 @@
-//! Memory retention sweep: archive old raw memories, trim rollout summaries.
+//! Memory retention sweep: archive old raw memories, trim rollout summaries,
+//! and prune unused rollout records based on usage frequency.
 
 use crate::config::AgentConfig;
 use crate::memory::consolidation::parse_raw_memory_sections;
 use crate::memory::constants::*;
 use crate::memory::layout::ensure_memory_layout;
+use crate::memory::state_db;
 use crate::memory::telemetry::telemetry_event;
 use crate::memory::utils::{atomic_write, now_secs};
 use crate::memory_extensions;
@@ -150,5 +152,99 @@ pub fn prune_memory_artifacts(config: &AgentConfig) -> Result<(), String> {
         warn!(error = %e, "extension resource pruning failed");
     }
 
+    // 5. Usage-based rollout record pruning (aligned with Codex retention model).
+    //    Removes DB records for rollouts that have never been cited and are older
+    //    than max_rollout_age_days.
+    if let Some(days) = memories_cfg.max_rollout_age_days {
+        if days > 0 {
+            match state_db::prune_unused_rollouts(&root, days as u64) {
+                Ok(pruned) if pruned > 0 => {
+                    telemetry_event(
+                        "retention.rollout_db_prune",
+                        pruned,
+                        true,
+                        Some("unused rollout records removed from state DB"),
+                    );
+                }
+                Err(e) => {
+                    warn!(error = %e, "rollout DB pruning failed");
+                }
+                _ => {}
+            }
+        }
+    }
+
     Ok(())
+}
+
+/// Prune Phase 1 (stage 1) output files for rollouts that have been superseded
+/// or are below usage thresholds. This is a batch operation that removes
+/// rollout summary files from disk whose corresponding DB records have been
+/// pruned or whose rollouts have zero usage and are beyond the retention window.
+///
+/// Returns the number of files removed.
+pub fn prune_stage1_outputs_for_retention(
+    config: &AgentConfig,
+    max_unused_days: Option<u64>,
+) -> Result<usize, String> {
+    let root = ensure_memory_layout()?;
+    let memories_cfg = config.get_memories_config();
+    let days = max_unused_days
+        .or(memories_cfg.max_rollout_age_days.map(|d| d.max(0) as u64))
+        .unwrap_or(30);
+
+    let summaries_dir = root.join("rollout_summaries");
+    if !summaries_dir.is_dir() {
+        return Ok(0);
+    }
+
+    // Get all rollouts that are tracked in the DB.
+    let tracked_rollouts = state_db::list_rollouts(&root, 10_000).unwrap_or_default();
+    let tracked_ids: std::collections::HashSet<String> = tracked_rollouts
+        .iter()
+        .map(|r| r.thread_id.clone())
+        .collect();
+
+    let mut removed = 0usize;
+
+    let entries: Vec<fs::DirEntry> = fs::read_dir(&summaries_dir)
+        .map(|iter| iter.filter_map(Result::ok).collect())
+        .unwrap_or_default();
+
+    for entry in entries {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let file_name = path
+            .file_stem()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+
+        // If the file has a thread_id-like slug and it's NOT tracked in the DB,
+        // check its age for removal.
+        if !tracked_ids.contains(&file_name) {
+            if let Ok(meta) = entry.metadata() {
+                if let Ok(modified) = meta.modified() {
+                    if let Ok(age) = SystemTime::now().duration_since(modified) {
+                        if age.as_secs() > days * 86_400 && fs::remove_file(&path).is_ok() {
+                            removed += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if removed > 0 {
+        telemetry_event(
+            "retention.stage1_output_prune",
+            removed as u64,
+            true,
+            Some("stale stage1 output files removed"),
+        );
+    }
+
+    Ok(removed)
 }

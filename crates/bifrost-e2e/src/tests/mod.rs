@@ -9,6 +9,7 @@ pub mod filters;
 pub mod group_rules;
 pub mod https;
 pub mod im_gateway_agent;
+pub mod im_gateway_session_persistence;
 pub mod install_skill;
 pub mod matchers;
 pub mod mock_traffic;
@@ -77,6 +78,7 @@ pub fn all_tests() -> Vec<TestCase> {
     tests.extend(group_rules::get_all_tests());
     tests.extend(mock_traffic::get_all_tests());
     tests.extend(im_gateway_agent::get_all_tests());
+    tests.extend(im_gateway_session_persistence::get_all_tests());
     tests.extend(skill_creator::get_all_tests());
     tests.extend(skill_loading::get_all_tests());
     tests

@@ -30,6 +30,8 @@ pub struct WholeFileTranscription {
 const DEFAULT_STREAM_WINDOW_MS: u64 = 1_000;
 const DEFAULT_STREAM_OVERLAP_MS: u64 = 300;
 const MIN_STREAM_WINDOW_MS: u64 = 300;
+const ASR_SERVER_REQUEST_TIMEOUT_SECS_ENV: &str = "BIFROST_ASR_SERVER_REQUEST_TIMEOUT_SECS";
+const ASR_TEXT_REQUEST_TIMEOUT_SECS_ENV: &str = "BIFROST_ASR_TEXT_REQUEST_TIMEOUT_SECS";
 
 #[derive(Debug, Clone, Deserialize)]
 struct AsrStreamQuery {
@@ -77,6 +79,7 @@ pub(crate) async fn call_asr_text_endpoint(
     let url = format!("{server_url}/v1/audio/transcriptions");
     let client = reqwest::Client::new();
     let mut last_error = None::<String>;
+    let request_timeout = asr_text_request_timeout();
 
     for attempt in 0..2 {
         let part = reqwest::multipart::Part::bytes(wav_bytes.clone())
@@ -91,7 +94,7 @@ pub(crate) async fn call_asr_text_endpoint(
         match client
             .post(&url)
             .multipart(form)
-            .timeout(Duration::from_secs(300))
+            .timeout(request_timeout)
             .send()
             .await
         {
@@ -136,6 +139,7 @@ pub async fn call_asr_whole_file_endpoint(
         .map_err(|error| format!("read WAV file {}: {error}", wav_path.display()))?;
     let url = format!("{server_url}/v1/audio/transcriptions");
     let client = reqwest::Client::new();
+    let request_timeout = asr_server_request_timeout(media_duration_ms);
 
     // --- attempt 1: verbose_json (segments with timestamps) ---
     let mut last_error = None::<String>;
@@ -152,7 +156,7 @@ pub async fn call_asr_whole_file_endpoint(
         match client
             .post(&url)
             .multipart(form)
-            .timeout(Duration::from_secs(600))
+            .timeout(request_timeout)
             .send()
             .await
         {
@@ -195,10 +199,6 @@ pub async fn call_asr_whole_file_endpoint(
                 }
                 return Err(error);
             }
-            Err(error) if attempt == 0 => {
-                last_error = Some(error.to_string());
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
             Err(error) => return Err(error.to_string()),
         }
     }
@@ -217,7 +217,7 @@ pub async fn call_asr_whole_file_endpoint(
     let response = client
         .post(&url)
         .multipart(form)
-        .timeout(Duration::from_secs(600))
+        .timeout(request_timeout)
         .send()
         .await
         .map_err(|error| {
@@ -235,6 +235,32 @@ pub async fn call_asr_whole_file_endpoint(
         return Err(format!("ASR text status: {status}; body: {body}"));
     }
     Ok(whole_file_text_fallback(&body, media_duration_ms))
+}
+
+pub(crate) fn asr_server_request_timeout(media_duration_ms: Option<u64>) -> Duration {
+    if let Ok(value) = std::env::var(ASR_SERVER_REQUEST_TIMEOUT_SECS_ENV) {
+        if let Ok(secs) = value.parse::<u64>() {
+            if secs > 0 {
+                return Duration::from_secs(secs);
+            }
+        }
+    }
+    let Some(ms) = media_duration_ms else {
+        return Duration::from_secs(600);
+    };
+    let duration_secs = ms.div_ceil(1000).max(1);
+    Duration::from_secs((duration_secs * 4).clamp(60, 180))
+}
+
+pub(crate) fn asr_text_request_timeout() -> Duration {
+    if let Ok(value) = std::env::var(ASR_TEXT_REQUEST_TIMEOUT_SECS_ENV) {
+        if let Ok(secs) = value.parse::<u64>() {
+            if secs > 0 {
+                return Duration::from_secs(secs);
+            }
+        }
+    }
+    Duration::from_secs(45)
 }
 
 /// Build a single-segment transcription from plain text.

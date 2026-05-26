@@ -105,9 +105,20 @@ pub(super) async fn handle_agent(
             return method_not_allowed();
         }
         let active_sessions = service.agent_session_manager.list_sessions();
+        let running_turns = service.agent_session_manager.list_active_turn_statuses();
+        let active_info_by_key: std::collections::HashMap<String, bifrost_agent::SessionInfo> =
+            active_sessions
+                .iter()
+                .map(|session| (session.session_key.clone(), session.clone()))
+                .collect();
+        let running_keys: std::collections::HashSet<String> = running_turns
+            .iter()
+            .map(|status| status.session_key.clone())
+            .collect();
         let active_keys: std::collections::HashSet<String> = active_sessions
             .iter()
             .map(|s| s.session_key.clone())
+            .chain(running_turns.iter().map(|s| s.session_key.clone()))
             .collect();
 
         let data_dir = bifrost_agent::config::agent_home_dir();
@@ -134,12 +145,45 @@ pub(super) async fn handle_agent(
         // Build unified list
         let mut unified: Vec<serde_json::Value> = Vec::new();
 
-        // Add active sessions
+        // Add running turn sessions. These are not present in list_sessions()
+        // because the turn loop temporarily takes exclusive ownership.
+        for s in running_turns {
+            let info = active_info_by_key.get(&s.session_key);
+            let duration_secs = s.updated_at.saturating_sub(s.started_at);
+            unified.push(serde_json::json!({
+                "session_key": s.session_key,
+                "status": "active",
+                "running": true,
+                "state": s.state,
+                "source": info.map(|item| item.source.clone()).unwrap_or_else(|| "admin-api".to_string()),
+                "work_dir": s.work_dir.or_else(|| info.and_then(|item| item.work_dir.clone())),
+                "turns": s.message_count.max(info.map(|item| item.message_count).unwrap_or(0)),
+                "tokens": s.total_tokens_used,
+                "start_time": s.started_at,
+                "last_active_time": s.updated_at,
+                "duration_secs": duration_secs,
+                "compaction_count": s.compaction_count,
+                "estimated_tokens": s.estimated_context_tokens,
+                "agent_type": s.agent_type.or_else(|| info.and_then(|item| item.agent_type.clone())),
+                "runner_type": s.runner_type.or_else(|| info.and_then(|item| item.runner_type.clone())),
+                "runner_id": s.runner_id.or_else(|| info.and_then(|item| item.runner_id.clone())),
+                "external_conversation_id": s.external_conversation_id,
+                "external_thread_id": s.external_thread_id,
+                "title": info.and_then(|item| item.title.clone()),
+            }));
+        }
+
+        // Add idle in-memory sessions.
         for s in active_sessions {
+            if running_keys.contains(&s.session_key) {
+                continue;
+            }
             let duration_secs = s.last_active_at.saturating_sub(s.created_at);
             unified.push(serde_json::json!({
                 "session_key": s.session_key,
                 "status": "active",
+                "running": s.running,
+                "state": if s.running { "running" } else { "idle" },
                 "source": s.source,
                 "work_dir": s.work_dir,
                 "turns": s.message_count,
@@ -149,6 +193,11 @@ pub(super) async fn handle_agent(
                 "duration_secs": duration_secs,
                 "compaction_count": s.compaction_count,
                 "estimated_tokens": s.estimated_tokens,
+                "agent_type": s.agent_type,
+                "runner_type": s.runner_type,
+                "runner_id": s.runner_id,
+                "external_conversation_id": s.external_conversation_id,
+                "external_thread_id": s.external_thread_id,
                 "title": s.title,
             }));
         }
@@ -179,6 +228,8 @@ pub(super) async fn handle_agent(
             unified.push(serde_json::json!({
                 "session_key": session_key,
                 "status": "ended",
+                "running": false,
+                "state": "ended",
                 "source": summary.source,
                 "work_dir": summary.work_dir,
                 "turns": (summary.user_turns as usize) + (summary.assistant_turns as usize),
@@ -187,7 +238,60 @@ pub(super) async fn handle_agent(
                 "last_active_time": summary.end_time,
                 "duration_secs": summary.end_time.saturating_sub(summary.start_time),
                 "history_path": p.display().to_string(),
-                "title": summary.title,
+                "title": summary.title.or(summary.first_user_message),
+            }));
+        }
+
+        // Add external runner sessions (Codex / ChatGPT Web / other adapters)
+        // that do not have an Agent JSONL history file. These runs are tracked
+        // in the IM Gateway session-state store, so the Web UI can keep the
+        // thread visible after the stream finishes or the page refreshes.
+        for state in crate::im_gateway::session_state::list_session_states() {
+            if active_keys.contains(&state.session_key) {
+                continue;
+            }
+            if state.latest_run_id.is_none()
+                && state.last_user_message.is_none()
+                && state.last_response.is_none()
+            {
+                continue;
+            }
+            let last_active_time = state.updated_at / 1000;
+            let first_message_time = state
+                .messages
+                .iter()
+                .filter_map(|message| message.timestamp)
+                .min()
+                .unwrap_or(last_active_time);
+            let turn_count = if state.messages.is_empty() {
+                usize::from(state.last_user_message.is_some())
+                    + usize::from(state.last_response.is_some())
+            } else {
+                state.messages.len()
+            };
+            let failed = matches!(
+                state.status.as_deref(),
+                Some("failed" | "stopped" | "timed_out")
+            );
+            unified.push(serde_json::json!({
+                "session_key": state.session_key,
+                "status": "ended",
+                "running": false,
+                "state": if failed { "failed" } else { "ended" },
+                "source": "admin-api",
+                "work_dir": state.work_dir,
+                "turns": turn_count,
+                "tokens": serde_json::Value::Null,
+                "start_time": first_message_time,
+                "last_active_time": last_active_time,
+                "duration_secs": last_active_time.saturating_sub(first_message_time),
+                "agent_type": "external_cli",
+                "runner_type": state.adapter,
+                "runner_id": state.runner_id,
+                "external_conversation_id": state.external_conversation_id,
+                "external_thread_id": state.external_thread_id,
+                "external_run_id": state.latest_run_id,
+                "title": state.title.or(state.last_user_message),
             }));
         }
 
@@ -203,6 +307,7 @@ pub(super) async fn handle_agent(
                 .unwrap_or(0);
             t_b.cmp(&t_a)
         });
+        dedupe_unified_sessions_by_key(&mut unified);
 
         let active_count = active_keys.len();
         let history_count = unified.len() - active_count;
@@ -245,6 +350,7 @@ pub(super) async fn handle_agent(
                     "event_count": summary.event_count,
                     "work_dir": summary.work_dir,
                     "source": summary.source,
+                    "title": summary.title.or(summary.first_user_message),
                     "start_time": summary.start_time,
                     "end_time": summary.end_time,
                     "duration_secs": summary.end_time.saturating_sub(summary.start_time),
@@ -259,10 +365,17 @@ pub(super) async fn handle_agent(
         let file_path = urlencoding::decode(file_path)
             .unwrap_or_default()
             .to_string();
-        let path = std::path::Path::new(&file_path);
+        let data_dir = bifrost_agent::config::agent_home_dir();
+        let path = match bifrost_agent::persistence::validate_conversation_path(
+            &data_dir,
+            Path::new(&file_path),
+        ) {
+            Ok(path) => path,
+            Err(e) => return error_response(StatusCode::BAD_REQUEST, &e),
+        };
         if req.method() == Method::GET {
             // Return full events with all details (tool calls, results, metadata, etc.)
-            match bifrost_agent::persistence::load_conversation_events(path) {
+            match bifrost_agent::persistence::load_conversation_events(&path) {
                 Ok(events) => {
                     let event_values: Vec<serde_json::Value> = events
                         .iter()
@@ -288,7 +401,7 @@ pub(super) async fn handle_agent(
             }
         }
         if req.method() == Method::DELETE {
-            match std::fs::remove_file(path) {
+            match std::fs::remove_file(&path) {
                 Ok(()) => return json_response(&serde_json::json!({ "ok": true })),
                 Err(e) => {
                     return error_response(
@@ -313,13 +426,25 @@ pub(super) async fn handle_agent(
             {
                 Some(detail) => return json_response(&detail),
                 None => {
+                    if let Some(detail) = history_session_detail(&session_key) {
+                        return json_response(&detail);
+                    }
+                    if let Some(detail) = external_runner_session_detail(&session_key).await {
+                        return json_response(&detail);
+                    }
                     return error_response(StatusCode::NOT_FOUND, "session not found");
                 }
             }
         }
         if req.method() == Method::DELETE {
+            service.agent_session_manager.request_stop(&session_key);
             service.agent_session_manager.clear_session(&session_key);
-            return json_response(&serde_json::json!({ "ok": true }));
+            service.queue_manager.clear_session(&session_key);
+            clear_persisted_agent_session_state(&session_key, None, None);
+            return json_response(&serde_json::json!({
+                "ok": true,
+                "message": "session deleted"
+            }));
         }
         return method_not_allowed();
     }
@@ -340,6 +465,9 @@ pub(super) async fn handle_agent(
             system_prompt: Option<String>,
             #[serde(default)]
             work_dir: Option<String>,
+            /// Optional JSONL history file to restore before continuing.
+            #[serde(default)]
+            history_path: Option<String>,
             /// Inject a guide message into guide_channel before starting the turn.
             /// Used to test the scenario where a user sends a message while the
             /// agent is finishing its turn (guide_channel drain at turn end).
@@ -404,11 +532,44 @@ pub(super) async fn handle_agent(
                     "plan_steps": null
                 }));
             }
-            let detail = resolve_agent_api_status_detail(
-                &service.agent_session_manager,
-                &session_key,
-                body.work_dir,
-            );
+            let detail = if service
+                .agent_session_manager
+                .get_session_detail(&session_key)
+                .is_none()
+            {
+                let has_requested_work_dir = body
+                    .work_dir
+                    .as_deref()
+                    .is_some_and(|work_dir| !work_dir.trim().is_empty());
+                if let Some(mut session) = service
+                    .agent_session_manager
+                    .try_take_session_with_work_dir(&session_key, body.work_dir.clone())
+                {
+                    session.source = "api".to_string();
+                    session.mark_bifrost_agent_runtime();
+                    let restored = restore_session_from_persisted_history(
+                        &mut session,
+                        &session_key,
+                        crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+                        None,
+                        config.history.as_ref().and_then(|h| h.max_bytes),
+                    );
+                    if restored.is_some() || has_requested_work_dir {
+                        service.agent_session_manager.return_session(session);
+                    } else {
+                        service.agent_session_manager.release_active(&session_key);
+                    }
+                }
+                service
+                    .agent_session_manager
+                    .get_session_detail(&session_key)
+            } else {
+                resolve_agent_api_status_detail(
+                    &service.agent_session_manager,
+                    &session_key,
+                    body.work_dir,
+                )
+            };
             let response = build_agent_api_status_text(detail.as_ref(), &config);
             return json_response(&serde_json::json!({
                 "success": true,
@@ -419,7 +580,7 @@ pub(super) async fn handle_agent(
         }
 
         if body.message.trim() == "/stop" {
-            let stopped = service.agent_session_manager.request_stop(&session_key);
+            let stopped = request_agent_stop(&service.agent_session_manager, &session_key).await;
             return json_response(&serde_json::json!({
                 "success": true,
                 "response": if stopped {
@@ -461,6 +622,43 @@ pub(super) async fn handle_agent(
         };
         session.source = "api".to_string();
         session.mark_bifrost_agent_runtime();
+        let requested_history_path = body
+            .history_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if let Some(history_path) = requested_history_path {
+            if session.history.is_empty() {
+                if let Err(error) = restore_session_from_history_path(
+                    &mut session,
+                    history_path,
+                    &session_key,
+                    config.history.as_ref().and_then(|h| h.max_bytes),
+                ) {
+                    service.agent_session_manager.return_session(session);
+                    return error_response(StatusCode::BAD_REQUEST, &error);
+                }
+            }
+        } else {
+            restore_session_from_persisted_history(
+                &mut session,
+                &session_key,
+                crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+                None,
+                config.history.as_ref().and_then(|h| h.max_bytes),
+            );
+        }
+        service.agent_session_manager.update_active_session_preview(
+            &session_key,
+            session
+                .title
+                .clone()
+                .or_else(|| Some(body.message.trim().to_string())),
+            session.work_dir.clone(),
+            Some("api".to_string()),
+            Some(crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER.to_string()),
+            None,
+        );
         // If guide messages are provided, inject into the shared guide channel
         // to simulate messages arriving before the next guide checkpoint.
         let mut has_guide_messages = false;
@@ -536,6 +734,16 @@ pub(super) async fn handle_agent(
         } else {
             None
         };
+        remember_session_turn_started(
+            &session_key,
+            crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+            None,
+            &body.message,
+            recorder
+                .as_ref()
+                .map(|recorder| recorder.file_path().display().to_string()),
+            session.work_dir.clone(),
+        );
         let images: Vec<bifrost_agent::ChatImageInput> = body
             .images
             .iter()
@@ -574,8 +782,17 @@ pub(super) async fn handle_agent(
         // If the session was cleared (via /clear or /reset), also clear the
         // ChatGPT Web conversation mapping so the next runner message starts fresh.
         if session.memory_cleared {
-            crate::im_gateway::chatgpt_web::clear_session_conversation(&session_key).await;
+            clear_persisted_agent_session_state(
+                &session_key,
+                Some(crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER),
+                None,
+            );
         }
+        remember_session_state_from_agent_session(
+            &session,
+            crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+            None,
+        );
         service.agent_session_manager.return_session(session);
         match result {
             Ok(turn_result) => {
@@ -604,6 +821,68 @@ pub(super) async fn handle_agent(
     } else {
         error_response(StatusCode::NOT_FOUND, "Agent endpoint not found")
     }
+}
+
+fn restore_session_from_history_path(
+    session: &mut bifrost_agent::AgentSession,
+    history_path: &str,
+    expected_session_key: &str,
+    max_bytes: Option<usize>,
+) -> Result<(), String> {
+    let data_dir = bifrost_agent::config::agent_home_dir();
+    let path =
+        bifrost_agent::persistence::validate_conversation_path(&data_dir, Path::new(history_path))?;
+    let report = bifrost_agent::persistence::load_conversation_lossy(&path)?;
+    if let Some(restored_key) = report.session_key.as_deref() {
+        if restored_key != expected_session_key {
+            return Err("history session_key does not match the requested session_key".to_string());
+        }
+    }
+    if report.messages.is_empty() {
+        return Err("history file does not contain restorable chat messages".to_string());
+    }
+
+    let summary = bifrost_agent::persistence::scan_session_summary(&path);
+    session.history = report.messages;
+    session.history_version = session.history_version.saturating_add(1);
+    session.last_response_tokens = None;
+    session.last_response_history_len = None;
+    session.memory_cleared = false;
+    session.title = summary.title;
+    if session.work_dir.is_none() {
+        session.work_dir = summary.work_dir;
+    }
+    if !summary.source.is_empty() {
+        session.source = summary.source;
+    }
+    match bifrost_agent::persistence::load_session_runtime_state(&path) {
+        Ok(runtime_state) => {
+            session.current_goal = runtime_state.current_goal;
+            session.current_plan = runtime_state.current_plan;
+            session.total_tokens_used = runtime_state.total_tokens_used;
+            session.restore_token_snapshot(runtime_state.last_response_tokens);
+            session.compaction_count = runtime_state.compaction_count;
+            session.resolved_base_instructions = runtime_state.base_instructions;
+            bifrost_agent::tools::goal::goal_runtime_apply(
+                session,
+                bifrost_agent::tools::goal::GoalRuntimeEvent::ThreadResumed,
+            );
+        }
+        Err(error) => {
+            warn!(history_path = %path.display(), error = %error, "restored chat history without runtime state");
+            session.total_tokens_used = Some(summary.total_tokens);
+            session.compaction_count = summary.compaction_count;
+        }
+    }
+    if report.skipped_lines > 0 {
+        warn!(
+            history_path = %path.display(),
+            skipped_lines = report.skipped_lines,
+            "restored chat history with skipped JSONL lines"
+        );
+    }
+    session.recorder = Some(ConversationRecorder::from_existing_file(path, max_bytes));
+    Ok(())
 }
 
 pub(super) fn agent_config_response(
@@ -836,6 +1115,7 @@ pub(super) fn apply_agent_config_patch(
         .or_insert_with(|| bifrost_agent::ModelProviderConfig {
             name: Some(provider_id.clone()),
             base_url: None,
+            wire_api: Some(bifrost_agent::ModelWireApi::ChatCompletions),
             env_key: None,
             api_key: None,
             http_headers: None,
@@ -921,6 +1201,449 @@ pub(super) fn uses_api_key_header(provider_id: &str, patch: &serde_json::Value) 
         .get("by_azure")
         .and_then(|v| v.as_bool())
         .unwrap_or(matches!(provider_id, "aidp_crawl" | "azure"))
+}
+
+fn dedupe_unified_sessions_by_key(unified: &mut Vec<serde_json::Value>) {
+    let mut seen_session_keys = std::collections::HashSet::new();
+    unified.retain(|item| {
+        let Some(session_key) = item.get("session_key").and_then(|v| v.as_str()) else {
+            return true;
+        };
+        seen_session_keys.insert(session_key.to_string())
+    });
+}
+
+fn history_session_detail(session_key: &str) -> Option<bifrost_agent::SessionDetail> {
+    let data_dir = bifrost_agent::config::agent_home_dir();
+    let files = bifrost_agent::persistence::list_conversations(&data_dir, Some(session_key));
+    let path = files
+        .into_iter()
+        .max_by_key(|path| bifrost_agent::persistence::scan_session_summary(path).end_time)?;
+    let report = bifrost_agent::persistence::load_conversation_lossy(&path).ok()?;
+    let summary = bifrost_agent::persistence::scan_session_summary(&path);
+    let runtime_state = bifrost_agent::persistence::load_session_runtime_state(&path).ok();
+    let mut message_timestamps: std::collections::VecDeque<u64> =
+        bifrost_agent::persistence::load_conversation_events(&path)
+            .ok()
+            .map(|events| {
+                events
+                    .into_iter()
+                    .filter(|event| {
+                        event.event_type == bifrost_agent::persistence::event_types::USER_MESSAGE
+                            || event.event_type
+                                == bifrost_agent::persistence::event_types::ASSISTANT_MESSAGE
+                    })
+                    .map(|event| event.timestamp)
+                    .collect()
+            })
+            .unwrap_or_default();
+    let messages: Vec<bifrost_agent::session::SessionMessage> = report
+        .messages
+        .iter()
+        .map(|message| bifrost_agent::session::SessionMessage {
+            role: message.role.clone(),
+            content: message.content.clone().unwrap_or_default(),
+            timestamp: message_timestamps.pop_front(),
+            content_parts: message
+                .content_parts
+                .as_ref()
+                .and_then(|parts| serde_json::to_value(parts).ok()),
+            tool_calls: message.tool_calls.as_ref().map(|calls| {
+                calls
+                    .iter()
+                    .map(|call| serde_json::to_string(call).unwrap_or_else(|_| format!("{call:?}")))
+                    .collect()
+            }),
+        })
+        .collect();
+    let resolved_key = summary
+        .session_key
+        .clone()
+        .unwrap_or_else(|| session_key.to_string());
+    Some(bifrost_agent::SessionDetail {
+        session_key: resolved_key,
+        user_id: None,
+        message_count: messages.len(),
+        user_turn_count: summary.user_turns as usize,
+        created_at: summary.start_time,
+        last_active_at: summary.end_time,
+        compaction_count: runtime_state
+            .as_ref()
+            .map(|state| state.compaction_count)
+            .unwrap_or(summary.compaction_count),
+        total_tokens_used: runtime_state
+            .as_ref()
+            .and_then(|state| state.total_tokens_used)
+            .or_else(|| (summary.total_tokens > 0).then_some(summary.total_tokens)),
+        estimated_tokens: runtime_state
+            .as_ref()
+            .and_then(|state| state.last_response_tokens)
+            .and_then(|tokens| u32::try_from(tokens).ok())
+            .unwrap_or_default(),
+        history_version: 0,
+        work_dir: summary.work_dir,
+        source: summary.source,
+        agent_type: None,
+        runner_type: None,
+        runner_id: None,
+        external_conversation_id: None,
+        external_thread_id: None,
+        title: summary.title.or(summary.first_user_message),
+        messages,
+        goal_status: runtime_state
+            .as_ref()
+            .and_then(|state| state.current_goal.as_ref())
+            .map(|goal| format!("{:?}", goal.status)),
+        goal_objective: runtime_state
+            .and_then(|state| state.current_goal.map(|goal| goal.objective)),
+    })
+}
+
+async fn external_runner_session_detail(session_key: &str) -> Option<bifrost_agent::SessionDetail> {
+    let state =
+        crate::im_gateway::session_state::load_latest_session_state(session_key, None, None)?;
+    let run_detail = match state.latest_run_id.as_deref() {
+        Some(run_id) => {
+            match crate::im_gateway::external_cli::read_run_detail(
+                crate::im_gateway::external_cli::default_runs_root(),
+                run_id,
+            )
+            .await
+            {
+                Ok(detail) => Some(detail),
+                Err(error) => {
+                    warn!(
+                        session_key = %session_key,
+                        run_id = %run_id,
+                        error = %error,
+                        "failed to load external runner detail from latest run"
+                    );
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+    let mut messages = Vec::new();
+    if state.messages.is_empty() {
+        if let Some(content) = state
+            .last_user_message
+            .clone()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            messages.push(bifrost_agent::session::SessionMessage {
+                role: "user".to_string(),
+                content,
+                timestamp: Some(state.updated_at / 1000),
+                content_parts: None,
+                tool_calls: None,
+            });
+        }
+        let response = run_detail
+            .as_ref()
+            .map(|detail| detail.response.clone())
+            .or_else(|| state.last_response.clone())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        if let Some(content) = response {
+            messages.push(bifrost_agent::session::SessionMessage {
+                role: "assistant".to_string(),
+                content,
+                timestamp: Some(state.updated_at / 1000),
+                content_parts: None,
+                tool_calls: None,
+            });
+        }
+    } else {
+        messages.extend(state.messages.iter().map(|message| {
+            bifrost_agent::session::SessionMessage {
+                role: message.role.clone(),
+                content: message.content.clone(),
+                timestamp: message.timestamp,
+                content_parts: None,
+                tool_calls: None,
+            }
+        }));
+    }
+    let updated_at = state.updated_at / 1000;
+    let created_at = messages
+        .iter()
+        .filter_map(|message| message.timestamp)
+        .min()
+        .unwrap_or(updated_at);
+    let user_turn_count = messages
+        .iter()
+        .filter(|message| message.role == "user")
+        .count();
+    let is_builtin_agent = state.adapter == crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER;
+    Some(bifrost_agent::SessionDetail {
+        session_key: state.session_key,
+        user_id: None,
+        message_count: messages.len(),
+        user_turn_count,
+        created_at,
+        last_active_at: updated_at,
+        compaction_count: 0,
+        total_tokens_used: None,
+        estimated_tokens: 0,
+        history_version: 0,
+        work_dir: state.work_dir,
+        source: "admin-api".to_string(),
+        agent_type: Some(if is_builtin_agent {
+            "Bifrost Agent".to_string()
+        } else {
+            "external_cli".to_string()
+        }),
+        runner_type: Some(state.adapter),
+        runner_id: state.runner_id,
+        external_conversation_id: state.external_conversation_id,
+        external_thread_id: state.external_thread_id,
+        title: state.title.or(state.last_user_message),
+        messages,
+        goal_status: None,
+        goal_objective: None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static AGENT_API_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn sessions_all_dedupes_by_session_key_after_sorting() {
+        let mut sessions = vec![
+            serde_json::json!({
+                "session_key": "same-thread",
+                "status": "ended",
+                "last_active_time": 200,
+                "history_path": "/tmp/newer.jsonl",
+            }),
+            serde_json::json!({
+                "session_key": "same-thread",
+                "status": "ended",
+                "last_active_time": 100,
+                "history_path": "/tmp/older.jsonl",
+            }),
+            serde_json::json!({
+                "session_key": "other-thread",
+                "status": "ended",
+                "last_active_time": 50,
+            }),
+        ];
+
+        dedupe_unified_sessions_by_key(&mut sessions);
+
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0]["session_key"], "same-thread");
+        assert_eq!(sessions[0]["history_path"], "/tmp/newer.jsonl");
+        assert_eq!(sessions[1]["session_key"], "other-thread");
+    }
+
+    struct AgentApiEnvGuard {
+        _guard: crate::test_env::BifrostDataDirGuard,
+    }
+
+    impl AgentApiEnvGuard {
+        fn new(data_dir: &std::path::Path) -> Self {
+            Self {
+                _guard: crate::test_env::BifrostDataDirGuard::set(data_dir),
+            }
+        }
+    }
+
+    #[test]
+    fn external_runner_session_detail_uses_persisted_state() {
+        let _lock = AGENT_API_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = AgentApiEnvGuard::new(dir.path());
+
+        crate::im_gateway::session_state::remember_session_state(
+            crate::im_gateway::session_state::ImAgentSessionState {
+                session_key: "codex-ui-session".to_string(),
+                adapter: "codex".to_string(),
+                runner_id: Some("codex".to_string()),
+                title: Some("Codex task".to_string()),
+                last_user_message: Some("Codex task".to_string()),
+                last_response: Some("Codex answer".to_string()),
+                status: Some("succeeded".to_string()),
+                updated_at: 1_770_000_000_000,
+                ..crate::im_gateway::session_state::ImAgentSessionState::default()
+            },
+        )
+        .expect("remember state");
+
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let detail = runtime
+            .block_on(external_runner_session_detail("codex-ui-session"))
+            .expect("detail");
+        assert_eq!(detail.session_key, "codex-ui-session");
+        assert_eq!(detail.runner_type.as_deref(), Some("codex"));
+        assert_eq!(detail.runner_id.as_deref(), Some("codex"));
+        assert_eq!(detail.title.as_deref(), Some("Codex task"));
+        assert_eq!(detail.messages.len(), 2);
+        assert_eq!(detail.messages[0].role, "user");
+        assert_eq!(detail.messages[0].content, "Codex task");
+        assert_eq!(detail.messages[1].role, "assistant");
+        assert_eq!(detail.messages[1].content, "Codex answer");
+    }
+
+    #[test]
+    fn external_runner_session_detail_preserves_five_turns_in_one_thread() {
+        let _lock = AGENT_API_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = AgentApiEnvGuard::new(dir.path());
+
+        let mut messages = Vec::new();
+        for turn in 1..=5 {
+            messages.push(crate::im_gateway::session_state::ImAgentSessionMessage {
+                role: "user".to_string(),
+                content: format!("ChatGPT Web round {turn}"),
+                timestamp: Some(1_770_000_000 + turn * 2),
+            });
+            messages.push(crate::im_gateway::session_state::ImAgentSessionMessage {
+                role: "assistant".to_string(),
+                content: format!("ChatGPT Web answer {turn}"),
+                timestamp: Some(1_770_000_000 + turn * 2 + 1),
+            });
+        }
+
+        crate::im_gateway::session_state::remember_session_state(
+            crate::im_gateway::session_state::ImAgentSessionState {
+                session_key: "chatgpt-web-five-turns".to_string(),
+                adapter: "chatgpt_web".to_string(),
+                runner_id: Some("web".to_string()),
+                external_conversation_id: Some("conversation-123".to_string()),
+                title: Some("ChatGPT Web round 1".to_string()),
+                last_user_message: Some("ChatGPT Web round 5".to_string()),
+                last_response: Some("ChatGPT Web answer 5".to_string()),
+                status: Some("succeeded".to_string()),
+                messages,
+                updated_at: 1_770_000_020_000,
+                ..crate::im_gateway::session_state::ImAgentSessionState::default()
+            },
+        )
+        .expect("remember state");
+
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let detail = runtime
+            .block_on(external_runner_session_detail("chatgpt-web-five-turns"))
+            .expect("detail");
+
+        assert_eq!(detail.session_key, "chatgpt-web-five-turns");
+        assert_eq!(detail.runner_type.as_deref(), Some("chatgpt_web"));
+        assert_eq!(
+            detail.external_conversation_id.as_deref(),
+            Some("conversation-123")
+        );
+        assert_eq!(detail.message_count, 10);
+        assert_eq!(detail.user_turn_count, 5);
+        assert_eq!(detail.created_at, 1_770_000_002);
+        assert_eq!(detail.last_active_at, 1_770_000_020);
+        assert_eq!(detail.messages[0].content, "ChatGPT Web round 1");
+        assert_eq!(detail.messages[9].content, "ChatGPT Web answer 5");
+    }
+
+    #[test]
+    fn session_detail_prefers_latest_builtin_turn_state_over_stale_external_state() {
+        let _lock = AGENT_API_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = AgentApiEnvGuard::new(dir.path());
+
+        crate::im_gateway::session_state::remember_session_state(
+            crate::im_gateway::session_state::ImAgentSessionState {
+                session_key: "shared-thread".to_string(),
+                adapter: "chatgpt_web".to_string(),
+                runner_id: Some("web".to_string()),
+                title: Some("Old web title".to_string()),
+                last_user_message: Some("old web prompt".to_string()),
+                last_response: Some("old web answer".to_string()),
+                status: Some("succeeded".to_string()),
+                updated_at: 1_770_000_000_000,
+                ..crate::im_gateway::session_state::ImAgentSessionState::default()
+            },
+        )
+        .expect("remember stale state");
+        crate::im_gateway::session_state::remember_session_state(
+            crate::im_gateway::session_state::ImAgentSessionState {
+                session_key: "shared-thread".to_string(),
+                adapter: crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER.to_string(),
+                title: Some("Old web title".to_string()),
+                last_user_message: Some("new builtin prompt".to_string()),
+                status: Some("running".to_string()),
+                updated_at: 1_770_000_001_000,
+                ..crate::im_gateway::session_state::ImAgentSessionState::default()
+            },
+        )
+        .expect("remember latest state");
+
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let detail = runtime
+            .block_on(external_runner_session_detail("shared-thread"))
+            .expect("detail");
+        assert_eq!(detail.runner_type.as_deref(), Some("bifrost_agent"));
+        assert_eq!(detail.agent_type.as_deref(), Some("Bifrost Agent"));
+        assert_eq!(detail.messages.len(), 1);
+        assert_eq!(detail.messages[0].content, "new builtin prompt");
+    }
+
+    #[test]
+    fn history_session_detail_uses_server_side_title_fallback() {
+        let _lock = AGENT_API_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = AgentApiEnvGuard::new(dir.path());
+        let sessions_dir = dir.path().join("agent/sessions/2026/05/25");
+        std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        std::fs::write(
+            sessions_dir.join("session-history-title-1779690000.jsonl"),
+            r#"{"timestamp":1,"event_type":"session_start","session_key":"history-title","content":{"source":"admin-api","work_dir":"/tmp/work"}}"#
+                .to_string()
+                + "\n"
+                + r#"{"timestamp":2,"event_type":"user_message","session_key":"history-title","content":{"message":"first user title"}}"#
+                + "\n"
+                + r#"{"timestamp":3,"event_type":"assistant_message","session_key":"history-title","content":{"message":"answer"}}"#
+                + "\n",
+        )
+        .expect("write jsonl");
+
+        let detail = history_session_detail("history-title").expect("history detail");
+        assert_eq!(detail.title.as_deref(), Some("first user title"));
+        assert_eq!(detail.message_count, 2);
+        assert_eq!(detail.work_dir.as_deref(), Some("/tmp/work"));
+    }
+
+    #[test]
+    fn history_session_detail_prefers_explicit_title() {
+        let _lock = AGENT_API_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = AgentApiEnvGuard::new(dir.path());
+        let sessions_dir = dir.path().join("agent/sessions/2026/05/25");
+        std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        std::fs::write(
+            sessions_dir.join("session-history-explicit-title-1779690000.jsonl"),
+            r#"{"timestamp":1,"event_type":"user_message","session_key":"history-explicit-title","content":{"message":"first user title"}}"#
+                .to_string()
+                + "\n"
+                + r#"{"timestamp":2,"event_type":"title_updated","session_key":"history-explicit-title","content":{"title":"Bifrost Edge"}}"#
+                + "\n",
+        )
+        .expect("write jsonl");
+
+        let detail = history_session_detail("history-explicit-title").expect("history detail");
+        assert_eq!(detail.title.as_deref(), Some("Bifrost Edge"));
+    }
 }
 
 // ---------------------------------------------------------------------------

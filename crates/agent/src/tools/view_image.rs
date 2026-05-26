@@ -52,6 +52,7 @@ impl ToolHandler for ViewImageTool {
                 return ToolResult {
                     success: false,
                     output: format!("invalid arguments: {error}"),
+                    runtime_events: Vec::new(),
                 };
             }
         };
@@ -63,6 +64,7 @@ impl ToolHandler for ViewImageTool {
                     output: format!(
                         "view_image.detail only supports `original`; omit `detail` for default resized behavior, got `{detail}`"
                     ),
+                    runtime_events: Vec::new(),
                 };
             }
         }
@@ -74,6 +76,7 @@ impl ToolHandler for ViewImageTool {
                 return ToolResult {
                     success: false,
                     output: format!("failed to stat image: {error}"),
+                    runtime_events: Vec::new(),
                 };
             }
         };
@@ -81,6 +84,7 @@ impl ToolHandler for ViewImageTool {
             return ToolResult {
                 success: false,
                 output: format!("path is not a file: {}", path.display()),
+                runtime_events: Vec::new(),
             };
         }
         if metadata.len() > MAX_IMAGE_BYTES {
@@ -91,6 +95,7 @@ impl ToolHandler for ViewImageTool {
                     metadata.len(),
                     MAX_IMAGE_BYTES
                 ),
+                runtime_events: Vec::new(),
             };
         }
 
@@ -98,6 +103,7 @@ impl ToolHandler for ViewImageTool {
             return ToolResult {
                 success: false,
                 output: format!("unsupported image type: {}", path.display()),
+                runtime_events: Vec::new(),
             };
         };
 
@@ -107,6 +113,7 @@ impl ToolHandler for ViewImageTool {
                 return ToolResult {
                     success: false,
                     output: format!("failed to read image: {error}"),
+                    runtime_events: Vec::new(),
                 };
             }
         };
@@ -118,6 +125,7 @@ impl ToolHandler for ViewImageTool {
         ToolResult {
             success: true,
             output: output.to_string(),
+            runtime_events: Vec::new(),
         }
     }
 }

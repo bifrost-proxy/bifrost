@@ -1,5 +1,5 @@
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -16,10 +16,12 @@ use bifrost_admin::asr_streaming::{
 use bifrost_admin::resource_download::{download_with_resume, DownloadProgress, DownloadRequest};
 use bifrost_core::{direct_reqwest_client_builder, BifrostError, Result};
 use chrono::{Local, TimeZone};
+use dialoguer::Select;
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::mpsc;
 
+use super::asr_tui::{handle_asr_task_tui, AsrTaskTuiOptions};
 use crate::cli::{AiAsrCommands, AiAsrTaskCommands, AiAsrTaskDailyCommands, AiCommands};
 
 const SERVICE_START_TIMEOUT: Duration = Duration::from_secs(180);
@@ -75,13 +77,13 @@ fn handle_asr_command(action: AiAsrCommands, admin_host: &str, admin_port: u16) 
 }
 
 #[derive(Debug)]
-struct AsrTaskClient {
-    base_url: String,
-    agent: ureq::Agent,
+pub(crate) struct AsrTaskClient {
+    pub(crate) base_url: String,
+    pub(crate) agent: ureq::Agent,
 }
 
 impl AsrTaskClient {
-    fn new(host: &str, port: u16) -> Self {
+    pub(crate) fn new(host: &str, port: u16) -> Self {
         Self {
             base_url: format!("http://{}:{}/_bifrost/api", host, port),
             agent: bifrost_core::direct_ureq_agent_builder()
@@ -90,7 +92,7 @@ impl AsrTaskClient {
         }
     }
 
-    fn get_json(&self, path: &str) -> Result<Value> {
+    pub(crate) fn get_json(&self, path: &str) -> Result<Value> {
         let url = format!("{}{}", self.base_url, path);
         let response = self
             .agent
@@ -100,7 +102,7 @@ impl AsrTaskClient {
         read_json_response("GET", &url, response)
     }
 
-    fn post_json(&self, path: &str) -> Result<Value> {
+    pub(crate) fn post_json(&self, path: &str) -> Result<Value> {
         let url = format!("{}{}", self.base_url, path);
         let response = self
             .agent
@@ -108,6 +110,17 @@ impl AsrTaskClient {
             .call()
             .map_err(|error| asr_task_api_error("POST", &url, error))?;
         read_json_response("POST", &url, response)
+    }
+
+    pub(crate) fn put_json_body(&self, path: &str, body: &Value) -> Result<Value> {
+        let url = format!("{}{}", self.base_url, path);
+        let response = self
+            .agent
+            .put(&url)
+            .set("content-type", "application/json")
+            .send_string(&body.to_string())
+            .map_err(|error| asr_task_api_error("PUT", &url, error))?;
+        read_json_response("PUT", &url, response)
     }
 }
 
@@ -195,6 +208,46 @@ struct AsrTask {
     files: Vec<AsrTaskFile>,
     #[serde(default)]
     daily_documents: Vec<AsrDailyDocument>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct AsrTaskWatchList {
+    #[serde(default)]
+    tasks: Vec<AsrTaskWatchChoice>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct AsrTaskWatchChoice {
+    #[serde(default)]
+    task: AsrTaskWatchChoiceTask,
+    #[serde(default)]
+    progress: AsrTaskWatchChoiceProgress,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct AsrTaskWatchChoiceTask {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    paused: bool,
+    #[serde(default)]
+    running: bool,
+    #[serde(default)]
+    next_run_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct AsrTaskWatchChoiceProgress {
+    #[serde(default)]
+    discovered: usize,
+    #[serde(default)]
+    processed: usize,
+    #[serde(default)]
+    pending: usize,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -288,6 +341,32 @@ fn handle_asr_task_command(client: &AsrTaskClient, action: AiAsrTaskCommands) ->
             wait,
             json,
         } => run_task(client, &task_id, wait, json),
+        AiAsrTaskCommands::Watch {
+            task,
+            refresh_ms,
+            no_interactive_select,
+            all,
+            json_snapshot,
+            read_only,
+        }
+        | AiAsrTaskCommands::Tui {
+            task,
+            refresh_ms,
+            no_interactive_select,
+            all,
+            json_snapshot,
+            read_only,
+        } => handle_asr_task_tui(
+            client,
+            AsrTaskTuiOptions {
+                task,
+                refresh_ms,
+                no_interactive_select,
+                all,
+                json_snapshot,
+                read_only,
+            },
+        ),
         AiAsrTaskCommands::Daily { action } => handle_asr_task_daily_command(client, action),
     }
 }
@@ -297,7 +376,8 @@ fn handle_asr_task_daily_command(
     action: AiAsrTaskDailyCommands,
 ) -> Result<()> {
     match action {
-        AiAsrTaskDailyCommands::List { task_id, json } => {
+        AiAsrTaskDailyCommands::List { task, json } => {
+            let task_id = select_asr_task_id(client, task.as_deref())?;
             let value = client.get_json(&format!("/asr/tasks/{}/daily", url_encode(&task_id)))?;
             if json {
                 print_json(&value)?;
@@ -315,11 +395,14 @@ fn handle_asr_task_daily_command(
             Ok(())
         }
         AiAsrTaskDailyCommands::Show {
-            task_id,
-            date,
+            first,
+            second,
+            task,
             output,
             json,
         } => {
+            let (task_query, date) = resolve_daily_show_args(first, second, task)?;
+            let task_id = select_asr_task_id(client, task_query.as_deref())?;
             let value = client.get_json(&format!(
                 "/asr/tasks/{}/daily/{}",
                 url_encode(&task_id),
@@ -347,6 +430,194 @@ fn handle_asr_task_daily_command(
             }
             Ok(())
         }
+        AiAsrTaskDailyCommands::SetSyncDir {
+            task,
+            dir,
+            clear,
+            json,
+        } => {
+            if clear && dir.is_some() {
+                return Err(BifrostError::Config(
+                    "Use either --dir or --clear, not both".to_string(),
+                ));
+            }
+            if !clear && dir.is_none() {
+                return Err(BifrostError::Config(
+                    "daily set-sync-dir requires --dir <PATH> or --clear".to_string(),
+                ));
+            }
+            let task_id = select_asr_task_id(client, task.as_deref())?;
+            let sync_dir = if clear {
+                String::new()
+            } else {
+                dir.unwrap().to_string_lossy().to_string()
+            };
+            let value = client.put_json_body(
+                &format!("/asr/tasks/{}/daily-agent", url_encode(&task_id)),
+                &serde_json::json!({ "report_sync_dir": sync_dir }),
+            )?;
+            if json {
+                print_json(&value)?;
+            } else if clear {
+                println!("Cleared Daily Agent report sync directory for task {task_id}");
+            } else {
+                let configured = value
+                    .pointer("/config/report_sync_dir")
+                    .and_then(Value::as_str)
+                    .unwrap_or(sync_dir.as_str());
+                println!("Daily Agent report sync directory for task {task_id}: {configured}");
+            }
+            Ok(())
+        }
+        AiAsrTaskDailyCommands::Sync { task, dir, json } => {
+            let task_id = select_asr_task_id(client, task.as_deref())?;
+            if let Some(dir) = dir {
+                let sync_dir = dir.to_string_lossy().to_string();
+                let _ = client.put_json_body(
+                    &format!("/asr/tasks/{}/daily-agent", url_encode(&task_id)),
+                    &serde_json::json!({ "report_sync_dir": sync_dir }),
+                )?;
+            }
+            let value = client.post_json(&format!(
+                "/asr/tasks/{}/daily-agent/sync",
+                url_encode(&task_id)
+            ))?;
+            if json {
+                print_json(&value)?;
+            } else {
+                print_daily_agent_sync_result(&task_id, &value);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn print_daily_agent_sync_result(task_id: &str, value: &Value) {
+    let sync = value.get("sync").unwrap_or(value);
+    let target_dir = sync
+        .get("target_dir")
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    let total = sync.get("total_files").and_then(Value::as_u64).unwrap_or(0);
+    let copied = sync
+        .get("copied_files")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let skipped = sync
+        .get("skipped_files")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let failed = sync
+        .get("failed_files")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    println!("Daily Agent report sync for task {task_id}");
+    println!("  Target:  {target_dir}");
+    println!("  Total:   {total}");
+    println!("  Copied:  {copied}");
+    println!("  Skipped: {skipped}");
+    println!("  Failed:  {failed}");
+}
+
+fn select_asr_task_id(client: &AsrTaskClient, query: Option<&str>) -> Result<String> {
+    let value = client.get_json("/asr/tasks/-/watch")?;
+    let list: AsrTaskWatchList = serde_json::from_value(value)
+        .map_err(|error| BifrostError::Config(format!("parse ASR task list: {error}")))?;
+    if let Some(query) = query {
+        return resolve_task_choice_query(&list.tasks, query).map(|task| task.task.id.clone());
+    }
+    match list.tasks.len() {
+        0 => Err(BifrostError::Config("No ASR directory tasks.".to_string())),
+        1 => Ok(list.tasks[0].task.id.clone()),
+        _ if !io::stdin().is_terminal() => Err(BifrostError::Config(
+            "Multiple ASR directory tasks exist; pass a task id, unique id prefix, or unique name"
+                .to_string(),
+        )),
+        _ => {
+            let labels = list.tasks.iter().map(task_choice_label).collect::<Vec<_>>();
+            let index = Select::new()
+                .with_prompt("Select ASR task")
+                .items(&labels)
+                .default(0)
+                .interact()
+                .map_err(|error| BifrostError::Io(io::Error::other(error)))?;
+            Ok(list.tasks[index].task.id.clone())
+        }
+    }
+}
+
+fn resolve_task_choice_query<'a>(
+    tasks: &'a [AsrTaskWatchChoice],
+    query: &str,
+) -> Result<&'a AsrTaskWatchChoice> {
+    if let Some(task) = tasks.iter().find(|task| task.task.id == query) {
+        return Ok(task);
+    }
+    let prefix_matches = tasks
+        .iter()
+        .filter(|task| task.task.id.starts_with(query))
+        .collect::<Vec<_>>();
+    if prefix_matches.len() == 1 {
+        return Ok(prefix_matches[0]);
+    }
+    if prefix_matches.len() > 1 {
+        return Err(BifrostError::Config(format!(
+            "ambiguous ASR task id prefix '{query}'; use the full task id"
+        )));
+    }
+    let name_matches = tasks
+        .iter()
+        .filter(|task| task.task.name == query)
+        .collect::<Vec<_>>();
+    if name_matches.len() == 1 {
+        return Ok(name_matches[0]);
+    }
+    if name_matches.len() > 1 {
+        return Err(BifrostError::Config(format!(
+            "ambiguous ASR task name '{query}'; use a task id"
+        )));
+    }
+    Err(BifrostError::Config(format!(
+        "ASR task '{query}' not found"
+    )))
+}
+
+fn task_choice_label(choice: &AsrTaskWatchChoice) -> String {
+    format!(
+        "{:<24} {:<10} {:>3}/{:<3} pending {:<3} next {}",
+        truncate(&choice.task.name, 24),
+        task_choice_state(&choice.task),
+        choice.progress.processed,
+        choice.progress.discovered,
+        choice.progress.pending,
+        format_optional_ms(choice.task.next_run_at_ms)
+    )
+}
+
+fn task_choice_state(task: &AsrTaskWatchChoiceTask) -> &'static str {
+    if task.running {
+        "running"
+    } else if task.paused {
+        "paused"
+    } else if !task.enabled {
+        "disabled"
+    } else {
+        "enabled"
+    }
+}
+
+fn resolve_daily_show_args(
+    first: String,
+    second: Option<String>,
+    task: Option<String>,
+) -> Result<(Option<String>, String)> {
+    match (second, task) {
+        (Some(_date), Some(_)) => Err(BifrostError::Config(
+            "Use either `daily show <task> <date>` or `daily show <date> --task <task>`, not both"
+                .to_string(),
+        )),
+        (Some(date), None) => Ok((Some(first), date)),
+        (None, task) => Ok((task, first)),
     }
 }
 
@@ -599,6 +870,81 @@ fn ensure_supported_platform() -> Result<()> {
             std::env::consts::OS,
             std::env::consts::ARCH
         )))
+    }
+}
+
+#[cfg(test)]
+mod daily_command_tests {
+    use super::*;
+
+    fn choice(id: &str, name: &str) -> AsrTaskWatchChoice {
+        AsrTaskWatchChoice {
+            task: AsrTaskWatchChoiceTask {
+                id: id.to_string(),
+                name: name.to_string(),
+                enabled: true,
+                ..AsrTaskWatchChoiceTask::default()
+            },
+            ..AsrTaskWatchChoice::default()
+        }
+    }
+
+    #[test]
+    fn resolve_task_choice_query_accepts_unique_prefix_and_name() {
+        let tasks = vec![choice("abcdef123", "Alpha"), choice("fedcba987", "Beta")];
+
+        assert_eq!(
+            resolve_task_choice_query(&tasks, "abcdef").unwrap().task.id,
+            "abcdef123"
+        );
+        assert_eq!(
+            resolve_task_choice_query(&tasks, "Beta").unwrap().task.id,
+            "fedcba987"
+        );
+    }
+
+    #[test]
+    fn resolve_task_choice_query_rejects_ambiguous_prefix_or_name() {
+        let tasks = vec![choice("abcdef123", "Same"), choice("abc999999", "Same")];
+
+        assert!(resolve_task_choice_query(&tasks, "abc")
+            .unwrap_err()
+            .to_string()
+            .contains("ambiguous ASR task id prefix"));
+        assert!(resolve_task_choice_query(&tasks, "Same")
+            .unwrap_err()
+            .to_string()
+            .contains("ambiguous ASR task name"));
+    }
+
+    #[test]
+    fn resolve_daily_show_args_supports_legacy_and_task_option_forms() {
+        assert_eq!(
+            resolve_daily_show_args("2026-05-24".to_string(), None, None).unwrap(),
+            (None, "2026-05-24".to_string())
+        );
+        assert_eq!(
+            resolve_daily_show_args("2026-05-24".to_string(), None, Some("Alpha".to_string()))
+                .unwrap(),
+            (Some("Alpha".to_string()), "2026-05-24".to_string())
+        );
+        assert_eq!(
+            resolve_daily_show_args("Alpha".to_string(), Some("2026-05-24".to_string()), None)
+                .unwrap(),
+            (Some("Alpha".to_string()), "2026-05-24".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_daily_show_args_rejects_mixed_legacy_and_task_option() {
+        assert!(resolve_daily_show_args(
+            "Alpha".to_string(),
+            Some("2026-05-24".to_string()),
+            Some("Beta".to_string())
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("Use either"));
     }
 }
 

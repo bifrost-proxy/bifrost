@@ -28,7 +28,7 @@ fn composer_text_injection_uses_paste_only_above_threshold() {
     );
     assert_eq!(
         composer_text_injection_mode(&"a".repeat(121)),
-        ComposerTextInjectionMode::Paste
+        ComposerTextInjectionMode::NativeClipboardPaste
     );
 }
 
@@ -40,7 +40,45 @@ fn composer_text_injection_threshold_counts_characters() {
     );
     assert_eq!(
         composer_text_injection_mode(&"你".repeat(121)),
-        ComposerTextInjectionMode::Paste
+        ComposerTextInjectionMode::NativeClipboardPaste
+    );
+}
+
+#[test]
+fn composer_text_injection_large_text_uses_native_clipboard_paste() {
+    assert_eq!(
+        composer_text_injection_mode(&"daily report\n".repeat(40_000)),
+        ComposerTextInjectionMode::NativeClipboardPaste
+    );
+}
+
+#[test]
+fn native_clipboard_paste_uses_platform_modifier() {
+    let expected = if cfg!(target_os = "macos") { 4 } else { 2 };
+    assert_eq!(paste_modifier(), expected);
+}
+
+#[test]
+fn native_clipboard_paste_uses_browser_clipboard_api_not_system_clipboard() {
+    let source = include_str!("send.rs");
+    assert!(source.contains("Browser.grantPermissions"));
+    assert!(source.contains("navigator.clipboard.writeText"));
+    assert!(!source.contains("SystemClipboardGuard"));
+    assert!(!source.contains("pbcopy"));
+}
+
+#[test]
+fn native_clipboard_paste_scales_send_button_waits_for_large_prompts() {
+    assert_eq!(
+        send_button_ready_max_wait(&"a".repeat(120)),
+        Duration::from_secs(10)
+    );
+
+    let large_prompt = "daily report\n".repeat(40_000);
+    assert!(send_button_ready_max_wait(&large_prompt) > Duration::from_secs(30));
+    assert_eq!(
+        send_button_ready_retry_max_wait(&large_prompt),
+        Duration::from_secs(60)
     );
 }
 
@@ -734,6 +772,144 @@ async fn auth_status_accepts_browser_account_check_when_native_probe_is_forbidde
         .as_deref()
         .unwrap_or_default()
         .contains("using captured browser accounts/check proof"));
+}
+
+#[tokio::test]
+async fn auth_status_rejects_expired_authorization_identity() {
+    let mut headers = BTreeMap::new();
+    headers.insert("authorization".to_string(), "Bearer captured".to_string());
+    let state = AuthState {
+        captured_at: iso_now(),
+        base_url: DEFAULT_BASE_URL.to_string(),
+        user_agent: "Mozilla/5.0".to_string(),
+        captured_auth_headers: headers,
+        captured_auth_identity: AuthorizationIdentity {
+            has_bearer_token: true,
+            has_profile_email: true,
+            profile_email_verified: Some(true),
+            has_user_identity: true,
+            has_account_identity: true,
+            complete: true,
+            expires_at: Some((chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339()),
+        },
+        captured_account_check: Some(BrowserAccountCheckProof {
+            captured_at: iso_now(),
+            status: 200,
+            logged_in: true,
+        }),
+        cookies: Vec::new(),
+    };
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = RuntimeConfig {
+        browser: BrowserConfig::default(),
+        chatgpt: ChatGptConfig {
+            base_url: "http://[::1".to_string(),
+            poll_interval_ms: 1,
+            timeout_secs: 1,
+            session_consistency: "strong".to_string(),
+            rate_limit_retry_secs: 180,
+            rate_limit_max_retries: 5,
+        },
+        profile_dir: temp.path().join("profile"),
+        state_path: temp.path().join("auth_state.json"),
+        sessions_path: temp.path().join("sessions.json"),
+        attachments_dir: temp.path().join("attachments"),
+    };
+
+    let status = auth_status_from_state(&config, &state)
+        .await
+        .expect("auth status");
+
+    assert!(!status.logged_in);
+    assert!(!status.identity_complete);
+    assert_eq!(status.state, "auth_required");
+    assert!(status
+        .message
+        .as_deref()
+        .unwrap_or_default()
+        .contains("authorization token expired"));
+}
+
+#[tokio::test]
+async fn auth_status_rejects_stale_browser_account_check_when_native_forbidden() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock accounts/check");
+    let port = listener.local_addr().expect("local addr").port();
+    tokio::spawn(async move {
+        if let Ok((mut stream, _)) = listener.accept().await {
+            let mut buf = [0_u8; 1024];
+            let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await;
+            let response = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n";
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, response).await;
+        }
+    });
+
+    let mut headers = BTreeMap::new();
+    headers.insert("authorization".to_string(), "Bearer captured".to_string());
+    let stale_captured_at = (chrono::Utc::now() - chrono::Duration::minutes(30)).to_rfc3339();
+    let state = AuthState {
+        captured_at: iso_now(),
+        base_url: DEFAULT_BASE_URL.to_string(),
+        user_agent: "Mozilla/5.0".to_string(),
+        captured_auth_headers: headers,
+        captured_auth_identity: AuthorizationIdentity {
+            has_bearer_token: true,
+            has_profile_email: true,
+            profile_email_verified: Some(true),
+            has_user_identity: true,
+            has_account_identity: true,
+            complete: true,
+            expires_at: None,
+        },
+        captured_account_check: Some(BrowserAccountCheckProof {
+            captured_at: stale_captured_at,
+            status: 200,
+            logged_in: true,
+        }),
+        cookies: Vec::new(),
+    };
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = RuntimeConfig {
+        browser: BrowserConfig::default(),
+        chatgpt: ChatGptConfig {
+            base_url: format!("http://127.0.0.1:{port}"),
+            poll_interval_ms: 1,
+            timeout_secs: 1,
+            session_consistency: "strong".to_string(),
+            rate_limit_retry_secs: 180,
+            rate_limit_max_retries: 5,
+        },
+        profile_dir: temp.path().join("profile"),
+        state_path: temp.path().join("auth_state.json"),
+        sessions_path: temp.path().join("sessions.json"),
+        attachments_dir: temp.path().join("attachments"),
+    };
+
+    let status = auth_status_from_state(&config, &state)
+        .await
+        .expect("auth status");
+
+    assert!(!status.logged_in);
+    assert!(!status.account_check_ok);
+    assert_eq!(status.account_status, Some(403));
+    assert_eq!(status.state, "auth_required");
+    assert!(status
+        .message
+        .as_deref()
+        .unwrap_or_default()
+        .contains("captured browser accounts/check proof is stale"));
+}
+
+#[test]
+fn browser_account_check_proof_rejects_far_future_timestamp() {
+    let proof = BrowserAccountCheckProof {
+        captured_at: (chrono::Utc::now() + chrono::Duration::minutes(30)).to_rfc3339(),
+        status: 200,
+        logged_in: true,
+    };
+
+    assert!(!browser_account_check_proof_is_fresh(&proof));
 }
 
 #[test]

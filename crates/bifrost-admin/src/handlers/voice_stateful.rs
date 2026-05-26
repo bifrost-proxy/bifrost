@@ -18,7 +18,7 @@ use tracing::warn;
 
 pub(crate) const STATEFUL_PROVIDER_ID: &str = "qwen3_stateful_streaming";
 #[cfg(target_os = "macos")]
-const DEFAULT_WORKER_STARTUP_TIMEOUT_MS: u64 = 15_000;
+const DEFAULT_WORKER_STARTUP_TIMEOUT_MS: u64 = 60_000;
 #[cfg(target_os = "macos")]
 const DEFAULT_WORKER_REQUEST_TIMEOUT_MS: u64 = 30_000;
 const WORKER_EXIT_TIMEOUT_MS: u64 = 2_000;
@@ -63,10 +63,19 @@ impl StatefulVoiceSession {
         }
     }
 
-    pub(crate) async fn finish(&mut self) -> Result<StatefulVoiceResult, String> {
+    /// Reset streaming state without killing the worker.
+    pub(crate) async fn reset(&mut self) -> Result<StatefulVoiceResult, String> {
         match self {
-            Self::Process(session) => session.finish().await,
+            Self::Process(session) => session.reset().await,
             Self::Fake(session) => session.finish().await,
+        }
+    }
+
+    /// Kill the worker process and wait for it to fully exit, releasing memory.
+    pub(crate) async fn shutdown(self) {
+        match self {
+            Self::Process(session) => session.shutdown().await,
+            Self::Fake(_) => {}
         }
     }
 }
@@ -145,31 +154,27 @@ impl ProcessStatefulVoiceSession {
         }
     }
 
-    async fn finish(&mut self) -> Result<StatefulVoiceResult, String> {
-        self.write_worker_request(&WorkerRequest::Finish).await?;
+    /// Reset streaming state without killing the worker process.
+    /// Used for silence commits to finalize the current utterance while keeping
+    /// the worker alive for the next utterance.
+    async fn reset(&mut self) -> Result<StatefulVoiceResult, String> {
+        self.write_worker_request(&WorkerRequest::Reset).await?;
         match self
-            .read_worker_output_with_timeout("finish response", self.request_timeout)
+            .read_worker_output_with_timeout("reset response", self.request_timeout)
             .await?
         {
             WorkerOutput::Final {
                 text,
                 language,
                 inference_ms,
-            } => {
-                let _ = tokio::time::timeout(
-                    Duration::from_millis(WORKER_EXIT_TIMEOUT_MS),
-                    self.child.wait(),
-                )
-                .await;
-                Ok(StatefulVoiceResult {
-                    text,
-                    language,
-                    inference_ms: u128::from(inference_ms),
-                })
-            }
+            } => Ok(StatefulVoiceResult {
+                text,
+                language,
+                inference_ms: u128::from(inference_ms),
+            }),
             WorkerOutput::Error { message } => Err(message),
             other => Err(format!(
-                "unexpected stateful ASR worker finish response: {other:?}"
+                "unexpected stateful ASR worker reset response: {other:?}"
             )),
         }
     }
@@ -245,6 +250,19 @@ impl ProcessStatefulVoiceSession {
     }
 }
 
+impl ProcessStatefulVoiceSession {
+    /// Gracefully kill the worker process and wait for it to fully exit,
+    /// ensuring its ~2GB memory is released before a new worker is spawned.
+    pub(crate) async fn shutdown(mut self) {
+        let _ = self.child.start_kill();
+        let _ = tokio::time::timeout(
+            Duration::from_millis(WORKER_EXIT_TIMEOUT_MS),
+            self.child.wait(),
+        )
+        .await;
+    }
+}
+
 impl Drop for ProcessStatefulVoiceSession {
     fn drop(&mut self) {
         let _ = self.child.start_kill();
@@ -255,7 +273,7 @@ impl Drop for ProcessStatefulVoiceSession {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WorkerRequest {
     Audio { data: String },
-    Finish,
+    Reset,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -389,8 +407,15 @@ mod platform {
     #[serde(tag = "type", rename_all = "snake_case")]
     enum WorkerInput {
         Audio { data: String },
+        Reset,
         Finish,
     }
+
+    /// Maximum audio duration (in samples) before automatically resetting the streaming
+    /// state. Longer sessions cause decoder slowdown as the KV cache and audio_accum grow
+    /// without bound. After this threshold, we finalize the current segment and reinit
+    /// streaming with the last transcript as `initial_text` for context continuity.
+    const MAX_SEGMENT_SAMPLES: usize = 16_000 * 30; // 30 seconds
 
     pub fn run_stateful_worker_stdio(config: StatefulVoiceConfig) -> Result<(), String> {
         validate_model_assets(&config.model_dir)?;
@@ -398,13 +423,17 @@ mod platform {
         let engine =
             AsrInference::load(&config.model_dir, device).map_err(|error| error.to_string())?;
         warm_stateful_engine(&engine);
+        let chunk_size_sec = config.chunk_size_sec.clamp(0.5, 4.0);
+        let language = config.language;
         let mut options = StreamingOptions::default()
-            .with_chunk_size_sec(config.chunk_size_sec.clamp(0.5, 4.0))
-            .with_language(config.language);
+            .with_chunk_size_sec(chunk_size_sec)
+            .with_language(&language);
         if let Some(initial_text) = config.initial_text {
             options = options.with_initial_text(initial_text);
         }
         let mut state = engine.init_streaming(options);
+        let mut accumulated_samples: usize = 0;
+        let mut last_text = String::new();
         write_worker_output(&WorkerOutput::Ready)?;
         let stdin = io::stdin();
         for line in stdin.lock().lines() {
@@ -433,18 +462,61 @@ mod platform {
                         }
                     };
                     let samples = pcm16le_to_f32(&pcm)?;
+                    accumulated_samples += samples.len();
                     let inference_started = Instant::now();
                     let result = engine
                         .feed_audio(&mut state, &samples)
                         .map_err(|error| error.to_string())?;
                     match result {
-                        Some(result) => write_worker_output(&WorkerOutput::Partial {
-                            text: result.text,
-                            language: result.language,
-                            inference_ms: elapsed_millis_u64(inference_started),
-                        })?,
+                        Some(result) => {
+                            last_text.clone_from(&result.text);
+                            write_worker_output(&WorkerOutput::Partial {
+                                text: result.text,
+                                language: result.language,
+                                inference_ms: elapsed_millis_u64(inference_started),
+                            })?;
+                        }
                         None => write_worker_output(&WorkerOutput::Empty)?,
                     }
+
+                    // Auto-reset state to prevent decoder slowdown on long sessions
+                    if accumulated_samples >= MAX_SEGMENT_SAMPLES {
+                        // Finalize current segment silently (we already emitted partials)
+                        let _ = engine.finish_streaming(&mut state);
+                        // Reinit with last transcript as context for continuity
+                        let mut new_options = StreamingOptions::default()
+                            .with_chunk_size_sec(chunk_size_sec)
+                            .with_language(&language);
+                        if !last_text.is_empty() {
+                            new_options = new_options.with_initial_text(&last_text);
+                        }
+                        state = engine.init_streaming(new_options);
+                        accumulated_samples = 0;
+                    }
+                }
+                WorkerInput::Reset => {
+                    // Reset streaming state without exiting — used for silence commits
+                    let inference_started = Instant::now();
+                    let result = engine
+                        .finish_streaming(&mut state)
+                        .map_err(|error| error.to_string())?;
+                    write_worker_output(&WorkerOutput::Final {
+                        text: result.text.clone(),
+                        language: result.language.clone(),
+                        inference_ms: elapsed_millis_u64(inference_started),
+                    })?;
+                    // Reinit state for next utterance
+                    let mut new_options = StreamingOptions::default()
+                        .with_chunk_size_sec(chunk_size_sec)
+                        .with_language(&language);
+                    if !result.text.is_empty() {
+                        last_text = result.text;
+                    }
+                    if !last_text.is_empty() {
+                        new_options = new_options.with_initial_text(&last_text);
+                    }
+                    state = engine.init_streaming(new_options);
+                    accumulated_samples = 0;
                 }
                 WorkerInput::Finish => {
                     let inference_started = Instant::now();
@@ -564,14 +636,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hung_worker_finish_times_out_and_kills_child() {
+    async fn hung_worker_reset_times_out_and_kills_child() {
         let mut session = hung_process_session("while IFS= read -r _line; do sleep 60; done").await;
-        let err = session.finish().await.unwrap_err();
-        assert!(err.contains("finish response timed out"), "{err}");
+        let err = session.reset().await.unwrap_err();
+        assert!(err.contains("reset response timed out"), "{err}");
         assert!(err.contains("worker unloaded"), "{err}");
         tokio::time::timeout(Duration::from_secs(2), session.child.wait())
             .await
-            .expect("hung worker should be killed after finish timeout")
+            .expect("hung worker should be killed after reset timeout")
             .expect("wait on killed worker");
     }
 

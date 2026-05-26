@@ -141,3 +141,35 @@ fn codex_runner_metadata_does_not_override_explicit_thread() {
         Some("explicit-thread")
     );
 }
+
+#[test]
+fn chatgpt_web_metadata_resumes_persisted_conversation() {
+    let mut request = crate::im_gateway::external_cli::ExternalCliRunRequest {
+        message: "continue".to_string(),
+        operation: "ask".to_string(),
+        params: serde_json::Value::Null,
+        provider_id: Some("provider-a".to_string()),
+        runner_id: Some("chatgpt-web".to_string()),
+        session_key: Some("im:provider-a:user-a".to_string()),
+        runtime: "external_cli".to_string(),
+        adapter: crate::im_gateway::chatgpt_web::ADAPTER_ID.to_string(),
+        work_dir: None,
+        instructions: None,
+        adapter_config: Default::default(),
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: true,
+        skill_paths: Vec::new(),
+    };
+    let mut metadata = std::collections::BTreeMap::new();
+    metadata.insert("conversationId".to_string(), "conv-existing".to_string());
+
+    apply_external_cli_resume_metadata(&mut request, &metadata);
+
+    assert_eq!(
+        request
+            .params
+            .get("conversationId")
+            .and_then(|value| value.as_str()),
+        Some("conv-existing")
+    );
+}

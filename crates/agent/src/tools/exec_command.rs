@@ -4,7 +4,9 @@
 //! `session_id` after the initial yield window; follow-up `write_stdin` calls
 //! poll the same process until its actual exit status is observed.
 
-use crate::tools::head_tail_buffer::HeadTailBuffer;
+mod transcript;
+
+use self::transcript::{ExecStream, ExecTranscript};
 use crate::tools::ToolHandler;
 use crate::types::ToolResult;
 use async_trait::async_trait;
@@ -21,7 +23,7 @@ use std::time::Duration;
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin, Command};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tracing::{debug, info};
 
 pub const MIN_YIELD_TIME_MS: u64 = 250;
@@ -30,6 +32,7 @@ pub const MAX_YIELD_TIME_MS: u64 = 30_000;
 pub const DEFAULT_EXEC_YIELD_TIME_MS: u64 = 10_000;
 pub const DEFAULT_WRITE_STDIN_YIELD_TIME_MS: u64 = 250;
 pub const DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS: u64 = 300_000;
+pub const MAX_EXEC_SESSIONS: usize = 64;
 const EXIT_STATUS_POLL_INTERVAL_MS: u64 = 100;
 const TRAILING_OUTPUT_GRACE_MS: u64 = 100;
 
@@ -79,6 +82,8 @@ pub struct ExecWriteArgs {
     #[serde(default)]
     pub chars: Option<String>,
     #[serde(default)]
+    pub since_chunk_id: Option<u64>,
+    #[serde(default)]
     pub yield_time_ms: Option<u64>,
     #[serde(default)]
     pub max_output_tokens: Option<usize>,
@@ -90,6 +95,8 @@ struct WriteStdinArgs {
     session_id: i64,
     #[serde(default)]
     chars: Option<String>,
+    #[serde(default)]
+    since_chunk_id: Option<u64>,
     #[serde(default)]
     yield_time_ms: Option<u64>,
     #[serde(default)]
@@ -148,6 +155,12 @@ impl ExecSessionManager {
         args: &ExecCommandArgs,
         work_dir: &Path,
     ) -> Result<Arc<ExecSession>, String> {
+        self.prune_completed_sessions().await;
+        if self.sessions.len() >= MAX_EXEC_SESSIONS {
+            return Err(format!(
+                "resource_pressure: max exec sessions reached ({MAX_EXEC_SESSIONS}); running tasks were not silently pruned"
+            ));
+        }
         let command =
             ShellCommand::new(args.shell.as_deref(), &args.cmd, args.login.unwrap_or(true));
         let session_id = self
@@ -166,6 +179,19 @@ impl ExecSessionManager {
         Ok(session)
     }
 
+    async fn prune_completed_sessions(&self) {
+        let sessions = self
+            .sessions
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect::<Vec<_>>();
+        for (session_id, session) in sessions {
+            if session.is_completed().await {
+                self.sessions.remove(&session_id);
+            }
+        }
+    }
+
     pub async fn write_and_poll(&self, args: ExecWriteArgs) -> ToolResult {
         let Some(session) = self
             .sessions
@@ -175,6 +201,7 @@ impl ExecSessionManager {
             return ToolResult {
                 success: false,
                 output: format!("session not found: {}", args.session_id),
+                runtime_events: Vec::new(),
             };
         };
 
@@ -187,6 +214,7 @@ impl ExecSessionManager {
                 return ToolResult {
                     success: false,
                     output: format!("failed to write to exec session stdin: {error}"),
+                    runtime_events: Vec::new(),
                 };
             }
         }
@@ -197,6 +225,9 @@ impl ExecSessionManager {
                     self.write_stdin_yield_time_ms(args.yield_time_ms, input.is_empty()),
                 ),
                 PollMode::OutputOrCompletion,
+                PollConsumer::Model {
+                    since_chunk_id: args.since_chunk_id,
+                },
             )
             .await;
         let response = format_poll_response(&poll, args.max_output_tokens);
@@ -206,7 +237,48 @@ impl ExecSessionManager {
         ToolResult {
             success: true,
             output: response,
+            runtime_events: Vec::new(),
         }
+    }
+
+    pub async fn poll_existing_session(
+        &self,
+        session_id: &str,
+        yield_time_ms: u64,
+        max_output_tokens: Option<usize>,
+    ) -> ToolResult {
+        let Some(session) = self.sessions.get(session_id).map(|entry| entry.clone()) else {
+            return ToolResult {
+                success: false,
+                output: format!("session not found: {session_id}"),
+                runtime_events: Vec::new(),
+            };
+        };
+
+        let poll = session
+            .poll(
+                Duration::from_millis(clamp_yield_time(yield_time_ms)),
+                PollMode::OutputOrCompletion,
+                PollConsumer::Runtime,
+            )
+            .await;
+        let response = format_poll_response(&poll, max_output_tokens);
+        if poll.completed {
+            self.sessions.remove(session_id);
+        }
+        ToolResult {
+            success: true,
+            output: response,
+            runtime_events: Vec::new(),
+        }
+    }
+
+    pub async fn terminate_session(&self, session_id: &str) -> bool {
+        let Some(session) = self.sessions.get(session_id).map(|entry| entry.clone()) else {
+            return false;
+        };
+        session.terminate().await;
+        true
     }
 
     fn exec_yield_time_ms(&self, requested: Option<u64>) -> u64 {
@@ -265,6 +337,10 @@ impl ToolHandler for WriteStdinTool {
                     "type": "string",
                     "description": "Bytes to write to stdin (may be empty to poll)."
                 },
+                "since_chunk_id": {
+                    "type": "integer",
+                    "description": "Optional output cursor. When supported, callers can request only output after this chunk id."
+                },
                 "yield_time_ms": {
                     "type": "integer",
                     "description": "How long to wait (in milliseconds) for output before yielding. Defaults to 250 for writes; empty polls wait at least 5000 and are capped by background terminal timeout."
@@ -286,6 +362,7 @@ impl ToolHandler for WriteStdinTool {
                 return ToolResult {
                     success: false,
                     output: format!("invalid arguments: {error}"),
+                    runtime_events: Vec::new(),
                 };
             }
         };
@@ -294,6 +371,7 @@ impl ToolHandler for WriteStdinTool {
             .write_and_poll(ExecWriteArgs {
                 session_id: args.session_id.to_string(),
                 chars: Some(args.chars.unwrap_or_default()),
+                since_chunk_id: args.since_chunk_id,
                 yield_time_ms: args.yield_time_ms,
                 max_output_tokens: args.max_output_tokens,
             })
@@ -356,6 +434,7 @@ impl ToolHandler for ExecCommandTool {
                 return ToolResult {
                     success: false,
                     output: format!("invalid arguments: {error}"),
+                    runtime_events: Vec::new(),
                 };
             }
         };
@@ -366,6 +445,7 @@ impl ToolHandler for ExecCommandTool {
                     return ToolResult {
                         success: false,
                         output: format!("workdir is not a directory: {}", candidate.display()),
+                        runtime_events: Vec::new(),
                     };
                 }
                 candidate
@@ -381,6 +461,7 @@ impl ToolHandler for ExecCommandTool {
                 return ToolResult {
                     success: false,
                     output: error,
+                    runtime_events: Vec::new(),
                 };
             }
         };
@@ -388,6 +469,7 @@ impl ToolHandler for ExecCommandTool {
             .poll(
                 Duration::from_millis(yield_time_ms),
                 PollMode::CompletionOrYield,
+                PollConsumer::Initial,
             )
             .await;
         let wall_time_seconds = (start.elapsed().as_secs_f64() * 10.0).round() / 10.0;
@@ -402,19 +484,55 @@ impl ToolHandler for ExecCommandTool {
         } else {
             session_id_value(&poll.session_id)
         };
+        let running = !poll.completed;
+        let long_task_candidate = running && !args.tty.unwrap_or(false);
+        let suggested_wait_profile = long_task_candidate.then_some("adaptive");
         let response = json!({
-            "chunk_id": null,
+            "chunk_id": poll.chunk_id,
             "wall_time_seconds": wall_time_seconds,
             "exit_code": poll.exit_code,
             "session_id": session_id,
             "original_token_count": original_token_count,
-            "output": output
+            "output": output,
+            "new_output_bytes": poll.new_output_bytes,
+            "output_lossy": poll.output_lossy,
+            "lost_chunk_count": poll.lost_chunk_count,
+            "truncated_bytes": poll.truncated_bytes,
+            "running": running,
+            "long_task_candidate": long_task_candidate,
+            "suggested_wait_profile": suggested_wait_profile,
+            "duration_class": classify_duration_class(running, wall_time_seconds),
+            "response_strategy": classify_response_strategy(long_task_candidate),
+            "next_output_cursor": {
+                "chunk_id": poll.chunk_id,
+                "stdout_bytes": null,
+                "stderr_bytes": null
+            }
         });
 
         ToolResult {
             success: true,
             output: response.to_string(),
+            runtime_events: Vec::new(),
         }
+    }
+}
+
+fn classify_duration_class(running: bool, wall_time_seconds: f64) -> &'static str {
+    if running {
+        "unknown_running"
+    } else if wall_time_seconds < 1.0 {
+        "instant"
+    } else {
+        "short"
+    }
+}
+
+fn classify_response_strategy(long_task_candidate: bool) -> &'static str {
+    if long_task_candidate {
+        "adaptive_monitor"
+    } else {
+        "inline_or_manual"
     }
 }
 
@@ -489,9 +607,11 @@ struct ExecState {
 pub struct ExecSession {
     session_id: String,
     backend: ExecBackend,
-    stdout_buffer: Mutex<HeadTailBuffer>,
-    stderr_buffer: Mutex<HeadTailBuffer>,
+    transcript: Mutex<ExecTranscript>,
+    model_visible_cursor: AtomicU64,
+    runtime_cursor: AtomicU64,
     state: Mutex<ExecState>,
+    notify: Notify,
 }
 
 struct ExecPoll {
@@ -499,6 +619,11 @@ struct ExecPoll {
     completed: bool,
     exit_code: Option<i32>,
     output: String,
+    chunk_id: u64,
+    new_output_bytes: usize,
+    output_lossy: bool,
+    lost_chunk_count: u64,
+    truncated_bytes: u64,
 }
 
 enum PollMode {
@@ -506,39 +631,81 @@ enum PollMode {
     OutputOrCompletion,
 }
 
+enum PollConsumer {
+    Initial,
+    Runtime,
+    Model { since_chunk_id: Option<u64> },
+}
+
 impl ExecSession {
-    async fn poll(&self, yield_duration: Duration, mode: PollMode) -> ExecPoll {
+    async fn poll(
+        &self,
+        yield_duration: Duration,
+        mode: PollMode,
+        consumer: PollConsumer,
+    ) -> ExecPoll {
+        let cursor = self.cursor_for_consumer(&consumer);
         let deadline = Instant::now() + yield_duration;
         loop {
             self.refresh_exit_status().await;
             if self.is_completed().await {
                 break;
             }
-            let has_output = self.has_output().await;
+            let has_output = self.has_output_after(cursor).await;
             if has_output && matches!(mode, PollMode::OutputOrCompletion) {
                 break;
             }
-            if Instant::now() >= deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            if tokio::time::timeout(remaining, self.notify.notified())
+                .await
+                .is_err()
+            {
+                break;
+            }
         }
 
-        let stdout_text = {
-            let mut stdout_buf = self.stdout_buffer.lock().await;
-            chunks_to_string(stdout_buf.drain_chunks())
+        let read = {
+            let transcript = self.transcript.lock().await;
+            transcript.read_since(cursor)
         };
-        let stderr_text = {
-            let mut stderr_buf = self.stderr_buffer.lock().await;
-            chunks_to_string(stderr_buf.drain_chunks())
-        };
-        let output = merge_output(stdout_text, stderr_text);
+        self.advance_cursor_for_consumer(&consumer, read.chunk_id);
         let state = self.state.lock().await;
         ExecPoll {
             session_id: self.session_id.clone(),
             completed: state.completed,
             exit_code: state.exit_code,
-            output,
+            output: read.output,
+            chunk_id: read.chunk_id,
+            new_output_bytes: read.new_output_bytes,
+            output_lossy: read.output_lossy,
+            lost_chunk_count: read.lost_chunk_count,
+            truncated_bytes: read.truncated_bytes,
+        }
+    }
+
+    fn cursor_for_consumer(&self, consumer: &PollConsumer) -> u64 {
+        match consumer {
+            PollConsumer::Initial => 0,
+            PollConsumer::Runtime => self
+                .runtime_cursor
+                .load(Ordering::Relaxed)
+                .max(self.model_visible_cursor.load(Ordering::Relaxed)),
+            PollConsumer::Model { since_chunk_id } => {
+                since_chunk_id.unwrap_or_else(|| self.model_visible_cursor.load(Ordering::Relaxed))
+            }
+        }
+    }
+
+    fn advance_cursor_for_consumer(&self, consumer: &PollConsumer, chunk_id: u64) {
+        if matches!(consumer, PollConsumer::Initial | PollConsumer::Runtime) {
+            self.runtime_cursor.fetch_max(chunk_id, Ordering::Relaxed);
+        }
+        if matches!(consumer, PollConsumer::Initial | PollConsumer::Model { .. }) {
+            self.model_visible_cursor
+                .fetch_max(chunk_id, Ordering::Relaxed);
         }
     }
 
@@ -580,16 +747,9 @@ impl ExecSession {
         self.state.lock().await.completed
     }
 
-    async fn has_output(&self) -> bool {
-        let stdout_has = {
-            let stdout = self.stdout_buffer.lock().await;
-            !stdout.to_bytes().is_empty()
-        };
-        if stdout_has {
-            return true;
-        }
-        let stderr = self.stderr_buffer.lock().await;
-        !stderr.to_bytes().is_empty()
+    async fn has_output_after(&self, cursor: u64) -> bool {
+        let transcript = self.transcript.lock().await;
+        transcript.has_after(cursor)
     }
 
     async fn refresh_exit_status(&self) {
@@ -621,6 +781,7 @@ impl ExecSession {
             }
             state.completed = true;
             state.exit_code = Some(exit_code);
+            self.notify.notify_waiters();
         }
     }
 }
@@ -661,20 +822,6 @@ fn truncate_to_token_budget(text: &str, max_tokens: usize) -> String {
     format!("{}\n[... output truncated ...]", &text[..end])
 }
 
-fn chunks_to_string(chunks: Vec<Vec<u8>>) -> String {
-    let bytes = chunks.into_iter().flatten().collect::<Vec<_>>();
-    String::from_utf8_lossy(&bytes).trim_end().to_string()
-}
-
-fn merge_output(stdout_text: String, stderr_text: String) -> String {
-    match (stdout_text.is_empty(), stderr_text.is_empty()) {
-        (true, true) => String::new(),
-        (false, true) => stdout_text,
-        (true, false) => format!("[stderr]\n{stderr_text}"),
-        (false, false) => format!("{stdout_text}\n[stderr]\n{stderr_text}"),
-    }
-}
-
 fn format_poll_response(poll: &ExecPoll, max_output_tokens: Option<usize>) -> String {
     let original_token_count = estimate_tokens(&poll.output);
     let output = max_output_tokens
@@ -686,10 +833,22 @@ fn format_poll_response(poll: &ExecPoll, max_output_tokens: Option<usize>) -> St
         session_id_value(&poll.session_id)
     };
     json!({
+        "chunk_id": poll.chunk_id,
         "session_id": session_id,
         "exit_code": poll.exit_code,
         "original_token_count": original_token_count,
-        "output": output
+        "output": output,
+        "running": !poll.completed,
+        "unchanged": !poll.completed && poll.output.is_empty(),
+        "new_output_bytes": poll.new_output_bytes,
+        "output_lossy": poll.output_lossy,
+        "lost_chunk_count": poll.lost_chunk_count,
+        "truncated_bytes": poll.truncated_bytes,
+        "next_output_cursor": {
+            "chunk_id": poll.chunk_id,
+            "stdout_bytes": null,
+            "stderr_bytes": null
+        }
     })
     .to_string()
 }
@@ -708,7 +867,7 @@ fn create_pipe_exec_session(
     let mut child = Command::new(&command.program)
         .args(&command.args)
         .current_dir(work_dir)
-        .envs(std::env::vars())
+        .envs(std::env::vars_os())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -734,12 +893,14 @@ fn create_pipe_exec_session(
             child: Mutex::new(child),
             stdin: Mutex::new(Some(stdin)),
         },
-        stdout_buffer: Mutex::new(HeadTailBuffer::default()),
-        stderr_buffer: Mutex::new(HeadTailBuffer::default()),
+        transcript: Mutex::new(ExecTranscript::default()),
+        model_visible_cursor: AtomicU64::new(0),
+        runtime_cursor: AtomicU64::new(0),
         state: Mutex::new(ExecState {
             completed: false,
             exit_code: None,
         }),
+        notify: Notify::new(),
     });
 
     spawn_pipe_reader(session.clone(), stdout, false);
@@ -755,18 +916,23 @@ where
         let mut chunk = vec![0_u8; 8192];
         loop {
             match reader.read(&mut chunk).await {
-                Ok(0) => break,
+                Ok(0) => {
+                    session.notify.notify_waiters();
+                    break;
+                }
                 Ok(n) => {
-                    let target = if stderr {
-                        &session.stderr_buffer
+                    let stream = if stderr {
+                        ExecStream::Stderr
                     } else {
-                        &session.stdout_buffer
+                        ExecStream::Stdout
                     };
-                    let mut buffer = target.lock().await;
-                    buffer.push_chunk(chunk[..n].to_vec());
+                    let mut transcript = session.transcript.lock().await;
+                    transcript.push_chunk(stream, chunk[..n].to_vec());
+                    session.notify.notify_waiters();
                 }
                 Err(error) => {
                     debug!(%session.session_id, ?error, stderr, "exec pipe reader errored");
+                    session.notify.notify_waiters();
                     break;
                 }
             }
@@ -821,12 +987,14 @@ fn create_pty_exec_session(
             child: Mutex::new(child),
             writer: Mutex::new(writer),
         },
-        stdout_buffer: Mutex::new(HeadTailBuffer::default()),
-        stderr_buffer: Mutex::new(HeadTailBuffer::default()),
+        transcript: Mutex::new(ExecTranscript::default()),
+        model_visible_cursor: AtomicU64::new(0),
+        runtime_cursor: AtomicU64::new(0),
         state: Mutex::new(ExecState {
             completed: false,
             exit_code: None,
         }),
+        notify: Notify::new(),
     });
 
     let session_stdout = session.clone();
@@ -836,13 +1004,18 @@ fn create_pty_exec_session(
             let mut chunk = vec![0_u8; 8192];
             loop {
                 match reader.read(&mut chunk) {
-                    Ok(0) => break,
+                    Ok(0) => {
+                        session_stdout.notify.notify_waiters();
+                        break;
+                    }
                     Ok(n) => {
-                        let mut buffer = session_stdout.stdout_buffer.blocking_lock();
-                        buffer.push_chunk(chunk[..n].to_vec());
+                        let mut transcript = session_stdout.transcript.blocking_lock();
+                        transcript.push_chunk(ExecStream::Stdout, chunk[..n].to_vec());
+                        session_stdout.notify.notify_waiters();
                     }
                     Err(error) => {
                         debug!(%session_stdout.session_id, ?error, "exec PTY reader errored");
+                        session_stdout.notify.notify_waiters();
                         break;
                     }
                 }
@@ -890,6 +1063,11 @@ mod tests {
             .expect("session id")
             .to_string();
         assert_eq!(value["exit_code"], serde_json::Value::Null);
+        assert_eq!(value["running"], true);
+        assert_eq!(value["long_task_candidate"], true);
+        assert_eq!(value["suggested_wait_profile"], "adaptive");
+        assert_eq!(value["duration_class"], "unknown_running");
+        assert_eq!(value["response_strategy"], "adaptive_monitor");
 
         let mut final_poll = serde_json::Value::Null;
         let mut combined_output = String::new();
@@ -898,6 +1076,7 @@ mod tests {
                 .write_and_poll(ExecWriteArgs {
                     session_id: session_id.clone(),
                     chars: None,
+                    since_chunk_id: None,
                     yield_time_ms: Some(100),
                     max_output_tokens: None,
                 })
@@ -913,6 +1092,95 @@ mod tests {
         assert!(final_poll["session_id"].is_null());
         assert!(combined_output.contains("end"));
         assert!(!manager.has_session(&session_id));
+    }
+
+    #[tokio::test]
+    async fn runtime_poll_exec_session_reports_unchanged_without_model_tool_call() {
+        let manager = Arc::new(ExecSessionManager::new());
+        let tool = ExecCommandTool::new(manager.clone());
+        let dir = tempdir().unwrap();
+        let result = tool
+            .execute(
+                r#"{"cmd":"sleep 0.8; printf done","yield_time_ms":50}"#,
+                dir.path(),
+            )
+            .await;
+        assert!(result.success, "{}", result.output);
+        let value: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        let session_id = value["session_id"]
+            .as_i64()
+            .expect("session id")
+            .to_string();
+
+        let unchanged = manager.poll_existing_session(&session_id, 250, None).await;
+        assert!(unchanged.success, "{}", unchanged.output);
+        let value: serde_json::Value = serde_json::from_str(&unchanged.output).unwrap();
+        assert_eq!(value["exit_code"], serde_json::Value::Null);
+        assert_eq!(value["running"], true);
+        assert_eq!(value["unchanged"], true);
+        assert_eq!(value["new_output_bytes"], 0);
+
+        let output_poll = manager.poll_existing_session(&session_id, 1000, None).await;
+        assert!(output_poll.success, "{}", output_poll.output);
+        let value: serde_json::Value = serde_json::from_str(&output_poll.output).unwrap();
+        assert!(value["output"].as_str().unwrap_or("").contains("done"));
+
+        let final_poll = if value["exit_code"].is_null() {
+            manager.poll_existing_session(&session_id, 1000, None).await
+        } else {
+            output_poll
+        };
+        assert!(final_poll.success, "{}", final_poll.output);
+        let value: serde_json::Value = serde_json::from_str(&final_poll.output).unwrap();
+        assert_eq!(value["exit_code"], 0);
+        assert_eq!(value["running"], false);
+    }
+
+    #[tokio::test]
+    async fn runtime_poll_exec_session_wakes_on_output_before_deadline() {
+        let manager = Arc::new(ExecSessionManager::new());
+        let tool = ExecCommandTool::new(manager.clone());
+        let dir = tempdir().unwrap();
+        let result = tool
+            .execute(
+                r#"{"cmd":"python3 -u -c 'import sys,time; time.sleep(0.5); print(\"notify-ready\", flush=True); time.sleep(1)'","yield_time_ms":50}"#,
+                dir.path(),
+            )
+            .await;
+        assert!(result.success, "{}", result.output);
+        let value: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        let session_id = value["session_id"]
+            .as_i64()
+            .expect("session id")
+            .to_string();
+
+        let started = Instant::now();
+        let poll = manager
+            .poll_existing_session(&session_id, 3_000, None)
+            .await;
+        let elapsed = started.elapsed();
+
+        assert!(poll.success, "{}", poll.output);
+        let value: serde_json::Value = serde_json::from_str(&poll.output).unwrap();
+        assert!(
+            elapsed < Duration::from_millis(1_000),
+            "poll waited for deadline instead of output notification: {elapsed:?}"
+        );
+        assert_eq!(value["running"], true);
+        assert!(value["output"]
+            .as_str()
+            .unwrap_or("")
+            .contains("notify-ready"));
+        assert!(manager.terminate_session(&session_id).await);
+    }
+
+    #[test]
+    fn adaptive_long_task_metadata_is_runtime_state_based() {
+        assert_eq!(classify_duration_class(true, 0.1), "unknown_running");
+        assert_eq!(classify_duration_class(false, 0.4), "instant");
+        assert_eq!(classify_duration_class(false, 1.2), "short");
+        assert_eq!(classify_response_strategy(true), "adaptive_monitor");
+        assert_eq!(classify_response_strategy(false), "inline_or_manual");
     }
 
     #[tokio::test]
@@ -949,6 +1217,7 @@ mod tests {
             .write_and_poll(ExecWriteArgs {
                 session_id: session_id.clone(),
                 chars: None,
+                since_chunk_id: None,
                 yield_time_ms: Some(1),
                 max_output_tokens: None,
             })
@@ -990,6 +1259,7 @@ mod tests {
                 .write_and_poll(ExecWriteArgs {
                     session_id: session_id.clone(),
                     chars: None,
+                    since_chunk_id: None,
                     yield_time_ms: Some(50),
                     max_output_tokens: None,
                 })
@@ -1000,22 +1270,31 @@ mod tests {
         }
         assert!(combined_output.contains("ready"), "{combined_output}");
 
-        let poll = manager
+        let output_poll = manager
             .write_and_poll(ExecWriteArgs {
-                session_id,
+                session_id: session_id.clone(),
                 chars: Some("from-stdin\n".to_string()),
+                since_chunk_id: None,
                 yield_time_ms: Some(1000),
                 max_output_tokens: None,
             })
             .await;
-        assert!(poll.success, "{}", poll.output);
-        let value: serde_json::Value = serde_json::from_str(&poll.output).unwrap();
-        assert_eq!(value["exit_code"], 0);
-        assert!(value["session_id"].is_null());
+        assert!(output_poll.success, "{}", output_poll.output);
+        let value: serde_json::Value = serde_json::from_str(&output_poll.output).unwrap();
         assert!(value["output"]
             .as_str()
             .unwrap_or("")
             .contains("from-stdin"));
+
+        let final_poll = if value["exit_code"].is_null() {
+            manager.poll_existing_session(&session_id, 1000, None).await
+        } else {
+            output_poll
+        };
+        assert!(final_poll.success, "{}", final_poll.output);
+        let value: serde_json::Value = serde_json::from_str(&final_poll.output).unwrap();
+        assert_eq!(value["exit_code"], 0);
+        assert!(value["session_id"].is_null());
     }
 
     #[tokio::test]
@@ -1040,6 +1319,7 @@ mod tests {
                 .write_and_poll(ExecWriteArgs {
                     session_id: session_id.clone(),
                     chars: chars.take(),
+                    since_chunk_id: None,
                     yield_time_ms: Some(100),
                     max_output_tokens: None,
                 })
@@ -1145,11 +1425,9 @@ mod tests {
             .await;
         assert!(result.success, "{}", result.output);
         let value: serde_json::Value = serde_json::from_str(&result.output).unwrap();
-        assert!(
-            value["output"].as_str().unwrap_or("").contains("True True"),
-            "{}",
-            value
-        );
+        assert!(value["output"].as_str().unwrap_or("").contains("True True"));
         assert_eq!(value["exit_code"], 0);
+        assert_eq!(value["long_task_candidate"], false);
+        assert!(value["suggested_wait_profile"].is_null());
     }
 }

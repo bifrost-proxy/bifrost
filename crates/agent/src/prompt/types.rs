@@ -148,6 +148,10 @@ pub const SKILLS_INSTRUCTIONS_CLOSE_TAG: &str = "</skills_instructions>";
 pub const USER_INSTRUCTIONS_OPEN_TAG: &str = "<user_instructions>";
 pub const USER_INSTRUCTIONS_CLOSE_TAG: &str = "</user_instructions>";
 
+/// XML tag markers for goal context section.
+pub const GOAL_CONTEXT_OPEN_TAG: &str = "<goal_context>";
+pub const GOAL_CONTEXT_CLOSE_TAG: &str = "</goal_context>";
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

@@ -7,6 +7,7 @@ use crate::memory::constants::*;
 use crate::memory::layout::ensure_memory_layout;
 use crate::memory::parse::parse_extracted_memories;
 use crate::memory::parse::phase1_output_schema;
+use crate::memory::pollution::{PollutionDetector, ThreadMemoryMode};
 use crate::memory::read_path::generate_memories_enabled;
 use crate::memory::retention::prune_memory_artifacts;
 use crate::memory::telemetry::telemetry_event;
@@ -17,11 +18,15 @@ use crate::memory_prompts::{EXTRACT_INPUT_TEMPLATE, EXTRACT_SYSTEM_PROMPT};
 use crate::session::AgentSession;
 use crate::types::ChatMessage;
 use std::time::Duration;
-use tracing::warn;
+use tracing::{debug, warn};
 
 /// Generate durable file-backed memories after a turn.
 ///
 /// Spawns a background task so that the turn can return immediately.
+///
+/// **Deprecated**: prefer [`auto_extract_after_turn_with_pollution_check`] which
+/// skips extraction when the session is polluted by external context.
+#[deprecated(note = "use auto_extract_after_turn_with_pollution_check instead")]
 pub fn auto_extract_after_turn(
     client: std::sync::Arc<crate::client::AgentClient>,
     config: AgentConfig,
@@ -213,4 +218,135 @@ pub(crate) fn bump_phase2_failure(reason: &str) {
             Some(reason),
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Pollution-aware extraction
+// ---------------------------------------------------------------------------
+
+/// Generate memories after a turn with pollution awareness.
+///
+/// This is the preferred entry point for callers that have a `PollutionDetector`
+/// available. If the session is polluted, extraction is skipped entirely.
+pub fn auto_extract_after_turn_with_pollution_check(
+    client: std::sync::Arc<crate::client::AgentClient>,
+    config: AgentConfig,
+    session_key: String,
+    user_message: String,
+    assistant_message: String,
+    pollution_detector: PollutionDetector,
+) {
+    if !generate_memories_enabled(&config) {
+        return;
+    }
+
+    // Check pollution state before spawning the extraction task.
+    if !pollution_detector.allows_memory_write() {
+        let mode = pollution_detector.current_mode();
+        debug!(
+            mode = ?mode,
+            session_key = %session_key,
+            "skipping memory extraction due to pollution/disabled state"
+        );
+        telemetry_event(
+            "auto_extract.skip_polluted",
+            0,
+            true,
+            match &mode {
+                ThreadMemoryMode::Polluted { reason } => Some(reason.as_str()),
+                ThreadMemoryMode::Disabled => Some("disabled"),
+                ThreadMemoryMode::Enabled => None,
+            },
+        );
+        return;
+    }
+
+    // Delegate to the standard extraction path.
+    #[allow(deprecated)]
+    auto_extract_after_turn(client, config, session_key, user_message, assistant_message);
+}
+
+// ---------------------------------------------------------------------------
+// Token limit self-adaptive
+// ---------------------------------------------------------------------------
+
+/// Compute the rollout token limit based on model context window.
+///
+/// Returns 70% of the effective context window, aligned with Codex's approach.
+/// Falls back to `DEFAULT_ROLLOUT_TOKEN_LIMIT` if context window is unknown.
+#[allow(dead_code)]
+pub fn compute_rollout_token_limit(context_window_tokens: Option<usize>) -> usize {
+    match context_window_tokens {
+        Some(window) if window > 0 => (window * ROLLOUT_CONTEXT_WINDOW_PERCENT / 100).max(1),
+        _ => DEFAULT_ROLLOUT_TOKEN_LIMIT,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Batch extraction (parallel)
+// ---------------------------------------------------------------------------
+
+/// Content of a turn to be extracted.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct TurnContent {
+    pub session_key: String,
+    pub user_message: String,
+    pub assistant_message: String,
+}
+
+/// Result of a single extraction attempt.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct ExtractionResult {
+    pub session_key: String,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+/// Extract memories from multiple turns in parallel.
+///
+/// `concurrency_limit` controls the maximum number of concurrent extraction
+/// calls. This is useful for batch processing of historical turns.
+///
+/// Callers should ensure pollution checking is done BEFORE calling this
+/// function (i.e., do not pass polluted turns into the batch).
+#[allow(dead_code)]
+pub async fn extract_batch(
+    client: std::sync::Arc<crate::client::AgentClient>,
+    config: &AgentConfig,
+    turns: Vec<TurnContent>,
+    concurrency_limit: usize,
+) -> Vec<ExtractionResult> {
+    use futures::stream::{self, StreamExt};
+
+    if turns.is_empty() {
+        return Vec::new();
+    }
+
+    let concurrency = concurrency_limit.max(1);
+
+    stream::iter(turns)
+        .map(|turn| {
+            let client = client.clone();
+            let config = config.clone();
+            async move {
+                let result = auto_extract_after_turn_inner(
+                    &client,
+                    &config,
+                    &turn.session_key,
+                    &turn.user_message,
+                    &turn.assistant_message,
+                )
+                .await;
+                ExtractionResult {
+                    session_key: turn.session_key,
+                    success: result.is_ok(),
+                    error: result.err(),
+                }
+            }
+        })
+        .buffer_unordered(concurrency)
+        .collect()
+        .await
 }

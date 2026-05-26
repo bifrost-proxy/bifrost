@@ -50,6 +50,7 @@ pub(crate) fn sanitize_skill_name(input: &str) -> String {
 }
 
 /// Truncate a string by character count, adding `[truncated]` marker.
+#[allow(dead_code)]
 pub(crate) fn truncate_chars(input: &str, limit: usize) -> String {
     if input.chars().count() <= limit {
         return input.to_string();

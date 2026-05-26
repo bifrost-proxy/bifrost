@@ -514,6 +514,7 @@ pub fn set_goal_status(session: &mut AgentSession, status: GoalStatus) -> ToolRe
         return ToolResult {
             success: false,
             output: "no goal exists to update".to_string(),
+            runtime_events: Vec::new(),
         };
     };
 
@@ -523,6 +524,7 @@ pub fn set_goal_status(session: &mut AgentSession, status: GoalStatus) -> ToolRe
                 return ToolResult {
                     success: false,
                     output: "cannot pause a completed goal".to_string(),
+                    runtime_events: Vec::new(),
                 };
             }
             goal.pause(total_tokens_used, now);
@@ -532,6 +534,7 @@ pub fn set_goal_status(session: &mut AgentSession, status: GoalStatus) -> ToolRe
                 return ToolResult {
                     success: false,
                     output: "cannot resume a completed goal".to_string(),
+                    runtime_events: Vec::new(),
                 };
             }
             goal.resume(total_tokens_used, now);
@@ -540,6 +543,7 @@ pub fn set_goal_status(session: &mut AgentSession, status: GoalStatus) -> ToolRe
             return ToolResult {
                 success: false,
                 output: "unsupported manual goal status transition".to_string(),
+                runtime_events: Vec::new(),
             };
         }
     }
@@ -586,6 +590,7 @@ fn handle_create_goal(session: &mut AgentSession, arguments: &str) -> ToolResult
             return ToolResult {
                 success: false,
                 output: format!("invalid arguments: {error}"),
+                runtime_events: Vec::new(),
             };
         }
     };
@@ -595,6 +600,7 @@ fn handle_create_goal(session: &mut AgentSession, arguments: &str) -> ToolResult
         return ToolResult {
             success: false,
             output: "objective cannot be empty".to_string(),
+            runtime_events: Vec::new(),
         };
     }
 
@@ -602,6 +608,7 @@ fn handle_create_goal(session: &mut AgentSession, arguments: &str) -> ToolResult
         return ToolResult {
             success: false,
             output: "cannot create a new goal because this session already has a goal; use update_goal only when the existing goal is complete".to_string(),
+            runtime_events: Vec::new(),
         };
     }
 
@@ -626,6 +633,7 @@ fn handle_update_goal(session: &mut AgentSession, arguments: &str) -> ToolResult
             return ToolResult {
                 success: false,
                 output: format!("invalid arguments: {error}"),
+                runtime_events: Vec::new(),
             };
         }
     };
@@ -634,6 +642,7 @@ fn handle_update_goal(session: &mut AgentSession, arguments: &str) -> ToolResult
         return ToolResult {
             success: false,
             output: "update_goal can only mark the existing goal complete; pause, resume, and budget-limited status changes are controlled by the user or system".to_string(),
+            runtime_events: Vec::new(),
         };
     }
 
@@ -648,6 +657,7 @@ fn handle_update_goal(session: &mut AgentSession, arguments: &str) -> ToolResult
             return ToolResult {
                 success: false,
                 output: "no goal exists to update".to_string(),
+                runtime_events: Vec::new(),
             };
         };
 
@@ -691,12 +701,14 @@ fn goal_response(session: &AgentSession, report_mode: CompletionBudgetReport) ->
         Ok(output) => ToolResult {
             success: true,
             output,
+            runtime_events: Vec::new(),
         },
         Err(error) => {
             warn!(error = %error, "failed to serialize goal response");
             ToolResult {
                 success: false,
                 output: format!("failed to serialize goal response: {error}"),
+                runtime_events: Vec::new(),
             }
         }
     }

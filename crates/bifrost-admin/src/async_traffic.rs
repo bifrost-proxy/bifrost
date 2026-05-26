@@ -94,10 +94,33 @@ pub fn start_async_traffic_processor(
         let mut batch: Vec<Box<TrafficRecord>> = Vec::with_capacity(64);
         let mut updates: Vec<(String, TrafficUpdater)> = Vec::with_capacity(32);
         let mut pending_updates: HashMap<String, Vec<TrafficUpdater>> = HashMap::new();
+        // Cap pending_updates to prevent unbounded memory growth when records are
+        // dropped (channel full) but their updates still arrive.
+        const MAX_PENDING_UPDATES: usize = 256;
+        let mut pending_update_cycle: u64 = 0;
 
         loop {
             batch.clear();
             updates.clear();
+            pending_update_cycle += 1;
+
+            // Periodically purge stale pending_updates to prevent memory leak.
+            // Every 100 cycles (~100 batches), if pending_updates exceeds the cap,
+            // drop oldest half to bound memory.
+            if pending_update_cycle.is_multiple_of(100)
+                && pending_updates.len() > MAX_PENDING_UPDATES
+            {
+                let excess = pending_updates.len() - MAX_PENDING_UPDATES / 2;
+                let keys_to_remove: Vec<String> =
+                    pending_updates.keys().take(excess).cloned().collect();
+                for key in keys_to_remove {
+                    pending_updates.remove(&key);
+                }
+                warn!(
+                    remaining = pending_updates.len(),
+                    "Purged stale pending_updates to prevent memory leak"
+                );
+            }
 
             match rx.recv().await {
                 Some(cmd) => {

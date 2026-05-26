@@ -1,10 +1,16 @@
 //! Cross-process exclusive lock for Phase 2 consolidation.
+//!
+//! Provides both file-based advisory locking (Phase2LockGuard) and
+//! DB-backed lease/heartbeat management (LeaseManager) aligned with
+//! Codex's distributed locking model.
 
+use crate::memory::state_db;
 use crate::memory::utils::now_secs;
 use fs2::FileExt;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Cross-process exclusive lock for Phase 2 consolidation. Uses real `fs2`
 /// advisory locking so that if a process dies abruptly the OS releases the
@@ -56,5 +62,85 @@ impl Phase2LockGuard {
                 Err(format!("lock {}: {error}", path.display()))
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DB-backed lease/heartbeat manager (aligned with Codex state DB leases)
+// ---------------------------------------------------------------------------
+
+/// Default lease key for Phase 2 consolidation.
+#[allow(dead_code)]
+const PHASE2_LEASE_KEY: &str = "phase2_consolidation";
+
+/// DB-backed lease manager that supports heartbeats and distributed claim/release.
+/// Unlike the file-based lock which relies on OS advisory locking, this approach
+/// survives process restarts and works across machines sharing a DB.
+#[allow(dead_code)]
+pub(crate) struct LeaseManager {
+    root: PathBuf,
+    lease_duration: Duration,
+    heartbeat_interval: Duration,
+}
+
+#[allow(dead_code)]
+impl LeaseManager {
+    /// Create a new lease manager.
+    pub(crate) fn new(root: &Path, lease_duration: Duration, heartbeat_interval: Duration) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            lease_duration,
+            heartbeat_interval,
+        }
+    }
+
+    /// Default lease manager for Phase 2 with sensible defaults
+    /// (30s lease, 10s heartbeat).
+    pub(crate) fn phase2_default(root: &Path) -> Self {
+        Self::new(root, Duration::from_secs(30), Duration::from_secs(10))
+    }
+
+    /// Get the configured heartbeat interval.
+    pub(crate) fn heartbeat_interval(&self) -> Duration {
+        self.heartbeat_interval
+    }
+
+    /// Try to claim the Phase 2 lease.
+    /// Returns true if the lease was successfully acquired.
+    pub(crate) fn try_claim_phase2(&self, token: &str) -> Result<bool, String> {
+        state_db::try_claim_lease(&self.root, PHASE2_LEASE_KEY, token, self.lease_duration)
+    }
+
+    /// Send a heartbeat to keep the Phase 2 lease alive.
+    /// Returns true if the heartbeat was accepted (we still hold the lease).
+    pub(crate) fn heartbeat(&self, token: &str) -> Result<bool, String> {
+        state_db::heartbeat_lease(&self.root, PHASE2_LEASE_KEY, token)
+    }
+
+    /// Release the Phase 2 lease.
+    /// Returns true if the lease was successfully released.
+    pub(crate) fn release(&self, token: &str) -> Result<bool, String> {
+        state_db::release_lease(&self.root, PHASE2_LEASE_KEY, token)
+    }
+
+    /// Check whether a lease is expired.
+    pub(crate) fn is_expired(last_heartbeat: i64) -> bool {
+        // Use a generous default lease duration for expiry checks.
+        state_db::is_lease_expired(last_heartbeat, Duration::from_secs(30))
+    }
+
+    /// Try to claim a custom-keyed lease.
+    pub(crate) fn try_claim_custom(&self, lease_key: &str, token: &str) -> Result<bool, String> {
+        state_db::try_claim_lease(&self.root, lease_key, token, self.lease_duration)
+    }
+
+    /// Send heartbeat on a custom-keyed lease.
+    pub(crate) fn heartbeat_custom(&self, lease_key: &str, token: &str) -> Result<bool, String> {
+        state_db::heartbeat_lease(&self.root, lease_key, token)
+    }
+
+    /// Release a custom-keyed lease.
+    pub(crate) fn release_custom(&self, lease_key: &str, token: &str) -> Result<bool, String> {
+        state_db::release_lease(&self.root, lease_key, token)
     }
 }

@@ -709,50 +709,12 @@ struct ExternalCliChatInput {
 }
 
 async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: ExternalCliChatInput) {
-    // Intercept /clear and /reset — these should reset the session rather than
-    // being forwarded to the external runner (e.g. ChatGPT Web) as a message.
-    let trimmed_msg = input.message_text.trim();
-    if trimmed_msg == "/clear" || trimmed_msg == "/reset" {
-        // Clear agent session history
-        if let Some(mut session) = ctx
-            .agent_session_manager
-            .try_take_session(&input.session_key)
-        {
-            session.clear();
-            ctx.agent_session_manager.return_session(session);
-        }
-        // Clear ChatGPT Web conversation mapping so the next message starts
-        // a new conversation instead of appending to the old one.
-        crate::im_gateway::chatgpt_web::clear_session_conversation(&input.session_key).await;
-        send_agent_reply(
-            ctx.client,
-            ctx.provider,
-            ctx.event,
-            "会话已重置，下一条消息将开始新的对话。",
-            ctx.message_log_store,
-        )
-        .await;
-        return;
-    }
-
     let config = ctx.external_cli_config_store.load();
     let effective = crate::im_gateway::external_cli::effective_config_for_provider_and_runner(
         &config,
         Some(&ctx.provider.id),
         input.runner_id_override.as_deref(),
     );
-    if !effective.settings.enabled && !input.runner_selected {
-        send_agent_reply(
-            ctx.client,
-            ctx.provider,
-            ctx.event,
-            "Runner is not enabled for this IM channel.",
-            ctx.message_log_store,
-        )
-        .await;
-        return;
-    }
-
     let mut settings = effective.settings;
     if let Some(adapter) = input
         .adapter_override
@@ -776,6 +738,49 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
         };
     }
 
+    // Intercept /clear and /reset after resolving the effective runner so the
+    // reset only clears the current adapter/runner rather than every agent that
+    // happens to share the same IM session key.
+    let trimmed_msg = input.message_text.trim();
+    if trimmed_msg == "/clear" || trimmed_msg == "/reset" {
+        if let Some(mut session) = ctx
+            .agent_session_manager
+            .try_take_session(&input.session_key)
+        {
+            session.clear();
+            ctx.agent_session_manager.return_session(session);
+        }
+        if settings.adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID {
+            crate::im_gateway::chatgpt_web::clear_session_conversation(&input.session_key).await;
+        }
+        clear_persisted_agent_session_state(
+            &input.session_key,
+            Some(&settings.adapter),
+            Some(&effective.runner_id),
+        );
+        send_agent_reply(
+            ctx.client,
+            ctx.provider,
+            ctx.event,
+            "会话已重置，下一条消息将开始新的对话。",
+            ctx.message_log_store,
+        )
+        .await;
+        return;
+    }
+
+    if !settings.enabled && !input.runner_selected {
+        send_agent_reply(
+            ctx.client,
+            ctx.provider,
+            ctx.event,
+            "Runner is not enabled for this IM channel.",
+            ctx.message_log_store,
+        )
+        .await;
+        return;
+    }
+
     let delivery_mode = input.delivery_override.unwrap_or(settings.delivery_mode);
     let status_context =
         status_context_from_external_runner(&effective.runner_id, &settings.adapter);
@@ -794,10 +799,12 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
         .await;
     }
 
-    let Some(mut session) = ctx.agent_session_manager.try_take_session_with_work_dir(
-        &input.session_key,
-        effective_agent_config_for_provider(&ctx.agent_config_store.load(), ctx.provider).work_dir,
-    ) else {
+    let provider_agent_config =
+        effective_agent_config_for_provider(&ctx.agent_config_store.load(), ctx.provider);
+    let Some(mut session) = ctx
+        .agent_session_manager
+        .try_take_session_with_work_dir(&input.session_key, provider_agent_config.work_dir.clone())
+    else {
         handle_busy_message(
             &input.message_text,
             &input.session_key,
@@ -820,9 +827,27 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
     let guide_channel = ctx
         .queue_manager
         .get_or_create_guide_channel(&input.session_key);
+    let persisted_state = crate::im_gateway::session_state::load_session_state(
+        &input.session_key,
+        &settings.adapter,
+        Some(&effective.runner_id),
+    );
+    restore_session_from_persisted_history(
+        &mut session,
+        &input.session_key,
+        &settings.adapter,
+        Some(&effective.runner_id),
+        provider_agent_config
+            .history
+            .as_ref()
+            .and_then(|h| h.max_bytes),
+    );
     let mut current_message = input.message_text;
     let mut recorder = session.recorder.take();
-    let mut runner_metadata = std::collections::BTreeMap::new();
+    let mut runner_metadata = persisted_state
+        .as_ref()
+        .map(crate::im_gateway::session_state::metadata_from_state)
+        .unwrap_or_default();
 
     loop {
         if matches!(
@@ -917,6 +942,17 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                     &mut recorder,
                     &input.session_key,
                     &result,
+                );
+                remember_session_state_values(
+                    &input.session_key,
+                    &settings.adapter,
+                    Some(&effective.runner_id),
+                    session.external_conversation_id.clone(),
+                    session.external_thread_id.clone(),
+                    recorder
+                        .as_ref()
+                        .map(|recorder| recorder.file_path().display().to_string()),
+                    session.work_dir.clone(),
                 );
                 if !matches!(
                     delivery_mode,
@@ -1034,6 +1070,11 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
     if recorder.is_some() && !session.memory_cleared {
         session.recorder = recorder;
     }
+    remember_session_state_from_agent_session(
+        &session,
+        &settings.adapter,
+        Some(&effective.runner_id),
+    );
     ctx.queue_manager.clear_session(&input.session_key);
     ctx.agent_session_manager.return_session(session);
 }
@@ -1042,6 +1083,37 @@ pub(super) fn apply_external_cli_resume_metadata(
     request: &mut crate::im_gateway::external_cli::ExternalCliRunRequest,
     metadata: &std::collections::BTreeMap<String, String>,
 ) {
+    if request.adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID {
+        if request
+            .params
+            .get("conversationId")
+            .or_else(|| request.params.get("conversation_id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
+        {
+            return;
+        }
+        let Some(conversation_id) = metadata
+            .get("conversationId")
+            .or_else(|| metadata.get("conversation_id"))
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return;
+        };
+        if !request.params.is_object() {
+            request.params = serde_json::json!({});
+        }
+        if let Some(params) = request.params.as_object_mut() {
+            params.insert(
+                "conversationId".to_string(),
+                serde_json::Value::String(conversation_id.to_string()),
+            );
+        }
+        return;
+    }
     if request.adapter != "codex" {
         return;
     }

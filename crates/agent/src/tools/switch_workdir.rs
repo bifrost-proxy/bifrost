@@ -30,7 +30,7 @@ impl ToolHandler for SwitchWorkdirTool {
     }
 
     fn description(&self) -> &str {
-        "Switch the working directory of the current session. This clears conversation history and reloads project-specific configuration (AGENTS.md, skills) for the new directory. Use when the user explicitly asks to switch to a different project or directory."
+        "Switch the working directory of the current session. WARNING: This is a destructive operation — it clears ALL conversation history and reloads project-specific configuration (AGENTS.md, skills) for the new directory. ONLY invoke this tool when the user has EXPLICITLY and UNAMBIGUOUSLY requested to switch/change the working directory (e.g., 'switch to /path/to/project', 'change working directory to ...'). NEVER invoke this tool when the user merely mentions, discusses, references, or asks about a directory path. When in doubt, ask the user for confirmation before calling this tool."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -53,6 +53,7 @@ impl ToolHandler for SwitchWorkdirTool {
                 return ToolResult {
                     success: false,
                     output: format!("invalid arguments: {e}"),
+                    runtime_events: Vec::new(),
                 }
             }
         };
@@ -64,6 +65,7 @@ impl ToolHandler for SwitchWorkdirTool {
             return ToolResult {
                 success: false,
                 output: format!("path must be absolute, got: {}", args.path),
+                runtime_events: Vec::new(),
             };
         }
 
@@ -72,6 +74,7 @@ impl ToolHandler for SwitchWorkdirTool {
             return ToolResult {
                 success: false,
                 output: format!("directory does not exist: {}", args.path),
+                runtime_events: Vec::new(),
             };
         }
 
@@ -80,6 +83,7 @@ impl ToolHandler for SwitchWorkdirTool {
         ToolResult {
             success: true,
             output: format!("SWITCH_WORKDIR:{}", args.path),
+            runtime_events: Vec::new(),
         }
     }
 }

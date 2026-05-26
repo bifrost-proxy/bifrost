@@ -23,13 +23,21 @@ use crate::handlers::asr_streaming::WholeFileTranscription;
 
 pub const ASR_MEMORY_LIMIT_ERROR_MARKER: &str = "asr cli exceeded memory footprint limit";
 pub const ASR_ABORTED_ERROR_MARKER: &str = "asr cli aborted by task control";
+pub const ASR_TIMEOUT_ERROR_MARKER: &str = "asr cli exceeded wall-clock timeout";
 
 const ASR_MAX_FOOTPRINT_MB_ENV: &str = "BIFROST_ASR_MAX_FOOTPRINT_MB";
 const ASR_UNSAFE_DISABLE_FOOTPRINT_GUARD_ENV: &str = "BIFROST_ASR_UNSAFE_DISABLE_FOOTPRINT_GUARD";
 const ASR_PHYSICAL_SAMPLE_INTERVAL_SECS_ENV: &str = "BIFROST_ASR_PHYSICAL_SAMPLE_INTERVAL_SECS";
+const ASR_CHUNK_TIMEOUT_SECS_ENV: &str = "BIFROST_ASR_CHUNK_TIMEOUT_SECS";
+const ASR_MIN_CHUNK_TIMEOUT_SECS_ENV: &str = "BIFROST_ASR_MIN_CHUNK_TIMEOUT_SECS";
+const ASR_TIMEOUT_MULTIPLIER_ENV: &str = "BIFROST_ASR_TIMEOUT_MULTIPLIER";
 const ASR_DEFAULT_MODEL_LIMIT_MB: u64 = 12 * 1024;
 const ASR_MODEL_LIMIT_06B_MB: u64 = 8 * 1024;
 const ASR_MODEL_LIMIT_17B_MB: u64 = 18 * 1024;
+const ASR_DEFAULT_CHUNK_TIMEOUT_SECS: u64 = 120;
+const ASR_DEFAULT_MIN_CHUNK_TIMEOUT_SECS: u64 = 45;
+const ASR_DEFAULT_TIMEOUT_MULTIPLIER: u64 = 3;
+const ASR_MAX_TIMEOUT_MULTIPLIER: u64 = 12;
 const ASR_HOST_MEMORY_SAFETY_PERCENT: u64 = 90;
 const ASR_MIN_HOST_SAFETY_MB: u64 = 4 * 1024;
 const ASR_FOOTPRINT_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -61,10 +69,11 @@ pub fn run_asr_cli(
         language,
         default_footprint_limit_bytes(model_path),
         None,
+        None,
     )
 }
 
-/// Fork the native `asr` CLI with memory guard plus an optional abort check.
+/// Fork the native `asr` CLI with memory guard, wall-clock timeout, and optional abort check.
 ///
 /// Apple Silicon Metal allocations can show up in `vmmap` physical footprint
 /// while `ps` RSS remains modest. Some Qwen3-ASR-1.7B chunks can climb past
@@ -73,11 +82,12 @@ pub fn run_asr_cli(
 /// `abort_check` is used by ASR directory tasks for force-pause. It is polled
 /// in the same loop as the footprint guard so a running Metal inference can be
 /// killed promptly instead of waiting for the current chunk boundary.
-pub fn run_asr_cli_with_footprint_guard_and_abort(
+pub fn run_asr_cli_with_footprint_guard_timeout_and_abort(
     asr_bin: &Path,
     model_path: &Path,
     audio: &Path,
     language: &str,
+    max_runtime: Option<Duration>,
     abort_check: Option<Box<dyn Fn() -> bool + Send>>,
 ) -> Result<WholeFileTranscription, String> {
     run_asr_cli_inner(
@@ -87,6 +97,7 @@ pub fn run_asr_cli_with_footprint_guard_and_abort(
         language,
         default_footprint_limit_bytes(model_path),
         abort_check,
+        max_runtime,
     )
 }
 
@@ -97,6 +108,7 @@ fn run_asr_cli_inner(
     language: &str,
     footprint_limit_bytes: Option<u64>,
     abort_check: Option<Box<dyn Fn() -> bool + Send>>,
+    max_runtime: Option<Duration>,
 ) -> Result<WholeFileTranscription, String> {
     tracing::debug!(
         asr_bin = %asr_bin.display(),
@@ -125,7 +137,7 @@ fn run_asr_cli_inner(
         "ASR CLI child started"
     );
 
-    if footprint_limit_bytes.is_some() || abort_check.is_some() {
+    if footprint_limit_bytes.is_some() || abort_check.is_some() || max_runtime.is_some() {
         let pid = child.id();
         let mut peak = 0u64;
         let mut footprint_sample_failures = 0u32;
@@ -139,6 +151,21 @@ fn run_asr_cli_inner(
                 Ok(Some(_status)) => break,
                 Ok(None) => {}
                 Err(error) => return Err(format!("wait asr cli: {error}")),
+            }
+
+            if let Some(max_runtime) = max_runtime {
+                if started.elapsed() >= max_runtime {
+                    terminate_child_process_group(pid, &mut child);
+                    let output = child
+                        .wait_with_output()
+                        .map_err(|e| format!("wait timed out asr cli: {e}"))?;
+                    return Err(format!(
+                        "{ASR_TIMEOUT_ERROR_MARKER}: pid={pid} timeout_secs={} peak_mb={} stderr={}",
+                        max_runtime.as_secs(),
+                        peak / 1024 / 1024,
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ));
+                }
             }
 
             if abort_check.as_ref().is_some_and(|check| check()) {
@@ -276,6 +303,34 @@ pub(crate) fn default_footprint_limit_bytes(model_path: &Path) -> Option<u64> {
         .and_then(|value| value.parse::<u64>().ok());
     let limit_mb = effective_footprint_limit_mb(safe_limit_mb, configured_limit_mb);
     (limit_mb > 0).then_some(limit_mb.saturating_mul(1024 * 1024))
+}
+
+pub(crate) fn asr_chunk_timeout(chunk_duration_secs: u64) -> Duration {
+    if let Ok(value) = std::env::var(ASR_CHUNK_TIMEOUT_SECS_ENV) {
+        if let Ok(secs) = value.parse::<u64>() {
+            if secs > 0 {
+                return Duration::from_secs(secs);
+            }
+        }
+    }
+    let duration_secs = chunk_duration_secs.max(1);
+    let min_timeout_secs = std::env::var(ASR_MIN_CHUNK_TIMEOUT_SECS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(ASR_DEFAULT_MIN_CHUNK_TIMEOUT_SECS)
+        .min(ASR_DEFAULT_CHUNK_TIMEOUT_SECS);
+    let timeout_multiplier = std::env::var(ASR_TIMEOUT_MULTIPLIER_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(ASR_DEFAULT_TIMEOUT_MULTIPLIER)
+        .min(ASR_MAX_TIMEOUT_MULTIPLIER);
+    Duration::from_secs(
+        duration_secs
+            .saturating_mul(timeout_multiplier)
+            .clamp(min_timeout_secs, ASR_DEFAULT_CHUNK_TIMEOUT_SECS),
+    )
 }
 
 fn env_flag_enabled(key: &str) -> bool {
@@ -583,11 +638,12 @@ mod tests {
             std::fs::set_permissions(&script, permissions).unwrap();
         }
 
-        let result = run_asr_cli_with_footprint_guard_and_abort(
+        let result = run_asr_cli_with_footprint_guard_timeout_and_abort(
             &script,
             Path::new("/tmp/model"),
             Path::new("/tmp/audio.wav"),
             "chinese",
+            None,
             Some(Box::new(|| true)),
         );
 

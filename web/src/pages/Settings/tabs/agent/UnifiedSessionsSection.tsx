@@ -31,6 +31,8 @@ const { Text } = Typography;
 interface UnifiedSession {
   session_key: string;
   status: "active" | "ended";
+  running?: boolean;
+  state?: string;
   source?: string;
   work_dir?: string;
   turns?: number;
@@ -120,6 +122,9 @@ export default function UnifiedSessionsSection({
   const canOpenSession = (record: UnifiedSession) =>
     record.status === "active" || Boolean(record.history_path);
 
+  const isRunningSession = (record: UnifiedSession) =>
+    record.status === "active" && record.running === true;
+
   const openSession = (record: UnifiedSession) => {
     if (record.status === "active") {
       onOpenSession?.(record.session_key, "active");
@@ -165,10 +170,13 @@ export default function UnifiedSessionsSection({
       ],
       onFilter: (value: unknown, record: UnifiedSession) =>
         record.status === value,
-      render: (val: string) =>
+      render: (val: string, record: UnifiedSession) =>
         val === "active" ? (
-          <Tag color="green" style={{ fontSize: 10, margin: 0 }}>
-            Active
+          <Tag
+            color={isRunningSession(record) ? "processing" : "green"}
+            style={{ fontSize: 10, margin: 0 }}
+          >
+            {isRunningSession(record) ? "Running" : "Active"}
           </Tag>
         ) : (
           <Tag color="default" style={{ fontSize: 10, margin: 0 }}>
@@ -335,7 +343,11 @@ export default function UnifiedSessionsSection({
         >
           {record.status === "active" ? (
             <Popconfirm
-              title="Delete this active session?"
+              title={
+                isRunningSession(record)
+                  ? "Delete this running session?"
+                  : "Delete this active session?"
+              }
               onConfirm={() => handleDeleteActive(record.session_key)}
             >
               <Button size="small" danger icon={<DeleteOutlined />} />

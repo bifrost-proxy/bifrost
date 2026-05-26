@@ -166,6 +166,44 @@ api.example.com h3://
 
 ---
 
+## upstreamUnsafeSsl
+
+为命中的单条规则允许不安全的上游 HTTPS 证书。适用于内网、自签名或测试环境上游，不需要通过启动参数全局开启 `--unsafe-ssl`。
+
+### 语法
+
+```
+pattern https://host:port upstreamUnsafeSsl://true
+```
+
+`true` 可替换为 `1` / `yes` / `on`；裸 `upstreamUnsafeSsl://` 也视为启用。需要在组合规则中显式关闭时，可写 `upstreamUnsafeSsl://false`。
+
+### 示例
+
+```txt
+qianchuan.jinritemai.com https://10.37.102.138:8080 upstreamUnsafeSsl://true
+qianchuan.jinritemai.com https://10.37.102.138:8080 upstreamUnsafeSsl://true excludeFilter:///account excludeFilter:///api
+```
+
+### 行为说明
+
+- 只影响 Bifrost 连接上游 HTTPS 服务时的证书校验。
+- 只对命中该规则的请求生效；其他请求仍执行默认安全校验。
+- 不改变客户端对 Bifrost CA 或目标站点证书的信任状态。
+- 可以与 `https://`、`host://`、`tunnel://` 等上游路由规则组合；它不会单独改变请求目标。
+- 对需要更精细匹配的路径应结合 `includeFilter`、`excludeFilter` 或正则过滤器使用。
+- 如果未配置该协议且上游 TLS 证书不可信，Bifrost 返回的默认错误响应会提示在匹配规则上追加 `upstreamUnsafeSsl://true`。
+
+### 测试用例
+
+| 测试场景 | 规则 | 预期 |
+| -------- | ---- | ---- |
+| 单规则允许不安全证书 | `test.com https://127.0.0.1:8443 upstreamUnsafeSsl://true` | 自签名 HTTPS 上游可以成功转发 |
+| 未命中规则仍保持安全校验 | `other.com https://127.0.0.1:8443` | 自签名 HTTPS 上游返回 TLS 校验失败 |
+| 失败提示可操作 | 未配置 `upstreamUnsafeSsl` 且上游证书不可信 | 默认错误响应 body 包含 `upstreamUnsafeSsl://true` 建议 |
+
+---
+
 ## proxy
 
 通过 HTTP 代理转发请求。
@@ -277,6 +315,7 @@ www.example.com host://backend.local resCors://*
 ## 注意事项
 
 1. **端口保留**：使用 `host` 时，原始请求的路径和查询参数会保留
-2. **Host 头部**：默认情况下，`Host` 头部会更新为目标主机
-3. **HTTPS 处理**：对于 HTTPS 请求，需要安装/信任 Bifrost CA 证书才能进行内容修改
-4. **优先级**：当前文档仅覆盖仓库内已实现并稳定支持的路由协议；如需查看历史设计，请以代码支持集为准
+2. **上游协议**：裸 `host:port` 会按 `host://` 路由，非 443/8443 端口默认使用明文 HTTP；如果目标服务在非标准端口上提供 HTTPS，必须显式写 `https://host:port`
+3. **Host 头部**：默认情况下，`Host` 头部会更新为目标主机
+4. **HTTPS 处理**：对于 HTTPS 请求，需要安装/信任 Bifrost CA 证书才能进行内容修改
+5. **优先级**：当前文档仅覆盖仓库内已实现并稳定支持的路由协议；如需查看历史设计，请以代码支持集为准

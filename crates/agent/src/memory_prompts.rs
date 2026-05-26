@@ -3,6 +3,25 @@
 //! Contains system prompts and templates used by the memory extraction (Phase 1),
 //! consolidation (Phase 2), and read-path injection pipeline. Aligned with the
 //! Codex memory writing agent prompt architecture.
+//!
+//! Token-based limits:
+//! - `MEMORY_SUMMARY_TOKEN_LIMIT`: controls how much of memory_summary.md is
+//!   injected into the read-path developer instructions (4000 tokens).
+//! - Codex reference: `MEMORY_TOOL_DEVELOPER_INSTRUCTIONS_SUMMARY_TOKEN_LIMIT = 2500`
+//!   but Bifrost's memory folder is flatter, so we allow 4000 tokens.
+
+/// Approximate bytes per token (aligned with Codex `APPROX_BYTES_PER_TOKEN = 4`).
+const APPROX_BYTES_PER_TOKEN: usize = 4;
+
+/// Token budget for memory summary injection into the read-path prompt.
+///
+/// Codex uses 2500 tokens; Bifrost allows 4000 due to its broader memory scope
+/// and lack of a separate retrieval backend.
+pub const MEMORY_SUMMARY_TOKEN_LIMIT: usize = 4_000;
+
+/// Token budget for the developer instructions block (consolidation prompt
+/// context injected alongside the summary). Aligned with Codex.
+pub const MEMORY_DEVELOPER_INSTRUCTIONS_TOKEN_LIMIT: usize = 2_500;
 
 // ---------------------------------------------------------------------------
 // Phase 1 — Extraction
@@ -805,3 +824,161 @@ rollout_summaries/2026-02-17T21-23-02-LN3m-weekly_memory_report_pivot_from_git_h
 When memory is likely relevant, start with the quick memory pass above before
 deep repo exploration.
 "#;
+
+// ---------------------------------------------------------------------------
+// Token-based Truncation
+// ---------------------------------------------------------------------------
+
+/// Truncate text to approximately `max_tokens` tokens.
+///
+/// Uses a simple byte-based heuristic (`bytes / 4 ≈ tokens`) aligned with
+/// Codex's `APPROX_BYTES_PER_TOKEN`. Preserves the beginning of text (which
+/// typically contains the most important structural information like headings
+/// and user profile) and appends a truncation marker.
+///
+/// This replaces the previous character-based `MEMORY_SUMMARY_TOKEN_LIMIT_CHARS`
+/// approach with a proper token-aware limit.
+pub fn truncate_to_token_limit(text: &str, max_tokens: usize) -> String {
+    if text.is_empty() || max_tokens == 0 {
+        return String::new();
+    }
+
+    let max_bytes = max_tokens.saturating_mul(APPROX_BYTES_PER_TOKEN);
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+
+    // Find a valid UTF-8 boundary near max_bytes.
+    let mut cut = max_bytes.min(text.len());
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+
+    // Try to cut at a line boundary for cleaner truncation.
+    if let Some(last_newline) = text[..cut].rfind('\n') {
+        // Only use line boundary if it doesn't lose more than 20% of budget.
+        if last_newline >= cut * 4 / 5 {
+            cut = last_newline + 1;
+        }
+    }
+
+    let approx_remaining_tokens = (text.len() - cut).div_ceil(APPROX_BYTES_PER_TOKEN);
+    format!(
+        "{}\n\n[…truncated — approximately {} more tokens not shown…]",
+        &text[..cut].trim_end(),
+        approx_remaining_tokens
+    )
+}
+
+/// Truncate text using head+tail preservation strategy (middle truncation).
+///
+/// Keeps both the beginning and end of text visible, replacing the middle
+/// with a truncation marker. This is useful for rollout contents where both
+/// the initial context and the final outcome are important.
+pub fn truncate_to_token_limit_middle(text: &str, max_tokens: usize) -> String {
+    if text.is_empty() || max_tokens == 0 {
+        return String::new();
+    }
+
+    let max_bytes = max_tokens.saturating_mul(APPROX_BYTES_PER_TOKEN);
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+
+    let total_tokens = text.len().div_ceil(APPROX_BYTES_PER_TOKEN);
+    // Reserve 40 bytes for the marker itself.
+    let keep_bytes = max_bytes.saturating_sub(60);
+    let left_budget = keep_bytes / 2;
+    let right_budget = keep_bytes - left_budget;
+
+    let mut left_end = left_budget.min(text.len());
+    while left_end > 0 && !text.is_char_boundary(left_end) {
+        left_end -= 1;
+    }
+
+    let mut right_start = text.len().saturating_sub(right_budget);
+    while right_start < text.len() && !text.is_char_boundary(right_start) {
+        right_start += 1;
+    }
+
+    if right_start <= left_end {
+        right_start = left_end;
+    }
+
+    let removed_tokens = total_tokens.saturating_sub(max_tokens);
+    format!(
+        "{}…\n[{} tokens truncated]\n…{}",
+        &text[..left_end],
+        removed_tokens,
+        &text[right_start..]
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_to_token_limit_short_text_unchanged() {
+        let text = "Hello, world!";
+        let result = truncate_to_token_limit(text, 100);
+        assert_eq!(result, text);
+    }
+
+    #[test]
+    fn truncate_to_token_limit_empty_text() {
+        assert_eq!(truncate_to_token_limit("", 100), "");
+    }
+
+    #[test]
+    fn truncate_to_token_limit_zero_tokens() {
+        assert_eq!(truncate_to_token_limit("some text", 0), "");
+    }
+
+    #[test]
+    fn truncate_to_token_limit_truncates_long_text() {
+        // 4000 tokens ≈ 16000 bytes. Create text longer than that.
+        let text = "a".repeat(20_000);
+        let result = truncate_to_token_limit(&text, 4000);
+        assert!(result.len() < 20_000);
+        assert!(result.contains("[…truncated"));
+        assert!(result.contains("more tokens not shown"));
+    }
+
+    #[test]
+    fn truncate_to_token_limit_respects_utf8_boundaries() {
+        // Create text with multi-byte chars.
+        let text = "你好世界".repeat(5000); // Each char is 3 bytes.
+        let result = truncate_to_token_limit(&text, 100);
+        // Should be valid UTF-8 and not panic.
+        assert!(result.is_char_boundary(0));
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn truncate_to_token_limit_middle_short_text_unchanged() {
+        let text = "Hello, world!";
+        let result = truncate_to_token_limit_middle(text, 100);
+        assert_eq!(result, text);
+    }
+
+    #[test]
+    fn truncate_to_token_limit_middle_preserves_head_and_tail() {
+        let head = "HEAD_CONTENT_START ";
+        let middle = "m".repeat(20_000);
+        let tail = " TAIL_CONTENT_END";
+        let text = format!("{}{}{}", head, middle, tail);
+
+        let result = truncate_to_token_limit_middle(&text, 500);
+        assert!(result.contains("HEAD_CONTENT"));
+        assert!(result.contains("TAIL_CONTENT_END"));
+        assert!(result.contains("tokens truncated"));
+    }
+
+    #[test]
+    fn memory_summary_token_limit_is_reasonable() {
+        // 4000 tokens * 4 bytes/token = 16000 bytes ≈ 16KB
+        // This should comfortably fit a well-structured memory_summary.md.
+        assert_eq!(MEMORY_SUMMARY_TOKEN_LIMIT * APPROX_BYTES_PER_TOKEN, 16_000);
+    }
+}

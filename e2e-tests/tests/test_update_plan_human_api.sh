@@ -6,13 +6,25 @@ REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 cd "$REPO_DIR"
 
-BIFROST_PORT="${BIFROST_PORT:-${ADMIN_PORT:-18891}}"
-MOCK_PORT="${MOCK_PORT:-${MOCK_HTTP_PORT:-18892}}"
+pick_port() {
+  python3 - <<'PY'
+import socket
+with socket.socket() as s:
+    s.bind(("127.0.0.1", 0))
+    print(s.getsockname()[1])
+PY
+}
+
+BIFROST_PORT="${BIFROST_PORT:-${ADMIN_PORT:-$(pick_port)}}"
+MOCK_PORT="${MOCK_PORT:-${MOCK_HTTP_PORT:-$(pick_port)}}"
 TEST_DIR="$(mktemp -d)"
 MOCK_LOG="$TEST_DIR/mock-requests.jsonl"
 BIFROST_LOG="$TEST_DIR/bifrost.log"
+FIRST_RESPONSE_FILE="$TEST_DIR/agent-response-first.json"
+SECOND_RESPONSE_FILE="$TEST_DIR/agent-response-second.json"
+THIRD_RESPONSE_FILE="$TEST_DIR/agent-response-third.json"
 BIFROST_BIN="${BIFROST_BIN:-}"
-GATE_PROMPT="You already have an active task plan. Before concluding, call update_plan to reflect the final task state. If the work is complete, mark all steps as completed."
+GATE_PROMPT="You already have an active task plan. Before concluding, call update_plan with the complete current task snapshot. If the work is complete, mark all still-relevant steps as completed. Do not re-add steps that are no longer relevant to the current task."
 
 cleanup() {
   if [[ -n "${BIFROST_PID:-}" ]]; then
@@ -159,13 +171,91 @@ class Handler(BaseHTTPRequestHandler):
                 }
                 finish_reason = "tool_calls"
                 stage["value"] = 3
-            else:
+            elif current_stage == 3:
+                message = {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        tool_call(
+                            "call-plan-final-snapshot",
+                            "update_plan",
+                            json.dumps(
+                                {
+                                    "explanation": "Replace execution history with the final current snapshot",
+                                    "plan": [
+                                        {"step": "Deliver concise answer", "status": "completed"},
+                                    ],
+                                },
+                                ensure_ascii=False,
+                            ),
+                        )
+                    ],
+                }
+                finish_reason = "tool_calls"
+                stage["value"] = 4
+            elif current_stage == 4:
                 message = {
                     "role": "assistant",
                     "content": "最终总结：runtime 已经强制我先收口 update_plan，然后才允许结束。",
                 }
                 finish_reason = "stop"
-                stage["value"] = 4
+                stage["value"] = 5
+            elif current_stage == 5:
+                message = {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        tool_call(
+                            "call-plan-new-task",
+                            "update_plan",
+                            json.dumps(
+                                {
+                                    "explanation": "Start a fresh follow-up task",
+                                    "plan": [
+                                        {"step": "Handle follow-up question", "status": "completed"},
+                                    ],
+                                },
+                                ensure_ascii=False,
+                            ),
+                        )
+                    ],
+                }
+                finish_reason = "tool_calls"
+                stage["value"] = 6
+            elif current_stage == 6:
+                message = {
+                    "role": "assistant",
+                    "content": "第二次总结：新任务计划没有继承上一轮已完成步骤。",
+                }
+                finish_reason = "stop"
+                stage["value"] = 7
+            elif current_stage == 7:
+                message = {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        tool_call(
+                            "call-plan-clear",
+                            "update_plan",
+                            json.dumps(
+                                {
+                                    "explanation": "No active task plan applies now",
+                                    "plan": [],
+                                },
+                                ensure_ascii=False,
+                            ),
+                        )
+                    ],
+                }
+                finish_reason = "tool_calls"
+                stage["value"] = 8
+            else:
+                message = {
+                    "role": "assistant",
+                    "content": "第三次总结：当前没有需要展示的任务计划。",
+                }
+                finish_reason = "stop"
+                stage["value"] = 9
 
         response = {
             "choices": [{"message": message, "finish_reason": finish_reason}],
@@ -225,13 +315,12 @@ curl -fsS --noproxy '*' -X PATCH "$BASE" \
   }" >/dev/null
 
 echo "[update-plan-human-api] calling real agent chat API"
-RESPONSE_FILE="$TEST_DIR/agent-response.json"
 curl -fsS --noproxy '*' -X POST "$BASE/chat" \
   -H 'Content-Type: application/json' \
   -d '{"session_key":"update-plan-human-api","message":"请检查当前工作区，然后给我一个简短总结。"}' \
-  > "$RESPONSE_FILE"
+  > "$FIRST_RESPONSE_FILE"
 
-python3 - "$RESPONSE_FILE" "$MOCK_LOG" "$GATE_PROMPT" <<'PY'
+python3 - "$FIRST_RESPONSE_FILE" "$MOCK_LOG" "$GATE_PROMPT" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -245,14 +334,17 @@ assert response.get("success") is True, response
 assert "runtime 已经强制我先收口 update_plan" in response.get("response", ""), response
 
 plan_steps = response.get("plan_steps")
-assert isinstance(plan_steps, list) and len(plan_steps) == 2, response
+assert isinstance(plan_steps, list) and len(plan_steps) == 1, response
 assert all(step.get("status") == "completed" for step in plan_steps), plan_steps
-assert [step.get("step") for step in plan_steps] == ["Inspect workspace", "Summarize findings"], plan_steps
+assert [step.get("step") for step in plan_steps] == ["Deliver concise answer"], plan_steps
+assert all(step.get("step") not in {"Inspect workspace", "Summarize findings"} for step in plan_steps), plan_steps
 
 tool_calls = response.get("tool_calls")
 assert isinstance(tool_calls, list), response
 update_plan_calls = [call for call in tool_calls if call.get("tool_name") == "update_plan"]
-assert len(update_plan_calls) >= 2, tool_calls
+assert len(update_plan_calls) >= 3, tool_calls
+assert all(call.get("result") == "Plan updated" for call in update_plan_calls), update_plan_calls
+assert all("UPDATE_PLAN:" not in (call.get("result") or "") for call in update_plan_calls), update_plan_calls
 
 payloads = [json.loads(line) for line in mock_log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
 assert len(payloads) >= 4, len(payloads)
@@ -262,6 +354,52 @@ assert any(
     for message in payload.get("messages", [])
     if isinstance(message.get("content"), str)
 ), payloads
+PY
+
+echo "[update-plan-human-api] calling second chat API turn to verify fresh plan boundary"
+curl -fsS --noproxy '*' -X POST "$BASE/chat" \
+  -H 'Content-Type: application/json' \
+  -d '{"session_key":"update-plan-human-api","message":"再回答一个后续小问题，并只为这个新问题更新计划。"}' \
+  > "$SECOND_RESPONSE_FILE"
+
+python3 - "$SECOND_RESPONSE_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+response = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert response.get("success") is True, response
+assert "新任务计划没有继承上一轮已完成步骤" in response.get("response", ""), response
+plan_steps = response.get("plan_steps")
+assert isinstance(plan_steps, list), response
+assert plan_steps == [{"step": "Handle follow-up question", "status": "completed"}], plan_steps
+assert all(step.get("step") not in {"Inspect workspace", "Summarize findings"} for step in plan_steps), plan_steps
+update_plan_calls = [call for call in response.get("tool_calls", []) if call.get("tool_name") == "update_plan"]
+assert update_plan_calls and all(call.get("result") == "Plan updated" for call in update_plan_calls), response
+PY
+
+echo "[update-plan-human-api] calling third chat API turn to verify empty plan clears current snapshot"
+curl -fsS --noproxy '*' -X POST "$BASE/chat" \
+  -H 'Content-Type: application/json' \
+  -d '{"session_key":"update-plan-human-api","message":"现在这个后续问题不需要任务计划，请清空当前计划后简短回答。"}' \
+  > "$THIRD_RESPONSE_FILE"
+
+python3 - "$THIRD_RESPONSE_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+response = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert response.get("success") is True, response
+assert "当前没有需要展示的任务计划" in response.get("response", ""), response
+assert response.get("plan_steps") is None, response
+tool_calls = response.get("tool_calls")
+assert isinstance(tool_calls, list), response
+clear_calls = [call for call in tool_calls if call.get("tool_name") == "update_plan"]
+assert len(clear_calls) == 1, tool_calls
+assert json.loads(clear_calls[0]["arguments"])["plan"] == [], clear_calls[0]
+assert clear_calls[0].get("result") == "Plan updated", clear_calls[0]
+assert "UPDATE_PLAN:" not in (clear_calls[0].get("result") or ""), clear_calls[0]
 PY
 
 echo "[update-plan-human-api] PASS"

@@ -142,20 +142,22 @@ wait_pid() {
     if [ -z "$pid" ]; then
         return 0
     fi
-    if is_windows; then
-        local timeout=30
-        local elapsed=0
-        while kill -0 "$pid" 2>/dev/null; do
-            sleep 0.2
-            elapsed=$((elapsed + 1))
-            if [ "$elapsed" -ge "$((timeout * 5))" ]; then
-                return 1
-            fi
-        done
-        return 0
-    else
+
+    local timeout="${BIFROST_E2E_WAIT_PID_TIMEOUT:-30}"
+    local elapsed=0
+    while kill -0 "$pid" 2>/dev/null; do
+        sleep 0.2
+        elapsed=$((elapsed + 1))
+        if [ "$elapsed" -ge "$((timeout * 5))" ]; then
+            kill_pid_force "$pid"
+            return 1
+        fi
+    done
+
+    if ! is_windows; then
         wait "$pid" 2>/dev/null || true
     fi
+    return 0
 }
 
 python_cmd() {

@@ -180,6 +180,35 @@ The Bifrost-side mitigation is:
 
 This avoids turning a transient `physical footprint unavailable` condition into an unnecessary server death, which in turn reduces avoidable chunk fallback and repeated `error sending request for url (.../v1/audio/transcriptions)` metrics.
 
+### 2026-05-24 streaming timeout and server breaker guard
+
+Realtime streaming windows use the plain-text `/v1/audio/transcriptions` path through `call_asr_text_endpoint`. This path must fail quickly enough that a stuck or overloaded `asr-server` cannot stall websocket or microphone consumers for minutes. The request timeout is therefore bounded by `BIFROST_ASR_TEXT_REQUEST_TIMEOUT_SECS`, defaulting to 45 seconds. Whole-file `verbose_json` / text fallback keeps the duration-aware `BIFROST_ASR_SERVER_REQUEST_TIMEOUT_SECS` path so long offline files still have a bounded but larger budget.
+
+Native fork-per-chunk retries also use a tighter default budget for short chunks. `BIFROST_ASR_CHUNK_TIMEOUT_SECS` remains an explicit override, but without it the timeout is `chunk_duration_secs * BIFROST_ASR_TIMEOUT_MULTIPLIER`, clamped by `BIFROST_ASR_MIN_CHUNK_TIMEOUT_SECS` and 120 seconds. Defaults are multiplier `3` and minimum `45` seconds, so 10 second sub-chunks time out in 45 seconds and 30 second chunks time out in 90 seconds. This keeps timeout-triggered bisection responsive without reducing the 30 second chunk size or masking slow-but-healthy long-file server requests.
+
+Managed server recovery also now has a clear circuit breaker:
+
+1. every failed managed-server chunk increments `ServerRunnerState.server_failures` and persists `fallback_reason` on the metric/state;
+2. restartable failures still stop the failed process and may retry the current chunk on a fresh managed server;
+3. if consecutive failures reach `BIFROST_ASR_MAX_SERVER_FAILURES_PER_FILE` for `reuse_per_file` or `BIFROST_ASR_MAX_SERVER_FAILURES_PER_TASK` for task-scoped server strategies, `force_fork_for_remaining=true` and `restart_required=false`;
+4. subsequent chunks use `fork_per_chunk` isolation with a fallback reason that explicitly says `switching remaining chunks to fork_per_chunk isolation`, rather than silently attempting endless server restarts;
+5. successful managed-server chunks reset `server_failures=0`, preserving the fast path when the server recovers before the threshold.
+
+Timeout and guardrail failures in `memory_bisect.rs` now share the same bisection semantics: memory-limit kills and chunk timeouts skip same-size retries and split the current chunk into smaller subsegments. Child subsegment timeouts no longer abort the parent chunk immediately; the sibling/result merge path continues and only records a failed chunk when the minimum split boundary still cannot complete. This prevents a single 30 second timeout from becoming a permanent `partial_success` hole when smaller windows can still be transcribed.
+
+The managed `asr-server` fallback path intentionally no longer restarts the server before retrying the current failed chunk. On a server failure, Bifrost stops/marks the failed service, immediately retries the same chunk through `fork_per_chunk`, and only restarts a managed server before a later server-eligible chunk. That ordering avoids concurrent native ASR fallback and server model initialization competing for unified memory.
+
+The service watchdog warning path is rate-limited. Repeated RSS-only advisory samples or sampler errors while the process is still alive are written at most once per minute per warning class, with log lines explicitly containing `process_alive=true`. Reliable physical-footprint samples above the model-aware limit still kill the managed service immediately.
+
+Test coverage:
+
+- unit: `asr_runtime_timeouts_are_bounded_for_short_chunks` covers the 45s streaming text timeout default alongside whole-file bounds;
+- unit: `server_failure_recovery_reason_uses_fork_for_current_chunk` covers the current-chunk fork fallback wording and delayed server restart semantics;
+- unit: `server_failure_breaker_switches_remaining_chunks_to_fork` covers the breaker state transition;
+- unit: `service_watchdog_warning_log_is_rate_limited` covers repeated watchdog warning throttling;
+- unit: `reuse_server_failure_threshold_forces_remaining_fork_isolation` exercises `run_chunk_with_strategy` against the simulated `test-error:` managed-server path;
+- E2E: `e2e-tests/tests/test_qwen3_asr_runtime_guards.sh` runs the targeted Rust assertions without downloading or starting Qwen3-ASR.
+
 When an existing `partial_success` file is repaired through `POST /api/asr/tasks/<task_id>/files/<file_key>/retry-chunks`, recovered chunks must be merged back into every user-visible artifact:
 
 - replace the placeholder in the transcript `.txt`;

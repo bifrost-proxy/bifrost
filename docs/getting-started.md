@@ -10,6 +10,12 @@
 curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash
 ```
 
+默认安装完成后，脚本会自动完成一键体验初始化：
+
+- 安装并信任 Bifrost CA 证书。
+- 安装所有支持 AI 工具的 Bifrost skills。
+- 以后台服务启动 Bifrost。
+
 可选参数：
 
 ```bash
@@ -18,6 +24,9 @@ curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-
 
 # 安装指定版本
 curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash -s -- --version v0.2.0
+
+# 仅安装二进制，不自动安装证书、skills 或启动服务
+curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash -s -- --no-post-install
 ```
 
 ### Homebrew（macOS）

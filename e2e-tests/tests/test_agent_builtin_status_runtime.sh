@@ -50,6 +50,25 @@ wait_http() {
   return 1
 }
 
+wait_for_mock_log() {
+  local needle="$1"
+  local label="$2"
+  for _ in $(seq 1 160); do
+    if [[ -f "$MOCK_LOG" ]] && grep -Fq "$needle" "$MOCK_LOG"; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "[agent-builtin-status-runtime] mock model did not observe $label" >&2
+  if [[ -f "$MOCK_LOG" ]]; then
+    tail -n 20 "$MOCK_LOG" >&2 || true
+  fi
+  if [[ -s "$TOOL_CHAT_RESPONSE" ]]; then
+    cat "$TOOL_CHAT_RESPONSE" >&2 || true
+  fi
+  return 1
+}
+
 python3 - "$MOCK_PORT" "$MOCK_LOG" <<'PY' &
 import json
 import sys
@@ -148,7 +167,7 @@ class Handler(BaseHTTPRequestHandler):
             }
         elif "触发大输出工具" in joined and has_compacted_summary:
             # Keep the second-loop status observable under slower CI runners.
-            time.sleep(8.0)
+            time.sleep(15.0)
             response = {
                 "choices": [
                     {
@@ -196,6 +215,21 @@ class Handler(BaseHTTPRequestHandler):
                         "message": {
                             "role": "assistant",
                             "content": "large tool turn finished",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 5, "total_tokens": 17},
+            }
+        elif "请等待 mock 模型完成" in joined:
+            # Keep the first-loop status observable under slower CI runners.
+            time.sleep(15.0)
+            response = {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "mock turn finished",
                         },
                         "finish_reason": "stop",
                     }
@@ -276,11 +310,13 @@ curl -fsS --noproxy '*' -X POST "$BASE/chat" \
   >"$CHAT_RESPONSE" &
 CHAT_PID=$!
 
+wait_for_mock_log "请等待 mock 模型完成" "the first-loop model request"
+
 echo "[agent-builtin-status-runtime] querying /status while turn is active"
 for _ in $(seq 1 160); do
   curl -fsS --noproxy '*' -X POST "$BASE/chat" \
     -H 'Content-Type: application/json' \
-    -d '{"session_key":"agent-status-runtime","message":"/status"}' \
+    -d "{\"session_key\":\"agent-status-runtime\",\"work_dir\":\"$WORK_DIR\",\"message\":\"/status\"}" \
     >"$STATUS_RESPONSE"
   if python3 - "$STATUS_RESPONSE" "$WORK_DIR" <<'PY'
 import json
@@ -378,10 +414,12 @@ curl -fsS --noproxy '*' -X POST "$BASE/chat" \
   >"$TOOL_CHAT_RESPONSE" &
 CHAT_PID=$!
 
+wait_for_mock_log "Another language model started" "the compacted second-loop model request"
+
 for _ in $(seq 1 160); do
   curl -fsS --noproxy '*' -X POST "$BASE/chat" \
     -H 'Content-Type: application/json' \
-    -d '{"session_key":"agent-status-runtime-tool-growth","message":"/status"}' \
+    -d "{\"session_key\":\"agent-status-runtime-tool-growth\",\"work_dir\":\"$WORK_DIR\",\"message\":\"/status\"}" \
     >"$TOOL_STATUS_RESPONSE"
   if python3 - "$TOOL_STATUS_RESPONSE" "$TOOL_ACTIVE_STATUS_RESPONSE" <<'PY'
 import json

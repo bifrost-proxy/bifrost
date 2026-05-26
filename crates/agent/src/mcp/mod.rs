@@ -914,6 +914,7 @@ impl McpManager {
         Ok(ToolResult {
             success: !is_error,
             output: content,
+            runtime_events: Vec::new(),
         })
     }
 
@@ -954,6 +955,7 @@ impl McpManager {
         Ok(ToolResult {
             success: true,
             output,
+            runtime_events: Vec::new(),
         })
     }
 

@@ -9,6 +9,7 @@
 1. **计划语义仍由模型负责**：步骤内容、状态迁移仍由模型通过 `update_plan` 明确表达。
 2. **计划生命周期由 runtime 强制闭环**：一旦会话中存在 active plan，模型在最终回答前必须把计划收口到最终状态。
 3. **展示层只渲染 runtime 状态**：IM 卡片和 API 返回都基于 `AgentSession.current_plan`，不再依赖当前 turn 的临时提取结果。
+4. **计划边界与用户 turn 对齐**：同一 turn 内保留已完成步骤，避免模型回退；已完成计划进入下一条普通用户消息时清空，避免旧任务 completed 步骤污染新任务。
 
 plan 是真实运行态，而不是 prompt + UI 拼接出来的附属物。
 
@@ -85,6 +86,8 @@ pub struct AgentSession {
   - runtime 在“最终回答前强制收口”时的有限重试计数。
   - 防止模型异常时无限循环。
 
+计划持久化新增 `plan_cleared` 事件：当已完成计划在下一条普通用户消息开始前被清空时写入 JSONL，恢复 session runtime state 时该事件会把 `current_plan` 还原为 `None`。
+
 同时增加两个辅助逻辑：
 
 - `plan_has_unfinished_steps(plan)`
@@ -92,6 +95,12 @@ pub struct AgentSession {
 - `extract_plan_update(tool_calls_log)`
   - 从最新成功的 `update_plan` 中解析 `UpdatePlanArgs.plan`。
   - 解析成功后更新 `session.current_plan`，并重置 `plan_repair_attempts`。
+- `clear_completed_plan_for_new_turn(session)`
+  - 只在普通非斜杠用户消息开始前运行。
+  - 若上一轮计划已经全部 `completed`，清空 `current_plan`、重置 repair 计数、推送空 plan 到 runtime 展示通道，并持久化 `plan_cleared`。
+- `reconcile_plan_update(current, incoming)`
+  - 同一 turn 内保留旧的 completed 步骤，防止同一任务中模型漏带或回退已完成步骤。
+  - 新任务边界通过 turn 开始时清空 completed plan 实现隔离，避免旧 completed 步骤进入新任务 reconcile 输入。
 
 ### 3. Turn loop 闭环策略
 
@@ -102,6 +111,7 @@ pub struct AgentSession {
 - 从最新 `update_plan` 成功调用中解析出 `Vec<PlanStep>`
 - 写入 `session.current_plan`
 - 推送到 `plan_sender`，让 IM 卡片实时刷新
+- 在同一 turn 内 reconcile 已完成步骤：如果模型后续 `update_plan` 漏带或回退已完成步骤，runtime 会保留这些 completed 步骤，避免卡片进度倒退。
 
 这样 plan 的真相来源变成 `session.current_plan`，而不是局部变量。
 
@@ -132,6 +142,16 @@ pub struct AgentSession {
 - API 返回与 IM 卡片展示基于同一份 plan 状态
 - 多轮 iteration 下不会因为局部变量遗漏导致状态丢失
 
+#### 3.4 已完成计划的新 turn 清理
+
+当用户在同一 `session_key` 中开启下一条普通消息时，如果上一轮 `current_plan` 已全部 completed：
+
+- runtime 在模型调用前清空 `current_plan`
+- 记录 `plan_cleared(reason = "new_turn_after_completion")`
+- 向进度/计划通道推送空 plan，让展示层不再沿用旧任务状态
+
+该清理只发生在普通用户消息；斜杠命令、状态查询等控制命令不会触发新任务 plan 语义。
+
 ### 4. 展示层（im_gateway.rs）
 
 展示层逻辑保持不变，继续通过 `plan_sender` 监听 plan 更新并刷新同一张飞书卡片：
@@ -152,6 +172,7 @@ pub struct AgentSession {
 4. runtime 阻止直接结束，要求模型补一次 `update_plan`。
 5. 模型把计划收口为最终状态（通常全部 `completed`）。
 6. 最终答复与 IM 卡片、API 返回中的 `plan_steps` 一致。
+7. 用户下一条普通消息开始新任务时，旧 completed 计划被 runtime 清空；新任务第一次 `update_plan` 只展示新步骤。
 
 ## 测试方案
 
@@ -162,6 +183,9 @@ pub struct AgentSession {
 - `plan_has_unfinished_steps`：验证 pending / in_progress / all completed 三种情况
 - `extract_plan_update`：验证可从 `UPDATE_PLAN:{json}` 提取计划
 - `plan repair gate`：验证已有 active plan 且未完成时，不会直接结束而会进入 repair 分支
+- `clear_completed_plan_for_new_turn`：验证 completed plan 在下一条普通消息前清空、重置 repair 计数并发送空 plan 进度事件
+- `reconcile_plan_update`：验证同一 turn 内会保留旧 completed 步骤，且不会回退已完成状态
+- `plan_cleared` 持久化 round trip：验证恢复 runtime state 时 `plan_cleared` 会清空历史 plan
 
 ### 接口化 E2E 测试
 
@@ -171,6 +195,7 @@ pub struct AgentSession {
 2. 使用临时数据目录启动服务
 3. 调用 Agent 对话接口触发 `update_plan`
 4. 验证最终 API 返回的 `plan_steps` 已收口为预期状态
+5. 使用同一 `session_key` 发起第二轮普通对话，验证新任务 `plan_steps` 不包含第一轮已完成步骤
 
 ### 真实场景测试
 
@@ -178,4 +203,5 @@ pub struct AgentSession {
 
 - 补充“任务完成但模型先忘记收口时，runtime 会强制补收口”用例
 - 补充“最终 API plan_steps 与实时 plan card 一致”用例
+- 补充“同一 session 下一轮新任务不会继承上一轮 completed 计划”用例
 - 按文档逐条真实执行

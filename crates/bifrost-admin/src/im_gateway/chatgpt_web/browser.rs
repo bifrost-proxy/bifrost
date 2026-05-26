@@ -288,6 +288,44 @@ pub(super) struct BrowserSession {
 }
 
 impl BrowserSession {
+    pub(super) async fn kill_headless_for_profile(config: &RuntimeConfig) {
+        let profile = config.profile_dir.clone();
+        let mut killed_any = false;
+        if let Some(port_entry) = browser_ports().get(&profile) {
+            let (_, cached_headless) = *port_entry;
+            drop(port_entry);
+            if cached_headless {
+                if let Some((_, pid)) = browser_pids().remove(&profile) {
+                    info!(
+                        pid,
+                        profile_dir = %profile.display(),
+                        "chatgpt_web browser: killing cached headless browser before headed login"
+                    );
+                    kill_process(pid);
+                    killed_any = true;
+                }
+                browser_ports().remove(&profile);
+                clear_conversation_tabs_for_profile(&profile);
+            }
+        }
+        let profile_str = profile.display().to_string();
+        for pid in find_headless_browser_pids_for_profile(&profile_str).await {
+            info!(
+                pid,
+                profile_dir = %profile.display(),
+                "chatgpt_web browser: killing orphaned headless browser before headed login"
+            );
+            kill_process(pid);
+            killed_any = true;
+        }
+        if killed_any {
+            browser_ports().remove(&profile);
+            browser_pids().remove(&profile);
+            clear_conversation_tabs_for_profile(&profile);
+            sleep(Duration::from_millis(500)).await;
+        }
+    }
+
     /// Get a reusable browser or launch a new one for the given profile.
     /// The browser is kept alive between send operations for performance and stability.
     /// A per-profile mutex ensures only one concurrent caller actually launches;
@@ -405,15 +443,6 @@ impl BrowserSession {
             }
         }
         Ok(session)
-    }
-
-    pub(super) async fn launch(
-        config: &RuntimeConfig,
-        headless: bool,
-        url: &str,
-    ) -> Result<Self, String> {
-        let kill_on_drop = headless || !config.browser.keep_browser_open_after_login;
-        Self::launch_with_options(config, headless, url, kill_on_drop).await
     }
 
     async fn launch_with_options(
@@ -890,6 +919,33 @@ async fn find_orphaned_browser_from_processes(profile_str: &str) -> Option<(u16,
     .await
     .ok()
     .flatten()
+}
+
+async fn find_headless_browser_pids_for_profile(profile_str: &str) -> Vec<u32> {
+    let profile_str = profile_str.to_string();
+    tokio::task::spawn_blocking(move || {
+        let output = std::process::Command::new("ps")
+            .args(["axo", "pid,command"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut pids = Vec::new();
+        for line in stdout.lines() {
+            let Some((pid, _)) = browser_process_pid_from_line(line, &profile_str) else {
+                continue;
+            };
+            if line.contains("--headless") {
+                pids.push(pid);
+            }
+        }
+        Some(pids)
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_default()
 }
 
 fn browser_process_pid_from_line(line: &str, profile_str: &str) -> Option<(u32, bool)> {

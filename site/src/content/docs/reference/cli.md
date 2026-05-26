@@ -57,6 +57,7 @@ bifrost <command> <subcommand> --help
 | `admin` | 管理 Admin 远程访问、密码、会话、审计日志 | [管理端远程访问与鉴权](#管理端远程访问与鉴权admin) |
 | `traffic` / `search` | 查看、获取、搜索、清除流量记录 | [流量查看与搜索](#流量查看与搜索) |
 | `install-skill` | 安装 Bifrost Agent Skill 文档到 AI coding tools | [安装 Skill](#安装-skillinstall-skill) |
+| `ai voice` | 本地语音输入 runtime：来源探测、监听、词汇管理 | [本地语音输入](#本地语音输入ai-voice) |
 | `completions` | 生成 shell 补全脚本 | [Shell 补全](#shell-补全completions) |
 | `metrics` | 查看实时指标和历史指标 | [指标](#指标metrics) |
 | `sync` | 登录、退出、触发、配置远端同步服务 | [同步](#同步sync) |
@@ -697,10 +698,41 @@ bifrost im send --image-file ./alert.png
 bifrost im send --card-title "Deploy report" --card-text "**Done**" --card-image-file ./chart.png
 bifrost im route add deploy --event message.receive --regex '^/deploy' --script-file ./deploy.sh
 bifrost im schedule add health --target oncall --cron '*/5 * * * *' --script-file ./check.sh
+bifrost im schedule add agent-daily --target oncall --cron '0 9 * * *' --agent-prompt 'Summarize traffic' --agent-runner-id codex --agent-model gpt-5 --agent-reasoning-effort high --agent-enable web_search
 bifrost im messages list --direction inbound
 ```
 
 需要 provider 的 IM 命令都支持 `--provider <id>` 显式指定。未提供 `--provider` 时，CLI 会复用统一选择逻辑：只有一个 enabled provider 时自动选择；多个 enabled provider 且处于交互式终端时展示列表让用户选择；多个 provider 且 stdin 非交互时会要求显式传 `--provider`。`bifrost im send` 未传 `--target` 时默认发送给所选 provider 的 owner，因此 provider 需要配置 `owner_open_id`（可在创建时用 `--owner-open-id`，或由后端连接飞书后自动检测）。
+
+Agent 配置支持 `default_message_channel`，用于给 turn 级 `send_msg` 工具和 Agent 创建的 schedule 提供默认 IM 发送目标。手动创建 schedule 时仍应显式绑定目标（例如 `--target oncall`，或 API 的 `message_channel`），避免任务执行时把通知发到最近一次对话；通过 IM 消息触发的 Agent 创建 schedule 时会自动继承当前来源通道，通过 `/agent/chat` 创建时会回退到 `default_message_channel`。
+
+`bifrost im schedule add/update` 创建 Agent schedule 时可用 `--agent-runner-id` 选择 Runner，并通过 `--agent-model`、`--agent-profile`、`--agent-profile-v2`、`--agent-sandbox`、`--agent-reasoning-effort`、`--agent-reasoning-summary`、`--agent-approval-policy`、`--agent-danger-full-access`、`--agent-bypass-hook-trust`、`--agent-skip-git-repo-check`、`--agent-ignore-user-config`、`--agent-ignore-rules`、`--agent-add-dir`、`--agent-config`、`--agent-enable`、`--agent-disable` 等参数写入 `agent.adapter_config`。这些 schedule 级参数会在运行时覆盖 Runner 默认 Codex adapter 配置；历史 `--agent-search` 仅作为兼容入口映射为 `--enable web_search`，不再生成当前 Codex CLI 不支持的 `--search`。
+
+### 本地语音输入（ai voice）
+
+`bifrost ai voice` 管理本机 Voice Input Runtime。它只使用本地 ASR 能力；原始音频默认不上传云端、不落盘。系统音频和单应用音频会先返回能力状态，权限或平台不满足时返回 `needs_permission` / `unsupported` / `source_unavailable`，不会静默录制。
+
+```bash
+bifrost ai voice sources --json
+bifrost ai voice listen --source mic --duration 15 --model Qwen3-ASR-0.6B --chunk-ms 1000 --format jsonl
+bifrost ai voice listen --source file --input-file ./sample.wav --duration 7 --model Qwen3-ASR-0.6B --chunk-ms 1000 --format jsonl
+bifrost ai voice listen --source file --input-file ./sample.wav --duration 7 --model Qwen3-ASR-0.6B --provider qwen3_stateful_streaming --format jsonl
+bifrost ai voice listen --source file --input-file ./sample.wav --duration 7 --model Qwen3-ASR-1.7B --provider qwen3_stateful_streaming --allow-stateful-large-model --format jsonl
+bifrost -p 18887 ai asr start --model Qwen3-ASR-0.6B --language chinese
+bifrost ai voice listen --source mic --dry-run --text "请打开宽增"
+bifrost ai voice vocabulary import ./terms.txt
+bifrost ai voice vocabulary list --json
+```
+
+词汇文件格式为每行一个 `canonical=alias1,alias2`，例如：
+
+```txt
+Bifrost=宽增,白 Frost
+```
+
+V1 中 `listen --source mic` 在 macOS 上通过本机 `ffmpeg` 持续输出 16kHz mono PCM。CLI 会连接当前 Bifrost 管理端的 `/_bifrost/api/voice/listen-ws`，等本机 Voice service ready 后再开始推送音频，并持续把服务端返回的 `asr_partial/asr_stable_delta/asr_final_utterance/done` 事件打印到 stdout。Voice 实时输入只支持 `qwen3_stateful_streaming` provider：每个 Voice WebSocket session 都由 Bifrost daemon 拉起独立 `bifrost ai voice worker` 子进程，worker 内部创建 Rust `qwen3-asr` `StreamingState`，daemon 通过 stdio 持续喂 PCM chunk 并流式返回 partial/stable/final，避免模型加载和推理占用代理主进程资源；旧的 ASR server 窗口式 realtime provider 不再作为 Web/CLI 实时输入方案。`asr_partial` 是可变的实时假设，UI 可以局部替换展示；只有静音边界、Finish/Stop 或最长连续 utterance 边界触发的 `asr_stable_delta` / `asr_final_utterance` 才会追加到 committed transcript。Voice 输入默认使用 `Qwen3-ASR-0.6B` 降低本机资源压力；`Qwen3-ASR-1.7B` 必须在高性能机器上显式传 `--allow-stateful-large-model`，Web/WS 调用可传 `allow_stateful_17b=1`，自动化实验也可继续使用 `BIFROST_VOICE_ALLOW_STATEFUL_17B=1`。`--chunk-ms` 作为 stateful streaming chunk size 传给本地模型，不会触发 HTTP whole-file 窗口转写。离线文件转写继续使用 `bifrost ai asr ...` 管理的本机 ASR server；`--source file --input-file` 属于实时链路的文件回放，会使用 `ffmpeg -re` 以实时速度推流验证 Web/CLI realtime 行为。`--source system` 和 `--source app` 先提供 capability 状态与明确错误，真实捕获将在 source discovery、权限和 Core Audio / ScreenCaptureKit 集成就绪后启用。
+
+资源边界：实时 session 收到 1 秒左右静音会提交当前 partial 并关闭当前 worker；连续说话约 30 秒会强制形成一次 stable boundary，避免 transcript 和 `StreamingState` 无界增长；如果 Start 后持续静音或 WebSocket 长时间没有音频，daemon 会先提交已有 partial，再停止/卸载 worker，并可发送 `worker_idle_unloaded` 事件。
 
 IM Gateway 子命令按对象划分：
 

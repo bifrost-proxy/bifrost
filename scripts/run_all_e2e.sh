@@ -720,9 +720,16 @@ run_shell_tests_parallel() {
   # These tests spawn long-lived bifrost/python children that escape the
   # per-test subshell trap. Run serially and call kill_all_bifrost after each
   # to prevent orphan processes from holding the parent job's wait/cleanup.
+  # Remote shell streaming owns a relay, target bifrost, caller process, and
+  # SSE worker; traffic DB and OpenAI-like SSE search own bifrost processes
+  # plus mock traffic generators. Linux CI has observed these tests stall when
+  # they run inside the parallel shell batch under shard load.
   local ISOLATED_AFTER_TESTS=(
     "test_remote_connect_overload_retry_e2e.sh"
     "test_client_process_transport_attribution.sh"
+    "test_remote_shell_exec_streaming_e2e.sh"
+    "test_traffic_db_e2e.sh"
+    "test_openai_like_sse_search_e2e.sh"
   )
 
   for script_name in "${shell_tests[@]}"; do
@@ -845,6 +852,7 @@ run_shell_batch_parallel() {
   local port_step="$3"
 
   local pids=()
+  local pid_child_files=()
   local pid_scripts=()
   local pid_logs=()
   local pid_starts=()
@@ -862,6 +870,7 @@ run_shell_batch_parallel() {
       local log_slug
       log_slug="$(printf 'shell_%s' "$script_name" | tr ' /:.' '____' | tr -cd '[:alnum:]_.-')"
       local log_file="$REPORT_DIR/${log_slug}.log"
+      local child_pid_file="$REPORT_DIR/${log_slug}.child.pid"
       local start_ts
       start_ts="$(date +%s)"
 
@@ -870,34 +879,68 @@ run_shell_batch_parallel() {
       (
         shell_data_dir="$(mktemp -d "$E2E_SANDBOX_DIR/shell-${log_slug}-XXXXXX")"
         trap 'kill $(jobs -p) 2>/dev/null || true; rm -rf "$shell_data_dir" 2>/dev/null || true' EXIT
-        ADMIN_PORT="$shell_admin_port" \
-        ADMIN_HOST="127.0.0.1" \
-        PROXY_PORT="$shell_port" \
-        PROXY_HOST="127.0.0.1" \
-        ECHO_HTTP_PORT="$((shell_port + 1))" \
-        HTTP_PORT="$((shell_port + 1))" \
-        MOCK_HTTP_PORT="$((shell_port + 1))" \
-        ECHO_HTTPS_PORT="$((shell_port + 2))" \
-        HTTPS_PORT="$((shell_port + 2))" \
-        HTTPS_MOCK_PORT="$((shell_port + 2))" \
-        ECHO_WS_PORT="$((shell_port + 3))" \
-        WS_PORT="$((shell_port + 3))" \
-        MOCK_WS_PORT="$((shell_port + 3))" \
-        ECHO_WSS_PORT="$((shell_port + 4))" \
-        WSS_PORT="$((shell_port + 4))" \
-        ECHO_SSE_PORT="$((shell_port + 5))" \
-        SSE_PORT="$((shell_port + 5))" \
-        MOCK_SSE_PORT="$((shell_port + 5))" \
-        SOCKS5_PORT="$((shell_port + 6))" \
-        MOCK_ECHO_PROXY_PORT="$((shell_port + 7))" \
-        ECHO_PROXY_PORT="$((shell_port + 7))" \
-        BIFROST_DATA_DIR="$shell_data_dir" \
-        SERVER_LOG_DIR="$shell_data_dir/mock-logs" \
-        SKIP_BUILD=true \
-        bash "$E2E_DIR/tests/$script_name"
+        if command -v setsid >/dev/null 2>&1; then
+          setsid -w env \
+            ADMIN_PORT="$shell_admin_port" \
+            ADMIN_HOST="127.0.0.1" \
+            PROXY_PORT="$shell_port" \
+            PROXY_HOST="127.0.0.1" \
+            ECHO_HTTP_PORT="$((shell_port + 1))" \
+            HTTP_PORT="$((shell_port + 1))" \
+            MOCK_HTTP_PORT="$((shell_port + 1))" \
+            ECHO_HTTPS_PORT="$((shell_port + 2))" \
+            HTTPS_PORT="$((shell_port + 2))" \
+            HTTPS_MOCK_PORT="$((shell_port + 2))" \
+            ECHO_WS_PORT="$((shell_port + 3))" \
+            WS_PORT="$((shell_port + 3))" \
+            MOCK_WS_PORT="$((shell_port + 3))" \
+            ECHO_WSS_PORT="$((shell_port + 4))" \
+            WSS_PORT="$((shell_port + 4))" \
+            ECHO_SSE_PORT="$((shell_port + 5))" \
+            SSE_PORT="$((shell_port + 5))" \
+            MOCK_SSE_PORT="$((shell_port + 5))" \
+            SOCKS5_PORT="$((shell_port + 6))" \
+            MOCK_ECHO_PROXY_PORT="$((shell_port + 7))" \
+            ECHO_PROXY_PORT="$((shell_port + 7))" \
+            BIFROST_DATA_DIR="$shell_data_dir" \
+            SERVER_LOG_DIR="$shell_data_dir/mock-logs" \
+            SKIP_BUILD=true \
+            bash "$E2E_DIR/tests/$script_name" &
+        else
+          env \
+            ADMIN_PORT="$shell_admin_port" \
+            ADMIN_HOST="127.0.0.1" \
+            PROXY_PORT="$shell_port" \
+            PROXY_HOST="127.0.0.1" \
+            ECHO_HTTP_PORT="$((shell_port + 1))" \
+            HTTP_PORT="$((shell_port + 1))" \
+            MOCK_HTTP_PORT="$((shell_port + 1))" \
+            ECHO_HTTPS_PORT="$((shell_port + 2))" \
+            HTTPS_PORT="$((shell_port + 2))" \
+            HTTPS_MOCK_PORT="$((shell_port + 2))" \
+            ECHO_WS_PORT="$((shell_port + 3))" \
+            WS_PORT="$((shell_port + 3))" \
+            MOCK_WS_PORT="$((shell_port + 3))" \
+            ECHO_WSS_PORT="$((shell_port + 4))" \
+            WSS_PORT="$((shell_port + 4))" \
+            ECHO_SSE_PORT="$((shell_port + 5))" \
+            SSE_PORT="$((shell_port + 5))" \
+            MOCK_SSE_PORT="$((shell_port + 5))" \
+            SOCKS5_PORT="$((shell_port + 6))" \
+            MOCK_ECHO_PROXY_PORT="$((shell_port + 7))" \
+            ECHO_PROXY_PORT="$((shell_port + 7))" \
+            BIFROST_DATA_DIR="$shell_data_dir" \
+            SERVER_LOG_DIR="$shell_data_dir/mock-logs" \
+            SKIP_BUILD=true \
+            bash "$E2E_DIR/tests/$script_name" &
+        fi
+        child_pid=$!
+        echo "$child_pid" >"$child_pid_file"
+        wait "$child_pid"
       ) > "$log_file" 2>&1 &
 
       pids[$next_index]=$!
+      pid_child_files[$next_index]="$child_pid_file"
       pid_scripts[$next_index]="$script_name"
       pid_logs[$next_index]="$log_file"
       pid_starts[$next_index]="$start_ts"
@@ -905,9 +948,9 @@ run_shell_batch_parallel() {
       next_index=$((next_index + 1))
     done
 
-    # PR-G-CI-FIX: per-test timeout (kill direct pid only; avoid PGID
-    # because children do not run in independent process groups and a
-    # group kill would take out sibling parallel tests).
+    # PR-G-CI-FIX: per-test timeout. On Linux, child tests run under setsid so
+    # timeout cleanup can terminate the entire child process group without
+    # affecting sibling parallel tests. Other platforms fall back to direct pid.
     local shell_per_test_timeout="${BIFROST_E2E_SHELL_TEST_TIMEOUT:-900}"
     local now_ts
     now_ts="$(date +%s)"
@@ -916,12 +959,22 @@ run_shell_batch_parallel() {
         continue
       fi
       local this_pid="${pids[$i]}"
+      local this_child_pid=""
+      if [[ -n "${pid_child_files[$i]:-}" && -f "${pid_child_files[$i]}" ]]; then
+        this_child_pid="$(cat "${pid_child_files[$i]}" 2>/dev/null || true)"
+      fi
       local this_start="${pid_starts[$i]}"
       local this_age=$((now_ts - this_start))
       if kill -0 "$this_pid" 2>/dev/null && [[ "$this_age" -gt "$shell_per_test_timeout" ]]; then
         echo "[TIMEOUT] shell:${pid_scripts[$i]} exceeded ${shell_per_test_timeout}s, age=${this_age}s pid=${this_pid}"
+        if [[ -n "$this_child_pid" ]]; then
+          kill -TERM "-$this_child_pid" 2>/dev/null || kill -TERM "$this_child_pid" 2>/dev/null || true
+        fi
         kill -TERM "$this_pid" 2>/dev/null || true
         sleep 1
+        if [[ -n "$this_child_pid" ]]; then
+          kill -KILL "-$this_child_pid" 2>/dev/null || kill -KILL "$this_child_pid" 2>/dev/null || true
+        fi
         kill -KILL "$this_pid" 2>/dev/null || true
       fi
       if [[ -n "${pids[$i]:-}" ]] && ! kill -0 "${pids[$i]}" 2>/dev/null; then
@@ -946,6 +999,8 @@ run_shell_batch_parallel() {
         fi
 
         unset 'pids[i]'
+        [[ -n "${pid_child_files[$i]:-}" ]] && rm -f "${pid_child_files[$i]}" 2>/dev/null || true
+        unset 'pid_child_files[i]'
         completed=$((completed + 1))
         running=$((running - 1))
       fi

@@ -131,6 +131,13 @@ print_report() {
 }
 
 HAD_FAILURE=0
+NEEDS_RELEASE_BUILD=0
+
+if [[ "$SKIP_E2E" -eq 0 ]]; then
+  if [[ -z "$E2E_ONLY" || "$E2E_ONLY" == "rules" || "$E2E_ONLY" == "shell" || "$E2E_ONLY" == "platform" ]]; then
+    NEEDS_RELEASE_BUILD=1
+  fi
+fi
 
 if [[ "$SKIP_STATIC" -eq 0 ]]; then
   run_step "cargo fmt (workspace)" cargo fmt --all -- --check || HAD_FAILURE=1
@@ -148,6 +155,12 @@ else
   register_result "cargo clippy" "SKIP"
   register_result "cargo test (workspace)" "SKIP"
   register_result "Rust dependency audit" "SKIP"
+fi
+
+if [[ "$NEEDS_RELEASE_BUILD" -eq 1 ]]; then
+  run_step "cargo build (release bifrost)" env SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost || HAD_FAILURE=1
+else
+  register_result "cargo build (release bifrost)" "SKIP"
 fi
 
 if [[ "$SKIP_E2E" -eq 0 ]]; then

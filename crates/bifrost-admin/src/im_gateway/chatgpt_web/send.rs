@@ -20,7 +20,6 @@ const HANDOFF_PAGE_PROBE_TIMEOUT_SECS: u64 = 3;
 const TARGET_PAGE_STABLE_MS: u64 = 1_000;
 const TARGET_PAGE_POLL_MS: u64 = 250;
 const COMPOSER_PASTE_THRESHOLD_CHARS: usize = 120;
-const COMPOSER_SYNTHETIC_PASTE_MAX_CHARS: usize = 20_000;
 
 pub(in crate::im_gateway::chatgpt_web) async fn send_with_browser(
     config: &RuntimeConfig,
@@ -145,16 +144,33 @@ fn normalize_whitespace(s: &str) -> String {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::im_gateway::chatgpt_web) enum ComposerTextInjectionMode {
     InsertText,
-    Paste,
+    NativeClipboardPaste,
 }
 
 pub(in crate::im_gateway::chatgpt_web) fn composer_text_injection_mode(
     text: &str,
 ) -> ComposerTextInjectionMode {
     if text.chars().count() > COMPOSER_PASTE_THRESHOLD_CHARS {
-        ComposerTextInjectionMode::Paste
+        ComposerTextInjectionMode::NativeClipboardPaste
     } else {
         ComposerTextInjectionMode::InsertText
+    }
+}
+
+pub(in crate::im_gateway::chatgpt_web) fn send_button_ready_max_wait(text: &str) -> Duration {
+    if composer_text_injection_mode(text) == ComposerTextInjectionMode::NativeClipboardPaste {
+        let chars = text.chars().count() as u64;
+        Duration::from_secs((30 + chars / 10_000).clamp(30, 180))
+    } else {
+        Duration::from_secs(10)
+    }
+}
+
+pub(in crate::im_gateway::chatgpt_web) fn send_button_ready_retry_max_wait(text: &str) -> Duration {
+    if composer_text_injection_mode(text) == ComposerTextInjectionMode::NativeClipboardPaste {
+        Duration::from_secs(60)
+    } else {
+        Duration::from_secs(15)
     }
 }
 
@@ -695,18 +711,36 @@ async fn send_with_browser_once(
                 set_composer_text(cdp, text).await?;
             }
 
-            info!("chatgpt_web send: verifying send button is enabled");
-            // Wait for send button — retry once after dismissing modal on failure.
-            // If still not found, fall through to Enter-key fallback below.
-            let send_button_available = match wait_send_button_ready(cdp, Duration::from_secs(10)).await {
+            let injection_mode = composer_text_injection_mode(text);
+            let native_clipboard_paste =
+                injection_mode == ComposerTextInjectionMode::NativeClipboardPaste;
+            let send_button_max_wait = send_button_ready_max_wait(text);
+            let send_button_retry_max_wait = send_button_ready_retry_max_wait(text);
+            info!(
+                ?injection_mode,
+                max_wait_secs = send_button_max_wait.as_secs(),
+                retry_max_wait_secs = send_button_retry_max_wait.as_secs(),
+                "chatgpt_web send: polling until send button is enabled"
+            );
+            // Poll until the send button becomes actionable. Native clipboard
+            // paste can spend time uploading/parsing large text before the
+            // button flips to sendable, but this returns immediately once ready.
+            // If still not found, short-text paths can fall through to Enter.
+            let send_button_available =
+                match wait_send_button_ready(cdp, send_button_max_wait).await {
                 Ok(()) => true,
                 Err(e) => {
                     warn!(error = %e, "chatgpt_web send: send button not ready, dismissing modal and retrying");
                     dismiss_modal_and_wait(cdp).await;
                     sleep(Duration::from_millis(500)).await;
-                    match wait_send_button_ready(cdp, Duration::from_secs(15)).await {
+                    match wait_send_button_ready(cdp, send_button_retry_max_wait).await {
                         Ok(()) => true,
                         Err(e2) => {
+                            if native_clipboard_paste {
+                                return Err(format!(
+                                    "browser_ui: send button not actionable after native clipboard paste upload wait: {e2}"
+                                ));
+                            }
                             warn!(error = %e2, "chatgpt_web send: send button still not found after retry, will use Enter fallback");
                             false
                         }
@@ -2647,8 +2681,6 @@ async fn navigate_to_new_conversation(
 }
 
 async fn set_composer_text(cdp: &CdpClient, text: &str) -> Result<Value, String> {
-    let text_json =
-        serde_json::to_string(text).map_err(|error| format!("serialize prompt failed: {error}"))?;
     let locate_expression = r#"(() => {
           const isVisible = (el) => !!(el?.offsetWidth || el?.offsetHeight || el?.getClientRects().length);
           const candidates = Array.from(document.querySelectorAll(
@@ -2715,11 +2747,11 @@ async fn set_composer_text(cdp: &CdpClient, text: &str) -> Result<Value, String>
         ComposerTextInjectionMode::InsertText => {
             cdp.send("Input.insertText", json!({"text": text})).await?;
         }
-        ComposerTextInjectionMode::Paste => {
-            let paste_result = paste_composer_text(cdp, text).await?;
+        ComposerTextInjectionMode::NativeClipboardPaste => {
+            let paste_result = paste_composer_text(cdp, text, injection_mode).await?;
             debug!(
                 result = %paste_result,
-                "chatgpt_web send: injected composer text via paste path"
+                "chatgpt_web send: injected composer text via native clipboard paste path"
             );
         }
     }
@@ -2732,8 +2764,27 @@ async fn set_composer_text(cdp: &CdpClient, text: &str) -> Result<Value, String>
         Duration::from_millis(50)
     };
     sleep(prosemirror_wait).await;
-    let verify_expression = format!(
-        r#"(() => {{
+    let result = match injection_mode {
+        ComposerTextInjectionMode::InsertText => verify_composer_text_exact(cdp, text).await?,
+        ComposerTextInjectionMode::NativeClipboardPaste => json!({
+            "ok": true,
+            "mode": "native_clipboard_paste_dispatched"
+        }),
+    };
+    if result.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        Ok(result)
+    } else {
+        Err(format!("browser_ui: UI set composer text failed: {result}"))
+    }
+}
+
+async fn verify_composer_text_exact(cdp: &CdpClient, text: &str) -> Result<Value, String> {
+    let text_json =
+        serde_json::to_string(text).map_err(|error| format!("serialize prompt failed: {error}"))?;
+    let result = evaluate_value(
+        cdp,
+        &format!(
+            r#"(() => {{
           const text = {text_json};
           const isVisible = (el) => !!(el?.offsetWidth || el?.offsetHeight || el?.getClientRects().length);
           const candidates = Array.from(document.querySelectorAll(
@@ -2770,8 +2821,9 @@ async fn set_composer_text(cdp: &CdpClient, text: &str) -> Result<Value, String>
             }} : null
           }};
         }})()"#
-    );
-    let result = evaluate_value(cdp, &verify_expression).await?;
+        ),
+    )
+    .await?;
     // The JS-side `ok` already uses normalized comparison.  On the Rust side
     // we also normalize: ProseMirror turns newlines into paragraph boundaries
     // whose innerText representation may differ from the raw input.
@@ -2786,191 +2838,150 @@ async fn set_composer_text(cdp: &CdpClient, text: &str) -> Result<Value, String>
                 || (!norm_actual.is_empty()
                     && norm_actual.contains(&norm_expected[..norm_expected.len().min(100)]))
         });
-    if js_ok || has_text {
-        Ok(result)
-    } else {
-        Err(format!("browser_ui: UI set composer text failed: {result}"))
+    Ok(json!({
+        "ok": js_ok || has_text,
+        "mode": "exact",
+        "result": result
+    }))
+}
+
+async fn paste_composer_text(
+    cdp: &CdpClient,
+    text: &str,
+    mode: ComposerTextInjectionMode,
+) -> Result<Value, String> {
+    match mode {
+        ComposerTextInjectionMode::InsertText => unreachable!("insertText mode does not paste"),
+        ComposerTextInjectionMode::NativeClipboardPaste => {
+            paste_composer_text_native(cdp, text).await
+        }
     }
 }
 
-async fn paste_composer_text(cdp: &CdpClient, text: &str) -> Result<Value, String> {
+async fn paste_composer_text_native(cdp: &CdpClient, text: &str) -> Result<Value, String> {
+    write_browser_clipboard(cdp, text).await?;
+    dispatch_paste_shortcut(cdp).await?;
+    Ok(json!({
+        "ok": true,
+        "mode": "native_clipboard_paste"
+    }))
+}
+
+async fn write_browser_clipboard(cdp: &CdpClient, text: &str) -> Result<Value, String> {
+    let origin = evaluate_value(cdp, "location.origin")
+        .await
+        .ok()
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .filter(|origin| origin.starts_with("http"))
+        .unwrap_or_else(|| "https://chatgpt.com".to_string());
+    cdp.send(
+        "Browser.grantPermissions",
+        json!({
+            "origin": origin,
+            "permissions": ["clipboardReadWrite", "clipboardSanitizedWrite"]
+        }),
+    )
+    .await
+    .map_err(|error| format!("grant browser clipboard permission failed: {error}"))?;
+
     let text_json =
         serde_json::to_string(text).map_err(|error| format!("serialize prompt failed: {error}"))?;
-    let expression = format!(
-        r#"(async () => {{
-          const text = {text_json};
-          const syntheticPasteMaxChars = {COMPOSER_SYNTHETIC_PASTE_MAX_CHARS};
-          const normalize = (s) => String(s || "").replace(/\s+/g, " ").trim();
-          const expectedNorm = normalize(text);
-          const isExpected = (actual) => {{
-            const actualNorm = normalize(actual);
-            return actualNorm === expectedNorm ||
-              (actualNorm.length > 0 && actualNorm.includes(expectedNorm.substring(0, Math.min(100, expectedNorm.length))));
-          }};
-          const readComposer = (composer) =>
-            ("value" in composer ? composer.value : (composer.innerText || composer.textContent || ""));
-          const isVisible = (el) => !!(el?.offsetWidth || el?.offsetHeight || el?.getClientRects().length);
-          const candidates = Array.from(document.querySelectorAll(
-            '[data-testid="composer-text-input"], #prompt-textarea, [contenteditable="true"], textarea'
-          )).filter((el) => isVisible(el) && !el.disabled && !el.readOnly)
-            .sort((a, b) => b.getBoundingClientRect().bottom - a.getBoundingClientRect().bottom);
-          const composer = candidates[0];
-          if (!composer) return {{ ok: false, error: "composer_not_found" }};
-
-          const errors = [];
-          let pasteDispatched = false;
-          let pasteDefaultPrevented = false;
-          let execCommandResult = null;
-          let fallbackUsed = null;
-          let syntheticPasteSkipped = text.length > syntheticPasteMaxChars;
-          const nextFrame = () => new Promise((resolve) =>
-            requestAnimationFrame(() => requestAnimationFrame(resolve))
-          );
-          const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-          const hasPastedAttachment = () => Array.from(document.querySelectorAll("button"))
-            .some((button) => {{
-              const label = button.getAttribute("aria-label") || button.innerText || "";
-              return /粘贴|pasted|markdown/i.test(label);
-            }});
-          const clearComposerDom = () => {{
-            composer.focus();
-            if ("value" in composer) {{
-              const proto = Object.getPrototypeOf(composer);
-              const descriptor =
-                Object.getOwnPropertyDescriptor(proto, "value") ||
-                Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value") ||
-                Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
-              if (descriptor?.set) {{
-                descriptor.set.call(composer, "");
-              }} else {{
-                composer.value = "";
+    let result = evaluate_value(
+        cdp,
+        &format!(
+            r#"(async () => {{
+              try {{
+                await navigator.clipboard.writeText({text_json});
+                return {{ ok: true }};
+              }} catch (error) {{
+                return {{
+                  ok: false,
+                  name: error?.name || "Error",
+                  message: error?.message || String(error)
+                }};
               }}
-            }} else {{
-              composer.textContent = "";
-              composer.innerHTML = "";
-            }}
-            composer.dispatchEvent(new InputEvent("input", {{
-              bubbles: true,
-              cancelable: true,
-              inputType: "deleteContentBackward",
-              data: null
-            }}));
-          }};
-          const setComposerDom = () => {{
-            composer.focus();
-            if ("value" in composer) {{
-              const proto = Object.getPrototypeOf(composer);
-              const descriptor =
-                Object.getOwnPropertyDescriptor(proto, "value") ||
-                Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value") ||
-                Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
-              if (descriptor?.set) {{
-                descriptor.set.call(composer, text);
-              }} else {{
-                composer.value = text;
-              }}
-            }} else {{
-              composer.textContent = text;
-            }}
+            }})()"#
+        ),
+    )
+    .await?;
+    if result.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        Ok(result)
+    } else {
+        Err(format!("browser clipboard write failed: {result}"))
+    }
+}
 
-            composer.dispatchEvent(new InputEvent("beforeinput", {{
-              bubbles: true,
-              cancelable: true,
-              inputType: "insertFromPaste",
-              data: text
-            }}));
-            composer.dispatchEvent(new InputEvent("input", {{
-              bubbles: true,
-              cancelable: true,
-              inputType: "insertFromPaste",
-              data: text
-            }}));
-            composer.dispatchEvent(new Event("change", {{ bubbles: true }}));
-          }};
+pub(in crate::im_gateway::chatgpt_web) async fn dispatch_paste_shortcut(
+    cdp: &CdpClient,
+) -> Result<(), String> {
+    let modifier = paste_modifier();
+    let (modifier_key, modifier_code, modifier_virtual_key) = paste_modifier_key();
+    cdp.send(
+        "Input.dispatchKeyEvent",
+        json!({
+            "type": "keyDown",
+            "key": modifier_key,
+            "code": modifier_code,
+            "windowsVirtualKeyCode": modifier_virtual_key,
+            "nativeVirtualKeyCode": modifier_virtual_key,
+            "modifiers": modifier
+        }),
+    )
+    .await?;
+    cdp.send(
+        "Input.dispatchKeyEvent",
+        json!({
+            "type": "keyDown",
+            "key": "v",
+            "code": "KeyV",
+            "windowsVirtualKeyCode": 86,
+            "nativeVirtualKeyCode": 86,
+            "modifiers": modifier,
+            "commands": ["paste"]
+        }),
+    )
+    .await?;
+    cdp.send(
+        "Input.dispatchKeyEvent",
+        json!({
+            "type": "keyUp",
+            "key": "v",
+            "code": "KeyV",
+            "windowsVirtualKeyCode": 86,
+            "nativeVirtualKeyCode": 86,
+            "modifiers": modifier
+        }),
+    )
+    .await?;
+    cdp.send(
+        "Input.dispatchKeyEvent",
+        json!({
+            "type": "keyUp",
+            "key": modifier_key,
+            "code": modifier_code,
+            "windowsVirtualKeyCode": modifier_virtual_key,
+            "nativeVirtualKeyCode": modifier_virtual_key,
+            "modifiers": 0
+        }),
+    )
+    .await?;
+    Ok(())
+}
 
-          if (!syntheticPasteSkipped) {{
-            composer.focus();
-            try {{
-              const data = new DataTransfer();
-              data.setData("text/plain", text);
-              const event = new ClipboardEvent("paste", {{
-                clipboardData: data,
-                bubbles: true,
-                cancelable: true
-              }});
-              pasteDispatched = true;
-              pasteDefaultPrevented = !composer.dispatchEvent(event);
-            }} catch (error) {{
-              errors.push(`paste_event:${{error?.message || String(error)}}`);
-            }}
+pub(in crate::im_gateway::chatgpt_web) fn paste_modifier() -> i32 {
+    if cfg!(target_os = "macos") {
+        4
+    } else {
+        2
+    }
+}
 
-            await nextFrame();
-            await wait(250);
-          }}
-          let actual = readComposer(composer);
-          const pasteAttachmentDetected = hasPastedAttachment();
-
-          if (!isExpected(actual) || pasteAttachmentDetected) {{
-            try {{
-              if (pasteAttachmentDetected) {{
-                clearComposerDom();
-                await nextFrame();
-              }}
-              composer.focus();
-              execCommandResult = document.execCommand
-                ? document.execCommand("insertText", false, text)
-                : false;
-              fallbackUsed = execCommandResult ? "execCommand" : fallbackUsed;
-            }} catch (error) {{
-              errors.push(`execCommand:${{error?.message || String(error)}}`);
-            }}
-            await nextFrame();
-            await wait(text.length > syntheticPasteMaxChars ? 1000 : 100);
-            actual = readComposer(composer);
-          }}
-
-          if (!isExpected(actual)) {{
-            fallbackUsed = "direct_dom";
-            try {{
-              setComposerDom();
-            }} catch (error) {{
-              errors.push(`direct_dom:${{error?.message || String(error)}}`);
-            }}
-            await nextFrame();
-            await wait(text.length > syntheticPasteMaxChars ? 1000 : 100);
-            actual = readComposer(composer);
-          }}
-
-          const sendButton =
-            document.querySelector('[data-testid="send-button"]') ||
-            document.querySelector('[data-testid="composer-submit-button"]') ||
-            document.querySelector('button[aria-label*="发送"]') ||
-            document.querySelector('button.composer-submit-btn');
-          return {{
-            ok: isExpected(actual),
-            mode: "paste",
-            syntheticPasteSkipped,
-            pasteAttachmentDetected,
-            pasteDispatched,
-            pasteDefaultPrevented,
-            execCommandResult,
-            fallbackUsed,
-            errors,
-            actualLength: actual.length,
-            expectedLength: text.length,
-            text: actual,
-            sendButton: sendButton ? {{
-              disabled: Boolean(sendButton.disabled),
-              aria: sendButton.getAttribute("aria-label") || "",
-              testId: sendButton.getAttribute("data-testid") || ""
-            }} : null,
-            tag: composer.tagName,
-            id: composer.id || null,
-            contentEditable: composer.getAttribute("contenteditable")
-          }};
-        }})()"#
-    );
-    evaluate_value(cdp, &expression).await
+fn paste_modifier_key() -> (&'static str, &'static str, i32) {
+    if cfg!(target_os = "macos") {
+        ("Meta", "MetaLeft", 91)
+    } else {
+        ("Control", "ControlLeft", 17)
+    }
 }
 
 /// Locate the send button using Playwright-style actionability checks.

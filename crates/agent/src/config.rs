@@ -231,6 +231,9 @@ fn default_message_target_mode() -> MessageTargetMode {
 pub struct ModelProviderConfig {
     pub name: Option<String>,
     pub base_url: Option<String>,
+    /// Model API wire format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire_api: Option<ModelWireApi>,
     /// Environment variable name for the API key.
     pub env_key: Option<String>,
     /// Direct API key value, or `$ENV_VAR` to resolve from an environment variable.
@@ -252,6 +255,14 @@ pub struct ModelProviderConfig {
     /// Max retries for stream reconnection.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_max_retries: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelWireApi {
+    #[default]
+    ChatCompletions,
+    Responses,
 }
 
 // ---------------------------------------------------------------------------
@@ -432,6 +443,7 @@ pub struct MemoriesConfig {
 pub struct EffectiveModelConfig {
     pub model: String,
     pub base_url: String,
+    pub wire_api: ModelWireApi,
     pub api_key: String,
     pub max_completion_tokens: u32,
     pub reasoning_effort: Option<String>,
@@ -615,6 +627,7 @@ impl AgentConfig {
             ModelProviderConfig {
                 name: user_provider.name.clone().or(builtin.name),
                 base_url: user_provider.base_url.clone().or(builtin.base_url),
+                wire_api: user_provider.wire_api.or(builtin.wire_api),
                 env_key: user_provider.env_key.clone().or(builtin.env_key),
                 api_key: user_provider.api_key.clone().or(builtin.api_key),
                 http_headers: user_provider.http_headers.clone().or(builtin.http_headers),
@@ -668,6 +681,7 @@ impl AgentConfig {
         Ok(EffectiveModelConfig {
             model: self.get_model().to_string(),
             base_url,
+            wire_api: provider.wire_api.unwrap_or_default(),
             api_key,
             max_completion_tokens: self.get_max_completion_tokens(),
             reasoning_effort: self
@@ -735,6 +749,7 @@ fn get_builtin_provider(id: &str) -> ModelProviderConfig {
         "openai" => ModelProviderConfig {
             name: Some("OpenAI".to_string()),
             base_url: Some("https://api.openai.com/v1/chat/completions".to_string()),
+            wire_api: Some(ModelWireApi::Responses),
             env_key: Some("OPENAI_API_KEY".to_string()),
             api_key: None,
             http_headers: None,
@@ -757,6 +772,7 @@ fn get_builtin_provider(id: &str) -> ModelProviderConfig {
             base_url: Some(
                 "https://search.bytedance.net/gpt/openapi/online/multimodal/crawl".to_string(),
             ),
+            wire_api: Some(ModelWireApi::ChatCompletions),
             env_key: Some("MODELHUB_AK".to_string()),
             api_key: None,
             http_headers: None,
@@ -774,6 +790,7 @@ fn get_builtin_provider(id: &str) -> ModelProviderConfig {
         "azure" => ModelProviderConfig {
             name: Some("Azure OpenAI".to_string()),
             base_url: None, // User must provide: https://<resource>.openai.azure.com/openai/deployments/<deployment>/chat/completions?api-version=...
+            wire_api: Some(ModelWireApi::ChatCompletions),
             env_key: Some("AZURE_OPENAI_API_KEY".to_string()),
             api_key: None,
             http_headers: None,
@@ -790,6 +807,7 @@ fn get_builtin_provider(id: &str) -> ModelProviderConfig {
         "anthropic" => ModelProviderConfig {
             name: Some("Anthropic".to_string()),
             base_url: Some("https://api.anthropic.com/v1/chat/completions".to_string()),
+            wire_api: Some(ModelWireApi::ChatCompletions),
             env_key: Some("ANTHROPIC_API_KEY".to_string()),
             api_key: None,
             http_headers: None,
@@ -809,6 +827,7 @@ fn get_builtin_provider(id: &str) -> ModelProviderConfig {
                 "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
                     .to_string(),
             ),
+            wire_api: Some(ModelWireApi::ChatCompletions),
             env_key: Some("GOOGLE_API_KEY".to_string()),
             api_key: None,
             http_headers: None,
@@ -825,6 +844,7 @@ fn get_builtin_provider(id: &str) -> ModelProviderConfig {
         "groq" => ModelProviderConfig {
             name: Some("Groq".to_string()),
             base_url: Some("https://api.groq.com/openai/v1/chat/completions".to_string()),
+            wire_api: Some(ModelWireApi::ChatCompletions),
             env_key: Some("GROQ_API_KEY".to_string()),
             api_key: None,
             http_headers: None,
@@ -837,6 +857,7 @@ fn get_builtin_provider(id: &str) -> ModelProviderConfig {
         "deepseek" => ModelProviderConfig {
             name: Some("DeepSeek".to_string()),
             base_url: Some("https://api.deepseek.com/v1/chat/completions".to_string()),
+            wire_api: Some(ModelWireApi::ChatCompletions),
             env_key: Some("DEEPSEEK_API_KEY".to_string()),
             api_key: None,
             http_headers: None,
@@ -849,6 +870,7 @@ fn get_builtin_provider(id: &str) -> ModelProviderConfig {
         "ollama" => ModelProviderConfig {
             name: Some("Ollama".to_string()),
             base_url: Some("http://localhost:11434/v1/chat/completions".to_string()),
+            wire_api: Some(ModelWireApi::ChatCompletions),
             env_key: None, // No API key needed for local
             api_key: None,
             http_headers: None,
@@ -861,6 +883,7 @@ fn get_builtin_provider(id: &str) -> ModelProviderConfig {
         "lmstudio" => ModelProviderConfig {
             name: Some("LM Studio".to_string()),
             base_url: Some("http://localhost:1234/v1/chat/completions".to_string()),
+            wire_api: Some(ModelWireApi::ChatCompletions),
             env_key: None, // No API key needed for local
             api_key: None,
             http_headers: None,
@@ -875,6 +898,7 @@ fn get_builtin_provider(id: &str) -> ModelProviderConfig {
             base_url: Some(
                 "https://bedrock-mantle.us-east-1.api.aws/openai/v1/chat/completions".to_string(),
             ),
+            wire_api: Some(ModelWireApi::ChatCompletions),
             env_key: None, // Uses AWS credentials chain
             api_key: None,
             http_headers: None,
@@ -887,6 +911,7 @@ fn get_builtin_provider(id: &str) -> ModelProviderConfig {
         "openrouter" => ModelProviderConfig {
             name: Some("OpenRouter".to_string()),
             base_url: Some("https://openrouter.ai/api/v1/chat/completions".to_string()),
+            wire_api: Some(ModelWireApi::ChatCompletions),
             env_key: Some("OPENROUTER_API_KEY".to_string()),
             api_key: None,
             http_headers: None,
@@ -907,6 +932,7 @@ fn get_builtin_provider(id: &str) -> ModelProviderConfig {
         "xai" => ModelProviderConfig {
             name: Some("xAI (Grok)".to_string()),
             base_url: Some("https://api.x.ai/v1/chat/completions".to_string()),
+            wire_api: Some(ModelWireApi::ChatCompletions),
             env_key: Some("XAI_API_KEY".to_string()),
             api_key: None,
             http_headers: None,
@@ -919,6 +945,7 @@ fn get_builtin_provider(id: &str) -> ModelProviderConfig {
         "mistral" => ModelProviderConfig {
             name: Some("Mistral AI".to_string()),
             base_url: Some("https://api.mistral.ai/v1/chat/completions".to_string()),
+            wire_api: Some(ModelWireApi::ChatCompletions),
             env_key: Some("MISTRAL_API_KEY".to_string()),
             api_key: None,
             http_headers: None,
@@ -931,6 +958,7 @@ fn get_builtin_provider(id: &str) -> ModelProviderConfig {
         "cerebras" => ModelProviderConfig {
             name: Some("Cerebras".to_string()),
             base_url: Some("https://api.cerebras.ai/v1/chat/completions".to_string()),
+            wire_api: Some(ModelWireApi::ChatCompletions),
             env_key: Some("CEREBRAS_API_KEY".to_string()),
             api_key: None,
             http_headers: None,
@@ -943,6 +971,7 @@ fn get_builtin_provider(id: &str) -> ModelProviderConfig {
         _ => ModelProviderConfig {
             name: None,
             base_url: None,
+            wire_api: None,
             env_key: Some("OPENAI_API_KEY".to_string()),
             api_key: None,
             http_headers: None,
@@ -1245,6 +1274,7 @@ mod tests {
         };
         let effective = config.resolve_effective_config().unwrap();
         assert!(effective.base_url.contains("api.openai.com"));
+        assert_eq!(effective.wire_api, ModelWireApi::Responses);
     }
 
     #[test]
@@ -1287,6 +1317,7 @@ mod tests {
             ModelProviderConfig {
                 name: Some("Custom".to_string()),
                 base_url: Some("https://custom.example.com/v1/chat".to_string()),
+                wire_api: Some(ModelWireApi::Responses),
                 env_key: Some("CUSTOM_KEY".to_string()),
                 api_key: None,
                 http_headers: None,
@@ -1303,6 +1334,7 @@ mod tests {
         };
         let effective = config.resolve_effective_config().unwrap();
         assert_eq!(effective.base_url, "https://custom.example.com/v1/chat");
+        assert_eq!(effective.wire_api, ModelWireApi::Responses);
     }
 
     #[test]
@@ -1415,6 +1447,7 @@ enabled = true
             ModelProviderConfig {
                 name: Some("aidp_crawl".to_string()),
                 base_url: None, // null — should fall back to built-in
+                wire_api: None, // null — should fall back to built-in
                 env_key: None,  // null — should fall back to built-in
                 api_key: None,
                 http_headers: None,
@@ -1432,6 +1465,7 @@ enabled = true
         let effective = config.resolve_effective_config().unwrap();
         // Should use built-in base_url, not fail with "no base_url"
         assert!(effective.base_url.contains("bytedance.net"));
+        assert_eq!(effective.wire_api, ModelWireApi::ChatCompletions);
         assert!(effective.use_azure_auth);
     }
 
@@ -1448,6 +1482,7 @@ enabled = true
             ModelProviderConfig {
                 name: None,
                 base_url: Some("https://custom.example.com/api".to_string()),
+                wire_api: Some(ModelWireApi::Responses),
                 env_key: None, // falls back to built-in MODELHUB_AK
                 api_key: None,
                 http_headers: None,
@@ -1465,6 +1500,7 @@ enabled = true
         let effective = config.resolve_effective_config().unwrap();
         // User's base_url override should win
         assert_eq!(effective.base_url, "https://custom.example.com/api");
+        assert_eq!(effective.wire_api, ModelWireApi::Responses);
         // Built-in env_http_headers should still be present (api-key, X-TT-LOGID)
         assert!(effective.use_azure_auth);
     }

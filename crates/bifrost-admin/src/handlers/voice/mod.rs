@@ -40,13 +40,13 @@ pub use vocabulary::{
 
 const MAX_VOICE_WS_TEXT_BYTES: usize = 32 * 1024;
 const MAX_VOICE_WS_AUDIO_CHUNK_BYTES: usize = 512 * 1024;
-const DEFAULT_VOICE_STREAM_CHUNK_SEC: f32 = 1.0;
+const DEFAULT_VOICE_STREAM_CHUNK_SEC: f32 = 0.5;
 const VOICE_SAMPLE_RATE: u32 = 16_000;
 const VOICE_CHANNELS: u16 = 1;
 const VOICE_AUDIO_FORMAT: &str = "pcm_s16le";
 const DEFAULT_VOICE_MODEL: &str = "Qwen3-ASR-0.6B";
-const VOICE_SILENCE_COMMIT_MS: u64 = 1_000;
-const VOICE_WORKER_IDLE_UNLOAD_MS: u64 = 10_000;
+const VOICE_SILENCE_COMMIT_MS: u64 = 500;
+const VOICE_WORKER_IDLE_UNLOAD_MS: u64 = 30_000;
 const VOICE_MAX_UTTERANCE_MS: u64 = 30_000;
 const VOICE_WS_IDLE_TIMEOUT_MS: u64 = 30_000;
 const VOICE_SILENCE_RMS_THRESHOLD: f32 = 0.008;
@@ -277,6 +277,9 @@ where
     let mut audio_started_at = started_at;
     let mut stateful_session = None::<StatefulVoiceSession>;
     let mut audio_config = VoiceAudioConfig::default();
+    // After worker startup completes, audio frames captured before this threshold
+    // are stale (buffered during the blocking startup) and should be discarded.
+    let mut stale_audio_before_ms: Option<u128> = None;
 
     if send_voice_event(
         &mut sender,
@@ -344,7 +347,11 @@ where
                             }
                         }
                     }
-                    stateful_session.take();
+                    // Use shutdown() to wait for the process to fully exit and release memory,
+                    // avoiding overlap with a new worker spawn.
+                    if let Some(session) = stateful_session.take() {
+                        session.shutdown().await;
+                    }
                     let detail = format!("idle_timeout_ms={}", tuning.ws_idle_timeout_ms);
                     let _ = send_voice_event(
                         &mut sender,
@@ -536,7 +543,19 @@ where
                                     )
                                     .await
                                     {
-                                        Ok(session) => stateful_session = Some(session),
+                                        Ok(session) => {
+                                            // Mark all audio captured before this point as stale;
+                                            // these frames were buffered during the blocking worker
+                                            // startup and would cause a processing backlog.
+                                            stale_audio_before_ms =
+                                                Some(audio_started_at.elapsed().as_millis());
+                                            tracing::debug!(
+                                                session_id = %session_id,
+                                                stale_threshold_ms = ?stale_audio_before_ms,
+                                                "voice worker started, will discard stale audio"
+                                            );
+                                            stateful_session = Some(session);
+                                        }
                                         Err(error) => {
                                             let _ = send_voice_error(
                                                 &mut sender,
@@ -549,6 +568,19 @@ where
                                     }
                                 }
                                 if let Some(session) = stateful_session.as_mut() {
+                                    // Discard audio frames that were buffered during worker startup
+                                    if let Some(threshold) = stale_audio_before_ms {
+                                        if captured_at_ms < threshold {
+                                            continue;
+                                        }
+                                        // First fresh frame: clear the threshold
+                                        stale_audio_before_ms = None;
+                                        tracing::debug!(
+                                            session_id = %session_id,
+                                            captured_at_ms = captured_at_ms,
+                                            "voice: first fresh audio frame after worker startup"
+                                        );
+                                    }
                                     match session.feed_pcm16(&bytes).await {
                                         Ok(Some(result)) => {
                                             if let Err(error) = emit_stateful_voice_partial(
@@ -646,7 +678,9 @@ where
                                         break;
                                     }
                                 } else if transcript_state.should_unload_idle_worker() {
-                                    stateful_session.take();
+                                    // Keep worker alive for the lifetime of the WS connection
+                                    // to avoid respawn latency. The 30s auto-reset in the worker
+                                    // prevents performance degradation from KV cache growth.
                                     transcript_state.silence_ms = 0;
                                 }
                             }
@@ -804,7 +838,16 @@ where
                     }
                     if stateful_session.is_none() {
                         match start_voice_stateful_session(query, chunk_size_sec, &language).await {
-                            Ok(session) => stateful_session = Some(session),
+                            Ok(session) => {
+                                stale_audio_before_ms =
+                                    Some(audio_started_at.elapsed().as_millis());
+                                tracing::debug!(
+                                    session_id = %session_id,
+                                    stale_threshold_ms = ?stale_audio_before_ms,
+                                    "voice worker started (binary path), will discard stale audio"
+                                );
+                                stateful_session = Some(session);
+                            }
                             Err(error) => {
                                 let _ = send_voice_error(
                                     &mut sender,
@@ -817,6 +860,18 @@ where
                         }
                     }
                     if let Some(session) = stateful_session.as_mut() {
+                        // Discard audio frames that were buffered during worker startup
+                        if let Some(threshold) = stale_audio_before_ms {
+                            if captured_at_ms < threshold {
+                                continue;
+                            }
+                            stale_audio_before_ms = None;
+                            tracing::debug!(
+                                session_id = %session_id,
+                                captured_at_ms = captured_at_ms,
+                                "voice: first fresh audio frame after worker startup (binary path)"
+                            );
+                        }
                         match session.feed_pcm16(&bytes).await {
                             Ok(Some(result)) => {
                                 if let Err(error) = emit_stateful_voice_partial(
@@ -912,7 +967,9 @@ where
                             break;
                         }
                     } else if transcript_state.should_unload_idle_worker() {
-                        stateful_session.take();
+                        // Keep worker alive for the lifetime of the WS connection
+                        // to avoid respawn latency. The 30s auto-reset in the worker
+                        // prevents performance degradation from KV cache growth.
                         transcript_state.silence_ms = 0;
                     }
                 }
@@ -947,6 +1004,11 @@ async fn start_voice_stateful_session(
         );
     }
     ensure_voice_target_ready(&target).await?;
+
+    // Stop the standalone asr-server if it's running with the same model to avoid
+    // loading the ~2GB ASR model twice (once in asr-server + once in voice worker).
+    crate::handlers::asr::stop_managed_service_for_target(&target).await;
+
     start_stateful_voice_session(StatefulVoiceConfig {
         model: target.model.clone(),
         model_dir: target.model_dir(),
@@ -1090,19 +1152,37 @@ async fn commit_stateful_voice_utterance<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    if let Some(session) = stateful_session.as_mut() {
-        let result = session.finish().await?;
-        emit_stateful_voice_partial(
-            sender,
-            transcript_state,
-            result,
-            options.captured_at_ms,
-            options.window_index,
-            context,
-        )
-        .await?;
+    if transcript_state.has_active_utterance() {
+        if let Some(session) = stateful_session.as_mut() {
+            // Use reset() instead of finish() to keep the worker process alive.
+            // reset() finalizes the current utterance and reinits streaming state.
+            match session.reset().await {
+                Ok(result) => {
+                    emit_stateful_voice_partial(
+                        sender,
+                        transcript_state,
+                        result,
+                        options.captured_at_ms,
+                        options.window_index,
+                        context,
+                    )
+                    .await?;
+                }
+                Err(error) => {
+                    // reset() timed out or failed — worker is likely dead or stuck.
+                    // Kill it and clear session; next audio frame will respawn a fresh worker.
+                    tracing::warn!(
+                        session_id = %context.session_id,
+                        error = %error,
+                        "voice worker reset failed, killing and will respawn on next audio",
+                    );
+                    if let Some(dead_session) = stateful_session.take() {
+                        dead_session.shutdown().await;
+                    }
+                }
+            }
+        }
     }
-    stateful_session.take();
 
     let (delta, raw_partial) = transcript_state.commit_partial();
     let emitted_at_ms = context.started_at.elapsed().as_millis();

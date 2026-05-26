@@ -45,6 +45,8 @@ cargo run -p bifrost -- --version
 curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash
 ```
 
+该脚本默认会自动安装并信任 CA、安装所有 Bifrost skills，并启动后台服务。
+
 安装完成后，必须重新执行：
 
 ```bash

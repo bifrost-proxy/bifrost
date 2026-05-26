@@ -93,6 +93,7 @@ impl ToolHandler for ToolSearchTool {
                 return ToolResult {
                     success: false,
                     output: format!("invalid arguments: {error}"),
+                    runtime_events: Vec::new(),
                 };
             }
         };
@@ -102,6 +103,7 @@ impl ToolHandler for ToolSearchTool {
             return ToolResult {
                 success: false,
                 output: "tool_search query must not be empty".to_string(),
+                runtime_events: Vec::new(),
             };
         }
 
@@ -110,6 +112,7 @@ impl ToolHandler for ToolSearchTool {
                 return ToolResult {
                     success: false,
                     output: "limit must be greater than zero".to_string(),
+                    runtime_events: Vec::new(),
                 };
             }
             Some(limit) => limit.min(50),
@@ -142,6 +145,7 @@ impl ToolHandler for ToolSearchTool {
         ToolResult {
             success: true,
             output: output.to_string(),
+            runtime_events: Vec::new(),
         }
     }
 }

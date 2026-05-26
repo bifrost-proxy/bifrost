@@ -212,6 +212,43 @@
 - 删除按钮仍然只触发删除确认，不会因为事件冒泡而打开详情页。
 - 亮色和暗色主题下行 hover、title 可点击状态和删除按钮均清晰可辨。
 
+### TC-ASP-16：重启恢复后 Context 不使用累计 token 回归
+
+**操作步骤**：
+1. 执行持久化恢复回归：
+   ```bash
+   cargo run -p bifrost-e2e -- --test im_gateway_agent_chat_restores_history_after_service_restart --jobs 1 --timeout 240
+   ```
+2. 该用例会使用临时数据目录创建 `/agent/chat` session，第一轮 mock 响应写入 `assistant_message.tokens = 15`。
+3. 用同一 `BIFROST_DATA_DIR` 重建 `ImGatewayService` 模拟服务重启。
+4. 重启恢复后立即向同一 session 发送 `/status`。
+5. 继续发送第二条业务消息，确认恢复后的历史仍包含第一轮消息。
+
+**预期结果**：
+- `/status` 返回 `Context 用量: ~15 / ...`，说明恢复后使用最近响应 context 快照，而不是历史累计 token。
+- 第二条业务消息发给 mock 模型时仍包含第一轮和第二轮 marker，说明对话保持未被破坏。
+- `/reset` 后再次发送新消息不会携带旧 marker。
+
+**执行记录（2026-05-25）**：PASS — 执行 `source ~/.zshrc && cargo run -p bifrost-e2e -- --test im_gateway_agent_chat_restores_history_after_service_restart --jobs 1 --timeout 240`，用例通过。日志中存在测试环境 CA 缺失和 AGENTS.md 截断 warning，但 mock 模型链路未走 TLS 拦截，测试最终 `1 passed`。
+
+### TC-ASP-17：Sessions 列表不把空闲恢复会话误报为 Running
+
+**操作步骤**：
+1. 准备 `/agent/sessions/all` 返回一条 `status:"active"`、`running:false`、`state:"idle"` 的 session 和一条 ended history session。
+2. 在浏览器中打开：
+   ```text
+   http://localhost:$MAIN_PORT/_bifrost/ai?aiSection=agent-sessions&agentSection=sessions
+   ```
+3. 查看 active session 行的状态标签。
+4. 点击 active session 行进入详情。
+
+**预期结果**：
+- active idle session 行显示 `Active`，不显示 `Running`。
+- 点击该行仍能进入 active session 详情，URL 包含 `view=active`。
+- ended session 的 history 详情入口不受影响。
+
+**执行记录（2026-05-25）**：PASS — 执行 `source ~/.zshrc && pnpm --dir web exec playwright test admin-settings.spec.ts -g "AI Agent Sessions 列表支持"`，用例通过；mock idle active session 带 `running:false`，断言该行不包含 `Running` 且包含 `Active`。
+
 ## 清理步骤
 
 1. 停止 Bifrost 服务

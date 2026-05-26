@@ -749,6 +749,91 @@ pub fn get_all_tests() -> Vec<TestCase> {
             },
         ),
         TestCase::standalone(
+            "im_gateway_agent_long_task_runtime_watch",
+            "Validate exec_command long tasks are watched by runtime without model polling",
+            "admin",
+            || async move {
+                let mock = ChatCompletionMock::start_long_exec().await?;
+                let mut model_providers = HashMap::new();
+                model_providers.insert(
+                    "mock".to_string(),
+                    ModelProviderConfig {
+                        name: Some("Mock".to_string()),
+                        base_url: Some(mock.url()),
+                        wire_api: Some(bifrost_agent::ModelWireApi::ChatCompletions),
+                        env_key: None,
+                        api_key: Some("test-key".to_string()),
+                        http_headers: None,
+                        env_http_headers: None,
+                        request_max_retries: None,
+                        stream_idle_timeout_ms: None,
+                        stream_max_retries: None,
+                    },
+                );
+                let config = AgentConfig {
+                    enabled: true,
+                    model: Some("mock-model".to_string()),
+                    model_provider: Some("mock".to_string()),
+                    model_providers,
+                    request_timeout_secs: Some(30),
+                    ..Default::default()
+                };
+                let client = bifrost_agent::AgentClient::new();
+                let tools = ToolRegistry::with_defaults();
+                let mut session = AgentSession::new("long-task-runtime-watch-e2e");
+
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    run_turn(
+                        &client,
+                        &config,
+                        &mut session,
+                        &tools,
+                        "LONG_TASK_RUNTIME_WATCH_E2E",
+                        None,
+                    ),
+                )
+                .await
+                .map_err(|_| "long task runtime watch timed out".to_string())?
+                .map_err(|e| format!("run_turn failed: {e}"))?;
+
+                if !result.response.contains("LONG_TASK_RUNTIME_WATCH_E2E_OK") {
+                    return Err(format!("unexpected final response: {}", result.response));
+                }
+                let request_count = mock.requests.lock().len();
+                if request_count != 2 {
+                    return Err(format!(
+                        "expected exactly 2 model requests, got {request_count}"
+                    ));
+                }
+                let tool_output = session
+                    .history
+                    .iter()
+                    .find(|message| message.role == "tool")
+                    .and_then(|message| message.content.as_deref())
+                    .ok_or_else(|| "missing exec_command tool result".to_string())?;
+                if !tool_output.contains("process_exited")
+                    || !tool_output.contains("start")
+                    || !tool_output.contains("done")
+                    || !tool_output.contains("model_request_count_while_waiting")
+                {
+                    return Err(format!("unexpected long task tool output: {tool_output}"));
+                }
+                if !session.last_turn_events.iter().any(|event| {
+                    event.kind == bifrost_agent::turn_runtime::CodexTurnEventKind::TurnSuspended
+                }) {
+                    return Err("missing TurnSuspended event".to_string());
+                }
+                if !session.last_turn_events.iter().any(|event| {
+                    event.kind == bifrost_agent::turn_runtime::CodexTurnEventKind::LongTaskExited
+                }) {
+                    return Err("missing LongTaskExited event".to_string());
+                }
+
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
             "im_gateway_agent_streaming_progress_card_renderer",
             "Validate IM Agent progress snapshot renders Feishu streaming card sections and guide/queue footer state",
             "admin",
@@ -1125,6 +1210,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     ModelProviderConfig {
                         name: Some("Mock".to_string()),
                         base_url: Some(mock_base_url),
+                        wire_api: Some(bifrost_agent::config::ModelWireApi::ChatCompletions),
                         env_key: None,
                         api_key: None,
                         http_headers: Some(HashMap::from([(
@@ -1264,6 +1350,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     ModelProviderConfig {
                         name: Some("Mock".to_string()),
                         base_url: Some(mock.url()),
+                        wire_api: Some(bifrost_agent::config::ModelWireApi::ChatCompletions),
                         env_key: None,
                         api_key: None,
                         http_headers: Some(HashMap::from([(
@@ -1365,6 +1452,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     ModelProviderConfig {
                         name: Some("Mock".to_string()),
                         base_url: Some(mock.url()),
+                        wire_api: Some(bifrost_agent::config::ModelWireApi::ChatCompletions),
                         env_key: None,
                         api_key: None,
                         http_headers: Some(HashMap::from([(
@@ -1512,6 +1600,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     ModelProviderConfig {
                         name: Some("Mock".to_string()),
                         base_url: Some(mock.url()),
+                        wire_api: Some(bifrost_agent::config::ModelWireApi::ChatCompletions),
                         env_key: None,
                         api_key: None,
                         http_headers: Some(HashMap::from([(
@@ -1612,6 +1701,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     ModelProviderConfig {
                         name: Some("Mock".to_string()),
                         base_url: Some(mock.url()),
+                        wire_api: Some(bifrost_agent::config::ModelWireApi::ChatCompletions),
                         env_key: None,
                         api_key: None,
                         http_headers: Some(HashMap::from([(
@@ -1897,6 +1987,110 @@ impl ChatCompletionMock {
         format!("http://127.0.0.1:{}/chat/completions", self.port)
     }
 
+    async fn start_long_exec() -> Result<Self, String> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|e| format!("bind mock chat server: {e}"))?;
+        let port = listener
+            .local_addr()
+            .map_err(|e| format!("mock local addr: {e}"))?
+            .port();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let requests_for_server = Arc::clone(&requests);
+        let request_count_for_server = Arc::clone(&request_count);
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let io = TokioIo::new(stream);
+                let requests = Arc::clone(&requests_for_server);
+                let request_count = Arc::clone(&request_count_for_server);
+                tokio::spawn(async move {
+                    let service = service_fn(move |req: Request<hyper::body::Incoming>| {
+                        let requests = Arc::clone(&requests);
+                        let request_count = Arc::clone(&request_count);
+                        async move {
+                            let current_call = request_count.fetch_add(1, Ordering::SeqCst) + 1;
+                            let body_bytes = req
+                                .into_body()
+                                .collect()
+                                .await
+                                .map(|b| b.to_bytes())
+                                .unwrap_or_else(|_| Bytes::new());
+                            let body: serde_json::Value =
+                                serde_json::from_slice(&body_bytes).unwrap_or_else(|_| json!({}));
+                            requests.lock().push(body.clone());
+
+                            if let Some(error) = validate_chat_messages_json(&body) {
+                                return Ok::<_, hyper::Error>(
+                                    Response::builder()
+                                        .status(StatusCode::BAD_REQUEST)
+                                        .header("Content-Type", "application/json")
+                                        .body(Full::new(Bytes::from(
+                                            json!({"error": {"message": error}}).to_string(),
+                                        )))
+                                        .unwrap(),
+                                );
+                            }
+
+                            let last_role = body
+                                .get("messages")
+                                .and_then(|value| value.as_array())
+                                .and_then(|messages| messages.last())
+                                .and_then(|message| message.get("role"))
+                                .and_then(|role| role.as_str());
+                            let should_call_tool = current_call == 1 && last_role != Some("tool");
+                            let message = if should_call_tool {
+                                json!({
+                                    "role": "assistant",
+                                    "content": null,
+                                    "tool_calls": [{
+                                        "id": "call-long-exec",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "exec_command",
+                                            "arguments": "{\"cmd\":\"printf start; sleep 0.4; printf done # cargo test\",\"yield_time_ms\":250}"
+                                        }
+                                    }]
+                                })
+                            } else {
+                                json!({
+                                    "role": "assistant",
+                                    "content": "LONG_TASK_RUNTIME_WATCH_E2E_OK"
+                                })
+                            };
+                            let response = json!({
+                                "choices": [{
+                                    "message": message,
+                                    "finish_reason": if should_call_tool { "tool_calls" } else { "stop" }
+                                }],
+                                "usage": {
+                                    "prompt_tokens": 10,
+                                    "completion_tokens": 5,
+                                    "total_tokens": 15
+                                }
+                            });
+
+                            Ok::<_, hyper::Error>(
+                                Response::builder()
+                                    .status(StatusCode::OK)
+                                    .header("Content-Type", "application/json")
+                                    .body(Full::new(Bytes::from(response.to_string())))
+                                    .unwrap(),
+                            )
+                        }
+                    });
+                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                });
+            }
+        });
+
+        Ok(Self { port, requests })
+    }
+
     async fn start_fail_once_before_tool_loop() -> Result<Self, String> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -2105,10 +2299,16 @@ fn request_contains_image_url(body: &serde_json::Value) -> bool {
 }
 
 async fn start_im_gateway_admin(port: u16) -> Result<(ProxyInstance, Arc<AdminState>), String> {
+    let data_dir = std::env::temp_dir().join(format!("bifrost_e2e_im_gateway_agent_{port}"));
+    if data_dir.exists() {
+        std::fs::remove_dir_all(&data_dir)
+            .map_err(|e| format!("Failed to clean IM Gateway E2E data dir: {e}"))?;
+    }
+    std::env::set_var("BIFROST_DATA_DIR", &data_dir);
+
     let (proxy, admin_state) = ProxyInstance::start_with_admin(port, vec![], false, true)
         .await
         .map_err(|e| format!("Failed to start proxy with admin: {}", e))?;
-    let data_dir = std::env::temp_dir().join(format!("bifrost_e2e_im_gateway_agent_{port}"));
     admin_state.set_im_gateway_service(Arc::new(ImGatewayService::new_with_agent_proxy_port(
         &data_dir,
         Some(port),

@@ -371,3 +371,120 @@ mark.mark-current {
   overflow-y: hidden !important;
   resize: none;
 }
+
+/* Agent Chat Markdown */
+.agent-chat-markdown {
+  font-size: 14px;
+  line-height: 1.7;
+  word-wrap: break-word;
+}
+
+.agent-chat-markdown > *:first-child {
+  margin-top: 0;
+}
+
+.agent-chat-markdown > *:last-child {
+  margin-bottom: 0;
+}
+
+.agent-chat-markdown p,
+.agent-chat-markdown ul,
+.agent-chat-markdown ol,
+.agent-chat-markdown blockquote,
+.agent-chat-markdown pre,
+.agent-chat-markdown table {
+  margin: 0 0 0.75em;
+}
+
+.agent-chat-markdown img {
+  display: block;
+  max-width: 100%;
+  max-height: min(90vh, 900px);
+  height: auto;
+  margin: 12px auto 12px 0;
+  border-radius: 8px;
+  object-fit: contain;
+}
+
+.agent-chat-markdown > img:first-child,
+.agent-chat-markdown > p:first-child > img:first-child {
+  margin-top: 0;
+}
+
+.agent-chat-markdown ul,
+.agent-chat-markdown ol {
+  padding-left: 1.5em;
+}
+
+.agent-chat-markdown li + li {
+  margin-top: 0.25em;
+}
+
+.agent-chat-markdown code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.05);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.9em;
+}
+
+[data-theme="dark"] .agent-chat-markdown code {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.agent-chat-markdown pre {
+  overflow: auto;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.04);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+[data-theme="dark"] .agent-chat-markdown pre {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.agent-chat-markdown pre code {
+  padding: 0;
+  background: transparent;
+}
+
+.agent-chat-markdown blockquote {
+  padding: 6px 12px;
+  border-left: 3px solid rgba(0, 0, 0, 0.12);
+  color: rgba(0, 0, 0, 0.55);
+}
+
+[data-theme="dark"] .agent-chat-markdown blockquote {
+  border-left-color: rgba(255, 255, 255, 0.2);
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.agent-chat-markdown h1,
+.agent-chat-markdown h2,
+.agent-chat-markdown h3 {
+  margin: 1em 0 0.5em;
+  line-height: 1.3;
+}
+
+.agent-chat-markdown h1 { font-size: 1.3em; }
+.agent-chat-markdown h2 { font-size: 1.15em; }
+.agent-chat-markdown h3 { font-size: 1.05em; }
+
+.agent-chat-markdown table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.agent-chat-markdown th,
+.agent-chat-markdown td {
+  padding: 6px 10px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  text-align: left;
+}
+
+[data-theme="dark"] .agent-chat-markdown th,
+[data-theme="dark"] .agent-chat-markdown td {
+  border-color: rgba(255, 255, 255, 0.12);
+}

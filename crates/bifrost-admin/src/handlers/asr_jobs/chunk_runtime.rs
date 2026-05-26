@@ -19,9 +19,10 @@ struct ServerRunnerState {
     server_url: String,
     baseline_rtf: Option<f64>,
     baseline_samples: Vec<f64>,
+    server_failures: u32,
     force_fork_for_remaining: bool,
     restart_required: bool,
-    fork_once_reason: Option<String>,
+    current_chunk_failure_reason: Option<String>,
     fallback_reason: Option<String>,
 }
 
@@ -44,6 +45,11 @@ struct ChunkAttempt {
     shadow_metrics: Vec<AsrChunkMetric>,
 }
 
+const ASR_MAX_SERVER_FAILURES_PER_FILE_ENV: &str = "BIFROST_ASR_MAX_SERVER_FAILURES_PER_FILE";
+const ASR_MAX_SERVER_FAILURES_PER_TASK_ENV: &str = "BIFROST_ASR_MAX_SERVER_FAILURES_PER_TASK";
+const ASR_DEFAULT_MAX_SERVER_FAILURES_PER_FILE: u32 = 2;
+const ASR_DEFAULT_MAX_SERVER_FAILURES_PER_TASK: u32 = 3;
+
 /// Split a long WAV file into fixed-duration chunks, transcribe each chunk
 /// by forking the native `asr` CLI (Plan B), and merge the results into one
 /// `WholeFileTranscription`.
@@ -64,6 +70,7 @@ async fn run_chunk_with_strategy(
     tmp_dir: &Path,
     force_pause_task_id: Option<&str>,
     server_state: &mut Option<ServerRunnerState>,
+    server_restart: Option<&mut ManagedServerRestartContext<'_>>,
     memory_events: Option<std::sync::Arc<StdMutex<Vec<AsrMemoryLimitEvent>>>>,
 ) -> Result<ChunkAttempt, String> {
     match strategy {
@@ -86,22 +93,14 @@ async fn run_chunk_with_strategy(
         AsrRuntimeStrategy::ReuseServer | AsrRuntimeStrategy::ReusePerFile => {
             if let Some(reason) = server_state
                 .as_mut()
-                .and_then(|state| state.fork_once_reason.take())
+                .and_then(|state| state.current_chunk_failure_reason.take())
             {
-                return run_fork_chunk(
-                    asr_bin,
-                    model_path,
-                    language,
-                    chunk_path,
+                return Ok(failed_server_chunk_attempt(
                     chunk_offset_secs,
                     chunk_duration_secs,
                     chunk_index,
-                    tmp_dir,
-                    force_pause_task_id,
-                    Some(reason),
-                    memory_events,
-                )
-                .await;
+                    reason,
+                ));
             }
 
             if server_state
@@ -146,50 +145,20 @@ async fn run_chunk_with_strategy(
                 None,
             )
             .await?;
-            match &server_attempt.result {
-                Ok(_) => Ok(server_attempt),
-                Err(error) => {
-                    let reason = server_failure_fallback_reason(strategy, error);
-                    if let Some(state) = server_state.as_mut() {
-                        state.restart_required = true;
-                        state.fallback_reason = Some(reason.clone());
-                    }
-                    tracing::warn!(
-                        chunk = chunk_index,
-                        offset_secs = chunk_offset_secs,
-                        duration_secs = chunk_duration_secs,
-                        server_url = ?server_attempt.metric.server_url,
-                        fallback_reason = %reason,
-                        server_error = %error,
-                        "ASR server runtime strategy retrying current chunk via fork_per_chunk"
-                    );
-                    let mut fallback_attempt = run_fork_chunk(
-                        asr_bin,
-                        model_path,
-                        language,
-                        chunk_path,
-                        chunk_offset_secs,
-                        chunk_duration_secs,
-                        chunk_index,
-                        tmp_dir,
-                        force_pause_task_id,
-                        Some(reason),
-                        memory_events,
-                    )
-                    .await?;
-                    fallback_attempt
-                        .shadow_metrics
-                        .push(server_attempt.metric.clone());
-                    Ok(fallback_attempt)
+            if server_attempt.result.is_ok() {
+                if let Some(state) = server_state.as_mut() {
+                    state.server_failures = 0;
                 }
-            }
-        }
-        AsrRuntimeStrategy::Auto => {
-            if let Some(reason) = server_state
-                .as_mut()
-                .and_then(|state| state.fork_once_reason.take())
-            {
-                return run_fork_chunk(
+                Ok(server_attempt)
+            } else {
+                let error = server_attempt
+                    .result
+                    .as_ref()
+                    .err()
+                    .cloned()
+                    .unwrap_or_else(|| "unknown ASR server error".to_string());
+                retry_server_failure_or_fork(
+                    strategy,
                     asr_bin,
                     model_path,
                     language,
@@ -197,12 +166,28 @@ async fn run_chunk_with_strategy(
                     chunk_offset_secs,
                     chunk_duration_secs,
                     chunk_index,
+                    server_state,
+                    server_restart,
+                    server_attempt,
+                    error,
                     tmp_dir,
                     force_pause_task_id,
-                    Some(reason),
                     memory_events,
                 )
-                .await;
+                .await
+            }
+        }
+        AsrRuntimeStrategy::Auto => {
+            if let Some(reason) = server_state
+                .as_mut()
+                .and_then(|state| state.current_chunk_failure_reason.take())
+            {
+                return Ok(failed_server_chunk_attempt(
+                    chunk_offset_secs,
+                    chunk_duration_secs,
+                    chunk_index,
+                    reason,
+                ));
             }
 
             if server_state
@@ -242,60 +227,53 @@ async fn run_chunk_with_strategy(
                 None,
             )
             .await?;
-            match &server_attempt.result {
-                Ok(_) if should_keep_using_server(server_state, &server_attempt.metric) => {
-                    Ok(server_attempt)
+            if server_attempt.result.is_ok()
+                && should_keep_using_server(server_state, &server_attempt.metric)
+            {
+                if let Some(state) = server_state.as_mut() {
+                    state.server_failures = 0;
                 }
-                Ok(_) => {
-                    let reason = "auto strategy RTF regression exceeded threshold".to_string();
-                    if let Some(state) = server_state.as_mut() {
-                        state.force_fork_for_remaining = true;
-                        state.fallback_reason = Some(reason.clone());
-                    }
-                    tracing::warn!(
-                        chunk = chunk_index,
-                        offset_secs = chunk_offset_secs,
-                        duration_secs = chunk_duration_secs,
-                        rtf = server_attempt.metric.rtf,
-                        %reason,
-                        "ASR auto strategy switching remaining chunks to fork_per_chunk"
-                    );
-                    Ok(server_attempt)
+                Ok(server_attempt)
+            } else if server_attempt.result.is_ok() {
+                let reason = "auto strategy RTF regression exceeded threshold".to_string();
+                if let Some(state) = server_state.as_mut() {
+                    state.force_fork_for_remaining = true;
+                    state.fallback_reason = Some(reason.clone());
                 }
-                Err(error) => {
-                    let reason = format!(
-                        "auto strategy server chunk failed; retrying current chunk via fork_per_chunk and scheduling managed ASR server restart for later chunks: {error}"
-                    );
-                    if let Some(state) = server_state.as_mut() {
-                        state.restart_required = true;
-                        state.fallback_reason = Some(reason.clone());
-                    }
-                    tracing::warn!(
-                        chunk = chunk_index,
-                        offset_secs = chunk_offset_secs,
-                        duration_secs = chunk_duration_secs,
-                        %reason,
-                        "ASR auto strategy retrying current chunk via fork_per_chunk"
-                    );
-                    let mut fallback_attempt = run_fork_chunk(
-                        asr_bin,
-                        model_path,
-                        language,
-                        chunk_path,
-                        chunk_offset_secs,
-                        chunk_duration_secs,
-                        chunk_index,
-                        tmp_dir,
-                        force_pause_task_id,
-                        Some(reason),
-                        memory_events,
-                    )
-                    .await?;
-                    fallback_attempt
-                        .shadow_metrics
-                        .push(server_attempt.metric.clone());
-                    Ok(fallback_attempt)
-                }
+                tracing::warn!(
+                    chunk = chunk_index,
+                    offset_secs = chunk_offset_secs,
+                    duration_secs = chunk_duration_secs,
+                    rtf = server_attempt.metric.rtf,
+                    %reason,
+                    "ASR auto strategy switching remaining chunks to fork_per_chunk"
+                );
+                Ok(server_attempt)
+            } else {
+                let error = server_attempt
+                    .result
+                    .as_ref()
+                    .err()
+                    .cloned()
+                    .unwrap_or_else(|| "unknown ASR server error".to_string());
+                retry_server_failure_or_fork(
+                    strategy,
+                    asr_bin,
+                    model_path,
+                    language,
+                    chunk_path,
+                    chunk_offset_secs,
+                    chunk_duration_secs,
+                    chunk_index,
+                    server_state,
+                    server_restart,
+                    server_attempt,
+                    error,
+                    tmp_dir,
+                    force_pause_task_id,
+                    memory_events,
+                )
+                .await
             }
         }
         AsrRuntimeStrategy::Compare => {
@@ -372,9 +350,140 @@ fn should_keep_using_server(
     metric.rtf <= baseline * ASR_AUTO_FALLBACK_RTF_MULTIPLIER
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn retry_server_failure_or_fork(
+    strategy: AsrRuntimeStrategy,
+    asr_bin: &Path,
+    model_path: &Path,
+    language: &str,
+    chunk_path: &Path,
+    chunk_offset_secs: u64,
+    chunk_duration_secs: u64,
+    chunk_index: usize,
+    server_state: &mut Option<ServerRunnerState>,
+    mut server_restart: Option<&mut ManagedServerRestartContext<'_>>,
+    first_server_attempt: ChunkAttempt,
+    first_error: String,
+    tmp_dir: &Path,
+    force_pause_task_id: Option<&str>,
+    memory_events: Option<std::sync::Arc<StdMutex<Vec<AsrMemoryLimitEvent>>>>,
+) -> Result<ChunkAttempt, String> {
+    let mut shadow_metrics = vec![first_server_attempt.metric.clone()];
+    let reason = server_failure_fallback_reason(strategy, &first_error);
+    if let Some(state) = server_state.as_mut() {
+        state.server_failures = state.server_failures.saturating_add(1);
+        state.restart_required = true;
+        state.fallback_reason = Some(reason.clone());
+        apply_server_failure_breaker_if_needed(
+            strategy,
+            state,
+            chunk_index,
+            chunk_offset_secs,
+            chunk_duration_secs,
+        );
+    }
+
+    tracing::warn!(
+        chunk = chunk_index,
+        offset_secs = chunk_offset_secs,
+        duration_secs = chunk_duration_secs,
+        server_url = ?first_server_attempt.metric.server_url,
+        fallback_reason = %reason,
+        server_error = %first_error,
+        retryable = is_server_restart_retriable(&first_error),
+        "ASR server chunk failed"
+    );
+
+    stop_failed_managed_server_after_failure(
+        strategy,
+        chunk_index,
+        chunk_offset_secs,
+        chunk_duration_secs,
+        &first_server_attempt.metric,
+        server_restart.as_deref_mut(),
+    )
+    .await;
+
+    if server_restart.is_none() && matches!(strategy, AsrRuntimeStrategy::Auto) {
+        let mut failed_attempt = first_server_attempt;
+        failed_attempt.metric.fallback_reason = Some(reason);
+        failed_attempt.shadow_metrics = shadow_metrics.split_off(1);
+        return Ok(failed_attempt);
+    }
+
+    let fork_reason = server_state
+        .as_ref()
+        .filter(|state| state.force_fork_for_remaining)
+        .and_then(|state| state.fallback_reason.clone())
+        .unwrap_or_else(|| reason.clone());
+    let mut fallback_attempt = run_fork_chunk(
+        asr_bin,
+        model_path,
+        language,
+        chunk_path,
+        chunk_offset_secs,
+        chunk_duration_secs,
+        chunk_index,
+        tmp_dir,
+        force_pause_task_id,
+        Some(fork_reason.clone()),
+        memory_events,
+    )
+    .await?;
+    fallback_attempt.shadow_metrics = shadow_metrics;
+    match &fallback_attempt.result {
+        Ok(_) => {
+            tracing::info!(
+                chunk = chunk_index,
+                offset_secs = chunk_offset_secs,
+                duration_secs = chunk_duration_secs,
+                fallback_reason = %fork_reason,
+                "ASR server chunk recovered via fork_per_chunk fallback"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                chunk = chunk_index,
+                offset_secs = chunk_offset_secs,
+                duration_secs = chunk_duration_secs,
+                fallback_reason = %fork_reason,
+                fallback_error = %error,
+                "ASR fork_per_chunk fallback failed after server chunk failure"
+            );
+        }
+    }
+    Ok(fallback_attempt)
+}
+
+async fn stop_failed_managed_server_after_failure(
+    strategy: AsrRuntimeStrategy,
+    chunk_index: usize,
+    chunk_offset_secs: u64,
+    chunk_duration_secs: u64,
+    metric: &AsrChunkMetric,
+    restart: Option<&mut ManagedServerRestartContext<'_>>,
+) {
+    let Some(restart) = restart else {
+        return;
+    };
+    tracing::warn!(
+        task_id = %restart.task.id,
+        runtime_strategy = strategy.as_str(),
+        scope = restart.scope,
+        chunk = chunk_index,
+        offset_secs = chunk_offset_secs,
+        duration_secs = chunk_duration_secs,
+        server_url = ?metric.server_url,
+        "stopping failed managed ASR server after chunk failure"
+    );
+    stop_managed_service_for_target(restart.target).await;
+}
+
 fn server_failure_fallback_reason(strategy: AsrRuntimeStrategy, error: &str) -> String {
     let kind = if is_server_transport_failure(error) {
         "transport"
+    } else if is_mlx_empty_tensor_failure(error) {
+        "mlx_empty_tensor"
     } else {
         "server"
     };
@@ -382,6 +491,58 @@ fn server_failure_fallback_reason(strategy: AsrRuntimeStrategy, error: &str) -> 
         "{} strategy {kind} failure; retrying current chunk via fork_per_chunk and scheduling managed ASR server restart for later chunks: {error}",
         strategy.as_str()
     )
+}
+
+fn max_server_failures_for_strategy(strategy: AsrRuntimeStrategy) -> u32 {
+    let (env_key, default) = match strategy {
+        AsrRuntimeStrategy::ReusePerFile => (
+            ASR_MAX_SERVER_FAILURES_PER_FILE_ENV,
+            ASR_DEFAULT_MAX_SERVER_FAILURES_PER_FILE,
+        ),
+        _ => (
+            ASR_MAX_SERVER_FAILURES_PER_TASK_ENV,
+            ASR_DEFAULT_MAX_SERVER_FAILURES_PER_TASK,
+        ),
+    };
+    std::env::var(env_key)
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+fn apply_server_failure_breaker_if_needed(
+    strategy: AsrRuntimeStrategy,
+    state: &mut ServerRunnerState,
+    chunk_index: usize,
+    chunk_offset_secs: u64,
+    chunk_duration_secs: u64,
+) {
+    let max_failures = max_server_failures_for_strategy(strategy);
+    if state.server_failures < max_failures {
+        return;
+    }
+    let disabled_reason = format!(
+        "{} strategy observed {} managed ASR server failures; switching remaining chunks to fork_per_chunk isolation",
+        strategy.as_str(),
+        state.server_failures
+    );
+    state.force_fork_for_remaining = true;
+    state.restart_required = false;
+    state.fallback_reason = Some(disabled_reason.clone());
+    tracing::warn!(
+        chunk = chunk_index,
+        offset_secs = chunk_offset_secs,
+        duration_secs = chunk_duration_secs,
+        failures = state.server_failures,
+        max_failures,
+        %disabled_reason,
+        "ASR managed server failure threshold reached"
+    );
+}
+
+fn is_server_restart_retriable(error: &str) -> bool {
+    is_server_transport_failure(error) || is_mlx_empty_tensor_failure(error)
 }
 
 fn is_server_transport_failure(error: &str) -> bool {
@@ -392,6 +553,13 @@ fn is_server_transport_failure(error: &str) -> bool {
         || lower.contains("broken pipe")
         || lower.contains("timed out")
         || lower.contains("connection closed")
+}
+
+fn is_mlx_empty_tensor_failure(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("mlx error")
+        && lower.contains("reshape")
+        && (lower.contains("array of size 0") || lower.contains("size 0"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -467,6 +635,30 @@ async fn run_server_chunk(
         metric,
         shadow_metrics: Vec::new(),
     })
+}
+
+fn failed_server_chunk_attempt(
+    chunk_offset_secs: u64,
+    chunk_duration_secs: u64,
+    chunk_index: usize,
+    reason: String,
+) -> ChunkAttempt {
+    let result = Err(reason.clone());
+    let metric = chunk_metric(
+        chunk_index,
+        chunk_offset_secs,
+        chunk_duration_secs,
+        "reuse_server",
+        &result,
+        0,
+        None,
+        Some(reason),
+    );
+    ChunkAttempt {
+        result,
+        metric,
+        shadow_metrics: Vec::new(),
+    }
 }
 
 #[cfg(not(test))]
@@ -609,9 +801,10 @@ async fn transcribe_in_chunks(
             server_url: url.to_string(),
             baseline_rtf: None,
             baseline_samples: Vec::new(),
+            server_failures: 0,
             force_fork_for_remaining: startup_fallback_reason.is_some(),
             restart_required: false,
-            fork_once_reason: None,
+            current_chunk_failure_reason: None,
             fallback_reason: startup_fallback_reason.map(str::to_string),
         });
         &mut local_server_state
@@ -752,6 +945,7 @@ async fn transcribe_in_chunks(
                 tmp_dir,
                 force_pause_task_id,
                 shared_server_state,
+                server_restart.as_mut(),
                 Some(memory_events.clone()),
             )
             .await?
@@ -901,8 +1095,9 @@ async fn prepare_managed_server_for_chunk(
             state.server_url = server.server_url;
             state.baseline_rtf = None;
             state.baseline_samples.clear();
+            state.server_failures = 0;
             state.restart_required = false;
-            state.fork_once_reason = None;
+            state.current_chunk_failure_reason = None;
             tracing::info!(
                 task_id = %restart.task.id,
                 runtime_strategy = runtime_strategy.as_str(),
@@ -914,11 +1109,11 @@ async fn prepare_managed_server_for_chunk(
         }
         Err(error) => {
             let reason = format!(
-                "{} strategy managed ASR server restart failed; retrying current chunk via fork_per_chunk and will retry server restart before the next server chunk: {error}",
+                "{} strategy managed ASR server restart failed; recording current chunk as failed and will retry server restart before the next server chunk: {error}",
                 runtime_strategy.as_str()
             );
             state.restart_required = true;
-            state.fork_once_reason = Some(reason.clone());
+            state.current_chunk_failure_reason = Some(reason.clone());
             state.fallback_reason = Some(reason.clone());
             tracing::warn!(
                 task_id = %restart.task.id,

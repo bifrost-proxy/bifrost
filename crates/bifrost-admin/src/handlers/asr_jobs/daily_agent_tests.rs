@@ -52,7 +52,7 @@ fn daily_agent_prompt_uses_file_list_for_file_capable_runners() {
 }
 
 #[tokio::test]
-async fn reuse_server_fallback_schedules_restart_for_later_chunks() {
+async fn reuse_server_failure_records_chunk_and_schedules_restart() {
     let temp = TempDir::new().unwrap();
     let chunk_path = temp.path().join("chunk.wav");
     std::fs::write(&chunk_path, make_wav(&[500i16; 16_000])).unwrap();
@@ -61,9 +61,10 @@ async fn reuse_server_fallback_schedules_restart_for_later_chunks() {
         server_url: "test-error:connection refused by watchdog".to_string(),
         baseline_rtf: None,
         baseline_samples: Vec::new(),
+        server_failures: 0,
         force_fork_for_remaining: false,
         restart_required: false,
-        fork_once_reason: None,
+        current_chunk_failure_reason: None,
         fallback_reason: None,
     });
 
@@ -80,6 +81,7 @@ async fn reuse_server_fallback_schedules_restart_for_later_chunks() {
         None,
         &mut server_state,
         None,
+        None,
     )
     .await
     .unwrap();
@@ -94,6 +96,7 @@ async fn reuse_server_fallback_schedules_restart_for_later_chunks() {
         .is_some_and(|state| !state.force_fork_for_remaining && state.restart_required));
     assert!(fallback_reason.contains("reuse_server strategy transport failure"));
     assert_eq!(first.metric.runner, "fork_per_chunk");
+    assert_eq!(first.metric.status, "error");
     assert_eq!(
         first.metric.fallback_reason.as_deref(),
         Some(fallback_reason.as_str())
@@ -105,7 +108,7 @@ async fn reuse_server_fallback_schedules_restart_for_later_chunks() {
     if let Some(state) = server_state.as_mut() {
         state.server_url = "test-ok:restarted-server".to_string();
         state.restart_required = false;
-        state.fork_once_reason = None;
+        state.current_chunk_failure_reason = None;
     }
     let second = run_chunk_with_strategy(
         AsrRuntimeStrategy::ReuseServer,
@@ -120,6 +123,7 @@ async fn reuse_server_fallback_schedules_restart_for_later_chunks() {
         None,
         &mut server_state,
         None,
+        None,
     )
     .await
     .unwrap();
@@ -132,19 +136,69 @@ async fn reuse_server_fallback_schedules_restart_for_later_chunks() {
 }
 
 #[tokio::test]
-async fn restart_failure_forks_only_current_chunk_and_keeps_retry_pending() {
+async fn reuse_server_failure_threshold_forces_remaining_fork_isolation() {
     let temp = TempDir::new().unwrap();
     let chunk_path = temp.path().join("chunk.wav");
     std::fs::write(&chunk_path, make_wav(&[500i16; 16_000])).unwrap();
 
     let mut server_state = Some(ServerRunnerState {
-        server_url: "test-ok:must-not-be-called-during-fork-once".to_string(),
+        server_url: "test-error:connection refused by watchdog".to_string(),
         baseline_rtf: None,
         baseline_samples: Vec::new(),
+        server_failures: max_server_failures_for_strategy(AsrRuntimeStrategy::ReuseServer) - 1,
+        force_fork_for_remaining: false,
+        restart_required: false,
+        current_chunk_failure_reason: None,
+        fallback_reason: None,
+    });
+
+    let attempt = run_chunk_with_strategy(
+        AsrRuntimeStrategy::ReuseServer,
+        Path::new("/nonexistent/asr"),
+        Path::new("/nonexistent/model"),
+        "chinese",
+        &chunk_path,
+        0,
+        1,
+        0,
+        temp.path(),
+        None,
+        &mut server_state,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(attempt.metric.runner, "fork_per_chunk");
+    assert_eq!(attempt.metric.status, "error");
+    assert_eq!(attempt.shadow_metrics.len(), 1);
+    assert_eq!(attempt.shadow_metrics[0].runner, "reuse_server");
+    assert_eq!(attempt.shadow_metrics[0].status, "error");
+    let state = server_state.as_ref().unwrap();
+    assert!(state.force_fork_for_remaining);
+    assert!(!state.restart_required);
+    assert!(state
+        .fallback_reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("switching remaining chunks to fork_per_chunk isolation")));
+}
+
+#[tokio::test]
+async fn restart_failure_records_current_chunk_and_keeps_retry_pending() {
+    let temp = TempDir::new().unwrap();
+    let chunk_path = temp.path().join("chunk.wav");
+    std::fs::write(&chunk_path, make_wav(&[500i16; 16_000])).unwrap();
+
+    let mut server_state = Some(ServerRunnerState {
+        server_url: "test-ok:must-not-be-called-after-restart-failure".to_string(),
+        baseline_rtf: None,
+        baseline_samples: Vec::new(),
+        server_failures: 0,
         force_fork_for_remaining: false,
         restart_required: true,
-        fork_once_reason: Some(
-            "reuse_per_file strategy managed ASR server restart failed; retrying current chunk via fork_per_chunk"
+        current_chunk_failure_reason: Some(
+            "reuse_per_file strategy managed ASR server restart failed; recording current chunk as failed"
                 .to_string(),
         ),
         fallback_reason: None,
@@ -163,11 +217,13 @@ async fn restart_failure_forks_only_current_chunk_and_keeps_retry_pending() {
         None,
         &mut server_state,
         None,
+        None,
     )
     .await
     .unwrap();
 
-    assert_eq!(attempt.metric.runner, "fork_per_chunk");
+    assert_eq!(attempt.metric.runner, "reuse_server");
+    assert_eq!(attempt.metric.status, "error");
     assert!(attempt.shadow_metrics.is_empty());
     assert!(attempt
         .metric
@@ -177,7 +233,7 @@ async fn restart_failure_forks_only_current_chunk_and_keeps_retry_pending() {
     let state = server_state.as_ref().unwrap();
     assert!(state.restart_required);
     assert!(!state.force_fork_for_remaining);
-    assert!(state.fork_once_reason.is_none());
+    assert!(state.current_chunk_failure_reason.is_none());
 }
 
 #[test]
@@ -233,6 +289,36 @@ fn daily_agent_report_detail_path_is_date_scoped() {
     assert!(report_path.ends_with("daily-agent-report-task/.daily/report/2026-05-14-report.md"));
     assert!(daily_agent_report_path_for_date("daily-agent-report-task", "../secret").is_err());
     assert!(daily_agent_report_path_for_date("daily-agent-report-task", "2026-02-31").is_err());
+}
+
+#[test]
+fn daily_agent_report_detail_uses_processed_state_report_path() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let task_id = "daily-agent-state-report-task";
+    let legacy_report_dir = text_output_dir(temp.path()).join(task_id).join("daily/report");
+    std::fs::create_dir_all(&legacy_report_dir).unwrap();
+    let legacy_report_path = legacy_report_dir.join("2026-05-20-report.md");
+    std::fs::write(&legacy_report_path, "# state report").unwrap();
+
+    let mut processed = AsrDailyAgentProcessedState::default();
+    processed.documents.insert(
+        "2026-05-20".to_string(),
+        AsrDailyAgentProcessedDocument {
+            date: "2026-05-20".to_string(),
+            source_sha256: "abc123".to_string(),
+            source_len_bytes: 42,
+            processed_at_ms: 100,
+            runner: "web".to_string(),
+            report_path: Some(legacy_report_path.to_string_lossy().to_string()),
+            last_run_id: "run-1".to_string(),
+        },
+    );
+    atomic_json_write(&daily_agent_processed_state_path(task_id), &processed).unwrap();
+
+    let detail_path = daily_agent_report_path_for_date(task_id, "2026-05-20").unwrap();
+    assert_eq!(detail_path, legacy_report_path);
 }
 
 #[test]
@@ -358,6 +444,166 @@ fn daily_agent_report_index_status_marks_unindexed_reports_without_backfill() {
         !state_path.exists(),
         "report index status must not backfill processed state"
     );
+}
+
+#[test]
+fn daily_agent_report_sync_copies_reports_and_skips_identical_targets() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let task_id = "daily-agent-report-sync-task";
+    let daily_dir = daily_dir_for_task(task_id);
+    let report_dir = daily_dir.join("report");
+    let sync_dir = temp.path().join("icloud-sync");
+    std::fs::create_dir_all(&report_dir).unwrap();
+    std::fs::create_dir_all(&sync_dir).unwrap();
+    std::fs::write(report_dir.join("2026-05-14-report.md"), "report one").unwrap();
+    std::fs::write(report_dir.join("2026-05-15-report.md"), "report two").unwrap();
+    std::fs::write(sync_dir.join("2026-05-14-report.md"), "report one").unwrap();
+
+    let mut task = AsrDirectoryTask {
+        id: task_id.to_string(),
+        name: "Daily Agent Report Sync Task".to_string(),
+        audio_dir: temp.path().join("audio"),
+        recursive: true,
+        enabled: true,
+        paused: false,
+        paused_at_ms: None,
+        schedule: AsrTaskSchedule::Hourly { minute: 0 },
+        language: "chinese".to_string(),
+        model: "Qwen3-ASR-1.7B".to_string(),
+        runtime_strategy: AsrRuntimeStrategy::ReusePerFile,
+        created_at_ms: 1,
+        updated_at_ms: 1,
+        last_run_at_ms: None,
+        next_run_at_ms: Some(1),
+        last_error: None,
+        daily_agent: AsrDailyAgentConfig::default(),
+        external_devices: Vec::new(),
+        import_policy: AsrExternalImportPolicy::default(),
+    };
+    task.daily_agent.report_sync_dir = Some(sync_dir.to_string_lossy().to_string());
+
+    let reports: Vec<String> = list_daily_agent_report_files(task_id)
+        .into_iter()
+        .map(|path| path.to_string_lossy().to_string())
+        .collect();
+    let result = sync_daily_agent_report_files(&task, &reports).unwrap();
+
+    assert_eq!(result.total_files, 2);
+    assert_eq!(result.copied_files, 1);
+    assert_eq!(result.skipped_files, 1);
+    assert_eq!(result.failed_files, 0);
+    assert_eq!(
+        std::fs::read_to_string(sync_dir.join("2026-05-15-report.md")).unwrap(),
+        "report two"
+    );
+}
+
+#[test]
+fn daily_agent_report_sync_requires_configured_directory() {
+    let temp = TempDir::new().unwrap();
+    let task = AsrDirectoryTask {
+        id: "daily-agent-report-sync-missing-dir-task".to_string(),
+        name: "Daily Agent Report Sync Missing Dir Task".to_string(),
+        audio_dir: temp.path().join("audio"),
+        recursive: true,
+        enabled: true,
+        paused: false,
+        paused_at_ms: None,
+        schedule: AsrTaskSchedule::Hourly { minute: 0 },
+        language: "chinese".to_string(),
+        model: "Qwen3-ASR-1.7B".to_string(),
+        runtime_strategy: AsrRuntimeStrategy::ReusePerFile,
+        created_at_ms: 1,
+        updated_at_ms: 1,
+        last_run_at_ms: None,
+        next_run_at_ms: Some(1),
+        last_error: None,
+        daily_agent: AsrDailyAgentConfig::default(),
+        external_devices: Vec::new(),
+        import_policy: AsrExternalImportPolicy::default(),
+    };
+
+    let error = sync_daily_agent_report_files(&task, &[]).unwrap_err();
+    assert!(error.contains("report sync directory is not configured"));
+}
+
+#[test]
+fn daily_agent_watch_summary_counts_processed_pending_and_report_only_documents() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let task_id = "daily-agent-watch-summary-task";
+    let daily_dir = daily_dir_for_task(task_id);
+    let report_dir = daily_dir.join("report");
+    std::fs::create_dir_all(&report_dir).unwrap();
+
+    let processed_source = daily_dir.join("2026-05-20.md");
+    let pending_source = daily_dir.join("2026-05-21.md");
+    std::fs::write(&processed_source, "processed source").unwrap();
+    std::fs::write(&pending_source, "pending source v2").unwrap();
+    let processed_report = report_dir.join("2026-05-20-report.md");
+    let report_only = report_dir.join("2026-05-19-report.md");
+    std::fs::write(&processed_report, "# processed report").unwrap();
+    std::fs::write(&report_only, "# report only").unwrap();
+
+    let mut processed = AsrDailyAgentProcessedState::default();
+    processed.documents.insert(
+        "2026-05-20".to_string(),
+        AsrDailyAgentProcessedDocument {
+            date: "2026-05-20".to_string(),
+            source_sha256: compute_sha256(&processed_source).unwrap(),
+            source_len_bytes: source_size(&processed_source).unwrap(),
+            processed_at_ms: 100,
+            runner: "codex".to_string(),
+            report_path: Some(processed_report.to_string_lossy().to_string()),
+            last_run_id: "run-processed".to_string(),
+        },
+    );
+    processed.documents.insert(
+        "2026-05-21".to_string(),
+        AsrDailyAgentProcessedDocument {
+            date: "2026-05-21".to_string(),
+            source_sha256: "old-hash".to_string(),
+            source_len_bytes: 4,
+            processed_at_ms: 90,
+            runner: "codex".to_string(),
+            report_path: Some(
+                report_dir
+                    .join("2026-05-21-report.md")
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+            last_run_id: "run-old".to_string(),
+        },
+    );
+    save_daily_agent_processed_state(task_id, &processed).unwrap();
+
+    let mut task = test_directory_task(task_id, temp.path().join("audio"));
+    task.daily_agent.enabled = true;
+    task.daily_agent.runner = "codex".to_string();
+
+    let summary = task_watch_daily_agent(&task, 8);
+
+    assert_eq!(summary.daily_files, 2);
+    assert_eq!(summary.processed_documents, 1);
+    assert_eq!(summary.pending_documents, 1);
+    assert_eq!(summary.report_files, 2);
+    assert_eq!(summary.indexed_reports, 1);
+    assert_eq!(summary.unindexed_reports, 1);
+    assert!(summary
+        .recent_documents
+        .iter()
+        .any(|document| document.date == "2026-05-21" && document.status == "pending"));
+    assert!(summary
+        .recent_documents
+        .iter()
+        .any(|document| document.date == "2026-05-20" && document.status == "processed"));
+    assert!(summary
+        .recent_documents
+        .iter()
+        .any(|document| document.date == "2026-05-19" && document.status == "report_only"));
 }
 
 #[test]
@@ -492,19 +738,17 @@ fn daily_agent_after_asr_run_requires_no_pending_files() {
     pending.pending = 1;
     assert!(!daily_agent_asr_completion_ready(&pending));
 
-    // failed/partial_success/failed_chunk_count 不应阻止 daily agent 触发，
-    // 因为这些文件可能永远无法成功处理。
     let mut failed = clean.clone();
     failed.failed = 1;
-    assert!(daily_agent_asr_completion_ready(&failed));
+    assert!(!daily_agent_asr_completion_ready(&failed));
 
     let mut partial = clean.clone();
     partial.partial_success = 1;
-    assert!(daily_agent_asr_completion_ready(&partial));
+    assert!(!daily_agent_asr_completion_ready(&partial));
 
     let mut failed_chunks = clean;
     failed_chunks.failed_chunk_count = 1;
-    assert!(daily_agent_asr_completion_ready(&failed_chunks));
+    assert!(!daily_agent_asr_completion_ready(&failed_chunks));
 }
 
 #[test]

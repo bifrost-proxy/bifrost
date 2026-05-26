@@ -178,15 +178,86 @@ fn start_external_device_event_watcher() {
 #[cfg(not(target_os = "macos"))]
 fn start_external_device_event_watcher() {}
 
+struct PendingBatchScan {
+    pending: Vec<PathBuf>,
+}
+
+fn discover_and_prepare_pending_batch(
+    task: &AsrDirectoryTask,
+    files: &mut FileStore,
+    attempted_keys: &HashSet<String>,
+) -> Result<PendingBatchScan, String> {
+    let discovered = discover_audio_files(&task.audio_dir, task.recursive)?;
+    for path in &discovered {
+        let key = source_key(path);
+        files
+            .files
+            .entry(key)
+            .or_insert_with(|| pending_record(&task.id, path));
+    }
+    apply_external_import_hashes_to_records(task, &discovered, files);
+    apply_content_hash_dedupe(task, &discovered, files)?;
+    save_file_store(&task.id, files)?;
+
+    // Only process files that are truly pending or failed outright.
+    // PartialSuccess files already have usable text/timeline output and should
+    // be recovered via retry-chunks, not re-processed from scratch.
+    let mut pending = discovered
+        .iter()
+        .filter(|path| {
+            let key = source_key(path);
+            !attempted_keys.contains(&key)
+                && files
+                    .files
+                    .get(&key)
+                    .map(|record| {
+                        matches!(
+                            record.status,
+                            FileStatus::Pending | FileStatus::Processing | FileStatus::Failed
+                        )
+                    })
+                    .unwrap_or(true)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    sort_pending_paths_by_source_time(files, &mut pending);
+    Ok(PendingBatchScan { pending })
+}
+
+fn sort_pending_paths_by_source_time(files: &FileStore, pending: &mut [PathBuf]) {
+    pending.sort_by(|left, right| {
+        let left_key = source_key(left);
+        let right_key = source_key(right);
+        let left_record = files.files.get(&left_key);
+        let right_record = files.files.get(&right_key);
+        pending_source_time_ms(left_record)
+            .cmp(&pending_source_time_ms(right_record))
+            .then_with(|| pending_modified_time_ms(left_record).cmp(&pending_modified_time_ms(right_record)))
+            .then_with(|| left.cmp(right))
+    });
+}
+
+fn pending_source_time_ms(record: Option<&FileRecord>) -> u64 {
+    record
+        .and_then(|record| record.source_created_at_ms)
+        .unwrap_or(u64::MAX)
+}
+
+fn pending_modified_time_ms(record: Option<&FileRecord>) -> u64 {
+    record
+        .and_then(|record| record.source_modified_ms)
+        .unwrap_or(u64::MAX)
+}
+
 async fn run_directory_task(
     task: AsrDirectoryTask,
 ) -> Result<(AsrDirectoryTask, usize, usize), String> {
     let _guard = ASR_JOB_RUN_LOCK.lock().await;
     let _task_lock = TaskRunFileLock::acquire(&task.id)?;
+    start_run_progress(&task.id, "background");
     if task_pause_requested(&task.id) {
         return Err(ASR_TASK_PAUSED_MESSAGE.to_string());
     }
-    let discovered = discover_audio_files(&task.audio_dir, task.recursive)?;
     let mut files = load_file_store(&task.id);
     let reset_count = reset_interrupted_processing_records(&task.id, &mut files);
     if reset_count > 0 {
@@ -196,39 +267,21 @@ async fn run_directory_task(
             "reset interrupted ASR processing records before starting task run"
         );
     }
-    for path in &discovered {
-        let key = source_key(path);
-        files
-            .files
-            .entry(key)
-            .or_insert_with(|| pending_record(&task.id, path));
-    }
-    apply_external_import_hashes_to_records(&task, &discovered, &mut files);
-    apply_content_hash_dedupe(&task, &discovered, &mut files)?;
-    save_file_store(&task.id, &files)?;
+    let mut attempted_keys = HashSet::new();
+    let mut pending_scan =
+        discover_and_prepare_pending_batch(&task, &mut files, &attempted_keys)?;
+    update_run_progress(&task.id, |progress| {
+        progress.current_file_total = pending_scan.pending.len();
+        progress.current_file_index = 0;
+        progress.current_chunk_done = 0;
+        progress.current_chunk_total = 0;
+        progress.message = Some(format!(
+            "discovered {} pending file(s)",
+            pending_scan.pending.len()
+        ));
+    });
 
-    // Only re-process files that are truly pending or failed outright.
-    // PartialSuccess files already have usable text/timeline output and
-    // should be recovered via the retry-chunks API, NOT re-processed from
-    // scratch (which would discard the existing partial results).
-    let pending = discovered
-        .iter()
-        .filter(|path| {
-            files
-                .files
-                .get(&source_key(path))
-                .map(|record| {
-                    matches!(
-                        record.status,
-                        FileStatus::Pending | FileStatus::Processing | FileStatus::Failed
-                    )
-                })
-                .unwrap_or(true)
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-
-    if pending.is_empty() {
+    if pending_scan.pending.is_empty() {
         refresh_task_daily_summaries(&task)?;
         let updated = match update_task_after_run(&task.id, None) {
             Ok(task) => task,
@@ -254,7 +307,7 @@ async fn run_directory_task(
         model = %task.model,
         language = %task.language,
         runtime_strategy = task.runtime_strategy.as_str(),
-        pending_files = pending.len(),
+        pending_files = pending_scan.pending.len(),
         "starting ASR directory task run"
     );
 
@@ -307,27 +360,75 @@ async fn run_directory_task(
         server_url: url.clone(),
         baseline_rtf: None,
         baseline_samples: Vec::new(),
+        server_failures: 0,
         force_fork_for_remaining: startup_fallback_reason.is_some(),
         restart_required: false,
-        fork_once_reason: None,
+        current_chunk_failure_reason: None,
         fallback_reason: startup_fallback_reason.clone(),
     });
 
     let pause_check = || task_pause_requested(&task.id);
-    let loop_result = process_pending_files(
-        &task,
-        &target,
-        &asr_bin,
-        &model_path,
-        server_url.as_deref(),
-        startup_fallback_reason.as_deref(),
-        &pending,
-        &mut files,
-        &pause_check,
-        &mut task_server_state,
-        &mut stop_task_server_after_use,
-    )
-    .await;
+    let mut processed_now = 0usize;
+    let mut failed_now = 0usize;
+    let loop_result: Result<(), String> = loop {
+        let pending = std::mem::take(&mut pending_scan.pending);
+        for path in &pending {
+            attempted_keys.insert(source_key(path));
+        }
+        let (batch_processed, batch_failed) = match process_pending_files(
+            &task,
+            &target,
+            &asr_bin,
+            &model_path,
+            server_url.as_deref(),
+            startup_fallback_reason.as_deref(),
+            &pending,
+            processed_now,
+            failed_now,
+            &mut files,
+            &pause_check,
+            &mut task_server_state,
+            &mut stop_task_server_after_use,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => break Err(error),
+        };
+        processed_now += batch_processed;
+        failed_now += batch_failed;
+
+        files = load_file_store(&task.id);
+        pending_scan =
+            match discover_and_prepare_pending_batch(&task, &mut files, &attempted_keys) {
+                Ok(scan) => scan,
+                Err(error) => break Err(error),
+            };
+        update_run_progress(&task.id, |progress| {
+            progress.current_file_index = 0;
+            progress.current_file_total = pending_scan.pending.len();
+            progress.current_chunk_done = 0;
+            progress.current_chunk_total = 0;
+            progress.processed_now = processed_now;
+            progress.failed_now = failed_now;
+            progress.message = if pending_scan.pending.is_empty() {
+                Some("no newly appended pending files found".to_string())
+            } else {
+                Some(format!(
+                    "discovered {} appended pending file(s)",
+                    pending_scan.pending.len()
+                ))
+            };
+        });
+        if pending_scan.pending.is_empty() {
+            break Ok(());
+        }
+        tracing::info!(
+            task_id = %task.id,
+            pending_files = pending_scan.pending.len(),
+            "continuing ASR directory task run with appended files"
+        );
+    };
 
     if stop_task_server_after_use {
         tracing::info!(
@@ -338,7 +439,7 @@ async fn run_directory_task(
         stop_managed_service_for_target(&target).await;
     }
 
-    let (processed_now, failed_now) = loop_result?;
+    loop_result?;
 
     if let Err(error) = refresh_task_daily_summaries(&task) {
         warn!(task_id = %task.id, error = %error, "failed to generate daily summaries");
@@ -379,12 +480,28 @@ fn spawn_directory_task_run_background(task: AsrDirectoryTask) -> Result<(), Str
         let result = run_directory_task(task_clone.clone()).await;
         match &result {
             Ok((_updated, processed, failed)) => {
+                finish_run_progress(
+                    &task_clone.id,
+                    "completed",
+                    *processed,
+                    *failed,
+                    Some(format!(
+                        "ASR directory task completed; processed {processed}, failed {failed}."
+                    )),
+                );
                 tracing::info!(
                     task_id = %task_clone.id, processed = processed, failed = failed,
                     "ASR directory task completed"
                 );
             }
             Err(error) if error == ASR_TASK_PAUSED_MESSAGE => {
+                finish_run_progress(
+                    &task_clone.id,
+                    "paused",
+                    0,
+                    0,
+                    Some("ASR directory task paused and released compute.".to_string()),
+                );
                 tracing::info!(
                     task_id = %task_clone.id,
                     "ASR directory task paused and released compute"
@@ -392,6 +509,13 @@ fn spawn_directory_task_run_background(task: AsrDirectoryTask) -> Result<(), Str
             }
             Err(error) => {
                 let _ = update_task_after_run(&task_clone.id, Some(error.clone()));
+                finish_run_progress(
+                    &task_clone.id,
+                    "failed",
+                    0,
+                    0,
+                    Some(error.clone()),
+                );
                 tracing::warn!(
                     task_id = %task_clone.id, error = %error,
                     "ASR directory task failed"
@@ -482,17 +606,29 @@ async fn process_pending_files(
     server_url: Option<&str>,
     startup_fallback_reason: Option<&str>,
     pending: &[PathBuf],
+    processed_now_base: usize,
+    failed_now_base: usize,
     files: &mut FileStore,
     pause_check: &(dyn Fn() -> bool + Send + Sync),
     task_server_state: &mut Option<ServerRunnerState>,
     stop_task_server_after_use: &mut bool,
 ) -> Result<(usize, usize), String> {
-    let mut processed_now = 0usize;
-    let mut failed_now = 0usize;
+    let mut processed_now = processed_now_base;
+    let mut failed_now = failed_now_base;
 
     let total_pending = pending.len();
 
     for (file_index, path) in pending.iter().enumerate() {
+        update_run_progress(&task.id, |progress| {
+            progress.current_source_path = Some(path.clone());
+            progress.current_file_index = file_index + 1;
+            progress.current_file_total = total_pending;
+            progress.current_chunk_done = 0;
+            progress.current_chunk_total = 0;
+            progress.processed_now = processed_now;
+            progress.failed_now = failed_now;
+            progress.message = Some(format!("processing {}", path.display()));
+        });
         if pause_check() {
             return Err(ASR_TASK_PAUSED_MESSAGE.to_string());
         }
@@ -604,9 +740,10 @@ async fn process_pending_files(
             server_url: url.clone(),
             baseline_rtf: None,
             baseline_samples: Vec::new(),
+            server_failures: 0,
             force_fork_for_remaining: startup_fallback_reason.is_some(),
             restart_required: false,
-            fork_once_reason: None,
+            current_chunk_failure_reason: None,
             fallback_reason: startup_fallback_reason.map(str::to_string),
         });
         let chunk_progress_cb = {
@@ -615,6 +752,12 @@ async fn process_pending_files(
             let path = path.clone();
             let runtime_strategy = task.runtime_strategy;
             move |chunk_done: usize, chunk_total: usize| {
+                update_run_progress(&task_id, |progress| {
+                    progress.current_source_path = Some(path.clone());
+                    progress.current_chunk_done = chunk_done;
+                    progress.current_chunk_total = chunk_total;
+                    progress.message = Some(format!("processing chunk {chunk_done}/{chunk_total}"));
+                });
                 let mut progress_store = load_file_store(&task_id);
                 if let Some(rec) = progress_store.files.get_mut(&key) {
                     rec.progress_current = Some(chunk_done);
@@ -797,6 +940,13 @@ async fn process_pending_files(
                 files.files.insert(key.clone(), record.clone());
                 index_completed_file_hash(task, &key, &record);
                 processed_now += 1;
+                update_run_progress(&task.id, |progress| {
+                    progress.processed_now = processed_now;
+                    progress.failed_now = failed_now;
+                    progress.message = Some(format!(
+                        "processed {processed_now} file(s), failed {failed_now}"
+                    ));
+                });
             }
             Err(error) if error == ASR_TASK_PAUSED_MESSAGE => {
                 let mut record = file_record_from_info(&task.id, path, &source_info);
@@ -834,6 +984,13 @@ async fn process_pending_files(
                 record.progress_total = Some(total_pending);
                 files.files.insert(key, record);
                 failed_now += 1;
+                update_run_progress(&task.id, |progress| {
+                    progress.processed_now = processed_now;
+                    progress.failed_now = failed_now;
+                    progress.message = Some(format!(
+                        "processed {processed_now} file(s), failed {failed_now}"
+                    ));
+                });
             }
         }
         if stop_file_server_after_use {
@@ -851,7 +1008,10 @@ async fn process_pending_files(
         save_file_store(&task.id, files)?;
     }
 
-    Ok((processed_now, failed_now))
+    Ok((
+        processed_now.saturating_sub(processed_now_base),
+        failed_now.saturating_sub(failed_now_base),
+    ))
 }
 
 /// Transcribe a pre-normalized WAV file for a directory task using
@@ -926,9 +1086,10 @@ async fn transcribe_file_for_task_with_wav(
                 server_url: url.to_string(),
                 baseline_rtf: None,
                 baseline_samples: Vec::new(),
+                server_failures: 0,
                 force_fork_for_remaining: hooks.startup_fallback_reason.is_some(),
                 restart_required: false,
-                fork_once_reason: None,
+                current_chunk_failure_reason: None,
                 fallback_reason: hooks.startup_fallback_reason.map(str::to_string),
             });
             &mut local_server_state
@@ -951,6 +1112,7 @@ async fn transcribe_file_for_task_with_wav(
             temp.path(),
             hooks.force_pause_task_id,
             server_state,
+            hooks.managed_server_restart.as_mut(),
             None,
         )
         .await?;

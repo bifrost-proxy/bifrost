@@ -36,6 +36,7 @@ ASR 定时任务完成音频转写后，自动触发 Daily Agent Runner 对每�
 | 6 | AGENTS.md 存储 | 双写：同时写入文件和 task config 的 `instructions` 副本（备份用途） |
 | 7 | Git commit | Phase 1 只做 `git init`；Runner 运行后 best-effort `git add + commit` |
 | 8 | Report 覆盖策略 | 默认不覆盖，`force=true` 时才允许覆盖 |
+| 9 | Report 同步目录 | 可选 `report_sync_dir`；Runner 生成 report 后自动复制本轮 report，用户也可在 Daily Agent 配置页手动同步全部现有 report，便于 iCloud 等外部目录同步 |
 
 ---
 
@@ -73,6 +74,10 @@ pub(crate) struct AsrDailyAgentConfig {
     #[serde(default)]
     pub im_delivery: AsrDailyAgentImDeliveryConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_sync_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_report_sync: Option<AsrDailyAgentReportSyncResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run_at_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_status: Option<String>,
@@ -94,6 +99,7 @@ pub(crate) struct AsrDailyAgentConfig {
 | `session_key` | `None` | 运行时默认 `asr-daily:<task_id>` |
 | `instructions_source` | `default` | — |
 | `instructions` | `None` | — |
+| `report_sync_dir` | `None` | 可选外部同步目录；空字符串清除配置 |
 | `im_delivery.enabled` | `false` | 需用户绑定 channel |
 | `im_delivery.mode` | `summary` | — |
 | `im_delivery.send_policy` | `on_success_with_report` | — |
@@ -233,6 +239,26 @@ Daily Agent 同时维护两类事实：
 3. `Force Run` 仍显式绕过增量判断，刷新匹配日期。
 4. Records 页和配置页复用同一套 report 目录扫描逻辑，避免 `report/` 与历史 `Report/` 兼容行为漂移。
 5. `/daily-agent/runs` 返回的 Records 列表必须按 `date` 倒序排列；同一日期存在多条候选记录时按 `processed_at_ms` 倒序，确保 Run Results tab 首屏优先展示最新数据。
+
+### 3.8 Report 同步状态
+
+`report_sync_dir` 只表示额外副本目录，不改变 `daily/report/` 作为系统事实源。同步时按 report 文件名复制到目标目录，目标文件内容一致时计入 skipped，内容不同或不存在时覆盖复制。路径支持 `~/...` 展开，目标目录不存在时创建；目标存在但不是目录时返回错误。
+
+最近一次同步结果保存在 `last_report_sync`，用于 `Last Run Status` 展示：
+
+```json
+{
+  "target_dir": "/Users/me/Library/Mobile Documents/com~apple~CloudDocs/ASR Reports",
+  "total_files": 12,
+  "copied_files": 2,
+  "skipped_files": 10,
+  "failed_files": 0,
+  "synced_at_ms": 1779212999000,
+  "errors": []
+}
+```
+
+自动同步只处理本轮 Runner 生成或更新的 report；手动同步通过 WebUI 按钮调用 `/daily-agent/sync`，扫描并同步全部现有 `daily/report/` 和历史兼容 `daily/Report/` 报告。
 
 ---
 
@@ -427,6 +453,7 @@ ExternalCliRuntime::run(ExternalCliRunRequest {
 | POST | `/api/asr/tasks/{task_id}/daily-agent/run` | 手动触发 run |
 | GET | `/api/asr/tasks/{task_id}/daily-agent/runs` | 获取 run 历史 |
 | POST | `/api/asr/tasks/{task_id}/daily-agent/send` | 发送最近 report 到 IM |
+| POST | `/api/asr/tasks/{task_id}/daily-agent/sync` | 手动同步全部现有 report 到 `report_sync_dir` |
 
 ### 6.2 GET /daily-agent 响应
 
@@ -440,7 +467,14 @@ ExternalCliRuntime::run(ExternalCliRunRequest {
     "trigger_policy": "after_asr_run",
     "session_key": null,
     "instructions_source": "default",
-    "im_delivery": { "enabled": false }
+    "im_delivery": { "enabled": false },
+    "report_sync_dir": "/Users/me/Library/Mobile Documents/com~apple~CloudDocs/ASR Reports",
+    "last_report_sync": {
+      "total_files": 12,
+      "copied_files": 2,
+      "skipped_files": 10,
+      "failed_files": 0
+    }
   },
   "workspace": {
     "daily_dir": "...",
@@ -514,6 +548,7 @@ ExternalCliRuntime::run(ExternalCliRunRequest {
 | Trigger | Select | "After ASR run completes" / "Manual only" |
 | Timeout | Number (分钟) | 默认 120 min |
 | Session key | Text | 可空，默认运行时自动生成 |
+| Report sync dir | Input + Save | 可选外部目录；保存到 `report_sync_dir`，空值表示不自动同步 |
 | IM delivery | Toggle | 开启后展示 provider/target/mode/policy |
 | IM Channel | Select | 单一通道下拉；列出可发送的 Provider Owner 通道和 IM Targets，直接保存为 `im_delivery.channel` |
 | Send mode | Select | Summary / Full report |
@@ -525,12 +560,32 @@ ExternalCliRuntime::run(ExternalCliRunRequest {
 展示信息：
 - Workspace path / Git status / AGENTS.md 状态
 - Report count / Last run (status, run_id, duration, error)
+- Report sync 状态：最近一次同步目标、总数、copied/skipped/failed、同步时间和错误摘要
 - IM delivery 状态 (provider, target, last sent, last error)
 
 操作按钮：
 - `Edit AGENTS.md` / `Save config`
-- `Run now` / `Send last report now`
+- `Run now` / `Send last report now` / `Sync reports`
 - `Refresh status` / `Open Daily Docs` / `Open Reports`
+
+---
+
+## 7.3 CLI
+
+Daily Agent report sync 必须同时提供 CLI 控制入口，便于不打开 WebUI 的自动化或 iCloud 目录配置：
+
+```bash
+bifrost ai asr task daily set-sync-dir <task> --dir "$HOME/Library/Mobile Documents/com~apple~CloudDocs/ASR Reports"
+bifrost ai asr task daily set-sync-dir <task> --clear
+bifrost ai asr task daily sync <task>
+bifrost ai asr task daily sync <task> --dir "$HOME/Library/Mobile Documents/com~apple~CloudDocs/ASR Reports"
+```
+
+约束：
+- `set-sync-dir` 只更新配置，不触发复制；`--clear` 清空 `report_sync_dir`。
+- `sync` 在已有配置上手动同步全部 report；传 `--dir` 时先保存该目录再同步。
+- 两个命令都复用 ASR task 的单任务自动选择/名称或 ID 前缀解析能力，并支持 `--json` 输出原始 API 响应。
+- 普通文本输出必须显示 target、total、copied、skipped、failed。
 
 ---
 
@@ -954,6 +1009,9 @@ build_daily_agent_change_plan(task, trigger, date, force)
 | 追加内容后再触发 | ChatGPT Web 只收新增 tail |
 | IM delivery 绑定 | 保存 `channel/mode/policy` |
 | 手动 Run now | report/ 生成文件 |
+| Report sync dir 自动同步 | 配置 `report_sync_dir` 后 Runner 成功生成 report，会把本轮 report 复制到目标目录，并在 `last_report_sync` 记录 copied/skipped/failed |
+| 手动同步 report | 调用 `/daily-agent/sync` 后同步全部现有 report，目标目录已有同内容文件计入 skipped |
+| CLI 同步控制 | `daily set-sync-dir` 能设置/清除目录，`daily sync` 能手动同步并输出 target/total/copied/skipped/failed |
 | 打开 report 详情 | `/daily-agent/reports/{date}` 返回 report Markdown 全文，非法日期拒绝，缺失 report 返回 404 |
 | 历史 report 发现 | `/daily-agent/runs` 合并 `daily_agent_processed.json` 与磁盘 `daily/report/`、兼容 `daily/Report/` 下的 `YYYY-MM-DD-report.md`；即使 processed state 缺失，Daily Agent Records 也必须展示已有报告，并按日期倒序返回 |
 | 自动 completion hook | run detail 记录 trigger_source=asr_completion |
@@ -971,7 +1029,10 @@ build_daily_agent_change_plan(task, trigger, date, force)
 - IM delivery 开关联动通道选择/mode/policy
 - 默认指导手册在 editor 中可见
 - 保存后 Daily Agent tab 读取到 custom AGENTS.md
+- Configuration 区域展示 Report Sync Dir 输入框和 Save 按钮；下方提供 Sync Reports 手动按钮，未配置目录时禁用。
+- Last Run Status 区域展示最近同步状态，包含 copied/total、skipped、同步目录和失败错误摘要。
 - Processed Documents 中任一 report 文件名可点击，进入全屏详情页并使用 Markdown 渲染器展示正文
+- Daily Agent Records 列表和 report 详情必须使用一致的状态来源：当 `daily_agent_processed.json` 中某日期记录了已存在的 `report_path` 时，`/daily-agent/reports/{date}` 必须读取同一个状态路径，而不是重新拼接另一个 workspace 路径导致列表可见、详情 404。
 - Daily Agent Records 不只依赖 `daily_agent_processed.json`：页面刷新时必须通过 `/daily-agent/runs` 展示磁盘中已存在的 `YYYY-MM-DD-report.md`，兼容历史任务里的 `Report` 大写目录；从该兜底记录打开详情时 `/daily-agent/reports/{date}` 必须读取同一真实文件。
 - Run Results 表格必须以最新数据优先展示，按 `date` 倒序排列；前端在消费 API 时保留同样的防御性排序，避免旧服务或 mock 数据无序导致用户先看到旧记录。
 - report 详情页展示任务、日期、路径、大小、修改时间、处理时间和 Runner，并支持返回 Daily Agent 列表
@@ -1017,7 +1078,7 @@ build_daily_agent_change_plan(task, trigger, date, force)
 
 2. **状态隔离**：`update_task_after_run()` 只更新 ASR 级别的 `last_run_at_ms`/`last_error`；Daily Agent 状态在 `AsrDailyAgentConfig` 内部独立维护。
 
-3. **ChatGPT Web 消息长度**：单条消息不超过 30K 字符。`AGENTS.md` 全文 + 初始化说明超出时按段落分片发送。
+3. **ChatGPT Web 大输入投递**：ChatGPT Web composer 超过 120 字符时必须走浏览器原生剪贴板 + 原生粘贴快捷键路径，避免把完整正文嵌入 `Input.insertText` 导致 CDP 卡死；不要再按固定字符数人为分片。该路径通过 CDP 写入当前浏览器上下文的 `navigator.clipboard`，再触发 `Meta+V` / `Ctrl+V`，不依赖系统剪贴板或用户授权弹窗。粘贴大文本后 ChatGPT 可能把内容上传为文件，此时输入框没有可采样正文是正常状态；adapter 不再对 composer 文本做 head/tail/长度采样校验，只轮询发送按钮是否变为可发送状态，按钮可用后立即继续；超时时间只是最大上限，用于覆盖长文档上传/解析耗时。
 
 4. **`appended` 判定**：读取 processed state 中的 `source_len_bytes`，取当前文件前 N bytes 与前次 sha256 比对。如果前缀匹配，remainder 为 tail；否则判定为 `rewritten`。
 

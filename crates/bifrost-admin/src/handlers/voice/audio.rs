@@ -126,6 +126,10 @@ impl VoiceTranscriptState {
             .unwrap_or(false)
     }
 
+    pub(super) fn has_active_utterance(&self) -> bool {
+        self.utterance_started_at_ms.is_some() || !self.partial.trim().is_empty()
+    }
+
     pub(super) fn commit_partial(&mut self) -> (String, String) {
         let partial = self.partial.clone();
         let delta = dedupe_increment(&self.committed, &self.partial);

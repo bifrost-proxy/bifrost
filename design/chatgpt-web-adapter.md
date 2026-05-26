@@ -410,13 +410,13 @@ NotConfigured
 2. 使用保存的 cookie、user-agent 和捕获的认证 header 对 `GET /backend-api/accounts/check/v4-2023-04-27?timezone_offset_min=<offset>` 做 native HTTP 轻量探测。
 3. 同时满足以下三组信号时，状态为 `LoggedIn`：
    - browser traffic identity：真实 `accounts/check` 请求存在 `Authorization` Bearer token。
-   - JWT identity：脱敏 claims 中 profile email 存在且 verified，`user_id/chatgpt_user_id/account_user_id` 至少一个是 `user-` 形态，`chatgpt_account_id` 存在。
+   - JWT identity：脱敏 claims 中 profile email 存在且 verified，`user_id/chatgpt_user_id/account_user_id` 至少一个是 `user-` 形态，`chatgpt_account_id` 存在，且 `exp` 未过期。
    - account check：返回 200，且至少一个账号满足 `can_access_with_session=true`、`account.account_user_id` 为用户形态、`account.account_id` 存在、`account.is_deactivated=false`。
-4. 返回 guest account、anonymous `/backend-api/me`、JWT 缺少 email/user/account、401/403、Cloudflare challenge、HTML 登录页、sentinel/challenge 错误、账号 fingerprint 不匹配时，进入 `AuthRequired`。
+4. 返回 guest account、anonymous `/backend-api/me`、JWT 缺少 email/user/account、JWT 已过期、401/403、Cloudflare challenge、HTML 登录页、sentinel/challenge 错误、账号 fingerprint 不匹配时，进入 `AuthRequired`。
 5. 如果 runner 的 `adapterConfig.browser.openOnAuthRequired=true`，由 Bifrost 后端调用 `BrowserLoginBroker::open_login()` 弹出浏览器。
 6. `BrowserLoginBroker` 使用受控浏览器 profile 通过 CDP 打开 `https://chatgpt.com/`，监听页面真实 `accounts/check` 请求并捕获可复用认证 header。
 7. 捕获认证 header 后，使用 CDP 导出 `chatgpt.com` cookies，连同必要 header 写回 `auth_state.json`，权限必须是 `0600`。
-8. 写回后立即再执行一次 native HTTP probe。native probe 通过则继续当前 run；如果 native probe 因本机网络、代理或 TLS 传输问题无法发出请求，但同一次浏览器真实 `accounts/check` 响应已经证明可用账号存在，则保留登录态并把状态标记为 `LoggedIn`，同时在状态 message 中保留 native probe 失败原因。
+8. 写回后立即再执行一次 native HTTP probe。native probe 通过则继续当前 run；如果 native probe 因本机网络、代理或 TLS 传输问题无法发出请求，但同一次浏览器真实 `accounts/check` 响应已经证明可用账号存在，则保留登录态并把状态标记为 `LoggedIn`，同时在状态 message 中保留 native probe 失败原因。该 browser proof 只作为刚捕获后的短期兜底，不能在后续 run 中替代当前 native `accounts/check`；否则旧 proof 会把已跳到登录页的 profile 误判为已登录。
 9. 登录等待没有固定超时：只有用户完成登录、用户关闭登录浏览器窗口，或 WebUI 主动调用 stop login 时才结束。关闭窗口或主动停止都返回 `auth_required`，错误文本需要明确区分 `login window was closed` 和 `login was stopped by request`。
 
 ### BrowserLoginBroker
@@ -458,7 +458,7 @@ ExecutionBrowserController
 - keep the handoff wait short and recover from interrupted handoff streams by reading the active `/c/{conversation_id}` URL or the already known conversation id
 - during handoff waits, run a heartbeat: fail fast if the browser process exits, the CDP WebSocket closes, or the page cannot answer a short `Runtime.evaluate` probe
 - poll /backend-api/conversation/{conversation_id} until assistant message status is finished_successfully; each native read uses a bounded request timeout, treats temporary read failures as heartbeat-visible transient state, and fails after a continuous unreadable grace window instead of holding the IM queue indefinitely
-- if native read/auth endpoints return transport-level 403/429/5xx while the browser profile has a captured accounts/check proof, fall back to browser-context evidence before declaring auth failure
+- if native read/auth endpoints return transport-level 403/429/5xx while the browser profile has a freshly captured accounts/check proof from the current login flow, fall back to browser-context evidence before declaring auth failure; stale browser proof or expired Authorization must produce `auth_required`
 - 性能优化：`chatgpt_web` native HTTP 读路径复用单例 `reqwest::Client`，避免每次 list/get/wait 重建 DNS/TLS/连接池；handoff 阶段在 `Network.dataReceived` 中尽早读取 SSE chunk，拿到 `conversation_id` 后进入最多 3 秒的 quick-complete 窗口，若短回答已经完成则直接解析完整 SSE，否则立即返回 conversation id 交给最终轮询。
 - 交互逻辑拆分：会话映射、conversation 摘要、最终消息轮询、stop marker 检查等与页面发送解耦到 `chatgpt_web/interaction.rs`，主模块保留 adapter 编排职责，确保单文件继续低于 1500 行。
 - 轮询策略：`wait_final` 首次可立即读取 conversation detail，后续使用 300ms 起步的指数退避，最大值不低于 `pollIntervalMs.max(2000)`；短回答降低首包后等待，长任务减少无效请求。
@@ -782,6 +782,7 @@ Schedule 选择 runner，由 runner 的 adapter 决定执行实现：
 - `chatgpt_auth_probe_requires_captured_runtime_headers`
 - `chatgpt_auth_probe_classifies_anonymous_as_auth_required`
 - `chatgpt_auth_probe_classifies_expired`
+- `chatgpt_auth_probe_rejects_stale_browser_proof_on_native_403`
 - `chatgpt_conversation_readable_does_not_imply_logged_in`
 - `chatgpt_conversation_list_parses_items`
 - `chatgpt_conversation_current_node_extracts_final_text`
@@ -823,6 +824,8 @@ Schedule 选择 runner，由 runner 的 adapter 决定执行实现：
 - `chatgpt_web_delivery_preserves_natural_process_batches` 覆盖 ChatGPT Web 多段文本投递：页面自然分批出现的过程/思考消息按批次分别投递，最后最终结论作为最后一批；图片场景仍强制使用带图片 Markdown 的最终 response。
 - `chatgpt_web_dom_extraction_does_not_truncate_response_text` 覆盖 DOM 提取脚本不得对最终 `text` 或 `allMarkdownTexts` 执行固定 10000 字符截断，保证长结果 artifact 和 IM 最终输出使用全文。
 - `agent_reply_collects_and_strips_generated_local_images`、`send_image_uploads_original_bytes_to_cdn_and_sends_image_item` 覆盖 ChatGPT Web / external runner 返回本地图片 Markdown 时，IM 回复文本剥离本地路径，并通过各 IM provider 的图片发送模式投递原图；Weixin 路径会先用 provider 返回的 `upload_param` 以 `POST` 上传原图密文字节到 Weixin CDN，再发送 `image_item`。
+- `chatgpt_web_startup_auth_runners_include_all_web_runners` 覆盖服务启动预检的 runner 选择：只要 Runners 配置中存在 `adapter=chatgpt_web`，不依赖 IM channel 是否已启用，都要纳入启动登录态检查。
+- `chatgpt_web_startup_auth_dry_run_reports_login_prompt` 和 `test_chatgpt_web_startup_auth_preflight.sh` 覆盖无登录态启动时的预检行为：复用强登录态判定，缺失/失效时后台拉起登录浏览器；E2E 使用 dry-run 钩子避免 CI 弹真实浏览器，同时验证启动日志和 auth status。
 
 ### Human Tests
 
@@ -844,6 +847,7 @@ Schedule 选择 runner，由 runner 的 adapter 决定执行实现：
 - TC-CWA-16 Session 记录：IM 入站触发 `chatgpt_web` 后，AI -> Agent -> Sessions 的 active detail 能看到用户输入与最终输出；History Event Timeline 能看到 `session_start`、`user_message`、runner `tool_call`、`tool_result`、`assistant_message`。Runner 失败时，active detail 显示 `Runner failed:*`，History 中 `tool_result.success=false` 且包含脱敏异常信息。
 - TC-CWA-17 生成图片原图发送：通过 IM 通道提问 `帮我生成4张可爱的小猫咪`，ChatGPT Web 识别 `image_gen` tool 结果，优先从 conversation JSON 的 `image_asset_pointer: sediment://file_...` 提取 `fileId` 并调用 `/backend-api/files/{fileId}/download` 获取签名原图 URL；如果结构化字段缺失，再从目标会话页面 / Network 解析 `/backend-api/estuary/content` 原图 URL。所有图片必须下载并缓存到数据目录附件存储，再通过可用 IM provider 逐张独立发送原图；Weixin 通道必须先按 Weixin 协议加密原图字节、`POST` 到 CDN，再发送 4 条包含 `image_item` 的 `image` 消息；Feishu 通道必须调用 Feishu 图片上传得到 `image_key`，再发送 Feishu `image` 消息。不同 provider 不共享图片发送 payload。
 - TC-CWA-18 失败现场诊断：任意 ChatGPT Web runner 失败时，本轮 `chat_runs/<run_id>/` 下必须包含 `failure_diagnostics.json`；如果已知 `conversation_id`，必须尽力包含 `conversation_response.json`；必须尽力包含 `page_dom.html` 与 `page_dom.json`。这些 artifact 用于定位页面是否处于新建会话、目标会话、错误会话、登录挑战或 composer 异常状态。
+- TC-CWA-25 服务启动登录态预检：当 Runners 配置包含 `adapter=chatgpt_web` 的自定义 runner 时，`bifrost start` 前台和 daemon 模式都在后台执行一次强登录态检查。若 `auth_status` 已证明可用，只记录 ready；若缺失、过期或 native/browser proof 不成立，则自动打开登录浏览器并等待用户登录，不等到首次 runner 使用时才暴露不可用。
 
 ### Review/Fix/Test
 

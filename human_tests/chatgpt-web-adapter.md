@@ -499,7 +499,7 @@ cargo clippy -p bifrost-admin --all-targets --all-features -- -D warnings
 - `generated_images.json.images.length` 与最终 response 图片 Markdown 数量不低于 ChatGPT 页面实际完成数量；明确请求 4 张且页面完成 4 张时，IM 图片消息按顺序发出 4 条。
 - 如果最终仍未达到期望数量，run artifact 必须保留实际下载数量和来源 URL，便于定位是 ChatGPT 未完成、页面懒加载还是 IM 上传失败。
 
-### TC-CWA-22：回归 - 长输入使用 paste 路径避免 CDP 卡死
+### TC-CWA-22：回归 - 长输入使用浏览器原生粘贴路径避免 CDP 卡死
 
 **前置条件**：已登录的 `chatgpt_web` runner 可用；服务使用默认数据目录或包含可复用登录态的数据目录启动。
 
@@ -509,17 +509,18 @@ cargo clippy -p bifrost-admin --all-targets --all-features -- -D warnings
    SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin chatgpt_web::tests::composer_text_injection --lib
    ```
 2. 发送超过 120 字符的 prompt，或通过 ASR Daily Agent 的 `web` runner 触发包含 `AGENTS.md` 与变更文件内容的长 prompt。
-3. 查看服务日志中的 `chatgpt_web send: injected composer text via paste path`。
+3. 查看服务日志中的 `chatgpt_web send: injected composer text via native clipboard paste path`，并确认长文本没有走 `Input.insertText`。
 4. 等待 `f/conversation` handoff、final wait 与 report / run result 完成。
 
 **预期结果**：
-- 120 个字符以内继续使用 `Input.insertText`；超过 120 个字符进入页面内 paste 路径。
-- 长输入路径不再调用 `Input.insertText`，避免 CDP 在大量逐字输入时卡死。
-- paste 路径不修改系统剪贴板；优先派发 `ClipboardEvent("paste") + DataTransfer("text/plain")`，失败时只在页面 DOM 内 fallback。
-- 日志包含 `pasteDispatched=true`、`ok=true` 或可诊断的 fallback 信息。
+- 120 个字符以内继续使用 `Input.insertText`；超过 120 个字符进入浏览器原生剪贴板 + 原生粘贴快捷键路径。
+- 长输入路径不再调用 `Input.insertText`，避免 CDP 在大 prompt 时卡死。
+- paste 路径先通过 CDP 写入当前浏览器上下文的 `navigator.clipboard`，再通过 macOS `Meta+V` 或其它平台 `Ctrl+V` 触发真实浏览器粘贴；不依赖系统剪贴板，也不需要用户处理浏览器授权弹窗。
+- 粘贴后不采样 composer 文本；ChatGPT 可能把长文本上传成文件，输入框为空也不能判定为失败。
+- 粘贴后持续轮询发送按钮状态，按钮变为可发送后立即继续；短文本不被固定 sleep 拖慢，长文档上传/解析较慢时在最大上限内继续等待。
 - 发送按钮可用性检查、点击发送、handoff 捕获和最终结果等待仍然完成。
 
-### TC-CWA-23：回归 - 超长输入避免 ChatGPT 粘贴附件模式
+### TC-CWA-23：回归 - 超长输入文件化后仍能等待发送按钮并提交
 
 **前置条件**：已登录的 `chatgpt_web` runner 可用；服务使用默认数据目录或包含可复用登录态的数据目录启动。
 
@@ -536,12 +537,65 @@ cargo clippy -p bifrost-admin --all-targets --all-features -- -D warnings
 
 **预期结果**：
 - 超过 120 字符仍不使用 CDP `Input.insertText`。
-- 超过超长阈值的输入不再优先派发 synthetic paste，避免 ChatGPT 把正文变成“pasted markdown”附件并禁用发送按钮。
-- 超长正文通过页面内 `execCommand("insertText")` 或 DOM fallback 注入到 composer 文本区，发送按钮保持可用。
+- 超过超长阈值的输入不再优先派发 synthetic paste，也不使用页面内 `execCommand("insertText")` 或 DOM fallback 注入正文。
+- 超长正文通过浏览器原生剪贴板 + 原生粘贴快捷键进入 ChatGPT；当页面把正文转换为粘贴文本文件/附件时，adapter 不读取 composer 正文，只通过轮询等待发送按钮可用。
 - ASR Daily Agent 的 `web` runner 按单个 daily 文件顺序发送 prompt；每个 run 成功返回并写 report。
+
+### TC-CWA-24：回归 - 过期登录态不能把登录页误判为已登录
+
+**前置条件**：存在 ChatGPT Web runner 的历史 `auth_state.json`，其中 `capturedAuthIdentity.expiresAt` 已过期，且历史 `capturedAccountCheck` 可能仍记录 `status=200/loggedIn=true`；native `accounts/check` 当前返回 401/403 或页面已经跳到 ChatGPT 登录页。
+
+**操作步骤**：
+1. 执行登录态判定回归单测：
+   ```bash
+   cargo test -p bifrost-admin chatgpt_web --lib
+   ```
+2. 重点确认测试输出包含并通过：
+   - `auth_status_rejects_expired_authorization_identity`
+   - `auth_status_rejects_stale_browser_account_check_when_native_forbidden`
+   - `auth_status_accepts_browser_account_check_when_native_probe_is_forbidden`
+3. 查看最近一次真实失败样本的 `auth_probe.json`，若出现 `accountStatus=403`，修复后同类状态不能再同时出现 `loggedIn=true`；应进入 `auth_required`，并在 message 中说明 Authorization 过期或 browser proof 已陈旧。
+4. 通过 IM 通道触发 ChatGPT Web runner 时，如页面是登录页，应返回登录失效/需要重新登录的可理解反馈，不应继续执行 composer 发送逻辑，也不应把登录页截图作为普通 runner failure 发送给用户。
+
+**预期结果**：
+- 过期 `expiresAt` 使 `identityComplete=false`、`loggedIn=false`、`state=auth_required`。
+- 超过短期兜底窗口的 `capturedAccountCheck` 不能覆盖当前 native 401/403。
+- 刚完成登录时的短期 browser proof fallback 仍保留，避免 native probe 被本机传输问题误杀。
+- IM 用户看到的是登录失效/需要重新登录，而不是 `browser_ui: composer not ready` 或登录页截图。
+
+### TC-CWA-25：服务启动时 ChatGPT Web Runner 登录态预检
+
+**前置条件**：准备隔离 `BIFROST_DATA_DIR`，在 `admin/im_gateway_external_cli_agent.json` 中配置自定义 runner `web`，其 `adapter` 为 `chatgpt_web`，且该 runner 的 `auth.statePath` 不存在或登录态失效。
+
+**操作步骤**：
+1. 执行代码级 runner 收集和 dry-run 登录提示回归：
+   ```bash
+   cargo test -p bifrost-admin chatgpt_web_startup_auth --lib
+   ```
+2. 执行隔离服务启动 E2E：
+   ```bash
+   bash e2e-tests/tests/test_chatgpt_web_startup_auth_preflight.sh
+   ```
+3. 真实人工场景中，去掉 E2E 的 `BIFROST_CHATGPT_WEB_STARTUP_AUTH_DRY_RUN=1`，用同样配置启动：
+   ```bash
+   BIFROST_DATA_DIR=/tmp/bifrost-chatgpt-web-startup-live \
+     target/debug/bifrost start -p 18947 --unsafe-ssl --skip-cert-check --no-system-proxy
+   ```
+4. 观察启动日志和浏览器窗口。
+
+**预期结果**：
+- 服务启动后立即在后台扫描 Runners 中所有 `adapter=chatgpt_web` 的 runner，不依赖 channel 是否已启用。
+- 已登录 runner 只记录 `chatgpt_web startup auth: login ready`。
+- 未登录或登录失效 runner 复用强 `auth_status` 判定，自动打开 ChatGPT 登录浏览器；用户完成登录后记录 ready。
+- E2E dry-run 不弹真实浏览器，但日志必须出现 `would open login browser` 和 `chatgpt_web startup auth: login still required`，auth status 仍返回 `loggedOut/loggedIn=false`，证明启动预检确实执行到缺登录分支。
+- `bifrost start` 前台和 daemon 模式都会触发同一预检方法，主服务 HTTP ready 不被等待用户登录阻塞。
 
 ## 真实执行记录
 
+- 2026-05-26：执行 TC-CWA-25 通过。代码级命令 `cargo test -p bifrost-admin chatgpt_web_startup_auth --lib` 通过 2 项，确认服务层会收集所有 `adapter=chatgpt_web` 的 runner（包括未启用但可被显式选择的自定义 runner），且 dry-run 模式下缺失登录态会返回“would open login browser”。E2E 命令 `bash e2e-tests/tests/test_chatgpt_web_startup_auth_preflight.sh` 使用隔离数据目录和自定义 runner `web` 启动 Bifrost，设置 `BIFROST_CHATGPT_WEB_STARTUP_AUTH_DRY_RUN=1` 避免 CI 弹真实浏览器；日志出现 `would open login browser` 与 `chatgpt_web startup auth: login still required`，随后 Auth Status API 返回 `state=logged_out`、`loggedIn=false`、`statePath` 指向测试配置的 `startup-auth-e2e.json`，证明启动预检已在首次使用 runner 前执行。
+- 2026-05-25：执行 TC-CWA-24 通过。先用最新真实失败样本确认问题形态：微信入站 `你好` 后，IM 出站返回 `Runner failed: browser_ui: composer not ready`，正文包含 ChatGPT 登录页文案，并额外发送 `Diagnostic Screenshot`；对应历史 `auth_state.json` 的 `capturedAuthIdentity.expiresAt=2026-05-24T16:47:44+00:00` 已过期、`capturedAccountCheck.capturedAt=2026-05-14T17:22:53.680183+00:00` 陈旧，而失败 run 的 `auth_probe.json` 仍为 `accountStatus=403/loggedIn=true/state=logged_in`。修复后执行 `cargo test -p bifrost-admin chatgpt_web --lib`，62 项通过，包含 `auth_status_rejects_expired_authorization_identity`、`auth_status_rejects_stale_browser_account_check_when_native_forbidden`、`browser_account_check_proof_rejects_far_future_timestamp` 和 `auth_status_accepts_browser_account_check_when_native_probe_is_forbidden`。随后启动隔离数据目录临时服务：`BIFROST_DATA_DIR=$(mktemp -d) target/debug/bifrost start -p 18898 --unsafe-ssl --skip-cert-check --no-system-proxy --daemon`，注入同一过期 `auth_state.json` 与 mock `accounts/check=403`，调用 `GET /_bifrost/api/im-gateway/chat/adapters/chatgpt-web/auth/status?runnerId=web`，返回 `state=auth_required`、`loggedIn=false`、`identityComplete=false`、`accountCheckOk=false`、`accountStatus=403`，message 同时包含 `captured browser accounts/check proof is stale` 与 `authorization token expired at 2026-05-24 16:47:44 UTC`。测试结束已停止临时 Bifrost 进程并删除临时数据目录。
+- 2026-05-26：执行 TC-CWA-22 / TC-CWA-23 原生剪贴板回归通过。先用当前源码 `cargo build --bin bifrost` 编译，再重启正式默认目录服务 `BIFROST_DATA_DIR=$HOME/.bifrost ./target/debug/bifrost start -p 9900 --host 0.0.0.0 --no-system-proxy --daemon`；随后通过 CLI Runner `./target/debug/bifrost -p 9900 agent run --runner web --session chatgpt-web-native-clipboard-no-sample-20260526 --json "$(cat /Users/eden/.bifrost/asr/data/text/76612de33e9740bc92440ce64a98a4cb/.daily/2026-05-19.md)"` 发送 457840 字节 prompt。run `1779727870753-c7feafc8-3173-43c8-8462-014e2b7409b1` 成功，日志 `/tmp/bifrost-chatgpt-web-no-sample-20260526005110.log` 返回 `收到文件《粘贴的文本 (1)(3).txt》`，证明 ChatGPT 将长文本文件化后 adapter 没有再采样 composer 文本，而是等待发送按钮可用并完成点击、handoff 和最终回复。代码级 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin composer_text_injection --lib` 通过 3 项，确认 120 字符以内走 `Input.insertText`，121 字符及以上走 `NativeClipboardPaste`，中文按字符数判断；`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin native_clipboard_paste_uses_platform_modifier --lib` 通过 1 项，确认 macOS 使用 Meta 粘贴 modifier。
+- 2026-05-26：补充执行 TC-CWA-22 浏览器剪贴板真实回归通过。使用已登录的隔离临时目录 `/private/tmp/bifrost-clipboard-auth-live-data.lFIcBF` 和独立 Edge profile `/tmp/bifrost-clipboard-auth-live-profile.0k7hs4`，先用当前源码 `cargo build --bin bifrost` 编译，再启动临时服务：`BIFROST_DATA_DIR=/private/tmp/bifrost-clipboard-auth-live-data.lFIcBF ./target/debug/bifrost start -p 19911 --host 127.0.0.1 --unsafe-ssl --skip-cert-check --no-system-proxy --daemon`。执行 `./target/debug/bifrost -p 19911 agent run --runner web --session chatgpt-web-browser-clipboard-smoke-20260526 --json '请只回复 OK_BROWSER_CLIPBOARD_SMOKE...abcdefghijklmnopqrstuvwxyz0123456789'`，该 prompt 超过 120 字符，触发浏览器 `navigator.clipboard.writeText` + `Meta+V` 原生粘贴路径。run `1779733277111-8e92518d-5606-4854-a3ec-7e8d63813796` 成功返回 `OK_BROWSER_CLIPBOARD_SMOKE`，conversationId 为 `6a149332-9e4c-83ec-93a4-2b3d2da12853`；验证 headless Edge 不依赖系统剪贴板，也不需要用户授权弹窗，粘贴后可持续等待发送按钮并完成发送。
 - 2026-05-19：执行 TC-CWA-19-05 服务重启后复用已有 conversation tab 通过。测试 session 为 `cli-chatgpt-tab-reuse-restart-20260519`。第一轮命令通过 9900 发送 `请只回复 TAB_REUSE_FIRST_OK，不要解释。`，run id `1779124077160-9e8739f3-3cb2-4846-847b-01cf6395624d`，返回 `TAB_REUSE_FIRST_OK`，conversationId 为 `6a0b4778-3224-83ec-8086-bdfcbd525047`。第一轮结束后 CDP `/json/list` 中该 conversation 的 tab 数为 `count=1`，target id 为 `58CB389DB8D5665FB1D017B8E8412025`。随后执行 `./target/debug/bifrost -p 9900 stop` 停止服务，再用 `./target/debug/bifrost start -p 9900 --no-system-proxy --daemon` 重启服务，PID `21351`，System Proxy 保持 disabled；重启后、第二轮发送前，CDP `/json/list` 中同一 conversation 仍为 `count=1` 且 target id 仍为 `58CB389DB8D5665FB1D017B8E8412025`。第二轮同 session 发送 `请只回复 TAB_REUSE_SECOND_OK，不要解释。`，run id `1779124121796-044389de-d24b-4933-975c-38111f3d2f50`，返回 `TAB_REUSE_SECOND_OK`，conversationId 仍为 `6a0b4778-3224-83ec-8086-bdfcbd525047`。第二轮结束后 CDP `/json/list` 中该 conversation 仍为 `count=1`，target id 仍为 `58CB389DB8D5665FB1D017B8E8412025`，确认服务重启后复用原有 conversation tab，没有新开重复 tab。
 - 2026-05-20：执行 TC-CWA-22 通过。代码级命令 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin chatgpt_web::tests::composer_text_injection --lib` 通过 2 项，确认 120 字符以内走 `Input.insertText`、121 字符及以上走 paste，并按字符数而非字节数判断中文。默认目录真实 ASR Daily Agent live E2E 使用当前源码服务 `18896` 触发 `runner=web`，日志显示 `injected composer text via paste path`、`expectedLength=767`、`pasteDispatched=true`、`pasteDefaultPrevented=true`、`ok=true`，随后成功点击发送、捕获 `f/conversation`、等待 ChatGPT 最终输出并写入 `/Users/eden/.bifrost/asr/data/text/159f0fa758334ab1b3f1191c7921b322/daily/report/2026-05-20-report.md`；报告包含 `ASR Daily Agent Live Runner Result`、`runner validation passed` 和 marker `ASR_LIVE_RUNNER_web_1779212771614`。同一 live E2E 还验证 IM send 使用 `mode=full_report`，outbound `sentPreview` 以 `# ASR Daily Agent Live Runner Result` 开头，确认发送的是报告原文而不是任务摘要。
 - 2026-05-20：执行 TC-CWA-23 通过。默认目录任务 `76612de33e9740bc92440ce64a98a4cb` 使用 `runner=web` 强制运行后生成四个 ChatGPT Web run：`1779216503662-*`、`1779216632038-*`、`1779216764881-*`、`1779216872746-*`。四个 prompt 分别只包含 `2026-05-14.md`、`2026-05-15.md`、`2026-05-16.md`、`2026-05-17.md`，大小约 217KB、262KB、267KB、149KB；四个 `result.json.status=succeeded`，没有复现 CDP 输入卡死，也没有把正文变成 ChatGPT paste attachment；最终写入四个 report。代码级 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin 'chatgpt_web::' --lib` 55 项通过。

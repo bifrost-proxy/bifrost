@@ -422,6 +422,7 @@ struct CommandSnapshot {
     work_dir: Option<String>,
     runtime: String,
     adapter: String,
+    params: serde_json::Value,
     timeout_secs: u64,
 }
 
@@ -947,6 +948,7 @@ fn command_snapshot(request: &ExternalCliRunRequest, spec: &CommandSpec) -> Comm
             .map(|path| path.display().to_string()),
         runtime: request.runtime.clone(),
         adapter: request.adapter.clone(),
+        params: request.params.clone(),
         timeout_secs: spec.timeout_secs,
     }
 }

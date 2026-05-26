@@ -28,8 +28,8 @@ use crate::handlers::asr::{
     start_managed_service, stop_managed_service_for_target, target_from_query, AsrTarget,
 };
 use crate::handlers::asr_cli_invoke::{
-    run_asr_cli_with_footprint_guard_and_abort, ASR_ABORTED_ERROR_MARKER,
-    ASR_MEMORY_LIMIT_ERROR_MARKER,
+    asr_chunk_timeout, run_asr_cli_with_footprint_guard_timeout_and_abort,
+    ASR_ABORTED_ERROR_MARKER, ASR_MEMORY_LIMIT_ERROR_MARKER, ASR_TIMEOUT_ERROR_MARKER,
 };
 use crate::handlers::asr_jobs_daily::{
     list_daily_documents_for_task, read_daily_document_for_task, AsrDailyDocumentSummary,
@@ -39,6 +39,8 @@ use crate::handlers::asr_jobs_timeline::{
     generate_daily_summaries, inspect_source_audio, render_timeline_text, source_modified_ms,
     source_size, SourceAudioInfo, TimelineSegment, TranscriptTimeline,
 };
+#[cfg(test)]
+use crate::handlers::asr_streaming::{asr_server_request_timeout, asr_text_request_timeout};
 use crate::handlers::{
     error_response, json_response, json_response_with_status, method_not_allowed, BoxBody,
 };
@@ -56,6 +58,9 @@ include!("asr_jobs/memory_bisect.rs");
 include!("asr_jobs/audio_processing.rs");
 include!("asr_jobs/store.rs");
 include!("asr_jobs/daily_agent.rs");
+include!("asr_jobs/daily_agent_workspace.rs");
+include!("asr_jobs/daily_agent_records.rs");
 include!("asr_jobs/daily_agent_im.rs");
+include!("asr_jobs/daily_agent_sync.rs");
 include!("asr_jobs/daily_agent_api.rs");
 include!("asr_jobs/tests.rs");
