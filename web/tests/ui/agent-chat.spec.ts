@@ -181,6 +181,177 @@ test("AI Agent Chat deep link renders local chat preview and composer flow", asy
   await expect(processBlock).toContainText("Compacted");
 });
 
+test("AI Agent Chat slash runner call selects a runner and renders the result", async ({
+  page,
+}) => {
+  let runnerCallRequested = false;
+  let releaseRunnerCallStream: (() => void) | undefined;
+  const runnerCallStreamReady = new Promise<void>((resolve) => {
+    releaseRunnerCallStream = resolve;
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessions: runnerCallRequested
+          ? [
+              {
+                session_key: "runner-call:admin-chat:test:codex",
+                status: "active",
+                running: true,
+                state: "running",
+                title: "Runner Call",
+                source: "runner_call",
+                runner_type: "bifrost_agent",
+                last_active_time: 2,
+                start_time: 1,
+              },
+            ]
+          : [],
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "bifrost_agent",
+        runners: {
+          codex: { enabled: true, adapter: "codex" },
+          web: { enabled: true, adapter: "chatgpt_web" },
+        },
+        channels: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ work_dir: "/tmp/default-agent-workspace" }),
+    });
+  });
+  await page.route(
+    "**/_bifrost/api/im-gateway/agent/sessions/runner-call%3Aadmin-chat%3Atest%3Acodex",
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          session_key: "runner-call:admin-chat:test:codex",
+          source: "runner_call",
+          state: "idle",
+          work_dir: "/tmp/default-agent-workspace",
+          runner_type: "codex",
+          runner_id: "codex",
+          title: "Run with codex",
+          messages: [
+            {
+              role: "user",
+              content: "Use the current context from another runner",
+              timestamp: 1,
+            },
+            {
+              role: "assistant",
+              content: "Codex runner result",
+              timestamp: 2,
+            },
+          ],
+        }),
+      });
+    },
+  );
+  await page.route("**/_bifrost/api/im-gateway/chat/stream", async (route) => {
+    const body = route.request().postDataJSON();
+    expect(body).toMatchObject({
+      sessionKey: "runner-call:admin-chat:test:codex",
+      runnerId: "codex",
+      adapter: "codex",
+      message: "continue inside child thread",
+    });
+    await route.fulfill({
+      status: 200,
+      contentType: "application/x-ndjson",
+      body:
+        '{"eventType":"run_started"}\n' +
+        '{"eventType":"run_finished","response":"Child thread follow-up only"}\n',
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/chat/runner-calls/stream", async (route) => {
+    runnerCallRequested = true;
+    const body = route.request().postDataJSON();
+    expect(body).toMatchObject({
+      callerRunnerId: "bifrost_agent",
+      callerRunnerAdapter: "bifrost_agent",
+      targetRunnerId: "codex",
+      message: "Use the current context from another runner",
+      workDir: "/tmp/default-agent-workspace",
+    });
+    expect(body.callerSessionKey).toContain("admin-chat-");
+    expect(Array.isArray(body.callerMessages)).toBe(true);
+    await runnerCallStreamReady;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/x-ndjson",
+      body:
+        '{"eventType":"runner_call_started","callId":"call-1","childSessionKey":"runner-call:admin-chat:test:codex","targetRunnerId":"codex","targetAdapter":"codex"}\n' +
+        '{"eventType":"tool_started","title":"codex","content":"reading context"}\n' +
+        '{"eventType":"runner_call_finished","callId":"call-1","status":"succeeded","response":"Codex runner result","targetRunnerId":"codex","targetAdapter":"codex"}\n',
+    });
+  });
+
+  await openPage(page, "ai?aiSection=agent-chat&agentSection=chat");
+  await page.getByTestId("agent-chat-input").fill("/");
+  await expect(page.getByTestId("agent-chat-slash-runner-panel")).toBeVisible();
+  await expect(page.getByTestId("agent-chat-slash-runner-panel")).toContainText(
+    "Bifrost Agent",
+  );
+  await page
+    .getByTestId("agent-chat-slash-runner-option")
+    .filter({ hasText: "codex" })
+    .click();
+  await expect(page.getByTestId("agent-chat-selected-runner")).toContainText(
+    "Run with codex",
+  );
+  await page
+    .getByTestId("agent-chat-input")
+    .fill("Use the current context from another runner");
+  await page.getByTestId("agent-chat-send").click();
+
+  await expect(page.getByTestId("agent-chat-selected-runner")).toHaveCount(0);
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Run with codex",
+  );
+  await expect(page.getByTestId("agent-chat-messages")).toContainText("running");
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Use the current context from another runner",
+  );
+  releaseRunnerCallStream?.();
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Codex runner result",
+  );
+  await expect(page.getByTestId("agent-chat-runner-tag")).toContainText(
+    "bifrost_agent",
+  );
+  await expect(page.getByTestId("agent-chat-thread-list")).not.toContainText(
+    "Runner Call",
+  );
+  await expect(page.getByTestId("agent-chat-thread-item")).toHaveCount(1);
+  await page.getByTestId("agent-chat-runner-call-open-child").first().click();
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Codex runner result",
+  );
+  await expect(page.getByTestId("agent-chat-runner-tag")).toContainText("codex");
+  await page.getByTestId("agent-chat-input").fill("continue inside child thread");
+  await page.getByTestId("agent-chat-send").click();
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Child thread follow-up only",
+  );
+});
+
 test("AI Agent Chat keeps plan content compact and scrolls after five steps", async ({
   page,
 }) => {
