@@ -65,6 +65,22 @@ Daily Agent 默认模板会生成每个 ASR Directory Task 的 `daily/AGENTS.md`
 - 模板要求输出关键发现和可参考来源，但不得编造来源。
 - 每个灵感都能帮助用户快速判断方向是否值得继续投入。
 
+### TC-DAT-04 默认模板头部提示是运行契约
+
+操作步骤：
+
+1. 读取 `crates/bifrost-admin/src/handlers/asr_jobs/daily_agent_template.md`。
+2. 检查模板开头是否说明该指南会写入 Daily Agent 工作目录的 `AGENTS.md`。
+3. 检查模板是否明确这些提示是 Runner 实际读取的运行指令，而不是注释、示例或可忽略说明。
+4. 检查模板是否明确核心模块不可省略，只能在无内容时写“无明确内容”。
+
+预期结果：
+
+- 模板包含 ``这份指南会作为当前 Daily Agent 工作目录中的 `AGENTS.md` 写入``。
+- 模板包含 `下面所有规则都是运行指令，不是注释、示例或可忽略说明`。
+- 模板包含 `不能省略会影响输出契约的核心模块`。
+- 模板明确报告内知识沉淀分栏不是装饰性标题，而是承担日报、复盘、待办追踪和长期记忆索引的作用。
+
 ## 清理步骤
 
 无需清理；本用例只读模板文件。
@@ -76,3 +92,4 @@ Daily Agent 默认模板会生成每个 ASR Directory Task 的 `daily/AGENTS.md`
 | 2026-05-26 | TC-DAT-01 默认模板不再引导生成 knowledge 目录 | `source ~/.zshrc; bash e2e-tests/tests/test_asr_daily_agent_template.sh` | PASS：默认模板包含报告内知识沉淀模块和知识沉淀输出要求，明确同一份 `{{report_dir}}YYYY-MM-DD-report.md`，未发现 `` `knowledge/`` 目录路径 |
 | 2026-05-26 | TC-DAT-02 报告结构按知识类型分模块输出 | `source ~/.zshrc; bash e2e-tests/tests/test_asr_daily_agent_template.sh` | PASS：所有模块标题均在默认模板 report 结构中存在，表达为同一份 report 内分模块输出 |
 | 2026-05-26 | TC-DAT-03 灵感爆发时刻包含资料搜索与可行性分析 | `source ~/.zshrc; bash e2e-tests/tests/test_asr_daily_agent_template.sh` | PASS：模板要求每个灵感输出资料搜索结果、可行性分析、方案草案；无法联网搜索时必须显式说明，禁止编造来源 |
+| 2026-05-26 | TC-DAT-04 默认模板头部提示是运行契约 | `source ~/.zshrc; bash e2e-tests/tests/test_asr_daily_agent_template.sh` | PASS：模板明确会写入 Daily Agent 工作目录的 `AGENTS.md`，所有规则是 Runner 实际读取的运行指令，核心模块不可省略，报告内知识沉淀分栏不是装饰性标题 |
