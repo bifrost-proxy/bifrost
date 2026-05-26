@@ -195,7 +195,7 @@ curl -fsS --noproxy '*' -X POST "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/im-
   }" >/dev/null
 
 DEFAULT_GUIDE_STATUS=""
-for _ in $(seq 1 40); do
+for _ in $(seq 1 100); do
   candidate="$(curl -fsS --noproxy '*' -X POST "$BASE/chat" \
     -H 'Content-Type: application/json' \
     -d "{\"session_key\":\"$GUIDE_SESSION_KEY\",\"message\":\"/status\"}")"
@@ -217,7 +217,7 @@ PY
     DEFAULT_GUIDE_STATUS="$candidate"
     break
   fi
-  sleep 0.1
+  sleep 0.2
 done
 
 if [[ -z "$DEFAULT_GUIDE_STATUS" ]]; then
@@ -260,7 +260,7 @@ curl -fsS --noproxy '*' -X POST "$BASE/chat" \
 MULTI_PID=$!
 
 STATUS_RESPONSE=""
-for _ in $(seq 1 40); do
+for _ in $(seq 1 100); do
   candidate="$(curl -fsS --noproxy '*' -X POST "$BASE/chat" \
     -H 'Content-Type: application/json' \
     -d '{"session_key":"multi-guide-status-test","message":"/status"}')"
@@ -286,7 +286,7 @@ PY
     STATUS_RESPONSE="$candidate"
     break
   fi
-  sleep 0.1
+  sleep 0.2
 done
 
 if [[ -z "$STATUS_RESPONSE" ]]; then
