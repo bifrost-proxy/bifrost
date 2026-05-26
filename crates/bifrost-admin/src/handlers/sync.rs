@@ -1,4 +1,4 @@
-use bifrost_storage::SyncConfigUpdate;
+use bifrost_storage::{SyncConfigUpdate, DEFAULT_REMOTE_BASE_URL};
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -384,7 +384,18 @@ async fn login(
     };
 
     match (request.token, request.remote_base_url) {
-        (Some(token), Some(remote_base_url)) => {
+        (Some(token), remote_base_url) => {
+            let remote_base_url = match remote_base_url {
+                Some(remote_base_url) => remote_base_url,
+                None => {
+                    let configured = sync_manager.status().await.remote_base_url;
+                    if configured.trim().is_empty() {
+                        DEFAULT_REMOTE_BASE_URL.to_string()
+                    } else {
+                        configured
+                    }
+                }
+            };
             match sync_manager
                 .save_login_session(token, remote_base_url)
                 .await
@@ -406,10 +417,7 @@ async fn login(
                 &format!("Failed to open sync login page: {error}"),
             ),
         },
-        _ => error_response(
-            StatusCode::BAD_REQUEST,
-            "token and remote_base_url must be provided together",
-        ),
+        (None, Some(_)) => error_response(StatusCode::BAD_REQUEST, "token is required"),
     }
 }
 

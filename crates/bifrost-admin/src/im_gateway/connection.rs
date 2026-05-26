@@ -175,20 +175,31 @@ impl ImConnectionManager {
         // Spawn the long connection task
         let config_clone = config.clone();
         let secret_clone = app_secret.to_string();
-        let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .unwrap_or_default();
+        let http = feishu::build_feishu_http_client();
+        let (status_tx, mut status_rx) =
+            tokio::sync::mpsc::unbounded_channel::<feishu::FeishuConnectionStatusEvent>();
 
         let connections = self.connections_arc();
         let pid = provider_id.clone();
+        let status_connections = Arc::clone(&connections);
+        let status_pid = provider_id.clone();
 
         tokio::spawn(async move {
-            // Update to connected once we enter the loop
-            update_connection_state(&connections, &pid, ConnectionState::Connected, None);
+            while let Some(event) = status_rx.recv().await {
+                update_connection_state(&status_connections, &status_pid, event.state, event.error);
+            }
+        });
 
-            feishu::start_long_connection(config_clone, secret_clone, sink, shutdown_rx, http)
-                .await;
+        tokio::spawn(async move {
+            feishu::start_long_connection(
+                config_clone,
+                secret_clone,
+                sink,
+                shutdown_rx,
+                http,
+                Some(status_tx),
+            )
+            .await;
 
             // Connection ended - update status
             update_connection_state(
@@ -246,11 +257,11 @@ impl ImConnectionManager {
         let mut conns = self.connections.write();
         if let Some(conn) = conns.get_mut(provider_id) {
             conn.status.state = state;
-            if let Some(err) = error {
-                conn.status.last_error = Some(err);
-            }
             if state == ConnectionState::Connected {
                 conn.status.last_connected_at = Some(current_timestamp_ms());
+                conn.status.last_error = None;
+            } else if let Some(err) = error {
+                conn.status.last_error = Some(err);
             }
             if state == ConnectionState::Reconnecting {
                 conn.status.reconnect_count += 1;
@@ -301,11 +312,11 @@ fn update_connection_state(
     let mut conns = connections.write();
     if let Some(conn) = conns.get_mut(provider_id) {
         conn.status.state = state;
-        if let Some(err) = error {
-            conn.status.last_error = Some(err);
-        }
         if state == ConnectionState::Connected {
             conn.status.last_connected_at = Some(current_timestamp_ms());
+            conn.status.last_error = None;
+        } else if let Some(err) = error {
+            conn.status.last_error = Some(err);
         }
         if state == ConnectionState::Reconnecting {
             conn.status.reconnect_count += 1;
@@ -354,5 +365,38 @@ mod tests {
         mgr.update_status("nonexistent", ConnectionState::Connected, None);
         // Should not panic, status remains None
         assert!(mgr.get_status("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_connection_state_reconnect_error_clears_after_connected() {
+        let mgr = ImConnectionManager::new();
+        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
+        mgr.connections.write().insert(
+            "feishu-main".to_string(),
+            ManagedConnection {
+                provider_id: "feishu-main".to_string(),
+                handle: ConnectionHandle { shutdown_tx },
+                status: ConnectionStatus::default(),
+            },
+        );
+
+        mgr.update_status(
+            "feishu-main",
+            ConnectionState::Reconnecting,
+            Some("ws endpoint fetch failed".to_string()),
+        );
+        let reconnecting = mgr.get_status("feishu-main").unwrap();
+        assert_eq!(reconnecting.state, ConnectionState::Reconnecting);
+        assert_eq!(reconnecting.reconnect_count, 1);
+        assert_eq!(
+            reconnecting.last_error.as_deref(),
+            Some("ws endpoint fetch failed")
+        );
+
+        mgr.update_status("feishu-main", ConnectionState::Connected, None);
+        let connected = mgr.get_status("feishu-main").unwrap();
+        assert_eq!(connected.state, ConnectionState::Connected);
+        assert!(connected.last_connected_at.is_some());
+        assert!(connected.last_error.is_none());
     }
 }

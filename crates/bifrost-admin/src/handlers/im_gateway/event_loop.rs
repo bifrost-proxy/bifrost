@@ -391,6 +391,12 @@ pub(super) async fn run_event_loop_with_options(
                                     status_context: status_context_from_agent_runner(
                                         effective_agent_config.runner.as_ref(),
                                     ),
+                                    default_work_dir: Some(
+                                        effective_agent_config
+                                            .resolve_work_dir()
+                                            .display()
+                                            .to_string(),
+                                    ),
                                 },
                             )
                             .await;
@@ -535,6 +541,9 @@ pub(super) async fn run_event_loop_with_options(
                             default_mode: busy_default_mode,
                             status_context: status_context_from_agent_runner(
                                 agent_config.runner.as_ref(),
+                            ),
+                            default_work_dir: Some(
+                                agent_config.resolve_work_dir().display().to_string(),
                             ),
                         },
                     )
@@ -818,6 +827,12 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                 progress_registry: ctx.progress_registry,
                 default_mode: BusyMessageDefaultMode::Queue,
                 status_context,
+                default_work_dir: Some(
+                    provider_agent_config
+                        .resolve_work_dir()
+                        .display()
+                        .to_string(),
+                ),
             },
         )
         .await;

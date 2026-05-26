@@ -499,7 +499,7 @@ Bifrost Sync API 提供云端同步管理功能，包括同步状态查询、配
 
 ---
 
-### TC-ASN-31：CI/沙箱环境 token + URL 直登
+### TC-ASN-31：CI/沙箱环境 token-only 默认 Provider 与 token + URL 直登
 
 **操作步骤**：
 1. 使用非 9900 动态端口启动本地 mock sync server，提供以下接口：
@@ -509,18 +509,39 @@ Bifrost Sync API 提供云端同步管理功能，包括同步状态查询、配
    ```bash
    BIFROST_DATA_DIR="$(mktemp -d)" target/release/bifrost -p <admin_port> start -y --access-mode allow_all --skip-cert-check --unsafe-ssl --no-system-proxy
    ```
-3. 执行直登命令：
+3. 先验证只提供 token 时使用内置默认 Provider：
+   ```bash
+   BIFROST_DATA_DIR="<same_temp_dir>" target/release/bifrost -p <admin_port> sync login --token ci-token-default
+   ```
+4. 查询 `sync login --help`：
+   ```bash
+   target/release/bifrost sync login --help
+   ```
+5. 将同步配置指向 mock sync server：
+   ```bash
+   BIFROST_DATA_DIR="<same_temp_dir>" target/release/bifrost -p <admin_port> sync config --remote-url "http://127.0.0.1:<mock_sync_port>"
+   ```
+6. 执行 token-only 直登命令：
+   ```bash
+   BIFROST_DATA_DIR="<same_temp_dir>" target/release/bifrost -p <admin_port> sync login --token ci-token
+   ```
+7. 执行显式 URL 直登命令：
    ```bash
    BIFROST_DATA_DIR="<same_temp_dir>" target/release/bifrost -p <admin_port> sync login --token ci-token --url "http://127.0.0.1:<mock_sync_port>"
    ```
-4. 查询同步状态：
+8. 查询同步状态：
    ```bash
    curl -s "http://127.0.0.1:<admin_port>/_bifrost/api/sync/status" | jq .
    ```
 
 **预期结果**：
-- CLI 输出包含 `"Login token saved."`
-- CLI 输出包含传入的 mock sync URL
+- 第 3 步 CLI 输出包含 `"Login token saved."`
+- 第 3 步 CLI 输出包含默认远端 URL `"https://bifrost.bytedance.net"`
+- 第 4 步 help 输出包含 token 获取地址 `https://bifrost.bytedance.net/v4/sso/token-login`
+- 第 6 步 CLI 输出包含 `"Login token saved."`
+- 第 6 步 CLI 输出包含 mock sync URL，说明 token-only 走当前同步配置
+- 第 7 步 CLI 输出包含 `"Login token saved."` 或 `"Login successful."`
+- 如果第 7 步输出 `"Login token saved."`，还会显示传入的 mock sync URL；如果后台授权已完成，查询状态确认 `remote_base_url` 为 mock sync URL
 - 状态 JSON 中 `has_session` 为 `true`
 - 后台同步完成后 `authorized` 为 `true`
 - 状态 JSON 中 `remote_base_url` 等于传入 URL
@@ -529,27 +550,40 @@ Bifrost Sync API 提供云端同步管理功能，包括同步状态查询、配
 
 ---
 
-### TC-ASN-32：CI/沙箱环境 token + URL 直登 — 缺少 URL 返回 400
+### TC-ASN-32：CI/沙箱环境直登 — token-only API 成功，URL-only 返回 400
 
 **操作步骤**：
-1. 在临时数据目录和非 9900 端口启动 Bifrost。
+1. 在临时数据目录和非 9900 端口启动 Bifrost，并将 sync config 指向 mock sync server。
 2. 执行：
    ```bash
-   curl -s -o /tmp/bifrost-sync-login-partial.json -w "%{http_code}" \
+   curl -s -o /tmp/bifrost-sync-login-token-only.json -w "%{http_code}" \
      -X POST "http://127.0.0.1:<admin_port>/_bifrost/api/sync/login" \
      -H "Content-Type: application/json" \
      -d '{"token":"ci-token"}'
    ```
 3. 查看响应体：
    ```bash
-   cat /tmp/bifrost-sync-login-partial.json
+   cat /tmp/bifrost-sync-login-token-only.json
+   ```
+4. 执行 URL-only 请求：
+   ```bash
+   curl -s -o /tmp/bifrost-sync-login-url-only.json -w "%{http_code}" \
+     -X POST "http://127.0.0.1:<admin_port>/_bifrost/api/sync/login" \
+     -H "Content-Type: application/json" \
+     -d '{"remote_base_url":"http://127.0.0.1:<mock_sync_port>"}'
+   ```
+5. 查看响应体：
+   ```bash
+   cat /tmp/bifrost-sync-login-url-only.json
    ```
 
 **预期结果**：
-- HTTP 状态码为 400
-- 响应体包含 `"token and remote_base_url must be provided together"`
-- 不会写入新的 sync session token
-- 不会修改 `remote_base_url`
+- token-only 请求 HTTP 状态码为 200
+- token-only 响应体中 `remote_base_url` 等于当前同步配置的 mock sync URL
+- token-only 请求写入 sync session token，不要求 `remote_base_url`
+- URL-only 请求 HTTP 状态码为 400
+- URL-only 响应体包含 `"token is required"`
+- URL-only 请求不会写入新的 sync session token
 
 ---
 

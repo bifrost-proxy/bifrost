@@ -304,6 +304,7 @@ bifrost whitelist approve <ip>
 首次连接或重新授权：
 
 ```bash
+bifrost setting ssh-key create --label "dev-mac" --output ./bifrost-device.key
 bifrost remote conn up <pair-code>
 bifrost remote conn up --ssh-key ./bifrost-device.key --label "dev-mac"
 bifrost remote conn status
@@ -340,9 +341,12 @@ bifrost import ./rules.bifrost
 
 ```bash
 bifrost sync status
+bifrost sync login --token "$BIFROST_SYNC_TOKEN"
 bifrost sync login --token "$BIFROST_SYNC_TOKEN" --url https://example.com
 bifrost sync run
 ```
+
+Headless/CI 登录 token 可从 `https://bifrost.bytedance.net/v4/sso/token-login` 获取；省略 `--url` 时使用当前同步配置的远端 URL，默认是内置 Bifrost Provider。
 
 Shell 补全：
 

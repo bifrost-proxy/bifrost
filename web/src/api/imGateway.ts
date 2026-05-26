@@ -387,6 +387,41 @@ export async function completeWeixinLogin(
   return post(`${BASE}/providers/${id}/weixin-login/complete`, {});
 }
 
+export async function startFeishuSetup(
+  data: { brand?: "feishu" | "lark" } = {},
+): Promise<{
+  success: boolean;
+  session_id: string;
+  verification_url: string;
+  expires_at: number;
+  expires_in_seconds: number;
+  interval_seconds: number;
+  brand: "feishu" | "lark";
+}> {
+  return post(`${BASE}/providers/feishu-setup/start`, data);
+}
+
+export async function getFeishuSetupStatus(sessionId: string): Promise<{
+  success: boolean;
+  status: "pending" | "expired" | "confirmed";
+  app_id?: string;
+  secret_configured?: boolean;
+  owner_open_id?: string;
+  brand?: "feishu" | "lark";
+  base_url?: string;
+  expires_at?: number;
+  interval_seconds?: number;
+}> {
+  return get(`${BASE}/providers/feishu-setup/${encodeURIComponent(sessionId)}/status`);
+}
+
+export async function createFeishuSetupProvider(
+  sessionId: string,
+  data: Partial<ImProviderConfig>,
+): Promise<{ success: boolean; provider: ImProviderConfig }> {
+  return post(`${BASE}/providers/feishu-setup/${encodeURIComponent(sessionId)}/provider`, data);
+}
+
 export async function getProviderPolicy(
   id: string,
 ): Promise<ImProviderPolicy> {

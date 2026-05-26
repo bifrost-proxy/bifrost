@@ -42,10 +42,15 @@ wait_http() {
 python3 - "$MOCK_PORT" "$MOCK_LOG" <<'PY' &
 import json
 import sys
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 port = int(sys.argv[1])
 log_path = sys.argv[2]
+# The release gates make the active-turn window deterministic: the test
+# verifies /status while the mock model request is intentionally blocked.
+default_guide_gate = threading.Event()
+multi_guide_gate = threading.Event()
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
@@ -56,6 +61,18 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"ok")
+            return
+        if self.path == "/release/default-guide":
+            default_guide_gate.set()
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"released")
+            return
+        if self.path == "/release/multi-guide":
+            multi_guide_gate.set()
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"released")
             return
         self.send_error(404)
 
@@ -79,12 +96,10 @@ class Handler(BaseHTTPRequestHandler):
         if any("第一条引导" in t for t in user_texts) and any("第二条引导" in t for t in user_texts):
             content = "GUIDES_MERGED: 第一条引导 -> 第二条引导"
         elif any("MULTI_GUIDE_INITIAL" in t for t in user_texts):
-            import time
-            time.sleep(3)
+            multi_guide_gate.wait(timeout=30)
             content = "INITIAL_DONE"
         elif any("DEFAULT_GUIDE_INITIAL" in t for t in user_texts):
-            import time
-            time.sleep(3)
+            default_guide_gate.wait(timeout=30)
             content = "DEFAULT_GUIDE_INITIAL_DONE"
         elif any("默认引导消息" in t for t in user_texts):
             content = "DEFAULT_GUIDE_CONSUMED"
@@ -195,10 +210,12 @@ curl -fsS --noproxy '*' -X POST "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/im-
   }" >/dev/null
 
 DEFAULT_GUIDE_STATUS=""
-for _ in $(seq 1 40); do
+DEFAULT_GUIDE_LAST_STATUS=""
+for _ in $(seq 1 100); do
   candidate="$(curl -fsS --noproxy '*' -X POST "$BASE/chat" \
     -H 'Content-Type: application/json' \
     -d "{\"session_key\":\"$GUIDE_SESSION_KEY\",\"message\":\"/status\"}")"
+  DEFAULT_GUIDE_LAST_STATUS="$candidate"
   if python3 - "$candidate" <<'PY'
 import json
 import sys
@@ -217,13 +234,16 @@ PY
     DEFAULT_GUIDE_STATUS="$candidate"
     break
   fi
-  sleep 0.1
+  sleep 0.2
 done
 
 if [[ -z "$DEFAULT_GUIDE_STATUS" ]]; then
   echo "[im-guide-queue-human-api] default IM inbound message did not become pending guide" >&2
+  echo "[im-guide-queue-human-api] last default status response: $DEFAULT_GUIDE_LAST_STATUS" >&2
   exit 1
 fi
+
+curl -fsS --noproxy '*' "http://127.0.0.1:$MOCK_PORT/release/default-guide" >/dev/null
 
 DEFAULT_GUIDE_DRAINED=""
 for _ in $(seq 1 80); do
@@ -259,11 +279,29 @@ curl -fsS --noproxy '*' -X POST "$BASE/chat" \
   >"$MULTI_RESPONSE_FILE" &
 MULTI_PID=$!
 
+MULTI_MODEL_STARTED=""
+for _ in $(seq 1 100); do
+  if [[ -f "$MOCK_LOG" ]] && grep -q "MULTI_GUIDE_INITIAL" "$MOCK_LOG"; then
+    MULTI_MODEL_STARTED="true"
+    break
+  fi
+  sleep 0.05
+done
+
+if [[ -z "$MULTI_MODEL_STARTED" ]]; then
+  echo "[im-guide-queue-human-api] multi-guide request did not reach mock model" >&2
+  kill "$MULTI_PID" >/dev/null 2>&1 || true
+  wait "$MULTI_PID" >/dev/null 2>&1 || true
+  exit 1
+fi
+
 STATUS_RESPONSE=""
-for _ in $(seq 1 40); do
+LAST_STATUS_RESPONSE=""
+for _ in $(seq 1 100); do
   candidate="$(curl -fsS --noproxy '*' -X POST "$BASE/chat" \
     -H 'Content-Type: application/json' \
     -d '{"session_key":"multi-guide-status-test","message":"/status"}')"
+  LAST_STATUS_RESPONSE="$candidate"
   if python3 - "$candidate" <<'PY'
 import json
 import sys
@@ -286,16 +324,18 @@ PY
     STATUS_RESPONSE="$candidate"
     break
   fi
-  sleep 0.1
+  sleep 0.2
 done
 
 if [[ -z "$STATUS_RESPONSE" ]]; then
   echo "[im-guide-queue-human-api] /status did not expose pending guide messages" >&2
+  echo "[im-guide-queue-human-api] last multi-guide status response: $LAST_STATUS_RESPONSE" >&2
   kill "$MULTI_PID" >/dev/null 2>&1 || true
   wait "$MULTI_PID" >/dev/null 2>&1 || true
   exit 1
 fi
 
+curl -fsS --noproxy '*' "http://127.0.0.1:$MOCK_PORT/release/multi-guide" >/dev/null
 wait "$MULTI_PID"
 MULTI_RESPONSE="$(cat "$MULTI_RESPONSE_FILE")"
 

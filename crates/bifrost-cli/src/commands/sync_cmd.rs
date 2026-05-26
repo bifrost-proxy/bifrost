@@ -64,16 +64,22 @@ fn sync_login(
     url: Option<String>,
 ) -> bifrost_core::Result<()> {
     match (&token, &url) {
-        (Some(token), Some(url)) if token.trim().is_empty() || url.trim().is_empty() => {
+        (Some(token), _) if token.trim().is_empty() => {
             return Err(bifrost_core::BifrostError::Config(
-                "--token and --url must not be empty".to_string(),
+                "--token must not be empty".to_string(),
+            ));
+        }
+        (_, Some(url)) if url.trim().is_empty() => {
+            return Err(bifrost_core::BifrostError::Config(
+                "--url must not be empty".to_string(),
             ));
         }
         (Some(_), Some(_)) => println!("Saving sync login token..."),
+        (Some(_), None) => println!("Saving sync login token with the configured remote URL..."),
         (None, None) => println!("Initiating sync login..."),
-        _ => {
+        (None, Some(_)) => {
             return Err(bifrost_core::BifrostError::Config(
-                "--token and --url must be provided together".to_string(),
+                "--url requires --token".to_string(),
             ));
         }
     }

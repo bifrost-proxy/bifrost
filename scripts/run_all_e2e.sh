@@ -37,6 +37,8 @@ STABLE_SHELL_TESTS=(
   "test_metrics_hosts_apps_admin_api.sh"
   "test_tls_intercept_mode_api.sh"
   "test_bifrost_file_syntax_admin_api.sh"
+  "test_sync_login_direct_e2e.sh"
+  "test_setting_ssh_key_cli.sh"
   "test_multiline_rule_filter_e2e.sh"
   "test_replay_rules.sh"
   "test_remote_file_api_e2e.sh"
@@ -732,6 +734,31 @@ run_shell_tests_parallel() {
     "test_openai_like_sse_search_e2e.sh"
   )
 
+  # Some shell tests run cargo check/test/run internally. If they run inside the
+  # parallel batch, they can spend most of the per-test timeout blocked on
+  # Cargo's shared target artifact lock while sibling tests compile. Keep them
+  # serial so the timeout measures test work instead of lock contention.
+  local CARGO_HEAVY_TESTS=(
+    "test_agent_builtin_status_runtime.sh"
+    "test_agent_codex_parity_contracts.sh"
+    "test_agent_loop_runtime_limits.sh"
+    "test_asr_model_autonomy.sh"
+    "test_asr_task_pause_resume.sh"
+    "test_chatgpt_web_behavior_artifacts.sh"
+    "test_client_process_transport_attribution.sh"
+    "test_http3_e2e.sh"
+    "test_im_agent_markdown_image_reply.sh"
+    "test_im_agent_streaming_progress_card.sh"
+    "test_im_gateway_long_reply_delivery_regression.sh"
+    "test_long_term_memory_remember_recall.sh"
+    "test_qwen3_asr_local_server.sh"
+    "test_qwen3_asr_runtime_guards.sh"
+    "test_skill_creator_flow.sh"
+    "test_sync_login_direct_e2e.sh"
+    "test_utf8_safe_preview_e2e.sh"
+    "test_voice_input_runtime.sh"
+  )
+
   for script_name in "${shell_tests[@]}"; do
     if [[ "$SHELL_MODE" == "full" ]] && should_skip_full_shell_test "$script_name"; then
       skip_suite "shell:${script_name}" "skipped on ${PLATFORM}"
@@ -755,7 +782,15 @@ run_shell_tests_parallel() {
       fi
     done
 
-    if [[ "$is_mock_managing" -eq 1 || "$is_isolated_after" -eq 1 ]]; then
+    local is_cargo_heavy=0
+    for ct in "${CARGO_HEAVY_TESTS[@]}"; do
+      if [[ "$script_name" == "$ct" ]]; then
+        is_cargo_heavy=1
+        break
+      fi
+    done
+
+    if [[ "$is_mock_managing" -eq 1 || "$is_isolated_after" -eq 1 || "$is_cargo_heavy" -eq 1 ]]; then
       serial_tests+=("$script_name")
     else
       parallel_tests+=("$script_name")
@@ -775,7 +810,7 @@ run_shell_tests_parallel() {
   fi
 
   if [[ ${#serial_tests[@]} -gt 0 ]]; then
-    header "Running ${#serial_tests[@]} mock-managing shell tests serially"
+    header "Running ${#serial_tests[@]} lock-sensitive shell tests serially"
     for script_name in "${serial_tests[@]}"; do
       log_info "Queue serial shell test: $script_name"
       run_shell_test_isolated "$script_name"

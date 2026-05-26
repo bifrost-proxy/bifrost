@@ -37,6 +37,7 @@ pattern rules... includeFilter://condition
 | 路径前缀 | `/path` | 以 `/` 开头但不以 `/` 结尾时，按普通前缀匹配：`/account` 匹配 `/account`、`/account/...`、`/account-center` 和带 query 的路径 |
 | 路径正则 | `/regex/` | 以 `/` 开头并以 `/` 结尾时，按正则匹配路径 |
 | URL host/path | `example.com` / `example.com/api` | 包含 `.` 的过滤值会按 host 与可选 path 匹配 |
+| URL 通配符 | `*/api` / `*/alice/*` | 兼容 Whistle 风格的 URL wildcard filter；`*/api` 匹配 `/api` 及其子路径，`*/alice/*` 匹配 URL 中包含 `/alice/` 的请求 |
 
 > 当前实现会解析 `b:` / `B:` body 过滤器，但运行时 resolver 尚未读取请求/响应 body 参与过滤，匹配结果恒为不命中。不要把 body 过滤作为可用能力依赖；需要按内容筛选请使用 `bifrost search --req-body/--res-body` 查看流量证据。
 
@@ -109,6 +110,9 @@ www.example.com host://account.local excludeFilter:///account
 
 # 匹配路径模式（正则）
 www.example.com resDelay://1000 includeFilter:///slow
+
+# 兼容 Whistle 风格 URL 通配符过滤，排除 /static、/api 及包含 /alice/ 的 URL
+www.example.com http://localhost:5173 excludeFilter://*/static excludeFilter://*/api excludeFilter://*/alice/*
 ```
 
 ### 多条件组合

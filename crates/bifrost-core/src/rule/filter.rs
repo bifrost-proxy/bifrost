@@ -58,6 +58,7 @@ impl PathMatcher {
 #[derive(Debug, Clone)]
 pub enum UrlMatcher {
     Contains(String),
+    Wildcard(Regex),
     HostPath { host: String, path: Option<String> },
 }
 
@@ -65,6 +66,7 @@ impl UrlMatcher {
     pub fn matches(&self, url: &str, host: &str, path: &str) -> bool {
         match self {
             UrlMatcher::Contains(s) => url.contains(s.as_str()),
+            UrlMatcher::Wildcard(regex) => regex.is_match(url),
             UrlMatcher::HostPath {
                 host: filter_host,
                 path: filter_path,
@@ -242,6 +244,12 @@ pub fn parse_filter(filter_str: &str) -> Option<Filter> {
         return Some(Filter::Path(PathMatcher::Prefix(filter_str.to_string())));
     }
 
+    if contains_wildcard(filter_str) {
+        if let Some(regex) = whistle_wildcard_filter_to_regex(filter_str) {
+            return Some(Filter::Url(UrlMatcher::Wildcard(regex)));
+        }
+    }
+
     if looks_like_url_pattern(filter_str) {
         if let Some(url_matcher) = parse_url_filter(filter_str) {
             return Some(Filter::Url(url_matcher));
@@ -293,6 +301,29 @@ fn parse_regex_pattern(s: &str) -> Option<Regex> {
 
 fn looks_like_url_pattern(s: &str) -> bool {
     s.contains('.')
+}
+
+fn contains_wildcard(s: &str) -> bool {
+    s.contains('*')
+}
+
+fn whistle_wildcard_filter_to_regex(s: &str) -> Option<Regex> {
+    if let Some(path_prefix) = s.strip_prefix("*/") {
+        if !path_prefix.is_empty() && !contains_wildcard(path_prefix) {
+            let escaped = regex::escape(path_prefix);
+            return Regex::new(&format!(r"^.*/{}(?:[/?#].*)?$", escaped)).ok();
+        }
+    }
+
+    let mut pattern = String::from("^");
+    for ch in s.chars() {
+        match ch {
+            '*' => pattern.push_str(".*"),
+            _ => pattern.push_str(&regex::escape(&ch.to_string())),
+        }
+    }
+    pattern.push('$');
+    Regex::new(&pattern).ok()
 }
 
 fn parse_ip_matcher(s: &str) -> Option<IpMatcher> {
@@ -542,6 +573,79 @@ mod tests {
             assert!(!matcher.matches("https://m.bifrost.local/other", "m.bifrost.local", "/other"));
         } else {
             panic!("Expected Url filter");
+        }
+    }
+
+    #[test]
+    fn test_parse_whistle_style_wildcard_url_filter() {
+        let filter = parse_filter("*/alice/*").unwrap();
+        if let Filter::Url(matcher) = filter {
+            assert!(matcher.matches(
+                "https://www.doubao.com/alice/commerce/sale/subscription/entry/config/",
+                "www.doubao.com",
+                "/alice/commerce/sale/subscription/entry/config/"
+            ));
+            assert!(matcher.matches(
+                "https://www.doubao.com/prefix/alice/user",
+                "www.doubao.com",
+                "/prefix/alice/user"
+            ));
+            assert!(matcher.matches(
+                "https://www.doubao.com/alice/commerce/sale/subscription/entry/config/?from=e2e",
+                "www.doubao.com",
+                "/alice/commerce/sale/subscription/entry/config/?from=e2e"
+            ));
+            assert!(!matcher.matches(
+                "https://www.doubao.com/bob/commerce/sale/subscription/entry/config/",
+                "www.doubao.com",
+                "/bob/commerce/sale/subscription/entry/config/"
+            ));
+        } else {
+            panic!("Expected Url wildcard filter");
+        }
+    }
+
+    #[test]
+    fn test_parse_whistle_style_wildcard_path_prefix_filter() {
+        let filter = parse_filter("*/api").unwrap();
+        if let Filter::Url(matcher) = filter {
+            assert!(matcher.matches("https://www.example.com/api", "www.example.com", "/api"));
+            assert!(matcher.matches(
+                "https://www.example.com/api/users",
+                "www.example.com",
+                "/api/users"
+            ));
+            assert!(matcher.matches(
+                "https://www.example.com/api?debug=1",
+                "www.example.com",
+                "/api?debug=1"
+            ));
+            assert!(!matcher.matches(
+                "https://www.example.com/apiary",
+                "www.example.com",
+                "/apiary"
+            ));
+        } else {
+            panic!("Expected Url wildcard filter");
+        }
+    }
+
+    #[test]
+    fn test_parse_whistle_style_wildcard_filter_with_literal_query() {
+        let filter = parse_filter("*/api?debug=*").unwrap();
+        if let Filter::Url(matcher) = filter {
+            assert!(matcher.matches(
+                "https://www.example.com/api?debug=1",
+                "www.example.com",
+                "/api?debug=1"
+            ));
+            assert!(!matcher.matches(
+                "https://www.example.com/apixdebug=1",
+                "www.example.com",
+                "/apixdebug=1"
+            ));
+        } else {
+            panic!("Expected Url wildcard filter");
         }
     }
 }

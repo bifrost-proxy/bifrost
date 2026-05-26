@@ -31,6 +31,7 @@ CI shell E2E 通过 `scripts/ci/run-e2e-shell.sh` 调用 `scripts/run_all_e2e.sh
 - Linux 与 macOS `E2E Shell` job 的 GitHub Actions `timeout-minutes` 与 rules/runner 对齐为 60 分钟。Linux shard 需要安装 Playwright `chromium-headless-shell` 及系统依赖；macOS shard 需要等待 release artifact、安装前端依赖并运行较重的 DevTools/remote shell 用例。任一平台短时变慢时，30 分钟预算会导致 shell 用例已经通过但 job 在归档/清理阶段被 workflow timeout 标记为失败。
 - GitHub Actions concurrency 对同一 ref 只保留最新 CI run。旧的 `main` push run 如果已经失败但长尾 Windows/macOS E2E 仍在运行，会阻塞后续修复 commit 的 run；`cancel-in-progress: true` 让最新 commit 立即获得执行权，避免用已过期的红灯 run 占用主干合入验证窗口。
 - Linux 与 macOS shell shard 内部并发设为 4。CI run `25469654203` 的 Linux shard 2 artifact 显示多个 Bifrost 子进程被系统 `Killed`，说明 16 路 shell 内部并发会在 hosted runner 上放大内存压力；CI run `25470391707` 的 Linux shard 3 artifact 又显示所有业务断言通过但仍有 Bifrost 子进程被系统 `Killed`，说明 8 路在 shard 3 的资源峰值下仍可能触发 OOM。3 个 shard 仍保持横向并行，单 shard 内改为 4 路降低 OOM 风险。
+- Shell shard 中会执行 `cargo check` / `cargo test` / `cargo run`，或在 `SKIP_BUILD=true` 下仍可能触发 Cargo 的用例，必须作为 lock-sensitive 用例串行执行。CI run `26451521064` 的 Linux shard 1 与 macOS shard 1 artifact 显示 `test_agent_codex_parity_contracts.sh`、`test_chatgpt_web_behavior_artifacts.sh`、`test_im_agent_streaming_progress_card.sh`、`test_asr_task_pause_resume.sh`、`test_voice_input_runtime.sh` 等用例在并行 shell batch 中长时间输出 `Blocking waiting for file lock on artifact directory`，部分业务断言本身已通过但最终被 900s per-test timeout 杀掉。该类用例不应靠放大 timeout 掩盖锁竞争，而应从并行批次移入串行队列，使超时预算用于真实测试执行。
 
 ## 依赖项
 
@@ -74,10 +75,12 @@ CI shell E2E 通过 `scripts/ci/run-e2e-shell.sh` 调用 `scripts/run_all_e2e.sh
 - 静态解析 `.github/workflows/ci.yml`，断言 Linux `e2e-shell` 与 macOS `e2e-macos-shell` job 的 `timeout-minutes` 都为 60，避免真实 shell shard 已完成但 job 收尾阶段被 workflow timeout 拉失败。
 - 静态解析 `.github/workflows/ci.yml`，断言 workflow 顶层 `concurrency` 使用 `group: ${{ github.workflow }}-${{ github.ref }}` 且 `cancel-in-progress: true`，确保主干连续 push 时旧 run 不再阻塞最新修复 commit 的 CI。
 - 静态解析 `.github/workflows/ci.yml`，断言 Linux `e2e-shell` 与 macOS `e2e-macos-shell` job 的 `BIFROST_E2E_SHELL_JOBS` 都为 4，避免 hosted runner 内部 8 路或 16 路并发触发 OOM kill。
+- 静态解析 `scripts/run_all_e2e.sh`，断言所有 shell E2E 中会调用 `cargo check/test/run` 的用例在 `CARGO_HEAVY_TESTS` 中登记，并且 `run_shell_tests_parallel` 将 `is_cargo_heavy` 用例加入 `serial_tests`。使用 `BIFROST_E2E_SHARD_INDEX=1 BIFROST_E2E_SHARD_TOTAL=3 scripts/run_all_e2e.sh --ci --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests` 确认当前失败 shard 仍收集这些用例，真实调度时会由 serial 队列避免 Cargo artifact lock 竞争。
 
 ### 真实场景测试
 
 - 更新 `human_tests/ci-shell-e2e-sharding.md`，覆盖 CI 不执行系统代理用例、隐藏日志 artifact 上传配置、失败原因摘要提取、shard 3 shell 包装回归、CLI offline help alternation 回归、CLI offline `echo | grep -q` Broken pipe 回归、失败日志 dump `find | head` pipefail 回归、SSE replay timeout 边界回归、macOS CI post-timeout 连接噪声回归、unsafe_ssl 管理端端口碰撞回归、long-term memory frontend build 竞争回归、Agent/IM human-api 并行端口隔离回归、Agent history/direct-path 用例预构建 release binary 复用回归、remote relay fallback 跳过重复 release build 回归、Linux/macOS shell E2E timeout 预算回归、main push CI concurrency 取消旧 run 回归、Linux/macOS shell shard 内部并发预算回归、shell E2E Cargo 默认解析回归，以及顶层 shell E2E 全 PASS 退出码回归。
+- 新增 `human_tests/ci-shell-e2e-sharding.md` 的 Cargo-heavy shell 用例串行调度回归，覆盖 `test_agent_codex_parity_contracts.sh`、`test_chatgpt_web_behavior_artifacts.sh`、`test_im_agent_streaming_progress_card.sh` 等当前 CI 失败路径。
 - 按新增用例逐条执行，确认 CI 模式过滤、本地模式保留，失败日志可上传且摘要不会被 cleanup 尾巴覆盖，CLI offline help 断言不再误判，unsafe_ssl 用例不再依赖外部 HTTPS mock fixture且不会复用错误本机服务，并行 shell 调度器和顶层 final status 检查在全 PASS 后返回 0，SSE replay 在超过 `timeout_ms` 后收到 post-timeout 事件，long-term memory 用例跳过 frontend build，Agent/IM human-api 用例消费调度器端口并可在不同端口真实启动，shell E2E 入口默认继承当前 PATH 的 Cargo，remote relay fallback 在预构建 binary 存在时不再重复 build，Linux/macOS shell E2E timeout 与真实 CI 运行成本匹配。
 
 ## 校验要求

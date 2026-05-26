@@ -891,7 +891,84 @@ function htmlToMd(el) {
   }
 }
 function cleanMd(s) { return s.replace(/\n{3,}/g, '\n\n').trim(); }
+function extractChatgptBehaviorArtifacts(root) {
+  const artifacts = [];
+  const seen = new Set();
+  const ignoreText = /^(复制回复|分享|来源|切换模型|更多操作|Pro 反馈|Copy|Share|Sources?|More actions?|Switch model)$/i;
+  const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim();
+  const classify = (label, context) => {
+    const combined = `${label} ${context}`;
+    if (/(zip|压缩包|打包下载|archive)/i.test(combined)) return 'archive';
+    if (/(图片|图像|image|png|jpg|jpeg|webp)/i.test(combined)) return 'image';
+    return 'image';
+  };
+  const buttons = root ? root.querySelectorAll('button.behavior-btn, button.entity-underline, .behavior-btn') : [];
+  for (const button of buttons) {
+    const label = normalize(button.getAttribute('title') || button.innerText || button.textContent);
+    const buttonText = normalize(button.innerText || button.textContent || label);
+    const context = normalize((button.closest('p, li, h1, h2, h3, h4') || {}).innerText || '');
+    if (!label || ignoreText.test(label)) continue;
+    if (/粘贴的\s*markdown|pasted\s+markdown|\.md$/i.test(label)) continue;
+    if (button.closest('[data-testid*="citation"], [aria-label*="来源"], [aria-label*="Sources"]')) continue;
+    const kind = classify(label, context);
+    const key = `${kind}:${label}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    artifacts.push({
+      kind,
+      label,
+      buttonText,
+      context,
+      source: 'chatgpt_behavior_button',
+    });
+  }
+  return artifacts;
+}
 "#;
+
+pub(super) fn append_dom_artifact_notice(text: &str, artifacts: &[Value]) -> String {
+    if artifacts.is_empty() {
+        return text.to_string();
+    }
+
+    let mut lines = Vec::new();
+    for artifact in artifacts {
+        let label = artifact
+            .get("label")
+            .or_else(|| artifact.get("buttonText"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let Some(label) = label else {
+            continue;
+        };
+        let kind = artifact
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("artifact");
+        let kind_label = match kind {
+            "archive" => "压缩包",
+            "image" => "图片",
+            _ => "附件",
+        };
+        let line = format!("- {kind_label}: {label}");
+        if !lines.contains(&line) {
+            lines.push(line);
+        }
+    }
+
+    if lines.is_empty() {
+        return text.to_string();
+    }
+
+    let mut output = text.trim().to_string();
+    if !output.is_empty() {
+        output.push_str("\n\n");
+    }
+    output.push_str("ChatGPT Web 页面还提供了这些可点击下载项：\n");
+    output.push_str(&lines.join("\n"));
+    output
+}
 
 /// Result of a DOM extraction attempt, distinguishing between "complete content",
 /// "streaming content (with observable text length)", and "no content found".
@@ -1645,6 +1722,7 @@ async fn extract_dom_outcome_inner(cdp: &super::CdpClient) -> DomExtractOutcome 
               images.push({{ alt, src, width: parseInt(img.width) || 0, height: parseInt(img.height) || 0 }});
             }}
           }}
+          const artifacts = extractChatgptBehaviorArtifacts(lastTurn);
 
           return JSON.stringify({{
             found: true,
@@ -1664,6 +1742,8 @@ async fn extract_dom_outcome_inner(cdp: &super::CdpClient) -> DomExtractOutcome 
             textLength: text.length,
             imageCount: images.length,
             images: images.slice(0, 10),
+            artifactCount: artifacts.length,
+            artifacts: artifacts.slice(0, 20),
             toolCalls: toolCalls.slice(0, 20),
             allMarkdownTexts: allMarkdownTexts.filter(t => t.length > 0),
           }});
@@ -1745,6 +1825,12 @@ async fn extract_dom_outcome_inner(cdp: &super::CdpClient) -> DomExtractOutcome 
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
+    let artifacts: Vec<Value> = data
+        .get("artifacts")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let artifact_count = artifacts.len();
 
     let mut final_message = json!({
         "text": text,
@@ -1772,15 +1858,30 @@ async fn extract_dom_outcome_inner(cdp: &super::CdpClient) -> DomExtractOutcome 
         final_message["text"] = json!("已生成图片，正在发送原图。");
     }
 
+    let mut final_text = final_message
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if artifact_count > 0 {
+        final_text = append_dom_artifact_notice(&final_text, &artifacts);
+        final_message["text"] = json!(final_text);
+        final_message["artifacts"] = json!(artifacts.clone());
+    }
+
     DomExtractOutcome::Ready(WaitedFinal {
         final_message,
         summary: json!({
             "source": "dom_fallback_outcome",
             "turnId": turn_id,
             "imageCount": image_count,
+            "artifactCount": artifact_count,
+            "artifacts": artifacts,
             "toolCalls": data.get("toolCalls").cloned().unwrap_or_else(|| json!([])),
         }),
-        all_texts: if all_texts.is_empty() {
+        all_texts: if artifact_count > 0 {
+            vec![final_text]
+        } else if all_texts.is_empty() {
             vec![text]
         } else {
             all_texts
@@ -1885,6 +1986,7 @@ async fn extract_latest_assistant_from_dom_ignore_streaming(
               images.push({{ alt, src, width: parseInt(img.width) || 0, height: parseInt(img.height) || 0 }});
             }}
           }}
+          const artifacts = extractChatgptBehaviorArtifacts(lastTurn);
 
           return JSON.stringify({{
             found: true,
@@ -1894,6 +1996,8 @@ async fn extract_latest_assistant_from_dom_ignore_streaming(
             textLength: text.length,
             imageCount: images.length,
             images: images.slice(0, 10),
+            artifactCount: artifacts.length,
+            artifacts: artifacts.slice(0, 20),
             allMarkdownTexts: allMarkdownTexts.filter(t => t.length > 0),
           }});
         }})()"#,
@@ -1953,6 +2057,12 @@ async fn extract_latest_assistant_from_dom_ignore_streaming(
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
+    let artifacts: Vec<Value> = data
+        .get("artifacts")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let artifact_count = artifacts.len();
 
     let mut final_message = json!({
         "text": text,
@@ -1980,14 +2090,29 @@ async fn extract_latest_assistant_from_dom_ignore_streaming(
         final_message["text"] = json!("已生成图片，正在发送原图。");
     }
 
+    let mut final_text = final_message
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if artifact_count > 0 {
+        final_text = append_dom_artifact_notice(&final_text, &artifacts);
+        final_message["text"] = json!(final_text);
+        final_message["artifacts"] = json!(artifacts.clone());
+    }
+
     Some(WaitedFinal {
         final_message,
         summary: json!({
             "source": "dom_fallback_force",
             "turnId": turn_id,
             "imageCount": image_count,
+            "artifactCount": artifact_count,
+            "artifacts": artifacts,
         }),
-        all_texts: if all_texts.is_empty() {
+        all_texts: if artifact_count > 0 {
+            vec![final_text]
+        } else if all_texts.is_empty() {
             vec![text]
         } else {
             all_texts

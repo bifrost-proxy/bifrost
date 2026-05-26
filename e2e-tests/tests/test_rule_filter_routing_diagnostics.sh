@@ -167,6 +167,15 @@ request_qianchuan_path() {
         "http://qianchuan.jinritemai.com${path}"
 }
 
+request_whistle_filter_path() {
+    local path="$1"
+    curl -sS \
+        --proxy "http://${PROXY_HOST}:${PROXY_PORT}" \
+        --connect-timeout 5 \
+        --max-time 15 \
+        "http://whistle-filter.local${path}"
+}
+
 request_unsafe_upstream() {
     curl -sS \
         --proxy "http://${PROXY_HOST}:${PROXY_PORT}" \
@@ -232,6 +241,24 @@ test_long_exclude_filter_chain_prefix_match() {
         body="$(request_qianchuan_path "$path")" || return 1
         assert_json_expr "$body" --arg expected_path "${path%%\?*}" '.request.parsed_path == $expected_path' \
             "excludeFilter chain should fall through for ${path}" || return 1
+    done
+}
+
+test_whistle_style_wildcard_filters() {
+    log_section "Whistle-style wildcard filters"
+
+    local paths=(
+        "/alice/commerce/sale/subscription/entry/config/?from=e2e"
+        "/prefix/alice/user?from=e2e"
+        "/api?from=e2e"
+        "/api/users?from=e2e"
+    )
+
+    local path body
+    for path in "${paths[@]}"; do
+        body="$(request_whistle_filter_path "$path")" || return 1
+        assert_json_expr "$body" --arg expected_path "${path%%\?*}" '.request.parsed_path == $expected_path' \
+            "Whistle wildcard filter should fall through for ${path}" || return 1
     done
 }
 
@@ -304,6 +331,7 @@ main() {
 
     test_path_filter_prefix_match
     test_long_exclude_filter_chain_prefix_match
+    test_whistle_style_wildcard_filters
     test_per_rule_upstream_unsafe_ssl
     test_traffic_detail_keeps_routing_diagnostics
     test_network_export_keeps_routing_diagnostics

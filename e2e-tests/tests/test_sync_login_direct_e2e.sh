@@ -125,20 +125,30 @@ wait_for_authorized() {
 }
 
 log "Starting isolated mock sync server and Bifrost admin"
-BIFROST_BIN="$ROOT_DIR/target/release/bifrost"
+: "${BIFROST_BIN:=$ROOT_DIR/target/release/bifrost}"
 if [[ -x "$BIFROST_BIN" ]]; then
-    log "Reusing pre-built release bifrost binary at $BIFROST_BIN"
+    log "Reusing pre-built bifrost binary at $BIFROST_BIN"
 else
     log "Building release bifrost binary"
     (cd "$ROOT_DIR" && cargo build --release --bin bifrost) || exit 1
+    BIFROST_BIN="$ROOT_DIR/target/release/bifrost"
 fi
 start_mock_sync_server || exit 1
 admin_start_bifrost || exit 1
 
-log "Login with token and url via CLI"
-LOGIN_OUTPUT="$(CI=1 BIFROST_DATA_DIR="$BIFROST_DATA_DIR" "$BIFROST_BIN" -p "$ADMIN_PORT" sync login --token ci-token --url "$MOCK_URL" 2>&1)"
+log "Help should explain where to get a headless login token"
+HELP_OUTPUT="$("$BIFROST_BIN" sync login --help 2>&1)"
+assert_body_contains "https://bifrost.bytedance.net/v4/sso/token-login" "$HELP_OUTPUT" "sync login help should include token login URL" || exit 1
+
+log "Point sync config at mock server for CI-safe authorization"
+CONFIG_OUTPUT="$(CI=1 BIFROST_DATA_DIR="$BIFROST_DATA_DIR" "$BIFROST_BIN" -p "$ADMIN_PORT" sync config --remote-url "$MOCK_URL" 2>&1)"
+assert_body_contains "Sync configuration updated" "$CONFIG_OUTPUT" "CLI sync config should update remote URL" || exit 1
+assert_body_contains "Remote URL: ${MOCK_URL}" "$CONFIG_OUTPUT" "CLI sync config should report mock URL" || exit 1
+
+log "Login with token only via configured default URL"
+LOGIN_OUTPUT="$(CI=1 BIFROST_DATA_DIR="$BIFROST_DATA_DIR" "$BIFROST_BIN" -p "$ADMIN_PORT" sync login --token ci-token 2>&1)"
 assert_body_contains "Login token saved" "$LOGIN_OUTPUT" "CLI direct login should save token" || exit 1
-assert_body_contains "Remote URL: ${MOCK_URL}" "$LOGIN_OUTPUT" "CLI direct login should report remote url" || exit 1
+assert_body_contains "Remote URL: ${MOCK_URL}" "$LOGIN_OUTPUT" "CLI token-only login should report configured remote url" || exit 1
 
 log "Wait until background sync authorizes the token"
 STATUS="$(wait_for_authorized)"
@@ -147,12 +157,40 @@ assert_body_contains '"authorized":true' "$STATUS" "status should be authorized"
 assert_body_contains '"remote_base_url":"'"$MOCK_URL"'"' "$STATUS" "status should persist remote url" || exit 1
 assert_body_contains '"user_id":"ci-user"' "$STATUS" "status should include user from token" || exit 1
 
-log "Partial direct-login payload should fail with 400"
-PARTIAL_STATUS="$(curl -sS -o "${TEST_ROOT}/partial.json" -w "%{http_code}" \
+log "Login with explicit token and url via CLI should remain supported"
+LOGIN_EXPLICIT_OUTPUT="$(CI=1 BIFROST_DATA_DIR="$BIFROST_DATA_DIR" "$BIFROST_BIN" -p "$ADMIN_PORT" sync login --token ci-token --url "$MOCK_URL" 2>&1)"
+if ! grep -qE "Login token saved|Login successful" <<<"$LOGIN_EXPLICIT_OUTPUT"; then
+    echo "explicit direct login should report success" >&2
+    echo "$LOGIN_EXPLICIT_OUTPUT" >&2
+    exit 1
+fi
+if grep -q "Login token saved" <<<"$LOGIN_EXPLICIT_OUTPUT"; then
+    assert_body_contains "Remote URL: ${MOCK_URL}" "$LOGIN_EXPLICIT_OUTPUT" "CLI explicit direct login should report remote url" || exit 1
+fi
+
+log "Token-only direct-login API payload should use configured default URL"
+TOKEN_ONLY_STATUS="$(curl -sS -o "${TEST_ROOT}/token-only.json" -w "%{http_code}" \
     -X POST "$(admin_base_url)/api/sync/login" \
     -H "content-type: application/json" \
     -d '{"token":"ci-token"}')"
-assert_equals "400" "$PARTIAL_STATUS" "missing remote_base_url should return 400" || exit 1
-assert_body_contains "token and remote_base_url must be provided together" "$(cat "${TEST_ROOT}/partial.json")" "partial payload error should be explicit" || exit 1
+assert_equals "200" "$TOKEN_ONLY_STATUS" "missing remote_base_url should use configured default" || exit 1
+assert_body_contains '"remote_base_url":"'"$MOCK_URL"'"' "$(cat "${TEST_ROOT}/token-only.json")" "token-only API should keep configured remote url" || exit 1
+
+log "URL-only direct-login payload should still fail with 400"
+URL_ONLY_STATUS="$(curl -sS -o "${TEST_ROOT}/url-only.json" -w "%{http_code}" \
+    -X POST "$(admin_base_url)/api/sync/login" \
+    -H "content-type: application/json" \
+    -d '{"remote_base_url":"'"$MOCK_URL"'"}')"
+assert_equals "400" "$URL_ONLY_STATUS" "missing token should return 400" || exit 1
+assert_body_contains "token is required" "$(cat "${TEST_ROOT}/url-only.json")" "url-only payload error should be explicit" || exit 1
+
+log "Login with token only should use built-in default provider URL on fresh default config"
+admin_cleanup_bifrost
+export ADMIN_PORT="$(pick_free_port)"
+export BIFROST_DATA_DIR="${TEST_ROOT}/bifrost-default-data"
+admin_start_bifrost || exit 1
+LOGIN_DEFAULT_OUTPUT="$(CI=1 BIFROST_DATA_DIR="$BIFROST_DATA_DIR" "$BIFROST_BIN" -p "$ADMIN_PORT" sync login --token ci-token-default 2>&1)"
+assert_body_contains "Login token saved" "$LOGIN_DEFAULT_OUTPUT" "CLI token-only login should save token" || exit 1
+assert_body_contains "Remote URL: https://bifrost.bytedance.net" "$LOGIN_DEFAULT_OUTPUT" "CLI token-only login should report built-in default URL" || exit 1
 
 log "PASS"

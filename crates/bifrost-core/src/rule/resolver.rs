@@ -1148,6 +1148,59 @@ mod tests {
     }
 
     #[test]
+    fn test_exclude_filter_whistle_style_wildcard_url() {
+        let exclude_filters = vec![parse_filter("*/alice/*").unwrap()];
+        let rules = vec![create_test_rule_with_filters(
+            "*.doubao.com",
+            Protocol::Http,
+            "localhost:8080",
+            vec![],
+            exclude_filters,
+        )];
+        let resolver = RulesResolver::new(rules);
+
+        let excluded = resolver.resolve(&RequestContext::from_url(
+            "https://www.doubao.com/alice/commerce/sale/subscription/entry/config/?from=test",
+        ));
+        assert!(excluded.is_empty());
+
+        let allowed = resolver.resolve(&RequestContext::from_url(
+            "https://www.doubao.com/bob/commerce/sale/subscription/entry/config/?from=test",
+        ));
+        assert_eq!(allowed.len(), 1);
+        assert_eq!(allowed.rules[0].resolved_value, "localhost:8080");
+    }
+
+    #[test]
+    fn test_exclude_filter_whistle_style_wildcard_path_prefix() {
+        let exclude_filters = vec![parse_filter("*/api").unwrap()];
+        let rules = vec![create_test_rule_with_filters(
+            "www.example.com",
+            Protocol::Http,
+            "localhost:5173",
+            vec![],
+            exclude_filters,
+        )];
+        let resolver = RulesResolver::new(rules);
+
+        assert!(resolver
+            .resolve(&RequestContext::from_url(
+                "https://www.example.com/api/users"
+            ))
+            .is_empty());
+        assert!(resolver
+            .resolve(&RequestContext::from_url(
+                "https://www.example.com/api?debug=1"
+            ))
+            .is_empty());
+
+        let allowed = resolver.resolve(&RequestContext::from_url(
+            "https://www.example.com/apiary/users",
+        ));
+        assert_eq!(allowed.len(), 1);
+    }
+
+    #[test]
     fn test_long_exclude_filter_chain_uses_regular_prefix_matching() {
         let excludes = [
             "/account/page/cooperate/qianchuan",

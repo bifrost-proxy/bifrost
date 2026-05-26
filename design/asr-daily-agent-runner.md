@@ -636,23 +636,26 @@ ASR daily agent git commit skipped task_id=... reason="git executable not found"
 
 ## 11. 内置 AGENTS.md 模板
 
-**文件位置**：`crates/bifrost-admin/assets/asr_daily_agents_default.md`
+**文件位置**：`crates/bifrost-admin/src/handlers/asr_jobs/daily_agent_template.md`
 
 **Rust 引用**：
 
 ```rust
-const DEFAULT_ASR_DAILY_AGENTS_MD: &str =
-    include_str!("../../assets/asr_daily_agents_default.md");
+const DEFAULT_ASR_DAILY_AGENTS_MD: &str = include_str!("daily_agent_template.md");
 ```
 
 **模板核心规则**：
-- 执行 shell 前 `source ~/.zshrc`
 - 禁止修改 `~/.zshrc`
 - 原始转写文件是 `YYYY-MM-DD.md`（只读）
 - 报告输出到 `report/YYYY-MM-DD-report.md`
+- 模板头部说明会被写入 Daily Agent 工作目录的 `AGENTS.md` 并由 Runner 实际读取；这些提示是运行契约，不是注释、示例或可忽略说明
 - 优先提取：用户声音、工作事实、判断、灵感、待办、长期知识
+- 每个“灵感爆发时刻”必须补充相关方向资料搜索、关键发现、可行性分析、方案草案、风险和下一步验证；如果 Runner 不能联网搜索，必须显式标记资料搜索受限，不得编造来源
 - 不确定归因必须保留不确定性
 - 明确报告结构和证据状态
+- 知识沉淀必须内嵌在同一份 report 的“报告内知识沉淀模块”，按长期想法、方向决策、跨天待办、人物协作、学习资料、生活状态、术语误识别等模块分栏输出
+- 报告内知识沉淀分栏不是装饰性标题；它们用于让同一份 report 同时承担日报、复盘、待办追踪和长期记忆索引职责
+- 默认不得创建、建议创建或引用 `knowledge/*` 这类额外知识目录；Daily Agent 的运行模型是一对输入生成一份最终 report
 
 **变量占位**（写入时替换，用户修改后保存为纯文本不再替换）：
 

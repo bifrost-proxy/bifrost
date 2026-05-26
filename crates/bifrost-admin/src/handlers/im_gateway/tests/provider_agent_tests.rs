@@ -85,6 +85,23 @@ pub(super) fn provider_create_payload_defaults_missing_display_name_to_id() {
 }
 
 #[test]
+pub(super) fn feishu_setup_brand_selects_expected_domains() {
+    assert_eq!(parse_feishu_setup_brand(None), FeishuSetupBrand::Feishu);
+    assert_eq!(
+        parse_feishu_setup_brand(Some("lark")),
+        FeishuSetupBrand::Lark
+    );
+    assert_eq!(
+        FeishuSetupBrand::Feishu.open_base(),
+        "https://open.feishu.cn"
+    );
+    assert_eq!(
+        FeishuSetupBrand::Lark.provider_base_url(),
+        "https://open.larksuite.com/open-apis"
+    );
+}
+
+#[test]
 pub(super) fn provider_agent_config_overrides_base_agent_config() {
     let base = crate::im_gateway::agent::ImAgentConfig {
         work_dir: Some("/global".to_string()),
@@ -121,6 +138,41 @@ pub(super) fn provider_agent_config_overrides_base_agent_config() {
         effective.user_instructions.as_deref(),
         Some("provider user")
     );
+}
+
+#[test]
+pub(super) fn provider_agent_work_dir_resolves_global_default_directory() {
+    let base = crate::im_gateway::agent::ImAgentConfig {
+        work_dir: None,
+        ..Default::default()
+    };
+    let provider = test_provider();
+
+    let effective_work_dir =
+        effective_agent_work_dir_for_provider(&base, &provider).expect("resolved work_dir");
+    let current_dir = std::env::current_dir().expect("current dir");
+
+    assert_eq!(effective_work_dir, current_dir);
+}
+
+#[test]
+pub(super) fn agent_config_response_includes_resolved_work_dir() {
+    let response = agent_config_response(crate::im_gateway::agent::ImAgentConfig {
+        work_dir: None,
+        ..Default::default()
+    });
+    let current_dir = std::env::current_dir()
+        .expect("current dir")
+        .display()
+        .to_string();
+
+    assert_eq!(
+        response
+            .get("resolved_work_dir")
+            .and_then(|value| value.as_str()),
+        Some(current_dir.as_str())
+    );
+    assert!(response.get("work_dir").is_none_or(|value| value.is_null()));
 }
 
 #[test]
@@ -280,6 +332,7 @@ pub(super) fn im_status_text_formats_metrics_and_runner_metadata() {
         &status_context_from_agent_runner(Some(&bifrost_agent::AgentRunnerMode::Custom(
             "codex".to_string(),
         ))),
+        None,
     );
 
     assert!(text.contains("Agent 类型: External Runner Agent"));
@@ -289,4 +342,37 @@ pub(super) fn im_status_text_formats_metrics_and_runner_metadata() {
     assert!(text.contains("历史对话轮次: 2"));
     assert!(text.contains("API 累计 token: 38.6K"));
     assert!(text.contains("压缩次数: 2"));
+}
+
+#[test]
+pub(super) fn im_status_text_uses_resolved_default_work_dir_when_session_has_no_override() {
+    let manager = bifrost_agent::AgentSessionManager::new(3600);
+    let session = manager
+        .try_take_session_with_work_dir("status-default-workdir", None)
+        .expect("session should be available");
+    manager.return_session(session);
+
+    let detail = manager
+        .get_session_detail("status-default-workdir")
+        .expect("detail");
+    assert!(detail.work_dir.is_none());
+
+    let current_dir = std::env::current_dir()
+        .expect("current dir")
+        .display()
+        .to_string();
+    let text = build_im_status_text(
+        Some(&detail),
+        &status_context_from_agent_runner(None),
+        Some(current_dir.as_str()),
+    );
+    let api_text = build_agent_api_status_text(
+        Some(&detail),
+        &bifrost_agent::config::AgentConfig::default(),
+    );
+
+    assert!(text.contains(&format!("工作路径: {current_dir}")));
+    assert!(api_text.contains(&format!("工作路径: {current_dir}")));
+    assert!(!text.contains("工作路径: N/A"));
+    assert!(!api_text.contains("工作路径: N/A"));
 }

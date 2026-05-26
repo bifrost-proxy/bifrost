@@ -1866,6 +1866,171 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 - `human_tests/im-gateway.md`
 - `human_tests/readme.md`
 
+## 2026-05-26 Owner 上线通知追加设备名称
+
+### 问题
+
+用户在多台电脑同时启动 Bifrost IM Gateway 时，owner 收到的上线通知只包含工作目录。若不同设备使用相同仓库路径或相近工作区，仅凭 `工作目录` 不容易判断是哪台电脑上线。
+
+### 实现逻辑
+
+- `build_online_notification_message(provider)` 在原有问候语和工作目录之外追加当前设备名称：
+  ```text
+  你好，Bifrost 助手上线了
+  设备名称：MacBook-Pro
+  工作目录：/Users/eden/work/github/bifrost
+  ```
+- 设备名称解析优先级：
+  1. `BIFROST_DEVICE_NAME`：允许用户或测试显式覆盖。
+  2. `COMPUTERNAME`：读取 Windows 常见系统环境变量。
+  3. macOS `scutil --get ComputerName`：读取 macOS 图形系统设备名。
+  4. `HOSTNAME`：读取 Unix 常见系统环境变量。
+  5. `hostname` 命令：跨平台兜底。
+  6. `unknown`：所有来源都不可用时的兜底值。
+- 设备名称会裁剪空白并只使用第一段非空行，避免命令输出换行污染 IM 消息格式。
+- 飞书实际发送内容和 message log 的 `content_preview` 继续共用同一份上线通知字符串，避免用户看到的消息与后台记录不一致。
+
+### 测试方案
+
+- 单元测试：`online_notification_message_uses_provider_work_dir_override` 使用固定设备名，验证通知包含 `设备名称` 和 Provider 自定义 `work_dir`。
+- 单元测试：`online_notification_message_falls_back_to_process_work_dir` 使用固定设备名，验证通知包含 `设备名称` 并在未配置 Provider work dir 时回退进程 cwd。
+- 真实场景测试：新增并执行 `human_tests/im-gateway.md` 的 `TC-IMG-62`，断言 owner 上线通知和 message log 中同时包含 `设备名称` 与 `工作目录`。
+
+### 校验要求
+
+```bash
+cargo test -p bifrost-admin online_notification_message_ --lib
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+```
+
+### 文档更新
+
+- `design/im-gateway.md`
+- `human_tests/im-gateway.md`
+- `human_tests/readme.md`
+
+## 2026-05-26 Provider/IM 状态默认工作目录展示修复
+
+### 问题
+
+Provider 未配置专属 `agent_config.work_dir`，且全局 Agent 配置也没有显式 `work_dir` 时，Agent 运行时会通过 `AgentConfig::resolve_work_dir()` 回退到进程当前目录；因此用户在 IM 里询问“当前目录”时可以得到正确结果。但 Connections Provider 卡片直接显示 `Global default`，IM `/status`、API status 与进度卡在 session detail 缺少显式 `work_dir` 时显示 `N/A`，造成“实际有目录但界面看起来没有目录”的误导。
+
+### 实现逻辑
+
+- `GET /im-gateway/agent` 响应新增 `resolved_work_dir`，保留原始 `work_dir` 的未配置状态，让 WebUI 能展示真实继承目录但不把默认值写回配置。
+- Provider 卡片在未设置专属工作目录时展示 `resolved_work_dir`，并保持关键字段可复制。
+- Provider effective work dir helper 使用 `resolve_work_dir()`，让外部 runner 与 IM 状态链路拿到与 Agent 运行时一致的默认目录。
+- IM `/status` 和 Agent API status 在 session detail 没有显式目录时使用解析后的默认目录，不再显示 `N/A`。
+- Built-in Agent 新会话没有显式工作目录时，仅在空历史会话初始化为解析后的目录；历史会话缺少目录时只补展示字段，避免清空已有上下文。
+
+### 测试方案
+
+- 单元测试：`provider_agent_work_dir_resolves_global_default_directory` 验证 Provider effective work dir 会解析到当前目录。
+- 单元测试：`agent_config_response_includes_resolved_work_dir` 验证配置 API 返回展示用的 resolved work dir，且原始 `work_dir` 仍保持未配置状态。
+- 单元测试：`im_status_text_uses_resolved_default_work_dir_when_session_has_no_override` 验证 IM status/API status 不再在隐式默认目录场景显示 `N/A`。
+- WebUI E2E：`IM Gateway Provider 卡片展示继承后的默认工作目录` mock `resolved_work_dir`，验证卡片展示真实路径而非 `Global default`。
+- 真实场景测试：更新并执行 `human_tests/im-gateway.md` 的 `TC-IMG-61`，覆盖 Provider 卡片与 IM 状态展示。
+
+### 校验要求
+
+```bash
+cargo test -p bifrost-admin provider_agent_work_dir_resolves_global_default_directory agent_config_response_includes_resolved_work_dir im_status_text_uses_resolved_default_work_dir_when_session_has_no_override --lib
+pnpm --dir web exec playwright test tests/ui/im-gateway-provider.spec.ts --grep "继承后的默认工作目录"
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+```
+
+### 文档更新
+
+- `design/im-gateway.md`
+- `human_tests/im-gateway.md`
+- `human_tests/readme.md`
+
+## 2026-05-26 Connections Provider 渐进式创建向导
+
+### 背景与目标
+
+Connections 的新建 Provider 表单一次性暴露平台、App ID、App Secret、Agent Runner、工作目录、Prompt 等字段，首次接入 IM 时用户难以判断先做哪一步。本次改造把新建流程拆成三步：
+
+1. **选择类型**：先只选择 Weixin 或 Feishu。
+2. **连接账号/应用**：按平台展示最小连接动作。Weixin 创建 Provider 后立即弹出登录二维码；Feishu 参考 `larksuite/cli` 的应用注册流程展示二维码，让用户在飞书页面创建机器人应用。
+3. **连接后配置**：连接成功后才展示 Agent Runner、工作目录、Prompt、事件类型等高级配置。
+
+### Feishu 自动应用创建协议
+
+Feishu 新建流程复用 Lark CLI 的 device-style app registration 设计：
+
+- 后端新增 `POST /_bifrost/api/im-gateway/providers/feishu-setup/start`，向 `https://accounts.feishu.cn/oauth/v1/app/registration` 发起 `action=begin`，表单参数包含 `archetype=PersonalAgent`、`auth_method=client_secret`、`request_user_info=open_id tenant_brand`。
+- 后端返回临时 `session_id`、二维码 URL、过期时间和轮询间隔。二维码 URL 优先使用 Feishu app registration 响应里的 `verification_uri_complete`；当前真实接口返回 `{open_base}/page/launcher?user_code=<code>`。如果响应缺失完整 URL，再按 `verification_uri + user_code` 或 `{open_base}/page/launcher?user_code=<code>` 兜底。
+- 前端只展示二维码和打开设置页面按钮，不展示 App Secret 输入。
+- 前端轮询 `GET /providers/feishu-setup/:session/status`。后端用 `action=poll&device_code=<code>` 获取 `client_id`、`client_secret`、`user_info.open_id`、`tenant_brand`。如果租户返回 `tenant_brand=lark` 且 Feishu endpoint 没返回 secret，后端使用 Lark accounts endpoint 重试一次。Feishu registration 的 begin/poll 请求使用直连 HTTP client，不继承 Bifrost 自身代理或环境代理，避免服务端出站请求被本机代理回环影响。
+- 后端把 App ID、App Secret 和 owner open_id 暂存在内存 session 中；状态响应只返回 App ID、owner、`secret_configured=true`，绝不返回 secret 明文。
+- 用户点击 Connect 时，前端调用 `POST /providers/feishu-setup/:session/provider`。后端从 pending session 合成 Feishu Provider，写入脱敏 provider store，然后移除 pending secret。
+
+### Weixin 渐进式流程
+
+- 用户选择 Weixin 后，第二步只要求 Provider ID 和 Display Name。
+- 点击创建后先调用现有 Provider create API，再调用现有 `POST /providers/:id/weixin-login/start`。
+- 二维码沿用当前 `Scan Weixin QR` 弹窗和轮询逻辑；扫码确认后前端刷新 provider，进入第三步高级配置。
+
+### 配置边界
+
+- 新建流程第三步只允许配置连接成功后才有意义的字段：event long connection、event types、Agent Runner、工作目录、Base Prompt、Developer/User Instructions。
+- 编辑已有 Provider 仍保留完整表单，允许补填或更新 App ID/App Secret。
+- API 响应保持脱敏：列表、详情、setup status 和 setup create provider 都不返回 App Secret 明文。
+
+### 测试方案
+
+- 前端类型检查：`pnpm --dir web exec tsc -b --pretty false`。
+- 后端编译检查：`SKIP_FRONTEND_BUILD=1 cargo check -p bifrost-admin --lib`。
+- WebUI E2E：更新 `web/tests/ui/im-gateway-provider.spec.ts`，mock Feishu setup start/status/provider 三个接口，验证 Add Provider 的 Type -> Connect -> Configure 流程、二维码展示、App Secret 不出现在新建连接步骤、确认后自动 connect。
+- 回归 E2E：保留重复 Provider ID 展示真实后端错误的用例，适配新增的类型选择步骤。
+- 真实场景测试：更新并执行 `human_tests/im-gateway.md` 的 Connections Provider 渐进式创建用例，覆盖亮色/暗色下选择类型、Feishu 二维码连接页、Weixin 扫码弹窗、高级配置延后展示。
+
+### Review/Fix/Test 闭环
+
+- 第 1 轮：复核用户目标、检查 Rust handler/API 和 WebUI wizard diff，运行 tsc、targeted cargo check、targeted Playwright；发现问题立即修复并复测。
+- 第 2 轮：复查修复后的最新 diff、human_tests 索引和脱敏边界，复跑 targeted checks；如果发现新问题继续追加轮次。
+- 收尾前执行 `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、`cargo test --workspace --all-features`；若 local-ci 因耗时未执行，最终交付中明确风险。
+
+## 2026-05-26 Edit IM Provider 表单密度优化
+
+### 背景与目标
+
+`Edit IM Provider` 弹窗仍沿用 Ant Design 垂直表单默认间距，每个字段之间留白过大，导致已有 Provider 的关键信息和 Agent 配置需要过多滚动才能浏览。本次只收紧编辑弹窗的表单密度，不影响 `Add IM Provider` 的渐进式创建向导。
+
+### 实现逻辑
+
+- 编辑态 `Form` 增加 `im-provider-edit-form-compact` class，并使用 `size="small"`。
+- scoped CSS 将编辑态 `Form.Item` 间距收紧到 10px，label 到输入框的间距收紧到 2px，extra 说明文案使用更紧凑的 12px / 1.35 line-height。
+- Provider 摘要 `Descriptions` 的底部间距从 16px 收紧到 10px。
+- 所有样式只通过 spacing/font sizing 调整，不新增主题颜色，继续兼容亮色和暗色主题。
+
+### 测试方案
+
+- WebUI E2E：更新 `web/tests/ui/im-gateway-provider.spec.ts` 的编辑 Provider 用例，断言编辑弹窗使用 compact class，首个 Form.Item 的 `margin-bottom=10px`，label `padding-bottom=2px`。
+- 真实场景测试：更新并执行 `human_tests/im-gateway.md` 的编辑表单密度用例，确认编辑态信息密度提升且 Add Provider 向导不受影响。
+
+## 2026-05-26 Connections Provider 列表宽度约束
+
+### 背景与目标
+
+Connections 页面在宽屏下把 Provider 卡片拉满整行，导致卡片数据集中在左侧，连接、编辑、删除等操作按钮贴在最右侧，数据与操作距离过长。目标是让 Provider 列表成为居中的工作区，最大宽度 750px，提升扫描和点击效率。
+
+### 实现逻辑
+
+- Provider 列表外层增加 `data-testid=settings-im-provider-list`。
+- 列表容器使用 `maxWidth: 750`、`width: "100%"`、`margin: "0 auto"`，保留原有纵向 flex 与 12px 卡片间距。
+- 单个 Provider 卡片继续使用原有标题、字段与操作按钮结构；宽度约束由列表容器统一控制，避免按钮和数据在宽屏下被拉得过远。
+
+### 测试方案
+
+- WebUI E2E：在卡片展示用例中断言 Provider 列表可见、宽度不超过 760px 容差，并在桌面 viewport 下居中。
+- 真实场景测试：更新 `human_tests/im-gateway.md`，覆盖宽屏下 Provider 卡片最大宽度与居中展示。
+
 ## 2026-05-13 Handler 模块化拆分
 
 ### 问题
@@ -2319,6 +2484,42 @@ cargo test -p bifrost-admin im_gateway -- --nocapture
 cargo test --workspace --all-features
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+```
+
+### 文档更新
+
+- `design/im-gateway.md`
+- `human_tests/im-gateway.md`
+- `human_tests/readme.md`
+
+## 2026-05-26 Feishu 自动创建 Provider 长连接回归
+
+### 问题
+
+Feishu 自动创建应用流程只在 accounts 端注册/轮询请求上使用了直连 HTTP client；Provider 创建后真正启动事件长连接时，`FeishuProvider` 和 long connection endpoint 请求仍使用默认 reqwest client。若本机环境代理指向正在运行的 Bifrost，Bifrost 进程内请求 `https://open.feishu.cn/callback/ws/endpoint` 会绕回自身或命中错误代理路径，日志表现为 `ws endpoint fetch failed: Network error: ws endpoint request failed: error sending request for url (...)`，用户发送消息不会产生 inbound message log。
+
+同时连接管理器在 spawned task 一启动就把状态标记为 `connected`，而不是等实际获取 WS endpoint 并完成 WebSocket 连接；因此 WebUI/API 可能显示 connected，但后台正在持续重连。
+
+### 实现逻辑
+
+- Feishu OpenAPI HTTP client 统一通过 `build_feishu_http_client()` 构建，启用 `no_proxy()`，覆盖 tenant token、消息发送、资源下载以及 WS endpoint 获取等请求。
+- Feishu long connection 在真正 WebSocket connected 后发布 `Connected` 状态；endpoint fetch / handshake / ping / event loop 失败时发布 `Reconnecting` 和真实错误。
+- connection manager 不再在 task 刚启动时提前标记 connected；状态错误在重连时保留，重新 connected 后清空。
+- WS endpoint 和 token 请求错误输出补充 reqwest source chain，便于看到 DNS、代理、TLS 或连接层真实原因。
+
+### 测试方案
+
+- 单元测试：`test_connection_state_reconnect_error_clears_after_connected` 验证 `Reconnecting` 保存 endpoint 错误并累加 reconnect count，后续 `Connected` 清除 last_error。
+- 真实场景测试：更新并执行 `human_tests/im-gateway.md` 的 `TC-IMG-60`，在系统代理/环境代理存在时，自动创建的 Feishu Provider 长连接必须直连飞书 endpoint，且状态不再误报 connected。
+
+### 校验要求
+
+```bash
+cargo test -p bifrost-admin test_connection_state_reconnect_error_clears_after_connected --lib
+cargo test -p bifrost-admin feishu --lib
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
 ```
 
 ### 文档更新

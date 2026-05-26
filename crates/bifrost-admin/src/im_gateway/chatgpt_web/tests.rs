@@ -359,6 +359,135 @@ fn dom_content_accepts_short_text_replies() {
 }
 
 #[test]
+fn dom_artifact_notice_lists_behavior_button_images_and_archive() {
+    let artifacts = vec![
+        json!({"kind": "image", "label": "大模型竞争格局"}),
+        json!({"kind": "image", "label": "模型发布时间线"}),
+        json!({"kind": "archive", "label": "5 张图片 ZIP"}),
+        json!({"kind": "archive", "label": "5 张图片 ZIP"}),
+    ];
+
+    let text = interaction::append_dom_artifact_notice("打包下载：", &artifacts);
+
+    assert!(text.contains("ChatGPT Web 页面还提供了这些可点击下载项"));
+    assert!(text.contains("- 图片: 大模型竞争格局"));
+    assert!(text.contains("- 图片: 模型发布时间线"));
+    assert!(text.contains("- 压缩包: 5 张图片 ZIP"));
+    assert_eq!(text.matches("5 张图片 ZIP").count(), 1);
+}
+
+#[test]
+fn dom_extraction_source_scans_chatgpt_behavior_button_artifacts() {
+    let source = include_str!("interaction.rs");
+    let adapter_source = include_str!("../chatgpt_web.rs");
+
+    assert!(source.contains("button.behavior-btn"));
+    assert!(source.contains("chatgpt_behavior_button"));
+    assert!(source.contains("artifactCount"));
+    assert!(source.contains("append_dom_artifact_notice"));
+    assert!(source.contains("return 'image';"));
+    assert!(adapter_source.contains("download_behavior_artifacts_for_conversation"));
+    assert!(adapter_source.contains("downloadedArtifacts"));
+    assert!(adapter_source.contains("behavior_artifacts.json"));
+    assert!(adapter_source.contains("![{label}]({path})"));
+    assert!(include_str!("artifacts.rs").contains("chatgpt_behavior_button_image_download"));
+    assert!(include_str!("artifacts.rs").contains("wait_for_dialog_image_url"));
+}
+
+#[test]
+fn chatgpt_web_behavior_artifacts_merge_final_and_summary_without_duplicates() {
+    let waited = WaitedFinal {
+        final_message: json!({
+            "text": "done",
+            "artifacts": [
+                {"kind": "image", "label": "大模型竞争格局"},
+                {"kind": "archive", "label": "5 张图片 ZIP"}
+            ]
+        }),
+        summary: json!({
+            "artifacts": [
+                {"kind": "archive", "label": "5 张图片 ZIP"},
+                {"kind": "image", "label": "模型发布时间线"}
+            ]
+        }),
+        had_429_or_fallback: false,
+        all_texts: vec!["done".to_string()],
+    };
+
+    let artifacts = chatgpt_behavior_artifacts(&waited);
+
+    assert_eq!(artifacts.len(), 3);
+    assert_eq!(artifacts[0]["label"], "大模型竞争格局");
+    assert_eq!(artifacts[1]["label"], "5 张图片 ZIP");
+    assert_eq!(artifacts[2]["label"], "模型发布时间线");
+}
+
+#[test]
+fn chatgpt_web_downloaded_artifact_links_force_single_response_content() {
+    let mut response = "打包下载：".to_string();
+
+    append_downloaded_behavior_artifact_links(
+        &mut response,
+        &[
+            json!({
+                "kind": "image",
+                "label": "大模型竞争格局",
+                "path": "/tmp/chatgpt/ai_infographic_01_overview.png"
+            }),
+            json!({
+                "kind": "archive",
+                "label": "5 张图片 ZIP",
+                "path": "/tmp/chatgpt/ai_infographics_5_images.zip"
+            }),
+            json!({
+                "kind": "download_failures",
+                "failures": [
+                    {"kind": "image", "label": "模型发布时间线", "error": "dialog image URL not found"}
+                ]
+            }),
+        ],
+    );
+    let responses =
+        chatgpt_web_responses_for_delivery(&response, &["打包下载：".to_string()], true);
+
+    assert!(response.contains("![大模型竞争格局](/tmp/chatgpt/ai_infographic_01_overview.png)"));
+    assert!(response.contains("已自动下载 ChatGPT Web 附件"));
+    assert!(response.contains("[5 张图片 ZIP](/tmp/chatgpt/ai_infographics_5_images.zip)"));
+    assert!(response.contains("部分 ChatGPT Web 附件未能自动下载"));
+    assert!(response.contains("- 图片: 模型发布时间线 (dialog image URL not found)"));
+    assert_eq!(responses, vec![response]);
+}
+
+#[test]
+fn chatgpt_web_downloaded_artifact_links_reports_failures_without_attachments() {
+    let mut response = String::new();
+    append_downloaded_behavior_artifact_links(
+        &mut response,
+        &[json!({
+            "kind": "download_failures",
+            "failures": [
+                {"kind": "image", "label": "大模型竞争格局", "error": "dialog image URL not found"}
+            ]
+        })],
+    );
+
+    assert!(response.starts_with("部分 ChatGPT Web 附件未能自动下载："));
+    assert!(response.contains("- 图片: 大模型竞争格局 (dialog image URL not found)"));
+}
+
+#[test]
+fn chatgpt_web_behavior_download_filename_is_safe() {
+    assert_eq!(
+        super::artifacts::sanitize_behavior_download_filename("../a:b*c?.zip"),
+        "-a-b-c-.zip"
+    );
+    assert_eq!(
+        super::artifacts::sanitize_behavior_download_filename("   "),
+        "chatgpt-web-artifact"
+    );
+}
+
+#[test]
 fn dom_output_state_waits_for_generation_controls_to_finish() {
     assert_eq!(
         interaction::dom_output_in_progress_reason(&json!({

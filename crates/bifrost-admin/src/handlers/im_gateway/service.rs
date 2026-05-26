@@ -16,6 +16,46 @@ pub(super) struct PendingWeixinLogin {
 }
 
 #[derive(Clone)]
+pub(super) struct PendingFeishuSetup {
+    pub(super) device_code: String,
+    pub(super) interval_seconds: u64,
+    pub(super) expires_at_ms: u64,
+    pub(super) app_id: Option<String>,
+    pub(super) app_secret: Option<String>,
+    pub(super) owner_open_id: Option<String>,
+    pub(super) brand: FeishuSetupBrand,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FeishuSetupBrand {
+    Feishu,
+    Lark,
+}
+
+impl FeishuSetupBrand {
+    pub(super) fn accounts_base(self) -> &'static str {
+        match self {
+            Self::Feishu => "https://accounts.feishu.cn",
+            Self::Lark => "https://accounts.larksuite.com",
+        }
+    }
+
+    pub(super) fn open_base(self) -> &'static str {
+        match self {
+            Self::Feishu => "https://open.feishu.cn",
+            Self::Lark => "https://open.larksuite.com",
+        }
+    }
+
+    pub(super) fn provider_base_url(self) -> &'static str {
+        match self {
+            Self::Feishu => "https://open.feishu.cn/open-apis",
+            Self::Lark => "https://open.larksuite.com/open-apis",
+        }
+    }
+}
+
+#[derive(Clone)]
 pub(super) enum ImProviderClient {
     Feishu(Arc<crate::im_gateway::feishu::FeishuProvider>),
     Weixin(Arc<WeixinProvider>),
@@ -182,6 +222,7 @@ pub struct ImGatewayService {
     pub progress_registry: Arc<ImAgentProgressRegistry>,
     pub(super) mock_event_sinks: Arc<RwLock<HashMap<String, mpsc::UnboundedSender<ImEvent>>>>,
     pub(super) weixin_login_pending: Arc<RwLock<HashMap<String, PendingWeixinLogin>>>,
+    pub(super) feishu_setup_pending: Arc<RwLock<HashMap<String, PendingFeishuSetup>>>,
 }
 
 #[derive(Clone)]
@@ -243,6 +284,7 @@ impl ImGatewayService {
             progress_registry: Arc::new(ImAgentProgressRegistry::new()),
             mock_event_sinks: Arc::new(RwLock::new(HashMap::new())),
             weixin_login_pending: Arc::new(RwLock::new(HashMap::new())),
+            feishu_setup_pending: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 

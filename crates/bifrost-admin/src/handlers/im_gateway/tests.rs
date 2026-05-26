@@ -137,9 +137,10 @@ pub(super) fn online_notification_message_uses_provider_work_dir_override() {
         user_instructions: None,
     });
 
-    let message = build_online_notification_message(&provider);
+    let message = build_online_notification_message_with_device_name(&provider, "eden-macbook");
 
     assert!(message.starts_with("你好，Bifrost 助手上线了"));
+    assert!(message.contains("设备名称：eden-macbook"));
     assert!(message.contains("工作目录：/custom/im-provider-workdir"));
 }
 
@@ -151,9 +152,10 @@ pub(super) fn online_notification_message_falls_back_to_process_work_dir() {
         .to_string();
     let provider = test_provider();
 
-    let message = build_online_notification_message(&provider);
+    let message = build_online_notification_message_with_device_name(&provider, "eden-macbook");
 
     assert!(message.starts_with("你好，Bifrost 助手上线了"));
+    assert!(message.contains("设备名称：eden-macbook"));
     assert!(message.contains("工作目录："));
     assert!(message.contains(&cwd));
 }

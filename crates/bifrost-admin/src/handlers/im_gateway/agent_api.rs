@@ -936,6 +936,7 @@ pub(super) fn agent_config_response(
         .as_deref()
         .unwrap_or(default_base_instructions)
         .to_string();
+    let resolved_work_dir = config.resolve_work_dir().display().to_string();
     let mut value = serde_json::to_value(config).unwrap_or_else(|_| serde_json::json!({}));
     if let Some(obj) = value.as_object_mut() {
         obj.insert(
@@ -945,6 +946,10 @@ pub(super) fn agent_config_response(
         obj.insert(
             "effective_base_instructions".to_string(),
             serde_json::Value::String(effective_base_instructions),
+        );
+        obj.insert(
+            "resolved_work_dir".to_string(),
+            serde_json::Value::String(resolved_work_dir),
         );
     }
     value

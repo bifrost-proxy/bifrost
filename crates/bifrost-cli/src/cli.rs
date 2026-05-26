@@ -504,6 +504,10 @@ pub enum Commands {
             "  bifrost setting grant list\n",
             "  bifrost setting grant revoke --grant-id <grant-id>\n",
             "\n",
+            "  # Create/export the local remote-invoke SSH key for reusable access\n",
+            "  bifrost setting ssh-key create --label dev-mac --output ~/.bifrost/remote-device.key\n",
+            "  bifrost setting ssh-key status\n",
+            "\n",
             "Note: these commands never touch a remote device. To configure a\n",
             "remote machine, run the equivalent `bifrost setting ...` there via\n",
             "`bifrost remote exec -- bifrost setting ...`.",
@@ -1605,11 +1609,36 @@ pub enum MetricsCommands {
 pub enum SyncCommands {
     #[command(about = "Show sync status")]
     Status,
-    #[command(about = "Login to sync service")]
+    #[command(
+        about = "Login to sync service",
+        long_about = concat!(
+            "Login to the sync service.\n",
+            "\n",
+            "Without options, opens the browser login flow. For CI or headless\n",
+            "environments, pass a token directly. If --url is omitted, Bifrost\n",
+            "uses the configured sync remote URL, which defaults to the built-in\n",
+            "Bifrost provider.\n",
+            "\n",
+            "Get a token from:\n",
+            "  https://bifrost.bytedance.net/v4/sso/token-login\n",
+            "\n",
+            "EXAMPLES:\n",
+            "  bifrost sync login\n",
+            "  bifrost sync login --token \"$BIFROST_SYNC_TOKEN\"\n",
+            "  bifrost sync login --token \"$BIFROST_SYNC_TOKEN\" --url https://bifrost.bytedance.net",
+        )
+    )]
     Login {
-        #[arg(long, help = "Sync session token for non-interactive login")]
+        #[arg(
+            long,
+            help = "Sync session token for non-interactive login; get one at https://bifrost.bytedance.net/v4/sso/token-login"
+        )]
         token: Option<String>,
-        #[arg(long, value_hint = ValueHint::Url, help = "Remote sync URL for non-interactive login")]
+        #[arg(
+            long,
+            value_hint = ValueHint::Url,
+            help = "Remote sync URL for non-interactive login (default: configured sync remote URL, built-in provider if unchanged)"
+        )]
         url: Option<String>,
     },
     #[command(about = "Logout from sync service")]
