@@ -37,18 +37,13 @@ import {
   SettingOutlined,
 } from "@ant-design/icons";
 import { apiFetch } from "../../api/apiFetch";
-import Markdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import {
   EMPTY_TELEMETRY,
   PROMPT_CHIPS,
-  ProcessStepsBlock,
   STARTER_MESSAGES,
   dedupeThreads,
   eventToProcessStep,
   formatCurrentStateTag,
-  formatMessageTime,
-  resolveAgentMarkdownImageSrc,
   formatRunnerOptionLabel,
   formatRunnerTag,
   formatThreadSource,
@@ -73,11 +68,18 @@ import {
   type RunTelemetry,
   type SessionDetail,
 } from "./AgentChatSection.helpers";
+import { AgentChatMessageList } from "./AgentChatSection.messages";
 import { AgentChatSettingsModal, AgentThreadListCard } from "./AgentChatSection.panels";
 import { queueItemsFromEvent, type QueuedInput } from "./AgentChatSection.queue";
+import {
+  SelectedRunnerPill,
+  SlashRunnerPanel,
+  useRunnerCallHandler,
+  useSlashRunnerSelection,
+} from "./AgentChatSection.runnerCall";
 import { createAgentChatStyles } from "./AgentChatSection.styles";
 
-const { Text, Paragraph } = Typography;
+const { Text } = Typography;
 const { TextArea } = Input;
 const { useBreakpoint } = Grid;
 
@@ -108,6 +110,17 @@ export default function AgentChatSection() {
   const [runnerOptions, setRunnerOptions] = useState<RunnerOption[]>([
     { label: "Bifrost Agent", value: "bifrost_agent", adapter: "bifrost_agent" },
   ]);
+  const {
+    slashRunner,
+    setSlashRunner,
+    slashRunnerOptions,
+    showSlashRunnerPanel,
+  } = useSlashRunnerSelection({
+    draft,
+    running,
+    supplementSubmitting,
+    runnerOptions,
+  });
   const [planCollapsed, setPlanCollapsed] = useState(false);
   const [defaultWorkDir, setDefaultWorkDir] = useState("");
   const messagesScrollRef = useRef<HTMLDivElement>(null);
@@ -284,11 +297,39 @@ export default function AgentChatSection() {
         return;
       }
       const payload = (await response.json()) as { sessions?: AgentThreadSummary[] };
-      setThreads(dedupeThreads(payload.sessions || []));
+      const incoming = dedupeThreads(payload.sessions || []);
+      setThreads((prev) => {
+        const selectedLocal = prev.find((thread) =>
+          isSelectedThread(thread, sessionKey, historyPath, queryView),
+        );
+        if (
+          selectedLocal &&
+          !incoming.some((thread) =>
+            isSelectedThread(thread, sessionKey, historyPath, queryView),
+          )
+        ) {
+          return dedupeThreads([selectedLocal, ...incoming]);
+        }
+        return incoming;
+      });
     } catch {
       // Keep chat usable even if the session index is temporarily unavailable.
     }
-  }, []);
+  }, [historyPath, queryView, sessionKey]);
+
+  const setSearchParamsForActiveSession = useCallback(() => {
+    setSearchParams(
+      (prev) => {
+        prev.set("aiSection", "agent-chat");
+        prev.set("agentSection", "chat");
+        prev.set("session", sessionKey);
+        prev.set("view", "active");
+        prev.delete("historyPath");
+        return prev;
+      },
+      { replace: true },
+    );
+  }, [sessionKey, setSearchParams]);
 
   useEffect(() => {
     refreshThreads();
@@ -613,6 +654,7 @@ export default function AgentChatSection() {
     pendingInstantScrollRef.current = true;
     setMessages([]);
     setDraft("");
+    setSlashRunner(undefined);
     setTelemetry(EMPTY_TELEMETRY);
     setWorkDir(selectedWorkDir);
     setRunnerId(newChatRunnerId);
@@ -710,6 +752,7 @@ export default function AgentChatSection() {
           setRunning(false);
           setQueuedInputs([]);
           setDraft("");
+          setSlashRunner(undefined);
           pendingInstantScrollRef.current = true;
           setSearchParams(
             (prev) => {
@@ -858,6 +901,10 @@ export default function AgentChatSection() {
   const handleSend = async () => {
     const content = draft.trim();
     if (!content || supplementSubmitting) {
+      return;
+    }
+    if (slashRunner && !running) {
+      await handleRunnerCall(content, slashRunner);
       return;
     }
     if (running) {
@@ -1033,17 +1080,7 @@ export default function AgentChatSection() {
       });
       setHistoryPath(undefined);
       setQueuedInputs([]);
-      setSearchParams(
-        (prev) => {
-          prev.set("aiSection", "agent-chat");
-          prev.set("agentSection", "chat");
-          prev.set("session", sessionKey);
-          prev.set("view", "active");
-          prev.delete("historyPath");
-          return prev;
-        },
-        { replace: true },
-      );
+      setSearchParamsForActiveSession();
       refreshThreads();
     } catch (error) {
       const text = error instanceof Error ? error.message : "Agent run failed";
@@ -1062,6 +1099,55 @@ export default function AgentChatSection() {
       setRunning(false);
     }
   };
+
+  const handleRunnerCall = useRunnerCallHandler({
+    historyPath,
+    messages,
+    pendingInstantScrollRef,
+    refreshThreads,
+    runnerId,
+    runnerOptions,
+    sessionKey,
+    setDraft,
+    setHistoryPath,
+    setMessages,
+    setRunning,
+    setSearchParamsForActiveSession,
+    setSlashRunner,
+    setTelemetry,
+    setThreads,
+    workDir,
+  });
+
+  const handleOpenRunnerCallThread = useCallback(
+    (message: ChatMessage) => {
+      const runnerCall = message.runnerCall;
+      if (!runnerCall?.childSessionKey) {
+        return;
+      }
+      handleOpenThread({
+        session_key: runnerCall.childSessionKey,
+        status: "active",
+        running: runnerCall.status === "running",
+        state: runnerCall.status === "running" ? "running" : "idle",
+        title: `Run with ${runnerCall.targetRunnerLabel}`,
+        source: "runner_call",
+        start_time: Math.floor(message.timestamp || Date.now() / 1000),
+        last_active_time: Math.floor(Date.now() / 1000),
+        duration_secs: 0,
+        runner_id:
+          runnerCall.targetRunnerId === "bifrost_agent"
+            ? undefined
+            : runnerCall.targetRunnerId,
+        runner_type:
+          runnerCall.targetRunnerId === "bifrost_agent"
+            ? "bifrost_agent"
+            : runnerCall.targetAdapter || runnerCall.targetRunnerId,
+        work_dir: workDir || undefined,
+      });
+    },
+    [handleOpenThread, workDir],
+  );
 
   return (
     <div data-testid="agent-chat-section" style={styles.shell}>
@@ -1160,107 +1246,14 @@ export default function AgentChatSection() {
                   />
                 </div>
               ) : (
-              <Space direction="vertical" size={12} style={{ width: "100%" }}>
-                {messages.map((message) => {
-                  const isUser = message.role === "user";
-                  return (
-                    <div
-                      key={message.id}
-                      data-testid={`agent-chat-message-${message.role}`}
-                      style={{
-                        display: "flex",
-                        justifyContent: isUser ? "flex-end" : "flex-start",
-                      }}
-                    >
-                      <div
-                        style={{
-                          display: "flex",
-                          flexDirection: "row",
-                          alignItems: "flex-start",
-                          width: isUser ? "auto" : "100%",
-                          maxWidth: isUser ? (isCompact ? "100%" : "78%") : "100%",
-                        }}
-                      >
-                        <div
-                          style={{
-                            display: "flex",
-                            flexDirection: "column",
-                            flex: isUser ? "0 1 auto" : "1 1 auto",
-                            minWidth: 0,
-                            alignItems: isUser ? "flex-end" : "stretch",
-                          }}
-                        >
-                          <div
-                            data-testid={`agent-chat-message-bubble-${message.role}`}
-                            style={{
-                              width: isUser ? "auto" : "100%",
-                              border: "none",
-                              borderRadius: 12,
-                              padding: "10px 12px",
-                              background: isUser
-                                ? token.colorPrimaryBg
-                                : "transparent",
-                            }}
-                          >
-                            {!isUser && message.processSteps && message.processSteps.length > 0 && (
-                              <ProcessStepsBlock
-                                steps={message.processSteps}
-                                running={running && message.content === "Agent is running..."}
-                              />
-                            )}
-                            <Paragraph style={{ margin: 0 }}>
-                              {message.content === "Agent is running..." && running ? (
-                                <Text type="secondary" italic>
-                                  <LoadingOutlined style={{ marginRight: 6 }} />
-                                  Generating…
-                                </Text>
-                              ) : (
-                                <div className="agent-chat-markdown">
-                                  <Markdown
-                                    remarkPlugins={[remarkGfm]}
-                                    components={{
-                                      a: ({ href, children }) => (
-                                        <a
-                                          href={href}
-                                          target="_blank"
-                                          rel="noreferrer"
-                                        >
-                                          {children}
-                                        </a>
-                                      ),
-                                      img: ({ src, alt }) => (
-                                        <img
-                                          src={resolveAgentMarkdownImageSrc(src)}
-                                          alt={alt || ""}
-                                        />
-                                      ),
-                                    }}
-                                  >
-                                    {message.content}
-                                  </Markdown>
-                                </div>
-                              )}
-                            </Paragraph>
-                          </div>
-                          <Text
-                            type="secondary"
-                            title={formatMessageTime(message.timestamp)}
-                            data-testid="agent-chat-message-time"
-                            style={{
-                              display: "block",
-                              marginTop: 4,
-                              fontSize: 11,
-                              alignSelf: isUser ? "flex-end" : "flex-start",
-                            }}
-                          >
-                            {formatMessageTime(message.timestamp)}
-                          </Text>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </Space>
+                <AgentChatMessageList
+                  isCompact={isCompact}
+                  messages={messages}
+                  onOpenRunnerCallThread={handleOpenRunnerCallThread}
+                  running={running}
+                  styles={styles}
+                  token={token}
+                />
               )}
             </div>
             <div ref={messagesEndRef} />
@@ -1415,7 +1408,24 @@ export default function AgentChatSection() {
                   )}
                 </div>
               ) : null}
+              {showSlashRunnerPanel ? (
+                <SlashRunnerPanel
+                  options={slashRunnerOptions}
+                  styles={styles}
+                  onSelect={(option) => {
+                    setSlashRunner(option);
+                    setDraft("");
+                  }}
+                />
+              ) : null}
               <div style={styles.inputWrap}>
+                {slashRunner ? (
+                  <SelectedRunnerPill
+                    runner={slashRunner}
+                    styles={styles}
+                    onClear={() => setSlashRunner(undefined)}
+                  />
+                ) : null}
                 <TextArea
                   data-testid="agent-chat-input"
                   data-session-key={sessionKey}
@@ -1430,7 +1440,9 @@ export default function AgentChatSection() {
                   placeholder="Describe a task for the Agent..."
                   autoSize={{ minRows: 2, maxRows: 7 }}
                   style={{
-                    padding: "8px 56px 30px 14px",
+                    padding: slashRunner
+                      ? "42px 56px 30px 14px"
+                      : "8px 56px 30px 14px",
                     border: "none",
                     boxShadow: "none",
                     outline: "none",

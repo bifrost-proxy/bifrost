@@ -39,6 +39,8 @@ pub struct ImAgentSessionState {
     pub status: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub messages: Vec<ImAgentSessionMessage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_imported_contexts: Vec<ImImportedRunnerContext>,
     pub updated_at: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub updated_seq: u64,
@@ -51,6 +53,18 @@ pub struct ImAgentSessionMessage {
     pub content: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImImportedRunnerContext {
+    pub call_id: String,
+    pub source_session_key: String,
+    pub target_runner_id: String,
+    pub target_adapter: String,
+    pub user_message: String,
+    pub response: String,
+    pub created_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -220,6 +234,75 @@ pub fn metadata_from_state(state: &ImAgentSessionState) -> BTreeMap<String, Stri
     metadata
 }
 
+pub fn push_imported_context(
+    session_key: &str,
+    adapter: &str,
+    runner_id: Option<&str>,
+    context: ImImportedRunnerContext,
+) -> Result<(), String> {
+    let mut context = normalize_imported_context(context)?;
+    upsert_session_state(session_key, adapter, runner_id, |state| {
+        if state
+            .pending_imported_contexts
+            .iter()
+            .any(|item| item.call_id == context.call_id)
+        {
+            return;
+        }
+        if context.created_at == 0 {
+            context.created_at = now_millis();
+        }
+        state.pending_imported_contexts.push(context);
+    })
+    .map(|_| ())
+}
+
+pub fn take_imported_contexts(
+    session_key: &str,
+    adapter: &str,
+    runner_id: Option<&str>,
+) -> Result<Vec<ImImportedRunnerContext>, String> {
+    let mut imported = Vec::new();
+    update_store(|store| {
+        store.write_seq = store.write_seq.saturating_add(1);
+        let key = state_key(session_key, adapter, runner_id);
+        if let Some(state) = store.sessions.get_mut(&key) {
+            imported = std::mem::take(&mut state.pending_imported_contexts);
+            if !imported.is_empty() {
+                state.updated_at = now_millis();
+                state.updated_seq = store.write_seq;
+            }
+        }
+    })?;
+    Ok(imported)
+}
+
+pub fn render_imported_contexts(contexts: &[ImImportedRunnerContext]) -> Option<String> {
+    if contexts.is_empty() {
+        return None;
+    }
+    let mut rendered = String::from("## Imported Runner Results\n\n");
+    rendered.push_str(
+        "The following results were produced by user-triggered slash Runner calls in this conversation. Use them as current conversation context.\n\n",
+    );
+    for context in contexts {
+        rendered.push_str("### Runner Call ");
+        rendered.push_str(&context.call_id);
+        rendered.push('\n');
+        rendered.push_str("- Target Runner: ");
+        rendered.push_str(&context.target_runner_id);
+        rendered.push_str(" (");
+        rendered.push_str(&context.target_adapter);
+        rendered.push_str(")\n");
+        rendered.push_str("- User Request: ");
+        rendered.push_str(&context.user_message);
+        rendered.push_str("\n\nResult:\n");
+        rendered.push_str(&context.response);
+        rendered.push_str("\n\n");
+    }
+    Some(rendered)
+}
+
 fn update_store(update: impl FnOnce(&mut StoreData)) -> Result<(), String> {
     let lock = STORE_LOCK.get_or_init(|| Mutex::new(()));
     let _guard = lock.lock().map_err(|_| "session state lock poisoned")?;
@@ -354,10 +437,41 @@ fn normalize_state(state: &mut ImAgentSessionState) -> Result<(), String> {
             }
         })
         .collect();
+    state.pending_imported_contexts = std::mem::take(&mut state.pending_imported_contexts)
+        .into_iter()
+        .filter_map(|context| normalize_imported_context(context).ok())
+        .collect();
     if state.updated_at == 0 {
         state.updated_at = now_millis();
     }
     Ok(())
+}
+
+fn normalize_imported_context(
+    mut context: ImImportedRunnerContext,
+) -> Result<ImImportedRunnerContext, String> {
+    context.call_id = context.call_id.trim().to_string();
+    context.source_session_key = context.source_session_key.trim().to_string();
+    context.target_runner_id = context.target_runner_id.trim().to_string();
+    context.target_adapter = context.target_adapter.trim().to_string();
+    context.user_message = context.user_message.trim().to_string();
+    context.response = context.response.trim().to_string();
+    if context.call_id.is_empty() {
+        return Err("imported context call_id cannot be empty".to_string());
+    }
+    if context.source_session_key.is_empty() {
+        return Err("imported context source_session_key cannot be empty".to_string());
+    }
+    if context.target_runner_id.is_empty() {
+        return Err("imported context target_runner_id cannot be empty".to_string());
+    }
+    if context.target_adapter.is_empty() {
+        return Err("imported context target_adapter cannot be empty".to_string());
+    }
+    if context.user_message.is_empty() || context.response.is_empty() {
+        return Err("imported context user_message and response cannot be empty".to_string());
+    }
+    Ok(context)
 }
 
 fn normalize_optional(value: Option<String>) -> Option<String> {
@@ -637,5 +751,43 @@ mod tests {
 
         clear_session_state("im:provider:user").expect("clear");
         assert!(load_latest_session_state("im:provider:user", None, None).is_none());
+    }
+
+    #[test]
+    fn imported_contexts_are_pushed_rendered_and_consumed_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvGuard::new(dir.path());
+
+        push_imported_context(
+            "admin-chat-import",
+            "codex",
+            Some("codex"),
+            ImImportedRunnerContext {
+                call_id: "call-1".to_string(),
+                source_session_key: "admin-chat-import".to_string(),
+                target_runner_id: "web".to_string(),
+                target_adapter: "chatgpt_web".to_string(),
+                user_message: "summarize context".to_string(),
+                response: "context summary".to_string(),
+                created_at: 1,
+            },
+        )
+        .expect("push");
+
+        let state = load_session_state("admin-chat-import", "codex", Some("codex")).expect("state");
+        assert_eq!(state.pending_imported_contexts.len(), 1);
+        let rendered =
+            render_imported_contexts(&state.pending_imported_contexts).expect("rendered contexts");
+        assert!(rendered.contains("Imported Runner Results"));
+        assert!(rendered.contains("context summary"));
+
+        let consumed =
+            take_imported_contexts("admin-chat-import", "codex", Some("codex")).expect("take");
+        assert_eq!(consumed.len(), 1);
+        assert!(
+            take_imported_contexts("admin-chat-import", "codex", Some("codex"))
+                .expect("take again")
+                .is_empty()
+        );
     }
 }
