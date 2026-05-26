@@ -47,6 +47,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 port = int(sys.argv[1])
 log_path = sys.argv[2]
+# The release gates make the active-turn window deterministic: the test
+# verifies /status while the mock model request is intentionally blocked.
 default_guide_gate = threading.Event()
 multi_guide_gate = threading.Event()
 
