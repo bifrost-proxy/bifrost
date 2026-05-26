@@ -590,6 +590,11 @@ mod tests {
                 "www.doubao.com",
                 "/prefix/alice/user"
             ));
+            assert!(matcher.matches(
+                "https://www.doubao.com/alice/commerce/sale/subscription/entry/config/?from=e2e",
+                "www.doubao.com",
+                "/alice/commerce/sale/subscription/entry/config/?from=e2e"
+            ));
             assert!(!matcher.matches(
                 "https://www.doubao.com/bob/commerce/sale/subscription/entry/config/",
                 "www.doubao.com",
