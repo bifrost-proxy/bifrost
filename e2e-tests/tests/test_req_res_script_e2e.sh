@@ -23,6 +23,7 @@ export TEST_ID
 TEST_DATA_DIR="$PROJECT_DIR/.bifrost-test-req-res-script"
 PROXY_LOG_FILE="$TEST_DATA_DIR/proxy.log"
 MOCK_LOG_FILE="$TEST_DATA_DIR/mock.log"
+RULE_FIXTURE="$E2E_DIR/rules/request_modify/req_res_script.txt"
 PROXY_PID=""
 
 cleanup() {
@@ -118,12 +119,7 @@ start_proxy() {
     mkdir -p "$TEST_DATA_DIR"
 
     local rules_file="$TEST_DATA_DIR/req_res_script.txt"
-    cat > "$rules_file" <<RULES
-script-test.local host://127.0.0.1:${ECHO_HTTP_PORT}
-script-test.local reqScript://req_script
-script-test.local resScript://res_script
-script-test.local decode://decode_script
-RULES
+    sed "s/__ECHO_HTTP_PORT__/${ECHO_HTTP_PORT}/g" "$RULE_FIXTURE" > "$rules_file"
 
     local bifrost_bin="$PROJECT_DIR/target/release/bifrost"
     if [[ ! -x "$bifrost_bin" ]]; then
