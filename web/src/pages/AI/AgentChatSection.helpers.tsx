@@ -223,17 +223,94 @@ export function historyEventsToMessages(events: HistoryEvent[]): ChatMessage[] {
 export function sessionDetailToMessages(detail: SessionDetail): ChatMessage[] {
   return (detail.messages || [])
     .filter((message) => message.role === "user" || message.role === "assistant")
-    .map((message, index) => {
+    .map((message, index, sourceMessages) => {
       const role = message.role === "user" ? ("user" as const) : ("assistant" as const);
+      const runnerCall = inferPersistedRunnerCall(
+        detail.session_key,
+        role,
+        message.content || "",
+        sourceMessages[index + 1]?.content || "",
+      );
       return {
         id: `session-${detail.session_key}-${index}`,
         role,
-        content: message.content || "",
+        content: runnerCall?.content ?? message.content ?? "",
         timestamp: message.timestamp,
-        meta: role === "user" ? "You" : "Bifrost Agent",
+        meta: runnerCall ? "Runner call" : role === "user" ? "You" : "Bifrost Agent",
+        runnerCall: runnerCall?.meta,
       };
     })
     .filter((message) => message.content.trim().length > 0);
+}
+
+function inferPersistedRunnerCall(
+  sessionKey: string,
+  role: "user" | "assistant",
+  content: string,
+  nextContent: string,
+): { content: string; meta: RunnerCallMessageMeta } | undefined {
+  if (isRunnerCallThread({ session_key: sessionKey })) {
+    return undefined;
+  }
+  if (role === "user") {
+    const match = content.match(/^Run with ([^:]+):\s*([\s\S]*)$/);
+    if (!match) {
+      return undefined;
+    }
+    const targetRunnerId = match[1].trim();
+    if (!targetRunnerId) {
+      return undefined;
+    }
+    return {
+      content: match[2] || content,
+      meta: {
+        targetRunnerId,
+        targetRunnerLabel: targetRunnerId,
+        childSessionKey: `runner-call:${sessionKey}:${targetRunnerId}`,
+        status: inferPersistedRunnerCallStatus(targetRunnerId, nextContent),
+      },
+    };
+  }
+  const running = content.match(/^Runner `([^`]+)` is running\.\.\.$/);
+  if (running) {
+    const targetRunnerId = running[1].trim();
+    return {
+      content: "Runner is running...",
+      meta: {
+        targetRunnerId,
+        targetRunnerLabel: targetRunnerId,
+        childSessionKey: `runner-call:${sessionKey}:${targetRunnerId}`,
+        status: "running",
+      },
+    };
+  }
+  const finished = content.match(/^Runner `([^`]+)` completed this call\.\n\n([\s\S]*)$/);
+  if (finished) {
+    const targetRunnerId = finished[1].trim();
+    return {
+      content: finished[2] || content,
+      meta: {
+        targetRunnerId,
+        targetRunnerLabel: targetRunnerId,
+        childSessionKey: `runner-call:${sessionKey}:${targetRunnerId}`,
+        status: "success",
+      },
+    };
+  }
+  return undefined;
+}
+
+function inferPersistedRunnerCallStatus(
+  targetRunnerId: string,
+  assistantContent: string,
+): RunnerCallMessageMeta["status"] {
+  if (assistantContent === `Runner \`${targetRunnerId}\` is running...`) {
+    return "running";
+  }
+  if (assistantContent.startsWith(`Runner \`${targetRunnerId}\` completed this call.\n\n`)) {
+    return "success";
+  }
+  return "success";
 }
 
 export function isSelectedThread(
@@ -253,7 +330,7 @@ export function isSelectedThread(
 
 export function dedupeThreads(threads: AgentThreadSummary[]) {
   const bySession = new Map<string, AgentThreadSummary>();
-  for (const thread of threads) {
+  for (const thread of threads.filter((item) => !isRunnerCallThread(item))) {
     const existing = bySession.get(thread.session_key);
     if (!existing || threadRank(thread) > threadRank(existing)) {
       bySession.set(thread.session_key, thread);
@@ -262,6 +339,10 @@ export function dedupeThreads(threads: AgentThreadSummary[]) {
   return Array.from(bySession.values()).sort(
     (a, b) => (b.last_active_time || 0) - (a.last_active_time || 0),
   );
+}
+
+export function isRunnerCallThread(thread: Pick<AgentThreadSummary, "session_key">) {
+  return thread.session_key.startsWith("runner-call:");
 }
 
 export function threadRank(thread: AgentThreadSummary) {

@@ -63,6 +63,8 @@ Agent Chat 输入框支持输入 `/` 后选择一个不同 Runner。选择后输
 
 外部 Runner 在 `build_prompt` 前消费 pending context，并追加到 instructions 中。内置 Bifrost Agent 在 `/agent/chat` 取出 session 后消费 pending context，并追加为上下文消息。Slash Runner Call 的目标可以是外部 Runner，也可以是内置 Bifrost Agent；当目标是内置 Agent 时，后端使用独立的 `runner-call:<source>:bifrost_agent` 子会话执行，不切换当前会话默认 Runner。
 
+Runner Call 发起后，后端必须立即把 `Run with <Runner>` 用户消息和 `Runner <Runner> is running...` assistant 状态持久化到源会话。子 session 只作为内部执行容器，不出现在 Agent Chat 线程列表。页面刷新后应从源会话 detail 恢复 running 状态；调用完成后后端在同一源会话内把 running assistant 消息原地更新为完成结果。
+
 ## API 设计
 
 新增：
@@ -114,6 +116,7 @@ V1 使用 UI 当前展示的 `callerMessages` 作为 transcript 来源；这能�
 - 消息流中用户气泡显示 `Run with <runner>` chip 和用户输入。
 - assistant 区域显示目标 Runner 的过程步骤和最终输出。
 - 顶部当前 Runner tag 不变，表示当前会话默认 Runner 未切换。
+- 刷新页面后，源会话仍能恢复已持久化的 Runner Call 用户消息和 running/完成状态；`runner-call:*` 子会话不会作为新线程展示。
 
 ## 测试方案
 
@@ -122,12 +125,14 @@ V1 使用 UI 当前展示的 `callerMessages` 作为 transcript 来源；这能�
 - `session_state` 保存、读取、消费 imported context。
 - Runner context bundle 渲染 transcript 和用户请求。
 - Runner Call stream 请求缺少必要字段时返回 400。
+- Runner Call started/finished 状态持久化在源会话，并在完成时原地更新 running 消息。
 
 ### E2E/UI
 
 - Playwright 输入 `/`，选择 `codex`，确认 chip 展示。
 - 发送后断言请求到 `/chat/runner-calls/stream`，body 包含 `callerMessages`。
 - mock stream 返回结果后，消息流展示 Runner Call 和最终输出。
+- mock 线程列表返回 `runner-call:*` 子会话时，UI 不展示子线程，并保留源会话中的 running 状态。
 - 再发一条普通外部 Runner 消息，断言请求 prompt/instructions 含 imported context。
 
 ### human_tests
@@ -137,6 +142,7 @@ V1 使用 UI 当前展示的 `callerMessages` 作为 transcript 来源；这能�
 - TC-IMA-126：Slash Runner Call 正常路径。
 - TC-IMA-127：调用结果被下一轮当前 Runner 消费。
 - TC-IMA-128：选择 Runner 不改变当前会话默认 Runner。
+- TC-IMA-129：刷新页面后 Runner Call running 状态从后端持久化恢复，且不展示 `runner-call:*` 子线程。
 
 ## Review/Fix/Test 闭环方案
 

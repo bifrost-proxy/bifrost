@@ -549,6 +549,7 @@ async fn runner_call_stream_response(
         body.caller_runner_adapter.as_deref(),
     );
     tokio::spawn(async move {
+        let started_at = now_ms();
         let started = serde_json::json!({
             "eventType": "runner_call_started",
             "callId": call_id.clone(),
@@ -560,6 +561,16 @@ async fn runner_call_stream_response(
         let _ = send_ndjson_event(&tx, &started).await;
         let request_snapshot = request.clone();
         let raw_user_message = user_message.clone();
+        remember_runner_call_started_for_caller(
+            &service_agent_sessions,
+            &caller_scope,
+            &caller_session_key,
+            &call_id,
+            &target_runner_id,
+            &effective.settings.adapter,
+            &raw_user_message,
+            started_at,
+        );
         remember_external_cli_started_state(&request_snapshot, &effective.runner_id);
         match runtime.run(request).await {
             Ok(result) => {
@@ -633,6 +644,7 @@ fn builtin_runner_call_stream_response(
     let config = service.agent_config_store.load();
     let turn_tools = service.build_agent_tool_registry(config.default_message_channel.clone());
     tokio::spawn(async move {
+        let run_started_at = now_ms();
         let started = serde_json::json!({
             "eventType": "runner_call_started",
             "callId": input.call_id.clone(),
@@ -642,6 +654,16 @@ fn builtin_runner_call_stream_response(
             "targetAdapter": crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
         });
         let _ = send_ndjson_event(&tx, &started).await;
+        remember_runner_call_started_for_caller(
+            &agent_session_manager,
+            &input.caller_scope,
+            &input.caller_session_key,
+            &input.call_id,
+            crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+            crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+            &input.user_message,
+            run_started_at,
+        );
 
         let Some(mut session) = agent_session_manager.try_take_session_with_work_dir(
             &input.child_session_key,
@@ -672,7 +694,6 @@ fn builtin_runner_call_stream_response(
         let run_caller_scope = input.caller_scope.clone();
         let run_child_session_key = input.child_session_key.clone();
         let run_user_message = input.user_message.clone();
-        let run_started_at = now_ms();
         let run_agent_session_manager = agent_session_manager.clone();
         let mut run_task = tokio::spawn(async move {
             let mut mcp_manager = ImMcpManager::new(&config.mcp_servers).await;
@@ -998,6 +1019,171 @@ fn caller_runner_scope(
     )
 }
 
+fn runner_call_visible_user(target_runner_id: &str, raw_user_message: &str) -> String {
+    format!("Run with {}: {}", target_runner_id, raw_user_message.trim())
+}
+
+fn runner_call_running_message(target_runner_id: &str) -> String {
+    format!("Runner `{target_runner_id}` is running...")
+}
+
+fn runner_call_completed_message(target_runner_id: &str, response: &str) -> String {
+    format!(
+        "Runner `{}` completed this call.\n\n{}",
+        target_runner_id,
+        response.trim()
+    )
+}
+
+fn update_agent_runner_call_messages(
+    messages: &mut Vec<bifrost_agent::ChatMessage>,
+    visible_user: &str,
+    running_message: &str,
+    assistant_message: &str,
+) {
+    let user_index = messages
+        .iter()
+        .rposition(|message| {
+            message.role == "user" && message.content.as_deref() == Some(visible_user)
+        })
+        .unwrap_or_else(|| {
+            messages.push(bifrost_agent::ChatMessage::user(visible_user));
+            messages.len() - 1
+        });
+    if let Some(message) = messages.iter_mut().skip(user_index + 1).find(|message| {
+        message.role == "assistant"
+            && matches!(
+                message.content.as_deref(),
+                Some(content) if content == running_message || content.starts_with("Runner `")
+            )
+    }) {
+        message.content = Some(assistant_message.to_string());
+        return;
+    }
+    messages.push(bifrost_agent::ChatMessage::assistant(assistant_message));
+}
+
+fn update_session_runner_call_messages(
+    messages: &mut Vec<crate::im_gateway::session_state::ImAgentSessionMessage>,
+    visible_user: &str,
+    running_message: &str,
+    assistant_message: &str,
+    user_timestamp: u64,
+    assistant_timestamp: u64,
+) {
+    let user_index = messages
+        .iter()
+        .rposition(|message| message.role == "user" && message.content == visible_user)
+        .unwrap_or_else(|| {
+            messages.push(crate::im_gateway::session_state::ImAgentSessionMessage {
+                role: "user".to_string(),
+                content: visible_user.to_string(),
+                timestamp: Some(user_timestamp),
+            });
+            messages.len() - 1
+        });
+    if let Some(message) = messages.iter_mut().skip(user_index + 1).find(|message| {
+        message.role == "assistant"
+            && (message.content == running_message || message.content.starts_with("Runner `"))
+    }) {
+        message.content = assistant_message.to_string();
+        message.timestamp = Some(assistant_timestamp);
+        return;
+    }
+    messages.push(crate::im_gateway::session_state::ImAgentSessionMessage {
+        role: "assistant".to_string(),
+        content: assistant_message.to_string(),
+        timestamp: Some(assistant_timestamp),
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn remember_runner_call_started_for_caller(
+    agent_session_manager: &std::sync::Arc<bifrost_agent::AgentSessionManager>,
+    caller_scope: &(String, Option<String>, String),
+    source_session_key: &str,
+    call_id: &str,
+    target_runner_id: &str,
+    target_adapter: &str,
+    raw_user_message: &str,
+    started_at: u64,
+) {
+    let visible_user = runner_call_visible_user(target_runner_id, raw_user_message);
+    let running_message = runner_call_running_message(target_runner_id);
+    let (caller_adapter, caller_runner_id, _) = caller_scope;
+    if caller_adapter == crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER {
+        if let Some(mut session) =
+            agent_session_manager.try_take_session_with_work_dir(source_session_key, None)
+        {
+            update_agent_runner_call_messages(
+                &mut session.history,
+                &visible_user,
+                &running_message,
+                &running_message,
+            );
+            session.last_active_at = started_at / 1000;
+            agent_session_manager.return_session(session);
+        } else if let Err(error) = crate::im_gateway::session_state::upsert_session_state(
+            source_session_key,
+            caller_adapter,
+            None,
+            |state| {
+                state.title.get_or_insert_with(|| visible_user.clone());
+                state.last_user_message = Some(visible_user.clone());
+                state.last_response = Some(running_message.clone());
+                state.status = Some("running".to_string());
+                update_session_runner_call_messages(
+                    &mut state.messages,
+                    &visible_user,
+                    &running_message,
+                    &running_message,
+                    started_at / 1000,
+                    started_at / 1000,
+                );
+            },
+        ) {
+            tracing::warn!(
+                session_key = %source_session_key,
+                call_id = %call_id,
+                target_runner_id = %target_runner_id,
+                error = %error,
+                "failed to persist started runner call for built-in caller"
+            );
+        }
+        return;
+    }
+    if let Err(error) = crate::im_gateway::session_state::upsert_session_state(
+        source_session_key,
+        caller_adapter,
+        caller_runner_id.as_deref(),
+        |state| {
+            state.title.get_or_insert_with(|| visible_user.clone());
+            state.last_user_message = Some(visible_user.clone());
+            state.last_response = Some(running_message.clone());
+            state.status = Some("running".to_string());
+            update_session_runner_call_messages(
+                &mut state.messages,
+                &visible_user,
+                &running_message,
+                &running_message,
+                started_at / 1000,
+                started_at / 1000,
+            );
+        },
+    ) {
+        tracing::warn!(
+            session_key = %source_session_key,
+            adapter = %caller_adapter,
+            runner_id = ?caller_runner_id,
+            call_id = %call_id,
+            target_runner_id = %target_runner_id,
+            target_adapter = %target_adapter,
+            error = %error,
+            "failed to persist started runner call for external caller"
+        );
+    }
+}
+
 fn remember_runner_call_for_caller(
     agent_session_manager: &std::sync::Arc<bifrost_agent::AgentSessionManager>,
     caller_scope: &(String, Option<String>, String),
@@ -1054,11 +1240,9 @@ fn remember_runner_call_result_for_caller(
     if response.is_empty() {
         return;
     }
-    let visible = format!(
-        "Runner `{}` completed this call.\n\n{}",
-        target_runner_id, response
-    );
-    let visible_user = format!("Run with {}: {}", target_runner_id, raw_user_message.trim());
+    let visible = runner_call_completed_message(target_runner_id, response);
+    let visible_user = runner_call_visible_user(target_runner_id, raw_user_message);
+    let running_message = runner_call_running_message(target_runner_id);
     let imported = crate::im_gateway::session_state::ImImportedRunnerContext {
         call_id: call_id.to_string(),
         source_session_key: source_session_key.to_string(),
@@ -1073,12 +1257,12 @@ fn remember_runner_call_result_for_caller(
         if let Some(mut session) =
             agent_session_manager.try_take_session_with_work_dir(source_session_key, None)
         {
-            session
-                .history
-                .push(bifrost_agent::ChatMessage::user(&visible_user));
-            session
-                .history
-                .push(bifrost_agent::ChatMessage::assistant(&visible));
+            update_agent_runner_call_messages(
+                &mut session.history,
+                &visible_user,
+                &running_message,
+                &visible,
+            );
             session.last_active_at = finished_at / 1000;
             agent_session_manager.return_session(session);
         } else if let Err(error) = crate::im_gateway::session_state::push_imported_context(
@@ -1114,20 +1298,16 @@ fn remember_runner_call_result_for_caller(
         caller_adapter,
         caller_runner_id.as_deref(),
         |state| {
-            state
-                .messages
-                .push(crate::im_gateway::session_state::ImAgentSessionMessage {
-                    role: "user".to_string(),
-                    content: visible_user,
-                    timestamp: Some(started_at / 1000),
-                });
-            state
-                .messages
-                .push(crate::im_gateway::session_state::ImAgentSessionMessage {
-                    role: "assistant".to_string(),
-                    content: visible,
-                    timestamp: Some(finished_at / 1000),
-                });
+            state.last_response = Some(visible.clone());
+            state.status = Some("succeeded".to_string());
+            update_session_runner_call_messages(
+                &mut state.messages,
+                &visible_user,
+                &running_message,
+                &visible,
+                started_at / 1000,
+                finished_at / 1000,
+            );
         },
     ) {
         tracing::warn!(
@@ -1748,6 +1928,72 @@ mod tests {
         assert_eq!(
             target.adapter(),
             crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER
+        );
+    }
+
+    #[test]
+    fn runner_call_visible_messages_stay_on_source_thread() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
+        let manager = std::sync::Arc::new(bifrost_agent::AgentSessionManager::new(60));
+        let caller_scope = (
+            "codex".to_string(),
+            Some("codex".to_string()),
+            "codex".to_string(),
+        );
+
+        remember_runner_call_started_for_caller(
+            &manager,
+            &caller_scope,
+            "source-session",
+            "call-visible",
+            crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+            crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+            "summarize this context",
+            1_000,
+        );
+        let running = crate::im_gateway::session_state::load_session_state(
+            "source-session",
+            "codex",
+            Some("codex"),
+        )
+        .expect("running source state");
+        assert_eq!(running.status.as_deref(), Some("running"));
+        assert_eq!(running.messages.len(), 2);
+        assert_eq!(running.messages[0].role, "user");
+        assert_eq!(
+            running.messages[0].content,
+            "Run with bifrost_agent: summarize this context"
+        );
+        assert_eq!(running.messages[1].role, "assistant");
+        assert_eq!(
+            running.messages[1].content,
+            "Runner `bifrost_agent` is running..."
+        );
+
+        remember_runner_call_result_for_caller(
+            &manager,
+            &caller_scope,
+            "source-session",
+            "call-visible",
+            crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+            crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+            "summarize this context",
+            "done",
+            1_000,
+            2_000,
+        );
+        let finished = crate::im_gateway::session_state::load_session_state(
+            "source-session",
+            "codex",
+            Some("codex"),
+        )
+        .expect("finished source state");
+        assert_eq!(finished.status.as_deref(), Some("succeeded"));
+        assert_eq!(finished.messages.len(), 2);
+        assert_eq!(
+            finished.messages[1].content,
+            "Runner `bifrost_agent` completed this call.\n\ndone"
         );
     }
 

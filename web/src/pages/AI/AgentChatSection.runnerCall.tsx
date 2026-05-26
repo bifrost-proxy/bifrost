@@ -7,14 +7,16 @@ import {
   type MutableRefObject,
   type SetStateAction,
 } from "react";
-import { Button, Tag, Typography, message as antdMessage } from "antd";
-import { CloseOutlined, RobotOutlined } from "@ant-design/icons";
+import { Button, Tag, Tooltip, Typography, message as antdMessage } from "antd";
+import { CloseOutlined, ExportOutlined, RobotOutlined } from "@ant-design/icons";
 import {
+  dedupeThreads,
   eventToProcessStep,
   reduceTelemetry,
   runRunnerCallStream,
   selectedRunnerAdapter,
   stringFrom,
+  type AgentThreadSummary,
   type ChatMessage,
   type RunnerCallMessageMeta,
   type RunnerOption,
@@ -83,6 +85,7 @@ export function useRunnerCallHandler({
   setSearchParamsForActiveSession,
   setSlashRunner,
   setTelemetry,
+  setThreads,
   workDir,
 }: {
   historyPath?: string;
@@ -99,6 +102,7 @@ export function useRunnerCallHandler({
   setSearchParamsForActiveSession: () => void;
   setSlashRunner: Dispatch<SetStateAction<RunnerOption | undefined>>;
   setTelemetry: Dispatch<SetStateAction<RunTelemetry>>;
+  setThreads: Dispatch<SetStateAction<AgentThreadSummary[]>>;
   workDir: string;
 }) {
   return useCallback(
@@ -140,7 +144,33 @@ export function useRunnerCallHandler({
       setMessages((prev) => [...prev, userMessage, assistantMessage]);
       setDraft("");
       setSlashRunner(undefined);
+      setSearchParamsForActiveSession();
       setRunning(true);
+      setThreads((prev) => {
+        const now = Math.floor(Date.now() / 1000);
+        const fallbackTitle =
+          content.length > 40 ? `${content.slice(0, 40)}...` : content;
+        return dedupeThreads([
+          {
+            session_key: sessionKey,
+            status: "active",
+            running: true,
+            state: "running",
+            title: fallbackTitle,
+            source: "admin-api",
+            start_time: now,
+            last_active_time: now,
+            duration_secs: 0,
+            runner_id: runnerId === "bifrost_agent" ? undefined : runnerId,
+            runner_type:
+              runnerId === "bifrost_agent"
+                ? "bifrost_agent"
+                : selectedRunnerAdapter(runnerOptions, runnerId),
+            work_dir: workDir || undefined,
+          },
+          ...prev.filter((thread) => thread.session_key !== sessionKey),
+        ]);
+      });
       setTelemetry({
         phase: "running",
         status: {
@@ -219,6 +249,11 @@ export function useRunnerCallHandler({
                         ? { ...message.runnerCall, status: "success" }
                         : message.runnerCall,
                     }
+                  : message.id === userMessage.id && message.runnerCall
+                    ? {
+                        ...message,
+                        runnerCall: { ...message.runnerCall, status: "success" },
+                      }
                   : message,
               ),
             );
@@ -244,6 +279,11 @@ export function useRunnerCallHandler({
                     ? { ...message.runnerCall, status: "failed" }
                     : message.runnerCall,
                 }
+              : message.id === userMessage.id && message.runnerCall
+                ? {
+                    ...message,
+                    runnerCall: { ...message.runnerCall, status: "failed" },
+                  }
               : message,
           ),
         );
@@ -267,16 +307,19 @@ export function useRunnerCallHandler({
       setSearchParamsForActiveSession,
       setSlashRunner,
       setTelemetry,
+      setThreads,
       workDir,
     ],
   );
 }
 
 export function RunnerCallChip({
+  onOpenThread,
   role,
   runnerCall,
   style,
 }: {
+  onOpenThread?: () => void;
   role: ChatMessage["role"];
   runnerCall: RunnerCallMessageMeta;
   style: CSSProperties;
@@ -299,6 +342,26 @@ export function RunnerCallChip({
       >
         {runnerCall.status}
       </Tag>
+      {onOpenThread ? (
+        <Tooltip title="Open child thread">
+          <button
+            type="button"
+            data-testid="agent-chat-runner-call-open-child"
+            onClick={onOpenThread}
+            style={{
+              border: 0,
+              background: "transparent",
+              color: "inherit",
+              cursor: "pointer",
+              display: "inline-flex",
+              alignItems: "center",
+              padding: 0,
+            }}
+          >
+            <ExportOutlined />
+          </button>
+        </Tooltip>
+      ) : null}
     </div>
   );
 }

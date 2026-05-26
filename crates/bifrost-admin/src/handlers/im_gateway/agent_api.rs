@@ -148,6 +148,9 @@ pub(super) async fn handle_agent(
         // Add running turn sessions. These are not present in list_sessions()
         // because the turn loop temporarily takes exclusive ownership.
         for s in running_turns {
+            if is_runner_call_session_key(&s.session_key) {
+                continue;
+            }
             let info = active_info_by_key.get(&s.session_key);
             let duration_secs = s.updated_at.saturating_sub(s.started_at);
             unified.push(serde_json::json!({
@@ -175,6 +178,9 @@ pub(super) async fn handle_agent(
 
         // Add idle in-memory sessions.
         for s in active_sessions {
+            if is_runner_call_session_key(&s.session_key) {
+                continue;
+            }
             if running_keys.contains(&s.session_key) {
                 continue;
             }
@@ -213,6 +219,9 @@ pub(super) async fn handle_agent(
                 .as_deref()
                 .unwrap_or(&parsed_key)
                 .to_string();
+            if is_runner_call_session_key(&session_key) {
+                continue;
+            }
             if active_keys.contains(&session_key) {
                 continue; // skip duplicate
             }
@@ -247,6 +256,9 @@ pub(super) async fn handle_agent(
         // in the IM Gateway session-state store, so the Web UI can keep the
         // thread visible after the stream finishes or the page refreshes.
         for state in crate::im_gateway::session_state::list_session_states() {
+            if is_runner_call_session_key(&state.session_key) {
+                continue;
+            }
             if active_keys.contains(&state.session_key) {
                 continue;
             }
@@ -273,11 +285,12 @@ pub(super) async fn handle_agent(
                 state.status.as_deref(),
                 Some("failed" | "stopped" | "timed_out")
             );
+            let running = state.status.as_deref() == Some("running");
             unified.push(serde_json::json!({
                 "session_key": state.session_key,
-                "status": "ended",
-                "running": false,
-                "state": if failed { "failed" } else { "ended" },
+                "status": if running { "active" } else { "ended" },
+                "running": running,
+                "state": if running { "running" } else if failed { "failed" } else { "ended" },
                 "source": "admin-api",
                 "work_dir": state.work_dir,
                 "turns": turn_count,
@@ -309,8 +322,11 @@ pub(super) async fn handle_agent(
         });
         dedupe_unified_sessions_by_key(&mut unified);
 
-        let active_count = active_keys.len();
-        let history_count = unified.len() - active_count;
+        let active_count = unified
+            .iter()
+            .filter(|item| item.get("status").and_then(|value| value.as_str()) == Some("active"))
+            .count();
+        let history_count = unified.len().saturating_sub(active_count);
 
         return json_response(&serde_json::json!({
             "sessions": unified,
@@ -1239,6 +1255,10 @@ fn dedupe_unified_sessions_by_key(unified: &mut Vec<serde_json::Value>) {
     });
 }
 
+fn is_runner_call_session_key(session_key: &str) -> bool {
+    session_key.starts_with("runner-call:")
+}
+
 fn history_session_detail(session_key: &str) -> Option<bifrost_agent::SessionDetail> {
     let data_dir = bifrost_agent::config::agent_home_dir();
     let files = bifrost_agent::persistence::list_conversations(&data_dir, Some(session_key));
@@ -1466,6 +1486,14 @@ mod tests {
         assert_eq!(sessions[0]["session_key"], "same-thread");
         assert_eq!(sessions[0]["history_path"], "/tmp/newer.jsonl");
         assert_eq!(sessions[1]["session_key"], "other-thread");
+    }
+
+    #[test]
+    fn runner_call_child_session_keys_are_internal() {
+        assert!(is_runner_call_session_key(
+            "runner-call:admin-chat-1:bifrost_agent"
+        ));
+        assert!(!is_runner_call_session_key("admin-chat-1"));
     }
 
     struct AgentApiEnvGuard {

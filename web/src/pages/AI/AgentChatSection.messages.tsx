@@ -16,12 +16,14 @@ const { Text, Paragraph } = Typography;
 export function AgentChatMessageList({
   isCompact,
   messages,
+  onOpenRunnerCallThread,
   running,
   styles,
   token,
 }: {
   isCompact: boolean;
   messages: ChatMessage[];
+  onOpenRunnerCallThread?: (message: ChatMessage) => void;
   running: boolean;
   styles: Record<string, CSSProperties>;
   token: {
@@ -73,6 +75,11 @@ export function AgentChatMessageList({
                     <RunnerCallChip
                       role={message.role}
                       runnerCall={message.runnerCall}
+                      onOpenThread={
+                        message.runnerCall.childSessionKey && onOpenRunnerCallThread
+                          ? () => onOpenRunnerCallThread(message)
+                          : undefined
+                      }
                       style={styles.runnerCallChip}
                     />
                   ) : null}

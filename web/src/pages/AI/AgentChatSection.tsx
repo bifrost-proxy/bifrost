@@ -298,11 +298,25 @@ export default function AgentChatSection() {
         return;
       }
       const payload = (await response.json()) as { sessions?: AgentThreadSummary[] };
-      setThreads(dedupeThreads(payload.sessions || []));
+      const incoming = dedupeThreads(payload.sessions || []);
+      setThreads((prev) => {
+        const selectedLocal = prev.find((thread) =>
+          isSelectedThread(thread, sessionKey, historyPath, queryView),
+        );
+        if (
+          selectedLocal &&
+          !incoming.some((thread) =>
+            isSelectedThread(thread, sessionKey, historyPath, queryView),
+          )
+        ) {
+          return dedupeThreads([selectedLocal, ...incoming]);
+        }
+        return incoming;
+      });
     } catch {
       // Keep chat usable even if the session index is temporarily unavailable.
     }
-  }, []);
+  }, [historyPath, queryView, sessionKey]);
 
   const setSearchParamsForActiveSession = useCallback(() => {
     setSearchParams(
@@ -1102,8 +1116,39 @@ export default function AgentChatSection() {
     setSearchParamsForActiveSession,
     setSlashRunner,
     setTelemetry,
+    setThreads,
     workDir,
   });
+
+  const handleOpenRunnerCallThread = useCallback(
+    (message: ChatMessage) => {
+      const runnerCall = message.runnerCall;
+      if (!runnerCall?.childSessionKey) {
+        return;
+      }
+      handleOpenThread({
+        session_key: runnerCall.childSessionKey,
+        status: "active",
+        running: runnerCall.status === "running",
+        state: runnerCall.status === "running" ? "running" : "idle",
+        title: `Run with ${runnerCall.targetRunnerLabel}`,
+        source: "runner_call",
+        start_time: Math.floor(message.timestamp || Date.now() / 1000),
+        last_active_time: Math.floor(Date.now() / 1000),
+        duration_secs: 0,
+        runner_id:
+          runnerCall.targetRunnerId === "bifrost_agent"
+            ? undefined
+            : runnerCall.targetRunnerId,
+        runner_type:
+          runnerCall.targetRunnerId === "bifrost_agent"
+            ? "bifrost_agent"
+            : runnerCall.targetAdapter || runnerCall.targetRunnerId,
+        work_dir: workDir || undefined,
+      });
+    },
+    [handleOpenThread, workDir],
+  );
 
   return (
     <div data-testid="agent-chat-section" style={styles.shell}>
@@ -1205,6 +1250,7 @@ export default function AgentChatSection() {
                 <AgentChatMessageList
                   isCompact={isCompact}
                   messages={messages}
+                  onOpenRunnerCallThread={handleOpenRunnerCallThread}
                   running={running}
                   styles={styles}
                   token={token}
