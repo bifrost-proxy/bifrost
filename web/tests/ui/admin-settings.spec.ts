@@ -603,6 +603,49 @@ test("AI 一级页整合 Agent 子导航并按 URL 切换独立编辑卡片", as
   await expect(page.getByTestId("agent-settings-section-runtime")).toBeVisible();
 });
 
+test("AI Agent Chat section 展示聊天工作台并支持真实流式发送", async ({ page }) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ sessions: [] }),
+    });
+  });
+  await page.route("**/_bifrost/api/agent/chat/stream", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "text/event-stream",
+      body:
+        'event: run_started\ndata: {"eventType":"run_started"}\n\n' +
+        'event: assistant_delta\ndata: {"eventType":"assistant_delta","content":"Streaming response"}\n\n' +
+        'event: run_finished\ndata: {"eventType":"run_finished","response":"API run complete"}\n\n',
+    });
+  });
+  await openPage(page, "ai?aiSection=agent-chat&agentSection=chat");
+
+  await expect(page.getByTestId("ai-nav-agent-chat")).toHaveAttribute(
+    "aria-current",
+    "true",
+  );
+  await expect(page.getByTestId("agent-chat-section")).toBeVisible();
+  await expect(page.getByTestId("agent-chat-info")).toContainText(
+    "Streaming Agent workspace",
+  );
+  await expect(page.getByTestId("agent-chat-status")).toBeVisible();
+
+  const input = page.getByTestId("agent-chat-input");
+  await input.fill("Create a safe UI implementation plan");
+  await page.getByTestId("agent-chat-send").click();
+
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Create a safe UI implementation plan",
+  );
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "API run complete",
+  );
+  await expect(input).toHaveValue("");
+});
+
 test("AI Agent Session 详情默认展示 Messages Tab 且内容区可真实滚动", async ({ page }) => {
   await page.setViewportSize({ width: 1180, height: 520 });
 
@@ -775,6 +818,8 @@ test("AI Agent Sessions 列表支持点击 title 或整行进入详情", async (
           {
             session_key: activeSessionKey,
             status: "active",
+            running: false,
+            state: "idle",
             source: "api",
             work_dir: "/tmp/agent-ui",
             turns: 2,
@@ -887,6 +932,12 @@ test("AI Agent Sessions 列表支持点击 title 或整行进入详情", async (
 
   await openPage(page, "ai?aiSection=agent-sessions&agentSection=sessions");
   await expect(page.locator(".anticon-eye")).toHaveCount(0);
+  await expect(
+    page.getByTestId("agent-session-row").filter({ hasText: "Clickable active title" }),
+  ).not.toContainText("Running");
+  await expect(
+    page.getByTestId("agent-session-row").filter({ hasText: "Clickable active title" }),
+  ).toContainText("Active");
   await page
     .getByTestId("agent-session-row")
     .filter({ hasText: "Clickable active title" })

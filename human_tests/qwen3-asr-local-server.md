@@ -634,6 +634,31 @@
 - 重启后旧进程留下的 `last_status=running` 对外显示为 `interrupted`，不再误导为当前仍有 Daily Agent 正在跑。
 - Run Results 中未索引 report 行的 `runner` 展示任务绑定的 runner（如 `web`），`last_run_id` 保持 `filesystem-scan`，用于区分“文件扫描补齐 metadata”与真实执行 run id。
 
+### TC-QASR-24 Daily Agent 大 prompt 使用 ChatGPT Web 原生剪贴板投递
+
+操作步骤：
+
+1. 对默认目录任务或等价测试任务启用 Daily Agent，配置 `runner=web`，并确保 ChatGPT Web runner 已登录。
+2. 准备包含 `AGENTS.md`、daily markdown 和历史 report 的大 prompt，使 run artifact 中的 `prompt.md` 超过 120 字符，建议覆盖 20KB 以上场景。
+3. 触发 Daily Agent：
+   ```bash
+   curl -sS -X POST 'http://127.0.0.1:9900/_bifrost/api/asr/tasks/<task_id>/daily-agent/run?force=true'
+   ```
+4. 检查对应 ChatGPT Web run 目录的 `prompt.md`、`result.json`、`failure_diagnostics.json` 和服务日志。
+5. 执行代码级回归，确认阈值、发送按钮轮询和平台粘贴快捷键：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin composer_text_injection --lib
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin native_clipboard_paste_uses_platform_modifier --lib
+   ```
+
+预期结果：
+
+- 大 prompt 不通过 CDP `Input.insertText` 或完整 `Runtime.evaluate` 注入。
+- ChatGPT Web adapter 通过系统剪贴板和浏览器原生粘贴快捷键提交大文本，日志可见 `native clipboard paste path`。
+- ChatGPT 把大文本上传成粘贴文件时，composer 没有正文是正常状态；adapter 不采样 composer 文本。
+- 粘贴后持续轮询发送按钮是否变为可发送状态，按钮可用后立即继续；长文档上传/解析慢时不走 Enter fallback 提前误发。
+- Daily Agent run 不因 composer 注入超时失败，成功等待 `f/conversation` handoff、最终回复和 report 写入。
+
 ## 清理步骤
 
 - 停止测试启动的 `asr-server` 进程。
@@ -693,3 +718,4 @@
 | 2026-05-21 | TC-QASR-21 / CLI ASR status 管道关闭回归 | `cargo test -p bifrost-cli asr_status_output --lib`；`BIFROST_QWEN3_ASR_E2E_ONLINE=0 bash e2e-tests/tests/test_qwen3_asr_local_server.sh` | PASS：单测覆盖 stdout `BrokenPipe` 被视为下游管道关闭且其它 IO 错误继续返回；离线结构 E2E 在当前平台通过，未下载模型、未启动 ASR server。 |
 | 2026-05-22 | TC-QASR-22 / 默认目录真实重启恢复 | `cargo build --bin bifrost`；`./target/debug/bifrost stop`；`BIFROST_DATA_DIR="$HOME/.bifrost" ./target/debug/bifrost start -p 9900 --host 0.0.0.0 --no-system-proxy --daemon`；查询 `/api/asr/tasks/76612de33e9740bc92440ce64a98a4cb` 与 `files.json` | PASS：重启前任务有 71 条 `managed ASR server start failed: Qwen3-ASR service is busy`；重启后自动恢复为 `pending=71 failed=0 running=true`，首个文件进入 `processing`，`chunk_metrics` 最近记录均为 `runner=reuse_server status=ok`，`files.json` 当前 `error_count=0 busy_errors=0`；补充单测验证恢复可重试失败时 task 顶层 `last_error` 会同步清空，非可重试失败仍保留错误。 |
 | 2026-05-22 | TC-QASR-23 / Daily Agent incomplete ASR gate 与未索引 report runner 展示 | `cargo test -p bifrost-admin daily_agent --lib`；默认 9900 查询 `/daily-agent` 和 `/daily-agent/runs` | PASS：单测覆盖 ASR summary 存在 pending/failed/partial/failed chunks 时不允许 after_asr_run 自动触发、stale running 对外转 interrupted、未索引 report 使用任务绑定 runner；重启最新二进制后默认 9900 显示 `last_run.status=interrupted`，2026-05-18/19 `last_run_id=filesystem-scan` 且 `runner=web`。 |
+| 2026-05-26 | TC-QASR-24 / Daily Agent 大 prompt 原生剪贴板投递 | `cargo build --bin bifrost`；`BIFROST_DATA_DIR=$HOME/.bifrost ./target/debug/bifrost start -p 9900 --host 0.0.0.0 --no-system-proxy --daemon`；`./target/debug/bifrost -p 9900 agent run --runner web --session chatgpt-web-native-clipboard-no-sample-20260526 --json "$(cat /Users/eden/.bifrost/asr/data/text/76612de33e9740bc92440ce64a98a4cb/.daily/2026-05-19.md)"`；`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin composer_text_injection --lib`；`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin native_clipboard_paste_uses_platform_modifier --lib` | PASS：阈值保持 120 字符，120 以内走 `Input.insertText`，121 及以上走 `NativeClipboardPaste`；macOS 粘贴 modifier 为 Meta。真实默认目录 ChatGPT Web live run 使用 2026-05-19 daily Markdown 生成 457840 字节 prompt，run `1779727870753-c7feafc8-3173-43c8-8462-014e2b7409b1` 成功，日志 `/tmp/bifrost-chatgpt-web-no-sample-20260526005110.log` 返回 `收到文件《粘贴的文本 (1)(3).txt》`；这验证了粘贴完成后 ChatGPT 文件化且 composer 无正文时不再采样文本，adapter 通过轮询发送按钮可用状态完成发送与最终回复。 |

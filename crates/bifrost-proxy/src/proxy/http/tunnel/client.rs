@@ -83,6 +83,11 @@ static UPSTREAM_LIMITERS: LazyLock<RwLock<HashMap<UpstreamConcurrencyKey, Arc<Se
     LazyLock::new(|| RwLock::new(HashMap::new()));
 const HTTP1_FALLBACK_TTL: Duration = Duration::from_secs(120);
 const HTTP1_FALLBACK_CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Maximum number of cached HTTPS client pools before eviction is triggered.
+const MAX_CACHED_HTTPS_CLIENTS: usize = 256;
+/// Maximum number of upstream limiter entries before eviction is triggered.
+const MAX_CACHED_UPSTREAM_LIMITERS: usize = 512;
 static MAX_UPSTREAM_INFLIGHT_PER_PARTITION: LazyLock<usize> = LazyLock::new(|| {
     std::env::var("BIFROST_UPSTREAM_MAX_INFLIGHT_PER_PARTITION")
         .ok()
@@ -320,6 +325,11 @@ fn get_https_client(
         key.protocol,
     ));
     if let Ok(mut clients) = HTTPS_CLIENTS.write() {
+        // Evict idle pools when cache grows too large.
+        // An entry with strong_count == 1 means only the cache holds it (no active requests).
+        if clients.len() >= MAX_CACHED_HTTPS_CLIENTS {
+            clients.retain(|_, v| Arc::strong_count(v) > 1);
+        }
         let entry = clients.entry(key).or_insert_with(|| Arc::clone(&client));
         return Arc::clone(entry);
     }
@@ -365,6 +375,11 @@ fn get_upstream_limiter(
 
     let limiter = Arc::new(Semaphore::new(*MAX_UPSTREAM_INFLIGHT_PER_PARTITION));
     if let Ok(mut limiters) = UPSTREAM_LIMITERS.write() {
+        // Evict unused limiters when map grows too large.
+        // strong_count == 1 means only the cache holds it (no active permits outstanding).
+        if limiters.len() >= MAX_CACHED_UPSTREAM_LIMITERS {
+            limiters.retain(|_, v| Arc::strong_count(v) > 1);
+        }
         let entry = limiters.entry(key).or_insert_with(|| Arc::clone(&limiter));
         return Arc::clone(entry);
     }

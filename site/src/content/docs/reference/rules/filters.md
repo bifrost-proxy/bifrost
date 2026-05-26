@@ -34,7 +34,7 @@ pattern rules... includeFilter://condition
 | 请求头匹配 | `h:name=value` / `reqH:name=/regex/` | `h:` 和 `reqH:` 都匹配请求头；`value` 可为普通文本或 `/regex/` |
 | 响应头匹配 | `resH:name=value` / `resH:name=/regex/` | 匹配响应头；仅响应阶段有意义 |
 | 客户端 IP | `i:ip` / `i:cidr` | 匹配客户端 IP 或 CIDR |
-| 路径包含 | `/path` | 以 `/` 开头但不以 `/` 结尾时，按路径包含匹配 |
+| 路径前缀 | `/path` | 以 `/` 开头但不以 `/` 结尾时，按普通前缀匹配：`/account` 匹配 `/account`、`/account/...`、`/account-center` 和带 query 的路径 |
 | 路径正则 | `/regex/` | 以 `/` 开头并以 `/` 结尾时，按正则匹配路径 |
 | URL host/path | `example.com` / `example.com/api` | 包含 `.` 的过滤值会按 host 与可选 path 匹配 |
 
@@ -104,7 +104,10 @@ www.example.com resBody://(cached) includeFilter://resH:X-Cache=HIT
 # 匹配特定路径
 www.example.com resHeaders://(X-Api: true) includeFilter:///api
 
-# 匹配路径模式
+# 匹配路径前缀，/account 会匹配 /account-center；需要边界时使用路径正则
+www.example.com host://account.local excludeFilter:///account
+
+# 匹配路径模式（正则）
 www.example.com resDelay://1000 includeFilter:///slow
 ```
 

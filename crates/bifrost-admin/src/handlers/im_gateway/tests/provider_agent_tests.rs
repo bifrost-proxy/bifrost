@@ -194,6 +194,60 @@ pub(super) fn agent_api_status_detail_keeps_new_session_text_when_no_work_dir_re
     assert!(detail.is_none());
 }
 
+#[tokio::test]
+pub(super) async fn request_agent_stop_stops_external_runner_by_session_key() {
+    let temp_dir = tempfile::tempdir().expect("temp runs root");
+    let runs_root = temp_dir.path().to_path_buf();
+    let manager = bifrost_agent::AgentSessionManager::new(3600);
+    let runtime = crate::im_gateway::external_cli::ExternalCliRuntime::new(&runs_root);
+    let session_key = "external-stop-status-deadlock";
+    let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
+        message: "stop by shared helper".to_string(),
+        operation: "ask".to_string(),
+        params: serde_json::Value::Null,
+        provider_id: Some("provider-a".to_string()),
+        runner_id: Some("web".to_string()),
+        session_key: Some(session_key.to_string()),
+        runtime: "external_cli".to_string(),
+        adapter: "mock".to_string(),
+        work_dir: None,
+        instructions: None,
+        adapter_config: crate::im_gateway::external_cli::ExternalCliAdapterConfig {
+            executable: Some("sh".to_string()),
+            args: vec![
+                "-c".to_string(),
+                "sleep 2; printf '%s\n' '{\"type\":\"assistant_final\",\"content\":\"too late\"}'"
+                    .to_string(),
+            ],
+            timeout_secs: Some(10),
+            ..Default::default()
+        },
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    };
+
+    let handle = tokio::spawn(async move { runtime.run(request).await.unwrap() });
+    for _ in 0..50 {
+        if std::fs::read_dir(&runs_root)
+            .expect("read runs root")
+            .next()
+            .is_some()
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    assert!(request_agent_stop_with_runs_root(&manager, session_key, &runs_root).await);
+    let result = handle.await.expect("join external run");
+
+    assert_eq!(
+        result.status,
+        crate::im_gateway::external_cli::ExternalCliRunStatus::Stopped
+    );
+}
+
 #[test]
 pub(super) fn im_status_text_formats_metrics_and_runner_metadata() {
     let manager = bifrost_agent::AgentSessionManager::new(3600);

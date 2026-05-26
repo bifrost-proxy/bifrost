@@ -115,6 +115,115 @@ mod tests {
     }
 
     #[test]
+    fn task_watch_snapshot_prefers_run_progress_for_current_work() {
+        let _guard = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let current_path = audio_dir.join("meeting.m4a");
+        std::fs::write(&current_path, b"audio").unwrap();
+        let task = test_directory_task("watch-progress", audio_dir);
+        let key = source_key(&current_path);
+        let store = FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::from([(
+                key,
+                FileRecord {
+                    task_id: task.id.clone(),
+                    source_path: current_path.clone(),
+                    source_size: Some(100),
+                    source_modified_ms: Some(1),
+                    source_created_at_ms: None,
+                    source_created_at_source: None,
+                    content_hash: None,
+                    content_hash_algorithm: None,
+                    duplicate_of_source_key: None,
+                    transcript_alias: None,
+                    media_duration_ms: Some(10_000),
+                    status: FileStatus::Processing,
+                    output_text_path: None,
+                    output_metadata_path: None,
+                    output_timeline_path: None,
+                    text_chars: 0,
+                    error: None,
+                    runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+                    chunk_metrics: vec![AsrChunkMetric {
+                        chunk_index: 0,
+                        offset_secs: 0,
+                        duration_secs: 5,
+                        runner: "fork_per_chunk".to_string(),
+                        status: "ok".to_string(),
+                        elapsed_ms: 2_000,
+                        rtf: 0.4,
+                        text_chars: 3,
+                        text_sha1: "abc".to_string(),
+                        server_url: None,
+                        fallback_reason: None,
+                        error: None,
+                        recorded_at_ms: 2,
+                    }],
+                    fallback_reason: None,
+                    started_at_ms: Some(1),
+                    finished_at_ms: None,
+                    progress_current: Some(1),
+                    progress_total: Some(2),
+                    failed_chunks: Vec::new(),
+                    memory_limit_hints: Vec::new(),
+                },
+            )]),
+        };
+        save_run_progress(
+            &task.id,
+            &AsrRunProgress {
+                run_id: "run".to_string(),
+                trigger: "test".to_string(),
+                status: "running".to_string(),
+                started_at_ms: 1,
+                updated_at_ms: 2,
+                finished_at_ms: None,
+                current_source_path: Some(current_path.clone()),
+                current_file_index: 3,
+                current_file_total: 8,
+                current_chunk_done: 4,
+                current_chunk_total: 9,
+                processed_now: 2,
+                failed_now: 0,
+                message: Some("processing".to_string()),
+            },
+        )
+        .unwrap();
+
+        let snapshot = task_watch_snapshot_from_store(task, &store, true);
+
+        assert_eq!(snapshot.progress.current_file_index, 3);
+        assert_eq!(snapshot.progress.current_file_total, 8);
+        assert_eq!(snapshot.progress.current_chunk_done, 4);
+        assert_eq!(snapshot.progress.current_chunk_total, 9);
+        assert_eq!(snapshot.snapshot_source, "stale_recovered");
+        assert_eq!(snapshot.consumption.inference_elapsed_ms, 2_000);
+        assert_eq!(snapshot.recent_files.len(), 1);
+    }
+
+    #[test]
+    fn task_watch_snapshot_marks_eta_confidence_without_duration() {
+        let _guard = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let task = test_directory_task("watch-empty", temp.path().to_path_buf());
+        let store = FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::new(),
+        };
+
+        let snapshot = task_watch_snapshot_from_store(task, &store, false);
+
+        assert_eq!(snapshot.progress.eta_confidence, "none");
+        assert!(snapshot.progress.eta_ms.is_none());
+        assert!(snapshot.consumption.average_rtf.is_none());
+    }
+
+    #[test]
     fn server_failure_fallback_reason_classifies_transport_errors() {
         let connect_error = "status: 502 Bad Gateway; cause: tcp connect error";
         assert!(is_server_transport_failure(connect_error));
@@ -122,10 +231,18 @@ mod tests {
             server_failure_fallback_reason(AsrRuntimeStrategy::ReusePerFile, connect_error);
         assert!(reason.contains("reuse_per_file strategy transport failure"));
         assert!(reason.contains("fork_per_chunk"));
-        assert!(reason.contains("scheduling managed ASR server restart"));
+        assert!(reason.contains("scheduling managed ASR server restart for later chunks"));
+        assert!(is_server_restart_retriable(connect_error));
+
+        let mlx_error =
+            "status: 500 Internal Server Error; MLX error: [reshape] Cannot reshape array of size 0 into shape (1,1,2048)";
+        assert!(is_server_restart_retriable(mlx_error));
+        let reason = server_failure_fallback_reason(AsrRuntimeStrategy::ReuseServer, mlx_error);
+        assert!(reason.contains("reuse_server strategy mlx_empty_tensor failure"));
 
         let http_error = "status: 500 Internal Server Error; model panic";
         assert!(!is_server_transport_failure(http_error));
+        assert!(!is_server_restart_retriable(http_error));
         let reason = server_failure_fallback_reason(AsrRuntimeStrategy::ReuseServer, http_error);
         assert!(reason.contains("reuse_server strategy server failure"));
     }
@@ -144,6 +261,68 @@ mod tests {
 
         let recursive = discover_audio_files(temp.path(), true).unwrap();
         assert_eq!(recursive.len(), 2);
+    }
+
+    #[test]
+    fn pending_batch_rescan_picks_up_appended_files_without_retrying_same_run_failures() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let first = audio_dir.join("TX02_MIC001_20260525_090000_orig.wav");
+        let appended = audio_dir.join("TX02_MIC002_20260525_100000_orig.wav");
+        std::fs::write(&first, b"audio").unwrap();
+
+        let task = test_directory_task("rescan-appended", audio_dir.clone());
+        let mut files = FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::new(),
+        };
+        let mut attempted = HashSet::new();
+
+        let initial =
+            discover_and_prepare_pending_batch(&task, &mut files, &attempted).unwrap();
+        assert_eq!(initial.pending, vec![first.clone()]);
+
+        let first_key = source_key(&first);
+        attempted.insert(first_key.clone());
+        let mut failed_record = files.files.remove(&first_key).unwrap();
+        failed_record.status = FileStatus::Failed;
+        files.files.insert(first_key, failed_record);
+        std::fs::write(&appended, b"audio").unwrap();
+
+        let after_append =
+            discover_and_prepare_pending_batch(&task, &mut files, &attempted).unwrap();
+        assert_eq!(after_append.pending, vec![appended.clone()]);
+
+        attempted.insert(source_key(&appended));
+        let final_scan =
+            discover_and_prepare_pending_batch(&task, &mut files, &attempted).unwrap();
+        assert!(final_scan.pending.is_empty());
+    }
+
+    #[test]
+    fn pending_batch_sorts_older_source_time_first() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let later = audio_dir.join("TX02_MIC002_20260525_100000_orig.wav");
+        let earlier = audio_dir.join("TX02_MIC001_20260525_090000_orig.wav");
+        std::fs::write(&later, b"audio").unwrap();
+        std::fs::write(&earlier, b"audio").unwrap();
+
+        let task = test_directory_task("sort-pending", audio_dir);
+        let mut files = FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::new(),
+        };
+        let attempted = HashSet::new();
+
+        let scan = discover_and_prepare_pending_batch(&task, &mut files, &attempted).unwrap();
+        assert_eq!(scan.pending, vec![earlier, later]);
     }
 
     #[test]
@@ -440,6 +619,56 @@ mod tests {
             ffmpeg_chunk_split_timeout(30),
             Duration::from_secs(FFMPEG_CHUNK_SPLIT_TIMEOUT_SECS)
         );
+    }
+
+    #[test]
+    fn asr_runtime_timeouts_are_bounded_for_short_chunks() {
+        assert_eq!(asr_chunk_timeout(30), Duration::from_secs(90));
+        assert_eq!(asr_chunk_timeout(10), Duration::from_secs(45));
+        assert_eq!(
+            asr_server_request_timeout(Some(30_000)),
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            asr_server_request_timeout(Some(2 * 60 * 1000)),
+            Duration::from_secs(180)
+        );
+        assert_eq!(asr_server_request_timeout(None), Duration::from_secs(600));
+        assert_eq!(asr_text_request_timeout(), Duration::from_secs(45));
+    }
+
+    #[test]
+    fn server_failure_recovery_reason_uses_fork_for_current_chunk() {
+        let connect_error = "status: 502 Bad Gateway; cause: tcp connect error";
+        let reason =
+            server_failure_fallback_reason(AsrRuntimeStrategy::ReusePerFile, connect_error);
+        assert!(reason.contains("reuse_per_file strategy transport failure"));
+        assert!(reason.contains("retrying current chunk via fork_per_chunk"));
+        assert!(reason.contains("scheduling managed ASR server restart for later chunks"));
+        assert!(!reason.contains("restarting managed ASR server"));
+    }
+
+    #[test]
+    fn server_failure_breaker_switches_remaining_chunks_to_fork() {
+        let mut state = ServerRunnerState {
+            server_url: "test-error:dead-server".to_string(),
+            baseline_rtf: None,
+            baseline_samples: Vec::new(),
+            server_failures: max_server_failures_for_strategy(AsrRuntimeStrategy::ReuseServer),
+            force_fork_for_remaining: false,
+            restart_required: true,
+            current_chunk_failure_reason: None,
+            fallback_reason: None,
+        };
+
+        apply_server_failure_breaker_if_needed(AsrRuntimeStrategy::ReuseServer, &mut state, 3, 90, 30);
+
+        assert!(state.force_fork_for_remaining);
+        assert!(!state.restart_required);
+        assert!(state
+            .fallback_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("switching remaining chunks to fork_per_chunk isolation")));
     }
 
     #[test]
@@ -1775,6 +2004,24 @@ mod tests {
         let path = temp.path().join("not.wav");
         std::fs::write(&path, b"this is not a wav file at all").unwrap();
         assert!(compute_wav_rms_energy(&path).is_none());
+    }
+
+    #[test]
+    fn normalized_wav_header_detection_accepts_16k_mono_pcm_without_ffprobe() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("normalized.wav");
+        std::fs::write(&path, make_wav(&[100, -100, 200, -200])).unwrap();
+
+        assert!(wav_header_is_normalized(&path));
+    }
+
+    #[test]
+    fn normalized_wav_header_detection_rejects_non_wav() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("not.wav");
+        std::fs::write(&path, b"not a wav").unwrap();
+
+        assert!(!wav_header_is_normalized(&path));
     }
 
     #[test]

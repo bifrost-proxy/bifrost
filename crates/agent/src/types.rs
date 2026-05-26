@@ -3,7 +3,7 @@
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
 
-use crate::tools::update_plan::PlanStep;
+use crate::tools::update_plan::{PlanStep, UpdatePlanArgs};
 
 /// A message in the Chat Completions API format.
 #[derive(Debug, Clone)]
@@ -336,6 +336,16 @@ pub struct TokenUsage {
 pub struct ToolResult {
     pub success: bool,
     pub output: String,
+    pub runtime_events: Vec<ToolRuntimeEvent>,
+}
+
+/// Structured runtime events produced by tools.
+///
+/// These events are consumed by the turn loop and are not exposed as model-visible
+/// tool output.
+#[derive(Debug, Clone)]
+pub enum ToolRuntimeEvent {
+    PlanUpdate(UpdatePlanArgs),
 }
 
 /// Record of a single tool call during a turn (for logging/display).

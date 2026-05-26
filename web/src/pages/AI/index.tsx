@@ -5,6 +5,7 @@ import { CloudOutlined, RobotOutlined, ToolOutlined } from "@ant-design/icons";
 import AgentTab from "../Settings/tabs/AgentTab";
 import ImGatewayTab from "../Settings/tabs/ImGatewayTab";
 import ASR from "../ASR";
+import AgentChatSection from "./AgentChatSection";
 import {
   AGENT_SECTION_NAV,
   type AgentSectionId,
@@ -323,7 +324,10 @@ export default function AI() {
             overflow: "hidden",
           }}
         >
-          {activeSection.group === "agent" ? (
+          {activeSection.group === "agent" &&
+          activeSection.section === "chat" ? (
+            <AgentChatSection />
+          ) : activeSection.group === "agent" ? (
             <AgentTab hideSectionNav />
           ) : activeSection.group === "im-gateway" ? (
             <ImGatewayTab hideSectionNav />

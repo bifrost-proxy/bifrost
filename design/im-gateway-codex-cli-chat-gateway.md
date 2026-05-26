@@ -857,6 +857,66 @@ Runs 页面用于排查 Chat Gateway 和真实 IM Agent 执行。列表字段：
 - WebUI 中使用 Chat Gateway 测试抽屉发起测试，查看流式时间线、progress card 预览、final response 和 Runs 详情。
 - WebUI 亮色和暗色主题下完成同一配置/测试流程。
 
+## IM Agent 会话状态持久化与默认续接
+
+### 背景
+
+IM 通道里的 Agent 对话在服务进程内已经能通过 `session_key` 保持连续性，但服务重启后 `AgentSessionManager` 的内存态会丢失。下一条 IM 消息到达时，如果没有显式携带 `history_path`、`threadId` 或 `conversationId`，系统会重新创建空会话，导致用户感知为“上一轮对话消失了”。这与 IM 的自然预期不一致：同一用户/同一 provider/channel 的后续消息应默认基于上一次会话继续，只有用户显式 `/clear` 或 `/reset` 时才开始新会话。
+
+### 目标
+
+- 内置 Bifrost Agent、Codex CLI runner、ChatGPT Web runner 三类 Agent 都必须支持重启后默认续接。
+- 原本只存在内存中的会话状态要滚动写入文件，Bifrost 任意时刻重启后都能恢复最近可用状态。
+- 续接粒度以 IM `session_key = provider_id:user_id` 为主，同时外部 runner 还要区分 `adapter + runner_id`，避免跨 bot、跨用户、跨 runner 串会话。
+- `/clear` 和 `/reset` 是主动重建边界：默认只清理当前 adapter/runner 的内存 session、ChatGPT Web conversation map（仅 ChatGPT Web runner）、统一 session state 记录，以及该记录引用的本地 JSONL 历史，避免重置当前 Agent 时误删同一 IM 会话下其他 Agent 的状态。
+
+### 状态文件
+
+新增统一状态文件：
+
+```text
+$BIFROST_DATA_DIR/agent/im_gateway/session_state.json
+```
+
+其中每条记录包含：
+
+- `sessionKey`：稳定 IM 会话 key，来自 provider + user。
+- `adapter`：`bifrost_agent`、`codex`、`chatgpt_web` 或其他外部 adapter。
+- `runnerId`：自定义 runner ID；内置 Agent 可为空。
+- `externalThreadId`：Codex CLI 返回的 threadId，用于后续 `codex exec resume <threadId>`。
+- `externalConversationId`：ChatGPT Web conversationId，用于后续继续同一 ChatGPT 对话。
+- `historyPath`：最近 JSONL session 文件路径，用于恢复内置 Agent 和外部 runner 的本地会话历史、title、goal、plan、tokens 与 recorder。
+- `workDir`：最近使用的工作目录，用于状态展示与恢复兜底。
+- `updatedAt`：毫秒级最后更新时间，用于 runner 未指定时选择最近状态。
+- `updatedSeq`：进程内单调写入序号，用于同毫秒写入时稳定选择最近状态。
+
+### 恢复优先级
+
+1. 当前进程内已有 active/idle `AgentSession` 时，继续使用内存态。
+2. session 为空时，先读取 `session_state.json` 中同 `sessionKey + adapter + runnerId` 的精确记录。
+3. 精确记录不存在时，只有在本次请求没有明确 runnerId 时才退回同 `sessionKey + adapter` 的最近记录；一旦已解析出当前 runner，就只恢复该 runner 的状态，避免 `/reset` 后被同 adapter 的其他 runner 重新兜底恢复。
+4. 如果记录中有 `historyPath`，校验其仍位于当前 agent sessions 目录下，并用 lossy JSONL loader 恢复 history/runtime state；若 runner 未指定且记录不可用，才扫描同 `sessionKey` 的最近 JSONL。
+5. Codex runner 从恢复到的 `externalThreadId` 注入 `threadId`，让现有 Codex adapter 生成 resume 命令。
+6. ChatGPT Web runner 从恢复到的 `externalConversationId` 注入 `conversationId`；同时保留原有 `chatgpt_web/sessions.json` 作为兼容来源。
+7. 恢复失败时不得静默宣称已续接；需要记录 warn，并在用户显式 `/reset` 前尽量保留旧状态供下一次尝试。
+8. 如果 `session_state.json` 损坏、版本不兼容或超过大小限制，写入前先把原文件重命名为 `.invalid.<timestamp>.<pid>.bak`，再重建新状态文件，避免静默覆盖排障证据。
+
+### 写入时机
+
+- 每个 Agent turn 成功创建/复用 recorder 后，写入 `historyPath`。
+- 每次外部 runner 成功返回后，提取 result metadata 中的 `threadId` 或 `conversationId`，写入统一状态文件。
+- 内置 Agent 每轮结束前写入最新 recorder path、workDir 和 runtime 摘要可恢复的 JSONL。
+- `/clear`、`/reset` 清理当前 adapter/runner 的状态和对应 JSONL 历史，确保下一条消息真正新建；Chat Gateway 直接调用也要识别该命令，不应继续触发外部 runner。
+- 只有明确需要清空整个 IM 会话时，才使用全量 `sessionKey` 清理能力；普通 Agent reset 不应影响同一 user/channel 下其它 Agent 类型。
+
+### 验证方案
+
+- 单元测试覆盖状态文件读写、按 adapter/runner 精确恢复、按最近状态兜底、scoped clear 不误删其它 adapter/runner、同时间戳写入的单调排序，以及坏 `session_state.json` 被 `.bak` 保留后重建。
+- 单元测试覆盖 Codex `threadId` 和 ChatGPT Web `conversationId` 注入 request params，且显式参数不被覆盖。
+- E2E 使用 mock Codex JSONL 输出第一次生成 `thread.started`，随后重建 service 模拟 Bifrost 重启，第二次消息必须进入 `codex exec resume`。
+- E2E 覆盖 ChatGPT Web Chat Gateway：通过仅 debug/dev 构建启用且必须显式设置的 `BIFROST_CHATGPT_WEB_E2E_MOCK=1` 避免真实网页登录依赖；预置 `conversationId` 后替换 `ImGatewayService` 模拟重启，下一次请求在 runtime snapshot 中自动注入 `conversationId`；`/reset` 后再次请求不再注入旧 `conversationId`。
+- human_tests 新增服务重启后默认续接和 `/reset` 后新建两条真实场景。
+
 ## Review/Fix/Test 闭环方案
 
 ### 第 1 轮

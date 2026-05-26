@@ -56,6 +56,7 @@ impl ToolHandler for SetTitleTool {
                 return ToolResult {
                     success: false,
                     output: format!("invalid arguments: {e}"),
+                    runtime_events: Vec::new(),
                 }
             }
         };
@@ -65,6 +66,7 @@ impl ToolHandler for SetTitleTool {
             return ToolResult {
                 success: false,
                 output: "title cannot be empty".to_string(),
+                runtime_events: Vec::new(),
             };
         }
 
@@ -79,6 +81,7 @@ impl ToolHandler for SetTitleTool {
         ToolResult {
             success: true,
             output: format!("SET_TITLE:{title}"),
+            runtime_events: Vec::new(),
         }
     }
 }

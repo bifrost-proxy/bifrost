@@ -429,6 +429,77 @@
 4. `schedule_agent_adapter_config_overrides_runner_without_dropping_command` 通过；测试中的 mock runner 仍使用 runner 默认 `executable/args` 执行，同时能读取 schedule 覆盖的 env/model 相关配置，避免出现只传 schedule 专用参数导致 runner 命令配置被清空的回归。
 5. API 返回的 schedule 中 `task_type:"agent"`，`message_channel.provider_id:"feishu-main"`、`message_channel.target_id:"oc_human_test"`、`message_channel.target_mode:"configured_target"`，且 `agent.adapter_config` 保留上述字段，说明定时任务可覆盖 Runner 默认 Codex 参数并绑定明确投递通道。
 
+### TC-IEC-21: Codex IM Runner 服务重启后默认续接上一次 thread
+
+操作步骤：
+1. 使用临时数据目录启动 Bifrost，端口为 `$MAIN_PORT`，启动参数必须包含 `--no-system-proxy`。
+2. 配置一个 mock Codex runner，mock 第一次输出：
+   ```json
+   {"type":"thread.started","thread_id":"thread-human-1"}
+   {"type":"assistant_final","content":"FIRST_OK"}
+   ```
+3. 通过 Chat Gateway 或真实 IM 入站发送第一条消息，指定 `providerId:"provider-a"`、`sessionKey:"provider-a:user-a"`、runner `codex`。
+4. 确认 `$BIFROST_DATA_DIR/agent/im_gateway/session_state.json` 中存在该 session 的 `externalThreadId:"thread-human-1"`。
+5. 停止服务并用同一个 `BIFROST_DATA_DIR` 重新启动 Bifrost。
+6. 发送第二条消息，仍使用同一 provider/user/channel，不显式传 `threadId`。
+7. 读取第二次 run 的 `runtime_snapshot.json`。
+
+预期结果：
+1. 第二次 run 使用 `codex exec resume ... thread-human-1 -`，而不是 `codex exec --json ... -` 新建线程。
+2. 第二次响应来自同一 session 的续接结果。
+3. `session_state.json` 的 `updatedAt` 更新；IM Agent loop 会记录 `historyPath`，Chat Gateway 直接调用至少记录 `externalThreadId` 并保留 run artifacts。
+4. 未出现跨 provider/user/runner 的状态串用。
+
+### TC-IEC-22: `/reset` 后清理持久状态并允许新建 thread
+
+操作步骤：
+1. 延续 TC-IEC-21 的临时数据目录，确认 `session_state.json` 中已有 `externalThreadId:"thread-human-1"`。
+2. 从同一 IM session 发送 `/reset` 或 `/clear`。
+3. 再发送一条普通消息，mock Codex 输出新的：
+   ```json
+   {"type":"thread.started","thread_id":"thread-human-2"}
+   {"type":"assistant_final","content":"RESET_OK"}
+   ```
+4. 读取本次 run 的 `runtime_snapshot.json` 和 `session_state.json`。
+
+预期结果：
+1. `/reset` 回复会话已重置。
+2. `/reset` 后的下一次 run 不携带 `thread-human-1`。
+3. 新 run 记录 `externalThreadId:"thread-human-2"`。
+4. 清理范围仅限当前 adapter/runner；同一 `sessionKey` 下其它 adapter/runner 的状态不被误删。
+
+### TC-IEC-23: ChatGPT Web Runner 服务重启后恢复 conversationId 且 reset 后不复活
+
+操作步骤：
+1. 使用临时数据目录启动 Bifrost，端口为 `$MAIN_PORT`，启动参数必须包含 `--no-system-proxy`。
+2. 配置 Chat Gateway runner `chatgpt-web-resume-e2e`，adapter 为 `chatgpt_web` 且 enabled。
+3. 在 `$BIFROST_DATA_DIR/agent/im_gateway/session_state.json` 预置同一 `sessionKey + adapter + runnerId` 的 `externalConversationId:"conv-chatgpt-web-e2e-1"`。
+4. 停止服务并用同一个 `BIFROST_DATA_DIR` 重新启动 Bifrost。
+5. 调用 `/_bifrost/api/im-gateway/chat`，传 `sessionKey`、`runnerId`、`adapter:"chatgpt_web"`，不显式传 `conversationId`。
+6. 读取最新 chat run 的 `runtime_snapshot.json`。
+7. 调用同一 endpoint 发送 `/reset`。
+8. 再次重启服务后发送普通消息，并读取最新 `runtime_snapshot.json`。
+
+预期结果：
+1. 第一次普通消息在显式 E2E mock ChatGPT Web adapter 下成功返回，`runtime_snapshot.params.conversationId` 为 `conv-chatgpt-web-e2e-1`，证明重启后默认恢复旧 conversation。
+2. `/reset` 返回 `{"success":true,"cleared":true}`，不触发真实 ChatGPT Web run。
+3. `/reset` 后的下一次普通消息不再携带 `conv-chatgpt-web-e2e-1`。
+4. 同一 `sessionKey` 下非 `chatgpt_web/chatgpt-web-resume-e2e` 的状态不被清理。
+
+### TC-IEC-24: `/stop` 同时停止 external runner，避免状态显示已停但进程仍跑
+
+操作步骤：
+1. 使用临时 runs root 启动一个 external-cli mock runner，命令先 `sleep 2` 再输出 `assistant_final`。
+2. 该 run 绑定明确 `session_key:"external-stop-status-deadlock"`。
+3. 在 run 仍处于 sleep 阶段时调用共享 stop helper，传入同一 session key。
+4. 等待 run 结束并读取返回状态。
+
+预期结果：
+1. stop helper 返回 `true`，即使内置 Agent manager 中没有 active stop signal。
+2. external runner 通过 session key stop marker 收敛为 `status:"stopped"`。
+3. 不会等待 sleep 完成后输出迟到的 `assistant_final`。
+4. 该行为覆盖 IM 忙碌态 `/stop`、空闲态 `/stop` 和 `/agent/chat` `/stop` 共用入口。
+
 ## 最近执行记录
 
 - 2026-05-13：执行 TC-IEC-01/02/03/04/08/09/10/11/12/13，临时服务端口 `18880`，`BIFROST_DATA_DIR=/tmp/bifrost-im-external-cli-test`，均通过；TC-IEC-12 使用 `sleep 23` 慢进程验证 active run 可停止，run 收敛为 `status:"stopped"`，`response:"External CLI run was stopped by request."`，且未残留 `sleep 23` 测试进程。
@@ -444,6 +515,9 @@
 - 2026-05-23：更新 TC-IEC-20，覆盖 Schedule Agent 对当前 Codex CLI 参数的独立配置：`model/profileV2/reasoningEffort/reasoningSummary/dangerFullAccess/skipGitRepoCheck/ignoreUserConfig/ignoreRules/addDirs/configOverrides/enableFeatures/disableFeatures`；同时新增字段级合并回归，确保 schedule 覆盖 model/env 等字段时不会丢失 runner 默认 executable/args，并确认历史 `search:true` 兼容映射为 `--enable web_search` 而不再生成废弃 `--search`。
 - 2026-05-23：执行 TC-IEC-20 的 CLI 解析与真实临时服务创建 schedule 链路，命令 `cargo test -p bifrost-cli parse_schedule_ --lib -- --nocapture` 与 `./e2e-tests/tests/test_im_schedule_agent_cli_args.sh` 均通过；确认 `bifrost im schedule add ... --target oc_human_test ...` 写入明确 `message_channel`，且 agent Codex adapter 参数完整保留。
 - 2026-05-23：复测 TC-IEC-20 的自定义 Runner args 覆盖回归，命令 `cargo test -p bifrost-admin codex_adapter_ --lib -- --nocapture`、`cargo test -p bifrost-cli parse_schedule_ --lib -- --nocapture`、`cargo test -p bifrost-admin schedule_agent_adapter_config_overrides_runner_without_dropping_command --lib -- --nocapture` 均通过；确认 `codex_adapter_applies_config_flags_to_custom_args` 覆盖自定义 `args` 仍注入 schedule 级 Codex 参数，并在 danger full access 下移除 `--sandbox`。
+- 2026-05-24：执行 TC-IEC-21/22，临时服务端口 `18894`，`BIFROST_DATA_DIR=/tmp/bifrost-im-session-human.BK5xH7`，启动命令使用 `cargo run --bin bifrost -- start -p 18894 --unsafe-ssl --no-system-proxy`；mock Codex 第一次写入 `thread-human-1`，重启服务后第二次 Chat Gateway run `1779614415676-e874b7c3-6450-407e-9b27-98400a5de4b5` 的 `runtime_snapshot.args` 为 `exec --cd ... resume --json --output-last-message ... thread-human-1 -`，证明默认续接；随后 `/reset` 返回 `{"success":true,"cleared":true}`，第三次 run `1779614617852-f6cfc201-8263-436c-8f1a-7f2a537de88a` 的 `runtime_snapshot.args` 不包含 `resume` 或 `thread-human-1`，并写入 `externalThreadId:"thread-human-2"`，证明主动重建后不会复活旧线程。
+- 2026-05-24：新增 TC-IEC-23，自动 E2E 通过仅 debug/dev 构建启用的 `BIFROST_CHATGPT_WEB_E2E_MOCK=1` 覆盖 ChatGPT Web Chat Gateway 重启恢复 `conversationId` 与 `/reset` 后不复活旧 conversation；本轮以 `cargo run -p bifrost-e2e -- --test im_gateway_chatgpt_web_restores_conversation_after_service_restart --test-timeout 180` 作为执行证据。
+- 2026-05-25：执行 TC-IEC-24，命令 `source ~/.zshrc && cargo test -p bifrost-admin request_agent_stop_stops_external_runner_by_session_key --lib` 通过；mock runner 在 `sleep 2` 阶段收到 session key stop marker，最终状态为 `Stopped`。
 
 ## 清理步骤
 

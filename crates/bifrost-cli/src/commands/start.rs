@@ -1272,6 +1272,7 @@ pub fn run_foreground(
             // Auto-connect IM Gateway providers that have owner_open_id configured
             if let Some(im_service) = admin_state.im_gateway_service() {
                 im_service.start_scheduler();
+                im_service.spawn_chatgpt_web_startup_auth_check();
                 let im_service_clone = im_service.clone();
                 tokio::spawn(async move {
                     im_service_clone.auto_connect_providers().await;
@@ -2021,6 +2022,7 @@ pub fn run_daemon(
                     // Auto-connect IM Gateway providers (daemon mode)
                     if let Some(im_service) = admin_state.im_gateway_service() {
                         im_service.start_scheduler();
+                        im_service.spawn_chatgpt_web_startup_auth_check();
                         let im_service_clone = im_service.clone();
                         tokio::spawn(async move {
                             im_service_clone.auto_connect_providers().await;

@@ -1,4 +1,5 @@
 use crate::config::AgentConfig;
+use crate::session::turn_timing::TurnTimingSummary;
 use crate::session::AgentSession;
 use crate::tools::update_plan::PlanStep;
 use crate::types::ToolCallLog;
@@ -11,6 +12,19 @@ pub type AgentTurnProgressSender = tokio::sync::mpsc::UnboundedSender<AgentTurnP
 #[derive(Debug, Clone)]
 pub enum AgentTurnProgressEvent {
     Status(Box<ActiveTurnStatus>),
+    ContextUpdated {
+        context: AgentContextSnapshot,
+    },
+    CompactionStarted {
+        progress: AgentCompactionProgress,
+    },
+    CompactionFinished {
+        progress: AgentCompactionProgress,
+    },
+    CompactionFailed {
+        progress: AgentCompactionProgress,
+        error: String,
+    },
     ToolStarted {
         tool_name: String,
         arguments: String,
@@ -18,6 +32,16 @@ pub enum AgentTurnProgressEvent {
     ToolFinished {
         log: ToolCallLog,
         duration_ms: u64,
+    },
+    LongTaskStatus {
+        session_key: String,
+        session_id: String,
+        profile: String,
+        state: String,
+        elapsed_ms: u64,
+        last_output_preview: Option<String>,
+        next_check_at_ms: Option<u64>,
+        unchanged_heartbeats: u32,
     },
     PlanUpdated {
         steps: Vec<PlanStep>,
@@ -38,6 +62,40 @@ pub enum AgentTurnProgressEvent {
     TurnFailed {
         error: String,
     },
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentContextSnapshot {
+    pub estimated_context_tokens: u32,
+    pub context_window_tokens: Option<u32>,
+    pub context_usage_percent: Option<f64>,
+    pub compaction_count: u32,
+    pub history_version: u64,
+    pub message_count: usize,
+    pub user_turn_count: usize,
+    pub last_response_tokens: Option<u64>,
+    pub total_tokens_used: Option<u64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentCompactionProgress {
+    pub trigger: String,
+    pub reason: String,
+    pub phase: String,
+    pub pre_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens_saved: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub messages_removed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    pub compaction_count: u32,
+    pub history_version: u64,
+    pub context: AgentContextSnapshot,
 }
 
 /// Live status for a session while a turn loop is executing.
@@ -68,6 +126,12 @@ pub struct ActiveTurnStatus {
     pub runner_id: Option<String>,
     pub external_conversation_id: Option<String>,
     pub external_thread_id: Option<String>,
+    /// Turn timing metrics (TTFT, TTFM, total duration).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_timing: Option<TurnTimingSummary>,
+    /// Current turn ID (UUID), when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
 }
 
 impl ActiveTurnStatus {
@@ -99,6 +163,8 @@ impl ActiveTurnStatus {
             runner_id: None,
             external_conversation_id: None,
             external_thread_id: None,
+            turn_timing: None,
+            turn_id: None,
         }
     }
 }
@@ -128,6 +194,28 @@ pub(crate) fn config_context_window_tokens(config: &AgentConfig) -> Option<u32> 
         .model_context_window
         .and_then(|value| u32::try_from(value).ok())
         .filter(|value| *value > 0)
+}
+
+pub fn snapshot_agent_context(
+    session: &AgentSession,
+    config: &AgentConfig,
+) -> AgentContextSnapshot {
+    let context_window_tokens = config_context_window_tokens(config);
+    let estimated_context_tokens = session.effective_token_count();
+    AgentContextSnapshot {
+        estimated_context_tokens,
+        context_window_tokens,
+        context_usage_percent: context_usage_percent(
+            estimated_context_tokens,
+            context_window_tokens,
+        ),
+        compaction_count: session.compaction_count,
+        history_version: session.history_version,
+        message_count: session.history.len(),
+        user_turn_count: session.user_turn_count(),
+        last_response_tokens: session.last_response_tokens,
+        total_tokens_used: session.total_tokens_used,
+    }
 }
 
 pub(crate) fn update_active_turn_status<F>(session: &AgentSession, f: F)
@@ -200,6 +288,11 @@ pub(crate) fn refresh_active_turn_status(
             .map(|ch| ch.lock().unwrap().iter().cloned().collect())
             .unwrap_or_default();
     });
+    if let Some(sender) = &session.progress_sender {
+        let _ = sender.send(AgentTurnProgressEvent::ContextUpdated {
+            context: snapshot_agent_context(session, config),
+        });
+    }
 }
 
 pub fn format_active_turn_status_text(status: &ActiveTurnStatus) -> String {
@@ -413,6 +506,8 @@ mod tests {
             runner_id: None,
             external_conversation_id: None,
             external_thread_id: Some("thread-runtime".to_string()),
+            turn_timing: None,
+            turn_id: None,
         };
 
         let text = format_active_turn_status_text(&status);

@@ -48,18 +48,23 @@ use send::send_with_browser;
 #[cfg(test)]
 use send::{
     composer_text_injection_mode, extract_conversation_id_from_url, handoff_heartbeat_error,
-    handoff_page_heartbeat_error, parse_send_sse, should_retry_as_new_conversation,
+    handoff_page_heartbeat_error, parse_send_sse, paste_modifier, send_button_ready_max_wait,
+    send_button_ready_retry_max_wait, should_retry_as_new_conversation,
     target_page_is_terminal_mismatch, target_page_matches, ComposerTextInjectionMode,
 };
 use storage::{read_auth_state, write_auth_state, write_redacted_json};
 
 pub const ADAPTER_ID: &str = "chatgpt_web";
+pub const STARTUP_AUTH_DRY_RUN_ENV: &str = "BIFROST_CHATGPT_WEB_STARTUP_AUTH_DRY_RUN";
 
 const DEFAULT_BASE_URL: &str = "https://chatgpt.com";
 const ACCOUNT_CHECK_PATH_PREFIX: &str = "/backend-api/accounts/check";
 const CONVERSATIONS_PATH: &str =
     "/backend-api/conversations?offset=0&limit=20&order=updated&is_archived=false&is_starred=false";
 const F_CONVERSATION_URL: &str = "https://chatgpt.com/backend-api/f/conversation";
+const AUTH_EXPIRY_SKEW_SECS: i64 = 60;
+const BROWSER_ACCOUNT_CHECK_PROOF_MAX_AGE_SECS: i64 = 15 * 60;
+const BROWSER_ACCOUNT_CHECK_PROOF_FUTURE_SKEW_SECS: i64 = 60;
 static LOGIN_SESSION_SEQ: AtomicU64 = AtomicU64::new(1);
 static LOGIN_SESSIONS: OnceLock<DashMap<String, ActiveLoginSession>> = OnceLock::new();
 
@@ -187,6 +192,8 @@ fn truncate_keep_head_tail(s: &str, max_chars: usize) -> String {
 
 /// Record a user→assistant exchange for potential future context replay.
 fn record_conversation_exchange(session_key: &str, user_msg: &str, assistant_msg: &str) {
+    const MAX_HISTORY_ENTRIES: usize = 100;
+
     let mut history = conversation_history_store()
         .entry(session_key.to_string())
         .or_default();
@@ -200,6 +207,16 @@ fn record_conversation_exchange(session_key: &str, user_msg: &str, assistant_msg
             role: "assistant",
             content: assistant_sanitized,
         });
+    }
+    // Prevent unbounded memory growth while preserving both setup and continuity:
+    // keep earliest entries plus the most recent entries, and drop the middle.
+    if history.len() > MAX_HISTORY_ENTRIES {
+        let keep_head = MAX_HISTORY_ENTRIES / 2;
+        let keep_tail = MAX_HISTORY_ENTRIES - keep_head;
+        let tail_start = history.len().saturating_sub(keep_tail);
+        if keep_head < tail_start {
+            history.drain(keep_head..tail_start);
+        }
     }
     info!(
         session_key,
@@ -406,6 +423,20 @@ pub struct ChatGptWebAuthStatus {
     pub message: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatGptWebStartupAuthStatus {
+    pub runner_id: String,
+    pub state: String,
+    pub logged_in: bool,
+    pub opened_login: bool,
+    pub dry_run: bool,
+    pub profile_dir: String,
+    pub state_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ChatGptWebAdapterConfig {
@@ -589,6 +620,15 @@ pub async fn run_adapter(
     prompt: &str,
     run_dir: &Path,
 ) -> Result<ChatGptWebRunOutput, String> {
+    #[cfg(debug_assertions)]
+    if std::env::var("BIFROST_CHATGPT_WEB_E2E_MOCK")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        return Ok(mock_run_adapter_for_e2e(request, prompt));
+    }
+
     let config = match runtime_config(&request.adapter_config) {
         Ok(config) => config,
         Err(error) => {
@@ -698,6 +738,42 @@ pub async fn run_adapter(
         events,
         metadata,
     })
+}
+
+#[cfg(debug_assertions)]
+fn mock_run_adapter_for_e2e(request: &ExternalCliRunRequest, prompt: &str) -> ChatGptWebRunOutput {
+    let conversation_id = conversation_id_hint_from_request(request)
+        .unwrap_or_else(|| format!("mock-conversation-{}", uuid::Uuid::new_v4()));
+    let response = format!("chatgpt_web_e2e_mock: {}", prompt.trim());
+    let mut metadata = BTreeMap::new();
+    metadata.insert("conversationId".to_string(), conversation_id.clone());
+    ChatGptWebRunOutput {
+        status: ExternalCliRunStatus::Succeeded,
+        exit_code: Some(0),
+        stdout: serde_json::to_vec(&json!({
+            "response": response,
+            "conversationId": conversation_id
+        }))
+        .unwrap_or_default(),
+        stderr: Vec::new(),
+        response: response.clone(),
+        responses: vec![response],
+        events: vec![
+            event(
+                ExternalCliProgressEventType::RunStarted,
+                "ChatGPT Web E2E mock run started",
+                Some("ChatGPT Web"),
+                json!({"operation": request.operation}),
+            ),
+            event(
+                ExternalCliProgressEventType::RunFinished,
+                "ChatGPT Web E2E mock run finished",
+                Some("ChatGPT Web"),
+                json!({"status": "succeeded"}),
+            ),
+        ],
+        metadata,
+    }
 }
 
 fn chatgpt_web_response_events(
@@ -1338,6 +1414,77 @@ pub async fn stop_login(
     auth_status(settings).await
 }
 
+pub async fn ensure_startup_auth_ready(
+    runner_id: &str,
+    settings: &ExternalCliAgentSettings,
+) -> Result<ChatGptWebStartupAuthStatus, String> {
+    let status = auth_status(settings).await?;
+    if status.logged_in {
+        return Ok(startup_auth_status_from_auth(
+            runner_id, status, false, false,
+        ));
+    }
+
+    if startup_auth_dry_run_enabled() {
+        info!(
+            runner_id,
+            state_path = %status.state_path,
+            "chatgpt_web startup auth: login required; dry run would open login browser"
+        );
+        let reason = status
+            .message
+            .clone()
+            .unwrap_or_else(|| status.state.clone());
+        return Ok(startup_auth_status_from_auth(
+            runner_id,
+            ChatGptWebAuthStatus {
+                message: Some(format!(
+                    "startup auth dry run: login required; would open login browser ({})",
+                    reason
+                )),
+                ..status
+            },
+            false,
+            true,
+        ));
+    }
+
+    info!(
+        runner_id,
+        state_path = %status.state_path,
+        "chatgpt_web startup auth: login required; opening login browser"
+    );
+    let opened = open_login(settings).await?;
+    Ok(startup_auth_status_from_auth(
+        runner_id, opened, true, false,
+    ))
+}
+
+fn startup_auth_status_from_auth(
+    runner_id: &str,
+    status: ChatGptWebAuthStatus,
+    opened_login: bool,
+    dry_run: bool,
+) -> ChatGptWebStartupAuthStatus {
+    ChatGptWebStartupAuthStatus {
+        runner_id: runner_id.to_string(),
+        state: status.state,
+        logged_in: status.logged_in,
+        opened_login,
+        dry_run,
+        profile_dir: status.profile_dir,
+        state_path: status.state_path,
+        message: status.message,
+    }
+}
+
+fn startup_auth_dry_run_enabled() -> bool {
+    std::env::var(STARTUP_AUTH_DRY_RUN_ENV)
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
+}
+
 async fn ensure_authenticated(
     config: &RuntimeConfig,
     open_on_required: bool,
@@ -1369,10 +1516,26 @@ async fn auth_status_from_state(
     state: &AuthState,
 ) -> Result<ChatGptWebAuthStatus, String> {
     let native = native_account_probe(config, state).await;
-    let captured_account_check_ok = state
+    let identity_issue = authorization_identity_issue(&state.captured_auth_identity);
+    let captured_account_check_stale_message = state
         .captured_account_check
         .as_ref()
-        .is_some_and(|proof| proof.logged_in && (200..300).contains(&proof.status));
+        .filter(|proof| proof.logged_in && (200..300).contains(&proof.status))
+        .and_then(|proof| {
+            if browser_account_check_proof_is_fresh(proof) {
+                None
+            } else {
+                Some(format!(
+                    "captured browser accounts/check proof is stale or has an invalid timestamp: {}",
+                    proof.captured_at
+                ))
+            }
+        });
+    let captured_account_check_ok = state.captured_account_check.as_ref().is_some_and(|proof| {
+        proof.logged_in
+            && (200..300).contains(&proof.status)
+            && browser_account_check_proof_is_fresh(proof)
+    });
     let (account_check_ok, account_status, message) = match native {
         Ok(probe) if probe.logged_in => (true, Some(probe.status), None),
         Ok(probe) if captured_account_check_ok => (
@@ -1383,7 +1546,11 @@ async fn auth_status_from_state(
                 probe.status
             )),
         ),
-        Ok(probe) => (false, Some(probe.status), None),
+        Ok(probe) => (
+            false,
+            Some(probe.status),
+            captured_account_check_stale_message,
+        ),
         Err(error) if captured_account_check_ok => (
             true,
             state.captured_account_check.as_ref().map(|proof| proof.status),
@@ -1391,10 +1558,21 @@ async fn auth_status_from_state(
                 "native accounts/check probe failed; using captured browser accounts/check proof: {error}"
             )),
         ),
-        Err(error) => (false, None, Some(error)),
+        Err(error) => (
+            false,
+            None,
+            Some(append_status_message(
+                captured_account_check_stale_message,
+                error,
+            )),
+        ),
     };
-    let identity_complete = state.captured_auth_identity.complete;
+    let identity_complete = state.captured_auth_identity.complete && identity_issue.is_none();
     let logged_in = account_check_ok && identity_complete;
+    let message = match identity_issue {
+        Some(issue) => Some(append_status_message(message, issue)),
+        None => message,
+    };
     Ok(ChatGptWebAuthStatus {
         state: if logged_in {
             "logged_in"
@@ -1414,13 +1592,48 @@ async fn auth_status_from_state(
     })
 }
 
+fn append_status_message(existing: Option<String>, next: impl Into<String>) -> String {
+    match existing {
+        Some(existing) if !existing.is_empty() => format!("{existing}; {}", next.into()),
+        _ => next.into(),
+    }
+}
+
+fn authorization_identity_issue(identity: &AuthorizationIdentity) -> Option<String> {
+    let expires_at = identity.expires_at.as_deref()?;
+    let expires_at = match chrono::DateTime::parse_from_rfc3339(expires_at) {
+        Ok(value) => value.with_timezone(&chrono::Utc),
+        Err(error) => {
+            return Some(format!(
+                "authorization token expiry could not be parsed: {error}"
+            ));
+        }
+    };
+    if chrono::Utc::now() + chrono::Duration::seconds(AUTH_EXPIRY_SKEW_SECS) >= expires_at {
+        return Some(format!("authorization token expired at {expires_at}"));
+    }
+    None
+}
+
+fn browser_account_check_proof_is_fresh(proof: &BrowserAccountCheckProof) -> bool {
+    let Ok(captured_at) = chrono::DateTime::parse_from_rfc3339(&proof.captured_at) else {
+        return false;
+    };
+    let age = chrono::Utc::now().signed_duration_since(captured_at.with_timezone(&chrono::Utc));
+    if age < -chrono::Duration::seconds(BROWSER_ACCOUNT_CHECK_PROOF_FUTURE_SKEW_SECS) {
+        return false;
+    }
+    age <= chrono::Duration::seconds(BROWSER_ACCOUNT_CHECK_PROOF_MAX_AGE_SECS)
+}
+
 async fn open_login_and_capture(config: &RuntimeConfig) -> Result<AuthState, String> {
     tokio::fs::create_dir_all(&config.profile_dir)
         .await
         .map_err(|error| format!("create profile dir failed: {error}"))?;
     let (_login_guard, mut stop_login) = register_login_session(config);
     info!(profile_dir = %config.profile_dir.display(), "chatgpt_web: opening login browser");
-    let mut browser = BrowserSession::launch(config, false, &config.chatgpt.base_url).await?;
+    BrowserSession::kill_headless_for_profile(config).await;
+    let mut browser = BrowserSession::get_or_launch(config, false).await?;
     let mut client = None;
     let mut target_id = None;
     let result = async {

@@ -6,38 +6,124 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::Mutex;
 
 mod busy_message_mode_tests;
 
 pub(super) struct EnvGuard {
-    old_data_dir: Option<String>,
-    _lock: MutexGuard<'static, ()>,
+    _guard: crate::test_env::BifrostDataDirGuard,
 }
 
 impl EnvGuard {
     pub(super) fn set_data_dir(data_dir: &std::path::Path) -> Self {
-        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let lock = ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("BIFROST_DATA_DIR test env lock poisoned");
-        let old_data_dir = std::env::var("BIFROST_DATA_DIR").ok();
-        std::env::set_var("BIFROST_DATA_DIR", data_dir);
         Self {
-            old_data_dir,
-            _lock: lock,
+            _guard: crate::test_env::BifrostDataDirGuard::set(data_dir),
         }
     }
 }
 
-impl Drop for EnvGuard {
+struct EnvVarGuard {
+    key: &'static str,
+    old_value: Option<String>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let old_value = std::env::var(key).ok();
+        std::env::set_var(key, value);
+        Self { key, old_value }
+    }
+}
+
+impl Drop for EnvVarGuard {
     fn drop(&mut self) {
-        match self.old_data_dir.as_deref() {
-            Some(value) => std::env::set_var("BIFROST_DATA_DIR", value),
-            None => std::env::remove_var("BIFROST_DATA_DIR"),
+        match self.old_value.as_deref() {
+            Some(value) => std::env::set_var(self.key, value),
+            None => std::env::remove_var(self.key),
         }
     }
+}
+
+#[test]
+pub(super) fn chatgpt_web_startup_auth_runners_include_all_web_runners() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let service = ImGatewayService::new(temp_dir.path());
+
+    let mut runners = std::collections::BTreeMap::new();
+    runners.insert(
+        "default".to_string(),
+        crate::im_gateway::external_cli::ExternalCliAgentSettings::default(),
+    );
+    runners.insert(
+        "web-disabled".to_string(),
+        crate::im_gateway::external_cli::ExternalCliAgentSettings {
+            adapter: crate::im_gateway::chatgpt_web::ADAPTER_ID.to_string(),
+            enabled: false,
+            ..Default::default()
+        },
+    );
+    runners.insert(
+        "web-enabled".to_string(),
+        crate::im_gateway::external_cli::ExternalCliAgentSettings {
+            adapter: crate::im_gateway::chatgpt_web::ADAPTER_ID.to_string(),
+            enabled: true,
+            ..Default::default()
+        },
+    );
+    runners.insert(
+        "codex".to_string(),
+        crate::im_gateway::external_cli::ExternalCliAgentSettings {
+            adapter: "codex".to_string(),
+            enabled: true,
+            ..Default::default()
+        },
+    );
+    service
+        .external_cli_config_store
+        .save(crate::im_gateway::external_cli::ExternalCliGatewayConfig {
+            version: 1,
+            default_runner_id: "default".to_string(),
+            runners,
+            channels: std::collections::BTreeMap::new(),
+        })
+        .unwrap();
+
+    let runner_ids = service
+        .chatgpt_web_startup_auth_runners()
+        .into_iter()
+        .map(|runner| runner.runner_id)
+        .collect::<Vec<_>>();
+
+    assert_eq!(runner_ids, vec!["web-disabled", "web-enabled"]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn chatgpt_web_startup_auth_dry_run_reports_login_prompt() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let _dry_run_guard = EnvVarGuard::set(
+        crate::im_gateway::chatgpt_web::STARTUP_AUTH_DRY_RUN_ENV,
+        "1",
+    );
+    let settings = crate::im_gateway::external_cli::ExternalCliAgentSettings {
+        adapter: crate::im_gateway::chatgpt_web::ADAPTER_ID.to_string(),
+        ..Default::default()
+    };
+
+    let status = crate::im_gateway::chatgpt_web::ensure_startup_auth_ready("web", &settings)
+        .await
+        .unwrap();
+
+    assert_eq!(status.runner_id, "web");
+    assert!(!status.logged_in);
+    assert!(!status.opened_login);
+    assert!(status.dry_run);
+    assert!(status.state_path.contains("chatgpt_web/auth_state.json"));
+    assert!(status
+        .message
+        .as_deref()
+        .unwrap_or_default()
+        .contains("would open login browser"));
 }
 
 #[test]
@@ -221,6 +307,149 @@ pub(super) fn agent_reply_prepare_text_and_images_splits_markdown_local_images()
     assert_eq!(images[0].alt, "cat one");
     assert!(!text.contains("./cat-1.png"));
     assert!(text.contains("![remote](https://example.com/favicon.png)"));
+}
+
+#[test]
+pub(super) fn agent_chat_message_text_prefers_trimmed_text_and_uses_image_prompt_fallback() {
+    let text_message = crate::im_gateway::types::ImEventMessage {
+        text: "  请分析这张图  ".to_string(),
+        mentions: Vec::new(),
+        images: vec![crate::im_gateway::types::ImImageAttachment {
+            file_key: "img-v3-1".to_string(),
+            source: crate::im_gateway::types::ImImageSource::UploadedImage,
+            mime_type: Some("image/png".to_string()),
+            data_base64: Some("AA==".to_string()),
+            download_url: None,
+            encrypted_query_param: None,
+            aes_key: None,
+        }],
+        raw_type: Some("text".to_string()),
+    };
+    assert_eq!(agent_message_text(&text_message), "请分析这张图");
+
+    let image_only_message = crate::im_gateway::types::ImEventMessage {
+        text: " \n\t ".to_string(),
+        mentions: Vec::new(),
+        images: vec![crate::im_gateway::types::ImImageAttachment {
+            file_key: "img-v3-2".to_string(),
+            source: crate::im_gateway::types::ImImageSource::MessageResource,
+            mime_type: None,
+            data_base64: None,
+            download_url: None,
+            encrypted_query_param: None,
+            aes_key: None,
+        }],
+        raw_type: Some("image".to_string()),
+    };
+    assert_eq!(
+        agent_message_text(&image_only_message),
+        IMAGE_ONLY_AGENT_PROMPT
+    );
+
+    let empty_message = crate::im_gateway::types::ImEventMessage {
+        text: "   ".to_string(),
+        mentions: Vec::new(),
+        images: Vec::new(),
+        raw_type: None,
+    };
+    assert!(agent_message_text(&empty_message).is_empty());
+}
+
+#[test]
+pub(super) fn inbound_message_preview_summarizes_image_only_and_truncates_text() {
+    let image_message = crate::im_gateway::types::ImEventMessage {
+        text: String::new(),
+        mentions: Vec::new(),
+        images: vec![
+            crate::im_gateway::types::ImImageAttachment {
+                file_key: "img-v3-1".to_string(),
+                source: crate::im_gateway::types::ImImageSource::UploadedImage,
+                mime_type: Some("image/png".to_string()),
+                data_base64: Some("AA==".to_string()),
+                download_url: None,
+                encrypted_query_param: None,
+                aes_key: None,
+            },
+            crate::im_gateway::types::ImImageAttachment {
+                file_key: "img-v3-2".to_string(),
+                source: crate::im_gateway::types::ImImageSource::MessageResource,
+                mime_type: None,
+                data_base64: None,
+                download_url: None,
+                encrypted_query_param: None,
+                aes_key: None,
+            },
+        ],
+        raw_type: Some("image".to_string()),
+    };
+    assert_eq!(inbound_message_preview(&image_message), "[图片消息: 2 张]");
+
+    let long_text = "中".repeat(240);
+    let text_message = crate::im_gateway::types::ImEventMessage {
+        text: long_text,
+        mentions: Vec::new(),
+        images: Vec::new(),
+        raw_type: Some("text".to_string()),
+    };
+    let preview = inbound_message_preview(&text_message);
+    assert_eq!(preview.chars().count(), 203);
+    assert!(preview.ends_with("..."));
+}
+
+#[test]
+pub(super) fn progress_events_flush_immediately_only_for_visible_chat_updates() {
+    let status = bifrost_agent::ActiveTurnStatus {
+        session_key: "s1".to_string(),
+        state: "running".to_string(),
+        started_at: 1,
+        updated_at: 2,
+        current_loop_iteration: 1,
+        completed_loop_iterations: 0,
+        max_loop_iterations: 1000,
+        last_response_tokens: None,
+        total_tokens_used: None,
+        estimated_context_tokens: 0,
+        context_window_tokens: None,
+        context_usage_percent: None,
+        compaction_count: 0,
+        history_version: 0,
+        work_dir: None,
+        message_count: 0,
+        local_tool_count: 0,
+        mcp_tool_count: 0,
+        pending_guide_messages: Vec::new(),
+        user_turn_count: 0,
+        agent_type: Some("Bifrost Agent".to_string()),
+        runner_type: Some("bifrost_agent".to_string()),
+        runner_id: None,
+        external_conversation_id: None,
+        external_thread_id: None,
+        turn_timing: None,
+        turn_id: None,
+    };
+    assert!(!progress_event_needs_immediate_flush(
+        &bifrost_agent::AgentTurnProgressEvent::Status(Box::new(status))
+    ));
+
+    for event in [
+        bifrost_agent::AgentTurnProgressEvent::AssistantDelta {
+            content: "thinking".to_string(),
+        },
+        bifrost_agent::AgentTurnProgressEvent::AssistantFinal {
+            content: "answer".to_string(),
+        },
+        bifrost_agent::AgentTurnProgressEvent::TurnFinished {
+            content: "done".to_string(),
+        },
+        bifrost_agent::AgentTurnProgressEvent::TurnFailed {
+            error: "boom".to_string(),
+        },
+    ] {
+        assert!(
+            progress_event_needs_immediate_flush(&event),
+            "event should refresh visible chat progress immediately: {event:?}"
+        );
+    }
 }
 
 #[test]
@@ -670,6 +899,7 @@ pub(super) async fn im_event_loop_uses_provider_agent_config_for_agent_chat() {
         bifrost_agent::config::ModelProviderConfig {
             name: Some("Mock".to_string()),
             base_url: Some(mock.url()),
+            wire_api: Some(bifrost_agent::config::ModelWireApi::ChatCompletions),
             env_key: None,
             api_key: None,
             http_headers: Some(HashMap::from([(
@@ -1108,6 +1338,7 @@ pub(super) async fn agent_chat_final_reply_sends_local_markdown_images_as_im_ima
         bifrost_agent::config::ModelProviderConfig {
             name: Some("Mock".to_string()),
             base_url: Some(mock.url()),
+            wire_api: Some(bifrost_agent::config::ModelWireApi::ChatCompletions),
             env_key: None,
             api_key: None,
             http_headers: Some(HashMap::from([(
@@ -1206,6 +1437,7 @@ pub(super) async fn im_event_loop_forwards_image_attachment_to_agent_chat() {
         bifrost_agent::config::ModelProviderConfig {
             name: Some("Mock".to_string()),
             base_url: Some(mock.url()),
+            wire_api: Some(bifrost_agent::config::ModelWireApi::ChatCompletions),
             env_key: None,
             api_key: None,
             http_headers: Some(HashMap::from([(

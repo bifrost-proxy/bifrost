@@ -19,9 +19,13 @@
 //!
 //! # Message Roles
 //!
-//! Bifrost combines all context into a single `system` message. XML-tagged sections
-//! keep the prompt boundaries explicit for the model.
+//! Bifrost keeps base instructions separate from developer and contextual user
+//! fragments. Responses requests map base instructions to the wire-level
+//! `instructions` field; Chat Completions fallback flattens the same prefix into
+//! compatible message roles.
 
+pub mod fragments;
+pub mod models;
 mod render;
 mod types;
 
@@ -35,9 +39,19 @@ use crate::types::ChatMessage;
 
 pub use types::{
     BaseInstructions, EnvironmentContext, UserInstructions, ENVIRONMENT_CONTEXT_CLOSE_TAG,
-    ENVIRONMENT_CONTEXT_OPEN_TAG, SKILLS_INSTRUCTIONS_CLOSE_TAG, SKILLS_INSTRUCTIONS_OPEN_TAG,
-    USER_INSTRUCTIONS_CLOSE_TAG, USER_INSTRUCTIONS_OPEN_TAG,
+    ENVIRONMENT_CONTEXT_OPEN_TAG, GOAL_CONTEXT_CLOSE_TAG, GOAL_CONTEXT_OPEN_TAG,
+    SKILLS_INSTRUCTIONS_CLOSE_TAG, SKILLS_INSTRUCTIONS_OPEN_TAG, USER_INSTRUCTIONS_CLOSE_TAG,
+    USER_INSTRUCTIONS_OPEN_TAG,
 };
+
+// Re-export fragment system types for convenient access.
+pub use fragments::{
+    ContextFragment, ContextualFragment, FragmentRegistration, FragmentRegistrationProxy,
+    FragmentRegistry, GoalContext, PromptSlot,
+};
+
+// Re-export model-specific types.
+pub use models::{ModelFamily, ModelMessages, PersonalityVariant};
 
 /// Default base instructions template loaded from external markdown file.
 const BASE_INSTRUCTIONS_DEFAULT: &str = include_str!("../prompts/base_instructions/default.md");
@@ -90,36 +104,106 @@ pub fn build_prompt_messages_with_skill_registry(
     registry: Option<&SkillRegistry>,
     user_instructions: Option<&str>,
 ) -> PromptMessages {
+    use crate::prompt::fragments::{ContextFragment, FragmentRegistry, PromptSlot};
+    use crate::prompt::models::ModelMessages;
+
     let work_dir = work_dir_override
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| config.resolve_work_dir());
-    let env_context = EnvironmentContext::from_system(Some(&work_dir));
-    let env_section = render::render_environment_context(&env_context);
-    let skills_section = build_skills_section(config, &work_dir, registry);
+
+    let mut frag_registry = FragmentRegistry::new();
+
+    // Model-specific instructions → DeveloperPolicy slot
+    let model_msgs = ModelMessages::new(config.model.as_deref().unwrap_or("default"), None);
+    if let Some(family_instructions) = model_msgs
+        .family_instructions()
+        .filter(|text| !base_instructions.contains(*text))
+    {
+        frag_registry.register(ContextFragment::new(
+            "model_family_instructions",
+            PromptSlot::DeveloperPolicy,
+            95,
+            family_instructions,
+        ));
+    }
+    let personality_instructions = model_msgs.personality_instructions();
+    if !base_instructions.contains(personality_instructions) {
+        frag_registry.register(ContextFragment::new(
+            "personality_instructions",
+            PromptSlot::DeveloperPolicy,
+            90,
+            personality_instructions,
+        ));
+    }
+    if let Some(patch_instructions) = model_msgs.apply_patch_instructions() {
+        frag_registry.register(ContextFragment::new(
+            "apply_patch_instructions",
+            PromptSlot::DeveloperPolicy,
+            85,
+            patch_instructions,
+        ));
+    }
+    if let Some(final_guidelines) = model_msgs.final_answer_guidelines() {
+        frag_registry.register(ContextFragment::new(
+            "final_answer_guidelines",
+            PromptSlot::DeveloperPolicy,
+            80,
+            final_guidelines,
+        ));
+    }
+
+    // Developer instructions → DeveloperPolicy slot
     let developer_section =
         build_developer_instructions_section(config.developer_instructions.as_deref());
-    let user_section = build_user_instructions_section(user_instructions, &work_dir);
+    if !developer_section.is_empty() {
+        frag_registry.register(ContextFragment::new(
+            "developer_instructions",
+            PromptSlot::DeveloperPolicy,
+            100,
+            developer_section,
+        ));
+    }
 
+    // Skills → DeveloperCapabilities slot
+    let skills_section = build_skills_section(config, &work_dir, registry);
+    if !skills_section.is_empty() {
+        frag_registry.register(ContextFragment::new(
+            "skills",
+            PromptSlot::DeveloperCapabilities,
+            80,
+            skills_section,
+        ));
+    }
+
+    // User instructions → ContextualUser slot (higher priority = rendered first)
+    let user_section = build_user_instructions_section(user_instructions, &work_dir);
+    if !user_section.is_empty() {
+        frag_registry.register(ContextFragment::new(
+            "user_instructions",
+            PromptSlot::ContextualUser,
+            100,
+            user_section,
+        ));
+    }
+
+    // Environment context → ContextualUser slot
+    let env_context = EnvironmentContext::from_system(Some(&work_dir));
+    let env_section = render::render_environment_context(&env_context);
+    if !env_section.is_empty() {
+        frag_registry.register(ContextFragment::new(
+            "environment",
+            PromptSlot::ContextualUser,
+            90,
+            env_section,
+        ));
+    }
+
+    // Assemble: base_instructions as system message + fragment-based messages
     let mut prefix = Vec::new();
     if !base_instructions.trim().is_empty() {
         prefix.push(ChatMessage::system(base_instructions));
     }
-
-    let developer_sections = [developer_section, skills_section]
-        .into_iter()
-        .filter(|section| !section.is_empty())
-        .collect::<Vec<_>>();
-    if !developer_sections.is_empty() {
-        prefix.push(ChatMessage::developer(&developer_sections.join("\n\n")));
-    }
-
-    let contextual_user_sections = [user_section, env_section]
-        .into_iter()
-        .filter(|section| !section.is_empty())
-        .collect::<Vec<_>>();
-    if !contextual_user_sections.is_empty() {
-        prefix.push(ChatMessage::user(&contextual_user_sections.join("\n\n")));
-    }
+    prefix.extend(frag_registry.assemble());
 
     PromptMessages {
         prefix,
@@ -137,32 +221,29 @@ pub fn build_system_prompt_with_skill_registry(
     registry: Option<&SkillRegistry>,
     user_instructions: Option<&str>,
 ) -> String {
-    // Step 1: Handle full override
-    if let Some(custom) = override_prompt {
-        return custom.to_string();
-    }
-
-    // Step 2: Resolve work directory
+    // Step 1: Resolve work directory
     let work_dir = work_dir_override
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| config.resolve_work_dir());
 
-    // Step 3: Build base instructions (3-tier priority)
-    let base_instructions = resolve_base_instructions(config);
+    // Step 2: Build base instructions. The override replaces only base
+    // instructions; environment, skills, developer and user fragments remain.
+    let base_instructions =
+        BaseInstructions::new(resolve_base_instructions_text(config, override_prompt));
 
-    // Step 4: Build environment context
+    // Step 3: Build environment context
     let env_context = EnvironmentContext::from_system(Some(&work_dir));
     let env_section = render::render_environment_context(&env_context);
 
-    // Step 5: Build skills section (budget-aware)
+    // Step 4: Build skills section (budget-aware)
     let skills_section = build_skills_section(config, &work_dir, registry);
 
-    // Step 6: Build developer and user instructions sections
+    // Step 5: Build developer and user instructions sections
     let developer_section =
         build_developer_instructions_section(config.developer_instructions.as_deref());
     let user_section = build_user_instructions_section(user_instructions, &work_dir);
 
-    // Step 7: Assemble final prompt
+    // Step 6: Assemble final prompt
     assemble_prompt(
         &base_instructions,
         &env_section,
@@ -353,8 +434,12 @@ mod tests {
         assert!(instructions
             .text
             .contains("Use `exec_command` for terminal commands"));
-        assert!(instructions.text.contains("long-running foreground jobs"));
-        assert!(instructions.text.contains("commands that wait for stdin"));
+        assert!(instructions
+            .text
+            .contains("foreground job that is still running"));
+        assert!(instructions
+            .text
+            .contains("Do not infer persistence only from command names"));
     }
 
     #[test]
@@ -414,7 +499,9 @@ mod tests {
             None,
             Some("User instructions"),
         );
-        assert_eq!(result, "Override prompt");
+        assert!(result.starts_with("Override prompt"));
+        assert!(result.contains("<environment_context>"));
+        assert!(result.contains("<user_instructions>"));
     }
 
     #[test]

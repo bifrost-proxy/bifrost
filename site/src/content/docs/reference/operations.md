@@ -343,6 +343,7 @@ key1=value1&key2=value2&keyN=valueN
 | `tlsIntercept` | 启用 TLS 拦截 |
 | `tlsPassthrough` | 禁用 TLS 拦截（直接透传） |
 | `tlsOptions` | 配置 CONNECT 上游 TLS 选项 |
+| `upstreamUnsafeSsl` | 仅对命中规则的上游 HTTPS 连接跳过证书校验 |
 | `sniCallback` | 配置 SNI 回调元数据（CONNECT 请求） |
 | `devtools` | 为命中的代理页面开启显式 DevTools 控制授权 |
 | `passthrough` | 直连透传，不做任何修改 |
@@ -472,3 +473,19 @@ api.example.com h3://
 - 该能力控制的是"代理到目标服务"的上游协议选择，不是开启下游 UDP/QUIC 监听
 - 仅对 HTTPS 上游请求生效
 - 如果目标不支持 H3 或协商失败，会回退到现有的 HTTP/1.1 或 HTTP/2 转发链路
+
+### `upstreamUnsafeSsl`
+
+允许命中规则的上游 HTTPS 连接跳过证书校验。该协议用于内网、自签名或测试环境 HTTPS 上游，避免为了单个目标在启动整个 Bifrost 时使用全局 `--unsafe-ssl`。
+
+```txt
+internal-api.example.test https://10.37.102.138:8080 upstreamUnsafeSsl://true
+```
+
+说明：
+
+- `upstreamUnsafeSsl://true` 只影响 Bifrost 连接上游 HTTPS 服务时的证书校验，不改变客户端到 Bifrost 的 TLS 信任关系
+- 该能力按规则生效；未命中的其他请求仍执行默认安全证书校验
+- value 可写为 `true` / `1` / `yes` / `on` 启用，也可写为 `false` / `0` / `no` / `off` 显式关闭；裸 `upstreamUnsafeSsl://` 等价于启用
+- 该协议可以与 `https://`、`host://`、`tunnel://`、`includeFilter` / `excludeFilter` 等规则组合使用
+- 如果上游 TLS 握手因自签名或不可信证书失败，默认错误响应会提示给匹配规则追加 `upstreamUnsafeSsl://true`

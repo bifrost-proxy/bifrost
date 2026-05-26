@@ -1,7 +1,8 @@
-//! HTTP client for Chat Completions API with tool calling support.
+//! HTTP client for model APIs with tool calling support.
 
-use crate::config::AgentConfig;
+use crate::config::{AgentConfig, ModelWireApi};
 use crate::history;
+use crate::responses;
 use crate::types::{ChatMessage, ModelResponse, TokenUsage, ToolCallMessage, ToolDefinition};
 use bifrost_core::text::truncate_bytes_with_suffix;
 use std::path::Path;
@@ -11,8 +12,7 @@ use tracing::{info, warn};
 /// for embedded Bifrost services.
 pub const AGENT_PROXY_DISABLE_ENV: &str = "BIFROST_AGENT_DISABLE_MODEL_PROXY";
 
-/// HTTP client that calls a Chat Completions endpoint with tool support.
-/// HTTP client that calls a Chat Completions endpoint with tool support.
+/// HTTP client that calls the configured model endpoint with tool support.
 #[derive(Clone)]
 pub struct AgentClient {
     http: reqwest::Client,
@@ -142,6 +142,16 @@ impl AgentClient {
         output_schema: Option<&serde_json::Value>,
     ) -> Result<ModelResponse, String> {
         let effective = config.resolve_effective_config()?;
+        if effective.wire_api == ModelWireApi::Responses {
+            return responses::stream_model_response(
+                &self.http,
+                &effective,
+                messages,
+                tools,
+                output_schema,
+            )
+            .await;
+        }
         let url = effective.base_url.trim_end_matches('/').to_string();
         let (messages, sanitize_report) = sanitize_request_messages(messages);
 
@@ -211,9 +221,9 @@ impl AgentClient {
                 effective.request_timeout_secs,
             ));
 
-        if effective.use_azure_auth {
+        if effective.use_azure_auth && !effective.api_key.is_empty() {
             request = request.header("api-key", &effective.api_key);
-        } else {
+        } else if !effective.use_azure_auth && !effective.api_key.is_empty() {
             request = request.header("Authorization", format!("Bearer {}", effective.api_key));
         }
         for (key, value) in &effective.extra_headers {
@@ -505,6 +515,7 @@ mod tests {
             crate::config::ModelProviderConfig {
                 name: Some("boundary-provider".to_string()),
                 base_url: Some(format!("http://{addr}/chat/completions")),
+                wire_api: Some(crate::config::ModelWireApi::ChatCompletions),
                 env_key: None,
                 api_key: Some("boundary-key".to_string()),
                 http_headers: None,
@@ -530,5 +541,78 @@ mod tests {
             observed_roles.lock().unwrap().as_slice(),
             ["system", "user"]
         );
+    }
+
+    #[tokio::test]
+    async fn chat_completion_does_not_send_empty_bearer_header() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let captured_headers = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let captured_headers_server = captured_headers.clone();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buffer = Vec::new();
+            let mut header_end = None;
+            loop {
+                let mut chunk = [0_u8; 1024];
+                let n = stream.read(&mut chunk).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                buffer.extend_from_slice(&chunk[..n]);
+                header_end = buffer.windows(4).position(|w| w == b"\r\n\r\n");
+                if header_end.is_some() {
+                    break;
+                }
+            }
+            let headers = String::from_utf8_lossy(&buffer[..header_end.unwrap()]).to_string();
+            *captured_headers_server.lock().unwrap() = headers;
+
+            let payload = serde_json::json!({
+                "choices": [{
+                    "message": {"role": "assistant", "content": "ok"},
+                    "finish_reason": "stop"
+                }]
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                payload.len(),
+                payload
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let mut config = AgentConfig {
+            model: Some("empty-auth-model".to_string()),
+            model_provider: Some("empty-auth-provider".to_string()),
+            request_timeout_secs: Some(20),
+            ..AgentConfig::default()
+        };
+        config.model_providers.insert(
+            "empty-auth-provider".to_string(),
+            crate::config::ModelProviderConfig {
+                name: Some("empty-auth-provider".to_string()),
+                base_url: Some(format!("http://{addr}/chat/completions")),
+                wire_api: Some(crate::config::ModelWireApi::ChatCompletions),
+                env_key: None,
+                api_key: Some(String::new()),
+                http_headers: None,
+                env_http_headers: None,
+                request_max_retries: None,
+                stream_idle_timeout_ms: None,
+                stream_max_retries: None,
+            },
+        );
+
+        AgentClient::new()
+            .chat_completion(&config, &[ChatMessage::user("hello")], &[])
+            .await
+            .unwrap();
+        let headers = captured_headers.lock().unwrap();
+        assert!(!headers.to_lowercase().contains("authorization: bearer"));
     }
 }

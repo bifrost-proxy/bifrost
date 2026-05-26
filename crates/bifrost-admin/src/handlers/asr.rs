@@ -7,7 +7,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use futures_util::StreamExt;
@@ -77,6 +77,7 @@ struct ManagedAsrService {
 }
 
 const SERVICE_FOOTPRINT_MAX_SAMPLE_FAILURES: u32 = 3;
+const SERVICE_FOOTPRINT_WARNING_LOG_INTERVAL_SECS: u64 = 60;
 
 fn service_watchdog_should_kill_for_sample(
     footprint: u64,
@@ -84,6 +85,19 @@ fn service_watchdog_should_kill_for_sample(
     limit: u64,
 ) -> bool {
     reliable_physical_footprint && footprint > limit
+}
+
+fn service_watchdog_should_log_warning(last_logged: &mut Option<Instant>, now: Instant) -> bool {
+    let should_log = last_logged
+        .map(|last| {
+            now.duration_since(last)
+                >= Duration::from_secs(SERVICE_FOOTPRINT_WARNING_LOG_INTERVAL_SECS)
+        })
+        .unwrap_or(true);
+    if should_log {
+        *last_logged = Some(now);
+    }
+    should_log
 }
 
 #[derive(Clone)]
@@ -1350,6 +1364,8 @@ fn spawn_service_footprint_watchdog(target: AsrTarget, pid: u32, log_path: PathB
     tokio::spawn(async move {
         let mut peak = 0u64;
         let mut sample_failures = 0u32;
+        let mut advisory_warning_logged_at: Option<Instant> = None;
+        let mut sampler_warning_logged_at: Option<Instant> = None;
         let sample_interval = physical_footprint_sample_interval();
         loop {
             let sample = tokio::task::spawn_blocking(move || read_process_footprint_bytes(pid))
@@ -1392,56 +1408,67 @@ fn spawn_service_footprint_watchdog(target: AsrTarget, pid: u32, log_path: PathB
                         break;
                     }
                     if !reliable && sample_failures >= SERVICE_FOOTPRINT_MAX_SAMPLE_FAILURES {
-                        warn!(
-                            pid,
-                            model = %target.model,
-                            sample_failures,
-                            rss_mb = footprint / 1024 / 1024,
-                            limit_mb = limit / 1024 / 1024,
-                            peak_mb = peak / 1024 / 1024,
-                            "ASR service physical footprint unavailable repeatedly; continuing with RSS-only advisory samples"
-                        );
-                        append_service_watchdog_log(
-                            &log_path,
-                            format!(
-                                "Bifrost ASR service watchdog warning pid={pid}: physical footprint unavailable {sample_failures} times; rss_mb={} limit_mb={} peak_mb={}; continuing\n",
-                                footprint / 1024 / 1024,
-                                limit / 1024 / 1024,
-                                peak / 1024 / 1024
-                            ),
-                        );
+                        if service_watchdog_should_log_warning(
+                            &mut advisory_warning_logged_at,
+                            Instant::now(),
+                        ) {
+                            warn!(
+                                pid,
+                                model = %target.model,
+                                sample_failures,
+                                rss_mb = footprint / 1024 / 1024,
+                                limit_mb = limit / 1024 / 1024,
+                                peak_mb = peak / 1024 / 1024,
+                                "ASR service physical footprint unavailable repeatedly; continuing with RSS-only advisory samples"
+                            );
+                            append_service_watchdog_log(
+                                &log_path,
+                                format!(
+                                    "Bifrost ASR service watchdog advisory pid={pid}: physical footprint unavailable {sample_failures} times; rss_mb={} limit_mb={} peak_mb={}; process_alive=true continuing\n",
+                                    footprint / 1024 / 1024,
+                                    limit / 1024 / 1024,
+                                    peak / 1024 / 1024
+                                ),
+                            );
+                        }
                         sample_failures = 0;
                     }
                 }
                 Err(error) => {
                     if !process_is_alive(pid) {
+                        append_service_watchdog_log(
+                            &log_path,
+                            format!(
+                                "Bifrost ASR service watchdog noticed pid={pid} exited during footprint sampling: {error}\n"
+                            ),
+                        );
                         clear_managed_service_for_pid(pid).await;
                         break;
                     }
                     sample_failures += 1;
-                    warn!(
-                        pid,
-                        sample_failures,
-                        %error,
-                        "ASR service footprint sampling failed"
-                    );
                     if sample_failures >= SERVICE_FOOTPRINT_MAX_SAMPLE_FAILURES {
-                        warn!(
-                            pid,
-                            model = %target.model,
-                            sample_failures,
-                            limit_mb = limit / 1024 / 1024,
-                            peak_mb = peak / 1024 / 1024,
-                            "ASR service footprint sampling failed repeatedly; continuing without killing service"
-                        );
-                        append_service_watchdog_log(
-                            &log_path,
-                            format!(
-                                "Bifrost ASR service watchdog warning pid={pid}: footprint sampling failed {sample_failures} times; limit_mb={} peak_mb={}; continuing\n",
-                                limit / 1024 / 1024,
-                                peak / 1024 / 1024
-                            ),
-                        );
+                        if service_watchdog_should_log_warning(
+                            &mut sampler_warning_logged_at,
+                            Instant::now(),
+                        ) {
+                            warn!(
+                                pid,
+                                model = %target.model,
+                                sample_failures,
+                                limit_mb = limit / 1024 / 1024,
+                                peak_mb = peak / 1024 / 1024,
+                                %error,
+                                "ASR service footprint sampler failed repeatedly while process is alive; continuing without killing service"
+                            );
+                            append_service_watchdog_log(
+                                &log_path,
+                                format!(
+                                    "Bifrost ASR service watchdog sampler_failure pid={pid}: footprint sampling failed {sample_failures} times; process_alive=true limit_mb={} peak_mb={}; continuing; last_error={error}\n",
+                                    limit / 1024 / 1024,
+                                    peak / 1024 / 1024
+                                ),
+                            );
+                        }
                         sample_failures = 0;
                     }
                 }
@@ -2337,13 +2364,14 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::{Mutex as StdMutex, OnceLock};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use super::{
         asr_download_requests, build_asr_download_client, default_home,
         persisted_target_matches_request, plan_upload_chunk_boundaries, same_service_owner,
         service_watchdog_should_kill_for_sample, target_from_query, target_matches_request,
         validate_loopback_host, wav_pcm_duration_ms, ASR_UPLOAD_CHUNK_DURATION_SECS,
+        SERVICE_FOOTPRINT_WARNING_LOG_INTERVAL_SECS,
     };
 
     fn proxy_env_lock() -> &'static StdMutex<()> {
@@ -2574,6 +2602,25 @@ mod tests {
             limit
         ));
         assert!(!service_watchdog_should_kill_for_sample(limit, true, limit));
+    }
+
+    #[test]
+    fn service_watchdog_warning_log_is_rate_limited() {
+        let mut last_logged = None;
+        let start = Instant::now();
+
+        assert!(super::service_watchdog_should_log_warning(
+            &mut last_logged,
+            start
+        ));
+        assert!(!super::service_watchdog_should_log_warning(
+            &mut last_logged,
+            start + Duration::from_secs(SERVICE_FOOTPRINT_WARNING_LOG_INTERVAL_SECS - 1)
+        ));
+        assert!(super::service_watchdog_should_log_warning(
+            &mut last_logged,
+            start + Duration::from_secs(SERVICE_FOOTPRINT_WARNING_LOG_INTERVAL_SECS)
+        ));
     }
 
     #[test]

@@ -14,7 +14,7 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use crate::handlers::{error_response, json_response, method_not_allowed, BoxBody};
+use crate::handlers::{error_response, full_body, json_response, method_not_allowed, BoxBody};
 use crate::im_gateway::event_router::ImEventRouter;
 use crate::im_gateway::progress_card::ImAgentProgressRegistry;
 use crate::im_gateway::provider::ImProvider;
@@ -77,6 +77,9 @@ pub async fn handle_im_gateway(
 
     let sub = path.strip_prefix("/api/im-gateway").unwrap_or(path);
 
+    if let Some(rest) = sub.strip_prefix("/attachments") {
+        return utils::handle_attachment(req, rest).await;
+    }
     if let Some(rest) = sub.strip_prefix("/providers") {
         return providers::handle_providers(req, &service, rest).await;
     }

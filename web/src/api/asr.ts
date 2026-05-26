@@ -463,7 +463,7 @@ export function defaultAsrParams(): Required<
   return {
     host: "127.0.0.1",
     language: "chinese",
-    model: "Qwen3-ASR-1.7B",
+    model: "Qwen3-ASR-0.6B",
     ownerModule: "speech_workbench",
   };
 }
@@ -487,7 +487,7 @@ export function defaultModelManagementParams(): Required<
   return {
     host: "127.0.0.1",
     language: "chinese",
-    model: "Qwen3-ASR-1.7B",
+    model: "Qwen3-ASR-0.6B",
     ownerModule: "model_management",
   };
 }
@@ -954,6 +954,8 @@ export interface AsrDailyAgentConfig {
   session_key?: string;
   instructions_source: "default" | "custom";
   im_delivery: AsrDailyAgentImDeliveryConfig;
+  report_sync_dir?: string;
+  last_report_sync?: AsrDailyAgentReportSyncResult;
   last_run_at_ms?: number;
   last_status?: string;
   last_error?: string;
@@ -967,6 +969,16 @@ export interface AsrDailyAgentImDeliveryConfig {
   send_policy: "on_success_with_report" | "on_success" | "always";
   last_sent_at_ms?: number;
   last_send_error?: string;
+}
+
+export interface AsrDailyAgentReportSyncResult {
+  target_dir: string;
+  total_files: number;
+  copied_files: number;
+  skipped_files: number;
+  failed_files: number;
+  synced_at_ms: number;
+  errors?: string[];
 }
 
 export interface AsrDailyAgentWorkspaceStatus {
@@ -1110,6 +1122,17 @@ export async function sendDailyAgentReport(
   taskId: string,
 ): Promise<{ ok: boolean; sent_reports: string[] }> {
   const url = buildApiUrl(`/asr/tasks/${taskId}/daily-agent/send`);
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${getAdminToken()}` },
+  });
+  return readJsonResponse(response);
+}
+
+export async function syncDailyAgentReports(
+  taskId: string,
+): Promise<{ ok: boolean; sync: AsrDailyAgentReportSyncResult }> {
+  const url = buildApiUrl(`/asr/tasks/${taskId}/daily-agent/sync`);
   const response = await fetch(url, {
     method: "POST",
     headers: { Authorization: `Bearer ${getAdminToken()}` },

@@ -5,12 +5,13 @@
 
 use crate::history;
 use crate::tools::goal::GoalState;
+use crate::tools::update_plan::PlanStep;
 use crate::types::{ChatImageInput, ChatMessage, ToolCallMessage};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{BufRead, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use tracing::debug;
+use tracing::{debug, warn};
 
 // ---------------------------------------------------------------------------
 // ConversationEvent
@@ -39,6 +40,8 @@ pub mod event_types {
     pub const TITLE_UPDATED: &str = "title_updated";
     pub const GOAL_UPDATED: &str = "goal_updated";
     pub const GOAL_CLEARED: &str = "goal_cleared";
+    pub const PLAN_UPDATED: &str = "plan_updated";
+    pub const PLAN_CLEARED: &str = "plan_cleared";
 }
 
 // ---------------------------------------------------------------------------
@@ -84,6 +87,15 @@ impl ConversationRecorder {
         let mut recorder = Self::new(data_dir, session_key);
         recorder.max_bytes = max_bytes.filter(|value| *value > 0);
         recorder
+    }
+
+    /// Continue recording into an existing, already-validated JSONL file.
+    pub fn from_existing_file(file_path: PathBuf, max_bytes: Option<usize>) -> Self {
+        Self {
+            file_path,
+            writer: None,
+            max_bytes: max_bytes.filter(|value| *value > 0),
+        }
     }
 
     /// Record a conversation event.
@@ -276,6 +288,32 @@ impl ConversationRecorder {
         })
     }
 
+    pub fn record_plan_cleared(&mut self, session_key: &str, reason: &str) -> Result<(), String> {
+        self.record(ConversationEvent {
+            timestamp: current_time_secs(),
+            event_type: event_types::PLAN_CLEARED.to_string(),
+            session_key: session_key.to_string(),
+            content: serde_json::json!({ "reason": reason }),
+        })
+    }
+
+    pub fn record_plan_updated(
+        &mut self,
+        session_key: &str,
+        plan: &[PlanStep],
+        explanation: Option<&str>,
+    ) -> Result<(), String> {
+        self.record(ConversationEvent {
+            timestamp: current_time_secs(),
+            event_type: event_types::PLAN_UPDATED.to_string(),
+            session_key: session_key.to_string(),
+            content: serde_json::json!({
+                "explanation": explanation,
+                "plan": plan,
+            }),
+        })
+    }
+
     /// Flush and close the recorder.
     pub fn close(&mut self) {
         if let Some(ref mut writer) = self.writer {
@@ -363,6 +401,39 @@ impl Drop for ConversationRecorder {
 /// Maximum session file size we will attempt to load (64 MiB).
 const MAX_SESSION_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
+#[derive(Debug, Clone)]
+pub struct ConversationLoadReport {
+    pub messages: Vec<ChatMessage>,
+    pub skipped_lines: usize,
+    pub session_key: Option<String>,
+}
+
+/// Validate that a caller-provided history path points to a JSONL session file
+/// under the configured agent data directory.
+pub fn validate_conversation_path(data_dir: &Path, path: &Path) -> Result<PathBuf, String> {
+    let sessions_root = data_dir.join("sessions");
+    let canonical_root = sessions_root
+        .canonicalize()
+        .map_err(|e| format!("session history root is not available: {e}"))?;
+    let canonical_path = path
+        .canonicalize()
+        .map_err(|e| format!("history file is not available: {e}"))?;
+    if !canonical_path.starts_with(&canonical_root) {
+        return Err("history path is outside the agent sessions directory".to_string());
+    }
+    let metadata =
+        std::fs::metadata(&canonical_path).map_err(|e| format!("stat history file: {e}"))?;
+    if !metadata.is_file() {
+        return Err("history path is not a file".to_string());
+    }
+    if canonical_path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+        return Err("history path must point to a .jsonl file".to_string());
+    }
+    bifrost_core::text::check_file_size(&canonical_path, MAX_SESSION_FILE_BYTES)
+        .map_err(|e| format!("session file too large to load: {e}"))?;
+    Ok(canonical_path)
+}
+
 /// Load a previous conversation from a JSONL file.
 pub fn load_conversation(path: &Path) -> Result<Vec<ChatMessage>, String> {
     bifrost_core::text::check_file_size(path, MAX_SESSION_FILE_BYTES)
@@ -370,16 +441,56 @@ pub fn load_conversation(path: &Path) -> Result<Vec<ChatMessage>, String> {
     let file = std::fs::File::open(path).map_err(|e| format!("open conversation file: {e}"))?;
     let reader = std::io::BufReader::new(file);
 
+    load_conversation_from_reader(reader, true).map(|report| report.messages)
+}
+
+/// Load a previous conversation and skip malformed JSONL rows.
+///
+/// This is intended for restore/continue flows where a process crash may leave
+/// a partially-written final line. Valid rows are still sanitized before use.
+pub fn load_conversation_lossy(path: &Path) -> Result<ConversationLoadReport, String> {
+    bifrost_core::text::check_file_size(path, MAX_SESSION_FILE_BYTES)
+        .map_err(|e| format!("session file too large to load: {e}"))?;
+    let file = std::fs::File::open(path).map_err(|e| format!("open conversation file: {e}"))?;
+    let reader = std::io::BufReader::new(file);
+
+    load_conversation_from_reader(reader, false)
+}
+
+fn load_conversation_from_reader<R: BufRead>(
+    reader: R,
+    strict: bool,
+) -> Result<ConversationLoadReport, String> {
     let mut messages = Vec::new();
     let mut pending_tool_calls: HashMap<String, ToolCallMessage> = HashMap::new();
-    for line in reader.lines() {
-        let line = line.map_err(|e| format!("read line: {e}"))?;
+    let mut skipped_lines = 0usize;
+    let mut session_key = None;
+    for (line_no, line) in reader.lines().enumerate() {
+        let line = match line {
+            Ok(line) => line,
+            Err(e) if strict => return Err(format!("read line: {e}")),
+            Err(e) => {
+                skipped_lines += 1;
+                warn!(line = line_no + 1, error = %e, "skipping unreadable conversation JSONL line");
+                continue;
+            }
+        };
         if line.trim().is_empty() {
             continue;
         }
 
-        let event: ConversationEvent =
-            serde_json::from_str(&line).map_err(|e| format!("parse event: {e}"))?;
+        let event: ConversationEvent = match serde_json::from_str(&line) {
+            Ok(event) => event,
+            Err(e) if strict => return Err(format!("parse event: {e}")),
+            Err(e) => {
+                skipped_lines += 1;
+                warn!(line = line_no + 1, error = %e, "skipping malformed conversation JSONL line");
+                continue;
+            }
+        };
+        if session_key.is_none() && !event.session_key.is_empty() {
+            session_key = Some(event.session_key.clone());
+        }
 
         match event.event_type.as_str() {
             event_types::USER_MESSAGE => {
@@ -442,13 +553,38 @@ pub fn load_conversation(path: &Path) -> Result<Vec<ChatMessage>, String> {
                     }
                 }
             }
+            event_types::COMPACTION => {
+                if let Some(replacement_history) = event.content.get("replacement_history") {
+                    match serde_json::from_value::<Vec<ChatMessage>>(replacement_history.clone()) {
+                        Ok(replacement_history) => {
+                            messages = history::sanitize_chat_history(&replacement_history).0;
+                            pending_tool_calls.clear();
+                        }
+                        Err(error) if strict => {
+                            return Err(format!("parse compaction replacement history: {error}"));
+                        }
+                        Err(error) => {
+                            skipped_lines += 1;
+                            warn!(
+                                line = line_no + 1,
+                                error = %error,
+                                "skipping malformed compaction replacement history"
+                            );
+                        }
+                    }
+                }
+            }
             _ => {
-                // Skip tool_call, compaction, and other meta events for replay
+                // Skip other meta events for replay.
             }
         }
     }
 
-    Ok(history::sanitize_chat_history(&messages).0)
+    Ok(ConversationLoadReport {
+        messages: history::sanitize_chat_history(&messages).0,
+        skipped_lines,
+        session_key,
+    })
 }
 
 /// Load raw conversation events from a JSONL file.
@@ -459,17 +595,37 @@ pub fn load_conversation(path: &Path) -> Result<Vec<ChatMessage>, String> {
 pub fn load_conversation_events(path: &Path) -> Result<Vec<ConversationEvent>, String> {
     let file = std::fs::File::open(path).map_err(|e| format!("open conversation file: {e}"))?;
     let reader = std::io::BufReader::new(file);
+    load_conversation_events_from_reader(reader, true)
+}
 
+fn load_conversation_events_lossy(path: &Path) -> Result<Vec<ConversationEvent>, String> {
+    let file = std::fs::File::open(path).map_err(|e| format!("open conversation file: {e}"))?;
+    let reader = std::io::BufReader::new(file);
+    load_conversation_events_from_reader(reader, false)
+}
+
+fn load_conversation_events_from_reader<R: BufRead>(
+    reader: R,
+    strict: bool,
+) -> Result<Vec<ConversationEvent>, String> {
     let mut events = Vec::new();
-    for line in reader.lines() {
+    for (line_no, line) in reader.lines().enumerate() {
         let line = line.map_err(|e| format!("read line: {e}"))?;
         if line.trim().is_empty() {
             continue;
         }
 
-        let event: ConversationEvent =
-            serde_json::from_str(&line).map_err(|e| format!("parse event: {e}"))?;
-        events.push(event);
+        match serde_json::from_str::<ConversationEvent>(&line) {
+            Ok(event) => events.push(event),
+            Err(error) if strict => return Err(format!("parse event: {error}")),
+            Err(error) => {
+                warn!(
+                    line = line_no + 1,
+                    error = %error,
+                    "skipping malformed event while loading runtime state"
+                );
+            }
+        }
     }
 
     Ok(events)
@@ -478,13 +634,15 @@ pub fn load_conversation_events(path: &Path) -> Result<Vec<ConversationEvent>, S
 #[derive(Debug, Clone, Default)]
 pub struct SessionRuntimeState {
     pub current_goal: Option<GoalState>,
+    pub current_plan: Option<Vec<PlanStep>>,
     pub total_tokens_used: Option<u64>,
+    pub last_response_tokens: Option<u64>,
     pub compaction_count: u32,
     pub base_instructions: Option<String>,
 }
 
 pub fn load_session_runtime_state(path: &Path) -> Result<SessionRuntimeState, String> {
-    let events = load_conversation_events(path)?;
+    let events = load_conversation_events_lossy(path)?;
     let mut state = SessionRuntimeState::default();
 
     for event in events {
@@ -504,6 +662,52 @@ pub fn load_session_runtime_state(path: &Path) -> Result<SessionRuntimeState, St
             }
             event_types::GOAL_CLEARED => {
                 state.current_goal = None;
+            }
+            event_types::PLAN_UPDATED => {
+                let plan = event
+                    .content
+                    .get("plan")
+                    .cloned()
+                    .ok_or_else(|| "plan_updated event missing plan".to_string())?;
+                state.current_plan = Some(
+                    serde_json::from_value(plan).map_err(|e| format!("parse plan state: {e}"))?,
+                );
+            }
+            event_types::PLAN_CLEARED => {
+                state.current_plan = None;
+            }
+            event_types::COMPACTION => {
+                if let Some(tokens) = event
+                    .content
+                    .get("post_tokens")
+                    .and_then(|value| value.as_u64())
+                {
+                    state.last_response_tokens = Some(tokens);
+                }
+                if event
+                    .content
+                    .get("current_plan")
+                    .is_some_and(|value| value.is_null())
+                {
+                    state.current_plan = None;
+                    continue;
+                }
+                if let Some(plan) = event
+                    .content
+                    .get("current_plan")
+                    .filter(|value| !value.is_null())
+                    .cloned()
+                {
+                    state.current_plan = Some(
+                        serde_json::from_value(plan)
+                            .map_err(|e| format!("parse compacted plan state: {e}"))?,
+                    );
+                }
+            }
+            event_types::ASSISTANT_MESSAGE => {
+                if let Some(tokens) = event.content.get("tokens").and_then(|v| v.as_u64()) {
+                    state.last_response_tokens = Some(tokens);
+                }
             }
             _ => {}
         }
@@ -533,6 +737,18 @@ pub struct SessionFileSummary {
     pub session_key: Option<String>,
     /// Session title (intent/topic) set by the agent via set_title tool.
     pub title: Option<String>,
+    /// First user message preview used as a stable display title fallback.
+    pub first_user_message: Option<String>,
+}
+
+fn truncate_session_title(value: &str) -> String {
+    const MAX_CHARS: usize = 80;
+    let preview: String = value.chars().take(MAX_CHARS).collect();
+    if value.chars().count() > MAX_CHARS {
+        format!("{preview}…")
+    } else {
+        preview
+    }
 }
 
 /// Quick scan of a session JSONL file to extract summary info without loading all events.
@@ -584,6 +800,14 @@ pub fn scan_session_summary(path: &Path) -> SessionFileSummary {
             }
             "user_message" => {
                 summary.user_turns += 1;
+                if summary.first_user_message.is_none() {
+                    if let Some(message) = event.content.get("message").and_then(|v| v.as_str()) {
+                        let message = message.trim();
+                        if !message.is_empty() {
+                            summary.first_user_message = Some(truncate_session_title(message));
+                        }
+                    }
+                }
             }
             "assistant_message" => {
                 summary.assistant_turns += 1;
@@ -646,10 +870,11 @@ pub fn list_conversations(data_dir: &Path, session_key: Option<&str>) -> Vec<Pat
     // Filter by session key if provided
     if let Some(key) = session_key {
         let sanitized = sanitize_key(key);
+        let prefix = format!("session-{sanitized}-");
         files.retain(|p| {
             p.file_name()
                 .and_then(|n| n.to_str())
-                .map(|n| n.contains(&sanitized))
+                .map(|n| n.starts_with(&prefix) && n.ends_with(".jsonl"))
                 .unwrap_or(false)
         });
     }
@@ -779,6 +1004,68 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].content.as_deref(), Some("hello"));
         assert_eq!(messages[1].content.as_deref(), Some("hi there"));
+    }
+
+    #[test]
+    fn test_validate_conversation_path_rejects_paths_outside_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("sessions")).unwrap();
+        let outside = dir.path().join("outside.jsonl");
+        std::fs::write(&outside, "").unwrap();
+
+        let error = validate_conversation_path(dir.path(), &outside).unwrap_err();
+
+        assert!(error.contains("outside the agent sessions directory"));
+    }
+
+    #[test]
+    fn test_load_conversation_lossy_skips_malformed_jsonl_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let path = sessions_dir.join("session-lossy-1.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"timestamp":1,"event_type":"user_message","session_key":"lossy","content":{"message":"hello"}}"#
+                .to_string()
+                + "\n"
+                + r#"{"timestamp":2,"event_type":"assistant_message","session_key":"lossy","content":{"message":"hi"}}"#
+                + "\n"
+                + r#"{"timestamp":3,"event_type":"assistant_message""#
+                + "\n",
+        )
+        .unwrap();
+
+        assert!(load_conversation(&path).is_err());
+        let report = load_conversation_lossy(&path).unwrap();
+
+        assert_eq!(report.skipped_lines, 1);
+        assert_eq!(report.session_key.as_deref(), Some("lossy"));
+        assert_eq!(report.messages.len(), 2);
+        assert_eq!(report.messages[0].content.as_deref(), Some("hello"));
+        assert_eq!(report.messages[1].content.as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn test_existing_file_recorder_appends_to_restored_jsonl() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut recorder = ConversationRecorder::new(dir.path(), "continue-session");
+        recorder
+            .record_user_message("continue-session", "first")
+            .unwrap();
+        let path = recorder.file_path().to_path_buf();
+        recorder.close();
+
+        let mut continuation = ConversationRecorder::from_existing_file(path.clone(), None);
+        continuation
+            .record_assistant_message("continue-session", "second")
+            .unwrap();
+        continuation.close();
+
+        let messages = load_conversation(&path).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].content.as_deref(), Some("first"));
+        assert_eq!(messages[1].content.as_deref(), Some("second"));
     }
 
     #[test]
@@ -968,6 +1255,25 @@ mod tests {
     }
 
     #[test]
+    fn test_list_conversations_uses_exact_session_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut exact = ConversationRecorder::new(dir.path(), "abc");
+        exact.record_user_message("abc", "exact").unwrap();
+        exact.close();
+        let mut superset = ConversationRecorder::new(dir.path(), "xabc");
+        superset.record_user_message("xabc", "wrong").unwrap();
+        superset.close();
+
+        let files = list_conversations(dir.path(), Some("abc"));
+
+        assert_eq!(files.len(), 1);
+        assert!(files[0]
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("session-abc-")));
+    }
+
+    #[test]
     fn test_list_conversations_empty() {
         let dir = tempfile::tempdir().unwrap();
         let files = list_conversations(dir.path(), None);
@@ -1149,6 +1455,48 @@ mod tests {
         let state = load_session_runtime_state(&path).unwrap();
         assert_eq!(state.current_goal, None);
         assert_eq!(state.total_tokens_used, Some(150));
+        assert_eq!(state.last_response_tokens, Some(120));
+        assert_eq!(state.compaction_count, 1);
+    }
+
+    #[test]
+    fn test_load_session_runtime_state_keeps_context_snapshot_separate_from_cumulative_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("context-snapshot.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"timestamp":1,"event_type":"assistant_message","session_key":"s","content":{"message":"first","tokens":120}}"#
+                .to_string()
+                + "\n"
+                + r#"{"timestamp":2,"event_type":"assistant_message","session_key":"s","content":{"message":"second","tokens":180}}"#
+                + "\n"
+                + r#"{"timestamp":3,"event_type":"session_end","session_key":"s","content":{"total_tokens":50000}}"#
+                + "\n",
+        )
+        .unwrap();
+
+        let state = load_session_runtime_state(&path).unwrap();
+        assert_eq!(state.total_tokens_used, Some(50000));
+        assert_eq!(state.last_response_tokens, Some(180));
+    }
+
+    #[test]
+    fn test_load_session_runtime_state_uses_compaction_post_tokens_as_context_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("context-snapshot-compacted.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"timestamp":1,"event_type":"assistant_message","session_key":"s","content":{"message":"before","tokens":1200}}"#
+                .to_string()
+                + "\n"
+                + r#"{"timestamp":2,"event_type":"compaction","session_key":"s","content":{"total_tokens":1500,"post_tokens":240,"compaction_count":1}}"#
+                + "\n",
+        )
+        .unwrap();
+
+        let state = load_session_runtime_state(&path).unwrap();
+        assert_eq!(state.total_tokens_used, Some(1500));
+        assert_eq!(state.last_response_tokens, Some(240));
         assert_eq!(state.compaction_count, 1);
     }
 
@@ -1164,6 +1512,55 @@ mod tests {
         let state = load_session_runtime_state(recorder.file_path()).unwrap();
         assert_eq!(state.total_tokens_used, Some(42));
         assert_eq!(state.compaction_count, 0);
+    }
+
+    #[test]
+    fn scan_session_summary_uses_first_user_message_as_title_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-title.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"timestamp":1,"event_type":"session_start","session_key":"s","content":{"source":"admin-api","work_dir":"/tmp/work"}}"#
+                .to_string()
+                + "\n"
+                + r#"{"timestamp":2,"event_type":"user_message","session_key":"s","content":{"message":"  hello from the first turn  "}}"#
+                + "\n"
+                + r#"{"timestamp":3,"event_type":"assistant_message","session_key":"s","content":{"message":"done"}}"#
+                + "\n",
+        )
+        .unwrap();
+
+        let summary = scan_session_summary(&path);
+        assert_eq!(
+            summary.first_user_message.as_deref(),
+            Some("hello from the first turn")
+        );
+        assert_eq!(summary.title, None);
+        assert_eq!(summary.work_dir.as_deref(), Some("/tmp/work"));
+    }
+
+    #[test]
+    fn scan_session_summary_keeps_explicit_title_separate_from_first_user_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-explicit-title.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"timestamp":1,"event_type":"session_start","session_key":"s","content":{"source":"admin-api"}}"#
+                .to_string()
+                + "\n"
+                + r#"{"timestamp":2,"event_type":"user_message","session_key":"s","content":{"message":"first user fallback text"}}"#
+                + "\n"
+                + r#"{"timestamp":3,"event_type":"title_updated","session_key":"s","content":{"title":"Bifrost Edge"}}"#
+                + "\n",
+        )
+        .unwrap();
+
+        let summary = scan_session_summary(&path);
+        assert_eq!(summary.title.as_deref(), Some("Bifrost Edge"));
+        assert_eq!(
+            summary.first_user_message.as_deref(),
+            Some("first user fallback text")
+        );
     }
 
     #[test]
@@ -1232,6 +1629,140 @@ mod tests {
         assert_eq!(events[0].content["tokens_saved"], 42);
         let state = load_session_runtime_state(recorder.file_path()).unwrap();
         assert_eq!(state.compaction_count, 1);
+    }
+
+    #[test]
+    fn test_plan_updated_round_trip_restores_runtime_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut recorder = ConversationRecorder::new(dir.path(), "plan-session");
+        let plan = vec![
+            PlanStep {
+                step: "inspect logs".to_string(),
+                status: crate::tools::update_plan::PlanStepStatus::Completed,
+            },
+            PlanStep {
+                step: "fix compaction".to_string(),
+                status: crate::tools::update_plan::PlanStepStatus::InProgress,
+            },
+        ];
+
+        recorder
+            .record_plan_updated("plan-session", &plan, Some("initial plan"))
+            .unwrap();
+        recorder.close();
+
+        let events = load_conversation_events(recorder.file_path()).unwrap();
+        assert_eq!(events[0].event_type, PLAN_UPDATED);
+        assert_eq!(events[0].content["plan"][0]["step"], "inspect logs");
+        let state = load_session_runtime_state(recorder.file_path()).unwrap();
+        assert_eq!(state.current_plan, Some(plan));
+    }
+
+    #[test]
+    fn test_plan_cleared_round_trip_resets_runtime_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut recorder = ConversationRecorder::new(dir.path(), "plan-clear-session");
+        let plan = vec![PlanStep {
+            step: "old task".to_string(),
+            status: crate::tools::update_plan::PlanStepStatus::Completed,
+        }];
+
+        recorder
+            .record_plan_updated("plan-clear-session", &plan, Some("done"))
+            .unwrap();
+        recorder
+            .record_plan_cleared("plan-clear-session", "new_turn_after_completion")
+            .unwrap();
+        recorder.close();
+
+        let events = load_conversation_events(recorder.file_path()).unwrap();
+        assert_eq!(events[0].event_type, PLAN_UPDATED);
+        assert_eq!(events[1].event_type, PLAN_CLEARED);
+        assert_eq!(events[1].content["reason"], "new_turn_after_completion");
+        let state = load_session_runtime_state(recorder.file_path()).unwrap();
+        assert!(state.current_plan.is_none());
+    }
+
+    #[test]
+    fn test_compaction_with_null_plan_resets_runtime_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut recorder = ConversationRecorder::new(dir.path(), "plan-compact-clear-session");
+        let plan = vec![PlanStep {
+            step: "old task".to_string(),
+            status: crate::tools::update_plan::PlanStepStatus::Completed,
+        }];
+
+        recorder
+            .record_plan_updated("plan-compact-clear-session", &plan, Some("done"))
+            .unwrap();
+        recorder
+            .record_compaction(
+                "plan-compact-clear-session",
+                serde_json::json!({
+                    "summary": "compact without active plan",
+                    "current_plan": null,
+                }),
+            )
+            .unwrap();
+        recorder.close();
+
+        let state = load_session_runtime_state(recorder.file_path()).unwrap();
+        assert!(state.current_plan.is_none());
+    }
+
+    #[test]
+    fn test_runtime_state_skips_malformed_jsonl_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runtime-lossy.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"timestamp":1,"event_type":"plan_updated","session_key":"s","content":{"plan":[{"step":"keep plan","status":"completed"}]}}"#
+                .to_string()
+                + "\n"
+                + r#"{"timestamp":2,"event_type":"assistant_message""#
+                + "\n",
+        )
+        .unwrap();
+
+        let state = load_session_runtime_state(&path).unwrap();
+        let plan = state.current_plan.expect("plan restored");
+        assert_eq!(plan[0].step, "keep plan");
+    }
+
+    #[test]
+    fn test_load_conversation_uses_compaction_replacement_history_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-compacted.jsonl");
+        let replacement_history = serde_json::to_string(&vec![
+            ChatMessage::user("latest user request"),
+            ChatMessage::user("compacted summary"),
+        ])
+        .unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{}\n{}\n",
+                r#"{"timestamp":1,"event_type":"user_message","session_key":"s","content":{"message":"old user"}}"#,
+                r#"{"timestamp":2,"event_type":"compaction","session_key":"s","content":{"compaction_count":1,"replacement_history":"#
+                    .to_string()
+                    + &replacement_history
+                    + "}}",
+                r#"{"timestamp":3,"event_type":"assistant_message","session_key":"s","content":{"message":"continued after compact"}}"#,
+            ),
+        )
+        .unwrap();
+
+        let messages = load_conversation(&path).unwrap();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].content.as_deref(), Some("latest user request"));
+        assert_eq!(messages[1].content.as_deref(), Some("compacted summary"));
+        assert_eq!(
+            messages[2].content.as_deref(),
+            Some("continued after compact")
+        );
+        assert!(messages
+            .iter()
+            .all(|message| { message.content.as_deref() != Some("old user") }));
     }
 
     #[test]

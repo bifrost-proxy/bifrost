@@ -1,6 +1,12 @@
 //! Memory system constants.
 
-/// Maximum character limit for memory summary injection.
+/// Maximum character limit for memory summary injection (legacy, deprecated).
+///
+/// Prefer using `crate::memory_prompts::MEMORY_SUMMARY_TOKEN_LIMIT` with
+/// `crate::memory_prompts::truncate_to_token_limit()` for token-aware truncation.
+/// This constant is retained for backward compatibility with callers that have
+/// not yet migrated.
+#[allow(dead_code)]
 pub(crate) const MEMORY_SUMMARY_TOKEN_LIMIT_CHARS: usize = 24_000;
 /// Default maximum raw memories available for Phase 2 consolidation.
 pub(crate) const DEFAULT_MAX_RAW_MEMORIES_FOR_CONSOLIDATION: usize = 512;
@@ -23,6 +29,14 @@ pub(crate) const MEMORY_CONSOLIDATION_FAILURE_LIMIT: usize = 5;
 
 /// Maximum number of tool-calling rounds the Phase 2 sub-agent is allowed (P2-1).
 pub(crate) const PHASE2_AGENT_MAX_ROUNDS: usize = 10;
+
+/// Default context window percentage for rollout token budget calculation.
+/// Aligned with Codex `CONTEXT_WINDOW_PERCENT = 70`.
+pub(crate) const ROLLOUT_CONTEXT_WINDOW_PERCENT: usize = 70;
+
+/// Default rollout token limit when model context window is unknown.
+/// Approximately 100K tokens — conservative default for most models.
+pub(crate) const DEFAULT_ROLLOUT_TOKEN_LIMIT: usize = 100_000;
 
 /// Memory skills subdirectory name.
 pub(crate) const MEMORY_SKILLS_SUBDIR: &str = "_memory";

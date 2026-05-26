@@ -764,6 +764,50 @@ pub enum AiAsrTaskCommands {
         #[arg(long, help = "Print JSON")]
         json: bool,
     },
+    #[command(about = "Watch ASR directory task progress in a terminal UI")]
+    Watch {
+        #[arg(help = "ASR task ID, unique ID prefix, or unique task name")]
+        task: Option<String>,
+        #[arg(
+            long,
+            default_value_t = 1000,
+            help = "Refresh interval in milliseconds"
+        )]
+        refresh_ms: u64,
+        #[arg(long, help = "Fail instead of opening an interactive task selector")]
+        no_interactive_select: bool,
+        #[arg(
+            long,
+            help = "Show all ASR tasks instead of auto-entering the only task"
+        )]
+        all: bool,
+        #[arg(long, help = "Print one watch snapshot as JSON and exit")]
+        json_snapshot: bool,
+        #[arg(long, help = "Disable run/pause/resume shortcuts")]
+        read_only: bool,
+    },
+    #[command(about = "Alias for `watch`")]
+    Tui {
+        #[arg(help = "ASR task ID, unique ID prefix, or unique task name")]
+        task: Option<String>,
+        #[arg(
+            long,
+            default_value_t = 1000,
+            help = "Refresh interval in milliseconds"
+        )]
+        refresh_ms: u64,
+        #[arg(long, help = "Fail instead of opening an interactive task selector")]
+        no_interactive_select: bool,
+        #[arg(
+            long,
+            help = "Show all ASR tasks instead of auto-entering the only task"
+        )]
+        all: bool,
+        #[arg(long, help = "Print one watch snapshot as JSON and exit")]
+        json_snapshot: bool,
+        #[arg(long, help = "Disable run/pause/resume shortcuts")]
+        read_only: bool,
+    },
     #[command(about = "Inspect daily merged documents for one ASR directory task")]
     Daily {
         #[command(subcommand)]
@@ -775,19 +819,41 @@ pub enum AiAsrTaskCommands {
 pub enum AiAsrTaskDailyCommands {
     #[command(about = "List daily merged documents for one ASR task")]
     List {
-        #[arg(help = "ASR task ID")]
-        task_id: String,
+        #[arg(help = "ASR task ID, unique ID prefix, or unique task name")]
+        task: Option<String>,
         #[arg(long, help = "Print JSON")]
         json: bool,
     },
     #[command(about = "Show one daily merged document")]
     Show {
-        #[arg(help = "ASR task ID")]
-        task_id: String,
-        #[arg(help = "Daily document date, formatted as YYYY-MM-DD")]
-        date: String,
+        #[arg(help = "Daily document date, or ASR task when DATE is also provided")]
+        first: String,
+        #[arg(help = "Daily document date for the legacy `<TASK> <DATE>` form")]
+        second: Option<String>,
+        #[arg(long, help = "ASR task ID, unique ID prefix, or unique task name")]
+        task: Option<String>,
         #[arg(long, value_hint = ValueHint::FilePath, help = "Write Markdown content to a file instead of stdout")]
         output: Option<PathBuf>,
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+    },
+    #[command(about = "Set or clear the Daily Agent report sync directory")]
+    SetSyncDir {
+        #[arg(help = "ASR task ID, unique ID prefix, or unique task name")]
+        task: Option<String>,
+        #[arg(long, value_hint = ValueHint::DirPath, help = "Directory to copy Daily Agent reports into")]
+        dir: Option<PathBuf>,
+        #[arg(long, help = "Clear the configured report sync directory")]
+        clear: bool,
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+    },
+    #[command(about = "Manually sync Daily Agent reports to the configured directory")]
+    Sync {
+        #[arg(help = "ASR task ID, unique ID prefix, or unique task name")]
+        task: Option<String>,
+        #[arg(long, value_hint = ValueHint::DirPath, help = "Set this sync directory before syncing")]
+        dir: Option<PathBuf>,
         #[arg(long, help = "Print JSON")]
         json: bool,
     },

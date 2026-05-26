@@ -12,7 +12,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
+
+use async_trait::async_trait;
 use tracing::{info, warn};
+
+use crate::config::MemoriesConfig;
 
 /// Default retention period for extension resources (days).
 const EXTENSION_RESOURCE_RETENTION_DAYS: u64 = 30;
@@ -258,6 +262,246 @@ pub fn ensure_extensions_layout(memory_root: &Path) -> Result<(), String> {
     let extensions_dir = memory_root.join("extensions");
     fs::create_dir_all(&extensions_dir)
         .map_err(|err| format!("create extensions dir {}: {err}", extensions_dir.display()))
+}
+
+// ---------------------------------------------------------------------------
+// Pluggable Extension Trait & Registry
+// ---------------------------------------------------------------------------
+
+/// Specification for a tool contributed by a memory extension.
+///
+/// Mirrors the structure used by the Codex extension API (`ToolExecutor`)
+/// but simplified for Bifrost's architecture where tools are described
+/// declaratively rather than via trait-object executors.
+#[derive(Debug, Clone)]
+pub struct ToolSpec {
+    /// Unique tool name (must not collide with built-in tools).
+    pub name: String,
+    /// Human-readable description shown in the system prompt.
+    pub description: String,
+    /// JSON Schema string describing the tool's parameters.
+    pub parameters_schema: Option<String>,
+}
+
+/// A prompt fragment contributed by a memory extension to the system prompt.
+#[derive(Debug, Clone)]
+pub struct PromptFragment {
+    /// The text to inject.
+    pub content: String,
+    /// Ordering priority — lower values appear earlier in the prompt.
+    pub priority: i32,
+}
+
+/// Trait for pluggable memory extensions.
+///
+/// Modeled after Codex's `ContextContributor` + `ToolContributor` +
+/// `ConfigContributor` + `ThreadLifecycleContributor` but unified into a
+/// single trait suitable for Bifrost's simpler runtime model.
+///
+/// Extensions are registered into a [`MemoryExtensionRegistry`] and invoked
+/// collectively during prompt building, tool enumeration, and config changes.
+#[async_trait]
+pub trait MemoryExtension: Send + Sync {
+    /// Unique name identifying this extension (e.g. `"code-search"`).
+    fn name(&self) -> &str;
+
+    /// Contribute prompt context fragments for the current thread.
+    ///
+    /// Called during system-prompt assembly. Return `None` if this extension
+    /// has nothing to add for the current session/thread state.
+    async fn contribute_context(&self) -> Option<PromptFragment>;
+
+    /// Contribute additional tools available to the agent.
+    ///
+    /// Called during tool enumeration. Return an empty vec if no tools.
+    async fn contribute_tools(&self) -> Vec<ToolSpec>;
+
+    /// React to a configuration change.
+    ///
+    /// Called whenever the agent's `MemoriesConfig` is updated (e.g. via
+    /// YAML reload or runtime API). Extensions can cache relevant settings.
+    fn on_config_change(&self, config: &MemoriesConfig);
+
+    /// Lifecycle hook: called when a new session/thread starts.
+    ///
+    /// Extensions can perform initialization (load caches, open handles).
+    /// Default implementation is a no-op.
+    async fn on_thread_start(&self) {
+        // no-op by default
+    }
+
+    /// Lifecycle hook: called when a session/thread ends.
+    ///
+    /// Extensions can perform cleanup (flush caches, close handles).
+    /// Default implementation is a no-op.
+    async fn on_thread_end(&self) {
+        // no-op by default
+    }
+}
+
+/// Registry holding all active memory extensions.
+///
+/// Extensions are registered at agent startup and queried during prompt
+/// assembly and tool enumeration. The registry itself is `Send + Sync` so
+/// it can be shared across async tasks via `Arc`.
+pub struct MemoryExtensionRegistry {
+    extensions: Vec<Box<dyn MemoryExtension>>,
+}
+
+impl MemoryExtensionRegistry {
+    /// Create a new empty registry.
+    pub fn new() -> Self {
+        Self {
+            extensions: Vec::new(),
+        }
+    }
+
+    /// Register an extension. Extensions are invoked in registration order.
+    pub fn register(&mut self, extension: Box<dyn MemoryExtension>) {
+        info!(
+            extension_name = extension.name(),
+            "registered memory extension"
+        );
+        self.extensions.push(extension);
+    }
+
+    /// Number of registered extensions.
+    pub fn len(&self) -> usize {
+        self.extensions.len()
+    }
+
+    /// Whether the registry has no extensions.
+    pub fn is_empty(&self) -> bool {
+        self.extensions.is_empty()
+    }
+
+    /// Collect prompt context fragments from all extensions.
+    ///
+    /// Fragments are returned sorted by priority (ascending).
+    pub async fn collect_context(&self) -> Vec<PromptFragment> {
+        let mut fragments: Vec<PromptFragment> = Vec::new();
+        for ext in &self.extensions {
+            if let Some(fragment) = ext.contribute_context().await {
+                fragments.push(fragment);
+            }
+        }
+        fragments.sort_by_key(|f| f.priority);
+        fragments
+    }
+
+    /// Collect tools from all extensions.
+    pub async fn collect_tools(&self) -> Vec<ToolSpec> {
+        let mut tools: Vec<ToolSpec> = Vec::new();
+        for ext in &self.extensions {
+            let mut ext_tools = ext.contribute_tools().await;
+            tools.append(&mut ext_tools);
+        }
+        tools
+    }
+
+    /// Notify all extensions of a configuration change.
+    pub fn notify_config_change(&self, config: &MemoriesConfig) {
+        for ext in &self.extensions {
+            ext.on_config_change(config);
+        }
+    }
+
+    /// Invoke `on_thread_start` on all extensions.
+    pub async fn notify_thread_start(&self) {
+        for ext in &self.extensions {
+            ext.on_thread_start().await;
+        }
+    }
+
+    /// Invoke `on_thread_end` on all extensions.
+    pub async fn notify_thread_end(&self) {
+        for ext in &self.extensions {
+            ext.on_thread_end().await;
+        }
+    }
+
+    /// Get extension names in registration order.
+    pub fn extension_names(&self) -> Vec<&str> {
+        self.extensions.iter().map(|e| e.name()).collect()
+    }
+}
+
+impl Default for MemoryExtensionRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A file-system-based extension that reads instructions and resources from
+/// the standard `$memory_root/extensions/<name>/` directory layout.
+///
+/// This bridges the existing directory-based discovery (`discover_extensions`)
+/// into the pluggable trait system, allowing mixed use of directory-based and
+/// programmatic extensions.
+pub struct FsBasedExtension {
+    info: ExtensionInfo,
+}
+
+impl FsBasedExtension {
+    /// Wrap an already-discovered [`ExtensionInfo`] into a trait-object extension.
+    pub fn from_info(info: ExtensionInfo) -> Self {
+        Self { info }
+    }
+}
+
+#[async_trait]
+impl MemoryExtension for FsBasedExtension {
+    fn name(&self) -> &str {
+        &self.info.name
+    }
+
+    async fn contribute_context(&self) -> Option<PromptFragment> {
+        let instructions = self.info.instructions.as_ref()?;
+        let mut content = format!(
+            "### Extension: {}\n\n{}",
+            self.info.name,
+            instructions.trim()
+        );
+
+        if !self.info.resource_files.is_empty() {
+            content.push_str("\n\nResources:");
+            for resource in &self.info.resource_files {
+                if let Some(name) = resource.file_name().and_then(|n| n.to_str()) {
+                    content.push_str(&format!("\n- {name}"));
+                }
+            }
+        }
+
+        Some(PromptFragment {
+            content,
+            priority: 100, // FS-based extensions get default priority
+        })
+    }
+
+    async fn contribute_tools(&self) -> Vec<ToolSpec> {
+        Vec::new() // FS-based extensions don't contribute tools
+    }
+
+    fn on_config_change(&self, _config: &MemoriesConfig) {
+        // FS-based extensions are stateless w.r.t. config
+    }
+}
+
+/// Build a [`MemoryExtensionRegistry`] pre-populated with all file-system
+/// extensions discovered under `$memory_root/extensions/`.
+///
+/// This is the recommended way to initialize the registry at agent startup,
+/// after which programmatic extensions can be registered via
+/// [`MemoryExtensionRegistry::register`].
+pub fn build_registry_from_fs(memory_root: &Path) -> MemoryExtensionRegistry {
+    let discovered = discover_extensions(memory_root);
+    let mut registry = MemoryExtensionRegistry::new();
+
+    for info in discovered {
+        registry.register(Box::new(FsBasedExtension::from_info(info)));
+    }
+
+    registry
 }
 
 /// Safety check: refuse to clear a memory root if it is a symlink.
@@ -560,5 +804,166 @@ mod tests {
 
         ensure_extensions_layout(&memory_root).unwrap();
         assert!(memory_root.join("extensions").is_dir());
+    }
+
+    // --- Tests for pluggable extension trait & registry ---
+
+    /// A minimal test extension for unit testing.
+    struct TestExtension {
+        ext_name: &'static str,
+        context: Option<&'static str>,
+        tools: Vec<ToolSpec>,
+    }
+
+    impl TestExtension {
+        fn new(name: &'static str) -> Self {
+            Self {
+                ext_name: name,
+                context: None,
+                tools: Vec::new(),
+            }
+        }
+
+        fn with_context(mut self, ctx: &'static str) -> Self {
+            self.context = Some(ctx);
+            self
+        }
+
+        fn with_tool(mut self, name: &str, desc: &str) -> Self {
+            self.tools.push(ToolSpec {
+                name: name.to_string(),
+                description: desc.to_string(),
+                parameters_schema: None,
+            });
+            self
+        }
+    }
+
+    #[async_trait]
+    impl MemoryExtension for TestExtension {
+        fn name(&self) -> &str {
+            self.ext_name
+        }
+
+        async fn contribute_context(&self) -> Option<PromptFragment> {
+            self.context.map(|c| PromptFragment {
+                content: c.to_string(),
+                priority: 50,
+            })
+        }
+
+        async fn contribute_tools(&self) -> Vec<ToolSpec> {
+            self.tools.clone()
+        }
+
+        fn on_config_change(&self, _config: &MemoriesConfig) {}
+    }
+
+    #[test]
+    fn registry_new_is_empty() {
+        let registry = MemoryExtensionRegistry::new();
+        assert!(registry.is_empty());
+        assert_eq!(registry.len(), 0);
+    }
+
+    #[test]
+    fn registry_register_increments_count() {
+        let mut registry = MemoryExtensionRegistry::new();
+        registry.register(Box::new(TestExtension::new("ext-a")));
+        registry.register(Box::new(TestExtension::new("ext-b")));
+
+        assert_eq!(registry.len(), 2);
+        assert!(!registry.is_empty());
+        assert_eq!(registry.extension_names(), vec!["ext-a", "ext-b"]);
+    }
+
+    #[tokio::test]
+    async fn registry_collect_context_gathers_fragments() {
+        let mut registry = MemoryExtensionRegistry::new();
+        registry.register(Box::new(TestExtension::new("a").with_context("context A")));
+        registry.register(Box::new(TestExtension::new("b"))); // no context
+        registry.register(Box::new(TestExtension::new("c").with_context("context C")));
+
+        let fragments = registry.collect_context().await;
+        assert_eq!(fragments.len(), 2);
+        assert_eq!(fragments[0].content, "context A");
+        assert_eq!(fragments[1].content, "context C");
+    }
+
+    #[tokio::test]
+    async fn registry_collect_tools_aggregates_from_all_extensions() {
+        let mut registry = MemoryExtensionRegistry::new();
+        registry.register(Box::new(
+            TestExtension::new("a").with_tool("tool1", "desc1"),
+        ));
+        registry.register(Box::new(
+            TestExtension::new("b")
+                .with_tool("tool2", "desc2")
+                .with_tool("tool3", "desc3"),
+        ));
+
+        let tools = registry.collect_tools().await;
+        assert_eq!(tools.len(), 3);
+        assert_eq!(tools[0].name, "tool1");
+        assert_eq!(tools[1].name, "tool2");
+        assert_eq!(tools[2].name, "tool3");
+    }
+
+    #[tokio::test]
+    async fn fs_based_extension_contributes_context_from_info() {
+        let info = ExtensionInfo {
+            name: "test-fs".to_string(),
+            root: PathBuf::from("/tmp/fake"),
+            instructions: Some("Use this wisely.".to_string()),
+            resource_files: vec![PathBuf::from("/tmp/fake/resources/ref.md")],
+        };
+
+        let ext = FsBasedExtension::from_info(info);
+        assert_eq!(ext.name(), "test-fs");
+
+        let fragment = ext.contribute_context().await.unwrap();
+        assert!(fragment.content.contains("### Extension: test-fs"));
+        assert!(fragment.content.contains("Use this wisely."));
+        assert!(fragment.content.contains("- ref.md"));
+        assert_eq!(fragment.priority, 100);
+    }
+
+    #[tokio::test]
+    async fn fs_based_extension_no_instructions_returns_none() {
+        let info = ExtensionInfo {
+            name: "no-instructions".to_string(),
+            root: PathBuf::from("/tmp/fake"),
+            instructions: None,
+            resource_files: Vec::new(),
+        };
+
+        let ext = FsBasedExtension::from_info(info);
+        assert!(ext.contribute_context().await.is_none());
+    }
+
+    #[test]
+    fn build_registry_from_fs_populates_from_discovered_extensions() {
+        let dir = tempdir().unwrap();
+        let memory_root = dir.path().join("memory");
+        let ext_a = memory_root.join("extensions").join("alpha");
+        let ext_b = memory_root.join("extensions").join("beta");
+        fs::create_dir_all(&ext_a).unwrap();
+        fs::create_dir_all(&ext_b).unwrap();
+        fs::write(ext_a.join("instructions.md"), "Alpha instructions").unwrap();
+        fs::write(ext_b.join("instructions.md"), "Beta instructions").unwrap();
+
+        let registry = build_registry_from_fs(&memory_root);
+        assert_eq!(registry.len(), 2);
+        assert_eq!(registry.extension_names(), vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn build_registry_from_fs_empty_dir_returns_empty_registry() {
+        let dir = tempdir().unwrap();
+        let memory_root = dir.path().join("memory");
+        fs::create_dir_all(memory_root.join("extensions")).unwrap();
+
+        let registry = build_registry_from_fs(&memory_root);
+        assert!(registry.is_empty());
     }
 }

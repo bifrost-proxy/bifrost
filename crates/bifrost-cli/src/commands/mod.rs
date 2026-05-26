@@ -1,6 +1,7 @@
 mod admin;
 pub mod agent;
 mod asr;
+mod asr_tui;
 mod bifrost_file;
 mod ca;
 mod caller_stream_frame;

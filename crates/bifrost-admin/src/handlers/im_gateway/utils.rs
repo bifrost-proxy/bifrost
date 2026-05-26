@@ -25,6 +25,56 @@ pub(super) fn handle_history(
     }
 }
 
+pub(super) async fn handle_attachment(req: Request<Incoming>, rest: &str) -> Response<BoxBody> {
+    if req.method() != Method::GET {
+        return method_not_allowed();
+    }
+
+    let relative = rest.trim_start_matches('/');
+    let relative = match urlencoding::decode(relative) {
+        Ok(value) => value.to_string(),
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "invalid attachment path"),
+    };
+    let Some(path) = resolve_attachment_path(&relative) else {
+        return error_response(StatusCode::BAD_REQUEST, "invalid attachment path");
+    };
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(bytes) => bytes,
+        Err(_) => return error_response(StatusCode::NOT_FOUND, "attachment not found"),
+    };
+    let content_type = mime_guess::from_path(&path)
+        .first_or_octet_stream()
+        .to_string();
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", content_type)
+        .header("Cache-Control", "private, max-age=3600")
+        .body(full_body(bytes))
+        .unwrap()
+}
+
+fn resolve_attachment_path(relative: &str) -> Option<PathBuf> {
+    let relative = Path::new(relative);
+    if relative.is_absolute()
+        || relative.components().any(|part| {
+            matches!(
+                part,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return None;
+    }
+    Some(
+        bifrost_agent::config::agent_home_dir()
+            .join("im_gateway")
+            .join("attachments")
+            .join(relative),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -44,6 +94,31 @@ pub(super) async fn read_body_json<T: serde::de::DeserializeOwned>(
             &format!("Invalid request body: {e}"),
         )
     })
+}
+
+pub(super) async fn request_agent_stop(
+    manager: &bifrost_agent::AgentSessionManager,
+    session_key: &str,
+) -> bool {
+    request_agent_stop_with_runs_root(
+        manager,
+        session_key,
+        crate::im_gateway::external_cli::default_runs_root(),
+    )
+    .await
+}
+
+pub(super) async fn request_agent_stop_with_runs_root(
+    manager: &bifrost_agent::AgentSessionManager,
+    session_key: &str,
+    runs_root: impl AsRef<Path>,
+) -> bool {
+    let internal_stopped = manager.request_stop(session_key);
+    let external_stopped =
+        crate::im_gateway::external_cli::request_session_stop(runs_root, session_key)
+            .await
+            .is_ok();
+    internal_stopped || external_stopped
 }
 
 /// Extract a path segment that appears before a known suffix.
@@ -810,6 +885,377 @@ fn merge_json_object(base: &mut serde_json::Value, patch: &serde_json::Value) {
     }
 }
 
+pub(super) fn restore_session_from_persisted_history(
+    session: &mut bifrost_agent::AgentSession,
+    session_key: &str,
+    adapter: &str,
+    runner_id: Option<&str>,
+    max_bytes: Option<usize>,
+) -> Option<PathBuf> {
+    if !session.history.is_empty() {
+        return None;
+    }
+
+    let state =
+        crate::im_gateway::session_state::load_session_state(session_key, adapter, runner_id)
+            .or_else(|| {
+                if runner_id.is_none() {
+                    crate::im_gateway::session_state::load_latest_session_state(
+                        session_key,
+                        Some(adapter),
+                        None,
+                    )
+                } else {
+                    None
+                }
+            });
+    let state_history_path = state
+        .as_ref()
+        .and_then(|state| state.history_path.as_deref())
+        .map(PathBuf::from);
+    let candidates = state_history_path
+        .into_iter()
+        .chain(if runner_id.is_none() {
+            latest_history_path_for_session(session_key)
+        } else {
+            None
+        })
+        .collect::<Vec<_>>();
+
+    for candidate in candidates {
+        match restore_session_from_history_path(session, &candidate, session_key, max_bytes) {
+            Ok(path) => {
+                if let Some(state) = state.as_ref() {
+                    session.remember_external_conversation_ref(
+                        state.external_conversation_id.clone(),
+                        state.external_thread_id.clone(),
+                    );
+                    if session.work_dir.is_none() {
+                        session.work_dir = state.work_dir.clone();
+                    }
+                }
+                return Some(path);
+            }
+            Err(error) => {
+                warn!(
+                    session_key = %session_key,
+                    history_path = %candidate.display(),
+                    error = %error,
+                    "failed to restore persisted IM agent session history"
+                );
+            }
+        }
+    }
+    None
+}
+
+pub(super) fn remember_session_state_from_agent_session(
+    session: &bifrost_agent::AgentSession,
+    adapter: &str,
+    runner_id: Option<&str>,
+) {
+    let history_path = session
+        .recorder
+        .as_ref()
+        .map(|recorder| recorder.file_path().display().to_string());
+    if history_path.is_none()
+        && session.external_conversation_id.is_none()
+        && session.external_thread_id.is_none()
+    {
+        return;
+    }
+    if let Err(error) = crate::im_gateway::session_state::upsert_session_state(
+        &session.session_key,
+        adapter,
+        runner_id,
+        |state| {
+            state.external_conversation_id = session.external_conversation_id.clone();
+            state.external_thread_id = session.external_thread_id.clone();
+            if let Some(history_path) = history_path.clone() {
+                state.history_path = Some(history_path);
+            }
+            state.work_dir = session.work_dir.clone();
+            state.title = session
+                .title
+                .clone()
+                .or_else(|| latest_role_content(session, "user"));
+            state.last_user_message = latest_role_content(session, "user");
+            state.last_response = latest_role_content(session, "assistant");
+            state.status = Some("ended".to_string());
+        },
+    ) {
+        warn!(
+            session_key = %session.session_key,
+            adapter = %adapter,
+            error = %error,
+            "failed to persist IM agent session state"
+        );
+    }
+}
+
+pub(super) fn remember_session_turn_started(
+    session_key: &str,
+    adapter: &str,
+    runner_id: Option<&str>,
+    user_message: &str,
+    history_path: Option<String>,
+    work_dir: Option<String>,
+) {
+    let user_message = user_message.trim();
+    if user_message.is_empty() {
+        return;
+    }
+    if let Err(error) = crate::im_gateway::session_state::upsert_session_state(
+        session_key,
+        adapter,
+        runner_id,
+        |state| {
+            state.title.get_or_insert_with(|| user_message.to_string());
+            state.last_user_message = Some(user_message.to_string());
+            state.last_response = None;
+            state.status = Some("running".to_string());
+            if let Some(history_path) = history_path {
+                state.history_path = Some(history_path);
+            }
+            if let Some(work_dir) = work_dir {
+                state.work_dir = Some(work_dir);
+            }
+        },
+    ) {
+        warn!(
+            session_key = %session_key,
+            adapter = %adapter,
+            error = %error,
+            "failed to persist IM agent turn start state"
+        );
+    }
+}
+
+fn latest_role_content(session: &bifrost_agent::AgentSession, role: &str) -> Option<String> {
+    session
+        .history
+        .iter()
+        .rev()
+        .find(|message| message.role == role)
+        .and_then(|message| message.content.as_deref())
+        .map(str::trim)
+        .filter(|content| !content.is_empty())
+        .map(ToString::to_string)
+}
+
+pub(super) fn remember_session_state_values(
+    session_key: &str,
+    adapter: &str,
+    runner_id: Option<&str>,
+    external_conversation_id: Option<String>,
+    external_thread_id: Option<String>,
+    history_path: Option<String>,
+    work_dir: Option<String>,
+) {
+    if history_path.is_none() && external_conversation_id.is_none() && external_thread_id.is_none()
+    {
+        return;
+    }
+    if let Err(error) = crate::im_gateway::session_state::upsert_session_state(
+        session_key,
+        adapter,
+        runner_id,
+        |state| {
+            if external_conversation_id.is_some() {
+                state.external_conversation_id = external_conversation_id;
+            }
+            if external_thread_id.is_some() {
+                state.external_thread_id = external_thread_id;
+            }
+            if history_path.is_some() {
+                state.history_path = history_path;
+            }
+            if work_dir.is_some() {
+                state.work_dir = work_dir;
+            }
+        },
+    ) {
+        warn!(
+            session_key = %session_key,
+            adapter = %adapter,
+            error = %error,
+            "failed to persist IM agent session state values"
+        );
+    }
+}
+
+pub(super) fn clear_persisted_agent_session_state(
+    session_key: &str,
+    adapter: Option<&str>,
+    runner_id: Option<&str>,
+) {
+    let removed_states = match crate::im_gateway::session_state::clear_session_state_scope(
+        session_key,
+        adapter,
+        runner_id,
+    ) {
+        Ok(states) => states,
+        Err(error) => {
+            warn!(
+                session_key = %session_key,
+                adapter = ?adapter,
+                runner_id = ?runner_id,
+                error = %error,
+                "failed to clear persisted IM agent session state"
+            );
+            Vec::new()
+        }
+    };
+    match clear_persisted_session_histories(session_key, adapter, &removed_states) {
+        Ok(removed) if removed > 0 => {
+            info!(
+                session_key = %session_key,
+                adapter = ?adapter,
+                runner_id = ?runner_id,
+                removed,
+                "cleared persisted IM agent session histories"
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            warn!(
+                session_key = %session_key,
+                adapter = ?adapter,
+                runner_id = ?runner_id,
+                error = %error,
+                "failed to clear persisted IM agent session histories"
+            );
+        }
+    }
+}
+
+fn latest_history_path_for_session(session_key: &str) -> Option<PathBuf> {
+    let data_dir = bifrost_agent::config::agent_home_dir();
+    let mut candidates =
+        bifrost_agent::persistence::list_conversations(&data_dir, Some(session_key));
+    candidates.sort_by_key(|path| {
+        let summary = bifrost_agent::persistence::scan_session_summary(path);
+        if summary.end_time > 0 {
+            summary.end_time
+        } else {
+            summary.start_time
+        }
+    });
+    candidates.pop()
+}
+
+fn clear_persisted_session_histories(
+    session_key: &str,
+    adapter: Option<&str>,
+    removed_states: &[crate::im_gateway::session_state::ImAgentSessionState],
+) -> Result<usize, String> {
+    let session_key = session_key.trim();
+    if session_key.is_empty() {
+        return Ok(0);
+    }
+    let data_dir = bifrost_agent::config::agent_home_dir();
+    let candidates: Vec<PathBuf> = if adapter.is_none() {
+        bifrost_agent::persistence::list_conversations(&data_dir, Some(session_key))
+    } else {
+        removed_states
+            .iter()
+            .filter_map(|state| state.history_path.as_deref())
+            .map(PathBuf::from)
+            .collect()
+    };
+    let mut removed = 0;
+    for candidate in candidates {
+        let validated =
+            match bifrost_agent::persistence::validate_conversation_path(&data_dir, &candidate) {
+                Ok(path) => path,
+                Err(error) => {
+                    warn!(
+                        session_key = %session_key,
+                        history_path = %candidate.display(),
+                        error = %error,
+                        "skipping invalid persisted IM agent session history during clear"
+                    );
+                    continue;
+                }
+            };
+        match std::fs::remove_file(&validated) {
+            Ok(()) => removed += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "remove session history {} failed: {error}",
+                    validated.display()
+                ));
+            }
+        }
+    }
+    Ok(removed)
+}
+
+fn restore_session_from_history_path(
+    session: &mut bifrost_agent::AgentSession,
+    history_path: &Path,
+    expected_session_key: &str,
+    max_bytes: Option<usize>,
+) -> Result<PathBuf, String> {
+    let data_dir = bifrost_agent::config::agent_home_dir();
+    let path = bifrost_agent::persistence::validate_conversation_path(&data_dir, history_path)?;
+    let report = bifrost_agent::persistence::load_conversation_lossy(&path)?;
+    if let Some(restored_key) = report.session_key.as_deref() {
+        if restored_key != expected_session_key {
+            return Err("history session_key does not match the requested session_key".to_string());
+        }
+    }
+    if report.messages.is_empty() {
+        return Err("history file does not contain restorable chat messages".to_string());
+    }
+
+    let summary = bifrost_agent::persistence::scan_session_summary(&path);
+    session.history = report.messages;
+    session.history_version = session.history_version.saturating_add(1);
+    session.last_response_tokens = None;
+    session.last_response_history_len = None;
+    session.memory_cleared = false;
+    session.title = summary.title;
+    if session.work_dir.is_none() {
+        session.work_dir = summary.work_dir;
+    }
+    if !summary.source.is_empty() {
+        session.source = summary.source;
+    }
+    match bifrost_agent::persistence::load_session_runtime_state(&path) {
+        Ok(runtime_state) => {
+            session.current_goal = runtime_state.current_goal;
+            session.current_plan = runtime_state.current_plan;
+            session.total_tokens_used = runtime_state.total_tokens_used;
+            session.restore_token_snapshot(runtime_state.last_response_tokens);
+            session.compaction_count = runtime_state.compaction_count;
+            session.resolved_base_instructions = runtime_state.base_instructions;
+            bifrost_agent::tools::goal::goal_runtime_apply(
+                session,
+                bifrost_agent::tools::goal::GoalRuntimeEvent::ThreadResumed,
+            );
+        }
+        Err(error) => {
+            warn!(history_path = %path.display(), error = %error, "restored IM agent history without runtime state");
+            session.total_tokens_used = Some(summary.total_tokens);
+            session.compaction_count = summary.compaction_count;
+        }
+    }
+    if report.skipped_lines > 0 {
+        warn!(
+            history_path = %path.display(),
+            skipped_lines = report.skipped_lines,
+            "restored IM agent history with skipped JSONL lines"
+        );
+    }
+    session.recorder = Some(ConversationRecorder::from_existing_file(
+        path.clone(),
+        max_bytes,
+    ));
+    Ok(path)
+}
+
 /// Parse a session filename like `session-{key}-{timestamp}.jsonl`
 /// into (session_key, timestamp).
 pub(super) fn parse_session_filename(filename: &str) -> (String, u64) {
@@ -822,5 +1268,17 @@ pub(super) fn parse_session_filename(filename: &str) -> (String, u64) {
         (key.to_string(), ts)
     } else {
         (name.to_string(), 0)
+    }
+}
+
+#[cfg(test)]
+mod attachment_tests {
+    use super::resolve_attachment_path;
+
+    #[test]
+    fn attachment_path_resolution_stays_inside_attachment_root() {
+        assert!(resolve_attachment_path("chatgpt_web/run/image.png").is_some());
+        assert!(resolve_attachment_path("../secret.png").is_none());
+        assert!(resolve_attachment_path("/tmp/secret.png").is_none());
     }
 }

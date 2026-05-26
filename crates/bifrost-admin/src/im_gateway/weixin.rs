@@ -889,6 +889,9 @@ impl WeixinProvider {
             "weixin outbound image uploaded to CDN"
         );
 
+        // Release the image bytes from memory now that upload is complete
+        self.outbound_images.write().remove(image_key);
+
         Ok(serde_json::json!({
             "media": {
                 "encrypt_query_param": download_param,

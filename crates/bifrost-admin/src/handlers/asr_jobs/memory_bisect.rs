@@ -303,12 +303,20 @@ fn transcribe_chunk_bisect_inner<'a>(
             let audio = chunk_wav.to_path_buf();
             let lang = language.to_string();
             let force_pause_task_id = force_pause_task_id.map(str::to_string);
+            let timeout = asr_chunk_timeout(chunk_duration_secs);
             match tokio::task::spawn_blocking(move || {
                 let abort_check = force_pause_task_id.map(|task_id| {
                     Box::new(move || task_force_pause_requested(&task_id))
                         as Box<dyn Fn() -> bool + Send>
                 });
-                run_asr_cli_with_footprint_guard_and_abort(&bin, &model, &audio, &lang, abort_check)
+                run_asr_cli_with_footprint_guard_timeout_and_abort(
+                    &bin,
+                    &model,
+                    &audio,
+                    &lang,
+                    Some(timeout),
+                    abort_check,
+                )
             })
             .await
             {
@@ -317,9 +325,10 @@ fn transcribe_chunk_bisect_inner<'a>(
                     if e.contains(ASR_ABORTED_ERROR_MARKER) {
                         return Err(ASR_TASK_PAUSED_MESSAGE.to_string());
                     }
-                    let memory_limited = e.contains(ASR_MEMORY_LIMIT_ERROR_MARKER);
+                    let should_bisect_without_retry = e.contains(ASR_MEMORY_LIMIT_ERROR_MARKER)
+                        || e.contains(ASR_TIMEOUT_ERROR_MARKER);
                     last_error = e;
-                    if memory_limited {
+                    if should_bisect_without_retry {
                         if let Some(events) = &memory_events {
                             events.lock().unwrap().push(AsrMemoryLimitEvent {
                                 offset_secs: chunk_offset_secs,
@@ -334,7 +343,7 @@ fn transcribe_chunk_bisect_inner<'a>(
                             chunk = chunk_label,
                             depth = depth,
                             error = %last_error,
-                            "ASR chunk exceeded footprint limit; bisecting without same-size retry"
+                            "ASR chunk exceeded guardrail; bisecting without same-size retry"
                         );
                         break;
                     }

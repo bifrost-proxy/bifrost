@@ -200,7 +200,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 port = int(sys.argv[1])
 log_path = sys.argv[2]
 final_text = sys.argv[3]
-state = {"request_no": 0}
+state = {"request_no": 0, "main_started": False}
 lock = threading.Lock()
 
 
@@ -231,6 +231,13 @@ def tool_names(payload):
     return names
 
 
+def maybe_json(text):
+    try:
+        return json.loads(text)
+    except Exception:
+        return {}
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         return
@@ -258,19 +265,25 @@ class Handler(BaseHTTPRequestHandler):
             state["request_no"] += 1
             request_no = state["request_no"]
 
-        if request_no == 1:
-            names = tool_names(payload)
-            joined = "\n".join(message_text(message) for message in payload.get("messages", []))
-            required_tools = {
-                "exec_command",
-                "write_stdin",
-                "update_plan",
-                "set_title",
-                "tool_search",
-                "list_mcp_resources",
-                "list_mcp_resource_templates",
-                "read_mcp_resource",
-            }
+        messages = payload.get("messages", [])
+        tool_outputs = [message_text(message) for message in messages if message.get("role") == "tool"]
+        names = tool_names(payload)
+        required_tools = {
+            "exec_command",
+            "write_stdin",
+            "update_plan",
+            "set_title",
+            "tool_search",
+            "list_mcp_resources",
+            "list_mcp_resource_templates",
+            "read_mcp_resource",
+        }
+        joined = "\n".join(message_text(message) for message in messages)
+        recent_background_outputs = "\n".join(tool_outputs[-2:])
+        last_tool_output = maybe_json(tool_outputs[-1]) if tool_outputs else {}
+
+        if not tool_outputs and required_tools.issubset(set(names)) and not state["main_started"]:
+            state["main_started"] = True
             missing = sorted(required_tools - set(names))
             forbidden = sorted({"shell", "shell_pty", "shell_command", "local_shell"} & set(names))
             leaked_deferred = sorted(name for name in names if name.startswith("mcp_mcpfixture__sample_tool_"))
@@ -369,13 +382,69 @@ class Handler(BaseHTTPRequestHandler):
                 ],
             }
             finish_reason = "tool_calls"
-        elif request_no == 2:
-            messages = payload.get("messages", [])
-            tool_outputs = [message_text(message) for message in messages if message.get("role") == "tool"]
+        elif not tool_outputs:
+            message = {"role": "assistant", "content": "AUXILIARY_MODEL_CALL_OK"}
+            finish_reason = "stop"
+        elif isinstance(last_tool_output.get("session_id"), int):
+            if not tool_outputs:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(
+                    json.dumps({"missing_background_session": tool_outputs[-1:]}, ensure_ascii=False).encode("utf-8")
+                )
+                return
+            session_id = last_tool_output["session_id"]
+            time.sleep(1.0)
+            message = {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    tool_call(
+                        "call-background-poll",
+                        "write_stdin",
+                        json.dumps(
+                            {
+                                "session_id": session_id,
+                                "chars": "",
+                                "yield_time_ms": 1,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    ),
+                ],
+            }
+            finish_reason = "tool_calls"
+        elif (
+            "parallel-a" in "\n".join(tool_outputs)
+            and "parallel-b" in "\n".join(tool_outputs)
+            and "MCP_RESOURCE_OK" in "\n".join(tool_outputs)
+            and "WATCH_BEGIN" not in "\n".join(tool_outputs)
+        ):
+            serialized_payload = json.dumps(payload, ensure_ascii=False)
+            expected_payload_fragments = ["Run parallel tools", "Read MCP resource"]
+            missing_payload_fragments = [
+                fragment
+                for fragment in expected_payload_fragments
+                if fragment not in serialized_payload
+            ]
+            if missing_payload_fragments:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(
+                    json.dumps(
+                        {
+                            "missing_payload_fragments": missing_payload_fragments,
+                            "payload": payload,
+                        },
+                        ensure_ascii=False,
+                    ).encode("utf-8")
+                )
+                return
+
             expected_fragments = [
                 "parallel-a",
                 "parallel-b",
-                "Run parallel tools",
+                "Plan updated",
                 "SET_TITLE:Codex Alignment Real Chat",
                 "sample_tool_042",
                 "bifrost://codex-alignment",
@@ -412,47 +481,7 @@ class Handler(BaseHTTPRequestHandler):
                 ],
             }
             finish_reason = "tool_calls"
-        elif request_no == 3:
-            messages = payload.get("messages", [])
-            tool_outputs = [message_text(message) for message in messages if message.get("role") == "tool"]
-            if not tool_outputs or "\"session_id\":" not in tool_outputs[-1]:
-                self.send_response(500)
-                self.end_headers()
-                self.wfile.write(
-                    json.dumps({"missing_background_session": tool_outputs[-1:]}, ensure_ascii=False).encode("utf-8")
-                )
-                return
-            try:
-                session_id = json.loads(tool_outputs[-1])["session_id"]
-            except Exception as exc:
-                self.send_response(500)
-                self.end_headers()
-                self.wfile.write(json.dumps({"bad_session_json": tool_outputs[-1], "error": str(exc)}, ensure_ascii=False).encode("utf-8"))
-                return
-            time.sleep(1.0)
-            message = {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    tool_call(
-                        "call-background-poll",
-                        "write_stdin",
-                        json.dumps(
-                            {
-                                "session_id": session_id,
-                                "chars": "",
-                                "yield_time_ms": 1,
-                            },
-                            ensure_ascii=False,
-                        ),
-                    ),
-                ],
-            }
-            finish_reason = "tool_calls"
-        else:
-            messages = payload.get("messages", [])
-            tool_outputs = [message_text(message) for message in messages if message.get("role") == "tool"]
-            recent_background_outputs = "\n".join(tool_outputs[-2:])
+        elif "WATCH_BEGIN" in recent_background_outputs or "WATCH_DONE" in recent_background_outputs:
             if (
                 not tool_outputs
                 or "WATCH_BEGIN" not in recent_background_outputs
@@ -468,6 +497,20 @@ class Handler(BaseHTTPRequestHandler):
 
             message = {"role": "assistant", "content": final_text}
             finish_reason = "stop"
+        else:
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(
+                json.dumps(
+                    {
+                        "unexpected_model_request": request_no,
+                        "tool_outputs": tool_outputs[-4:],
+                        "tools": names,
+                    },
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            )
+            return
 
         response = {
             "choices": [{"message": message, "finish_reason": finish_reason}],
@@ -583,7 +626,6 @@ expected_names = [
     "list_mcp_resources",
     "read_mcp_resource",
     "exec_command",
-    "write_stdin",
 ]
 assert names[: len(expected_names)] == expected_names, names
 assert all(call.get("success") is True for call in tool_calls[: len(expected_names)]), tool_calls
@@ -594,9 +636,23 @@ assert [step.get("status") for step in plan_steps] == ["completed", "completed"]
 
 payloads = [json.loads(line) for line in mock_log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
 assert len(payloads) >= 2, len(payloads)
+main_payload = next(
+    (
+        payload
+        for payload in payloads
+        if "list_mcp_resources"
+        in {
+            (tool.get("function") or {}).get("name")
+            for tool in payload.get("tools", [])
+            if isinstance(tool, dict)
+        }
+    ),
+    None,
+)
+assert main_payload is not None, payloads
 first_tool_names = [
     (tool.get("function") or {}).get("name")
-    for tool in payloads[0].get("tools", [])
+    for tool in main_payload.get("tools", [])
     if isinstance(tool, dict)
 ]
 assert "list_mcp_resources" in first_tool_names, first_tool_names
@@ -607,9 +663,9 @@ assert "shell_command" not in first_tool_names, first_tool_names
 assert "local_shell" not in first_tool_names, first_tool_names
 assert not any(name.startswith("mcp_mcpfixture__sample_tool_") for name in first_tool_names if name), first_tool_names
 
-# Two exec_command calls are in one model tool-call batch; the rest of this
-# scenario adds an intentional background-completion wait. Sequential first-batch
-# execution is comfortably above this budget on the same local fixture.
+# Two exec_command calls are in one model tool-call batch. The final background
+# command is completed by the runtime watcher, so this trace must not require a
+# model-driven write_stdin poll.
 assert elapsed_ms < 7000, f"parallel/background exec_command scenario took too long: {elapsed_ms}ms"
 PY
 

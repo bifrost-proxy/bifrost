@@ -1833,3 +1833,320 @@ rm -rf ./.bifrost-test
 - **清理步骤**:
   - 自动化脚本退出后 mock server 随测试进程释放，无需保留临时数据。
 - **执行记录（2026-05-22）**: PASS — 执行 `source ~/.zshrc && e2e-tests/tests/test_im_gateway_long_reply_delivery_regression.sh` 通过：`chatgpt_web_dom_extraction_does_not_truncate_response_text` 确认 DOM 提取脚本不存在固定 10000 字符截断；`send_text_retries_failed_long_message_as_split_messages` 使用 Weixin mock 首次返回 `ret=-2`，随后收到多条 `[i/N]` 分片，去前缀后拼接等于完整原文。补充执行 `source ~/.zshrc && cargo test -p bifrost-admin split_text_for_retry_preserves_multibyte_content --lib -- --nocapture` 通过，确认中文、多字节字符和换行切分保真。
+
+### TC-IMA-97: AI Agent Chat 页面深链与真实流式 API 交互
+
+- **前置条件**:
+  - 使用临时 `BIFROST_DATA_DIR` 启动 Bifrost Admin，启动参数包含 `--no-system-proxy`。
+  - WebUI 可通过 `http://127.0.0.1:<port>/_bifrost/` 访问。
+- **操作步骤**:
+  1. 打开 `http://127.0.0.1:<port>/_bifrost/ai?aiSection=agent-chat&agentSection=chat`。
+  2. 检查 AI 左侧导航中 Agent Chat 项处于选中状态。
+  3. 检查页面出现对话区、Workspace、Run Settings 和 Recent Threads。
+  4. 在未输入内容时检查 Send 按钮禁用。
+  5. 使用 mock SSE 或真实 Agent 配置拦截 `/_bifrost/api/agent/chat/stream`，点击 `Review the latest diff` prompt chip，再点击 Send。
+- **预期结果**:
+  - URL 深链直接进入 Agent Chat 页面，不跳回 Agent General。
+  - 对话区显示 starter messages，布局不挤压右侧上下文卡片。
+  - Prompt chip 内容写入 composer，Send 从禁用变为可点击。
+  - 点击 Send 后输入框清空，对话区追加用户消息和来自流式 API 的 assistant 回复。
+  - 请求体包含非空 `session_key` 和输入的 `message`，不再停留在本地 preview。
+
+### TC-IMA-98: AI 页面兼容旧 agentSection 会话深链
+
+- **前置条件**:
+  - WebUI 可访问，Agent sessions API 可为空或返回测试数据。
+- **操作步骤**:
+  1. 打开 `http://127.0.0.1:<port>/_bifrost/ai?agentSection=sessions&session=session-key-1`。
+  2. 检查页面 URL 是否补齐 `aiSection=agent-sessions`。
+  3. 检查 Agent Sessions 导航项处于选中状态。
+- **预期结果**:
+  - 旧链接仍能进入 Agent Sessions，不因 AI 一级页新导航参数丢失上下文。
+  - `session` query 保留，用于后续 Session 详情入口解析。
+  - 页面不会进入 IM Gateway 或 ASR 子页。
+
+### TC-IMA-101: Agent Chat Composer 键盘发送与多行输入
+
+- **前置条件**:
+  - 使用临时 `BIFROST_DATA_DIR` 启动 Bifrost Admin，启动参数包含 `--no-system-proxy`。
+  - WebUI 可通过 `http://127.0.0.1:<port>/_bifrost/` 访问。
+- **操作步骤**:
+  1. 打开 `http://127.0.0.1:<port>/_bifrost/ai?aiSection=agent-chat&agentSection=chat`。
+  2. 在 composer 中输入 `Line one`。
+  3. 按 `Shift+Enter`，继续输入 `Line two`。
+  4. 确认对话区尚未追加该草稿内容。
+  5. 按 `Enter` 发送。
+- **预期结果**:
+  - `Shift+Enter` 只在 composer 中插入换行，不触发发送。
+  - composer 值为两行文本：`Line one` 与 `Line two`。
+  - 按 `Enter` 后 composer 清空。
+  - 对话区追加用户两行消息和来自流式 API 的 assistant 回复。
+  - 发送过程中输入框与 Send 按钮处于运行中状态，避免重复提交。
+
+### TC-IMA-99: Agent Chat 后端文本/图片消息入口语义
+
+- **前置条件**:
+  - 本用例可通过 Rust 单元测试或真实 IM mock 链路验证。
+- **操作步骤**:
+  1. 构造包含前后空白文本和图片附件的 IM event message。
+  2. 构造空文本但包含图片附件的 IM event message。
+  3. 构造超长文本和图片-only inbound message preview。
+  4. 执行：
+     ```bash
+     cargo test -p bifrost-admin agent_chat_message_text_prefers_trimmed_text_and_uses_image_prompt_fallback --lib -- --nocapture
+     cargo test -p bifrost-admin inbound_message_preview_summarizes_image_only_and_truncates_text --lib -- --nocapture
+     ```
+- **预期结果**:
+  - 文本消息进入 Agent 前会 trim，且文本优先于图片默认提示。
+  - 图片-only 消息不会被空文本短路，会使用默认图片理解提示。
+  - 空文本且无图片时返回空字符串。
+  - inbound 日志 preview 对图片-only 消息显示 `[图片消息: N 张]`，超长文本安全截断且不破坏 UTF-8。
+
+### TC-IMA-100: Agent Chat 进度事件刷新节流边界
+
+- **前置条件**:
+  - 可执行 `bifrost-admin` lib 单元测试。
+- **操作步骤**:
+  1. 执行：
+     ```bash
+     cargo test -p bifrost-admin progress_events_flush_immediately_only_for_visible_chat_updates --lib -- --nocapture
+     ```
+  2. 对照一次真实 Feishu progress card 长任务，观察 status 与 assistant/tool/final 事件刷新节奏。
+- **预期结果**:
+  - 高频 `Status` 事件不会立即刷新卡片，避免状态上报淹没 CardKit 更新。
+  - 用户可见的 `AssistantDelta`、`AssistantFinal`、`TurnFinished`、`TurnFailed` 会立即刷新。
+  - tool、plan、title 等可见结构性事件仍保持即时刷新策略。
+  - 长任务过程中卡片既能及时显示关键输出，又不会因 status tick 造成过多更新。
+
+### TC-IMA-116: Agent Chat 从 JSONL 历史安全恢复并续聊
+
+- **前置条件**:
+  - 使用临时 `BIFROST_DATA_DIR` 启动 Bifrost Admin，启动参数包含 `--no-system-proxy`。
+  - 数据目录下存在一份 `sessions/` 子目录内的 Agent JSONL 历史文件，内容至少包含一条 `user_message` 和一条 `assistant_message`。
+  - 准备一份 `sessions/` 外部的 `.jsonl` 文件作为越权路径负例。
+- **操作步骤**:
+  1. 打开 `http://127.0.0.1:<port>/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=<session-key>&historyPath=<encoded-jsonl-path>`。
+  2. 检查页面对话区是否渲染 JSONL 中的历史 user/assistant 消息。
+  3. 在 composer 输入 `Continue this thread` 并点击 Send。
+  4. 检查 `/_bifrost/api/agent/chat/stream` 请求体包含 `session_key`、`message` 和相同的 `history_path`。
+  5. 用 API 直接请求外部 `.jsonl` 路径：`GET /_bifrost/api/im-gateway/agent/sessions/history/<encoded-outside-path>`。
+- **预期结果**:
+  - 历史消息只从合法的 Agent `sessions/` JSONL 文件恢复。
+  - 续聊请求触发后端先恢复历史再执行新 turn，assistant 回复显示在对话区。
+  - 新 turn 继续写回原 JSONL 文件，后续再次打开相同 `historyPath` 能看到续聊内容。
+  - 外部 `.jsonl` 路径返回 400，错误说明路径不在 Agent sessions 目录内。
+
+### TC-IMA-117: Agent Chat active 会话刷新恢复与线程列表选中回归
+
+- **前置条件**:
+  - 使用当前源码 WebUI（Vite dev server 或重新构建后的 Admin 静态资源）连接到已启动的 Bifrost Admin。
+  - Bifrost Admin 中存在一个 active Agent Chat session，`GET /_bifrost/api/im-gateway/agent/sessions/<session-key>` 返回至少一条 user 消息和一条 assistant 消息。
+  - `GET /_bifrost/api/im-gateway/agent/sessions/all` 返回超过右侧 Threads 区域高度的多条记录；如存在同一 `session_key` 的 active/history 记录，需要验证不会重复选中。
+- **操作步骤**:
+  1. 打开 `http://127.0.0.1:<web-port>/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=<session-key>&view=active`。
+  2. 检查对话区是否显示该 active session detail 中的 user 与 assistant 消息，而不是 starter preview。
+  3. 检查 Conversation 卡片标题是否展示当前对话标题（线程 title、set_title 或第一条用户消息摘要），而不是固定文案 `Conversation`。
+  4. 刷新页面，重新检查第 2 步消息仍然显示。
+  5. 检查切换或刷新恢复后的消息区直接展示底部，不执行平滑动画滚动到底部。
+  6. 检查 Threads 列表容器出现独立滚动能力：列表内容高度大于可视高度，滚动不影响左侧对话输入区。
+  7. 检查当前 active session 只有一条线程按钮处于 primary/selected 状态；同一 `session_key` 的 history 记录不应同时高亮。
+- **预期结果**:
+  - 只有 `session` 和 `view=active` 的深链刷新后仍能恢复 active session 消息。
+  - 对话卡片标题跟随当前对话，不显示固定 `Conversation`。
+  - 切换会话或刷新恢复时消息区立即定位到底部，不出现动画滚动等待。
+  - URL 不会被错误改写为 history view，除非原 URL 未指定 active 且只有历史记录可恢复。
+  - Threads 不截断为 8 条，列表本身可滚动。
+  - 同一 `session_key` 的 active/history 记录不会重复选中。
+- **清理步骤**:
+  - 停止为本用例启动的 Vite dev server。
+  - 不删除用户已有 active session，除非本用例专门创建了临时 session。
+- **执行记录（2026-05-25）**: PASS — 使用用户已启动的 Bifrost Admin `http://127.0.0.1:9900` 作为后端，先通过 `curl http://127.0.0.1:9900/_bifrost/api/im-gateway/agent/sessions/admin-chat-1779677418274` 确认 active session detail 含 user 消息 `你好` 与 assistant 消息 `你好！有什么需要我帮你处理的？`。随后启动当前源码 WebUI：`WEB_PORT=3001 BACKEND_PORT=9900 pnpm --dir web dev --host 127.0.0.1`，用真实浏览器打开 `http://127.0.0.1:3001/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=admin-chat-1779677418274&view=active`。刷新前后均确认对话区包含上述两条消息，URL 保持 `view=active`；UI 自动化补充拦截 `scrollIntoView`，确认 active session 恢复和刷新恢复后的最后一次滚动行为均为 `auto`，不会平滑动画滚动到底部；Threads 列表 `scrollHeight=3984`、`clientHeight=320`，存在独立滚动能力；选中线程按钮数量为 1，文本为 `你好Active`，未出现同 session 多项同时高亮。本用例未启动或修改系统代理。
+
+### TC-IMA-118: Agent Chat Threads 去重、来源/Runner 标签与 Settings 弹窗回填
+
+- **前置条件**:
+  - 使用当前源码 WebUI（Vite dev server 或重新构建后的 Admin 静态资源）连接到 Bifrost Admin。
+  - `GET /_bifrost/api/im-gateway/agent/sessions/all` 至少返回 active、history 与不同来源的线程；可使用 mock API 构造同一 `session_key` 的 active/history 重复项。
+  - `GET /_bifrost/api/im-gateway/agent/instructions` 返回默认 `work_dir`。
+  - 已完成或已存在的会话详情中包含 `work_dir`、message/token/compaction/runner 元信息，或 JSONL history 中包含 `session_start`、`tool_call`、`tool_result`、`compaction`、`session_end` 事件。
+- **操作步骤**:
+  1. 打开 `http://127.0.0.1:<web-port>/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=<session-key>&view=active`。
+  2. 检查右侧侧栏只展示 Threads 卡片，不再平铺 Workspace、Status、Context、Plan 等卡片。
+  3. 检查 composer 输入框右下方 New Chat 按钮旁边存在 Status 按钮；点击 Status。
+  4. 点击 New Chat，检查弹窗中出现 Workspace 输入框；在尚未输入问题的新会话里确认创建后，检查 session id 不变化。
+  5. 在 Settings 弹窗中检查 Workspace 输入框显示默认或当前会话的工作目录，且已初始化会话里为只读/disabled，不能直接切换。
+  6. 在 Status 弹窗中检查已存在/已完成会话的 Status、Context 不再全部为空：Status 显示 message/compaction，Context 显示 token/runner；弹窗中不展示 Tools 模块，也不展示本轮已执行工具的 Args/Result 记录。
+  7. 检查对话标题栏展示来源、Runner 和状态标签；例如 ChatGPT Web/admin API 显示 Web，runner id 显示在 Runner 标签中，active session 显示 Active。
+  8. 关闭 Settings 弹窗，检查没有 plan 的会话不显示 Plan 模块；触发或 mock 一次包含 `plan_updated` 的 stream/history 后，确认 Plan 显示在输入框上方而不是弹窗中。
+  9. 点击 Plan 折叠按钮，切换会话后确认折叠状态保持；再次展开后切换会话确认展开状态保持。
+  10. 检查 Threads 列表同一 `session_key` 只出现一条记录；active/history 重复时 active 优先展示且只有一个选中项。
+  11. 检查每条线程显示来源标签：Feishu/Weixin/Lark 显示 IM，ChatGPT Web/admin API 显示 Web，Codex/external runner 显示 Runner，ASR runner 显示 ASR；线程列表不显示 `Active` / `Ended` 文案，只有 running 线程显示跳动绿点。
+- **预期结果**:
+  - 右侧侧栏干净，只保留 Threads 列表，列表自身可滚动。
+  - Status 弹窗入口位于输入框按钮区，并承载 Workspace、Status、Context、Errors、Run Settings。
+  - 只有 New Chat 弹窗允许选择待创建会话的 workspace；空白新会话重复 New Chat 不生成新 session id。
+  - 已初始化会话的 Workspace 只读展示，不允许切换；已存在 active session 和已完成 history session 都能从 session detail 或 JSONL events 回填 workspace/status/context；Status 弹窗不展示 Tools 卡片。
+  - 对话顶部展示来源、Runner 和状态标签。
+  - 没有 plan 时不渲染 Plan；有 plan 时 Plan 位于输入框上方，折叠/展开偏好在页面内持续保持。
+  - Threads 数据按 `session_key` 唯一展示，不出现重复数据或重复选中。
+  - 每条线程都展示可读来源标签，不展示结束状态文案；running 线程通过跳动绿点提示。
+- **清理步骤**:
+  - 停止为本用例启动的 Vite dev server。
+  - 删除自动化测试创建的临时 mock 数据；不删除用户已有 Bifrost 数据。
+- **执行记录（2026-05-25）**: PASS — 执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "deep link renders|restores active session|thread list"`，3 条真实 Chromium UI 回归通过：覆盖 New Chat 弹窗选择 workspace、空白未输入新会话确认后 session label 不变、已初始化会话 Settings Workspace disabled、默认 Workspace 随 stream 请求发送、顶部来源/Runner/状态标签、Plan 初始隐藏且有 plan 时在输入框上方可折叠/展开、active session 刷新恢复、线程来源标签 IM/Web、线程列表不再展示 Ended 文案、running 线程展示绿点、同 `session_key` active/history 去重且只选中一条、Threads 独立滚动且窄屏仍保持在对话区右侧，长标题不撑宽页面。随后使用当前源码启动 `WEB_PORT=3001 BACKEND_PORT=9900 pnpm --dir web dev --host 127.0.0.1`，连接用户已启动的 `http://127.0.0.1:9900` 后端并用真实浏览器打开 active session；确认右侧侧栏只剩 Threads，Settings 弹窗 Workspace 为 `/Users/eden/work/github/bifrost`，Status 显示 `Messages 4` / `Compactions 0`，Context 显示 runner `bifrost_agent`，无 plan 时 Plan 模块隐藏，Threads 展示 Web/IM 来源标签且同一 Feishu session 历史被折叠为唯一一条记录。
+
+### TC-IMA-125: Agent Chat Status 弹窗不展示 Tools 模块
+
+- **前置条件**:
+  - 使用当前源码 WebUI 连接到 Bifrost Admin。
+  - Agent Chat stream 可以包含 `tool_started/tool_finished` 执行事件，用于验证执行记录不会混入 Status 弹窗。
+- **操作步骤**:
+  1. 打开 `http://127.0.0.1:<web-port>/_bifrost/ai?aiSection=agent-chat&agentSection=chat`。
+  2. 发送一条消息，等待流式响应完成。
+  3. 点击 Agent Chat 标题区的 Status 按钮。
+  4. 查看 Status 弹窗内容。
+- **预期结果**:
+  - 弹窗标题为 `Agent Chat Status`。
+  - 弹窗不展示 Tools 卡片，不展示 `Success`、`Args:`、`Result:`，也不展示本轮已执行工具名称（例如 mock 执行事件中的 `shell`）。
+  - 已执行工具的过程信息仍只出现在 assistant 消息的 process steps 中。
+- **清理步骤**:
+  - 停止为本用例启动的 Vite dev server；不删除用户已有 Bifrost 数据。
+
+### TC-IMA-119: Agent Chat Runner 选择、统一标题摘要与刷新不中断后台 Loop
+
+- **前置条件**:
+  - 使用当前源码构建或启动 Bifrost Admin；若连接用户已有 `9900` 服务，必须确认该后端已重启到包含本次修复的二进制，否则只能验证前端热更新，无法验证服务侧 disconnect 语义。
+  - WebUI 可通过 `http://127.0.0.1:<web-port>/_bifrost/` 访问。
+  - `GET /_bifrost/api/im-gateway/chat/config` 返回 `defaultRunnerId` 与至少一个自定义 Runner，例如 `codex` 或 `web`。
+  - 存在一个 active session 和一份 JSONL history：两者都没有显式 title，但都包含第一条 user message。
+- **操作步骤**:
+  1. 打开 `http://127.0.0.1:<web-port>/_bifrost/ai?aiSection=agent-chat&agentSection=chat`，点击 New Chat。
+  2. 在 New Chat 弹窗中打开 Runner 下拉，选择 `codex` 或 `web`，确认创建。
+  3. 输入问题并发送，检查请求走 `/_bifrost/api/im-gateway/chat/stream`，请求体包含 `runnerId`、`adapter`、`workDir` 和 `message`。
+  4. 打开 Threads 列表，检查没有显式 title 的 active/history 会话都显示第一条用户消息摘要，而不是 `session_key`；点击会话后标题不应从 `session_key` 抖动为另一段文本。
+  5. 发起一个耗时 Agent Chat 请求，在浏览器开始收到 `run_started` 后刷新页面或关闭页面。
+  6. 不点击 Stop，等待后台 turn/run 完成；重新打开相同 `session_key` 的 active/history 链接。
+  7. 另起一次运行并点击 Stop 或发送 `/stop`，验证这次才真正停止当前轮次。
+- **预期结果**:
+  - 新建会话可选择内置 Bifrost Agent、Codex Runner、ChatGPT Web Runner 或其他已配置 Runner。
+  - 自定义 Runner 发送时使用外部 Runner NDJSON stream，顶部 Runner 标签显示所选 runner id。
+  - sessions/all 的公共字段稳定：同一 session 在列表和详情中的 title 来源一致，不因点击选中而抖动。
+  - 浏览器刷新或 HTTP stream client disconnect 不会触发 `request_stop`，后台 Agent Loop 继续运行并最终写回 session。
+  - 只有显式 Stop / `/stop` 会写入 stop signal，并释放 session 后允许后续继续对话。
+- **清理步骤**:
+  - 停止为本用例启动的 Vite dev server 和临时 Bifrost Admin。
+  - 删除自动化测试创建的临时 data dir；不删除用户已有 Bifrost 数据。
+- **执行记录（2026-05-25）**: PASS — UI 侧执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "external runner"`，真实 Chromium 验证 New Chat Runner 下拉选择 `codex` 后，请求命中 `/_bifrost/api/im-gateway/chat/stream`，请求体包含 `runnerId:"codex"`、`adapter:"codex"`、`workDir` 和用户消息，顶部 Runner 标签显示 `codex`。标题摘要与唯一数据源执行 `cargo test -p bifrost-agent scan_session_summary_uses_first_user_message_as_title_fallback --lib`、`cargo test -p bifrost-agent scan_session_summary_keeps_explicit_title_separate_from_first_user_fallback --lib`、`cargo test -p bifrost-agent test_session_info_from_list --lib`、`cargo test -p bifrost-admin sessions_all_dedupes_by_session_key_after_sorting --lib` 均通过，验证 active session list 与 JSONL summary 均使用显式 `title_updated` 优先、第一条用户消息作为 fallback，sessions/all 后端按 session_key 去重。运行中线程快照执行 `cargo test -p bifrost-agent test_running_turns_remain_visible_in_session_list --lib` 通过，验证 session checkout 后仍通过 `active_session_infos` 出现在 `list_sessions()` 并保留 running、title、workspace、runner 元信息。后台 Loop 语义通过代码 review 与 `cargo check -p bifrost-admin` 验证：`/_bifrost/api/agent/chat/stream` 与 `/_bifrost/api/im-gateway/chat/stream` 的 client disconnect 分支不再调用 `request_stop` 或 external CLI stop marker。真实 `9900` 已用 `zsh -lc 'source ~/.zshrc ... cargo run --bin bifrost -- start -p 9900 --unsafe-ssl --no-system-proxy'` 重启，PID `54277`，`ps eww -p 54277` 确认 `MODELHUB_AK` 与 `RUST_LOG` 已从 zshrc 进入进程环境，数据目录 `/Users/eden/.bifrost`，系统代理保持 disabled。
+
+### TC-IMA-120: Agent Chat 运行中消息区不显示全局 Loading 图标
+
+- **前置条件**:
+  - WebUI 可访问，`/_bifrost/api/agent/chat/stream` 或 `/_bifrost/api/im-gateway/chat/stream` 可返回一个保持 running 的流式响应。
+- **操作步骤**:
+  1. 打开 Agent Chat 页面并发送消息。
+  2. 在等待 assistant 回复期间观察消息区。
+  3. 检查对话顶部状态标签、assistant 气泡和 Threads 运行态提示。
+- **预期结果**:
+  - 消息区左上角不出现独立 Spin/loading 图标。
+  - 运行态仅通过顶部 `Running`、assistant 气泡 `Generating...` 和 Threads 跳动绿点表达。
+  - 历史加载期间消息容器只设置 `aria-busy`，不改变视觉布局。
+- **执行记录（2026-05-25）**: PASS — `pnpm --dir web exec tsc --noEmit` 通过；代码检查确认 `agent-chat-messages` 去除 `<Spin />`，仅保留 `aria-busy={historyLoading}`，assistant 气泡仍保留 `Generating...`。
+
+### TC-IMA-121: Agent Chat Codex Runner 完成后不丢失会话且内容轨道居中
+
+- **前置条件**:
+  - 使用当前源码启动 WebUI 与 Bifrost Admin。
+  - `GET /_bifrost/api/im-gateway/chat/config` 中 `codex` runner 为 enabled。
+  - Admin 进程从 shell 配置加载到 Codex / 模型相关环境变量。
+- **操作步骤**:
+  1. 打开 `/_bifrost/ai?aiSection=agent-chat&agentSection=chat`。
+  2. 点击 New Chat，选择 `codex` Runner，并使用默认或指定 Workspace 创建。
+  3. 输入一条短消息并发送，等待 Codex Runner 返回 `run_finished`。
+  4. 检查当前对话区仍保留 user 消息和 Codex assistant 回复。
+  5. 刷新页面或点击线程列表中的该会话。
+  6. 检查 `/_bifrost/api/im-gateway/agent/sessions/all` 仍包含该 session，且 `/sessions/<session_key>` 能返回合成的 user/assistant messages、runner_id、work_dir。
+  7. 在 1600px 以上宽屏检查消息轨道和 composer 轨道最大宽度为 750px，并在 Conversation 主栏居中。
+- **预期结果**:
+  - Codex Runner 成功后不会因为 active preview 清理而从 Threads 消失。
+  - 刷新或重新点击线程后，对话详情仍显示首条用户消息和最终回复。
+  - 线程标题使用首条用户消息或显式 title，不回退到奇怪的 session id。
+  - 消息区和输入区内容轨道在宽屏居中，宽度不超过 750px。
+- **执行记录（2026-05-25）**: PASS — 直接调用真实 `9900`：`curl -N -sS -X POST /_bifrost/api/im-gateway/chat/stream`，请求 `runnerId:"codex"`、`adapter:"codex"`、`workDir:"/Users/eden/work/github/bifrost"`，返回 `run_started`、`assistant_final`、`run_finished status:"succeeded"`。随后新增并执行 `cargo test -p bifrost-admin external_runner_session_detail_uses_persisted_state --lib -- --nocapture` 与 `cargo test -p bifrost-admin list_session_states_includes_external_runner_result_fields --lib -- --nocapture`，验证外部 runner 完成后 session state 可合成详情并保留 latest run/response 字段。Web UI 真实链路在 `http://127.0.0.1:3001/_bifrost/ai?aiSection=agent-chat&agentSection=chat` 逐个点击 New Chat 选择 Runner 并发送消息：内置 Bifrost Agent 会话 `admin-chat-1779698889119` 走 `/api/agent/chat/stream`，Codex 会话 `admin-chat-1779699072406` 走 `/api/im-gateway/chat/stream` 且请求包含 `runnerId:"codex"`、`adapter:"codex"`，ChatGPT Web 会话 `admin-chat-1779698291975` 走 `/api/im-gateway/chat/stream` 且请求包含 `runnerId:"abc"`、`adapter:"chatgpt_web"`；三者均在 `sessions/all` 可见，`/sessions/{session_key}` 均返回 200、`message_count >= 2`、`work_dir:"/Users/eden/work/github/bifrost"`，其中 Codex 详情返回 `runner_type:"codex"` 与 assistant 内容 `Codex UI E2E 1779699073490`。UI 宽度回归通过 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "750px|max|external runner|thread list|restores active session"` 覆盖，其中 max-width 用例验证消息轨道和 composer 轨道为 750px 且居中。
+
+### TC-IMA-122: Agent Chat 服务端稳定标题、线程列表与消息时间戳
+
+- **前置条件**:
+  - 使用当前源码启动 Bifrost Admin 与 WebUI。
+  - 存在包含 `title_updated` 的 JSONL history、无显式 title 但有第一条 user message 的 JSONL history、内置 Bifrost Agent active session、Codex/ChatGPT Web external runner active session。
+- **操作步骤**:
+  1. 调用 `GET /_bifrost/api/im-gateway/agent/sessions/all`，检查每个线程对象直接带有稳定 `title`。
+  2. 对无显式 title 的 history session 调用 `GET /_bifrost/api/im-gateway/agent/sessions/<session_key>`，检查服务端详情直接返回第一条 user message 作为 `title`。
+  3. 对包含 `title_updated` 的 history session 调用同一详情接口，检查显式 title 优先。
+  4. 在 WebUI 发起一个内置 Agent 长任务；无输入时检查输入框内右下角按钮显示 Stop。
+  5. 长任务运行中输入一条消息，检查可切换 Guide / Queue；选择 Queue 后消息只显示在输入框上方队列面板，不进入 MessageList，可继续追加多条并删除。
+  6. 对支持 guide 的内置 Agent，点击队列项上的 Guide，检查该消息可转为立即引导；对 Codex/ChatGPT Web 只显示默认 Queue，不展示 Guide。
+  7. 打开长历史会话，手动向上滚动消息区，等待 2 秒后检查页面不会自动弹回底部。
+  8. 在线程列表中切换多个线程，检查选中态和标题/副标题不闪烁；左侧小标识表示 Runner 类型（Bifrost/Codex/WebGPT），第二行渠道表示 Web/WeChat/Feishu/ASR Task/Scheduled。
+  9. 检查每条消息气泡下方都展示时间戳；鼠标悬浮时间戳时可看到完整发送/存储时间，时间戳不占用气泡正文区域。
+  10. 检查 MessageList 不展示用户/机器人头像，assistant 气泡充分使用中间内容轨道宽度，user 气泡仍右侧对齐且保持较窄阅读宽度。
+  11. 在 assistant Markdown 中点击普通链接，检查链接使用新标签页打开，不覆盖当前 Agent Chat 页面。
+- **预期结果**:
+  - 服务端列表与详情都遵循同一 title 规则：`title_updated` > 第一条 user message > session_key，不依赖前端点击后临时计算。
+  - 线程行不会在选中后从 session id 抖动为第一条消息。
+  - 运行中输入框仍可输入：内置 Agent 支持 guide/queue，外部 Runner 默认 queue。
+  - Queue 列表显示在输入框上方，支持多条、删除、内置 Agent 一键转 guide；排队确认与删除确认不作为消息流卡片展示。
+  - 输入区在同一个消息滚动容器内以悬浮卡片贴近容器底部展示，没有与消息列表割裂的顶部硬分割线。
+  - 历史阅读时手动滚动不会被自动贴底逻辑抢回底部。
+  - 线程列表是轻量两行列表：无按钮边框，Runner 类型与渠道来源分离展示。
+  - 消息时间戳显示在气泡外侧底部，不挤占正文；消息列表不渲染头像，assistant 气泡使用完整内容轨道。
+  - Markdown 链接带 `target="_blank"` 和安全 `rel`，点击不会让当前会话页跳走。
+- **执行记录（2026-05-25）**: PASS — 执行 `cargo test -p bifrost-agent session_detail_ --lib` 通过，验证内存 session detail 使用第一条 user message 作为 title fallback 且显式 title 优先；执行 `cargo test -p bifrost-admin history_session_detail_ --lib -- --nocapture` 通过，验证服务端从 JSONL history 合成 `/sessions/{session_key}` 详情并直接返回稳定 title 和 message timestamp。执行真实历史页脚本打开 `session-weixin_o9cq80wqfvOh3cJ69ywGqu9cGdqM_im_wechat-1779205574.jsonl`，刷新恢复后 `agent-chat-messages` 的 `scrollHeight=10195`、`clientHeight=1240`、`scrollTop=8955`、`distanceFromBottom=0`；随后手动向上滚动 900px，等待 2.5 秒后 `distanceFromBottom=900`，验证首次进入直接到底部且用户向上阅读时不会被锁回底部。执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "thread list scrolls|750px max|running stop|deep link renders" --reporter=line` 通过，覆盖线程标题不因点击选中抖动、线程列表撑满右侧 rail 且内部滚动、发送按钮嵌入输入框且运行中可 Stop、运行中输入支持 Guide/Queue 切换、Queue 面板展示与删除、Queue/Remove 不进入 MessageList、输入区 750px 居中并悬浮贴近滚动容器底部、消息列表不展示头像且 assistant 气泡占满内容轨道、Markdown 链接新开页面。执行 `cargo test -p bifrost-admin queue_stream_remove_deletes_item_before_drain --lib -- --nocapture` 通过，验证服务端 `/q` 后 `/rq 1` 删除会清空 queue manager，后续 `pop_queue` 取不到已删除消息；执行 `cargo test -p bifrost-admin external_runner_persists_user_message_before_result_and_dedupes_finish --lib -- --nocapture` 通过，验证外部 Runner 开始执行时立即把 user 消息落入同一 session_state，结束时不会重复追加 user 消息。
+
+### TC-IMA-123: Agent Chat Threads 右键菜单删除会话
+
+- **前置条件**:
+  - 使用当前源码启动 Bifrost Admin 与 WebUI。
+  - Threads 列表至少包含一条测试会话；该会话可由 mock API 或临时 `admin-chat-*` 会话创建，不使用用户重要历史数据。
+  - `GET /_bifrost/api/im-gateway/agent/sessions/all` 能返回该会话，`DELETE /_bifrost/api/im-gateway/agent/sessions/<session_key>` 可访问。
+- **操作步骤**:
+  1. 打开 `/_bifrost/ai?aiSection=agent-chat&agentSection=chat`。
+  2. 在线程列表中对测试会话行点击鼠标右键。
+  3. 检查右键菜单在鼠标位置打开，菜单中出现 Delete 操作；线程行本身不新增常驻删除按钮。
+  4. 点击 Delete。
+  5. 检查同一个菜单位置切换为 Confirm / Cancel 原位二次确认。
+  6. 点击 Cancel，检查会话仍保留且菜单关闭或回到可再次操作状态。
+  7. 再次右键同一会话，点击 Delete，再点击 Confirm。
+  8. 刷新 Threads 列表或页面，调用 `GET /sessions/all` 确认该 `session_key` 不再从 active/history/session_state 任一数据源返回。
+- **预期结果**:
+  - 线程操作通过可扩展右键 context menu 承载，后续可继续增加更多菜单项。
+  - 删除需要二次确认，确认 UI 原位展示，不弹出全局 Modal。
+  - Confirm 后前端立即移除该线程；如果删除的是当前会话，页面回到新的空白草稿对话。
+  - 服务端删除会清理内存 session、running preview、queue/guide、外部 runner session_state 以及同 key JSONL history，刷新后不会重新出现。
+- **清理步骤**:
+  - 删除本用例创建的临时会话数据；不删除用户已有重要历史。
+- **执行记录（2026-05-25）**: PASS — 执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "thread context menu deletes" --reporter=line` 通过，真实 Chromium 验证线程行右键打开 context menu、点击 Delete 后同位置出现 Confirm / Cancel、Confirm 调用 `DELETE /_bifrost/api/im-gateway/agent/sessions/delete-target` 并从列表移除。执行 `pnpm --dir web exec tsc --noEmit && pnpm --dir web exec tsc -b` 通过，确认右键菜单实现满足生产构建 noUnused 约束。执行 `cargo check -p bifrost-admin` 通过，确认服务端 `DELETE /sessions/{session_key}` 编译通过。随后用当前源码重启真实 `9900` 服务，打开 `http://localhost:3001/_bifrost/ai?aiSection=agent-chat&agentSection=chat`，确认页面不再白屏且 Threads 有 14 条；在真实页面右键第一条线程，确认右键菜单出现 Delete 项。未在真实用户数据上点击 Confirm 删除。
+
+### TC-IMA-124: Agent Chat 三类 Runner 五轮多轮会话不漂移
+
+- **前置条件**:
+  - 使用当前源码启动 Bifrost Admin 与 WebUI。
+  - `GET /_bifrost/api/im-gateway/chat/config` 至少启用内置 Bifrost Agent、Codex Runner、ChatGPT Web Runner。
+  - 为测试创建新的临时会话，不复用用户重要历史。
+- **操作步骤**:
+  1. 打开 `/_bifrost/ai?aiSection=agent-chat&agentSection=chat`。
+  2. 如果 Threads 为空，检查消息列表不展示 demo/starter 对话，只展示空态提示用户输入问题。
+  3. 如果 Threads 非空且 URL 没有 `session` / `historyPath`，检查页面自动选中第一条线程；随后点击 New Chat 创建空白草稿，确认不会被自动拉回第一条线程。
+  4. 分别创建 Bifrost Agent、Codex、ChatGPT Web 三类 Runner 的新对话。
+  5. 每类 Runner 在同一个新对话中连续发送 5 条消息，每轮等待 assistant 回复完成后再发送下一轮。
+  6. 每轮后记录请求中的 `session_key` / `sessionKey`、Runner ID、adapter，以及服务端返回/持久化的 `threadId` 或 `conversationId`。
+  7. 完成 5 轮后调用 `GET /_bifrost/api/im-gateway/agent/sessions/all`，检查该 Runner 的测试 `session_key` 只出现一次。
+  8. 调用 `GET /_bifrost/api/im-gateway/agent/sessions/<session_key>`，检查 messages 至少包含 5 条 user 和 5 条 assistant，顺序完整，runner/source/workspace 元信息一致。
+- **预期结果**:
+  - 三类 Runner 的 5 轮请求都复用同一个 `session_key`。
+  - Threads 不会为同一组多轮消息生成多个线程。
+  - Codex/ChatGPT Web 的外部 `threadId` / `conversationId` 作为扩展续聊引用保存，但不会替代或改变 UI 线程主键。
+  - `/sessions/<session_key>` 返回完整 10 条消息，而不是只返回最后一轮。
+  - 空白入口不展示 demo 消息；有线程时首次进入默认打开第一条线程，主动 New Chat 后保持空白草稿。
+- **清理步骤**:
+  - 删除本用例创建的测试会话；不删除用户已有重要历史。
+- **执行记录（2026-05-25）**: PASS — 执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "five rounds|selects the first thread|deep link renders" --reporter=line` 通过，覆盖空白入口不展示 demo 消息、无线程时展示输入提示、有线程且无 `session/historyPath` 时默认打开第一条线程、主动 New Chat 后保持草稿，以及 Bifrost Agent / Codex / ChatGPT Web 三类 Runner 各自连续 5 轮都复用同一个 `sessionKey` 且 Threads 只保留一条对应线程。执行 `cargo test -p bifrost-admin external_runner_session_detail_preserves_five_turns_in_one_thread --lib -- --nocapture` 与 `cargo test -p bifrost-admin session_state_normalizes_persisted_message_sequence --lib -- --nocapture` 通过，确认外部 Runner 的多轮消息序列会落在同一个服务端 `session_state.messages` 中，`/sessions/<session_key>` 可返回完整 5 user + 5 assistant。执行 `pnpm --dir web exec tsc --noEmit`、`pnpm --dir web exec tsc -b`、`cargo check -p bifrost-admin` 通过。

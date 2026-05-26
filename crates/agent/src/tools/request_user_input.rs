@@ -93,6 +93,7 @@ impl ToolHandler for RequestUserInputTool {
                 return ToolResult {
                     success: false,
                     output: format!("invalid arguments: {error}"),
+                    runtime_events: Vec::new(),
                 };
             }
         };
@@ -101,6 +102,7 @@ impl ToolHandler for RequestUserInputTool {
             return ToolResult {
                 success: false,
                 output: "request_user_input requires one to three questions".to_string(),
+                runtime_events: Vec::new(),
             };
         }
 
@@ -112,6 +114,7 @@ impl ToolHandler for RequestUserInputTool {
                         "request_user_input question id must be snake_case: {}",
                         question.id
                     ),
+                    runtime_events: Vec::new(),
                 };
             }
             if question.header.chars().count() > 12 {
@@ -121,12 +124,14 @@ impl ToolHandler for RequestUserInputTool {
                         "request_user_input header must be 12 or fewer characters: {}",
                         question.header
                     ),
+                    runtime_events: Vec::new(),
                 };
             }
             if question.question.trim().is_empty() {
                 return ToolResult {
                     success: false,
                     output: format!("request_user_input question is empty: {}", question.id),
+                    runtime_events: Vec::new(),
                 };
             }
             if !(2..=3).contains(&question.options.len()) {
@@ -136,6 +141,7 @@ impl ToolHandler for RequestUserInputTool {
                         "request_user_input question {} requires 2-3 options",
                         question.id
                     ),
+                    runtime_events: Vec::new(),
                 };
             }
             for option in &question.options {
@@ -146,6 +152,7 @@ impl ToolHandler for RequestUserInputTool {
                             "request_user_input question {} has an empty option label or description",
                             question.id
                         ),
+                        runtime_events: Vec::new(),
                     };
                 }
             }
@@ -154,6 +161,7 @@ impl ToolHandler for RequestUserInputTool {
         ToolResult {
             success: false,
             output: "request_user_input is unavailable in this Bifrost runtime: no interactive user-input channel is attached to the agent turn".to_string(),
+            runtime_events: Vec::new(),
         }
     }
 }

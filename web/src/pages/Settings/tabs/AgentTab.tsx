@@ -55,6 +55,7 @@ import SessionDetailPage from "./agent/SessionDetailPage";
 import MemoriesSection from "./agent/MemoriesSection";
 import LongTextModalField from "./agent/LongTextModalField";
 import ExternalCliPanel from "./imGateway/ExternalCliPanel";
+import AgentChatSection from "../../AI/AgentChatSection";
 
 const { Text } = Typography;
 const { useBreakpoint } = Grid;
@@ -454,6 +455,18 @@ export default function AgentTab({ hideSectionNav = false }: AgentTabProps) {
             }}
           >
             <Row gutter={[16, 16]}>
+        {/* Chat */}
+        {activeSection === "chat" && (
+        <Col
+          xs={24}
+          id="agent-settings-chat"
+          data-agent-section="chat"
+          data-testid="agent-settings-section-chat"
+        >
+          <AgentChatSection />
+        </Col>
+        )}
+
         {/* General Settings */}
         {activeSection === "general" && (
         <Col

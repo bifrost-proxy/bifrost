@@ -42,6 +42,8 @@ mod version_check;
 mod ws_payload_store;
 
 #[cfg(test)]
+mod test_env;
+#[cfg(test)]
 mod tests;
 
 pub use admin_auth::{

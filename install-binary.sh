@@ -803,6 +803,10 @@ show_help() {
     echo "  --target <TRIPLE>     Override target triple (e.g., x86_64-unknown-linux-musl)"
     echo "  --libc <gnu|musl>     Override libc variant on Linux (auto-detected by default)"
     echo "  --no-modify-path      Skip automatic PATH configuration in shell profile"
+    echo "  --no-post-install     Skip automatic CA trust, skill install, and service start"
+    echo "  --no-install-cert     Skip automatic CA certificate installation/trust"
+    echo "  --no-install-skills   Skip automatic Bifrost skill installation"
+    echo "  --no-start            Skip automatic Bifrost service startup"
     echo "  --help                Show this help message"
     echo ""
     echo "Environment variables:"
@@ -812,6 +816,10 @@ show_help() {
     echo "  BIFROST_DOWNLOAD_CONNECT_TIMEOUT  Connection timeout in seconds"
     echo "  BIFROST_DOWNLOAD_TIMEOUT          Total timeout per download attempt in seconds"
     echo "  BIFROST_DOWNLOAD_TRIES            Retry count per downloader attempt"
+    echo "  BIFROST_INSTALL_POST_INSTALL      Set to 0/false to skip post-install setup"
+    echo "  BIFROST_INSTALL_AUTO_CERT         Set to 0/false to skip CA trust"
+    echo "  BIFROST_INSTALL_AUTO_SKILLS       Set to 0/false to skip skill installation"
+    echo "  BIFROST_INSTALL_AUTO_START        Set to 0/false to skip service startup"
     echo ""
     echo "Examples:"
     echo "  curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install-binary.sh | bash"
@@ -820,6 +828,7 @@ show_help() {
     echo "  curl -fsSL ... | bash -s -- --libc musl"
     echo "  curl -fsSL ... | bash -s -- --target x86_64-unknown-linux-musl"
     echo "  curl -fsSL ... | bash -s -- --no-modify-path"
+    echo "  curl -fsSL ... | bash -s -- --no-post-install"
     echo ""
     echo "If raw.githubusercontent.com is unreachable, use a mirror to download this script:"
     echo "  curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/${REPO}/main/install-binary.sh | bash"
@@ -830,6 +839,10 @@ VERSION=""
 FORCE_TARGET=""
 FORCE_LIBC=""
 NO_MODIFY_PATH=0
+NO_POST_INSTALL=0
+NO_INSTALL_CERT=0
+NO_INSTALL_SKILLS=0
+NO_START=0
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -873,6 +886,22 @@ while [[ $# -gt 0 ]]; do
             NO_MODIFY_PATH=1
             shift
             ;;
+        --no-post-install)
+            NO_POST_INSTALL=1
+            shift
+            ;;
+        --no-install-cert)
+            NO_INSTALL_CERT=1
+            shift
+            ;;
+        --no-install-skills)
+            NO_INSTALL_SKILLS=1
+            shift
+            ;;
+        --no-start)
+            NO_START=1
+            shift
+            ;;
         --help)
             show_help
             exit 0
@@ -884,6 +913,81 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+is_enabled() {
+    local value="$1"
+    case "$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')" in
+        0|false|no|off) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+run_bifrost_post_install_command() {
+    if is_enabled "${BIFROST_INSTALL_POST_INSTALL_DRY_RUN:-0}"; then
+        echo "  [dry-run] $*"
+        return 0
+    fi
+
+    "$@"
+}
+
+run_bifrost_post_install_step() {
+    local label="$1"
+    shift
+
+    print_step "$label"
+    if run_bifrost_post_install_command "$@"; then
+        print_success "$label completed"
+        return 0
+    fi
+
+    print_warning "$label failed"
+    print_warning "You can retry manually with:"
+    echo "  $*"
+    return 1
+}
+
+run_post_install() {
+    local bifrost_bin="$1"
+    local failures=0
+
+    if [[ "$NO_POST_INSTALL" == "1" ]] || ! is_enabled "${BIFROST_INSTALL_POST_INSTALL:-1}"; then
+        print_warning "Post-install setup skipped"
+        return 0
+    fi
+
+    echo ""
+    print_step "Completing one-click setup..."
+
+    if [[ "$NO_INSTALL_CERT" != "1" ]] && is_enabled "${BIFROST_INSTALL_AUTO_CERT:-1}"; then
+        run_bifrost_post_install_step "Installing and trusting CA certificate" \
+            "$bifrost_bin" ca install || failures=$((failures + 1))
+    else
+        print_warning "CA certificate installation skipped"
+    fi
+
+    if [[ "$NO_INSTALL_SKILLS" != "1" ]] && is_enabled "${BIFROST_INSTALL_AUTO_SKILLS:-1}"; then
+        run_bifrost_post_install_step "Installing Bifrost skills for all supported AI tools" \
+            "$bifrost_bin" install-skill --tool all -y || failures=$((failures + 1))
+    else
+        print_warning "Bifrost skill installation skipped"
+    fi
+
+    if [[ "$NO_START" != "1" ]] && is_enabled "${BIFROST_INSTALL_AUTO_START:-1}"; then
+        run_bifrost_post_install_step "Starting Bifrost service" \
+            "$bifrost_bin" start --daemon --yes || failures=$((failures + 1))
+    else
+        print_warning "Bifrost service startup skipped"
+    fi
+
+    if [[ "$failures" -eq 0 ]]; then
+        print_success "One-click setup completed"
+    else
+        print_warning "One-click setup finished with $failures failed step(s); the CLI binary is installed."
+    fi
+
+    return 0
+}
 
 install_binary_for_target() {
     local target="$1"
@@ -1108,11 +1212,13 @@ main() {
         echo "  export PATH=\"$INSTALL_DIR:\$PATH\""
     fi
 
+    run_post_install "$INSTALL_DIR/$binary_name"
+
     echo ""
     echo "Getting started:"
     echo ""
-    echo "  # Start proxy server"
-    echo "  bifrost start"
+    echo "  # Check proxy status"
+    echo "  bifrost status"
     echo ""
     echo "  # Start with custom port"
     echo "  bifrost -p 8080 start"

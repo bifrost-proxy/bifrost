@@ -730,6 +730,193 @@ struct TaskDetail {
     daily_documents: Vec<AsrDailyDocumentSummary>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AsrRunProgress {
+    run_id: String,
+    trigger: String,
+    status: String,
+    started_at_ms: u64,
+    updated_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    finished_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    current_source_path: Option<PathBuf>,
+    #[serde(default)]
+    current_file_index: usize,
+    #[serde(default)]
+    current_file_total: usize,
+    #[serde(default)]
+    current_chunk_done: usize,
+    #[serde(default)]
+    current_chunk_total: usize,
+    #[serde(default)]
+    processed_now: usize,
+    #[serde(default)]
+    failed_now: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TaskWatchTask {
+    id: String,
+    name: String,
+    audio_dir: PathBuf,
+    enabled: bool,
+    paused: bool,
+    running: bool,
+    schedule: AsrTaskSchedule,
+    language: String,
+    model: String,
+    runtime_strategy: AsrRuntimeStrategy,
+    last_run_at_ms: Option<u64>,
+    next_run_at_ms: Option<u64>,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TaskWatchProgress {
+    discovered: usize,
+    processed: usize,
+    pending: usize,
+    failed: usize,
+    partial_success: usize,
+    failed_chunk_count: usize,
+    deleted_after_processing: usize,
+    file_percent: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_file_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_source_path: Option<PathBuf>,
+    current_file_index: usize,
+    current_file_total: usize,
+    current_chunk_done: usize,
+    current_chunk_total: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    eta_ms: Option<u64>,
+    eta_confidence: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TaskWatchConsumption {
+    source_bytes_total: u64,
+    source_bytes_processed: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_bytes_processed_estimated: Option<u64>,
+    audio_duration_ms_total: u64,
+    audio_duration_ms_processed: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audio_duration_ms_processed_estimated: Option<u64>,
+    inference_elapsed_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    average_rtf: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_chunk_rtf: Option<f64>,
+    text_chars: usize,
+    chunks_completed: usize,
+    chunks_failed: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TaskWatchService {
+    managed: bool,
+    server_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pid: Option<u32>,
+    owner_module: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TaskWatchFile {
+    key: String,
+    source_path: PathBuf,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    media_duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    progress_current: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    progress_total: Option<usize>,
+    text_chars: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_chunk_rtf: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    started_at_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    finished_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TaskWatchDailyAgentDocument {
+    date: String,
+    status: String,
+    change_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    report_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_len_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    processed_at_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runner: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_run_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TaskWatchDailyAgent {
+    enabled: bool,
+    runner: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_run_at_ms: Option<u64>,
+    daily_files: usize,
+    processed_documents: usize,
+    pending_documents: usize,
+    report_files: usize,
+    indexed_reports: usize,
+    unindexed_reports: usize,
+    processed_missing_report: usize,
+    recent_documents: Vec<TaskWatchDailyAgentDocument>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TaskWatchSnapshot {
+    task: TaskWatchTask,
+    progress: TaskWatchProgress,
+    consumption: TaskWatchConsumption,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    service: Option<TaskWatchService>,
+    recent_files: Vec<TaskWatchFile>,
+    daily_agent: TaskWatchDailyAgent,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run_progress: Option<AsrRunProgress>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_error: Option<String>,
+    snapshot_source: String,
+    warnings: Vec<String>,
+    updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TaskWatchListResponse {
+    tasks: Vec<TaskWatchSnapshot>,
+    updated_at_ms: u64,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum BulkChunkRetryStatus {

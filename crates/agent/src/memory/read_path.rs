@@ -4,8 +4,9 @@ use crate::config::AgentConfig;
 use crate::memory::constants::*;
 use crate::memory::layout::{ensure_memory_layout, memory_root};
 use crate::memory::telemetry::telemetry_event;
-use crate::memory::utils::truncate_chars;
-use crate::memory_prompts::READ_PATH_TEMPLATE;
+use crate::memory_prompts::{
+    truncate_to_token_limit, MEMORY_SUMMARY_TOKEN_LIMIT, READ_PATH_TEMPLATE,
+};
 use crate::session::AgentSession;
 use crate::types::ChatMessage;
 use std::fs;
@@ -48,7 +49,7 @@ pub fn build_memory_read_instructions() -> Option<String> {
         telemetry_event("read_inject.skip", 0, true, Some("empty summary"));
         return None;
     }
-    let summary = truncate_chars(&summary, MEMORY_SUMMARY_TOKEN_LIMIT_CHARS);
+    let summary = truncate_to_token_limit(&summary, MEMORY_SUMMARY_TOKEN_LIMIT);
     telemetry_event("read_inject.hit", summary.len() as u64, true, None);
     Some(render_read_path_prompt(&root, &summary))
 }

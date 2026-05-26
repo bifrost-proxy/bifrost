@@ -8,6 +8,8 @@
 
 2026-05-08 补充修复目标是把 Bifrost local compaction 与 `~/work/github/codex` 的 Codex local compaction 策略继续对齐，重点处理压缩后保留内容、summary 模板、summary 生成请求形态、user message 预算、token snapshot 重算和自动压缩触发时机的细节差异。
 
+2026-05-24 补充修复目标是让内置 Bifrost Agent 的 compaction/context progress events 同步刷新飞书 IM progress card。此前 progress card 只消费 `Status` 事件，`CompactionStarted/Finished/Failed` 和 `ContextUpdated` 被忽略；当压缩发生在两次 status 刷新之间时，飞书卡片 footer 和状态面板标题可能继续显示旧的压缩次数。
+
 ## 现状核查与根因
 
 相关代码路径：
@@ -22,6 +24,9 @@
   - `record_compaction_event()` 写入持久化统计。
 - `crates/agent/src/session_status.rs`
   - `refresh_active_turn_status()` 将 session state 投影到运行中 `/status`。
+- `crates/bifrost-admin/src/im_gateway/progress_card.rs`
+  - `ImAgentProgressSnapshot::apply_event()` 消费 Agent progress events 并渲染飞书 progress card。
+  - `format_status_panel_title()` / `format_footer_markdown()` 展示 token、context 和压缩次数。
 - `crates/agent/src/persistence.rs`
   - `ConversationRecorder::record_compaction()` 持久化 compaction 事件。
 
@@ -34,6 +39,7 @@
 5. Bifrost 在普通 sampling overflow 后保留 emergency compact + trim retry，这是 Bifrost 的特殊保护，不是普通 sampling overflow 语义；必须收窄边界并明确记录。
 6. history rewrite 后 active `/status` 曾存在短窗口旧快照，`compaction_count`、`history_version`、context token 口径可能和实际 session 不一致。
 7. 后续复核发现 Bifrost 仍保留了若干非 Codex local compaction 细节：summary prompt/prefix 不是 Codex 原文；summary 生成请求把完整 history 扁平化为 `[role]: ...` 单条 user message，且把 compaction prompt 放在 system message；user carry-over 用 char/byte 预算而非 token 预算；replacement history 直接 clone `ChatMessage`，可能保留 `content_parts`；压缩后 token snapshot 没有把 base instructions 算入；普通新 turn 采样前缺少 Codex 当前仍保留的 pre-sampling compaction。
+8. 飞书 progress card 的 snapshot 只有 `status: Option<ActiveTurnStatus>`，但内置 Agent compaction 成功时先发出 `CompactionFinished { progress.context.compaction_count = N }`，未必紧跟新的 `Status` 事件。旧实现把 `ContextUpdated` 与 compaction 事件直接丢弃，导致卡片增量更新链路没有新的 status hash，用户在 IM 卡片上看到的“压缩：N 次”可能落后于真实 session。
 
 ## 实现逻辑
 
@@ -174,11 +180,22 @@ InitialContextInjection::DoNotInject
 
 post-sampling 路径仍使用 mid-turn `BeforeLastUserMessage` 注入非 system initial context，与 Codex 的 `token_limit_reached && needs_follow_up` 语义保持一致。
 
+### 9. 飞书 IM progress card 消费 compaction/context 事件
+
+`ImAgentProgressSnapshot` 新增 `context: Option<AgentContextSnapshot>`，并在 `apply_event()` 中统一处理：
+
+- `Status`：保存完整 `ActiveTurnStatus`，并同步生成一份 context snapshot。
+- `ContextUpdated`：更新 context；如果已有 status，则把 estimated context、window、usage percent、compaction count、history version、message count、user turn count、last/total tokens 回写到 status。
+- `CompactionStarted` / `CompactionFinished` / `CompactionFailed`：从 progress.context 走同一套 context 同步逻辑。
+
+飞书卡片仍优先展示 status 中的运行态字段（loop、work_dir、队列、guide 等）；当 status 暂不可用时，状态面板标题和 footer 会回退到 context snapshot，至少保证 token、context usage 和 `压缩：N 次` 能随 compaction event 更新。这样不会改变最终回复卡片、工具面板和计划面板结构，只修正状态区数据源。
+
 ## 依赖项
 
 - `crates/agent/src/session.rs`
 - `crates/agent/src/compact.rs`
 - `crates/agent/src/session_status.rs`
+- `crates/bifrost-admin/src/im_gateway/progress_card.rs`
 - `crates/agent/src/persistence.rs`
 - `crates/bifrost-admin/src/state.rs`（测试隔离修正，避免并发测试中默认 `RulesStorage` 被全局 env 污染）
 - `e2e-tests/tests/test_agent_builtin_status_runtime.sh`
@@ -211,6 +228,8 @@ post-sampling 路径仍使用 mid-turn `BeforeLastUserMessage` 注入非 system 
 18. `session::tests::test_mid_turn_initial_context_excludes_base_instructions`：验证 mid-turn initial context builder 不把 base/system instructions 放进 replacement history。
 19. `session::tests::test_build_messages_dedupes_injected_mid_turn_context`：验证 build_messages 在本次请求选中的 history 已携带非 system context / memory 时不会重复 prepend，但 system/base 仍只出现一次。
 20. `session::tests::test_build_messages_only_dedupes_context_selected_for_request`：验证 max_history 裁剪掉 reinjected context 时，build_messages 不会误以完整 history 中存在该 context 为由跳过 prompt prefix。
+21. `progress_card::tests::progress_snapshot_updates_status_from_compaction_context`：验证已有 status 时，`CompactionFinished` 的 context 会把 `compaction_count`、history version、token 和 context 字段回写到飞书卡片状态。
+22. `progress_card::tests::progress_snapshot_uses_context_when_status_is_not_available`：验证尚无 status 时，`ContextUpdated` 也能让飞书卡片状态区展示 token、context 和压缩次数。
 
 ### E2E 测试
 
@@ -219,16 +238,18 @@ post-sampling 路径仍使用 mid-turn `BeforeLastUserMessage` 注入非 system 
 1. mock provider 返回较小 `usage.total_tokens = 17`。
 2. 工具调用产生大体积输出并进入第二轮模型请求。
 3. 运行中 `/status` 断言：
-   - 首轮长模型请求启动后，脚本轮询到真实 `active_status` 再做断言，避免固定 sleep 在 CI 并发调度下抢跑。
+   - 首轮长模型请求启动后，脚本先等待 mock 记录到第一轮模型请求，再轮询到真实 `active_status` 做断言，避免固定 sleep 或请求调度延迟在 CI 并发环境下抢跑。
    - 如果 `/status` 在业务请求之前误创建了空闲 session，后续带 `work_dir` 的 turn 必须覆盖该 session 的工作路径并重置上下文。
    - `active_status.current_loop_iteration == 2`
    - 压缩前路径验证 `active_status.last_response_tokens == 17` 且 `active_status.estimated_context_tokens > 10017`
    - 压缩后路径验证 `active_status.compaction_count == 1`
    - 文本 `Context 用量` 与 JSON 字段一致，并使用 K/M/B 格式化窗口值（例如 `250K`）
    - 文本最近响应显示与 JSON 字段一致的格式化值
-4. CI 高负载下第二轮模型请求保留足够长的 mock 延迟窗口，并在轮询期间保存最后一次 `active_status` 响应，避免因为采样窗口过短导致脚本只捕获到 turn 完成后的空闲 `/status`。
+4. CI 高负载下先等待 mock 记录到压缩后的第二轮模型请求，再进入 `/status` 轮询；第二轮模型请求保留足够长的 mock 延迟窗口，并在轮询期间保存最后一次 `active_status` 响应，避免因为请求尚未进入 active turn 或采样窗口过短导致脚本只捕获到新会话/空闲 `/status`。
 
 由于本轮触达 guide / pending continuation，补跑 `e2e-tests/tests/test_im_guide_queue_human_api.sh`，验证 turn-end guide、FIFO queue、guide 优先级和空白忽略仍符合预期。
+
+2026-05-24 新增覆盖：执行 `cargo test -p bifrost-admin im_gateway::progress_card::tests::progress_snapshot_updates_status_from_compaction_context --lib -- --nocapture` 和 `cargo test -p bifrost-admin im_gateway::progress_card::tests::progress_snapshot_uses_context_when_status_is_not_available --lib -- --nocapture`，作为飞书 progress card payload 层的可自动执行 E2E 替代验证；如需真实飞书发送链路，可在已配置 Feishu provider 的默认数据目录下触发一次会自动压缩的内置 Agent 会话，并观察卡片状态区。
 
 ### 真实场景测试（human_tests）
 
@@ -249,6 +270,8 @@ post-sampling 路径仍使用 mid-turn `BeforeLastUserMessage` 注入非 system 
 
 同步更新 `human_tests/readme.md` 中 Agent 内置命令测试用例数量。
 
+新增 `human_tests/agent-im-card-compression.md`：覆盖飞书 IM progress card 从 `Status`、`ContextUpdated` 和 `CompactionFinished` 事件同步压缩次数的真实场景验证，并记录本轮实际执行的 Rust payload 层命令结果。
+
 ## 校验要求
 
 按顺序执行：
@@ -258,11 +281,13 @@ post-sampling 路径仍使用 mid-turn `BeforeLastUserMessage` 注入非 system 
 3. `cargo test -p bifrost-agent session_status::tests:: -- --nocapture`
 4. `bash e2e-tests/tests/test_agent_builtin_status_runtime.sh`
 5. `bash e2e-tests/tests/test_im_guide_queue_human_api.sh`
-6. 按 `human_tests/agent-builtin-commands.md` 新增/受影响用例逐条执行并记录结果
-7. `cargo fmt --all -- --check`
-8. `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-9. `cargo test --workspace --all-features`
-10. 按修改范围执行 `bash scripts/ci/local-ci.sh --skip-e2e`，并用上面的 targeted E2E 覆盖受影响链路。
+6. `cargo test -p bifrost-admin im_gateway::progress_card::tests::progress_snapshot_updates_status_from_compaction_context --lib -- --nocapture`
+7. `cargo test -p bifrost-admin im_gateway::progress_card::tests::progress_snapshot_uses_context_when_status_is_not_available --lib -- --nocapture`
+8. 按 `human_tests/agent-builtin-commands.md` 和 `human_tests/agent-im-card-compression.md` 新增/受影响用例逐条执行并记录结果
+9. `cargo fmt --all -- --check`
+10. `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+11. `cargo test --workspace --all-features`
+12. 按修改范围执行 `bash scripts/ci/local-ci.sh --skip-e2e`，并用上面的 targeted E2E 覆盖受影响链路。
 
 ## 本轮验证结果（2026-05-10）
 
@@ -311,4 +336,5 @@ GitHub Actions `E2E Shell (Linux, shard 1/3)` 暴露首轮 `/status` 采样竞�
 
 - 更新 `design/agent-context-status-compaction.md`
 - 更新 `human_tests/agent-builtin-commands.md`
+- 更新 `human_tests/agent-im-card-compression.md`
 - 更新 `human_tests/readme.md`

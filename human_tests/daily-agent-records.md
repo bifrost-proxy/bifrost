@@ -90,6 +90,71 @@ BIFROST_DATA_DIR="$(mktemp -d)" cargo run --bin bifrost -- start -p 18880 --unsa
 - `Run Results` 表格首行显示 `2026-05-16`，最新数据优先。
 - 点击任一 report 链接的行为不受排序影响，仍能进入对应日期的全屏 Markdown 详情。
 
+### TC-DAR-05 详情页读取与列表状态路径一致回归
+
+操作步骤：
+
+1. 使用临时 `BIFROST_DATA_DIR`。
+2. 创建任务 ID 为 `daily-records-state-path-task` 的 ASR Directory Task。
+3. 创建 `asr/data/text/daily-records-state-path-task/daily/report/2026-05-20-report.md`，内容包含 `# State Path Report`。
+4. 写入 `asr/tasks/daily-records-state-path-task/daily_agent_processed.json`，其中 `documents["2026-05-20"].report_path` 指向上一步创建的真实 report 文件。
+5. 请求 `GET /_bifrost/api/asr/tasks/daily-records-state-path-task/daily-agent/runs`，确认列表记录包含同一个 `report_path`。
+6. 请求 `GET /_bifrost/api/asr/tasks/daily-records-state-path-task/daily-agent/reports/2026-05-20`。
+7. 直接访问非法日期 API：
+   ```bash
+   curl -i 'http://127.0.0.1:<port>/_bifrost/api/asr/tasks/daily-records-state-path-task/daily-agent/reports/%2E%2E%2Fsecret'
+   ```
+
+预期结果：
+
+- `runs` 响应中 `date=2026-05-20` 的记录展示 `daily_agent_processed.json` 里的 `report_path`。
+- report 详情响应状态为 200，`path` 与列表记录中的 `report_path` 一致，`content` 包含 `State Path Report`。
+- 详情接口不会重新拼接另一个 Daily workspace 路径导致 404。
+- 非法日期或路径穿越仍返回 400/404，不允许越权读文件。
+
+### TC-DAR-06 Daily Agent report 同步目录 CLI 控制
+
+操作步骤：
+
+1. 使用临时 `BIFROST_DATA_DIR` 启动 Bifrost，必须带 `--no-system-proxy`。
+2. 创建一个 ASR Directory Task，并在 `asr/data/text/<task_id>/.daily/report/` 下写入 `2026-05-17-report.md`。
+3. 执行：
+   ```bash
+   BIFROST_DATA_DIR=<temp> bifrost ai asr task daily set-sync-dir <task_id> --dir <sync_dir>
+   ```
+4. 执行：
+   ```bash
+   BIFROST_DATA_DIR=<temp> bifrost ai asr task daily sync <task_id>
+   ```
+5. 检查 `<sync_dir>/2026-05-17-report.md`。
+6. 再次执行：
+   ```bash
+   BIFROST_DATA_DIR=<temp> bifrost ai asr task daily sync <task_id> --json
+   ```
+
+预期结果：
+
+- `set-sync-dir` 输出包含配置的同步目录。
+- 首次 `sync` 输出包含 `Copied: 1`、`Skipped: 0`、`Failed: 0`。
+- 同步目录中存在 `2026-05-17-report.md`，内容与原 report 一致。
+- 第二次 `sync --json` 返回 `sync.total_files=1`、`copied_files=0`、`skipped_files=1`、`failed_files=0`。
+
+### TC-DAR-07 Daily Agent WebUI report 同步目录与状态展示
+
+操作步骤：
+
+1. 打开 ASR task 详情页，切换到 `Daily Agent` tab。
+2. 在 `Configuration` 区域找到 `Report Sync Dir` 输入框，填写一个同步目录并点击 `Save`。
+3. 点击配置区下方 `Sync Reports` 按钮。
+4. 查看 `Last Run Status` 区域。
+
+预期结果：
+
+- `Report Sync Dir` 可以保存到后端 `report_sync_dir`。
+- 未配置目录时 `Sync Reports` 按钮不可用；配置后按钮可用。
+- 点击 `Sync Reports` 后页面显示成功提示。
+- `Last Run Status` 展示最近同步结果，包含 copied/total、skipped、Last Sync 和 Sync Dir；如失败则展示错误摘要。
+
 ## 清理步骤
 
 1. 停止测试端口上的 Bifrost 进程。
@@ -103,3 +168,5 @@ BIFROST_DATA_DIR="$(mktemp -d)" cargo run --bin bifrost -- start -p 18880 --unsa
 | 2026-05-20 | TC-DAR-02 processed state 元数据优先且补齐 report_path | 同一真实服务与临时数据目录；创建临时 ASR task `aa81bf23510c4eb2b727c42c8ba93514`，写入 `daily/report/2026-05-15-report.md` 与 `asr/tasks/<task_id>/daily_agent_processed.json`，其中 `runner=web`、`last_run_id=run-1`、`report_path=null`；请求 `/_bifrost/api/asr/tasks/<task_id>/daily-agent/runs` | PASS：响应 1 条记录，没有重复行；保留 `runner=web`、`last_run_id=run-1`、`processed_at_ms=100`、`source_sha256=abc123`；`report_path` 补齐为 `daily/report/2026-05-15-report.md` |
 | 2026-05-21 | TC-DAR-03 Daily Agent 配置页展示 report 索引状态 | `BIFROST_DATA_DIR=/tmp/bifrost-dar-index-human.w5hMjx target/debug/bifrost start -p 18881 --unsafe-ssl --no-system-proxy --skip-cert-check -y`；创建临时 ASR task `eeb1f24cdef34d5ab31b0c3c8745482c`，写入 2 个 report 文件和只包含 `2026-05-14` 的 `daily_agent_processed.json`；请求 `/_bifrost/api/asr/tasks/<task_id>/daily-agent` 并复查状态文件 keys | PASS：`report_index_status` 返回 `report_files=2`、`processed_documents=1`、`indexed_reports=1`、`unindexed_reports=1`、`unindexed_dates=["2026-05-15"]`；状态文件仍只包含 `2026-05-14`，未自动回填 |
 | 2026-05-21 | TC-DAR-04 Run Results 最新日期优先倒序展示 | `SKIP_FRONTEND_BUILD=1 BIFROST_DATA_DIR=/tmp/bifrost-dar-sort-human.sjmERC target/debug/bifrost start -p 55092 --unsafe-ssl --no-system-proxy --skip-cert-check -y`；创建临时 ASR task `a4e4520ba02c43a99508fea6785d732e`，在 `daily_agent_processed.json` 中按非倒序写入 `2026-05-14`、`2026-05-16`、`2026-05-15`，并请求 `/_bifrost/api/asr/tasks/<task_id>/daily-agent/runs` 与 `/_bifrost/api/asr/tasks/<task_id>/daily-agent/reports/2026-05-16` | PASS：`processed_documents` 返回日期顺序 `2026-05-16,2026-05-15,2026-05-14`；最新日期 report 详情返回 200 且正文包含 `Report 2026-05-16`；临时服务、数据目录和音频目录已清理 |
+| 2026-05-26 | TC-DAR-06 Daily Agent report 同步目录 CLI 控制 | `source ~/.zshrc && bash e2e-tests/tests/test_asr_task_cli.sh` | PASS：脚本使用临时 Bifrost、临时 ASR task 和临时同步目录，执行 `daily set-sync-dir <task_id> --dir <sync_dir>` 后输出同步目录；执行 `daily sync <task_id>` 后复制 `2026-05-17-report.md` 到同步目录，输出 `Copied: 1`、`Skipped: 0`；二次 `daily sync <task_id> --json` 返回 `total_files=1`、`copied_files=0`、`skipped_files=1`、`failed_files=0` |
+| 2026-05-26 | TC-DAR-07 Daily Agent WebUI report 同步目录与状态展示 | `source ~/.zshrc && pnpm --dir web exec playwright test tests/ui/asr-daily-agent-runner.spec.ts --grep "simple Runner"` | PASS：WebUI mock 验证 `Report Sync Dir` 输入框可保存 `report_sync_dir`，`Sync Reports` 按钮触发 `/daily-agent/sync`，toast 显示 `Synced 2 copied, 0 skipped`，Last Run Status 展示 `2 copied / 2 total` 和同步目录 |

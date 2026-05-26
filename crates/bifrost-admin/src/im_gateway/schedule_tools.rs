@@ -437,6 +437,7 @@ fn json_tool_result<T: serde::Serialize>(success: bool, value: &T) -> ToolResult
     ToolResult {
         success,
         output: serde_json::to_string_pretty(value).unwrap_or_else(|_| "{}".to_string()),
+        runtime_events: Vec::new(),
     }
 }
 
@@ -444,6 +445,7 @@ fn error_tool_result(error: String) -> ToolResult {
     ToolResult {
         success: false,
         output: error,
+        runtime_events: Vec::new(),
     }
 }
 

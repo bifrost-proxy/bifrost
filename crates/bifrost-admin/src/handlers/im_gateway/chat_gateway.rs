@@ -116,6 +116,14 @@ pub(super) async fn handle_chat_gateway(
                     request,
                     &effective.settings,
                 );
+                if is_clear_session_command(&request.message) {
+                    return clear_chat_gateway_session_response(
+                        &request,
+                        &effective.runner_id,
+                        true,
+                    )
+                    .await;
+                }
                 if !effective.settings.enabled {
                     return error_response(
                         StatusCode::BAD_REQUEST,
@@ -123,90 +131,116 @@ pub(super) async fn handle_chat_gateway(
                     );
                 }
                 apply_provider_work_dir_to_external_cli_request(_service, &mut request);
+                apply_persisted_external_cli_state(&mut request, &effective.runner_id);
+                if request.message.trim() == "/stop" {
+                    return stop_external_cli_stream_response(
+                        request.session_key.as_deref().unwrap_or_default(),
+                    )
+                    .await;
+                }
+                if let Some(session_key) = request.session_key.as_deref() {
+                    if !_service
+                        .agent_session_manager
+                        .try_start_external_session_preview(
+                            session_key,
+                            first_message_title_preview(&request.message),
+                            request
+                                .work_dir
+                                .as_ref()
+                                .map(|path| path.display().to_string()),
+                            Some("admin-api".to_string()),
+                            Some(request.adapter.clone()),
+                            Some(effective.runner_id.clone()),
+                        )
+                    {
+                        return queue_external_cli_stream_response(
+                            _service,
+                            session_key,
+                            &request.message,
+                        );
+                    }
+                }
                 let runtime = crate::im_gateway::external_cli::ExternalCliRuntime::new(
                     crate::im_gateway::external_cli::default_runs_root(),
                 );
                 let (tx, rx) = tokio::sync::mpsc::channel::<
                     Result<hyper::body::Frame<bytes::Bytes>, hyper::Error>,
                 >(16);
-                let session_key_for_stop = request.session_key.clone();
-                let runs_root_for_stop = crate::im_gateway::external_cli::default_runs_root();
+                let runner_id_for_state = effective.runner_id.clone();
+                let request_for_state = request.clone();
+                let agent_session_manager = _service.agent_session_manager.clone();
+                let queue_manager = _service.queue_manager.clone();
+                let session_key_for_preview = request.session_key.clone();
                 tokio::spawn(async move {
-                    let started =
-                        serde_json::json!({"eventType":"run_started","content":"started"});
-                    if tx
-                        .send(Ok(hyper::body::Frame::data(bytes::Bytes::from(format!(
-                            "{}\n",
-                            started
-                        )))))
-                        .await
-                        .is_err()
-                    {
-                        // Client already disconnected before run even started
-                        return;
-                    }
-                    // Race between the run completing and the client disconnecting.
-                    // tx.closed() resolves when the receiver (HTTP response body) is dropped,
-                    // which happens when the client closes the connection.
-                    let run_result = tokio::select! {
-                        result = runtime.run(request) => Some(result),
-                        _ = tx.closed() => {
-                            // Client disconnected while run is in progress — stop it
-                            tracing::info!("SSE client disconnected, stopping active session");
-                            if let Some(ref sk) = session_key_for_stop {
-                                let _ =
-                                    crate::im_gateway::external_cli::request_session_stop(
-                                        &runs_root_for_stop,
-                                        sk,
-                                    )
+                    let mut current_request = request;
+                    loop {
+                        remember_external_cli_started_state(&current_request, &runner_id_for_state);
+                        let started =
+                            serde_json::json!({"eventType":"run_started","content":"started"});
+                        let _ = tx
+                            .send(Ok(hyper::body::Frame::data(bytes::Bytes::from(format!(
+                                "{}\n",
+                                started
+                            )))))
+                            .await;
+                        let request_snapshot = current_request.clone();
+                        let run_result = runtime.run(current_request).await;
+                        match run_result {
+                            Ok(result) => {
+                                remember_external_cli_result_state(
+                                    &request_snapshot,
+                                    &runner_id_for_state,
+                                    &result,
+                                );
+                                for event in &result.events {
+                                    if matches!(
+                                        event.event_type,
+                                        crate::im_gateway::external_cli::ExternalCliProgressEventType::RunStarted
+                                            | crate::im_gateway::external_cli::ExternalCliProgressEventType::RunFinished
+                                    ) {
+                                        continue;
+                                    }
+                                    let line = serde_json::to_string(event)
+                                        .unwrap_or_else(|_| "{}".to_string());
+                                    let _ = tx
+                                        .send(Ok(hyper::body::Frame::data(bytes::Bytes::from(
+                                            format!("{line}\n"),
+                                        ))))
+                                        .await;
+                                }
+                                let finished = serde_json::json!({"eventType":"run_finished","runId":result.run_id,"status":result.status,"response":result.response});
+                                let _ = tx
+                                    .send(Ok(hyper::body::Frame::data(bytes::Bytes::from(
+                                        format!("{}\n", finished),
+                                    ))))
                                     .await;
                             }
-                            None
-                        }
-                    };
-                    let Some(run_result) = run_result else {
-                        return;
-                    };
-                    match run_result {
-                        Ok(result) => {
-                            for event in &result.events {
-                                if matches!(
-                                    event.event_type,
-                                    crate::im_gateway::external_cli::ExternalCliProgressEventType::RunStarted
-                                        | crate::im_gateway::external_cli::ExternalCliProgressEventType::RunFinished
-                                ) {
-                                    continue;
-                                }
-                                let line = serde_json::to_string(event)
-                                    .unwrap_or_else(|_| "{}".to_string());
-                                if tx
+                            Err(error) => {
+                                let failed =
+                                    serde_json::json!({"eventType":"run_failed","error":error});
+                                let _ = tx
                                     .send(Ok(hyper::body::Frame::data(bytes::Bytes::from(
-                                        format!("{line}\n"),
+                                        format!("{}\n", failed),
                                     ))))
-                                    .await
-                                    .is_err()
-                                {
-                                    return;
-                                }
+                                    .await;
+                                break;
                             }
-                            let finished = serde_json::json!({"eventType":"run_finished","runId":result.run_id,"status":result.status,"response":result.response});
-                            let _ = tx
-                                .send(Ok(hyper::body::Frame::data(bytes::Bytes::from(format!(
-                                    "{}\n",
-                                    finished
-                                )))))
-                                .await;
                         }
-                        Err(error) => {
-                            let failed =
-                                serde_json::json!({"eventType":"run_failed","error":error});
-                            let _ = tx
-                                .send(Ok(hyper::body::Frame::data(bytes::Bytes::from(format!(
-                                    "{}\n",
-                                    failed
-                                )))))
-                                .await;
-                        }
+                        let Some(session_key) = session_key_for_preview.as_deref() else {
+                            break;
+                        };
+                        let Some(next_message) = queue_manager.pop_queue(session_key) else {
+                            break;
+                        };
+                        current_request = request_for_state.clone();
+                        current_request.message = next_message;
+                        apply_persisted_external_cli_state(
+                            &mut current_request,
+                            &runner_id_for_state,
+                        );
+                    }
+                    if let Some(session_key) = session_key_for_preview.as_deref() {
+                        agent_session_manager.clear_active_session_preview(session_key);
                     }
                 });
                 let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
@@ -280,6 +314,14 @@ pub(super) async fn handle_chat_gateway(
                     request,
                     &effective.settings,
                 );
+                if is_clear_session_command(&request.message) {
+                    return clear_chat_gateway_session_response(
+                        &request,
+                        &effective.runner_id,
+                        false,
+                    )
+                    .await;
+                }
                 if !effective.settings.enabled {
                     return error_response(
                         StatusCode::BAD_REQUEST,
@@ -287,11 +329,21 @@ pub(super) async fn handle_chat_gateway(
                     );
                 }
                 apply_provider_work_dir_to_external_cli_request(_service, &mut request);
+                apply_persisted_external_cli_state(&mut request, &effective.runner_id);
                 let runtime = crate::im_gateway::external_cli::ExternalCliRuntime::new(
                     crate::im_gateway::external_cli::default_runs_root(),
                 );
+                let request_for_state = request.clone();
+                remember_external_cli_started_state(&request_for_state, &effective.runner_id);
                 match runtime.run(request).await {
-                    Ok(result) => json_response(&result),
+                    Ok(result) => {
+                        remember_external_cli_result_state(
+                            &request_for_state,
+                            &effective.runner_id,
+                            &result,
+                        );
+                        json_response(&result)
+                    }
                     Err(error) => error_response(StatusCode::BAD_REQUEST, &error),
                 }
             }
@@ -338,6 +390,352 @@ pub(super) async fn handle_chat_gateway(
     }
 
     error_response(StatusCode::NOT_FOUND, "Chat Gateway endpoint not found")
+}
+
+fn queue_external_cli_stream_response(
+    service: &ImGatewayService,
+    session_key: &str,
+    message: &str,
+) -> Response<BoxBody> {
+    let trimmed = message.trim();
+    let payload = if let Some(rest) = trimmed.strip_prefix("/rq ") {
+        match rest.trim().parse::<u64>() {
+            Ok(seq) if service.queue_manager.remove_queue(session_key, seq) => {
+                let items = service.queue_manager.queue_status(session_key);
+                serde_json::json!({
+                    "eventType": "run_finished",
+                    "sessionKey": session_key,
+                    "response": format!("🗑️ 已删除排队消息 #{seq}"),
+                    "queued": true,
+                    "queueLength": items.len(),
+                    "queueItems": items,
+                })
+            }
+            Ok(seq) => serde_json::json!({
+                "eventType": "run_finished",
+                "sessionKey": session_key,
+                "response": format!("❌ 未找到排队消息 #{seq}"),
+            }),
+            Err(_) => serde_json::json!({
+                "eventType": "run_finished",
+                "sessionKey": session_key,
+                "response": "用法: /rq <序号>（如 /rq 1）",
+            }),
+        }
+    } else {
+        let queue_message = trimmed
+            .strip_prefix("/q ")
+            .map(str::trim)
+            .unwrap_or(trimmed);
+        match service
+            .queue_manager
+            .push_queue(session_key, queue_message.to_string())
+        {
+            Ok(items) => serde_json::json!({
+                "eventType": "run_finished",
+                "sessionKey": session_key,
+                "response": format!("✅ 消息已收到，将在当前任务完成后处理（排队 {} 条）", items.len()),
+                "queued": true,
+                "queueLength": items.len(),
+                "queueItems": items,
+            }),
+            Err(error) => serde_json::json!({
+                "eventType": "run_failed",
+                "sessionKey": session_key,
+                "error": format!("排队失败: {error}"),
+            }),
+        }
+    };
+    let stream = tokio_stream::once(Ok::<_, hyper::Error>(hyper::body::Frame::data(
+        bytes::Bytes::from(format!("{payload}\n")),
+    )));
+    let body = http_body_util::StreamBody::new(stream);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/x-ndjson")
+        .body(http_body_util::BodyExt::boxed(body))
+        .unwrap()
+}
+
+async fn stop_external_cli_stream_response(session_key: &str) -> Response<BoxBody> {
+    let stopped = crate::im_gateway::external_cli::request_session_stop(
+        crate::im_gateway::external_cli::default_runs_root(),
+        session_key,
+    )
+    .await
+    .is_ok();
+    let payload = serde_json::json!({
+        "eventType": "run_finished",
+        "sessionKey": session_key,
+        "response": if stopped {
+            "已请求停止当前 Runner。"
+        } else {
+            "当前没有正在执行的 Runner。"
+        },
+        "stopped": stopped,
+    });
+    let stream = tokio_stream::once(Ok::<_, hyper::Error>(hyper::body::Frame::data(
+        bytes::Bytes::from(format!("{payload}\n")),
+    )));
+    let body = http_body_util::StreamBody::new(stream);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/x-ndjson")
+        .body(http_body_util::BodyExt::boxed(body))
+        .unwrap()
+}
+
+fn is_clear_session_command(message: &str) -> bool {
+    matches!(message.trim(), "/clear" | "/reset")
+}
+
+fn first_message_title_preview(message: &str) -> Option<String> {
+    let message = message.trim();
+    if message.is_empty() {
+        return None;
+    }
+    const MAX_CHARS: usize = 80;
+    let preview: String = message.chars().take(MAX_CHARS).collect();
+    if message.chars().count() > MAX_CHARS {
+        Some(format!("{preview}…"))
+    } else {
+        Some(preview)
+    }
+}
+
+async fn clear_chat_gateway_session_response(
+    request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
+    runner_id: &str,
+    stream: bool,
+) -> Response<BoxBody> {
+    let Some(session_key) = request
+        .session_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "sessionKey is required to reset Chat Gateway session",
+        );
+    };
+    if request.adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID {
+        crate::im_gateway::chatgpt_web::clear_session_conversation(session_key).await;
+    }
+    clear_persisted_agent_session_state(session_key, Some(&request.adapter), Some(runner_id));
+    let payload = serde_json::json!({
+        "success": true,
+        "cleared": true,
+        "sessionKey": session_key,
+        "response": "Session reset.",
+    });
+    if !stream {
+        return json_response(&payload);
+    }
+    let finished = serde_json::json!({
+        "eventType": "run_finished",
+        "status": "cleared",
+        "response": "Session reset.",
+        "cleared": true,
+        "sessionKey": session_key,
+    });
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/x-ndjson")
+        .body(crate::handlers::full_body(format!("{finished}\n")))
+        .unwrap()
+}
+
+fn apply_persisted_external_cli_state(
+    request: &mut crate::im_gateway::external_cli::ExternalCliRunRequest,
+    runner_id: &str,
+) {
+    let Some(session_key) = request.session_key.as_deref() else {
+        return;
+    };
+    let Some(state) = crate::im_gateway::session_state::load_session_state(
+        session_key,
+        &request.adapter,
+        Some(runner_id),
+    ) else {
+        return;
+    };
+    let metadata = crate::im_gateway::session_state::metadata_from_state(&state);
+    apply_external_cli_resume_metadata(request, &metadata);
+}
+
+fn remember_external_cli_started_state(
+    request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
+    runner_id: &str,
+) {
+    let Some(session_key) = request.session_key.as_deref() else {
+        return;
+    };
+    remember_session_state_values(
+        session_key,
+        &request.adapter,
+        Some(runner_id),
+        None,
+        None,
+        None,
+        request
+            .work_dir
+            .as_ref()
+            .map(|path| path.display().to_string()),
+    );
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    if let Err(error) = crate::im_gateway::session_state::upsert_session_state(
+        session_key,
+        &request.adapter,
+        Some(runner_id),
+        |state| {
+            state.last_user_message = first_message_title_preview(&request.message);
+            state.title = state
+                .title
+                .clone()
+                .or_else(|| state.last_user_message.clone());
+            state.status = Some("running".to_string());
+            state.work_dir = request
+                .work_dir
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .or_else(|| state.work_dir.clone());
+            append_external_runner_user_message_once(state, request, now);
+        },
+    ) {
+        tracing::warn!(
+            session_key = %session_key,
+            adapter = %request.adapter,
+            runner_id = %runner_id,
+            error = %error,
+            "failed to persist external runner started state"
+        );
+    }
+}
+
+fn remember_external_cli_result_state(
+    request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
+    runner_id: &str,
+    result: &crate::im_gateway::external_cli::ExternalCliRunResult,
+) {
+    let Some(session_key) = request.session_key.as_deref() else {
+        return;
+    };
+    remember_session_state_values(
+        session_key,
+        &result.adapter,
+        Some(runner_id),
+        result
+            .metadata
+            .get("conversationId")
+            .or_else(|| result.metadata.get("conversation_id"))
+            .cloned(),
+        result
+            .metadata
+            .get("threadId")
+            .or_else(|| result.metadata.get("thread_id"))
+            .cloned(),
+        None,
+        request
+            .work_dir
+            .as_ref()
+            .map(|path| path.display().to_string()),
+    );
+    if let Err(error) = crate::im_gateway::session_state::upsert_session_state(
+        session_key,
+        &result.adapter,
+        Some(runner_id),
+        |state| {
+            state.latest_run_id = Some(result.run_id.clone());
+            state.last_user_message = first_message_title_preview(&request.message);
+            state.title = state
+                .title
+                .clone()
+                .or_else(|| state.last_user_message.clone());
+            state.last_response = if result.response.trim().is_empty() {
+                None
+            } else {
+                Some(result.response.clone())
+            };
+            append_external_runner_turn_messages(state, request, result);
+            state.status = Some(
+                match result.status {
+                    crate::im_gateway::external_cli::ExternalCliRunStatus::Succeeded => "succeeded",
+                    crate::im_gateway::external_cli::ExternalCliRunStatus::Failed => "failed",
+                    crate::im_gateway::external_cli::ExternalCliRunStatus::Stopped => "stopped",
+                    crate::im_gateway::external_cli::ExternalCliRunStatus::TimedOut => "timed_out",
+                }
+                .to_string(),
+            );
+            state.work_dir = request
+                .work_dir
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .or_else(|| state.work_dir.clone());
+        },
+    ) {
+        tracing::warn!(
+            session_key = %session_key,
+            adapter = %result.adapter,
+            runner_id = %runner_id,
+            error = %error,
+            "failed to persist external runner result state"
+        );
+    }
+}
+
+fn append_external_runner_turn_messages(
+    state: &mut crate::im_gateway::session_state::ImAgentSessionState,
+    request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
+    result: &crate::im_gateway::external_cli::ExternalCliRunResult,
+) {
+    append_external_runner_user_message_once(state, request, result.started_at / 1000);
+    let assistant_message = result.response.trim();
+    if !assistant_message.is_empty() {
+        if state.messages.last().is_some_and(|message| {
+            message.role == "assistant" && message.content == assistant_message
+        }) {
+            return;
+        }
+        state
+            .messages
+            .push(crate::im_gateway::session_state::ImAgentSessionMessage {
+                role: "assistant".to_string(),
+                content: assistant_message.to_string(),
+                timestamp: Some(result.finished_at / 1000),
+            });
+    }
+}
+
+fn append_external_runner_user_message_once(
+    state: &mut crate::im_gateway::session_state::ImAgentSessionState,
+    request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
+    timestamp: u64,
+) {
+    let user_message = request.message.trim();
+    if user_message.is_empty() {
+        return;
+    }
+    if let Some(existing) = state
+        .messages
+        .last_mut()
+        .filter(|message| message.role == "user" && message.content == user_message)
+    {
+        if existing.timestamp.is_none() {
+            existing.timestamp = Some(timestamp);
+        }
+        return;
+    }
+    state
+        .messages
+        .push(crate::im_gateway::session_state::ImAgentSessionMessage {
+            role: "user".to_string(),
+            content: user_message.to_string(),
+            timestamp: Some(timestamp),
+        });
 }
 
 fn apply_provider_work_dir_to_external_cli_request(
@@ -393,4 +791,133 @@ fn query_param(query: Option<&str>, name: &str) -> Option<String> {
             .find(|(key, _)| key == name)
             .map(|(_, value)| value.to_string())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http_body_util::BodyExt;
+
+    async fn response_json(response: Response<BoxBody>) -> serde_json::Value {
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect response body")
+            .to_bytes();
+        serde_json::from_slice(&body).expect("response should be json")
+    }
+
+    #[tokio::test]
+    async fn queue_stream_remove_deletes_item_before_drain() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let service = ImGatewayService::new(temp_dir.path());
+
+        let queued = response_json(queue_external_cli_stream_response(
+            &service,
+            "web-queue-delete",
+            "/q queued follow up",
+        ))
+        .await;
+        assert_eq!(queued["queued"], true);
+        assert_eq!(queued["queueLength"], 1);
+        assert_eq!(
+            service.queue_manager.queue_status("web-queue-delete")[0].message,
+            "queued follow up"
+        );
+
+        let removed = response_json(queue_external_cli_stream_response(
+            &service,
+            "web-queue-delete",
+            "/rq 1",
+        ))
+        .await;
+        assert_eq!(removed["queued"], true);
+        assert_eq!(removed["queueLength"], 0);
+        assert_eq!(
+            removed["queueItems"].as_array().expect("queue items").len(),
+            0
+        );
+        assert!(service
+            .queue_manager
+            .queue_status("web-queue-delete")
+            .is_empty());
+        assert!(service
+            .queue_manager
+            .pop_queue("web-queue-delete")
+            .is_none());
+    }
+
+    #[test]
+    fn external_runner_persists_user_message_before_result_and_dedupes_finish() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
+        let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
+            message: "今天的AI领域相关的新闻。".to_string(),
+            operation: "chat".to_string(),
+            params: serde_json::Value::Null,
+            provider_id: None,
+            runner_id: Some("web".to_string()),
+            session_key: Some("web-refresh-running-session".to_string()),
+            runtime: "local".to_string(),
+            adapter: "chatgpt_web".to_string(),
+            work_dir: Some(std::path::PathBuf::from("/tmp/web-workspace")),
+            instructions: None,
+            adapter_config: Default::default(),
+            allow_work_dirs: Vec::new(),
+            inject_bifrost_tools: false,
+            skill_paths: Vec::new(),
+        };
+
+        remember_external_cli_started_state(&request, "web");
+        let running_state = crate::im_gateway::session_state::load_session_state(
+            "web-refresh-running-session",
+            "chatgpt_web",
+            Some("web"),
+        )
+        .expect("running state should be persisted immediately");
+        assert_eq!(running_state.status.as_deref(), Some("running"));
+        assert_eq!(running_state.messages.len(), 1);
+        assert_eq!(running_state.messages[0].role, "user");
+        assert_eq!(running_state.messages[0].content, request.message);
+
+        let result = crate::im_gateway::external_cli::ExternalCliRunResult {
+            run_id: "run-web-refresh".to_string(),
+            session_key: request.session_key.clone(),
+            runtime: request.runtime.clone(),
+            adapter: request.adapter.clone(),
+            status: crate::im_gateway::external_cli::ExternalCliRunStatus::Succeeded,
+            exit_code: Some(0),
+            response: "这是今天的 AI 新闻摘要。".to_string(),
+            responses: Vec::new(),
+            started_at: 1_779_700_000_000,
+            finished_at: 1_779_700_002_000,
+            duration_ms: 2_000,
+            artifacts: crate::im_gateway::external_cli::ExternalCliRunArtifacts {
+                run_dir: String::new(),
+                prompt: String::new(),
+                command_snapshot: String::new(),
+                stdout: String::new(),
+                stderr: String::new(),
+                normalized_events: String::new(),
+                last_message: String::new(),
+            },
+            events: Vec::new(),
+            metadata: std::collections::BTreeMap::new(),
+        };
+        remember_external_cli_result_state(&request, "web", &result);
+
+        let finished_state = crate::im_gateway::session_state::load_session_state(
+            "web-refresh-running-session",
+            "chatgpt_web",
+            Some("web"),
+        )
+        .expect("finished state");
+        assert_eq!(finished_state.status.as_deref(), Some("succeeded"));
+        assert_eq!(finished_state.messages.len(), 2);
+        assert_eq!(finished_state.messages[0].role, "user");
+        assert_eq!(finished_state.messages[0].content, request.message);
+        assert_eq!(finished_state.messages[1].role, "assistant");
+        assert_eq!(finished_state.messages[1].content, result.response);
+    }
 }

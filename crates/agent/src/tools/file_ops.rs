@@ -54,6 +54,7 @@ impl ToolHandler for WriteFileTool {
                 return ToolResult {
                     success: false,
                     output: format!("invalid arguments: {e}"),
+                    runtime_events: Vec::new(),
                 }
             }
         };
@@ -66,6 +67,7 @@ impl ToolHandler for WriteFileTool {
                 return ToolResult {
                     success: false,
                     output: format!("failed to create directories: {e}"),
+                    runtime_events: Vec::new(),
                 };
             }
         }
@@ -78,10 +80,12 @@ impl ToolHandler for WriteFileTool {
                     args.content.len(),
                     file_path.display()
                 ),
+                runtime_events: Vec::new(),
             },
             Err(e) => ToolResult {
                 success: false,
                 output: format!("failed to write file: {e}"),
+                runtime_events: Vec::new(),
             },
         }
     }
@@ -140,6 +144,7 @@ impl ToolHandler for ReadFileTool {
                 return ToolResult {
                     success: false,
                     output: format!("invalid arguments: {e}"),
+                    runtime_events: Vec::new(),
                 }
             }
         };
@@ -152,6 +157,7 @@ impl ToolHandler for ReadFileTool {
             return ToolResult {
                 success: false,
                 output: e,
+                runtime_events: Vec::new(),
             };
         }
 
@@ -188,11 +194,13 @@ impl ToolHandler for ReadFileTool {
                 ToolResult {
                     success: true,
                     output: result,
+                    runtime_events: Vec::new(),
                 }
             }
             Err(e) => ToolResult {
                 success: false,
                 output: format!("failed to read file: {e}"),
+                runtime_events: Vec::new(),
             },
         }
     }
@@ -255,17 +263,20 @@ impl ToolHandler for ListDirectoryTool {
                     ToolResult {
                         success: true,
                         output: "(empty directory)".to_string(),
+                        runtime_events: Vec::new(),
                     }
                 } else {
                     ToolResult {
                         success: true,
                         output: items.join("\n"),
+                        runtime_events: Vec::new(),
                     }
                 }
             }
             Err(e) => ToolResult {
                 success: false,
                 output: format!("failed to list directory: {e}"),
+                runtime_events: Vec::new(),
             },
         }
     }

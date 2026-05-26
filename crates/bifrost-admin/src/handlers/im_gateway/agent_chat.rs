@@ -33,7 +33,7 @@ pub(super) async fn handle_idle_im_command(
     }
 
     if trimmed == "/stop" {
-        let stopped = ctx.agent_session_manager.request_stop(session_key);
+        let stopped = request_agent_stop(ctx.agent_session_manager, session_key).await;
         let reply = if stopped {
             "已请求停止当前 Agent loop。"
         } else {
@@ -208,7 +208,7 @@ pub(super) async fn handle_busy_message(
 
     // /stop — cooperative cancellation of the active turn loop
     if trimmed == "/stop" {
-        let stopped = agent_session_manager.request_stop(session_key);
+        let stopped = request_agent_stop(agent_session_manager, session_key).await;
         let reply = if stopped {
             "🛑 已请求停止当前 Agent loop。"
         } else {
@@ -404,6 +404,7 @@ pub(super) fn progress_event_needs_immediate_flush(
         event,
         bifrost_agent::AgentTurnProgressEvent::ToolStarted { .. }
             | bifrost_agent::AgentTurnProgressEvent::ToolFinished { .. }
+            | bifrost_agent::AgentTurnProgressEvent::LongTaskStatus { .. }
             | bifrost_agent::AgentTurnProgressEvent::PlanUpdated { .. }
             | bifrost_agent::AgentTurnProgressEvent::TitleUpdated { .. }
             | bifrost_agent::AgentTurnProgressEvent::AssistantDelta { .. }
@@ -774,6 +775,13 @@ pub(super) async fn process_agent_chat(
             return;
         }
     };
+    restore_session_from_persisted_history(
+        &mut session,
+        session_key,
+        crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+        None,
+        agent_config.history.as_ref().and_then(|h| h.max_bytes),
+    );
     if session.history.is_empty() {
         if let Some(work_dir) = agent_config
             .work_dir
@@ -1119,13 +1127,22 @@ pub(super) async fn process_agent_chat(
     // If the session was cleared (via /clear or /reset), also clear the
     // ChatGPT Web conversation mapping so the next runner message starts fresh.
     if session.memory_cleared {
-        crate::im_gateway::chatgpt_web::clear_session_conversation(session_key).await;
+        clear_persisted_agent_session_state(
+            session_key,
+            Some(crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER),
+            None,
+        );
     }
 
     // Extract session title before returning the session
     let session_title = session.title.clone();
     session.progress_sender = None;
     session.plan_sender = None;
+    remember_session_state_from_agent_session(
+        &session,
+        crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+        None,
+    );
 
     // Return session after turn completes
     session_manager.return_session(session);

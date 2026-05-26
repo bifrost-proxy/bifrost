@@ -566,6 +566,40 @@
 - Proxy chain auth 汇总 `Total: 11 / Passed: 11 / Failed: 0`，包含 absolute-form URL 与 `Proxy-Authorization` 断言。
 - 所有真实执行均使用临时数据目录、`--no-system-proxy` 与非 9900 端口。
 
+### TC-CS-28: Agent history/direct-path shell E2E 复用 CI release binary 回归
+
+**操作步骤**：
+1. 对两个 Agent shell E2E 脚本执行语法检查：
+   ```bash
+   bash -n \
+     e2e-tests/tests/test_agent_chat_history_continue.sh \
+     e2e-tests/tests/test_agent_direct_path_switch.sh
+   ```
+2. 静态检查两个脚本的 binary 选择逻辑：
+   ```bash
+   rg -n 'SKIP_BUILD|target/release/bifrost|target/debug/bifrost|skipping build, using|bifrost binary not found' \
+     e2e-tests/tests/test_agent_chat_history_continue.sh \
+     e2e-tests/tests/test_agent_direct_path_switch.sh
+   ```
+3. 使用已构建的 release binary 真实执行 history continue 回归：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" \
+     bash e2e-tests/tests/test_agent_chat_history_continue.sh
+   ```
+4. 使用已构建的 release binary 真实执行 direct path switch 回归：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" \
+     bash e2e-tests/tests/test_agent_direct_path_switch.sh
+   ```
+
+**预期结果**：
+- 两个脚本语法检查通过。
+- 静态检查显示 `SKIP_BUILD=true` 分支默认 `$REPO_DIR/target/release/bifrost`，本地构建分支默认 `$REPO_DIR/target/debug/bifrost`，且 binary 不存在时有明确错误。
+- 两个真实执行均输出 `skipping build, using .../target/release/bifrost`，不会查找 `target/debug/bifrost`。
+- `test_agent_chat_history_continue.sh` 输出 `[agent-chat-history-continue] PASS`，验证压缩后的历史恢复、计划恢复、续聊写回与外部 history path 拒绝。
+- `test_agent_direct_path_switch.sh` 输出 `[agent-direct-path-switch] PASS`，验证绝对路径消息直接切换工作目录，不调用模型，并且 `/status` 展示新工作路径。
+- 两个真实执行均使用临时数据目录、`--no-system-proxy` 与动态非 9900 端口。
+
 ## 本轮执行记录
 
 测试日期：2026-05-09
@@ -590,6 +624,7 @@
 | TC-CS-25 | 通过 | 2026-05-09 本轮执行：`rg -n 'CARGO_BIN="\$\{CARGO_BIN:-\$\(resolve_non_shim_command cargo\)\}"' scripts/run_all_e2e.sh` 定位到默认 Cargo 解析逻辑；`bash -n scripts/run_all_e2e.sh` 通过；`which cargo` 输出 `/opt/homebrew/bin/cargo`；`CARGO_BIN="$(which cargo)" bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests` 只列出 shell tests，未构建、未启动 Bifrost、未使用 9900、未修改系统代理。随后完整本地 shell CI 由 `bash scripts/ci/local-ci.sh --skip-static --e2e-only shell` 验证。 |
 | TC-CS-26 | 通过 | 2026-05-12 本轮执行：CI run `25725290679` 的 `E2E Shell (Linux, shard 3/3)` 失败日志显示 `sh: 1: astro: not found` 与 `Local package.json exists, but node_modules missing`，`E2E Shell (aarch64-apple-darwin, shard 3/3)` 同 shard 上传失败 artifact；修复后执行 `rm -rf site/node_modules` 模拟缺失依赖，`bash -n e2e-tests/tests/test_site_docs_sync.sh` 通过，随后使用本机可用新版 Node 执行 `PATH="/opt/homebrew/bin:$PATH" bash e2e-tests/tests/test_site_docs_sync.sh`，输出 `Installing site dependencies for docs sync E2E...`、`Docs sync verification passed for 27 docs pages.`、探针文档加入后的 `Docs sync verification passed for 28 docs pages.`、`Site link verification passed.`、`Site docs sync E2E passed.`，确认缺少 site 依赖时会自举安装并完成 Astro build。该回归未启动 Bifrost，未使用 9900，未修改系统代理。 |
 | TC-CS-27 | 通过 | 2026-05-20 本轮执行：`bash -n` 覆盖 13 个本轮涉及的 shell E2E 脚本并通过；静态检查确认这些脚本中 `start --no-system-proxy` 的 Bifrost 启动窗口均包含 `--skip-cert-check`，且 `test_asr_task_cli.sh` 包含 `SKIP_BUILD=true` 复用 `target/release/bifrost` 的路径。随后使用 release binary 执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_asr_task_cli.sh`，输出 `skipping build, using .../target/release/bifrost` 与 `[asr-task-cli-e2e] PASS`；执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_values_hot_reload.sh`，汇总 `Total: 5 / Passed: 5 / Failed: 0`；执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_proxy_chain_auth_e2e.sh`，汇总 `Total: 11 / Passed: 11 / Failed: 0`，包含 absolute-form 与 `Proxy-Authorization` 断言。全部真实执行使用临时数据目录、`--no-system-proxy` 与非 9900 端口。 |
+| TC-CS-28 | 通过 | 2026-05-23 本轮执行：`bash -n e2e-tests/tests/test_agent_chat_history_continue.sh e2e-tests/tests/test_agent_direct_path_switch.sh` 通过；`rg -n 'SKIP_BUILD\|target/release/bifrost\|target/debug/bifrost\|skipping build, using\|bifrost binary not found' ...` 显示两个脚本均在 `SKIP_BUILD=true` 分支默认 release binary、本地构建分支默认 debug binary，并在 binary 不可执行时明确失败。随后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_agent_chat_history_continue.sh`，输出 `skipping build, using .../target/release/bifrost` 与 `[agent-chat-history-continue] PASS`；执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_agent_direct_path_switch.sh`，输出 `skipping build, using .../target/release/bifrost` 与 `[agent-direct-path-switch] PASS`。两条真实链路均使用临时数据目录、`--no-system-proxy` 与动态非 9900 端口，未再查找 `target/debug/bifrost`。 |
 
 ## 清理步骤
 

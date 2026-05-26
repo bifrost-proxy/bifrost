@@ -7,7 +7,8 @@ use tokio::sync::Mutex;
 use tracing::warn;
 
 use bifrost_agent::{
-    ActiveTurnStatus, AgentTurnProgressEvent, PlanStep, PlanStepStatus, ToolCallLog,
+    ActiveTurnStatus, AgentContextSnapshot, AgentTurnProgressEvent, PlanStep, PlanStepStatus,
+    ToolCallLog,
 };
 use bifrost_core::{BifrostError, Result};
 
@@ -49,6 +50,7 @@ pub struct ImAgentProgressSnapshot {
     pub tool_calls: Vec<ToolCallLog>,
     pub latest_tool: Option<ProgressToolSummary>,
     pub status: Option<ActiveTurnStatus>,
+    pub context: Option<AgentContextSnapshot>,
     pub queue_items: Vec<QueueItem>,
     pub guide_pending: bool,
     pub activity_notice: Option<String>,
@@ -66,6 +68,7 @@ impl ImAgentProgressSnapshot {
             tool_calls: Vec::new(),
             latest_tool: None,
             status: None,
+            context: None,
             queue_items: Vec::new(),
             guide_pending: false,
             activity_notice: None,
@@ -76,7 +79,20 @@ impl ImAgentProgressSnapshot {
     pub fn apply_event(&mut self, event: AgentTurnProgressEvent) {
         match event {
             AgentTurnProgressEvent::Status(status) => {
+                self.context = Some(context_snapshot_from_status(&status));
                 self.status = Some(*status);
+            }
+            AgentTurnProgressEvent::ContextUpdated { context } => {
+                self.apply_context_snapshot(context);
+            }
+            AgentTurnProgressEvent::CompactionStarted { progress } => {
+                self.apply_context_snapshot(progress.context);
+            }
+            AgentTurnProgressEvent::CompactionFinished { progress } => {
+                self.apply_context_snapshot(progress.context);
+            }
+            AgentTurnProgressEvent::CompactionFailed { progress, .. } => {
+                self.apply_context_snapshot(progress.context);
             }
             AgentTurnProgressEvent::ToolStarted {
                 tool_name,
@@ -99,6 +115,35 @@ impl ImAgentProgressSnapshot {
                     duration_ms: Some(duration_ms),
                 });
                 self.tool_calls.push(log);
+            }
+            AgentTurnProgressEvent::LongTaskStatus {
+                session_id,
+                profile,
+                state,
+                elapsed_ms,
+                last_output_preview,
+                next_check_at_ms,
+                unchanged_heartbeats,
+                ..
+            } => {
+                let mut preview =
+                    format!("state={state}, profile={profile}, elapsed={}ms", elapsed_ms);
+                if let Some(output) = last_output_preview.filter(|value| !value.trim().is_empty()) {
+                    preview.push_str(&format!(", last={}", truncate_str(&output, 120)));
+                }
+                if let Some(next_check_at_ms) = next_check_at_ms {
+                    preview.push_str(&format!(", next_check_at={next_check_at_ms}"));
+                }
+                if unchanged_heartbeats > 0 {
+                    preview.push_str(&format!(", unchanged_heartbeats={unchanged_heartbeats}"));
+                }
+                self.latest_tool = Some(ProgressToolSummary {
+                    tool_name: "exec_command".to_string(),
+                    arguments: Some(format!("session_id={session_id}")),
+                    success: None,
+                    result_preview: Some(preview),
+                    duration_ms: Some(elapsed_ms),
+                });
             }
             AgentTurnProgressEvent::PlanUpdated { steps, title } => {
                 self.plan_steps = steps;
@@ -134,6 +179,21 @@ impl ImAgentProgressSnapshot {
         }
     }
 
+    fn apply_context_snapshot(&mut self, context: AgentContextSnapshot) {
+        if let Some(status) = self.status.as_mut() {
+            status.estimated_context_tokens = context.estimated_context_tokens;
+            status.context_window_tokens = context.context_window_tokens;
+            status.context_usage_percent = context.context_usage_percent;
+            status.compaction_count = context.compaction_count;
+            status.history_version = context.history_version;
+            status.message_count = context.message_count;
+            status.user_turn_count = context.user_turn_count;
+            status.last_response_tokens = context.last_response_tokens;
+            status.total_tokens_used = context.total_tokens_used;
+        }
+        self.context = Some(context);
+    }
+
     pub fn update_queue_state(
         &mut self,
         queue_items: Vec<QueueItem>,
@@ -145,6 +205,20 @@ impl ImAgentProgressSnapshot {
         if let Some(notice) = notice.filter(|value| !value.trim().is_empty()) {
             self.activity_notice = Some(truncate_one_line(&notice, 80));
         }
+    }
+}
+
+fn context_snapshot_from_status(status: &ActiveTurnStatus) -> AgentContextSnapshot {
+    AgentContextSnapshot {
+        estimated_context_tokens: status.estimated_context_tokens,
+        context_window_tokens: status.context_window_tokens,
+        context_usage_percent: status.context_usage_percent,
+        compaction_count: status.compaction_count,
+        history_version: status.history_version,
+        message_count: status.message_count,
+        user_turn_count: status.user_turn_count,
+        last_response_tokens: status.last_response_tokens,
+        total_tokens_used: status.total_tokens_used,
     }
 }
 
@@ -865,7 +939,29 @@ fn format_status_panel_title(snapshot: &ImAgentProgressSnapshot) -> String {
             }
             (None, None) => "Token：统计中".to_string(),
         },
-        None => "Token：统计中".to_string(),
+        None => match snapshot.context.as_ref() {
+            Some(context) => match (context.total_tokens_used, context.last_response_tokens) {
+                (Some(total), Some(last)) => format!(
+                    "Token：累计 {} · 最近 {}",
+                    bifrost_agent::format_status_metric_count(total),
+                    bifrost_agent::format_status_metric_count(last)
+                ),
+                (Some(total), None) => {
+                    format!(
+                        "Token：累计 {}",
+                        bifrost_agent::format_status_metric_count(total)
+                    )
+                }
+                (None, Some(last)) => {
+                    format!(
+                        "Token：最近 {}",
+                        bifrost_agent::format_status_metric_count(last)
+                    )
+                }
+                (None, None) => "Token：统计中".to_string(),
+            },
+            None => "Token：统计中".to_string(),
+        },
     };
     if let Some(notice) = snapshot.activity_notice.as_deref() {
         format!("{token_title} · {notice}")
@@ -969,17 +1065,55 @@ fn format_footer_markdown(snapshot: &ImAgentProgressSnapshot) -> String {
                 status.work_dir.as_deref().unwrap_or("N/A")
             )
         }
-        None => format!(
-            "{}状态：{} · 队列：{} · 引导：{}",
-            snapshot
+        None => {
+            let prefix = snapshot
                 .activity_notice
                 .as_deref()
                 .map(|notice| format!("提示：{notice}\n"))
-                .unwrap_or_default(),
-            phase,
-            queue_text,
-            guide_text
-        ),
+                .unwrap_or_default();
+            if let Some(context) = snapshot.context.as_ref() {
+                let token_text = context
+                    .total_tokens_used
+                    .map(bifrost_agent::format_status_metric_count)
+                    .unwrap_or_else(|| "N/A".to_string());
+                let last_token_text = context
+                    .last_response_tokens
+                    .map(bifrost_agent::format_status_metric_count)
+                    .unwrap_or_else(|| "N/A".to_string());
+                let context_text =
+                    match (context.context_window_tokens, context.context_usage_percent) {
+                        (Some(window), Some(percent)) => format!(
+                            "~{} / {} ({percent:.1}%)",
+                            bifrost_agent::format_status_metric_count(
+                                context.estimated_context_tokens.into()
+                            ),
+                            bifrost_agent::format_status_metric_count(window.into())
+                        ),
+                        _ => format!(
+                            "~{} / N/A",
+                            bifrost_agent::format_status_metric_count(
+                                context.estimated_context_tokens.into()
+                            )
+                        ),
+                    };
+                format!(
+                    "{}状态：{}\nContext：{}\nToken：累计 {}，最近 {}\n压缩：{} 次 · 队列：{} · 引导：{}",
+                    prefix,
+                    phase,
+                    context_text,
+                    token_text,
+                    last_token_text,
+                    context.compaction_count,
+                    queue_text,
+                    guide_text
+                )
+            } else {
+                format!(
+                    "{}状态：{} · 队列：{} · 引导：{}",
+                    prefix, phase, queue_text, guide_text
+                )
+            }
+        }
     }
 }
 
@@ -1070,6 +1204,106 @@ mod tests {
         );
     }
 
+    fn active_status(compaction_count: u32) -> ActiveTurnStatus {
+        ActiveTurnStatus {
+            session_key: "s1".to_string(),
+            state: "model_response".to_string(),
+            started_at: 1,
+            updated_at: 2,
+            current_loop_iteration: 2,
+            completed_loop_iterations: 1,
+            max_loop_iterations: 1000,
+            last_response_tokens: Some(100),
+            total_tokens_used: Some(1_000),
+            estimated_context_tokens: 2_000,
+            context_window_tokens: Some(10_000),
+            context_usage_percent: Some(20.0),
+            compaction_count,
+            history_version: 7,
+            work_dir: Some("/tmp/bifrost-work".to_string()),
+            message_count: 9,
+            local_tool_count: 12,
+            mcp_tool_count: 5,
+            pending_guide_messages: Vec::new(),
+            user_turn_count: 2,
+            agent_type: Some("Bifrost Agent".to_string()),
+            runner_type: Some("bifrost_agent".to_string()),
+            runner_id: None,
+            external_conversation_id: None,
+            external_thread_id: None,
+            turn_timing: None,
+            turn_id: None,
+        }
+    }
+
+    fn context_snapshot(compaction_count: u32) -> AgentContextSnapshot {
+        AgentContextSnapshot {
+            estimated_context_tokens: 1_200,
+            context_window_tokens: Some(10_000),
+            context_usage_percent: Some(12.0),
+            compaction_count,
+            history_version: 8,
+            message_count: 4,
+            user_turn_count: 2,
+            last_response_tokens: Some(77),
+            total_tokens_used: Some(1_077),
+        }
+    }
+
+    fn compaction_progress(compaction_count: u32) -> bifrost_agent::AgentCompactionProgress {
+        bifrost_agent::AgentCompactionProgress {
+            trigger: "auto".to_string(),
+            reason: "context_limit".to_string(),
+            phase: "mid_turn".to_string(),
+            pre_tokens: 4_000,
+            post_tokens: Some(1_200),
+            tokens_saved: Some(2_800),
+            messages_removed: Some(5),
+            duration_ms: Some(42),
+            compaction_count,
+            history_version: 8,
+            context: context_snapshot(compaction_count),
+        }
+    }
+
+    #[test]
+    fn progress_snapshot_updates_status_from_compaction_context() {
+        let mut snapshot = ImAgentProgressSnapshot::new("s1", "compact task");
+        snapshot.apply_event(AgentTurnProgressEvent::Status(Box::new(active_status(0))));
+        snapshot.apply_event(AgentTurnProgressEvent::CompactionFinished {
+            progress: compaction_progress(2),
+        });
+
+        let status = snapshot.status.as_ref().expect("status should be kept");
+        assert_eq!(status.compaction_count, 2);
+        assert_eq!(status.history_version, 8);
+        assert_eq!(status.estimated_context_tokens, 1_200);
+        assert_eq!(status.last_response_tokens, Some(77));
+        assert_eq!(status.total_tokens_used, Some(1_077));
+        assert_eq!(snapshot.context.as_ref().unwrap().compaction_count, 2);
+
+        let card = build_feishu_progress_card(&snapshot, true);
+        let serialized = serde_json::to_string(&card).unwrap();
+        assert!(serialized.contains("压缩：2 次"));
+        assert!(serialized.contains("Token：累计 1.1K · 最近 77"));
+        assert!(serialized.contains("Token：累计 1.1K，最近 77"));
+        assert!(!serialized.contains("压缩：0 次"));
+    }
+
+    #[test]
+    fn progress_snapshot_uses_context_when_status_is_not_available() {
+        let mut snapshot = ImAgentProgressSnapshot::new("s1", "compact task");
+        snapshot.apply_event(AgentTurnProgressEvent::ContextUpdated {
+            context: context_snapshot(3),
+        });
+
+        let title = format_status_panel_title(&snapshot);
+        let footer = format_footer_markdown(&snapshot);
+        assert!(title.contains("Token：累计 1.1K · 最近 77"));
+        assert!(footer.contains("压缩：3 次"));
+        assert!(footer.contains("Context：~1.2K / 10K (12.0%)"));
+    }
+
     #[test]
     fn card_metric_count_uses_readable_kmb_units() {
         assert_eq!(bifrost_agent::format_status_metric_count(0), "0");
@@ -1091,33 +1325,13 @@ mod tests {
     #[test]
     fn feishu_progress_card_formats_large_token_usage() {
         let mut snapshot = ImAgentProgressSnapshot::new("s1", "token task");
-        snapshot.status = Some(ActiveTurnStatus {
-            session_key: "s1".to_string(),
-            state: "model_response".to_string(),
-            started_at: 1,
-            updated_at: 2,
-            current_loop_iteration: 2,
-            completed_loop_iterations: 1,
-            max_loop_iterations: 1000,
-            last_response_tokens: Some(1_234_567),
-            total_tokens_used: Some(1_000_000),
-            estimated_context_tokens: 260_000,
-            context_window_tokens: Some(1_000_000),
-            context_usage_percent: Some(26.0),
-            compaction_count: 1,
-            history_version: 7,
-            work_dir: Some("/tmp/bifrost-work".to_string()),
-            message_count: 9,
-            local_tool_count: 12,
-            mcp_tool_count: 5,
-            pending_guide_messages: Vec::new(),
-            user_turn_count: 2,
-            agent_type: Some("Bifrost Agent".to_string()),
-            runner_type: Some("bifrost_agent".to_string()),
-            runner_id: None,
-            external_conversation_id: None,
-            external_thread_id: None,
-        });
+        let mut status = active_status(1);
+        status.last_response_tokens = Some(1_234_567);
+        status.total_tokens_used = Some(1_000_000);
+        status.estimated_context_tokens = 260_000;
+        status.context_window_tokens = Some(1_000_000);
+        status.context_usage_percent = Some(26.0);
+        snapshot.status = Some(status);
 
         let card = build_feishu_progress_card(&snapshot, true);
         let serialized = serde_json::to_string(&card).unwrap();

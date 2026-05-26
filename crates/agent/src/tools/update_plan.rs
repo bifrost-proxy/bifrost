@@ -3,12 +3,12 @@
 //! Allows the agent to maintain a structured task plan with step status tracking.
 //! The plan is rendered as a progress card in Feishu IM to show task progress to users.
 //!
-//! This is a "signal" tool — the actual plan extraction happens in the turn loop
-//! after this tool returns. The tool validates arguments and returns a prefixed output
-//! that the turn loop parses to update TurnResult.plan_steps.
+//! This is a typed runtime-event tool: the model-visible output is a short
+//! confirmation, while the parsed plan is returned as a `ToolRuntimeEvent` for
+//! the turn loop to apply to `TurnResult.plan_steps` and progress displays.
 
 use crate::tools::ToolHandler;
-use crate::types::ToolResult;
+use crate::types::{ToolResult, ToolRuntimeEvent};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -57,7 +57,7 @@ impl PlanStepStatus {
 }
 
 /// A single step in the plan.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanStep {
     /// Step description.
     pub step: String,
@@ -89,6 +89,7 @@ impl ToolHandler for UpdatePlanTool {
         "Update the task plan (TODO/checklist) to track progress on multi-step tasks. \
          Each step has a status: pending, in_progress, or completed. \
          At most one step should be in_progress at a time. \
+         Send the complete current plan snapshot; use an empty plan to clear the current plan. \
          The plan is displayed to the user as a progress card."
     }
 
@@ -102,7 +103,7 @@ impl ToolHandler for UpdatePlanTool {
                 },
                 "plan": {
                     "type": "array",
-                    "description": "List of plan steps with their status",
+                    "description": "Complete current plan snapshot. Use an empty list to clear the current plan when no task plan applies.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -125,23 +126,16 @@ impl ToolHandler for UpdatePlanTool {
     }
 
     async fn execute(&self, arguments: &str, _work_dir: &Path) -> ToolResult {
-        let args: UpdatePlanArgs = match serde_json::from_str(arguments) {
+        let args = match parse_update_plan_arguments(arguments) {
             Ok(a) => a,
             Err(e) => {
                 return ToolResult {
                     success: false,
-                    output: format!("invalid arguments: {e}"),
+                    output: e,
+                    runtime_events: Vec::new(),
                 }
             }
         };
-
-        // Validate plan is not empty
-        if args.plan.is_empty() {
-            return ToolResult {
-                success: false,
-                output: "plan cannot be empty".to_string(),
-            };
-        }
 
         // Validate at most one in_progress step
         let in_progress_count = args
@@ -153,20 +147,20 @@ impl ToolHandler for UpdatePlanTool {
             return ToolResult {
                 success: false,
                 output: "at most one step can be in_progress at a time".to_string(),
+                runtime_events: Vec::new(),
             };
         }
 
-        // Return signal for turn loop to extract
-        let json = serde_json::to_string(&args).unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "failed to serialize update_plan args");
-            arguments.to_string()
-        });
-
         ToolResult {
             success: true,
-            output: format!("UPDATE_PLAN:{}", json),
+            output: "Plan updated".to_string(),
+            runtime_events: vec![ToolRuntimeEvent::PlanUpdate(args)],
         }
     }
+}
+
+pub fn parse_update_plan_arguments(arguments: &str) -> Result<UpdatePlanArgs, String> {
+    serde_json::from_str(arguments).map_err(|e| format!("invalid arguments: {e}"))
 }
 
 #[cfg(test)]
@@ -213,22 +207,37 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_plan_rejected() {
+    fn test_empty_plan_allowed_as_clear_snapshot() {
         let tool = UpdatePlanTool;
         let json = r#"{"plan":[]}"#;
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(tool.execute(json, std::path::Path::new("/tmp")));
-        assert!(!result.success);
-        assert!(result.output.contains("plan cannot be empty"));
+        assert!(result.success);
+        assert_eq!(result.output, "Plan updated");
+        assert_eq!(result.runtime_events.len(), 1);
+        match &result.runtime_events[0] {
+            ToolRuntimeEvent::PlanUpdate(args) => {
+                assert!(args.plan.is_empty());
+                assert!(args.explanation.is_none());
+            }
+        }
     }
 
     #[test]
-    fn test_update_plan_signal() {
+    fn test_update_plan_returns_runtime_event() {
         let tool = UpdatePlanTool;
         let json = r#"{"plan":[{"step":"Task","status":"pending"}]}"#;
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(tool.execute(json, std::path::Path::new("/tmp")));
         assert!(result.success);
-        assert!(result.output.starts_with("UPDATE_PLAN:"));
+        assert_eq!(result.output, "Plan updated");
+        assert_eq!(result.runtime_events.len(), 1);
+        match &result.runtime_events[0] {
+            ToolRuntimeEvent::PlanUpdate(args) => {
+                assert_eq!(args.plan.len(), 1);
+                assert_eq!(args.plan[0].step, "Task");
+                assert_eq!(args.plan[0].status, PlanStepStatus::Pending);
+            }
+        }
     }
 }

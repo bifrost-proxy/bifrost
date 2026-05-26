@@ -15,6 +15,11 @@ bash -n "$0"
 echo "[qwen3-asr-e2e] bifrost ai asr CLI structure"
 cargo run --quiet --bin bifrost -- ai asr --help | grep -q "stream-file"
 
+echo "[qwen3-asr-e2e] ASR runtime guard unit assertions"
+cargo test -p bifrost-admin asr_runtime_timeouts_are_bounded_for_short_chunks --lib
+cargo test -p bifrost-admin server_failure_breaker --lib
+cargo test -p bifrost-admin reuse_server_failure_threshold --lib
+
 if [[ "$(uname -s)-$(uname -m)" != "Darwin-arm64" ]]; then
   echo "[qwen3-asr-e2e] unsupported platform CLI guard"
   if cargo run --quiet --bin bifrost -- ai asr status --json >/tmp/bifrost-qwen3-asr-unsupported.out 2>&1; then

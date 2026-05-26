@@ -6,7 +6,7 @@
 //! - **Memory compaction**: Automatic history summarization when context grows too long
 //! - **Token tracking**: Real API token usage tracking + coarse estimates
 //! - **Context management**: History limits, compaction summary preservation
-//! - **Chat Completions API**: Standard format with function calling
+//! - **Responses API**: Streaming model protocol with function calling
 //! - **AGENTS.md**: Project instruction loading from hierarchy
 //! - **Skills**: Extensible skill system with YAML frontmatter
 //! - **MCP**: Model Context Protocol server integration
@@ -31,8 +31,11 @@
 //! ```
 
 pub mod agents_md;
+pub mod authorization;
+pub mod auto_compact_window;
 pub mod client;
 pub mod compact;
+pub mod compaction_hooks;
 pub mod config;
 pub mod history;
 pub mod mcp;
@@ -43,11 +46,13 @@ pub mod memory_guard;
 pub mod memory_prompts;
 pub mod persistence;
 pub mod prompt;
+pub mod responses;
 pub mod session;
 pub mod session_status;
 pub mod skill_authoring;
 pub mod skills;
 pub mod slash;
+pub mod token_counting;
 pub mod tools;
 pub mod turn_runtime;
 pub mod types;
@@ -58,15 +63,16 @@ pub use compact::CompactionResult;
 pub use config::{
     list_builtin_providers, AgentConfig, AgentConfigStore, AgentRunnerMode, HistoryConfig,
     HistoryPersistence, ImMessageChannelBinding, McpServerConfig, MemoriesConfig,
-    MessageTargetMode, ModelProviderConfig, ProviderInfo, ToolConfig,
+    MessageTargetMode, ModelProviderConfig, ModelWireApi, ProviderInfo, ToolConfig,
 };
 pub use session::{
     handle_session_free_command, AgentSession, AgentSessionManager, SessionDetail, SessionInfo,
 };
 pub use session_status::{
     format_active_turn_status_text, format_active_turn_status_text_with_context,
-    format_conversation_ref, format_status_metric_count, ActiveTurnStatus, AgentTurnProgressEvent,
-    AgentTurnProgressSender, StatusRuntimeContext,
+    format_conversation_ref, format_status_metric_count, snapshot_agent_context, ActiveTurnStatus,
+    AgentCompactionProgress, AgentContextSnapshot, AgentTurnProgressEvent, AgentTurnProgressSender,
+    StatusRuntimeContext,
 };
 pub use skills::{install_system_skills, SkillMetadata, SkillScope, SkillsManager};
 pub use tools::update_plan::{PlanStep, PlanStepStatus, UpdatePlanArgs};

@@ -1,0 +1,486 @@
+import { useState, type CSSProperties } from "react";
+import { Card, Divider, Dropdown, Empty, Input, Modal, Popover, Space, Tag, Typography, theme } from "antd";
+import {
+  DatabaseOutlined,
+  DeleteOutlined,
+  ExclamationCircleOutlined,
+  FolderOpenOutlined,
+  HistoryOutlined,
+  PlayCircleOutlined,
+  SyncOutlined,
+  WarningOutlined,
+} from "@ant-design/icons";
+import {
+  ACTIVITY_ITEMS,
+  MetricRow,
+  compactionTagColor,
+  formatContextUsage,
+  formatContextWindow,
+  formatDuration,
+  formatLabel,
+  formatLoopProgress,
+  formatNumber,
+  formatRelativeTime,
+  formatRunPhase,
+  formatRunnerTag,
+  formatThreadRunnerMark,
+  formatThreadSource,
+  isSelectedThread,
+  statusTagColor,
+  type AgentThreadSummary,
+  type RunTelemetry,
+} from "./AgentChatSection.helpers";
+
+const { Text, Paragraph } = Typography;
+
+type AgentChatSettingsModalProps = {
+  open: boolean;
+  onClose: () => void;
+  styles: Record<string, CSSProperties>;
+  workDir: string;
+  defaultWorkDir: string;
+  telemetry: RunTelemetry;
+  historyPath?: string;
+};
+
+type AgentThreadListCardProps = {
+  threads: AgentThreadSummary[];
+  sessionKey: string;
+  historyPath?: string;
+  view?: string;
+  nowSeconds: number;
+  styles: Record<string, CSSProperties>;
+  onOpenThread: (thread: AgentThreadSummary) => void;
+  onDeleteThread: (thread: AgentThreadSummary) => void;
+};
+
+export function AgentThreadListCard({
+  threads,
+  sessionKey,
+  historyPath,
+  view,
+  nowSeconds,
+  styles,
+  onOpenThread,
+  onDeleteThread,
+}: AgentThreadListCardProps) {
+  const { token } = theme.useToken();
+  const [contextThreadKey, setContextThreadKey] = useState<string | null>(null);
+  const [confirmDeleteKey, setConfirmDeleteKey] = useState<string | null>(null);
+  const isRunningThread = (thread: AgentThreadSummary) =>
+    thread.status === "active" && thread.running !== false;
+  const threadDuration = (thread: AgentThreadSummary) => {
+    if (isRunningThread(thread) && thread.start_time) {
+      return Math.max(0, nowSeconds - thread.start_time);
+    }
+    return thread.duration_secs || (
+      thread.start_time && thread.last_active_time
+        ? thread.last_active_time - thread.start_time
+        : undefined
+    );
+  };
+  const threadMeta = (thread: AgentThreadSummary) => {
+    const created = formatRelativeTime(thread.start_time || thread.last_active_time, nowSeconds);
+    return `${formatThreadSource(thread)} · ${created} · duration ${formatDuration(threadDuration(thread))}`;
+  };
+  const threadDetails = (thread: AgentThreadSummary) => (
+    <Space direction="vertical" size={6} style={{ maxWidth: 320 }}>
+      <Text strong>{thread.title || thread.session_key}</Text>
+      <Text type="secondary">Workspace: {thread.work_dir || "Not recorded"}</Text>
+      <Text type="secondary">{formatRunnerTag(undefined, thread)}</Text>
+      <Text type="secondary">Source: {formatThreadSource(thread)}</Text>
+      <Text type="secondary">
+        State: {isRunningThread(thread) ? "Running" : "Ready"}
+      </Text>
+      <Text type="secondary">
+        Created: {formatRelativeTime(thread.start_time || thread.last_active_time, nowSeconds)}
+      </Text>
+      <Text type="secondary">Duration: {formatDuration(threadDuration(thread))}</Text>
+    </Space>
+  );
+
+  return (
+    <Card
+      size="small"
+      style={styles.threadCard}
+      bodyStyle={styles.threadCardBody}
+      title={
+        <Space>
+          <HistoryOutlined />
+          <span>Threads</span>
+        </Space>
+      }
+    >
+      <div style={styles.threadList} data-testid="agent-chat-thread-list">
+        {threads.length === 0 ? (
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No previous sessions" />
+        ) : (
+          threads.map((thread) => {
+            const selected = isSelectedThread(thread, sessionKey, historyPath, view);
+            const threadKey = thread.history_path || thread.session_key;
+            const showConfirm = confirmDeleteKey === threadKey;
+            return (
+              <Dropdown
+                key={threadKey}
+                trigger={["contextMenu"]}
+                open={contextThreadKey === threadKey}
+                onOpenChange={(open) => {
+                  if (open) {
+                    setContextThreadKey(threadKey);
+                    return;
+                  }
+                  setContextThreadKey((current) => (current === threadKey ? null : current));
+                  setConfirmDeleteKey((current) => (current === threadKey ? null : current));
+                }}
+                dropdownRender={() => (
+                  <div style={styles.threadContextMenu}>
+                    {showConfirm ? (
+                      <Space direction="vertical" size={6} style={{ width: "100%" }}>
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          Delete this conversation?
+                        </Text>
+                        <Space size={6}>
+                          <button
+                            type="button"
+                            data-testid="agent-chat-thread-delete-confirm"
+                            style={{
+                              ...styles.threadContextButton,
+                              ...styles.threadContextDangerButton,
+                            }}
+                            onClick={() => {
+                              onDeleteThread(thread);
+                              setConfirmDeleteKey(null);
+                              setContextThreadKey(null);
+                            }}
+                          >
+                            Confirm
+                          </button>
+                          <button
+                            type="button"
+                            data-testid="agent-chat-thread-delete-cancel"
+                            style={styles.threadContextButton}
+                            onClick={() => {
+                              setConfirmDeleteKey(null);
+                            }}
+                          >
+                            Cancel
+                          </button>
+                        </Space>
+                      </Space>
+                    ) : (
+                      <button
+                        type="button"
+                        data-testid="agent-chat-thread-delete"
+                        style={{
+                          ...styles.threadContextButton,
+                          ...styles.threadContextDangerButton,
+                        }}
+                        onClick={() => setConfirmDeleteKey(threadKey)}
+                      >
+                        <DeleteOutlined /> Delete
+                      </button>
+                    )}
+                  </div>
+                )}
+              >
+                <button
+                  type="button"
+                  onClick={() => onOpenThread(thread)}
+                  onContextMenu={() => {
+                    setContextThreadKey(threadKey);
+                    setConfirmDeleteKey(null);
+                  }}
+                  data-testid="agent-chat-thread-item"
+                  data-selected={selected ? "true" : "false"}
+                  aria-current={selected ? "true" : undefined}
+                  style={{
+                    ...styles.threadItem,
+                    ...(selected ? styles.threadItemSelected : {}),
+                  }}
+                >
+                  <Popover
+                    trigger="hover"
+                    placement="left"
+                    content={threadDetails(thread)}
+                    mouseEnterDelay={0.5}
+                  >
+                    <span
+                      data-testid="agent-chat-thread-runner-mark"
+                      style={{
+                        ...styles.threadRunnerMark,
+                        ...(selected
+                          ? {
+                              background: token.colorPrimaryBgHover,
+                              color: token.colorPrimary,
+                            }
+                          : {}),
+                      }}
+                    >
+                      {formatThreadRunnerMark(thread)}
+                    </span>
+                  </Popover>
+                  <span style={{ flex: "1 1 auto", minWidth: 0 }}>
+                    <span
+                      style={{
+                        display: "block",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                        fontWeight: selected ? 600 : 500,
+                      }}
+                    >
+                      {thread.title || thread.session_key}
+                    </span>
+                    <span
+                      style={{
+                        display: "block",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                        color: selected ? token.colorPrimaryText : token.colorTextSecondary,
+                        fontSize: 12,
+                        marginTop: 2,
+                      }}
+                    >
+                      {threadMeta(thread)}
+                    </span>
+                  </span>
+                  {isRunningThread(thread) ? (
+                    <span aria-label="running" title="Running" style={styles.runningDot} />
+                  ) : null}
+                </button>
+              </Dropdown>
+            );
+          })
+        )}
+      </div>
+    </Card>
+  );
+}
+
+export function AgentChatSettingsModal({
+  open,
+  onClose,
+  styles,
+  workDir,
+  defaultWorkDir,
+  telemetry,
+  historyPath,
+}: AgentChatSettingsModalProps) {
+  const { token } = theme.useToken();
+
+  return (
+    <Modal
+      title="Agent Chat Status"
+      open={open}
+      onCancel={onClose}
+      footer={null}
+      width={720}
+      destroyOnHidden
+    >
+      <Space
+        direction="vertical"
+        size={16}
+        style={styles.settingsModalContent}
+        data-testid="agent-chat-settings-modal"
+      >
+        <Card
+          size="small"
+          title={
+            <Space>
+              <FolderOpenOutlined />
+              <span>Workspace</span>
+            </Space>
+          }
+        >
+          <Space direction="vertical" size={8} style={{ width: "100%" }}>
+            <Input
+              size="small"
+              placeholder="Working directory (leave empty for default)"
+              value={workDir || defaultWorkDir}
+              data-testid="agent-chat-workspace-display"
+              prefix={<FolderOpenOutlined style={{ color: "rgba(0,0,0,0.25)" }} />}
+              disabled
+            />
+            {telemetry.status?.work_dir ? (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                Active: {telemetry.status.work_dir}
+              </Text>
+            ) : null}
+          </Space>
+        </Card>
+
+        <Card size="small" data-testid="agent-chat-info">
+          <Space direction="vertical" size={6} style={{ width: "100%" }}>
+            <Space wrap size={4}>
+              <Tag color="blue">Agent Chat</Tag>
+              <Tag>{historyPath ? "History Continue" : "Live API"}</Tag>
+            </Space>
+            <Text strong>Streaming Agent workspace</Text>
+            <Paragraph type="secondary" style={{ margin: 0, fontSize: 12 }}>
+              Prompt shortcuts, execution context, and safe JSONL history
+              continue are available in this compact chat panel.
+            </Paragraph>
+          </Space>
+        </Card>
+
+        <Card
+          size="small"
+          title={
+            <Space>
+              <SyncOutlined spin={telemetry.phase === "running"} />
+              <span>Status</span>
+            </Space>
+          }
+          data-testid="agent-chat-status"
+        >
+          <Space direction="vertical" size={8} style={{ width: "100%" }}>
+            <Space wrap size={4}>
+              <Tag color={statusTagColor(telemetry.phase)}>
+                {formatRunPhase(telemetry.phase)}
+              </Tag>
+              {telemetry.status?.state ? (
+                <Tag>{formatLabel(telemetry.status.state)}</Tag>
+              ) : null}
+            </Space>
+            <MetricRow label="Loop" value={formatLoopProgress(telemetry.status)} />
+            <MetricRow
+              label="Messages"
+              value={formatNumber(telemetry.status?.message_count)}
+            />
+            <MetricRow
+              label="Compactions"
+              value={formatNumber(telemetry.status?.compaction_count)}
+            />
+          </Space>
+        </Card>
+
+        <Card
+          size="small"
+          title={
+            <Space>
+              <DatabaseOutlined />
+              <span>Context</span>
+            </Space>
+          }
+          data-testid="agent-chat-context"
+        >
+          <Space direction="vertical" size={8} style={{ width: "100%" }}>
+            <MetricRow
+              label="Usage"
+              value={formatContextUsage(telemetry.status, telemetry.context)}
+            />
+            <MetricRow
+              label="Tokens"
+              value={formatNumber(
+                telemetry.status?.total_tokens_used ??
+                  telemetry.context?.totalTokensUsed,
+              )}
+            />
+            <MetricRow
+              label="Window"
+              value={formatContextWindow(telemetry.status, telemetry.context)}
+            />
+            <MetricRow
+              label="Compactions"
+              value={formatNumber(
+                telemetry.status?.compaction_count ??
+                  telemetry.context?.compactionCount,
+              )}
+            />
+            <MetricRow
+              label="Local tools"
+              value={formatNumber(telemetry.status?.local_tool_count)}
+            />
+            <MetricRow
+              label="MCP tools"
+              value={formatNumber(telemetry.status?.mcp_tool_count)}
+            />
+            {telemetry.status?.runner_type || telemetry.status?.runner_id ? (
+              <>
+                <Divider style={{ margin: "4px 0" }} />
+                <Text type="secondary">
+                  Runner: {[telemetry.status.runner_type, telemetry.status.runner_id]
+                    .filter(Boolean)
+                    .join(" / ")}
+                </Text>
+              </>
+            ) : null}
+            {telemetry.compaction ? (
+              <>
+                <Divider style={{ margin: "4px 0" }} />
+                <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                  <Space wrap size={4}>
+                    <Tag color={compactionTagColor(telemetry.compactionPhase)}>
+                      {formatLabel(telemetry.compactionPhase || "finished")}
+                    </Tag>
+                    {telemetry.compaction.phase ? (
+                      <Text>{formatLabel(telemetry.compaction.phase)}</Text>
+                    ) : null}
+                  </Space>
+                  <MetricRow
+                    label="Saved"
+                    value={formatNumber(telemetry.compaction.tokensSaved)}
+                  />
+                  <MetricRow
+                    label="Removed"
+                    value={formatNumber(telemetry.compaction.messagesRemoved)}
+                  />
+                </Space>
+              </>
+            ) : null}
+          </Space>
+        </Card>
+
+        <Card
+          size="small"
+          title={
+            <Space>
+              <WarningOutlined />
+              <span>Errors</span>
+            </Space>
+          }
+          data-testid="agent-chat-errors"
+        >
+          {telemetry.errors.length === 0 ? (
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No errors" />
+          ) : (
+            <Space direction="vertical" size={8} style={{ width: "100%" }}>
+              {telemetry.errors.map((error, index) => (
+                <div key={`${index}-${error}`} style={styles.telemetrySection}>
+                  <Space align="start">
+                    <ExclamationCircleOutlined style={{ color: token.colorError }} />
+                    <Text type="danger">{error}</Text>
+                  </Space>
+                </div>
+              ))}
+            </Space>
+          )}
+        </Card>
+
+        <Card
+          size="small"
+          title={
+            <Space>
+              <PlayCircleOutlined />
+              <span>Run Settings</span>
+            </Space>
+          }
+        >
+          <Space direction="vertical" size={8}>
+            {ACTIVITY_ITEMS.map((item) => (
+              <div key={item.label}>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  {item.label}
+                </Text>
+                <div>
+                  <Text>{item.value}</Text>
+                </div>
+              </div>
+            ))}
+          </Space>
+        </Card>
+      </Space>
+    </Modal>
+  );
+}

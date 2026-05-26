@@ -10,13 +10,25 @@
 //! - `CompactionTrigger`: Auto (threshold-based) vs Manual (user-requested)
 //! - `CompactionPhase`: PreTurn (before user message) vs MidTurn (during tool loop)
 //! - `InitialContextInjection`: Where to place the summary after compaction
+//! - `AutoCompactWindow`: Scoped compaction budget (body_after_prefix)
+//! - `CompactionAnalytics`: Structured observability events
+//! - `CompactionHook`: Pre/post lifecycle callbacks
 
 use crate::client::AgentClient;
+use crate::compaction_hooks::{
+    CompactionAnalytics, CompactionContext, CompactionHookResult, CompactionImplementation,
+    CompactionStatus, PostCompactOutcome, PreCompactOutcome,
+};
 use crate::config::AgentConfig;
 use crate::history;
 use crate::session::AgentSession;
+use crate::session_status::{
+    snapshot_agent_context, AgentCompactionProgress, AgentTurnProgressEvent,
+};
+use crate::token_counting::TokenUsageSnapshot;
+use crate::turn_runtime::CancellationToken;
 use crate::types::ChatMessage;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 // ---------------------------------------------------------------------------
 // Compaction enums (matching Codex's analytics taxonomy)
@@ -49,6 +61,28 @@ pub enum CompactionPhase {
     MidTurn,
     /// Standalone compaction turn (manual /compact).
     StandaloneTurn,
+}
+
+fn compaction_trigger_label(trigger: CompactionTrigger) -> &'static str {
+    match trigger {
+        CompactionTrigger::Auto => "auto",
+        CompactionTrigger::Manual => "manual",
+    }
+}
+
+fn compaction_reason_label(reason: CompactionReason) -> &'static str {
+    match reason {
+        CompactionReason::ContextLimit => "context_limit",
+        CompactionReason::UserRequested => "user_requested",
+    }
+}
+
+fn compaction_phase_label(phase: CompactionPhase) -> &'static str {
+    match phase {
+        CompactionPhase::PreTurn => "pre_turn",
+        CompactionPhase::MidTurn => "mid_turn",
+        CompactionPhase::StandaloneTurn => "standalone_turn",
+    }
 }
 
 /// Controls whether compaction replacement history includes caller-provided
@@ -97,13 +131,16 @@ const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Error returned when compaction is interrupted by a cancellation token.
+pub const COMPACTION_INTERRUPTED_ERROR: &str = "compaction interrupted by cancellation";
+
 /// Compact (summarize) the session history using the model.
 ///
 /// Strategy (Memento — same as Codex):
 /// 1. Clone structured history and append the compaction prompt as a user input
 /// 2. Ask the model to create a handoff summary
 /// 3. Preserve recent user messages for continuity
-/// 4. Rebuild history as: [...recent_user_messages, summary_message]
+/// 4. Rebuild history as: \[...recent_user_messages, summary_message\]
 #[allow(clippy::too_many_arguments)]
 pub async fn compact_session(
     client: &AgentClient,
@@ -115,6 +152,7 @@ pub async fn compact_session(
     base_instructions: Option<&str>,
     initial_context_injection: InitialContextInjection,
     initial_context: Vec<ChatMessage>,
+    cancellation_token: &CancellationToken,
 ) -> Result<CompactionResult, String> {
     let start_instant = std::time::Instant::now();
     let pre_tokens = session.effective_token_count();
@@ -141,17 +179,39 @@ pub async fn compact_session(
         base_instructions.is_some_and(|instructions| !instructions.trim().is_empty());
     let mut summary_messages = build_compaction_messages(&session.history, base_instructions);
     let history_start_index = usize::from(request_has_base_instructions);
+    let protected_tail_len = 1;
     let max_retries = compaction_summary_max_retries(config);
     let mut retries = 0_u64;
 
     // Call the model to generate a summary (no tools for compaction)
     let response = loop {
-        match client.chat_completion(config, &summary_messages, &[]).await {
+        // Check cancellation before each attempt (matching Codex's Interrupted handling)
+        if cancellation_token.is_cancelled() {
+            warn!(
+                session_key = %session.session_key,
+                "compaction interrupted before model call"
+            );
+            return Err(COMPACTION_INTERRUPTED_ERROR.to_string());
+        }
+
+        // Race the model call against the cancellation token
+        match tokio::select! {
+            biased;
+            _ = cancellation_token.cancelled() => {
+                warn!(
+                    session_key = %session.session_key,
+                    "compaction interrupted during model call"
+                );
+                return Err(COMPACTION_INTERRUPTED_ERROR.to_string());
+            }
+            result = client.chat_completion(config, &summary_messages, &[]) => result,
+        } {
             Ok(response) => break response,
             Err(error) if is_context_window_error(&error) => {
                 if remove_oldest_history_item_from_compaction_messages(
                     &mut summary_messages,
                     history_start_index,
+                    protected_tail_len,
                 ) {
                     warn!(
                         session_key = %session.session_key,
@@ -231,6 +291,9 @@ pub async fn compact_session(
     session.history_version = session.history_version.saturating_add(1);
     session.recompute_token_snapshot_from_history(base_instructions);
 
+    // Advance the auto-compact window so the next window starts fresh.
+    session.auto_compact_window.start_next_window();
+
     // Track token savings
     let post_tokens = session.effective_token_count();
     let tokens_saved = pre_tokens.saturating_sub(post_tokens);
@@ -276,12 +339,317 @@ pub async fn compact_session(
 
 /// Check whether the session should be compacted based on token usage.
 ///
-/// Matches Codex's approach: compare current context tokens against the
-/// auto-compact threshold, which defaults to `context_window × 90%` and
-/// is clamped to that ceiling even when the user sets a custom value.
+/// Uses the AutoCompactWindow's scoped budget: instead of comparing absolute
+/// token count against the threshold, it compares the "body after prefix"
+/// (growth since window start) against the threshold. This prevents initial
+/// context (system prompts, AGENTS.md) from being double-counted toward the
+/// compaction budget.
+///
+/// Falls back to full context comparison if no window prefill baseline is set.
 pub fn should_compact(session: &AgentSession, config: &AgentConfig) -> bool {
-    let context_tokens = session.effective_token_count();
-    context_tokens > config.get_compact_threshold_tokens()
+    let window = &session.auto_compact_window;
+    let context_tokens = u64::from(session.effective_token_count());
+    let body = window.body_after_prefix(context_tokens);
+    let threshold = u64::from(config.get_compact_threshold_tokens());
+
+    debug!(
+        context_tokens,
+        prefill_baseline = ?window.prefill_tokens(),
+        body_after_prefix = body,
+        threshold,
+        window_ordinal = window.ordinal(),
+        "should_compact check"
+    );
+
+    body > threshold
+}
+
+/// Get a `TokenUsageSnapshot` from the session's current state.
+///
+/// Uses `ServerObserved` when the session has real API response tokens,
+/// falls back to `Estimated` from the character-based heuristic.
+pub fn token_usage_snapshot(session: &AgentSession) -> TokenUsageSnapshot {
+    if let Some(server_tokens) = session.last_response_tokens {
+        let effective = u64::from(session.effective_token_count());
+        if session.last_response_history_len == Some(session.history.len()) {
+            TokenUsageSnapshot::from_server(effective)
+        } else {
+            TokenUsageSnapshot::from_mixed(server_tokens, effective)
+        }
+    } else {
+        TokenUsageSnapshot::from_estimate(u64::from(session.effective_token_count()))
+    }
+}
+
+/// Update the auto-compact window's prefill baseline from API response token usage.
+///
+/// Called when the API returns `usage.input_tokens` in its response. This locks
+/// the server-observed prefill baseline for the current window so that
+/// `should_compact()` only considers growth beyond the initial context.
+///
+/// Safe to call multiple times — only the first server observation per window
+/// takes effect (subsequent calls are no-ops).
+pub fn update_token_baseline(session: &mut AgentSession, input_tokens: u64) {
+    session
+        .auto_compact_window
+        .ensure_server_observed_prefill_from_usage(input_tokens);
+}
+
+/// Compact session with full hook lifecycle and analytics emission.
+///
+/// This is the preferred entry point for compaction that integrates:
+/// 1. Pre-compact hooks (can abort compaction)
+/// 2. The actual compaction (delegated to `compact_session`)
+/// 3. Post-compact hooks (can signal turn abort)
+/// 4. Analytics emission
+/// 5. Reference context invalidation
+///
+/// Window advancement is handled by `compact_session()` internally.
+///
+/// Returns `Ok(CompactionResult)` on success, `Err` with reason on failure
+/// or hook-stopped abort.
+#[allow(clippy::too_many_arguments)]
+pub async fn compact_session_with_hooks(
+    client: &AgentClient,
+    config: &AgentConfig,
+    session: &mut AgentSession,
+    trigger: CompactionTrigger,
+    reason: CompactionReason,
+    phase: CompactionPhase,
+    base_instructions: Option<&str>,
+    initial_context_injection: InitialContextInjection,
+    initial_context: Vec<ChatMessage>,
+    cancellation_token: &CancellationToken,
+) -> Result<CompactionResult, String> {
+    let active_tokens_before = u64::from(session.effective_token_count());
+    let window_ordinal = session.auto_compact_window.ordinal();
+    let started_progress = build_compaction_progress(
+        session,
+        config,
+        trigger,
+        reason,
+        phase,
+        active_tokens_before,
+    );
+    emit_compaction_progress(
+        session,
+        AgentTurnProgressEvent::CompactionStarted {
+            progress: started_progress.clone(),
+        },
+    );
+
+    // --- Pre-compact hooks ---
+    let hook_context = CompactionContext {
+        trigger,
+        reason,
+        phase,
+        active_context_tokens: active_tokens_before,
+        session_key: session.session_key.clone(),
+        compaction_count: session.compaction_count,
+    };
+
+    if !session.compaction_hooks.is_empty() {
+        let pre_outcome = session
+            .compaction_hooks
+            .run_pre_compact(&hook_context)
+            .await;
+        match pre_outcome {
+            PreCompactOutcome::Continue => {}
+            PreCompactOutcome::Stopped {
+                reason: stop_reason,
+            } => {
+                let reason_str =
+                    stop_reason.unwrap_or_else(|| "pre-compact hook stopped execution".to_string());
+                warn!(
+                    session_key = %session.session_key,
+                    reason = %reason_str,
+                    "compaction aborted by pre-compact hook"
+                );
+                emit_compaction_progress(
+                    session,
+                    AgentTurnProgressEvent::CompactionFailed {
+                        progress: started_progress,
+                        error: reason_str.clone(),
+                    },
+                );
+                return Err(reason_str);
+            }
+        }
+    }
+
+    // --- Execute compaction (also advances the auto-compact window) ---
+    let start_instant = std::time::Instant::now();
+    let result = compact_session(
+        client,
+        config,
+        session,
+        trigger,
+        reason,
+        phase,
+        base_instructions,
+        initial_context_injection,
+        initial_context,
+        cancellation_token,
+    )
+    .await;
+
+    let duration_ms = start_instant.elapsed().as_millis() as u64;
+
+    match &result {
+        Ok(compaction_result) => {
+            emit_compaction_progress(
+                session,
+                AgentTurnProgressEvent::CompactionFinished {
+                    progress: build_compaction_progress_from_result(
+                        session,
+                        config,
+                        trigger,
+                        reason,
+                        phase,
+                        compaction_result,
+                    ),
+                },
+            );
+            // --- Post-compact hooks ---
+            let hook_result = CompactionHookResult {
+                pre_tokens: compaction_result.pre_tokens,
+                post_tokens: compaction_result.post_tokens,
+                tokens_saved: compaction_result.tokens_saved,
+                duration_ms,
+                success: true,
+            };
+
+            if !session.compaction_hooks.is_empty() {
+                let post_outcome = session
+                    .compaction_hooks
+                    .run_post_compact(&hook_result)
+                    .await;
+                if matches!(post_outcome, PostCompactOutcome::Stopped) {
+                    warn!(
+                        session_key = %session.session_key,
+                        "post-compact hook signaled stop"
+                    );
+                    return Err("post-compact hook stopped execution".to_string());
+                }
+            }
+
+            // --- Invalidate reference context (needs re-injection next turn) ---
+            session.reference_context_state.advance_generation();
+
+            // --- Emit analytics ---
+            let active_tokens_after = u64::from(session.effective_token_count());
+            let _analytics = CompactionAnalytics {
+                trigger,
+                reason,
+                phase,
+                active_context_tokens_before: active_tokens_before,
+                active_context_tokens_after: Some(active_tokens_after),
+                duration_ms,
+                implementation: CompactionImplementation::Local,
+                status: CompactionStatus::Completed,
+                error: None,
+                session_key: session.session_key.clone(),
+                window_ordinal,
+            };
+
+            info!(
+                session_key = %session.session_key,
+                window_ordinal,
+                new_window_ordinal = session.auto_compact_window.ordinal(),
+                active_tokens_before,
+                active_tokens_after,
+                "compaction window advanced"
+            );
+        }
+        Err(error) => {
+            emit_compaction_progress(
+                session,
+                AgentTurnProgressEvent::CompactionFailed {
+                    progress: build_compaction_progress(
+                        session,
+                        config,
+                        trigger,
+                        reason,
+                        phase,
+                        active_tokens_before,
+                    ),
+                    error: error.clone(),
+                },
+            );
+            let status = if error == COMPACTION_INTERRUPTED_ERROR {
+                CompactionStatus::Interrupted
+            } else {
+                CompactionStatus::Failed
+            };
+            let _analytics = CompactionAnalytics {
+                trigger,
+                reason,
+                phase,
+                active_context_tokens_before: active_tokens_before,
+                active_context_tokens_after: None,
+                duration_ms,
+                implementation: CompactionImplementation::Local,
+                status,
+                error: Some(error.clone()),
+                session_key: session.session_key.clone(),
+                window_ordinal,
+            };
+        }
+    }
+
+    result
+}
+
+fn build_compaction_progress(
+    session: &AgentSession,
+    config: &AgentConfig,
+    trigger: CompactionTrigger,
+    reason: CompactionReason,
+    phase: CompactionPhase,
+    pre_tokens: u64,
+) -> AgentCompactionProgress {
+    AgentCompactionProgress {
+        trigger: compaction_trigger_label(trigger).to_string(),
+        reason: compaction_reason_label(reason).to_string(),
+        phase: compaction_phase_label(phase).to_string(),
+        pre_tokens: u32::try_from(pre_tokens).unwrap_or(u32::MAX),
+        post_tokens: None,
+        tokens_saved: None,
+        messages_removed: None,
+        duration_ms: None,
+        compaction_count: session.compaction_count,
+        history_version: session.history_version,
+        context: snapshot_agent_context(session, config),
+    }
+}
+
+fn build_compaction_progress_from_result(
+    session: &AgentSession,
+    config: &AgentConfig,
+    trigger: CompactionTrigger,
+    reason: CompactionReason,
+    phase: CompactionPhase,
+    result: &CompactionResult,
+) -> AgentCompactionProgress {
+    AgentCompactionProgress {
+        trigger: compaction_trigger_label(trigger).to_string(),
+        reason: compaction_reason_label(reason).to_string(),
+        phase: compaction_phase_label(phase).to_string(),
+        pre_tokens: result.pre_tokens,
+        post_tokens: Some(result.post_tokens),
+        tokens_saved: Some(result.tokens_saved),
+        messages_removed: Some(result.messages_removed),
+        duration_ms: result.duration_ms,
+        compaction_count: session.compaction_count,
+        history_version: session.history_version,
+        context: snapshot_agent_context(session, config),
+    }
+}
+
+fn emit_compaction_progress(session: &AgentSession, event: AgentTurnProgressEvent) {
+    if let Some(sender) = &session.progress_sender {
+        let _ = sender.send(event);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -335,11 +703,12 @@ fn build_compaction_messages(
 fn remove_oldest_history_item_from_compaction_messages(
     messages: &mut Vec<ChatMessage>,
     history_start_index: usize,
+    protected_tail_len: usize,
 ) -> bool {
-    let Some(prompt_index) = messages.len().checked_sub(1) else {
+    let Some(protected_tail_start) = messages.len().checked_sub(protected_tail_len.max(1)) else {
         return false;
     };
-    if history_start_index >= prompt_index {
+    if history_start_index >= protected_tail_start {
         return false;
     }
     messages.remove(history_start_index);
@@ -666,6 +1035,7 @@ mod tests {
             ModelProviderConfig {
                 name: Some("test".to_string()),
                 base_url: Some(base_url),
+                wire_api: Some(crate::config::ModelWireApi::ChatCompletions),
                 env_key: None,
                 api_key: Some("test-key".to_string()),
                 http_headers: None,
@@ -867,6 +1237,19 @@ mod tests {
     }
 
     #[test]
+    fn test_build_compaction_messages_does_not_inject_plan_text() {
+        let messages = build_compaction_messages(&[ChatMessage::user("hello")], None);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].content.as_deref(), Some("hello"));
+        assert_eq!(messages[1].content.as_deref(), Some(COMPACTION_PROMPT));
+        assert!(messages.iter().all(|message| !message
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains("Current persisted task plan"))));
+    }
+
+    #[test]
     fn test_remove_oldest_history_item_preserves_base_and_compaction_prompt() {
         let mut messages = build_compaction_messages(
             &[
@@ -879,7 +1262,8 @@ mod tests {
 
         assert!(remove_oldest_history_item_from_compaction_messages(
             &mut messages,
-            1
+            1,
+            1,
         ));
 
         assert_eq!(messages.len(), 4);
@@ -892,8 +1276,36 @@ mod tests {
                 ChatMessage::system("base"),
                 ChatMessage::user(COMPACTION_PROMPT)
             ],
-            1
+            1,
+            1,
         ));
+    }
+
+    #[test]
+    fn test_remove_oldest_history_item_preserves_compaction_prompt_tail() {
+        let mut messages = vec![
+            ChatMessage::system("base"),
+            ChatMessage::user("oldest"),
+            ChatMessage::assistant("reply"),
+            ChatMessage::user(COMPACTION_PROMPT),
+        ];
+
+        assert!(remove_oldest_history_item_from_compaction_messages(
+            &mut messages,
+            1,
+            1,
+        ));
+        assert!(remove_oldest_history_item_from_compaction_messages(
+            &mut messages,
+            1,
+            1,
+        ));
+        assert!(!remove_oldest_history_item_from_compaction_messages(
+            &mut messages,
+            1,
+            1,
+        ));
+        assert_eq!(messages[1].content.as_deref(), Some(COMPACTION_PROMPT));
     }
 
     #[tokio::test]
@@ -918,6 +1330,7 @@ mod tests {
             Some("base instructions"),
             InitialContextInjection::DoNotInject,
             Vec::new(),
+            &CancellationToken::default_grace(),
         )
         .await
         .unwrap();
@@ -971,6 +1384,7 @@ mod tests {
             Some("base instructions"),
             InitialContextInjection::DoNotInject,
             Vec::new(),
+            &CancellationToken::default_grace(),
         )
         .await
         .unwrap();
@@ -1146,6 +1560,24 @@ mod tests {
     }
 
     #[test]
+    fn test_token_usage_snapshot_marks_stale_server_usage_as_mixed() {
+        let mut session = AgentSession::new("mixed-token-source");
+        session.history.push(ChatMessage::assistant("covered"));
+        session.track_token_usage(100);
+        session
+            .history
+            .push(ChatMessage::user("new estimated context"));
+
+        let snapshot = token_usage_snapshot(&session);
+
+        assert!(snapshot.source.is_mixed());
+        assert_eq!(
+            snapshot.active_context_tokens,
+            u64::from(session.effective_token_count())
+        );
+    }
+
+    #[test]
     fn test_is_summary_message() {
         let summary = ChatMessage::user(&format!("{SUMMARY_PREFIX}\nsome summary"));
         assert!(is_summary_message(&summary));
@@ -1232,5 +1664,127 @@ mod tests {
         assert_eq!(result[1].content.as_deref(), Some("[ctx2]"));
         assert_eq!(result[2].content.as_deref(), Some("question"));
         assert!(is_summary_message(&result[3]));
+    }
+
+    /// Verify that cancelling the token before compaction starts returns
+    /// the interrupted error immediately without calling the model.
+    #[tokio::test]
+    async fn test_compaction_interrupted_before_model_call() {
+        use std::time::Duration;
+
+        // Create a token and cancel it immediately
+        let token = CancellationToken::new(Duration::from_secs(60));
+        token.cancel();
+
+        let config = AgentConfig {
+            model: Some("test-model".to_string()),
+            model_context_window: Some(1_000),
+            model_auto_compact_token_limit: Some(100),
+            ..Default::default()
+        };
+        let client = AgentClient::new();
+        let mut session = AgentSession::new("compact-interrupted");
+        session.history = vec![ChatMessage::user("hello"), ChatMessage::assistant("hi")];
+
+        let result = compact_session(
+            &client,
+            &config,
+            &mut session,
+            CompactionTrigger::Auto,
+            CompactionReason::ContextLimit,
+            CompactionPhase::MidTurn,
+            None,
+            InitialContextInjection::DoNotInject,
+            Vec::new(),
+            &token,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), COMPACTION_INTERRUPTED_ERROR);
+        // Session should be unchanged — no compaction performed
+        assert_eq!(session.compaction_count, 0);
+        assert_eq!(session.history.len(), 2);
+    }
+
+    /// Verify that cancelling the token during a model call (slow server)
+    /// returns the interrupted error without waiting for completion.
+    #[tokio::test]
+    async fn test_compaction_interrupted_during_model_call() {
+        use std::time::Duration;
+        use tokio::io::AsyncWriteExt;
+
+        // Start a server that never responds (hangs)
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                // Accept connection but never respond — simulates a slow model
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+
+        let mut model_providers = HashMap::new();
+        model_providers.insert(
+            "test".to_string(),
+            ModelProviderConfig {
+                name: Some("test".to_string()),
+                base_url: Some(format!("http://{addr}/chat/completions")),
+                wire_api: Some(crate::config::ModelWireApi::ChatCompletions),
+                env_key: None,
+                api_key: Some("test-key".to_string()),
+                http_headers: None,
+                env_http_headers: None,
+                request_max_retries: None,
+                stream_idle_timeout_ms: None,
+                stream_max_retries: None,
+            },
+        );
+        let config = AgentConfig {
+            model: Some("test-model".to_string()),
+            model_provider: Some("test".to_string()),
+            model_providers,
+            model_context_window: Some(1_000),
+            model_auto_compact_token_limit: Some(100),
+            ..Default::default()
+        };
+        let client = AgentClient::new();
+        let mut session = AgentSession::new("compact-interrupted-during");
+        session.history = vec![ChatMessage::user("hello"), ChatMessage::assistant("hi")];
+
+        // Create token and cancel it after a short delay
+        let token = CancellationToken::new(Duration::from_secs(60));
+        let token_clone = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            token_clone.cancel();
+        });
+
+        let start = std::time::Instant::now();
+        let result = compact_session(
+            &client,
+            &config,
+            &mut session,
+            CompactionTrigger::Auto,
+            CompactionReason::ContextLimit,
+            CompactionPhase::MidTurn,
+            None,
+            InitialContextInjection::DoNotInject,
+            Vec::new(),
+            &token,
+        )
+        .await;
+
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), COMPACTION_INTERRUPTED_ERROR);
+        // Should return quickly (well under the 30s server timeout)
+        assert!(elapsed < Duration::from_secs(5));
+        // Session should be unchanged
+        assert_eq!(session.compaction_count, 0);
+        assert_eq!(session.history.len(), 2);
     }
 }

@@ -1,4 +1,5 @@
 export type AgentSectionId =
+  | "chat"
   | "general"
   | "model"
   | "runtime"
@@ -11,6 +12,7 @@ export type AgentSectionId =
   | "sessions";
 
 export const AGENT_SECTION_NAV: Array<{ id: AgentSectionId; label: string }> = [
+  { id: "chat", label: "Chat" },
   { id: "general", label: "General" },
   { id: "model", label: "Model" },
   { id: "runtime", label: "Runtime" },

@@ -104,6 +104,54 @@ Invalid parameter: messages with role 'tool' must be a response to a preceeding 
 - MCP tool 与本地 tool 共用同一 ChatMessage invariant
 - 多轮对话后的 max history 裁剪
 
+## Agent Chat JSONL 恢复与续聊
+
+### 背景
+
+AI Agent Chat 页面需要从 Sessions/History 列表打开历史 JSONL，并在同一个对话上下文中继续运行。历史文件路径来自 WebUI query 或 API 请求体，不能直接作为文件系统路径使用，否则会出现任意文件读取/删除风险；同时 JSONL 末尾可能因进程退出留下半行坏 JSON，恢复流程不能因此丢弃整份有效历史。
+
+### 方案
+
+- `persistence::validate_conversation_path()` 对调用方传入的历史路径做 canonicalize，只允许访问当前 Agent data dir 的 `sessions/` 子目录内 `.jsonl` 文件，并复用 64 MiB 大小保护。
+- `persistence::load_conversation_lossy()` 用于 restore/continue 场景：跳过无法解析的 JSONL 行，保留可恢复的 user/assistant/tool-call 合法历史，并返回 `skipped_lines` 供日志告警。
+- `/_bifrost/api/im-gateway/agent/sessions/history/*` 的 GET/DELETE 先走安全路径校验，再读取或删除文件，避免越权路径。
+- `/_bifrost/api/im-gateway/agent/chat` 与 `/_bifrost/api/agent/chat/stream` 接受可选 `history_path`。当 session 当前为空时，后端先校验路径、校验 JSONL 内 `session_key` 与请求 `session_key` 一致，再恢复 history/runtime summary。
+- 恢复成功后通过 `ConversationRecorder::from_existing_file()` 继续写回原 JSONL，让后续再次打开同一个 historyPath 时可以看到续聊内容。
+- Agent Chat WebUI 在 URL 包含 `historyPath` 时先加载并渲染历史消息，发送时把 `history_path` 传给流式 API；首次续聊成功后本地清除 pending `historyPath`，避免同一运行态重复恢复。
+
+## Agent Chat 刷新恢复与线程列表选中
+
+### 背景
+
+AI Agent Chat 页支持 `session` 深链，例如 `/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=<key>&view=active`。旧实现只有 URL 携带 `historyPath` 时才读取 JSONL 历史；普通 active session 深链刷新后会保留 session key，但消息区回到 starter messages，用户刚发出的消息和回复看起来像丢失。同时 Recent Threads 只按 `session_key` 判断选中态，同一 session 同时出现 active 与 ended 记录时会多条高亮；线程列表还被截断到 8 条，列表区域本身没有独立滚动容器。
+
+### 方案
+
+- WebUI 在 `session` 存在且 `historyPath` 不存在时调用 `GET /_bifrost/api/im-gateway/agent/sessions/{session}`，从 active in-memory session detail 恢复 user/assistant 消息。
+- 如果当前 URL 只有 `session`，但 sessions/all 返回同 session 的 ended history 记录，则自动补齐 `view=history&historyPath=<jsonl>`，继续复用现有安全 history loader。
+- 对话卡片标题展示当前会话标题：优先使用运行中 `set_title`/线程标题，其次使用第一条用户消息摘要，最后才回退到 session key。
+- Recent Threads 不再截断到 8 条；线程卡片内部增加独立可滚动列表，避免右侧其他状态卡片把线程项挤出可视区。
+- 选中态按当前视图区分：history 视图匹配 `history_path`，active 视图只匹配无 `history_path` 的 active 记录，避免同一 `session_key` 多条记录同时高亮。
+- 发送完成后 URL 保留当前 `session` 和 `view=active`，刷新时能重新进入同一 active session。
+- 切换线程、active session detail 恢复、JSONL history 恢复后的下一次消息区滚动使用 `behavior: "auto"`，直接展示底部；普通发送和流式追加仍可使用 smooth 跟随。
+
+### 测试方案
+
+- 单元/类型检查：执行 `pnpm --dir web exec tsc --noEmit`，覆盖新增类型与 helper 的 TypeScript 约束。
+- E2E/UI：在 `web/tests/ui/agent-chat.spec.ts` 中补充 session detail 恢复、对话标题展示、恢复后即时滚到底部、historyPath 自动补齐、线程列表滚动和唯一选中态测试。
+- 真实场景测试：在 `human_tests/im-gateway-agent.md` 增加 Agent Chat 刷新恢复回归用例，使用真实浏览器打开 active session 深链，确认刷新后消息保留、对话标题使用线程/消息标题、恢复后即时展示底部、线程列表可滚动、同 key active/history 不重复选中。
+
+### Review/Fix/Test 闭环
+
+- 第 1 轮：复核用户目标、检查 `AgentChatSection.tsx` diff、执行 TypeScript 与新增 UI 测试，修复发现的加载/选中/滚动问题。
+- 第 2 轮：重新检查 URL 参数、history/active 双路径、human_tests 索引与真实浏览器表现，复跑受影响 UI 测试和项目校验命令。
+
+### 验证
+
+- 单元测试覆盖越权路径拒绝、坏 JSONL 行容错恢复、existing-file recorder 续写。
+- UI 测试覆盖 Agent Chat 流式 API 发送，以及从 `historyPath` 渲染历史后携带 `history_path` 续聊。
+- human_tests 新增 TC-IMA-116，要求真实验证合法 historyPath 恢复、续聊写回和外部路径 400。
+
 ## `/status` 运行中可观测指标
 
 ### 背景
@@ -892,6 +940,56 @@ IM 事件链路也使用同一语义：busy session 收到 `/stop` 时调用 `re
 - `session::tests::test_stop_request_cancels_in_flight_model_request`
 - `im_gateway_agent_chat_stop_active_loop`
 - `human_tests/im-gateway-agent.md` 的 TC-IMA-89 通过真实 Admin API 验证 active `/status`、`/stop`、原 chat 停止返回和后续 chat 恢复。
+
+## Agent Chat 页面信息架构
+
+Agent Chat 页面右侧侧栏只承载 Threads 列表。Workspace、Status、Context、Errors、Run Settings 等状态信息从侧栏移入 `Agent Chat Status` 弹窗，弹窗入口放在 composer 区域的 New Chat 按钮旁边，避免右侧列表被设置卡片挤压。对话标题栏展示当前会话 title、来源标签、Runner 标签和状态标签，让用户不用打开弹窗也能判断该对话来自 Web/IM/Runner/ASR、使用哪个 runner、是否 running/ready。已执行工具调用的 Args/Result 只属于消息过程步骤，不展示在 Status 弹窗中。
+
+Threads 数据源使用 `/api/im-gateway/agent/sessions/all` 的 active + history 合并结果，后端按 `session_key` 去重，前端再做兜底去重：同一 `session_key` 只展示一条记录，active 优先于 history。线程列表使用无边框两行列表：左侧小标识只表达 Runner 类型（Bifrost Agent / Codex / ChatGPT Web / Unknown），第二行表达入口渠道（Web / WeChat / Feishu / ASR Task / Scheduled）以及创建时间、运行时长。线程列表不展示 `Active` / `Ended` 文案，避免噪音；只有运行中的线程展示跳动绿点。
+
+线程行右键使用可扩展 context menu，而不是把操作按钮挤在线程行内。当前菜单包含 Delete；点击 Delete 后在同一个菜单位置切换为 Confirm / Cancel 原位二次确认，后续可继续追加复制 session key、导出 history、打开详情等菜单项。删除操作调用 `DELETE /api/im-gateway/agent/sessions/{session_key}`，服务端必须停止运行中 turn、清理内存 session、queue/guide、`session_state.json` 中的外部 runner 状态以及同 `session_key` 的 JSONL history，避免 UI 删除后刷新又从另一个数据源合并回来。
+
+线程标题必须来自统一摘要语义，避免列表未选中时显示 `session_key`、选中后又因详情加载改成首条用户消息而抖动。后端 active session list、JSONL history scan、`/sessions/{session_key}` 详情合成都提供同一套 `title` fallback：显式 `set_title` / `title_updated` 持久化标题优先级最高；只有没有显式标题时，才使用第一条用户消息的 UTF-8 安全摘要；最后才由前端兜底显示 `session_key`。`plan_updated` 的标题或说明只属于 Plan 模块，不允许覆盖 Conversation title。这样 WebUI 不需要猜测多个来源的标题，Codex Runner、ChatGPT Web Runner 和内置 Bifrost Agent 只在扩展字段上差异化，公共字段保持一致。
+
+窄屏布局仍保持 Conversation 与 Threads 平级左右布局，不把 Threads 挤到 Conversation 下方。Threads 宽度使用有上限的右栏，标题文本必须 `min-width: 0` 并单行省略，防止长中文标题撑宽整页。
+
+首次进入 Agent Chat 且 URL 没有指定 `session` / `historyPath` 时，如果 Threads 中已有会话，默认打开第一条线程，让用户直接看到最近对话；如果没有任何线程，则消息列表保持空，不渲染 demo/starter 对话，只在空态提示用户从输入框发起问题。用户主动点击 New Chat 后进入空白草稿，这个状态不能再被“默认选中第一条线程”逻辑抢回旧会话。
+
+对话区在宽屏上不能把 user/assistant 气泡拉到屏幕两端。Conversation 卡片保持占满主栏，但消息轨道和 composer 内容轨道限制 `max-width: 750px` 并水平居中；窄屏仍使用 `width: 100%`，右侧 Threads 继续保持与 Conversation 平级展示。
+
+运行中的会话必须作为服务端数据源的一等成员暴露给 Threads。内置 Bifrost Agent turn 执行期间，`AgentSessionManager` 会把 session checkout 出 idle map，因此必须维护 `active_session_infos` 快照；Web 发起新 turn 时用当前消息作为临时 title fallback，并记录 workspace、source、runner 元信息。外部 Runner 的 `/api/im-gateway/chat/stream` 同样在开始运行时写入 active preview。这样用户在等待回复时刷新页面，`/sessions/all` 仍返回该 running session，线程列表不会消失。
+
+外部 Runner 完成后的会话也必须进入同一个服务端数据源。`/api/im-gateway/chat/stream` 在 Codex/ChatGPT Web/自定义 Runner 完成后，把 `latest_run_id`、首条用户消息、最终回复、runner_id、adapter、work_dir、status 写入 `im_gateway/session_state.json`；`/sessions/all` 会把这些 session state 作为 ended thread 返回，`/sessions/{session_key}` 在没有内置 Agent in-memory detail 时从最新 run detail 或 session state 合成 user/assistant 消息。这样 Codex Runner 运行成功后不会因为 active preview 被清理而从线程列表和对话详情中消失。
+
+外部 Runner 的 session state 不能只保存最后一轮。Codex、ChatGPT Web、自定义 Runner 每次 run 完成后，都要把本轮 user/assistant message 追加到同一个 `session_key + adapter + runner_id` 的消息序列中，并保留 external `threadId` / `conversationId` 作为续聊引用。`/sessions/all` 的 turns、start_time、duration 以及 `/sessions/{session_key}` 的 messages 必须从这条消息序列生成，确保 5 轮及以上多轮对话仍完整挂在同一线程下，不因 latest run 或 conversation id 变化漂移成多个线程。
+
+对话详情恢复必须带上运行元信息，而不仅恢复消息文本：
+
+1. active session 深链通过 `/api/im-gateway/agent/sessions/{session_key}` 恢复 messages、title、work_dir、message_count、token、compaction、runner 元信息。
+2. history session 深链通过 JSONL events 恢复 messages，并从 `session_start`、`plan_updated`、`tool_call`、`tool_result`、`compaction`、`session_end` 回填 workspace、plan、tools、context 和完成状态。
+3. 新建对话从 `/api/im-gateway/agent/instructions` 读取默认 `work_dir`。只有点击 New Chat 时弹出 workspace 输入框，用户可在创建新会话前选择路径；确认后该 workspace 随 stream 请求进入后端并保存到 session runtime state。
+4. 已初始化过的会话不允许在 Settings 中切换 workspace。原因是会话初始化时已经加载了工作目录相关的 AGENTS.md、skills、词典和执行上下文；后续切换路径会导致 UI 展示与真实运行上下文错位。Settings 中的 Workspace 只读展示当前会话路径。
+5. 如果当前已经是未输入问题、未产生历史、未初始化运行信息的新会话，再次点击 New Chat 并确认时只更新待创建会话的 workspace，不生成新的 `admin-chat-*` session id。
+6. 切换对话或刷新恢复时消息区第一次直接定位到底部，使用非动画滚动；同一个 history/session 的重复详情加载、线程列表刷新、标题回填不再替换消息或抢滚动位置。用户手动向上阅读历史时，后续状态刷新不能把 scrollTop 拉回底部。
+7. New Chat 弹窗允许选择待创建会话的 Runner。内置 `bifrost_agent` 与自定义 Runner registry 的 `defaultRunnerId + runners{}` 共用一个下拉框；选择 Codex/ChatGPT Web/其他 Runner 后，该选择锁定到新会话，并在发送时分别走内置 Agent SSE 或外部 Runner NDJSON stream。
+
+刷新页面或关闭浏览器响应流不能代表用户停止 Agent Loop。`/_bifrost/api/agent/chat/stream` 和 `/_bifrost/api/im-gateway/chat/stream` 的 SSE/NDJSON client disconnect 只停止向该 HTTP 响应写入增量，不调用 `request_stop` 或 external CLI stop marker；后台 turn/run 继续执行并在完成后归还 session / 记录 runner state。只有显式点击停止当前轮次或发送 `/stop`，才允许写入 stop signal。
+
+运行中的输入框不能禁用。无输入时，输入框内右下角主按钮切换为 Stop；有输入时，内置 Bifrost Agent 展示 Guide / Queue 模式切换，默认 Guide 注入当前 loop，也可选择 Queue 等当前轮结束后处理；Codex、ChatGPT Web 和其他外部 Runner 不支持运行中 guide，默认只排队。Queue 状态显示在输入框上方，支持多条追加与删除；当 Runner 支持 guide 时，队列项可一键改为立即 Guide。Queue/Remove 是本地交互状态，不应插入 MessageList，也不应作为 assistant 消息持久化；只有排队项被实际 drain 成下一轮输入后，才进入消息列表和历史。
+
+Composer 与 MessageList 共用同一个滚动容器。输入区使用 sticky/floating 样式贴在对话容器底部，短消息时仍位于容器底部，长历史时随同一滚动容器保持底部悬浮；输入区不再通过顶部硬边框与消息列表切开。
+
+Plan 不属于 Settings 弹窗。存在 plan 时，Plan 面板展示在输入框上方；没有 plan 时整个模块隐藏。用户手动折叠或展开后，该偏好保存在当前页面状态中，不因切换会话或新建对话而重置。
+
+Plan 面板是辅助信息，不能抢占 Agent Chat 的主要阅读空间。展开时只展示真正的 todo step，不展示 `plan_updated` title / explanation 这类二级标题；header 和每个 step 都使用紧凑字体、行高与 padding。每条 step 使用 todo 风格状态图标：completed 显示勾选，in_progress 显示旋转 loading，pending 显示空心待办圆点，不再用文字 tag 占据横向空间。step 列表最多展示 5 条的高度，超过 5 条时只在列表内部滚动，不能继续抬高 composer 或把对话区顶出可视区域。输入框默认只提供 2 行内容高度，随用户输入自动扩高，最高沿用现有 7 行上限；超过上限后由输入框内部滚动承载长文本。输入框 hint 只展示换行方式 `Shift + Enter for a new line`，不展示 session id；hint 与发送按钮的底部留白必须和顶部输入留白保持一致，避免 composer 底部出现大块空白。
+
+消息区自身不展示全局 loading spinner。运行状态由顶部 `Running` 标签、Threads 的跳动绿点，以及 assistant 气泡中的 `Generating...` 表达；历史恢复只设置 `aria-busy`，避免左上角出现位置突兀的 loading 图标。
+
+每条消息都必须带时间语义。JSONL history 使用事件 `timestamp`，`/sessions/{session_key}` 详情在服务端把 message timestamp 透传给前端；当前新发送消息使用发送时刻作为临时时间。时间戳展示在消息气泡外侧底部，hover 显示完整时间，不占用正文区域。assistant 消息气泡使用完整 750px 内容轨道宽度，user 消息仍右对齐并保持较窄气泡宽度。
+
+MessageList 不渲染 user/assistant 头像，左右位置、气泡背景和顶部来源/Runner 标签已经足够区分角色；移除头像后不保留横向占位，assistant 消息直接使用完整内容轨道。Markdown 链接统一新开页面，避免点击消息里的链接覆盖当前 Agent Chat 会话页面。
+
+Threads 列表的详情 tooltip 只属于左侧 runner/source 图标，不属于整行。用户悬浮在线程标题、meta 或空白区域时不能弹出详情；只有鼠标停在图标上超过 0.5 秒才显示 Workspace、Runner、Source、State、Created、Duration，降低扫列表时的误触干扰。
 
 ## 扩展性考虑
 

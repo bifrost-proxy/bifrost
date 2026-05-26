@@ -45,6 +45,7 @@ sidebar:
 - `http` / `https`
 - `ws` / `wss`
 - `http3` / `h3`
+- `upstreamUnsafeSsl`
 - `proxy` / `pac`
 - `redirect`
 - `file` / `tpl` / `rawfile`
@@ -91,11 +92,11 @@ sidebar:
 ### 6) TLS / DevTools / 控制规则
 
 - `tlsIntercept` / `tlsPassthrough`
-- `tlsOptions` / `sniCallback`
+- `tlsOptions` / `upstreamUnsafeSsl` / `sniCallback`
 - `passthrough` / `tunnel`
 - `devtools`
 
-详见：[../operation.md](../operations/) 与 [filters.md](./filters/)
+详见：[routing.md](./routing/)、[../operation.md](../operations/) 与 [filters.md](./filters/)
 
 ### 7) WebSocket
 

@@ -170,9 +170,13 @@ fn compute_wav_rms_energy(wav_path: &Path) -> Option<f64> {
     None // "data" sub-chunk not found
 }
 
-/// Check if input is already 16kHz mono 16-bit PCM WAV via ffprobe.
+/// Check if input is already 16kHz mono 16-bit PCM WAV.
 /// Returns true if no transcoding is needed.
 async fn is_already_normalized_wav(input: &Path) -> bool {
+    if wav_header_is_normalized(input) {
+        return true;
+    }
+
     let result = Command::new("ffprobe")
         .arg("-v")
         .arg("error")
@@ -197,6 +201,52 @@ async fn is_already_normalized_wav(input: &Path) -> bool {
     let trimmed = stdout.trim();
     // Expected format: "pcm_s16le,16000,1"
     trimmed == "pcm_s16le,16000,1"
+}
+
+fn wav_header_is_normalized(input: &Path) -> bool {
+    let data = match std::fs::read(input) {
+        Ok(data) => data,
+        Err(_) => return false,
+    };
+    if data.len() < 12 || &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" {
+        return false;
+    }
+
+    let mut pos = 12usize;
+    while pos + 8 <= data.len() {
+        let chunk_id = &data[pos..pos + 4];
+        let chunk_size =
+            u32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]])
+                as usize;
+        let chunk_start = pos + 8;
+        let chunk_end = chunk_start.saturating_add(chunk_size);
+        if chunk_end > data.len() {
+            return false;
+        }
+
+        if chunk_id == b"fmt " {
+            if chunk_size < 16 {
+                return false;
+            }
+            let audio_format = u16::from_le_bytes([data[chunk_start], data[chunk_start + 1]]);
+            let channels = u16::from_le_bytes([data[chunk_start + 2], data[chunk_start + 3]]);
+            let sample_rate = u32::from_le_bytes([
+                data[chunk_start + 4],
+                data[chunk_start + 5],
+                data[chunk_start + 6],
+                data[chunk_start + 7],
+            ]);
+            let bits_per_sample =
+                u16::from_le_bytes([data[chunk_start + 14], data[chunk_start + 15]]);
+            return audio_format == 1
+                && channels == 1
+                && sample_rate == 16_000
+                && bits_per_sample == 16;
+        }
+
+        pos += 8 + chunk_size + (chunk_size & 1);
+    }
+    false
 }
 
 /// Create a temp dir, normalize `input` into it, and return `(wav_path, temp_dir_path)`.
@@ -266,4 +316,3 @@ async fn normalize_audio_file(
         Err(String::from_utf8_lossy(&result.stderr).trim().to_string())
     }
 }
-

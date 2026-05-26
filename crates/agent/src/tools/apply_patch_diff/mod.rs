@@ -97,6 +97,7 @@ impl ToolHandler for ApplyDiffTool {
                     return ToolResult {
                         success: false,
                         output: format!("invalid arguments: {e}"),
+                        runtime_events: Vec::new(),
                     };
                 }
             };
@@ -104,6 +105,7 @@ impl ToolHandler for ApplyDiffTool {
                 return ToolResult {
                     success: false,
                     output: "invalid arguments: missing patch content in `input`".to_string(),
+                    runtime_events: Vec::new(),
                 };
             };
             patch_text
@@ -118,6 +120,7 @@ impl ToolHandler for ApplyDiffTool {
                 return ToolResult {
                     success: false,
                     output: format!("patch parse error: {e}"),
+                    runtime_events: Vec::new(),
                 };
             }
         };
@@ -126,6 +129,7 @@ impl ToolHandler for ApplyDiffTool {
             return ToolResult {
                 success: false,
                 output: "patch contained no operations".to_string(),
+                runtime_events: Vec::new(),
             };
         }
 
@@ -147,6 +151,7 @@ impl ToolHandler for ApplyDiffTool {
                 ToolResult {
                     success: true,
                     output: format!("{total} file(s) changed:\n{summary}"),
+                    runtime_events: Vec::new(),
                 }
             }
             Err(e) => {
@@ -154,6 +159,7 @@ impl ToolHandler for ApplyDiffTool {
                 ToolResult {
                     success: false,
                     output: format!("apply error: {e}"),
+                    runtime_events: Vec::new(),
                 }
             }
         }

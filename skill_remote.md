@@ -73,7 +73,7 @@ bifrost --version
 curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash
 ```
 
-检查是否已有实例在跑；有就复用，不要启动第二个：
+安装脚本默认会自动安装并信任 CA、安装 Bifrost skills，并启动后台服务。随后检查是否已有实例在跑；有就复用，不要启动第二个：
 
 ```bash
 bifrost status

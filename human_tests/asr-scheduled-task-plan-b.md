@@ -12,6 +12,7 @@
 - 每 chunk 最多重试 3 次应对瞬态 GPU 崩溃
 - native `asr` 子进程默认启用 macOS physical-footprint guard；阈值先按模型官方规模和 30 秒 chunk 实测峰值定上限，再用宿主机内存做安全阀，1.7B 默认 18432 MiB，超过 `BIFROST_ASR_MAX_FOOTPRINT_MB` 安全收紧值或默认上限后立即 kill 并进入 bisect，避免 1.7B 特定 chunk 把 unified memory 顶到 20G+；为避免 `vmmap -summary` 采样拖慢推理，physical footprint 默认每 5 秒采样一次，可通过 `BIFROST_ASR_PHYSICAL_SAMPLE_INTERVAL_SECS=2..60` 调整
 - WebUI 托管 `asr-server` 启动后同样启用 Bifrost 外层 physical-footprint watchdog；当前 qwen3_asr_rs v0.2.0 二进制内部没有设置 MLX memory/cache/wired limit，默认沿用 MLX runtime；`bifrost ai asr stream-file` 默认临时启动/复用 `asr-server` 做文件级复用，长驻 `bifrost ai asr start` 后续需收敛到 daemon/supervisor 托管才能持续 watchdog
+- streaming plain-text ASR 请求通过 `BIFROST_ASR_TEXT_REQUEST_TIMEOUT_SECS` 限制，默认 45 秒；managed `asr-server` 连续失败达到阈值后明确切换剩余 chunk 到 `fork_per_chunk` 隔离，避免连接失败或服务卡死导致整批任务长时间停滞
 - memory-limit chunk 会记录 `memory_limit_hints`，后续同一文件、同一模型、同一 chunk 直接用已学习的小窗口，不再先重撞完整 30 秒风险路径
 - 长音频逐 chunk 切片、逐 chunk 删除，不预先并发切出全部 30 秒窗口，避免长录音触发无界 `ffmpeg` 进程和临时文件膨胀
 - 运行中的目录任务支持资源让路 pause/resume；普通 pause 在文件或 chunk 边界释放计算资源，`pause?force=true` 会主动 abort 当前 native `asr` 或 `ffmpeg` 子进程，resume 复用现有 pending/failed 文件恢复
@@ -960,6 +961,63 @@
 - 长期暂停仍清空 `next_run_at_ms`，不会被 scheduler 自动恢复，必须手动 Resume。
 - WebUI 的普通 Pause 操作提供临时暂停和长期暂停两个明确选项；Force Pause 保持长期暂停语义，用于立即释放运行中的 ASR/ffmpeg 子进程。
 
+### TC-ASPB-40 ASR streaming timeout 与 managed server breaker
+
+操作步骤：
+
+1. 执行 request timeout 单测：
+   ```bash
+   cargo test -p bifrost-admin asr_runtime_timeouts_are_bounded_for_short_chunks --lib
+   ```
+2. 执行 breaker 状态单测：
+   ```bash
+   cargo test -p bifrost-admin server_failure_breaker --lib
+   ```
+3. 执行策略级失败阈值单测：
+   ```bash
+   cargo test -p bifrost-admin reuse_server_failure_threshold --lib
+   ```
+4. 执行 E2E guard 脚本：
+   ```bash
+   bash e2e-tests/tests/test_qwen3_asr_runtime_guards.sh
+   ```
+
+预期结果：
+
+- streaming text endpoint 默认 request timeout 为 45 秒，whole-file request timeout 仍按音频时长限制在 60 到 180 秒，未知时长为 600 秒。
+- fork-per-chunk 原生 `asr` 默认 timeout 对短 chunk 更快失败：30 秒 chunk 为 90 秒，10 秒 bisect 子 chunk 为 45 秒；显式 `BIFROST_ASR_CHUNK_TIMEOUT_SECS` 仍可覆盖。
+- managed server 连续失败达到阈值后，`force_fork_for_remaining=true`、`restart_required=false`，fallback reason 包含 `switching remaining chunks to fork_per_chunk isolation`。
+- server chunk 首次失败后，当前 chunk 的恢复路径是先停止/标记失败服务，再立即用 `fork_per_chunk` 处理；只有后续 server-eligible chunk 才重启 managed server，避免 fallback 与 server 初始化并发抢占内存。
+- native chunk timeout 与 memory-limit kill 一样进入 bisect，不做同尺寸三次重试；子 chunk timeout 会继续尝试更小分片，直到最小分片仍失败才留下 failed chunk。
+- watchdog 对仍存活进程的 RSS-only advisory 或 sampler failure warning 至少间隔 60 秒记录一次，日志包含 `process_alive=true`，不会清理 managed service state。
+- `run_chunk_with_strategy` 在模拟 `test-error:connection refused by watchdog` 的失败路径下，当前 chunk 立即返回 `fork_per_chunk` fallback metric，并在 shadow metric 中保留原始 `reuse_server` error 证据，同时触发上述 breaker 状态。
+- E2E guard 脚本不下载或启动真实 Qwen3-ASR，只执行离线断言，exit code 0。
+
+### TC-ASPB-41 运行中追加音频文件继续纳入同一 run
+
+操作步骤：
+
+1. 执行增量重扫排序单测：
+   ```bash
+   cargo test -p bifrost-admin pending_batch_rescan_picks_up_appended_files_without_retrying_same_run_failures --lib
+   ```
+2. 执行 pending 时间优先排序单测：
+   ```bash
+   cargo test -p bifrost-admin pending_batch_sorts_older_source_time_first --lib
+   ```
+3. 执行真实 Admin API E2E：
+   ```bash
+   bash e2e-tests/tests/test_asr_task_append_during_run.sh
+   ```
+
+预期结果：
+
+- 手动 run 启动时只有第一个音频文件，任务进入 running 后向同一 `audio_dir` 追加第二个音频文件。
+- 当前批次处理完后，后台 run 会重新扫描目录，发现追加文件并继续处理，不需要等待下一次 daily schedule 或人工再次点击 Run。
+- 两个文件均在同一个 run 中进入 `success`，详情 API 的 `files` 按更早录音时间优先展示第一个文件。
+- Daily Docs 中生成 `2026-05-25.md`，后续 Daily Agent 待处理文档可以看到 25 号汇总。
+- 如果本次 run 中某个文件失败，它不会在同一 run 的后续重扫中无限重试；历史 failed 文件仍会在新 run 开始时被尝试一次。
+
 ## 清理步骤
 
 ```bash
@@ -972,6 +1030,7 @@ rm -rf ./.bifrost-test-planb
 
 | 日期 | 用例 | 命令 / 操作 | 结果 |
 | --- | --- | --- | --- |
+| 2026-05-26 | TC-ASPB-41 运行中追加音频文件继续纳入同一 run | `cargo test -p bifrost-admin pending_batch_rescan_picks_up_appended_files_without_retrying_same_run_failures --lib`；`cargo test -p bifrost-admin pending_batch_sorts_older_source_time_first --lib`；`bash e2e-tests/tests/test_asr_task_append_during_run.sh` | PASS：单测证明运行中第二轮扫描会发现追加文件且同一 run 已尝试失败的文件不会无限重试，pending 队列按录音时间早到晚排序；E2E 使用临时 Bifrost 服务和 fake ASR runtime，手动 run 启动时只有第一个音频，running 后追加第二个音频，最终两个文件均为 success，详情文件顺序为 09:00 后 10:00，Daily Docs 生成 `2026-05-25`。 |
 | 2026-05-22 | TC-ASPB-21C watchdog 不因 physical footprint unavailable 误杀 asr-server | `cargo test -p bifrost-admin service_watchdog_kills_only_on_reliable_physical_footprint_over_limit --lib` | PASS：测试断言只有 `reliable=true` 且 footprint 超过阈值才触发 kill；RSS-only fallback 即使数值高于阈值也不触发 kill，等于阈值也不触发 kill。代码复核确认连续 `physical footprint unavailable` 或 sampler error 只写 warning 并继续，不清理 managed service state。 |
 | 2026-05-22 | TC-ASPB-21 reuse_per_file 服务死亡后当前 chunk 降级并自动重启 server | `cargo test -p bifrost-admin restart_failure_forks_only_current_chunk_and_keeps_retry_pending --lib` | PASS：测试模拟 managed server restart 失败后设置一次性 fork reason，即使 `server_url` 指向可成功的 test server，本 chunk 仍只走 `fork_per_chunk` 且没有 shadow server metric；状态保持 `restart_required=true`、`force_fork_for_remaining=false`，证明不会在 native/fork fallback 同时尝试 server 请求或重启，下一次 server-eligible chunk 才继续重启。 |
 | 2026-05-22 | TC-ASPB-21B reuse_server 跨文件复用失败后重启 task-scoped server | `cargo test -p bifrost-admin reuse_server_fallback_schedules_restart_for_later_chunks --lib` | PASS：测试模拟 task-scoped `reuse_server` 首个 chunk 连接失败后立即 fork fallback，断言共享 `ServerRunnerState.restart_required=true`、`force_fork_for_remaining=false` 且 `fallback_reason` 持久化；随后模拟 managed server 重启到 `test-ok:*` 并清除 restart flag，第二个 chunk 重新走 `reuse_server`、使用新 `server_url` 且不携带旧 fallback reason，证明后续 chunk/文件不会永久退化。 |
@@ -1000,3 +1059,5 @@ rm -rf ./.bifrost-test-planb
 | 2026-05-20 | TC-ASPB-35 Daily Agent Processed Documents report 全屏 Markdown 详情 | `BIFROST_DATA_DIR=/Users/eden/.bifrost cargo run --bin bifrost -- start -p 9900 --unsafe-ssl --no-system-proxy --daemon -y`；`curl -sS 'http://127.0.0.1:9900/_bifrost/api/asr/tasks/76612de33e9740bc92440ce64a98a4cb/daily-agent/reports/2026-05-14'`；`curl -i 'http://127.0.0.1:9900/_bifrost/api/asr/tasks/76612de33e9740bc92440ce64a98a4cb/daily-agent/reports/%2E%2E%2Fsecret'`；`pnpm --dir web exec node --input-type=module` 使用 Playwright 打开真实 9900 页面、进入 Daily Agent、刷新 tab、点击 `2026-05-14-report.md`、刷新 report 详情、检查 Markdown DOM 并返回 | PASS：真实 API 返回 `runner=web`、report 路径 `/Users/eden/.bifrost/asr/data/text/76612de33e9740bc92440ce64a98a4cb/daily/report/2026-05-14-report.md` 和 Markdown 正文；路径穿越日期返回 400；真实页面进入 Daily Agent 后 URL 增加 `asrTaskTab=daily-agent`，刷新后 tab 仍选中；点击 report 后 URL 增加 `asrDailyReport=2026-05-14`，出现 `asr-daily-agent-report-page` 和 `asr-daily-agent-report-content`；刷新 report 详情后仍恢复全屏 Markdown；Markdown 渲染出 H1 `2026-05-14 日报（Force 更新版）`、多级标题与 140 个列表项，`preCount=0`；点击返回后 URL 移除 `asrDailyReport` 并保留 `asrTaskTab=daily-agent` |
 | 2026-05-21 | TC-ASPB-36 Directory Task Runtime 选项说明 | `pnpm --dir web exec tsc -b --pretty false`；临时 `BIFROST_DATA_DIR=/tmp/bifrost-runtime-desc.stX3OY CARGO_TARGET_DIR=/tmp/bifrost-runtime-desc-target cargo run --bin bifrost -- start -p 18897 --unsafe-ssl --no-system-proxy --skip-cert-check --access-mode allow_all`；`BIFROST_UI_TEST_RUN_ID=manual-runtime-desc BIFROST_UI_TEST_PORT=18897 BACKEND_PORT=18897 WEB_PORT=53990 ... pnpm --dir web exec playwright test tests/ui/asr-microphone-meter.spec.ts -g "ASR directory tasks can be created and refreshed in the tools panel" --reporter=line --timeout=60000` | PASS：Runtime 下拉展示 `Reuse / file`、`Fork / chunk`、`Reuse server`、`Auto fallback`、`Compare` 及各自说明；下拉菜单加宽后五个策略均可直接看到；选中态保持短标题 `Reuse / file`；创建任务流程仍通过，默认提交 `runtime_strategy=reuse_per_file`；临时后端通过 `--no-system-proxy` 启动且由 Playwright teardown 停止 |
 | 2026-05-21 | TC-ASPB-37 服务重启后中断 ASR run 自动恢复且不假 Running | `cargo test -p bifrost-admin startup_recovery --lib`；`bash e2e-tests/tests/test_asr_task_startup_recovery.sh` | PASS：单测覆盖 enabled 未暂停任务从 stale run.lock + processing 恢复后进入 startup recovery 计划、paused 任务不自动 requeue、live owner lock 不被抢占、RAII running guard drop 后释放内存 running 标记；E2E 使用临时数据目录预置 paused stale run，启动最新 bifrost 后 API 返回文件 `pending`、旧进度清空、`summary.running=false` 且 run.lock 已删除 |
+| 2026-05-24 | TC-ASPB-40 ASR streaming timeout 与 managed server breaker | `cargo test -p bifrost-admin asr_runtime_timeouts_are_bounded_for_short_chunks --lib`；`cargo test -p bifrost-admin server_failure_breaker --lib`；`cargo test -p bifrost-admin reuse_server_failure_threshold --lib`；`bash e2e-tests/tests/test_qwen3_asr_runtime_guards.sh` | PASS：streaming text endpoint 默认 timeout 为 45s；whole-file timeout 保持 duration-aware bounds；breaker 达阈值后设置 `force_fork_for_remaining=true`、`restart_required=false`，fallback reason 明确包含 `switching remaining chunks to fork_per_chunk isolation`；策略级模拟 server 连接失败路径当前 chunk 返回 `fork_per_chunk` fallback metric，并通过 shadow metric 保留原始 `reuse_server` error 证据且触发 breaker；E2E guard 脚本离线通过且不启动真实模型 |
+| 2026-05-24 | TC-ASPB-40 ASR timeout/fallback/watchdog 回归补充 | `cargo test -p bifrost-admin asr_runtime_timeouts_are_bounded_for_short_chunks --lib`；`cargo test -p bifrost-admin server_failure_recovery_reason_uses_fork_for_current_chunk --lib`；`cargo test -p bifrost-admin service_watchdog_warning_log_is_rate_limited --lib`；代码复核 `memory_bisect.rs` timeout 分支和 `chunk_runtime.rs` server fallback 顺序 | PASS：30s native chunk 默认 timeout 为 90s、10s 子 chunk 为 45s；fallback reason 明确当前 chunk 走 `fork_per_chunk` 且 server restart 延后到 later chunks；watchdog warning 60s 限流；timeout 与 memory-limit 均不做同尺寸重试而进入 bisect，子 chunk timeout 不立即中止父 chunk；server fallback 不在当前 fork fallback 前重启 managed server |

@@ -104,6 +104,27 @@ impl ToolRegistry {
         }
     }
 
+    pub async fn poll_exec_session(
+        &self,
+        session_id: &str,
+        yield_time_ms: u64,
+        max_output_tokens: Option<usize>,
+    ) -> Option<ToolResult> {
+        let manager = self.exec_session_manager.as_ref()?;
+        Some(
+            manager
+                .poll_existing_session(session_id, yield_time_ms, max_output_tokens)
+                .await,
+        )
+    }
+
+    pub async fn terminate_exec_session(&self, session_id: &str) -> bool {
+        let Some(manager) = &self.exec_session_manager else {
+            return false;
+        };
+        manager.terminate_session(session_id).await
+    }
+
     /// Get tool definitions for the model API `tools` parameter.
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         let mut definitions: Vec<_> = self
@@ -135,6 +156,7 @@ impl ToolRegistry {
             None => ToolResult {
                 success: false,
                 output: format!("unknown tool: {name}"),
+                runtime_events: Vec::new(),
             },
         }
     }

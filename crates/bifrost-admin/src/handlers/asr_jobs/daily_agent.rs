@@ -62,6 +62,10 @@ pub(crate) struct AsrDailyAgentConfig {
     #[serde(default)]
     pub im_delivery: AsrDailyAgentImDeliveryConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_sync_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_report_sync: Option<AsrDailyAgentReportSyncResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run_at_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_status: Option<String>,
@@ -82,6 +86,8 @@ impl Default for AsrDailyAgentConfig {
             instructions_source: AsrDailyAgentInstructionsSource::default(),
             instructions: None,
             im_delivery: AsrDailyAgentImDeliveryConfig::default(),
+            report_sync_dir: None,
+            last_report_sync: None,
             last_run_at_ms: None,
             last_status: None,
             last_error: None,
@@ -137,6 +143,18 @@ pub(crate) enum AsrDailyAgentImSendPolicy {
     OnSuccessWithReport,
     OnSuccess,
     Always,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct AsrDailyAgentReportSyncResult {
+    pub target_dir: String,
+    pub total_files: usize,
+    pub copied_files: usize,
+    pub skipped_files: usize,
+    pub failed_files: usize,
+    pub synced_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
 }
 
 // ─── Processed State ──────────────────────────────────────────────────────────
@@ -316,197 +334,6 @@ fn is_valid_date_format(date: &str) -> bool {
         && bytes[8..10].iter().all(|b| b.is_ascii_digit())
 }
 
-/// Read workspace status without creating directories or files (for GET endpoint).
-fn read_workspace_status(task: &AsrDirectoryTask) -> AsrDailyWorkspaceStatus {
-    let daily_dir = daily_dir_for_task(&task.id);
-    let report_dir = daily_dir.join("report");
-    let agents_path = daily_dir.join("AGENTS.md");
-
-    let agents_exists = agents_path.exists();
-    let git_initialized = daily_dir.join(".git").exists();
-
-    let report_count = std::fs::read_dir(&report_dir)
-        .map(|entries| {
-            entries
-                .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.path()
-                        .extension()
-                        .map(|ext| ext == "md")
-                        .unwrap_or(false)
-                })
-                .count()
-        })
-        .unwrap_or(0);
-
-    AsrDailyWorkspaceStatus {
-        daily_dir: daily_dir.to_string_lossy().to_string(),
-        report_dir: report_dir.to_string_lossy().to_string(),
-        agents_path: agents_path.to_string_lossy().to_string(),
-        agents_exists,
-        git_available: true, // Assume available; actual check deferred to ensure_*
-        git_initialized,
-        git_error: None,
-        report_count,
-    }
-}
-
-fn ensure_asr_daily_workspace(
-    task: &AsrDirectoryTask,
-) -> Result<AsrDailyWorkspaceStatus, String> {
-    let daily_dir = daily_dir_for_task(&task.id);
-    let report_dir = daily_dir.join("report");
-    let agents_path = daily_dir.join("AGENTS.md");
-    let gitignore_path = daily_dir.join(".gitignore");
-
-    // Create directories
-    std::fs::create_dir_all(&daily_dir).map_err(|e| format!("create daily dir: {e}"))?;
-    std::fs::create_dir_all(&report_dir).map_err(|e| format!("create report dir: {e}"))?;
-
-    // Write AGENTS.md if not exists
-    let agents_exists = if agents_path.exists() {
-        true
-    } else {
-        let content =
-            if task.daily_agent.instructions_source == AsrDailyAgentInstructionsSource::Custom {
-                task.daily_agent.instructions.clone().unwrap_or_default()
-            } else {
-                DEFAULT_ASR_DAILY_AGENTS_MD
-                    .replace("{{task_name}}", &task.name)
-                    .replace("{{daily_dir}}", ".")
-                    .replace("{{report_dir}}", "./report/")
-            };
-        std::fs::write(&agents_path, content.as_bytes())
-            .map_err(|e| format!("write AGENTS.md: {e}"))?;
-        true
-    };
-
-    // Write .gitignore if not exists
-    if !gitignore_path.exists() {
-        let _ = std::fs::write(&gitignore_path, ".DS_Store\n");
-    }
-
-    // Git init (best-effort)
-    let (git_available, git_initialized, git_error) = try_git_init(&daily_dir);
-
-    // Count reports
-    let report_count = std::fs::read_dir(&report_dir)
-        .map(|entries| {
-            entries
-                .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.path()
-                        .extension()
-                        .map(|ext| ext == "md")
-                        .unwrap_or(false)
-                })
-                .count()
-        })
-        .unwrap_or(0);
-
-    let status = AsrDailyWorkspaceStatus {
-        daily_dir: daily_dir.to_string_lossy().to_string(),
-        report_dir: report_dir.to_string_lossy().to_string(),
-        agents_path: agents_path.to_string_lossy().to_string(),
-        agents_exists,
-        git_available,
-        git_initialized,
-        git_error,
-        report_count,
-    };
-
-    tracing::info!(
-        task_id = %task.id,
-        daily_dir = %status.daily_dir,
-        git_initialized = status.git_initialized,
-        "initialized ASR daily agent workspace"
-    );
-
-    Ok(status)
-}
-
-fn try_git_init(daily_dir: &Path) -> (bool, bool, Option<String>) {
-    // Check if already initialized (no need to run git --version)
-    if daily_dir.join(".git").exists() {
-        return (true, true, None);
-    }
-
-    // Try git init (implicitly checks if git is available)
-    let result = std::process::Command::new("git")
-        .arg("init")
-        .current_dir(daily_dir)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output();
-
-    match result {
-        Ok(output) if output.status.success() => (true, true, None),
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            tracing::warn!(daily_dir = %daily_dir.display(), error = %stderr, "git init failed");
-            (true, false, Some(stderr))
-        }
-        Err(e) => {
-            let is_not_found = e.kind() == std::io::ErrorKind::NotFound;
-            if is_not_found {
-                (false, false, Some("git executable not found".to_string()))
-            } else {
-                tracing::warn!(daily_dir = %daily_dir.display(), error = %e, "git init failed");
-                (true, false, Some(e.to_string()))
-            }
-        }
-    }
-}
-
-fn try_git_commit(daily_dir: &Path, message: &str) -> Option<String> {
-    if !daily_dir.join(".git").exists() {
-        return None;
-    }
-
-    // git add *.md report/ .gitignore (track daily source files too)
-    let _ = std::process::Command::new("git")
-        .args(["add", "*.md", "report/", ".gitignore"])
-        .current_dir(daily_dir)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-
-    // git commit
-    let result = std::process::Command::new("git")
-        .args(["commit", "-m", message, "--allow-empty-message"])
-        .current_dir(daily_dir)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output();
-
-    match result {
-        Ok(output) if output.status.success() => {
-            tracing::debug!(daily_dir = %daily_dir.display(), "git commit succeeded");
-            // Capture the commit hash
-            let hash_output = std::process::Command::new("git")
-                .args(["rev-parse", "--short", "HEAD"])
-                .current_dir(daily_dir)
-                .output();
-            hash_output
-                .ok()
-                .filter(|o| o.status.success())
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            // "nothing to commit" is not a real error
-            if !stderr.contains("nothing to commit") {
-                tracing::warn!(daily_dir = %daily_dir.display(), error = %stderr, "git commit failed");
-            }
-            None
-        }
-        Err(e) => {
-            tracing::warn!(daily_dir = %daily_dir.display(), error = %e, "git commit failed");
-            None
-        }
-    }
-}
-
 fn compute_sha256(path: &Path) -> Result<String, String> {
     use sha2::{Digest as Sha2Digest, Sha256};
     let content = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
@@ -518,97 +345,6 @@ fn compute_sha256_of_bytes(data: &[u8]) -> String {
     use sha2::{Digest as Sha2Digest, Sha256};
     let hash = Sha256::digest(data);
     format!("{:x}", hash)
-}
-
-fn daily_agent_report_dirs_for_task(task_id: &str) -> Vec<PathBuf> {
-    let daily_dir = daily_dir_for_task(task_id);
-    let mut exact_lower = Vec::new();
-    let mut case_compat = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&daily_dir) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
-            if name == "report" {
-                exact_lower.push(path);
-            } else if name.eq_ignore_ascii_case("report") {
-                case_compat.push(path);
-            }
-        }
-    }
-
-    exact_lower.sort();
-    case_compat.sort();
-    let mut dirs = exact_lower;
-    dirs.extend(case_compat);
-    if dirs.is_empty() {
-        dirs.push(daily_dir.join("report"));
-    }
-    dirs
-}
-
-fn daily_agent_report_date_from_path(path: &Path) -> Option<String> {
-    let filename = path.file_name()?.to_str()?;
-    let date = filename.strip_suffix("-report.md")?;
-    if NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok() {
-        Some(date.to_string())
-    } else {
-        None
-    }
-}
-
-fn list_daily_agent_report_files(task_id: &str) -> Vec<PathBuf> {
-    let mut reports = Vec::new();
-    for report_dir in daily_agent_report_dirs_for_task(task_id) {
-        let Ok(entries) = std::fs::read_dir(&report_dir) else {
-            continue;
-        };
-        for entry in entries.filter_map(|e| e.ok()) {
-            let path = entry.path();
-            if path.is_file() && daily_agent_report_date_from_path(&path).is_some() {
-                reports.push(path);
-            }
-        }
-    }
-    reports.sort();
-    reports
-}
-
-fn build_daily_agent_report_index_status(
-    task_id: &str,
-    processed: &AsrDailyAgentProcessedState,
-) -> AsrDailyAgentReportIndexStatus {
-    let report_files = list_daily_agent_report_files(task_id);
-    let report_dates: HashSet<String> = report_files
-        .iter()
-        .filter_map(|path| daily_agent_report_date_from_path(path))
-        .collect();
-
-    let mut unindexed_dates: Vec<String> = report_dates
-        .iter()
-        .filter(|date| !processed.documents.contains_key(*date))
-        .cloned()
-        .collect();
-    unindexed_dates.sort();
-
-    let processed_missing_report = processed
-        .documents
-        .keys()
-        .filter(|date| !report_dates.contains(*date))
-        .count();
-
-    AsrDailyAgentReportIndexStatus {
-        report_files: report_dates.len(),
-        processed_documents: processed.documents.len(),
-        indexed_reports: report_dates.len().saturating_sub(unindexed_dates.len()),
-        unindexed_reports: unindexed_dates.len(),
-        processed_missing_report,
-        unindexed_dates,
-    }
 }
 
 fn build_daily_agent_change_plan(
@@ -892,7 +628,10 @@ async fn maybe_enqueue_daily_agent_after_asr_run(task: &AsrDirectoryTask) {
         tracing::info!(
             task_id = %task.id,
             pending = summary.pending,
-            "skipped daily agent: ASR task still has pending/processing files"
+            failed = summary.failed,
+            partial_success = summary.partial_success,
+            failed_chunk_count = summary.failed_chunk_count,
+            "skipped daily agent: ASR task still has incomplete files"
         );
         return;
     }
@@ -935,11 +674,11 @@ async fn maybe_enqueue_daily_agent_after_asr_run(task: &AsrDirectoryTask) {
     );
 }
 
-/// 判断 ASR 任务是否已完成所有待处理工作，可以触发 daily agent。
-/// 只检查是否还有尚未处理或正在处理中的文件（pending 包含 Pending + Processing 状态）。
-/// 失败或部分成功的文件不阻塞 daily agent 触发——因为这些文件可能永远无法成功。
 fn daily_agent_asr_completion_ready(summary: &TaskSummary) -> bool {
     summary.pending == 0
+        && summary.failed == 0
+        && summary.partial_success == 0
+        && summary.failed_chunk_count == 0
 }
 
 fn daily_agent_effective_last_status(task: &AsrDirectoryTask) -> Option<String> {
@@ -1603,6 +1342,19 @@ async fn run_daily_agent_inner(
 
     processed.version = PROCESSED_STATE_VERSION;
     save_daily_agent_processed_state(&task.id, &processed)?;
+
+    if !reports_generated.is_empty() && task.daily_agent.report_sync_dir.is_some() {
+        let sync_result = sync_daily_agent_report_files(task, &reports_generated)?;
+        update_daily_agent_report_sync_status(&task.id, sync_result.clone())?;
+        if sync_result.failed_files > 0 {
+            tracing::warn!(
+                task_id = %task.id,
+                failed_files = sync_result.failed_files,
+                errors = ?sync_result.errors,
+                "ASR daily agent report sync failed after report generation"
+            );
+        }
+    }
 
     tracing::info!(
         task_id = %task.id,

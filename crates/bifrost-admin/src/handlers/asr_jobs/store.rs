@@ -139,6 +139,91 @@ fn file_store_path(task_id: &str) -> PathBuf {
         .join("files.json")
 }
 
+fn run_progress_path(task_id: &str) -> PathBuf {
+    bifrost_storage::data_dir()
+        .join("asr/tasks")
+        .join(task_id)
+        .join("run_progress.json")
+}
+
+fn load_run_progress(task_id: &str) -> (Option<AsrRunProgress>, Option<String>) {
+    let path = run_progress_path(task_id);
+    match std::fs::read_to_string(&path) {
+        Ok(content) => match serde_json::from_str::<AsrRunProgress>(&content) {
+            Ok(progress) => (Some(progress), None),
+            Err(error) => (
+                None,
+                Some(format!(
+                    "parse run progress {}: {error}",
+                    path.display()
+                )),
+            ),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (None, None),
+        Err(error) => (
+            None,
+            Some(format!("read run progress {}: {error}", path.display())),
+        ),
+    }
+}
+
+fn save_run_progress(task_id: &str, progress: &AsrRunProgress) -> Result<(), String> {
+    atomic_json_write(&run_progress_path(task_id), progress)
+}
+
+fn start_run_progress(task_id: &str, trigger: &str) -> AsrRunProgress {
+    let now = now_ms();
+    let progress = AsrRunProgress {
+        run_id: format!("{now}-{task_id}"),
+        trigger: trigger.to_string(),
+        status: "running".to_string(),
+        started_at_ms: now,
+        updated_at_ms: now,
+        finished_at_ms: None,
+        current_source_path: None,
+        current_file_index: 0,
+        current_file_total: 0,
+        current_chunk_done: 0,
+        current_chunk_total: 0,
+        processed_now: 0,
+        failed_now: 0,
+        message: Some("ASR directory task queued.".to_string()),
+    };
+    if let Err(error) = save_run_progress(task_id, &progress) {
+        tracing::warn!(task_id, %error, "failed to persist ASR run progress");
+    }
+    progress
+}
+
+fn update_run_progress<F>(task_id: &str, update: F)
+where
+    F: FnOnce(&mut AsrRunProgress),
+{
+    let (progress, _) = load_run_progress(task_id);
+    let mut progress = progress.unwrap_or_else(|| start_run_progress(task_id, "background"));
+    update(&mut progress);
+    progress.updated_at_ms = now_ms();
+    if let Err(error) = save_run_progress(task_id, &progress) {
+        tracing::warn!(task_id, %error, "failed to persist ASR run progress");
+    }
+}
+
+fn finish_run_progress(
+    task_id: &str,
+    status: &str,
+    processed_now: usize,
+    failed_now: usize,
+    message: Option<String>,
+) {
+    update_run_progress(task_id, |progress| {
+        progress.status = status.to_string();
+        progress.finished_at_ms = Some(now_ms());
+        progress.processed_now = processed_now;
+        progress.failed_now = failed_now;
+        progress.message = message;
+    });
+}
+
 fn load_file_store(task_id: &str) -> FileStore {
     let path = file_store_path(task_id);
     match std::fs::read_to_string(&path) {
@@ -258,6 +343,342 @@ fn task_detail(task: AsrDirectoryTask) -> TaskDetail {
         summary,
         files,
         daily_documents,
+    }
+}
+
+fn task_watch_snapshot(task: AsrDirectoryTask, include_recent: bool) -> TaskWatchSnapshot {
+    let file_store = load_file_store(&task.id);
+    task_watch_snapshot_from_store(task, &file_store, include_recent)
+}
+
+fn task_watch_snapshot_from_store(
+    task: AsrDirectoryTask,
+    file_store: &FileStore,
+    include_recent: bool,
+) -> TaskWatchSnapshot {
+    let (run_progress, run_progress_warning) = load_run_progress(&task.id);
+    let running = RUNNING_TASKS.lock().unwrap().contains(&task.id);
+    let summary = summarize_task_records(&task, file_store, None);
+    let service = read_service_state(&bifrost_storage::data_dir()).map(|state| TaskWatchService {
+        managed: true,
+        server_url: format!("http://{}:{}", state.host, state.port),
+        pid: state.pid,
+        owner_module: state.lease_owner_module().to_string(),
+        owner_id: state.owner_id,
+    });
+
+    let current = current_watch_file(file_store, run_progress.as_ref());
+    let current_key = current.as_ref().map(|(key, _)| key.clone());
+    let current_record = current.as_ref().map(|(_, record)| *record);
+    let current_path = run_progress
+        .as_ref()
+        .and_then(|progress| progress.current_source_path.clone())
+        .or_else(|| current_record.map(|record| record.source_path.clone()));
+
+    let (current_file_index, current_file_total) = run_progress
+        .as_ref()
+        .map(|progress| (progress.current_file_index, progress.current_file_total))
+        .unwrap_or_else(|| {
+            current_record
+                .and_then(|record| Some((record.progress_current?, record.progress_total?)))
+                .unwrap_or((0, 0))
+        });
+    let (current_chunk_done, current_chunk_total) = run_progress
+        .as_ref()
+        .map(|progress| (progress.current_chunk_done, progress.current_chunk_total))
+        .unwrap_or_else(|| {
+            current_record
+                .filter(|record| record.status == FileStatus::Processing)
+                .and_then(|record| Some((record.progress_current?, record.progress_total?)))
+                .unwrap_or((0, 0))
+        });
+
+    let file_percent = if summary.discovered == 0 {
+        0.0
+    } else {
+        ((summary.processed + summary.failed + summary.partial_success) as f64
+            / summary.discovered as f64
+            * 100.0)
+            .min(100.0)
+    };
+
+    let consumption = task_watch_consumption(file_store, current_record, current_chunk_done, current_chunk_total);
+    let (eta_ms, eta_confidence) = estimate_watch_eta(
+        &consumption,
+        running,
+        current_record,
+        current_chunk_done,
+        current_chunk_total,
+    );
+
+    let mut warnings = Vec::new();
+    let mut snapshot_source = if run_progress.is_some() {
+        "live_progress"
+    } else {
+        "file_store"
+    }
+    .to_string();
+    if let Some(warning) = run_progress_warning {
+        warnings.push(warning);
+        snapshot_source = "file_store".to_string();
+    }
+    if let Some(progress) = run_progress.as_ref() {
+        if progress.status == "running" && !running {
+            snapshot_source = "stale_recovered".to_string();
+            warnings.push("ASR run progress was running but no active task marker exists.".to_string());
+        }
+    }
+
+    let recent_files = if include_recent {
+        recent_watch_files(file_store, 8)
+    } else {
+        Vec::new()
+    };
+
+    TaskWatchSnapshot {
+        task: TaskWatchTask {
+            id: task.id.clone(),
+            name: task.name.clone(),
+            audio_dir: task.audio_dir.clone(),
+            enabled: task.enabled,
+            paused: task.paused,
+            running,
+            schedule: task.schedule.clone(),
+            language: task.language.clone(),
+            model: task.model.clone(),
+            runtime_strategy: task.runtime_strategy,
+            last_run_at_ms: task.last_run_at_ms,
+            next_run_at_ms: task.next_run_at_ms,
+            last_error: task.last_error.clone(),
+        },
+        progress: TaskWatchProgress {
+            discovered: summary.discovered,
+            processed: summary.processed,
+            pending: summary.pending,
+            failed: summary.failed,
+            partial_success: summary.partial_success,
+            failed_chunk_count: summary.failed_chunk_count,
+            deleted_after_processing: summary.deleted_after_processing,
+            file_percent,
+            current_file_key: current_key,
+            current_source_path: current_path,
+            current_file_index,
+            current_file_total,
+            current_chunk_done,
+            current_chunk_total,
+            eta_ms,
+            eta_confidence,
+        },
+        consumption,
+        service,
+        recent_files,
+        daily_agent: task_watch_daily_agent(&task, 8),
+        run_progress,
+        last_error: task.last_error,
+        snapshot_source,
+        warnings,
+        updated_at_ms: now_ms(),
+    }
+}
+
+fn current_watch_file<'a>(
+    file_store: &'a FileStore,
+    run_progress: Option<&AsrRunProgress>,
+) -> Option<(String, &'a FileRecord)> {
+    if let Some(path) = run_progress.and_then(|progress| progress.current_source_path.as_ref()) {
+        if let Some((key, record)) = file_store
+            .files
+            .iter()
+            .find(|(_, record)| record.source_path == *path)
+        {
+            return Some((key.clone(), record));
+        }
+    }
+    file_store
+        .files
+        .iter()
+        .find(|(_, record)| record.status == FileStatus::Processing)
+        .map(|(key, record)| (key.clone(), record))
+        .or_else(|| {
+            file_store
+                .files
+                .iter()
+                .max_by_key(|(_, record)| record.finished_at_ms.unwrap_or(0))
+                .map(|(key, record)| (key.clone(), record))
+        })
+}
+
+fn task_watch_consumption(
+    file_store: &FileStore,
+    current_record: Option<&FileRecord>,
+    current_chunk_done: usize,
+    current_chunk_total: usize,
+) -> TaskWatchConsumption {
+    let mut source_bytes_total = 0u64;
+    let mut source_bytes_processed = 0u64;
+    let mut source_bytes_processed_estimated = None::<u64>;
+    let mut audio_duration_ms_total = 0u64;
+    let mut audio_duration_ms_processed = 0u64;
+    let mut audio_duration_ms_processed_estimated = None::<u64>;
+    let mut inference_elapsed_ms = 0u64;
+    let mut text_chars = 0usize;
+    let mut chunks_completed = 0usize;
+    let mut chunks_failed = 0usize;
+    let mut last_chunk = None::<&AsrChunkMetric>;
+
+    for record in file_store.files.values() {
+        if let Some(size) = record.source_size {
+            source_bytes_total = source_bytes_total.saturating_add(size);
+        }
+        if let Some(duration) = record.media_duration_ms {
+            audio_duration_ms_total = audio_duration_ms_total.saturating_add(duration);
+        }
+        if matches!(
+            record.status,
+            FileStatus::Success | FileStatus::PartialSuccess | FileStatus::Failed
+        ) {
+            if let Some(size) = record.source_size {
+                source_bytes_processed = source_bytes_processed.saturating_add(size);
+            }
+            if let Some(duration) = record.media_duration_ms {
+                audio_duration_ms_processed =
+                    audio_duration_ms_processed.saturating_add(duration);
+            }
+        }
+        text_chars = text_chars.saturating_add(record.text_chars);
+        chunks_failed = chunks_failed.saturating_add(record.failed_chunks.len());
+        for metric in &record.chunk_metrics {
+            if metric.status == "ok" {
+                inference_elapsed_ms = inference_elapsed_ms.saturating_add(metric.elapsed_ms);
+                chunks_completed += 1;
+            }
+            if last_chunk
+                .map(|last| last.recorded_at_ms < metric.recorded_at_ms)
+                .unwrap_or(true)
+            {
+                last_chunk = Some(metric);
+            }
+        }
+    }
+
+    if let Some(record) = current_record.filter(|record| record.status == FileStatus::Processing) {
+        let ratio = if current_chunk_total > 0 {
+            (current_chunk_done as f64 / current_chunk_total as f64).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if let Some(size) = record.source_size {
+            source_bytes_processed_estimated =
+                Some(source_bytes_processed.saturating_add((size as f64 * ratio) as u64));
+        }
+        if let Some(duration) = record.media_duration_ms {
+            audio_duration_ms_processed_estimated =
+                Some(audio_duration_ms_processed.saturating_add((duration as f64 * ratio) as u64));
+        }
+    }
+
+    let duration_for_rtf = audio_duration_ms_processed_estimated
+        .unwrap_or(audio_duration_ms_processed)
+        .max(audio_duration_ms_processed);
+    let average_rtf = (duration_for_rtf > 0)
+        .then(|| inference_elapsed_ms as f64 / duration_for_rtf as f64);
+
+    TaskWatchConsumption {
+        source_bytes_total,
+        source_bytes_processed,
+        source_bytes_processed_estimated,
+        audio_duration_ms_total,
+        audio_duration_ms_processed,
+        audio_duration_ms_processed_estimated,
+        inference_elapsed_ms,
+        average_rtf,
+        last_chunk_rtf: last_chunk.map(|metric| metric.rtf),
+        text_chars,
+        chunks_completed,
+        chunks_failed,
+    }
+}
+
+fn estimate_watch_eta(
+    consumption: &TaskWatchConsumption,
+    running: bool,
+    current_record: Option<&FileRecord>,
+    current_chunk_done: usize,
+    current_chunk_total: usize,
+) -> (Option<u64>, &'static str) {
+    if !running {
+        return (None, "none");
+    }
+    let Some(rtf) = consumption.average_rtf.filter(|rtf| *rtf > 0.0) else {
+        return (None, "none");
+    };
+    let total = consumption.audio_duration_ms_total;
+    let processed = consumption
+        .audio_duration_ms_processed_estimated
+        .unwrap_or(consumption.audio_duration_ms_processed);
+    if total > processed {
+        return (Some(((total - processed) as f64 * rtf) as u64), "medium");
+    }
+    if let Some(record) = current_record {
+        if let Some(duration) = record.media_duration_ms {
+            if current_chunk_total > current_chunk_done && current_chunk_total > 0 {
+                let remaining_ratio =
+                    (current_chunk_total - current_chunk_done) as f64 / current_chunk_total as f64;
+                return (Some((duration as f64 * remaining_ratio * rtf) as u64), "low");
+            }
+        }
+    }
+    (None, "none")
+}
+
+fn recent_watch_files(file_store: &FileStore, limit: usize) -> Vec<TaskWatchFile> {
+    let mut files = file_store.files.iter().collect::<Vec<_>>();
+    files.sort_by(|(_, left), (_, right)| {
+        file_status_sort_rank(&left.status)
+            .cmp(&file_status_sort_rank(&right.status))
+            .then_with(|| {
+                right
+                    .finished_at_ms
+                    .unwrap_or(0)
+                    .cmp(&left.finished_at_ms.unwrap_or(0))
+            })
+            .then_with(|| left.source_path.cmp(&right.source_path))
+    });
+    files
+        .into_iter()
+        .take(limit)
+        .map(|(key, record)| watch_file_from_record(key, record))
+        .collect()
+}
+
+fn watch_file_from_record(key: &str, record: &FileRecord) -> TaskWatchFile {
+    TaskWatchFile {
+        key: key.to_string(),
+        source_path: record.source_path.clone(),
+        status: file_status_as_str(&record.status).to_string(),
+        source_size: record.source_size,
+        media_duration_ms: record.media_duration_ms,
+        progress_current: record.progress_current,
+        progress_total: record.progress_total,
+        text_chars: record.text_chars,
+        last_chunk_rtf: record
+            .chunk_metrics
+            .iter()
+            .max_by_key(|metric| metric.recorded_at_ms)
+            .map(|metric| metric.rtf),
+        error: record.error.clone(),
+        started_at_ms: record.started_at_ms,
+        finished_at_ms: record.finished_at_ms,
+    }
+}
+
+fn file_status_as_str(status: &FileStatus) -> &'static str {
+    match status {
+        FileStatus::Pending => "pending",
+        FileStatus::Processing => "processing",
+        FileStatus::Success => "success",
+        FileStatus::PartialSuccess => "partial_success",
+        FileStatus::Failed => "failed",
     }
 }
 

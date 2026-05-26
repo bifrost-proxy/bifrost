@@ -62,6 +62,18 @@ async function installDailyAgentMocks(page: Page) {
     trigger_policy: "after_asr_run",
     session_key: undefined as string | undefined,
     instructions_source: "default",
+    report_sync_dir: undefined as string | undefined,
+    last_report_sync: undefined as
+      | {
+          target_dir: string;
+          total_files: number;
+          copied_files: number;
+          skipped_files: number;
+          failed_files: number;
+          synced_at_ms: number;
+          errors?: string[];
+        }
+      | undefined,
     im_delivery: {
       enabled: false,
       channel: undefined as string | undefined,
@@ -88,6 +100,28 @@ async function installDailyAgentMocks(page: Page) {
         model: "Qwen3-ASR-1.7B",
         language: "chinese",
         message: "ready",
+      }),
+    });
+  });
+
+  await page.route(`**/_bifrost/api/asr/tasks/${taskId}/daily-agent/sync`, async (route) => {
+    dailyAgentConfig = {
+      ...dailyAgentConfig,
+      last_report_sync: {
+        target_dir: dailyAgentConfig.report_sync_dir || "/tmp/bifrost-asr-runner-select-sync",
+        total_files: 2,
+        copied_files: 2,
+        skipped_files: 0,
+        failed_files: 0,
+        synced_at_ms: 1_779_212_999_000,
+      },
+    };
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        ok: true,
+        sync: dailyAgentConfig.last_report_sync,
       }),
     });
   });
@@ -323,7 +357,7 @@ test("ASR Daily Agent uses simple Runner and IM Channel dropdowns", async ({ pag
 
   await expect(page.getByText("Runner Type")).toHaveCount(0);
   await expect(page.getByText("Runner ID")).toHaveCount(0);
-  await expect(page.getByText("Indexed Reports")).toBeVisible();
+  await expect(page.getByText("Indexed Reports", { exact: true })).toBeVisible();
   await expect(page.getByText("1/2")).toBeVisible();
   await expect(page.getByText("Unindexed Reports")).toBeVisible();
   await expect(page.getByText("Unindexed report dates: 2026-05-15")).toBeVisible();
@@ -357,6 +391,20 @@ test("ASR Daily Agent uses simple Runner and IM Channel dropdowns", async ({ pag
       channel: "target:daily-report-room",
     },
   });
+
+  const syncDirInput = page.getByTestId("asr-daily-agent-report-sync-dir");
+  await syncDirInput.fill("/tmp/bifrost-asr-runner-select-sync");
+  await page.getByRole("button", { name: "Save" }).first().click();
+  await waitForToast(page, "Report sync directory saved");
+
+  expect(updates.at(-1)).toMatchObject({
+    report_sync_dir: "/tmp/bifrost-asr-runner-select-sync",
+  });
+
+  await page.getByTestId("asr-daily-agent-sync-reports-button").click();
+  await waitForToast(page, "Synced 2 copied, 0 skipped");
+  await expect(page.getByText("2 copied / 2 total")).toBeVisible();
+  await expect(page.getByText("/tmp/bifrost-asr-runner-select-sync")).toBeVisible();
 });
 
 test("ASR Daily Agent opens processed reports as full-page Markdown details", async ({
