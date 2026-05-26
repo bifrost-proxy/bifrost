@@ -97,6 +97,22 @@ pub(super) async fn handle_chat_gateway(
         };
     }
 
+    if rest == "/runner-calls/stream" {
+        return match *req.method() {
+            Method::POST => {
+                let body: RunnerCallStreamRequest = match read_body_json(req).await {
+                    Ok(value) => value,
+                    Err(response) => return response,
+                };
+                match runner_call_stream_response(_service, body).await {
+                    Ok(response) => response,
+                    Err(error) => error_response(StatusCode::BAD_REQUEST, &error),
+                }
+            }
+            _ => method_not_allowed(),
+        };
+    }
+
     if rest == "/stream" {
         return match *req.method() {
             Method::POST => {
@@ -392,6 +408,375 @@ pub(super) async fn handle_chat_gateway(
     error_response(StatusCode::NOT_FOUND, "Chat Gateway endpoint not found")
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RunnerCallStreamRequest {
+    caller_session_key: String,
+    #[serde(default)]
+    caller_runner_id: Option<String>,
+    #[serde(default)]
+    caller_runner_adapter: Option<String>,
+    target_runner_id: String,
+    message: String,
+    #[serde(default)]
+    work_dir: Option<PathBuf>,
+    #[serde(default)]
+    history_path: Option<String>,
+    #[serde(default)]
+    caller_messages: Vec<RunnerCallMessage>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RunnerCallMessage {
+    role: String,
+    content: String,
+}
+
+async fn runner_call_stream_response(
+    service: &ImGatewayService,
+    body: RunnerCallStreamRequest,
+) -> Result<Response<BoxBody>, String> {
+    let caller_session_key = body.caller_session_key.trim().to_string();
+    let target_runner_id = body.target_runner_id.trim().to_string();
+    let user_message = body.message.trim().to_string();
+    if caller_session_key.is_empty() {
+        return Err("callerSessionKey is required".to_string());
+    }
+    if target_runner_id.is_empty() {
+        return Err("targetRunnerId is required".to_string());
+    }
+    if user_message.is_empty() {
+        return Err("message is required".to_string());
+    }
+    if target_runner_id == crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER {
+        return Err("slash Runner calls currently require an external target Runner".to_string());
+    }
+
+    let config = service.external_cli_config_store.load();
+    if !config.runners.contains_key(&target_runner_id) {
+        return Err(format!("runner '{target_runner_id}' not found"));
+    }
+    let effective = crate::im_gateway::external_cli::effective_config_for_provider_and_runner(
+        &config,
+        None,
+        Some(&target_runner_id),
+    );
+    if !effective.settings.enabled {
+        return Err(format!("runner '{}' is not enabled", effective.runner_id));
+    }
+
+    let call_id = format!("runner-call-{}", uuid::Uuid::new_v4());
+    let child_session_key = format!("runner-call:{}:{}", caller_session_key, target_runner_id);
+    let prompt = build_runner_call_prompt(
+        &caller_session_key,
+        body.caller_runner_id.as_deref(),
+        &target_runner_id,
+        &effective.settings.adapter,
+        body.history_path.as_deref(),
+        &body.caller_messages,
+        &user_message,
+    );
+    let mut request = crate::im_gateway::external_cli::run_request_from_settings(
+        prompt,
+        None,
+        Some(child_session_key.clone()),
+        &effective.settings,
+    );
+    request.runner_id = Some(target_runner_id.clone());
+    request.work_dir = body.work_dir.clone();
+    apply_provider_work_dir_to_external_cli_request(service, &mut request);
+    apply_persisted_external_cli_state(&mut request, &effective.runner_id);
+
+    let runtime = crate::im_gateway::external_cli::ExternalCliRuntime::new(
+        crate::im_gateway::external_cli::default_runs_root(),
+    );
+    let (tx, rx) =
+        tokio::sync::mpsc::channel::<Result<hyper::body::Frame<bytes::Bytes>, hyper::Error>>(16);
+    let service_agent_sessions = service.agent_session_manager.clone();
+    let caller_scope = caller_runner_scope(
+        body.caller_runner_id.as_deref(),
+        body.caller_runner_adapter.as_deref(),
+    );
+    tokio::spawn(async move {
+        let started = serde_json::json!({
+            "eventType": "runner_call_started",
+            "callId": call_id.clone(),
+            "callerSessionKey": caller_session_key.clone(),
+            "childSessionKey": child_session_key.clone(),
+            "targetRunnerId": target_runner_id.clone(),
+            "targetAdapter": effective.settings.adapter.clone(),
+        });
+        let _ = send_ndjson_event(&tx, &started).await;
+        let request_snapshot = request.clone();
+        let raw_user_message = user_message.clone();
+        remember_external_cli_started_state(&request_snapshot, &effective.runner_id);
+        match runtime.run(request).await {
+            Ok(result) => {
+                remember_external_cli_result_state(
+                    &request_snapshot,
+                    &effective.runner_id,
+                    &result,
+                );
+                for event in &result.events {
+                    let line =
+                        serde_json::to_value(event).unwrap_or_else(|_| serde_json::json!({}));
+                    let _ = send_ndjson_event(&tx, &line).await;
+                }
+                remember_runner_call_for_caller(
+                    &service_agent_sessions,
+                    &caller_scope,
+                    &call_id,
+                    &raw_user_message,
+                    &request_snapshot,
+                    &result,
+                );
+                let finished = serde_json::json!({
+                    "eventType": "runner_call_finished",
+                    "callId": call_id.clone(),
+                    "runId": result.run_id,
+                    "status": result.status,
+                    "response": result.response,
+                    "childSessionKey": request_snapshot.session_key,
+                    "targetRunnerId": effective.runner_id,
+                    "targetAdapter": result.adapter,
+                });
+                let _ = send_ndjson_event(&tx, &finished).await;
+            }
+            Err(error) => {
+                let failed = serde_json::json!({
+                    "eventType": "runner_call_failed",
+                    "callId": call_id.clone(),
+                    "error": error,
+                });
+                let _ = send_ndjson_event(&tx, &failed).await;
+            }
+        }
+    });
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+    let body = http_body_util::StreamBody::new(stream);
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/x-ndjson")
+        .body(http_body_util::BodyExt::boxed(body))
+        .unwrap())
+}
+
+async fn send_ndjson_event(
+    tx: &tokio::sync::mpsc::Sender<Result<hyper::body::Frame<bytes::Bytes>, hyper::Error>>,
+    event: &serde_json::Value,
+) -> Result<
+    (),
+    tokio::sync::mpsc::error::SendError<Result<hyper::body::Frame<bytes::Bytes>, hyper::Error>>,
+> {
+    tx.send(Ok(hyper::body::Frame::data(bytes::Bytes::from(format!(
+        "{event}\n"
+    )))))
+    .await
+}
+
+fn build_runner_call_prompt(
+    caller_session_key: &str,
+    caller_runner_id: Option<&str>,
+    target_runner_id: &str,
+    target_adapter: &str,
+    history_path: Option<&str>,
+    caller_messages: &[RunnerCallMessage],
+    user_message: &str,
+) -> String {
+    let mut prompt = String::from("# Runner Call Context\n\n");
+    prompt.push_str("Source session: ");
+    prompt.push_str(caller_session_key);
+    prompt.push('\n');
+    if let Some(caller_runner_id) = caller_runner_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        prompt.push_str("Current runner: ");
+        prompt.push_str(caller_runner_id);
+        prompt.push('\n');
+    }
+    prompt.push_str("Target runner: ");
+    prompt.push_str(target_runner_id);
+    prompt.push_str(" (");
+    prompt.push_str(target_adapter);
+    prompt.push_str(")\n");
+    if let Some(history_path) = history_path
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        prompt.push_str("History path: ");
+        prompt.push_str(history_path);
+        prompt.push('\n');
+    }
+    prompt.push_str("\n## Source Conversation Transcript\n\n");
+    let mut included = 0usize;
+    for message in caller_messages {
+        let role = normalize_transcript_role(&message.role);
+        let content = message.content.trim();
+        if content.is_empty() {
+            continue;
+        }
+        included += 1;
+        prompt.push_str(role);
+        prompt.push_str(":\n");
+        prompt.push_str(content);
+        prompt.push_str("\n\n");
+    }
+    if included == 0 {
+        prompt.push_str("(No prior visible messages were provided.)\n\n");
+    }
+    prompt.push_str("## User Request For Target Runner\n\n");
+    prompt.push_str(user_message.trim());
+    prompt.push('\n');
+    prompt
+}
+
+fn normalize_transcript_role(role: &str) -> &'static str {
+    match role.trim().to_lowercase().as_str() {
+        "assistant" => "Assistant",
+        "system" => "System",
+        "developer" => "Developer",
+        _ => "User",
+    }
+}
+
+fn caller_runner_scope(
+    caller_runner_id: Option<&str>,
+    caller_runner_adapter: Option<&str>,
+) -> (String, Option<String>, String) {
+    let runner_id = caller_runner_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER);
+    if runner_id == crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER {
+        return (
+            crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER.to_string(),
+            None,
+            runner_id.to_string(),
+        );
+    }
+    let adapter = caller_runner_adapter
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(runner_id);
+    (
+        adapter.to_string(),
+        Some(runner_id.to_string()),
+        runner_id.to_string(),
+    )
+}
+
+fn remember_runner_call_for_caller(
+    agent_session_manager: &std::sync::Arc<bifrost_agent::AgentSessionManager>,
+    caller_scope: &(String, Option<String>, String),
+    call_id: &str,
+    raw_user_message: &str,
+    request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
+    result: &crate::im_gateway::external_cli::ExternalCliRunResult,
+) {
+    let Some(source_session_key) = request
+        .session_key
+        .as_deref()
+        .and_then(|child_key| child_key.strip_prefix("runner-call:"))
+        .and_then(|rest| rest.rsplit_once(':').map(|(source, _)| source.to_string()))
+    else {
+        return;
+    };
+    let response = result.response.trim();
+    if response.is_empty() {
+        return;
+    }
+    let target_runner_id = result
+        .session_key
+        .as_deref()
+        .and_then(|key| key.rsplit_once(':').map(|(_, runner)| runner.to_string()))
+        .unwrap_or_else(|| result.adapter.clone());
+    let visible = format!(
+        "Runner `{}` completed this call.\n\n{}",
+        target_runner_id, response
+    );
+    let visible_user = format!("Run with {}: {}", target_runner_id, raw_user_message.trim());
+    let imported = crate::im_gateway::session_state::ImImportedRunnerContext {
+        call_id: call_id.to_string(),
+        source_session_key: source_session_key.clone(),
+        target_runner_id,
+        target_adapter: result.adapter.clone(),
+        user_message: raw_user_message.to_string(),
+        response: response.to_string(),
+        created_at: result.finished_at,
+    };
+    let (caller_adapter, caller_runner_id, _) = caller_scope;
+    if caller_adapter == crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER {
+        if let Some(mut session) =
+            agent_session_manager.try_take_session_with_work_dir(&source_session_key, None)
+        {
+            session
+                .history
+                .push(bifrost_agent::ChatMessage::user(&visible_user));
+            session
+                .history
+                .push(bifrost_agent::ChatMessage::assistant(&visible));
+            session.last_active_at = result.finished_at / 1000;
+            agent_session_manager.return_session(session);
+        } else if let Err(error) = crate::im_gateway::session_state::push_imported_context(
+            &source_session_key,
+            caller_adapter,
+            None,
+            imported,
+        ) {
+            tracing::warn!(
+                session_key = %source_session_key,
+                error = %error,
+                "failed to persist imported runner context for busy built-in caller"
+            );
+        }
+        return;
+    }
+    if let Err(error) = crate::im_gateway::session_state::push_imported_context(
+        &source_session_key,
+        caller_adapter,
+        caller_runner_id.as_deref(),
+        imported,
+    ) {
+        tracing::warn!(
+            session_key = %source_session_key,
+            adapter = %caller_adapter,
+            runner_id = ?caller_runner_id,
+            error = %error,
+            "failed to persist imported runner context for external caller"
+        );
+    }
+    if let Err(error) = crate::im_gateway::session_state::upsert_session_state(
+        &source_session_key,
+        caller_adapter,
+        caller_runner_id.as_deref(),
+        |state| {
+            state
+                .messages
+                .push(crate::im_gateway::session_state::ImAgentSessionMessage {
+                    role: "user".to_string(),
+                    content: visible_user,
+                    timestamp: Some(result.started_at / 1000),
+                });
+            state
+                .messages
+                .push(crate::im_gateway::session_state::ImAgentSessionMessage {
+                    role: "assistant".to_string(),
+                    content: visible,
+                    timestamp: Some(result.finished_at / 1000),
+                });
+        },
+    ) {
+        tracing::warn!(
+            session_key = %source_session_key,
+            adapter = %caller_adapter,
+            error = %error,
+            "failed to append visible runner call message"
+        );
+    }
+}
+
 fn queue_external_cli_stream_response(
     service: &ImGatewayService,
     session_key: &str,
@@ -558,10 +943,48 @@ fn apply_persisted_external_cli_state(
         &request.adapter,
         Some(runner_id),
     ) else {
+        consume_imported_contexts_for_external_runner(request, runner_id);
         return;
     };
     let metadata = crate::im_gateway::session_state::metadata_from_state(&state);
     apply_external_cli_resume_metadata(request, &metadata);
+    consume_imported_contexts_for_external_runner(request, runner_id);
+}
+
+fn consume_imported_contexts_for_external_runner(
+    request: &mut crate::im_gateway::external_cli::ExternalCliRunRequest,
+    runner_id: &str,
+) {
+    let Some(session_key) = request.session_key.as_deref() else {
+        return;
+    };
+    let contexts = match crate::im_gateway::session_state::take_imported_contexts(
+        session_key,
+        &request.adapter,
+        Some(runner_id),
+    ) {
+        Ok(contexts) => contexts,
+        Err(error) => {
+            tracing::warn!(
+                session_key = %session_key,
+                adapter = %request.adapter,
+                runner_id = %runner_id,
+                error = %error,
+                "failed to consume imported runner contexts"
+            );
+            Vec::new()
+        }
+    };
+    let Some(rendered) = crate::im_gateway::session_state::render_imported_contexts(&contexts)
+    else {
+        return;
+    };
+    request.instructions = Some(match request.instructions.take() {
+        Some(existing) if !existing.trim().is_empty() => {
+            format!("{}\n\n{}", existing.trim(), rendered.trim())
+        }
+        _ => rendered,
+    });
 }
 
 fn remember_external_cli_started_state(
@@ -919,5 +1342,85 @@ mod tests {
         assert_eq!(finished_state.messages[0].content, request.message);
         assert_eq!(finished_state.messages[1].role, "assistant");
         assert_eq!(finished_state.messages[1].content, result.response);
+    }
+
+    #[test]
+    fn runner_call_prompt_includes_source_transcript_and_user_request() {
+        let prompt = build_runner_call_prompt(
+            "admin-chat-1",
+            Some("bifrost_agent"),
+            "codex",
+            "codex",
+            Some("/tmp/session.jsonl"),
+            &[
+                RunnerCallMessage {
+                    role: "user".to_string(),
+                    content: "Original question".to_string(),
+                },
+                RunnerCallMessage {
+                    role: "assistant".to_string(),
+                    content: "Original answer".to_string(),
+                },
+            ],
+            "Review this from another runner",
+        );
+
+        assert!(prompt.contains("Source session: admin-chat-1"));
+        assert!(prompt.contains("Current runner: bifrost_agent"));
+        assert!(prompt.contains("Target runner: codex (codex)"));
+        assert!(prompt.contains("History path: /tmp/session.jsonl"));
+        assert!(prompt.contains("User:\nOriginal question"));
+        assert!(prompt.contains("Assistant:\nOriginal answer"));
+        assert!(prompt.contains("Review this from another runner"));
+    }
+
+    #[test]
+    fn external_runner_consumes_imported_context_into_instructions_once() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
+        crate::im_gateway::session_state::push_imported_context(
+            "external-import-session",
+            "codex",
+            Some("codex"),
+            crate::im_gateway::session_state::ImImportedRunnerContext {
+                call_id: "call-import".to_string(),
+                source_session_key: "external-import-session".to_string(),
+                target_runner_id: "web".to_string(),
+                target_adapter: "chatgpt_web".to_string(),
+                user_message: "ask web".to_string(),
+                response: "web answer".to_string(),
+                created_at: 1,
+            },
+        )
+        .expect("push imported context");
+        let mut request = crate::im_gateway::external_cli::ExternalCliRunRequest {
+            message: "continue".to_string(),
+            operation: "chat".to_string(),
+            params: serde_json::Value::Null,
+            provider_id: None,
+            runner_id: Some("codex".to_string()),
+            session_key: Some("external-import-session".to_string()),
+            runtime: "local".to_string(),
+            adapter: "codex".to_string(),
+            work_dir: None,
+            instructions: Some("base instructions".to_string()),
+            adapter_config: Default::default(),
+            allow_work_dirs: Vec::new(),
+            inject_bifrost_tools: false,
+            skill_paths: Vec::new(),
+        };
+
+        consume_imported_contexts_for_external_runner(&mut request, "codex");
+        let instructions = request.instructions.expect("instructions");
+        assert!(instructions.contains("base instructions"));
+        assert!(instructions.contains("Imported Runner Results"));
+        assert!(instructions.contains("web answer"));
+        assert!(crate::im_gateway::session_state::take_imported_contexts(
+            "external-import-session",
+            "codex",
+            Some("codex"),
+        )
+        .expect("take after consume")
+        .is_empty());
     }
 }

@@ -659,6 +659,7 @@ pub(super) async fn handle_agent(
             Some(crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER.to_string()),
             None,
         );
+        consume_imported_contexts_for_builtin_agent(&mut session);
         // If guide messages are provided, inject into the shared guide channel
         // to simulate messages arriving before the next guide checkpoint.
         let mut has_guide_messages = false;
@@ -821,6 +822,31 @@ pub(super) async fn handle_agent(
     } else {
         error_response(StatusCode::NOT_FOUND, "Agent endpoint not found")
     }
+}
+
+fn consume_imported_contexts_for_builtin_agent(session: &mut bifrost_agent::AgentSession) {
+    let contexts = match crate::im_gateway::session_state::take_imported_contexts(
+        &session.session_key,
+        crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+        None,
+    ) {
+        Ok(contexts) => contexts,
+        Err(error) => {
+            warn!(
+                session_key = %session.session_key,
+                error = %error,
+                "failed to consume imported runner contexts for built-in agent"
+            );
+            Vec::new()
+        }
+    };
+    let Some(rendered) = crate::im_gateway::session_state::render_imported_contexts(&contexts)
+    else {
+        return;
+    };
+    session
+        .history
+        .push(bifrost_agent::ChatMessage::developer(&rendered));
 }
 
 fn restore_session_from_history_path(

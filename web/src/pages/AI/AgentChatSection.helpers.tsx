@@ -30,6 +30,16 @@ export type ChatMessage = {
   meta?: string;
   processSteps?: ProcessStep[];
   processCollapsed?: boolean;
+  runnerCall?: RunnerCallMessageMeta;
+};
+
+export type RunnerCallMessageMeta = {
+  callId?: string;
+  targetRunnerId: string;
+  targetRunnerLabel: string;
+  targetAdapter?: string;
+  childSessionKey?: string;
+  status: "running" | "success" | "failed";
 };
 
 export type HistoryEvent = {
@@ -751,6 +761,75 @@ export async function runAgentStream(params: {
     }
   }
   const tailEvent = isExternalRunner ? parseNdjsonEvent(buffer) : parseSseFrame(buffer);
+  if (tailEvent) {
+    handleEvent(tailEvent);
+  }
+  params.onFinal(finalResponse);
+}
+
+export async function runRunnerCallStream(params: {
+  message: string;
+  sessionKey: string;
+  historyPath?: string;
+  workDir?: string;
+  callerRunnerId: string;
+  callerRunnerAdapter?: string;
+  targetRunnerId: string;
+  callerMessages: Array<{ role: "user" | "assistant"; content: string }>;
+  onEvent: (event: Record<string, unknown>) => void;
+  onFinal: (content: string) => void;
+}) {
+  const response = await apiFetch("/api/im-gateway/chat/runner-calls/stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      callerSessionKey: params.sessionKey,
+      callerRunnerId: params.callerRunnerId,
+      callerRunnerAdapter: params.callerRunnerAdapter,
+      targetRunnerId: params.targetRunnerId,
+      message: params.message,
+      workDir: params.workDir,
+      historyPath: params.historyPath,
+      callerMessages: params.callerMessages,
+    }),
+  });
+  if (!response.ok || !response.body) {
+    throw new Error(await response.text());
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finalResponse = "";
+  const handleEvent = (event: Record<string, unknown>) => {
+    params.onEvent(event);
+    if (
+      (event.eventType === "runner_call_finished" ||
+        event.eventType === "run_finished") &&
+      typeof event.response === "string"
+    ) {
+      finalResponse = event.response;
+    }
+    if (event.eventType === "runner_call_failed") {
+      throw new Error(String(event.error || "Runner call failed"));
+    }
+  };
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+    for (const line of lines) {
+      const event = parseNdjsonEvent(line);
+      if (event) {
+        handleEvent(event);
+      }
+    }
+  }
+  const tailEvent = parseNdjsonEvent(buffer);
   if (tailEvent) {
     handleEvent(tailEvent);
   }

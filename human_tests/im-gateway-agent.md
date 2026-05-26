@@ -2150,3 +2150,56 @@ rm -rf ./.bifrost-test
 - **清理步骤**:
   - 删除本用例创建的测试会话；不删除用户已有重要历史。
 - **执行记录（2026-05-25）**: PASS — 执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "five rounds|selects the first thread|deep link renders" --reporter=line` 通过，覆盖空白入口不展示 demo 消息、无线程时展示输入提示、有线程且无 `session/historyPath` 时默认打开第一条线程、主动 New Chat 后保持草稿，以及 Bifrost Agent / Codex / ChatGPT Web 三类 Runner 各自连续 5 轮都复用同一个 `sessionKey` 且 Threads 只保留一条对应线程。执行 `cargo test -p bifrost-admin external_runner_session_detail_preserves_five_turns_in_one_thread --lib -- --nocapture` 与 `cargo test -p bifrost-admin session_state_normalizes_persisted_message_sequence --lib -- --nocapture` 通过，确认外部 Runner 的多轮消息序列会落在同一个服务端 `session_state.messages` 中，`/sessions/<session_key>` 可返回完整 5 user + 5 assistant。执行 `pnpm --dir web exec tsc --noEmit`、`pnpm --dir web exec tsc -b`、`cargo check -p bifrost-admin` 通过。
+
+### TC-IMA-126: Agent Chat Slash Runner Call 正常路径
+
+- **前置条件**:
+  - 使用当前源码启动 Bifrost Admin 与 WebUI。
+  - `GET /_bifrost/api/im-gateway/chat/config` 至少启用一个与当前会话 Runner 不同的外部 Runner，例如 `codex`。
+  - 使用新的临时 Agent Chat 会话，不复用用户重要历史。
+- **操作步骤**:
+  1. 打开 `/_bifrost/ai?aiSection=agent-chat&agentSection=chat`。
+  2. 在输入框输入 `/`。
+  3. 检查输入框上方出现 Runner 选择面板，面板列出不同于当前 Runner 的可用 Runner。
+  4. 点击 `codex` Runner。
+  5. 检查输入框内出现 `Run with codex` chip，且输入框可继续输入消息。
+  6. 输入 `基于当前上下文给出实现建议` 并发送。
+  7. 检查请求发送到 `/_bifrost/api/im-gateway/chat/runner-calls/stream`，请求体包含 `callerSessionKey`、`callerRunnerId`、`callerRunnerAdapter`、`targetRunnerId:"codex"`、`callerMessages` 和用户消息。
+  8. 等待流式返回完成。
+- **预期结果**:
+  - Slash 选择不会修改顶部当前 Runner tag。
+  - 消息流中 user 气泡展示 `Run with codex` 和用户输入。
+  - assistant 气泡展示目标 Runner 的执行状态和最终输出。
+  - 调用完成后 chip 自动清空，输入框恢复普通输入状态。
+- **执行记录（2026-05-26）**: PASS — 执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "slash runner" --reporter=line`，通过真实浏览器操作输入 `/`、选择 `codex`、检查 `Run with codex` chip、拦截并断言 `/_bifrost/api/im-gateway/chat/runner-calls/stream` 请求体包含 `callerSessionKey`、`callerRunnerId`、`targetRunnerId:"codex"`、`callerMessages` 和用户消息，mock NDJSON 流式返回后消息区展示 Runner Call 结果；同时断言顶部 Runner tag 仍为 `Runner: bifrost_agent`。
+
+### TC-IMA-127: Slash Runner Call 结果被下一轮当前 Runner 消费
+
+- **前置条件**:
+  - 已完成 TC-IMA-126，且目标 Runner 返回了非空结果。
+- **操作步骤**:
+  1. 在同一当前会话中继续发送普通消息：`请结合刚才 Runner 的结果继续分析`。
+  2. 对外部当前 Runner，检查下一轮 `/chat/stream` 运行前生成的 prompt 或 instructions 包含 `Imported Runner Results` 和上一轮目标 Runner 输出。
+  3. 对内置 Bifrost Agent 当前 Runner，检查下一轮 `/agent/chat/stream` 执行前 session history 已包含上一轮 slash Runner call 的 user/assistant 可见记录或 imported context。
+  4. 等待当前 Runner 回复完成。
+- **预期结果**:
+  - 下一轮当前 Runner 能引用上一轮 slash Runner call 输出，不需要用户手动复制。
+  - imported context 只消费一次；同一结果不会无限重复注入后续请求。
+  - 普通发送路径仍走当前会话 Runner，不会自动切换到目标 Runner。
+- **执行记录（2026-05-26）**: PASS — 执行 `cargo test -p bifrost-admin external_runner_consumes_imported_context_into_instructions_once --lib -- --nocapture`，验证 slash Runner call 保存的 imported context 会在下一轮当前外部 Runner 请求构建时追加到 instructions，且第一次消费后第二次请求不再重复注入；执行 `cargo test -p bifrost-admin imported_contexts_are_pushed_rendered_and_consumed_once --lib -- --nocapture`，验证 session_state 的入队、渲染和一次性消费语义。
+
+### TC-IMA-128: Slash Runner Call 选择 Runner 不改变当前会话默认 Runner
+
+- **前置条件**:
+  - 当前会话默认 Runner 为 Bifrost Agent 或任意外部 Runner。
+  - 至少存在一个其他外部 Runner 可用于 slash call。
+- **操作步骤**:
+  1. 记录顶部 Runner tag 和 New Chat 设置中的当前 Runner。
+  2. 使用 `/` 选择另一个 Runner 并完成一次 slash Runner call。
+  3. 调用 `GET /_bifrost/api/im-gateway/agent/sessions/all`，检查当前会话线程的 `runner_id` / `runner_type` 仍表示原当前 Runner。
+  4. 继续发送一条普通消息。
+- **预期结果**:
+  - Slash Runner call 是一次工具式调用，不改变当前会话默认 Runner。
+  - 普通消息继续由原当前 Runner 处理。
+  - 目标 Runner 子会话可独立保留自己的 `sessionKey` / `threadId` / `conversationId`，但不会替代当前 UI 线程主键。
+- **执行记录（2026-05-26）**: PASS — 执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "slash runner" --reporter=line`，在同一浏览器用例中完成 slash Runner call 后断言顶部 `agent-chat-runner-tag` 保持 `Runner: bifrost_agent`，未切换为目标 `codex`；执行 `cargo test -p bifrost-admin external_runner_persists_user_message_before_result_and_dedupes_finish --lib -- --nocapture`，确认外部 Runner 原有会话持久化与完成事件去重路径未被 runner call 改动破坏。
