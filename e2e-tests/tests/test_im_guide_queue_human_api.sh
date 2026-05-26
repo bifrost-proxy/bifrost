@@ -80,7 +80,7 @@ class Handler(BaseHTTPRequestHandler):
             content = "GUIDES_MERGED: 第一条引导 -> 第二条引导"
         elif any("MULTI_GUIDE_INITIAL" in t for t in user_texts):
             import time
-            time.sleep(3)
+            time.sleep(5)
             content = "INITIAL_DONE"
         elif any("DEFAULT_GUIDE_INITIAL" in t for t in user_texts):
             import time
@@ -258,6 +258,22 @@ curl -fsS --noproxy '*' -X POST "$BASE/chat" \
   -d '{"session_key":"multi-guide-status-test","message":"MULTI_GUIDE_INITIAL","guide_messages":["第一条引导","第二条引导"]}' \
   >"$MULTI_RESPONSE_FILE" &
 MULTI_PID=$!
+
+MULTI_MODEL_STARTED=""
+for _ in $(seq 1 100); do
+  if [[ -f "$MOCK_LOG" ]] && grep -q "MULTI_GUIDE_INITIAL" "$MOCK_LOG"; then
+    MULTI_MODEL_STARTED="true"
+    break
+  fi
+  sleep 0.05
+done
+
+if [[ -z "$MULTI_MODEL_STARTED" ]]; then
+  echo "[im-guide-queue-human-api] multi-guide request did not reach mock model" >&2
+  kill "$MULTI_PID" >/dev/null 2>&1 || true
+  wait "$MULTI_PID" >/dev/null 2>&1 || true
+  exit 1
+fi
 
 STATUS_RESPONSE=""
 for _ in $(seq 1 100); do
