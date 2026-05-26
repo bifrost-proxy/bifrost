@@ -1,4 +1,18 @@
 #[test]
+fn daily_agent_default_template_keeps_knowledge_modules_inside_report() {
+    assert!(DEFAULT_ASR_DAILY_AGENTS_MD.contains("## 报告内知识沉淀模块"));
+    assert!(DEFAULT_ASR_DAILY_AGENTS_MD.contains("## 知识沉淀输出要求"));
+    assert!(DEFAULT_ASR_DAILY_AGENTS_MD.contains("同一份 `{{report_dir}}YYYY-MM-DD-report.md`"));
+    assert!(DEFAULT_ASR_DAILY_AGENTS_MD.contains("### 长期想法与效率方案"));
+    assert!(DEFAULT_ASR_DAILY_AGENTS_MD.contains("### 方向决策与判断"));
+    assert!(DEFAULT_ASR_DAILY_AGENTS_MD.contains("### 跨天待办追踪"));
+    assert!(DEFAULT_ASR_DAILY_AGENTS_MD.contains("资料搜索结果"));
+    assert!(DEFAULT_ASR_DAILY_AGENTS_MD.contains("可行性分析"));
+    assert!(DEFAULT_ASR_DAILY_AGENTS_MD.contains("方案草案"));
+    assert!(!DEFAULT_ASR_DAILY_AGENTS_MD.contains("`knowledge/"));
+}
+
+#[test]
 fn daily_agent_prompt_uses_file_list_for_file_capable_runners() {
     let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp = TempDir::new().unwrap();

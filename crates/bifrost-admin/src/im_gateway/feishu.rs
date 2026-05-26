@@ -15,9 +15,9 @@ use bifrost_core::Result;
 
 use crate::im_gateway::provider::{EventSink, ImProvider};
 use crate::im_gateway::types::{
-    ConnectionHandle, ImEvent, ImEventMessage, ImEventSource, ImImageAttachment, ImImageSource,
-    ImProviderConfig, ImProviderType, ImTarget, ProviderValidation, SendOptions, SendResult,
-    UploadedImage,
+    ConnectionHandle, ConnectionState, ImEvent, ImEventMessage, ImEventSource, ImImageAttachment,
+    ImImageSource, ImProviderConfig, ImProviderType, ImTarget, ProviderValidation, SendOptions,
+    SendResult, UploadedImage,
 };
 
 // ---------------------------------------------------------------------------
@@ -79,6 +79,15 @@ struct WsEndpointResult {
     service_id: i32,
     ping_interval_secs: u64,
 }
+
+#[derive(Debug)]
+pub(crate) struct FeishuConnectionStatusEvent {
+    pub state: ConnectionState,
+    pub error: Option<String>,
+}
+
+pub(crate) type FeishuConnectionStatusTx =
+    tokio::sync::mpsc::UnboundedSender<FeishuConnectionStatusEvent>;
 
 // ---------------------------------------------------------------------------
 // Protobuf frame helpers
@@ -151,10 +160,7 @@ impl Default for FeishuProvider {
 
 impl FeishuProvider {
     pub fn new() -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .unwrap_or_default();
+        let http = build_feishu_http_client();
 
         Self {
             http,
@@ -246,7 +252,10 @@ impl FeishuProvider {
             .send()
             .await
             .map_err(|e| {
-                bifrost_core::BifrostError::Network(format!("feishu token request failed: {}", e))
+                bifrost_core::BifrostError::Network(format!(
+                    "feishu token request failed: {}",
+                    reqwest_error_with_sources(e)
+                ))
             })?;
 
         let status = resp.status();
@@ -418,7 +427,7 @@ impl ImProvider for FeishuProvider {
                 provider_id = config.id,
                 "connect_events spawned via trait - use ImConnectionManager.start_connection for proper secret handling"
             );
-            start_long_connection(config, String::new(), sink, shutdown_rx, http).await;
+            start_long_connection(config, String::new(), sink, shutdown_rx, http, None).await;
         });
 
         Ok(ConnectionHandle { shutdown_tx })
@@ -1419,12 +1428,13 @@ impl FeishuProvider {
 /// Start and maintain a Feishu long connection with auto-reconnect.
 ///
 /// This function runs until `shutdown_rx` fires or is dropped.
-pub async fn start_long_connection(
+pub(crate) async fn start_long_connection(
     config: ImProviderConfig,
     app_secret: String,
     sink: EventSink,
     mut shutdown_rx: oneshot::Receiver<()>,
     http: reqwest::Client,
+    status_tx: Option<FeishuConnectionStatusTx>,
 ) {
     let provider_id = config.id.clone();
     let mut backoff_secs = INITIAL_BACKOFF_SECS;
@@ -1434,7 +1444,16 @@ pub async fn start_long_connection(
     loop {
         info!(provider_id = %provider_id, reconnect_count, "starting feishu long connection");
 
-        match run_connection_loop(&config, &app_secret, &sink, &mut shutdown_rx, &http).await {
+        match run_connection_loop(
+            &config,
+            &app_secret,
+            &sink,
+            &mut shutdown_rx,
+            &http,
+            status_tx.as_ref(),
+        )
+        .await
+        {
             ConnectionLoopResult::Shutdown => {
                 info!(provider_id = %provider_id, "feishu long connection shutdown requested");
                 return;
@@ -1455,6 +1474,11 @@ pub async fn start_long_connection(
                     total_connects,
                     "feishu long connection dropped after being connected, will reconnect"
                 );
+                publish_connection_status(
+                    status_tx.as_ref(),
+                    ConnectionState::Reconnecting,
+                    Some(err.clone()),
+                );
                 if wait_with_shutdown(&mut shutdown_rx, Duration::from_secs(backoff_secs)).await {
                     info!(provider_id = %provider_id, "shutdown during reconnect backoff");
                     return;
@@ -1468,6 +1492,11 @@ pub async fn start_long_connection(
                     backoff_secs,
                     reconnect_count,
                     "feishu long connection disconnected, will reconnect"
+                );
+                publish_connection_status(
+                    status_tx.as_ref(),
+                    ConnectionState::Reconnecting,
+                    Some(err.clone()),
                 );
 
                 if reconnect_count == 5 || reconnect_count.is_multiple_of(20) {
@@ -1532,6 +1561,7 @@ async fn run_connection_loop(
     sink: &EventSink,
     shutdown_rx: &mut oneshot::Receiver<()>,
     http: &reqwest::Client,
+    status_tx: Option<&FeishuConnectionStatusTx>,
 ) -> ConnectionLoopResult {
     let app_id = config.app_id.as_deref().unwrap_or_default();
     let domain = ws_domain(config);
@@ -1557,6 +1587,7 @@ async fn run_connection_loop(
     };
 
     info!(provider_id = %config.id, service_id, ping_interval = endpoint.ping_interval_secs, "feishu websocket connected");
+    publish_connection_status(status_tx, ConnectionState::Connected, None);
 
     let (mut ws_write, mut ws_read) = ws_stream.split();
 
@@ -1938,7 +1969,10 @@ async fn fetch_ws_endpoint(
         .send()
         .await
         .map_err(|e| {
-            bifrost_core::BifrostError::Network(format!("ws endpoint request failed: {}", e))
+            bifrost_core::BifrostError::Network(format!(
+                "ws endpoint request failed: {}",
+                reqwest_error_with_sources(e)
+            ))
         })?;
 
     let body: Resp = resp.json().await.map_err(|e| {
@@ -1983,6 +2017,35 @@ async fn fetch_ws_endpoint(
         service_id,
         ping_interval_secs,
     })
+}
+
+pub(crate) fn build_feishu_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .expect("static Feishu HTTP client configuration should be valid")
+}
+
+fn publish_connection_status(
+    status_tx: Option<&FeishuConnectionStatusTx>,
+    state: ConnectionState,
+    error: Option<String>,
+) {
+    if let Some(tx) = status_tx {
+        let _ = tx.send(FeishuConnectionStatusEvent { state, error });
+    }
+}
+
+fn reqwest_error_with_sources(error: reqwest::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = std::error::Error::source(&error);
+    while let Some(error) = source {
+        message.push_str(": ");
+        message.push_str(&error.to_string());
+        source = error.source();
+    }
+    message
 }
 
 // ---------------------------------------------------------------------------

@@ -672,8 +672,10 @@ fn external_schedule_effective_work_dir(
     }
     let provider_id = run.provider_id.as_deref()?;
     let provider = service.provider_store.get(provider_id)?;
-    effective_agent_work_dir_for_provider(&service.agent_config_store.load(), &provider)
-        .map(|path| path.display().to_string())
+    effective_agent_config_for_provider(&service.agent_config_store.load(), &provider)
+        .work_dir
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn merge_schedule_adapter_config(

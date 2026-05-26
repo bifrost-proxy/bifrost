@@ -119,6 +119,7 @@ export interface AgentConfig {
   tool_output_token_limit?: number;
   request_timeout_secs?: number;
   work_dir?: string;
+  resolved_work_dir?: string;
   // History & Session (Codex-compatible)
   history?: HistoryConfig;
   ephemeral?: boolean;

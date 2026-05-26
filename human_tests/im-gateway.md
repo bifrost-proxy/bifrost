@@ -349,7 +349,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 - **预期结果**:
   - WebUI 显示 `Provider created and connected`。
   - 第 5 步状态响应包含 `state=connected`。
-  - 第 6 步消息记录包含一条 `direction=outbound`、`trigger=online`、`status=success` 的 owner 通知，`content_preview` 以 `你好，Bifrost 助手上线了` 开头，并包含 `工作目录：~/work/github/bifrost`。
+  - 第 6 步消息记录包含一条 `direction=outbound`、`trigger=online`、`status=success` 的 owner 通知，`content_preview` 以 `你好，Bifrost 助手上线了` 开头，并包含 `设备名称：...` 与 `工作目录：~/work/github/bifrost`。
   - 全流程不需要重启 Bifrost。
   - Provider 列表与消息响应不包含 App Secret 明文。
 - **执行记录（2026-05-06）**: PASS — 使用临时端口 `18888` 源码服务和用户提供的真实飞书 AK/SK 通过 WebUI 创建 Provider；页面显示 `Provider created and connected`；未重启服务即查询到状态 `connected`；message log 包含 `trigger=online`、`status=success`、`content_preview=你好，Bifrost 助手上线了` 的 owner 通知；响应中未泄露 App Secret；最后删除清理成功。本用例后续要求上线通知同时包含 `工作目录：~/work/github/bifrost`。
@@ -390,7 +390,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 - **预期结果**:
   - 两次创建后 WebUI 均显示 `Provider created and connected`。
   - 两个 Provider 的状态响应都包含 `state=connected`，且无需重启 Bifrost。
-  - 两个 Provider 的消息记录都各自包含一条 `direction=outbound`、`trigger=online`、`status=success` 的 owner 通知，且 `content_preview` 以 `你好，Bifrost 助手上线了` 开头，并包含 `工作目录：~/work/github/bifrost`。
+  - 两个 Provider 的消息记录都各自包含一条 `direction=outbound`、`trigger=online`、`status=success` 的 owner 通知，且 `content_preview` 以 `你好，Bifrost 助手上线了` 开头，并包含 `设备名称：...` 与 `工作目录：~/work/github/bifrost`。
   - 两个 Provider 不会串用对方的飞书 token；第二个机器人不会因复用第一个机器人的 token 而发送失败。
   - Provider 列表、状态与消息响应不包含任何 App Secret 明文。
 - **执行记录（2026-05-06）**: PASS — 使用临时端口 `18889` 和独立数据目录 `.bifrost-test-im-provider-two-bots` 启动源码版 Bifrost；通过 Settings / IM Gateway WebUI 分别创建两个真实飞书 Provider；两个 Provider 均显示创建并连接成功，状态均为 `connected`；两个 Provider 的 message log 均包含 `direction=outbound`、`trigger=online`、`status=success` 的 owner 通知，`content_preview` 为 `你好，Bifrost 助手上线了\n工作目录：~/work/github/bifrost`；第二个机器人未复用第一个机器人的 token，响应中未泄露 App Secret；最后删除清理两个 Provider。
@@ -421,7 +421,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 - **预期结果**:
   - WebUI 显示 `Provider created and connected`。
   - 消息记录包含一条 `direction=outbound`、`trigger=online`、`status=success` 的 owner 通知。
-  - owner 通知的 `content_preview` 以 `你好，Bifrost 助手上线了` 开头，并包含 `工作目录：/tmp/bifrost-im-provider-custom-workdir`。
+  - owner 通知的 `content_preview` 以 `你好，Bifrost 助手上线了` 开头，并包含 `设备名称：...` 与 `工作目录：/tmp/bifrost-im-provider-custom-workdir`。
   - owner 通知不得回退为全局 Agent Working Directory 或 Bifrost 进程 cwd。
   - Provider 列表与消息响应不包含 App Secret 明文。
 - **执行记录（2026-05-06）**: PASS — 使用临时端口 `18890` 和独立数据目录 `.bifrost-test-im-provider-custom-workdir` 启动源码版 Bifrost；通过 Settings / IM Gateway WebUI 创建真实飞书 Provider，并在 `Agent Working Directory` 填写 `/tmp/bifrost-im-provider-custom-workdir`；页面显示 `Provider created and connected`，Provider 状态为 `connected`；message log 包含 `direction=outbound`、`trigger=online`、`status=success` 的 owner 通知，且 `content_preview` 包含 `工作目录：/tmp/bifrost-im-provider-custom-workdir`，未回退到 `~/work/github/bifrost`；响应中未泄露 App Secret；最后删除 Provider 清理成功。
@@ -825,3 +825,157 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   - favicon / 引用卡片小图标不会被误发为用户图片。
   - 文字卡片仍发送剩余正文，图片通过 IM 图片消息逐张发送。
 - **执行记录（2026-05-20）**: PASS — 执行 `e2e-tests/tests/test_im_agent_markdown_image_reply.sh` 通过。wrapper 内部执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin agent_reply_ --lib`，10 个 Agent reply 图片/附件解析、下载和目标选择测试全部通过，覆盖本地路径、远端附件下载、普通下载链接按 `Content-Type=image/png` 转图片通道、非图片附件识别、普通链接排除、favicon 排除、代码块保护和去重；执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin agent_chat_final_reply_sends_local_markdown_images_as_im_images --lib` 通过，mock 模型返回 `![ChatGPT 生成图片 1](<本地图片路径>)` 后，主 Agent Chat 链路产生 `msg_type=image` outbound message log，interactive preview 不再包含本地图片路径。
+
+### TC-IMG-56: Connections 新建 Provider 先选择类型再进入平台连接
+
+- **前置条件**:
+  - 使用源码版 Bifrost 或 Vite dev server 打开 `/_bifrost/ai?aiSection=im-gateway-connections&imGatewaySection=connections`。
+  - 如启动 Bifrost，必须使用临时 `BIFROST_DATA_DIR`，并携带 `--no-system-proxy`。
+- **操作步骤**:
+  1. 打开 Connections 页面，点击 `Add Provider`。
+  2. 确认弹窗第一步只显示 `Type` 选择，包含 `Weixin` 与 `Feishu` 两个选项。
+  3. 确认第一步不展示 `App ID`、`App Secret`、`Agent Runner`、`Agent Working Directory`、Prompt 等高级配置。
+  4. 选择 `Feishu` 后点击 `Next`。
+  5. 在第二步填写 Provider ID，确认页面展示 Feishu 二维码、setup URL 或打开按钮。
+  6. 在亮色和暗色主题下重复步骤 1-5，确认文本、二维码区域、步骤条和按钮均可读可点击。
+- **预期结果**:
+  - 用户不会在第一屏看到复杂的连接与 Agent 配置字段。
+  - 选择 Feishu 后第二步立即进入二维码 setup，不要求用户手填 App ID 或 App Secret。
+  - 新建流程的高级配置只在连接完成后的 `Configure` 步骤展示。
+  - 亮色和暗色主题下没有文本重叠、不可读按钮或低对比度状态提示。
+- **清理步骤**:
+  - 如创建了测试 Provider，删除测试 Provider。
+  - 停止临时服务并删除临时 `BIFROST_DATA_DIR`。
+- **执行记录（2026-05-26）**: PASS — 执行 `pnpm --dir web exec playwright test tests/ui/im-gateway-provider.spec.ts` 通过。Feishu setup 用例在暗色主题打开 Connections 页面，点击 `Add Provider` 后确认第一步仅显示 Weixin/Feishu 类型选择，未出现 `App ID`、`App Secret`、`Agent Runner`、`Agent Working Directory`；选择 Feishu 后进入二维码 setup，展示 `https://open.feishu.cn/page/launcher?user_code=123`、`Open Setup Page` 和 `App created. Bifrost has the App ID and Secret on the server.`，连接成功后才展示 `Connection` 与 `Agent Runner` 配置。失败回归用例模拟 `/feishu-setup/start` 返回 502，弹窗内显示 `Failed to start Feishu setup.`、后端错误详情和 `Retry Setup` 按钮；点击重试后恢复展示二维码 URL。随后使用临时数据目录启动源码版 Bifrost：`BIFROST_DATA_DIR=./.bifrost-test-feishu-setup-real SKIP_FRONTEND_BUILD=1 cargo run --bin bifrost -- start -p 18893 --unsafe-ssl --no-system-proxy --skip-cert-check`，真实调用 `POST /_bifrost/api/im-gateway/providers/feishu-setup/start` 返回 `success=true`、`session_id=fas_...`、`verification_url=https://open.feishu.cn/page/launcher?user_code=4MUN-PRLG`；再用 Playwright 打开 `http://127.0.0.1:18893/_bifrost/ai?aiSection=im-gateway-connections&imGatewaySection=connections`，实际点击 Add Provider → Feishu → Next，页面渲染真实 `open.feishu.cn/page/launcher` 二维码 URL 和 `Open Setup Page` 链接。
+
+### TC-IMG-57: Weixin 新建 Provider 后立即弹出扫码二维码并延后配置
+
+- **前置条件**:
+  - 使用源码版 Bifrost 或 Vite dev server 打开 `/_bifrost/ai?aiSection=im-gateway-connections&imGatewaySection=connections`。
+  - 如启动 Bifrost，必须使用临时 `BIFROST_DATA_DIR`，并携带 `--no-system-proxy`。
+- **操作步骤**:
+  1. 打开 Connections 页面，点击 `Add Provider`。
+  2. 保持或选择 `Weixin`，点击 `Next`。
+  3. 填写唯一 Provider ID，例如 `weixin-progressive-setup`。
+  4. 点击 `Create and Show QR`。
+  5. 确认页面调用 Weixin 登录启动流程，并弹出 `Scan Weixin QR` 二维码弹窗。
+  6. 在未扫码前确认 Agent Runner、工作目录、Prompt 等高级配置没有提前要求填写。
+  7. 模拟或完成扫码确认后，确认 Add Provider 主弹窗进入 `Configure` 步骤，再展示高级配置。
+- **预期结果**:
+  - Weixin 第二步只要求最小 Provider 元数据，创建后立即展示二维码。
+  - 扫码连接前不要求用户理解或填写 Agent 运行配置。
+  - 扫码确认后才进入 `Configure`，可保存 Runner、工作目录和 Prompt 等高级配置。
+  - 失败或重复 Provider ID 时，toast 展示后端真实错误，不退回通用错误。
+- **清理步骤**:
+  - 删除 `weixin-progressive-setup` 测试 Provider。
+  - 停止临时服务并删除临时 `BIFROST_DATA_DIR`。
+- **执行记录（2026-05-26）**: PASS — 执行 `pnpm --dir web exec playwright test tests/ui/im-gateway-provider.spec.ts` 通过。Weixin setup 用例从 Connections 页面点击 `Add Provider`，默认 Weixin 后点击 `Next`，第二步只展示 Provider ID、Display Name 与 “immediately show the Weixin QR code” 提示，未提前展示 `Agent Runner`；点击 `Create and Show QR` 后弹出 `Scan Weixin QR` modal，并展示 `https://login.weixin.qq.com/qrcode/test-weixin-qr`。重复 Provider ID 回归用例继续验证 toast 展示后端真实错误。
+
+### TC-IMG-58: Edit IM Provider 表单字段间距紧凑
+
+- **前置条件**:
+  - 使用源码版 Bifrost 或 Vite dev server 打开 `/_bifrost/ai?aiSection=im-gateway-connections&imGatewaySection=connections`。
+  - 已存在至少一个 Feishu Provider。
+- **操作步骤**:
+  1. 在 Connections 页面点击某个 Provider 的 `Edit`。
+  2. 查看 `Edit IM Provider` 弹窗中的 Display Name、Enabled、Owner Open ID、App ID、App Secret、Agent Runner、Agent Working Directory、Prompt 等字段。
+  3. 对比字段之间的垂直留白，确认 label、输入框、extra 说明文案形成紧凑连续的信息块。
+  4. 确认 `Add IM Provider` 的 Type → Connect → Configure 渐进式向导没有被 compact 样式影响。
+- **预期结果**:
+  - 编辑弹窗使用紧凑表单密度，字段之间不再出现大段空白。
+  - `Form.Item` 之间保持足够可读的 10px 级间距，label 到输入框距离明显小于默认垂直表单。
+  - extra 说明文案仍可读，不与后续字段重叠。
+  - 亮色和暗色主题下布局一致，无文本重叠。
+- **清理步骤**:
+  - 删除测试 Provider。
+- **执行记录（2026-05-26）**: PASS — 执行 `pnpm --dir web exec playwright test tests/ui/im-gateway-provider.spec.ts --grep "编辑时可以补填 App Secret"` 通过。用例打开 `Edit IM Provider` 弹窗后确认存在 `.im-provider-edit-form-compact`，首个 `.ant-form-item` 的 `margin-bottom=10px`，首个 `.ant-form-item-label` 的 `padding-bottom=2px`；随后继续补填 App Secret 并保存成功，证明紧凑样式未破坏编辑提交流程。
+
+### TC-IMG-59: Connections Provider 列表最大 750px 并居中展示
+
+- **前置条件**:
+  - 使用源码版 Bifrost 或 Vite dev server 打开 `/_bifrost/ai?aiSection=im-gateway-connections&imGatewaySection=connections`。
+  - 至少存在一个 Provider，且浏览器 viewport 宽度大于 1200px。
+- **操作步骤**:
+  1. 打开 Connections 页面。
+  2. 查看 Provider 卡片列表整体宽度与页面左右留白。
+  3. 查看每张卡片顶部的连接/编辑/删除按钮与卡片数据之间的横向距离。
+  4. 缩小窗口到 750px 以下，确认卡片仍能按容器宽度自适应。
+- **预期结果**:
+  - Provider 列表最大宽度约 750px，并在内容区水平居中。
+  - 卡片不会在宽屏下被拉满整行，操作按钮不再远离 Provider 名称与字段数据。
+  - 窄屏下列表宽度为 100%，不会产生额外水平滚动。
+- **清理步骤**:
+  - 删除测试 Provider。
+- **执行记录（2026-05-26）**: PASS — 执行 `pnpm --dir web exec playwright test tests/ui/im-gateway-provider.spec.ts` 通过。卡片展示用例确认 `settings-im-provider-list` 可见，bounding box 宽度不超过 760px 容差，并在桌面 viewport 下相对页面居中；原有卡片单列字段和复制按钮断言继续通过。
+
+### TC-IMG-60: Feishu 自动创建 Provider 长连接直连并正确暴露重连状态
+
+- **前置条件**:
+  - 使用源码版 Bifrost 或当前本机运行的 Bifrost。
+  - 已通过 Connections 的 Feishu 二维码流程创建一个 Provider，例如 `feishu-main`。
+  - 本机可能启用了系统代理或环境代理，代理地址可能指向 Bifrost 自身。
+- **操作步骤**:
+  1. 创建或重新连接 `feishu-main` Provider。
+  2. 查看服务日志，关注 `open.feishu.cn/callback/ws/endpoint` 获取结果。
+  3. 调用 `GET /_bifrost/api/im-gateway/providers/feishu-main/status` 查看状态。
+  4. 如果 endpoint 获取失败，确认状态为 `reconnecting`，并包含 `ws endpoint fetch failed` 的 `last_error`。
+  5. 如果 endpoint 获取成功，确认状态只在 `feishu websocket connected` 后变为 `connected`。
+  6. 向新机器人发送一条消息，确认 `GET /_bifrost/api/im-gateway/providers/feishu-main/messages?direction=inbound` 出现 inbound 记录，随后产生回复或至少进入 Agent 处理日志。
+- **预期结果**:
+  - Feishu long connection 的 tenant token 和 WS endpoint 请求绕过本机代理，不会因为 Bifrost 自身代理导致 endpoint fetch 失败。
+  - 状态 API 不会在连接 task 刚启动时误报 `connected`。
+  - 长连接失败时 WebUI/API 可见 `reconnecting` 与真实错误，便于区分网络/代理问题和 Agent 无响应问题。
+  - 消息未回复时能通过 inbound message log 判断是否已经进入 Bifrost。
+- **清理步骤**:
+  - 删除测试 Provider 或保留用户真实 Provider。
+- **执行记录（2026-05-26）**: PASS — 针对用户当前 `feishu-main` 日志先执行只读排查：`GET /providers/feishu-main/messages?limit=50` 只有 `trigger=online` 的 outbound 记录，无 inbound，确认消息没有进入 Bifrost；日志显示 `ws endpoint fetch failed`，根因定位为 Feishu long connection endpoint 请求未使用直连 client，且状态 API 因提前标记 connected 产生误导。修复后执行 `cargo test -p bifrost-admin test_connection_state_reconnect_error_clears_after_connected --lib` 通过，验证 reconnecting/connected 状态转换和 last_error 清理。
+
+### TC-IMG-61: Provider 卡片与 IM 状态展示解析后的默认工作目录
+
+- **前置条件**:
+  - 使用源码版 Bifrost 或 Vite dev server 打开 `/_bifrost/ai?aiSection=im-gateway-connections&imGatewaySection=connections`。
+  - 全局 Agent 配置未显式设置 `work_dir`，至少存在一个未配置 Provider 专属 `agent_config.work_dir` 的 IM Provider。
+  - 如启动 Bifrost，必须使用临时 `BIFROST_DATA_DIR`，并携带 `--no-system-proxy`。
+- **操作步骤**:
+  1. 打开 Connections 页面，查看该 Provider 卡片的 `Agent Work Dir` 字段。
+  2. 调用或查看 `GET /_bifrost/api/im-gateway/agent`，确认响应包含展示用 `resolved_work_dir`，且原始 `work_dir` 仍保持未配置状态。
+  3. 从该 Provider 对应 IM 通道发送 `/status`，或通过 Agent API status 查询同一 session。
+  4. 在运行中进度卡或 `/status` 文案里查看 `工作路径`。
+  5. 向 Agent 询问当前目录，确认 Agent 回答的目录与卡片/status 展示一致。
+- **预期结果**:
+  - Provider 卡片不再把 `Agent Work Dir` 显示为 `Global default`，而是显示解析后的真实默认目录，且字段可复制。
+  - `GET /im-gateway/agent` 不把 `resolved_work_dir` 写回为配置项，原始 `work_dir` 仍保持未配置状态。
+  - IM `/status`、Agent API status 与进度卡不再显示 `工作路径: N/A`。
+  - Agent 实际运行目录与管理端/IM 状态展示一致。
+- **清理步骤**:
+  - 删除测试 Provider。
+  - 停止临时服务并删除临时 `BIFROST_DATA_DIR`。
+- **执行记录（2026-05-26）**: PASS — 执行 `cargo test -p bifrost-admin provider_agent_work_dir_resolves_global_default_directory agent_config_response_includes_resolved_work_dir im_status_text_uses_resolved_default_work_dir_when_session_has_no_override --lib` 和 `pnpm --dir web exec playwright test tests/ui/im-gateway-provider.spec.ts --grep "继承后的默认工作目录"` 通过。回归验证覆盖配置 API 的 `resolved_work_dir`、Provider 卡片继承目录展示，以及 IM/API status 缺少 session work_dir 时不再显示 `N/A`。
+
+### TC-IMG-62: Owner 上线通知包含当前设备名称
+
+- **前置条件**:
+  - 使用临时数据目录启动 Bifrost，端口不得使用 9900，必须禁用系统代理：
+    ```bash
+    BIFROST_DEVICE_NAME=eden-macbook BIFROST_DATA_DIR=./.bifrost-test-im-provider-device-name cargo run --bin bifrost -- start -p 18892 --unsafe-ssl --no-system-proxy --skip-cert-check
+    ```
+  - 浏览器打开 `http://127.0.0.1:18892/_bifrost/ai?aiSection=im-gateway-connections&imGatewaySection=connections`。
+  - 准备真实可用且可发送 owner 通知的飞书或微信 Provider 配置。
+- **操作步骤**:
+  1. 在 WebUI 点击 `Add Provider`。
+  2. 选择 Provider 类型，完成连接步骤。
+  3. 在配置步骤保留默认 Agent 工作目录，或显式填写 `/Users/eden/work/github/bifrost`。
+  4. 点击完成创建，等待 Provider 连接成功并触发 owner 上线通知。
+  5. 查询该 Provider 的消息记录：
+     ```bash
+     curl -s http://127.0.0.1:18892/_bifrost/api/im-gateway/providers/<provider-id>/messages
+     ```
+- **预期结果**:
+  - owner 收到的上线通知以 `你好，Bifrost 助手上线了` 开头。
+  - 通知正文包含 `设备名称：eden-macbook`，可用于区分多台电脑。
+  - 通知正文包含 `工作目录：/Users/eden/work/github/bifrost` 或 Provider 实际解析后的工作目录。
+  - 第 5 步 message log 的 `content_preview` 与 owner 实收通知一致，包含同一设备名称和工作目录。
+- **清理步骤**:
+  - 删除测试 Provider。
+  - 停止临时服务并删除临时 `BIFROST_DATA_DIR`。
+- **执行记录（2026-05-26）**: PASS — 执行 `cargo test -p bifrost-admin online_notification_message_ --lib` 通过，覆盖固定设备名 `eden-macbook` 时上线通知同时包含 `设备名称：eden-macbook`、Provider 自定义工作目录和进程 cwd 回退目录；消息发送链路沿用 `build_online_notification_message` 生成的同一 `content_preview`。

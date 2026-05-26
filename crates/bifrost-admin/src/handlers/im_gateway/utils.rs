@@ -142,8 +142,59 @@ pub(super) fn uuid_short() -> String {
     id.to_string()[..8].to_string()
 }
 
-pub(super) fn build_online_notification_message(provider: &ImProviderConfig) -> String {
-    let work_dir = provider
+fn clean_device_name(value: &str) -> Option<String> {
+    value
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|line| !line.is_empty())
+}
+
+fn device_name_from_command(program: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .and_then(|value| clean_device_name(&value))
+}
+
+fn macos_computer_name() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        device_name_from_command("scutil", &["--get", "ComputerName"])
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+fn current_device_name() -> String {
+    ["BIFROST_DEVICE_NAME", "COMPUTERNAME"]
+        .into_iter()
+        .find_map(|key| {
+            std::env::var(key)
+                .ok()
+                .and_then(|value| clean_device_name(&value))
+        })
+        .or_else(macos_computer_name)
+        .or_else(|| {
+            std::env::var("HOSTNAME")
+                .ok()
+                .and_then(|value| clean_device_name(&value))
+        })
+        .or_else(|| device_name_from_command("hostname", &[]))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn online_notification_work_dir(provider: &ImProviderConfig) -> String {
+    provider
         .agent_config
         .as_ref()
         .and_then(|config| config.work_dir.as_deref())
@@ -155,9 +206,21 @@ pub(super) fn build_online_notification_message(provider: &ImProviderConfig) -> 
                 .map(|path| path.display().to_string())
                 .ok()
         })
-        .unwrap_or_else(|| "unknown".to_string());
+        .unwrap_or_else(|| "unknown".to_string())
+}
 
-    format!("你好，Bifrost 助手上线了\n工作目录：{work_dir}")
+pub(super) fn build_online_notification_message_with_device_name(
+    provider: &ImProviderConfig,
+    device_name: &str,
+) -> String {
+    let device_name = clean_device_name(device_name).unwrap_or_else(|| "unknown".to_string());
+    let work_dir = online_notification_work_dir(provider);
+
+    format!("你好，Bifrost 助手上线了\n设备名称：{device_name}\n工作目录：{work_dir}")
+}
+
+pub(super) fn build_online_notification_message(provider: &ImProviderConfig) -> String {
+    build_online_notification_message_with_device_name(provider, &current_device_name())
 }
 
 /// Build a Feishu Card 2.0 JSON for real-time plan progress display.
@@ -212,6 +275,7 @@ pub(super) fn build_plan_card(
 pub(super) fn build_im_status_text(
     detail: Option<&SessionDetail>,
     context: &bifrost_agent::StatusRuntimeContext,
+    default_work_dir: Option<&str>,
 ) -> String {
     match detail {
         Some(d) => {
@@ -254,7 +318,7 @@ pub(super) fn build_im_status_text(
                 }
                 _ => String::new(),
             };
-            let work_dir = d.work_dir.as_deref().unwrap_or("N/A");
+            let work_dir = d.work_dir.as_deref().or(default_work_dir).unwrap_or("N/A");
             format!(
                 "会话状态:\n- 工作路径: {}\n- Agent 类型: {}\n- Runner 类型: {}\n- Runner ID: {}\n- 外部会话: {}\n- 历史对话轮次: {}\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- 压缩次数: {}\n- 历史版本: {}\n- 状态: 空闲{}",
                 work_dir,
@@ -282,6 +346,7 @@ pub(super) fn build_agent_api_status_text(
     config: &bifrost_agent::config::AgentConfig,
 ) -> String {
     let context = status_context_from_agent_runner(config.runner.as_ref());
+    let default_work_dir = config.resolve_work_dir().display().to_string();
     match detail {
         Some(d) => {
             let real = d
@@ -323,7 +388,7 @@ pub(super) fn build_agent_api_status_text(
                 .unwrap_or(bifrost_agent::config::AgentConfig::DEFAULT_MODEL_CONTEXT_WINDOW as u32);
             let context_percent =
                 ((d.estimated_tokens as f64 / context_window as f64) * 1000.0).round() / 10.0;
-            let work_dir = d.work_dir.as_deref().unwrap_or("N/A");
+            let work_dir = d.work_dir.as_deref().unwrap_or(default_work_dir.as_str());
             format!(
                 "会话状态:\n- 工作路径: {}\n- Agent 类型: {}\n- Runner 类型: {}\n- Runner ID: {}\n- 外部会话: {}\n- 历史对话轮次: {}\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- Context 用量: ~{} / {} ({:.1}%)\n- 压缩次数: {}\n- 历史版本: {}\n- MCP 工具数: 0",
                 work_dir,

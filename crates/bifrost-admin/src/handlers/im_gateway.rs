@@ -59,11 +59,12 @@ use event_loop::*;
 use messages::*;
 use providers::*;
 use schedules::*;
-pub use service::{ImGatewayService, SharedImGatewayService};
 use service::{
-    ImProviderClient, PendingWeixinLogin, AGENT_REPLY_IMAGE_UPLOAD_CACHE, IMAGE_ONLY_AGENT_PROMPT,
-    MAX_AGENT_IMAGES_PER_MESSAGE, MAX_AGENT_REPLY_ATTACHMENT_BYTES, MAX_AGENT_REPLY_IMAGE_BYTES,
+    FeishuSetupBrand, ImProviderClient, PendingFeishuSetup, PendingWeixinLogin,
+    AGENT_REPLY_IMAGE_UPLOAD_CACHE, IMAGE_ONLY_AGENT_PROMPT, MAX_AGENT_IMAGES_PER_MESSAGE,
+    MAX_AGENT_REPLY_ATTACHMENT_BYTES, MAX_AGENT_REPLY_IMAGE_BYTES,
 };
+pub use service::{ImGatewayService, SharedImGatewayService};
 use utils::*;
 
 pub async fn handle_im_gateway(

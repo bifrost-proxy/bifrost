@@ -11,6 +11,7 @@ pub(super) struct BusyMessageContext<'a> {
     pub(super) progress_registry: &'a Arc<ImAgentProgressRegistry>,
     pub(super) default_mode: BusyMessageDefaultMode,
     pub(super) status_context: bifrost_agent::StatusRuntimeContext,
+    pub(super) default_work_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

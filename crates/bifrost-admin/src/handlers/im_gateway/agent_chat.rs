@@ -20,7 +20,12 @@ pub(super) async fn handle_idle_im_command(
     if trimmed == "/status" {
         let detail = ctx.agent_session_manager.get_session_detail(session_key);
         let status_context = status_context_from_agent_runner(agent_config.runner.as_ref());
-        let reply = build_im_status_text(detail.as_ref(), &status_context);
+        let default_work_dir = agent_config.resolve_work_dir().display().to_string();
+        let reply = build_im_status_text(
+            detail.as_ref(),
+            &status_context,
+            Some(default_work_dir.as_str()),
+        );
         send_agent_reply(
             ctx.client,
             ctx.provider,
@@ -169,7 +174,11 @@ pub(super) async fn handle_busy_message(
     if trimmed == "/status" {
         // Try to get session detail from idle sessions
         if let Some(detail) = agent_session_manager.get_session_detail(session_key) {
-            let reply = build_im_status_text(Some(&detail), &ctx.status_context);
+            let reply = build_im_status_text(
+                Some(&detail),
+                &ctx.status_context,
+                ctx.default_work_dir.as_deref(),
+            );
             send_agent_reply(client, provider, event, &reply, message_log_store).await;
         } else if let Some(mut status) = agent_session_manager.get_active_turn_status(session_key) {
             status.pending_guide_messages = queue_manager.guide_status(session_key);
@@ -673,6 +682,7 @@ pub(super) async fn handle_concurrent_event_during_chat(
                 progress_registry,
                 default_mode: active_session_default_mode,
                 status_context: status_context_from_agent_runner(agent_config.runner.as_ref()),
+                default_work_dir: Some(agent_config.resolve_work_dir().display().to_string()),
             },
         )
         .await;
@@ -694,6 +704,7 @@ pub(super) async fn handle_concurrent_event_during_chat(
                     progress_registry,
                     default_mode: busy_default_mode_for_agent_config(&agent_config),
                     status_context: status_context_from_agent_runner(agent_config.runner.as_ref()),
+                    default_work_dir: Some(agent_config.resolve_work_dir().display().to_string()),
                 },
             )
             .await;
@@ -760,6 +771,7 @@ pub(super) async fn process_agent_chat(
     // ── Busy check ───────────────────────────────────────────────────────
     // If another turn loop is already processing this session, reject early
     // instead of creating a duplicate empty session.
+    let resolved_work_dir = agent_config.resolve_work_dir().display().to_string();
     let mut session = match session_manager
         .try_take_session_with_work_dir(session_key, agent_config.work_dir.clone())
     {
@@ -793,14 +805,10 @@ pub(super) async fn process_agent_chat(
                 session.reinitialize_work_dir(work_dir.to_string());
             }
         } else if session.work_dir.is_none() {
-            if let Some(work_dir) = agent_config.work_dir.clone() {
-                session.reinitialize_work_dir(work_dir);
-            }
+            session.reinitialize_work_dir(resolved_work_dir.clone());
         }
     } else if session.work_dir.is_none() {
-        if let Some(work_dir) = agent_config.work_dir.clone() {
-            session.reinitialize_work_dir(work_dir);
-        }
+        session.work_dir = Some(resolved_work_dir.clone());
     }
     session.source = format!("{:?}", provider.provider_type).to_lowercase();
     session.mark_bifrost_agent_runtime();

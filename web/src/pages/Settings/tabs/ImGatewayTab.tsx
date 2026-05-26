@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
+  Alert,
   Badge,
   Button,
   Card,
@@ -16,6 +17,7 @@ import {
   Select,
   Space,
   Spin,
+  Steps,
   Switch,
   Table,
   Tabs,
@@ -65,6 +67,13 @@ const BUILTIN_AGENT_RUNNER_OPTIONS = [
   { label: "Inherit global default", value: "__inherit__" },
   { label: "Bifrost Agent", value: "bifrost_agent" },
 ];
+
+type ProviderCreateStep = 0 | 1 | 2;
+type SetupProviderType = "weixin" | "feishu";
+
+function defaultProviderId(type: SetupProviderType): string {
+  return type === "weixin" ? "weixin-main" : "feishu-main";
+}
 
 function OverflowText({
   value,
@@ -352,6 +361,22 @@ function ConnectionsPanel({
   const [addModalOpen, setAddModalOpen] = useState(false);
   const [editingProvider, setEditingProvider] =
     useState<ImProviderConfig | null>(null);
+  const [createStep, setCreateStep] = useState<ProviderCreateStep>(0);
+  const [setupProviderType, setSetupProviderType] =
+    useState<SetupProviderType>("weixin");
+  const [createdProvider, setCreatedProvider] = useState<ImProviderConfig | null>(null);
+  const [feishuSetup, setFeishuSetup] = useState<{
+    sessionId: string;
+    verificationUrl: string;
+    expiresAt: number;
+    intervalSeconds: number;
+    status: "pending" | "expired" | "confirmed" | "error";
+    appId?: string;
+    ownerOpenId?: string;
+    baseUrl?: string;
+    errorMessage?: string;
+  } | null>(null);
+  const [feishuSetupLoading, setFeishuSetupLoading] = useState(false);
   const [weixinLogin, setWeixinLogin] = useState<{
     providerId: string;
     scanUrl: string;
@@ -370,6 +395,7 @@ function ConnectionsPanel({
   const selectedProviderType =
     (Form.useWatch("provider_type", form) as string | undefined) ||
     editingProvider?.provider_type ||
+    setupProviderType ||
     "feishu";
 
   const fetchStatuses = useCallback(async () => {
@@ -416,7 +442,8 @@ function ConnectionsPanel({
     return () => window.clearTimeout(timer);
   }, [fetchAgentDefaults, fetchExternalCliConfig]);
 
-  const inheritedWorkDir = agentDefaults?.work_dir || "Process working directory";
+  const inheritedWorkDir =
+    agentDefaults?.work_dir || agentDefaults?.resolved_work_dir || "Process working directory";
   const inheritedBaseInstructions =
     agentDefaults?.base_instructions ||
     agentDefaults?.default_base_instructions ||
@@ -533,6 +560,10 @@ function ConnectionsPanel({
 
   const openAddModal = () => {
     setEditingProvider(null);
+    setCreateStep(0);
+    setSetupProviderType("weixin");
+    setCreatedProvider(null);
+    setFeishuSetup(null);
     form.resetFields();
     form.setFieldsValue({
       provider_type: "weixin",
@@ -547,6 +578,9 @@ function ConnectionsPanel({
 
   const openEditModal = (provider: ImProviderConfig) => {
     setEditingProvider(provider);
+    setCreateStep(2);
+    setCreatedProvider(null);
+    setFeishuSetup(null);
     form.setFieldsValue({
       ...provider,
       app_secret: undefined,
@@ -561,8 +595,133 @@ function ConnectionsPanel({
     setAddModalOpen(true);
   };
 
+  const startFeishuSetupSession = async () => {
+    try {
+      setFeishuSetupLoading(true);
+      setFeishuSetup(null);
+      const result = await imGatewayApi.startFeishuSetup({ brand: "feishu" });
+      setFeishuSetup({
+        sessionId: result.session_id,
+        verificationUrl: result.verification_url,
+        expiresAt: result.expires_at,
+        intervalSeconds: result.interval_seconds,
+        status: "pending",
+      });
+    } catch (err) {
+      const errorMessage = normalizeApiErrorMessage(err, "Failed to start Feishu setup");
+      setFeishuSetup({
+        sessionId: "",
+        verificationUrl: "",
+        expiresAt: Date.now(),
+        intervalSeconds: 5,
+        status: "error",
+        errorMessage,
+      });
+      message.error(errorMessage);
+    } finally {
+      setFeishuSetupLoading(false);
+    }
+  };
+
+  const beginCreateConnectionStep = async () => {
+    const nextType = setupProviderType;
+    form.resetFields();
+    form.setFieldsValue({
+      id: defaultProviderId(nextType),
+      provider_type: nextType,
+      enabled: true,
+      event_connection_enabled: true,
+      agent_config: {
+        runner: "__inherit__",
+      },
+    });
+    setCreatedProvider(null);
+    setCreateStep(1);
+    if (nextType === "feishu") {
+      await startFeishuSetupSession();
+    }
+  };
+
+  const startWeixinProviderSetup = async () => {
+    try {
+      const values = await form.validateFields(["id", "display_name"]);
+      await imGatewayApi.createProvider({
+        id: values.id,
+        provider_type: "weixin",
+        display_name: values.display_name,
+        enabled: true,
+        event_connection_enabled: true,
+        event_types: ["message.receive"],
+      });
+      const provider = await imGatewayApi.getProvider(values.id);
+      const result = await imGatewayApi.startWeixinLogin(values.id);
+      setCreatedProvider(provider);
+      setWeixinLogin({
+        providerId: values.id,
+        scanUrl: result.scan_url,
+        expiresInSeconds: result.expires_in_seconds,
+        expiresAt: Date.now() + result.expires_in_seconds * 1000,
+        status: "pending",
+      });
+      setAutoPromptedWeixinIds((prev) => new Set(prev).add(values.id));
+      message.success("Provider created. Scan the Weixin QR code to continue.");
+      onRefresh();
+    } catch (err) {
+      if (err && typeof err === "object" && "errorFields" in err) return;
+      message.error(normalizeApiErrorMessage(err, "Failed to start Weixin setup"));
+    }
+  };
+
+  const createConnectedFeishuProvider = async () => {
+    if (!feishuSetup || feishuSetup.status !== "confirmed") return;
+    try {
+      const values = await form.validateFields(["id", "display_name"]);
+      const result = await imGatewayApi.createFeishuSetupProvider(feishuSetup.sessionId, {
+        id: values.id,
+        provider_type: "feishu",
+        display_name: values.display_name,
+        enabled: true,
+        event_connection_enabled: true,
+        event_types: ["message.receive"],
+      });
+      await imGatewayApi.connectProvider(result.provider.id);
+      const provider = await imGatewayApi.getProvider(result.provider.id);
+      setCreatedProvider(provider);
+      form.setFieldsValue({
+        ...provider,
+        app_secret: undefined,
+        agent_config: {
+          runner: providerRunnerFormValue(provider),
+          work_dir: provider.agent_config?.work_dir,
+          base_instructions: provider.agent_config?.base_instructions,
+          developer_instructions: provider.agent_config?.developer_instructions,
+          user_instructions: provider.agent_config?.user_instructions,
+        },
+      });
+      setCreateStep(2);
+      message.success("Feishu provider connected. Finish the optional configuration.");
+      onRefresh();
+      void fetchStatuses();
+    } catch (err) {
+      if (err && typeof err === "object" && "errorFields" in err) return;
+      message.error(normalizeApiErrorMessage(err, "Failed to create Feishu provider"));
+    }
+  };
+
   const handleSaveProvider = async () => {
     try {
+      if (!editingProvider && createStep === 0) {
+        await beginCreateConnectionStep();
+        return;
+      }
+      if (!editingProvider && createStep === 1) {
+        if (setupProviderType === "weixin") {
+          await startWeixinProviderSetup();
+        } else {
+          await createConnectedFeishuProvider();
+        }
+        return;
+      }
       const values = await form.validateFields();
       if (editingProvider) {
         const appSecret =
@@ -584,6 +743,22 @@ function ConnectionsPanel({
         );
         await syncProviderRunnerOverride(editingProvider.id, values.agent_config?.runner);
         message.success("Provider updated");
+      } else if (createdProvider) {
+        const payload = normalizeProviderValues(
+          {
+            display_name: values.display_name,
+            enabled: values.enabled,
+            owner_open_id: values.owner_open_id,
+            agent_config: values.agent_config,
+          },
+          true,
+        );
+        await imGatewayApi.updateProvider(
+          createdProvider.id,
+          payload as Partial<ImProviderConfig>,
+        );
+        await syncProviderRunnerOverride(createdProvider.id, values.agent_config?.runner);
+        message.success("Provider configured");
       } else {
         const appSecret =
           typeof values.app_secret === "string" ? values.app_secret.trim() : "";
@@ -713,8 +888,22 @@ function ConnectionsPanel({
         const status = await imGatewayApi.getWeixinLoginStatus(weixinLogin.providerId);
         if (status.status === "confirmed" || status.status === "authorized") {
           await imGatewayApi.connectProvider(weixinLogin.providerId);
+          const provider = status.provider || (await imGatewayApi.getProvider(weixinLogin.providerId));
+          setCreatedProvider(provider);
+          form.setFieldsValue({
+            ...provider,
+            app_secret: undefined,
+            agent_config: {
+              runner: providerRunnerFormValue(provider),
+              work_dir: provider.agent_config?.work_dir,
+              base_instructions: provider.agent_config?.base_instructions,
+              developer_instructions: provider.agent_config?.developer_instructions,
+              user_instructions: provider.agent_config?.user_instructions,
+            },
+          });
+          setCreateStep(2);
           setWeixinLogin(null);
-          message.success("Weixin login completed and connected");
+          message.success("Weixin login completed. Finish the optional configuration.");
           onRefresh();
           void fetchStatuses();
           return;
@@ -749,6 +938,41 @@ function ConnectionsPanel({
     weixinLogin,
     weixinLoginLoading,
   ]);
+
+  useEffect(() => {
+    if (!feishuSetup || feishuSetup.status !== "pending" || feishuSetupLoading) return;
+    const delay = Math.max(2, feishuSetup.intervalSeconds || 5) * 1000;
+    const timer = window.setInterval(async () => {
+      try {
+        const result = await imGatewayApi.getFeishuSetupStatus(feishuSetup.sessionId);
+        if (result.status === "confirmed") {
+          setFeishuSetup((current) =>
+            current?.sessionId === feishuSetup.sessionId
+              ? {
+                  ...current,
+                  status: "confirmed",
+                  appId: result.app_id,
+                  ownerOpenId: result.owner_open_id,
+                  baseUrl: result.base_url,
+                }
+              : current,
+          );
+          message.success("Feishu app created. Continue to connect it.");
+          return;
+        }
+        if (result.status === "expired") {
+          setFeishuSetup((current) =>
+            current?.sessionId === feishuSetup.sessionId
+              ? { ...current, status: "expired" }
+              : current,
+          );
+        }
+      } catch {
+        // keep polling; transient network errors are common while the user is in the browser
+      }
+    }, delay);
+    return () => window.clearInterval(timer);
+  }, [feishuSetup, feishuSetupLoading]);
 
   useEffect(() => {
     if (weixinLogin || weixinLoginLoading) return;
@@ -795,6 +1019,25 @@ function ConnectionsPanel({
     }
   };
 
+  const addProviderOkText = editingProvider
+    ? "Save"
+    : createStep === 0
+    ? "Next"
+    : createStep === 1
+    ? setupProviderType === "weixin"
+      ? createdProvider
+        ? "Waiting for Scan"
+        : "Create and Show QR"
+      : feishuSetup?.status === "confirmed"
+      ? "Connect"
+      : "Waiting for Setup"
+    : "Save Configuration";
+  const addProviderOkDisabled =
+    !editingProvider &&
+    createStep === 1 &&
+    ((setupProviderType === "weixin" && !!createdProvider) ||
+      (setupProviderType === "feishu" && feishuSetup?.status !== "confirmed"));
+
   return (
     <div>
       <PanelHeader description="Manage IM bot connections">
@@ -811,7 +1054,17 @@ function ConnectionsPanel({
       ) : providers.length === 0 ? (
         <Empty description="No IM providers configured" />
       ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <div
+          data-testid="settings-im-provider-list"
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 12,
+            maxWidth: 750,
+            width: "100%",
+            margin: "0 auto",
+          }}
+        >
           {providers.map((p) => {
             const status = statusMap[p.id];
             return (
@@ -946,7 +1199,11 @@ function ConnectionsPanel({
                           testId={`settings-im-provider-${p.id}-work-dir`}
                         />
                       ) : (
-                        <SecondaryInline>Global default</SecondaryInline>
+                        <CopyableOverflowText
+                          value={inheritedWorkDir}
+                          code
+                          testId={`settings-im-provider-${p.id}-work-dir`}
+                        />
                       ),
                     },
                     {
@@ -997,13 +1254,173 @@ function ConnectionsPanel({
         onCancel={() => {
           setAddModalOpen(false);
           setEditingProvider(null);
+          setCreateStep(0);
+          setCreatedProvider(null);
+          setFeishuSetup(null);
           form.resetFields();
         }}
-        okText={editingProvider ? "Save" : "Create"}
+        okText={addProviderOkText}
+        okButtonProps={{ disabled: addProviderOkDisabled }}
+        width={editingProvider || createStep === 2 ? 720 : 560}
       >
-        <Form form={form} layout="vertical">
-          {editingProvider ? (
-            <Descriptions size="small" column={1} style={{ marginBottom: 16 }}>
+        {!editingProvider && (
+          <Steps
+            size="small"
+            current={createStep}
+            style={{ marginBottom: 20 }}
+            items={[
+              { title: "Type" },
+              { title: "Connect" },
+              { title: "Configure" },
+            ]}
+          />
+        )}
+        <Form
+          form={form}
+          layout="vertical"
+          size={editingProvider ? "small" : "middle"}
+          className={editingProvider ? "im-provider-edit-form-compact" : undefined}
+        >
+          {!editingProvider && createStep === 0 ? (
+            <Space direction="vertical" size={12} style={{ width: "100%" }}>
+              <Text type="secondary">
+                Choose the IM platform first. Bifrost will only ask for platform-specific setup on
+                the next step.
+              </Text>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                {([
+                  {
+                    type: "weixin" as const,
+                    title: "Weixin",
+                    desc: "Create the provider, then scan the QR code with Weixin.",
+                  },
+                  {
+                    type: "feishu" as const,
+                    title: "Feishu",
+                    desc: "Scan a Lark CLI style QR code to create the bot app automatically.",
+                  },
+                ]).map((option) => (
+                  <Card
+                    key={option.type}
+                    size="small"
+                    hoverable
+                    onClick={() => setSetupProviderType(option.type)}
+                    style={{
+                      borderColor:
+                        setupProviderType === option.type
+                          ? token.colorPrimary
+                          : token.colorBorderSecondary,
+                    }}
+                  >
+                    <Space direction="vertical" size={4}>
+                      <Space>
+                        <ApiOutlined
+                          style={{
+                            color:
+                              setupProviderType === option.type
+                                ? token.colorPrimary
+                                : token.colorTextSecondary,
+                          }}
+                        />
+                        <Text strong>{option.title}</Text>
+                      </Space>
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        {option.desc}
+                      </Text>
+                    </Space>
+                  </Card>
+                ))}
+              </div>
+            </Space>
+          ) : !editingProvider && createStep === 1 ? (
+            <>
+              <Form.Item
+                name="id"
+                label="Provider ID"
+                rules={[{ required: true, message: "Required" }]}
+              >
+                <Input placeholder={defaultProviderId(setupProviderType)} disabled={!!createdProvider} />
+              </Form.Item>
+              <Form.Item name="display_name" label="Display Name">
+                <Input placeholder="Optional display name" disabled={!!createdProvider} />
+              </Form.Item>
+              {setupProviderType === "weixin" ? (
+                <Alert
+                  type={createdProvider ? "success" : "info"}
+                  showIcon
+                  message={
+                    createdProvider
+                      ? "Provider created. Complete the QR scan in the Weixin dialog."
+                      : "Create the provider first, then Bifrost will immediately show the Weixin QR code."
+                  }
+                />
+              ) : (
+                <Space direction="vertical" size={14} style={{ width: "100%", alignItems: "center" }}>
+                  {feishuSetup?.verificationUrl ? (
+                    <>
+                      <QRCode value={feishuSetup.verificationUrl} size={220} />
+                      <Text code style={{ wordBreak: "break-all", textAlign: "center" }}>
+                        {feishuSetup.verificationUrl}
+                      </Text>
+                      <Button
+                        href={feishuSetup.verificationUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        Open Setup Page
+                      </Button>
+                    </>
+                  ) : feishuSetup?.status === "error" ? null : (
+                    <Spin />
+                  )}
+                  <Alert
+                    type={
+                      feishuSetup?.status === "confirmed"
+                        ? "success"
+                        : feishuSetup?.status === "expired"
+                        ? "warning"
+                        : feishuSetup?.status === "error"
+                        ? "error"
+                        : "info"
+                    }
+                    showIcon
+                    style={{ width: "100%" }}
+                    message={
+                      feishuSetup?.status === "confirmed"
+                        ? "App created. Bifrost has the App ID and Secret on the server."
+                        : feishuSetup?.status === "expired"
+                        ? "The setup QR code expired. Close and start again."
+                        : feishuSetup?.status === "error"
+                        ? "Failed to start Feishu setup."
+                        : "Create the bot app in the opened page. Bifrost will detect completion automatically."
+                    }
+                    description={
+                      feishuSetup?.status === "error" ? (
+                        <Space direction="vertical" size={8}>
+                          <Text type="secondary">{feishuSetup.errorMessage}</Text>
+                          <Button
+                            size="small"
+                            loading={feishuSetupLoading}
+                            onClick={() => void startFeishuSetupSession()}
+                          >
+                            Retry Setup
+                          </Button>
+                        </Space>
+                      ) : feishuSetup?.appId ? (
+                        <Text code>{feishuSetup.appId}</Text>
+                      ) : undefined
+                    }
+                  />
+                </Space>
+              )}
+            </>
+          ) : editingProvider ? (
+            <Descriptions
+              size="small"
+              column={1}
+              className="im-provider-edit-summary"
+              style={{ marginBottom: 10 }}
+            >
               <Descriptions.Item label="Provider ID">
                 <Text code>{editingProvider.id}</Text>
               </Descriptions.Item>
@@ -1031,51 +1448,22 @@ function ConnectionsPanel({
               </Descriptions.Item>
             </Descriptions>
           ) : (
-            <>
-              <Form.Item
-                name="id"
-                label="Provider ID"
-                rules={[{ required: true, message: "Required" }]}
-              >
-                <Input placeholder="e.g. weixin-main" />
-              </Form.Item>
-              <Form.Item
-                name="provider_type"
-                label="Type"
-                initialValue="feishu"
-                rules={[{ required: true, message: "Required" }]}
-              >
-                <Select
-                  placeholder="Select provider type"
-                  options={[
-                    { label: "Weixin", value: "weixin" },
-                    { label: "Feishu", value: "feishu" },
-                  ]}
-                />
-              </Form.Item>
-              {selectedProviderType === "feishu" ? (
-                <Form.Item>
-                  <Text type="secondary" style={{ fontSize: 13 }}>
-                    前往{" "}
-                    <a
-                      href="https://open.larkoffice.com/page/launcher?from=backend_oneclick"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                    >
-                      飞书开放平台
-                    </a>{" "}
-                    一键创建机器人应用并获取 App ID 和 App Secret。
-                  </Text>
-                </Form.Item>
-              ) : (
-                <Form.Item>
-                  <Text type="secondary" style={{ fontSize: 13 }}>
-                    创建后点击列表中的扫码按钮，用微信扫描二维码完成 ClawBot 接入。
-                  </Text>
-                </Form.Item>
-              )}
-            </>
+            createdProvider ? (
+              <Descriptions size="small" column={1} style={{ marginBottom: 16 }}>
+                <Descriptions.Item label="Provider ID">
+                  <Text code>{createdProvider.id}</Text>
+                </Descriptions.Item>
+                <Descriptions.Item label="Type">
+                  <Tag>{createdProvider.provider_type}</Tag>
+                </Descriptions.Item>
+                <Descriptions.Item label="Connection">
+                  <Tag color="green">Connected</Tag>
+                </Descriptions.Item>
+              </Descriptions>
+            ) : null
           )}
+          {(editingProvider || createStep === 2) && (
+            <>
           <Form.Item name="display_name" label="Display Name">
             <Input placeholder="Optional display name" />
           </Form.Item>
@@ -1085,35 +1473,37 @@ function ConnectionsPanel({
           <Form.Item name="owner_open_id" label="Owner Open ID">
             <Input placeholder="Optional owner open_id" />
           </Form.Item>
-          <Form.Item name="app_id" label="App ID">
-            <Input
-              placeholder={
-                selectedProviderType === "weixin"
-                  ? "Filled after QR login"
-                  : "Application ID"
-              }
-              disabled={selectedProviderType === "weixin"}
-            />
-          </Form.Item>
-          <Form.Item
-            name="app_secret"
-            label={selectedProviderType === "weixin" ? "Bot Token" : "App Secret"}
-            extra={
-              selectedProviderType === "weixin"
-                ? "Filled by QR login. Manual replacement is only for debugging."
-                : editingProvider
-                ? "Leave blank to keep the existing secret. Enter a new value to replace it."
-                : undefined
-            }
-          >
-            <Input.Password
-              placeholder={
-                selectedProviderType === "weixin"
-                  ? "Filled by QR login"
-                  : "Application secret (stored securely)"
-              }
-            />
-          </Form.Item>
+          {editingProvider && (
+            <>
+              <Form.Item name="app_id" label="App ID">
+                <Input
+                  placeholder={
+                    selectedProviderType === "weixin"
+                      ? "Filled after QR login"
+                      : "Application ID"
+                  }
+                  disabled={selectedProviderType === "weixin"}
+                />
+              </Form.Item>
+              <Form.Item
+                name="app_secret"
+                label={selectedProviderType === "weixin" ? "Bot Token" : "App Secret"}
+                extra={
+                  selectedProviderType === "weixin"
+                    ? "Filled by QR login. Manual replacement is only for debugging."
+                    : "Leave blank to keep the existing secret. Enter a new value to replace it."
+                }
+              >
+                <Input.Password
+                  placeholder={
+                    selectedProviderType === "weixin"
+                      ? "Filled by QR login"
+                      : "Application secret (stored securely)"
+                  }
+                />
+              </Form.Item>
+            </>
+          )}
           <Form.Item
             name={["agent_config", "runner"]}
             label="Agent Runner"
@@ -1187,6 +1577,8 @@ function ConnectionsPanel({
           >
             <Switch />
           </Form.Item>
+            </>
+          )}
         </Form>
       </Modal>
       <Modal
