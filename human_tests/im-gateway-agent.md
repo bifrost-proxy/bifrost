@@ -2207,3 +2207,29 @@ rm -rf ./.bifrost-test
   - 普通消息继续由原当前 Runner 处理。
   - 目标 Runner 子会话可独立保留自己的 `sessionKey` / `threadId` / `conversationId`，但不会替代当前 UI 线程主键。
 - **执行记录（2026-05-26）**: PASS — 执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "slash runner" --reporter=line`，在同一浏览器用例中完成 slash Runner call 后断言顶部 `agent-chat-runner-tag` 保持 `Runner: bifrost_agent`，未切换为目标 `codex`；执行 `cargo test -p bifrost-admin external_runner_persists_user_message_before_result_and_dedupes_finish --lib -- --nocapture`，确认外部 Runner 原有会话持久化与完成事件去重路径未被 runner call 改动破坏。
+
+### TC-IMA-129: Agent Chat Threads 大量历史默认分批加载与虚拟滚动
+
+- **前置条件**:
+  - 使用当前源码启动 Bifrost Admin 与 WebUI；启动服务必须使用临时数据目录并携带 `--no-system-proxy`。
+  - `GET /_bifrost/api/im-gateway/agent/sessions/all` 返回至少 55 条 Agent Chat 线程摘要，可用 Playwright mock API 或测试数据构造，不复用或删除用户重要历史。
+  - 测试需覆盖亮色和暗色主题下的 Threads 侧栏。
+- **操作步骤**:
+  1. 打开 `/_bifrost/ai?aiSection=agent-chat&agentSection=chat&view=active`。
+  2. 检查右侧 Threads 卡片底部显示 `Showing 20 of <total>`，且出现 `Load more` 按钮。
+  3. 检查 DOM 中实际挂载的线程行数量明显小于 `sessions/all` 返回总数，证明列表没有把所有历史线程一次性渲染出来。
+  4. 滚动 Threads 列表到底部，点击 `Load more`。
+  5. 检查底部计数变为 `Showing 40 of <total>`。
+  6. 再次滚动到底部并点击 `Load more`，直到全部加载。
+  7. 检查计数变为 `Showing <total> of <total>`，`Load more` 按钮消失。
+  8. 点击已加载范围内任意线程，确认左侧会话内容正常切换且只有该线程为选中态。
+  9. 切换暗色主题，重复检查 Threads 行文本、Runner 标识、计数和按钮均清晰可读。
+- **预期结果**:
+  - 首屏 Threads 只开放 20 条历史线程，不会一次性展示全部历史。
+  - 每次点击 `Load more` 只追加 20 条，最后不足 20 条时追加剩余线程。
+  - Threads 列表使用虚拟滚动，DOM 中的线程行数量不随总线程数线性膨胀。
+  - 已选线程、右键菜单、running 状态点、来源/Runner 标识和亮暗主题可读性不退化。
+- **清理步骤**:
+  - 关闭 Playwright 浏览器。
+  - 由 Playwright global teardown 清理临时服务；如手动启动过服务，停止对应临时端口服务并删除临时数据目录。
+- **执行记录（2026-05-26）**: PASS — 创建用例后立即执行 `pnpm --dir web exec playwright test tests/ui/agent-chat-threads.spec.ts --grep "loads in batches" --reporter=line`，真实 Chromium UI 用例通过。测试构造 55 条 Agent Chat 线程，打开 `/_bifrost/ai?aiSection=agent-chat&agentSection=chat` 后确认底部计数初始为 `Showing 20 of 55` 且 `Load more` 可见；DOM 中 `agent-chat-thread-virtual-row` 数量小于 55；滚动到底部点击后计数依次变为 `Showing 40 of 55` 和 `Showing 55 of 55`，最终 `Load more` 消失，验证默认 20 条、每次追加 20 条与虚拟滚动均生效。

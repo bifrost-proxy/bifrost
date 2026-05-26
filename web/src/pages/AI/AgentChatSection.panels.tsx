@@ -1,5 +1,6 @@
-import { useState, type CSSProperties } from "react";
-import { Card, Divider, Dropdown, Empty, Input, Modal, Popover, Space, Tag, Typography, theme } from "antd";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import { Button, Card, Divider, Dropdown, Empty, Input, Modal, Popover, Space, Tag, Typography, theme } from "antd";
 import {
   DatabaseOutlined,
   DeleteOutlined,
@@ -33,6 +34,10 @@ import {
 
 const { Text, Paragraph } = Typography;
 
+const INITIAL_THREAD_LOAD_COUNT = 20;
+const THREAD_LOAD_INCREMENT = 20;
+const THREAD_ROW_ESTIMATE_SIZE = 68;
+
 type AgentChatSettingsModalProps = {
   open: boolean;
   onClose: () => void;
@@ -65,8 +70,10 @@ export function AgentThreadListCard({
   onDeleteThread,
 }: AgentThreadListCardProps) {
   const { token } = theme.useToken();
+  const threadScrollRef = useRef<HTMLDivElement>(null);
   const [contextThreadKey, setContextThreadKey] = useState<string | null>(null);
   const [confirmDeleteKey, setConfirmDeleteKey] = useState<string | null>(null);
+  const [visibleLimit, setVisibleLimit] = useState(INITIAL_THREAD_LOAD_COUNT);
   const isRunningThread = (thread: AgentThreadSummary) =>
     thread.status === "active" && thread.running !== false;
   const threadDuration = (thread: AgentThreadSummary) => {
@@ -98,6 +105,51 @@ export function AgentThreadListCard({
       <Text type="secondary">Duration: {formatDuration(threadDuration(thread))}</Text>
     </Space>
   );
+  const selectedThreadIndex = useMemo(
+    () =>
+      threads.findIndex((thread) =>
+        isSelectedThread(thread, sessionKey, historyPath, view),
+      ),
+    [historyPath, sessionKey, threads, view],
+  );
+  const minimumVisibleLimit = Math.max(
+    INITIAL_THREAD_LOAD_COUNT,
+    selectedThreadIndex >= 0 ? selectedThreadIndex + 1 : 0,
+  );
+
+  useEffect(() => {
+    setVisibleLimit((current) => {
+      if (threads.length === 0) {
+        return INITIAL_THREAD_LOAD_COUNT;
+      }
+      const required = Math.min(threads.length, minimumVisibleLimit);
+      return Math.min(threads.length, Math.max(current, required));
+    });
+  }, [minimumVisibleLimit, threads.length]);
+
+  const visibleThreads = useMemo(
+    () => threads.slice(0, Math.min(visibleLimit, threads.length)),
+    [threads, visibleLimit],
+  );
+  const hasMoreThreads = visibleThreads.length < threads.length;
+
+  // eslint-disable-next-line react-hooks/incompatible-library
+  const threadVirtualizer = useVirtualizer({
+    count: visibleThreads.length,
+    getScrollElement: () => threadScrollRef.current,
+    estimateSize: () => THREAD_ROW_ESTIMATE_SIZE,
+    overscan: 6,
+    getItemKey: (index) => {
+      const thread = visibleThreads[index];
+      return thread?.history_path || thread?.session_key || index;
+    },
+  });
+
+  const loadMoreThreads = () => {
+    setVisibleLimit((current) =>
+      Math.min(threads.length, Math.max(current, INITIAL_THREAD_LOAD_COUNT) + THREAD_LOAD_INCREMENT),
+    );
+  };
 
   return (
     <Card
@@ -111,147 +163,194 @@ export function AgentThreadListCard({
         </Space>
       }
     >
-      <div style={styles.threadList} data-testid="agent-chat-thread-list">
+      <div
+        ref={threadScrollRef}
+        style={styles.threadList}
+        data-testid="agent-chat-thread-list"
+      >
         {threads.length === 0 ? (
           <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No previous sessions" />
         ) : (
-          threads.map((thread) => {
-            const selected = isSelectedThread(thread, sessionKey, historyPath, view);
-            const threadKey = thread.history_path || thread.session_key;
-            const showConfirm = confirmDeleteKey === threadKey;
-            return (
-              <Dropdown
-                key={threadKey}
-                trigger={["contextMenu"]}
-                open={contextThreadKey === threadKey}
-                onOpenChange={(open) => {
-                  if (open) {
-                    setContextThreadKey(threadKey);
-                    return;
-                  }
-                  setContextThreadKey((current) => (current === threadKey ? null : current));
-                  setConfirmDeleteKey((current) => (current === threadKey ? null : current));
-                }}
-                dropdownRender={() => (
-                  <div style={styles.threadContextMenu}>
-                    {showConfirm ? (
-                      <Space direction="vertical" size={6} style={{ width: "100%" }}>
-                        <Text type="secondary" style={{ fontSize: 12 }}>
-                          Delete this conversation?
-                        </Text>
-                        <Space size={6}>
-                          <button
-                            type="button"
-                            data-testid="agent-chat-thread-delete-confirm"
-                            style={{
-                              ...styles.threadContextButton,
-                              ...styles.threadContextDangerButton,
-                            }}
-                            onClick={() => {
-                              onDeleteThread(thread);
-                              setConfirmDeleteKey(null);
-                              setContextThreadKey(null);
-                            }}
-                          >
-                            Confirm
-                          </button>
-                          <button
-                            type="button"
-                            data-testid="agent-chat-thread-delete-cancel"
-                            style={styles.threadContextButton}
-                            onClick={() => {
-                              setConfirmDeleteKey(null);
-                            }}
-                          >
-                            Cancel
-                          </button>
-                        </Space>
-                      </Space>
-                    ) : (
+          <>
+            <div
+              style={{
+                ...styles.threadVirtualSpace,
+                height: threadVirtualizer.getTotalSize(),
+              }}
+              data-testid="agent-chat-thread-virtual-space"
+            >
+              {threadVirtualizer.getVirtualItems().map((virtualItem) => {
+                const thread = visibleThreads[virtualItem.index];
+                if (!thread) {
+                  return null;
+                }
+                const selected = isSelectedThread(thread, sessionKey, historyPath, view);
+                const threadKey = thread.history_path || thread.session_key;
+                const showConfirm = confirmDeleteKey === threadKey;
+                return (
+                  <div
+                    key={virtualItem.key}
+                    ref={threadVirtualizer.measureElement}
+                    data-index={virtualItem.index}
+                    data-testid="agent-chat-thread-virtual-row"
+                    style={{
+                      ...styles.threadVirtualRow,
+                      transform: `translateY(${virtualItem.start}px)`,
+                    }}
+                  >
+                    <Dropdown
+                      trigger={["contextMenu"]}
+                      open={contextThreadKey === threadKey}
+                      onOpenChange={(open) => {
+                        if (open) {
+                          setContextThreadKey(threadKey);
+                          return;
+                        }
+                        setContextThreadKey((current) => (current === threadKey ? null : current));
+                        setConfirmDeleteKey((current) => (current === threadKey ? null : current));
+                      }}
+                      dropdownRender={() => (
+                        <div style={styles.threadContextMenu}>
+                          {showConfirm ? (
+                            <Space direction="vertical" size={6} style={{ width: "100%" }}>
+                              <Text type="secondary" style={{ fontSize: 12 }}>
+                                Delete this conversation?
+                              </Text>
+                              <Space size={6}>
+                                <button
+                                  type="button"
+                                  data-testid="agent-chat-thread-delete-confirm"
+                                  style={{
+                                    ...styles.threadContextButton,
+                                    ...styles.threadContextDangerButton,
+                                  }}
+                                  onClick={() => {
+                                    onDeleteThread(thread);
+                                    setConfirmDeleteKey(null);
+                                    setContextThreadKey(null);
+                                  }}
+                                >
+                                  Confirm
+                                </button>
+                                <button
+                                  type="button"
+                                  data-testid="agent-chat-thread-delete-cancel"
+                                  style={styles.threadContextButton}
+                                  onClick={() => {
+                                    setConfirmDeleteKey(null);
+                                  }}
+                                >
+                                  Cancel
+                                </button>
+                              </Space>
+                            </Space>
+                          ) : (
+                            <button
+                              type="button"
+                              data-testid="agent-chat-thread-delete"
+                              style={{
+                                ...styles.threadContextButton,
+                                ...styles.threadContextDangerButton,
+                              }}
+                              onClick={() => setConfirmDeleteKey(threadKey)}
+                            >
+                              <DeleteOutlined /> Delete
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    >
                       <button
                         type="button"
-                        data-testid="agent-chat-thread-delete"
-                        style={{
-                          ...styles.threadContextButton,
-                          ...styles.threadContextDangerButton,
+                        onClick={() => onOpenThread(thread)}
+                        onContextMenu={() => {
+                          setContextThreadKey(threadKey);
+                          setConfirmDeleteKey(null);
                         }}
-                        onClick={() => setConfirmDeleteKey(threadKey)}
+                        data-testid="agent-chat-thread-item"
+                        data-selected={selected ? "true" : "false"}
+                        aria-current={selected ? "true" : undefined}
+                        style={{
+                          ...styles.threadItem,
+                          ...(selected ? styles.threadItemSelected : {}),
+                        }}
                       >
-                        <DeleteOutlined /> Delete
+                        <Popover
+                          trigger="hover"
+                          placement="left"
+                          content={threadDetails(thread)}
+                          mouseEnterDelay={0.5}
+                        >
+                          <span
+                            data-testid="agent-chat-thread-runner-mark"
+                            style={{
+                              ...styles.threadRunnerMark,
+                              ...(selected
+                                ? {
+                                    background: token.colorPrimaryBgHover,
+                                    color: token.colorPrimary,
+                                  }
+                                : {}),
+                            }}
+                          >
+                            {formatThreadRunnerMark(thread)}
+                          </span>
+                        </Popover>
+                        <span style={{ flex: "1 1 auto", minWidth: 0 }}>
+                          <span
+                            style={{
+                              display: "block",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap",
+                              fontWeight: selected ? 600 : 500,
+                            }}
+                          >
+                            {thread.title || thread.session_key}
+                          </span>
+                          <span
+                            style={{
+                              display: "block",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap",
+                              color: selected ? token.colorPrimaryText : token.colorTextSecondary,
+                              fontSize: 12,
+                              marginTop: 2,
+                            }}
+                          >
+                            {threadMeta(thread)}
+                          </span>
+                        </span>
+                        {isRunningThread(thread) ? (
+                          <span aria-label="running" title="Running" style={styles.runningDot} />
+                        ) : null}
                       </button>
-                    )}
+                    </Dropdown>
                   </div>
-                )}
+                );
+              })}
+            </div>
+            <div style={styles.threadLoadMoreBar}>
+              <Text
+                type="secondary"
+                style={{ fontSize: 12 }}
+                data-testid="agent-chat-thread-load-count"
               >
-                <button
-                  type="button"
-                  onClick={() => onOpenThread(thread)}
-                  onContextMenu={() => {
-                    setContextThreadKey(threadKey);
-                    setConfirmDeleteKey(null);
-                  }}
-                  data-testid="agent-chat-thread-item"
-                  data-selected={selected ? "true" : "false"}
-                  aria-current={selected ? "true" : undefined}
-                  style={{
-                    ...styles.threadItem,
-                    ...(selected ? styles.threadItemSelected : {}),
-                  }}
+                Showing {visibleThreads.length} of {threads.length}
+              </Text>
+              {hasMoreThreads ? (
+                <Button
+                  size="small"
+                  block
+                  onClick={loadMoreThreads}
+                  data-testid="agent-chat-thread-load-more"
                 >
-                  <Popover
-                    trigger="hover"
-                    placement="left"
-                    content={threadDetails(thread)}
-                    mouseEnterDelay={0.5}
-                  >
-                    <span
-                      data-testid="agent-chat-thread-runner-mark"
-                      style={{
-                        ...styles.threadRunnerMark,
-                        ...(selected
-                          ? {
-                              background: token.colorPrimaryBgHover,
-                              color: token.colorPrimary,
-                            }
-                          : {}),
-                      }}
-                    >
-                      {formatThreadRunnerMark(thread)}
-                    </span>
-                  </Popover>
-                  <span style={{ flex: "1 1 auto", minWidth: 0 }}>
-                    <span
-                      style={{
-                        display: "block",
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                        fontWeight: selected ? 600 : 500,
-                      }}
-                    >
-                      {thread.title || thread.session_key}
-                    </span>
-                    <span
-                      style={{
-                        display: "block",
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                        color: selected ? token.colorPrimaryText : token.colorTextSecondary,
-                        fontSize: 12,
-                        marginTop: 2,
-                      }}
-                    >
-                      {threadMeta(thread)}
-                    </span>
-                  </span>
-                  {isRunningThread(thread) ? (
-                    <span aria-label="running" title="Running" style={styles.runningDot} />
-                  ) : null}
-                </button>
-              </Dropdown>
-            );
-          })
+                  Load more
+                </Button>
+              ) : null}
+            </div>
+          </>
         )}
       </div>
     </Card>
