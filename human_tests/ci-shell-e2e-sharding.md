@@ -600,6 +600,36 @@
 - `test_agent_direct_path_switch.sh` 输出 `[agent-direct-path-switch] PASS`，验证绝对路径消息直接切换工作目录，不调用模型，并且 `/status` 展示新工作路径。
 - 两个真实执行均使用临时数据目录、`--no-system-proxy` 与动态非 9900 端口。
 
+### TC-CS-29: Cargo-heavy shell E2E 串行调度避免 artifact lock 超时
+
+**操作步骤**：
+1. 执行 runner 语法检查：
+   ```bash
+   bash -n scripts/run_all_e2e.sh
+   ```
+2. 静态检查所有本轮观察到 Cargo artifact lock 等待的 shell E2E 用例都登记在 `CARGO_HEAVY_TESTS`：
+   ```bash
+   rg -n 'CARGO_HEAVY_TESTS|test_agent_builtin_status_runtime.sh|test_agent_codex_parity_contracts.sh|test_agent_loop_runtime_limits.sh|test_asr_model_autonomy.sh|test_asr_task_pause_resume.sh|test_chatgpt_web_behavior_artifacts.sh|test_client_process_transport_attribution.sh|test_http3_e2e.sh|test_im_agent_markdown_image_reply.sh|test_im_agent_streaming_progress_card.sh|test_im_gateway_long_reply_delivery_regression.sh|test_long_term_memory_remember_recall.sh|test_qwen3_asr_local_server.sh|test_qwen3_asr_runtime_guards.sh|test_skill_creator_flow.sh|test_sync_login_direct_e2e.sh|test_utf8_safe_preview_e2e.sh|test_voice_input_runtime.sh|is_cargo_heavy|serial_tests' scripts/run_all_e2e.sh
+   ```
+3. 列出 CI shard 1 的 shell 用例，确认本次失败相关的 cargo-heavy 用例仍属于 shard 1：
+   ```bash
+   BIFROST_E2E_SHARD_INDEX=1 BIFROST_E2E_SHARD_TOTAL=3 \
+     scripts/run_all_e2e.sh --ci --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests
+   ```
+4. 用本轮失败 artifact 复核原始根因：
+   ```bash
+   grep -R -n 'Blocking.*file lock on artifact directory' \
+     /tmp/bifrost-ci-26451521064/linux-shard-1/.e2e-reports \
+     /tmp/bifrost-ci-26451521064/macos-shard-1/.e2e-reports | head -20
+   ```
+
+**预期结果**：
+- 语法检查通过。
+- 静态检查显示 `CARGO_HEAVY_TESTS` 包含当前 CI 失败相关和同 shard 观察到 artifact lock 等待的 Cargo 用例，且 `is_cargo_heavy` 会把它们加入 `serial_tests`。
+- shard 1 列表仍包含 `test_agent_codex_parity_contracts.sh`、`test_chatgpt_web_behavior_artifacts.sh`、`test_im_agent_streaming_progress_card.sh`、`test_long_term_memory_remember_recall.sh`、`test_skill_creator_flow.sh` 等用例，说明覆盖范围不被跳过，只改变调度方式。
+- artifact 复核能定位原始失败是并发 Cargo artifact lock 竞争，而不是业务断言失败。
+- 该回归不启动 Bifrost，不使用 9900，不修改系统代理。
+
 ## 本轮执行记录
 
 测试日期：2026-05-09
@@ -625,6 +655,7 @@
 | TC-CS-26 | 通过 | 2026-05-12 本轮执行：CI run `25725290679` 的 `E2E Shell (Linux, shard 3/3)` 失败日志显示 `sh: 1: astro: not found` 与 `Local package.json exists, but node_modules missing`，`E2E Shell (aarch64-apple-darwin, shard 3/3)` 同 shard 上传失败 artifact；修复后执行 `rm -rf site/node_modules` 模拟缺失依赖，`bash -n e2e-tests/tests/test_site_docs_sync.sh` 通过，随后使用本机可用新版 Node 执行 `PATH="/opt/homebrew/bin:$PATH" bash e2e-tests/tests/test_site_docs_sync.sh`，输出 `Installing site dependencies for docs sync E2E...`、`Docs sync verification passed for 27 docs pages.`、探针文档加入后的 `Docs sync verification passed for 28 docs pages.`、`Site link verification passed.`、`Site docs sync E2E passed.`，确认缺少 site 依赖时会自举安装并完成 Astro build。该回归未启动 Bifrost，未使用 9900，未修改系统代理。 |
 | TC-CS-27 | 通过 | 2026-05-20 本轮执行：`bash -n` 覆盖 13 个本轮涉及的 shell E2E 脚本并通过；静态检查确认这些脚本中 `start --no-system-proxy` 的 Bifrost 启动窗口均包含 `--skip-cert-check`，且 `test_asr_task_cli.sh` 包含 `SKIP_BUILD=true` 复用 `target/release/bifrost` 的路径。随后使用 release binary 执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_asr_task_cli.sh`，输出 `skipping build, using .../target/release/bifrost` 与 `[asr-task-cli-e2e] PASS`；执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_values_hot_reload.sh`，汇总 `Total: 5 / Passed: 5 / Failed: 0`；执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_proxy_chain_auth_e2e.sh`，汇总 `Total: 11 / Passed: 11 / Failed: 0`，包含 absolute-form 与 `Proxy-Authorization` 断言。全部真实执行使用临时数据目录、`--no-system-proxy` 与非 9900 端口。 |
 | TC-CS-28 | 通过 | 2026-05-23 本轮执行：`bash -n e2e-tests/tests/test_agent_chat_history_continue.sh e2e-tests/tests/test_agent_direct_path_switch.sh` 通过；`rg -n 'SKIP_BUILD\|target/release/bifrost\|target/debug/bifrost\|skipping build, using\|bifrost binary not found' ...` 显示两个脚本均在 `SKIP_BUILD=true` 分支默认 release binary、本地构建分支默认 debug binary，并在 binary 不可执行时明确失败。随后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_agent_chat_history_continue.sh`，输出 `skipping build, using .../target/release/bifrost` 与 `[agent-chat-history-continue] PASS`；执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_agent_direct_path_switch.sh`，输出 `skipping build, using .../target/release/bifrost` 与 `[agent-direct-path-switch] PASS`。两条真实链路均使用临时数据目录、`--no-system-proxy` 与动态非 9900 端口，未再查找 `target/debug/bifrost`。 |
+| TC-CS-29 | 通过 | 2026-05-26 本轮执行：`bash -n scripts/run_all_e2e.sh` 退出码 0；`rg -n 'CARGO_HEAVY_TESTS\|... \|serial_tests' scripts/run_all_e2e.sh` 显示 `test_agent_builtin_status_runtime.sh`、`test_agent_codex_parity_contracts.sh`、`test_agent_loop_runtime_limits.sh`、`test_asr_model_autonomy.sh`、`test_asr_task_pause_resume.sh`、`test_chatgpt_web_behavior_artifacts.sh`、`test_client_process_transport_attribution.sh`、`test_http3_e2e.sh`、`test_im_agent_markdown_image_reply.sh`、`test_im_agent_streaming_progress_card.sh`、`test_im_gateway_long_reply_delivery_regression.sh`、`test_long_term_memory_remember_recall.sh`、`test_qwen3_asr_local_server.sh`、`test_qwen3_asr_runtime_guards.sh`、`test_skill_creator_flow.sh`、`test_sync_login_direct_e2e.sh`、`test_utf8_safe_preview_e2e.sh`、`test_voice_input_runtime.sh` 等 Cargo-heavy 用例，以及 `is_cargo_heavy` 加入 `serial_tests` 的调度逻辑；`BIFROST_E2E_SHARD_INDEX=1 BIFROST_E2E_SHARD_TOTAL=3 scripts/run_all_e2e.sh --ci --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests` 显示失败相关用例仍在 shard 1 覆盖范围内；`grep -R -n 'Blocking.*file lock on artifact directory' /tmp/bifrost-ci-26451521064/... | head -20` 定位到 Linux/macOS shard 1 artifact 中多个 Cargo-heavy 用例等待 Cargo artifact lock 的原始症状。该回归未启动 Bifrost，未使用 9900，未修改系统代理。 |
 
 ## 清理步骤
 
