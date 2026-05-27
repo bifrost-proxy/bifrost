@@ -524,8 +524,8 @@ impl AgentSession {
     }
 
     /// Track token usage from an API response.
-    pub(crate) fn track_token_usage(&mut self, total_tokens: u64) {
-        self.last_response_tokens = Some(total_tokens);
+    pub(crate) fn track_token_usage(&mut self, context_tokens: u64, total_tokens: u64) {
+        self.last_response_tokens = Some(context_tokens);
         // The assistant/model item is appended just after the API response is
         // processed. Until that append happens, the current history length is
         // the correct "items after last model item" boundary.

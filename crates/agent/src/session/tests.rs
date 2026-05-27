@@ -150,7 +150,7 @@ fn test_apply_plan_update_empty_snapshot_clears_plan() {
     let mut session = AgentSession::new("plan-empty-clear");
     session.current_plan = Some(vec![PlanStep {
         step: "旧任务".to_string(),
-        status: PlanStepStatus::InProgress,
+        status: PlanStepStatus::Completed,
     }]);
     session.plan_repair_attempts = 1;
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -180,6 +180,39 @@ fn test_apply_plan_update_empty_snapshot_clears_plan() {
 
     let state = persistence::load_session_runtime_state(recorder.file_path()).unwrap();
     assert!(state.current_plan.is_none());
+}
+
+#[test]
+fn test_apply_plan_update_empty_snapshot_does_not_clear_unfinished_plan() {
+    use crate::tools::update_plan::{PlanStep, PlanStepStatus, UpdatePlanArgs};
+
+    let mut session = AgentSession::new("plan-empty-unfinished");
+    let existing = vec![PlanStep {
+        step: "继续实现".to_string(),
+        status: PlanStepStatus::InProgress,
+    }];
+    session.current_plan = Some(existing.clone());
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (plan_tx, mut plan_rx) = tokio::sync::mpsc::unbounded_channel();
+    (session.progress_sender, session.plan_sender) = (Some(progress_tx), Some(plan_tx));
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut recorder = ConversationRecorder::new(dir.path(), "plan-empty-unfinished");
+    let mut recorder_ref = Some(&mut recorder);
+    apply_plan_update_snapshot(
+        &mut session,
+        &mut recorder_ref,
+        UpdatePlanArgs {
+            explanation: Some("当前消息只包含项目规则".to_string()),
+            plan: Vec::new(),
+        },
+    );
+    recorder.close();
+
+    assert_eq!(session.current_plan, Some(existing));
+    assert!(progress_rx.try_recv().is_err());
+    assert!(plan_rx.try_recv().is_err());
+    assert!(!recorder.file_path().exists());
 }
 
 #[test]
@@ -486,16 +519,16 @@ fn test_track_token_usage() {
     assert!(session.total_tokens_used.is_none());
 
     session.add_user_message("hello");
-    session.track_token_usage(1000);
+    session.track_token_usage(900, 1000);
     assert_eq!(session.total_tokens_used, Some(1000));
-    assert_eq!(session.last_response_tokens, Some(1000));
+    assert_eq!(session.last_response_tokens, Some(900));
     assert_eq!(session.last_response_history_len, Some(1));
 
     session.add_assistant_message("hi");
     assert_eq!(session.last_response_history_len, Some(2));
-    session.track_token_usage(2000);
+    session.track_token_usage(1500, 2000);
     assert_eq!(session.total_tokens_used, Some(3000));
-    assert_eq!(session.last_response_tokens, Some(2000));
+    assert_eq!(session.last_response_tokens, Some(1500));
     assert_eq!(session.last_response_history_len, Some(2));
 }
 
@@ -503,11 +536,11 @@ fn test_track_token_usage() {
 fn test_background_token_usage_does_not_update_context_snapshot() {
     let mut session = AgentSession::new("test");
 
-    session.track_token_usage(1000);
+    session.track_token_usage(800, 1000);
     session.track_background_token_usage(2500);
 
     assert_eq!(session.total_tokens_used, Some(3500));
-    assert_eq!(session.last_response_tokens, Some(1000));
+    assert_eq!(session.last_response_tokens, Some(800));
 }
 
 #[test]
@@ -558,7 +591,7 @@ fn test_record_compaction_event_includes_emergency_and_total_tokens() {
 #[test]
 fn test_history_growth_after_response_is_incrementally_accounted() {
     let mut session = AgentSession::new("test");
-    session.track_token_usage(100);
+    session.track_token_usage(100, 120);
     assert_eq!(session.last_response_tokens, Some(100));
 
     session.add_user_message(&"x".repeat(1_000));
@@ -571,7 +604,7 @@ fn test_history_growth_after_response_is_incrementally_accounted() {
 fn test_model_message_advances_incremental_token_boundary() {
     let mut session = AgentSession::new("test");
     session.add_user_message(&"old context ".repeat(100));
-    session.track_token_usage(500);
+    session.track_token_usage(500, 700);
     session.add_assistant_message("covered by usage");
     session.add_user_message(&"new context ".repeat(100));
 
@@ -723,7 +756,7 @@ async fn test_queued_continuation_compacts_before_next_model_request() {
     session.add_assistant_message("reply");
     session.add_user_message("second");
     session.add_assistant_message("final before queued message");
-    session.track_token_usage(17);
+    session.track_token_usage(17, 30);
     session.add_user_message(&"queued context ".repeat(200));
 
     assert!(compact::should_compact(&session, &config));
@@ -754,7 +787,7 @@ async fn test_queued_continuation_compacts_before_next_model_request() {
     .await;
 
     assert_eq!(session.compaction_count, 1);
-    assert_eq!(session.total_tokens_used, Some(94));
+    assert_eq!(session.total_tokens_used, Some(107));
     let expected_snapshot_tokens =
         session
             .estimate_tokens()
@@ -1116,7 +1149,7 @@ async fn test_compaction_recomputes_context_snapshot_and_drops_tool_suffix() {
     session.add_user_message("first");
     session.add_assistant_message("reply");
     session.add_user_message("inspect generated output");
-    session.track_token_usage(17);
+    session.track_token_usage(17, 30);
     session.add_assistant_tool_calls(&[test_tool_call("call-1")]);
     session.add_tool_result("call-1", &"tool-output ".repeat(2_000));
 
@@ -1141,7 +1174,7 @@ async fn test_compaction_recomputes_context_snapshot_and_drops_tool_suffix() {
     assert!(result.performed);
     assert_eq!(result.pre_tokens, pre_tokens);
     assert_eq!(session.compaction_count, 1);
-    assert_eq!(session.total_tokens_used, Some(94));
+    assert_eq!(session.total_tokens_used, Some(107));
     assert!(session.history.iter().all(|message| message.role == "user"));
     assert!(session
         .history
@@ -1173,7 +1206,7 @@ async fn test_compaction_runs_for_first_tool_turn_below_four_messages() {
     let mut session = AgentSession::new("first-tool-turn-compaction");
 
     session.add_user_message("inspect generated output");
-    session.track_token_usage(17);
+    session.track_token_usage(17, 30);
     session.add_assistant_tool_calls(&[test_tool_call("call-1")]);
     session.add_tool_result("call-1", &"tool-output ".repeat(2_000));
 
@@ -1388,7 +1421,7 @@ fn test_trim_oldest_messages_invalidates_response_tokens() {
     session.add_assistant_tool_calls(&[test_tool_call("call-1")]);
     session.add_tool_result("call-1", "[file] Cargo.toml");
     session.add_user_message("continue");
-    session.track_token_usage(10);
+    session.track_token_usage(10, 20);
 
     let trimmed = trim_oldest_messages_count(&mut session, 2);
 

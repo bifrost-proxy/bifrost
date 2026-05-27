@@ -85,18 +85,18 @@
 - `compact.rs` 的测试覆盖 compaction request 不包含 plan 自然语言消息。
 - `compact.rs` 中不存在会诱导模型保留或丢弃 completed 历史步骤的 Bifrost-only plan prompt。
 
-### TC-APL-06：空 plan 快照清空当前 plan
+### TC-APL-06：空 plan 快照只清空已完成或空闲 plan
 
 **操作步骤**：
 1. 执行：
    ```bash
-   rg -n 'incoming 为空表示当前任务不再需要展示 plan|record_plan_cleared|第三轮提交 `plan: \\[\\]`' design/agent-plan-lifecycle.md human_tests/update-plan.md
-   rg -n 'test_apply_plan_update_empty_snapshot_clears_plan|test_empty_plan_allowed_as_clear_snapshot|record_plan_cleared' crates/agent/src/session/tests.rs crates/agent/src/tools/update_plan.rs crates/agent/src/session/turn_loop.rs
+   rg -n 'incoming 为空表示当前任务不再需要展示 plan|当前 `current_plan` 仍有未完成步骤时，不清空|record_plan_cleared|第三轮提交 `plan: \\[\\]`' design/agent-plan-lifecycle.md human_tests/update-plan.md
+   rg -n 'test_apply_plan_update_empty_snapshot_clears_plan|test_apply_plan_update_empty_snapshot_does_not_clear_unfinished_plan|test_empty_plan_allowed_as_clear_snapshot|record_plan_cleared' crates/agent/src/session/tests.rs crates/agent/src/tools/update_plan.rs crates/agent/src/session/turn_loop.rs
    ```
 
 **预期结果**：
-- 设计文档明确 `plan: []` 是清空当前快照，不是非法输入。
-- 单元测试覆盖空 plan 清空 runtime state、progress card 空快照和持久化恢复。
+- 设计文档明确 `plan: []` 是清空当前快照，不是非法输入，但未完成计划不能被空快照误清。
+- 单元测试覆盖已完成 plan 可被空 plan 清空，以及未完成 plan 收到空 plan 时保持原状态且不推送/不持久化。
 - 真实 API human test 覆盖第三轮 `plan: []` 清空后 `plan_steps == null`。
 
 ### TC-APL-07：typed PlanUpdate runtime event 方案验收

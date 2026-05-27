@@ -369,6 +369,8 @@ assert active.get("current_loop_iteration") == 1, active
 assert active.get("max_loop_iterations") == 8, active
 assert active.get("context_window_tokens") == 250000, active
 assert active.get("compaction_count") == 0, active
+assert active.get("last_response_tokens") in (None, 0), active
+assert active.get("total_tokens_used") in (None, 0), active
 assert active.get("estimated_context_tokens", 0) >= 0, active
 assert active.get("context_usage_percent") is not None, active
 PY
@@ -405,6 +407,8 @@ assert "Runner 类型: bifrost_agent" in text, text
 assert "历史对话轮次:" in text, text
 assert "API 累计 token:" in text, text
 assert "Context 用量:" in text, text
+assert "API 累计 token: 17" in text, text
+assert "Context 用量: ~12 / 250K" in text, text
 PY
 
 echo "[agent-builtin-status-runtime] starting a tool-output growth request"
@@ -480,6 +484,7 @@ assert active.get("compaction_count") == 1, active
 assert estimated < 10000, active
 assert active.get("message_count", 0) < 10, active
 assert active.get("last_response_tokens", 0) == estimated, active
+assert active.get("total_tokens_used") == 94, active
 estimated_text = fmt_metric(estimated)
 assert f"Context 用量: ~{estimated_text} / 250K" in text, text
 assert "实时 token: 累计" in text and f"最近响应 {estimated_text}" in text, text

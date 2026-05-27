@@ -326,9 +326,22 @@ pub struct ModelResponse {
 /// Token usage information from the model response.
 #[derive(Debug, Clone)]
 pub struct TokenUsage {
+    /// Server-observed input/context tokens for this request.
     pub prompt_tokens: u64,
+    /// Server-observed output tokens for this request.
     pub completion_tokens: u64,
+    /// Server-observed total API tokens for cost/accounting.
     pub total_tokens: u64,
+}
+
+impl TokenUsage {
+    pub fn context_tokens(&self) -> u64 {
+        if self.prompt_tokens > 0 {
+            self.prompt_tokens
+        } else {
+            self.total_tokens
+        }
+    }
 }
 
 /// Result of a tool execution.
@@ -360,6 +373,28 @@ pub struct ToolCallLog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn token_usage_context_prefers_prompt_tokens() {
+        let usage = TokenUsage {
+            prompt_tokens: 90,
+            completion_tokens: 10,
+            total_tokens: 100,
+        };
+
+        assert_eq!(usage.context_tokens(), 90);
+    }
+
+    #[test]
+    fn token_usage_context_falls_back_to_total_tokens() {
+        let usage = TokenUsage {
+            prompt_tokens: 0,
+            completion_tokens: 10,
+            total_tokens: 100,
+        };
+
+        assert_eq!(usage.context_tokens(), 100);
+    }
 
     #[test]
     fn user_with_images_serializes_openai_content_parts() {

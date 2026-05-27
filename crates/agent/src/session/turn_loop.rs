@@ -1958,9 +1958,10 @@ pub async fn run_turn_with_mcp_multimodal(
             return Ok(stopped_turn_result(session, &mut recorder, tool_calls_log));
         }
 
-        // Track real token usage from API response
+        // Track real token usage from API response. Cumulative cost uses
+        // total_tokens while the active context snapshot uses input tokens.
         if let Some(ref usage) = response.usage {
-            session.track_token_usage(usage.total_tokens);
+            session.track_token_usage(usage.context_tokens(), usage.total_tokens);
             // Update AutoCompactWindow prefill baseline from server-observed input tokens.
             session
                 .auto_compact_window
@@ -2030,10 +2031,13 @@ pub async fn run_turn_with_mcp_multimodal(
                     if let Some(ref mut rec) = recorder {
                         let response_tokens =
                             response.usage.as_ref().map(|usage| usage.total_tokens);
-                        if let Err(e) = rec.record_assistant_message_with_tokens(
+                        let context_tokens =
+                            response.usage.as_ref().map(|usage| usage.context_tokens());
+                        if let Err(e) = rec.record_assistant_message_with_token_usage(
                             &session.session_key,
                             &content,
                             response_tokens,
+                            context_tokens,
                         ) {
                             warn!(error = %e, "failed to record assistant message (guide inject)");
                         }
@@ -2086,10 +2090,13 @@ pub async fn run_turn_with_mcp_multimodal(
                     if let Some(ref mut rec) = recorder {
                         let response_tokens =
                             response.usage.as_ref().map(|usage| usage.total_tokens);
-                        if let Err(e) = rec.record_assistant_message_with_tokens(
+                        let context_tokens =
+                            response.usage.as_ref().map(|usage| usage.context_tokens());
+                        if let Err(e) = rec.record_assistant_message_with_token_usage(
                             &session.session_key,
                             &content,
                             response_tokens,
+                            context_tokens,
                         ) {
                             warn!(error = %e, "failed to record assistant message (queue)");
                         }
@@ -2139,10 +2146,12 @@ pub async fn run_turn_with_mcp_multimodal(
             // Record assistant message
             if let Some(ref mut rec) = recorder {
                 let response_tokens = response.usage.as_ref().map(|usage| usage.total_tokens);
-                if let Err(e) = rec.record_assistant_message_with_tokens(
+                let context_tokens = response.usage.as_ref().map(|usage| usage.context_tokens());
+                if let Err(e) = rec.record_assistant_message_with_token_usage(
                     &session.session_key,
                     &content,
                     response_tokens,
+                    context_tokens,
                 ) {
                     warn!(error = %e, "failed to record assistant message");
                 }
@@ -2773,6 +2782,19 @@ pub(super) fn apply_plan_update_snapshot(
     args: crate::tools::update_plan::UpdatePlanArgs,
 ) {
     let steps = args.plan;
+    if steps.is_empty()
+        && session
+            .current_plan
+            .as_deref()
+            .is_some_and(plan_has_unfinished_steps)
+    {
+        warn!(
+            session_key = %session.session_key,
+            explanation = ?args.explanation,
+            "ignored empty update_plan snapshot while current plan has unfinished steps"
+        );
+        return;
+    }
     session.current_plan = if steps.is_empty() {
         None
     } else {

@@ -43,6 +43,7 @@ Codex 的 `update_plan` 行为更简单：
 - 同一 turn 中一次 `update_plan` 成功调用只消费一次，不因后续工具调用被重复落库或重复推送。
 - 保留 runtime 强制收口能力：最终结束前仍可要求未完成 plan 补成 completed。
 - `plan_cleared` 仍用于任务完成后新 turn 清空已完成计划。
+- 空 `plan: []` 只允许在当前没有未完成步骤、或当前计划已全部完成后清空；如果当前 plan 仍有 `pending` / `in_progress`，runtime 会忽略空快照，避免“仅收到项目规则/上下文消息”时误清未完成任务。
 
 ### 必须不破坏
 
@@ -79,6 +80,7 @@ current_plan = if incoming_plan.is_empty() { None } else { incoming_plan }
 要求：
 
 - incoming 为空表示当前任务不再需要展示 plan，runtime 清空 `current_plan`、发送空 `PlanUpdated` 清空展示，并持久化 `plan_cleared`。
+- incoming 为空但当前 `current_plan` 仍有未完成步骤时，不清空、不推送、不持久化 `plan_cleared`，只记录 warn；任务完成后新 turn 的 `clear_completed_plan_for_new_turn()` 仍负责自动清理已完成计划。
 - 同名步骤从 completed 变回 pending/in_progress 是允许的，表示模型重新规划。
 - 缺失步骤表示该步骤不属于当前计划，不能补回。
 
@@ -198,6 +200,7 @@ Compaction prompt 必须继续参考 Codex：handoff summary 只描述当前进�
 - `multiple_plan_updates_in_one_turn_are_applied_in_order`：同一 turn 两次 plan update，最终 `current_plan` 等于第二次。
 - `plan_cleared_still_resets_completed_plan_on_new_turn`：完成后下一轮仍清空。
 - `empty_plan_snapshot_clears_current_plan`：模型提交 `plan: []` 时清空 runtime state、发送空展示快照，并恢复为无当前 plan。
+- `empty_plan_snapshot_does_not_clear_unfinished_plan`：当前计划有未完成步骤时，空快照不清空 runtime state，也不发送空展示快照或写入 `plan_cleared`。
 - `persistence_replay_uses_last_plan_snapshot`：多个 `plan_updated` 回放后只保留最后一个。
 - `update_plan_tool_output_is_plain_text`：成功工具结果为 `Plan updated`，不包含 `UPDATE_PLAN:` 或参数 JSON。
 - `update_plan_runtime_event_is_returned_by_tool_result`：typed event 由 `UpdatePlanTool::execute()` 解析参数后放入 `ToolResult.runtime_events`，而不是从 `ToolResult.output` 或 completion 阶段反解析。

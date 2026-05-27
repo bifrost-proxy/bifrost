@@ -1563,7 +1563,7 @@ mod tests {
     fn test_token_usage_snapshot_marks_stale_server_usage_as_mixed() {
         let mut session = AgentSession::new("mixed-token-source");
         session.history.push(ChatMessage::assistant("covered"));
-        session.track_token_usage(100);
+        session.track_token_usage(100, 120);
         session
             .history
             .push(ChatMessage::user("new estimated context"));

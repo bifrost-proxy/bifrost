@@ -159,6 +159,16 @@ impl ConversationRecorder {
         content: &str,
         tokens: Option<u64>,
     ) -> Result<(), String> {
+        self.record_assistant_message_with_token_usage(session_key, content, tokens, None)
+    }
+
+    pub fn record_assistant_message_with_token_usage(
+        &mut self,
+        session_key: &str,
+        content: &str,
+        tokens: Option<u64>,
+        context_tokens: Option<u64>,
+    ) -> Result<(), String> {
         self.record(ConversationEvent {
             timestamp: current_time_secs(),
             event_type: event_types::ASSISTANT_MESSAGE.to_string(),
@@ -166,6 +176,7 @@ impl ConversationRecorder {
             content: serde_json::json!({
                 "message": content,
                 "tokens": tokens,
+                "context_tokens": context_tokens,
             }),
         })
     }
@@ -705,7 +716,12 @@ pub fn load_session_runtime_state(path: &Path) -> Result<SessionRuntimeState, St
                 }
             }
             event_types::ASSISTANT_MESSAGE => {
-                if let Some(tokens) = event.content.get("tokens").and_then(|v| v.as_u64()) {
+                if let Some(tokens) = event
+                    .content
+                    .get("context_tokens")
+                    .or_else(|| event.content.get("tokens"))
+                    .and_then(|v| v.as_u64())
+                {
                     state.last_response_tokens = Some(tokens);
                 }
             }
@@ -1465,10 +1481,10 @@ mod tests {
         let path = dir.path().join("context-snapshot.jsonl");
         std::fs::write(
             &path,
-            r#"{"timestamp":1,"event_type":"assistant_message","session_key":"s","content":{"message":"first","tokens":120}}"#
+            r#"{"timestamp":1,"event_type":"assistant_message","session_key":"s","content":{"message":"first","tokens":120,"context_tokens":100}}"#
                 .to_string()
                 + "\n"
-                + r#"{"timestamp":2,"event_type":"assistant_message","session_key":"s","content":{"message":"second","tokens":180}}"#
+                + r#"{"timestamp":2,"event_type":"assistant_message","session_key":"s","content":{"message":"second","tokens":180,"context_tokens":150}}"#
                 + "\n"
                 + r#"{"timestamp":3,"event_type":"session_end","session_key":"s","content":{"total_tokens":50000}}"#
                 + "\n",
@@ -1477,6 +1493,23 @@ mod tests {
 
         let state = load_session_runtime_state(&path).unwrap();
         assert_eq!(state.total_tokens_used, Some(50000));
+        assert_eq!(state.last_response_tokens, Some(150));
+    }
+
+    #[test]
+    fn test_load_session_runtime_state_falls_back_to_total_tokens_for_old_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("context-snapshot-legacy.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"timestamp":1,"event_type":"assistant_message","session_key":"s","content":{"message":"legacy","tokens":180}}"#
+                .to_string()
+                + "\n",
+        )
+        .unwrap();
+
+        let state = load_session_runtime_state(&path).unwrap();
+        assert_eq!(state.total_tokens_used, Some(180));
         assert_eq!(state.last_response_tokens, Some(180));
     }
 
@@ -1505,12 +1538,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut recorder = ConversationRecorder::new(dir.path(), "assistant-tokens");
         recorder
-            .record_assistant_message_with_tokens("assistant-tokens", "done", Some(42))
+            .record_assistant_message_with_token_usage(
+                "assistant-tokens",
+                "done",
+                Some(42),
+                Some(35),
+            )
             .unwrap();
         recorder.close();
 
         let state = load_session_runtime_state(recorder.file_path()).unwrap();
         assert_eq!(state.total_tokens_used, Some(42));
+        assert_eq!(state.last_response_tokens, Some(35));
         assert_eq!(state.compaction_count, 0);
     }
 
