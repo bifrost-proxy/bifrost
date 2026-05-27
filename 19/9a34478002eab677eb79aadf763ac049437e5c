@@ -1,0 +1,574 @@
+crates/bifrost-admin/src/handlers/voice/mod.rs
+  0933d43eccea4a99 28,161 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a16d5b1462ed113221edfb6","tool_type":"agent","tool_id":"RunCommand","line_ranges":[{"Single":28},{"Single":161}]}]}
+web/src/pages/ASR/components/VoiceWakeActionsCard.tsx
+  0933d43eccea4a99 1-571 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a16d5b1462ed113221edfb6","tool_type":"agent","tool_id":"RunCommand","line_ranges":[{"Range":[1,571]}]}]}
+crates/bifrost-cli/tests/cli_commands.rs
+  0933d43eccea4a99 5-7,131-191 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a16d5b1462ed113221edfb6","tool_type":"agent","tool_id":"RunCommand","line_ranges":[{"Range":[5,7]},{"Range":[131,191]}]}]}
+human_tests/voice-wake-actions.md
+  0933d43eccea4a99 1-182 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a16d5b1462ed113221edfb6","tool_type":"agent","tool_id":"RunCommand","line_ranges":[{"Range":[1,182]}]}]}
+crates/bifrost-cli/src/cli.rs
+  0933d43eccea4a99 687-691,708-804 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a16d5b1462ed113221edfb6","tool_type":"agent","tool_id":"RunCommand","line_ranges":[{"Range":[687,691]},{"Range":[708,804]}]}]}
+human_tests/readme.md
+  0933d43eccea4a99 31 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a16d5b1462ed113221edfb6","tool_type":"agent","tool_id":"RunCommand","line_ranges":[{"Single":31}]}]}
+e2e-tests/tests/test_voice_wake_actions.sh
+  0933d43eccea4a99 1-137 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a16d5b1462ed113221edfb6","tool_type":"agent","tool_id":"RunCommand","line_ranges":[{"Range":[1,137]}]}]}
+web/tests/ui/voice-wake-actions.spec.ts
+  0933d43eccea4a99 1-253 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a16d5b1462ed113221edfb6","tool_type":"agent","tool_id":"RunCommand","line_ranges":[{"Range":[1,253]}]}]}
+crates/bifrost-admin/src/handlers/voice/wake.rs
+  0933d43eccea4a99 1-1163 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a16d5b1462ed113221edfb6","tool_type":"agent","tool_id":"RunCommand","line_ranges":[{"Range":[1,1163]}]}]}
+web/src/api/asr.ts
+  0933d43eccea4a99 4,86-206,770-819 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a16d5b1462ed113221edfb6","tool_type":"agent","tool_id":"RunCommand","line_ranges":[{"Single":4},{"Range":[86,206]},{"Range":[770,819]}]}]}
+web/src/pages/ASR/index.tsx
+  0933d43eccea4a99 62,1363 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a16d5b1462ed113221edfb6","tool_type":"agent","tool_id":"RunCommand","line_ranges":[{"Single":62},{"Single":1363}]}]}
+crates/bifrost-admin/src/handlers/asr_jobs/diarization.rs
+  0933d43eccea4a99 9,107-110,619-1045,1288-1304,1402-1403 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a16d5b1462ed113221edfb6","tool_type":"agent","tool_id":"RunCommand","line_ranges":[{"Single":9},{"Range":[107,110]},{"Range":[619,1045]},{"Range":[1288,1304]},{"Range":[1402,1403]}]}]}
+design/voice-wake-actions.md
+  0933d43eccea4a99 1-127 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a16d5b1462ed113221edfb6","tool_type":"agent","tool_id":"RunCommand","line_ranges":[{"Range":[1,127]}]}]}
+crates/bifrost-cli/src/commands/voice.rs
+  0933d43eccea4a99 15,18-22,75-78,546-784 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a16d5b1462ed113221edfb6","tool_type":"agent","tool_id":"RunCommand","line_ranges":[{"Single":15},{"Range":[18,22]},{"Range":[75,78]},{"Range":[546,784]}]}]}
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "199a34478002eab677eb79aadf763ac049437e5c",
+  "prompts": {
+    "0933d43eccea4a99": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a0d8c77df50548d8ddbbec9",
+        "model": "c_o_new_thinking__dev"
+      },
+      "human_author": "liuhua.jia <liuhua.jia@bytedance.com>",
+      "messages": [],
+      "total_additions": 5670,
+      "total_deletions": 36,
+      "accepted_lines": 5640,
+      "overriden_lines": 0
+    }
+  },
+  "attestation_metadata": {
+    "crates/bifrost-admin/src/handlers/asr_jobs/diarization.rs": [
+      {
+        "hash": "0933d43eccea4a99",
+        "line_ranges": [
+          {
+            "Single": 9
+          },
+          {
+            "Range": [
+              107,
+              110
+            ]
+          },
+          {
+            "Range": [
+              619,
+              1045
+            ]
+          },
+          {
+            "Range": [
+              1288,
+              1304
+            ]
+          },
+          {
+            "Range": [
+              1402,
+              1403
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a16d5b1462ed113221edfb6",
+            "tool_type": "agent",
+            "tool_id": "RunCommand",
+            "line_ranges": [
+              {
+                "Single": 9
+              },
+              {
+                "Range": [
+                  107,
+                  110
+                ]
+              },
+              {
+                "Range": [
+                  619,
+                  1045
+                ]
+              },
+              {
+                "Range": [
+                  1288,
+                  1304
+                ]
+              },
+              {
+                "Range": [
+                  1402,
+                  1403
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "crates/bifrost-admin/src/handlers/voice/mod.rs": [
+      {
+        "hash": "0933d43eccea4a99",
+        "line_ranges": [
+          {
+            "Single": 28
+          },
+          {
+            "Single": 161
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a16d5b1462ed113221edfb6",
+            "tool_type": "agent",
+            "tool_id": "RunCommand",
+            "line_ranges": [
+              {
+                "Single": 28
+              },
+              {
+                "Single": 161
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "crates/bifrost-admin/src/handlers/voice/wake.rs": [
+      {
+        "hash": "0933d43eccea4a99",
+        "line_ranges": [
+          {
+            "Range": [
+              1,
+              1163
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a16d5b1462ed113221edfb6",
+            "tool_type": "agent",
+            "tool_id": "RunCommand",
+            "line_ranges": [
+              {
+                "Range": [
+                  1,
+                  1163
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "crates/bifrost-cli/src/cli.rs": [
+      {
+        "hash": "0933d43eccea4a99",
+        "line_ranges": [
+          {
+            "Range": [
+              687,
+              691
+            ]
+          },
+          {
+            "Range": [
+              708,
+              804
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a16d5b1462ed113221edfb6",
+            "tool_type": "agent",
+            "tool_id": "RunCommand",
+            "line_ranges": [
+              {
+                "Range": [
+                  687,
+                  691
+                ]
+              },
+              {
+                "Range": [
+                  708,
+                  804
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "crates/bifrost-cli/src/commands/voice.rs": [
+      {
+        "hash": "0933d43eccea4a99",
+        "line_ranges": [
+          {
+            "Single": 15
+          },
+          {
+            "Range": [
+              18,
+              22
+            ]
+          },
+          {
+            "Range": [
+              75,
+              78
+            ]
+          },
+          {
+            "Range": [
+              546,
+              784
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a16d5b1462ed113221edfb6",
+            "tool_type": "agent",
+            "tool_id": "RunCommand",
+            "line_ranges": [
+              {
+                "Single": 15
+              },
+              {
+                "Range": [
+                  18,
+                  22
+                ]
+              },
+              {
+                "Range": [
+                  75,
+                  78
+                ]
+              },
+              {
+                "Range": [
+                  546,
+                  784
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "crates/bifrost-cli/tests/cli_commands.rs": [
+      {
+        "hash": "0933d43eccea4a99",
+        "line_ranges": [
+          {
+            "Range": [
+              5,
+              7
+            ]
+          },
+          {
+            "Range": [
+              131,
+              191
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a16d5b1462ed113221edfb6",
+            "tool_type": "agent",
+            "tool_id": "RunCommand",
+            "line_ranges": [
+              {
+                "Range": [
+                  5,
+                  7
+                ]
+              },
+              {
+                "Range": [
+                  131,
+                  191
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "design/voice-wake-actions.md": [
+      {
+        "hash": "0933d43eccea4a99",
+        "line_ranges": [
+          {
+            "Range": [
+              1,
+              127
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a16d5b1462ed113221edfb6",
+            "tool_type": "agent",
+            "tool_id": "RunCommand",
+            "line_ranges": [
+              {
+                "Range": [
+                  1,
+                  127
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "e2e-tests/tests/test_voice_wake_actions.sh": [
+      {
+        "hash": "0933d43eccea4a99",
+        "line_ranges": [
+          {
+            "Range": [
+              1,
+              137
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a16d5b1462ed113221edfb6",
+            "tool_type": "agent",
+            "tool_id": "RunCommand",
+            "line_ranges": [
+              {
+                "Range": [
+                  1,
+                  137
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "human_tests/readme.md": [
+      {
+        "hash": "0933d43eccea4a99",
+        "line_ranges": [
+          {
+            "Single": 31
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a16d5b1462ed113221edfb6",
+            "tool_type": "agent",
+            "tool_id": "RunCommand",
+            "line_ranges": [
+              {
+                "Single": 31
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "human_tests/voice-wake-actions.md": [
+      {
+        "hash": "0933d43eccea4a99",
+        "line_ranges": [
+          {
+            "Range": [
+              1,
+              182
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a16d5b1462ed113221edfb6",
+            "tool_type": "agent",
+            "tool_id": "RunCommand",
+            "line_ranges": [
+              {
+                "Range": [
+                  1,
+                  182
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "web/src/api/asr.ts": [
+      {
+        "hash": "0933d43eccea4a99",
+        "line_ranges": [
+          {
+            "Single": 4
+          },
+          {
+            "Range": [
+              86,
+              206
+            ]
+          },
+          {
+            "Range": [
+              770,
+              819
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a16d5b1462ed113221edfb6",
+            "tool_type": "agent",
+            "tool_id": "RunCommand",
+            "line_ranges": [
+              {
+                "Single": 4
+              },
+              {
+                "Range": [
+                  86,
+                  206
+                ]
+              },
+              {
+                "Range": [
+                  770,
+                  819
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "web/src/pages/ASR/components/VoiceWakeActionsCard.tsx": [
+      {
+        "hash": "0933d43eccea4a99",
+        "line_ranges": [
+          {
+            "Range": [
+              1,
+              571
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a16d5b1462ed113221edfb6",
+            "tool_type": "agent",
+            "tool_id": "RunCommand",
+            "line_ranges": [
+              {
+                "Range": [
+                  1,
+                  571
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "web/src/pages/ASR/index.tsx": [
+      {
+        "hash": "0933d43eccea4a99",
+        "line_ranges": [
+          {
+            "Single": 62
+          },
+          {
+            "Single": 1363
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a16d5b1462ed113221edfb6",
+            "tool_type": "agent",
+            "tool_id": "RunCommand",
+            "line_ranges": [
+              {
+                "Single": 62
+              },
+              {
+                "Single": 1363
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "web/tests/ui/voice-wake-actions.spec.ts": [
+      {
+        "hash": "0933d43eccea4a99",
+        "line_ranges": [
+          {
+            "Range": [
+              1,
+              253
+            ]
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a16d5b1462ed113221edfb6",
+            "tool_type": "agent",
+            "tool_id": "RunCommand",
+            "line_ranges": [
+              {
+                "Range": [
+                  1,
+                  253
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "remote_transcripts": {
+    "0933d43eccea4a99": {
+      "tool": "trae",
+      "conversation_id": "6a0d8c77df50548d8ddbbec9",
+      "session_id": "6a0d8c77df50548d8ddbbec9",
+      "status": "remote_only",
+      "message": "Remote transcript resolution is not implemented yet for TRAE prompts."
+    }
+  }
+}
