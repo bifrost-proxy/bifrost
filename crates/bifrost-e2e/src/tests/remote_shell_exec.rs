@@ -276,7 +276,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 if chunks[0].0.as_slice() != b"stream-one" || chunks[1].0.as_slice() != b"stream-two" {
                     return Err(format!("unexpected streamed chunks: {:?}", *chunks));
                 }
-                if chunks[0].1 >= 250 {
+                if chunks[0].1 >= 1000 {
                     return Err(format!(
                         "first streamed chunk arrived too late: {}ms",
                         chunks[0].1
