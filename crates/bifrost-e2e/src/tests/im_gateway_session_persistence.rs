@@ -16,7 +16,7 @@ use std::net::TcpListener;
 use std::sync::Arc;
 
 pub fn get_all_tests() -> Vec<TestCase> {
-    vec![
+    let tests = vec![
         TestCase::standalone(
             "im_gateway_agent_chat_restores_history_after_service_restart",
             "Validate /agent/chat restores prior session history from disk after IM Gateway service restart and clears it after /reset",
@@ -111,9 +111,11 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 .get("response")
                 .and_then(|value| value.as_str())
                 .ok_or_else(|| format!("restored status response missing text: {status_json}"))?;
-            if !status_text.contains("Context 用量: ~15 /") {
+            if !status_text.contains("Context 用量: ~10 /")
+                || !status_text.contains("API 累计 token: 15")
+            {
                 return Err(format!(
-                    "Expected restored status to use latest response context snapshot, got: {status_text}"
+                    "Expected restored status to use latest response context snapshot and cumulative token usage, got: {status_text}"
                 ));
             }
 
@@ -317,7 +319,8 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 Ok(())
             },
         ),
-    ]
+    ];
+    tests.into_iter().map(TestCase::serial).collect()
 }
 
 struct ChatCompletionMock {

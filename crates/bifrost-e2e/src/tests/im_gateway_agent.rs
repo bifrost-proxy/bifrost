@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 pub fn get_all_tests() -> Vec<TestCase> {
-    vec![
+    let tests = vec![
         TestCase::standalone(
             "im_gateway_agent_config_get",
             "Validate GET /api/im-gateway/agent returns default config with expected fields",
@@ -1782,7 +1782,8 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 Ok(())
             },
         ),
-    ]
+    ];
+    tests.into_iter().map(TestCase::serial).collect()
 }
 
 struct ChatCompletionMock {

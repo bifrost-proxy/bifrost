@@ -86,6 +86,7 @@ pub struct TestCase {
     pub name: String,
     pub description: String,
     pub category: String,
+    pub parallel_safe: bool,
     test_type: TestCaseType,
 }
 
@@ -99,6 +100,7 @@ impl TestCase {
             name: name.to_string(),
             description: String::new(),
             category: category.to_string(),
+            parallel_safe: true,
             test_type: TestCaseType::Standard {
                 rules: rules.iter().map(|s| s.to_string()).collect(),
                 test_fn: Arc::new(move |client| Box::pin(test_fn(client))),
@@ -115,10 +117,16 @@ impl TestCase {
             name: name.to_string(),
             description: description.to_string(),
             category: category.to_string(),
+            parallel_safe: true,
             test_type: TestCaseType::Standalone {
                 test_fn: Arc::new(move || Box::pin(test_fn())),
             },
         }
+    }
+
+    pub fn serial(mut self) -> Self {
+        self.parallel_safe = false;
+        self
     }
 
     pub fn rules(&self) -> Option<&[String]> {
@@ -307,10 +315,14 @@ impl TestRunner {
         let semaphore = Arc::new(Semaphore::new(self.concurrency));
         let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let test_timeout = self.test_timeout;
+        let mut indexed_results: Vec<Option<TestResult>> = vec![None; total];
 
         let mut handles = Vec::with_capacity(total);
 
         for (i, test) in self.tests.iter().enumerate() {
+            if !test.parallel_safe {
+                continue;
+            }
             let port = self.base_port + (i as u16);
             let sem = semaphore.clone();
             let completed = completed.clone();
@@ -339,25 +351,58 @@ impl TestRunner {
                     }
                 }
 
-                result
+                (i, result)
             });
 
             handles.push(handle);
         }
 
-        let mut results = Vec::with_capacity(total);
         for handle in handles {
             match handle.await {
-                Ok(result) => results.push(result),
-                Err(e) => results.push(TestResult {
-                    name: "unknown".to_string(),
-                    category: "unknown".to_string(),
-                    status: TestStatus::Failed,
-                    duration: Duration::ZERO,
-                    error: Some(format!("Task panicked: {}", e)),
-                }),
+                Ok((idx, result)) => indexed_results[idx] = Some(result),
+                Err(e) => {
+                    let result = TestResult {
+                        name: "unknown".to_string(),
+                        category: "unknown".to_string(),
+                        status: TestStatus::Failed,
+                        duration: Duration::ZERO,
+                        error: Some(format!("Task panicked: {}", e)),
+                    };
+                    indexed_results.push(Some(result));
+                }
             }
         }
+
+        for (i, test) in self.tests.iter().enumerate() {
+            if test.parallel_safe {
+                continue;
+            }
+            tracing::info!("Running serial-only test: {}", test.name);
+            let port = self.base_port + (i as u16);
+            wait_for_port_available(port).await;
+            let result = run_single_test(test, port, test_timeout).await;
+            let done = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            tracing::info!(
+                "[{}/{}] {} {} ({}ms)",
+                done,
+                total,
+                match result.status {
+                    TestStatus::Passed => "✓",
+                    TestStatus::Failed => "✗",
+                    TestStatus::Skipped => "○",
+                },
+                result.name,
+                result.duration.as_millis()
+            );
+            if result.status == TestStatus::Failed {
+                if let Some(ref error) = result.error {
+                    tracing::error!("  FAIL: {} - {}", result.name, error);
+                }
+            }
+            indexed_results[i] = Some(result);
+        }
+
+        let results: Vec<TestResult> = indexed_results.into_iter().flatten().collect();
 
         for (i, result) in results.iter().enumerate() {
             self.reporter.report_test(result, i + 1, total);
@@ -476,5 +521,93 @@ async fn wait_for_port_available(port: u16) {
 impl Default for TestRunner {
     fn default() -> Self {
         Self::new(18800, Reporter::new(false))
+    }
+}
+
+#[cfg(test)]
+mod runner_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn parallel_runner_keeps_result_order_and_runs_serial_tests_after_parallel_tests() {
+        let sequence = Arc::new(AtomicUsize::new(0));
+        let serial_seen = Arc::new(AtomicUsize::new(0));
+
+        let mut runner = TestRunner::new(21000, Reporter::new(false)).with_concurrency(2);
+
+        runner.add_test(TestCase::standalone("parallel-one", "", "unit", {
+            let sequence = Arc::clone(&sequence);
+            let serial_seen = Arc::clone(&serial_seen);
+            move || {
+                let sequence = Arc::clone(&sequence);
+                let serial_seen = Arc::clone(&serial_seen);
+                async move {
+                    if serial_seen.load(Ordering::SeqCst) != 0 {
+                        return Err(
+                            "serial test ran before all parallel tests finished".to_string()
+                        );
+                    }
+                    sequence.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            }
+        }));
+
+        runner.add_test(
+            TestCase::standalone("serial-middle", "", "unit", {
+                let sequence = Arc::clone(&sequence);
+                let serial_seen = Arc::clone(&serial_seen);
+                move || {
+                    let sequence = Arc::clone(&sequence);
+                    let serial_seen = Arc::clone(&serial_seen);
+                    async move {
+                        let before = sequence.load(Ordering::SeqCst);
+                        if before != 2 {
+                            return Err(format!(
+                                "serial test started before parallel tests completed: {before}"
+                            ));
+                        }
+                        serial_seen.fetch_add(1, Ordering::SeqCst);
+                        sequence.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    }
+                }
+            })
+            .serial(),
+        );
+
+        runner.add_test(TestCase::standalone("parallel-two", "", "unit", {
+            let sequence = Arc::clone(&sequence);
+            let serial_seen = Arc::clone(&serial_seen);
+            move || {
+                let sequence = Arc::clone(&sequence);
+                let serial_seen = Arc::clone(&serial_seen);
+                async move {
+                    if serial_seen.load(Ordering::SeqCst) != 0 {
+                        return Err(
+                            "serial test ran before all parallel tests finished".to_string()
+                        );
+                    }
+                    sequence.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            }
+        }));
+
+        let results = runner.run_all().await;
+
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| result.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["parallel-one", "serial-middle", "parallel-two"]
+        );
+        assert!(results
+            .iter()
+            .all(|result| result.status == TestStatus::Passed));
+        assert_eq!(sequence.load(Ordering::SeqCst), 3);
+        assert_eq!(serial_seen.load(Ordering::SeqCst), 1);
     }
 }

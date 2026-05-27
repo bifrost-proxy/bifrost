@@ -48,3 +48,43 @@ IM Gateway Agent 会把会话历史写入 JSONL，并在服务重启后按 `sess
 ## 文档更新要求
 
 更新 `human_tests/agent-session-persistence.md` 和 `human_tests/readme.md`，记录本次 Context 恢复回归测试。
+
+## CI E2E Runner 并发稳定性修复（2026-05-27）
+
+### 功能模块详细描述
+
+`bifrost-e2e` runner 在 GitHub Actions `E2E Runner` job 中以 `BIFROST_E2E_RUNNER_JOBS=8` 并发执行。部分 standalone 用例会修改进程级共享状态，例如 `BIFROST_DATA_DIR`、Chat Gateway mock 环境变量、全局 storage data dir 或 mock request 计数语义。它们单独运行时稳定，但和其他用例并行时可能出现跨用例污染：长期记忆新 session 未消费刚生成的记忆、IM Gateway 重启恢复读到错误 context snapshot、ChatGPT Web mock run 目录缺失、stdout 首块耗时阈值被 CI 调度抖动击穿。
+
+### 实现逻辑
+
+- 在 `TestCase` 上增加 `parallel_safe` 标记，默认保持 true，避免影响大多数纯隔离用例。
+- 为 `TestCase` 增加 `serial()` builder，用于声明需要进程级隔离的用例。
+- `run_all_parallel()` 先按原并发度执行 `parallel_safe=true` 用例，再在同一 run 内逐条执行 serial-only 用例；结果仍按原 tests 索引汇总，retry 逻辑和 reporter 行为保持一致。
+- 将 `im_gateway_agent` 和 `im_gateway_session_persistence` 模块统一标记 serial-only，因为该模块存在 `BIFROST_DATA_DIR` / provider mock / session state 恢复的进程级副作用。
+- 放宽 `remote_shell_exec_streams_stdout` 的首块 stdout 阈值为 1000ms，保留“首块早于第二块且最终 stdout 分片完整”的语义，避免 CI 高负载下 250ms 绝对时间阈值造成误报。
+
+### 依赖项
+
+- `crates/bifrost-e2e/src/runner.rs`：TestCase 并行安全标记与 parallel runner 调度。
+- `crates/bifrost-e2e/src/tests/im_gateway_agent.rs`：IM Gateway Agent standalone 用例 serial-only。
+- `crates/bifrost-e2e/src/tests/im_gateway_session_persistence.rs`：IM Gateway session persistence standalone 用例 serial-only。
+- `crates/bifrost-e2e/src/tests/remote_shell_exec.rs`：stdout streaming CI 阈值。
+
+### 测试方案
+
+- 单元/编译测试：`cargo test -p bifrost-e2e --no-run` 验证 runner API 与测试集合编译。
+- E2E 测试：以 `BIFROST_E2E_RUNNER_JOBS=8` 复跑 CI 失败的 4 个用例，验证 serial-only 用例在并发 runner 下仍通过；同时单独复跑 `remote_shell_exec_streams_stdout` 验证 stdout 流式语义。
+- 真实场景测试：创建并执行 `human_tests/ci-e2e-runner.md`，覆盖 CI 并发 runner、serial-only 隔离与 stdout streaming 阈值回归。
+
+### Review/Fix/Test 闭环方案
+
+- 第 1 轮：复核 GitHub Actions 失败日志、runner 调度 diff 与 serial-only 标记范围；运行受影响 E2E；若出现失败，先归因为并发污染、测试阈值或功能缺陷再修复。
+- 第 2 轮：复查第 1 轮修复后的 `git diff`、human_tests 索引和 E2E 输出；复跑失败用例集合与最小编译/格式检查，确认无需追加轮次。
+
+### 校验要求
+
+先执行受影响 bifrost-e2e，再执行 rust-project-validate：`cargo fmt --all -- --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test --workspace --all-features`。本地 `scripts/ci/local-ci.sh` 成本高，若未执行需在最终矩阵说明风险；推送后必须用 GitHub Actions fail-fast 看护 MR CI。
+
+### 文档更新要求
+
+更新 `human_tests/ci-e2e-runner.md` 与 `human_tests/readme.md`，记录 CI E2E runner 并发隔离和失败用例回归验证。
