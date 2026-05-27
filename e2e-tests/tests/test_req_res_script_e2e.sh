@@ -17,6 +17,7 @@ export ADMIN_PORT="${ADMIN_PORT:-$PROXY_PORT}"
 export ADMIN_PATH_PREFIX="${ADMIN_PATH_PREFIX:-/_bifrost}"
 source "$E2E_DIR/test_utils/admin_client.sh"
 ECHO_HTTP_PORT="${ECHO_HTTP_PORT:-3000}"
+ECHO_HTTPS_PORT="${ECHO_HTTPS_PORT:-3443}"
 TEST_ID="${TEST_ID:-req_res_script}"
 export TEST_ID
 
@@ -31,7 +32,7 @@ cleanup() {
         safe_cleanup_proxy "$PROXY_PID"
     fi
 
-    MOCK_SERVERS=http HTTP_PORT="$ECHO_HTTP_PORT" \
+    MOCK_SERVERS=http,https HTTP_PORT="$ECHO_HTTP_PORT" HTTPS_PORT="$ECHO_HTTPS_PORT" \
     "$E2E_DIR/mock_servers/start_servers.sh" stop 2>/dev/null || true
 
     kill_bifrost_on_port "$PROXY_PORT"
@@ -57,13 +58,21 @@ assert_body_contains_ci() {
     fi
 }
 
+skip_pass() {
+    local message="$1"
+    local reason="${2:-skipped}"
+    echo "[SKIP-PASS] ${message}: ${reason}"
+}
+
 start_mock_servers() {
     mkdir -p "$TEST_DATA_DIR"
 
-    HTTP_PORT="$ECHO_HTTP_PORT" "$E2E_DIR/mock_servers/start_servers.sh" start-http > "$MOCK_LOG_FILE" 2>&1 &
+    MOCK_SERVERS=http,https HTTP_PORT="$ECHO_HTTP_PORT" HTTPS_PORT="$ECHO_HTTPS_PORT" \
+        "$E2E_DIR/mock_servers/start_servers.sh" start-bg > "$MOCK_LOG_FILE" 2>&1 &
 
     local count=0
-    while ! curl -s "http://127.0.0.1:${ECHO_HTTP_PORT}/health" >/dev/null 2>&1; do
+    while ! curl -s "http://127.0.0.1:${ECHO_HTTP_PORT}/health" >/dev/null 2>&1 \
+        || ! curl -sk "https://127.0.0.1:${ECHO_HTTPS_PORT}/health" >/dev/null 2>&1; do
         count=$((count + 1))
         if [[ $count -ge 30 ]]; then
             cat "$MOCK_LOG_FILE"
@@ -90,6 +99,21 @@ EOF
 
     cat > "$TEST_DATA_DIR/scripts/response/res_script.js" <<'EOF'
 response.headers["X-ResScript"] = "enabled";
+if (response.request.path.indexOf("/anything/http-repro") >= 0 || response.request.path.indexOf("/anything/https-repro") >= 0) {
+  response.status = 218;
+  response.statusText = "This is fine";
+  response.headers["x-repro-script"] = "ran";
+  response.headers["content-type"] = "application/json;charset=utf-8";
+  delete response.headers["content-length"];
+  delete response.headers["Content-Length"];
+  response.body = JSON.stringify({
+    via: "resScript",
+    url: response.request.url || "",
+    path: response.request.path || "",
+    statusWas: 218
+  });
+  log.info("repro resScript applied");
+}
 if (response.request.path.indexOf("/res-body") >= 0 && response.body) {
   response.body = response.body + "::res-script";
 }
@@ -119,7 +143,9 @@ start_proxy() {
     mkdir -p "$TEST_DATA_DIR"
 
     local rules_file="$TEST_DATA_DIR/req_res_script.txt"
-    sed "s/__ECHO_HTTP_PORT__/${ECHO_HTTP_PORT}/g" "$RULE_FIXTURE" > "$rules_file"
+    sed -e "s/__ECHO_HTTP_PORT__/${ECHO_HTTP_PORT}/g" \
+        -e "s/__ECHO_HTTPS_PORT__/${ECHO_HTTPS_PORT}/g" \
+        "$RULE_FIXTURE" > "$rules_file"
 
     local bifrost_bin="$PROJECT_DIR/target/release/bifrost"
     if [[ ! -x "$bifrost_bin" ]]; then
@@ -189,6 +215,29 @@ get_response_body_text() {
 get_response_body_text_raw() {
     local id="$1"
     admin_get "/api/traffic/${id}/response-body?raw=1" | jq -r '.data // ""'
+}
+
+https_request_via_proxy() {
+    local url="$1"
+    local headers_file
+    local body_file
+    headers_file="$(mktemp)"
+    body_file="$(mktemp)"
+
+    HTTP_STATUS=$(NO_PROXY="" no_proxy="" HTTP_PROXY="" http_proxy="" HTTPS_PROXY="" https_proxy="" \
+        curl -s -k \
+        --connect-timeout 10 \
+        --max-time 20 \
+        --proxy "http://${PROXY_HOST}:${PROXY_PORT}" \
+        --noproxy "" \
+        -D "$headers_file" \
+        -o "$body_file" \
+        -w '%{http_code}' \
+        "$url" 2>/dev/null) || HTTP_STATUS="000"
+    HTTP_HEADERS="$(tr -d '\r' < "$headers_file")"
+    HTTP_BODY="$(cat "$body_file")"
+
+    rm -f "$headers_file" "$body_file"
 }
 
 update_sandbox_limits() {
@@ -307,6 +356,34 @@ test_res_script_body() {
     assert_body_contains "::res-script" "$HTTP_BODY" "resScript should append response body"
 }
 
+test_https_res_script_local() {
+    local url="https://script-https.local/anything/https-repro"
+    https_request_via_proxy "$url"
+    assert_equals "218" "$HTTP_STATUS" "HTTPS resScript should override upstream status"
+    assert_header_value "x-repro-script" "ran" "$HTTP_HEADERS" "HTTPS resScript should add response header"
+    assert_body_contains 'resScript' "$HTTP_BODY" "HTTPS resScript should rewrite response body"
+    assert_body_contains '/anything/https-repro' "$HTTP_BODY" "HTTPS resScript response body should include request path"
+
+    sleep 2
+    local id
+    id=$(wait_for_traffic_id "/anything/https-repro" 30)
+    assert_not_empty "$id" "HTTPS resScript traffic should be recorded"
+
+    local detail
+    detail=$(admin_get "/api/traffic/${id}")
+    local recorded_status
+    recorded_status=$(echo "$detail" | jq -r '.status // 0')
+    assert_equals "218" "$recorded_status" "Traffic detail should record resScript-updated status"
+
+    local script_name
+    script_name=$(echo "$detail" | jq -r '.res_script_results[0].script_name // ""')
+    assert_equals "res_script" "$script_name" "Traffic detail should include resScript execution result"
+
+    local script_success
+    script_success=$(echo "$detail" | jq -r '.res_script_results[0].success // false')
+    assert_equals "true" "$script_success" "Traffic detail should mark HTTPS resScript as successful"
+}
+
 main() {
     start_mock_servers
     write_scripts
@@ -315,6 +392,7 @@ main() {
     sleep 1
     test_req_script
     test_res_script_body
+    test_https_res_script_local
     test_decode_script_bodies
     test_max_decode_input_bytes_skip
     test_max_decompress_output_bytes_fallback

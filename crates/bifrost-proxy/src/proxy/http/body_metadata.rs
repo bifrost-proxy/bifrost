@@ -1,0 +1,126 @@
+use hyper::header::HeaderValue;
+use hyper::http::request::Parts as RequestParts;
+use hyper::http::response::Parts as ResponseParts;
+use hyper::StatusCode;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::proxy::http) enum BodyMode {
+    Known(usize),
+    Stream,
+    StreamWithLength(usize),
+    StreamWithTrailers,
+}
+
+pub(in crate::proxy::http) fn streaming_res_body_mode(
+    content_length: Option<usize>,
+    has_trailers: bool,
+) -> BodyMode {
+    if has_trailers {
+        BodyMode::StreamWithTrailers
+    } else if let Some(len) = content_length {
+        BodyMode::StreamWithLength(len)
+    } else {
+        BodyMode::Stream
+    }
+}
+
+pub(in crate::proxy::http) fn is_no_body_response(status: StatusCode, method: &str) -> bool {
+    status.is_informational()
+        || status == StatusCode::NO_CONTENT
+        || status == StatusCode::NOT_MODIFIED
+        || method.eq_ignore_ascii_case("HEAD")
+}
+
+pub(in crate::proxy::http) fn response_content_encoding(parts: &ResponseParts) -> Option<String> {
+    parts
+        .headers
+        .get(hyper::header::CONTENT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+}
+
+pub(in crate::proxy::http) fn header_content_encoding(
+    headers: &hyper::HeaderMap,
+) -> Option<String> {
+    headers
+        .get(hyper::header::CONTENT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+}
+
+pub(in crate::proxy::http) fn set_content_encoding_header(
+    headers: &mut hyper::HeaderMap,
+    content_encoding: Option<&str>,
+) {
+    headers.remove(hyper::header::CONTENT_ENCODING);
+    if let Some(content_encoding) = content_encoding {
+        if let Ok(value) = HeaderValue::from_str(content_encoding) {
+            headers.insert(hyper::header::CONTENT_ENCODING, value);
+        }
+    }
+}
+
+pub(in crate::proxy::http) fn normalize_req_headers(
+    parts: &mut RequestParts,
+    mode: BodyMode,
+    had_content_length: bool,
+) {
+    match mode {
+        BodyMode::Known(len) => {
+            parts.headers.remove(hyper::header::TRANSFER_ENCODING);
+            parts.headers.remove(hyper::header::CONTENT_LENGTH);
+            if len > 0 || had_content_length {
+                parts.headers.insert(
+                    hyper::header::CONTENT_LENGTH,
+                    HeaderValue::from_str(&len.to_string()).unwrap(),
+                );
+            }
+        }
+        BodyMode::Stream | BodyMode::StreamWithTrailers => {
+            parts.headers.remove(hyper::header::TRANSFER_ENCODING);
+            parts.headers.remove(hyper::header::CONTENT_LENGTH);
+        }
+        BodyMode::StreamWithLength(len) => {
+            parts.headers.remove(hyper::header::TRANSFER_ENCODING);
+            parts.headers.remove(hyper::header::CONTENT_LENGTH);
+            parts.headers.insert(
+                hyper::header::CONTENT_LENGTH,
+                HeaderValue::from_str(&len.to_string()).unwrap(),
+            );
+        }
+    }
+}
+
+pub(in crate::proxy::http) fn normalize_res_headers(
+    parts: &mut ResponseParts,
+    mode: BodyMode,
+    method: &str,
+) {
+    if is_no_body_response(parts.status, method) {
+        parts.headers.remove(hyper::header::TRANSFER_ENCODING);
+        parts.headers.remove(hyper::header::CONTENT_LENGTH);
+        return;
+    }
+    match mode {
+        BodyMode::Known(len) => {
+            parts.headers.remove(hyper::header::TRANSFER_ENCODING);
+            parts.headers.remove(hyper::header::CONTENT_LENGTH);
+            parts.headers.insert(
+                hyper::header::CONTENT_LENGTH,
+                HeaderValue::from_str(&len.to_string()).unwrap(),
+            );
+        }
+        BodyMode::Stream | BodyMode::StreamWithTrailers => {
+            parts.headers.remove(hyper::header::TRANSFER_ENCODING);
+            parts.headers.remove(hyper::header::CONTENT_LENGTH);
+        }
+        BodyMode::StreamWithLength(len) => {
+            parts.headers.remove(hyper::header::TRANSFER_ENCODING);
+            parts.headers.remove(hyper::header::CONTENT_LENGTH);
+            parts.headers.insert(
+                hyper::header::CONTENT_LENGTH,
+                HeaderValue::from_str(&len.to_string()).unwrap(),
+            );
+        }
+    }
+}
