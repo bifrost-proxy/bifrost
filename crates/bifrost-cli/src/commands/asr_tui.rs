@@ -126,6 +126,10 @@ struct WatchProgress {
     eta_ms: Option<u64>,
     #[serde(default)]
     eta_confidence: String,
+    #[serde(default)]
+    stage: String,
+    #[serde(default)]
+    stage_message: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -910,9 +914,19 @@ fn render_progress(frame: &mut Frame, area: Rect, snapshot: &WatchSnapshot) {
         .as_deref()
         .map(short_path)
         .unwrap_or_else(|| "-".to_string());
+    let stage_detail = snapshot
+        .progress
+        .stage_message
+        .as_deref()
+        .unwrap_or(current.as_str());
     frame.render_widget(
         Paragraph::new(format!(
-            "Current {current}  partial {} failed_chunks {} eta {} ({})",
+            "Stage {}  Current {stage_detail}  partial {} failed_chunks {} eta {} ({})",
+            if snapshot.progress.stage.is_empty() {
+                "-"
+            } else {
+                snapshot.progress.stage.as_str()
+            },
             snapshot.progress.partial_success,
             snapshot.progress.failed_chunk_count,
             eta,

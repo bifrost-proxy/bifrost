@@ -264,7 +264,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-admin"
-version = "0.0.82"
+version = "0.0.83"
 dependencies = [
  "aes",
  "async-trait",
@@ -327,6 +327,7 @@ dependencies = [
  "serde_urlencoded",
  "sha1",
  "sha2",
+ "sherpa-onnx",
  "skills",
  "sysinfo",
  "tar",
@@ -349,7 +350,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-agent"
-version = "0.0.82"
+version = "0.0.83"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -383,7 +384,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-cli"
-version = "0.0.82"
+version = "0.0.83"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -424,13 +425,14 @@ dependencies = [
  "tracing",
  "ureq",
  "urlencoding",
+ "uuid",
  "windows-sys 0.59.0",
  "zip 2.4.2",
 ]
 
 [[package]]
 name = "bifrost-command"
-version = "0.0.82"
+version = "0.0.83"
 dependencies = [
  "serde",
  "serde_json",
@@ -438,7 +440,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-core"
-version = "0.0.82"
+version = "0.0.83"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
@@ -468,7 +470,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-e2e"
-version = "0.0.82"
+version = "0.0.83"
 dependencies = [
  "base64 0.22.1",
  "bifrost-admin",
@@ -506,7 +508,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-power"
-version = "0.0.82"
+version = "0.0.83"
 dependencies = [
  "core-foundation 0.10.1",
  "core-foundation-sys",
@@ -519,7 +521,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-proxy"
-version = "0.0.82"
+version = "0.0.83"
 dependencies = [
  "base64 0.22.1",
  "bifrost-admin",
@@ -573,7 +575,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-script"
-version = "0.0.82"
+version = "0.0.83"
 dependencies = [
  "base64 0.22.1",
  "bifrost-core",
@@ -592,7 +594,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-storage"
-version = "0.0.82"
+version = "0.0.83"
 dependencies = [
  "bifrost-core",
  "chrono",
@@ -612,7 +614,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-sync"
-version = "0.0.82"
+version = "0.0.83"
 dependencies = [
  "bifrost-core",
  "bifrost-storage",
@@ -630,7 +632,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-tests"
-version = "0.0.82"
+version = "0.0.83"
 dependencies = [
  "async-trait",
  "bifrost-admin",
@@ -651,7 +653,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-tls"
-version = "0.0.82"
+version = "0.0.83"
 dependencies = [
  "bifrost-core",
  "chrono",
@@ -879,6 +881,26 @@ name = "bytes"
 version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
+
+[[package]]
+name = "bzip2"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bdb116a6ef3f6c3698828873ad02c3014b3c85cadb88496095628e3ef1e347f8"
+dependencies = [
+ "bzip2-sys",
+ "libc",
+]
+
+[[package]]
+name = "bzip2-sys"
+version = "0.1.13+1.0.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "225bff33b2141874fe80d71e07d6eec4f85c5c216453dd96388240f96e1acc14"
+dependencies = [
+ "cc",
+ "pkg-config",
+]
 
 [[package]]
 name = "cached"
@@ -5319,6 +5341,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "sherpa-onnx"
+version = "1.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f70620e4fa58e4cb1acf4e0a9c2cbc7496ea8284f80e55be23d443b92e563e49"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sherpa-onnx-sys",
+]
+
+[[package]]
+name = "sherpa-onnx-sys"
+version = "1.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7f3fe4987367b162336027b5d1ffca6dcd627bee6a324e46f80e82dfcb4365b"
+dependencies = [
+ "bzip2",
+ "tar",
+ "ureq",
+]
+
+[[package]]
 name = "shlex"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5375,7 +5419,7 @@ dependencies = [
 
 [[package]]
 name = "skills"
-version = "0.0.82"
+version = "0.0.83"
 dependencies = [
  "chrono",
  "notify",

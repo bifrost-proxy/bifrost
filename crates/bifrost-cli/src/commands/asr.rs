@@ -1,5 +1,5 @@
 use std::fs::{self, OpenOptions};
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -22,7 +22,10 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use super::asr_tui::{handle_asr_task_tui, AsrTaskTuiOptions};
-use crate::cli::{AiAsrCommands, AiAsrTaskCommands, AiAsrTaskDailyCommands, AiCommands};
+use crate::cli::{
+    AiAsrCommands, AiAsrDiarizationCommands, AiAsrDiarizationSpeakerCommands, AiAsrTaskCommands,
+    AiAsrTaskDailyCommands, AiCommands,
+};
 
 const SERVICE_START_TIMEOUT: Duration = Duration::from_secs(180);
 const ASR_RELEASE_REPO: &str = "second-state/qwen3_asr_rs";
@@ -64,16 +67,117 @@ fn handle_asr_command(action: AiAsrCommands, admin_host: &str, admin_port: u16) 
             audio,
             model,
             language,
+            speaker_aware,
             format: _,
         } => {
             ensure_supported_platform()?;
-            stream_file(&audio, &model, &language)
+            if speaker_aware {
+                let client = AsrTaskClient::new(admin_host, admin_port);
+                stream_file_with_admin_speakers(&client, &audio, &model, &language)
+            } else {
+                stream_file(&audio, &model, &language)
+            }
         }
         AiAsrCommands::Task { action } => {
             let client = AsrTaskClient::new(admin_host, admin_port);
             handle_asr_task_command(&client, action)
         }
+        AiAsrCommands::Diarization { action } => {
+            let client = AsrTaskClient::new(admin_host, admin_port);
+            handle_asr_diarization_command(&client, action)
+        }
     }
+}
+
+fn stream_file_with_admin_speakers(
+    client: &AsrTaskClient,
+    audio: &Path,
+    model: &str,
+    language: &str,
+) -> Result<()> {
+    if !audio.is_file() {
+        return Err(BifrostError::Config(format!(
+            "audio file does not exist: {}",
+            audio.display()
+        )));
+    }
+    let file_name = audio
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("upload.audio");
+    let audio_bytes = fs::read(audio).map_err(|error| {
+        BifrostError::Io(io::Error::other(format!(
+            "read audio file {}: {error}",
+            audio.display()
+        )))
+    })?;
+    let (content_type, body) = build_asr_upload_multipart(file_name, &audio_bytes);
+    let url = format!(
+        "{}/asr/transcribe-stream?model={}&language={}&owner_module=speech_workbench",
+        client.base_url,
+        url_encode(model),
+        url_encode(language)
+    );
+    let response = client
+        .agent
+        .post(&url)
+        .set("content-type", &content_type)
+        .set("accept", "text/event-stream")
+        .send_bytes(&body)
+        .map_err(|error| asr_task_api_error("POST", &url, error))?;
+    let stream = response.into_reader();
+    consume_asr_sse_jsonl(stream)
+}
+
+fn build_asr_upload_multipart(file_name: &str, audio_bytes: &[u8]) -> (String, Vec<u8>) {
+    let boundary = format!("bifrost-asr-{}", uuid::Uuid::new_v4().as_simple());
+    let mut body = Vec::new();
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        format!(
+            "Content-Disposition: form-data; name=\"file\"; filename=\"{}\"\r\n",
+            sanitize_multipart_filename(file_name)
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
+    body.extend_from_slice(audio_bytes);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    (format!("multipart/form-data; boundary={boundary}"), body)
+}
+
+fn sanitize_multipart_filename(file_name: &str) -> String {
+    file_name
+        .chars()
+        .map(|ch| match ch {
+            '"' | '\r' | '\n' => '_',
+            other => other,
+        })
+        .collect()
+}
+
+fn consume_asr_sse_jsonl(reader: impl io::Read) -> Result<()> {
+    let reader = io::BufReader::new(reader);
+    for line in reader.lines() {
+        let line = line.map_err(|error| {
+            BifrostError::Io(io::Error::other(format!("read ASR stream: {error}")))
+        })?;
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim();
+        if data.is_empty() || data == "[DONE]" {
+            continue;
+        }
+        let value: Value = serde_json::from_str(data).map_err(|error| {
+            BifrostError::Config(format!(
+                "ASR stream returned invalid JSON: {error}; data: {}",
+                truncate(data, 300)
+            ))
+        })?;
+        println!("{value}");
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -87,7 +191,7 @@ impl AsrTaskClient {
         Self {
             base_url: format!("http://{}:{}/_bifrost/api", host, port),
             agent: bifrost_core::direct_ureq_agent_builder()
-                .timeout(Duration::from_secs(30))
+                .timeout(Duration::from_secs(30 * 60))
                 .build(),
         }
     }
@@ -102,12 +206,37 @@ impl AsrTaskClient {
         read_json_response("GET", &url, response)
     }
 
+    pub(crate) fn get_text(&self, path: &str) -> Result<String> {
+        let url = format!("{}{}", self.base_url, path);
+        let response = self
+            .agent
+            .get(&url)
+            .call()
+            .map_err(|error| asr_task_api_error("GET", &url, error))?;
+        response.into_string().map_err(|error| {
+            BifrostError::Io(io::Error::other(format!(
+                "read ASR API response from {url}: {error}"
+            )))
+        })
+    }
+
     pub(crate) fn post_json(&self, path: &str) -> Result<Value> {
         let url = format!("{}{}", self.base_url, path);
         let response = self
             .agent
             .post(&url)
             .call()
+            .map_err(|error| asr_task_api_error("POST", &url, error))?;
+        read_json_response("POST", &url, response)
+    }
+
+    pub(crate) fn post_json_body(&self, path: &str, body: &Value) -> Result<Value> {
+        let url = format!("{}{}", self.base_url, path);
+        let response = self
+            .agent
+            .post(&url)
+            .set("content-type", "application/json")
+            .send_string(&body.to_string())
             .map_err(|error| asr_task_api_error("POST", &url, error))?;
         read_json_response("POST", &url, response)
     }
@@ -174,6 +303,16 @@ struct AsrTaskSummary {
     deleted_after_processing: usize,
     #[serde(default)]
     running: bool,
+    #[serde(default)]
+    diarization_enabled: bool,
+    #[serde(default)]
+    diarization_ready: bool,
+    #[serde(default)]
+    diarization_running: bool,
+    #[serde(default)]
+    diarized_files: usize,
+    #[serde(default)]
+    speaker_count: usize,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -196,6 +335,8 @@ struct AsrTask {
     model: String,
     #[serde(default)]
     runtime_strategy: Value,
+    #[serde(default)]
+    diarization: Value,
     #[serde(default)]
     last_run_at_ms: Option<i64>,
     #[serde(default)]
@@ -270,6 +411,10 @@ struct AsrTaskFile {
     text_chars: Option<usize>,
     #[serde(default)]
     error: Option<String>,
+    #[serde(default)]
+    diarization_status: Option<String>,
+    #[serde(default)]
+    speaker_count: Option<usize>,
     #[serde(default)]
     finished_at_ms: Option<i64>,
 }
@@ -369,6 +514,239 @@ fn handle_asr_task_command(client: &AsrTaskClient, action: AiAsrTaskCommands) ->
         ),
         AiAsrTaskCommands::Daily { action } => handle_asr_task_daily_command(client, action),
     }
+}
+
+fn handle_asr_diarization_command(
+    client: &AsrTaskClient,
+    action: AiAsrDiarizationCommands,
+) -> Result<()> {
+    match action {
+        AiAsrDiarizationCommands::Profiles { json } => {
+            let value = client.get_json("/asr/diarization/profiles")?;
+            if json {
+                print_json(&value)?;
+            } else {
+                print_diarization_profiles(&value);
+            }
+            Ok(())
+        }
+        AiAsrDiarizationCommands::Status { profile, json } => {
+            let value = client.get_json(&format!(
+                "/asr/diarization/status?profile={}",
+                url_encode(&profile)
+            ))?;
+            if json {
+                print_json(&value)?;
+            } else {
+                print_diarization_status(&value);
+            }
+            Ok(())
+        }
+        AiAsrDiarizationCommands::Init { profile, json } => {
+            let stream = client.get_text(&format!(
+                "/asr/diarization/init-stream?profile={}",
+                url_encode(&profile)
+            ))?;
+            let value = sse_last_json(&stream).unwrap_or_else(|| Value::String(stream.clone()));
+            if json {
+                print_json(&value)?;
+            } else {
+                println!("Diarization profile initialized: {profile}");
+                print_diarization_status(value.get("status").unwrap_or(&value));
+            }
+            Ok(())
+        }
+        AiAsrDiarizationCommands::Speakers { action } => {
+            handle_asr_diarization_speaker_command(client, action)
+        }
+    }
+}
+
+fn handle_asr_diarization_speaker_command(
+    client: &AsrTaskClient,
+    action: AiAsrDiarizationSpeakerCommands,
+) -> Result<()> {
+    match action {
+        AiAsrDiarizationSpeakerCommands::List { json } => {
+            let value = client.get_json("/asr/speaker-profiles")?;
+            if json {
+                print_json(&value)?;
+            } else {
+                print_speaker_profiles(&value);
+            }
+            Ok(())
+        }
+        AiAsrDiarizationSpeakerCommands::Show { profile_id, json } => {
+            let value = client.get_json(&format!(
+                "/asr/speaker-profiles/{}",
+                url_encode(&profile_id)
+            ))?;
+            if json {
+                print_json(&value)?;
+            } else {
+                print_speaker_profile(&value);
+            }
+            Ok(())
+        }
+        AiAsrDiarizationSpeakerCommands::EnrollLive {
+            name,
+            profile,
+            phrase_seconds,
+            device,
+            test_pcm16,
+            json,
+        } => enroll_speaker_live(
+            client,
+            &name,
+            &profile,
+            phrase_seconds,
+            &device,
+            test_pcm16.as_deref(),
+            json,
+        ),
+    }
+}
+
+fn enroll_speaker_live(
+    client: &AsrTaskClient,
+    name: &str,
+    profile: &str,
+    phrase_seconds: u64,
+    device: &str,
+    test_pcm16: Option<&Path>,
+    json: bool,
+) -> Result<()> {
+    let session_value = client.post_json_body(
+        "/asr/speaker-profiles/enrollment-sessions",
+        &serde_json::json!({
+            "name": name,
+            "diarization_profile": profile,
+        }),
+    )?;
+    let session = session_value
+        .get("session")
+        .ok_or_else(|| BifrostError::Config("speaker enrollment session missing".to_string()))?;
+    let session_id = session
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| BifrostError::Config("speaker enrollment session id missing".to_string()))?;
+    let prompts = session
+        .get("prompts")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if prompts.is_empty() {
+        return Err(BifrostError::Config(
+            "speaker enrollment session did not return prompts".to_string(),
+        ));
+    }
+
+    for (index, prompt) in prompts.iter().enumerate() {
+        let prompt_id = prompt.get("id").and_then(Value::as_str).ok_or_else(|| {
+            BifrostError::Config("speaker enrollment prompt id missing".to_string())
+        })?;
+        let text = prompt.get("text").and_then(Value::as_str).unwrap_or("");
+        if test_pcm16.is_none() {
+            println!();
+            println!("Prompt {}/{}:", index + 1, prompts.len());
+            println!("{text}");
+            println!("Recording {phrase_seconds}s from local microphone device '{device}'...");
+        }
+        let audio = match test_pcm16 {
+            Some(path) => fs::read(path).map_err(BifrostError::Io)?,
+            None => record_pcm16_with_ffmpeg(phrase_seconds, device)?,
+        };
+        send_enrollment_audio_chunk(client, session_id, prompt_id, &audio, true)?;
+    }
+    let result = client.post_json_body(
+        &format!(
+            "/asr/speaker-profiles/enrollment-sessions/{}/finish",
+            url_encode(session_id)
+        ),
+        &serde_json::json!({}),
+    )?;
+    if json {
+        print_json(&result)?;
+    } else {
+        let profile = result.get("profile").unwrap_or(&result);
+        println!(
+            "Speaker voiceprint enrolled: {} ({})",
+            profile
+                .get("display_name")
+                .and_then(Value::as_str)
+                .unwrap_or(name),
+            profile.get("id").and_then(Value::as_str).unwrap_or("-")
+        );
+    }
+    Ok(())
+}
+
+fn send_enrollment_audio_chunk(
+    client: &AsrTaskClient,
+    session_id: &str,
+    prompt_id: &str,
+    audio: &[u8],
+    final_chunk: bool,
+) -> Result<()> {
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(audio);
+    client.post_json_body(
+        &format!(
+            "/asr/speaker-profiles/enrollment-sessions/{}/audio",
+            url_encode(session_id)
+        ),
+        &serde_json::json!({
+            "prompt_id": prompt_id,
+            "pcm16le_base64": encoded,
+            "sample_rate": 16000,
+            "channels": 1,
+            "final_chunk": final_chunk,
+        }),
+    )?;
+    Ok(())
+}
+
+fn record_pcm16_with_ffmpeg(seconds: u64, device: &str) -> Result<Vec<u8>> {
+    let mut command = Command::new("ffmpeg");
+    command.args([
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-t",
+        &seconds.max(1).to_string(),
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-f",
+    ]);
+    if cfg!(target_os = "macos") {
+        command.args(["avfoundation", "-i", device]);
+    } else {
+        command.args(["pulse", "-i", device]);
+    }
+    command.args(["-f", "s16le", "-"]);
+    let output = command.output().map_err(BifrostError::Io)?;
+    if !output.status.success() {
+        return Err(BifrostError::Config(format!(
+            "ffmpeg microphone capture failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    if output.stdout.is_empty() {
+        return Err(BifrostError::Config(
+            "ffmpeg microphone capture produced no audio".to_string(),
+        ));
+    }
+    Ok(output.stdout)
+}
+
+fn sse_last_json(stream: &str) -> Option<Value> {
+    stream
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .next_back()
 }
 
 fn handle_asr_task_daily_command(
@@ -701,6 +1079,136 @@ fn print_task_list(tasks: &[AsrTask]) {
     }
 }
 
+fn print_diarization_profiles(value: &Value) {
+    let profiles = value
+        .get("profiles")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if profiles.is_empty() {
+        println!("No ASR diarization profiles.");
+        return;
+    }
+    println!("{:<28}  {:<18}  {:<10}  READY", "PROFILE", "ENGINE", "TIER");
+    for profile in profiles {
+        println!(
+            "{:<28}  {:<18}  {:<10}  {}",
+            profile.get("id").and_then(Value::as_str).unwrap_or("-"),
+            profile.get("engine").and_then(Value::as_str).unwrap_or("-"),
+            profile
+                .get("quality_tier")
+                .and_then(Value::as_str)
+                .unwrap_or("-"),
+            profile
+                .get("ready")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        );
+    }
+}
+
+fn print_diarization_status(value: &Value) {
+    let profile = value.get("profile").unwrap_or(value);
+    println!(
+        "Profile:          {}",
+        profile.get("id").and_then(Value::as_str).unwrap_or("-")
+    );
+    println!(
+        "Engine:           {}",
+        profile.get("engine").and_then(Value::as_str).unwrap_or("-")
+    );
+    println!(
+        "Ready:            {}",
+        profile
+            .get("ready")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    );
+    println!(
+        "Install dir:      {}",
+        profile
+            .get("install_dir")
+            .and_then(Value::as_str)
+            .unwrap_or("-")
+    );
+    if let Some(dir) = value.get("voiceprint_dir").and_then(Value::as_str) {
+        println!("Voiceprint dir:   {dir}");
+    }
+    if let Some(count) = value.get("speaker_profile_count").and_then(Value::as_u64) {
+        println!("Speaker profiles: {count}");
+    }
+    if let Some(message) = profile.get("message").and_then(Value::as_str) {
+        println!("Message:          {message}");
+    }
+}
+
+fn print_speaker_profiles(value: &Value) {
+    let profiles = value
+        .get("profiles")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if profiles.is_empty() {
+        println!("No enrolled speaker voiceprints.");
+        return;
+    }
+    println!("{:<40}  {:<24}  EMBEDDING", "PROFILE", "NAME");
+    for profile in profiles {
+        println!(
+            "{:<40}  {:<24}  {}",
+            profile.get("id").and_then(Value::as_str).unwrap_or("-"),
+            profile
+                .get("display_name")
+                .and_then(Value::as_str)
+                .unwrap_or("-"),
+            profile
+                .get("embedding_dim")
+                .and_then(Value::as_u64)
+                .map(|dim| format!("{dim}d"))
+                .unwrap_or_else(|| "-".to_string())
+        );
+    }
+}
+
+fn print_speaker_profile(value: &Value) {
+    println!(
+        "Speaker:          {}",
+        value
+            .get("display_name")
+            .and_then(Value::as_str)
+            .unwrap_or("-")
+    );
+    println!(
+        "Profile ID:       {}",
+        value.get("id").and_then(Value::as_str).unwrap_or("-")
+    );
+    println!(
+        "Source:           {}",
+        value.get("source").and_then(Value::as_str).unwrap_or("-")
+    );
+    println!(
+        "Diarization:      {}",
+        value
+            .get("diarization_profile")
+            .and_then(Value::as_str)
+            .unwrap_or("-")
+    );
+    println!(
+        "Duration:         {} ms",
+        value
+            .get("total_duration_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    );
+    println!(
+        "Embedding:        {}d",
+        value
+            .get("embedding_dim")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    );
+}
+
 fn print_task_detail(task: &AsrTask) {
     println!("ID:              {}", task.id);
     println!("Name:            {}", task.name);
@@ -711,6 +1219,7 @@ fn print_task_detail(task: &AsrTask) {
     println!("Model:           {}", task.model);
     println!("Language:        {}", task.language);
     println!("Runtime:         {}", format_value(&task.runtime_strategy));
+    println!("Diarization:     {}", format_value(&task.diarization));
     println!("Schedule:        {}", format_value(&task.schedule));
     println!(
         "Last run:        {}",
@@ -733,6 +1242,15 @@ fn print_task_detail(task: &AsrTask) {
         task.summary.failed_chunk_count,
         task.summary.deleted_after_processing
     );
+    if task.summary.diarization_enabled {
+        println!(
+            "Speaker state:   ready={}, running={}, diarized_files={}, speakers={}",
+            task.summary.diarization_ready,
+            task.summary.diarization_running,
+            task.summary.diarized_files,
+            task.summary.speaker_count
+        );
+    }
     println!("Files:           {}", task.files.len());
     println!("Daily documents: {}", task.daily_documents.len());
     if !task.daily_documents.is_empty() {
@@ -753,13 +1271,20 @@ fn print_task_files(task: &AsrTask, status: Option<&str>, limit: usize) {
         return;
     }
     println!(
-        "{:<12}  {:>8}  {:>10}  {:<19}  SOURCE",
-        "STATUS", "CHARS", "DURATION", "FINISHED"
+        "{:<12}  {:<12}  {:>8}  {:>10}  {:<19}  SOURCE",
+        "STATUS", "SPEAKERS", "CHARS", "DURATION", "FINISHED"
     );
     for file in files {
         println!(
-            "{:<12}  {:>8}  {:>10}  {:<19}  {}",
+            "{:<12}  {:<12}  {:>8}  {:>10}  {:<19}  {}",
             file.status,
+            file.diarization_status
+                .as_deref()
+                .map(|status| match file.speaker_count {
+                    Some(count) => format!("{status}:{count}"),
+                    None => status.to_string(),
+                })
+                .unwrap_or_else(|| "-".to_string()),
             file.text_chars
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "-".to_string()),
@@ -2274,6 +2799,17 @@ mod tests {
         assert_eq!(loaded.managed_by, "test");
         assert_eq!(loaded.lease_owner_module(), "test");
         assert_eq!(loaded.owner_id.as_deref(), Some("status-fixture"));
+    }
+
+    #[test]
+    fn asr_upload_multipart_contains_file_field_and_sanitized_filename() {
+        let (content_type, body) = build_asr_upload_multipart("bad\"name\n.wav", b"abc");
+        let body = String::from_utf8(body).unwrap();
+
+        assert!(content_type.starts_with("multipart/form-data; boundary=bifrost-asr-"));
+        assert!(body.contains("name=\"file\""));
+        assert!(body.contains("filename=\"bad_name_.wav\""));
+        assert!(body.contains("\r\n\r\nabc\r\n--"));
     }
 
     #[test]

@@ -1,6 +1,14 @@
 pub async fn handle_asr_tasks(req: Request<Incoming>, path: &str) -> Response<BoxBody> {
     ensure_scheduler_started().await;
 
+    if path.starts_with("/api/asr/diarization")
+        || path.starts_with("/api/asr/speaker-profiles")
+        || (path.starts_with("/api/asr/tasks/")
+            && (path.ends_with("/diarization") || path.contains("/speakers/")))
+    {
+        return handle_diarization_api(req, path).await;
+    }
+
     match (req.method(), path) {
         (&Method::GET, "/api/asr/external-volumes") => {
             json_response(&serde_json::json!({ "volumes": list_external_volumes() }))
@@ -297,6 +305,7 @@ async fn create_task_response(req: Request<Incoming>) -> Response<BoxBody> {
         language: create.language.unwrap_or_else(|| "chinese".to_string()),
         model: create.model.unwrap_or_else(|| "Qwen3-ASR-1.7B".to_string()),
         runtime_strategy: create.runtime_strategy.unwrap_or_default(),
+        diarization: create.diarization.unwrap_or_default(),
         created_at_ms: now,
         updated_at_ms: now,
         last_run_at_ms: None,
@@ -355,6 +364,7 @@ fn update_task_config(
         || update.language.is_some()
         || update.model.is_some()
         || update.runtime_strategy.is_some()
+        || update.diarization.is_some()
         || update.external_devices.is_some()
         || update.import_policy.is_some();
     if running && high_risk {
@@ -402,6 +412,9 @@ fn update_task_config(
     }
     if let Some(runtime_strategy) = update.runtime_strategy {
         task.runtime_strategy = runtime_strategy;
+    }
+    if let Some(diarization) = update.diarization {
+        task.diarization = diarization;
     }
     if let Some(daily_agent) = update.daily_agent {
         task.daily_agent = daily_agent;
@@ -538,6 +551,7 @@ async fn put_external_import_response(id: &str, req: Request<Incoming>) -> Respo
         language: None,
         model: None,
         runtime_strategy: None,
+        diarization: None,
         daily_agent: None,
         external_devices: update.external_devices,
         import_policy: update.import_policy,

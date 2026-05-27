@@ -14,6 +14,7 @@ static CONTENT_HASH_QUEUE_LOCK: Lazy<StdMutex<()>> = Lazy::new(|| StdMutex::new(
 
 const TASK_STORE_VERSION: u32 = 1;
 const ASR_TASK_PAUSED_MESSAGE: &str = "ASR task paused by request";
+const DEFAULT_DIARIZATION_PROFILE: &str = "sherpa-onnx-balanced";
 const ASR_TASK_SEGMENT_MAX_MS: u64 = 30_000;
 const ASR_AUTO_FALLBACK_RTF_MULTIPLIER: f64 = 1.5;
 const MIN_BISECT_SECS: u64 = 2;
@@ -105,6 +106,8 @@ pub(crate) struct AsrDirectoryTask {
     pub model: String,
     #[serde(default)]
     pub runtime_strategy: AsrRuntimeStrategy,
+    #[serde(default)]
+    pub diarization: AsrDiarizationConfig,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
     pub last_run_at_ms: Option<u64>,
@@ -116,6 +119,39 @@ pub(crate) struct AsrDirectoryTask {
     pub external_devices: Vec<AsrExternalDeviceBinding>,
     #[serde(default)]
     pub import_policy: AsrExternalImportPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AsrDiarizationConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_diarization_profile")]
+    pub profile: String,
+    #[serde(default)]
+    pub min_speakers: Option<u8>,
+    #[serde(default)]
+    pub max_speakers: Option<u8>,
+    #[serde(default)]
+    pub known_speaker_count: Option<u8>,
+    #[serde(default)]
+    pub voiceprint_matching: bool,
+}
+
+impl Default for AsrDiarizationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            profile: default_diarization_profile(),
+            min_speakers: None,
+            max_speakers: None,
+            known_speaker_count: None,
+            voiceprint_matching: false,
+        }
+    }
+}
+
+fn default_diarization_profile() -> String {
+    DEFAULT_DIARIZATION_PROFILE.to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -672,6 +708,11 @@ struct TaskSummary {
     cleanable_source_bytes: u64,
     cleanable_source_file_count: usize,
     running: bool,
+    diarization_enabled: bool,
+    diarization_ready: bool,
+    diarization_running: bool,
+    diarized_files: usize,
+    speaker_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -688,6 +729,12 @@ struct FileRecordWithKey {
     key: String,
     #[serde(flatten)]
     record: FileRecord,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diarization_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diarization_manifest_path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    speaker_count: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -753,8 +800,16 @@ struct AsrRunProgress {
     processed_now: usize,
     #[serde(default)]
     failed_now: usize,
+    #[serde(default = "default_asr_progress_stage")]
+    stage: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stage_message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     message: Option<String>,
+}
+
+fn default_asr_progress_stage() -> String {
+    "idle".to_string()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -769,6 +824,7 @@ struct TaskWatchTask {
     language: String,
     model: String,
     runtime_strategy: AsrRuntimeStrategy,
+    diarization: AsrDiarizationConfig,
     last_run_at_ms: Option<u64>,
     next_run_at_ms: Option<u64>,
     last_error: Option<String>,
@@ -795,6 +851,9 @@ struct TaskWatchProgress {
     #[serde(skip_serializing_if = "Option::is_none")]
     eta_ms: Option<u64>,
     eta_confidence: &'static str,
+    stage: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stage_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -846,6 +905,10 @@ struct TaskWatchFile {
     last_chunk_rtf: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diarization_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    speaker_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     started_at_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -999,6 +1062,17 @@ struct TranscriptionOutput {
     fallback_reason: Option<String>,
 }
 
+struct DiarizedTranscriptionOutput {
+    text: String,
+    timeline_segments: Vec<TimelineSegment>,
+    speakers: Vec<TimelineSpeaker>,
+    diarization_segments: Vec<DiarizationSegment>,
+    failed_chunks: Vec<FailedChunkRecord>,
+    memory_limit_hints: Vec<AsrChunkMemoryHint>,
+    chunk_metrics: Vec<AsrChunkMetric>,
+    fallback_reason: Option<String>,
+}
+
 type ChunkProgressCallback<'a> = dyn Fn(usize, usize) + Send + Sync + 'a;
 type ChunkMetricCallback<'a> = dyn Fn(AsrChunkMetric) + Send + Sync + 'a;
 type PauseCheckCallback<'a> = dyn Fn() -> bool + Send + Sync + 'a;
@@ -1025,6 +1099,7 @@ struct CreateTaskRequest {
     language: Option<String>,
     model: Option<String>,
     runtime_strategy: Option<AsrRuntimeStrategy>,
+    diarization: Option<AsrDiarizationConfig>,
     external_devices: Option<Vec<AsrExternalDeviceBinding>>,
     import_policy: Option<AsrExternalImportPolicy>,
 }
@@ -1040,6 +1115,7 @@ struct UpdateTaskRequest {
     language: Option<String>,
     model: Option<String>,
     runtime_strategy: Option<AsrRuntimeStrategy>,
+    diarization: Option<AsrDiarizationConfig>,
     daily_agent: Option<AsrDailyAgentConfig>,
     external_devices: Option<Vec<AsrExternalDeviceBinding>>,
     import_policy: Option<AsrExternalImportPolicy>,

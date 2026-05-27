@@ -376,6 +376,9 @@ export default function DirectoryTasksPanel({
             schedule_day: 1,
             schedule_minute: 0,
             runtime_strategy: "reuse_per_file",
+            diarization_enabled: false,
+            diarization_profile: "sherpa-onnx-balanced",
+            voiceprint_matching: false,
           }}
         >
           <Row gutter={[12, 0]}>
@@ -480,6 +483,39 @@ export default function DirectoryTasksPanel({
                     </Select.Option>
                   ))}
                 </Select>
+              </Form.Item>
+            </Col>
+            <Col xs={12} md={8}>
+              <Form.Item
+                name="diarization_enabled"
+                label="Speaker Diarization"
+                valuePropName="checked"
+              >
+                <Switch />
+              </Form.Item>
+            </Col>
+            <Col xs={12} md={8}>
+              <Form.Item name="diarization_profile" label="Diarization Profile">
+                <Select
+                  options={[
+                    { value: "sherpa-onnx-balanced", label: "sherpa-onnx balanced" },
+                    { value: "pyannote-community-quality", label: "pyannote community quality" },
+                  ]}
+                />
+              </Form.Item>
+            </Col>
+            <Col xs={12} md={8}>
+              <Form.Item name="diarization_known_speaker_count" label="Known Speakers">
+                <InputNumber min={1} max={8} placeholder="Auto" style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+            <Col xs={12} md={8}>
+              <Form.Item
+                name="voiceprint_matching"
+                label="Voiceprint Matching"
+                valuePropName="checked"
+              >
+                <Switch />
               </Form.Item>
             </Col>
             <Col xs={24} md={8}>
@@ -588,6 +624,11 @@ export default function DirectoryTasksPanel({
                   next {formatTime(record.next_run_at_ms)}
                 </Text>
                 <Tag>{record.runtime_strategy}</Tag>
+                {record.diarization?.enabled ? (
+                  <Tag color={record.summary.diarization_ready ? "purple" : "warning"}>
+                    {record.summary.diarization_ready ? "speakers ready" : "speakers setup"}
+                  </Tag>
+                ) : null}
               </Space>
             ),
           },
@@ -835,6 +876,10 @@ function defaultTaskFormValues() {
     schedule_day: 1,
     schedule_minute: 0,
     runtime_strategy: "reuse_per_file",
+    diarization_enabled: false,
+    diarization_profile: "sherpa-onnx-balanced",
+    diarization_known_speaker_count: undefined,
+    voiceprint_matching: false,
     model: "Qwen3-ASR-1.7B",
     language: "chinese",
     external_devices: "",
@@ -880,6 +925,10 @@ function taskToFormValues(task: AsrDirectoryTask) {
     model: task.model,
     language: task.language,
     runtime_strategy: task.runtime_strategy,
+    diarization_enabled: task.diarization?.enabled ?? false,
+    diarization_profile: task.diarization?.profile ?? "sherpa-onnx-balanced",
+    diarization_known_speaker_count: task.diarization?.known_speaker_count,
+    voiceprint_matching: task.diarization?.voiceprint_matching ?? false,
     external_devices: (task.external_devices ?? []).map((device) => device.name).join("\n"),
   };
 }

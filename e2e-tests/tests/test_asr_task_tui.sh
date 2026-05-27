@@ -4,9 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-PORT="${BIFROST_TEST_PORT:-18883}"
-TARGET_DIR="${CARGO_TARGET_DIR:-target}"
-BIN="$TARGET_DIR/debug/bifrost"
+PORT="${BIFROST_ASR_TASK_TUI_E2E_PORT:-${ADMIN_PORT:-18883}}"
 DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bifrost-asr-tui.XXXXXX")"
 LOG_FILE="$DATA_DIR/bifrost.log"
 OPEN_LOG="$DATA_DIR/open.log"
@@ -21,7 +19,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
-cargo build --bin bifrost
+if [[ "${SKIP_BUILD:-false}" == "true" ]]; then
+  BIN="${BIFROST_BIN:-$ROOT_DIR/target/release/bifrost}"
+else
+  BIN="${BIFROST_BIN:-$ROOT_DIR/target/debug/bifrost}"
+  SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
+fi
+
+if [[ ! -x "$BIN" ]]; then
+  echo "Bifrost binary not executable: $BIN" >&2
+  exit 1
+fi
 
 mkdir -p "$DATA_DIR/audio-one" "$DATA_DIR/audio-two"
 BIFROST_DATA_DIR="$DATA_DIR" "$BIN" start -p "$PORT" --unsafe-ssl --no-system-proxy --skip-cert-check >"$LOG_FILE" 2>&1 &
@@ -270,8 +278,8 @@ fi
 
 curl -fsS -X POST "http://127.0.0.1:$PORT/_bifrost/api/asr/tasks/$TASK_ONE_ID/resume" >"$DATA_DIR/resume.json"
 grep -q '"paused":false' "$DATA_DIR/resume.json"
-curl -fsS -X POST "http://127.0.0.1:$PORT/_bifrost/api/asr/tasks/$TASK_ONE_ID/pause?mode=temporary" >"$DATA_DIR/pause.json"
-grep -q '"pause_mode":"temporary"' "$DATA_DIR/pause.json"
+curl -fsS -X POST "http://127.0.0.1:$PORT/_bifrost/api/asr/tasks/$TASK_ONE_ID/pause?mode=long_term" >"$DATA_DIR/pause.json"
+grep -q '"pause_mode":"long_term"' "$DATA_DIR/pause.json"
 RUN_PAUSED_STATUS="$(curl -sS -o "$DATA_DIR/run-paused.json" -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/_bifrost/api/asr/tasks/$TASK_ONE_ID/run")"
 if [[ "$RUN_PAUSED_STATUS" != "409" ]]; then
   echo "expected paused task run to fail with 409, got $RUN_PAUSED_STATUS"

@@ -2,7 +2,8 @@ use std::fs;
 use std::process::Command;
 
 use bifrost_cli::cli::{
-    AiAsrCommands, AiAsrTaskCommands, AiAsrTaskDailyCommands, AiCommands, Cli, Commands,
+    AiAsrCommands, AiAsrTaskCommands, AiAsrTaskDailyCommands, AiCommands, AiVoiceCommands,
+    AiVoiceWakeBindingCommands, AiVoiceWakeCommands, AiVoiceWakeListenerCommands, Cli, Commands,
     RemoteCommands, SettingCommands, SyncCommands,
 };
 use clap::Parser;
@@ -50,13 +51,20 @@ fn sync_subcommands_parse() {
 #[test]
 fn ai_asr_commands_parse() {
     let help = run_help(&["ai", "asr"]);
-    assert!(help.contains("start"), "ai asr help should contain start");
-    assert!(help.contains("stop"), "ai asr help should contain stop");
-    assert!(
-        help.contains("stream-file"),
-        "ai asr help should contain stream-file"
-    );
-    assert!(help.contains("task"), "ai asr help should contain task");
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        assert!(help.contains("start"), "ai asr help should contain start");
+        assert!(help.contains("stop"), "ai asr help should contain stop");
+        assert!(
+            help.contains("stream-file"),
+            "ai asr help should contain stream-file"
+        );
+        assert!(help.contains("task"), "ai asr help should contain task");
+    } else {
+        assert!(
+            !help.contains("stream-file"),
+            "ai asr help should hide local ASR commands on unsupported platforms"
+        );
+    }
 
     let cli = Cli::try_parse_from([
         "bifrost",
@@ -122,6 +130,176 @@ fn ai_asr_commands_parse() {
                 assert!(!json);
             }
             _ => panic!("unexpected ai asr task action"),
+        },
+        _ => panic!("unexpected command"),
+    }
+}
+
+#[test]
+fn ai_voice_wake_commands_parse() {
+    let help = run_help(&["ai", "voice", "wake"]);
+    assert!(
+        help.contains("status"),
+        "voice wake help should contain status"
+    );
+    assert!(
+        help.contains("profile"),
+        "voice wake help should contain profile"
+    );
+    assert!(
+        help.contains("binding"),
+        "voice wake help should contain binding"
+    );
+    assert!(
+        help.contains("listener"),
+        "voice wake help should contain listener"
+    );
+    assert!(
+        help.contains("bind-audio"),
+        "voice wake help should contain bind-audio"
+    );
+    assert!(
+        help.contains("trigger"),
+        "voice wake help should contain trigger"
+    );
+
+    let cli = Cli::try_parse_from([
+        "bifrost",
+        "ai",
+        "voice",
+        "wake",
+        "binding",
+        "add",
+        "--phrase",
+        "打开录音",
+        "--profile",
+        "wake_profile_eden",
+        "--key",
+        "space",
+        "--modifiers",
+        "cmd,shift",
+    ])
+    .expect("voice wake binding add should parse");
+
+    match cli.command.expect("command should exist") {
+        Commands::Ai {
+            action: AiCommands::Voice { action },
+        } => match action {
+            AiVoiceCommands::Wake {
+                action:
+                    AiVoiceWakeCommands::Binding {
+                        action:
+                            AiVoiceWakeBindingCommands::Add {
+                                phrase,
+                                profile,
+                                key,
+                                modifiers,
+                                ..
+                            },
+                    },
+            } => {
+                assert_eq!(phrase, "打开录音");
+                assert_eq!(profile, "wake_profile_eden");
+                assert_eq!(key, "space");
+                assert_eq!(modifiers, vec!["cmd".to_string(), "shift".to_string()]);
+            }
+            _ => panic!("unexpected ai voice wake action"),
+        },
+        _ => panic!("unexpected command"),
+    }
+
+    let cli = Cli::try_parse_from([
+        "bifrost",
+        "ai",
+        "voice",
+        "wake",
+        "bind-audio",
+        "/tmp/wake.wav",
+        "--voiceprint-profile-id",
+        "speaker_eden",
+        "--phrase",
+        "打开录音",
+        "--key",
+        "space",
+        "--modifiers",
+        "cmd,shift",
+        "--profile-id",
+        "wake_profile_eden",
+        "--binding-id",
+        "wake_binding_eden",
+    ])
+    .expect("voice wake bind-audio should parse");
+
+    match cli.command.expect("command should exist") {
+        Commands::Ai {
+            action: AiCommands::Voice { action },
+        } => match action {
+            AiVoiceCommands::Wake {
+                action:
+                    AiVoiceWakeCommands::BindAudio {
+                        audio,
+                        voiceprint_profile_id,
+                        phrase,
+                        key,
+                        modifiers,
+                        profile_id,
+                        binding_id,
+                        ..
+                    },
+            } => {
+                assert_eq!(audio, std::path::PathBuf::from("/tmp/wake.wav"));
+                assert_eq!(voiceprint_profile_id, "speaker_eden");
+                assert_eq!(phrase.as_deref(), Some("打开录音"));
+                assert_eq!(key.as_deref(), Some("space"));
+                assert_eq!(modifiers, vec!["cmd".to_string(), "shift".to_string()]);
+                assert_eq!(profile_id.as_deref(), Some("wake_profile_eden"));
+                assert_eq!(binding_id.as_deref(), Some("wake_binding_eden"));
+            }
+            _ => panic!("unexpected ai voice wake bind-audio action"),
+        },
+        _ => panic!("unexpected command"),
+    }
+
+    let cli = Cli::try_parse_from([
+        "bifrost",
+        "ai",
+        "voice",
+        "wake",
+        "listener",
+        "start",
+        "--device",
+        ":2",
+        "--dry-run",
+        "--chunk-ms",
+        "2500",
+        "--json",
+    ])
+    .expect("voice wake listener start should parse");
+
+    match cli.command.expect("command should exist") {
+        Commands::Ai {
+            action: AiCommands::Voice { action },
+        } => match action {
+            AiVoiceCommands::Wake {
+                action: AiVoiceWakeCommands::Listener { action },
+            } => match action {
+                AiVoiceWakeListenerCommands::Start {
+                    source,
+                    device,
+                    chunk_ms,
+                    dry_run,
+                    json,
+                    ..
+                } => {
+                    assert_eq!(source, "mic");
+                    assert_eq!(device.as_deref(), Some(":2"));
+                    assert_eq!(chunk_ms, Some(2500));
+                    assert!(dry_run);
+                    assert!(json);
+                }
+                _ => panic!("unexpected voice wake listener action"),
+            },
+            _ => panic!("unexpected ai voice wake listener action"),
         },
         _ => panic!("unexpected command"),
     }

@@ -54,6 +54,10 @@ export default function TaskFileTranscriptPage({
     () => findActiveSegmentIndex(timeline?.segments || [], currentMs),
     [currentMs, timeline],
   );
+  const speakerMetadataById = useMemo(
+    () => new Map((timeline?.speakers || []).map((speaker) => [speaker.id, speaker])),
+    [timeline],
+  );
 
   const syncCurrentTime = useCallback((audio: HTMLAudioElement) => {
     setCurrentMs(Math.round(audio.currentTime * 1000));
@@ -280,6 +284,19 @@ export default function TaskFileTranscriptPage({
               <Descriptions.Item label="Segments">
                 {timeline.segments.length}
               </Descriptions.Item>
+              <Descriptions.Item label="Speakers">
+                {timeline.speakers?.length ? (
+                  <Space wrap>
+                    {timeline.speakers.map((speaker) => (
+                      <Tag key={speaker.id} color="purple">
+                        {formatSpeakerLabel(speaker.display_name, speaker.confidence)}
+                      </Tag>
+                    ))}
+                  </Space>
+                ) : (
+                  "-"
+                )}
+              </Descriptions.Item>
             </Descriptions>
             <div>
               <Text strong>Segments</Text>
@@ -331,6 +348,14 @@ export default function TaskFileTranscriptPage({
                         >
                           {formatDuration(segment.audio_start_ms)}
                         </Button>
+                        {segment.speaker ? (
+                          <Tag color="purple" style={{ flexShrink: 0, marginInlineEnd: 0 }}>
+                            {formatSpeakerLabel(
+                              segment.speaker_display_name ?? segment.speaker,
+                              speakerMetadataById.get(segment.speaker)?.confidence,
+                            )}
+                          </Tag>
+                        ) : null}
                         <Paragraph
                           style={{
                             flex: 1,
@@ -394,4 +419,11 @@ function findActiveSegmentIndex(segments: AsrTimelineSegment[], currentMs: numbe
   }
   const nextIndex = segments.findIndex((segment) => currentMs < segment.audio_start_ms);
   return nextIndex >= 0 ? nextIndex : segments.length - 1;
+}
+
+function formatSpeakerLabel(displayName: string, confidence?: number): string {
+  if (confidence === undefined || confidence === null) {
+    return displayName;
+  }
+  return `${displayName} ${Math.round(Math.max(0, Math.min(1, confidence)) * 100)}%`;
 }

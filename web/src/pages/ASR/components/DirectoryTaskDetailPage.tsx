@@ -622,6 +622,22 @@ export default function DirectoryTaskDetailPage({
               <Descriptions.Item label="Runtime">
                 {taskDetail.runtime_strategy}
               </Descriptions.Item>
+              <Descriptions.Item label="Speaker Diarization">
+                {taskDetail.diarization?.enabled ? (
+                  <Space wrap>
+                    <Tag color={taskDetail.summary.diarization_ready ? "purple" : "warning"}>
+                      {taskDetail.summary.diarization_ready ? "Ready" : "Needs setup"}
+                    </Tag>
+                    <Text>{taskDetail.diarization.profile}</Text>
+                  </Space>
+                ) : (
+                  "Disabled"
+                )}
+              </Descriptions.Item>
+              <Descriptions.Item label="Speakers">
+                {taskDetail.summary.diarized_files ?? 0} files,{" "}
+                {taskDetail.summary.speaker_count ?? 0} speakers
+              </Descriptions.Item>
               <Descriptions.Item label="Processed">
                 {taskDetail.summary.processed}
               </Descriptions.Item>
@@ -895,6 +911,25 @@ export default function DirectoryTaskDetailPage({
                       }
                       return tag;
                     },
+                  },
+                  {
+                    title: "Diarization",
+                    width: 150,
+                    render: (_value, record) =>
+                      record.diarization_status ? (
+                        <Space direction="vertical" size={2}>
+                          <Tag color={record.diarization_status === "success" ? "purple" : "default"}>
+                            {record.diarization_status}
+                          </Tag>
+                          {record.speaker_count ? (
+                            <Text type="secondary" style={{ fontSize: 11 }}>
+                              {record.speaker_count} speakers
+                            </Text>
+                          ) : null}
+                        </Space>
+                      ) : (
+                        <Text type="secondary">-</Text>
+                      ),
                   },
                   {
                     title: "Text",

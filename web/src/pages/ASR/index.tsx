@@ -8,6 +8,7 @@ import {
   createAsrTask,
   deleteAsrTask,
   getDailyAgentReport,
+  getAsrCapabilities,
   getAsrStatus,
   getAsrTask,
   getAsrTaskDailyDocument,
@@ -34,6 +35,7 @@ import {
   type AsrStatus,
   type AsrStreamEvent,
   type AsrConnectionParams,
+  type AsrCapabilities,
   type AsrTaskDailyDocumentDetail,
   type AsrTaskFileRecord,
   type AsrTranscriptTimeline,
@@ -57,7 +59,9 @@ import {
   type DirectoryTaskDetailTabKey,
 } from "./components/taskDetailRoute";
 import DirectoryTasksPanel from "./components/DirectoryTasksPanel";
+import DiarizationSetupCard from "./components/DiarizationSetupCard";
 import SpeechWorkbench from "./components/SpeechWorkbench";
+import VoiceWakeActionsCard from "./components/VoiceWakeActionsCard";
 
 export default function ASR() {
   const { token } = theme.useToken();
@@ -81,6 +85,7 @@ export default function ASR() {
     }
     return "files";
   })();
+  const [capabilities, setCapabilities] = useState<AsrCapabilities | null>(null);
   const [status, setStatus] = useState<AsrStatus | null>(null);
   const [tasks, setTasks] = useState<AsrDirectoryTask[]>([]);
   const [tasksLoading, setTasksLoading] = useState(false);
@@ -120,6 +125,38 @@ export default function ASR() {
   const committedTranscriptRef = useRef("");
   const partialTranscriptRef = useRef("");
   const recordingActiveRef = useRef(false);
+  const asrSupported =
+    capabilities?.qwen3_asr.enabled === true && capabilities.qwen3_asr.hidden === false;
+
+  useEffect(() => {
+    let alive = true;
+    void getAsrCapabilities()
+      .then((next) => {
+        if (alive) {
+          setCapabilities(next);
+        }
+      })
+      .catch(() => {
+        if (alive) {
+          setCapabilities({
+            platform: "unknown",
+            arch: "unknown",
+            supported_target: "macos-aarch64",
+            qwen3_asr: { enabled: false, hidden: true, platform_supported: false },
+            local_transcription: { enabled: false, hidden: true, platform_supported: false },
+            speech_workbench: { enabled: false, hidden: true, platform_supported: false },
+            directory_tasks: { enabled: false, hidden: true, platform_supported: false },
+            speaker_diarization: { enabled: false, hidden: true, platform_supported: false },
+            voiceprint: { enabled: false, hidden: true, platform_supported: false },
+            voice_wake_asr: { enabled: false, hidden: true, platform_supported: false },
+          });
+        }
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   const getCurrentAsrParams = useCallback(
     (): AsrConnectionParams => ({
       ...workbenchParams,
@@ -313,6 +350,9 @@ export default function ASR() {
   }, []);
 
   useEffect(() => {
+    if (!asrSupported) {
+      return;
+    }
     const initialRefreshTimer = window.setTimeout(() => {
       void refreshStatus();
       void refreshTasks();
@@ -336,7 +376,7 @@ export default function ASR() {
       stopVoicePcmStreaming();
       stopMicMeter();
     };
-  }, [refreshStatus, refreshTasks, stopMicMeter, stopVoicePcmStreaming]);
+  }, [asrSupported, refreshStatus, refreshTasks, stopMicMeter, stopVoicePcmStreaming]);
 
   useEffect(() => {
     saveAsrParams(workbenchParams);
@@ -794,6 +834,12 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
         language: values.language,
         model: values.model,
         runtime_strategy: values.runtime_strategy,
+        diarization: {
+          enabled: Boolean(values.diarization_enabled),
+          profile: values.diarization_profile || "sherpa-onnx-balanced",
+          known_speaker_count: values.diarization_known_speaker_count,
+          voiceprint_matching: Boolean(values.voiceprint_matching),
+        },
         external_devices: externalDevices,
         import_policy: externalDevices.length
           ? {
@@ -835,6 +881,12 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
           language: values.language,
           model: values.model,
           runtime_strategy: values.runtime_strategy,
+          diarization: {
+            enabled: Boolean(values.diarization_enabled),
+            profile: values.diarization_profile || "sherpa-onnx-balanced",
+            known_speaker_count: values.diarization_known_speaker_count,
+            voiceprint_matching: Boolean(values.voiceprint_matching),
+          },
           external_devices: externalDevices,
           import_policy: externalDevices.length
             ? {
@@ -1158,7 +1210,7 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
   );
 
   useEffect(() => {
-    if (!selectedTaskId) {
+    if (!asrSupported || !selectedTaskId) {
       setTaskDetail(null);
       setTaskTimeline(null);
       setTaskDailyDocument(null);
@@ -1166,31 +1218,31 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
       return;
     }
     void loadTaskDetail(selectedTaskId);
-  }, [loadTaskDetail, selectedTaskId]);
+  }, [asrSupported, loadTaskDetail, selectedTaskId]);
 
   useEffect(() => {
-    if (!selectedTaskId || !selectedFileKey) {
+    if (!asrSupported || !selectedTaskId || !selectedFileKey) {
       setTaskTimeline(null);
       return;
     }
     void loadTaskTimeline(selectedTaskId, selectedFileKey);
-  }, [loadTaskTimeline, selectedFileKey, selectedTaskId]);
+  }, [asrSupported, loadTaskTimeline, selectedFileKey, selectedTaskId]);
 
   useEffect(() => {
-    if (!selectedTaskId || !selectedDailyDate) {
+    if (!asrSupported || !selectedTaskId || !selectedDailyDate) {
       setTaskDailyDocument(null);
       return;
     }
     void loadTaskDailyDocument(selectedTaskId, selectedDailyDate);
-  }, [loadTaskDailyDocument, selectedDailyDate, selectedTaskId]);
+  }, [asrSupported, loadTaskDailyDocument, selectedDailyDate, selectedTaskId]);
 
   useEffect(() => {
-    if (!selectedTaskId || !selectedDailyAgentReportDate) {
+    if (!asrSupported || !selectedTaskId || !selectedDailyAgentReportDate) {
       setTaskDailyAgentReport(null);
       return;
     }
     void loadDailyAgentReport(selectedTaskId, selectedDailyAgentReportDate);
-  }, [loadDailyAgentReport, selectedDailyAgentReportDate, selectedTaskId]);
+  }, [asrSupported, loadDailyAgentReport, selectedDailyAgentReportDate, selectedTaskId]);
 
   // Auto-refresh task detail every 3 seconds while the task or bulk chunk retry is running.
   useEffect(() => {
@@ -1310,6 +1362,10 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
     workState !== "recording" &&
     (workState === "transcribing" || workState === "error" || progress > 0);
 
+  if (capabilities === null || !asrSupported) {
+    return <div style={{ height: "100%" }} />;
+  }
+
   if (selectedTaskId) {
     return (
       <DirectoryTaskDetailPage
@@ -1345,6 +1401,8 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
   return (
     <div style={{ height: "100%", overflow: "auto" }}>
       <SpeechTab />
+      <DiarizationSetupCard />
+      <VoiceWakeActionsCard />
       <DirectoryTasksPanel
         taskForm={taskForm}
         taskScheduleKind={taskScheduleKind}

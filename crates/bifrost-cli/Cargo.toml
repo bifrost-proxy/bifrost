@@ -53,6 +53,7 @@ crossterm = "0.28"
 tokio-tungstenite = "0.26"
 base64 = "0.22"
 ring = "0.17"
+uuid.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.28", features = ["signal", "process", "fs"] }

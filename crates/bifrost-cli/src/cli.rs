@@ -605,11 +605,19 @@ pub enum AgentCommands {
 #[derive(Subcommand, Clone)]
 pub enum AiCommands {
     #[command(about = "Manage Qwen3-ASR speech-to-text")]
+    #[cfg_attr(
+        not(all(target_os = "macos", target_arch = "aarch64")),
+        command(hide = true)
+    )]
     Asr {
         #[command(subcommand)]
         action: AiAsrCommands,
     },
     #[command(about = "Run local voice input runtime")]
+    #[cfg_attr(
+        not(all(target_os = "macos", target_arch = "aarch64")),
+        command(hide = true)
+    )]
     Voice {
         #[command(subcommand)]
         action: AiVoiceCommands,
@@ -624,6 +632,10 @@ pub enum AiVoiceCommands {
         json: bool,
     },
     #[command(about = "Listen to a local voice source and print transcript events")]
+    #[cfg_attr(
+        not(all(target_os = "macos", target_arch = "aarch64")),
+        command(hide = true)
+    )]
     Listen {
         #[arg(long, default_value = "mic", value_parser = ["mic", "system", "app", "file"], help = "Voice source kind")]
         source: String,
@@ -684,6 +696,15 @@ pub enum AiVoiceCommands {
         #[command(subcommand)]
         action: AiVoiceVocabularyCommands,
     },
+    #[command(about = "Manage local voice wake actions")]
+    #[cfg_attr(
+        not(all(target_os = "macos", target_arch = "aarch64")),
+        command(hide = true)
+    )]
+    Wake {
+        #[command(subcommand)]
+        action: AiVoiceWakeCommands,
+    },
 }
 
 #[derive(Subcommand, Clone)]
@@ -701,8 +722,211 @@ pub enum AiVoiceVocabularyCommands {
 }
 
 #[derive(Subcommand, Clone)]
+pub enum AiVoiceWakeCommands {
+    #[command(about = "Show local voice wake status")]
+    Status {
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+    },
+    #[command(about = "Manage voice wake profiles")]
+    Profile {
+        #[command(subcommand)]
+        action: AiVoiceWakeProfileCommands,
+    },
+    #[command(about = "Manage trigger phrase bindings")]
+    Binding {
+        #[command(subcommand)]
+        action: AiVoiceWakeBindingCommands,
+    },
+    #[command(about = "Start or stop the backend voice wake listener")]
+    Listener {
+        #[command(subcommand)]
+        action: AiVoiceWakeListenerCommands,
+    },
+    #[command(about = "Create a wake binding from one audio sample and one captured shortcut")]
+    BindAudio {
+        #[arg(value_hint = ValueHint::FilePath, help = "Wake audio sample to recognize")]
+        audio: PathBuf,
+        #[arg(long, help = "Existing ASR speaker voiceprint profile id")]
+        voiceprint_profile_id: String,
+        #[arg(
+            long,
+            help = "Display name for the wake profile; defaults to the voiceprint id"
+        )]
+        name: Option<String>,
+        #[arg(long, help = "Stable wake profile id; generated when omitted")]
+        profile_id: Option<String>,
+        #[arg(long, help = "Stable binding id; generated when omitted")]
+        binding_id: Option<String>,
+        #[arg(
+            long,
+            hide = true,
+            help = "Recognized phrase override for non-interactive or test runs"
+        )]
+        phrase: Option<String>,
+        #[arg(long, default_value = "Qwen3-ASR-1.7B", help = "ASR model name")]
+        model: String,
+        #[arg(long, default_value = "chinese", help = "Recognition language")]
+        language: String,
+        #[arg(
+            long,
+            help = "Key name; when omitted, press the shortcut in the terminal"
+        )]
+        key: Option<String>,
+        #[arg(
+            long,
+            value_delimiter = ',',
+            help = "Comma-separated modifiers for --key: cmd,shift,ctrl,option"
+        )]
+        modifiers: Vec<String>,
+        #[arg(long, default_value_t = 1, help = "Number of key presses")]
+        press_count: u8,
+        #[arg(long, help = "Speaker threshold override")]
+        speaker_threshold: Option<f32>,
+        #[arg(long, help = "Cooldown after trigger in milliseconds")]
+        cooldown_ms: Option<u64>,
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+    },
+    #[command(about = "Trigger a wake binding for testing")]
+    Trigger {
+        #[arg(long, help = "Spoken trigger phrase")]
+        phrase: String,
+        #[arg(long, help = "Wake profile id that should match")]
+        profile: Option<String>,
+        #[arg(long, help = "Speaker confidence score for threshold testing")]
+        speaker_confidence: Option<f32>,
+        #[arg(long, help = "Actually execute the key press instead of dry-run")]
+        execute: bool,
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+    },
+    #[command(hide = true, about = "Run the voice wake listener worker process")]
+    Worker {
+        #[arg(long, default_value = "127.0.0.1")]
+        admin_host: String,
+        #[arg(long)]
+        admin_port: u16,
+        #[arg(
+            long,
+            help = "Backend microphone device for ffmpeg avfoundation capture; defaults to :0"
+        )]
+        device: Option<String>,
+        #[arg(long, default_value_t = 2500)]
+        chunk_ms: u64,
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum AiVoiceWakeListenerCommands {
+    #[command(about = "Start backend listening with Bifrost-owned microphone capture")]
+    Start {
+        #[arg(long, default_value = "mic", value_parser = ["mic", "mock"], help = "Listener audio source; mic uses backend capture")]
+        source: String,
+        #[arg(
+            long,
+            help = "Backend microphone device for ffmpeg avfoundation capture; defaults to :0"
+        )]
+        device: Option<String>,
+        #[arg(long, help = "Audio chunk size in milliseconds")]
+        chunk_ms: Option<u64>,
+        #[arg(long, help = "Do not execute matched key press actions")]
+        dry_run: bool,
+        #[arg(long, value_delimiter = ',', help = "Mock transcripts for tests")]
+        mock_transcripts: Vec<String>,
+        #[arg(long, help = "Mock transcript interval in milliseconds")]
+        mock_interval_ms: Option<u64>,
+        #[arg(long, help = "Mock identified speaker profile id")]
+        mock_speaker_profile_id: Option<String>,
+        #[arg(long, help = "Mock speaker confidence")]
+        mock_speaker_confidence: Option<f32>,
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+    },
+    #[command(about = "Stop backend voice wake listening")]
+    Stop {
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum AiVoiceWakeProfileCommands {
+    #[command(about = "List voice wake profiles")]
+    List {
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+    },
+    #[command(about = "Create a voice wake profile")]
+    Add {
+        #[arg(long, help = "Stable profile id; generated when omitted")]
+        id: Option<String>,
+        #[arg(long, help = "Display name")]
+        name: String,
+        #[arg(long, help = "Required linked ASR speaker voiceprint profile id")]
+        voiceprint_profile_id: Option<String>,
+        #[arg(long, help = "Default speaker match threshold")]
+        speaker_threshold: Option<f32>,
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum AiVoiceWakeBindingCommands {
+    #[command(about = "List voice wake bindings")]
+    List {
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+    },
+    #[command(about = "Bind one trigger phrase to one key press")]
+    Add {
+        #[arg(long, help = "Stable binding id; generated when omitted")]
+        id: Option<String>,
+        #[arg(long, help = "Spoken trigger phrase")]
+        phrase: String,
+        #[arg(long, help = "Wake profile id")]
+        profile: String,
+        #[arg(
+            long,
+            default_value = "space",
+            help = "Key name, e.g. space, return, tab, escape, or a single character"
+        )]
+        key: String,
+        #[arg(long, help = "Platform keycode; overrides --key")]
+        keycode: Option<u16>,
+        #[arg(
+            long,
+            value_delimiter = ',',
+            help = "Comma-separated modifiers: cmd,shift,ctrl,option"
+        )]
+        modifiers: Vec<String>,
+        #[arg(long, default_value_t = 1, help = "Number of key presses")]
+        press_count: u8,
+        #[arg(long, help = "Create disabled binding")]
+        disabled: bool,
+        #[arg(long, help = "KWS boosting score recorded for the binding")]
+        kws_score: Option<f32>,
+        #[arg(long, help = "KWS trigger threshold recorded for the binding")]
+        kws_threshold: Option<f32>,
+        #[arg(long, help = "Speaker threshold override")]
+        speaker_threshold: Option<f32>,
+        #[arg(long, help = "Cooldown after trigger in milliseconds")]
+        cooldown_ms: Option<u64>,
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Clone)]
 pub enum AiAsrCommands {
     #[command(about = "Start the local Qwen3-ASR model service")]
+    #[cfg_attr(
+        not(all(target_os = "macos", target_arch = "aarch64")),
+        command(hide = true)
+    )]
     Start {
         #[arg(long, default_value = "Qwen3-ASR-1.7B", help = "ASR model name")]
         model: String,
@@ -710,13 +934,25 @@ pub enum AiAsrCommands {
         language: String,
     },
     #[command(about = "Stop the local Qwen3-ASR model service")]
+    #[cfg_attr(
+        not(all(target_os = "macos", target_arch = "aarch64")),
+        command(hide = true)
+    )]
     Stop,
     #[command(about = "Show the local Qwen3-ASR model service status")]
+    #[cfg_attr(
+        not(all(target_os = "macos", target_arch = "aarch64")),
+        command(hide = true)
+    )]
     Status {
         #[arg(long, help = "Print JSON")]
         json: bool,
     },
     #[command(about = "Stream-transcribe one audio file to stdout")]
+    #[cfg_attr(
+        not(all(target_os = "macos", target_arch = "aarch64")),
+        command(hide = true)
+    )]
     StreamFile {
         #[arg(value_hint = ValueHint::FilePath, help = "Audio file to transcribe")]
         audio: PathBuf,
@@ -724,13 +960,106 @@ pub enum AiAsrCommands {
         model: String,
         #[arg(long, default_value = "chinese", help = "Recognition language")]
         language: String,
+        #[arg(
+            long,
+            help = "Use Bifrost admin speaker diarization and enrolled voiceprints for this file"
+        )]
+        speaker_aware: bool,
         #[arg(long, default_value = "jsonl", value_parser = ["jsonl"], help = "Output format")]
         format: String,
     },
     #[command(about = "Inspect and run ASR directory tasks")]
+    #[cfg_attr(
+        not(all(target_os = "macos", target_arch = "aarch64")),
+        command(hide = true)
+    )]
     Task {
         #[command(subcommand)]
         action: AiAsrTaskCommands,
+    },
+    #[command(about = "Initialize and inspect ASR speaker diarization profiles")]
+    #[cfg_attr(
+        not(all(target_os = "macos", target_arch = "aarch64")),
+        command(hide = true)
+    )]
+    Diarization {
+        #[command(subcommand)]
+        action: AiAsrDiarizationCommands,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum AiAsrDiarizationCommands {
+    #[command(about = "List available speaker diarization profiles")]
+    Profiles {
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+    },
+    #[command(about = "Show one speaker diarization profile status")]
+    Status {
+        #[arg(
+            long,
+            default_value = "sherpa-onnx-balanced",
+            help = "Diarization profile ID"
+        )]
+        profile: String,
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+    },
+    #[command(about = "Initialize local speaker diarization profile assets")]
+    Init {
+        #[arg(
+            long,
+            default_value = "sherpa-onnx-balanced",
+            help = "Diarization profile ID"
+        )]
+        profile: String,
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+    },
+    #[command(about = "Manage enrolled speaker voiceprints")]
+    Speakers {
+        #[command(subcommand)]
+        action: AiAsrDiarizationSpeakerCommands,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum AiAsrDiarizationSpeakerCommands {
+    #[command(about = "List enrolled speaker voiceprints")]
+    List {
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+    },
+    #[command(about = "Show one enrolled speaker voiceprint")]
+    Show {
+        #[arg(help = "Speaker profile ID")]
+        profile_id: String,
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+    },
+    #[command(about = "Enroll a speaker voiceprint by live prompted reading")]
+    EnrollLive {
+        #[arg(long, help = "Speaker display name")]
+        name: String,
+        #[arg(
+            long,
+            default_value = "sherpa-onnx-balanced",
+            help = "Diarization profile ID"
+        )]
+        profile: String,
+        #[arg(long, default_value_t = 4, help = "Seconds to record for each prompt")]
+        phrase_seconds: u64,
+        #[arg(
+            long,
+            default_value = ":0",
+            help = "Local microphone device for ffmpeg capture"
+        )]
+        device: String,
+        #[arg(long, hide = true, value_hint = ValueHint::FilePath)]
+        test_pcm16: Option<PathBuf>,
+        #[arg(long, help = "Print JSON")]
+        json: bool,
     },
 }
 
