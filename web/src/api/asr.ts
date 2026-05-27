@@ -1,7 +1,7 @@
 import { buildApiUrl, buildWsUrl } from "../runtime";
 import { getClientId } from "../services/clientId";
 import { getAdminToken } from "../services/adminAuth";
-import { get } from "./client";
+import { get, post } from "./client";
 
 export interface AsrConnectionParams {
   host?: string;
@@ -32,6 +32,201 @@ export interface AsrStatus {
   owner_module: string;
   owner_id?: string;
   message: string;
+}
+
+export interface AsrCapabilityFlag {
+  enabled: boolean;
+  hidden: boolean;
+  platform_supported: boolean;
+  reason?: string;
+}
+
+export interface AsrCapabilities {
+  platform: string;
+  arch: string;
+  supported_target: "macos-aarch64";
+  qwen3_asr: AsrCapabilityFlag;
+  local_transcription: AsrCapabilityFlag;
+  speech_workbench: AsrCapabilityFlag;
+  directory_tasks: AsrCapabilityFlag;
+  speaker_diarization: AsrCapabilityFlag;
+  voiceprint: AsrCapabilityFlag;
+  voice_wake_asr: AsrCapabilityFlag;
+}
+
+export interface AsrDiarizationProfileInfo {
+  id: string;
+  label: string;
+  engine: string;
+  quality_tier: string;
+  requires_init: boolean;
+  ready: boolean;
+  install_dir: string;
+  message: string;
+}
+
+export interface AsrDiarizationStatus {
+  profile: AsrDiarizationProfileInfo;
+  voiceprint_dir: string;
+  speaker_profile_count: number;
+}
+
+export interface AsrSpeakerProfileSummary {
+  id: string;
+  display_name: string;
+  embedding_dim: number;
+}
+
+export interface AsrSpeakerEnrollmentPrompt {
+  id: string;
+  text: string;
+}
+
+export interface AsrSpeakerEnrollmentSession {
+  id: string;
+  speaker_name: string;
+  diarization_profile: string;
+  sample_rate: number;
+  audio_format: string;
+  prompts: AsrSpeakerEnrollmentPrompt[];
+}
+
+export interface AsrSpeakerEnrollmentResult {
+  profile: {
+    id: string;
+    display_name: string;
+    source: string;
+    diarization_profile: string;
+    embedding_dim: number;
+    total_duration_ms: number;
+  };
+  profile_path: string;
+}
+
+export interface AsrSpeakerProfilesResponse {
+  profiles: AsrSpeakerProfileSummary[];
+}
+
+export interface VoiceWakeStatus {
+  enabled: boolean;
+  profile_count: number;
+  binding_count: number;
+  event_count: number;
+  mode: string;
+  store_path: string;
+  default_dry_run: boolean;
+  listener: VoiceWakeListenerStatus;
+}
+
+export interface VoiceWakeListenerStatus {
+  running: boolean;
+  source: string;
+  device?: string | null;
+  worker_pid?: number | null;
+  chunk_ms: number;
+  started_at_ms: number | null;
+  stopped_at_ms: number | null;
+  last_transcript: string | null;
+  last_transcript_at_ms: number | null;
+  last_error: string | null;
+  last_error_at_ms: number | null;
+  last_speaker_profile_id: string | null;
+  last_speaker_confidence: number | null;
+  last_speaker_status: string | null;
+  trigger_count: number;
+}
+
+export interface VoiceWakeProfile {
+  id: string;
+  display_name: string;
+  voiceprint_profile_id: string | null;
+  speaker_threshold: number;
+  created_at_ms: number;
+  updated_at_ms: number;
+}
+
+export interface VoiceWakeProfilesResponse {
+  profiles: VoiceWakeProfile[];
+}
+
+export interface VoiceWakeActionKeyPress {
+  type: "key_press";
+  key: string | null;
+  keycode: number | null;
+  modifiers: string[];
+  press_count: number;
+}
+
+export type VoiceWakeAction = VoiceWakeActionKeyPress;
+
+export interface VoiceWakeBinding {
+  id: string;
+  enabled: boolean;
+  phrase: string;
+  normalized_phrase: string;
+  profile_id: string;
+  kws_score: number;
+  kws_threshold: number;
+  speaker_threshold: number;
+  cooldown_ms: number;
+  action: VoiceWakeAction;
+  created_at_ms: number;
+  updated_at_ms: number;
+  last_triggered_at_ms: number | null;
+}
+
+export interface VoiceWakeBindingsResponse {
+  bindings: VoiceWakeBinding[];
+}
+
+export interface VoiceWakeActionResult {
+  action_type: string;
+  dry_run: boolean;
+  executed: boolean;
+  platform: string;
+  message: string;
+  command_preview: string | null;
+}
+
+export interface VoiceWakeEvent {
+  id: string;
+  binding_id: string;
+  phrase: string;
+  profile_id: string;
+  speaker_confidence: number | null;
+  dry_run: boolean;
+  matched_at_ms: number;
+  action_result: VoiceWakeActionResult;
+}
+
+export interface VoiceWakeEventsResponse {
+  events: VoiceWakeEvent[];
+}
+
+export interface VoiceWakeTriggerResponse {
+  matched: boolean;
+  binding: VoiceWakeBinding;
+  event: VoiceWakeEvent;
+  action_result: VoiceWakeActionResult;
+}
+
+export interface CreateVoiceWakeProfileRequest {
+  id?: string;
+  display_name: string;
+  voiceprint_profile_id?: string;
+  speaker_threshold?: number;
+}
+
+export interface CreateVoiceWakeBindingRequest {
+  id?: string;
+  phrase: string;
+  profile_id: string;
+  enabled?: boolean;
+  kws_score?: number;
+  kws_threshold?: number;
+  speaker_threshold?: number;
+  cooldown_ms?: number;
+  action: VoiceWakeAction;
 }
 
 export interface AsrServiceResult {
@@ -80,6 +275,10 @@ export interface AsrSegmentEvent {
   text: string;
   delta: string;
   committed: string;
+  speaker?: string;
+  speaker_display_name?: string;
+  speaker_profile_id?: string;
+  speaker_confidence?: number;
 }
 
 export interface AsrErrorEvent {
@@ -106,6 +305,11 @@ export interface AsrTaskSummary {
   cleanable_source_bytes: number;
   cleanable_source_file_count: number;
   running: boolean;
+  diarization_enabled?: boolean;
+  diarization_ready?: boolean;
+  diarization_running?: boolean;
+  diarized_files?: number;
+  speaker_count?: number;
 }
 
 export type AsrRuntimeStrategy =
@@ -150,6 +354,9 @@ export interface AsrTaskFileRecord {
   progress_current?: number;
   progress_total?: number;
   failed_chunks?: AsrFailedChunkRecord[];
+  diarization_status?: string;
+  diarization_manifest_path?: string;
+  speaker_count?: number;
 }
 
 export interface AsrChunkMetric {
@@ -174,7 +381,17 @@ export interface AsrTimelineSegment {
   audio_end_ms: number;
   absolute_start_ms?: number;
   absolute_end_ms?: number;
+  speaker?: string;
+  speaker_display_name?: string;
+  overlap?: boolean;
   text: string;
+}
+
+export interface AsrTimelineSpeaker {
+  id: string;
+  display_name: string;
+  mapped_profile_id?: string;
+  confidence?: number;
 }
 
 export interface AsrTranscriptTimeline {
@@ -188,6 +405,8 @@ export interface AsrTranscriptTimeline {
   media_duration_ms?: number;
   model: string;
   language: string;
+  diarization_profile?: string;
+  speakers?: AsrTimelineSpeaker[];
   processed_at_ms: number;
   segments: AsrTimelineSegment[];
 }
@@ -224,6 +443,14 @@ export interface AsrDirectoryTask {
   language: string;
   model: string;
   runtime_strategy: AsrRuntimeStrategy;
+  diarization?: {
+    enabled: boolean;
+    profile: string;
+    min_speakers?: number;
+    max_speakers?: number;
+    known_speaker_count?: number;
+    voiceprint_matching?: boolean;
+  };
   created_at_ms: number;
   updated_at_ms: number;
   last_run_at_ms?: number;
@@ -281,6 +508,7 @@ export interface CreateAsrTaskRequest {
   language?: string;
   model?: string;
   runtime_strategy?: AsrRuntimeStrategy;
+  diarization?: AsrDirectoryTask["diarization"];
   external_devices?: AsrExternalDeviceBinding[];
   import_policy?: AsrExternalImportPolicy;
 }
@@ -463,7 +691,7 @@ export function defaultAsrParams(): Required<
   return {
     host: "127.0.0.1",
     language: "chinese",
-    model: "Qwen3-ASR-0.6B",
+    model: "Qwen3-ASR-1.7B",
     ownerModule: "speech_workbench",
   };
 }
@@ -487,7 +715,7 @@ export function defaultModelManagementParams(): Required<
   return {
     host: "127.0.0.1",
     language: "chinese",
-    model: "Qwen3-ASR-0.6B",
+    model: "Qwen3-ASR-1.7B",
     ownerModule: "model_management",
   };
 }
@@ -556,6 +784,243 @@ export async function getAsrStatus(
   params: AsrConnectionParams = {},
 ): Promise<AsrStatus> {
   return get<AsrStatus>(`/asr/status?${buildAsrQuery(params)}`);
+}
+
+export async function getAsrCapabilities(): Promise<AsrCapabilities> {
+  return get<AsrCapabilities>("/asr/capabilities");
+}
+
+export async function getAsrDiarizationStatus(
+  profile = "sherpa-onnx-balanced",
+): Promise<AsrDiarizationStatus> {
+  return get<AsrDiarizationStatus>(
+    `/asr/diarization/status?profile=${encodeURIComponent(profile)}`,
+  );
+}
+
+export async function getAsrSpeakerProfiles(): Promise<AsrSpeakerProfilesResponse> {
+  return get<AsrSpeakerProfilesResponse>("/asr/speaker-profiles");
+}
+
+export async function getVoiceWakeStatus(): Promise<VoiceWakeStatus> {
+  return get<VoiceWakeStatus>("/voice/wake/status");
+}
+
+export async function getVoiceWakeProfiles(): Promise<VoiceWakeProfilesResponse> {
+  return get<VoiceWakeProfilesResponse>("/voice/wake/profiles");
+}
+
+export async function createVoiceWakeProfile(
+  payload: CreateVoiceWakeProfileRequest,
+): Promise<VoiceWakeProfile> {
+  return post<VoiceWakeProfile>("/voice/wake/profiles", payload);
+}
+
+export async function getVoiceWakeBindings(): Promise<VoiceWakeBindingsResponse> {
+  return get<VoiceWakeBindingsResponse>("/voice/wake/bindings");
+}
+
+export async function createVoiceWakeBinding(
+  payload: CreateVoiceWakeBindingRequest,
+): Promise<VoiceWakeBinding> {
+  return post<VoiceWakeBinding>("/voice/wake/bindings", payload);
+}
+
+export async function triggerVoiceWake(
+  phrase: string,
+  profileId: string,
+  execute = true,
+): Promise<VoiceWakeTriggerResponse> {
+  return post<VoiceWakeTriggerResponse>("/voice/wake/trigger", {
+    phrase,
+    profile_id: profileId,
+    dry_run: !execute,
+  });
+}
+
+export async function startVoiceWakeListener(): Promise<{ listener: VoiceWakeListenerStatus }> {
+  return post<{ listener: VoiceWakeListenerStatus }>("/voice/wake/listener/start", {});
+}
+
+export async function stopVoiceWakeListener(): Promise<{ listener: VoiceWakeListenerStatus }> {
+  return post<{ listener: VoiceWakeListenerStatus }>("/voice/wake/listener/stop", {});
+}
+
+export async function getVoiceWakeEvents(): Promise<VoiceWakeEventsResponse> {
+  return get<VoiceWakeEventsResponse>("/voice/wake/events");
+}
+
+export async function initAsrDiarizationProfile(
+  profile = "sherpa-onnx-balanced",
+): Promise<AsrDiarizationStatus> {
+  const response = await fetch(
+    buildApiUrl(`/asr/diarization/init-stream?profile=${encodeURIComponent(profile)}`),
+    {
+      method: "GET",
+      headers: buildStreamHeaders(),
+    },
+  );
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(text || `HTTP ${response.status}`);
+  }
+  const dataLine = text
+    .split("\n")
+    .filter((line) => line.startsWith("data: "))
+    .map((line) => line.slice("data: ".length))
+    .at(-1);
+  if (!dataLine) {
+    return getAsrDiarizationStatus(profile);
+  }
+  const payload = JSON.parse(dataLine) as { status?: AsrDiarizationStatus };
+  if (payload.status) {
+    return payload.status;
+  }
+  return getAsrDiarizationStatus(profile);
+}
+
+export async function listAsrSpeakerProfiles(): Promise<AsrSpeakerProfileSummary[]> {
+  const response = await get<{ profiles: AsrSpeakerProfileSummary[] }>("/asr/speaker-profiles");
+  return response.profiles;
+}
+
+export async function deleteAsrSpeakerProfile(profileId: string): Promise<void> {
+  const response = await fetch(
+    buildApiUrl(`/asr/speaker-profiles/${encodeURIComponent(profileId)}`),
+    {
+      method: "DELETE",
+      headers: {
+        Accept: "application/json",
+      },
+    },
+  );
+  await readJsonResponse<unknown>(response);
+}
+
+export type AsrSpeakerIdentifyResult = {
+  matched: boolean;
+  profile_id: string | null;
+  display_name: string;
+  speaker: string;
+  confidence: number;
+  status?: "matched" | "unmatched" | "insufficient_audio";
+  reason?: string | null;
+  audio_duration_ms?: number;
+  speech_duration_ms?: number;
+};
+
+export async function identifyAsrSpeakerVoice(
+  pcm16leBase64: string,
+): Promise<AsrSpeakerIdentifyResult> {
+  const response = await fetch(buildApiUrl("/asr/speaker-profiles/identify"), {
+    method: "POST",
+    headers: {
+      ...buildJsonHeaders(),
+      Accept: "application/json",
+    },
+    body: JSON.stringify({
+      pcm16le_base64: pcm16leBase64,
+      sample_rate: 16000,
+      channels: 1,
+    }),
+  });
+  return readJsonResponse<AsrSpeakerIdentifyResult>(response);
+}
+
+export async function createAsrSpeakerEnrollmentSession(
+  name: string,
+  diarizationProfile = "sherpa-onnx-balanced",
+): Promise<AsrSpeakerEnrollmentSession> {
+  const response = await fetch(buildApiUrl("/asr/speaker-profiles/enrollment-sessions"), {
+    method: "POST",
+    headers: {
+      ...buildJsonHeaders(),
+      Accept: "application/json",
+    },
+    body: JSON.stringify({ name, diarization_profile: diarizationProfile }),
+  });
+  const payload = await readJsonResponse<{ session: AsrSpeakerEnrollmentSession }>(response);
+  return payload.session;
+}
+
+export async function appendAsrSpeakerEnrollmentAudio(
+  sessionId: string,
+  promptId: string,
+  pcm16leBase64: string,
+  finalChunk = true,
+): Promise<void> {
+  const response = await fetch(
+    buildApiUrl(
+      `/asr/speaker-profiles/enrollment-sessions/${encodeURIComponent(sessionId)}/audio`,
+    ),
+    {
+      method: "POST",
+      headers: {
+        ...buildJsonHeaders(),
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        prompt_id: promptId,
+        pcm16le_base64: pcm16leBase64,
+        sample_rate: 16000,
+        channels: 1,
+        final_chunk: finalChunk,
+      }),
+    },
+  );
+  await readJsonResponse<unknown>(response);
+}
+
+export type AsrSpeakerEnrollmentVerifyResult = {
+  prompt_id: string;
+  transcript: string;
+  match_score: number;
+  matched: boolean;
+};
+
+export async function verifyAsrSpeakerEnrollmentPrompt(
+  sessionId: string,
+  promptId: string,
+  pcm16leBase64: string,
+): Promise<AsrSpeakerEnrollmentVerifyResult> {
+  const response = await fetch(
+    buildApiUrl(
+      `/asr/speaker-profiles/enrollment-sessions/${encodeURIComponent(sessionId)}/verify`,
+    ),
+    {
+      method: "POST",
+      headers: {
+        ...buildJsonHeaders(),
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        prompt_id: promptId,
+        pcm16le_base64: pcm16leBase64,
+        sample_rate: 16000,
+        channels: 1,
+      }),
+    },
+  );
+  return readJsonResponse<AsrSpeakerEnrollmentVerifyResult>(response);
+}
+
+export async function finishAsrSpeakerEnrollment(
+  sessionId: string,
+): Promise<AsrSpeakerEnrollmentResult> {
+  const response = await fetch(
+    buildApiUrl(
+      `/asr/speaker-profiles/enrollment-sessions/${encodeURIComponent(sessionId)}/finish`,
+    ),
+    {
+      method: "POST",
+      headers: {
+        ...buildJsonHeaders(),
+        Accept: "application/json",
+      },
+      body: "{}",
+    },
+  );
+  return readJsonResponse<AsrSpeakerEnrollmentResult>(response);
 }
 
 export async function startAsrService(
@@ -857,6 +1322,14 @@ function buildStreamHeaders(): HeadersInit {
     headers.Authorization = `Bearer ${token}`;
   }
   return headers;
+}
+
+function buildJsonHeaders(): HeadersInit {
+  return {
+    ...buildStreamHeaders(),
+    Accept: "application/json",
+    "Content-Type": "application/json",
+  };
 }
 
 async function readSseResponse(

@@ -135,6 +135,8 @@ mod tests {
             media_duration_ms: Some(2_000),
             model: "Qwen3-ASR-1.7B".to_string(),
             language: "chinese".to_string(),
+            diarization_profile: None,
+            speakers: Vec::new(),
             processed_at_ms: start,
             segments: vec![TimelineSegment {
                 index: 0,
@@ -142,6 +144,9 @@ mod tests {
                 audio_end_ms: 2_000,
                 absolute_start_ms: Some(start),
                 absolute_end_ms: Some(start + 2_000),
+                speaker: None,
+                speaker_display_name: None,
+                overlap: false,
                 text: "完整整理内容".to_string(),
             }],
         };

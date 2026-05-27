@@ -37,6 +37,7 @@ mod tests {
             language: "chinese".to_string(),
             model: "Qwen3-ASR-1.7B".to_string(),
             runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            diarization: AsrDiarizationConfig::default(),
             created_at_ms: 1,
             updated_at_ms: 1,
             last_run_at_ms: None,
@@ -67,6 +68,483 @@ mod tests {
         }"#;
         let task: AsrDirectoryTask = serde_json::from_str(json).unwrap();
         assert_eq!(task.runtime_strategy, AsrRuntimeStrategy::ReusePerFile);
+    }
+
+    #[test]
+    fn diarization_profile_ready_requires_real_model_files() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let profile_dir = bifrost_storage::data_dir()
+            .join("asr")
+            .join("diarization")
+            .join("profiles")
+            .join(DEFAULT_DIARIZATION_PROFILE);
+        std::fs::create_dir_all(&profile_dir).unwrap();
+        std::fs::write(profile_dir.join("profile.json"), "{}").unwrap();
+        std::fs::write(profile_dir.join("segmentation.ready"), "old marker").unwrap();
+        std::fs::write(profile_dir.join("embedding.ready"), "old marker").unwrap();
+        assert!(!diarization_profile_ready(DEFAULT_DIARIZATION_PROFILE));
+    }
+
+    #[test]
+    fn voiceprint_enrollment_auto_prepares_default_diarization_profile() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+
+        assert!(!voiceprint_dir().exists());
+        ensure_diarization_profile_ready_for_voiceprint(DEFAULT_DIARIZATION_PROFILE).unwrap();
+        assert!(voiceprint_dir().is_dir());
+        assert!(diarization_profile_dir(DEFAULT_DIARIZATION_PROFILE).is_dir());
+    }
+
+    #[test]
+    fn diarization_overlap_mapping_uses_model_segments() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let source_path = audio_dir.join("meeting.wav");
+        std::fs::write(&source_path, b"audio").unwrap();
+
+        let mut task = test_directory_task("diarization-task", audio_dir.clone());
+        task.diarization.enabled = true;
+        task.diarization.known_speaker_count = Some(2);
+        let mut timeline = TranscriptTimeline {
+            task_id: task.id.clone(),
+            task_name: task.name.clone(),
+            source_path: source_path.clone(),
+            source_size: Some(5),
+            source_modified_ms: None,
+            source_created_at_ms: Some(1_000),
+            source_created_at_source: Some("test".to_string()),
+            media_duration_ms: Some(2_000),
+            model: task.model.clone(),
+            language: task.language.clone(),
+            diarization_profile: None,
+            speakers: Vec::new(),
+            processed_at_ms: 2_000,
+            segments: vec![
+                TimelineSegment {
+                    index: 0,
+                    audio_start_ms: 0,
+                    audio_end_ms: 1_000,
+                    absolute_start_ms: Some(1_000),
+                    absolute_end_ms: Some(2_000),
+                    speaker: None,
+                    speaker_display_name: None,
+                    overlap: false,
+                    text: "hello".to_string(),
+                },
+                TimelineSegment {
+                    index: 1,
+                    audio_start_ms: 1_000,
+                    audio_end_ms: 2_000,
+                    absolute_start_ms: Some(2_000),
+                    absolute_end_ms: Some(3_000),
+                    speaker: None,
+                    speaker_display_name: None,
+                    overlap: false,
+                    text: "world".to_string(),
+                },
+            ],
+        };
+
+        let diarization_segments = vec![
+            DiarizationSegment {
+                speaker: "speaker_03".to_string(),
+                display_name: "用户D".to_string(),
+                mapped_profile_id: None,
+                confidence: None,
+                start_ms: 0,
+                end_ms: 1_100,
+                overlap: false,
+            },
+            DiarizationSegment {
+                speaker: "speaker_01".to_string(),
+                display_name: "用户B".to_string(),
+                mapped_profile_id: None,
+                confidence: None,
+                start_ms: 1_100,
+                end_ms: 2_000,
+                overlap: false,
+            },
+        ];
+        apply_speaker_segments_to_asr_timeline(&mut timeline, &diarization_segments).unwrap();
+        timeline.diarization_profile = Some(task.diarization.profile.clone());
+        timeline.speakers = speakers_from_diarization_segments(&diarization_segments);
+        write_diarization_manifest(
+            &task,
+            &timeline,
+            timeline.speakers.clone(),
+            &diarization_segments,
+        )
+        .unwrap();
+
+        assert_eq!(
+            timeline.diarization_profile.as_deref(),
+            Some(DEFAULT_DIARIZATION_PROFILE)
+        );
+        assert_eq!(timeline.speakers.len(), 2);
+        assert_eq!(timeline.segments[0].speaker.as_deref(), Some("speaker_03"));
+        assert_eq!(timeline.segments[1].speaker.as_deref(), Some("speaker_01"));
+        assert!(diarization_manifest_path(&task.id, &source_path, &audio_dir).is_file());
+    }
+
+    #[test]
+    fn live_voiceprint_enrollment_writes_named_profile() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let session = SpeakerEnrollmentSession {
+            id: "enroll-test".to_string(),
+            speaker_name: "Eden".to_string(),
+            diarization_profile: DEFAULT_DIARIZATION_PROFILE.to_string(),
+            sample_rate: VOICEPRINT_SAMPLE_RATE,
+            audio_format: "pcm_s16le_mono".to_string(),
+            prompts: voiceprint_prompts(),
+            created_at_ms: now_ms(),
+            updated_at_ms: now_ms(),
+        };
+        let session_dir = speaker_enrollment_session_dir(&session.id);
+        std::fs::create_dir_all(&session_dir).unwrap();
+        atomic_json_write(&session_dir.join("session.json"), &session).unwrap();
+        let one_second_pcm = (0..VOICEPRINT_SAMPLE_RATE)
+            .flat_map(|index| {
+                let sample = if index % 2 == 0 { 8_000i16 } else { -8_000i16 };
+                sample.to_le_bytes()
+            })
+            .collect::<Vec<_>>();
+        for prompt in &session.prompts {
+            std::fs::write(speaker_audio_path(&session.id, &prompt.id), &one_second_pcm).unwrap();
+        }
+
+        let result = finish_speaker_enrollment(&session).unwrap();
+
+        assert_eq!(result.profile.display_name, "Eden");
+        assert_eq!(result.profile.source, "live_enrollment");
+        assert_eq!(result.profile.sample_rate, VOICEPRINT_SAMPLE_RATE);
+        assert!(result.profile.total_duration_ms >= VOICEPRINT_MIN_TOTAL_MS);
+        assert!(result.profile_path.is_file());
+        assert_eq!(load_registered_speaker_profiles().len(), 1);
+    }
+
+    #[test]
+    fn voiceprint_mapping_replaces_generated_display_name() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        std::fs::create_dir_all(voiceprint_dir()).unwrap();
+        let profile = SpeakerVoiceprintProfile {
+            id: "spk-eden".to_string(),
+            display_name: "Eden".to_string(),
+            source: "live_enrollment".to_string(),
+            diarization_profile: DEFAULT_DIARIZATION_PROFILE.to_string(),
+            embedding_model: "test".to_string(),
+            embedding_dim: 2,
+            embedding: vec![1.0, 0.0],
+            sample_rate: VOICEPRINT_SAMPLE_RATE,
+            total_duration_ms: 3_000,
+            samples: Vec::new(),
+            created_at_ms: now_ms(),
+            updated_at_ms: now_ms(),
+        };
+        atomic_json_write(&speaker_profile_path(&profile.id), &profile).unwrap();
+        let mut segments = vec![DiarizationSegment {
+            speaker: "speaker_00".to_string(),
+            display_name: "用户A".to_string(),
+            mapped_profile_id: None,
+            confidence: None,
+            start_ms: 0,
+            end_ms: 1_000,
+            overlap: false,
+        }];
+        let embeddings = BTreeMap::from([(
+            "speaker_00".to_string(),
+            vec![0.70, (1.0_f32 - 0.70_f32 * 0.70_f32).sqrt()],
+        )]);
+
+        map_speakers_with_registered_voiceprints(&mut segments, &embeddings);
+        let speakers = speakers_from_diarization_segments(&segments);
+
+        assert_eq!(segments[0].display_name, "Eden");
+        assert_eq!(segments[0].mapped_profile_id.as_deref(), Some("spk-eden"));
+        assert!((segments[0].confidence.unwrap() - 0.70).abs() < 0.001);
+        assert_eq!(speaker_transcript_label(&segments[0]), "Eden (70% match)");
+        assert_eq!(speakers[0].display_name, "Eden");
+        assert_eq!(speakers[0].mapped_profile_id.as_deref(), Some("spk-eden"));
+        assert!((speakers[0].confidence.unwrap() - 0.70).abs() < 0.001);
+    }
+
+    #[test]
+    fn voiceprint_prompt_match_requires_substantial_reading() {
+        let prompt = "今天我会用 Bifrost 录入自己的声纹，用于本地离线音频处理。";
+
+        assert!(
+            voiceprint_prompt_match_score(prompt, "今天我会用Bifrost录入自己的声纹用于本地离线音频处理")
+                >= VOICEPRINT_PROMPT_MATCH_THRESHOLD
+        );
+        assert!(
+            voiceprint_prompt_match_score(prompt, "今天我会用 Bifrost")
+                < VOICEPRINT_PROMPT_MATCH_THRESHOLD
+        );
+    }
+
+    #[test]
+    fn voiceprint_prompt_match_strips_asr_tags() {
+        let prompt = "今天我会用 Bifrost 录入自己的声纹，用于本地离线音频处理。";
+        let transcript = "<asr_text>今天我会用 Bifrost 录入自己的声纹，用于本地离线音频处理。</asr_text>";
+
+        assert_eq!(
+            clean_voiceprint_asr_text(transcript),
+            "今天我会用 Bifrost 录入自己的声纹，用于本地离线音频处理。"
+        );
+        assert!(voiceprint_prompt_match_score(prompt, transcript) >= 0.72);
+    }
+
+    #[test]
+    fn voiceprint_prompt_verify_rejects_silence_before_asr() {
+        let silence = vec![0u8; VOICEPRINT_SAMPLE_RATE as usize * 2 * 2];
+        let speech = (0..VOICEPRINT_SAMPLE_RATE * 2)
+            .flat_map(|index| {
+                let sample = if index % 2 == 0 { 8_000i16 } else { -8_000i16 };
+                sample.to_le_bytes()
+            })
+            .collect::<Vec<_>>();
+
+        assert!(!voiceprint_prompt_audio_ready(&silence, VOICEPRINT_SAMPLE_RATE).unwrap());
+        assert!(voiceprint_prompt_audio_ready(&speech, VOICEPRINT_SAMPLE_RATE).unwrap());
+    }
+
+    #[test]
+    fn voiceprint_embedding_average_normalizes_multiple_prompt_embeddings() {
+        let embeddings = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
+
+        let averaged = average_speaker_embeddings(&embeddings).unwrap();
+        let norm = averaged
+            .iter()
+            .map(|value| value * value)
+            .sum::<f32>()
+            .sqrt();
+
+        assert!((norm - 1.0).abs() < 0.0001);
+        assert!((averaged[0] - averaged[1]).abs() < 0.0001);
+    }
+
+    #[test]
+    fn voiceprint_identity_matches_and_delete_removes_profile() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        std::fs::create_dir_all(voiceprint_dir()).unwrap();
+        let audio = (0..VOICEPRINT_SAMPLE_RATE * 2)
+            .flat_map(|index| {
+                let sample = if index % 2 == 0 { 8_000i16 } else { -8_000i16 };
+                sample.to_le_bytes()
+            })
+            .collect::<Vec<_>>();
+        let waveform = pcm16le_to_f32(&audio).unwrap();
+        let embedding = compute_speaker_embedding(DEFAULT_DIARIZATION_PROFILE, &waveform).unwrap();
+        let profile = SpeakerVoiceprintProfile {
+            id: "spk-eden".to_string(),
+            display_name: "Eden".to_string(),
+            source: "live_enrollment".to_string(),
+            diarization_profile: DEFAULT_DIARIZATION_PROFILE.to_string(),
+            embedding_model: "test".to_string(),
+            embedding_dim: embedding.len(),
+            embedding,
+            sample_rate: VOICEPRINT_SAMPLE_RATE,
+            total_duration_ms: 2_000,
+            samples: Vec::new(),
+            created_at_ms: now_ms(),
+            updated_at_ms: now_ms(),
+        };
+        atomic_json_write(&speaker_profile_path(&profile.id), &profile).unwrap();
+
+        let prepared = prepare_voiceprint_identify_audio(&audio, VOICEPRINT_SAMPLE_RATE)
+            .unwrap()
+            .ready
+            .unwrap();
+        let identified = identify_speaker_voice(
+            &prepared.waveform,
+            prepared.audio_duration_ms,
+            prepared.speech_duration_ms,
+        )
+        .unwrap();
+        assert!(identified.matched);
+        assert_eq!(identified.profile_id.as_deref(), Some("spk-eden"));
+        assert_eq!(identified.display_name, "Eden");
+        assert!(identified.confidence >= VOICEPRINT_SPEAKER_MATCH_THRESHOLD);
+        assert_eq!(identified.status, "matched");
+        assert!(identified.speech_duration_ms >= VOICEPRINT_MIN_IDENTIFY_SPEECH_MS);
+
+        let response = delete_speaker_profile_response("spk-eden");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!speaker_profile_path("spk-eden").exists());
+    }
+
+    #[test]
+    fn voiceprint_identity_short_audio_reports_insufficient_speech() {
+        let short_speech = (0..VOICEPRINT_SAMPLE_RATE / 4)
+            .flat_map(|index| {
+                let sample = if index % 2 == 0 { 8_000i16 } else { -8_000i16 };
+                sample.to_le_bytes()
+            })
+            .collect::<Vec<_>>();
+
+        let prepared =
+            prepare_voiceprint_identify_audio(&short_speech, VOICEPRINT_SAMPLE_RATE).unwrap();
+        assert!(prepared.ready.is_none());
+        assert!(prepared.speech_duration_ms > 0);
+
+        let response = insufficient_speaker_identify_response(
+            pcm16_duration_ms(short_speech.len() as u64, VOICEPRINT_SAMPLE_RATE),
+            prepared.speech_duration_ms,
+        );
+        assert!(!response.matched);
+        assert_eq!(response.status, "insufficient_audio");
+        assert_eq!(response.reason.as_deref(), Some("need_more_speech"));
+        assert_eq!(response.confidence, 0.0);
+    }
+
+    #[test]
+    fn voiceprint_identity_trims_edge_silence_before_matching() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        std::fs::create_dir_all(voiceprint_dir()).unwrap();
+        let speech = (0..VOICEPRINT_SAMPLE_RATE * 2)
+            .flat_map(|index| {
+                let sample = if index % 2 == 0 { 8_000i16 } else { -8_000i16 };
+                sample.to_le_bytes()
+            })
+            .collect::<Vec<_>>();
+        let waveform = pcm16le_to_f32(&speech).unwrap();
+        let embedding = compute_speaker_embedding(DEFAULT_DIARIZATION_PROFILE, &waveform).unwrap();
+        let profile = SpeakerVoiceprintProfile {
+            id: "spk-eden".to_string(),
+            display_name: "Eden".to_string(),
+            source: "live_enrollment".to_string(),
+            diarization_profile: DEFAULT_DIARIZATION_PROFILE.to_string(),
+            embedding_model: "test".to_string(),
+            embedding_dim: embedding.len(),
+            embedding,
+            sample_rate: VOICEPRINT_SAMPLE_RATE,
+            total_duration_ms: 2_000,
+            samples: Vec::new(),
+            created_at_ms: now_ms(),
+            updated_at_ms: now_ms(),
+        };
+        atomic_json_write(&speaker_profile_path(&profile.id), &profile).unwrap();
+
+        let silence = vec![0u8; VOICEPRINT_SAMPLE_RATE as usize * 2];
+        let mut audio = Vec::new();
+        audio.extend_from_slice(&silence);
+        audio.extend_from_slice(&speech);
+        audio.extend_from_slice(&silence);
+
+        let prepared = prepare_voiceprint_identify_audio(&audio, VOICEPRINT_SAMPLE_RATE)
+            .unwrap()
+            .ready
+            .unwrap();
+        assert!(prepared.audio_duration_ms >= 4_000);
+        assert!(prepared.speech_duration_ms < prepared.audio_duration_ms);
+        let identified = identify_speaker_voice(
+            &prepared.waveform,
+            prepared.audio_duration_ms,
+            prepared.speech_duration_ms,
+        )
+        .unwrap();
+
+        assert!(identified.matched);
+        assert_eq!(identified.profile_id.as_deref(), Some("spk-eden"));
+        assert_eq!(identified.display_name, "Eden");
+    }
+
+    #[test]
+    fn voiceprint_identity_uses_sixty_percent_threshold_and_keeps_candidate_name() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        std::fs::create_dir_all(voiceprint_dir()).unwrap();
+        let profile = SpeakerVoiceprintProfile {
+            id: "spk-eden".to_string(),
+            display_name: "Eden".to_string(),
+            source: "live_enrollment".to_string(),
+            diarization_profile: DEFAULT_DIARIZATION_PROFILE.to_string(),
+            embedding_model: "test".to_string(),
+            embedding_dim: 16,
+            embedding: {
+                let mut embedding = vec![0.0; 16];
+                embedding[0] = 0.70;
+                embedding[1] = (1.0_f32 - 0.70_f32 * 0.70_f32).sqrt();
+                embedding
+            },
+            sample_rate: VOICEPRINT_SAMPLE_RATE,
+            total_duration_ms: 2_000,
+            samples: Vec::new(),
+            created_at_ms: now_ms(),
+            updated_at_ms: now_ms(),
+        };
+        atomic_json_write(&speaker_profile_path(&profile.id), &profile).unwrap();
+
+        let identified = identify_speaker_voice(&[1.0, 0.0], 1_000, 1_000).unwrap();
+
+        assert!(identified.matched);
+        assert_eq!(identified.profile_id.as_deref(), Some("spk-eden"));
+        assert_eq!(identified.display_name, "Eden");
+        assert!(identified.confidence >= VOICEPRINT_SPEAKER_MATCH_THRESHOLD);
+    }
+
+    #[test]
+    fn voiceprint_identity_keeps_candidate_name_even_below_match_threshold() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        std::fs::create_dir_all(voiceprint_dir()).unwrap();
+        let profile = SpeakerVoiceprintProfile {
+            id: "spk-eden".to_string(),
+            display_name: "Eden".to_string(),
+            source: "live_enrollment".to_string(),
+            diarization_profile: DEFAULT_DIARIZATION_PROFILE.to_string(),
+            embedding_model: "test".to_string(),
+            embedding_dim: 16,
+            embedding: {
+                let mut embedding = vec![0.0; 16];
+                embedding[0] = 0.55;
+                embedding[1] = (1.0_f32 - 0.55_f32 * 0.55_f32).sqrt();
+                embedding
+            },
+            sample_rate: VOICEPRINT_SAMPLE_RATE,
+            total_duration_ms: 2_000,
+            samples: Vec::new(),
+            created_at_ms: now_ms(),
+            updated_at_ms: now_ms(),
+        };
+        atomic_json_write(&speaker_profile_path(&profile.id), &profile).unwrap();
+
+        let identified = identify_speaker_voice(&[1.0, 0.0], 1_000, 1_000).unwrap();
+
+        assert!(!identified.matched);
+        assert_eq!(identified.status, "unmatched");
+        assert_eq!(identified.profile_id.as_deref(), Some("spk-eden"));
+        assert_eq!(identified.display_name, "Eden");
+        assert!(identified.confidence < VOICEPRINT_SPEAKER_MATCH_THRESHOLD);
+    }
+
+    #[test]
+    fn uploaded_speaker_asr_chunks_keep_each_voiceprint_segment_bounded() {
+        assert_eq!(plan_uploaded_speaker_asr_chunks(30_000), vec![(0, 30_000)]);
+        assert_eq!(
+            plan_uploaded_speaker_asr_chunks(30_001),
+            vec![(0, 30_000), (28_000, 3_000)]
+        );
+        let chunks = plan_uploaded_speaker_asr_chunks(180_015);
+        assert_eq!(chunks.first(), Some(&(0, 30_000)));
+        assert!(chunks.iter().all(|(_, duration)| *duration <= 30_000));
+        assert_eq!(chunks.last(), Some(&(168_000, 13_000)));
     }
 
     #[test]
@@ -189,6 +667,8 @@ mod tests {
                 current_chunk_total: 9,
                 processed_now: 2,
                 failed_now: 0,
+                stage: "asr".to_string(),
+                stage_message: Some("processing chunks".to_string()),
                 message: Some("processing".to_string()),
             },
         )
@@ -452,6 +932,7 @@ mod tests {
             language: "chinese".to_string(),
             model: "Qwen3-ASR-1.7B".to_string(),
             runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            diarization: AsrDiarizationConfig::default(),
             created_at_ms: 1,
             updated_at_ms: 1,
             last_run_at_ms: None,
@@ -690,6 +1171,7 @@ mod tests {
             language: "chinese".to_string(),
             model: "Qwen3-ASR-1.7B".to_string(),
             runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            diarization: AsrDiarizationConfig::default(),
             created_at_ms: 1,
             updated_at_ms: 1,
             last_run_at_ms: None,
@@ -784,6 +1266,7 @@ mod tests {
             language: "chinese".to_string(),
             model: "Qwen3-ASR-1.7B".to_string(),
             runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            diarization: AsrDiarizationConfig::default(),
             created_at_ms: 1,
             updated_at_ms: 1,
             last_run_at_ms: None,
@@ -892,6 +1375,7 @@ mod tests {
             language: "chinese".to_string(),
             model: "Qwen3-ASR-1.7B".to_string(),
             runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            diarization: AsrDiarizationConfig::default(),
             created_at_ms: 1,
             updated_at_ms: 1,
             last_run_at_ms: None,
@@ -954,6 +1438,7 @@ mod tests {
             language: "chinese".to_string(),
             model: "Qwen3-ASR-1.7B".to_string(),
             runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            diarization: AsrDiarizationConfig::default(),
             created_at_ms: 1,
             updated_at_ms: 1,
             last_run_at_ms: None,
@@ -1018,6 +1503,7 @@ mod tests {
             language: "chinese".to_string(),
             model: "Qwen3-ASR-1.7B".to_string(),
             runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            diarization: AsrDiarizationConfig::default(),
             created_at_ms: 1,
             updated_at_ms: 1,
             last_run_at_ms: None,
@@ -1065,6 +1551,7 @@ mod tests {
             language: "chinese".to_string(),
             model: "Qwen3-ASR-1.7B".to_string(),
             runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            diarization: AsrDiarizationConfig::default(),
             created_at_ms: 1,
             updated_at_ms: 1,
             last_run_at_ms: None,
@@ -1113,6 +1600,7 @@ mod tests {
             language: "chinese".to_string(),
             model: "Qwen3-ASR-1.7B".to_string(),
             runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            diarization: AsrDiarizationConfig::default(),
             created_at_ms: 1,
             updated_at_ms: 1,
             last_run_at_ms: None,
@@ -1165,6 +1653,7 @@ mod tests {
             language: "chinese".to_string(),
             model: "Qwen3-ASR-1.7B".to_string(),
             runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            diarization: AsrDiarizationConfig::default(),
             created_at_ms: 1,
             updated_at_ms: 1,
             last_run_at_ms: None,
@@ -1296,6 +1785,7 @@ mod tests {
             language: "chinese".to_string(),
             model: "Qwen3-ASR-1.7B".to_string(),
             runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            diarization: AsrDiarizationConfig::default(),
             created_at_ms: start,
             updated_at_ms: start,
             last_run_at_ms: Some(start),
@@ -1326,6 +1816,8 @@ mod tests {
             media_duration_ms: Some(2_000),
             model: task.model.clone(),
             language: task.language.clone(),
+            diarization_profile: None,
+            speakers: Vec::new(),
             processed_at_ms: start + 2_000,
             segments: vec![TimelineSegment {
                 index: 0,
@@ -1333,6 +1825,9 @@ mod tests {
                 audio_end_ms: 2_000,
                 absolute_start_ms: Some(start),
                 absolute_end_ms: Some(start + 2_000),
+                speaker: None,
+                speaker_display_name: None,
+                overlap: false,
                 text: "完整按天整理内容".to_string(),
             }],
         };
@@ -1496,6 +1991,8 @@ mod tests {
             media_duration_ms: Some(65_000),
             model: "Qwen3-ASR-1.7B".to_string(),
             language: "chinese".to_string(),
+            diarization_profile: None,
+            speakers: Vec::new(),
             processed_at_ms: 1,
             segments: vec![TimelineSegment {
                 index: 0,
@@ -1503,6 +2000,9 @@ mod tests {
                 audio_end_ms: 65_000,
                 absolute_start_ms: Some(1_000_000),
                 absolute_end_ms: Some(1_065_000),
+                speaker: None,
+                speaker_display_name: None,
+                overlap: false,
                 text: "abcdefghijklmnopqrstuvwxyz".to_string(),
             }],
         };
@@ -2398,6 +2898,7 @@ mod tests {
             language: "chinese".to_string(),
             model: "Qwen3-ASR-1.7B".to_string(),
             runtime_strategy: AsrRuntimeStrategy::ReusePerFile,
+            diarization: AsrDiarizationConfig::default(),
             created_at_ms: 1,
             updated_at_ms: 1,
             last_run_at_ms: None,
@@ -2597,6 +3098,7 @@ mod tests {
             language: "chinese".to_string(),
             model: "Qwen3-ASR-1.7B".to_string(),
             runtime_strategy: AsrRuntimeStrategy::ReusePerFile,
+            diarization: AsrDiarizationConfig::default(),
             created_at_ms: 1,
             updated_at_ms: 1,
             last_run_at_ms: None,

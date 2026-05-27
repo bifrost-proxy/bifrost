@@ -25,6 +25,7 @@ use crate::state::SharedAdminState;
 mod audio;
 mod sources;
 mod vocabulary;
+mod wake;
 
 use audio::{
     is_voice_speech_chunk, validate_voice_audio_chunk, voice_audio_chunk_duration_ms,
@@ -157,6 +158,7 @@ pub async fn handle_voice(
         (&Method::PUT, "/api/voice/vocabulary") => put_vocabulary(req).await,
         (&Method::POST, "/api/voice/sessions") => create_session_response(),
         (&Method::GET, "/api/voice/listen-ws") => handle_voice_ws_upgrade(req).await,
+        _ if path.starts_with("/api/voice/wake") => wake::handle_voice_wake(req, path).await,
         _ => error_response(StatusCode::NOT_FOUND, "Voice API endpoint not found"),
     }
 }

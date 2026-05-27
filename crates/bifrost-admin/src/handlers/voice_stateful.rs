@@ -1,25 +1,25 @@
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use std::path::Path;
 use std::path::PathBuf;
-#[cfg(any(target_os = "macos", all(test, unix)))]
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), all(test, unix)))]
 use std::process::Stdio;
 use std::time::Duration;
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
-#[cfg(any(target_os = "macos", all(test, unix)))]
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), all(test, unix)))]
 use tokio::io::AsyncBufReadExt;
 use tokio::io::{AsyncWriteExt, BufReader, Lines};
-#[cfg(any(target_os = "macos", all(test, unix)))]
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), all(test, unix)))]
 use tokio::process::Command;
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::time::Instant;
 use tracing::warn;
 
 pub(crate) const STATEFUL_PROVIDER_ID: &str = "qwen3_stateful_streaming";
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const DEFAULT_WORKER_STARTUP_TIMEOUT_MS: u64 = 60_000;
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const DEFAULT_WORKER_REQUEST_TIMEOUT_MS: u64 = 30_000;
 const WORKER_EXIT_TIMEOUT_MS: u64 = 2_000;
 
@@ -296,7 +296,7 @@ enum WorkerOutput {
     },
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn worker_startup_timeout() -> Duration {
     worker_timeout_from_env(
         "BIFROST_VOICE_WORKER_STARTUP_TIMEOUT_MS",
@@ -304,7 +304,7 @@ fn worker_startup_timeout() -> Duration {
     )
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn worker_request_timeout() -> Duration {
     worker_timeout_from_env(
         "BIFROST_VOICE_WORKER_REQUEST_TIMEOUT_MS",
@@ -312,7 +312,7 @@ fn worker_request_timeout() -> Duration {
     )
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn worker_timeout_from_env(key: &str, default_ms: u64) -> Duration {
     let millis = std::env::var(key)
         .ok()
@@ -322,7 +322,7 @@ fn worker_timeout_from_env(key: &str, default_ms: u64) -> Duration {
     Duration::from_millis(millis)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn validate_model_assets(model_dir: &Path) -> Result<(), String> {
     for file in ["config.json", "tokenizer.json"] {
         let path = model_dir.join(file);
@@ -341,7 +341,7 @@ fn validate_model_assets(model_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 mod platform {
     use std::io::{self, BufRead, Write};
     use std::time::Instant;
@@ -571,7 +571,7 @@ mod platform {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 mod platform {
     use super::*;
 

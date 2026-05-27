@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Grid, theme, Typography } from "antd";
 import { CloudOutlined, RobotOutlined, ToolOutlined } from "@ant-design/icons";
 import AgentTab from "../Settings/tabs/AgentTab";
 import ImGatewayTab from "../Settings/tabs/ImGatewayTab";
 import ASR from "../ASR";
+import { getAsrCapabilities } from "../../api/asr";
 import AgentChatSection from "./AgentChatSection";
 import {
   AGENT_SECTION_NAV,
@@ -43,15 +44,41 @@ export default function AI() {
   const { token } = theme.useToken();
   const screens = useBreakpoint();
   const isCompactNav = !screens.lg;
+  const [asrEntryEnabled, setAsrEntryEnabled] = useState(false);
+  const [asrCapabilityLoaded, setAsrCapabilityLoaded] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    void getAsrCapabilities()
+      .then((capabilities) => {
+        if (alive) {
+          setAsrEntryEnabled(capabilities.qwen3_asr.enabled && !capabilities.qwen3_asr.hidden);
+          setAsrCapabilityLoaded(true);
+        }
+      })
+      .catch(() => {
+        if (alive) {
+          setAsrEntryEnabled(false);
+          setAsrCapabilityLoaded(true);
+        }
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   const sections = useMemo<AiSection[]>(
     () => [
-      {
-        id: "tools-asr" as const,
-        group: "tools" as const,
-        section: "asr" as const,
-        label: "ASR",
-      },
+      ...(asrEntryEnabled
+        ? [
+            {
+              id: "tools-asr" as const,
+              group: "tools" as const,
+              section: "asr" as const,
+              label: "ASR",
+            },
+          ]
+        : []),
       ...AGENT_SECTION_NAV.map((section) => ({
         id: `agent-${section.id}` as const,
         group: "agent" as const,
@@ -65,7 +92,7 @@ export default function AI() {
         label: section.label,
       })),
     ],
-    [],
+    [asrEntryEnabled],
   );
 
   const sectionById = useMemo(
@@ -102,6 +129,9 @@ export default function AI() {
 
   useEffect(() => {
     const currentAiSection = searchParams.get("aiSection");
+    if (!asrCapabilityLoaded && currentAiSection === "tools-asr") {
+      return;
+    }
     if (currentAiSection === activeSection.id) {
       return;
     }
@@ -117,7 +147,7 @@ export default function AI() {
       },
       { replace: true },
     );
-  }, [activeSection, searchParams, setSearchParams]);
+  }, [activeSection, asrCapabilityLoaded, searchParams, setSearchParams]);
 
   const handleSelectSection = useCallback(
     (section: AiSection) => {
@@ -227,35 +257,37 @@ export default function AI() {
             maxHeight: "100%",
           }}
         >
-          <div
-            style={{
-              display: "flex",
-              flexDirection: isCompactNav ? "row" : "column",
-              alignItems: isCompactNav ? "center" : "stretch",
-              flex: isCompactNav ? "0 0 auto" : undefined,
-              gap: 6,
-            }}
-          >
-            <Text
-              type="secondary"
+          {toolSections.length > 0 ? (
+            <div
               style={{
                 display: "flex",
-                alignItems: "center",
-                gap: 6,
-                fontSize: 11,
-                fontWeight: 600,
-                lineHeight: "18px",
-                padding: isCompactNav ? "7px 2px" : "0 2px",
-                textTransform: "uppercase",
-                whiteSpace: "nowrap",
+                flexDirection: isCompactNav ? "row" : "column",
+                alignItems: isCompactNav ? "center" : "stretch",
                 flex: isCompactNav ? "0 0 auto" : undefined,
+                gap: 6,
               }}
             >
-              <ToolOutlined />
-              Tools
-            </Text>
-            {toolSections.map(renderSectionButton)}
-          </div>
+              <Text
+                type="secondary"
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  fontSize: 11,
+                  fontWeight: 600,
+                  lineHeight: "18px",
+                  padding: isCompactNav ? "7px 2px" : "0 2px",
+                  textTransform: "uppercase",
+                  whiteSpace: "nowrap",
+                  flex: isCompactNav ? "0 0 auto" : undefined,
+                }}
+              >
+                <ToolOutlined />
+                Tools
+              </Text>
+              {toolSections.map(renderSectionButton)}
+            </div>
+          ) : null}
           <div
             style={{
               display: "flex",

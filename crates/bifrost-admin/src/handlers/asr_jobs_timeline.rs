@@ -14,7 +14,23 @@ pub(super) struct TimelineSegment {
     pub(super) audio_end_ms: u64,
     pub(super) absolute_start_ms: Option<u64>,
     pub(super) absolute_end_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) speaker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) speaker_display_name: Option<String>,
+    #[serde(default)]
+    pub(super) overlap: bool,
     pub(super) text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct TimelineSpeaker {
+    pub(super) id: String,
+    pub(super) display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) mapped_profile_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) confidence: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,6 +45,10 @@ pub(super) struct TranscriptTimeline {
     pub(super) media_duration_ms: Option<u64>,
     pub(super) model: String,
     pub(super) language: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) diarization_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) speakers: Vec<TimelineSpeaker>,
     pub(super) processed_at_ms: u64,
     pub(super) segments: Vec<TimelineSegment>,
 }
@@ -134,7 +154,13 @@ pub(super) fn render_timeline_text(timeline: &TranscriptTimeline, fallback_text:
                     format_audio_offset_ms(segment.audio_end_ms)
                 ),
             };
-            format!("[{range}] {}", segment.text.trim())
+            let speaker = segment
+                .speaker_display_name
+                .as_ref()
+                .or(segment.speaker.as_ref())
+                .map(|label| format!(" {label}:"))
+                .unwrap_or_default();
+            format!("[{range}]{speaker} {}", segment.text.trim())
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -250,6 +276,7 @@ pub(super) fn generate_daily_summaries(
         source_label: String,
         absolute_start_ms: u64,
         absolute_end_ms: u64,
+        speaker_label: Option<String>,
         text: String,
     }
 
@@ -305,6 +332,10 @@ pub(super) fn generate_daily_summaries(
                 source_label: source_label.clone(),
                 absolute_start_ms: abs_start,
                 absolute_end_ms: abs_end,
+                speaker_label: seg
+                    .speaker_display_name
+                    .clone()
+                    .or_else(|| seg.speaker.clone()),
                 text: seg.text.clone(),
             });
         }
@@ -366,7 +397,15 @@ pub(super) fn generate_daily_summaries(
             for seg in segs {
                 let start = format_wall_clock_ms(seg.absolute_start_ms);
                 let end = format_wall_clock_ms(seg.absolute_end_ms);
-                md.push_str(&format!("**[{start} → {end}]**  \n{}\n\n", seg.text.trim()));
+                let speaker = seg
+                    .speaker_label
+                    .as_ref()
+                    .map(|label| format!(" **{label}:**"))
+                    .unwrap_or_default();
+                md.push_str(&format!(
+                    "**[{start} → {end}]**{speaker}  \n{}\n\n",
+                    seg.text.trim()
+                ));
             }
         }
 
@@ -441,6 +480,8 @@ mod tests {
             media_duration_ms: Some(2_000),
             model: "Qwen3-ASR-1.7B".to_string(),
             language: "chinese".to_string(),
+            diarization_profile: None,
+            speakers: Vec::new(),
             processed_at_ms: start,
             segments: vec![TimelineSegment {
                 index: 0,
@@ -448,6 +489,9 @@ mod tests {
                 audio_end_ms: 2_000,
                 absolute_start_ms: Some(start + 1_000),
                 absolute_end_ms: Some(start + 2_000),
+                speaker: None,
+                speaker_display_name: None,
+                overlap: false,
                 text: "测试内容".to_string(),
             }],
         };
@@ -486,6 +530,8 @@ mod tests {
             media_duration_ms: Some(60_000),
             model: "Qwen3-ASR-1.7B".to_string(),
             language: "chinese".to_string(),
+            diarization_profile: None,
+            speakers: Vec::new(),
             processed_at_ms: start1,
             segments: vec![TimelineSegment {
                 index: 0,
@@ -493,6 +539,9 @@ mod tests {
                 audio_end_ms: 60_000,
                 absolute_start_ms: Some(start1),
                 absolute_end_ms: Some(start1 + 60_000),
+                speaker: None,
+                speaker_display_name: None,
+                overlap: false,
                 text: "上午会议内容".to_string(),
             }],
         };
@@ -507,6 +556,8 @@ mod tests {
             media_duration_ms: Some(60_000),
             model: "Qwen3-ASR-1.7B".to_string(),
             language: "chinese".to_string(),
+            diarization_profile: None,
+            speakers: Vec::new(),
             processed_at_ms: start2,
             segments: vec![TimelineSegment {
                 index: 0,
@@ -514,6 +565,9 @@ mod tests {
                 audio_end_ms: 60_000,
                 absolute_start_ms: Some(start2),
                 absolute_end_ms: Some(start2 + 60_000),
+                speaker: None,
+                speaker_display_name: None,
+                overlap: false,
                 text: "下午讨论内容".to_string(),
             }],
         };

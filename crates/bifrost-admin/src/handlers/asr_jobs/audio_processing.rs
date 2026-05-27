@@ -39,6 +39,52 @@ async fn ffmpeg_split_chunk(
     }
 }
 
+async fn ffmpeg_cut_wav_ms(
+    source: &Path,
+    output: &Path,
+    start_ms: u64,
+    end_ms: u64,
+    pause_check: Option<&(dyn Fn() -> bool + Send + Sync)>,
+) -> Result<(), String> {
+    let duration_ms = end_ms.saturating_sub(start_ms);
+    if duration_ms == 0 {
+        return Err("ffmpeg segment cut: empty duration".to_string());
+    }
+    let mut command = Command::new("ffmpeg");
+    command
+        .arg("-nostdin")
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-y")
+        .arg("-ss")
+        .arg(format!("{:.3}", start_ms as f64 / 1000.0))
+        .arg("-t")
+        .arg(format!("{:.3}", duration_ms as f64 / 1000.0))
+        .arg("-i")
+        .arg(source)
+        .arg("-ar")
+        .arg("16000")
+        .arg("-ac")
+        .arg("1")
+        .arg(output);
+    let result = run_abortable_command(
+        command,
+        "ffmpeg speaker segment cut",
+        pause_check,
+        ffmpeg_chunk_split_timeout(duration_ms.div_ceil(1000).max(1)),
+    )
+    .await?;
+    if result.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "ffmpeg speaker segment cut failed: {}",
+            String::from_utf8_lossy(&result.stderr).trim()
+        ))
+    }
+}
+
 async fn run_abortable_command(
     mut command: Command,
     label: &str,

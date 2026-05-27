@@ -83,7 +83,6 @@ portable-pty = "0.8"
 [target.'cfg(target_os = "macos")'.dependencies]
 icns = "0.3"
 plist = "1"
-qwen3-asr = "0.2.2"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = [
   "NSString",
@@ -97,6 +96,10 @@ objc2-app-kit = { version = "0.3", features = [
   "NSImage",
   "NSBitmapImageRep",
 ] }
+
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+qwen3-asr = "0.2.2"
+sherpa-onnx = "1.13.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 pelite = "0.10"

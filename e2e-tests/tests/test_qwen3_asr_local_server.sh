@@ -13,7 +13,14 @@ echo "[qwen3-asr-e2e] syntax checks"
 bash -n "$0"
 
 echo "[qwen3-asr-e2e] bifrost ai asr CLI structure"
-cargo run --quiet --bin bifrost -- ai asr --help | grep -q "stream-file"
+ASR_HELP="$(cargo run --quiet --bin bifrost -- ai asr --help)"
+if [[ "$(uname -s)-$(uname -m)" == "Darwin-arm64" ]]; then
+  grep -q "stream-file" <<<"$ASR_HELP"
+else
+  if grep -q "stream-file" <<<"$ASR_HELP"; then
+    fail "bifrost ai asr help unexpectedly exposed stream-file on unsupported platform"
+  fi
+fi
 
 echo "[qwen3-asr-e2e] ASR runtime guard unit assertions"
 cargo test -p bifrost-admin asr_runtime_timeouts_are_bounded_for_short_chunks --lib

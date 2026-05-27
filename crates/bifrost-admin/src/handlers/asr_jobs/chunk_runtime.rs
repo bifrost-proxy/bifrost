@@ -1258,6 +1258,9 @@ fn split_timeline_segment(
                 audio_end_ms,
                 absolute_start_ms,
                 absolute_end_ms,
+                speaker: segment.speaker.clone(),
+                speaker_display_name: segment.speaker_display_name.clone(),
+                overlap: segment.overlap,
                 text,
             }
         })

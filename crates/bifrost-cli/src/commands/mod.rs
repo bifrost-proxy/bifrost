@@ -32,6 +32,7 @@ mod update_check;
 mod upgrade;
 mod value;
 mod voice;
+mod voice_wake_worker;
 mod whitelist;
 
 use colored::Colorize;

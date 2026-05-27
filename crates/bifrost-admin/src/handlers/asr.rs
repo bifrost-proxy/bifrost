@@ -29,7 +29,9 @@ use crate::asr_runtime::{
 use crate::handlers::asr_cli_invoke::{
     default_footprint_limit_bytes, physical_footprint_sample_interval, read_process_footprint_bytes,
 };
-use crate::handlers::asr_jobs::handle_asr_tasks;
+use crate::handlers::asr_jobs::{
+    handle_asr_tasks, transcribe_uploaded_wav_with_voiceprint_speakers,
+};
 use crate::handlers::asr_streaming::{
     append_transcript_delta, call_asr_whole_file_endpoint, dedupe_increment,
 };
@@ -49,6 +51,14 @@ const ASR_SAMPLE_BASE_URL: &str =
 
 static MANAGED_SERVICE: Lazy<Mutex<Option<ManagedAsrService>>> = Lazy::new(|| Mutex::new(None));
 static ASR_INIT_TASK: Lazy<Mutex<Option<AsrInitTask>>> = Lazy::new(|| Mutex::new(None));
+
+pub(crate) fn asr_platform_supported_for(os: &str, arch: &str) -> bool {
+    os == "macos" && arch == "aarch64"
+}
+
+pub(crate) fn asr_platform_supported() -> bool {
+    asr_platform_supported_for(std::env::consts::OS, std::env::consts::ARCH)
+}
 
 #[derive(Debug, Clone, Deserialize)]
 struct AsrQuery {
@@ -130,6 +140,28 @@ struct AsrStatusResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct AsrCapabilityFlag {
+    enabled: bool,
+    hidden: bool,
+    platform_supported: bool,
+    reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AsrCapabilitiesResponse {
+    platform: String,
+    arch: String,
+    supported_target: &'static str,
+    qwen3_asr: AsrCapabilityFlag,
+    local_transcription: AsrCapabilityFlag,
+    speech_workbench: AsrCapabilityFlag,
+    directory_tasks: AsrCapabilityFlag,
+    speaker_diarization: AsrCapabilityFlag,
+    voiceprint: AsrCapabilityFlag,
+    voice_wake_asr: AsrCapabilityFlag,
+}
+
+#[derive(Debug, Serialize)]
 pub(crate) struct AsrServiceResponse {
     pub(crate) ready: bool,
     pub(crate) managed: bool,
@@ -196,6 +228,14 @@ pub(crate) struct AsrSegmentPayload<'a> {
     pub(crate) text: &'a str,
     pub(crate) delta: &'a str,
     pub(crate) committed: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) speaker: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) speaker_display_name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) speaker_profile_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) speaker_confidence: Option<f32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -206,11 +246,16 @@ pub(crate) struct AsrErrorPayload<'a> {
 }
 
 pub async fn handle_asr(req: Request<Incoming>, path: &str) -> Response<BoxBody> {
-    if path.starts_with("/api/asr/tasks") || path == "/api/asr/external-volumes" {
+    if path.starts_with("/api/asr/tasks")
+        || path.starts_with("/api/asr/diarization")
+        || path.starts_with("/api/asr/speaker-profiles")
+        || path == "/api/asr/external-volumes"
+    {
         return handle_asr_tasks(req, path).await;
     }
 
     match (req.method(), path) {
+        (&Method::GET, "/api/asr/capabilities") => handle_capabilities(),
         (&Method::GET, "/api/asr/status") => handle_status(req).await,
         (&Method::GET, "/api/asr/init-stream") => handle_init_stream(req).await,
         (&Method::POST, "/api/asr/service/start") => handle_service_start(req).await,
@@ -221,6 +266,39 @@ pub async fn handle_asr(req: Request<Incoming>, path: &str) -> Response<BoxBody>
             error_response(StatusCode::NOT_FOUND, "ASR endpoint not found")
         }
         _ => method_not_allowed(),
+    }
+}
+
+fn handle_capabilities() -> Response<BoxBody> {
+    json_response(&asr_capabilities_response())
+}
+
+fn asr_capabilities_response() -> AsrCapabilitiesResponse {
+    let platform = std::env::consts::OS.to_string();
+    let arch = std::env::consts::ARCH.to_string();
+    let supported = asr_platform_supported_for(&platform, &arch);
+    let reason = (!supported).then(|| {
+        format!(
+            "ASR capabilities are available only on Apple Silicon macOS; current platform is {platform}-{arch}"
+        )
+    });
+    let flag = || AsrCapabilityFlag {
+        enabled: supported,
+        hidden: !supported,
+        platform_supported: supported,
+        reason: reason.clone(),
+    };
+    AsrCapabilitiesResponse {
+        platform,
+        arch,
+        supported_target: "macos-aarch64",
+        qwen3_asr: flag(),
+        local_transcription: flag(),
+        speech_workbench: flag(),
+        directory_tasks: flag(),
+        speaker_diarization: flag(),
+        voiceprint: flag(),
+        voice_wake_asr: flag(),
     }
 }
 
@@ -578,6 +656,88 @@ async fn handle_transcribe_stream(req: Request<Incoming>) -> Response<BoxBody> {
 
         let approx_duration_ms = wav_pcm_duration_ms(&wav_bytes);
 
+        match transcribe_uploaded_wav_with_voiceprint_speakers(
+            &server_url,
+            &target.language,
+            &source_wav,
+        )
+        .await
+        {
+            Ok(Some(diarized)) => {
+                send_progress(
+                    &tx,
+                    AsrStreamPayload {
+                        phase: "diarization",
+                        status: "done",
+                        progress: 95,
+                        message: "Speaker-aware transcription completed.",
+                        detail: Some("voiceprint matching enabled"),
+                        file: None,
+                        server_url: Some(target.server_url_display()),
+                    },
+                )
+                .await;
+                let mut committed = String::new();
+                for segment in &diarized.segments {
+                    let speaker_label = match (&segment.mapped_profile_id, segment.confidence) {
+                        (Some(_), Some(confidence)) => format!(
+                            "{} ({}% match)",
+                            segment.display_name,
+                            (confidence.clamp(0.0, 1.0) * 100.0).round() as u32
+                        ),
+                        _ => segment.display_name.clone(),
+                    };
+                    let line = format!("{speaker_label}: {}", segment.text);
+                    if !committed.is_empty() {
+                        committed.push('\n');
+                    }
+                    committed.push_str(&line);
+                    send_asr_segment(
+                        &tx,
+                        "final",
+                        AsrSegmentPayload {
+                            index: segment.index,
+                            start_ms: segment.start_ms,
+                            end_ms: segment.end_ms,
+                            stable_start_ms: segment.start_ms,
+                            stable_end_ms: segment.end_ms,
+                            text: &segment.text,
+                            delta: &line,
+                            committed: &committed,
+                            speaker: Some(&segment.speaker),
+                            speaker_display_name: Some(&segment.display_name),
+                            speaker_profile_id: segment.mapped_profile_id.as_deref(),
+                            speaker_confidence: segment.confidence,
+                        },
+                    )
+                    .await;
+                }
+                send_text(&tx, diarized.text.trim()).await;
+                send_progress(
+                    &tx,
+                    AsrStreamPayload {
+                        phase: "done",
+                        status: "done",
+                        progress: 100,
+                        message: "Transcription completed.",
+                        detail: Some("speaker-aware upload"),
+                        file: None,
+                        server_url: Some(target.server_url_display()),
+                    },
+                )
+                .await;
+                send_done(&tx).await;
+                return;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                warn!(
+                    error,
+                    "speaker-aware upload transcription failed; falling back to plain ASR"
+                );
+            }
+        }
+
         match transcribe_uploaded_wav_in_chunks(
             &tx,
             &server_url,
@@ -721,6 +881,10 @@ async fn transcribe_uploaded_wav_in_chunks(
                     text: seg_text,
                     delta: &delta,
                     committed: &committed,
+                    speaker: None,
+                    speaker_display_name: None,
+                    speaker_profile_id: None,
+                    speaker_confidence: None,
                 },
             )
             .await;
@@ -750,6 +914,10 @@ async fn transcribe_uploaded_wav_in_chunks(
                     text: &result.text,
                     delta: &delta,
                     committed: &committed,
+                    speaker: None,
+                    speaker_display_name: None,
+                    speaker_profile_id: None,
+                    speaker_confidence: None,
                 },
             )
             .await;
@@ -1945,11 +2113,13 @@ fn asr_download_requests(target: &AsrTarget) -> Result<Vec<DownloadRequest>, Str
 }
 
 fn detect_asr_release_asset() -> Result<&'static str, String> {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", "aarch64") => Ok("asr-macos-aarch64"),
-        (os, arch) => Err(format!(
+    if asr_platform_supported() {
+        Ok("asr-macos-aarch64")
+    } else {
+        let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
+        Err(format!(
             "Qwen3-ASR local runtime is only supported on Apple Silicon macOS; current platform is {os}-{arch}"
-        )),
+        ))
     }
 }
 
@@ -2367,11 +2537,11 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        asr_download_requests, build_asr_download_client, default_home,
-        persisted_target_matches_request, plan_upload_chunk_boundaries, same_service_owner,
-        service_watchdog_should_kill_for_sample, target_from_query, target_matches_request,
-        validate_loopback_host, wav_pcm_duration_ms, ASR_UPLOAD_CHUNK_DURATION_SECS,
-        SERVICE_FOOTPRINT_WARNING_LOG_INTERVAL_SECS,
+        asr_capabilities_response, asr_download_requests, asr_platform_supported_for,
+        build_asr_download_client, default_home, persisted_target_matches_request,
+        plan_upload_chunk_boundaries, same_service_owner, service_watchdog_should_kill_for_sample,
+        target_from_query, target_matches_request, validate_loopback_host, wav_pcm_duration_ms,
+        ASR_UPLOAD_CHUNK_DURATION_SECS, SERVICE_FOOTPRINT_WARNING_LOG_INTERVAL_SECS,
     };
 
     fn proxy_env_lock() -> &'static StdMutex<()> {
@@ -2424,6 +2594,27 @@ mod tests {
         std::env::remove_var("no_proxy");
 
         ProxyEnvGuard { saved }
+    }
+
+    #[test]
+    fn asr_platform_support_matrix_is_apple_silicon_macos_only() {
+        assert!(asr_platform_supported_for("macos", "aarch64"));
+        assert!(!asr_platform_supported_for("macos", "x86_64"));
+        assert!(!asr_platform_supported_for("linux", "x86_64"));
+        assert!(!asr_platform_supported_for("windows", "x86_64"));
+    }
+
+    #[test]
+    fn asr_capabilities_are_hidden_on_unsupported_current_platform() {
+        let capabilities = asr_capabilities_response();
+        let expected_supported =
+            asr_platform_supported_for(std::env::consts::OS, std::env::consts::ARCH);
+        assert_eq!(capabilities.supported_target, "macos-aarch64");
+        assert_eq!(capabilities.qwen3_asr.enabled, expected_supported);
+        assert_eq!(capabilities.qwen3_asr.hidden, !expected_supported);
+        assert_eq!(capabilities.speaker_diarization.enabled, expected_supported);
+        assert_eq!(capabilities.voiceprint.enabled, expected_supported);
+        assert_eq!(capabilities.voice_wake_asr.enabled, expected_supported);
     }
 
     fn spawn_local_http_server() -> String {

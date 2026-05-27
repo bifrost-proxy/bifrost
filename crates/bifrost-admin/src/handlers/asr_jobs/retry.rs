@@ -262,6 +262,9 @@ async fn retry_failed_chunks_for_file_locked(
                                             .map(|c| c.saturating_add(*s)),
                                         absolute_end_ms: source_created
                                             .map(|c| c.saturating_add(*e)),
+                                        speaker: None,
+                                        speaker_display_name: None,
+                                        overlap: false,
                                         text: t.clone(),
                                     });
                                 }

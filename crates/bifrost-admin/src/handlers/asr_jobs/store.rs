@@ -187,6 +187,8 @@ fn start_run_progress(task_id: &str, trigger: &str) -> AsrRunProgress {
         current_chunk_total: 0,
         processed_now: 0,
         failed_now: 0,
+        stage: "queued".to_string(),
+        stage_message: Some("waiting for ASR worker".to_string()),
         message: Some("ASR directory task queued.".to_string()),
     };
     if let Err(error) = save_run_progress(task_id, &progress) {
@@ -220,6 +222,8 @@ fn finish_run_progress(
         progress.finished_at_ms = Some(now_ms());
         progress.processed_now = processed_now;
         progress.failed_now = failed_now;
+        progress.stage = status.to_string();
+        progress.stage_message = None;
         progress.message = message;
     });
 }
@@ -330,7 +334,7 @@ fn task_detail(task: AsrDirectoryTask) -> TaskDetail {
     let mut files = load_file_store(&task.id)
         .files
         .into_iter()
-        .map(|(key, record)| FileRecordWithKey { key, record })
+        .map(|(key, record)| file_record_with_key(&task, key, record))
         .collect::<Vec<_>>();
     files.sort_by(|left, right| {
         file_status_sort_rank(&left.record.status)
@@ -343,6 +347,25 @@ fn task_detail(task: AsrDirectoryTask) -> TaskDetail {
         summary,
         files,
         daily_documents,
+    }
+}
+
+fn file_record_with_key(
+    task: &AsrDirectoryTask,
+    key: String,
+    record: FileRecord,
+) -> FileRecordWithKey {
+    let (diarization_status, speaker_count) = diarization_file_state(task, &record);
+    let diarization_manifest_path = task
+        .diarization
+        .enabled
+        .then(|| diarization_manifest_path(&task.id, &record.source_path, &task.audio_dir));
+    FileRecordWithKey {
+        key,
+        record,
+        diarization_status,
+        diarization_manifest_path,
+        speaker_count,
     }
 }
 
@@ -430,7 +453,7 @@ fn task_watch_snapshot_from_store(
     }
 
     let recent_files = if include_recent {
-        recent_watch_files(file_store, 8)
+        recent_watch_files(&task, file_store, 8)
     } else {
         Vec::new()
     };
@@ -447,6 +470,7 @@ fn task_watch_snapshot_from_store(
             language: task.language.clone(),
             model: task.model.clone(),
             runtime_strategy: task.runtime_strategy,
+            diarization: task.diarization.clone(),
             last_run_at_ms: task.last_run_at_ms,
             next_run_at_ms: task.next_run_at_ms,
             last_error: task.last_error.clone(),
@@ -468,6 +492,13 @@ fn task_watch_snapshot_from_store(
             current_chunk_total,
             eta_ms,
             eta_confidence,
+            stage: run_progress
+                .as_ref()
+                .map(|progress| progress.stage.clone())
+                .unwrap_or_else(|| "idle".to_string()),
+            stage_message: run_progress
+                .as_ref()
+                .and_then(|progress| progress.stage_message.clone()),
         },
         consumption,
         service,
@@ -631,7 +662,11 @@ fn estimate_watch_eta(
     (None, "none")
 }
 
-fn recent_watch_files(file_store: &FileStore, limit: usize) -> Vec<TaskWatchFile> {
+fn recent_watch_files(
+    task: &AsrDirectoryTask,
+    file_store: &FileStore,
+    limit: usize,
+) -> Vec<TaskWatchFile> {
     let mut files = file_store.files.iter().collect::<Vec<_>>();
     files.sort_by(|(_, left), (_, right)| {
         file_status_sort_rank(&left.status)
@@ -647,11 +682,12 @@ fn recent_watch_files(file_store: &FileStore, limit: usize) -> Vec<TaskWatchFile
     files
         .into_iter()
         .take(limit)
-        .map(|(key, record)| watch_file_from_record(key, record))
+        .map(|(key, record)| watch_file_from_record(task, key, record))
         .collect()
 }
 
-fn watch_file_from_record(key: &str, record: &FileRecord) -> TaskWatchFile {
+fn watch_file_from_record(task: &AsrDirectoryTask, key: &str, record: &FileRecord) -> TaskWatchFile {
+    let (diarization_status, speaker_count) = diarization_file_state(task, record);
     TaskWatchFile {
         key: key.to_string(),
         source_path: record.source_path.clone(),
@@ -667,6 +703,8 @@ fn watch_file_from_record(key: &str, record: &FileRecord) -> TaskWatchFile {
             .max_by_key(|metric| metric.recorded_at_ms)
             .map(|metric| metric.rtf),
         error: record.error.clone(),
+        diarization_status,
+        speaker_count,
         started_at_ms: record.started_at_ms,
         finished_at_ms: record.finished_at_ms,
     }
@@ -856,6 +894,80 @@ fn is_retryable_asr_server_acquire_error(error: &str) -> bool {
             || error.contains("Timed out waiting for Qwen3-ASR model service to become healthy"))
 }
 
+fn read_record_timeline(record: &FileRecord) -> Option<TranscriptTimeline> {
+    let path = record.output_timeline_path.as_ref()?;
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<TranscriptTimeline>(&content).ok()
+}
+
+fn timeline_speaker_count(timeline: &TranscriptTimeline) -> usize {
+    if !timeline.speakers.is_empty() {
+        return timeline.speakers.len();
+    }
+    timeline
+        .segments
+        .iter()
+        .filter_map(|segment| segment.speaker.as_deref())
+        .collect::<HashSet<_>>()
+        .len()
+}
+
+fn diarization_file_state(
+    task: &AsrDirectoryTask,
+    record: &FileRecord,
+) -> (Option<String>, Option<usize>) {
+    if !task.diarization.enabled {
+        return (None, None);
+    }
+    if record.status == FileStatus::Processing {
+        return (Some("running".to_string()), None);
+    }
+    if record
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("diarization_missing_assets"))
+    {
+        return (Some("missing_assets".to_string()), None);
+    }
+    let speaker_count = read_record_timeline(record).and_then(|timeline| {
+        (timeline.diarization_profile.is_some()).then(|| timeline_speaker_count(&timeline))
+    });
+    match speaker_count {
+        Some(count) => (Some("success".to_string()), Some(count)),
+        None if record.status == FileStatus::Failed => (Some("failed".to_string()), None),
+        None => (Some("pending".to_string()), None),
+    }
+}
+
+fn summarize_diarization(
+    task: &AsrDirectoryTask,
+    file_store: &FileStore,
+) -> (bool, bool, usize, usize) {
+    let ready = !task.diarization.enabled || diarization_profile_ready(&task.diarization.profile);
+    let running = file_store
+        .files
+        .values()
+        .any(|record| record.status == FileStatus::Processing);
+    let mut diarized_files = 0usize;
+    let mut speaker_ids = HashSet::new();
+    for record in file_store.files.values() {
+        if let Some(timeline) = read_record_timeline(record) {
+            if timeline.diarization_profile.is_some() {
+                diarized_files += 1;
+                for speaker in timeline.speakers {
+                    speaker_ids.insert(speaker.id);
+                }
+                for segment in timeline.segments {
+                    if let Some(speaker) = segment.speaker {
+                        speaker_ids.insert(speaker);
+                    }
+                }
+            }
+        }
+    }
+    (ready, running, diarized_files, speaker_ids.len())
+}
+
 fn summarize_task(task: &AsrDirectoryTask) -> TaskSummary {
     let discovered = discover_audio_files(&task.audio_dir, task.recursive).unwrap_or_default();
     let discovered_keys = discovered
@@ -907,6 +1019,8 @@ fn summarize_task(task: &AsrDirectoryTask) -> TaskSummary {
         .keys()
         .filter(|key| !discovered_keys.contains(*key))
         .count();
+    let (diarization_ready, diarization_running, diarized_files, speaker_count) =
+        summarize_diarization(task, &file_store);
     TaskSummary {
         discovered: discovered.len(),
         processed,
@@ -920,6 +1034,11 @@ fn summarize_task(task: &AsrDirectoryTask) -> TaskSummary {
         cleanable_source_bytes,
         cleanable_source_file_count,
         running: RUNNING_TASKS.lock().unwrap().contains(&task.id),
+        diarization_enabled: task.diarization.enabled,
+        diarization_ready,
+        diarization_running,
+        diarized_files,
+        speaker_count,
     }
 }
 
@@ -991,6 +1110,8 @@ fn summarize_task_records(
         })
         .unwrap_or(0);
 
+    let (diarization_ready, diarization_running, diarized_files, speaker_count) =
+        summarize_diarization(task, file_store);
     TaskSummary {
         discovered: discovered.map(|paths| paths.len()).unwrap_or(file_store.files.len()),
         processed,
@@ -1006,6 +1127,11 @@ fn summarize_task_records(
         cleanable_source_bytes: 0,
         cleanable_source_file_count: 0,
         running: RUNNING_TASKS.lock().unwrap().contains(&task.id),
+        diarization_enabled: task.diarization.enabled,
+        diarization_ready,
+        diarization_running,
+        diarized_files,
+        speaker_count,
     }
 }
 

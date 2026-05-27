@@ -174,7 +174,7 @@ curl -sS -X POST -H 'content-type: application/json' \
 3. 按 `R` 立即运行；如果任务已在运行，继续观察底部消息。
 4. 按 `p` 暂停，再通过 API 或 TUI 恢复。
 5. 按 `P` 强制暂停。
-6. 在暂停状态下调用 run API：`curl -sS -o "$DATA_DIR/run-paused.json" -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/_bifrost/api/asr/tasks/<task_id>/run"`。
+6. 通过 `POST /_bifrost/api/asr/tasks/<task_id>/pause?mode=long_term` 进入确定的长期暂停状态，再调用 run API：`curl -sS -o "$DATA_DIR/run-paused.json" -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/_bifrost/api/asr/tasks/<task_id>/run"`。
 
 预期结果：
 
@@ -191,5 +191,6 @@ curl -sS -X POST -H 'content-type: application/json' \
 
 ## 执行记录
 
+- 2026-05-28：针对 CI `E2E Shell (aarch64-apple-darwin, shard 1/3)` 中 `test_asr_task_tui.sh` 失败更新 TC-ASR-TUI-10 的自动化路径：CI `SKIP_BUILD=true` 时复用 workflow 已下载的 release binary，避免 macOS shard 内重新 debug 编译；暂停状态 run 409 回归改用长期暂停，避免临时暂停被 scheduler 到点自动恢复造成竞态。执行 `SKIP_BUILD=true BIFROST_BIN=$PWD/target/release/bifrost BIFROST_ASR_TASK_TUI_E2E_PORT=18991 bash e2e-tests/tests/test_asr_task_tui.sh`，真实启动临时 Bifrost 服务（`--no-system-proxy`）并通过。
 - 2026-05-26：针对 CI `E2E Shell (Linux, shard 2/3)` 中 `multi-task selector did not choose second task` 回归更新 TC-ASR-TUI-02 的自动化等待条件。多任务 PTY 选择用例在发送 `Down + Enter` 前必须等待选择器 prompt 和两个任务选项 `CLI TUI One` / `CLI TUI Two` 都已渲染，避免慢速 CI 终端里 prompt 先出现但列表尚未绘制完就输入导致选中不稳定。执行 `bash e2e-tests/tests/test_asr_task_tui.sh`，真实启动临时 Bifrost 服务（`--no-system-proxy`）并通过。
 - 2026-05-24：执行 `bash e2e-tests/tests/test_asr_task_tui.sh`，真实启动临时 Bifrost 服务（`--no-system-proxy`）并通过。覆盖单任务自动进入、多任务 TTY 选择、非交互错误、`watch --json-snapshot`、Daily/Jennie Agent 统计、`daily list/show` 自动/参数选择、TUI Daily Agent Docs 打开日志、刷新、暂停/恢复、强制暂停、暂停状态 run 409 文案和临时目录清理。

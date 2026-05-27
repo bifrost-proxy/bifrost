@@ -25,7 +25,8 @@ use nix::unistd::Pid as NixPid;
 
 use crate::asr_runtime::{now_ms, read_service_state, text_output_dir, AsrServiceState};
 use crate::handlers::asr::{
-    start_managed_service, stop_managed_service_for_target, target_from_query, AsrTarget,
+    resolve_managed_target, start_managed_service, stop_managed_service_for_target,
+    target_from_query, AsrTarget,
 };
 use crate::handlers::asr_cli_invoke::{
     asr_chunk_timeout, run_asr_cli_with_footprint_guard_timeout_and_abort,
@@ -37,18 +38,22 @@ use crate::handlers::asr_jobs_daily::{
 use crate::handlers::asr_jobs_source::source_audio_response;
 use crate::handlers::asr_jobs_timeline::{
     generate_daily_summaries, inspect_source_audio, render_timeline_text, source_modified_ms,
-    source_size, SourceAudioInfo, TimelineSegment, TranscriptTimeline,
+    source_size, SourceAudioInfo, TimelineSegment, TimelineSpeaker, TranscriptTimeline,
 };
+use crate::handlers::asr_streaming::call_asr_text_endpoint;
 #[cfg(test)]
 use crate::handlers::asr_streaming::{asr_server_request_timeout, asr_text_request_timeout};
 use crate::handlers::{
-    error_response, json_response, json_response_with_status, method_not_allowed, BoxBody,
+    error_response, full_body, json_response, json_response_with_status, method_not_allowed,
+    BoxBody,
 };
 
 // The ASR jobs implementation is intentionally split by responsibility.
 // `include!` keeps these pieces in the same Rust module, preserving the
 // pre-refactor visibility model while making each file reviewable.
 include!("asr_jobs/state.rs");
+include!("asr_jobs/diarization.rs");
+include!("asr_jobs/voiceprint.rs");
 include!("asr_jobs/external_import.rs");
 include!("asr_jobs/api.rs");
 include!("asr_jobs/retry.rs");

@@ -579,6 +579,10 @@ where
         text: &text,
         delta: &delta,
         committed: &committed,
+        speaker: None,
+        speaker_display_name: None,
+        speaker_profile_id: None,
+        speaker_confidence: None,
     };
     send_asr_segment_ws(sender, "partial", &payload)
         .await

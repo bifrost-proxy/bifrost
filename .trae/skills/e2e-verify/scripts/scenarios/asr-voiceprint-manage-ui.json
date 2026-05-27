@@ -1,0 +1,38 @@
+{
+  "name": "ASR 声纹管理入口",
+  "description": "验证 ASR 页面展示声纹录入、实时验证与删除相关入口",
+  "config": {
+    "waitForLogin": false,
+    "timeout": 30000
+  },
+  "steps": [
+    { "action": "log", "message": "==== 步骤 1: 进入 ASR 页面 ====" },
+    {
+      "action": "evaluate",
+      "code": "window.location.href = window.location.origin + '/_bifrost/ai?aiSection=tools-asr'; true"
+    },
+    { "action": "wait", "ms": 1000 },
+    { "action": "waitForSelector", "selector": "[data-testid='asr-diarization-setup-card']" },
+    {
+      "action": "assert",
+      "condition": "document.querySelector('[data-testid=\"asr-diarization-setup-card\"]') !== null",
+      "message": "Speaker Diarization 卡片可见"
+    },
+    {
+      "action": "assert",
+      "condition": "document.querySelector('[data-testid=\"asr-enroll-voiceprint-button\"]') !== null",
+      "message": "声纹录入按钮可见"
+    },
+    {
+      "action": "assert",
+      "condition": "document.querySelector('[data-testid=\"asr-identify-speaker-button\"]') !== null",
+      "message": "实时声纹验证按钮可见"
+    },
+    {
+      "action": "assert",
+      "condition": "document.body.innerText.includes('Voiceprints')",
+      "message": "声纹数量状态可见"
+    },
+    { "action": "takeSnapshot", "name": "ASR 声纹管理入口", "print": false }
+  ]
+}

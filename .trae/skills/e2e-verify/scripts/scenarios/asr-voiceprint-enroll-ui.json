@@ -1,0 +1,56 @@
+{
+  "name": "ASR 声纹录入入口",
+  "description": "验证 ASR 页面展示声纹录入入口，并能打开实时朗读录入弹窗",
+  "config": {
+    "waitForLogin": false,
+    "timeout": 30000
+  },
+  "steps": [
+    { "action": "log", "message": "==== 步骤 1: 进入 ASR 页面 ====" },
+    {
+      "action": "evaluate",
+      "code": "window.location.href = window.location.origin + '/_bifrost/ai?aiSection=tools-asr'; true"
+    },
+    { "action": "wait", "ms": 1000 },
+    { "action": "waitForSelector", "selector": "[data-testid='asr-diarization-setup-card']" },
+    {
+      "action": "assert",
+      "condition": "document.querySelector('[data-testid=\"asr-diarization-setup-card\"]') !== null",
+      "message": "Speaker Diarization 卡片可见"
+    },
+    {
+      "action": "assert",
+      "condition": "document.querySelector('[data-testid=\"asr-enroll-voiceprint-button\"]') !== null",
+      "message": "声纹录入按钮可见"
+    },
+    {
+      "action": "assert",
+      "condition": "!document.querySelector('[data-testid=\"asr-enroll-voiceprint-button\"]').disabled",
+      "message": "声纹录入按钮在已初始化 profile 下可点击"
+    },
+    { "action": "click", "selector": "[data-testid='asr-enroll-voiceprint-button']" },
+    { "action": "waitForSelector", "selector": "[data-testid='asr-enroll-speaker-name-input']" },
+    { "action": "fill", "selector": "[data-testid='asr-enroll-speaker-name-input']", "value": "Eden" },
+    {
+      "action": "assert",
+      "condition": "document.body.innerText.includes('Enroll Voiceprint') && document.querySelector('[data-testid=\"asr-enroll-speaker-name-input\"]')?.value === 'Eden'",
+      "message": "实时朗读声纹录入弹窗可填写用户名称"
+    },
+    {
+      "action": "evaluate",
+      "code": "Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }) } }); class MockAudioContext { constructor(){ this.sampleRate = 16000; this.destination = {}; } createMediaStreamSource(){ return { connect(){}, disconnect(){} }; } createScriptProcessor(){ const processor = { onaudioprocess: null, connect(){ const emit = () => processor.onaudioprocess && processor.onaudioprocess({ inputBuffer: { getChannelData: () => new Float32Array(4096).fill(0.2) } }); for (let i = 0; i < 120; i += 1) window.setTimeout(emit, i * 50); }, disconnect(){} }; return processor; } close(){ return Promise.resolve(); } } window.AudioContext = MockAudioContext; window.webkitAudioContext = MockAudioContext; true"
+    },
+    { "action": "click", "selector": ".ant-modal-footer .ant-btn-primary" },
+    { "action": "wait", "ms": 9000 },
+    {
+      "action": "evaluate",
+      "code": "fetch('/_bifrost/api/asr/speaker-profiles').then((response) => response.json()).then((payload) => { window.__asrVoiceprintProfiles = payload.profiles || []; return true; })"
+    },
+    {
+      "action": "assert",
+      "condition": "window.__asrVoiceprintProfiles?.some((profile) => profile.display_name === 'Eden')",
+      "message": "声纹录入会提取朗读文本并据此自动推进"
+    },
+    { "action": "takeSnapshot", "name": "ASR 声纹录入弹窗", "print": false }
+  ]
+}
