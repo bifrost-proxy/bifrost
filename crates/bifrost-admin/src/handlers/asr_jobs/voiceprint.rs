@@ -905,8 +905,10 @@ pub(crate) fn registered_speaker_profile_exists(profile_id: &str) -> bool {
 }
 
 const VOICEPRINT_SELF_PRIORITY_THRESHOLD: f32 = 0.52;
+#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
 const VOICEPRINT_SELF_PRIORITY_MIN_DURATION_MS: u64 = 5_000;
 
+#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
 #[derive(Debug, Clone)]
 struct DiarizationVoiceprintCandidate {
     profile_id: String,
@@ -998,6 +1000,7 @@ fn map_speakers_with_registered_voiceprints(
     }
 }
 
+#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
 fn diarization_speaker_durations(segments: &[DiarizationSegment]) -> BTreeMap<String, u64> {
     let mut durations = BTreeMap::new();
     for segment in segments {

@@ -58,6 +58,7 @@ use bifrost_asr::planner::{
 use bifrost_asr::profiles::{
     default_diarization_profile, AsrDiarizationConfig, DEFAULT_DIARIZATION_PROFILE,
 };
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use bifrost_asr::speaker::{
     stabilize_diarization_speakers, SpeakerMergeDecision, SpeakerStabilizationConfig,
 };

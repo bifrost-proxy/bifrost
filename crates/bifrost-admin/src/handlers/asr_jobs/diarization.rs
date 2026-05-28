@@ -606,6 +606,7 @@ fn count_speaker_profiles() -> usize {
         .unwrap_or(0)
 }
 
+#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
 fn resolved_diarization_cluster_count(config: &AsrDiarizationConfig) -> i32 {
     let count = config
         .known_speaker_count
@@ -773,6 +774,7 @@ fn run_sherpa_diarization(
     ))
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn log_speaker_stabilization_decisions(decisions: &[SpeakerMergeDecision]) {
     for decision in decisions {
         tracing::info!(
