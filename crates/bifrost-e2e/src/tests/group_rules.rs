@@ -1063,20 +1063,15 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 let group_name = format!("badge-sync-cache-group-{port}");
                 let group_id =
                     create_remote_group(&client, &sync_base_url, &sync_token, &group_name).await?;
-
-                let create_resp = client
-                    .post(format!(
-                        "http://127.0.0.1:{}/_bifrost/api/group-rules/{}",
-                        port, group_id
-                    ))
-                    .json(&serde_json::json!({
-                        "name": "badge-sync-cache-rule",
-                        "content": "badge-sync-cache.example.com status://231",
-                    }))
-                    .send()
-                    .await
-                    .map_err(|e| format!("Create remote group rule via admin failed: {e}"))?;
-                assert_status(&create_resp, 200)?;
+                create_remote_env(
+                    &client,
+                    &sync_base_url,
+                    &sync_token,
+                    &group_name,
+                    "badge-sync-cache-rule",
+                    "badge-sync-cache.example.com status://231",
+                )
+                .await?;
 
                 let group_storage = setup_group_storage(&admin_state, &group_name)?;
                 let mut local_rule = RuleFile::new(
@@ -1100,23 +1095,14 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     ));
                 }
 
-                let list_resp = client
-                    .get(format!(
-                        "http://127.0.0.1:{}/_bifrost/api/group-rules/{}",
-                        port, group_id
-                    ))
-                    .send()
-                    .await
-                    .map_err(|e| format!("Group list sync request failed: {}", e))?;
-                assert_status(&list_resp, 200)?;
-
-                wait_for_rule_state(
+                sync_group_rules_until_rule_content(
                     &client,
                     &admin_state,
+                    &group_storage,
                     port,
+                    &group_id,
                     "badge-sync-cache-rule",
-                    true,
-                    "status://231",
+                    "badge-sync-cache.example.com status://231",
                 )
                 .await?;
                 if badge_has_rule(&admin_state, "badge-sync-cache-rule", "status://230")? {
@@ -1926,23 +1912,129 @@ async fn create_remote_group(
     token: &str,
     group_name: &str,
 ) -> Result<String, String> {
-    let resp = client
-        .post(format!("{base_url}/v4/group"))
-        .header("x-bifrost-token", token)
-        .json(&serde_json::json!({ "name": group_name }))
-        .send()
+    let mut last_error = String::new();
+    for _ in 0..5 {
+        let resp = client
+            .post(format!("{base_url}/v4/group"))
+            .header("x-bifrost-token", token)
+            .json(&serde_json::json!({ "name": group_name }))
+            .send()
+            .await
+            .map_err(|e| format!("Create remote group failed: {e}"))?;
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("Failed to read remote group response: {e}"))?;
+        if status.as_u16() == 200 {
+            let json: serde_json::Value = serde_json::from_str(&body)
+                .map_err(|e| format!("Failed to parse remote group response: {e}: {body}"))?;
+            return json
+                .get("data")
+                .and_then(|v| v.get("id"))
+                .and_then(|v| v.as_str())
+                .map(|v| v.to_string())
+                .ok_or_else(|| format!("Remote group response missing id: {json}"));
+        }
+        last_error = format!("status={} body={body}", status.as_u16());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    Err(format!(
+        "Create remote group failed after retries: {last_error}"
+    ))
+}
+
+async fn create_remote_env(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+    user_id: &str,
+    name: &str,
+    rule: &str,
+) -> Result<(), String> {
+    let mut last_error = String::new();
+    for _ in 0..5 {
+        let resp = client
+            .post(format!("{base_url}/v4/env"))
+            .header("x-bifrost-token", token)
+            .json(&serde_json::json!({
+                "user_id": user_id,
+                "name": name,
+                "rule": rule,
+            }))
+            .send()
+            .await
+            .map_err(|e| format!("Create remote env failed: {e}"))?;
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("Failed to read remote env response: {e}"))?;
+        if status.as_u16() == 200 {
+            return Ok(());
+        }
+        last_error = format!("status={} body={body}", status.as_u16());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    Err(format!(
+        "Create remote env failed after retries: {last_error}"
+    ))
+}
+
+async fn sync_group_rules_until_rule_content(
+    client: &reqwest::Client,
+    admin_state: &Arc<bifrost_admin::AdminState>,
+    group_storage: &RulesStorage,
+    port: u16,
+    group_id: &str,
+    rule_name: &str,
+    expected_content: &str,
+) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut last_list: Option<String> = None;
+
+    loop {
+        let resp = client
+            .get(format!(
+                "http://127.0.0.1:{}/_bifrost/api/group-rules/{}",
+                port, group_id
+            ))
+            .send()
+            .await
+            .map_err(|e| format!("Group list sync request failed: {e}"))?;
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("Failed to read group list sync response: {e}"))?;
+        last_list = Some(format!("status={} body={body}", status.as_u16()));
+
+        if status.as_u16() == 200 {
+            let synced_rule = group_storage.load(rule_name).ok();
+            if synced_rule
+                .as_ref()
+                .is_some_and(|rule| rule.enabled && rule.content == expected_content)
+                && badge_has_rule(admin_state, rule_name, expected_content)?
+            {
+                return Ok(());
+            }
+        }
+
+        if Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let last_summary = fetch_active_summary(client, port)
         .await
-        .map_err(|e| format!("Create remote group failed: {e}"))?;
-    assert_status(&resp, 200)?;
-    let json: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse remote group response: {e}"))?;
-    json.get("data")
-        .and_then(|v| v.get("id"))
-        .and_then(|v| v.as_str())
         .map(|v| v.to_string())
-        .ok_or_else(|| format!("Remote group response missing id: {json}"))
+        .unwrap_or_else(|e| format!("failed to fetch active summary: {e}"));
+    let last_list = last_list.unwrap_or_else(|| "list sync was not attempted".to_string());
+    Err(format!(
+        "Timed out waiting for synced group rule {rule_name}; last_list={last_list}; last_summary={last_summary}; last_badge={}",
+        admin_state.badge_rules_json()
+    ))
 }
 
 async fn save_test_sync_token(admin_state: &Arc<bifrost_admin::AdminState>) -> Result<(), String> {
