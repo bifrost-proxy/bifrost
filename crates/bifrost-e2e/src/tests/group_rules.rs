@@ -1063,15 +1063,20 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 let group_name = format!("badge-sync-cache-group-{port}");
                 let group_id =
                     create_remote_group(&client, &sync_base_url, &sync_token, &group_name).await?;
-                create_remote_env(
-                    &client,
-                    &sync_base_url,
-                    &sync_token,
-                    &group_name,
-                    "badge-sync-cache-rule",
-                    "badge-sync-cache.example.com status://231",
-                )
-                .await?;
+
+                let create_resp = client
+                    .post(format!(
+                        "http://127.0.0.1:{}/_bifrost/api/group-rules/{}",
+                        port, group_id
+                    ))
+                    .json(&serde_json::json!({
+                        "name": "badge-sync-cache-rule",
+                        "content": "badge-sync-cache.example.com status://231",
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("Create remote group rule via admin failed: {e}"))?;
+                assert_status(&create_resp, 200)?;
 
                 let group_storage = setup_group_storage(&admin_state, &group_name)?;
                 let mut local_rule = RuleFile::new(
@@ -1938,28 +1943,6 @@ async fn create_remote_group(
         .and_then(|v| v.as_str())
         .map(|v| v.to_string())
         .ok_or_else(|| format!("Remote group response missing id: {json}"))
-}
-
-async fn create_remote_env(
-    client: &reqwest::Client,
-    base_url: &str,
-    token: &str,
-    user_id: &str,
-    name: &str,
-    rule: &str,
-) -> Result<(), String> {
-    let resp = client
-        .post(format!("{base_url}/v4/env"))
-        .header("x-bifrost-token", token)
-        .json(&serde_json::json!({
-            "user_id": user_id,
-            "name": name,
-            "rule": rule,
-        }))
-        .send()
-        .await
-        .map_err(|e| format!("Create remote env failed: {e}"))?;
-    assert_status(&resp, 200)
 }
 
 async fn save_test_sync_token(admin_state: &Arc<bifrost_admin::AdminState>) -> Result<(), String> {
