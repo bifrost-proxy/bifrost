@@ -5,6 +5,7 @@ use bifrost_asr::native::sherpa_onnx::{
     OfflineSpeakerSegmentationModelConfig, OfflineSpeakerSegmentationPyannoteModelConfig,
     SpeakerEmbeddingExtractor, SpeakerEmbeddingExtractorConfig, Wave,
 };
+#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
 use bifrost_asr::profiles::DEFAULT_AUTO_MAX_SPEAKERS;
 
 const SHERPA_SEGMENTATION_MODEL_URL: &str =
