@@ -1,4 +1,4 @@
-# ASR 模型自治与共享服务互斥
+# ASR 模型自治与共享服务复用
 
 ## 功能模块说明
 
@@ -8,7 +8,7 @@
 - Speech Workbench：上传文件和实时麦克风共用 Workbench 自己的模型配置，可启动/停止共享 ASR Server，租约 owner 为 `speech_workbench`。
 - CLI：`bifrost ai asr start`、`bifrost ai asr stream-file`、`bifrost ai voice listen` 通过显式 `--model` 参数选择模型，租约 owner 为 `cli`。
 - Model Management：只负责共享模型资产状态、下载和初始化，不在 ASR 页面顶部混放 Start Service / Stop Service。
-- 共享 ASR Server：同一时间只允许一个 owner 消费；其它 owner 请求启动或转写时应获得清晰的 busy/owner 提示。
+- 共享 ASR Server：同一 `host/home/model/port` 的托管 Qwen3-ASR runtime 可被 Workbench、Directory Task、offline-jobs 和 CLI 复用；owner 仍用于状态解释和请求归属，不能再因为 owner 不同阻止同模型复用。
 
 ## 前置条件
 
@@ -61,18 +61,18 @@
 - `bifrost ai voice listen --help` 包含 `--model`。
 - CLI ASR 状态结构支持 `owner_module` / `owner_id`；旧 `service.json` 仍可反序列化。
 
-### TC-ASR-AUTO-04：共享 ASR Server owner 隔离
+### TC-ASR-AUTO-04：共享 ASR Server 同模型跨 owner 复用
 
 操作步骤：
 
 1. 执行 `e2e-tests/tests/test_asr_model_autonomy.sh`。
-2. 观察脚本中的 `seed busy speech_workbench service and verify status owner isolation` 步骤。
-3. 执行 `cargo test -p bifrost-admin qwen3_service_owner_isolation_blocks_other_modules -- --nocapture`。
+2. 观察脚本中的 `seed speech_workbench service and verify same-model runtime sharing` 步骤。
+3. 执行 `cargo test -p bifrost-admin qwen3_service_runtime_is_shared_across_modules_for_same_model -- --nocapture`。
 
 预期结果：
 
-- seed 的 `speech_workbench` 服务状态不会被 `directory_task` 状态查询误认为同 owner managed 服务。
-- 单元测试确认同模型不同 owner 不可复用，防止互相消费共享 ASR Server。
+- seed 的 `speech_workbench` 服务可被 `directory_task` 同模型启动请求复用，返回 `ready=true` 和同一个 `server_url`。
+- 单元测试确认同模型跨 owner 可复用；不同模型或不可复用资源才需要明确等待/拒绝。
 
 ### TC-ASR-AUTO-05：ASR 页面入口重组与主题兼容
 
@@ -105,3 +105,4 @@
 | 2026-05-22 | TC-ASR-AUTO-03 | 已执行 `cargo test -p bifrost-cli voice_ws_url_includes_runtime_chunk_options --lib` | 通过；CLI realtime voice URL 显式携带 `owner_module=cli`、`model`、`language` 和 chunk 参数 |
 | 2026-05-22 | TC-ASR-AUTO-05 | 已执行 `npm --prefix web run test:unit -- src/api/asr.test.ts` | 通过；5 个前端 API 单测确认 Workbench/Model Management owner 隔离，实时语音 URL 携带 `owner_module=speech_workbench` 且跟随 Workbench 模型 |
 | 2026-05-22 | TC-ASR-AUTO-03/04 | 已执行 `cargo test -p bifrost-admin qwen3_service_owner_isolation_blocks_other_modules -- --nocapture`、`cargo test -p bifrost-cli status_reads_persisted_asr_service_state -- --nocapture` | 通过 |
+| 2026-05-28 | TC-ASR-AUTO-04 | CI `E2E Shell (aarch64-apple-darwin, shard 2/3)` 暴露旧断言仍要求不同 owner 返回 busy；已更新 `test_asr_model_autonomy.sh`，并执行 `SKIP_BUILD=true BIFROST_BIN=$PWD/target/debug/bifrost BIFROST_ASR_MODEL_AUTONOMY_E2E_PORT=18991 bash e2e-tests/tests/test_asr_model_autonomy.sh` | 通过；`speech_workbench` seed runtime 被 `directory_task` 同模型启动请求复用，返回同一 `server_url` |

@@ -745,7 +745,10 @@ pub enum AiVoiceWakeCommands {
     },
     #[command(about = "Create a wake binding from one audio sample and one captured shortcut")]
     BindAudio {
-        #[arg(value_hint = ValueHint::FilePath, help = "Wake audio sample to recognize")]
+        #[arg(
+            value_hint = ValueHint::FilePath,
+            help = "Wake audio sample for local verification; it is not transcribed"
+        )]
         audio: PathBuf,
         #[arg(long, help = "Existing ASR speaker voiceprint profile id")]
         voiceprint_profile_id: String,
@@ -760,14 +763,9 @@ pub enum AiVoiceWakeCommands {
         binding_id: Option<String>,
         #[arg(
             long,
-            hide = true,
-            help = "Recognized phrase override for non-interactive or test runs"
+            help = "Wake phrase text to register into sherpa-onnx KWS keywords"
         )]
-        phrase: Option<String>,
-        #[arg(long, default_value = "Qwen3-ASR-0.6B", help = "ASR model name")]
-        model: String,
-        #[arg(long, default_value = "chinese", help = "Recognition language")]
-        language: String,
+        phrase: String,
         #[arg(
             long,
             help = "Key name; when omitted, press the shortcut in the terminal"
@@ -810,7 +808,7 @@ pub enum AiVoiceWakeCommands {
         #[arg(
             long,
             default_value = "lightweight_kws_listener",
-            value_parser = ["lightweight_kws_listener", "backend_asr_phrase_match"]
+            value_parser = ["lightweight_kws_listener"]
         )]
         engine: String,
         #[arg(
@@ -834,8 +832,8 @@ pub enum AiVoiceWakeListenerCommands {
         #[arg(
             long,
             default_value = "lightweight_kws_listener",
-            value_parser = ["lightweight_kws_listener", "backend_asr_phrase_match"],
-            help = "Wake listener engine"
+            value_parser = ["lightweight_kws_listener"],
+            help = "Wake listener engine; wake commands use sherpa-onnx lightweight KWS"
         )]
         engine: String,
         #[arg(

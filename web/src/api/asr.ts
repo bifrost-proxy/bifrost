@@ -168,8 +168,15 @@ export interface VoiceWakeStatus {
   binding_count: number;
   event_count: number;
   mode: string;
-  fallback?: string;
+  fallback?: string | null;
   requires_qwen_by_default?: boolean;
+  kws?: {
+    engine: string;
+    profile: string;
+    ready: boolean;
+    install_dir: string;
+    missing_files: string[];
+  };
   store_path: string;
   default_dry_run: boolean;
   listener: VoiceWakeListenerStatus;
@@ -180,6 +187,7 @@ export interface VoiceWakeListenerStatus {
   source: string;
   engine?: string;
   device?: string | null;
+  device_label?: string | null;
   worker_pid?: number | null;
   chunk_ms: number;
   started_at_ms: number | null;
@@ -191,6 +199,11 @@ export interface VoiceWakeListenerStatus {
   last_speaker_profile_id: string | null;
   last_speaker_confidence: number | null;
   last_speaker_status: string | null;
+  last_match_status: string | null;
+  last_match_binding_id: string | null;
+  last_match_phrase: string | null;
+  last_action_result: VoiceWakeActionResult | null;
+  last_action_at_ms: number | null;
   trigger_count: number;
 }
 
@@ -213,6 +226,7 @@ export interface VoiceWakeActionKeyPress {
   keycode: number | null;
   modifiers: string[];
   press_count: number;
+  repeat_delay_ms?: number;
 }
 
 export type VoiceWakeAction = VoiceWakeActionKeyPress;

@@ -130,6 +130,11 @@ print(json.dumps({
     "language": "chinese",
     "model": "Qwen3-ASR-1.7B",
     "runtime_strategy": "fork_per_chunk",
+    "diarization": {
+        "enabled": False,
+        "profile": "sherpa-onnx-balanced",
+        "voiceprint_matching": False,
+    },
     "daily_agent": {"enabled": False},
 }))
 PY

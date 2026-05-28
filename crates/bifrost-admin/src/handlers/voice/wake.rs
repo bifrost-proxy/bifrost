@@ -33,7 +33,7 @@ const DEFAULT_SPEAKER_THRESHOLD: f32 = VOICEPRINT_SPEAKER_MATCH_THRESHOLD;
 const MAX_EVENTS: usize = 50;
 const DEFAULT_LISTENER_CHUNK_MS: u64 = 2500;
 const MIN_LISTENER_CHUNK_MS: u64 = 1000;
-const MAX_LISTENER_CHUNK_MS: u64 = 10_000;
+const MAX_LISTENER_CHUNK_MS: u64 = 4_000;
 
 static VOICE_WAKE_LISTENER: Lazy<Mutex<VoiceWakeListenerRuntime>> =
     Lazy::new(|| Mutex::new(VoiceWakeListenerRuntime::default()));
@@ -96,6 +96,8 @@ enum VoiceWakeAction {
         modifiers: Vec<String>,
         #[serde(default = "default_press_count")]
         press_count: u8,
+        #[serde(default = "default_repeat_delay_ms")]
+        repeat_delay_ms: u64,
     },
 }
 
@@ -160,12 +162,38 @@ struct VoiceWakeTriggerRequest {
     dry_run: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct VoiceWakeListenerProgressRequest {
+    status: String,
+    #[serde(default)]
+    device: Option<String>,
+    #[serde(default)]
+    device_label: Option<String>,
+    #[serde(default)]
+    transcript: Option<String>,
+    #[serde(default)]
+    phrase: Option<String>,
+    #[serde(default)]
+    profile_id: Option<String>,
+    #[serde(default)]
+    binding_id: Option<String>,
+    #[serde(default)]
+    speaker_profile_id: Option<String>,
+    #[serde(default)]
+    speaker_confidence: Option<f32>,
+    #[serde(default)]
+    speaker_status: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct VoiceWakeListenerState {
     running: bool,
     source: String,
     engine: String,
     device: Option<String>,
+    device_label: Option<String>,
     worker_pid: Option<u32>,
     chunk_ms: u64,
     started_at_ms: Option<u64>,
@@ -177,6 +205,11 @@ struct VoiceWakeListenerState {
     last_speaker_profile_id: Option<String>,
     last_speaker_confidence: Option<f32>,
     last_speaker_status: Option<String>,
+    last_match_status: Option<String>,
+    last_match_binding_id: Option<String>,
+    last_match_phrase: Option<String>,
+    last_action_result: Option<VoiceWakeActionResult>,
+    last_action_at_ms: Option<u64>,
     trigger_count: u64,
 }
 
@@ -187,6 +220,7 @@ impl Default for VoiceWakeListenerState {
             source: "mic".to_string(),
             engine: default_listener_engine(),
             device: None,
+            device_label: None,
             worker_pid: None,
             chunk_ms: DEFAULT_LISTENER_CHUNK_MS,
             started_at_ms: None,
@@ -198,6 +232,11 @@ impl Default for VoiceWakeListenerState {
             last_speaker_profile_id: None,
             last_speaker_confidence: None,
             last_speaker_status: None,
+            last_match_status: None,
+            last_match_binding_id: None,
+            last_match_phrase: None,
+            last_action_result: None,
+            last_action_at_ms: None,
             trigger_count: 0,
         }
     }
@@ -262,6 +301,9 @@ pub(super) async fn handle_voice_wake(req: Request<Incoming>, path: &str) -> Res
         (&Method::POST, "/api/voice/wake/listener/start") => {
             post_listener_start_response(req).await
         }
+        (&Method::POST, "/api/voice/wake/listener/progress") => {
+            post_listener_progress_response(req).await
+        }
         (&Method::POST, "/api/voice/wake/listener/stop") => post_listener_stop_response().await,
         (&Method::GET, "/api/voice/wake/events") => get_events_response(),
         (&Method::GET, _) | (&Method::POST, _) => {
@@ -282,7 +324,7 @@ async fn get_status_response() -> Response<BoxBody> {
             "binding_count": store.bindings.len(),
             "event_count": store.events.len(),
             "mode": default_engine,
-            "fallback": "backend_asr_phrase_match",
+            "fallback": serde_json::Value::Null,
             "requires_qwen_by_default": false,
             "kws": {
                 "engine": "sherpa-onnx",
@@ -477,11 +519,11 @@ async fn post_listener_start_response(req: Request<Incoming>) -> Response<BoxBod
             "mock_transcripts is required when source is mock",
         );
     }
-    let mut engine = create.engine.trim().to_ascii_lowercase();
-    if engine != "lightweight_kws_listener" && engine != "backend_asr_phrase_match" {
+    let engine = create.engine.trim().to_ascii_lowercase();
+    if engine != "lightweight_kws_listener" {
         return error_response(
             StatusCode::BAD_REQUEST,
-            "voice wake listener engine must be lightweight_kws_listener or backend_asr_phrase_match",
+            "voice wake listener engine must be lightweight_kws_listener",
         );
     }
     if source == "mic" && std::env::consts::OS != "macos" {
@@ -493,13 +535,17 @@ async fn post_listener_start_response(req: Request<Incoming>) -> Response<BoxBod
     if source == "mic" && engine == "lightweight_kws_listener" {
         let pack = voice_wake_kws_model_pack();
         if !pack.is_ready() {
-            tracing::warn!(
+            tracing::info!(
                 profile = DEFAULT_WAKE_KWS_PROFILE,
                 install_dir = %pack.root_dir.display(),
-                missing_files = ?pack.missing_files(),
-                "voice wake KWS assets are missing, falling back to backend ASR phrase match"
+                "voice wake KWS assets are missing; initializing before starting listener"
             );
-            engine = "backend_asr_phrase_match".to_string();
+            if let Err(error) = prepare_voice_wake_kws_profile() {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("voice wake lightweight KWS initialization failed: {error}"),
+                );
+            }
         }
     }
     let store = match load_store() {
@@ -531,17 +577,12 @@ async fn post_listener_start_response(req: Request<Incoming>) -> Response<BoxBod
         ..create
     };
     runtime.cancel = Some(cancel.clone());
-    let fallback_status = (engine == "backend_asr_phrase_match"
-        && create
-            .engine
-            .trim()
-            .eq_ignore_ascii_case("lightweight_kws_listener"))
-    .then(|| "kws_missing_fallback_backend_asr_phrase_match".to_string());
     runtime.state = VoiceWakeListenerState {
         running: true,
         source,
         engine,
         device: request.device.clone(),
+        device_label: None,
         worker_pid: None,
         chunk_ms,
         started_at_ms: Some(now_ms()),
@@ -552,13 +593,15 @@ async fn post_listener_start_response(req: Request<Incoming>) -> Response<BoxBod
         last_error_at_ms: None,
         last_speaker_profile_id: None,
         last_speaker_confidence: None,
-        last_speaker_status: fallback_status,
+        last_speaker_status: None,
+        last_match_status: None,
+        last_match_binding_id: None,
+        last_match_phrase: None,
+        last_action_result: None,
+        last_action_at_ms: None,
         trigger_count: 0,
     };
-    if request.source == "mic"
-        && (request.engine == "backend_asr_phrase_match"
-            || request.engine == "lightweight_kws_listener")
-    {
+    if request.source == "mic" && request.engine == "lightweight_kws_listener" {
         match spawn_voice_wake_worker(&request, &admin_host, admin_port).await {
             Ok((pid, task)) => {
                 runtime.worker_pid = Some(pid);
@@ -596,6 +639,73 @@ async fn post_listener_stop_response() -> Response<BoxBody> {
     runtime.state.running = false;
     runtime.state.worker_pid = None;
     runtime.state.stopped_at_ms = Some(now_ms());
+    runtime.state.last_match_status = None;
+    json_response(&serde_json::json!({ "listener": runtime.state }))
+}
+
+async fn post_listener_progress_response(req: Request<Incoming>) -> Response<BoxBody> {
+    let progress = match read_json_body::<VoiceWakeListenerProgressRequest>(req).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let status = progress.status.trim();
+    if status.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "listener progress status is required",
+        );
+    }
+    let now = now_ms();
+    let mut runtime = VOICE_WAKE_LISTENER.lock().await;
+    if !runtime.state.running {
+        return json_response(&serde_json::json!({ "listener": runtime.state }));
+    }
+    if let Some(device) = progress
+        .device
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        runtime.state.device = Some(device.to_string());
+    }
+    if let Some(device_label) = progress
+        .device_label
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        runtime.state.device_label = Some(device_label.to_string());
+    }
+    runtime.state.last_match_status = Some(status.to_string());
+    if let Some(transcript) = progress.transcript {
+        runtime.state.last_transcript = Some(transcript);
+        runtime.state.last_transcript_at_ms = Some(now);
+    }
+    if let Some(phrase) = progress.phrase {
+        runtime.state.last_match_phrase = Some(phrase);
+    }
+    if let Some(match_id) = progress.binding_id.or(progress.profile_id) {
+        runtime.state.last_match_binding_id = Some(match_id);
+    }
+    if let Some(speaker_profile_id) = progress.speaker_profile_id {
+        runtime.state.last_speaker_profile_id = Some(speaker_profile_id);
+    }
+    if let Some(speaker_confidence) = progress.speaker_confidence {
+        runtime.state.last_speaker_confidence = Some(speaker_confidence);
+    }
+    if let Some(speaker_status) = progress.speaker_status {
+        runtime.state.last_speaker_status = Some(speaker_status);
+    }
+    if let Some(error) = progress.error {
+        runtime.state.last_error = Some(error);
+        runtime.state.last_error_at_ms = Some(now);
+    } else if matches!(
+        status,
+        "capturing" | "captured" | "transcribing" | "recognized" | "no_match"
+    ) {
+        runtime.state.last_error = None;
+        runtime.state.last_error_at_ms = None;
+    }
     json_response(&serde_json::json!({ "listener": runtime.state }))
 }
 
@@ -784,17 +894,34 @@ async fn process_listener_transcript(
     update_listener_state(|state| {
         state.last_transcript = Some(transcript.to_string());
         state.last_transcript_at_ms = Some(now_ms());
+        state.last_match_status = Some("recognized".to_string());
+        state.last_match_binding_id = None;
+        state.last_match_phrase = None;
+        state.last_action_result = None;
+        state.last_action_at_ms = None;
     })
     .await;
     let candidate =
         match load_store().and_then(|store| listener_match_candidate(&store, transcript)) {
             Ok(candidate) => candidate,
-            Err(error) if error == "no_match" || error == "cooldown" => return Ok(()),
+            Err(error) if error == "no_match" || error == "cooldown" => {
+                update_listener_state(|state| {
+                    state.last_match_status = Some(error);
+                })
+                .await;
+                return Ok(());
+            }
             Err(error) => {
                 record_listener_error(&error).await;
                 return Ok(());
             }
         };
+    update_listener_state(|state| {
+        state.last_match_status = Some("phrase_matched".to_string());
+        state.last_match_binding_id = Some(candidate.binding_id.clone());
+        state.last_match_phrase = Some(candidate.phrase.clone());
+    })
+    .await;
     let speaker_confidence =
         if let Some(expected_voiceprint_profile_id) = candidate.voiceprint_profile_id.as_deref() {
             let speaker = match identify_listener_speaker(chunk_path, request) {
@@ -815,6 +942,10 @@ async fn process_listener_transcript(
                 || speaker_profile_id != expected_voiceprint_profile_id
                 || speaker.confidence < candidate.speaker_threshold
             {
+                update_listener_state(|state| {
+                    state.last_match_status = Some("speaker_rejected".to_string());
+                })
+                .await;
                 record_listener_error(&format!(
                     "speaker verification failed: expected {}, got {} at {:.3} ({})",
                     expected_voiceprint_profile_id,
@@ -831,6 +962,7 @@ async fn process_listener_transcript(
                 state.last_speaker_profile_id = None;
                 state.last_speaker_confidence = None;
                 state.last_speaker_status = Some("phrase_only_dry_run".to_string());
+                state.last_match_status = Some("phrase_only_dry_run".to_string());
             })
             .await;
             None
@@ -841,10 +973,27 @@ async fn process_listener_transcript(
     }) {
         Ok(value) => {
             if value["matched"].as_bool().unwrap_or(false) {
+                let action_result =
+                    serde_json::from_value::<VoiceWakeActionResult>(value["action_result"].clone())
+                        .ok();
                 update_listener_state(|state| {
                     state.trigger_count = state.trigger_count.saturating_add(1);
                     state.last_error = None;
                     state.last_error_at_ms = None;
+                    state.last_match_status = action_result
+                        .as_ref()
+                        .map(|result| {
+                            if result.executed {
+                                "executed".to_string()
+                            } else if result.dry_run {
+                                "dry_run_matched".to_string()
+                            } else {
+                                "matched".to_string()
+                            }
+                        })
+                        .or_else(|| Some("matched".to_string()));
+                    state.last_action_result = action_result;
+                    state.last_action_at_ms = Some(now_ms());
                 })
                 .await;
             }
@@ -861,6 +1010,7 @@ async fn process_listener_transcript(
 #[derive(Debug, Clone)]
 struct ListenerMatchCandidate {
     binding_id: String,
+    phrase: String,
     voiceprint_profile_id: Option<String>,
     speaker_threshold: f32,
 }
@@ -899,6 +1049,7 @@ fn listener_match_candidate(
         .map(ToString::to_string);
     Ok(ListenerMatchCandidate {
         binding_id: binding.id.clone(),
+        phrase: binding.phrase.clone(),
         voiceprint_profile_id,
         speaker_threshold: binding.speaker_threshold,
     })
@@ -1089,7 +1240,15 @@ fn execute_action(
             keycode,
             modifiers,
             press_count,
-        } => execute_key_press(key.as_deref(), *keycode, modifiers, *press_count, dry_run),
+            repeat_delay_ms,
+        } => execute_key_press(
+            key.as_deref(),
+            *keycode,
+            modifiers,
+            *press_count,
+            *repeat_delay_ms,
+            dry_run,
+        ),
     }
 }
 
@@ -1098,10 +1257,13 @@ fn execute_key_press(
     keycode: Option<u16>,
     modifiers: &[String],
     press_count: u8,
+    repeat_delay_ms: u64,
     dry_run: bool,
 ) -> Result<VoiceWakeActionResult, String> {
     let press_count = press_count.clamp(1, 8);
-    let script = build_macos_keypress_script(key, keycode, modifiers, press_count)?;
+    let repeat_delay_ms = repeat_delay_ms.min(5_000);
+    let script =
+        build_macos_keypress_script(key, keycode, modifiers, press_count, repeat_delay_ms)?;
     if dry_run {
         return Ok(VoiceWakeActionResult {
             action_type: "key_press".to_string(),
@@ -1143,6 +1305,7 @@ fn build_macos_keypress_script(
     keycode: Option<u16>,
     modifiers: &[String],
     press_count: u8,
+    repeat_delay_ms: u64,
 ) -> Result<String, String> {
     let normalized_modifiers = normalize_modifiers(modifiers)?;
     let using_clause = if normalized_modifiers.is_empty() {
@@ -1170,9 +1333,19 @@ fn build_macos_keypress_script(
     if press_count <= 1 {
         return Ok(format!("tell application \"System Events\" to {action}"));
     }
+    let delay_seconds = format_repeat_delay_seconds(repeat_delay_ms);
     Ok(format!(
-        "tell application \"System Events\" to repeat {press_count} times\n  {action}\nend repeat"
+        "tell application \"System Events\" to repeat with pressIndex from 1 to {press_count}\n  {action}\n  if pressIndex is less than {press_count} then delay {delay_seconds}\nend repeat"
     ))
+}
+
+fn format_repeat_delay_seconds(delay_ms: u64) -> String {
+    let seconds = delay_ms as f64 / 1000.0;
+    let formatted = format!("{seconds:.3}");
+    formatted
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
 }
 
 fn named_keycode(key: &str) -> Option<u16> {
@@ -1185,6 +1358,10 @@ fn named_keycode(key: &str) -> Option<u16> {
         "right" => Some(124),
         "down" => Some(125),
         "up" => Some(126),
+        "cmd" | "command" | "meta" => Some(55),
+        "shift" => Some(56),
+        "option" | "alt" => Some(58),
+        "ctrl" | "control" => Some(59),
         _ => None,
     }
 }
@@ -1212,6 +1389,7 @@ fn validate_key_action(action: &VoiceWakeAction) -> Result<(), String> {
             keycode,
             modifiers,
             press_count,
+            repeat_delay_ms,
         } => {
             if key.as_deref().unwrap_or("").trim().is_empty() && keycode.is_none() {
                 return Err("key_press action requires key or keycode".to_string());
@@ -1219,8 +1397,17 @@ fn validate_key_action(action: &VoiceWakeAction) -> Result<(), String> {
             if *press_count == 0 || *press_count > 8 {
                 return Err("key_press press_count must be between 1 and 8".to_string());
             }
-            build_macos_keypress_script(key.as_deref(), *keycode, modifiers, *press_count)
-                .map(|_| ())
+            if *repeat_delay_ms > 5_000 {
+                return Err("key_press repeat_delay_ms must be between 0 and 5000".to_string());
+            }
+            build_macos_keypress_script(
+                key.as_deref(),
+                *keycode,
+                modifiers,
+                *press_count,
+                *repeat_delay_ms,
+            )
+            .map(|_| ())
         }
     }
 }
@@ -1457,6 +1644,10 @@ fn default_press_count() -> u8 {
     1
 }
 
+fn default_repeat_delay_ms() -> u64 {
+    100
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1494,11 +1685,31 @@ mod tests {
             None,
             &["cmd".to_string(), "shift".to_string()],
             1,
+            100,
         )
         .expect("script");
         assert_eq!(
             script,
             "tell application \"System Events\" to key code 49 using {command down, shift down}"
+        );
+    }
+
+    #[test]
+    fn builds_double_keypress_with_100ms_delay() {
+        let script = build_macos_keypress_script(Some("space"), None, &[], 2, 100).expect("script");
+        assert_eq!(
+            script,
+            "tell application \"System Events\" to repeat with pressIndex from 1 to 2\n  key code 49\n  if pressIndex is less than 2 then delay 0.1\nend repeat"
+        );
+    }
+
+    #[test]
+    fn builds_double_option_keypress_with_100ms_delay() {
+        let script =
+            build_macos_keypress_script(Some("option"), None, &[], 2, 100).expect("script");
+        assert_eq!(
+            script,
+            "tell application \"System Events\" to repeat with pressIndex from 1 to 2\n  key code 58\n  if pressIndex is less than 2 then delay 0.1\nend repeat"
         );
     }
 
@@ -1509,6 +1720,7 @@ mod tests {
             keycode: None,
             modifiers: Vec::new(),
             press_count: 1,
+            repeat_delay_ms: 100,
         })
         .unwrap_err();
         assert!(error.contains("unsupported key"));
@@ -1541,6 +1753,7 @@ mod tests {
                     keycode: None,
                     modifiers: Vec::new(),
                     press_count: 1,
+                    repeat_delay_ms: 100,
                 },
                 created_at_ms: now,
                 updated_at_ms: now,
@@ -1589,6 +1802,7 @@ mod tests {
                     keycode: None,
                     modifiers: Vec::new(),
                     press_count: 1,
+                    repeat_delay_ms: 100,
                 },
                 created_at_ms: now,
                 updated_at_ms: now,
@@ -1648,6 +1862,7 @@ mod tests {
                     keycode: None,
                     modifiers: Vec::new(),
                     press_count: 1,
+                    repeat_delay_ms: 100,
                 },
                 created_at_ms: now,
                 updated_at_ms: now,
@@ -1685,6 +1900,7 @@ mod tests {
                     keycode: None,
                     modifiers: Vec::new(),
                     press_count: 1,
+                    repeat_delay_ms: 100,
                 },
                 created_at_ms: now,
                 updated_at_ms: now,

@@ -271,9 +271,9 @@
 操作步骤：
 
 1. 启动临时服务，并在 WebUI 手动启动 `Qwen3-ASR-0.6B`。
-2. 执行：
+2. Workflows / Directory Task owner 再启动同模型服务：
    ```bash
-   source ~/.zshrc && curl -fsS "http://127.0.0.1:19010/_bifrost/api/asr/service/start?model=Qwen3-ASR-0.6B&owner_module=voice_wake_listener"
+   source ~/.zshrc && curl -fsS "http://127.0.0.1:19010/_bifrost/api/asr/service/start?model=Qwen3-ASR-0.6B&owner_module=directory_task&owner_id=manual-share-test"
    ```
 3. 执行：
    ```bash
@@ -281,7 +281,7 @@
    ```
 4. 执行：
    ```bash
-   source ~/.zshrc && curl -fsS "http://127.0.0.1:19010/_bifrost/api/asr/service/stop?model=Qwen3-ASR-0.6B&owner_module=voice_wake_listener"
+   source ~/.zshrc && curl -fsS "http://127.0.0.1:19010/_bifrost/api/asr/service/stop?model=Qwen3-ASR-0.6B&owner_module=directory_task&owner_id=manual-share-test"
    ```
 
 预期结果：
@@ -289,6 +289,7 @@
 - 第 2 步返回 `ready: true`，不会因为 active owner 是 `speech_workbench` 而返回 409。
 - 第 3 步返回默认 `Qwen3-ASR-0.6B`，不会默认要求 `Qwen3-ASR-1.7B`。
 - 第 4 步可以停止同一个共享 ASR runtime，不会因为 owner 不一致留下 stale state。
+- wake listener 不再作为 ASR service owner；它使用 sherpa-onnx KWS，不持有 Qwen3-ASR runtime。
 
 ### TC-ASPO-15：Directory Task 新建默认开启说话人和声纹匹配
 
@@ -392,11 +393,11 @@
 - 导出的 `live-realtime.srt`、`live-realtime.txt`、`live-realtime.timeline.json` 包含同一组稳定 utterance。
 - 如果多人重叠同时说话，实时 timeline 可以只保留单主说话人；最终高质量多人字幕仍由离线字幕 pipeline 产出。
 
-### TC-ASPO-19：WebUI Work Actions Start Listening 不因 KWS 资产缺失报 400
+### TC-ASPO-19：WebUI Work Actions Start Listening 自动初始化轻量 KWS，禁止 Qwen fallback
 
 操作步骤：
 
-1. 使用已有真实数据目录启动服务，确保 `/_bifrost/api/voice/wake/kws/status` 返回 `ready=false`：
+1. 使用已有真实数据目录启动服务，查询 `/_bifrost/api/voice/wake/kws/status`：
    ```bash
    source ~/.zshrc && curl -sS http://127.0.0.1:19010/_bifrost/api/voice/wake/kws/status
    ```
@@ -410,11 +411,91 @@
 
 预期结果：
 
-- 点击 `Start Listening` 不返回 400，页面不会卡在 `Starting voice wake listener...`。
-- KWS 资产缺失时，listener 返回 `running=true` 且 `engine=backend_asr_phrase_match`。
-- listener 状态包含 `last_speaker_status=kws_missing_fallback_backend_asr_phrase_match`，用于解释当前不是 KWS 轻量路径。
+- 点击 `Start Listening` 不会启动 Qwen3-ASR，也不会 fallback 到 `backend_asr_phrase_match`。
+- 任何传入 `engine=backend_asr_phrase_match` 的 listener 启动请求都会返回 400，提示只能使用 `lightweight_kws_listener`。
+- 如果 KWS 资产缺失，后端自动初始化 `sherpa-onnx-kws-wenetspeech-3.3m` 资产；初始化失败时明确显示 KWS 初始化错误。
+- listener 返回 `running=true` 时，`engine=lightweight_kws_listener`，`/_bifrost/api/voice/wake/status` 的 `requires_qwen_by_default=false` 且 `fallback=null`。
 - 页面显示 `Backend Listening`，点击 `Stop Listening` 后回到 `Idle`。
-- KWS 资产初始化完成后，同一按钮仍优先使用 `lightweight_kws_listener`。
+- `ps` 进程列表中允许出现 `ai voice wake worker` 和 `ffmpeg -f avfoundation`，不应因 wake listener 出现 `qwen3_asr_rs/asr-server`。
+
+### TC-ASPO-20：WebUI Work Actions 快捷键录入支持单键、组合键和双击
+
+操作步骤：
+
+1. 使用临时数据目录启动真实 Bifrost 服务：
+   ```bash
+   source ~/.zshrc && BIFROST_DATA_DIR=/Users/eden/work/github/bifrost-asr-pipeline-orchestrator/.bifrost-asr-manual-test SKIP_FRONTEND_BUILD=1 RUST_LOG=bifrost_admin::voice=info,bifrost_admin::handlers::voice::wake=info,bifrost_admin::asr_jobs=info,info cargo run --bin bifrost -- start -p 19010 --unsafe-ssl --skip-cert-check --no-system-proxy
+   ```
+2. 打开 WebUI：
+   ```text
+   http://127.0.0.1:19010/_bifrost/ai?aiSection=tools-asr
+   ```
+3. 在 `Voice Wake Actions -> Global shortcut` 输入框内单独按 `cmd`、`ctrl`、`option` 或 `shift`。
+4. 再按一个普通字母键，例如 `a`。
+5. 通过 `Optional modifiers` 手动选择或取消修饰键，避免触发系统全局热键。
+6. 清空其他 modifiers 后单独按 `option`，打开 `Double press` 开关并保存命令。
+
+预期结果：
+
+- 单独按修饰键不会弹出 `Press a letter, space, return, tab, escape, or arrow key.` 错误。
+- 快捷键可以是无修饰键的单键、`cmd+a` 这类组合键，也可以是 `option` 这种 modifier 本身作为主键。
+- `Optional modifiers` 支持逐个手动录入/取消修饰键，不需要直接按系统全局热键组合。
+- 打开 `Double press` 后输入框展示 `option x2`，保存的 action 包含 `key=option`、空 `modifiers`、`press_count=2` 和 `repeat_delay_ms=100`。
+- 后端生成的 macOS 执行脚本包含 `key code 58`，并在两次按键之间包含 `delay 0.1`。
+
+### TC-ASPO-21：Listen 模式展示真实识别、命中和执行结果，不使用 mock 执行动作
+
+操作步骤：
+
+1. 使用同一个真实服务和数据目录打开 `Voice Wake Actions`。
+2. 点击 `Start Listening`，确认页面进入 `Backend Listening`。
+3. 查询 listener 状态，确认后台 worker 真实读取系统麦克风，而不是 WebUI 录音：
+   ```bash
+   source ~/.zshrc && curl -sS http://127.0.0.1:19010/_bifrost/api/voice/wake/status
+   ```
+4. 对着当前默认麦克风说一句话，刷新页面或等待短轮询。
+5. 不传 `source=mock`，通过真实 API dry-run 触发一个已保存的唤醒命令，用于验证事件落盘但不执行真实按键：
+   ```bash
+   source ~/.zshrc && curl -sS -X POST http://127.0.0.1:19010/_bifrost/api/voice/wake/trigger \
+     -H 'content-type: application/json' \
+     -d '{"phrase":"哈喽哈喽。","profile_id":"wake_profile_104a7db794d54dee9b6f6ec629ab5fab","dry_run":true}'
+   ```
+6. 打开 `/_bifrost/api/voice/wake/events` 或刷新 WebUI。
+7. 点击 `Stop Listening`。
+
+预期结果：
+
+- `Start Listening` 请求体不使用 `source=mock`，真实 listener 状态返回 `running=true`。
+- listener 状态包含真实后台 `worker_pid`，并且默认 `device=':0'`，不自动替用户切换到其他麦克风；`device_label` 展示 avfoundation 第 0 个音频输入名称，方便确认外接麦克风是否被系统排在第 0 个。
+- WebUI Listen 状态区展示 `Continuously listening / Checking the latest wake window / Input: <device> · PID <pid>`，用户能看见后台持续采集、滑动 KWS 窗口和识别进度。
+- 后台 worker 持续读取麦克风，识别时取最近最多 4 秒滑动 wake window；说话跨窗口边界时仍能在后续重叠窗口内识别，不要求用户停顿分段。
+- 绑定 voiceprint 的命令只用最新 wake window 的短声纹片段做 speaker verification；本人声纹通过阈值才执行，其他人说出同一唤醒词必须显示 `Voice rejected` 或 `speaker_rejected`，不能触发真实按键。
+- API dry-run 结果显示 `matched=true`，`action_result.executed=false`，message 为 `dry-run: key press was matched but not executed`。
+- WebUI 事件表展示命中的 phrase、快捷键、`Matched` 结果和后端返回的 action message。
+- Listen 状态区展示 `Recognized` / `Phrase matched` / `Executed` / `Dry-run matched` / `No match` / `Voice rejected` 等真实状态，不再让用户只能猜后台是否命中。
+- 只有 `dry_run=false` 且通过声纹/置信度门禁时，后端才会执行真实按键；测试期间不使用 mock 执行动作。
+
+### TC-ASPO-22：Work Actions 录入唤醒词不调用 ASR，保存后走 sherpa-onnx KWS keywords
+
+操作步骤：
+
+1. 使用同一个真实服务和数据目录打开 `Voice Wake Actions`。
+2. 在 `Wake phrase` 输入框手动输入 `哈喽哈喽`。
+3. 点击 `Record Wake Audio`，说出该唤醒词后点击 `Stop Recording`。
+4. 点击 `Save`。
+5. 查询后台状态和进程：
+   ```bash
+   source ~/.zshrc && curl -sS http://127.0.0.1:19010/_bifrost/api/voice/wake/status
+   source ~/.zshrc && ps -axo pid,command | rg 'qwen3_asr_rs|asr-server|ai voice wake worker' || true
+   ```
+6. 点击 `Start Listening`，再查询 `/_bifrost/api/voice/wake/kws/status`。
+
+预期结果：
+
+- `Wake phrase` 输入框可编辑；录音停止后只显示样本已捕获，不会出现 `Recognizing`，也不会自动启动 ASR service。
+- 保存后的 binding phrase 等于用户手动输入的 `哈喽哈喽`。
+- 录入、保存和启动监听过程中不出现 `qwen3_asr_rs/asr-server` 进程；只有 listener 启动后允许出现 `ai voice wake worker` 和 `ffmpeg -f avfoundation`。
+- `/_bifrost/api/voice/wake/kws/status` 返回 `engine=sherpa-onnx`，listener 只使用 `lightweight_kws_listener`。
 
 ## 清理步骤
 
@@ -436,9 +517,12 @@
 | 2026-05-28 | TC-ASPO-11 | 已由 TC-ASPO-09 脚本覆盖真实服务 `/api/asr/transcribe-ws`，返回 410 且响应包含 `/api/voice/listen-ws` | 通过 |
 | 2026-05-28 | TC-ASPO-12 | 已由 TC-ASPO-09 脚本覆盖真实 Directory Task artifacts 和 Daily Agent 配置接口，确认单文件 Offline Pipeline 未覆盖后处理入口 | 通过 |
 | 2026-05-28 | TC-ASPO-13 | 已启动临时 Bifrost 服务并用 Playwright 打开 `/_bifrost/`，验证管理端可加载；同时通过浏览器请求 `/api/speech/pipelines/status` 确认 WebUI 后端使用的 realtime/offline/scheduled profiles 可用。WebUI 构建由本地/CI build 覆盖 | 通过 |
-| 2026-05-28 | TC-ASPO-14 | 已在 `http://127.0.0.1:19010` 启动真实服务，验证 offline decision 默认 `Qwen3-ASR-0.6B`；`speech_workbench` 启动 0.6B 后 `voice_wake_listener` 再启动返回 200 并复用同一 `server_url`；通过 `voice_wake_listener` 停止后可重新启动，未残留 owner stale state | 通过 |
+| 2026-05-28 | TC-ASPO-14 | 已在 `http://127.0.0.1:19010` 启动真实服务，验证 offline decision 默认 `Qwen3-ASR-0.6B`；`speech_workbench` 启动 0.6B 后 `directory_task` owner 再启动返回 200 并复用同一 `server_url`；通过 `directory_task` owner 停止后可重新启动，未残留 owner stale state。wake listener 已改为 sherpa-onnx KWS，不再持有 Qwen3-ASR owner | 通过 |
 | 2026-05-28 | TC-ASPO-15 | 已在 `http://127.0.0.1:19010` 使用真实服务验证：API 只传 `name/audio_dir` 创建任务返回 `Qwen3-ASR-0.6B`、diarization enabled、voiceprint matching enabled；`cargo run --bin bifrost -- -p 19010 ai asr task create --json` 返回同样默认；Playwright 打开 WebUI 新建任务弹窗，确认 `Qwen3-ASR-0.6B` 可见且 4 个开关中包含 Speaker Diarization / Voiceprint Matching 默认打开 | 通过 |
 | 2026-05-28 | TC-ASPO-16 | 已用真实 `TX01_MIC012_20260520_102542_orig.wav` 先验证旧产物为 30 个 diarization segment 被拆成 20 个 speaker；修复后在隔离任务中重跑同一音频，任务完成且 `speaker_count=4`；随后将原 `demo` 任务的同一文件重跑，原 URL 对应文件从 `speaker_count=20` 更新为 `speaker_count=4`，timeline speakers 为 `用户A/B/C/D` | 通过 |
 | 2026-05-28 | TC-ASPO-17 | 已用真实 `TX01_MIC012_20260520_102542_orig.wav`、真实 sherpa diarization、真实 Qwen3-ASR-0.6B fork-per-chunk、真实已注册 `eden` 声纹重跑；修复后任务 `36c10c9a62654d23bd8414aaa765c05b` 完成，短碎片 `speaker_02/speaker_03` 被合并，`speaker_count=2`，主要角色 `speaker_00` 映射为 `eden` 且 `confidence=0.5412222`，另一个角色保留 `用户B` 并记录 eden candidate `0.49354425` | 通过 |
 | 2026-05-28 | TC-ASPO-18 | 已执行 `BIFROST_ASR_PIPELINE_E2E_ONLINE=0 BIFROST_ASR_PIPELINE_E2E_PORT=18998 bash e2e-tests/tests/test_asr_speech_pipeline_orchestrator_real_service.sh`，真实启动服务并通过 `/api/voice/listen-ws` WebSocket 发送 16k PCM，验证 stable realtime event 包含 `window_start_ms/window_end_ms/speaker/speaker_display_name/delta`；WebUI 多人现场体验仍需用户与多人录音环境继续复测 | 自动化链路通过，现场多人待复测 |
-| 2026-05-28 | TC-ASPO-19 | 已在 `http://127.0.0.1:19010` 重启真实服务；先用 curl 验证 `POST /_bifrost/api/voice/wake/listener/start` 返回 200、`running=true`、`engine=backend_asr_phrase_match`、`last_speaker_status=kws_missing_fallback_backend_asr_phrase_match`；再用浏览器真实点击 WebUI `Voice Wake Actions -> Start Listening`，页面显示 `Backend Listening`，点击 `Stop Listening` 后回到 `Idle` | 通过 |
+| 2026-05-28 | TC-ASPO-19 | 已在 `http://127.0.0.1:19010` 重启最新真实服务；`/_bifrost/api/voice/wake/kws/status` 初始 `ready=false/missing=4`，点击/调用 `Start Listening` 自动初始化 sherpa-onnx KWS 资产；启动完成后 `kws_ready=true`、`engine=lightweight_kws_listener`、`fallback=null`、`requires_qwen_by_default=false`，进程列表只有 `ai voice wake worker` 和 `ffmpeg -f avfoundation -i :0`，没有 `qwen3_asr_rs/asr-server` | 通过 |
+| 2026-05-28 | TC-ASPO-20 | 已在真实 `http://127.0.0.1:19010` 服务上验证：快捷键输入框单独按 modifier 不报 warning；`option` 可作为主键保存；打开 `Double press` 后后端单测确认脚本为 `key code 58` 且包含 `delay 0.1` | 通过 |
+| 2026-05-28 | TC-ASPO-21 | 已在真实服务上验证：后台 listener 使用 sherpa-onnx `KeywordSpotter` 流式检测，持续 `ffmpeg -f avfoundation -i :0` 采集外接 `Wireless Mic Rx`，状态显示 `device=':0'`、`device_label=Wireless Mic Rx`、`last_match_status=no_match`、无错误；不再因为 wake listener 拉起 Qwen3-ASR-0.6B | 通过 |
+| 2026-05-28 | TC-ASPO-22 | 已在真实服务和 WebUI 验证：`Wake phrase` 输入框 `readOnly=false`，可手动填入 `哈喽哈喽`；点击 Save 后 binding phrase/normalized_phrase 均保存为手输文本；页面无 `Recognizing` 状态，录入和保存过程中进程列表没有 `qwen3_asr_rs/asr-server`；`engine=backend_asr_phrase_match` 启动 listener 返回 400；启动真实 mic listener 后 status 为 `engine=lightweight_kws_listener`、`kws.engine=sherpa-onnx`、`requires_qwen_by_default=false`，只出现 wake worker/ffmpeg，不出现 Qwen ASR | 通过 |

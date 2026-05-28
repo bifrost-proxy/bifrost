@@ -72,6 +72,76 @@ pub struct WakeKwsDetection {
     pub json: String,
 }
 
+#[cfg(all(feature = "wake-sherpa", target_os = "macos", target_arch = "aarch64"))]
+pub struct StreamingWakeKwsDetector {
+    kws: sherpa_onnx::KeywordSpotter,
+    stream: sherpa_onnx::OnlineStream,
+}
+
+#[cfg(all(feature = "wake-sherpa", target_os = "macos", target_arch = "aarch64"))]
+impl StreamingWakeKwsDetector {
+    pub fn new(
+        pack: &SherpaKwsModelPack,
+        keywords_buf: &str,
+        keywords_score: f32,
+        keywords_threshold: f32,
+    ) -> Result<Self, String> {
+        let kws = create_keyword_spotter(pack, keywords_buf, keywords_score, keywords_threshold)?;
+        let stream = kws.create_stream();
+        Ok(Self { kws, stream })
+    }
+
+    pub fn accept_pcm16le(&mut self, pcm16le: &[u8], sample_rate: i32) -> Option<WakeKwsDetection> {
+        if pcm16le.len() < 2 {
+            return None;
+        }
+        let samples = pcm16le
+            .chunks_exact(2)
+            .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]) as f32 / i16::MAX as f32)
+            .collect::<Vec<_>>();
+        self.stream.accept_waveform(sample_rate, &samples);
+        while self.kws.is_ready(&self.stream) {
+            self.kws.decode(&self.stream);
+        }
+        let result = self.kws.get_result(&self.stream)?;
+        if result.keyword.trim().is_empty() {
+            return None;
+        }
+        self.kws.reset(&self.stream);
+        Some(WakeKwsDetection {
+            keyword: normalize_wake_phrase(&result.keyword),
+            start_time: result.start_time,
+            json: result.json,
+        })
+    }
+}
+
+#[cfg(not(all(feature = "wake-sherpa", target_os = "macos", target_arch = "aarch64")))]
+pub struct StreamingWakeKwsDetector;
+
+#[cfg(not(all(feature = "wake-sherpa", target_os = "macos", target_arch = "aarch64")))]
+impl StreamingWakeKwsDetector {
+    pub fn new(
+        _pack: &SherpaKwsModelPack,
+        _keywords_buf: &str,
+        _keywords_score: f32,
+        _keywords_threshold: f32,
+    ) -> Result<Self, String> {
+        Err(
+            "wake_sherpa_unsupported_platform: lightweight KWS requires macOS Apple Silicon"
+                .to_string(),
+        )
+    }
+
+    pub fn accept_pcm16le(
+        &mut self,
+        _pcm16le: &[u8],
+        _sample_rate: i32,
+    ) -> Option<WakeKwsDetection> {
+        None
+    }
+}
+
 pub fn normalize_wake_phrase(phrase: &str) -> String {
     phrase
         .to_lowercase()
@@ -86,8 +156,47 @@ pub fn wake_phrase_matches(normalized_transcript: &str, normalized_binding: &str
         .any(|transcript| {
             wake_phrase_variants(normalized_binding)
                 .iter()
-                .any(|binding| binding.chars().count() >= 2 && transcript.contains(binding))
+                .any(|binding| wake_phrase_variant_matches(transcript, binding))
         })
+}
+
+fn wake_phrase_variant_matches(transcript: &str, binding: &str) -> bool {
+    let binding_len = binding.chars().count();
+    if binding_len < 2 {
+        return false;
+    }
+    if transcript.contains(binding) {
+        return true;
+    }
+    let transcript_len = transcript.chars().count();
+    if binding_len <= 3 || transcript_len < binding_len {
+        return false;
+    }
+    let common = longest_common_subsequence_len(transcript, binding);
+    let required = binding_len.saturating_sub(1).max(2);
+    common >= required
+}
+
+fn longest_common_subsequence_len(left: &str, right: &str) -> usize {
+    let left: Vec<char> = left.chars().collect();
+    let right: Vec<char> = right.chars().collect();
+    if left.is_empty() || right.is_empty() {
+        return 0;
+    }
+    let mut previous = vec![0_usize; right.len() + 1];
+    let mut current = vec![0_usize; right.len() + 1];
+    for left_ch in &left {
+        for (index, right_ch) in right.iter().enumerate() {
+            current[index + 1] = if left_ch == right_ch {
+                previous[index] + 1
+            } else {
+                current[index].max(previous[index + 1])
+            };
+        }
+        std::mem::swap(&mut previous, &mut current);
+        current.fill(0);
+    }
+    previous[right.len()]
 }
 
 pub fn keywords_buf_from_phrases(phrases: &[String]) -> Result<String, String> {
@@ -139,7 +248,7 @@ pub fn detect_sherpa_kws_in_wav(
     keywords_score: f32,
     keywords_threshold: f32,
 ) -> Result<Option<WakeKwsDetection>, String> {
-    use sherpa_onnx::{KeywordSpotter, KeywordSpotterConfig, Wave};
+    use sherpa_onnx::Wave;
 
     if !pack.is_ready() {
         return Err(format!(
@@ -153,18 +262,7 @@ pub fn detect_sherpa_kws_in_wav(
     }
     let wav = Wave::read(&wav_path.display().to_string())
         .ok_or_else(|| format!("read wake KWS wav failed: {}", wav_path.display()))?;
-    let mut config = KeywordSpotterConfig::default();
-    config.model_config.transducer.encoder = Some(pack.encoder.display().to_string());
-    config.model_config.transducer.decoder = Some(pack.decoder.display().to_string());
-    config.model_config.transducer.joiner = Some(pack.joiner.display().to_string());
-    config.model_config.tokens = Some(pack.tokens.display().to_string());
-    config.model_config.num_threads = 1;
-    config.model_config.provider = Some("cpu".to_string());
-    config.keywords_score = keywords_score;
-    config.keywords_threshold = keywords_threshold;
-    config.keywords_buf = Some(keywords_buf.to_string());
-    let kws = KeywordSpotter::create(&config)
-        .ok_or_else(|| "create sherpa-onnx keyword spotter failed".to_string())?;
+    let kws = create_keyword_spotter(pack, keywords_buf, keywords_score, keywords_threshold)?;
     let stream = kws.create_stream();
     stream.accept_waveform(wav.sample_rate(), wav.samples());
     stream.input_finished();
@@ -182,6 +280,39 @@ pub fn detect_sherpa_kws_in_wav(
         start_time: result.start_time,
         json: result.json,
     }))
+}
+
+#[cfg(all(feature = "wake-sherpa", target_os = "macos", target_arch = "aarch64"))]
+fn create_keyword_spotter(
+    pack: &SherpaKwsModelPack,
+    keywords_buf: &str,
+    keywords_score: f32,
+    keywords_threshold: f32,
+) -> Result<sherpa_onnx::KeywordSpotter, String> {
+    use sherpa_onnx::{KeywordSpotter, KeywordSpotterConfig};
+
+    if !pack.is_ready() {
+        return Err(format!(
+            "voice_wake_kws_missing_assets: missing {}",
+            pack.missing_files()
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    let mut config = KeywordSpotterConfig::default();
+    config.model_config.transducer.encoder = Some(pack.encoder.display().to_string());
+    config.model_config.transducer.decoder = Some(pack.decoder.display().to_string());
+    config.model_config.transducer.joiner = Some(pack.joiner.display().to_string());
+    config.model_config.tokens = Some(pack.tokens.display().to_string());
+    config.model_config.num_threads = 1;
+    config.model_config.provider = Some("cpu".to_string());
+    config.keywords_score = keywords_score;
+    config.keywords_threshold = keywords_threshold;
+    config.keywords_buf = Some(keywords_buf.to_string());
+    KeywordSpotter::create(&config)
+        .ok_or_else(|| "create sherpa-onnx keyword spotter failed".to_string())
 }
 
 #[cfg(not(all(feature = "wake-sherpa", target_os = "macos", target_arch = "aarch64")))]
@@ -283,6 +414,26 @@ mod tests {
         assert!(!wake_phrase_matches(
             &normalize_wake_phrase("打开"),
             &normalize_wake_phrase("打开录音")
+        ));
+    }
+
+    #[test]
+    fn phrase_match_finds_wake_word_inside_continuous_speech() {
+        assert!(wake_phrase_matches(
+            &normalize_wake_phrase("我现在说哈喽然后继续讲后面的内容"),
+            &normalize_wake_phrase("哈喽")
+        ));
+    }
+
+    #[test]
+    fn phrase_match_allows_one_missed_character_for_long_wake_phrase() {
+        assert!(wake_phrase_matches(
+            &normalize_wake_phrase("你好比霜帮我开始"),
+            &normalize_wake_phrase("你好冰霜")
+        ));
+        assert!(!wake_phrase_matches(
+            &normalize_wake_phrase("你好帮我开始"),
+            &normalize_wake_phrase("你好冰霜")
         ));
     }
 

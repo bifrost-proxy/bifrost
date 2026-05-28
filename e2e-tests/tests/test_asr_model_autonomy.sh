@@ -143,7 +143,7 @@ assert task["language"] == "english", task
 assert task["runtime_strategy"] == "reuse_per_file", task
 PY
 
-echo "[asr-model-autonomy-e2e] seed busy speech_workbench service and verify status owner isolation"
+echo "[asr-model-autonomy-e2e] seed speech_workbench service and verify same-model runtime sharing"
 BUSY_PORT="$(python3 - <<'PY'
 import socket
 
@@ -212,36 +212,27 @@ assert status.get("owner_id"), status
 assert status["model"] == "Qwen3-ASR-1.7B", status
 PY
 set +e
-CONFLICT_BODY="$(curl -sS -w '\n%{http_code}' -X POST "http://127.0.0.1:${ADMIN_PORT}/_bifrost/api/asr/service/start?model=Qwen3-ASR-1.7B&owner_module=directory_task&owner_id=${TASK_ID}")"
-CONFLICT_EXIT=$?
+SHARED_BODY="$(curl -sS -w '\n%{http_code}' -X POST "http://127.0.0.1:${ADMIN_PORT}/_bifrost/api/asr/service/start?model=Qwen3-ASR-1.7B&owner_module=directory_task&owner_id=${TASK_ID}")"
+SHARED_EXIT=$?
 set -e
-if [[ "$CONFLICT_EXIT" -ne 0 ]]; then
-  fail "busy conflict request failed"
+if [[ "$SHARED_EXIT" -ne 0 ]]; then
+  fail "shared runtime request failed"
 fi
-CONFLICT_STATUS="${CONFLICT_BODY##*$'\n'}"
-CONFLICT_JSON="${CONFLICT_BODY%$'\n'*}"
-if [[ "$CONFLICT_STATUS" == "409" ]]; then
-  python3 - "$CONFLICT_JSON" <<'PY'
-import json
-import sys
-body = json.loads(sys.argv[1])
-assert body["ready"] is False, body
-assert body["message"] == "Qwen3-ASR service is busy.", body
-assert "active owner=speech_workbench" in body.get("detail", ""), body
-PY
-else
-  python3 - "$CONFLICT_STATUS" "$CONFLICT_JSON" <<'PY'
+SHARED_STATUS="${SHARED_BODY##*$'\n'}"
+SHARED_JSON="${SHARED_BODY%$'\n'*}"
+python3 - "$SHARED_STATUS" "$SHARED_JSON" "$BUSY_PORT" <<'PY'
 import json
 import sys
 status = sys.argv[1]
 body = json.loads(sys.argv[2])
+busy_port = sys.argv[3]
 assert status == "200", (status, body)
-assert body["ready"] is False, body
-assert "not supported" in body.get("message", "").lower(), body
-assert "linux" in body.get("detail", "").lower(), body
+assert body["ready"] is True, body
+assert body["managed"] is True, body
+assert body["server_url"] == f"http://127.0.0.1:{busy_port}", body
+message = body.get("message", "")
+assert "already running" in message.lower() or "reusing" in message.lower(), body
 PY
-  echo "[asr-model-autonomy-e2e] platform unsupported; busy service start conflict check skipped"
-fi
 kill "$BUSY_PID" >/dev/null 2>&1 || true
 wait "$BUSY_PID" >/dev/null 2>&1 || true
 

@@ -576,8 +576,6 @@ fn handle_wake_command(client: &AsrTaskClient, action: AiVoiceWakeCommands) -> R
             profile_id,
             binding_id,
             phrase,
-            model,
-            language,
             key,
             modifiers,
             press_count,
@@ -593,8 +591,6 @@ fn handle_wake_command(client: &AsrTaskClient, action: AiVoiceWakeCommands) -> R
                 profile_id,
                 binding_id,
                 phrase,
-                model: &model,
-                language: &language,
                 key,
                 modifiers,
                 press_count,
@@ -704,9 +700,7 @@ struct WakeBindAudioArgs<'a> {
     name: Option<&'a str>,
     profile_id: Option<String>,
     binding_id: Option<String>,
-    phrase: Option<String>,
-    model: &'a str,
-    language: &'a str,
+    phrase: String,
     key: Option<String>,
     modifiers: Vec<String>,
     press_count: u8,
@@ -725,18 +719,11 @@ fn handle_wake_bind_audio_command(
             args.audio.display()
         )));
     }
-    let phrase = match args.phrase {
-        Some(phrase) if !phrase.trim().is_empty() => phrase.trim().to_string(),
-        Some(_) => {
-            return Err(BifrostError::Config(
-                "recognized phrase override cannot be empty".to_string(),
-            ))
-        }
-        None => recognize_wake_phrase_from_audio(client, args.audio, args.model, args.language)?,
-    };
+    let phrase = args.phrase.trim().to_string();
     if phrase.trim().is_empty() {
         return Err(BifrostError::Config(
-            "ASR did not recognize a wake phrase from the audio sample".to_string(),
+            "wake phrase is required; wake command enrollment does not transcribe audio samples"
+                .to_string(),
         ));
     }
     let (key, modifiers) = match args.key {
@@ -783,61 +770,6 @@ fn handle_wake_bind_audio_command(
     }
 }
 
-pub(super) fn recognize_wake_phrase_from_audio(
-    client: &AsrTaskClient,
-    audio: &Path,
-    model: &str,
-    language: &str,
-) -> Result<String> {
-    let start_path = format!(
-        "/asr/service/start?model={}&language={}&owner_module=voice_wake_cli",
-        url_encode(model),
-        url_encode(language)
-    );
-    let service = client.post_json(&start_path)?;
-    if !service["ready"].as_bool().unwrap_or(false) {
-        return Err(BifrostError::Config(
-            service["detail"]
-                .as_str()
-                .or_else(|| service["message"].as_str())
-                .unwrap_or("ASR service is not ready")
-                .to_string(),
-        ));
-    }
-    let file_name = audio
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("wake-audio");
-    let bytes = fs::read(audio).map_err(|error| {
-        BifrostError::Io(io::Error::other(format!(
-            "read wake audio {}: {error}",
-            audio.display()
-        )))
-    })?;
-    let (content_type, body) = build_multipart_upload(file_name, &bytes);
-    let url = format!(
-        "{}/asr/transcribe-stream?model={}&language={}&owner_module=voice_wake_cli",
-        client.base_url,
-        url_encode(model),
-        url_encode(language)
-    );
-    let response = client
-        .agent
-        .post(&url)
-        .set("content-type", &content_type)
-        .set("accept", "text/event-stream")
-        .send_bytes(&body)
-        .map_err(|error| voice_wake_api_error("POST", &url, error))?;
-    let stream = response.into_string().map_err(|error| {
-        BifrostError::Io(io::Error::other(format!(
-            "read ASR wake audio response from {url}: {error}"
-        )))
-    })?;
-    extract_wake_phrase_from_sse(&stream).ok_or_else(|| {
-        BifrostError::Config("ASR response did not include recognized wake text".to_string())
-    })
-}
-
 struct RawModeGuard;
 
 impl Drop for RawModeGuard {
@@ -870,131 +802,6 @@ fn capture_shortcut_from_terminal() -> Result<(String, Vec<String>)> {
         eprintln!("{}", format_shortcut(key, modifiers));
     }
     result
-}
-
-fn build_multipart_upload(file_name: &str, bytes: &[u8]) -> (String, Vec<u8>) {
-    let boundary = format!("bifrost-wake-audio-{}", uuid::Uuid::new_v4().as_simple());
-    let mut body = Vec::new();
-    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
-    body.extend_from_slice(
-        format!(
-            "Content-Disposition: form-data; name=\"file\"; filename=\"{}\"\r\n",
-            sanitize_multipart_filename(file_name)
-        )
-        .as_bytes(),
-    );
-    body.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
-    body.extend_from_slice(bytes);
-    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
-    (format!("multipart/form-data; boundary={boundary}"), body)
-}
-
-fn sanitize_multipart_filename(file_name: &str) -> String {
-    file_name
-        .chars()
-        .map(|ch| match ch {
-            '"' | '\r' | '\n' => '_',
-            other => other,
-        })
-        .collect()
-}
-
-fn url_encode(value: &str) -> String {
-    urlencoding::encode(value).into_owned()
-}
-
-fn voice_wake_api_error(method: &str, url: &str, error: ureq::Error) -> BifrostError {
-    match error {
-        ureq::Error::Status(status, response) => {
-            let body = response.into_string().unwrap_or_default();
-            BifrostError::Config(format!(
-                "{method} {url} failed with HTTP {status}: {}",
-                truncate(&body, 500)
-            ))
-        }
-        other => BifrostError::Config(format!(
-            "Failed to connect to Bifrost admin API at {url}. Start Bifrost first with `bifrost start --no-system-proxy`. Error: {other}"
-        )),
-    }
-}
-
-fn extract_wake_phrase_from_sse(stream: &str) -> Option<String> {
-    let mut latest = None;
-    for line in stream.lines() {
-        let data = line
-            .strip_prefix("data:")
-            .map(str::trim)
-            .unwrap_or_else(|| line.trim());
-        if data.is_empty() || data == "[DONE]" {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<Value>(data) else {
-            continue;
-        };
-        if let Some(text) = asr_text_candidate(&value) {
-            latest = Some(clean_wake_phrase_candidate(&text));
-        }
-    }
-    latest
-}
-
-fn asr_text_candidate(value: &Value) -> Option<String> {
-    for key in [
-        "text",
-        "final_text",
-        "transcript",
-        "committed_text",
-        "delta",
-    ] {
-        if let Some(text) = value.get(key).and_then(Value::as_str) {
-            let text = text.trim();
-            if !text.is_empty() {
-                return Some(text.to_string());
-            }
-        }
-    }
-    if let Some(text) = value
-        .get("result")
-        .and_then(|result| result.get("text"))
-        .and_then(Value::as_str)
-    {
-        let text = text.trim();
-        if !text.is_empty() {
-            return Some(text.to_string());
-        }
-    }
-    None
-}
-
-fn clean_wake_phrase_candidate(value: &str) -> String {
-    value
-        .lines()
-        .map(|line| {
-            let trimmed = line.trim();
-            trimmed
-                .split_once(':')
-                .or_else(|| trimmed.split_once('：'))
-                .and_then(|(prefix, rest)| {
-                    let prefix = prefix.trim();
-                    let rest = rest.trim();
-                    let looks_like_speaker = prefix.starts_with("用户")
-                        || prefix.to_ascii_lowercase().starts_with("speaker")
-                        || prefix.to_ascii_lowercase().starts_with("spk")
-                        || (prefix.is_ascii()
-                            && prefix.len() <= 64
-                            && prefix
-                                .chars()
-                                .all(|ch| ch.is_ascii_alphanumeric() || ch.is_ascii_whitespace())
-                            && !rest.is_empty());
-                    looks_like_speaker.then_some(rest)
-                })
-                .unwrap_or(trimmed)
-        })
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
-        .trim()
-        .to_string()
 }
 
 fn format_shortcut(key: &str, modifiers: &[String]) -> String {
@@ -1309,33 +1116,6 @@ mod tests {
         args.allow_stateful_large_model = true;
         let url = voice_ws_url(args, 1_000);
         assert!(url.contains("allow_stateful_17b=1"));
-    }
-
-    #[test]
-    fn extract_wake_phrase_from_sse_uses_last_text_candidate() {
-        let stream = "event: partial\n\
-data: {\"delta\":\"打\"}\n\n\
-data: {\"text\":\"打开录音\"}\n\n\
-data: [DONE]\n";
-        assert_eq!(
-            extract_wake_phrase_from_sse(stream).as_deref(),
-            Some("打开录音")
-        );
-    }
-
-    #[test]
-    fn extract_wake_phrase_from_sse_strips_speaker_prefix() {
-        let stream = "data: {\"text\":\"用户B: 打开录音\"}\n\n";
-        assert_eq!(
-            extract_wake_phrase_from_sse(stream).as_deref(),
-            Some("打开录音")
-        );
-
-        let stream = "data: {\"text\":\"Manual Voice Wake Live: hello hello\"}\n\n";
-        assert_eq!(
-            extract_wake_phrase_from_sse(stream).as_deref(),
-            Some("hello hello")
-        );
     }
 
     #[test]

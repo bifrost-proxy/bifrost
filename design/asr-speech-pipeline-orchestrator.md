@@ -691,7 +691,7 @@ POST /_bifrost/api/voice/wake/bindings
 GET  /_bifrost/api/voice/wake/events
 ```
 
-listener 默认引擎从 `backend_asr_listener` 升级为 `lightweight_kws_listener`，旧 ASR phrase match 仅作为 fallback。
+listener 默认引擎从 `backend_asr_listener` 升级为 `lightweight_kws_listener`。真实麦克风常驻唤醒禁止使用 `backend_asr_phrase_match` / Qwen3-ASR 这类大模型 fallback；KWS 资产缺失时由 wake 模块自动初始化 sherpa-onnx KWS 资产，初始化失败才返回错误。
 
 ### 单文件离线字幕 API
 
@@ -827,7 +827,7 @@ Speech Engines
   ASR Model: Qwen3-ASR-1.7B / 0.6B
   Realtime Provider: qwen3_stateful_streaming
   Speaker Engine: sherpa-onnx-balanced
-  Wake Engine: lightweight KWS / fallback ASR
+  Wake Engine: lightweight sherpa-onnx KWS
   Resource: idle / realtime active / offline running / scheduled paused
 ```
 
@@ -1103,7 +1103,7 @@ human_tests：
 - Directory Task 保持既有输出合并、Daily Docs、Daily Agent / AI Runner、report/IM/sync 后处理；OfflineSubtitlePipeline 只负责单文件标准 ASR 产物。
 - wake listener 默认 `lightweight_kws_listener`，不默认拉起 Qwen3；无声纹配置只允许 dry-run，真实执行动作需要 speaker verification。
 - `ResourceLeaseManager` 让 realtime voice、offline job 和 scheduled Directory Task 共用资源优先级，scheduled task 在 realtime active 时让出。
-- 托管 Qwen3-ASR runtime 按 `host/home/model/port` 共享，不再按 `owner_module` 隔离；`speech_workbench` 手动启动的 0.6B 服务必须能被 Workflows / wake listener 复用，跨 owner 停止同一模型服务时也必须清理持久化 state，避免 stale owner 阻塞 recorder。
+- 托管 Qwen3-ASR runtime 按 `host/home/model/port` 共享，不再按 `owner_module` 隔离；`speech_workbench` 手动启动的 0.6B 服务必须能被 Workflows / Directory Task / offline-jobs 复用，跨 owner 停止同一模型服务时也必须清理持久化 state，避免 stale owner 阻塞 recorder。wake listener 不再持有 Qwen3-ASR runtime。
 - 新增真实服务回归脚本 `e2e-tests/tests/test_asr_speech_pipeline_orchestrator_real_service.sh`，启动当前 Bifrost 服务并验证 speech API、旧 WS 下线、wake lightweight；在 Apple Silicon 且设置 `BIFROST_ASR_PIPELINE_E2E_ONLINE=1` 时继续验证真实语音、offline-jobs、CLI subtitle、Directory Task artifacts 和 Daily Agent 后处理入口。CI/非在线 ASR 环境不使用 mock ASR，只跳过需要本地 Qwen3-ASR 资产的产物链路。
 
 ## 实时麦克风多说话人 Timeline
@@ -1134,7 +1134,11 @@ WebUI Speech Workbench 的 `Start Mic` 链路继续走 `/api/voice/listen-ws`，
 - 已注册声纹优先：正式阈值通过时直接显示真人名；只有一个注册声纹时，允许短实时 utterance 使用较低 self-priority 阈值，但仍保留置信度。
 - 未匹配声纹时，在本次 WebSocket session 内做 embedding 聚类，默认最多 4 个本地角色 `用户A/B/C/D`，避免实时链路也出现 20 个用户的爆炸。
 - 重叠说话 V1 不做 source separation；事件保持单主说话人，离线 pipeline 仍是最终 who-said-what 的高质量产物链路。
-- Work Actions 的 `Start Listening` 默认优先 `lightweight_kws_listener`；如果本地 KWS 资产未初始化，不再返回 400，而是启动 `backend_asr_phrase_match` fallback，并在 listener status 写入 `kws_missing_fallback_backend_asr_phrase_match` 解释当前资源路径。
+- Work Actions 的唤醒词能力全链路只使用 sherpa-onnx KWS：录入时由用户直接输入/确认 wake phrase，保存时生成 sherpa KWS keywords；录音样本只作为声纹/试听材料，不调用 Qwen3-ASR 解析文本。`Start Listening` 只允许使用 `lightweight_kws_listener`。如果本地 KWS 资产未初始化，后端自动下载并解压 `sherpa-onnx-kws-wenetspeech-3.3m` 资产后再启动；禁止 fallback 到 Qwen3-ASR / `backend_asr_phrase_match` 做常驻关键词检测。
+- Work Actions 快捷键录入支持无修饰键单键、组合键和双击。UI 必须允许用户逐个手动选择 `cmd/ctrl/option/shift`，避免直接按下系统全局热键；双击按键通过 `press_count=2`、`repeat_delay_ms=100` 表达，macOS 执行脚本两次按键之间插入 `delay 0.1`。
+- Listen 模式不能是黑箱：listener status 必须暴露后台 worker pid、真实麦克风设备、最近一次真实识别文本、匹配状态、命中的 binding/phrase、speaker verification 状态和 action_result。macOS 后台 worker 默认使用 avfoundation 的第 0 个音频输入 `:0`，不自动替用户切换到其他麦克风；同时枚举 audio devices 仅用于把 `device/device_label` 回传给 Admin，方便用户确认当前到底录的是哪个输入。WebUI 在监听中以短轮询展示 `Continuously listening / Checking latest wake window / Heard / Input / Recognized / No match / Phrase matched / Voice rejected / Dry-run matched / Executed` 等状态；只有真实 listener 或显式 dry-run trigger 能写入事件，禁止用 mock 数据伪造执行结果。
+- 后台 wake worker 必须按 sherpa-onnx 官方 KeywordSpotter 流式模式工作：创建一次 `KeywordSpotter` 和 stream，持续把 16k mono PCM 喂给 stream，循环 `is_ready -> decode -> get_result`，命中后 reset stream。麦克风采集仍写入内存 ring buffer，供声纹校验取最近最多 4 秒 wake window；禁止每个窗口重新创建 KWS 或把窗口送 Qwen3-ASR 做关键词检测。
+- 唤醒文本匹配偏召回：归一化后允许唤醒词出现在连续讲话文本中，较长唤醒词允许 1 个字符级 ASR 误差；动作执行边界由声纹门禁兜底。绑定了 voiceprint 的命令只有在最新 wake window 的短声纹片段匹配目标声纹且达到阈值时才执行，其他人说出同样词只记录 rejected，不触发热键。
 
 WebUI 行为：
 

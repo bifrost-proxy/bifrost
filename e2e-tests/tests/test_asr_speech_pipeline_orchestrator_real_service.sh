@@ -129,7 +129,7 @@ curl -fsS -X POST "http://127.0.0.1:$PORT/_bifrost/api/voice/wake/profiles" \
   --data '{"id":"wake_phrase_only","display_name":"Phrase only"}' >"$TEST_ROOT/wake-profile.json"
 curl -fsS -X POST "http://127.0.0.1:$PORT/_bifrost/api/voice/wake/bindings" \
   -H 'Content-Type: application/json' \
-  --data '{"id":"wake_binding_phrase_only","phrase":"hello bifrost","profile_id":"wake_phrase_only","cooldown_ms":1,"action":{"type":"key_press","key":"space","keycode":null,"modifiers":["cmd"],"press_count":1}}' >"$TEST_ROOT/wake-binding.json"
+  --data '{"id":"wake_binding_phrase_only","phrase":"hello bifrost","profile_id":"wake_phrase_only","cooldown_ms":1,"action":{"type":"key_press","key":"option","keycode":null,"modifiers":[],"press_count":2,"repeat_delay_ms":100}}' >"$TEST_ROOT/wake-binding.json"
 curl -fsS -X POST "http://127.0.0.1:$PORT/_bifrost/api/voice/wake/listener/start" \
   -H 'Content-Type: application/json' \
   --data '{"source":"mock","engine":"lightweight_kws_listener","mock_transcripts":["hello bifrost"],"execute":false,"chunk_ms":1000}' >"$TEST_ROOT/wake-listener.json"
@@ -140,6 +140,14 @@ assert data["listener"]["running"] is True, data
 assert data["listener"]["engine"] == "lightweight_kws_listener", data
 assert data["listener"]["worker_pid"] is None, data
 PY
+REJECT_CODE="$(curl -sS -o "$TEST_ROOT/wake-listener-asr-reject.json" -w "%{http_code}" -X POST "http://127.0.0.1:$PORT/_bifrost/api/voice/wake/listener/start" \
+  -H 'Content-Type: application/json' \
+  --data '{"source":"mock","engine":"backend_asr_phrase_match","mock_transcripts":["hello bifrost"],"execute":false,"chunk_ms":1000}')"
+if [ "$REJECT_CODE" != "400" ]; then
+  echo "expected backend_asr_phrase_match listener start to return 400, got $REJECT_CODE" >&2
+  cat "$TEST_ROOT/wake-listener-asr-reject.json" >&2
+  exit 1
+fi
 curl -fsS "http://127.0.0.1:$PORT/_bifrost/api/voice/wake/kws/status" >"$TEST_ROOT/wake-kws-status.json"
 python3 - "$TEST_ROOT/wake-kws-status.json" <<'PY'
 import json, sys
@@ -157,23 +165,70 @@ data = json.load(open(sys.argv[1]))
 assert data["matched"] is True, data
 assert data["action_result"]["dry_run"] is True, data
 assert data["action_result"]["executed"] is False, data
+assert "key code 58" in data["action_result"]["command_preview"], data
+assert "delay 0.1" in data["action_result"]["command_preview"], data
+PY
+curl -fsS "http://127.0.0.1:$PORT/_bifrost/api/voice/wake/events" >"$TEST_ROOT/wake-events.json"
+python3 - "$TEST_ROOT/wake-events.json" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+assert data["events"], data
+event = data["events"][-1]
+assert event["phrase"] == "hello bifrost", data
+assert event["action_result"]["executed"] is False, data
+assert "dry-run" in event["action_result"]["message"], data
 PY
 curl -fsS -X POST "http://127.0.0.1:$PORT/_bifrost/api/voice/wake/listener/stop" >/dev/null
 if [[ "$(uname -s)" == "Darwin" ]]; then
-  echo "[asr-speech-pipeline-real] mic listener falls back when KWS assets are missing"
-  curl -fsS -X POST "http://127.0.0.1:$PORT/_bifrost/api/voice/wake/listener/start" \
-    -H 'Content-Type: application/json' \
-    --data '{}' >"$TEST_ROOT/wake-mic-start.json"
-  python3 - "$TEST_ROOT/wake-mic-start.json" <<'PY'
+  if [[ "${BIFROST_ASR_PIPELINE_E2E_ONLINE:-0}" == "1" ]]; then
+    echo "[asr-speech-pipeline-real] mic listener auto-initializes lightweight KWS assets"
+    curl -fsS -X POST "http://127.0.0.1:$PORT/_bifrost/api/voice/wake/listener/start" \
+      -H 'Content-Type: application/json' \
+      --data '{}' >"$TEST_ROOT/wake-mic-start.json"
+    for _ in $(seq 1 40); do
+      curl -fsS "http://127.0.0.1:$PORT/_bifrost/api/voice/wake/status" >"$TEST_ROOT/wake-mic-status.json"
+      if python3 - "$TEST_ROOT/wake-mic-status.json" <<'PY'
+import json, sys
+listener = json.load(open(sys.argv[1]))["listener"]
+raise SystemExit(0 if listener.get("device") and listener.get("last_match_status") else 1)
+PY
+      then
+        break
+      fi
+      sleep 0.5
+    done
+    python3 - "$TEST_ROOT/wake-mic-status.json" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1]))
 listener = data["listener"]
 assert listener["running"] is True, data
-assert listener["engine"] in ("lightweight_kws_listener", "backend_asr_phrase_match"), data
-if listener["engine"] == "backend_asr_phrase_match":
-    assert listener["last_speaker_status"] == "kws_missing_fallback_backend_asr_phrase_match", data
+assert listener["worker_pid"], data
+assert listener["device"], data
+assert listener["device"] == ":0", data
+assert listener["engine"] == "lightweight_kws_listener", data
+assert listener["last_match_status"] in {
+    "worker_started",
+    "capturing",
+    "captured",
+    "transcribing",
+    "recognized",
+    "empty_transcript",
+    "no_match",
+    "phrase_matched",
+    "speaker_identifying",
+    "speaker_allowed",
+    "speaker_rejected",
+    "trigger_error",
+    "cooldown",
+    "asr_error",
+}, data
+if listener.get("device_label"):
+    assert listener["device_label"].strip(), data
 PY
-  curl -fsS -X POST "http://127.0.0.1:$PORT/_bifrost/api/voice/wake/listener/stop" >/dev/null
+    curl -fsS -X POST "http://127.0.0.1:$PORT/_bifrost/api/voice/wake/listener/stop" >/dev/null
+  else
+    echo "[asr-speech-pipeline-real] skipping mic KWS auto-init download; set BIFROST_ASR_PIPELINE_E2E_ONLINE=1"
+  fi
 fi
 
 echo "[asr-speech-pipeline-real] realtime voice websocket emits speaker timeline fields"

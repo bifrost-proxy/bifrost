@@ -31,6 +31,7 @@ import type {
   AsrSpeakerProfileSummary,
   VoiceWakeBinding,
   VoiceWakeEvent,
+  VoiceWakeListenerStatus,
   VoiceWakeProfile,
   VoiceWakeStatus,
 } from "../../../api/asr";
@@ -42,12 +43,8 @@ import {
   getVoiceWakeEvents,
   getVoiceWakeStatus,
   listAsrSpeakerProfiles,
-  loadAsrParams,
-  startAsrService,
   startVoiceWakeListener,
   stopVoiceWakeListener,
-  streamAsrTranscription,
-  type AsrStreamEvent,
 } from "../../../api/asr";
 
 const { Text } = Typography;
@@ -55,6 +52,22 @@ const { Text } = Typography;
 function formatShortcut(key: string, modifiers: string[]): string {
   const prefix = modifiers.length ? `${modifiers.join("+")}+` : "";
   return `${prefix}${key}`;
+}
+
+function formatWakeAction(key: string, modifiers: string[], pressCount: number): string {
+  const suffix = pressCount > 1 ? ` x${pressCount}` : "";
+  return `${formatShortcut(key, modifiers)}${suffix}`;
+}
+
+function isModifierKey(key: string): boolean {
+  return ["cmd", "ctrl", "option", "shift"].includes(key);
+}
+
+function sanitizeModifiersForKey(key: string, modifiers: string[]): string[] {
+  if (!isModifierKey(key)) {
+    return modifiers;
+  }
+  return modifiers.filter((modifier) => modifier !== key);
 }
 
 function normalizeCapturedKey(event: KeyboardEvent<HTMLInputElement>): string | null {
@@ -82,6 +95,22 @@ function normalizeCapturedKey(event: KeyboardEvent<HTMLInputElement>): string | 
   return null;
 }
 
+function capturedModifierKey(event: KeyboardEvent<HTMLInputElement>): string | null {
+  if (event.key === "Meta") {
+    return "cmd";
+  }
+  if (event.key === "Control") {
+    return "ctrl";
+  }
+  if (event.key === "Shift") {
+    return "shift";
+  }
+  if (event.key === "Alt") {
+    return "option";
+  }
+  return null;
+}
+
 function capturedModifiers(event: KeyboardEvent<HTMLInputElement>): string[] {
   return [
     event.metaKey ? "cmd" : null,
@@ -93,10 +122,12 @@ function capturedModifiers(event: KeyboardEvent<HTMLInputElement>): string[] {
 
 function bindingShortcut(binding: VoiceWakeBinding): string {
   const modifiers = binding.action.modifiers.length ? `${binding.action.modifiers.join("+")}+` : "";
+  const actionPressCount = binding.action.press_count ?? 1;
+  const suffix = actionPressCount > 1 ? ` x${actionPressCount}` : "";
   if (binding.action.keycode !== null) {
-    return `${modifiers}keycode:${binding.action.keycode}`;
+    return `${modifiers}keycode:${binding.action.keycode}${suffix}`;
   }
-  return `${modifiers}${binding.action.key ?? "-"}`;
+  return `${modifiers}${binding.action.key ?? "-"}${suffix}`;
 }
 
 function latestBinding(bindings: VoiceWakeBinding[]): VoiceWakeBinding | null {
@@ -113,6 +144,113 @@ function voiceWakeErrorMessage(error: unknown, fallback: string): string {
   return messageText || fallback;
 }
 
+function wakeMatchStatusLabel(status?: string | null): string {
+  switch (status) {
+    case "worker_started":
+      return "Worker started";
+    case "capturing":
+      return "Capturing mic";
+    case "captured":
+      return "Audio captured";
+    case "transcribing":
+      return "Checking";
+    case "empty_transcript":
+      return "No speech";
+    case "capture_error":
+      return "Capture error";
+    case "asr_error":
+      return "Wake engine error";
+    case "kws_error":
+      return "KWS error";
+    case "recognized":
+      return "Recognized";
+    case "no_match":
+      return "No match";
+    case "cooldown":
+      return "Cooldown";
+    case "phrase_matched":
+      return "Phrase matched";
+    case "speaker_identifying":
+      return "Checking voice";
+    case "speaker_allowed":
+      return "Voice matched";
+    case "speaker_error":
+      return "Voice error";
+    case "trigger_error":
+      return "Action error";
+    case "speaker_rejected":
+      return "Voice rejected";
+    case "phrase_only_dry_run":
+      return "Phrase only";
+    case "dry_run_matched":
+      return "Dry-run matched";
+    case "executed":
+      return "Executed";
+    case "matched":
+      return "Matched";
+    default:
+      return "Idle";
+  }
+}
+
+function wakeMatchStatusColor(status?: string | null): string {
+  if (status === "executed") return "success";
+  if (
+    status === "dry_run_matched" ||
+    status === "phrase_matched" ||
+    status === "matched" ||
+    status === "capturing" ||
+    status === "captured" ||
+    status === "transcribing" ||
+    status === "speaker_identifying" ||
+    status === "speaker_allowed"
+  ) return "processing";
+  if (
+    status === "speaker_rejected" ||
+    status === "no_match" ||
+    status === "empty_transcript"
+  ) return "warning";
+  if (status === "capture_error" || status === "asr_error" || status === "kws_error" || status === "trigger_error" || status === "speaker_error") return "error";
+  if (status === "cooldown") return "default";
+  return "default";
+}
+
+function wakeListenerStatusMessage(listener?: VoiceWakeListenerStatus | null, lastResult?: string, liveTranscript?: string): string {
+  if (liveTranscript) return `Heard: ${liveTranscript}`;
+  if (lastResult) return lastResult;
+  const device = listener?.device_label || listener?.device || "default microphone";
+  switch (listener?.last_match_status) {
+    case "worker_started":
+      return `Backend worker started on ${device}.`;
+    case "capturing":
+      return `Continuously listening from ${device} with a sliding wake window.`;
+    case "captured":
+      return `Checking the latest sliding wake window from ${device}.`;
+    case "transcribing":
+      return "Checking the latest wake window.";
+    case "empty_transcript":
+      return "No wake keyword candidate was detected in the latest window.";
+    case "no_match":
+      return "The wake engine did not match any saved command.";
+    case "phrase_matched":
+      return "Wake phrase matched; checking speaker/action policy.";
+    case "speaker_identifying":
+      return "Checking the wake-window voice against the selected voiceprint.";
+    case "speaker_allowed":
+      return "Voice verification passed; action is being triggered.";
+    case "speaker_rejected":
+      return "Wake phrase matched, but the speaker did not pass voice verification.";
+    case "capture_error":
+      return "Bifrost could not capture microphone audio. Check the selected input device and macOS microphone permission.";
+    case "asr_error":
+      return "The wake worker captured audio but the wake engine failed.";
+    case "trigger_error":
+      return "The wake phrase matched, but action execution failed.";
+    default:
+      return "Backend listener reads the microphone from the Bifrost process after start.";
+  }
+}
+
 export default function VoiceWakeActionsCard() {
   const { token } = theme.useToken();
   const [status, setStatus] = useState<VoiceWakeStatus | null>(null);
@@ -124,11 +262,11 @@ export default function VoiceWakeActionsCard() {
   const [selectedVoiceprintProfileId, setSelectedVoiceprintProfileId] = useState<string | null>(null);
   const [key, setKey] = useState("space");
   const [modifiers, setModifiers] = useState<string[]>(["cmd"]);
+  const [pressCount, setPressCount] = useState(1);
   const [activeBindingId, setActiveBindingId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [recordingSample, setRecordingSample] = useState(false);
-  const [recognizingSample, setRecognizingSample] = useState(false);
   const [sampleUrl, setSampleUrl] = useState<string | null>(null);
   const [sampleDurationMs, setSampleDurationMs] = useState<number | null>(null);
   const [listening, setListening] = useState(false);
@@ -139,7 +277,6 @@ export default function VoiceWakeActionsCard() {
   const sampleStreamRef = useRef<MediaStream | null>(null);
   const sampleChunksRef = useRef<Blob[]>([]);
   const sampleStartedAtRef = useRef(0);
-  const sampleSequenceRef = useRef(0);
 
   const activeBinding = useMemo(
     () =>
@@ -164,77 +301,33 @@ export default function VoiceWakeActionsCard() {
           activeBinding.phrase === wakePhrase.trim() &&
           activeWakeProfile?.voiceprint_profile_id === selectedVoiceprintProfileId &&
           (activeBinding.action.key ?? "space") === key &&
-          activeBinding.action.modifiers.join(",") === modifiers.join(","),
+          activeBinding.action.modifiers.join(",") === modifiers.join(",") &&
+          (activeBinding.action.press_count ?? 1) === pressCount,
       ),
-    [activeBinding, activeWakeProfile, key, modifiers, selectedVoiceprintProfileId, wakePhrase],
+    [activeBinding, activeWakeProfile, key, modifiers, pressCount, selectedVoiceprintProfileId, wakePhrase],
   );
-  const shortcutValue = useMemo(() => formatShortcut(key, modifiers), [key, modifiers]);
+  const shortcutValue = useMemo(() => formatWakeAction(key, modifiers, pressCount), [key, modifiers, pressCount]);
 
   const captureShortcut = useCallback((event: KeyboardEvent<HTMLInputElement>) => {
     event.preventDefault();
     event.stopPropagation();
+    const modifier = capturedModifierKey(event);
+    if (modifier) {
+      setKey(modifier);
+      setModifiers((current) => sanitizeModifiersForKey(modifier, current));
+      return;
+    }
     const nextKey = normalizeCapturedKey(event);
     if (!nextKey) {
       message.warning("Press a letter, space, return, tab, escape, or arrow key.");
       return;
     }
     setKey(nextKey);
-    setModifiers(capturedModifiers(event));
-  }, []);
-
-  const ensureBackendAsrService = useCallback(async () => {
-    const result = await startAsrService({
-      ...loadAsrParams(),
-      ownerModule: "voice_wake_listener",
-    });
-    if (!result.ready) {
-      throw new Error(result.detail || result.message || "Backend ASR service is not ready");
+    const captured = capturedModifiers(event);
+    if (captured.length) {
+      setModifiers(sanitizeModifiersForKey(nextKey, captured));
     }
   }, []);
-
-  const recognizeWakePhrase = useCallback(async (blob: Blob, sequence: number) => {
-    setRecognizingSample(true);
-    setLastResult("Recognizing wake audio in backend...");
-    let recognized = "";
-    const handleEvent = (event: AsrStreamEvent) => {
-      if (event.type === "text") {
-        recognized = event.text;
-      } else if (event.type === "final") {
-        recognized = event.committed || event.text || event.delta || recognized;
-      } else if (event.type === "partial") {
-        recognized = event.text || recognized;
-      } else if (event.type === "error") {
-        throw new Error(event.detail ? `${event.message}\n${event.detail}` : event.message);
-      }
-    };
-    try {
-      await ensureBackendAsrService();
-      await streamAsrTranscription(
-        blob,
-        `wake-sample-${sequence}.webm`,
-        {
-          ...loadAsrParams(),
-          ownerModule: "voice_wake_sample",
-        },
-        handleEvent,
-      );
-      const phrase = recognized.trim();
-      if (!phrase) {
-        setLastResult("Backend ASR did not recognize text from this wake audio.");
-        message.error("Backend ASR did not recognize text from this wake audio.");
-        return;
-      }
-      setWakePhrase(phrase);
-      setLastResult(`Wake phrase recognized: ${phrase}`);
-      message.success(`Wake phrase recognized: ${phrase}`);
-    } catch (error) {
-      const text = voiceWakeErrorMessage(error, "Failed to recognize wake audio");
-      setLastResult(text);
-      message.error(text);
-    } finally {
-      setRecognizingSample(false);
-    }
-  }, [ensureBackendAsrService]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -266,6 +359,7 @@ export default function VoiceWakeActionsCard() {
         );
         setKey(newestBinding.action.key ?? "space");
         setModifiers(newestBinding.action.modifiers);
+        setPressCount(newestBinding.action.press_count ?? 1);
       } else if (!selectedVoiceprintProfileId && nextSpeakerProfiles[0]) {
         setSelectedVoiceprintProfileId(nextSpeakerProfiles[0].id);
       }
@@ -286,7 +380,7 @@ export default function VoiceWakeActionsCard() {
     }
     const timer = window.setInterval(() => {
       void refresh();
-    }, 1500);
+    }, 500);
     return () => window.clearInterval(timer);
   }, [listening, refresh]);
 
@@ -340,8 +434,8 @@ export default function VoiceWakeActionsCard() {
         setSampleUrl(URL.createObjectURL(blob));
         setSampleDurationMs(Date.now() - sampleStartedAtRef.current);
         setRecordingSample(false);
-        sampleSequenceRef.current += 1;
-        void recognizeWakePhrase(blob, sampleSequenceRef.current);
+        setLastResult("Wake audio sample captured. Enter the wake phrase and save.");
+        message.success("Wake audio sample captured.");
       };
       recorder.start();
       setRecordingSample(true);
@@ -351,7 +445,7 @@ export default function VoiceWakeActionsCard() {
       setRecordingSample(false);
       message.error(voiceWakeErrorMessage(error, "Failed to record wake audio"));
     }
-  }, [recognizeWakePhrase, sampleUrl]);
+  }, [sampleUrl]);
 
   const saveWakeAction = useCallback(async (): Promise<VoiceWakeBinding | null> => {
     const phrase = wakePhrase.trim();
@@ -374,12 +468,13 @@ export default function VoiceWakeActionsCard() {
           key,
           keycode: null,
           modifiers,
-          press_count: 1,
+          press_count: pressCount,
+          repeat_delay_ms: 100,
         },
       });
       setActiveBindingId(binding.id);
       message.success(
-        `Saved ${selectedSpeakerProfile?.display_name ?? "phrase-only"}: ${phrase} -> ${formatShortcut(key, modifiers)}`,
+        `Saved ${selectedSpeakerProfile?.display_name ?? "phrase-only"}: ${phrase} -> ${formatWakeAction(key, modifiers, pressCount)}`,
       );
       await refresh();
       return binding;
@@ -389,7 +484,7 @@ export default function VoiceWakeActionsCard() {
     } finally {
       setSaving(false);
     }
-  }, [key, modifiers, refresh, selectedSpeakerProfile, wakePhrase]);
+  }, [key, modifiers, pressCount, refresh, selectedSpeakerProfile, wakePhrase]);
 
   const listenerBlockReason = useMemo(() => {
     if (!activeBinding) {
@@ -531,9 +626,8 @@ export default function VoiceWakeActionsCard() {
                 <Form.Item label="Wake phrase" required style={{ marginBottom: 0 }}>
                   <Input
                     value={wakePhrase}
-                    readOnly
-                    placeholder="Record wake audio to recognize"
-                    suffix={recognizingSample ? <Tag color="processing">Recognizing</Tag> : null}
+                    onChange={(event) => setWakePhrase(event.target.value)}
+                    placeholder="Enter wake phrase"
                     data-testid="voice-wake-phrase-input"
                   />
                 </Form.Item>
@@ -564,15 +658,40 @@ export default function VoiceWakeActionsCard() {
           <Col xs={24} lg={10}>
             <Form layout="vertical">
               <Form.Item label="Global shortcut">
-                <Input
-                  value={shortcutValue}
-                  readOnly
-                  prefix={<KeyOutlined />}
-                  onKeyDown={captureShortcut}
-                  onFocus={(event) => event.currentTarget.select()}
-                  placeholder="Press shortcut"
-                  data-testid="voice-wake-shortcut-input"
-                />
+                <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                  <Input
+                    value={shortcutValue}
+                    readOnly
+                    prefix={<KeyOutlined />}
+                    onKeyDown={captureShortcut}
+                    onFocus={(event) => event.currentTarget.select()}
+                    placeholder="Press shortcut key"
+                    data-testid="voice-wake-shortcut-input"
+                  />
+                  <Select
+                    mode="multiple"
+                    value={modifiers}
+                    onChange={(values) => setModifiers(sanitizeModifiersForKey(key, values))}
+                    placeholder="Optional modifiers"
+                    data-testid="voice-wake-modifier-select"
+                    options={[
+                      { value: "cmd", label: "cmd" },
+                      { value: "ctrl", label: "ctrl" },
+                      { value: "option", label: "option" },
+                      { value: "shift", label: "shift" },
+                    ]}
+                    style={{ width: "100%" }}
+                  />
+                  <Space>
+                    <Switch
+                      checked={pressCount === 2}
+                      onChange={(checked) => setPressCount(checked ? 2 : 1)}
+                      data-testid="voice-wake-double-press-switch"
+                    />
+                    <Text>Double press</Text>
+                    {pressCount === 2 ? <Tag>100ms</Tag> : null}
+                  </Space>
+                </Space>
               </Form.Item>
               <Space wrap>
                 <Tooltip title={!listening ? listenerBlockReason : null}>
@@ -644,6 +763,11 @@ export default function VoiceWakeActionsCard() {
             <Space>
               <KeyOutlined />
               <Text strong>{listening ? "Backend Listening" : "Idle"}</Text>
+              {status?.listener.last_match_status ? (
+                <Tag color={wakeMatchStatusColor(status.listener.last_match_status)}>
+                  {wakeMatchStatusLabel(status.listener.last_match_status)}
+                </Tag>
+              ) : null}
               {status?.listener.trigger_count ? (
                 <Tag color="success">{status.listener.trigger_count} triggered</Tag>
               ) : null}
@@ -654,8 +778,24 @@ export default function VoiceWakeActionsCard() {
               ) : null}
             </Space>
             <Text type={lastResult ? "danger" : "secondary"}>
-              {liveTranscript || lastResult || "Backend listener runs in Bifrost after start."}
+              {wakeListenerStatusMessage(status?.listener, lastResult, liveTranscript)}
             </Text>
+            {status?.listener.device_label || status?.listener.device ? (
+              <Text type="secondary">
+                Input: {status.listener.device_label || status.listener.device}
+                {status.listener.worker_pid ? ` · PID ${status.listener.worker_pid}` : ""}
+              </Text>
+            ) : null}
+            {status?.listener.last_match_phrase ? (
+              <Text>
+                Matched command: <Text strong>{status.listener.last_match_phrase}</Text>
+              </Text>
+            ) : null}
+            {status?.listener.last_action_result ? (
+              <Text type={status.listener.last_action_result.executed ? "success" : "secondary"}>
+                Action: {status.listener.last_action_result.message}
+              </Text>
+            ) : null}
           </Space>
         </div>
 

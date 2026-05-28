@@ -249,7 +249,7 @@ fn ai_voice_wake_commands_parse() {
             } => {
                 assert_eq!(audio, std::path::PathBuf::from("/tmp/wake.wav"));
                 assert_eq!(voiceprint_profile_id, "speaker_eden");
-                assert_eq!(phrase.as_deref(), Some("打开录音"));
+                assert_eq!(phrase, "打开录音");
                 assert_eq!(key.as_deref(), Some("space"));
                 assert_eq!(modifiers, vec!["cmd".to_string(), "shift".to_string()]);
                 assert_eq!(profile_id.as_deref(), Some("wake_profile_eden"));
