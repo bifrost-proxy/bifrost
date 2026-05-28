@@ -7,7 +7,8 @@ pub const OFFLINE_PLAIN_ASR_PROFILE: &str = "offline-plain-asr-local";
 pub const OFFLINE_SPEAKER_SUBTITLE_PROFILE: &str = "offline-speaker-subtitle-local";
 pub const SCHEDULED_SPEAKER_SUBTITLE_PROFILE: &str = "scheduled-speaker-subtitle-local";
 pub const REALTIME_ASR_MODEL: &str = "Qwen3-ASR-0.6B";
-pub const OFFLINE_ASR_MODEL: &str = "Qwen3-ASR-1.7B";
+pub const OFFLINE_ASR_MODEL: &str = REALTIME_ASR_MODEL;
+pub const DEFAULT_AUTO_MAX_SPEAKERS: u8 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AsrDiarizationConfig {
@@ -34,6 +35,19 @@ impl Default for AsrDiarizationConfig {
             max_speakers: None,
             known_speaker_count: None,
             voiceprint_matching: false,
+        }
+    }
+}
+
+impl AsrDiarizationConfig {
+    pub fn speaker_aware_default() -> Self {
+        Self {
+            enabled: true,
+            profile: default_diarization_profile(),
+            min_speakers: None,
+            max_speakers: Some(DEFAULT_AUTO_MAX_SPEAKERS),
+            known_speaker_count: None,
+            voiceprint_matching: true,
         }
     }
 }
@@ -190,10 +204,7 @@ pub fn builtin_speech_pipeline_profiles() -> Vec<SpeechPipelineProfile> {
                 asr_provider: "qwen3-offline".to_string(),
                 model: OFFLINE_ASR_MODEL.to_string(),
                 fallback_model: Some(REALTIME_ASR_MODEL.to_string()),
-                diarization: Some(AsrDiarizationConfig {
-                    enabled: true,
-                    ..AsrDiarizationConfig::default()
-                }),
+                diarization: Some(AsrDiarizationConfig::speaker_aware_default()),
                 subtitle_formats: vec![
                     "txt".to_string(),
                     "timeline_json".to_string(),
@@ -220,10 +231,7 @@ pub fn builtin_speech_pipeline_profiles() -> Vec<SpeechPipelineProfile> {
                 asr_provider: "qwen3-offline".to_string(),
                 model: OFFLINE_ASR_MODEL.to_string(),
                 fallback_model: Some(REALTIME_ASR_MODEL.to_string()),
-                diarization: Some(AsrDiarizationConfig {
-                    enabled: true,
-                    ..AsrDiarizationConfig::default()
-                }),
+                diarization: Some(AsrDiarizationConfig::speaker_aware_default()),
                 subtitle_formats: vec![
                     "txt".to_string(),
                     "timeline_json".to_string(),
@@ -248,4 +256,35 @@ pub fn builtin_profile(id: &str) -> Option<SpeechPipelineProfile> {
     builtin_speech_pipeline_profiles()
         .into_iter()
         .find(|profile| profile.id == id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn speaker_aware_default_enables_diarization_and_voiceprints() {
+        let config = AsrDiarizationConfig::speaker_aware_default();
+
+        assert!(config.enabled);
+        assert!(config.voiceprint_matching);
+        assert_eq!(config.profile, DEFAULT_DIARIZATION_PROFILE);
+        assert_eq!(config.max_speakers, Some(DEFAULT_AUTO_MAX_SPEAKERS));
+    }
+
+    #[test]
+    fn offline_speaker_profiles_use_0_6b_and_voiceprint_matching() {
+        for profile_id in [
+            OFFLINE_SPEAKER_SUBTITLE_PROFILE,
+            SCHEDULED_SPEAKER_SUBTITLE_PROFILE,
+        ] {
+            let profile = builtin_profile(profile_id).expect("profile exists");
+            let offline = profile.offline.expect("offline profile");
+            let diarization = offline.diarization.expect("diarization profile");
+
+            assert_eq!(offline.model, "Qwen3-ASR-0.6B");
+            assert!(diarization.enabled);
+            assert!(diarization.voiceprint_matching);
+        }
+    }
 }

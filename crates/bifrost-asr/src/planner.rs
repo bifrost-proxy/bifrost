@@ -14,6 +14,12 @@ pub struct DiarizationSegment {
     pub mapped_profile_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_profile_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_confidence: Option<f32>,
     pub start_ms: u64,
     pub end_ms: u64,
     #[serde(default)]
@@ -104,25 +110,48 @@ pub fn plan_asr_units(
 }
 
 pub fn speakers_from_diarization_segments(segments: &[DiarizationSegment]) -> Vec<TimelineSpeaker> {
-    let mut speakers =
-        std::collections::BTreeMap::<String, (String, Option<String>, Option<f32>)>::new();
+    type SpeakerMetadata = (
+        String,
+        Option<String>,
+        Option<f32>,
+        Option<String>,
+        Option<String>,
+        Option<f32>,
+    );
+    let mut speakers = std::collections::BTreeMap::<String, SpeakerMetadata>::new();
     for segment in segments {
         speakers.entry(segment.speaker.clone()).or_insert_with(|| {
             (
                 segment.display_name.clone(),
                 segment.mapped_profile_id.clone(),
                 segment.confidence,
+                segment.candidate_profile_id.clone(),
+                segment.candidate_display_name.clone(),
+                segment.candidate_confidence,
             )
         });
     }
     speakers
         .into_iter()
         .map(
-            |(id, (display_name, mapped_profile_id, confidence))| TimelineSpeaker {
+            |(
+                id,
+                (
+                    display_name,
+                    mapped_profile_id,
+                    confidence,
+                    candidate_profile_id,
+                    candidate_display_name,
+                    candidate_confidence,
+                ),
+            )| TimelineSpeaker {
                 id,
                 display_name,
                 mapped_profile_id,
                 confidence,
+                candidate_profile_id,
+                candidate_display_name,
+                candidate_confidence,
             },
         )
         .collect()
@@ -272,6 +301,9 @@ mod tests {
             display_name: speaker.to_string(),
             mapped_profile_id: None,
             confidence: None,
+            candidate_profile_id: None,
+            candidate_display_name: None,
+            candidate_confidence: None,
             start_ms,
             end_ms,
             overlap: false,

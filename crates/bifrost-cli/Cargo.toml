@@ -24,6 +24,7 @@ bifrost-tls = { path = "../bifrost-tls" }
 bifrost-storage = { path = "../bifrost-storage" }
 bifrost-script = { path = "../bifrost-script" }
 bifrost-power = { path = "../bifrost-power" }
+bifrost-asr = { path = "../bifrost-asr", default-features = false, features = ["core"] }
 parking_lot.workspace = true
 tracing.workspace = true
 tokio.workspace = true
@@ -58,6 +59,9 @@ uuid.workspace = true
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.28", features = ["signal", "process", "fs"] }
 libc = "0.2"
+
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+bifrost-asr = { path = "../bifrost-asr", default-features = false, features = ["full-local-asr"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_Foundation", "Win32_System_Threading"] }

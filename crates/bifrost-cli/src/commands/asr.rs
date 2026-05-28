@@ -634,6 +634,38 @@ struct AsrDailyDocumentDetail {
 
 fn handle_asr_task_command(client: &AsrTaskClient, action: AiAsrTaskCommands) -> Result<()> {
     match action {
+        AiAsrTaskCommands::Create {
+            name,
+            dir,
+            model,
+            language,
+            runtime_strategy,
+            time,
+            disabled,
+            non_recursive,
+            no_speaker_diarization,
+            diarization_profile,
+            known_speaker_count,
+            no_voiceprint_matching,
+            json,
+        } => create_task(
+            client,
+            CreateTaskCliInput {
+                name,
+                dir,
+                model,
+                language,
+                runtime_strategy,
+                time,
+                disabled,
+                non_recursive,
+                no_speaker_diarization,
+                diarization_profile,
+                known_speaker_count,
+                no_voiceprint_matching,
+                json,
+            },
+        ),
         AiAsrTaskCommands::List { json } => {
             let value = client.get_json("/asr/tasks")?;
             if json {
@@ -707,6 +739,89 @@ fn handle_asr_task_command(client: &AsrTaskClient, action: AiAsrTaskCommands) ->
         ),
         AiAsrTaskCommands::Daily { action } => handle_asr_task_daily_command(client, action),
     }
+}
+
+#[derive(Debug)]
+struct CreateTaskCliInput {
+    name: Option<String>,
+    dir: PathBuf,
+    model: String,
+    language: String,
+    runtime_strategy: String,
+    time: String,
+    disabled: bool,
+    non_recursive: bool,
+    no_speaker_diarization: bool,
+    diarization_profile: String,
+    known_speaker_count: Option<u8>,
+    no_voiceprint_matching: bool,
+    json: bool,
+}
+
+fn create_task(client: &AsrTaskClient, input: CreateTaskCliInput) -> Result<()> {
+    let (hour, minute) = parse_daily_time(&input.time)?;
+    let body = build_create_task_body(&input, hour, minute);
+    let value = client.post_json_body("/asr/tasks", &body)?;
+    if input.json {
+        print_json(&value)?;
+        return Ok(());
+    }
+    let id = value
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("<unknown>");
+    let name = value
+        .get("name")
+        .and_then(Value::as_str)
+        .or(input.name.as_deref())
+        .unwrap_or("ASR directory task");
+    println!("ASR directory task created: {name} ({id})");
+    println!(
+        "Defaults: model={}, speaker_diarization={}, voiceprint_matching={}",
+        input.model, !input.no_speaker_diarization, !input.no_voiceprint_matching
+    );
+    Ok(())
+}
+
+fn build_create_task_body(input: &CreateTaskCliInput, hour: u8, minute: u8) -> Value {
+    serde_json::json!({
+        "name": input.name,
+        "audio_dir": input.dir,
+        "recursive": !input.non_recursive,
+        "enabled": !input.disabled,
+        "schedule": {
+            "kind": "daily",
+            "hour": hour,
+            "minute": minute
+        },
+        "language": input.language,
+        "model": input.model,
+        "runtime_strategy": input.runtime_strategy,
+        "diarization": {
+            "enabled": !input.no_speaker_diarization,
+            "profile": input.diarization_profile,
+            "known_speaker_count": input.known_speaker_count,
+            "voiceprint_matching": !input.no_voiceprint_matching
+        }
+    })
+}
+
+fn parse_daily_time(value: &str) -> Result<(u8, u8)> {
+    let (hour, minute) = value.split_once(':').ok_or_else(|| {
+        BifrostError::Config("Invalid --time; expected HH:MM, for example 02:00".to_string())
+    })?;
+    let hour = hour.parse::<u8>().map_err(|_| {
+        BifrostError::Config("Invalid --time hour; expected 00 through 23".to_string())
+    })?;
+    let minute = minute.parse::<u8>().map_err(|_| {
+        BifrostError::Config("Invalid --time minute; expected 00 through 59".to_string())
+    })?;
+    if hour > 23 || minute > 59 {
+        return Err(BifrostError::Config(
+            "Invalid --time; expected HH:MM with hour 00-23 and minute 00-59".to_string(),
+        ));
+    }
+    Ok((hour, minute))
 }
 
 fn handle_asr_diarization_command(
@@ -3047,6 +3162,40 @@ mod tests {
         let error = write_text_ignore_broken_pipe(&mut writer, "ready: false\n")
             .expect_err("non-broken-pipe errors should still be returned");
         assert!(error.to_string().contains("disk output unavailable"));
+    }
+
+    #[test]
+    fn create_task_cli_body_defaults_to_speaker_aware_0_6b() {
+        let input = CreateTaskCliInput {
+            name: Some("meetings".to_string()),
+            dir: PathBuf::from("/tmp/meetings"),
+            model: bifrost_asr::runtime::DEFAULT_ASR_MODEL.to_string(),
+            language: "chinese".to_string(),
+            runtime_strategy: "reuse_per_file".to_string(),
+            time: "02:00".to_string(),
+            disabled: false,
+            non_recursive: false,
+            no_speaker_diarization: false,
+            diarization_profile: bifrost_asr::profiles::DEFAULT_DIARIZATION_PROFILE.to_string(),
+            known_speaker_count: None,
+            no_voiceprint_matching: false,
+            json: false,
+        };
+
+        let body = build_create_task_body(&input, 2, 0);
+
+        assert_eq!(body["model"], "Qwen3-ASR-0.6B");
+        assert_eq!(body["diarization"]["enabled"], true);
+        assert_eq!(body["diarization"]["voiceprint_matching"], true);
+        assert_eq!(body["diarization"]["profile"], "sherpa-onnx-balanced");
+        assert_eq!(body["runtime_strategy"], "reuse_per_file");
+    }
+
+    #[test]
+    fn parse_daily_time_rejects_invalid_clock_values() {
+        assert_eq!(parse_daily_time("23:59").unwrap(), (23, 59));
+        assert!(parse_daily_time("24:00").is_err());
+        assert!(parse_daily_time("02").is_err());
     }
 
     #[test]

@@ -11,6 +11,7 @@ default = ["core"]
 core = []
 subtitle = ["core"]
 diarization-sherpa = ["core", "dep:sherpa-onnx"]
+wake-sherpa = ["core", "dep:pinyin", "dep:sherpa-onnx"]
 qwen3-offline = ["core", "dep:qwen3-asr"]
 qwen3-stateful = ["qwen3-offline"]
 pyannote-sidecar = ["core"]
@@ -18,6 +19,7 @@ voiceprint = ["diarization-sherpa"]
 full-local-asr = [
   "subtitle",
   "diarization-sherpa",
+  "wake-sherpa",
   "qwen3-offline",
   "qwen3-stateful",
   "voiceprint",
@@ -29,6 +31,7 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 ureq.workspace = true
+pinyin = { version = "0.11.0", optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true

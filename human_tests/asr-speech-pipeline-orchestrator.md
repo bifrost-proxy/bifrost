@@ -21,7 +21,7 @@
 2. 所有命令必须以 `source ~/.zshrc` 开头。
 3. 静态方案用例不需要启动服务。
 4. 真实服务回归用例必须启动当前构建产物，使用临时 `BIFROST_DATA_DIR`，启动命令必须包含 `--no-system-proxy`。
-5. 真实 ASR 用例需要 Apple Silicon、`ffmpeg`、macOS `say`、已初始化的 Qwen3-ASR 模型资产；资产缺失时必须先执行 ASR 初始化，不能把缺失资产当通过。
+5. 真实在线 ASR 产物用例需要 Apple Silicon 和已初始化的 Qwen3-ASR 模型资产；资产缺失时必须先执行 ASR 初始化，不能把缺失资产当通过。
 
 ## 测试用例列表
 
@@ -180,7 +180,7 @@
 - 脚本启动临时 Bifrost 服务，启动参数包含 `--no-system-proxy`。
 - `/api/speech/pipelines/status` 返回 realtime/offline/scheduled profiles 和 resource snapshot。
 - `/api/speech/decision?mode=realtime_dictation` 返回 `qwen3_stateful_streaming + Qwen3-ASR-0.6B`。
-- `/api/speech/decision?mode=offline_file&speaker_aware=true` 返回 `offline-speaker-subtitle-local`、diarization decision 和 `Qwen3-ASR-1.7B`。
+- `/api/speech/decision?mode=offline_file&speaker_aware=true` 返回 `offline-speaker-subtitle-local`、diarization decision 和默认 `Qwen3-ASR-0.6B`。
 - `/api/asr/transcribe-ws` 返回 410，并提示使用 `/api/voice/listen-ws`。
 - wake phrase-only 配置可以启动 lightweight listener，且不会启动后台 ASR worker pid。
 - 当 `BIFROST_ASR_PIPELINE_E2E_ONLINE=1` 且本地 Qwen3-ASR 资产可用时，`POST /api/asr/offline-jobs` 对真实语音音频生成 `txt/srt/vtt/timeline_json/metadata` artifacts。
@@ -266,6 +266,107 @@
 - 顶部 pipeline 状态显示 realtime/offline resource 状态，不要求用户手动调用旧 streaming preview 接口。
 - 亮色和暗色主题下状态、按钮、进度和下载区域均可读，无重叠。
 
+### TC-ASPO-14：ASR runtime 跨 Workbench / Workflows 共享且默认 0.6B
+
+操作步骤：
+
+1. 启动临时服务，并在 WebUI 手动启动 `Qwen3-ASR-0.6B`。
+2. 执行：
+   ```bash
+   source ~/.zshrc && curl -fsS "http://127.0.0.1:19010/_bifrost/api/asr/service/start?model=Qwen3-ASR-0.6B&owner_module=voice_wake_listener"
+   ```
+3. 执行：
+   ```bash
+   source ~/.zshrc && curl -fsS "http://127.0.0.1:19010/_bifrost/api/speech/decision?mode=offline_file&speaker_aware=true"
+   ```
+4. 执行：
+   ```bash
+   source ~/.zshrc && curl -fsS "http://127.0.0.1:19010/_bifrost/api/asr/service/stop?model=Qwen3-ASR-0.6B&owner_module=voice_wake_listener"
+   ```
+
+预期结果：
+
+- 第 2 步返回 `ready: true`，不会因为 active owner 是 `speech_workbench` 而返回 409。
+- 第 3 步返回默认 `Qwen3-ASR-0.6B`，不会默认要求 `Qwen3-ASR-1.7B`。
+- 第 4 步可以停止同一个共享 ASR runtime，不会因为 owner 不一致留下 stale state。
+
+### TC-ASPO-15：Directory Task 新建默认开启说话人和声纹匹配
+
+操作步骤：
+
+1. 启动真实服务：
+   ```bash
+   source ~/.zshrc && BIFROST_DATA_DIR="$(mktemp -d)" cargo run --bin bifrost -- start -p 19010 --unsafe-ssl --skip-cert-check --no-system-proxy
+   ```
+2. 只传 `name/audio_dir` 调用后端创建任务：
+   ```bash
+   source ~/.zshrc && TMP_DIR="$(mktemp -d)" && curl -sS -X POST http://127.0.0.1:19010/_bifrost/api/asr/tasks -H 'content-type: application/json' --data-binary "{\"name\":\"defaults-smoke\",\"audio_dir\":\"$TMP_DIR\"}"
+   ```
+3. 通过 CLI 创建任务：
+   ```bash
+   source ~/.zshrc && TMP_DIR="$(mktemp -d)" && cargo run --bin bifrost -- -p 19010 ai asr task create --name cli-defaults-smoke --dir "$TMP_DIR" --json
+   ```
+4. 用浏览器打开 `http://127.0.0.1:19010/_bifrost/ai?aiSection=tools-asr`，点击 Directory Tasks 的 `New`。
+
+预期结果：
+
+- API 创建任务默认返回 `model=Qwen3-ASR-0.6B`。
+- API 创建任务默认返回 `diarization.enabled=true`、`diarization.voiceprint_matching=true`、`profile=sherpa-onnx-balanced`。
+- CLI 创建任务默认返回同样的 0.6B、diarization enabled、voiceprint matching enabled。
+- WebUI 新建任务弹窗默认展示 `Task Model=Qwen3-ASR-0.6B`，`Speaker Diarization` 与 `Voiceprint Matching` 开关均为打开。
+
+### TC-ASPO-16：未知说话人数时不会把短句炸成大量用户
+
+操作步骤：
+
+1. 使用真实服务创建一个 speaker-aware Directory Task，不填写 `known_speaker_count`，只传 `max_speakers=4` 或使用产品默认：
+   ```bash
+   source ~/.zshrc && TMP_DIR="$(mktemp -d)" && cp /Users/eden/Downloads/demo/TX01_MIC012_20260520_102542_orig.wav "$TMP_DIR/" && curl -sS -X POST http://127.0.0.1:19010/_bifrost/api/asr/tasks -H 'content-type: application/json' --data-binary "{\"name\":\"diarization-cap-real\",\"audio_dir\":\"$TMP_DIR\",\"enabled\":false,\"model\":\"Qwen3-ASR-0.6B\",\"diarization\":{\"enabled\":true,\"profile\":\"sherpa-onnx-balanced\",\"max_speakers\":4,\"voiceprint_matching\":true}}"
+   ```
+2. 对任务执行 run，等待完成：
+   ```bash
+   source ~/.zshrc && curl -sS -X POST "http://127.0.0.1:19010/_bifrost/api/asr/tasks/<task-id>/run"
+   ```
+3. 查询任务详情和 timeline：
+   ```bash
+   source ~/.zshrc && curl -sS "http://127.0.0.1:19010/_bifrost/api/asr/tasks/<task-id>"
+   ```
+
+预期结果：
+
+- 同一真实 5 分 30 秒单声道音频不会生成 20 个 speaker。
+- `summary.speaker_count <= 4`。
+- 文件级 `speaker_count <= 4`。
+- timeline speakers 显示为稳定的 `用户A/B/C/D` 本地角色；只有声纹匹配置信度达到阈值时才覆盖为已注册真人名。
+
+### TC-ASPO-17：短碎片角色稳定化且单注册声纹优先识别本人
+
+操作步骤：
+
+1. 保持真实服务运行，并确认已经存在一个注册声纹 `eden`：
+   ```bash
+   source ~/.zshrc && curl -sS http://127.0.0.1:19010/_bifrost/api/asr/speaker-profiles
+   ```
+2. 使用同一段真实会议音频创建 speaker-aware Directory Task，模型使用 `Qwen3-ASR-0.6B`，不填写 `known_speaker_count`，只设置 `max_speakers=4`：
+   ```bash
+   source ~/.zshrc && TMP_DIR="$(mktemp -d)" && cp /Users/eden/Downloads/demo/TX01_MIC012_20260520_102542_orig.wav "$TMP_DIR/meeting.wav" && curl -sS -X POST http://127.0.0.1:19010/_bifrost/api/asr/tasks -H 'content-type: application/json' --data-binary "{\"name\":\"speaker-stabilize-real\",\"audio_dir\":\"$TMP_DIR\",\"model\":\"Qwen3-ASR-0.6B\",\"runtime_strategy\":\"fork_per_chunk\",\"recursive\":false,\"diarization\":{\"enabled\":true,\"profile\":\"sherpa-onnx-balanced\",\"max_speakers\":4,\"voiceprint_matching\":true}}"
+   ```
+3. 执行任务并等待完成：
+   ```bash
+   source ~/.zshrc && curl -sS -X POST "http://127.0.0.1:19010/_bifrost/api/asr/tasks/<task-id>/run"
+   ```
+4. 查询 timeline：
+   ```bash
+   source ~/.zshrc && FILE_KEY="$(curl -sS http://127.0.0.1:19010/_bifrost/api/asr/tasks/<task-id> | jq -r '.files[0].key')" && curl -sS "http://127.0.0.1:19010/_bifrost/api/asr/tasks/<task-id>/files/$FILE_KEY/timeline"
+   ```
+
+预期结果：
+
+- 短碎片 speaker 不再作为独立 `用户C/用户D` 大量出现在字幕中，同一真实音频稳定到 2 个主要角色。
+- `speakers[0].display_name` 或主要候选角色显示为已注册声纹名 `eden`。
+- 低于正式阈值但最接近已注册声纹的角色会写入 `candidate_profile_id/candidate_display_name/candidate_confidence`，页面可解释“为什么没有正式匹配”。
+- 未被正式识别为 `eden` 的角色仍保留本地角色名，不会因为低置信度候选误标成本人。
+
 ## 清理步骤
 
 - 静态验收用例不创建临时服务和临时数据目录。
@@ -280,9 +381,13 @@
 | 2026-05-28 | TC-ASPO-07 | 已执行后处理链路静态验收命令，验证 `OfflineSubtitlePipeline` 不替代 Daily Docs / Daily Agent / AI Runner / report/IM/sync 后处理 | 通过 |
 | 2026-05-28 | TC-ASPO-08 | 已执行独立 crate 与跨平台编译边界静态验收命令，验证 `bifrost-asr`、feature matrix、admin 适配层和 Cargo metadata/tree 门禁 | 通过 |
 | 2026-05-28 | TC-ASPO-09 | 已执行 `bash e2e-tests/tests/test_asr_speech_pipeline_orchestrator_real_service.sh`，真实启动 Bifrost 服务并验证 speech decision、旧 ASR WS 410、wake lightweight、offline-jobs、CLI subtitle、Directory Task artifacts 和 Daily Agent 后处理入口 | 通过 |
-| 2026-05-28 | TC-ASPO-09 | 已执行 `CI=1 SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost BIFROST_ASR_PIPELINE_E2E_PORT=18998 bash e2e-tests/tests/test_asr_speech_pipeline_orchestrator_real_service.sh`，验证 CI/非在线 ASR 环境下不依赖 ffmpeg/say/Qwen3 资产，仍真实启动服务覆盖 orchestrator、legacy 410、wake lightweight | 通过 |
+| 2026-05-28 | TC-ASPO-09 | 已执行 `CI=1 SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost BIFROST_ASR_PIPELINE_E2E_PORT=18998 bash e2e-tests/tests/test_asr_speech_pipeline_orchestrator_real_service.sh`，验证 CI/非在线 ASR 环境下不依赖 ffmpeg/say/Qwen3 资产，仍真实启动服务覆盖 orchestrator、legacy 410、wake lightweight，并确认 KWS 状态不包含 Qwen3-ASR 默认依赖 | 通过 |
 | 2026-05-28 | TC-ASPO-09 | 已执行 `SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost BIFROST_ASR_PIPELINE_E2E_PORT=18999 BIFROST_ASR_PIPELINE_E2E_ONLINE=1 bash e2e-tests/tests/test_asr_speech_pipeline_orchestrator_real_service.sh`，验证 Apple Silicon 在线 ASR 真实语音、offline-jobs、CLI subtitle、Directory Task artifacts 和 Daily Agent 后处理入口 | 通过 |
 | 2026-05-28 | TC-ASPO-10 | 已执行 `rg` 静态验收，确认 `bifrost-asr` 暴露 decision/resources/planner/offline/subtitle/timeline/artifacts/profiles，Admin 通过 `bifrost_asr::*` 接入核心业务 | 通过 |
 | 2026-05-28 | TC-ASPO-11 | 已由 TC-ASPO-09 脚本覆盖真实服务 `/api/asr/transcribe-ws`，返回 410 且响应包含 `/api/voice/listen-ws` | 通过 |
 | 2026-05-28 | TC-ASPO-12 | 已由 TC-ASPO-09 脚本覆盖真实 Directory Task artifacts 和 Daily Agent 配置接口，确认单文件 Offline Pipeline 未覆盖后处理入口 | 通过 |
 | 2026-05-28 | TC-ASPO-13 | 已启动临时 Bifrost 服务并用 Playwright 打开 `/_bifrost/`，验证管理端可加载；同时通过浏览器请求 `/api/speech/pipelines/status` 确认 WebUI 后端使用的 realtime/offline/scheduled profiles 可用。WebUI 构建由本地/CI build 覆盖 | 通过 |
+| 2026-05-28 | TC-ASPO-14 | 已在 `http://127.0.0.1:19010` 启动真实服务，验证 offline decision 默认 `Qwen3-ASR-0.6B`；`speech_workbench` 启动 0.6B 后 `voice_wake_listener` 再启动返回 200 并复用同一 `server_url`；通过 `voice_wake_listener` 停止后可重新启动，未残留 owner stale state | 通过 |
+| 2026-05-28 | TC-ASPO-15 | 已在 `http://127.0.0.1:19010` 使用真实服务验证：API 只传 `name/audio_dir` 创建任务返回 `Qwen3-ASR-0.6B`、diarization enabled、voiceprint matching enabled；`cargo run --bin bifrost -- -p 19010 ai asr task create --json` 返回同样默认；Playwright 打开 WebUI 新建任务弹窗，确认 `Qwen3-ASR-0.6B` 可见且 4 个开关中包含 Speaker Diarization / Voiceprint Matching 默认打开 | 通过 |
+| 2026-05-28 | TC-ASPO-16 | 已用真实 `TX01_MIC012_20260520_102542_orig.wav` 先验证旧产物为 30 个 diarization segment 被拆成 20 个 speaker；修复后在隔离任务中重跑同一音频，任务完成且 `speaker_count=4`；随后将原 `demo` 任务的同一文件重跑，原 URL 对应文件从 `speaker_count=20` 更新为 `speaker_count=4`，timeline speakers 为 `用户A/B/C/D` | 通过 |
+| 2026-05-28 | TC-ASPO-17 | 已用真实 `TX01_MIC012_20260520_102542_orig.wav`、真实 sherpa diarization、真实 Qwen3-ASR-0.6B fork-per-chunk、真实已注册 `eden` 声纹重跑；修复后任务 `36c10c9a62654d23bd8414aaa765c05b` 完成，短碎片 `speaker_02/speaker_03` 被合并，`speaker_count=2`，主要角色 `speaker_00` 映射为 `eden` 且 `confidence=0.5412222`，另一个角色保留 `用户B` 并记录 eden candidate `0.49354425` | 通过 |

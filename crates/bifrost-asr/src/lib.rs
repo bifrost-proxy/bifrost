@@ -6,13 +6,19 @@ pub mod platform;
 pub mod profiles;
 pub mod resources;
 pub mod runtime;
+pub mod speaker;
 pub mod subtitle;
 pub mod timeline;
+pub mod wake;
 
 #[cfg(all(
     target_os = "macos",
     target_arch = "aarch64",
-    any(feature = "qwen3-offline", feature = "diarization-sherpa")
+    any(
+        feature = "qwen3-offline",
+        feature = "diarization-sherpa",
+        feature = "wake-sherpa"
+    )
 ))]
 pub mod native {
     #[cfg(feature = "qwen3-offline")]

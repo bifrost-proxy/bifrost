@@ -450,6 +450,9 @@ export interface AsrTimelineSpeaker {
   display_name: string;
   mapped_profile_id?: string;
   confidence?: number;
+  candidate_profile_id?: string;
+  candidate_display_name?: string;
+  candidate_confidence?: number;
 }
 
 export interface AsrTranscriptTimeline {
@@ -737,11 +740,18 @@ const ASR_LEGACY_PARAMS_STORAGE_KEYS = [
   "bifrost.asr.connection",
   "bifrost.asr.connection.v2",
   "bifrost.asr.connection.v3",
+  "bifrost.asr.workbench.connection.v1",
+  "bifrost.asr.model-management.connection.v1",
 ];
-const ASR_PARAMS_STORAGE_KEY = "bifrost.asr.workbench.connection.v1";
-const ASR_MODEL_MANAGEMENT_PARAMS_STORAGE_KEY = "bifrost.asr.model-management.connection.v1";
+const ASR_PARAMS_STORAGE_KEY = "bifrost.asr.workbench.connection.v2";
+const ASR_MODEL_MANAGEMENT_PARAMS_STORAGE_KEY = "bifrost.asr.model-management.connection.v2";
 export const ASR_PARAMS_CHANGED_EVENT = "bifrost.asr.params.changed";
 export const ASR_STATUS_CHANGED_EVENT = "bifrost.asr.status.changed";
+export const DEFAULT_ASR_MODEL = "Qwen3-ASR-0.6B";
+
+function clearLegacyAsrParams(): void {
+  ASR_LEGACY_PARAMS_STORAGE_KEYS.forEach((key) => window.localStorage.removeItem(key));
+}
 
 export function defaultAsrParams(): Required<
   Pick<AsrConnectionParams, "host" | "language" | "model" | "ownerModule">
@@ -749,7 +759,7 @@ export function defaultAsrParams(): Required<
   return {
     host: "127.0.0.1",
     language: "chinese",
-    model: "Qwen3-ASR-1.7B",
+    model: DEFAULT_ASR_MODEL,
     ownerModule: "speech_workbench",
   };
 }
@@ -773,7 +783,7 @@ export function defaultModelManagementParams(): Required<
   return {
     host: "127.0.0.1",
     language: "chinese",
-    model: "Qwen3-ASR-1.7B",
+    model: DEFAULT_ASR_MODEL,
     ownerModule: "model_management",
   };
 }
@@ -782,7 +792,7 @@ export function loadAsrParams(): AsrConnectionParams {
   try {
     const raw = window.localStorage.getItem(ASR_PARAMS_STORAGE_KEY);
     if (!raw) {
-      ASR_LEGACY_PARAMS_STORAGE_KEYS.forEach((key) => window.localStorage.removeItem(key));
+      clearLegacyAsrParams();
       return defaultAsrParams();
     }
     return { ...defaultAsrParams(), ...JSON.parse(raw) };
@@ -795,6 +805,7 @@ export function loadModelManagementParams(): AsrConnectionParams {
   try {
     const raw = window.localStorage.getItem(ASR_MODEL_MANAGEMENT_PARAMS_STORAGE_KEY);
     if (!raw) {
+      clearLegacyAsrParams();
       return defaultModelManagementParams();
     }
     return { ...defaultModelManagementParams(), ...JSON.parse(raw) };

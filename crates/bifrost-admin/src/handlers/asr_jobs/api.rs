@@ -260,6 +260,13 @@ fn pause_mode_from_query(query: &str) -> Result<AsrTaskPauseMode, &'static str> 
         .ok_or("invalid pause mode; use temporary or long_term")
 }
 
+fn normalize_task_diarization_config(mut config: AsrDiarizationConfig) -> AsrDiarizationConfig {
+    if config.enabled && config.known_speaker_count.is_none() && config.max_speakers.is_none() {
+        config.max_speakers = Some(bifrost_asr::profiles::DEFAULT_AUTO_MAX_SPEAKERS);
+    }
+    config
+}
+
 async fn create_task_response(req: Request<Incoming>) -> Response<BoxBody> {
     let body = match req.into_body().collect().await {
         Ok(body) => body.to_bytes(),
@@ -319,9 +326,13 @@ async fn create_task_response(req: Request<Incoming>) -> Response<BoxBody> {
         paused_at_ms: None,
         schedule,
         language: create.language.unwrap_or_else(|| "chinese".to_string()),
-        model: create.model.unwrap_or_else(|| "Qwen3-ASR-1.7B".to_string()),
+        model: create
+            .model
+            .unwrap_or_else(|| bifrost_asr::runtime::DEFAULT_ASR_MODEL.to_string()),
         runtime_strategy: create.runtime_strategy.unwrap_or_default(),
-        diarization: create.diarization.unwrap_or_default(),
+        diarization: normalize_task_diarization_config(create.diarization.unwrap_or_else(
+            bifrost_asr::profiles::AsrDiarizationConfig::speaker_aware_default,
+        )),
         created_at_ms: now,
         updated_at_ms: now,
         last_run_at_ms: None,
@@ -430,7 +441,7 @@ fn update_task_config(
         task.runtime_strategy = runtime_strategy;
     }
     if let Some(diarization) = update.diarization {
-        task.diarization = diarization;
+        task.diarization = normalize_task_diarization_config(diarization);
     }
     if let Some(daily_agent) = update.daily_agent {
         task.daily_agent = daily_agent;

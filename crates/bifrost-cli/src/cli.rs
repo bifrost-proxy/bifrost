@@ -764,7 +764,7 @@ pub enum AiVoiceWakeCommands {
             help = "Recognized phrase override for non-interactive or test runs"
         )]
         phrase: Option<String>,
-        #[arg(long, default_value = "Qwen3-ASR-1.7B", help = "ASR model name")]
+        #[arg(long, default_value = "Qwen3-ASR-0.6B", help = "ASR model name")]
         model: String,
         #[arg(long, default_value = "chinese", help = "Recognition language")]
         language: String,
@@ -809,6 +809,12 @@ pub enum AiVoiceWakeCommands {
         admin_port: u16,
         #[arg(
             long,
+            default_value = "lightweight_kws_listener",
+            value_parser = ["lightweight_kws_listener", "backend_asr_phrase_match"]
+        )]
+        engine: String,
+        #[arg(
+            long,
             help = "Backend microphone device for ffmpeg avfoundation capture; defaults to :0"
         )]
         device: Option<String>,
@@ -825,6 +831,13 @@ pub enum AiVoiceWakeListenerCommands {
     Start {
         #[arg(long, default_value = "mic", value_parser = ["mic", "mock"], help = "Listener audio source; mic uses backend capture")]
         source: String,
+        #[arg(
+            long,
+            default_value = "lightweight_kws_listener",
+            value_parser = ["lightweight_kws_listener", "backend_asr_phrase_match"],
+            help = "Wake listener engine"
+        )]
+        engine: String,
         #[arg(
             long,
             help = "Backend microphone device for ffmpeg avfoundation capture; defaults to :0"
@@ -928,7 +941,7 @@ pub enum AiAsrCommands {
         command(hide = true)
     )]
     Start {
-        #[arg(long, default_value = "Qwen3-ASR-1.7B", help = "ASR model name")]
+        #[arg(long, default_value = "Qwen3-ASR-0.6B", help = "ASR model name")]
         model: String,
         #[arg(long, default_value = "chinese", help = "Recognition language")]
         language: String,
@@ -956,7 +969,7 @@ pub enum AiAsrCommands {
     StreamFile {
         #[arg(value_hint = ValueHint::FilePath, help = "Audio file to transcribe")]
         audio: PathBuf,
-        #[arg(long, default_value = "Qwen3-ASR-1.7B", help = "ASR model name")]
+        #[arg(long, default_value = "Qwen3-ASR-0.6B", help = "ASR model name")]
         model: String,
         #[arg(long, default_value = "chinese", help = "Recognition language")]
         language: String,
@@ -976,7 +989,7 @@ pub enum AiAsrCommands {
     Subtitle {
         #[arg(value_hint = ValueHint::FilePath, help = "Audio file to subtitle")]
         audio: PathBuf,
-        #[arg(long, default_value = "Qwen3-ASR-1.7B", help = "ASR model name")]
+        #[arg(long, default_value = "Qwen3-ASR-0.6B", help = "ASR model name")]
         model: String,
         #[arg(long, default_value = "chinese", help = "Recognition language")]
         language: String,
@@ -1097,6 +1110,39 @@ pub enum AiAsrDiarizationSpeakerCommands {
 
 #[derive(Subcommand, Clone)]
 pub enum AiAsrTaskCommands {
+    #[command(about = "Create an ASR directory task")]
+    Create {
+        #[arg(long, help = "Task display name")]
+        name: Option<String>,
+        #[arg(long, value_hint = ValueHint::DirPath, help = "Audio directory to watch")]
+        dir: PathBuf,
+        #[arg(long, default_value = "Qwen3-ASR-0.6B", help = "ASR model name")]
+        model: String,
+        #[arg(long, default_value = "chinese", help = "Recognition language")]
+        language: String,
+        #[arg(long, default_value = "reuse_per_file", help = "ASR runtime strategy")]
+        runtime_strategy: String,
+        #[arg(long, default_value = "02:00", help = "Daily task time in HH:MM")]
+        time: String,
+        #[arg(long, help = "Disable the task after creation")]
+        disabled: bool,
+        #[arg(long, help = "Do not scan subdirectories")]
+        non_recursive: bool,
+        #[arg(long, help = "Disable speaker diarization")]
+        no_speaker_diarization: bool,
+        #[arg(
+            long,
+            default_value = "sherpa-onnx-balanced",
+            help = "Speaker diarization profile"
+        )]
+        diarization_profile: String,
+        #[arg(long, help = "Expected speaker count for diarization")]
+        known_speaker_count: Option<u8>,
+        #[arg(long, help = "Disable enrolled voiceprint matching")]
+        no_voiceprint_matching: bool,
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+    },
     #[command(about = "List ASR directory tasks")]
     List {
         #[arg(long, help = "Print JSON")]

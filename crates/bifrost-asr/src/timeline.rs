@@ -33,6 +33,12 @@ pub struct TimelineSpeaker {
     pub mapped_profile_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_profile_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_confidence: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

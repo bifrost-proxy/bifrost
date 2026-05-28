@@ -5,6 +5,7 @@ use bifrost_asr::native::sherpa_onnx::{
     OfflineSpeakerSegmentationModelConfig, OfflineSpeakerSegmentationPyannoteModelConfig,
     SpeakerEmbeddingExtractor, SpeakerEmbeddingExtractorConfig, Wave,
 };
+use bifrost_asr::profiles::DEFAULT_AUTO_MAX_SPEAKERS;
 
 const SHERPA_SEGMENTATION_MODEL_URL: &str =
     "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.int8.onnx";
@@ -605,6 +606,14 @@ fn count_speaker_profiles() -> usize {
         .unwrap_or(0)
 }
 
+fn resolved_diarization_cluster_count(config: &AsrDiarizationConfig) -> i32 {
+    let count = config
+        .known_speaker_count
+        .or(config.max_speakers)
+        .unwrap_or(DEFAULT_AUTO_MAX_SPEAKERS);
+    i32::from(count.max(1))
+}
+
 fn apply_diarization_to_timeline(
     task: &AsrDirectoryTask,
     timeline: &mut TranscriptTimeline,
@@ -652,7 +661,7 @@ fn run_sherpa_diarization(
         .to_str()
         .ok_or_else(|| "normalized audio path contains non-utf8 characters".to_string())?;
     let clustering = FastClusteringConfig {
-        num_clusters: config.known_speaker_count.map(i32::from).unwrap_or(-1),
+        num_clusters: resolved_diarization_cluster_count(config),
         threshold: 0.5,
     };
     let diarization_config = OfflineSpeakerDiarizationConfig {
@@ -707,6 +716,9 @@ fn run_sherpa_diarization(
                 speaker,
                 mapped_profile_id: None,
                 confidence: None,
+                candidate_profile_id: None,
+                candidate_display_name: None,
+                candidate_confidence: None,
                 start_ms: seconds_to_ms(segment.start),
                 end_ms: seconds_to_ms(segment.end),
                 overlap: raw_segments.iter().enumerate().any(|(other_index, other)| {
@@ -722,13 +734,27 @@ fn run_sherpa_diarization(
             }
         })
         .collect::<Vec<_>>();
-    if config.voiceprint_matching {
-        let speaker_embeddings = compute_diarization_speaker_embeddings(
+    let mut speaker_embeddings = compute_diarization_speaker_embeddings(
+        &embedding_model_path,
+        wave.samples(),
+        wave.sample_rate(),
+        &segments,
+    )?;
+    let merge_decisions = stabilize_diarization_speakers(
+        &mut segments,
+        &speaker_embeddings,
+        &SpeakerStabilizationConfig::default(),
+    );
+    log_speaker_stabilization_decisions(&merge_decisions);
+    if !merge_decisions.is_empty() {
+        speaker_embeddings = compute_diarization_speaker_embeddings(
             &embedding_model_path,
             wave.samples(),
             wave.sample_rate(),
             &segments,
         )?;
+    }
+    if config.voiceprint_matching {
         map_speakers_with_registered_voiceprints(&mut segments, &speaker_embeddings);
     }
     Ok(segments)
@@ -745,6 +771,19 @@ fn run_sherpa_diarization(
         std::env::consts::OS,
         std::env::consts::ARCH
     ))
+}
+
+fn log_speaker_stabilization_decisions(decisions: &[SpeakerMergeDecision]) {
+    for decision in decisions {
+        tracing::info!(
+            target: "bifrost_admin::asr_jobs",
+            from_speaker = %decision.from_speaker,
+            to_speaker = %decision.to_speaker,
+            similarity = decision.similarity,
+            reason = %decision.reason,
+            "merged unstable diarization speaker cluster"
+        );
+    }
 }
 
 pub(crate) async fn transcribe_uploaded_wav_with_voiceprint_speakers(

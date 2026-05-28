@@ -376,9 +376,11 @@ export default function DirectoryTasksPanel({
             schedule_day: 1,
             schedule_minute: 0,
             runtime_strategy: "reuse_per_file",
-            diarization_enabled: false,
+            diarization_enabled: true,
             diarization_profile: "sherpa-onnx-balanced",
-            voiceprint_matching: false,
+            voiceprint_matching: true,
+            model: "Qwen3-ASR-0.6B",
+            language: "chinese",
           }}
         >
           <Row gutter={[12, 0]}>
@@ -522,8 +524,8 @@ export default function DirectoryTasksPanel({
               <Form.Item name="model" label="Task Model">
                 <Select
                   options={[
-                    { value: "Qwen3-ASR-1.7B", label: "Qwen3-ASR-1.7B" },
                     { value: "Qwen3-ASR-0.6B", label: "Qwen3-ASR-0.6B" },
+                    { value: "Qwen3-ASR-1.7B", label: "Qwen3-ASR-1.7B" },
                   ]}
                 />
               </Form.Item>
@@ -876,11 +878,11 @@ function defaultTaskFormValues() {
     schedule_day: 1,
     schedule_minute: 0,
     runtime_strategy: "reuse_per_file",
-    diarization_enabled: false,
+    diarization_enabled: true,
     diarization_profile: "sherpa-onnx-balanced",
     diarization_known_speaker_count: undefined,
-    voiceprint_matching: false,
-    model: "Qwen3-ASR-1.7B",
+    voiceprint_matching: true,
+    model: "Qwen3-ASR-0.6B",
     language: "chinese",
     external_devices: "",
   };
@@ -925,10 +927,10 @@ function taskToFormValues(task: AsrDirectoryTask) {
     model: task.model,
     language: task.language,
     runtime_strategy: task.runtime_strategy,
-    diarization_enabled: task.diarization?.enabled ?? false,
+    diarization_enabled: task.diarization?.enabled ?? true,
     diarization_profile: task.diarization?.profile ?? "sherpa-onnx-balanced",
     diarization_known_speaker_count: task.diarization?.known_speaker_count,
-    voiceprint_matching: task.diarization?.voiceprint_matching ?? false,
+    voiceprint_matching: task.diarization?.voiceprint_matching ?? true,
     external_devices: (task.external_devices ?? []).map((device) => device.name).join("\n"),
   };
 }

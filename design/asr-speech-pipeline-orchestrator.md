@@ -172,8 +172,8 @@ diarization:
   profile: sherpa-onnx-balanced
 asr:
   provider: qwen3-offline
-  model: Qwen3-ASR-1.7B
-  fallback_model: Qwen3-ASR-0.6B
+  model: Qwen3-ASR-0.6B
+  optional_model: Qwen3-ASR-1.7B
   runtime_strategy: reuse_per_file
 planner:
   merge_same_speaker_gap_ms: 800
@@ -513,6 +513,40 @@ V2 再做：
 - overlap-aware subtitle lane。
 - source separation。
 
+### Speaker Stabilizer 和声纹优先级
+
+`max_speakers` 只限制聚类数量，不等于真实人数判断。真实音频里 sherpa diarization 仍可能把同一个人拆成多个短碎片 cluster，尤其是短句、笑声、重叠语音、远近麦和音色变化明显时。因此离线 speaker-aware pipeline 必须在 diarization 后增加稳定化阶段：
+
+```text
+DiarizationSegment[]
+  -> compute per-speaker embedding
+  -> merge embedding-similar short clusters into dominant speaker
+  -> absorb fragmentary temporal-neighbor clusters
+  -> densify local speaker ids/display names
+  -> voiceprint matching
+  -> AsrUnitPlanner
+```
+
+默认规则：
+
+```text
+speaker_merge_similarity_threshold = 0.78
+short_speaker_merge_similarity_threshold = 0.66
+short_speaker_max_duration_ms = 10000
+short_speaker_max_segments = 4
+fragment_neighbor_max_gap_ms = 5000
+voiceprint_match_threshold = 0.60
+single_registered_self_priority_threshold = 0.52
+single_registered_self_priority_min_duration_ms = 5000
+```
+
+声纹匹配策略：
+
+- 正式匹配仍以 `voiceprint_match_threshold=0.60` 为默认可信阈值。
+- 如果只有一个已注册声纹，且没有 cluster 达到 0.60，则允许把得分最高、时长足够的 cluster 标为本人。这是“用户自己录入声纹后优先识别自己”的产品语义。
+- 低于正式阈值的最佳候选仍写入 `candidate_profile_id/candidate_display_name/candidate_confidence`，用于 UI 解释和后续调参；字幕文本不使用候选身份，避免低置信度误标。
+- 多注册声纹场景不走单人 self-priority，需要后续加入 profile 间 margin 和冲突仲裁。
+
 ### OfflineSubtitlePipeline
 
 统一方法：
@@ -590,7 +624,7 @@ pub struct ResourceLeaseRequest {
 - 实时听写启动时，如果后台 scheduled task 正在跑 ASR，后台任务在 unit 边界 pause/yield。
 - 定时任务运行时，如果 realtime voice session active，不启动新文件；已启动文件在当前 unit 完成后让出。
 - 唤醒词监听默认不得持有 Qwen3 大模型，只允许轻量 KWS/VAD 常驻。
-- 离线字幕可使用 1.7B，但不能和 realtime stateful worker 同时抢 MLX。
+- 离线字幕默认使用 0.6B；用户显式选择 1.7B 时，不能和 realtime stateful worker 同时抢 MLX。
 
 ## API 改造
 
@@ -619,7 +653,7 @@ GET  /_bifrost/api/speech/decision?mode=offline_file&profile=offline-speaker-sub
     },
     "asr": {
       "provider": "qwen3-offline",
-      "model": "Qwen3-ASR-1.7B",
+      "model": "Qwen3-ASR-0.6B",
       "ready": true
     }
   },
@@ -680,7 +714,7 @@ GET  /_bifrost/api/asr/offline-jobs/{job_id}/artifacts/{format}
   },
   "pipeline_profile": "offline-speaker-subtitle-local",
   "language": "chinese",
-  "model": "Qwen3-ASR-1.7B",
+  "model": "Qwen3-ASR-0.6B",
   "speaker_aware": true,
   "subtitle_formats": ["srt", "vtt", "txt", "timeline_json"]
 }
@@ -692,7 +726,7 @@ GET  /_bifrost/api/asr/offline-jobs/{job_id}/artifacts/{format}
 
 ```json
 {
-  "model": "Qwen3-ASR-1.7B",
+  "model": "Qwen3-ASR-0.6B",
   "language": "chinese",
   "pipeline_profile": "scheduled-speaker-subtitle-local",
   "diarization": {
@@ -800,7 +834,7 @@ Speech Engines
 UI 规则：
 
 - 实时语音默认用 0.6B。
-- 字幕转换默认可用 1.7B。
+- 字幕转换默认用 0.6B，1.7B 只作为显式高精度选项。
 - Directory Task 默认按 resolved pipeline 执行；旧任务只做必要迁移，不为旧表现维持额外兼容逻辑。
 - 资产缺失时提示 Initialize，不在任务运行时偷偷下载。
 - 唤醒词常驻不默认拉起 Qwen3 大模型。
@@ -829,7 +863,7 @@ UI 规则：
   "task_id": "task_x",
   "source_path": "/audio/call.wav",
   "media_duration_ms": 128430,
-  "model": "Qwen3-ASR-1.7B",
+  "model": "Qwen3-ASR-0.6B",
   "language": "chinese",
   "pipeline_profile": "offline-speaker-subtitle-local",
   "diarization_profile": "sherpa-onnx-balanced",
@@ -980,6 +1014,10 @@ resolve_directory_task_with_diarization_maps_to_speaker_pipeline
 planner_merges_same_speaker_gap
 planner_splits_unit_over_30s
 planner_skips_short_low_energy_segments
+speaker_stabilizer_merges_short_similar_cluster
+speaker_stabilizer_absorbs_fragmentary_neighbor
+voiceprint_mapping_records_below_threshold_candidate
+voiceprint_single_registered_profile_uses_self_priority
 subtitle_writer_formats_srt_timecode
 subtitle_writer_formats_vtt_timecode
 resource_manager_realtime_preempts_scheduled
@@ -1065,4 +1103,5 @@ human_tests：
 - Directory Task 保持既有输出合并、Daily Docs、Daily Agent / AI Runner、report/IM/sync 后处理；OfflineSubtitlePipeline 只负责单文件标准 ASR 产物。
 - wake listener 默认 `lightweight_kws_listener`，不默认拉起 Qwen3；无声纹配置只允许 dry-run，真实执行动作需要 speaker verification。
 - `ResourceLeaseManager` 让 realtime voice、offline job 和 scheduled Directory Task 共用资源优先级，scheduled task 在 realtime active 时让出。
+- 托管 Qwen3-ASR runtime 按 `host/home/model/port` 共享，不再按 `owner_module` 隔离；`speech_workbench` 手动启动的 0.6B 服务必须能被 Workflows / wake listener 复用，跨 owner 停止同一模型服务时也必须清理持久化 state，避免 stale owner 阻塞 recorder。
 - 新增真实服务回归脚本 `e2e-tests/tests/test_asr_speech_pipeline_orchestrator_real_service.sh`，启动当前 Bifrost 服务并验证 speech API、旧 WS 下线、wake lightweight；在 Apple Silicon 且设置 `BIFROST_ASR_PIPELINE_E2E_ONLINE=1` 时继续验证真实语音、offline-jobs、CLI subtitle、Directory Task artifacts 和 Daily Agent 后处理入口。CI/非在线 ASR 环境不使用 mock ASR，只跳过需要本地 Qwen3-ASR 资产的产物链路。

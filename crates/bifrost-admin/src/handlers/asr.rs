@@ -456,10 +456,7 @@ async fn handle_service_stop(req: Request<Incoming>) -> Response<BoxBody> {
 
     let existing = MANAGED_SERVICE.lock().await.take();
     match existing {
-        Some(mut managed)
-            if target_matches_request(&managed.target, &target)
-                && same_service_owner(&managed.target, &target) =>
-        {
+        Some(mut managed) if target_matches_request(&managed.target, &target) => {
             let _ = managed.child.kill().await;
             let _ = clear_service_state(&bifrost_storage::data_dir());
             json_response(&AsrServiceResponse {
@@ -488,7 +485,6 @@ async fn handle_service_stop(req: Request<Incoming>) -> Response<BoxBody> {
                     && state.model == target.model
                     && state.home == target.home
                     && target.port.is_none_or(|port| port == state.port)
-                    && target_matches_state_owner(&target, &state)
                 {
                     if let Some(pid) = state.pid {
                         let _ = stop_pid(pid);
@@ -1272,9 +1268,7 @@ async fn managed_service_matches(target: &AsrTarget) -> bool {
         .lock()
         .await
         .as_ref()
-        .map(|service| {
-            same_target(&service.target, target) && same_service_owner(&service.target, target)
-        })
+        .map(|service| same_target(&service.target, target))
         .unwrap_or(false)
     {
         return true;
@@ -1285,7 +1279,6 @@ async fn managed_service_matches(target: &AsrTarget) -> bool {
                 && target.port == Some(state.port)
                 && state.model == target.model
                 && state.home == target.home
-                && target_matches_state_owner(target, &state)
         })
         .unwrap_or(false)
 }
@@ -1406,7 +1399,6 @@ async fn find_managed_target(target: &AsrTarget) -> Option<AsrTarget> {
         .await
         .as_ref()
         .filter(|service| target_matches_request(&service.target, target))
-        .filter(|service| same_service_owner(&service.target, target))
         .map(|service| service.target.clone())
 }
 
@@ -1423,20 +1415,14 @@ async fn find_conflicting_healthy_service(target: &AsrTarget) -> Option<AsrTarge
         .as_ref()
         .map(|service| service.target.clone());
     if let Some(existing) = existing_managed {
-        if !same_service_owner(&existing, target) && probe_asr_health(&existing).await.is_ok() {
-            return Some(existing);
-        }
-        if same_service_owner(&existing, target)
-            && !target_matches_request(&existing, target)
-            && probe_asr_health(&existing).await.is_ok()
-        {
+        if !target_matches_request(&existing, target) && probe_asr_health(&existing).await.is_ok() {
             return Some(existing);
         }
     }
 
     let state = read_service_state(&bifrost_storage::data_dir())?;
     let existing = target.with_state(&state);
-    if target_matches_request(&existing, target) && same_service_owner(&existing, target) {
+    if target_matches_request(&existing, target) {
         return None;
     }
     probe_asr_health(&existing).await.ok().map(|_| existing)
@@ -1473,11 +1459,7 @@ pub(crate) async fn resolve_managed_target(target: AsrTarget) -> AsrTarget {
     let Some(state) = read_service_state(&bifrost_storage::data_dir()) else {
         return target;
     };
-    if state.host == target.host
-        && state.model == target.model
-        && state.home == target.home
-        && target_matches_state_owner(&target, &state)
-    {
+    if state.host == target.host && state.model == target.model && state.home == target.home {
         let persisted = target.with_state(&state);
         if probe_asr_health(&persisted).await.is_ok() {
             return persisted;
@@ -1508,10 +1490,7 @@ pub(crate) async fn stop_managed_service_for_target(target: &AsrTarget) {
         let mut guard = MANAGED_SERVICE.lock().await;
         let should_stop = guard
             .as_ref()
-            .map(|managed| {
-                target_matches_request(&managed.target, target)
-                    && same_service_owner(&managed.target, target)
-            })
+            .map(|managed| target_matches_request(&managed.target, target))
             .unwrap_or(false);
         if should_stop {
             guard.take()
@@ -1528,7 +1507,6 @@ pub(crate) async fn stop_managed_service_for_target(target: &AsrTarget) {
             && state.model == target.model
             && state.home == target.home
             && target.port.is_none_or(|port| port == state.port)
-            && target_matches_state_owner(target, &state)
         {
             if let Some(pid) = state.pid {
                 terminate_service_process_group(Some(pid));
@@ -1746,19 +1724,16 @@ fn target_matches_request(managed: &AsrTarget, requested: &AsrTarget) -> bool {
             .unwrap_or(true)
 }
 
+#[cfg(test)]
 fn same_service_owner(left: &AsrTarget, right: &AsrTarget) -> bool {
     left.owner_module == right.owner_module && left.owner_id == right.owner_id
-}
-
-fn target_matches_state_owner(target: &AsrTarget, state: &AsrServiceState) -> bool {
-    target.owner_module == state.lease_owner_module() && target.owner_id == state.owner_id
 }
 
 /// 检查持久化的 ASR target 是否匹配当前请求。
 /// 注意参数顺序：第一个是请求方的 target，第二个是从持久化 state 恢复的 target。
 /// 内部委托 target_matches_request(existing=persisted, requested=requested)。
 fn persisted_target_matches_request(requested: &AsrTarget, persisted: &AsrTarget) -> bool {
-    target_matches_request(persisted, requested) && same_service_owner(persisted, requested)
+    target_matches_request(persisted, requested)
 }
 
 async fn run_initializer(
@@ -2741,7 +2716,7 @@ mod tests {
     }
 
     #[test]
-    fn qwen3_service_owner_isolation_blocks_other_modules() {
+    fn qwen3_service_runtime_is_shared_across_modules_for_same_model() {
         let workbench = target_from_query(Some(
             "model=Qwen3-ASR-0.6B&owner_module=speech_workbench&port=18080",
         ))
@@ -2761,17 +2736,17 @@ mod tests {
     }
 
     #[test]
-    fn qwen3_service_owner_id_must_match_within_same_module() {
+    fn qwen3_service_runtime_is_shared_across_owner_ids_for_same_model() {
         let task_a = target_from_query(Some(
-            "model=Qwen3-ASR-1.7B&owner_module=directory_task&owner_id=task-a",
+            "model=Qwen3-ASR-0.6B&owner_module=directory_task&owner_id=task-a",
         ))
         .unwrap();
         let task_b = target_from_query(Some(
-            "model=Qwen3-ASR-1.7B&owner_module=directory_task&owner_id=task-b",
+            "model=Qwen3-ASR-0.6B&owner_module=directory_task&owner_id=task-b",
         ))
         .unwrap();
         let task_a_without_port = target_from_query(Some(
-            "model=Qwen3-ASR-1.7B&owner_module=directory_task&owner_id=task-a",
+            "model=Qwen3-ASR-0.6B&owner_module=directory_task&owner_id=task-a",
         ))
         .unwrap();
 
@@ -2825,9 +2800,9 @@ mod tests {
     }
 
     #[test]
-    fn qwen3_owner_scoped_status_does_not_probe_default_port() {
+    fn qwen3_owner_agnostic_status_reuses_matching_port() {
         let target = target_from_query(Some(
-            "model=Qwen3-ASR-1.7B&owner_module=directory_task&owner_id=task-a",
+            "model=Qwen3-ASR-0.6B&owner_module=directory_task&owner_id=task-a",
         ))
         .unwrap();
         let workbench =
@@ -2837,7 +2812,7 @@ mod tests {
                 .with_state(&crate::asr_runtime::AsrServiceState {
                     host: "127.0.0.1".to_string(),
                     port: 18080,
-                    model: "Qwen3-ASR-1.7B".to_string(),
+                    model: "Qwen3-ASR-0.6B".to_string(),
                     language: "chinese".to_string(),
                     home: default_home(),
                     pid: None,
@@ -2850,16 +2825,17 @@ mod tests {
         assert_eq!(target.port, None);
         assert_eq!(workbench.port, Some(18080));
         assert!(!same_service_owner(&target, &workbench));
+        assert!(target_matches_request(&workbench, &target));
     }
 
     #[test]
     fn qwen3_resolved_state_preserves_owner_and_port() {
         let requested =
-            target_from_query(Some("model=Qwen3-ASR-1.7B&owner_module=speech_workbench")).unwrap();
+            target_from_query(Some("model=Qwen3-ASR-0.6B&owner_module=speech_workbench")).unwrap();
         let resolved = requested.with_state(&crate::asr_runtime::AsrServiceState {
             host: "127.0.0.1".to_string(),
             port: 18081,
-            model: "Qwen3-ASR-1.7B".to_string(),
+            model: "Qwen3-ASR-0.6B".to_string(),
             language: "chinese".to_string(),
             home: default_home(),
             pid: None,
@@ -2876,15 +2852,15 @@ mod tests {
     }
 
     #[test]
-    fn qwen3_dynamic_request_reuses_same_owner_persisted_service() {
+    fn qwen3_dynamic_request_reuses_persisted_service_across_owners() {
         let requested = target_from_query(Some(
-            "model=Qwen3-ASR-1.7B&owner_module=directory_task&owner_id=task-a",
+            "model=Qwen3-ASR-0.6B&owner_module=directory_task&owner_id=task-a",
         ))
         .unwrap();
         let persisted = requested.with_state(&crate::asr_runtime::AsrServiceState {
             host: "127.0.0.1".to_string(),
             port: 60241,
-            model: "Qwen3-ASR-1.7B".to_string(),
+            model: "Qwen3-ASR-0.6B".to_string(),
             language: "chinese".to_string(),
             home: default_home(),
             pid: Some(12345),
@@ -2894,14 +2870,14 @@ mod tests {
             started_at_ms: 1,
         });
         let conflicting_task = target_from_query(Some(
-            "model=Qwen3-ASR-1.7B&owner_module=directory_task&owner_id=task-b",
+            "model=Qwen3-ASR-0.6B&owner_module=directory_task&owner_id=task-b",
         ))
         .unwrap();
 
         assert_eq!(requested.port, None);
         assert_eq!(persisted.port, Some(60241));
         assert!(persisted_target_matches_request(&requested, &persisted));
-        assert!(!persisted_target_matches_request(
+        assert!(persisted_target_matches_request(
             &conflicting_task,
             &persisted
         ));

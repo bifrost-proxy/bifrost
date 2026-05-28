@@ -283,6 +283,9 @@ async fn run_offline_job_inner(
                             display_name: segment.display_name.clone(),
                             mapped_profile_id: segment.mapped_profile_id.clone(),
                             confidence: segment.confidence,
+                            candidate_profile_id: None,
+                            candidate_display_name: None,
+                            candidate_confidence: None,
                         });
                     TimelineSegment {
                         index: segment.index,

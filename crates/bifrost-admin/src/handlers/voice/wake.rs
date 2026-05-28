@@ -4,7 +4,12 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
+use std::time::Duration;
 
+use bifrost_asr::wake::{
+    normalize_wake_phrase, wake_phrase_matches, SherpaKwsModelPack, DEFAULT_WAKE_KWS_ARCHIVE_URL,
+    DEFAULT_WAKE_KWS_PROFILE,
+};
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use hyper::{Method, Request, Response, StatusCode};
@@ -247,6 +252,8 @@ impl Default for VoiceWakeListenerStartRequest {
 pub(super) async fn handle_voice_wake(req: Request<Incoming>, path: &str) -> Response<BoxBody> {
     match (req.method(), path) {
         (&Method::GET, "/api/voice/wake/status") => get_status_response().await,
+        (&Method::GET, "/api/voice/wake/kws/status") => get_kws_status_response(),
+        (&Method::POST, "/api/voice/wake/kws/init") => post_kws_init_response(),
         (&Method::GET, "/api/voice/wake/profiles") => get_profiles_response(),
         (&Method::POST, "/api/voice/wake/profiles") => post_profile_response(req).await,
         (&Method::GET, "/api/voice/wake/bindings") => get_bindings_response(),
@@ -266,15 +273,24 @@ pub(super) async fn handle_voice_wake(req: Request<Incoming>, path: &str) -> Res
 
 async fn get_status_response() -> Response<BoxBody> {
     let listener = listener_state_snapshot().await;
+    let default_engine = default_listener_engine();
+    let kws_pack = voice_wake_kws_model_pack();
     match load_store() {
         Ok(store) => json_response(&serde_json::json!({
             "enabled": store.enabled,
             "profile_count": store.profiles.len(),
             "binding_count": store.bindings.len(),
             "event_count": store.events.len(),
-            "mode": "lightweight_kws_listener",
+            "mode": default_engine,
             "fallback": "backend_asr_phrase_match",
             "requires_qwen_by_default": false,
+            "kws": {
+                "engine": "sherpa-onnx",
+                "profile": DEFAULT_WAKE_KWS_PROFILE,
+                "ready": kws_pack.is_ready(),
+                "install_dir": kws_pack.root_dir,
+                "missing_files": kws_pack.missing_files(),
+            },
             "store_path": store_path(),
             "default_dry_run": true,
             "listener": listener
@@ -286,6 +302,21 @@ async fn get_status_response() -> Response<BoxBody> {
 fn get_profiles_response() -> Response<BoxBody> {
     match load_store() {
         Ok(store) => json_response(&serde_json::json!({ "profiles": store.profiles })),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
+    }
+}
+
+fn get_kws_status_response() -> Response<BoxBody> {
+    json_response(&voice_wake_kws_status_json())
+}
+
+fn post_kws_init_response() -> Response<BoxBody> {
+    match prepare_voice_wake_kws_profile() {
+        Ok(()) => json_response(&serde_json::json!({
+            "profile": DEFAULT_WAKE_KWS_PROFILE,
+            "status": voice_wake_kws_status_json(),
+            "message": "voice wake KWS profile initialized"
+        })),
         Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
     }
 }
@@ -453,11 +484,29 @@ async fn post_listener_start_response(req: Request<Incoming>) -> Response<BoxBod
             "voice wake listener engine must be lightweight_kws_listener or backend_asr_phrase_match",
         );
     }
-    if source == "mic" && engine == "backend_asr_phrase_match" && std::env::consts::OS != "macos" {
+    if source == "mic" && std::env::consts::OS != "macos" {
         return error_response(
             StatusCode::BAD_REQUEST,
-            "backend ASR microphone fallback listener is currently implemented for macOS",
+            "voice wake microphone listener is currently implemented for macOS",
         );
+    }
+    if source == "mic" && engine == "lightweight_kws_listener" {
+        let pack = voice_wake_kws_model_pack();
+        if !pack.is_ready() {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!(
+                    "voice_wake_kws_missing_assets: initialize {} under {}; missing {}",
+                    DEFAULT_WAKE_KWS_PROFILE,
+                    pack.root_dir.display(),
+                    pack.missing_files()
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            );
+        }
     }
     let store = match load_store() {
         Ok(store) => store,
@@ -506,7 +555,10 @@ async fn post_listener_start_response(req: Request<Incoming>) -> Response<BoxBod
         last_speaker_status: None,
         trigger_count: 0,
     };
-    if request.source == "mic" && request.engine == "backend_asr_phrase_match" {
+    if request.source == "mic"
+        && (request.engine == "backend_asr_phrase_match"
+            || request.engine == "lightweight_kws_listener")
+    {
         match spawn_voice_wake_worker(&request, &admin_host, admin_port).await {
             Ok((pid, task)) => {
                 runtime.worker_pid = Some(pid);
@@ -598,6 +650,8 @@ async fn spawn_voice_wake_worker(
         .arg(admin_host)
         .arg("--admin-port")
         .arg(admin_port.to_string())
+        .arg("--engine")
+        .arg(request.engine.clone())
         .arg("--chunk-ms")
         .arg(chunk_ms.to_string())
         .env(
@@ -823,7 +877,7 @@ fn listener_match_candidate(
     let Some(binding) = store.bindings.iter().find(|binding| {
         binding.enabled
             && !binding.normalized_phrase.is_empty()
-            && normalized_transcript.contains(&binding.normalized_phrase)
+            && phrase_matches(&normalized_transcript, &binding.normalized_phrase)
     }) else {
         return Err("no_match".to_string());
     };
@@ -915,7 +969,7 @@ fn trigger_binding(
     let now = now_ms();
     let Some(binding_index) = store.bindings.iter().position(|binding| {
         binding.enabled
-            && binding.normalized_phrase == normalized
+            && phrase_matches(&normalized, &binding.normalized_phrase)
             && profile_filter
                 .map(|profile_id| profile_id == binding.profile_id)
                 .unwrap_or(true)
@@ -1244,6 +1298,105 @@ fn store_path() -> PathBuf {
         .join("actions.json")
 }
 
+fn voice_wake_kws_model_pack() -> SherpaKwsModelPack {
+    SherpaKwsModelPack::for_root(
+        bifrost_storage::data_dir()
+            .join("asr")
+            .join("wake")
+            .join("kws")
+            .join(DEFAULT_WAKE_KWS_PROFILE),
+    )
+}
+
+fn voice_wake_kws_status_json() -> serde_json::Value {
+    let pack = voice_wake_kws_model_pack();
+    serde_json::json!({
+        "engine": "sherpa-onnx",
+        "profile": DEFAULT_WAKE_KWS_PROFILE,
+        "ready": pack.is_ready(),
+        "install_dir": pack.root_dir,
+        "model_dir": pack.model_dir,
+        "archive_url": DEFAULT_WAKE_KWS_ARCHIVE_URL,
+        "missing_files": pack.missing_files(),
+    })
+}
+
+fn prepare_voice_wake_kws_profile() -> Result<(), String> {
+    let pack = voice_wake_kws_model_pack();
+    if pack.is_ready() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(&pack.root_dir)
+        .map_err(|error| format!("create voice wake KWS profile dir: {error}"))?;
+    let archive_path = pack.archive_path();
+    download_voice_wake_kws_archive(&archive_path)?;
+    let status = Command::new("tar")
+        .arg("-xjf")
+        .arg(&archive_path)
+        .arg("-C")
+        .arg(&pack.root_dir)
+        .status()
+        .map_err(|error| format!("extract voice wake KWS archive with tar: {error}"))?;
+    if !status.success() {
+        return Err(format!(
+            "extract voice wake KWS archive failed with status {status}"
+        ));
+    }
+    if !pack.is_ready() {
+        return Err(format!(
+            "voice wake KWS profile extracted but required files are missing: {}",
+            pack.missing_files()
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    Ok(())
+}
+
+fn download_voice_wake_kws_archive(destination: &Path) -> Result<(), String> {
+    if destination
+        .metadata()
+        .map(|metadata| metadata.is_file() && metadata.len() > 1_000_000)
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    let temp_path = destination.with_extension("download");
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(30 * 60))
+        .build();
+    let response = agent
+        .get(DEFAULT_WAKE_KWS_ARCHIVE_URL)
+        .call()
+        .map_err(|error| format!("download voice wake KWS model: {error}"))?;
+    let mut reader = response.into_reader();
+    let mut output = std::fs::File::create(&temp_path)
+        .map_err(|error| format!("create {}: {error}", temp_path.display()))?;
+    std::io::copy(&mut reader, &mut output)
+        .map_err(|error| format!("write {}: {error}", temp_path.display()))?;
+    drop(output);
+    let len = temp_path
+        .metadata()
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    if len <= 1_000_000 {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(format!(
+            "downloaded voice wake KWS archive is incomplete: {} has {len} bytes",
+            temp_path.display()
+        ));
+    }
+    std::fs::rename(&temp_path, destination).map_err(|error| {
+        format!(
+            "install voice wake KWS archive {} -> {}: {error}",
+            temp_path.display(),
+            destination.display()
+        )
+    })
+}
+
 fn atomic_json_write<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -1257,7 +1410,11 @@ fn atomic_json_write<T: Serialize>(path: &Path, value: &T) -> Result<(), String>
 }
 
 fn normalize_phrase(phrase: &str) -> String {
-    phrase.to_lowercase().split_whitespace().collect()
+    normalize_wake_phrase(phrase)
+}
+
+fn phrase_matches(normalized_transcript: &str, normalized_binding: &str) -> bool {
+    wake_phrase_matches(normalized_transcript, normalized_binding)
 }
 
 fn validate_id(value: &str, label: &str) -> Result<(), String> {
@@ -1307,6 +1464,27 @@ mod tests {
     #[test]
     fn normalizes_phrase_whitespace_without_changing_text() {
         assert_eq!(normalize_phrase("  打开   录音 "), "打开录音");
+    }
+
+    #[test]
+    fn normalizes_phrase_punctuation() {
+        assert_eq!(normalize_phrase("哈喽哈喽。"), "哈喽哈喽");
+        assert_eq!(normalize_phrase("Hello, Bifrost!"), "hellobifrost");
+    }
+
+    #[test]
+    fn phrase_match_collapses_repeated_wake_word() {
+        let binding = normalize_phrase("哈喽哈喽。");
+        let transcript = normalize_phrase("哈喽");
+        assert!(phrase_matches(&transcript, &binding));
+        assert!(phrase_matches(
+            &normalize_phrase("现在 哈喽 一下"),
+            &binding
+        ));
+        assert!(!phrase_matches(
+            &normalize_phrase("打开"),
+            &normalize_phrase("打开录音")
+        ));
     }
 
     #[test]

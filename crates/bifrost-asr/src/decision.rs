@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::profiles::{
-    builtin_profile, OFFLINE_PLAIN_ASR_PROFILE, OFFLINE_SPEAKER_SUBTITLE_PROFILE,
-    REALTIME_DICTATION_PROFILE, REALTIME_WAKE_PROFILE, SCHEDULED_SPEAKER_SUBTITLE_PROFILE,
+    builtin_profile, OFFLINE_ASR_MODEL, OFFLINE_PLAIN_ASR_PROFILE,
+    OFFLINE_SPEAKER_SUBTITLE_PROFILE, REALTIME_DICTATION_PROFILE, REALTIME_WAKE_PROFILE,
+    SCHEDULED_SPEAKER_SUBTITLE_PROFILE,
 };
 use crate::profiles::{SpeechMode, SpeechPipelineProfile};
 
@@ -247,7 +248,7 @@ fn resolve_asr(
                     .offline
                     .as_ref()
                     .map(|offline| offline.model.clone())
-                    .unwrap_or_else(|| "Qwen3-ASR-1.7B".to_string())
+                    .unwrap_or_else(|| OFFLINE_ASR_MODEL.to_string())
             }),
         ),
     };

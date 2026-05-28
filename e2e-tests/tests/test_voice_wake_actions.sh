@@ -78,6 +78,7 @@ curl -fsS "http://127.0.0.1:$PORT/_bifrost/api/voice/wake/status" >/dev/null
 
 echo "[voice-wake] rejecting listener start before voiceprint binding exists"
 if BIFROST_DATA_DIR="$DATA_DIR" "$BIN" -p "$PORT" ai voice wake listener start --source mock \
+  --engine backend_asr_phrase_match \
   --mock-transcripts "现在 打开 录音" \
   --dry-run \
   --mock-speaker-profile-id spk-e2e \
@@ -139,6 +140,7 @@ PY
 echo "[voice-wake] starting backend listener with mock ASR transcript"
 BIFROST_DATA_DIR="$DATA_DIR" "$BIN" -p "$PORT" ai voice wake listener start \
   --source mock \
+  --engine backend_asr_phrase_match \
   --mock-transcripts "现在 打开 录音" \
   --dry-run \
   --mock-interval-ms 1 \
@@ -183,6 +185,7 @@ BIFROST_DATA_DIR="$DATA_DIR" "$BIN" -p "$PORT" ai voice wake listener stop --jso
 sleep 0.05
 BIFROST_DATA_DIR="$DATA_DIR" "$BIN" -p "$PORT" ai voice wake listener start \
   --source mock \
+  --engine backend_asr_phrase_match \
   --mock-transcripts "现在 打开 录音" \
   --dry-run \
   --mock-interval-ms 1 \

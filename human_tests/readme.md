@@ -27,7 +27,7 @@
 | [port-conflict-restart.md](./port-conflict-restart.md) | 端口冲突检测与自动重启 | 6 | 端口占用检测、进程信息显示、交互式终止确认、--yes 自动确认、PID 检测兼容性、非交互端口冲突早于系统代理摘要回归 |
 | [cli-log-output-default.md](./cli-log-output-default.md) | CLI 日志输出默认行为 | 9 | --log-output 默认值修复回归：非 start 命令不写文件、start 前台不写文件、daemon 写文件、daemon 结构化 tracing 元数据、显式指定覆盖，以及默认 info 日志隐藏常态连接生命周期与规则命中噪声 |
 | [asr-task-cli-tui.md](./asr-task-cli-tui.md) | ASR Task CLI TUI | 10 | `bifrost ai asr task watch/tui` 单任务自动进入、多任务交互选择、传 task 直接进入、运行进度/消耗信息、Daily/Jennie Agent 处理状态、Daily 文档交互选择、文件打开、刷新/运行/暂停/强制暂停动作、错误提示、窄终端降级和 read-only 模式 |
-| [asr-speech-pipeline-orchestrator.md](./asr-speech-pipeline-orchestrator.md) | ASR Speech Pipeline Orchestrator | 13 | 顶层可执行方案与真实服务回归：统一实时语音、离线字幕、Directory Task、唤醒词、资源优先级、旧支持下线、独立 `bifrost-asr` 编译边界、Admin ASR 业务逻辑迁移、API/CLI/WebUI、artifact schema、Daily Agent/AI Runner 后处理、真实 offline-jobs/Directory Task artifacts、分阶段落地和 Review/Fix/Test |
+| [asr-speech-pipeline-orchestrator.md](./asr-speech-pipeline-orchestrator.md) | ASR Speech Pipeline Orchestrator | 17 | 顶层可执行方案与真实服务回归：统一实时语音、离线字幕、Directory Task、唤醒词、资源优先级、旧支持下线、独立 `bifrost-asr` 编译边界、Admin ASR 业务逻辑迁移、API/CLI/WebUI、artifact schema、Daily Agent/AI Runner 后处理、共享 ASR runtime、Directory Task 默认 0.6B 且说话人/声纹匹配开启、未知人数默认 speaker 上限、短碎片 speaker 稳定化、单注册声纹优先识别、真实 offline-jobs/Directory Task artifacts、分阶段落地和 Review/Fix/Test |
 | [audio-diarization-asr.md](./audio-diarization-asr.md) | Audio Diarization 与 ASR 离线任务集成 | 23 | 双引擎 + 可插拔 profile、V1 ASR Directory Task 离线集成、先 diarization 再 speaker 切片 ASR、speaker-aware timeline/text/Daily Docs、ASR 页面交互状态、WebUI/CLI 模型初始化、实时朗读声纹录入与自动文本匹配推进、多句 embedding 平均、声纹删除与实时身份验证、短音频验证持续累计有效语音、WebUI 拖入文件与 CLI 指定单文件声纹匹配 speaker-aware 输出、Speech Engine 编排方案、真实音频目录任务配置验证、Qwen3-ASR-0.6B 真实多 speaker Daily Markdown 验证，以及 armv7/aarch64/musl sherpa-onnx 依赖边界回归 |
 | [asr-platform-gating.md](./asr-platform-gating.md) | ASR Platform Gating | 8 | macOS aarch64 支持矩阵、capability API、非支持平台隐藏 WebUI/CLI ASR 入口、独立 `bifrost-asr` 编译边界、Cargo target dependency 不解析 qwen3-asr/sherpa-onnx、native diarization/voiceprint cfg 边界、admin ASR 纯业务逻辑迁移边界、Directory Task artifact API 与 subtitle writer 归属 |
 | [voice-wake-actions.md](./voice-wake-actions.md) | Voice Wake Actions | 10 | 复用 Speaker Diarization 已录入声纹、本机唤醒音频录入、后端 ASR 生成录音下方只读唤醒文本、快捷键输入框直接捕获组合键、CLI bind-audio 音频样本绑定与 listener 后台麦克风启动、文本+声纹双门禁、WebUI 开关启动门禁、独立 worker 跟随主服务停止、后台不可达错误提示、API events 落盘，以及 CLI 显式 execute 真实按键边界 |
@@ -202,7 +202,7 @@
 
 ---
 
-**总计：135 个测试文件，2327 个测试用例**
+**总计：135 个测试文件，2328 个测试用例**
 
 ## 工作流程
 

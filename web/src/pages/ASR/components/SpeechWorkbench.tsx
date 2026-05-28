@@ -110,7 +110,7 @@ export default function SpeechWorkbench({
           <Space wrap style={{ width: "100%" }}>
             <Select
               aria-label="Workbench ASR model"
-              value={params.model || "Qwen3-ASR-1.7B"}
+              value={params.model || "Qwen3-ASR-0.6B"}
               style={{ minWidth: 180 }}
               options={[
                 { value: "Qwen3-ASR-0.6B", label: "Qwen3-ASR-0.6B" },

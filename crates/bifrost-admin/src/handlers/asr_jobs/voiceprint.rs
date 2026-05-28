@@ -904,6 +904,16 @@ pub(crate) fn registered_speaker_profile_exists(profile_id: &str) -> bool {
         .any(|profile| profile.id == profile_id)
 }
 
+const VOICEPRINT_SELF_PRIORITY_THRESHOLD: f32 = 0.52;
+const VOICEPRINT_SELF_PRIORITY_MIN_DURATION_MS: u64 = 5_000;
+
+#[derive(Debug, Clone)]
+struct DiarizationVoiceprintCandidate {
+    profile_id: String,
+    display_name: String,
+    score: f32,
+}
+
 #[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
 fn map_speakers_with_registered_voiceprints(
     diarization_segments: &mut [DiarizationSegment],
@@ -913,10 +923,8 @@ fn map_speakers_with_registered_voiceprints(
     if profiles.is_empty() {
         return;
     }
-    for segment in diarization_segments {
-        let Some(embedding) = speaker_embeddings.get(&segment.speaker) else {
-            continue;
-        };
+    let mut candidates = BTreeMap::<String, DiarizationVoiceprintCandidate>::new();
+    for (speaker, embedding) in speaker_embeddings {
         let Some((profile, score)) = profiles
             .iter()
             .filter_map(|profile| {
@@ -928,12 +936,75 @@ fn map_speakers_with_registered_voiceprints(
         else {
             continue;
         };
-        if score >= VOICEPRINT_SPEAKER_MATCH_THRESHOLD {
-            segment.display_name = profile.display_name.clone();
-            segment.mapped_profile_id = Some(profile.id.clone());
-            segment.confidence = Some(score);
+        candidates.insert(
+            speaker.clone(),
+            DiarizationVoiceprintCandidate {
+                profile_id: profile.id.clone(),
+                display_name: profile.display_name.clone(),
+                score,
+            },
+        );
+    }
+    let self_priority_speaker = if profiles.len() == 1 {
+        let durations = diarization_speaker_durations(diarization_segments);
+        candidates
+            .iter()
+            .filter(|(speaker, candidate)| {
+                candidate.score >= VOICEPRINT_SELF_PRIORITY_THRESHOLD
+                    && durations.get(*speaker).is_some_and(|duration| {
+                        *duration >= VOICEPRINT_SELF_PRIORITY_MIN_DURATION_MS
+                    })
+            })
+            .max_by(|(_, left), (_, right)| {
+                left.score
+                    .partial_cmp(&right.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(speaker, _)| speaker.clone())
+    } else {
+        None
+    };
+    for (speaker, candidate) in &candidates {
+        let self_priority_matched = self_priority_speaker
+            .as_ref()
+            .is_some_and(|matched_speaker| matched_speaker == speaker);
+        tracing::info!(
+            target: "bifrost_admin::asr_jobs",
+            speaker = %speaker,
+            profile_id = %candidate.profile_id,
+            profile_name = %candidate.display_name,
+            confidence = candidate.score,
+            matched = candidate.score >= VOICEPRINT_SPEAKER_MATCH_THRESHOLD || self_priority_matched,
+            self_priority_matched = self_priority_matched,
+            threshold = VOICEPRINT_SPEAKER_MATCH_THRESHOLD,
+            "evaluated diarization speaker voiceprint candidate"
+        );
+    }
+    for segment in diarization_segments {
+        let Some(candidate) = candidates.get(&segment.speaker) else {
+            continue;
+        };
+        segment.candidate_profile_id = Some(candidate.profile_id.clone());
+        segment.candidate_display_name = Some(candidate.display_name.clone());
+        segment.candidate_confidence = Some(candidate.score);
+        let self_priority_matched = self_priority_speaker
+            .as_ref()
+            .is_some_and(|speaker| speaker == &segment.speaker);
+        if candidate.score >= VOICEPRINT_SPEAKER_MATCH_THRESHOLD || self_priority_matched {
+            segment.display_name = candidate.display_name.clone();
+            segment.mapped_profile_id = Some(candidate.profile_id.clone());
+            segment.confidence = Some(candidate.score);
         }
     }
+}
+
+fn diarization_speaker_durations(segments: &[DiarizationSegment]) -> BTreeMap<String, u64> {
+    let mut durations = BTreeMap::new();
+    for segment in segments {
+        *durations.entry(segment.speaker.clone()).or_default() +=
+            segment.end_ms.saturating_sub(segment.start_ms);
+    }
+    durations
 }
 
 fn identify_speaker_voice(

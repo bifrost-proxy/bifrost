@@ -627,12 +627,19 @@ fn handle_wake_command(client: &AsrTaskClient, action: AiVoiceWakeCommands) -> R
         AiVoiceWakeCommands::Worker {
             admin_host,
             admin_port,
+            engine,
             device,
             chunk_ms,
             dry_run,
         } => {
             let worker_client = AsrTaskClient::new(&admin_host, admin_port);
-            run_wake_worker(&worker_client, device.as_deref(), chunk_ms, !dry_run)
+            run_wake_worker(
+                &worker_client,
+                device.as_deref(),
+                chunk_ms,
+                !dry_run,
+                &engine,
+            )
         }
     }
 }
@@ -644,6 +651,7 @@ fn handle_wake_listener_command(
     match action {
         AiVoiceWakeListenerCommands::Start {
             source,
+            engine,
             device,
             chunk_ms,
             dry_run,
@@ -655,6 +663,7 @@ fn handle_wake_listener_command(
         } => {
             let body = serde_json::json!({
                 "source": source,
+                "engine": engine,
                 "device": device,
                 "chunk_ms": chunk_ms,
                 "execute": !dry_run,

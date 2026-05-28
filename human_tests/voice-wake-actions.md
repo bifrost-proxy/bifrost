@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证本机 Voice Wake Actions 能复用现有 Speaker Diarization 声纹录入模块中的 speaker profile，录入唤醒音频后由后端 ASR 识别唤醒文本，绑定到全局快捷键，并在启动后台监听后通过“唤醒文本 + 本人声纹”双门禁触发真实按键动作。CLI/API 仍保留非执行测试路径用于自动化安全验证；WebUI 不展示该概念。
+验证本机 Voice Wake Actions 能复用现有 Speaker Diarization 声纹录入模块中的 speaker profile，录入唤醒音频后由后端识别唤醒文本，绑定到全局快捷键，并在启动后台监听后通过“轻量 KWS 候选 + 本人声纹”双门禁触发真实按键动作。默认 listener 使用 sherpa-onnx KWS，不默认拉起 Qwen3-ASR；backend ASR phrase match 只作为显式 fallback 和 mock 自动化验证路径。CLI/API 仍保留非执行测试路径用于自动化安全验证；WebUI 不展示该概念。
 
 ## 前置条件
 
@@ -11,6 +11,7 @@
 - 启动服务必须带 `--no-system-proxy`。
 - 如执行真实按键用例，macOS 需要给当前终端或 Bifrost 进程授予 Accessibility 权限。
 - 如执行真实后台监听，macOS 需要给当前终端或 Bifrost 进程授予 Microphone 权限，并确保 `ffmpeg` 可用。
+- 默认轻量唤醒需要初始化 sherpa-onnx KWS 模型资产；资产缺失时 listener start 必须明确失败，不能隐式拉起 Qwen3-ASR 或偷偷下载。
 
 推荐准备：
 
@@ -173,7 +174,7 @@ JSON
 
 - 2026-05-27：通过。隔离 binding 使用 `escape`；不带 `--execute` 时返回 dry-run 且 `executed=false`，带 `--execute` 时进入真实执行路径并返回 `key press executed`。
 
-### TC-VWA-06：WebUI 录音样本生成只读唤醒文本并启动后台监听
+### TC-VWA-06：WebUI 录音样本生成只读唤醒文本并启动轻量后台监听
 
 操作步骤：
 
@@ -197,24 +198,26 @@ JSON
 - 录音停止后由后端 ASR 自动生成唤醒文本。
 - `Voiceprint` 展示已有 Speaker Diarization 声纹，用户只能选择已有声纹，不能在 Voice Wake 中手工录入声纹 ID。
 - `Global shortcut` 不是下拉框；用户按下组合键后，输入框直接展示捕获到的快捷键。
-- 启用 `Voice command` 开关或点击 `Start Listening` 后状态显示 `Backend Listening`。
+- 启用 `Voice command` 开关或点击 `Start Listening` 后状态显示 backend listener running，listener engine 为 `lightweight_kws_listener`。
 - 页面关闭后 listener 仍在 Bifrost 后台进程内运行。
 - CLI 等价启动命令 `ai voice wake listener start` 默认使用 Bifrost 后台内置麦克风采集链路，不需要浏览器打开或参与音频读取；未指定设备时默认使用 `:0`。
-- 本人说出唤醒词后后端 listener 识别文本并通过声纹验证，事件表显示 `测试唤醒`，结果为 `Executed`。
+- 本人说出唤醒词后轻量 KWS 命中候选，再通过声纹验证，事件表显示 `测试唤醒`，结果为 `Executed`。
+- 默认 listener 不启动 Qwen3-ASR 服务；只有显式选择 `backend_asr_phrase_match` fallback 才允许使用 ASR phrase match。
 - 页面不展示 `dry-run`。
 
 实际结果：
 
 - 2026-05-27：通过。本轮 `web/tests/ui/voice-wake-actions.spec.ts` 验证 ASR 页面显示 `Voice Wake Actions`、`Record Wake Audio`、只读 `Wake phrase`、`Voiceprint` 已有声纹选择、`Global shortcut` 快捷键输入框和 `Voice command` 开关；测试模拟直接按下 `Alt+Shift+A` 后输入框展示 `shift+option+a`，点击 `Save` 后事件表也显示该快捷键；启用开关后进入后端 listener 状态，状态区显示 `91% voice`，事件表显示 `Executed`，页面未展示 `dry-run`，未使用浏览器 SpeechRecognition。真实麦克风说话触发需用户在 18892 服务里现场验证。
+- 2026-05-28：通过。已补充默认 listener engine 为 `lightweight_kws_listener`，并通过真实服务 `GET /api/voice/wake/kws/status` 验证该 engine 不要求默认 Qwen3-ASR；mock 自动化路径显式使用 `backend_asr_phrase_match`，避免把重 ASR fallback 当默认唤醒方案。
 
 ### TC-VWA-07：非绑定声纹不能触发同一唤醒词
 
 操作步骤：
 
-1. 使用 mock listener 启动一次匹配文本但 speaker profile 不同的后台监听：
+1. 使用 mock listener 启动一次匹配文本但 speaker profile 不同的后台监听，并显式指定 ASR fallback engine：
    ```bash
    curl -sS -H 'content-type: application/json' \
-     -d '{"source":"mock","mock_transcripts":["现在 打开 录音"],"execute":false,"mock_interval_ms":1,"mock_speaker_profile_id":"speaker_other","mock_speaker_confidence":0.95}' \
+     -d '{"source":"mock","engine":"backend_asr_phrase_match","mock_transcripts":["现在 打开 录音"],"execute":false,"mock_interval_ms":1,"mock_speaker_profile_id":"speaker_other","mock_speaker_confidence":0.95}' \
      http://127.0.0.1:18892/_bifrost/api/voice/wake/listener/start
    ```
 2. 查询状态：
@@ -281,6 +284,7 @@ JSON
 
 - 2026-05-27：通过。`web/tests/ui/voice-wake-actions.spec.ts` 分别覆盖无声纹和已有声纹但无保存指令两种状态，`Voice command` 开关和 `Start Listening` 均禁用，并显示对应提示；`e2e-tests/tests/test_voice_wake_actions.sh` 还验证未保存 voice command 前 CLI/API listener start 被 400 拒绝，不会启动后台监听。
 - 2026-05-28：通过。CI Linux shard 2 暴露 `test_voice_wake_actions.sh` 在 `SKIP_BUILD=true` 时仍重新 debug build，导致 shard timeout；已改为复用 `BIFROST_BIN`/`target/release/bifrost`。本地执行 `SKIP_BUILD=true BIFROST_BIN=$PWD/target/debug/bifrost BIFROST_VOICE_WAKE_E2E_PORT=18992 bash e2e-tests/tests/test_voice_wake_actions.sh`，验证未保存 voice command 拒绝启动、绑定音频快捷键、dry-run 触发、mock listener 同声纹触发和异声纹拒绝均通过。
+- 2026-05-28：通过。默认 listener 改为轻量 KWS 后，本地再次执行 `SKIP_BUILD=true BIFROST_BIN=$PWD/target/debug/bifrost BIFROST_VOICE_WAKE_E2E_PORT=18992 bash e2e-tests/tests/test_voice_wake_actions.sh`，mock transcript 用例显式指定 `--engine backend_asr_phrase_match`，验证 fallback 路径仍可用于自动化，默认 KWS 不被 mock ASR 用例掩盖。
 
 ### TC-VWA-10：后台监听 worker 跟随主服务 stop 退出
 
@@ -289,7 +293,7 @@ JSON
 1. 使用临时 `BIFROST_DATA_DIR` 启动 Bifrost，并创建关联已有声纹的 Voice Wake profile 与 binding。
 2. 执行：
    ```bash
-   BIFROST_DATA_DIR="$BIFROST_DATA_DIR" ./.bifrost-human-voice-wake-target/debug/bifrost -p 18892 ai voice wake listener start --json
+  BIFROST_DATA_DIR="$BIFROST_DATA_DIR" ./.bifrost-human-voice-wake-target/debug/bifrost -p 18892 ai voice wake listener start --engine backend_asr_phrase_match --json
    ```
 3. 查询 listener 状态，记录 `listener.worker_pid`。
 4. 停止主服务：

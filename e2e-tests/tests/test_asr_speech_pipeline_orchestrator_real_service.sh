@@ -112,7 +112,7 @@ import json, sys
 data = json.load(open(sys.argv[1]))
 assert data["pipeline_profile"] == "offline-speaker-subtitle-local", data
 assert data["diarization"] is not None, data
-assert data["asr"]["model"] == "Qwen3-ASR-1.7B", data
+assert data["asr"]["model"] == "Qwen3-ASR-0.6B", data
 PY
 
 echo "[asr-speech-pipeline-real] legacy ASR websocket is gone"
@@ -129,13 +129,21 @@ curl -fsS -X POST "http://127.0.0.1:$PORT/_bifrost/api/voice/wake/bindings" \
   --data '{"id":"wake_binding_phrase_only","phrase":"hello bifrost","profile_id":"wake_phrase_only","cooldown_ms":1,"action":{"type":"key_press","key":"space","keycode":null,"modifiers":["cmd"],"press_count":1}}' >"$TEST_ROOT/wake-binding.json"
 curl -fsS -X POST "http://127.0.0.1:$PORT/_bifrost/api/voice/wake/listener/start" \
   -H 'Content-Type: application/json' \
-  --data '{"source":"mic","engine":"lightweight_kws_listener","execute":false,"chunk_ms":1000}' >"$TEST_ROOT/wake-listener.json"
+  --data '{"source":"mock","engine":"lightweight_kws_listener","mock_transcripts":["hello bifrost"],"execute":false,"chunk_ms":1000}' >"$TEST_ROOT/wake-listener.json"
 python3 - "$TEST_ROOT/wake-listener.json" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1]))
 assert data["listener"]["running"] is True, data
 assert data["listener"]["engine"] == "lightweight_kws_listener", data
 assert data["listener"]["worker_pid"] is None, data
+PY
+curl -fsS "http://127.0.0.1:$PORT/_bifrost/api/voice/wake/kws/status" >"$TEST_ROOT/wake-kws-status.json"
+python3 - "$TEST_ROOT/wake-kws-status.json" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+assert data["engine"] == "sherpa-onnx", data
+assert "Qwen3-ASR" not in json.dumps(data), data
+assert isinstance(data["ready"], bool), data
 PY
 curl -fsS -X POST "http://127.0.0.1:$PORT/_bifrost/api/voice/wake/trigger" \
   -H 'Content-Type: application/json' \
@@ -166,7 +174,7 @@ fi
 
 echo "[asr-speech-pipeline-real] offline-jobs API creates subtitle artifacts"
 curl -fsS -X POST \
-  "http://127.0.0.1:$PORT/_bifrost/api/asr/offline-jobs?model=Qwen3-ASR-1.7B&language=english&pipeline_profile=offline-speaker-subtitle-local&speaker_aware=0" \
+  "http://127.0.0.1:$PORT/_bifrost/api/asr/offline-jobs?model=Qwen3-ASR-0.6B&language=english&pipeline_profile=offline-speaker-subtitle-local&speaker_aware=0" \
   -F "file=@$AUDIO_DIR/meeting.wav;type=audio/wav" >"$TEST_ROOT/offline-create.json"
 JOB_ID="$(python3 - "$TEST_ROOT/offline-create.json" <<'PY'
 import json, sys
@@ -222,7 +230,7 @@ print(json.dumps({
   "enabled": False,
   "schedule": {"kind": "daily", "hour": 3, "minute": 0},
   "language": "english",
-  "model": "Qwen3-ASR-1.7B",
+  "model": "Qwen3-ASR-0.6B",
   "runtime_strategy": "reuse_per_file",
   "pipeline_profile": "scheduled-speaker-subtitle-local",
   "diarization": {"enabled": False, "profile": "sherpa-onnx-balanced"},

@@ -71,6 +71,21 @@ mod tests {
     }
 
     #[test]
+    fn diarization_cluster_count_prefers_known_then_max_then_default_cap() {
+        let mut config = AsrDiarizationConfig::default();
+        assert_eq!(
+            resolved_diarization_cluster_count(&config),
+            i32::from(DEFAULT_AUTO_MAX_SPEAKERS)
+        );
+
+        config.max_speakers = Some(3);
+        assert_eq!(resolved_diarization_cluster_count(&config), 3);
+
+        config.known_speaker_count = Some(2);
+        assert_eq!(resolved_diarization_cluster_count(&config), 2);
+    }
+
+    #[test]
     fn diarization_profile_ready_requires_real_model_files() {
         let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
@@ -158,6 +173,9 @@ mod tests {
                 display_name: "用户D".to_string(),
                 mapped_profile_id: None,
                 confidence: None,
+                candidate_profile_id: None,
+                candidate_display_name: None,
+                candidate_confidence: None,
                 start_ms: 0,
                 end_ms: 1_100,
                 overlap: false,
@@ -167,6 +185,9 @@ mod tests {
                 display_name: "用户B".to_string(),
                 mapped_profile_id: None,
                 confidence: None,
+                candidate_profile_id: None,
+                candidate_display_name: None,
+                candidate_confidence: None,
                 start_ms: 1_100,
                 end_ms: 2_000,
                 overlap: false,
@@ -257,6 +278,9 @@ mod tests {
             display_name: "用户A".to_string(),
             mapped_profile_id: None,
             confidence: None,
+            candidate_profile_id: None,
+            candidate_display_name: None,
+            candidate_confidence: None,
             start_ms: 0,
             end_ms: 1_000,
             overlap: false,
@@ -272,10 +296,132 @@ mod tests {
         assert_eq!(segments[0].display_name, "Eden");
         assert_eq!(segments[0].mapped_profile_id.as_deref(), Some("spk-eden"));
         assert!((segments[0].confidence.unwrap() - 0.70).abs() < 0.001);
+        assert_eq!(segments[0].candidate_profile_id.as_deref(), Some("spk-eden"));
+        assert_eq!(segments[0].candidate_display_name.as_deref(), Some("Eden"));
+        assert!((segments[0].candidate_confidence.unwrap() - 0.70).abs() < 0.001);
         assert_eq!(speaker_transcript_label(&segments[0]), "Eden (70% match)");
         assert_eq!(speakers[0].display_name, "Eden");
         assert_eq!(speakers[0].mapped_profile_id.as_deref(), Some("spk-eden"));
         assert!((speakers[0].confidence.unwrap() - 0.70).abs() < 0.001);
+    }
+
+    #[test]
+    fn voiceprint_mapping_records_below_threshold_candidate() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        std::fs::create_dir_all(voiceprint_dir()).unwrap();
+        let profile = SpeakerVoiceprintProfile {
+            id: "spk-eden".to_string(),
+            display_name: "Eden".to_string(),
+            source: "live_enrollment".to_string(),
+            diarization_profile: DEFAULT_DIARIZATION_PROFILE.to_string(),
+            embedding_model: "test".to_string(),
+            embedding_dim: 2,
+            embedding: vec![1.0, 0.0],
+            sample_rate: VOICEPRINT_SAMPLE_RATE,
+            total_duration_ms: 3_000,
+            samples: Vec::new(),
+            created_at_ms: now_ms(),
+            updated_at_ms: now_ms(),
+        };
+        atomic_json_write(&speaker_profile_path(&profile.id), &profile).unwrap();
+        let mut segments = vec![DiarizationSegment {
+            speaker: "speaker_00".to_string(),
+            display_name: "用户A".to_string(),
+            mapped_profile_id: None,
+            confidence: None,
+            candidate_profile_id: None,
+            candidate_display_name: None,
+            candidate_confidence: None,
+            start_ms: 0,
+            end_ms: 1_000,
+            overlap: false,
+        }];
+        let embeddings = BTreeMap::from([(
+            "speaker_00".to_string(),
+            vec![0.50, (1.0_f32 - 0.50_f32 * 0.50_f32).sqrt()],
+        )]);
+
+        map_speakers_with_registered_voiceprints(&mut segments, &embeddings);
+        let speakers = speakers_from_diarization_segments(&segments);
+
+        assert_eq!(segments[0].display_name, "用户A");
+        assert_eq!(segments[0].mapped_profile_id, None);
+        assert_eq!(segments[0].confidence, None);
+        assert_eq!(segments[0].candidate_profile_id.as_deref(), Some("spk-eden"));
+        assert_eq!(segments[0].candidate_display_name.as_deref(), Some("Eden"));
+        assert!((segments[0].candidate_confidence.unwrap() - 0.50).abs() < 0.001);
+        assert_eq!(speakers[0].mapped_profile_id, None);
+        assert_eq!(speakers[0].candidate_display_name.as_deref(), Some("Eden"));
+    }
+
+    #[test]
+    fn voiceprint_mapping_uses_single_registered_self_priority() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        std::fs::create_dir_all(voiceprint_dir()).unwrap();
+        let profile = SpeakerVoiceprintProfile {
+            id: "spk-eden".to_string(),
+            display_name: "Eden".to_string(),
+            source: "live_enrollment".to_string(),
+            diarization_profile: DEFAULT_DIARIZATION_PROFILE.to_string(),
+            embedding_model: "test".to_string(),
+            embedding_dim: 2,
+            embedding: vec![1.0, 0.0],
+            sample_rate: VOICEPRINT_SAMPLE_RATE,
+            total_duration_ms: 3_000,
+            samples: Vec::new(),
+            created_at_ms: now_ms(),
+            updated_at_ms: now_ms(),
+        };
+        atomic_json_write(&speaker_profile_path(&profile.id), &profile).unwrap();
+        let mut segments = vec![
+            DiarizationSegment {
+                speaker: "speaker_00".to_string(),
+                display_name: "用户A".to_string(),
+                mapped_profile_id: None,
+                confidence: None,
+                candidate_profile_id: None,
+                candidate_display_name: None,
+                candidate_confidence: None,
+                start_ms: 0,
+                end_ms: 6_000,
+                overlap: false,
+            },
+            DiarizationSegment {
+                speaker: "speaker_01".to_string(),
+                display_name: "用户B".to_string(),
+                mapped_profile_id: None,
+                confidence: None,
+                candidate_profile_id: None,
+                candidate_display_name: None,
+                candidate_confidence: None,
+                start_ms: 7_000,
+                end_ms: 15_000,
+                overlap: false,
+            },
+        ];
+        let embeddings = BTreeMap::from([
+            (
+                "speaker_00".to_string(),
+                vec![0.53, (1.0_f32 - 0.53_f32 * 0.53_f32).sqrt()],
+            ),
+            (
+                "speaker_01".to_string(),
+                vec![0.49, (1.0_f32 - 0.49_f32 * 0.49_f32).sqrt()],
+            ),
+        ]);
+
+        map_speakers_with_registered_voiceprints(&mut segments, &embeddings);
+
+        assert_eq!(segments[0].display_name, "Eden");
+        assert_eq!(segments[0].mapped_profile_id.as_deref(), Some("spk-eden"));
+        assert!((segments[0].confidence.unwrap() - 0.53).abs() < 0.001);
+        assert_eq!(segments[1].display_name, "用户B");
+        assert_eq!(segments[1].mapped_profile_id, None);
+        assert_eq!(segments[1].candidate_display_name.as_deref(), Some("Eden"));
     }
 
     #[test]

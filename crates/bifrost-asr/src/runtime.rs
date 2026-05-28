@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_ASR_HOST: &str = "127.0.0.1";
 pub const DEFAULT_ASR_LANGUAGE: &str = "chinese";
-pub const DEFAULT_ASR_MODEL: &str = "Qwen3-ASR-1.7B";
+pub const DEFAULT_ASR_MODEL: &str = "Qwen3-ASR-0.6B";
 pub const ASR_INSTALL_NAME: &str = "qwen3_asr_rs";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
