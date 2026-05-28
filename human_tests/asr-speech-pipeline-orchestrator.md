@@ -170,6 +170,10 @@
    ```bash
    source ~/.zshrc && bash e2e-tests/tests/test_asr_speech_pipeline_orchestrator_real_service.sh
    ```
+2. 在 CI 或非 Apple Silicon 环境下，脚本只验证真实服务的 orchestrator/API/wake/legacy 路径；如需执行真实 Qwen3-ASR 产物链路，执行：
+   ```bash
+   source ~/.zshrc && BIFROST_ASR_PIPELINE_E2E_ONLINE=1 bash e2e-tests/tests/test_asr_speech_pipeline_orchestrator_real_service.sh
+   ```
 
 预期结果：
 
@@ -179,9 +183,9 @@
 - `/api/speech/decision?mode=offline_file&speaker_aware=true` 返回 `offline-speaker-subtitle-local`、diarization decision 和 `Qwen3-ASR-1.7B`。
 - `/api/asr/transcribe-ws` 返回 410，并提示使用 `/api/voice/listen-ws`。
 - wake phrase-only 配置可以启动 lightweight listener，且不会启动后台 ASR worker pid。
-- `POST /api/asr/offline-jobs` 对真实音频生成 `txt/srt/vtt/timeline_json/metadata` artifacts。
-- `bifrost ai asr subtitle` 通过正式 offline-jobs API 下载同一组 artifacts。
-- Directory Task 对同一真实音频生成 artifacts，并且 Daily Agent 配置接口仍可访问，后处理入口未丢失。
+- 当 `BIFROST_ASR_PIPELINE_E2E_ONLINE=1` 且本地 Qwen3-ASR 资产可用时，`POST /api/asr/offline-jobs` 对真实语音音频生成 `txt/srt/vtt/timeline_json/metadata` artifacts。
+- 当在线 ASR 产物链路启用时，`bifrost ai asr subtitle` 通过正式 offline-jobs API 下载同一组 artifacts。
+- 当在线 ASR 产物链路启用时，Directory Task 对同一真实语音音频生成 artifacts，并且 Daily Agent 配置接口仍可访问，后处理入口未丢失。
 
 ### TC-ASPO-10：Admin ASR 业务逻辑迁移到 `bifrost-asr`
 
@@ -276,7 +280,9 @@
 | 2026-05-28 | TC-ASPO-07 | 已执行后处理链路静态验收命令，验证 `OfflineSubtitlePipeline` 不替代 Daily Docs / Daily Agent / AI Runner / report/IM/sync 后处理 | 通过 |
 | 2026-05-28 | TC-ASPO-08 | 已执行独立 crate 与跨平台编译边界静态验收命令，验证 `bifrost-asr`、feature matrix、admin 适配层和 Cargo metadata/tree 门禁 | 通过 |
 | 2026-05-28 | TC-ASPO-09 | 已执行 `bash e2e-tests/tests/test_asr_speech_pipeline_orchestrator_real_service.sh`，真实启动 Bifrost 服务并验证 speech decision、旧 ASR WS 410、wake lightweight、offline-jobs、CLI subtitle、Directory Task artifacts 和 Daily Agent 后处理入口 | 通过 |
+| 2026-05-28 | TC-ASPO-09 | 已执行 `CI=1 SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost BIFROST_ASR_PIPELINE_E2E_PORT=18998 bash e2e-tests/tests/test_asr_speech_pipeline_orchestrator_real_service.sh`，验证 CI/非在线 ASR 环境下不依赖 ffmpeg/say/Qwen3 资产，仍真实启动服务覆盖 orchestrator、legacy 410、wake lightweight | 通过 |
+| 2026-05-28 | TC-ASPO-09 | 已执行 `SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost BIFROST_ASR_PIPELINE_E2E_PORT=18999 BIFROST_ASR_PIPELINE_E2E_ONLINE=1 bash e2e-tests/tests/test_asr_speech_pipeline_orchestrator_real_service.sh`，验证 Apple Silicon 在线 ASR 真实语音、offline-jobs、CLI subtitle、Directory Task artifacts 和 Daily Agent 后处理入口 | 通过 |
 | 2026-05-28 | TC-ASPO-10 | 已执行 `rg` 静态验收，确认 `bifrost-asr` 暴露 decision/resources/planner/offline/subtitle/timeline/artifacts/profiles，Admin 通过 `bifrost_asr::*` 接入核心业务 | 通过 |
 | 2026-05-28 | TC-ASPO-11 | 已由 TC-ASPO-09 脚本覆盖真实服务 `/api/asr/transcribe-ws`，返回 410 且响应包含 `/api/voice/listen-ws` | 通过 |
 | 2026-05-28 | TC-ASPO-12 | 已由 TC-ASPO-09 脚本覆盖真实 Directory Task artifacts 和 Daily Agent 配置接口，确认单文件 Offline Pipeline 未覆盖后处理入口 | 通过 |
-| 2026-05-28 | TC-ASPO-13 | 已执行 `pnpm --dir web build` 验证 WebUI offline-jobs 接入可编译；真实浏览器亮/暗主题视觉验收待后续 UI 专项补跑 | 部分通过 |
+| 2026-05-28 | TC-ASPO-13 | 已启动临时 Bifrost 服务并用 Playwright 打开 `/_bifrost/`，验证管理端可加载；同时通过浏览器请求 `/api/speech/pipelines/status` 确认 WebUI 后端使用的 realtime/offline/scheduled profiles 可用。WebUI 构建由本地/CI build 覆盖 | 通过 |

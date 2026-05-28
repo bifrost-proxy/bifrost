@@ -1065,4 +1065,4 @@ human_tests：
 - Directory Task 保持既有输出合并、Daily Docs、Daily Agent / AI Runner、report/IM/sync 后处理；OfflineSubtitlePipeline 只负责单文件标准 ASR 产物。
 - wake listener 默认 `lightweight_kws_listener`，不默认拉起 Qwen3；无声纹配置只允许 dry-run，真实执行动作需要 speaker verification。
 - `ResourceLeaseManager` 让 realtime voice、offline job 和 scheduled Directory Task 共用资源优先级，scheduled task 在 realtime active 时让出。
-- 新增真实服务回归脚本 `e2e-tests/tests/test_asr_speech_pipeline_orchestrator_real_service.sh`，启动当前 Bifrost 服务并验证 speech API、旧 WS 下线、wake lightweight、offline-jobs、CLI subtitle、Directory Task artifacts 和 Daily Agent 后处理入口。
+- 新增真实服务回归脚本 `e2e-tests/tests/test_asr_speech_pipeline_orchestrator_real_service.sh`，启动当前 Bifrost 服务并验证 speech API、旧 WS 下线、wake lightweight；在 Apple Silicon 且设置 `BIFROST_ASR_PIPELINE_E2E_ONLINE=1` 时继续验证真实语音、offline-jobs、CLI subtitle、Directory Task artifacts 和 Daily Agent 后处理入口。CI/非在线 ASR 环境不使用 mock ASR，只跳过需要本地 Qwen3-ASR 资产的产物链路。
