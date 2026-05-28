@@ -1991,9 +1991,8 @@ async fn sync_group_rules_until_rule_content(
     expected_content: &str,
 ) -> Result<(), String> {
     let deadline = Instant::now() + Duration::from_secs(10);
-    let mut last_list: Option<String> = None;
 
-    loop {
+    let last_list = loop {
         let resp = client
             .get(format!(
                 "http://127.0.0.1:{}/_bifrost/api/group-rules/{}",
@@ -2007,7 +2006,7 @@ async fn sync_group_rules_until_rule_content(
             .text()
             .await
             .map_err(|e| format!("Failed to read group list sync response: {e}"))?;
-        last_list = Some(format!("status={} body={body}", status.as_u16()));
+        let current_list = format!("status={} body={body}", status.as_u16());
 
         if status.as_u16() == 200 {
             let synced_rule = group_storage.load(rule_name).ok();
@@ -2021,16 +2020,15 @@ async fn sync_group_rules_until_rule_content(
         }
 
         if Instant::now() >= deadline {
-            break;
+            break current_list;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    };
 
     let last_summary = fetch_active_summary(client, port)
         .await
         .map(|v| v.to_string())
         .unwrap_or_else(|e| format!("failed to fetch active summary: {e}"));
-    let last_list = last_list.unwrap_or_else(|| "list sync was not attempted".to_string());
     Err(format!(
         "Timed out waiting for synced group rule {rule_name}; last_list={last_list}; last_summary={last_summary}; last_badge={}",
         admin_state.badge_rules_json()
