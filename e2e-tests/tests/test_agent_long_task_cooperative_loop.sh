@@ -5,8 +5,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_DIR"
 
-BIFROST_PORT="${BIFROST_PORT:-18911}"
-MOCK_PORT="${MOCK_PORT:-18912}"
+pick_free_port() {
+  python3 - <<'PY'
+import socket
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+}
+
+BIFROST_PORT="${BIFROST_PORT:-$(pick_free_port)}"
+MOCK_PORT="${MOCK_PORT:-$(pick_free_port)}"
 TEST_DIR="$(mktemp -d)"
 MOCK_LOG="$TEST_DIR/mock-requests.jsonl"
 BIFROST_LOG="$TEST_DIR/bifrost.log"
@@ -19,10 +28,10 @@ resolve_bifrost_bin() {
   for candidate in \
     "$requested" \
     "${requested}.exe" \
-    "$REPO_DIR/target/release/bifrost" \
-    "$REPO_DIR/target/release/bifrost.exe" \
     "$REPO_DIR/target/debug/bifrost" \
-    "$REPO_DIR/target/debug/bifrost.exe"; do
+    "$REPO_DIR/target/debug/bifrost.exe" \
+    "$REPO_DIR/target/release/bifrost" \
+    "$REPO_DIR/target/release/bifrost.exe"; do
     if [[ -n "$candidate" && -x "$candidate" ]]; then
       printf '%s\n' "$candidate"
       return 0

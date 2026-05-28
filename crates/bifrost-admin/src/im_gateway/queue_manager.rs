@@ -9,7 +9,7 @@ use serde::Serialize;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use bifrost_agent::session::GuideChannel;
+use bifrost_agent::session::{GuideChannel, GuideMessageChannel};
 
 /// A queued message with a sequence number.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -64,7 +64,7 @@ impl SessionQueueManager {
     pub fn get_or_create_guide_channel(&self, session_key: &str) -> GuideChannel {
         self.guide_slots
             .entry(session_key.to_string())
-            .or_insert_with(|| Arc::new(std::sync::Mutex::new(VecDeque::new())))
+            .or_insert_with(|| Arc::new(GuideMessageChannel::new()))
             .clone()
     }
 
@@ -72,16 +72,14 @@ impl SessionQueueManager {
     /// Returns the number of guide messages now waiting to enter the loop.
     pub fn inject_guide(&self, session_key: &str, msg: String) -> usize {
         let channel = self.get_or_create_guide_channel(session_key);
-        let mut guard = channel.lock().unwrap();
-        guard.push_back(msg);
-        guard.len()
+        channel.push_back(msg)
     }
 
     /// Get pending guide messages without modifying state.
     pub fn guide_status(&self, session_key: &str) -> Vec<String> {
         self.guide_slots
             .get(session_key)
-            .map(|entry| entry.lock().unwrap().iter().cloned().collect())
+            .map(|entry| entry.snapshot())
             .unwrap_or_default()
     }
 

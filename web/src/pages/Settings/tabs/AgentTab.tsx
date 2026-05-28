@@ -75,7 +75,6 @@ const MEMORY_DEFAULTS = {
 
 const RUNTIME_DEFAULTS = {
   max_turn_iterations: DEFAULTS.max_turn_iterations,
-  max_history_messages: DEFAULTS.max_history_messages,
   session_ttl_secs: DEFAULTS.session_ttl_secs,
   request_timeout_secs: DEFAULTS.request_timeout_secs,
   tool_output_token_limit: DEFAULTS.tool_output_token_limit,
@@ -965,26 +964,6 @@ export default function AgentTab({ hideSectionNav = false }: AgentTabProps) {
                     onChange={(val) => handleNumberChange("max_turn_iterations", val)}
                     min={1}
                     step={1}
-                    style={{ width: 120 }}
-                    size="small"
-                  />
-                </Col>
-              </Row>
-
-              <Divider style={{ margin: "12px 0" }} />
-
-              <Row justify="space-between" align="middle">
-                <Col>
-                  <Text>Max History Messages</Text>
-                </Col>
-                <Col>
-                  <InputNumber
-                    value={config.max_history_messages}
-                    onChange={(val) =>
-                      handleNumberChange("max_history_messages", val)
-                    }
-                    min={1}
-                    step={10}
                     style={{ width: 120 }}
                     size="small"
                   />

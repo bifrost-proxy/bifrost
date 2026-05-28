@@ -8,6 +8,7 @@ import { useVersionStore } from "../../stores/useVersionStore";
 import { useSyncStore } from "../../stores/useSyncStore";
 import type { SyncStatus } from "../../api/sync";
 import VersionModal from "../VersionModal";
+import AiSkillAssistant from "../AiSkillAssistant";
 
 function formatSyncAction(action?: SyncStatus["last_sync_action"]): string | null {
   switch (action) {
@@ -336,6 +337,11 @@ const StatusBar = memo(function StatusBar() {
       fontSize: 10,
       color: token.colorSuccess,
     },
+    rightCluster: {
+      display: "flex",
+      alignItems: "center",
+      gap: 6,
+    },
   };
 
   const versionTooltip = hasUpdate
@@ -426,25 +432,29 @@ const StatusBar = memo(function StatusBar() {
         {overview?.system?.version && (
           <>
             <div style={{ flex: 1 }} />
-            <Tooltip title={versionTooltip}>
-              <div
-                style={styles.versionButton}
-                onClick={handleVersionClick}
-                data-testid="statusbar-version-button"
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.backgroundColor = token.colorFillSecondary;
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.backgroundColor = "transparent";
-                }}
-              >
-                {hasUpdate && <div style={styles.updateDot} />}
-                <span style={styles.value}>v{overview.system.version}</span>
-                {hasUpdate && (
-                  <ArrowUpOutlined style={styles.updateArrow} />
-                )}
-              </div>
-            </Tooltip>
+            <div style={styles.rightCluster}>
+              <Tooltip title={versionTooltip}>
+                <div
+                  style={styles.versionButton}
+                  onClick={handleVersionClick}
+                  data-testid="statusbar-version-button"
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.backgroundColor = token.colorFillSecondary;
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.backgroundColor = "transparent";
+                  }}
+                >
+                  {hasUpdate && <div style={styles.updateDot} />}
+                  <span style={styles.value}>v{overview.system.version}</span>
+                  {hasUpdate && (
+                    <ArrowUpOutlined style={styles.updateArrow} />
+                  )}
+                </div>
+              </Tooltip>
+              <div style={styles.separator} />
+              <AiSkillAssistant />
+            </div>
           </>
         )}
       </div>

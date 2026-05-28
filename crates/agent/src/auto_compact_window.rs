@@ -1,11 +1,11 @@
-//! Auto-compact window tracking for scoped compaction budgets.
+//! Auto-compact window tracking for status/debug telemetry.
 //!
-//! Aligned with Codex's `AutoCompactWindow` system:
+//! Bifrost's runtime compaction trigger follows Codex's current total-token
+//! threshold. This window still tracks a per-compaction-cycle prefill baseline
+//! for diagnostics:
 //! - Each compaction cycle creates a new "window" with an ordinal
 //! - The window tracks a prefill baseline (initial input tokens)
-//! - Compaction triggers when `active_context - prefill_baseline > threshold`
-//! - This prevents the initial context (system prompt, instructions) from being
-//!   counted against the compaction budget
+//! - Debug/status consumers can inspect `active_context - prefill_baseline`
 //!
 //! Key design: the prefill baseline is established per window from either:
 //! 1. Server-observed `input_tokens` from the first API response (preferred)
@@ -36,11 +36,11 @@ enum PrefillSource {
     Estimated(u64),
 }
 
-/// Tracks the auto-compaction window state for a session.
+/// Tracks auto-compaction window telemetry for a session.
 ///
-/// The window system ensures compaction is triggered based on growth within
-/// the current window, not absolute token count. This prevents initial context
-/// (system prompts, AGENTS.md, etc.) from being double-counted.
+/// The window is not the compaction trigger; `compact::should_compact()`
+/// compares Codex-style total effective context tokens to the configured
+/// threshold. This state is retained for progress/debug surfaces.
 ///
 /// Lifecycle:
 /// 1. Window starts at ordinal=1 with no prefill

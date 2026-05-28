@@ -338,7 +338,12 @@ export default function SessionDetailPage({
           <Descriptions.Item label="Est. Tokens">
             {sessionDetail.estimated_tokens?.toLocaleString() ?? "-"}
           </Descriptions.Item>
-          <Descriptions.Item label="Compactions">{sessionDetail.compaction_count}</Descriptions.Item>
+          <Descriptions.Item label="Explicit Compactions">{sessionDetail.compaction_count}</Descriptions.Item>
+          <Descriptions.Item label="Context Management">
+            {sessionDetail.message_count != null
+              ? `Full history (${sessionDetail.message_count}) · token budget + compaction`
+              : "Token budget + compaction"}
+          </Descriptions.Item>
           <Descriptions.Item label="Created">{formatTs(sessionDetail.created_at)}</Descriptions.Item>
           <Descriptions.Item label="Last Active">{formatTs(sessionDetail.last_active_at)}</Descriptions.Item>
           <Descriptions.Item label="Duration">

@@ -302,32 +302,24 @@ session.history_version = session.history_version.saturating_add(1);
 
 ### 4.2 召回策略
 
-当前 prompt 注入策略是：每次模型请求调用 `build_messages(system_prompt, max_history)`，把 system prompt 和历史消息拼成 Chat Completions messages；当历史过长时按 `max_history_messages` 裁剪，保留 compaction summary 和最近消息。
+当前 prompt 注入策略是：每次模型请求调用 `build_messages(system_prompt)`，把 system prompt 和完整 sanitized history 拼成 Chat Completions messages；历史过长时通过 token/context budget 触发 compaction，只有 provider context-window overflow fallback 才会删除最老消息重试。
 
 证据：
 
 ```rust
-// crates/agent/src/session.rs:L192-L235
-fn build_messages(&self, system_prompt: &str, max_history: u32) -> Vec<ChatMessage> {
+// crates/agent/src/session.rs
+fn build_messages(
+    &self,
+    prompt_prefix: &[ChatMessage],
+    memory_message: Option<&ChatMessage>,
+) -> Vec<ChatMessage> {
+    let full_history = self.history.clone();
     let mut messages = Vec::new();
-    if !system_prompt.is_empty() {
-        messages.push(ChatMessage::system(system_prompt));
+    messages.extend(prompt_prefix.iter().cloned());
+    if let Some(memory_message) = memory_message {
+        messages.push(memory_message.clone());
     }
-    ...
-    if max > 0 && history.len() > max {
-        let has_summary = self.compaction_count > 0 && !history.is_empty();
-        if has_summary {
-            messages.push(history[0].clone());
-            let tail_start = history.len().saturating_sub(max.saturating_sub(1));
-            let tail_start = tail_start.max(1);
-            messages.extend_from_slice(&history[tail_start..]);
-        } else {
-            let tail_start = history.len().saturating_sub(max);
-            messages.extend_from_slice(&history[tail_start..]);
-        }
-    } else {
-        messages.extend(history.iter().cloned());
-    }
+    messages.extend(full_history);
     let (sanitized, report) = history::sanitize_chat_history(&messages);
     ...
     sanitized

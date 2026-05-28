@@ -17,7 +17,6 @@ export const DEFAULTS = {
   model_auto_compact_token_limit: undefined as number | undefined,
   max_completion_tokens: 16_384,
   max_turn_iterations: 1000,
-  max_history_messages: 50,
   session_ttl_secs: 3600,
   request_timeout_secs: 600,
   tool_output_token_limit: 10_000,
@@ -114,7 +113,6 @@ export interface AgentConfig {
   skills?: Record<string, unknown>;
   project_doc_max_bytes?: number;
   max_turn_iterations?: number;
-  max_history_messages?: number;
   session_ttl_secs?: number;
   tool_output_token_limit?: number;
   request_timeout_secs?: number;

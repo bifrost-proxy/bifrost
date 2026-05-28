@@ -341,7 +341,9 @@ pub(super) fn im_status_text_formats_metrics_and_runner_metadata() {
     assert!(text.contains("外部会话: Codex threadId=thread-status-123"));
     assert!(text.contains("历史对话轮次: 2"));
     assert!(text.contains("API 累计 token: 38.6K"));
-    assert!(text.contains("压缩次数: 2"));
+    assert!(text.contains("显式压缩次数: 2"));
+    assert!(text.contains("上下文管理: 按 token/context budget 与 compaction 管理"));
+    assert!(text.contains("常规请求使用完整 history：3 条"));
 }
 
 #[test]

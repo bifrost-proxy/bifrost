@@ -1,6 +1,6 @@
 use super::turn_loop::*;
 use super::*;
-use crate::config::ModelProviderConfig;
+use crate::config::{AgentConfig, ModelProviderConfig};
 use crate::types::{ToolCallMessage, ToolRuntimeEvent};
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -697,7 +697,7 @@ fn test_build_messages_dedupes_injected_mid_turn_context() {
     ];
     let memory_message = ChatMessage::developer("memory context");
 
-    let messages = session.build_messages(&prompt_prefix, Some(&memory_message), 0);
+    let messages = session.build_messages(&prompt_prefix, Some(&memory_message));
 
     assert_eq!(
         count_messages_with_content(&messages, "base instructions"),
@@ -713,7 +713,7 @@ fn test_build_messages_dedupes_injected_mid_turn_context() {
 }
 
 #[test]
-fn test_build_messages_only_dedupes_context_selected_for_request() {
+fn test_build_messages_dedupes_context_against_full_history() {
     let mut session = AgentSession::new("test");
     session
         .history
@@ -726,7 +726,7 @@ fn test_build_messages_only_dedupes_context_selected_for_request() {
         ChatMessage::developer("developer context"),
     ];
 
-    let messages = session.build_messages(&prompt_prefix, None, 5);
+    let messages = session.build_messages(&prompt_prefix, None);
 
     assert_eq!(
         count_messages_with_content(&messages, "base instructions"),
@@ -736,9 +736,9 @@ fn test_build_messages_only_dedupes_context_selected_for_request() {
         count_messages_with_content(&messages, "developer context"),
         1
     );
-    assert_eq!(messages.len(), 7);
-    assert_eq!(messages[2].content.as_deref(), Some("msg 5"));
-    assert_eq!(messages[6].content.as_deref(), Some("msg 9"));
+    assert_eq!(messages.len(), 12);
+    assert_eq!(messages[2].content.as_deref(), Some("msg 0"));
+    assert_eq!(messages[11].content.as_deref(), Some("msg 9"));
 }
 
 #[tokio::test]
@@ -784,7 +784,8 @@ async fn test_queued_continuation_compacts_before_next_model_request() {
         },
         &crate::turn_runtime::CancellationToken::default_grace(),
     )
-    .await;
+    .await
+    .unwrap();
 
     assert_eq!(session.compaction_count, 1);
     assert_eq!(session.total_tokens_used, Some(107));
@@ -825,7 +826,7 @@ async fn test_queued_continuation_compacts_before_next_model_request() {
         .history
         .last()
         .is_some_and(compact::is_summary_message));
-    let messages = session.build_messages(&prompt_prefix, Some(&memory_message), 0);
+    let messages = session.build_messages(&prompt_prefix, Some(&memory_message));
     assert_eq!(
         count_messages_with_content(&messages, "base instructions"),
         1
@@ -1140,6 +1141,58 @@ async fn test_stop_when_idle_does_not_call_model() {
 }
 
 #[tokio::test]
+async fn test_unknown_slash_input_falls_back_to_normal_chat_message() {
+    let (url, request_count) =
+        counted_chat_response_url(vec![chat_text_response("slash response", 24)]).await;
+    let config = provider_config_for_url(url);
+    let client = AgentClient::new();
+    let tools = ToolRegistry::new();
+    let mut session = AgentSession::new("unknown-slash");
+
+    let result = run_turn(&client, &config, &mut session, &tools, "/demo", None)
+        .await
+        .unwrap();
+
+    assert_eq!(request_count.load(Ordering::SeqCst), 1);
+    assert_eq!(result.response, "slash response");
+    assert!(session
+        .history
+        .iter()
+        .any(|message| message.role == "user" && message.content.as_deref() == Some("/demo")));
+}
+
+#[tokio::test]
+async fn test_manual_compaction_command_does_not_record_user_message() {
+    let (url, request_count) =
+        counted_chat_response_url(vec![chat_text_response("compacted summary", 24)]).await;
+    let config = provider_config_for_url(url);
+    let client = AgentClient::new();
+    let mut session = AgentSession::new("manual-compact");
+    session.add_user_message("请总结一下当前改动");
+    session.add_assistant_message("我会先检查当前工程。");
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut recorder = ConversationRecorder::new(dir.path(), "manual-compact");
+    let result = run_manual_compaction_command(&client, &config, &mut session, Some(&mut recorder))
+        .await
+        .unwrap();
+    recorder.close();
+
+    assert_eq!(request_count.load(Ordering::SeqCst), 1);
+    assert_eq!(result.response, "上下文已自动压缩");
+    assert_eq!(session.compaction_count, 1);
+    assert!(!session
+        .history
+        .iter()
+        .any(|message| message.content.as_deref() == Some("/compact")));
+
+    let raw = std::fs::read_to_string(recorder.file_path()).unwrap();
+    assert!(!raw.contains(r#""event_type":"user_message""#));
+    assert!(!raw.contains("/compact"));
+    assert!(raw.contains(r#""event_type":"compaction""#));
+}
+
+#[tokio::test]
 async fn test_compaction_recomputes_context_snapshot_and_drops_tool_suffix() {
     let mut config = single_summary_provider_config(77).await;
     config.model_auto_compact_token_limit = Some(500);
@@ -1415,36 +1468,17 @@ fn test_context_rewrite_refreshes_active_status_snapshot() {
 }
 
 #[test]
-fn test_trim_oldest_messages_invalidates_response_tokens() {
-    let mut session = AgentSession::new("trim");
-    session.add_user_message("inspect");
-    session.add_assistant_tool_calls(&[test_tool_call("call-1")]);
-    session.add_tool_result("call-1", "[file] Cargo.toml");
-    session.add_user_message("continue");
-    session.track_token_usage(10, 20);
-
-    let trimmed = trim_oldest_messages_count(&mut session, 2);
-
-    assert_eq!(trimmed, 2);
-    assert!(session.last_response_tokens.is_none());
-    assert_eq!(session.history_version, 1);
-}
-
-#[test]
-fn test_build_messages_with_limit() {
+fn test_build_messages_uses_full_sanitized_history() {
     let mut session = AgentSession::new("test");
     for i in 0..10 {
         session.add_user_message(&format!("msg {i}"));
     }
-    // Limit to 5 messages
     let prefix = vec![ChatMessage::system("system")];
-    let messages = session.build_messages(&prefix, None, 5);
-    // 1 system + 5 history = 6
-    assert_eq!(messages.len(), 6);
+    let messages = session.build_messages(&prefix, None);
+    assert_eq!(messages.len(), 11);
     assert_eq!(messages[0].role, "system");
-    // Should have the last 5 user messages
-    assert_eq!(messages[1].content.as_deref(), Some("msg 5"));
-    assert_eq!(messages[5].content.as_deref(), Some("msg 9"));
+    assert_eq!(messages[1].content.as_deref(), Some("msg 0"));
+    assert_eq!(messages[10].content.as_deref(), Some("msg 9"));
 }
 
 #[test]
@@ -1455,39 +1489,35 @@ fn test_build_messages_preserves_compaction_summary() {
         session.add_user_message(&format!("msg {i}"));
     }
     session.add_user_message(&format!("{}\nprevious context", compact::SUMMARY_PREFIX));
-    // Limit to 5 messages
     let prefix = vec![ChatMessage::system("system")];
-    let messages = session.build_messages(&prefix, None, 5);
-    // 1 system + 5 history (4 recent + summary) = 6
-    assert_eq!(messages.len(), 6);
+    let messages = session.build_messages(&prefix, None);
+    assert_eq!(messages.len(), 12);
     assert_eq!(messages[0].role, "system");
-    assert_eq!(messages[1].content.as_deref(), Some("msg 6"));
-    assert!(messages[5]
+    assert_eq!(messages[1].content.as_deref(), Some("msg 0"));
+    assert!(messages[11]
         .content
         .as_deref()
         .is_some_and(|content| content.starts_with(compact::SUMMARY_PREFIX)));
 }
 
 #[test]
-fn test_build_messages_no_limit() {
+fn test_build_messages_with_full_history() {
     let mut session = AgentSession::new("test");
     for i in 0..5 {
         session.add_user_message(&format!("msg {i}"));
     }
     let prefix = vec![ChatMessage::system("system")];
-    let messages = session.build_messages(&prefix, None, 0); // 0 = no limit
+    let messages = session.build_messages(&prefix, None);
     assert_eq!(messages.len(), 6); // 1 system + 5 history
 }
 
 #[test]
-fn test_build_messages_sanitizes_tool_when_history_limit_cuts_assistant_tool_calls() {
+fn test_build_messages_sanitizes_malformed_tool_history_without_count_trim() {
     let mut session = AgentSession::new("test");
-    session.add_user_message("inspect");
-    session.add_assistant_tool_calls(&[test_tool_call("call-1")]);
     session.add_tool_result("call-1", "[file] Cargo.toml");
 
     let prefix = vec![ChatMessage::system("system")];
-    let messages = session.build_messages(&prefix, None, 1);
+    let messages = session.build_messages(&prefix, None);
 
     assert_eq!(messages.len(), 1);
 }
@@ -1543,6 +1573,37 @@ fn test_running_turns_remain_visible_in_session_list() {
 
     manager.return_session(running);
     assert!(manager.list_active_turn_statuses().is_empty());
+}
+
+#[test]
+fn test_session_manager_broadcasts_session_list_changes() {
+    let manager = AgentSessionManager::new(3600);
+    let mut events = manager.subscribe_session_events();
+
+    let session = manager.take_session("event-session");
+    let started = events.try_recv().expect("take should broadcast start");
+    assert_eq!(started.event_type, "sessions_changed");
+    assert_eq!(started.session_key.as_deref(), Some("event-session"));
+    assert_eq!(started.reason, "started");
+
+    manager.update_active_session_preview(
+        "event-session",
+        Some("event title".to_string()),
+        None,
+        Some("im".to_string()),
+        Some("bifrost_agent".to_string()),
+        None,
+    );
+    let updated = events
+        .try_recv()
+        .expect("preview update should broadcast update");
+    assert_eq!(updated.session_key.as_deref(), Some("event-session"));
+    assert_eq!(updated.reason, "updated");
+
+    manager.return_session(session);
+    let returned = events.try_recv().expect("return should broadcast change");
+    assert_eq!(returned.session_key.as_deref(), Some("event-session"));
+    assert_eq!(returned.reason, "returned");
 }
 
 #[test]
@@ -1680,35 +1741,6 @@ fn test_is_retryable_error() {
     assert!(is_retryable_error("HTTP request failed: timeout"));
     assert!(is_retryable_error("connection reset"));
     assert!(!is_retryable_error("invalid api key"));
-}
-
-#[test]
-fn test_trim_oldest_messages() {
-    let mut session = AgentSession::new("test");
-    session.add_user_message("inspect");
-    session.add_assistant_tool_calls(&[test_tool_call("call-1")]);
-    session.add_tool_result("call-1", "[file] Cargo.toml");
-    session.add_user_message("continue");
-    let trimmed = trim_oldest_messages_count(&mut session, 2);
-    assert_eq!(trimmed, 2);
-    assert_eq!(session.history.len(), 1);
-    assert_eq!(session.history[0].content.as_deref(), Some("continue"));
-    assert!(history::is_valid_chat_history(&session.history));
-}
-
-#[test]
-fn test_trim_oldest_preserves_summary() {
-    let mut session = AgentSession::new("test");
-    session.compaction_count = 1;
-    for i in 0..5 {
-        session.add_user_message(&format!("msg{i}"));
-    }
-    session.add_user_message(&format!("{}\nsummary", compact::SUMMARY_PREFIX));
-    let trimmed = trim_oldest_messages_count(&mut session, 2);
-    assert_eq!(trimmed, 2);
-    assert_eq!(session.history.len(), 4); // summary + 3 remaining
-    assert_eq!(session.history[0].content.as_deref(), Some("msg2"));
-    assert!(compact::is_summary_message(&session.history[3]));
 }
 
 #[test]

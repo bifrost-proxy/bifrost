@@ -103,7 +103,7 @@ impl ToolHandler for UpdatePlanTool {
                 },
                 "plan": {
                     "type": "array",
-                    "description": "Complete current plan snapshot. Use an empty list to clear the current plan when no task plan applies.",
+                    "description": "Complete current plan snapshot. Use an empty list to clear the current plan when no task plan applies. One or more steps may be in_progress when work is genuinely concurrent.",
                     "items": {
                         "type": "object",
                         "properties": {

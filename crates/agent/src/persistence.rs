@@ -30,6 +30,7 @@ pub struct ConversationEvent {
 pub mod event_types {
     pub const USER_MESSAGE: &str = "user_message";
     pub const ASSISTANT_MESSAGE: &str = "assistant_message";
+    pub const ASSISTANT_DELTA: &str = "assistant_delta";
     pub const TOOL_CALL: &str = "tool_call";
     pub const TOOL_RESULT: &str = "tool_result";
     pub const COMPACTION: &str = "compaction";
@@ -42,6 +43,7 @@ pub mod event_types {
     pub const GOAL_CLEARED: &str = "goal_cleared";
     pub const PLAN_UPDATED: &str = "plan_updated";
     pub const PLAN_CLEARED: &str = "plan_cleared";
+    pub const RUN_STATE_CHANGED: &str = "run_state_changed";
 }
 
 // ---------------------------------------------------------------------------
@@ -177,6 +179,38 @@ impl ConversationRecorder {
                 "message": content,
                 "tokens": tokens,
                 "context_tokens": context_tokens,
+            }),
+        })
+    }
+
+    pub fn record_assistant_delta(
+        &mut self,
+        session_key: &str,
+        content: &str,
+    ) -> Result<(), String> {
+        self.record(ConversationEvent {
+            timestamp: current_time_secs(),
+            event_type: event_types::ASSISTANT_DELTA.to_string(),
+            session_key: session_key.to_string(),
+            content: serde_json::json!({ "message": content }),
+        })
+    }
+
+    pub fn record_run_state(
+        &mut self,
+        session_key: &str,
+        state: &str,
+        source_channel: Option<&str>,
+        agent_kind: Option<&str>,
+    ) -> Result<(), String> {
+        self.record(ConversationEvent {
+            timestamp: current_time_secs(),
+            event_type: event_types::RUN_STATE_CHANGED.to_string(),
+            session_key: session_key.to_string(),
+            content: serde_json::json!({
+                "state": state,
+                "source_channel": source_channel,
+                "agent_kind": agent_kind,
             }),
         })
     }
@@ -753,6 +787,7 @@ pub struct SessionFileSummary {
     pub session_key: Option<String>,
     /// Session title (intent/topic) set by the agent via set_title tool.
     pub title: Option<String>,
+    pub run_state: Option<String>,
     /// First user message preview used as a stable display title fallback.
     pub first_user_message: Option<String>,
 }
@@ -853,6 +888,12 @@ pub fn scan_session_summary(path: &Path) -> SessionFileSummary {
                     if let Some(tokens) = obj.get("total_tokens").and_then(|v| v.as_u64()) {
                         summary.total_tokens = tokens;
                     }
+                }
+                summary.run_state = Some("completed".to_string());
+            }
+            "run_state_changed" => {
+                if let Some(state) = event.content.get("state").and_then(|v| v.as_str()) {
+                    summary.run_state = Some(state.to_string());
                 }
             }
             "tool_call" => {
@@ -1362,12 +1403,15 @@ mod tests {
             )
             .unwrap();
         recorder
+            .record_assistant_delta("test-events", "checking result")
+            .unwrap();
+        recorder
             .record_assistant_message("test-events", "done")
             .unwrap();
         recorder.close();
 
         let events = load_conversation_events(recorder.file_path()).unwrap();
-        assert_eq!(events.len(), 4);
+        assert_eq!(events.len(), 5);
 
         // Verify event types and content
         assert_eq!(events[0].event_type, USER_MESSAGE);
@@ -1384,8 +1428,11 @@ mod tests {
         assert_eq!(events[2].content["result"], "file1.txt");
         assert_eq!(events[2].content["success"], true);
 
-        assert_eq!(events[3].event_type, ASSISTANT_MESSAGE);
-        assert_eq!(events[3].content["message"], "done");
+        assert_eq!(events[3].event_type, ASSISTANT_DELTA);
+        assert_eq!(events[3].content["message"], "checking result");
+
+        assert_eq!(events[4].event_type, ASSISTANT_MESSAGE);
+        assert_eq!(events[4].content["message"], "done");
 
         // Verify timestamps are present
         for event in &events {
@@ -1600,6 +1647,34 @@ mod tests {
             summary.first_user_message.as_deref(),
             Some("first user fallback text")
         );
+    }
+
+    #[test]
+    fn scan_session_summary_tracks_latest_run_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut recorder = ConversationRecorder::new(dir.path(), "run-state-session");
+        recorder
+            .record_session_start(
+                "run-state-session",
+                serde_json::json!({"source": "im", "runner_id": "builtin"}),
+            )
+            .unwrap();
+        recorder
+            .record_run_state("run-state-session", "running", Some("im"), Some("builtin"))
+            .unwrap();
+        recorder
+            .record_run_state(
+                "run-state-session",
+                "completed",
+                Some("web"),
+                Some("builtin"),
+            )
+            .unwrap();
+        recorder.close();
+
+        let summary = scan_session_summary(recorder.file_path());
+        assert_eq!(summary.run_state.as_deref(), Some("completed"));
+        assert_eq!(summary.event_count, 3);
     }
 
     #[test]

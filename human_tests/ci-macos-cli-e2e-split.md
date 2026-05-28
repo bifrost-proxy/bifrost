@@ -81,6 +81,27 @@
 - 不再出现 `cargo metadata` 实际调用到 `rustup-init` 并报 `unexpected argument 'metadata'` 的失败。
 - `Bundle macOS (aarch64-apple-darwin)` 和 `Bundle macOS (x86_64-apple-darwin)` 最终进入 success。
 
+### TC-CMCE-06: macOS desktop bundle Rust toolchain 安装具备重试
+
+**操作步骤**：
+1. 检查 PR CI desktop bundle 的 Rust toolchain 安装步骤：
+   ```bash
+   rg -n 'Install Rust toolchain with retry|command -v rustup|https://sh\\.rustup\\.rs|rustup toolchain install stable --target "\\$\\{target\\}" --profile minimal --no-self-update|attempt \\* 20|Failed to install stable Rust toolchain' .github/workflows/ci.yml
+   ```
+2. 检查 release workflow macOS desktop bundle 的 Rust toolchain 安装步骤：
+   ```bash
+   rg -n 'Install Rust toolchain with retry|runner\\.os == '\\''macOS'\\''|command -v rustup|https://sh\\.rustup\\.rs|rustup toolchain install stable --target "\\$\\{target\\}" --profile minimal --no-self-update|attempt \\* 20|Failed to install stable Rust toolchain' .github/workflows/release.yml
+   ```
+3. 推送当前分支并观察 GitHub Actions `CI` workflow。
+
+**预期结果**：
+- PR CI 的 `bundle-desktop-macos` 在安装 stable toolchain 时最多重试 3 次。
+- 如果 macOS runner 缺少 `rustup`，会先通过 `https://sh.rustup.rs` bootstrap，并把 cargo bin 目录加入后续步骤的 `GITHUB_PATH`。
+- 每次重试使用同一个 `${{ matrix.target }}`，包含 `--profile minimal` 和 `--no-self-update`。
+- 第 1、2 次失败后按 `attempt * 20` 秒递增等待，第 3 次仍失败才让 job 失败。
+- release workflow 的 macOS desktop bundle 使用同一重试策略；非 macOS bundle 保持 `dtolnay/rust-toolchain@stable`。
+- 如果 `static.rust-lang.org` 出现短暂 DNS 抖动，macOS desktop bundle 有机会自动恢复；远端 `Bundle macOS (x86_64-apple-darwin)` 最终进入 success。
+
 ## 清理步骤
 
 - 无清理需求；本测试不创建临时服务实例、不写入数据目录、不修改系统代理。
@@ -88,3 +109,4 @@
 ## 执行记录
 
 - 2026-05-15：通过。执行 `rg -n 'Verify Rust tool paths|rustup which cargo|rustup which rustc' .github/workflows/ci.yml` 与 `rg -n 'Build macOS desktop bundle|export CARGO="\\$\\(rustup which cargo\\)"|export RUSTC="\\$\\(rustup which rustc\\)"|pnpm exec tauri build' .github/workflows/ci.yml`，确认 macOS desktop bundle 在 Tauri 构建前校验真实工具链，并在同一 shell step 中导出 `CARGO/RUSTC`；远端 TC-CMCE-05 由后续 GitHub Actions `CI` run 验证。
+- 2026-05-28：通过。执行 `rg -n 'Install Rust toolchain with retry|command -v rustup|https://sh\\.rustup\\.rs|rustup toolchain install stable --target "\\$\\{target\\}" --profile minimal --no-self-update|attempt \\* 20|Failed to install stable Rust toolchain' .github/workflows/ci.yml`，确认 PR CI macOS desktop bundle toolchain 安装保留 rustup bootstrap 且具备 3 次重试；执行 `rg -n 'Install Rust toolchain with retry|runner\\.os == '\''macOS'\''|command -v rustup|https://sh\\.rustup\\.rs|rustup toolchain install stable --target "\\$\\{target\\}" --profile minimal --no-self-update|attempt \\* 20|Failed to install stable Rust toolchain' .github/workflows/release.yml`，确认 release macOS desktop bundle 同步具备重试且非 macOS 仍走 `dtolnay/rust-toolchain@stable`。远端 TC-CMCE-06 由推送后的 GitHub Actions `CI` run 验证。

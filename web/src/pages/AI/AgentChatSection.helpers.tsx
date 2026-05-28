@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Col, Row, Typography } from "antd";
+import { Col, Row, Typography, theme } from "antd";
 import {
   CheckCircleOutlined,
   DownOutlined,
@@ -30,6 +30,7 @@ export type ChatMessage = {
   meta?: string;
   processSteps?: ProcessStep[];
   processCollapsed?: boolean;
+  hideTimestamp?: boolean;
   runnerCall?: RunnerCallMessageMeta;
 };
 
@@ -68,6 +69,9 @@ export type AgentThreadSummary = {
   tokens?: number;
   compaction_count?: number;
   estimated_tokens?: number;
+  has_timeline?: boolean;
+  timeline_event_count?: number;
+  run_state?: string;
 };
 
 export type RunnerConfigPayload = {
@@ -102,6 +106,10 @@ export type SessionDetail = {
   agent_type?: string;
   runner_type?: string;
   runner_id?: string;
+  history_path?: string;
+  has_timeline?: boolean;
+  timeline_event_count?: number;
+  run_state?: string;
   messages?: SessionDetailMessage[];
 };
 
@@ -198,26 +206,27 @@ export const ACTIVITY_ITEMS = [
   { label: "Tools", value: "Files, terminal, browser" },
 ];
 
-export function historyEventsToMessages(events: HistoryEvent[]): ChatMessage[] {
-  return events
-    .filter(
-      (event) =>
-        event.event_type === "user_message" ||
-        event.event_type === "assistant_message",
-    )
-    .map((event, index) => {
-      const role =
-        event.event_type === "user_message" ? ("user" as const) : ("assistant" as const);
-      const content = event.content.message;
-      return {
-        id: `history-${index}`,
-        role,
-        content: typeof content === "string" ? content : "",
-        timestamp: event.timestamp,
-        meta: role === "user" ? "History user" : "History assistant",
-      };
+export function sameChatMessages(left: ChatMessage[], right: ChatMessage[]) {
+  return (
+    left.length === right.length &&
+    left.every((message, index) => {
+      const other = right[index];
+      return (
+        message.role === other.role &&
+        message.content === other.content &&
+        message.meta === other.meta &&
+        JSON.stringify(message.processSteps || []) ===
+          JSON.stringify(other.processSteps || [])
+      );
     })
-    .filter((item) => item.content.trim().length > 0);
+  );
+}
+
+export function titleFromChatMessages(items: ChatMessage[]) {
+  const firstUserMsg = items.find((message) => message.role === "user");
+  const text = firstUserMsg?.content.trim();
+  if (!text) return undefined;
+  return text.length > 40 ? `${text.slice(0, 40)}…` : text;
 }
 
 export function sessionDetailToMessages(detail: SessionDetail): ChatMessage[] {
@@ -325,7 +334,7 @@ export function isSelectedThread(
   if (view === "history") {
     return thread.session_key === sessionKey && Boolean(thread.history_path);
   }
-  return thread.session_key === sessionKey && !thread.history_path;
+  return thread.session_key === sessionKey;
 }
 
 export function dedupeThreads(threads: AgentThreadSummary[]) {
@@ -574,7 +583,7 @@ export function telemetryFromSessionDetail(
     phase: "idle",
     title: detail.title || thread?.title,
     status: {
-      state: detail.state || thread?.state || thread?.status || "idle",
+      state: detail.run_state || detail.state || thread?.run_state || thread?.state || thread?.status || "idle",
       source: detail.source || thread?.source,
       work_dir: detail.work_dir || thread?.work_dir,
       message_count: detail.message_count ?? thread?.turns,
@@ -586,152 +595,6 @@ export function telemetryFromSessionDetail(
       runner_id: detail.runner_id || thread?.runner_id,
       agent_type: detail.agent_type || thread?.agent_type,
     },
-  };
-}
-
-export function historyEventsToTelemetry(
-  events: HistoryEvent[],
-  thread?: AgentThreadSummary,
-  fallback: RunTelemetry = EMPTY_TELEMETRY,
-): RunTelemetry {
-  let telemetry = {
-    ...telemetryFromThread(thread),
-    phase: fallback.phase,
-    plan: fallback.plan,
-    tools: fallback.tools,
-    errors: fallback.errors,
-  };
-  for (const event of events) {
-    if (event.event_type === "session_start") {
-      telemetry = {
-        ...telemetry,
-        status: {
-          ...telemetry.status,
-          state: telemetry.status?.state || "started",
-          source:
-            stringFrom(event.content.source) ||
-            telemetry.status?.source,
-          work_dir:
-            stringFrom(event.content.work_dir) ||
-            stringFrom(event.content.workDir) ||
-            telemetry.status?.work_dir,
-          agent_type:
-            stringFrom(event.content.agent_type) ||
-            stringFrom(event.content.agentType) ||
-            telemetry.status?.agent_type,
-          runner_type:
-            stringFrom(event.content.runner_type) ||
-            stringFrom(event.content.runnerType) ||
-            telemetry.status?.runner_type,
-          runner_id:
-            stringFrom(event.content.runner_id) ||
-            stringFrom(event.content.runnerId) ||
-            telemetry.status?.runner_id,
-        },
-      };
-      continue;
-    }
-    if (event.event_type === "title_updated") {
-      telemetry = {
-        ...telemetry,
-        title: stringFrom(event.content.title) || telemetry.title,
-      };
-      continue;
-    }
-    if (event.event_type === "plan_updated" && Array.isArray(event.content.plan)) {
-      telemetry = {
-        ...telemetry,
-        plan: parsePlanSteps(event.content.plan),
-      };
-      continue;
-    }
-    if (event.event_type === "tool_call") {
-      const name = stringFrom(event.content.tool_name) || "tool";
-      telemetry = {
-        ...telemetry,
-        tools: [
-          ...telemetry.tools,
-          {
-            id: `history-tool-${event.timestamp}-${telemetry.tools.length}`,
-            name,
-            status: "running",
-            arguments: stringFrom(event.content.arguments),
-          },
-        ],
-      };
-      continue;
-    }
-    if (event.event_type === "tool_result") {
-      telemetry = finishTool(telemetry, event.content);
-      continue;
-    }
-    if (event.event_type === "compaction") {
-      telemetry = {
-        ...telemetry,
-        compactionPhase: "finished",
-        compaction: {
-          trigger: stringFrom(event.content.trigger),
-          reason: stringFrom(event.content.reason),
-          phase: stringFrom(event.content.phase),
-          preTokens: numberFrom(event.content.pre_tokens),
-          postTokens:
-            numberFrom(event.content.post_tokens) ??
-            numberFrom(event.content.postTokens),
-          tokensSaved:
-            numberFrom(event.content.tokens_saved) ??
-            numberFrom(event.content.tokensSaved),
-          messagesRemoved:
-            numberFrom(event.content.messages_removed) ??
-            numberFrom(event.content.messagesRemoved),
-          compactionCount:
-            numberFrom(event.content.compaction_count) ??
-            numberFrom(event.content.compactionCount),
-        },
-        status: {
-          ...telemetry.status,
-          total_tokens_used:
-            numberFrom(event.content.total_tokens) ??
-            numberFrom(event.content.totalTokens) ??
-            telemetry.status?.total_tokens_used,
-          estimated_context_tokens:
-            numberFrom(event.content.post_tokens) ??
-            numberFrom(event.content.postTokens) ??
-            telemetry.status?.estimated_context_tokens,
-          compaction_count:
-            numberFrom(event.content.compaction_count) ??
-            numberFrom(event.content.compactionCount) ??
-            telemetry.status?.compaction_count,
-        },
-      };
-      continue;
-    }
-    if (event.event_type === "session_end") {
-      telemetry = {
-        ...telemetry,
-        phase: "finished",
-        status: {
-          ...telemetry.status,
-          total_tokens_used:
-            numberFrom(event.content.total_tokens) ??
-            numberFrom(event.content.totalTokens) ??
-            telemetry.status?.total_tokens_used,
-          message_count:
-            numberFrom(event.content.message_count) ??
-            numberFrom(event.content.messageCount) ??
-            telemetry.status?.message_count,
-          compaction_count:
-            numberFrom(event.content.compaction_count) ??
-            numberFrom(event.content.compactionCount) ??
-            telemetry.status?.compaction_count,
-        },
-      };
-    }
-  }
-  return {
-    ...telemetry,
-    tools: telemetry.tools.map((tool) =>
-      tool.status === "running" ? { ...tool, status: "success" } : tool,
-    ),
   };
 }
 
@@ -775,6 +638,7 @@ export async function runAgentStream(params: {
               sessionKey: params.sessionKey,
               runnerId: params.runnerId,
               adapter: params.runnerAdapter,
+              params: params.historyPath ? { historyPath: params.historyPath } : undefined,
               workDir: params.workDir,
             }
           : {
@@ -1154,6 +1018,16 @@ export function formatContextWindow(
     : "-";
 }
 
+export function formatContextManagement(
+  status?: RunStatusSnapshot,
+  context?: AgentContextSnapshot,
+) {
+  const total = status?.message_count ?? context?.messageCount;
+  return total === undefined
+    ? "Token budget + compaction"
+    : `Full history (${total}) · token budget + compaction`;
+}
+
 export function statusTagColor(phase: RunTelemetry["phase"]) {
   if (phase === "running") {
     return "processing";
@@ -1302,13 +1176,13 @@ export function eventToProcessStep(event: Record<string, unknown>): ProcessStep 
     };
   }
   if (eventType === "compaction_started") {
-    return { type: "compaction", summary: "Context compaction…", status: "running" };
+    return { type: "compaction", summary: "上下文正在自动压缩", status: "running" };
   }
   if (eventType === "compaction_finished") {
     const comp = isRecord(event.compaction) ? event.compaction : {};
     const saved = numberFrom(comp.tokensSaved);
     const removed = numberFrom(comp.messagesRemoved);
-    const parts: string[] = ["Compacted"];
+    const parts: string[] = ["上下文已自动压缩"];
     if (typeof saved === "number") parts.push(`saved ${saved} tokens`);
     if (typeof removed === "number") parts.push(`removed ${removed} msgs`);
     return { type: "compaction", summary: parts.join(", "), status: "success" };
@@ -1349,6 +1223,7 @@ export function truncateText(text: string): { display: string; isTruncated: bool
  * Expandable text block for tool args/result or thinking content.
  */
 export function ExpandableText({ text, label }: { text: string; label: string }) {
+  const { token } = theme.useToken();
   const [expanded, setExpanded] = useState(false);
   const { display, isTruncated } = truncateText(text);
 
@@ -1367,7 +1242,8 @@ export function ExpandableText({ text, label }: { text: string; label: string })
             padding: "4px 8px",
             fontSize: 11,
             lineHeight: "16px",
-            background: "rgba(0,0,0,0.03)",
+            background: token.colorFillQuaternary,
+            color: token.colorTextTertiary,
             borderRadius: 4,
             whiteSpace: "pre-wrap",
             wordBreak: "break-all",
@@ -1380,7 +1256,7 @@ export function ExpandableText({ text, label }: { text: string; label: string })
         {isTruncated && (
           <Text
             type="secondary"
-            style={{ fontSize: 10, color: "#1677ff", cursor: "pointer" }}
+            style={{ fontSize: 10, color: token.colorTextTertiary, cursor: "pointer" }}
             onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
           >
             {expanded ? "收起" : "展开更多"}
@@ -1402,14 +1278,30 @@ export function ProcessStepsBlock({
   steps: ProcessStep[];
   running: boolean;
 }) {
+  const { token } = theme.useToken();
   const [expanded, setExpanded] = useState(false);
   const [expandedTools, setExpandedTools] = useState<Set<number>>(new Set());
-  if (steps.length === 0) return null;
+  const visibleSteps = isRunning
+    ? steps
+    : steps.filter(
+        (step) =>
+          step.type !== "compaction" &&
+          !(step.type === "status" && step.summary.startsWith("Run state:")),
+      );
+  if (visibleSteps.length === 0) return null;
+  const mutedColor = token.colorTextQuaternary;
+  const textColor = token.colorTextTertiary;
 
-  const runningCount = steps.filter((s) => s.status === "running").length;
-  const summaryText = isRunning
-    ? `Thinking… ${steps.length} step${steps.length > 1 ? "s" : ""}${runningCount > 0 ? ` (${runningCount} running)` : ""}`
-    : `${steps.length} step${steps.length > 1 ? "s" : ""} completed`;
+  const runningCount = isRunning
+    ? visibleSteps.filter((s) => s.status === "running").length
+    : 0;
+  const commandCount = visibleSteps.filter((step) => step.type === "tool").length;
+  const summaryCount = commandCount || visibleSteps.length;
+  const summaryText = `${isRunning ? "Running" : "Ran"} ${
+    summaryCount
+  } command${summaryCount > 1 ? "s" : ""}${
+    runningCount > 0 ? ` (${runningCount} active)` : ""
+  }`;
 
   const toggleToolExpand = (index: number) => {
     setExpandedTools((prev) => {
@@ -1424,12 +1316,10 @@ export function ProcessStepsBlock({
     <div
       data-testid="agent-chat-process-block"
       style={{
-        marginBottom: 8,
-        padding: "6px 10px",
-        borderRadius: 8,
-        background: "rgba(0,0,0,0.02)",
-        border: "1px solid rgba(0,0,0,0.06)",
+        margin: "0 0 2px",
+        padding: 0,
         fontSize: 12,
+        color: textColor,
       }}
     >
       <div
@@ -1440,22 +1330,25 @@ export function ProcessStepsBlock({
           alignItems: "center",
           gap: 6,
           userSelect: "none",
+          width: "fit-content",
         }}
       >
         {isRunning ? (
-          <LoadingOutlined style={{ fontSize: 11, color: "#1677ff" }} />
+          <LoadingOutlined style={{ fontSize: 12, color: mutedColor }} />
         ) : expanded ? (
-          <DownOutlined style={{ fontSize: 9 }} />
+          <DownOutlined style={{ fontSize: 10, color: mutedColor }} />
         ) : (
-          <RightOutlined style={{ fontSize: 9 }} />
+          <RightOutlined style={{ fontSize: 10, color: mutedColor }} />
         )}
-        <Text type="secondary" style={{ fontSize: 12 }}>
+        <Text type="secondary" style={{ fontSize: 12, color: textColor }}>
           {summaryText}
         </Text>
       </div>
       {expanded && (
-        <div style={{ marginTop: 6, paddingLeft: 4 }}>
-          {steps.map((step, index) => {
+        <div style={{ marginTop: 6, paddingLeft: 18 }}>
+          {visibleSteps.map((step, index) => {
+            const displayStatus =
+              !isRunning && step.status === "running" ? "success" : step.status;
             if (step.type === "thinking") {
               // Thinking step: show as italic/gray text block
               const { display, isTruncated } = truncateText(step.summary);
@@ -1466,7 +1359,7 @@ export function ProcessStepsBlock({
             // Tool or other step
             const isToolExpanded = expandedTools.has(index);
             return (
-              <div key={`${index}-${step.summary}`} style={{ marginBottom: 4 }}>
+              <div key={`${index}-${step.summary}`} style={{ marginBottom: 5 }}>
                 <div
                   style={{
                     display: "flex",
@@ -1474,31 +1367,32 @@ export function ProcessStepsBlock({
                     gap: 6,
                     lineHeight: "18px",
                     cursor: step.type === "tool" ? "pointer" : "default",
+                    width: "fit-content",
                   }}
                   onClick={() => step.type === "tool" && toggleToolExpand(index)}
                 >
-                  {step.status === "running" ? (
-                    <LoadingOutlined style={{ fontSize: 10, color: "#1677ff" }} />
-                  ) : step.status === "failed" ? (
-                    <ExclamationCircleOutlined style={{ fontSize: 10, color: "#ff4d4f" }} />
+                  {displayStatus === "running" ? (
+                    <LoadingOutlined style={{ fontSize: 11, color: mutedColor }} />
+                  ) : displayStatus === "failed" ? (
+                    <ExclamationCircleOutlined style={{ fontSize: 11, color: textColor }} />
                   ) : (
-                    <CheckCircleOutlined style={{ fontSize: 10, color: "#52c41a" }} />
+                    <CheckCircleOutlined style={{ fontSize: 11, color: mutedColor }} />
                   )}
                   {step.type === "tool" && (
                     isToolExpanded
-                      ? <DownOutlined style={{ fontSize: 8 }} />
-                      : <RightOutlined style={{ fontSize: 8 }} />
+                      ? <DownOutlined style={{ fontSize: 8, color: mutedColor }} />
+                      : <RightOutlined style={{ fontSize: 8, color: mutedColor }} />
                   )}
                   <Text
                     type="secondary"
-                    style={{ fontSize: 11 }}
+                    style={{ fontSize: 11, color: textColor }}
                     ellipsis={{ tooltip: step.summary }}
                   >
                     {step.summary}
                   </Text>
                 </div>
                 {step.type === "tool" && isToolExpanded && (
-                  <div style={{ marginLeft: 16 }}>
+                  <div style={{ marginLeft: 30, marginTop: 4, opacity: 0.78 }}>
                     {step.args && <ExpandableText text={step.args} label="Input" />}
                     {step.result && <ExpandableText text={step.result} label="Output" />}
                     {!step.args && !step.result && (
@@ -1521,14 +1415,15 @@ export function ProcessStepsBlock({
  * A thinking step displayed as an italic gray text block.
  */
 export function ThinkingStepItem({ text, display, isTruncated }: { text: string; display: string; isTruncated: boolean }) {
+  const { token } = theme.useToken();
   const [showFull, setShowFull] = useState(false);
   return (
     <div
       style={{
         margin: "4px 0",
         padding: "4px 8px",
-        borderLeft: "2px solid rgba(0,0,0,0.1)",
-        background: "rgba(0,0,0,0.015)",
+        borderLeft: `2px solid ${token.colorBorderSecondary}`,
+        background: token.colorFillQuaternary,
         borderRadius: "0 4px 4px 0",
       }}
     >
@@ -1538,7 +1433,7 @@ export function ThinkingStepItem({ text, display, isTruncated }: { text: string;
           fontSize: 11,
           lineHeight: "16px",
           fontStyle: "italic",
-          color: "rgba(0,0,0,0.5)",
+          color: token.colorTextTertiary,
           whiteSpace: "pre-wrap",
           wordBreak: "break-all",
           maxHeight: showFull ? "none" : "52px",
@@ -1550,7 +1445,7 @@ export function ThinkingStepItem({ text, display, isTruncated }: { text: string;
       {isTruncated && (
         <Text
           type="secondary"
-          style={{ fontSize: 10, color: "#1677ff", cursor: "pointer" }}
+          style={{ fontSize: 10, color: token.colorTextTertiary, cursor: "pointer" }}
           onClick={() => setShowFull(!showFull)}
         >
           {showFull ? "收起" : "展开更多"}

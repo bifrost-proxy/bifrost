@@ -942,8 +942,9 @@ pub(super) async fn process_agent_chat(
             .unwrap_or(true);
         if should_persist {
             // Reuse existing recorder from session, or create a new one
-            if session.recorder.is_some() {
-                session.recorder.take()
+            if let Some(mut rec) = session.recorder.take() {
+                let _ = rec.record_run_state(session_key, "running", Some("im"), Some("builtin"));
+                Some(rec)
             } else {
                 let data_dir = bifrost_agent::config::agent_home_dir();
                 let max_bytes = agent_config.history.as_ref().and_then(|h| h.max_bytes);
@@ -959,6 +960,7 @@ pub(super) async fn process_agent_chat(
                         "base_instructions": bifrost_agent::prompt::resolve_base_instructions_text(agent_config, None),
                     }),
                 );
+                let _ = rec.record_run_state(session_key, "running", Some("im"), Some("builtin"));
                 Some(rec)
             }
         } else {
@@ -1123,6 +1125,15 @@ pub(super) async fn process_agent_chat(
             total_continuations = continuation_count,
             "goal continuation loop completed"
         );
+    }
+
+    if let Some(recorder) = recorder.as_mut() {
+        let state = if result.is_ok() {
+            "completed"
+        } else {
+            "failed"
+        };
+        let _ = recorder.record_run_state(session_key, state, Some("im"), Some("builtin"));
     }
 
     // Put the recorder back into the session so it persists across turns.

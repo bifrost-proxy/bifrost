@@ -1,4 +1,7 @@
 use super::*;
+use bytes::Bytes;
+use futures_util::StreamExt;
+use tokio_stream::wrappers::BroadcastStream;
 
 // ---------------------------------------------------------------------------
 
@@ -99,6 +102,14 @@ pub(super) async fn handle_agent(
         return method_not_allowed();
     }
 
+    // GET /agent/sessions/events — push session list changes to every view.
+    if rest == "/sessions/events" {
+        if req.method() != Method::GET {
+            return method_not_allowed();
+        }
+        return agent_session_events_response(service);
+    }
+
     // GET /agent/sessions/all — unified list of active + history sessions
     if rest == "/sessions/all" {
         if req.method() != Method::GET {
@@ -115,14 +126,40 @@ pub(super) async fn handle_agent(
             .iter()
             .map(|status| status.session_key.clone())
             .collect();
+        let data_dir = bifrost_agent::config::agent_home_dir();
+        let files = bifrost_agent::persistence::list_conversations(&data_dir, None);
+        let mut history_by_key: std::collections::HashMap<
+            String,
+            (
+                std::path::PathBuf,
+                bifrost_agent::persistence::SessionFileSummary,
+            ),
+        > = std::collections::HashMap::new();
+        for p in &files {
+            let filename = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let (parsed_key, _timestamp) = parse_session_filename(filename);
+            let summary = bifrost_agent::persistence::scan_session_summary(p);
+            let session_key = summary
+                .session_key
+                .as_deref()
+                .unwrap_or(&parsed_key)
+                .to_string();
+            if is_runner_call_session_key(&session_key) {
+                continue;
+            }
+            let replace = history_by_key
+                .get(&session_key)
+                .map(|(_, existing)| summary.end_time > existing.end_time)
+                .unwrap_or(true);
+            if replace {
+                history_by_key.insert(session_key, (p.clone(), summary));
+            }
+        }
         let active_keys: std::collections::HashSet<String> = active_sessions
             .iter()
             .map(|s| s.session_key.clone())
             .chain(running_turns.iter().map(|s| s.session_key.clone()))
             .collect();
-
-        let data_dir = bifrost_agent::config::agent_home_dir();
-        let files = bifrost_agent::persistence::list_conversations(&data_dir, None);
 
         // Determine retention cutoff based on persistence mode
         let agent_config = service.agent_config_store.load();
@@ -152,6 +189,7 @@ pub(super) async fn handle_agent(
                 continue;
             }
             let info = active_info_by_key.get(&s.session_key);
+            let history = history_by_key.get(&s.session_key);
             let duration_secs = s.updated_at.saturating_sub(s.started_at);
             unified.push(serde_json::json!({
                 "session_key": s.session_key,
@@ -173,6 +211,10 @@ pub(super) async fn handle_agent(
                 "external_conversation_id": s.external_conversation_id,
                 "external_thread_id": s.external_thread_id,
                 "title": info.and_then(|item| item.title.clone()),
+                "history_path": history.map(|(path, _)| path.display().to_string()),
+                "has_timeline": history.is_some(),
+                "timeline_event_count": history.map(|(_, summary)| summary.event_count).unwrap_or(0),
+                "run_state": "running",
             }));
         }
 
@@ -184,6 +226,7 @@ pub(super) async fn handle_agent(
             if running_keys.contains(&s.session_key) {
                 continue;
             }
+            let history = history_by_key.get(&s.session_key);
             let duration_secs = s.last_active_at.saturating_sub(s.created_at);
             unified.push(serde_json::json!({
                 "session_key": s.session_key,
@@ -205,6 +248,18 @@ pub(super) async fn handle_agent(
                 "external_conversation_id": s.external_conversation_id,
                 "external_thread_id": s.external_thread_id,
                 "title": s.title,
+                "history_path": s.history_path.or_else(|| history.map(|(path, _)| path.display().to_string())),
+                "has_timeline": s.has_timeline || history.is_some(),
+                "timeline_event_count": if s.timeline_event_count > 0 {
+                    s.timeline_event_count
+                } else {
+                    history
+                        .map(|(_, summary)| summary.event_count as usize)
+                        .unwrap_or(0)
+                },
+                "run_state": history
+                    .and_then(|(_, summary)| summary.run_state.clone())
+                    .unwrap_or(s.run_state),
             }));
         }
 
@@ -247,6 +302,9 @@ pub(super) async fn handle_agent(
                 "last_active_time": summary.end_time,
                 "duration_secs": summary.end_time.saturating_sub(summary.start_time),
                 "history_path": p.display().to_string(),
+                "has_timeline": true,
+                "timeline_event_count": summary.event_count,
+                "run_state": summary.run_state.clone().unwrap_or_else(|| "completed".to_string()),
                 "title": summary.title.or(summary.first_user_message),
             }));
         }
@@ -291,6 +349,7 @@ pub(super) async fn handle_agent(
                 "status": if running { "active" } else { "ended" },
                 "running": running,
                 "state": if running { "running" } else if failed { "failed" } else { "ended" },
+                "run_state": if running { "running" } else if failed { "failed" } else { "completed" },
                 "source": "admin-api",
                 "work_dir": state.work_dir,
                 "turns": turn_count,
@@ -304,6 +363,9 @@ pub(super) async fn handle_agent(
                 "external_conversation_id": state.external_conversation_id,
                 "external_thread_id": state.external_thread_id,
                 "external_run_id": state.latest_run_id,
+                "history_path": state.history_path,
+                "has_timeline": state.history_path.is_some(),
+                "timeline_event_count": 0,
                 "title": state.title.or(state.last_user_message),
             }));
         }
@@ -638,6 +700,7 @@ pub(super) async fn handle_agent(
         };
         session.source = "api".to_string();
         session.mark_bifrost_agent_runtime();
+        let is_manual_compaction = body.message.trim() == "/compact";
         let requested_history_path = body
             .history_path
             .as_deref()
@@ -666,10 +729,14 @@ pub(super) async fn handle_agent(
         }
         service.agent_session_manager.update_active_session_preview(
             &session_key,
-            session
-                .title
-                .clone()
-                .or_else(|| Some(body.message.trim().to_string())),
+            if is_manual_compaction {
+                session.title.clone()
+            } else {
+                session
+                    .title
+                    .clone()
+                    .or_else(|| Some(body.message.trim().to_string()))
+            },
             session.work_dir.clone(),
             Some("api".to_string()),
             Some(crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER.to_string()),
@@ -724,8 +791,10 @@ pub(super) async fn handle_agent(
                 .map(|h| h.persistence != bifrost_agent::config::HistoryPersistence::None)
                 .unwrap_or(true);
             if should_persist {
-                if session.recorder.is_some() {
-                    session.recorder.take()
+                if let Some(mut rec) = session.recorder.take() {
+                    let _ =
+                        rec.record_run_state(&session_key, "running", Some("api"), Some("builtin"));
+                    Some(rec)
                 } else {
                     let data_dir = bifrost_agent::config::agent_home_dir();
                     let max_bytes = config.history.as_ref().and_then(|h| h.max_bytes);
@@ -743,6 +812,8 @@ pub(super) async fn handle_agent(
                             "base_instructions": bifrost_agent::prompt::resolve_base_instructions_text(&config, None),
                         }),
                     );
+                    let _ =
+                        rec.record_run_state(&session_key, "running", Some("api"), Some("builtin"));
                     Some(rec)
                 }
             } else {
@@ -751,16 +822,18 @@ pub(super) async fn handle_agent(
         } else {
             None
         };
-        remember_session_turn_started(
-            &session_key,
-            crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
-            None,
-            &body.message,
-            recorder
-                .as_ref()
-                .map(|recorder| recorder.file_path().display().to_string()),
-            session.work_dir.clone(),
-        );
+        if !is_manual_compaction {
+            remember_session_turn_started(
+                &session_key,
+                crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+                None,
+                &body.message,
+                recorder
+                    .as_ref()
+                    .map(|recorder| recorder.file_path().display().to_string()),
+                session.work_dir.clone(),
+            );
+        }
         let images: Vec<bifrost_agent::ChatImageInput> = body
             .images
             .iter()
@@ -780,19 +853,37 @@ pub(super) async fn handle_agent(
             );
         }
         let turn_tools = service.build_agent_tool_registry(config.default_message_channel.clone());
-        let result = bifrost_agent::session::run_turn_with_mcp_multimodal(
-            &service.agent_client,
-            &config,
-            &mut session,
-            &turn_tools,
-            mcp_opt,
-            &body.message,
-            &images,
-            body.system_prompt.as_deref(),
-            recorder.as_mut(),
-        )
-        .await;
+        let result = if is_manual_compaction {
+            bifrost_agent::session::run_manual_compaction_command(
+                &service.agent_client,
+                &config,
+                &mut session,
+                recorder.as_mut(),
+            )
+            .await
+        } else {
+            bifrost_agent::session::run_turn_with_mcp_multimodal(
+                &service.agent_client,
+                &config,
+                &mut session,
+                &turn_tools,
+                mcp_opt,
+                &body.message,
+                &images,
+                body.system_prompt.as_deref(),
+                recorder.as_mut(),
+            )
+            .await
+        };
         mcp_manager.shutdown().await;
+        if let Some(recorder) = recorder.as_mut() {
+            let state = if result.is_ok() {
+                "completed"
+            } else {
+                "failed"
+            };
+            let _ = recorder.record_run_state(&session_key, state, Some("api"), Some("builtin"));
+        }
         if recorder.is_some() && !session.memory_cleared {
             session.recorder = recorder;
         }
@@ -838,6 +929,42 @@ pub(super) async fn handle_agent(
     } else {
         error_response(StatusCode::NOT_FOUND, "Agent endpoint not found")
     }
+}
+
+fn agent_session_events_response(service: &ImGatewayService) -> Response<BoxBody> {
+    let connected = futures_util::stream::once(async {
+        "retry: 30000\nevent: connected\ndata: {\"eventType\":\"connected\"}\n\n".to_string()
+    });
+    let updates =
+        BroadcastStream::new(service.agent_session_manager.subscribe_session_events()).filter_map(
+            |result| async move {
+                match result {
+                    Ok(event) => {
+                        let data = serde_json::to_string(&event).ok()?;
+                        Some(format!("event: sessions_changed\ndata: {data}\n\n"))
+                    }
+                    Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(_)) => {
+                        Some(
+                            "event: sessions_changed\ndata: {\"eventType\":\"sessions_changed\",\"reason\":\"lagged\"}\n\n"
+                                .to_string(),
+                        )
+                    }
+                }
+            },
+        );
+    let body_stream = http_body_util::StreamBody::new(
+        connected
+            .chain(updates)
+            .map(|chunk| Ok::<_, hyper::Error>(hyper::body::Frame::data(Bytes::from(chunk)))),
+    );
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "text/event-stream")
+        .header("Cache-Control", "no-cache")
+        .header("Connection", "keep-alive")
+        .body(BoxBody::new(body_stream))
+        .unwrap()
 }
 
 fn consume_imported_contexts_for_builtin_agent(session: &mut bifrost_agent::AgentSession) {
@@ -1033,9 +1160,6 @@ pub(super) fn apply_agent_config_patch(
         &["developer_instructions"],
     );
     patch_optional_string(&mut config.user_instructions, patch, &["user_instructions"]);
-    if let Some(max_hist) = patch.get("max_history_messages").and_then(|v| v.as_u64()) {
-        config.max_history_messages = Some(u32::try_from(max_hist).unwrap_or(u32::MAX));
-    }
     if let Some(ttl) = patch.get("session_ttl_secs").and_then(|v| v.as_u64()) {
         config.session_ttl_secs = Some(ttl);
     }
@@ -1347,6 +1471,10 @@ fn history_session_detail(session_key: &str) -> Option<bifrost_agent::SessionDet
             .map(|goal| format!("{:?}", goal.status)),
         goal_objective: runtime_state
             .and_then(|state| state.current_goal.map(|goal| goal.objective)),
+        history_path: Some(path.display().to_string()),
+        has_timeline: true,
+        timeline_event_count: summary.event_count as usize,
+        run_state: summary.run_state.unwrap_or_else(|| "completed".to_string()),
     })
 }
 
@@ -1375,8 +1503,17 @@ async fn external_runner_session_detail(session_key: &str) -> Option<bifrost_age
         }
         None => None,
     };
-    let mut messages = Vec::new();
-    if state.messages.is_empty() {
+    let history_path = state.history_path.clone();
+    let timeline_detail = history_path
+        .as_deref()
+        .and_then(external_runner_timeline_messages);
+    let (mut messages, timeline_event_count) =
+        if let Some((messages, event_count)) = timeline_detail {
+            (messages, event_count)
+        } else {
+            (Vec::new(), 0)
+        };
+    if messages.is_empty() && state.messages.is_empty() {
         if let Some(content) = state
             .last_user_message
             .clone()
@@ -1406,7 +1543,7 @@ async fn external_runner_session_detail(session_key: &str) -> Option<bifrost_age
                 tool_calls: None,
             });
         }
-    } else {
+    } else if messages.is_empty() {
         messages.extend(state.messages.iter().map(|message| {
             bifrost_agent::session::SessionMessage {
                 role: message.role.clone(),
@@ -1428,6 +1565,12 @@ async fn external_runner_session_detail(session_key: &str) -> Option<bifrost_age
         .filter(|message| message.role == "user")
         .count();
     let is_builtin_agent = state.adapter == crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER;
+    let run_state = match state.status.as_deref() {
+        Some("running") => "running",
+        Some("failed" | "stopped" | "timed_out") => "failed",
+        _ => "completed",
+    }
+    .to_string();
     Some(bifrost_agent::SessionDetail {
         session_key: state.session_key,
         user_id: None,
@@ -1454,7 +1597,64 @@ async fn external_runner_session_detail(session_key: &str) -> Option<bifrost_age
         messages,
         goal_status: None,
         goal_objective: None,
+        has_timeline: history_path.is_some(),
+        history_path,
+        timeline_event_count,
+        run_state,
     })
+}
+
+fn external_runner_timeline_messages(
+    history_path: &str,
+) -> Option<(Vec<bifrost_agent::session::SessionMessage>, usize)> {
+    let data_dir = bifrost_agent::config::agent_home_dir();
+    let path = bifrost_agent::persistence::validate_conversation_path(
+        &data_dir,
+        std::path::Path::new(history_path),
+    )
+    .ok()?;
+    let report = bifrost_agent::persistence::load_conversation_lossy(&path).ok()?;
+    if report.messages.is_empty() {
+        return None;
+    }
+    let events = bifrost_agent::persistence::load_conversation_events(&path).ok();
+    let mut message_timestamps: std::collections::VecDeque<u64> = events
+        .as_ref()
+        .map(|events| {
+            events
+                .iter()
+                .filter(|event| {
+                    event.event_type == bifrost_agent::persistence::event_types::USER_MESSAGE
+                        || event.event_type
+                            == bifrost_agent::persistence::event_types::ASSISTANT_MESSAGE
+                })
+                .map(|event| event.timestamp)
+                .collect()
+        })
+        .unwrap_or_default();
+    let messages = report
+        .messages
+        .iter()
+        .map(|message| bifrost_agent::session::SessionMessage {
+            role: message.role.clone(),
+            content: message.content.clone().unwrap_or_default(),
+            timestamp: message_timestamps.pop_front(),
+            content_parts: message
+                .content_parts
+                .as_ref()
+                .and_then(|parts| serde_json::to_value(parts).ok()),
+            tool_calls: message.tool_calls.as_ref().map(|calls| {
+                calls
+                    .iter()
+                    .map(|call| serde_json::to_string(call).unwrap_or_else(|_| format!("{call:?}")))
+                    .collect()
+            }),
+        })
+        .collect();
+    Some((
+        messages,
+        events.map(|events| events.len()).unwrap_or_default(),
+    ))
 }
 
 #[cfg(test)]
@@ -1549,6 +1749,69 @@ mod tests {
         assert_eq!(detail.messages[0].content, "Codex task");
         assert_eq!(detail.messages[1].role, "assistant");
         assert_eq!(detail.messages[1].content, "Codex answer");
+    }
+
+    #[test]
+    fn external_runner_session_detail_prefers_canonical_timeline_messages() {
+        let _lock = AGENT_API_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = AgentApiEnvGuard::new(dir.path());
+        let session_key = "external-canonical-detail";
+        let data_dir = bifrost_agent::config::agent_home_dir();
+        let mut recorder =
+            bifrost_agent::persistence::ConversationRecorder::new(&data_dir, session_key);
+        recorder
+            .record_session_start(session_key, serde_json::json!({"source": "web"}))
+            .expect("record start");
+        recorder
+            .record_user_message(session_key, "canonical user")
+            .expect("record user");
+        recorder
+            .record_assistant_message(session_key, "canonical assistant")
+            .expect("record assistant");
+        let history_path = recorder.file_path().display().to_string();
+
+        crate::im_gateway::session_state::remember_session_state(
+            crate::im_gateway::session_state::ImAgentSessionState {
+                session_key: session_key.to_string(),
+                adapter: "chatgpt_web".to_string(),
+                runner_id: Some("gpt".to_string()),
+                title: Some("Canonical detail".to_string()),
+                last_user_message: Some("stale user".to_string()),
+                last_response: Some("stale assistant".to_string()),
+                history_path: Some(history_path),
+                status: Some("succeeded".to_string()),
+                messages: vec![
+                    crate::im_gateway::session_state::ImAgentSessionMessage {
+                        role: "user".to_string(),
+                        content: "stale user".to_string(),
+                        timestamp: Some(1),
+                    },
+                    crate::im_gateway::session_state::ImAgentSessionMessage {
+                        role: "assistant".to_string(),
+                        content: "stale assistant".to_string(),
+                        timestamp: Some(2),
+                    },
+                ],
+                updated_at: 1_770_000_000_000,
+                ..crate::im_gateway::session_state::ImAgentSessionState::default()
+            },
+        )
+        .expect("remember state");
+
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let detail = runtime
+            .block_on(external_runner_session_detail(session_key))
+            .expect("detail");
+
+        assert_eq!(detail.runner_type.as_deref(), Some("chatgpt_web"));
+        assert_eq!(detail.runner_id.as_deref(), Some("gpt"));
+        assert_eq!(detail.message_count, 2);
+        assert_eq!(detail.messages[0].content, "canonical user");
+        assert_eq!(detail.messages[1].content, "canonical assistant");
+        assert!(detail.timeline_event_count >= 3);
     }
 
     #[test]

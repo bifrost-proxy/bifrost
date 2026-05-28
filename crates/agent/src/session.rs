@@ -52,7 +52,58 @@ use tracing::{debug, error, info, warn};
 // ---------------------------------------------------------------------------
 
 pub type AgentStopSignalHandle = Arc<AgentStopSignal>;
-pub type GuideChannel = Arc<std::sync::Mutex<VecDeque<String>>>;
+pub type GuideChannel = Arc<GuideMessageChannel>;
+
+#[derive(Debug, Default)]
+pub struct GuideMessageChannel {
+    messages: std::sync::Mutex<VecDeque<String>>,
+    notify: tokio::sync::Notify,
+}
+
+impl GuideMessageChannel {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn lock(&self) -> std::sync::LockResult<std::sync::MutexGuard<'_, VecDeque<String>>> {
+        self.messages.lock()
+    }
+
+    pub fn push_back(&self, msg: String) -> usize {
+        let len = {
+            let mut guard = self.messages.lock().unwrap();
+            guard.push_back(msg);
+            guard.len()
+        };
+        self.notify.notify_one();
+        len
+    }
+
+    pub fn has_pending(&self) -> bool {
+        self.messages
+            .lock()
+            .map(|messages| messages.iter().any(|msg| !msg.trim().is_empty()))
+            .unwrap_or(false)
+    }
+
+    pub fn drain(&self) -> Vec<String> {
+        self.messages
+            .lock()
+            .map(|mut messages| messages.drain(..).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn snapshot(&self) -> Vec<String> {
+        self.messages
+            .lock()
+            .map(|messages| messages.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    pub async fn notified(&self) {
+        self.notify.notified().await;
+    }
+}
 
 /// Cooperative stop signal for the turn currently checked out by a session.
 #[derive(Debug)]
@@ -621,64 +672,35 @@ impl AgentSession {
 
     /// Build the full message list for a model call.
     ///
-    /// Enforces `max_history_messages` limit by dropping the oldest non-summary
-    /// messages while preserving the compaction summary wherever replacement
-    /// history placed it.
+    /// Uses the full sanitized session history. Token budget and compaction
+    /// decide when history is summarized or rewritten; provider overflow is
+    /// surfaced without request-level count trimming.
     fn build_messages(
         &self,
         prompt_prefix: &[ChatMessage],
         memory_message: Option<&ChatMessage>,
-        max_history: u32,
     ) -> Vec<ChatMessage> {
-        let history = &self.history;
-        let max = max_history as usize;
-
-        let selected_history = if max > 0 && history.len() > max {
-            if let Some(summary_idx) = history.iter().position(compact::is_summary_message) {
-                // Preserve the compaction summary wherever it lives. Codex local
-                // compaction places it after preserved user messages, and later
-                // turns may append newer messages after it.
-                let summary = history[summary_idx].clone();
-                let tail_start = history.len().saturating_sub(max);
-                if summary_idx >= tail_start {
-                    history[tail_start..].to_vec()
-                } else {
-                    let tail_budget = max.saturating_sub(1);
-                    let tail_start = history.len().saturating_sub(tail_budget);
-                    let mut tail = Vec::with_capacity(tail_budget.saturating_add(1));
-                    tail.insert(0, summary);
-                    tail.extend_from_slice(&history[tail_start..]);
-                    tail
-                }
-            } else {
-                // No compaction summary — just take the most recent messages
-                let tail_start = history.len().saturating_sub(max);
-                history[tail_start..].to_vec()
-            }
-        } else {
-            history.to_vec()
-        };
+        let full_history = self.history.clone();
 
         let mut messages = Vec::with_capacity(
             prompt_prefix
                 .len()
                 .saturating_add(usize::from(memory_message.is_some()))
-                .saturating_add(selected_history.len()),
+                .saturating_add(full_history.len()),
         );
         for message in prompt_prefix {
             if message.role == "system"
-                || !Self::messages_contain_equivalent_context_message(&selected_history, message)
+                || !Self::messages_contain_equivalent_context_message(&full_history, message)
             {
                 messages.push(message.clone());
             }
         }
         if let Some(memory_message) = memory_message {
-            if !Self::messages_contain_equivalent_context_message(&selected_history, memory_message)
-            {
+            if !Self::messages_contain_equivalent_context_message(&full_history, memory_message) {
                 messages.push(memory_message.clone());
             }
         }
-        messages.extend(selected_history);
+        messages.extend(full_history);
 
         let (sanitized, report) = history::sanitize_chat_history(&messages);
         if report.dropped_anything() {
@@ -779,7 +801,9 @@ impl AgentSession {
 
 #[path = "session/session_store.rs"]
 mod session_store;
-pub use session_store::{AgentSessionManager, SessionDetail, SessionInfo, SessionMessage};
+pub use session_store::{
+    AgentSessionEvent, AgentSessionManager, SessionDetail, SessionInfo, SessionMessage,
+};
 #[path = "session/pending_input.rs"]
 mod pending_input;
 #[path = "session/progress.rs"]
@@ -878,6 +902,114 @@ pub fn handle_session_free_command(
             }
         }
         _ => None,
+    }
+}
+
+/// Execute manual context compaction as a control action.
+///
+/// This intentionally bypasses the normal agent turn loop: `/compact` is not a
+/// user message, should not be sent to the task model as chat input, and should
+/// only persist a compaction event when persistence is enabled.
+pub async fn run_manual_compaction_command(
+    client: &AgentClient,
+    config: &AgentConfig,
+    session: &mut AgentSession,
+    mut recorder: Option<&mut ConversationRecorder>,
+) -> Result<TurnResult, String> {
+    session.clear_turn_events();
+    session.record_turn_event(CodexTurnEventKind::TurnStarted);
+    if session.history.is_empty() {
+        session.record_turn_event(CodexTurnEventKind::TurnCompleted);
+        return Ok(TurnResult {
+            response: "历史消息太少，无需压缩。".to_string(),
+            tool_calls_log: Vec::new(),
+            work_dir_switched: None,
+            title_updated: session.title.clone(),
+            plan_steps: session.current_plan.clone(),
+            goal_needs_continuation: session
+                .current_goal
+                .as_ref()
+                .is_some_and(|goal| goal.status == crate::tools::goal::GoalStatus::Active),
+            goal_objective: session
+                .current_goal
+                .as_ref()
+                .map(|goal| goal.objective.clone()),
+        });
+    }
+
+    let base_instructions = prompt::resolve_base_instructions_text(config, None);
+    match compact::compact_session_with_hooks(
+        client,
+        config,
+        session,
+        compact::CompactionTrigger::Manual,
+        compact::CompactionReason::UserRequested,
+        compact::CompactionPhase::StandaloneTurn,
+        Some(&base_instructions),
+        compact::InitialContextInjection::DoNotInject,
+        vec![],
+        &crate::turn_runtime::CancellationToken::default_grace(),
+    )
+    .await
+    {
+        Ok(result) if result.performed => {
+            let metadata = serde_json::json!({
+                "trigger": "manual",
+                "reason": "user_requested",
+                "phase": "standalone_turn",
+                "pre_tokens": result.pre_tokens,
+                "post_tokens": result.post_tokens,
+                "tokens_saved": result.tokens_saved,
+                "messages_removed": result.messages_removed,
+                "compaction_count": session.compaction_count,
+                "total_tokens": session.total_tokens_used.unwrap_or(0),
+                "replacement_history": &session.history,
+                "current_plan": &session.current_plan,
+            });
+            if let Some(ref mut rec) = recorder {
+                if let Err(error) = rec.record_compaction(&session.session_key, metadata) {
+                    warn!(error = %error, "failed to record manual compaction event");
+                }
+            }
+            session.record_turn_event(CodexTurnEventKind::TurnCompleted);
+            Ok(TurnResult {
+                response: "上下文已自动压缩".to_string(),
+                tool_calls_log: Vec::new(),
+                work_dir_switched: None,
+                title_updated: session.title.clone(),
+                plan_steps: session.current_plan.clone(),
+                goal_needs_continuation: session
+                    .current_goal
+                    .as_ref()
+                    .is_some_and(|goal| goal.status == crate::tools::goal::GoalStatus::Active),
+                goal_objective: session
+                    .current_goal
+                    .as_ref()
+                    .map(|goal| goal.objective.clone()),
+            })
+        }
+        Ok(result) => {
+            session.record_turn_event(CodexTurnEventKind::TurnCompleted);
+            Ok(TurnResult {
+                response: format!(
+                    "压缩已跳过: {}",
+                    result.reason.unwrap_or_else(|| "unknown".to_string())
+                ),
+                tool_calls_log: Vec::new(),
+                work_dir_switched: None,
+                title_updated: session.title.clone(),
+                plan_steps: session.current_plan.clone(),
+                goal_needs_continuation: session
+                    .current_goal
+                    .as_ref()
+                    .is_some_and(|goal| goal.status == crate::tools::goal::GoalStatus::Active),
+                goal_objective: session
+                    .current_goal
+                    .as_ref()
+                    .map(|goal| goal.objective.clone()),
+            })
+        }
+        Err(error) => Err(format!("压缩失败: {error}")),
     }
 }
 

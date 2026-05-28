@@ -319,6 +319,12 @@ impl FeishuProgressCardSession {
         self.flush_snapshot().await
     }
 
+    pub async fn restart_turn(&mut self, initial_message: &str) -> Result<()> {
+        let session_key = self.snapshot.session_key.clone();
+        self.snapshot = ImAgentProgressSnapshot::new(session_key, initial_message);
+        self.flush_snapshot().await
+    }
+
     pub async fn finish(&mut self, output: Option<String>, failed: bool) -> Result<()> {
         if let Some(output) = output.filter(|value| !value.trim().is_empty()) {
             self.snapshot.output = output;
@@ -599,7 +605,8 @@ impl ImAgentProgressRegistry {
         output: Option<String>,
         failed: bool,
     ) -> Option<ProgressCardMessageInfo> {
-        let (_, session) = self.sessions.remove(session_key)?;
+        let session = self.sessions.get(session_key)?;
+        let session = Arc::clone(session.value());
         let mut session = session.lock().await;
         let message_info = session.message_info();
         let result = session.finish(output, failed).await;
@@ -611,6 +618,25 @@ impl ImAgentProgressRegistry {
             );
         }
         message_info
+    }
+
+    pub async fn restart_existing(&self, session_key: &str, initial_message: &str) -> bool {
+        let Some(session) = self.sessions.get(session_key) else {
+            return false;
+        };
+        let session = Arc::clone(session.value());
+        let result = session.lock().await.restart_turn(initial_message).await;
+        match result {
+            Ok(()) => true,
+            Err(error) => {
+                warn!(
+                    session_key = session_key,
+                    error = %error,
+                    "failed to restart existing IM progress card"
+                );
+                false
+            }
+        }
     }
 }
 

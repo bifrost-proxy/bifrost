@@ -1,5 +1,25 @@
 import { expect, test } from "@playwright/test";
+import type { Page } from "@playwright/test";
 import { openPage } from "./helpers/admin-helpers";
+
+const AGENT_SESSION_EVENTS_ROUTE =
+  "**/_bifrost/api/im-gateway/agent/sessions/events*";
+
+async function routeAgentSessionEvents(page: Page, body?: string) {
+  await page.route(AGENT_SESSION_EVENTS_ROUTE, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "text/event-stream",
+      body:
+        body ||
+        'retry: 60000\nevent: connected\ndata: {"eventType":"connected"}\n\n',
+    });
+  });
+}
+
+test.beforeEach(async ({ page }) => {
+  await routeAgentSessionEvents(page);
+});
 
 test("AI Agent Chat deep link renders local chat preview and composer flow", async ({
   page,
@@ -54,7 +74,7 @@ test("AI Agent Chat deep link renders local chat preview and composer flow", asy
         'event: plan_updated\ndata: {"eventType":"plan_updated","title":"UI telemetry","steps":[{"step":"Gather context","status":"completed"},{"step":"Implement UI","status":"in_progress"}]}\n\n' +
         'event: tool_started\ndata: {"eventType":"tool_started","toolName":"shell","arguments":"pnpm test"}\n\n' +
         'event: tool_finished\ndata: {"eventType":"tool_finished","durationMs":42,"log":{"tool_name":"shell","arguments":"pnpm test","result":"ok","success":true}}\n\n' +
-        'event: assistant_delta\ndata: {"eventType":"assistant_delta","content":"Review received"}\n\n' +
+        'event: assistant_delta\ndata: {"eventType":"assistant_delta","content":"Tool result checked."}\n\n' +
         'event: run_finished\ndata: {"eventType":"run_finished","response":"API run complete [docs](https://example.test/docs)","planSteps":[{"step":"Gather context","status":"completed"},{"step":"Implement UI","status":"completed"}],"toolCalls":[{"tool_name":"shell","arguments":"pnpm test","result":"ok","success":true}]}\n\n',
     });
   });
@@ -72,6 +92,14 @@ test("AI Agent Chat deep link renders local chat preview and composer flow", asy
   await expect(page.getByTestId("agent-chat-prompt-chips")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Review the latest diff" })).toHaveCount(0);
   const initialSessionHint = await page.getByTestId("agent-chat-input-hint").innerText();
+  await page.getByTestId("agent-chat-input").fill("/");
+  await expect(page.getByTestId("agent-chat-slash-command-option")).toContainText(
+    "/compact",
+  );
+  await expect(page.getByTestId("agent-chat-slash-command-option")).toContainText(
+    "立即压缩当前对话上下文",
+  );
+  await page.getByTestId("agent-chat-input").fill("");
   await page.getByTestId("agent-chat-settings-open").click();
   await expect(page.getByTestId("agent-chat-info")).toContainText(
     "Streaming Agent workspace",
@@ -120,6 +148,43 @@ test("AI Agent Chat deep link renders local chat preview and composer flow", asy
   await expect(page.getByTestId("agent-chat-messages")).toContainText(
     "API run complete",
   );
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Tool result checked.",
+  );
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "我先执行一步检查。",
+  );
+  await expect
+    .poll(async () =>
+      page.evaluate(() => {
+        const fallback = Array.from(
+          document.querySelectorAll('[data-testid="agent-chat-message-assistant"]'),
+        ).find((item) => item.textContent?.includes("我先执行一步检查。"));
+        const process = document.querySelector('[data-testid="agent-chat-process-block"]');
+        if (!fallback || !process) return false;
+        return process.getBoundingClientRect().top > fallback.getBoundingClientRect().top;
+      }),
+    )
+    .toBe(true);
+  await expect
+    .poll(async () =>
+      page.evaluate(() => {
+        const process = document.querySelector<HTMLElement>(
+          '[data-testid="agent-chat-process-block"]',
+        );
+        if (!process) return false;
+        const style = window.getComputedStyle(process);
+        const box = process.getBoundingClientRect();
+        return (
+          Number.parseFloat(style.marginTop) === 0 &&
+          Number.parseFloat(style.marginBottom) <= 2 &&
+          Number.parseFloat(style.paddingTop) === 0 &&
+          Number.parseFloat(style.paddingBottom) === 0 &&
+          box.height <= 20
+        );
+      }),
+    )
+    .toBe(true);
   await expect(page.getByRole("link", { name: "docs" })).toHaveAttribute(
     "target",
     "_blank",
@@ -130,29 +195,43 @@ test("AI Agent Chat deep link renders local chat preview and composer flow", asy
   );
   await expect
     .poll(async () =>
-      page.getByTestId("agent-chat-message-bubble-assistant").evaluate((bubble) => {
-        const track = document.querySelector('[data-testid="agent-chat-message-track"]');
-        if (!track) return false;
-        const bubbleBox = bubble.getBoundingClientRect();
-        const trackBox = track.getBoundingClientRect();
-        return (
-          Math.abs(bubbleBox.left - trackBox.left) < 2 &&
-          Math.abs(bubbleBox.right - trackBox.right) < 2
-        );
-      }),
+      page
+        .getByTestId("agent-chat-message-bubble-assistant")
+        .first()
+        .evaluate((bubble) => {
+          const track = document.querySelector('[data-testid="agent-chat-message-track"]');
+          if (!track) return false;
+          const bubbleBox = bubble.getBoundingClientRect();
+          const trackBox = track.getBoundingClientRect();
+          return (
+            Math.abs(bubbleBox.left - trackBox.left) < 2 &&
+            Math.abs(bubbleBox.right - trackBox.right) < 2
+          );
+        }),
     )
     .toBe(true);
   await expect(page.getByTestId("agent-chat-source-tag")).toContainText("Web");
   await expect(page.getByTestId("agent-chat-runner-tag")).toContainText("bifrost");
   await expect(page.getByTestId("agent-chat-state-tag")).toContainText("Ready");
+  await expect(page.getByTestId("agent-chat-token-hud")).toContainText("Tokens");
+  await expect(page.getByTestId("agent-chat-token-hud")).toContainText("1,234");
+  await expect(page.getByTestId("agent-chat-token-hud")).toContainText("Context");
+  await expect(page.getByTestId("agent-chat-token-hud")).toContainText("45%");
+  await expect(page.getByTestId("agent-chat-token-hud")).not.toContainText("Compression");
+  await expect(page.getByTestId("agent-chat-compaction-divider")).toHaveCount(1);
+  await expect(page.getByTestId("agent-chat-compaction-divider")).toContainText(
+    "上下文已自动压缩",
+  );
+  await expect(page.getByTestId("agent-chat-plan-current")).toContainText("Implement UI");
+  await expect(page.getByTestId("agent-chat-plan-more")).toContainText("+1");
+  await expect(page.getByTestId("agent-chat-plan")).not.toContainText("Gather context");
+  await expect(page.getByTestId("agent-chat-plan-list")).toHaveCount(0);
+  await page.getByTestId("agent-chat-plan-toggle").click();
   await expect(page.getByTestId("agent-chat-plan")).toContainText("Gather context");
   await expect(page.getByTestId("agent-chat-plan")).toContainText("Implement UI");
   await expect(page.getByTestId("agent-chat-plan")).toContainText("Completed");
   await page.getByTestId("agent-chat-plan-toggle").click();
-  await expect(page.getByTestId("agent-chat-plan")).not.toContainText("Gather context");
   await expect(page.getByTestId("agent-chat-plan")).toContainText("Plan");
-  await page.getByTestId("agent-chat-plan-toggle").click();
-  await expect(page.getByTestId("agent-chat-plan")).toContainText("Gather context");
   await page.getByTestId("agent-chat-settings-open").click();
   await expect(page.getByText("Agent Chat Status")).toBeVisible();
   await expect(page.getByTestId("agent-chat-status")).toContainText("Finished");
@@ -173,12 +252,233 @@ test("AI Agent Chat deep link renders local chat preview and composer flow", asy
   const processBlock = page.getByTestId("agent-chat-process-block");
   await expect(processBlock).toBeVisible();
   // Collapsed by default - shows summary line only
-  await expect(processBlock).toContainText("steps completed");
+  await expect(processBlock).toContainText("Ran 1 command");
+  await expect(processBlock).not.toContainText("pnpm test");
   // Click to expand
-  await processBlock.click();
+  await processBlock.getByText("Ran 1 command").click();
   // After expanding, shows individual step summaries
   await expect(processBlock).toContainText("shell");
-  await expect(processBlock).toContainText("Compacted");
+  await expect(processBlock).not.toContainText("active");
+  await expect(processBlock).not.toContainText("Run state: Running");
+});
+
+test("AI Agent Chat token HUD stays subtle above the composer", async ({
+  page,
+}, testInfo) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ sessions: [] }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "bifrost_agent",
+        runners: {},
+        channels: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ content: "", work_dir: "/tmp/agent-token-hud" }),
+    });
+  });
+  await page.route("**/_bifrost/api/agent/chat/stream", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "text/event-stream",
+      body:
+        'event: run_started\ndata: {"eventType":"run_started"}\n\n' +
+        'event: status\ndata: {"eventType":"status","status":{"state":"model_response","total_tokens_used":2468,"estimated_context_tokens":875,"context_window_tokens":2500,"context_usage_percent":35,"compaction_count":1}}\n\n' +
+        'event: context_updated\ndata: {"eventType":"context_updated","context":{"estimatedContextTokens":875,"contextWindowTokens":2500,"contextUsagePercent":35,"compactionCount":1,"totalTokensUsed":2468}}\n\n' +
+        'event: compaction_started\ndata: {"eventType":"compaction_started","compaction":{"phase":"pre_turn","compactionCount":1,"context":{"estimatedContextTokens":875,"contextWindowTokens":2500,"contextUsagePercent":35,"compactionCount":1}}}\n\n' +
+        'event: assistant_delta\ndata: {"eventType":"assistant_delta","content":"HUD telemetry visible"}\n\n' +
+        'event: run_finished\ndata: {"eventType":"run_finished","response":"HUD telemetry visible"}\n\n',
+    });
+  });
+
+  await openPage(page, "ai?aiSection=agent-chat&agentSection=chat");
+  await expect(page.getByTestId("agent-chat-token-hud")).toHaveCount(0);
+  await page.getByTestId("agent-chat-input").fill("Show token HUD");
+  await page.getByTestId("agent-chat-send").click();
+
+  const hud = page.getByTestId("agent-chat-token-hud");
+  await expect(hud).toContainText("Tokens");
+  await expect(hud).toContainText("2,468");
+  await expect(hud).toContainText("Context");
+  await expect(hud).toContainText("35%");
+  await expect(hud).not.toContainText("Compression");
+  await expect(page.getByTestId("agent-chat-input")).toBeVisible();
+
+  await expect
+    .poll(async () =>
+      page.getByTestId("agent-chat-token-hud").evaluate((element) => {
+        const input = document.querySelector('[data-testid="agent-chat-input"]');
+        if (!input) return false;
+        const hudBox = element.getBoundingClientRect();
+        const inputBox = input.getBoundingClientRect();
+        return hudBox.bottom <= inputBox.top - 12 && hudBox.height <= 22;
+      }),
+    )
+    .toBe(true);
+  await expect(page.getByTestId("agent-chat-token-hud-progress")).toHaveJSProperty(
+    "style.width",
+    "35%",
+  );
+  await expect
+    .poll(async () =>
+      page.getByTestId("agent-chat-token-hud-progress").evaluate((element) =>
+        getComputedStyle(element).backgroundColor,
+      ),
+    )
+    .not.toBe("rgb(22, 119, 255)");
+  await expect
+    .poll(async () =>
+      page.evaluate(() => {
+        const track = document.querySelector('[data-testid="agent-chat-token-hud-track"]');
+        const item = document.querySelector('[data-testid="agent-chat-token-hud-item"]');
+        const composer = document.querySelector('[data-testid="agent-chat-composer-track"]');
+        if (!track || !item || !composer) return false;
+        const trackBox = track.getBoundingClientRect();
+        const itemBox = item.getBoundingClientRect();
+        const composerBox = composer.getBoundingClientRect();
+        return (
+          trackBox.right <= itemBox.left &&
+          trackBox.top < composerBox.top - 12 &&
+          itemBox.top < composerBox.top - 12
+        );
+      }),
+    )
+    .toBe(true);
+  await expect
+    .poll(async () =>
+      page.getByTestId("agent-chat-message-track").evaluate((track) => {
+        const style = window.getComputedStyle(track);
+        return Number.parseFloat(style.paddingBottom) >= 72;
+      }),
+    )
+    .toBe(true);
+
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await page.getByTestId("theme-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(hud).toContainText("2,468");
+  await expect(hud).toContainText("35%");
+  const screenshotPath = testInfo.outputPath("agent-chat-token-hud.png");
+  await hud.screenshot({ path: screenshotPath });
+  await testInfo.attach("agent-chat-token-hud", {
+    path: screenshotPath,
+    contentType: "image/png",
+  });
+});
+
+test("AI Agent Chat runs compact as a control command without chat messages", async ({
+  page,
+}) => {
+  let compactCalls = 0;
+  let releaseFirstCompactResponse: (() => void) | undefined;
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ sessions: [] }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "bifrost_agent",
+        runners: {
+          codex: { enabled: true, adapter: "codex" },
+        },
+        channels: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ content: "", work_dir: "/tmp/agent-compact" }),
+    });
+  });
+  await page.route("**/_bifrost/api/agent/chat/stream", async (route) => {
+    const body = route.request().postDataJSON();
+    expect(body).toMatchObject({
+      message: "/compact",
+      work_dir: "/tmp/agent-compact",
+    });
+    compactCalls += 1;
+    if (compactCalls === 1) {
+      await new Promise<void>((resolve) => {
+        releaseFirstCompactResponse = resolve;
+      });
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "text/event-stream",
+      body:
+        'event: run_started\ndata: {"eventType":"run_started"}\n\n' +
+        'event: compaction_started\ndata: {"eventType":"compaction_started","compaction":{"trigger":"manual","reason":"user_requested","phase":"standalone_turn","preTokens":900,"compactionCount":1,"context":{"estimatedContextTokens":900,"contextWindowTokens":1000,"contextUsagePercent":90,"compactionCount":1}}}\n\n' +
+        'event: assistant_delta\ndata: {"eventType":"assistant_delta","content":"我先执行一步检查。"}\n\n' +
+        'event: tool_started\ndata: {"eventType":"tool_started","toolName":"shell","arguments":"should-not-render"}\n\n' +
+        'event: compaction_finished\ndata: {"eventType":"compaction_finished","compaction":{"trigger":"manual","reason":"user_requested","phase":"standalone_turn","preTokens":900,"postTokens":240,"tokensSaved":660,"messagesRemoved":3,"durationMs":12,"compactionCount":2,"context":{"estimatedContextTokens":240,"contextWindowTokens":1000,"contextUsagePercent":24,"compactionCount":2}}}\n\n' +
+        'event: run_finished\ndata: {"eventType":"run_finished","response":"上下文已自动压缩"}\n\n',
+    });
+  });
+
+  await openPage(page, "ai?aiSection=agent-chat&agentSection=chat");
+  const input = page.getByTestId("agent-chat-input");
+  await input.fill("/");
+  await expect(page.getByTestId("agent-chat-slash-command-option")).toHaveAttribute(
+    "data-active",
+    "true",
+  );
+  await input.press("ArrowDown");
+  await expect(
+    page.getByTestId("agent-chat-slash-runner-option").filter({ hasText: "Bifrost Agent" }),
+  ).toHaveAttribute("data-active", "true");
+  await input.press("ArrowUp");
+  await input.press("Enter");
+
+  await expect.poll(() => compactCalls).toBe(1);
+  await expect(page.getByTestId("agent-chat-compaction-divider")).toContainText(
+    "上下文正在自动压缩",
+  );
+  await expect(page.getByTestId("agent-chat-thinking-tail")).toHaveCount(0);
+  await expect(page.getByTestId("agent-chat-messages")).not.toContainText(
+    /Running \d+ command/,
+  );
+  releaseFirstCompactResponse?.();
+  await expect(input).toHaveValue("");
+  await expect(page.getByTestId("agent-chat-message-bubble-user")).toHaveCount(0);
+  await expect(page.getByTestId("agent-chat-compaction-divider")).toContainText(
+    "上下文已自动压缩",
+  );
+  await expect(page.getByTestId("agent-chat-messages")).not.toContainText("/compact");
+  await expect(page.getByTestId("agent-chat-messages")).not.toContainText(
+    "我先执行一步检查。",
+  );
+  await expect(page.getByTestId("agent-chat-messages")).not.toContainText(
+    "should-not-render",
+  );
+
+  await input.fill("/compact");
+  await page.getByTestId("agent-chat-send").click();
+  await expect.poll(() => compactCalls).toBe(2);
+  await expect(page.getByTestId("agent-chat-message-bubble-user")).toHaveCount(0);
+  await expect(page.getByTestId("agent-chat-messages")).not.toContainText("/compact");
 });
 
 test("AI Agent Chat slash runner call selects a runner and renders the result", async ({
@@ -463,6 +763,15 @@ test("AI Agent Chat keeps plan content compact and scrolls after five steps", as
   await page.getByTestId("agent-chat-input").fill("");
   await page.getByTestId("agent-chat-input").fill("Show a dense plan");
   await page.getByTestId("agent-chat-send").click();
+  await expect(page.getByTestId("agent-chat-plan-current")).toContainText(
+    "Compress every row",
+  );
+  await expect(page.getByTestId("agent-chat-plan-more")).toContainText("+6");
+  await expect(page.getByTestId("agent-chat-plan-list")).toHaveCount(0);
+  await expect(page.getByTestId("agent-chat-plan")).not.toContainText(
+    "Overflow item seven",
+  );
+  await page.getByTestId("agent-chat-plan-toggle").click();
   await expect(page.getByTestId("agent-chat-plan")).toContainText("Overflow item seven");
   await expect(page.getByTestId("agent-chat-plan-item")).toHaveCount(7);
 
@@ -787,6 +1096,82 @@ test("AI Agent Chat selects the first thread on initial entry", async ({ page })
   ).toHaveAttribute("aria-current", "true");
 });
 
+test("AI Agent Chat updates the thread list from session events", async ({ page }) => {
+  let sessionsAllCalls = 0;
+  await page.unroute(AGENT_SESSION_EVENTS_ROUTE);
+  await routeAgentSessionEvents(
+    page,
+    'retry: 60000\nevent: sessions_changed\ndata: {"eventType":"sessions_changed","sessionKey":"incoming-im-loop","reason":"started"}\n\n',
+  );
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+    sessionsAllCalls += 1;
+    const sessions = [
+      {
+        session_key: "current-web-thread",
+        status: "ended",
+        title: "Current Web thread",
+        source: "admin-api",
+        runner_type: "bifrost_agent",
+        start_time: 100,
+        last_active_time: 120,
+      },
+    ];
+    if (sessionsAllCalls >= 2) {
+      sessions.unshift({
+        session_key: "incoming-im-loop",
+        status: "active",
+        running: true,
+        title: "Incoming IM loop",
+        source: "feishu",
+        runner_type: "bifrost_agent",
+        run_state: "running",
+        start_time: 200,
+        last_active_time: 240,
+      });
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ sessions }),
+    });
+  });
+  await page.route(
+    "**/_bifrost/api/im-gateway/agent/sessions/current-web-thread",
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          session_key: "current-web-thread",
+          title: "Current Web thread",
+          source: "admin-api",
+          messages: [
+            { role: "user", content: "Keep me selected" },
+            { role: "assistant", content: "Current reply stays visible" },
+          ],
+        }),
+      });
+    },
+  );
+
+  await openPage(
+    page,
+    "ai?aiSection=agent-chat&agentSection=chat&session=current-web-thread&view=active",
+  );
+
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Current reply stays visible",
+  );
+  await expect(page.getByRole("button", { name: /Incoming IM loop/ })).toBeVisible({
+    timeout: 5000,
+  });
+  await expect(page.getByRole("button", { name: /Incoming IM loop.*Feishu/ })).toBeVisible();
+  await expect(page).toHaveURL(/session=current-web-thread/);
+  await expect(
+    page.locator('[data-testid="agent-chat-thread-item"][data-selected="true"]'),
+  ).toContainText("Current Web thread");
+});
+
 test("AI Agent Chat keeps five rounds for each runner in one thread", async ({
   page,
 }) => {
@@ -1015,6 +1400,114 @@ test("AI Agent Chat restores JSONL history and continues with history path", asy
   );
 });
 
+test("AI Agent Chat continues external runner history with canonical history path", async ({
+  page,
+}) => {
+  const historyPath = "/tmp/external-runner-history.jsonl";
+  let externalPayload: Record<string, unknown> | undefined;
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "bifrost_agent",
+        runners: {
+          bifrost_agent: { enabled: true, adapter: "builtin" },
+          web: { enabled: true, adapter: "chatgpt_web" },
+        },
+        channels: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ content: "", work_dir: "/tmp/external-workspace" }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessions: [
+          {
+            session_key: "external-history-session",
+            status: "ended",
+            title: "External runner history",
+            history_path: historyPath,
+            has_timeline: true,
+            runner_id: "web",
+            runner_type: "chatgpt_web",
+            work_dir: "/tmp/external-workspace",
+            source: "web",
+          },
+        ],
+      }),
+    });
+  });
+  await page.route(
+    `**/_bifrost/api/im-gateway/agent/sessions/history/${encodeURIComponent(historyPath)}`,
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          events: [
+            {
+              timestamp: 1,
+              event_type: "user_message",
+              session_key: "external-history-session",
+              content: { message: "Earlier GPT Web question" },
+            },
+            {
+              timestamp: 2,
+              event_type: "assistant_message",
+              session_key: "external-history-session",
+              content: { message: "Earlier GPT Web answer" },
+            },
+          ],
+        }),
+      });
+    },
+  );
+  await page.route("**/_bifrost/api/im-gateway/chat/stream", async (route) => {
+    externalPayload = route.request().postDataJSON();
+    await route.fulfill({
+      status: 200,
+      contentType: "application/x-ndjson",
+      body:
+        '{"eventType":"run_started","content":"started"}\n' +
+        '{"eventType":"run_finished","status":"succeeded","response":"External history continued"}\n',
+    });
+  });
+
+  await openPage(
+    page,
+    `ai?aiSection=agent-chat&agentSection=chat&session=external-history-session&view=history&historyPath=${encodeURIComponent(historyPath)}`,
+  );
+
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Earlier GPT Web answer",
+  );
+  await expect(page.getByTestId("agent-chat-runner-tag")).toContainText("web");
+  await page.getByTestId("agent-chat-input").fill("Continue via GPT Web");
+  await page.getByTestId("agent-chat-send").click();
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "External history continued",
+  );
+  expect(externalPayload).toMatchObject({
+    message: "Continue via GPT Web",
+    sessionKey: "external-history-session",
+    runnerId: "web",
+    adapter: "chatgpt_web",
+    workDir: "/tmp/external-workspace",
+    params: { historyPath },
+  });
+});
+
 test("AI Agent Chat restores active session messages after refresh", async ({
   page,
 }) => {
@@ -1234,6 +1727,361 @@ test("AI Agent Chat falls back to persisted history when active detail is gone",
     "Answer from persisted JSONL",
   );
   await expect(page.getByTestId("agent-chat-title")).toHaveText("Bifrost Edge");
+});
+
+test("AI Agent Chat restores active timeline process steps from history path", async ({
+  page,
+}) => {
+  const historyPath = "/tmp/active-timeline-session.jsonl";
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "bifrost_agent",
+        runners: { bifrost_agent: { enabled: true, adapter: "builtin" } },
+        channels: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ content: "", work_dir: "/tmp/workspace" }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessions: [
+          {
+            session_key: "active-timeline",
+            status: "active",
+            title: "IM timeline",
+            history_path: historyPath,
+            has_timeline: true,
+            timeline_event_count: 5,
+            run_state: "completed",
+            source: "im",
+          },
+        ],
+      }),
+    });
+  });
+  await page.route(
+    "**/_bifrost/api/im-gateway/agent/sessions/active-timeline",
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          session_key: "active-timeline",
+          title: "IM timeline",
+          history_path: historyPath,
+          has_timeline: true,
+          timeline_event_count: 5,
+          run_state: "completed",
+          messages: [
+            { role: "user", content: "IM timeline question", timestamp: 1 },
+            { role: "assistant", content: "IM timeline answer", timestamp: 5 },
+          ],
+        }),
+      });
+    },
+  );
+  await page.route(
+    `**/_bifrost/api/im-gateway/agent/sessions/history/${encodeURIComponent(historyPath)}`,
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          events: [
+            {
+              timestamp: 1,
+              event_type: "run_state_changed",
+              session_key: "active-timeline",
+              content: { state: "running", source_channel: "im", agent_kind: "builtin" },
+            },
+            {
+              timestamp: 2,
+              event_type: "user_message",
+              session_key: "active-timeline",
+              content: { message: "IM timeline question" },
+            },
+            {
+              timestamp: 2.5,
+              event_type: "assistant_delta",
+              session_key: "active-timeline",
+              content: { message: "I will run the timeline check first." },
+            },
+            {
+              timestamp: 3,
+              event_type: "tool_call",
+              session_key: "active-timeline",
+              content: {
+                tool_name: "exec_command",
+                arguments: "{\"cmd\":\"pnpm test\"}",
+              },
+            },
+            {
+              timestamp: 4,
+              event_type: "tool_result",
+              session_key: "active-timeline",
+              content: {
+                tool_name: "exec_command",
+                result: "ok",
+                success: true,
+              },
+            },
+            {
+              timestamp: 4.5,
+              event_type: "assistant_delta",
+              session_key: "active-timeline",
+              content: { message: "The command completed successfully." },
+            },
+            {
+              timestamp: 5,
+              event_type: "assistant_message",
+              session_key: "active-timeline",
+              content: { message: "IM timeline answer" },
+            },
+          ],
+        }),
+      });
+    },
+  );
+
+  await openPage(
+    page,
+    "ai?aiSection=agent-chat&agentSection=chat&session=active-timeline&view=active",
+  );
+
+  await expect(page).not.toHaveURL(/view=history/);
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "IM timeline question",
+  );
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "IM timeline answer",
+  );
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "I will run the timeline check first.",
+  );
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "The command completed successfully.",
+  );
+  const firstDeltaMessage = page
+    .getByTestId("agent-chat-message-assistant")
+    .filter({ hasText: "I will run the timeline check first." });
+  const secondDeltaMessage = page
+    .getByTestId("agent-chat-message-assistant")
+    .filter({ hasText: "The command completed successfully." });
+  const finalAssistantMessage = page
+    .getByTestId("agent-chat-message-assistant")
+    .filter({ hasText: "IM timeline answer" });
+  await expect(firstDeltaMessage.getByTestId("agent-chat-message-time")).toHaveCount(0);
+  await expect(secondDeltaMessage.getByTestId("agent-chat-message-time")).toHaveCount(0);
+  await expect(finalAssistantMessage.getByTestId("agent-chat-message-time")).toHaveCount(1);
+  const processBlock = page.getByTestId("agent-chat-process-block");
+  await expect(processBlock).toBeVisible();
+  await expect(processBlock).toContainText("Running 1 command");
+  await expect(processBlock).not.toContainText("pnpm test");
+  await expect
+    .poll(async () =>
+      page.evaluate(() => {
+        const assistantMessages = Array.from(
+          document.querySelectorAll('[data-testid="agent-chat-message-assistant"]'),
+        );
+        const firstDelta = assistantMessages.find((item) =>
+          item.textContent?.includes("I will run the timeline check first."),
+        );
+        const process = document.querySelector('[data-testid="agent-chat-process-block"]');
+        const secondDelta = assistantMessages.find((item) =>
+          item.textContent?.includes("The command completed successfully."),
+        );
+        const finalAssistant = assistantMessages.find((item) =>
+          item.textContent?.includes("IM timeline answer"),
+        );
+        if (!firstDelta || !process || !secondDelta || !finalAssistant) return false;
+        return (
+          firstDelta.getBoundingClientRect().top <
+            process.getBoundingClientRect().top &&
+          process.getBoundingClientRect().top <
+            secondDelta.getBoundingClientRect().top &&
+          secondDelta.getBoundingClientRect().top <
+            finalAssistant.getBoundingClientRect().top
+        );
+      }),
+    )
+    .toBe(true);
+  await processBlock.getByText(/Ran|Running/).click();
+  await expect(processBlock).toContainText("Run state: Running");
+  await expect(processBlock).toContainText("exec_command");
+  await processBlock.getByText("exec_command").click();
+  await expect(processBlock).toContainText("pnpm test");
+  await expect(processBlock).toContainText("ok");
+});
+
+test("AI Agent Chat keeps polling running history timeline after refresh", async ({
+  page,
+}) => {
+  const historyPath = "/tmp/running-refresh-session.jsonl";
+  let historyCalls = 0;
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "bifrost_agent",
+        runners: { bifrost_agent: { enabled: true, adapter: "builtin" } },
+        channels: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ content: "", work_dir: "/tmp/workspace" }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessions: [
+          {
+            session_key: "running-refresh",
+            status: "active",
+            running: true,
+            title: "Running refresh",
+            history_path: historyPath,
+            has_timeline: true,
+            timeline_event_count: 2,
+            run_state: "running",
+            source: "web",
+          },
+        ],
+      }),
+    });
+  });
+  await page.route(
+    `**/_bifrost/api/im-gateway/agent/sessions/history/${encodeURIComponent(historyPath)}`,
+    async (route) => {
+      historyCalls += 1;
+      const events = [
+        {
+          timestamp: 0.1,
+          event_type: "user_message",
+          session_key: "running-refresh",
+          content: { message: "Previous question" },
+        },
+        {
+          timestamp: 0.2,
+          event_type: "assistant_message",
+          session_key: "running-refresh",
+          content: { message: "Previous answer" },
+        },
+        {
+          timestamp: 2,
+          event_type: "user_message",
+          session_key: "running-refresh",
+          content: { message: "Question before refresh" },
+        },
+        ...(historyCalls >= 2
+          ? [
+              {
+                timestamp: 2.5,
+                event_type: "assistant_delta",
+                session_key: "running-refresh",
+                content: { message: "I am checking the refreshed run state." },
+              },
+              {
+                timestamp: 3,
+                event_type: "tool_call",
+                session_key: "running-refresh",
+                content: {
+                  tool_name: "exec_command",
+                  arguments: "{\"cmd\":\"cargo test\"}",
+                },
+              },
+              {
+                timestamp: 4,
+                event_type: "tool_result",
+                session_key: "running-refresh",
+                content: {
+                  tool_name: "exec_command",
+                  result: "still running output",
+                  success: true,
+                },
+              },
+              {
+                timestamp: 4.5,
+                event_type: "assistant_delta",
+                session_key: "running-refresh",
+                content: { message: "The command is still being observed." },
+              },
+            ]
+          : []),
+      ];
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ events }),
+      });
+    },
+  );
+
+  await openPage(
+    page,
+    `ai?aiSection=agent-chat&agentSection=chat&session=running-refresh&view=history&historyPath=${encodeURIComponent(historyPath)}`,
+  );
+
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Question before refresh",
+  );
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "I am checking the refreshed run state.",
+  );
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "The command is still being observed.",
+  );
+  await expect(page.getByTestId("agent-chat-thinking-tail")).toBeVisible();
+  const processBlock = page.getByTestId("agent-chat-process-block");
+  await expect(processBlock).toBeVisible();
+  await expect(processBlock).not.toContainText("cargo test");
+  await expect
+    .poll(async () =>
+      page.evaluate(() => {
+        const users = Array.from(
+          document.querySelectorAll('[data-testid="agent-chat-message-user"]'),
+        );
+        const assistants = Array.from(
+          document.querySelectorAll('[data-testid="agent-chat-message-assistant"]'),
+        );
+        const lastUser = users.at(-1);
+        const lastAssistant = assistants.at(-1);
+        if (!lastUser || !lastAssistant) return false;
+        return (
+          lastAssistant.getBoundingClientRect().top >
+          lastUser.getBoundingClientRect().top
+        );
+      }),
+    )
+    .toBe(true);
+  await processBlock.getByText(/Ran|Running/).click();
+  await expect(processBlock).toContainText("Run state: Running");
+  await expect(processBlock).toContainText("exec_command");
+  await processBlock.getByText("exec_command").click();
+  await expect(processBlock).toContainText("cargo test");
+  await expect(processBlock).toContainText("still running output");
+  expect(historyCalls).toBeGreaterThanOrEqual(2);
 });
 
 test("AI Agent Chat thread list scrolls and selects only the active duplicate", async ({

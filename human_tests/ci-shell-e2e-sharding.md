@@ -684,6 +684,38 @@
 - Replay gzip 回归启动本地 HTTP mock，`Replay decoded gzip response body as JSON` 通过，最终 `Results: 1 passed, 0 failed`。
 - Startup auth preflight 输出 `using existing bifrost binary` 和 `[chatgpt-web-startup-auth] PASS`，不会进入 `cargo build`，避免 macOS shell shard 内 Cargo artifact lock 竞争。
 
+### TC-CS-31: Feishu card Agent shell E2E 复用 CI release binary 回归
+
+**操作步骤**：
+1. 对 Feishu card Agent shell E2E 脚本执行语法检查：
+   ```bash
+   bash -n e2e-tests/tests/test_agent_send_msg_feishu_card.sh
+   ```
+2. 静态检查脚本的端口与 binary 选择逻辑：
+   ```bash
+   rg -n 'BIFROST_PORT=.*ADMIN_PORT|MOCK_PORT=.*MOCK_HTTP_PORT|SKIP_BUILD|target/release/bifrost|target/debug/bifrost|bifrost binary is not executable' \
+     e2e-tests/tests/test_agent_send_msg_feishu_card.sh
+   ```
+3. 使用已构建的 release binary 和并行调度器端口变量真实执行 Feishu card 链路：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" \
+     ADMIN_PORT=18945 MOCK_HTTP_PORT=18946 \
+     bash e2e-tests/tests/test_agent_send_msg_feishu_card.sh
+   ```
+4. 用本轮失败 artifact 复核原始根因：
+   ```bash
+   grep -R -n 'target/debug/bifrost: No such file or directory' \
+     /tmp/bifrost-ci-artifacts-26515240075/e2e-shell-logs-*/.e2e-reports/shell_test_agent_send_msg_feishu_card_sh.log
+   ```
+
+**预期结果**：
+- 脚本语法检查通过。
+- 静态检查显示脚本优先消费 `ADMIN_PORT` / `MOCK_HTTP_PORT`，`SKIP_BUILD=true` 分支默认 `$REPO_DIR/target/release/bifrost`，本地构建分支默认 `$REPO_DIR/target/debug/bifrost`，且 binary 不可执行时有明确错误。
+- 真实执行输出 `skipping build, using .../target/release/bifrost` 与 `[agent-send-msg-feishu-card] PASS`，不会查找 `target/debug/bifrost`。
+- fake Feishu 收到 interactive card 请求，outbound message log 记录 `trigger=agent_tool:send_msg` 且 `msg_type=interactive`。
+- artifact 复核能定位原始失败是 CI release artifact 场景下脚本错误查找 debug binary，而不是业务断言失败。
+- 真实执行使用临时数据目录、`--no-system-proxy` 与非 9900 端口。
+
 ## 本轮执行记录
 
 测试日期：2026-05-09
@@ -711,6 +743,7 @@
 | TC-CS-28 | 通过 | 2026-05-23 本轮执行：`bash -n e2e-tests/tests/test_agent_chat_history_continue.sh e2e-tests/tests/test_agent_direct_path_switch.sh` 通过；`rg -n 'SKIP_BUILD\|target/release/bifrost\|target/debug/bifrost\|skipping build, using\|bifrost binary not found' ...` 显示两个脚本均在 `SKIP_BUILD=true` 分支默认 release binary、本地构建分支默认 debug binary，并在 binary 不可执行时明确失败。随后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_agent_chat_history_continue.sh`，输出 `skipping build, using .../target/release/bifrost` 与 `[agent-chat-history-continue] PASS`；执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_agent_direct_path_switch.sh`，输出 `skipping build, using .../target/release/bifrost` 与 `[agent-direct-path-switch] PASS`。两条真实链路均使用临时数据目录、`--no-system-proxy` 与动态非 9900 端口，未再查找 `target/debug/bifrost`。 |
 | TC-CS-29 | 通过 | 2026-05-26 本轮执行：`bash -n scripts/run_all_e2e.sh` 退出码 0；`rg -n 'CARGO_HEAVY_TESTS\|... \|serial_tests' scripts/run_all_e2e.sh` 显示 `test_agent_builtin_status_runtime.sh`、`test_agent_codex_parity_contracts.sh`、`test_agent_loop_runtime_limits.sh`、`test_asr_model_autonomy.sh`、`test_asr_task_pause_resume.sh`、`test_chatgpt_web_behavior_artifacts.sh`、`test_client_process_transport_attribution.sh`、`test_http3_e2e.sh`、`test_im_agent_markdown_image_reply.sh`、`test_im_agent_streaming_progress_card.sh`、`test_im_gateway_long_reply_delivery_regression.sh`、`test_long_term_memory_remember_recall.sh`、`test_qwen3_asr_local_server.sh`、`test_qwen3_asr_runtime_guards.sh`、`test_skill_creator_flow.sh`、`test_sync_login_direct_e2e.sh`、`test_utf8_safe_preview_e2e.sh`、`test_voice_input_runtime.sh` 等 Cargo-heavy 用例，以及 `is_cargo_heavy` 加入 `serial_tests` 的调度逻辑；`BIFROST_E2E_SHARD_INDEX=1 BIFROST_E2E_SHARD_TOTAL=3 scripts/run_all_e2e.sh --ci --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests` 显示失败相关用例仍在 shard 1 覆盖范围内；`grep -R -n 'Blocking.*file lock on artifact directory' /tmp/bifrost-ci-26451521064/... | head -20` 定位到 Linux/macOS shard 1 artifact 中多个 Cargo-heavy 用例等待 Cargo artifact lock 的原始症状。该回归未启动 Bifrost，未使用 9900，未修改系统代理。 |
 | TC-CS-30 | 通过 | 2026-05-28 本轮执行：`bash -n e2e-tests/tests/test_http3_e2e.sh e2e-tests/tests/test_replay_body_decode.sh e2e-tests/tests/test_chatgpt_web_startup_auth_preflight.sh scripts/run_all_e2e.sh` 通过；`rg -n 'httpbin\.org|echo\.websocket\.events' e2e-tests/tests/test_http3_e2e.sh e2e-tests/tests/test_replay_body_decode.sh e2e-tests/rules/http3/http3_e2e.txt` 无公网域名匹配。随后使用已有 debug binary 执行 `BIFROST_BIN=/Users/eden/work/github/bifrost/target/debug/bifrost SKIP_BUILD=true SKIP_CARGO_TEST=true PROXY_PORT=18991 ECHO_HTTP_PORT=18992 ECHO_HTTPS_PORT=18993 SERVER_LOG_DIR=/tmp/bifrost-http3-mock-logs bash e2e-tests/tests/test_http3_e2e.sh`，脚本启动本地 mock，host forwarding 和 body append 均返回 200，最终 `Passed: 34`、`Failed: 0`。执行 `BIFROST_BIN=/Users/eden/work/github/bifrost/target/debug/bifrost SKIP_BUILD=true PROXY_PORT=18981 MOCK_HTTP_PORT=18982 BIFROST_DATA_DIR=/tmp/bifrost-replay-body-decode-test SERVER_LOG_DIR=/tmp/bifrost-replay-body-decode-test/mock-logs bash e2e-tests/tests/test_replay_body_decode.sh`，输出 `Replay decoded gzip response body as JSON`，`Results: 1 passed, 0 failed`。执行 `BIFROST_BIN=/Users/eden/work/github/bifrost/target/debug/bifrost SKIP_BUILD=true BIFROST_CHATGPT_WEB_STARTUP_E2E_PORT=18971 bash e2e-tests/tests/test_chatgpt_web_startup_auth_preflight.sh`，输出 `using existing bifrost binary` 与 `[chatgpt-web-startup-auth] PASS`，未触发 cargo build。三条真实执行均使用临时端口、`--no-system-proxy`，未使用 9900。 |
+| TC-CS-31 | 通过 | 2026-05-27 本轮执行：`bash -n e2e-tests/tests/test_agent_send_msg_feishu_card.sh` 通过；`rg -n 'BIFROST_PORT=.*ADMIN_PORT\|MOCK_PORT=.*MOCK_HTTP_PORT\|SKIP_BUILD\|target/release/bifrost\|target/debug/bifrost\|bifrost binary is not executable' e2e-tests/tests/test_agent_send_msg_feishu_card.sh` 显示脚本优先消费调度器端口、`SKIP_BUILD=true` 默认 release binary、本地构建默认 debug binary，且 binary 不可执行时明确失败。随后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" ADMIN_PORT=18945 MOCK_HTTP_PORT=18946 bash e2e-tests/tests/test_agent_send_msg_feishu_card.sh`，输出 `skipping build, using .../target/release/bifrost` 与 `[agent-send-msg-feishu-card] PASS`。CI run `26515240075` 的 Linux/macOS shard 3 artifact 中原始日志均显示 `target/debug/bifrost: No such file or directory`，确认根因为 release artifact 场景错误查找 debug binary；真实执行使用临时数据目录、`--no-system-proxy` 与非 9900 端口。 |
 
 ## 清理步骤
 

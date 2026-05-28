@@ -291,8 +291,6 @@ pub struct ImAgentConfig {
     pub reasoning_summary: Option<String>,
     /// 会话 TTL（秒）
     pub session_ttl_secs: u64,
-    /// 单会话最大历史消息数
-    pub max_history: usize,
     /// 是否使用 Azure 认证方式
     pub by_azure: bool,
     /// 是否启用 Agent 功能
@@ -373,7 +371,7 @@ pub struct AgentMessageContext {
 
 `send_msg` 的工具名固定，但 description 和 JSON schema 按 provider capability 动态生成：
 
-- 飞书支持 `text`、`markdown`、`interactive card` 时，schema 才出现 `format=card` 与 `card` 字段。
+- 飞书支持 `text`、`markdown`、`interactive card` 时，schema 才出现 `format=card`、`card`、`image_key`、`image` 与 `image_alt` 字段。飞书通道下模型只传 `markdown` 或 `image_key` 时，工具默认构造 JSON 2.0 interactive card 发送，而不是纯文本消息；这样 Markdown 与图片都走飞书卡片渲染能力。
 - 微信如果仅支持 `text` / `markdown`，则 schema 只暴露这两类，不提示卡片能力。
 - 不支持的消息类型在模型可见 schema 中直接不可见，而不是等执行时报错。
 
@@ -384,11 +382,23 @@ pub struct AgentMessageContext {
   "body": "要发送的文本或 markdown",
   "format": "text|markdown|card",
   "target": "default|current_thread|current_user|owner",
-  "card": {}
+  "card": {},
+  "image_key": "飞书 image_key，可作为卡片图片元素发送",
+  "image_alt": "图片说明"
 }
 ```
 
 `target=default` 的解析优先级是：tool call 显式安全目标、任务绑定通道、当前入站来源、Agent 默认发送通道。schedule 执行时必须优先使用 schedule 保存的任务绑定通道，不能因为后续对话来自另一个 IM 来源而漂移。
+
+#### 飞书 send_msg 卡片默认值
+
+2026-05-27 起，`send_msg` 在 `provider_type=Feishu` 时对 `markdown`、`image_key`、`image` 走卡片优先策略：
+
+1. 如果模型提供 `card`，按原始 interactive card JSON 直通发送。
+2. 如果模型提供 `markdown`、`image_key` 或 `image`，后端构造飞书 JSON 2.0 卡片：header 默认 `Bifrost AI`，body 中按顺序放置可选 `img` 元素与 `markdown` 元素。
+3. `image_key` 直接作为卡片 `img_key`；`image.data_base64` 先上传为飞书 image_key 后再入卡，避免 data URL 或 Markdown 图片 URL 在飞书客户端变成不可渲染文本。
+4. 如果只提供 `text`，仍发送纯文本，便于模型明确要求短文本通知；非飞书通道继续按 provider 能力降级为文本或原有 card 行为。
+5. tool result 和 message log 只记录 `msg_type=interactive`、message_id 与安全摘要，不暴露 open_id、tenant token、原始 secret 或上传字节。
 
 ### 1.2 Provider 级 Agent 基础配置覆盖
 
@@ -486,8 +496,6 @@ pub struct ImAgentSessionManager {
     sessions: DashMap<String, Session>,
     /// 会话 TTL
     ttl: Duration,
-    /// 最大历史消息数
-    max_history: usize,
 }
 
 struct Session {
@@ -651,7 +659,6 @@ pub enum ImRouteAction {
   "reasoning_effort": "medium",
   "reasoning_summary": "auto",
   "session_ttl_secs": 3600,
-  "max_history": 20,
   "by_azure": true
 }
 ```
@@ -779,14 +786,13 @@ struct ChatMessage {
 - **简单性**：避免引入数据库依赖和迁移逻辑
 - **重启清空**：服务重启后从新对话开始，符合用户预期
 
-### 5. 为什么限制历史消息数
+### 5. 为什么不限制历史消息数
 
-**限制 `max_history` 的原因**：
+Agent Loop 已移除请求级历史条数限制，常规请求使用完整 sanitized history；上下文管理对齐 Codex，由 token/context budget、自动压缩和 provider context-window 错误共同驱动。
 
-- **成本控制**：减少 API token 消耗
-- **性能优化**：避免请求体过大
-- **上下文聚焦**：保留最近对话更相关
-- **模型限制**：避免超出模型上下文窗口
+- **语义完整**：不因为固定消息条数裁掉早期需求、约束或工具结果。
+- **压缩优先**：达到 token 阈值时用 compaction 生成 summary，而不是直接截断。
+- **错误显式化**：provider 仍报告超窗时保留 live history 并返回错误，避免静默丢上下文。
 
 ## 文件结构
 
@@ -836,7 +842,7 @@ tracing = "0.1"
 |--------|----------|
 | `test_im_agent_config_env_var` | 验证 `$ENV_VAR` 环境变量替换 |
 | `test_session_manager_ttl` | 验证会话 TTL 过期清理 |
-| `test_session_manager_max_history` | 验证历史消息数限制 |
+| `test_build_messages_uses_full_sanitized_history` | 验证常规请求使用完整 sanitized history |
 | `test_agent_client_request_build` | 验证 HTTP 请求构建正确性 |
 | `test_agent_client_azure_auth` | 验证 Azure 认证 header |
 | `test_builtin_commands` | 验证 /clear、/reset 命令 |
@@ -1022,7 +1028,7 @@ Threads 列表的详情 tooltip 只属于左侧 runner/source 图标，不属于
 | 风险 | 影响 | 缓解措施 |
 |------|------|----------|
 | 模型 API 故障 | 用户无响应 | 超时机制 + 错误提示消息 |
-| 上下文过长 | Token 消耗大 | max_history 限制 |
+| 上下文过长 | Token 消耗大 | token/context budget 触发 compaction，provider 超窗时显式报错并保留 live history |
 | 敏感信息泄露 | 隐私问题 | 会话不持久化 + TTL 清理 |
 | 非 owner 滥用 | 成本失控 | owner_ids 白名单校验 |
 | 并发请求过多 | API 限流 | 请求队列 + 限流机制 |

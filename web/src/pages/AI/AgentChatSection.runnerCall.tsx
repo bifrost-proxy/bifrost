@@ -8,7 +8,7 @@ import {
   type SetStateAction,
 } from "react";
 import { Button, Tag, Tooltip, Typography, message as antdMessage } from "antd";
-import { CloseOutlined, ExportOutlined, RobotOutlined } from "@ant-design/icons";
+import { CloseOutlined, CompressOutlined, ExportOutlined, RobotOutlined } from "@ant-design/icons";
 import {
   dedupeThreads,
   eventToProcessStep,
@@ -24,6 +24,22 @@ import {
 } from "./AgentChatSection.helpers";
 
 const { Text } = Typography;
+
+export type SlashCommandOption = {
+  command: string;
+  label: string;
+  description: string;
+  value: string;
+};
+
+const SLASH_COMMAND_OPTIONS: SlashCommandOption[] = [
+  {
+    command: "/compact",
+    label: "Compact context",
+    description: "立即压缩当前对话上下文",
+    value: "compact",
+  },
+];
 
 export function useSlashRunnerSelection({
   draft,
@@ -51,16 +67,28 @@ export function useSlashRunnerSelection({
       ),
     [runnerOptions, slashQuery],
   );
+  const slashCommandOptions = useMemo(
+    () =>
+      SLASH_COMMAND_OPTIONS.filter((option) => {
+        if (!slashQuery) {
+          return true;
+        }
+        const searchable = `${option.command} ${option.label} ${option.description}`;
+        return searchable.toLowerCase().includes(slashQuery);
+      }),
+    [slashQuery],
+  );
   const showSlashRunnerPanel =
     !running &&
     !supplementSubmitting &&
     !slashRunner &&
     draft.trimStart().startsWith("/") &&
-    slashRunnerOptions.length > 0;
+    (slashCommandOptions.length > 0 || slashRunnerOptions.length > 0);
 
   return {
     slashRunner,
     setSlashRunner,
+    slashCommandOptions,
     slashRunnerOptions,
     showSlashRunnerPanel,
   };
@@ -363,33 +391,84 @@ export function RunnerCallChip({
 }
 
 export function SlashRunnerPanel({
+  commands,
   options,
+  activeIndex,
   styles,
+  onSelectCommand,
   onSelect,
+  onActiveIndexChange,
 }: {
+  commands: SlashCommandOption[];
   options: RunnerOption[];
+  activeIndex: number;
   styles: Record<string, CSSProperties>;
+  onSelectCommand: (option: SlashCommandOption) => void;
   onSelect: (option: RunnerOption) => void;
+  onActiveIndexChange: (index: number) => void;
 }) {
   return (
     <div data-testid="agent-chat-slash-runner-panel" style={styles.slashRunnerPanel}>
-      <Text type="secondary" style={{ fontSize: 12 }}>
-        Choose a Runner
-      </Text>
-      <div style={styles.slashRunnerList}>
-        {options.map((option) => (
-          <button
-            key={option.value}
-            type="button"
-            data-testid="agent-chat-slash-runner-option"
-            style={styles.slashRunnerOption}
-            onClick={() => onSelect(option)}
-          >
-            <RobotOutlined />
-            <span style={styles.slashRunnerOptionText}>{option.label}</span>
-          </button>
-        ))}
-      </div>
+      {commands.length > 0 ? (
+        <>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            Commands
+          </Text>
+          <div style={styles.slashRunnerList}>
+            {commands.map((option, index) => (
+              <button
+                key={option.value}
+                type="button"
+                data-testid="agent-chat-slash-command-option"
+                data-active={activeIndex === index ? "true" : "false"}
+                style={{
+                  ...styles.slashRunnerOption,
+                  ...(activeIndex === index ? styles.slashRunnerOptionActive : {}),
+                }}
+                onMouseEnter={() => onActiveIndexChange(index)}
+                onClick={() => onSelectCommand(option)}
+              >
+                <CompressOutlined />
+                <span style={styles.slashRunnerOptionText}>
+                  <strong>{option.command}</strong>
+                  <Text type="secondary" style={{ marginLeft: 8 }}>
+                    {option.description}
+                  </Text>
+                </span>
+              </button>
+            ))}
+          </div>
+        </>
+      ) : null}
+      {options.length > 0 ? (
+        <>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            Choose a Runner
+          </Text>
+          <div style={styles.slashRunnerList}>
+            {options.map((option, index) => {
+              const optionIndex = commands.length + index;
+              return (
+              <button
+                key={option.value}
+                type="button"
+                data-testid="agent-chat-slash-runner-option"
+                data-active={activeIndex === optionIndex ? "true" : "false"}
+                style={{
+                  ...styles.slashRunnerOption,
+                  ...(activeIndex === optionIndex ? styles.slashRunnerOptionActive : {}),
+                }}
+                onMouseEnter={() => onActiveIndexChange(optionIndex)}
+                onClick={() => onSelect(option)}
+              >
+                <RobotOutlined />
+                <span style={styles.slashRunnerOptionText}>{option.label}</span>
+              </button>
+              );
+            })}
+          </div>
+        </>
+      ) : null}
     </div>
   );
 }

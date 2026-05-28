@@ -33,10 +33,10 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   ```bash
   curl -s -X PATCH http://127.0.0.1:8800/_bifrost/api/im-gateway/agent \
     -H 'Content-Type: application/json' \
-    -d '{"default_system_prompt": "你是一个测试助手", "max_history_messages": 10}'
+    -d '{"default_system_prompt": "你是一个测试助手", "max_turn_iterations": 10}'
   ```
 - **预期结果**: 返回 `{"success": true}`
-- **验证步骤**: 再次 GET /agent 确认 default_system_prompt 和 max_history_messages 已更新
+- **验证步骤**: 再次 GET /agent 确认 default_system_prompt 和 max_turn_iterations 已更新
 
 ### TC-IMA-03: Agent 配置 API - 禁用/启用 Agent
 
@@ -161,6 +161,24 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
        -d '{"session_key": "compact-test", "message": "/compact"}'
      ```
 - **预期结果**: 回复包含"记忆压缩完成"，并显示压缩前后 token 数和节省量
+
+### TC-IMA-14B: Agent Chat /compact 命令 - 运行中显示独立压缩状态
+
+- **前置条件**:
+  - 使用当前源码 WebUI（Vite dev server 或重新构建后的 Admin 静态资源）连接到 Bifrost Admin。
+  - Agent Chat 输入框输入 `/` 时能展示 Commands 中的 `/compact` 选项。
+- **操作步骤**:
+  1. 打开 `http://127.0.0.1:<web-port>/_bifrost/ai?aiSection=agent-chat&agentSection=chat`。
+  2. 在输入框输入 `/`，通过键盘上下键选中 `/compact`，按 Enter 触发。
+  3. 在压缩请求尚未完成时观察消息流。
+  4. 等待压缩完成后再次观察消息流。
+- **预期结果**:
+  - `/compact` 不作为用户消息气泡写入消息列表，也不显示普通 assistant 回复或工具执行过程。
+  - 请求进行中时，消息流中出现独立分隔线状态 `上下文正在自动压缩`。
+  - 进行中的压缩状态不在上一条 assistant 卡片下方追加 `Thinking...`。
+  - 进行中的压缩状态不把上一条 assistant 的工具过程块重新标记为 `Running ...`。
+  - 请求完成后，同一位置更新为 `上下文已自动压缩`。
+- **执行记录（2026-05-28）**: PASS — 执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "runs compact as a control command|restores active timeline process steps" --reporter=line`，真实 Chromium UI 回归通过。用例延迟首个 `/compact` SSE 响应，验证请求进行中即显示 `上下文正在自动压缩` 独立分隔线，不渲染用户 `/compact` 气泡，不显示 `agent-chat-thinking-tail`，也不显示 `Running N command`；释放响应后同一分隔线更新为 `上下文已自动压缩`，且 assistant_delta/tool_started 不进入消息列表。同时复跑 active timeline 过程块回归，确认普通 active timeline 仍可显示真实运行中的 `Running 1 command`。
 
 ### TC-IMA-15: /compact 命令 - 历史过少时跳过
 
@@ -477,12 +495,13 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 - **操作步骤**:
   1. 在浏览器中打开 `http://127.0.0.1:8800/_bifrost/ai?aiSection=agent-runtime&agentSection=runtime`。
   2. 确认右侧只渲染 `Runtime Settings` 卡片。
-  3. 将 `Shell Timeout (secs)`、`Max Turn Iterations`、`Max History Messages`、`Session TTL (secs)`、`Request Timeout (secs)`、`Tool Output Token Limit`、`Project Doc Max Bytes`、`Background Terminal Timeout (ms)` 临时改成非默认值。
+  3. 将 `Shell Timeout (secs)`、`Max Turn Iterations`、`Session TTL (secs)`、`Request Timeout (secs)`、`Tool Output Token Limit`、`Project Doc Max Bytes`、`Background Terminal Timeout (ms)` 临时改成非默认值。
   4. 点击 `Runtime Settings` 卡片右上角的 `Restore Defaults` 按钮。
   5. 观察页面输入框，并通过 `GET /_bifrost/api/im-gateway/agent` 检查配置。
 - **预期结果**:
   - 页面提示 `Runtime settings restored to defaults`。
-  - Runtime 输入框恢复为后端默认值：`shell_timeout_secs=600`、`max_turn_iterations=1000`、`max_history_messages=50`、`session_ttl_secs=3600`、`request_timeout_secs=600`、`tool_output_token_limit=10000`、`project_doc_max_bytes=32768`、`background_terminal_max_timeout=600000`。
+  - Runtime 输入框恢复为后端默认值：`shell_timeout_secs=600`、`max_turn_iterations=1000`、`session_ttl_secs=3600`、`request_timeout_secs=600`、`tool_output_token_limit=10000`、`project_doc_max_bytes=32768`、`background_terminal_max_timeout=600000`。
+  - Runtime Settings 不再展示 `Max History Messages`，避免误导为请求级消息数量裁剪。
   - 后端 Agent 配置返回上述默认值，刷新页面后仍保持一致。
   - 亮色和暗色主题下右上角按钮可见且可点击。
 
@@ -1138,7 +1157,6 @@ rm -rf ./.bifrost-test
      ```bash
      cargo test -p bifrost-agent test_load_conversation_matches -- --nocapture
      cargo test -p bifrost-agent test_build_messages_sanitizes -- --nocapture
-     cargo test -p bifrost-agent test_trim_oldest_messages -- --nocapture
      ```
   3. 执行自动化真实链路回归：
      ```bash
@@ -1149,7 +1167,7 @@ rm -rf ./.bifrost-test
 - **预期结果**:
   - `bifrost-agent` history / persistence / session 单元回归全部通过
   - 多个 pending `tool_call` 先落盘、后续 `tool_result` 按 `call_id` 或旧记录顺序恢复时，不出现结果错配或 orphan `tool`
-  - max_history 裁剪和 context overflow trim 切断 tool-call 片段时，请求前会删除非法 `tool` suffix
+  - malformed history 或持久化恢复产生非法 tool-call 片段时，请求前会删除非法 `tool` suffix
   - E2E 输出 `PASS im_gateway_agent_tool_history_resume_regression`
   - 测试至少完成两轮模型工具调用：首次工具调用、JSONL 持久化恢复后的再次工具调用
   - mock 模型服务未观察到 orphan `tool` message
@@ -1157,8 +1175,7 @@ rm -rf ./.bifrost-test
 - **执行记录（2026-05-02）**:
   - `cargo test -p bifrost-agent -- --nocapture`：PASS，94 个单元测试 + 1 个 doctest 通过
   - `cargo test -p bifrost-agent test_load_conversation_matches -- --nocapture`：PASS，2 个恢复匹配测试通过
-  - `cargo test -p bifrost-agent test_build_messages_sanitizes -- --nocapture`：PASS，1 个请求裁剪清洗测试通过
-  - `cargo test -p bifrost-agent test_trim_oldest_messages -- --nocapture`：PASS，1 个 trim 清洗测试通过
+  - `cargo test -p bifrost-agent test_build_messages_sanitizes -- --nocapture`：PASS，1 个请求前 history 清洗测试通过
   - `cargo run -p bifrost-e2e -- --test im_gateway_agent_tool_history_resume_regression --jobs 1 --timeout 240`：PASS，首次工具调用、JSONL 恢复、恢复后再次工具调用均通过；未出现 orphan `tool` 或 400 invalid parameter
   - `cargo run -p bifrost-e2e -- --test im_gateway_agent_tool_history_resume_regression --test-timeout 120 --port 18882`：PASS，mock Chat Completions 在长期记忆自动抽取额外调用后仍按最后一条消息角色返回工具调用；恢复后的第二个 turn 执行 `call-4` 工具调用
 
@@ -1273,7 +1290,7 @@ rm -rf ./.bifrost-test
   - 卡片 JSON 中不再出现 `Token：累计 1000000`、`最近 1234567` 或 `Context：~260000 / 1000000` 这类裸长数字。
 - **执行记录（2026-05-21）**: PASS — 执行 `cargo test -p bifrost-admin progress_card --lib`，6 个 progress card 相关测试全部通过；新增断言覆盖 K/M/B formatter 和飞书卡片标题、展开状态区 Token/Context 字段。
 
-### TC-IMA-90B: `/status` 展示 runner 元信息、历史轮次与压缩次数
+### TC-IMA-90B: `/status` 展示 runner 元信息、历史轮次、显式压缩次数与上下文管理
 
 - **前置条件**:
   - 存在一个已有 Agent session，或可通过测试构造 session detail。
@@ -1295,8 +1312,10 @@ rm -rf ./.bifrost-test
   - `/status` 展示 `Agent 类型`、`Runner 类型`、`Runner ID`、`外部会话`、`历史对话轮次`。
   - Codex Runner session 展示 `Codex threadId=<id>`；ChatGPT Web session 展示 `conversationId=<id>`。
   - `估算 token`、`API 累计 token`、`Context 用量` 使用 K/M/B 格式，例如 `19.3K`、`38.6K`、`250K`。
-  - 已发生 compaction 的 session 在恢复后 `/status` 展示非 0 `压缩次数`，不会因 `/resume` 或 runtime state reload 回到 0。
-- **执行记录（2026-05-21）**: PASS — `cargo test -p bifrost-admin im_status_text_formats_metrics_and_runner_metadata --lib` 通过，验证外部 Runner status 展示 `External Runner Agent`、`codex`、`Codex threadId=thread-status-123`、历史对话轮次 `2`、`API 累计 token: 38.6K` 和 `压缩次数: 2`。`cargo test -p bifrost-agent session_status --lib`、`cargo test -p bifrost-agent runtime_state --lib`、`cargo test -p bifrost-agent record_compaction_event_round_trip --lib`、`cargo test -p bifrost-agent scan_session_summary_uses_recorded_compaction_count_when_higher --lib` 均通过，验证 active `/status` K/M/B、compaction 事件恢复，并优先保留事件内已记录的更高压缩次数。
+  - 已发生 compaction 的 session 在恢复后 `/status` 展示非 0 `显式压缩次数`，不会因 `/resume` 或 runtime state reload 回到 0。
+  - `/status` 单独展示 `上下文管理`，表达上下文由 token/context budget 与 compaction 管理，不把它混同为显式压缩。
+- **执行记录（2026-05-28）**: PASS — 执行 `cargo test -p bifrost-admin im_status_text_formats_metrics_and_runner_metadata --lib -- --nocapture`，结果 `1 passed`；验证外部 Runner status 展示 `External Runner Agent`、`codex`、`Codex threadId=thread-status-123`、历史对话轮次 `2`、`API 累计 token: 38.6K`、`显式压缩次数: 2`，并在 3 条历史下展示 `上下文管理: 按 token/context budget 与 compaction 管理`。
+- **历史执行记录（2026-05-21）**: PASS — `cargo test -p bifrost-admin im_status_text_formats_metrics_and_runner_metadata --lib` 通过，验证外部 Runner status 展示 `External Runner Agent`、`codex`、`Codex threadId=thread-status-123`、历史对话轮次 `2`、`API 累计 token: 38.6K` 和 `压缩次数: 2`。`cargo test -p bifrost-agent session_status --lib`、`cargo test -p bifrost-agent runtime_state --lib`、`cargo test -p bifrost-agent record_compaction_event_round_trip --lib`、`cargo test -p bifrost-agent scan_session_summary_uses_recorded_compaction_count_when_higher --lib` 均通过，验证 active `/status` K/M/B、compaction 事件恢复，并优先保留事件内已记录的更高压缩次数。
 
 ### TC-IMA-91: 飞书流式进度卡片 - guide 消息进入后同卡刷新
 
@@ -1815,6 +1834,31 @@ rm -rf ./.bifrost-test
   - 删除临时 `BIFROST_DATA_DIR`。
 - **执行记录（2026-05-13）**: PASS — 真实启动当前源码 Bifrost，预检直发 Feishu `bifrost` provider 成功，返回 `om_x100b6f744c70b93cc32aa02b96e1ea3`；首次 `/agent/chat` 暴露 AIDP schema 兼容问题（`send_msg` 顶层 `anyOf` 被拒绝），修复 schema 后重启复测通过。chat 返回 `tool_calls[0].tool_name=send_msg`、`success=true`，工具结果包含真实 `message_id=om_x100b6f74423a54a0c2945f565987a08`；消息日志记录 `trigger=agent_tool:send_msg`、`status=success`、文本 `Bifrost agent chat send_msg real test 20260513-124040`。
 
+### TC-IMA-95A: 飞书通道 send_msg 默认生成图文卡片
+
+- **前置条件**:
+  - 使用临时 `BIFROST_DATA_DIR` 启动当前源码 Bifrost，启动命令必须包含 `--no-system-proxy`。
+  - 准备 fake Feishu OpenAPI 服务，覆盖 tenant token 与 `POST /im/v1/messages`。
+  - Agent 默认消息通道绑定到 `provider_type=feishu` 的 Provider owner。
+- **操作步骤**:
+  1. 本地源码构建路径执行 `BIFROST_PORT=18945 MOCK_PORT=18946 bash e2e-tests/tests/test_agent_send_msg_feishu_card.sh`。
+  2. CI 预构建 release 复用路径执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" ADMIN_PORT=18945 MOCK_HTTP_PORT=18946 bash e2e-tests/tests/test_agent_send_msg_feishu_card.sh`。
+  3. 脚本通过 `/agent/chat` 触发 mock 模型调用 `send_msg`，参数包含 `markdown`、`image_key`、`image_alt` 与 `card_title`，不传原始 `card`。
+  4. 检查 mock 模型收到的 `send_msg` schema，确认飞书通道暴露 `card` 与 `image_key` 字段。
+  5. 检查 fake Feishu 捕获的 `POST /im/v1/messages?receive_id_type=open_id` 请求体。
+  6. 检查 outbound message log 中 `trigger=agent_tool:send_msg` 的记录。
+- **预期结果**:
+  - `send_msg` 工具在飞书默认通道下不再把 `markdown` 当纯文本发送。
+  - 飞书发送请求 `msg_type=interactive`。
+  - `content` 为 Feishu JSON 2.0 card，`header.title.content=Card Send`。
+  - `body.elements[0]` 为 `tag=img` 且 `img_key=img_v3_chart`，`body.elements[1]` 为 `tag=markdown` 且内容为模型传入 Markdown。
+  - 消息日志记录 `msg_type=interactive`，不泄露 open_id 以外的 token/secret。
+  - `SKIP_BUILD=true` 时脚本使用 `target/release/bifrost` 或显式 `BIFROST_BIN`，不会查找 CI 中不存在的 `target/debug/bifrost`。
+  - 并行 shell 调度时脚本使用 `ADMIN_PORT` 与 `MOCK_HTTP_PORT` 注入端口，避免默认端口碰撞。
+- **执行记录（2026-05-27）**: PASS — 执行 `BIFROST_PORT=18945 MOCK_PORT=18946 bash e2e-tests/tests/test_agent_send_msg_feishu_card.sh` 通过。脚本使用临时 `BIFROST_DATA_DIR`、源码构建的 `target/debug/bifrost` 和 `--no-system-proxy` 启动真实 Admin；mock 模型请求确认 `send_msg` schema 在飞书默认通道下包含 `card` 与 `image_key`；模型只传 `markdown`、`image_key`、`image_alt`、`card_title`，fake Feishu 捕获到 `msg_type=interactive`，卡片 `schema=2.0`、`header.title.content=Card Send`、首个元素为 `img_key=img_v3_chart`，第二个元素为 Markdown `**card body** with image`；outbound message log 记录 `trigger=agent_tool:send_msg` 且 `msg_type=interactive`。
+- **回归执行记录（2026-05-27）**: PASS — CI run `26515240075` 的 Linux/macOS `E2E Shell shard 3/3` 均在 `test_agent_send_msg_feishu_card.sh` 失败，日志显示 `target/debug/bifrost: No such file or directory`。修复后执行 `bash -n e2e-tests/tests/test_agent_send_msg_feishu_card.sh`、`rg -n 'BIFROST_PORT=.*ADMIN_PORT|MOCK_PORT=.*MOCK_HTTP_PORT|target/release/bifrost|target/debug/bifrost' e2e-tests/tests/test_agent_send_msg_feishu_card.sh` 与 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" ADMIN_PORT=18945 MOCK_HTTP_PORT=18946 bash e2e-tests/tests/test_agent_send_msg_feishu_card.sh` 通过；脚本在 release binary 路径下真实启动 Admin，fake Feishu 捕获 `msg_type=interactive`，消息日志记录 `trigger=agent_tool:send_msg` 且 `msg_type=interactive`。
+
+
 ### TC-IMA-96: ChatGPT Web 长回复经 Weixin 失败后拆分补发
 
 - **前置条件**:
@@ -2233,3 +2277,125 @@ rm -rf ./.bifrost-test
   - 关闭 Playwright 浏览器。
   - 由 Playwright global teardown 清理临时服务；如手动启动过服务，停止对应临时端口服务并删除临时数据目录。
 - **执行记录（2026-05-26）**: PASS — 创建用例后立即执行 `pnpm --dir web exec playwright test tests/ui/agent-chat-threads.spec.ts --grep "loads in batches" --reporter=line`，真实 Chromium UI 用例通过。测试构造 55 条 Agent Chat 线程，打开 `/_bifrost/ai?aiSection=agent-chat&agentSection=chat` 后确认底部计数初始为 `Showing 20 of 55` 且 `Load more` 可见；DOM 中 `agent-chat-thread-virtual-row` 数量小于 55；滚动到底部点击后计数依次变为 `Showing 40 of 55` 和 `Showing 55 of 55`，最终 `Load more` 消失，验证默认 20 条、每次追加 20 条与虚拟滚动均生效。
+
+### TC-IMA-130: Web 与 IM 同会话共享底层 Agent timeline 与运行状态
+
+- **前置条件**:
+  - 使用当前源码和临时 `BIFROST_DATA_DIR` 启动 Bifrost，必须携带 `--no-system-proxy`。
+  - Agent history persistence 设置为 `save-all`，模型指向 OpenAI-compatible mock provider。
+  - 使用新的 `session_key=timeline-channel-unified`，不复用用户重要历史。
+- **操作步骤**:
+  1. 通过 IM/API 通道调用 `POST /_bifrost/api/im-gateway/agent/chat`，发送 `IM asks for canonical timeline`。
+  2. mock provider 首轮返回 `update_plan` tool call，第二轮返回最终内容 `IM_TURN_OK`。
+  3. 调用 `GET /_bifrost/api/im-gateway/agent/sessions/all`，找到同一 session。
+  4. 使用返回的 `history_path` 调用 `GET /_bifrost/api/im-gateway/agent/sessions/history/<encoded-history-path>`。
+  5. 通过 Web 通道调用 `POST /_bifrost/api/agent/chat/stream`，同一个 session 发送 `Web continues same canonical timeline`。
+  6. 再次读取同一个 `history_path`。
+- **预期结果**:
+  - `sessions/all` 中该 session 同时包含 `history_path`、`has_timeline=true`、`timeline_event_count > 0`、`run_state=completed`。
+  - 首次 history 中包含 IM 用户消息、`tool_call`、`tool_result`、IM assistant 最终消息，以及 `source_channel=api` 的 running/completed `run_state_changed`。
+  - Web SSE 返回 `WEB_TURN_OK`，并且同一个 history 文件新增 Web 用户消息、Web assistant 最终消息，以及 `source_channel=web` 的 running/completed `run_state_changed`。
+  - Web UI 读取 active thread 时可从 `history_path` 恢复工具执行和运行状态过程，不再只展示用户消息和最终回复。
+- **清理步骤**:
+  - 停止临时 Bifrost 和 mock provider 进程。
+  - 删除临时数据目录。
+- **执行记录（2026-05-28）**: PASS — 创建用例后立即执行 `bash e2e-tests/tests/test_agent_run_timeline_channel_unification.sh`。脚本使用临时 `BIFROST_DATA_DIR`、随机端口和 `--no-system-proxy` 启动当前源码 Bifrost 与 OpenAI-compatible mock provider；先通过 `POST /_bifrost/api/im-gateway/agent/chat` 完成包含 `update_plan` tool call 的 IM/API turn，断言 `sessions/all` 返回 `history_path`、`has_timeline=true`、`timeline_event_count >= 6`、`run_state=completed`；再通过同一 session 调用 `POST /_bifrost/api/agent/chat/stream`，断言 Web SSE 返回 `WEB_TURN_OK`，同一个 history 文件同时包含 IM 与 Web 用户/assistant 消息，并包含 `source_channel=api` 与 `source_channel=web` 的 running/completed `run_state_changed`。补充执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "active timeline process" --reporter=line`，验证 active Web thread 按真实事件顺序从 `history_path` 恢复 `run_state_changed`、tool input/output 与 assistant 过程块，结果通过。
+
+### TC-IMA-131: Agent Chat Token/Context HUD 使用细进度线展示
+
+- **前置条件**:
+  - 使用当前源码启动 WebUI，或使用 Playwright mock Agent Chat stream。
+  - Agent Chat stream 返回 `total_tokens_used`、`context_usage_percent`，或历史 `assistant_message.context_tokens`。
+  - 测试需覆盖亮色与暗色主题。
+- **操作步骤**:
+  1. 打开 `/_bifrost/ai?aiSection=agent-chat&agentSection=chat`。
+  2. 发送一条消息，让 mock stream 返回 token/context telemetry。
+  3. 检查输入框上方的 Token/Context HUD。
+  4. 切换暗色主题，重复检查 HUD。
+- **预期结果**:
+  - HUD 不再以占高 pill/card 形式展示三段指标。
+  - 输入框顶部只显示一条细进度线，进度宽度跟随 `context_usage_percent`。
+  - 文字位于进度线尾部上方，展示 `Tokens` 和百分比形式的 `Context`；不展示 `Compression`。
+  - 自动或手动压缩发生时，消息流中在对应 assistant 段落内展示低对比度分隔提示 `上下文已自动压缩`，而不是只在 HUD/Status 弹窗里体现。
+  - 当只有 `assistant_message.context_tokens` 可用时，HUD 仍可按默认 context window 计算百分比，不显示 `Context -`。
+  - HUD 高度保持很薄，不挤占输入框主要空间；亮暗主题下文字和线条均清晰可读。
+- **清理步骤**:
+  - 关闭 Playwright 浏览器；如手动启动过服务，停止对应临时端口服务并删除临时数据目录。
+- **执行记录（2026-05-28）**: PASS — 执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "updates the thread list from session events" --reporter=line` 通过。测试通过 `sessions/events` SSE mock 推送 `sessions_changed`，断言页面不依赖固定轮询即可刷新 `sessions/all`，新 IM running 线程立即出现在列表中，且当前选中的 Web 线程不被抢占。
+
+- **执行记录（2026-05-28）**: PASS — 创建用例后立即执行 `pnpm --dir web exec tsc -b` 通过；执行 `SKIP_BUILD=true BIFROST_BIN=/tmp/bifrost-does-not-exist bash e2e-tests/tests/test_agent_run_timeline_channel_unification.sh` 通过，确认 CI fallback 修复不破坏主 timeline E2E；执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "token HUD|active timeline process|running history timeline" --reporter=line`，3 条真实 Chromium UI 回归通过，覆盖 HUD 文案、进度线宽度 `35%`、高度不超过 22px、线在 composer 外圈上沿且文字位于线右侧、亮暗主题，以及刷新 running history 后最后一个 user 下方必有 assistant 过程卡片并继续轮询工具过程。补充根据截图回归执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "token HUD" --reporter=line` 通过，确认 HUD 上移后不遮挡 Plan/输入内容，移除 `Compression`，`Context` 以百分比展示；再次补充执行同一 token HUD 回归，确认消息列表底部保留至少 72px padding，最后一条消息不会贴住 HUD/输入框；再次补充执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "token HUD|plan content compact" --reporter=line`，确认 HUD 进度线改为低饱和弱对比色、Plan 默认折叠并在折叠态展示当前执行步骤与 `+N` 更多计数；再次补充执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "deep link|active timeline process|running history timeline" --reporter=line` 通过，确认 Loop 中的 `assistant_delta` 按顺序渲染为 assistant 文本段，工具输出挂在最近文本段下方且默认只显示低对比度摘要，不默认展开命令输入/输出。
+- **间距回归执行记录（2026-05-28）**: PASS — 执行 `pnpm --dir web exec tsc -b` 通过；执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "token HUD|keeps plan content compact" --reporter=line`，2 条真实 Chromium UI 回归通过，确认 Token HUD 进度线不再作为 AntD Space item 占用 composer 内部垂直空间，Plan 与输入文字之间的间距收紧，同时 HUD 仍保持在 composer 外圈上方且亮暗主题可读。
+
+### TC-IMA-132: Agent Chat 刷新 running history 后保留 assistant 过程卡片
+
+- **前置条件**:
+  - WebUI 打开一个绑定 `history_path` 的 Agent Chat 会话。
+  - 会话已有上一轮 user/assistant 消息。
+  - 当前轮最新状态为 running，thread summary 标记 `running=true`，JSONL 中至少包含当前轮 `user_message`，但可能还没有新的 `run_state_changed`，后续会 append `tool_call/tool_result`。
+- **操作步骤**:
+  1. 打开 `/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=<session>&view=history&historyPath=<encoded-path>`。
+  2. 确认当前轮用户消息已展示。
+  3. 在当前轮仍 running 时刷新页面。
+  4. 检查消息列表最后一个 user message 下方是否立即出现 assistant running/process 卡片。
+  5. 等待 history 追加 `tool_call/tool_result` 后，检查同一 assistant 卡片原位更新过程块。
+- **预期结果**:
+  - 输入 `/` 时 slash 面板列出 `/compact` 压缩命令，支持上下键切换选择，回车触发当前选中项。
+  - 选择 `/compact` 后不把命令填入输入框，也不需要用户再点击发送；前端直接向服务端触发压缩控制动作。
+  - 手动输入 `/compact` 并回车或点击发送时，也按系统控制命令处理，不生成 `/compact` 用户气泡，不进入普通 Agent Loop，不展示模型普通回复或工具执行过程，只在消息流中展示压缩状态/`上下文已自动压缩` 分隔提示。
+  - 未命中内置命令的 slash 输入（例如 `/demo`）回落为普通聊天消息，不返回 `未知命令`。
+  - 刷新后不能只展示用户消息；只要底层 Loop running，最后一条当前轮 user 下方必须有 assistant 卡片。
+  - 工具执行、plan、compaction 等 timeline append 后，Web view 继续轮询并更新该 assistant 卡片。
+  - 新一轮 running 的 process steps 不会挂到上一轮 assistant 回答上。
+  - 如果第一条 timeline 事件就是工具执行，工具摘要前仍要展示一段 assistant 过程说明，不能出现空白 assistant 段。
+  - 工具摘要默认低对比度折叠展示，不在摘要上下保留大块空白。
+  - 当整体 run 已结束后，即使历史里残留 running 状态事件，展开工具详情也不能继续展示 `Run state: Running` 或 `(N active)`。
+  - 压缩摘要模型请求如果遇到 429、timeout、connection、overloaded、5xx 等可恢复错误，按时间梯度最多重试 5 次；仍失败后终止当前任务并交给人工处理，不能继续无限发送消息。
+  - 压缩摘要模型请求如果遇到 `context_length_exceeded` / context window / token limit 等已知超窗错误，先降级裁剪较旧 history，再重试生成摘要；仍无法压缩时终止当前任务，不能循环触发新消息。
+- **清理步骤**:
+  - 关闭 Playwright 浏览器；如手动启动过服务，停止对应临时端口服务并删除临时数据目录。
+- **执行记录（2026-05-28）**: PASS — 创建用例后立即执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "running history timeline" --reporter=line` 通过。测试构造上一轮 user/assistant 后追加当前轮 user，thread summary 标记 `running=true`，首次 history 读取没有 `run_state_changed` 或 tool 事件，随后轮询读取到 `assistant_delta`、`exec_command` 的 `tool_call/tool_result` 和下一段 `assistant_delta`；断言最后一个 user 下方出现新的 assistant process 卡片，展开后可见 `Run state: Running`、`exec_command`、`cargo test` 和 `still running output`，消息底部在时间上方保留 `Thinking...` 提示。补充执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "deep link|active timeline process|running history timeline" --reporter=line` 通过，4 条真实 Chromium UI 回归覆盖：第一条事件为工具调用时会显示 `我先执行一步检查。` 作为 assistant 过程说明；工具摘要默认折叠且紧贴文本不产生大块空白；完成态 process block 展开后不再显示 `Run state: Running` 或 `active`；running history 仍保留底部 `Thinking...` 提示。再次补充执行 `WEB_PORT=3000 BACKEND_PORT=8800 pnpm --dir web dev --host 127.0.0.1`，真实打开 `http://127.0.0.1:3000/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=admin-chat-1779949709059&view=active` 并量测两个 `agent-chat-process-block`：实际高度均为 `18.84375px`，`marginTop=0px`、`marginBottom=2px`、`paddingTop=0px`、`paddingBottom=0px`，确认截图中的 `750x22.85` 多余盒模型空间已移除。
+- **压缩命令回归执行记录（2026-05-28）**: PASS — 执行 `pnpm --dir web exec tsc -b` 通过；执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "compact as a control command" --reporter=line`，真实 Chromium 验证 slash 面板默认选中 `/compact`、上下键可切到 Runner 再切回命令、回车直接触发 `message:"/compact"` 请求且输入框清空，消息区没有 `/compact` 用户气泡、没有 `我先执行一步检查。`、没有工具输出，只展示 `上下文已自动压缩`；同一用例继续手动输入 `/compact` 点击发送，断言仍不生成用户气泡。执行 `cargo test -p bifrost-agent test_unknown_slash_input_falls_back_to_normal_chat_message -- --nocapture` 通过，验证 `/demo` 调用模型并作为普通用户消息进入 history；执行 `cargo test -p bifrost-agent test_manual_compaction_command_does_not_record_user_message -- --nocapture` 通过，验证 manual compaction 只记录 `compaction` 事件，不记录 `/compact` user_message。
+- **压缩失败回归执行记录（2026-05-28）**: PASS — 使用 `bifrost traffic get 811767 --request-body --response-body --format json-pretty` 获取真实失败请求，确认压缩摘要请求返回 `400 context_length_exceeded`，服务端提示配置上限 `922000` tokens、实际请求 `1714286` tokens。执行 `cargo test -p bifrost-agent test_compaction_ -- --nocapture` 通过，覆盖压缩请求发出前按 safe budget 预裁剪、`context_length_exceeded` 后批量降级裁剪 history 再重试、transient/429/5xx 类错误最多 5 次退避重试后失败且不改写 history；执行 `cargo test -p bifrost-agent test_is_retryable_error -- --nocapture` 通过，确认普通模型请求把 `429` / rate limit / timeout / connection 等归类为 retryable。
+
+### TC-IMA-133: Agent Chat Threads 通过长连接感知 IM 新 Loop
+
+- **前置条件**:
+  - 使用当前源码和临时 `BIFROST_DATA_DIR` 启动 Bifrost，必须携带 `--no-system-proxy`。
+  - WebUI 打开 `/_bifrost/ai?aiSection=agent-chat&agentSection=chat`，并保持 Agent Chat 页面停留在线程列表视图。
+  - 存在一个可触发 Agent Loop 的 IM 通道或 Playwright mock 的 `sessions/events` SSE。
+- **操作步骤**:
+  1. 打开 Agent Chat 页面并确认初始线程列表已加载。
+  2. 不刷新页面、不等待定时轮询，通过 IM 通道或 mock SSE 触发一个新的 `sessions_changed` 事件。
+  3. 让 `GET /_bifrost/api/im-gateway/agent/sessions/all` 在事件后返回一个新的 Feishu/IM running 线程。
+  4. 检查线程列表是否立即出现该 IM 线程，同时当前选中的 Web 线程和消息内容不被切换。
+  5. 使用浏览器 Network/测试断言确认页面没有固定间隔请求 `sessions/all`。
+- **预期结果**:
+  - Agent Chat 页面只在初始加载、页面重新可见、或 `sessions/events` 长连接收到 `sessions_changed` 时刷新线程列表。
+  - 通过 IM 通道新建的 Agent Loop 能实时出现在 Web Agent Chat 线程列表中。
+  - 当前选中的 Web 会话不被新 IM 线程抢占，消息区保持当前会话。
+  - 不存在 2 秒轮询之类固定刷新，避免空闲页面持续消耗性能。
+- **清理步骤**:
+  - 关闭 Playwright 浏览器；如手动启动过服务，停止对应临时端口服务并删除临时数据目录。
+
+### TC-IMA-134: Web 触发 Codex/GPT Web Runner 时写回同一 canonical timeline
+
+- **前置条件**:
+  - 使用当前源码启动 Bifrost Admin 与 WebUI，服务必须使用临时 `BIFROST_DATA_DIR` 并携带 `--no-system-proxy`。
+  - 存在一个由 IM 或内置 Agent 创建的 `session_key` 与 `history_path`，该 JSONL 已包含上一轮 user/assistant 消息。
+  - 当前会话绑定的 Runner 为 Codex、GPT Web 或其他 external CLI runner。
+- **操作步骤**:
+  1. 打开 `/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=<session>&view=history&historyPath=<encoded-path>`。
+  2. 在 Web UI 中发送一条新消息，确认请求走 `/api/im-gateway/chat/stream` 且包含当前 `historyPath`。
+  3. 等待 external runner 返回最终回复。
+  4. 刷新同一个 history URL。
+  5. 读取原 `history_path` 对应 JSONL，检查新增事件。
+  6. 再打开一个无 `historyPath` 的 active GPT Web/Codex 会话，发送一条消息，确认后端创建新的 canonical JSONL 并把 `history_path` 写回 session state。
+- **预期结果**:
+  - Web 发送的用户消息不会在发送后或刷新后消失。
+  - 新的 Codex/GPT Web assistant 回复展示在该用户消息下方，不挂到上一轮 assistant 卡片内部。
+  - 原 `history_path` JSONL 追加 `source_channel=web`、`agent_kind=<runner>` 的 running/completed `run_state_changed`，并追加本轮 `user_message`、runner `tool_call/tool_result` 和 `assistant_message`。
+  - 对于无 `historyPath` 的 active external runner 会话，首轮 Web 消息也会创建 canonical timeline；刷新后从该 timeline 恢复，不再只依赖 adapter-local `session_state.messages`。
+  - `session_state.json` 只作为线程索引和 external thread/latest run 摘要；消息回放以 canonical timeline 为准。
+- **清理步骤**:
+  - 关闭 Playwright 浏览器；如手动启动过服务，停止对应临时端口服务并删除临时数据目录。
+- **执行记录（2026-05-28）**: PASS — 对用户反馈的 `admin-chat-1779973287101` 本地数据做只读排查，确认 GPT Web 两次 run 均成功写入 `.bifrost-ui-test/agent/im_gateway/session_state.json` 与 `chat_runs/*/result.json`，但未出现在 `.bifrost-ui-test/agent/sessions/**/*.jsonl`，根因与 Codex external runner 一致：adapter-local state 成为消息事实源。随后执行 `cargo test -p bifrost-admin external_runner_ --lib -- --nocapture`，覆盖已有 historyPath 的 Codex/GPT Web 续聊追加原 JSONL、无 historyPath 的 active GPT Web 会话创建 canonical timeline 并写回 `history_path`、以及 `/sessions/{session}` 在存在 `history_path` 时优先从 canonical timeline 还原消息而不是读取 stale `session_state.messages`。执行 `pnpm --dir web exec tsc -b && pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "external runner" --reporter=line`，真实 Chromium 断言 Web 历史续聊 external runner 请求走 `/api/im-gateway/chat/stream` 且携带 `params.historyPath`，刷新回放不再丢失用户消息。

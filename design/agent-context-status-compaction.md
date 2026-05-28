@@ -10,6 +10,8 @@
 
 2026-05-24 补充修复目标是让内置 Bifrost Agent 的 compaction/context progress events 同步刷新飞书 IM progress card。此前 progress card 只消费 `Status` 事件，`CompactionStarted/Finished/Failed` 和 `ContextUpdated` 被忽略；当压缩发生在两次 status 刷新之间时，飞书卡片 footer 和状态面板标题可能继续显示旧的压缩次数。
 
+2026-05-28 补充修复目标是收敛压缩摘要模型请求失败策略。真实流量 `811767` 显示 `/compact`/自动压缩的 summary 请求本身可能超过模型 context window（请求约 1,714,286 tokens，模型配置上限 922,000 tokens），旧实现会在压缩失败后只记录 warn，外层 loop 继续运行并再次触发压缩，形成重复发请求/发消息的循环。新策略要求：已知超窗错误先降级裁剪较旧 history 再压缩；429、timeout、connection、overloaded、5xx 等可恢复错误按时间梯度最多重试 5 次；仍失败或不可恢复错误直接终止当前任务并交给人工处理。
+
 ## 现状核查与根因
 
 相关代码路径：
@@ -36,7 +38,7 @@
 2. Bifrost mid-turn compaction 只注入轻量 reminder，仍依赖 `build_messages()` 每次 prepend prompt prefix；应该把 Codex local history 中的非 system initial context 重新插入 replacement history 边界。
 3. guide / pending queue continuation 曾经在追加消息后直接进入下一 loop，绕过部分 mid-turn compaction 检查。
 4. token accounting 只保存 `last_response_tokens` 或退回 full-history estimate，不能表达"last API usage + last model item 之后新增 items 估算"。
-5. Bifrost 在普通 sampling overflow 后保留 emergency compact + trim retry，这是 Bifrost 的特殊保护，不是普通 sampling overflow 语义；必须收窄边界并明确记录。
+5. Bifrost 曾在普通 sampling overflow 后保留 emergency compact + trim retry；这不是 Codex 普通 sampling overflow 语义，需要删除静默 trim live history 的 fallback。
 6. history rewrite 后 active `/status` 曾存在短窗口旧快照，`compaction_count`、`history_version`、context token 口径可能和实际 session 不一致。
 7. 后续复核发现 Bifrost 仍保留了若干非 Codex local compaction 细节：summary prompt/prefix 不是 Codex 原文；summary 生成请求把完整 history 扁平化为 `[role]: ...` 单条 user message，且把 compaction prompt 放在 system message；user carry-over 用 char/byte 预算而非 token 预算；replacement history 直接 clone `ChatMessage`，可能保留 `content_parts`；压缩后 token snapshot 没有把 base instructions 算入；普通新 turn 采样前缺少 Codex 当前仍保留的 pre-sampling compaction。
 8. 飞书 progress card 的 snapshot 只有 `status: Option<ActiveTurnStatus>`，但内置 Agent compaction 成功时先发出 `CompactionFinished { progress.context.compaction_count = N }`，未必紧跟新的 `Status` 事件。旧实现把 `ContextUpdated` 与 compaction 事件直接丢弃，导致卡片增量更新链路没有新的 status hash，用户在 IM 卡片上看到的“压缩：N 次”可能落后于真实 session。
@@ -93,6 +95,13 @@ Bifrost 仍保留自己的 prompt-prefix 架构：常规 `build_messages()` 会�
 
 当 summary 生成请求遇到非 context-window 的 transient error（例如 429、5xx、timeout、connection reset）时，`compact_session()` 现在按 provider 合并后的 `stream_max_retries` 预算做 exponential backoff retry。context-window retry 仍优先走移除最老 history item 的路径，并在裁剪后重置 transient retry 计数，保持和 Codex compact loop 相同的重试边界。
 
+2026-05-28 起，summary 生成请求增加两层失败保护：
+
+1. 发请求前先根据 `model_context_window` 计算 safe request budget（默认取 70% 并预留 completion headroom），如果 structured history 已经超过预算，先批量丢弃最旧的 history item，避免直接构造超窗请求。
+2. 如果 provider 仍返回 `context_length_exceeded` / context window / token limit，按当前请求 token 数继续批量降级，而不是每次只删一条历史导致请求风暴。
+
+transient/未知可恢复错误的重试预算统一限制为最多 5 次；如果 provider 配置更高，也向下夹到 5。重试全部失败后 `compact_session_with_hooks()` 返回错误，mid-turn / guide / pending queue 压缩调用会把错误向外传播并终止当前 turn，不再只 warn 后继续 loop。普通模型请求路径已有同类保护：`is_retryable_error()` 覆盖 `429`、rate limit、timeout、connection、overloaded、5xx 等，turn loop 最多 5 次指数退避，失败后返回错误或把已执行工具结果交给用户处理。
+
 ### 3. token accounting 改为 last usage + appended items
 
 `AgentSession` 新增 `last_response_history_len`：
@@ -122,18 +131,18 @@ last_response_tokens + estimate(history[last_response_history_len..])
 
 这样新增 queued/guide input 后，如果下一步仍要进入模型请求，会先走同一套 `should_compact()` 和 `record_compaction_event()`，避免“刚追加大消息就直接进入下一次请求”的抖动。
 
-### 5. emergency overflow 保留 Bifrost 特殊保护但收窄边界
+### 5. emergency overflow 对齐 Codex，不静默裁剪 live history
 
-普通 sampling overflow 不会主动改写 history 后重试；Bifrost 仍保留 emergency compact + retry + trim loop，原因是当前 IM/API runtime 更偏向长任务不中断，直接失败会丢掉已完成工具结果。
+普通 sampling overflow 不主动删除 live history 后重试。Bifrost 只允许先尝试 emergency compaction；如果 compaction 失败或 compaction 后 provider 仍报告 context-window overflow，则标记当前 context window 已满、刷新 active status，并把错误显式返回给调用方。
 
 本轮对该特殊行为加边界：
 
 - emergency compaction 使用与 mid-turn compaction 相同的 summary-last history 和非 system initial context reinjection。
 - compaction 成功后立即刷新 active status。
 - emergency compaction 写入统一 `compaction` 事件，并带 `emergency: true`。
-- trim retry 每次裁剪后清空 token snapshot、递增 `history_version`、刷新 active status。
+- 不再执行 `trim_oldest_messages_count()` 这类 live history 删除 fallback。
 
-这是保留 Bifrost 特殊行为但明确边界的部分。
+这让 provider overflow 语义与 Codex 对齐：compact 是有记录的历史改写；overflow 失败是显式错误，不是静默丢上下文。
 
 ### 6. status 与 persistence 同步
 
@@ -214,12 +223,11 @@ post-sampling 路径仍使用 mid-turn `BeforeLastUserMessage` 注入非 system 
 5. `session::tests::test_model_message_advances_incremental_token_boundary`：验证 assistant model item 会推进 last model boundary。
 6. `session::tests::test_queued_continuation_compacts_before_next_model_request`：验证 pending continuation 追加大消息后会先 compact，并且 reinjected context 包含非 system prompt context / memory，不包含 base instructions。
 7. `session::tests::test_context_rewrite_refreshes_active_status_snapshot`：验证 history rewrite 后 active status 与 session 同步。
-8. `session::tests::test_trim_oldest_messages_invalidates_response_tokens`：验证 trim retry 清空 token snapshot。
-9. `session::tests::test_record_compaction_event_includes_emergency_and_total_tokens`：验证 emergency compaction 事件统计字段。
-10. `session_status::tests::test_active_turn_status_text_contains_runtime_metrics`：验证 `/status` 文案字段。
-11. `compact::tests::test_codex_compaction_templates_are_exact`：验证 compaction prompt 与 summary prefix 与 Codex 模板逐字一致。
-12. `compact::tests::test_build_compaction_messages_uses_codex_local_request_shape`：验证 summary 生成请求保留 structured history，把 compaction prompt 作为最后一条 user message，且不再出现 `[role]: ...` 扁平化输入。
-13. `compact::tests::test_compaction_retries_context_window_error_by_dropping_oldest_request_item`：验证 summary 请求超上下文后，移除请求副本中的最老 history item 并重试，且保留 base/system 与 compact prompt。
+8. `session::tests::test_record_compaction_event_includes_emergency_and_total_tokens`：验证 emergency compaction 事件统计字段。
+9. `session_status::tests::test_active_turn_status_text_contains_runtime_metrics`：验证 `/status` 文案字段。
+10. `compact::tests::test_codex_compaction_templates_are_exact`：验证 compaction prompt 与 summary prefix 与 Codex 模板逐字一致。
+11. `compact::tests::test_build_compaction_messages_uses_codex_local_request_shape`：验证 summary 生成请求保留 structured history，把 compaction prompt 作为最后一条 user message，且不再出现 `[role]: ...` 扁平化输入。
+12. `compact::tests::test_compaction_retries_context_window_error_by_dropping_oldest_request_item`：验证 summary 请求超上下文后，移除请求副本中的最老 history item 并重试，且保留 base/system 与 compact prompt。
 14. `compact::tests::test_compaction_retries_transient_error_using_provider_budget`：验证 summary 请求遇到 transient 500 时，按 provider `stream_max_retries` 预算重试且不裁剪 history。
 15. `compact::tests::test_collect_user_messages_caps_preserved_user_budget`：验证 user carry-over 使用 token 预算并产生 `tokens truncated` marker。
 16. `compact::tests::test_build_compacted_history_rebuilds_text_only_user_messages`：验证多模态 user message 压缩后重建为 text-only user message。
@@ -227,7 +235,7 @@ post-sampling 路径仍使用 mid-turn `BeforeLastUserMessage` 注入非 system 
 17. `session::tests::test_pre_sampling_auto_compacts_before_model_request`：验证普通 turn 采样前如果历史已超过阈值，会用 `DoNotInject` 先压缩旧 history，再追加本轮 user message 并请求模型。
 18. `session::tests::test_mid_turn_initial_context_excludes_base_instructions`：验证 mid-turn initial context builder 不把 base/system instructions 放进 replacement history。
 19. `session::tests::test_build_messages_dedupes_injected_mid_turn_context`：验证 build_messages 在本次请求选中的 history 已携带非 system context / memory 时不会重复 prepend，但 system/base 仍只出现一次。
-20. `session::tests::test_build_messages_only_dedupes_context_selected_for_request`：验证 max_history 裁剪掉 reinjected context 时，build_messages 不会误以完整 history 中存在该 context 为由跳过 prompt prefix。
+20. `session::tests::test_build_messages_dedupes_context_against_full_history`：验证 build_messages 使用完整 history 做非 system context 去重，不再因请求级数量窗口产生遗漏。
 21. `progress_card::tests::progress_snapshot_updates_status_from_compaction_context`：验证已有 status 时，`CompactionFinished` 的 context 会把 `compaction_count`、history version、token 和 context 字段回写到飞书卡片状态。
 22. `progress_card::tests::progress_snapshot_uses_context_when_status_is_not_available`：验证尚无 status 时，`ContextUpdated` 也能让飞书卡片状态区展示 token、context 和压缩次数。
 
@@ -251,6 +259,20 @@ post-sampling 路径仍使用 mid-turn `BeforeLastUserMessage` 注入非 system 
 
 2026-05-24 新增覆盖：执行 `cargo test -p bifrost-admin im_gateway::progress_card::tests::progress_snapshot_updates_status_from_compaction_context --lib -- --nocapture` 和 `cargo test -p bifrost-admin im_gateway::progress_card::tests::progress_snapshot_uses_context_when_status_is_not_available --lib -- --nocapture`，作为飞书 progress card payload 层的可自动执行 E2E 替代验证；如需真实飞书发送链路，可在已配置 Feishu provider 的默认数据目录下触发一次会自动压缩的内置 Agent 会话，并观察卡片状态区。
 
+
+### `/status` 显式压缩与上下文管理展示（2026-05-28）
+
+`compaction_count` 只表示显式 summary/manual/emergency compaction。Bifrost Agent Loop 不提供请求级消息数量硬裁剪；历史上下文默认完整进入 `build_messages()`，然后统一通过 history sanitize 保证 tool call / tool result 配对合法。
+
+上下文大小控制对齐 Codex-style 路径：
+
+1. 常规请求依赖 provider context window、`model_auto_compact_token_limit`、pre-turn / mid-turn / manual compaction、summary replacement history 和 token snapshot。
+2. `/status` 与 WebUI token HUD 展示 `Context 用量`、`显式压缩次数`、`上下文管理`；`上下文管理` 表达“按 token/context budget 与 compaction 管理”，不再暗示默认存在消息数量窗口。
+3. provider context-window overflow 只允许触发有记录的 emergency compaction；若仍超限或 compaction 失败，则保留 live history 并显式返回错误，不再批量删除最老消息。
+4. 旧的请求级数量窗口配置、状态字段、Web 展示和 patch 入口已删除；未知旧配置由 serde/JSON patch 自然忽略，不再成为产品语义。
+
+这避免用户把请求级历史窗口裁剪误解为 summary compaction，也让 status 文案、WebUI HUD 与真实模型请求上下文口径保持一致。
+
 ### 真实场景测试（human_tests）
 
 更新 `human_tests/agent-builtin-commands.md`：
@@ -259,7 +281,7 @@ post-sampling 路径仍使用 mid-turn `BeforeLastUserMessage` 注入非 system 
 2. 新增 `TC-BC-22`：自动压缩判断使用增量 token accounting，不被旧 snapshot 遮蔽。
 3. 新增 `TC-BC-23`：emergency compaction 记录完整统计事件。
 4. 新增 `TC-BC-24`：guide / pending queue 追加消息后继续 loop 前先执行 mid-turn compaction。
-5. 新增 `TC-BC-25`：emergency compaction 与 trim retry 改写 history 后立即刷新运行中 `/status`。
+5. 更新 `TC-BC-25`：emergency compaction 改写 history 后立即刷新运行中 `/status`；provider overflow 不再静默 trim live history。
 6. 新增 `TC-BC-27`：Codex local compaction 模板、纯文本 replacement history 与 token budget 对齐。
 7. 新增 `TC-BC-28`：压缩后 token snapshot 包含 base instructions。
 8. 新增 `TC-BC-29`：mid-turn compact 后 replacement history 不包含 base instructions，build_messages 不重复注入非 system context / memory，token snapshot 只额外计入一次 base instructions。
@@ -267,6 +289,8 @@ post-sampling 路径仍使用 mid-turn `BeforeLastUserMessage` 注入非 system 
 10. 新增 `TC-BC-31`：summary 生成请求使用 Codex local structured history 形态，把 `COMPACTION_PROMPT` 作为最后一条 user message。
 11. 新增 `TC-BC-32`：summary 请求超上下文后移除请求副本中的最老 history item 并重试。
 12. 新增 `TC-BC-33`：summary 请求 transient error 按 provider retry budget 退避重试。
+13. 更新 `TC-BC-35`：`/status` 区分显式压缩次数与 token/context budget 驱动的上下文管理，不再报告请求级数量裁剪。
+14. 更新 `TC-BC-36`：构造超过 50 条短历史，验证最终模型请求仍包含最早和最新探针消息，证明常规请求使用完整 history。
 
 同步更新 `human_tests/readme.md` 中 Agent 内置命令测试用例数量。
 
