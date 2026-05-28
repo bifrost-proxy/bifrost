@@ -968,6 +968,38 @@ pub enum AiAsrCommands {
         #[arg(long, default_value = "jsonl", value_parser = ["jsonl"], help = "Output format")]
         format: String,
     },
+    #[command(about = "Create offline subtitle artifacts for one audio file")]
+    #[cfg_attr(
+        not(all(target_os = "macos", target_arch = "aarch64")),
+        command(hide = true)
+    )]
+    Subtitle {
+        #[arg(value_hint = ValueHint::FilePath, help = "Audio file to subtitle")]
+        audio: PathBuf,
+        #[arg(long, default_value = "Qwen3-ASR-1.7B", help = "ASR model name")]
+        model: String,
+        #[arg(long, default_value = "chinese", help = "Recognition language")]
+        language: String,
+        #[arg(
+            long,
+            default_value = "offline-speaker-subtitle-local",
+            help = "Speech pipeline profile"
+        )]
+        profile: String,
+        #[arg(long, help = "Enable speaker-aware subtitle timeline")]
+        speaker_aware: bool,
+        #[arg(
+            long,
+            value_delimiter = ',',
+            default_value = "srt,vtt,txt,timeline_json,metadata",
+            help = "Comma-separated output formats: srt,vtt,txt,timeline_json,metadata"
+        )]
+        format: Vec<String>,
+        #[arg(long, value_hint = ValueHint::DirPath, default_value = ".", help = "Output directory")]
+        out: PathBuf,
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+    },
     #[command(about = "Inspect and run ASR directory tasks")]
     #[cfg_attr(
         not(all(target_os = "macos", target_arch = "aarch64")),

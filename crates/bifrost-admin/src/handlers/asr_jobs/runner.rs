@@ -296,6 +296,24 @@ async fn run_directory_task(
         return Ok((updated, 0, 0));
     }
 
+    let resource_decision = crate::handlers::speech::acquire_speech_resource(
+        crate::handlers::speech::directory_task_lease(&task.id, &task.model),
+    );
+    if !resource_decision.granted {
+        update_run_progress(&task.id, |progress| {
+            progress.stage = "paused".to_string();
+            progress.stage_message = resource_decision.reason.clone();
+            progress.message = Some(
+                "directory task is waiting for realtime voice resources to become idle"
+                    .to_string(),
+            );
+        });
+        return Err(ASR_TASK_PAUSED_MESSAGE.to_string());
+    }
+    let _resource_guard = SpeechResourceLeaseGuard {
+        lease: resource_decision.lease,
+    };
+
     let target = target_from_query(Some(&format!(
         "language={}&model={}&owner_module=directory_task&owner_id={}",
         urlencoding::encode(&task.language),
@@ -367,7 +385,10 @@ async fn run_directory_task(
         fallback_reason: startup_fallback_reason.clone(),
     });
 
-    let pause_check = || task_pause_requested(&task.id);
+    let pause_check = || {
+        task_pause_requested(&task.id)
+            || crate::handlers::speech::directory_task_should_yield_for_realtime(&task.id)
+    };
     let mut processed_now = 0usize;
     let mut failed_now = 0usize;
     let loop_result: Result<(), String> = loop {
@@ -466,6 +487,16 @@ async fn run_directory_task(
     maybe_enqueue_daily_agent_after_asr_run(&updated).await;
 
     Ok((updated, processed_now, failed_now))
+}
+
+struct SpeechResourceLeaseGuard {
+    lease: Option<bifrost_asr::resources::ResourceLease>,
+}
+
+impl Drop for SpeechResourceLeaseGuard {
+    fn drop(&mut self) {
+        crate::handlers::speech::release_speech_resource(self.lease.as_ref());
+    }
 }
 
 fn spawn_directory_task_run_background(task: AsrDirectoryTask) -> Result<(), String> {

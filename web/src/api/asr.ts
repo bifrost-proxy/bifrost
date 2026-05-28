@@ -16,6 +16,61 @@ export interface VoiceRealtimeParams extends AsrConnectionParams {
   chunkMs?: number;
 }
 
+export interface SpeechPipelineProfile {
+  id: string;
+  label: string;
+  mode: string[];
+  resources: {
+    priority: number;
+    preemptible: boolean;
+    max_concurrent_files?: number | null;
+    pause_on_realtime_voice: boolean;
+  };
+}
+
+export interface SpeechPipelinesStatus {
+  profiles: SpeechPipelineProfile[];
+  runtime: {
+    platform_supported: boolean;
+    asr_ready: boolean;
+    diarization_ready: boolean;
+    realtime_voice_active: boolean;
+    offline_asr_active: boolean;
+  };
+  resources: {
+    leases: unknown[];
+    realtime_voice_active: boolean;
+    offline_asr_active: boolean;
+    wake_listener_active: boolean;
+  };
+}
+
+export interface AsrOfflineJob {
+  job_id: string;
+  status: "queued" | "running" | "succeeded" | "failed";
+  source_name: string;
+  model: string;
+  language: string;
+  pipeline_profile: string;
+  speaker_aware: boolean;
+  created_at_ms: number;
+  updated_at_ms: number;
+  error?: string | null;
+  artifacts?: Record<string, string> | null;
+  events: Array<{
+    at_ms: number;
+    stage: string;
+    message: string;
+  }>;
+}
+
+export interface AsrOfflineJobCreateOptions {
+  model?: string;
+  language?: string;
+  pipelineProfile?: string;
+  speakerAware?: boolean;
+}
+
 export interface AsrStatus {
   status: "unsupported" | "missing" | "installed" | "ready";
   ready: boolean;
@@ -113,6 +168,8 @@ export interface VoiceWakeStatus {
   binding_count: number;
   event_count: number;
   mode: string;
+  fallback?: string;
+  requires_qwen_by_default?: boolean;
   store_path: string;
   default_dry_run: boolean;
   listener: VoiceWakeListenerStatus;
@@ -121,6 +178,7 @@ export interface VoiceWakeStatus {
 export interface VoiceWakeListenerStatus {
   running: boolean;
   source: string;
+  engine?: string;
   device?: string | null;
   worker_pid?: number | null;
   chunk_ms: number;
@@ -1267,6 +1325,65 @@ export async function streamAsrTranscription(
     },
   );
   await readSseResponse(response, onEvent);
+}
+
+export function getSpeechPipelinesStatus(): Promise<SpeechPipelinesStatus> {
+  return get<SpeechPipelinesStatus>("/speech/pipelines/status");
+}
+
+export async function createAsrOfflineJob(
+  file: Blob,
+  fileName: string,
+  params: AsrConnectionParams,
+  options: AsrOfflineJobCreateOptions = {},
+): Promise<AsrOfflineJob> {
+  const form = new FormData();
+  form.append("file", file, fileName);
+  const defaults = defaultAsrParams();
+  const query = new URLSearchParams();
+  query.set("host", params.host || defaults.host);
+  if (params.port) {
+    query.set("port", String(params.port));
+  }
+  query.set("language", options.language || params.language || defaults.language);
+  query.set("model", options.model || params.model || defaults.model);
+  query.set(
+    "pipeline_profile",
+    options.pipelineProfile || "offline-speaker-subtitle-local",
+  );
+  query.set("speaker_aware", options.speakerAware === false ? "0" : "1");
+  const response = await fetch(buildApiUrl(`/asr/offline-jobs?${query.toString()}`), {
+    method: "POST",
+    headers: {
+      ...buildStreamHeaders(),
+      Accept: "application/json",
+    },
+    body: form,
+  });
+  return readJsonResponse<AsrOfflineJob>(response);
+}
+
+export function getAsrOfflineJob(jobId: string): Promise<AsrOfflineJob> {
+  return get<AsrOfflineJob>(`/asr/offline-jobs/${encodeURIComponent(jobId)}`);
+}
+
+export async function getAsrOfflineJobArtifact(
+  jobId: string,
+  format: string,
+): Promise<string> {
+  const response = await fetch(
+    buildApiUrl(
+      `/asr/offline-jobs/${encodeURIComponent(jobId)}/artifacts/${encodeURIComponent(format)}`,
+    ),
+    {
+      headers: buildStreamHeaders(),
+    },
+  );
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(body || `ASR artifact request failed with status ${response.status}`);
+  }
+  return response.text();
 }
 
 export function buildVoiceRealtimeUrl(params: VoiceRealtimeParams): string {

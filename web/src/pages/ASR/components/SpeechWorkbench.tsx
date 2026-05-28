@@ -19,7 +19,12 @@ import {
   StopOutlined,
   UploadOutlined,
 } from "@ant-design/icons";
-import type { AsrConnectionParams, AsrStatus } from "../../../api/asr";
+import type {
+  AsrConnectionParams,
+  AsrOfflineJob,
+  AsrStatus,
+  SpeechPipelinesStatus,
+} from "../../../api/asr";
 import type { WorkState } from "../asrUtils";
 
 const { Text, Paragraph } = Typography;
@@ -35,6 +40,9 @@ interface SpeechWorkbenchProps {
   progress: number;
   selectedName: string;
   transcript: string;
+  offlineJob: AsrOfflineJob | null;
+  offlineArtifacts: Record<string, string>;
+  speechStatus: SpeechPipelinesStatus | null;
   events: string[];
   errorText: string;
   micLevels: number[];
@@ -61,6 +69,9 @@ export default function SpeechWorkbench({
   progress,
   selectedName,
   transcript,
+  offlineJob,
+  offlineArtifacts,
+  speechStatus,
   events,
   errorText,
   micLevels,
@@ -136,10 +147,17 @@ export default function SpeechWorkbench({
             </Button>
             {status?.server_url ? <Tag>{status.server_url}</Tag> : null}
           </Space>
-          <Text type="secondary" style={{ display: "block", marginTop: 8 }}>
-            File upload transcription requires starting the ASR Service first. Realtime microphone
-            input works directly without starting the service (model will load on first use).
-          </Text>
+          <Space wrap style={{ marginTop: 8 }}>
+            <Tag color={speechStatus?.runtime.realtime_voice_active ? "processing" : "default"}>
+              Realtime {speechStatus?.runtime.realtime_voice_active ? "active" : "idle"}
+            </Tag>
+            <Tag color={speechStatus?.runtime.offline_asr_active ? "processing" : "default"}>
+              Offline {speechStatus?.runtime.offline_asr_active ? "running" : "idle"}
+            </Tag>
+            <Tag color={speechStatus?.runtime.diarization_ready ? "success" : "warning"}>
+              Diarization {speechStatus?.runtime.diarization_ready ? "ready" : "not ready"}
+            </Tag>
+          </Space>
         </section>
 
         <section aria-label="Audio Input">
@@ -304,7 +322,9 @@ export default function SpeechWorkbench({
               />
               <Text type="secondary">
                 {workState === "transcribing"
-                  ? "Streaming file transcription status"
+                  ? offlineJob
+                    ? `Offline subtitle job ${offlineJob.status}`
+                    : "Offline subtitle job starting"
                   : selectedName}
               </Text>
             </div>
@@ -344,6 +364,27 @@ export default function SpeechWorkbench({
           >
             {transcript || "Waiting for transcription text."}
           </Paragraph>
+          {Object.keys(offlineArtifacts).length > 0 ? (
+            <Space wrap style={{ marginBottom: 12 }}>
+              {Object.entries(offlineArtifacts).map(([format, content]) => (
+                <Button
+                  key={format}
+                  size="small"
+                  onClick={() => {
+                    const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+                    const url = URL.createObjectURL(blob);
+                    const link = document.createElement("a");
+                    link.href = url;
+                    link.download = `${selectedName || "subtitle"}.${format === "timeline_json" ? "timeline.json" : format}`;
+                    link.click();
+                    URL.revokeObjectURL(url);
+                  }}
+                >
+                  Download {format}
+                </Button>
+              ))}
+            </Space>
+          ) : null}
           <div
             style={{
               minHeight: 140,

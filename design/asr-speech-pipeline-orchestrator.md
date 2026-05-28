@@ -997,6 +997,7 @@ test_voice_listen_ws_realtime_pcm.sh
 test_deprecated_transcribe_ws_migration_error.sh
 test_scheduled_task_yields_to_realtime_voice.sh
 test_directory_task_offline_pipeline_keeps_daily_agent_postprocess.sh
+test_asr_speech_pipeline_orchestrator_real_service.sh
 ```
 
 human_tests：
@@ -1052,3 +1053,16 @@ human_tests：
 - 再次变更复核：复查最新 diff、human_tests/readme 索引和测试用例数。
 - 再次文档 review：检查旧支持降级策略、Phase 顺序、测试计划和不适用项说明。
 - 复跑测试：复跑全部静态验收命令，确认无需第 3 轮。
+
+## 当前实现收敛清单
+
+本轮实现必须把方案落到真实产品能力，而不是继续停留在文档和适配壳：
+
+- `crates/bifrost-asr` 承接 ASR 主要业务逻辑：profile/decision/resource lease/planner/offline artifact/subtitle/timeline，`bifrost-admin` 只保留 HTTP、任务状态、托管进程和 Directory Task 后处理适配。
+- `/api/speech/pipelines/status`、`/api/speech/decision` 和 `/api/speech/resources` 暴露统一 pipeline 状态、引擎决策和资源租约状态。
+- `/api/asr/offline-jobs` 是单文件字幕正式产物接口，输出 `txt/srt/vtt/timeline_json/metadata`，WebUI Speech Workbench 和 `bifrost ai asr subtitle` 都走这个接口。
+- `/api/asr/transcribe-ws` 不再提供旧兼容转写服务，返回 410 和迁移指引。
+- Directory Task 保持既有输出合并、Daily Docs、Daily Agent / AI Runner、report/IM/sync 后处理；OfflineSubtitlePipeline 只负责单文件标准 ASR 产物。
+- wake listener 默认 `lightweight_kws_listener`，不默认拉起 Qwen3；无声纹配置只允许 dry-run，真实执行动作需要 speaker verification。
+- `ResourceLeaseManager` 让 realtime voice、offline job 和 scheduled Directory Task 共用资源优先级，scheduled task 在 realtime active 时让出。
+- 新增真实服务回归脚本 `e2e-tests/tests/test_asr_speech_pipeline_orchestrator_real_service.sh`，启动当前 Bifrost 服务并验证 speech API、旧 WS 下线、wake lightweight、offline-jobs、CLI subtitle、Directory Task artifacts 和 Daily Agent 后处理入口。

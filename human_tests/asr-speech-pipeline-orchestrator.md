@@ -19,7 +19,9 @@
 
 1. 在仓库根目录执行。
 2. 所有命令必须以 `source ~/.zshrc` 开头。
-3. 本文件是方案文档静态验收，不需要启动 Bifrost 服务，不修改系统代理。
+3. 静态方案用例不需要启动服务。
+4. 真实服务回归用例必须启动当前构建产物，使用临时 `BIFROST_DATA_DIR`，启动命令必须包含 `--no-system-proxy`。
+5. 真实 ASR 用例需要 Apple Silicon、`ffmpeg`、macOS `say`、已初始化的 Qwen3-ASR 模型资产；资产缺失时必须先执行 ASR 初始化，不能把缺失资产当通过。
 
 ## 测试用例列表
 
@@ -160,9 +162,111 @@
 - 文档明确不同平台通过是否依赖 `bifrost-asr` 以及启用哪些 feature 决定编译方案。
 - 文档明确后续实现必须用 Cargo metadata/tree 验证不支持平台不解析 `qwen3-asr` / `sherpa-onnx`。
 
+### TC-ASPO-09：真实服务回归覆盖 ASR Speech Pipeline 全入口
+
+操作步骤：
+
+1. 执行：
+   ```bash
+   source ~/.zshrc && bash e2e-tests/tests/test_asr_speech_pipeline_orchestrator_real_service.sh
+   ```
+
+预期结果：
+
+- 脚本启动临时 Bifrost 服务，启动参数包含 `--no-system-proxy`。
+- `/api/speech/pipelines/status` 返回 realtime/offline/scheduled profiles 和 resource snapshot。
+- `/api/speech/decision?mode=realtime_dictation` 返回 `qwen3_stateful_streaming + Qwen3-ASR-0.6B`。
+- `/api/speech/decision?mode=offline_file&speaker_aware=true` 返回 `offline-speaker-subtitle-local`、diarization decision 和 `Qwen3-ASR-1.7B`。
+- `/api/asr/transcribe-ws` 返回 410，并提示使用 `/api/voice/listen-ws`。
+- wake phrase-only 配置可以启动 lightweight listener，且不会启动后台 ASR worker pid。
+- `POST /api/asr/offline-jobs` 对真实音频生成 `txt/srt/vtt/timeline_json/metadata` artifacts。
+- `bifrost ai asr subtitle` 通过正式 offline-jobs API 下载同一组 artifacts。
+- Directory Task 对同一真实音频生成 artifacts，并且 Daily Agent 配置接口仍可访问，后处理入口未丢失。
+
+### TC-ASPO-10：Admin ASR 业务逻辑迁移到 `bifrost-asr`
+
+操作步骤：
+
+1. 执行：
+   ```bash
+   source ~/.zshrc && rg -n "pub mod (decision|resources|planner|offline|subtitle|timeline|artifacts|profiles)" crates/bifrost-asr/src/lib.rs
+   ```
+2. 执行：
+   ```bash
+   source ~/.zshrc && rg -n "resolve_engine_decision|ResourceLeaseManager|write_offline_subtitle_artifacts|plan_asr_units|render_srt|render_vtt" crates/bifrost-asr/src
+   ```
+3. 执行：
+   ```bash
+   source ~/.zshrc && rg -n "bifrost_asr::(decision|resources|offline|planner|subtitle|timeline|profiles)" crates/bifrost-admin/src/handlers
+   ```
+
+预期结果：
+
+- `bifrost-asr` 暴露 decision/resources/planner/offline/subtitle/timeline/artifacts/profiles 等 ASR 业务模块。
+- engine decision、资源租约、字幕产物写入、ASR Unit Planner、SRT/VTT writer 均位于 `bifrost-asr`。
+- `bifrost-admin` 通过 `bifrost_asr::*` 调用核心业务，只保留 HTTP、任务状态和 Directory Task 后处理适配。
+
+### TC-ASPO-11：旧实时 ASR WebSocket 不再作为兼容服务
+
+操作步骤：
+
+1. 启动临时服务：
+   ```bash
+   source ~/.zshrc && BIFROST_DATA_DIR="$(mktemp -d)" cargo run --bin bifrost -- start -p 18998 --unsafe-ssl --skip-cert-check --no-system-proxy
+   ```
+2. 另开命令执行：
+   ```bash
+   source ~/.zshrc && curl -sS -o /tmp/bifrost-asr-legacy-ws.txt -w "%{http_code}" http://127.0.0.1:18998/_bifrost/api/asr/transcribe-ws
+   ```
+
+预期结果：
+
+- HTTP 状态码为 `410`。
+- 响应正文包含 `/api/voice/listen-ws`。
+- 服务日志不出现旧 `AsrRealtimeBuffer` 全会话重转码链路被启动的记录。
+
+### TC-ASPO-12：Directory Task 后处理没有被单文件 Offline Pipeline 覆盖掉
+
+操作步骤：
+
+1. 使用 TC-ASPO-09 脚本完成真实 Directory Task 转写。
+2. 检查脚本输出目录和接口响应：
+   ```bash
+   source ~/.zshrc && rg -n "daily-agent|artifacts|timeline_json|metadata" e2e-tests/tests/test_asr_speech_pipeline_orchestrator_real_service.sh
+   ```
+
+预期结果：
+
+- Directory Task 文件级 artifacts 可通过 `/api/asr/tasks/{task_id}/files/{file_key}/artifacts/{format}` 读取。
+- Daily Agent 配置接口仍返回有效 JSON。
+- OfflineSubtitlePipeline 只负责单文件标准产物，Directory Task runner 仍负责 Daily Docs、Daily Agent / AI Runner、report/IM/sync 后处理。
+
+### TC-ASPO-13：WebUI 使用正式 offline-jobs 生成文件字幕
+
+操作步骤：
+
+1. 启动临时服务：
+   ```bash
+   source ~/.zshrc && BIFROST_DATA_DIR="$(mktemp -d)" cargo run --bin bifrost -- start -p 18999 --unsafe-ssl --skip-cert-check --no-system-proxy
+   ```
+2. 在浏览器打开 `http://127.0.0.1:18999/_bifrost/`。
+3. 进入 AI / ASR 页面。
+4. 在 Speech to Text 区域选择真实音频文件上传。
+5. 等待文件转写完成。
+
+预期结果：
+
+- 页面展示 offline subtitle job 进度。
+- 完成后 transcript 区域展示文本。
+- 页面出现 `txt/srt/vtt/timeline_json` 下载按钮。
+- 顶部 pipeline 状态显示 realtime/offline resource 状态，不要求用户手动调用旧 streaming preview 接口。
+- 亮色和暗色主题下状态、按钮、进度和下载区域均可读，无重叠。
+
 ## 清理步骤
 
-- 本组用例不创建临时服务和临时数据目录，无需清理。
+- 静态验收用例不创建临时服务和临时数据目录。
+- 真实服务用例执行后必须停止临时 Bifrost 进程并删除临时 `BIFROST_DATA_DIR`。
+- 如果手动执行 TC-ASPO-11/13，结束后用 `lsof -nP -iTCP:18998 -sTCP:LISTEN`、`lsof -nP -iTCP:18999 -sTCP:LISTEN` 确认没有残留进程。
 
 ## 执行记录
 
@@ -171,3 +275,8 @@
 | 2026-05-28 | TC-ASPO-01/02/03/04/05/06 | 已执行上述 7 条静态验收命令，验证顶层架构、旧实时 WebSocket 降级边界、离线 pipeline、ASR Unit Planner、迁移策略、分阶段计划、测试计划和 readme 索引 | 通过 |
 | 2026-05-28 | TC-ASPO-07 | 已执行后处理链路静态验收命令，验证 `OfflineSubtitlePipeline` 不替代 Daily Docs / Daily Agent / AI Runner / report/IM/sync 后处理 | 通过 |
 | 2026-05-28 | TC-ASPO-08 | 已执行独立 crate 与跨平台编译边界静态验收命令，验证 `bifrost-asr`、feature matrix、admin 适配层和 Cargo metadata/tree 门禁 | 通过 |
+| 2026-05-28 | TC-ASPO-09 | 已执行 `bash e2e-tests/tests/test_asr_speech_pipeline_orchestrator_real_service.sh`，真实启动 Bifrost 服务并验证 speech decision、旧 ASR WS 410、wake lightweight、offline-jobs、CLI subtitle、Directory Task artifacts 和 Daily Agent 后处理入口 | 通过 |
+| 2026-05-28 | TC-ASPO-10 | 已执行 `rg` 静态验收，确认 `bifrost-asr` 暴露 decision/resources/planner/offline/subtitle/timeline/artifacts/profiles，Admin 通过 `bifrost_asr::*` 接入核心业务 | 通过 |
+| 2026-05-28 | TC-ASPO-11 | 已由 TC-ASPO-09 脚本覆盖真实服务 `/api/asr/transcribe-ws`，返回 410 且响应包含 `/api/voice/listen-ws` | 通过 |
+| 2026-05-28 | TC-ASPO-12 | 已由 TC-ASPO-09 脚本覆盖真实 Directory Task artifacts 和 Daily Agent 配置接口，确认单文件 Offline Pipeline 未覆盖后处理入口 | 通过 |
+| 2026-05-28 | TC-ASPO-13 | 已执行 `pnpm --dir web build` 验证 WebUI offline-jobs 接入可编译；真实浏览器亮/暗主题视觉验收待后续 UI 专项补跑 | 部分通过 |

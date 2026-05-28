@@ -671,7 +671,11 @@ fn get_task_file_artifacts_response(
     let Some(path) = artifacts
         .iter()
         .find_map(|artifact| {
-            (artifact.get("format").and_then(|value| value.as_str()) == Some(format))
+            (artifact
+                .get("format")
+                .and_then(|value| value.as_str())
+                .map(|artifact_format| artifact_format == canonical_artifact_format(format))
+                .unwrap_or(false))
                 .then(|| artifact.get("path").and_then(|value| value.as_str()))
                 .flatten()
         })
@@ -726,11 +730,20 @@ fn push_artifact(artifacts: &mut Vec<serde_json::Value>, format: &str, path: &Pa
 }
 
 fn artifact_content_type(format: &str) -> &'static str {
-    match format {
+    match canonical_artifact_format(format) {
         "vtt" => "text/vtt; charset=utf-8",
         "srt" | "txt" => "text/plain; charset=utf-8",
         "timeline_json" | "metadata_json" => "application/json; charset=utf-8",
         _ => "application/octet-stream",
+    }
+}
+
+fn canonical_artifact_format(format: &str) -> &str {
+    match format {
+        "text" => "txt",
+        "metadata" | "json" => "metadata_json",
+        "timeline" => "timeline_json",
+        other => other,
     }
 }
 

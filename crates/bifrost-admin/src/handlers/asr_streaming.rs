@@ -27,25 +27,30 @@ pub struct WholeFileTranscription {
     pub segments: Vec<(u64, u64, String)>,
 }
 
+#[allow(dead_code)]
 const DEFAULT_STREAM_WINDOW_MS: u64 = 1_000;
+#[allow(dead_code)]
 const DEFAULT_STREAM_OVERLAP_MS: u64 = 300;
+#[allow(dead_code)]
 const MIN_STREAM_WINDOW_MS: u64 = 300;
 const ASR_SERVER_REQUEST_TIMEOUT_SECS_ENV: &str = "BIFROST_ASR_SERVER_REQUEST_TIMEOUT_SECS";
 const ASR_TEXT_REQUEST_TIMEOUT_SECS_ENV: &str = "BIFROST_ASR_TEXT_REQUEST_TIMEOUT_SECS";
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 struct AsrStreamQuery {
     window_ms: Option<u64>,
     overlap_ms: Option<u64>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct StreamingOptions {
-    #[allow(dead_code)] // read by asr_ws tests
     pub(crate) window_ms: u64,
     pub(crate) overlap_ms: u64,
 }
 
+#[allow(dead_code)]
 pub(crate) fn stream_options_from_query(query: Option<&str>) -> Result<StreamingOptions, String> {
     let params: AsrStreamQuery = query
         .map(serde_urlencoded::from_str)

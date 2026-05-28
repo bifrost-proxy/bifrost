@@ -262,6 +262,23 @@ where
     let source = parse_query_value(query, "source").unwrap_or_else(|| "web_mic".to_string());
     let tuning = VoiceRuntimeTuning::from_query(query);
     let chunk_size_sec = voice_stateful_chunk_size_sec(query);
+    let lease_model =
+        parse_query_value(query, "model").unwrap_or_else(|| DEFAULT_VOICE_MODEL.to_string());
+    let lease_decision = crate::handlers::speech::acquire_speech_resource(
+        crate::handlers::speech::realtime_voice_lease(&session_id, &lease_model),
+    );
+    if !lease_decision.granted {
+        let detail = lease_decision.reason.as_deref();
+        let _ = send_voice_error(
+            &mut sender,
+            "voice realtime ASR resource is not available",
+            detail,
+        )
+        .await;
+        let _ = sender.close().await;
+        return;
+    }
+    let resource_lease = lease_decision.lease;
     let language = parse_query_value(query, "language")
         .unwrap_or_else(|| crate::asr_runtime::DEFAULT_ASR_LANGUAGE.to_string());
     let provider = match VoiceAsrProvider::from_query(query) {
@@ -306,6 +323,7 @@ where
     .await
     .is_err()
     {
+        crate::handlers::speech::release_speech_resource(resource_lease.as_ref());
         return;
     }
 
@@ -986,6 +1004,7 @@ where
             Message::Frame(_) => {}
         }
     }
+    crate::handlers::speech::release_speech_resource(resource_lease.as_ref());
 }
 
 async fn start_voice_stateful_session(

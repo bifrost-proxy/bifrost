@@ -359,15 +359,11 @@ export default function VoiceWakeActionsCard() {
       message.error("Wake phrase is required.");
       return null;
     }
-    if (!selectedSpeakerProfile) {
-      message.error("Select an enrolled voiceprint before saving.");
-      return null;
-    }
     setSaving(true);
     try {
       const profile = await createVoiceWakeProfile({
-        display_name: selectedSpeakerProfile.display_name,
-        voiceprint_profile_id: selectedSpeakerProfile.id,
+        display_name: selectedSpeakerProfile?.display_name ?? "Phrase only wake",
+        voiceprint_profile_id: selectedSpeakerProfile?.id,
       });
       const binding = await createVoiceWakeBinding({
         phrase,
@@ -383,7 +379,7 @@ export default function VoiceWakeActionsCard() {
       });
       setActiveBindingId(binding.id);
       message.success(
-        `Saved ${selectedSpeakerProfile.display_name}: ${phrase} -> ${formatShortcut(key, modifiers)}`,
+        `Saved ${selectedSpeakerProfile?.display_name ?? "phrase-only"}: ${phrase} -> ${formatShortcut(key, modifiers)}`,
       );
       await refresh();
       return binding;
@@ -396,31 +392,21 @@ export default function VoiceWakeActionsCard() {
   }, [key, modifiers, refresh, selectedSpeakerProfile, wakePhrase]);
 
   const listenerBlockReason = useMemo(() => {
-    if (speakerProfiles.length === 0) {
-      return "Enroll a speaker voiceprint in Speaker Diarization before enabling voice commands.";
-    }
     if (!activeBinding) {
       return "Record wake audio, capture a shortcut, and save the voice command before enabling.";
     }
-    if (!activeWakeProfile?.voiceprint_profile_id) {
-      return "The saved voice command must be linked to an enrolled speaker voiceprint.";
-    }
     return null;
-  }, [activeBinding, activeWakeProfile?.voiceprint_profile_id, speakerProfiles.length]);
+  }, [activeBinding]);
 
   const ensureListenerCanStart = useCallback(
     (binding: VoiceWakeBinding | null): binding is VoiceWakeBinding => {
-      if (speakerProfiles.length === 0) {
-        message.warning("Enroll a speaker voiceprint in Speaker Diarization first.");
-        return false;
-      }
       if (!binding) {
         message.warning("Save a wake command before enabling voice commands.");
         return false;
       }
       return true;
     },
-    [speakerProfiles.length],
+    [],
   );
 
   const stopListening = useCallback(async () => {
@@ -440,8 +426,7 @@ export default function VoiceWakeActionsCard() {
       return;
     }
     try {
-      setLastResult("Starting backend ASR service...");
-      await ensureBackendAsrService();
+      setLastResult("Starting voice wake listener...");
       const response = await startVoiceWakeListener();
       setListening(response.listener.running);
       setLastResult("");
@@ -454,7 +439,7 @@ export default function VoiceWakeActionsCard() {
       setListening(false);
       message.error(voiceWakeErrorMessage(error, "Failed to start backend listener"));
     }
-  }, [activeBinding, ensureBackendAsrService, ensureListenerCanStart, refresh]);
+  }, [activeBinding, ensureListenerCanStart, refresh]);
 
   const toggleListening = useCallback(
     (checked: boolean) => {
@@ -552,16 +537,16 @@ export default function VoiceWakeActionsCard() {
                     data-testid="voice-wake-phrase-input"
                   />
                 </Form.Item>
-                <Form.Item label="Voiceprint" required style={{ marginBottom: 0, marginTop: 8 }}>
+                <Form.Item label="Voiceprint" style={{ marginBottom: 0, marginTop: 8 }}>
                   <Select
+                    allowClear
                     value={selectedVoiceprintProfileId ?? undefined}
-                    placeholder="Enroll a voiceprint in Speaker Diarization first"
+                    placeholder="Optional speaker verification"
                     options={speakerProfiles.map((profile) => ({
                       label: `${profile.display_name} (${profile.embedding_dim}d)`,
                       value: profile.id,
                     }))}
                     onChange={setSelectedVoiceprintProfileId}
-                    disabled={speakerProfiles.length === 0}
                     data-testid="voice-wake-voiceprint-select"
                   />
                 </Form.Item>

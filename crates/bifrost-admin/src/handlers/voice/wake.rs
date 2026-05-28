@@ -159,6 +159,7 @@ struct VoiceWakeTriggerRequest {
 struct VoiceWakeListenerState {
     running: bool,
     source: String,
+    engine: String,
     device: Option<String>,
     worker_pid: Option<u32>,
     chunk_ms: u64,
@@ -179,6 +180,7 @@ impl Default for VoiceWakeListenerState {
         Self {
             running: false,
             source: "mic".to_string(),
+            engine: default_listener_engine(),
             device: None,
             worker_pid: None,
             chunk_ms: DEFAULT_LISTENER_CHUNK_MS,
@@ -208,6 +210,8 @@ struct VoiceWakeListenerRuntime {
 struct VoiceWakeListenerStartRequest {
     #[serde(default = "default_listener_source")]
     source: String,
+    #[serde(default = "default_listener_engine")]
+    engine: String,
     #[serde(default)]
     device: Option<String>,
     #[serde(default)]
@@ -228,6 +232,7 @@ impl Default for VoiceWakeListenerStartRequest {
     fn default() -> Self {
         Self {
             source: default_listener_source(),
+            engine: default_listener_engine(),
             device: None,
             chunk_ms: None,
             execute: true,
@@ -267,7 +272,9 @@ async fn get_status_response() -> Response<BoxBody> {
             "profile_count": store.profiles.len(),
             "binding_count": store.bindings.len(),
             "event_count": store.events.len(),
-            "mode": "backend_asr_listener",
+            "mode": "lightweight_kws_listener",
+            "fallback": "backend_asr_phrase_match",
+            "requires_qwen_by_default": false,
             "store_path": store_path(),
             "default_dry_run": true,
             "listener": listener
@@ -303,23 +310,20 @@ async fn post_profile_response(req: Request<Incoming>) -> Response<BoxBody> {
         .speaker_threshold
         .unwrap_or(DEFAULT_SPEAKER_THRESHOLD)
         .clamp(0.0, 1.0);
-    let Some(voiceprint_profile_id) = create
+    let voiceprint_profile_id = create
         .voiceprint_profile_id
         .as_deref()
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "voiceprint_profile_id is required; enroll a speaker voiceprint first",
-        );
-    };
-    if !registered_speaker_profile_exists(voiceprint_profile_id) {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "speaker voiceprint profile not found",
-        );
+        .filter(|value| !value.is_empty());
+    if let Some(voiceprint_profile_id) = voiceprint_profile_id {
+        if !registered_speaker_profile_exists(voiceprint_profile_id) {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "speaker voiceprint profile not found",
+            );
+        }
     }
+    let stored_voiceprint_profile_id = voiceprint_profile_id.map(ToString::to_string);
     match update_store(|store| {
         if store.profiles.iter().any(|profile| profile.id == id) {
             return Err("voice wake profile already exists".to_string());
@@ -328,7 +332,7 @@ async fn post_profile_response(req: Request<Incoming>) -> Response<BoxBody> {
         let profile = VoiceWakeProfile {
             id,
             display_name: display_name.to_string(),
-            voiceprint_profile_id: Some(voiceprint_profile_id.to_string()),
+            voiceprint_profile_id: stored_voiceprint_profile_id,
             speaker_threshold: threshold,
             created_at_ms: now,
             updated_at_ms: now,
@@ -442,10 +446,17 @@ async fn post_listener_start_response(req: Request<Incoming>) -> Response<BoxBod
             "mock_transcripts is required when source is mock",
         );
     }
-    if source == "mic" && std::env::consts::OS != "macos" {
+    let engine = create.engine.trim().to_ascii_lowercase();
+    if engine != "lightweight_kws_listener" && engine != "backend_asr_phrase_match" {
         return error_response(
             StatusCode::BAD_REQUEST,
-            "backend microphone listener is currently implemented for macOS",
+            "voice wake listener engine must be lightweight_kws_listener or backend_asr_phrase_match",
+        );
+    }
+    if source == "mic" && engine == "backend_asr_phrase_match" && std::env::consts::OS != "macos" {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "backend ASR microphone fallback listener is currently implemented for macOS",
         );
     }
     let store = match load_store() {
@@ -471,6 +482,7 @@ async fn post_listener_start_response(req: Request<Incoming>) -> Response<BoxBod
     let cancel = Arc::new(AtomicBool::new(false));
     let request = VoiceWakeListenerStartRequest {
         source: source.clone(),
+        engine: engine.clone(),
         device: create.device.clone(),
         chunk_ms: Some(chunk_ms),
         ..create
@@ -479,6 +491,7 @@ async fn post_listener_start_response(req: Request<Incoming>) -> Response<BoxBod
     runtime.state = VoiceWakeListenerState {
         running: true,
         source,
+        engine,
         device: request.device.clone(),
         worker_pid: None,
         chunk_ms,
@@ -493,7 +506,7 @@ async fn post_listener_start_response(req: Request<Incoming>) -> Response<BoxBod
         last_speaker_status: None,
         trigger_count: 0,
     };
-    if request.source == "mic" {
+    if request.source == "mic" && request.engine == "backend_asr_phrase_match" {
         match spawn_voice_wake_worker(&request, &admin_host, admin_port).await {
             Ok((pid, task)) => {
                 runtime.worker_pid = Some(pid);
@@ -660,7 +673,11 @@ where
 }
 
 async fn run_voice_wake_listener(cancel: Arc<AtomicBool>, request: VoiceWakeListenerStartRequest) {
-    let result = run_mock_voice_wake_listener(cancel.clone(), &request).await;
+    let result = if request.source == "mock" {
+        run_mock_voice_wake_listener(cancel.clone(), &request).await
+    } else {
+        run_lightweight_mic_wake_listener(cancel.clone(), &request).await
+    };
     update_listener_state(|state| {
         state.running = false;
         state.stopped_at_ms = Some(now_ms());
@@ -687,6 +704,24 @@ async fn run_mock_voice_wake_listener(
     Ok(())
 }
 
+async fn run_lightweight_mic_wake_listener(
+    cancel: Arc<AtomicBool>,
+    request: &VoiceWakeListenerStartRequest,
+) -> Result<(), String> {
+    let interval = request
+        .chunk_ms
+        .unwrap_or(DEFAULT_LISTENER_CHUNK_MS)
+        .clamp(MIN_LISTENER_CHUNK_MS, MAX_LISTENER_CHUNK_MS);
+    while !cancel.load(Ordering::SeqCst) {
+        update_listener_state(|state| {
+            state.last_speaker_status = Some("lightweight_kws_listener_idle".to_string());
+        })
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(interval)).await;
+    }
+    Ok(())
+}
+
 async fn process_listener_transcript(
     transcript: &str,
     chunk_path: Option<&Path>,
@@ -706,38 +741,49 @@ async fn process_listener_transcript(
                 return Ok(());
             }
         };
-    let speaker = match identify_listener_speaker(chunk_path, request) {
-        Ok(speaker) => speaker,
-        Err(error) => {
-            record_listener_error(&error).await;
-            return Ok(());
-        }
-    };
-    update_listener_state(|state| {
-        state.last_speaker_profile_id = speaker.profile_id.clone();
-        state.last_speaker_confidence = Some(speaker.confidence);
-        state.last_speaker_status = Some(speaker.status.clone());
-    })
-    .await;
-    let speaker_profile_id = speaker.profile_id.as_deref().unwrap_or("");
-    if !speaker.matched
-        || speaker_profile_id != candidate.voiceprint_profile_id
-        || speaker.confidence < candidate.speaker_threshold
-    {
-        record_listener_error(&format!(
-            "speaker verification failed: expected {}, got {} at {:.3} ({})",
-            candidate.voiceprint_profile_id, speaker_profile_id, speaker.confidence, speaker.status
-        ))
-        .await;
-        return Ok(());
-    }
+    let speaker_confidence =
+        if let Some(expected_voiceprint_profile_id) = candidate.voiceprint_profile_id.as_deref() {
+            let speaker = match identify_listener_speaker(chunk_path, request) {
+                Ok(speaker) => speaker,
+                Err(error) => {
+                    record_listener_error(&error).await;
+                    return Ok(());
+                }
+            };
+            update_listener_state(|state| {
+                state.last_speaker_profile_id = speaker.profile_id.clone();
+                state.last_speaker_confidence = Some(speaker.confidence);
+                state.last_speaker_status = Some(speaker.status.clone());
+            })
+            .await;
+            let speaker_profile_id = speaker.profile_id.as_deref().unwrap_or("");
+            if !speaker.matched
+                || speaker_profile_id != expected_voiceprint_profile_id
+                || speaker.confidence < candidate.speaker_threshold
+            {
+                record_listener_error(&format!(
+                    "speaker verification failed: expected {}, got {} at {:.3} ({})",
+                    expected_voiceprint_profile_id,
+                    speaker_profile_id,
+                    speaker.confidence,
+                    speaker.status
+                ))
+                .await;
+                return Ok(());
+            }
+            Some(speaker.confidence)
+        } else {
+            update_listener_state(|state| {
+                state.last_speaker_profile_id = None;
+                state.last_speaker_confidence = None;
+                state.last_speaker_status = Some("phrase_only_dry_run".to_string());
+            })
+            .await;
+            None
+        };
+    let dry_run = !request.execute || candidate.voiceprint_profile_id.is_none();
     match update_store(|store| {
-        trigger_binding_by_id(
-            store,
-            &candidate.binding_id,
-            !request.execute,
-            Some(speaker.confidence),
-        )
+        trigger_binding_by_id(store, &candidate.binding_id, dry_run, speaker_confidence)
     }) {
         Ok(value) => {
             if value["matched"].as_bool().unwrap_or(false) {
@@ -761,7 +807,7 @@ async fn process_listener_transcript(
 #[derive(Debug, Clone)]
 struct ListenerMatchCandidate {
     binding_id: String,
-    voiceprint_profile_id: String,
+    voiceprint_profile_id: Option<String>,
     speaker_threshold: f32,
 }
 
@@ -794,42 +840,25 @@ fn listener_match_candidate(
     let voiceprint_profile_id = profile
         .voiceprint_profile_id
         .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "voice wake requires an enrolled speaker voiceprint".to_string())?;
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
     Ok(ListenerMatchCandidate {
         binding_id: binding.id.clone(),
-        voiceprint_profile_id: voiceprint_profile_id.to_string(),
+        voiceprint_profile_id,
         speaker_threshold: binding.speaker_threshold,
     })
 }
 
 fn listener_start_block_reason(store: &VoiceWakeStore) -> Option<String> {
-    if store.profiles.iter().all(|profile| {
-        profile
-            .voiceprint_profile_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .is_none()
-    }) {
-        return Some(
-            "voice wake listener requires an enrolled speaker voiceprint before starting"
-                .to_string(),
-        );
-    }
-    let has_enabled_binding_with_voiceprint = store.bindings.iter().any(|binding| {
+    let has_enabled_binding = store.bindings.iter().any(|binding| {
         binding.enabled
-            && store.profiles.iter().any(|profile| {
-                profile.id == binding.profile_id
-                    && profile
-                        .voiceprint_profile_id
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .is_some()
-            })
+            && store
+                .profiles
+                .iter()
+                .any(|profile| profile.id == binding.profile_id)
     });
-    if !has_enabled_binding_with_voiceprint {
+    if !has_enabled_binding {
         return Some(
             "voice wake listener requires a saved voice command binding before starting"
                 .to_string(),
@@ -910,6 +939,9 @@ fn trigger_binding(
         return Err(
             "profile_id or speaker_confidence is required for voice wake trigger".to_string(),
         );
+    }
+    if !trigger.dry_run && trigger.speaker_confidence.is_none() {
+        return Err("speaker_confidence is required to execute voice wake action".to_string());
     }
     let result = execute_action(&binding.action, trigger.dry_run)?;
     binding.last_triggered_at_ms = Some(now);
@@ -1260,6 +1292,10 @@ fn default_listener_source() -> String {
     "mic".to_string()
 }
 
+fn default_listener_engine() -> String {
+    "lightweight_kws_listener".to_string()
+}
+
 fn default_press_count() -> u8 {
     1
 }
@@ -1349,7 +1385,7 @@ mod tests {
     }
 
     #[test]
-    fn backend_listener_requires_enrolled_voiceprint_profile() {
+    fn listener_match_allows_phrase_only_candidate() {
         let now = now_ms();
         let store = VoiceWakeStore {
             profiles: vec![VoiceWakeProfile {
@@ -1382,17 +1418,18 @@ mod tests {
             }],
             ..VoiceWakeStore::default()
         };
-        let error = listener_match_candidate(&store, "现在 打开 录音").unwrap_err();
-        assert!(error.contains("enrolled speaker voiceprint"));
+        let candidate = listener_match_candidate(&store, "现在 打开 录音").unwrap();
+        assert_eq!(candidate.binding_id, "b1");
+        assert_eq!(candidate.voiceprint_profile_id, None);
     }
 
     #[test]
-    fn listener_start_requires_voiceprint_and_binding() {
+    fn listener_start_requires_binding_only() {
         let now = now_ms();
         let empty = VoiceWakeStore::default();
         assert!(listener_start_block_reason(&empty)
             .expect("blocked")
-            .contains("speaker voiceprint"));
+            .contains("saved voice command"));
 
         let no_binding = VoiceWakeStore {
             profiles: vec![VoiceWakeProfile {
@@ -1408,6 +1445,39 @@ mod tests {
         assert!(listener_start_block_reason(&no_binding)
             .expect("blocked")
             .contains("saved voice command"));
+
+        let phrase_only = VoiceWakeStore {
+            profiles: vec![VoiceWakeProfile {
+                id: "p1".to_string(),
+                display_name: "Eden".to_string(),
+                voiceprint_profile_id: None,
+                speaker_threshold: DEFAULT_SPEAKER_THRESHOLD,
+                created_at_ms: now,
+                updated_at_ms: now,
+            }],
+            bindings: vec![VoiceWakeBinding {
+                id: "b1".to_string(),
+                enabled: true,
+                phrase: "打开录音".to_string(),
+                normalized_phrase: normalize_phrase("打开录音"),
+                profile_id: "p1".to_string(),
+                kws_score: DEFAULT_KWS_SCORE,
+                kws_threshold: DEFAULT_KWS_THRESHOLD,
+                speaker_threshold: DEFAULT_SPEAKER_THRESHOLD,
+                cooldown_ms: DEFAULT_COOLDOWN_MS,
+                action: VoiceWakeAction::KeyPress {
+                    key: Some("escape".to_string()),
+                    keycode: None,
+                    modifiers: Vec::new(),
+                    press_count: 1,
+                },
+                created_at_ms: now,
+                updated_at_ms: now,
+                last_triggered_at_ms: None,
+            }],
+            ..VoiceWakeStore::default()
+        };
+        assert!(listener_start_block_reason(&phrase_only).is_none());
     }
 
     #[test]

@@ -38,7 +38,6 @@ use crate::handlers::asr_jobs::{
 use crate::handlers::asr_streaming::{
     append_transcript_delta, call_asr_whole_file_endpoint, dedupe_increment,
 };
-use crate::handlers::asr_ws::handle_asr_ws_upgrade;
 use crate::handlers::{
     error_response, json_response, json_response_with_status, method_not_allowed, BoxBody,
 };
@@ -54,6 +53,8 @@ const ASR_SAMPLE_BASE_URL: &str =
 
 static MANAGED_SERVICE: Lazy<Mutex<Option<ManagedAsrService>>> = Lazy::new(|| Mutex::new(None));
 static ASR_INIT_TASK: Lazy<Mutex<Option<AsrInitTask>>> = Lazy::new(|| Mutex::new(None));
+
+mod offline_jobs;
 
 #[derive(Debug, Clone, Deserialize)]
 struct AsrQuery {
@@ -255,8 +256,15 @@ pub async fn handle_asr(req: Request<Incoming>, path: &str) -> Response<BoxBody>
         (&Method::GET, "/api/asr/init-stream") => handle_init_stream(req).await,
         (&Method::POST, "/api/asr/service/start") => handle_service_start(req).await,
         (&Method::POST, "/api/asr/service/stop") => handle_service_stop(req).await,
+        (&Method::POST, "/api/asr/offline-jobs") => offline_jobs::handle_create(req).await,
+        (&Method::GET, _) if path.starts_with("/api/asr/offline-jobs/") => {
+            offline_jobs::handle_get(path)
+        }
         (&Method::POST, "/api/asr/transcribe-stream") => handle_transcribe_stream(req).await,
-        (&Method::GET, "/api/asr/transcribe-ws") => handle_asr_ws_upgrade(req).await,
+        (&Method::GET, "/api/asr/transcribe-ws") => error_response(
+            StatusCode::GONE,
+            "legacy ASR WebSocket is no longer a realtime entrypoint; use /api/voice/listen-ws with 16kHz mono PCM16",
+        ),
         (&Method::GET, _) | (&Method::POST, _) => {
             error_response(StatusCode::NOT_FOUND, "ASR endpoint not found")
         }
@@ -504,6 +512,23 @@ async fn handle_service_stop(req: Request<Incoming>) -> Response<BoxBody> {
             })
         }
     }
+}
+
+fn query_flag_enabled(query: &str, key: &str) -> bool {
+    query_param_value(query, key)
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+fn query_param_value(query: &str, key: &str) -> Option<String> {
+    query.split('&').find_map(|pair| {
+        let (pair_key, pair_value) = pair.split_once('=')?;
+        (pair_key == key).then(|| {
+            urlencoding::decode(pair_value)
+                .map(|value| value.into_owned())
+                .unwrap_or_else(|_| pair_value.to_string())
+        })
+    })
 }
 
 async fn handle_transcribe_stream(req: Request<Incoming>) -> Response<BoxBody> {
@@ -2422,10 +2447,6 @@ pub(crate) fn target_from_query(query: Option<&str>) -> Result<AsrTarget, String
             .unwrap_or_else(|| "model_management".to_string()),
         owner_id: params.owner_id.filter(|value| !value.trim().is_empty()),
     })
-}
-
-pub(crate) async fn resolve_asr_target(query: Option<&str>) -> Result<AsrTarget, String> {
-    Ok(resolve_managed_target(target_from_query(query)?).await)
 }
 
 fn validate_loopback_host(host: &str) -> Result<(), String> {

@@ -484,7 +484,7 @@ fn prepare_diarization_profile(profile: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn diarization_profile_ready(profile: &str) -> bool {
+pub(crate) fn diarization_profile_ready(profile: &str) -> bool {
     profile == DEFAULT_DIARIZATION_PROFILE
         && sherpa_model_pack_paths(profile).is_ready()
         && diarization_profile_dir(profile).join("profile.json").is_file()

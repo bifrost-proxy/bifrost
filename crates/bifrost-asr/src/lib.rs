@@ -1,8 +1,10 @@
 pub mod artifacts;
+pub mod decision;
 pub mod offline;
 pub mod planner;
 pub mod platform;
 pub mod profiles;
+pub mod resources;
 pub mod runtime;
 pub mod subtitle;
 pub mod timeline;

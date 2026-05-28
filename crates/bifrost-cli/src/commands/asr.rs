@@ -78,6 +78,30 @@ fn handle_asr_command(action: AiAsrCommands, admin_host: &str, admin_port: u16) 
                 stream_file(&audio, &model, &language)
             }
         }
+        AiAsrCommands::Subtitle {
+            audio,
+            model,
+            language,
+            profile,
+            speaker_aware,
+            format,
+            out,
+            json,
+        } => {
+            ensure_supported_platform()?;
+            let client = AsrTaskClient::new(admin_host, admin_port);
+            subtitle_file_with_admin_pipeline(
+                &client,
+                &audio,
+                &model,
+                &language,
+                &profile,
+                speaker_aware,
+                &format,
+                &out,
+                json,
+            )
+        }
         AiAsrCommands::Task { action } => {
             let client = AsrTaskClient::new(admin_host, admin_port);
             handle_asr_task_command(&client, action)
@@ -87,6 +111,175 @@ fn handle_asr_command(action: AiAsrCommands, admin_host: &str, admin_port: u16) 
             handle_asr_diarization_command(&client, action)
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn subtitle_file_with_admin_pipeline(
+    client: &AsrTaskClient,
+    audio: &Path,
+    model: &str,
+    language: &str,
+    profile: &str,
+    speaker_aware: bool,
+    formats: &[String],
+    out: &Path,
+    json: bool,
+) -> Result<()> {
+    if !audio.is_file() {
+        return Err(BifrostError::Config(format!(
+            "audio file does not exist: {}",
+            audio.display()
+        )));
+    }
+    fs::create_dir_all(out).map_err(|error| {
+        BifrostError::Io(io::Error::other(format!(
+            "create subtitle output dir {}: {error}",
+            out.display()
+        )))
+    })?;
+    let file_name = audio
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("upload.audio");
+    let audio_bytes = fs::read(audio).map_err(|error| {
+        BifrostError::Io(io::Error::other(format!(
+            "read audio file {}: {error}",
+            audio.display()
+        )))
+    })?;
+    let (content_type, body) = build_asr_upload_multipart(file_name, &audio_bytes);
+    let url = format!(
+        "{}/asr/offline-jobs?model={}&language={}&pipeline_profile={}&speaker_aware={}",
+        client.base_url,
+        url_encode(model),
+        url_encode(language),
+        url_encode(profile),
+        if speaker_aware { "1" } else { "0" },
+    );
+    let response = client
+        .agent
+        .post(&url)
+        .set("content-type", &content_type)
+        .set("accept", "application/json")
+        .send_bytes(&body)
+        .map_err(|error| asr_task_api_error("POST", &url, error))?;
+    let created = read_json_response("POST", &url, response)?;
+    let job_id = created["job_id"]
+        .as_str()
+        .ok_or_else(|| BifrostError::Config("offline job response missing job_id".to_string()))?;
+    let job = wait_for_offline_job(client, job_id)?;
+    if job["status"].as_str() != Some("succeeded") {
+        return Err(BifrostError::Config(format!(
+            "offline subtitle job {} failed: {}",
+            job_id,
+            job["error"].as_str().unwrap_or("unknown error")
+        )));
+    }
+    let outputs = download_offline_job_artifacts(client, job_id, audio, out, formats)?;
+    let summary = serde_json::json!({
+        "job_id": job_id,
+        "status": job["status"],
+        "pipeline_profile": job["pipeline_profile"],
+        "outputs": outputs,
+    });
+    if json {
+        print_json(&summary)
+    } else {
+        println!("Offline subtitle job {job_id} succeeded.");
+        for output in summary["outputs"].as_array().into_iter().flatten() {
+            println!(
+                "{}\t{}",
+                output["format"].as_str().unwrap_or("-"),
+                output["path"].as_str().unwrap_or("-")
+            );
+        }
+        Ok(())
+    }
+}
+
+fn wait_for_offline_job(client: &AsrTaskClient, job_id: &str) -> Result<Value> {
+    let started = Instant::now();
+    loop {
+        let job = client.get_json(&format!("/asr/offline-jobs/{}", url_encode(job_id)))?;
+        match job["status"].as_str() {
+            Some("succeeded") | Some("failed") => return Ok(job),
+            _ => {
+                if started.elapsed() > Duration::from_secs(60 * 60) {
+                    return Err(BifrostError::Config(format!(
+                        "offline subtitle job {job_id} did not finish within 1 hour"
+                    )));
+                }
+                thread::sleep(Duration::from_secs(1));
+            }
+        }
+    }
+}
+
+fn download_offline_job_artifacts(
+    client: &AsrTaskClient,
+    job_id: &str,
+    audio: &Path,
+    out: &Path,
+    formats: &[String],
+) -> Result<Vec<Value>> {
+    let stem = audio
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("subtitle");
+    let mut outputs = Vec::new();
+    for format in normalized_subtitle_formats(formats) {
+        let text = client.get_text(&format!(
+            "/asr/offline-jobs/{}/artifacts/{}",
+            url_encode(job_id),
+            url_encode(&format)
+        ))?;
+        let extension = match format.as_str() {
+            "timeline_json" => "timeline.json",
+            "metadata" => "metadata.json",
+            "txt" => "txt",
+            "srt" => "srt",
+            "vtt" => "vtt",
+            other => other,
+        };
+        let path = out.join(format!("{stem}.{extension}"));
+        fs::write(&path, text).map_err(|error| {
+            BifrostError::Io(io::Error::other(format!(
+                "write subtitle artifact {}: {error}",
+                path.display()
+            )))
+        })?;
+        outputs.push(serde_json::json!({
+            "format": format,
+            "path": path,
+        }));
+    }
+    Ok(outputs)
+}
+
+fn normalized_subtitle_formats(formats: &[String]) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for format in formats {
+        let value = format.trim().to_ascii_lowercase();
+        let value = match value.as_str() {
+            "json" | "timeline" => "timeline_json",
+            "metadata_json" => "metadata",
+            "text" => "txt",
+            other => other,
+        };
+        if matches!(value, "srt" | "vtt" | "txt" | "timeline_json" | "metadata")
+            && !normalized.iter().any(|existing| existing == value)
+        {
+            normalized.push(value.to_string());
+        }
+    }
+    if normalized.is_empty() {
+        normalized.extend(
+            ["srt", "vtt", "txt", "timeline_json", "metadata"]
+                .into_iter()
+                .map(ToString::to_string),
+        );
+    }
+    normalized
 }
 
 fn stream_file_with_admin_speakers(

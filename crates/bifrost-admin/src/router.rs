@@ -32,6 +32,7 @@ use crate::handlers::{
     rules::handle_rules,
     scripts::handle_scripts_request,
     search::handle_search,
+    speech::handle_speech,
     sync::{handle_sync, handle_sync_public},
     syntax::handle_syntax,
     system::handle_system,
@@ -130,6 +131,8 @@ impl AdminRouter {
             handle_agent_memories(req, path).await
         } else if path.starts_with("/api/asr") {
             handle_asr(req, path).await
+        } else if path.starts_with("/api/speech") {
+            handle_speech(req, path).await
         } else if path.starts_with("/api/voice") {
             handle_voice(req, state, path).await
         } else if path.starts_with("/api/rules") {
