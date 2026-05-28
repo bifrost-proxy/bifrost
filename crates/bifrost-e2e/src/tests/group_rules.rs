@@ -1043,6 +1043,89 @@ pub fn get_all_tests() -> Vec<TestCase> {
             },
         ),
         TestCase::standalone(
+            "group_rules_remote_sync_refreshes_badge_cache_for_enabled_rules",
+            "Remote group rule sync refreshes Badge cache when an enabled local rule changes",
+            "group_rules",
+            || async move {
+                let Some((sync_base_url, sync_token)) = sync_fixture() else {
+                    return Err(
+                        "SKIPPED: BIFROST_E2E_SYNC_BASE_URL/TOKEN not configured".to_string(),
+                    );
+                };
+                let port = pick_unused_port()?;
+                let (_proxy, admin_state) =
+                    ProxyInstance::start_with_admin_sync(port, vec![], false, true)
+                        .await
+                        .map_err(|e| format!("Failed to start proxy: {}", e))?;
+                save_test_sync_token(&admin_state).await?;
+
+                let client = build_client()?;
+                let group_name = format!("badge-sync-cache-group-{port}");
+                let group_id =
+                    create_remote_group(&client, &sync_base_url, &sync_token, &group_name).await?;
+                create_remote_env(
+                    &client,
+                    &sync_base_url,
+                    &sync_token,
+                    &group_name,
+                    "badge-sync-cache-rule",
+                    "badge-sync-cache.example.com status://231",
+                )
+                .await?;
+
+                let group_storage = setup_group_storage(&admin_state, &group_name)?;
+                let mut local_rule = RuleFile::new(
+                    "badge-sync-cache-rule",
+                    "badge-sync-cache.example.com status://230",
+                );
+                local_rule.enabled = true;
+                local_rule.group = Some(group_name.clone());
+                group_storage
+                    .save(&local_rule)
+                    .map_err(|e| format!("Failed to save stale local rule: {}", e))?;
+                admin_state.refresh_badge_rules_cache();
+                if !badge_has_rule(
+                    &admin_state,
+                    "badge-sync-cache-rule",
+                    "status://230",
+                )? {
+                    return Err(format!(
+                        "Expected stale badge cache before sync, got {}",
+                        admin_state.badge_rules_json()
+                    ));
+                }
+
+                let list_resp = client
+                    .get(format!(
+                        "http://127.0.0.1:{}/_bifrost/api/group-rules/{}",
+                        port, group_id
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| format!("Group list sync request failed: {}", e))?;
+                assert_status(&list_resp, 200)?;
+
+                wait_for_rule_state(
+                    &client,
+                    &admin_state,
+                    port,
+                    "badge-sync-cache-rule",
+                    true,
+                    "status://231",
+                )
+                .await?;
+                if badge_has_rule(&admin_state, "badge-sync-cache-rule", "status://230")? {
+                    return Err(format!(
+                        "Badge cache still contains stale synced rule content: {}",
+                        admin_state.badge_rules_json()
+                    ));
+                }
+
+                cleanup_group_storage(&admin_state, &group_name);
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
             "group_rules_deeplink_accepts_group_name",
             "Group rules API accepts the local group name used by badge and Rules deep links",
             "group_rules",
@@ -1817,6 +1900,66 @@ fn build_client() -> Result<reqwest::Client, String> {
         .no_proxy()
         .build()
         .map_err(|e| format!("Failed to create client: {}", e))
+}
+
+fn sync_fixture() -> Option<(String, String)> {
+    let base_url = std::env::var("BIFROST_E2E_SYNC_BASE_URL").ok();
+    let token = std::env::var("BIFROST_E2E_SYNC_TOKEN").ok();
+    match (base_url, token) {
+        (Some(base_url), Some(token))
+            if !base_url.trim().is_empty() && !token.trim().is_empty() =>
+        {
+            Some((base_url.trim().to_string(), token.trim().to_string()))
+        }
+        _ => None,
+    }
+}
+
+async fn create_remote_group(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+    group_name: &str,
+) -> Result<String, String> {
+    let resp = client
+        .post(format!("{base_url}/v4/group"))
+        .header("x-bifrost-token", token)
+        .json(&serde_json::json!({ "name": group_name }))
+        .send()
+        .await
+        .map_err(|e| format!("Create remote group failed: {e}"))?;
+    assert_status(&resp, 200)?;
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse remote group response: {e}"))?;
+    json.get("data")
+        .and_then(|v| v.get("id"))
+        .and_then(|v| v.as_str())
+        .map(|v| v.to_string())
+        .ok_or_else(|| format!("Remote group response missing id: {json}"))
+}
+
+async fn create_remote_env(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+    user_id: &str,
+    name: &str,
+    rule: &str,
+) -> Result<(), String> {
+    let resp = client
+        .post(format!("{base_url}/v4/env"))
+        .header("x-bifrost-token", token)
+        .json(&serde_json::json!({
+            "user_id": user_id,
+            "name": name,
+            "rule": rule,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("Create remote env failed: {e}"))?;
+    assert_status(&resp, 200)
 }
 
 async fn save_test_sync_token(admin_state: &Arc<bifrost_admin::AdminState>) -> Result<(), String> {
