@@ -1,0 +1,29 @@
+human_tests/voice-wake-actions.md
+  0933d43eccea4a99 196-259
+crates/bifrost-admin/src/handlers/asr_jobs/diarization.rs
+  0933d43eccea4a99 2
+design/voice-wake-actions.md
+  0933d43eccea4a99 57-106
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "8a7d4f671011b45a94975d55b9dbb334640681ef",
+  "prompts": {
+    "0933d43eccea4a99": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a0d8c77df50548d8ddbbec9",
+        "model": "c_o_new_thinking__dev"
+      },
+      "human_author": "liuhua.jia <liuhua.jia@bytedance.com>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 115,
+      "overriden_lines": 0
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
