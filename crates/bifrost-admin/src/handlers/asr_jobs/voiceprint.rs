@@ -1158,6 +1158,77 @@ fn unknown_speaker_identify_response(
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct VoiceprintEmbeddingResult {
+    pub(crate) embedding: Vec<f32>,
+    pub(crate) audio_duration_ms: u64,
+    pub(crate) speech_duration_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct VoiceprintMatchResult {
+    pub(crate) profile_id: String,
+    pub(crate) display_name: String,
+    pub(crate) confidence: f32,
+}
+
+pub(crate) fn voiceprint_registered_profile_count() -> usize {
+    load_registered_speaker_profiles().len()
+}
+
+pub(crate) fn voiceprint_match_threshold() -> f32 {
+    VOICEPRINT_SPEAKER_MATCH_THRESHOLD
+}
+
+pub(crate) fn voiceprint_self_priority_threshold() -> f32 {
+    VOICEPRINT_SELF_PRIORITY_THRESHOLD
+}
+
+pub(crate) fn compute_voiceprint_embedding_from_pcm16le(
+    pcm16le: &[u8],
+    sample_rate: u32,
+) -> Result<Option<VoiceprintEmbeddingResult>, String> {
+    if sample_rate != VOICEPRINT_SAMPLE_RATE {
+        return Err(format!(
+            "realtime speaker tracking expects {}Hz audio, got {}Hz",
+            VOICEPRINT_SAMPLE_RATE, sample_rate
+        ));
+    }
+    #[cfg(not(test))]
+    let test_embedding =
+        std::env::var("BIFROST_ASR_VOICEPRINT_TEST_EMBEDDING").as_deref() == Ok("1");
+    #[cfg(not(test))]
+    if !test_embedding && !diarization_profile_ready(DEFAULT_DIARIZATION_PROFILE) {
+        return Err(format!(
+            "realtime_speaker_tracking_unavailable: diarization profile '{}' is not initialized",
+            DEFAULT_DIARIZATION_PROFILE
+        ));
+    }
+    #[cfg(test)]
+    ensure_diarization_profile_ready_for_voiceprint(DEFAULT_DIARIZATION_PROFILE)?;
+
+    let prepared = prepare_voiceprint_identify_audio(pcm16le, sample_rate)?;
+    let Some(ready) = prepared.ready else {
+        return Ok(None);
+    };
+    let embedding = compute_speaker_embedding(DEFAULT_DIARIZATION_PROFILE, &ready.waveform)?;
+    Ok(Some(VoiceprintEmbeddingResult {
+        embedding,
+        audio_duration_ms: ready.audio_duration_ms,
+        speech_duration_ms: ready.speech_duration_ms,
+    }))
+}
+
+pub(crate) fn best_registered_voiceprint_match(
+    embedding: &[f32],
+) -> Option<VoiceprintMatchResult> {
+    best_registered_speaker_match(embedding).map(|(profile, confidence)| VoiceprintMatchResult {
+        profile_id: profile.id,
+        display_name: profile.display_name,
+        confidence,
+    })
+}
+
 fn best_registered_speaker_match(embedding: &[f32]) -> Option<(RegisteredSpeakerProfile, f32)> {
     load_registered_speaker_profiles()
         .into_iter()

@@ -477,7 +477,7 @@ async fn post_listener_start_response(req: Request<Incoming>) -> Response<BoxBod
             "mock_transcripts is required when source is mock",
         );
     }
-    let engine = create.engine.trim().to_ascii_lowercase();
+    let mut engine = create.engine.trim().to_ascii_lowercase();
     if engine != "lightweight_kws_listener" && engine != "backend_asr_phrase_match" {
         return error_response(
             StatusCode::BAD_REQUEST,
@@ -493,19 +493,13 @@ async fn post_listener_start_response(req: Request<Incoming>) -> Response<BoxBod
     if source == "mic" && engine == "lightweight_kws_listener" {
         let pack = voice_wake_kws_model_pack();
         if !pack.is_ready() {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                &format!(
-                    "voice_wake_kws_missing_assets: initialize {} under {}; missing {}",
-                    DEFAULT_WAKE_KWS_PROFILE,
-                    pack.root_dir.display(),
-                    pack.missing_files()
-                        .iter()
-                        .map(|path| path.display().to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
+            tracing::warn!(
+                profile = DEFAULT_WAKE_KWS_PROFILE,
+                install_dir = %pack.root_dir.display(),
+                missing_files = ?pack.missing_files(),
+                "voice wake KWS assets are missing, falling back to backend ASR phrase match"
             );
+            engine = "backend_asr_phrase_match".to_string();
         }
     }
     let store = match load_store() {
@@ -537,6 +531,12 @@ async fn post_listener_start_response(req: Request<Incoming>) -> Response<BoxBod
         ..create
     };
     runtime.cancel = Some(cancel.clone());
+    let fallback_status = (engine == "backend_asr_phrase_match"
+        && create
+            .engine
+            .trim()
+            .eq_ignore_ascii_case("lightweight_kws_listener"))
+    .then(|| "kws_missing_fallback_backend_asr_phrase_match".to_string());
     runtime.state = VoiceWakeListenerState {
         running: true,
         source,
@@ -552,7 +552,7 @@ async fn post_listener_start_response(req: Request<Incoming>) -> Response<BoxBod
         last_error_at_ms: None,
         last_speaker_profile_id: None,
         last_speaker_confidence: None,
-        last_speaker_status: None,
+        last_speaker_status: fallback_status,
         trigger_count: 0,
     };
     if request.source == "mic"

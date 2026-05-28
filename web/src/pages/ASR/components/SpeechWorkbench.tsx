@@ -13,6 +13,7 @@ import {
 } from "antd";
 import {
   AudioOutlined,
+  DownloadOutlined,
   InboxOutlined,
   LoadingOutlined,
   PlayCircleOutlined,
@@ -24,6 +25,7 @@ import type {
   AsrOfflineJob,
   AsrStatus,
   SpeechPipelinesStatus,
+  VoiceRealtimeTranscriptSegment,
 } from "../../../api/asr";
 import type { WorkState } from "../asrUtils";
 
@@ -40,6 +42,8 @@ interface SpeechWorkbenchProps {
   progress: number;
   selectedName: string;
   transcript: string;
+  realtimeSegments: VoiceRealtimeTranscriptSegment[];
+  partialRealtimeSegment: VoiceRealtimeTranscriptSegment | null;
   offlineJob: AsrOfflineJob | null;
   offlineArtifacts: Record<string, string>;
   speechStatus: SpeechPipelinesStatus | null;
@@ -69,6 +73,8 @@ export default function SpeechWorkbench({
   progress,
   selectedName,
   transcript,
+  realtimeSegments,
+  partialRealtimeSegment,
   offlineJob,
   offlineArtifacts,
   speechStatus,
@@ -86,6 +92,10 @@ export default function SpeechWorkbench({
   onStopService,
   onCancel,
 }: SpeechWorkbenchProps) {
+  const liveTimelineRows = partialRealtimeSegment
+    ? [...realtimeSegments, partialRealtimeSegment]
+    : realtimeSegments;
+
   return (
     <Card
       data-testid="asr-workbench-card"
@@ -364,6 +374,91 @@ export default function SpeechWorkbench({
           >
             {transcript || "Waiting for transcription text."}
           </Paragraph>
+          {liveTimelineRows.length > 0 ? (
+            <div style={{ marginBottom: 12 }}>
+              <Space style={{ marginBottom: 8 }}>
+                <Text strong>Live Timeline</Text>
+                <Tag>{new Set(liveTimelineRows.map((row) => row.speaker).filter(Boolean)).size || 1} speakers</Tag>
+                <Button
+                  size="small"
+                  icon={<DownloadOutlined />}
+                  onClick={() =>
+                    downloadTextArtifact(
+                      "live-realtime.srt",
+                      renderRealtimeSegmentsAsSrt(realtimeSegments),
+                    )
+                  }
+                  disabled={!realtimeSegments.length}
+                >
+                  SRT
+                </Button>
+                <Button
+                  size="small"
+                  icon={<DownloadOutlined />}
+                  onClick={() =>
+                    downloadTextArtifact(
+                      "live-realtime.txt",
+                      renderRealtimeSegmentsAsText(realtimeSegments),
+                    )
+                  }
+                  disabled={!realtimeSegments.length}
+                >
+                  TXT
+                </Button>
+                <Button
+                  size="small"
+                  icon={<DownloadOutlined />}
+                  onClick={() =>
+                    downloadTextArtifact(
+                      "live-realtime.timeline.json",
+                      JSON.stringify(realtimeSegments, null, 2),
+                    )
+                  }
+                  disabled={!realtimeSegments.length}
+                >
+                  JSON
+                </Button>
+              </Space>
+              <div
+                aria-label="Realtime speaker timeline"
+                style={{
+                  border: `1px solid ${token.colorBorderSecondary}`,
+                  borderRadius: 6,
+                  overflow: "hidden",
+                }}
+              >
+                {liveTimelineRows.map((segment) => (
+                  <div
+                    key={segment.id}
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "140px 120px minmax(0, 1fr)",
+                      gap: 12,
+                      padding: "8px 12px",
+                      borderBottom: `1px solid ${token.colorBorderSecondary}`,
+                      background: segment.final ? token.colorBgContainer : token.colorFillQuaternary,
+                      alignItems: "start",
+                    }}
+                  >
+                    <Text type="secondary">{formatRealtimeRange(segment)}</Text>
+                    <Space size={4} wrap>
+                      <Tag color={segment.speaker_profile_id ? "success" : "blue"}>
+                        {segment.speaker_display_name || segment.speaker || "Unknown"}
+                      </Tag>
+                      {segment.speaker_confidence !== undefined ? (
+                        <Text type="secondary">{Math.round(segment.speaker_confidence * 100)}%</Text>
+                      ) : segment.candidate_display_name ? (
+                        <Text type="secondary">
+                          {segment.candidate_display_name} {Math.round((segment.candidate_confidence || 0) * 100)}%
+                        </Text>
+                      ) : null}
+                    </Space>
+                    <Text style={{ whiteSpace: "pre-wrap" }}>{segment.text}</Text>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
           {Object.keys(offlineArtifacts).length > 0 ? (
             <Space wrap style={{ marginBottom: 12 }}>
               {Object.entries(offlineArtifacts).map(([format, content]) => (
@@ -405,4 +500,62 @@ export default function SpeechWorkbench({
       </Space>
     </Card>
   );
+}
+
+function downloadTextArtifact(fileName: string, content: string): void {
+  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function renderRealtimeSegmentsAsText(segments: VoiceRealtimeTranscriptSegment[]): string {
+  return segments
+    .map(
+      (segment) =>
+        `[${formatRealtimeRange(segment)}] ${segment.speaker_display_name || segment.speaker || "Unknown"}: ${segment.text}`,
+    )
+    .join("\n");
+}
+
+function renderRealtimeSegmentsAsSrt(segments: VoiceRealtimeTranscriptSegment[]): string {
+  return segments
+    .map((segment, index) =>
+      [
+        String(index + 1),
+        `${formatSrtTime(segment.start_ms || 0)} --> ${formatSrtTime(segment.end_ms || segment.start_ms || 0)}`,
+        `${segment.speaker_display_name || segment.speaker || "Unknown"}: ${segment.text}`,
+      ].join("\n"),
+    )
+    .join("\n\n");
+}
+
+function formatRealtimeRange(segment: VoiceRealtimeTranscriptSegment): string {
+  return `${formatClockTime(segment.start_ms)} - ${formatClockTime(segment.end_ms)}`;
+}
+
+function formatClockTime(value?: number): string {
+  const ms = Math.max(0, Math.floor(value || 0));
+  const minutes = Math.floor(ms / 60_000);
+  const seconds = Math.floor((ms % 60_000) / 1_000);
+  const millis = ms % 1_000;
+  return `${minutes.toString().padStart(2, "0")}:${seconds
+    .toString()
+    .padStart(2, "0")}.${millis.toString().padStart(3, "0")}`;
+}
+
+function formatSrtTime(value: number): string {
+  const ms = Math.max(0, Math.floor(value));
+  const hours = Math.floor(ms / 3_600_000);
+  const minutes = Math.floor((ms % 3_600_000) / 60_000);
+  const seconds = Math.floor((ms % 60_000) / 1_000);
+  const millis = ms % 1_000;
+  return `${hours.toString().padStart(2, "0")}:${minutes
+    .toString()
+    .padStart(2, "0")}:${seconds.toString().padStart(2, "0")},${millis
+    .toString()
+    .padStart(3, "0")}`;
 }

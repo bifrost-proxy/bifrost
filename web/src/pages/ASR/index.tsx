@@ -44,6 +44,7 @@ import {
   type AsrTaskFileRecord,
   type AsrTranscriptTimeline,
   type VoiceRealtimeEvent,
+  type VoiceRealtimeTranscriptSegment,
 } from "../../api/asr";
 import SpeechTab from "../Settings/tabs/SpeechTab";
 import {
@@ -55,6 +56,7 @@ import {
   MIC_METER_BARS,
   VOICE_REALTIME_CHUNK_MS,
   VOICE_REALTIME_SAMPLE_RATE,
+  voiceRealtimeSegmentFromEvent,
   type WorkState,
 } from "./asrUtils";
 import DirectoryTaskDetailPage from "./components/DirectoryTaskDetailPage";
@@ -110,6 +112,9 @@ export default function ASR() {
   const [progress, setProgress] = useState(0);
   const [selectedName, setSelectedName] = useState("");
   const [transcript, setTranscript] = useState("");
+  const [realtimeSegments, setRealtimeSegments] = useState<VoiceRealtimeTranscriptSegment[]>([]);
+  const [partialRealtimeSegment, setPartialRealtimeSegment] =
+    useState<VoiceRealtimeTranscriptSegment | null>(null);
   const [events, setEvents] = useState<string[]>([]);
   const [errorText, setErrorText] = useState("");
   const [speechStatus, setSpeechStatus] = useState<SpeechPipelinesStatus | null>(null);
@@ -358,6 +363,8 @@ export default function ASR() {
     committedTranscriptRef.current = "";
     partialTranscriptRef.current = "";
     setTranscript("");
+    setRealtimeSegments([]);
+    setPartialRealtimeSegment(null);
   }, []);
 
   useEffect(() => {
@@ -450,6 +457,9 @@ export default function ASR() {
           committedTranscriptRef.current = event.committed;
         }
         partialTranscriptRef.current = event.text || event.delta || "";
+        setPartialRealtimeSegment(
+          voiceRealtimeSegmentFromEvent(event, partialTranscriptRef.current, false),
+        );
         appendEvent(
           `partial[${event.window_index ?? 0}]: captured ${event.captured_at_ms ?? 0}ms`,
         );
@@ -466,6 +476,15 @@ export default function ASR() {
           );
         }
         partialTranscriptRef.current = "";
+        setPartialRealtimeSegment(null);
+        const segment = voiceRealtimeSegmentFromEvent(
+          event,
+          delta || event.raw_text || "",
+          true,
+        );
+        if (segment && segment.text.trim()) {
+          setRealtimeSegments((previous) => [...previous, segment]);
+        }
         appendEvent(
           `stable[${event.window_index ?? 0}]: emitted ${event.emitted_at_ms ?? 0}ms`,
         );
@@ -484,6 +503,15 @@ export default function ASR() {
           }
         }
         partialTranscriptRef.current = "";
+        setPartialRealtimeSegment(null);
+        const segment = voiceRealtimeSegmentFromEvent(
+          event,
+          event.delta || event.raw_text || "",
+          true,
+        );
+        if (segment && segment.text.trim()) {
+          setRealtimeSegments((previous) => [...previous, segment]);
+        }
         appendEvent(`final: emitted ${event.emitted_at_ms ?? 0}ms`);
         renderTranscript();
       } else if (event.type === "worker_idle_unloaded") {
@@ -491,6 +519,7 @@ export default function ASR() {
           committedTranscriptRef.current = event.committed;
         }
         partialTranscriptRef.current = "";
+        setPartialRealtimeSegment(null);
         appendEvent(event.message || "voice worker unloaded after idle timeout");
         renderTranscript();
       } else if (event.type === "error") {
@@ -1419,6 +1448,8 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
         progress={progress}
         selectedName={selectedName}
         transcript={transcript}
+        realtimeSegments={realtimeSegments}
+        partialRealtimeSegment={partialRealtimeSegment}
         offlineJob={offlineJob}
         offlineArtifacts={offlineArtifacts}
         speechStatus={speechStatus}

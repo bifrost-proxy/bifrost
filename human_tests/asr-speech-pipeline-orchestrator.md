@@ -367,6 +367,55 @@
 - 低于正式阈值但最接近已注册声纹的角色会写入 `candidate_profile_id/candidate_display_name/candidate_confidence`，页面可解释“为什么没有正式匹配”。
 - 未被正式识别为 `eden` 的角色仍保留本地角色名，不会因为低置信度候选误标成本人。
 
+### TC-ASPO-18：WebUI 实时麦克风展示多人 Timeline
+
+操作步骤：
+
+1. 使用临时数据目录启动真实 Bifrost 服务，端口使用 `19010` 或其他未占用端口：
+   ```bash
+   source ~/.zshrc && BIFROST_DATA_DIR=/Users/eden/work/github/bifrost-asr-pipeline-orchestrator/.bifrost-asr-manual-test SKIP_FRONTEND_BUILD=1 RUST_LOG=bifrost_admin::voice=info,bifrost_admin::asr_jobs=info,info cargo run --bin bifrost -- start -p 19010 --unsafe-ssl --skip-cert-check --no-system-proxy
+   ```
+2. 打开 WebUI：
+   ```text
+   http://127.0.0.1:19010/_bifrost/ai?aiSection=tools-asr
+   ```
+3. 在 Speech to Text 页面确认 Workbench Model 为 `Qwen3-ASR-0.6B`，点击 `Start Service`。
+4. 点击 `Start Mic`，让 2 到 4 个人轮流说话，每个人至少说 2 轮，每轮 2 秒以上。
+5. 观察 Transcript 下方的 `Live Timeline`，并点击 `SRT`、`TXT`、`JSON` 导出按钮。
+
+预期结果：
+
+- Transcript 仍显示连续完整文本。
+- `Live Timeline` 每条稳定 utterance 都展示 `mm:ss.mmm - mm:ss.mmm` 时间范围、说话人标签和该句文本。
+- 已注册声纹本人通过阈值时优先显示注册名；低于正式阈值时显示候选名和置信度，不误覆盖其他人。
+- 未注册的人按本次录音 session 内聚类为 `用户A/B/C/D`，不会出现 20 个用户这种爆炸。
+- 导出的 `live-realtime.srt`、`live-realtime.txt`、`live-realtime.timeline.json` 包含同一组稳定 utterance。
+- 如果多人重叠同时说话，实时 timeline 可以只保留单主说话人；最终高质量多人字幕仍由离线字幕 pipeline 产出。
+
+### TC-ASPO-19：WebUI Work Actions Start Listening 不因 KWS 资产缺失报 400
+
+操作步骤：
+
+1. 使用已有真实数据目录启动服务，确保 `/_bifrost/api/voice/wake/kws/status` 返回 `ready=false`：
+   ```bash
+   source ~/.zshrc && curl -sS http://127.0.0.1:19010/_bifrost/api/voice/wake/kws/status
+   ```
+2. 打开 WebUI：
+   ```text
+   http://127.0.0.1:19010/_bifrost/ai?aiSection=tools-asr
+   ```
+3. 在 `Voice Wake Actions` 中保存一个带声纹的 Wake phrase。
+4. 点击 `Start Listening`。
+5. 点击 `Stop Listening`。
+
+预期结果：
+
+- 点击 `Start Listening` 不返回 400，页面不会卡在 `Starting voice wake listener...`。
+- KWS 资产缺失时，listener 返回 `running=true` 且 `engine=backend_asr_phrase_match`。
+- listener 状态包含 `last_speaker_status=kws_missing_fallback_backend_asr_phrase_match`，用于解释当前不是 KWS 轻量路径。
+- 页面显示 `Backend Listening`，点击 `Stop Listening` 后回到 `Idle`。
+- KWS 资产初始化完成后，同一按钮仍优先使用 `lightweight_kws_listener`。
+
 ## 清理步骤
 
 - 静态验收用例不创建临时服务和临时数据目录。
@@ -391,3 +440,5 @@
 | 2026-05-28 | TC-ASPO-15 | 已在 `http://127.0.0.1:19010` 使用真实服务验证：API 只传 `name/audio_dir` 创建任务返回 `Qwen3-ASR-0.6B`、diarization enabled、voiceprint matching enabled；`cargo run --bin bifrost -- -p 19010 ai asr task create --json` 返回同样默认；Playwright 打开 WebUI 新建任务弹窗，确认 `Qwen3-ASR-0.6B` 可见且 4 个开关中包含 Speaker Diarization / Voiceprint Matching 默认打开 | 通过 |
 | 2026-05-28 | TC-ASPO-16 | 已用真实 `TX01_MIC012_20260520_102542_orig.wav` 先验证旧产物为 30 个 diarization segment 被拆成 20 个 speaker；修复后在隔离任务中重跑同一音频，任务完成且 `speaker_count=4`；随后将原 `demo` 任务的同一文件重跑，原 URL 对应文件从 `speaker_count=20` 更新为 `speaker_count=4`，timeline speakers 为 `用户A/B/C/D` | 通过 |
 | 2026-05-28 | TC-ASPO-17 | 已用真实 `TX01_MIC012_20260520_102542_orig.wav`、真实 sherpa diarization、真实 Qwen3-ASR-0.6B fork-per-chunk、真实已注册 `eden` 声纹重跑；修复后任务 `36c10c9a62654d23bd8414aaa765c05b` 完成，短碎片 `speaker_02/speaker_03` 被合并，`speaker_count=2`，主要角色 `speaker_00` 映射为 `eden` 且 `confidence=0.5412222`，另一个角色保留 `用户B` 并记录 eden candidate `0.49354425` | 通过 |
+| 2026-05-28 | TC-ASPO-18 | 已执行 `BIFROST_ASR_PIPELINE_E2E_ONLINE=0 BIFROST_ASR_PIPELINE_E2E_PORT=18998 bash e2e-tests/tests/test_asr_speech_pipeline_orchestrator_real_service.sh`，真实启动服务并通过 `/api/voice/listen-ws` WebSocket 发送 16k PCM，验证 stable realtime event 包含 `window_start_ms/window_end_ms/speaker/speaker_display_name/delta`；WebUI 多人现场体验仍需用户与多人录音环境继续复测 | 自动化链路通过，现场多人待复测 |
+| 2026-05-28 | TC-ASPO-19 | 已在 `http://127.0.0.1:19010` 重启真实服务；先用 curl 验证 `POST /_bifrost/api/voice/wake/listener/start` 返回 200、`running=true`、`engine=backend_asr_phrase_match`、`last_speaker_status=kws_missing_fallback_backend_asr_phrase_match`；再用浏览器真实点击 WebUI `Voice Wake Actions -> Start Listening`，页面显示 `Backend Listening`，点击 `Stop Listening` 后回到 `Idle` | 通过 |

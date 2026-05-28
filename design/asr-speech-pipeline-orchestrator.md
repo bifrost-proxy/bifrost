@@ -1105,3 +1105,40 @@ human_tests：
 - `ResourceLeaseManager` 让 realtime voice、offline job 和 scheduled Directory Task 共用资源优先级，scheduled task 在 realtime active 时让出。
 - 托管 Qwen3-ASR runtime 按 `host/home/model/port` 共享，不再按 `owner_module` 隔离；`speech_workbench` 手动启动的 0.6B 服务必须能被 Workflows / wake listener 复用，跨 owner 停止同一模型服务时也必须清理持久化 state，避免 stale owner 阻塞 recorder。
 - 新增真实服务回归脚本 `e2e-tests/tests/test_asr_speech_pipeline_orchestrator_real_service.sh`，启动当前 Bifrost 服务并验证 speech API、旧 WS 下线、wake lightweight；在 Apple Silicon 且设置 `BIFROST_ASR_PIPELINE_E2E_ONLINE=1` 时继续验证真实语音、offline-jobs、CLI subtitle、Directory Task artifacts 和 Daily Agent 后处理入口。CI/非在线 ASR 环境不使用 mock ASR，只跳过需要本地 Qwen3-ASR 资产的产物链路。
+
+## 实时麦克风多说话人 Timeline
+
+WebUI Speech Workbench 的 `Start Mic` 链路继续走 `/api/voice/listen-ws`，但不能只展示一段纯文本。stateful Qwen3-ASR 每次提交 utterance 时，后端同时输出时间窗和说话人字段：
+
+```json
+{
+  "type": "asr_stable_delta",
+  "window_start_ms": 1200,
+  "window_end_ms": 5860,
+  "utterance_index": 7,
+  "speaker": "speaker_00",
+  "speaker_display_name": "eden",
+  "speaker_profile_id": "spk_x",
+  "speaker_confidence": 0.61,
+  "candidate_display_name": "eden",
+  "candidate_confidence": 0.61,
+  "delta": "你好，我想咨询一下订单。"
+}
+```
+
+实现策略：
+
+- `VoiceTranscriptState` 记录 utterance 的真实起始时间，按 speech chunk 的开始时间而不是结束时间计。
+- `VoiceRealtimeAudioBuffer` 保存最近 120 秒 PCM16 时间窗，只在 fresh frame 进入 stateful worker 后写入，避免 worker 启动期间的陈旧浏览器缓冲污染说话人识别。
+- `RealtimeVoiceSpeakerTracker` 在 stable/final utterance 边界截取对应 PCM，复用 speaker embedding 能力。
+- 已注册声纹优先：正式阈值通过时直接显示真人名；只有一个注册声纹时，允许短实时 utterance 使用较低 self-priority 阈值，但仍保留置信度。
+- 未匹配声纹时，在本次 WebSocket session 内做 embedding 聚类，默认最多 4 个本地角色 `用户A/B/C/D`，避免实时链路也出现 20 个用户的爆炸。
+- 重叠说话 V1 不做 source separation；事件保持单主说话人，离线 pipeline 仍是最终 who-said-what 的高质量产物链路。
+- Work Actions 的 `Start Listening` 默认优先 `lightweight_kws_listener`；如果本地 KWS 资产未初始化，不再返回 400，而是启动 `backend_asr_phrase_match` fallback，并在 listener status 写入 `kws_missing_fallback_backend_asr_phrase_match` 解释当前资源路径。
+
+WebUI 行为：
+
+- Transcript 区域保留完整文本，同时新增 Live Timeline 列表。
+- 每行展示时间范围、speaker tag、置信度或候选声纹、文本内容。
+- 已稳定的实时 timeline 可直接导出 `live-realtime.srt`、`live-realtime.txt`、`live-realtime.timeline.json`。
+- 实时 timeline 是低延迟产品体验；如果需要更准确的多人重叠语音、speaker 重排和字幕产物，应在录制后交给 offline subtitle pipeline 复跑。

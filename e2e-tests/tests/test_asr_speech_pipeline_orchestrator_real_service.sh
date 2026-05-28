@@ -66,7 +66,10 @@ with wave.open(path, "wb") as wav:
 PY
 fi
 
-BIFROST_DATA_DIR="$DATA_DIR" "$BIN" start \
+BIFROST_DATA_DIR="$DATA_DIR" \
+BIFROST_VOICE_ENABLE_FAKE_STATEFUL=1 \
+BIFROST_ASR_VOICEPRINT_TEST_EMBEDDING=1 \
+"$BIN" start \
   -p "$PORT" \
   --unsafe-ssl \
   --skip-cert-check \
@@ -156,6 +159,101 @@ assert data["action_result"]["dry_run"] is True, data
 assert data["action_result"]["executed"] is False, data
 PY
 curl -fsS -X POST "http://127.0.0.1:$PORT/_bifrost/api/voice/wake/listener/stop" >/dev/null
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  echo "[asr-speech-pipeline-real] mic listener falls back when KWS assets are missing"
+  curl -fsS -X POST "http://127.0.0.1:$PORT/_bifrost/api/voice/wake/listener/start" \
+    -H 'Content-Type: application/json' \
+    --data '{}' >"$TEST_ROOT/wake-mic-start.json"
+  python3 - "$TEST_ROOT/wake-mic-start.json" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+listener = data["listener"]
+assert listener["running"] is True, data
+assert listener["engine"] in ("lightweight_kws_listener", "backend_asr_phrase_match"), data
+if listener["engine"] == "backend_asr_phrase_match":
+    assert listener["last_speaker_status"] == "kws_missing_fallback_backend_asr_phrase_match", data
+PY
+  curl -fsS -X POST "http://127.0.0.1:$PORT/_bifrost/api/voice/wake/listener/stop" >/dev/null
+fi
+
+echo "[asr-speech-pipeline-real] realtime voice websocket emits speaker timeline fields"
+node - "$PORT" "$TEST_ROOT/realtime-voice-events.json" <<'NODE'
+const fs = require("fs");
+const port = Number(process.argv[2]);
+const out = process.argv[3];
+const url =
+  `ws://127.0.0.1:${port}/_bifrost/api/voice/listen-ws?source=web_mic` +
+  `&fake_stateful_worker=1&fake_stateful_text=hello%20from%20speaker` +
+  `&silence_commit_ms=50&worker_idle_unload_ms=5000`;
+const events = [];
+
+function pcmChunk(ms, amplitude, frequency = 440) {
+  const sampleRate = 16000;
+  const frames = Math.floor((sampleRate * ms) / 1000);
+  const buffer = Buffer.alloc(frames * 2);
+  for (let index = 0; index < frames; index += 1) {
+    const sample =
+      amplitude === 0
+        ? 0
+        : Math.round(amplitude * Math.sin((2 * Math.PI * frequency * index) / sampleRate));
+    buffer.writeInt16LE(sample, index * 2);
+  }
+  return buffer;
+}
+
+const ws = new WebSocket(url);
+const timeout = setTimeout(() => {
+  fs.writeFileSync(out, JSON.stringify(events, null, 2));
+  console.error("timed out waiting for realtime stable event");
+  process.exit(1);
+}, 12000);
+
+ws.onmessage = (message) => {
+  const event = JSON.parse(String(message.data));
+  events.push(event);
+  if (event.type === "asr_stable_delta" && event.speaker && event.window_start_ms !== undefined) {
+    clearTimeout(timeout);
+    fs.writeFileSync(out, JSON.stringify(events, null, 2));
+    ws.close();
+  }
+};
+
+ws.onerror = (error) => {
+  clearTimeout(timeout);
+  console.error(error);
+  process.exit(1);
+};
+
+ws.onopen = async () => {
+  ws.send(JSON.stringify({
+    type: "start",
+    source: "web_mic",
+    sample_rate: 16000,
+    channels: 1,
+    format: "pcm_s16le",
+  }));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  for (let index = 0; index < 8; index += 1) {
+    ws.send(pcmChunk(200, 9000, 440 + index * 5));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  for (let index = 0; index < 3; index += 1) {
+    ws.send(pcmChunk(120, 0));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+};
+NODE
+python3 - "$TEST_ROOT/realtime-voice-events.json" <<'PY'
+import json, sys
+events = json.load(open(sys.argv[1]))
+stable = [event for event in events if event.get("type") == "asr_stable_delta"]
+assert stable, events
+event = stable[-1]
+assert event["speaker"] == "speaker_00", event
+assert event["speaker_display_name"] == "用户A", event
+assert event["window_end_ms"] > event["window_start_ms"], event
+assert event["delta"].strip(), event
+PY
 
 ONLINE_ASR="${BIFROST_ASR_PIPELINE_E2E_ONLINE:-}"
 if [[ -z "$ONLINE_ASR" ]]; then

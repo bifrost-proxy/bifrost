@@ -729,11 +729,34 @@ export interface VoiceRealtimeEvent {
   window_start_ms?: number;
   window_end_ms?: number;
   window_index?: number;
+  utterance_index?: number;
+  speaker?: string;
+  speaker_display_name?: string;
+  speaker_profile_id?: string;
+  speaker_confidence?: number;
+  candidate_profile_id?: string;
+  candidate_display_name?: string;
+  candidate_confidence?: number;
   captured_at_ms?: number;
   emitted_at_ms?: number;
   inference_ms?: number;
   message?: string;
   detail?: string;
+}
+
+export interface VoiceRealtimeTranscriptSegment {
+  id: string;
+  start_ms?: number;
+  end_ms?: number;
+  speaker?: string;
+  speaker_display_name?: string;
+  speaker_profile_id?: string;
+  speaker_confidence?: number;
+  candidate_profile_id?: string;
+  candidate_display_name?: string;
+  candidate_confidence?: number;
+  text: string;
+  final?: boolean;
 }
 
 const ASR_LEGACY_PARAMS_STORAGE_KEYS = [
