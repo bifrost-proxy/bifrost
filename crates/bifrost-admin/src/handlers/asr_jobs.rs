@@ -49,12 +49,12 @@ use crate::handlers::{
     BoxBody,
 };
 use bifrost_asr::offline::{write_offline_subtitle_artifacts, OfflineSubtitleArtifactRequest};
-use bifrost_asr::planner::{
-    interval_overlap_ms, plan_asr_units, speakers_from_diarization_segments, AsrAudioUnit,
-    AsrUnitPlannerConfig, DiarizationSegment,
-};
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-use bifrost_asr::planner::{seconds_to_ms, speaker_display_name};
+use bifrost_asr::planner::seconds_to_ms;
+use bifrost_asr::planner::{
+    interval_overlap_ms, plan_asr_units, speaker_display_name, speakers_from_diarization_segments,
+    AsrAudioUnit, AsrUnitPlannerConfig, DiarizationSegment,
+};
 use bifrost_asr::profiles::{
     default_diarization_profile, AsrDiarizationConfig, DEFAULT_DIARIZATION_PROFILE,
 };
