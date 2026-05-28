@@ -1047,7 +1047,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
             "Remote group rule sync refreshes Badge cache when an enabled local rule changes",
             "group_rules",
             || async move {
-                let Some((sync_base_url, sync_token)) = sync_fixture() else {
+                let Some((sync_base_url, _sync_token)) = sync_fixture() else {
                     return Err(
                         "SKIPPED: BIFROST_E2E_SYNC_BASE_URL/TOKEN not configured".to_string(),
                     );
@@ -1057,9 +1057,16 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     ProxyInstance::start_with_admin_sync(port, vec![], false, true)
                         .await
                         .map_err(|e| format!("Failed to start proxy: {}", e))?;
-                save_test_sync_token(&admin_state).await?;
 
                 let client = build_client()?;
+                let sync_token = register_remote_user(
+                    &client,
+                    &sync_base_url,
+                    &format!("badge_sync_cache_user_{port}"),
+                )
+                .await?;
+                save_sync_session(&admin_state, &sync_base_url, &sync_token).await?;
+
                 let group_name = format!("badge-sync-cache-group-{port}");
                 let group_id =
                     create_remote_group(&client, &sync_base_url, &sync_token, &group_name).await?;
@@ -1906,6 +1913,41 @@ fn sync_fixture() -> Option<(String, String)> {
     }
 }
 
+async fn register_remote_user(
+    client: &reqwest::Client,
+    base_url: &str,
+    user_id: &str,
+) -> Result<String, String> {
+    let resp = client
+        .post(format!("{base_url}/v4/sso/register"))
+        .json(&serde_json::json!({
+            "user_id": user_id,
+            "password": "badge-sync-cache-e2e",
+            "nickname": "Badge Sync Cache E2E",
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("Register remote user failed: {e}"))?;
+    let status = resp.status();
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read register remote user response: {e}"))?;
+    if status.as_u16() != 200 {
+        return Err(format!(
+            "Register remote user failed: status={} body={body}",
+            status.as_u16()
+        ));
+    }
+    let json: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| format!("Failed to parse register remote user response: {e}: {body}"))?;
+    json.get("data")
+        .and_then(|v| v.get("token"))
+        .and_then(|v| v.as_str())
+        .map(|v| v.to_string())
+        .ok_or_else(|| format!("Register remote user response missing token: {json}"))
+}
+
 async fn create_remote_group(
     client: &reqwest::Client,
     base_url: &str,
@@ -2033,6 +2075,22 @@ async fn sync_group_rules_until_rule_content(
         "Timed out waiting for synced group rule {rule_name}; last_list={last_list}; last_summary={last_summary}; last_badge={}",
         admin_state.badge_rules_json()
     ))
+}
+
+async fn save_sync_session(
+    admin_state: &Arc<bifrost_admin::AdminState>,
+    sync_base_url: &str,
+    sync_token: &str,
+) -> Result<(), String> {
+    let sync_manager = admin_state
+        .sync_manager
+        .as_ref()
+        .ok_or("Expected sync manager for group rule runtime test")?;
+    sync_manager
+        .save_login_session(sync_token.to_string(), sync_base_url.to_string())
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("Failed to save test sync session: {e}"))
 }
 
 async fn save_test_sync_token(admin_state: &Arc<bifrost_admin::AdminState>) -> Result<(), String> {
