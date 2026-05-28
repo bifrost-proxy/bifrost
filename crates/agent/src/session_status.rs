@@ -369,6 +369,7 @@ pub fn format_active_turn_status_text_with_context(
         }
         text
     };
+    let context_management_text = format_context_management_status(status.message_count);
 
     format!(
         "会话状态:\n\
@@ -382,7 +383,8 @@ pub fn format_active_turn_status_text_with_context(
          - Loop: 第 {} 次 / 最多 {} 次（已完成 {} 次）\n\
          - 实时 token: 累计 {}，最近响应 {}\n\
          - Context 用量: {}\n\
-         - 压缩次数: {}\n\
+         - 显式压缩次数: {}\n\
+         - 上下文管理: {}\n\
          - 消息数: {}\n\
          {}\n\
          - 历史版本: {}\n\
@@ -401,11 +403,18 @@ pub fn format_active_turn_status_text_with_context(
         last_token_text,
         context_text,
         status.compaction_count,
+        context_management_text,
         status.message_count,
         guide_text,
         status.history_version,
         status.mcp_tool_count,
         status.local_tool_count
+    )
+}
+
+pub fn format_context_management_status(message_count: usize) -> String {
+    format!(
+        "按 token/context budget 与 compaction 管理（常规请求使用完整 history：{message_count} 条；仅 context-window overflow fallback 会改写 history）"
     )
 }
 
@@ -520,7 +529,9 @@ mod tests {
         assert!(text.contains("已完成 2 次"));
         assert!(text.contains("实时 token: 累计 51，最近响应 17"));
         assert!(text.contains("Context 用量: ~4K / 250K (1.6%)"));
-        assert!(text.contains("压缩次数: 1"));
+        assert!(text.contains("显式压缩次数: 1"));
+        assert!(text.contains("上下文管理: 按 token/context budget 与 compaction 管理"));
+        assert!(text.contains("常规请求使用完整 history：9 条"));
         assert!(text.contains("引导消息: 2 条尚未进入 loop"));
         assert!(text.contains("1. 第一条引导"));
         assert!(text.contains("2. 第二条引导"));

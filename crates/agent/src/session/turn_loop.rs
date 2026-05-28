@@ -18,7 +18,6 @@ pub(super) fn display_iteration(iteration: usize) -> u32 {
 // ---------------------------------------------------------------------------
 
 pub(super) const STOPPED_RESPONSE: &str = "已收到 /stop，正在执行的 Agent loop 已停止。";
-const STOPPED_ERROR: &str = "__bifrost_agent_stopped_by_user__";
 
 fn stop_requested(session: &AgentSession) -> bool {
     session
@@ -79,7 +78,7 @@ fn drain_guide_messages(session: &AgentSession) -> Vec<String> {
     session
         .guide_channel
         .as_ref()
-        .map(|ch| ch.lock().unwrap().drain(..).collect::<Vec<_>>())
+        .map(|ch| ch.drain())
         .unwrap_or_default()
 }
 
@@ -785,25 +784,11 @@ pub async fn run_turn_with_mcp_multimodal(
     let slash_dispatch = slash_commands::dispatch(&session.slash_router, trimmed);
     match &slash_dispatch {
         Dispatch::Unknown(command) => {
-            // /q and /rq are IM-gateway queue commands, only valid when a session
-            // is already busy. If the session is free, give a helpful explanation.
-            let response = if command == "/q" || command.starts_with("/rq") {
-                format!(
-                    "{command} 是排队命令，仅在 Agent 正在处理任务时有效。\n\
-                     当 Agent 空闲时，直接发送消息即可开始对话。"
-                )
-            } else {
-                format!("未知命令: {command}")
-            };
-            return Ok(TurnResult {
-                response,
-                tool_calls_log: Vec::new(),
-                work_dir_switched: None,
-                title_updated: None,
-                plan_steps: None,
-                goal_needs_continuation: false,
-                goal_objective: None,
-            });
+            debug!(
+                session_key = %session.session_key,
+                command = %command,
+                "unknown slash input falls back to normal chat message"
+            );
         }
         Dispatch::RunSkill { record, invocation } => {
             let report = bifrost_skills::SkillExecutor::default()
@@ -826,7 +811,8 @@ pub async fn run_turn_with_mcp_multimodal(
         Dispatch::Builtin { .. } | Dispatch::NotACommand => {}
     }
 
-    if matches!(slash_dispatch, Dispatch::NotACommand) && !trimmed.is_empty() {
+    if matches!(slash_dispatch, Dispatch::NotACommand | Dispatch::Unknown(_)) && !trimmed.is_empty()
+    {
         clear_completed_plan_for_new_turn(session, &mut recorder);
     }
 
@@ -932,80 +918,7 @@ pub async fn run_turn_with_mcp_multimodal(
             ..
         }
     ) {
-        if let Some(ref mut rec) = recorder {
-            if let Err(e) = rec.record_user_message(&session.session_key, trimmed) {
-                warn!(error = %e, "failed to record user message");
-            }
-        }
-        if session.history.is_empty() {
-            return Ok(TurnResult {
-                response: "历史消息太少，无需压缩。".to_string(),
-                tool_calls_log: Vec::new(),
-                work_dir_switched: None,
-                title_updated: None,
-                plan_steps: None,
-                goal_needs_continuation: false,
-                goal_objective: None,
-            });
-        }
-        let base_instructions = prompt::resolve_base_instructions_text(config, None);
-        match compact::compact_session_with_hooks(
-            client,
-            config,
-            session,
-            compact::CompactionTrigger::Manual,
-            compact::CompactionReason::UserRequested,
-            compact::CompactionPhase::StandaloneTurn,
-            Some(&base_instructions),
-            compact::InitialContextInjection::DoNotInject,
-            vec![],
-            &crate::turn_runtime::CancellationToken::default_grace(),
-        )
-        .await
-        {
-            Ok(result) if result.performed => {
-                record_compaction_event(
-                    &mut recorder,
-                    session,
-                    &result,
-                    "manual",
-                    "user_requested",
-                    "standalone_turn",
-                    false,
-                );
-                return Ok(TurnResult {
-                    response: format!(
-                        "记忆压缩完成。\n- 压缩前 token: ~{}\n- 压缩后 token: ~{}\n- 节省: ~{}\n- 移除消息: {}\n- 累计压缩次数: {}\n- 耗时: {}ms",
-                        result.pre_tokens, result.post_tokens, result.tokens_saved,
-                        result.messages_removed, session.compaction_count,
-                        result.duration_ms.unwrap_or(0)
-                    ),
-                    tool_calls_log: Vec::new(),
-                    work_dir_switched: None,
-                    title_updated: None,
-                    plan_steps: None,
-                    goal_needs_continuation: false,
-                    goal_objective: None,
-                });
-            }
-            Ok(result) => {
-                return Ok(TurnResult {
-                    response: format!(
-                        "压缩已跳过: {}",
-                        result.reason.unwrap_or_else(|| "unknown".to_string())
-                    ),
-                    tool_calls_log: Vec::new(),
-                    work_dir_switched: None,
-                    title_updated: None,
-                    plan_steps: None,
-                    goal_needs_continuation: false,
-                    goal_objective: None,
-                });
-            }
-            Err(e) => {
-                return Err(format!("压缩失败: {e}"));
-            }
-        }
+        return super::run_manual_compaction_command(client, config, session, recorder).await;
     }
 
     // /remember <text> — explicit long-term memory write.
@@ -1165,6 +1078,8 @@ pub async fn run_turn_with_mcp_multimodal(
         let context_window_text = context_window
             .map(|window| crate::session_status::format_status_metric_count(window.into()))
             .unwrap_or_else(|| "N/A".to_string());
+        let context_management_text =
+            crate::session_status::format_context_management_status(session.history.len());
         let work_dir_text = session.work_dir.as_deref().unwrap_or("N/A");
         let agent_type = session.agent_type.as_deref().unwrap_or("Bifrost Agent");
         let runner_type = session.runner_type.as_deref().unwrap_or("bifrost_agent");
@@ -1175,7 +1090,7 @@ pub async fn run_turn_with_mcp_multimodal(
         );
         return Ok(TurnResult {
             response: format!(
-                "会话状态:\n- 工作路径: {}\n- Agent 类型: {}\n- Runner 类型: {}\n- Runner ID: {}\n- 外部会话: {}\n- 历史对话轮次: {}\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- Context 用量: ~{} / {} ({})\n- 压缩次数: {}\n- 历史版本: {}\n- MCP 工具数: {}",
+                "会话状态:\n- 工作路径: {}\n- Agent 类型: {}\n- Runner 类型: {}\n- Runner ID: {}\n- 外部会话: {}\n- 历史对话轮次: {}\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- Context 用量: ~{} / {} ({})\n- 显式压缩次数: {}\n- 上下文管理: {}\n- 历史版本: {}\n- MCP 工具数: {}",
                 work_dir_text,
                 agent_type,
                 runner_type,
@@ -1189,6 +1104,7 @@ pub async fn run_turn_with_mcp_multimodal(
                 context_window_text,
                 context_usage,
                 session.compaction_count,
+                context_management_text,
                 session.history_version,
                 mcp_tool_count
             ),
@@ -1569,12 +1485,10 @@ pub async fn run_turn_with_mcp_multimodal(
             }
         }
 
-        // Build messages with history limit enforcement
-        let messages = session.build_messages(
-            &prompt_prefix,
-            memory_message.as_ref(),
-            config.get_max_history_messages(),
-        );
+        // Build messages from full sanitized history. Compaction is the normal
+        // history-rewrite path; provider overflow is surfaced without silently
+        // trimming live history.
+        let messages = session.build_messages(&prompt_prefix, memory_message.as_ref());
         let model_request_progress = ActiveTurnProgress {
             state: "model_request",
             current_loop_iteration: u32::try_from(iteration + 1).unwrap_or(u32::MAX),
@@ -1677,18 +1591,18 @@ pub async fn run_turn_with_mcp_multimodal(
                             false
                         }
                         Err(compact_err) => {
-                            warn!(error = %compact_err, "emergency compact failed, falling back to trim");
+                            warn!(error = %compact_err, "emergency compact failed");
                             false
                         }
                     };
 
-                    // Step 2: If compact worked, retry once
+                    // Step 2: If compact worked, retry once. If the provider
+                    // still reports context overflow, do not silently delete
+                    // live history; mirror Codex by marking the context full
+                    // and surfacing the overflow.
                     if compacted {
-                        let retry_messages = session.build_messages(
-                            &prompt_prefix,
-                            memory_message.as_ref(),
-                            config.get_max_history_messages(),
-                        );
+                        let retry_messages =
+                            session.build_messages(&prompt_prefix, memory_message.as_ref());
                         match chat_completion_or_stop(
                             client,
                             config,
@@ -1711,38 +1625,18 @@ pub async fn run_turn_with_mcp_multimodal(
                                 ));
                             }
                             Err(e2) if is_context_window_error(&e2) => {
-                                // Compact wasn't enough, fall through to trim loop
-                                warn!("still over context limit after compact, starting trim loop");
-                                match trim_loop_retry(
-                                    client,
-                                    config,
+                                warn!(
+                                    error = %e2,
+                                    "still over context limit after compact; preserving live history"
+                                );
+                                mark_context_window_full(session, config, model_request_progress);
+                                crate::tools::goal::goal_runtime_apply(
                                     session,
-                                    &prompt_prefix,
-                                    memory_message.as_ref(),
-                                    &tool_defs,
-                                    model_request_progress,
-                                )
-                                .await
-                                {
-                                    Ok(r) => r,
-                                    Err(e3) if e3 == STOPPED_ERROR => {
-                                        return Ok(stopped_turn_result(
-                                            session,
-                                            &mut recorder,
-                                            tool_calls_log,
-                                        ));
-                                    }
-                                    Err(e3) => {
-                                        crate::tools::goal::goal_runtime_apply(
-                                            session,
-                                            crate::tools::goal::GoalRuntimeEvent::TaskAborted {
-                                                reason:
-                                                    crate::tools::goal::GoalAbortReason::Interrupted,
-                                            },
-                                        );
-                                        return Err(e3);
-                                    }
-                                }
+                                    crate::tools::goal::GoalRuntimeEvent::TaskAborted {
+                                        reason: crate::tools::goal::GoalAbortReason::Interrupted,
+                                    },
+                                );
+                                return Err(e2);
                             }
                             Err(e2) => {
                                 crate::tools::goal::goal_runtime_apply(
@@ -1755,36 +1649,18 @@ pub async fn run_turn_with_mcp_multimodal(
                             }
                         }
                     } else {
-                        // Compact didn't run or failed, go straight to trim loop
-                        match trim_loop_retry(
-                            client,
-                            config,
+                        warn!(
+                            error = %e,
+                            "context overflow could not be compacted; preserving live history"
+                        );
+                        mark_context_window_full(session, config, model_request_progress);
+                        crate::tools::goal::goal_runtime_apply(
                             session,
-                            &prompt_prefix,
-                            memory_message.as_ref(),
-                            &tool_defs,
-                            model_request_progress,
-                        )
-                        .await
-                        {
-                            Ok(r) => r,
-                            Err(e3) if e3 == STOPPED_ERROR => {
-                                return Ok(stopped_turn_result(
-                                    session,
-                                    &mut recorder,
-                                    tool_calls_log,
-                                ));
-                            }
-                            Err(e3) => {
-                                crate::tools::goal::goal_runtime_apply(
-                                    session,
-                                    crate::tools::goal::GoalRuntimeEvent::TaskAborted {
-                                        reason: crate::tools::goal::GoalAbortReason::Interrupted,
-                                    },
-                                );
-                                return Err(e3);
-                            }
-                        }
+                            crate::tools::goal::GoalRuntimeEvent::TaskAborted {
+                                reason: crate::tools::goal::GoalAbortReason::Interrupted,
+                            },
+                        );
+                        return Err(e);
                     }
                 } else if is_retryable_error(&e) {
                     // Transient error — exponential backoff retry (up to 5 attempts)
@@ -1818,11 +1694,8 @@ pub async fn run_turn_with_mcp_multimodal(
                         } else {
                             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                         }
-                        let retry_messages = session.build_messages(
-                            &prompt_prefix,
-                            memory_message.as_ref(),
-                            config.get_max_history_messages(),
-                        );
+                        let retry_messages =
+                            session.build_messages(&prompt_prefix, memory_message.as_ref());
                         match chat_completion_or_stop(
                             client,
                             config,
@@ -1962,7 +1835,7 @@ pub async fn run_turn_with_mcp_multimodal(
         // total_tokens while the active context snapshot uses input tokens.
         if let Some(ref usage) = response.usage {
             session.track_token_usage(usage.context_tokens(), usage.total_tokens);
-            // Update AutoCompactWindow prefill baseline from server-observed input tokens.
+            // Keep server-observed prefill baseline for status/debug telemetry.
             session
                 .auto_compact_window
                 .ensure_server_observed_prefill_from_usage(usage.prompt_tokens);
@@ -2066,7 +1939,7 @@ pub async fn run_turn_with_mcp_multimodal(
                     },
                     &turn_context.cancellation_token,
                 )
-                .await;
+                .await?;
                 continue;
             }
 
@@ -2125,7 +1998,7 @@ pub async fn run_turn_with_mcp_multimodal(
                     },
                     &turn_context.cancellation_token,
                 )
-                .await;
+                .await?;
                 continue;
             }
 
@@ -2254,8 +2127,13 @@ pub async fn run_turn_with_mcp_multimodal(
         if !process_content.trim().is_empty() {
             if let Some(sender) = &session.progress_sender {
                 let _ = sender.send(AgentTurnProgressEvent::AssistantDelta {
-                    content: process_content,
+                    content: process_content.clone(),
                 });
+            }
+            if let Some(ref mut rec) = recorder {
+                if let Err(e) = rec.record_assistant_delta(&session.session_key, &process_content) {
+                    warn!(error = %e, "failed to record assistant delta");
+                }
             }
         }
         refresh_active_turn_status(
@@ -2625,7 +2503,7 @@ pub async fn run_turn_with_mcp_multimodal(
             },
             &turn_context.cancellation_token,
         )
-        .await;
+        .await?;
     }
 
     error!(
@@ -2908,9 +2786,9 @@ pub(super) async fn compact_mid_turn_if_needed(
     memory_message: Option<&ChatMessage>,
     progress: ActiveTurnProgress,
     cancellation_token: &crate::turn_runtime::CancellationToken,
-) {
+) -> Result<(), String> {
     if !compact::should_compact(session, config) {
-        return;
+        return Ok(());
     }
 
     info!(
@@ -2956,8 +2834,16 @@ pub(super) async fn compact_mid_turn_if_needed(
         Ok(_) => {}
         Err(e) => {
             warn!(error = %e, "mid-turn compaction failed");
+            crate::tools::goal::goal_runtime_apply(
+                session,
+                crate::tools::goal::GoalRuntimeEvent::TaskAborted {
+                    reason: crate::tools::goal::GoalAbortReason::Interrupted,
+                },
+            );
+            return Err(e);
         }
     }
+    Ok(())
 }
 
 async fn compact_pre_sampling_if_needed(
@@ -3079,97 +2965,13 @@ pub(super) fn is_retryable_error(error: &str) -> bool {
         || lower.contains("http request failed")
 }
 
-/// Trim loop for context window overflow: repeatedly trim oldest messages
-/// and retry until the request succeeds or history is exhausted.
-/// This matches Codex's approach of aggressive degradation to keep the session alive.
-async fn trim_loop_retry(
-    client: &crate::client::AgentClient,
-    config: &crate::config::AgentConfig,
+fn mark_context_window_full(
     session: &mut AgentSession,
-    prompt_prefix: &[ChatMessage],
-    memory_message: Option<&ChatMessage>,
-    tool_defs: &[crate::types::ToolDefinition],
+    config: &AgentConfig,
     progress: ActiveTurnProgress,
-) -> Result<crate::types::ModelResponse, String> {
-    const MAX_TRIM_ITERATIONS: usize = 10;
-    const TRIM_BATCH_SIZE: usize = 4;
-
-    for i in 0..MAX_TRIM_ITERATIONS {
-        // Trim a batch of oldest messages
-        let trimmed = trim_oldest_messages_count(session, TRIM_BATCH_SIZE);
-        if trimmed == 0 {
-            return Err("context window exceeded and history exhausted".to_string());
-        }
-        refresh_active_turn_status(session, config, progress);
-
-        warn!(
-            iteration = i + 1,
-            trimmed_count = trimmed,
-            history_len = session.history.len(),
-            "trimmed oldest messages, retrying"
-        );
-
-        let retry_messages = session.build_messages(
-            prompt_prefix,
-            memory_message,
-            config.get_max_history_messages(),
-        );
-        match chat_completion_or_stop(client, config, session, &retry_messages, tool_defs).await {
-            Ok(Some(r)) => {
-                info!(
-                    iterations = i + 1,
-                    total_trimmed = (i + 1) * TRIM_BATCH_SIZE,
-                    "trim loop succeeded"
-                );
-                return Ok(r);
-            }
-            Ok(None) => return Err(STOPPED_ERROR.to_string()),
-            Err(e) if is_context_window_error(&e) => {
-                // Still over limit, continue trimming
-                continue;
-            }
-            Err(e) => {
-                // Different error, give up
-                return Err(e);
-            }
-        }
+) {
+    if let Some(context_window) = config_context_window_tokens(config) {
+        session.restore_token_snapshot(Some(u64::from(context_window)));
     }
-
-    Err("context window exceeded after maximum trim iterations".to_string())
-}
-
-/// Trim oldest messages and return the count actually removed.
-pub(super) fn trim_oldest_messages_count(session: &mut AgentSession, count: usize) -> usize {
-    if session.history.is_empty() {
-        return 0;
-    }
-    let mut removed = 0;
-    let mut idx = 0;
-    while idx < session.history.len() && removed < count {
-        if session.compaction_count > 0 && compact::is_summary_message(&session.history[idx]) {
-            idx += 1;
-            continue;
-        }
-
-        session.history.remove(idx);
-        removed += 1;
-    }
-
-    if removed > 0 {
-        let (sanitized, report) = history::sanitize_chat_history(&session.history);
-        if report.dropped_anything() {
-            warn!(
-                dropped_orphan_tool_messages = report.dropped_orphan_tool_messages,
-                dropped_incomplete_tool_call_messages =
-                    report.dropped_incomplete_tool_call_messages,
-                "trim removed tool-call context; sanitized malformed history suffix"
-            );
-            session.history = sanitized;
-        }
-        session.history_version = session.history_version.saturating_add(1);
-        session.invalidate_token_snapshot();
-        removed
-    } else {
-        0
-    }
+    refresh_active_turn_status(session, config, progress);
 }

@@ -319,8 +319,10 @@ pub(super) fn build_im_status_text(
                 _ => String::new(),
             };
             let work_dir = d.work_dir.as_deref().or(default_work_dir).unwrap_or("N/A");
+            let context_management_text =
+                bifrost_agent::format_context_management_status(d.message_count);
             format!(
-                "会话状态:\n- 工作路径: {}\n- Agent 类型: {}\n- Runner 类型: {}\n- Runner ID: {}\n- 外部会话: {}\n- 历史对话轮次: {}\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- 压缩次数: {}\n- 历史版本: {}\n- 状态: 空闲{}",
+                "会话状态:\n- 工作路径: {}\n- Agent 类型: {}\n- Runner 类型: {}\n- Runner ID: {}\n- 外部会话: {}\n- 历史对话轮次: {}\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- 显式压缩次数: {}\n- 上下文管理: {}\n- 历史版本: {}\n- 状态: 空闲{}",
                 work_dir,
                 agent_type,
                 runner_type,
@@ -331,6 +333,7 @@ pub(super) fn build_im_status_text(
                 bifrost_agent::format_status_metric_count(d.estimated_tokens.into()),
                 real,
                 d.compaction_count,
+                context_management_text,
                 d.history_version,
                 goal_info
             )
@@ -389,8 +392,10 @@ pub(super) fn build_agent_api_status_text(
             let context_percent =
                 ((d.estimated_tokens as f64 / context_window as f64) * 1000.0).round() / 10.0;
             let work_dir = d.work_dir.as_deref().unwrap_or(default_work_dir.as_str());
+            let context_management_text =
+                bifrost_agent::format_context_management_status(d.message_count);
             format!(
-                "会话状态:\n- 工作路径: {}\n- Agent 类型: {}\n- Runner 类型: {}\n- Runner ID: {}\n- 外部会话: {}\n- 历史对话轮次: {}\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- Context 用量: ~{} / {} ({:.1}%)\n- 压缩次数: {}\n- 历史版本: {}\n- MCP 工具数: 0",
+                "会话状态:\n- 工作路径: {}\n- Agent 类型: {}\n- Runner 类型: {}\n- Runner ID: {}\n- 外部会话: {}\n- 历史对话轮次: {}\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- Context 用量: ~{} / {} ({:.1}%)\n- 显式压缩次数: {}\n- 上下文管理: {}\n- 历史版本: {}\n- MCP 工具数: 0",
                 work_dir,
                 agent_type,
                 runner_type,
@@ -404,6 +409,7 @@ pub(super) fn build_agent_api_status_text(
                 bifrost_agent::format_status_metric_count(context_window.into()),
                 context_percent,
                 d.compaction_count,
+                context_management_text,
                 d.history_version,
             )
         }

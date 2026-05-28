@@ -127,6 +127,7 @@ async fn handle_stream(req: Request<Incoming>, state: SharedAdminState) -> Respo
     };
     session.source = "admin-api".to_string();
     session.mark_bifrost_agent_runtime();
+    let is_manual_compaction = body.message.trim() == "/compact";
     session.guide_channel = Some(
         service
             .queue_manager
@@ -155,12 +156,27 @@ async fn handle_stream(req: Request<Incoming>, state: SharedAdminState) -> Respo
     }
     service.agent_session_manager.update_active_session_preview(
         &session_key,
-        first_message_title_preview(&body.message),
+        if is_manual_compaction {
+            session.title.clone()
+        } else {
+            first_message_title_preview(&body.message)
+        },
         session.work_dir.clone(),
         Some(session.source.clone()),
         session.runner_type.clone(),
         session.runner_id.clone(),
     );
+    service
+        .progress_registry
+        .restart_existing(
+            &session_key,
+            if is_manual_compaction {
+                "上下文正在自动压缩"
+            } else {
+                body.message.trim()
+            },
+        )
+        .await;
 
     let (progress_tx, progress_rx) = mpsc::unbounded_channel();
     session.progress_sender = Some(progress_tx);
@@ -278,51 +294,75 @@ async fn run_agent_stream(
     let images = normalize_images(&body.images);
     let user_message = body.message.clone();
     let mut run_task = tokio::spawn(async move {
-        let mut mcp_manager =
-            bifrost_agent::mcp::McpManager::new(&config_for_run.mcp_servers).await;
         let mut recorder =
             create_conversation_recorder(&config_for_run, &session_key_for_run, &mut session);
         let turn_tools = service_for_run
             .build_agent_tool_registry(config_for_run.default_message_channel.clone());
-        let mut current_message = user_message;
-        let mut current_images = images;
-        let mut current_system_prompt = system_prompt;
-        let has_mcp_tools = !mcp_manager.list_tools().is_empty();
-        let result = loop {
-            let mcp_opt = if has_mcp_tools {
-                Some(&mut mcp_manager)
-            } else {
-                None
-            };
-            let result = bifrost_agent::session::run_turn_with_mcp_multimodal(
+        let result = if user_message.trim() == "/compact" {
+            bifrost_agent::session::run_manual_compaction_command(
                 &service_for_run.agent_client,
                 &config_for_run,
                 &mut session,
-                &turn_tools,
-                mcp_opt,
-                &current_message,
-                &current_images,
-                current_system_prompt.as_deref(),
                 recorder.as_mut(),
             )
-            .await;
-            match result {
-                Ok(turn_result) => {
-                    if let Some(next_message) = service_for_run
-                        .queue_manager
-                        .pop_queue(&session_key_for_run)
-                    {
-                        current_message = next_message;
-                        current_images = Vec::new();
-                        current_system_prompt = None;
-                        continue;
+            .await
+        } else {
+            let mut mcp_manager =
+                bifrost_agent::mcp::McpManager::new(&config_for_run.mcp_servers).await;
+            let mut current_message = user_message;
+            let mut current_images = images;
+            let mut current_system_prompt = system_prompt;
+            let has_mcp_tools = !mcp_manager.list_tools().is_empty();
+            let result = loop {
+                let mcp_opt = if has_mcp_tools {
+                    Some(&mut mcp_manager)
+                } else {
+                    None
+                };
+                let result = bifrost_agent::session::run_turn_with_mcp_multimodal(
+                    &service_for_run.agent_client,
+                    &config_for_run,
+                    &mut session,
+                    &turn_tools,
+                    mcp_opt,
+                    &current_message,
+                    &current_images,
+                    current_system_prompt.as_deref(),
+                    recorder.as_mut(),
+                )
+                .await;
+                match result {
+                    Ok(turn_result) => {
+                        if let Some(next_message) = service_for_run
+                            .queue_manager
+                            .pop_queue(&session_key_for_run)
+                        {
+                            current_message = next_message;
+                            current_images = Vec::new();
+                            current_system_prompt = None;
+                            continue;
+                        }
+                        break Ok(turn_result);
                     }
-                    break Ok(turn_result);
+                    Err(error) => break Err(error),
                 }
-                Err(error) => break Err(error),
-            }
+            };
+            mcp_manager.shutdown().await;
+            result
         };
-        mcp_manager.shutdown().await;
+        if let Some(recorder) = recorder.as_mut() {
+            let state = if result.is_ok() {
+                "completed"
+            } else {
+                "failed"
+            };
+            let _ = recorder.record_run_state(
+                &session_key_for_run,
+                state,
+                Some("web"),
+                Some("builtin"),
+            );
+        }
         if recorder.is_some() && !session.memory_cleared {
             session.recorder = recorder;
         }
@@ -359,6 +399,7 @@ async fn run_agent_stream(
                                 None,
                             );
                         }
+                        service.progress_registry.apply_event(&session_key, event.clone()).await;
                         let (event_name, payload) = progress_event_payload(&session_key, event);
                         if !send_sse_event(&tx, event_name, payload).await {
                             info!(
@@ -385,6 +426,7 @@ async fn run_agent_stream(
                             None,
                         );
                     }
+                    service.progress_registry.apply_event(&session_key, event.clone()).await;
                     let (event_name, payload) = progress_event_payload(&session_key, event);
                     if !send_sse_event(&tx, event_name, payload).await {
                         info!(
@@ -608,8 +650,9 @@ fn create_conversation_recorder(
     if !should_persist {
         return None;
     }
-    if session.recorder.is_some() {
-        return session.recorder.take();
+    if let Some(mut recorder) = session.recorder.take() {
+        let _ = recorder.record_run_state(session_key, "running", Some("web"), Some("builtin"));
+        return Some(recorder);
     }
 
     let data_dir = bifrost_agent::config::agent_home_dir();
@@ -631,6 +674,7 @@ fn create_conversation_recorder(
             "base_instructions": bifrost_agent::prompt::resolve_base_instructions_text(config, None),
         }),
     );
+    let _ = recorder.record_run_state(session_key, "running", Some("web"), Some("builtin"));
     Some(recorder)
 }
 

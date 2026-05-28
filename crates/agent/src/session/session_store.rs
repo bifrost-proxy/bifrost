@@ -8,6 +8,18 @@ use super::{
 use crate::types::ChatMessage;
 use dashmap::{DashMap, DashSet};
 use std::sync::Arc;
+use tokio::sync::broadcast;
+
+const SESSION_EVENT_CHANNEL_SIZE: usize = 256;
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSessionEvent {
+    pub event_type: String,
+    pub session_key: Option<String>,
+    pub reason: String,
+    pub timestamp_ms: u64,
+}
 
 /// Manages multiple agent sessions with concurrent access.
 pub struct AgentSessionManager {
@@ -18,19 +30,35 @@ pub struct AgentSessionManager {
     active_session_infos: DashMap<String, SessionInfo>,
     active_turn_statuses: DashMap<String, ActiveTurnStatusHandle>,
     active_stop_signals: DashMap<String, AgentStopSignalHandle>,
+    session_events: broadcast::Sender<AgentSessionEvent>,
     session_ttl_secs: u64,
 }
 
 impl AgentSessionManager {
     pub fn new(session_ttl_secs: u64) -> Self {
+        let (session_events, _) = broadcast::channel(SESSION_EVENT_CHANNEL_SIZE);
         Self {
             sessions: DashMap::new(),
             active_sessions: DashSet::new(),
             active_session_infos: DashMap::new(),
             active_turn_statuses: DashMap::new(),
             active_stop_signals: DashMap::new(),
+            session_events,
             session_ttl_secs,
         }
+    }
+
+    pub fn subscribe_session_events(&self) -> broadcast::Receiver<AgentSessionEvent> {
+        self.session_events.subscribe()
+    }
+
+    fn emit_session_event(&self, session_key: Option<&str>, reason: &str) {
+        let _ = self.session_events.send(AgentSessionEvent {
+            event_type: "sessions_changed".to_string(),
+            session_key: session_key.map(str::to_string),
+            reason: reason.to_string(),
+            timestamp_ms: current_time_ms(),
+        });
     }
 
     fn create_active_turn_status(&self, session_key: &str) -> ActiveTurnStatusHandle {
@@ -92,6 +120,7 @@ impl AgentSessionManager {
             .map(|(_, s)| s)
             .unwrap_or_else(|| AgentSession::new(session_key));
         self.attach_active_turn_handles(session_key, &mut session);
+        self.emit_session_event(Some(session_key), "started");
         session
     }
 
@@ -108,6 +137,7 @@ impl AgentSessionManager {
             .map(|(_, s)| s)
             .unwrap_or_else(|| AgentSession::new(session_key));
         self.attach_active_turn_handles(session_key, &mut session);
+        self.emit_session_event(Some(session_key), "started");
         Some(session)
     }
 
@@ -125,6 +155,7 @@ impl AgentSessionManager {
             .unwrap_or_else(|| AgentSession::new_with_work_dir(session_key, work_dir.clone()));
         Self::apply_work_dir_override(&mut session, work_dir);
         self.attach_active_turn_handles(session_key, &mut session);
+        self.emit_session_event(Some(session_key), "started");
         session
     }
 
@@ -144,6 +175,7 @@ impl AgentSessionManager {
             .unwrap_or_else(|| AgentSession::new_with_work_dir(session_key, work_dir.clone()));
         Self::apply_work_dir_override(&mut session, work_dir);
         self.attach_active_turn_handles(session_key, &mut session);
+        self.emit_session_event(Some(session_key), "started");
         Some(session)
     }
 
@@ -161,6 +193,7 @@ impl AgentSessionManager {
         self.active_session_infos.remove(&key);
         self.active_turn_statuses.remove(&key);
         self.active_stop_signals.remove(&key);
+        self.emit_session_event(Some(&key), "returned");
     }
 
     /// Release a session from the active set without returning it.
@@ -171,6 +204,7 @@ impl AgentSessionManager {
         self.active_session_infos.remove(session_key);
         self.active_turn_statuses.remove(session_key);
         self.active_stop_signals.remove(session_key);
+        self.emit_session_event(Some(session_key), "released");
     }
 
     /// Remove expired sessions.
@@ -231,6 +265,7 @@ impl AgentSessionManager {
         info.running = true;
         self.active_session_infos
             .insert(session_key.to_string(), info);
+        self.emit_session_event(Some(session_key), "updated");
     }
 
     /// Mark an external runner session as active without taking an
@@ -261,6 +296,7 @@ impl AgentSessionManager {
     pub fn clear_active_session_preview(&self, session_key: &str) {
         self.active_session_infos.remove(session_key);
         self.active_sessions.remove(session_key);
+        self.emit_session_event(Some(session_key), "cleared_preview");
     }
 
     /// Clear a specific session.
@@ -270,6 +306,7 @@ impl AgentSessionManager {
         self.active_stop_signals.remove(session_key);
         self.active_session_infos.remove(session_key);
         self.active_sessions.remove(session_key);
+        self.emit_session_event(Some(session_key), "cleared");
     }
 
     /// Clear all sessions.
@@ -279,6 +316,7 @@ impl AgentSessionManager {
         self.active_stop_signals.clear();
         self.active_session_infos.clear();
         self.active_sessions.clear();
+        self.emit_session_event(None, "cleared_all");
     }
 
     /// Request cooperative cancellation of the active turn for a session.
@@ -293,6 +331,7 @@ impl AgentSessionManager {
                 status.state = "stopping".to_string();
             }
         }
+        self.emit_session_event(Some(session_key), "stop_requested");
         requested || self.active_sessions.contains(session_key)
     }
 
@@ -314,6 +353,10 @@ impl AgentSessionManager {
     pub fn get_session_detail(&self, session_key: &str) -> Option<SessionDetail> {
         self.sessions.get(session_key).map(|r| {
             let s = r.value();
+            let history_path = s
+                .recorder
+                .as_ref()
+                .map(|recorder| recorder.file_path().display().to_string());
             let (goal_status, goal_objective) = match &s.current_goal {
                 Some(g) => (Some(format!("{:?}", g.status)), Some(g.objective.clone())),
                 None => (None, None),
@@ -360,6 +403,10 @@ impl AgentSessionManager {
                     .collect(),
                 goal_status,
                 goal_objective,
+                has_timeline: history_path.is_some(),
+                history_path,
+                timeline_event_count: 0,
+                run_state: "idle".to_string(),
             }
         })
     }
@@ -388,6 +435,10 @@ pub struct SessionInfo {
     pub external_thread_id: Option<String>,
     /// Session title (intent/topic) set by the agent via set_title tool.
     pub title: Option<String>,
+    pub history_path: Option<String>,
+    pub has_timeline: bool,
+    pub timeline_event_count: usize,
+    pub run_state: String,
 }
 
 impl SessionInfo {
@@ -412,11 +463,19 @@ impl SessionInfo {
             external_conversation_id: None,
             external_thread_id: None,
             title: None,
+            history_path: None,
+            has_timeline: false,
+            timeline_event_count: 0,
+            run_state: "running".to_string(),
         }
     }
 }
 
 fn session_info_from_session(s: &AgentSession, running: bool) -> SessionInfo {
+    let history_path = s
+        .recorder
+        .as_ref()
+        .map(|recorder| recorder.file_path().display().to_string());
     SessionInfo {
         session_key: s.session_key.clone(),
         running,
@@ -440,6 +499,10 @@ fn session_info_from_session(s: &AgentSession, running: bool) -> SessionInfo {
             .title
             .clone()
             .or_else(|| first_user_message_preview(&s.history)),
+        has_timeline: history_path.is_some(),
+        history_path,
+        timeline_event_count: 0,
+        run_state: if running { "running" } else { "idle" }.to_string(),
     }
 }
 
@@ -466,6 +529,13 @@ fn current_time_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn current_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 /// A single message in session detail view.
@@ -508,4 +578,8 @@ pub struct SessionDetail {
     pub goal_status: Option<String>,
     /// Current goal objective (if any).
     pub goal_objective: Option<String>,
+    pub history_path: Option<String>,
+    pub has_timeline: bool,
+    pub timeline_event_count: usize,
+    pub run_state: String,
 }

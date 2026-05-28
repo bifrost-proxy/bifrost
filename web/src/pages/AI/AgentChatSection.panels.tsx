@@ -15,6 +15,7 @@ import {
   ACTIVITY_ITEMS,
   MetricRow,
   compactionTagColor,
+  formatContextManagement,
   formatContextUsage,
   formatContextWindow,
   formatDuration,
@@ -448,8 +449,12 @@ export function AgentChatSettingsModal({
               value={formatNumber(telemetry.status?.message_count)}
             />
             <MetricRow
-              label="Compactions"
+              label="Explicit compactions"
               value={formatNumber(telemetry.status?.compaction_count)}
+            />
+            <MetricRow
+              label="Context management"
+              value={formatContextManagement(telemetry.status, telemetry.context)}
             />
           </Space>
         </Card>
@@ -481,11 +486,15 @@ export function AgentChatSettingsModal({
               value={formatContextWindow(telemetry.status, telemetry.context)}
             />
             <MetricRow
-              label="Compactions"
+              label="Explicit compactions"
               value={formatNumber(
                 telemetry.status?.compaction_count ??
                   telemetry.context?.compactionCount,
               )}
+            />
+            <MetricRow
+              label="Context management"
+              value={formatContextManagement(telemetry.status, telemetry.context)}
             />
             <MetricRow
               label="Local tools"

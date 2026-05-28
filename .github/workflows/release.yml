@@ -333,9 +333,37 @@ jobs:
         run: node scripts/sync-tauri-version.mjs --msi
 
       - name: Install Rust toolchain
+        if: runner.os != 'macOS'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - name: Install Rust toolchain with retry
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 --retry 10 --retry-connrefused --location --silent --show-error --fail https://sh.rustup.rs | sh -s -- --default-toolchain none -y
+            echo "${cargo_home}/bin" >> "${GITHUB_PATH}"
+            export PATH="${cargo_home}/bin:${PATH}"
+          fi
+
+          target="${{ matrix.target }}"
+          for attempt in 1 2 3; do
+            echo "Installing stable Rust toolchain for ${target} (attempt ${attempt}/3)"
+            if rustup toolchain install stable --target "${target}" --profile minimal --no-self-update; then
+              rustup default stable
+              exit 0
+            fi
+
+            if [[ "${attempt}" == "3" ]]; then
+              echo "Failed to install stable Rust toolchain for ${target} after 3 attempts"
+              exit 1
+            fi
+
+            sleep "$((attempt * 20))"
+          done
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2

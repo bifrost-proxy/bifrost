@@ -40,7 +40,7 @@ BIFROST_DATA_DIR=./.bifrost-cmd-test cargo run --bin bifrost -- start -p 8801 --
 - response 包含"会话状态:"
 - response 包含"工作路径:"
 - response 包含"消息数: 0"（新会话）
-- response 包含"估算 token"、"API 累计 token"、"压缩次数"、"历史版本"、"MCP 工具数"
+- response 包含"估算 token"、"API 累计 token"、"显式压缩次数"、"上下文管理"、"历史版本"、"MCP 工具数"
 
 ### TC-BC-03: /clear 清除会话历史
 
@@ -308,21 +308,20 @@ BIFROST_DATA_DIR=./.bifrost-cmd-test cargo run --bin bifrost -- start -p 8801 --
 
 **本次执行结果**：通过。2026-05-08 执行 `cargo test -p bifrost-agent session::tests:: -- --nocapture`，结果 `68 passed`；其中 `test_queued_continuation_compacts_before_next_model_request` 使用本地 mock Chat Completions provider 触发 mid-turn compaction，断言 `compaction_count == 1`、replacement history 包含非 system prompt context 与 memory context、不包含 base instructions，summary 位于 history 末尾，且 active status 中的 `compaction_count`、`history_version`、`estimated_context_tokens` 与当前 session 一致，压缩后 token snapshot 已包含 base instructions。补跑 `bash e2e-tests/tests/test_im_guide_queue_human_api.sh`，脚本输出 `[im-guide-queue-human-api] PASS`，覆盖 turn-end guide、FIFO queue、guide 优先和空白忽略黑盒链路。
 
-### TC-BC-25: 回归 - emergency compaction 与 trim retry 改写 history 后立即刷新运行中 /status
+### TC-BC-25: 回归 - emergency compaction 改写 history 后立即刷新运行中 /status，overflow 不静默 trim
 
-**背景**：context window overflow 后的 emergency compaction 和 fallback trim retry 会改写 `session.history`。此前 recorder 与内存统计已经更新，但 active `/status` 快照可能要等后续模型响应或下一轮循环才刷新，短窗口内显示旧的 `compaction_count`、`history_version` 或 context 估算。
+**背景**：context window overflow 后只允许 emergency compaction 作为有记录的 history rewrite。若 compaction 失败或 compact 后仍超窗，运行时必须保留 live history 并显式返回错误，避免旧的 fallback trim 静默丢上下文。此前 recorder 与内存统计已经更新，但 active `/status` 快照可能要等后续模型响应或下一轮循环才刷新，短窗口内显示旧的 `compaction_count`、`history_version` 或 context 估算。
 
 **操作步骤**：
 1. 运行 active status 刷新回归：`cargo test -p bifrost-agent session::tests::test_context_rewrite_refreshes_active_status_snapshot -- --nocapture`。
-2. 运行 trim token 快照回归：`cargo test -p bifrost-agent session::tests::test_trim_oldest_messages_invalidates_response_tokens -- --nocapture`。
-3. 检查测试输出。
+2. 检查测试输出。
 
 **预期结果**：
-- 两个测试均通过。
-- history 被 compaction/trim 改写后，active status 中的 `compaction_count`、`history_version`、`estimated_context_tokens` 与当前 session 一致。
-- trim retry 清空旧 `last_response_tokens`，避免旧响应 token 在 history 改写后继续参与上下文判断或展示。
+- 测试通过。
+- history 被 compaction 改写后，active status 中的 `compaction_count`、`history_version`、`estimated_context_tokens` 与当前 session 一致。
+- 代码中不再存在 provider overflow 后自动删除 live history 的 trim retry fallback。
 
-**本次执行结果**：通过。2026-05-08 执行 `cargo test -p bifrost-agent session::tests:: -- --nocapture`，结果 `68 passed`；其中 `test_context_rewrite_refreshes_active_status_snapshot` 断言 history 改写并刷新后 active status 与 session 一致，`test_trim_oldest_messages_invalidates_response_tokens` 断言 trim history 后 `last_response_tokens == null` 且 `history_version == 1`。
+**本次执行结果**：通过。2026-05-08 执行 `cargo test -p bifrost-agent session::tests:: -- --nocapture`，结果 `68 passed`；其中 `test_context_rewrite_refreshes_active_status_snapshot` 断言 history 改写并刷新后 active status 与 session 一致。2026-05-28 复核 Codex parity 后移除 provider overflow trim retry，改为保留 live history 并显式返回 overflow。
 
 ### TC-BC-26: 回归 - replacement history summary placement 与 initial context reinjection
 
@@ -386,8 +385,8 @@ BIFROST_DATA_DIR=./.bifrost-cmd-test cargo run --bin bifrost -- start -p 8801 --
    `cargo test -p bifrost-agent session::tests::test_mid_turn_initial_context_excludes_base_instructions -- --nocapture`。
 2. 运行 model request 构造去重回归：
    `cargo test -p bifrost-agent session::tests::test_build_messages_dedupes_injected_mid_turn_context -- --nocapture`。
-3. 运行 request history 裁剪下的去重边界回归：
-   `cargo test -p bifrost-agent session::tests::test_build_messages_only_dedupes_context_selected_for_request -- --nocapture`。
+3. 运行完整 history 下的去重边界回归：
+   `cargo test -p bifrost-agent session::tests::test_build_messages_dedupes_context_against_full_history -- --nocapture`。
 4. 运行 pending continuation 正向自动压缩回归：
    `cargo test -p bifrost-agent session::tests::test_queued_continuation_compacts_before_next_model_request -- --nocapture`。
 
@@ -395,10 +394,10 @@ BIFROST_DATA_DIR=./.bifrost-cmd-test cargo run --bin bifrost -- start -p 8801 --
 - 四个测试均通过。
 - `build_mid_turn_initial_context()` 返回的 replacement context 不包含 `base instructions`，但包含 developer context、contextual user environment context 和 memory context。
 - `build_messages()` 在 history 已携带这些非 system context / memory 时不会重复 prepend；下一次请求中 base instructions、developer context、environment context、memory context 各只出现一次。
-- 当 `max_history` 裁剪使 reinjected context 不在本次请求选中的 history 中时，`build_messages()` 仍会 prepend prompt prefix，避免去重导致 context 缺失。
+- `build_messages()` 使用完整 history 判断非 system context / memory 是否已存在，不再因请求级数量窗口产生遗漏。
 - `test_queued_continuation_compacts_before_next_model_request` 同时断言 compacted history 中没有 base instructions，token snapshot 等于 compacted history 估算值加一次 base instructions 估算值，active status 与 session 当前值一致。
 
-**本次执行结果**：通过。2026-05-08 已执行操作步骤中的命令，结果均为 `1 passed`；确认 mid-turn compact 后 replacement history 不包含 base instructions，下一次 model request 不重复注入非 system context / memory，token snapshot 只额外计入一次 base instructions，并且 max_history 裁剪不会误跳过本次请求实际缺失的 prompt context。
+**本次执行结果**：通过。2026-05-08 已执行操作步骤中的命令，结果均为 `1 passed`；本轮需复跑更新后的 `test_build_messages_dedupes_context_against_full_history`，确认 mid-turn compact 后 replacement history 不包含 base instructions，下一次 model request 不重复注入非 system context / memory，token snapshot 只额外计入一次 base instructions。
 
 ### TC-BC-30: 回归 - 普通 turn 采样前按 Codex 当前策略执行 PreTurn DoNotInject 自动压缩
 
@@ -476,6 +475,45 @@ BIFROST_DATA_DIR=./.bifrost-cmd-test cargo run --bin bifrost -- start -p 8801 --
 - retry 请求仍保留 base/system instructions、原始 structured history 和末尾 `COMPACTION_PROMPT`。
 
 **本次执行结果**：通过。2026-05-08 执行 `cargo test -p bifrost-agent compact::tests::test_compaction_retries_transient_error_using_provider_budget -- --nocapture`，结果 `1 passed`；执行 `cargo test -p bifrost-agent compact::tests:: -- --nocapture`，结果 `20 passed`。真实 `compact_session` 回归中 mock provider 第一次返回 `500 temporary server error`，第二次返回 summary；断言发生两次 summary 请求，第二次请求未裁剪 history，仍保留 `base instructions`、真实 user message 和末尾 `COMPACTION_PROMPT`，最终 session replacement history 正常安装 summary。
+
+
+### TC-BC-35: 回归 - `/status` 区分显式压缩次数与 token/context 上下文管理
+
+**背景**：Agent Loop 不提供请求级历史数量硬裁剪。`/status` 需要区分 summary/manual/emergency compaction 次数与 token/context budget 管理，避免用户把上下文管理误读为按消息数量裁剪。
+
+**操作步骤**：
+1. 启动临时 Bifrost 服务，使用 `--no-system-proxy`。
+2. 使用同一 `session_key` 发送至少 3 条普通 Agent 消息，或通过测试构造一个包含 3 条 history 的 idle session。
+3. 发送 `/status`。
+4. 对照响应文本。
+
+**预期结果**：
+- `/status` 返回 `success: true`。
+- response 展示 `显式压缩次数: <n>`，该值只代表 summary/manual/emergency compaction 次数。
+- response 展示 `上下文管理: 按 token/context budget 与 compaction 管理`，并显示常规请求使用完整 history。
+- response 不展示任何请求级 history window pruning 字段或“省略 N 条”语义。
+- response 不再只用模糊的 `压缩次数` 字段表达两种不同机制。
+
+**本次执行结果**：通过。2026-05-28 执行 `cargo test -p bifrost-admin im_status_text_formats_metrics_and_runner_metadata --lib -- --nocapture`，结果 `1 passed`；断言 `/status` 文本同时包含 `显式压缩次数: 2` 与 `上下文管理: 按 token/context budget 与 compaction 管理`，且 3 条历史显示为常规请求使用完整 history。
+
+### TC-BC-36: 回归 - 长历史常规请求使用完整 history
+
+**背景**：旧实现曾支持按消息数量只发送尾部 history。Codex-style 设计应依赖 token/context budget、compaction、summary replacement history 和 overflow fallback，而不是消息数量硬截断。
+
+**操作步骤**：
+1. 启动临时 Bifrost 服务，使用 `--no-system-proxy`，并配置 mock model provider。
+2. PATCH Agent 配置：`model_auto_compact_token_limit=2000`、关闭 memories。
+3. 使用同一 `session_key` 连续发送 55 条短消息：`历史保留探针 00` 到 `历史保留探针 54`。
+4. 再发送 `请报告历史保留探针。`。
+5. 检查 mock model 记录到的最后一次请求 payload。
+
+**预期结果**：
+- 最后一次模型请求的 `messages` 数量大于 50。
+- 请求内容同时包含 `历史保留探针 00` 和 `历史保留探针 54`。
+- `/status` 或 active status 中不再暴露请求级历史数量裁剪字段。
+- 如 context-window overflow 被 provider 真实触发，才允许进入 emergency compaction / trim fallback；本用例短消息路径不应触发。
+
+**本次执行结果**：通过。2026-05-28 执行 `BIFROST_PORT=18931 MOCK_PORT=18932 bash e2e-tests/tests/test_agent_builtin_status_runtime.sh`，脚本使用隔离临时数据目录和 `--no-system-proxy` 启动最新构建的 Bifrost；最终输出 `PASS`。长历史探针断言确认最后一次模型请求 `messages` 数量大于 50，且同时包含 `历史保留探针 00` 与 `历史保留探针 54`。
 
 ### TC-BC-34: 回归 - `/agent/chat` 首条 `/status` 保留请求 work_dir
 

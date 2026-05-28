@@ -236,6 +236,19 @@ class Handler(BaseHTTPRequestHandler):
                 ],
                 "usage": {"prompt_tokens": 12, "completion_tokens": 5, "total_tokens": 17},
             }
+        elif "历史保留探针" in joined:
+            response = {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "history probe acknowledged",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 5, "total_tokens": 17},
+            }
         else:
             time.sleep(3.0)
             response = {
@@ -409,6 +422,54 @@ assert "API 累计 token:" in text, text
 assert "Context 用量:" in text, text
 assert "API 累计 token: 17" in text, text
 assert "Context 用量: ~12 / 250K" in text, text
+assert "显式压缩次数: 0" in text, text
+assert "上下文管理: 按 token/context budget 与 compaction 管理" in text, text
+assert "常规请求使用完整 history：2 条" in text, text
+assert "\n- 压缩次数:" not in text, text
+PY
+
+echo "[agent-builtin-status-runtime] verifying long history is not count-trimmed"
+for i in $(seq -w 0 54); do
+  curl -fsS --noproxy '*' -X POST "$BASE/chat" \
+    -H 'Content-Type: application/json' \
+    -d "{\"session_key\":\"agent-status-runtime-long-history\",\"work_dir\":\"$WORK_DIR\",\"message\":\"历史保留探针 $i\"}" \
+    >"$CHAT_RESPONSE"
+done
+
+curl -fsS --noproxy '*' -X POST "$BASE/chat" \
+  -H 'Content-Type: application/json' \
+  -d "{\"session_key\":\"agent-status-runtime-long-history\",\"work_dir\":\"$WORK_DIR\",\"message\":\"请报告历史保留探针。\"}" \
+  >"$CHAT_RESPONSE"
+
+python3 - "$CHAT_RESPONSE" "$MOCK_LOG" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+response = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert response.get("success") is True, response
+
+entries = [
+    json.loads(line)
+    for line in Path(sys.argv[2]).read_text(encoding="utf-8").splitlines()
+    if line.strip()
+]
+probe_requests = []
+for payload in entries:
+    messages = payload.get("messages", [])
+    joined = "\n".join(
+        message.get("content", "")
+        for message in messages
+        if isinstance(message, dict) and isinstance(message.get("content"), str)
+    )
+    if "请报告历史保留探针" in joined:
+        probe_requests.append((payload, joined))
+assert probe_requests, "missing final long-history probe request"
+payload, joined = probe_requests[-1]
+messages = payload.get("messages", [])
+assert len(messages) > 50, len(messages)
+assert "历史保留探针 00" in joined, joined
+assert "历史保留探针 54" in joined, joined
 PY
 
 echo "[agent-builtin-status-runtime] starting a tool-output growth request"
@@ -507,6 +568,25 @@ assert "large tool turn finished after compacted context" in response.get("respo
 tool_calls = response.get("tool_calls")
 assert isinstance(tool_calls, list), response
 assert any(call.get("tool_name") == "exec_command" for call in tool_calls), tool_calls
+PY
+
+curl -fsS --noproxy '*' -X POST "$BASE/chat" \
+  -H 'Content-Type: application/json' \
+  -d '{"session_key":"agent-status-runtime-tool-growth","message":"/status"}' \
+  >"$TOOL_STATUS_RESPONSE"
+
+python3 - "$TOOL_STATUS_RESPONSE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+response = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert response.get("success") is True, response
+text = response.get("response", "")
+assert "显式压缩次数: 1" in text, text
+assert "上下文管理: 按 token/context budget 与 compaction 管理" in text, text
+assert "省略" not in text, text
+assert "\n- 压缩次数:" not in text, text
 PY
 
 echo "[agent-builtin-status-runtime] PASS"

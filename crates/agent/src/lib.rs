@@ -5,7 +5,7 @@
 //! - **Tool system**: Terminal execution, file read/write/patch, directory listing
 //! - **Memory compaction**: Automatic history summarization when context grows too long
 //! - **Token tracking**: Real API token usage tracking + coarse estimates
-//! - **Context management**: History limits, compaction summary preservation
+//! - **Context management**: Token budgets, context-window fallback, compaction summary preservation
 //! - **Responses API**: Streaming model protocol with function calling
 //! - **AGENTS.md**: Project instruction loading from hierarchy
 //! - **Skills**: Extensible skill system with YAML frontmatter
@@ -66,13 +66,14 @@ pub use config::{
     MessageTargetMode, ModelProviderConfig, ModelWireApi, ProviderInfo, ToolConfig,
 };
 pub use session::{
-    handle_session_free_command, AgentSession, AgentSessionManager, SessionDetail, SessionInfo,
+    handle_session_free_command, AgentSession, AgentSessionEvent, AgentSessionManager,
+    SessionDetail, SessionInfo,
 };
 pub use session_status::{
     format_active_turn_status_text, format_active_turn_status_text_with_context,
-    format_conversation_ref, format_status_metric_count, snapshot_agent_context, ActiveTurnStatus,
-    AgentCompactionProgress, AgentContextSnapshot, AgentTurnProgressEvent, AgentTurnProgressSender,
-    StatusRuntimeContext,
+    format_context_management_status, format_conversation_ref, format_status_metric_count,
+    snapshot_agent_context, ActiveTurnStatus, AgentCompactionProgress, AgentContextSnapshot,
+    AgentTurnProgressEvent, AgentTurnProgressSender, StatusRuntimeContext,
 };
 pub use skills::{install_system_skills, SkillMetadata, SkillScope, SkillsManager};
 pub use tools::update_plan::{PlanStep, PlanStepStatus, UpdatePlanArgs};

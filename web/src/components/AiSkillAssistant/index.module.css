@@ -1,80 +1,27 @@
-.root {
-  position: fixed;
-  z-index: 950;
-  width: 56px;
-  height: 56px;
-  color: var(--ai-skill-text);
-  --ai-skill-panel-width: min(360px, calc(100vw - 32px));
-}
-
-.rootHidden {
-  display: none;
-}
-
-.launcher {
-  position: relative;
-  width: 56px;
-  height: 56px;
-  border: 1px solid var(--ai-skill-border);
-  border-radius: 50%;
-  display: grid;
-  place-items: center;
-  color: var(--ai-skill-launcher-text);
-  background: var(--ai-skill-launcher-bg);
-  box-shadow: var(--ai-skill-shadow);
-  cursor: grab;
-  user-select: none;
-  touch-action: none;
-  transition:
-    transform 180ms ease,
-    border-color 180ms ease,
-    box-shadow 180ms ease;
-}
-
-.launcher:active {
-  cursor: grabbing;
-}
-
-.launcher:hover {
-  transform: translateY(-2px);
-  border-color: var(--ai-skill-accent);
-}
-
-.launcherIcon {
-  position: relative;
-  z-index: 1;
-  font-size: 25px;
-  animation: aiSkillBounce 1.55s ease-in-out infinite;
-}
-
-.launcherPulse {
-  position: absolute;
-  inset: 5px;
-  border-radius: 50%;
-  border: 1px solid var(--ai-skill-pulse);
-  animation: aiSkillPulse 1.55s ease-out infinite;
-}
-
-.dragHint {
-  position: absolute;
-  right: -3px;
-  bottom: -3px;
-  width: 18px;
+.statusButton {
   height: 18px;
-  border-radius: 50%;
-  display: grid;
-  place-items: center;
+  border: 0;
+  border-radius: 3px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-size: 10px;
+  line-height: 18px;
   color: var(--ai-skill-muted);
-  background: var(--ai-skill-panel-bg);
-  border: 1px solid var(--ai-skill-border);
+  background: transparent;
+  cursor: pointer;
+}
+
+.statusButton:hover,
+.statusButton:focus-visible {
+  color: var(--ai-skill-accent);
+  background: var(--ai-skill-accent-bg);
+  outline: none;
 }
 
 .panel {
-  position: absolute;
-  right: 0;
-  bottom: 66px;
-  width: var(--ai-skill-panel-width);
+  width: min(360px, calc(100vw - 32px));
   padding: 14px;
   border: 1px solid var(--ai-skill-border);
   border-radius: 8px;
@@ -82,16 +29,6 @@
   color: var(--ai-skill-text);
   box-shadow: var(--ai-skill-panel-shadow);
   backdrop-filter: blur(18px) saturate(1.08);
-}
-
-.panelLeft {
-  right: auto;
-  left: 0;
-}
-
-.panelBelow {
-  bottom: auto;
-  top: 66px;
 }
 
 .header {
@@ -163,6 +100,7 @@
 .scenarioList {
   list-style: none;
   margin: 12px 0;
+  padding: 0;
   display: grid;
   gap: 8px;
 }
@@ -199,32 +137,4 @@
   color: var(--ai-skill-muted);
   font-size: 11px;
   line-height: 16px;
-}
-
-@keyframes aiSkillBounce {
-  0%,
-  100% {
-    transform: translateY(0) scale(1);
-  }
-  45% {
-    transform: translateY(-5px) scale(1.04);
-  }
-}
-
-@keyframes aiSkillPulse {
-  0% {
-    opacity: 0.7;
-    transform: scale(0.82);
-  }
-  100% {
-    opacity: 0;
-    transform: scale(1.42);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .launcherIcon,
-  .launcherPulse {
-    animation: none;
-  }
 }

@@ -1236,6 +1236,13 @@ fn ensure_external_cli_session_recorder(
         }
         *recorder = Some(rec);
     }
+    if let Some(rec) = recorder.as_mut() {
+        if let Err(error) =
+            rec.record_run_state(session_key, "running", Some("im"), Some(runner_id))
+        {
+            warn!(error = %error, "failed to record external cli running state");
+        }
+    }
 }
 
 fn record_external_cli_input(
@@ -1294,6 +1301,19 @@ fn record_external_cli_result(
     );
     sync_external_cli_active_status(session);
     if let Some(rec) = recorder.as_mut() {
+        let run_state = if matches!(
+            result.status,
+            crate::im_gateway::external_cli::ExternalCliRunStatus::Succeeded
+        ) {
+            "completed"
+        } else {
+            "failed"
+        };
+        if let Err(error) =
+            rec.record_run_state(session_key, run_state, Some("im"), Some(&result.adapter))
+        {
+            warn!(error = %error, "failed to record external cli run state");
+        }
         let tool_result = serde_json::json!({
             "run_id": result.run_id,
             "runtime": result.runtime,
@@ -1335,6 +1355,11 @@ fn record_external_cli_failure(
 ) {
     append_session_message(session, bifrost_agent::ChatMessage::assistant(reply));
     if let Some(rec) = recorder.as_mut() {
+        if let Err(record_error) =
+            rec.record_run_state(session_key, "failed", Some("im"), Some(&request.adapter))
+        {
+            warn!(error = %record_error, "failed to record external cli failure state");
+        }
         let tool_result = serde_json::json!({
             "runtime": request.runtime,
             "adapter": request.adapter,

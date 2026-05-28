@@ -1488,6 +1488,11 @@ fn apply_persisted_external_cli_state(
         consume_imported_contexts_for_external_runner(request, runner_id);
         return;
     };
+    if request_history_path(request).is_none() {
+        if let Some(history_path) = state.history_path.as_deref() {
+            set_request_history_path(request, history_path);
+        }
+    }
     let metadata = crate::im_gateway::session_state::metadata_from_state(&state);
     apply_external_cli_resume_metadata(request, &metadata);
     consume_imported_contexts_for_external_runner(request, runner_id);
@@ -1542,7 +1547,7 @@ fn remember_external_cli_started_state(
         Some(runner_id),
         None,
         None,
-        None,
+        request_history_path(request),
         request
             .work_dir
             .as_ref()
@@ -1579,6 +1584,7 @@ fn remember_external_cli_started_state(
             "failed to persist external runner started state"
         );
     }
+    record_external_cli_web_turn_started(request, runner_id);
 }
 
 fn remember_external_cli_result_state(
@@ -1603,7 +1609,8 @@ fn remember_external_cli_result_state(
             .get("threadId")
             .or_else(|| result.metadata.get("thread_id"))
             .cloned(),
-        None,
+        request_history_path(request)
+            .or_else(|| persisted_history_path_for_request(request, runner_id)),
         request
             .work_dir
             .as_ref()
@@ -1649,6 +1656,209 @@ fn remember_external_cli_result_state(
             error = %error,
             "failed to persist external runner result state"
         );
+    }
+    record_external_cli_web_turn_result(request, runner_id, result);
+}
+
+fn request_history_path(
+    request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
+) -> Option<String> {
+    request
+        .params
+        .get("historyPath")
+        .or_else(|| request.params.get("history_path"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn set_request_history_path(
+    request: &mut crate::im_gateway::external_cli::ExternalCliRunRequest,
+    history_path: &str,
+) {
+    let Some(params) = request.params.as_object_mut() else {
+        request.params = serde_json::json!({ "historyPath": history_path });
+        return;
+    };
+    params
+        .entry("historyPath".to_string())
+        .or_insert_with(|| serde_json::Value::String(history_path.to_string()));
+}
+
+fn persisted_history_path_for_request(
+    request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
+    runner_id: &str,
+) -> Option<String> {
+    let session_key = request.session_key.as_deref()?;
+    crate::im_gateway::session_state::load_session_state(
+        session_key,
+        &request.adapter,
+        Some(runner_id),
+    )
+    .and_then(|state| state.history_path)
+}
+
+fn external_cli_timeline_recorder(
+    request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
+    runner_id: &str,
+) -> Option<bifrost_agent::persistence::ConversationRecorder> {
+    let session_key = request.session_key.as_deref()?;
+    let data_dir = bifrost_agent::config::agent_home_dir();
+    let history_paths = [
+        request_history_path(request),
+        persisted_history_path_for_request(request, runner_id),
+    ];
+    for history_path in history_paths.into_iter().flatten() {
+        match bifrost_agent::persistence::validate_conversation_path(
+            &data_dir,
+            std::path::Path::new(&history_path),
+        ) {
+            Ok(path) => {
+                return Some(
+                    bifrost_agent::persistence::ConversationRecorder::from_existing_file(
+                        path, None,
+                    ),
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    session_key = %session_key,
+                    adapter = %request.adapter,
+                    runner_id = %runner_id,
+                    history_path = %history_path,
+                    error = %error,
+                    "external runner history path is invalid; creating a new timeline"
+                );
+            }
+        }
+    }
+
+    let mut recorder =
+        bifrost_agent::persistence::ConversationRecorder::new(&data_dir, session_key);
+    let path = recorder.file_path().display().to_string();
+    remember_session_state_values(
+        session_key,
+        &request.adapter,
+        Some(runner_id),
+        None,
+        None,
+        Some(path),
+        request
+            .work_dir
+            .as_ref()
+            .map(|work_dir| work_dir.display().to_string()),
+    );
+    if let Err(error) = recorder.record_session_start(
+        session_key,
+        serde_json::json!({
+            "source": "admin-api",
+            "runtime": request.runtime,
+            "adapter": request.adapter,
+            "runner_id": runner_id,
+            "provider_id": request.provider_id,
+            "work_dir": request.work_dir.as_ref().map(|path| path.display().to_string()),
+        }),
+    ) {
+        tracing::warn!(
+            session_key = %session_key,
+            adapter = %request.adapter,
+            runner_id = %runner_id,
+            error = %error,
+            "failed to record external runner session start"
+        );
+    }
+    Some(recorder)
+}
+
+fn record_external_cli_web_turn_started(
+    request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
+    runner_id: &str,
+) {
+    let Some(session_key) = request.session_key.as_deref() else {
+        return;
+    };
+    let Some(mut recorder) = external_cli_timeline_recorder(request, runner_id) else {
+        return;
+    };
+    if let Err(error) =
+        recorder.record_run_state(session_key, "running", Some("web"), Some(runner_id))
+    {
+        tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner running state");
+    }
+    if let Err(error) = recorder.record_user_message(session_key, &request.message) {
+        tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner user message");
+    }
+    let arguments = serde_json::json!({
+        "runtime": request.runtime,
+        "adapter": request.adapter,
+        "runner_id": runner_id,
+        "operation": request.operation,
+        "provider_id": request.provider_id,
+        "work_dir": request.work_dir.as_ref().map(|path| path.display().to_string()),
+        "message_length": request.message.chars().count(),
+    })
+    .to_string();
+    if let Err(error) =
+        recorder.record_tool_call_with_id(session_key, &request.adapter, &arguments, None)
+    {
+        tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner tool call");
+    }
+}
+
+fn record_external_cli_web_turn_result(
+    request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
+    runner_id: &str,
+    result: &crate::im_gateway::external_cli::ExternalCliRunResult,
+) {
+    let Some(session_key) = request.session_key.as_deref() else {
+        return;
+    };
+    let Some(mut recorder) = external_cli_timeline_recorder(request, runner_id) else {
+        return;
+    };
+    let run_state = if matches!(
+        result.status,
+        crate::im_gateway::external_cli::ExternalCliRunStatus::Succeeded
+    ) {
+        "completed"
+    } else {
+        "failed"
+    };
+    if let Err(error) =
+        recorder.record_run_state(session_key, run_state, Some("web"), Some(runner_id))
+    {
+        tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner final state");
+    }
+    let tool_result = serde_json::json!({
+        "run_id": result.run_id,
+        "runtime": result.runtime,
+        "adapter": result.adapter,
+        "status": result.status,
+        "exit_code": result.exit_code,
+        "duration_ms": result.duration_ms,
+        "artifacts": result.artifacts,
+        "event_types": result.events.iter().map(|event| format!("{:?}", event.event_type)).collect::<Vec<_>>(),
+        "response_preview": truncate_str(&result.response, 500),
+    })
+    .to_string();
+    let success = matches!(
+        result.status,
+        crate::im_gateway::external_cli::ExternalCliRunStatus::Succeeded
+    );
+    if let Err(error) = recorder.record_tool_result_with_call_id(
+        session_key,
+        &result.adapter,
+        &tool_result,
+        success,
+        Some(&result.run_id),
+    ) {
+        tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner tool result");
+    }
+    if !result.response.trim().is_empty() {
+        if let Err(error) = recorder.record_assistant_message(session_key, &result.response) {
+            tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner assistant message");
+        }
     }
 }
 
@@ -1884,6 +2094,241 @@ mod tests {
         assert_eq!(finished_state.messages[0].content, request.message);
         assert_eq!(finished_state.messages[1].role, "assistant");
         assert_eq!(finished_state.messages[1].content, result.response);
+    }
+
+    #[test]
+    fn external_runner_web_turn_appends_to_existing_history_timeline() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
+        let session_key = "shared-codex-history";
+        let data_dir = bifrost_agent::config::agent_home_dir();
+        let mut recorder =
+            bifrost_agent::persistence::ConversationRecorder::new(&data_dir, session_key);
+        recorder
+            .record_session_start(session_key, serde_json::json!({"source": "im"}))
+            .expect("record start");
+        recorder
+            .record_user_message(session_key, "old IM message")
+            .expect("record old user");
+        recorder
+            .record_assistant_message(session_key, "old IM response")
+            .expect("record old assistant");
+        let history_path = recorder.file_path().display().to_string();
+
+        let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
+            message: "new Web message".to_string(),
+            operation: "chat".to_string(),
+            params: serde_json::json!({ "historyPath": history_path }),
+            provider_id: Some("feishu-main".to_string()),
+            runner_id: Some("codex".to_string()),
+            session_key: Some(session_key.to_string()),
+            runtime: "external_cli".to_string(),
+            adapter: "codex".to_string(),
+            work_dir: Some(std::path::PathBuf::from("/tmp/web-workspace")),
+            instructions: None,
+            adapter_config: Default::default(),
+            allow_work_dirs: Vec::new(),
+            inject_bifrost_tools: false,
+            skill_paths: Vec::new(),
+        };
+
+        remember_external_cli_started_state(&request, "codex");
+        let result = crate::im_gateway::external_cli::ExternalCliRunResult {
+            run_id: "run-codex-web-history".to_string(),
+            session_key: request.session_key.clone(),
+            runtime: request.runtime.clone(),
+            adapter: request.adapter.clone(),
+            status: crate::im_gateway::external_cli::ExternalCliRunStatus::Succeeded,
+            exit_code: Some(0),
+            response: "new Codex response".to_string(),
+            responses: Vec::new(),
+            started_at: 1_779_700_000_000,
+            finished_at: 1_779_700_002_000,
+            duration_ms: 2_000,
+            artifacts: crate::im_gateway::external_cli::ExternalCliRunArtifacts {
+                run_dir: String::new(),
+                prompt: String::new(),
+                command_snapshot: String::new(),
+                stdout: String::new(),
+                stderr: String::new(),
+                normalized_events: String::new(),
+                last_message: String::new(),
+            },
+            events: Vec::new(),
+            metadata: std::collections::BTreeMap::new(),
+        };
+        remember_external_cli_result_state(&request, "codex", &result);
+
+        let events = bifrost_agent::persistence::load_conversation_events(recorder.file_path())
+            .expect("load history events");
+        assert!(events.iter().any(|event| {
+            event.event_type == bifrost_agent::persistence::event_types::USER_MESSAGE
+                && event.content.get("message").and_then(|v| v.as_str()) == Some("new Web message")
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == bifrost_agent::persistence::event_types::ASSISTANT_MESSAGE
+                && event.content.get("message").and_then(|v| v.as_str())
+                    == Some("new Codex response")
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == bifrost_agent::persistence::event_types::RUN_STATE_CHANGED
+                && event.content.get("source_channel").and_then(|v| v.as_str()) == Some("web")
+                && event.content.get("agent_kind").and_then(|v| v.as_str()) == Some("codex")
+        }));
+        let state = crate::im_gateway::session_state::load_session_state(
+            session_key,
+            "codex",
+            Some("codex"),
+        )
+        .expect("state");
+        assert_eq!(state.history_path.as_deref(), Some(history_path.as_str()));
+
+        let gpt_request = crate::im_gateway::external_cli::ExternalCliRunRequest {
+            message: "new GPT Web message".to_string(),
+            operation: "chat".to_string(),
+            params: serde_json::json!({ "historyPath": history_path }),
+            provider_id: None,
+            runner_id: Some("web".to_string()),
+            session_key: Some(session_key.to_string()),
+            runtime: "external_cli".to_string(),
+            adapter: "chatgpt_web".to_string(),
+            work_dir: Some(std::path::PathBuf::from("/tmp/web-workspace")),
+            instructions: None,
+            adapter_config: Default::default(),
+            allow_work_dirs: Vec::new(),
+            inject_bifrost_tools: false,
+            skill_paths: Vec::new(),
+        };
+        remember_external_cli_started_state(&gpt_request, "web");
+        let gpt_result = crate::im_gateway::external_cli::ExternalCliRunResult {
+            run_id: "run-gpt-web-history".to_string(),
+            session_key: gpt_request.session_key.clone(),
+            runtime: gpt_request.runtime.clone(),
+            adapter: gpt_request.adapter.clone(),
+            status: crate::im_gateway::external_cli::ExternalCliRunStatus::Succeeded,
+            exit_code: Some(0),
+            response: "new GPT Web response".to_string(),
+            responses: Vec::new(),
+            started_at: 1_779_700_003_000,
+            finished_at: 1_779_700_004_000,
+            duration_ms: 1_000,
+            artifacts: crate::im_gateway::external_cli::ExternalCliRunArtifacts {
+                run_dir: String::new(),
+                prompt: String::new(),
+                command_snapshot: String::new(),
+                stdout: String::new(),
+                stderr: String::new(),
+                normalized_events: String::new(),
+                last_message: String::new(),
+            },
+            events: Vec::new(),
+            metadata: std::collections::BTreeMap::new(),
+        };
+        remember_external_cli_result_state(&gpt_request, "web", &gpt_result);
+        let events = bifrost_agent::persistence::load_conversation_events(recorder.file_path())
+            .expect("reload history events");
+        assert!(events.iter().any(|event| {
+            event.event_type == bifrost_agent::persistence::event_types::USER_MESSAGE
+                && event.content.get("message").and_then(|v| v.as_str())
+                    == Some("new GPT Web message")
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == bifrost_agent::persistence::event_types::ASSISTANT_MESSAGE
+                && event.content.get("message").and_then(|v| v.as_str())
+                    == Some("new GPT Web response")
+        }));
+    }
+
+    #[test]
+    fn external_runner_web_turn_without_history_creates_canonical_timeline() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
+        let session_key = "active-gpt-web-history";
+        let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
+            message: "active GPT Web message".to_string(),
+            operation: "chat".to_string(),
+            params: serde_json::json!({}),
+            provider_id: None,
+            runner_id: Some("gpt".to_string()),
+            session_key: Some(session_key.to_string()),
+            runtime: "external_cli".to_string(),
+            adapter: "chatgpt_web".to_string(),
+            work_dir: Some(std::path::PathBuf::from("/tmp/web-workspace")),
+            instructions: None,
+            adapter_config: Default::default(),
+            allow_work_dirs: Vec::new(),
+            inject_bifrost_tools: false,
+            skill_paths: Vec::new(),
+        };
+
+        remember_external_cli_started_state(&request, "gpt");
+        let started_state = crate::im_gateway::session_state::load_session_state(
+            session_key,
+            "chatgpt_web",
+            Some("gpt"),
+        )
+        .expect("started state");
+        let history_path = started_state
+            .history_path
+            .as_deref()
+            .expect("created history path")
+            .to_string();
+
+        let result = crate::im_gateway::external_cli::ExternalCliRunResult {
+            run_id: "run-gpt-web-active".to_string(),
+            session_key: request.session_key.clone(),
+            runtime: request.runtime.clone(),
+            adapter: request.adapter.clone(),
+            status: crate::im_gateway::external_cli::ExternalCliRunStatus::Succeeded,
+            exit_code: Some(0),
+            response: "active GPT Web response".to_string(),
+            responses: Vec::new(),
+            started_at: 1_779_700_005_000,
+            finished_at: 1_779_700_006_000,
+            duration_ms: 1_000,
+            artifacts: crate::im_gateway::external_cli::ExternalCliRunArtifacts {
+                run_dir: String::new(),
+                prompt: String::new(),
+                command_snapshot: String::new(),
+                stdout: String::new(),
+                stderr: String::new(),
+                normalized_events: String::new(),
+                last_message: String::new(),
+            },
+            events: Vec::new(),
+            metadata: std::collections::BTreeMap::new(),
+        };
+        remember_external_cli_result_state(&request, "gpt", &result);
+
+        let events = bifrost_agent::persistence::load_conversation_events(std::path::Path::new(
+            &history_path,
+        ))
+        .expect("load created history events");
+        assert!(events.iter().any(|event| {
+            event.event_type == bifrost_agent::persistence::event_types::USER_MESSAGE
+                && event.content.get("message").and_then(|v| v.as_str())
+                    == Some("active GPT Web message")
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == bifrost_agent::persistence::event_types::ASSISTANT_MESSAGE
+                && event.content.get("message").and_then(|v| v.as_str())
+                    == Some("active GPT Web response")
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == bifrost_agent::persistence::event_types::RUN_STATE_CHANGED
+                && event.content.get("source_channel").and_then(|v| v.as_str()) == Some("web")
+                && event.content.get("agent_kind").and_then(|v| v.as_str()) == Some("gpt")
+        }));
+        let finished_state = crate::im_gateway::session_state::load_session_state(
+            session_key,
+            "chatgpt_web",
+            Some("gpt"),
+        )
+        .expect("finished state");
+        assert_eq!(
+            finished_state.history_path.as_deref(),
+            Some(history_path.as_str())
+        );
     }
 
     #[test]

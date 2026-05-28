@@ -100,10 +100,6 @@ pub struct AgentConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_turn_iterations: Option<u32>,
 
-    /// Max history messages per session (default 50).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_history_messages: Option<u32>,
-
     /// Session TTL in seconds (default 3600).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_ttl_secs: Option<u64>,
@@ -465,7 +461,6 @@ fn default_true() -> bool {
 /// Default values as associated constants for easy access.
 impl AgentConfig {
     pub const DEFAULT_MAX_COMPLETION_TOKENS: u32 = 16384;
-    pub const DEFAULT_MAX_HISTORY: u32 = 50;
     pub const DEFAULT_SESSION_TTL: u64 = 3600;
     pub const DEFAULT_REQUEST_TIMEOUT: u64 = 600;
     pub const DEFAULT_MAX_TURN_ITERATIONS: u32 = 1000;
@@ -502,7 +497,6 @@ impl Default for AgentConfig {
             project_doc_max_bytes: Some(Self::DEFAULT_PROJECT_DOC_MAX_BYTES),
             project_doc_fallback_filenames: None,
             max_turn_iterations: Some(Self::DEFAULT_MAX_TURN_ITERATIONS),
-            max_history_messages: Some(Self::DEFAULT_MAX_HISTORY),
             session_ttl_secs: Some(Self::DEFAULT_SESSION_TTL),
             tool_output_token_limit: Some(Self::DEFAULT_TOOL_OUTPUT_TOKEN_LIMIT),
             request_timeout_secs: Some(Self::DEFAULT_REQUEST_TIMEOUT),
@@ -526,11 +520,6 @@ impl AgentConfig {
     pub fn get_max_completion_tokens(&self) -> u32 {
         self.max_completion_tokens
             .unwrap_or(Self::DEFAULT_MAX_COMPLETION_TOKENS)
-    }
-
-    pub fn get_max_history_messages(&self) -> u32 {
-        self.max_history_messages
-            .unwrap_or(Self::DEFAULT_MAX_HISTORY)
     }
 
     pub fn get_session_ttl_secs(&self) -> u64 {
@@ -1134,7 +1123,6 @@ fn merge_config(base: AgentConfig, overlay: AgentConfig) -> AgentConfig {
             .project_doc_fallback_filenames
             .or(base.project_doc_fallback_filenames),
         max_turn_iterations: overlay.max_turn_iterations.or(base.max_turn_iterations),
-        max_history_messages: overlay.max_history_messages.or(base.max_history_messages),
         session_ttl_secs: overlay.session_ttl_secs.or(base.session_ttl_secs),
         tool_output_token_limit: overlay
             .tool_output_token_limit

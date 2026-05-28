@@ -488,7 +488,6 @@ test("AI 一级页整合 Agent 子导航并按 URL 切换独立编辑卡片", as
     model: "gpt-test",
     model_provider: "mock",
     max_completion_tokens: 4096,
-    max_history_messages: 20,
     model_providers: {
       mock: {
         api_key: "$MODEL_API_KEY",
@@ -654,7 +653,6 @@ test("AI Agent Session 详情默认展示 Messages Tab 且内容区可真实滚�
     work_dir: "/tmp/agent-ui",
     model: "gpt-test",
     model_provider: "mock",
-    max_history_messages: 20,
     model_providers: {
       mock: {
         api_key: "$MODEL_API_KEY",
@@ -769,7 +767,6 @@ test("AI Agent Sessions 列表支持点击 title 或整行进入详情", async (
     work_dir: "/tmp/agent-ui",
     model: "gpt-test",
     model_provider: "mock",
-    max_history_messages: 20,
     model_providers: {
       mock: {
         api_key: "$MODEL_API_KEY",
@@ -1083,7 +1080,6 @@ test("AI Agent Runtime Settings 支持恢复默认值", async ({ page }) => {
     model_providers: {},
     shell_timeout_secs: 30,
     max_turn_iterations: 20,
-    max_history_messages: 10,
     session_ttl_secs: 120,
     request_timeout_secs: 90,
     tool_output_token_limit: 2000,
@@ -1118,7 +1114,6 @@ test("AI Agent Runtime Settings 支持恢复默认值", async ({ page }) => {
 
   expect(patches).toContainEqual({
     max_turn_iterations: 1000,
-    max_history_messages: 50,
     session_ttl_secs: 3600,
     request_timeout_secs: 600,
     tool_output_token_limit: 10000,

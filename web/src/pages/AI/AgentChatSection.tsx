@@ -1,42 +1,10 @@
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useSearchParams } from "react-router-dom";
-import {
-  Button,
-  Card,
-  Col,
-  Empty,
-  Grid,
-  Input,
-  Modal,
-  Row,
-  Segmented,
-  Select,
-  Space,
-  Tag,
-  Typography,
-  message as antdMessage,
-  theme,
-} from "antd";
-import {
-  CheckCircleOutlined,
-  DeleteOutlined,
-  DownOutlined,
-  FolderOpenOutlined,
-  BorderOutlined,
-  LoadingOutlined,
-  PlusOutlined,
-  RightOutlined,
-  RobotOutlined,
-  SendOutlined,
-  SettingOutlined,
-} from "@ant-design/icons";
+import { Button, Card, Col, Empty, Grid, Input, Modal, Row, Segmented, Select, Space, Tag, Typography, message as antdMessage, theme } from "antd";
+import { DeleteOutlined, FolderOpenOutlined, BorderOutlined, PlusOutlined, RobotOutlined, SendOutlined, SettingOutlined } from "@ant-design/icons";
 import { apiFetch } from "../../api/apiFetch";
+import { buildApiUrl } from "../../runtime";
+import { getClientId } from "../../services/clientId";
 import {
   EMPTY_TELEMETRY,
   PROMPT_CHIPS,
@@ -47,16 +15,16 @@ import {
   formatRunnerOptionLabel,
   formatRunnerTag,
   formatThreadSource,
-  historyEventsToMessages,
-  historyEventsToTelemetry,
   isRecord,
   isRealChatMessage,
   isSelectedThread,
   reduceTelemetry,
   runAgentStream,
+  sameChatMessages,
   selectedRunnerAdapter,
   sessionDetailToMessages,
   stringFrom,
+  titleFromChatMessages,
   telemetryFromSessionDetail,
   telemetryFromThread,
   type AgentThreadSummary,
@@ -68,16 +36,15 @@ import {
   type RunTelemetry,
   type SessionDetail,
 } from "./AgentChatSection.helpers";
+import { historyEventsToMessages, historyEventsToTelemetry } from "./AgentChatSection.timeline";
+import { isRunStateActive, isThreadActive, useRunningTimelinePolling } from "./AgentChatSection.timelinePolling";
 import { AgentChatMessageList } from "./AgentChatSection.messages";
+import { AgentChatPlan, AgentChatPromptChips } from "./AgentChatSection.composerExtras";
 import { AgentChatSettingsModal, AgentThreadListCard } from "./AgentChatSection.panels";
 import { queueItemsFromEvent, type QueuedInput } from "./AgentChatSection.queue";
-import {
-  SelectedRunnerPill,
-  SlashRunnerPanel,
-  useRunnerCallHandler,
-  useSlashRunnerSelection,
-} from "./AgentChatSection.runnerCall";
+import { SelectedRunnerPill, SlashRunnerPanel, useRunnerCallHandler, useSlashRunnerSelection } from "./AgentChatSection.runnerCall";
 import { createAgentChatStyles } from "./AgentChatSection.styles";
+import { AgentChatTokenHud } from "./AgentChatSection.tokenHud";
 
 const { Text } = Typography;
 const { TextArea } = Input;
@@ -113,6 +80,7 @@ export default function AgentChatSection() {
   const {
     slashRunner,
     setSlashRunner,
+    slashCommandOptions,
     slashRunnerOptions,
     showSlashRunnerPanel,
   } = useSlashRunnerSelection({
@@ -121,7 +89,8 @@ export default function AgentChatSection() {
     supplementSubmitting,
     runnerOptions,
   });
-  const [planCollapsed, setPlanCollapsed] = useState(false);
+  const [slashActiveIndex, setSlashActiveIndex] = useState(0);
+  const [planCollapsed, setPlanCollapsed] = useState(true);
   const [defaultWorkDir, setDefaultWorkDir] = useState("");
   const messagesScrollRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -196,31 +165,10 @@ export default function AgentChatSection() {
     userNearBottomRef.current = distanceFromBottom < 96;
   }, []);
 
-  // Compute fallback title for the current session from first user message
-  const currentSessionFallbackTitle = useMemo(() => {
-    const firstUserMsg = messages.find((m) => m.role === "user");
-    if (!firstUserMsg) return undefined;
-    const text = firstUserMsg.content.trim();
-    return text.length > 40 ? `${text.slice(0, 40)}…` : text;
-  }, [messages]);
-
-  const titleFromMessages = useCallback((items: ChatMessage[]) => {
-    const firstUserMsg = items.find((message) => message.role === "user");
-    const text = firstUserMsg?.content.trim();
-    if (!text) return undefined;
-    return text.length > 40 ? `${text.slice(0, 40)}…` : text;
-  }, []);
-
-  const sameMessages = useCallback((left: ChatMessage[], right: ChatMessage[]) =>
-    left.length === right.length &&
-    left.every((message, index) => {
-      const other = right[index];
-      return (
-        message.role === other.role &&
-        message.content === other.content &&
-        message.meta === other.meta
-      );
-    }), []);
+  const currentSessionFallbackTitle = useMemo(
+    () => titleFromChatMessages(messages),
+    [messages],
+  );
 
   const replaceLoadedMessages = useCallback((restored: ChatMessage[], shouldStickToBottom: boolean) => {
     const fallbackTimestamp = Date.now() / 1000;
@@ -229,7 +177,7 @@ export default function AgentChatSection() {
       timestamp: message.timestamp || fallbackTimestamp,
     }));
     setMessages((prev) => {
-      if (sameMessages(prev, withTimestamps)) {
+      if (sameChatMessages(prev, withTimestamps)) {
         return prev;
       }
       if (shouldStickToBottom) {
@@ -238,7 +186,7 @@ export default function AgentChatSection() {
       }
       return withTimestamps;
     });
-  }, [sameMessages]);
+  }, []);
 
   const querySessionKey = searchParams.get("session") || undefined;
   const queryHistoryPath = searchParams.get("historyPath") || undefined;
@@ -333,6 +281,25 @@ export default function AgentChatSection() {
 
   useEffect(() => {
     refreshThreads();
+    const refreshFromSessionEvent = () => {
+      if (document.visibilityState === "visible") {
+        void refreshThreads();
+      }
+    };
+    const eventsUrl = `${buildApiUrl("/im-gateway/agent/sessions/events")}?x_client_id=${encodeURIComponent(getClientId())}`;
+    const eventSource = new EventSource(eventsUrl);
+    eventSource.addEventListener("sessions_changed", refreshFromSessionEvent);
+    const refreshIfVisible = () => {
+      if (document.visibilityState === "visible") {
+        void refreshThreads();
+      }
+    };
+    document.addEventListener("visibilitychange", refreshIfVisible);
+    return () => {
+      eventSource.removeEventListener("sessions_changed", refreshFromSessionEvent);
+      eventSource.close();
+      document.removeEventListener("visibilitychange", refreshIfVisible);
+    };
   }, [refreshThreads]);
 
   useEffect(() => {
@@ -439,7 +406,7 @@ export default function AgentChatSection() {
           }
           return response.json() as Promise<SessionDetail>;
         })
-        .then((detail) => {
+        .then(async (detail) => {
           if (cancelled || !detail) {
             return;
           }
@@ -472,14 +439,51 @@ export default function AgentChatSection() {
             return;
           }
           const restored = sessionDetailToMessages(detail);
-          if (restored.length > 0) {
-            replaceLoadedMessages(restored, shouldStickToBottom);
+          const timelineHistoryPath =
+            detail.history_path ||
+            matchedThread?.history_path ||
+            fallbackHistoryThread?.history_path;
+          let timelineMessages: ChatMessage[] | undefined;
+          let timelineEvents: HistoryEvent[] | undefined;
+          if (timelineHistoryPath) {
+            try {
+              const historyResponse = await apiFetch(
+                `/api/im-gateway/agent/sessions/history/${encodeURIComponent(
+                  timelineHistoryPath,
+                )}`,
+              );
+              if (historyResponse.ok) {
+                const payload = (await historyResponse.json()) as { events?: HistoryEvent[] };
+                timelineEvents = payload.events || [];
+                timelineMessages = historyEventsToMessages(timelineEvents, {
+                  ensureRunningAssistant:
+                    isThreadActive(matchedThread) ||
+                    isThreadActive(fallbackHistoryThread) ||
+                    isRunStateActive(detail.run_state || detail.state),
+                  runningState:
+                    detail.run_state ||
+                    detail.state ||
+                    matchedThread?.run_state ||
+                    matchedThread?.state ||
+                    fallbackHistoryThread?.run_state ||
+                    fallbackHistoryThread?.state,
+                });
+              }
+            } catch {
+              // Keep the active detail fallback usable while timeline is being written.
+            }
           }
-          const resolvedTitle = matchedThread?.title || detail.title || titleFromMessages(restored);
+          const loadedMessages =
+            timelineMessages && timelineMessages.length > 0 ? timelineMessages : restored;
+          if (loadedMessages.length > 0) {
+            replaceLoadedMessages(loadedMessages, shouldStickToBottom);
+          }
+          const resolvedTitle =
+            matchedThread?.title || detail.title || titleFromChatMessages(loadedMessages);
           setThreads((prev) => {
             let changed = false;
             const next = prev.map((thread) => {
-              if (thread.session_key !== nextSessionKey || thread.history_path) {
+              if (thread.session_key !== nextSessionKey) {
                 return thread;
               }
               const updated = {
@@ -490,6 +494,11 @@ export default function AgentChatSection() {
                 agent_type: detail.agent_type || thread.agent_type,
                 runner_type: detail.runner_type || thread.runner_type,
                 runner_id: detail.runner_id || thread.runner_id,
+                history_path: timelineHistoryPath || thread.history_path,
+                has_timeline: detail.has_timeline || thread.has_timeline || Boolean(timelineHistoryPath),
+                timeline_event_count:
+                  detail.timeline_event_count ?? thread.timeline_event_count,
+                run_state: detail.run_state || thread.run_state,
               };
               if (
                 updated.title !== thread.title ||
@@ -497,7 +506,11 @@ export default function AgentChatSection() {
                 updated.work_dir !== thread.work_dir ||
                 updated.agent_type !== thread.agent_type ||
                 updated.runner_type !== thread.runner_type ||
-                updated.runner_id !== thread.runner_id
+                updated.runner_id !== thread.runner_id ||
+                updated.history_path !== thread.history_path ||
+                updated.has_timeline !== thread.has_timeline ||
+                updated.timeline_event_count !== thread.timeline_event_count ||
+                updated.run_state !== thread.run_state
               ) {
                 changed = true;
                 return updated;
@@ -506,7 +519,26 @@ export default function AgentChatSection() {
             });
             return changed ? next : prev;
           });
-          setTelemetry(telemetryFromSessionDetail(detail, matchedThread));
+          const detailTelemetry = telemetryFromSessionDetail(detail, matchedThread);
+          const nextTelemetry = timelineEvents
+            ? historyEventsToTelemetry(
+                timelineEvents,
+                {
+                  ...(matchedThread || {
+                    session_key: nextSessionKey,
+                    status: "active" as const,
+                  }),
+                  history_path: timelineHistoryPath,
+                  run_state: detail.run_state || matchedThread?.run_state,
+                },
+                detailTelemetry,
+              )
+            : detailTelemetry;
+          setTelemetry(nextTelemetry);
+          setRunning(
+            nextTelemetry.phase === "running" ||
+              isRunStateActive(detail.run_state || detail.state),
+          );
           setWorkDir(detail.work_dir || matchedThread?.work_dir || defaultWorkDir);
           setRunnerId(detail.runner_id || matchedThread?.runner_id || "bifrost_agent");
         })
@@ -540,10 +572,13 @@ export default function AgentChatSection() {
         const matchedThread = threadsRef.current.find((thread) =>
           isSelectedThread(thread, nextSessionKey || "", nextHistoryPath, "history"),
         );
-        const restored = historyEventsToMessages(payload.events || []);
+        const restored = historyEventsToMessages(payload.events || [], {
+          ensureRunningAssistant: isThreadActive(matchedThread),
+          runningState: matchedThread?.run_state || matchedThread?.state,
+        });
         if (restored.length > 0) {
           replaceLoadedMessages(restored, shouldStickToBottom);
-          const resolvedTitle = matchedThread?.title || titleFromMessages(restored);
+          const resolvedTitle = matchedThread?.title || titleFromChatMessages(restored);
           if (resolvedTitle) {
             setThreads((prev) => {
               let changed = false;
@@ -561,9 +596,6 @@ export default function AgentChatSection() {
               return changed ? next : prev;
             });
           }
-          setTelemetry((prev) =>
-            historyEventsToTelemetry(payload.events || [], matchedThread, prev),
-          );
           setRunnerId(matchedThread?.runner_id || "bifrost_agent");
           const eventSessionKey =
             payload.events?.find((event) => event.session_key)?.session_key;
@@ -571,6 +603,13 @@ export default function AgentChatSection() {
             setSessionKey(nextSessionKey || eventSessionKey!);
           }
         }
+        const nextTelemetry = historyEventsToTelemetry(
+          payload.events || [],
+          matchedThread,
+          telemetryFromThread(matchedThread),
+        );
+        setTelemetry(nextTelemetry);
+        setRunning(nextTelemetry.phase === "running" || isThreadActive(matchedThread));
       })
       .catch((error) => {
         if (!cancelled) {
@@ -595,8 +634,18 @@ export default function AgentChatSection() {
     querySessionKey,
     replaceLoadedMessages,
     setSearchParams,
-    titleFromMessages,
   ]);
+
+  useRunningTimelinePolling({
+    historyPath,
+    refreshThreads,
+    replaceLoadedMessages,
+    selectedThread,
+    setRunning,
+    setTelemetry,
+    telemetryPhase: telemetry.phase,
+    userNearBottomRef,
+  });
 
   useEffect(() => {
     const requestedSessionKey = searchParams.get("session") || undefined;
@@ -898,12 +947,13 @@ export default function AgentChatSection() {
     await submitRunningInput(item.message, "guide");
   };
 
-  const handleSend = async () => {
-    const content = draft.trim();
+  const handleSend = async (options?: { contentOverride?: string; silentCommand?: boolean }) => {
+    const content = (options?.contentOverride ?? draft).trim();
+    const silentCommand = options?.silentCommand === true || content === "/compact";
     if (!content || supplementSubmitting) {
       return;
     }
-    if (slashRunner && !running) {
+    if (slashRunner && !running && !silentCommand) {
       await handleRunnerCall(content, slashRunner);
       return;
     }
@@ -922,12 +972,23 @@ export default function AgentChatSection() {
     const assistantMessage: ChatMessage = {
       id: assistantId,
       role: "assistant",
-      content: "Agent is running...",
+      content: silentCommand ? "" : "Agent is running...",
       timestamp: Date.now() / 1000,
       meta: "Bifrost Agent",
+      processSteps: silentCommand
+        ? [
+            {
+              type: "compaction",
+              summary: "上下文正在自动压缩",
+              status: "running",
+            },
+          ]
+        : undefined,
     };
     pendingInstantScrollRef.current = true;
-    setMessages((prev) => [...prev, userMessage, assistantMessage]);
+    setMessages((prev) =>
+      silentCommand ? [...prev, assistantMessage] : [...prev, userMessage, assistantMessage],
+    );
     setDraft("");
     setRunning(true);
     setTelemetry({
@@ -943,7 +1004,9 @@ export default function AgentChatSection() {
     });
     // Ensure the current session is visible in the threads list with first message as fallback title
     setThreads((prev) => {
-      const fallbackTitle = content.length > 40 ? `${content.slice(0, 40)}…` : content;
+      const fallbackTitle = silentCommand
+        ? currentSessionFallbackTitle || "Context compaction"
+        : content.length > 40 ? `${content.slice(0, 40)}…` : content;
       return dedupeThreads([
         {
           session_key: sessionKey,
@@ -964,8 +1027,241 @@ export default function AgentChatSection() {
       ]);
     });
     try {
-      // Buffer for intermediate thinking text between tool calls
-      let thinkingBuffer = "";
+      let assistantSegmentId = assistantId;
+      let assistantSegmentIndex = 0;
+      let assistantSegmentHasText = false;
+      let assistantSegmentHasSteps = silentCommand;
+      let nextAssistantDeltaStartsSegment = false;
+
+      const appendAssistantSegment = (initialContent = "") => {
+        const previousSegmentId = assistantSegmentId;
+        assistantSegmentIndex += 1;
+        assistantSegmentId = `assistant-${Date.now()}-${assistantSegmentIndex}`;
+        assistantSegmentHasText = initialContent.trim().length > 0;
+        assistantSegmentHasSteps = false;
+        nextAssistantDeltaStartsSegment = false;
+        const message: ChatMessage = {
+          id: assistantSegmentId,
+          role: "assistant",
+          content: initialContent,
+          timestamp: Date.now() / 1000,
+          meta: "Bifrost Agent",
+        };
+        setMessages((prev) => [
+          ...prev.map((item) =>
+            item.id === previousSegmentId ? { ...item, hideTimestamp: true } : item,
+          ),
+          message,
+        ]);
+      };
+
+      const appendAssistantDelta = (delta: string) => {
+        if (!delta) {
+          return;
+        }
+        if (
+          nextAssistantDeltaStartsSegment &&
+          (assistantSegmentHasText || assistantSegmentHasSteps)
+        ) {
+          appendAssistantSegment();
+        }
+        const targetId = assistantSegmentId;
+        const segmentHadText = assistantSegmentHasText;
+        setMessages((prev) =>
+          prev.map((message) => {
+            if (message.id !== targetId) {
+              return message;
+            }
+            const nextContent =
+              !segmentHadText && message.content === "Agent is running..."
+                ? delta
+                : `${message.content}${delta}`;
+            return {
+              ...message,
+              content: nextContent,
+            };
+          }),
+        );
+        assistantSegmentHasText =
+          assistantSegmentHasText || delta.trim().length > 0;
+        nextAssistantDeltaStartsSegment = false;
+      };
+
+      const appendProcessStep = (step: ProcessStep) => {
+        const targetId = assistantSegmentId;
+        const segmentHadText = assistantSegmentHasText;
+        setMessages((prev) =>
+          prev.map((message) =>
+            message.id === targetId
+              ? (() => {
+                  const processSteps = [...(message.processSteps || [])];
+                  if (step.type === "compaction") {
+                    const runningCompactionIndex = processSteps.findIndex(
+                      (item) => item.type === "compaction" && item.status === "running",
+                    );
+                    if (runningCompactionIndex >= 0) {
+                      processSteps[runningCompactionIndex] = step;
+                    } else {
+                      processSteps.push(step);
+                    }
+                  } else {
+                    processSteps.push(step);
+                  }
+                  return {
+                    ...message,
+                    content:
+                      !segmentHadText && message.content === "Agent is running..."
+                        ? ""
+                        : message.content,
+                    processSteps,
+                  };
+                })()
+              : message,
+          ),
+        );
+        assistantSegmentHasSteps = true;
+      };
+
+      const finishSilentCommandCompaction = (
+        status: "success" | "failed",
+        summary: string,
+      ) => {
+        setMessages((prev) =>
+          prev.map((message) => {
+            if (message.id !== assistantId) {
+              return message;
+            }
+            const processSteps = [...(message.processSteps || [])];
+            const runningCompactionIndex = processSteps.findIndex(
+              (item) => item.type === "compaction" && item.status === "running",
+            );
+            if (runningCompactionIndex < 0) {
+              return message;
+            }
+            processSteps[runningCompactionIndex] = {
+              ...processSteps[runningCompactionIndex],
+              status,
+              summary,
+            };
+            return { ...message, content: "", processSteps };
+          }),
+        );
+      };
+
+      const updateRunningToolStep = (
+        toolName: string,
+        success: boolean,
+        toolResult?: string,
+      ) => {
+        const targetId = assistantSegmentId;
+        setMessages((prev) => {
+          const updateMessageAt = (messages: ChatMessage[], index: number) => {
+            const steps = [...(messages[index].processSteps || [])];
+            const stepIndex = steps
+              .map((step, i) => ({ step, i }))
+              .reverse()
+              .find(
+                ({ step }) =>
+                  step.type === "tool" &&
+                  step.status === "running" &&
+                  step.summary.startsWith(toolName),
+              )?.i;
+            if (stepIndex === undefined) {
+              return null;
+            }
+            steps[stepIndex] = {
+              ...steps[stepIndex],
+              status: success ? "success" : "failed",
+              result: toolResult || undefined,
+            };
+            const next = [...messages];
+            next[index] = { ...messages[index], processSteps: steps };
+            return next;
+          };
+
+          const targetIndex = prev.findIndex((message) => message.id === targetId);
+          if (targetIndex >= 0) {
+            const next = updateMessageAt(prev, targetIndex);
+            if (next) {
+              return next;
+            }
+          }
+          for (let index = prev.length - 1; index >= 0; index -= 1) {
+            if (index === targetIndex || prev[index].role !== "assistant") {
+              continue;
+            }
+            const next = updateMessageAt(prev, index);
+            if (next) {
+              return next;
+            }
+          }
+          return prev;
+        });
+        assistantSegmentHasSteps = true;
+        nextAssistantDeltaStartsSegment = true;
+      };
+
+      const applyFinalResponse = (response: string) => {
+        const trimmedResponse = response.trim();
+        if (!trimmedResponse) {
+          return;
+        }
+        let handled = false;
+        const targetId = assistantSegmentId;
+        const segmentHadText = assistantSegmentHasText;
+        const segmentHadSteps = assistantSegmentHasSteps;
+        setMessages((prev) => {
+          const current = prev.find((message) => message.id === targetId);
+          if (!current) {
+            return prev;
+          }
+          if (current.content.trim() === trimmedResponse) {
+            handled = true;
+            return prev;
+          }
+          if (!segmentHadText && !segmentHadSteps) {
+            handled = true;
+            assistantSegmentHasText = true;
+            return prev.map((message) =>
+              message.id === targetId
+                ? { ...message, content: response || message.content }
+                : message,
+            );
+          }
+          return prev;
+        });
+        if (!handled) {
+          appendAssistantSegment(response);
+        }
+        setMessages((prev) => {
+          let lastAssistantIndex = -1;
+          for (let index = prev.length - 1; index >= 0; index -= 1) {
+            if (prev[index].role === "assistant") {
+              lastAssistantIndex = index;
+              break;
+            }
+            if (prev[index].role === "user") {
+              break;
+            }
+          }
+          if (lastAssistantIndex < 0) {
+            return prev;
+          }
+          let lastUserIndex = -1;
+          for (let index = lastAssistantIndex; index >= 0; index -= 1) {
+            if (prev[index].role === "user") {
+              lastUserIndex = index;
+              break;
+            }
+          }
+          return prev.map((message, index) =>
+            message.role === "assistant" && index > lastUserIndex
+              ? { ...message, hideTimestamp: index !== lastAssistantIndex }
+              : message,
+          );
+        });
+      };
+
       await runAgentStream({
         message: content,
         sessionKey,
@@ -975,6 +1271,13 @@ export default function AgentChatSection() {
         runnerAdapter: selectedRunnerAdapter(runnerOptions, runnerId),
         onEvent: (event) => {
           setTelemetry((prev) => reduceTelemetry(prev, event));
+          if (silentCommand) {
+            const step = eventToProcessStep(event);
+            if (step?.type === "compaction") {
+              appendProcessStep(step);
+            }
+            return;
+          }
           // Dynamically update thread title in the sidebar when set_title fires
           if (event.eventType === "title_updated" && typeof event.title === "string") {
             const newTitle = event.title as string;
@@ -990,92 +1293,39 @@ export default function AgentChatSection() {
               return changed ? next : prev;
             });
           }
-          // Accumulate assistant_delta into thinking buffer (not message.content)
           if (event.eventType === "assistant_delta" && typeof event.content === "string") {
-            thinkingBuffer += event.content;
+            appendAssistantDelta(event.content);
             return;
           }
-          // When tool_started arrives, flush thinking buffer as a thinking step, then add tool step
           if (event.eventType === "tool_started") {
-            const newSteps: ProcessStep[] = [];
-            if (thinkingBuffer.trim()) {
-              newSteps.push({
-                type: "thinking",
-                summary: thinkingBuffer.trim(),
-                status: "success",
-              });
-              thinkingBuffer = "";
-            }
             const toolStep = eventToProcessStep(event);
-            if (toolStep) newSteps.push(toolStep);
-            if (newSteps.length > 0) {
-              setMessages((prev) =>
-                prev.map((message) =>
-                  message.id === assistantId
-                    ? {
-                        ...message,
-                        processSteps: [...(message.processSteps || []), ...newSteps],
-                      }
-                    : message,
-                ),
-              );
+            if (toolStep) {
+              appendProcessStep(toolStep);
             }
             return;
           }
-          // When tool_finished arrives, update the last matching running tool step with result and status
           if (event.eventType === "tool_finished" && isRecord(event.log)) {
             const log = event.log as Record<string, unknown>;
             const toolName = stringFrom(log.tool_name) || stringFrom(log.toolName) || "tool";
             const success = log.success !== false;
             const toolResult = stringFrom(log.result);
-            setMessages((prev) =>
-              prev.map((message) => {
-                if (message.id !== assistantId) return message;
-                // Find the last running tool step matching this tool name and update it
-                const steps = [...(message.processSteps || [])];
-                for (let i = steps.length - 1; i >= 0; i--) {
-                  if (steps[i].type === "tool" && steps[i].status === "running" && steps[i].summary.startsWith(toolName)) {
-                    steps[i] = {
-                      ...steps[i],
-                      status: success ? "success" : "failed",
-                      result: toolResult || undefined,
-                    };
-                    break;
-                  }
-                }
-                return { ...message, processSteps: steps };
-              }),
-            );
+            updateRunningToolStep(toolName, success, toolResult || undefined);
             return;
           }
-          // Build process steps for other event types (plan_updated, compaction, etc.)
           const step = eventToProcessStep(event);
           if (step) {
-            setMessages((prev) =>
-              prev.map((message) =>
-                message.id === assistantId
-                  ? {
-                      ...message,
-                      processSteps: [...(message.processSteps || []), step],
-                    }
-                  : message,
-              ),
-            );
+            appendProcessStep(step);
           }
         },
         onDelta: () => {
-          // No-op: deltas are accumulated as thinking steps in onEvent
+          // Deltas are rendered as assistant message segments from onEvent.
         },
         onFinal: (response) => {
-          // Flush any remaining thinking buffer (from the final loop iteration before tools)
-          // The final response from assistant_final/turn_finished is the real output
-          setMessages((prev) =>
-            prev.map((message) =>
-              message.id === assistantId
-                ? { ...message, content: response || message.content }
-                : message,
-            ),
-          );
+          if (silentCommand) {
+            finishSilentCommandCompaction("success", "上下文已自动压缩");
+            return;
+          }
+          applyFinalResponse(response);
         },
       });
       setHistoryPath(undefined);
@@ -1091,12 +1341,106 @@ export default function AgentChatSection() {
       }));
       setMessages((prev) =>
         prev.map((message) =>
-          message.id === assistantId ? { ...message, content: text } : message,
+          message.id === assistantId
+            ? silentCommand
+              ? {
+                  ...message,
+                  content: "",
+                  processSteps: [
+                    ...(message.processSteps || []).filter(
+                      (step) =>
+                        !(step.type === "compaction" && step.status === "running"),
+                    ),
+                    {
+                      type: "compaction",
+                      summary: "上下文压缩失败",
+                      status: "failed",
+                      result: text,
+                    },
+                  ],
+                }
+              : { ...message, content: text }
+            : message,
         ),
       );
       antdMessage.error(text);
     } finally {
       setRunning(false);
+    }
+  };
+
+  const handleSlashCommand = (command: string) => {
+    setSlashRunner(undefined);
+    void handleSend({ contentOverride: command, silentCommand: true });
+  };
+
+  const slashOptionCount = slashCommandOptions.length + slashRunnerOptions.length;
+  const slashOptionKey = useMemo(
+    () =>
+      [
+        ...slashCommandOptions.map((option) => `command:${option.value}`),
+        ...slashRunnerOptions.map((option) => `runner:${option.value}`),
+      ].join("|"),
+    [slashCommandOptions, slashRunnerOptions],
+  );
+
+  useEffect(() => {
+    if (!showSlashRunnerPanel || slashOptionCount <= 0) {
+      setSlashActiveIndex(0);
+      return;
+    }
+    setSlashActiveIndex((index) => Math.min(index, slashOptionCount - 1));
+  }, [showSlashRunnerPanel, slashOptionCount, slashOptionKey]);
+
+  const selectActiveSlashOption = useCallback(() => {
+    if (!showSlashRunnerPanel || slashOptionCount <= 0) {
+      return false;
+    }
+    if (slashActiveIndex < slashCommandOptions.length) {
+      const option = slashCommandOptions[slashActiveIndex];
+      if (!option) {
+        return false;
+      }
+      handleSlashCommand(option.command);
+      return true;
+    }
+    const runner = slashRunnerOptions[slashActiveIndex - slashCommandOptions.length];
+    if (!runner) {
+      return false;
+    }
+    setSlashRunner(runner);
+    setDraft("");
+    return true;
+  }, [
+    showSlashRunnerPanel,
+    slashActiveIndex,
+    slashCommandOptions,
+    slashOptionCount,
+    slashRunnerOptions,
+    setSlashRunner,
+  ]);
+
+  const handleComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (showSlashRunnerPanel && slashOptionCount > 0) {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setSlashActiveIndex((index) => (index + 1) % slashOptionCount);
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setSlashActiveIndex((index) => (index - 1 + slashOptionCount) % slashOptionCount);
+        return;
+      }
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        selectActiveSlashOption();
+        return;
+      }
+    }
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      void handleSend();
     }
   };
 
@@ -1260,88 +1604,17 @@ export default function AgentChatSection() {
 
             <div style={styles.composer}>
               <div style={styles.composerTrack} data-testid="agent-chat-composer-track">
-                <Space direction="vertical" size={10} style={{ width: "100%" }}>
-              {telemetry.plan.length > 0 ? (
-                <div data-testid="agent-chat-plan" style={styles.planPanel}>
-                  <button
-                    type="button"
-                    onClick={() => setPlanCollapsed((value) => !value)}
-                    data-testid="agent-chat-plan-toggle"
-                    style={{
-                      ...styles.planHeader,
-                      border: 0,
-                      background: "transparent",
-                      cursor: "pointer",
-                      color: token.colorText,
-                    }}
-                  >
-                    <span style={styles.planHeaderLabel}>
-                      <CheckCircleOutlined />
-                      <Text strong style={{ fontSize: 13, lineHeight: "18px" }}>
-                        Plan
-                      </Text>
-                      <Tag style={styles.planCountTag}>{telemetry.plan.length}</Tag>
-                    </span>
-                    {planCollapsed ? <RightOutlined /> : <DownOutlined />}
-                  </button>
-                  {!planCollapsed ? (
-                    <div style={styles.planBody}>
-                      <div data-testid="agent-chat-plan-list" style={styles.planList}>
-                        {telemetry.plan.map((step, index) => (
-                          <div
-                            key={`${index}-${step.step}`}
-                            data-testid="agent-chat-plan-item"
-                            style={styles.planItem}
-                          >
-                            {step.status === "completed" ? (
-                              <CheckCircleOutlined
-                                aria-label="completed"
-                                data-testid="agent-chat-plan-status-completed"
-                                style={{
-                                  ...styles.planStatusIcon,
-                                  color: token.colorSuccess,
-                                }}
-                              />
-                            ) : step.status === "in_progress" ? (
-                              <LoadingOutlined
-                                spin
-                                aria-label="in progress"
-                                data-testid="agent-chat-plan-status-in-progress"
-                                style={{
-                                  ...styles.planStatusIcon,
-                                  color: token.colorPrimary,
-                                }}
-                              />
-                            ) : (
-                              <span
-                                aria-label="pending"
-                                data-testid="agent-chat-plan-status-pending"
-                                style={styles.planPendingIcon}
-                              />
-                            )}
-                            <Text title={step.step} style={styles.planStepText}>
-                              {step.step}
-                            </Text>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
-                </div>
-              ) : null}
-              {PROMPT_CHIPS.length > 0 ? (
-                <Space wrap data-testid="agent-chat-prompt-chips">
-                  {PROMPT_CHIPS.map((prompt) => (
-                    <Button
-                      key={prompt}
-                      size="small"
-                      onClick={() => setDraft(prompt)}
-                    >
-                      {prompt}
-                    </Button>
-                    ))}
-                </Space>
-              ) : null}
+                <AgentChatTokenHud telemetry={telemetry} styles={styles} />
+                <Space direction="vertical" size={6} style={{ width: "100%" }}>
+              <AgentChatPlan
+                plan={telemetry.plan}
+                collapsed={planCollapsed}
+                styles={styles}
+                successColor={token.colorSuccess}
+                primaryColor={token.colorPrimary}
+                onToggle={() => setPlanCollapsed((value) => !value)}
+              />
+              <AgentChatPromptChips prompts={PROMPT_CHIPS} onSelect={setDraft} />
               {queuedInputs.length > 0 ? (
                 <div style={styles.queuePanel} data-testid="agent-chat-queue-panel">
                   <Space direction="vertical" size={6} style={{ width: "100%" }}>
@@ -1410,8 +1683,14 @@ export default function AgentChatSection() {
               ) : null}
               {showSlashRunnerPanel ? (
                 <SlashRunnerPanel
+                  commands={slashCommandOptions}
                   options={slashRunnerOptions}
+                  activeIndex={slashActiveIndex}
                   styles={styles}
+                  onActiveIndexChange={setSlashActiveIndex}
+                  onSelectCommand={(option) => {
+                    handleSlashCommand(option.command);
+                  }}
                   onSelect={(option) => {
                     setSlashRunner(option);
                     setDraft("");
@@ -1431,12 +1710,7 @@ export default function AgentChatSection() {
                   data-session-key={sessionKey}
                   value={draft}
                   onChange={(event) => setDraft(event.target.value)}
-                  onPressEnter={(event) => {
-                    if (!event.shiftKey) {
-                      event.preventDefault();
-                      handleSend();
-                    }
-                  }}
+                  onKeyDown={handleComposerKeyDown}
                   placeholder="Describe a task for the Agent..."
                   autoSize={{ minRows: 2, maxRows: 7 }}
                   style={{
@@ -1459,7 +1733,7 @@ export default function AgentChatSection() {
                   icon={running && !draft.trim() ? <BorderOutlined /> : <SendOutlined />}
                   aria-label={running && !draft.trim() ? "Stop" : "Send"}
                   title={running && !draft.trim() ? "Stop current turn" : "Send"}
-                  onClick={running && !draft.trim() ? handleStop : handleSend}
+                  onClick={running && !draft.trim() ? handleStop : () => void handleSend()}
                   disabled={
                     supplementSubmitting || (!draft.trim() && !running)
                   }
