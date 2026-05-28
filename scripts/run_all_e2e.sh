@@ -854,6 +854,7 @@ run_shell_test_isolated() {
 
   run_and_capture "shell:${script_name}" \
     env \
+      BIFROST_BIN="${BIFROST_BIN:-$ROOT_DIR/target/release/bifrost}" \
       ADMIN_PORT="$shell_port" \
       ADMIN_HOST="127.0.0.1" \
       PROXY_PORT="$shell_port" \
@@ -916,6 +917,7 @@ run_shell_batch_parallel() {
         trap 'kill $(jobs -p) 2>/dev/null || true; rm -rf "$shell_data_dir" 2>/dev/null || true' EXIT
         if command -v setsid >/dev/null 2>&1; then
           setsid -w env \
+            BIFROST_BIN="${BIFROST_BIN:-$ROOT_DIR/target/release/bifrost}" \
             ADMIN_PORT="$shell_admin_port" \
             ADMIN_HOST="127.0.0.1" \
             PROXY_PORT="$shell_port" \
@@ -943,6 +945,7 @@ run_shell_batch_parallel() {
             bash "$E2E_DIR/tests/$script_name" &
         else
           env \
+            BIFROST_BIN="${BIFROST_BIN:-$ROOT_DIR/target/release/bifrost}" \
             ADMIN_PORT="$shell_admin_port" \
             ADMIN_HOST="127.0.0.1" \
             PROXY_PORT="$shell_port" \

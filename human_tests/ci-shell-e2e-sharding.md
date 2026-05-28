@@ -630,6 +630,60 @@
 - artifact 复核能定位原始失败是并发 Cargo artifact lock 竞争，而不是业务断言失败。
 - 该回归不启动 Bifrost，不使用 9900，不修改系统代理。
 
+### TC-CS-30: HTTP3/Replay shell E2E 不依赖外部 httpbin 域名
+
+**操作步骤**：
+1. 执行脚本语法检查：
+   ```bash
+   bash -n \
+     e2e-tests/tests/test_http3_e2e.sh \
+     e2e-tests/tests/test_replay_body_decode.sh \
+     e2e-tests/tests/test_chatgpt_web_startup_auth_preflight.sh \
+     scripts/run_all_e2e.sh
+   ```
+2. 静态检查 HTTP3/Replay 失败路径不再引用公网 `httpbin.org` 或 `echo.websocket.events`：
+   ```bash
+   rg -n 'httpbin\.org|echo\.websocket\.events' \
+     e2e-tests/tests/test_http3_e2e.sh \
+     e2e-tests/tests/test_replay_body_decode.sh \
+     e2e-tests/rules/http3/http3_e2e.txt
+   ```
+3. 使用已有 Bifrost binary 执行 HTTP3 shell 回归，避免触发本地重构建：
+   ```bash
+   BIFROST_BIN=/Users/eden/work/github/bifrost/target/debug/bifrost \
+   SKIP_BUILD=true \
+   SKIP_CARGO_TEST=true \
+   PROXY_PORT=18991 \
+   ECHO_HTTP_PORT=18992 \
+   ECHO_HTTPS_PORT=18993 \
+   SERVER_LOG_DIR=/tmp/bifrost-http3-mock-logs \
+   bash e2e-tests/tests/test_http3_e2e.sh
+   ```
+4. 使用本地 HTTP mock 执行 replay gzip body decode 回归：
+   ```bash
+   BIFROST_BIN=/Users/eden/work/github/bifrost/target/debug/bifrost \
+   SKIP_BUILD=true \
+   PROXY_PORT=18981 \
+   MOCK_HTTP_PORT=18982 \
+   BIFROST_DATA_DIR=/tmp/bifrost-replay-body-decode-test \
+   SERVER_LOG_DIR=/tmp/bifrost-replay-body-decode-test/mock-logs \
+   bash e2e-tests/tests/test_replay_body_decode.sh
+   ```
+5. 使用已有 Bifrost binary 执行 startup auth preflight 回归：
+   ```bash
+   BIFROST_BIN=/Users/eden/work/github/bifrost/target/debug/bifrost \
+   SKIP_BUILD=true \
+   BIFROST_CHATGPT_WEB_STARTUP_E2E_PORT=18971 \
+   bash e2e-tests/tests/test_chatgpt_web_startup_auth_preflight.sh
+   ```
+
+**预期结果**：
+- 语法检查通过。
+- 静态检查在 HTTP3/Replay 失败路径中无公网 `httpbin.org` 或 `echo.websocket.events` 引用。
+- HTTP3 shell 回归启动本地 HTTP/HTTPS mock，host forwarding、response body append、gzip、SSE、POST、PUT/PATCH/DELETE 等断言全部通过，最终 `Passed: 34`、`Failed: 0`。
+- Replay gzip 回归启动本地 HTTP mock，`Replay decoded gzip response body as JSON` 通过，最终 `Results: 1 passed, 0 failed`。
+- Startup auth preflight 输出 `using existing bifrost binary` 和 `[chatgpt-web-startup-auth] PASS`，不会进入 `cargo build`，避免 macOS shell shard 内 Cargo artifact lock 竞争。
+
 ## 本轮执行记录
 
 测试日期：2026-05-09
@@ -656,6 +710,7 @@
 | TC-CS-27 | 通过 | 2026-05-20 本轮执行：`bash -n` 覆盖 13 个本轮涉及的 shell E2E 脚本并通过；静态检查确认这些脚本中 `start --no-system-proxy` 的 Bifrost 启动窗口均包含 `--skip-cert-check`，且 `test_asr_task_cli.sh` 包含 `SKIP_BUILD=true` 复用 `target/release/bifrost` 的路径。随后使用 release binary 执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_asr_task_cli.sh`，输出 `skipping build, using .../target/release/bifrost` 与 `[asr-task-cli-e2e] PASS`；执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_values_hot_reload.sh`，汇总 `Total: 5 / Passed: 5 / Failed: 0`；执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_proxy_chain_auth_e2e.sh`，汇总 `Total: 11 / Passed: 11 / Failed: 0`，包含 absolute-form 与 `Proxy-Authorization` 断言。全部真实执行使用临时数据目录、`--no-system-proxy` 与非 9900 端口。 |
 | TC-CS-28 | 通过 | 2026-05-23 本轮执行：`bash -n e2e-tests/tests/test_agent_chat_history_continue.sh e2e-tests/tests/test_agent_direct_path_switch.sh` 通过；`rg -n 'SKIP_BUILD\|target/release/bifrost\|target/debug/bifrost\|skipping build, using\|bifrost binary not found' ...` 显示两个脚本均在 `SKIP_BUILD=true` 分支默认 release binary、本地构建分支默认 debug binary，并在 binary 不可执行时明确失败。随后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_agent_chat_history_continue.sh`，输出 `skipping build, using .../target/release/bifrost` 与 `[agent-chat-history-continue] PASS`；执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_agent_direct_path_switch.sh`，输出 `skipping build, using .../target/release/bifrost` 与 `[agent-direct-path-switch] PASS`。两条真实链路均使用临时数据目录、`--no-system-proxy` 与动态非 9900 端口，未再查找 `target/debug/bifrost`。 |
 | TC-CS-29 | 通过 | 2026-05-26 本轮执行：`bash -n scripts/run_all_e2e.sh` 退出码 0；`rg -n 'CARGO_HEAVY_TESTS\|... \|serial_tests' scripts/run_all_e2e.sh` 显示 `test_agent_builtin_status_runtime.sh`、`test_agent_codex_parity_contracts.sh`、`test_agent_loop_runtime_limits.sh`、`test_asr_model_autonomy.sh`、`test_asr_task_pause_resume.sh`、`test_chatgpt_web_behavior_artifacts.sh`、`test_client_process_transport_attribution.sh`、`test_http3_e2e.sh`、`test_im_agent_markdown_image_reply.sh`、`test_im_agent_streaming_progress_card.sh`、`test_im_gateway_long_reply_delivery_regression.sh`、`test_long_term_memory_remember_recall.sh`、`test_qwen3_asr_local_server.sh`、`test_qwen3_asr_runtime_guards.sh`、`test_skill_creator_flow.sh`、`test_sync_login_direct_e2e.sh`、`test_utf8_safe_preview_e2e.sh`、`test_voice_input_runtime.sh` 等 Cargo-heavy 用例，以及 `is_cargo_heavy` 加入 `serial_tests` 的调度逻辑；`BIFROST_E2E_SHARD_INDEX=1 BIFROST_E2E_SHARD_TOTAL=3 scripts/run_all_e2e.sh --ci --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests` 显示失败相关用例仍在 shard 1 覆盖范围内；`grep -R -n 'Blocking.*file lock on artifact directory' /tmp/bifrost-ci-26451521064/... | head -20` 定位到 Linux/macOS shard 1 artifact 中多个 Cargo-heavy 用例等待 Cargo artifact lock 的原始症状。该回归未启动 Bifrost，未使用 9900，未修改系统代理。 |
+| TC-CS-30 | 通过 | 2026-05-28 本轮执行：`bash -n e2e-tests/tests/test_http3_e2e.sh e2e-tests/tests/test_replay_body_decode.sh e2e-tests/tests/test_chatgpt_web_startup_auth_preflight.sh scripts/run_all_e2e.sh` 通过；`rg -n 'httpbin\.org|echo\.websocket\.events' e2e-tests/tests/test_http3_e2e.sh e2e-tests/tests/test_replay_body_decode.sh e2e-tests/rules/http3/http3_e2e.txt` 无公网域名匹配。随后使用已有 debug binary 执行 `BIFROST_BIN=/Users/eden/work/github/bifrost/target/debug/bifrost SKIP_BUILD=true SKIP_CARGO_TEST=true PROXY_PORT=18991 ECHO_HTTP_PORT=18992 ECHO_HTTPS_PORT=18993 SERVER_LOG_DIR=/tmp/bifrost-http3-mock-logs bash e2e-tests/tests/test_http3_e2e.sh`，脚本启动本地 mock，host forwarding 和 body append 均返回 200，最终 `Passed: 34`、`Failed: 0`。执行 `BIFROST_BIN=/Users/eden/work/github/bifrost/target/debug/bifrost SKIP_BUILD=true PROXY_PORT=18981 MOCK_HTTP_PORT=18982 BIFROST_DATA_DIR=/tmp/bifrost-replay-body-decode-test SERVER_LOG_DIR=/tmp/bifrost-replay-body-decode-test/mock-logs bash e2e-tests/tests/test_replay_body_decode.sh`，输出 `Replay decoded gzip response body as JSON`，`Results: 1 passed, 0 failed`。执行 `BIFROST_BIN=/Users/eden/work/github/bifrost/target/debug/bifrost SKIP_BUILD=true BIFROST_CHATGPT_WEB_STARTUP_E2E_PORT=18971 bash e2e-tests/tests/test_chatgpt_web_startup_auth_preflight.sh`，输出 `using existing bifrost binary` 与 `[chatgpt-web-startup-auth] PASS`，未触发 cargo build。三条真实执行均使用临时端口、`--no-system-proxy`，未使用 9900。 |
 
 ## 清理步骤
 

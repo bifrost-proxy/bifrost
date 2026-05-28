@@ -11,6 +11,9 @@ fi
 PROXY_PORT="${PROXY_PORT:-18888}"
 ADMIN_PORT="$PROXY_PORT"
 ADMIN_BASE_URL="http://127.0.0.1:${ADMIN_PORT}/_bifrost"
+MOCK_HTTP_PORT="${MOCK_HTTP_PORT:-${ECHO_HTTP_PORT:-3000}}"
+MOCK_BASE_URL="http://127.0.0.1:${MOCK_HTTP_PORT}"
+MOCK_LOG_DIR="${SERVER_LOG_DIR:-${BIFROST_DATA_DIR:-./.bifrost-e2e-test}/mock-logs}"
 
 source "$SCRIPT_DIR/../test_utils/assert.sh"
 source "$SCRIPT_DIR/../test_utils/process.sh"
@@ -29,6 +32,9 @@ cleanup() {
     fi
 
     if is_windows; then kill_bifrost_on_port "$PROXY_PORT"; fi
+    MOCK_SERVERS="http" \
+    HTTP_PORT="$MOCK_HTTP_PORT" \
+    "$ROOT_DIR/e2e-tests/mock_servers/start_servers.sh" stop >/dev/null 2>&1 || true
     echo "Cleanup complete."
 }
 
@@ -64,12 +70,20 @@ start_bifrost() {
     exit 1
 }
 
+start_mock_httpbin() {
+    echo "Starting local httpbin mock on port $MOCK_HTTP_PORT..."
+    MOCK_SERVERS="http" \
+    HTTP_PORT="$MOCK_HTTP_PORT" \
+    SERVER_LOG_DIR="$MOCK_LOG_DIR" \
+    "$ROOT_DIR/e2e-tests/mock_servers/start_servers.sh" start-bg
+}
+
 test_replay_gzip_decoding() {
     echo ""
     echo "=== Test: Replay gzip body decoding ==="
 
     local payload
-    payload='{"method":"GET","url":"https://httpbin.org/gzip","headers":[["accept","application/json"],["accept-encoding","gzip"]],"rule_config":{"mode":"none"},"timeout_ms":15000}'
+    payload=$(jq -cn --arg url "${MOCK_BASE_URL}/gzip" '{method:"GET",url:$url,headers:[["accept","application/json"],["accept-encoding","gzip"]],rule_config:{mode:"none"},timeout_ms:15000}')
 
     local response
     response=$(curl -sS -X POST "${ADMIN_BASE_URL}/api/replay/execute" \
@@ -102,6 +116,7 @@ main() {
     echo "  Replay Body Decode E2E Tests"
     echo "=========================================="
 
+    start_mock_httpbin
     start_bifrost
     test_replay_gzip_decoding
 

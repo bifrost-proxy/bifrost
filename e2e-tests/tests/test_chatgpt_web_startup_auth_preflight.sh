@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PORT="${BIFROST_CHATGPT_WEB_STARTUP_E2E_PORT:-18947}"
 DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bifrost-chatgpt-web-startup.XXXXXX")"
 LOG_FILE="$DATA_DIR/bifrost.log"
+BIFROST_BIN="${BIFROST_BIN:-$ROOT_DIR/target/debug/bifrost}"
 PID=""
 
 cleanup() {
@@ -73,12 +74,17 @@ cat >"$DATA_DIR/admin/im_gateway_external_cli_agent.json" <<JSON
 }
 JSON
 
-echo "[chatgpt-web-startup-auth] build bifrost"
-cargo build --bin bifrost >/dev/null
+if [[ "${SKIP_BUILD:-false}" != "true" || ! -x "$BIFROST_BIN" ]]; then
+  echo "[chatgpt-web-startup-auth] build bifrost"
+  cargo build --bin bifrost >/dev/null
+  BIFROST_BIN="$ROOT_DIR/target/debug/bifrost"
+else
+  echo "[chatgpt-web-startup-auth] using existing bifrost binary: $BIFROST_BIN"
+fi
 
 echo "[chatgpt-web-startup-auth] start bifrost on ${PORT}"
 BIFROST_DATA_DIR="$DATA_DIR" BIFROST_CHATGPT_WEB_STARTUP_AUTH_DRY_RUN=1 \
-  "$ROOT_DIR/target/debug/bifrost" start \
+  "$BIFROST_BIN" start \
   -p "$PORT" \
   --unsafe-ssl \
   --skip-cert-check \

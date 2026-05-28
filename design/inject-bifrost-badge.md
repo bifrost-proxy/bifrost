@@ -51,6 +51,7 @@
 - Badge Group 数据保留既有导航契约：内联脚本使用当前字段组合来同时满足面板分组展示和 `/_bifrost/rules?group=...` 跳转定位，不按字段名做单纯重命名式改造。后续如要改字段语义，必须同步迁移注入脚本和跳转逻辑。
 - Group 规则变更时，`handlers/group_rules.rs` 的规则变更通知路径必须刷新 `AdminState.badge_rules_cache`，与个人规则变更路径保持一致。
 - Group 规则启用、禁用或更新已启用规则后，通知路径必须同时触发代理规则 hot reload；hot reload 的 Group 目录解析以本地规则目录为准，远端 group cache 不得成为 Badge 或代理运行时生效的前置条件。
+- Group 规则列表接口从远端 env 同步到本地时，如果同步导致已启用规则的内容变化，或删除了本地已启用规则，必须触发同一条规则变更通知链路，刷新 `AdminState.badge_rules_cache` 并 hot reload runtime rules。否则 Rules 页面会先显示同步后的 enabled 状态，而注入网页里的 Badge 仍使用旧 cache，表现为 Badge active 数量少一到两个，直到用户手动保存任意规则才恢复。
 
 ### 4. Web UI / Admin API
 
@@ -94,6 +95,7 @@
 - `crates/bifrost-e2e/src/tests/group_rules.rs`
   - `group_rules_enable_refreshes_badge_cache`：通过 Group Rule enable API 开启规则后，直接检查 `badge_rules_json()` 已包含该规则，并保留既有 Group 跳转字段组合。
   - `group_rules_rapid_toggle_keeps_active_summary_and_badge_consistent`：连续多次启用/停用同一 Group 规则，每次都轮询 active summary 与 Badge cache 到一致状态，覆盖本地刷新延迟和系统短暂卡顿下的最终一致性。
+  - `group_rules_remote_sync_refreshes_badge_cache_for_enabled_rules`：本地已有 enabled Group 规则且 Badge cache 仍是旧内容时，通过 Group list-sync 从远端同步同名新规则内容，断言 active summary 与 Badge cache 都刷新到新内容，不需要用户再保存任意规则触发补刷新。
   - `resolve_valid_group_dirs_uses_local_dirs_without_sync_session`：没有 active sync session 时，代理热重载仍加载本地 Group 规则目录。
 
 ### 真实场景测试
@@ -107,6 +109,7 @@
 - 新增 `human_tests/badge-hover-panel.md` 的 `TC-BHP-11`：通过本地上游返回 `Content-Type: text/html` 但 body 为 JSON 的响应，确认启用 Badge 时客户端收到的仍是原始 JSON，不包含 Badge 注入片段。
 - 新增 `human_tests/badge-hover-panel.md` 的 `TC-BHP-12`：通过 Group Rule API 启用规则后，不重启服务直接请求代理 HTML，确认 Badge hover 面板 active 数量和规则列表立即更新，并确认 Group 规则链接仍能定位到对应 Rules 页面。
 - 新增 `human_tests/badge-hover-panel.md` 的 `TC-BHP-13`：连续快速启用/停用同一 Group 规则，允许短暂刷新延迟但要求 active summary 与 Badge cache 在限定时间内收敛到一致状态，防止系统卡顿或本地写入延迟导致长期显示旧规则。
+- 新增 `human_tests/badge-hover-panel.md` 的 `TC-BHP-14`：本地已有 enabled Group 规则旧内容、远端同步同名新内容时，只打开/刷新 Rules 页面触发 Group list-sync，不手动保存规则，确认后续代理 HTML 的 Badge active 数量与 Merged Rules 内容立即更新。
 
 ## 校验要求
 

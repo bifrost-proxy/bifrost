@@ -240,23 +240,29 @@ fn sync_envs_to_local(
     rules_storage: &RulesStorage,
     envs: &[RemoteEnv],
     group_name: &str,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let existing_names: std::collections::HashSet<String> = rules_storage
         .list()
         .unwrap_or_default()
         .into_iter()
         .collect();
 
+    let mut active_rules_changed = false;
     let mut remote_names = std::collections::HashSet::new();
     for env in envs {
         let rule_name = env.name.clone();
         remote_names.insert(rule_name.clone());
 
-        let existing_enabled = rules_storage
-            .load(&rule_name)
-            .ok()
-            .map(|r| r.enabled)
-            .unwrap_or(false);
+        let existing = rules_storage.load(&rule_name).ok();
+        let existing_enabled = existing.as_ref().map(|r| r.enabled).unwrap_or(false);
+        if existing_enabled
+            && existing
+                .as_ref()
+                .map(|r| r.content.as_str() != env.rule.as_str())
+                .unwrap_or(false)
+        {
+            active_rules_changed = true;
+        }
 
         let mut rule_file = bifrost_storage::RuleFile::new(&rule_name, &env.rule);
         rule_file.enabled = existing_enabled;
@@ -272,11 +278,19 @@ fn sync_envs_to_local(
 
     for name in &existing_names {
         if !remote_names.contains(name) {
+            if rules_storage
+                .load(name)
+                .ok()
+                .map(|r| r.enabled)
+                .unwrap_or(false)
+            {
+                active_rules_changed = true;
+            }
             let _ = rules_storage.delete(name);
         }
     }
 
-    Ok(())
+    Ok(active_rules_changed)
 }
 
 fn build_rule_info_from_storage(rules_storage: &RulesStorage) -> Vec<GroupRuleInfo> {
@@ -671,11 +685,16 @@ async fn handle_list_and_sync(
     );
 
     match fetch_user_envs(&sync_manager, &virtual_user_id).await {
-        Ok(envs) => {
-            if let Err(e) = sync_envs_to_local(&group_storage, &envs, &group_name) {
+        Ok(envs) => match sync_envs_to_local(&group_storage, &envs, &group_name) {
+            Ok(active_rules_changed) => {
+                if active_rules_changed {
+                    notify_rules_changed(&state);
+                }
+            }
+            Err(e) => {
                 tracing::warn!(error = %e, "Failed to sync envs to local storage");
             }
-        }
+        },
         Err(e) => {
             tracing::warn!(
                 error = %e,
@@ -1014,5 +1033,96 @@ fn notify_rules_changed(state: &SharedAdminState) {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bifrost_storage::RuleFile;
+
+    fn remote_env(name: &str, rule: &str) -> RemoteEnv {
+        RemoteEnv {
+            id: format!("env-{name}"),
+            user_id: "virtual-user".to_string(),
+            name: name.to_string(),
+            rule: rule.to_string(),
+            create_time: "2026-05-28T00:00:00Z".to_string(),
+            update_time: "2026-05-28T00:00:00Z".to_string(),
+        }
+    }
+
+    fn storage() -> RulesStorage {
+        let dir = tempfile::tempdir().expect("temp dir");
+        RulesStorage::with_dir(dir.keep()).expect("rules storage")
+    }
+
+    #[test]
+    fn sync_envs_to_local_reports_enabled_rule_content_changes() {
+        let storage = storage();
+        let mut local_rule = RuleFile::new("badge-cache-rule", "old.example.com status://201");
+        local_rule.enabled = true;
+        local_rule.group = Some("cache-group".to_string());
+        storage.save(&local_rule).expect("save local rule");
+
+        let changed = sync_envs_to_local(
+            &storage,
+            &[remote_env(
+                "badge-cache-rule",
+                "new.example.com status://202",
+            )],
+            "cache-group",
+        )
+        .expect("sync envs");
+
+        assert!(
+            changed,
+            "enabled rule content changes must refresh Badge cache"
+        );
+        let saved = storage.load("badge-cache-rule").expect("load synced rule");
+        assert!(saved.enabled);
+        assert_eq!(saved.content, "new.example.com status://202");
+    }
+
+    #[test]
+    fn sync_envs_to_local_reports_enabled_rule_removal() {
+        let storage = storage();
+        let mut removed_rule =
+            RuleFile::new("removed-active-rule", "gone.example.com status://410");
+        removed_rule.enabled = true;
+        removed_rule.group = Some("cache-group".to_string());
+        storage.save(&removed_rule).expect("save local rule");
+
+        let changed = sync_envs_to_local(&storage, &[], "cache-group").expect("sync envs");
+
+        assert!(changed, "removing an enabled rule must refresh Badge cache");
+        assert!(storage.load("removed-active-rule").is_err());
+    }
+
+    #[test]
+    fn sync_envs_to_local_ignores_inactive_remote_metadata_changes() {
+        let storage = storage();
+        let mut disabled_rule = RuleFile::new("inactive-rule", "inactive.example.com status://200");
+        disabled_rule.enabled = false;
+        disabled_rule.group = Some("cache-group".to_string());
+        storage.save(&disabled_rule).expect("save local rule");
+
+        let changed = sync_envs_to_local(
+            &storage,
+            &[remote_env(
+                "inactive-rule",
+                "inactive.example.com status://204",
+            )],
+            "cache-group",
+        )
+        .expect("sync envs");
+
+        assert!(
+            !changed,
+            "disabled rule updates do not affect active Badge/runtime state"
+        );
+        let saved = storage.load("inactive-rule").expect("load synced rule");
+        assert!(!saved.enabled);
+        assert_eq!(saved.content, "inactive.example.com status://204");
     }
 }

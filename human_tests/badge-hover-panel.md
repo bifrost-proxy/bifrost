@@ -329,6 +329,31 @@ curl -x http://127.0.0.1:8800 http://httpbin.org/html -s | grep "__bb_panel__"
 
 ---
 
+### TC-BHP-14：回归 - Group 远端同步已启用规则后 Badge cache 立即刷新
+
+**操作步骤**：
+1. 使用临时数据目录和非 9900 端口启动 Bifrost，带 `--no-system-proxy --enable-badge-injection`，并登录到测试 Sync 服务。
+2. 在本地 Group 规则目录中准备 enabled 规则 `badge-sync-cache-rule`，内容为 `badge-sync-cache.example.com status://230`，并先请求一个代理 HTML 页面，确认 Badge 内联 `merged_content` 包含 `status://230`。
+3. 在远端同一 Group 下准备同名规则 `badge-sync-cache-rule`，内容为 `badge-sync-cache.example.com status://231`。
+4. 打开或刷新管理端 Rules 页面中的该 Group，或直接请求：
+   ```bash
+   curl http://127.0.0.1:8800/_bifrost/api/group-rules/{group_id} -s
+   ```
+5. 不手动保存任何规则，立即请求新的代理 HTML 页面并检查 Badge 内联数据：
+   ```bash
+   curl -x http://127.0.0.1:8800 http://httpbin.org/html -s -o /tmp/bifrost-badge-group-sync-cache.html
+   ```
+
+**预期结果**：
+- `/_bifrost/api/group-rules/{group_id}` 返回 200，Rules 页面看到的该规则内容/规则数量与远端同步后的状态一致。
+- 新代理 HTML 的 Badge 内联 `rules` 数组仍包含 `badge-sync-cache-rule`，active 数量与 `/_bifrost/api/rules/active-summary` 一致。
+- Badge 内联 `merged_content` 包含 `status://231`，不再包含旧的 `status://230`。
+- 整个过程不需要通过手动编辑/保存任意规则来触发补刷新。
+
+**回归目的**：覆盖 Group list-sync 修改本地已启用规则但未刷新 `badge_rules_cache` 的问题，防止 Badge active 数量少于管理端 enabled 数量。
+
+---
+
 ## 清理步骤
 
 ```bash
@@ -336,5 +361,5 @@ curl -X DELETE http://127.0.0.1:8800/_bifrost/api/rules/test-badge-rule -s
 curl -X DELETE http://127.0.0.1:18880/_bifrost/api/rules/badge-html-tag-escaping-regression -s
 curl -X PUT http://127.0.0.1:8800/_bifrost/api/config/performance \
   -H "Content-Type: application/json" -d '{"inject_bifrost_badge":true}' -s
-rm -f /tmp/bifrost-badge-escape-rule.json /tmp/bifrost-badge-escape.html /tmp/bifrost-badge-mislabeled-json.txt /tmp/bifrost-badge-group-cache.html /tmp/bifrost-badge-rapid-toggle-enabled.txt
+rm -f /tmp/bifrost-badge-escape-rule.json /tmp/bifrost-badge-escape.html /tmp/bifrost-badge-mislabeled-json.txt /tmp/bifrost-badge-group-cache.html /tmp/bifrost-badge-rapid-toggle-enabled.txt /tmp/bifrost-badge-group-sync-cache.html
 ```
