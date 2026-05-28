@@ -254,6 +254,7 @@ pub(super) async fn request_agent_stop_stops_external_runner_by_session_key() {
     let runtime = crate::im_gateway::external_cli::ExternalCliRuntime::new(&runs_root);
     let session_key = "external-stop-status-deadlock";
     let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
+        images: Vec::new(),
         message: "stop by shared helper".to_string(),
         operation: "ask".to_string(),
         params: serde_json::Value::Null,

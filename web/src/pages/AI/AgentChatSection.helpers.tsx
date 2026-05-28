@@ -26,12 +26,37 @@ export type ChatMessage = {
   id: string;
   role: "user" | "assistant";
   content: string;
+  contentParts?: ChatContentPart[];
   timestamp?: number;
   meta?: string;
   processSteps?: ProcessStep[];
   processCollapsed?: boolean;
   hideTimestamp?: boolean;
   runnerCall?: RunnerCallMessageMeta;
+};
+
+export type ChatImageUrlPart = {
+  type: "image_url";
+  image_url?: {
+    url?: string;
+    detail?: string;
+  };
+};
+
+export type ChatTextPart = {
+  type: "text";
+  text?: string;
+};
+
+export type ChatContentPart = ChatImageUrlPart | ChatTextPart;
+
+export type PendingChatImage = {
+  id: string;
+  mimeType: string;
+  data: string;
+  previewUrl: string;
+  name?: string;
+  size: number;
 };
 
 export type RunnerCallMessageMeta = {
@@ -90,6 +115,8 @@ export type SessionDetailMessage = {
   role: string;
   content: string;
   timestamp?: number;
+  content_parts?: ChatContentPart[];
+  contentParts?: ChatContentPart[];
 };
 
 export type SessionDetail = {
@@ -244,12 +271,17 @@ export function sessionDetailToMessages(detail: SessionDetail): ChatMessage[] {
         id: `session-${detail.session_key}-${index}`,
         role,
         content: runnerCall?.content ?? message.content ?? "",
+        contentParts: message.content_parts || message.contentParts,
         timestamp: message.timestamp,
         meta: runnerCall ? "Runner call" : role === "user" ? "You" : "Bifrost Agent",
         runnerCall: runnerCall?.meta,
       };
     })
-    .filter((message) => message.content.trim().length > 0);
+    .filter(
+      (message) =>
+        message.content.trim().length > 0 ||
+        (message.contentParts || []).some((part) => part.type === "image_url"),
+    );
 }
 
 function inferPersistedRunnerCall(
@@ -615,6 +647,7 @@ export function MetricRow({ label, value }: { label: string; value: string }) {
 
 export async function runAgentStream(params: {
   message: string;
+  images?: PendingChatImage[];
   sessionKey: string;
   historyPath?: string;
   workDir?: string;
@@ -635,6 +668,11 @@ export async function runAgentStream(params: {
         isExternalRunner
           ? {
               message: params.message,
+              images: (params.images || []).map((image) => ({
+                mimeType: image.mimeType,
+                data: image.data,
+                name: image.name,
+              })),
               sessionKey: params.sessionKey,
               runnerId: params.runnerId,
               adapter: params.runnerAdapter,
@@ -643,6 +681,10 @@ export async function runAgentStream(params: {
             }
           : {
               message: params.message,
+              images: (params.images || []).map((image) => ({
+                mime_type: image.mimeType,
+                data: image.data,
+              })),
               session_key: params.sessionKey,
               history_path: params.historyPath,
               work_dir: params.workDir,

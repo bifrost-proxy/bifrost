@@ -17,6 +17,18 @@ async function routeAgentSessionEvents(page: Page, body?: string) {
   });
 }
 
+async function pasteImageFiles(page: Page, testId: string, files: Array<{ name: string; type: string; content: string }>) {
+  await page.getByTestId(testId).evaluate((element, pastedFiles) => {
+    const data = new DataTransfer();
+    pastedFiles.forEach((file) => {
+      data.items.add(new File([file.content], file.name, { type: file.type }));
+    });
+    const event = new ClipboardEvent("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "clipboardData", { value: data });
+    element.dispatchEvent(event);
+  }, files);
+}
+
 test.beforeEach(async ({ page }) => {
   await routeAgentSessionEvents(page);
 });
@@ -2587,6 +2599,133 @@ test("AI Agent Chat composer keeps Shift Enter multiline and sends on Enter", as
   await expect(page.getByTestId("agent-chat-messages")).toContainText("Line two");
   await expect(page.getByTestId("agent-chat-messages")).toContainText(
     "Multiline sent through API",
+  );
+});
+
+test("AI Agent Chat supports pasted image previews and pure image send", async ({
+  page,
+}) => {
+  const requests: Array<Record<string, unknown>> = [];
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ sessions: [] }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "bifrost_agent",
+        runners: {},
+        channels: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ content: "", work_dir: "/tmp/workspace" }),
+    });
+  });
+  await page.route("**/_bifrost/api/agent/chat/stream", async (route) => {
+    requests.push(route.request().postDataJSON());
+    await route.fulfill({
+      status: 200,
+      contentType: "text/event-stream",
+      body:
+        'event: run_started\ndata: {"eventType":"run_started"}\n\n' +
+        'event: run_finished\ndata: {"eventType":"run_finished","response":"Image received"}\n\n',
+    });
+  });
+
+  await openPage(page, "ai?aiSection=agent-chat&agentSection=chat");
+
+  const input = page.getByTestId("agent-chat-input");
+  await input.focus();
+  await pasteImageFiles(
+    page,
+    "agent-chat-input",
+    Array.from({ length: 7 }, (_, index) => ({
+      name: `image-${index}.png`,
+      type: "image/png",
+      content: `image-${index}`,
+    })),
+  );
+
+  await expect(page.getByTestId("agent-chat-image-preview")).toHaveCount(6);
+  await page.getByTestId("theme-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(page.getByTestId("agent-chat-image-preview")).toHaveCount(6);
+  await page.getByLabel("Remove pasted image 1").click();
+  await expect(page.getByTestId("agent-chat-image-preview")).toHaveCount(5);
+  await expect(page.getByTestId("agent-chat-send")).toBeEnabled();
+  await page.getByTestId("agent-chat-send").click();
+
+  await expect(page.getByTestId("agent-chat-input")).toHaveValue("");
+  await expect(page.getByTestId("agent-chat-image-preview")).toHaveCount(0);
+  await expect(page.getByTestId("agent-chat-messages")).toContainText("Attached 5 images");
+  await expect(page.getByTestId("agent-chat-message-images")).toBeVisible();
+  await expect(page.getByTestId("agent-chat-message-images").locator("img")).toHaveCount(5);
+  await expect(page.getByTestId("agent-chat-messages")).toContainText("Image received");
+  expect(requests).toHaveLength(1);
+  expect(requests[0]).toMatchObject({ message: "" });
+  expect((requests[0].images as unknown[]).length).toBe(5);
+  expect(requests[0].images).toEqual(
+    expect.arrayContaining([expect.objectContaining({ mime_type: "image/png" })]),
+  );
+});
+
+test("AI Agent Chat sends pasted images to external runner stream", async ({
+  page,
+}) => {
+  let requestPayload: Record<string, unknown> | undefined;
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ sessions: [] }) });
+  });
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "codex",
+        runners: { codex: { enabled: true, adapter: "codex" } },
+        channels: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ content: "", work_dir: "/tmp/workspace" }) });
+  });
+  await page.route("**/_bifrost/api/im-gateway/chat/stream", async (route) => {
+    requestPayload = route.request().postDataJSON();
+    await route.fulfill({
+      status: 200,
+      contentType: "application/x-ndjson",
+      body: '{"eventType":"run_finished","status":"succeeded","response":"Codex saw image"}\n',
+    });
+  });
+
+  await openPage(page, "ai?aiSection=agent-chat&agentSection=chat");
+  await page.getByTestId("agent-chat-input").fill("Describe this image");
+  await pasteImageFiles(page, "agent-chat-input", [
+    { name: "external.png", type: "image/png", content: "external" },
+  ]);
+  await expect(page.getByTestId("agent-chat-image-preview")).toHaveCount(1);
+  await page.getByTestId("agent-chat-send").click();
+
+  await expect(page.getByTestId("agent-chat-messages")).toContainText("Codex saw image");
+  expect(requestPayload).toMatchObject({
+    message: "Describe this image",
+    runnerId: "codex",
+  });
+  expect(requestPayload?.images).toEqual(
+    expect.arrayContaining([expect.objectContaining({ mimeType: "image/png" })]),
   );
 });
 

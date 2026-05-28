@@ -19,11 +19,17 @@ function isVisibleMessage(message: ChatMessage, running: boolean) {
   if (message.runnerCall) {
     return true;
   }
+  const hasImages = (message.contentParts || []).some((part) => part.type === "image_url");
   const hasProcessSteps = (message.processSteps?.length || 0) > 0;
   const isRunningPlaceholder =
     message.content === "Agent is running..." ||
     message.content === "Runner is running...";
-  return message.content.trim().length > 0 || hasProcessSteps || (running && isRunningPlaceholder);
+  return (
+    message.content.trim().length > 0 ||
+    hasImages ||
+    hasProcessSteps ||
+    (running && isRunningPlaceholder)
+  );
 }
 
 function isCompactionOnlyStatusMessage(message?: ChatMessage) {
@@ -86,6 +92,10 @@ export function AgentChatMessageList({
           shouldShowGenerating ||
           (message.content.trim().length > 0 &&
             !(isRunningPlaceholder && hasProcessSteps));
+        const imageParts = (message.contentParts || []).filter(
+          (part): part is Extract<typeof part, { type: "image_url" }> =>
+            part.type === "image_url" && Boolean(part.image_url?.url),
+        );
         const shouldShowProcessFallback =
           !isUser && hasExecutionSteps && !shouldShowContent && !message.runnerCall;
         const isCompactionOnlyStatus =
@@ -182,6 +192,18 @@ export function AgentChatMessageList({
                         </div>
                       )}
                     </Paragraph>
+                  ) : null}
+                  {imageParts.length > 0 ? (
+                    <div style={styles.messageImageGrid} data-testid="agent-chat-message-images">
+                      {imageParts.map((part, imageIndex) => (
+                        <img
+                          key={`${message.id}-image-${imageIndex}`}
+                          src={resolveAgentMarkdownImageSrc(part.image_url?.url)}
+                          alt={`Attached image ${imageIndex + 1}`}
+                          style={styles.messageImageThumb}
+                        />
+                      ))}
+                    </div>
                   ) : null}
                   {shouldShowProcessFallback ? (
                     <Paragraph style={{ margin: "0 0 4px" }}>

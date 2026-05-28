@@ -273,6 +273,56 @@ IM Gateway Agent 支持把飞书 IM 中的图片和文本一起传给模型；`P
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - `cargo test --workspace --all-features`
 
+## Agent Chat WebUI 图片粘贴与 Runner 附件桥接
+
+### 目标
+
+Agent Chat Composer 支持直接粘贴图片，图片预览展示在输入框上部，单次最多 6 张。用户可以发送“文本 + 图片”，也可以只发送图片。内置 Bifrost Agent 继续走原生 Chat Completions 多模态 content parts；Codex/BIF/自定义外部 Runner 在没有原生图片输入能力时走文件路径桥接，让 Runner 可以通过本地图片文件消费视觉输入。
+
+### WebUI 交互
+
+1. `AgentChatSection` 维护 `pendingImages`，`TextArea` 的 `onPaste` 从 `clipboardData.items/files` 中筛选 `image/*` 文件。
+2. 图片读取为 data URL 后保存 `{id, mimeType, data, previewUrl, name, size}`；`data` 使用去掉 data URL 前缀后的 base64，`previewUrl` 用于缩略图展示。
+3. Composer 在输入框上方渲染预览条：最多 6 张，支持逐张删除；超过上限时用 toast 提示并忽略超出部分。
+4. 发送按钮启用条件改为 `draft.trim().length > 0 || pendingImages.length > 0 || running`。非运行态允许纯图片发送，运行态 Guide/Queue 仍只支持文本，避免把图片注入到已运行 loop 的中途控制消息。
+5. 本地消息和历史消息支持 `contentParts` 图片渲染；用户消息有图片但无文本时展示 `Attached N image(s)` 作为可读占位，同时在气泡中展示缩略图。
+6. WebUI 使用 CSS 变量/Ant Design token 颜色，预览框、删除按钮和占位文字必须兼容亮色/暗色主题。
+
+### API 与持久化
+
+1. `/_bifrost/api/agent/chat/stream` 允许 `message` 为空但 `images` 非空；请求体 `images` 继续使用 `{mime_type,data}` 并截断到 6 张。
+2. `/_bifrost/api/im-gateway/chat/stream` 与 `ExternalCliRunRequest` 新增 `images` 字段，格式同 WebUI：`{mimeType|mime_type,data,name?}`。
+3. `SessionMessage.content_parts` 已从内置 Agent JSONL 恢复路径返回给 WebUI；外部 Runner 的 `session_state` 增加 `content_parts`，保证 Codex/BIF 线程刷新后仍能回显用户粘贴的图片。
+4. 线程标题 fallback：若消息文本为空但有图片，使用 `Attached N image(s)`，避免纯图片会话在 Threads 中显示空标题或 session key。
+
+### 外部 Runner 附件桥接
+
+1. 外部 Runner 请求进入 `ExternalCliRuntime::run()` 后，在 run 目录下创建 `attachments/images/`，把图片写为 `image-1.png` / `image-2.jpg` 等稳定文件名。
+2. `build_prompt()` 在用户消息前追加：
+   - `## Attached Images`
+   - 每张图片的 `path`、`mime_type`、`size_bytes`
+   - 指令：`Use the local image file paths above when you need to inspect the user's pasted images.`
+3. Codex/BIF 这类 CLI Runner 可以通过现有文件读取或 `view_image` 能力消费本地图片；自定义 Runner 即使不支持原生图片，也能从 prompt 中拿到可访问路径。
+4. 附件路径写入 `ExternalCliRunResult.metadata` 的 `attachments.images` JSON，便于调试和后续 UI 展示。
+5. 队列续跑时只携带当前消息文本，不继承上一轮图片，避免重复消费旧图片。
+
+### 测试方案
+
+- 单元测试：
+  - `external_cli::tests::external_cli_run_writes_image_attachments_and_injects_prompt_paths` 验证外部 Runner 写出图片文件、prompt 引用路径、metadata 记录附件。
+  - `session_state::tests::session_state_persists_message_content_parts` 验证外部 Runner 会话状态保留用户图片 content parts。
+  - `/agent/chat/stream` 的纯图片请求不再被 `message must not be empty` 拒绝。
+- UI/E2E 测试：
+  - `web/tests/ui/agent-chat.spec.ts` 新增 Composer 图片粘贴用例：粘贴图片后预览在输入框上方，删除可生效，最多保留 6 张，纯图片发送请求体包含 `images`。
+  - 断言内置 Bifrost Agent 请求发往 `/api/agent/chat/stream`，外部 Runner 请求发往 `/api/im-gateway/chat/stream` 且携带同样的 `images`。
+- 真实场景测试：
+  - `human_tests/im-gateway-agent.md` 新增 WebUI 图片粘贴真实用例，使用真实浏览器粘贴图片，分别验证文本+图片、纯图片、6 张上限、删除预览、亮色/暗色主题、外部 Runner 附件路径桥接。
+
+### Review/Fix/Test 闭环
+
+- 第 1 轮：复核用户目标、检查 WebUI paste/preview/send、后端 6 张上限、Builtin 多模态、外部 Runner 文件桥接，运行前端 UI targeted 测试和 Rust targeted 单元测试。
+- 第 2 轮：复查第 1 轮修复后的 diff、历史恢复 content parts、human_tests 索引和真实浏览器表现，复跑 targeted 测试并执行项目级校验。
+
 ### 1. ImAgentConfig - 全局配置
 
 ```rust

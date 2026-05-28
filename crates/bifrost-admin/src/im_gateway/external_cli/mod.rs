@@ -16,6 +16,7 @@ const DEFAULT_ADAPTER: &str = "codex";
 const DEFAULT_TIMEOUT_SECS: u64 = 900;
 const CONFIG_FILENAME: &str = "im_gateway_external_cli_agent.json";
 const CONFIG_VERSION: u32 = 1;
+const MAX_EXTERNAL_RUNNER_IMAGES_PER_MESSAGE: usize = 6;
 
 static ACTIVE_RUNS: once_cell::sync::Lazy<dashmap::DashMap<String, u32>> =
     once_cell::sync::Lazy::new(dashmap::DashMap::new);
@@ -29,6 +30,8 @@ use command_spec::build_command_spec;
 #[serde(rename_all = "camelCase")]
 pub struct ExternalCliRunRequest {
     pub message: String,
+    #[serde(default)]
+    pub images: Vec<ExternalCliImageInput>,
     #[serde(default = "default_operation")]
     pub operation: String,
     #[serde(default)]
@@ -55,6 +58,30 @@ pub struct ExternalCliRunRequest {
     pub inject_bifrost_tools: bool,
     #[serde(default)]
     pub skill_paths: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalCliImageInput {
+    #[serde(default = "default_image_mime_type", alias = "mime_type")]
+    pub mime_type: String,
+    pub data: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+fn default_image_mime_type() -> String {
+    "image/png".to_string()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalCliSavedImageAttachment {
+    pub path: String,
+    pub mime_type: String,
+    pub size_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -475,8 +502,9 @@ impl ExternalCliRuntime {
         let snapshot_path = run_dir.join("runtime_snapshot.json");
         let events_path = run_dir.join("normalized_events.jsonl");
         let stop_marker_path = run_dir.join("stop_requested");
+        let saved_images = save_image_attachments(&run_dir, &request.images).await?;
 
-        let prompt = build_prompt(&request).await?;
+        let prompt = build_prompt(&request, &saved_images).await?;
         tokio::fs::write(&prompt_path, &prompt)
             .await
             .map_err(|error| format!("write prompt failed: {error}"))?;
@@ -587,6 +615,12 @@ impl ExternalCliRuntime {
         };
         let mut metadata = run_output.metadata;
         append_external_cli_metadata(&request.adapter, &run_output.events, &mut metadata);
+        if !saved_images.is_empty() {
+            metadata.insert(
+                "attachments.images".to_string(),
+                serde_json::to_string(&saved_images).unwrap_or_else(|_| "[]".to_string()),
+            );
+        }
         tokio::fs::write(&stdout_path, &run_output.stdout)
             .await
             .map_err(|error| format!("write stdout failed: {error}"))?;
@@ -641,6 +675,7 @@ pub fn run_request_from_settings(
 ) -> ExternalCliRunRequest {
     ExternalCliRunRequest {
         message: message.into(),
+        images: Vec::new(),
         operation: default_operation(),
         params: serde_json::Value::Null,
         provider_id,
@@ -777,7 +812,11 @@ fn validate_run_request(request: &ExternalCliRunRequest) -> Result<(), String> {
     }
     let operation = request.operation.trim();
     let needs_message = operation.is_empty() || matches!(operation, "ask" | "create" | "send");
-    if needs_message && request.message.trim().is_empty() {
+    let has_image = request
+        .images
+        .iter()
+        .any(|image| !image.data.trim().is_empty());
+    if needs_message && request.message.trim().is_empty() && !has_image {
         return Err("message cannot be empty".to_string());
     }
     Ok(())
@@ -829,7 +868,10 @@ fn canonicalize_for_allowlist(path: &Path) -> Result<PathBuf, String> {
         .map_err(|error| format!("canonicalize '{}' failed: {error}", path.display()))
 }
 
-async fn build_prompt(request: &ExternalCliRunRequest) -> Result<String, String> {
+async fn build_prompt(
+    request: &ExternalCliRunRequest,
+    saved_images: &[ExternalCliSavedImageAttachment],
+) -> Result<String, String> {
     let mut prompt = String::new();
     if let Some(instructions) = request.instructions.as_deref() {
         if !instructions.trim().is_empty() {
@@ -871,9 +913,89 @@ async fn build_prompt(request: &ExternalCliRunRequest) -> Result<String, String>
             prompt.push_str("\n\n");
         }
     }
+    if !saved_images.is_empty() {
+        prompt.push_str("## Attached Images\n\n");
+        prompt.push_str(
+            "The user pasted the following local image files. Use these paths when you need to inspect or reason about the images.\n\n",
+        );
+        for (index, image) in saved_images.iter().enumerate() {
+            prompt.push_str(&format!(
+                "{}. `{}` (mime_type: {}, size_bytes: {})\n",
+                index + 1,
+                image.path,
+                image.mime_type,
+                image.size_bytes
+            ));
+        }
+        prompt.push('\n');
+    }
     prompt.push_str(request.message.trim());
     prompt.push('\n');
     Ok(prompt)
+}
+
+async fn save_image_attachments(
+    run_dir: &Path,
+    images: &[ExternalCliImageInput],
+) -> Result<Vec<ExternalCliSavedImageAttachment>, String> {
+    let normalized: Vec<&ExternalCliImageInput> = images
+        .iter()
+        .filter(|image| !image.data.trim().is_empty())
+        .take(MAX_EXTERNAL_RUNNER_IMAGES_PER_MESSAGE)
+        .collect();
+    if normalized.is_empty() {
+        return Ok(Vec::new());
+    }
+    if images.len() > MAX_EXTERNAL_RUNNER_IMAGES_PER_MESSAGE {
+        tracing::warn!(
+            image_count = images.len(),
+            max_images = MAX_EXTERNAL_RUNNER_IMAGES_PER_MESSAGE,
+            "too many external runner images in one request; truncating images"
+        );
+    }
+    let images_dir = run_dir.join("attachments").join("images");
+    tokio::fs::create_dir_all(&images_dir)
+        .await
+        .map_err(|error| format!("create image attachments dir failed: {error}"))?;
+    let mut saved = Vec::with_capacity(normalized.len());
+    for (index, image) in normalized.into_iter().enumerate() {
+        let bytes = decode_image_data(&image.data)?;
+        let ext = image_extension(&image.mime_type);
+        let path = images_dir.join(format!("image-{}.{}", index + 1, ext));
+        tokio::fs::write(&path, &bytes)
+            .await
+            .map_err(|error| format!("write image attachment failed: {error}"))?;
+        saved.push(ExternalCliSavedImageAttachment {
+            path: path.display().to_string(),
+            mime_type: image.mime_type.clone(),
+            size_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+            name: image.name.clone(),
+        });
+    }
+    Ok(saved)
+}
+
+fn decode_image_data(data: &str) -> Result<Vec<u8>, String> {
+    let data = data.trim();
+    let payload = data
+        .strip_prefix("data:")
+        .and_then(|value| value.split_once(','))
+        .map(|(_, payload)| payload)
+        .unwrap_or(data);
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .map_err(|error| format!("decode image attachment failed: {error}"))
+}
+
+fn image_extension(mime_type: &str) -> &'static str {
+    match mime_type.trim().to_ascii_lowercase().as_str() {
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "image/png" => "png",
+        _ => "img",
+    }
 }
 
 fn is_skill_path_allowed(

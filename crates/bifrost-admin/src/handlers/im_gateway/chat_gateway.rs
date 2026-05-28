@@ -1,6 +1,56 @@
 use super::*;
 use std::path::PathBuf;
 
+fn message_image_content_parts(
+    message: &str,
+    images: &[crate::im_gateway::external_cli::ExternalCliImageInput],
+) -> Option<serde_json::Value> {
+    let normalized: Vec<&crate::im_gateway::external_cli::ExternalCliImageInput> = images
+        .iter()
+        .filter(|image| !image.data.trim().is_empty())
+        .take(MAX_AGENT_IMAGES_PER_MESSAGE)
+        .collect();
+    if normalized.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if !message.trim().is_empty() {
+        parts.push(serde_json::json!({"type": "text", "text": message}));
+    }
+    for image in normalized {
+        let data = if image.data.starts_with("data:") {
+            image.data.clone()
+        } else {
+            format!("data:{};base64,{}", image.mime_type, image.data)
+        };
+        parts.push(serde_json::json!({
+            "type": "image_url",
+            "image_url": {"url": data, "detail": "auto"}
+        }));
+    }
+    Some(serde_json::Value::Array(parts))
+}
+
+fn image_message_preview(
+    message: &str,
+    images: &[crate::im_gateway::external_cli::ExternalCliImageInput],
+) -> String {
+    let trimmed = message.trim();
+    if !trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+    let count = images
+        .iter()
+        .filter(|image| !image.data.trim().is_empty())
+        .take(MAX_AGENT_IMAGES_PER_MESSAGE)
+        .count();
+    if count == 1 {
+        "Attached 1 image".to_string()
+    } else {
+        format!("Attached {count} images")
+    }
+}
+
 pub(super) async fn handle_chat_gateway(
     req: Request<Incoming>,
     _service: &ImGatewayService,
@@ -159,7 +209,10 @@ pub(super) async fn handle_chat_gateway(
                         .agent_session_manager
                         .try_start_external_session_preview(
                             session_key,
-                            first_message_title_preview(&request.message),
+                            first_message_title_preview(&image_message_preview(
+                                &request.message,
+                                &request.images,
+                            )),
                             request
                                 .work_dir
                                 .as_ref()
@@ -1079,6 +1132,7 @@ fn update_session_runner_call_messages(
                 role: "user".to_string(),
                 content: visible_user.to_string(),
                 timestamp: Some(user_timestamp),
+                content_parts: None,
             });
             messages.len() - 1
         });
@@ -1094,6 +1148,7 @@ fn update_session_runner_call_messages(
         role: "assistant".to_string(),
         content: assistant_message.to_string(),
         timestamp: Some(assistant_timestamp),
+        content_parts: None,
     });
 }
 
@@ -1562,7 +1617,10 @@ fn remember_external_cli_started_state(
         &request.adapter,
         Some(runner_id),
         |state| {
-            state.last_user_message = first_message_title_preview(&request.message);
+            state.last_user_message = first_message_title_preview(&image_message_preview(
+                &request.message,
+                &request.images,
+            ));
             state.title = state
                 .title
                 .clone()
@@ -1622,7 +1680,10 @@ fn remember_external_cli_result_state(
         Some(runner_id),
         |state| {
             state.latest_run_id = Some(result.run_id.clone());
-            state.last_user_message = first_message_title_preview(&request.message);
+            state.last_user_message = first_message_title_preview(&image_message_preview(
+                &request.message,
+                &request.images,
+            ));
             state.title = state
                 .title
                 .clone()
@@ -1881,6 +1942,7 @@ fn append_external_runner_turn_messages(
                 role: "assistant".to_string(),
                 content: assistant_message.to_string(),
                 timestamp: Some(result.finished_at / 1000),
+                content_parts: None,
             });
     }
 }
@@ -1890,10 +1952,11 @@ fn append_external_runner_user_message_once(
     request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
     timestamp: u64,
 ) {
-    let user_message = request.message.trim();
-    if user_message.is_empty() {
+    let user_message = image_message_preview(&request.message, &request.images);
+    if user_message.is_empty() || user_message == "Attached 0 images" {
         return;
     }
+    let content_parts = message_image_content_parts(&request.message, &request.images);
     if let Some(existing) = state
         .messages
         .last_mut()
@@ -1901,6 +1964,9 @@ fn append_external_runner_user_message_once(
     {
         if existing.timestamp.is_none() {
             existing.timestamp = Some(timestamp);
+        }
+        if existing.content_parts.is_none() {
+            existing.content_parts = content_parts;
         }
         return;
     }
@@ -1910,6 +1976,7 @@ fn append_external_runner_user_message_once(
             role: "user".to_string(),
             content: user_message.to_string(),
             timestamp: Some(timestamp),
+            content_parts,
         });
 }
 
@@ -2028,6 +2095,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
         let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
+            images: Vec::new(),
             message: "今天的AI领域相关的新闻。".to_string(),
             operation: "chat".to_string(),
             params: serde_json::Value::Null,
@@ -2116,6 +2184,7 @@ mod tests {
         let history_path = recorder.file_path().display().to_string();
 
         let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
+            images: Vec::new(),
             message: "new Web message".to_string(),
             operation: "chat".to_string(),
             params: serde_json::json!({ "historyPath": history_path }),
@@ -2184,6 +2253,7 @@ mod tests {
         assert_eq!(state.history_path.as_deref(), Some(history_path.as_str()));
 
         let gpt_request = crate::im_gateway::external_cli::ExternalCliRunRequest {
+            images: Vec::new(),
             message: "new GPT Web message".to_string(),
             operation: "chat".to_string(),
             params: serde_json::json!({ "historyPath": history_path }),
@@ -2245,6 +2315,7 @@ mod tests {
         let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
         let session_key = "active-gpt-web-history";
         let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
+            images: Vec::new(),
             message: "active GPT Web message".to_string(),
             operation: "chat".to_string(),
             params: serde_json::json!({}),
@@ -2462,6 +2533,7 @@ mod tests {
         )
         .expect("push imported context");
         let mut request = crate::im_gateway::external_cli::ExternalCliRunRequest {
+            images: Vec::new(),
             message: "continue".to_string(),
             operation: "chat".to_string(),
             params: serde_json::Value::Null,

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Button, Card, Col, Empty, Grid, Input, Modal, Row, Segmented, Select, Space, Tag, Typography, message as antdMessage, theme } from "antd";
 import { DeleteOutlined, FolderOpenOutlined, BorderOutlined, PlusOutlined, RobotOutlined, SendOutlined, SettingOutlined } from "@ant-design/icons";
@@ -30,6 +30,7 @@ import {
   type AgentThreadSummary,
   type ChatMessage,
   type HistoryEvent,
+  type PendingChatImage,
   type ProcessStep,
   type RunnerConfigPayload,
   type RunnerOption,
@@ -49,6 +50,51 @@ import { AgentChatTokenHud } from "./AgentChatSection.tokenHud";
 const { Text } = Typography;
 const { TextArea } = Input;
 const { useBreakpoint } = Grid;
+const MAX_PASTED_IMAGES = 6;
+
+function imageCountLabel(count: number) {
+  return count === 1 ? "Attached 1 image" : `Attached ${count} images`;
+}
+
+function imageContentParts(content: string, images: PendingChatImage[]) {
+  if (images.length === 0) {
+    return undefined;
+  }
+  return [
+    ...(content.trim() ? [{ type: "text" as const, text: content }] : []),
+    ...images.map((image) => ({
+      type: "image_url" as const,
+      image_url: { url: image.previewUrl, detail: "auto" },
+    })),
+  ];
+}
+
+function imageSizeLabel(size: number) {
+  if (size >= 1024 * 1024) {
+    return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  if (size >= 1024) {
+    return `${Math.ceil(size / 1024)} KB`;
+  }
+  return `${size} B`;
+}
+
+function imageFilesFromClipboard(event: ClipboardEvent<HTMLTextAreaElement>) {
+  const files = Array.from(event.clipboardData.files);
+  const itemFiles = Array.from(event.clipboardData.items)
+    .filter((item) => item.kind === "file")
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => Boolean(file));
+  return [...files, ...itemFiles].filter((file, index, allFiles) =>
+    file.type.startsWith("image/") &&
+    allFiles.findIndex(
+      (candidate) =>
+        candidate.name === file.name &&
+        candidate.size === file.size &&
+        candidate.type === file.type,
+    ) === index,
+  );
+}
 
 export default function AgentChatSection() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -56,6 +102,7 @@ export default function AgentChatSection() {
   const screens = useBreakpoint();
   const isCompact = !screens.lg;
   const [draft, setDraft] = useState("");
+  const [pendingImages, setPendingImages] = useState<PendingChatImage[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>(STARTER_MESSAGES);
   const [sessionKey, setSessionKey] = useState(() => `admin-chat-${Date.now()}`);
   const [historyPath, setHistoryPath] = useState<string | undefined>();
@@ -338,6 +385,9 @@ export default function AgentChatSection() {
         const defaultRunner = payload.defaultRunnerId || payload.default_runner_id;
         if (defaultRunner) {
           setDefaultRunnerId(defaultRunner);
+          setRunnerId((current) =>
+            current === "bifrost_agent" ? defaultRunner : current,
+          );
           setNewChatRunnerId((current) =>
             current === "bifrost_agent" ? defaultRunner : current,
           );
@@ -947,13 +997,73 @@ export default function AgentChatSection() {
     await submitRunningInput(item.message, "guide");
   };
 
+  const addImageFiles = useCallback(
+    (files: File[]) => {
+      const imageFiles = files.filter((file) => file.type.startsWith("image/"));
+      if (imageFiles.length === 0) {
+        return;
+      }
+      const remaining = MAX_PASTED_IMAGES - pendingImages.length;
+      if (remaining <= 0) {
+        antdMessage.warning(`You can attach up to ${MAX_PASTED_IMAGES} images.`);
+        return;
+      }
+      const accepted = imageFiles.slice(0, remaining);
+      if (accepted.length < imageFiles.length) {
+        antdMessage.warning(`Only the first ${MAX_PASTED_IMAGES} images are kept.`);
+      }
+      accepted.forEach((file) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const previewUrl = String(reader.result || "");
+          if (!previewUrl.startsWith("data:")) {
+            return;
+          }
+          const data = previewUrl.split(",", 2)[1] || "";
+          setPendingImages((prev) => {
+            if (prev.length >= MAX_PASTED_IMAGES) {
+              return prev;
+            }
+            return [
+              ...prev,
+              {
+                id: `image-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+                mimeType: file.type || "image/png",
+                data,
+                previewUrl,
+                name: file.name || undefined,
+                size: file.size,
+              },
+            ];
+          });
+        };
+        reader.readAsDataURL(file);
+      });
+    },
+    [pendingImages.length],
+  );
+
+  const handlePasteImages = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = imageFilesFromClipboard(event);
+    if (files.length === 0) {
+      return;
+    }
+    event.preventDefault();
+    addImageFiles(files);
+  };
+
   const handleSend = async (options?: { contentOverride?: string; silentCommand?: boolean }) => {
     const content = (options?.contentOverride ?? draft).trim();
     const silentCommand = options?.silentCommand === true || content === "/compact";
-    if (!content || supplementSubmitting) {
+    const imagesForSend = options?.contentOverride ? [] : pendingImages;
+    if ((!content && imagesForSend.length === 0) || supplementSubmitting) {
       return;
     }
     if (slashRunner && !running && !silentCommand) {
+      if (imagesForSend.length > 0) {
+        antdMessage.warning("Slash runner calls do not support image attachments yet. Select the runner and send from chat instead.");
+        return;
+      }
       await handleRunnerCall(content, slashRunner);
       return;
     }
@@ -961,10 +1071,12 @@ export default function AgentChatSection() {
       await handleRunningInput(content);
       return;
     }
+    const userVisibleContent = content || imageCountLabel(imagesForSend.length);
     const userMessage: ChatMessage = {
       id: `user-${Date.now()}`,
       role: "user",
-      content,
+      content: userVisibleContent,
+      contentParts: imageContentParts(content, imagesForSend),
       timestamp: Date.now() / 1000,
       meta: "You",
     };
@@ -990,6 +1102,7 @@ export default function AgentChatSection() {
       silentCommand ? [...prev, assistantMessage] : [...prev, userMessage, assistantMessage],
     );
     setDraft("");
+    setPendingImages([]);
     setRunning(true);
     setTelemetry({
       phase: "running",
@@ -1006,7 +1119,7 @@ export default function AgentChatSection() {
     setThreads((prev) => {
       const fallbackTitle = silentCommand
         ? currentSessionFallbackTitle || "Context compaction"
-        : content.length > 40 ? `${content.slice(0, 40)}…` : content;
+        : userVisibleContent.length > 40 ? `${userVisibleContent.slice(0, 40)}…` : userVisibleContent;
       return dedupeThreads([
         {
           session_key: sessionKey,
@@ -1264,6 +1377,7 @@ export default function AgentChatSection() {
 
       await runAgentStream({
         message: content,
+        images: imagesForSend,
         sessionKey,
         historyPath,
         workDir: workDir || undefined,
@@ -1705,11 +1819,36 @@ export default function AgentChatSection() {
                     onClear={() => setSlashRunner(undefined)}
                   />
                 ) : null}
+                {pendingImages.length > 0 ? (
+                  <div style={styles.imagePreviewStrip} data-testid="agent-chat-image-preview-strip">
+                    {pendingImages.map((image, index) => (
+                      <div key={image.id} style={styles.imagePreviewItem} data-testid="agent-chat-image-preview">
+                        <img
+                          src={image.previewUrl}
+                          alt={image.name || `Pasted image ${index + 1}`}
+                          style={styles.imagePreviewThumb}
+                        />
+                        <Button
+                          size="small"
+                          type="text"
+                          icon={<DeleteOutlined />}
+                          aria-label={`Remove pasted image ${index + 1}`}
+                          style={styles.imagePreviewRemove}
+                          onClick={() =>
+                            setPendingImages((prev) => prev.filter((item) => item.id !== image.id))
+                          }
+                        />
+                        <span style={styles.imagePreviewMeta}>{imageSizeLabel(image.size)}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
                 <TextArea
                   data-testid="agent-chat-input"
                   data-session-key={sessionKey}
                   value={draft}
                   onChange={(event) => setDraft(event.target.value)}
+                  onPaste={handlePasteImages}
                   onKeyDown={handleComposerKeyDown}
                   placeholder="Describe a task for the Agent..."
                   autoSize={{ minRows: 2, maxRows: 7 }}
@@ -1735,7 +1874,7 @@ export default function AgentChatSection() {
                   title={running && !draft.trim() ? "Stop current turn" : "Send"}
                   onClick={running && !draft.trim() ? handleStop : () => void handleSend()}
                   disabled={
-                    supplementSubmitting || (!draft.trim() && !running)
+                    supplementSubmitting || (!draft.trim() && pendingImages.length === 0 && !running)
                   }
                   data-testid="agent-chat-send"
                   style={styles.sendInInput}

@@ -85,6 +85,7 @@ fn native_clipboard_paste_scales_send_button_waits_for_large_prompts() {
 #[test]
 fn failure_diagnostics_conversation_hint_accepts_known_param_names() {
     let mut request = ExternalCliRunRequest {
+        images: Vec::new(),
         message: "hello".to_string(),
         operation: "ask".to_string(),
         params: json!({"conversationId": " c1 "}),
@@ -166,6 +167,7 @@ async fn run_adapter_writes_failure_diagnostics_on_authenticated_error() {
         .await
         .expect("write auth state");
     let request = ExternalCliRunRequest {
+        images: Vec::new(),
         message: "hello".to_string(),
         operation: "bad-op".to_string(),
         params: Value::Null,

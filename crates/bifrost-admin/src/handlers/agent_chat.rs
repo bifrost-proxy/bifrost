@@ -11,7 +11,7 @@ use tracing::{error, info, warn};
 use super::{error_response, method_not_allowed, BoxBody};
 use crate::state::SharedAdminState;
 
-const MAX_AGENT_IMAGES_PER_MESSAGE: usize = 5;
+const MAX_AGENT_IMAGES_PER_MESSAGE: usize = 6;
 
 #[derive(Debug, Deserialize)]
 struct AgentChatRequest {
@@ -85,7 +85,7 @@ async fn handle_stream(req: Request<Incoming>, state: SharedAdminState) -> Respo
         Ok(value) => value,
         Err(response) => return response,
     };
-    if body.message.trim().is_empty() {
+    if body.message.trim().is_empty() && body.images.is_empty() {
         return error_response(StatusCode::BAD_REQUEST, "message must not be empty");
     }
 

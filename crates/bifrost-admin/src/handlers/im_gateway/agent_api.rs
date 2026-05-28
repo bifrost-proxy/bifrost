@@ -1549,7 +1549,7 @@ async fn external_runner_session_detail(session_key: &str) -> Option<bifrost_age
                 role: message.role.clone(),
                 content: message.content.clone(),
                 timestamp: message.timestamp,
-                content_parts: None,
+                content_parts: message.content_parts.clone(),
                 tool_calls: None,
             }
         }));
@@ -1788,11 +1788,13 @@ mod tests {
                         role: "user".to_string(),
                         content: "stale user".to_string(),
                         timestamp: Some(1),
+                        content_parts: None,
                     },
                     crate::im_gateway::session_state::ImAgentSessionMessage {
                         role: "assistant".to_string(),
                         content: "stale assistant".to_string(),
                         timestamp: Some(2),
+                        content_parts: None,
                     },
                 ],
                 updated_at: 1_770_000_000_000,
@@ -1828,11 +1830,13 @@ mod tests {
                 role: "user".to_string(),
                 content: format!("ChatGPT Web round {turn}"),
                 timestamp: Some(1_770_000_000 + turn * 2),
+                content_parts: None,
             });
             messages.push(crate::im_gateway::session_state::ImAgentSessionMessage {
                 role: "assistant".to_string(),
                 content: format!("ChatGPT Web answer {turn}"),
                 timestamp: Some(1_770_000_000 + turn * 2 + 1),
+                content_parts: None,
             });
         }
 

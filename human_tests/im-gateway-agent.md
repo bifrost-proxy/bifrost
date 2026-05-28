@@ -2399,3 +2399,63 @@ rm -rf ./.bifrost-test
 - **清理步骤**:
   - 关闭 Playwright 浏览器；如手动启动过服务，停止对应临时端口服务并删除临时数据目录。
 - **执行记录（2026-05-28）**: PASS — 对用户反馈的 `admin-chat-1779973287101` 本地数据做只读排查，确认 GPT Web 两次 run 均成功写入 `.bifrost-ui-test/agent/im_gateway/session_state.json` 与 `chat_runs/*/result.json`，但未出现在 `.bifrost-ui-test/agent/sessions/**/*.jsonl`，根因与 Codex external runner 一致：adapter-local state 成为消息事实源。随后执行 `cargo test -p bifrost-admin external_runner_ --lib -- --nocapture`，覆盖已有 historyPath 的 Codex/GPT Web 续聊追加原 JSONL、无 historyPath 的 active GPT Web 会话创建 canonical timeline 并写回 `history_path`、以及 `/sessions/{session}` 在存在 `history_path` 时优先从 canonical timeline 还原消息而不是读取 stale `session_state.messages`。执行 `pnpm --dir web exec tsc -b && pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "external runner" --reporter=line`，真实 Chromium 断言 Web 历史续聊 external runner 请求走 `/api/im-gateway/chat/stream` 且携带 `params.historyPath`，刷新回放不再丢失用户消息。
+
+### TC-IMA-135: Agent Chat 输入框支持粘贴图片预览与上限控制
+
+- **前置条件**:
+  - 使用当前源码启动 WebUI，或使用 Playwright mock Agent Chat stream。
+  - 打开 `/_bifrost/ai?aiSection=agent-chat&agentSection=chat`，当前 Runner 为 Bifrost Agent。
+  - 测试需覆盖亮色和暗色主题下的输入框上方图片预览区域。
+- **操作步骤**:
+  1. 聚焦 Agent Chat 输入框。
+  2. 从系统剪贴板一次性粘贴 7 张 PNG 图片，或通过浏览器测试构造等效的 `ClipboardEvent` 图片文件。
+  3. 观察输入框上方图片预览区域。
+  4. 点击第 1 张图片的删除按钮。
+  5. 不输入任何文字，点击发送按钮。
+- **预期结果**:
+  - 输入框上方最多展示 6 张图片缩略图，并提示超出部分不会保留。
+  - 每张缩略图有可识别的删除按钮和大小信息，亮色/暗色主题下边框、背景、删除按钮均清晰可见。
+  - 删除第 1 张后预览数量变为 5。
+  - 即使文本为空，只要有图片，发送按钮也可用。
+  - 发送后输入框清空、预览区消失，用户消息显示 `Attached 5 images` 并在消息气泡内展示图片缩略图。
+- **清理步骤**:
+  - 关闭 Playwright 浏览器；如手动启动过服务，停止对应临时端口服务并删除临时数据目录。
+- **执行记录（2026-05-29）**: PASS — 创建用例后立即执行 `pnpm --dir web exec playwright test web/tests/ui/agent-chat.spec.ts -g "pasted image"`，真实 Chromium UI 验证通过。用例构造 7 个 PNG `ClipboardEvent` 文件，断言预览数量被限制为 6，删除后变为 5；纯图片发送后输入框清空、预览区消失，消息区包含 `Attached 5 images` 与 `agent-chat-message-images`，请求体 `message:""` 且 `images.length===5`、`mime_type:"image/png"`。
+
+### TC-IMA-136: Agent Chat 粘贴图片传给外部 Runner stream
+
+- **前置条件**:
+  - 使用当前源码启动 WebUI，或使用 Playwright mock Agent Chat stream。
+  - `/_bifrost/api/im-gateway/chat/config` 中默认 Runner 为一个外部 Runner，例如 `codex`。
+  - 打开 `/_bifrost/ai?aiSection=agent-chat&agentSection=chat`。
+- **操作步骤**:
+  1. 在 Agent Chat 输入框输入 `Describe this image`。
+  2. 粘贴 1 张 PNG 图片。
+  3. 点击发送。
+  4. 检查请求路径与请求体。
+- **预期结果**:
+  - 页面请求 `/api/im-gateway/chat/stream`，不会误走内置 `/api/agent/chat/stream`。
+  - 请求体包含 `message:"Describe this image"`、`runnerId:"codex"`，并包含 `images[0].mimeType:"image/png"` 与 base64 `data`。
+  - 外部 Runner 返回的最终文本展示在消息区，用户消息保留文本和图片缩略图。
+  - 当前会话的 Runner tag 与线程摘要保持外部 Runner 语义，刷新后可从会话详情恢复图片消息内容。
+- **清理步骤**:
+  - 关闭 Playwright 浏览器；如手动启动过服务，停止对应临时端口服务并删除临时数据目录。
+- **执行记录（2026-05-29）**: PASS — 创建用例后立即执行 `pnpm --dir web exec playwright test web/tests/ui/agent-chat.spec.ts -g "pasted image"`，真实 Chromium UI 验证通过。用例 mock 默认 Runner 为 `codex`，粘贴 PNG 后发送，断言请求命中 `/api/im-gateway/chat/stream` 并携带 `message:"Describe this image"`、`runnerId:"codex"`、`images[0].mimeType:"image/png"`，页面展示 `Codex saw image`。
+
+### TC-IMA-137: Agent Chat 图片消息后端落盘与历史回放
+
+- **前置条件**:
+  - 使用当前源码执行后端单元/集成测试，不复用用户真实会话目录。
+  - 外部 Runner 使用临时 `run_dir`，图片内容为测试 PNG base64。
+- **操作步骤**:
+  1. 调用 external CLI runner，传入文本和图片数组。
+  2. 检查 runner prompt 与 run metadata。
+  3. 写入并读取 `session_state.json` 中包含 `content_parts` 的消息。
+- **预期结果**:
+  - 外部 Runner 将图片写入 `attachments/images/image-N.<ext>`，prompt 注入 `## Attached Images` 和本地文件路径。
+  - `attachments.images` metadata 包含原始 `name`、`mime_type`、`path` 和 `size_bytes`。
+  - 会话状态持久化 `content_parts`，读取详情 API 时可回放图片消息，而不是只剩文本占位。
+  - 纯图片消息允许通过校验；无文本且无图片仍被拒绝。
+- **清理步骤**:
+  - 测试结束后删除临时目录。
+- **执行记录（2026-05-29）**: PASS — 创建用例后立即执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin external_cli_run_writes_image_attachments_and_injects_prompt_paths --lib` 与 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin session_state_persists_message_content_parts --lib`，两项均通过，覆盖图片附件写入、prompt 路径注入、metadata 与 `content_parts` 持久化回放。
