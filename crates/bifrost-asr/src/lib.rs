@@ -9,7 +9,11 @@ pub mod runtime;
 pub mod subtitle;
 pub mod timeline;
 
-#[cfg(any(feature = "qwen3-offline", feature = "diarization-sherpa"))]
+#[cfg(all(
+    target_os = "macos",
+    target_arch = "aarch64",
+    any(feature = "qwen3-offline", feature = "diarization-sherpa")
+))]
 pub mod native {
     #[cfg(feature = "qwen3-offline")]
     pub use qwen3_asr;
