@@ -222,10 +222,23 @@ SHARED_STATUS="${SHARED_BODY##*$'\n'}"
 SHARED_JSON="${SHARED_BODY%$'\n'*}"
 python3 - "$SHARED_STATUS" "$SHARED_JSON" "$BUSY_PORT" <<'PY'
 import json
+import platform
 import sys
 status = sys.argv[1]
 body = json.loads(sys.argv[2])
 busy_port = sys.argv[3]
+supported = platform.system().lower() == "darwin" and platform.machine().lower() in {
+    "arm64",
+    "aarch64",
+}
+if not supported:
+    assert status in {"200", "400"}, (status, body)
+    assert body["ready"] is False, body
+    assert body["managed"] is False, body
+    message = body.get("message", "").lower()
+    detail = body.get("detail", "").lower()
+    assert "not supported" in message or "not supported" in detail, body
+    sys.exit(0)
 assert status == "200", (status, body)
 assert body["ready"] is True, body
 assert body["managed"] is True, body
