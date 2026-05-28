@@ -131,7 +131,7 @@ pub fn keyword_line_from_phrase(_phrase: &str) -> Result<String, String> {
     Err("wake_sherpa_feature_disabled: lightweight KWS is not compiled".to_string())
 }
 
-#[cfg(feature = "wake-sherpa")]
+#[cfg(all(feature = "wake-sherpa", target_os = "macos", target_arch = "aarch64"))]
 pub fn detect_sherpa_kws_in_wav(
     pack: &SherpaKwsModelPack,
     wav_path: &Path,
@@ -184,7 +184,7 @@ pub fn detect_sherpa_kws_in_wav(
     }))
 }
 
-#[cfg(not(feature = "wake-sherpa"))]
+#[cfg(not(all(feature = "wake-sherpa", target_os = "macos", target_arch = "aarch64")))]
 pub fn detect_sherpa_kws_in_wav(
     _pack: &SherpaKwsModelPack,
     _wav_path: &Path,
@@ -192,7 +192,10 @@ pub fn detect_sherpa_kws_in_wav(
     _keywords_score: f32,
     _keywords_threshold: f32,
 ) -> Result<Option<WakeKwsDetection>, String> {
-    Err("wake_sherpa_feature_disabled: lightweight KWS is not compiled".to_string())
+    Err(
+        "wake_sherpa_unsupported_platform: lightweight KWS requires macOS Apple Silicon"
+            .to_string(),
+    )
 }
 
 fn wake_phrase_variants(normalized: &str) -> Vec<String> {
