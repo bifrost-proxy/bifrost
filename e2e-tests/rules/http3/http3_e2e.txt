@@ -1,7 +1,8 @@
 # 测试目标: 验证 HTTP/3 相关的请求头、响应头、UA、转发、响应体附加与路径改写规则。
-httpbin.org reqHeaders://X-H3-Test:enabled
-httpbin.org resHeaders://X-Proxy-Protocol:h3-test
-httpbin.org ua://BifrostH3Test/1.0
-h3-forward-test.local http://httpbin.org/
-h3-body-test.local http://httpbin.org/ resAppend://`<--H3-APPENDED-->`
-h3-path-test.local http://httpbin.org/anything
+__HTTPBIN_HOST__ reqHeaders://X-H3-Test:enabled
+__HTTPBIN_HOST__ resHeaders://X-Proxy-Protocol:h3-test
+__HTTPBIN_HOST__ ua://BifrostH3Test/1.0
+h3-forward-test.local http://127.0.0.1:__HTTP_PORT__/
+h3-body-test.local http://127.0.0.1:__HTTP_PORT__/ resAppend://`<--H3-APPENDED-->`
+h3-path-test.local http://127.0.0.1:__HTTP_PORT__/anything
+h3-websocket-test.local http://127.0.0.1:__HTTP_PORT__/

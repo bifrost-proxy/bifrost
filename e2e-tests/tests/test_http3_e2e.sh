@@ -15,12 +15,16 @@ RULES_FILE="${DATA_DIR}/rules.txt"
 RULES_TEMPLATE="${ROOT_DIR}/e2e-tests/rules/http3/http3_e2e.txt"
 PROXY_LOG="${DATA_DIR}/proxy.log"
 PROXY_PID=""
-BIFROST_BIN="${ROOT_DIR}/target/release/bifrost"
+BIFROST_BIN="${BIFROST_BIN:-${ROOT_DIR}/target/release/bifrost}"
 CARGO_BIN="${CARGO_BIN:-$HOME/.cargo/bin/cargo}"
 TEST_ID=""
+HTTPBIN_HOST="${HTTPBIN_HOST:-bifrost-httpbin.test}"
+HTTPBIN_HTTP_BASE="http://${HTTPBIN_HOST}"
+HTTPBIN_HTTPS_BASE="https://${HTTPBIN_HOST}"
 
-# External HTTPS requests to httpbin can occasionally time out under proxy/H3
-# verification, so give this suite a small retry budget by default.
+# The suite uses the local httpbin-compatible mock via proxy rules so CI does
+# not depend on public network availability. Keep a small retry budget for
+# transient local proxy startup and connection timing.
 export BIFROST_E2E_HTTP_RETRIES="${BIFROST_E2E_HTTP_RETRIES:-3}"
 export TIMEOUT="${TIMEOUT:-20}"
 if [[ "$TIMEOUT" -gt 30 ]]; then
@@ -28,6 +32,11 @@ if [[ "$TIMEOUT" -gt 30 ]]; then
 fi
 
 resolve_bifrost_bin() {
+    if [[ -x "${BIFROST_BIN:-}" ]]; then
+        printf '%s\n' "$BIFROST_BIN"
+        return 0
+    fi
+
     if [[ -x "${ROOT_DIR}/target/release/bifrost" ]]; then
         printf '%s\n' "${ROOT_DIR}/target/release/bifrost"
         return 0
@@ -44,7 +53,6 @@ resolve_bifrost_bin() {
 passed=0
 failed=0
 HTTPBIN_REACHABLE=""
-HTTPBIN_CHECK_COUNT=0
 
 kill_process_on_port() {
     local port="$1"
@@ -52,31 +60,26 @@ kill_process_on_port() {
 }
 
 check_httpbin_reachable() {
-    HTTPBIN_CHECK_COUNT= 
-    if [[ "$HTTPBIN_CHECK_COUNT" -gt 5 ]]; then
-        HTTPBIN_REACHABLE=""
-        HTTPBIN_CHECK_COUNT=1
-    fi
     if [[ -n "$HTTPBIN_REACHABLE" ]]; then
         [[ "$HTTPBIN_REACHABLE" == "true" ]]
         return $?
     fi
     local attempt
     for attempt in 1 2 3; do
-        if curl -s -k --max-time 15 --proxy "http://${PROXY_HOST}:${PROXY_PORT}" "https://httpbin.org/get" -o /dev/null -w '%{http_code}' 2>/dev/null | grep -q '^2'; then
+        if curl -s -k --max-time 15 --proxy "http://${PROXY_HOST}:${PROXY_PORT}" "${HTTPBIN_HTTP_BASE}/get" -o /dev/null -w '%{http_code}' 2>/dev/null | grep -q '^2'; then
             HTTPBIN_REACHABLE="true"
             return 0
         fi
         sleep 1
     done
     HTTPBIN_REACHABLE="false"
-    echo "[WARN] httpbin.org is not reachable through proxy; external-dependent tests will be skipped"
+    echo "[WARN] local httpbin mock is not reachable through proxy; dependent tests will be skipped"
     return 1
 }
 
 skip_pass() {
     local message="$1"
-    local reason="${2:-httpbin.org unreachable}"
+    local reason="${2:-local httpbin mock unreachable}"
     echo -e "  \033[0;33m⊘\033[0m $message (skipped: $reason)"
     passed=$((passed + 1))
 }
@@ -135,10 +138,12 @@ cleanup() {
 trap cleanup EXIT
 
 create_test_rules() {
-    render_rule_fixture_to_file "$RULES_TEMPLATE" "$RULES_FILE"
     local http_port="${ECHO_HTTP_PORT:-3000}"
-    printf '\nhttp://httpbin.org/ http://127.0.0.1:%s\n' "$http_port" >> "$RULES_FILE"
-    printf 'https://httpbin.org/ http://127.0.0.1:%s\n' "$http_port" >> "$RULES_FILE"
+    render_rule_fixture_to_file "$RULES_TEMPLATE" "$RULES_FILE" \
+        "HTTPBIN_HOST=$HTTPBIN_HOST" \
+        "HTTP_PORT=$http_port"
+    printf '\nhttp://%s/ http://127.0.0.1:%s\n' "$HTTPBIN_HOST" "$http_port" >> "$RULES_FILE"
+    printf 'https://%s/ http://127.0.0.1:%s\n' "$HTTPBIN_HOST" "$http_port" >> "$RULES_FILE"
     echo "Test rules created at $RULES_FILE"
 }
 
@@ -252,7 +257,7 @@ test_http_proxy_basic() {
         return
     fi
     
-    http_get "http://httpbin.org/get?test=http3"
+    http_get "${HTTPBIN_HTTP_BASE}/get?test=http3"
     
     if assert_status_2xx "$HTTP_STATUS" "HTTP proxy GET request"; then
         passed=$((passed + 1))
@@ -278,7 +283,7 @@ test_https_proxy_basic() {
         return
     fi
     
-    https_request "https://httpbin.org/get?test=https-h3"
+    https_request "${HTTPBIN_HTTPS_BASE}/get?test=https-h3"
     
     if assert_status_2xx "$HTTP_STATUS" "HTTPS proxy GET request"; then
         passed=$((passed + 1))
@@ -305,7 +310,7 @@ test_rule_header_modification() {
         return
     fi
     
-    https_request "https://httpbin.org/headers"
+    https_request "${HTTPBIN_HTTPS_BASE}/headers"
     
     if assert_status_2xx "$HTTP_STATUS" "Header test request"; then
         passed=$((passed + 1))
@@ -345,7 +350,7 @@ test_rule_user_agent() {
         return
     fi
     
-    https_request "https://httpbin.org/user-agent"
+    https_request "${HTTPBIN_HTTPS_BASE}/user-agent"
     
     if assert_status_2xx "$HTTP_STATUS" "User-Agent test request"; then
         passed=$((passed + 1))
@@ -375,7 +380,7 @@ test_rule_response_header() {
         return
     fi
     
-    https_request "https://httpbin.org/get"
+    https_request "${HTTPBIN_HTTPS_BASE}/get"
     
     if assert_status_2xx "$HTTP_STATUS" "Response header test request"; then
         passed=$((passed + 1))
@@ -401,7 +406,7 @@ test_rule_host_forwarding() {
     
     if ! check_httpbin_reachable; then
         skip_pass "Host forwarding request"
-        skip_pass "Request was forwarded to httpbin"
+        skip_pass "Request was forwarded to local httpbin mock"
         return
     fi
     
@@ -413,7 +418,7 @@ test_rule_host_forwarding() {
         failed=$((failed + 1))
     fi
     
-    if assert_body_contains "forwarded" "$HTTP_BODY" "Request was forwarded to httpbin"; then
+    if assert_body_contains "forwarded" "$HTTP_BODY" "Request was forwarded to local httpbin mock"; then
         passed=$((passed + 1))
     else
         failed=$((failed + 1))
@@ -458,7 +463,7 @@ test_post_request() {
     fi
     
     local post_data='{"test":"http3","message":"hello world"}'
-    https_request "https://httpbin.org/post" "POST" "$post_data" "Content-Type: application/json"
+    https_request "${HTTPBIN_HTTPS_BASE}/post" "POST" "$post_data" "Content-Type: application/json"
     
     if assert_status_2xx "$HTTP_STATUS" "POST request"; then
         passed=$((passed + 1))
@@ -484,7 +489,7 @@ test_large_response() {
         return
     fi
     
-    https_request "https://httpbin.org/bytes/10000"
+    https_request "${HTTPBIN_HTTPS_BASE}/bytes/10000"
     
     if assert_status_2xx "$HTTP_STATUS" "Large response request"; then
         passed=$((passed + 1))
@@ -514,7 +519,7 @@ test_streaming_response() {
     fi
     
     local start_time=$(date +%s)
-    https_request "https://httpbin.org/drip?numbytes=100&duration=2&delay=0"
+    https_request "${HTTPBIN_HTTPS_BASE}/drip?numbytes=100&duration=2&delay=0"
     local end_time=$(date +%s)
     local duration=$((end_time - start_time))
     
@@ -548,7 +553,7 @@ test_websocket_detection() {
         -H "Connection: Upgrade" \
         -H "Sec-WebSocket-Version: 13" \
         -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
-        "https://echo.websocket.events/" 2>&1)
+        "http://h3-websocket-test.local/ws" 2>&1)
     
     local ws_headers=$(cat "$_temp_headers_file")
     local ws_body=$(cat "$_temp_body_file")
@@ -580,7 +585,7 @@ test_sse_detection() {
     sse_status=$(run_with_timeout 5 curl -s -k -o "$_temp_body_file" -D "$_temp_headers_file" -w '%{http_code}' \
         --proxy "http://${PROXY_HOST}:${PROXY_PORT}" \
         -H "Accept: text/event-stream" \
-        "https://httpbin.org/sse?count=3&delay=0.1" 2>&1 || echo "timeout")
+        "${HTTPBIN_HTTPS_BASE}/sse?count=3&delay=0.1" 2>&1 || echo "timeout")
     
     local sse_headers=$(cat "$_temp_headers_file" 2>/dev/null)
     local sse_body=$(cat "$_temp_body_file" 2>/dev/null)
@@ -608,7 +613,7 @@ test_admin_traffic_recording() {
         return
     fi
     
-    https_request "https://httpbin.org/get?traffic_test=true"
+    https_request "${HTTPBIN_HTTPS_BASE}/get?traffic_test=true"
     
     sleep 1
     
@@ -667,7 +672,7 @@ test_concurrent_requests() {
             local status
             status=$(curl -s -k -w '%{http_code}' -o /dev/null \
                 --proxy "http://${PROXY_HOST}:${PROXY_PORT}" \
-                "https://httpbin.org/get?concurrent=$i" 2>&1)
+                "${HTTPBIN_HTTPS_BASE}/get?concurrent=$i" 2>&1)
             echo "$status" >> "$results_file"
         ) &
         pids+=($!)
@@ -718,7 +723,7 @@ test_http_methods() {
         return
     fi
     
-    https_request "https://httpbin.org/put" "PUT" '{"method":"PUT"}' "Content-Type: application/json"
+    https_request "${HTTPBIN_HTTPS_BASE}/put" "PUT" '{"method":"PUT"}' "Content-Type: application/json"
     if assert_status_2xx "$HTTP_STATUS" "PUT request"; then
         passed=$((passed + 1))
     elif [[ "$HTTP_STATUS" == "000" ]]; then
@@ -728,14 +733,14 @@ test_http_methods() {
         failed=$((failed + 1))
     fi
     
-    https_request "https://httpbin.org/patch" "PATCH" '{"method":"PATCH"}' "Content-Type: application/json"
+    https_request "${HTTPBIN_HTTPS_BASE}/patch" "PATCH" '{"method":"PATCH"}' "Content-Type: application/json"
     if assert_status_2xx "$HTTP_STATUS" "PATCH request"; then
         passed=$((passed + 1))
     else
         failed=$((failed + 1))
     fi
     
-    https_request "https://httpbin.org/delete" "DELETE"
+    https_request "${HTTPBIN_HTTPS_BASE}/delete" "DELETE"
     if assert_status_2xx "$HTTP_STATUS" "DELETE request"; then
         passed=$((passed + 1))
     else
@@ -759,7 +764,7 @@ test_redirect_handling() {
     local status
     status=$(curl -s -k -L -w '%{http_code}' -o "$_temp_body_file" -D "$_temp_headers_file" \
         --proxy "http://${PROXY_HOST}:${PROXY_PORT}" \
-        "https://httpbin.org/redirect/2" 2>&1)
+        "${HTTPBIN_HTTPS_BASE}/redirect/2" 2>&1)
     
     local body=$(cat "$_temp_body_file")
     rm -f "$_temp_headers_file" "$_temp_body_file"
@@ -790,7 +795,7 @@ test_compression() {
     status=$(curl -s -k -w '%{http_code}' -o "$_temp_body_file" -D "$_temp_headers_file" \
         --proxy "http://${PROXY_HOST}:${PROXY_PORT}" \
         -H "Accept-Encoding: gzip, deflate" \
-        "https://httpbin.org/gzip" 2>&1)
+        "${HTTPBIN_HTTPS_BASE}/gzip" 2>&1)
     
     local body=$(cat "$_temp_body_file")
     rm -f "$_temp_headers_file" "$_temp_body_file"
