@@ -1,6 +1,6 @@
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[allow(unused_imports)]
-use sherpa_onnx::{
+use bifrost_asr::native::sherpa_onnx::{
     FastClusteringConfig, OfflineSpeakerDiarization, OfflineSpeakerDiarizationConfig,
     OfflineSpeakerSegmentationModelConfig, OfflineSpeakerSegmentationPyannoteModelConfig,
     SpeakerEmbeddingExtractor, SpeakerEmbeddingExtractorConfig, Wave,
@@ -33,17 +33,6 @@ const VOICEPRINT_PROMPTS: &[&str] = &[
 struct SherpaDiarizationModelPack {
     segmentation_model: PathBuf,
     embedding_model: PathBuf,
-}
-
-#[derive(Debug, Clone)]
-struct DiarizationSegment {
-    speaker: String,
-    display_name: String,
-    mapped_profile_id: Option<String>,
-    confidence: Option<f32>,
-    start_ms: u64,
-    end_ms: u64,
-    overlap: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -723,12 +712,12 @@ fn run_sherpa_diarization(
                 overlap: raw_segments.iter().enumerate().any(|(other_index, other)| {
                     other_index != index
                         && other.speaker != segment.speaker
-                        && intervals_overlap(
+                        && interval_overlap_ms(
                             seconds_to_ms(segment.start),
                             seconds_to_ms(segment.end),
                             seconds_to_ms(other.start),
                             seconds_to_ms(other.end),
-                        )
+                        ) > 0
                 }),
             }
         })
@@ -786,23 +775,24 @@ pub(crate) async fn transcribe_uploaded_wav_with_voiceprint_speakers(
         text: String::new(),
         segments: Vec::new(),
     };
+    let asr_units = plan_asr_units(&diarization_segments, &AsrUnitPlannerConfig::default());
 
-    for (index, speaker_segment) in diarization_segments.iter().enumerate() {
-        let duration_ms = speaker_segment
-            .end_ms
-            .saturating_sub(speaker_segment.start_ms);
+    for (index, asr_unit) in asr_units.iter().enumerate() {
+        let duration_ms = asr_unit
+            .source_end_ms
+            .saturating_sub(asr_unit.source_start_ms);
         let chunk_boundaries = plan_uploaded_speaker_asr_chunks(duration_ms);
         let mut segment_committed = String::new();
         for (chunk_index, (chunk_offset_ms, chunk_duration_ms)) in
             chunk_boundaries.iter().copied().enumerate()
         {
-            let chunk_start_ms = speaker_segment.start_ms.saturating_add(chunk_offset_ms);
+            let chunk_start_ms = asr_unit.source_start_ms.saturating_add(chunk_offset_ms);
             let chunk_end_ms = chunk_start_ms
                 .saturating_add(chunk_duration_ms)
-                .min(speaker_segment.end_ms);
+                .min(asr_unit.source_end_ms);
             let segment_wav =
                 temp.path()
-                    .join(format!("upload-speaker-{index:04}-chunk-{chunk_index:04}.wav"));
+                    .join(format!("upload-{}-chunk-{chunk_index:04}.wav", asr_unit.unit_id));
             ffmpeg_cut_wav_ms(normalized_wav, &segment_wav, chunk_start_ms, chunk_end_ms, None)
                 .await?;
             if compute_wav_rms_energy(&segment_wav).is_some_and(|rms| rms < SILENCE_RMS_THRESHOLD)
@@ -852,18 +842,18 @@ pub(crate) async fn transcribe_uploaded_wav_with_voiceprint_speakers(
                 if !output.text.is_empty() {
                     output.text.push('\n');
                 }
-                let speaker_label = speaker_transcript_label(speaker_segment);
+                let speaker_label = speaker_transcript_label_for_unit(asr_unit);
                 output.text.push_str(&format!("{speaker_label}: {text}"));
                 output.segments.push(UploadedDiarizedTranscriptionSegment {
                     index: output.segments.len(),
                     start_ms: chunk_start_ms.saturating_add(local_start_ms),
                     end_ms: chunk_start_ms
                         .saturating_add(local_end_ms)
-                        .min(speaker_segment.end_ms),
-                    speaker: speaker_segment.speaker.clone(),
-                    display_name: speaker_segment.display_name.clone(),
-                    mapped_profile_id: speaker_segment.mapped_profile_id.clone(),
-                    confidence: speaker_segment.confidence,
+                        .min(asr_unit.source_end_ms),
+                    speaker: asr_unit.speaker.clone().unwrap_or_default(),
+                    display_name: asr_unit.speaker_display_name.clone().unwrap_or_default(),
+                    mapped_profile_id: asr_unit.mapped_profile_id.clone(),
+                    confidence: asr_unit.confidence,
                     text,
                 });
             }
@@ -878,14 +868,36 @@ pub(crate) async fn transcribe_uploaded_wav_with_voiceprint_speakers(
     }
 }
 
+fn speaker_transcript_label_for_unit(unit: &AsrAudioUnit) -> String {
+    let display_name = unit
+        .speaker_display_name
+        .as_deref()
+        .or(unit.speaker.as_deref())
+        .unwrap_or("unknown_speaker");
+    speaker_transcript_label_from_parts(display_name, unit.mapped_profile_id.as_deref(), unit.confidence)
+}
+
+#[cfg(test)]
 fn speaker_transcript_label(segment: &DiarizationSegment) -> String {
-    match (segment.mapped_profile_id.as_ref(), segment.confidence) {
+    speaker_transcript_label_from_parts(
+        &segment.display_name,
+        segment.mapped_profile_id.as_deref(),
+        segment.confidence,
+    )
+}
+
+fn speaker_transcript_label_from_parts(
+    display_name: &str,
+    mapped_profile_id: Option<&str>,
+    confidence: Option<f32>,
+) -> String {
+    match (mapped_profile_id, confidence) {
         (Some(_), Some(confidence)) => format!(
             "{} ({}% match)",
-            segment.display_name,
+            display_name,
             (confidence.clamp(0.0, 1.0) * 100.0).round() as u32
         ),
-        _ => segment.display_name.clone(),
+        _ => display_name.to_string(),
     }
 }
 
@@ -954,52 +966,6 @@ fn apply_speaker_segments_to_asr_timeline(
         segment.overlap = segment_overlap;
     }
     Ok(())
-}
-
-fn speakers_from_diarization_segments(segments: &[DiarizationSegment]) -> Vec<TimelineSpeaker> {
-    let mut speakers = BTreeMap::<String, (String, Option<String>, Option<f32>)>::new();
-    for segment in segments {
-        speakers.entry(segment.speaker.clone()).or_insert_with(|| {
-            (
-                segment.display_name.clone(),
-                segment.mapped_profile_id.clone(),
-                segment.confidence,
-            )
-        });
-    }
-    speakers
-        .into_iter()
-        .map(|(id, (display_name, mapped_profile_id, confidence))| TimelineSpeaker {
-            id,
-            display_name,
-            mapped_profile_id,
-            confidence,
-        })
-        .collect()
-}
-
-fn speaker_display_name(index: usize) -> String {
-    if index < 26 {
-        format!("用户{}", (b'A' + index as u8) as char)
-    } else {
-        format!("用户{}", index + 1)
-    }
-}
-
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn seconds_to_ms(seconds: f32) -> u64 {
-    (seconds.max(0.0) * 1000.0).round() as u64
-}
-
-fn interval_overlap_ms(left_start: u64, left_end: u64, right_start: u64, right_end: u64) -> u64 {
-    let start = left_start.max(right_start);
-    let end = left_end.min(right_end);
-    end.saturating_sub(start)
-}
-
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn intervals_overlap(left_start: u64, left_end: u64, right_start: u64, right_end: u64) -> bool {
-    interval_overlap_ms(left_start, left_end, right_start, right_end) > 0
 }
 
 fn write_diarization_manifest(

@@ -347,7 +347,7 @@ mod platform {
     use std::time::Instant;
 
     use super::*;
-    use qwen3_asr::{AsrInference, StreamingOptions};
+    use bifrost_asr::native::qwen3_asr::{AsrInference, StreamingOptions};
     use tracing::warn;
 
     pub(super) async fn start_process_stateful_voice_session(
@@ -419,7 +419,7 @@ mod platform {
 
     pub fn run_stateful_worker_stdio(config: StatefulVoiceConfig) -> Result<(), String> {
         validate_model_assets(&config.model_dir)?;
-        let device = qwen3_asr::best_device();
+        let device = bifrost_asr::native::qwen3_asr::best_device();
         let engine =
             AsrInference::load(&config.model_dir, device).map_err(|error| error.to_string())?;
         warm_stateful_engine(&engine);

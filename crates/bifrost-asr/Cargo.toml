@@ -1,0 +1,38 @@
+[package]
+name = "bifrost-asr"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "ASR pipeline, platform, and native engine boundary for Bifrost"
+
+[features]
+default = ["core"]
+core = []
+subtitle = ["core"]
+diarization-sherpa = ["core", "dep:sherpa-onnx"]
+qwen3-offline = ["core", "dep:qwen3-asr"]
+qwen3-stateful = ["qwen3-offline"]
+pyannote-sidecar = ["core"]
+voiceprint = ["diarization-sherpa"]
+full-local-asr = [
+  "subtitle",
+  "diarization-sherpa",
+  "qwen3-offline",
+  "qwen3-stateful",
+  "voiceprint",
+]
+
+[dependencies]
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+qwen3-asr = { version = "0.2.2", optional = true }
+sherpa-onnx = { version = "1.13.2", optional = true }

@@ -119,6 +119,22 @@ pub async fn handle_asr_tasks(req: Request<Incoming>, path: &str) -> Response<Bo
                 .and_then(|value| value.to_str().ok());
             get_task_file_source_response(parts[0], parts[2], range)
         }
+        (&Method::GET, _) if path.starts_with("/api/asr/tasks/") && path.contains("/artifacts") => {
+            let parts = path
+                .trim_start_matches("/api/asr/tasks/")
+                .trim_end_matches('/')
+                .split('/')
+                .collect::<Vec<_>>();
+            match parts.as_slice() {
+                [task_id, "files", file_key, "artifacts"] => {
+                    get_task_file_artifacts_response(task_id, file_key, None)
+                }
+                [task_id, "files", file_key, "artifacts", format] => {
+                    get_task_file_artifacts_response(task_id, file_key, Some(format))
+                }
+                _ => error_response(StatusCode::NOT_FOUND, "ASR task endpoint not found"),
+            }
+        }
         (&Method::GET, _) if path.starts_with("/api/asr/tasks/") && path.ends_with("/timeline") => {
             let parts = path
                 .trim_start_matches("/api/asr/tasks/")
@@ -636,6 +652,85 @@ fn get_task_file_timeline_response(task_id: &str, file_key: &str) -> Response<Bo
             json_response(&timeline)
         }
         Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
+    }
+}
+
+fn get_task_file_artifacts_response(
+    task_id: &str,
+    file_key: &str,
+    format: Option<&str>,
+) -> Response<BoxBody> {
+    let files = load_file_store(task_id);
+    let Some(record) = files.files.get(file_key) else {
+        return error_response(StatusCode::NOT_FOUND, "ASR task file not found");
+    };
+    let artifacts = record_artifact_paths(record);
+    let Some(format) = format else {
+        return json_response(&serde_json::json!({ "artifacts": artifacts }));
+    };
+    let Some(path) = artifacts
+        .iter()
+        .find_map(|artifact| {
+            (artifact.get("format").and_then(|value| value.as_str()) == Some(format))
+                .then(|| artifact.get("path").and_then(|value| value.as_str()))
+                .flatten()
+        })
+        .map(PathBuf::from)
+    else {
+        return error_response(StatusCode::NOT_FOUND, "ASR task file artifact not found");
+    };
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("read artifact {}: {error}", path.display()),
+            );
+        }
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", artifact_content_type(format))
+        .body(full_body(bytes))
+        .unwrap()
+}
+
+fn record_artifact_paths(record: &FileRecord) -> Vec<serde_json::Value> {
+    let mut artifacts = Vec::new();
+    if let Some(path) = &record.output_text_path {
+        push_artifact(&mut artifacts, "txt", path);
+    }
+    if let Some(path) = &record.output_metadata_path {
+        push_artifact(&mut artifacts, "metadata_json", path);
+    }
+    if let Some(path) = &record.output_timeline_path {
+        push_artifact(&mut artifacts, "timeline_json", path);
+        let srt_path = bifrost_asr::artifacts::subtitle_path_from_timeline(path, "srt");
+        if srt_path.is_file() {
+            push_artifact(&mut artifacts, "srt", &srt_path);
+        }
+        let vtt_path = bifrost_asr::artifacts::subtitle_path_from_timeline(path, "vtt");
+        if vtt_path.is_file() {
+            push_artifact(&mut artifacts, "vtt", &vtt_path);
+        }
+    }
+    artifacts
+}
+
+fn push_artifact(artifacts: &mut Vec<serde_json::Value>, format: &str, path: &Path) {
+    artifacts.push(serde_json::json!({
+        "format": format,
+        "path": path.to_string_lossy().to_string(),
+        "exists": path.is_file(),
+    }));
+}
+
+fn artifact_content_type(format: &str) -> &'static str {
+    match format {
+        "vtt" => "text/vtt; charset=utf-8",
+        "srt" | "txt" => "text/plain; charset=utf-8",
+        "timeline_json" | "metadata_json" => "application/json; charset=utf-8",
+        _ => "application/octet-stream",
     }
 }
 

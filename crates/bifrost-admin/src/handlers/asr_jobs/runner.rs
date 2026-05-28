@@ -1309,18 +1309,6 @@ async fn transcribe_file_for_task_with_wav(
     } else {
         apply_diarization_to_timeline(task, &mut timeline, wav)?;
     }
-    let (text_path, metadata_path, timeline_path) = output_paths(&task.id, path, &task.audio_dir);
-    if let Some(parent) = text_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| format!("create text dir: {error}"))?;
-    }
-    let timeline_text = render_timeline_text(&timeline, &text);
-    std::fs::write(&text_path, &timeline_text)
-        .map_err(|error| format!("write transcript text: {error}"))?;
-    std::fs::write(
-        &timeline_path,
-        serde_json::to_string_pretty(&timeline).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| format!("write transcript timeline: {error}"))?;
     let metadata = serde_json::json!({
         "task_id": task.id,
         "task_name": task.name,
@@ -1330,8 +1318,6 @@ async fn transcribe_file_for_task_with_wav(
         "source_created_at_ms": timeline.source_created_at_ms,
         "source_created_at_source": timeline.source_created_at_source,
         "media_duration_ms": timeline.media_duration_ms,
-        "text_path": text_path,
-        "timeline_path": timeline_path,
         "model": task.model,
         "language": task.language,
         "runtime_strategy": task.runtime_strategy,
@@ -1339,16 +1325,20 @@ async fn transcribe_file_for_task_with_wav(
         "chunk_metrics": result_chunk_metrics.clone(),
         "processed_at_ms": timeline.processed_at_ms,
     });
-    std::fs::write(
-        &metadata_path,
-        serde_json::to_string_pretty(&metadata).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| format!("write transcript metadata: {error}"))?;
+    let artifact_paths = write_offline_subtitle_artifacts(OfflineSubtitleArtifactRequest {
+        data_dir: &bifrost_storage::data_dir(),
+        task_id: &task.id,
+        source_path: path,
+        audio_dir: &task.audio_dir,
+        timeline: &timeline,
+        fallback_text: &text,
+        metadata,
+    })?;
     Ok(TranscriptionOutput {
         text,
-        text_path,
-        metadata_path,
-        timeline_path,
+        text_path: artifact_paths.text_path,
+        metadata_path: artifact_paths.metadata_path,
+        timeline_path: artifact_paths.timeline_path,
         timeline,
         failed_chunks,
         memory_limit_hints: result_memory_limit_hints,
@@ -1402,7 +1392,12 @@ async fn transcribe_diarized_segments_for_task(
     .await;
 
     let speakers = speakers_from_diarization_segments(&diarization_segments);
-    let total_segments = diarization_segments.len();
+    let asr_units = plan_asr_units(&diarization_segments, &AsrUnitPlannerConfig::default());
+    if asr_units.is_empty() {
+        return Err("diarization_no_asr_units: diarization produced no transcribable ASR units"
+            .to_string());
+    }
+    let total_units = asr_units.len();
     let mut all_text = String::new();
     let mut timeline_segments = Vec::new();
     let mut chunk_metrics = Vec::new();
@@ -1412,28 +1407,28 @@ async fn transcribe_diarized_segments_for_task(
         .and_then(|state| state.fallback_reason.clone())
         .or_else(|| hooks.startup_fallback_reason.map(str::to_string));
 
-    for (index, speaker_segment) in diarization_segments.iter().enumerate() {
+    for (index, asr_unit) in asr_units.iter().enumerate() {
         if hooks.pause_check.is_some_and(|check| check()) {
             return Err(ASR_TASK_PAUSED_MESSAGE.to_string());
         }
         if let Some(callback) = hooks.on_chunk_progress {
-            callback(index, total_segments);
+            callback(index, total_units);
         }
-        let segment_wav = temp_dir.join(format!("speaker-segment-{index:04}.wav"));
+        let segment_wav = temp_dir.join(format!("{}.wav", asr_unit.unit_id));
         ffmpeg_cut_wav_ms(
             wav,
             &segment_wav,
-            speaker_segment.start_ms,
-            speaker_segment.end_ms,
+            asr_unit.source_start_ms,
+            asr_unit.source_end_ms,
             hooks.pause_check,
         )
         .await?;
         if compute_wav_rms_energy(&segment_wav).is_some_and(|rms| rms < SILENCE_RMS_THRESHOLD) {
             continue;
         }
-        let duration_ms = speaker_segment
-            .end_ms
-            .saturating_sub(speaker_segment.start_ms);
+        let duration_ms = asr_unit
+            .source_end_ms
+            .saturating_sub(asr_unit.source_start_ms);
         let duration_secs = duration_ms.div_ceil(1000).max(1);
         let attempt = run_chunk_with_strategy(
             task.runtime_strategy,
@@ -1441,7 +1436,7 @@ async fn transcribe_diarized_segments_for_task(
             model_path,
             &task.language,
             &segment_wav,
-            speaker_segment.start_ms / 1000,
+            asr_unit.source_start_ms / 1000,
             duration_secs,
             index,
             temp_dir,
@@ -1468,13 +1463,13 @@ async fn transcribe_diarized_segments_for_task(
         append_diarized_segment_result(
             &mut all_text,
             &mut timeline_segments,
-            speaker_segment,
+            asr_unit,
             chunk_result,
         );
     }
 
     if let Some(callback) = hooks.on_chunk_progress {
-        callback(total_segments, total_segments);
+        callback(total_units, total_units);
     }
 
     Ok(DiarizedTranscriptionOutput {
@@ -1492,7 +1487,7 @@ async fn transcribe_diarized_segments_for_task(
 fn append_diarized_segment_result(
     all_text: &mut String,
     timeline_segments: &mut Vec<TimelineSegment>,
-    speaker_segment: &DiarizationSegment,
+    asr_unit: &AsrAudioUnit,
     chunk_result: WholeFileTranscription,
 ) {
     let chunk_text = chunk_result.text.trim();
@@ -1508,13 +1503,13 @@ fn append_diarized_segment_result(
     if chunk_result.segments.is_empty() {
         timeline_segments.push(TimelineSegment {
             index: timeline_segments.len(),
-            audio_start_ms: speaker_segment.start_ms,
-            audio_end_ms: speaker_segment.end_ms,
+            audio_start_ms: asr_unit.source_start_ms,
+            audio_end_ms: asr_unit.source_end_ms,
             absolute_start_ms: None,
             absolute_end_ms: None,
-            speaker: Some(speaker_segment.speaker.clone()),
-            speaker_display_name: Some(speaker_segment.display_name.clone()),
-            overlap: speaker_segment.overlap,
+            speaker: asr_unit.speaker.clone(),
+            speaker_display_name: asr_unit.speaker_display_name.clone(),
+            overlap: asr_unit.overlap,
             text: chunk_text.to_string(),
         });
         return;
@@ -1523,11 +1518,11 @@ fn append_diarized_segment_result(
         if text.trim().is_empty() {
             continue;
         }
-        let audio_start_ms = speaker_segment.start_ms.saturating_add(local_start_ms);
-        let audio_end_ms = speaker_segment
-            .start_ms
+        let audio_start_ms = asr_unit.source_start_ms.saturating_add(local_start_ms);
+        let audio_end_ms = asr_unit
+            .source_start_ms
             .saturating_add(local_end_ms)
-            .min(speaker_segment.end_ms);
+            .min(asr_unit.source_end_ms);
         if audio_end_ms <= audio_start_ms {
             continue;
         }
@@ -1537,9 +1532,9 @@ fn append_diarized_segment_result(
             audio_end_ms,
             absolute_start_ms: None,
             absolute_end_ms: None,
-            speaker: Some(speaker_segment.speaker.clone()),
-            speaker_display_name: Some(speaker_segment.display_name.clone()),
-            overlap: speaker_segment.overlap,
+            speaker: asr_unit.speaker.clone(),
+            speaker_display_name: asr_unit.speaker_display_name.clone(),
+            overlap: asr_unit.overlap,
             text,
         });
     }

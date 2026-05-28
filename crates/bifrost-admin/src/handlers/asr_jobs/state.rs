@@ -14,8 +14,6 @@ static CONTENT_HASH_QUEUE_LOCK: Lazy<StdMutex<()>> = Lazy::new(|| StdMutex::new(
 
 const TASK_STORE_VERSION: u32 = 1;
 const ASR_TASK_PAUSED_MESSAGE: &str = "ASR task paused by request";
-const DEFAULT_DIARIZATION_PROFILE: &str = "sherpa-onnx-balanced";
-const ASR_TASK_SEGMENT_MAX_MS: u64 = 30_000;
 const ASR_AUTO_FALLBACK_RTF_MULTIPLIER: f64 = 1.5;
 const MIN_BISECT_SECS: u64 = 2;
 const FFMPEG_NORMALIZE_MIN_TIMEOUT_SECS: u64 = 120;
@@ -119,39 +117,6 @@ pub(crate) struct AsrDirectoryTask {
     pub external_devices: Vec<AsrExternalDeviceBinding>,
     #[serde(default)]
     pub import_policy: AsrExternalImportPolicy,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct AsrDiarizationConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default = "default_diarization_profile")]
-    pub profile: String,
-    #[serde(default)]
-    pub min_speakers: Option<u8>,
-    #[serde(default)]
-    pub max_speakers: Option<u8>,
-    #[serde(default)]
-    pub known_speaker_count: Option<u8>,
-    #[serde(default)]
-    pub voiceprint_matching: bool,
-}
-
-impl Default for AsrDiarizationConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            profile: default_diarization_profile(),
-            min_speakers: None,
-            max_speakers: None,
-            known_speaker_count: None,
-            voiceprint_matching: false,
-        }
-    }
-}
-
-fn default_diarization_profile() -> String {
-    DEFAULT_DIARIZATION_PROFILE.to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

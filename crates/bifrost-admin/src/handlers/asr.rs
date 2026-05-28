@@ -9,6 +9,9 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+pub(crate) use bifrost_asr::asr_platform_supported;
+#[cfg(test)]
+pub(crate) use bifrost_asr::asr_platform_supported_for;
 use bytes::Bytes;
 use futures_util::StreamExt;
 use http_body_util::BodyExt;
@@ -51,14 +54,6 @@ const ASR_SAMPLE_BASE_URL: &str =
 
 static MANAGED_SERVICE: Lazy<Mutex<Option<ManagedAsrService>>> = Lazy::new(|| Mutex::new(None));
 static ASR_INIT_TASK: Lazy<Mutex<Option<AsrInitTask>>> = Lazy::new(|| Mutex::new(None));
-
-pub(crate) fn asr_platform_supported_for(os: &str, arch: &str) -> bool {
-    os == "macos" && arch == "aarch64"
-}
-
-pub(crate) fn asr_platform_supported() -> bool {
-    asr_platform_supported_for(std::env::consts::OS, std::env::consts::ARCH)
-}
 
 #[derive(Debug, Clone, Deserialize)]
 struct AsrQuery {
@@ -274,24 +269,18 @@ fn handle_capabilities() -> Response<BoxBody> {
 }
 
 fn asr_capabilities_response() -> AsrCapabilitiesResponse {
-    let platform = std::env::consts::OS.to_string();
-    let arch = std::env::consts::ARCH.to_string();
-    let supported = asr_platform_supported_for(&platform, &arch);
-    let reason = (!supported).then(|| {
-        format!(
-            "ASR capabilities are available only on Apple Silicon macOS; current platform is {platform}-{arch}"
-        )
-    });
+    let platform = bifrost_asr::current_platform();
+    let reason = platform.unsupported_reason.clone();
     let flag = || AsrCapabilityFlag {
-        enabled: supported,
-        hidden: !supported,
-        platform_supported: supported,
+        enabled: platform.supported,
+        hidden: !platform.supported,
+        platform_supported: platform.supported,
         reason: reason.clone(),
     };
     AsrCapabilitiesResponse {
-        platform,
-        arch,
-        supported_target: "macos-aarch64",
+        platform: platform.os,
+        arch: platform.arch,
+        supported_target: platform.supported_target,
         qwen3_asr: flag(),
         local_transcription: flag(),
         speech_workbench: flag(),

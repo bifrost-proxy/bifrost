@@ -271,6 +271,7 @@ dependencies = [
  "base64 0.22.1",
  "bcrypt",
  "bifrost-agent",
+ "bifrost-asr",
  "bifrost-command",
  "bifrost-core",
  "bifrost-power",
@@ -313,7 +314,6 @@ dependencies = [
  "portable-pty",
  "prost",
  "qrcode",
- "qwen3-asr",
  "rand 0.8.5",
  "regex 1.12.3",
  "reqwest",
@@ -327,7 +327,6 @@ dependencies = [
  "serde_urlencoded",
  "sha1",
  "sha2",
- "sherpa-onnx",
  "skills",
  "sysinfo",
  "tar",
@@ -380,6 +379,20 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "bifrost-asr"
+version = "0.0.84"
+dependencies = [
+ "chrono",
+ "qwen3-asr",
+ "serde",
+ "serde_json",
+ "sherpa-onnx",
+ "tempfile",
+ "tracing",
+ "ureq",
 ]
 
 [[package]]

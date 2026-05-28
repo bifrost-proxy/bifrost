@@ -14,6 +14,7 @@ bifrost-storage = { path = "../bifrost-storage" }
 bifrost-sync = { path = "../bifrost-sync" }
 bifrost-script = { path = "../bifrost-script" }
 bifrost-power = { path = "../bifrost-power" }
+bifrost-asr = { path = "../bifrost-asr", default-features = false, features = ["core"] }
 
 tokio = { version = "1", features = ["full", "sync"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
@@ -98,8 +99,9 @@ objc2-app-kit = { version = "0.3", features = [
 ] }
 
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
-qwen3-asr = "0.2.2"
-sherpa-onnx = "1.13.2"
+bifrost-asr = { path = "../bifrost-asr", default-features = false, features = [
+  "full-local-asr",
+] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 pelite = "0.10"
