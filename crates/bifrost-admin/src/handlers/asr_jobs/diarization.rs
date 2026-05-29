@@ -951,6 +951,7 @@ pub(crate) async fn transcribe_uploaded_wav_with_voiceprint_speakers(
     server_url: &str,
     language: &str,
     normalized_wav: &Path,
+    stream_tx: Option<&tokio::sync::mpsc::Sender<hyper::body::Bytes>>,
 ) -> Result<Option<UploadedDiarizedTranscription>, String> {
     if !diarization_profile_ready(DEFAULT_DIARIZATION_PROFILE) || count_speaker_profiles() == 0 {
         return Ok(None);
@@ -1043,8 +1044,9 @@ pub(crate) async fn transcribe_uploaded_wav_with_voiceprint_speakers(
                     output.text.push('\n');
                 }
                 let speaker_label = speaker_transcript_label_for_unit(asr_unit);
-                output.text.push_str(&format!("{speaker_label}: {text}"));
-                output.segments.push(UploadedDiarizedTranscriptionSegment {
+                let line = format!("{speaker_label}: {text}");
+                output.text.push_str(&line);
+                let segment = UploadedDiarizedTranscriptionSegment {
                     index: output.segments.len(),
                     start_ms: chunk_start_ms.saturating_add(local_start_ms),
                     end_ms: chunk_start_ms
@@ -1055,7 +1057,29 @@ pub(crate) async fn transcribe_uploaded_wav_with_voiceprint_speakers(
                     mapped_profile_id: asr_unit.mapped_profile_id.clone(),
                     confidence: asr_unit.confidence,
                     text,
-                });
+                };
+                if let Some(tx) = stream_tx {
+                    crate::handlers::asr::send_asr_segment(
+                        tx,
+                        "final",
+                        crate::handlers::asr::AsrSegmentPayload {
+                            index: segment.index,
+                            start_ms: segment.start_ms,
+                            end_ms: segment.end_ms,
+                            stable_start_ms: segment.start_ms,
+                            stable_end_ms: segment.end_ms,
+                            text: &segment.text,
+                            delta: &line,
+                            committed: &output.text,
+                            speaker: Some(&segment.speaker),
+                            speaker_display_name: Some(&segment.display_name),
+                            speaker_profile_id: segment.mapped_profile_id.as_deref(),
+                            speaker_confidence: segment.confidence,
+                        },
+                    )
+                    .await;
+                }
+                output.segments.push(segment);
             }
             let _ = std::fs::remove_file(&segment_wav);
         }

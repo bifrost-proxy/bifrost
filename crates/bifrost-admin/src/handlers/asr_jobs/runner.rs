@@ -673,6 +673,13 @@ async fn process_pending_files(
             return Err(ASR_TASK_PAUSED_MESSAGE.to_string());
         }
         let key = source_key(path);
+        let (partial_text_path, partial_metadata_path, partial_timeline_path) =
+            bifrost_asr::artifacts::output_paths_in(
+                &bifrost_storage::data_dir(),
+                &task.id,
+                path,
+                &task.audio_dir,
+            );
         let existing_content_hash = files
             .files
             .get(&key)
@@ -917,6 +924,25 @@ async fn process_pending_files(
         };
 
         let use_task_lifetime_server = task.runtime_strategy.uses_task_lifetime_server();
+        let partial_artifact_context = PartialArtifactContext {
+            task_id: task.id.clone(),
+            file_key: key.clone(),
+            task_name: task.name.clone(),
+            model: task.model.clone(),
+            language: task.language.clone(),
+            runtime_strategy: task.runtime_strategy,
+            source_path: path.clone(),
+            source_info: source_info.clone(),
+            diarization_profile: task
+                .diarization
+                .enabled
+                .then(|| task.diarization.profile.clone()),
+            speakers: Vec::new(),
+            text_path: partial_text_path.clone(),
+            metadata_path: partial_metadata_path.clone(),
+            timeline_path: partial_timeline_path.clone(),
+            started_at_ms: file_started_at_ms,
+        };
         update_run_progress(&task.id, |progress| {
             progress.stage = "asr".to_string();
             progress.stage_message = Some(if task.diarization.enabled {
@@ -948,6 +974,7 @@ async fn process_pending_files(
                         scope: "task",
                         stop_after_use: &mut *stop_task_server_after_use,
                     }),
+                    partial_artifacts: Some(partial_artifact_context.clone()),
                 },
             )
             .await
@@ -974,6 +1001,7 @@ async fn process_pending_files(
                         scope: "file",
                         stop_after_use: &mut stop_file_server_after_use,
                     }),
+                    partial_artifacts: Some(partial_artifact_context),
                 },
             )
             .await
@@ -1037,12 +1065,16 @@ async fn process_pending_files(
                 });
             }
             Err(error) if error == ASR_TASK_PAUSED_MESSAGE => {
+                let latest_record = load_file_store(&task.id).files.get(&key).cloned();
                 let mut record = file_record_from_info(&task.id, path, &source_info);
                 record.memory_limit_hints = existing_memory_limit_hints.clone();
                 record.status = FileStatus::Pending;
                 record.started_at_ms = Some(file_started_at_ms);
                 record.progress_current = Some(file_index);
                 record.progress_total = Some(total_pending);
+                if let Some(existing) = latest_record.as_ref() {
+                    preserve_partial_artifact_fields(&mut record, existing);
+                }
                 files.files.insert(key, record);
                 let _ = std::fs::remove_dir_all(&_temp_dir_path);
                 if stop_file_server_after_use {
@@ -1058,6 +1090,7 @@ async fn process_pending_files(
                 return Err(error);
             }
             Err(error) => {
+                let latest_record = load_file_store(&task.id).files.get(&key).cloned();
                 let mut record = file_record_from_info(&task.id, path, &source_info);
                 record.memory_limit_hints = existing_memory_limit_hints.clone();
                 record.runtime_strategy = task.runtime_strategy;
@@ -1070,6 +1103,9 @@ async fn process_pending_files(
                 record.finished_at_ms = Some(now_ms());
                 record.progress_current = Some(file_index + 1);
                 record.progress_total = Some(total_pending);
+                if let Some(existing) = latest_record.as_ref() {
+                    preserve_partial_artifact_fields(&mut record, existing);
+                }
                 files.files.insert(key, record);
                 failed_now += 1;
                 update_run_progress(&task.id, |progress| {
@@ -1159,6 +1195,7 @@ async fn transcribe_file_for_task_with_wav(
         )
     } else if duration_ms > CHUNK_DURATION_SECS * 1000 {
         // Split into chunks and process each via fork-per-chunk.
+        let partial_artifacts = hooks.partial_artifacts.clone();
         let chunked = transcribe_in_chunks(
             asr_bin,
             model_path,
@@ -1180,6 +1217,7 @@ async fn transcribe_file_for_task_with_wav(
             hooks.server_state,
             hooks.managed_server_restart,
             hooks.on_chunk_metric,
+            partial_artifacts.as_ref(),
         )
         .await?;
         (
@@ -1423,6 +1461,9 @@ async fn transcribe_diarized_segments_for_task(
     .await;
 
     let speakers = speakers_from_diarization_segments(&diarization_segments);
+    if let Some(context) = hooks.partial_artifacts.as_mut() {
+        context.speakers = speakers.clone();
+    }
     let asr_units = plan_asr_units(&diarization_segments, &AsrUnitPlannerConfig::default());
     if asr_units.is_empty() {
         return Err("diarization_no_asr_units: diarization produced no transcribable ASR units"
@@ -1497,6 +1538,17 @@ async fn transcribe_diarized_segments_for_task(
             asr_unit,
             chunk_result,
         );
+        if let Some(context) = hooks.partial_artifacts.as_ref() {
+            persist_partial_transcription_artifacts(
+                context,
+                DiarizedSegmentProgress {
+                    text: all_text.clone(),
+                    timeline_segments: timeline_segments.clone(),
+                    chunk_metrics: chunk_metrics.clone(),
+                    fallback_reason: fallback_reason.clone(),
+                },
+            )?;
+        }
     }
 
     if let Some(callback) = hooks.on_chunk_progress {
@@ -1569,4 +1621,150 @@ fn append_diarized_segment_result(
             text,
         });
     }
+}
+
+fn timeline_segments_from_plain_chunks(
+    segments: &[(u64, u64, String)],
+    context: &PartialArtifactContext,
+) -> Vec<TimelineSegment> {
+    segments
+        .iter()
+        .enumerate()
+        .map(|(index, (audio_start_ms, audio_end_ms, text))| TimelineSegment {
+            index,
+            audio_start_ms: *audio_start_ms,
+            audio_end_ms: *audio_end_ms,
+            absolute_start_ms: context
+                .source_info
+                .source_created_at_ms
+                .map(|start| start.saturating_add(*audio_start_ms)),
+            absolute_end_ms: context
+                .source_info
+                .source_created_at_ms
+                .map(|start| start.saturating_add(*audio_end_ms)),
+            speaker: None,
+            speaker_display_name: None,
+            overlap: false,
+            text: text.clone(),
+        })
+        .collect()
+}
+
+fn preserve_partial_artifact_fields(record: &mut FileRecord, existing: &FileRecord) {
+    if existing.output_text_path.is_some() {
+        record.output_text_path = existing.output_text_path.clone();
+    }
+    if existing.output_metadata_path.is_some() {
+        record.output_metadata_path = existing.output_metadata_path.clone();
+    }
+    if existing.output_timeline_path.is_some() {
+        record.output_timeline_path = existing.output_timeline_path.clone();
+    }
+    if existing.text_chars > 0 {
+        record.text_chars = existing.text_chars;
+    }
+    if existing.media_duration_ms.is_some() {
+        record.media_duration_ms = existing.media_duration_ms;
+    }
+    if !existing.chunk_metrics.is_empty() {
+        record.chunk_metrics = existing.chunk_metrics.clone();
+    }
+    if record.fallback_reason.is_none() {
+        record.fallback_reason = existing.fallback_reason.clone();
+    }
+}
+
+fn persist_partial_transcription_artifacts(
+    context: &PartialArtifactContext,
+    progress: DiarizedSegmentProgress,
+) -> Result<(), String> {
+    let mut segments = progress.timeline_segments;
+    for (index, segment) in segments.iter_mut().enumerate() {
+        segment.index = index;
+        if segment.absolute_start_ms.is_none() {
+            segment.absolute_start_ms = context
+                .source_info
+                .source_created_at_ms
+                .map(|start| start.saturating_add(segment.audio_start_ms));
+        }
+        if segment.absolute_end_ms.is_none() {
+            segment.absolute_end_ms = context
+                .source_info
+                .source_created_at_ms
+                .map(|start| start.saturating_add(segment.audio_end_ms));
+        }
+    }
+    let timeline = TranscriptTimeline {
+        task_id: context.task_id.clone(),
+        task_name: context.task_name.clone(),
+        source_path: context.source_path.clone(),
+        source_size: context.source_info.source_size,
+        source_modified_ms: context.source_info.source_modified_ms,
+        source_created_at_ms: context.source_info.source_created_at_ms,
+        source_created_at_source: context.source_info.source_created_at_source.clone(),
+        media_duration_ms: context.source_info.media_duration_ms,
+        model: context.model.clone(),
+        language: context.language.clone(),
+        diarization_profile: context.diarization_profile.clone(),
+        speakers: context.speakers.clone(),
+        processed_at_ms: now_ms(),
+        segments,
+    };
+    let rendered = render_timeline_text(&timeline, &progress.text);
+    atomic_text_write(&context.text_path, &rendered)?;
+    atomic_json_write(&context.timeline_path, &timeline)?;
+    let srt_path = bifrost_asr::artifacts::subtitle_path_from_timeline(&context.timeline_path, "srt");
+    let vtt_path = bifrost_asr::artifacts::subtitle_path_from_timeline(&context.timeline_path, "vtt");
+    atomic_text_write(&srt_path, &bifrost_asr::subtitle::render_srt(&timeline))?;
+    atomic_text_write(&vtt_path, &bifrost_asr::subtitle::render_vtt(&timeline))?;
+
+    let text_chars = rendered.chars().count();
+    let chunk_metrics = progress.chunk_metrics.clone();
+    let fallback_reason = progress.fallback_reason.clone();
+    let mut metadata = serde_json::json!({
+        "task_id": context.task_id,
+        "task_name": context.task_name,
+        "source_path": context.source_path,
+        "source_size": timeline.source_size,
+        "source_modified_ms": timeline.source_modified_ms,
+        "source_created_at_ms": timeline.source_created_at_ms,
+        "source_created_at_source": timeline.source_created_at_source,
+        "media_duration_ms": timeline.media_duration_ms,
+        "model": context.model,
+        "language": context.language,
+        "runtime_strategy": context.runtime_strategy,
+        "fallback_reason": fallback_reason,
+        "chunk_metrics": chunk_metrics,
+        "processed_at_ms": timeline.processed_at_ms,
+        "partial": true,
+        "partial_started_at_ms": context.started_at_ms,
+        "partial_segment_count": timeline.segments.len(),
+        "text_path": context.text_path,
+        "metadata_path": context.metadata_path,
+        "timeline_path": context.timeline_path,
+        "srt_path": srt_path,
+        "vtt_path": vtt_path,
+    });
+    if let Some(profile) = &context.diarization_profile {
+        metadata["diarization_profile"] = serde_json::Value::String(profile.clone());
+    }
+    atomic_json_write(&context.metadata_path, &metadata)?;
+
+    let mut store = load_file_store(&context.task_id);
+    if let Some(record) = store.files.get_mut(&context.file_key) {
+        if matches!(record.status, FileStatus::Pending | FileStatus::Processing) {
+            record.status = FileStatus::Processing;
+        }
+        record.output_text_path = Some(context.text_path.clone());
+        record.output_metadata_path = Some(context.metadata_path.clone());
+        record.output_timeline_path = Some(context.timeline_path.clone());
+        record.media_duration_ms = timeline.media_duration_ms;
+        record.text_chars = text_chars;
+        record.chunk_metrics = chunk_metrics;
+        if record.fallback_reason.is_none() {
+            record.fallback_reason = fallback_reason;
+        }
+        record.started_at_ms.get_or_insert(context.started_at_ms);
+    }
+    save_file_store(&context.task_id, &store)
 }

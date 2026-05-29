@@ -764,6 +764,7 @@ async fn transcribe_in_chunks(
     server_state: Option<&mut Option<ServerRunnerState>>,
     mut server_restart: Option<ManagedServerRestartContext<'_>>,
     on_chunk_metric: Option<&(dyn Fn(AsrChunkMetric) + Send + Sync)>,
+    partial_artifacts: Option<&PartialArtifactContext>,
 ) -> Result<ChunkedTranscriptionResult, String> {
     // The effective step between chunk starts accounts for overlap so that
     // consecutive chunks share `overlap_secs` seconds of audio.
@@ -982,6 +983,23 @@ async fn transcribe_in_chunks(
                     overlap_secs,
                     total_duration_ms,
                 );
+                if let Some(context) = partial_artifacts {
+                    persist_partial_transcription_artifacts(
+                        context,
+                        DiarizedSegmentProgress {
+                            text: all_text.clone(),
+                            timeline_segments: timeline_segments_from_plain_chunks(
+                                &all_segments,
+                                context,
+                            ),
+                            chunk_metrics: chunk_metrics.clone(),
+                            fallback_reason: shared_server_state
+                                .as_ref()
+                                .and_then(|state| state.fallback_reason.clone())
+                                .or_else(|| startup_fallback_reason.map(str::to_string)),
+                        },
+                    )?;
+                }
             }
             Err(error) if error == ASR_TASK_PAUSED_MESSAGE => {
                 let _ = std::fs::remove_file(&chunk_path);

@@ -1038,6 +1038,31 @@ struct DiarizedTranscriptionOutput {
     fallback_reason: Option<String>,
 }
 
+#[derive(Clone)]
+struct PartialArtifactContext {
+    task_id: String,
+    file_key: String,
+    task_name: String,
+    model: String,
+    language: String,
+    runtime_strategy: AsrRuntimeStrategy,
+    source_path: PathBuf,
+    source_info: SourceAudioInfo,
+    diarization_profile: Option<String>,
+    speakers: Vec<TimelineSpeaker>,
+    text_path: PathBuf,
+    metadata_path: PathBuf,
+    timeline_path: PathBuf,
+    started_at_ms: u64,
+}
+
+struct DiarizedSegmentProgress {
+    text: String,
+    timeline_segments: Vec<TimelineSegment>,
+    chunk_metrics: Vec<AsrChunkMetric>,
+    fallback_reason: Option<String>,
+}
+
 type ChunkProgressCallback<'a> = dyn Fn(usize, usize) + Send + Sync + 'a;
 type ChunkMetricCallback<'a> = dyn Fn(AsrChunkMetric) + Send + Sync + 'a;
 type PauseCheckCallback<'a> = dyn Fn() -> bool + Send + Sync + 'a;
@@ -1052,6 +1077,7 @@ struct TaskTranscribeHooks<'a> {
     startup_fallback_reason: Option<&'a str>,
     server_state: Option<&'a mut Option<ServerRunnerState>>,
     managed_server_restart: Option<ManagedServerRestartContext<'a>>,
+    partial_artifacts: Option<PartialArtifactContext>,
 }
 
 #[derive(Debug, Deserialize)]

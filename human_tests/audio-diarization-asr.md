@@ -520,6 +520,35 @@
 - 第 2 条命令能看到 `identify_listener_speaker` 仍接入声纹校验，但 `identify_speaker_voice_from_wav_file` 读取 WAV 后转成 PCM 并调用 `identify_speaker_voice_pcm16`，生产路径由 worker 执行 embedding。
 - 直接执行隐藏 worker 命令时 stdout 返回结构化 JSON，`operation` 为 `identify`，静音样本返回 `status=insufficient_audio`，不依赖 Admin 主进程内直接执行模型推理。
 
+### TC-ADA-24：长音频 partial artifact 流式落盘且不牺牲声纹准确性
+
+操作步骤：
+
+1. 静态确认设计文档把流式优化限制在 full-file diarization 之后：
+   ```bash
+   source ~/.zshrc && rg -n "full-file diarization|voiceprint matching|speaker timeline 已确定之后|partial=true|partial_segment_count|不能绕过 speaker-aware unit planner" design/audio-diarization-asr-offline.md
+   ```
+2. 静态确认 Directory Task 每个 diarized ASR unit 完成后写 partial artifact，并且暂停/失败保留 partial 路径：
+   ```bash
+   source ~/.zshrc && rg -n "PartialArtifactContext|persist_partial_transcription_artifacts|preserve_partial_artifact_fields|partial_artifacts" crates/bifrost-admin/src/handlers/asr_jobs/runner.rs crates/bifrost-admin/src/handlers/asr_jobs/chunk_runtime.rs crates/bifrost-admin/src/handlers/asr_jobs/state.rs
+   ```
+3. 静态确认上传 SSE 在 speaker-aware unit 完成时推送 `final` segment，而不是全部完成后回放：
+   ```bash
+   source ~/.zshrc && rg -n "transcribe_uploaded_wav_with_voiceprint_speakers\\(|send_asr_segment\\(|stream_tx" crates/bifrost-admin/src/handlers/asr.rs crates/bifrost-admin/src/handlers/asr_jobs/diarization.rs
+   ```
+4. 执行 partial artifact 持久化单元测试：
+   ```bash
+   source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin partial_transcription_artifacts_update_file_store --lib -- --nocapture
+   ```
+
+预期结果：
+
+- 设计文档明确声纹、speaker embedding、speaker 稳定化和 `plan_asr_units()` 仍基于完整 normalized WAV，不把 full-file diarization 改成边听边猜。
+- Directory Task 只有在 ASR unit/chunk 已经产生文本后才把 `output_text_path` / `output_metadata_path` / `output_timeline_path` 写入 FileStore，避免 UI 暴露不存在的文件。
+- 每次 partial 写入都会更新 `.txt`、`.timeline.json`、`.srt`、`.vtt`、`.metadata.json`，metadata 包含 `partial=true` 和 `partial_segment_count`。
+- 任务暂停或失败时保留已经写出的 partial artifact 路径、`text_chars`、`chunk_metrics` 和 fallback 信息，刷新页面或恢复任务后仍能看到已产出的片段。
+- 上传 SSE 在 full-file diarization 完成后按 speaker-aware unit 逐段发送 `final` segment，最终 `done` 仍带完整文本；不会为了低延迟绕过 speaker-aware unit planner。
+
 ## 清理步骤
 
 - 临时服务通过 trap 关闭。
@@ -551,3 +580,4 @@
 | 2026-05-27 | TC-ADA-16 回归 | 已修复 `test_asr_voiceprint_enroll_cli.sh` 在 `SKIP_BUILD=true` 时默认寻找 `target/debug/bifrost` 的问题，改为复用 CI 预构建的 `target/release/bifrost`；已执行 `bash -n e2e-tests/tests/test_asr_voiceprint_enroll_cli.sh` | 通过 |
 | 2026-05-28 | TC-ADA-16 回归 | CI Linux shard 3 暴露 live enrollment fixture 在非支持平台返回 `speaker_embedding_unsupported_platform`；已让 `BIFROST_ASR_VOICEPRINT_TEST_EMBEDDING=1` 在非 macOS arm64 上继续使用 deterministic embedding，真实运行未设置该变量时仍保持 unsupported。已执行 `SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost` 与 `SKIP_BUILD=true BIFROST_BIN=$PWD/target/debug/bifrost BIFROST_ASR_VOICEPRINT_E2E_PORT=18994 bash e2e-tests/tests/test_asr_voiceprint_enroll_cli.sh`，CLI enroll-live 和 speakers list 均通过 | 通过 |
 | 2026-05-29 | TC-ADA-23 | 已执行静态 worker 入口校验，确认离线 diarization、声纹 identify、实时 voice wake WAV 声纹校验和 enrollment finish 均通过当前 `bifrost` 二进制的 `asr-diarization-worker --request <json>` 子进程请求；已执行 `SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost` 和隐藏 worker `identify_pcm16` 静音请求，返回 `operation=identify`、`status=insufficient_audio` | 通过 |
+| 2026-05-29 | TC-ADA-24 | 已执行设计边界静态验收、Directory Task partial artifact 静态验收、上传 SSE 流式发送静态验收，以及 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin partial_transcription_artifacts_update_file_store --lib -- --nocapture` | 通过 |

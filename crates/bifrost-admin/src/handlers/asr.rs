@@ -670,6 +670,7 @@ async fn handle_transcribe_stream(req: Request<Incoming>) -> Response<BoxBody> {
             &server_url,
             &target.language,
             &source_wav,
+            Some(&tx),
         )
         .await
         {
@@ -687,41 +688,6 @@ async fn handle_transcribe_stream(req: Request<Incoming>) -> Response<BoxBody> {
                     },
                 )
                 .await;
-                let mut committed = String::new();
-                for segment in &diarized.segments {
-                    let speaker_label = match (&segment.mapped_profile_id, segment.confidence) {
-                        (Some(_), Some(confidence)) => format!(
-                            "{} ({}% match)",
-                            segment.display_name,
-                            (confidence.clamp(0.0, 1.0) * 100.0).round() as u32
-                        ),
-                        _ => segment.display_name.clone(),
-                    };
-                    let line = format!("{speaker_label}: {}", segment.text);
-                    if !committed.is_empty() {
-                        committed.push('\n');
-                    }
-                    committed.push_str(&line);
-                    send_asr_segment(
-                        &tx,
-                        "final",
-                        AsrSegmentPayload {
-                            index: segment.index,
-                            start_ms: segment.start_ms,
-                            end_ms: segment.end_ms,
-                            stable_start_ms: segment.start_ms,
-                            stable_end_ms: segment.end_ms,
-                            text: &segment.text,
-                            delta: &line,
-                            committed: &committed,
-                            speaker: Some(&segment.speaker),
-                            speaker_display_name: Some(&segment.display_name),
-                            speaker_profile_id: segment.mapped_profile_id.as_deref(),
-                            speaker_confidence: segment.confidence,
-                        },
-                    )
-                    .await;
-                }
                 send_text(&tx, diarized.text.trim()).await;
                 send_progress(
                     &tx,
@@ -2382,7 +2348,7 @@ async fn send_text(tx: &tokio::sync::mpsc::Sender<Bytes>, text: &str) {
     send_event(tx, "text", &AsrTextPayload { text }).await;
 }
 
-async fn send_asr_segment(
+pub(crate) async fn send_asr_segment(
     tx: &tokio::sync::mpsc::Sender<Bytes>,
     event: &str,
     payload: AsrSegmentPayload<'_>,

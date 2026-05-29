@@ -2806,6 +2806,108 @@ mod tests {
     }
 
     #[test]
+    fn partial_transcription_artifacts_update_file_store() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let source_path = audio_dir.join("meeting.wav");
+        std::fs::write(&source_path, b"fake wav").unwrap();
+        let task_id = "partial-stream-task";
+        let file_key = source_key(&source_path);
+        let source_info = inspect_source_audio(&source_path);
+        let (text_path, metadata_path, timeline_path) = bifrost_asr::artifacts::output_paths_in(
+            &bifrost_storage::data_dir(),
+            task_id,
+            &source_path,
+            &audio_dir,
+        );
+
+        let mut initial_record = file_record_from_info(task_id, &source_path, &source_info);
+        initial_record.status = FileStatus::Processing;
+        initial_record.started_at_ms = Some(100);
+        save_file_store(
+            task_id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(file_key.clone(), initial_record)]),
+            },
+        )
+        .unwrap();
+
+        persist_partial_transcription_artifacts(
+            &PartialArtifactContext {
+                task_id: task_id.to_string(),
+                file_key: file_key.clone(),
+                task_name: "Partial Stream Task".to_string(),
+                model: "Qwen3-ASR-0.6B".to_string(),
+                language: "chinese".to_string(),
+                runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+                source_path: source_path.clone(),
+                source_info: source_info.clone(),
+                diarization_profile: Some("sherpa-onnx-balanced".to_string()),
+                speakers: vec![TimelineSpeaker {
+                    id: "speaker_00".to_string(),
+                    display_name: "用户A".to_string(),
+                    mapped_profile_id: None,
+                    confidence: None,
+                    candidate_profile_id: None,
+                    candidate_display_name: None,
+                    candidate_confidence: None,
+                }],
+                text_path: text_path.clone(),
+                metadata_path: metadata_path.clone(),
+                timeline_path: timeline_path.clone(),
+                started_at_ms: 100,
+            },
+            DiarizedSegmentProgress {
+                text: "用户A: 你好。".to_string(),
+                timeline_segments: vec![TimelineSegment {
+                    index: 99,
+                    audio_start_ms: 0,
+                    audio_end_ms: 1200,
+                    absolute_start_ms: None,
+                    absolute_end_ms: None,
+                    speaker: Some("speaker_00".to_string()),
+                    speaker_display_name: Some("用户A".to_string()),
+                    overlap: false,
+                    text: "你好。".to_string(),
+                }],
+                chunk_metrics: Vec::new(),
+                fallback_reason: Some("managed server fallback".to_string()),
+            },
+        )
+        .unwrap();
+
+        let rendered_text = std::fs::read_to_string(&text_path).unwrap();
+        assert!(rendered_text.contains("用户A"));
+        let timeline =
+            serde_json::from_str::<TranscriptTimeline>(&std::fs::read_to_string(&timeline_path).unwrap())
+                .unwrap();
+        assert_eq!(timeline.segments.len(), 1);
+        assert_eq!(timeline.segments[0].index, 0);
+        assert_eq!(timeline.speakers[0].display_name, "用户A");
+        let metadata =
+            serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&metadata_path).unwrap())
+                .unwrap();
+        assert_eq!(metadata["partial"], true);
+        assert_eq!(metadata["partial_segment_count"], 1);
+
+        let stored = load_file_store(task_id);
+        let record = stored.files.get(&file_key).unwrap();
+        assert_eq!(record.status, FileStatus::Processing);
+        assert_eq!(record.output_text_path.as_ref(), Some(&text_path));
+        assert_eq!(record.output_metadata_path.as_ref(), Some(&metadata_path));
+        assert_eq!(record.output_timeline_path.as_ref(), Some(&timeline_path));
+        assert!(record.text_chars > 0);
+        assert_eq!(
+            record.fallback_reason.as_deref(),
+            Some("managed server fallback")
+        );
+    }
+
+    #[test]
     fn task_run_lock_recovers_dead_owner_lock() {
         let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();

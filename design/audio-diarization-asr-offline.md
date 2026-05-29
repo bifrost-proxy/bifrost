@@ -236,6 +236,17 @@ pub current_segment_total: usize,
 
 暂停规则：diarization、ffmpeg 切片、每个 ASR unit 完成后都检查 `pause_check()`；暂停时 FileRecord 回到可恢复状态，已写 manifest 保留，下一次运行可从 manifest 继续。
 
+### 1.1 流式产物持久化边界
+
+长音频和定时目录任务需要尽早暴露处理进展，但优化边界必须服从准确性：
+
+- 不能把 full-file diarization / voiceprint matching 改成边听边猜。声纹识别、speaker embedding、speaker 稳定化和 `plan_asr_units()` 仍然基于完整 normalized WAV 的 diarization 结果，避免因为局部窗口导致角色重排、阈值漂移或同一个人被拆成多个身份。
+- 可流式化的阶段是 speaker timeline 已确定之后的 ASR unit 转写。每个 diarized ASR unit 完成后，立即用当前累计 segments 写出 `.txt`、`.timeline.json`、`.srt`、`.vtt` 和 `.metadata.json`，并同步 `FileStore.output_*_path`、`text_chars`、`chunk_metrics`、`fallback_reason`。
+- partial metadata 必须带 `partial=true`、`partial_started_at_ms` 和 `partial_segment_count`。最终任务成功时再写完整 artifact，并把 `partial` 状态替换为正式完成状态。
+- 暂停、失败或页面刷新时，已经写出的 partial artifact 不能丢失。失败 FileRecord 必须保留 partial 路径和已输出字符数，让 WebUI、CLI 和恢复后的任务仍然能看到已经产出的片段。
+- 上传文件的 `/api/asr/transcribe-stream` 在 full-file diarization 完成后，按 speaker-aware ASR unit 逐段推送 SSE `final` segment；不再等所有 segment 都转写完后一次性回放。最终 `done` 事件仍携带完整文本。
+- 纯 ASR fallback chunking 也可以在每个 chunk 完成后写 partial artifact，但它只用于未启用或不可用 speaker-aware pipeline 的场景；启用 diarization 时不能绕过 speaker-aware unit planner。
+
 ### 2. ASR unit 规划
 
 Diarization 原始 segment 可能太短、太密或重叠。V1 增加 `AsrAudioUnit`：
