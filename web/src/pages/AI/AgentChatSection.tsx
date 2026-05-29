@@ -42,7 +42,11 @@ import { isRunStateActive, isThreadActive, useRunningTimelinePolling } from "./A
 import { AgentChatMessageList } from "./AgentChatSection.messages";
 import { AgentChatPlan, AgentChatPromptChips } from "./AgentChatSection.composerExtras";
 import { AgentChatSettingsModal, AgentThreadListCard } from "./AgentChatSection.panels";
-import { queueItemsFromEvent, type QueuedInput } from "./AgentChatSection.queue";
+import {
+  queueItemsFromEvent,
+  queueItemsFromUnknown,
+  type QueuedInput,
+} from "./AgentChatSection.queue";
 import { SelectedRunnerPill, SlashRunnerPanel, useRunnerCallHandler, useSlashRunnerSelection } from "./AgentChatSection.runnerCall";
 import { createAgentChatStyles } from "./AgentChatSection.styles";
 import { AgentChatTokenHud } from "./AgentChatSection.tokenHud";
@@ -293,6 +297,17 @@ export default function AgentChatSection() {
       }
       const payload = (await response.json()) as { sessions?: AgentThreadSummary[] };
       const incoming = dedupeThreads(payload.sessions || []);
+      const selectedQueueThread = incoming.find((thread) =>
+        isSelectedThread(thread, sessionKey, historyPath, queryView),
+      );
+      const selectedQueueItems = selectedQueueThread
+        ? queueItemsFromUnknown(
+            selectedQueueThread.queueItems ?? selectedQueueThread.queue_items,
+          )
+        : null;
+      if (selectedQueueItems) {
+        setQueuedInputs(selectedQueueItems);
+      }
       setThreads((prev) => {
         const selectedLocal = prev.find((thread) =>
           isSelectedThread(thread, sessionKey, historyPath, queryView),
@@ -570,6 +585,12 @@ export default function AgentChatSection() {
             return changed ? next : prev;
           });
           const detailTelemetry = telemetryFromSessionDetail(detail, matchedThread);
+          const detailQueueItems = queueItemsFromUnknown(
+            detail.queueItems ?? detail.queue_items,
+          );
+          if (detailQueueItems) {
+            setQueuedInputs(detailQueueItems);
+          }
           const nextTelemetry = timelineEvents
             ? historyEventsToTelemetry(
                 timelineEvents,
@@ -755,6 +776,7 @@ export default function AgentChatSection() {
     setDraft("");
     setSlashRunner(undefined);
     setTelemetry(EMPTY_TELEMETRY);
+    setQueuedInputs([]);
     setWorkDir(selectedWorkDir);
     setRunnerId(newChatRunnerId);
     setNewChatOpen(false);
@@ -788,6 +810,9 @@ export default function AgentChatSection() {
       setHistoryPath(thread.history_path);
       setDraft("");
       setTelemetry(telemetryFromThread(thread));
+      setQueuedInputs(
+        queueItemsFromUnknown(thread.queueItems ?? thread.queue_items) ?? [],
+      );
       setWorkDir(thread.work_dir || defaultWorkDir);
       setRunnerId(thread.runner_id || "bifrost_agent");
       pendingInstantScrollRef.current = true;

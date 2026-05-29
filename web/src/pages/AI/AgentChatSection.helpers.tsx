@@ -75,6 +75,11 @@ export type HistoryEvent = {
   content: Record<string, unknown>;
 };
 
+export type QueuedInput = {
+  seq: number;
+  message: string;
+};
+
 export type AgentThreadSummary = {
   session_key: string;
   status: "active" | "ended";
@@ -97,6 +102,10 @@ export type AgentThreadSummary = {
   has_timeline?: boolean;
   timeline_event_count?: number;
   run_state?: string;
+  queue_length?: number;
+  queue_items?: QueuedInput[];
+  queueLength?: number;
+  queueItems?: QueuedInput[];
 };
 
 export type RunnerConfigPayload = {
@@ -137,6 +146,10 @@ export type SessionDetail = {
   has_timeline?: boolean;
   timeline_event_count?: number;
   run_state?: string;
+  queue_length?: number;
+  queue_items?: QueuedInput[];
+  queueLength?: number;
+  queueItems?: QueuedInput[];
   messages?: SessionDetailMessage[];
 };
 

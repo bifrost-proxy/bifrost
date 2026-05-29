@@ -920,6 +920,7 @@ tracing = "0.1"
 | 压缩次数恢复回归 | session JSONL 中的 `compaction` 事件会恢复为 `SessionRuntimeState.compaction_count`，`/resume` 后 `/status` 不再把已发生的压缩次数重置为 0 |
 | Agent 模型请求默认代理回归 | `im_gateway_agent_model_request_uses_bifrost_proxy` 使用 `AgentClient::new_with_bifrost_proxy(port)` 调用 mock Chat Completions，断言请求经当前 Bifrost 端口转发并在 `/api/traffic` 中出现可查询记录 |
 | Chat API `/stop` 停止运行中 loop | `im_gateway_agent_chat_stop_active_loop` 启动真实 Admin + 慢速 mock Chat Completions，先发起长请求，再用同 session 的 `/stop` 立即停止 active turn，并验证后续 chat 可继续使用 |
+| Web Agent Chat 持久排队恢复回归 | WebUI 运行中输入 Queue 时，`/_bifrost/api/agent/chat/stream` busy 路径只把消息写入后端 `SessionQueueManager`；`/sessions/all` 与 `/sessions/{session_key}` 返回 `queue_items` / `queue_length`，页面刷新后从后端恢复排队面板；当前 turn 完成后由后端 drain queue，前端不得再次重发队列消息 |
 | WebUI instruction 大窗口编辑回归 | `Settings Agent 三层 instructions 使用大窗口编辑` 验证全局 Agent instruction 页面无行内 textarea、点击 Edit 打开大弹窗并 PATCH；`Settings IM Provider instructions 使用大窗口编辑后保存覆盖值` 验证 Provider Edit 弹窗中 instruction 通过嵌套大弹窗编辑并保存到 `agent_config` |
 | WebUI Session 详情 Tab 与滚动回归 | `AI Agent Session 详情默认展示 Messages Tab 且内容区可真实滚动` 验证 history 深链默认进入 Messages、长事件列表在 `agent-session-messages-scroll` 内滚动、Settings Tab 展示 metadata/AGENTS/Skills |
 | WebUI Sessions 列表点击进入详情回归 | `AI Agent Sessions 列表支持点击 title 或整行进入详情` 验证列表不再展示查看 icon，history title 点击进入 history 详情，active session 整行点击进入 active 详情 |
@@ -947,6 +948,7 @@ tracing = "0.1"
 | TC-GQ-16 | 自定义 Runner busy 普通消息默认 queue | 通过 IM/debug inbound 在自定义 runner active run 期间发送普通消息，验证消息等待当前 run 结束后再处理；Codex runner 若返回 `threadId`，下一条排队消息使用 `codex exec resume` 接续 |
 | TC-IMA-90A | 飞书流式进度卡片与 `/status` Token/Context KMB 格式化 | 构造百万级 Token 与几十万 Context 的 progress card，并调用 `/status`，验证折叠标题、展开状态区和状态文本均展示 `K/M/B` 单位，不再裸显长数字 |
 | TC-IMA-90B | `/status` runner 元信息与压缩次数回归 | 构造外部 runner session 和 compaction 记录，验证 `/status` 展示 Agent 类型、Runner 类型、Runner ID、历史对话轮次、`threadId` / `conversationId`，且恢复后压缩次数保持非 0 |
+| TC-IMA-91A | Web Agent Chat 后端持久排队与刷新恢复 | 同一 session 运行中在 WebUI 选择 Queue 发送追加消息；刷新页面后队列面板仍从后端 `queue_items` 恢复；上一轮结束后由后端自动处理排队消息，前端不再本地重发 |
 | TC-LTM-09 | 长期记忆真实对话链路 | 真实 Bifrost + mock Chat API 环境下验证自动记忆、Phase 2 consolidation、跨 session 消费 |
 | TC-IMA-83 | Agent 模型请求默认进入 Traffic | 真实 Bifrost 监听端口启动后，Agent 底层 Chat Completions 请求默认经 `http://127.0.0.1:<port>` 代理发出；mock 模型 host 可查询到 POST 记录，真实模型域名在 `--intercept-include` 下可解包为 HTTPS POST 明文记录 |
 | TC-IMA-84 | Agent 设置页卡片导航 | Settings → Agent 左侧导航可见，点击 MCP Servers / Runtime 只渲染对应编辑卡片，URL `agentSection` 可刷新恢复，亮色与暗色主题下当前项高亮可读 |

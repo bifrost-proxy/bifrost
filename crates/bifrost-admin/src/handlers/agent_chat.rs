@@ -568,6 +568,17 @@ fn handle_builtin_busy_stream_input(
     })
 }
 
+pub(crate) fn queue_snapshot_payload(
+    queue_manager: &crate::im_gateway::SessionQueueManager,
+    session_key: &str,
+) -> Value {
+    let items = queue_manager.queue_status(session_key);
+    json!({
+        "queueLength": items.len(),
+        "queueItems": items,
+    })
+}
+
 fn handle_session_free_stream_command(
     body: &AgentChatRequest,
     session_key: &str,
@@ -896,6 +907,7 @@ async fn read_body_json<T: for<'de> Deserialize<'de>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::im_gateway::SessionQueueManager;
 
     #[test]
     fn formats_named_sse_event_with_json_payload() {
@@ -991,5 +1003,24 @@ mod tests {
             payload["compaction"]["context"]["estimatedContextTokens"],
             250
         );
+    }
+
+    #[test]
+    fn queue_snapshot_payload_exposes_backend_queue_items() {
+        let queue_manager = SessionQueueManager::new();
+        queue_manager
+            .push_queue("web-session", "first queued".to_string())
+            .unwrap();
+        queue_manager
+            .push_queue("web-session", "second queued".to_string())
+            .unwrap();
+
+        let payload = queue_snapshot_payload(&queue_manager, "web-session");
+
+        assert_eq!(payload["queueLength"], 2);
+        assert_eq!(payload["queueItems"][0]["seq"], 1);
+        assert_eq!(payload["queueItems"][0]["message"], "first queued");
+        assert_eq!(payload["queueItems"][1]["seq"], 2);
+        assert_eq!(payload["queueItems"][1]["message"], "second queued");
     }
 }

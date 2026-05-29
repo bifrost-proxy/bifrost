@@ -1336,6 +1336,26 @@ rm -rf ./.bifrost-test
   - 修复后复测：`bash e2e-tests/tests/test_im_agent_streaming_progress_card.sh` PASS，断言状态区标题包含“已收到引导：...”，避免 guide 注入成功但用户无可见反馈。
   - 默认数据目录真实 Feishu 链路：测试中途发送的新 IM 消息被注入 guide，没有发送第二张 progress card。
 
+### TC-IMA-91A: Web Agent Chat 后端持久排队与刷新恢复
+
+- **前置条件**:
+  - 使用临时数据目录启动最新 Bifrost：`BIFROST_DATA_DIR=$(mktemp -d) target/debug/bifrost start -p <PORT> --unsafe-ssl --no-system-proxy --skip-cert-check`。
+  - Agent 配置启用内置 Bifrost Agent，模型指向本地慢速 OpenAI-compatible mock，首个请求保持运行中。
+- **操作步骤**:
+  1. 打开 `http://127.0.0.1:<PORT>/_bifrost/ai?aiSection=agent-chat&agentSection=chat`。
+  2. 发起一条会保持运行中的消息，确认状态进入 Running。
+  3. 在运行中输入框选择 `Queue`，发送 `queued follow-up from web ui`。
+  4. 调用 `GET /_bifrost/api/im-gateway/agent/sessions/all`，确认当前 session 返回 `queue_items[0].message == "queued follow-up from web ui"`。
+  5. 刷新 WebUI 页面，确认 Queue 面板仍显示 `#1 queued follow-up from web ui`。
+  6. 释放或停止首个慢请求，观察后端自动处理排队消息；确认前端没有再发起额外本地重发造成重复消息。
+- **预期结果**:
+  - 排队消息写入后端 `SessionQueueManager`，`/agent/chat/stream` busy 响应、`/sessions/all` 和 `/sessions/{session_key}` 均返回同一组 `queueItems`。
+  - 页面刷新后 Queue 面板从后端恢复，不依赖 React 本地状态。
+  - 当前 turn 结束后由后端 drain queue 并继续处理，前端不再用 running false transition 自动重发队列消息。
+- **执行记录（2026-05-29）**:
+  - `CARGO_TARGET_DIR=target/agent-chat-queue-e2e BIFROST_E2E_RUNNER_JOBS=1 cargo run -p bifrost-e2e -- --test im_gateway_agent_chat_queue_state_persists_for_refresh --timeout 120 --port 18887`：PASS，真实启动 Admin + 慢速 mock model，验证 busy queue 写入后端、`sessions/all` 与 session detail 均返回同一 `queueItems`，并通过 `/stop` 释放当前 turn 后由后端继续 drain。
+  - API-backed human 流程覆盖 TC-IMA-91A 的步骤 2-6；WebUI 刷新恢复依赖同一 `sessions/all` / detail payload，前端构建验证见 `pnpm --dir web run build`。
+
 ### TC-IMA-92: 飞书流式进度卡片 - queue 消息进入后同卡刷新
 
 - **前置条件**:

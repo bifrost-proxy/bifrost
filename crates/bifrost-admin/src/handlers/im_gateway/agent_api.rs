@@ -191,6 +191,10 @@ pub(super) async fn handle_agent(
             let info = active_info_by_key.get(&s.session_key);
             let history = history_by_key.get(&s.session_key);
             let duration_secs = s.updated_at.saturating_sub(s.started_at);
+            let queue_snapshot = crate::handlers::agent_chat::queue_snapshot_payload(
+                &service.queue_manager,
+                &s.session_key,
+            );
             unified.push(serde_json::json!({
                 "session_key": s.session_key,
                 "status": "active",
@@ -215,6 +219,10 @@ pub(super) async fn handle_agent(
                 "has_timeline": history.is_some(),
                 "timeline_event_count": history.map(|(_, summary)| summary.event_count).unwrap_or(0),
                 "run_state": "running",
+                "queue_length": queue_snapshot["queueLength"].clone(),
+                "queue_items": queue_snapshot["queueItems"].clone(),
+                "queueLength": queue_snapshot["queueLength"].clone(),
+                "queueItems": queue_snapshot["queueItems"].clone(),
             }));
         }
 
@@ -228,6 +236,10 @@ pub(super) async fn handle_agent(
             }
             let history = history_by_key.get(&s.session_key);
             let duration_secs = s.last_active_at.saturating_sub(s.created_at);
+            let queue_snapshot = crate::handlers::agent_chat::queue_snapshot_payload(
+                &service.queue_manager,
+                &s.session_key,
+            );
             unified.push(serde_json::json!({
                 "session_key": s.session_key,
                 "status": "active",
@@ -260,6 +272,10 @@ pub(super) async fn handle_agent(
                 "run_state": history
                     .and_then(|(_, summary)| summary.run_state.clone())
                     .unwrap_or(s.run_state),
+                "queue_length": queue_snapshot["queueLength"].clone(),
+                "queue_items": queue_snapshot["queueItems"].clone(),
+                "queueLength": queue_snapshot["queueLength"].clone(),
+                "queueItems": queue_snapshot["queueItems"].clone(),
             }));
         }
 
@@ -502,13 +518,24 @@ pub(super) async fn handle_agent(
                 .agent_session_manager
                 .get_session_detail(&session_key)
             {
-                Some(detail) => return json_response(&detail),
+                Some(detail) => {
+                    return json_response(&session_detail_with_queue(
+                        detail,
+                        &service.queue_manager,
+                    ));
+                }
                 None => {
                     if let Some(detail) = history_session_detail(&session_key) {
-                        return json_response(&detail);
+                        return json_response(&session_detail_with_queue(
+                            detail,
+                            &service.queue_manager,
+                        ));
                     }
                     if let Some(detail) = external_runner_session_detail(&session_key).await {
-                        return json_response(&detail);
+                        return json_response(&session_detail_with_queue(
+                            detail,
+                            &service.queue_manager,
+                        ));
                     }
                     return error_response(StatusCode::NOT_FOUND, "session not found");
                 }
@@ -1386,6 +1413,34 @@ fn dedupe_unified_sessions_by_key(unified: &mut Vec<serde_json::Value>) {
 
 fn is_runner_call_session_key(session_key: &str) -> bool {
     session_key.starts_with("runner-call:")
+}
+
+fn session_detail_with_queue(
+    detail: bifrost_agent::SessionDetail,
+    queue_manager: &crate::im_gateway::SessionQueueManager,
+) -> serde_json::Value {
+    let queue_snapshot =
+        crate::handlers::agent_chat::queue_snapshot_payload(queue_manager, &detail.session_key);
+    let mut value = serde_json::to_value(detail).unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "queue_length".to_string(),
+            queue_snapshot["queueLength"].clone(),
+        );
+        object.insert(
+            "queue_items".to_string(),
+            queue_snapshot["queueItems"].clone(),
+        );
+        object.insert(
+            "queueLength".to_string(),
+            queue_snapshot["queueLength"].clone(),
+        );
+        object.insert(
+            "queueItems".to_string(),
+            queue_snapshot["queueItems"].clone(),
+        );
+    }
+    value
 }
 
 fn history_session_detail(session_key: &str) -> Option<bifrost_agent::SessionDetail> {

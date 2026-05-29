@@ -749,6 +749,156 @@ pub fn get_all_tests() -> Vec<TestCase> {
             },
         ),
         TestCase::standalone(
+            "im_gateway_agent_chat_queue_state_persists_for_refresh",
+            "Validate Web Agent Chat queue state is served from backend sessions APIs",
+            "admin",
+            || async move {
+                let mock = ChatCompletionMock::start().await?;
+                let port = pick_unused_port()?;
+                let (_proxy, _admin_state) = start_im_gateway_admin(port).await?;
+
+                let client = reqwest::Client::builder()
+                    .danger_accept_invalid_certs(true)
+                    .no_proxy()
+                    .build()
+                    .map_err(|e| format!("Failed to create client: {}", e))?;
+                let base = format!("http://127.0.0.1:{port}/_bifrost/api");
+                let gateway_base = format!("{base}/im-gateway");
+                let session_key = "web-queue-refresh-e2e";
+
+                let patch_response = client
+                    .patch(format!("{gateway_base}/agent"))
+                    .json(&serde_json::json!({
+                        "enabled": true,
+                        "model": "mock-model",
+                        "model_provider": "mock",
+                        "max_turn_iterations": 2,
+                        "request_timeout_secs": 60,
+                        "memories": {
+                            "use_memories": false,
+                            "generate_memories": false
+                        },
+                        "model_providers": {
+                            "mock": {
+                                "name": "Mock",
+                                "base_url": mock.url(),
+                                "api_key": "test"
+                            }
+                        }
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("PATCH agent config failed: {e}"))?;
+                assert_status(&patch_response, 200)?;
+
+                let chat_client = client.clone();
+                let chat_base = base.clone();
+                let chat_handle = tokio::spawn(async move {
+                    chat_client
+                        .post(format!("{chat_base}/agent/chat/stream"))
+                        .json(&serde_json::json!({
+                            "session_key": session_key,
+                            "message": "AGENT_QUEUE_REFRESH_E2E keep this model request open"
+                        }))
+                        .send()
+                        .await
+                        .map_err(|e| format!("POST slow agent chat stream failed: {e}"))
+                });
+
+                let started_at = std::time::Instant::now();
+                loop {
+                    let seen = mock
+                        .requests
+                        .lock()
+                        .iter()
+                        .any(|body| request_messages_contain(body, "AGENT_QUEUE_REFRESH_E2E"));
+                    if seen {
+                        break;
+                    }
+                    if started_at.elapsed() > std::time::Duration::from_secs(5) {
+                        return Err("mock did not receive queue refresh request".to_string());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+
+                let queue_response = client
+                    .post(format!("{base}/agent/chat/stream"))
+                    .json(&serde_json::json!({
+                        "session_key": session_key,
+                        "message": "/q queued follow-up from web ui"
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("POST queue stream failed: {e}"))?;
+                assert_status(&queue_response, 200)?;
+                let queue_text = queue_response
+                    .text()
+                    .await
+                    .map_err(|e| format!("read queue stream failed: {e}"))?;
+                if !queue_text.contains("\"queueLength\":1")
+                    || !queue_text.contains("queued follow-up from web ui")
+                {
+                    return Err(format!("Expected queue SSE to include backend queue items, got: {queue_text}"));
+                }
+
+                let sessions_response = client
+                    .get(format!("{gateway_base}/agent/sessions/all"))
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET sessions/all failed: {e}"))?;
+                assert_status(&sessions_response, 200)?;
+                let sessions_json: serde_json::Value = sessions_response
+                    .json()
+                    .await
+                    .map_err(|e| format!("parse sessions/all failed: {e}"))?;
+                let session = sessions_json
+                    .get("sessions")
+                    .and_then(|value| value.as_array())
+                    .and_then(|items| {
+                        items.iter().find(|item| {
+                            item.get("session_key").and_then(|value| value.as_str())
+                                == Some(session_key)
+                        })
+                    })
+                    .ok_or_else(|| format!("queued active session missing: {sessions_json}"))?;
+                assert_queue_item(session, "queued follow-up from web ui")?;
+
+                let detail_response = client
+                    .get(format!(
+                        "{gateway_base}/agent/sessions/{}",
+                        urlencoding::encode(session_key)
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET session detail failed: {e}"))?;
+                assert_status(&detail_response, 200)?;
+                let detail_json: serde_json::Value = detail_response
+                    .json()
+                    .await
+                    .map_err(|e| format!("parse session detail failed: {e}"))?;
+                assert_queue_item(&detail_json, "queued follow-up from web ui")?;
+
+                let stop_response = client
+                    .post(format!("{gateway_base}/agent/chat"))
+                    .json(&serde_json::json!({
+                        "session_key": session_key,
+                        "message": "/stop"
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("POST stop for queue refresh failed: {e}"))?;
+                assert_status(&stop_response, 200)?;
+                let chat_response =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), chat_handle)
+                        .await
+                        .map_err(|_| "slow queue refresh chat did not return after /stop".to_string())?
+                        .map_err(|e| format!("queue refresh chat task join failed: {e}"))??;
+                assert_status(&chat_response, 200)?;
+
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
             "im_gateway_agent_long_task_runtime_watch",
             "Validate exec_command long tasks are watched by runtime without model polling",
             "admin",
@@ -1885,7 +2035,8 @@ impl ChatCompletionMock {
                             let is_multimodal_e2e =
                                 request_messages_contain(&body, "MULTIMODAL_IMAGE_E2E")
                                     && request_contains_image_url(&body);
-                            let is_stop_e2e = request_messages_contain(&body, "AGENT_STOP_E2E")
+                            let is_stop_e2e = (request_messages_contain(&body, "AGENT_STOP_E2E")
+                                || request_messages_contain(&body, "AGENT_QUEUE_REFRESH_E2E"))
                                 && !request_messages_contain(&body, "已收到 /stop");
                             if is_stop_e2e {
                                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
@@ -2274,6 +2425,35 @@ fn request_messages_contain(body: &serde_json::Value, needle: &str) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+fn assert_queue_item(value: &serde_json::Value, expected_message: &str) -> Result<(), String> {
+    if value
+        .get("queue_length")
+        .or_else(|| value.get("queueLength"))
+        .and_then(|item| item.as_u64())
+        != Some(1)
+    {
+        return Err(format!("Expected queue length 1, got: {value}"));
+    }
+    let has_expected_item = value
+        .get("queue_items")
+        .or_else(|| value.get("queueItems"))
+        .and_then(|item| item.as_array())
+        .map(|items| {
+            items.iter().any(|item| {
+                item.get("seq").and_then(|seq| seq.as_u64()) == Some(1)
+                    && item.get("message").and_then(|message| message.as_str())
+                        == Some(expected_message)
+            })
+        })
+        .unwrap_or(false);
+    if !has_expected_item {
+        return Err(format!(
+            "Expected queue item {expected_message:?}, got: {value}"
+        ));
+    }
+    Ok(())
 }
 
 fn request_contains_image_url(body: &serde_json::Value) -> bool {
