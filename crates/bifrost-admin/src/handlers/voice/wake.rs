@@ -790,6 +790,7 @@ async fn spawn_voice_wake_worker(
         .map_err(|error| format!("clone voice wake worker log handle: {error}"))?;
     let current_exe =
         std::env::current_exe().map_err(|error| format!("resolve current executable: {error}"))?;
+    let current_exe = labeled_process_executable(&current_exe, "bifrost-voice");
     let chunk_ms = request
         .chunk_ms
         .unwrap_or(DEFAULT_LISTENER_CHUNK_MS)
@@ -844,6 +845,22 @@ async fn spawn_voice_wake_worker(
         .await;
     });
     Ok((pid, task))
+}
+
+fn labeled_process_executable(executable: &Path, alias_name: &str) -> PathBuf {
+    let alias_dir = bifrost_storage::data_dir().join("runtime/process-aliases");
+    match bifrost_core::process_alias_executable(executable, &alias_dir, alias_name) {
+        Ok(alias) => alias,
+        Err(error) => {
+            tracing::warn!(
+                executable = %executable.display(),
+                alias_name = %alias_name,
+                error = %error,
+                "falling back to unlabeled bifrost voice wake executable"
+            );
+            executable.to_path_buf()
+        }
+    }
 }
 
 fn get_events_response() -> Response<BoxBody> {

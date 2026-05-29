@@ -134,6 +134,7 @@ impl AgentWorkerClient {
     pub fn current_exe() -> Result<Self, String> {
         let executable = std::env::current_exe()
             .map_err(|error| format!("resolve current executable failed: {error}"))?;
+        let executable = labeled_process_executable(&executable, "bifrost-agent");
         Ok(Self { executable })
     }
 
@@ -179,6 +180,22 @@ impl AgentWorkerClient {
             #[cfg(test)]
             task: None,
         })
+    }
+}
+
+fn labeled_process_executable(executable: &Path, alias_name: &str) -> PathBuf {
+    let alias_dir = bifrost_storage::data_dir().join("runtime/process-aliases");
+    match bifrost_core::process_alias_executable(executable, &alias_dir, alias_name) {
+        Ok(alias) => alias,
+        Err(error) => {
+            tracing::warn!(
+                executable = %executable.display(),
+                alias_name = %alias_name,
+                error = %error,
+                "falling back to unlabeled bifrost worker executable"
+            );
+            executable.to_path_buf()
+        }
     }
 }
 

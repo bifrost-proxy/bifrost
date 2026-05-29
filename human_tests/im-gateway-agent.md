@@ -1646,6 +1646,30 @@ rm -rf ./.bifrost-test
   - `CARGO_TARGET_DIR=target/agent-proxy-e2e BIFROST_E2E_RUNNER_JOBS=1 cargo run -p bifrost-e2e -- --test im_gateway_agent_model_request_uses_bifrost_proxy --test-timeout 120 --port 18884`：PASS。临时 E2E 数据目录尚未生成 CA 时会告警 `proxied HTTP client could not load CA`，但不会退回 direct，模型请求仍保持经 Bifrost proxy 转发。
   - `cargo run --bin bifrost -- -p 19999 agent run --runner codex --session cli-server-required 'ping'`：PASS，退出码 1，错误包含 `Failed to reach Bifrost at 127.0.0.1:19999 — is the proxy running?`。
 
+### TC-IMA-83B: Bifrost 异步子进程按场景展示进程名
+
+- **前置条件**:
+  - 当前源码已构建或可通过 `cargo run` 启动。
+  - 使用临时数据目录，启动命令必须包含 `--no-system-proxy`。
+- **操作步骤**:
+  1. 触发一个内置 Bifrost Agent turn，并在系统进程列表或 `ps` 输出中检查子进程名称。
+  2. 触发一个 Codex/ChatGPT Web/external CLI Runner run，并检查对应子进程名称。
+  3. 触发 Voice worker 或 ASR managed service 启动，并检查对应子进程名称。
+  4. 查看临时数据目录下 `runtime/process-aliases/`，确认存在场景别名入口。
+- **预期结果**:
+  - 内置 Agent worker 通过 `bifrost-agent` 入口启动。
+  - 外部 CLI Runner worker 通过 `bifrost-runner` 入口启动。
+  - Voice worker 通过 `bifrost-voice` 入口启动。
+  - 托管 ASR server 通过 `bifrost-asr-server` 入口启动。
+  - 按 chunk fork 的 ASR CLI 通过 `bifrost-asr-cli` 入口启动。
+  - 如果别名创建失败，业务仍可启动原 executable，日志中出现可定位 warning。
+- **清理步骤**:
+  - 停止临时 Bifrost 服务，清理临时数据目录和 ASR/Voice 测试资源。
+- **执行记录（2026-05-29）**:
+  - `cargo test -p bifrost-core process_alias_executable -- --nocapture`：PASS，验证创建 `bifrost-agent` 场景别名并拒绝包含路径分隔符的非法别名。
+  - `cargo test -p bifrost-admin im_gateway::agent_worker::tests:: --lib -- --nocapture`：PASS，确认 Agent worker 改用别名 executable 后既有 worker 协议回归仍通过。
+  - `cargo test -p bifrost-admin external_cli --lib -- --nocapture`：PASS，确认 external runner worker 改用别名 executable 后既有 runner 回归仍通过。
+
 ### TC-IMA-84: AI 一级页合并 Agent/IM Gateway 子导航并按 URL 切换独立面板
 
 - **前置条件**:

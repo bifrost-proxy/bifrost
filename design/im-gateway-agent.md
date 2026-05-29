@@ -953,6 +953,7 @@ tracing = "0.1"
 | TC-LTM-09 | 长期记忆真实对话链路 | 真实 Bifrost + mock Chat API 环境下验证自动记忆、Phase 2 consolidation、跨 session 消费 |
 | TC-IMA-83 | Agent 模型请求默认进入 Traffic | 真实 Bifrost 监听端口启动后，Agent 底层 Chat Completions 请求默认经 `http://127.0.0.1:<port>` 代理发出；mock 模型 host 可查询到 POST 记录，真实模型域名在 `--intercept-include` 下可解包为 HTTPS POST 明文记录 |
 | TC-IMA-83A | Agent worker 内置代理信任与外部 proxy env 隔离 | IM/Web 入口的内置 Agent worker 使用当前 Bifrost 端口和 `data_dir/certs/ca.crt` 访问模型；CLI `agent run` 通过 Admin Server stream 执行，Server 不运行时明确失败；库级 direct client 不被 shell/system proxy 环境变量劫持 |
+| TC-IMA-83B | Bifrost 异步子进程场景化命名 | 内置 Agent、external Runner、Voice、ASR 这类独立子进程通过 `bifrost-agent`、`bifrost-runner`、`bifrost-voice`、`bifrost-asr-server`、`bifrost-asr-cli` 场景别名启动，系统进程列表不再全显示为 `bifrost` |
 | TC-IMA-84 | Agent 设置页卡片导航 | Settings → Agent 左侧导航可见，点击 MCP Servers / Runtime 只渲染对应编辑卡片，URL `agentSection` 可刷新恢复，亮色与暗色主题下当前项高亮可读 |
 | TC-ASP-14 | WebUI Session 详情 Messages/Settings Tab 与右侧内容滚动回归 | 历史 session 深链默认显示 Messages Tab，长事件列表在右侧内容区真实滚动；Settings Tab 展示 Session Info、AGENTS.md Instructions 和 Skills |
 | TC-ASP-15 | WebUI Sessions 列表 title/整行点击进入详情回归 | Sessions 列表不再显示查看 icon；点击 history session title 进入 history 详情；点击 active session 当前行进入 active 详情；删除按钮不会触发行跳转 |
@@ -971,6 +972,8 @@ Agent 相关 HTTP 客户端必须复用 `bifrost_core` 的 direct/proxied client
 `bifrost agent run` 是 Server 模式命令：CLI 只调用 `/_bifrost/api/im-gateway/chat/stream`，由已经启动的 Bifrost Server 再拉起内置 worker 或 `external-runner-worker` 执行 Codex/ChatGPT Web/自定义 Runner。若代理服务未启动，CLI 应明确提示 `Failed to reach Bifrost ... is the proxy running?`，而不是在当前 CLI 进程中 fallback 本地执行。
 
 库级直连调用仍保留 `AgentClient::new()`，用于纯单元测试和不在 Bifrost 服务内运行的场景。需要临时绕过默认代理时，可设置 `BIFROST_AGENT_DISABLE_MODEL_PROXY=1`，服务会回退为直连模型请求。
+
+Agent/Runner/Voice/ASR 这类异步工作必须在独立进程中运行，主进程只保留代理、Admin 网关和调度任务。为了方便在 Activity Monitor、`ps` 等系统进程列表中辨认，所有由 Bifrost 启动的长期 worker 都必须通过 `runtime/process-aliases/` 下的场景别名入口 exec：内置 Agent worker 使用 `bifrost-agent`，外部 CLI Runner worker 使用 `bifrost-runner`，Voice worker 使用 `bifrost-voice`，托管 ASR server 使用 `bifrost-asr-server`，按 chunk fork 的 ASR CLI 使用 `bifrost-asr-cli`。别名创建失败不能阻断业务，应记录 warning 并回退到原 executable。
 
 ## `/agent/chat` `/status` 工作目录语义
 

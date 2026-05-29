@@ -1175,7 +1175,11 @@ pub(crate) async fn start_managed_service(
         detail: Some(error.to_string()),
     })?;
 
-    let mut command = Command::new(target.install_dir().join("asr-server"));
+    let asr_server = labeled_process_executable(
+        &target.install_dir().join("asr-server"),
+        "bifrost-asr-server",
+    );
+    let mut command = Command::new(asr_server);
     command
         .arg("--model-dir")
         .arg(target.model_dir())
@@ -1447,6 +1451,22 @@ fn service_busy_response(target: &AsrTarget, existing: &AsrTarget) -> AsrService
 
 fn is_service_busy(response: &AsrServiceResponse) -> bool {
     response.message == "Qwen3-ASR service is busy."
+}
+
+fn labeled_process_executable(executable: &Path, alias_name: &str) -> PathBuf {
+    let alias_dir = bifrost_storage::data_dir().join("runtime/process-aliases");
+    match bifrost_core::process_alias_executable(executable, &alias_dir, alias_name) {
+        Ok(alias) => alias,
+        Err(error) => {
+            warn!(
+                executable = %executable.display(),
+                alias_name = %alias_name,
+                error = %error,
+                "falling back to unlabeled ASR executable"
+            );
+            executable.to_path_buf()
+        }
+    }
 }
 
 pub(crate) async fn resolve_managed_target(target: AsrTarget) -> AsrTarget {
@@ -2218,7 +2238,8 @@ async fn verify_cli_sample(
         },
     )
     .await;
-    let output = Command::new(target.install_dir().join("asr"))
+    let asr_cli = labeled_process_executable(&target.install_dir().join("asr"), "bifrost-asr-cli");
+    let output = Command::new(asr_cli)
         .arg(target.model_dir())
         .arg(sample)
         .arg(&target.language)

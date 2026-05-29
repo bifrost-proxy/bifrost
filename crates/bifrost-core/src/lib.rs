@@ -7,6 +7,7 @@ pub mod limits;
 pub mod logging;
 pub mod matcher;
 pub mod panic_handler;
+pub mod process_alias;
 pub mod protocol;
 pub mod rule;
 pub mod shell_proxy;
@@ -34,6 +35,7 @@ pub use matcher::{
     WildcardMatcher,
 };
 pub use panic_handler::{install_panic_hook, spawn_with_panic_guard};
+pub use process_alias::process_alias_executable;
 pub use protocol::*;
 pub use rule::{
     create_shared_store, extract_inline_variables, parse_line, parse_rules, parse_rules_tolerant,

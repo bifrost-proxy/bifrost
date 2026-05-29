@@ -356,6 +356,7 @@ mod platform {
         validate_model_assets(&config.model_dir)?;
         let exe = std::env::current_exe()
             .map_err(|error| format!("resolve Bifrost executable for voice worker: {error}"))?;
+        let exe = labeled_process_executable(&exe, "bifrost-voice");
         let mut command = Command::new(exe);
         command
             .args(["ai", "voice", "worker"])
@@ -400,6 +401,22 @@ mod platform {
             other => Err(format!(
                 "unexpected stateful ASR worker startup response: {other:?}"
             )),
+        }
+    }
+
+    fn labeled_process_executable(executable: &Path, alias_name: &str) -> PathBuf {
+        let alias_dir = bifrost_storage::data_dir().join("runtime/process-aliases");
+        match bifrost_core::process_alias_executable(executable, &alias_dir, alias_name) {
+            Ok(alias) => alias,
+            Err(error) => {
+                warn!(
+                    executable = %executable.display(),
+                    alias_name = %alias_name,
+                    error = %error,
+                    "falling back to unlabeled bifrost voice executable"
+                );
+                executable.to_path_buf()
+            }
         }
     }
 

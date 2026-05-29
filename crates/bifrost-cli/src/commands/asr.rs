@@ -14,7 +14,7 @@ use bifrost_admin::asr_streaming::{
     append_transcript_delta, call_asr_whole_file_endpoint, dedupe_increment, WholeFileTranscription,
 };
 use bifrost_admin::resource_download::{download_with_resume, DownloadProgress, DownloadRequest};
-use bifrost_core::{direct_reqwest_client_builder, BifrostError, Result};
+use bifrost_core::{direct_reqwest_client_builder, process_alias_executable, BifrostError, Result};
 use chrono::{Local, TimeZone};
 use dialoguer::Select;
 use serde::Deserialize;
@@ -2616,7 +2616,8 @@ fn start_service(model: &str, language: &str) -> Result<AsrServiceState> {
         BifrostError::Io(std::io::Error::other(format!("clone ASR log: {error}")))
     })?;
 
-    let child = Command::new(install.join("asr-server"))
+    let asr_server = labeled_process_executable(&install.join("asr-server"), "bifrost-asr-server");
+    let child = Command::new(asr_server)
         .arg("--model-dir")
         .arg(model_path)
         .arg("--host")
@@ -2659,6 +2660,21 @@ fn start_service(model: &str, language: &str) -> Result<AsrServiceState> {
         "Timed out waiting for Qwen3-ASR service to become healthy. Log: {}",
         log_path.display()
     )))
+}
+
+fn labeled_process_executable(executable: &Path, alias_name: &str) -> PathBuf {
+    let alias_dir = bifrost_storage::data_dir().join("runtime/process-aliases");
+    match process_alias_executable(executable, &alias_dir, alias_name) {
+        Ok(alias) => alias,
+        Err(error) => {
+            eprintln!(
+                "warning: falling back to unlabeled ASR executable {}: {}",
+                executable.display(),
+                error
+            );
+            executable.to_path_buf()
+        }
+    }
 }
 
 fn stop_service() -> Result<()> {
