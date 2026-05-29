@@ -8,6 +8,22 @@ AUDIO_DIR="$DATA_DIR/audio"
 LOG_FILE="$DATA_DIR/bifrost.log"
 PID=""
 
+resolve_bifrost_bin() {
+  local candidate="${BIFROST_BIN:-}"
+  if [[ -z "$candidate" ]]; then
+    if [[ "${SKIP_BUILD:-false}" == "true" ]]; then
+      candidate="$ROOT_DIR/target/release/bifrost"
+    else
+      candidate="$ROOT_DIR/target/debug/bifrost"
+    fi
+  fi
+  if [[ ! -x "$candidate" ]]; then
+    echo "bifrost binary is not executable: $candidate" >&2
+    return 1
+  fi
+  printf '%s\n' "$candidate"
+}
+
 cleanup() {
   if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then
     kill "$PID" 2>/dev/null || true
@@ -162,11 +178,16 @@ retryable_dir.mkdir(parents=True, exist_ok=True)
 }, indent=2), encoding="utf-8")
 PY
 
-echo "[asr-task-startup-recovery] build bifrost"
-cargo build --bin bifrost >/dev/null
+if [[ "${SKIP_BUILD:-false}" == "true" ]]; then
+  echo "[asr-task-startup-recovery] skipping build, using ${BIFROST_BIN:-$ROOT_DIR/target/release/bifrost}"
+else
+  echo "[asr-task-startup-recovery] build bifrost"
+  cargo build --bin bifrost >/dev/null
+fi
+BIFROST_BIN="$(resolve_bifrost_bin)"
 
 echo "[asr-task-startup-recovery] start bifrost on ${PORT}"
-BIFROST_DATA_DIR="$DATA_DIR" "$ROOT_DIR/target/debug/bifrost" start \
+BIFROST_DATA_DIR="$DATA_DIR" "$BIFROST_BIN" start \
   -p "$PORT" \
   --unsafe-ssl \
   --skip-cert-check \

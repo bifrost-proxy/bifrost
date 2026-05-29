@@ -11,6 +11,22 @@ CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT_DIR/.bifrost-e2e-target}"
 export CARGO_TARGET_DIR
 export BIFROST_DATA_DIR="$DATA_DIR"
 
+resolve_bifrost_bin() {
+  local candidate="${BIFROST_BIN:-}"
+  if [[ -z "$candidate" ]]; then
+    if [[ "${SKIP_BUILD:-false}" == "true" ]]; then
+      candidate="$ROOT_DIR/target/release/bifrost"
+    else
+      candidate="$CARGO_TARGET_DIR/debug/bifrost"
+    fi
+  fi
+  if [[ ! -x "$candidate" ]]; then
+    echo "bifrost binary is not executable: $candidate" >&2
+    return 1
+  fi
+  printf '%s\n' "$candidate"
+}
+
 cleanup() {
   status=$?
   if [[ "$status" -ne 0 && -f "$LOG_FILE" ]]; then
@@ -49,8 +65,13 @@ cat > "$HISTORY_FILE" <<'JSONL'
 {"timestamp":1780017906,"event_type":"assistant_message","session_key":"pagination-session","content":{"message":"done","tokens":12}}
 JSONL
 
-cargo build --bin bifrost
-"$CARGO_TARGET_DIR/debug/bifrost" start -p "$PORT" --unsafe-ssl --no-system-proxy --skip-cert-check --yes >"$LOG_FILE" 2>&1 &
+if [[ "${SKIP_BUILD:-false}" == "true" ]]; then
+  echo "[agent-history-pagination] skipping build, using ${BIFROST_BIN:-$ROOT_DIR/target/release/bifrost}"
+else
+  cargo build --bin bifrost
+fi
+BIFROST_BIN="$(resolve_bifrost_bin)"
+"$BIFROST_BIN" start -p "$PORT" --unsafe-ssl --no-system-proxy --skip-cert-check --yes >"$LOG_FILE" 2>&1 &
 BIFROST_PID=$!
 
 for _ in $(seq 1 80); do

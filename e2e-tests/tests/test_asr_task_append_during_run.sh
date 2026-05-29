@@ -10,6 +10,22 @@ FAKE_BIN_DIR="$DATA_DIR/bin"
 LOG_FILE="$DATA_DIR/bifrost.log"
 PID=""
 
+resolve_bifrost_bin() {
+  local candidate="${BIFROST_BIN:-}"
+  if [[ -z "$candidate" ]]; then
+    if [[ "${SKIP_BUILD:-false}" == "true" ]]; then
+      candidate="$ROOT_DIR/target/release/bifrost"
+    else
+      candidate="$ROOT_DIR/target/debug/bifrost"
+    fi
+  fi
+  if [[ ! -x "$candidate" ]]; then
+    echo "bifrost binary is not executable: $candidate" >&2
+    return 1
+  fi
+  printf '%s\n' "$candidate"
+}
+
 cleanup() {
   if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then
     kill "$PID" 2>/dev/null || true
@@ -100,12 +116,17 @@ FIRST_AUDIO="$AUDIO_DIR/TX02_MIC001_20260525_090000_orig.wav"
 SECOND_AUDIO="$AUDIO_DIR/TX02_MIC002_20260525_100000_orig.wav"
 make_wav "$FIRST_AUDIO"
 
-echo "[asr-task-append] build bifrost"
-cargo build --bin bifrost >/dev/null
+if [[ "${SKIP_BUILD:-false}" == "true" ]]; then
+  echo "[asr-task-append] skipping build, using ${BIFROST_BIN:-$ROOT_DIR/target/release/bifrost}"
+else
+  echo "[asr-task-append] build bifrost"
+  cargo build --bin bifrost >/dev/null
+fi
+BIFROST_BIN="$(resolve_bifrost_bin)"
 
 echo "[asr-task-append] start bifrost on ${PORT}"
 HOME="$HOME_DIR" BIFROST_DATA_DIR="$DATA_DIR" BIFROST_FAKE_ASR_SLEEP_SECS=1.5 PATH="$FAKE_BIN_DIR:$PATH" \
-  "$ROOT_DIR/target/debug/bifrost" start \
+  "$BIFROST_BIN" start \
   -p "$PORT" \
   --unsafe-ssl \
   --skip-cert-check \
