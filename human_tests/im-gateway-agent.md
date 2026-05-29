@@ -1669,6 +1669,7 @@ rm -rf ./.bifrost-test
   - `cargo test -p bifrost-core process_alias_executable -- --nocapture`：PASS，验证创建 `bifrost-agent` 场景别名并拒绝包含路径分隔符的非法别名。
   - `cargo test -p bifrost-admin im_gateway::agent_worker::tests:: --lib -- --nocapture`：PASS，确认 Agent worker 改用别名 executable 后既有 worker 协议回归仍通过。
   - `cargo test -p bifrost-admin external_cli --lib -- --nocapture`：PASS，确认 external runner worker 改用别名 executable 后既有 runner 回归仍通过。
+  - CI `26636858269` macOS shard 3 暴露 `test_agent_worker_process_isolation.sh` 使用固定端口且 cleanup 通过全局 `pkill -f "bifrost agent worker"` 杀到同 shard 其他用例 worker。已改为消费 `ADMIN_PORT`/`MOCK_HTTP_PORT`，只匹配当前 Bifrost 父进程下的 worker，并等待 SSE `run_started` 写出后断言。
 
 ### TC-IMA-84: AI 一级页合并 Agent/IM Gateway 子导航并按 URL 切换独立面板
 

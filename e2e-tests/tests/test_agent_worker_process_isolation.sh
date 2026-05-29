@@ -4,7 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-PORT="${BIFROST_AGENT_WORKER_E2E_PORT:-18881}"
+PORT="${BIFROST_AGENT_WORKER_E2E_PORT:-${ADMIN_PORT:-18881}}"
+MOCK_PORT="${BIFROST_AGENT_WORKER_E2E_MOCK_PORT:-${MOCK_HTTP_PORT:-18882}}"
 TEST_DIR="$(mktemp -d)"
 LOG_FILE="$TEST_DIR/bifrost.log"
 SSE_FILE="$TEST_DIR/agent.sse"
@@ -17,16 +18,38 @@ CURL_PID=""
 DISCONNECT_CURL_PID=""
 EXTERNAL_CURL_PID=""
 
+worker_pids() {
+  local pattern="$1"
+  if [[ -z "$BIFROST_PID" ]]; then
+    return 0
+  fi
+  pgrep -P "$BIFROST_PID" -f "$pattern" 2>/dev/null || true
+}
+
+worker_running() {
+  local pattern="$1"
+  [[ -n "$(worker_pids "$pattern")" ]]
+}
+
+kill_workers() {
+  local pattern="$1"
+  local pids
+  pids="$(worker_pids "$pattern")"
+  if [[ -n "$pids" ]]; then
+    kill $pids >/dev/null 2>&1 || true
+  fi
+}
+
 cleanup() {
   set +e
   if [[ -n "$CURL_PID" ]]; then kill "$CURL_PID" >/dev/null 2>&1 || true; fi
   if [[ -n "$DISCONNECT_CURL_PID" ]]; then kill "$DISCONNECT_CURL_PID" >/dev/null 2>&1 || true; fi
   if [[ -n "$EXTERNAL_CURL_PID" ]]; then kill "$EXTERNAL_CURL_PID" >/dev/null 2>&1 || true; fi
+  kill_workers "bifrost agent worker"
+  kill_workers "bifrost agent external-runner-worker"
   if [[ -n "$BIFROST_PID" ]]; then kill "$BIFROST_PID" >/dev/null 2>&1 || true; fi
   if [[ -n "$MOCK_PID" ]]; then kill "$MOCK_PID" >/dev/null 2>&1 || true; fi
   BIFROST_DATA_DIR="$TEST_DIR" "$ROOT_DIR/target/debug/bifrost" -p "$PORT" stop >/dev/null 2>&1 || true
-  pkill -f "bifrost agent worker" >/dev/null 2>&1 || true
-  pkill -f "bifrost agent external-runner-worker" >/dev/null 2>&1 || true
   rm -rf "$TEST_DIR"
 }
 trap cleanup EXIT
@@ -52,9 +75,10 @@ model = "mock-model"
 model_provider = "openai"
 
 [model_providers.openai]
-base_url = "http://127.0.0.1:18882/v1"
+base_url = "http://127.0.0.1:__MOCK_PORT__/v1"
 api_key = "test"
 TOML
+perl -0pi -e "s/__MOCK_PORT__/$MOCK_PORT/g" "$TEST_DIR/agent/config.toml"
 
 mkdir -p "$TEST_DIR/admin"
 cat > "$TEST_DIR/admin/im_gateway_external_cli_agent.json" <<'JSON'
@@ -112,12 +136,12 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         return
 
-ThreadingHTTPServer(("127.0.0.1", 18882), Handler).serve_forever()
+ThreadingHTTPServer(("127.0.0.1", int(__import__("sys").argv[1])), Handler).serve_forever()
 PY
-python3 "$TEST_DIR/mock_model.py" >"$MOCK_LOG_FILE" 2>&1 &
+python3 "$TEST_DIR/mock_model.py" "$MOCK_PORT" >"$MOCK_LOG_FILE" 2>&1 &
 MOCK_PID=$!
 for _ in {1..40}; do
-  if curl -sS "http://127.0.0.1:18882/health" >/dev/null 2>&1; then
+  if curl -sS --noproxy '*' "http://127.0.0.1:$MOCK_PORT/health" >/dev/null 2>&1; then
     break
   fi
   sleep 0.1
@@ -141,7 +165,7 @@ CURL_PID=$!
 
 worker_seen=false
 for _ in {1..40}; do
-  if pgrep -af "bifrost agent worker" >/dev/null 2>&1; then
+  if worker_running "bifrost agent worker"; then
     worker_seen=true
     break
   fi
@@ -149,6 +173,12 @@ for _ in {1..40}; do
 done
 [[ "$worker_seen" == "true" ]] || fail "worker process was not spawned"
 
+for _ in {1..40}; do
+  if grep -q "run_started" "$SSE_FILE"; then
+    break
+  fi
+  sleep 0.25
+done
 grep -q "run_started" "$SSE_FILE" || fail "stream did not emit run_started"
 curl -sS "http://127.0.0.1:${PORT}/_bifrost/api/proxy/address" >/dev/null || fail "admin api stopped responding while worker active"
 
@@ -158,12 +188,12 @@ STOP_RESPONSE="$(curl -sS -X POST "http://127.0.0.1:${PORT}/_bifrost/api/agent/c
 echo "$STOP_RESPONSE" | grep -Eq 'stopped|已请求停止当前 Agent loop|Agent worker 子进程已停止' || fail "stop response did not acknowledge stop: $STOP_RESPONSE"
 
 for _ in {1..40}; do
-  if ! pgrep -af "bifrost agent worker" >/dev/null 2>&1; then
+  if ! worker_running "bifrost agent worker"; then
     break
   fi
   sleep 0.25
 done
-if pgrep -af "bifrost agent worker" >/dev/null 2>&1; then
+if worker_running "bifrost agent worker"; then
   fail "worker process still running after stop"
 fi
 curl -sS "http://127.0.0.1:${PORT}/_bifrost/api/proxy/address" >/dev/null || fail "admin api not responding after stop"
@@ -174,7 +204,7 @@ curl -sS -N -X POST "http://127.0.0.1:${PORT}/_bifrost/api/agent/chat/stream" \
 DISCONNECT_CURL_PID=$!
 
 for _ in {1..40}; do
-  if pgrep -af "bifrost agent worker" >/dev/null 2>&1; then
+  if worker_running "bifrost agent worker"; then
     break
   fi
   sleep 0.25
@@ -182,12 +212,12 @@ done
 kill "$DISCONNECT_CURL_PID" >/dev/null 2>&1 || true
 DISCONNECT_CURL_PID=""
 for _ in {1..40}; do
-  if ! pgrep -af "bifrost agent worker" >/dev/null 2>&1; then
+  if ! worker_running "bifrost agent worker"; then
     break
   fi
   sleep 0.25
 done
-if pgrep -af "bifrost agent worker" >/dev/null 2>&1; then
+if worker_running "bifrost agent worker"; then
   fail "worker process still running after SSE disconnect"
 fi
 curl -sS "http://127.0.0.1:${PORT}/_bifrost/api/proxy/address" >/dev/null || fail "admin api not responding after disconnect cleanup"
@@ -199,7 +229,7 @@ EXTERNAL_CURL_PID=$!
 
 external_worker_seen=false
 for _ in {1..40}; do
-  if pgrep -af "bifrost agent external-runner-worker" >/dev/null 2>&1; then
+  if worker_running "bifrost agent external-runner-worker"; then
     external_worker_seen=true
     break
   fi
@@ -214,12 +244,12 @@ EXTERNAL_STOP_RESPONSE="$(curl -sS -N -X POST "http://127.0.0.1:${PORT}/_bifrost
 echo "$EXTERNAL_STOP_RESPONSE" | grep -Eq 'stopped|已请求停止当前 Runner' || fail "external stop response did not acknowledge stop: $EXTERNAL_STOP_RESPONSE"
 
 for _ in {1..40}; do
-  if ! pgrep -af "bifrost agent external-runner-worker" >/dev/null 2>&1; then
+  if ! worker_running "bifrost agent external-runner-worker"; then
     break
   fi
   sleep 0.25
 done
-if pgrep -af "bifrost agent external-runner-worker" >/dev/null 2>&1; then
+if worker_running "bifrost agent external-runner-worker"; then
   fail "external runner worker process still running after stop"
 fi
 curl -sS "http://127.0.0.1:${PORT}/_bifrost/api/proxy/address" >/dev/null || fail "admin api not responding after external runner stop"
