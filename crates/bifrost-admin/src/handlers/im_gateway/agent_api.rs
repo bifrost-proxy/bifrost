@@ -688,7 +688,10 @@ pub(super) async fn handle_agent(
                 .agent_session_manager
                 .get_active_turn_status(&session_key)
             {
-                let pending_guides = service.queue_manager.guide_status(&session_key);
+                let pending_guides = merge_pending_guide_messages(
+                    &status.pending_guide_messages,
+                    service.queue_manager.guide_status(&session_key),
+                );
                 status.pending_guide_messages = pending_guides.clone();
                 let status_context = status_context_from_agent_runner(config.runner.as_ref());
                 return json_response(&serde_json::json!({

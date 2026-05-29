@@ -53,6 +53,23 @@ fn apply_busy_message_default_guides_builtin_messages_without_queueing() {
 }
 
 #[test]
+fn merge_pending_guide_messages_keeps_worker_guides_and_deduplicates_queue_guides() {
+    let merged = merge_pending_guide_messages(
+        &["worker-guide".to_string(), "shared-guide".to_string()],
+        vec!["shared-guide".to_string(), "queue-guide".to_string()],
+    );
+
+    assert_eq!(
+        merged,
+        vec![
+            "worker-guide".to_string(),
+            "shared-guide".to_string(),
+            "queue-guide".to_string()
+        ]
+    );
+}
+
+#[test]
 fn apply_busy_message_default_queues_custom_runner_messages() {
     let manager = SessionQueueManager::new();
 

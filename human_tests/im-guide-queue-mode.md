@@ -201,6 +201,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8801 --unsa
   - 原 chat 完成后，模型请求历史中只新增一条合并后的 user message，内容包含 `引导消息 1` 和 `引导消息 2`
   - 最终响应包含 `GUIDES_MERGED: 第一条引导 -> 第二条引导`
 - **执行记录（2026-05-10）**: PASS — 执行 `source ~/.zshrc && SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" ADMIN_PORT=18131 MOCK_HTTP_PORT=18132 bash e2e-tests/tests/test_im_guide_queue_human_api.sh`，脚本启动临时 Bifrost 与 mock provider，通过 `/agent/chat` 注入两条 `guide_messages`，在首轮慢模型请求期间轮询 `/status` 并断言 pending guide JSON 与文案明细，随后断言最终模型请求收到合并后的单条 guide user message。
+- **回归记录（2026-05-29）**: CI `26635014024` 暴露隔离 worker 场景中 `/status` 用主进程 guide queue 覆盖 worker active status，导致 `pending_guide_messages` 为空。修复后 `/status` 合并 worker active guides 与主进程 queue guides，并去重避免非隔离路径重复展示。
 
 ### TC-GQ-15: 内置 Bifrost Agent busy 普通 IM 消息默认进入 guide
 

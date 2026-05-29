@@ -181,7 +181,10 @@ pub(super) async fn handle_busy_message(
             );
             send_agent_reply(client, provider, event, &reply, message_log_store).await;
         } else if let Some(mut status) = agent_session_manager.get_active_turn_status(session_key) {
-            status.pending_guide_messages = queue_manager.guide_status(session_key);
+            status.pending_guide_messages = merge_pending_guide_messages(
+                &status.pending_guide_messages,
+                queue_manager.guide_status(session_key),
+            );
             let queue_items = queue_manager.queue_status(session_key);
             let queue_info = if queue_items.is_empty() {
                 "无排队消息".to_string()
