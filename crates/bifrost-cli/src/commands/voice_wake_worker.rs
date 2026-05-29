@@ -249,7 +249,7 @@ pub(super) fn run_wake_worker(
                 "phrase": candidate.phrase,
                 "profile_id": candidate.profile_id,
                 "speaker_confidence": speaker.as_ref().and_then(|value| value["confidence"].as_f64()),
-                "dry_run": !execute || candidate.voiceprint_profile_id.is_none(),
+                "dry_run": !execute,
             });
             if let Err(error) = client.post_json_body("/voice/wake/trigger", &body) {
                 post_wake_worker_progress(

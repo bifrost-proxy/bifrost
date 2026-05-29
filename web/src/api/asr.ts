@@ -205,6 +205,9 @@ export interface VoiceWakeListenerStatus {
   last_action_result: VoiceWakeActionResult | null;
   last_action_at_ms: number | null;
   trigger_count: number;
+  model_download_status?: string | null;
+  model_download_progress?: number | null;
+  model_download_total?: number | null;
 }
 
 export interface VoiceWakeProfile {

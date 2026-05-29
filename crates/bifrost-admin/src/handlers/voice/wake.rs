@@ -211,6 +211,12 @@ struct VoiceWakeListenerState {
     last_action_result: Option<VoiceWakeActionResult>,
     last_action_at_ms: Option<u64>,
     trigger_count: u64,
+    /// Model download progress: "downloading", "extracting", "downloaded", "failed"
+    model_download_status: Option<String>,
+    /// Bytes downloaded so far
+    model_download_progress: Option<u64>,
+    /// Total bytes (from Content-Length)
+    model_download_total: Option<u64>,
 }
 
 impl Default for VoiceWakeListenerState {
@@ -238,6 +244,9 @@ impl Default for VoiceWakeListenerState {
             last_action_result: None,
             last_action_at_ms: None,
             trigger_count: 0,
+            model_download_status: None,
+            model_download_progress: None,
+            model_download_total: None,
         }
     }
 }
@@ -532,22 +541,21 @@ async fn post_listener_start_response(req: Request<Incoming>) -> Response<BoxBod
             "voice wake microphone listener is currently implemented for macOS",
         );
     }
-    if source == "mic" && engine == "lightweight_kws_listener" {
+    let needs_model_download = if source == "mic" && engine == "lightweight_kws_listener" {
         let pack = voice_wake_kws_model_pack();
         if !pack.is_ready() {
             tracing::info!(
                 profile = DEFAULT_WAKE_KWS_PROFILE,
                 install_dir = %pack.root_dir.display(),
-                "voice wake KWS assets are missing; initializing before starting listener"
+                "voice wake KWS assets are missing; will download asynchronously"
             );
-            if let Err(error) = prepare_voice_wake_kws_profile() {
-                return error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("voice wake lightweight KWS initialization failed: {error}"),
-                );
-            }
+            true
+        } else {
+            false
         }
-    }
+    } else {
+        false
+    };
     let store = match load_store() {
         Ok(store) => store,
         Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
@@ -600,21 +608,56 @@ async fn post_listener_start_response(req: Request<Incoming>) -> Response<BoxBod
         last_action_result: None,
         last_action_at_ms: None,
         trigger_count: 0,
+        model_download_status: None,
+        model_download_progress: None,
+        model_download_total: None,
     };
     if request.source == "mic" && request.engine == "lightweight_kws_listener" {
-        match spawn_voice_wake_worker(&request, &admin_host, admin_port).await {
-            Ok((pid, task)) => {
-                runtime.worker_pid = Some(pid);
-                runtime.state.worker_pid = Some(pid);
-                runtime.task = Some(task);
-            }
-            Err(error) => {
-                runtime.cancel = None;
-                runtime.state.running = false;
-                runtime.state.stopped_at_ms = Some(now_ms());
-                runtime.state.last_error = Some(error.clone());
-                runtime.state.last_error_at_ms = Some(now_ms());
-                return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error);
+        if needs_model_download {
+            // Set initial download status and spawn async download + start task
+            runtime.state.model_download_status = Some("downloading".to_string());
+            runtime.state.model_download_progress = Some(0);
+            let admin_host_clone = admin_host.clone();
+            let request_clone = request.clone();
+            let cancel_clone = cancel.clone();
+            runtime.task = Some(tokio::spawn(async move {
+                match download_and_start_listener(
+                    cancel_clone,
+                    request_clone,
+                    admin_host_clone,
+                    admin_port,
+                )
+                .await
+                {
+                    Ok(()) => {}
+                    Err(error) => {
+                        tracing::error!(%error, "voice wake async model download/start failed");
+                        update_listener_state(|state| {
+                            state.model_download_status = Some("failed".to_string());
+                            state.last_error = Some(error);
+                            state.last_error_at_ms = Some(now_ms());
+                            state.running = false;
+                            state.stopped_at_ms = Some(now_ms());
+                        })
+                        .await;
+                    }
+                }
+            }));
+        } else {
+            match spawn_voice_wake_worker(&request, &admin_host, admin_port).await {
+                Ok((pid, task)) => {
+                    runtime.worker_pid = Some(pid);
+                    runtime.state.worker_pid = Some(pid);
+                    runtime.task = Some(task);
+                }
+                Err(error) => {
+                    runtime.cancel = None;
+                    runtime.state.running = false;
+                    runtime.state.stopped_at_ms = Some(now_ms());
+                    runtime.state.last_error = Some(error.clone());
+                    runtime.state.last_error_at_ms = Some(now_ms());
+                    return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error);
+                }
             }
         }
     } else {
@@ -961,13 +1004,13 @@ async fn process_listener_transcript(
             update_listener_state(|state| {
                 state.last_speaker_profile_id = None;
                 state.last_speaker_confidence = None;
-                state.last_speaker_status = Some("phrase_only_dry_run".to_string());
-                state.last_match_status = Some("phrase_only_dry_run".to_string());
+                state.last_speaker_status = Some("phrase_only".to_string());
+                state.last_match_status = Some("speaker_allowed".to_string());
             })
             .await;
             None
         };
-    let dry_run = !request.execute || candidate.voiceprint_profile_id.is_none();
+    let dry_run = !request.execute;
     match update_store(|store| {
         trigger_binding_by_id(store, &candidate.binding_id, dry_run, speaker_confidence)
     }) {
@@ -1146,7 +1189,20 @@ fn trigger_binding(
         );
     }
     if !trigger.dry_run && trigger.speaker_confidence.is_none() {
-        return Err("speaker_confidence is required to execute voice wake action".to_string());
+        // Only require speaker_confidence when the binding's profile has voiceprint configured
+        let profile_requires_voiceprint = store
+            .profiles
+            .iter()
+            .find(|p| p.id == binding.profile_id)
+            .and_then(|p| p.voiceprint_profile_id.as_deref())
+            .map(|id| !id.trim().is_empty())
+            .unwrap_or(false);
+        if profile_requires_voiceprint {
+            return Err(
+                "speaker_confidence is required to execute voice wake action with voiceprint"
+                    .to_string(),
+            );
+        }
     }
     let result = execute_action(&binding.action, trigger.dry_run)?;
     binding.last_triggered_at_ms = Some(now);
@@ -1582,6 +1638,193 @@ fn download_voice_wake_kws_archive(destination: &Path) -> Result<(), String> {
             destination.display()
         )
     })
+}
+
+/// Async model download + extract + start worker. Runs in a spawned task.
+async fn download_and_start_listener(
+    cancel: Arc<AtomicBool>,
+    request: VoiceWakeListenerStartRequest,
+    admin_host: String,
+    admin_port: u16,
+) -> Result<(), String> {
+    let pack = voice_wake_kws_model_pack();
+    tokio::fs::create_dir_all(&pack.root_dir)
+        .await
+        .map_err(|e| format!("create KWS dir: {e}"))?;
+    let archive_path = pack.archive_path();
+
+    // Phase 1: async streaming download with progress
+    download_voice_wake_kws_archive_async(&archive_path, &cancel).await?;
+
+    if cancel.load(Ordering::SeqCst) {
+        return Err("cancelled".to_string());
+    }
+
+    // Phase 2: extract
+    update_listener_state(|state| {
+        state.model_download_status = Some("extracting".to_string());
+    })
+    .await;
+
+    let root_dir = pack.root_dir.clone();
+    let archive_for_extract = archive_path.clone();
+    let extract_result = tokio::task::spawn_blocking(move || {
+        let status = Command::new("tar")
+            .arg("-xjf")
+            .arg(&archive_for_extract)
+            .arg("-C")
+            .arg(&root_dir)
+            .status()
+            .map_err(|e| format!("extract tar: {e}"))?;
+        if !status.success() {
+            return Err(format!("tar extract failed: {status}"));
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking join: {e}"))?;
+    extract_result?;
+
+    if !pack.is_ready() {
+        let missing = pack
+            .missing_files()
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!("extracted but missing files: {missing}"));
+    }
+
+    update_listener_state(|state| {
+        state.model_download_status = Some("downloaded".to_string());
+    })
+    .await;
+
+    if cancel.load(Ordering::SeqCst) {
+        return Err("cancelled".to_string());
+    }
+
+    // Phase 3: start the worker
+    match spawn_voice_wake_worker(&request, &admin_host, admin_port).await {
+        Ok((pid, task)) => {
+            let mut runtime = VOICE_WAKE_LISTENER.lock().await;
+            runtime.worker_pid = Some(pid);
+            runtime.state.worker_pid = Some(pid);
+            runtime.state.model_download_status = None;
+            runtime.state.model_download_progress = None;
+            runtime.state.model_download_total = None;
+            // Replace our own task handle with the worker monitoring task
+            runtime.task = Some(task);
+            Ok(())
+        }
+        Err(error) => {
+            update_listener_state(|state| {
+                state.running = false;
+                state.stopped_at_ms = Some(now_ms());
+                state.model_download_status = Some("failed".to_string());
+                state.last_error = Some(error.clone());
+                state.last_error_at_ms = Some(now_ms());
+            })
+            .await;
+            Err(error)
+        }
+    }
+}
+
+/// Async streaming download of the KWS model archive with progress updates.
+async fn download_voice_wake_kws_archive_async(
+    destination: &Path,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
+    use futures_util::StreamExt;
+
+    // Skip if already downloaded
+    if destination
+        .metadata()
+        .map(|m| m.is_file() && m.len() > 1_000_000)
+        .unwrap_or(false)
+    {
+        update_listener_state(|state| {
+            state.model_download_status = Some("downloaded".to_string());
+        })
+        .await;
+        return Ok(());
+    }
+
+    let temp_path = destination.with_extension("download");
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30 * 60))
+        .build()
+        .map_err(|e| format!("create HTTP client: {e}"))?;
+
+    let response = client
+        .get(DEFAULT_WAKE_KWS_ARCHIVE_URL)
+        .send()
+        .await
+        .map_err(|e| format!("download KWS model: {e}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!("download KWS model: HTTP {}", response.status()));
+    }
+
+    let total_size = response.content_length();
+    update_listener_state(|state| {
+        state.model_download_total = total_size;
+    })
+    .await;
+
+    let mut file = tokio::fs::File::create(&temp_path)
+        .await
+        .map_err(|e| format!("create {}: {e}", temp_path.display()))?;
+
+    let mut stream = response.bytes_stream();
+    let mut downloaded: u64 = 0;
+    let mut last_progress_update = tokio::time::Instant::now();
+
+    use tokio::io::AsyncWriteExt;
+    while let Some(chunk) = stream.next().await {
+        if cancel.load(Ordering::SeqCst) {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Err("cancelled".to_string());
+        }
+        let chunk = chunk.map_err(|e| format!("download stream: {e}"))?;
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| format!("write {}: {e}", temp_path.display()))?;
+        downloaded += chunk.len() as u64;
+
+        // Throttle progress updates to every 200ms
+        if last_progress_update.elapsed() >= Duration::from_millis(200) {
+            last_progress_update = tokio::time::Instant::now();
+            update_listener_state(|state| {
+                state.model_download_progress = Some(downloaded);
+            })
+            .await;
+        }
+    }
+    file.flush()
+        .await
+        .map_err(|e| format!("flush {}: {e}", temp_path.display()))?;
+    drop(file);
+
+    // Final progress update
+    update_listener_state(|state| {
+        state.model_download_progress = Some(downloaded);
+    })
+    .await;
+
+    if downloaded <= 1_000_000 {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Err(format!(
+            "downloaded KWS archive incomplete: {downloaded} bytes"
+        ));
+    }
+
+    tokio::fs::rename(&temp_path, destination)
+        .await
+        .map_err(|e| format!("install KWS archive: {e}"))?;
+
+    Ok(())
 }
 
 fn atomic_json_write<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {

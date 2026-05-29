@@ -6,6 +6,7 @@ import {
   Col,
   Form,
   Input,
+  Progress,
   Row,
   Select,
   Space,
@@ -216,6 +217,26 @@ function wakeMatchStatusColor(status?: string | null): string {
 }
 
 function wakeListenerStatusMessage(listener?: VoiceWakeListenerStatus | null, lastResult?: string, liveTranscript?: string): string {
+  if (listener?.model_download_status === "downloading") {
+    const progress = listener.model_download_progress ?? 0;
+    const total = listener.model_download_total;
+    const progressMB = (progress / 1024 / 1024).toFixed(1);
+    if (total && total > 0) {
+      const totalMB = (total / 1024 / 1024).toFixed(1);
+      const percent = Math.round((progress / total) * 100);
+      return `Downloading wake word model: ${progressMB}MB / ${totalMB}MB (${percent}%)`;
+    }
+    return `Downloading wake word model: ${progressMB}MB...`;
+  }
+  if (listener?.model_download_status === "extracting") {
+    return "Extracting wake word model...";
+  }
+  if (listener?.model_download_status === "downloaded") {
+    return "Model ready, starting listener...";
+  }
+  if (listener?.model_download_status === "failed") {
+    return `Model download failed: ${listener.last_error ?? "unknown error"}`;
+  }
   if (liveTranscript) return `Heard: ${liveTranscript}`;
   if (lastResult) return lastResult;
   const device = listener?.device_label || listener?.device || "default microphone";
@@ -780,6 +801,21 @@ export default function VoiceWakeActionsCard() {
             <Text type={lastResult ? "danger" : "secondary"}>
               {wakeListenerStatusMessage(status?.listener, lastResult, liveTranscript)}
             </Text>
+            {status?.listener.model_download_status === "downloading" && (
+              <Progress
+                percent={
+                  status.listener.model_download_total && status.listener.model_download_total > 0
+                    ? Math.round(((status.listener.model_download_progress ?? 0) / status.listener.model_download_total) * 100)
+                    : 0
+                }
+                size="small"
+                status="active"
+                style={{ maxWidth: 320 }}
+              />
+            )}
+            {status?.listener.model_download_status === "extracting" && (
+              <Progress percent={100} size="small" status="active" style={{ maxWidth: 320 }} />
+            )}
             {status?.listener.device_label || status?.listener.device ? (
               <Text type="secondary">
                 Input: {status.listener.device_label || status.listener.device}
