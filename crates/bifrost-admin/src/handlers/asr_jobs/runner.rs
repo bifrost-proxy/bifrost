@@ -296,6 +296,24 @@ async fn run_directory_task(
         return Ok((updated, 0, 0));
     }
 
+    let resource_decision = crate::handlers::speech::acquire_speech_resource(
+        crate::handlers::speech::directory_task_lease(&task.id, &task.model),
+    );
+    if !resource_decision.granted {
+        update_run_progress(&task.id, |progress| {
+            progress.stage = "paused".to_string();
+            progress.stage_message = resource_decision.reason.clone();
+            progress.message = Some(
+                "directory task is waiting for realtime voice resources to become idle"
+                    .to_string(),
+            );
+        });
+        return Err(ASR_TASK_PAUSED_MESSAGE.to_string());
+    }
+    let _resource_guard = SpeechResourceLeaseGuard {
+        lease: resource_decision.lease,
+    };
+
     let target = target_from_query(Some(&format!(
         "language={}&model={}&owner_module=directory_task&owner_id={}",
         urlencoding::encode(&task.language),
@@ -367,7 +385,10 @@ async fn run_directory_task(
         fallback_reason: startup_fallback_reason.clone(),
     });
 
-    let pause_check = || task_pause_requested(&task.id);
+    let pause_check = || {
+        task_pause_requested(&task.id)
+            || crate::handlers::speech::directory_task_should_yield_for_realtime(&task.id)
+    };
     let mut processed_now = 0usize;
     let mut failed_now = 0usize;
     let loop_result: Result<(), String> = loop {
@@ -466,6 +487,16 @@ async fn run_directory_task(
     maybe_enqueue_daily_agent_after_asr_run(&updated).await;
 
     Ok((updated, processed_now, failed_now))
+}
+
+struct SpeechResourceLeaseGuard {
+    lease: Option<bifrost_asr::resources::ResourceLease>,
+}
+
+impl Drop for SpeechResourceLeaseGuard {
+    fn drop(&mut self) {
+        crate::handlers::speech::release_speech_resource(self.lease.as_ref());
+    }
 }
 
 fn spawn_directory_task_run_background(task: AsrDirectoryTask) -> Result<(), String> {
@@ -642,6 +673,13 @@ async fn process_pending_files(
             return Err(ASR_TASK_PAUSED_MESSAGE.to_string());
         }
         let key = source_key(path);
+        let (partial_text_path, partial_metadata_path, partial_timeline_path) =
+            bifrost_asr::artifacts::output_paths_in(
+                &bifrost_storage::data_dir(),
+                &task.id,
+                path,
+                &task.audio_dir,
+            );
         let existing_content_hash = files
             .files
             .get(&key)
@@ -886,6 +924,25 @@ async fn process_pending_files(
         };
 
         let use_task_lifetime_server = task.runtime_strategy.uses_task_lifetime_server();
+        let partial_artifact_context = PartialArtifactContext {
+            task_id: task.id.clone(),
+            file_key: key.clone(),
+            task_name: task.name.clone(),
+            model: task.model.clone(),
+            language: task.language.clone(),
+            runtime_strategy: task.runtime_strategy,
+            source_path: path.clone(),
+            source_info: source_info.clone(),
+            diarization_profile: task
+                .diarization
+                .enabled
+                .then(|| task.diarization.profile.clone()),
+            speakers: Vec::new(),
+            text_path: partial_text_path.clone(),
+            metadata_path: partial_metadata_path.clone(),
+            timeline_path: partial_timeline_path.clone(),
+            started_at_ms: file_started_at_ms,
+        };
         update_run_progress(&task.id, |progress| {
             progress.stage = "asr".to_string();
             progress.stage_message = Some(if task.diarization.enabled {
@@ -917,6 +974,7 @@ async fn process_pending_files(
                         scope: "task",
                         stop_after_use: &mut *stop_task_server_after_use,
                     }),
+                    partial_artifacts: Some(partial_artifact_context.clone()),
                 },
             )
             .await
@@ -943,6 +1001,7 @@ async fn process_pending_files(
                         scope: "file",
                         stop_after_use: &mut stop_file_server_after_use,
                     }),
+                    partial_artifacts: Some(partial_artifact_context),
                 },
             )
             .await
@@ -1006,12 +1065,16 @@ async fn process_pending_files(
                 });
             }
             Err(error) if error == ASR_TASK_PAUSED_MESSAGE => {
+                let latest_record = load_file_store(&task.id).files.get(&key).cloned();
                 let mut record = file_record_from_info(&task.id, path, &source_info);
                 record.memory_limit_hints = existing_memory_limit_hints.clone();
                 record.status = FileStatus::Pending;
                 record.started_at_ms = Some(file_started_at_ms);
                 record.progress_current = Some(file_index);
                 record.progress_total = Some(total_pending);
+                if let Some(existing) = latest_record.as_ref() {
+                    preserve_partial_artifact_fields(&mut record, existing);
+                }
                 files.files.insert(key, record);
                 let _ = std::fs::remove_dir_all(&_temp_dir_path);
                 if stop_file_server_after_use {
@@ -1027,6 +1090,7 @@ async fn process_pending_files(
                 return Err(error);
             }
             Err(error) => {
+                let latest_record = load_file_store(&task.id).files.get(&key).cloned();
                 let mut record = file_record_from_info(&task.id, path, &source_info);
                 record.memory_limit_hints = existing_memory_limit_hints.clone();
                 record.runtime_strategy = task.runtime_strategy;
@@ -1039,6 +1103,9 @@ async fn process_pending_files(
                 record.finished_at_ms = Some(now_ms());
                 record.progress_current = Some(file_index + 1);
                 record.progress_total = Some(total_pending);
+                if let Some(existing) = latest_record.as_ref() {
+                    preserve_partial_artifact_fields(&mut record, existing);
+                }
                 files.files.insert(key, record);
                 failed_now += 1;
                 update_run_progress(&task.id, |progress| {
@@ -1128,6 +1195,7 @@ async fn transcribe_file_for_task_with_wav(
         )
     } else if duration_ms > CHUNK_DURATION_SECS * 1000 {
         // Split into chunks and process each via fork-per-chunk.
+        let partial_artifacts = hooks.partial_artifacts.clone();
         let chunked = transcribe_in_chunks(
             asr_bin,
             model_path,
@@ -1149,6 +1217,7 @@ async fn transcribe_file_for_task_with_wav(
             hooks.server_state,
             hooks.managed_server_restart,
             hooks.on_chunk_metric,
+            partial_artifacts.as_ref(),
         )
         .await?;
         (
@@ -1309,18 +1378,6 @@ async fn transcribe_file_for_task_with_wav(
     } else {
         apply_diarization_to_timeline(task, &mut timeline, wav)?;
     }
-    let (text_path, metadata_path, timeline_path) = output_paths(&task.id, path, &task.audio_dir);
-    if let Some(parent) = text_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| format!("create text dir: {error}"))?;
-    }
-    let timeline_text = render_timeline_text(&timeline, &text);
-    std::fs::write(&text_path, &timeline_text)
-        .map_err(|error| format!("write transcript text: {error}"))?;
-    std::fs::write(
-        &timeline_path,
-        serde_json::to_string_pretty(&timeline).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| format!("write transcript timeline: {error}"))?;
     let metadata = serde_json::json!({
         "task_id": task.id,
         "task_name": task.name,
@@ -1330,8 +1387,6 @@ async fn transcribe_file_for_task_with_wav(
         "source_created_at_ms": timeline.source_created_at_ms,
         "source_created_at_source": timeline.source_created_at_source,
         "media_duration_ms": timeline.media_duration_ms,
-        "text_path": text_path,
-        "timeline_path": timeline_path,
         "model": task.model,
         "language": task.language,
         "runtime_strategy": task.runtime_strategy,
@@ -1339,16 +1394,20 @@ async fn transcribe_file_for_task_with_wav(
         "chunk_metrics": result_chunk_metrics.clone(),
         "processed_at_ms": timeline.processed_at_ms,
     });
-    std::fs::write(
-        &metadata_path,
-        serde_json::to_string_pretty(&metadata).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| format!("write transcript metadata: {error}"))?;
+    let artifact_paths = write_offline_subtitle_artifacts(OfflineSubtitleArtifactRequest {
+        data_dir: &bifrost_storage::data_dir(),
+        task_id: &task.id,
+        source_path: path,
+        audio_dir: &task.audio_dir,
+        timeline: &timeline,
+        fallback_text: &text,
+        metadata,
+    })?;
     Ok(TranscriptionOutput {
         text,
-        text_path,
-        metadata_path,
-        timeline_path,
+        text_path: artifact_paths.text_path,
+        metadata_path: artifact_paths.metadata_path,
+        timeline_path: artifact_paths.timeline_path,
         timeline,
         failed_chunks,
         memory_limit_hints: result_memory_limit_hints,
@@ -1402,7 +1461,15 @@ async fn transcribe_diarized_segments_for_task(
     .await;
 
     let speakers = speakers_from_diarization_segments(&diarization_segments);
-    let total_segments = diarization_segments.len();
+    if let Some(context) = hooks.partial_artifacts.as_mut() {
+        context.speakers = speakers.clone();
+    }
+    let asr_units = plan_asr_units(&diarization_segments, &AsrUnitPlannerConfig::default());
+    if asr_units.is_empty() {
+        return Err("diarization_no_asr_units: diarization produced no transcribable ASR units"
+            .to_string());
+    }
+    let total_units = asr_units.len();
     let mut all_text = String::new();
     let mut timeline_segments = Vec::new();
     let mut chunk_metrics = Vec::new();
@@ -1412,28 +1479,28 @@ async fn transcribe_diarized_segments_for_task(
         .and_then(|state| state.fallback_reason.clone())
         .or_else(|| hooks.startup_fallback_reason.map(str::to_string));
 
-    for (index, speaker_segment) in diarization_segments.iter().enumerate() {
+    for (index, asr_unit) in asr_units.iter().enumerate() {
         if hooks.pause_check.is_some_and(|check| check()) {
             return Err(ASR_TASK_PAUSED_MESSAGE.to_string());
         }
         if let Some(callback) = hooks.on_chunk_progress {
-            callback(index, total_segments);
+            callback(index, total_units);
         }
-        let segment_wav = temp_dir.join(format!("speaker-segment-{index:04}.wav"));
+        let segment_wav = temp_dir.join(format!("{}.wav", asr_unit.unit_id));
         ffmpeg_cut_wav_ms(
             wav,
             &segment_wav,
-            speaker_segment.start_ms,
-            speaker_segment.end_ms,
+            asr_unit.source_start_ms,
+            asr_unit.source_end_ms,
             hooks.pause_check,
         )
         .await?;
         if compute_wav_rms_energy(&segment_wav).is_some_and(|rms| rms < SILENCE_RMS_THRESHOLD) {
             continue;
         }
-        let duration_ms = speaker_segment
-            .end_ms
-            .saturating_sub(speaker_segment.start_ms);
+        let duration_ms = asr_unit
+            .source_end_ms
+            .saturating_sub(asr_unit.source_start_ms);
         let duration_secs = duration_ms.div_ceil(1000).max(1);
         let attempt = run_chunk_with_strategy(
             task.runtime_strategy,
@@ -1441,7 +1508,7 @@ async fn transcribe_diarized_segments_for_task(
             model_path,
             &task.language,
             &segment_wav,
-            speaker_segment.start_ms / 1000,
+            asr_unit.source_start_ms / 1000,
             duration_secs,
             index,
             temp_dir,
@@ -1468,13 +1535,24 @@ async fn transcribe_diarized_segments_for_task(
         append_diarized_segment_result(
             &mut all_text,
             &mut timeline_segments,
-            speaker_segment,
+            asr_unit,
             chunk_result,
         );
+        if let Some(context) = hooks.partial_artifacts.as_ref() {
+            persist_partial_transcription_artifacts(
+                context,
+                DiarizedSegmentProgress {
+                    text: all_text.clone(),
+                    timeline_segments: timeline_segments.clone(),
+                    chunk_metrics: chunk_metrics.clone(),
+                    fallback_reason: fallback_reason.clone(),
+                },
+            )?;
+        }
     }
 
     if let Some(callback) = hooks.on_chunk_progress {
-        callback(total_segments, total_segments);
+        callback(total_units, total_units);
     }
 
     Ok(DiarizedTranscriptionOutput {
@@ -1492,7 +1570,7 @@ async fn transcribe_diarized_segments_for_task(
 fn append_diarized_segment_result(
     all_text: &mut String,
     timeline_segments: &mut Vec<TimelineSegment>,
-    speaker_segment: &DiarizationSegment,
+    asr_unit: &AsrAudioUnit,
     chunk_result: WholeFileTranscription,
 ) {
     let chunk_text = chunk_result.text.trim();
@@ -1508,13 +1586,13 @@ fn append_diarized_segment_result(
     if chunk_result.segments.is_empty() {
         timeline_segments.push(TimelineSegment {
             index: timeline_segments.len(),
-            audio_start_ms: speaker_segment.start_ms,
-            audio_end_ms: speaker_segment.end_ms,
+            audio_start_ms: asr_unit.source_start_ms,
+            audio_end_ms: asr_unit.source_end_ms,
             absolute_start_ms: None,
             absolute_end_ms: None,
-            speaker: Some(speaker_segment.speaker.clone()),
-            speaker_display_name: Some(speaker_segment.display_name.clone()),
-            overlap: speaker_segment.overlap,
+            speaker: asr_unit.speaker.clone(),
+            speaker_display_name: asr_unit.speaker_display_name.clone(),
+            overlap: asr_unit.overlap,
             text: chunk_text.to_string(),
         });
         return;
@@ -1523,11 +1601,11 @@ fn append_diarized_segment_result(
         if text.trim().is_empty() {
             continue;
         }
-        let audio_start_ms = speaker_segment.start_ms.saturating_add(local_start_ms);
-        let audio_end_ms = speaker_segment
-            .start_ms
+        let audio_start_ms = asr_unit.source_start_ms.saturating_add(local_start_ms);
+        let audio_end_ms = asr_unit
+            .source_start_ms
             .saturating_add(local_end_ms)
-            .min(speaker_segment.end_ms);
+            .min(asr_unit.source_end_ms);
         if audio_end_ms <= audio_start_ms {
             continue;
         }
@@ -1537,10 +1615,156 @@ fn append_diarized_segment_result(
             audio_end_ms,
             absolute_start_ms: None,
             absolute_end_ms: None,
-            speaker: Some(speaker_segment.speaker.clone()),
-            speaker_display_name: Some(speaker_segment.display_name.clone()),
-            overlap: speaker_segment.overlap,
+            speaker: asr_unit.speaker.clone(),
+            speaker_display_name: asr_unit.speaker_display_name.clone(),
+            overlap: asr_unit.overlap,
             text,
         });
     }
+}
+
+fn timeline_segments_from_plain_chunks(
+    segments: &[(u64, u64, String)],
+    context: &PartialArtifactContext,
+) -> Vec<TimelineSegment> {
+    segments
+        .iter()
+        .enumerate()
+        .map(|(index, (audio_start_ms, audio_end_ms, text))| TimelineSegment {
+            index,
+            audio_start_ms: *audio_start_ms,
+            audio_end_ms: *audio_end_ms,
+            absolute_start_ms: context
+                .source_info
+                .source_created_at_ms
+                .map(|start| start.saturating_add(*audio_start_ms)),
+            absolute_end_ms: context
+                .source_info
+                .source_created_at_ms
+                .map(|start| start.saturating_add(*audio_end_ms)),
+            speaker: None,
+            speaker_display_name: None,
+            overlap: false,
+            text: text.clone(),
+        })
+        .collect()
+}
+
+fn preserve_partial_artifact_fields(record: &mut FileRecord, existing: &FileRecord) {
+    if existing.output_text_path.is_some() {
+        record.output_text_path = existing.output_text_path.clone();
+    }
+    if existing.output_metadata_path.is_some() {
+        record.output_metadata_path = existing.output_metadata_path.clone();
+    }
+    if existing.output_timeline_path.is_some() {
+        record.output_timeline_path = existing.output_timeline_path.clone();
+    }
+    if existing.text_chars > 0 {
+        record.text_chars = existing.text_chars;
+    }
+    if existing.media_duration_ms.is_some() {
+        record.media_duration_ms = existing.media_duration_ms;
+    }
+    if !existing.chunk_metrics.is_empty() {
+        record.chunk_metrics = existing.chunk_metrics.clone();
+    }
+    if record.fallback_reason.is_none() {
+        record.fallback_reason = existing.fallback_reason.clone();
+    }
+}
+
+fn persist_partial_transcription_artifacts(
+    context: &PartialArtifactContext,
+    progress: DiarizedSegmentProgress,
+) -> Result<(), String> {
+    let mut segments = progress.timeline_segments;
+    for (index, segment) in segments.iter_mut().enumerate() {
+        segment.index = index;
+        if segment.absolute_start_ms.is_none() {
+            segment.absolute_start_ms = context
+                .source_info
+                .source_created_at_ms
+                .map(|start| start.saturating_add(segment.audio_start_ms));
+        }
+        if segment.absolute_end_ms.is_none() {
+            segment.absolute_end_ms = context
+                .source_info
+                .source_created_at_ms
+                .map(|start| start.saturating_add(segment.audio_end_ms));
+        }
+    }
+    let timeline = TranscriptTimeline {
+        task_id: context.task_id.clone(),
+        task_name: context.task_name.clone(),
+        source_path: context.source_path.clone(),
+        source_size: context.source_info.source_size,
+        source_modified_ms: context.source_info.source_modified_ms,
+        source_created_at_ms: context.source_info.source_created_at_ms,
+        source_created_at_source: context.source_info.source_created_at_source.clone(),
+        media_duration_ms: context.source_info.media_duration_ms,
+        model: context.model.clone(),
+        language: context.language.clone(),
+        diarization_profile: context.diarization_profile.clone(),
+        speakers: context.speakers.clone(),
+        processed_at_ms: now_ms(),
+        segments,
+    };
+    let rendered = render_timeline_text(&timeline, &progress.text);
+    atomic_text_write(&context.text_path, &rendered)?;
+    atomic_json_write(&context.timeline_path, &timeline)?;
+    let srt_path = bifrost_asr::artifacts::subtitle_path_from_timeline(&context.timeline_path, "srt");
+    let vtt_path = bifrost_asr::artifacts::subtitle_path_from_timeline(&context.timeline_path, "vtt");
+    atomic_text_write(&srt_path, &bifrost_asr::subtitle::render_srt(&timeline))?;
+    atomic_text_write(&vtt_path, &bifrost_asr::subtitle::render_vtt(&timeline))?;
+
+    let text_chars = rendered.chars().count();
+    let chunk_metrics = progress.chunk_metrics.clone();
+    let fallback_reason = progress.fallback_reason.clone();
+    let mut metadata = serde_json::json!({
+        "task_id": context.task_id,
+        "task_name": context.task_name,
+        "source_path": context.source_path,
+        "source_size": timeline.source_size,
+        "source_modified_ms": timeline.source_modified_ms,
+        "source_created_at_ms": timeline.source_created_at_ms,
+        "source_created_at_source": timeline.source_created_at_source,
+        "media_duration_ms": timeline.media_duration_ms,
+        "model": context.model,
+        "language": context.language,
+        "runtime_strategy": context.runtime_strategy,
+        "fallback_reason": fallback_reason,
+        "chunk_metrics": chunk_metrics,
+        "processed_at_ms": timeline.processed_at_ms,
+        "partial": true,
+        "partial_started_at_ms": context.started_at_ms,
+        "partial_segment_count": timeline.segments.len(),
+        "text_path": context.text_path,
+        "metadata_path": context.metadata_path,
+        "timeline_path": context.timeline_path,
+        "srt_path": srt_path,
+        "vtt_path": vtt_path,
+    });
+    if let Some(profile) = &context.diarization_profile {
+        metadata["diarization_profile"] = serde_json::Value::String(profile.clone());
+    }
+    atomic_json_write(&context.metadata_path, &metadata)?;
+
+    let mut store = load_file_store(&context.task_id);
+    if let Some(record) = store.files.get_mut(&context.file_key) {
+        if matches!(record.status, FileStatus::Pending | FileStatus::Processing) {
+            record.status = FileStatus::Processing;
+        }
+        record.output_text_path = Some(context.text_path.clone());
+        record.output_metadata_path = Some(context.metadata_path.clone());
+        record.output_timeline_path = Some(context.timeline_path.clone());
+        record.media_duration_ms = timeline.media_duration_ms;
+        record.text_chars = text_chars;
+        record.chunk_metrics = chunk_metrics;
+        if record.fallback_reason.is_none() {
+            record.fallback_reason = fallback_reason;
+        }
+        record.started_at_ms.get_or_insert(context.started_at_ms);
+    }
+    save_file_store(&context.task_id, &store)
 }

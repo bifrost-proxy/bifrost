@@ -14,7 +14,7 @@ use bifrost_admin::asr_streaming::{
     append_transcript_delta, call_asr_whole_file_endpoint, dedupe_increment, WholeFileTranscription,
 };
 use bifrost_admin::resource_download::{download_with_resume, DownloadProgress, DownloadRequest};
-use bifrost_core::{direct_reqwest_client_builder, BifrostError, Result};
+use bifrost_core::{direct_reqwest_client_builder, process_alias_executable, BifrostError, Result};
 use chrono::{Local, TimeZone};
 use dialoguer::Select;
 use serde::Deserialize;
@@ -78,6 +78,30 @@ fn handle_asr_command(action: AiAsrCommands, admin_host: &str, admin_port: u16) 
                 stream_file(&audio, &model, &language)
             }
         }
+        AiAsrCommands::Subtitle {
+            audio,
+            model,
+            language,
+            profile,
+            speaker_aware,
+            format,
+            out,
+            json,
+        } => {
+            ensure_supported_platform()?;
+            let client = AsrTaskClient::new(admin_host, admin_port);
+            subtitle_file_with_admin_pipeline(
+                &client,
+                &audio,
+                &model,
+                &language,
+                &profile,
+                speaker_aware,
+                &format,
+                &out,
+                json,
+            )
+        }
         AiAsrCommands::Task { action } => {
             let client = AsrTaskClient::new(admin_host, admin_port);
             handle_asr_task_command(&client, action)
@@ -87,6 +111,175 @@ fn handle_asr_command(action: AiAsrCommands, admin_host: &str, admin_port: u16) 
             handle_asr_diarization_command(&client, action)
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn subtitle_file_with_admin_pipeline(
+    client: &AsrTaskClient,
+    audio: &Path,
+    model: &str,
+    language: &str,
+    profile: &str,
+    speaker_aware: bool,
+    formats: &[String],
+    out: &Path,
+    json: bool,
+) -> Result<()> {
+    if !audio.is_file() {
+        return Err(BifrostError::Config(format!(
+            "audio file does not exist: {}",
+            audio.display()
+        )));
+    }
+    fs::create_dir_all(out).map_err(|error| {
+        BifrostError::Io(io::Error::other(format!(
+            "create subtitle output dir {}: {error}",
+            out.display()
+        )))
+    })?;
+    let file_name = audio
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("upload.audio");
+    let audio_bytes = fs::read(audio).map_err(|error| {
+        BifrostError::Io(io::Error::other(format!(
+            "read audio file {}: {error}",
+            audio.display()
+        )))
+    })?;
+    let (content_type, body) = build_asr_upload_multipart(file_name, &audio_bytes);
+    let url = format!(
+        "{}/asr/offline-jobs?model={}&language={}&pipeline_profile={}&speaker_aware={}",
+        client.base_url,
+        url_encode(model),
+        url_encode(language),
+        url_encode(profile),
+        if speaker_aware { "1" } else { "0" },
+    );
+    let response = client
+        .agent
+        .post(&url)
+        .set("content-type", &content_type)
+        .set("accept", "application/json")
+        .send_bytes(&body)
+        .map_err(|error| asr_task_api_error("POST", &url, error))?;
+    let created = read_json_response("POST", &url, response)?;
+    let job_id = created["job_id"]
+        .as_str()
+        .ok_or_else(|| BifrostError::Config("offline job response missing job_id".to_string()))?;
+    let job = wait_for_offline_job(client, job_id)?;
+    if job["status"].as_str() != Some("succeeded") {
+        return Err(BifrostError::Config(format!(
+            "offline subtitle job {} failed: {}",
+            job_id,
+            job["error"].as_str().unwrap_or("unknown error")
+        )));
+    }
+    let outputs = download_offline_job_artifacts(client, job_id, audio, out, formats)?;
+    let summary = serde_json::json!({
+        "job_id": job_id,
+        "status": job["status"],
+        "pipeline_profile": job["pipeline_profile"],
+        "outputs": outputs,
+    });
+    if json {
+        print_json(&summary)
+    } else {
+        println!("Offline subtitle job {job_id} succeeded.");
+        for output in summary["outputs"].as_array().into_iter().flatten() {
+            println!(
+                "{}\t{}",
+                output["format"].as_str().unwrap_or("-"),
+                output["path"].as_str().unwrap_or("-")
+            );
+        }
+        Ok(())
+    }
+}
+
+fn wait_for_offline_job(client: &AsrTaskClient, job_id: &str) -> Result<Value> {
+    let started = Instant::now();
+    loop {
+        let job = client.get_json(&format!("/asr/offline-jobs/{}", url_encode(job_id)))?;
+        match job["status"].as_str() {
+            Some("succeeded") | Some("failed") => return Ok(job),
+            _ => {
+                if started.elapsed() > Duration::from_secs(60 * 60) {
+                    return Err(BifrostError::Config(format!(
+                        "offline subtitle job {job_id} did not finish within 1 hour"
+                    )));
+                }
+                thread::sleep(Duration::from_secs(1));
+            }
+        }
+    }
+}
+
+fn download_offline_job_artifacts(
+    client: &AsrTaskClient,
+    job_id: &str,
+    audio: &Path,
+    out: &Path,
+    formats: &[String],
+) -> Result<Vec<Value>> {
+    let stem = audio
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("subtitle");
+    let mut outputs = Vec::new();
+    for format in normalized_subtitle_formats(formats) {
+        let text = client.get_text(&format!(
+            "/asr/offline-jobs/{}/artifacts/{}",
+            url_encode(job_id),
+            url_encode(&format)
+        ))?;
+        let extension = match format.as_str() {
+            "timeline_json" => "timeline.json",
+            "metadata" => "metadata.json",
+            "txt" => "txt",
+            "srt" => "srt",
+            "vtt" => "vtt",
+            other => other,
+        };
+        let path = out.join(format!("{stem}.{extension}"));
+        fs::write(&path, text).map_err(|error| {
+            BifrostError::Io(io::Error::other(format!(
+                "write subtitle artifact {}: {error}",
+                path.display()
+            )))
+        })?;
+        outputs.push(serde_json::json!({
+            "format": format,
+            "path": path,
+        }));
+    }
+    Ok(outputs)
+}
+
+fn normalized_subtitle_formats(formats: &[String]) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for format in formats {
+        let value = format.trim().to_ascii_lowercase();
+        let value = match value.as_str() {
+            "json" | "timeline" => "timeline_json",
+            "metadata_json" => "metadata",
+            "text" => "txt",
+            other => other,
+        };
+        if matches!(value, "srt" | "vtt" | "txt" | "timeline_json" | "metadata")
+            && !normalized.iter().any(|existing| existing == value)
+        {
+            normalized.push(value.to_string());
+        }
+    }
+    if normalized.is_empty() {
+        normalized.extend(
+            ["srt", "vtt", "txt", "timeline_json", "metadata"]
+                .into_iter()
+                .map(ToString::to_string),
+        );
+    }
+    normalized
 }
 
 fn stream_file_with_admin_speakers(
@@ -441,6 +634,38 @@ struct AsrDailyDocumentDetail {
 
 fn handle_asr_task_command(client: &AsrTaskClient, action: AiAsrTaskCommands) -> Result<()> {
     match action {
+        AiAsrTaskCommands::Create {
+            name,
+            dir,
+            model,
+            language,
+            runtime_strategy,
+            time,
+            disabled,
+            non_recursive,
+            no_speaker_diarization,
+            diarization_profile,
+            known_speaker_count,
+            no_voiceprint_matching,
+            json,
+        } => create_task(
+            client,
+            CreateTaskCliInput {
+                name,
+                dir,
+                model,
+                language,
+                runtime_strategy,
+                time,
+                disabled,
+                non_recursive,
+                no_speaker_diarization,
+                diarization_profile,
+                known_speaker_count,
+                no_voiceprint_matching,
+                json,
+            },
+        ),
         AiAsrTaskCommands::List { json } => {
             let value = client.get_json("/asr/tasks")?;
             if json {
@@ -514,6 +739,89 @@ fn handle_asr_task_command(client: &AsrTaskClient, action: AiAsrTaskCommands) ->
         ),
         AiAsrTaskCommands::Daily { action } => handle_asr_task_daily_command(client, action),
     }
+}
+
+#[derive(Debug)]
+struct CreateTaskCliInput {
+    name: Option<String>,
+    dir: PathBuf,
+    model: String,
+    language: String,
+    runtime_strategy: String,
+    time: String,
+    disabled: bool,
+    non_recursive: bool,
+    no_speaker_diarization: bool,
+    diarization_profile: String,
+    known_speaker_count: Option<u8>,
+    no_voiceprint_matching: bool,
+    json: bool,
+}
+
+fn create_task(client: &AsrTaskClient, input: CreateTaskCliInput) -> Result<()> {
+    let (hour, minute) = parse_daily_time(&input.time)?;
+    let body = build_create_task_body(&input, hour, minute);
+    let value = client.post_json_body("/asr/tasks", &body)?;
+    if input.json {
+        print_json(&value)?;
+        return Ok(());
+    }
+    let id = value
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("<unknown>");
+    let name = value
+        .get("name")
+        .and_then(Value::as_str)
+        .or(input.name.as_deref())
+        .unwrap_or("ASR directory task");
+    println!("ASR directory task created: {name} ({id})");
+    println!(
+        "Defaults: model={}, speaker_diarization={}, voiceprint_matching={}",
+        input.model, !input.no_speaker_diarization, !input.no_voiceprint_matching
+    );
+    Ok(())
+}
+
+fn build_create_task_body(input: &CreateTaskCliInput, hour: u8, minute: u8) -> Value {
+    serde_json::json!({
+        "name": input.name,
+        "audio_dir": input.dir,
+        "recursive": !input.non_recursive,
+        "enabled": !input.disabled,
+        "schedule": {
+            "kind": "daily",
+            "hour": hour,
+            "minute": minute
+        },
+        "language": input.language,
+        "model": input.model,
+        "runtime_strategy": input.runtime_strategy,
+        "diarization": {
+            "enabled": !input.no_speaker_diarization,
+            "profile": input.diarization_profile,
+            "known_speaker_count": input.known_speaker_count,
+            "voiceprint_matching": !input.no_voiceprint_matching
+        }
+    })
+}
+
+fn parse_daily_time(value: &str) -> Result<(u8, u8)> {
+    let (hour, minute) = value.split_once(':').ok_or_else(|| {
+        BifrostError::Config("Invalid --time; expected HH:MM, for example 02:00".to_string())
+    })?;
+    let hour = hour.parse::<u8>().map_err(|_| {
+        BifrostError::Config("Invalid --time hour; expected 00 through 23".to_string())
+    })?;
+    let minute = minute.parse::<u8>().map_err(|_| {
+        BifrostError::Config("Invalid --time minute; expected 00 through 59".to_string())
+    })?;
+    if hour > 23 || minute > 59 {
+        return Err(BifrostError::Config(
+            "Invalid --time; expected HH:MM with hour 00-23 and minute 00-59".to_string(),
+        ));
+    }
+    Ok((hour, minute))
 }
 
 fn handle_asr_diarization_command(
@@ -2308,7 +2616,8 @@ fn start_service(model: &str, language: &str) -> Result<AsrServiceState> {
         BifrostError::Io(std::io::Error::other(format!("clone ASR log: {error}")))
     })?;
 
-    let child = Command::new(install.join("asr-server"))
+    let asr_server = labeled_process_executable(&install.join("asr-server"), "bifrost-asr-server");
+    let child = Command::new(asr_server)
         .arg("--model-dir")
         .arg(model_path)
         .arg("--host")
@@ -2351,6 +2660,21 @@ fn start_service(model: &str, language: &str) -> Result<AsrServiceState> {
         "Timed out waiting for Qwen3-ASR service to become healthy. Log: {}",
         log_path.display()
     )))
+}
+
+fn labeled_process_executable(executable: &Path, alias_name: &str) -> PathBuf {
+    let alias_dir = bifrost_storage::data_dir().join("runtime/process-aliases");
+    match process_alias_executable(executable, &alias_dir, alias_name) {
+        Ok(alias) => alias,
+        Err(error) => {
+            eprintln!(
+                "warning: falling back to unlabeled ASR executable {}: {}",
+                executable.display(),
+                error
+            );
+            executable.to_path_buf()
+        }
+    }
 }
 
 fn stop_service() -> Result<()> {
@@ -2854,6 +3178,40 @@ mod tests {
         let error = write_text_ignore_broken_pipe(&mut writer, "ready: false\n")
             .expect_err("non-broken-pipe errors should still be returned");
         assert!(error.to_string().contains("disk output unavailable"));
+    }
+
+    #[test]
+    fn create_task_cli_body_defaults_to_speaker_aware_0_6b() {
+        let input = CreateTaskCliInput {
+            name: Some("meetings".to_string()),
+            dir: PathBuf::from("/tmp/meetings"),
+            model: bifrost_asr::runtime::DEFAULT_ASR_MODEL.to_string(),
+            language: "chinese".to_string(),
+            runtime_strategy: "reuse_per_file".to_string(),
+            time: "02:00".to_string(),
+            disabled: false,
+            non_recursive: false,
+            no_speaker_diarization: false,
+            diarization_profile: bifrost_asr::profiles::DEFAULT_DIARIZATION_PROFILE.to_string(),
+            known_speaker_count: None,
+            no_voiceprint_matching: false,
+            json: false,
+        };
+
+        let body = build_create_task_body(&input, 2, 0);
+
+        assert_eq!(body["model"], "Qwen3-ASR-0.6B");
+        assert_eq!(body["diarization"]["enabled"], true);
+        assert_eq!(body["diarization"]["voiceprint_matching"], true);
+        assert_eq!(body["diarization"]["profile"], "sherpa-onnx-balanced");
+        assert_eq!(body["runtime_strategy"], "reuse_per_file");
+    }
+
+    #[test]
+    fn parse_daily_time_rejects_invalid_clock_values() {
+        assert_eq!(parse_daily_time("23:59").unwrap(), (23, 59));
+        assert!(parse_daily_time("24:00").is_err());
+        assert!(parse_daily_time("02").is_err());
     }
 
     #[test]

@@ -24,15 +24,19 @@ use crate::state::SharedAdminState;
 
 mod audio;
 mod sources;
+mod speaker;
+#[cfg(test)]
+mod tests;
 mod vocabulary;
 mod wake;
 
 use audio::{
     is_voice_speech_chunk, validate_voice_audio_chunk, voice_audio_chunk_duration_ms,
-    VoiceAudioConfig, VoiceRuntimeTuning, VoiceTranscriptState,
+    VoiceAudioConfig, VoiceRealtimeAudioBuffer, VoiceRuntimeTuning, VoiceTranscriptState,
 };
 use sources::voice_status_response;
 pub use sources::{discover_voice_sources, VoiceSource, VoiceSourceStatus};
+use speaker::{RealtimeSpeakerAssignment, RealtimeVoiceSpeakerTracker};
 use vocabulary::VoiceVocabularyImportRequest;
 pub use vocabulary::{
     apply_voice_vocabulary, load_voice_vocabulary, save_voice_vocabulary, VoiceVocabulary,
@@ -107,6 +111,24 @@ enum VoiceWsClientMessage {
 }
 
 #[derive(Debug, Serialize)]
+struct VoiceWsSpeakerFields<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    utterance_index: Option<u64>,
+    speaker: &'a str,
+    speaker_display_name: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    speaker_profile_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    speaker_confidence: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    candidate_profile_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    candidate_display_name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    candidate_confidence: Option<f32>,
+}
+
+#[derive(Debug, Serialize)]
 struct VoiceWsEvent<'a> {
     #[serde(rename = "type")]
     event_type: &'a str,
@@ -128,6 +150,8 @@ struct VoiceWsEvent<'a> {
     window_end_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     window_index: Option<u64>,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    speaker: Option<VoiceWsSpeakerFields<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     captured_at_ms: Option<u128>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -262,6 +286,23 @@ where
     let source = parse_query_value(query, "source").unwrap_or_else(|| "web_mic".to_string());
     let tuning = VoiceRuntimeTuning::from_query(query);
     let chunk_size_sec = voice_stateful_chunk_size_sec(query);
+    let lease_model =
+        parse_query_value(query, "model").unwrap_or_else(|| DEFAULT_VOICE_MODEL.to_string());
+    let lease_decision = crate::handlers::speech::acquire_speech_resource(
+        crate::handlers::speech::realtime_voice_lease(&session_id, &lease_model),
+    );
+    if !lease_decision.granted {
+        let detail = lease_decision.reason.as_deref();
+        let _ = send_voice_error(
+            &mut sender,
+            "voice realtime ASR resource is not available",
+            detail,
+        )
+        .await;
+        let _ = sender.close().await;
+        return;
+    }
+    let resource_lease = lease_decision.lease;
     let language = parse_query_value(query, "language")
         .unwrap_or_else(|| crate::asr_runtime::DEFAULT_ASR_LANGUAGE.to_string());
     let provider = match VoiceAsrProvider::from_query(query) {
@@ -282,6 +323,8 @@ where
     // After worker startup completes, audio frames captured before this threshold
     // are stale (buffered during the blocking startup) and should be discarded.
     let mut stale_audio_before_ms: Option<u128> = None;
+    let mut audio_buffer = VoiceRealtimeAudioBuffer::default();
+    let mut speaker_tracker = RealtimeVoiceSpeakerTracker::default();
 
     if send_voice_event(
         &mut sender,
@@ -296,6 +339,7 @@ where
             window_start_ms: None,
             window_end_ms: None,
             window_index: None,
+            speaker: None,
             captured_at_ms: None,
             emitted_at_ms: None,
             inference_ms: None,
@@ -306,6 +350,7 @@ where
     .await
     .is_err()
     {
+        crate::handlers::speech::release_speech_resource(resource_lease.as_ref());
         return;
     }
 
@@ -324,6 +369,11 @@ where
                             &mut sender,
                             &mut stateful_session,
                             &mut transcript_state,
+                            RealtimeVoiceSpeakerContext {
+                                tracker: &mut speaker_tracker,
+                                audio_buffer: &audio_buffer,
+                                audio_config,
+                            },
                             &StatefulVoiceTranscriptionContext {
                                 vocabulary: &vocabulary,
                                 source: &source,
@@ -368,6 +418,7 @@ where
                             window_start_ms: None,
                             window_end_ms: None,
                             window_index: None,
+                            speaker: None,
                             captured_at_ms: None,
                             emitted_at_ms: Some(audio_started_at.elapsed().as_millis()),
                             inference_ms: None,
@@ -447,6 +498,8 @@ where
                             }
                         }
                         audio_started_at = Instant::now();
+                        audio_buffer.clear();
+                        speaker_tracker.reset();
                         let detail = format!(
                             "sample_rate={}; channels={}; format={}",
                             audio_config.sample_rate, audio_config.channels, VOICE_AUDIO_FORMAT
@@ -464,6 +517,7 @@ where
                                 window_start_ms: None,
                                 window_end_ms: None,
                                 window_index: None,
+                                speaker: None,
                                 captured_at_ms: None,
                                 emitted_at_ms: None,
                                 inference_ms: None,
@@ -506,6 +560,7 @@ where
                                         window_start_ms: Some(0),
                                         window_end_ms: duration_ms.or(Some(1000)),
                                         window_index: Some(0),
+                                        speaker: None,
                                         captured_at_ms: Some(
                                             audio_started_at.elapsed().as_millis(),
                                         ),
@@ -526,11 +581,6 @@ where
                                         break;
                                     }
                                 };
-                                transcript_state.mark_audio_activity(
-                                    captured_at_ms,
-                                    chunk_ms,
-                                    is_speech,
-                                );
                                 if !is_speech
                                     && stateful_session.is_none()
                                     && transcript_state.partial.trim().is_empty()
@@ -583,6 +633,17 @@ where
                                             "voice: first fresh audio frame after worker startup"
                                         );
                                     }
+                                    transcript_state.mark_audio_activity(
+                                        captured_at_ms,
+                                        chunk_ms,
+                                        is_speech,
+                                    );
+                                    audio_buffer.push_chunk(
+                                        &bytes,
+                                        captured_at_ms,
+                                        chunk_ms,
+                                        audio_config,
+                                    );
                                     match session.feed_pcm16(&bytes).await {
                                         Ok(Some(result)) => {
                                             if let Err(error) = emit_stateful_voice_partial(
@@ -626,6 +687,11 @@ where
                                         &mut sender,
                                         &mut stateful_session,
                                         &mut transcript_state,
+                                        RealtimeVoiceSpeakerContext {
+                                            tracker: &mut speaker_tracker,
+                                            audio_buffer: &audio_buffer,
+                                            audio_config,
+                                        },
                                         &StatefulVoiceTranscriptionContext {
                                             vocabulary: &vocabulary,
                                             source: &source,
@@ -656,6 +722,11 @@ where
                                         &mut sender,
                                         &mut stateful_session,
                                         &mut transcript_state,
+                                        RealtimeVoiceSpeakerContext {
+                                            tracker: &mut speaker_tracker,
+                                            audio_buffer: &audio_buffer,
+                                            audio_config,
+                                        },
                                         &StatefulVoiceTranscriptionContext {
                                             vocabulary: &vocabulary,
                                             source: &source,
@@ -708,6 +779,7 @@ where
                                     window_start_ms: Some(0),
                                     window_end_ms: Some(1000),
                                     window_index: None,
+                                    speaker: None,
                                     captured_at_ms: None,
                                     emitted_at_ms: Some(audio_started_at.elapsed().as_millis()),
                                     inference_ms: None,
@@ -731,6 +803,7 @@ where
                                 window_start_ms: Some(0),
                                 window_end_ms: Some(1000),
                                 window_index: None,
+                                speaker: None,
                                 captured_at_ms: None,
                                 emitted_at_ms: Some(audio_started_at.elapsed().as_millis()),
                                 inference_ms: None,
@@ -747,6 +820,11 @@ where
                                 &mut sender,
                                 &mut stateful_session,
                                 &mut transcript_state,
+                                RealtimeVoiceSpeakerContext {
+                                    tracker: &mut speaker_tracker,
+                                    audio_buffer: &audio_buffer,
+                                    audio_config,
+                                },
                                 &StatefulVoiceTranscriptionContext {
                                     vocabulary: &vocabulary,
                                     source: &source,
@@ -786,6 +864,7 @@ where
                                     window_start_ms: Some(0),
                                     window_end_ms: Some(1000),
                                     window_index: None,
+                                    speaker: None,
                                     captured_at_ms: None,
                                     emitted_at_ms: Some(audio_started_at.elapsed().as_millis()),
                                     inference_ms: None,
@@ -831,7 +910,6 @@ where
                             break;
                         }
                     };
-                    transcript_state.mark_audio_activity(captured_at_ms, chunk_ms, is_speech);
                     if !is_speech
                         && stateful_session.is_none()
                         && transcript_state.partial.trim().is_empty()
@@ -874,6 +952,8 @@ where
                                 "voice: first fresh audio frame after worker startup (binary path)"
                             );
                         }
+                        transcript_state.mark_audio_activity(captured_at_ms, chunk_ms, is_speech);
+                        audio_buffer.push_chunk(&bytes, captured_at_ms, chunk_ms, audio_config);
                         match session.feed_pcm16(&bytes).await {
                             Ok(Some(result)) => {
                                 if let Err(error) = emit_stateful_voice_partial(
@@ -917,6 +997,11 @@ where
                             &mut sender,
                             &mut stateful_session,
                             &mut transcript_state,
+                            RealtimeVoiceSpeakerContext {
+                                tracker: &mut speaker_tracker,
+                                audio_buffer: &audio_buffer,
+                                audio_config,
+                            },
                             &StatefulVoiceTranscriptionContext {
                                 vocabulary: &vocabulary,
                                 source: &source,
@@ -945,6 +1030,11 @@ where
                             &mut sender,
                             &mut stateful_session,
                             &mut transcript_state,
+                            RealtimeVoiceSpeakerContext {
+                                tracker: &mut speaker_tracker,
+                                audio_buffer: &audio_buffer,
+                                audio_config,
+                            },
                             &StatefulVoiceTranscriptionContext {
                                 vocabulary: &vocabulary,
                                 source: &source,
@@ -986,6 +1076,7 @@ where
             Message::Frame(_) => {}
         }
     }
+    crate::handlers::speech::release_speech_resource(resource_lease.as_ref());
 }
 
 async fn start_voice_stateful_session(
@@ -1082,6 +1173,12 @@ struct StatefulVoiceTranscriptionContext<'a> {
     started_at: Instant,
 }
 
+struct RealtimeVoiceSpeakerContext<'a> {
+    tracker: &'a mut RealtimeVoiceSpeakerTracker,
+    audio_buffer: &'a VoiceRealtimeAudioBuffer,
+    audio_config: VoiceAudioConfig,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VoiceCommitKind {
     Stable,
@@ -1115,6 +1212,10 @@ where
     let delta = dedupe_increment(&transcript_state.committed, &refined);
     transcript_state.partial = refined.clone();
     let emitted_at_ms = context.started_at.elapsed().as_millis();
+    let window_start_ms = transcript_state
+        .utterance_started_at_ms()
+        .map(u128_to_u64_lossy);
+    let window_end_ms = Some(u128_to_u64_lossy(captured_at_ms));
     let detail = format!(
         "provider={}; language={}; stable=false",
         STATEFUL_PROVIDER_ID, result.language
@@ -1129,9 +1230,10 @@ where
             raw_text: Some(&raw_text),
             delta: Some(&delta),
             committed: Some(&transcript_state.committed),
-            window_start_ms: None,
-            window_end_ms: None,
+            window_start_ms,
+            window_end_ms,
             window_index: Some(window_index),
+            speaker: None,
             captured_at_ms: Some(captured_at_ms),
             emitted_at_ms: Some(emitted_at_ms),
             inference_ms: Some(result.inference_ms),
@@ -1148,6 +1250,7 @@ async fn commit_stateful_voice_utterance<S>(
     sender: &mut futures_util::stream::SplitSink<WebSocketStream<S>, Message>,
     stateful_session: &mut Option<StatefulVoiceSession>,
     transcript_state: &mut VoiceTranscriptState,
+    speaker_context: RealtimeVoiceSpeakerContext<'_>,
     context: &StatefulVoiceTranscriptionContext<'_>,
     options: VoiceCommitOptions<'_>,
 ) -> Result<(), String>
@@ -1186,7 +1289,30 @@ where
         }
     }
 
+    let window_start_ms = transcript_state
+        .utterance_started_at_ms()
+        .map(u128_to_u64_lossy)
+        .unwrap_or_else(|| u128_to_u64_lossy(options.captured_at_ms).saturating_sub(1_000));
+    let window_end_ms = u128_to_u64_lossy(options.captured_at_ms).max(window_start_ms);
     let (delta, raw_partial) = transcript_state.commit_partial();
+    let utterance_audio = speaker_context.audio_buffer.slice_pcm16(
+        window_start_ms,
+        window_end_ms,
+        speaker_context.audio_config,
+    );
+    let speaker_assignment =
+        if raw_partial.trim().is_empty() || utterance_audio.is_empty() || delta.trim().is_empty() {
+            None
+        } else {
+            speaker_context.tracker.classify_utterance(
+                &utterance_audio,
+                speaker_context.audio_config.sample_rate,
+                context.session_id,
+            )
+        };
+    let speaker_fields = speaker_assignment
+        .as_ref()
+        .map(|assignment| voice_ws_speaker_fields(options.window_index, assignment));
     let emitted_at_ms = context.started_at.elapsed().as_millis();
     let detail = format!(
         "provider={}; reason={}; stable=true",
@@ -1206,9 +1332,10 @@ where
             raw_text: Some(&raw_partial),
             delta: Some(&delta),
             committed: Some(&transcript_state.committed),
-            window_start_ms: None,
-            window_end_ms: None,
+            window_start_ms: Some(window_start_ms),
+            window_end_ms: Some(window_end_ms),
             window_index: Some(options.window_index),
+            speaker: speaker_fields,
             captured_at_ms: Some(options.captured_at_ms),
             emitted_at_ms: Some(emitted_at_ms),
             inference_ms: None,
@@ -1218,6 +1345,26 @@ where
     )
     .await
     .map_err(|error| error.to_string())
+}
+
+fn voice_ws_speaker_fields(
+    utterance_index: u64,
+    assignment: &RealtimeSpeakerAssignment,
+) -> VoiceWsSpeakerFields<'_> {
+    VoiceWsSpeakerFields {
+        utterance_index: Some(utterance_index),
+        speaker: &assignment.speaker,
+        speaker_display_name: &assignment.display_name,
+        speaker_profile_id: assignment.mapped_profile_id.as_deref(),
+        speaker_confidence: assignment.confidence,
+        candidate_profile_id: assignment.candidate_profile_id.as_deref(),
+        candidate_display_name: assignment.candidate_display_name.as_deref(),
+        candidate_confidence: assignment.candidate_confidence,
+    }
+}
+
+fn u128_to_u64_lossy(value: u128) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 fn parse_query_value(query: &str, key: &str) -> Option<String> {
@@ -1296,6 +1443,7 @@ where
             window_start_ms: None,
             window_end_ms: None,
             window_index: None,
+            speaker: None,
             captured_at_ms: None,
             emitted_at_ms: None,
             inference_ms: None,
@@ -1325,6 +1473,7 @@ where
             window_start_ms: None,
             window_end_ms: None,
             window_index: None,
+            speaker: None,
             captured_at_ms: None,
             emitted_at_ms: None,
             inference_ms: None,
@@ -1333,141 +1482,4 @@ where
         },
     )
     .await
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn voice_sources_include_local_statuses() {
-        let sources = discover_voice_sources();
-        assert!(sources.iter().any(|source| source.id == "web_mic"));
-        assert!(sources.iter().any(|source| source.id == "file:realtime"));
-        assert!(sources.iter().any(|source| source.kind == "mic"));
-        assert!(sources.iter().any(|source| source.kind == "system"));
-        assert!(sources.iter().any(|source| source.kind == "app"));
-    }
-
-    #[test]
-    fn vocabulary_rewrites_aliases_without_touching_raw_input() {
-        let vocabulary = VoiceVocabulary {
-            version: 1,
-            terms: vec![VoiceVocabularyTerm {
-                canonical: "Bifrost".to_string(),
-                aliases: vec!["宽增".to_string(), "白 Frost".to_string()],
-                category: Some("project".to_string()),
-            }],
-        };
-        let raw = "请打开宽增并搜索白 Frost 的日志";
-        assert_eq!(
-            apply_voice_vocabulary(raw, &vocabulary),
-            "请打开Bifrost并搜索Bifrost 的日志"
-        );
-        assert_eq!(raw, "请打开宽增并搜索白 Frost 的日志");
-    }
-
-    #[test]
-    fn invalid_base64_audio_is_rejected() {
-        let err = decode_voice_audio_payload("***").unwrap_err();
-        assert!(err.contains("invalid base64 voice audio payload"));
-    }
-
-    #[test]
-    fn voice_provider_selection_defaults_and_validates() {
-        assert_eq!(
-            VoiceAsrProvider::from_query("source=file").unwrap(),
-            VoiceAsrProvider::Qwen3Stateful
-        );
-        assert_eq!(
-            VoiceAsrProvider::from_query("provider=qwen3_stateful_streaming").unwrap(),
-            VoiceAsrProvider::Qwen3Stateful
-        );
-        assert!(VoiceAsrProvider::from_query("provider=qwen3_rs_http_chunked").is_err());
-        assert!(VoiceAsrProvider::from_query("provider=remote_cloud").is_err());
-    }
-
-    #[test]
-    fn stateful_large_model_can_be_enabled_from_query() {
-        assert!(!stateful_17b_enabled("provider=qwen3_stateful_streaming"));
-        assert!(stateful_17b_enabled(
-            "provider=qwen3_stateful_streaming&allow_stateful_17b=1"
-        ));
-    }
-
-    #[test]
-    fn voice_target_defaults_to_realtime_06b() {
-        let target = voice_target_from_query("source=web_mic&language=english").unwrap();
-        assert_eq!(target.model, DEFAULT_VOICE_MODEL);
-        assert_eq!(target.language, "english");
-    }
-
-    #[test]
-    fn voice_start_rejects_non_16k_pcm() {
-        let error =
-            VoiceAudioConfig::from_start(Some(48_000), Some(1), Some("pcm_s16le")).unwrap_err();
-        assert!(error.contains("16000Hz PCM"));
-        let error =
-            VoiceAudioConfig::from_start(Some(16_000), Some(2), Some("pcm_s16le")).unwrap_err();
-        assert!(error.contains("mono PCM"));
-        let error =
-            VoiceAudioConfig::from_start(Some(16_000), Some(1), Some("pcm_f32")).unwrap_err();
-        assert!(error.contains("pcm_s16le"));
-    }
-
-    #[test]
-    fn partial_commit_keeps_stable_text_monotonic() {
-        let mut state = VoiceTranscriptState::new(VoiceRuntimeTuning::from_query(""));
-        state.partial = "hello bifrost".to_string();
-        assert_eq!(state.committed, "");
-
-        state.partial = "hello".to_string();
-        assert_eq!(state.committed, "");
-
-        state.partial = "hello bifrost voice".to_string();
-        let (delta, partial) = state.commit_partial();
-        assert_eq!(partial, "hello bifrost voice");
-        assert_eq!(delta, "hello bifrost voice");
-        assert_eq!(state.committed, "hello bifrost voice");
-
-        state.partial = "hello bifrost voice input".to_string();
-        let (delta, _) = state.commit_partial();
-        assert_eq!(delta, " input");
-        assert_eq!(state.committed, "hello bifrost voice input");
-    }
-
-    #[test]
-    fn voice_vad_detects_silence_and_speech_boundaries() {
-        let silence = vec![0u8; 16_000 * 2];
-        assert!(!is_voice_speech_chunk(&silence).unwrap());
-        assert_eq!(
-            voice_audio_chunk_duration_ms(&silence, VoiceAudioConfig::default()),
-            1000
-        );
-
-        let mut speech = Vec::new();
-        for _ in 0..16_000 {
-            speech.extend_from_slice(&10_000i16.to_le_bytes());
-        }
-        assert!(is_voice_speech_chunk(&speech).unwrap());
-    }
-
-    #[test]
-    fn transcript_boundaries_use_testable_runtime_tuning() {
-        let mut state = VoiceTranscriptState::new(VoiceRuntimeTuning::from_query(
-            "silence_commit_ms=25&worker_idle_unload_ms=50&max_utterance_ms=75",
-        ));
-        state.partial = "hello bifrost".to_string();
-        state.mark_audio_activity(10, 10, true);
-        assert!(!state.should_commit_for_max_duration(80));
-        assert!(state.should_commit_for_max_duration(85));
-
-        state.mark_audio_activity(90, 25, false);
-        assert!(state.should_commit_for_silence());
-        let (delta, _) = state.commit_partial();
-        assert_eq!(delta, "hello bifrost");
-
-        state.mark_audio_activity(120, 50, false);
-        assert!(state.should_unload_idle_worker());
-    }
 }

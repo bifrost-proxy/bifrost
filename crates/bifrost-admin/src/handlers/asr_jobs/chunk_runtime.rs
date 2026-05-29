@@ -764,6 +764,7 @@ async fn transcribe_in_chunks(
     server_state: Option<&mut Option<ServerRunnerState>>,
     mut server_restart: Option<ManagedServerRestartContext<'_>>,
     on_chunk_metric: Option<&(dyn Fn(AsrChunkMetric) + Send + Sync)>,
+    partial_artifacts: Option<&PartialArtifactContext>,
 ) -> Result<ChunkedTranscriptionResult, String> {
     // The effective step between chunk starts accounts for overlap so that
     // consecutive chunks share `overlap_secs` seconds of audio.
@@ -982,6 +983,23 @@ async fn transcribe_in_chunks(
                     overlap_secs,
                     total_duration_ms,
                 );
+                if let Some(context) = partial_artifacts {
+                    persist_partial_transcription_artifacts(
+                        context,
+                        DiarizedSegmentProgress {
+                            text: all_text.clone(),
+                            timeline_segments: timeline_segments_from_plain_chunks(
+                                &all_segments,
+                                context,
+                            ),
+                            chunk_metrics: chunk_metrics.clone(),
+                            fallback_reason: shared_server_state
+                                .as_ref()
+                                .and_then(|state| state.fallback_reason.clone())
+                                .or_else(|| startup_fallback_reason.map(str::to_string)),
+                        },
+                    )?;
+                }
             }
             Err(error) if error == ASR_TASK_PAUSED_MESSAGE => {
                 let _ = std::fs::remove_file(&chunk_path);
@@ -1192,77 +1210,4 @@ fn append_chunk_transcription(
     for (start_ms, end_ms, text) in chunk_result.segments {
         all_segments.push((start_ms + offset_ms, end_ms + offset_ms, text));
     }
-}
-
-fn normalize_timeline_segments(timeline: &mut TranscriptTimeline) {
-    if timeline.segments.iter().all(|segment| {
-        segment.audio_end_ms.saturating_sub(segment.audio_start_ms) <= ASR_TASK_SEGMENT_MAX_MS
-    }) {
-        return;
-    }
-
-    let mut normalized = Vec::new();
-    for segment in timeline.segments.drain(..) {
-        normalized.extend(split_timeline_segment(
-            segment,
-            timeline.source_created_at_ms,
-            ASR_TASK_SEGMENT_MAX_MS,
-        ));
-    }
-    for (index, segment) in normalized.iter_mut().enumerate() {
-        segment.index = index;
-    }
-    timeline.segments = normalized;
-}
-
-fn split_timeline_segment(
-    segment: TimelineSegment,
-    source_created_at_ms: Option<u64>,
-    max_segment_ms: u64,
-) -> Vec<TimelineSegment> {
-    let duration_ms = segment.audio_end_ms.saturating_sub(segment.audio_start_ms);
-    if duration_ms <= max_segment_ms || max_segment_ms == 0 {
-        return vec![segment];
-    }
-
-    let window_count = duration_ms.div_ceil(max_segment_ms) as usize;
-    let text_chars = segment.text.chars().collect::<Vec<_>>();
-    let text_len = text_chars.len();
-    let absolute_base = segment.absolute_start_ms.or_else(|| {
-        source_created_at_ms.map(|source_start| source_start.saturating_add(segment.audio_start_ms))
-    });
-
-    (0..window_count)
-        .map(|window_index| {
-            let audio_start_ms = segment
-                .audio_start_ms
-                .saturating_add((window_index as u64).saturating_mul(max_segment_ms));
-            let audio_end_ms = segment.audio_end_ms.min(
-                segment
-                    .audio_start_ms
-                    .saturating_add(((window_index as u64) + 1).saturating_mul(max_segment_ms)),
-            );
-            let char_start = text_len.saturating_mul(window_index) / window_count;
-            let char_end = text_len.saturating_mul(window_index + 1) / window_count;
-            let text = text_chars[char_start..char_end].iter().collect::<String>();
-            let absolute_start_ms = absolute_base.map(|base| {
-                base.saturating_add(audio_start_ms.saturating_sub(segment.audio_start_ms))
-            });
-            let absolute_end_ms = absolute_base.map(|base| {
-                base.saturating_add(audio_end_ms.saturating_sub(segment.audio_start_ms))
-            });
-
-            TimelineSegment {
-                index: window_index,
-                audio_start_ms,
-                audio_end_ms,
-                absolute_start_ms,
-                absolute_end_ms,
-                speaker: segment.speaker.clone(),
-                speaker_display_name: segment.speaker_display_name.clone(),
-                overlap: segment.overlap,
-                text,
-            }
-        })
-        .collect()
 }

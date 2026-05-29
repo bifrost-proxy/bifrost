@@ -53,6 +53,8 @@ pub struct ImAgentSessionMessage {
     pub content: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_parts: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -592,16 +594,19 @@ mod tests {
                     role: " user ".to_string(),
                     content: " first ".to_string(),
                     timestamp: Some(11),
+                    content_parts: None,
                 },
                 ImAgentSessionMessage {
                     role: "assistant".to_string(),
                     content: " ".to_string(),
                     timestamp: Some(12),
+                    content_parts: None,
                 },
                 ImAgentSessionMessage {
                     role: "assistant".to_string(),
                     content: "answer".to_string(),
                     timestamp: Some(13),
+                    content_parts: None,
                 },
             ],
             ..ImAgentSessionState::default()
@@ -615,6 +620,33 @@ mod tests {
         assert_eq!(state.messages[0].content, "first");
         assert_eq!(state.messages[1].role, "assistant");
         assert_eq!(state.messages[1].content, "answer");
+    }
+
+    #[test]
+    fn session_state_persists_message_content_parts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvGuard::new(dir.path());
+
+        let content_parts = serde_json::json!([
+            {"type": "text", "text": "describe"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGVsbG8=", "detail": "auto"}}
+        ]);
+        remember_session_state(ImAgentSessionState {
+            session_key: "image-session".to_string(),
+            adapter: "codex".to_string(),
+            runner_id: Some("codex".to_string()),
+            messages: vec![ImAgentSessionMessage {
+                role: "user".to_string(),
+                content: "describe".to_string(),
+                timestamp: Some(11),
+                content_parts: Some(content_parts.clone()),
+            }],
+            ..ImAgentSessionState::default()
+        })
+        .expect("remember");
+
+        let state = load_session_state("image-session", "codex", Some("codex")).unwrap();
+        assert_eq!(state.messages[0].content_parts, Some(content_parts));
     }
 
     #[test]

@@ -1,12 +1,13 @@
-import { isRecord, stringFrom } from "./AgentChatSection.helpers";
+import { isRecord, stringFrom, type QueuedInput } from "./AgentChatSection.helpers";
 
-export type QueuedInput = {
-  seq: number;
-  message: string;
-};
+export type { QueuedInput } from "./AgentChatSection.helpers";
 
 export function queueItemsFromEvent(event: Record<string, unknown>): QueuedInput[] | null {
-  const items = event.queueItems;
+  return queueItemsFromUnknown(event.queueItems ?? event.queue_items);
+}
+
+export function queueItemsFromUnknown(value: unknown): QueuedInput[] | null {
+  const items = value;
   if (!Array.isArray(items)) {
     return null;
   }

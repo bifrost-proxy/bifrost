@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Col, Row, Typography, theme } from "antd";
 import {
   CheckCircleOutlined,
@@ -20,18 +20,46 @@ export type ProcessStep = {
   /** Tool result string */
   result?: string;
   status?: "running" | "success" | "failed";
+  startedAt?: number;
+  completedAt?: number;
+  durationMs?: number;
 };
 
 export type ChatMessage = {
   id: string;
   role: "user" | "assistant";
   content: string;
+  contentParts?: ChatContentPart[];
   timestamp?: number;
   meta?: string;
   processSteps?: ProcessStep[];
   processCollapsed?: boolean;
   hideTimestamp?: boolean;
   runnerCall?: RunnerCallMessageMeta;
+};
+
+export type ChatImageUrlPart = {
+  type: "image_url";
+  image_url?: {
+    url?: string;
+    detail?: string;
+  };
+};
+
+export type ChatTextPart = {
+  type: "text";
+  text?: string;
+};
+
+export type ChatContentPart = ChatImageUrlPart | ChatTextPart;
+
+export type PendingChatImage = {
+  id: string;
+  mimeType: string;
+  data: string;
+  previewUrl: string;
+  name?: string;
+  size: number;
 };
 
 export type RunnerCallMessageMeta = {
@@ -48,6 +76,11 @@ export type HistoryEvent = {
   event_type: string;
   session_key: string;
   content: Record<string, unknown>;
+};
+
+export type QueuedInput = {
+  seq: number;
+  message: string;
 };
 
 export type AgentThreadSummary = {
@@ -69,9 +102,16 @@ export type AgentThreadSummary = {
   tokens?: number;
   compaction_count?: number;
   estimated_tokens?: number;
+  context_window_tokens?: number;
+  context_usage_percent?: number;
+  last_response_tokens?: number;
   has_timeline?: boolean;
   timeline_event_count?: number;
   run_state?: string;
+  queue_length?: number;
+  queue_items?: QueuedInput[];
+  queueLength?: number;
+  queueItems?: QueuedInput[];
 };
 
 export type RunnerConfigPayload = {
@@ -90,6 +130,8 @@ export type SessionDetailMessage = {
   role: string;
   content: string;
   timestamp?: number;
+  content_parts?: ChatContentPart[];
+  contentParts?: ChatContentPart[];
 };
 
 export type SessionDetail = {
@@ -101,6 +143,9 @@ export type SessionDetail = {
   message_count?: number;
   total_tokens_used?: number;
   estimated_tokens?: number;
+  context_window_tokens?: number;
+  context_usage_percent?: number;
+  last_response_tokens?: number;
   compaction_count?: number;
   history_version?: number;
   agent_type?: string;
@@ -110,6 +155,11 @@ export type SessionDetail = {
   has_timeline?: boolean;
   timeline_event_count?: number;
   run_state?: string;
+  queue_length?: number;
+  queue_items?: QueuedInput[];
+  queueLength?: number;
+  queueItems?: QueuedInput[];
+  active_status?: RunStatusSnapshot;
   messages?: SessionDetailMessage[];
 };
 
@@ -135,6 +185,7 @@ export type RunStatusSnapshot = {
   current_loop_iteration?: number;
   completed_loop_iterations?: number;
   max_loop_iterations?: number;
+  last_response_tokens?: number;
   total_tokens_used?: number;
   estimated_context_tokens?: number;
   context_window_tokens?: number;
@@ -244,12 +295,17 @@ export function sessionDetailToMessages(detail: SessionDetail): ChatMessage[] {
         id: `session-${detail.session_key}-${index}`,
         role,
         content: runnerCall?.content ?? message.content ?? "",
+        contentParts: message.content_parts || message.contentParts,
         timestamp: message.timestamp,
         meta: runnerCall ? "Runner call" : role === "user" ? "You" : "Bifrost Agent",
         runnerCall: runnerCall?.meta,
       };
     })
-    .filter((message) => message.content.trim().length > 0);
+    .filter(
+      (message) =>
+        message.content.trim().length > 0 ||
+        (message.contentParts || []).some((part) => part.type === "image_url"),
+    );
 }
 
 function inferPersistedRunnerCall(
@@ -563,6 +619,9 @@ export function telemetryFromThread(thread?: AgentThreadSummary): RunTelemetry {
       message_count: thread.turns,
       total_tokens_used: thread.tokens,
       estimated_context_tokens: thread.estimated_tokens,
+      context_window_tokens: thread.context_window_tokens,
+      context_usage_percent: thread.context_usage_percent,
+      last_response_tokens: thread.last_response_tokens,
       compaction_count: thread.compaction_count,
       runner_type: thread.runner_type,
       runner_id: thread.runner_id,
@@ -583,17 +642,47 @@ export function telemetryFromSessionDetail(
     phase: "idle",
     title: detail.title || thread?.title,
     status: {
-      state: detail.run_state || detail.state || thread?.run_state || thread?.state || thread?.status || "idle",
+      ...detail.active_status,
+      state:
+        detail.active_status?.state ||
+        detail.run_state ||
+        detail.state ||
+        thread?.run_state ||
+        thread?.state ||
+        thread?.status ||
+        "idle",
       source: detail.source || thread?.source,
-      work_dir: detail.work_dir || thread?.work_dir,
-      message_count: detail.message_count ?? thread?.turns,
-      total_tokens_used: detail.total_tokens_used ?? thread?.tokens,
-      estimated_context_tokens: detail.estimated_tokens ?? thread?.estimated_tokens,
-      compaction_count: detail.compaction_count ?? thread?.compaction_count,
-      history_version: detail.history_version,
-      runner_type: detail.runner_type || thread?.runner_type,
-      runner_id: detail.runner_id || thread?.runner_id,
-      agent_type: detail.agent_type || thread?.agent_type,
+      work_dir: detail.active_status?.work_dir || detail.work_dir || thread?.work_dir,
+      message_count:
+        detail.active_status?.message_count ?? detail.message_count ?? thread?.turns,
+      total_tokens_used:
+        detail.active_status?.total_tokens_used ??
+        detail.total_tokens_used ??
+        thread?.tokens,
+      estimated_context_tokens:
+        detail.active_status?.estimated_context_tokens ??
+        detail.estimated_tokens ??
+        thread?.estimated_tokens,
+      context_window_tokens:
+        detail.active_status?.context_window_tokens ??
+        detail.context_window_tokens ??
+        thread?.context_window_tokens,
+      context_usage_percent:
+        detail.active_status?.context_usage_percent ??
+        detail.context_usage_percent ??
+        thread?.context_usage_percent,
+      last_response_tokens:
+        detail.active_status?.last_response_tokens ??
+        detail.last_response_tokens ??
+        thread?.last_response_tokens,
+      compaction_count:
+        detail.active_status?.compaction_count ??
+        detail.compaction_count ??
+        thread?.compaction_count,
+      history_version: detail.active_status?.history_version ?? detail.history_version,
+      runner_type: detail.active_status?.runner_type || detail.runner_type || thread?.runner_type,
+      runner_id: detail.active_status?.runner_id || detail.runner_id || thread?.runner_id,
+      agent_type: detail.active_status?.agent_type || detail.agent_type || thread?.agent_type,
     },
   };
 }
@@ -615,6 +704,7 @@ export function MetricRow({ label, value }: { label: string; value: string }) {
 
 export async function runAgentStream(params: {
   message: string;
+  images?: PendingChatImage[];
   sessionKey: string;
   historyPath?: string;
   workDir?: string;
@@ -635,6 +725,11 @@ export async function runAgentStream(params: {
         isExternalRunner
           ? {
               message: params.message,
+              images: (params.images || []).map((image) => ({
+                mimeType: image.mimeType,
+                data: image.data,
+                name: image.name,
+              })),
               sessionKey: params.sessionKey,
               runnerId: params.runnerId,
               adapter: params.runnerAdapter,
@@ -643,6 +738,10 @@ export async function runAgentStream(params: {
             }
           : {
               message: params.message,
+              images: (params.images || []).map((image) => ({
+                mime_type: image.mimeType,
+                data: image.data,
+              })),
               session_key: params.sessionKey,
               history_path: params.historyPath,
               work_dir: params.workDir,
@@ -973,6 +1072,45 @@ export function formatNumber(value?: number) {
   return typeof value === "number" ? value.toLocaleString() : "-";
 }
 
+export function formatStatusMetricCount(value?: number) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "-";
+  }
+  const wholeValue = Math.max(0, Math.round(value));
+  const units: Array<[number, string]> = [
+    [1_000, "K"],
+    [1_000_000, "M"],
+    [1_000_000_000, "B"],
+  ];
+  if (wholeValue < units[0][0]) {
+    return String(wholeValue);
+  }
+
+  let unitIndex = units.length - 1;
+  for (let index = 0; index < units.length; index += 1) {
+    if (wholeValue < units[index][0]) {
+      unitIndex = Math.max(index - 1, 0);
+      break;
+    }
+  }
+  while (
+    unitIndex + 1 < units.length &&
+    roundedMetricTenths(wholeValue, units[unitIndex][0]) >= 10_000
+  ) {
+    unitIndex += 1;
+  }
+
+  const [unit, suffix] = units[unitIndex];
+  const scaledTenths = roundedMetricTenths(wholeValue, unit);
+  const whole = Math.floor(scaledTenths / 10);
+  const decimal = scaledTenths % 10;
+  return decimal === 0 ? `${whole}${suffix}` : `${whole}.${decimal}${suffix}`;
+}
+
+function roundedMetricTenths(value: number, unit: number) {
+  return Math.floor((value * 10 + Math.floor(unit / 2)) / unit);
+}
+
 export function formatLoopProgress(status?: RunStatusSnapshot) {
   if (!status) {
     return "-";
@@ -1014,7 +1152,7 @@ export function formatContextWindow(
   const used = status?.estimated_context_tokens ?? context?.estimatedContextTokens;
   const window = status?.context_window_tokens ?? context?.contextWindowTokens;
   return typeof used === "number" && typeof window === "number"
-    ? `${used.toLocaleString()} / ${window.toLocaleString()}`
+    ? `${formatStatusMetricCount(used)} / ${formatStatusMetricCount(window)}`
     : "-";
 }
 
@@ -1162,6 +1300,7 @@ export function eventToProcessStep(event: Record<string, unknown>): ProcessStep 
       detail: args,
       args: args || undefined,
       status: "running",
+      startedAt: Date.now() / 1000,
     };
   }
   if (eventType === "plan_updated" && Array.isArray(event.steps)) {
@@ -1267,6 +1406,68 @@ export function ExpandableText({ text, label }: { text: string; label: string })
   );
 }
 
+function formatProcessStepsDuration(steps: ProcessStep[], nowSeconds: number) {
+  const toolSteps = steps.filter((step) => step.type === "tool");
+  if (toolSteps.length === 0) {
+    return undefined;
+  }
+  const totalMs = toolSteps.reduce(
+    (total, step) => total + processStepDurationMs(step, nowSeconds),
+    0,
+  );
+  if (totalMs > 0) {
+    return formatCompactDuration(totalMs / 1000);
+  }
+  const startedAt = toolSteps
+    .map((step) => step.startedAt)
+    .filter((value): value is number => typeof value === "number")
+    .map(normalizeTimestampSeconds);
+  const completedAt = toolSteps
+    .map((step) => step.completedAt)
+    .filter((value): value is number => typeof value === "number")
+    .map(normalizeTimestampSeconds);
+  if (startedAt.length === 0 || completedAt.length === 0) {
+    return undefined;
+  }
+  const spanSeconds = Math.max(...completedAt) - Math.min(...startedAt);
+  return spanSeconds > 0 ? formatCompactDuration(spanSeconds) : undefined;
+}
+
+function processStepDurationMs(step: ProcessStep, nowSeconds: number) {
+  if (typeof step.durationMs === "number" && step.durationMs >= 0) {
+    return step.durationMs;
+  }
+  if (typeof step.startedAt !== "number") {
+    return 0;
+  }
+  const endSeconds =
+    typeof step.completedAt === "number" ? step.completedAt : nowSeconds;
+  return Math.max(
+    0,
+    (normalizeTimestampSeconds(endSeconds) -
+      normalizeTimestampSeconds(step.startedAt)) *
+      1000,
+  );
+}
+
+function normalizeTimestampSeconds(timestamp: number) {
+  return timestamp > 1_000_000_000_000 ? timestamp / 1000 : timestamp;
+}
+
+function formatCompactDuration(seconds: number) {
+  const rounded = Math.max(1, Math.round(seconds));
+  const hours = Math.floor(rounded / 3600);
+  const minutes = Math.floor((rounded % 3600) / 60);
+  const secs = rounded % 60;
+  if (hours > 0) {
+    return secs > 0 ? `${hours}h ${minutes}m ${secs}s` : `${hours}h ${minutes}m`;
+  }
+  if (minutes > 0) {
+    return secs > 0 ? `${minutes}m ${secs}s` : `${minutes}m`;
+  }
+  return `${secs}s`;
+}
+
 /**
  * Collapsible "thinking process" block inside a message bubble.
  * Shows thinking steps interleaved with tool calls.
@@ -1281,6 +1482,7 @@ export function ProcessStepsBlock({
   const { token } = theme.useToken();
   const [expanded, setExpanded] = useState(false);
   const [expandedTools, setExpandedTools] = useState<Set<number>>(new Set());
+  const [nowSeconds, setNowSeconds] = useState(() => Date.now() / 1000);
   const visibleSteps = isRunning
     ? steps
     : steps.filter(
@@ -1288,6 +1490,17 @@ export function ProcessStepsBlock({
           step.type !== "compaction" &&
           !(step.type === "status" && step.summary.startsWith("Run state:")),
       );
+
+  useEffect(() => {
+    if (!isRunning) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      setNowSeconds(Date.now() / 1000);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [isRunning]);
+
   if (visibleSteps.length === 0) return null;
   const mutedColor = token.colorTextQuaternary;
   const textColor = token.colorTextTertiary;
@@ -1297,11 +1510,12 @@ export function ProcessStepsBlock({
     : 0;
   const commandCount = visibleSteps.filter((step) => step.type === "tool").length;
   const summaryCount = commandCount || visibleSteps.length;
+  const durationLabel = formatProcessStepsDuration(visibleSteps, nowSeconds);
   const summaryText = `${isRunning ? "Running" : "Ran"} ${
     summaryCount
   } command${summaryCount > 1 ? "s" : ""}${
     runningCount > 0 ? ` (${runningCount} active)` : ""
-  }`;
+  }${durationLabel ? ` · ${durationLabel}` : ""}`;
 
   const toggleToolExpand = (index: number) => {
     setExpandedTools((prev) => {

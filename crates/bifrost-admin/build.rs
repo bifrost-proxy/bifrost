@@ -4,6 +4,8 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::thread;
+use std::time::Duration;
 
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -197,7 +199,7 @@ fn generate_gzip_dist(dist_dir: &Path, gzip_dist_dir: &Path) {
     }
 
     if gzip_dist_dir.exists() {
-        fs::remove_dir_all(gzip_dist_dir).expect("Failed to remove stale gzip dist directory");
+        remove_dir_all_with_retry(gzip_dist_dir, "stale gzip dist directory");
     }
     fs::create_dir_all(gzip_dist_dir).expect("Failed to create gzip dist directory");
 
@@ -207,6 +209,36 @@ fn generate_gzip_dist(dist_dir: &Path, gzip_dist_dir: &Path) {
         "cargo:warning=Generated {} gzip frontend assets at {}",
         file_count,
         gzip_dist_dir.display()
+    );
+}
+
+fn remove_dir_all_with_retry(path: &Path, label: &str) {
+    let mut last_error = None;
+    for attempt in 0..8 {
+        match fs::remove_dir_all(path) {
+            Ok(()) => return,
+            Err(err) if !path.exists() => {
+                println!(
+                    "cargo:warning=Ignoring {} removal race after attempt {}: {}",
+                    label,
+                    attempt + 1,
+                    err
+                );
+                return;
+            }
+            Err(err) => {
+                last_error = Some(err);
+                thread::sleep(Duration::from_millis(25 * (attempt + 1) as u64));
+            }
+        }
+    }
+    panic!(
+        "Failed to remove {} at {}: {}",
+        label,
+        path.display(),
+        last_error
+            .map(|err| err.to_string())
+            .unwrap_or_else(|| "unknown error".to_string())
     );
 }
 

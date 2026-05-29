@@ -135,6 +135,11 @@ export function historyEventsToMessages(
             ...lastSteps[lastPendingIndex],
             status: step.status,
             result: step.result,
+            completedAt: step.completedAt,
+            durationMs: durationMsBetween(
+              lastSteps[lastPendingIndex].startedAt,
+              step.completedAt,
+            ),
           };
           messages[messages.length - 1] = {
             ...lastMessage,
@@ -149,6 +154,11 @@ export function historyEventsToMessages(
           ...pendingSteps[pendingIndex],
           status: step.status,
           result: step.result,
+          completedAt: step.completedAt,
+          durationMs: durationMsBetween(
+            pendingSteps[pendingIndex].startedAt,
+            step.completedAt,
+          ),
         };
         return;
       }
@@ -263,7 +273,7 @@ function hasRunStateStep(steps: ProcessStep[]) {
 }
 
 function isActiveRunState(state?: string) {
-  return state === "running" || state === "queued" || state === "waiting_for_tool";
+  return isRunStateActive(state);
 }
 
 function isTerminalRunState(state?: string) {
@@ -302,6 +312,7 @@ function historyEventToProcessStep(event: HistoryEvent): ProcessStep | null {
       detail: stringFrom(event.content.arguments),
       args: stringFrom(event.content.arguments),
       status: "running",
+      startedAt: event.timestamp,
     };
   }
   if (event.event_type === "tool_result") {
@@ -311,9 +322,21 @@ function historyEventToProcessStep(event: HistoryEvent): ProcessStep | null {
       summary: name,
       result: stringFrom(event.content.result),
       status: event.content.success === false ? "failed" : "success",
+      completedAt: event.timestamp,
     };
   }
   return null;
+}
+
+function durationMsBetween(start?: number, end?: number) {
+  if (typeof start !== "number" || typeof end !== "number") {
+    return undefined;
+  }
+  return Math.max(0, (normalizeTimestampSeconds(end) - normalizeTimestampSeconds(start)) * 1000);
+}
+
+function normalizeTimestampSeconds(timestamp: number) {
+  return timestamp > 1_000_000_000_000 ? timestamp / 1000 : timestamp;
 }
 
 function findPendingToolStep(steps: ProcessStep[], name?: string) {
@@ -331,9 +354,11 @@ export function historyEventsToTelemetry(
   thread?: AgentThreadSummary,
   fallback: RunTelemetry = EMPTY_TELEMETRY,
 ): RunTelemetry {
-  let telemetry = {
-    ...telemetryFromThread(thread),
+  const threadTelemetry = telemetryFromThread(thread);
+  let telemetry: RunTelemetry = {
+    ...threadTelemetry,
     phase: fallback.phase,
+    status: mergeDefinedStatus(fallback.status, threadTelemetry.status),
     plan: fallback.plan,
     tools: fallback.tools,
     errors: fallback.errors,
@@ -500,10 +525,53 @@ export function historyEventsToTelemetry(
       };
     }
   }
+  const liveStatus = isThreadActiveForTelemetry(thread)
+    ? threadTelemetry.status
+    : isRunStatusActive(fallback.status)
+      ? fallback.status
+      : undefined;
   return {
     ...telemetry,
+    status: mergeDefinedStatus(telemetry.status, liveStatus),
     tools: telemetry.tools.map((tool) =>
       tool.status === "running" ? { ...tool, status: "success" } : tool,
     ),
   };
+}
+
+function mergeDefinedStatus(
+  base?: RunTelemetry["status"],
+  overlay?: RunTelemetry["status"],
+): RunTelemetry["status"] {
+  if (!overlay) {
+    return base;
+  }
+  const next = { ...(base || {}) };
+  for (const [key, value] of Object.entries(overlay)) {
+    if (value !== undefined && value !== null) {
+      (next as Record<string, unknown>)[key] = value;
+    }
+  }
+  return next;
+}
+
+function isThreadActiveForTelemetry(thread?: AgentThreadSummary) {
+  return thread?.running === true || isRunStateActive(thread?.run_state || thread?.state);
+}
+
+function isRunStatusActive(status?: RunTelemetry["status"]) {
+  return isRunStateActive(status?.state);
+}
+
+function isRunStateActive(state?: string) {
+  return (
+    state === "running" ||
+    state === "queued" ||
+    state === "waiting_for_tool" ||
+    state === "waiting_on_session" ||
+    state === "model_response" ||
+    state === "tool_running" ||
+    state === "compacting" ||
+    state === "stopping"
+  );
 }

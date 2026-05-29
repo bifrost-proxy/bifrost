@@ -91,7 +91,7 @@ export function AgentChatPlan({
           ) : (
             <CheckCircleOutlined />
           )}
-          <Text strong style={{ fontSize: 13, lineHeight: "18px" }}>
+          <Text strong style={{ fontSize: 13, lineHeight: "18px", flexShrink: 0 }}>
             Plan
           </Text>
           {collapsedStep ? (

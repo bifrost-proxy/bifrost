@@ -5,6 +5,8 @@ use super::{
 };
 use crate::handlers::asr_streaming::{append_transcript_delta, dedupe_increment};
 
+const VOICE_REALTIME_AUDIO_BUFFER_RETAIN_MS: u64 = 120_000;
+
 #[derive(Debug, Clone, Copy)]
 pub(super) struct VoiceRuntimeTuning {
     pub(super) silence_commit_ms: u64,
@@ -103,7 +105,8 @@ impl VoiceTranscriptState {
         if is_speech {
             self.silence_ms = 0;
             if self.utterance_started_at_ms.is_none() {
-                self.utterance_started_at_ms = Some(captured_at_ms);
+                self.utterance_started_at_ms =
+                    Some(captured_at_ms.saturating_sub(u128::from(chunk_ms.max(1))));
             }
         } else {
             self.silence_ms = self.silence_ms.saturating_add(chunk_ms.max(1));
@@ -130,6 +133,10 @@ impl VoiceTranscriptState {
         self.utterance_started_at_ms.is_some() || !self.partial.trim().is_empty()
     }
 
+    pub(super) fn utterance_started_at_ms(&self) -> Option<u128> {
+        self.utterance_started_at_ms
+    }
+
     pub(super) fn commit_partial(&mut self) -> (String, String) {
         let partial = self.partial.clone();
         let delta = dedupe_increment(&self.committed, &self.partial);
@@ -141,6 +148,86 @@ impl VoiceTranscriptState {
         self.silence_ms = 0;
         (delta, partial)
     }
+}
+
+#[derive(Debug, Clone)]
+struct VoiceAudioTimelineChunk {
+    start_ms: u64,
+    end_ms: u64,
+    bytes: Vec<u8>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub(super) struct VoiceRealtimeAudioBuffer {
+    chunks: Vec<VoiceAudioTimelineChunk>,
+}
+
+impl VoiceRealtimeAudioBuffer {
+    pub(super) fn clear(&mut self) {
+        self.chunks.clear();
+    }
+
+    pub(super) fn push_chunk(
+        &mut self,
+        bytes: &[u8],
+        captured_at_ms: u128,
+        chunk_ms: u64,
+        config: VoiceAudioConfig,
+    ) {
+        let end_ms = u64::try_from(captured_at_ms).unwrap_or(u64::MAX);
+        let start_ms = end_ms.saturating_sub(chunk_ms.max(1));
+        self.chunks.push(VoiceAudioTimelineChunk {
+            start_ms,
+            end_ms,
+            bytes: bytes.to_vec(),
+        });
+        let retain_after_ms = end_ms.saturating_sub(VOICE_REALTIME_AUDIO_BUFFER_RETAIN_MS);
+        self.chunks.retain(|chunk| chunk.end_ms >= retain_after_ms);
+        if config.channels != 1 || config.sample_rate == 0 {
+            self.chunks.clear();
+        }
+    }
+
+    pub(super) fn slice_pcm16(
+        &self,
+        start_ms: u64,
+        end_ms: u64,
+        config: VoiceAudioConfig,
+    ) -> Vec<u8> {
+        if start_ms >= end_ms || config.sample_rate == 0 || config.channels != 1 {
+            return Vec::new();
+        }
+        let mut output = Vec::new();
+        for chunk in &self.chunks {
+            if chunk.end_ms <= start_ms || chunk.start_ms >= end_ms {
+                continue;
+            }
+            let keep_start_ms = start_ms.max(chunk.start_ms);
+            let keep_end_ms = end_ms.min(chunk.end_ms);
+            if keep_start_ms >= keep_end_ms {
+                continue;
+            }
+            let byte_start = ms_offset_to_pcm16_byte_offset(
+                keep_start_ms.saturating_sub(chunk.start_ms),
+                config.sample_rate,
+            )
+            .min(chunk.bytes.len());
+            let byte_end = ms_offset_to_pcm16_byte_offset(
+                keep_end_ms.saturating_sub(chunk.start_ms),
+                config.sample_rate,
+            )
+            .min(chunk.bytes.len());
+            if byte_end > byte_start {
+                output.extend_from_slice(&chunk.bytes[byte_start..byte_end]);
+            }
+        }
+        output
+    }
+}
+
+fn ms_offset_to_pcm16_byte_offset(offset_ms: u64, sample_rate: u32) -> usize {
+    let samples = offset_ms.saturating_mul(u64::from(sample_rate)) / 1_000;
+    usize::try_from(samples.saturating_mul(2)).unwrap_or(usize::MAX) & !1
 }
 
 pub(super) fn validate_voice_audio_chunk(
@@ -182,4 +269,42 @@ pub(super) fn voice_pcm16_rms(bytes: &[u8]) -> Result<f32, String> {
 
 pub(super) fn is_voice_speech_chunk(bytes: &[u8]) -> Result<bool, String> {
     Ok(voice_pcm16_rms(bytes)? > VOICE_SILENCE_RMS_THRESHOLD)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pcm16(samples: &[i16]) -> Vec<u8> {
+        samples
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect()
+    }
+
+    #[test]
+    fn realtime_audio_buffer_slices_window_across_chunks() {
+        let config = VoiceAudioConfig::default();
+        let first = pcm16(&vec![1; 16_000]);
+        let second = pcm16(&vec![2; 16_000]);
+        let mut buffer = VoiceRealtimeAudioBuffer::default();
+        buffer.push_chunk(&first, 1_000, 1_000, config);
+        buffer.push_chunk(&second, 2_000, 1_000, config);
+
+        let sliced = buffer.slice_pcm16(500, 1_500, config);
+        assert_eq!(sliced.len(), 16_000 * 2);
+        assert_eq!(i16::from_le_bytes([sliced[0], sliced[1]]), 1);
+        let midpoint = 8_000 * 2;
+        assert_eq!(
+            i16::from_le_bytes([sliced[midpoint], sliced[midpoint + 1]]),
+            2
+        );
+    }
+
+    #[test]
+    fn speech_activity_marks_utterance_at_chunk_start() {
+        let mut state = VoiceTranscriptState::new(VoiceRuntimeTuning::from_query(""));
+        state.mark_audio_activity(1_500, 500, true);
+        assert_eq!(state.utterance_started_at_ms(), Some(1_000));
+    }
 }

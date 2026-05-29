@@ -71,6 +71,21 @@ mod tests {
     }
 
     #[test]
+    fn diarization_cluster_count_prefers_known_then_max_then_default_cap() {
+        let mut config = AsrDiarizationConfig::default();
+        assert_eq!(
+            resolved_diarization_cluster_count(&config),
+            i32::from(DEFAULT_AUTO_MAX_SPEAKERS)
+        );
+
+        config.max_speakers = Some(3);
+        assert_eq!(resolved_diarization_cluster_count(&config), 3);
+
+        config.known_speaker_count = Some(2);
+        assert_eq!(resolved_diarization_cluster_count(&config), 2);
+    }
+
+    #[test]
     fn diarization_profile_ready_requires_real_model_files() {
         let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
@@ -158,6 +173,9 @@ mod tests {
                 display_name: "用户D".to_string(),
                 mapped_profile_id: None,
                 confidence: None,
+                candidate_profile_id: None,
+                candidate_display_name: None,
+                candidate_confidence: None,
                 start_ms: 0,
                 end_ms: 1_100,
                 overlap: false,
@@ -167,6 +185,9 @@ mod tests {
                 display_name: "用户B".to_string(),
                 mapped_profile_id: None,
                 confidence: None,
+                candidate_profile_id: None,
+                candidate_display_name: None,
+                candidate_confidence: None,
                 start_ms: 1_100,
                 end_ms: 2_000,
                 overlap: false,
@@ -257,6 +278,9 @@ mod tests {
             display_name: "用户A".to_string(),
             mapped_profile_id: None,
             confidence: None,
+            candidate_profile_id: None,
+            candidate_display_name: None,
+            candidate_confidence: None,
             start_ms: 0,
             end_ms: 1_000,
             overlap: false,
@@ -272,10 +296,132 @@ mod tests {
         assert_eq!(segments[0].display_name, "Eden");
         assert_eq!(segments[0].mapped_profile_id.as_deref(), Some("spk-eden"));
         assert!((segments[0].confidence.unwrap() - 0.70).abs() < 0.001);
+        assert_eq!(segments[0].candidate_profile_id.as_deref(), Some("spk-eden"));
+        assert_eq!(segments[0].candidate_display_name.as_deref(), Some("Eden"));
+        assert!((segments[0].candidate_confidence.unwrap() - 0.70).abs() < 0.001);
         assert_eq!(speaker_transcript_label(&segments[0]), "Eden (70% match)");
         assert_eq!(speakers[0].display_name, "Eden");
         assert_eq!(speakers[0].mapped_profile_id.as_deref(), Some("spk-eden"));
         assert!((speakers[0].confidence.unwrap() - 0.70).abs() < 0.001);
+    }
+
+    #[test]
+    fn voiceprint_mapping_records_below_threshold_candidate() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        std::fs::create_dir_all(voiceprint_dir()).unwrap();
+        let profile = SpeakerVoiceprintProfile {
+            id: "spk-eden".to_string(),
+            display_name: "Eden".to_string(),
+            source: "live_enrollment".to_string(),
+            diarization_profile: DEFAULT_DIARIZATION_PROFILE.to_string(),
+            embedding_model: "test".to_string(),
+            embedding_dim: 2,
+            embedding: vec![1.0, 0.0],
+            sample_rate: VOICEPRINT_SAMPLE_RATE,
+            total_duration_ms: 3_000,
+            samples: Vec::new(),
+            created_at_ms: now_ms(),
+            updated_at_ms: now_ms(),
+        };
+        atomic_json_write(&speaker_profile_path(&profile.id), &profile).unwrap();
+        let mut segments = vec![DiarizationSegment {
+            speaker: "speaker_00".to_string(),
+            display_name: "用户A".to_string(),
+            mapped_profile_id: None,
+            confidence: None,
+            candidate_profile_id: None,
+            candidate_display_name: None,
+            candidate_confidence: None,
+            start_ms: 0,
+            end_ms: 1_000,
+            overlap: false,
+        }];
+        let embeddings = BTreeMap::from([(
+            "speaker_00".to_string(),
+            vec![0.50, (1.0_f32 - 0.50_f32 * 0.50_f32).sqrt()],
+        )]);
+
+        map_speakers_with_registered_voiceprints(&mut segments, &embeddings);
+        let speakers = speakers_from_diarization_segments(&segments);
+
+        assert_eq!(segments[0].display_name, "用户A");
+        assert_eq!(segments[0].mapped_profile_id, None);
+        assert_eq!(segments[0].confidence, None);
+        assert_eq!(segments[0].candidate_profile_id.as_deref(), Some("spk-eden"));
+        assert_eq!(segments[0].candidate_display_name.as_deref(), Some("Eden"));
+        assert!((segments[0].candidate_confidence.unwrap() - 0.50).abs() < 0.001);
+        assert_eq!(speakers[0].mapped_profile_id, None);
+        assert_eq!(speakers[0].candidate_display_name.as_deref(), Some("Eden"));
+    }
+
+    #[test]
+    fn voiceprint_mapping_uses_single_registered_self_priority() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        std::fs::create_dir_all(voiceprint_dir()).unwrap();
+        let profile = SpeakerVoiceprintProfile {
+            id: "spk-eden".to_string(),
+            display_name: "Eden".to_string(),
+            source: "live_enrollment".to_string(),
+            diarization_profile: DEFAULT_DIARIZATION_PROFILE.to_string(),
+            embedding_model: "test".to_string(),
+            embedding_dim: 2,
+            embedding: vec![1.0, 0.0],
+            sample_rate: VOICEPRINT_SAMPLE_RATE,
+            total_duration_ms: 3_000,
+            samples: Vec::new(),
+            created_at_ms: now_ms(),
+            updated_at_ms: now_ms(),
+        };
+        atomic_json_write(&speaker_profile_path(&profile.id), &profile).unwrap();
+        let mut segments = vec![
+            DiarizationSegment {
+                speaker: "speaker_00".to_string(),
+                display_name: "用户A".to_string(),
+                mapped_profile_id: None,
+                confidence: None,
+                candidate_profile_id: None,
+                candidate_display_name: None,
+                candidate_confidence: None,
+                start_ms: 0,
+                end_ms: 6_000,
+                overlap: false,
+            },
+            DiarizationSegment {
+                speaker: "speaker_01".to_string(),
+                display_name: "用户B".to_string(),
+                mapped_profile_id: None,
+                confidence: None,
+                candidate_profile_id: None,
+                candidate_display_name: None,
+                candidate_confidence: None,
+                start_ms: 7_000,
+                end_ms: 15_000,
+                overlap: false,
+            },
+        ];
+        let embeddings = BTreeMap::from([
+            (
+                "speaker_00".to_string(),
+                vec![0.53, (1.0_f32 - 0.53_f32 * 0.53_f32).sqrt()],
+            ),
+            (
+                "speaker_01".to_string(),
+                vec![0.49, (1.0_f32 - 0.49_f32 * 0.49_f32).sqrt()],
+            ),
+        ]);
+
+        map_speakers_with_registered_voiceprints(&mut segments, &embeddings);
+
+        assert_eq!(segments[0].display_name, "Eden");
+        assert_eq!(segments[0].mapped_profile_id.as_deref(), Some("spk-eden"));
+        assert!((segments[0].confidence.unwrap() - 0.53).abs() < 0.001);
+        assert_eq!(segments[1].display_name, "用户B");
+        assert_eq!(segments[1].mapped_profile_id, None);
+        assert_eq!(segments[1].candidate_display_name.as_deref(), Some("Eden"));
     }
 
     #[test]
@@ -2657,6 +2803,108 @@ mod tests {
         assert_eq!(cloned.energy_rms, Some(42.0));
         assert!(!cloned.is_silent);
         assert_eq!(cloned.attempts, 4);
+    }
+
+    #[test]
+    fn partial_transcription_artifacts_update_file_store() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let source_path = audio_dir.join("meeting.wav");
+        std::fs::write(&source_path, b"fake wav").unwrap();
+        let task_id = "partial-stream-task";
+        let file_key = source_key(&source_path);
+        let source_info = inspect_source_audio(&source_path);
+        let (text_path, metadata_path, timeline_path) = bifrost_asr::artifacts::output_paths_in(
+            &bifrost_storage::data_dir(),
+            task_id,
+            &source_path,
+            &audio_dir,
+        );
+
+        let mut initial_record = file_record_from_info(task_id, &source_path, &source_info);
+        initial_record.status = FileStatus::Processing;
+        initial_record.started_at_ms = Some(100);
+        save_file_store(
+            task_id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(file_key.clone(), initial_record)]),
+            },
+        )
+        .unwrap();
+
+        persist_partial_transcription_artifacts(
+            &PartialArtifactContext {
+                task_id: task_id.to_string(),
+                file_key: file_key.clone(),
+                task_name: "Partial Stream Task".to_string(),
+                model: "Qwen3-ASR-0.6B".to_string(),
+                language: "chinese".to_string(),
+                runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+                source_path: source_path.clone(),
+                source_info: source_info.clone(),
+                diarization_profile: Some("sherpa-onnx-balanced".to_string()),
+                speakers: vec![TimelineSpeaker {
+                    id: "speaker_00".to_string(),
+                    display_name: "用户A".to_string(),
+                    mapped_profile_id: None,
+                    confidence: None,
+                    candidate_profile_id: None,
+                    candidate_display_name: None,
+                    candidate_confidence: None,
+                }],
+                text_path: text_path.clone(),
+                metadata_path: metadata_path.clone(),
+                timeline_path: timeline_path.clone(),
+                started_at_ms: 100,
+            },
+            DiarizedSegmentProgress {
+                text: "用户A: 你好。".to_string(),
+                timeline_segments: vec![TimelineSegment {
+                    index: 99,
+                    audio_start_ms: 0,
+                    audio_end_ms: 1200,
+                    absolute_start_ms: None,
+                    absolute_end_ms: None,
+                    speaker: Some("speaker_00".to_string()),
+                    speaker_display_name: Some("用户A".to_string()),
+                    overlap: false,
+                    text: "你好。".to_string(),
+                }],
+                chunk_metrics: Vec::new(),
+                fallback_reason: Some("managed server fallback".to_string()),
+            },
+        )
+        .unwrap();
+
+        let rendered_text = std::fs::read_to_string(&text_path).unwrap();
+        assert!(rendered_text.contains("用户A"));
+        let timeline =
+            serde_json::from_str::<TranscriptTimeline>(&std::fs::read_to_string(&timeline_path).unwrap())
+                .unwrap();
+        assert_eq!(timeline.segments.len(), 1);
+        assert_eq!(timeline.segments[0].index, 0);
+        assert_eq!(timeline.speakers[0].display_name, "用户A");
+        let metadata =
+            serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&metadata_path).unwrap())
+                .unwrap();
+        assert_eq!(metadata["partial"], true);
+        assert_eq!(metadata["partial_segment_count"], 1);
+
+        let stored = load_file_store(task_id);
+        let record = stored.files.get(&file_key).unwrap();
+        assert_eq!(record.status, FileStatus::Processing);
+        assert_eq!(record.output_text_path.as_ref(), Some(&text_path));
+        assert_eq!(record.output_metadata_path.as_ref(), Some(&metadata_path));
+        assert_eq!(record.output_timeline_path.as_ref(), Some(&timeline_path));
+        assert!(record.text_chars > 0);
+        assert_eq!(
+            record.fallback_reason.as_deref(),
+            Some("managed server fallback")
+        );
     }
 
     #[test]

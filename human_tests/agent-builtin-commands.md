@@ -229,7 +229,7 @@ BIFROST_DATA_DIR=./.bifrost-cmd-test cargo run --bin bifrost -- start -p 8801 --
 - `active_status.context_usage_percent` 为可读数值或 `null`（仅当未配置 context window 时允许为 `null`）
 - 忙碌结束后的 `/status` 返回空闲会话状态，包含"API 累计 token"与"Context 用量"，数值使用 K/M/B 格式（例如 `250K` 而不是 `250000`）
 
-**本次执行结果**：通过。2026-05-25 执行 `bash e2e-tests/tests/test_agent_builtin_status_runtime.sh`。脚本使用临时数据目录、非 9900 端口和 `--no-system-proxy` 启动当前源码版 Bifrost；首轮长模型请求先等待 mock 日志确认请求已进入 provider，再轮询 `/status` 直到返回真实 `active_status`，断言 `active_status.session_key == "agent-status-runtime"`、`active_status.work_dir == <临时 workdir>`、`active_status.current_loop_iteration == 1`，response 同时包含 `Agent 类型: Bifrost Agent`、`Runner 类型: bifrost_agent` 与 `历史对话轮次:`。随后空闲 `/status` 仍显示同一工作路径，并保留 K/M/B 状态格式。该回归同时覆盖 `/agent/chat` 的 `/status` 纯读路径不会抢先创建空 session；即使已存在空 session，后续带 `work_dir` 的业务 turn 也会覆盖工作目录，不再显示 `N/A`。
+**本次执行结果**：通过。2026-05-29 回归 CI `26646452401` 的隔离 worker active status 丢失问题：主进程在启动 worker 前先预热 `active_turn_status` 的 `work_dir`、loop、runner 和 context window 字段，避免 `/status` 必须等 worker 首条 progress 事件才可见。执行 `CARGO_TARGET_DIR="$PWD/target-codex-status-fix" SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost` 生成隔离 release binary，再执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target-codex-status-fix/release/bifrost" BIFROST_PORT=19150 MOCK_PORT=19151 bash e2e-tests/tests/test_agent_builtin_status_runtime.sh`，脚本使用临时数据目录、非 9900 端口和 `--no-system-proxy` 启动当前 release 版 Bifrost；首轮长模型请求先等待 mock 日志确认请求已进入 provider，再轮询 `/status` 直到返回真实 `active_status`，断言 `active_status.session_key == "agent-status-runtime"`、`active_status.work_dir == <临时 workdir>`、`active_status.current_loop_iteration == 1`，response 同时包含 `Agent 类型: Bifrost Agent`、`Runner 类型: bifrost_agent` 与 `历史对话轮次:`。随后空闲 `/status` 仍显示同一工作路径，并保留 K/M/B 状态格式。该回归同时覆盖 `/agent/chat` 的 `/status` 纯读路径不会抢先创建空 session；即使已存在空 session，后续带 `work_dir` 的业务 turn 也会覆盖工作目录，不再显示 `N/A`。
 
 ### TC-BC-21: 回归 - 工具结果追加后 /status 展示当前上下文估算
 
@@ -514,6 +514,29 @@ BIFROST_DATA_DIR=./.bifrost-cmd-test cargo run --bin bifrost -- start -p 8801 --
 - 如 context-window overflow 被 provider 真实触发，才允许进入 emergency compaction / trim fallback；本用例短消息路径不应触发。
 
 **本次执行结果**：通过。2026-05-28 执行 `BIFROST_PORT=18931 MOCK_PORT=18932 bash e2e-tests/tests/test_agent_builtin_status_runtime.sh`，脚本使用隔离临时数据目录和 `--no-system-proxy` 启动最新构建的 Bifrost；最终输出 `PASS`。长历史探针断言确认最后一次模型请求 `messages` 数量大于 50，且同时包含 `历史保留探针 00` 与 `历史保留探针 54`。
+
+### TC-BC-37: 回归 - WebUI history 深链运行中 Token/Context 与 /status 同步
+
+**背景**：同一个 running session 同时有 JSONL history timeline 和 active turn status。WebUI Chat 的 history 深链应使用 JSONL 还原消息列表，但 Token/Context HUD 必须使用 active turn 的实时累计 token、最近 context token、context window 和占比，不能被旧的 `assistant_message` 或 `compaction` 持久化快照覆盖。
+
+**操作步骤**：
+
+1. 使用临时数据目录和 `--no-system-proxy` 启动当前源码 Bifrost，并配置 mock Chat Completions provider。
+2. 发起一个会阻塞在模型请求中的内置 Agent 会话，确保生成 JSONL history path。
+3. 调用 `GET /_bifrost/api/im-gateway/agent/sessions/all`，记录该 session 的 `tokens`、`estimated_tokens`、`context_window_tokens`、`context_usage_percent`。
+4. 调用同 session 的 `/agent/chat` `/status`，记录 `active_status.total_tokens_used`、`active_status.estimated_context_tokens`、`active_status.context_window_tokens`、`active_status.context_usage_percent`，并记录文本中的紧凑 token 格式。
+5. 打开 WebUI history 深链：
+   `http://127.0.0.1:<web-port>/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=<session-key>&view=history&historyPath=<encoded-jsonl-path>`。
+6. 读取 `agent-chat-token-hud` 与 `agent-chat-context`，并对比第 3、4 步的实时指标。
+
+**预期结果**：
+
+- `sessions/all`、`/status.active_status`、WebUI Token/Context HUD 的累计 token 和 context 占比一致。
+- WebUI Token/Context HUD 和 Context 面板使用与 `/status` 一致的紧凑 token 格式，例如 `29.7M`、`181.9K`、`186.7K / 250K`，不显示 `29,668,709` 这类长数字。
+- WebUI history 深链仍显示 JSONL 中的消息 timeline 和运行中的 assistant 过程卡片。
+- 即使 JSONL 最后一条 token 类事件是旧 `compaction.total_tokens/post_tokens`，HUD 也不回退到旧值。
+
+**本次执行结果**：通过。2026-05-29 执行 `BIFROST_PORT=18941 MOCK_PORT=18942 bash e2e-tests/tests/test_agent_builtin_status_runtime.sh`，脚本使用隔离临时数据目录和 `--no-system-proxy` 启动当前源码 Bifrost + mock provider，新增断言确认运行中 `sessions/all`、`/agent/chat` `/status.active_status`、`sessions/{key}` detail 的 `total_tokens_used`、`estimated_context_tokens`、`context_window_tokens`、`context_usage_percent`、`last_response_tokens` 完全一致；最终输出 `PASS`。同日执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts -g "keeps running history token HUD" --reporter=line --timeout=60000`，验证 WebUI history 深链 HUD 显示 `29.7M` 和 `74.7%`，设置面板 Context 显示 `186.7K / 250K`，且旧 `19.5M` 不再出现。
 
 ### TC-BC-34: 回归 - `/agent/chat` 首条 `/status` 保留请求 work_dir
 

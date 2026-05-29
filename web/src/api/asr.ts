@@ -16,6 +16,61 @@ export interface VoiceRealtimeParams extends AsrConnectionParams {
   chunkMs?: number;
 }
 
+export interface SpeechPipelineProfile {
+  id: string;
+  label: string;
+  mode: string[];
+  resources: {
+    priority: number;
+    preemptible: boolean;
+    max_concurrent_files?: number | null;
+    pause_on_realtime_voice: boolean;
+  };
+}
+
+export interface SpeechPipelinesStatus {
+  profiles: SpeechPipelineProfile[];
+  runtime: {
+    platform_supported: boolean;
+    asr_ready: boolean;
+    diarization_ready: boolean;
+    realtime_voice_active: boolean;
+    offline_asr_active: boolean;
+  };
+  resources: {
+    leases: unknown[];
+    realtime_voice_active: boolean;
+    offline_asr_active: boolean;
+    wake_listener_active: boolean;
+  };
+}
+
+export interface AsrOfflineJob {
+  job_id: string;
+  status: "queued" | "running" | "succeeded" | "failed";
+  source_name: string;
+  model: string;
+  language: string;
+  pipeline_profile: string;
+  speaker_aware: boolean;
+  created_at_ms: number;
+  updated_at_ms: number;
+  error?: string | null;
+  artifacts?: Record<string, string> | null;
+  events: Array<{
+    at_ms: number;
+    stage: string;
+    message: string;
+  }>;
+}
+
+export interface AsrOfflineJobCreateOptions {
+  model?: string;
+  language?: string;
+  pipelineProfile?: string;
+  speakerAware?: boolean;
+}
+
 export interface AsrStatus {
   status: "unsupported" | "missing" | "installed" | "ready";
   ready: boolean;
@@ -113,6 +168,15 @@ export interface VoiceWakeStatus {
   binding_count: number;
   event_count: number;
   mode: string;
+  fallback?: string | null;
+  requires_qwen_by_default?: boolean;
+  kws?: {
+    engine: string;
+    profile: string;
+    ready: boolean;
+    install_dir: string;
+    missing_files: string[];
+  };
   store_path: string;
   default_dry_run: boolean;
   listener: VoiceWakeListenerStatus;
@@ -121,7 +185,9 @@ export interface VoiceWakeStatus {
 export interface VoiceWakeListenerStatus {
   running: boolean;
   source: string;
+  engine?: string;
   device?: string | null;
+  device_label?: string | null;
   worker_pid?: number | null;
   chunk_ms: number;
   started_at_ms: number | null;
@@ -133,7 +199,15 @@ export interface VoiceWakeListenerStatus {
   last_speaker_profile_id: string | null;
   last_speaker_confidence: number | null;
   last_speaker_status: string | null;
+  last_match_status: string | null;
+  last_match_binding_id: string | null;
+  last_match_phrase: string | null;
+  last_action_result: VoiceWakeActionResult | null;
+  last_action_at_ms: number | null;
   trigger_count: number;
+  model_download_status?: string | null;
+  model_download_progress?: number | null;
+  model_download_total?: number | null;
 }
 
 export interface VoiceWakeProfile {
@@ -155,6 +229,7 @@ export interface VoiceWakeActionKeyPress {
   keycode: number | null;
   modifiers: string[];
   press_count: number;
+  repeat_delay_ms?: number;
 }
 
 export type VoiceWakeAction = VoiceWakeActionKeyPress;
@@ -392,6 +467,9 @@ export interface AsrTimelineSpeaker {
   display_name: string;
   mapped_profile_id?: string;
   confidence?: number;
+  candidate_profile_id?: string;
+  candidate_display_name?: string;
+  candidate_confidence?: number;
 }
 
 export interface AsrTranscriptTimeline {
@@ -668,6 +746,14 @@ export interface VoiceRealtimeEvent {
   window_start_ms?: number;
   window_end_ms?: number;
   window_index?: number;
+  utterance_index?: number;
+  speaker?: string;
+  speaker_display_name?: string;
+  speaker_profile_id?: string;
+  speaker_confidence?: number;
+  candidate_profile_id?: string;
+  candidate_display_name?: string;
+  candidate_confidence?: number;
   captured_at_ms?: number;
   emitted_at_ms?: number;
   inference_ms?: number;
@@ -675,15 +761,37 @@ export interface VoiceRealtimeEvent {
   detail?: string;
 }
 
+export interface VoiceRealtimeTranscriptSegment {
+  id: string;
+  start_ms?: number;
+  end_ms?: number;
+  speaker?: string;
+  speaker_display_name?: string;
+  speaker_profile_id?: string;
+  speaker_confidence?: number;
+  candidate_profile_id?: string;
+  candidate_display_name?: string;
+  candidate_confidence?: number;
+  text: string;
+  final?: boolean;
+}
+
 const ASR_LEGACY_PARAMS_STORAGE_KEYS = [
   "bifrost.asr.connection",
   "bifrost.asr.connection.v2",
   "bifrost.asr.connection.v3",
+  "bifrost.asr.workbench.connection.v1",
+  "bifrost.asr.model-management.connection.v1",
 ];
-const ASR_PARAMS_STORAGE_KEY = "bifrost.asr.workbench.connection.v1";
-const ASR_MODEL_MANAGEMENT_PARAMS_STORAGE_KEY = "bifrost.asr.model-management.connection.v1";
+const ASR_PARAMS_STORAGE_KEY = "bifrost.asr.workbench.connection.v2";
+const ASR_MODEL_MANAGEMENT_PARAMS_STORAGE_KEY = "bifrost.asr.model-management.connection.v2";
 export const ASR_PARAMS_CHANGED_EVENT = "bifrost.asr.params.changed";
 export const ASR_STATUS_CHANGED_EVENT = "bifrost.asr.status.changed";
+export const DEFAULT_ASR_MODEL = "Qwen3-ASR-0.6B";
+
+function clearLegacyAsrParams(): void {
+  ASR_LEGACY_PARAMS_STORAGE_KEYS.forEach((key) => window.localStorage.removeItem(key));
+}
 
 export function defaultAsrParams(): Required<
   Pick<AsrConnectionParams, "host" | "language" | "model" | "ownerModule">
@@ -691,7 +799,7 @@ export function defaultAsrParams(): Required<
   return {
     host: "127.0.0.1",
     language: "chinese",
-    model: "Qwen3-ASR-1.7B",
+    model: DEFAULT_ASR_MODEL,
     ownerModule: "speech_workbench",
   };
 }
@@ -715,7 +823,7 @@ export function defaultModelManagementParams(): Required<
   return {
     host: "127.0.0.1",
     language: "chinese",
-    model: "Qwen3-ASR-1.7B",
+    model: DEFAULT_ASR_MODEL,
     ownerModule: "model_management",
   };
 }
@@ -724,7 +832,7 @@ export function loadAsrParams(): AsrConnectionParams {
   try {
     const raw = window.localStorage.getItem(ASR_PARAMS_STORAGE_KEY);
     if (!raw) {
-      ASR_LEGACY_PARAMS_STORAGE_KEYS.forEach((key) => window.localStorage.removeItem(key));
+      clearLegacyAsrParams();
       return defaultAsrParams();
     }
     return { ...defaultAsrParams(), ...JSON.parse(raw) };
@@ -737,6 +845,7 @@ export function loadModelManagementParams(): AsrConnectionParams {
   try {
     const raw = window.localStorage.getItem(ASR_MODEL_MANAGEMENT_PARAMS_STORAGE_KEY);
     if (!raw) {
+      clearLegacyAsrParams();
       return defaultModelManagementParams();
     }
     return { ...defaultModelManagementParams(), ...JSON.parse(raw) };
@@ -1267,6 +1376,65 @@ export async function streamAsrTranscription(
     },
   );
   await readSseResponse(response, onEvent);
+}
+
+export function getSpeechPipelinesStatus(): Promise<SpeechPipelinesStatus> {
+  return get<SpeechPipelinesStatus>("/speech/pipelines/status");
+}
+
+export async function createAsrOfflineJob(
+  file: Blob,
+  fileName: string,
+  params: AsrConnectionParams,
+  options: AsrOfflineJobCreateOptions = {},
+): Promise<AsrOfflineJob> {
+  const form = new FormData();
+  form.append("file", file, fileName);
+  const defaults = defaultAsrParams();
+  const query = new URLSearchParams();
+  query.set("host", params.host || defaults.host);
+  if (params.port) {
+    query.set("port", String(params.port));
+  }
+  query.set("language", options.language || params.language || defaults.language);
+  query.set("model", options.model || params.model || defaults.model);
+  query.set(
+    "pipeline_profile",
+    options.pipelineProfile || "offline-speaker-subtitle-local",
+  );
+  query.set("speaker_aware", options.speakerAware === false ? "0" : "1");
+  const response = await fetch(buildApiUrl(`/asr/offline-jobs?${query.toString()}`), {
+    method: "POST",
+    headers: {
+      ...buildStreamHeaders(),
+      Accept: "application/json",
+    },
+    body: form,
+  });
+  return readJsonResponse<AsrOfflineJob>(response);
+}
+
+export function getAsrOfflineJob(jobId: string): Promise<AsrOfflineJob> {
+  return get<AsrOfflineJob>(`/asr/offline-jobs/${encodeURIComponent(jobId)}`);
+}
+
+export async function getAsrOfflineJobArtifact(
+  jobId: string,
+  format: string,
+): Promise<string> {
+  const response = await fetch(
+    buildApiUrl(
+      `/asr/offline-jobs/${encodeURIComponent(jobId)}/artifacts/${encodeURIComponent(format)}`,
+    ),
+    {
+      headers: buildStreamHeaders(),
+    },
+  );
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(body || `ASR artifact request failed with status ${response.status}`);
+  }
+  return response.text();
 }
 
 export function buildVoiceRealtimeUrl(params: VoiceRealtimeParams): string {

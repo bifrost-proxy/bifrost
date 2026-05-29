@@ -2039,14 +2039,22 @@ pub async fn run_turn_with_mcp_multimodal(
             );
 
             // Pollution-aware memory extraction (skips if session is polluted).
-            memory::auto_extract_after_turn_with_pollution_check(
-                std::sync::Arc::new(client.clone()),
-                config.clone(),
-                session.session_key.clone(),
-                user_message.to_string(),
-                content.clone(),
+            //
+            // The turn may run inside a short-lived worker process. Keep the
+            // extraction lifecycle in this turn so Phase 1 / Phase 2 artifacts
+            // are durable before the worker exits.
+            if let Err(error) = memory::auto_extract_after_turn_with_pollution_check_blocking(
+                client,
+                config,
+                &session.session_key,
+                user_message,
+                &content,
                 session.pollution_detector.clone(),
-            );
+            )
+            .await
+            {
+                warn!(error = %error, "failed to generate file-backed memories");
+            }
 
             // Citation tracking via CitationConsumer (Codex parity).
             let citation_result = session.citation_consumer.process_turn_citations(&content);
@@ -2918,7 +2926,6 @@ pub(super) fn record_compaction_event(
         "compaction_count": session.compaction_count,
         "total_tokens": session.total_tokens_used.unwrap_or(0),
         "replacement_history": &session.history,
-        "current_plan": &session.current_plan,
     });
     if emergency {
         metadata["emergency"] = serde_json::Value::Bool(true);

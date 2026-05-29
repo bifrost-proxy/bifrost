@@ -10,7 +10,7 @@ fail() {
   exit 1
 }
 
-ADMIN_PORT="${BIFROST_ASR_DIARIZATION_E2E_PORT:-18993}"
+ADMIN_PORT="${BIFROST_ASR_DIARIZATION_E2E_PORT:-${ADMIN_PORT:-18993}}"
 ADMIN_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bifrost-asr-diarization.XXXXXX")"
 AUDIO_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bifrost-asr-diarization-audio.XXXXXX")"
 ADMIN_PID=""

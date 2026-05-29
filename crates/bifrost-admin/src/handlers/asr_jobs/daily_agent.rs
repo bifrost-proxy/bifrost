@@ -1095,6 +1095,7 @@ async fn run_external_daily_agent_prompt(
     };
 
     let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
+        images: Vec::new(),
         message: prompt,
         operation,
         params,

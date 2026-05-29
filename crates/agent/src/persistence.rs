@@ -643,6 +643,65 @@ pub fn load_conversation_events(path: &Path) -> Result<Vec<ConversationEvent>, S
     load_conversation_events_from_reader(reader, true)
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ConversationEventPageOptions {
+    pub limit: Option<usize>,
+    /// End-exclusive event index used when loading older history pages.
+    pub cursor: Option<usize>,
+    /// Load the newest window instead of starting from the beginning.
+    pub tail: bool,
+    /// Start-inclusive event index used by polling to fetch only new events.
+    pub since: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConversationEventPage {
+    pub events: Vec<ConversationEvent>,
+    pub total_count: usize,
+    pub start_index: usize,
+    pub end_index: usize,
+    pub next_cursor: Option<usize>,
+    pub has_more: bool,
+}
+
+pub fn load_conversation_events_page(
+    path: &Path,
+    options: ConversationEventPageOptions,
+) -> Result<ConversationEventPage, String> {
+    let events = load_conversation_events(path)?;
+    let total_count = events.len();
+    let limit = options.limit.filter(|value| *value > 0);
+
+    let (start_index, end_index, has_more, next_cursor) = if let Some(since) = options.since {
+        let start = since.min(total_count);
+        (start, total_count, false, Some(total_count))
+    } else if options.tail {
+        let limit = limit.unwrap_or(total_count);
+        let start = total_count.saturating_sub(limit);
+        (start, total_count, start > 0, Some(start))
+    } else if let Some(cursor) = options.cursor {
+        let end = cursor.min(total_count);
+        let limit = limit.unwrap_or(end);
+        let start = end.saturating_sub(limit);
+        (start, end, start > 0, Some(start))
+    } else if let Some(limit) = limit {
+        let end = limit.min(total_count);
+        (0, end, end < total_count, Some(end))
+    } else {
+        (0, total_count, false, None)
+    };
+
+    let page_events = events[start_index..end_index].to_vec();
+    Ok(ConversationEventPage {
+        events: page_events,
+        total_count,
+        start_index,
+        end_index,
+        next_cursor,
+        has_more,
+    })
+}
+
 fn load_conversation_events_lossy(path: &Path) -> Result<Vec<ConversationEvent>, String> {
     let file = std::fs::File::open(path).map_err(|e| format!("open conversation file: {e}"))?;
     let reader = std::io::BufReader::new(file);
@@ -728,25 +787,6 @@ pub fn load_session_runtime_state(path: &Path) -> Result<SessionRuntimeState, St
                     .and_then(|value| value.as_u64())
                 {
                     state.last_response_tokens = Some(tokens);
-                }
-                if event
-                    .content
-                    .get("current_plan")
-                    .is_some_and(|value| value.is_null())
-                {
-                    state.current_plan = None;
-                    continue;
-                }
-                if let Some(plan) = event
-                    .content
-                    .get("current_plan")
-                    .filter(|value| !value.is_null())
-                    .cloned()
-                {
-                    state.current_plan = Some(
-                        serde_json::from_value(plan)
-                            .map_err(|e| format!("parse compacted plan state: {e}"))?,
-                    );
                 }
             }
             event_types::ASSISTANT_MESSAGE => {
@@ -1441,6 +1481,97 @@ mod tests {
     }
 
     #[test]
+    fn test_load_conversation_events_page_supports_tail_cursor_and_since() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut recorder = ConversationRecorder::new(dir.path(), "paged-events");
+
+        recorder
+            .record_user_message("paged-events", "first")
+            .unwrap();
+        recorder
+            .record_assistant_delta("paged-events", "thinking")
+            .unwrap();
+        recorder
+            .record_tool_call_with_id(
+                "paged-events",
+                "exec_command",
+                r#"{"cmd":"pwd"}"#,
+                Some("call-1"),
+            )
+            .unwrap();
+        recorder
+            .record_tool_result_with_call_id(
+                "paged-events",
+                "exec_command",
+                "/tmp/project",
+                true,
+                Some("call-1"),
+            )
+            .unwrap();
+        recorder
+            .record_user_message("paged-events", "second")
+            .unwrap();
+        recorder
+            .record_assistant_message("paged-events", "done")
+            .unwrap();
+        recorder.close();
+
+        let tail = load_conversation_events_page(
+            recorder.file_path(),
+            ConversationEventPageOptions {
+                limit: Some(2),
+                tail: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(tail.total_count, 6);
+        assert_eq!(tail.start_index, 4);
+        assert_eq!(tail.end_index, 6);
+        assert_eq!(tail.next_cursor, Some(4));
+        assert!(tail.has_more);
+        assert_eq!(tail.events[0].event_type, USER_MESSAGE);
+        assert_eq!(tail.events[1].event_type, ASSISTANT_MESSAGE);
+
+        let older = load_conversation_events_page(
+            recorder.file_path(),
+            ConversationEventPageOptions {
+                limit: Some(3),
+                cursor: tail.next_cursor,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(older.start_index, 1);
+        assert_eq!(older.end_index, 4);
+        assert_eq!(older.next_cursor, Some(1));
+        assert!(older.has_more);
+        assert_eq!(
+            older
+                .events
+                .iter()
+                .map(|event| event.event_type.as_str())
+                .collect::<Vec<_>>(),
+            vec![ASSISTANT_DELTA, TOOL_CALL, TOOL_RESULT]
+        );
+
+        let delta = load_conversation_events_page(
+            recorder.file_path(),
+            ConversationEventPageOptions {
+                since: Some(5),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(delta.start_index, 5);
+        assert_eq!(delta.end_index, 6);
+        assert_eq!(delta.next_cursor, Some(6));
+        assert!(!delta.has_more);
+        assert_eq!(delta.events.len(), 1);
+        assert_eq!(delta.events[0].event_type, ASSISTANT_MESSAGE);
+    }
+
+    #[test]
     fn test_load_session_runtime_state_restores_latest_goal() {
         let dir = tempfile::tempdir().unwrap();
         let mut recorder = ConversationRecorder::new(dir.path(), "goal-runtime");
@@ -1798,30 +1929,29 @@ mod tests {
     }
 
     #[test]
-    fn test_compaction_with_null_plan_resets_runtime_state() {
+    fn test_compaction_does_not_mutate_plan_runtime_state() {
         let dir = tempfile::tempdir().unwrap();
-        let mut recorder = ConversationRecorder::new(dir.path(), "plan-compact-clear-session");
+        let mut recorder = ConversationRecorder::new(dir.path(), "plan-compact-session");
         let plan = vec![PlanStep {
-            step: "old task".to_string(),
+            step: "current task".to_string(),
             status: crate::tools::update_plan::PlanStepStatus::Completed,
         }];
 
         recorder
-            .record_plan_updated("plan-compact-clear-session", &plan, Some("done"))
+            .record_plan_updated("plan-compact-session", &plan, Some("done"))
             .unwrap();
         recorder
             .record_compaction(
-                "plan-compact-clear-session",
+                "plan-compact-session",
                 serde_json::json!({
-                    "summary": "compact without active plan",
-                    "current_plan": null,
+                    "summary": "compact handoff summary",
                 }),
             )
             .unwrap();
         recorder.close();
 
         let state = load_session_runtime_state(recorder.file_path()).unwrap();
-        assert!(state.current_plan.is_none());
+        assert_eq!(state.current_plan, Some(plan));
     }
 
     #[test]

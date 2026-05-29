@@ -19,7 +19,7 @@ allocate_local_test_port() {
         if [[ "$candidate" -eq 9900 || "$candidate" -gt 60999 ]]; then
             continue
         fi
-        if command -v lsof >/dev/null 2>&1 && lsof -ti :"$candidate" >/dev/null 2>&1; then
+        if ! port_is_available "$candidate"; then
             continue
         fi
         printf -v "$__outvar" '%s' "$candidate"
@@ -115,8 +115,9 @@ start_proxy() {
     wait_for_admin
 }
 
-start_html_server() {
-    python3 - "$HTML_PORT" <<'PY' >/dev/null 2>&1 &
+start_html_server_once() {
+    local log_file="$1"
+    python3 - "$HTML_PORT" <<'PY' > "${log_file}" 2>&1 &
 import http.server
 import sys
 
@@ -139,12 +140,30 @@ server.serve_forever()
 PY
     HTML_PID=$!
     for _ in {1..60}; do
+        if ! kill -0 "$HTML_PID" 2>/dev/null; then
+            return 1
+        fi
         if curl -fsS "http://127.0.0.1:${HTML_PORT}/index.html" >/dev/null 2>&1; then
             return 0
         fi
         sleep 0.2
     done
-    echo "html server did not become ready"
+    return 1
+}
+
+start_html_server() {
+    local log_file="${TEST_DATA_DIR}/html-server.log"
+    for _ in {1..10}; do
+        : > "${log_file}"
+        if start_html_server_once "${log_file}"; then
+            return 0
+        fi
+        safe_cleanup_proxy "$HTML_PID"
+        HTML_PID=""
+        assign_local_test_port HTML_PORT
+    done
+    echo "html server did not become ready on last attempted port ${HTML_PORT}"
+    cat "${log_file}" || true
     return 1
 }
 
@@ -248,6 +267,8 @@ main() {
     TEST_DATA_DIR="$(mktemp -d)"
     export BIFROST_DATA_DIR="${TEST_DATA_DIR}"
 
+    start_html_server
+
     "$BIFROST_BIN" rule add main-default -c "main-only.test status://209 resBody://(main-default)"
     "$BIFROST_BIN" rule add temp-bound -c "temp-only.test status://210 resBody://(temp-bound)"
     "$BIFROST_BIN" rule add main-badge -c "badge-main.test host://127.0.0.1:${HTML_PORT}"
@@ -255,7 +276,6 @@ main() {
     "$BIFROST_BIN" rule disable temp-bound
     "$BIFROST_BIN" rule disable temp-badge
 
-    start_html_server
     start_proxy
 
     "$BIFROST_BIN" port bind --port "${TEMP_PORT}" --rule temp-bound --rule temp-badge > "${TEST_DATA_DIR}/bind.log"

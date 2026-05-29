@@ -11,7 +11,7 @@ use tracing::{error, info, warn};
 use super::{error_response, method_not_allowed, BoxBody};
 use crate::state::SharedAdminState;
 
-const MAX_AGENT_IMAGES_PER_MESSAGE: usize = 5;
+const MAX_AGENT_IMAGES_PER_MESSAGE: usize = 6;
 
 #[derive(Debug, Deserialize)]
 struct AgentChatRequest {
@@ -85,7 +85,7 @@ async fn handle_stream(req: Request<Incoming>, state: SharedAdminState) -> Respo
         Ok(value) => value,
         Err(response) => return response,
     };
-    if body.message.trim().is_empty() {
+    if body.message.trim().is_empty() && body.images.is_empty() {
         return error_response(StatusCode::BAD_REQUEST, "message must not be empty");
     }
 
@@ -105,7 +105,7 @@ async fn handle_stream(req: Request<Incoming>, state: SharedAdminState) -> Respo
 
     // Keep session-free commands synchronous enough to avoid taking the session.
     if let Some(response) =
-        handle_session_free_stream_command(&body, &session_key, &service, &config)
+        handle_session_free_stream_command(&body, &session_key, &service, &config).await
     {
         return sse_response(move |tx| async move {
             let _ = send_sse_event(&tx, "run_finished", response).await;
@@ -125,7 +125,7 @@ async fn handle_stream(req: Request<Incoming>, state: SharedAdminState) -> Respo
             });
         }
     };
-    session.source = "admin-api".to_string();
+    session.source = "web".to_string();
     session.mark_bifrost_agent_runtime();
     let is_manual_compaction = body.message.trim() == "/compact";
     session.guide_channel = Some(
@@ -287,125 +287,86 @@ async fn run_agent_stream(
         return;
     }
 
-    let service_for_run = service.clone();
-    let config_for_run = config.clone();
-    let session_key_for_run = session_key.clone();
-    let system_prompt = body.system_prompt.clone();
-    let images = normalize_images(&body.images);
-    let user_message = body.message.clone();
-    let mut run_task = tokio::spawn(async move {
-        let mut recorder =
-            create_conversation_recorder(&config_for_run, &session_key_for_run, &mut session);
-        let turn_tools = service_for_run
-            .build_agent_tool_registry(config_for_run.default_message_channel.clone());
-        let result = if user_message.trim() == "/compact" {
-            bifrost_agent::session::run_manual_compaction_command(
-                &service_for_run.agent_client,
-                &config_for_run,
-                &mut session,
-                recorder.as_mut(),
+    let mut worker_request = crate::im_gateway::agent_worker::build_run_request(
+        session_key.clone(),
+        body.message.clone(),
+        normalize_images(&body.images),
+        &config,
+        session.work_dir.clone(),
+        body.history_path.clone(),
+        Some("web".to_string()),
+    );
+    worker_request.system_prompt = body.system_prompt.clone();
+    let worker_client = match crate::im_gateway::agent_worker::AgentWorkerClient::current_exe() {
+        Ok(client) => client,
+        Err(error) => {
+            service.agent_session_manager.return_session(session);
+            let _ = send_sse_event(
+                &tx,
+                "run_failed",
+                json!({"eventType":"run_failed","sessionKey":session_key,"error":error}),
             )
-            .await
-        } else {
-            let mut mcp_manager =
-                bifrost_agent::mcp::McpManager::new(&config_for_run.mcp_servers).await;
-            let mut current_message = user_message;
-            let mut current_images = images;
-            let mut current_system_prompt = system_prompt;
-            let has_mcp_tools = !mcp_manager.list_tools().is_empty();
-            let result = loop {
-                let mcp_opt = if has_mcp_tools {
-                    Some(&mut mcp_manager)
-                } else {
-                    None
-                };
-                let result = bifrost_agent::session::run_turn_with_mcp_multimodal(
-                    &service_for_run.agent_client,
-                    &config_for_run,
-                    &mut session,
-                    &turn_tools,
-                    mcp_opt,
-                    &current_message,
-                    &current_images,
-                    current_system_prompt.as_deref(),
-                    recorder.as_mut(),
-                )
-                .await;
-                match result {
-                    Ok(turn_result) => {
-                        if let Some(next_message) = service_for_run
-                            .queue_manager
-                            .pop_queue(&session_key_for_run)
-                        {
-                            current_message = next_message;
-                            current_images = Vec::new();
-                            current_system_prompt = None;
-                            continue;
-                        }
-                        break Ok(turn_result);
-                    }
-                    Err(error) => break Err(error),
-                }
-            };
-            mcp_manager.shutdown().await;
-            result
-        };
-        if let Some(recorder) = recorder.as_mut() {
-            let state = if result.is_ok() {
-                "completed"
-            } else {
-                "failed"
-            };
-            let _ = recorder.record_run_state(
-                &session_key_for_run,
-                state,
-                Some("web"),
-                Some("builtin"),
-            );
+            .await;
+            return;
         }
-        if recorder.is_some() && !session.memory_cleared {
-            session.recorder = recorder;
+    };
+    let mut worker = match worker_client.spawn(worker_request).await {
+        Ok(worker) => worker,
+        Err(error) => {
+            service.agent_session_manager.return_session(session);
+            let _ = send_sse_event(
+                &tx,
+                "run_failed",
+                json!({"eventType":"run_failed","sessionKey":session_key,"error":error}),
+            )
+            .await;
+            return;
         }
-        if session.memory_cleared {
-            crate::im_gateway::chatgpt_web::clear_session_conversation(&session_key_for_run).await;
-        }
-        service_for_run
-            .agent_session_manager
-            .return_session(session);
-        result
-    });
+    };
+    let (stop_tx, mut stop_rx) = mpsc::unbounded_channel::<()>();
+    if let Some(pid) = worker.child_id() {
+        crate::im_gateway::agent_worker::register_active_worker(&session_key, pid, stop_tx);
+    }
 
     let mut progress_closed = false;
     loop {
         tokio::select! {
+            _ = stop_rx.recv() => {
+                let _ = worker.terminate().await;
+                crate::im_gateway::agent_worker::clear_active_worker(&session_key);
+                service.agent_session_manager.return_session(session);
+                let payload = json!({
+                    "eventType": "run_finished",
+                    "sessionKey": session_key,
+                    "response": "已收到 /stop，Agent worker 子进程已停止。",
+                    "stopped": true,
+                });
+                let _ = send_sse_event(&tx, "run_finished", payload).await;
+                return;
+            }
             _ = tx.closed() => {
                 info!(
                     session_key = %session_key,
-                    "agent chat stream client disconnected; leaving turn running in background"
+                    "agent chat stream client disconnected; stopping isolated worker"
                 );
+                let _ = worker.terminate().await;
+                crate::im_gateway::agent_worker::clear_active_worker(&session_key);
+                service.agent_session_manager.return_session(session);
                 return;
             }
             maybe_event = progress_rx.recv(), if !progress_closed => {
                 match maybe_event {
                     Some(event) => {
-                        if let bifrost_agent::AgentTurnProgressEvent::TitleUpdated { title } = &event
-                        {
-                            service.agent_session_manager.update_active_session_preview(
-                                &session_key,
-                                Some(title.clone()),
-                                None,
-                                None,
-                                None,
-                                None,
-                            );
-                        }
-                        service.progress_registry.apply_event(&session_key, event.clone()).await;
+                        apply_worker_progress_event(&service, &session_key, &event).await;
                         let (event_name, payload) = progress_event_payload(&session_key, event);
                         if !send_sse_event(&tx, event_name, payload).await {
                             info!(
                                 session_key = %session_key,
-                                "agent chat stream receiver closed while sending progress; leaving turn running in background"
+                                "agent chat stream receiver closed while sending progress; stopping isolated worker"
                             );
+                            let _ = worker.terminate().await;
+                            crate::im_gateway::agent_worker::clear_active_worker(&session_key);
+                            service.agent_session_manager.return_session(session);
                             return;
                         }
                     }
@@ -414,30 +375,34 @@ async fn run_agent_stream(
                     }
                 }
             }
-            result = &mut run_task => {
+            event = worker.next_event() => {
                 while let Ok(event) = progress_rx.try_recv() {
-                    if let bifrost_agent::AgentTurnProgressEvent::TitleUpdated { title } = &event {
-                        service.agent_session_manager.update_active_session_preview(
-                            &session_key,
-                            Some(title.clone()),
-                            None,
-                            None,
-                            None,
-                            None,
-                        );
-                    }
-                    service.progress_registry.apply_event(&session_key, event.clone()).await;
+                    apply_worker_progress_event(&service, &session_key, &event).await;
                     let (event_name, payload) = progress_event_payload(&session_key, event);
                     if !send_sse_event(&tx, event_name, payload).await {
                         info!(
                             session_key = %session_key,
-                            "agent chat stream receiver closed while flushing progress"
+                            "agent chat stream receiver closed while flushing progress; stopping isolated worker"
                         );
+                        let _ = worker.terminate().await;
+                        crate::im_gateway::agent_worker::clear_active_worker(&session_key);
+                        service.agent_session_manager.return_session(session);
                         return;
                     }
                 }
-                match result {
-                    Ok(Ok(turn_result)) => {
+                match event {
+                    Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Started { .. })) => {}
+                    Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Progress { event })) => {
+                        apply_worker_progress_event(&service, &session_key, &event).await;
+                        let (event_name, payload) = progress_event_payload(&session_key, event);
+                        if !send_sse_event(&tx, event_name, payload).await {
+                            let _ = worker.terminate().await;
+                            crate::im_gateway::agent_worker::clear_active_worker(&session_key);
+                            service.agent_session_manager.return_session(session);
+                            return;
+                        }
+                    }
+                    Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Finished { result: turn_result })) => {
                         info!(
                             session_key = %session_key,
                             response_len = turn_result.response.len(),
@@ -452,8 +417,12 @@ async fn run_agent_stream(
                             "planSteps": turn_result.plan_steps,
                         });
                         let _ = send_sse_event(&tx, "run_finished", payload).await;
+                        crate::im_gateway::agent_worker::clear_active_worker(&session_key);
+                        refresh_session_from_worker_history(&mut session, &session_key, &turn_result.history_path, &config);
+                        service.agent_session_manager.return_session(session);
+                        return;
                     }
-                    Ok(Err(error)) => {
+                    Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Failed { error })) => {
                         error!(session_key = %session_key, error = %error, "agent chat stream failed");
                         let payload = json!({
                             "eventType": "run_failed",
@@ -461,21 +430,98 @@ async fn run_agent_stream(
                             "error": error,
                         });
                         let _ = send_sse_event(&tx, "run_failed", payload).await;
+                        crate::im_gateway::agent_worker::clear_active_worker(&session_key);
+                        service.agent_session_manager.return_session(session);
+                        return;
+                    }
+                    Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Stopped)) => {
+                        let payload = json!({
+                            "eventType": "run_finished",
+                            "sessionKey": session_key,
+                            "response": "已收到 /stop，Agent worker 子进程已停止。",
+                            "stopped": true,
+                        });
+                        let _ = send_sse_event(&tx, "run_finished", payload).await;
+                        crate::im_gateway::agent_worker::clear_active_worker(&session_key);
+                        service.agent_session_manager.return_session(session);
+                        return;
+                    }
+                    Ok(None) => {
+                        crate::im_gateway::agent_worker::clear_active_worker(&session_key);
+                        service.agent_session_manager.return_session(session);
+                        return;
                     }
                     Err(error) => {
-                        error!(session_key = %session_key, error = %error, "agent chat stream task panicked");
-                        service.agent_session_manager.release_active(&session_key);
+                        error!(session_key = %session_key, error = %error, "agent worker stream failed");
                         let payload = json!({
                             "eventType": "run_failed",
                             "sessionKey": session_key,
-                            "error": format!("agent task failed: {error}"),
+                            "error": format!("agent worker failed: {error}"),
                         });
                         let _ = send_sse_event(&tx, "run_failed", payload).await;
+                        crate::im_gateway::agent_worker::clear_active_worker(&session_key);
+                        service.agent_session_manager.return_session(session);
+                        return;
                     }
                 }
-                return;
             }
         }
+    }
+}
+
+async fn apply_worker_progress_event(
+    service: &crate::handlers::im_gateway::SharedImGatewayService,
+    session_key: &str,
+    event: &bifrost_agent::AgentTurnProgressEvent,
+) {
+    match event {
+        bifrost_agent::AgentTurnProgressEvent::TitleUpdated { title } => {
+            service.agent_session_manager.update_active_session_preview(
+                session_key,
+                Some(title.clone()),
+                None,
+                None,
+                None,
+                None,
+            );
+        }
+        bifrost_agent::AgentTurnProgressEvent::Status(status) => {
+            service
+                .agent_session_manager
+                .update_active_turn_status_from_worker((**status).clone());
+        }
+        _ => {}
+    }
+    service
+        .progress_registry
+        .apply_event(session_key, event.clone())
+        .await;
+}
+
+fn refresh_session_from_worker_history(
+    session: &mut bifrost_agent::AgentSession,
+    session_key: &str,
+    history_path: &Option<String>,
+    config: &bifrost_agent::AgentConfig,
+) {
+    let Some(history_path) = history_path.as_deref() else {
+        return;
+    };
+    if let Err(error) = restore_session_from_history_path(
+        session,
+        history_path,
+        session_key,
+        config
+            .history
+            .as_ref()
+            .and_then(|history| history.max_bytes),
+    ) {
+        warn!(
+            session_key = %session_key,
+            history_path = %history_path,
+            error = %error,
+            "failed to refresh main-process session from isolated worker history"
+        );
     }
 }
 
@@ -568,7 +614,18 @@ fn handle_builtin_busy_stream_input(
     })
 }
 
-fn handle_session_free_stream_command(
+pub(crate) fn queue_snapshot_payload(
+    queue_manager: &crate::im_gateway::SessionQueueManager,
+    session_key: &str,
+) -> Value {
+    let items = queue_manager.queue_status(session_key);
+    json!({
+        "queueLength": items.len(),
+        "queueItems": items,
+    })
+}
+
+async fn handle_session_free_stream_command(
     body: &AgentChatRequest,
     session_key: &str,
     service: &crate::handlers::im_gateway::SharedImGatewayService,
@@ -602,7 +659,10 @@ fn handle_session_free_stream_command(
     }
 
     if trimmed == "/stop" {
-        let stopped = service.agent_session_manager.request_stop(session_key);
+        let internal_stopped = service.agent_session_manager.request_stop(session_key);
+        let worker_stopped =
+            crate::im_gateway::agent_worker::request_session_stop(session_key).await;
+        let stopped = internal_stopped || worker_stopped;
         return Some(json!({
             "eventType": "run_finished",
             "sessionKey": session_key,
@@ -632,50 +692,6 @@ fn format_session_detail_status(detail: &bifrost_agent::SessionDetail) -> String
         detail.user_turn_count,
         detail.work_dir.as_deref().unwrap_or("N/A")
     )
-}
-
-fn create_conversation_recorder(
-    config: &bifrost_agent::AgentConfig,
-    session_key: &str,
-    session: &mut bifrost_agent::AgentSession,
-) -> Option<bifrost_agent::persistence::ConversationRecorder> {
-    if config.is_ephemeral() {
-        return None;
-    }
-    let should_persist = config
-        .history
-        .as_ref()
-        .map(|history| history.persistence != bifrost_agent::HistoryPersistence::None)
-        .unwrap_or(true);
-    if !should_persist {
-        return None;
-    }
-    if let Some(mut recorder) = session.recorder.take() {
-        let _ = recorder.record_run_state(session_key, "running", Some("web"), Some("builtin"));
-        return Some(recorder);
-    }
-
-    let data_dir = bifrost_agent::config::agent_home_dir();
-    let max_bytes = config
-        .history
-        .as_ref()
-        .and_then(|history| history.max_bytes);
-    let mut recorder = bifrost_agent::persistence::ConversationRecorder::new_with_max_bytes(
-        &data_dir,
-        session_key,
-        max_bytes,
-    );
-    let _ = recorder.record_session_start(
-        session_key,
-        json!({
-            "model": config.model,
-            "provider": config.model_provider,
-            "source": "admin-api",
-            "base_instructions": bifrost_agent::prompt::resolve_base_instructions_text(config, None),
-        }),
-    );
-    let _ = recorder.record_run_state(session_key, "running", Some("web"), Some("builtin"));
-    Some(recorder)
 }
 
 fn normalize_images(images: &[AgentChatImageRequest]) -> Vec<bifrost_agent::ChatImageInput> {
@@ -896,6 +912,7 @@ async fn read_body_json<T: for<'de> Deserialize<'de>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::im_gateway::SessionQueueManager;
 
     #[test]
     fn formats_named_sse_event_with_json_payload() {
@@ -991,5 +1008,24 @@ mod tests {
             payload["compaction"]["context"]["estimatedContextTokens"],
             250
         );
+    }
+
+    #[test]
+    fn queue_snapshot_payload_exposes_backend_queue_items() {
+        let queue_manager = SessionQueueManager::new();
+        queue_manager
+            .push_queue("web-session", "first queued".to_string())
+            .unwrap();
+        queue_manager
+            .push_queue("web-session", "second queued".to_string())
+            .unwrap();
+
+        let payload = queue_snapshot_payload(&queue_manager, "web-session");
+
+        assert_eq!(payload["queueLength"], 2);
+        assert_eq!(payload["queueItems"][0]["seq"], 1);
+        assert_eq!(payload["queueItems"][0]["message"], "first queued");
+        assert_eq!(payload["queueItems"][1]["seq"], 2);
+        assert_eq!(payload["queueItems"][1]["message"], "second queued");
     }
 }

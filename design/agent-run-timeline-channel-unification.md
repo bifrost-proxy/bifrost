@@ -138,7 +138,40 @@ Web 触发 External Runner 时还存在一个更隐蔽的分叉：如果当前�
 7. 同一 conversation 绑定多个 channel 时，任意 channel 发起的消息和 Agent 回复都要广播到所有绑定 channel。
 8. 通道只保存展示状态与投递游标，不拥有 Loop 状态；Loop 不应该依赖“当前触发通道”决定写哪份过程数据。
 9. 不同 Agent/Runner 的状态统一进入 `AgentRunState` / canonical timeline，所有视图从同一状态机感知 queued/running/waiting/failed/completed。
-10. 不做旧数据兼容设计；相关 API、前端 helper 和持久化读写可以直接按新模型收敛。
+10. 已结束的 Web Chat turn loop 默认折叠过程消息，只保留 `已处理 <duration>` 摘要与最终 assistant 结论；展开后仍能查看完整 assistant delta、工具调用、plan、compaction 等过程。
+11. 不做旧数据兼容设计；相关 API、前端 helper 和持久化读写可以直接按新模型收敛。
+
+### 完成态 Loop 折叠展示
+
+Web Agent Chat 的消息区按 `user_message` 切分 turn：一个用户输入及其后的连续 assistant 片段属于同一个 loop 展示组。当前仍在运行的最后一个 turn 保持展开，继续实时显示 delta、process block、Thinking tail 和工具状态；已经结束的 turn 默认收起中间过程，只在用户消息下方显示轻量摘要行：
+
+```text
+已处理 4m 33s >
+```
+
+摘要耗时来自该 turn 的 user 消息时间戳到最终 assistant 输出时间戳的差值；没有可靠时间戳时显示 `<1s`。默认收起状态下只渲染最后一个可见 assistant 输出（文本、图片或 runner call），并隐藏其 process steps，避免工具调用和状态日志把历史页面撑长。点击摘要行后，按原始顺序恢复渲染该 turn 内的所有 assistant 片段和 process block。
+
+process block 自身也必须显示工具执行耗时：`Ran 1 command · 4m 33s` 表示已完成工具调用的总耗时；运行中显示 `Running 1 command (1 active) · 1m 12s`，并每秒刷新一次。历史 timeline 从 `tool_call.timestamp` 到 `tool_result.timestamp` 计算；实时 SSE 从 `tool_started` 接收时间开始计时，`tool_finished.durationMs` 优先作为完成耗时来源。
+
+边界规则：
+
+- 如果没有 user 消息（例如独立 compaction 状态消息），保持原有单条消息渲染。
+- 如果全局 `running=true`，最后一个 user turn 视为活跃 turn，不做默认折叠；在该 turn 的输出顶部展示 `已处理 <duration>` 并每秒刷新运行时长，更早的 turn 仍可折叠。
+- 折叠只影响展示层，不改变 JSONL timeline、session detail 或续聊上下文。
+- 颜色、边框和文字必须使用 Ant Design token，亮色/暗色主题都要可读。
+- 窄屏时消息列必须随视口收缩并保留水平 padding；右侧 thread rail 在 `md` 以下隐藏，避免把消息内容挤到无 padding 状态；Markdown 长路径、代码块和表格不得撑出横向溢出。
+- 消息区离开底部时，在 composer 正上方居中显示圆形滚动到底部按钮；按钮用 opacity + transform 淡入淡出，点击后复用现有直接滚到底部逻辑，不额外持久化任何 UI-only 滚动状态。
+- `New Chat` 是创建新的独立 session，不属于当前 running turn 的输入或 stop 控制；即使当前选中的线程处于 `Running`，按钮也必须可用。后端 active worker 和 busy 保护按 `session_key` 隔离，只有同一个 session 的并发输入需要进入 guide/queue 或 busy 分支。
+
+测试方案：
+
+- 单元/组件：覆盖 completed turn 默认只显示最终输出和 `已处理` 摘要，展开后恢复 process block 与中间 delta。
+- E2E：在 `web/tests/ui/agent-chat.spec.ts` 中覆盖 Web stream 完成态和 history timeline 完成态；运行中 history refresh 用例必须保持当前 turn 展开，并断言顶部 `已处理 <duration>` 会继续更新。
+- E2E 额外覆盖 640px 视口，断言消息区没有横向溢出且 message track 与滚动区之间保留左右 padding。
+- E2E 覆盖消息区离开底部时滚动按钮淡入、位置居中在 composer 上方、点击后滚到底部并淡出。
+- E2E 覆盖选中 running 线程时 `New Chat` 仍可点击并创建新 session。
+- human_tests：在 `human_tests/agent-session-persistence.md` 增加完成态折叠回归，按真实 WebUI 或 Playwright mock 逐条执行。
+- Review/Fix/Test：两轮复核折叠默认态、展开态、运行态、暗色主题、历史深链与现有 process block 交互。
 
 ## 方案
 

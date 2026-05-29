@@ -148,11 +148,11 @@ append ToolCallCompleted turn event
 
 - `plan_updated`：`current_plan = event.plan`
 - `plan_cleared`：`current_plan = None`
-- `compaction_performed.current_plan`：仅作为 compact 后状态快照，不对旧 plan 做 merge
+- `compaction_performed`：不写入、不读取、不恢复、不清空 `current_plan`
 
 展示层只消费 `AgentTurnProgressEvent::PlanUpdated { steps, title }` 的 `steps` 当前值。`crates/bifrost-admin/src/im_gateway/progress_card.rs` 不应保存或补齐旧步骤。
 
-Compaction prompt 必须继续参考 Codex：handoff summary 只描述当前进展、关键上下文和剩余工作，不额外向 compaction model 注入 `current_plan` 文本。`current_plan` 只作为结构化 runtime state 写入 JSONL/compaction metadata，用于恢复 UI 和 runtime gate；不要让 summary 阶段重新解释 checklist。
+Compaction prompt 必须继续参考 Codex：handoff summary 只描述当前进展、关键上下文和剩余工作，不额外向 compaction model 注入 `current_plan` 文本，也不把 `current_plan` 写入 compaction metadata。`current_plan` 只由 `plan_updated` / `plan_cleared` 事件恢复 UI 和 runtime gate；不要让 summary 阶段重新解释 checklist。
 
 ### 4. Runtime 收口门禁保留但不增殖
 
@@ -172,7 +172,7 @@ Compaction prompt 必须继续参考 Codex：handoff summary 只描述当前进�
 - 更新 plan 时提交完整当前清单。
 - 当目标改变、子任务收敛或发现原计划不合适时，可以删除或重写步骤。
 - 避免把启动检查、每轮 review、每条测试命令都长期保留在同一 plan 中；最终交付证据放 final，不放进 plan。
-- Compaction / handoff prompt 不得要求保留 completed 历史步骤，也不得额外注入 plan 文本；这些状态只属于结构化 runtime state 和审计记录，不属于 summary 的自然语言任务描述。
+- Compaction / handoff prompt 不得要求保留 completed 历史步骤，也不得额外注入 plan 文本；plan 状态只属于 `plan_updated` / `plan_cleared` 结构化 runtime state 和审计记录，不属于 summary 的自然语言任务描述或 compaction metadata。
 
 这部分只用于减少模型漂移；真正的防膨胀必须靠 runtime 快照语义保证。
 
@@ -202,6 +202,7 @@ Compaction prompt 必须继续参考 Codex：handoff summary 只描述当前进�
 - `empty_plan_snapshot_clears_current_plan`：模型提交 `plan: []` 时清空 runtime state、发送空展示快照，并恢复为无当前 plan。
 - `empty_plan_snapshot_does_not_clear_unfinished_plan`：当前计划有未完成步骤时，空快照不清空 runtime state，也不发送空展示快照或写入 `plan_cleared`。
 - `persistence_replay_uses_last_plan_snapshot`：多个 `plan_updated` 回放后只保留最后一个。
+- `compaction_does_not_mutate_plan_runtime_state`：`compaction_performed` 不是 plan runtime source，不能覆盖或清空当前 plan。
 - `update_plan_tool_output_is_plain_text`：成功工具结果为 `Plan updated`，不包含 `UPDATE_PLAN:` 或参数 JSON。
 - `update_plan_runtime_event_is_returned_by_tool_result`：typed event 由 `UpdatePlanTool::execute()` 解析参数后放入 `ToolResult.runtime_events`，而不是从 `ToolResult.output` 或 completion 阶段反解析。
 - `failed_update_plan_does_not_emit_runtime_event`：工具失败时不产生 `PlanUpdate`，不会污染 `current_plan`。

@@ -249,6 +249,35 @@
 
 **执行记录（2026-05-25）**：PASS — 执行 `source ~/.zshrc && pnpm --dir web exec playwright test admin-settings.spec.ts -g "AI Agent Sessions 列表支持"`，用例通过；mock idle active session 带 `running:false`，断言该行不包含 `Running` 且包含 `Active`。
 
+### TC-ASP-18：Agent Chat 已完成 Loop 默认折叠与工具摘要耗时回归
+
+**操作步骤**：
+1. 使用 Playwright mock 或真实 history JSONL 准备一条已完成 Agent Chat timeline，事件至少包含 `user_message`、两段 `assistant_delta`、一组 `tool_call/tool_result` 和最终 `assistant_message`，其中工具调用耗时大于 1 秒。
+2. 在浏览器中打开：
+   ```text
+   http://localhost:$MAIN_PORT/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=completed-loop&view=history&historyPath=<url-encoded-path>
+   ```
+3. 不点击展开，查看消息区。
+4. 点击 `已处理 <duration>` 摘要行展开该 turn。
+5. 切换暗色主题后重复查看摘要行、process block 和最终输出。
+6. 准备一条仍在运行的 timeline（最后一个 turn 只有 `tool_call`，尚无 `tool_result`），打开同一 Agent Chat history 深链并观察 `Running n commands` 摘要至少 2 秒。
+7. 将浏览器宽度缩小到 640px 左右，查看消息列表、完成态摘要行、最终输出和底部输入框。
+8. 在消息区向上滚动，观察底部输入框正上方是否出现滚动到底部按钮；点击该按钮。
+9. 打开一个 `Running` 状态的历史线程，查看右上角 `New Chat` 按钮并点击创建新对话。
+
+**预期结果**：
+- 默认收起状态只显示用户消息、`已处理 <分钟/秒>` 摘要和最终 assistant 结论，不显示中间 assistant delta、工具参数或工具结果。
+- 点击摘要后，中间 assistant delta、`Ran n commands · <分钟/秒>` process block、工具名、参数和结果按原始顺序恢复可见。
+- 已完成工具摘要耗时来自 `tool_call` 到 `tool_result`，格式为 `Xs`、`Mm Ss` 或 `Hh Mm Ss`。
+- 未完成工具摘要显示 `Running n commands (m active) · <分钟/秒>`，已执行时长每秒更新。
+- 运行中的最后一个 turn 不会被默认折叠；该 turn 输出顶部显示 `已处理 <分钟/秒>` 并每秒更新，更早的已完成 turn 仍保持可折叠。
+- 亮色和暗色主题下摘要行、箭头、耗时和最终输出均清晰可读。
+- 窄屏下右侧线程列表不挤压消息列，消息列表随视口收窄并保留左右 padding；长路径、内联代码、代码块和表格不会撑出横向溢出。
+- 当消息区不在底部时，输入框正上方居中淡入一个圆形向下箭头按钮；回到底部或点击按钮后按钮淡出隐藏，点击后消息区直接滚动到底部。
+- 当前线程处于 `Running` 时仍可点击 `New Chat` 并创建新的独立 session；该动作不停止、不复用、也不修改原 running 线程。
+
+**执行记录（2026-05-29）**：PASS — 执行 `source ~/.zshrc && pnpm --dir web exec playwright test agent-chat.spec.ts -g "deep link|restores active timeline process steps|keeps polling running history timeline|can start a new chat"`，5 个相关 UI 用例通过；另用 Vite dev server 代理 `BACKEND_PORT=9900` 打开真实 history 深链 `/Users/eden/.bifrost/agent/sessions/2026/05/29/session-feishu-main_ou_82c9bc36c12abfaed40c2c52ef4b7fea-1780017943.jsonl`，刷新后默认显示 `已处理 4m 26s` 和最终结论，展开后旧 turn 的过程摘要显示 `Ran ...`，不再误显示 `Running ...`，且可从持久化 timeline 恢复工具耗时；运行中 turn 输出顶部显示实时更新的 `已处理 <duration>`；将浏览器缩到约 640px 后消息列随视口收窄并保留左右 padding，没有横向溢出；消息区离开底部时滚动到底部按钮在输入框正上方居中淡入，点击后直接回到底部并淡出；`Running` 线程页面的 `New Chat` 可点击并能创建新 session。
+
 ## 清理步骤
 
 1. 停止 Bifrost 服务

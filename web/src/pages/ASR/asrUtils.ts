@@ -1,4 +1,9 @@
-import type { AsrTaskFileRecord, AsrTaskSchedule } from "../../api/asr";
+import type {
+  AsrTaskFileRecord,
+  AsrTaskSchedule,
+  VoiceRealtimeEvent,
+  VoiceRealtimeTranscriptSegment,
+} from "../../api/asr";
 
 export type WorkState = "idle" | "recording" | "transcribing" | "error";
 
@@ -176,6 +181,32 @@ export function appendTranscriptDelta(committed: string, delta: string): string 
     return `${committed}${delta}`;
   }
   return `${committed} ${delta}`;
+}
+
+export function voiceRealtimeSegmentFromEvent(
+  event: VoiceRealtimeEvent,
+  text: string,
+  final: boolean,
+): VoiceRealtimeTranscriptSegment | null {
+  const cleanText = text.trim();
+  if (!cleanText) {
+    return null;
+  }
+  const index = event.utterance_index ?? event.window_index ?? Date.now();
+  return {
+    id: `${event.session_id || "voice"}-${index}-${final ? "final" : "partial"}`,
+    start_ms: event.window_start_ms,
+    end_ms: event.window_end_ms,
+    speaker: event.speaker,
+    speaker_display_name: event.speaker_display_name,
+    speaker_profile_id: event.speaker_profile_id,
+    speaker_confidence: event.speaker_confidence,
+    candidate_profile_id: event.candidate_profile_id,
+    candidate_display_name: event.candidate_display_name,
+    candidate_confidence: event.candidate_confidence,
+    text: cleanText,
+    final,
+  };
 }
 
 function parseTimeInput(value: unknown): { hour: number; minute: number } {

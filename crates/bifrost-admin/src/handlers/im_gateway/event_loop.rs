@@ -166,7 +166,17 @@ pub(super) async fn run_event_loop_with_options(
         }
     }
 
-    let mut mcp_manager = ImMcpManager::new(&init_config.mcp_servers).await;
+    let mcp_http_network = agent_client
+        .model_proxy_url()
+        .map(|proxy_url| {
+            bifrost_agent::mcp::McpHttpNetwork::with_proxy_and_ca(
+                proxy_url.to_string(),
+                Some(bifrost_storage::data_dir().join("certs").join("ca.crt")),
+            )
+        })
+        .unwrap_or_else(bifrost_agent::mcp::McpHttpNetwork::direct);
+    let mut mcp_manager =
+        ImMcpManager::new_with_http_network(&init_config.mcp_servers, mcp_http_network).await;
     let mcp_tool_count = mcp_manager.list_tools().len();
     if mcp_tool_count > 0 {
         info!(

@@ -43,6 +43,7 @@ use crate::types::{ToolDefinition, ToolResult};
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -136,6 +137,17 @@ const SHUTDOWN_TIMEOUT_MS: u64 = 500;
 
 /// Max concurrent server startups.
 const STARTUP_CONCURRENCY: usize = 8;
+
+const PROXY_ENV_KEYS: &[&str] = &[
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+];
 
 /// Codex threshold for switching MCP tools to deferred loading.
 ///
@@ -692,8 +704,48 @@ pub struct McpServerAvailability {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct McpHttpNetwork {
+    proxy_url: Option<String>,
+    ca_cert_path: Option<PathBuf>,
+}
+
+impl McpHttpNetwork {
+    pub fn direct() -> Self {
+        Self::default()
+    }
+
+    pub fn with_proxy_and_ca(proxy_url: impl Into<String>, ca_cert_path: Option<PathBuf>) -> Self {
+        Self {
+            proxy_url: Some(proxy_url.into()),
+            ca_cert_path,
+        }
+    }
+
+    fn client_builder(&self, server_name: &str) -> Result<reqwest::ClientBuilder, String> {
+        if let Some(proxy_url) = self.proxy_url.as_deref() {
+            let ca_path = self.ca_cert_path.as_deref();
+            return bifrost_core::proxied_reqwest_client_builder(proxy_url, ca_path).map_err(
+                |error| {
+                    format!(
+                        "configure MCP HTTP client for '{server_name}' via proxy failed: {error}"
+                    )
+                },
+            );
+        }
+        Ok(bifrost_core::direct_reqwest_client_builder())
+    }
+}
+
 pub async fn check_server_availability(
     configs: &HashMap<String, McpServerConfig>,
+) -> Vec<McpServerAvailability> {
+    check_server_availability_with_http_network(configs, McpHttpNetwork::direct()).await
+}
+
+pub async fn check_server_availability_with_http_network(
+    configs: &HashMap<String, McpServerConfig>,
+    http_network: McpHttpNetwork,
 ) -> Vec<McpServerAvailability> {
     use futures::stream::{self, StreamExt};
 
@@ -715,9 +767,12 @@ pub async fn check_server_availability(
         .map(|(name, cfg)| (name.clone(), cfg.clone()))
         .collect::<Vec<_>>();
 
-    let outcomes = stream::iter(eligible.into_iter().map(|(name, cfg)| async move {
-        let outcome = start_one_server(&name, &cfg).await;
-        (name, outcome)
+    let outcomes = stream::iter(eligible.into_iter().map(|(name, cfg)| {
+        let http_network = http_network.clone();
+        async move {
+            let outcome = start_one_server(&name, &cfg, &http_network).await;
+            (name, outcome)
+        }
     }))
     .buffer_unordered(STARTUP_CONCURRENCY)
     .collect::<Vec<_>>()
@@ -749,6 +804,13 @@ impl McpManager {
     /// bounded parallelism; individual failures are logged and skipped without
     /// blocking peers.
     pub async fn new(configs: &HashMap<String, McpServerConfig>) -> Self {
+        Self::new_with_http_network(configs, McpHttpNetwork::direct()).await
+    }
+
+    pub async fn new_with_http_network(
+        configs: &HashMap<String, McpServerConfig>,
+        http_network: McpHttpNetwork,
+    ) -> Self {
         let mut manager = Self {
             connections: HashMap::new(),
             tool_routing: HashMap::new(),
@@ -768,9 +830,12 @@ impl McpManager {
 
         use futures::stream::{self, StreamExt};
         let outcomes: Vec<(String, Result<Arc<McpConnection>, String>)> =
-            stream::iter(eligible.into_iter().map(|(name, cfg)| async move {
-                let outcome = start_one_server(&name, &cfg).await;
-                (name, outcome)
+            stream::iter(eligible.into_iter().map(|(name, cfg)| {
+                let http_network = http_network.clone();
+                async move {
+                    let outcome = start_one_server(&name, &cfg, &http_network).await;
+                    (name, outcome)
+                }
             }))
             .buffer_unordered(STARTUP_CONCURRENCY)
             .collect()
@@ -1218,6 +1283,7 @@ impl Drop for McpManager {
 async fn start_one_server(
     name: &str,
     config: &McpServerConfig,
+    http_network: &McpHttpNetwork,
 ) -> Result<Arc<McpConnection>, String> {
     let per_request_timeout =
         Duration::from_secs(config.tool_timeout_sec.unwrap_or(DEFAULT_TOOL_TIMEOUT_SEC));
@@ -1229,7 +1295,14 @@ async fn start_one_server(
     let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
 
     let (conn_core, mut tasks) = if config.url.is_some() {
-        build_http_connection(name, config, pending.clone(), per_request_timeout).await?
+        build_http_connection(
+            name,
+            config,
+            pending.clone(),
+            per_request_timeout,
+            http_network,
+        )
+        .await?
     } else if config.command.is_some() {
         build_stdio_connection(name, config, pending.clone(), per_request_timeout).await?
     } else {
@@ -1285,6 +1358,9 @@ async fn build_stdio_connection(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    for key in PROXY_ENV_KEYS {
+        cmd.env_remove(key);
+    }
     if let Some(ref cwd) = config.cwd {
         cmd.current_dir(cwd);
     }
@@ -1327,6 +1403,7 @@ async fn build_http_connection(
     config: &McpServerConfig,
     pending: PendingMap,
     per_request_timeout: Duration,
+    http_network: &McpHttpNetwork,
 ) -> Result<((Box<dyn FrameSink>, Option<Child>), Vec<JoinHandle<()>>), String> {
     let url = config
         .url
@@ -1334,7 +1411,8 @@ async fn build_http_connection(
         .ok_or_else(|| format!("MCP '{name}' missing url"))?
         .to_string();
 
-    let client = reqwest::Client::builder()
+    let client = http_network
+        .client_builder(name)?
         .timeout(per_request_timeout)
         .build()
         .map_err(|e| format!("build HTTP client for '{name}': {e}"))?;

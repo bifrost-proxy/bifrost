@@ -273,6 +273,56 @@ IM Gateway Agent 支持把飞书 IM 中的图片和文本一起传给模型；`P
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - `cargo test --workspace --all-features`
 
+## Agent Chat WebUI 图片粘贴与 Runner 附件桥接
+
+### 目标
+
+Agent Chat Composer 支持直接粘贴图片，图片预览展示在输入框上部，单次最多 6 张。用户可以发送“文本 + 图片”，也可以只发送图片。内置 Bifrost Agent 继续走原生 Chat Completions 多模态 content parts；Codex/BIF/自定义外部 Runner 在没有原生图片输入能力时走文件路径桥接，让 Runner 可以通过本地图片文件消费视觉输入。
+
+### WebUI 交互
+
+1. `AgentChatSection` 维护 `pendingImages`，`TextArea` 的 `onPaste` 从 `clipboardData.items/files` 中筛选 `image/*` 文件。
+2. 图片读取为 data URL 后保存 `{id, mimeType, data, previewUrl, name, size}`；`data` 使用去掉 data URL 前缀后的 base64，`previewUrl` 用于缩略图展示。
+3. Composer 在输入框上方渲染预览条：最多 6 张，支持逐张删除；超过上限时用 toast 提示并忽略超出部分。
+4. 发送按钮启用条件改为 `draft.trim().length > 0 || pendingImages.length > 0 || running`。非运行态允许纯图片发送，运行态 Guide/Queue 仍只支持文本，避免把图片注入到已运行 loop 的中途控制消息。
+5. 本地消息和历史消息支持 `contentParts` 图片渲染；用户消息有图片但无文本时展示 `Attached N image(s)` 作为可读占位，同时在气泡中展示缩略图。
+6. WebUI 使用 CSS 变量/Ant Design token 颜色，预览框、删除按钮和占位文字必须兼容亮色/暗色主题。
+
+### API 与持久化
+
+1. `/_bifrost/api/agent/chat/stream` 允许 `message` 为空但 `images` 非空；请求体 `images` 继续使用 `{mime_type,data}` 并截断到 6 张。
+2. `/_bifrost/api/im-gateway/chat/stream` 与 `ExternalCliRunRequest` 新增 `images` 字段，格式同 WebUI：`{mimeType|mime_type,data,name?}`。
+3. `SessionMessage.content_parts` 已从内置 Agent JSONL 恢复路径返回给 WebUI；外部 Runner 的 `session_state` 增加 `content_parts`，保证 Codex/BIF 线程刷新后仍能回显用户粘贴的图片。
+4. 线程标题 fallback：若消息文本为空但有图片，使用 `Attached N image(s)`，避免纯图片会话在 Threads 中显示空标题或 session key。
+
+### 外部 Runner 附件桥接
+
+1. 外部 Runner 请求进入 `ExternalCliRuntime::run()` 后，在 run 目录下创建 `attachments/images/`，把图片写为 `image-1.png` / `image-2.jpg` 等稳定文件名。
+2. `build_prompt()` 在用户消息前追加：
+   - `## Attached Images`
+   - 每张图片的 `path`、`mime_type`、`size_bytes`
+   - 指令：`Use the local image file paths above when you need to inspect the user's pasted images.`
+3. Codex/BIF 这类 CLI Runner 可以通过现有文件读取或 `view_image` 能力消费本地图片；自定义 Runner 即使不支持原生图片，也能从 prompt 中拿到可访问路径。
+4. 附件路径写入 `ExternalCliRunResult.metadata` 的 `attachments.images` JSON，便于调试和后续 UI 展示。
+5. 队列续跑时只携带当前消息文本，不继承上一轮图片，避免重复消费旧图片。
+
+### 测试方案
+
+- 单元测试：
+  - `external_cli::tests::external_cli_run_writes_image_attachments_and_injects_prompt_paths` 验证外部 Runner 写出图片文件、prompt 引用路径、metadata 记录附件。
+  - `session_state::tests::session_state_persists_message_content_parts` 验证外部 Runner 会话状态保留用户图片 content parts。
+  - `/agent/chat/stream` 的纯图片请求不再被 `message must not be empty` 拒绝。
+- UI/E2E 测试：
+  - `web/tests/ui/agent-chat.spec.ts` 新增 Composer 图片粘贴用例：粘贴图片后预览在输入框上方，删除可生效，最多保留 6 张，纯图片发送请求体包含 `images`。
+  - 断言内置 Bifrost Agent 请求发往 `/api/agent/chat/stream`，外部 Runner 请求发往 `/api/im-gateway/chat/stream` 且携带同样的 `images`。
+- 真实场景测试：
+  - `human_tests/im-gateway-agent.md` 新增 WebUI 图片粘贴真实用例，使用真实浏览器粘贴图片，分别验证文本+图片、纯图片、6 张上限、删除预览、亮色/暗色主题、外部 Runner 附件路径桥接。
+
+### Review/Fix/Test 闭环
+
+- 第 1 轮：复核用户目标、检查 WebUI paste/preview/send、后端 6 张上限、Builtin 多模态、外部 Runner 文件桥接，运行前端 UI targeted 测试和 Rust targeted 单元测试。
+- 第 2 轮：复查第 1 轮修复后的 diff、历史恢复 content parts、human_tests 索引和真实浏览器表现，复跑 targeted 测试并执行项目级校验。
+
 ### 1. ImAgentConfig - 全局配置
 
 ```rust
@@ -869,7 +919,9 @@ tracing = "0.1"
 | `/status` runner 元信息回归 | IM `/status` 和 `/agent/chat` `/status` 展示当前 Agent 类型、Runner 类型、Runner ID、历史对话轮次、外部会话引用；Codex 展示 `threadId`，ChatGPT Web 展示 `conversationId` |
 | 压缩次数恢复回归 | session JSONL 中的 `compaction` 事件会恢复为 `SessionRuntimeState.compaction_count`，`/resume` 后 `/status` 不再把已发生的压缩次数重置为 0 |
 | Agent 模型请求默认代理回归 | `im_gateway_agent_model_request_uses_bifrost_proxy` 使用 `AgentClient::new_with_bifrost_proxy(port)` 调用 mock Chat Completions，断言请求经当前 Bifrost 端口转发并在 `/api/traffic` 中出现可查询记录 |
+| Agent worker 代理端口恢复回归 | 独立 `bifrost agent worker` 子进程从父进程请求或 `BIFROST_DATA_DIR/runtime.json` 恢复当前 Bifrost 端口，并使用当前 Bifrost CA 信任内置 TLS intercept；`AgentClient::new()` 不读取外部 `HTTP_PROXY/HTTPS_PROXY` 环境变量 |
 | Chat API `/stop` 停止运行中 loop | `im_gateway_agent_chat_stop_active_loop` 启动真实 Admin + 慢速 mock Chat Completions，先发起长请求，再用同 session 的 `/stop` 立即停止 active turn，并验证后续 chat 可继续使用 |
+| Web Agent Chat 持久排队恢复回归 | WebUI 运行中输入 Queue 时，`/_bifrost/api/agent/chat/stream` busy 路径只把消息写入后端 `SessionQueueManager`；`/sessions/all` 与 `/sessions/{session_key}` 返回 `queue_items` / `queue_length`，页面刷新后从后端恢复排队面板；当前 turn 完成后由后端 drain queue，前端不得再次重发队列消息 |
 | WebUI instruction 大窗口编辑回归 | `Settings Agent 三层 instructions 使用大窗口编辑` 验证全局 Agent instruction 页面无行内 textarea、点击 Edit 打开大弹窗并 PATCH；`Settings IM Provider instructions 使用大窗口编辑后保存覆盖值` 验证 Provider Edit 弹窗中 instruction 通过嵌套大弹窗编辑并保存到 `agent_config` |
 | WebUI Session 详情 Tab 与滚动回归 | `AI Agent Session 详情默认展示 Messages Tab 且内容区可真实滚动` 验证 history 深链默认进入 Messages、长事件列表在 `agent-session-messages-scroll` 内滚动、Settings Tab 展示 metadata/AGENTS/Skills |
 | WebUI Sessions 列表点击进入详情回归 | `AI Agent Sessions 列表支持点击 title 或整行进入详情` 验证列表不再展示查看 icon，history title 点击进入 history 详情，active session 整行点击进入 active 详情 |
@@ -897,8 +949,11 @@ tracing = "0.1"
 | TC-GQ-16 | 自定义 Runner busy 普通消息默认 queue | 通过 IM/debug inbound 在自定义 runner active run 期间发送普通消息，验证消息等待当前 run 结束后再处理；Codex runner 若返回 `threadId`，下一条排队消息使用 `codex exec resume` 接续 |
 | TC-IMA-90A | 飞书流式进度卡片与 `/status` Token/Context KMB 格式化 | 构造百万级 Token 与几十万 Context 的 progress card，并调用 `/status`，验证折叠标题、展开状态区和状态文本均展示 `K/M/B` 单位，不再裸显长数字 |
 | TC-IMA-90B | `/status` runner 元信息与压缩次数回归 | 构造外部 runner session 和 compaction 记录，验证 `/status` 展示 Agent 类型、Runner 类型、Runner ID、历史对话轮次、`threadId` / `conversationId`，且恢复后压缩次数保持非 0 |
+| TC-IMA-91A | Web Agent Chat 后端持久排队与刷新恢复 | 同一 session 运行中在 WebUI 选择 Queue 发送追加消息；刷新页面后队列面板仍从后端 `queue_items` 恢复；上一轮结束后由后端自动处理排队消息，前端不再本地重发 |
 | TC-LTM-09 | 长期记忆真实对话链路 | 真实 Bifrost + mock Chat API 环境下验证自动记忆、Phase 2 consolidation、跨 session 消费 |
 | TC-IMA-83 | Agent 模型请求默认进入 Traffic | 真实 Bifrost 监听端口启动后，Agent 底层 Chat Completions 请求默认经 `http://127.0.0.1:<port>` 代理发出；mock 模型 host 可查询到 POST 记录，真实模型域名在 `--intercept-include` 下可解包为 HTTPS POST 明文记录 |
+| TC-IMA-83A | Agent worker 内置代理信任与外部 proxy env 隔离 | IM/Web 入口的内置 Agent worker 使用当前 Bifrost 端口和 `data_dir/certs/ca.crt` 访问模型；CLI `agent run` 通过 Admin Server stream 执行，Server 不运行时明确失败；库级 direct client 不被 shell/system proxy 环境变量劫持 |
+| TC-IMA-83B | Bifrost 异步子进程场景化命名 | 内置 Agent、external Runner、Voice、ASR 这类独立子进程通过 `bifrost-agent`、`bifrost-runner`、`bifrost-voice`、`bifrost-asr-server`、`bifrost-asr-cli` 场景别名启动，系统进程列表不再全显示为 `bifrost` |
 | TC-IMA-84 | Agent 设置页卡片导航 | Settings → Agent 左侧导航可见，点击 MCP Servers / Runtime 只渲染对应编辑卡片，URL `agentSection` 可刷新恢复，亮色与暗色主题下当前项高亮可读 |
 | TC-ASP-14 | WebUI Session 详情 Messages/Settings Tab 与右侧内容滚动回归 | 历史 session 深链默认显示 Messages Tab，长事件列表在右侧内容区真实滚动；Settings Tab 展示 Session Info、AGENTS.md Instructions 和 Skills |
 | TC-ASP-15 | WebUI Sessions 列表 title/整行点击进入详情回归 | Sessions 列表不再显示查看 icon；点击 history session title 进入 history 详情；点击 active session 当前行进入 active 详情；删除按钮不会触发行跳转 |
@@ -910,7 +965,15 @@ tracing = "0.1"
 
 IM Gateway 内嵌 Agent 默认通过当前启动的 Bifrost HTTP 代理访问模型提供方：真实 CLI 启动和 E2E `ProxyInstance::start_with_admin` 都使用 `ImGatewayService::new_with_agent_proxy_port(data_dir, Some(port))` 创建服务，底层 `AgentClient::new_with_bifrost_proxy_and_ca(port, data_dir/certs/ca.crt)` 会把 Chat Completions 请求代理到 `http://127.0.0.1:<port>`，并只把当前 Bifrost CA 加入 Agent 自己的 reqwest trust store。这样模型请求、响应、状态码和耗时会落入现有 Traffic 记录；对模型域名启用 TLS intercept 时，Agent 不会因为 Bifrost 签发的拦截证书报 `UnknownIssuer`。
 
+内置 Agent loop 实际在隔离的 `bifrost agent worker` 子进程里执行。父进程创建 worker 请求时必须携带当前 Bifrost 端口；worker 也必须能从 `BIFROST_ADMIN_PORT` 或 `BIFROST_DATA_DIR/runtime.json` 恢复端口，避免子进程退化成 direct client。库级 `AgentClient::new()` 使用 `direct_reqwest_client_builder().no_proxy()`，不能读取 `HTTP_PROXY/HTTPS_PROXY/ALL_PROXY` 等外部环境变量；否则日志会显示 `model_proxy_url="direct"`，但请求实际被 shell/system proxy 劫持，且没有加载 Bifrost CA，最终在 TLS intercept 场景下报 `UnknownIssuer`。
+
+Agent 相关 HTTP 客户端必须复用 `bifrost_core` 的 direct/proxied client builder：MCP Streamable HTTP、MCP availability 检查、Agent worker 内 MCP、IM event loop 内 MCP、MCP OAuth discovery/token、Agent 回复远端图片/附件下载、ChatGPT Web native/CDP HTTP 探测都不能裸用 `reqwest::Client::new()` 或默认 builder。HTTP MCP 在 Agent 已配置内置代理时使用同一个 Bifrost proxy URL 与 `data_dir/certs/ca.crt`；stdio MCP 子进程默认移除继承自父进程的 proxy 环境变量，只有 MCP server config 的 `env` 显式写入时才会生效。
+
+`bifrost agent run` 是 Server 模式命令：CLI 只调用 `/_bifrost/api/im-gateway/chat/stream`，由已经启动的 Bifrost Server 再拉起内置 worker 或 `external-runner-worker` 执行 Codex/ChatGPT Web/自定义 Runner。若代理服务未启动，CLI 应明确提示 `Failed to reach Bifrost ... is the proxy running?`，而不是在当前 CLI 进程中 fallback 本地执行。
+
 库级直连调用仍保留 `AgentClient::new()`，用于纯单元测试和不在 Bifrost 服务内运行的场景。需要临时绕过默认代理时，可设置 `BIFROST_AGENT_DISABLE_MODEL_PROXY=1`，服务会回退为直连模型请求。
+
+Agent/Runner/Voice/ASR 这类异步工作必须在独立进程中运行，主进程只保留代理、Admin 网关和调度任务。为了方便在 Activity Monitor、`ps` 等系统进程列表中辨认，所有由 Bifrost 启动的长期 worker 都必须通过 `runtime/process-aliases/` 下的场景别名入口 exec：内置 Agent worker 使用 `bifrost-agent`，外部 CLI Runner worker 使用 `bifrost-runner`，Voice worker 使用 `bifrost-voice`，托管 ASR server 使用 `bifrost-asr-server`，按 chunk fork 的 ASR CLI 使用 `bifrost-asr-cli`。别名创建失败不能阻断业务，应记录 warning 并回退到原 executable。
 
 ## `/agent/chat` `/status` 工作目录语义
 

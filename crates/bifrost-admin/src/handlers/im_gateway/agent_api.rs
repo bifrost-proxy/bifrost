@@ -41,7 +41,21 @@ pub(super) async fn handle_agent(
             return method_not_allowed();
         }
         let config = service.agent_config_store.load();
-        let statuses = bifrost_agent::mcp::check_server_availability(&config.mcp_servers).await;
+        let mcp_http_network = service
+            .agent_client
+            .model_proxy_url()
+            .map(|proxy_url| {
+                bifrost_agent::mcp::McpHttpNetwork::with_proxy_and_ca(
+                    proxy_url.to_string(),
+                    Some(bifrost_storage::data_dir().join("certs").join("ca.crt")),
+                )
+            })
+            .unwrap_or_else(bifrost_agent::mcp::McpHttpNetwork::direct);
+        let statuses = bifrost_agent::mcp::check_server_availability_with_http_network(
+            &config.mcp_servers,
+            mcp_http_network,
+        )
+        .await;
         return json_response(&serde_json::json!({ "servers": statuses }));
     }
 
@@ -191,6 +205,10 @@ pub(super) async fn handle_agent(
             let info = active_info_by_key.get(&s.session_key);
             let history = history_by_key.get(&s.session_key);
             let duration_secs = s.updated_at.saturating_sub(s.started_at);
+            let queue_snapshot = crate::handlers::agent_chat::queue_snapshot_payload(
+                &service.queue_manager,
+                &s.session_key,
+            );
             unified.push(serde_json::json!({
                 "session_key": s.session_key,
                 "status": "active",
@@ -205,6 +223,9 @@ pub(super) async fn handle_agent(
                 "duration_secs": duration_secs,
                 "compaction_count": s.compaction_count,
                 "estimated_tokens": s.estimated_context_tokens,
+                "context_window_tokens": s.context_window_tokens,
+                "context_usage_percent": s.context_usage_percent,
+                "last_response_tokens": s.last_response_tokens,
                 "agent_type": s.agent_type.or_else(|| info.and_then(|item| item.agent_type.clone())),
                 "runner_type": s.runner_type.or_else(|| info.and_then(|item| item.runner_type.clone())),
                 "runner_id": s.runner_id.or_else(|| info.and_then(|item| item.runner_id.clone())),
@@ -215,6 +236,10 @@ pub(super) async fn handle_agent(
                 "has_timeline": history.is_some(),
                 "timeline_event_count": history.map(|(_, summary)| summary.event_count).unwrap_or(0),
                 "run_state": "running",
+                "queue_length": queue_snapshot["queueLength"].clone(),
+                "queue_items": queue_snapshot["queueItems"].clone(),
+                "queueLength": queue_snapshot["queueLength"].clone(),
+                "queueItems": queue_snapshot["queueItems"].clone(),
             }));
         }
 
@@ -228,6 +253,10 @@ pub(super) async fn handle_agent(
             }
             let history = history_by_key.get(&s.session_key);
             let duration_secs = s.last_active_at.saturating_sub(s.created_at);
+            let queue_snapshot = crate::handlers::agent_chat::queue_snapshot_payload(
+                &service.queue_manager,
+                &s.session_key,
+            );
             unified.push(serde_json::json!({
                 "session_key": s.session_key,
                 "status": "active",
@@ -260,6 +289,10 @@ pub(super) async fn handle_agent(
                 "run_state": history
                     .and_then(|(_, summary)| summary.run_state.clone())
                     .unwrap_or(s.run_state),
+                "queue_length": queue_snapshot["queueLength"].clone(),
+                "queue_items": queue_snapshot["queueItems"].clone(),
+                "queueLength": queue_snapshot["queueLength"].clone(),
+                "queueItems": queue_snapshot["queueItems"].clone(),
             }));
         }
 
@@ -453,9 +486,50 @@ pub(super) async fn handle_agent(
         };
         if req.method() == Method::GET {
             // Return full events with all details (tool calls, results, metadata, etc.)
-            match bifrost_agent::persistence::load_conversation_events(&path) {
-                Ok(events) => {
-                    let event_values: Vec<serde_json::Value> = events
+            let query_params = parse_query_params(req.uri().query().unwrap_or_default());
+            let limit = query_params
+                .get("limit")
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|value| *value > 0)
+                .map(|value| value.min(500));
+            let cursor = query_params
+                .get("cursor")
+                .and_then(|value| value.parse::<usize>().ok());
+            let since = query_params
+                .get("since")
+                .and_then(|value| value.parse::<usize>().ok());
+            let tail = query_params
+                .get("tail")
+                .map(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+                .unwrap_or(false);
+            let paged_request = limit.is_some() || cursor.is_some() || since.is_some() || tail;
+            let page_result = if paged_request {
+                bifrost_agent::persistence::load_conversation_events_page(
+                    &path,
+                    bifrost_agent::persistence::ConversationEventPageOptions {
+                        limit,
+                        cursor,
+                        tail,
+                        since,
+                    },
+                )
+            } else {
+                bifrost_agent::persistence::load_conversation_events(&path).map(|events| {
+                    let total_count = events.len();
+                    bifrost_agent::persistence::ConversationEventPage {
+                        events,
+                        total_count,
+                        start_index: 0,
+                        end_index: total_count,
+                        next_cursor: None,
+                        has_more: false,
+                    }
+                })
+            };
+            match page_result {
+                Ok(page) => {
+                    let event_values: Vec<serde_json::Value> = page
+                        .events
                         .iter()
                         .map(|e| {
                             serde_json::json!({
@@ -466,9 +540,15 @@ pub(super) async fn handle_agent(
                             })
                         })
                         .collect();
-                    return json_response(
-                        &serde_json::json!({ "events": event_values, "count": event_values.len() }),
-                    );
+                    return json_response(&serde_json::json!({
+                        "events": event_values,
+                        "count": event_values.len(),
+                        "total_count": page.total_count,
+                        "start_index": page.start_index,
+                        "end_index": page.end_index,
+                        "next_cursor": page.next_cursor,
+                        "has_more": page.has_more,
+                    }));
                 }
                 Err(e) => {
                     return error_response(
@@ -498,21 +578,34 @@ pub(super) async fn handle_agent(
             .unwrap_or_default()
             .to_string();
         if req.method() == Method::GET {
-            match service
+            let active_status = service
+                .agent_session_manager
+                .get_active_turn_status(&session_key);
+            let detail = service
                 .agent_session_manager
                 .get_session_detail(&session_key)
-            {
-                Some(detail) => return json_response(&detail),
-                None => {
-                    if let Some(detail) = history_session_detail(&session_key) {
-                        return json_response(&detail);
-                    }
-                    if let Some(detail) = external_runner_session_detail(&session_key).await {
-                        return json_response(&detail);
-                    }
-                    return error_response(StatusCode::NOT_FOUND, "session not found");
-                }
+                .or_else(|| history_session_detail(&session_key));
+            if let Some(detail) = detail {
+                return json_response(&session_detail_response(
+                    detail,
+                    &service.queue_manager,
+                    active_status,
+                ));
             }
+            if let Some(detail) = external_runner_session_detail(&session_key).await {
+                return json_response(&session_detail_response(
+                    detail,
+                    &service.queue_manager,
+                    active_status,
+                ));
+            }
+            if let Some(status) = active_status {
+                return json_response(&active_status_session_detail(
+                    status,
+                    &service.queue_manager,
+                ));
+            }
+            return error_response(StatusCode::NOT_FOUND, "session not found");
         }
         if req.method() == Method::DELETE {
             service.agent_session_manager.request_stop(&session_key);
@@ -595,7 +688,10 @@ pub(super) async fn handle_agent(
                 .agent_session_manager
                 .get_active_turn_status(&session_key)
             {
-                let pending_guides = service.queue_manager.guide_status(&session_key);
+                let pending_guides = merge_pending_guide_messages(
+                    &status.pending_guide_messages,
+                    service.queue_manager.guide_status(&session_key),
+                );
                 status.pending_guide_messages = pending_guides.clone();
                 let status_context = status_context_from_agent_runner(config.runner.as_ref());
                 return json_response(&serde_json::json!({
@@ -672,6 +768,29 @@ pub(super) async fn handle_agent(
             }));
         }
 
+        if matches!(body.message.trim(), "/clear" | "/reset") {
+            service.agent_session_manager.request_stop(&session_key);
+            if let Some(mut session) = service.agent_session_manager.try_take_session(&session_key)
+            {
+                session.clear();
+                service.agent_session_manager.return_session(session);
+            } else {
+                service.agent_session_manager.clear_session(&session_key);
+            }
+            service.queue_manager.clear_session(&session_key);
+            clear_persisted_agent_session_state(
+                &session_key,
+                Some(crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER),
+                None,
+            );
+            return json_response(&serde_json::json!({
+                "success": true,
+                "response": "会话已重置，可以开始新的对话。",
+                "tool_calls": [],
+                "plan_steps": null
+            }));
+        }
+
         if let Some(response) =
             bifrost_agent::handle_session_free_command(&session_key, &body.message, &config)
         {
@@ -742,95 +861,23 @@ pub(super) async fn handle_agent(
             Some(crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER.to_string()),
             None,
         );
+        prime_builtin_worker_active_status(&service.agent_session_manager, &session, &config);
         consume_imported_contexts_for_builtin_agent(&mut session);
-        // If guide messages are provided, inject into the shared guide channel
-        // to simulate messages arriving before the next guide checkpoint.
-        let mut has_guide_messages = false;
-        if let Some(ref guide_msg) = body.guide_message {
-            if !guide_msg.trim().is_empty() {
-                service
-                    .queue_manager
-                    .inject_guide(&session_key, guide_msg.clone());
-                has_guide_messages = true;
-            }
-        }
-        for guide_msg in &body.guide_messages {
-            if !guide_msg.trim().is_empty() {
-                service
-                    .queue_manager
-                    .inject_guide(&session_key, guide_msg.clone());
-                has_guide_messages = true;
-            }
-        }
-        if has_guide_messages {
-            session.guide_channel = Some(
-                service
-                    .queue_manager
-                    .get_or_create_guide_channel(&session_key),
-            );
-        }
-        // If queue_messages is provided, inject into session's pending_messages
-        // to simulate queued messages arriving during agent processing.
-        for msg in &body.queue_messages {
-            if !msg.trim().is_empty() {
-                session.pending_messages.push_back(msg.clone());
-            }
-        }
-        // Initialize MCP from config for test endpoint (mirrors event loop behavior)
-        let mut mcp_manager = ImMcpManager::new(&config.mcp_servers).await;
-        let mcp_opt: Option<&mut ImMcpManager> = if mcp_manager.list_tools().is_empty() {
-            None
-        } else {
-            Some(&mut mcp_manager)
-        };
-        // Create recorder for persistence (same logic as process_agent_chat)
-        let mut recorder = if !config.is_ephemeral() {
-            let should_persist = config
-                .history
-                .as_ref()
-                .map(|h| h.persistence != bifrost_agent::config::HistoryPersistence::None)
-                .unwrap_or(true);
-            if should_persist {
-                if let Some(mut rec) = session.recorder.take() {
-                    let _ =
-                        rec.record_run_state(&session_key, "running", Some("api"), Some("builtin"));
-                    Some(rec)
-                } else {
-                    let data_dir = bifrost_agent::config::agent_home_dir();
-                    let max_bytes = config.history.as_ref().and_then(|h| h.max_bytes);
-                    let mut rec = ConversationRecorder::new_with_max_bytes(
-                        &data_dir,
-                        &session_key,
-                        max_bytes,
-                    );
-                    let _ = rec.record_session_start(
-                        &session_key,
-                        serde_json::json!({
-                            "model": config.model,
-                            "provider": config.model_provider,
-                            "source": "api",
-                            "base_instructions": bifrost_agent::prompt::resolve_base_instructions_text(&config, None),
-                        }),
-                    );
-                    let _ =
-                        rec.record_run_state(&session_key, "running", Some("api"), Some("builtin"));
-                    Some(rec)
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        // Initial guide messages are passed to the isolated worker request.
+        // Avoid writing them into the main-process guide queue, otherwise the
+        // same guide can leak into a later turn after the worker has finished.
+        let history_path = session
+            .recorder
+            .as_ref()
+            .map(|recorder| recorder.file_path().display().to_string())
+            .or_else(|| body.history_path.clone());
         if !is_manual_compaction {
             remember_session_turn_started(
                 &session_key,
                 crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
                 None,
                 &body.message,
-                recorder
-                    .as_ref()
-                    .map(|recorder| recorder.file_path().display().to_string()),
+                history_path.clone(),
                 session.work_dir.clone(),
             );
         }
@@ -852,49 +899,82 @@ pub(super) async fn handle_agent(
                 "too many /agent/chat images in one request; truncating images"
             );
         }
-        let turn_tools = service.build_agent_tool_registry(config.default_message_channel.clone());
-        let result = if is_manual_compaction {
-            bifrost_agent::session::run_manual_compaction_command(
-                &service.agent_client,
-                &config,
-                &mut session,
-                recorder.as_mut(),
-            )
-            .await
-        } else {
-            bifrost_agent::session::run_turn_with_mcp_multimodal(
-                &service.agent_client,
-                &config,
-                &mut session,
-                &turn_tools,
-                mcp_opt,
-                &body.message,
-                &images,
-                body.system_prompt.as_deref(),
-                recorder.as_mut(),
-            )
-            .await
+        let mut worker_request = crate::im_gateway::agent_worker::build_run_request(
+            session_key.clone(),
+            body.message.clone(),
+            images,
+            &config,
+            session.work_dir.clone(),
+            history_path,
+            Some("api".to_string()),
+        );
+        worker_request.system_prompt = body.system_prompt.clone();
+        worker_request.guide_messages = body
+            .guide_message
+            .clone()
+            .into_iter()
+            .chain(body.guide_messages.clone())
+            .collect();
+        worker_request.queued_messages = body.queue_messages.clone();
+        let worker_client = match crate::im_gateway::agent_worker::AgentWorkerClient::current_exe()
+        {
+            Ok(client) => client,
+            Err(error) => {
+                service.agent_session_manager.return_session(session);
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error);
+            }
         };
-        mcp_manager.shutdown().await;
-        if let Some(recorder) = recorder.as_mut() {
-            let state = if result.is_ok() {
-                "completed"
-            } else {
-                "failed"
-            };
-            let _ = recorder.record_run_state(&session_key, state, Some("api"), Some("builtin"));
+        let mut worker = match worker_client.spawn(worker_request).await {
+            Ok(worker) => worker,
+            Err(error) => {
+                service.agent_session_manager.return_session(session);
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error);
+            }
+        };
+        let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        if let Some(pid) = worker.child_id() {
+            crate::im_gateway::agent_worker::register_active_worker(&session_key, pid, stop_tx);
         }
-        if recorder.is_some() && !session.memory_cleared {
-            session.recorder = recorder;
-        }
-        // If the session was cleared (via /clear or /reset), also clear the
-        // ChatGPT Web conversation mapping so the next runner message starts fresh.
-        if session.memory_cleared {
-            clear_persisted_agent_session_state(
-                &session_key,
-                Some(crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER),
-                None,
-            );
+        let result = loop {
+            tokio::select! {
+                _ = stop_rx.recv() => {
+                    let _ = worker.terminate().await;
+                    break Err("已收到 /stop，Agent worker 子进程已停止。".to_string());
+                }
+                event = worker.next_event() => {
+                    match event {
+                        Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Started { .. })) => {}
+                        Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Progress { event })) => {
+                            if let bifrost_agent::AgentTurnProgressEvent::Status(status) = event {
+                                service.agent_session_manager.update_active_turn_status_from_worker(*status);
+                            }
+                        }
+                        Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Finished { result })) => {
+                            if let Some(history_path) = result.history_path.as_deref() {
+                                let _ = restore_session_from_history_path(
+                                    &mut session,
+                                    history_path,
+                                    &session_key,
+                                    config.history.as_ref().and_then(|h| h.max_bytes),
+                                );
+                            }
+                            break Ok(bifrost_agent::TurnResult::from(result));
+                        }
+                        Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Failed { error })) => break Err(error),
+                        Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Stopped)) => {
+                            break Err("已收到 /stop，Agent worker 子进程已停止。".to_string());
+                        }
+                        Ok(None) => break Err("agent worker exited without result".to_string()),
+                        Err(error) => break Err(format!("agent worker failed: {error}")),
+                    }
+                }
+            }
+        };
+        crate::im_gateway::agent_worker::clear_active_worker(&session_key);
+        if let Ok(turn_result) = &result {
+            if let Some(new_dir) = turn_result.work_dir_switched.as_ref() {
+                session.work_dir = Some(new_dir.clone());
+            }
         }
         remember_session_state_from_agent_session(
             &session,
@@ -918,6 +998,20 @@ pub(super) async fn handle_agent(
                 }))
             }
             Err(e) => {
+                if e.contains("已收到 /stop") {
+                    info!(
+                        session_key = %session_key,
+                        response = %e,
+                        "agent chat api stopped"
+                    );
+                    return json_response(&serde_json::json!({
+                        "success": true,
+                        "response": e,
+                        "stopped": true,
+                        "tool_calls": [],
+                        "plan_steps": null
+                    }));
+                }
                 error!(
                     session_key = %session_key,
                     error = %e,
@@ -1388,6 +1482,218 @@ fn is_runner_call_session_key(session_key: &str) -> bool {
     session_key.starts_with("runner-call:")
 }
 
+fn session_detail_response(
+    detail: bifrost_agent::SessionDetail,
+    queue_manager: &crate::im_gateway::SessionQueueManager,
+    active_status: Option<bifrost_agent::ActiveTurnStatus>,
+) -> serde_json::Value {
+    let mut value = session_detail_with_active_status(detail, active_status);
+    insert_queue_snapshot(&mut value, queue_manager);
+    value
+}
+
+fn session_detail_with_active_status(
+    detail: bifrost_agent::SessionDetail,
+    active_status: Option<bifrost_agent::ActiveTurnStatus>,
+) -> serde_json::Value {
+    let Some(status) = active_status else {
+        return serde_json::to_value(detail).unwrap_or_else(|_| serde_json::json!({}));
+    };
+    let mut value = serde_json::to_value(detail).unwrap_or_else(|_| serde_json::json!({}));
+    overlay_active_status_on_session_detail(&mut value, status);
+    value
+}
+
+fn active_status_session_detail(
+    status: bifrost_agent::ActiveTurnStatus,
+    queue_manager: &crate::im_gateway::SessionQueueManager,
+) -> serde_json::Value {
+    let active_status = serde_json::to_value(&status).unwrap_or_else(|_| serde_json::json!({}));
+    let mut value = serde_json::json!({
+        "session_key": status.session_key.clone(),
+        "user_id": null,
+        "message_count": status.message_count,
+        "user_turn_count": status.user_turn_count,
+        "created_at": status.started_at,
+        "last_active_at": status.updated_at,
+        "compaction_count": status.compaction_count,
+        "total_tokens_used": status.total_tokens_used,
+        "estimated_tokens": status.estimated_context_tokens,
+        "context_window_tokens": status.context_window_tokens,
+        "context_usage_percent": status.context_usage_percent,
+        "last_response_tokens": status.last_response_tokens,
+        "history_version": status.history_version,
+        "work_dir": status.work_dir.clone(),
+        "source": "admin-api",
+        "agent_type": status.agent_type.clone(),
+        "runner_type": status.runner_type.clone(),
+        "runner_id": status.runner_id.clone(),
+        "external_conversation_id": status.external_conversation_id.clone(),
+        "external_thread_id": status.external_thread_id.clone(),
+        "title": null,
+        "messages": [],
+        "goal_status": null,
+        "goal_objective": null,
+        "history_path": null,
+        "has_timeline": false,
+        "timeline_event_count": 0,
+        "run_state": "running",
+        "active_status": active_status,
+    });
+    insert_queue_snapshot(&mut value, queue_manager);
+    value
+}
+
+fn prime_builtin_worker_active_status(
+    manager: &bifrost_agent::AgentSessionManager,
+    session: &bifrost_agent::AgentSession,
+    config: &bifrost_agent::AgentConfig,
+) {
+    let Some(mut status) = manager.get_active_turn_status(&session.session_key) else {
+        return;
+    };
+    let estimated_context_tokens = session.effective_token_count();
+    let context_window_tokens = config
+        .model_context_window
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0);
+    status.state = "running".to_string();
+    status.current_loop_iteration = status.current_loop_iteration.max(1);
+    status.max_loop_iterations = config.get_max_turn_iterations();
+    status.last_response_tokens = session.last_response_tokens;
+    status.total_tokens_used = session.total_tokens_used;
+    status.estimated_context_tokens = estimated_context_tokens;
+    status.context_window_tokens = context_window_tokens;
+    status.context_usage_percent = context_window_tokens
+        .map(|window| ((estimated_context_tokens as f64 / window as f64) * 1000.0).round() / 10.0);
+    status.compaction_count = session.compaction_count;
+    status.history_version = session.history_version;
+    status.work_dir = session.work_dir.clone();
+    status.message_count = session.history.len();
+    status.user_turn_count = session.user_turn_count();
+    status.agent_type = session.agent_type.clone();
+    status.runner_type = session.runner_type.clone();
+    status.runner_id = session.runner_id.clone();
+    manager.update_active_turn_status_from_worker(status);
+}
+
+fn insert_queue_snapshot(
+    value: &mut serde_json::Value,
+    queue_manager: &crate::im_gateway::SessionQueueManager,
+) {
+    let Some(session_key) = value.get("session_key").and_then(|value| value.as_str()) else {
+        return;
+    };
+    let queue_snapshot =
+        crate::handlers::agent_chat::queue_snapshot_payload(queue_manager, session_key);
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "queue_length".to_string(),
+            queue_snapshot["queueLength"].clone(),
+        );
+        object.insert(
+            "queue_items".to_string(),
+            queue_snapshot["queueItems"].clone(),
+        );
+        object.insert(
+            "queueLength".to_string(),
+            queue_snapshot["queueLength"].clone(),
+        );
+        object.insert(
+            "queueItems".to_string(),
+            queue_snapshot["queueItems"].clone(),
+        );
+    }
+}
+
+fn overlay_active_status_on_session_detail(
+    value: &mut serde_json::Value,
+    status: bifrost_agent::ActiveTurnStatus,
+) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    let active_status = serde_json::to_value(&status).unwrap_or_else(|_| serde_json::json!({}));
+    object.insert("run_state".to_string(), serde_json::json!("running"));
+    object.insert(
+        "message_count".to_string(),
+        serde_json::json!(status.message_count),
+    );
+    object.insert(
+        "user_turn_count".to_string(),
+        serde_json::json!(status.user_turn_count),
+    );
+    object.insert(
+        "last_active_at".to_string(),
+        serde_json::json!(status.updated_at),
+    );
+    object.insert(
+        "compaction_count".to_string(),
+        serde_json::json!(status.compaction_count),
+    );
+    object.insert(
+        "total_tokens_used".to_string(),
+        serde_json::json!(status.total_tokens_used),
+    );
+    object.insert(
+        "estimated_tokens".to_string(),
+        serde_json::json!(status.estimated_context_tokens),
+    );
+    object.insert(
+        "context_window_tokens".to_string(),
+        serde_json::json!(status.context_window_tokens),
+    );
+    object.insert(
+        "context_usage_percent".to_string(),
+        serde_json::json!(status.context_usage_percent),
+    );
+    object.insert(
+        "last_response_tokens".to_string(),
+        serde_json::json!(status.last_response_tokens),
+    );
+    object.insert(
+        "history_version".to_string(),
+        serde_json::json!(status.history_version),
+    );
+    if status.work_dir.is_some() {
+        object.insert(
+            "work_dir".to_string(),
+            serde_json::json!(status.work_dir.clone()),
+        );
+    }
+    if status.agent_type.is_some() {
+        object.insert(
+            "agent_type".to_string(),
+            serde_json::json!(status.agent_type.clone()),
+        );
+    }
+    if status.runner_type.is_some() {
+        object.insert(
+            "runner_type".to_string(),
+            serde_json::json!(status.runner_type.clone()),
+        );
+    }
+    if status.runner_id.is_some() {
+        object.insert(
+            "runner_id".to_string(),
+            serde_json::json!(status.runner_id.clone()),
+        );
+    }
+    if status.external_conversation_id.is_some() {
+        object.insert(
+            "external_conversation_id".to_string(),
+            serde_json::json!(status.external_conversation_id.clone()),
+        );
+    }
+    if status.external_thread_id.is_some() {
+        object.insert(
+            "external_thread_id".to_string(),
+            serde_json::json!(status.external_thread_id.clone()),
+        );
+    }
+    object.insert("active_status".to_string(), active_status);
+}
+
 fn history_session_detail(session_key: &str) -> Option<bifrost_agent::SessionDetail> {
     let data_dir = bifrost_agent::config::agent_home_dir();
     let files = bifrost_agent::persistence::list_conversations(&data_dir, Some(session_key));
@@ -1549,7 +1855,7 @@ async fn external_runner_session_detail(session_key: &str) -> Option<bifrost_age
                 role: message.role.clone(),
                 content: message.content.clone(),
                 timestamp: message.timestamp,
-                content_parts: None,
+                content_parts: message.content_parts.clone(),
                 tool_calls: None,
             }
         }));
@@ -1701,6 +2007,109 @@ mod tests {
         assert!(!is_runner_call_session_key("admin-chat-1"));
     }
 
+    #[test]
+    fn session_detail_overlay_uses_active_status_token_context_metrics() {
+        let detail = bifrost_agent::SessionDetail {
+            session_key: "active-token-sync".to_string(),
+            user_id: None,
+            message_count: 10,
+            user_turn_count: 5,
+            created_at: 1,
+            last_active_at: 2,
+            compaction_count: 1,
+            total_tokens_used: Some(19_503_264),
+            estimated_tokens: 23_448,
+            history_version: 3,
+            work_dir: Some("/tmp/old".to_string()),
+            source: "feishu".to_string(),
+            agent_type: None,
+            runner_type: None,
+            runner_id: None,
+            external_conversation_id: None,
+            external_thread_id: None,
+            title: Some("history title".to_string()),
+            messages: Vec::new(),
+            goal_status: None,
+            goal_objective: None,
+            history_path: Some("/tmp/history.jsonl".to_string()),
+            has_timeline: true,
+            timeline_event_count: 100,
+            run_state: "completed".to_string(),
+        };
+        let status = bifrost_agent::ActiveTurnStatus {
+            session_key: "active-token-sync".to_string(),
+            state: "waiting_on_session".to_string(),
+            started_at: 10,
+            updated_at: 20,
+            current_loop_iteration: 97,
+            completed_loop_iterations: 96,
+            max_loop_iterations: 1000,
+            last_response_tokens: Some(181_900),
+            total_tokens_used: Some(29_668_709),
+            estimated_context_tokens: 186_727,
+            context_window_tokens: Some(250_000),
+            context_usage_percent: Some(74.7),
+            compaction_count: 2,
+            history_version: 11,
+            work_dir: Some("/tmp/live".to_string()),
+            message_count: 204,
+            local_tool_count: 1,
+            mcp_tool_count: 2,
+            pending_guide_messages: Vec::new(),
+            user_turn_count: 50,
+            agent_type: Some("Bifrost Agent".to_string()),
+            runner_type: Some("bifrost_agent".to_string()),
+            runner_id: None,
+            external_conversation_id: None,
+            external_thread_id: None,
+            turn_timing: None,
+            turn_id: None,
+        };
+
+        let value = session_detail_with_active_status(detail, Some(status));
+
+        assert_eq!(value["run_state"], "running");
+        assert_eq!(value["total_tokens_used"], 29_668_709);
+        assert_eq!(value["estimated_tokens"], 186_727);
+        assert_eq!(value["context_window_tokens"], 250_000);
+        assert_eq!(value["context_usage_percent"], 74.7);
+        assert_eq!(value["last_response_tokens"], 181_900);
+        assert_eq!(value["active_status"]["estimated_context_tokens"], 186_727);
+        assert_eq!(value["history_path"], "/tmp/history.jsonl");
+    }
+
+    #[test]
+    fn prime_builtin_worker_active_status_publishes_running_snapshot() {
+        let manager = bifrost_agent::AgentSessionManager::new(3600);
+        let mut session = manager.take_session_with_work_dir(
+            "worker-prime-status",
+            Some("/tmp/worker-prime-status".to_string()),
+        );
+        session.mark_bifrost_agent_runtime();
+        session
+            .history
+            .push(bifrost_agent::ChatMessage::user("hello"));
+
+        let config = bifrost_agent::AgentConfig {
+            max_turn_iterations: Some(8),
+            ..Default::default()
+        };
+
+        prime_builtin_worker_active_status(&manager, &session, &config);
+
+        let status = manager
+            .get_active_turn_status("worker-prime-status")
+            .expect("active status");
+        assert_eq!(status.state, "running");
+        assert_eq!(status.current_loop_iteration, 1);
+        assert_eq!(status.max_loop_iterations, 8);
+        assert_eq!(status.work_dir.as_deref(), Some("/tmp/worker-prime-status"));
+        assert_eq!(status.context_window_tokens, Some(250_000));
+        assert_eq!(status.agent_type.as_deref(), Some("Bifrost Agent"));
+        assert_eq!(status.runner_type.as_deref(), Some("bifrost_agent"));
+        assert_eq!(status.user_turn_count, 1);
+    }
+
     struct AgentApiEnvGuard {
         _guard: crate::test_env::BifrostDataDirGuard,
     }
@@ -1788,11 +2197,13 @@ mod tests {
                         role: "user".to_string(),
                         content: "stale user".to_string(),
                         timestamp: Some(1),
+                        content_parts: None,
                     },
                     crate::im_gateway::session_state::ImAgentSessionMessage {
                         role: "assistant".to_string(),
                         content: "stale assistant".to_string(),
                         timestamp: Some(2),
+                        content_parts: None,
                     },
                 ],
                 updated_at: 1_770_000_000_000,
@@ -1828,11 +2239,13 @@ mod tests {
                 role: "user".to_string(),
                 content: format!("ChatGPT Web round {turn}"),
                 timestamp: Some(1_770_000_000 + turn * 2),
+                content_parts: None,
             });
             messages.push(crate::im_gateway::session_state::ImAgentSessionMessage {
                 role: "assistant".to_string(),
                 content: format!("ChatGPT Web answer {turn}"),
                 timestamp: Some(1_770_000_000 + turn * 2 + 1),
+                content_parts: None,
             });
         }
 

@@ -253,8 +253,8 @@ export default function SpeechTab() {
               value={params.model || defaults.model}
               style={{ width: "100%" }}
               options={[
-                { value: "Qwen3-ASR-1.7B", label: "Qwen3-ASR-1.7B" },
                 { value: "Qwen3-ASR-0.6B", label: "Qwen3-ASR-0.6B" },
+                { value: "Qwen3-ASR-1.7B", label: "Qwen3-ASR-1.7B" },
               ]}
               onChange={(value) =>
                 setParams((prev) => ({ ...prev, model: value }))

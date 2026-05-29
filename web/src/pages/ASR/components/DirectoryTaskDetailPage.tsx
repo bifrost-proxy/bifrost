@@ -41,6 +41,7 @@ import {
   cleanupAsrSourceAudio,
   retryAllFailedChunks,
   retryFailedChunks,
+  triggerDailyAgentRun,
 } from "../../../api/asr";
 import {
   fileStatusColor,
@@ -179,6 +180,7 @@ export default function DirectoryTaskDetailPage({
   const [retryingFileKey, setRetryingFileKey] = useState<string | null>(null);
   const [startingBulkRetry, setStartingBulkRetry] = useState(false);
   const [cleaningSourceAudio, setCleaningSourceAudio] = useState(false);
+  const [dailyAgentRunDate, setDailyAgentRunDate] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [fileStatusFilter, setFileStatusFilter] = useState<FileStatusFilter>("all");
   const [fileTablePagination, setFileTablePagination] = useState({
@@ -303,6 +305,24 @@ export default function DirectoryTaskDetailPage({
       setCleaningSourceAudio(false);
     }
   }, [taskDetail, onRefreshTask]);
+
+  const handleRunDailyAgentForDocument = useCallback(
+    async (date: string) => {
+      if (!taskDetail || dailyAgentRunDate) return;
+      setDailyAgentRunDate(date);
+      try {
+        const result = await triggerDailyAgentRun(taskDetail.id, { date });
+        message.success(result.message || `Daily Agent run queued for ${date}`);
+      } catch (error) {
+        message.error(
+          `Daily Agent run failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      } finally {
+        setDailyAgentRunDate(null);
+      }
+    },
+    [dailyAgentRunDate, taskDetail],
+  );
 
   if (selectedFileKey) {
     return (
@@ -1080,16 +1100,29 @@ export default function DirectoryTaskDetailPage({
                             },
                             {
                               title: "Action",
-                              width: 140,
+                              width: 220,
                               render: (_value, record) => (
-                                <Button
-                                  type="link"
-                                  size="small"
-                                  style={{ padding: 0 }}
-                                  onClick={() => onOpenDailyDocument(record.date)}
-                                >
-                                  Open document
-                                </Button>
+                                <Space size={8} wrap>
+                                  <Button
+                                    type="link"
+                                    size="small"
+                                    style={{ padding: 0 }}
+                                    onClick={() => onOpenDailyDocument(record.date)}
+                                  >
+                                    Open document
+                                  </Button>
+                                  <Button
+                                    type="link"
+                                    size="small"
+                                    style={{ padding: 0 }}
+                                    loading={dailyAgentRunDate === record.date}
+                                    disabled={Boolean(dailyAgentRunDate)}
+                                    data-testid={`asr-daily-doc-run-agent-${record.date}`}
+                                    onClick={() => handleRunDailyAgentForDocument(record.date)}
+                                  >
+                                    Run Daily Agent
+                                  </Button>
+                                </Space>
                               ),
                             },
                           ]}

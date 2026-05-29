@@ -53,6 +53,23 @@ fn apply_busy_message_default_guides_builtin_messages_without_queueing() {
 }
 
 #[test]
+fn merge_pending_guide_messages_keeps_worker_guides_and_deduplicates_queue_guides() {
+    let merged = merge_pending_guide_messages(
+        &["worker-guide".to_string(), "shared-guide".to_string()],
+        vec!["shared-guide".to_string(), "queue-guide".to_string()],
+    );
+
+    assert_eq!(
+        merged,
+        vec![
+            "worker-guide".to_string(),
+            "shared-guide".to_string(),
+            "queue-guide".to_string()
+        ]
+    );
+}
+
+#[test]
 fn apply_busy_message_default_queues_custom_runner_messages() {
     let manager = SessionQueueManager::new();
 
@@ -81,6 +98,7 @@ fn apply_busy_message_default_queues_custom_runner_messages() {
 #[test]
 fn codex_runner_metadata_resumes_queued_messages_after_current_run() {
     let mut request = crate::im_gateway::external_cli::ExternalCliRunRequest {
+        images: Vec::new(),
         message: "queued continuation".to_string(),
         operation: "chat".to_string(),
         params: serde_json::Value::Null,
@@ -113,6 +131,7 @@ fn codex_runner_metadata_resumes_queued_messages_after_current_run() {
 #[test]
 fn codex_runner_metadata_does_not_override_explicit_thread() {
     let mut request = crate::im_gateway::external_cli::ExternalCliRunRequest {
+        images: Vec::new(),
         message: "queued continuation".to_string(),
         operation: "chat".to_string(),
         params: serde_json::json!({ "threadId": "explicit-thread" }),
@@ -145,6 +164,7 @@ fn codex_runner_metadata_does_not_override_explicit_thread() {
 #[test]
 fn chatgpt_web_metadata_resumes_persisted_conversation() {
     let mut request = crate::im_gateway::external_cli::ExternalCliRunRequest {
+        images: Vec::new(),
         message: "continue".to_string(),
         operation: "ask".to_string(),
         params: serde_json::Value::Null,

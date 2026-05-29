@@ -1344,28 +1344,14 @@ fn source_key(path: &Path) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn output_paths(task_id: &str, source: &Path, audio_dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
-    output_paths_in(&bifrost_storage::data_dir(), task_id, source, audio_dir)
-}
-
+#[cfg(test)]
 fn output_paths_in(
     data_dir: &Path,
     task_id: &str,
     source: &Path,
     audio_dir: &Path,
 ) -> (PathBuf, PathBuf, PathBuf) {
-    // Preserve the relative directory structure from audio_dir so that output
-    // mirrors the original folder hierarchy (important for recursive tasks).
-    let relative = source
-        .strip_prefix(audio_dir)
-        .unwrap_or(source.file_name().map(Path::new).unwrap_or(source));
-    let stem = relative.with_extension("");
-    let dir = text_output_dir(data_dir).join(task_id);
-    (
-        dir.join(format!("{}.txt", stem.display())),
-        dir.join(format!("{}.json", stem.display())),
-        dir.join(format!("{}.timeline.json", stem.display())),
-    )
+    bifrost_asr::artifacts::output_paths_in(data_dir, task_id, source, audio_dir)
 }
 
 struct TaskRunFileLock {

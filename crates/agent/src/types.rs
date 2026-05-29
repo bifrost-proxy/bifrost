@@ -345,7 +345,7 @@ impl TokenUsage {
 }
 
 /// Result of a tool execution.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
     pub success: bool,
     pub output: String,
@@ -356,7 +356,8 @@ pub struct ToolResult {
 ///
 /// These events are consumed by the turn loop and are not exposed as model-visible
 /// tool output.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolRuntimeEvent {
     PlanUpdate(UpdatePlanArgs),
 }

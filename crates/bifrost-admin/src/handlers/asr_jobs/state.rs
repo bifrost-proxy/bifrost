@@ -14,8 +14,6 @@ static CONTENT_HASH_QUEUE_LOCK: Lazy<StdMutex<()>> = Lazy::new(|| StdMutex::new(
 
 const TASK_STORE_VERSION: u32 = 1;
 const ASR_TASK_PAUSED_MESSAGE: &str = "ASR task paused by request";
-const DEFAULT_DIARIZATION_PROFILE: &str = "sherpa-onnx-balanced";
-const ASR_TASK_SEGMENT_MAX_MS: u64 = 30_000;
 const ASR_AUTO_FALLBACK_RTF_MULTIPLIER: f64 = 1.5;
 const MIN_BISECT_SECS: u64 = 2;
 const FFMPEG_NORMALIZE_MIN_TIMEOUT_SECS: u64 = 120;
@@ -119,39 +117,6 @@ pub(crate) struct AsrDirectoryTask {
     pub external_devices: Vec<AsrExternalDeviceBinding>,
     #[serde(default)]
     pub import_policy: AsrExternalImportPolicy,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct AsrDiarizationConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default = "default_diarization_profile")]
-    pub profile: String,
-    #[serde(default)]
-    pub min_speakers: Option<u8>,
-    #[serde(default)]
-    pub max_speakers: Option<u8>,
-    #[serde(default)]
-    pub known_speaker_count: Option<u8>,
-    #[serde(default)]
-    pub voiceprint_matching: bool,
-}
-
-impl Default for AsrDiarizationConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            profile: default_diarization_profile(),
-            min_speakers: None,
-            max_speakers: None,
-            known_speaker_count: None,
-            voiceprint_matching: false,
-        }
-    }
-}
-
-fn default_diarization_profile() -> String {
-    DEFAULT_DIARIZATION_PROFILE.to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1073,6 +1038,31 @@ struct DiarizedTranscriptionOutput {
     fallback_reason: Option<String>,
 }
 
+#[derive(Clone)]
+struct PartialArtifactContext {
+    task_id: String,
+    file_key: String,
+    task_name: String,
+    model: String,
+    language: String,
+    runtime_strategy: AsrRuntimeStrategy,
+    source_path: PathBuf,
+    source_info: SourceAudioInfo,
+    diarization_profile: Option<String>,
+    speakers: Vec<TimelineSpeaker>,
+    text_path: PathBuf,
+    metadata_path: PathBuf,
+    timeline_path: PathBuf,
+    started_at_ms: u64,
+}
+
+struct DiarizedSegmentProgress {
+    text: String,
+    timeline_segments: Vec<TimelineSegment>,
+    chunk_metrics: Vec<AsrChunkMetric>,
+    fallback_reason: Option<String>,
+}
+
 type ChunkProgressCallback<'a> = dyn Fn(usize, usize) + Send + Sync + 'a;
 type ChunkMetricCallback<'a> = dyn Fn(AsrChunkMetric) + Send + Sync + 'a;
 type PauseCheckCallback<'a> = dyn Fn() -> bool + Send + Sync + 'a;
@@ -1087,6 +1077,7 @@ struct TaskTranscribeHooks<'a> {
     startup_fallback_reason: Option<&'a str>,
     server_state: Option<&'a mut Option<ServerRunnerState>>,
     managed_server_restart: Option<ManagedServerRestartContext<'a>>,
+    partial_artifacts: Option<PartialArtifactContext>,
 }
 
 #[derive(Debug, Deserialize)]

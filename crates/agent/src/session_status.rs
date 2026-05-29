@@ -9,7 +9,8 @@ pub type ActiveTurnStatusHandle = Arc<std::sync::Mutex<ActiveTurnStatus>>;
 pub type AgentTurnProgressSender = tokio::sync::mpsc::UnboundedSender<AgentTurnProgressEvent>;
 
 /// Provider-neutral progress events emitted by the turn loop for IM renderers.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentTurnProgressEvent {
     Status(Box<ActiveTurnStatus>),
     ContextUpdated {
@@ -64,7 +65,7 @@ pub enum AgentTurnProgressEvent {
     },
 }
 
-#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentContextSnapshot {
     pub estimated_context_tokens: u32,
@@ -78,7 +79,7 @@ pub struct AgentContextSnapshot {
     pub total_tokens_used: Option<u64>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentCompactionProgress {
     pub trigger: String,
@@ -99,7 +100,7 @@ pub struct AgentCompactionProgress {
 }
 
 /// Live status for a session while a turn loop is executing.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ActiveTurnStatus {
     pub session_key: String,
     pub state: String,
@@ -135,7 +136,7 @@ pub struct ActiveTurnStatus {
 }
 
 impl ActiveTurnStatus {
-    pub(crate) fn new(session_key: &str) -> Self {
+    pub fn new(session_key: &str) -> Self {
         let now = current_time_secs();
         Self {
             session_key: session_key.to_string(),

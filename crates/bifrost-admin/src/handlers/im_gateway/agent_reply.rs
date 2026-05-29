@@ -443,7 +443,7 @@ pub(super) fn is_remote_markdown_image_attachment_candidate(raw_url: &str) -> bo
 async fn download_agent_reply_remote_image(
     image: &AgentReplyRemoteImage,
 ) -> bifrost_core::Result<AgentReplyLocalImage> {
-    let http = reqwest::Client::builder()
+    let http = bifrost_core::direct_reqwest_client_builder()
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|error| {
@@ -1179,6 +1179,7 @@ pub(super) async fn send_agent_reply_images(
 
 /// Send an agent reply with plan progress and tool calls panel (for goal continuation).
 /// This sends a card similar to the final response rendering but can be called mid-continuation.
+#[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn send_agent_reply_with_plan(
     client: &ImProviderClient,

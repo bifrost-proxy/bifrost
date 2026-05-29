@@ -1,10 +1,12 @@
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[allow(unused_imports)]
-use sherpa_onnx::{
+use bifrost_asr::native::sherpa_onnx::{
     FastClusteringConfig, OfflineSpeakerDiarization, OfflineSpeakerDiarizationConfig,
     OfflineSpeakerSegmentationModelConfig, OfflineSpeakerSegmentationPyannoteModelConfig,
     SpeakerEmbeddingExtractor, SpeakerEmbeddingExtractorConfig, Wave,
 };
+#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
+use bifrost_asr::profiles::DEFAULT_AUTO_MAX_SPEAKERS;
 
 const SHERPA_SEGMENTATION_MODEL_URL: &str =
     "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.int8.onnx";
@@ -33,17 +35,6 @@ const VOICEPRINT_PROMPTS: &[&str] = &[
 struct SherpaDiarizationModelPack {
     segmentation_model: PathBuf,
     embedding_model: PathBuf,
-}
-
-#[derive(Debug, Clone)]
-struct DiarizationSegment {
-    speaker: String,
-    display_name: String,
-    mapped_profile_id: Option<String>,
-    confidence: Option<f32>,
-    start_ms: u64,
-    end_ms: u64,
-    overlap: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -203,7 +194,7 @@ struct SpeakerVoiceIdentifyRequest {
     channels: u8,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct SpeakerVoiceIdentifyResponse {
     pub(crate) matched: bool,
     pub(crate) profile_id: Option<String>,
@@ -248,10 +239,35 @@ struct RegisteredSpeakerProfile {
     embedding: Vec<f32>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct SpeakerEnrollmentFinishResponse {
     profile: SpeakerVoiceprintProfile,
     profile_path: PathBuf,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+enum AsrDiarizationWorkerRequest {
+    Diarize {
+        profile: String,
+        config: AsrDiarizationConfig,
+        normalized_wav: PathBuf,
+    },
+    IdentifyPcm16 {
+        pcm16le_path: PathBuf,
+        sample_rate: u32,
+    },
+    FinishEnrollment {
+        session_id: String,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+enum AsrDiarizationWorkerResponse {
+    Diarize { segments: Vec<DiarizationSegment> },
+    Identify { response: SpeakerVoiceIdentifyResponse },
+    FinishEnrollment { response: SpeakerEnrollmentFinishResponse },
 }
 
 async fn handle_diarization_api(req: Request<Incoming>, path: &str) -> Response<BoxBody> {
@@ -495,7 +511,7 @@ fn prepare_diarization_profile(profile: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn diarization_profile_ready(profile: &str) -> bool {
+pub(crate) fn diarization_profile_ready(profile: &str) -> bool {
     profile == DEFAULT_DIARIZATION_PROFILE
         && sherpa_model_pack_paths(profile).is_ready()
         && diarization_profile_dir(profile).join("profile.json").is_file()
@@ -616,6 +632,15 @@ fn count_speaker_profiles() -> usize {
         .unwrap_or(0)
 }
 
+#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
+fn resolved_diarization_cluster_count(config: &AsrDiarizationConfig) -> i32 {
+    let count = config
+        .known_speaker_count
+        .or(config.max_speakers)
+        .unwrap_or(DEFAULT_AUTO_MAX_SPEAKERS);
+    i32::from(count.max(1))
+}
+
 fn apply_diarization_to_timeline(
     task: &AsrDirectoryTask,
     timeline: &mut TranscriptTimeline,
@@ -642,8 +667,141 @@ fn apply_diarization_to_timeline(
     write_diarization_manifest(task, timeline, speakers, &diarization_segments)
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(not(test))]
+fn asr_diarization_worker_request_dir() -> Result<PathBuf, String> {
+    let dir = bifrost_storage::data_dir()
+        .join("runtime")
+        .join("asr-diarization-worker");
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("create ASR diarization worker request dir: {error}"))?;
+    Ok(dir)
+}
+
+#[cfg(not(test))]
+fn run_asr_diarization_worker_request(
+    request: AsrDiarizationWorkerRequest,
+) -> Result<AsrDiarizationWorkerResponse, String> {
+    let request_dir = asr_diarization_worker_request_dir()?;
+    let request_path = request_dir.join(format!("request-{}.json", uuid::Uuid::new_v4()));
+    let request_json = serde_json::to_vec(&request)
+        .map_err(|error| format!("serialize ASR diarization worker request: {error}"))?;
+    std::fs::write(&request_path, request_json)
+        .map_err(|error| format!("write ASR diarization worker request: {error}"))?;
+
+    let current_exe =
+        std::env::current_exe().map_err(|error| format!("resolve current executable: {error}"))?;
+    let alias_dir = bifrost_storage::data_dir()
+        .join("runtime")
+        .join("process-aliases");
+    let worker_exe = bifrost_core::process_alias_executable(
+        &current_exe,
+        &alias_dir,
+        "bifrost-asr-diarization",
+    )
+    .unwrap_or_else(|error| {
+        warn!(
+            error = %error,
+            executable = %current_exe.display(),
+            "failed to create ASR diarization process alias; using original executable"
+        );
+        current_exe
+    });
+    let output = std::process::Command::new(worker_exe)
+        .arg("asr-diarization-worker")
+        .arg("--request")
+        .arg(&request_path)
+        .output()
+        .map_err(|error| format!("spawn ASR diarization worker: {error}"))?;
+    let _ = std::fs::remove_file(&request_path);
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(format!(
+            "ASR diarization worker failed: {}{}",
+            stderr.trim(),
+            if stdout.trim().is_empty() {
+                String::new()
+            } else {
+                format!(" stdout={}", stdout.trim())
+            }
+        ));
+    }
+    serde_json::from_slice::<AsrDiarizationWorkerResponse>(&output.stdout)
+        .map_err(|error| format!("parse ASR diarization worker response: {error}"))
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+fn run_asr_diarization_worker_request(
+    request: AsrDiarizationWorkerRequest,
+) -> Result<AsrDiarizationWorkerResponse, String> {
+    run_asr_diarization_worker_request_in_process(request)
+}
+
+fn run_asr_diarization_worker_request_in_process(
+    request: AsrDiarizationWorkerRequest,
+) -> Result<AsrDiarizationWorkerResponse, String> {
+    match request {
+        AsrDiarizationWorkerRequest::Diarize {
+            profile,
+            config,
+            normalized_wav,
+        } => run_sherpa_diarization_in_process(&config, &profile, &normalized_wav)
+            .map(|segments| AsrDiarizationWorkerResponse::Diarize { segments }),
+        AsrDiarizationWorkerRequest::IdentifyPcm16 {
+            pcm16le_path,
+            sample_rate,
+        } => {
+            let bytes = std::fs::read(&pcm16le_path)
+                .map_err(|error| format!("read voiceprint identify audio: {error}"))?;
+            identify_speaker_voice_pcm16_in_process(&bytes, sample_rate)
+                .map(|response| AsrDiarizationWorkerResponse::Identify { response })
+        }
+        AsrDiarizationWorkerRequest::FinishEnrollment { session_id } => {
+            let session = read_speaker_enrollment_session(&session_id)?;
+            finish_speaker_enrollment_in_process(&session)
+                .map(|response| AsrDiarizationWorkerResponse::FinishEnrollment { response })
+        }
+    }
+}
+
+pub fn run_asr_diarization_worker_stdio(request_path: &Path) -> Result<(), String> {
+    let raw = std::fs::read(request_path)
+        .map_err(|error| format!("read ASR diarization worker request: {error}"))?;
+    let request = serde_json::from_slice::<AsrDiarizationWorkerRequest>(&raw)
+        .map_err(|error| format!("parse ASR diarization worker request: {error}"))?;
+    let response = run_asr_diarization_worker_request_in_process(request)?;
+    let json = serde_json::to_string(&response)
+        .map_err(|error| format!("serialize ASR diarization worker response: {error}"))?;
+    println!("{json}");
+    Ok(())
+}
+
 fn run_sherpa_diarization(
+    config: &AsrDiarizationConfig,
+    profile: &str,
+    normalized_wav: &Path,
+) -> Result<Vec<DiarizationSegment>, String> {
+    #[cfg(test)]
+    {
+        run_sherpa_diarization_in_process(config, profile, normalized_wav)
+    }
+    #[cfg(not(test))]
+    {
+        run_asr_diarization_worker_request(AsrDiarizationWorkerRequest::Diarize {
+            profile: profile.to_string(),
+            config: config.clone(),
+            normalized_wav: normalized_wav.to_path_buf(),
+        })
+        .and_then(|response| match response {
+            AsrDiarizationWorkerResponse::Diarize { segments } => Ok(segments),
+            other => Err(format!("unexpected ASR diarization worker response: {other:?}")),
+        })
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn run_sherpa_diarization_in_process(
     config: &AsrDiarizationConfig,
     profile: &str,
     normalized_wav: &Path,
@@ -663,7 +821,7 @@ fn run_sherpa_diarization(
         .to_str()
         .ok_or_else(|| "normalized audio path contains non-utf8 characters".to_string())?;
     let clustering = FastClusteringConfig {
-        num_clusters: config.known_speaker_count.map(i32::from).unwrap_or(-1),
+        num_clusters: resolved_diarization_cluster_count(config),
         threshold: 0.5,
     };
     let diarization_config = OfflineSpeakerDiarizationConfig {
@@ -718,35 +876,52 @@ fn run_sherpa_diarization(
                 speaker,
                 mapped_profile_id: None,
                 confidence: None,
+                candidate_profile_id: None,
+                candidate_display_name: None,
+                candidate_confidence: None,
                 start_ms: seconds_to_ms(segment.start),
                 end_ms: seconds_to_ms(segment.end),
                 overlap: raw_segments.iter().enumerate().any(|(other_index, other)| {
                     other_index != index
                         && other.speaker != segment.speaker
-                        && intervals_overlap(
+                        && interval_overlap_ms(
                             seconds_to_ms(segment.start),
                             seconds_to_ms(segment.end),
                             seconds_to_ms(other.start),
                             seconds_to_ms(other.end),
-                        )
+                        ) > 0
                 }),
             }
         })
         .collect::<Vec<_>>();
-    if config.voiceprint_matching {
-        let speaker_embeddings = compute_diarization_speaker_embeddings(
+    let mut speaker_embeddings = compute_diarization_speaker_embeddings(
+        &embedding_model_path,
+        wave.samples(),
+        wave.sample_rate(),
+        &segments,
+    )?;
+    let merge_decisions = stabilize_diarization_speakers(
+        &mut segments,
+        &speaker_embeddings,
+        &SpeakerStabilizationConfig::default(),
+    );
+    log_speaker_stabilization_decisions(&merge_decisions);
+    if !merge_decisions.is_empty() {
+        speaker_embeddings = compute_diarization_speaker_embeddings(
             &embedding_model_path,
             wave.samples(),
             wave.sample_rate(),
             &segments,
         )?;
+    }
+    if config.voiceprint_matching {
         map_speakers_with_registered_voiceprints(&mut segments, &speaker_embeddings);
     }
     Ok(segments)
 }
 
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-fn run_sherpa_diarization(
+fn run_sherpa_diarization_in_process(
     _config: &AsrDiarizationConfig,
     _profile: &str,
     _normalized_wav: &Path,
@@ -758,10 +933,25 @@ fn run_sherpa_diarization(
     ))
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn log_speaker_stabilization_decisions(decisions: &[SpeakerMergeDecision]) {
+    for decision in decisions {
+        tracing::info!(
+            target: "bifrost_admin::asr_jobs",
+            from_speaker = %decision.from_speaker,
+            to_speaker = %decision.to_speaker,
+            similarity = decision.similarity,
+            reason = %decision.reason,
+            "merged unstable diarization speaker cluster"
+        );
+    }
+}
+
 pub(crate) async fn transcribe_uploaded_wav_with_voiceprint_speakers(
     server_url: &str,
     language: &str,
     normalized_wav: &Path,
+    stream_tx: Option<&tokio::sync::mpsc::Sender<hyper::body::Bytes>>,
 ) -> Result<Option<UploadedDiarizedTranscription>, String> {
     if !diarization_profile_ready(DEFAULT_DIARIZATION_PROFILE) || count_speaker_profiles() == 0 {
         return Ok(None);
@@ -786,23 +976,24 @@ pub(crate) async fn transcribe_uploaded_wav_with_voiceprint_speakers(
         text: String::new(),
         segments: Vec::new(),
     };
+    let asr_units = plan_asr_units(&diarization_segments, &AsrUnitPlannerConfig::default());
 
-    for (index, speaker_segment) in diarization_segments.iter().enumerate() {
-        let duration_ms = speaker_segment
-            .end_ms
-            .saturating_sub(speaker_segment.start_ms);
+    for (index, asr_unit) in asr_units.iter().enumerate() {
+        let duration_ms = asr_unit
+            .source_end_ms
+            .saturating_sub(asr_unit.source_start_ms);
         let chunk_boundaries = plan_uploaded_speaker_asr_chunks(duration_ms);
         let mut segment_committed = String::new();
         for (chunk_index, (chunk_offset_ms, chunk_duration_ms)) in
             chunk_boundaries.iter().copied().enumerate()
         {
-            let chunk_start_ms = speaker_segment.start_ms.saturating_add(chunk_offset_ms);
+            let chunk_start_ms = asr_unit.source_start_ms.saturating_add(chunk_offset_ms);
             let chunk_end_ms = chunk_start_ms
                 .saturating_add(chunk_duration_ms)
-                .min(speaker_segment.end_ms);
+                .min(asr_unit.source_end_ms);
             let segment_wav =
                 temp.path()
-                    .join(format!("upload-speaker-{index:04}-chunk-{chunk_index:04}.wav"));
+                    .join(format!("upload-{}-chunk-{chunk_index:04}.wav", asr_unit.unit_id));
             ffmpeg_cut_wav_ms(normalized_wav, &segment_wav, chunk_start_ms, chunk_end_ms, None)
                 .await?;
             if compute_wav_rms_energy(&segment_wav).is_some_and(|rms| rms < SILENCE_RMS_THRESHOLD)
@@ -852,20 +1043,43 @@ pub(crate) async fn transcribe_uploaded_wav_with_voiceprint_speakers(
                 if !output.text.is_empty() {
                     output.text.push('\n');
                 }
-                let speaker_label = speaker_transcript_label(speaker_segment);
-                output.text.push_str(&format!("{speaker_label}: {text}"));
-                output.segments.push(UploadedDiarizedTranscriptionSegment {
+                let speaker_label = speaker_transcript_label_for_unit(asr_unit);
+                let line = format!("{speaker_label}: {text}");
+                output.text.push_str(&line);
+                let segment = UploadedDiarizedTranscriptionSegment {
                     index: output.segments.len(),
                     start_ms: chunk_start_ms.saturating_add(local_start_ms),
                     end_ms: chunk_start_ms
                         .saturating_add(local_end_ms)
-                        .min(speaker_segment.end_ms),
-                    speaker: speaker_segment.speaker.clone(),
-                    display_name: speaker_segment.display_name.clone(),
-                    mapped_profile_id: speaker_segment.mapped_profile_id.clone(),
-                    confidence: speaker_segment.confidence,
+                        .min(asr_unit.source_end_ms),
+                    speaker: asr_unit.speaker.clone().unwrap_or_default(),
+                    display_name: asr_unit.speaker_display_name.clone().unwrap_or_default(),
+                    mapped_profile_id: asr_unit.mapped_profile_id.clone(),
+                    confidence: asr_unit.confidence,
                     text,
-                });
+                };
+                if let Some(tx) = stream_tx {
+                    crate::handlers::asr::send_asr_segment(
+                        tx,
+                        "final",
+                        crate::handlers::asr::AsrSegmentPayload {
+                            index: segment.index,
+                            start_ms: segment.start_ms,
+                            end_ms: segment.end_ms,
+                            stable_start_ms: segment.start_ms,
+                            stable_end_ms: segment.end_ms,
+                            text: &segment.text,
+                            delta: &line,
+                            committed: &output.text,
+                            speaker: Some(&segment.speaker),
+                            speaker_display_name: Some(&segment.display_name),
+                            speaker_profile_id: segment.mapped_profile_id.as_deref(),
+                            speaker_confidence: segment.confidence,
+                        },
+                    )
+                    .await;
+                }
+                output.segments.push(segment);
             }
             let _ = std::fs::remove_file(&segment_wav);
         }
@@ -878,14 +1092,36 @@ pub(crate) async fn transcribe_uploaded_wav_with_voiceprint_speakers(
     }
 }
 
+fn speaker_transcript_label_for_unit(unit: &AsrAudioUnit) -> String {
+    let display_name = unit
+        .speaker_display_name
+        .as_deref()
+        .or(unit.speaker.as_deref())
+        .unwrap_or("unknown_speaker");
+    speaker_transcript_label_from_parts(display_name, unit.mapped_profile_id.as_deref(), unit.confidence)
+}
+
+#[cfg(test)]
 fn speaker_transcript_label(segment: &DiarizationSegment) -> String {
-    match (segment.mapped_profile_id.as_ref(), segment.confidence) {
+    speaker_transcript_label_from_parts(
+        &segment.display_name,
+        segment.mapped_profile_id.as_deref(),
+        segment.confidence,
+    )
+}
+
+fn speaker_transcript_label_from_parts(
+    display_name: &str,
+    mapped_profile_id: Option<&str>,
+    confidence: Option<f32>,
+) -> String {
+    match (mapped_profile_id, confidence) {
         (Some(_), Some(confidence)) => format!(
             "{} ({}% match)",
-            segment.display_name,
+            display_name,
             (confidence.clamp(0.0, 1.0) * 100.0).round() as u32
         ),
-        _ => segment.display_name.clone(),
+        _ => display_name.to_string(),
     }
 }
 
@@ -954,52 +1190,6 @@ fn apply_speaker_segments_to_asr_timeline(
         segment.overlap = segment_overlap;
     }
     Ok(())
-}
-
-fn speakers_from_diarization_segments(segments: &[DiarizationSegment]) -> Vec<TimelineSpeaker> {
-    let mut speakers = BTreeMap::<String, (String, Option<String>, Option<f32>)>::new();
-    for segment in segments {
-        speakers.entry(segment.speaker.clone()).or_insert_with(|| {
-            (
-                segment.display_name.clone(),
-                segment.mapped_profile_id.clone(),
-                segment.confidence,
-            )
-        });
-    }
-    speakers
-        .into_iter()
-        .map(|(id, (display_name, mapped_profile_id, confidence))| TimelineSpeaker {
-            id,
-            display_name,
-            mapped_profile_id,
-            confidence,
-        })
-        .collect()
-}
-
-fn speaker_display_name(index: usize) -> String {
-    if index < 26 {
-        format!("用户{}", (b'A' + index as u8) as char)
-    } else {
-        format!("用户{}", index + 1)
-    }
-}
-
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn seconds_to_ms(seconds: f32) -> u64 {
-    (seconds.max(0.0) * 1000.0).round() as u64
-}
-
-fn interval_overlap_ms(left_start: u64, left_end: u64, right_start: u64, right_end: u64) -> u64 {
-    let start = left_start.max(right_start);
-    let end = left_end.min(right_end);
-    end.saturating_sub(start)
-}
-
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn intervals_overlap(left_start: u64, left_end: u64, right_start: u64, right_end: u64) -> bool {
-    interval_overlap_ms(left_start, left_end, right_start, right_end) > 0
 }
 
 fn write_diarization_manifest(

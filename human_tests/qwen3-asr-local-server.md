@@ -659,6 +659,27 @@
 - 粘贴后持续轮询发送按钮是否变为可发送状态，按钮可用后立即继续；长文档上传/解析慢时不走 Enter fallback 提前误发。
 - Daily Agent run 不因 composer 注入超时失败，成功等待 `f/conversation` handoff、最终回复和 report 写入。
 
+### TC-QASR-25 Daily Docs 单文档行级 Run Daily Agent
+
+操作步骤：
+
+1. 使用已有 ASR Directory Task 或临时任务打开 Daily Docs tab：
+   ```text
+   http://127.0.0.1:<port>/_bifrost/ai?aiSection=tools-asr&asrTask=<task_id>&asrTaskTab=daily
+   ```
+2. 确认表格至少存在一条 `YYYY-MM-DD.md` 日文档记录。
+3. 点击目标日期行 `Action` 列中的 `Run Daily Agent`。
+4. 通过浏览器网络请求或 Playwright route 记录确认提交的接口。
+5. 点击同一行 `Open document`，确认原文档打开行为仍正常。
+
+预期结果：
+
+- `Run Daily Agent` 调用 `POST /_bifrost/api/asr/tasks/<task_id>/daily-agent/run?date=<YYYY-MM-DD>`，其中 `date` 等于当前行日期。
+- 行级动作不携带 `force` 参数，保持 Daily Agent 普通增量语义。
+- 请求提交期间该行按钮显示 loading，同一 task 下其它行的 `Run Daily Agent` 暂时不可重复点击。
+- 页面出现 `Daily Agent run queued` 成功提示。
+- `Open document` 仍进入 `asrDay=<YYYY-MM-DD>` 文档详情，Daily Docs tab URL 恢复行为不受影响。
+
 ## 清理步骤
 
 - 停止测试启动的 `asr-server` 进程。

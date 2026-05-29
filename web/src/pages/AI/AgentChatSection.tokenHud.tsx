@@ -1,7 +1,7 @@
 import type { CSSProperties } from "react";
 import {
   formatContextWindow,
-  formatNumber,
+  formatStatusMetricCount,
   type RunTelemetry,
 } from "./AgentChatSection.helpers";
 
@@ -19,7 +19,7 @@ export function AgentChatTokenHud({ telemetry, styles }: AgentChatTokenHudProps)
     return null;
   }
 
-  const label = `Tokens ${formatNumber(totalTokens)} · Context ${contextUsage}`;
+  const label = `Tokens ${formatStatusMetricCount(totalTokens)} · Context ${contextUsage}`;
   const progress = contextPercent ?? 0;
   const title = `${label} · Context window: ${formatContextWindow(telemetry.status, telemetry.context)}`;
 
@@ -41,7 +41,7 @@ export function AgentChatTokenHud({ telemetry, styles }: AgentChatTokenHudProps)
         style={styles.tokenHudItem}
       >
         <span style={styles.tokenHudLabel}>Tokens </span>
-        <span style={styles.tokenHudValue}>{formatNumber(totalTokens)}</span>
+        <span style={styles.tokenHudValue}>{formatStatusMetricCount(totalTokens)}</span>
         <span style={styles.tokenHudLabel}> · Context </span>
         <span style={styles.tokenHudValue}>{contextUsage}</span>
       </span>

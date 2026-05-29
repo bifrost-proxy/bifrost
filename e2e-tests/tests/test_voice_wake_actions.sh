@@ -78,6 +78,7 @@ curl -fsS "http://127.0.0.1:$PORT/_bifrost/api/voice/wake/status" >/dev/null
 
 echo "[voice-wake] rejecting listener start before voiceprint binding exists"
 if BIFROST_DATA_DIR="$DATA_DIR" "$BIN" -p "$PORT" ai voice wake listener start --source mock \
+  --engine lightweight_kws_listener \
   --mock-transcripts "现在 打开 录音" \
   --dry-run \
   --mock-speaker-profile-id spk-e2e \
@@ -136,9 +137,22 @@ assert events[0]["binding_id"] == "wake_binding_e2e", data
 assert events[0]["dry_run"] is True, data
 PY
 
-echo "[voice-wake] starting backend listener with mock ASR transcript"
+echo "[voice-wake] rejecting legacy backend ASR listener engine"
+REJECT_CODE="$(curl -sS -o "$TEST_ROOT/backend-asr-reject.json" -w "%{http_code}" \
+  -H 'content-type: application/json' \
+  --data '{"source":"mock","engine":"backend_asr_phrase_match","mock_transcripts":["hello bifrost"],"execute":false,"chunk_ms":1000}' \
+  "http://127.0.0.1:$PORT/_bifrost/api/voice/wake/listener/start")"
+if [[ "$REJECT_CODE" != "400" ]]; then
+  echo "[voice-wake] expected backend_asr_phrase_match listener start to return 400, got $REJECT_CODE" >&2
+  cat "$TEST_ROOT/backend-asr-reject.json" >&2
+  exit 1
+fi
+grep -q "lightweight_kws_listener" "$TEST_ROOT/backend-asr-reject.json"
+
+echo "[voice-wake] starting lightweight KWS listener with mock wake candidate"
 BIFROST_DATA_DIR="$DATA_DIR" "$BIN" -p "$PORT" ai voice wake listener start \
   --source mock \
+  --engine lightweight_kws_listener \
   --mock-transcripts "现在 打开 录音" \
   --dry-run \
   --mock-interval-ms 1 \
@@ -178,11 +192,12 @@ assert events[-1]["action_result"]["executed"] is False, data
 assert events[-1]["speaker_confidence"] >= 0.9, data
 PY
 
-echo "[voice-wake] rejecting mock ASR transcript from a different speaker"
+echo "[voice-wake] rejecting mock KWS candidate from a different speaker"
 BIFROST_DATA_DIR="$DATA_DIR" "$BIN" -p "$PORT" ai voice wake listener stop --json >/dev/null
 sleep 0.05
 BIFROST_DATA_DIR="$DATA_DIR" "$BIN" -p "$PORT" ai voice wake listener start \
   --source mock \
+  --engine lightweight_kws_listener \
   --mock-transcripts "现在 打开 录音" \
   --dry-run \
   --mock-interval-ms 1 \

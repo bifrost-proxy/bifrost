@@ -647,6 +647,8 @@ impl ExecSession {
         let cursor = self.cursor_for_consumer(&consumer);
         let deadline = Instant::now() + yield_duration;
         loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
             self.refresh_exit_status().await;
             if self.is_completed().await {
                 break;
@@ -659,7 +661,7 @@ impl ExecSession {
             if remaining.is_zero() {
                 break;
             }
-            if tokio::time::timeout(remaining, self.notify.notified())
+            if tokio::time::timeout(remaining, &mut notified)
                 .await
                 .is_err()
             {

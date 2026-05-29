@@ -36,10 +36,12 @@ impl ImScheduleStore {
     }
 
     pub fn list(&self) -> Vec<ImSchedule> {
+        self.refresh_from_disk();
         self.data.read().schedules.clone()
     }
 
     pub fn get(&self, id: &str) -> Option<ImSchedule> {
+        self.refresh_from_disk();
         self.data
             .read()
             .schedules
@@ -50,6 +52,7 @@ impl ImScheduleStore {
 
     pub fn add(&self, schedule: ImSchedule) -> Result<()> {
         let mut data = self.data.write();
+        self.refresh_locked(&mut data);
         if data.schedules.iter().any(|s| s.id == schedule.id) {
             return Err(BifrostError::Config(format!(
                 "schedule with id '{}' already exists",
@@ -62,6 +65,7 @@ impl ImScheduleStore {
 
     pub fn update(&self, schedule: ImSchedule) -> Result<()> {
         let mut data = self.data.write();
+        self.refresh_locked(&mut data);
         if let Some(existing) = data.schedules.iter_mut().find(|s| s.id == schedule.id) {
             *existing = schedule;
             self.save_locked(&data)
@@ -75,6 +79,7 @@ impl ImScheduleStore {
 
     pub fn delete(&self, id: &str) -> Result<()> {
         let mut data = self.data.write();
+        self.refresh_locked(&mut data);
         let before = data.schedules.len();
         data.schedules.retain(|s| s.id != id);
         if data.schedules.len() == before {
@@ -101,6 +106,18 @@ impl ImScheduleStore {
             )))
         })?;
         Ok(())
+    }
+
+    fn refresh_from_disk(&self) {
+        if let Some(data) = Self::load_from_disk(&self.file_path) {
+            *self.data.write() = data;
+        }
+    }
+
+    fn refresh_locked(&self, data: &mut StoreData) {
+        if let Some(latest) = Self::load_from_disk(&self.file_path) {
+            *data = latest;
+        }
     }
 
     fn load_from_disk(file_path: &Path) -> Option<StoreData> {

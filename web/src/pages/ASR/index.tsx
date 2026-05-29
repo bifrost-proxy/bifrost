@@ -5,8 +5,11 @@ import {
   ASR_PARAMS_CHANGED_EVENT,
   ASR_STATUS_CHANGED_EVENT,
   buildVoiceRealtimeUrl,
+  createAsrOfflineJob,
   createAsrTask,
   deleteAsrTask,
+  getAsrOfflineJob,
+  getAsrOfflineJobArtifact,
   getDailyAgentReport,
   getAsrCapabilities,
   getAsrStatus,
@@ -24,8 +27,8 @@ import {
   saveAsrParams,
   startAsrService,
   stopAsrService,
-  streamAsrTranscription,
   updateAsrTask,
+  getSpeechPipelinesStatus,
   type AsrDirectoryTask,
   type AsrDirectoryTaskDetail,
   type AsrDailyAgentReportDetail,
@@ -33,13 +36,15 @@ import {
   type AsrExternalImportRunProgress,
   type AsrPauseMode,
   type AsrStatus,
-  type AsrStreamEvent,
   type AsrConnectionParams,
   type AsrCapabilities,
+  type AsrOfflineJob,
+  type SpeechPipelinesStatus,
   type AsrTaskDailyDocumentDetail,
   type AsrTaskFileRecord,
   type AsrTranscriptTimeline,
   type VoiceRealtimeEvent,
+  type VoiceRealtimeTranscriptSegment,
 } from "../../api/asr";
 import SpeechTab from "../Settings/tabs/SpeechTab";
 import {
@@ -51,6 +56,7 @@ import {
   MIC_METER_BARS,
   VOICE_REALTIME_CHUNK_MS,
   VOICE_REALTIME_SAMPLE_RATE,
+  voiceRealtimeSegmentFromEvent,
   type WorkState,
 } from "./asrUtils";
 import DirectoryTaskDetailPage from "./components/DirectoryTaskDetailPage";
@@ -106,8 +112,14 @@ export default function ASR() {
   const [progress, setProgress] = useState(0);
   const [selectedName, setSelectedName] = useState("");
   const [transcript, setTranscript] = useState("");
+  const [realtimeSegments, setRealtimeSegments] = useState<VoiceRealtimeTranscriptSegment[]>([]);
+  const [partialRealtimeSegment, setPartialRealtimeSegment] =
+    useState<VoiceRealtimeTranscriptSegment | null>(null);
   const [events, setEvents] = useState<string[]>([]);
   const [errorText, setErrorText] = useState("");
+  const [speechStatus, setSpeechStatus] = useState<SpeechPipelinesStatus | null>(null);
+  const [offlineJob, setOfflineJob] = useState<AsrOfflineJob | null>(null);
+  const [offlineArtifacts, setOfflineArtifacts] = useState<Record<string, string>>({});
   const [micLevels, setMicLevels] = useState<number[]>(EMPTY_MIC_LEVELS);
   const [micPeak, setMicPeak] = useState(0);
   const [workbenchParams, setWorkbenchParams] = useState(() => loadAsrParams());
@@ -181,8 +193,12 @@ export default function ASR() {
 
   const refreshStatus = useCallback(async () => {
     try {
-      const next = await getAsrStatus(getCurrentAsrParams());
+      const [next, nextSpeechStatus] = await Promise.all([
+        getAsrStatus(getCurrentAsrParams()),
+        getSpeechPipelinesStatus(),
+      ]);
       setStatus(next);
+      setSpeechStatus(nextSpeechStatus);
     } catch (error) {
       appendEvent(
         `status error: ${error instanceof Error ? error.message : String(error)}`,
@@ -347,6 +363,8 @@ export default function ASR() {
     committedTranscriptRef.current = "";
     partialTranscriptRef.current = "";
     setTranscript("");
+    setRealtimeSegments([]);
+    setPartialRealtimeSegment(null);
   }, []);
 
   useEffect(() => {
@@ -429,63 +447,6 @@ export default function ASR() {
     }
   }, [getCurrentAsrParams, refreshStatus]);
 
-  const handleStreamEvent = useCallback(
-    (event: AsrStreamEvent) => {
-      if (
-        event.type === "progress" ||
-        event.type === "connected" ||
-        event.type === "stream" ||
-        event.type === "finish"
-      ) {
-        setProgress(event.progress);
-        appendEvent(`${event.phase}: ${event.message}`);
-      } else if (event.type === "partial") {
-        partialTranscriptRef.current = dedupeTranscript(
-          committedTranscriptRef.current,
-          event.text || event.delta,
-        );
-        appendEvent(
-          `partial[${event.index}]: ${event.stable_start_ms}-${event.stable_end_ms}ms`,
-        );
-        renderTranscript();
-      } else if (event.type === "final") {
-        const candidate = event.committed || event.delta || event.text;
-        const delta = dedupeTranscript(committedTranscriptRef.current, candidate);
-        if (delta) {
-          committedTranscriptRef.current = appendTranscriptDelta(
-            committedTranscriptRef.current,
-            delta,
-          );
-        }
-        partialTranscriptRef.current = "";
-        appendEvent(
-          `final[${event.index}]: ${event.stable_start_ms}-${event.stable_end_ms}ms`,
-        );
-        renderTranscript();
-      } else if (event.type === "text") {
-        const delta = dedupeTranscript(committedTranscriptRef.current, event.text);
-        if (delta) {
-          committedTranscriptRef.current = appendTranscriptDelta(
-            committedTranscriptRef.current,
-            delta,
-          );
-        }
-        partialTranscriptRef.current = "";
-        renderTranscript();
-      } else if (event.type === "error") {
-        setWorkState("error");
-        setErrorText(event.detail ? `${event.message}\n${event.detail}` : event.message);
-        appendEvent(`error: ${event.message}`);
-      } else if (event.type === "done") {
-        setWorkState(recordingActiveRef.current ? "recording" : "idle");
-        setProgress(100);
-        appendEvent("done");
-        void refreshStatus();
-      }
-    },
-    [appendEvent, refreshStatus, renderTranscript],
-  );
-
   const handleVoiceRealtimeEvent = useCallback(
     (event: VoiceRealtimeEvent) => {
       if (event.type === "connected" || event.type === "source_ready") {
@@ -496,6 +457,9 @@ export default function ASR() {
           committedTranscriptRef.current = event.committed;
         }
         partialTranscriptRef.current = event.text || event.delta || "";
+        setPartialRealtimeSegment(
+          voiceRealtimeSegmentFromEvent(event, partialTranscriptRef.current, false),
+        );
         appendEvent(
           `partial[${event.window_index ?? 0}]: captured ${event.captured_at_ms ?? 0}ms`,
         );
@@ -512,6 +476,15 @@ export default function ASR() {
           );
         }
         partialTranscriptRef.current = "";
+        setPartialRealtimeSegment(null);
+        const segment = voiceRealtimeSegmentFromEvent(
+          event,
+          delta || event.raw_text || "",
+          true,
+        );
+        if (segment && segment.text.trim()) {
+          setRealtimeSegments((previous) => [...previous, segment]);
+        }
         appendEvent(
           `stable[${event.window_index ?? 0}]: emitted ${event.emitted_at_ms ?? 0}ms`,
         );
@@ -530,6 +503,15 @@ export default function ASR() {
           }
         }
         partialTranscriptRef.current = "";
+        setPartialRealtimeSegment(null);
+        const segment = voiceRealtimeSegmentFromEvent(
+          event,
+          event.delta || event.raw_text || "",
+          true,
+        );
+        if (segment && segment.text.trim()) {
+          setRealtimeSegments((previous) => [...previous, segment]);
+        }
         appendEvent(`final: emitted ${event.emitted_at_ms ?? 0}ms`);
         renderTranscript();
       } else if (event.type === "worker_idle_unloaded") {
@@ -537,6 +519,7 @@ export default function ASR() {
           committedTranscriptRef.current = event.committed;
         }
         partialTranscriptRef.current = "";
+        setPartialRealtimeSegment(null);
         appendEvent(event.message || "voice worker unloaded after idle timeout");
         renderTranscript();
       } else if (event.type === "error") {
@@ -568,15 +551,51 @@ export default function ASR() {
       setSelectedName(fileName);
       setErrorText("");
       setProgress(1);
+      setOfflineJob(null);
+      setOfflineArtifacts({});
 
       try {
-        await streamAsrTranscription(
+        const created = await createAsrOfflineJob(
           blob,
           fileName,
           getCurrentAsrParams(),
-          handleStreamEvent,
-          controller.signal,
+          {
+            pipelineProfile: "offline-speaker-subtitle-local",
+            speakerAware: true,
+          },
         );
+        setOfflineJob(created);
+        appendEvent(`offline job: ${created.job_id} queued`);
+        let current = created;
+        while (!controller.signal.aborted) {
+          current = await getAsrOfflineJob(created.job_id);
+          setOfflineJob(current);
+          appendEvent(`offline job: ${current.status}`);
+          if (current.status === "succeeded" || current.status === "failed") {
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+        if (controller.signal.aborted) {
+          return;
+        }
+        if (current.status !== "succeeded") {
+          throw new Error(current.error || "Offline subtitle job failed");
+        }
+        const [timeline, text, srt, vtt] = await Promise.all([
+          getAsrOfflineJobArtifact(created.job_id, "timeline_json"),
+          getAsrOfflineJobArtifact(created.job_id, "txt"),
+          getAsrOfflineJobArtifact(created.job_id, "srt"),
+          getAsrOfflineJobArtifact(created.job_id, "vtt"),
+        ]);
+        setOfflineArtifacts({ timeline_json: timeline, txt: text, srt, vtt });
+        committedTranscriptRef.current = text;
+        partialTranscriptRef.current = "";
+        setTranscript(text);
+        setProgress(100);
+        setWorkState(recordingActiveRef.current ? "recording" : "idle");
+        appendEvent("offline job: artifacts ready");
+        void refreshStatus();
       } catch (error) {
         if (controller.signal.aborted) {
           return;
@@ -584,10 +603,10 @@ export default function ASR() {
         const text = error instanceof Error ? error.message : String(error);
         setWorkState("error");
         setErrorText(text);
-        appendEvent(`stream error: ${text}`);
+        appendEvent(`offline job error: ${text}`);
       }
     },
-    [appendEvent, getCurrentAsrParams, handleStreamEvent, resetTranscript],
+    [appendEvent, getCurrentAsrParams, refreshStatus, resetTranscript],
   );
 
   const handleFile = useCallback(
@@ -1429,6 +1448,11 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
         progress={progress}
         selectedName={selectedName}
         transcript={transcript}
+        realtimeSegments={realtimeSegments}
+        partialRealtimeSegment={partialRealtimeSegment}
+        offlineJob={offlineJob}
+        offlineArtifacts={offlineArtifacts}
+        speechStatus={speechStatus}
         events={events}
         errorText={errorText}
         micLevels={micLevels}

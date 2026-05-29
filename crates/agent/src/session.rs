@@ -964,7 +964,6 @@ pub async fn run_manual_compaction_command(
                 "compaction_count": session.compaction_count,
                 "total_tokens": session.total_tokens_used.unwrap_or(0),
                 "replacement_history": &session.history,
-                "current_plan": &session.current_plan,
             });
             if let Some(ref mut rec) = recorder {
                 if let Err(error) = rec.record_compaction(&session.session_key, metadata) {

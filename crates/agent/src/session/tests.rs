@@ -586,6 +586,7 @@ fn test_record_compaction_event_includes_emergency_and_total_tokens() {
     assert_eq!(events[0].content["total_tokens"], 1234);
     assert_eq!(events[0].content["compaction_count"], 2);
     assert_eq!(events[0].content["phase"], "mid_turn");
+    assert!(events[0].content.get("current_plan").is_none());
 }
 
 #[test]

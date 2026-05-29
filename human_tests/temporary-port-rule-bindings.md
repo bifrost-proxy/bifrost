@@ -127,6 +127,24 @@
 - `MAIN_PORT` 与 `TEMP_PORT` 等所有临时端口互不相同。
 - 脚本不会再因为 `Port <same_port> is the main proxy port` 失败。
 
+### TC-TPRB-06-回归-02：HTML fixture 端口占用时自动换端口
+
+**背景**：CI 并行 shard 中，`test_temporary_port_bindings.sh` 的 HTML fixture 端口可能在探测后、实际 bind 前被其他进程抢占，导致 fixture server 未就绪并使整条 E2E 失败。
+
+**操作步骤**：
+1. 执行：
+   ```bash
+   source ~/.zshrc
+   SKIP_BUILD=true BIFROST_BIN=$PWD/target/debug/bifrost bash e2e-tests/tests/test_temporary_port_bindings.sh
+   ```
+2. 观察主端口 HTML Badge、临时端口 HTML Badge、无规则直连 fixture 请求是否都能通过。
+3. 如 fixture 端口被占用，脚本应自动重新选择可用端口，并在创建规则前使用最终端口。
+
+**预期结果**：
+- HTML fixture server 必须真实启动成功后才继续创建规则。
+- fixture bind 失败时脚本自动换端口重试，失败日志可诊断，不再静默等待到超时。
+- 主端口和临时端口的 HTML Badge、直连 fixture 请求均通过。
+
 ### TC-TPRB-07：错误信息质量
 
 **操作步骤**：
@@ -415,6 +433,15 @@ rm -rf "$TEST_DIR"
 ```
 
 ## 执行记录
+
+2026-05-29 HTML fixture 端口占用回归执行记录：
+
+- 已执行命令：`source ~/.zshrc; SKIP_BUILD=true BIFROST_BIN=$PWD/target/debug/bifrost bash e2e-tests/tests/test_temporary_port_bindings.sh`
+- 已执行占用端口回归命令：先用 `python3 -m http.server "$OCCUPIED_PORT" --bind 127.0.0.1` 占住 `HTML_PORT`，再执行 `HTML_PORT="$OCCUPIED_PORT" SKIP_BUILD=true BIFROST_BIN=$PWD/target/debug/bifrost bash e2e-tests/tests/test_temporary_port_bindings.sh`
+- 使用隔离数据目录：脚本通过 `mktemp -d` 创建临时 `BIFROST_DATA_DIR`，启动 Bifrost 时包含 `--no-system-proxy`。
+- 端口要求：脚本使用动态测试端口，且通过真实 bind 检查跳过不可用端口，未使用 `9900`。
+- 实际结果：正常路径与预占用 `HTML_PORT` 路径均执行 `55/55 passed`；HTML fixture 在规则创建前启动成功，主端口/临时端口 Badge 与无规则直连请求全部通过。
+- 结论：`TC-TPRB-06-回归-02` 已按文档完成执行并通过，本次无环境阻塞。
 
 2026-05-18 status 临时端口绑定展示执行记录：
 

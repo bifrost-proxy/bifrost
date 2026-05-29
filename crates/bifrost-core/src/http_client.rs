@@ -1,9 +1,41 @@
+use std::path::Path;
+
 pub fn direct_reqwest_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder().no_proxy()
 }
 
 pub fn direct_blocking_reqwest_client_builder() -> reqwest::blocking::ClientBuilder {
     reqwest::blocking::Client::builder().no_proxy()
+}
+
+pub fn load_reqwest_certificate(path: &Path) -> std::result::Result<reqwest::Certificate, String> {
+    let pem = std::fs::read(path).map_err(|error| format!("read CA certificate: {error}"))?;
+    reqwest::Certificate::from_pem(&pem).map_err(|error| format!("parse CA certificate: {error}"))
+}
+
+pub fn proxied_reqwest_client_builder(
+    proxy_url: &str,
+    ca_cert_path: Option<&Path>,
+) -> std::result::Result<reqwest::ClientBuilder, String> {
+    let proxy = reqwest::Proxy::all(proxy_url)
+        .map_err(|error| format!("invalid proxy URL '{proxy_url}': {error}"))?;
+    let mut builder = direct_reqwest_client_builder().proxy(proxy);
+    if let Some(path) = ca_cert_path {
+        match load_reqwest_certificate(path) {
+            Ok(cert) => {
+                builder = builder.add_root_certificate(cert);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    proxy_url = %proxy_url,
+                    ca_cert_path = %path.display(),
+                    error = %error,
+                    "proxied HTTP client could not load CA; TLS-intercepted HTTPS requests may fail"
+                );
+            }
+        }
+    }
+    Ok(builder)
 }
 
 pub fn direct_ureq_agent_builder() -> ureq::AgentBuilder {

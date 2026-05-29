@@ -254,6 +254,7 @@ pub(super) async fn request_agent_stop_stops_external_runner_by_session_key() {
     let runtime = crate::im_gateway::external_cli::ExternalCliRuntime::new(&runs_root);
     let session_key = "external-stop-status-deadlock";
     let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
+        images: Vec::new(),
         message: "stop by shared helper".to_string(),
         operation: "ask".to_string(),
         params: serde_json::Value::Null,
@@ -291,7 +292,16 @@ pub(super) async fn request_agent_stop_stops_external_runner_by_session_key() {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 
-    assert!(request_agent_stop_with_runs_root(&manager, session_key, &runs_root).await);
+    let mut stop_requested = false;
+    for _ in 0..50 {
+        if request_agent_stop_with_runs_root(&manager, session_key, &runs_root).await {
+            stop_requested = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(stop_requested);
+
     let result = handle.await.expect("join external run");
 
     assert_eq!(

@@ -4,7 +4,12 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
+use std::time::Duration;
 
+use bifrost_asr::wake::{
+    normalize_wake_phrase, wake_phrase_matches, SherpaKwsModelPack, DEFAULT_WAKE_KWS_ARCHIVE_URL,
+    DEFAULT_WAKE_KWS_PROFILE,
+};
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use hyper::{Method, Request, Response, StatusCode};
@@ -28,7 +33,7 @@ const DEFAULT_SPEAKER_THRESHOLD: f32 = VOICEPRINT_SPEAKER_MATCH_THRESHOLD;
 const MAX_EVENTS: usize = 50;
 const DEFAULT_LISTENER_CHUNK_MS: u64 = 2500;
 const MIN_LISTENER_CHUNK_MS: u64 = 1000;
-const MAX_LISTENER_CHUNK_MS: u64 = 10_000;
+const MAX_LISTENER_CHUNK_MS: u64 = 4_000;
 
 static VOICE_WAKE_LISTENER: Lazy<Mutex<VoiceWakeListenerRuntime>> =
     Lazy::new(|| Mutex::new(VoiceWakeListenerRuntime::default()));
@@ -91,6 +96,8 @@ enum VoiceWakeAction {
         modifiers: Vec<String>,
         #[serde(default = "default_press_count")]
         press_count: u8,
+        #[serde(default = "default_repeat_delay_ms")]
+        repeat_delay_ms: u64,
     },
 }
 
@@ -155,11 +162,38 @@ struct VoiceWakeTriggerRequest {
     dry_run: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct VoiceWakeListenerProgressRequest {
+    status: String,
+    #[serde(default)]
+    device: Option<String>,
+    #[serde(default)]
+    device_label: Option<String>,
+    #[serde(default)]
+    transcript: Option<String>,
+    #[serde(default)]
+    phrase: Option<String>,
+    #[serde(default)]
+    profile_id: Option<String>,
+    #[serde(default)]
+    binding_id: Option<String>,
+    #[serde(default)]
+    speaker_profile_id: Option<String>,
+    #[serde(default)]
+    speaker_confidence: Option<f32>,
+    #[serde(default)]
+    speaker_status: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct VoiceWakeListenerState {
     running: bool,
     source: String,
+    engine: String,
     device: Option<String>,
+    device_label: Option<String>,
     worker_pid: Option<u32>,
     chunk_ms: u64,
     started_at_ms: Option<u64>,
@@ -171,7 +205,18 @@ struct VoiceWakeListenerState {
     last_speaker_profile_id: Option<String>,
     last_speaker_confidence: Option<f32>,
     last_speaker_status: Option<String>,
+    last_match_status: Option<String>,
+    last_match_binding_id: Option<String>,
+    last_match_phrase: Option<String>,
+    last_action_result: Option<VoiceWakeActionResult>,
+    last_action_at_ms: Option<u64>,
     trigger_count: u64,
+    /// Model download progress: "downloading", "extracting", "downloaded", "failed"
+    model_download_status: Option<String>,
+    /// Bytes downloaded so far
+    model_download_progress: Option<u64>,
+    /// Total bytes (from Content-Length)
+    model_download_total: Option<u64>,
 }
 
 impl Default for VoiceWakeListenerState {
@@ -179,7 +224,9 @@ impl Default for VoiceWakeListenerState {
         Self {
             running: false,
             source: "mic".to_string(),
+            engine: default_listener_engine(),
             device: None,
+            device_label: None,
             worker_pid: None,
             chunk_ms: DEFAULT_LISTENER_CHUNK_MS,
             started_at_ms: None,
@@ -191,7 +238,15 @@ impl Default for VoiceWakeListenerState {
             last_speaker_profile_id: None,
             last_speaker_confidence: None,
             last_speaker_status: None,
+            last_match_status: None,
+            last_match_binding_id: None,
+            last_match_phrase: None,
+            last_action_result: None,
+            last_action_at_ms: None,
             trigger_count: 0,
+            model_download_status: None,
+            model_download_progress: None,
+            model_download_total: None,
         }
     }
 }
@@ -208,6 +263,8 @@ struct VoiceWakeListenerRuntime {
 struct VoiceWakeListenerStartRequest {
     #[serde(default = "default_listener_source")]
     source: String,
+    #[serde(default = "default_listener_engine")]
+    engine: String,
     #[serde(default)]
     device: Option<String>,
     #[serde(default)]
@@ -228,6 +285,7 @@ impl Default for VoiceWakeListenerStartRequest {
     fn default() -> Self {
         Self {
             source: default_listener_source(),
+            engine: default_listener_engine(),
             device: None,
             chunk_ms: None,
             execute: true,
@@ -242,6 +300,8 @@ impl Default for VoiceWakeListenerStartRequest {
 pub(super) async fn handle_voice_wake(req: Request<Incoming>, path: &str) -> Response<BoxBody> {
     match (req.method(), path) {
         (&Method::GET, "/api/voice/wake/status") => get_status_response().await,
+        (&Method::GET, "/api/voice/wake/kws/status") => get_kws_status_response(),
+        (&Method::POST, "/api/voice/wake/kws/init") => post_kws_init_response(),
         (&Method::GET, "/api/voice/wake/profiles") => get_profiles_response(),
         (&Method::POST, "/api/voice/wake/profiles") => post_profile_response(req).await,
         (&Method::GET, "/api/voice/wake/bindings") => get_bindings_response(),
@@ -249,6 +309,9 @@ pub(super) async fn handle_voice_wake(req: Request<Incoming>, path: &str) -> Res
         (&Method::POST, "/api/voice/wake/trigger") => post_trigger_response(req).await,
         (&Method::POST, "/api/voice/wake/listener/start") => {
             post_listener_start_response(req).await
+        }
+        (&Method::POST, "/api/voice/wake/listener/progress") => {
+            post_listener_progress_response(req).await
         }
         (&Method::POST, "/api/voice/wake/listener/stop") => post_listener_stop_response().await,
         (&Method::GET, "/api/voice/wake/events") => get_events_response(),
@@ -261,13 +324,24 @@ pub(super) async fn handle_voice_wake(req: Request<Incoming>, path: &str) -> Res
 
 async fn get_status_response() -> Response<BoxBody> {
     let listener = listener_state_snapshot().await;
+    let default_engine = default_listener_engine();
+    let kws_pack = voice_wake_kws_model_pack();
     match load_store() {
         Ok(store) => json_response(&serde_json::json!({
             "enabled": store.enabled,
             "profile_count": store.profiles.len(),
             "binding_count": store.bindings.len(),
             "event_count": store.events.len(),
-            "mode": "backend_asr_listener",
+            "mode": default_engine,
+            "fallback": serde_json::Value::Null,
+            "requires_qwen_by_default": false,
+            "kws": {
+                "engine": "sherpa-onnx",
+                "profile": DEFAULT_WAKE_KWS_PROFILE,
+                "ready": kws_pack.is_ready(),
+                "install_dir": kws_pack.root_dir,
+                "missing_files": kws_pack.missing_files(),
+            },
             "store_path": store_path(),
             "default_dry_run": true,
             "listener": listener
@@ -279,6 +353,21 @@ async fn get_status_response() -> Response<BoxBody> {
 fn get_profiles_response() -> Response<BoxBody> {
     match load_store() {
         Ok(store) => json_response(&serde_json::json!({ "profiles": store.profiles })),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
+    }
+}
+
+fn get_kws_status_response() -> Response<BoxBody> {
+    json_response(&voice_wake_kws_status_json())
+}
+
+fn post_kws_init_response() -> Response<BoxBody> {
+    match prepare_voice_wake_kws_profile() {
+        Ok(()) => json_response(&serde_json::json!({
+            "profile": DEFAULT_WAKE_KWS_PROFILE,
+            "status": voice_wake_kws_status_json(),
+            "message": "voice wake KWS profile initialized"
+        })),
         Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
     }
 }
@@ -303,23 +392,20 @@ async fn post_profile_response(req: Request<Incoming>) -> Response<BoxBody> {
         .speaker_threshold
         .unwrap_or(DEFAULT_SPEAKER_THRESHOLD)
         .clamp(0.0, 1.0);
-    let Some(voiceprint_profile_id) = create
+    let voiceprint_profile_id = create
         .voiceprint_profile_id
         .as_deref()
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "voiceprint_profile_id is required; enroll a speaker voiceprint first",
-        );
-    };
-    if !registered_speaker_profile_exists(voiceprint_profile_id) {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "speaker voiceprint profile not found",
-        );
+        .filter(|value| !value.is_empty());
+    if let Some(voiceprint_profile_id) = voiceprint_profile_id {
+        if !registered_speaker_profile_exists(voiceprint_profile_id) {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "speaker voiceprint profile not found",
+            );
+        }
     }
+    let stored_voiceprint_profile_id = voiceprint_profile_id.map(ToString::to_string);
     match update_store(|store| {
         if store.profiles.iter().any(|profile| profile.id == id) {
             return Err("voice wake profile already exists".to_string());
@@ -328,7 +414,7 @@ async fn post_profile_response(req: Request<Incoming>) -> Response<BoxBody> {
         let profile = VoiceWakeProfile {
             id,
             display_name: display_name.to_string(),
-            voiceprint_profile_id: Some(voiceprint_profile_id.to_string()),
+            voiceprint_profile_id: stored_voiceprint_profile_id,
             speaker_threshold: threshold,
             created_at_ms: now,
             updated_at_ms: now,
@@ -442,12 +528,34 @@ async fn post_listener_start_response(req: Request<Incoming>) -> Response<BoxBod
             "mock_transcripts is required when source is mock",
         );
     }
+    let engine = create.engine.trim().to_ascii_lowercase();
+    if engine != "lightweight_kws_listener" {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "voice wake listener engine must be lightweight_kws_listener",
+        );
+    }
     if source == "mic" && std::env::consts::OS != "macos" {
         return error_response(
             StatusCode::BAD_REQUEST,
-            "backend microphone listener is currently implemented for macOS",
+            "voice wake microphone listener is currently implemented for macOS",
         );
     }
+    let needs_model_download = if source == "mic" && engine == "lightweight_kws_listener" {
+        let pack = voice_wake_kws_model_pack();
+        if !pack.is_ready() {
+            tracing::info!(
+                profile = DEFAULT_WAKE_KWS_PROFILE,
+                install_dir = %pack.root_dir.display(),
+                "voice wake KWS assets are missing; will download asynchronously"
+            );
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
     let store = match load_store() {
         Ok(store) => store,
         Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
@@ -471,6 +579,7 @@ async fn post_listener_start_response(req: Request<Incoming>) -> Response<BoxBod
     let cancel = Arc::new(AtomicBool::new(false));
     let request = VoiceWakeListenerStartRequest {
         source: source.clone(),
+        engine: engine.clone(),
         device: create.device.clone(),
         chunk_ms: Some(chunk_ms),
         ..create
@@ -479,7 +588,9 @@ async fn post_listener_start_response(req: Request<Incoming>) -> Response<BoxBod
     runtime.state = VoiceWakeListenerState {
         running: true,
         source,
+        engine,
         device: request.device.clone(),
+        device_label: None,
         worker_pid: None,
         chunk_ms,
         started_at_ms: Some(now_ms()),
@@ -491,22 +602,62 @@ async fn post_listener_start_response(req: Request<Incoming>) -> Response<BoxBod
         last_speaker_profile_id: None,
         last_speaker_confidence: None,
         last_speaker_status: None,
+        last_match_status: None,
+        last_match_binding_id: None,
+        last_match_phrase: None,
+        last_action_result: None,
+        last_action_at_ms: None,
         trigger_count: 0,
+        model_download_status: None,
+        model_download_progress: None,
+        model_download_total: None,
     };
-    if request.source == "mic" {
-        match spawn_voice_wake_worker(&request, &admin_host, admin_port).await {
-            Ok((pid, task)) => {
-                runtime.worker_pid = Some(pid);
-                runtime.state.worker_pid = Some(pid);
-                runtime.task = Some(task);
-            }
-            Err(error) => {
-                runtime.cancel = None;
-                runtime.state.running = false;
-                runtime.state.stopped_at_ms = Some(now_ms());
-                runtime.state.last_error = Some(error.clone());
-                runtime.state.last_error_at_ms = Some(now_ms());
-                return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error);
+    if request.source == "mic" && request.engine == "lightweight_kws_listener" {
+        if needs_model_download {
+            // Set initial download status and spawn async download + start task
+            runtime.state.model_download_status = Some("downloading".to_string());
+            runtime.state.model_download_progress = Some(0);
+            let admin_host_clone = admin_host.clone();
+            let request_clone = request.clone();
+            let cancel_clone = cancel.clone();
+            runtime.task = Some(tokio::spawn(async move {
+                match download_and_start_listener(
+                    cancel_clone,
+                    request_clone,
+                    admin_host_clone,
+                    admin_port,
+                )
+                .await
+                {
+                    Ok(()) => {}
+                    Err(error) => {
+                        tracing::error!(%error, "voice wake async model download/start failed");
+                        update_listener_state(|state| {
+                            state.model_download_status = Some("failed".to_string());
+                            state.last_error = Some(error);
+                            state.last_error_at_ms = Some(now_ms());
+                            state.running = false;
+                            state.stopped_at_ms = Some(now_ms());
+                        })
+                        .await;
+                    }
+                }
+            }));
+        } else {
+            match spawn_voice_wake_worker(&request, &admin_host, admin_port).await {
+                Ok((pid, task)) => {
+                    runtime.worker_pid = Some(pid);
+                    runtime.state.worker_pid = Some(pid);
+                    runtime.task = Some(task);
+                }
+                Err(error) => {
+                    runtime.cancel = None;
+                    runtime.state.running = false;
+                    runtime.state.stopped_at_ms = Some(now_ms());
+                    runtime.state.last_error = Some(error.clone());
+                    runtime.state.last_error_at_ms = Some(now_ms());
+                    return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error);
+                }
             }
         }
     } else {
@@ -531,6 +682,73 @@ async fn post_listener_stop_response() -> Response<BoxBody> {
     runtime.state.running = false;
     runtime.state.worker_pid = None;
     runtime.state.stopped_at_ms = Some(now_ms());
+    runtime.state.last_match_status = None;
+    json_response(&serde_json::json!({ "listener": runtime.state }))
+}
+
+async fn post_listener_progress_response(req: Request<Incoming>) -> Response<BoxBody> {
+    let progress = match read_json_body::<VoiceWakeListenerProgressRequest>(req).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let status = progress.status.trim();
+    if status.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "listener progress status is required",
+        );
+    }
+    let now = now_ms();
+    let mut runtime = VOICE_WAKE_LISTENER.lock().await;
+    if !runtime.state.running {
+        return json_response(&serde_json::json!({ "listener": runtime.state }));
+    }
+    if let Some(device) = progress
+        .device
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        runtime.state.device = Some(device.to_string());
+    }
+    if let Some(device_label) = progress
+        .device_label
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        runtime.state.device_label = Some(device_label.to_string());
+    }
+    runtime.state.last_match_status = Some(status.to_string());
+    if let Some(transcript) = progress.transcript {
+        runtime.state.last_transcript = Some(transcript);
+        runtime.state.last_transcript_at_ms = Some(now);
+    }
+    if let Some(phrase) = progress.phrase {
+        runtime.state.last_match_phrase = Some(phrase);
+    }
+    if let Some(match_id) = progress.binding_id.or(progress.profile_id) {
+        runtime.state.last_match_binding_id = Some(match_id);
+    }
+    if let Some(speaker_profile_id) = progress.speaker_profile_id {
+        runtime.state.last_speaker_profile_id = Some(speaker_profile_id);
+    }
+    if let Some(speaker_confidence) = progress.speaker_confidence {
+        runtime.state.last_speaker_confidence = Some(speaker_confidence);
+    }
+    if let Some(speaker_status) = progress.speaker_status {
+        runtime.state.last_speaker_status = Some(speaker_status);
+    }
+    if let Some(error) = progress.error {
+        runtime.state.last_error = Some(error);
+        runtime.state.last_error_at_ms = Some(now);
+    } else if matches!(
+        status,
+        "capturing" | "captured" | "transcribing" | "recognized" | "no_match"
+    ) {
+        runtime.state.last_error = None;
+        runtime.state.last_error_at_ms = None;
+    }
     json_response(&serde_json::json!({ "listener": runtime.state }))
 }
 
@@ -572,6 +790,7 @@ async fn spawn_voice_wake_worker(
         .map_err(|error| format!("clone voice wake worker log handle: {error}"))?;
     let current_exe =
         std::env::current_exe().map_err(|error| format!("resolve current executable: {error}"))?;
+    let current_exe = labeled_process_executable(&current_exe, "bifrost-voice");
     let chunk_ms = request
         .chunk_ms
         .unwrap_or(DEFAULT_LISTENER_CHUNK_MS)
@@ -585,6 +804,8 @@ async fn spawn_voice_wake_worker(
         .arg(admin_host)
         .arg("--admin-port")
         .arg(admin_port.to_string())
+        .arg("--engine")
+        .arg(request.engine.clone())
         .arg("--chunk-ms")
         .arg(chunk_ms.to_string())
         .env(
@@ -626,6 +847,22 @@ async fn spawn_voice_wake_worker(
     Ok((pid, task))
 }
 
+fn labeled_process_executable(executable: &Path, alias_name: &str) -> PathBuf {
+    let alias_dir = bifrost_storage::data_dir().join("runtime/process-aliases");
+    match bifrost_core::process_alias_executable(executable, &alias_dir, alias_name) {
+        Ok(alias) => alias,
+        Err(error) => {
+            tracing::warn!(
+                executable = %executable.display(),
+                alias_name = %alias_name,
+                error = %error,
+                "falling back to unlabeled bifrost voice wake executable"
+            );
+            executable.to_path_buf()
+        }
+    }
+}
+
 fn get_events_response() -> Response<BoxBody> {
     match load_store() {
         Ok(store) => json_response(&serde_json::json!({ "events": store.events })),
@@ -660,7 +897,11 @@ where
 }
 
 async fn run_voice_wake_listener(cancel: Arc<AtomicBool>, request: VoiceWakeListenerStartRequest) {
-    let result = run_mock_voice_wake_listener(cancel.clone(), &request).await;
+    let result = if request.source == "mock" {
+        run_mock_voice_wake_listener(cancel.clone(), &request).await
+    } else {
+        run_lightweight_mic_wake_listener(cancel.clone(), &request).await
+    };
     update_listener_state(|state| {
         state.running = false;
         state.stopped_at_ms = Some(now_ms());
@@ -687,6 +928,24 @@ async fn run_mock_voice_wake_listener(
     Ok(())
 }
 
+async fn run_lightweight_mic_wake_listener(
+    cancel: Arc<AtomicBool>,
+    request: &VoiceWakeListenerStartRequest,
+) -> Result<(), String> {
+    let interval = request
+        .chunk_ms
+        .unwrap_or(DEFAULT_LISTENER_CHUNK_MS)
+        .clamp(MIN_LISTENER_CHUNK_MS, MAX_LISTENER_CHUNK_MS);
+    while !cancel.load(Ordering::SeqCst) {
+        update_listener_state(|state| {
+            state.last_speaker_status = Some("lightweight_kws_listener_idle".to_string());
+        })
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(interval)).await;
+    }
+    Ok(())
+}
+
 async fn process_listener_transcript(
     transcript: &str,
     chunk_path: Option<&Path>,
@@ -695,56 +954,106 @@ async fn process_listener_transcript(
     update_listener_state(|state| {
         state.last_transcript = Some(transcript.to_string());
         state.last_transcript_at_ms = Some(now_ms());
+        state.last_match_status = Some("recognized".to_string());
+        state.last_match_binding_id = None;
+        state.last_match_phrase = None;
+        state.last_action_result = None;
+        state.last_action_at_ms = None;
     })
     .await;
     let candidate =
         match load_store().and_then(|store| listener_match_candidate(&store, transcript)) {
             Ok(candidate) => candidate,
-            Err(error) if error == "no_match" || error == "cooldown" => return Ok(()),
+            Err(error) if error == "no_match" || error == "cooldown" => {
+                update_listener_state(|state| {
+                    state.last_match_status = Some(error);
+                })
+                .await;
+                return Ok(());
+            }
             Err(error) => {
                 record_listener_error(&error).await;
                 return Ok(());
             }
         };
-    let speaker = match identify_listener_speaker(chunk_path, request) {
-        Ok(speaker) => speaker,
-        Err(error) => {
-            record_listener_error(&error).await;
-            return Ok(());
-        }
-    };
     update_listener_state(|state| {
-        state.last_speaker_profile_id = speaker.profile_id.clone();
-        state.last_speaker_confidence = Some(speaker.confidence);
-        state.last_speaker_status = Some(speaker.status.clone());
+        state.last_match_status = Some("phrase_matched".to_string());
+        state.last_match_binding_id = Some(candidate.binding_id.clone());
+        state.last_match_phrase = Some(candidate.phrase.clone());
     })
     .await;
-    let speaker_profile_id = speaker.profile_id.as_deref().unwrap_or("");
-    if !speaker.matched
-        || speaker_profile_id != candidate.voiceprint_profile_id
-        || speaker.confidence < candidate.speaker_threshold
-    {
-        record_listener_error(&format!(
-            "speaker verification failed: expected {}, got {} at {:.3} ({})",
-            candidate.voiceprint_profile_id, speaker_profile_id, speaker.confidence, speaker.status
-        ))
-        .await;
-        return Ok(());
-    }
+    let speaker_confidence =
+        if let Some(expected_voiceprint_profile_id) = candidate.voiceprint_profile_id.as_deref() {
+            let speaker = match identify_listener_speaker(chunk_path, request) {
+                Ok(speaker) => speaker,
+                Err(error) => {
+                    record_listener_error(&error).await;
+                    return Ok(());
+                }
+            };
+            update_listener_state(|state| {
+                state.last_speaker_profile_id = speaker.profile_id.clone();
+                state.last_speaker_confidence = Some(speaker.confidence);
+                state.last_speaker_status = Some(speaker.status.clone());
+            })
+            .await;
+            let speaker_profile_id = speaker.profile_id.as_deref().unwrap_or("");
+            if !speaker.matched
+                || speaker_profile_id != expected_voiceprint_profile_id
+                || speaker.confidence < candidate.speaker_threshold
+            {
+                update_listener_state(|state| {
+                    state.last_match_status = Some("speaker_rejected".to_string());
+                })
+                .await;
+                record_listener_error(&format!(
+                    "speaker verification failed: expected {}, got {} at {:.3} ({})",
+                    expected_voiceprint_profile_id,
+                    speaker_profile_id,
+                    speaker.confidence,
+                    speaker.status
+                ))
+                .await;
+                return Ok(());
+            }
+            Some(speaker.confidence)
+        } else {
+            update_listener_state(|state| {
+                state.last_speaker_profile_id = None;
+                state.last_speaker_confidence = None;
+                state.last_speaker_status = Some("phrase_only".to_string());
+                state.last_match_status = Some("speaker_allowed".to_string());
+            })
+            .await;
+            None
+        };
+    let dry_run = !request.execute;
     match update_store(|store| {
-        trigger_binding_by_id(
-            store,
-            &candidate.binding_id,
-            !request.execute,
-            Some(speaker.confidence),
-        )
+        trigger_binding_by_id(store, &candidate.binding_id, dry_run, speaker_confidence)
     }) {
         Ok(value) => {
             if value["matched"].as_bool().unwrap_or(false) {
+                let action_result =
+                    serde_json::from_value::<VoiceWakeActionResult>(value["action_result"].clone())
+                        .ok();
                 update_listener_state(|state| {
                     state.trigger_count = state.trigger_count.saturating_add(1);
                     state.last_error = None;
                     state.last_error_at_ms = None;
+                    state.last_match_status = action_result
+                        .as_ref()
+                        .map(|result| {
+                            if result.executed {
+                                "executed".to_string()
+                            } else if result.dry_run {
+                                "dry_run_matched".to_string()
+                            } else {
+                                "matched".to_string()
+                            }
+                        })
+                        .or_else(|| Some("matched".to_string()));
+                    state.last_action_result = action_result;
+                    state.last_action_at_ms = Some(now_ms());
                 })
                 .await;
             }
@@ -761,7 +1070,8 @@ async fn process_listener_transcript(
 #[derive(Debug, Clone)]
 struct ListenerMatchCandidate {
     binding_id: String,
-    voiceprint_profile_id: String,
+    phrase: String,
+    voiceprint_profile_id: Option<String>,
     speaker_threshold: f32,
 }
 
@@ -777,7 +1087,7 @@ fn listener_match_candidate(
     let Some(binding) = store.bindings.iter().find(|binding| {
         binding.enabled
             && !binding.normalized_phrase.is_empty()
-            && normalized_transcript.contains(&binding.normalized_phrase)
+            && phrase_matches(&normalized_transcript, &binding.normalized_phrase)
     }) else {
         return Err("no_match".to_string());
     };
@@ -794,42 +1104,26 @@ fn listener_match_candidate(
     let voiceprint_profile_id = profile
         .voiceprint_profile_id
         .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "voice wake requires an enrolled speaker voiceprint".to_string())?;
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
     Ok(ListenerMatchCandidate {
         binding_id: binding.id.clone(),
-        voiceprint_profile_id: voiceprint_profile_id.to_string(),
+        phrase: binding.phrase.clone(),
+        voiceprint_profile_id,
         speaker_threshold: binding.speaker_threshold,
     })
 }
 
 fn listener_start_block_reason(store: &VoiceWakeStore) -> Option<String> {
-    if store.profiles.iter().all(|profile| {
-        profile
-            .voiceprint_profile_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .is_none()
-    }) {
-        return Some(
-            "voice wake listener requires an enrolled speaker voiceprint before starting"
-                .to_string(),
-        );
-    }
-    let has_enabled_binding_with_voiceprint = store.bindings.iter().any(|binding| {
+    let has_enabled_binding = store.bindings.iter().any(|binding| {
         binding.enabled
-            && store.profiles.iter().any(|profile| {
-                profile.id == binding.profile_id
-                    && profile
-                        .voiceprint_profile_id
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .is_some()
-            })
+            && store
+                .profiles
+                .iter()
+                .any(|profile| profile.id == binding.profile_id)
     });
-    if !has_enabled_binding_with_voiceprint {
+    if !has_enabled_binding {
         return Some(
             "voice wake listener requires a saved voice command binding before starting"
                 .to_string(),
@@ -886,7 +1180,7 @@ fn trigger_binding(
     let now = now_ms();
     let Some(binding_index) = store.bindings.iter().position(|binding| {
         binding.enabled
-            && binding.normalized_phrase == normalized
+            && phrase_matches(&normalized, &binding.normalized_phrase)
             && profile_filter
                 .map(|profile_id| profile_id == binding.profile_id)
                 .unwrap_or(true)
@@ -910,6 +1204,22 @@ fn trigger_binding(
         return Err(
             "profile_id or speaker_confidence is required for voice wake trigger".to_string(),
         );
+    }
+    if !trigger.dry_run && trigger.speaker_confidence.is_none() {
+        // Only require speaker_confidence when the binding's profile has voiceprint configured
+        let profile_requires_voiceprint = store
+            .profiles
+            .iter()
+            .find(|p| p.id == binding.profile_id)
+            .and_then(|p| p.voiceprint_profile_id.as_deref())
+            .map(|id| !id.trim().is_empty())
+            .unwrap_or(false);
+        if profile_requires_voiceprint {
+            return Err(
+                "speaker_confidence is required to execute voice wake action with voiceprint"
+                    .to_string(),
+            );
+        }
     }
     let result = execute_action(&binding.action, trigger.dry_run)?;
     binding.last_triggered_at_ms = Some(now);
@@ -1003,7 +1313,15 @@ fn execute_action(
             keycode,
             modifiers,
             press_count,
-        } => execute_key_press(key.as_deref(), *keycode, modifiers, *press_count, dry_run),
+            repeat_delay_ms,
+        } => execute_key_press(
+            key.as_deref(),
+            *keycode,
+            modifiers,
+            *press_count,
+            *repeat_delay_ms,
+            dry_run,
+        ),
     }
 }
 
@@ -1012,10 +1330,13 @@ fn execute_key_press(
     keycode: Option<u16>,
     modifiers: &[String],
     press_count: u8,
+    repeat_delay_ms: u64,
     dry_run: bool,
 ) -> Result<VoiceWakeActionResult, String> {
     let press_count = press_count.clamp(1, 8);
-    let script = build_macos_keypress_script(key, keycode, modifiers, press_count)?;
+    let repeat_delay_ms = repeat_delay_ms.min(5_000);
+    let script =
+        build_macos_keypress_script(key, keycode, modifiers, press_count, repeat_delay_ms)?;
     if dry_run {
         return Ok(VoiceWakeActionResult {
             action_type: "key_press".to_string(),
@@ -1057,6 +1378,7 @@ fn build_macos_keypress_script(
     keycode: Option<u16>,
     modifiers: &[String],
     press_count: u8,
+    repeat_delay_ms: u64,
 ) -> Result<String, String> {
     let normalized_modifiers = normalize_modifiers(modifiers)?;
     let using_clause = if normalized_modifiers.is_empty() {
@@ -1084,9 +1406,19 @@ fn build_macos_keypress_script(
     if press_count <= 1 {
         return Ok(format!("tell application \"System Events\" to {action}"));
     }
+    let delay_seconds = format_repeat_delay_seconds(repeat_delay_ms);
     Ok(format!(
-        "tell application \"System Events\" to repeat {press_count} times\n  {action}\nend repeat"
+        "tell application \"System Events\" to repeat with pressIndex from 1 to {press_count}\n  {action}\n  if pressIndex is less than {press_count} then delay {delay_seconds}\nend repeat"
     ))
+}
+
+fn format_repeat_delay_seconds(delay_ms: u64) -> String {
+    let seconds = delay_ms as f64 / 1000.0;
+    let formatted = format!("{seconds:.3}");
+    formatted
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
 }
 
 fn named_keycode(key: &str) -> Option<u16> {
@@ -1099,6 +1431,10 @@ fn named_keycode(key: &str) -> Option<u16> {
         "right" => Some(124),
         "down" => Some(125),
         "up" => Some(126),
+        "cmd" | "command" | "meta" => Some(55),
+        "shift" => Some(56),
+        "option" | "alt" => Some(58),
+        "ctrl" | "control" => Some(59),
         _ => None,
     }
 }
@@ -1126,6 +1462,7 @@ fn validate_key_action(action: &VoiceWakeAction) -> Result<(), String> {
             keycode,
             modifiers,
             press_count,
+            repeat_delay_ms,
         } => {
             if key.as_deref().unwrap_or("").trim().is_empty() && keycode.is_none() {
                 return Err("key_press action requires key or keycode".to_string());
@@ -1133,8 +1470,17 @@ fn validate_key_action(action: &VoiceWakeAction) -> Result<(), String> {
             if *press_count == 0 || *press_count > 8 {
                 return Err("key_press press_count must be between 1 and 8".to_string());
             }
-            build_macos_keypress_script(key.as_deref(), *keycode, modifiers, *press_count)
-                .map(|_| ())
+            if *repeat_delay_ms > 5_000 {
+                return Err("key_press repeat_delay_ms must be between 0 and 5000".to_string());
+            }
+            build_macos_keypress_script(
+                key.as_deref(),
+                *keycode,
+                modifiers,
+                *press_count,
+                *repeat_delay_ms,
+            )
+            .map(|_| ())
         }
     }
 }
@@ -1212,6 +1558,292 @@ fn store_path() -> PathBuf {
         .join("actions.json")
 }
 
+fn voice_wake_kws_model_pack() -> SherpaKwsModelPack {
+    SherpaKwsModelPack::for_root(
+        bifrost_storage::data_dir()
+            .join("asr")
+            .join("wake")
+            .join("kws")
+            .join(DEFAULT_WAKE_KWS_PROFILE),
+    )
+}
+
+fn voice_wake_kws_status_json() -> serde_json::Value {
+    let pack = voice_wake_kws_model_pack();
+    serde_json::json!({
+        "engine": "sherpa-onnx",
+        "profile": DEFAULT_WAKE_KWS_PROFILE,
+        "ready": pack.is_ready(),
+        "install_dir": pack.root_dir,
+        "model_dir": pack.model_dir,
+        "archive_url": DEFAULT_WAKE_KWS_ARCHIVE_URL,
+        "missing_files": pack.missing_files(),
+    })
+}
+
+fn prepare_voice_wake_kws_profile() -> Result<(), String> {
+    let pack = voice_wake_kws_model_pack();
+    if pack.is_ready() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(&pack.root_dir)
+        .map_err(|error| format!("create voice wake KWS profile dir: {error}"))?;
+    let archive_path = pack.archive_path();
+    download_voice_wake_kws_archive(&archive_path)?;
+    let status = Command::new("tar")
+        .arg("-xjf")
+        .arg(&archive_path)
+        .arg("-C")
+        .arg(&pack.root_dir)
+        .status()
+        .map_err(|error| format!("extract voice wake KWS archive with tar: {error}"))?;
+    if !status.success() {
+        return Err(format!(
+            "extract voice wake KWS archive failed with status {status}"
+        ));
+    }
+    if !pack.is_ready() {
+        return Err(format!(
+            "voice wake KWS profile extracted but required files are missing: {}",
+            pack.missing_files()
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    Ok(())
+}
+
+fn download_voice_wake_kws_archive(destination: &Path) -> Result<(), String> {
+    if destination
+        .metadata()
+        .map(|metadata| metadata.is_file() && metadata.len() > 1_000_000)
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    let temp_path = destination.with_extension("download");
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(30 * 60))
+        .build();
+    let response = agent
+        .get(DEFAULT_WAKE_KWS_ARCHIVE_URL)
+        .call()
+        .map_err(|error| format!("download voice wake KWS model: {error}"))?;
+    let mut reader = response.into_reader();
+    let mut output = std::fs::File::create(&temp_path)
+        .map_err(|error| format!("create {}: {error}", temp_path.display()))?;
+    std::io::copy(&mut reader, &mut output)
+        .map_err(|error| format!("write {}: {error}", temp_path.display()))?;
+    drop(output);
+    let len = temp_path
+        .metadata()
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    if len <= 1_000_000 {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(format!(
+            "downloaded voice wake KWS archive is incomplete: {} has {len} bytes",
+            temp_path.display()
+        ));
+    }
+    std::fs::rename(&temp_path, destination).map_err(|error| {
+        format!(
+            "install voice wake KWS archive {} -> {}: {error}",
+            temp_path.display(),
+            destination.display()
+        )
+    })
+}
+
+/// Async model download + extract + start worker. Runs in a spawned task.
+async fn download_and_start_listener(
+    cancel: Arc<AtomicBool>,
+    request: VoiceWakeListenerStartRequest,
+    admin_host: String,
+    admin_port: u16,
+) -> Result<(), String> {
+    let pack = voice_wake_kws_model_pack();
+    tokio::fs::create_dir_all(&pack.root_dir)
+        .await
+        .map_err(|e| format!("create KWS dir: {e}"))?;
+    let archive_path = pack.archive_path();
+
+    // Phase 1: async streaming download with progress
+    download_voice_wake_kws_archive_async(&archive_path, &cancel).await?;
+
+    if cancel.load(Ordering::SeqCst) {
+        return Err("cancelled".to_string());
+    }
+
+    // Phase 2: extract
+    update_listener_state(|state| {
+        state.model_download_status = Some("extracting".to_string());
+    })
+    .await;
+
+    let root_dir = pack.root_dir.clone();
+    let archive_for_extract = archive_path.clone();
+    let extract_result = tokio::task::spawn_blocking(move || {
+        let status = Command::new("tar")
+            .arg("-xjf")
+            .arg(&archive_for_extract)
+            .arg("-C")
+            .arg(&root_dir)
+            .status()
+            .map_err(|e| format!("extract tar: {e}"))?;
+        if !status.success() {
+            return Err(format!("tar extract failed: {status}"));
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking join: {e}"))?;
+    extract_result?;
+
+    if !pack.is_ready() {
+        let missing = pack
+            .missing_files()
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!("extracted but missing files: {missing}"));
+    }
+
+    update_listener_state(|state| {
+        state.model_download_status = Some("downloaded".to_string());
+    })
+    .await;
+
+    if cancel.load(Ordering::SeqCst) {
+        return Err("cancelled".to_string());
+    }
+
+    // Phase 3: start the worker
+    match spawn_voice_wake_worker(&request, &admin_host, admin_port).await {
+        Ok((pid, task)) => {
+            let mut runtime = VOICE_WAKE_LISTENER.lock().await;
+            runtime.worker_pid = Some(pid);
+            runtime.state.worker_pid = Some(pid);
+            runtime.state.model_download_status = None;
+            runtime.state.model_download_progress = None;
+            runtime.state.model_download_total = None;
+            // Replace our own task handle with the worker monitoring task
+            runtime.task = Some(task);
+            Ok(())
+        }
+        Err(error) => {
+            update_listener_state(|state| {
+                state.running = false;
+                state.stopped_at_ms = Some(now_ms());
+                state.model_download_status = Some("failed".to_string());
+                state.last_error = Some(error.clone());
+                state.last_error_at_ms = Some(now_ms());
+            })
+            .await;
+            Err(error)
+        }
+    }
+}
+
+/// Async streaming download of the KWS model archive with progress updates.
+async fn download_voice_wake_kws_archive_async(
+    destination: &Path,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
+    use futures_util::StreamExt;
+
+    // Skip if already downloaded
+    if destination
+        .metadata()
+        .map(|m| m.is_file() && m.len() > 1_000_000)
+        .unwrap_or(false)
+    {
+        update_listener_state(|state| {
+            state.model_download_status = Some("downloaded".to_string());
+        })
+        .await;
+        return Ok(());
+    }
+
+    let temp_path = destination.with_extension("download");
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30 * 60))
+        .build()
+        .map_err(|e| format!("create HTTP client: {e}"))?;
+
+    let response = client
+        .get(DEFAULT_WAKE_KWS_ARCHIVE_URL)
+        .send()
+        .await
+        .map_err(|e| format!("download KWS model: {e}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!("download KWS model: HTTP {}", response.status()));
+    }
+
+    let total_size = response.content_length();
+    update_listener_state(|state| {
+        state.model_download_total = total_size;
+    })
+    .await;
+
+    let mut file = tokio::fs::File::create(&temp_path)
+        .await
+        .map_err(|e| format!("create {}: {e}", temp_path.display()))?;
+
+    let mut stream = response.bytes_stream();
+    let mut downloaded: u64 = 0;
+    let mut last_progress_update = tokio::time::Instant::now();
+
+    use tokio::io::AsyncWriteExt;
+    while let Some(chunk) = stream.next().await {
+        if cancel.load(Ordering::SeqCst) {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Err("cancelled".to_string());
+        }
+        let chunk = chunk.map_err(|e| format!("download stream: {e}"))?;
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| format!("write {}: {e}", temp_path.display()))?;
+        downloaded += chunk.len() as u64;
+
+        // Throttle progress updates to every 200ms
+        if last_progress_update.elapsed() >= Duration::from_millis(200) {
+            last_progress_update = tokio::time::Instant::now();
+            update_listener_state(|state| {
+                state.model_download_progress = Some(downloaded);
+            })
+            .await;
+        }
+    }
+    file.flush()
+        .await
+        .map_err(|e| format!("flush {}: {e}", temp_path.display()))?;
+    drop(file);
+
+    // Final progress update
+    update_listener_state(|state| {
+        state.model_download_progress = Some(downloaded);
+    })
+    .await;
+
+    if downloaded <= 1_000_000 {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Err(format!(
+            "downloaded KWS archive incomplete: {downloaded} bytes"
+        ));
+    }
+
+    tokio::fs::rename(&temp_path, destination)
+        .await
+        .map_err(|e| format!("install KWS archive: {e}"))?;
+
+    Ok(())
+}
+
 fn atomic_json_write<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -1225,7 +1857,11 @@ fn atomic_json_write<T: Serialize>(path: &Path, value: &T) -> Result<(), String>
 }
 
 fn normalize_phrase(phrase: &str) -> String {
-    phrase.to_lowercase().split_whitespace().collect()
+    normalize_wake_phrase(phrase)
+}
+
+fn phrase_matches(normalized_transcript: &str, normalized_binding: &str) -> bool {
+    wake_phrase_matches(normalized_transcript, normalized_binding)
 }
 
 fn validate_id(value: &str, label: &str) -> Result<(), String> {
@@ -1260,8 +1896,16 @@ fn default_listener_source() -> String {
     "mic".to_string()
 }
 
+fn default_listener_engine() -> String {
+    "lightweight_kws_listener".to_string()
+}
+
 fn default_press_count() -> u8 {
     1
+}
+
+fn default_repeat_delay_ms() -> u64 {
+    100
 }
 
 #[cfg(test)]
@@ -1274,17 +1918,58 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_phrase_punctuation() {
+        assert_eq!(normalize_phrase("哈喽哈喽。"), "哈喽哈喽");
+        assert_eq!(normalize_phrase("Hello, Bifrost!"), "hellobifrost");
+    }
+
+    #[test]
+    fn phrase_match_collapses_repeated_wake_word() {
+        let binding = normalize_phrase("哈喽哈喽。");
+        let transcript = normalize_phrase("哈喽");
+        assert!(phrase_matches(&transcript, &binding));
+        assert!(phrase_matches(
+            &normalize_phrase("现在 哈喽 一下"),
+            &binding
+        ));
+        assert!(!phrase_matches(
+            &normalize_phrase("打开"),
+            &normalize_phrase("打开录音")
+        ));
+    }
+
+    #[test]
     fn builds_safe_macos_keypress_script_for_named_key() {
         let script = build_macos_keypress_script(
             Some("space"),
             None,
             &["cmd".to_string(), "shift".to_string()],
             1,
+            100,
         )
         .expect("script");
         assert_eq!(
             script,
             "tell application \"System Events\" to key code 49 using {command down, shift down}"
+        );
+    }
+
+    #[test]
+    fn builds_double_keypress_with_100ms_delay() {
+        let script = build_macos_keypress_script(Some("space"), None, &[], 2, 100).expect("script");
+        assert_eq!(
+            script,
+            "tell application \"System Events\" to repeat with pressIndex from 1 to 2\n  key code 49\n  if pressIndex is less than 2 then delay 0.1\nend repeat"
+        );
+    }
+
+    #[test]
+    fn builds_double_option_keypress_with_100ms_delay() {
+        let script =
+            build_macos_keypress_script(Some("option"), None, &[], 2, 100).expect("script");
+        assert_eq!(
+            script,
+            "tell application \"System Events\" to repeat with pressIndex from 1 to 2\n  key code 58\n  if pressIndex is less than 2 then delay 0.1\nend repeat"
         );
     }
 
@@ -1295,6 +1980,7 @@ mod tests {
             keycode: None,
             modifiers: Vec::new(),
             press_count: 1,
+            repeat_delay_ms: 100,
         })
         .unwrap_err();
         assert!(error.contains("unsupported key"));
@@ -1327,6 +2013,7 @@ mod tests {
                     keycode: None,
                     modifiers: Vec::new(),
                     press_count: 1,
+                    repeat_delay_ms: 100,
                 },
                 created_at_ms: now,
                 updated_at_ms: now,
@@ -1349,7 +2036,7 @@ mod tests {
     }
 
     #[test]
-    fn backend_listener_requires_enrolled_voiceprint_profile() {
+    fn listener_match_allows_phrase_only_candidate() {
         let now = now_ms();
         let store = VoiceWakeStore {
             profiles: vec![VoiceWakeProfile {
@@ -1375,6 +2062,7 @@ mod tests {
                     keycode: None,
                     modifiers: Vec::new(),
                     press_count: 1,
+                    repeat_delay_ms: 100,
                 },
                 created_at_ms: now,
                 updated_at_ms: now,
@@ -1382,17 +2070,18 @@ mod tests {
             }],
             ..VoiceWakeStore::default()
         };
-        let error = listener_match_candidate(&store, "现在 打开 录音").unwrap_err();
-        assert!(error.contains("enrolled speaker voiceprint"));
+        let candidate = listener_match_candidate(&store, "现在 打开 录音").unwrap();
+        assert_eq!(candidate.binding_id, "b1");
+        assert_eq!(candidate.voiceprint_profile_id, None);
     }
 
     #[test]
-    fn listener_start_requires_voiceprint_and_binding() {
+    fn listener_start_requires_binding_only() {
         let now = now_ms();
         let empty = VoiceWakeStore::default();
         assert!(listener_start_block_reason(&empty)
             .expect("blocked")
-            .contains("speaker voiceprint"));
+            .contains("saved voice command"));
 
         let no_binding = VoiceWakeStore {
             profiles: vec![VoiceWakeProfile {
@@ -1408,6 +2097,40 @@ mod tests {
         assert!(listener_start_block_reason(&no_binding)
             .expect("blocked")
             .contains("saved voice command"));
+
+        let phrase_only = VoiceWakeStore {
+            profiles: vec![VoiceWakeProfile {
+                id: "p1".to_string(),
+                display_name: "Eden".to_string(),
+                voiceprint_profile_id: None,
+                speaker_threshold: DEFAULT_SPEAKER_THRESHOLD,
+                created_at_ms: now,
+                updated_at_ms: now,
+            }],
+            bindings: vec![VoiceWakeBinding {
+                id: "b1".to_string(),
+                enabled: true,
+                phrase: "打开录音".to_string(),
+                normalized_phrase: normalize_phrase("打开录音"),
+                profile_id: "p1".to_string(),
+                kws_score: DEFAULT_KWS_SCORE,
+                kws_threshold: DEFAULT_KWS_THRESHOLD,
+                speaker_threshold: DEFAULT_SPEAKER_THRESHOLD,
+                cooldown_ms: DEFAULT_COOLDOWN_MS,
+                action: VoiceWakeAction::KeyPress {
+                    key: Some("escape".to_string()),
+                    keycode: None,
+                    modifiers: Vec::new(),
+                    press_count: 1,
+                    repeat_delay_ms: 100,
+                },
+                created_at_ms: now,
+                updated_at_ms: now,
+                last_triggered_at_ms: None,
+            }],
+            ..VoiceWakeStore::default()
+        };
+        assert!(listener_start_block_reason(&phrase_only).is_none());
     }
 
     #[test]
@@ -1437,6 +2160,7 @@ mod tests {
                     keycode: None,
                     modifiers: Vec::new(),
                     press_count: 1,
+                    repeat_delay_ms: 100,
                 },
                 created_at_ms: now,
                 updated_at_ms: now,

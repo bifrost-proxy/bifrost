@@ -10,7 +10,7 @@ fail() {
   exit 1
 }
 
-ADMIN_PORT="${BIFROST_ASR_TASK_CLI_E2E_PORT:-18990}"
+ADMIN_PORT="${BIFROST_ASR_TASK_CLI_E2E_PORT:-${ADMIN_PORT:-18990}}"
 ADMIN_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bifrost-asr-task-cli.XXXXXX")"
 AUDIO_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bifrost-asr-task-audio.XXXXXX")"
 SYNC_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bifrost-asr-task-sync.XXXXXX")"

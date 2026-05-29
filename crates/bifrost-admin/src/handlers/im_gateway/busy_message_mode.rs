@@ -266,3 +266,16 @@ pub(super) fn format_pending_guide_status(guides: &[String]) -> String {
     }
     text
 }
+
+pub(super) fn merge_pending_guide_messages(
+    active_guides: &[String],
+    queue_guides: Vec<String>,
+) -> Vec<String> {
+    let mut merged = active_guides.to_vec();
+    for guide in queue_guides {
+        if !merged.iter().any(|existing| existing == &guide) {
+            merged.push(guide);
+        }
+    }
+    merged
+}

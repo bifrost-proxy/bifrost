@@ -14,9 +14,9 @@ describe("Voice realtime ASR params", () => {
     window.localStorage.clear();
   });
 
-  it("keeps offline ASR default on the high-accuracy 1.7B model", () => {
+  it("defaults every ASR entry to the lightweight 0.6B model", () => {
     expect(defaultAsrParams()).toMatchObject({
-      model: "Qwen3-ASR-1.7B",
+      model: "Qwen3-ASR-0.6B",
     });
   });
 
@@ -34,10 +34,10 @@ describe("Voice realtime ASR params", () => {
     expect(url.pathname).toBe("/_bifrost/api/voice/listen-ws");
     expect(url.searchParams.get("provider")).toBe("qwen3_stateful_streaming");
     expect(url.searchParams.get("source")).toBe("web_mic");
-    expect(url.searchParams.get("model")).toBe("Qwen3-ASR-1.7B");
+    expect(url.searchParams.get("model")).toBe("Qwen3-ASR-0.6B");
     expect(url.searchParams.get("owner_module")).toBe("speech_workbench");
     expect(url.searchParams.get("chunk_ms")).toBe("1000");
-    expect(url.searchParams.get("allow_stateful_17b")).toBe("1");
+    expect(url.searchParams.get("allow_stateful_17b")).toBeNull();
   });
 
   it("inherits the workbench model for realtime voice input", () => {
@@ -54,7 +54,7 @@ describe("Voice realtime ASR params", () => {
     expect(url.searchParams.get("language")).toBe("english");
   });
 
-  it("enables the large-model guard when workbench selects 1.7B", () => {
+  it("enables the large-model guard only when workbench selects 1.7B", () => {
     const url = new URL(
       buildVoiceRealtimeUrl({
         ...loadVoiceRealtimeParams(),
@@ -73,7 +73,7 @@ describe("Voice realtime ASR params", () => {
 
     expect(workbenchQuery.get("owner_module")).toBe("speech_workbench");
     expect(managementQuery.get("owner_module")).toBe("model_management");
-    expect(workbenchQuery.get("model")).toBe("Qwen3-ASR-1.7B");
-    expect(managementQuery.get("model")).toBe("Qwen3-ASR-1.7B");
+    expect(workbenchQuery.get("model")).toBe("Qwen3-ASR-0.6B");
+    expect(managementQuery.get("model")).toBe("Qwen3-ASR-0.6B");
   });
 });

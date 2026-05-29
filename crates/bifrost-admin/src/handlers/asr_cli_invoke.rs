@@ -11,7 +11,7 @@
 //! of model-load overhead but keeps RTF stable at ~0.25–0.28, yielding 2× faster
 //! overall throughput for batch workloads.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -119,7 +119,8 @@ fn run_asr_cli_inner(
     );
     let started = Instant::now();
 
-    let mut command = Command::new(asr_bin);
+    let asr_executable = labeled_asr_executable(asr_bin);
+    let mut command = Command::new(asr_executable);
     command
         .arg(model_path)
         .arg(audio)
@@ -467,6 +468,21 @@ fn parse_vmmap_size_bytes(size: &str) -> Option<u64> {
         .parse::<f64>()
         .ok()
         .map(|value| (value * multiplier) as u64)
+}
+
+fn labeled_asr_executable(asr_bin: &Path) -> PathBuf {
+    let alias_dir = bifrost_storage::data_dir().join("runtime/process-aliases");
+    match bifrost_core::process_alias_executable(asr_bin, &alias_dir, "bifrost-asr-cli") {
+        Ok(alias) => alias,
+        Err(error) => {
+            tracing::warn!(
+                executable = %asr_bin.display(),
+                error = %error,
+                "falling back to unlabeled ASR CLI executable"
+            );
+            asr_bin.to_path_buf()
+        }
+    }
 }
 
 #[cfg(unix)]

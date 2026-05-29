@@ -328,24 +328,7 @@ async fn post_speaker_voice_identify_response(req: Request<Incoming>) -> Respons
     if !bytes.len().is_multiple_of(2) {
         return error_response(StatusCode::BAD_REQUEST, "pcm16le audio byte length must be even");
     }
-    let preparation = match prepare_voiceprint_identify_audio(&bytes, request.sample_rate) {
-        Ok(preparation) => preparation,
-        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error),
-    };
-    let prepared = match preparation.ready {
-        Some(prepared) => prepared,
-        None => {
-            return json_response(&insufficient_speaker_identify_response(
-                preparation.audio_duration_ms,
-                preparation.speech_duration_ms,
-            ))
-        }
-    };
-    match identify_speaker_voice(
-        &prepared.waveform,
-        prepared.audio_duration_ms,
-        prepared.speech_duration_ms,
-    ) {
+    match identify_speaker_voice_pcm16(&bytes, request.sample_rate) {
         Ok(response) => json_response(&response),
         Err(error) => error_response(StatusCode::CONFLICT, &error),
     }
@@ -521,6 +504,25 @@ fn read_speaker_enrollment_session(session_id: &str) -> Result<SpeakerEnrollment
 fn finish_speaker_enrollment(
     session: &SpeakerEnrollmentSession,
 ) -> Result<SpeakerEnrollmentFinishResponse, String> {
+    #[cfg(test)]
+    {
+        finish_speaker_enrollment_in_process(session)
+    }
+    #[cfg(not(test))]
+    {
+        run_asr_diarization_worker_request(AsrDiarizationWorkerRequest::FinishEnrollment {
+            session_id: session.id.clone(),
+        })
+        .and_then(|response| match response {
+            AsrDiarizationWorkerResponse::FinishEnrollment { response } => Ok(response),
+            other => Err(format!("unexpected ASR diarization worker response: {other:?}")),
+        })
+    }
+}
+
+fn finish_speaker_enrollment_in_process(
+    session: &SpeakerEnrollmentSession,
+) -> Result<SpeakerEnrollmentFinishResponse, String> {
     let mut samples = Vec::new();
     let mut embeddings = Vec::<Vec<f32>>::new();
     for prompt in &session.prompts {
@@ -580,6 +582,53 @@ fn finish_speaker_enrollment(
         profile,
         profile_path,
     })
+}
+
+fn identify_speaker_voice_pcm16(
+    pcm16le: &[u8],
+    sample_rate: u32,
+) -> Result<SpeakerVoiceIdentifyResponse, String> {
+    #[cfg(test)]
+    {
+        identify_speaker_voice_pcm16_in_process(pcm16le, sample_rate)
+    }
+    #[cfg(not(test))]
+    {
+        let request_dir = asr_diarization_worker_request_dir()?;
+        let audio_path = request_dir.join(format!("voiceprint-{}.pcm16le", uuid::Uuid::new_v4()));
+        std::fs::write(&audio_path, pcm16le)
+            .map_err(|error| format!("write voiceprint identify audio: {error}"))?;
+        let result = run_asr_diarization_worker_request(
+            AsrDiarizationWorkerRequest::IdentifyPcm16 {
+                pcm16le_path: audio_path.clone(),
+                sample_rate,
+            },
+        )
+        .and_then(|response| match response {
+            AsrDiarizationWorkerResponse::Identify { response } => Ok(response),
+            other => Err(format!("unexpected ASR diarization worker response: {other:?}")),
+        });
+        let _ = std::fs::remove_file(audio_path);
+        result
+    }
+}
+
+fn identify_speaker_voice_pcm16_in_process(
+    pcm16le: &[u8],
+    sample_rate: u32,
+) -> Result<SpeakerVoiceIdentifyResponse, String> {
+    let preparation = prepare_voiceprint_identify_audio(pcm16le, sample_rate)?;
+    let Some(prepared) = preparation.ready else {
+        return Ok(insufficient_speaker_identify_response(
+            preparation.audio_duration_ms,
+            preparation.speech_duration_ms,
+        ));
+    };
+    identify_speaker_voice(
+        &prepared.waveform,
+        prepared.audio_duration_ms,
+        prepared.speech_duration_ms,
+    )
 }
 
 fn average_speaker_embeddings(embeddings: &[Vec<f32>]) -> Option<Vec<f32>> {
@@ -842,6 +891,21 @@ fn pcm16le_to_f32(bytes: &[u8]) -> Result<Vec<f32>, String> {
         .collect())
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn f32_waveform_to_pcm16le(waveform: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(waveform.len().saturating_mul(2));
+    for sample in waveform {
+        let normalized = if sample.is_finite() {
+            sample.clamp(-1.0, 1.0)
+        } else {
+            0.0
+        };
+        let pcm = (normalized * i16::MAX as f32).round() as i16;
+        bytes.extend_from_slice(&pcm.to_le_bytes());
+    }
+    bytes
+}
+
 fn voiceprint_sample_stats(waveform: &[f32], _sample_rate: u32) -> (f32, f32) {
     if waveform.is_empty() {
         return (0.0, 0.0);
@@ -904,6 +968,18 @@ pub(crate) fn registered_speaker_profile_exists(profile_id: &str) -> bool {
         .any(|profile| profile.id == profile_id)
 }
 
+const VOICEPRINT_SELF_PRIORITY_THRESHOLD: f32 = 0.52;
+#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
+const VOICEPRINT_SELF_PRIORITY_MIN_DURATION_MS: u64 = 5_000;
+
+#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
+#[derive(Debug, Clone)]
+struct DiarizationVoiceprintCandidate {
+    profile_id: String,
+    display_name: String,
+    score: f32,
+}
+
 #[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
 fn map_speakers_with_registered_voiceprints(
     diarization_segments: &mut [DiarizationSegment],
@@ -913,10 +989,8 @@ fn map_speakers_with_registered_voiceprints(
     if profiles.is_empty() {
         return;
     }
-    for segment in diarization_segments {
-        let Some(embedding) = speaker_embeddings.get(&segment.speaker) else {
-            continue;
-        };
+    let mut candidates = BTreeMap::<String, DiarizationVoiceprintCandidate>::new();
+    for (speaker, embedding) in speaker_embeddings {
         let Some((profile, score)) = profiles
             .iter()
             .filter_map(|profile| {
@@ -928,12 +1002,76 @@ fn map_speakers_with_registered_voiceprints(
         else {
             continue;
         };
-        if score >= VOICEPRINT_SPEAKER_MATCH_THRESHOLD {
-            segment.display_name = profile.display_name.clone();
-            segment.mapped_profile_id = Some(profile.id.clone());
-            segment.confidence = Some(score);
+        candidates.insert(
+            speaker.clone(),
+            DiarizationVoiceprintCandidate {
+                profile_id: profile.id.clone(),
+                display_name: profile.display_name.clone(),
+                score,
+            },
+        );
+    }
+    let self_priority_speaker = if profiles.len() == 1 {
+        let durations = diarization_speaker_durations(diarization_segments);
+        candidates
+            .iter()
+            .filter(|(speaker, candidate)| {
+                candidate.score >= VOICEPRINT_SELF_PRIORITY_THRESHOLD
+                    && durations.get(*speaker).is_some_and(|duration| {
+                        *duration >= VOICEPRINT_SELF_PRIORITY_MIN_DURATION_MS
+                    })
+            })
+            .max_by(|(_, left), (_, right)| {
+                left.score
+                    .partial_cmp(&right.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(speaker, _)| speaker.clone())
+    } else {
+        None
+    };
+    for (speaker, candidate) in &candidates {
+        let self_priority_matched = self_priority_speaker
+            .as_ref()
+            .is_some_and(|matched_speaker| matched_speaker == speaker);
+        tracing::info!(
+            target: "bifrost_admin::asr_jobs",
+            speaker = %speaker,
+            profile_id = %candidate.profile_id,
+            profile_name = %candidate.display_name,
+            confidence = candidate.score,
+            matched = candidate.score >= VOICEPRINT_SPEAKER_MATCH_THRESHOLD || self_priority_matched,
+            self_priority_matched = self_priority_matched,
+            threshold = VOICEPRINT_SPEAKER_MATCH_THRESHOLD,
+            "evaluated diarization speaker voiceprint candidate"
+        );
+    }
+    for segment in diarization_segments {
+        let Some(candidate) = candidates.get(&segment.speaker) else {
+            continue;
+        };
+        segment.candidate_profile_id = Some(candidate.profile_id.clone());
+        segment.candidate_display_name = Some(candidate.display_name.clone());
+        segment.candidate_confidence = Some(candidate.score);
+        let self_priority_matched = self_priority_speaker
+            .as_ref()
+            .is_some_and(|speaker| speaker == &segment.speaker);
+        if candidate.score >= VOICEPRINT_SPEAKER_MATCH_THRESHOLD || self_priority_matched {
+            segment.display_name = candidate.display_name.clone();
+            segment.mapped_profile_id = Some(candidate.profile_id.clone());
+            segment.confidence = Some(candidate.score);
         }
     }
+}
+
+#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
+fn diarization_speaker_durations(segments: &[DiarizationSegment]) -> BTreeMap<String, u64> {
+    let mut durations = BTreeMap::new();
+    for segment in segments {
+        *durations.entry(segment.speaker.clone()).or_default() +=
+            segment.end_ms.saturating_sub(segment.start_ms);
+    }
+    durations
 }
 
 fn identify_speaker_voice(
@@ -1009,7 +1147,13 @@ pub(crate) fn identify_speaker_voice_from_wav_file(
         })?;
         let sample_rate = u32::try_from(wave.sample_rate())
             .map_err(|_| format!("invalid voice wake sample rate {}", wave.sample_rate()))?;
-        identify_speaker_voice_from_waveform(wave.samples(), sample_rate)
+        if sample_rate != VOICEPRINT_SAMPLE_RATE {
+            return Err(format!(
+                "voice wake speaker verification expects {}Hz audio, got {}Hz",
+                VOICEPRINT_SAMPLE_RATE, sample_rate
+            ));
+        }
+        identify_speaker_voice_pcm16(&f32_waveform_to_pcm16le(wave.samples()), sample_rate)
     }
     #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
     {
@@ -1020,36 +1164,6 @@ pub(crate) fn identify_speaker_voice_from_wav_file(
             std::env::consts::ARCH
         ))
     }
-}
-
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn identify_speaker_voice_from_waveform(
-    waveform: &[f32],
-    sample_rate: u32,
-) -> Result<SpeakerVoiceIdentifyResponse, String> {
-    if sample_rate != VOICEPRINT_SAMPLE_RATE {
-        return Err(format!(
-            "voice wake speaker verification expects {}Hz audio, got {}Hz",
-            VOICEPRINT_SAMPLE_RATE, sample_rate
-        ));
-    }
-    let audio_duration_ms =
-        (waveform.len() as u64).saturating_mul(1_000) / u64::from(sample_rate.max(1));
-    let Some((start, end)) =
-        active_speech_bounds(waveform, sample_rate, VOICEPRINT_IDENTIFY_SPEECH_RMS)
-    else {
-        return Ok(insufficient_speaker_identify_response(audio_duration_ms, 0));
-    };
-    let speech_duration_ms = ((end.saturating_sub(start)) as u64)
-        .saturating_mul(1_000)
-        / u64::from(sample_rate.max(1));
-    if speech_duration_ms < VOICEPRINT_MIN_IDENTIFY_SPEECH_MS {
-        return Ok(insufficient_speaker_identify_response(
-            audio_duration_ms,
-            speech_duration_ms,
-        ));
-    }
-    identify_speaker_voice(&waveform[start..end], audio_duration_ms, speech_duration_ms)
 }
 
 fn insufficient_speaker_identify_response(
@@ -1085,6 +1199,77 @@ fn unknown_speaker_identify_response(
         audio_duration_ms,
         speech_duration_ms,
     }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct VoiceprintEmbeddingResult {
+    pub(crate) embedding: Vec<f32>,
+    pub(crate) audio_duration_ms: u64,
+    pub(crate) speech_duration_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct VoiceprintMatchResult {
+    pub(crate) profile_id: String,
+    pub(crate) display_name: String,
+    pub(crate) confidence: f32,
+}
+
+pub(crate) fn voiceprint_registered_profile_count() -> usize {
+    load_registered_speaker_profiles().len()
+}
+
+pub(crate) fn voiceprint_match_threshold() -> f32 {
+    VOICEPRINT_SPEAKER_MATCH_THRESHOLD
+}
+
+pub(crate) fn voiceprint_self_priority_threshold() -> f32 {
+    VOICEPRINT_SELF_PRIORITY_THRESHOLD
+}
+
+pub(crate) fn compute_voiceprint_embedding_from_pcm16le(
+    pcm16le: &[u8],
+    sample_rate: u32,
+) -> Result<Option<VoiceprintEmbeddingResult>, String> {
+    if sample_rate != VOICEPRINT_SAMPLE_RATE {
+        return Err(format!(
+            "realtime speaker tracking expects {}Hz audio, got {}Hz",
+            VOICEPRINT_SAMPLE_RATE, sample_rate
+        ));
+    }
+    #[cfg(not(test))]
+    let test_embedding =
+        std::env::var("BIFROST_ASR_VOICEPRINT_TEST_EMBEDDING").as_deref() == Ok("1");
+    #[cfg(not(test))]
+    if !test_embedding && !diarization_profile_ready(DEFAULT_DIARIZATION_PROFILE) {
+        return Err(format!(
+            "realtime_speaker_tracking_unavailable: diarization profile '{}' is not initialized",
+            DEFAULT_DIARIZATION_PROFILE
+        ));
+    }
+    #[cfg(test)]
+    ensure_diarization_profile_ready_for_voiceprint(DEFAULT_DIARIZATION_PROFILE)?;
+
+    let prepared = prepare_voiceprint_identify_audio(pcm16le, sample_rate)?;
+    let Some(ready) = prepared.ready else {
+        return Ok(None);
+    };
+    let embedding = compute_speaker_embedding(DEFAULT_DIARIZATION_PROFILE, &ready.waveform)?;
+    Ok(Some(VoiceprintEmbeddingResult {
+        embedding,
+        audio_duration_ms: ready.audio_duration_ms,
+        speech_duration_ms: ready.speech_duration_ms,
+    }))
+}
+
+pub(crate) fn best_registered_voiceprint_match(
+    embedding: &[f32],
+) -> Option<VoiceprintMatchResult> {
+    best_registered_speaker_match(embedding).map(|(profile, confidence)| VoiceprintMatchResult {
+        profile_id: profile.id,
+        display_name: profile.display_name,
+        confidence,
+    })
 }
 
 fn best_registered_speaker_match(embedding: &[f32]) -> Option<(RegisteredSpeakerProfile, f32)> {

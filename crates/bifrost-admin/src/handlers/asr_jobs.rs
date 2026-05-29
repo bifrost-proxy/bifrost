@@ -37,8 +37,9 @@ use crate::handlers::asr_jobs_daily::{
 };
 use crate::handlers::asr_jobs_source::source_audio_response;
 use crate::handlers::asr_jobs_timeline::{
-    generate_daily_summaries, inspect_source_audio, render_timeline_text, source_modified_ms,
-    source_size, SourceAudioInfo, TimelineSegment, TimelineSpeaker, TranscriptTimeline,
+    generate_daily_summaries, inspect_source_audio, normalize_timeline_segments,
+    render_timeline_text, source_modified_ms, source_size, SourceAudioInfo, TimelineSegment,
+    TimelineSpeaker, TranscriptTimeline, ASR_TASK_SEGMENT_MAX_MS,
 };
 use crate::handlers::asr_streaming::call_asr_text_endpoint;
 #[cfg(test)]
@@ -46,6 +47,20 @@ use crate::handlers::asr_streaming::{asr_server_request_timeout, asr_text_reques
 use crate::handlers::{
     error_response, full_body, json_response, json_response_with_status, method_not_allowed,
     BoxBody,
+};
+use bifrost_asr::offline::{write_offline_subtitle_artifacts, OfflineSubtitleArtifactRequest};
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+use bifrost_asr::planner::seconds_to_ms;
+use bifrost_asr::planner::{
+    interval_overlap_ms, plan_asr_units, speaker_display_name, speakers_from_diarization_segments,
+    AsrAudioUnit, AsrUnitPlannerConfig, DiarizationSegment,
+};
+use bifrost_asr::profiles::{
+    default_diarization_profile, AsrDiarizationConfig, DEFAULT_DIARIZATION_PROFILE,
+};
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+use bifrost_asr::speaker::{
+    stabilize_diarization_speakers, SpeakerMergeDecision, SpeakerStabilizationConfig,
 };
 
 // The ASR jobs implementation is intentionally split by responsibility.

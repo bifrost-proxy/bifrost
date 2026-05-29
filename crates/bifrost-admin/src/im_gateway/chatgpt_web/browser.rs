@@ -43,6 +43,12 @@ fn browser_pids() -> &'static DashMap<PathBuf, u32> {
     BROWSER_PIDS.get_or_init(DashMap::new)
 }
 
+fn browser_http_client() -> reqwest::Client {
+    bifrost_core::direct_reqwest_client_builder()
+        .build()
+        .expect("build ChatGPT browser HTTP client")
+}
+
 /// Maximum number of conversation tabs kept persistently per profile.
 /// When this limit is exceeded, the LRU tab is evicted (closed) to make room.
 pub(super) const CONVERSATION_TAB_POOL_SIZE: usize = 16;
@@ -537,7 +543,7 @@ impl BrowserSession {
             sleep(Duration::from_millis(250)).await;
         }
         info!(%url, "chatgpt_web browser: no matching page found, creating new tab");
-        let created: CdpPage = reqwest::Client::new()
+        let created: CdpPage = browser_http_client()
             .put(format!(
                 "http://127.0.0.1:{}/json/new?{}",
                 self.port,
@@ -636,7 +642,7 @@ impl BrowserSession {
                 page_url = %page.url,
                 "chatgpt_web browser: closing stale page"
             );
-            let _ = reqwest::Client::new()
+            let _ = browser_http_client()
                 .get(format!(
                     "http://127.0.0.1:{}/json/close/{}",
                     self.port, page.id
@@ -655,7 +661,7 @@ impl BrowserSession {
             port = self.port,
             "chatgpt_web browser: creating new isolated tab (about:blank)"
         );
-        let created: CdpPage = reqwest::Client::new()
+        let created: CdpPage = browser_http_client()
             .put(format!(
                 "http://127.0.0.1:{}/json/new?{}",
                 self.port,
@@ -676,7 +682,7 @@ impl BrowserSession {
     }
 
     pub(super) async fn close_target(&self, target_id: &str) -> Result<(), String> {
-        reqwest::Client::new()
+        browser_http_client()
             .put(format!(
                 "http://127.0.0.1:{}/json/close/{}",
                 self.port,
@@ -1099,7 +1105,9 @@ async fn is_browser_responsive(port: u16) -> bool {
     for attempt in 1..=3u32 {
         match tokio::time::timeout(
             Duration::from_secs(5),
-            reqwest::get(format!("http://127.0.0.1:{port}/json/version")),
+            browser_http_client()
+                .get(format!("http://127.0.0.1:{port}/json/version"))
+                .send(),
         )
         .await
         {
@@ -1814,7 +1822,7 @@ async fn wait_for_json<T: for<'de> Deserialize<'de>>(
     let deadline = tokio::time::Instant::now() + duration;
     let mut last_error = String::new();
     while tokio::time::Instant::now() < deadline {
-        match reqwest::get(url).await {
+        match browser_http_client().get(url).send().await {
             Ok(response) if response.status().is_success() => {
                 return response
                     .json::<T>()

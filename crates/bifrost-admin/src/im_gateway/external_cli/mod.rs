@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::io::{BufRead, Write as StdWrite};
 use std::path::{Path, PathBuf};
 #[cfg(windows)]
 use std::process::Command as StdCommand;
@@ -7,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -16,11 +17,108 @@ const DEFAULT_ADAPTER: &str = "codex";
 const DEFAULT_TIMEOUT_SECS: u64 = 900;
 const CONFIG_FILENAME: &str = "im_gateway_external_cli_agent.json";
 const CONFIG_VERSION: u32 = 1;
+const MAX_EXTERNAL_RUNNER_IMAGES_PER_MESSAGE: usize = 6;
+const WORKER_STOP_GRACE_MS: u64 = 1500;
 
 static ACTIVE_RUNS: once_cell::sync::Lazy<dashmap::DashMap<String, u32>> =
     once_cell::sync::Lazy::new(dashmap::DashMap::new);
 static ACTIVE_SESSIONS: once_cell::sync::Lazy<dashmap::DashMap<String, String>> =
     once_cell::sync::Lazy::new(dashmap::DashMap::new);
+static ACTIVE_WORKER_SESSIONS: once_cell::sync::Lazy<
+    dashmap::DashMap<String, ExternalCliWorkerStopHandle>,
+> = once_cell::sync::Lazy::new(dashmap::DashMap::new);
+
+#[derive(Clone)]
+struct ExternalCliWorkerStopHandle {
+    pid: u32,
+    stop_tx: tokio::sync::mpsc::UnboundedSender<()>,
+}
+
+pub(crate) fn terminate_process_group(pid: u32) -> Result<(), String> {
+    terminate_process(pid)
+}
+
+pub async fn request_worker_session_stop(session_key: &str) -> bool {
+    let session_key = session_key.trim();
+    if session_key.is_empty() {
+        return false;
+    }
+    let Some((_, handle)) = ACTIVE_WORKER_SESSIONS.remove(session_key) else {
+        return false;
+    };
+    let _ = handle.stop_tx.send(());
+    tokio::time::sleep(Duration::from_millis(WORKER_STOP_GRACE_MS)).await;
+    let _ = terminate_process(handle.pid);
+    true
+}
+
+pub fn run_worker_stdio() -> Result<(), String> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("bifrost-external-runner-worker")
+        .build()
+        .map_err(|error| format!("build external runner worker runtime failed: {error}"))?;
+    runtime.block_on(run_worker_stdio_async())
+}
+
+async fn run_worker_stdio_async() -> Result<(), String> {
+    let mut stdin = std::io::BufReader::new(std::io::stdin()).lines();
+    let Some(first_line) = stdin
+        .next()
+        .transpose()
+        .map_err(|error| format!("read external runner worker command failed: {error}"))?
+    else {
+        return Err("external runner worker expected a run command".to_string());
+    };
+    let ExternalCliWorkerCommand::Run { request } = serde_json::from_str(&first_line)
+        .map_err(|error| format!("parse external runner worker command failed: {error}"))?
+    else {
+        return Err("external runner worker first command must be run".to_string());
+    };
+    if request.protocol_version != CONFIG_VERSION {
+        return Err(format!(
+            "unsupported external runner worker protocol version {}",
+            request.protocol_version
+        ));
+    }
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    std::thread::spawn(move || {
+        while let Some(Ok(line)) = stdin.next() {
+            if matches!(
+                serde_json::from_str::<ExternalCliWorkerCommand>(&line),
+                Ok(ExternalCliWorkerCommand::Stop)
+            ) {
+                let _ = stop_tx.send(());
+                break;
+            }
+        }
+    });
+    send_external_cli_worker_event(&ExternalCliWorkerEvent::Started {
+        session_key: request.request.session_key.clone(),
+        pid: std::process::id(),
+    })?;
+    let request = *request;
+    let runtime = ExternalCliRuntime::new(PathBuf::from(&request.runs_root));
+    let run = tokio::spawn(async move { runtime.run_in_current_process(request.request).await });
+    tokio::pin!(stop_rx);
+    tokio::pin!(run);
+    tokio::select! {
+        _ = &mut stop_rx => {
+            kill_all_active_runs();
+            run.abort();
+            send_external_cli_worker_event(&ExternalCliWorkerEvent::Stopped)?;
+        }
+        result = &mut run => {
+            match result {
+                Ok(Ok(result)) => send_external_cli_worker_event(&ExternalCliWorkerEvent::Finished { result: Box::new(result) })?,
+                Ok(Err(error)) => send_external_cli_worker_event(&ExternalCliWorkerEvent::Failed { error })?,
+                Err(error) if error.is_cancelled() => send_external_cli_worker_event(&ExternalCliWorkerEvent::Stopped)?,
+                Err(error) => send_external_cli_worker_event(&ExternalCliWorkerEvent::Failed { error: format!("external runner worker task failed: {error}") })?,
+            }
+        }
+    }
+    Ok(())
+}
 
 mod command_spec;
 use command_spec::build_command_spec;
@@ -29,6 +127,8 @@ use command_spec::build_command_spec;
 #[serde(rename_all = "camelCase")]
 pub struct ExternalCliRunRequest {
     pub message: String,
+    #[serde(default)]
+    pub images: Vec<ExternalCliImageInput>,
     #[serde(default = "default_operation")]
     pub operation: String,
     #[serde(default)]
@@ -55,6 +155,30 @@ pub struct ExternalCliRunRequest {
     pub inject_bifrost_tools: bool,
     #[serde(default)]
     pub skill_paths: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalCliImageInput {
+    #[serde(default = "default_image_mime_type", alias = "mime_type")]
+    pub mime_type: String,
+    pub data: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+fn default_image_mime_type() -> String {
+    "image/png".to_string()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalCliSavedImageAttachment {
+    pub path: String,
+    pub mime_type: String,
+    pub size_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -356,6 +480,41 @@ pub struct ExternalCliRunResult {
     pub metadata: BTreeMap<String, String>,
 }
 
+impl ExternalCliRunResult {
+    fn stopped(session_key: Option<String>, adapter: String) -> Self {
+        let now = now_ms();
+        Self {
+            run_id: format!("stopped-{now}"),
+            session_key,
+            runtime: DEFAULT_RUNTIME.to_string(),
+            adapter,
+            status: ExternalCliRunStatus::Stopped,
+            exit_code: None,
+            response: "External runner worker was stopped by request.".to_string(),
+            responses: vec!["External runner worker was stopped by request.".to_string()],
+            started_at: now,
+            finished_at: now,
+            duration_ms: 0,
+            artifacts: ExternalCliRunArtifacts {
+                run_dir: String::new(),
+                prompt: String::new(),
+                command_snapshot: String::new(),
+                stdout: String::new(),
+                stderr: String::new(),
+                normalized_events: String::new(),
+                last_message: String::new(),
+            },
+            events: vec![ExternalCliProgressEvent {
+                event_type: ExternalCliProgressEventType::RunFailed,
+                content: "External runner worker was stopped by request.".to_string(),
+                title: Some("Stopped".to_string()),
+                raw: serde_json::json!({ "type": "worker_stopped" }),
+            }],
+            metadata: BTreeMap::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExternalCliRunStatus {
@@ -448,6 +607,168 @@ pub struct ExternalCliRuntime {
     runs_root: PathBuf,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExternalCliWorkerRunRequest {
+    protocol_version: u32,
+    runs_root: String,
+    request: ExternalCliRunRequest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ExternalCliWorkerCommand {
+    Run {
+        request: Box<ExternalCliWorkerRunRequest>,
+    },
+    Stop,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ExternalCliWorkerEvent {
+    Started {
+        session_key: Option<String>,
+        pid: u32,
+    },
+    Finished {
+        result: Box<ExternalCliRunResult>,
+    },
+    Failed {
+        error: String,
+    },
+    Stopped,
+}
+
+struct ExternalCliWorkerClient {
+    executable: PathBuf,
+}
+
+struct ExternalCliWorkerRun {
+    child: tokio::process::Child,
+    stdin: tokio::process::ChildStdin,
+    events: tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+}
+
+impl ExternalCliWorkerClient {
+    fn current_exe() -> Result<Self, String> {
+        let executable = std::env::current_exe()
+            .map_err(|error| format!("resolve current executable failed: {error}"))?;
+        let executable = labeled_process_executable(&executable, "bifrost-runner");
+        Ok(Self { executable })
+    }
+
+    async fn spawn(
+        &self,
+        runs_root: PathBuf,
+        request: ExternalCliRunRequest,
+    ) -> Result<ExternalCliWorkerRun, String> {
+        let mut child = spawn_external_cli_worker_process(&self.executable)?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "external runner worker stdin unavailable".to_string())?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "external runner worker stdout unavailable".to_string())?;
+        write_external_cli_worker_command(
+            &mut stdin,
+            &ExternalCliWorkerCommand::Run {
+                request: Box::new(ExternalCliWorkerRunRequest {
+                    protocol_version: CONFIG_VERSION,
+                    runs_root: runs_root.display().to_string(),
+                    request,
+                }),
+            },
+        )
+        .await?;
+        Ok(ExternalCliWorkerRun {
+            child,
+            stdin,
+            events: tokio::io::BufReader::new(stdout).lines(),
+        })
+    }
+}
+
+fn labeled_process_executable(executable: &Path, alias_name: &str) -> PathBuf {
+    let alias_dir = bifrost_storage::data_dir().join("runtime/process-aliases");
+    match bifrost_core::process_alias_executable(executable, &alias_dir, alias_name) {
+        Ok(alias) => alias,
+        Err(error) => {
+            tracing::warn!(
+                executable = %executable.display(),
+                alias_name = %alias_name,
+                error = %error,
+                "falling back to unlabeled bifrost runner executable"
+            );
+            executable.to_path_buf()
+        }
+    }
+}
+
+impl ExternalCliWorkerRun {
+    fn child_id(&self) -> Option<u32> {
+        self.child.id()
+    }
+
+    async fn request_stop(&mut self) -> Result<(), String> {
+        write_external_cli_worker_command(&mut self.stdin, &ExternalCliWorkerCommand::Stop).await
+    }
+
+    async fn terminate(mut self) -> Result<(), String> {
+        let _ = self.request_stop().await;
+        match tokio::time::timeout(
+            Duration::from_millis(WORKER_STOP_GRACE_MS),
+            self.child.wait(),
+        )
+        .await
+        {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(error)) => Err(format!("wait external runner worker failed: {error}")),
+            Err(_) => {
+                if let Some(pid) = self.child.id() {
+                    let _ = terminate_process(pid);
+                }
+                let _ = self.child.kill().await;
+                Ok(())
+            }
+        }
+    }
+
+    async fn wait_final(&mut self) -> Result<ExternalCliRunResult, String> {
+        loop {
+            let Some(line) =
+                self.events.next_line().await.map_err(|error| {
+                    format!("read external runner worker event failed: {error}")
+                })?
+            else {
+                let status = self
+                    .child
+                    .wait()
+                    .await
+                    .map_err(|error| format!("wait external runner worker failed: {error}"))?;
+                return Err(format!(
+                    "external runner worker exited before final event: {status}"
+                ));
+            };
+            match serde_json::from_str::<ExternalCliWorkerEvent>(&line).map_err(|error| {
+                format!("parse external runner worker event failed: {error}; line={line}")
+            })? {
+                ExternalCliWorkerEvent::Started { .. } => {}
+                ExternalCliWorkerEvent::Finished { result } => return Ok(*result),
+                ExternalCliWorkerEvent::Failed { error } => return Err(error),
+                ExternalCliWorkerEvent::Stopped => {
+                    return Ok(ExternalCliRunResult::stopped(
+                        None,
+                        DEFAULT_ADAPTER.to_string(),
+                    ))
+                }
+            }
+        }
+    }
+}
+
 impl ExternalCliRuntime {
     pub fn new(runs_root: impl Into<PathBuf>) -> Self {
         Self {
@@ -456,6 +777,43 @@ impl ExternalCliRuntime {
     }
 
     pub async fn run(
+        &self,
+        request: ExternalCliRunRequest,
+    ) -> Result<ExternalCliRunResult, String> {
+        if std::env::var_os("BIFROST_EXTERNAL_CLI_WORKER").is_some() {
+            return self.run_in_current_process(request).await;
+        }
+        #[cfg(test)]
+        if std::env::var_os("BIFROST_FORCE_EXTERNAL_CLI_WORKER").is_none() {
+            return self.run_in_current_process(request).await;
+        }
+        let worker_client = ExternalCliWorkerClient::current_exe()?;
+        let mut worker = worker_client
+            .spawn(self.runs_root.clone(), request.clone())
+            .await?;
+        let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        if let (Some(session_key), Some(pid)) = (request.session_key.as_deref(), worker.child_id())
+        {
+            ACTIVE_WORKER_SESSIONS.insert(
+                session_key.to_string(),
+                ExternalCliWorkerStopHandle { pid, stop_tx },
+            );
+        }
+        let session_key = request.session_key.clone();
+        let result = tokio::select! {
+            _ = stop_rx.recv() => {
+                let _ = worker.terminate().await;
+                Ok(ExternalCliRunResult::stopped(request.session_key.clone(), request.adapter.clone()))
+            }
+            result = worker.wait_final() => result,
+        };
+        if let Some(session_key) = session_key.as_deref() {
+            ACTIVE_WORKER_SESSIONS.remove(session_key);
+        }
+        result
+    }
+
+    async fn run_in_current_process(
         &self,
         request: ExternalCliRunRequest,
     ) -> Result<ExternalCliRunResult, String> {
@@ -475,8 +833,9 @@ impl ExternalCliRuntime {
         let snapshot_path = run_dir.join("runtime_snapshot.json");
         let events_path = run_dir.join("normalized_events.jsonl");
         let stop_marker_path = run_dir.join("stop_requested");
+        let saved_images = save_image_attachments(&run_dir, &request.images).await?;
 
-        let prompt = build_prompt(&request).await?;
+        let prompt = build_prompt(&request, &saved_images).await?;
         tokio::fs::write(&prompt_path, &prompt)
             .await
             .map_err(|error| format!("write prompt failed: {error}"))?;
@@ -587,6 +946,12 @@ impl ExternalCliRuntime {
         };
         let mut metadata = run_output.metadata;
         append_external_cli_metadata(&request.adapter, &run_output.events, &mut metadata);
+        if !saved_images.is_empty() {
+            metadata.insert(
+                "attachments.images".to_string(),
+                serde_json::to_string(&saved_images).unwrap_or_else(|_| "[]".to_string()),
+            );
+        }
         tokio::fs::write(&stdout_path, &run_output.stdout)
             .await
             .map_err(|error| format!("write stdout failed: {error}"))?;
@@ -641,6 +1006,7 @@ pub fn run_request_from_settings(
 ) -> ExternalCliRunRequest {
     ExternalCliRunRequest {
         message: message.into(),
+        images: Vec::new(),
         operation: default_operation(),
         params: serde_json::Value::Null,
         provider_id,
@@ -777,7 +1143,11 @@ fn validate_run_request(request: &ExternalCliRunRequest) -> Result<(), String> {
     }
     let operation = request.operation.trim();
     let needs_message = operation.is_empty() || matches!(operation, "ask" | "create" | "send");
-    if needs_message && request.message.trim().is_empty() {
+    let has_image = request
+        .images
+        .iter()
+        .any(|image| !image.data.trim().is_empty());
+    if needs_message && request.message.trim().is_empty() && !has_image {
         return Err("message cannot be empty".to_string());
     }
     Ok(())
@@ -829,7 +1199,10 @@ fn canonicalize_for_allowlist(path: &Path) -> Result<PathBuf, String> {
         .map_err(|error| format!("canonicalize '{}' failed: {error}", path.display()))
 }
 
-async fn build_prompt(request: &ExternalCliRunRequest) -> Result<String, String> {
+async fn build_prompt(
+    request: &ExternalCliRunRequest,
+    saved_images: &[ExternalCliSavedImageAttachment],
+) -> Result<String, String> {
     let mut prompt = String::new();
     if let Some(instructions) = request.instructions.as_deref() {
         if !instructions.trim().is_empty() {
@@ -871,9 +1244,89 @@ async fn build_prompt(request: &ExternalCliRunRequest) -> Result<String, String>
             prompt.push_str("\n\n");
         }
     }
+    if !saved_images.is_empty() {
+        prompt.push_str("## Attached Images\n\n");
+        prompt.push_str(
+            "The user pasted the following local image files. Use these paths when you need to inspect or reason about the images.\n\n",
+        );
+        for (index, image) in saved_images.iter().enumerate() {
+            prompt.push_str(&format!(
+                "{}. `{}` (mime_type: {}, size_bytes: {})\n",
+                index + 1,
+                image.path,
+                image.mime_type,
+                image.size_bytes
+            ));
+        }
+        prompt.push('\n');
+    }
     prompt.push_str(request.message.trim());
     prompt.push('\n');
     Ok(prompt)
+}
+
+async fn save_image_attachments(
+    run_dir: &Path,
+    images: &[ExternalCliImageInput],
+) -> Result<Vec<ExternalCliSavedImageAttachment>, String> {
+    let normalized: Vec<&ExternalCliImageInput> = images
+        .iter()
+        .filter(|image| !image.data.trim().is_empty())
+        .take(MAX_EXTERNAL_RUNNER_IMAGES_PER_MESSAGE)
+        .collect();
+    if normalized.is_empty() {
+        return Ok(Vec::new());
+    }
+    if images.len() > MAX_EXTERNAL_RUNNER_IMAGES_PER_MESSAGE {
+        tracing::warn!(
+            image_count = images.len(),
+            max_images = MAX_EXTERNAL_RUNNER_IMAGES_PER_MESSAGE,
+            "too many external runner images in one request; truncating images"
+        );
+    }
+    let images_dir = run_dir.join("attachments").join("images");
+    tokio::fs::create_dir_all(&images_dir)
+        .await
+        .map_err(|error| format!("create image attachments dir failed: {error}"))?;
+    let mut saved = Vec::with_capacity(normalized.len());
+    for (index, image) in normalized.into_iter().enumerate() {
+        let bytes = decode_image_data(&image.data)?;
+        let ext = image_extension(&image.mime_type);
+        let path = images_dir.join(format!("image-{}.{}", index + 1, ext));
+        tokio::fs::write(&path, &bytes)
+            .await
+            .map_err(|error| format!("write image attachment failed: {error}"))?;
+        saved.push(ExternalCliSavedImageAttachment {
+            path: path.display().to_string(),
+            mime_type: image.mime_type.clone(),
+            size_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+            name: image.name.clone(),
+        });
+    }
+    Ok(saved)
+}
+
+fn decode_image_data(data: &str) -> Result<Vec<u8>, String> {
+    let data = data.trim();
+    let payload = data
+        .strip_prefix("data:")
+        .and_then(|value| value.split_once(','))
+        .map(|(_, payload)| payload)
+        .unwrap_or(data);
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .map_err(|error| format!("decode image attachment failed: {error}"))
+}
+
+fn image_extension(mime_type: &str) -> &'static str {
+    match mime_type.trim().to_ascii_lowercase().as_str() {
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "image/png" => "png",
+        _ => "img",
+    }
 }
 
 fn is_skill_path_allowed(
@@ -1052,6 +1505,58 @@ fn remove_active_sessions_for_run(run_id: &str) {
     for session_key in session_keys {
         ACTIVE_SESSIONS.remove(&session_key);
     }
+}
+
+fn spawn_external_cli_worker_process(executable: &Path) -> Result<tokio::process::Child, String> {
+    let mut command = Command::new(executable);
+    command
+        .arg("agent")
+        .arg("external-runner-worker")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .env("BIFROST_EXTERNAL_CLI_WORKER", "1")
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    command
+        .spawn()
+        .map_err(|error| format!("spawn external runner worker failed: {error}"))
+}
+
+async fn write_external_cli_worker_command(
+    stdin: &mut tokio::process::ChildStdin,
+    command: &ExternalCliWorkerCommand,
+) -> Result<(), String> {
+    let line = serde_json::to_string(command)
+        .map_err(|error| format!("serialize external runner worker command failed: {error}"))?;
+    stdin
+        .write_all(line.as_bytes())
+        .await
+        .map_err(|error| format!("write external runner worker command failed: {error}"))?;
+    stdin
+        .write_all(b"\n")
+        .await
+        .map_err(|error| format!("write external runner worker command newline failed: {error}"))?;
+    stdin
+        .flush()
+        .await
+        .map_err(|error| format!("flush external runner worker command failed: {error}"))
+}
+
+fn send_external_cli_worker_event(event: &ExternalCliWorkerEvent) -> Result<(), String> {
+    let line = serde_json::to_string(event)
+        .map_err(|error| format!("serialize external runner worker event failed: {error}"))?;
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(line.as_bytes())
+        .map_err(|error| format!("write external runner worker event failed: {error}"))?;
+    stdout
+        .write_all(b"\n")
+        .map_err(|error| format!("write external runner worker event newline failed: {error}"))?;
+    stdout
+        .flush()
+        .map_err(|error| format!("flush external runner worker event failed: {error}"))
 }
 
 /// 终止所有正在运行的 external CLI 子进程。在 Bifrost 进程退出时调用，

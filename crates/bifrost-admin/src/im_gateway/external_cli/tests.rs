@@ -59,6 +59,7 @@ fn codex_cli_parser_maps_real_jsonl_events() {
 #[test]
 fn codex_adapter_builds_exec_command_with_prompt_stdin() {
     let request = ExternalCliRunRequest {
+        images: Vec::new(),
         message: "hello".to_string(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -107,6 +108,7 @@ fn codex_adapter_builds_exec_command_with_prompt_stdin() {
 #[test]
 fn codex_adapter_builds_current_cli_config_flags() {
     let request = ExternalCliRunRequest {
+        images: Vec::new(),
         message: "hello".to_string(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -192,6 +194,7 @@ fn codex_adapter_builds_current_cli_config_flags() {
 #[test]
 fn codex_adapter_maps_legacy_search_to_web_search_feature() {
     let request = ExternalCliRunRequest {
+        images: Vec::new(),
         message: "hello".to_string(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -221,6 +224,7 @@ fn codex_adapter_maps_legacy_search_to_web_search_feature() {
 #[test]
 fn codex_adapter_danger_full_access_suppresses_sandbox() {
     let request = ExternalCliRunRequest {
+        images: Vec::new(),
         message: "hello".to_string(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -253,6 +257,7 @@ fn codex_adapter_danger_full_access_suppresses_sandbox() {
 #[test]
 fn codex_adapter_builds_resume_command_from_thread_id() {
     let request = ExternalCliRunRequest {
+        images: Vec::new(),
         message: "hello again".to_string(),
         operation: default_operation(),
         params: serde_json::json!({ "threadId": "thread-existing" }),
@@ -299,6 +304,7 @@ fn codex_adapter_builds_resume_command_from_thread_id() {
 #[test]
 fn codex_adapter_injects_work_dir_with_custom_args() {
     let request = ExternalCliRunRequest {
+        images: Vec::new(),
         message: "hello".to_string(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -334,6 +340,7 @@ fn codex_adapter_injects_work_dir_with_custom_args() {
 #[test]
 fn codex_adapter_applies_config_flags_to_custom_args() {
     let request = ExternalCliRunRequest {
+        images: Vec::new(),
         message: "hello".to_string(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -410,6 +417,7 @@ async fn external_cli_runtime_runs_mock_command_and_writes_artifacts() {
     let temp_dir = tempfile::tempdir().unwrap();
     let runtime = ExternalCliRuntime::new(temp_dir.path());
     let request = ExternalCliRunRequest {
+        images: Vec::new(),
         message: "hello from api".to_string(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -445,11 +453,65 @@ async fn external_cli_runtime_runs_mock_command_and_writes_artifacts() {
 }
 
 #[tokio::test]
+async fn external_cli_run_writes_image_attachments_and_injects_prompt_paths() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let runtime = ExternalCliRuntime::new(temp_dir.path());
+    let request = ExternalCliRunRequest {
+        images: vec![ExternalCliImageInput {
+            mime_type: "image/png".to_string(),
+            data: "aGVsbG8=".to_string(),
+            name: Some("pasted.png".to_string()),
+        }],
+        message: String::new(),
+        operation: default_operation(),
+        params: serde_json::Value::Null,
+        provider_id: Some("provider-a".to_string()),
+        runner_id: None,
+        session_key: Some("chat-gateway-image-test".to_string()),
+        runtime: DEFAULT_RUNTIME.to_string(),
+        adapter: "mock".to_string(),
+        work_dir: None,
+        instructions: None,
+        adapter_config: ExternalCliAdapterConfig {
+            executable: Some("sh".to_string()),
+            args: vec![
+                "-c".to_string(),
+                "cat >/dev/null; printf '%s\n' '{\"type\":\"assistant_final\",\"content\":\"saw image\"}'".to_string(),
+            ],
+            timeout_secs: Some(10),
+            ..Default::default()
+        },
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    };
+
+    let result = runtime.run(request).await.unwrap();
+
+    let prompt = tokio::fs::read_to_string(&result.artifacts.prompt)
+        .await
+        .unwrap();
+    assert!(prompt.contains("## Attached Images"));
+    assert!(prompt.contains("image-1.png"));
+    let images: Vec<ExternalCliSavedImageAttachment> = serde_json::from_str(
+        result
+            .metadata
+            .get("attachments.images")
+            .expect("attachments metadata"),
+    )
+    .unwrap();
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0].mime_type, "image/png");
+    assert_eq!(tokio::fs::read(&images[0].path).await.unwrap(), b"hello");
+}
+
+#[tokio::test]
 async fn external_cli_runtime_marks_stopped_run_before_late_stdout() {
     let temp_dir = tempfile::tempdir().unwrap();
     let runs_root = temp_dir.path().to_path_buf();
     let runtime = ExternalCliRuntime::new(&runs_root);
     let request = ExternalCliRunRequest {
+        images: Vec::new(),
         message: "stop me".to_string(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -498,6 +560,7 @@ async fn external_cli_runtime_stops_active_run_by_session_key() {
     let runs_root = temp_dir.path().to_path_buf();
     let runtime = ExternalCliRuntime::new(&runs_root);
     let request = ExternalCliRunRequest {
+        images: Vec::new(),
         message: "stop by session".to_string(),
         operation: default_operation(),
         params: serde_json::Value::Null,

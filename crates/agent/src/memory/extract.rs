@@ -38,46 +38,16 @@ pub fn auto_extract_after_turn(
         return;
     }
     tokio::spawn(async move {
-        let begin = std::time::Instant::now();
-        telemetry_event("auto_extract.begin", 0, true, None);
-        let deadline = Duration::from_secs(MEMORY_EXTRACT_TIMEOUT_SECS);
-        let work = auto_extract_after_turn_inner(
+        if let Err(error) = auto_extract_after_turn_with_timeout(
             &client,
             &config,
             &session_key,
             &user_message,
             &assistant_message,
-        );
-        match tokio::time::timeout(deadline, work).await {
-            Ok(Ok(())) => {
-                telemetry_event(
-                    "auto_extract.end",
-                    begin.elapsed().as_millis() as u64,
-                    true,
-                    None,
-                );
-            }
-            Ok(Err(error)) => {
-                warn!(error = %error, "failed to generate file-backed memories");
-                telemetry_event(
-                    "auto_extract.end",
-                    begin.elapsed().as_millis() as u64,
-                    false,
-                    Some(&error),
-                );
-            }
-            Err(_) => {
-                warn!(
-                    secs = MEMORY_EXTRACT_TIMEOUT_SECS,
-                    "auto memory extraction timed out"
-                );
-                telemetry_event(
-                    "auto_extract.end",
-                    begin.elapsed().as_millis() as u64,
-                    false,
-                    Some("timeout"),
-                );
-            }
+        )
+        .await
+        {
+            warn!(error = %error, "failed to generate file-backed memories");
         }
     });
 }
@@ -103,6 +73,101 @@ pub async fn auto_extract_after_turn_blocking(
         assistant_message,
     )
     .await
+}
+
+/// Pollution-aware synchronous variant for isolated worker processes.
+///
+/// A worker process exits immediately after sending its final turn result, so
+/// fire-and-forget extraction tasks would be dropped before they can persist
+/// Phase 1 / Phase 2 artifacts. This variant keeps the extraction lifecycle
+/// inside the turn and preserves the same pollution gate as the async path.
+pub async fn auto_extract_after_turn_with_pollution_check_blocking(
+    client: &crate::client::AgentClient,
+    config: &AgentConfig,
+    session_key: &str,
+    user_message: &str,
+    assistant_message: &str,
+    pollution_detector: PollutionDetector,
+) -> Result<(), String> {
+    if !generate_memories_enabled(config) {
+        return Ok(());
+    }
+
+    if !pollution_detector.allows_memory_write() {
+        let mode = pollution_detector.current_mode();
+        debug!(
+            mode = ?mode,
+            session_key = %session_key,
+            "skipping memory extraction due to pollution/disabled state"
+        );
+        telemetry_event(
+            "auto_extract.skip_polluted",
+            0,
+            true,
+            match &mode {
+                ThreadMemoryMode::Polluted { reason } => Some(reason.as_str()),
+                ThreadMemoryMode::Disabled => Some("disabled"),
+                ThreadMemoryMode::Enabled => None,
+            },
+        );
+        return Ok(());
+    }
+
+    auto_extract_after_turn_with_timeout(
+        client,
+        config,
+        session_key,
+        user_message,
+        assistant_message,
+    )
+    .await
+}
+
+async fn auto_extract_after_turn_with_timeout(
+    client: &crate::client::AgentClient,
+    config: &AgentConfig,
+    session_key: &str,
+    user_message: &str,
+    assistant_message: &str,
+) -> Result<(), String> {
+    let begin = std::time::Instant::now();
+    telemetry_event("auto_extract.begin", 0, true, None);
+    let deadline = Duration::from_secs(MEMORY_EXTRACT_TIMEOUT_SECS);
+    let work =
+        auto_extract_after_turn_inner(client, config, session_key, user_message, assistant_message);
+    match tokio::time::timeout(deadline, work).await {
+        Ok(Ok(())) => {
+            telemetry_event(
+                "auto_extract.end",
+                begin.elapsed().as_millis() as u64,
+                true,
+                None,
+            );
+            Ok(())
+        }
+        Ok(Err(error)) => {
+            telemetry_event(
+                "auto_extract.end",
+                begin.elapsed().as_millis() as u64,
+                false,
+                Some(&error),
+            );
+            Err(error)
+        }
+        Err(_) => {
+            let error = format!(
+                "auto memory extraction timed out after {} seconds",
+                MEMORY_EXTRACT_TIMEOUT_SECS
+            );
+            telemetry_event(
+                "auto_extract.end",
+                begin.elapsed().as_millis() as u64,
+                false,
+                Some("timeout"),
+            );
+            Err(error)
+        }
+    }
 }
 
 async fn auto_extract_after_turn_inner(

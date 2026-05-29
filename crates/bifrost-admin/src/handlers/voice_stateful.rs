@@ -347,7 +347,7 @@ mod platform {
     use std::time::Instant;
 
     use super::*;
-    use qwen3_asr::{AsrInference, StreamingOptions};
+    use bifrost_asr::native::qwen3_asr::{AsrInference, StreamingOptions};
     use tracing::warn;
 
     pub(super) async fn start_process_stateful_voice_session(
@@ -356,6 +356,7 @@ mod platform {
         validate_model_assets(&config.model_dir)?;
         let exe = std::env::current_exe()
             .map_err(|error| format!("resolve Bifrost executable for voice worker: {error}"))?;
+        let exe = labeled_process_executable(&exe, "bifrost-voice");
         let mut command = Command::new(exe);
         command
             .args(["ai", "voice", "worker"])
@@ -403,6 +404,22 @@ mod platform {
         }
     }
 
+    fn labeled_process_executable(executable: &Path, alias_name: &str) -> PathBuf {
+        let alias_dir = bifrost_storage::data_dir().join("runtime/process-aliases");
+        match bifrost_core::process_alias_executable(executable, &alias_dir, alias_name) {
+            Ok(alias) => alias,
+            Err(error) => {
+                warn!(
+                    executable = %executable.display(),
+                    alias_name = %alias_name,
+                    error = %error,
+                    "falling back to unlabeled bifrost voice executable"
+                );
+                executable.to_path_buf()
+            }
+        }
+    }
+
     #[derive(Debug, Deserialize)]
     #[serde(tag = "type", rename_all = "snake_case")]
     enum WorkerInput {
@@ -419,7 +436,7 @@ mod platform {
 
     pub fn run_stateful_worker_stdio(config: StatefulVoiceConfig) -> Result<(), String> {
         validate_model_assets(&config.model_dir)?;
-        let device = qwen3_asr::best_device();
+        let device = bifrost_asr::native::qwen3_asr::best_device();
         let engine =
             AsrInference::load(&config.model_dir, device).map_err(|error| error.to_string())?;
         warm_stateful_engine(&engine);

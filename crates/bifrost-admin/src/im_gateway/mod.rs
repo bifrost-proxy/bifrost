@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod agent_worker;
 pub mod chatgpt_web;
 pub mod connection;
 pub mod event_router;

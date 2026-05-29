@@ -290,6 +290,9 @@ export default function TaskFileTranscriptPage({
                     {timeline.speakers.map((speaker) => (
                       <Tag key={speaker.id} color="purple">
                         {formatSpeakerLabel(speaker.display_name, speaker.confidence)}
+                        {!speaker.mapped_profile_id
+                          ? formatSpeakerCandidate(speaker.candidate_display_name, speaker.candidate_confidence)
+                          : ""}
                       </Tag>
                     ))}
                   </Space>
@@ -354,6 +357,12 @@ export default function TaskFileTranscriptPage({
                               segment.speaker_display_name ?? segment.speaker,
                               speakerMetadataById.get(segment.speaker)?.confidence,
                             )}
+                            {!speakerMetadataById.get(segment.speaker)?.mapped_profile_id
+                              ? formatSpeakerCandidate(
+                                  speakerMetadataById.get(segment.speaker)?.candidate_display_name,
+                                  speakerMetadataById.get(segment.speaker)?.candidate_confidence,
+                                )
+                              : ""}
                           </Tag>
                         ) : null}
                         <Paragraph
@@ -426,4 +435,11 @@ function formatSpeakerLabel(displayName: string, confidence?: number): string {
     return displayName;
   }
   return `${displayName} ${Math.round(Math.max(0, Math.min(1, confidence)) * 100)}%`;
+}
+
+function formatSpeakerCandidate(displayName?: string, confidence?: number): string {
+  if (!displayName || confidence === undefined || confidence === null) {
+    return "";
+  }
+  return ` candidate ${displayName} ${Math.round(Math.max(0, Math.min(1, confidence)) * 100)}%`;
 }

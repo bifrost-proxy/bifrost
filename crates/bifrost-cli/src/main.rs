@@ -1,4 +1,6 @@
-use bifrost_core::{init_logging_with_config, install_panic_hook, LogConfig, LogOutput};
+use bifrost_core::{
+    init_logging_with_config, install_panic_hook, BifrostError, LogConfig, LogOutput,
+};
 use bifrost_storage::{data_dir, ConfigManager, DEFAULT_REMOTE_BASE_URL};
 use bifrost_tls::init_crypto_provider;
 use clap::{CommandFactory, Parser};
@@ -98,7 +100,11 @@ fn command_uses_stdout_protocol(command: Option<&Commands>) -> bool {
             action: AiCommands::Voice {
                 action: AiVoiceCommands::Worker { .. }
             }
-        })
+        }) | Some(Commands::Agent {
+            action: cli::AgentCommands::Worker,
+        }) | Some(Commands::Agent {
+            action: cli::AgentCommands::ExternalRunnerWorker,
+        }) | Some(Commands::AsrDiarizationWorker { .. })
     )
 }
 
@@ -150,6 +156,9 @@ fn main() {
     }
 
     let result = match cli.command {
+        Some(Commands::AsrDiarizationWorker { request }) => {
+            bifrost_admin::run_asr_diarization_worker_stdio(&request).map_err(BifrostError::Config)
+        }
         Some(Commands::Start {
             port,
             host,

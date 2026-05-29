@@ -28,7 +28,9 @@ impl Default for AgentClient {
 impl AgentClient {
     pub fn new() -> Self {
         Self {
-            http: reqwest::Client::builder().build().unwrap_or_default(),
+            http: bifrost_core::direct_reqwest_client_builder()
+                .build()
+                .unwrap_or_default(),
             model_proxy_url: None,
         }
     }
@@ -62,40 +64,26 @@ impl AgentClient {
         ca_cert_path: Option<&Path>,
     ) -> Self {
         let proxy_url = proxy_url.into();
-        let mut builder = reqwest::Client::builder();
-        match reqwest::Proxy::all(&proxy_url) {
-            Ok(proxy) => {
-                builder = builder.proxy(proxy);
-            }
-            Err(error) => {
-                warn!(
-                    proxy_url = %proxy_url,
-                    error = %error,
-                    "invalid agent model proxy URL; falling back to direct model requests"
-                );
-                return Self::new();
-            }
-        }
-        if let Some(path) = ca_cert_path {
-            match load_reqwest_certificate(path) {
-                Ok(cert) => {
-                    builder = builder.add_root_certificate(cert);
+        let builder = match bifrost_core::proxied_reqwest_client_builder(&proxy_url, ca_cert_path) {
+            Ok(builder) => {
+                if let Some(path) = ca_cert_path {
                     info!(
                         proxy_url = %proxy_url,
                         ca_cert_path = %path.display(),
                         "agent model proxy trusts Bifrost CA"
                     );
                 }
-                Err(error) => {
-                    warn!(
-                        proxy_url = %proxy_url,
-                        ca_cert_path = %path.display(),
-                        error = %error,
-                        "agent model proxy could not load Bifrost CA; TLS-intercepted model requests may fail"
-                    );
-                }
+                builder
             }
-        }
+            Err(error) => {
+                warn!(
+                    proxy_url = %proxy_url,
+                    error = %error,
+                    "failed to configure proxied agent HTTP client; falling back to direct model requests"
+                );
+                return Self::new();
+            }
+        };
 
         let http = match builder.build() {
             Ok(client) => client,
@@ -342,11 +330,6 @@ fn truncate(s: &str, max_len: usize) -> String {
     truncate_bytes_with_suffix(s, max_len, "...")
 }
 
-fn load_reqwest_certificate(path: &Path) -> Result<reqwest::Certificate, String> {
-    let pem = std::fs::read(path).map_err(|error| format!("read CA certificate: {error}"))?;
-    reqwest::Certificate::from_pem(&pem).map_err(|error| format!("parse CA certificate: {error}"))
-}
-
 fn agent_proxy_disabled_by_env() -> bool {
     std::env::var(AGENT_PROXY_DISABLE_ENV)
         .map(|value| {
@@ -362,6 +345,57 @@ fn agent_proxy_disabled_by_env() -> bool {
 mod tests {
     use super::*;
     use crate::types::ToolCallMessage;
+    use std::sync::{Mutex, OnceLock};
+
+    fn proxy_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn with_proxy_env<T>(proxy_url: &str, f: impl FnOnce() -> T) -> T {
+        let _guard = proxy_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let vars = [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+            "no_proxy",
+        ];
+        let saved: Vec<(String, Option<String>)> = vars
+            .iter()
+            .map(|key| (key.to_string(), std::env::var(key).ok()))
+            .collect();
+
+        for key in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
+            std::env::set_var(key, proxy_url);
+        }
+        for key in ["NO_PROXY", "no_proxy"] {
+            std::env::remove_var(key);
+        }
+
+        let result = f();
+
+        for (key, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+
+        result
+    }
 
     fn tool_call(id: &str, name: &str) -> ToolCallMessage {
         ToolCallMessage::function_call(id.to_string(), name.to_string(), "{}".to_string())
@@ -371,6 +405,87 @@ mod tests {
     fn default_agent_client_uses_direct_model_requests() {
         let client = AgentClient::new();
         assert_eq!(client.model_proxy_url(), None);
+    }
+
+    #[tokio::test]
+    async fn default_agent_client_ignores_proxy_environment() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let model_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let model_addr = model_listener.local_addr().unwrap();
+        let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy_listener.local_addr().unwrap();
+        let proxy_was_used = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let proxy_was_used_server = proxy_was_used.clone();
+
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = proxy_listener.accept().await {
+                proxy_was_used_server.store(true, std::sync::atomic::Ordering::SeqCst);
+                let _ = stream
+                    .write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+                    .await;
+            }
+        });
+
+        tokio::spawn(async move {
+            let (mut stream, _) = model_listener.accept().await.unwrap();
+            let mut buffer = Vec::new();
+            loop {
+                let mut chunk = [0_u8; 1024];
+                let n = stream.read(&mut chunk).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                buffer.extend_from_slice(&chunk[..n]);
+                if buffer.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let payload = serde_json::json!({
+                "choices": [{
+                    "message": {"role": "assistant", "content": "direct-ok"},
+                    "finish_reason": "stop"
+                }]
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                payload.len(),
+                payload
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let mut config = AgentConfig {
+            model: Some("direct-model".to_string()),
+            model_provider: Some("direct-provider".to_string()),
+            request_timeout_secs: Some(2),
+            ..AgentConfig::default()
+        };
+        config.model_providers.insert(
+            "direct-provider".to_string(),
+            crate::config::ModelProviderConfig {
+                name: Some("direct-provider".to_string()),
+                base_url: Some(format!("http://{model_addr}/chat/completions")),
+                wire_api: Some(crate::config::ModelWireApi::ChatCompletions),
+                env_key: None,
+                api_key: None,
+                http_headers: None,
+                env_http_headers: None,
+                request_max_retries: None,
+                stream_idle_timeout_ms: None,
+                stream_max_retries: None,
+            },
+        );
+
+        let client = with_proxy_env(&format!("http://{proxy_addr}"), AgentClient::new);
+        let response = client
+            .chat_completion(&config, &[ChatMessage::user("hello")], &[])
+            .await
+            .unwrap();
+
+        assert_eq!(response.content.as_deref(), Some("direct-ok"));
+        assert!(!proxy_was_used.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test]
@@ -391,6 +506,82 @@ mod tests {
 
         let client = AgentClient::new_with_bifrost_proxy_and_ca(18889, Some(&cert_path));
         assert_eq!(client.model_proxy_url(), Some("http://127.0.0.1:18889"));
+    }
+
+    #[tokio::test]
+    async fn explicit_model_proxy_is_used_even_when_proxy_env_is_bad() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy_listener.local_addr().unwrap();
+        let captured_request = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let captured_request_server = captured_request.clone();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = proxy_listener.accept().await.unwrap();
+            let mut buffer = Vec::new();
+            loop {
+                let mut chunk = [0_u8; 1024];
+                let n = stream.read(&mut chunk).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                buffer.extend_from_slice(&chunk[..n]);
+                if buffer.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            *captured_request_server.lock().unwrap() = String::from_utf8_lossy(&buffer).to_string();
+            let payload = serde_json::json!({
+                "choices": [{
+                    "message": {"role": "assistant", "content": "proxied-ok"},
+                    "finish_reason": "stop"
+                }]
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                payload.len(),
+                payload
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let mut config = AgentConfig {
+            model: Some("proxied-model".to_string()),
+            model_provider: Some("proxied-provider".to_string()),
+            request_timeout_secs: Some(2),
+            ..AgentConfig::default()
+        };
+        config.model_providers.insert(
+            "proxied-provider".to_string(),
+            crate::config::ModelProviderConfig {
+                name: Some("proxied-provider".to_string()),
+                base_url: Some("http://model-proxy.test/chat/completions".to_string()),
+                wire_api: Some(crate::config::ModelWireApi::ChatCompletions),
+                env_key: None,
+                api_key: None,
+                http_headers: None,
+                env_http_headers: None,
+                request_max_retries: None,
+                stream_idle_timeout_ms: None,
+                stream_max_retries: None,
+            },
+        );
+
+        let client = with_proxy_env("http://127.0.0.1:1", || {
+            AgentClient::new_with_model_proxy_url(format!("http://{proxy_addr}"))
+        });
+        let response = client
+            .chat_completion(&config, &[ChatMessage::user("hello")], &[])
+            .await
+            .unwrap();
+
+        assert_eq!(response.content.as_deref(), Some("proxied-ok"));
+        assert!(captured_request
+            .lock()
+            .unwrap()
+            .contains("http://model-proxy.test/chat/completions"));
     }
 
     #[test]
