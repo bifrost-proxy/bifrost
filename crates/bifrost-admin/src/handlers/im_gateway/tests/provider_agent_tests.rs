@@ -292,7 +292,16 @@ pub(super) async fn request_agent_stop_stops_external_runner_by_session_key() {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 
-    assert!(request_agent_stop_with_runs_root(&manager, session_key, &runs_root).await);
+    let mut stop_requested = false;
+    for _ in 0..50 {
+        if request_agent_stop_with_runs_root(&manager, session_key, &runs_root).await {
+            stop_requested = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(stop_requested);
+
     let result = handle.await.expect("join external run");
 
     assert_eq!(

@@ -1,4 +1,4 @@
-import { useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import {
   CompressOutlined,
   DownOutlined,
@@ -304,13 +304,12 @@ export function AgentChatMessageList({
             token={token}
           />
         ) : (
-          <div
+          <RunningTurnGroup
             key={group.key}
-            style={{ display: "grid", gap: 12, minWidth: 0, width: "100%" }}
-          >
-            {renderMessage(group.user.message, group.user.index)}
-            {group.assistants.map((item) => renderMessage(item.message, item.index))}
-          </div>
+            group={group}
+            renderMessage={renderMessage}
+            token={token}
+          />
         ),
       )}
     </Space>
@@ -366,6 +365,64 @@ function buildMessageGroups(messages: ChatMessage[], running: boolean): MessageG
     }
   }
   return groups;
+}
+
+function RunningTurnGroup({
+  group,
+  renderMessage,
+  token,
+}: {
+  group: Extract<MessageGroup, { type: "turn" }>;
+  renderMessage: (
+    message: ChatMessage,
+    index: number,
+    options?: { forceProcessCompleted?: boolean; hideProcessSteps?: boolean },
+  ) => ReactNode;
+  token: {
+    colorBorderSecondary: string;
+    colorTextSecondary: string;
+  };
+}) {
+  const [mountedAtSeconds] = useState(() => Date.now() / 1000);
+  const [nowSeconds, setNowSeconds] = useState(() => Date.now() / 1000);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setNowSeconds(Date.now() / 1000);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const durationLabel = formatTurnDuration(
+    runningDurationSeconds(
+      group.user.message.timestamp,
+      group.assistants,
+      nowSeconds,
+      mountedAtSeconds,
+    ),
+  );
+  return (
+    <div
+      data-testid="agent-chat-turn-running-group"
+      style={{ display: "grid", gap: 12, minWidth: 0, width: "100%" }}
+    >
+      {renderMessage(group.user.message, group.user.index)}
+      <div
+        data-testid="agent-chat-turn-running-summary"
+        aria-live="polite"
+        style={{
+          margin: "8px 0 0",
+          padding: "0 0 12px",
+          borderBottom: `1px solid ${token.colorBorderSecondary}`,
+          color: token.colorTextSecondary,
+          fontWeight: 600,
+        }}
+      >
+        已处理 {durationLabel}
+      </div>
+      {group.assistants.map((item) => renderMessage(item.message, item.index))}
+    </div>
+  );
 }
 
 function CompletedTurnGroup({
@@ -449,6 +506,34 @@ function durationSeconds(start?: number, end?: number) {
     return undefined;
   }
   return Math.max(0, normalizeTimestampSeconds(end) - normalizeTimestampSeconds(start));
+}
+
+function runningDurationSeconds(
+  start: number | undefined,
+  assistants: MessageItem[],
+  now: number,
+  mountedAt: number,
+) {
+  if (!start) {
+    return undefined;
+  }
+  const normalizedStart = normalizeTimestampSeconds(start);
+  if (normalizedStart < 1_000_000_000) {
+    const lastAssistantTimestamp = assistants
+      .map((item) => item.message.timestamp)
+      .filter((value): value is number => typeof value === "number")
+      .map(normalizeTimestampSeconds)
+      .reduce<number | undefined>(
+        (latest, value) => (latest === undefined ? value : Math.max(latest, value)),
+        undefined,
+      );
+    const timelineSeconds =
+      lastAssistantTimestamp === undefined
+        ? 0
+        : Math.max(0, lastAssistantTimestamp - normalizedStart);
+    return timelineSeconds + Math.max(0, normalizeTimestampSeconds(now) - mountedAt);
+  }
+  return Math.max(0, normalizeTimestampSeconds(now) - normalizedStart);
 }
 
 function normalizeTimestampSeconds(timestamp: number) {

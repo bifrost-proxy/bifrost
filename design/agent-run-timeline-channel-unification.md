@@ -156,7 +156,7 @@ process block 自身也必须显示工具执行耗时：`Ran 1 command · 4m 33s
 边界规则：
 
 - 如果没有 user 消息（例如独立 compaction 状态消息），保持原有单条消息渲染。
-- 如果全局 `running=true`，最后一个 user turn 视为活跃 turn，不做默认折叠；更早的 turn 仍可折叠。
+- 如果全局 `running=true`，最后一个 user turn 视为活跃 turn，不做默认折叠；在该 turn 的输出顶部展示 `已处理 <duration>` 并每秒刷新运行时长，更早的 turn 仍可折叠。
 - 折叠只影响展示层，不改变 JSONL timeline、session detail 或续聊上下文。
 - 颜色、边框和文字必须使用 Ant Design token，亮色/暗色主题都要可读。
 - 窄屏时消息列必须随视口收缩并保留水平 padding；右侧 thread rail 在 `md` 以下隐藏，避免把消息内容挤到无 padding 状态；Markdown 长路径、代码块和表格不得撑出横向溢出。
@@ -166,7 +166,7 @@ process block 自身也必须显示工具执行耗时：`Ran 1 command · 4m 33s
 测试方案：
 
 - 单元/组件：覆盖 completed turn 默认只显示最终输出和 `已处理` 摘要，展开后恢复 process block 与中间 delta。
-- E2E：在 `web/tests/ui/agent-chat.spec.ts` 中覆盖 Web stream 完成态和 history timeline 完成态；运行中 history refresh 用例必须保持当前 turn 展开。
+- E2E：在 `web/tests/ui/agent-chat.spec.ts` 中覆盖 Web stream 完成态和 history timeline 完成态；运行中 history refresh 用例必须保持当前 turn 展开，并断言顶部 `已处理 <duration>` 会继续更新。
 - E2E 额外覆盖 640px 视口，断言消息区没有横向溢出且 message track 与滚动区之间保留左右 padding。
 - E2E 覆盖消息区离开底部时滚动按钮淡入、位置居中在 composer 上方、点击后滚到底部并淡出。
 - E2E 覆盖选中 running 线程时 `New Chat` 仍可点击并创建新 session。

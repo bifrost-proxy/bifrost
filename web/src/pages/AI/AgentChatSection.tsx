@@ -310,7 +310,8 @@ export default function AgentChatSection() {
         agent_type: telemetry.status?.agent_type,
       });
   const currentRunnerTag = formatRunnerTag(telemetry.status, selectedThread, runnerId);
-  const currentStateTag = formatCurrentStateTag(telemetry, selectedThread, running);
+  const displayRunning = running || isThreadActive(selectedThread);
+  const currentStateTag = formatCurrentStateTag(telemetry, selectedThread, displayRunning);
   const guideSupported = runnerId === "bifrost_agent";
 
   const refreshThreads = useCallback(async () => {
@@ -1765,7 +1766,7 @@ export default function AgentChatSection() {
                   isCompact={isCompact}
                   messages={messages}
                   onOpenRunnerCallThread={handleOpenRunnerCallThread}
-                  running={running}
+                  running={displayRunning}
                   styles={styles}
                   token={token}
                 />

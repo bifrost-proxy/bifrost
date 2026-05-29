@@ -2210,6 +2210,7 @@ test("AI Agent Chat keeps polling running history timeline after refresh", async
   page,
 }) => {
   const historyPath = "/tmp/running-refresh-session.jsonl";
+  const runningStartedAt = Math.floor(Date.now() / 1000) - 3;
   let historyCalls = 0;
   await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
     await route.fulfill({
@@ -2257,19 +2258,19 @@ test("AI Agent Chat keeps polling running history timeline after refresh", async
       historyCalls += 1;
       const events = [
         {
-          timestamp: 0.1,
+          timestamp: runningStartedAt - 10,
           event_type: "user_message",
           session_key: "running-refresh",
           content: { message: "Previous question" },
         },
         {
-          timestamp: 0.2,
+          timestamp: runningStartedAt - 9,
           event_type: "assistant_message",
           session_key: "running-refresh",
           content: { message: "Previous answer" },
         },
         {
-          timestamp: 2,
+          timestamp: runningStartedAt,
           event_type: "user_message",
           session_key: "running-refresh",
           content: { message: "Question before refresh" },
@@ -2277,13 +2278,13 @@ test("AI Agent Chat keeps polling running history timeline after refresh", async
         ...(historyCalls >= 2
           ? [
               {
-                timestamp: 2.5,
+                timestamp: runningStartedAt + 0.5,
                 event_type: "assistant_delta",
                 session_key: "running-refresh",
                 content: { message: "I am checking the refreshed run state." },
               },
               {
-                timestamp: 3,
+                timestamp: runningStartedAt + 1,
                 event_type: "tool_call",
                 session_key: "running-refresh",
                 content: {
@@ -2292,7 +2293,7 @@ test("AI Agent Chat keeps polling running history timeline after refresh", async
                 },
               },
               {
-                timestamp: 4,
+                timestamp: runningStartedAt + 2,
                 event_type: "tool_result",
                 session_key: "running-refresh",
                 content: {
@@ -2302,7 +2303,7 @@ test("AI Agent Chat keeps polling running history timeline after refresh", async
                 },
               },
               {
-                timestamp: 4.5,
+                timestamp: runningStartedAt + 2.5,
                 event_type: "assistant_delta",
                 session_key: "running-refresh",
                 content: { message: "The command is still being observed." },
@@ -2332,6 +2333,16 @@ test("AI Agent Chat keeps polling running history timeline after refresh", async
   await expect(page.getByTestId("agent-chat-messages")).toContainText(
     "The command is still being observed.",
   );
+  const runningSummary = page.getByTestId("agent-chat-turn-running-summary");
+  await expect(runningSummary).toContainText(/已处理 \d+s/);
+  const firstRunningSummary = await runningSummary.textContent();
+  await page.waitForTimeout(1100);
+  await expect
+    .poll(async () => {
+      const next = await runningSummary.textContent();
+      return Boolean(next && firstRunningSummary && next !== firstRunningSummary);
+    })
+    .toBe(true);
   await expect(page.getByTestId("agent-chat-thinking-tail")).toBeVisible();
   const processBlock = page.getByTestId("agent-chat-process-block");
   await expect(processBlock).toBeVisible();
