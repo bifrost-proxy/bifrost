@@ -470,8 +470,14 @@ pub fn generate_daily_summaries(
         }
 
         let path = daily_dir.join(format!("{date}.md"));
-        std::fs::write(&path, md.as_bytes())
-            .map_err(|e| format!("write {}: {e}", path.display()))?;
+        let needs_write = match std::fs::read(&path) {
+            Ok(existing) => existing != md.as_bytes(),
+            Err(_) => true,
+        };
+        if needs_write {
+            std::fs::write(&path, md.as_bytes())
+                .map_err(|e| format!("write {}: {e}", path.display()))?;
+        }
         written.push(path);
     }
 
