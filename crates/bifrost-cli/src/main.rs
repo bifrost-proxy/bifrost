@@ -98,6 +98,10 @@ fn command_uses_stdout_protocol(command: Option<&Commands>) -> bool {
             action: AiCommands::Voice {
                 action: AiVoiceCommands::Worker { .. }
             }
+        }) | Some(Commands::Agent {
+            action: cli::AgentCommands::Worker,
+        }) | Some(Commands::Agent {
+            action: cli::AgentCommands::ExternalRunnerWorker,
         })
     )
 }

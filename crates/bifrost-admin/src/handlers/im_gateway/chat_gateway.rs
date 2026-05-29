@@ -693,9 +693,7 @@ fn builtin_runner_call_stream_response(
     let (tx, rx) =
         tokio::sync::mpsc::channel::<Result<hyper::body::Frame<bytes::Bytes>, hyper::Error>>(16);
     let agent_session_manager = service.agent_session_manager.clone();
-    let agent_client = service.agent_client.clone();
     let config = service.agent_config_store.load();
-    let turn_tools = service.build_agent_tool_registry(config.default_message_channel.clone());
     tokio::spawn(async move {
         let run_started_at = now_ms();
         let started = serde_json::json!({
@@ -738,69 +736,100 @@ fn builtin_runner_call_stream_response(
         if session.title.is_none() {
             session.title = Some("Runner Call".to_string());
         }
-        let (progress_tx, mut progress_rx) =
-            tokio::sync::mpsc::unbounded_channel::<bifrost_agent::AgentTurnProgressEvent>();
-        session.progress_sender = Some(progress_tx);
+        let history_path = session
+            .recorder
+            .as_ref()
+            .map(|recorder| recorder.file_path().display().to_string());
+        remember_session_turn_started(
+            &input.child_session_key,
+            crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+            None,
+            &input.user_message,
+            history_path.clone(),
+            session.work_dir.clone(),
+        );
+        let mut worker_request = crate::im_gateway::agent_worker::build_run_request(
+            input.child_session_key.clone(),
+            input.prompt.clone(),
+            Vec::new(),
+            &config,
+            session.work_dir.clone(),
+            history_path,
+            Some("runner_call".to_string()),
+        );
+        worker_request.default_message_channel = config.default_message_channel.clone();
+        let worker_client = match crate::im_gateway::agent_worker::AgentWorkerClient::current_exe()
+        {
+            Ok(client) => client,
+            Err(error) => {
+                agent_session_manager.return_session(session);
+                let failed = serde_json::json!({
+                    "eventType": "runner_call_failed",
+                    "callId": input.call_id,
+                    "error": error,
+                });
+                let _ = send_ndjson_event(&tx, &failed).await;
+                return;
+            }
+        };
+        let mut worker = match worker_client.spawn(worker_request).await {
+            Ok(worker) => worker,
+            Err(error) => {
+                agent_session_manager.return_session(session);
+                let failed = serde_json::json!({
+                    "eventType": "runner_call_failed",
+                    "callId": input.call_id,
+                    "error": error,
+                });
+                let _ = send_ndjson_event(&tx, &failed).await;
+                return;
+            }
+        };
+        let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        if let Some(pid) = worker.child_id() {
+            crate::im_gateway::agent_worker::register_active_worker(
+                &input.child_session_key,
+                pid,
+                stop_tx,
+            );
+        }
 
         let run_call_id = input.call_id.clone();
         let run_caller_session_key = input.caller_session_key.clone();
         let run_caller_scope = input.caller_scope.clone();
         let run_child_session_key = input.child_session_key.clone();
         let run_user_message = input.user_message.clone();
-        let run_agent_session_manager = agent_session_manager.clone();
-        let mut run_task = tokio::spawn(async move {
-            let mut mcp_manager = ImMcpManager::new(&config.mcp_servers).await;
-            let has_mcp_tools = !mcp_manager.list_tools().is_empty();
-            let mcp_opt = if has_mcp_tools {
-                Some(&mut mcp_manager)
-            } else {
-                None
-            };
-            let result = bifrost_agent::session::run_turn_with_mcp_multimodal(
-                &agent_client,
-                &config,
-                &mut session,
-                &turn_tools,
-                mcp_opt,
-                &input.prompt,
-                &[],
-                None,
-                None,
-            )
-            .await;
-            mcp_manager.shutdown().await;
-            session.progress_sender = None;
-            remember_session_state_from_agent_session(
-                &session,
-                crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
-                None,
-            );
-            run_agent_session_manager.return_session(session);
-            result
-        });
-
-        let mut progress_closed = false;
         loop {
             tokio::select! {
-                maybe_event = progress_rx.recv(), if !progress_closed => {
-                    match maybe_event {
-                        Some(event) => {
+                _ = stop_rx.recv() => {
+                    let _ = worker.terminate().await;
+                    crate::im_gateway::agent_worker::clear_active_worker(&run_child_session_key);
+                    agent_session_manager.return_session(session);
+                    let failed = serde_json::json!({
+                        "eventType": "runner_call_failed",
+                        "callId": run_call_id,
+                        "error": "target Bifrost Agent runner was stopped",
+                    });
+                    let _ = send_ndjson_event(&tx, &failed).await;
+                    return;
+                }
+                event = worker.next_event() => {
+                    let finished_at = now_ms();
+                    match event {
+                        Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Started { .. })) => {}
+                        Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Progress { event })) => {
                             let payload = builtin_runner_call_progress_event_payload(&run_child_session_key, event);
                             let _ = send_ndjson_event(&tx, &payload).await;
                         }
-                        None => {
-                            progress_closed = true;
-                        }
-                    }
-                }
-                result = &mut run_task => {
-                    while let Ok(event) = progress_rx.try_recv() {
-                        let payload = builtin_runner_call_progress_event_payload(&run_child_session_key, event);
-                        let _ = send_ndjson_event(&tx, &payload).await;
-                    }
-                    let finished_at = now_ms();
-                    match result {
-                        Ok(Ok(turn_result)) => {
+                        Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Finished { result: turn_result })) => {
+                            if let Some(history_path) = turn_result.history_path.as_deref() {
+                                let _ = restore_session_from_history_path(
+                                    &mut session,
+                                    std::path::Path::new(history_path),
+                                    &run_child_session_key,
+                                    config.history.as_ref().and_then(|h| h.max_bytes),
+                                );
+                            }
                             remember_runner_call_result_for_caller(
                                 &agent_session_manager,
                                 &run_caller_scope,
@@ -826,26 +855,54 @@ fn builtin_runner_call_stream_response(
                                 "toolCalls": turn_result.tool_calls_log,
                             });
                             let _ = send_ndjson_event(&tx, &finished).await;
+                            crate::im_gateway::agent_worker::clear_active_worker(&run_child_session_key);
+                            remember_session_state_from_agent_session(
+                                &session,
+                                crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+                                None,
+                            );
+                            agent_session_manager.return_session(session);
+                            return;
                         }
-                        Ok(Err(error)) => {
+                        Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Failed { error })) => {
                             let failed = serde_json::json!({
                                 "eventType": "runner_call_failed",
                                 "callId": run_call_id,
                                 "error": error,
                             });
                             let _ = send_ndjson_event(&tx, &failed).await;
+                            crate::im_gateway::agent_worker::clear_active_worker(&run_child_session_key);
+                            agent_session_manager.return_session(session);
+                            return;
                         }
-                        Err(error) => {
-                            agent_session_manager.release_active(&run_child_session_key);
+                        Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Stopped)) => {
                             let failed = serde_json::json!({
                                 "eventType": "runner_call_failed",
                                 "callId": run_call_id,
-                                "error": format!("target Bifrost Agent task failed: {error}"),
+                                "error": "target Bifrost Agent runner was stopped",
                             });
                             let _ = send_ndjson_event(&tx, &failed).await;
+                            crate::im_gateway::agent_worker::clear_active_worker(&run_child_session_key);
+                            agent_session_manager.return_session(session);
+                            return;
+                        }
+                        Ok(None) => {
+                            crate::im_gateway::agent_worker::clear_active_worker(&run_child_session_key);
+                            agent_session_manager.return_session(session);
+                            return;
+                        }
+                        Err(error) => {
+                            let failed = serde_json::json!({
+                                "eventType": "runner_call_failed",
+                                "callId": run_call_id,
+                                "error": format!("target Bifrost Agent worker failed: {error}"),
+                            });
+                            let _ = send_ndjson_event(&tx, &failed).await;
+                            crate::im_gateway::agent_worker::clear_active_worker(&run_child_session_key);
+                            agent_session_manager.return_session(session);
+                            return;
                         }
                     }
-                    return;
                 }
             }
         }
@@ -1440,12 +1497,15 @@ fn queue_external_cli_stream_response(
 }
 
 async fn stop_external_cli_stream_response(session_key: &str) -> Response<BoxBody> {
+    let worker_stopped =
+        crate::im_gateway::external_cli::request_worker_session_stop(session_key).await;
     let stopped = crate::im_gateway::external_cli::request_session_stop(
         crate::im_gateway::external_cli::default_runs_root(),
         session_key,
     )
     .await
-    .is_ok();
+    .is_ok()
+        || worker_stopped;
     let payload = serde_json::json!({
         "eventType": "run_finished",
         "sessionKey": session_key,

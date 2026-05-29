@@ -341,6 +341,17 @@ impl AgentSessionManager {
             .and_then(|handle| handle.lock().ok().map(|status| status.clone()))
     }
 
+    /// Replace the observable active status with a status emitted by an
+    /// isolated worker process for the same session.
+    pub fn update_active_turn_status_from_worker(&self, status: ActiveTurnStatus) {
+        let session_key = status.session_key.clone();
+        if let Some(handle) = self.active_turn_statuses.get(&session_key) {
+            if let Ok(mut current) = handle.lock() {
+                *current = status;
+            }
+        }
+    }
+
     /// List currently running turn statuses.
     pub fn list_active_turn_statuses(&self) -> Vec<ActiveTurnStatus> {
         self.active_turn_statuses

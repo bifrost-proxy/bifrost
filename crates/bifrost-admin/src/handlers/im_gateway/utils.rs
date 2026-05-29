@@ -114,11 +114,14 @@ pub(super) async fn request_agent_stop_with_runs_root(
     runs_root: impl AsRef<Path>,
 ) -> bool {
     let internal_stopped = manager.request_stop(session_key);
+    let worker_stopped = crate::im_gateway::agent_worker::request_session_stop(session_key).await;
+    let external_worker_stopped =
+        crate::im_gateway::external_cli::request_worker_session_stop(session_key).await;
     let external_stopped =
         crate::im_gateway::external_cli::request_session_stop(runs_root, session_key)
             .await
             .is_ok();
-    internal_stopped || external_stopped
+    internal_stopped || worker_stopped || external_worker_stopped || external_stopped
 }
 
 /// Extract a path segment that appears before a known suffix.
@@ -1263,7 +1266,7 @@ fn clear_persisted_session_histories(
     Ok(removed)
 }
 
-fn restore_session_from_history_path(
+pub(super) fn restore_session_from_history_path(
     session: &mut bifrost_agent::AgentSession,
     history_path: &Path,
     expected_session_key: &str,

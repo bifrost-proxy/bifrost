@@ -171,6 +171,7 @@
 | [agent-plan-lifecycle.md](./agent-plan-lifecycle.md) | Agent Plan 生命周期 | 8 | 参考 Codex `update_plan` 快照语义，静态验收 plan 不再按旧 completed 步骤增殖、同一工具调用不重复消费、typed PlanUpdate runtime event 方案、空 plan 清空当前快照、compaction prompt 不注入 plan 自然语言历史、local-ci release 二进制新鲜度，后续单元/E2E/飞书 IM 真链路验证矩阵 |
 | [agent-token-usage.md](./agent-token-usage.md) | Agent Token Usage 统计口径 | 6 | 区分累计 `total_tokens_used` 与当前 context `last_response_tokens`，Chat Completions `prompt_tokens` / Responses `input_tokens` 作为 context 快照，JSONL `context_tokens` 持久化与旧事件兼容，AI Chat 输入框上方 token HUD 展示实时消耗、context 占比和压缩状态，单元、真实服务 E2E 与截图验收入口 |
 | [chat-plan-density.md](./chat-plan-density.md) | Agent Chat Plan 密度与输入框高度 | 6 | Plan 面板紧凑展示、不展示二级标题行、todo 状态图标、超过 5 条 step 后内部滚动、输入框默认 2 行并扩高到 7 行上限、hint 不展示 session id、线程 tooltip 仅图标延迟触发、亮色/暗色主题可读性 |
+| [agent-loop-process-isolation.md](./agent-loop-process-isolation.md) | Agent Loop 进程隔离 | 5 | 内置 Bifrost Agent 与外置 Runner 默认每会话独立 worker 子进程，主进程只转发输入/进度/结果，`/stop` 可停止 worker 且代理/Admin API 继续响应，SSE 断开自动清理 worker |
 
 ### IM Gateway 测试
 
@@ -202,7 +203,7 @@
 
 ---
 
-**总计：135 个测试文件，2333 个测试用例**
+**总计：136 个测试文件，2336 个测试用例**
 
 ## 工作流程
 

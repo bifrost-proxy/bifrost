@@ -115,7 +115,7 @@ impl TurnTimingState {
 }
 
 /// Summary of timing metrics for a completed turn.
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct TurnTimingSummary {
     /// Time to first token in milliseconds.
     pub ttft_ms: Option<i64>,

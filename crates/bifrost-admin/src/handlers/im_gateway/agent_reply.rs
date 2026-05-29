@@ -1179,6 +1179,7 @@ pub(super) async fn send_agent_reply_images(
 
 /// Send an agent reply with plan progress and tool calls panel (for goal continuation).
 /// This sends a card similar to the final response rendering but can be called mid-continuation.
+#[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn send_agent_reply_with_plan(
     client: &ImProviderClient,

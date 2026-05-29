@@ -770,94 +770,21 @@ pub(super) async fn handle_agent(
             None,
         );
         consume_imported_contexts_for_builtin_agent(&mut session);
-        // If guide messages are provided, inject into the shared guide channel
-        // to simulate messages arriving before the next guide checkpoint.
-        let mut has_guide_messages = false;
-        if let Some(ref guide_msg) = body.guide_message {
-            if !guide_msg.trim().is_empty() {
-                service
-                    .queue_manager
-                    .inject_guide(&session_key, guide_msg.clone());
-                has_guide_messages = true;
-            }
-        }
-        for guide_msg in &body.guide_messages {
-            if !guide_msg.trim().is_empty() {
-                service
-                    .queue_manager
-                    .inject_guide(&session_key, guide_msg.clone());
-                has_guide_messages = true;
-            }
-        }
-        if has_guide_messages {
-            session.guide_channel = Some(
-                service
-                    .queue_manager
-                    .get_or_create_guide_channel(&session_key),
-            );
-        }
-        // If queue_messages is provided, inject into session's pending_messages
-        // to simulate queued messages arriving during agent processing.
-        for msg in &body.queue_messages {
-            if !msg.trim().is_empty() {
-                session.pending_messages.push_back(msg.clone());
-            }
-        }
-        // Initialize MCP from config for test endpoint (mirrors event loop behavior)
-        let mut mcp_manager = ImMcpManager::new(&config.mcp_servers).await;
-        let mcp_opt: Option<&mut ImMcpManager> = if mcp_manager.list_tools().is_empty() {
-            None
-        } else {
-            Some(&mut mcp_manager)
-        };
-        // Create recorder for persistence (same logic as process_agent_chat)
-        let mut recorder = if !config.is_ephemeral() {
-            let should_persist = config
-                .history
-                .as_ref()
-                .map(|h| h.persistence != bifrost_agent::config::HistoryPersistence::None)
-                .unwrap_or(true);
-            if should_persist {
-                if let Some(mut rec) = session.recorder.take() {
-                    let _ =
-                        rec.record_run_state(&session_key, "running", Some("api"), Some("builtin"));
-                    Some(rec)
-                } else {
-                    let data_dir = bifrost_agent::config::agent_home_dir();
-                    let max_bytes = config.history.as_ref().and_then(|h| h.max_bytes);
-                    let mut rec = ConversationRecorder::new_with_max_bytes(
-                        &data_dir,
-                        &session_key,
-                        max_bytes,
-                    );
-                    let _ = rec.record_session_start(
-                        &session_key,
-                        serde_json::json!({
-                            "model": config.model,
-                            "provider": config.model_provider,
-                            "source": "api",
-                            "base_instructions": bifrost_agent::prompt::resolve_base_instructions_text(&config, None),
-                        }),
-                    );
-                    let _ =
-                        rec.record_run_state(&session_key, "running", Some("api"), Some("builtin"));
-                    Some(rec)
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        // Initial guide messages are passed to the isolated worker request.
+        // Avoid writing them into the main-process guide queue, otherwise the
+        // same guide can leak into a later turn after the worker has finished.
+        let history_path = session
+            .recorder
+            .as_ref()
+            .map(|recorder| recorder.file_path().display().to_string())
+            .or_else(|| body.history_path.clone());
         if !is_manual_compaction {
             remember_session_turn_started(
                 &session_key,
                 crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
                 None,
                 &body.message,
-                recorder
-                    .as_ref()
-                    .map(|recorder| recorder.file_path().display().to_string()),
+                history_path.clone(),
                 session.work_dir.clone(),
             );
         }
@@ -879,50 +806,78 @@ pub(super) async fn handle_agent(
                 "too many /agent/chat images in one request; truncating images"
             );
         }
-        let turn_tools = service.build_agent_tool_registry(config.default_message_channel.clone());
-        let result = if is_manual_compaction {
-            bifrost_agent::session::run_manual_compaction_command(
-                &service.agent_client,
-                &config,
-                &mut session,
-                recorder.as_mut(),
-            )
-            .await
-        } else {
-            bifrost_agent::session::run_turn_with_mcp_multimodal(
-                &service.agent_client,
-                &config,
-                &mut session,
-                &turn_tools,
-                mcp_opt,
-                &body.message,
-                &images,
-                body.system_prompt.as_deref(),
-                recorder.as_mut(),
-            )
-            .await
+        let mut worker_request = crate::im_gateway::agent_worker::build_run_request(
+            session_key.clone(),
+            body.message.clone(),
+            images,
+            &config,
+            session.work_dir.clone(),
+            history_path,
+            Some("api".to_string()),
+        );
+        worker_request.system_prompt = body.system_prompt.clone();
+        worker_request.guide_messages = body
+            .guide_message
+            .clone()
+            .into_iter()
+            .chain(body.guide_messages.clone())
+            .collect();
+        worker_request.queued_messages = body.queue_messages.clone();
+        let worker_client = match crate::im_gateway::agent_worker::AgentWorkerClient::current_exe()
+        {
+            Ok(client) => client,
+            Err(error) => {
+                service.agent_session_manager.return_session(session);
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error);
+            }
         };
-        mcp_manager.shutdown().await;
-        if let Some(recorder) = recorder.as_mut() {
-            let state = if result.is_ok() {
-                "completed"
-            } else {
-                "failed"
-            };
-            let _ = recorder.record_run_state(&session_key, state, Some("api"), Some("builtin"));
+        let mut worker = match worker_client.spawn(worker_request).await {
+            Ok(worker) => worker,
+            Err(error) => {
+                service.agent_session_manager.return_session(session);
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error);
+            }
+        };
+        let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        if let Some(pid) = worker.child_id() {
+            crate::im_gateway::agent_worker::register_active_worker(&session_key, pid, stop_tx);
         }
-        if recorder.is_some() && !session.memory_cleared {
-            session.recorder = recorder;
-        }
-        // If the session was cleared (via /clear or /reset), also clear the
-        // ChatGPT Web conversation mapping so the next runner message starts fresh.
-        if session.memory_cleared {
-            clear_persisted_agent_session_state(
-                &session_key,
-                Some(crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER),
-                None,
-            );
-        }
+        let result = loop {
+            tokio::select! {
+                _ = stop_rx.recv() => {
+                    let _ = worker.terminate().await;
+                    break Err("已收到 /stop，Agent worker 子进程已停止。".to_string());
+                }
+                event = worker.next_event() => {
+                    match event {
+                        Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Started { .. })) => {}
+                        Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Progress { event })) => {
+                            if let bifrost_agent::AgentTurnProgressEvent::Status(status) = event {
+                                service.agent_session_manager.update_active_turn_status_from_worker(*status);
+                            }
+                        }
+                        Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Finished { result })) => {
+                            if let Some(history_path) = result.history_path.as_deref() {
+                                let _ = restore_session_from_history_path(
+                                    &mut session,
+                                    history_path,
+                                    &session_key,
+                                    config.history.as_ref().and_then(|h| h.max_bytes),
+                                );
+                            }
+                            break Ok(bifrost_agent::TurnResult::from(result));
+                        }
+                        Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Failed { error })) => break Err(error),
+                        Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Stopped)) => {
+                            break Err("已收到 /stop，Agent worker 子进程已停止。".to_string());
+                        }
+                        Ok(None) => break Err("agent worker exited without result".to_string()),
+                        Err(error) => break Err(format!("agent worker failed: {error}")),
+                    }
+                }
+            }
+        };
+        crate::im_gateway::agent_worker::clear_active_worker(&session_key);
         remember_session_state_from_agent_session(
             &session,
             crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
