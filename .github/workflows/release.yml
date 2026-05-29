@@ -26,6 +26,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_HTTP_TIMEOUT: "120"
+  CARGO_NET_RETRY: "10"
 
 permissions:
   contents: write

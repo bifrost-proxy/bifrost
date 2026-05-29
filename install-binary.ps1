@@ -27,6 +27,11 @@ $ErrorActionPreference = "Stop"
 
 $REPO = "bifrost-proxy/bifrost"
 $BINARY_NAME = "bifrost"
+$DEFAULT_GITHUB_MIRROR_URLS = @(
+    "https://github.com",
+    "https://ghfast.top/https://github.com",
+    "https://github.moeyy.xyz/https://github.com"
+)
 
 if (-not $InstallDir) {
     $InstallDir = Join-Path $env:LOCALAPPDATA "bifrost\bin"
@@ -99,10 +104,115 @@ function Get-GithubHeaders {
     return $headers
 }
 
-function Get-LatestVersionViaRedirect {
-    $redirectUrl = "https://github.com/$REPO/releases/latest"
+function Get-IntEnv {
+    param(
+        [string]$Name,
+        [int]$Default
+    )
+
+    $value = [Environment]::GetEnvironmentVariable($Name)
+    if (-not $value) {
+        return $Default
+    }
+
+    $parsed = 0
+    if ([int]::TryParse($value, [ref]$parsed) -and $parsed -gt 0) {
+        return $parsed
+    }
+
+    return $Default
+}
+
+function Get-GithubMirrorList {
+    $preferred = $env:BIFROST_GITHUB_MIRROR
+    $mirrors = New-Object System.Collections.Generic.List[string]
+
+    if ($preferred) {
+        [void]$mirrors.Add($preferred.TrimEnd('/'))
+    }
+
+    foreach ($mirror in $DEFAULT_GITHUB_MIRROR_URLS) {
+        $normalized = $mirror.TrimEnd('/')
+        if (-not $preferred -or $normalized -ne $preferred.TrimEnd('/')) {
+            [void]$mirrors.Add($normalized)
+        }
+    }
+
+    return $mirrors.ToArray()
+}
+
+function Get-MirrorDisplayName {
+    param([string]$BaseUrl)
+
+    return ($BaseUrl -replace '^https?://', '' -replace '/.*$', '')
+}
+
+function Join-GithubUrl {
+    param(
+        [string]$BaseUrl,
+        [string]$GithubPath
+    )
+
+    return "$($BaseUrl.TrimEnd('/'))/$($GithubPath.TrimStart('/'))"
+}
+
+function Test-GithubUrl {
+    param([string]$Url)
+
+    $timeout = Get-IntEnv -Name "BIFROST_MIRROR_PROBE_TIMEOUT" -Default 5
+
     try {
-        $response = Invoke-WebRequest -Uri $redirectUrl -MaximumRedirection 0 -UseBasicParsing -ErrorAction SilentlyContinue
+        Invoke-WebRequest -Uri $Url -Method Head -MaximumRedirection 5 -TimeoutSec $timeout -UseBasicParsing -ErrorAction Stop | Out-Null
+        return $true
+    }
+    catch {
+        try {
+            $headers = @{ Range = "bytes=0-0" }
+            Invoke-WebRequest -Uri $Url -Headers $headers -MaximumRedirection 5 -TimeoutSec $timeout -UseBasicParsing -ErrorAction Stop | Out-Null
+            return $true
+        }
+        catch {
+            return $false
+        }
+    }
+}
+
+function Select-FastestGithubBase {
+    param([string]$GithubPath)
+
+    $mirrors = @(Get-GithubMirrorList)
+    if ($mirrors.Count -eq 0) {
+        return $null
+    }
+
+    if ($mirrors.Count -eq 1) {
+        return $mirrors[0]
+    }
+
+    $bestMirror = $null
+    $bestElapsed = [double]::MaxValue
+
+    foreach ($mirror in $mirrors) {
+        $url = Join-GithubUrl -BaseUrl $mirror -GithubPath $GithubPath
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+        $ok = Test-GithubUrl -Url $url
+        $watch.Stop()
+
+        if ($ok -and $watch.Elapsed.TotalMilliseconds -lt $bestElapsed) {
+            $bestMirror = $mirror
+            $bestElapsed = $watch.Elapsed.TotalMilliseconds
+        }
+    }
+
+    return $bestMirror
+}
+
+function Get-LatestVersionViaRedirect {
+    param([string]$BaseUrl = "https://github.com")
+
+    $redirectUrl = Join-GithubUrl -BaseUrl $BaseUrl -GithubPath "$REPO/releases/latest"
+    try {
+        $response = Invoke-WebRequest -Uri $redirectUrl -MaximumRedirection 0 -TimeoutSec (Get-IntEnv -Name "BIFROST_MIRROR_PROBE_TIMEOUT" -Default 5) -UseBasicParsing -ErrorAction SilentlyContinue
         $location = $response.Headers["Location"]
     }
     catch {
@@ -145,11 +255,25 @@ function Get-LatestVersionViaApi {
 }
 
 function Get-LatestVersion {
-    $version = Get-LatestVersionViaRedirect
-    if ($version) {
-        return $version
+    $selectedBase = Select-FastestGithubBase -GithubPath "$REPO/releases/latest"
+    if ($selectedBase) {
+        $version = Get-LatestVersionViaRedirect -BaseUrl $selectedBase
+        if ($version) {
+            return $version
+        }
     }
-    Write-Warning "Redirect-based version detection failed, falling back to GitHub API..."
+
+    foreach ($baseUrl in @(Get-GithubMirrorList)) {
+        if ($baseUrl -eq $selectedBase) {
+            continue
+        }
+        $version = Get-LatestVersionViaRedirect -BaseUrl $baseUrl
+        if ($version) {
+            return $version
+        }
+    }
+
+    Write-Warning "Redirect-based version detection failed on all mirrors, falling back to GitHub API..."
 
     $version = Get-LatestVersionViaApi
     if ($version) {
@@ -170,6 +294,80 @@ function Get-FileHash256 {
     param([string]$FilePath)
     $hash = Get-FileHash -Path $FilePath -Algorithm SHA256
     return $hash.Hash.ToLower()
+}
+
+function Invoke-BifrostDownload {
+    param(
+        [string]$Uri,
+        [string]$OutFile
+    )
+
+    $timeout = Get-IntEnv -Name "BIFROST_DOWNLOAD_TIMEOUT" -Default 120
+    $tries = Get-IntEnv -Name "BIFROST_DOWNLOAD_TRIES" -Default 2
+    $lastError = $null
+
+    for ($attempt = 1; $attempt -le $tries; $attempt++) {
+        try {
+            Invoke-WebRequest -Uri $Uri -OutFile $OutFile -TimeoutSec $timeout -UseBasicParsing -ErrorAction Stop
+            if ((Test-Path $OutFile) -and ((Get-Item $OutFile).Length -gt 0)) {
+                return $true
+            }
+            $lastError = "Downloaded file is empty: $OutFile"
+        }
+        catch {
+            $lastError = $_
+        }
+
+        if ($attempt -lt $tries) {
+            Start-Sleep -Seconds 1
+        }
+    }
+
+    if ($lastError) {
+        Write-Warning "Download failed: $lastError"
+    }
+
+    return $false
+}
+
+function Download-GithubFile {
+    param(
+        [string]$GithubPath,
+        [string]$OutFile
+    )
+
+    $selectedBase = Select-FastestGithubBase -GithubPath $GithubPath
+    if ($selectedBase) {
+        $label = Get-MirrorDisplayName -BaseUrl $selectedBase
+        $url = Join-GithubUrl -BaseUrl $selectedBase -GithubPath $GithubPath
+        Write-Step "Selected fastest available source: $label"
+        Write-Step "Downloading from: $url"
+
+        if (Invoke-BifrostDownload -Uri $url -OutFile $OutFile) {
+            Write-Success "Downloaded via $label"
+            return $true
+        }
+
+        Write-Warning "Selected source failed during full download, falling back to all mirrors"
+    }
+    else {
+        Write-Warning "Could not probe GitHub mirrors, falling back to all mirrors"
+    }
+
+    foreach ($baseUrl in @(Get-GithubMirrorList)) {
+        if ($baseUrl -eq $selectedBase) {
+            continue
+        }
+        $label = Get-MirrorDisplayName -BaseUrl $baseUrl
+        $url = Join-GithubUrl -BaseUrl $baseUrl -GithubPath $GithubPath
+        Write-Step "Downloading from: $url"
+        if (Invoke-BifrostDownload -Uri $url -OutFile $OutFile) {
+            Write-Success "Downloaded via $label"
+            return $true
+        }
+    }
+
+    return $false
 }
 
 function Install-Bifrost {
@@ -213,26 +411,19 @@ function Install-Bifrost {
         Write-Step "Installing CLI..."
 
         $archiveFile = "bifrost-$Version-$target.zip"
-        $archiveUrl = "https://github.com/$REPO/releases/download/$Version/$archiveFile"
-        $checksumsUrl = "https://github.com/$REPO/releases/download/$Version/bifrost-$Version-checksums.txt"
+        $archivePathOnGithub = "$REPO/releases/download/$Version/$archiveFile"
+        $checksumsPathOnGithub = "$REPO/releases/download/$Version/bifrost-$Version-checksums.txt"
 
         $archivePath = Join-Path $tmpDir $archiveFile
         $checksumsPath = Join-Path $tmpDir "checksums.txt"
 
-        Write-Step "Downloading from: $archiveUrl"
-        try {
-            Invoke-WebRequest -Uri $archiveUrl -OutFile $archivePath -UseBasicParsing
-        }
-        catch {
-            Write-Error "Failed to download binary: $_"
+        if (-not (Download-GithubFile -GithubPath $archivePathOnGithub -OutFile $archivePath)) {
+            Write-Error "Failed to download binary"
             exit 1
         }
 
         Write-Step "Downloading checksums..."
-        try {
-            Invoke-WebRequest -Uri $checksumsUrl -OutFile $checksumsPath -UseBasicParsing
-        }
-        catch {
+        if (-not (Download-GithubFile -GithubPath $checksumsPathOnGithub -OutFile $checksumsPath)) {
             Write-Warning "Failed to download checksums, skipping verification"
             $checksumsPath = $null
         }
@@ -326,4 +517,6 @@ function Install-Bifrost {
     }
 }
 
-Install-Bifrost
+if ($env:BIFROST_INSTALL_BINARY_SKIP_MAIN -ne "1") {
+    Install-Bifrost
+}
