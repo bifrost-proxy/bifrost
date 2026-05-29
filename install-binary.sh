@@ -254,6 +254,116 @@ build_mirror_url_list() {
     printf '%s\n' "${mirrors[@]}"
 }
 
+mirror_display_name() {
+    echo "$1" | sed 's|https\{0,1\}://||;s|/.*||'
+}
+
+probe_github_url() {
+    local url="$1"
+    local connect_timeout="${BIFROST_DOWNLOAD_CONNECT_TIMEOUT:-5}"
+    local probe_timeout="${BIFROST_MIRROR_PROBE_TIMEOUT:-5}"
+
+    if has_command curl; then
+        curl -fsSIL \
+            --connect-timeout "$connect_timeout" \
+            --max-time "$probe_timeout" \
+            -o /dev/null \
+            "$url" >/dev/null 2>&1 && return 0
+    fi
+
+    if has_command wget; then
+        wget -q --spider \
+            --max-redirect=5 \
+            --connect-timeout="$connect_timeout" \
+            --timeout="$probe_timeout" \
+            "$url" >/dev/null 2>&1 && return 0
+    fi
+
+    return 1
+}
+
+select_fastest_github_base() {
+    local github_path="$1"
+    local -a mirrors=()
+    local base_url
+
+    while IFS= read -r base_url; do
+        [[ -n "$base_url" ]] && mirrors+=("$base_url")
+    done < <(build_mirror_url_list)
+
+    if [[ ${#mirrors[@]} -eq 0 ]]; then
+        return 1
+    fi
+
+    if [[ ${#mirrors[@]} -eq 1 ]]; then
+        echo "${mirrors[0]}"
+        return 0
+    fi
+
+    if ! has_command curl && ! has_command wget; then
+        return 1
+    fi
+
+    local probe_dir
+    probe_dir=$(mktemp -d)
+    local -a pids=()
+    local index=0
+
+    for base_url in "${mirrors[@]}"; do
+        (
+            local full_url="${base_url%/}/${github_path}"
+            if probe_github_url "$full_url"; then
+                printf '%s\n' "$base_url" > "${probe_dir}/${index}.ok"
+            fi
+        ) &
+        pids+=($!)
+        index=$((index + 1))
+    done
+
+    local winner_index=""
+    while true; do
+        for ((i = 0; i < index; i++)); do
+            if [[ -f "${probe_dir}/${i}.ok" ]]; then
+                winner_index=$i
+                break 2
+            fi
+        done
+
+        local any_alive=false
+        for pid in "${pids[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                any_alive=true
+                break
+            fi
+        done
+        if ! $any_alive; then
+            for ((i = 0; i < index; i++)); do
+                if [[ -f "${probe_dir}/${i}.ok" ]]; then
+                    winner_index=$i
+                    break 2
+                fi
+            done
+            break
+        fi
+
+        sleep 0.2
+    done
+
+    for pid in "${pids[@]}"; do
+        kill "$pid" 2>/dev/null || true
+    done
+    wait 2>/dev/null || true
+
+    if [[ -n "$winner_index" ]]; then
+        cat "${probe_dir}/${winner_index}.ok"
+        rm -rf "$probe_dir"
+        return 0
+    fi
+
+    rm -rf "$probe_dir"
+    return 1
+}
+
 build_downloader_list() {
     local preferred="${BIFROST_DOWNLOADER:-auto}"
     local -a candidates=()
@@ -421,6 +531,83 @@ get_latest_version_via_redirect() {
     return 1
 }
 
+get_latest_version_via_redirect_race() {
+    local -a mirrors=()
+    local base_url
+
+    while IFS= read -r base_url; do
+        [[ -n "$base_url" ]] && mirrors+=("$base_url")
+    done < <(build_mirror_url_list)
+
+    if [[ ${#mirrors[@]} -eq 0 ]]; then
+        return 1
+    fi
+
+    if [[ ${#mirrors[@]} -eq 1 ]]; then
+        get_latest_version_via_redirect "${mirrors[0]}"
+        return
+    fi
+
+    local race_dir
+    race_dir=$(mktemp -d)
+    local -a pids=()
+    local index=0
+
+    for base_url in "${mirrors[@]}"; do
+        (
+            local version
+            version=$(get_latest_version_via_redirect "$base_url" 2>/dev/null) || exit 1
+            printf '%s\n' "$version" > "${race_dir}/${index}.version"
+            touch "${race_dir}/${index}.ok"
+        ) &
+        pids+=($!)
+        index=$((index + 1))
+    done
+
+    local winner_index=""
+    while true; do
+        for ((i = 0; i < index; i++)); do
+            if [[ -f "${race_dir}/${i}.ok" ]]; then
+                winner_index=$i
+                break 2
+            fi
+        done
+
+        local any_alive=false
+        for pid in "${pids[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                any_alive=true
+                break
+            fi
+        done
+        if ! $any_alive; then
+            for ((i = 0; i < index; i++)); do
+                if [[ -f "${race_dir}/${i}.ok" ]]; then
+                    winner_index=$i
+                    break 2
+                fi
+            done
+            break
+        fi
+
+        sleep 0.2
+    done
+
+    for pid in "${pids[@]}"; do
+        kill "$pid" 2>/dev/null || true
+    done
+    wait 2>/dev/null || true
+
+    if [[ -n "$winner_index" ]]; then
+        cat "${race_dir}/${winner_index}.version"
+        rm -rf "$race_dir"
+        return 0
+    fi
+
+    rm -rf "$race_dir"
+    return 1
+}
+
 get_latest_version_via_api() {
     local all_releases_url="https://api.github.com/repos/${REPO}/releases?per_page=10"
     local response version
@@ -455,13 +642,10 @@ get_latest_version_via_api() {
 get_latest_version() {
     local version
 
-    while IFS= read -r base_url; do
-        [[ -z "$base_url" ]] && continue
-        version=$(get_latest_version_via_redirect "$base_url" 2>/dev/null) && {
-            echo "$version"
-            return 0
-        }
-    done < <(build_mirror_url_list)
+    version=$(get_latest_version_via_redirect_race 2>/dev/null) && {
+        echo "$version"
+        return 0
+    }
     print_warning "Redirect-based version detection failed on all mirrors, falling back to GitHub API..."
 
     version=$(get_latest_version_via_api 2>/dev/null) && {
@@ -522,7 +706,7 @@ download_file() {
     fi
 }
 
-download_github_file() {
+download_github_file_race() {
     local github_path="$1"
     local output="$2"
     local race_dir
@@ -593,6 +777,12 @@ download_github_file() {
             fi
         done
         if ! $any_alive; then
+            for ((i = 0; i < index; i++)); do
+                if [[ -f "${race_dir}/${i}.ok" ]]; then
+                    winner_index=$i
+                    break 2
+                fi
+            done
             break
         fi
 
@@ -614,6 +804,33 @@ download_github_file() {
     rm -rf "$race_dir"
     print_error "All download attempts failed for: $(basename "$github_path")"
     return 1
+}
+
+download_github_file() {
+    local github_path="$1"
+    local output="$2"
+    local selected_base=""
+    local selected_label=""
+    local selected_url=""
+
+    selected_base=$(select_fastest_github_base "$github_path" 2>/dev/null || true)
+
+    if [[ -n "$selected_base" ]]; then
+        selected_label=$(mirror_display_name "$selected_base")
+        selected_url="${selected_base%/}/${github_path}"
+        print_step "Selected fastest available source: $selected_label"
+
+        if download_file "$selected_url" "$output"; then
+            print_success "Downloaded via $selected_label"
+            return 0
+        fi
+
+        print_warning "Selected source failed during full download, falling back to all mirrors"
+    else
+        print_warning "Could not probe GitHub mirrors, falling back to all mirrors"
+    fi
+
+    download_github_file_race "$github_path" "$output"
 }
 
 verify_checksum() {
@@ -814,6 +1031,7 @@ show_help() {
     echo "  BIFROST_DOWNLOADER    Preferred downloader: auto|aria2c|axel|wget|curl"
     echo "  BIFROST_GITHUB_MIRROR Preferred mirror base URL"
     echo "  BIFROST_DOWNLOAD_CONNECT_TIMEOUT  Connection timeout in seconds"
+    echo "  BIFROST_MIRROR_PROBE_TIMEOUT      Fast mirror probe timeout in seconds"
     echo "  BIFROST_DOWNLOAD_TIMEOUT          Total timeout per download attempt in seconds"
     echo "  BIFROST_DOWNLOAD_TRIES            Retry count per downloader attempt"
     echo "  BIFROST_INSTALL_POST_INSTALL      Set to 0/false to skip post-install setup"

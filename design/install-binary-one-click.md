@@ -13,6 +13,9 @@
 ## 实现逻辑
 
 - `install-binary.sh` 下载并安装 CLI 后调用 `run_post_install "$INSTALL_DIR/$binary_name"`。
+- 下载 release 资产前，脚本会对 GitHub 直连和内置镜像源做轻量可用性探测，优先选择最快返回的源；如果被选中的源在完整下载阶段失败，再回退到所有镜像和下载器的竞速下载。
+- 最新版本探测不再按 `github.com -> mirror` 串行等待，而是并发探测各镜像的 `releases/latest` 重定向结果，避免默认 GitHub 直连在受限网络中拖到超时。
+- `BIFROST_GITHUB_MIRROR` 仍作为优先候选源保留，`BIFROST_DOWNLOAD_CONNECT_TIMEOUT`、`BIFROST_DOWNLOAD_TIMEOUT`、`BIFROST_DOWNLOAD_TRIES` 继续控制完整下载；新增 `BIFROST_MIRROR_PROBE_TIMEOUT` 控制镜像轻量探测超时，默认 5 秒。
 - 默认 post-install 顺序固定为：
   1. `bifrost ca install`
   2. `bifrost install-skill --tool all -y`
@@ -33,6 +36,7 @@
 - `crates/bifrost-cli/src/commands/ca.rs`
 - `crates/bifrost-cli/src/commands/install_skill.rs`
 - `crates/bifrost-cli/src/commands/start.rs`
+- `e2e-tests/tests/test_install_binary_adaptive_download.sh`
 - `e2e-tests/tests/test_install_binary_post_install.sh`
 - `human_tests/install-binary-one-click.md`
 
@@ -45,6 +49,13 @@
 
 ### E2E 测试
 
+- 新增 `e2e-tests/tests/test_install_binary_adaptive_download.sh`：
+  - source `install-binary.sh` 并设置 `BIFROST_INSTALL_BINARY_SKIP_MAIN=1`，避免真实下载 release。
+  - stub `probe_github_url`，验证默认 GitHub 不可用时会选择 `https://ghfast.top/https://github.com`。
+  - stub `get_latest_version_via_redirect`，验证最新版本探测使用并发最快镜像结果。
+  - stub `download_file`，验证完整下载优先使用已探测出的最快源。
+  - stub `download_github_file_race`，验证最快源完整下载失败后仍回退到旧的全镜像竞速路径。
+  - 验证 help 暴露 `BIFROST_MIRROR_PROBE_TIMEOUT`。
 - 新增 `e2e-tests/tests/test_install_binary_post_install.sh`：
   - source `install-binary.sh` 并设置 `BIFROST_INSTALL_BINARY_SKIP_MAIN=1`，避免真实下载 release。
   - 设置 `BIFROST_INSTALL_POST_INSTALL_DRY_RUN=1`，验证默认命令顺序为 `ca install` -> `install-skill --tool all -y` -> `start --daemon --yes`。
@@ -55,6 +66,9 @@
 ### 真实场景测试
 
 - 新增 `human_tests/install-binary-one-click.md`：
+  - 默认镜像自适应用例：通过 stub 网络探测函数模拟 GitHub 直连不可用，验证安装脚本选择更快镜像。
+  - 下载回退用例：通过 stub 完整下载失败，验证脚本仍保留旧的全镜像竞速兜底。
+  - 临时目录真实安装用例：设置 `BIFROST_INSTALL_DIR=$(mktemp -d)`、`--no-post-install --no-modify-path`，验证 latest 探测、release 下载、checksum 校验、解压和 `bifrost --version` 全链路通过且不修改系统状态。
   - 默认 dry-run 输出包含证书安装、全量 skill 安装和服务启动命令。
   - 验证命令顺序符合一键体验目标。
   - 验证全局 opt-out 和分步 opt-out。
@@ -67,16 +81,18 @@
 - 复核用户目标：默认证书、skills、服务启动是否全部覆盖。
 - 复核变更范围：`git status --short`、`git diff`，确认未触碰既有 im-gateway 改动。
 - 代码 review：检查 `install-binary.sh` 在 `PATH` 未刷新、权限失败、CI opt-out、dry-run 下的行为。
-- 复测命令：`bash -n install-binary.sh`、`bash e2e-tests/tests/test_install_binary_post_install.sh`。
+- 代码 review：检查镜像探测不会污染 `VERSION=$(get_latest_version)` stdout，不会破坏用户指定 `BIFROST_GITHUB_MIRROR`，被选中源失败后仍能回退旧下载路径。
+- 复测命令：`bash -n install-binary.sh`、`bash e2e-tests/tests/test_install_binary_adaptive_download.sh`、`bash e2e-tests/tests/test_install_binary_post_install.sh`。
 
 ### 第 2 轮
 
 - 再次对照第 1 轮 diff 和测试输出，检查文档、E2E、human_tests/readme 是否同步。
-- 复测命令：`bash -n install-binary.sh`、`bash e2e-tests/tests/test_install_binary_post_install.sh`、human_tests 中列出的 dry-run 命令。
+- 复测命令：`bash -n install-binary.sh`、`bash e2e-tests/tests/test_install_binary_adaptive_download.sh`、`bash e2e-tests/tests/test_install_binary_post_install.sh`、human_tests 中列出的 dry-run 命令。
 
 ## 校验要求
 
 - `bash -n install-binary.sh`
+- `bash e2e-tests/tests/test_install_binary_adaptive_download.sh`
 - `bash e2e-tests/tests/test_install_binary_post_install.sh`
 - `bash e2e-tests/tests/test_install_musl_fallback.sh`
 - `cargo fmt --all -- --check`
