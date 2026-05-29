@@ -26,7 +26,7 @@ curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-
 ```
 
 该脚本默认会继续安装并信任 CA 证书、安装所有 Bifrost AI skills，并以后台服务启动 Bifrost；安装完成后可直接访问管理端。
-脚本会自动探测 GitHub 直连和内置镜像源，优先使用最快可用的 release 下载地址；受限网络中也可通过 `BIFROST_GITHUB_MIRROR` 指定优先镜像。
+Bash 与 PowerShell 安装脚本都会自动探测 GitHub 直连和内置镜像源，优先使用最快可用的 release 下载地址；受限网络中也可通过 `BIFROST_GITHUB_MIRROR` 指定优先镜像。
 
 安装指定版本
 

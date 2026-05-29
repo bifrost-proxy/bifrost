@@ -16,7 +16,7 @@ curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-
 - 安装所有支持 AI 工具的 Bifrost skills。
 - 以后台服务启动 Bifrost。
 
-脚本会自动探测 GitHub 直连和内置镜像源，优先使用最快可用的 release 下载地址；受限网络中可以设置 `BIFROST_GITHUB_MIRROR` 指定优先镜像，也可以用 `BIFROST_MIRROR_PROBE_TIMEOUT` 调整镜像探测超时。
+Bash 与 PowerShell 安装脚本都会自动探测 GitHub 直连和内置镜像源，优先使用最快可用的 release 下载地址；受限网络中可以设置 `BIFROST_GITHUB_MIRROR` 指定优先镜像，也可以用 `BIFROST_MIRROR_PROBE_TIMEOUT` 调整镜像探测超时。
 
 可选参数：
 

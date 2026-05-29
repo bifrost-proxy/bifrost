@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证 `install-binary.sh` 在远程二进制安装时会自动探测更快的 GitHub/mirror 下载源，并在安装完成后默认规划并执行证书安装/信任、全量 skill 安装和 Bifrost 服务启动，形成一键安装、一键体验流程。为避免真实测试修改系统证书、skills 目录或系统代理，本用例使用脚本内置 dry-run post-install 路径和离线网络 stub 验证用户可感知命令编排。
+验证 `install-binary.sh` 和 `install-binary.ps1` 在远程二进制安装时会自动探测更快的 GitHub/mirror 下载源，并在安装完成后默认规划并执行证书安装/信任、全量 skill 安装和 Bifrost 服务启动，形成一键安装、一键体验流程。为避免真实测试修改系统证书、skills 目录或系统代理，本用例使用脚本内置 dry-run post-install 路径和离线网络 stub 验证用户可感知命令编排。
 
 ## 前置条件
 
@@ -10,6 +10,7 @@
 - 除 TC-IBOC-08 外，不下载 release；所有用例都不启动真实 Bifrost 服务，不修改系统代理。
 - 所有用例都不安装真实 CA 证书，不写入真实 AI tool skills 目录。
 - 下载源自适应用例通过 shell stub 模拟网络探测和下载结果，不访问真实 GitHub 或镜像。
+- Windows installer 用例需要 `pwsh` 或 Windows PowerShell；如果当前机器不可用，必须记录为环境阻塞，不能宣称已执行通过。
 - 所有命令执行前使用：
   ```bash
   source ~/.zshrc
@@ -202,6 +203,32 @@
 - latest 版本探测、release archive 下载、checksum 下载、校验、解压和二进制运行完整通过。
 - 安装目录为临时目录，`--no-post-install --no-modify-path` 不修改系统证书、skills、服务进程、系统代理或 shell PATH。
 
+### TC-IBOC-09 Windows PowerShell installer 下载源自适应
+
+操作步骤：
+
+1. 执行：
+   ```bash
+   source ~/.zshrc
+   pwsh -NoProfile -File e2e-tests/tests/test_install_binary_windows_adaptive_download.ps1
+   ```
+2. 检查输出包含：
+   ```text
+   PASS fastest mirror probe selection
+   PASS latest version redirect selection
+   PASS selected source full download
+   PASS fallback full mirror list
+   PASS download timeout env
+   ```
+
+预期结果：
+
+- `install-binary.ps1` 保留 `BIFROST_GITHUB_MIRROR` 作为优先候选源且不重复。
+- 当 stub 模拟 `github.com` 探测失败且 `ghfast.top` 探测成功时，PowerShell installer 选择 `https://ghfast.top/https://github.com`。
+- latest 版本探测、完整 archive 下载和 checksums 下载都可基于选出的镜像 URL 构造。
+- 当选中源完整下载失败时，PowerShell installer 会继续回退到候选源列表中的 `github.com`。
+- `BIFROST_DOWNLOAD_TIMEOUT` 和 `BIFROST_DOWNLOAD_TRIES` 在 PowerShell installer 中可被解析。
+
 ## 清理步骤
 
 - 本用例只 source shell 函数和执行 dry-run，不产生持久化测试数据。
@@ -224,3 +251,4 @@
 | 2026-05-29 | TC-IBOC-06 | `bash e2e-tests/tests/test_install_binary_adaptive_download.sh` | PASS：stub 模拟 GitHub 直连不可用时自动选择 `ghfast.top`，latest redirect race 和 selected source download 断言通过 |
 | 2026-05-29 | TC-IBOC-07 | `bash e2e-tests/tests/test_install_binary_adaptive_download.sh` | PASS：stub 模拟最快源完整下载失败后回退全镜像竞速，help 包含 `BIFROST_MIRROR_PROBE_TIMEOUT` |
 | 2026-05-29 | TC-IBOC-08 | `TMP_INSTALL_DIR=$(mktemp -d) ... bash install-binary.sh --no-post-install --no-modify-path` | PASS：真实 latest 探测安装 v0.0.84 到临时目录，archive 经 github.com 下载、checksum 经 ghfast.top 下载，校验通过，`bifrost --version` 输出 `bifrost 0.0.84`，临时目录已清理 |
+| 2026-05-29 | TC-IBOC-09 | `pwsh -NoProfile -File e2e-tests/tests/test_install_binary_windows_adaptive_download.ps1` | 未执行：当前 Mac 环境无 `pwsh` / `powershell`，命令返回 `zsh: command not found: pwsh`；已补测试脚本并通过源码 review，需 Windows/PowerShell 环境补跑 |
