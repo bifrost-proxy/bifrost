@@ -64,7 +64,26 @@
 - 输出显示 `remote_shell_exec_streams_stdout` 通过。
 - 断言仍验证至少两个 stdout chunk，且内容依次为 `stream-one`、`stream-two`。
 
+### TC-CER-05：E2E Runner in-process Admin 服务可启动 Agent worker
+
+操作步骤：
+
+1. 执行：`BIFROST_E2E_RETRY_FAILED_ONCE=1 SKIP_FRONTEND_BUILD=1 cargo run -p bifrost-e2e -- --port 18080 --jobs 1 --timeout 900 --test im_gateway_agent_chat_ --test-timeout 180`。
+2. 观察输出中的 5 个 `im_gateway_agent_chat_` 用例结果。
+
+预期结果：
+
+- 命令退出码为 `0`。
+- 输出显示 5 个用例全部通过。
+- CI 中 `std::env::current_exe()` 指向 `bifrost-e2e` 时，`agent worker` / `agent external-runner-worker` 隐藏入口仍能被 pass-through 执行，不出现 `agent worker exited before final event: exit status: 2`。
+
 ## 清理步骤
 
 - 测试用例内部使用临时目录并在结束时清理。
 - 若命令被手动中断，执行 `ps aux | grep bifrost-e2e` 检查残留测试进程，并按需终止。
+
+## 执行记录
+
+| 日期 | 用例 | 操作 | 结果 |
+| --- | --- | --- | --- |
+| 2026-05-29 | TC-CER-05 | 执行 `BIFROST_E2E_RETRY_FAILED_ONCE=1 SKIP_FRONTEND_BUILD=1 cargo run -p bifrost-e2e -- --port 18080 --jobs 1 --timeout 900 --test im_gateway_agent_chat_ --test-timeout 180` | 通过：5/5 passed，覆盖 `bifrost-e2e` worker pass-through、`/stop` 200 stopped 语义和 `/reset` 清理持久化历史 |

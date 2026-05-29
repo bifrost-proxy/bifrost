@@ -30,12 +30,14 @@ Bifrost 主进程同时承载流量代理、Admin API、IM Gateway 与 Agent/Run
    - Web/Admin `/api/agent/chat/stream` 使用内置 Agent worker。
    - IM built-in Agent `process_agent_chat()` 使用内置 Agent worker，并把主进程 guide queue 转发为 worker `Guide` 命令。
    - Web/Admin `/api/im-gateway/agent/chat` 非流式测试入口使用内置 Agent worker。
+   - `bifrost-e2e` 自定义 E2E runner 在 CI 中作为 `current_exe()` 启动 worker 时，也必须支持隐藏 `agent worker` 与 `agent external-runner-worker` pass-through 入口，避免 in-process E2E 服务把 worker 子进程误启动为普通测试 runner。
    - Slash runner-call 目标为 built-in Agent 时使用内置 Agent worker。
    - Chat Gateway、IM Event Loop、Schedule、Daily Agent 等所有 `ExternalCliRuntime::run()` 调用默认进入外置 Runner worker。
 4. 状态与 stop。
    - 主进程仍用 `AgentSessionManager` 做 busy gate 和 session preview。
    - worker progress 反向同步 active turn status、title、plan/progress card。
-   - `/stop` 聚合 internal cooperative signal、内置 Agent worker、外置 Runner worker、legacy external CLI run stop。
+   - `/stop` 聚合 internal cooperative signal、内置 Agent worker、外置 Runner worker、legacy external CLI run stop；`/_bifrost/api/im-gateway/agent/chat` 的 `/stop` 作为控制成功响应返回 200 + `stopped=true`，不把 worker stopped 当作 500。
+   - `/clear`/`/reset` 在 `/_bifrost/api/im-gateway/agent/chat` 中同样走 session-free 控制路径：停止 active worker、清理内存 session/queue，并删除 built-in Agent adapter 持久化 session state 与 JSONL history，确保服务重启后不会恢复旧上下文。
    - SSE 断开或 stop 后清理 worker，避免孤儿进程。
 
 ## 依赖项
@@ -67,6 +69,12 @@ Bifrost 主进程同时承载流量代理、Admin API、IM Gateway 与 Agent/Run
 - 配置 slow mock external runner，发起 `/api/im-gateway/chat/stream`。
 - 断言独立 `bifrost agent external-runner-worker` 子进程出现，主进程继续响应，`/stop` 可停止外置 Runner worker。
 
+`cargo run -p bifrost-e2e -- --test im_gateway_agent_chat_`：
+
+- 验证 `bifrost-e2e` 当前可执行文件支持隐藏 worker pass-through，内置 Agent worker 能在 in-process E2E Admin 服务中正常启动。
+- 验证 `/agent/chat` 非流式测试入口中的 `/stop` 返回 200 + stopped 语义，原 active chat 收敛后 session 可继续使用。
+- 验证 `/reset` 删除持久化 built-in Agent history，模拟服务重启后 fresh chat 不携带 reset 前消息。
+
 ### 真实场景测试
 
 `human_tests/agent-loop-process-isolation.md`：
@@ -76,6 +84,7 @@ Bifrost 主进程同时承载流量代理、Admin API、IM Gateway 与 Agent/Run
 - TC-ALPI-03：SSE 客户端断开后内置 worker 被清理。
 - TC-ALPI-04：外置 Runner 请求启动后出现独立 external-runner worker，主进程继续响应。
 - TC-ALPI-05：`/stop` 能停止外置 Runner worker。
+- TC-ALPI-06：CI/E2E runner 进程作为 `current_exe()` 时可启动 worker，`/agent/chat` 的 `/stop` 和 `/reset` 控制语义保持 200 成功响应并清理持久化历史。
 
 ## Review/Fix/Test 闭环方案
 

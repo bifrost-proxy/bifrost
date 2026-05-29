@@ -704,6 +704,29 @@ pub(super) async fn handle_agent(
             }));
         }
 
+        if matches!(body.message.trim(), "/clear" | "/reset") {
+            service.agent_session_manager.request_stop(&session_key);
+            if let Some(mut session) = service.agent_session_manager.try_take_session(&session_key)
+            {
+                session.clear();
+                service.agent_session_manager.return_session(session);
+            } else {
+                service.agent_session_manager.clear_session(&session_key);
+            }
+            service.queue_manager.clear_session(&session_key);
+            clear_persisted_agent_session_state(
+                &session_key,
+                Some(crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER),
+                None,
+            );
+            return json_response(&serde_json::json!({
+                "success": true,
+                "response": "会话已重置，可以开始新的对话。",
+                "tool_calls": [],
+                "plan_steps": null
+            }));
+        }
+
         if let Some(response) =
             bifrost_agent::handle_session_free_command(&session_key, &body.message, &config)
         {
@@ -905,6 +928,20 @@ pub(super) async fn handle_agent(
                 }))
             }
             Err(e) => {
+                if e.contains("已收到 /stop") {
+                    info!(
+                        session_key = %session_key,
+                        response = %e,
+                        "agent chat api stopped"
+                    );
+                    return json_response(&serde_json::json!({
+                        "success": true,
+                        "response": e,
+                        "stopped": true,
+                        "tool_calls": [],
+                        "plan_steps": null
+                    }));
+                }
                 error!(
                     session_key = %session_key,
                     error = %e,

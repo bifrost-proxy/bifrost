@@ -152,6 +152,23 @@ BIFROST_DATA_DIR="$TEST_DIR" ./target/debug/bifrost start -p 18881 --unsafe-ssl 
 - 外置 Runner worker 子进程退出。
 - 主进程仍然响应 Admin API。
 
+### TC-ALPI-06：E2E runner 当前可执行文件支持 worker 入口且 `/agent/chat` 控制语义不回归
+
+操作步骤：
+
+1. 执行：
+   ```bash
+   BIFROST_E2E_RETRY_FAILED_ONCE=1 SKIP_FRONTEND_BUILD=1 cargo run -p bifrost-e2e -- --port 18080 --jobs 1 --timeout 900 --test im_gateway_agent_chat_ --test-timeout 180
+   ```
+2. 观察输出中的 `im_gateway_agent_chat_codex_prompt_layers`、`im_gateway_agent_chat_stop_active_loop`、`im_gateway_agent_chat_queue_state_persists_for_refresh`、`im_gateway_agent_chat_multimodal_image_parts`、`im_gateway_agent_chat_restores_history_after_service_restart`。
+
+预期结果：
+
+- 命令退出码为 `0`，5 个用例全部通过。
+- `bifrost-e2e` 作为 `current_exe()` 时能响应隐藏 `agent worker` 入口，worker 不会以参数错误退出。
+- `/agent/chat` 的 `/stop` 返回 200 + `stopped=true`，不再因为 worker stopped 被包装成 500。
+- `/agent/chat` 的 `/reset` 会清理 built-in Agent 持久化 history，模拟服务重启后的 fresh chat 不携带 reset 前消息。
+
 ## 清理步骤
 
 ```bash
@@ -167,3 +184,4 @@ rm -f /tmp/bifrost-agent-worker-human.sse /tmp/bifrost-agent-worker-disconnect.s
 | 日期 | 用例 | 操作 | 结果 |
 | --- | --- | --- | --- |
 | 2026-05-29 | TC-ALPI-01/02/03/04/05 | 执行 `bash e2e-tests/tests/test_agent_worker_process_isolation.sh`，脚本使用临时 `BIFROST_DATA_DIR`、慢速本地 mock 模型、slow mock external runner、`--unsafe-ssl --skip-cert-check --no-system-proxy` 启动当前构建 bifrost，验证内置 worker、外置 runner worker、`/stop`、SSE 断开清理和 Admin API 存活 | 通过 |
+| 2026-05-29 | TC-ALPI-06 | 执行 `BIFROST_E2E_RETRY_FAILED_ONCE=1 SKIP_FRONTEND_BUILD=1 cargo run -p bifrost-e2e -- --port 18080 --jobs 1 --timeout 900 --test im_gateway_agent_chat_ --test-timeout 180`，验证 `bifrost-e2e` 当前可执行文件可作为 worker pass-through，且 `/agent/chat` `/stop` 与 `/reset` 控制语义不回归 | 通过：5/5 passed |

@@ -58,8 +58,26 @@ struct Args {
     test_timeout: u64,
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
+    if let Some(exit_code) = maybe_run_agent_worker_entrypoint() {
+        return exit_code;
+    }
+
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("bifrost-e2e")
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("failed to build e2e runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    runtime.block_on(run_e2e())
+}
+
+async fn run_e2e() -> ExitCode {
     let args = Args::parse();
 
     let log_level = if args.verbose { "debug" } else { "info" };
@@ -166,5 +184,33 @@ async fn main() -> ExitCode {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+fn maybe_run_agent_worker_entrypoint() -> Option<ExitCode> {
+    let mut args = std::env::args().skip(1);
+    let first = args.next()?;
+    if first != "agent" {
+        return None;
+    }
+    let second = args.next()?;
+    match second.as_str() {
+        "worker" => Some(
+            bifrost_admin::im_gateway::agent_worker::run_worker_stdio()
+                .map(|()| ExitCode::SUCCESS)
+                .unwrap_or_else(|error| {
+                    eprintln!("{error}");
+                    ExitCode::FAILURE
+                }),
+        ),
+        "external-runner-worker" => Some(
+            bifrost_admin::im_gateway::external_cli::run_worker_stdio()
+                .map(|()| ExitCode::SUCCESS)
+                .unwrap_or_else(|error| {
+                    eprintln!("{error}");
+                    ExitCode::FAILURE
+                }),
+        ),
+        _ => None,
     }
 }
