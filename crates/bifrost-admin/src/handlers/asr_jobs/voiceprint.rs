@@ -891,6 +891,20 @@ fn pcm16le_to_f32(bytes: &[u8]) -> Result<Vec<f32>, String> {
         .collect())
 }
 
+fn f32_waveform_to_pcm16le(waveform: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(waveform.len().saturating_mul(2));
+    for sample in waveform {
+        let normalized = if sample.is_finite() {
+            sample.clamp(-1.0, 1.0)
+        } else {
+            0.0
+        };
+        let pcm = (normalized * i16::MAX as f32).round() as i16;
+        bytes.extend_from_slice(&pcm.to_le_bytes());
+    }
+    bytes
+}
+
 fn voiceprint_sample_stats(waveform: &[f32], _sample_rate: u32) -> (f32, f32) {
     if waveform.is_empty() {
         return (0.0, 0.0);
@@ -1132,7 +1146,13 @@ pub(crate) fn identify_speaker_voice_from_wav_file(
         })?;
         let sample_rate = u32::try_from(wave.sample_rate())
             .map_err(|_| format!("invalid voice wake sample rate {}", wave.sample_rate()))?;
-        identify_speaker_voice_from_waveform(wave.samples(), sample_rate)
+        if sample_rate != VOICEPRINT_SAMPLE_RATE {
+            return Err(format!(
+                "voice wake speaker verification expects {}Hz audio, got {}Hz",
+                VOICEPRINT_SAMPLE_RATE, sample_rate
+            ));
+        }
+        identify_speaker_voice_pcm16(&f32_waveform_to_pcm16le(wave.samples()), sample_rate)
     }
     #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
     {
@@ -1143,36 +1163,6 @@ pub(crate) fn identify_speaker_voice_from_wav_file(
             std::env::consts::ARCH
         ))
     }
-}
-
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn identify_speaker_voice_from_waveform(
-    waveform: &[f32],
-    sample_rate: u32,
-) -> Result<SpeakerVoiceIdentifyResponse, String> {
-    if sample_rate != VOICEPRINT_SAMPLE_RATE {
-        return Err(format!(
-            "voice wake speaker verification expects {}Hz audio, got {}Hz",
-            VOICEPRINT_SAMPLE_RATE, sample_rate
-        ));
-    }
-    let audio_duration_ms =
-        (waveform.len() as u64).saturating_mul(1_000) / u64::from(sample_rate.max(1));
-    let Some((start, end)) =
-        active_speech_bounds(waveform, sample_rate, VOICEPRINT_IDENTIFY_SPEECH_RMS)
-    else {
-        return Ok(insufficient_speaker_identify_response(audio_duration_ms, 0));
-    };
-    let speech_duration_ms = ((end.saturating_sub(start)) as u64)
-        .saturating_mul(1_000)
-        / u64::from(sample_rate.max(1));
-    if speech_duration_ms < VOICEPRINT_MIN_IDENTIFY_SPEECH_MS {
-        return Ok(insufficient_speaker_identify_response(
-            audio_duration_ms,
-            speech_duration_ms,
-        ));
-    }
-    identify_speaker_voice(&waveform[start..end], audio_duration_ms, speech_duration_ms)
 }
 
 fn insufficient_speaker_identify_response(

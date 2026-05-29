@@ -496,6 +496,30 @@
 - 第 2 条命令不能再出现来自 `libsherpa_onnx_sys` 的 `std::__throw_bad_array_new_length()`、`std::string::reserve()` 等链接错误。
 - 如果本机缺少 aarch64 交叉 C 编译器，允许在其他 native dependency 的 cc toolchain 阶段失败；GitHub Actions 的 cross 容器具备完整 aarch64 工具链时应继续通过。
 
+### TC-ADA-23：声纹识别与 diarization 推理使用独立 worker 进程
+
+操作步骤：
+
+1. 静态确认声纹/diarization worker 入口和请求类型：
+   ```bash
+   source ~/.zshrc && rg -n "asr-diarization-worker|run_asr_diarization_worker_request|IdentifyPcm16|FinishEnrollment" crates/bifrost-admin/src/handlers/asr_jobs/diarization.rs crates/bifrost-admin/src/handlers/asr_jobs/voiceprint.rs crates/bifrost-cli/src/cli.rs crates/bifrost-cli/src/main.rs
+   ```
+2. 静态确认实时 voice wake 的 WAV 声纹校验不再直接执行 embedding，而是转到 PCM worker 请求：
+   ```bash
+   source ~/.zshrc && rg -n "identify_listener_speaker|identify_speaker_voice_from_wav_file|identify_speaker_voice_pcm16|f32_waveform_to_pcm16le" crates/bifrost-admin/src/handlers/voice/wake.rs crates/bifrost-admin/src/handlers/asr_jobs/voiceprint.rs
+   ```
+3. 构建当前二进制并直接执行隐藏 worker 命令：
+   ```bash
+   source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
+   source ~/.zshrc && TMP_DIR=$(mktemp -d) && PCM="$TMP_DIR/silence.pcm16le" && REQUEST="$TMP_DIR/request.json" && dd if=/dev/zero of="$PCM" bs=3200 count=1 >/dev/null 2>&1 && printf '{"operation":"identify_pcm16","pcm16le_path":"%s","sample_rate":16000}\n' "$PCM" > "$REQUEST" && BIFROST_DATA_DIR="$TMP_DIR/data" target/debug/bifrost asr-diarization-worker --request "$REQUEST"
+   ```
+
+预期结果：
+
+- 第 1 条命令能看到隐藏 CLI 命令、`run_asr_diarization_worker_request`，以及 `Diarize` / `IdentifyPcm16` / `FinishEnrollment` 三类 worker 请求；生产路径不创建 symlink、hard link、copy 或额外 shim 可执行文件。
+- 第 2 条命令能看到 `identify_listener_speaker` 仍接入声纹校验，但 `identify_speaker_voice_from_wav_file` 读取 WAV 后转成 PCM 并调用 `identify_speaker_voice_pcm16`，生产路径由 worker 执行 embedding。
+- 直接执行隐藏 worker 命令时 stdout 返回结构化 JSON，`operation` 为 `identify`，静音样本返回 `status=insufficient_audio`，不依赖 Admin 主进程内直接执行模型推理。
+
 ## 清理步骤
 
 - 临时服务通过 trap 关闭。
@@ -526,3 +550,4 @@
 | 2026-05-27 | TC-ADA-09 回归 | 已修复 `test_asr_diarization_cli.sh` 在 `SKIP_BUILD=true` 时默认寻找 `target/debug/bifrost` 的问题，改为复用 CI 预构建的 `target/release/bifrost`；已执行 `bash -n e2e-tests/tests/test_asr_diarization_cli.sh` | 通过 |
 | 2026-05-27 | TC-ADA-16 回归 | 已修复 `test_asr_voiceprint_enroll_cli.sh` 在 `SKIP_BUILD=true` 时默认寻找 `target/debug/bifrost` 的问题，改为复用 CI 预构建的 `target/release/bifrost`；已执行 `bash -n e2e-tests/tests/test_asr_voiceprint_enroll_cli.sh` | 通过 |
 | 2026-05-28 | TC-ADA-16 回归 | CI Linux shard 3 暴露 live enrollment fixture 在非支持平台返回 `speaker_embedding_unsupported_platform`；已让 `BIFROST_ASR_VOICEPRINT_TEST_EMBEDDING=1` 在非 macOS arm64 上继续使用 deterministic embedding，真实运行未设置该变量时仍保持 unsupported。已执行 `SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost` 与 `SKIP_BUILD=true BIFROST_BIN=$PWD/target/debug/bifrost BIFROST_ASR_VOICEPRINT_E2E_PORT=18994 bash e2e-tests/tests/test_asr_voiceprint_enroll_cli.sh`，CLI enroll-live 和 speakers list 均通过 | 通过 |
+| 2026-05-29 | TC-ADA-23 | 已执行静态 worker 入口校验，确认离线 diarization、声纹 identify、实时 voice wake WAV 声纹校验和 enrollment finish 均通过当前 `bifrost` 二进制的 `asr-diarization-worker --request <json>` 子进程请求；已执行 `SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost` 和隐藏 worker `identify_pcm16` 静音请求，返回 `operation=identify`、`status=insufficient_audio` | 通过 |

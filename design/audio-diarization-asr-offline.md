@@ -774,6 +774,14 @@ CLI 采集要求：
 - 实时验证不能把短音频或静音直接当作 0% 未匹配；后端需返回 `insufficient_audio`，前端继续累计有效语音，并在识别前裁剪首尾静音，避免固定时长录音中的空白稀释 embedding。
 - 参考 sherpa-onnx speaker identification 示例，同一用户的多句朗读不直接拼接成长音频，而是每句独立提取 speaker embedding 后做归一化平均，降低某一句录音质量波动对 profile centroid 的影响。
 
+进程隔离要求：
+
+- Admin 主进程只负责 API 编排、任务状态持久化、轻量音频格式校验和结果落盘；不得在主进程内加载 sherpa-onnx diarization 或 speaker embedding 模型。
+- 离线 speaker diarization、speaker profile identify、实时 voice wake 声纹校验和 enrollment finish 都必须通过隐藏命令 `bifrost asr-diarization-worker --request <json>` 在独立子进程中执行。
+- 子进程必须在命令参数中包含可观察的场景标识，例如 `asr-diarization-worker --request <json>`，便于 `ps args`、日志和 WebUI 状态区分 Admin 主进程与重模型推理 worker；不为了 Activity Monitor 展示名创建 symlink、hard link、copy 或额外 shim 可执行文件。
+- 主进程与 worker 通过 `runtime/asr-diarization-worker/request-*.json` 交换持久化请求，worker stdout 只返回结构化 JSON；刷新页面、重启 WebUI 或恢复对话不影响已经写入的 ASR job 状态。
+- 单元测试可以使用 in-process fallback，但生产路径和真实 CLI/WebUI 路径必须走 worker，避免声纹识别、diarization 或 enrollment 让 Admin 主进程承担模型内存和 CPU。
+
 ## 实施顺序
 
 1. 数据结构与测试骨架：新增 profile config、manifest schema、真实模型 ready 检查、slicer/overlap 单元测试；`TimelineSegment` 加 speaker 字段且 serde default 不破坏旧 timeline。
@@ -801,6 +809,7 @@ CLI 采集要求：
 - 后续声纹阶段追加 `speaker_profile_enroll_live_rejects_low_quality_phrase`：低音量、削波、静音过多或时长不足的句子被拒绝并要求重录。
 - 后续声纹阶段追加 `speaker_profile_match_low_confidence_only_suggests`：低置信度只 suggestion，不自动回写明确姓名。
 - 后续声纹阶段追加 `speaker_profile_unmatch_restores_anonymous_display`：撤销绑定后 timeline 回到匿名 speaker display。
+- `speaker_voiceprint_identify_runs_in_diarization_worker`：实时 voice wake 和 `/speaker-profiles/identify` 都只通过 `asr-diarization-worker` 子进程执行 embedding 推理，Admin 主进程不直接调用 in-process identify。
 
 ### E2E
 
@@ -815,6 +824,7 @@ CLI 采集要求：
 - 断言 `.timeline.json` 每个 segment 包含 speaker 字段。
 - 断言 `.txt` 和 `.daily/YYYY-MM-DD.md` 包含真实模型输出的 speaker label，例如 `用户A:`。
 - 断言未启用 diarization 的任务输出与现有格式一致。
+- 断言离线 diarization、声纹 identify、实时 voice wake 声纹校验和 enrollment finish 的 worker 请求均通过当前 `bifrost` 二进制的 `asr-diarization-worker --request <json>` 子进程执行，不创建额外 alias/link/copy 文件。
 - 后续声纹阶段追加 WebUI 真实录入验证：浏览器打开 Speaker Profiles，按指定文本朗读 5-8 句，实时电平和质量检查通过后写入 `Eden` profile。
 - 后续声纹阶段追加 CLI 真实录入验证：`bifrost ai asr diarization speakers enroll-live --name Eden` 通过本地 voice helper 采集麦克风，按指定文本朗读后写入 profile；后续启用 `voiceprint_matching=true` 的任务可在高置信度时自动展示 `Eden`。
 
