@@ -99,6 +99,9 @@ export type AgentThreadSummary = {
   tokens?: number;
   compaction_count?: number;
   estimated_tokens?: number;
+  context_window_tokens?: number;
+  context_usage_percent?: number;
+  last_response_tokens?: number;
   has_timeline?: boolean;
   timeline_event_count?: number;
   run_state?: string;
@@ -137,6 +140,9 @@ export type SessionDetail = {
   message_count?: number;
   total_tokens_used?: number;
   estimated_tokens?: number;
+  context_window_tokens?: number;
+  context_usage_percent?: number;
+  last_response_tokens?: number;
   compaction_count?: number;
   history_version?: number;
   agent_type?: string;
@@ -150,6 +156,7 @@ export type SessionDetail = {
   queue_items?: QueuedInput[];
   queueLength?: number;
   queueItems?: QueuedInput[];
+  active_status?: RunStatusSnapshot;
   messages?: SessionDetailMessage[];
 };
 
@@ -175,6 +182,7 @@ export type RunStatusSnapshot = {
   current_loop_iteration?: number;
   completed_loop_iterations?: number;
   max_loop_iterations?: number;
+  last_response_tokens?: number;
   total_tokens_used?: number;
   estimated_context_tokens?: number;
   context_window_tokens?: number;
@@ -608,6 +616,9 @@ export function telemetryFromThread(thread?: AgentThreadSummary): RunTelemetry {
       message_count: thread.turns,
       total_tokens_used: thread.tokens,
       estimated_context_tokens: thread.estimated_tokens,
+      context_window_tokens: thread.context_window_tokens,
+      context_usage_percent: thread.context_usage_percent,
+      last_response_tokens: thread.last_response_tokens,
       compaction_count: thread.compaction_count,
       runner_type: thread.runner_type,
       runner_id: thread.runner_id,
@@ -628,17 +639,47 @@ export function telemetryFromSessionDetail(
     phase: "idle",
     title: detail.title || thread?.title,
     status: {
-      state: detail.run_state || detail.state || thread?.run_state || thread?.state || thread?.status || "idle",
+      ...detail.active_status,
+      state:
+        detail.active_status?.state ||
+        detail.run_state ||
+        detail.state ||
+        thread?.run_state ||
+        thread?.state ||
+        thread?.status ||
+        "idle",
       source: detail.source || thread?.source,
-      work_dir: detail.work_dir || thread?.work_dir,
-      message_count: detail.message_count ?? thread?.turns,
-      total_tokens_used: detail.total_tokens_used ?? thread?.tokens,
-      estimated_context_tokens: detail.estimated_tokens ?? thread?.estimated_tokens,
-      compaction_count: detail.compaction_count ?? thread?.compaction_count,
-      history_version: detail.history_version,
-      runner_type: detail.runner_type || thread?.runner_type,
-      runner_id: detail.runner_id || thread?.runner_id,
-      agent_type: detail.agent_type || thread?.agent_type,
+      work_dir: detail.active_status?.work_dir || detail.work_dir || thread?.work_dir,
+      message_count:
+        detail.active_status?.message_count ?? detail.message_count ?? thread?.turns,
+      total_tokens_used:
+        detail.active_status?.total_tokens_used ??
+        detail.total_tokens_used ??
+        thread?.tokens,
+      estimated_context_tokens:
+        detail.active_status?.estimated_context_tokens ??
+        detail.estimated_tokens ??
+        thread?.estimated_tokens,
+      context_window_tokens:
+        detail.active_status?.context_window_tokens ??
+        detail.context_window_tokens ??
+        thread?.context_window_tokens,
+      context_usage_percent:
+        detail.active_status?.context_usage_percent ??
+        detail.context_usage_percent ??
+        thread?.context_usage_percent,
+      last_response_tokens:
+        detail.active_status?.last_response_tokens ??
+        detail.last_response_tokens ??
+        thread?.last_response_tokens,
+      compaction_count:
+        detail.active_status?.compaction_count ??
+        detail.compaction_count ??
+        thread?.compaction_count,
+      history_version: detail.active_status?.history_version ?? detail.history_version,
+      runner_type: detail.active_status?.runner_type || detail.runner_type || thread?.runner_type,
+      runner_id: detail.active_status?.runner_id || detail.runner_id || thread?.runner_id,
+      agent_type: detail.active_status?.agent_type || detail.agent_type || thread?.agent_type,
     },
   };
 }
@@ -1028,6 +1069,45 @@ export function formatNumber(value?: number) {
   return typeof value === "number" ? value.toLocaleString() : "-";
 }
 
+export function formatStatusMetricCount(value?: number) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "-";
+  }
+  const wholeValue = Math.max(0, Math.round(value));
+  const units: Array<[number, string]> = [
+    [1_000, "K"],
+    [1_000_000, "M"],
+    [1_000_000_000, "B"],
+  ];
+  if (wholeValue < units[0][0]) {
+    return String(wholeValue);
+  }
+
+  let unitIndex = units.length - 1;
+  for (let index = 0; index < units.length; index += 1) {
+    if (wholeValue < units[index][0]) {
+      unitIndex = Math.max(index - 1, 0);
+      break;
+    }
+  }
+  while (
+    unitIndex + 1 < units.length &&
+    roundedMetricTenths(wholeValue, units[unitIndex][0]) >= 10_000
+  ) {
+    unitIndex += 1;
+  }
+
+  const [unit, suffix] = units[unitIndex];
+  const scaledTenths = roundedMetricTenths(wholeValue, unit);
+  const whole = Math.floor(scaledTenths / 10);
+  const decimal = scaledTenths % 10;
+  return decimal === 0 ? `${whole}${suffix}` : `${whole}.${decimal}${suffix}`;
+}
+
+function roundedMetricTenths(value: number, unit: number) {
+  return Math.floor((value * 10 + Math.floor(unit / 2)) / unit);
+}
+
 export function formatLoopProgress(status?: RunStatusSnapshot) {
   if (!status) {
     return "-";
@@ -1069,7 +1149,7 @@ export function formatContextWindow(
   const used = status?.estimated_context_tokens ?? context?.estimatedContextTokens;
   const window = status?.context_window_tokens ?? context?.contextWindowTokens;
   return typeof used === "number" && typeof window === "number"
-    ? `${used.toLocaleString()} / ${window.toLocaleString()}`
+    ? `${formatStatusMetricCount(used)} / ${formatStatusMetricCount(window)}`
     : "-";
 }
 

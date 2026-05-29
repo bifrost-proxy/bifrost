@@ -117,7 +117,7 @@ transient/未知可恢复错误的重试预算统一限制为最多 5 次；如�
 last_response_tokens + estimate(history[last_response_history_len..])
 ```
 
-当没有有效 API snapshot 时才退回 `estimate_tokens()`。`compact::should_compact()`、session list/detail 的 `estimated_tokens`、运行中 `/status.active_status.estimated_context_tokens` 都使用这同一口径。
+当没有有效 API snapshot 时才退回 `estimate_tokens()`。`compact::should_compact()`、session list/detail 的 `estimated_tokens`、运行中 `/status.active_status.estimated_context_tokens` 都使用这同一口径。运行中的 session 必须以 `ActiveTurnStatus` 为 token/context 权威来源：`sessions/all`、`sessions/{key}` detail、WebUI history timeline polling 和 IM `/status` 看到的累计 token、最近 context token、context window 与占比必须一致；JSONL history 只作为消息 timeline 和持久化快照来源，不允许用旧 `assistant_message` / `compaction` 事件覆盖 running active status。WebUI token/context 展示必须使用与 IM `/status` 相同的紧凑单位格式（K/M/B，保留一位小数且整数去掉 `.0`），避免累计 token 显示成长串数字。
 
 这是按 token trigger 语义实现的部分。
 
@@ -153,6 +153,8 @@ last_response_tokens + estimate(history[last_response_history_len..])
 - `compaction_count`
 - `total_tokens`
 - emergency 路径额外包含 `emergency: true`
+
+Compaction event 不记录 `current_plan`，persistence 回放时也不从 compaction metadata 恢复、覆盖或清空 plan。Plan 的运行态恢复只接受 `plan_updated` / `plan_cleared`，保持与 Codex Memento/handoff-summary 方案一致：summary 是历史重写，不是 runtime checkpoint。
 
 history rewrite 后同步刷新 active status，避免 `/status` 展示旧 `history_version` 或旧 context token。
 
@@ -196,6 +198,7 @@ post-sampling 路径仍使用 mid-turn `BeforeLastUserMessage` 注入非 system 
 - `Status`：保存完整 `ActiveTurnStatus`，并同步生成一份 context snapshot。
 - `ContextUpdated`：更新 context；如果已有 status，则把 estimated context、window、usage percent、compaction count、history version、message count、user turn count、last/total tokens 回写到 status。
 - `CompactionStarted` / `CompactionFinished` / `CompactionFailed`：从 progress.context 走同一套 context 同步逻辑。
+- WebUI history 视图：消息列表继续从 JSONL events 恢复；若同 session 在 `sessions/all` 或 detail 中仍是 running，则 telemetry 最终再覆盖 active status，避免旧 compaction 快照让顶部 Token/Context HUD 与 M 通道 `/status` 不一致。
 
 飞书卡片仍优先展示 status 中的运行态字段（loop、work_dir、队列、guide 等）；当 status 暂不可用时，状态面板标题和 footer 会回退到 context snapshot，至少保证 token、context usage 和 `压缩：N 次` 能随 compaction event 更新。这样不会改变最终回复卡片、工具面板和计划面板结构，只修正状态区数据源。
 
@@ -223,21 +226,22 @@ post-sampling 路径仍使用 mid-turn `BeforeLastUserMessage` 注入非 system 
 5. `session::tests::test_model_message_advances_incremental_token_boundary`：验证 assistant model item 会推进 last model boundary。
 6. `session::tests::test_queued_continuation_compacts_before_next_model_request`：验证 pending continuation 追加大消息后会先 compact，并且 reinjected context 包含非 system prompt context / memory，不包含 base instructions。
 7. `session::tests::test_context_rewrite_refreshes_active_status_snapshot`：验证 history rewrite 后 active status 与 session 同步。
-8. `session::tests::test_record_compaction_event_includes_emergency_and_total_tokens`：验证 emergency compaction 事件统计字段。
+8. `session::tests::test_record_compaction_event_includes_emergency_and_total_tokens`：验证 emergency compaction 事件统计字段，且不包含 `current_plan`。
 9. `session_status::tests::test_active_turn_status_text_contains_runtime_metrics`：验证 `/status` 文案字段。
 10. `compact::tests::test_codex_compaction_templates_are_exact`：验证 compaction prompt 与 summary prefix 与 Codex 模板逐字一致。
 11. `compact::tests::test_build_compaction_messages_uses_codex_local_request_shape`：验证 summary 生成请求保留 structured history，把 compaction prompt 作为最后一条 user message，且不再出现 `[role]: ...` 扁平化输入。
-12. `compact::tests::test_compaction_retries_context_window_error_by_dropping_oldest_request_item`：验证 summary 请求超上下文后，移除请求副本中的最老 history item 并重试，且保留 base/system 与 compact prompt。
+13. `compact::tests::test_compaction_retries_context_window_error_by_dropping_oldest_request_item`：验证 summary 请求超上下文后，移除请求副本中的最老 history item 并重试，且保留 base/system 与 compact prompt。
 14. `compact::tests::test_compaction_retries_transient_error_using_provider_budget`：验证 summary 请求遇到 transient 500 时，按 provider `stream_max_retries` 预算重试且不裁剪 history。
 15. `compact::tests::test_collect_user_messages_caps_preserved_user_budget`：验证 user carry-over 使用 token 预算并产生 `tokens truncated` marker。
 16. `compact::tests::test_build_compacted_history_rebuilds_text_only_user_messages`：验证多模态 user message 压缩后重建为 text-only user message。
-16. `session::tests::test_recompute_token_snapshot_includes_base_instructions`：验证压缩后 token snapshot 包含 base instructions。
-17. `session::tests::test_pre_sampling_auto_compacts_before_model_request`：验证普通 turn 采样前如果历史已超过阈值，会用 `DoNotInject` 先压缩旧 history，再追加本轮 user message 并请求模型。
-18. `session::tests::test_mid_turn_initial_context_excludes_base_instructions`：验证 mid-turn initial context builder 不把 base/system instructions 放进 replacement history。
-19. `session::tests::test_build_messages_dedupes_injected_mid_turn_context`：验证 build_messages 在本次请求选中的 history 已携带非 system context / memory 时不会重复 prepend，但 system/base 仍只出现一次。
-20. `session::tests::test_build_messages_dedupes_context_against_full_history`：验证 build_messages 使用完整 history 做非 system context 去重，不再因请求级数量窗口产生遗漏。
-21. `progress_card::tests::progress_snapshot_updates_status_from_compaction_context`：验证已有 status 时，`CompactionFinished` 的 context 会把 `compaction_count`、history version、token 和 context 字段回写到飞书卡片状态。
-22. `progress_card::tests::progress_snapshot_uses_context_when_status_is_not_available`：验证尚无 status 时，`ContextUpdated` 也能让飞书卡片状态区展示 token、context 和压缩次数。
+17. `session::tests::test_recompute_token_snapshot_includes_base_instructions`：验证压缩后 token snapshot 包含 base instructions。
+18. `persistence::tests::test_compaction_does_not_mutate_plan_runtime_state`：验证 compaction event 不是 plan runtime source，不写入、不恢复、不清空 plan。
+19. `session::tests::test_pre_sampling_auto_compacts_before_model_request`：验证普通 turn 采样前如果历史已超过阈值，会用 `DoNotInject` 先压缩旧 history，再追加本轮 user message 并请求模型。
+20. `session::tests::test_mid_turn_initial_context_excludes_base_instructions`：验证 mid-turn initial context builder 不把 base/system instructions 放进 replacement history。
+21. `session::tests::test_build_messages_dedupes_injected_mid_turn_context`：验证 build_messages 在本次请求选中的 history 已携带非 system context / memory 时不会重复 prepend，但 system/base 仍只出现一次。
+22. `session::tests::test_build_messages_dedupes_context_against_full_history`：验证 build_messages 使用完整 history 做非 system context 去重，不再因请求级数量窗口产生遗漏。
+23. `progress_card::tests::progress_snapshot_updates_status_from_compaction_context`：验证已有 status 时，`CompactionFinished` 的 context 会把 `compaction_count`、history version、token 和 context 字段回写到飞书卡片状态。
+24. `progress_card::tests::progress_snapshot_uses_context_when_status_is_not_available`：验证尚无 status 时，`ContextUpdated` 也能让飞书卡片状态区展示 token、context 和压缩次数。
 
 ### E2E 测试
 
@@ -291,6 +295,7 @@ post-sampling 路径仍使用 mid-turn `BeforeLastUserMessage` 注入非 system 
 12. 新增 `TC-BC-33`：summary 请求 transient error 按 provider retry budget 退避重试。
 13. 更新 `TC-BC-35`：`/status` 区分显式压缩次数与 token/context budget 驱动的上下文管理，不再报告请求级数量裁剪。
 14. 更新 `TC-BC-36`：构造超过 50 条短历史，验证最终模型请求仍包含最早和最新探针消息，证明常规请求使用完整 history。
+15. 新增 `TC-BC-37`：running history 深链下 WebUI Token/Context HUD 与 `sessions/all` / `/status.active_status` 同步，不再使用旧 JSONL compaction 快照。
 
 同步更新 `human_tests/readme.md` 中 Agent 内置命令测试用例数量。
 

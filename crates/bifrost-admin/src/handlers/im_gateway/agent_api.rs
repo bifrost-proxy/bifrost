@@ -209,6 +209,9 @@ pub(super) async fn handle_agent(
                 "duration_secs": duration_secs,
                 "compaction_count": s.compaction_count,
                 "estimated_tokens": s.estimated_context_tokens,
+                "context_window_tokens": s.context_window_tokens,
+                "context_usage_percent": s.context_usage_percent,
+                "last_response_tokens": s.last_response_tokens,
                 "agent_type": s.agent_type.or_else(|| info.and_then(|item| item.agent_type.clone())),
                 "runner_type": s.runner_type.or_else(|| info.and_then(|item| item.runner_type.clone())),
                 "runner_id": s.runner_id.or_else(|| info.and_then(|item| item.runner_id.clone())),
@@ -514,32 +517,34 @@ pub(super) async fn handle_agent(
             .unwrap_or_default()
             .to_string();
         if req.method() == Method::GET {
-            match service
+            let active_status = service
+                .agent_session_manager
+                .get_active_turn_status(&session_key);
+            let detail = service
                 .agent_session_manager
                 .get_session_detail(&session_key)
-            {
-                Some(detail) => {
-                    return json_response(&session_detail_with_queue(
-                        detail,
-                        &service.queue_manager,
-                    ));
-                }
-                None => {
-                    if let Some(detail) = history_session_detail(&session_key) {
-                        return json_response(&session_detail_with_queue(
-                            detail,
-                            &service.queue_manager,
-                        ));
-                    }
-                    if let Some(detail) = external_runner_session_detail(&session_key).await {
-                        return json_response(&session_detail_with_queue(
-                            detail,
-                            &service.queue_manager,
-                        ));
-                    }
-                    return error_response(StatusCode::NOT_FOUND, "session not found");
-                }
+                .or_else(|| history_session_detail(&session_key));
+            if let Some(detail) = detail {
+                return json_response(&session_detail_response(
+                    detail,
+                    &service.queue_manager,
+                    active_status,
+                ));
             }
+            if let Some(detail) = external_runner_session_detail(&session_key).await {
+                return json_response(&session_detail_response(
+                    detail,
+                    &service.queue_manager,
+                    active_status,
+                ));
+            }
+            if let Some(status) = active_status {
+                return json_response(&active_status_session_detail(
+                    status,
+                    &service.queue_manager,
+                ));
+            }
+            return error_response(StatusCode::NOT_FOUND, "session not found");
         }
         if req.method() == Method::DELETE {
             service.agent_session_manager.request_stop(&session_key);
@@ -1370,13 +1375,77 @@ fn is_runner_call_session_key(session_key: &str) -> bool {
     session_key.starts_with("runner-call:")
 }
 
-fn session_detail_with_queue(
+fn session_detail_response(
     detail: bifrost_agent::SessionDetail,
     queue_manager: &crate::im_gateway::SessionQueueManager,
+    active_status: Option<bifrost_agent::ActiveTurnStatus>,
 ) -> serde_json::Value {
-    let queue_snapshot =
-        crate::handlers::agent_chat::queue_snapshot_payload(queue_manager, &detail.session_key);
+    let mut value = session_detail_with_active_status(detail, active_status);
+    insert_queue_snapshot(&mut value, queue_manager);
+    value
+}
+
+fn session_detail_with_active_status(
+    detail: bifrost_agent::SessionDetail,
+    active_status: Option<bifrost_agent::ActiveTurnStatus>,
+) -> serde_json::Value {
+    let Some(status) = active_status else {
+        return serde_json::to_value(detail).unwrap_or_else(|_| serde_json::json!({}));
+    };
     let mut value = serde_json::to_value(detail).unwrap_or_else(|_| serde_json::json!({}));
+    overlay_active_status_on_session_detail(&mut value, status);
+    value
+}
+
+fn active_status_session_detail(
+    status: bifrost_agent::ActiveTurnStatus,
+    queue_manager: &crate::im_gateway::SessionQueueManager,
+) -> serde_json::Value {
+    let active_status = serde_json::to_value(&status).unwrap_or_else(|_| serde_json::json!({}));
+    let mut value = serde_json::json!({
+        "session_key": status.session_key.clone(),
+        "user_id": null,
+        "message_count": status.message_count,
+        "user_turn_count": status.user_turn_count,
+        "created_at": status.started_at,
+        "last_active_at": status.updated_at,
+        "compaction_count": status.compaction_count,
+        "total_tokens_used": status.total_tokens_used,
+        "estimated_tokens": status.estimated_context_tokens,
+        "context_window_tokens": status.context_window_tokens,
+        "context_usage_percent": status.context_usage_percent,
+        "last_response_tokens": status.last_response_tokens,
+        "history_version": status.history_version,
+        "work_dir": status.work_dir.clone(),
+        "source": "admin-api",
+        "agent_type": status.agent_type.clone(),
+        "runner_type": status.runner_type.clone(),
+        "runner_id": status.runner_id.clone(),
+        "external_conversation_id": status.external_conversation_id.clone(),
+        "external_thread_id": status.external_thread_id.clone(),
+        "title": null,
+        "messages": [],
+        "goal_status": null,
+        "goal_objective": null,
+        "history_path": null,
+        "has_timeline": false,
+        "timeline_event_count": 0,
+        "run_state": "running",
+        "active_status": active_status,
+    });
+    insert_queue_snapshot(&mut value, queue_manager);
+    value
+}
+
+fn insert_queue_snapshot(
+    value: &mut serde_json::Value,
+    queue_manager: &crate::im_gateway::SessionQueueManager,
+) {
+    let Some(session_key) = value.get("session_key").and_then(|value| value.as_str()) else {
+        return;
+    };
+    let queue_snapshot =
+        crate::handlers::agent_chat::queue_snapshot_payload(queue_manager, session_key);
     if let Some(object) = value.as_object_mut() {
         object.insert(
             "queue_length".to_string(),
@@ -1395,7 +1464,94 @@ fn session_detail_with_queue(
             queue_snapshot["queueItems"].clone(),
         );
     }
-    value
+}
+
+fn overlay_active_status_on_session_detail(
+    value: &mut serde_json::Value,
+    status: bifrost_agent::ActiveTurnStatus,
+) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    let active_status = serde_json::to_value(&status).unwrap_or_else(|_| serde_json::json!({}));
+    object.insert("run_state".to_string(), serde_json::json!("running"));
+    object.insert(
+        "message_count".to_string(),
+        serde_json::json!(status.message_count),
+    );
+    object.insert(
+        "user_turn_count".to_string(),
+        serde_json::json!(status.user_turn_count),
+    );
+    object.insert(
+        "last_active_at".to_string(),
+        serde_json::json!(status.updated_at),
+    );
+    object.insert(
+        "compaction_count".to_string(),
+        serde_json::json!(status.compaction_count),
+    );
+    object.insert(
+        "total_tokens_used".to_string(),
+        serde_json::json!(status.total_tokens_used),
+    );
+    object.insert(
+        "estimated_tokens".to_string(),
+        serde_json::json!(status.estimated_context_tokens),
+    );
+    object.insert(
+        "context_window_tokens".to_string(),
+        serde_json::json!(status.context_window_tokens),
+    );
+    object.insert(
+        "context_usage_percent".to_string(),
+        serde_json::json!(status.context_usage_percent),
+    );
+    object.insert(
+        "last_response_tokens".to_string(),
+        serde_json::json!(status.last_response_tokens),
+    );
+    object.insert(
+        "history_version".to_string(),
+        serde_json::json!(status.history_version),
+    );
+    if status.work_dir.is_some() {
+        object.insert(
+            "work_dir".to_string(),
+            serde_json::json!(status.work_dir.clone()),
+        );
+    }
+    if status.agent_type.is_some() {
+        object.insert(
+            "agent_type".to_string(),
+            serde_json::json!(status.agent_type.clone()),
+        );
+    }
+    if status.runner_type.is_some() {
+        object.insert(
+            "runner_type".to_string(),
+            serde_json::json!(status.runner_type.clone()),
+        );
+    }
+    if status.runner_id.is_some() {
+        object.insert(
+            "runner_id".to_string(),
+            serde_json::json!(status.runner_id.clone()),
+        );
+    }
+    if status.external_conversation_id.is_some() {
+        object.insert(
+            "external_conversation_id".to_string(),
+            serde_json::json!(status.external_conversation_id.clone()),
+        );
+    }
+    if status.external_thread_id.is_some() {
+        object.insert(
+            "external_thread_id".to_string(),
+            serde_json::json!(status.external_thread_id.clone()),
+        );
+    }
+    object.insert("active_status".to_string(), active_status);
 }
 
 fn history_session_detail(session_key: &str) -> Option<bifrost_agent::SessionDetail> {
@@ -1709,6 +1865,77 @@ mod tests {
             "runner-call:admin-chat-1:bifrost_agent"
         ));
         assert!(!is_runner_call_session_key("admin-chat-1"));
+    }
+
+    #[test]
+    fn session_detail_overlay_uses_active_status_token_context_metrics() {
+        let detail = bifrost_agent::SessionDetail {
+            session_key: "active-token-sync".to_string(),
+            user_id: None,
+            message_count: 10,
+            user_turn_count: 5,
+            created_at: 1,
+            last_active_at: 2,
+            compaction_count: 1,
+            total_tokens_used: Some(19_503_264),
+            estimated_tokens: 23_448,
+            history_version: 3,
+            work_dir: Some("/tmp/old".to_string()),
+            source: "feishu".to_string(),
+            agent_type: None,
+            runner_type: None,
+            runner_id: None,
+            external_conversation_id: None,
+            external_thread_id: None,
+            title: Some("history title".to_string()),
+            messages: Vec::new(),
+            goal_status: None,
+            goal_objective: None,
+            history_path: Some("/tmp/history.jsonl".to_string()),
+            has_timeline: true,
+            timeline_event_count: 100,
+            run_state: "completed".to_string(),
+        };
+        let status = bifrost_agent::ActiveTurnStatus {
+            session_key: "active-token-sync".to_string(),
+            state: "waiting_on_session".to_string(),
+            started_at: 10,
+            updated_at: 20,
+            current_loop_iteration: 97,
+            completed_loop_iterations: 96,
+            max_loop_iterations: 1000,
+            last_response_tokens: Some(181_900),
+            total_tokens_used: Some(29_668_709),
+            estimated_context_tokens: 186_727,
+            context_window_tokens: Some(250_000),
+            context_usage_percent: Some(74.7),
+            compaction_count: 2,
+            history_version: 11,
+            work_dir: Some("/tmp/live".to_string()),
+            message_count: 204,
+            local_tool_count: 1,
+            mcp_tool_count: 2,
+            pending_guide_messages: Vec::new(),
+            user_turn_count: 50,
+            agent_type: Some("Bifrost Agent".to_string()),
+            runner_type: Some("bifrost_agent".to_string()),
+            runner_id: None,
+            external_conversation_id: None,
+            external_thread_id: None,
+            turn_timing: None,
+            turn_id: None,
+        };
+
+        let value = session_detail_with_active_status(detail, Some(status));
+
+        assert_eq!(value["run_state"], "running");
+        assert_eq!(value["total_tokens_used"], 29_668_709);
+        assert_eq!(value["estimated_tokens"], 186_727);
+        assert_eq!(value["context_window_tokens"], 250_000);
+        assert_eq!(value["context_usage_percent"], 74.7);
+        assert_eq!(value["last_response_tokens"], 181_900);
+        assert_eq!(value["active_status"]["estimated_context_tokens"], 186_727);
+        assert_eq!(value["history_path"], "/tmp/history.jsonl");
     }
 
     struct AgentApiEnvGuard {

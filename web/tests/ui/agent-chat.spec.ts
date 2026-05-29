@@ -226,7 +226,7 @@ test("AI Agent Chat deep link renders local chat preview and composer flow", asy
   await expect(page.getByTestId("agent-chat-runner-tag")).toContainText("bifrost");
   await expect(page.getByTestId("agent-chat-state-tag")).toContainText("Ready");
   await expect(page.getByTestId("agent-chat-token-hud")).toContainText("Tokens");
-  await expect(page.getByTestId("agent-chat-token-hud")).toContainText("1,234");
+  await expect(page.getByTestId("agent-chat-token-hud")).toContainText("1.2K");
   await expect(page.getByTestId("agent-chat-token-hud")).toContainText("Context");
   await expect(page.getByTestId("agent-chat-token-hud")).toContainText("45%");
   await expect(page.getByTestId("agent-chat-token-hud")).not.toContainText("Compression");
@@ -324,7 +324,7 @@ test("AI Agent Chat token HUD stays subtle above the composer", async ({
 
   const hud = page.getByTestId("agent-chat-token-hud");
   await expect(hud).toContainText("Tokens");
-  await expect(hud).toContainText("2,468");
+  await expect(hud).toContainText("2.5K");
   await expect(hud).toContainText("Context");
   await expect(hud).toContainText("35%");
   await expect(hud).not.toContainText("Compression");
@@ -382,7 +382,7 @@ test("AI Agent Chat token HUD stays subtle above the composer", async ({
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   await page.getByTestId("theme-toggle").click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
-  await expect(hud).toContainText("2,468");
+  await expect(hud).toContainText("2.5K");
   await expect(hud).toContainText("35%");
   const screenshotPath = testInfo.outputPath("agent-chat-token-hud.png");
   await hud.screenshot({ path: screenshotPath });
@@ -1410,6 +1410,148 @@ test("AI Agent Chat restores JSONL history and continues with history path", asy
   await expect(page.getByTestId("agent-chat-messages")).toContainText(
     "Continued from history",
   );
+});
+
+test("AI Agent Chat keeps running history token HUD synced with live status", async ({
+  page,
+}) => {
+  const historyPath = "/tmp/running-token-sync.jsonl";
+  const liveStatus = {
+    state: "waiting_on_session",
+    session_key: "running-token-sync",
+    total_tokens_used: 29_668_709,
+    estimated_context_tokens: 186_727,
+    context_window_tokens: 250_000,
+    context_usage_percent: 74.7,
+    last_response_tokens: 181_900,
+    compaction_count: 2,
+    history_version: 11,
+    message_count: 204,
+    user_turn_count: 50,
+    work_dir: "/tmp/live-workspace",
+    runner_type: "bifrost_agent",
+    runner_id: "bifrost",
+    agent_type: "Bifrost Agent",
+  };
+
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessions: [
+          {
+            session_key: "running-token-sync",
+            status: "active",
+            running: true,
+            title: "Running token sync",
+            history_path: historyPath,
+            has_timeline: true,
+            run_state: "running",
+            turns: liveStatus.message_count,
+            tokens: liveStatus.total_tokens_used,
+            estimated_tokens: liveStatus.estimated_context_tokens,
+            context_window_tokens: liveStatus.context_window_tokens,
+            context_usage_percent: liveStatus.context_usage_percent,
+            last_response_tokens: liveStatus.last_response_tokens,
+            compaction_count: liveStatus.compaction_count,
+            work_dir: liveStatus.work_dir,
+            runner_type: liveStatus.runner_type,
+            runner_id: liveStatus.runner_id,
+            agent_type: liveStatus.agent_type,
+            source: "feishu",
+          },
+        ],
+      }),
+    });
+  });
+  await page.route(
+    "**/_bifrost/api/im-gateway/agent/sessions/running-token-sync",
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          session_key: "running-token-sync",
+          title: "Running token sync",
+          history_path: historyPath,
+          has_timeline: true,
+          run_state: "running",
+          message_count: 10,
+          total_tokens_used: 19_503_264,
+          estimated_tokens: 23_448,
+          context_window_tokens: 250_000,
+          context_usage_percent: 9.4,
+          last_response_tokens: 23_448,
+          compaction_count: 1,
+          active_status: liveStatus,
+          messages: [],
+        }),
+      });
+    },
+  );
+  await page.route(
+    `**/_bifrost/api/im-gateway/agent/sessions/history/${encodeURIComponent(historyPath)}`,
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          events: [
+            {
+              timestamp: 1,
+              event_type: "run_state_changed",
+              session_key: "running-token-sync",
+              content: { state: "running", source_channel: "feishu" },
+            },
+            {
+              timestamp: 2,
+              event_type: "user_message",
+              session_key: "running-token-sync",
+              content: { message: "Question before stale token event" },
+            },
+            {
+              timestamp: 3,
+              event_type: "assistant_message",
+              session_key: "running-token-sync",
+              content: {
+                message: "Stale answer snapshot",
+                total_tokens: 19_503_264,
+                context_tokens: 23_448,
+              },
+            },
+            {
+              timestamp: 4,
+              event_type: "compaction",
+              session_key: "running-token-sync",
+              content: {
+                total_tokens: 19_503_264,
+                post_tokens: 23_448,
+                compaction_count: 1,
+              },
+            },
+          ],
+        }),
+      });
+    },
+  );
+
+  await openPage(
+    page,
+    `ai?aiSection=agent-chat&agentSection=chat&session=running-token-sync&view=history&historyPath=${encodeURIComponent(historyPath)}`,
+  );
+
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Question before stale token event",
+  );
+  const hud = page.getByTestId("agent-chat-token-hud");
+  await expect(hud).toContainText("29.7M");
+  await expect(hud).toContainText("74.7%");
+  await expect(hud).not.toContainText("19.5M");
+  await page.getByTestId("agent-chat-settings-open").click();
+  await expect(page.getByTestId("agent-chat-context")).toContainText("29.7M");
+  await expect(page.getByTestId("agent-chat-context")).toContainText("74.7%");
+  await expect(page.getByTestId("agent-chat-context")).toContainText("186.7K / 250K");
 });
 
 test("AI Agent Chat continues external runner history with canonical history path", async ({

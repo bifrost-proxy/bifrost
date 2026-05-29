@@ -25,6 +25,7 @@ import {
   formatRelativeTime,
   formatRunPhase,
   formatRunnerTag,
+  formatStatusMetricCount,
   formatThreadRunnerMark,
   formatThreadSource,
   isSelectedThread,
@@ -476,7 +477,7 @@ export function AgentChatSettingsModal({
             />
             <MetricRow
               label="Tokens"
-              value={formatNumber(
+              value={formatStatusMetricCount(
                 telemetry.status?.total_tokens_used ??
                   telemetry.context?.totalTokensUsed,
               )}

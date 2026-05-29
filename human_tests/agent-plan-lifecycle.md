@@ -134,6 +134,24 @@
 - `--skip-static --e2e-only shell --shard 100/112` 仍会构建 release `bifrost`，避免 shell E2E 使用 stale `target/release/bifrost`。
 - 该 shard 执行 `test_update_plan_human_api.sh` 并通过，证明 `--skip-build` 的 shell E2E 使用的是刚构建的当前源码二进制。
 
+### TC-APL-09：compaction 不是 plan runtime state
+
+**操作步骤**：
+1. 执行：
+   ```bash
+   rg -n 'compaction_performed.*不写入、不读取、不恢复、不清空 `current_plan`|只由 `plan_updated` / `plan_cleared`' design/agent-plan-lifecycle.md
+   rg -n 'Compaction event 不记录 `current_plan`|summary 是历史重写，不是 runtime checkpoint|test_compaction_does_not_mutate_plan_runtime_state' design/agent-context-status-compaction.md
+   rg -n 'test_compaction_does_not_mutate_plan_runtime_state|compact handoff summary|record_plan_updated' crates/agent/src/persistence.rs
+   rg -n 'get\("current_plan"\)\.is_none\(\)' crates/agent/src/session/tests.rs
+   ! rg -n '"current_plan": &session.current_plan|current_plan": session.current_plan|current_plan": &state.current_plan' crates/agent/src/session.rs crates/agent/src/session/turn_loop.rs crates/agent/src/persistence.rs
+   ```
+
+**预期结果**：
+- 设计文档明确 compaction 只做 Memento/handoff-summary 与 token/context telemetry，不是 plan runtime checkpoint。
+- compaction 事件写入路径不再携带 `current_plan`。
+- persistence 回放中 compaction 分支不读取 plan 字段，不覆盖、不清空当前 plan。
+- 单元测试覆盖 compaction 事件不会改变已有 plan runtime state。
+
 ## 清理步骤
 
 1. 静态验收不会创建临时进程或数据目录，无需清理。
