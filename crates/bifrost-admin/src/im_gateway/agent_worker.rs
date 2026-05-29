@@ -606,6 +606,9 @@ async fn run_builtin_agent_turn(
     );
     session.source = source.to_string();
     session.mark_bifrost_agent_runtime();
+    session.active_turn_status = Some(std::sync::Arc::new(std::sync::Mutex::new(
+        bifrost_agent::ActiveTurnStatus::new(&request.session_key),
+    )));
     session.progress_sender = Some(progress_tx);
     session.guide_channel = Some(guide_channel);
     for message in &request.guide_messages {

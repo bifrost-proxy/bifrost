@@ -861,6 +861,7 @@ pub(super) async fn handle_agent(
             Some(crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER.to_string()),
             None,
         );
+        prime_builtin_worker_active_status(&service.agent_session_manager, &session, &config);
         consume_imported_contexts_for_builtin_agent(&mut session);
         // Initial guide messages are passed to the isolated worker request.
         // Avoid writing them into the main-process guide queue, otherwise the
@@ -1543,6 +1544,39 @@ fn active_status_session_detail(
     value
 }
 
+fn prime_builtin_worker_active_status(
+    manager: &bifrost_agent::AgentSessionManager,
+    session: &bifrost_agent::AgentSession,
+    config: &bifrost_agent::AgentConfig,
+) {
+    let Some(mut status) = manager.get_active_turn_status(&session.session_key) else {
+        return;
+    };
+    let estimated_context_tokens = session.effective_token_count();
+    let context_window_tokens = config
+        .model_context_window
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0);
+    status.state = "running".to_string();
+    status.current_loop_iteration = status.current_loop_iteration.max(1);
+    status.max_loop_iterations = config.get_max_turn_iterations();
+    status.last_response_tokens = session.last_response_tokens;
+    status.total_tokens_used = session.total_tokens_used;
+    status.estimated_context_tokens = estimated_context_tokens;
+    status.context_window_tokens = context_window_tokens;
+    status.context_usage_percent = context_window_tokens
+        .map(|window| ((estimated_context_tokens as f64 / window as f64) * 1000.0).round() / 10.0);
+    status.compaction_count = session.compaction_count;
+    status.history_version = session.history_version;
+    status.work_dir = session.work_dir.clone();
+    status.message_count = session.history.len();
+    status.user_turn_count = session.user_turn_count();
+    status.agent_type = session.agent_type.clone();
+    status.runner_type = session.runner_type.clone();
+    status.runner_id = session.runner_id.clone();
+    manager.update_active_turn_status_from_worker(status);
+}
+
 fn insert_queue_snapshot(
     value: &mut serde_json::Value,
     queue_manager: &crate::im_gateway::SessionQueueManager,
@@ -2042,6 +2076,38 @@ mod tests {
         assert_eq!(value["last_response_tokens"], 181_900);
         assert_eq!(value["active_status"]["estimated_context_tokens"], 186_727);
         assert_eq!(value["history_path"], "/tmp/history.jsonl");
+    }
+
+    #[test]
+    fn prime_builtin_worker_active_status_publishes_running_snapshot() {
+        let manager = bifrost_agent::AgentSessionManager::new(3600);
+        let mut session = manager.take_session_with_work_dir(
+            "worker-prime-status",
+            Some("/tmp/worker-prime-status".to_string()),
+        );
+        session.mark_bifrost_agent_runtime();
+        session
+            .history
+            .push(bifrost_agent::ChatMessage::user("hello"));
+
+        let config = bifrost_agent::AgentConfig {
+            max_turn_iterations: Some(8),
+            ..Default::default()
+        };
+
+        prime_builtin_worker_active_status(&manager, &session, &config);
+
+        let status = manager
+            .get_active_turn_status("worker-prime-status")
+            .expect("active status");
+        assert_eq!(status.state, "running");
+        assert_eq!(status.current_loop_iteration, 1);
+        assert_eq!(status.max_loop_iterations, 8);
+        assert_eq!(status.work_dir.as_deref(), Some("/tmp/worker-prime-status"));
+        assert_eq!(status.context_window_tokens, Some(250_000));
+        assert_eq!(status.agent_type.as_deref(), Some("Bifrost Agent"));
+        assert_eq!(status.runner_type.as_deref(), Some("bifrost_agent"));
+        assert_eq!(status.user_turn_count, 1);
     }
 
     struct AgentApiEnvGuard {

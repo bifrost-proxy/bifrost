@@ -136,7 +136,7 @@ pub struct ActiveTurnStatus {
 }
 
 impl ActiveTurnStatus {
-    pub(crate) fn new(session_key: &str) -> Self {
+    pub fn new(session_key: &str) -> Self {
         let now = current_time_secs();
         Self {
             session_key: session_key.to_string(),
