@@ -486,9 +486,50 @@ pub(super) async fn handle_agent(
         };
         if req.method() == Method::GET {
             // Return full events with all details (tool calls, results, metadata, etc.)
-            match bifrost_agent::persistence::load_conversation_events(&path) {
-                Ok(events) => {
-                    let event_values: Vec<serde_json::Value> = events
+            let query_params = parse_query_params(req.uri().query().unwrap_or_default());
+            let limit = query_params
+                .get("limit")
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|value| *value > 0)
+                .map(|value| value.min(500));
+            let cursor = query_params
+                .get("cursor")
+                .and_then(|value| value.parse::<usize>().ok());
+            let since = query_params
+                .get("since")
+                .and_then(|value| value.parse::<usize>().ok());
+            let tail = query_params
+                .get("tail")
+                .map(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+                .unwrap_or(false);
+            let paged_request = limit.is_some() || cursor.is_some() || since.is_some() || tail;
+            let page_result = if paged_request {
+                bifrost_agent::persistence::load_conversation_events_page(
+                    &path,
+                    bifrost_agent::persistence::ConversationEventPageOptions {
+                        limit,
+                        cursor,
+                        tail,
+                        since,
+                    },
+                )
+            } else {
+                bifrost_agent::persistence::load_conversation_events(&path).map(|events| {
+                    let total_count = events.len();
+                    bifrost_agent::persistence::ConversationEventPage {
+                        events,
+                        total_count,
+                        start_index: 0,
+                        end_index: total_count,
+                        next_cursor: None,
+                        has_more: false,
+                    }
+                })
+            };
+            match page_result {
+                Ok(page) => {
+                    let event_values: Vec<serde_json::Value> = page
+                        .events
                         .iter()
                         .map(|e| {
                             serde_json::json!({
@@ -499,9 +540,15 @@ pub(super) async fn handle_agent(
                             })
                         })
                         .collect();
-                    return json_response(
-                        &serde_json::json!({ "events": event_values, "count": event_values.len() }),
-                    );
+                    return json_response(&serde_json::json!({
+                        "events": event_values,
+                        "count": event_values.len(),
+                        "total_count": page.total_count,
+                        "start_index": page.start_index,
+                        "end_index": page.end_index,
+                        "next_cursor": page.next_cursor,
+                        "has_more": page.has_more,
+                    }));
                 }
                 Err(e) => {
                     return error_response(

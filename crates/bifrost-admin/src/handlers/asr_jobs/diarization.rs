@@ -194,7 +194,7 @@ struct SpeakerVoiceIdentifyRequest {
     channels: u8,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct SpeakerVoiceIdentifyResponse {
     pub(crate) matched: bool,
     pub(crate) profile_id: Option<String>,
@@ -239,10 +239,35 @@ struct RegisteredSpeakerProfile {
     embedding: Vec<f32>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct SpeakerEnrollmentFinishResponse {
     profile: SpeakerVoiceprintProfile,
     profile_path: PathBuf,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+enum AsrDiarizationWorkerRequest {
+    Diarize {
+        profile: String,
+        config: AsrDiarizationConfig,
+        normalized_wav: PathBuf,
+    },
+    IdentifyPcm16 {
+        pcm16le_path: PathBuf,
+        sample_rate: u32,
+    },
+    FinishEnrollment {
+        session_id: String,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+enum AsrDiarizationWorkerResponse {
+    Diarize { segments: Vec<DiarizationSegment> },
+    Identify { response: SpeakerVoiceIdentifyResponse },
+    FinishEnrollment { response: SpeakerEnrollmentFinishResponse },
 }
 
 async fn handle_diarization_api(req: Request<Incoming>, path: &str) -> Response<BoxBody> {
@@ -642,8 +667,141 @@ fn apply_diarization_to_timeline(
     write_diarization_manifest(task, timeline, speakers, &diarization_segments)
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(not(test))]
+fn asr_diarization_worker_request_dir() -> Result<PathBuf, String> {
+    let dir = bifrost_storage::data_dir()
+        .join("runtime")
+        .join("asr-diarization-worker");
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("create ASR diarization worker request dir: {error}"))?;
+    Ok(dir)
+}
+
+#[cfg(not(test))]
+fn run_asr_diarization_worker_request(
+    request: AsrDiarizationWorkerRequest,
+) -> Result<AsrDiarizationWorkerResponse, String> {
+    let request_dir = asr_diarization_worker_request_dir()?;
+    let request_path = request_dir.join(format!("request-{}.json", uuid::Uuid::new_v4()));
+    let request_json = serde_json::to_vec(&request)
+        .map_err(|error| format!("serialize ASR diarization worker request: {error}"))?;
+    std::fs::write(&request_path, request_json)
+        .map_err(|error| format!("write ASR diarization worker request: {error}"))?;
+
+    let current_exe =
+        std::env::current_exe().map_err(|error| format!("resolve current executable: {error}"))?;
+    let alias_dir = bifrost_storage::data_dir()
+        .join("runtime")
+        .join("process-aliases");
+    let worker_exe = bifrost_core::process_alias_executable(
+        &current_exe,
+        &alias_dir,
+        "bifrost-asr-diarization",
+    )
+    .unwrap_or_else(|error| {
+        warn!(
+            error = %error,
+            executable = %current_exe.display(),
+            "failed to create ASR diarization process alias; using original executable"
+        );
+        current_exe
+    });
+    let output = std::process::Command::new(worker_exe)
+        .arg("asr-diarization-worker")
+        .arg("--request")
+        .arg(&request_path)
+        .output()
+        .map_err(|error| format!("spawn ASR diarization worker: {error}"))?;
+    let _ = std::fs::remove_file(&request_path);
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(format!(
+            "ASR diarization worker failed: {}{}",
+            stderr.trim(),
+            if stdout.trim().is_empty() {
+                String::new()
+            } else {
+                format!(" stdout={}", stdout.trim())
+            }
+        ));
+    }
+    serde_json::from_slice::<AsrDiarizationWorkerResponse>(&output.stdout)
+        .map_err(|error| format!("parse ASR diarization worker response: {error}"))
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+fn run_asr_diarization_worker_request(
+    request: AsrDiarizationWorkerRequest,
+) -> Result<AsrDiarizationWorkerResponse, String> {
+    run_asr_diarization_worker_request_in_process(request)
+}
+
+fn run_asr_diarization_worker_request_in_process(
+    request: AsrDiarizationWorkerRequest,
+) -> Result<AsrDiarizationWorkerResponse, String> {
+    match request {
+        AsrDiarizationWorkerRequest::Diarize {
+            profile,
+            config,
+            normalized_wav,
+        } => run_sherpa_diarization_in_process(&config, &profile, &normalized_wav)
+            .map(|segments| AsrDiarizationWorkerResponse::Diarize { segments }),
+        AsrDiarizationWorkerRequest::IdentifyPcm16 {
+            pcm16le_path,
+            sample_rate,
+        } => {
+            let bytes = std::fs::read(&pcm16le_path)
+                .map_err(|error| format!("read voiceprint identify audio: {error}"))?;
+            identify_speaker_voice_pcm16_in_process(&bytes, sample_rate)
+                .map(|response| AsrDiarizationWorkerResponse::Identify { response })
+        }
+        AsrDiarizationWorkerRequest::FinishEnrollment { session_id } => {
+            let session = read_speaker_enrollment_session(&session_id)?;
+            finish_speaker_enrollment_in_process(&session)
+                .map(|response| AsrDiarizationWorkerResponse::FinishEnrollment { response })
+        }
+    }
+}
+
+pub fn run_asr_diarization_worker_stdio(request_path: &Path) -> Result<(), String> {
+    let raw = std::fs::read(request_path)
+        .map_err(|error| format!("read ASR diarization worker request: {error}"))?;
+    let request = serde_json::from_slice::<AsrDiarizationWorkerRequest>(&raw)
+        .map_err(|error| format!("parse ASR diarization worker request: {error}"))?;
+    let response = run_asr_diarization_worker_request_in_process(request)?;
+    let json = serde_json::to_string(&response)
+        .map_err(|error| format!("serialize ASR diarization worker response: {error}"))?;
+    println!("{json}");
+    Ok(())
+}
+
 fn run_sherpa_diarization(
+    config: &AsrDiarizationConfig,
+    profile: &str,
+    normalized_wav: &Path,
+) -> Result<Vec<DiarizationSegment>, String> {
+    #[cfg(test)]
+    {
+        return run_sherpa_diarization_in_process(config, profile, normalized_wav);
+    }
+    #[cfg(not(test))]
+    {
+        run_asr_diarization_worker_request(AsrDiarizationWorkerRequest::Diarize {
+            profile: profile.to_string(),
+            config: config.clone(),
+            normalized_wav: normalized_wav.to_path_buf(),
+        })
+        .and_then(|response| match response {
+            AsrDiarizationWorkerResponse::Diarize { segments } => Ok(segments),
+            other => Err(format!("unexpected ASR diarization worker response: {other:?}")),
+        })
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn run_sherpa_diarization_in_process(
     config: &AsrDiarizationConfig,
     profile: &str,
     normalized_wav: &Path,
@@ -763,7 +921,7 @@ fn run_sherpa_diarization(
 }
 
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-fn run_sherpa_diarization(
+fn run_sherpa_diarization_in_process(
     _config: &AsrDiarizationConfig,
     _profile: &str,
     _normalized_wav: &Path,

@@ -98,6 +98,11 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    #[command(hide = true)]
+    AsrDiarizationWorker {
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        request: PathBuf,
+    },
     #[command(about = "Start the proxy server (default when no subcommand provided)")]
     Start {
         #[arg(short, long, help = "HTTP proxy port (overrides global -p)")]

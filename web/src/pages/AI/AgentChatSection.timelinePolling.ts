@@ -22,20 +22,33 @@ export function isThreadActive(thread?: AgentThreadSummary) {
 
 export function useRunningTimelinePolling(params: {
   historyPath?: string;
+  historyEventEndIndexRef?: MutableRefObject<number | undefined>;
   selectedThread?: AgentThreadSummary;
   telemetryPhase: RunTelemetry["phase"];
   userNearBottomRef: MutableRefObject<boolean>;
   refreshThreads: () => Promise<void>;
   replaceLoadedMessages: (restored: ChatMessage[], shouldStickToBottom: boolean) => void;
+  mergeTimelineEvents?: (
+    events: HistoryEvent[],
+    page: {
+      start_index?: number;
+      end_index?: number;
+      next_cursor?: number | null;
+      has_more?: boolean;
+    },
+    shouldStickToBottom: boolean,
+  ) => RunTelemetry | undefined;
   setRunning: Dispatch<SetStateAction<boolean>>;
   setTelemetry: Dispatch<SetStateAction<RunTelemetry>>;
 }) {
   const {
     historyPath,
+    historyEventEndIndexRef,
     selectedThread,
     telemetryPhase,
     userNearBottomRef,
     refreshThreads,
+    mergeTimelineEvents,
     replaceLoadedMessages,
     setRunning,
     setTelemetry,
@@ -54,19 +67,47 @@ export function useRunningTimelinePolling(params: {
     let timeoutId: number | undefined;
     const pollTimeline = async () => {
       try {
+        const since = historyEventEndIndexRef?.current;
+        const query =
+          since !== undefined
+            ? `?since=${encodeURIComponent(String(since))}`
+            : "?tail=true&limit=300";
         const response = await apiFetch(
           `/api/im-gateway/agent/sessions/history/${encodeURIComponent(
             timelineHistoryPath,
-          )}`,
+          )}${query}`,
         );
         if (!response.ok) {
           throw new Error(await response.text());
         }
-        const payload = (await response.json()) as { events?: HistoryEvent[] };
+        const payload = (await response.json()) as {
+          events?: HistoryEvent[];
+          start_index?: number;
+          end_index?: number;
+          next_cursor?: number | null;
+          has_more?: boolean;
+        };
         if (cancelled) {
           return;
         }
         const events = payload.events || [];
+        if (mergeTimelineEvents) {
+          const nextTelemetry = mergeTimelineEvents(
+            events,
+            payload,
+            userNearBottomRef.current,
+          );
+          const stillRunning =
+            nextTelemetry?.phase === "running" ||
+            (!nextTelemetry && (telemetryPhase === "running" || isThreadActive(selectedThread)));
+          setRunning(stillRunning);
+          if (stillRunning) {
+            timeoutId = window.setTimeout(pollTimeline, 1200);
+          } else {
+            void refreshThreads();
+          }
+          return;
+        }
         const restored = historyEventsToMessages(events, {
           ensureRunningAssistant: isThreadActive(selectedThread),
           runningState: selectedThread?.run_state || selectedThread?.state,
@@ -103,6 +144,8 @@ export function useRunningTimelinePolling(params: {
     };
   }, [
     historyPath,
+    historyEventEndIndexRef,
+    mergeTimelineEvents,
     refreshThreads,
     replaceLoadedMessages,
     selectedThread,

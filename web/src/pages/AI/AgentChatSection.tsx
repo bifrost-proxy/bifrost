@@ -18,6 +18,7 @@ import {
   isRecord,
   isRealChatMessage,
   isSelectedThread,
+  numberFrom,
   reduceTelemetry,
   runAgentStream,
   sameChatMessages,
@@ -55,6 +56,51 @@ const { Text } = Typography;
 const { TextArea } = Input;
 const { useBreakpoint } = Grid;
 const MAX_PASTED_IMAGES = 6;
+const HISTORY_EVENT_PAGE_SIZE = 300;
+
+type HistoryPagePayload = {
+  events?: HistoryEvent[];
+  count?: number;
+  total_count?: number;
+  start_index?: number;
+  end_index?: number;
+  next_cursor?: number | null;
+  has_more?: boolean;
+};
+
+function historyPageUrl(
+  historyPath: string,
+  params: { tail?: boolean; limit?: number; cursor?: number; since?: number } = {},
+) {
+  const query = new URLSearchParams();
+  if (params.tail) {
+    query.set("tail", "true");
+  }
+  if (params.limit !== undefined) {
+    query.set("limit", String(params.limit));
+  }
+  if (params.cursor !== undefined) {
+    query.set("cursor", String(params.cursor));
+  }
+  if (params.since !== undefined) {
+    query.set("since", String(params.since));
+  }
+  const suffix = query.toString();
+  return `/api/im-gateway/agent/sessions/history/${encodeURIComponent(historyPath)}${
+    suffix ? `?${suffix}` : ""
+  }`;
+}
+
+async function fetchHistoryPage(
+  historyPath: string,
+  params: { tail?: boolean; limit?: number; cursor?: number; since?: number } = {},
+) {
+  const response = await apiFetch(historyPageUrl(historyPath, params));
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+  return response.json() as Promise<HistoryPagePayload>;
+}
 
 function imageCountLabel(count: number) {
   return count === 1 ? "Attached 1 image" : `Attached ${count} images`;
@@ -112,6 +158,8 @@ export default function AgentChatSection() {
   const [sessionKey, setSessionKey] = useState(() => `admin-chat-${Date.now()}`);
   const [historyPath, setHistoryPath] = useState<string | undefined>();
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyLoadingOlder, setHistoryLoadingOlder] = useState(false);
+  const [historyHasOlder, setHistoryHasOlder] = useState(false);
   const [running, setRunning] = useState(false);
   const [supplementSubmitting, setSupplementSubmitting] = useState(false);
   const [runningInputMode, setRunningInputMode] = useState<"guide" | "queue">("guide");
@@ -151,6 +199,11 @@ export default function AgentChatSection() {
   const userNearBottomRef = useRef(true);
   const loadedConversationKeyRef = useRef<string | undefined>(undefined);
   const threadsRef = useRef<AgentThreadSummary[]>([]);
+  const historyEventsRef = useRef<HistoryEvent[]>([]);
+  const historyEventStartIndexRef = useRef<number | undefined>(undefined);
+  const historyEventEndIndexRef = useRef<number | undefined>(undefined);
+  const historyOlderCursorRef = useRef<number | undefined>(undefined);
+  const loadOlderHistoryPageRef = useRef<() => void>(() => {});
   const initialThreadAutoSelectRef = useRef(false);
 
   const scrollMessagesToBottom = useCallback((force = true) => {
@@ -228,6 +281,10 @@ export default function AgentChatSection() {
 
   const handleMessagesScroll = useCallback(() => {
     updateMessagesScrollState();
+    const element = messagesScrollRef.current;
+    if (element && element.scrollTop < 96) {
+      loadOlderHistoryPageRef.current();
+    }
   }, [updateMessagesScrollState]);
 
   useEffect(() => {
@@ -263,6 +320,47 @@ export default function AgentChatSection() {
     });
   }, []);
 
+  const resetHistoryEventWindow = useCallback(() => {
+    historyEventsRef.current = [];
+    historyEventStartIndexRef.current = undefined;
+    historyEventEndIndexRef.current = undefined;
+    historyOlderCursorRef.current = undefined;
+    setHistoryHasOlder(false);
+  }, []);
+
+  const applyHistoryEventWindow = useCallback(
+    (
+      events: HistoryEvent[],
+      page: HistoryPagePayload,
+      matchedThread: AgentThreadSummary | undefined,
+      shouldStickToBottom: boolean,
+    ) => {
+      historyEventsRef.current = events;
+      historyEventStartIndexRef.current = page.start_index ?? 0;
+      historyEventEndIndexRef.current =
+        page.end_index ?? (page.start_index ?? 0) + events.length;
+      historyOlderCursorRef.current =
+        typeof page.next_cursor === "number"
+          ? page.next_cursor
+          : historyEventStartIndexRef.current;
+      setHistoryHasOlder(Boolean(page.has_more));
+      const restored = historyEventsToMessages(events, {
+        ensureRunningAssistant: isThreadActive(matchedThread),
+        runningState: matchedThread?.run_state || matchedThread?.state,
+      });
+      replaceLoadedMessages(restored, shouldStickToBottom);
+      const nextTelemetry = historyEventsToTelemetry(
+        events,
+        matchedThread,
+        telemetryFromThread(matchedThread),
+      );
+      setTelemetry(nextTelemetry);
+      setRunning(nextTelemetry.phase === "running" || isThreadActive(matchedThread));
+      return { restored, nextTelemetry };
+    },
+    [replaceLoadedMessages],
+  );
+
   const querySessionKey = searchParams.get("session") || undefined;
   const queryHistoryPath = searchParams.get("historyPath") || undefined;
   const queryView = searchParams.get("view") || undefined;
@@ -279,6 +377,67 @@ export default function AgentChatSection() {
       ),
     [historyPath, queryView, sessionKey, threads],
   );
+
+  const loadOlderHistoryPage = useCallback(async () => {
+    const timelineHistoryPath = historyPath || selectedThread?.history_path;
+    const cursor = historyOlderCursorRef.current;
+    if (
+      !timelineHistoryPath ||
+      cursor === undefined ||
+      cursor <= 0 ||
+      historyLoadingOlder ||
+      !historyHasOlder
+    ) {
+      return;
+    }
+    const element = messagesScrollRef.current;
+    const previousScrollHeight = element?.scrollHeight ?? 0;
+    const previousScrollTop = element?.scrollTop ?? 0;
+    const previousEndIndex = historyEventEndIndexRef.current;
+    setHistoryLoadingOlder(true);
+    try {
+      const page = await fetchHistoryPage(timelineHistoryPath, {
+        cursor,
+        limit: HISTORY_EVENT_PAGE_SIZE,
+      });
+      const olderEvents = page.events || [];
+      if (olderEvents.length === 0) {
+        setHistoryHasOlder(false);
+        historyOlderCursorRef.current = undefined;
+        return;
+      }
+      const mergedEvents = [...olderEvents, ...historyEventsRef.current];
+      applyHistoryEventWindow(mergedEvents, page, selectedThread, false);
+      historyEventEndIndexRef.current =
+        previousEndIndex ?? historyEventEndIndexRef.current ?? mergedEvents.length;
+      requestAnimationFrame(() => {
+        const nextElement = messagesScrollRef.current;
+        if (!nextElement) {
+          return;
+        }
+        const addedHeight = nextElement.scrollHeight - previousScrollHeight;
+        nextElement.scrollTop = previousScrollTop + addedHeight;
+      });
+    } catch (error) {
+      antdMessage.error(
+        error instanceof Error ? error.message : "Failed to load older Agent history",
+      );
+    } finally {
+      setHistoryLoadingOlder(false);
+    }
+  }, [
+    applyHistoryEventWindow,
+    historyHasOlder,
+    historyLoadingOlder,
+    historyPath,
+    selectedThread,
+  ]);
+
+  useEffect(() => {
+    loadOlderHistoryPageRef.current = () => {
+      void loadOlderHistoryPage();
+    };
+  }, [loadOlderHistoryPage]);
 
   const conversationTitle =
     telemetry.title ||
@@ -475,6 +634,9 @@ export default function AgentChatSection() {
         ? `active:${nextSessionKey}`
         : "draft";
     const shouldStickToBottom = loadedConversationKeyRef.current !== conversationKey;
+    if (shouldStickToBottom) {
+      resetHistoryEventWindow();
+    }
     loadedConversationKeyRef.current = conversationKey;
     setHistoryPath(nextHistoryPath);
     if (nextSessionKey) {
@@ -537,28 +699,32 @@ export default function AgentChatSection() {
           let timelineEvents: HistoryEvent[] | undefined;
           if (timelineHistoryPath) {
             try {
-              const historyResponse = await apiFetch(
-                `/api/im-gateway/agent/sessions/history/${encodeURIComponent(
-                  timelineHistoryPath,
-                )}`,
-              );
-              if (historyResponse.ok) {
-                const payload = (await historyResponse.json()) as { events?: HistoryEvent[] };
-                timelineEvents = payload.events || [];
-                timelineMessages = historyEventsToMessages(timelineEvents, {
-                  ensureRunningAssistant:
-                    isThreadActive(matchedThread) ||
-                    isThreadActive(fallbackHistoryThread) ||
-                    isRunStateActive(detail.run_state || detail.state),
-                  runningState:
-                    detail.run_state ||
-                    detail.state ||
-                    matchedThread?.run_state ||
-                    matchedThread?.state ||
-                    fallbackHistoryThread?.run_state ||
-                    fallbackHistoryThread?.state,
-                });
-              }
+              const payload = await fetchHistoryPage(timelineHistoryPath, {
+                tail: true,
+                limit: HISTORY_EVENT_PAGE_SIZE,
+              });
+              timelineEvents = payload.events || [];
+              const timelineThread = matchedThread || fallbackHistoryThread;
+              historyEventsRef.current = timelineEvents;
+              historyEventStartIndexRef.current = payload.start_index ?? 0;
+              historyEventEndIndexRef.current =
+                payload.end_index ??
+                (payload.start_index ?? 0) + timelineEvents.length;
+              historyOlderCursorRef.current =
+                typeof payload.next_cursor === "number"
+                  ? payload.next_cursor
+                  : historyEventStartIndexRef.current;
+              setHistoryHasOlder(Boolean(payload.has_more));
+              timelineMessages = historyEventsToMessages(timelineEvents, {
+                ensureRunningAssistant:
+                  isThreadActive(timelineThread) ||
+                  isRunStateActive(detail.run_state || detail.state),
+                runningState:
+                  detail.run_state ||
+                  detail.state ||
+                  timelineThread?.run_state ||
+                  timelineThread?.state,
+              });
             } catch {
               // Keep the active detail fallback usable while timeline is being written.
             }
@@ -650,17 +816,10 @@ export default function AgentChatSection() {
 
     let cancelled = false;
     setHistoryLoading(true);
-    apiFetch(
-      `/api/im-gateway/agent/sessions/history/${encodeURIComponent(
-        nextHistoryPath,
-      )}`,
-    )
-      .then(async (response) => {
-        if (!response.ok) {
-          throw new Error(await response.text());
-        }
-        return response.json() as Promise<{ events?: HistoryEvent[] }>;
-      })
+    fetchHistoryPage(nextHistoryPath, {
+      tail: true,
+      limit: HISTORY_EVENT_PAGE_SIZE,
+    })
       .then((payload) => {
         if (cancelled) {
           return;
@@ -668,12 +827,14 @@ export default function AgentChatSection() {
         const matchedThread = threadsRef.current.find((thread) =>
           isSelectedThread(thread, nextSessionKey || "", nextHistoryPath, "history"),
         );
-        const restored = historyEventsToMessages(payload.events || [], {
-          ensureRunningAssistant: isThreadActive(matchedThread),
-          runningState: matchedThread?.run_state || matchedThread?.state,
-        });
+        const pageEvents = payload.events || [];
+        const { restored } = applyHistoryEventWindow(
+          pageEvents,
+          payload,
+          matchedThread,
+          shouldStickToBottom,
+        );
         if (restored.length > 0) {
-          replaceLoadedMessages(restored, shouldStickToBottom);
           const resolvedTitle = matchedThread?.title || titleFromChatMessages(restored);
           if (resolvedTitle) {
             setThreads((prev) => {
@@ -694,18 +855,11 @@ export default function AgentChatSection() {
           }
           setRunnerId(matchedThread?.runner_id || "bifrost_agent");
           const eventSessionKey =
-            payload.events?.find((event) => event.session_key)?.session_key;
+            pageEvents.find((event) => event.session_key)?.session_key;
           if (nextSessionKey || eventSessionKey) {
             setSessionKey(nextSessionKey || eventSessionKey!);
           }
         }
-        const nextTelemetry = historyEventsToTelemetry(
-          payload.events || [],
-          matchedThread,
-          telemetryFromThread(matchedThread),
-        );
-        setTelemetry(nextTelemetry);
-        setRunning(nextTelemetry.phase === "running" || isThreadActive(matchedThread));
       })
       .catch((error) => {
         if (!cancelled) {
@@ -726,14 +880,59 @@ export default function AgentChatSection() {
     };
   }, [
     defaultWorkDir,
+    applyHistoryEventWindow,
     queryHistoryPath,
     querySessionKey,
-    replaceLoadedMessages,
+    resetHistoryEventWindow,
     setSearchParams,
   ]);
 
+  const mergeTimelineEvents = useCallback(
+    (
+      events: HistoryEvent[],
+      page: Pick<HistoryPagePayload, "start_index" | "end_index" | "next_cursor" | "has_more">,
+      shouldStickToBottom: boolean,
+    ) => {
+      if (events.length === 0) {
+        historyEventEndIndexRef.current =
+          page.end_index ?? historyEventEndIndexRef.current;
+        return undefined;
+      }
+      const startIndex = page.start_index;
+      const currentEnd = historyEventEndIndexRef.current;
+      const mergedEvents =
+        startIndex !== undefined &&
+        currentEnd !== undefined &&
+        startIndex >= currentEnd
+          ? [...historyEventsRef.current, ...events]
+          : events;
+      const previousStartIndex = historyEventStartIndexRef.current;
+      const previousOlderCursor = historyOlderCursorRef.current;
+      const wasAppending =
+        startIndex !== undefined && currentEnd !== undefined && startIndex >= currentEnd;
+      const { nextTelemetry } = applyHistoryEventWindow(
+        mergedEvents,
+        page,
+        selectedThread,
+        shouldStickToBottom,
+      );
+      if (wasAppending) {
+        historyEventStartIndexRef.current = previousStartIndex ?? startIndex;
+        historyOlderCursorRef.current =
+          previousOlderCursor ?? historyEventStartIndexRef.current;
+        setHistoryHasOlder(
+          historyOlderCursorRef.current !== undefined && historyOlderCursorRef.current > 0,
+        );
+      }
+      return nextTelemetry;
+    },
+    [applyHistoryEventWindow, selectedThread],
+  );
+
   useRunningTimelinePolling({
     historyPath,
+    historyEventEndIndexRef,
+    mergeTimelineEvents,
     refreshThreads,
     replaceLoadedMessages,
     selectedThread,
@@ -1368,6 +1567,54 @@ export default function AgentChatSection() {
         nextAssistantDeltaStartsSegment = true;
       };
 
+      const updateRunningToolPreview = (toolResult: string, durationMs?: number) => {
+        if (!toolResult.trim()) {
+          return;
+        }
+        const targetId = assistantSegmentId;
+        setMessages((prev) => {
+          const updateMessageAt = (messages: ChatMessage[], index: number) => {
+            const steps = [...(messages[index].processSteps || [])];
+            const stepIndex = steps
+              .map((step, i) => ({ step, i }))
+              .reverse()
+              .find(
+                ({ step }) => step.type === "tool" && step.status === "running",
+              )?.i;
+            if (stepIndex === undefined) {
+              return null;
+            }
+            steps[stepIndex] = {
+              ...steps[stepIndex],
+              result: toolResult,
+              durationMs: durationMs ?? steps[stepIndex].durationMs,
+            };
+            const next = [...messages];
+            next[index] = { ...messages[index], processSteps: steps };
+            return next;
+          };
+
+          const targetIndex = prev.findIndex((message) => message.id === targetId);
+          if (targetIndex >= 0) {
+            const next = updateMessageAt(prev, targetIndex);
+            if (next) {
+              return next;
+            }
+          }
+          for (let index = prev.length - 1; index >= 0; index -= 1) {
+            if (index === targetIndex || prev[index].role !== "assistant") {
+              continue;
+            }
+            const next = updateMessageAt(prev, index);
+            if (next) {
+              return next;
+            }
+          }
+          return prev;
+        });
+        assistantSegmentHasSteps = true;
+      };
+
       const applyFinalResponse = (response: string) => {
         const trimmedResponse = response.trim();
         if (!trimmedResponse) {
@@ -1483,6 +1730,13 @@ export default function AgentChatSection() {
               toolResult || undefined,
               typeof event.durationMs === "number" ? event.durationMs : undefined,
             );
+            return;
+          }
+          if (event.eventType === "long_task_status") {
+            const preview = stringFrom(event.lastOutputPreview);
+            if (preview) {
+              updateRunningToolPreview(preview, numberFrom(event.elapsedMs));
+            }
             return;
           }
           const step = eventToProcessStep(event);
@@ -1751,6 +2005,18 @@ export default function AgentChatSection() {
             style={styles.conversation}
           >
             <div style={styles.conversationTrack} data-testid="agent-chat-message-track">
+              {historyHasOlder ? (
+                <div style={{ display: "flex", justifyContent: "center", padding: "4px 0 8px" }}>
+                  <Button
+                    size="small"
+                    loading={historyLoadingOlder}
+                    onClick={loadOlderHistoryPage}
+                    data-testid="agent-chat-load-older"
+                  >
+                    Load older
+                  </Button>
+                </div>
+              ) : null}
               {messages.length === 0 ? (
                 <div
                   data-testid="agent-chat-empty-state"

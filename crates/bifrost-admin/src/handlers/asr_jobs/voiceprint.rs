@@ -328,24 +328,7 @@ async fn post_speaker_voice_identify_response(req: Request<Incoming>) -> Respons
     if !bytes.len().is_multiple_of(2) {
         return error_response(StatusCode::BAD_REQUEST, "pcm16le audio byte length must be even");
     }
-    let preparation = match prepare_voiceprint_identify_audio(&bytes, request.sample_rate) {
-        Ok(preparation) => preparation,
-        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error),
-    };
-    let prepared = match preparation.ready {
-        Some(prepared) => prepared,
-        None => {
-            return json_response(&insufficient_speaker_identify_response(
-                preparation.audio_duration_ms,
-                preparation.speech_duration_ms,
-            ))
-        }
-    };
-    match identify_speaker_voice(
-        &prepared.waveform,
-        prepared.audio_duration_ms,
-        prepared.speech_duration_ms,
-    ) {
+    match identify_speaker_voice_pcm16(&bytes, request.sample_rate) {
         Ok(response) => json_response(&response),
         Err(error) => error_response(StatusCode::CONFLICT, &error),
     }
@@ -521,6 +504,25 @@ fn read_speaker_enrollment_session(session_id: &str) -> Result<SpeakerEnrollment
 fn finish_speaker_enrollment(
     session: &SpeakerEnrollmentSession,
 ) -> Result<SpeakerEnrollmentFinishResponse, String> {
+    #[cfg(test)]
+    {
+        return finish_speaker_enrollment_in_process(session);
+    }
+    #[cfg(not(test))]
+    {
+        run_asr_diarization_worker_request(AsrDiarizationWorkerRequest::FinishEnrollment {
+            session_id: session.id.clone(),
+        })
+        .and_then(|response| match response {
+            AsrDiarizationWorkerResponse::FinishEnrollment { response } => Ok(response),
+            other => Err(format!("unexpected ASR diarization worker response: {other:?}")),
+        })
+    }
+}
+
+fn finish_speaker_enrollment_in_process(
+    session: &SpeakerEnrollmentSession,
+) -> Result<SpeakerEnrollmentFinishResponse, String> {
     let mut samples = Vec::new();
     let mut embeddings = Vec::<Vec<f32>>::new();
     for prompt in &session.prompts {
@@ -580,6 +582,53 @@ fn finish_speaker_enrollment(
         profile,
         profile_path,
     })
+}
+
+fn identify_speaker_voice_pcm16(
+    pcm16le: &[u8],
+    sample_rate: u32,
+) -> Result<SpeakerVoiceIdentifyResponse, String> {
+    #[cfg(test)]
+    {
+        return identify_speaker_voice_pcm16_in_process(pcm16le, sample_rate);
+    }
+    #[cfg(not(test))]
+    {
+        let request_dir = asr_diarization_worker_request_dir()?;
+        let audio_path = request_dir.join(format!("voiceprint-{}.pcm16le", uuid::Uuid::new_v4()));
+        std::fs::write(&audio_path, pcm16le)
+            .map_err(|error| format!("write voiceprint identify audio: {error}"))?;
+        let result = run_asr_diarization_worker_request(
+            AsrDiarizationWorkerRequest::IdentifyPcm16 {
+                pcm16le_path: audio_path.clone(),
+                sample_rate,
+            },
+        )
+        .and_then(|response| match response {
+            AsrDiarizationWorkerResponse::Identify { response } => Ok(response),
+            other => Err(format!("unexpected ASR diarization worker response: {other:?}")),
+        });
+        let _ = std::fs::remove_file(audio_path);
+        result
+    }
+}
+
+fn identify_speaker_voice_pcm16_in_process(
+    pcm16le: &[u8],
+    sample_rate: u32,
+) -> Result<SpeakerVoiceIdentifyResponse, String> {
+    let preparation = prepare_voiceprint_identify_audio(pcm16le, sample_rate)?;
+    let Some(prepared) = preparation.ready else {
+        return Ok(insufficient_speaker_identify_response(
+            preparation.audio_duration_ms,
+            preparation.speech_duration_ms,
+        ));
+    };
+    identify_speaker_voice(
+        &prepared.waveform,
+        prepared.audio_duration_ms,
+        prepared.speech_duration_ms,
+    )
 }
 
 fn average_speaker_embeddings(embeddings: &[Vec<f32>]) -> Option<Vec<f32>> {
