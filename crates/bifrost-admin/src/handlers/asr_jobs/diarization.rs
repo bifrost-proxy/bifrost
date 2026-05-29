@@ -784,7 +784,7 @@ fn run_sherpa_diarization(
 ) -> Result<Vec<DiarizationSegment>, String> {
     #[cfg(test)]
     {
-        return run_sherpa_diarization_in_process(config, profile, normalized_wav);
+        run_sherpa_diarization_in_process(config, profile, normalized_wav)
     }
     #[cfg(not(test))]
     {

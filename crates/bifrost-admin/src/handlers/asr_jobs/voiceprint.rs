@@ -506,7 +506,7 @@ fn finish_speaker_enrollment(
 ) -> Result<SpeakerEnrollmentFinishResponse, String> {
     #[cfg(test)]
     {
-        return finish_speaker_enrollment_in_process(session);
+        finish_speaker_enrollment_in_process(session)
     }
     #[cfg(not(test))]
     {
@@ -590,7 +590,7 @@ fn identify_speaker_voice_pcm16(
 ) -> Result<SpeakerVoiceIdentifyResponse, String> {
     #[cfg(test)]
     {
-        return identify_speaker_voice_pcm16_in_process(pcm16le, sample_rate);
+        identify_speaker_voice_pcm16_in_process(pcm16le, sample_rate)
     }
     #[cfg(not(test))]
     {
@@ -891,6 +891,7 @@ fn pcm16le_to_f32(bytes: &[u8]) -> Result<Vec<f32>, String> {
         .collect())
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn f32_waveform_to_pcm16le(waveform: &[f32]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(waveform.len().saturating_mul(2));
     for sample in waveform {
