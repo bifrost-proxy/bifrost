@@ -919,6 +919,7 @@ tracing = "0.1"
 | `/status` runner 元信息回归 | IM `/status` 和 `/agent/chat` `/status` 展示当前 Agent 类型、Runner 类型、Runner ID、历史对话轮次、外部会话引用；Codex 展示 `threadId`，ChatGPT Web 展示 `conversationId` |
 | 压缩次数恢复回归 | session JSONL 中的 `compaction` 事件会恢复为 `SessionRuntimeState.compaction_count`，`/resume` 后 `/status` 不再把已发生的压缩次数重置为 0 |
 | Agent 模型请求默认代理回归 | `im_gateway_agent_model_request_uses_bifrost_proxy` 使用 `AgentClient::new_with_bifrost_proxy(port)` 调用 mock Chat Completions，断言请求经当前 Bifrost 端口转发并在 `/api/traffic` 中出现可查询记录 |
+| Agent worker 代理端口恢复回归 | 独立 `bifrost agent worker` 子进程从父进程请求或 `BIFROST_DATA_DIR/runtime.json` 恢复当前 Bifrost 端口，并使用当前 Bifrost CA 信任内置 TLS intercept；`AgentClient::new()` 不读取外部 `HTTP_PROXY/HTTPS_PROXY` 环境变量 |
 | Chat API `/stop` 停止运行中 loop | `im_gateway_agent_chat_stop_active_loop` 启动真实 Admin + 慢速 mock Chat Completions，先发起长请求，再用同 session 的 `/stop` 立即停止 active turn，并验证后续 chat 可继续使用 |
 | Web Agent Chat 持久排队恢复回归 | WebUI 运行中输入 Queue 时，`/_bifrost/api/agent/chat/stream` busy 路径只把消息写入后端 `SessionQueueManager`；`/sessions/all` 与 `/sessions/{session_key}` 返回 `queue_items` / `queue_length`，页面刷新后从后端恢复排队面板；当前 turn 完成后由后端 drain queue，前端不得再次重发队列消息 |
 | WebUI instruction 大窗口编辑回归 | `Settings Agent 三层 instructions 使用大窗口编辑` 验证全局 Agent instruction 页面无行内 textarea、点击 Edit 打开大弹窗并 PATCH；`Settings IM Provider instructions 使用大窗口编辑后保存覆盖值` 验证 Provider Edit 弹窗中 instruction 通过嵌套大弹窗编辑并保存到 `agent_config` |
@@ -951,6 +952,7 @@ tracing = "0.1"
 | TC-IMA-91A | Web Agent Chat 后端持久排队与刷新恢复 | 同一 session 运行中在 WebUI 选择 Queue 发送追加消息；刷新页面后队列面板仍从后端 `queue_items` 恢复；上一轮结束后由后端自动处理排队消息，前端不再本地重发 |
 | TC-LTM-09 | 长期记忆真实对话链路 | 真实 Bifrost + mock Chat API 环境下验证自动记忆、Phase 2 consolidation、跨 session 消费 |
 | TC-IMA-83 | Agent 模型请求默认进入 Traffic | 真实 Bifrost 监听端口启动后，Agent 底层 Chat Completions 请求默认经 `http://127.0.0.1:<port>` 代理发出；mock 模型 host 可查询到 POST 记录，真实模型域名在 `--intercept-include` 下可解包为 HTTPS POST 明文记录 |
+| TC-IMA-83A | Agent worker 内置代理信任与外部 proxy env 隔离 | IM/Web 入口的内置 Agent worker 使用当前 Bifrost 端口和 `data_dir/certs/ca.crt` 访问模型；CLI `agent run` 通过 Admin Server stream 执行，Server 不运行时明确失败；库级 direct client 不被 shell/system proxy 环境变量劫持 |
 | TC-IMA-84 | Agent 设置页卡片导航 | Settings → Agent 左侧导航可见，点击 MCP Servers / Runtime 只渲染对应编辑卡片，URL `agentSection` 可刷新恢复，亮色与暗色主题下当前项高亮可读 |
 | TC-ASP-14 | WebUI Session 详情 Messages/Settings Tab 与右侧内容滚动回归 | 历史 session 深链默认显示 Messages Tab，长事件列表在右侧内容区真实滚动；Settings Tab 展示 Session Info、AGENTS.md Instructions 和 Skills |
 | TC-ASP-15 | WebUI Sessions 列表 title/整行点击进入详情回归 | Sessions 列表不再显示查看 icon；点击 history session title 进入 history 详情；点击 active session 当前行进入 active 详情；删除按钮不会触发行跳转 |
@@ -961,6 +963,12 @@ tracing = "0.1"
 ## Agent 模型请求代理
 
 IM Gateway 内嵌 Agent 默认通过当前启动的 Bifrost HTTP 代理访问模型提供方：真实 CLI 启动和 E2E `ProxyInstance::start_with_admin` 都使用 `ImGatewayService::new_with_agent_proxy_port(data_dir, Some(port))` 创建服务，底层 `AgentClient::new_with_bifrost_proxy_and_ca(port, data_dir/certs/ca.crt)` 会把 Chat Completions 请求代理到 `http://127.0.0.1:<port>`，并只把当前 Bifrost CA 加入 Agent 自己的 reqwest trust store。这样模型请求、响应、状态码和耗时会落入现有 Traffic 记录；对模型域名启用 TLS intercept 时，Agent 不会因为 Bifrost 签发的拦截证书报 `UnknownIssuer`。
+
+内置 Agent loop 实际在隔离的 `bifrost agent worker` 子进程里执行。父进程创建 worker 请求时必须携带当前 Bifrost 端口；worker 也必须能从 `BIFROST_ADMIN_PORT` 或 `BIFROST_DATA_DIR/runtime.json` 恢复端口，避免子进程退化成 direct client。库级 `AgentClient::new()` 使用 `direct_reqwest_client_builder().no_proxy()`，不能读取 `HTTP_PROXY/HTTPS_PROXY/ALL_PROXY` 等外部环境变量；否则日志会显示 `model_proxy_url="direct"`，但请求实际被 shell/system proxy 劫持，且没有加载 Bifrost CA，最终在 TLS intercept 场景下报 `UnknownIssuer`。
+
+Agent 相关 HTTP 客户端必须复用 `bifrost_core` 的 direct/proxied client builder：MCP Streamable HTTP、MCP availability 检查、Agent worker 内 MCP、IM event loop 内 MCP、MCP OAuth discovery/token、Agent 回复远端图片/附件下载、ChatGPT Web native/CDP HTTP 探测都不能裸用 `reqwest::Client::new()` 或默认 builder。HTTP MCP 在 Agent 已配置内置代理时使用同一个 Bifrost proxy URL 与 `data_dir/certs/ca.crt`；stdio MCP 子进程默认移除继承自父进程的 proxy 环境变量，只有 MCP server config 的 `env` 显式写入时才会生效。
+
+`bifrost agent run` 是 Server 模式命令：CLI 只调用 `/_bifrost/api/im-gateway/chat/stream`，由已经启动的 Bifrost Server 再拉起内置 worker 或 `external-runner-worker` 执行 Codex/ChatGPT Web/自定义 Runner。若代理服务未启动，CLI 应明确提示 `Failed to reach Bifrost ... is the proxy running?`，而不是在当前 CLI 进程中 fallback 本地执行。
 
 库级直连调用仍保留 `AgentClient::new()`，用于纯单元测试和不在 Bifrost 服务内运行的场景。需要临时绕过默认代理时，可设置 `BIFROST_AGENT_DISABLE_MODEL_PROXY=1`，服务会回退为直连模型请求。
 

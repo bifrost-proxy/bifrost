@@ -1,4 +1,70 @@
 use super::*;
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::sync::{Mutex as StdMutex, OnceLock};
+use std::time::Duration as StdDuration;
+
+fn proxy_env_lock() -> &'static StdMutex<()> {
+    static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| StdMutex::new(()))
+}
+
+fn with_bad_proxy_env<T>(f: impl FnOnce() -> T) -> T {
+    let _guard = proxy_env_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let vars = [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+    ];
+    let saved = vars
+        .iter()
+        .map(|key| (key.to_string(), std::env::var(key).ok()))
+        .collect::<Vec<_>>();
+
+    for key in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ] {
+        std::env::set_var(key, "http://127.0.0.1:1");
+    }
+    for key in ["NO_PROXY", "no_proxy"] {
+        std::env::remove_var(key);
+    }
+
+    let result = f();
+
+    for (key, value) in saved {
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+    result
+}
+
+fn spawn_single_http_response() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let mut buffer = [0_u8; 1024];
+        let _ = stream.read(&mut buffer);
+        let _ = stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+    });
+    format!("http://{addr}")
+}
 
 fn test_mcp_config() -> McpServerConfig {
     McpServerConfig {
@@ -22,6 +88,81 @@ fn test_mcp_config() -> McpServerConfig {
         env_http_headers: None,
         tools: None,
     }
+}
+
+#[test]
+fn mcp_direct_http_network_ignores_proxy_environment() {
+    with_bad_proxy_env(|| {
+        let url = spawn_single_http_response();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let body = rt.block_on(async {
+            McpHttpNetwork::direct()
+                .client_builder("test")
+                .unwrap()
+                .timeout(StdDuration::from_secs(2))
+                .build()
+                .unwrap()
+                .get(url)
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap()
+        });
+        assert_eq!(body, "ok");
+    });
+}
+
+#[test]
+fn mcp_explicit_http_network_uses_configured_proxy() {
+    with_bad_proxy_env(|| {
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").expect("bind proxy");
+        let proxy_addr = proxy_listener.local_addr().expect("proxy addr");
+        let captured = std::sync::Arc::new(StdMutex::new(String::new()));
+        let captured_thread = captured.clone();
+        std::thread::spawn(move || {
+            let (mut stream, _) = proxy_listener.accept().expect("accept proxy");
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0_u8; 1024];
+                let read = stream.read(&mut chunk).expect("read proxy");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            *captured_thread.lock().unwrap() = String::from_utf8_lossy(&request).to_string();
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+        });
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let body = rt.block_on(async {
+            McpHttpNetwork::with_proxy_and_ca(format!("http://{proxy_addr}"), None)
+                .client_builder("test")
+                .unwrap()
+                .timeout(StdDuration::from_secs(2))
+                .build()
+                .unwrap()
+                .get("http://mcp-proxy.test/metadata")
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap()
+        });
+
+        assert_eq!(body, "ok");
+        assert!(captured
+            .lock()
+            .unwrap()
+            .starts_with("GET http://mcp-proxy.test/metadata "));
+    });
 }
 
 #[test]

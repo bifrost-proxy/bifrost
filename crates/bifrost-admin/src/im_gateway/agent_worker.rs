@@ -45,6 +45,8 @@ pub struct AgentWorkerRunRequest {
     pub source: Option<String>,
     #[serde(default)]
     pub default_message_channel: Option<crate::im_gateway::types::ImMessageChannelBinding>,
+    #[serde(default)]
+    pub agent_proxy_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -428,7 +430,25 @@ pub fn build_run_request(
         history_path,
         source,
         default_message_channel: config.default_message_channel.clone(),
+        agent_proxy_port: resolve_agent_proxy_port_from_data_dir(&bifrost_storage::data_dir()),
     }
+}
+
+fn resolve_agent_proxy_port_from_data_dir(data_dir: &Path) -> Option<u16> {
+    if let Some(port) = std::env::var("BIFROST_ADMIN_PORT")
+        .ok()
+        .and_then(|value| value.trim().parse::<u16>().ok())
+    {
+        return Some(port);
+    }
+
+    let runtime_path = data_dir.join("runtime.json");
+    let runtime = std::fs::read_to_string(runtime_path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&runtime).ok()?;
+    value
+        .get("port")
+        .and_then(|port| port.as_u64())
+        .and_then(|port| u16::try_from(port).ok())
 }
 
 pub fn run_worker_stdio() -> Result<(), String> {
@@ -555,7 +575,12 @@ async fn run_builtin_agent_turn(
     }
 
     let data_dir = bifrost_storage::data_dir();
-    let service = crate::handlers::im_gateway::ImGatewayService::new(&data_dir);
+    let service = crate::handlers::im_gateway::ImGatewayService::new_with_agent_proxy_port(
+        &data_dir,
+        request
+            .agent_proxy_port
+            .or_else(|| resolve_agent_proxy_port_from_data_dir(&data_dir)),
+    );
     let agent_client = service.agent_client.clone();
     let turn_tools = service.build_agent_tool_registry(config.default_message_channel.clone());
     let mut session = bifrost_agent::AgentSession::new_with_work_dir(
@@ -605,7 +630,20 @@ async fn run_builtin_agent_turn(
     }
     let mut recorder =
         create_conversation_recorder(&config, &request.session_key, &mut session, source);
-    let mut mcp_manager = bifrost_agent::mcp::McpManager::new(&config.mcp_servers).await;
+    let mcp_http_network = agent_client
+        .model_proxy_url()
+        .map(|proxy_url| {
+            bifrost_agent::mcp::McpHttpNetwork::with_proxy_and_ca(
+                proxy_url.to_string(),
+                Some(data_dir.join("certs").join("ca.crt")),
+            )
+        })
+        .unwrap_or_else(bifrost_agent::mcp::McpHttpNetwork::direct);
+    let mut mcp_manager = bifrost_agent::mcp::McpManager::new_with_http_network(
+        &config.mcp_servers,
+        mcp_http_network,
+    )
+    .await;
     let mcp_opt = if mcp_manager.list_tools().is_empty() {
         None
     } else {
@@ -808,6 +846,12 @@ fn send_worker_event(event: &AgentWorkerEvent) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn admin_port_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn build_run_request_uses_protocol_version_and_session() {
@@ -827,6 +871,44 @@ mod tests {
         assert_eq!(request.work_dir.as_deref(), Some("/tmp"));
         assert_eq!(request.source.as_deref(), Some("api"));
         assert!(request.config.is_some());
+    }
+
+    #[test]
+    fn worker_proxy_port_resolution_reads_runtime_file_when_env_missing() {
+        let _lock = admin_port_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _port_guard = EnvVarGuard::remove("BIFROST_ADMIN_PORT");
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp_dir.path().join("runtime.json"),
+            r#"{"pid":123,"port":19191,"host":"127.0.0.1"}"#,
+        )
+        .expect("write runtime");
+
+        assert_eq!(
+            resolve_agent_proxy_port_from_data_dir(temp_dir.path()),
+            Some(19191)
+        );
+    }
+
+    #[test]
+    fn worker_proxy_port_resolution_prefers_environment() {
+        let _lock = admin_port_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _guard = EnvVarGuard::set("BIFROST_ADMIN_PORT", "19192");
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp_dir.path().join("runtime.json"),
+            r#"{"pid":123,"port":19191,"host":"127.0.0.1"}"#,
+        )
+        .expect("write runtime");
+
+        assert_eq!(
+            resolve_agent_proxy_port_from_data_dir(temp_dir.path()),
+            Some(19192)
+        );
     }
 
     #[test]
@@ -860,5 +942,33 @@ mod tests {
         );
         request.protocol_version = 0;
         assert!(validate_request(&request).unwrap_err().contains("protocol"));
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.as_ref() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
     }
 }

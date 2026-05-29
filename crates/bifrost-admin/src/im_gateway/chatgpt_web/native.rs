@@ -12,7 +12,7 @@ const NATIVE_HTTP_TIMEOUT_SECS: u64 = 20;
 fn shared_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
+        bifrost_core::direct_reqwest_client_builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(std::time::Duration::from_secs(NATIVE_HTTP_TIMEOUT_SECS))
             .pool_max_idle_per_host(4)
@@ -59,7 +59,7 @@ pub(super) async fn native_binary(auth: &AuthState, url: &str) -> Result<NativeB
     // Use a separate client that follows redirects — estuary/content may 302 to CDN.
     static BINARY_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     let client = BINARY_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
+        bifrost_core::direct_reqwest_client_builder()
             .redirect(reqwest::redirect::Policy::limited(5))
             .timeout(std::time::Duration::from_secs(30))
             .pool_max_idle_per_host(2)

@@ -41,7 +41,21 @@ pub(super) async fn handle_agent(
             return method_not_allowed();
         }
         let config = service.agent_config_store.load();
-        let statuses = bifrost_agent::mcp::check_server_availability(&config.mcp_servers).await;
+        let mcp_http_network = service
+            .agent_client
+            .model_proxy_url()
+            .map(|proxy_url| {
+                bifrost_agent::mcp::McpHttpNetwork::with_proxy_and_ca(
+                    proxy_url.to_string(),
+                    Some(bifrost_storage::data_dir().join("certs").join("ca.crt")),
+                )
+            })
+            .unwrap_or_else(bifrost_agent::mcp::McpHttpNetwork::direct);
+        let statuses = bifrost_agent::mcp::check_server_availability_with_http_network(
+            &config.mcp_servers,
+            mcp_http_network,
+        )
+        .await;
         return json_response(&serde_json::json!({ "servers": statuses }));
     }
 

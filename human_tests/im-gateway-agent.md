@@ -1613,6 +1613,39 @@ rm -rf ./.bifrost-test
   - 自动化真实链路回归 `CARGO_TARGET_DIR=target/agent-proxy-e2e BIFROST_E2E_RUNNER_JOBS=1 cargo run -p bifrost-e2e -- --test im_gateway_agent_model_request_uses_bifrost_proxy --test-timeout 120 --port 18884`：PASS。用例通过 `model-proxy.test host://127.0.0.1:<mock_port>` 规则把外部模型 host 转到本地 mock，Agent 请求经 Bifrost 端口代理后在 Traffic 中出现 `POST model-proxy.test` 记录。
   - 真实模型 + TLS 拦截回归 `source ~/.zshrc; BIFROST_DATA_DIR="$(mktemp -d)" cargo run --bin bifrost -- start --host 127.0.0.1 -p 18883 --unsafe-ssl --no-system-proxy --intercept-include search.bytedance.net` 后调用 `/api/im-gateway/agent/chat`：PASS。Agent Chat 返回 `success: true`，Traffic 出现 `REQ-69fa0d05-000003`，`POST https://search.bytedance.net/gpt/openapi/online/multimodal/crawl`，`status=200`，`protocol=https`，`is_tunnel=false`，request body 文件 61531 bytes、response body 文件 493 bytes。验证 Agent 已信任当前 Bifrost CA，不再因 `UnknownIssuer` 在 TLS 拦截下失败。
 
+### TC-IMA-83A: Agent worker 内置代理信任与 CLI Server 模式边界
+
+- **前置条件**:
+  - 当前源码已构建或可通过 `cargo run` 启动。
+  - 使用临时数据目录，启动命令必须包含 `--no-system-proxy`。
+- **操作步骤**:
+  1. 设置外部代理环境变量指向当前 Bifrost 端口，并通过 IM/Web Agent Chat 入口触发内置 Agent。确认 worker 请求仍能恢复当前 Bifrost 端口并加载 `data_dir/certs/ca.crt`。
+  2. 执行代码级回归：
+     ```bash
+     cargo test -p bifrost-agent default_agent_client_ignores_proxy_environment -- --nocapture
+     cargo test -p bifrost-agent explicit_model_proxy_is_used_even_when_proxy_env_is_bad -- --nocapture
+     cargo test -p bifrost-admin worker_proxy_port_resolution_reads_runtime_file_when_env_missing --lib -- --nocapture
+     cargo test -p bifrost-admin worker_proxy_port_resolution_prefers_environment --lib -- --nocapture
+     ```
+  3. 在未启动目标端口服务时执行：
+     ```bash
+     cargo run --bin bifrost -- -p 19999 agent run --runner codex --session cli-server-required 'ping'
+     ```
+- **预期结果**:
+  - `AgentClient::new()` 不读取 `HTTP_PROXY/HTTPS_PROXY/ALL_PROXY`，不会被外部 shell/system proxy 环境变量劫持。
+  - 显式 `new_with_bifrost_proxy_and_ca` 仍强制走当前 Bifrost 端口，并使用当前 Bifrost CA 信任 TLS intercept。
+  - 独立 `bifrost agent worker` 子进程从父进程请求、`BIFROST_ADMIN_PORT` 或 `runtime.json` 恢复当前 Server 端口，不退化成 direct 模型请求。
+  - HTTP MCP、MCP availability、MCP OAuth、Agent 回复远端附件下载、ChatGPT Web native/CDP HTTP 探测不读取外部 proxy env；HTTP MCP 在 Agent 有内置代理时复用同一个 Bifrost proxy URL 与 CA。
+  - CLI `agent run` 只调用 Admin Server 的 chat stream；目标端口无 Server 时明确报 `Failed to reach Bifrost ... is the proxy running?`，不会在当前 CLI 进程里 fallback 本地执行 Codex/ChatGPT Web。
+- **执行记录（2026-05-29）**:
+  - `cargo test -p bifrost-agent default_agent_client_ignores_proxy_environment -- --nocapture`：PASS。
+  - `cargo test -p bifrost-agent explicit_model_proxy_is_used_even_when_proxy_env_is_bad -- --nocapture`：PASS。
+  - `cargo test -p bifrost-agent mcp_ -- --nocapture`：PASS，覆盖 `mcp_direct_http_network_ignores_proxy_environment` 与 `mcp_explicit_http_network_uses_configured_proxy`。
+  - `cargo test -p bifrost-admin worker_proxy_port_resolution_reads_runtime_file_when_env_missing --lib -- --nocapture`：PASS。
+  - `cargo test -p bifrost-admin worker_proxy_port_resolution_prefers_environment --lib -- --nocapture`：PASS。
+  - `CARGO_TARGET_DIR=target/agent-proxy-e2e BIFROST_E2E_RUNNER_JOBS=1 cargo run -p bifrost-e2e -- --test im_gateway_agent_model_request_uses_bifrost_proxy --test-timeout 120 --port 18884`：PASS。临时 E2E 数据目录尚未生成 CA 时会告警 `proxied HTTP client could not load CA`，但不会退回 direct，模型请求仍保持经 Bifrost proxy 转发。
+  - `cargo run --bin bifrost -- -p 19999 agent run --runner codex --session cli-server-required 'ping'`：PASS，退出码 1，错误包含 `Failed to reach Bifrost at 127.0.0.1:19999 — is the proxy running?`。
+
 ### TC-IMA-84: AI 一级页合并 Agent/IM Gateway 子导航并按 URL 切换独立面板
 
 - **前置条件**:

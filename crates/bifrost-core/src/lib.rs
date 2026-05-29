@@ -23,7 +23,7 @@ pub use access_control::{
 pub use error::{BifrostError, Result};
 pub use http_client::{
     direct_blocking_reqwest_client_builder, direct_reqwest_client_builder, direct_ureq_agent,
-    direct_ureq_agent_builder,
+    direct_ureq_agent_builder, load_reqwest_certificate, proxied_reqwest_client_builder,
 };
 pub use logging::{
     init_logging, init_logging_with_config, reinit_logging_for_daemon, rotate_daemon_err_log,

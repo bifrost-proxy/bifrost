@@ -201,7 +201,7 @@ fn is_explicit_attachment_label_or_path(label: &str, path: &str) -> bool {
 pub(super) async fn download_agent_reply_remote_attachment(
     attachment: &AgentReplyRemoteAttachment,
 ) -> bifrost_core::Result<AgentReplyDownloadedAttachment> {
-    let http = reqwest::Client::builder()
+    let http = bifrost_core::direct_reqwest_client_builder()
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|error| {
