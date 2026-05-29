@@ -33,6 +33,8 @@
 
 ## 依赖项
 
+- `.github/workflows/ci.yml`
+- `.github/workflows/release.yml`
 - `install-binary.sh`
 - `install-binary.ps1`
 - `crates/bifrost-cli/src/commands/ca.rs`
@@ -102,6 +104,9 @@
 
 ## 校验要求
 
+- `grep -q 'CARGO_HTTP_MULTIPLEXING: "false"' .github/workflows/ci.yml`
+- `grep -q 'CARGO_NET_RETRY: "10"' .github/workflows/ci.yml`
+- `grep -q 'CARGO_HTTP_TIMEOUT: "120"' .github/workflows/ci.yml`
 - `bash -n install-binary.sh`
 - `bash e2e-tests/tests/test_install_binary_adaptive_download.sh`
 - `pwsh -NoProfile -File e2e-tests/tests/test_install_binary_windows_adaptive_download.ps1`

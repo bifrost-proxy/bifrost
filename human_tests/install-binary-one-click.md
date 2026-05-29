@@ -11,6 +11,7 @@
 - 所有用例都不安装真实 CA 证书，不写入真实 AI tool skills 目录。
 - 下载源自适应用例通过 shell stub 模拟网络探测和下载结果，不访问真实 GitHub 或镜像。
 - Windows installer 用例需要 `pwsh` 或 Windows PowerShell；如果当前机器不可用，必须记录为环境阻塞，不能宣称已执行通过。
+- CI Cargo 网络稳定性用例通过读取 GitHub Actions workflow，验证 CI/Release 统一关闭 Cargo HTTP/2 multiplexing、开启网络重试并提高 HTTP timeout。
 - 所有命令执行前使用：
   ```bash
   source ~/.zshrc
@@ -229,6 +230,27 @@
 - 当选中源完整下载失败时，PowerShell installer 会继续回退到候选源列表中的 `github.com`。
 - `BIFROST_DOWNLOAD_TIMEOUT` 和 `BIFROST_DOWNLOAD_TRIES` 在 PowerShell installer 中可被解析。
 
+### TC-IBOC-10 CI Cargo 依赖下载 HTTP/2 抖动回归
+
+操作步骤：
+
+1. 执行：
+   ```bash
+   source ~/.zshrc
+   grep -q 'CARGO_HTTP_MULTIPLEXING: "false"' .github/workflows/ci.yml
+   grep -q 'CARGO_NET_RETRY: "10"' .github/workflows/ci.yml
+   grep -q 'CARGO_HTTP_TIMEOUT: "120"' .github/workflows/ci.yml
+   grep -q 'CARGO_HTTP_MULTIPLEXING: "false"' .github/workflows/release.yml
+   grep -q 'CARGO_NET_RETRY: "10"' .github/workflows/release.yml
+   grep -q 'CARGO_HTTP_TIMEOUT: "120"' .github/workflows/release.yml
+   ```
+2. 检查所有命令退出码为 0。
+
+预期结果：
+
+- CI 和 Release workflow 都为 Cargo 网络层开启 10 次重试、关闭 HTTP/2 multiplexing，并将 HTTP timeout 设置为 120 秒。
+- GitHub Actions macOS CLI build 遇到 crates.io sparse index HTTP/2 framing 抖动时不再因一次 `curl failed [16]` 直接失败。
+
 ## 清理步骤
 
 - 本用例只 source shell 函数和执行 dry-run，不产生持久化测试数据。
@@ -252,3 +274,4 @@
 | 2026-05-29 | TC-IBOC-07 | `bash e2e-tests/tests/test_install_binary_adaptive_download.sh` | PASS：stub 模拟最快源完整下载失败后回退全镜像竞速，help 包含 `BIFROST_MIRROR_PROBE_TIMEOUT` |
 | 2026-05-29 | TC-IBOC-08 | `TMP_INSTALL_DIR=$(mktemp -d) ... bash install-binary.sh --no-post-install --no-modify-path` | PASS：真实 latest 探测安装 v0.0.84 到临时目录，archive 经 github.com 下载、checksum 经 ghfast.top 下载，校验通过，`bifrost --version` 输出 `bifrost 0.0.84`，临时目录已清理 |
 | 2026-05-29 | TC-IBOC-09 | `pwsh -NoProfile -File e2e-tests/tests/test_install_binary_windows_adaptive_download.ps1` | 未执行：当前 Mac 环境无 `pwsh` / `powershell`，命令返回 `zsh: command not found: pwsh`；已补测试脚本并通过源码 review，需 Windows/PowerShell 环境补跑 |
+| 2026-05-29 | TC-IBOC-10 | `grep -q 'CARGO_HTTP_MULTIPLEXING: "false"' .github/workflows/ci.yml && grep -q 'CARGO_NET_RETRY: "10"' .github/workflows/ci.yml && grep -q 'CARGO_HTTP_TIMEOUT: "120"' .github/workflows/ci.yml && grep -q 'CARGO_HTTP_MULTIPLEXING: "false"' .github/workflows/release.yml && grep -q 'CARGO_NET_RETRY: "10"' .github/workflows/release.yml && grep -q 'CARGO_HTTP_TIMEOUT: "120"' .github/workflows/release.yml` | PASS：CI 和 Release workflow 均设置 Cargo HTTP/2 multiplexing 关闭、10 次重试、120 秒 timeout |
