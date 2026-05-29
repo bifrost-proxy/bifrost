@@ -539,6 +539,7 @@ async fn run_builtin_agent_turn(
     progress_tx: mpsc::UnboundedSender<bifrost_agent::AgentTurnProgressEvent>,
     guide_channel: bifrost_agent::session::GuideChannel,
 ) -> Result<AgentWorkerRunResult, String> {
+    let source = request.source.as_deref().unwrap_or("agent-worker");
     let mut config = request.config.clone().unwrap_or_else(|| {
         bifrost_agent::AgentConfigStore::new(&bifrost_agent::config::agent_home_dir()).load()
     });
@@ -561,7 +562,7 @@ async fn run_builtin_agent_turn(
         &request.session_key,
         config.work_dir.clone(),
     );
-    session.source = request.source.unwrap_or_else(|| "agent-worker".to_string());
+    session.source = source.to_string();
     session.mark_bifrost_agent_runtime();
     session.progress_sender = Some(progress_tx);
     session.guide_channel = Some(guide_channel);
@@ -602,7 +603,8 @@ async fn run_builtin_agent_turn(
                 .and_then(|history| history.max_bytes),
         );
     }
-    let mut recorder = create_conversation_recorder(&config, &request.session_key, &mut session);
+    let mut recorder =
+        create_conversation_recorder(&config, &request.session_key, &mut session, source);
     let mut mcp_manager = bifrost_agent::mcp::McpManager::new(&config.mcp_servers).await;
     let mcp_opt = if mcp_manager.list_tools().is_empty() {
         None
@@ -666,7 +668,7 @@ async fn run_builtin_agent_turn(
             "failed"
         };
         let _ =
-            recorder.record_run_state(&request.session_key, state, Some("worker"), Some("builtin"));
+            recorder.record_run_state(&request.session_key, state, Some(source), Some("builtin"));
     }
     result.map(|turn_result| AgentWorkerRunResult {
         history_path,
@@ -694,10 +696,35 @@ fn restore_session_from_history_path(
     }
     session.history = report.messages;
     session.history_version = session.history_version.saturating_add(1);
+    session.last_response_tokens = None;
+    session.last_response_history_len = None;
+    session.memory_cleared = false;
     let summary = bifrost_agent::persistence::scan_session_summary(&path);
     session.title = summary.title;
     if session.work_dir.is_none() {
         session.work_dir = summary.work_dir;
+    }
+    if !summary.source.is_empty() {
+        session.source = summary.source;
+    }
+    match bifrost_agent::persistence::load_session_runtime_state(&path) {
+        Ok(runtime_state) => {
+            session.current_goal = runtime_state.current_goal;
+            session.current_plan = runtime_state.current_plan;
+            session.total_tokens_used = runtime_state.total_tokens_used;
+            session.restore_token_snapshot(runtime_state.last_response_tokens);
+            session.compaction_count = runtime_state.compaction_count;
+            session.resolved_base_instructions = runtime_state.base_instructions;
+            bifrost_agent::tools::goal::goal_runtime_apply(
+                session,
+                bifrost_agent::tools::goal::GoalRuntimeEvent::ThreadResumed,
+            );
+        }
+        Err(error) => {
+            tracing::warn!(history_path = %path.display(), error = %error, "restored worker agent history without runtime state");
+            session.total_tokens_used = Some(summary.total_tokens);
+            session.compaction_count = summary.compaction_count;
+        }
     }
     session.recorder = Some(ConversationRecorder::from_existing_file(path, max_bytes));
     Ok(())
@@ -727,6 +754,7 @@ fn create_conversation_recorder(
     config: &bifrost_agent::AgentConfig,
     session_key: &str,
     session: &mut bifrost_agent::AgentSession,
+    source: &str,
 ) -> Option<ConversationRecorder> {
     if config.is_ephemeral() {
         return None;
@@ -740,7 +768,7 @@ fn create_conversation_recorder(
         return None;
     }
     if let Some(mut recorder) = session.recorder.take() {
-        let _ = recorder.record_run_state(session_key, "running", Some("worker"), Some("builtin"));
+        let _ = recorder.record_run_state(session_key, "running", Some(source), Some("builtin"));
         return Some(recorder);
     }
     let data_dir = bifrost_agent::config::agent_home_dir();
@@ -754,11 +782,11 @@ fn create_conversation_recorder(
         serde_json::json!({
             "model": config.model,
             "provider": config.model_provider,
-            "source": "agent-worker",
+            "source": source,
             "base_instructions": bifrost_agent::prompt::resolve_base_instructions_text(config, None),
         }),
     );
-    let _ = recorder.record_run_state(session_key, "running", Some("worker"), Some("builtin"));
+    let _ = recorder.record_run_state(session_key, "running", Some(source), Some("builtin"));
     Some(recorder)
 }
 

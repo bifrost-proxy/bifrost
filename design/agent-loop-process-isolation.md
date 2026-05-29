@@ -36,6 +36,8 @@ Bifrost 主进程同时承载流量代理、Admin API、IM Gateway 与 Agent/Run
 4. 状态与 stop。
    - 主进程仍用 `AgentSessionManager` 做 busy gate 和 session preview。
    - worker progress 反向同步 active turn status、title、plan/progress card。
+   - worker 与主进程各自持有 `ImGatewayService`，send_msg / schedule 这类工具写入的消息与定时任务落盘后，主进程读取 store 前必须重新加载磁盘数据，避免独立进程写入后 API/list 仍读到旧内存快照。
+   - worker 恢复 JSONL history 时必须恢复 runtime state（plan、goal、token snapshot、compaction count、base instructions）和原始 source channel，避免续聊后 `/status`、plan、timeline run_state 与主进程恢复路径不一致。
    - `/stop` 聚合 internal cooperative signal、内置 Agent worker、外置 Runner worker、legacy external CLI run stop；`/_bifrost/api/im-gateway/agent/chat` 的 `/stop` 作为控制成功响应返回 200 + `stopped=true`，不把 worker stopped 当作 500。
    - `/clear`/`/reset` 在 `/_bifrost/api/im-gateway/agent/chat` 中同样走 session-free 控制路径：停止 active worker、清理内存 session/queue，并删除 built-in Agent adapter 持久化 session state 与 JSONL history，确保服务重启后不会恢复旧上下文。
    - SSE 断开或 stop 后清理 worker，避免孤儿进程。
@@ -75,6 +77,14 @@ Bifrost 主进程同时承载流量代理、Admin API、IM Gateway 与 Agent/Run
 - 验证 `/agent/chat` 非流式测试入口中的 `/stop` 返回 200 + stopped 语义，原 active chat 收敛后 session 可继续使用。
 - 验证 `/reset` 删除持久化 built-in Agent history，模拟服务重启后 fresh chat 不携带 reset 前消息。
 
+CI shell E2E worker 隔离回归：
+
+- `test_agent_send_msg_feishu_card.sh`：worker 进程通过 `send_msg` 工具写入 Feishu card 后，主进程 message log API 重新加载磁盘 store 并能立刻查到 outbound 记录。
+- `test_agent_send_msg_default_channel.sh`：worker 使用默认消息通道发送消息后，主进程 message log / schedule 相关 store 不因进程内缓存缺失而返回空数据。
+- `test_agent_chat_history_continue.sh`：worker 续聊恢复 JSONL runtime state，`plan_steps` 不丢失。
+- `test_agent_direct_path_switch.sh`：worker 返回 `work_dir_switched` 后主进程 session state 立即更新，后续 `/status` 显示新工作目录。
+- `test_agent_run_timeline_channel_unification.sh`：worker 写入 run_state 时保留请求来源 `api` / `web`，不把所有状态归因成 `worker` 或 `admin-api`。
+
 ### 真实场景测试
 
 `human_tests/agent-loop-process-isolation.md`：
@@ -85,6 +95,7 @@ Bifrost 主进程同时承载流量代理、Admin API、IM Gateway 与 Agent/Run
 - TC-ALPI-04：外置 Runner 请求启动后出现独立 external-runner worker，主进程继续响应。
 - TC-ALPI-05：`/stop` 能停止外置 Runner worker。
 - TC-ALPI-06：CI/E2E runner 进程作为 `current_exe()` 时可启动 worker，`/agent/chat` 的 `/stop` 和 `/reset` 控制语义保持 200 成功响应并清理持久化历史。
+- TC-ALPI-07：worker 独立进程写入 send_msg/schedule/history/timeline/work_dir 后，主进程 API 读取到最新落盘状态，覆盖 CI shell E2E 失败路径。
 
 ## Review/Fix/Test 闭环方案
 

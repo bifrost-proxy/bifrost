@@ -906,6 +906,11 @@ pub(super) async fn handle_agent(
             }
         };
         crate::im_gateway::agent_worker::clear_active_worker(&session_key);
+        if let Ok(turn_result) = &result {
+            if let Some(new_dir) = turn_result.work_dir_switched.as_ref() {
+                session.work_dir = Some(new_dir.clone());
+            }
+        }
         remember_session_state_from_agent_session(
             &session,
             crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,

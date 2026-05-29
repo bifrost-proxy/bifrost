@@ -44,6 +44,7 @@ impl ImMessageLogStore {
     /// Add a message log entry.
     pub fn add(&self, log: ImMessageLog) -> Result<()> {
         let mut data = self.data.write();
+        self.refresh_locked(&mut data);
         data.messages.push(log);
         self.trim_locked(&mut data);
         self.save_locked(&data)
@@ -51,6 +52,7 @@ impl ImMessageLogStore {
 
     /// List all message logs, newest first.
     pub fn list(&self) -> Vec<ImMessageLog> {
+        self.refresh_from_disk();
         let data = self.data.read();
         let mut msgs = data.messages.clone();
         msgs.reverse();
@@ -59,6 +61,7 @@ impl ImMessageLogStore {
 
     /// List message logs for a specific provider, newest first.
     pub fn list_by_provider(&self, provider_id: &str) -> Vec<ImMessageLog> {
+        self.refresh_from_disk();
         let data = self.data.read();
         let mut msgs: Vec<_> = data
             .messages
@@ -73,6 +76,7 @@ impl ImMessageLogStore {
     /// Clear all message logs for a specific provider.
     pub fn clear_by_provider(&self, provider_id: &str) -> Result<()> {
         let mut data = self.data.write();
+        self.refresh_locked(&mut data);
         data.messages.retain(|m| m.provider_id != provider_id);
         self.save_locked(&data)
     }
@@ -80,6 +84,7 @@ impl ImMessageLogStore {
     /// Clear all message logs.
     pub fn clear_all(&self) -> Result<()> {
         let mut data = self.data.write();
+        self.refresh_locked(&mut data);
         data.messages.clear();
         self.save_locked(&data)
     }
@@ -126,6 +131,18 @@ impl ImMessageLogStore {
             )))
         })?;
         Ok(())
+    }
+
+    fn refresh_from_disk(&self) {
+        if let Some(data) = Self::load_from_disk(&self.file_path) {
+            *self.data.write() = data;
+        }
+    }
+
+    fn refresh_locked(&self, data: &mut StoreData) {
+        if let Some(latest) = Self::load_from_disk(&self.file_path) {
+            *data = latest;
+        }
     }
 
     fn load_from_disk(file_path: &Path) -> Option<StoreData> {

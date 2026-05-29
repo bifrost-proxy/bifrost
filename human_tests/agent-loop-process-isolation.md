@@ -169,6 +169,27 @@ BIFROST_DATA_DIR="$TEST_DIR" ./target/debug/bifrost start -p 18881 --unsafe-ssl 
 - `/agent/chat` 的 `/stop` 返回 200 + `stopped=true`，不再因为 worker stopped 被包装成 500。
 - `/agent/chat` 的 `/reset` 会清理 built-in Agent 持久化 history，模拟服务重启后的 fresh chat 不携带 reset 前消息。
 
+### TC-ALPI-07：独立 worker 写入状态后主进程读取不 stale
+
+操作步骤：
+
+1. 使用当前构建出的 `target/debug/bifrost` 作为 `BIFROST_BIN`，跳过重复构建执行以下 CI shell 回归：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost BIFROST_PORT=19331 MOCK_PORT=19332 bash e2e-tests/tests/test_agent_send_msg_feishu_card.sh
+   SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost BIFROST_PORT=19341 MOCK_PORT=19342 bash e2e-tests/tests/test_agent_send_msg_default_channel.sh
+   SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost BIFROST_PORT=19351 MOCK_PORT=19352 bash e2e-tests/tests/test_agent_chat_history_continue.sh
+   SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost BIFROST_PORT=19361 MOCK_PORT=19362 bash e2e-tests/tests/test_agent_direct_path_switch.sh
+   SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost BIFROST_PORT=19371 MOCK_PORT=19372 bash e2e-tests/tests/test_agent_run_timeline_channel_unification.sh
+   ```
+2. 观察每个脚本的 PASS 输出。
+
+预期结果：
+
+- Feishu card / 默认通道 send_msg 用例能从主进程 message log API 读到 worker 进程写入的 outbound 记录。
+- history continue 用例返回恢复后的 `plan_steps`，不为 `null`。
+- direct path switch 后 `/status` 显示新工作目录。
+- timeline run_state 同时包含 `api` 和 `web` 来源，不出现把 worker 子进程误作为用户渠道的状态。
+
 ## 清理步骤
 
 ```bash
@@ -185,3 +206,5 @@ rm -f /tmp/bifrost-agent-worker-human.sse /tmp/bifrost-agent-worker-disconnect.s
 | --- | --- | --- | --- |
 | 2026-05-29 | TC-ALPI-01/02/03/04/05 | 执行 `bash e2e-tests/tests/test_agent_worker_process_isolation.sh`，脚本使用临时 `BIFROST_DATA_DIR`、慢速本地 mock 模型、slow mock external runner、`--unsafe-ssl --skip-cert-check --no-system-proxy` 启动当前构建 bifrost，验证内置 worker、外置 runner worker、`/stop`、SSE 断开清理和 Admin API 存活 | 通过 |
 | 2026-05-29 | TC-ALPI-06 | 执行 `BIFROST_E2E_RETRY_FAILED_ONCE=1 SKIP_FRONTEND_BUILD=1 cargo run -p bifrost-e2e -- --port 18080 --jobs 1 --timeout 900 --test im_gateway_agent_chat_ --test-timeout 180`，验证 `bifrost-e2e` 当前可执行文件可作为 worker pass-through，且 `/agent/chat` `/stop` 与 `/reset` 控制语义不回归 | 通过：5/5 passed |
+| 2026-05-29 | TC-ALPI-01/02/03/04/05 | 重新执行 `bash e2e-tests/tests/test_agent_worker_process_isolation.sh`，覆盖本轮 worker state 修复后内置/外置 worker、stop、SSE 断开清理和 Admin API 存活 | 通过 |
+| 2026-05-29 | TC-ALPI-07 | 依次执行 `test_agent_send_msg_feishu_card.sh`、`test_agent_send_msg_default_channel.sh`、`test_agent_chat_history_continue.sh`、`test_agent_direct_path_switch.sh`、`test_agent_run_timeline_channel_unification.sh`，均使用 `SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost` 和独立临时端口/数据目录 | 通过：5/5 PASS |

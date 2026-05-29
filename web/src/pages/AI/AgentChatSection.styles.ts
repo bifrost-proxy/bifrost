@@ -5,11 +5,14 @@ type ThemeToken = ReturnType<typeof theme.useToken>["token"];
 
 export function createAgentChatStyles(
   isCompact: boolean,
+  isNarrow: boolean,
   token: ThemeToken,
 ): Record<string, CSSProperties> {
+  const horizontalPadding = isNarrow ? 12 : isCompact ? 16 : 24;
   return {
     shell: {
       height: "100%",
+      minWidth: 0,
       minHeight: 0,
       display: "flex",
       flexDirection: "column",
@@ -19,7 +22,10 @@ export function createAgentChatStyles(
       flex: 1,
       minHeight: 0,
       display: "grid",
-      gridTemplateColumns: isCompact
+      minWidth: 0,
+      gridTemplateColumns: isNarrow
+        ? "minmax(0, 1fr)"
+        : isCompact
         ? "minmax(0, 1fr) minmax(180px, 240px)"
         : "minmax(0, 1fr) 280px",
       gap: 16,
@@ -27,6 +33,7 @@ export function createAgentChatStyles(
     },
     conversationCard: {
       height: "100%",
+      minWidth: 0,
       minHeight: 0,
       display: "flex",
       flexDirection: "column",
@@ -56,9 +63,11 @@ export function createAgentChatStyles(
     },
     conversation: {
       flex: 1,
+      minWidth: 0,
       minHeight: 0,
       overflowY: "auto",
-      padding: "28px 0 0",
+      overflowX: "hidden",
+      padding: `28px ${horizontalPadding}px 0`,
       boxSizing: "border-box",
       scrollPaddingTop: 28,
       scrollbarGutter: "stable",
@@ -68,6 +77,7 @@ export function createAgentChatStyles(
     },
     conversationTrack: {
       width: "100%",
+      minWidth: 0,
       maxWidth: 750,
       flex: "1 0 auto",
       paddingBottom: 72,
@@ -81,9 +91,10 @@ export function createAgentChatStyles(
     },
     sideRail: {
       height: "100%",
+      minWidth: 0,
       minHeight: 0,
       overflow: "hidden",
-      display: "flex",
+      display: isNarrow ? "none" : "flex",
       flexDirection: "column",
     },
     threadCard: {
@@ -193,14 +204,39 @@ export function createAgentChatStyles(
       bottom: 0,
       zIndex: 3,
       marginTop: "auto",
-      padding: "12px 16px 8px",
+      padding: isNarrow ? "12px 0 8px" : "12px 16px 8px",
       background: `linear-gradient(to top, ${token.colorBgContainer} 0%, ${token.colorBgContainer} 88%, transparent 100%)`,
       width: "100%",
+      minWidth: 0,
       boxSizing: "border-box",
+    },
+    scrollToBottomLayer: {
+      position: "absolute",
+      left: 0,
+      right: 0,
+      top: -52,
+      zIndex: 5,
+      height: 44,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      transition: "opacity 180ms ease, transform 180ms ease",
+      willChange: "opacity, transform",
+    },
+    scrollToBottomButton: {
+      width: 42,
+      height: 42,
+      minWidth: 42,
+      borderRadius: "50%",
+      color: token.colorText,
+      background: token.colorBgElevated,
+      border: `1px solid ${token.colorBorderSecondary}`,
+      boxShadow: token.boxShadowSecondary,
     },
     composerTrack: {
       position: "relative",
       width: "100%",
+      minWidth: 0,
       maxWidth: 750,
       margin: "0 auto",
       padding: 12,

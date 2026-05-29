@@ -135,6 +135,11 @@ export function historyEventsToMessages(
             ...lastSteps[lastPendingIndex],
             status: step.status,
             result: step.result,
+            completedAt: step.completedAt,
+            durationMs: durationMsBetween(
+              lastSteps[lastPendingIndex].startedAt,
+              step.completedAt,
+            ),
           };
           messages[messages.length - 1] = {
             ...lastMessage,
@@ -149,6 +154,11 @@ export function historyEventsToMessages(
           ...pendingSteps[pendingIndex],
           status: step.status,
           result: step.result,
+          completedAt: step.completedAt,
+          durationMs: durationMsBetween(
+            pendingSteps[pendingIndex].startedAt,
+            step.completedAt,
+          ),
         };
         return;
       }
@@ -302,6 +312,7 @@ function historyEventToProcessStep(event: HistoryEvent): ProcessStep | null {
       detail: stringFrom(event.content.arguments),
       args: stringFrom(event.content.arguments),
       status: "running",
+      startedAt: event.timestamp,
     };
   }
   if (event.event_type === "tool_result") {
@@ -311,9 +322,21 @@ function historyEventToProcessStep(event: HistoryEvent): ProcessStep | null {
       summary: name,
       result: stringFrom(event.content.result),
       status: event.content.success === false ? "failed" : "success",
+      completedAt: event.timestamp,
     };
   }
   return null;
+}
+
+function durationMsBetween(start?: number, end?: number) {
+  if (typeof start !== "number" || typeof end !== "number") {
+    return undefined;
+  }
+  return Math.max(0, (normalizeTimestampSeconds(end) - normalizeTimestampSeconds(start)) * 1000);
+}
+
+function normalizeTimestampSeconds(timestamp: number) {
+  return timestamp > 1_000_000_000_000 ? timestamp / 1000 : timestamp;
 }
 
 function findPendingToolStep(steps: ProcessStep[], name?: string) {

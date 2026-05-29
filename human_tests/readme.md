@@ -171,7 +171,7 @@
 | [agent-plan-lifecycle.md](./agent-plan-lifecycle.md) | Agent Plan 生命周期 | 9 | 参考 Codex `update_plan` 快照语义，静态验收 plan 不再按旧 completed 步骤增殖、同一工具调用不重复消费、typed PlanUpdate runtime event 方案、空 plan 清空当前快照、compaction prompt 不注入 plan 自然语言历史、compaction 不是 plan runtime state、local-ci release 二进制新鲜度，后续单元/E2E/飞书 IM 真链路验证矩阵 |
 | [agent-token-usage.md](./agent-token-usage.md) | Agent Token Usage 统计口径 | 6 | 区分累计 `total_tokens_used` 与当前 context `last_response_tokens`，Chat Completions `prompt_tokens` / Responses `input_tokens` 作为 context 快照，JSONL `context_tokens` 持久化与旧事件兼容，AI Chat 输入框上方 token HUD 展示实时消耗、context 占比和压缩状态，单元、真实服务 E2E 与截图验收入口 |
 | [chat-plan-density.md](./chat-plan-density.md) | Agent Chat Plan 密度与输入框高度 | 6 | Plan 面板紧凑展示、不展示二级标题行、todo 状态图标、超过 5 条 step 后内部滚动、输入框默认 2 行并扩高到 7 行上限、hint 不展示 session id、线程 tooltip 仅图标延迟触发、亮色/暗色主题可读性 |
-| [agent-loop-process-isolation.md](./agent-loop-process-isolation.md) | Agent Loop 进程隔离 | 6 | 内置 Bifrost Agent 与外置 Runner 默认每会话独立 worker 子进程，主进程只转发输入/进度/结果，`/stop` 可停止 worker 且代理/Admin API 继续响应，SSE 断开自动清理 worker，并覆盖 E2E runner 当前可执行文件 worker pass-through 与 `/agent/chat` `/stop`/`/reset` 控制语义 |
+| [agent-loop-process-isolation.md](./agent-loop-process-isolation.md) | Agent Loop 进程隔离 | 7 | 内置 Bifrost Agent 与外置 Runner 默认每会话独立 worker 子进程，主进程只转发输入/进度/结果，`/stop` 可停止 worker 且代理/Admin API 继续响应，SSE 断开自动清理 worker，并覆盖 E2E runner 当前可执行文件 worker pass-through、`/agent/chat` `/stop`/`/reset` 控制语义，以及 worker 独立进程写入 send_msg/schedule/history/timeline/work_dir 后主进程读取不 stale 的 CI 回归 |
 
 ### IM Gateway 测试
 
@@ -189,7 +189,7 @@
 | [agent-p1-tools.md](./agent-p1-tools.md) | Agent P1 Tools 对齐 | 6 | `/goal` 显式入口、Goal 生命周期、`apply_patch`、raw patch body 兼容、`exec_command` + `write_stdin` 统一终端会话复用与交互输入、真实 exit_code 收敛、`bifrost-agent` 全量回归 |
 | [update-plan.md](./update-plan.md) | Update Plan 工具 | 4 | 真实 Bifrost + Admin API + mock model server 黑盒验证 update_plan 工具注册、runtime 强制收口未完成计划、同一 turn 最终快照不继承早先 completed 步骤、同一 session 下一轮新任务计划不继承旧 completed 步骤、`plan: []` 清空当前快照、compaction 不改变 plan 持久化恢复状态、`plan_steps` 最终返回与 helper 回归测试 |
 | [agent-loop-timeouts.md](./agent-loop-timeouts.md) | Agent Loop Runtime Limits | 3 | 真实 Bifrost + Admin API + mock model server 黑盒验证默认 600 秒级超时、1000 次迭代上限，以及 35+ 次工具调用不会在 30 次时提前中断 |
-| [agent-session-persistence.md](./agent-session-persistence.md) | Agent Session 持久化 | 17 | Session JSONL 文件生成、事件类型完整性（session_start/user_message/assistant_message/tool_call/tool_result）、跨 turn 复用 recorder、History 列表/详情/删除 API、WebUI 事件时间线查看与删除、Sessions 列表 title/整行点击进入详情、详情页 Messages/Settings Tab 与内容区域真实滚动、暗色主题兼容、恢复持久化 session 后继续 tool loop 回归、重启恢复后 Context 使用最近响应快照而非累计 token、Sessions 列表不把空闲恢复会话误报为 Running |
+| [agent-session-persistence.md](./agent-session-persistence.md) | Agent Session 持久化 | 18 | Session JSONL 文件生成、事件类型完整性（session_start/user_message/assistant_message/tool_call/tool_result）、跨 turn 复用 recorder、History 列表/详情/删除 API、WebUI 事件时间线查看与删除、Sessions 列表 title/整行点击进入详情、详情页 Messages/Settings Tab 与内容区域真实滚动、暗色主题兼容、恢复持久化 session 后继续 tool loop 回归、重启恢复后 Context 使用最近响应快照而非累计 token、Sessions 列表不把空闲恢复会话误报为 Running、Agent Chat 已完成 Loop 默认折叠与工具摘要耗时 |
 | [agent-runtime-review-fixes.md](./agent-runtime-review-fixes.md) | Agent Runtime Review Fixes | 3 | AgentSession 自动装配 SkillRegistry、MEMORY.md 并发 append 文件锁、system prompt 注入有界 Skill 摘要 |
 | [agent-skills-admin-cli.md](./agent-skills-admin-cli.md) | Agent Skills Admin and CLI | 3 | Skill import multipart/bytes 接口、AgentSkillError 错误码分层、IM CLI secret 缺失错误 |
 

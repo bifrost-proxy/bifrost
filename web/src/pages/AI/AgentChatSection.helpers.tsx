@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Col, Row, Typography, theme } from "antd";
 import {
   CheckCircleOutlined,
@@ -20,6 +20,9 @@ export type ProcessStep = {
   /** Tool result string */
   result?: string;
   status?: "running" | "success" | "failed";
+  startedAt?: number;
+  completedAt?: number;
+  durationMs?: number;
 };
 
 export type ChatMessage = {
@@ -1297,6 +1300,7 @@ export function eventToProcessStep(event: Record<string, unknown>): ProcessStep 
       detail: args,
       args: args || undefined,
       status: "running",
+      startedAt: Date.now() / 1000,
     };
   }
   if (eventType === "plan_updated" && Array.isArray(event.steps)) {
@@ -1402,6 +1406,68 @@ export function ExpandableText({ text, label }: { text: string; label: string })
   );
 }
 
+function formatProcessStepsDuration(steps: ProcessStep[], nowSeconds: number) {
+  const toolSteps = steps.filter((step) => step.type === "tool");
+  if (toolSteps.length === 0) {
+    return undefined;
+  }
+  const totalMs = toolSteps.reduce(
+    (total, step) => total + processStepDurationMs(step, nowSeconds),
+    0,
+  );
+  if (totalMs > 0) {
+    return formatCompactDuration(totalMs / 1000);
+  }
+  const startedAt = toolSteps
+    .map((step) => step.startedAt)
+    .filter((value): value is number => typeof value === "number")
+    .map(normalizeTimestampSeconds);
+  const completedAt = toolSteps
+    .map((step) => step.completedAt)
+    .filter((value): value is number => typeof value === "number")
+    .map(normalizeTimestampSeconds);
+  if (startedAt.length === 0 || completedAt.length === 0) {
+    return undefined;
+  }
+  const spanSeconds = Math.max(...completedAt) - Math.min(...startedAt);
+  return spanSeconds > 0 ? formatCompactDuration(spanSeconds) : undefined;
+}
+
+function processStepDurationMs(step: ProcessStep, nowSeconds: number) {
+  if (typeof step.durationMs === "number" && step.durationMs >= 0) {
+    return step.durationMs;
+  }
+  if (typeof step.startedAt !== "number") {
+    return 0;
+  }
+  const endSeconds =
+    typeof step.completedAt === "number" ? step.completedAt : nowSeconds;
+  return Math.max(
+    0,
+    (normalizeTimestampSeconds(endSeconds) -
+      normalizeTimestampSeconds(step.startedAt)) *
+      1000,
+  );
+}
+
+function normalizeTimestampSeconds(timestamp: number) {
+  return timestamp > 1_000_000_000_000 ? timestamp / 1000 : timestamp;
+}
+
+function formatCompactDuration(seconds: number) {
+  const rounded = Math.max(1, Math.round(seconds));
+  const hours = Math.floor(rounded / 3600);
+  const minutes = Math.floor((rounded % 3600) / 60);
+  const secs = rounded % 60;
+  if (hours > 0) {
+    return secs > 0 ? `${hours}h ${minutes}m ${secs}s` : `${hours}h ${minutes}m`;
+  }
+  if (minutes > 0) {
+    return secs > 0 ? `${minutes}m ${secs}s` : `${minutes}m`;
+  }
+  return `${secs}s`;
+}
+
 /**
  * Collapsible "thinking process" block inside a message bubble.
  * Shows thinking steps interleaved with tool calls.
@@ -1416,6 +1482,7 @@ export function ProcessStepsBlock({
   const { token } = theme.useToken();
   const [expanded, setExpanded] = useState(false);
   const [expandedTools, setExpandedTools] = useState<Set<number>>(new Set());
+  const [nowSeconds, setNowSeconds] = useState(() => Date.now() / 1000);
   const visibleSteps = isRunning
     ? steps
     : steps.filter(
@@ -1423,6 +1490,17 @@ export function ProcessStepsBlock({
           step.type !== "compaction" &&
           !(step.type === "status" && step.summary.startsWith("Run state:")),
       );
+
+  useEffect(() => {
+    if (!isRunning) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      setNowSeconds(Date.now() / 1000);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [isRunning]);
+
   if (visibleSteps.length === 0) return null;
   const mutedColor = token.colorTextQuaternary;
   const textColor = token.colorTextTertiary;
@@ -1432,11 +1510,12 @@ export function ProcessStepsBlock({
     : 0;
   const commandCount = visibleSteps.filter((step) => step.type === "tool").length;
   const summaryCount = commandCount || visibleSteps.length;
+  const durationLabel = formatProcessStepsDuration(visibleSteps, nowSeconds);
   const summaryText = `${isRunning ? "Running" : "Ran"} ${
     summaryCount
   } command${summaryCount > 1 ? "s" : ""}${
     runningCount > 0 ? ` (${runningCount} active)` : ""
-  }`;
+  }${durationLabel ? ` · ${durationLabel}` : ""}`;
 
   const toggleToolExpand = (index: number) => {
     setExpandedTools((prev) => {

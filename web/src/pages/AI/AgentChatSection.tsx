@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Button, Card, Col, Empty, Grid, Input, Modal, Row, Segmented, Select, Space, Tag, Typography, message as antdMessage, theme } from "antd";
-import { DeleteOutlined, FolderOpenOutlined, BorderOutlined, PlusOutlined, RobotOutlined, SendOutlined, SettingOutlined } from "@ant-design/icons";
+import { DeleteOutlined, DownOutlined, FolderOpenOutlined, BorderOutlined, PlusOutlined, RobotOutlined, SendOutlined, SettingOutlined } from "@ant-design/icons";
 import { apiFetch } from "../../api/apiFetch";
 import { buildApiUrl } from "../../runtime";
 import { getClientId } from "../../services/clientId";
@@ -105,6 +105,7 @@ export default function AgentChatSection() {
   const { token } = theme.useToken();
   const screens = useBreakpoint();
   const isCompact = !screens.lg;
+  const isNarrow = !screens.md;
   const [draft, setDraft] = useState("");
   const [pendingImages, setPendingImages] = useState<PendingChatImage[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>(STARTER_MESSAGES);
@@ -143,6 +144,7 @@ export default function AgentChatSection() {
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
   const [planCollapsed, setPlanCollapsed] = useState(true);
   const [defaultWorkDir, setDefaultWorkDir] = useState("");
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const messagesScrollRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const pendingInstantScrollRef = useRef(true);
@@ -151,23 +153,41 @@ export default function AgentChatSection() {
   const threadsRef = useRef<AgentThreadSummary[]>([]);
   const initialThreadAutoSelectRef = useRef(false);
 
-  const scrollMessagesToBottom = useCallback(() => {
+  const scrollMessagesToBottom = useCallback((force = true) => {
     const element = messagesScrollRef.current;
     if (!element) {
       return;
     }
+    if (!force && !pendingInstantScrollRef.current && !userNearBottomRef.current) {
+      return;
+    }
     element.scrollTop = element.scrollHeight;
+    userNearBottomRef.current = true;
+    setShowScrollToBottom(false);
   }, []);
 
-  const scheduleMessagesBottomScroll = useCallback(() => {
-    scrollMessagesToBottom();
+  const scheduleMessagesBottomScroll = useCallback((force = false) => {
+    const scroll = () => scrollMessagesToBottom(force);
+    scroll();
     requestAnimationFrame(() => {
-      scrollMessagesToBottom();
-      requestAnimationFrame(scrollMessagesToBottom);
+      scroll();
+      requestAnimationFrame(scroll);
     });
-    window.setTimeout(scrollMessagesToBottom, 80);
-    window.setTimeout(scrollMessagesToBottom, 240);
+    window.setTimeout(scroll, 80);
+    window.setTimeout(scroll, 240);
   }, [scrollMessagesToBottom]);
+
+  const updateMessagesScrollState = useCallback(() => {
+    const element = messagesScrollRef.current;
+    if (!element) {
+      return;
+    }
+    const distanceFromBottom =
+      element.scrollHeight - element.scrollTop - element.clientHeight;
+    const isNearBottom = distanceFromBottom < 96;
+    userNearBottomRef.current = isNearBottom;
+    setShowScrollToBottom(!isNearBottom);
+  }, []);
 
   useEffect(() => {
     if (!pendingInstantScrollRef.current && !userNearBottomRef.current) {
@@ -207,14 +227,18 @@ export default function AgentChatSection() {
   }, [scheduleMessagesBottomScroll]);
 
   const handleMessagesScroll = useCallback(() => {
+    updateMessagesScrollState();
+  }, [updateMessagesScrollState]);
+
+  useEffect(() => {
     const element = messagesScrollRef.current;
     if (!element) {
       return;
     }
-    const distanceFromBottom =
-      element.scrollHeight - element.scrollTop - element.clientHeight;
-    userNearBottomRef.current = distanceFromBottom < 96;
-  }, []);
+    element.addEventListener("scroll", updateMessagesScrollState, { passive: true });
+    updateMessagesScrollState();
+    return () => element.removeEventListener("scroll", updateMessagesScrollState);
+  }, [updateMessagesScrollState]);
 
   const currentSessionFallbackTitle = useMemo(
     () => titleFromChatMessages(messages),
@@ -777,6 +801,7 @@ export default function AgentChatSection() {
     setSlashRunner(undefined);
     setTelemetry(EMPTY_TELEMETRY);
     setQueuedInputs([]);
+    setRunning(false);
     setWorkDir(selectedWorkDir);
     setRunnerId(newChatRunnerId);
     setNewChatOpen(false);
@@ -905,8 +930,8 @@ export default function AgentChatSection() {
   );
 
   const styles = useMemo(
-    () => createAgentChatStyles(isCompact, token),
-    [isCompact, token],
+    () => createAgentChatStyles(isCompact, isNarrow, token),
+    [isCompact, isNarrow, token],
   );
 
   const applyQueueEvent = (event: Record<string, unknown>) => {
@@ -1290,6 +1315,7 @@ export default function AgentChatSection() {
         toolName: string,
         success: boolean,
         toolResult?: string,
+        durationMs?: number,
       ) => {
         const targetId = assistantSegmentId;
         setMessages((prev) => {
@@ -1311,6 +1337,8 @@ export default function AgentChatSection() {
               ...steps[stepIndex],
               status: success ? "success" : "failed",
               result: toolResult || undefined,
+              completedAt: Date.now() / 1000,
+              durationMs,
             };
             const next = [...messages];
             next[index] = { ...messages[index], processSteps: steps };
@@ -1448,7 +1476,12 @@ export default function AgentChatSection() {
             const toolName = stringFrom(log.tool_name) || stringFrom(log.toolName) || "tool";
             const success = log.success !== false;
             const toolResult = stringFrom(log.result);
-            updateRunningToolStep(toolName, success, toolResult || undefined);
+            updateRunningToolStep(
+              toolName,
+              success,
+              toolResult || undefined,
+              typeof event.durationMs === "number" ? event.durationMs : undefined,
+            );
             return;
           }
           const step = eventToProcessStep(event);
@@ -1695,7 +1728,6 @@ export default function AgentChatSection() {
                 icon={<PlusOutlined />}
                 data-testid="agent-chat-new"
                 onClick={handleOpenNewChat}
-                disabled={running}
               >
                 New Chat
               </Button>
@@ -1742,6 +1774,26 @@ export default function AgentChatSection() {
             <div ref={messagesEndRef} />
 
             <div style={styles.composer}>
+              <div
+                data-testid="agent-chat-scroll-bottom-layer"
+                style={{
+                  ...styles.scrollToBottomLayer,
+                  opacity: showScrollToBottom ? 1 : 0,
+                  transform: showScrollToBottom
+                    ? "translateY(0) scale(1)"
+                    : "translateY(10px) scale(0.96)",
+                  pointerEvents: showScrollToBottom ? "auto" : "none",
+                }}
+              >
+                <Button
+                  shape="circle"
+                  icon={<DownOutlined />}
+                  aria-label="Scroll to bottom"
+                  data-testid="agent-chat-scroll-bottom"
+                  style={styles.scrollToBottomButton}
+                  onClick={() => scheduleMessagesBottomScroll(true)}
+                />
+              </div>
               <div style={styles.composerTrack} data-testid="agent-chat-composer-track">
                 <AgentChatTokenHud telemetry={telemetry} styles={styles} />
                 <Space direction="vertical" size={6} style={{ width: "100%" }}>

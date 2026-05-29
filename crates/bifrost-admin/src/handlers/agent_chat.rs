@@ -125,7 +125,7 @@ async fn handle_stream(req: Request<Incoming>, state: SharedAdminState) -> Respo
             });
         }
     };
-    session.source = "admin-api".to_string();
+    session.source = "web".to_string();
     session.mark_bifrost_agent_runtime();
     let is_manual_compaction = body.message.trim() == "/compact";
     session.guide_channel = Some(
@@ -294,7 +294,7 @@ async fn run_agent_stream(
         &config,
         session.work_dir.clone(),
         body.history_path.clone(),
-        Some("admin-api".to_string()),
+        Some("web".to_string()),
     );
     worker_request.system_prompt = body.system_prompt.clone();
     let worker_client = match crate::im_gateway::agent_worker::AgentWorkerClient::current_exe() {

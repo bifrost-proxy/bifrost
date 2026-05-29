@@ -399,6 +399,9 @@ mark.mark-current {
 .agent-chat-markdown {
   font-size: 14px;
   line-height: 1.7;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   word-wrap: break-word;
 }
 
@@ -449,6 +452,7 @@ mark.mark-current {
   background: rgba(0, 0, 0, 0.05);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 0.9em;
+  overflow-wrap: anywhere;
 }
 
 [data-theme="dark"] .agent-chat-markdown code {
@@ -456,6 +460,7 @@ mark.mark-current {
 }
 
 .agent-chat-markdown pre {
+  max-width: 100%;
   overflow: auto;
   padding: 10px 12px;
   border-radius: 6px;
@@ -497,6 +502,9 @@ mark.mark-current {
 
 .agent-chat-markdown table {
   width: 100%;
+  max-width: 100%;
+  display: block;
+  overflow-x: auto;
   border-collapse: collapse;
 }
 
