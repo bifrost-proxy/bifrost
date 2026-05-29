@@ -209,13 +209,14 @@
 - `exec_command` 首次返回 running session 后，turn loop 进入 runtime watcher 等待，不让模型调用 `write_stdin` 轮询。
 - 普通未归类后台命令继续保留模型可见 `session_id`，既有 `write_stdin` 轮询兼容路径不被 runtime watcher 抢占。
 - 长任务进程退出后，模型只收到一条压缩 tool result，包含 `resume_reason=process_exited`、最终输出和 `model_request_count_while_waiting=0`。
-- mock model server 总请求数为 2：第一次请求产生 `exec_command`，第二次请求处理最终 tool result。
+- 该用例显式关闭长期记忆读写，mock model server 总请求数为 2：第一次请求产生 `exec_command`，第二次请求处理最终 tool result。
 - runtime poll 能返回 `unchanged=true` 和 `new_output_bytes=0`，不重复旧输出。
 - turn events 包含 `TurnSuspended`、`LongTaskExited` 和 `TurnResumed`。
 
 **实际结果**：
 
 - 通过。2026-05-24 按项目规则带 `source ~/.zshrc &&` 执行上述 4 条命令均成功；`im_gateway_agent_long_task_runtime_watch` 通过，断言模型请求数为 2，工具输出包含 `process_exited`、`start`、`done` 和 `model_request_count_while_waiting`。
+- 通过。2026-05-29 CI 回归发现 worker 确定性执行 memory extraction 后，未隔离的 mock 请求计数会包含 `Memory Writing Agent: Phase 1`，导致本用例从 2 变 3。已将该用例显式设置 `memories.generate_memories=false`、`memories.use_memories=false`，保持测试目标聚焦在长任务 watcher 是否避免模型轮询。
 
 ---
 

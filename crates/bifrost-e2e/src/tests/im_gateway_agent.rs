@@ -3,7 +3,7 @@
 use crate::assertions::assert_status;
 use crate::{ProxyInstance, TestCase};
 use bifrost_admin::{AdminState, ImGatewayService};
-use bifrost_agent::config::{AgentConfig, ModelProviderConfig};
+use bifrost_agent::config::{AgentConfig, MemoriesConfig, ModelProviderConfig};
 use bifrost_agent::memory_prompts::{CONSOLIDATION_SYSTEM_PROMPT, EXTRACT_SYSTEM_PROMPT};
 use bifrost_agent::persistence::{load_conversation, ConversationRecorder};
 use bifrost_agent::session::{run_turn, run_turn_with_mcp, AgentSession};
@@ -925,6 +925,11 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     model: Some("mock-model".to_string()),
                     model_provider: Some("mock".to_string()),
                     model_providers,
+                    memories: Some(MemoriesConfig {
+                        generate_memories: Some(false),
+                        use_memories: Some(false),
+                        ..Default::default()
+                    }),
                     request_timeout_secs: Some(30),
                     ..Default::default()
                 };
