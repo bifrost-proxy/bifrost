@@ -73,6 +73,50 @@ fn daily_agent_prompt_uses_file_list_for_file_capable_runners() {
     assert!(chatgpt_next.contains("今日新增转写内容"));
 }
 
+#[test]
+fn daily_agent_change_plan_filters_to_requested_date() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let audio_dir = temp.path().join("audio");
+    std::fs::create_dir_all(&audio_dir).unwrap();
+    let task = AsrDirectoryTask {
+        id: "daily-agent-date-filter-task".to_string(),
+        name: "Daily Agent Date Filter Task".to_string(),
+        audio_dir,
+        recursive: true,
+        enabled: true,
+        paused: false,
+        paused_at_ms: None,
+        schedule: AsrTaskSchedule::Hourly { minute: 0 },
+        language: "chinese".to_string(),
+        model: "Qwen3-ASR-1.7B".to_string(),
+        runtime_strategy: AsrRuntimeStrategy::ReusePerFile,
+        diarization: AsrDiarizationConfig::default(),
+        created_at_ms: 1,
+        updated_at_ms: 1,
+        last_run_at_ms: None,
+        next_run_at_ms: Some(1),
+        last_error: None,
+        daily_agent: AsrDailyAgentConfig::default(),
+        external_devices: Vec::new(),
+        import_policy: AsrExternalImportPolicy::default(),
+    };
+    ensure_asr_daily_workspace(&task).unwrap();
+    let daily_dir = daily_dir_for_task(&task.id);
+    std::fs::write(daily_dir.join("2026-05-18.md"), "older daily doc").unwrap();
+    std::fs::write(daily_dir.join("2026-05-19.md"), "selected daily doc").unwrap();
+
+    let plan = build_daily_agent_change_plan(&task, "manual", Some("2026-05-19"), false).unwrap();
+
+    assert!(!plan.skipped);
+    assert_eq!(plan.entries.len(), 1);
+    assert_eq!(plan.entries[0].date, "2026-05-19");
+    assert!(plan.entries[0]
+        .report_target
+        .ends_with("daily-agent-date-filter-task/.daily/report/2026-05-19-report.md"));
+}
+
 #[tokio::test]
 async fn reuse_server_failure_records_chunk_and_schedules_restart() {
     let temp = TempDir::new().unwrap();

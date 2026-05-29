@@ -518,6 +518,7 @@ ExternalCliRuntime::run(ExternalCliRunRequest {
 - 已有 active run → 返回 202 + 当前 run 状态
 - 无 active run → 排队执行，返回 202 + run_id
 - 可选参数：`date`（指定日期）/ `force`（强制覆盖）/ `send`（运行后发送 IM）
+- `date=YYYY-MM-DD` 必须把 change plan 限定到单个 `daily/YYYY-MM-DD.md`，用于 WebUI Daily Docs 行级 `Run Daily Agent` 操作；未传 `force` 时保持普通增量语义，不覆盖未变化的既有 report。
 
 ### 6.5 POST /daily-agent/send
 
@@ -567,6 +568,13 @@ ExternalCliRuntime::run(ExternalCliRunRequest {
 - `Edit AGENTS.md` / `Save config`
 - `Run now` / `Send last report now` / `Sync reports`
 - `Refresh status` / `Open Daily Docs` / `Open Reports`
+
+### 7.2.1 Task Detail - Daily Docs Row Action
+
+Daily Docs 表格的每个 `YYYY-MM-DD.md` 行在 `Action` 列同时提供：
+
+- `Open document`：保持原行为，进入 `asrDay=<date>` 的日文档详情页。
+- `Run Daily Agent`：调用 `POST /api/asr/tasks/{task_id}/daily-agent/run?date=<date>`，只对当前行日期排队 Daily Agent，不切换 tab、不影响其它日期文档。按钮在请求提交期间展示行级 loading，并在已有行级请求未完成时禁用其它行的同类动作，避免用户连续触发同一 task 的并发 run。
 
 ---
 
@@ -1012,6 +1020,7 @@ build_daily_agent_change_plan(task, trigger, date, force)
 | 追加内容后再触发 | ChatGPT Web 只收新增 tail |
 | IM delivery 绑定 | 保存 `channel/mode/policy` |
 | 手动 Run now | report/ 生成文件 |
+| Daily Docs 行级 Run Daily Agent | 点击某日文档行操作后，请求只携带该行 `date`，不携带 `force`，后端 change plan 只包含该日期 |
 | Report sync dir 自动同步 | 配置 `report_sync_dir` 后 Runner 成功生成 report，会把本轮 report 复制到目标目录，并在 `last_report_sync` 记录 copied/skipped/failed |
 | 手动同步 report | 调用 `/daily-agent/sync` 后同步全部现有 report，目标目录已有同内容文件计入 skipped |
 | CLI 同步控制 | `daily set-sync-dir` 能设置/清除目录，`daily sync` 能手动同步并输出 target/total/copied/skipped/failed |
@@ -1035,6 +1044,7 @@ build_daily_agent_change_plan(task, trigger, date, force)
 - Configuration 区域展示 Report Sync Dir 输入框和 Save 按钮；下方提供 Sync Reports 手动按钮，未配置目录时禁用。
 - Last Run Status 区域展示最近同步状态，包含 copied/total、skipped、同步目录和失败错误摘要。
 - Processed Documents 中任一 report 文件名可点击，进入全屏详情页并使用 Markdown 渲染器展示正文
+- Daily Docs 表格每行提供 `Run Daily Agent`，调用 date-scoped run API；行级动作与 `Open document` 共存，不能破坏 Daily Docs tab 的 URL 恢复和文档打开行为。
 - Daily Agent Records 列表和 report 详情必须使用一致的状态来源：当 `daily_agent_processed.json` 中某日期记录了已存在的 `report_path` 时，`/daily-agent/reports/{date}` 必须读取同一个状态路径，而不是重新拼接另一个 workspace 路径导致列表可见、详情 404。
 - Daily Agent Records 不只依赖 `daily_agent_processed.json`：页面刷新时必须通过 `/daily-agent/runs` 展示磁盘中已存在的 `YYYY-MM-DD-report.md`，兼容历史任务里的 `Report` 大写目录；从该兜底记录打开详情时 `/daily-agent/reports/{date}` 必须读取同一真实文件。
 - Run Results 表格必须以最新数据优先展示，按 `date` 倒序排列；前端在消费 API 时保留同样的防御性排序，避免旧服务或 mock 数据无序导致用户先看到旧记录。
@@ -1053,6 +1063,7 @@ build_daily_agent_change_plan(task, trigger, date, force)
 | TC-ASPB-29 | 绑定 IM 通道后 Daily Agent 发送处理结论 |
 | TC-ASPB-35 | Daily Agent Processed Documents report 全屏 Markdown 详情 |
 | TC-DAR-01 | Daily Agent Records 从已有 Report 目录兜底发现历史报告 |
+| TC-QASR-25 | Daily Docs 单文档行级 Run Daily Agent |
 
 ---
 
