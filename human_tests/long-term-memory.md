@@ -224,6 +224,7 @@ cargo build --bin bifrost
 
 实际结果：
 - 通过。2026-05-11 执行该命令 passed，脚本输出 `[long-term-memory-human-api] PASS`，并验证 `memory_summary.md`、`MEMORY.md`、`raw_memories.md`、`.memory_state.db`、`rollout_summaries/`、无 `.phase2_state.json` 和跨独立 session 读取均符合预期。
+- 通过。2026-05-29 回归复测先在 worker 子进程隔离路径复现失败：turn 返回后 fire-and-forget memory extraction 会随 worker 退出被丢弃，mock 日志没有 Phase 1/Phase 2 请求。修复为 turn 内确定性执行污染检查后的 extraction 后，执行 `SKIP_BUILD=false BIFROST_PORT=19070 MOCK_PORT=19071 bash e2e-tests/tests/test_long_term_memory_human_api.sh` 通过，脚本输出 `[long-term-memory-human-api] PASS`，并完成第一 session 写入、Phase 2 落盘、第二/第三独立 session 消费断言。
 
 ## 清理步骤
 

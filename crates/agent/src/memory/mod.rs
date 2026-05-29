@@ -30,7 +30,10 @@ mod write;
 
 // Re-export public memory API.
 pub use constants::{MEMORY_CONSOLIDATION_TIMEOUT_SECS, MEMORY_EXTRACT_TIMEOUT_SECS};
-pub use extract::{auto_extract_after_turn_blocking, auto_extract_after_turn_with_pollution_check};
+pub use extract::{
+    auto_extract_after_turn_blocking, auto_extract_after_turn_with_pollution_check,
+    auto_extract_after_turn_with_pollution_check_blocking,
+};
 pub use layout::{ensure_memory_layout, memory_root};
 pub use pollution::PollutionDetector;
 pub use read_path::{
