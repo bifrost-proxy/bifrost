@@ -10,7 +10,7 @@ fail() {
   exit 1
 }
 
-ADMIN_PORT="${BIFROST_ASR_MODEL_AUTONOMY_E2E_PORT:-18991}"
+ADMIN_PORT="${BIFROST_ASR_MODEL_AUTONOMY_E2E_PORT:-${ADMIN_PORT:-18991}}"
 ADMIN_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bifrost-asr-model-autonomy.XXXXXX")"
 AUDIO_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bifrost-asr-model-autonomy-audio.XXXXXX")"
 ADMIN_PID=""

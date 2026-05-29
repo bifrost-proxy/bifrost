@@ -754,6 +754,42 @@
 - `test_asr_task_startup_recovery.sh` 输出 `[asr-task-startup-recovery] PASS`。
 - 全程使用临时数据目录、`--no-system-proxy` 与非 9900 端口。
 
+### TC-CS-33: ASR shell E2E 消费并行调度器 ADMIN_PORT 回归
+
+**操作步骤**：
+1. 对 ASR CLI shell E2E 脚本执行语法检查：
+   ```bash
+   bash -n \
+     e2e-tests/tests/test_asr_task_cli.sh \
+     e2e-tests/tests/test_asr_diarization_cli.sh \
+     e2e-tests/tests/test_asr_model_autonomy.sh \
+     e2e-tests/tests/test_asr_voiceprint_enroll_cli.sh
+   ```
+2. 静态检查这些脚本的端口优先级：
+   ```bash
+   rg -n 'ADMIN_PORT="\$\{BIFROST_ASR_[A-Z_]+_E2E_PORT:-\$\{ADMIN_PORT:-18[0-9]+' \
+     e2e-tests/tests/test_asr_task_cli.sh \
+     e2e-tests/tests/test_asr_diarization_cli.sh \
+     e2e-tests/tests/test_asr_model_autonomy.sh \
+     e2e-tests/tests/test_asr_voiceprint_enroll_cli.sh
+   ```
+3. 使用 CI 风格的 `SKIP_BUILD=true`、`BIFROST_BIN` 和外层 `ADMIN_PORT` 执行声纹录入回归：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" ADMIN_PORT=19141 \
+     bash e2e-tests/tests/test_asr_voiceprint_enroll_cli.sh
+   ```
+4. 复核失败 artifact 中原始症状：
+   ```bash
+   rg -n 'Failed to connect to Bifrost admin API|Invalid argument' \
+     /tmp/bifrost-ci-26643081691-mac-shard2/.e2e-reports/shell_test_asr_voiceprint_enroll_cli_sh.log
+   ```
+
+**预期结果**：
+- 语法检查通过。
+- 静态检查显示四个 ASR 脚本均优先使用显式 `BIFROST_ASR_*_E2E_PORT`，其次使用外层并行调度器传入的 `ADMIN_PORT`，最后才使用本地默认固定端口。
+- 声纹录入真实链路输出 `[asr-voiceprint-enroll-cli-e2e] ok`，证明 `ADMIN_PORT=19141` 生效且不再固定到 `18994`。
+- 原始 artifact 复核能定位失败为固定端口场景下 CLI finish enrollment 无法连接 admin API，而不是声纹识别准确性或业务断言失败。
+
 ## 本轮执行记录
 
 测试日期：2026-05-09
@@ -783,6 +819,7 @@
 | TC-CS-30 | 通过 | 2026-05-28 本轮执行：`bash -n e2e-tests/tests/test_http3_e2e.sh e2e-tests/tests/test_replay_body_decode.sh e2e-tests/tests/test_chatgpt_web_startup_auth_preflight.sh scripts/run_all_e2e.sh` 通过；`rg -n 'httpbin\.org|echo\.websocket\.events' e2e-tests/tests/test_http3_e2e.sh e2e-tests/tests/test_replay_body_decode.sh e2e-tests/rules/http3/http3_e2e.txt` 无公网域名匹配。随后使用已有 debug binary 执行 `BIFROST_BIN=/Users/eden/work/github/bifrost/target/debug/bifrost SKIP_BUILD=true SKIP_CARGO_TEST=true PROXY_PORT=18991 ECHO_HTTP_PORT=18992 ECHO_HTTPS_PORT=18993 SERVER_LOG_DIR=/tmp/bifrost-http3-mock-logs bash e2e-tests/tests/test_http3_e2e.sh`，脚本启动本地 mock，host forwarding 和 body append 均返回 200，最终 `Passed: 34`、`Failed: 0`。执行 `BIFROST_BIN=/Users/eden/work/github/bifrost/target/debug/bifrost SKIP_BUILD=true PROXY_PORT=18981 MOCK_HTTP_PORT=18982 BIFROST_DATA_DIR=/tmp/bifrost-replay-body-decode-test SERVER_LOG_DIR=/tmp/bifrost-replay-body-decode-test/mock-logs bash e2e-tests/tests/test_replay_body_decode.sh`，输出 `Replay decoded gzip response body as JSON`，`Results: 1 passed, 0 failed`。执行 `BIFROST_BIN=/Users/eden/work/github/bifrost/target/debug/bifrost SKIP_BUILD=true BIFROST_CHATGPT_WEB_STARTUP_E2E_PORT=18971 bash e2e-tests/tests/test_chatgpt_web_startup_auth_preflight.sh`，输出 `using existing bifrost binary` 与 `[chatgpt-web-startup-auth] PASS`，未触发 cargo build。三条真实执行均使用临时端口、`--no-system-proxy`，未使用 9900。 |
 | TC-CS-31 | 通过 | 2026-05-27 本轮执行：`bash -n e2e-tests/tests/test_agent_send_msg_feishu_card.sh` 通过；`rg -n 'BIFROST_PORT=.*ADMIN_PORT\|MOCK_PORT=.*MOCK_HTTP_PORT\|SKIP_BUILD\|target/release/bifrost\|target/debug/bifrost\|bifrost binary is not executable' e2e-tests/tests/test_agent_send_msg_feishu_card.sh` 显示脚本优先消费调度器端口、`SKIP_BUILD=true` 默认 release binary、本地构建默认 debug binary，且 binary 不可执行时明确失败。随后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" ADMIN_PORT=18945 MOCK_HTTP_PORT=18946 bash e2e-tests/tests/test_agent_send_msg_feishu_card.sh`，输出 `skipping build, using .../target/release/bifrost` 与 `[agent-send-msg-feishu-card] PASS`。CI run `26515240075` 的 Linux/macOS shard 3 artifact 中原始日志均显示 `target/debug/bifrost: No such file or directory`，确认根因为 release artifact 场景错误查找 debug binary；真实执行使用临时数据目录、`--no-system-proxy` 与非 9900 端口。 |
 | TC-CS-32 | 通过 | 2026-05-29 本轮执行：`bash -n e2e-tests/tests/test_agent_history_pagination_api.sh e2e-tests/tests/test_asr_task_append_during_run.sh e2e-tests/tests/test_asr_task_startup_recovery.sh` 通过；`rg -n 'SKIP_BUILD\|target/release/bifrost\|target/debug/bifrost\|bifrost binary is not executable\|skipping build, using' ...` 显示三个脚本均在 `SKIP_BUILD=true` 分支默认 release binary、本地构建分支默认 debug binary，且 binary 不可执行时明确失败；`/tmp/job-78509089317.log` 复核确认原始失败为三个脚本并行重复触发 Cargo build 后超过 900 秒 suite timeout。随后执行 `SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost` 生成 release binary，并分别运行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_agent_history_pagination_api.sh`、`SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" BIFROST_ASR_TASK_APPEND_E2E_PORT=19131 bash e2e-tests/tests/test_asr_task_append_during_run.sh`、`SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" BIFROST_ASR_TASK_RECOVERY_E2E_PORT=19132 bash e2e-tests/tests/test_asr_task_startup_recovery.sh`，三者分别输出 `agent history pagination API checks passed`、`[asr-task-append] PASS`、`[asr-task-startup-recovery] PASS`，均未进入 `cargo build`；真实执行使用临时数据目录、`--no-system-proxy` 与非 9900 端口。 |
+| TC-CS-33 | 通过 | 2026-05-29 本轮执行：`bash -n e2e-tests/tests/test_asr_task_cli.sh e2e-tests/tests/test_asr_diarization_cli.sh e2e-tests/tests/test_asr_model_autonomy.sh e2e-tests/tests/test_asr_voiceprint_enroll_cli.sh` 通过；`rg -n 'ADMIN_PORT="\$\{BIFROST_ASR_[A-Z_]+_E2E_PORT:-\$\{ADMIN_PORT:-18[0-9]+' ...` 显示四个 ASR CLI shell E2E 均优先使用显式 `BIFROST_ASR_*_E2E_PORT`，其次使用外层 `ADMIN_PORT`，最后使用本地默认固定端口；`rg -n 'Failed to connect to Bifrost admin API\|Invalid argument' /tmp/bifrost-ci-26643081691-mac-shard2/.e2e-reports/shell_test_asr_voiceprint_enroll_cli_sh.log` 复核原始失败为固定端口场景下 CLI finish enrollment 无法连接 admin API。执行 `SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost` 时发现并修复 `web/dist-gzip` stale 目录删除 `Directory not empty` 构建竞态；修复后 release 构建通过。随后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" ADMIN_PORT=19141 bash e2e-tests/tests/test_asr_voiceprint_enroll_cli.sh`，输出 `[asr-voiceprint-enroll-cli-e2e] ok`；真实执行使用临时数据目录、`--no-system-proxy` 与非 9900 端口。 |
 
 ## 清理步骤
 
