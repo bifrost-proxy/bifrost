@@ -263,7 +263,7 @@ function hasRunStateStep(steps: ProcessStep[]) {
 }
 
 function isActiveRunState(state?: string) {
-  return state === "running" || state === "queued" || state === "waiting_for_tool";
+  return isRunStateActive(state);
 }
 
 function isTerminalRunState(state?: string) {
@@ -331,9 +331,11 @@ export function historyEventsToTelemetry(
   thread?: AgentThreadSummary,
   fallback: RunTelemetry = EMPTY_TELEMETRY,
 ): RunTelemetry {
-  let telemetry = {
-    ...telemetryFromThread(thread),
+  const threadTelemetry = telemetryFromThread(thread);
+  let telemetry: RunTelemetry = {
+    ...threadTelemetry,
     phase: fallback.phase,
+    status: mergeDefinedStatus(fallback.status, threadTelemetry.status),
     plan: fallback.plan,
     tools: fallback.tools,
     errors: fallback.errors,
@@ -500,10 +502,53 @@ export function historyEventsToTelemetry(
       };
     }
   }
+  const liveStatus = isThreadActiveForTelemetry(thread)
+    ? threadTelemetry.status
+    : isRunStatusActive(fallback.status)
+      ? fallback.status
+      : undefined;
   return {
     ...telemetry,
+    status: mergeDefinedStatus(telemetry.status, liveStatus),
     tools: telemetry.tools.map((tool) =>
       tool.status === "running" ? { ...tool, status: "success" } : tool,
     ),
   };
+}
+
+function mergeDefinedStatus(
+  base?: RunTelemetry["status"],
+  overlay?: RunTelemetry["status"],
+): RunTelemetry["status"] {
+  if (!overlay) {
+    return base;
+  }
+  const next = { ...(base || {}) };
+  for (const [key, value] of Object.entries(overlay)) {
+    if (value !== undefined && value !== null) {
+      (next as Record<string, unknown>)[key] = value;
+    }
+  }
+  return next;
+}
+
+function isThreadActiveForTelemetry(thread?: AgentThreadSummary) {
+  return thread?.running === true || isRunStateActive(thread?.run_state || thread?.state);
+}
+
+function isRunStatusActive(status?: RunTelemetry["status"]) {
+  return isRunStateActive(status?.state);
+}
+
+function isRunStateActive(state?: string) {
+  return (
+    state === "running" ||
+    state === "queued" ||
+    state === "waiting_for_tool" ||
+    state === "waiting_on_session" ||
+    state === "model_response" ||
+    state === "tool_running" ||
+    state === "compacting" ||
+    state === "stopping"
+  );
 }

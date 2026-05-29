@@ -18,6 +18,8 @@ IDLE_STATUS_RESPONSE="$TEST_DIR/idle-status-response.json"
 TOOL_CHAT_RESPONSE="$TEST_DIR/tool-chat-response.json"
 TOOL_STATUS_RESPONSE="$TEST_DIR/tool-status-response.json"
 TOOL_ACTIVE_STATUS_RESPONSE="$TEST_DIR/tool-active-status-response.json"
+TOOL_SESSIONS_RESPONSE="$TEST_DIR/tool-sessions-response.json"
+TOOL_DETAIL_RESPONSE="$TEST_DIR/tool-detail-response.json"
 WORK_DIR="$TEST_DIR/workdir"
 mkdir -p "$WORK_DIR"
 
@@ -553,6 +555,46 @@ match = re.search(r"Context 用量: ~([0-9.]+[KMB]?) / 250K", text)
 assert match, text
 assert match.group(1) == estimated_text, (text, active)
 assert "压缩次数: 1" in text, text
+PY
+
+curl -fsS --noproxy '*' "$BASE/sessions/all" >"$TOOL_SESSIONS_RESPONSE"
+curl -fsS --noproxy '*' "$BASE/sessions/agent-status-runtime-tool-growth" >"$TOOL_DETAIL_RESPONSE"
+
+python3 - "$TOOL_STATUS_RESPONSE" "$TOOL_SESSIONS_RESPONSE" "$TOOL_DETAIL_RESPONSE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+status_response = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+sessions_response = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+detail = json.loads(Path(sys.argv[3]).read_text(encoding="utf-8"))
+active = status_response.get("active_status")
+assert isinstance(active, dict), status_response
+
+sessions = sessions_response.get("sessions") or []
+summary = next(
+    (
+        item
+        for item in sessions
+        if item.get("session_key") == "agent-status-runtime-tool-growth"
+    ),
+    None,
+)
+assert isinstance(summary, dict), sessions_response
+assert summary.get("running") is True, summary
+assert summary.get("tokens") == active.get("total_tokens_used"), (summary, active)
+assert summary.get("estimated_tokens") == active.get("estimated_context_tokens"), (summary, active)
+assert summary.get("context_window_tokens") == active.get("context_window_tokens"), (summary, active)
+assert summary.get("context_usage_percent") == active.get("context_usage_percent"), (summary, active)
+assert summary.get("last_response_tokens") == active.get("last_response_tokens"), (summary, active)
+
+assert detail.get("run_state") == "running", detail
+assert detail.get("active_status", {}).get("session_key") == active.get("session_key"), detail
+assert detail.get("total_tokens_used") == active.get("total_tokens_used"), (detail, active)
+assert detail.get("estimated_tokens") == active.get("estimated_context_tokens"), (detail, active)
+assert detail.get("context_window_tokens") == active.get("context_window_tokens"), (detail, active)
+assert detail.get("context_usage_percent") == active.get("context_usage_percent"), (detail, active)
+assert detail.get("last_response_tokens") == active.get("last_response_tokens"), (detail, active)
 PY
 
 wait "$CHAT_PID"

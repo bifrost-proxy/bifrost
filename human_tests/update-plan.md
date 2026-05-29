@@ -9,6 +9,7 @@
 3. 计划收口后，最终返回的 `plan_steps` 全部为 `completed`
 4. 同一 turn 内后续 `update_plan` 是当前快照替换，不会继承本 turn 早先已完成但已删除的步骤
 5. 模型提交 `plan: []` 时，runtime 会清空当前 plan，而不是要求模型编造一个占位步骤
+6. context compaction 不携带、不恢复、不清空 plan；plan runtime state 只由 `plan_updated` / `plan_cleared` 回放恢复
 
 本次真实场景测试以**真实 Bifrost 进程 + 真实 Admin API + 本地 mock model server** 方式执行，禁止仅用 grep / 静态检查代替。
 
@@ -98,6 +99,23 @@
 - `clear_completed_plan_for_new_turn` 会重置 `current_plan` 与 `plan_repair_attempts`，并向展示通道发送空计划
 - `apply_plan_update_snapshot` 接收空 plan 时会清空 `current_plan`，持久化 `plan_cleared`，并向展示通道发送空计划
 - `plan_cleared` 持久化事件在恢复 runtime state 时会清空历史计划
+
+### TC-UP-04：compaction 不改变 plan 持久化恢复状态
+
+**操作步骤**：
+1. 执行 compaction / plan persistence 回归测试：
+   ```bash
+   cargo test -p bifrost-agent --all-features test_compaction_does_not_mutate_plan_runtime_state
+   ```
+2. 执行静态检查确认 compaction event 不写入 plan：
+   ```bash
+   ! rg -n '"current_plan": &session.current_plan|current_plan": session.current_plan|current_plan": &state.current_plan' crates/agent/src/session.rs crates/agent/src/session/turn_loop.rs crates/agent/src/persistence.rs
+   ```
+
+**预期结果**：
+- 测试通过，证明已有 `plan_updated` 恢复出来的当前 plan 不会被后续 compaction 事件覆盖或清空。
+- 测试证明 compaction 不是 plan runtime source，plan 只由 `plan_updated` / `plan_cleared` 维护。
+- 静态检查无匹配，证明新写入的 compaction metadata 不再携带 `current_plan`。
 
 ## 清理步骤
 

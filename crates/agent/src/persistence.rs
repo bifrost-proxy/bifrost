@@ -729,25 +729,6 @@ pub fn load_session_runtime_state(path: &Path) -> Result<SessionRuntimeState, St
                 {
                     state.last_response_tokens = Some(tokens);
                 }
-                if event
-                    .content
-                    .get("current_plan")
-                    .is_some_and(|value| value.is_null())
-                {
-                    state.current_plan = None;
-                    continue;
-                }
-                if let Some(plan) = event
-                    .content
-                    .get("current_plan")
-                    .filter(|value| !value.is_null())
-                    .cloned()
-                {
-                    state.current_plan = Some(
-                        serde_json::from_value(plan)
-                            .map_err(|e| format!("parse compacted plan state: {e}"))?,
-                    );
-                }
             }
             event_types::ASSISTANT_MESSAGE => {
                 if let Some(tokens) = event
@@ -1798,30 +1779,29 @@ mod tests {
     }
 
     #[test]
-    fn test_compaction_with_null_plan_resets_runtime_state() {
+    fn test_compaction_does_not_mutate_plan_runtime_state() {
         let dir = tempfile::tempdir().unwrap();
-        let mut recorder = ConversationRecorder::new(dir.path(), "plan-compact-clear-session");
+        let mut recorder = ConversationRecorder::new(dir.path(), "plan-compact-session");
         let plan = vec![PlanStep {
-            step: "old task".to_string(),
+            step: "current task".to_string(),
             status: crate::tools::update_plan::PlanStepStatus::Completed,
         }];
 
         recorder
-            .record_plan_updated("plan-compact-clear-session", &plan, Some("done"))
+            .record_plan_updated("plan-compact-session", &plan, Some("done"))
             .unwrap();
         recorder
             .record_compaction(
-                "plan-compact-clear-session",
+                "plan-compact-session",
                 serde_json::json!({
-                    "summary": "compact without active plan",
-                    "current_plan": null,
+                    "summary": "compact handoff summary",
                 }),
             )
             .unwrap();
         recorder.close();
 
         let state = load_session_runtime_state(recorder.file_path()).unwrap();
-        assert!(state.current_plan.is_none());
+        assert_eq!(state.current_plan, Some(plan));
     }
 
     #[test]

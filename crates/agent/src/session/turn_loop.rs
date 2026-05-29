@@ -2918,7 +2918,6 @@ pub(super) fn record_compaction_event(
         "compaction_count": session.compaction_count,
         "total_tokens": session.total_tokens_used.unwrap_or(0),
         "replacement_history": &session.history,
-        "current_plan": &session.current_plan,
     });
     if emergency {
         metadata["emergency"] = serde_json::Value::Bool(true);
