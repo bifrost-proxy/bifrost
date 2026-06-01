@@ -963,44 +963,12 @@ pub(super) async fn process_agent_chat(
     );
     worker_request.system_prompt = system_prompt_override.map(ToString::to_string);
     worker_request.default_message_channel = message_channel;
-    let worker_client = match crate::im_gateway::agent_worker::AgentWorkerClient::current_exe() {
-        Ok(client) => client,
-        Err(error) => {
-            session.progress_sender = None;
-            session.plan_sender = None;
-            session_manager.return_session(session);
-            send_agent_reply(
-                client,
-                provider,
-                event,
-                &format!("Agent worker 启动失败: {error}"),
-                message_log_store,
-            )
-            .await;
-            return;
-        }
-    };
-    let mut worker = match worker_client.spawn(worker_request).await {
-        Ok(worker) => worker,
-        Err(error) => {
-            session.progress_sender = None;
-            session.plan_sender = None;
-            session_manager.return_session(session);
-            send_agent_reply(
-                client,
-                provider,
-                event,
-                &format!("Agent worker 启动失败: {error}"),
-                message_log_store,
-            )
-            .await;
-            return;
-        }
-    };
+    let mut worker =
+        crate::im_gateway::agent_worker::AgentWorkerClient::spawn_or_fallback(worker_request).await;
     let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-    if let Some(pid) = worker.child_id() {
-        crate::im_gateway::agent_worker::register_active_worker(session_key, pid, stop_tx);
-    }
+    // pid=0 signals in-process worker (no external process to kill on stop)
+    let worker_pid = worker.child_id().unwrap_or(0);
+    crate::im_gateway::agent_worker::register_active_worker(session_key, worker_pid, stop_tx);
 
     let mut result: Result<bifrost_agent::TurnResult, String> =
         Err("agent worker exited without result".to_string());

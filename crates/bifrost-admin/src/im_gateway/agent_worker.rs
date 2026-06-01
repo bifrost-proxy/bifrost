@@ -144,11 +144,43 @@ impl AgentWorkerClient {
         }
     }
 
-    pub async fn spawn(&self, request: AgentWorkerRunRequest) -> Result<AgentWorkerRun, String> {
+    /// 启动 agent worker，如果外部进程启动失败则自动回退到进程内执行。
+    /// 此方法永远不会失败，确保 Agent 始终可用。
+    pub async fn spawn_or_fallback(request: AgentWorkerRunRequest) -> AgentWorkerRun {
         #[cfg(test)]
         if std::env::var_os("BIFROST_FORCE_AGENT_WORKER").is_none() {
-            return Ok(spawn_in_process_worker(request));
+            return spawn_in_process_worker(request);
         }
+        let client = match Self::current_exe() {
+            Ok(client) => client,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "resolve agent worker executable failed, falling back to in-process execution"
+                );
+                return spawn_in_process_worker(request);
+            }
+        };
+        // Clone request for in-process fallback in case external process setup fails
+        let fallback_request = request.clone();
+        match client.spawn_process(request).await {
+            Ok(worker) => worker,
+            Err(error) => {
+                tracing::warn!(
+                    executable = %client.executable.display(),
+                    %error,
+                    "agent worker process failed, falling back to in-process execution"
+                );
+                spawn_in_process_worker(fallback_request)
+            }
+        }
+    }
+
+    /// 尝试通过外部进程启动 worker，失败时返回错误。
+    async fn spawn_process(
+        &self,
+        request: AgentWorkerRunRequest,
+    ) -> Result<AgentWorkerRun, String> {
         let mut child = spawn_worker_process(&self.executable)?;
         let mut stdin = child
             .stdin
@@ -177,7 +209,6 @@ impl AgentWorkerClient {
             child: Some(child),
             command_tx,
             events: AgentWorkerEventStream::Process(BufReader::new(stdout).lines()),
-            #[cfg(test)]
             task: None,
         })
     }
@@ -203,13 +234,11 @@ pub struct AgentWorkerRun {
     child: Option<Child>,
     command_tx: mpsc::UnboundedSender<AgentWorkerCommand>,
     events: AgentWorkerEventStream,
-    #[cfg(test)]
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
 enum AgentWorkerEventStream {
     Process(tokio::io::Lines<BufReader<tokio::process::ChildStdout>>),
-    #[cfg(test)]
     Channel(mpsc::UnboundedReceiver<AgentWorkerEvent>),
 }
 
@@ -230,7 +259,10 @@ pub async fn request_session_stop(session_key: &str) -> bool {
     };
     let _ = handle.stop_tx.send(());
     tokio::time::sleep(Duration::from_millis(WORKER_STOP_GRACE_MS)).await;
-    let _ = crate::im_gateway::external_cli::terminate_process_group(handle.pid);
+    // pid == 0 means in-process worker (no external process to kill)
+    if handle.pid != 0 {
+        let _ = crate::im_gateway::external_cli::terminate_process_group(handle.pid);
+    }
     true
 }
 
@@ -266,7 +298,6 @@ impl AgentWorkerRun {
                     )
                 })
             }
-            #[cfg(test)]
             AgentWorkerEventStream::Channel(events) => Ok(events.recv().await),
         }
     }
@@ -285,7 +316,6 @@ impl AgentWorkerRun {
 
     pub async fn terminate(mut self) -> Result<(), String> {
         let _ = self.request_stop().await;
-        #[cfg(test)]
         if let Some(task) = self.task.take() {
             task.abort();
             return Ok(());
@@ -305,7 +335,6 @@ impl AgentWorkerRun {
     }
 }
 
-#[cfg(test)]
 fn spawn_in_process_worker(request: AgentWorkerRunRequest) -> AgentWorkerRun {
     let (command_tx, mut command_rx) = mpsc::unbounded_channel::<AgentWorkerCommand>();
     let (event_tx, event_rx) = mpsc::unbounded_channel::<AgentWorkerEvent>();
@@ -387,9 +416,12 @@ fn spawn_worker_process(executable: &Path) -> Result<Child, String> {
         .kill_on_drop(true);
     #[cfg(unix)]
     command.process_group(0);
-    command
-        .spawn()
-        .map_err(|error| format!("spawn agent worker failed: {error}"))
+    command.spawn().map_err(|error| {
+        format!(
+            "spawn agent worker failed: {error} (executable: {})",
+            executable.display()
+        )
+    })
 }
 
 async fn write_worker_command(
@@ -990,5 +1022,52 @@ mod tests {
                 None => std::env::remove_var(self.key),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn spawn_process_fallback_to_in_process_on_missing_executable() {
+        // Force external worker mode by setting the env var
+        let _guard = EnvVarGuard::set("BIFROST_FORCE_AGENT_WORKER", "1");
+        // Use a non-existent executable to trigger the fallback
+        let client = AgentWorkerClient::with_executable("/nonexistent/bifrost-test-binary");
+        let request = build_run_request(
+            "test-fallback",
+            "hello",
+            Vec::new(),
+            &bifrost_agent::AgentConfig::default(),
+            None,
+            None,
+            None,
+        );
+        // spawn_process should fail with ENOENT
+        let result = client.spawn_process(request.clone()).await;
+        let error = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected spawn_process to fail with missing executable"),
+        };
+        assert!(
+            error.contains("No such file") || error.contains("not found"),
+            "expected ENOENT error, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_or_fallback_always_succeeds() {
+        // Ensure we're NOT in forced external worker mode
+        let _guard = EnvVarGuard::remove("BIFROST_FORCE_AGENT_WORKER");
+        let request = build_run_request(
+            "test-always-ok",
+            "hello",
+            Vec::new(),
+            &bifrost_agent::AgentConfig::default(),
+            None,
+            None,
+            None,
+        );
+        let worker = AgentWorkerClient::spawn_or_fallback(request).await;
+        // In test mode (without BIFROST_FORCE_AGENT_WORKER), should use in-process worker
+        assert!(worker.child_id().is_none());
+        // Should be able to terminate without error
+        let _ = worker.terminate().await;
     }
 }

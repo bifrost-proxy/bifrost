@@ -916,25 +916,12 @@ pub(super) async fn handle_agent(
             .chain(body.guide_messages.clone())
             .collect();
         worker_request.queued_messages = body.queue_messages.clone();
-        let worker_client = match crate::im_gateway::agent_worker::AgentWorkerClient::current_exe()
-        {
-            Ok(client) => client,
-            Err(error) => {
-                service.agent_session_manager.return_session(session);
-                return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error);
-            }
-        };
-        let mut worker = match worker_client.spawn(worker_request).await {
-            Ok(worker) => worker,
-            Err(error) => {
-                service.agent_session_manager.return_session(session);
-                return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error);
-            }
-        };
+        let mut worker =
+            crate::im_gateway::agent_worker::AgentWorkerClient::spawn_or_fallback(worker_request)
+                .await;
         let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-        if let Some(pid) = worker.child_id() {
-            crate::im_gateway::agent_worker::register_active_worker(&session_key, pid, stop_tx);
-        }
+        let worker_pid = worker.child_id().unwrap_or(0);
+        crate::im_gateway::agent_worker::register_active_worker(&session_key, worker_pid, stop_tx);
         let result = loop {
             tokio::select! {
                 _ = stop_rx.recv() => {

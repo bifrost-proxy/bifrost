@@ -758,41 +758,16 @@ fn builtin_runner_call_stream_response(
             Some("runner_call".to_string()),
         );
         worker_request.default_message_channel = config.default_message_channel.clone();
-        let worker_client = match crate::im_gateway::agent_worker::AgentWorkerClient::current_exe()
-        {
-            Ok(client) => client,
-            Err(error) => {
-                agent_session_manager.return_session(session);
-                let failed = serde_json::json!({
-                    "eventType": "runner_call_failed",
-                    "callId": input.call_id,
-                    "error": error,
-                });
-                let _ = send_ndjson_event(&tx, &failed).await;
-                return;
-            }
-        };
-        let mut worker = match worker_client.spawn(worker_request).await {
-            Ok(worker) => worker,
-            Err(error) => {
-                agent_session_manager.return_session(session);
-                let failed = serde_json::json!({
-                    "eventType": "runner_call_failed",
-                    "callId": input.call_id,
-                    "error": error,
-                });
-                let _ = send_ndjson_event(&tx, &failed).await;
-                return;
-            }
-        };
+        let mut worker =
+            crate::im_gateway::agent_worker::AgentWorkerClient::spawn_or_fallback(worker_request)
+                .await;
         let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-        if let Some(pid) = worker.child_id() {
-            crate::im_gateway::agent_worker::register_active_worker(
-                &input.child_session_key,
-                pid,
-                stop_tx,
-            );
-        }
+        let worker_pid = worker.child_id().unwrap_or(0);
+        crate::im_gateway::agent_worker::register_active_worker(
+            &input.child_session_key,
+            worker_pid,
+            stop_tx,
+        );
 
         let run_call_id = input.call_id.clone();
         let run_caller_session_key = input.caller_session_key.clone();

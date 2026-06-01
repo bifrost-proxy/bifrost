@@ -583,6 +583,47 @@ async fn maybe_watch_exec_long_task(
                     .with_iteration(u32::try_from(iteration + 1).unwrap_or(u32::MAX))
                     .with_tool(tc.name(), tc.id.clone()),
             );
+
+            // Stall detection: if consecutive unchanged heartbeats exceed the
+            // configured threshold, return control to the model so it can
+            // decide whether to continue, terminate, or take another action.
+            let stall_threshold = config.get_long_task_stall_threshold();
+            if stall_threshold > 0 && unchanged_heartbeats >= stall_threshold {
+                let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                session.record_turn_event_entry(
+                    CodexTurnEvent::new(0, CodexTurnEventKind::LongTaskStalled)
+                        .with_iteration(u32::try_from(iteration + 1).unwrap_or(u32::MAX))
+                        .with_tool(tc.name(), tc.id.clone())
+                        .with_detail(format!(
+                            "unchanged_heartbeats={unchanged_heartbeats},threshold={stall_threshold}"
+                        )),
+                );
+                session.record_turn_event_entry(
+                    CodexTurnEvent::new(0, CodexTurnEventKind::TurnResumed)
+                        .with_iteration(u32::try_from(iteration + 1).unwrap_or(u32::MAX))
+                        .with_tool(tc.name(), tc.id.clone()),
+                );
+                let output = output_parts.join("\n");
+                return LongTaskWatchOutcome::Completed(crate::types::ToolResult {
+                    success: true,
+                    output: serde_json::json!({
+                        "session_id": candidate.session_id,
+                        "exit_code": null,
+                        "running": true,
+                        "resume_reason": "stalled",
+                        "profile": candidate.profile,
+                        "elapsed_ms": elapsed_ms,
+                        "unchanged_heartbeats": unchanged_heartbeats,
+                        "stall_threshold": stall_threshold,
+                        "omitted_heartbeats": total_omitted_heartbeats,
+                        "model_request_count_while_waiting": 0,
+                        "output": truncate_tool_output(&output, tool_output_limit.saturating_mul(4)),
+                        "hint": "The long-running task has produced no output for an extended period. You may poll it again with write_stdin, terminate it, or take another action."
+                    })
+                    .to_string(),
+                    runtime_events: Vec::new(),
+                });
+            }
         } else {
             output_parts.push(new_output);
             unchanged_heartbeats = 0;
