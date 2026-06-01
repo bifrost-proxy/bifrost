@@ -1080,6 +1080,81 @@ fn long_task_profile_intervals_are_bounded_by_profile_caps() {
 }
 
 #[tokio::test]
+async fn exec_command_long_task_stall_detection_returns_control_to_model() {
+    // Use a command that produces initial output then goes silent, with a very
+    // low stall threshold (3 heartbeats) to trigger stall detection quickly.
+    let tool_calls = vec![ToolCallMessage::function_call(
+        "call-stall".to_string(),
+        "exec_command".to_string(),
+        r#"{"cmd":"printf start; sleep 30","yield_time_ms":50}"#.to_string(),
+    )];
+    let (url, request_count) = counted_chat_response_url(vec![
+        chat_tool_calls_response(tool_calls, 22),
+        chat_text_response("stall detected answer", 24),
+    ])
+    .await;
+    let mut config = provider_config_for_url(url);
+    config.long_task_stall_threshold = Some(3);
+    // Use a large context window to avoid mid-turn compaction consuming a model response.
+    config.model_context_window = Some(100_000);
+    config.model_auto_compact_token_limit = Some(80_000);
+    let client = AgentClient::new();
+    let tools = ToolRegistry::with_defaults();
+    let mut session = AgentSession::new("long-task-stall-detection");
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        run_turn(
+            &client,
+            &config,
+            &mut session,
+            &tools,
+            "run a stalling command",
+            None,
+        ),
+    )
+    .await
+    .expect("stall detection should return before absolute timeout")
+    .unwrap();
+
+    assert_eq!(result.response, "stall detected answer");
+    assert_eq!(
+        request_count.load(Ordering::SeqCst),
+        2,
+        "stall detection should resume model without extra polling requests"
+    );
+
+    let tool_output = session
+        .history
+        .iter()
+        .find(|message| message.role == "tool")
+        .and_then(|message| message.content.as_deref())
+        .expect("tool result");
+    assert!(tool_output.contains("\"stalled\""), "{tool_output}");
+    assert!(
+        tool_output.contains("unchanged_heartbeats"),
+        "{tool_output}"
+    );
+    assert!(tool_output.contains("stall_threshold"), "{tool_output}");
+    assert!(tool_output.contains("start"), "{tool_output}");
+
+    assert!(session
+        .last_turn_events
+        .iter()
+        .any(|event| event.kind == CodexTurnEventKind::LongTaskStalled));
+    assert!(session
+        .last_turn_events
+        .iter()
+        .any(|event| event.kind == CodexTurnEventKind::TurnResumed));
+}
+
+#[test]
+fn long_task_stall_threshold_default_is_30() {
+    let config = AgentConfig::default();
+    assert_eq!(config.get_long_task_stall_threshold(), 30);
+}
+
+#[tokio::test]
 async fn test_stop_request_cancels_in_flight_model_request() {
     let (url, accepted_rx) = slow_chat_response_url(std::time::Duration::from_secs(30)).await;
     let config = provider_config_for_url(url);

@@ -136,6 +136,12 @@ pub struct AgentConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub background_terminal_max_timeout: Option<u64>,
 
+    /// Maximum consecutive unchanged heartbeats before a long task is considered
+    /// stalled. When reached, the runtime returns control to the model with
+    /// `resume_reason: "stalled"`. Default: 30.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub long_task_stall_threshold: Option<u32>,
+
     /// Default IM channel used by injected message tools and agent-created schedules
     /// when the current turn has no inbound IM source to inherit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -474,6 +480,8 @@ impl AgentConfig {
         crate::tools::exec_command::DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS;
     /// Default tool output token limit (matching Codex DEFAULT_MAX_OUTPUT_TOKENS).
     pub const DEFAULT_TOOL_OUTPUT_TOKEN_LIMIT: usize = 10_000;
+    /// Default stall threshold: 30 consecutive empty heartbeats triggers stall detection.
+    pub const DEFAULT_LONG_TASK_STALL_THRESHOLD: u32 = 30;
 }
 
 impl Default for AgentConfig {
@@ -505,6 +513,7 @@ impl Default for AgentConfig {
             ephemeral: false,
             memories: None,
             background_terminal_max_timeout: Some(Self::DEFAULT_BACKGROUND_TERMINAL_TIMEOUT_MS),
+            long_task_stall_threshold: None,
             default_message_channel: None,
         }
     }
@@ -591,6 +600,13 @@ impl AgentConfig {
     pub fn get_background_terminal_max_timeout(&self) -> u64 {
         self.background_terminal_max_timeout
             .unwrap_or(Self::DEFAULT_BACKGROUND_TERMINAL_TIMEOUT_MS)
+    }
+
+    /// Get the maximum consecutive unchanged heartbeats before a long task is
+    /// considered stalled (default: 30).
+    pub fn get_long_task_stall_threshold(&self) -> u32 {
+        self.long_task_stall_threshold
+            .unwrap_or(Self::DEFAULT_LONG_TASK_STALL_THRESHOLD)
     }
 
     /// Resolve the working directory path.
@@ -1135,6 +1151,9 @@ fn merge_config(base: AgentConfig, overlay: AgentConfig) -> AgentConfig {
         background_terminal_max_timeout: overlay
             .background_terminal_max_timeout
             .or(base.background_terminal_max_timeout),
+        long_task_stall_threshold: overlay
+            .long_task_stall_threshold
+            .or(base.long_task_stall_threshold),
         default_message_channel: overlay
             .default_message_channel
             .or(base.default_message_channel),

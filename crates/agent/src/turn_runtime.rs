@@ -300,6 +300,7 @@ pub enum CodexTurnEventKind {
     LongTaskHeartbeat,
     LongTaskOutputAvailable,
     LongTaskExited,
+    LongTaskStalled,
     LongTaskResumeFailed,
     TurnResumed,
     TurnCompleted,
