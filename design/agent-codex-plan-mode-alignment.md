@@ -10,7 +10,8 @@
 
 - 新增 `CollaborationMode::{Default, Plan}` 作为每轮请求参数，不写入全局 `AgentConfig`，避免破坏现有配置初始化和 IM Provider 默认行为。
 - `/api/agent/chat/stream` 与 `/api/im-gateway/agent/chat` 接受 `collaborationMode` / `collaboration_mode`，worker JSON 协议传递 `collaborationMode`。
-- Web UI slash 面板提供 `/plan` 入口：选择后插入 `/plan ` 供用户继续输入；发送时前端剥离 slash 文本并显式传 `collaboration_mode=plan`。
+- Web UI slash 面板提供 `/plan` 入口：仅在当前线程/runner 是内置 Bifrost Agent 时展示；选择后进入 composer `Plan Mode` 状态并显示可关闭的模式标记，不再只把 `/plan ` 文本塞进输入框。发送时前端显式传 `collaboration_mode=plan`；用户手动输入 `/plan <message>` 时仍剥离 slash 文本。
+- `/plan` 与 `/compact` 属于内置 Agent 控制命令。当前线程是外部 APP、Codex、ChatGPT Web 或其他 external runner 时，Web UI 不展示这些命令；用户手动输入时也按普通消息交给外部 runner，不能由前端误剥离或静默改路由。
 - IM/API 后端统一解析 `/plan <message>`：即使调用方没有显式传 `collaboration_mode`，也会剥离 slash 文本并以 Plan Mode 启动 worker；`/planner` 等普通文本不得误判。
 - Prompt builder 在每轮 prefix 中追加独立 developer fragment：
   - Default：声明当前处于 Default，用户文本不会切换模式，`request_user_input` 只在工具可用时使用。
@@ -28,6 +29,8 @@
 - Plan Mode 最终回复中：
   - 标签外文本作为普通 `response`、assistant history、recorder、memory extraction 和 citation 输入。
   - 标签内文本作为 `TurnResult.proposed_plan`、`AgentTurnProgressEvent::ProposedPlan`、SSE `proposed_plan`、worker `proposedPlan`、API `proposed_plan`。
+- Web UI 必须把 `proposed_plan` progress event 和 `run_finished.proposedPlan` 渲染为用户可见的 “Plan Mode result”。如果模型只输出 `<proposed_plan>` 块、标签外 `response` 为空，消息区仍必须展示方案正文。
+- JSONL history 必须记录 `proposed_plan` 事件，history replay 必须把该事件还原为 assistant 规划结果。否则 live UI 刷新或打开历史会看起来“没有规划结果”。
 - IM progress card 在收到 `ProposedPlan` 后复用计划面板展示“实施方案”，但 final output 不包含 proposal 标签。
 
 ### request_user_input 和 Goal Continuation
@@ -60,7 +63,9 @@
   - API `response` 不包含 `<proposed_plan>` 标签。
   - API `proposed_plan` 独立包含方案正文。
   - IM/API `/plan <message>` 入口在不显式传 `collaboration_mode` 时仍进入 Plan Mode，且模型请求中的用户正文已剥离 `/plan`。
-- `web/tests/ui/agent-chat.spec.ts` 的 `slash plan mode`：验证 Web UI slash 面板可选择 `/plan`，输入框插入 `/plan `，发送 payload 的 `message` 已剥离 slash 且包含 `collaboration_mode: "plan"`。
+- `web/tests/ui/agent-chat.spec.ts` 的 `slash plan mode`：验证 Web UI slash 面板可选择 `/plan`，输入框显示 Plan Mode 标记和规划提示，发送 payload 的 `message` 已剥离 slash 且包含 `collaboration_mode: "plan"`，消息区展示 `proposed_plan` 规划结果。
+- `web/tests/ui/agent-chat.spec.ts` 的 external runner 回归：验证切到 Codex/external runner 后输入 `/` 不展示 `/plan` / `/compact` 命令，但 runner 选择仍可用。
+- `web/src/pages/AI/AgentChatSection.timeline.test.ts`：验证 persisted `proposed_plan` history event 会渲染为 assistant 规划结果。
 - `e2e-tests/tests/test_agent_goal_prompt_templates_human_api.sh`：启动真实 Bifrost + mock model，先创建 active goal，再触发 worker 自动 continuation，验证：
   - continuation 模型请求包含 `Work from evidence`、`The audit must prove completion` 和 `strict blocked audit`。
   - continuation 模型请求不包含旧内联 prompt 的 `Avoid repeating work that is already done`。

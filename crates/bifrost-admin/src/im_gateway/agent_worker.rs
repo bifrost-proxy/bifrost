@@ -259,6 +259,55 @@ pub fn clear_active_worker(session_key: &str) {
     ACTIVE_WORKERS.remove(session_key);
 }
 
+fn drain_active_workers() -> Vec<(String, AgentWorkerStopHandle)> {
+    let entries: Vec<(String, AgentWorkerStopHandle)> = ACTIVE_WORKERS
+        .iter()
+        .map(|entry| (entry.key().clone(), entry.value().clone()))
+        .collect();
+    for (session_key, _) in &entries {
+        ACTIVE_WORKERS.remove(session_key);
+    }
+    entries
+}
+
+async fn stop_active_worker_entries(
+    entries: Vec<(String, AgentWorkerStopHandle)>,
+    grace: Duration,
+) {
+    if entries.is_empty() {
+        return;
+    }
+    for (session_key, handle) in &entries {
+        tracing::info!(session_key = %session_key, pid = handle.pid, "agent worker: stopping active worker");
+        let _ = handle.stop_tx.send(());
+    }
+    if entries.iter().all(|(_, handle)| handle.pid == 0) {
+        return;
+    }
+    tokio::time::sleep(grace).await;
+    for (session_key, handle) in entries {
+        if handle.pid == 0 {
+            continue;
+        }
+        if let Err(error) = crate::im_gateway::external_cli::terminate_process_group(handle.pid) {
+            tracing::warn!(
+                session_key = %session_key,
+                pid = handle.pid,
+                %error,
+                "agent worker: failed to terminate active worker process group"
+            );
+        }
+    }
+}
+
+pub async fn kill_all_active_workers() {
+    stop_active_worker_entries(
+        drain_active_workers(),
+        Duration::from_millis(WORKER_STOP_GRACE_MS),
+    )
+    .await;
+}
+
 pub async fn request_session_stop(session_key: &str) -> bool {
     let Some((_, handle)) = ACTIVE_WORKERS.remove(session_key) else {
         return false;
@@ -537,26 +586,7 @@ async fn run_worker_stdio_async() -> Result<(), String> {
     let guide_channel: bifrost_agent::session::GuideChannel =
         std::sync::Arc::new(bifrost_agent::session::GuideMessageChannel::new());
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
-    let stdin_guide_channel = guide_channel.clone();
-    std::thread::spawn(move || {
-        let mut stop_tx = Some(stop_tx);
-        while let Some(Ok(line)) = stdin.next() {
-            match serde_json::from_str::<AgentWorkerCommand>(&line) {
-                Ok(AgentWorkerCommand::Stop) => {
-                    if let Some(stop_tx) = stop_tx.take() {
-                        let _ = stop_tx.send(());
-                    }
-                    break;
-                }
-                Ok(AgentWorkerCommand::Guide { message }) => {
-                    if !message.trim().is_empty() {
-                        stdin_guide_channel.push_back(message);
-                    }
-                }
-                Ok(AgentWorkerCommand::Run { .. }) | Err(_) => {}
-            }
-        }
-    });
+    spawn_worker_command_reader(stdin, stop_tx, guide_channel.clone());
 
     send_worker_event(&AgentWorkerEvent::Started {
         session_key: request.session_key.clone(),
@@ -592,6 +622,39 @@ async fn run_worker_stdio_async() -> Result<(), String> {
             }
         }
     }
+}
+
+fn spawn_worker_command_reader<R>(
+    mut stdin: std::io::Lines<R>,
+    stop_tx: tokio::sync::oneshot::Sender<()>,
+    guide_channel: bifrost_agent::session::GuideChannel,
+) where
+    R: BufRead + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut stop_tx = Some(stop_tx);
+        while let Some(Ok(line)) = stdin.next() {
+            match serde_json::from_str::<AgentWorkerCommand>(&line) {
+                Ok(AgentWorkerCommand::Stop) => {
+                    if let Some(stop_tx) = stop_tx.take() {
+                        let _ = stop_tx.send(());
+                    }
+                    break;
+                }
+                Ok(AgentWorkerCommand::Guide { message }) => {
+                    if !message.trim().is_empty() {
+                        guide_channel.push_back(message);
+                    }
+                }
+                Ok(AgentWorkerCommand::Run { .. }) | Err(_) => {}
+            }
+        }
+        // Parent death closes the command pipe. Treat EOF like a stop request
+        // so a detached worker does not keep running after Bifrost exits.
+        if let Some(stop_tx) = stop_tx.take() {
+            let _ = stop_tx.send(());
+        }
+    });
 }
 
 fn validate_request(request: &AgentWorkerRunRequest) -> Result<(), String> {
@@ -1037,6 +1100,39 @@ mod tests {
                 None => std::env::remove_var(self.key),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn worker_command_reader_requests_stop_on_stdin_eof() {
+        let input = std::io::Cursor::new(Vec::<u8>::new());
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+        let guide_channel: bifrost_agent::session::GuideChannel =
+            std::sync::Arc::new(bifrost_agent::session::GuideMessageChannel::new());
+
+        spawn_worker_command_reader(
+            std::io::BufReader::new(input).lines(),
+            stop_tx,
+            guide_channel,
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), stop_rx)
+            .await
+            .expect("stdin EOF should request stop")
+            .expect("stop receiver should be signalled");
+    }
+
+    #[tokio::test]
+    async fn stop_active_worker_entries_sends_stop_and_clears_registry() {
+        let _ = drain_active_workers();
+        let (stop_tx, mut stop_rx) = mpsc::unbounded_channel();
+        register_active_worker("test-stop-all-workers", 0, stop_tx);
+
+        let entries = drain_active_workers();
+        assert_eq!(entries.len(), 1);
+        stop_active_worker_entries(entries, Duration::ZERO).await;
+
+        assert!(stop_rx.recv().await.is_some());
+        assert!(!request_session_stop("test-stop-all-workers").await);
     }
 
     #[tokio::test]

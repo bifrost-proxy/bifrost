@@ -19,6 +19,7 @@ const CONFIG_FILENAME: &str = "im_gateway_external_cli_agent.json";
 const CONFIG_VERSION: u32 = 1;
 const MAX_EXTERNAL_RUNNER_IMAGES_PER_MESSAGE: usize = 6;
 const WORKER_STOP_GRACE_MS: u64 = 1500;
+const PROCESS_KILL_GRACE_MS: u64 = 250;
 
 static ACTIVE_RUNS: once_cell::sync::Lazy<dashmap::DashMap<String, u32>> =
     once_cell::sync::Lazy::new(dashmap::DashMap::new);
@@ -1586,34 +1587,61 @@ fn terminate_process(pid: u32) -> Result<(), String> {
 #[cfg(unix)]
 fn terminate_process_impl(pid: u32) -> Result<(), String> {
     use nix::errno::Errno;
-    use nix::sys::signal::{kill, Signal};
-    use nix::unistd::Pid;
 
     if pid > i32::MAX as u32 {
         return Err(format!("pid {pid} is too large to terminate"));
     }
 
-    // We always spawn with process_group(0), so the child PID is the group leader.
-    // Kill the entire process group via negative PID, regardless of whether the
-    // leader is still alive (kill_on_drop may have already killed it). This ensures
-    // background children spawned by the shell are also terminated.
-    let group_pid = Pid::from_raw(-(pid as i32));
-    match kill(group_pid, Signal::SIGTERM) {
-        Ok(()) => Ok(()),
+    match signal_process_group_or_child(pid, nix::sys::signal::Signal::SIGTERM) {
+        Ok(()) => {
+            schedule_process_group_force_kill(pid);
+            Ok(())
+        }
         Err(Errno::ESRCH) => {
             // Entire group is already gone — nothing to do
             Ok(())
         }
-        Err(Errno::EPERM) => {
-            // No permission for group kill, try the child directly as fallback
-            let child_pid = Pid::from_raw(pid as i32);
-            match kill(child_pid, Signal::SIGTERM) {
-                Ok(()) | Err(Errno::ESRCH) => Ok(()),
-                Err(error) => Err(format!("failed to terminate pid {pid}: {error}")),
-            }
-        }
         Err(error) => Err(format!("failed to terminate process group {pid}: {error}")),
     }
+}
+
+#[cfg(unix)]
+fn signal_process_group_or_child(
+    pid: u32,
+    signal: nix::sys::signal::Signal,
+) -> Result<(), nix::errno::Errno> {
+    use nix::errno::Errno;
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+
+    // We always spawn with process_group(0), so the child PID is the group leader.
+    // Signal the process group first so shell-spawned children are covered.
+    let group_pid = Pid::from_raw(-(pid as i32));
+    match kill(group_pid, signal) {
+        Ok(()) | Err(Errno::ESRCH) => Ok(()),
+        Err(Errno::EPERM) => {
+            let child_pid = Pid::from_raw(pid as i32);
+            match kill(child_pid, signal) {
+                Ok(()) | Err(Errno::ESRCH) => Ok(()),
+                Err(error) => Err(error),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
+fn schedule_process_group_force_kill(pid: u32) {
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(PROCESS_KILL_GRACE_MS));
+        if let Err(error) = signal_process_group_or_child(pid, nix::sys::signal::Signal::SIGKILL) {
+            tracing::warn!(
+                pid,
+                %error,
+                "failed to force-kill process group after SIGTERM grace"
+            );
+        }
+    });
 }
 
 #[cfg(windows)]

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Button, Card, Col, Empty, Grid, Input, Modal, Row, Segmented, Select, Space, Tag, Typography, message as antdMessage, theme } from "antd";
-import { DeleteOutlined, DownOutlined, FolderOpenOutlined, BorderOutlined, PlusOutlined, RobotOutlined, SendOutlined, SettingOutlined } from "@ant-design/icons";
+import { BulbOutlined, DeleteOutlined, DownOutlined, FolderOpenOutlined, BorderOutlined, PlusOutlined, RobotOutlined, SendOutlined, SettingOutlined } from "@ant-design/icons";
 import { apiFetch } from "../../api/apiFetch";
 import { buildApiUrl } from "../../runtime";
 import { getClientId } from "../../services/clientId";
@@ -75,6 +75,56 @@ function parseAgentPlanSlash(content: string): {
     message: rest.trimStart(),
     collaborationMode: "plan",
   };
+}
+
+function explicitRunnerIdentity(
+  status: RunTelemetry["status"] | undefined,
+  thread: AgentThreadSummary | undefined,
+) {
+  return [
+    status?.source,
+    status?.runner_id,
+    status?.runner_type,
+    status?.agent_type,
+    thread?.source,
+    thread?.runner_id,
+    thread?.runner_type,
+    thread?.agent_type,
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join(" ")
+    .toLowerCase();
+}
+
+function supportsBuiltInAgentCommands({
+  runnerId,
+  runnerOptions,
+  selectedThread,
+  status,
+}: {
+  runnerId: string;
+  runnerOptions: RunnerOption[];
+  selectedThread?: AgentThreadSummary;
+  status?: RunTelemetry["status"];
+}) {
+  const explicit = explicitRunnerIdentity(status, selectedThread);
+  if (/\b(codex|chatgpt|webgpt|external|external_runner|chatgpt_web)\b/.test(explicit)) {
+    return false;
+  }
+  if (/\b(bifrost_agent|builtin)\b/.test(explicit)) {
+    return true;
+  }
+  if (selectedThread?.runner_id && selectedThread.runner_id !== "bifrost_agent") {
+    return false;
+  }
+  if (status?.runner_id && status.runner_id !== "bifrost_agent") {
+    return false;
+  }
+  return runnerId === "bifrost_agent" || selectedRunnerAdapter(runnerOptions, runnerId) === "bifrost_agent";
+}
+
+function proposedPlanMessageContent(content: string) {
+  return `**Plan Mode result**\n\n${content.trim()}`;
 }
 
 type HistoryPagePayload = {
@@ -196,18 +246,8 @@ export default function AgentChatSection() {
   const [runnerOptions, setRunnerOptions] = useState<RunnerOption[]>([
     { label: "Bifrost Agent", value: "bifrost_agent", adapter: "bifrost_agent" },
   ]);
-  const {
-    slashRunner,
-    setSlashRunner,
-    slashCommandOptions,
-    slashRunnerOptions,
-    showSlashRunnerPanel,
-  } = useSlashRunnerSelection({
-    draft,
-    running,
-    supplementSubmitting,
-    runnerOptions,
-  });
+  const [composerMode, setComposerMode] = useState<AgentCollaborationMode | undefined>();
+  const [activeCollaborationMode, setActiveCollaborationMode] = useState<AgentCollaborationMode | undefined>();
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
   const [planCollapsed, setPlanCollapsed] = useState(true);
   const [defaultWorkDir, setDefaultWorkDir] = useState("");
@@ -491,6 +531,33 @@ export default function AgentChatSection() {
   const displayRunning = running || isThreadActive(selectedThread);
   const currentStateTag = formatCurrentStateTag(telemetry, selectedThread, displayRunning);
   const guideSupported = runnerId === "bifrost_agent";
+  const builtInAgentCommandsSupported = supportsBuiltInAgentCommands({
+    runnerId,
+    runnerOptions,
+    selectedThread,
+    status: telemetry.status,
+  });
+  const {
+    slashRunner,
+    setSlashRunner,
+    slashCommandOptions,
+    slashRunnerOptions,
+    showSlashRunnerPanel,
+  } = useSlashRunnerSelection({
+    enableCommands: builtInAgentCommandsSupported,
+    draft,
+    running,
+    supplementSubmitting,
+    runnerOptions,
+  });
+
+  useEffect(() => {
+    if (builtInAgentCommandsSupported) {
+      return;
+    }
+    setComposerMode(undefined);
+    setActiveCollaborationMode(undefined);
+  }, [builtInAgentCommandsSupported]);
 
   const refreshThreads = useCallback(async () => {
     try {
@@ -1008,6 +1075,8 @@ export default function AgentChatSection() {
     if (isUninitializedDraftSession) {
       setWorkDir(selectedWorkDir);
       setRunnerId(newChatRunnerId);
+      setComposerMode(undefined);
+      setActiveCollaborationMode(undefined);
       setNewChatOpen(false);
       return;
     }
@@ -1018,6 +1087,8 @@ export default function AgentChatSection() {
     setMessages([]);
     setDraft("");
     setSlashRunner(undefined);
+    setComposerMode(undefined);
+    setActiveCollaborationMode(undefined);
     setTelemetry(EMPTY_TELEMETRY);
     setQueuedInputs([]);
     setRunning(false);
@@ -1054,6 +1125,8 @@ export default function AgentChatSection() {
       setHistoryPath(thread.history_path);
       setDraft("");
       setTelemetry(telemetryFromThread(thread));
+      setComposerMode(undefined);
+      setActiveCollaborationMode(undefined);
       setQueuedInputs(
         queueItemsFromUnknown(thread.queueItems ?? thread.queue_items) ?? [],
       );
@@ -1121,6 +1194,8 @@ export default function AgentChatSection() {
           setQueuedInputs([]);
           setDraft("");
           setSlashRunner(undefined);
+          setComposerMode(undefined);
+          setActiveCollaborationMode(undefined);
           pendingInstantScrollRef.current = true;
           setSearchParams(
             (prev) => {
@@ -1331,13 +1406,21 @@ export default function AgentChatSection() {
       await handleRunningInput(rawContent);
       return;
     }
-    const parsedPlanSlash = parseAgentPlanSlash(rawContent);
+    const parsedPlanSlash = builtInAgentCommandsSupported
+      ? parseAgentPlanSlash(rawContent)
+      : { message: rawContent };
+    const collaborationMode =
+      builtInAgentCommandsSupported
+        ? parsedPlanSlash.collaborationMode || composerMode
+        : undefined;
     const content = parsedPlanSlash.message.trim();
-    const silentCommand = options?.silentCommand === true || rawContent === "/compact";
+    const silentCommand =
+      builtInAgentCommandsSupported &&
+      (options?.silentCommand === true || rawContent === "/compact");
     if (!content && imagesForSend.length === 0) {
-      if (parsedPlanSlash.collaborationMode === "plan" && imagesForSend.length === 0) {
-        antdMessage.warning("Type a task after /plan to start Plan Mode.");
-        setDraft("/plan ");
+      if (collaborationMode === "plan" && imagesForSend.length === 0) {
+        antdMessage.warning("Type a task to start Plan Mode.");
+        setComposerMode("plan");
       }
       return;
     }
@@ -1362,7 +1445,7 @@ export default function AgentChatSection() {
     const assistantMessage: ChatMessage = {
       id: assistantId,
       role: "assistant",
-      content: silentCommand ? "" : "Agent is running...",
+      content: silentCommand ? "" : collaborationMode === "plan" ? "Planning..." : "Agent is running...",
       timestamp: Date.now() / 1000,
       meta: "Bifrost Agent",
       processSteps: silentCommand
@@ -1373,13 +1456,23 @@ export default function AgentChatSection() {
               status: "running",
             },
           ]
-        : undefined,
+        : collaborationMode === "plan"
+          ? [
+              {
+                type: "status",
+                summary: "Plan Mode: drafting an implementation plan",
+                status: "running",
+              },
+            ]
+          : undefined,
     };
     pendingInstantScrollRef.current = true;
     setMessages((prev) =>
       silentCommand ? [...prev, assistantMessage] : [...prev, userMessage, assistantMessage],
     );
     setDraft("");
+    setComposerMode(undefined);
+    setActiveCollaborationMode(collaborationMode);
     setPendingImages([]);
     setRunning(true);
     setTelemetry({
@@ -1422,6 +1515,7 @@ export default function AgentChatSection() {
       let assistantSegmentIndex = 0;
       let assistantSegmentHasText = false;
       let assistantSegmentHasSteps = silentCommand;
+      let assistantSegmentHasProposedPlan = false;
       let nextAssistantDeltaStartsSegment = false;
 
       const appendAssistantSegment = (initialContent = "") => {
@@ -1464,7 +1558,8 @@ export default function AgentChatSection() {
               return message;
             }
             const nextContent =
-              !segmentHadText && message.content === "Agent is running..."
+              !segmentHadText &&
+              (message.content === "Agent is running..." || message.content === "Planning...")
                 ? delta
                 : `${message.content}${delta}`;
             return {
@@ -1501,7 +1596,8 @@ export default function AgentChatSection() {
                   return {
                     ...message,
                     content:
-                      !segmentHadText && message.content === "Agent is running..."
+                      !segmentHadText &&
+                      (message.content === "Agent is running..." || message.content === "Planning...")
                         ? ""
                         : message.content,
                     processSteps,
@@ -1704,6 +1800,27 @@ export default function AgentChatSection() {
         });
       };
 
+      const appendProposedPlan = (planContent: string) => {
+        const trimmedPlan = planContent.trim();
+        if (!trimmedPlan || assistantSegmentHasProposedPlan) {
+          return;
+        }
+        assistantSegmentHasProposedPlan = true;
+        const renderedPlan = proposedPlanMessageContent(trimmedPlan);
+        if (assistantSegmentHasText || assistantSegmentHasSteps) {
+          appendAssistantSegment(renderedPlan);
+          return;
+        }
+        assistantSegmentHasText = true;
+        setMessages((prev) =>
+          prev.map((message) =>
+            message.id === assistantSegmentId
+              ? { ...message, content: renderedPlan }
+              : message,
+          ),
+        );
+      };
+
       await runAgentStream({
         message: content,
         images: imagesForSend,
@@ -1712,7 +1829,7 @@ export default function AgentChatSection() {
         workDir: workDir || undefined,
         runnerId,
         runnerAdapter: selectedRunnerAdapter(runnerOptions, runnerId),
-        collaborationMode: parsedPlanSlash.collaborationMode,
+        collaborationMode,
         onEvent: (event) => {
           setTelemetry((prev) => reduceTelemetry(prev, event));
           if (silentCommand) {
@@ -1721,6 +1838,13 @@ export default function AgentChatSection() {
               appendProcessStep(step);
             }
             return;
+          }
+          if (event.eventType === "proposed_plan" && typeof event.content === "string") {
+            appendProposedPlan(event.content);
+            return;
+          }
+          if (event.eventType === "run_finished" && typeof event.proposedPlan === "string") {
+            appendProposedPlan(event.proposedPlan);
           }
           // Dynamically update thread title in the sidebar when set_title fires
           if (event.eventType === "title_updated" && typeof event.title === "string") {
@@ -1822,11 +1946,23 @@ export default function AgentChatSection() {
       antdMessage.error(text);
     } finally {
       setRunning(false);
+      setActiveCollaborationMode(undefined);
     }
   };
 
   const handleSlashCommand = (option: SlashCommandOption) => {
     setSlashRunner(undefined);
+    if (option.value === "plan") {
+      setComposerMode("plan");
+      setDraft("");
+      setTimeout(() => {
+        const input = document.querySelector<HTMLTextAreaElement>(
+          '[data-testid="agent-chat-input"]',
+        );
+        input?.focus();
+      }, 0);
+      return;
+    }
     if (option.action === "insert") {
       setDraft(option.insertText || `${option.command} `);
       setTimeout(() => {
@@ -1875,6 +2011,7 @@ export default function AgentChatSection() {
       return false;
     }
     setSlashRunner(runner);
+    setComposerMode(undefined);
     setDraft("");
     return true;
   }, [
@@ -2004,6 +2141,11 @@ export default function AgentChatSection() {
                 >
                   {currentStateTag}
                 </Tag>
+                {activeCollaborationMode === "plan" ? (
+                  <Tag color="gold" data-testid="agent-chat-active-plan-mode">
+                    Plan Mode
+                  </Tag>
+                ) : null}
               </Space>
             </div>
           }
@@ -2191,6 +2333,7 @@ export default function AgentChatSection() {
                   }}
                   onSelect={(option) => {
                     setSlashRunner(option);
+                    setComposerMode(undefined);
                     setDraft("");
                   }}
                 />
@@ -2234,10 +2377,14 @@ export default function AgentChatSection() {
                   onChange={(event) => setDraft(event.target.value)}
                   onPaste={handlePasteImages}
                   onKeyDown={handleComposerKeyDown}
-                  placeholder="Describe a task for the Agent..."
+                  placeholder={
+                    composerMode === "plan"
+                      ? "Describe what should be planned..."
+                      : "Describe a task for the Agent..."
+                  }
                   autoSize={{ minRows: 2, maxRows: 7 }}
                   style={{
-                    padding: slashRunner
+                    padding: slashRunner || composerMode === "plan"
                       ? "42px 56px 30px 14px"
                       : "8px 56px 30px 14px",
                     border: "none",
@@ -2247,8 +2394,25 @@ export default function AgentChatSection() {
                     resize: "none",
                   }}
                 />
+                {composerMode === "plan" ? (
+                  <Tag
+                    color="gold"
+                    data-testid="agent-chat-plan-mode-pill"
+                    style={styles.planModePill}
+                    closable
+                    onClose={(event) => {
+                      event.preventDefault();
+                      setComposerMode(undefined);
+                    }}
+                  >
+                    <BulbOutlined style={{ marginRight: 4 }} />
+                    Plan Mode
+                  </Tag>
+                ) : null}
                 <Text style={styles.inputHint} data-testid="agent-chat-input-hint">
-                  Shift + Enter for a new line
+                  {composerMode === "plan"
+                    ? "Planning only. Shift + Enter for a new line"
+                    : "Shift + Enter for a new line"}
                 </Text>
                 <Button
                   shape="circle"

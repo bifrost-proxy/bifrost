@@ -119,6 +119,22 @@ export function historyEventsToMessages(
       return;
     }
 
+    if (event.event_type === "proposed_plan") {
+      flushPendingSteps();
+      lastEventWasAssistantDelta = false;
+      const content = stringFrom(event.content.content);
+      if (content) {
+        messages.push({
+          id: `history-proposed-plan-${index}`,
+          role: "assistant",
+          content: `**Plan Mode result**\n\n${content.trim()}`,
+          timestamp: event.timestamp,
+          meta: "Plan Mode",
+        });
+      }
+      return;
+    }
+
     const step = historyEventToProcessStep(event);
     if (!step) {
       return;
@@ -426,6 +442,13 @@ export function historyEventsToTelemetry(
       };
       continue;
     }
+    if (event.event_type === "plan_cleared") {
+      telemetry = {
+        ...telemetry,
+        plan: [],
+      };
+      continue;
+    }
     if (event.event_type === "tool_call") {
       const name = stringFrom(event.content.tool_name) || "tool";
       telemetry = {
@@ -525,13 +548,19 @@ export function historyEventsToTelemetry(
       };
     }
   }
-  const liveStatus = isThreadActiveForTelemetry(thread)
+  const explicitIdleThread =
+    thread?.running === false && !isRunStateActive(thread.state);
+  const liveStatus = explicitIdleThread
+    ? threadTelemetry.status
+    : isThreadActiveForTelemetry(thread)
     ? threadTelemetry.status
     : isRunStatusActive(fallback.status)
       ? fallback.status
       : undefined;
   return {
     ...telemetry,
+    phase:
+      explicitIdleThread && telemetry.phase === "running" ? "idle" : telemetry.phase,
     status: mergeDefinedStatus(telemetry.status, liveStatus),
     tools: telemetry.tools.map((tool) =>
       tool.status === "running" ? { ...tool, status: "success" } : tool,
@@ -556,6 +585,9 @@ function mergeDefinedStatus(
 }
 
 function isThreadActiveForTelemetry(thread?: AgentThreadSummary) {
+  if (thread?.running === false && !isRunStateActive(thread.state)) {
+    return false;
+  }
   return thread?.running === true || isRunStateActive(thread?.run_state || thread?.state);
 }
 

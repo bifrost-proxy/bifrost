@@ -902,6 +902,12 @@ export function reduceTelemetry(
       plan: parsePlanSteps(event.steps),
     };
   }
+  if (eventType === "plan_cleared") {
+    return {
+      ...telemetry,
+      plan: [],
+    };
+  }
   if (eventType === "tool_started") {
     const name = stringFrom(event.toolName) || "tool";
     return {

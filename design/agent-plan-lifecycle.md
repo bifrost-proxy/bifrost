@@ -152,6 +152,8 @@ append ToolCallCompleted turn event
 
 展示层只消费 `AgentTurnProgressEvent::PlanUpdated { steps, title }` 的 `steps` 当前值。`crates/bifrost-admin/src/im_gateway/progress_card.rs` 不应保存或补齐旧步骤。
 
+Web UI history replay 必须同样消费 `plan_cleared`。当已完成 plan 后的新 turn 记录 `plan_cleared reason=new_turn_after_completion`，顶部 plan 面板必须清空；不能只看最后一次非空 `plan_updated`，否则下一轮对话仍会把上一轮已完成 checklist 固定显示在 composer 顶部。
+
 Compaction prompt 必须继续参考 Codex：handoff summary 只描述当前进展、关键上下文和剩余工作，不额外向 compaction model 注入 `current_plan` 文本，也不把 `current_plan` 写入 compaction metadata。`current_plan` 只由 `plan_updated` / `plan_cleared` 事件恢复 UI 和 runtime gate；不要让 summary 阶段重新解释 checklist。
 
 2026-06-02 回归修复补充：上述约束只针对 compaction summary 生成请求和持久化 metadata。mid-turn compaction 发生后，同一个 turn 的后续模型请求必须从 runtime `session.current_plan` 临时恢复当前 plan snapshot，否则模型只能看到 handoff summary，容易把 11 步计划重写成 7 步粗粒度计划。这个恢复提示必须满足：

@@ -2175,6 +2175,11 @@ pub async fn run_turn_with_mcp_multimodal(
                 ) {
                     warn!(error = %e, "failed to record assistant message");
                 }
+                if let Some(plan) = proposed_plan.as_ref() {
+                    if let Err(e) = rec.record_proposed_plan(&session.session_key, plan) {
+                        warn!(error = %e, "failed to record proposed plan");
+                    }
+                }
             }
 
             info!(

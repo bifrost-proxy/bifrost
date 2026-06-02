@@ -53,11 +53,13 @@ const SLASH_COMMAND_OPTIONS: SlashCommandOption[] = [
 ];
 
 export function useSlashRunnerSelection({
+  enableCommands,
   draft,
   running,
   supplementSubmitting,
   runnerOptions,
 }: {
+  enableCommands: boolean;
   draft: string;
   running: boolean;
   supplementSubmitting: boolean;
@@ -80,14 +82,14 @@ export function useSlashRunnerSelection({
   );
   const slashCommandOptions = useMemo(
     () =>
-      SLASH_COMMAND_OPTIONS.filter((option) => {
+      (enableCommands ? SLASH_COMMAND_OPTIONS : []).filter((option) => {
         if (!slashQuery) {
           return true;
         }
         const searchable = `${option.command} ${option.label} ${option.description}`;
         return searchable.toLowerCase().includes(slashQuery);
       }),
-    [slashQuery],
+    [enableCommands, slashQuery],
   );
   const showSlashRunnerPanel =
     !running &&

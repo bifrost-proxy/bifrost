@@ -603,6 +603,7 @@ test("AI Agent Chat runs compact as a control command without chat messages", as
 
 test("AI Agent Chat supports slash plan mode from the composer", async ({ page }) => {
   let planCalls = 0;
+  let releasePlanResponse: (() => void) | undefined;
   await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
     await route.fulfill({
       status: 200,
@@ -633,19 +634,29 @@ test("AI Agent Chat supports slash plan mode from the composer", async ({ page }
   });
   await page.route("**/_bifrost/api/agent/chat/stream", async (route) => {
     const body = route.request().postDataJSON();
+    const requestIndex = planCalls + 1;
     expect(body).toMatchObject({
-      message: "Create a migration plan",
+      message:
+        requestIndex === 1
+          ? "Create a migration plan"
+          : "Create another migration plan",
       collaboration_mode: "plan",
       work_dir: "/tmp/agent-plan",
     });
     expect(body.message).not.toContain("/plan");
     planCalls += 1;
+    if (planCalls === 1) {
+      await new Promise<void>((resolve) => {
+        releasePlanResponse = resolve;
+      });
+    }
     await route.fulfill({
       status: 200,
       contentType: "text/event-stream",
       body:
         'event: run_started\ndata: {"eventType":"run_started"}\n\n' +
-        'event: run_finished\ndata: {"eventType":"run_finished","response":"Plan mode request accepted."}\n\n',
+        'event: proposed_plan\ndata: {"eventType":"proposed_plan","content":"- Inspect current schema\\n- Draft migration steps\\n- Verify rollback"}\n\n' +
+        'event: run_finished\ndata: {"eventType":"run_finished","response":"","proposedPlan":"- Inspect current schema\\n- Draft migration steps\\n- Verify rollback"}\n\n',
     });
   });
 
@@ -656,11 +667,15 @@ test("AI Agent Chat supports slash plan mode from the composer", async ({ page }
     page.getByTestId("agent-chat-slash-command-option").filter({ hasText: "/plan" }),
   ).toContainText("进入规划模式");
   await page.getByTestId("agent-chat-slash-command-option").filter({ hasText: "/plan" }).click();
-  await expect(input).toHaveValue("/plan ");
+  await expect(input).toHaveValue("");
+  await expect(page.getByTestId("agent-chat-plan-mode-pill")).toContainText("Plan Mode");
+  await expect(page.getByTestId("agent-chat-input-hint")).toContainText("Planning only");
 
-  await input.fill("/plan Create a migration plan");
+  await input.fill("Create a migration plan");
   await page.getByTestId("agent-chat-send").click();
   await expect.poll(() => planCalls).toBe(1);
+  await expect(page.getByTestId("agent-chat-active-plan-mode")).toContainText("Plan Mode");
+  releasePlanResponse?.();
   await expect(page.getByTestId("agent-chat-messages")).toContainText(
     "Create a migration plan",
   );
@@ -668,8 +683,16 @@ test("AI Agent Chat supports slash plan mode from the composer", async ({ page }
     "/plan Create a migration plan",
   );
   await expect(page.getByTestId("agent-chat-messages")).toContainText(
-    "Plan mode request accepted.",
+    "Plan Mode result",
   );
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Verify rollback",
+  );
+  await expect(page.getByTestId("agent-chat-active-plan-mode")).toHaveCount(0);
+
+  await input.fill("/plan Create another migration plan");
+  await page.getByTestId("agent-chat-send").click();
+  await expect.poll(() => planCalls).toBe(2);
 });
 
 test("AI Agent Chat slash runner call selects a runner and renders the result", async ({
@@ -1223,6 +1246,12 @@ test("AI Agent Chat new chat can select an external runner", async ({ page }) =>
   await expect(page.getByTestId("agent-chat-new-runner")).toContainText("codex");
   await page.getByRole("button", { name: "Create" }).click();
   await expect(page.getByTestId("agent-chat-runner-tag")).toContainText("codex");
+
+  await page.getByTestId("agent-chat-input").fill("/");
+  await expect(page.getByTestId("agent-chat-slash-command-option")).toHaveCount(0);
+  await expect(page.getByTestId("agent-chat-slash-runner-option").first()).toContainText(
+    "Bifrost Agent",
+  );
 
   await page.getByTestId("agent-chat-input").fill("Run via Codex");
   await page.getByTestId("agent-chat-send").click();
