@@ -752,3 +752,32 @@ Workflow 需要能替换现有 ASR 定时任务模式：旧模式中的“扫描
 - 通过。2026-06-02 执行 `SKIP_FRONTEND_BUILD=1 cargo run -p bifrost-e2e -- --test ai_workflow_create_validate_preview_run --test-timeout 180 --verbose`，真实 E2E Runner 1/1 通过；默认 ASR 模板链路完成 templates/detail/validate/preview/save/list/run/logs，真实 run 断言 events、node states、manifest、attempt stdout/stderr、artifacts sha256；script Workflow 真实执行 shell 命令并验证 artifact 包含 `real-execution` 输入；notification Workflow 真实写入本地通知并通过 `/notifications?type=ai_workflow` 查询；enabled schedule trigger 被后台 scheduler 真实触发，`/schedules` 返回 `lastRunId/lastStatus`，并通过 run logs 查询到 schedule run 的 events、node states、artifact 与 `scheduled` 输入。
 - 通过。2026-06-02 执行 `cd web && npm run build -- --mode development`，TypeScript 与 Vite 构建通过；静态检查确认 WebUI 使用 `Check Apply`、`Workflow executed`、`quick debug executed the full workflow`，Quick Debug 空态文案为 `validate → preview → check → save → execute → logs`。
 - 通过。2026-06-02 静态检查确认 CLI `run` about 为 `Execute a saved Workflow and persist run traces`，CLI schema 流程为 `draft -> validate -> preview -> apply -> execute -> logs`，运行完成输出 `Workflow executed`；旧 `Create a dry-run Workflow run record` 不再存在。
+
+### TC-AIW-32：Workflow 首页列表与详情 Tab 信息架构
+
+操作步骤：
+
+1. 启动真实浏览器 E2E 场景，进入 `/_bifrost/ai?aiSection=tools-workflow`：
+   ```bash
+   node .agents/skills/e2e-verify/scripts/browser-test.js scenario ai-workflow-list-detail-tabs --headless --verbose
+   ```
+2. 检查首页是否只展示 `Workflow List`、`Workflow Templates`、`New Workflow`、`Refresh` 和列表项操作。
+3. 检查首页是否不展示 `ai-workflow-detail-tabs`、`ai-workflow-draft-editor` 和 `Quick Debug Trace`。
+4. 点击模板 `Use Template` 进入详情页，检查详情页是否有 `Editor`、`Execution Records`、`Debug Run` 三个 Tab。
+5. 在 `Editor` Tab 检查默认是否展示 React Flow 画布，并能切换到 `Code Config` 展示配置编辑器。
+6. 切换到 `Execution Records`，检查该 Tab 独立展示执行记录空态或列表，不混入调试轨迹。
+7. 切换到 `Debug Run`，检查该 Tab 独立展示 `audio_dir` 调试输入、Run/Quick Debug 操作和 Trace。
+8. 点击 `Back to Workflow list`，检查页面回到纯列表首页。
+
+预期结果：
+
+- Workflow 首页不再把模板、编辑器、预览、执行记录和调试全部揉在一起；首页只承担列表、新建和条目管理/状态入口。
+- Workflow 详情页按 Tab 分离：编辑、执行记录、调试运行。
+- 编辑 Tab 默认是 React Flow 可视化 DAG，可切换为代码配置编辑模式。
+- 执行记录 Tab 可以从后端 `GET /ai/workflows/{id}/runs` 获取当前 Workflow 的 run 列表。
+- 调试运行 Tab 单独承载完整运行和 Quick Debug Trace。
+- 旧 `asrTask` 深链不会让首页布局混乱；Workflow 详情只由 `workflowId` 驱动，后续迁移链路应显式生成 `workflowId` 后再进入详情。
+
+实际结果：
+
+- 通过。2026-06-02 执行 `node .agents/skills/e2e-verify/scripts/browser-test.js scenario ai-workflow-list-detail-tabs --headless --verbose`，真实独立 Bifrost 进程启动后打开 `/_bifrost/ai?aiSection=tools-workflow`，确认首页只展示 `Workflow List` 与 `Workflow Templates`，不展示详情 Tab、代码编辑器和 Quick Debug Trace；点击默认 ASR 模板后进入详情页，确认 `Editor`、`Execution Records`、`Debug Run` 三个 Tab 独立存在；`Editor` 默认展示 React Flow 并可切到 `Code Config`；`Execution Records` 不混入调试轨迹；`Debug Run` 单独展示 `audio_dir` 调试输入与 Quick Debug Trace；返回后首页恢复纯列表布局。场景 22/22 步通过，46 个 API 请求 0 失败。

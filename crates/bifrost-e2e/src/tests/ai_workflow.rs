@@ -236,6 +236,27 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 ));
             }
             assert_event_sequence(&logs)?;
+            let run_list_response = client
+                .get(format!("{base}/{workflow_id}/runs"))
+                .send()
+                .await
+                .map_err(|e| format!("run list request failed: {e}"))?;
+            assert_status(&run_list_response, 200)?;
+            let run_list: Value = run_list_response
+                .json()
+                .await
+                .map_err(|e| format!("parse run list response: {e}"))?;
+            if !run_list
+                .get("runs")
+                .and_then(Value::as_array)
+                .unwrap_or(&Vec::new())
+                .iter()
+                .any(|item| item.get("id").and_then(Value::as_str) == Some(run_id))
+            {
+                return Err(format!(
+                    "run list did not include persisted run: {run_list}"
+                ));
+            }
 
             let script_workflow_id = format!("e2e-script-real-{port}");
             let script_draft = format!(

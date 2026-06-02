@@ -281,6 +281,10 @@ fn store_persists_definition_and_run_record_impl() {
     assert!(run_log.contains("node transcribe"));
     assert!(run_log.contains("finished status=no_update"));
     assert!(store.get_run(&run.id).is_ok());
+    let listed_runs = store.list_runs("daily-audio").unwrap();
+    assert_eq!(listed_runs.len(), 1);
+    assert_eq!(listed_runs[0].id, run.id);
+    assert!(store.list_runs("missing-workflow").unwrap().is_empty());
 }
 
 fn script_node_retries_and_preserves_attempt_logs_impl() {

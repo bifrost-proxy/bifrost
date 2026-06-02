@@ -130,3 +130,11 @@ export function runAiWorkflow(
 export function getAiWorkflowRun(workflowId: string, runId: string): Promise<{ run: WorkflowRun }> {
   return get(`/ai/workflows/${encodeURIComponent(workflowId)}/runs/${encodeURIComponent(runId)}`);
 }
+
+export function listAiWorkflowRuns(workflowId: string): Promise<{ runs: WorkflowRun[] }> {
+  return get(`/ai/workflows/${encodeURIComponent(workflowId)}/runs`);
+}
+
+export function workflowToDraft(workflow: WorkflowDocument): string {
+  return JSON.stringify(workflow, null, 2);
+}

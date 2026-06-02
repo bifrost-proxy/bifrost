@@ -876,6 +876,32 @@ impl WorkflowStore {
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
     }
 
+    pub fn list_runs(&self, workflow_id: &str) -> io::Result<Vec<WorkflowRunRecord>> {
+        let dir = self.runs_dir();
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut runs = Vec::new();
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let path = entry.path().join("run.json");
+            if !path.exists() {
+                continue;
+            }
+            let body = fs::read_to_string(path)?;
+            let run: WorkflowRunRecord = serde_json::from_str(&body)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            if run.workflow_id == workflow_id {
+                runs.push(run);
+            }
+        }
+        runs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        Ok(runs)
+    }
+
     pub fn list_schedule_states(&self) -> io::Result<Vec<WorkflowScheduleState>> {
         let mut states_by_key = BTreeMap::<(String, usize), WorkflowScheduleState>::new();
         let dir = self.scheduler_dir();

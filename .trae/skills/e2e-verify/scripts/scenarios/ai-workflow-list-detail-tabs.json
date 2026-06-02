@@ -1,0 +1,83 @@
+{
+  "name": "AI Workflow List Detail Tabs",
+  "description": "Workflow 首页只展示列表和模板入口，详情页分离编辑、执行记录和调试运行 Tab",
+  "config": {
+    "baseUrl": "http://127.0.0.1:3000/_bifrost",
+    "timeout": 30000
+  },
+  "steps": [
+    { "action": "log", "message": "==== 打开 AI Workflow 列表首页 ====" },
+    { "action": "goto", "url": "/ai?aiSection=tools-workflow" },
+    { "action": "wait", "ms": 2000 },
+    {
+      "action": "assert",
+      "condition": "document.querySelector('[data-testid=ai-workflow-section]') !== null",
+      "message": "AI Workflow 页面已打开"
+    },
+    {
+      "action": "assert",
+      "condition": "document.body.innerText.includes('Workflow List') && document.body.innerText.includes('Workflow Templates')",
+      "message": "首页展示 Workflow 列表和模板区域"
+    },
+    {
+      "action": "assert",
+      "condition": "document.querySelector('[data-testid=ai-workflow-detail-tabs]') === null && document.querySelector('[data-testid=ai-workflow-draft-editor]') === null && !document.body.innerText.includes('Quick Debug Trace')",
+      "message": "首页不展示详情 Tab、代码编辑器和调试轨迹"
+    },
+    {
+      "action": "evaluate",
+      "code": "(() => { const buttons = Array.from(document.querySelectorAll('button')); const target = buttons.find((button) => button.textContent && button.textContent.includes('Use Template')); if (!target) return false; target.click(); return true; })()"
+    },
+    { "action": "wait", "ms": 1600 },
+    {
+      "action": "assert",
+      "condition": "document.querySelector('[data-testid=ai-workflow-detail-tabs]') !== null && document.body.innerText.includes('Editor') && document.body.innerText.includes('Execution Records') && document.body.innerText.includes('Debug Run')",
+      "message": "模板进入详情页后展示三个独立 Tab"
+    },
+    {
+      "action": "assert",
+      "condition": "document.querySelector('[data-testid=ai-workflow-reactflow-preview]') !== null && document.body.innerText.includes('Visual Workflow') && document.body.innerText.includes('Code Config')",
+      "message": "详情编辑 Tab 默认展示可视化 Workflow 并支持切换代码模式"
+    },
+    {
+      "action": "evaluate",
+      "code": "(() => { const nodes = Array.from(document.querySelectorAll('label, button, span')); const target = nodes.find((node) => node.textContent && node.textContent.includes('Code Config')); if (!target) return false; target.click(); return true; })()"
+    },
+    { "action": "wait", "ms": 500 },
+    {
+      "action": "assert",
+      "condition": "document.querySelector('[data-testid=ai-workflow-draft-editor]') !== null && document.body.innerText.includes('Workflow Configuration')",
+      "message": "代码模式只在详情编辑 Tab 中展示配置编辑器"
+    },
+    {
+      "action": "evaluate",
+      "code": "(() => { const tabs = Array.from(document.querySelectorAll('[role=tab]')); const target = tabs.find((node) => node.textContent && node.textContent.includes('Execution Records')); if (!target) return false; target.click(); return true; })()"
+    },
+    { "action": "wait", "ms": 700 },
+    {
+      "action": "assert",
+      "condition": "document.body.innerText.includes('Execution Records') && !document.body.innerText.includes('Quick Debug Trace')",
+      "message": "执行记录 Tab 独立展示，不混入调试轨迹"
+    },
+    {
+      "action": "evaluate",
+      "code": "(() => { const tabs = Array.from(document.querySelectorAll('[role=tab]')); const target = tabs.find((node) => node.textContent && node.textContent.includes('Debug Run')); if (!target) return false; target.click(); return true; })()"
+    },
+    { "action": "wait", "ms": 700 },
+    {
+      "action": "assert",
+      "condition": "document.body.innerText.includes('Debug Run') && document.body.innerText.includes('Quick Debug Trace') && document.body.innerText.includes('audio_dir')",
+      "message": "调试运行 Tab 独立展示输入和调试轨迹"
+    },
+    {
+      "action": "evaluate",
+      "code": "(() => { const buttons = Array.from(document.querySelectorAll('button')); const target = buttons.find((button) => button.textContent && button.textContent.includes('Back to Workflow list')); if (!target) return false; target.click(); return true; })()"
+    },
+    { "action": "wait", "ms": 700 },
+    {
+      "action": "assert",
+      "condition": "document.body.innerText.includes('Workflow List') && document.querySelector('[data-testid=ai-workflow-detail-tabs]') === null",
+      "message": "返回后首页重新保持纯列表布局"
+    }
+  ]
+}

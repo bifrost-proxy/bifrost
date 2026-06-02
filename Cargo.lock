@@ -264,7 +264,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-admin"
-version = "0.0.86"
+version = "0.0.87"
 dependencies = [
  "aes",
  "async-trait",
@@ -350,7 +350,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-agent"
-version = "0.0.86"
+version = "0.0.87"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -384,7 +384,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-asr"
-version = "0.0.86"
+version = "0.0.87"
 dependencies = [
  "chrono",
  "pinyin",
@@ -399,7 +399,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-cli"
-version = "0.0.86"
+version = "0.0.87"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -449,7 +449,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-command"
-version = "0.0.86"
+version = "0.0.87"
 dependencies = [
  "serde",
  "serde_json",
@@ -457,7 +457,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-core"
-version = "0.0.86"
+version = "0.0.87"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
@@ -487,7 +487,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-e2e"
-version = "0.0.86"
+version = "0.0.87"
 dependencies = [
  "base64 0.22.1",
  "bifrost-admin",
@@ -526,7 +526,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-power"
-version = "0.0.86"
+version = "0.0.87"
 dependencies = [
  "core-foundation 0.10.1",
  "core-foundation-sys",
@@ -539,7 +539,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-proxy"
-version = "0.0.86"
+version = "0.0.87"
 dependencies = [
  "base64 0.22.1",
  "bifrost-admin",
@@ -593,7 +593,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-script"
-version = "0.0.86"
+version = "0.0.87"
 dependencies = [
  "base64 0.22.1",
  "bifrost-core",
@@ -612,7 +612,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-storage"
-version = "0.0.86"
+version = "0.0.87"
 dependencies = [
  "bifrost-core",
  "chrono",
@@ -632,7 +632,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-sync"
-version = "0.0.86"
+version = "0.0.87"
 dependencies = [
  "bifrost-core",
  "bifrost-storage",
@@ -650,7 +650,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-tests"
-version = "0.0.86"
+version = "0.0.87"
 dependencies = [
  "async-trait",
  "bifrost-admin",
@@ -671,7 +671,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-tls"
-version = "0.0.86"
+version = "0.0.87"
 dependencies = [
  "bifrost-core",
  "chrono",
@@ -5443,7 +5443,7 @@ dependencies = [
 
 [[package]]
 name = "skills"
-version = "0.0.86"
+version = "0.0.87"
 dependencies = [
  "chrono",
  "notify",

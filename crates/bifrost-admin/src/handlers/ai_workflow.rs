@@ -208,6 +208,10 @@ async fn handle_workflow_resource(req: Request<Incoming>, rest: &str) -> Respons
                 Err(error) => error_response(StatusCode::BAD_REQUEST, &error),
             }
         }
+        (&Method::GET, [_, "runs"]) => match store.list_runs(workflow_id) {
+            Ok(runs) => json_response(&json!({ "runs": runs })),
+            Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+        },
         (&Method::GET, [_, "runs", run_id]) => match store.get_run(run_id) {
             Ok(run) if run.workflow_id == workflow_id => json_response(&json!({ "run": run })),
             Ok(_) => error_response(StatusCode::NOT_FOUND, "workflow run not found"),

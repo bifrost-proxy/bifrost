@@ -1039,6 +1039,16 @@ ASR 定时任务迁移入口：
 - Quick Debug 不绕过后端校验；只有 validate 通过且 preview 无 blocking errors 时才保存和运行。
 - React Flow 画布必须在默认模板加载和切换模板后自动预览渲染，让用户无需先阅读 YAML 也能理解任务流。
 
+页面信息架构必须分层，禁止把列表、模板、编辑器、预览、执行记录和调试轨迹全部揉在一个首页：
+
+1. `tools-workflow` 首页只展示 Workflow 列表、模板列表、新建入口、刷新入口和每个条目的详情/调试操作；它不展示代码编辑器、执行轨迹或 Quick Debug Trace。
+2. 点击列表项或使用模板后进入 Workflow 详情页；详情页顶部展示当前 Workflow 名称、ID、模板状态和返回列表入口。
+3. 详情页使用 Tab 分离能力：`Editor`、`Execution Records`、`Debug Run`。
+4. `Editor` Tab 默认展示 React Flow 可视化 DAG，并允许切换到 `Code Config` 模式编辑 JSON/YAML 配置；保存前仍必须走后端 validate/preview/check apply。
+5. `Execution Records` Tab 只展示该 Workflow 的历史 run 列表和选中 run 的节点状态、事件数量、artifact 路径与 attempt 日志路径。
+6. `Debug Run` Tab 只展示调试输入、完整运行按钮、Quick Debug 和 Trace；Run 与 Quick Debug 不再挤在首页或编辑器侧栏。
+7. 深链兼容：旧的 `asrTask` 参数不再驱动 Workflow 详情加载，避免 ASR Task 与 Workflow 详情状态混用；后续迁移链路应显式生成 `workflowId` 后再进入详情。
+
 节点配置需要特别暴露：
 
 - `asr_transcription`：扫描目录、周期触发、无更新判定、Daily 文档输出路径。
