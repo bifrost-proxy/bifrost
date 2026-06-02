@@ -141,6 +141,24 @@ Web 触发 External Runner 时还存在一个更隐蔽的分叉：如果当前�
 10. 已结束的 Web Chat turn loop 默认折叠过程消息，只保留 `已处理 <duration>` 摘要与最终 assistant 结论；展开后仍能查看完整 assistant delta、工具调用、plan、compaction 等过程。
 11. 不做旧数据兼容设计；相关 API、前端 helper 和持久化读写可以直接按新模型收敛。
 
+### 运行态一致性真源
+
+`session_state.json` 只能作为线程索引、外部 runner 引用、latest run id 和展示摘要缓存，不能作为 `running=true` 的唯一事实源。运行态投影必须按以下优先级收敛：
+
+1. 当前进程的 live runtime registry（内置 Agent active turn、worker stop registry、external CLI worker registry）是“仍在运行”的唯一实时证明。
+2. canonical JSONL timeline 的最新终态 `run_state_changed` 是“已经结束”的持久化事实源，终态包括 `completed`、`failed`、`stopped`、`timed_out`。
+3. `/sessions/all` 合并 persisted `session_state` 时，如果同一 `session_key` 已有 JSONL 终态，必须按 JSONL 终态投影，并使用 JSONL 终态时间作为排序时间，避免陈旧 `updatedAt` 把 ended history 顶到 running。
+4. 内置 `bifrost_agent` 的 persisted `status:"running"` 如果没有当前进程 live runtime 证明，应视为陈旧残留并投影为 ended/completed；内置 Agent 没有跨装置持久运行语义。
+5. 所有非内置 runner adapter（例如 `codex`、`chatgpt_web`、自定义 CLI adapter）在没有 JSONL 终态且没有本地 live registry 证明时，仍可保留 persisted `running`，用于兼容不同装置或外部 runner 的异步状态。
+6. `/stop` 先请求 live runtime 停止；如果没有命中任何正在运行的 loop，但 persisted state 确认为陈旧 running，应同步修复 `session_state.json` 为 terminal status，并在响应中暴露修复计数。
+
+测试方案：
+
+- 单元测试覆盖内置 Agent 陈旧 running、JSONL 终态覆盖、所有非内置 runner adapter 无终态时保持 running、陈旧状态修复落盘。
+- E2E 使用临时 `BIFROST_DATA_DIR` 构造 completed JSONL + stale `bifrost_agent` running state，并同时构造 `codex`、`chatgpt_web`、`custom_cli` running state，验证 `/sessions/all`、`/stop` 和落盘状态一致。
+- human_tests 在 `human_tests/agent-session-persistence.md` 记录陈旧 Running 状态与 Stop 一致性回归，并真实执行对应 E2E。
+- Review/Fix/Test 至少两轮复核状态投影、runner 兼容、history 排序、stop 响应和文档/测试一致性。
+
 ### 完成态 Loop 折叠展示
 
 Web Agent Chat 的消息区按 `user_message` 切分 turn：一个用户输入及其后的连续 assistant 片段属于同一个 loop 展示组。当前仍在运行的最后一个 turn 保持展开，继续实时显示 delta、process block、Thinking tail 和工具状态；已经结束的 turn 默认收起中间过程，只在用户消息下方显示轻量摘要行：
