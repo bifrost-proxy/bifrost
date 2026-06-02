@@ -306,8 +306,9 @@
 - `session_state.json` 中该内置 Agent session 的 `status` 被修复为 `ended`。
 - 第 2 步外部 runner session 仍显示 `running:true`、`status:"active"`、`state:"running"`、`run_state:"running"`；该修复不会误停止或误结束不同装置、不同 adapter 的外部 runner。
 - 如果任意 runner adapter 后续已有 canonical timeline 终态，则 `/sessions/all` 按该终态投影为 completed/failed/stopped/timed_out，不再受 persisted `status:"running"` 覆盖。
+- 终态投影只使用最新模型显式写入的 `history_path`；未绑定到 `session_state.history_path` 的旧 history 文件不会被按 `sessionKey` 额外扫描或用于修正状态。
 
-**执行记录（2026-06-02）**：PASS — 执行 `source ~/.zshrc && e2e-tests/tests/test_agent_session_stale_running_reconciliation.sh`，脚本使用临时数据目录和随机端口启动 Bifrost（包含 `--no-system-proxy`），先验证 completed JSONL + stale `bifrost_agent` running state 在 `/sessions/all` 投影为 ended/completed，再验证 `/stop` 返回 `stopped:false` 且 `repaired_stale_running >= 1` 并把 persisted status 修复为 `ended`，最后确认无终态 timeline 的外部 `codex`、`chatgpt_web` 和 `custom_cli` runner 都仍保持 running。
+**执行记录（2026-06-02）**：PASS — 执行 `source ~/.zshrc && e2e-tests/tests/test_agent_session_stale_running_reconciliation.sh`，脚本使用临时数据目录和随机端口启动 Bifrost（包含 `--no-system-proxy`），先验证 completed JSONL + stale `bifrost_agent` running state 在 `/sessions/all` 投影为 ended/completed，再验证 `/stop` 返回 `stopped:false` 且 `repaired_stale_running >= 1` 并把 persisted status 修复为 `ended`，最后确认无终态 timeline 的外部 `codex`、`chatgpt_web` 和 `custom_cli` runner 都仍保持 running。follow-up 复核补充执行 `source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin external_running -- --nocapture --test-threads=1`，确认未绑定到显式 `history_path` 的 terminal history 不会被按 `sessionKey` 扫描用于状态投影；并执行 `source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_agent_session_stale_running_reconciliation.sh` 复跑真实 API 场景，结果 PASS。
 
 ## 清理步骤
 

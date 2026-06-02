@@ -1636,10 +1636,7 @@ fn terminal_run_state_from_summary(
 }
 
 fn is_terminal_run_state(run_state: &str) -> bool {
-    matches!(
-        run_state,
-        "completed" | "failed" | "stopped" | "timed_out" | "ended"
-    )
+    matches!(run_state, "completed" | "failed" | "stopped" | "timed_out")
 }
 
 fn is_failed_terminal_run_state(run_state: &str) -> bool {
@@ -1647,10 +1644,7 @@ fn is_failed_terminal_run_state(run_state: &str) -> bool {
 }
 
 fn normalize_terminal_run_state(run_state: &str) -> &str {
-    match run_state {
-        "ended" => "completed",
-        other => other,
-    }
+    run_state
 }
 
 fn summary_end_time(summary: &bifrost_agent::persistence::SessionFileSummary) -> u64 {
@@ -1701,29 +1695,14 @@ fn persisted_state_history_summary(
     state: &crate::im_gateway::session_state::ImAgentSessionState,
 ) -> Option<bifrost_agent::persistence::SessionFileSummary> {
     let data_dir = bifrost_agent::config::agent_home_dir();
-    let path = state
-        .history_path
-        .as_deref()
-        .and_then(|path| {
-            bifrost_agent::persistence::validate_conversation_path(
-                &data_dir,
-                std::path::Path::new(path),
-            )
-            .ok()
-        })
-        .or_else(|| latest_history_path_for_state(&state.session_key));
-    path.map(|path| bifrost_agent::persistence::scan_session_summary(&path))
-}
-
-fn latest_history_path_for_state(session_key: &str) -> Option<std::path::PathBuf> {
-    let data_dir = bifrost_agent::config::agent_home_dir();
-    let mut candidates =
-        bifrost_agent::persistence::list_conversations(&data_dir, Some(session_key));
-    candidates.sort_by_key(|path| {
-        let summary = bifrost_agent::persistence::scan_session_summary(path);
-        summary_end_time(&summary)
+    let path = state.history_path.as_deref().and_then(|path| {
+        bifrost_agent::persistence::validate_conversation_path(
+            &data_dir,
+            std::path::Path::new(path),
+        )
+        .ok()
     });
-    candidates.pop()
+    path.map(|path| bifrost_agent::persistence::scan_session_summary(&path))
 }
 
 fn status_from_run_state(run_state: &str) -> &'static str {
@@ -2367,7 +2346,7 @@ mod tests {
     }
 
     #[test]
-    fn all_external_runners_without_terminal_history_stay_running_for_compatibility() {
+    fn all_external_runners_without_terminal_history_stay_running_for_remote_semantics() {
         for adapter in ["codex", "chatgpt_web", "custom_cli"] {
             let state = persisted_state("external-running", adapter, "running");
 
@@ -2394,6 +2373,45 @@ mod tests {
         assert_eq!(projection.run_state, "completed");
         assert!(projection.stale_running);
         assert!(projection.prefer_history_time);
+    }
+
+    #[test]
+    fn external_running_without_explicit_history_path_ignores_unlinked_terminal_history() {
+        let _lock = AGENT_API_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = AgentApiEnvGuard::new(dir.path());
+        let session_key = "external-unlinked-terminal-history";
+        let data_dir = bifrost_agent::config::agent_home_dir();
+        let mut recorder =
+            bifrost_agent::persistence::ConversationRecorder::new(&data_dir, session_key);
+        recorder
+            .record_session_start(session_key, serde_json::json!({"source": "web"}))
+            .expect("record start");
+        recorder
+            .record_user_message(session_key, "old unlinked user")
+            .expect("record user");
+        recorder
+            .record_assistant_message(session_key, "old unlinked assistant")
+            .expect("record assistant");
+        recorder
+            .record_run_state(session_key, "completed", Some("test"), Some("external"))
+            .expect("record run state");
+
+        let state = persisted_state(session_key, "codex", "running");
+        let summary = persisted_state_history_summary(&state);
+
+        assert!(
+            summary.is_none(),
+            "unlinked terminal history must not be discovered by session_key fallback"
+        );
+        let projection = persisted_session_projection(&state, summary.as_ref());
+        assert!(projection.running);
+        assert_eq!(projection.status, "active");
+        assert_eq!(projection.state, "running");
+        assert_eq!(projection.run_state, "running");
+        assert!(!projection.stale_running);
     }
 
     struct AgentApiEnvGuard {

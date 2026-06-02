@@ -147,17 +147,18 @@ Web 触发 External Runner 时还存在一个更隐蔽的分叉：如果当前�
 
 1. 当前进程的 live runtime registry（内置 Agent active turn、worker stop registry、external CLI worker registry）是“仍在运行”的唯一实时证明。
 2. canonical JSONL timeline 的最新终态 `run_state_changed` 是“已经结束”的持久化事实源，终态包括 `completed`、`failed`、`stopped`、`timed_out`。
-3. `/sessions/all` 合并 persisted `session_state` 时，如果同一 `session_key` 已有 JSONL 终态，必须按 JSONL 终态投影，并使用 JSONL 终态时间作为排序时间，避免陈旧 `updatedAt` 把 ended history 顶到 running。
+3. `/sessions/all` 合并 persisted `session_state` 时，如果最新模型写入的显式 `history_path` 指向的 canonical JSONL 已有终态，必须按 JSONL 终态投影，并使用 JSONL 终态时间作为排序时间，避免陈旧 `updatedAt` 把 ended history 顶到 running。
 4. 内置 `bifrost_agent` 的 persisted `status:"running"` 如果没有当前进程 live runtime 证明，应视为陈旧残留并投影为 ended/completed；内置 Agent 没有跨装置持久运行语义。
-5. 所有非内置 runner adapter（例如 `codex`、`chatgpt_web`、自定义 CLI adapter）在没有 JSONL 终态且没有本地 live registry 证明时，仍可保留 persisted `running`，用于兼容不同装置或外部 runner 的异步状态。
+5. 所有非内置 runner adapter（例如 `codex`、`chatgpt_web`、自定义 CLI adapter）在没有 JSONL 终态且没有本地 live registry 证明时，仍可保留 persisted `running`，用于表达不同装置或外部 runner 的异步运行语义。
 6. `/stop` 先请求 live runtime 停止；如果没有命中任何正在运行的 loop，但 persisted state 确认为陈旧 running，应同步修复 `session_state.json` 为 terminal status，并在响应中暴露修复计数。
+7. 不为旧版 `session_state` 做额外历史文件扫描或 run_state alias 兼容；缺失显式 `history_path` 时，只按当前 persisted metadata 与 live runtime 规则投影。
 
 测试方案：
 
-- 单元测试覆盖内置 Agent 陈旧 running、JSONL 终态覆盖、所有非内置 runner adapter 无终态时保持 running、陈旧状态修复落盘。
+- 单元测试覆盖内置 Agent 陈旧 running、显式 `history_path` 指向的 JSONL 终态覆盖、所有非内置 runner adapter 无终态时保持 running、陈旧状态修复落盘。
 - E2E 使用临时 `BIFROST_DATA_DIR` 构造 completed JSONL + stale `bifrost_agent` running state，并同时构造 `codex`、`chatgpt_web`、`custom_cli` running state，验证 `/sessions/all`、`/stop` 和落盘状态一致。
 - human_tests 在 `human_tests/agent-session-persistence.md` 记录陈旧 Running 状态与 Stop 一致性回归，并真实执行对应 E2E。
-- Review/Fix/Test 至少两轮复核状态投影、runner 兼容、history 排序、stop 响应和文档/测试一致性。
+- Review/Fix/Test 至少两轮复核状态投影、runner 跨装置语义、history 排序、stop 响应和文档/测试一致性。
 
 ### 完成态 Loop 折叠展示
 
@@ -362,9 +363,9 @@ AgentTurnProgressEvent
 
 ### 3. `/sessions/all` 合并 active 与 history，而不是互斥
 
-当前 active key 存在时跳过 history row。应改为：
+当前 active key 存在时跳过 history row。应改为只面向 canonical timeline 合并：
 
-- 先扫描 history files，按 session_key 找最新 history_path。
+- 按 canonical timeline 索引/显式 `history_path` 找到同一 `session_key` 的最新 timeline。
 - active/running/idle session item 与 history summary 合并。
 - 最终只保留一条 thread，但包含 `history_path`。
 
