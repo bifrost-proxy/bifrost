@@ -1288,13 +1288,18 @@ mod tests {
             .unwrap_or("")
             .contains("from-stdin"));
 
-        let final_poll = if value["exit_code"].is_null() {
-            manager.poll_existing_session(&session_id, 1000, None).await
-        } else {
-            output_poll
-        };
-        assert!(final_poll.success, "{}", final_poll.output);
-        let value: serde_json::Value = serde_json::from_str(&final_poll.output).unwrap();
+        let mut final_value = value;
+        if final_value["exit_code"].is_null() {
+            for _ in 0..20 {
+                let final_poll = manager.poll_existing_session(&session_id, 1000, None).await;
+                assert!(final_poll.success, "{}", final_poll.output);
+                final_value = serde_json::from_str(&final_poll.output).unwrap();
+                if !final_value["exit_code"].is_null() {
+                    break;
+                }
+            }
+        }
+        let value = final_value;
         assert_eq!(value["exit_code"], 0);
         assert!(value["session_id"].is_null());
     }
