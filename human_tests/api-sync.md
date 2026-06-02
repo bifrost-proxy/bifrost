@@ -615,10 +615,12 @@ Bifrost Sync API 提供云端同步管理功能，包括同步状态查询、配
 - 自动打开后 `sync-state.json` 持久化 `startup_login_prompt`，后续重启不再自动打开登录 URL。
 - 不可达 + 无 token 时最多探测 3 次；3 次仍不可达时不自动打开登录 URL。
 - 未登录状态下不会继续按 `probe_interval_secs` 高频探测并反复弹窗。
+- 启动预检处于重试等待时，如果用户完成 token 登录，登录 wake 应立即打断预检等待，后台状态应及时变为 authorized。
 - 手动登录入口不受本用例限制，用户仍可主动执行 `bifrost sync login`。
 
 **真实执行记录**：
 - 2026-06-02：执行 `bash e2e-tests/tests/test_sync_startup_login_preflight_e2e.sh` 通过。脚本使用临时数据目录、本地 mock sync server、`--no-system-proxy` 和 `BIFROST_SYNC_LOGIN_BROWSER_DRY_RUN_FILE`，验证可达远端首次启动只记录 1 条 `/v4/sso/logout?next=...` 登录 URL，`sync-state.json` 写入 `startup_login_prompt`，同一数据目录重启后登录 URL 仍只有 1 条；不可达本地端口场景等待三次短间隔启动预检后没有记录登录 URL。
+- 2026-06-02：CI 回归 `test_sync_login_direct_e2e.sh` 发现启动预检重试等待会延迟 token 登录授权；修复后执行 `bash e2e-tests/tests/test_sync_login_direct_e2e.sh` 通过，验证 token 登录后 `/api/sync/status` 及时返回 `authorized:true` 和 `user_id:"ci-user"`。
 
 ---
 

@@ -770,7 +770,17 @@ impl SyncManager {
             }
 
             if attempt < STARTUP_LOGIN_PREFLIGHT_MAX_ATTEMPTS {
-                tokio::time::sleep(retry_delay).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(retry_delay) => {}
+                    _ = self.wake.notified() => {
+                        tracing::debug!(
+                            target: "bifrost_sync::manager",
+                            attempt,
+                            "sync startup login preflight interrupted by sync wake"
+                        );
+                        return Ok(());
+                    }
+                }
             }
         }
 
@@ -1622,6 +1632,37 @@ mod tests {
         assert!(read_dry_run_urls(&dry_run_file).is_empty());
         assert!(manager.state.lock().startup_login_prompt.is_none());
         assert_eq!(manager.runtime.read().await.reason, SyncReason::Unreachable);
+    }
+
+    #[tokio::test]
+    async fn startup_login_preflight_wake_interrupts_retry_wait() {
+        let _env_lock = env_lock().lock().await;
+        let (remote_base_url, hits) = spawn_sso_check_server(vec![503, 503, 503]).await;
+        let (_temp_dir, _config_manager, manager) = sync_manager_for_remote(&remote_base_url).await;
+        let manager = Arc::new(manager);
+        let preflight_manager = manager.clone();
+
+        let preflight = tokio::spawn(async move {
+            preflight_manager
+                .startup_login_preflight_with_delay(Duration::from_secs(60))
+                .await
+        });
+
+        for _ in 0..50 {
+            if hits.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        manager.save_token("login-token".to_string()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), preflight)
+            .await
+            .expect("preflight should be interrupted by sync wake")
+            .expect("preflight task should not panic")
+            .unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
