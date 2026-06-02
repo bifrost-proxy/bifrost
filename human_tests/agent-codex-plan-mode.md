@@ -82,18 +82,36 @@
 **操作步骤**：
 1. 执行：
    ```bash
-   rg -n 'command: "/plan"|collaboration_mode: params\\.collaborationMode|parseAgentPlanSlash' web/src/pages/AI/AgentChatSection.tsx web/src/pages/AI/AgentChatSection.helpers.tsx web/src/pages/AI/AgentChatSection.runnerCall.tsx
+   rg -n 'command: "/plan"|agent-chat-plan-mode-pill|agent-chat-active-plan-mode|collaboration_mode: params\\.collaborationMode|parseAgentPlanSlash' web/src/pages/AI/AgentChatSection.tsx web/src/pages/AI/AgentChatSection.helpers.tsx web/src/pages/AI/AgentChatSection.runnerCall.tsx
    rg -n 'parse_agent_slash_mode|worker_request\\.collaboration_mode' crates/bifrost-admin/src/im_gateway/agent_slash.rs crates/bifrost-admin/src/handlers/agent_chat.rs crates/bifrost-admin/src/handlers/im_gateway/agent_api.rs crates/bifrost-admin/src/handlers/im_gateway/agent_chat.rs
    cargo test -p bifrost-admin agent_slash -- --nocapture
-   pnpm --dir web exec playwright test web/tests/ui/agent-chat.spec.ts -g "slash plan mode" --project=chromium
+   pnpm --dir web exec playwright test web/tests/ui/agent-chat.spec.ts -g "slash plan mode"
    SKIP_BUILD=true BIFROST_BIN="${BIFROST_BIN:-$(pwd)/target/debug/bifrost}" e2e-tests/tests/test_agent_plan_mode_human_api.sh
    ```
 
 **预期结果**：
-- Web UI slash 面板包含 `/plan`，选择后会把 `/plan ` 插入输入框，而不是像 `/compact` 一样立即静默发送。
+- Web UI slash 面板包含 `/plan`，选择后输入框显示 `Plan Mode` 状态标记和 planning hint，而不是像 `/compact` 一样立即静默发送。
 - Web UI 发送 `/plan Create a migration plan` 时，请求体包含 `collaboration_mode: "plan"`，且 `message` 被剥离为 `Create a migration plan`。
+- Web UI 收到 `proposed_plan` 或 `run_finished.proposedPlan` 后，消息区展示 `Plan Mode result` 与方案正文；即使普通 `response` 为空也不能空白。
 - IM/API 入口发送 `/plan 请规划斜杠入口方案` 时，即使请求体没有显式 `collaboration_mode`，模型请求仍包含 Plan Mode prompt 和 `<proposed_plan>` 指令。
 - IM/API 模型请求中的用户正文包含 `请规划斜杠入口方案`，不包含原始 `/plan 请规划斜杠入口方案`。
+
+### TC-ACPM-06：外部 runner/Codex 隐藏内置 Agent 控制命令，history 保留 proposed plan
+
+**操作步骤**：
+1. 执行：
+   ```bash
+   rg -n 'supportsBuiltInAgentCommands|enableCommands|proposedPlanMessageContent|eventType === "proposed_plan"|event\\.proposedPlan' web/src/pages/AI/AgentChatSection.tsx web/src/pages/AI/AgentChatSection.runnerCall.tsx
+   rg -n 'PROPOSED_PLAN|record_proposed_plan|proposed_plan' crates/agent/src/persistence.rs crates/agent/src/session/turn_loop.rs web/src/pages/AI/AgentChatSection.timeline.ts
+   pnpm --dir web exec vitest run src/pages/AI/AgentChatSection.timeline.test.ts
+   pnpm --dir web exec playwright test web/tests/ui/agent-chat.spec.ts -g "external runner"
+   ```
+
+**预期结果**：
+- 当前线程/runner 为 Codex、ChatGPT Web 或 external runner 时，输入 `/` 不展示 `/plan`、`/compact` 命令；runner 选择项仍可正常展示和选择。
+- 外部 runner 手动输入 `/plan ...` 时不会被前端剥离为 Plan Mode，也不会走内置 `/api/agent/chat/stream`。
+- Plan Mode live UI 收到 proposed plan 后会显示规划结果。
+- JSONL history 中的 `proposed_plan` 事件可被前端 replay 成 assistant 规划结果，刷新或打开历史不会丢失方案正文。
 
 ## 清理步骤
 

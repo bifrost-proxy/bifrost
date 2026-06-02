@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { historyEventsToTelemetry } from "./AgentChatSection.timeline";
+import { historyEventsToMessages, historyEventsToTelemetry } from "./AgentChatSection.timeline";
 import {
   formatContextWindow,
   formatStatusMetricCount,
@@ -9,6 +9,38 @@ import {
 } from "./AgentChatSection.helpers";
 
 describe("historyEventsToTelemetry", () => {
+  it("clears stale completed plans when a later turn records plan_cleared", () => {
+    const events: HistoryEvent[] = [
+      {
+        timestamp: 1,
+        event_type: "plan_updated",
+        session_key: "plan-clear",
+        content: {
+          plan: [
+            { step: "Inspect", status: "completed" },
+            { step: "Ship", status: "completed" },
+          ],
+        },
+      },
+      {
+        timestamp: 2,
+        event_type: "plan_cleared",
+        session_key: "plan-clear",
+        content: { reason: "new_turn_after_completion" },
+      },
+      {
+        timestamp: 3,
+        event_type: "user_message",
+        session_key: "plan-clear",
+        content: { message: "next turn" },
+      },
+    ];
+
+    const telemetry = historyEventsToTelemetry(events);
+
+    expect(telemetry.plan).toEqual([]);
+  });
+
   it("keeps running thread token and context metrics newer than stale history events", () => {
     const thread: AgentThreadSummary = {
       session_key: "feishu-main:user",
@@ -46,6 +78,31 @@ describe("historyEventsToTelemetry", () => {
     expect(telemetry.status?.compaction_count).toBe(2);
   });
 
+  it("lets explicit idle thread status override stale running history state", () => {
+    const thread: AgentThreadSummary = {
+      session_key: "feishu-main:user",
+      status: "active",
+      running: false,
+      run_state: "running",
+      state: "idle",
+      tokens: 29_668_709,
+      estimated_tokens: 186_727,
+    };
+    const events: HistoryEvent[] = [
+      {
+        timestamp: 1,
+        event_type: "run_state_changed",
+        session_key: "feishu-main:user",
+        content: { state: "running" },
+      },
+    ];
+
+    const telemetry = historyEventsToTelemetry(events, thread);
+
+    expect(telemetry.phase).toBe("idle");
+    expect(telemetry.status?.state).toBe("idle");
+  });
+
   it("keeps active detail status newer than stale history events when thread summary is missing", () => {
     const fallback: RunTelemetry = {
       phase: "running",
@@ -81,6 +138,39 @@ describe("historyEventsToTelemetry", () => {
     expect(telemetry.status?.context_window_tokens).toBe(250_000);
     expect(telemetry.status?.context_usage_percent).toBe(74.7);
     expect(telemetry.status?.last_response_tokens).toBe(181_900);
+  });
+});
+
+describe("historyEventsToMessages", () => {
+  it("renders persisted Plan Mode proposed plans as assistant results", () => {
+    const messages = historyEventsToMessages([
+      {
+        timestamp: 1,
+        event_type: "user_message",
+        session_key: "plan-mode",
+        content: { message: "Plan the migration" },
+      },
+      {
+        timestamp: 2,
+        event_type: "assistant_message",
+        session_key: "plan-mode",
+        content: { message: "" },
+      },
+      {
+        timestamp: 3,
+        event_type: "proposed_plan",
+        session_key: "plan-mode",
+        content: { content: "- Inspect\n- Implement\n- Verify" },
+      },
+    ]);
+
+    expect(messages).toHaveLength(2);
+    expect(messages[1]).toMatchObject({
+      role: "assistant",
+      meta: "Plan Mode",
+    });
+    expect(messages[1].content).toContain("Plan Mode result");
+    expect(messages[1].content).toContain("- Verify");
   });
 });
 

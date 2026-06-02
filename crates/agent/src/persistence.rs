@@ -43,6 +43,7 @@ pub mod event_types {
     pub const GOAL_CLEARED: &str = "goal_cleared";
     pub const PLAN_UPDATED: &str = "plan_updated";
     pub const PLAN_CLEARED: &str = "plan_cleared";
+    pub const PROPOSED_PLAN: &str = "proposed_plan";
     pub const RUN_STATE_CHANGED: &str = "run_state_changed";
 }
 
@@ -339,6 +340,15 @@ impl ConversationRecorder {
             event_type: event_types::PLAN_CLEARED.to_string(),
             session_key: session_key.to_string(),
             content: serde_json::json!({ "reason": reason }),
+        })
+    }
+
+    pub fn record_proposed_plan(&mut self, session_key: &str, content: &str) -> Result<(), String> {
+        self.record(ConversationEvent {
+            timestamp: current_time_secs(),
+            event_type: event_types::PROPOSED_PLAN.to_string(),
+            session_key: session_key.to_string(),
+            content: serde_json::json!({ "content": content }),
         })
     }
 
@@ -1926,6 +1936,21 @@ mod tests {
         assert_eq!(events[1].content["reason"], "new_turn_after_completion");
         let state = load_session_runtime_state(recorder.file_path()).unwrap();
         assert!(state.current_plan.is_none());
+    }
+
+    #[test]
+    fn test_proposed_plan_round_trip_records_plan_mode_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut recorder = ConversationRecorder::new(dir.path(), "proposed-plan-session");
+
+        recorder
+            .record_proposed_plan("proposed-plan-session", "- inspect\n- verify")
+            .unwrap();
+        recorder.close();
+
+        let events = load_conversation_events(recorder.file_path()).unwrap();
+        assert_eq!(events[0].event_type, PROPOSED_PLAN);
+        assert_eq!(events[0].content["content"], "- inspect\n- verify");
     }
 
     #[test]

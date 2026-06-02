@@ -257,6 +257,7 @@ pub(super) async fn handle_agent(
                 &service.queue_manager,
                 &s.session_key,
             );
+            let run_state = active_session_list_run_state(s.running, &s.run_state);
             unified.push(serde_json::json!({
                 "session_key": s.session_key,
                 "status": "active",
@@ -286,9 +287,7 @@ pub(super) async fn handle_agent(
                         .map(|(_, summary)| summary.event_count as usize)
                         .unwrap_or(0)
                 },
-                "run_state": history
-                    .and_then(|(_, summary)| summary.run_state.clone())
-                    .unwrap_or(s.run_state),
+                "run_state": run_state,
                 "queue_length": queue_snapshot["queueLength"].clone(),
                 "queue_items": queue_snapshot["queueItems"].clone(),
                 "queueLength": queue_snapshot["queueLength"].clone(),
@@ -337,7 +336,7 @@ pub(super) async fn handle_agent(
                 "history_path": p.display().to_string(),
                 "has_timeline": true,
                 "timeline_event_count": summary.event_count,
-                "run_state": summary.run_state.clone().unwrap_or_else(|| "completed".to_string()),
+                "run_state": history_session_list_run_state(&summary),
                 "title": summary.title.or(summary.first_user_message),
             }));
         }
@@ -1558,6 +1557,22 @@ fn active_status_session_detail(
     value
 }
 
+fn active_session_list_run_state(running: bool, session_run_state: &str) -> String {
+    if running {
+        "running".to_string()
+    } else {
+        session_run_state.to_string()
+    }
+}
+
+fn history_session_list_run_state(
+    summary: &bifrost_agent::persistence::SessionFileSummary,
+) -> String {
+    terminal_run_state_from_summary(summary)
+        .unwrap_or("completed")
+        .to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PersistedSessionProjection {
     running: bool,
@@ -2167,6 +2182,61 @@ mod tests {
         assert_eq!(sessions[0]["session_key"], "same-thread");
         assert_eq!(sessions[0]["history_path"], "/tmp/newer.jsonl");
         assert_eq!(sessions[1]["session_key"], "other-thread");
+    }
+
+    #[test]
+    fn sessions_all_idle_active_session_does_not_inherit_running_history_state() {
+        let session = bifrost_agent::SessionInfo {
+            session_key: "idle-active-with-running-history".to_string(),
+            running: false,
+            user_id: None,
+            message_count: 1,
+            user_turn_count: 1,
+            created_at: 10,
+            last_active_at: 20,
+            compaction_count: 0,
+            total_tokens_used: None,
+            estimated_tokens: 0,
+            history_version: 1,
+            work_dir: None,
+            source: "web".to_string(),
+            agent_type: Some("Bifrost Agent".to_string()),
+            runner_type: Some("bifrost_agent".to_string()),
+            runner_id: None,
+            external_conversation_id: None,
+            external_thread_id: None,
+            title: Some("Idle active".to_string()),
+            history_path: Some("/tmp/history.jsonl".to_string()),
+            has_timeline: true,
+            timeline_event_count: 10,
+            run_state: "idle".to_string(),
+        };
+        let _history = summary_with_run_state("running", 10, 20);
+
+        assert_eq!(
+            active_session_list_run_state(session.running, &session.run_state),
+            "idle"
+        );
+    }
+
+    #[test]
+    fn sessions_all_history_row_projects_non_terminal_run_state_to_completed() {
+        let running_summary = summary_with_run_state("running", 10, 20);
+        let waiting_summary = summary_with_run_state("waiting_for_tool", 10, 20);
+        let completed_summary = summary_with_run_state("completed", 10, 20);
+
+        assert_eq!(
+            history_session_list_run_state(&running_summary),
+            "completed"
+        );
+        assert_eq!(
+            history_session_list_run_state(&waiting_summary),
+            "completed"
+        );
+        assert_eq!(
+            history_session_list_run_state(&completed_summary),
+            "completed"
+        );
     }
 
     #[test]

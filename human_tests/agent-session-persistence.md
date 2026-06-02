@@ -310,6 +310,26 @@
 
 **执行记录（2026-06-02）**：PASS — 执行 `source ~/.zshrc && e2e-tests/tests/test_agent_session_stale_running_reconciliation.sh`，脚本使用临时数据目录和随机端口启动 Bifrost（包含 `--no-system-proxy`），先验证 completed JSONL + stale `bifrost_agent` running state 在 `/sessions/all` 投影为 ended/completed，再验证 `/stop` 返回 `stopped:false` 且 `repaired_stale_running >= 1` 并把 persisted status 修复为 `ended`，最后确认无终态 timeline 的外部 `codex`、`chatgpt_web` 和 `custom_cli` runner 都仍保持 running。follow-up 复核补充执行 `source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin external_running -- --nocapture --test-threads=1`，确认未绑定到显式 `history_path` 的 terminal history 不会被按 `sessionKey` 扫描用于状态投影；并执行 `source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_agent_session_stale_running_reconciliation.sh` 复跑真实 API 场景，结果 PASS。
 
+### TC-ASP-20：Active Idle 会话不继承历史 Running run_state
+
+**操作步骤**：
+1. 准备一条已恢复到内存的 active session，当前 live 状态为 `running:false`、`state:"idle"`、`run_state:"idle"`。
+2. 让同一 `session_key` 的 canonical JSONL 最后一条 `run_state_changed` 仍为 `running`，模拟历史文件缺失最终 completed/stopped 事件。
+3. 请求：
+   ```bash
+   curl -fsS --noproxy '*' "http://127.0.0.1:$MAIN_PORT/_bifrost/api/im-gateway/agent/sessions/all"
+   ```
+4. 在 WebUI 打开该 active session，并加载对应 history timeline。
+5. 不输入内容时点击输入框右侧 Stop 按钮。
+
+**预期结果**：
+- `/sessions/all` 返回该 active session 的 `running:false`、`state:"idle"`、`run_state:"idle"`，不会被 history summary 中的 `run_state:"running"` 覆盖。
+- 如果该 session 只作为 history row 返回，`status:"ended"`、`state:"ended"` 时也不能继续暴露非终态 `run_state:"running"`；非终态 history summary 应投影为 `run_state:"completed"`。
+- WebUI 不显示 Running 状态，不展示 Stop 作为当前 turn 操作；history timeline 中陈旧的 running event 不会把 telemetry phase 恢复为 `running`。
+- 如果仍手动调用 `/stop`，响应可以是 `stopped:false` 和“当前没有正在执行的 Agent loop”，但页面状态必须与该响应一致。
+
+**执行记录（2026-06-02）**：PASS — 在默认数据目录的真实会话 `feishu-main:ou_82c9bc36c12abfaed40c2c52ef4b7fea` 上复现 `/sessions/all` 返回 `running:false`、`state:"idle"` 但 `run_state:"running"`，同时 `/stop` 返回“当前没有正在执行的 Agent loop”。修复后执行 `source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin sessions_all_idle_active_session_does_not_inherit_running_history_state -- --nocapture` 和 `source ~/.zshrc && pnpm --dir web exec vitest run src/pages/AI/AgentChatSection.timeline.test.ts`，分别验证后端 active session run_state 投影与前端 history telemetry 覆盖逻辑，结果 PASS。
+
 ## 清理步骤
 
 1. 停止 Bifrost 服务

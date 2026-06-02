@@ -1,5 +1,41 @@
 use super::*;
 
+#[cfg(unix)]
+#[test]
+fn terminate_process_group_force_kills_sigterm_ignoring_process() {
+    use std::os::unix::process::CommandExt;
+    use std::process::Command as StdProcessCommand;
+    use std::time::Instant;
+
+    let mut child = StdProcessCommand::new("sh")
+        .arg("-c")
+        .arg("trap '' TERM; while true; do sleep 1; done")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .expect("spawn SIGTERM-ignoring process");
+    let pid = child.id();
+
+    terminate_process_group(pid).expect("terminate process group");
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                panic!("process ignored SIGTERM and was not force-killed");
+            }
+            Err(error) => panic!("wait SIGTERM-ignoring process: {error}"),
+        }
+    }
+}
+
 #[test]
 fn external_cli_adapter_parser_maps_progress_events() {
     let stdout = r#"{"type":"run_started","content":"start"}
