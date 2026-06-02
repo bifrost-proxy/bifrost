@@ -372,17 +372,28 @@ pub(super) async fn handle_agent(
             } else {
                 state.messages.len()
             };
-            let failed = matches!(
-                state.status.as_deref(),
-                Some("failed" | "stopped" | "timed_out")
-            );
-            let running = state.status.as_deref() == Some("running");
+            let history = history_by_key.get(&state.session_key);
+            let projection =
+                persisted_session_projection(&state, history.map(|(_, summary)| summary));
+            let last_active_time = if projection.prefer_history_time {
+                history
+                    .map(|(_, summary)| summary_end_time(summary))
+                    .unwrap_or(last_active_time)
+            } else {
+                last_active_time
+            };
+            let history_path = state
+                .history_path
+                .clone()
+                .or_else(|| history.map(|(path, _)| path.display().to_string()));
+            let has_timeline = history_path.is_some();
+            let timeline_event_count = history.map(|(_, summary)| summary.event_count).unwrap_or(0);
             unified.push(serde_json::json!({
                 "session_key": state.session_key,
-                "status": if running { "active" } else { "ended" },
-                "running": running,
-                "state": if running { "running" } else if failed { "failed" } else { "ended" },
-                "run_state": if running { "running" } else if failed { "failed" } else { "completed" },
+                "status": projection.status,
+                "running": projection.running,
+                "state": projection.state,
+                "run_state": projection.run_state,
                 "source": "admin-api",
                 "work_dir": state.work_dir,
                 "turns": turn_count,
@@ -396,9 +407,9 @@ pub(super) async fn handle_agent(
                 "external_conversation_id": state.external_conversation_id,
                 "external_thread_id": state.external_thread_id,
                 "external_run_id": state.latest_run_id,
-                "history_path": state.history_path,
-                "has_timeline": state.history_path.is_some(),
-                "timeline_event_count": 0,
+                "history_path": history_path,
+                "has_timeline": has_timeline,
+                "timeline_event_count": timeline_event_count,
                 "title": state.title.or(state.last_user_message),
             }));
         }
@@ -755,14 +766,22 @@ pub(super) async fn handle_agent(
 
         if body.message.trim() == "/stop" {
             let stopped = request_agent_stop(&service.agent_session_manager, &session_key).await;
+            let repaired_stale_running = if stopped {
+                0
+            } else {
+                repair_stale_persisted_running_states(&session_key)
+            };
             return json_response(&serde_json::json!({
                 "success": true,
                 "response": if stopped {
                     "已请求停止当前 Agent loop。"
+                } else if repaired_stale_running > 0 {
+                    "当前没有正在执行的 Agent loop，已修复残留运行状态。"
                 } else {
                     "当前没有正在执行的 Agent loop。"
                 },
                 "stopped": stopped,
+                "repaired_stale_running": repaired_stale_running,
                 "tool_calls": [],
                 "plan_steps": null
             }));
@@ -1531,6 +1550,183 @@ fn active_status_session_detail(
     value
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PersistedSessionProjection {
+    running: bool,
+    status: String,
+    state: String,
+    run_state: String,
+    stale_running: bool,
+    prefer_history_time: bool,
+}
+
+fn persisted_session_projection(
+    state: &crate::im_gateway::session_state::ImAgentSessionState,
+    history: Option<&bifrost_agent::persistence::SessionFileSummary>,
+) -> PersistedSessionProjection {
+    let raw_running = state.status.as_deref() == Some("running");
+    let history_run_state = history.and_then(terminal_run_state_from_summary);
+    if raw_running {
+        if let Some(run_state) = history_run_state {
+            return terminal_persisted_session_projection(run_state, true, true);
+        }
+        if state.adapter == crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER {
+            return terminal_persisted_session_projection("completed", true, false);
+        }
+        return PersistedSessionProjection {
+            running: true,
+            status: "active".to_string(),
+            state: "running".to_string(),
+            run_state: "running".to_string(),
+            stale_running: false,
+            prefer_history_time: false,
+        };
+    }
+
+    if let Some(run_state) = history_run_state {
+        return terminal_persisted_session_projection(run_state, false, true);
+    }
+
+    match state.status.as_deref() {
+        Some("failed") => terminal_persisted_session_projection("failed", false, false),
+        Some("stopped") => terminal_persisted_session_projection("stopped", false, false),
+        Some("timed_out") => terminal_persisted_session_projection("timed_out", false, false),
+        _ => terminal_persisted_session_projection("completed", false, false),
+    }
+}
+
+fn terminal_persisted_session_projection(
+    run_state: &str,
+    stale_running: bool,
+    prefer_history_time: bool,
+) -> PersistedSessionProjection {
+    let run_state = normalize_terminal_run_state(run_state);
+    let state = if is_failed_terminal_run_state(run_state) {
+        "failed"
+    } else {
+        "ended"
+    };
+    PersistedSessionProjection {
+        running: false,
+        status: "ended".to_string(),
+        state: state.to_string(),
+        run_state: run_state.to_string(),
+        stale_running,
+        prefer_history_time,
+    }
+}
+
+fn terminal_run_state_from_summary(
+    summary: &bifrost_agent::persistence::SessionFileSummary,
+) -> Option<&str> {
+    let run_state = summary.run_state.as_deref()?;
+    if is_terminal_run_state(run_state) {
+        Some(run_state)
+    } else {
+        None
+    }
+}
+
+fn is_terminal_run_state(run_state: &str) -> bool {
+    matches!(
+        run_state,
+        "completed" | "failed" | "stopped" | "timed_out" | "ended"
+    )
+}
+
+fn is_failed_terminal_run_state(run_state: &str) -> bool {
+    matches!(run_state, "failed" | "stopped" | "timed_out")
+}
+
+fn normalize_terminal_run_state(run_state: &str) -> &str {
+    match run_state {
+        "ended" => "completed",
+        other => other,
+    }
+}
+
+fn summary_end_time(summary: &bifrost_agent::persistence::SessionFileSummary) -> u64 {
+    if summary.end_time > 0 {
+        summary.end_time
+    } else {
+        summary.start_time
+    }
+}
+
+fn repair_stale_persisted_running_states(session_key: &str) -> usize {
+    let mut repaired = 0;
+    for state in crate::im_gateway::session_state::list_session_states()
+        .into_iter()
+        .filter(|state| state.session_key == session_key)
+        .filter(|state| state.status.as_deref() == Some("running"))
+    {
+        let history_summary = persisted_state_history_summary(&state);
+        let projection = persisted_session_projection(&state, history_summary.as_ref());
+        if !projection.stale_running {
+            continue;
+        }
+        let next_status = status_from_run_state(&projection.run_state).to_string();
+        match crate::im_gateway::session_state::upsert_session_state(
+            &state.session_key,
+            &state.adapter,
+            state.runner_id.as_deref(),
+            |stored| {
+                stored.status = Some(next_status.clone());
+            },
+        ) {
+            Ok(_) => repaired += 1,
+            Err(error) => {
+                warn!(
+                    session_key = %state.session_key,
+                    adapter = %state.adapter,
+                    runner_id = ?state.runner_id,
+                    error = %error,
+                    "failed to repair stale persisted Agent running state"
+                );
+            }
+        }
+    }
+    repaired
+}
+
+fn persisted_state_history_summary(
+    state: &crate::im_gateway::session_state::ImAgentSessionState,
+) -> Option<bifrost_agent::persistence::SessionFileSummary> {
+    let data_dir = bifrost_agent::config::agent_home_dir();
+    let path = state
+        .history_path
+        .as_deref()
+        .and_then(|path| {
+            bifrost_agent::persistence::validate_conversation_path(
+                &data_dir,
+                std::path::Path::new(path),
+            )
+            .ok()
+        })
+        .or_else(|| latest_history_path_for_state(&state.session_key));
+    path.map(|path| bifrost_agent::persistence::scan_session_summary(&path))
+}
+
+fn latest_history_path_for_state(session_key: &str) -> Option<std::path::PathBuf> {
+    let data_dir = bifrost_agent::config::agent_home_dir();
+    let mut candidates =
+        bifrost_agent::persistence::list_conversations(&data_dir, Some(session_key));
+    candidates.sort_by_key(|path| {
+        let summary = bifrost_agent::persistence::scan_session_summary(path);
+        summary_end_time(&summary)
+    });
+    candidates.pop()
+}
+
+fn status_from_run_state(run_state: &str) -> &'static str {
+    match run_state {
+        "failed" => "failed",
+        "stopped" => "stopped",
+        "timed_out" => "timed_out",
+        _ => "ended",
+    }
+}
+
 fn prime_builtin_worker_active_status(
     manager: &bifrost_agent::AgentSessionManager,
     session: &bifrost_agent::AgentSession,
@@ -2097,6 +2293,101 @@ mod tests {
         assert_eq!(status.user_turn_count, 1);
     }
 
+    fn persisted_state(
+        session_key: &str,
+        adapter: &str,
+        status: &str,
+    ) -> crate::im_gateway::session_state::ImAgentSessionState {
+        crate::im_gateway::session_state::ImAgentSessionState {
+            session_key: session_key.to_string(),
+            adapter: adapter.to_string(),
+            status: Some(status.to_string()),
+            ..crate::im_gateway::session_state::ImAgentSessionState::default()
+        }
+    }
+
+    fn summary_with_run_state(
+        run_state: &str,
+        start_time: u64,
+        end_time: u64,
+    ) -> bifrost_agent::persistence::SessionFileSummary {
+        bifrost_agent::persistence::SessionFileSummary {
+            start_time,
+            end_time,
+            event_count: 4,
+            source: "admin-api".to_string(),
+            run_state: Some(run_state.to_string()),
+            ..bifrost_agent::persistence::SessionFileSummary::default()
+        }
+    }
+
+    #[test]
+    fn stale_running_builtin_with_terminal_history_projects_completed() {
+        let state = persisted_state(
+            "stale-builtin-terminal",
+            crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+            "running",
+        );
+        let summary = summary_with_run_state("completed", 10, 20);
+
+        let projection = persisted_session_projection(&state, Some(&summary));
+
+        assert!(!projection.running);
+        assert_eq!(projection.status, "ended");
+        assert_eq!(projection.state, "ended");
+        assert_eq!(projection.run_state, "completed");
+        assert!(projection.stale_running);
+        assert!(projection.prefer_history_time);
+    }
+
+    #[test]
+    fn stale_running_builtin_without_live_runtime_projects_completed() {
+        let state = persisted_state(
+            "stale-builtin-no-history",
+            crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+            "running",
+        );
+
+        let projection = persisted_session_projection(&state, None);
+
+        assert!(!projection.running);
+        assert_eq!(projection.status, "ended");
+        assert_eq!(projection.state, "ended");
+        assert_eq!(projection.run_state, "completed");
+        assert!(projection.stale_running);
+        assert!(!projection.prefer_history_time);
+    }
+
+    #[test]
+    fn all_external_runners_without_terminal_history_stay_running_for_compatibility() {
+        for adapter in ["codex", "chatgpt_web", "custom_cli"] {
+            let state = persisted_state("external-running", adapter, "running");
+
+            let projection = persisted_session_projection(&state, None);
+
+            assert!(projection.running, "{adapter}");
+            assert_eq!(projection.status, "active", "{adapter}");
+            assert_eq!(projection.state, "running", "{adapter}");
+            assert_eq!(projection.run_state, "running", "{adapter}");
+            assert!(!projection.stale_running, "{adapter}");
+        }
+    }
+
+    #[test]
+    fn external_running_with_terminal_history_projects_completed() {
+        let state = persisted_state("external-terminal", "codex", "running");
+        let summary = summary_with_run_state("completed", 10, 20);
+
+        let projection = persisted_session_projection(&state, Some(&summary));
+
+        assert!(!projection.running);
+        assert_eq!(projection.status, "ended");
+        assert_eq!(projection.state, "ended");
+        assert_eq!(projection.run_state, "completed");
+        assert!(projection.stale_running);
+        assert!(projection.prefer_history_time);
+    }
+
     struct AgentApiEnvGuard {
         _guard: crate::test_env::BifrostDataDirGuard,
     }
@@ -2145,6 +2436,53 @@ mod tests {
         assert_eq!(detail.messages[0].content, "Codex task");
         assert_eq!(detail.messages[1].role, "assistant");
         assert_eq!(detail.messages[1].content, "Codex answer");
+    }
+
+    #[test]
+    fn stale_running_repair_marks_builtin_state_ended() {
+        let _lock = AGENT_API_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = AgentApiEnvGuard::new(dir.path());
+        let session_key = "stale-running-repair";
+        let data_dir = bifrost_agent::config::agent_home_dir();
+        let mut recorder =
+            bifrost_agent::persistence::ConversationRecorder::new(&data_dir, session_key);
+        recorder
+            .record_session_start(session_key, serde_json::json!({"source": "admin-api"}))
+            .expect("record start");
+        recorder
+            .record_user_message(session_key, "repair me")
+            .expect("record user");
+        recorder
+            .record_assistant_message(session_key, "done")
+            .expect("record assistant");
+        recorder
+            .record_run_state(session_key, "completed", Some("test"), Some("builtin"))
+            .expect("record run state");
+        let history_path = recorder.file_path().display().to_string();
+
+        crate::im_gateway::session_state::remember_session_state(
+            crate::im_gateway::session_state::ImAgentSessionState {
+                session_key: session_key.to_string(),
+                adapter: crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER.to_string(),
+                title: Some("Stale repair".to_string()),
+                last_user_message: Some("repair me".to_string()),
+                history_path: Some(history_path),
+                status: Some("running".to_string()),
+                updated_at: 1_780_274_116_096,
+                ..crate::im_gateway::session_state::ImAgentSessionState::default()
+            },
+        )
+        .expect("remember state");
+
+        assert_eq!(repair_stale_persisted_running_states(session_key), 1);
+
+        let repaired =
+            crate::im_gateway::session_state::load_latest_session_state(session_key, None, None)
+                .expect("repaired state");
+        assert_eq!(repaired.status.as_deref(), Some("ended"));
     }
 
     #[test]
