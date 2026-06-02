@@ -9,7 +9,8 @@
 3. 计划收口后，最终返回的 `plan_steps` 全部为 `completed`
 4. 同一 turn 内后续 `update_plan` 是当前快照替换，不会继承本 turn 早先已完成但已删除的步骤
 5. 模型提交 `plan: []` 时，runtime 会清空当前 plan，而不是要求模型编造一个占位步骤
-6. context compaction 不携带、不恢复、不清空 plan；plan runtime state 只由 `plan_updated` / `plan_cleared` 回放恢复
+6. context compaction event / summary metadata 不携带、不持久化、不清空 plan；plan runtime state 只由 `plan_updated` / `plan_cleared` 回放恢复
+7. mid-turn compaction 后，同一 turn 的后续模型请求可从 runtime `current_plan` 临时恢复当前快照，但该提示不写入 history、不进入 JSONL、不跨普通新 user turn 重放
 
 本次真实场景测试以**真实 Bifrost 进程 + 真实 Admin API + 本地 mock model server** 方式执行，禁止仅用 grep / 静态检查代替。
 
@@ -116,6 +117,7 @@
 - 测试通过，证明已有 `plan_updated` 恢复出来的当前 plan 不会被后续 compaction 事件覆盖或清空。
 - 测试证明 compaction 不是 plan runtime source，plan 只由 `plan_updated` / `plan_cleared` 维护。
 - 静态检查无匹配，证明新写入的 compaction metadata 不再携带 `current_plan`。
+- 本用例不禁止 `turn_loop` 在 mid-turn compaction 后给同一 turn 的下一次模型请求注入 transient `current_plan` 恢复提示；该边界由 `human_tests/agent-plan-lifecycle.md` 的 TC-APL-10 覆盖。
 
 ## 清理步骤
 

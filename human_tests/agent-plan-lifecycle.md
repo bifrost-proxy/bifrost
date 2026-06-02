@@ -70,20 +70,21 @@
 - `human_tests/readme.md` 已收录本测试文档。
 - 索引中的用例数与本文档一致。
 
-### TC-APL-05：compaction prompt 不注入 plan 自然语言
+### TC-APL-05：compaction summary request 不注入 plan 自然语言
 
 **操作步骤**：
 1. 执行：
    ```bash
-   rg -n 'Compaction prompt 必须继续参考 Codex|不额外向 compaction model 注入 `current_plan` 文本|不要让 summary 阶段重新解释 checklist' design/agent-plan-lifecycle.md
-   rg -n 'test_build_compaction_messages_does_not_inject_plan_text|test_codex_compaction_templates_are_exact' crates/agent/src/compact.rs
+   rg -n 'Compaction prompt 必须继续参考 Codex|不额外向 compaction model 注入 `current_plan` 文本|不要让 summary 阶段重新解释 checklist|上述约束只针对 compaction summary 生成请求和持久化 metadata' design/agent-plan-lifecycle.md
+   rg -n 'const COMPACTION_PROMPT|build_compaction_messages|messages.extend_from_slice\\(history\\)|messages.push\\(ChatMessage::user\\(COMPACTION_PROMPT\\)\\)' crates/agent/src/compact.rs
    ! rg -n 'preserving completed work|do not regress completed steps|latest current snapshot|not a historical checklist|do not carry completed steps forward|Current persisted task plan before compaction' crates/agent/src/compact.rs
    ```
 
 **预期结果**：
 - 设计文档明确 compaction 继续参考 Codex，不向 compaction model 注入 plan 文本。
-- `compact.rs` 的测试覆盖 compaction request 不包含 plan 自然语言消息。
+- `compact.rs` 的 summary request 构造只追加 Codex 风格 `COMPACTION_PROMPT`，不额外拼接 `current_plan` 自然语言。
 - `compact.rs` 中不存在会诱导模型保留或丢弃 completed 历史步骤的 Bifrost-only plan prompt。
+- 文档明确该限制只约束 summary 生成请求和 metadata，不禁止 turn loop 在压缩后的同一 turn 临时恢复 runtime plan context。
 
 ### TC-APL-06：空 plan 快照只清空已完成或空闲 plan
 
@@ -151,6 +152,28 @@
 - compaction 事件写入路径不再携带 `current_plan`。
 - persistence 回放中 compaction 分支不读取 plan 字段，不覆盖、不清空当前 plan。
 - 单元测试覆盖 compaction 事件不会改变已有 plan runtime state。
+
+### TC-APL-10：mid-turn compaction 后只在同一 turn 临时恢复 current_plan
+
+**操作步骤**：
+1. 执行设计与实现静态验收：
+   ```bash
+   rg -n 'mid-turn compaction 发生后，同一个 turn 的后续模型请求必须从 runtime `session.current_plan` 临时恢复当前 plan snapshot|不跨普通新 user turn 注入|不能持久化' design/agent-plan-lifecycle.md
+   rg -n 'mid-turn compaction 后，同一 turn 的下一次模型请求会额外收到 turn-local plan runtime context|不写入 replacement history|不进入 JSONL|不跨普通新 user turn 重放' design/agent-context-status-compaction.md
+   rg -n 'build_mid_turn_plan_context_message|build_model_request_messages|mid_turn_compaction_plan_context_active|Current update_plan snapshot restored after mid-turn context compaction' crates/agent/src/session/turn_loop.rs
+   rg -n 'test_mid_turn_plan_context_is_transient_model_context|test_queued_continuation_compacts_before_next_model_request' crates/agent/src/session/tests.rs
+   ```
+2. 执行单元回归测试：
+   ```bash
+   cargo test -p bifrost-agent --all-features test_mid_turn_plan_context_is_transient_model_context
+   cargo test -p bifrost-agent --all-features test_queued_continuation_compacts_before_next_model_request
+   ```
+
+**预期结果**：
+- 设计文档明确本修复只处理 turn loop 内部 mid-turn/emergency compaction 后的状态恢复，不做跨普通用户轮次的上一轮 plan 注入。
+- `turn_loop.rs` 只在 `mid_turn_compaction_plan_context_active` 为 true 时构造 transient developer runtime context。
+- 单元测试证明该提示包含当前 `session.current_plan`，但不进入 `session.history`；关闭开关时不会注入。
+- guide / pending queue 导致 mid-turn compaction 后，helper 会返回已压缩信号，后续模型请求可启用 transient plan context。
 
 ## 清理步骤
 

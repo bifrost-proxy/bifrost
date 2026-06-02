@@ -102,6 +102,56 @@ pub fn combine_guide_messages(messages: Vec<String>) -> Option<String> {
     }
 }
 
+fn build_mid_turn_plan_context_message(session: &AgentSession) -> Option<ChatMessage> {
+    let plan = session
+        .current_plan
+        .as_deref()
+        .filter(|plan| !plan.is_empty())?;
+    let mut content = String::from(
+        "<runtime_context>\nCurrent update_plan snapshot restored after mid-turn context compaction:\n",
+    );
+    for step in plan {
+        content.push_str(&format!("- [{}] {}\n", step.status, step.step));
+    }
+    content.push_str(
+        "\nThis is a turn-local runtime state restoration hint. Use it only to preserve the current task plan after compaction within this turn. Do not treat it as conversation history and do not carry it into a new user turn. When calling update_plan, send the complete current snapshot.\n</runtime_context>",
+    );
+    Some(ChatMessage::developer(&content))
+}
+
+pub(super) fn build_model_request_messages(
+    session: &AgentSession,
+    prompt_prefix: &[ChatMessage],
+    memory_message: Option<&ChatMessage>,
+    include_mid_turn_plan_context: bool,
+) -> Vec<ChatMessage> {
+    let mut messages = session.build_messages(prompt_prefix, memory_message);
+    if include_mid_turn_plan_context {
+        if let Some(context) = build_mid_turn_plan_context_message(session) {
+            let insertion_idx = messages
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(idx, message)| (message.role == "user").then_some(idx))
+                .unwrap_or(messages.len());
+            messages.insert(insertion_idx, context);
+            let (sanitized, report) = crate::history::sanitize_chat_history(&messages);
+            if report.dropped_anything() {
+                warn!(
+                    dropped_orphan_tool_messages = report.dropped_orphan_tool_messages,
+                    dropped_incomplete_tool_call_messages =
+                        report.dropped_incomplete_tool_call_messages,
+                    original_message_count = messages.len(),
+                    sanitized_message_count = sanitized.len(),
+                    "sanitized malformed agent chat history after transient plan context injection"
+                );
+            }
+            return sanitized;
+        }
+    }
+    messages
+}
+
 async fn chat_completion_or_stop(
     client: &AgentClient,
     config: &AgentConfig,
@@ -1516,6 +1566,7 @@ pub async fn run_turn_with_mcp_multimodal(
         memory::recall_system_message(config, session, user_message)
     };
 
+    let mut mid_turn_compaction_plan_context_active = false;
     for iteration in 0..max_iterations {
         // Drain steer queue before building the next model request (Codex parity).
         // Steer inputs injected mid-turn are appended as user messages so the
@@ -1550,7 +1601,12 @@ pub async fn run_turn_with_mcp_multimodal(
         // Build messages from full sanitized history. Compaction is the normal
         // history-rewrite path; provider overflow is surfaced without silently
         // trimming live history.
-        let messages = session.build_messages(&prompt_prefix, memory_message.as_ref());
+        let messages = build_model_request_messages(
+            session,
+            &prompt_prefix,
+            memory_message.as_ref(),
+            mid_turn_compaction_plan_context_active,
+        );
         let model_request_progress = ActiveTurnProgress {
             state: "model_request",
             current_loop_iteration: u32::try_from(iteration + 1).unwrap_or(u32::MAX),
@@ -1646,6 +1702,7 @@ pub async fn run_turn_with_mcp_multimodal(
                                 "emergency compact succeeded"
                             );
                             refresh_active_turn_status(session, config, model_request_progress);
+                            mid_turn_compaction_plan_context_active = true;
                             true
                         }
                         Ok(_) => {
@@ -1663,8 +1720,12 @@ pub async fn run_turn_with_mcp_multimodal(
                     // live history; mirror Codex by marking the context full
                     // and surfacing the overflow.
                     if compacted {
-                        let retry_messages =
-                            session.build_messages(&prompt_prefix, memory_message.as_ref());
+                        let retry_messages = build_model_request_messages(
+                            session,
+                            &prompt_prefix,
+                            memory_message.as_ref(),
+                            mid_turn_compaction_plan_context_active,
+                        );
                         match chat_completion_or_stop(
                             client,
                             config,
@@ -1756,8 +1817,12 @@ pub async fn run_turn_with_mcp_multimodal(
                         } else {
                             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                         }
-                        let retry_messages =
-                            session.build_messages(&prompt_prefix, memory_message.as_ref());
+                        let retry_messages = build_model_request_messages(
+                            session,
+                            &prompt_prefix,
+                            memory_message.as_ref(),
+                            mid_turn_compaction_plan_context_active,
+                        );
                         match chat_completion_or_stop(
                             client,
                             config,
@@ -1986,7 +2051,7 @@ pub async fn run_turn_with_mcp_multimodal(
                         warn!(error = %e, "failed to record guide message at turn end");
                     }
                 }
-                compact_mid_turn_if_needed(
+                if compact_mid_turn_if_needed(
                     client,
                     config,
                     session,
@@ -2003,7 +2068,10 @@ pub async fn run_turn_with_mcp_multimodal(
                     },
                     &turn_context.cancellation_token,
                 )
-                .await?;
+                .await?
+                {
+                    mid_turn_compaction_plan_context_active = true;
+                }
                 continue;
             }
 
@@ -2045,7 +2113,7 @@ pub async fn run_turn_with_mcp_multimodal(
                         warn!(error = %e, "failed to record queued message");
                     }
                 }
-                compact_mid_turn_if_needed(
+                if compact_mid_turn_if_needed(
                     client,
                     config,
                     session,
@@ -2062,7 +2130,10 @@ pub async fn run_turn_with_mcp_multimodal(
                     },
                     &turn_context.cancellation_token,
                 )
-                .await?;
+                .await?
+                {
+                    mid_turn_compaction_plan_context_active = true;
+                }
                 continue;
             }
 
@@ -2581,7 +2652,7 @@ pub async fn run_turn_with_mcp_multimodal(
         }
 
         // Mid-turn compaction check (same pattern as Codex's auto-compact in turn.rs)
-        compact_mid_turn_if_needed(
+        if compact_mid_turn_if_needed(
             client,
             config,
             session,
@@ -2598,7 +2669,10 @@ pub async fn run_turn_with_mcp_multimodal(
             },
             &turn_context.cancellation_token,
         )
-        .await?;
+        .await?
+        {
+            mid_turn_compaction_plan_context_active = true;
+        }
     }
 
     error!(
@@ -2881,9 +2955,9 @@ pub(super) async fn compact_mid_turn_if_needed(
     memory_message: Option<&ChatMessage>,
     progress: ActiveTurnProgress,
     cancellation_token: &crate::turn_runtime::CancellationToken,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     if !compact::should_compact(session, config) {
-        return Ok(());
+        return Ok(false);
     }
 
     info!(
@@ -2925,8 +2999,9 @@ pub(super) async fn compact_mid_turn_if_needed(
                 "mid-turn compaction succeeded"
             );
             refresh_active_turn_status(session, config, progress);
+            Ok(true)
         }
-        Ok(_) => {}
+        Ok(_) => Ok(false),
         Err(e) => {
             warn!(error = %e, "mid-turn compaction failed");
             crate::tools::goal::goal_runtime_apply(
@@ -2935,10 +3010,9 @@ pub(super) async fn compact_mid_turn_if_needed(
                     reason: crate::tools::goal::GoalAbortReason::Interrupted,
                 },
             );
-            return Err(e);
+            Err(e)
         }
     }
-    Ok(())
 }
 
 async fn compact_pre_sampling_if_needed(

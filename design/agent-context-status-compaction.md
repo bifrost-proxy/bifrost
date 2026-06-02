@@ -156,6 +156,8 @@ last_response_tokens + estimate(history[last_response_history_len..])
 
 Compaction event 不记录 `current_plan`，persistence 回放时也不从 compaction metadata 恢复、覆盖或清空 plan。Plan 的运行态恢复只接受 `plan_updated` / `plan_cleared`，保持与 Codex Memento/handoff-summary 方案一致：summary 是历史重写，不是 runtime checkpoint。
 
+mid-turn compaction 后，同一 turn 的下一次模型请求会额外收到 turn-local plan runtime context，用于恢复 `session.current_plan` 的当前 snapshot。该提示不是 compaction event，不写入 replacement history，不进入 JSONL，也不跨普通新 user turn 重放；它只修复 summary replacement history 丢失模型可见 plan 状态的问题。
+
 history rewrite 后同步刷新 active status，避免 `/status` 展示旧 `history_version` 或旧 context token。
 
 ### 7. 压缩后 token snapshot 纳入 base instructions
