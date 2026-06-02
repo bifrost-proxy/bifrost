@@ -309,10 +309,15 @@ else:
 log "Use same SSH key from another caller sandbox and verify caller identity isolation"
 CALLER_DATA_DIR_2="$(mktemp -d)"
 CLI_CONNECT_OUTPUT_2="$TMPDIR/cli_connect_2.out"
-BIFROST_DATA_DIR="$CALLER_DATA_DIR_2" "$REPO_DIR/target/release/bifrost" remote conn up --ssh-key "$TMPDIR/cli-test.bifrost" --relay-url "$RELAY_URL" \
+BIFROST_REMOTE_SSH_KEY="$KEY_FILE" \
+BIFROST_DATA_DIR="$CALLER_DATA_DIR_2" "$REPO_DIR/target/release/bifrost" remote conn up --ssh-key --relay-url "$RELAY_URL" \
     >"$CLI_CONNECT_OUTPUT_2" 2>&1
 grep -q "Connected with SSH key" "$CLI_CONNECT_OUTPUT_2"
 CALLER_CONNECTIONS_JSON_2="$CALLER_DATA_DIR_2/remote-connections.json"
+assert_python "$CALLER_CONNECTIONS_JSON_2" '
+conn = obj["connections"][0]
+assert conn["ssh_key_source"] == "env:BIFROST_REMOTE_SSH_KEY"
+'
 CALLER_FINGERPRINT_2="$(jq -r '.connections[0].caller_fingerprint' "$CALLER_CONNECTIONS_JSON_2")"
 assert_not_empty "$CALLER_FINGERPRINT_2" "第二个 caller fingerprint 不应为空"
 if [[ "$CALLER_FINGERPRINT_1" == "$CALLER_FINGERPRINT_2" ]]; then

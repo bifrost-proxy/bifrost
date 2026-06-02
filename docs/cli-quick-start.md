@@ -307,8 +307,12 @@ bifrost whitelist approve <ip>
 bifrost setting ssh-key create --label "dev-mac" --output ./bifrost-device.key
 bifrost remote conn up <pair-code>
 bifrost remote conn up --ssh-key ./bifrost-device.key --label "dev-mac"
+export BIFROST_REMOTE_SSH_KEY="$(cat ./bifrost-device.key)"
+bifrost remote conn up --ssh-key --label "ci-agent"
 bifrost remote conn status
 ```
+
+`--ssh-key` 带路径时读取指定 key 文件；不带值时读取固定环境变量 `BIFROST_REMOTE_SSH_KEY`，适合 CI secret 和自动化环境。
 
 远程查看状态、流量或文件：
 

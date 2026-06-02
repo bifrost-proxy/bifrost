@@ -47,6 +47,8 @@ const CALLER_IDENTITY_FILE: &str = "remote-caller-identity.json";
 const START_PAIRING_OVERLOAD_RETRY_DELAYS_MS: [u64; 3] = [300, 700, 1500];
 const CANCEL_SETTLE_RETRY_DELAYS_MS: [u64; 4] = [200, 500, 1000, 2000];
 const SSH_CONNECT_TIMEOUT_SECS: u64 = 30;
+const DEFAULT_REMOTE_SSH_KEY_ENV_VAR: &str = "BIFROST_REMOTE_SSH_KEY";
+const DEFAULT_REMOTE_SSH_KEY_ENV_SPEC: &str = "env:BIFROST_REMOTE_SSH_KEY";
 const BIFROST_KEY_BEGIN: &str = "-----BEGIN BIFROST KEY-----";
 const BIFROST_KEY_END: &str = "-----END BIFROST KEY-----";
 const PKCS8_KEY_BEGIN: &str = "-----BEGIN PRIVATE KEY-----";
@@ -4694,10 +4696,27 @@ fn load_ssh_key(
 
 fn read_ssh_key_source(spec: &str) -> bifrost_core::Result<(Vec<u8>, String, Option<PathBuf>)> {
     if let Some(env_name) = spec.strip_prefix("env:") {
+        if env_name != DEFAULT_REMOTE_SSH_KEY_ENV_VAR {
+            return Err(BifrostError::Config(format!(
+                "remote SSH key env source only supports `{DEFAULT_REMOTE_SSH_KEY_ENV_SPEC}`; pass `--ssh-key` without a value or pass a key file path"
+            )));
+        }
         let value = std::env::var(env_name).map_err(|_| {
-            BifrostError::Config(format!("environment variable `{env_name}` is not set"))
+            BifrostError::Config(format!(
+                "{DEFAULT_REMOTE_SSH_KEY_ENV_VAR} is not set; pass `--ssh-key <path>` or set {DEFAULT_REMOTE_SSH_KEY_ENV_VAR}"
+            ))
         })?;
-        return Ok((value.into_bytes(), format!("env:{env_name}"), None));
+        if value.trim().is_empty() {
+            return Err(BifrostError::Config(format!(
+                "{DEFAULT_REMOTE_SSH_KEY_ENV_VAR} is empty; pass `--ssh-key <path>` or set a non-empty {DEFAULT_REMOTE_SSH_KEY_ENV_VAR}"
+            )));
+        }
+        let value = normalize_env_ssh_key_value(value);
+        return Ok((
+            value.into_bytes(),
+            DEFAULT_REMOTE_SSH_KEY_ENV_SPEC.to_string(),
+            None,
+        ));
     }
 
     if spec == "-" {
@@ -4718,6 +4737,14 @@ fn read_ssh_key_source(spec: &str) -> bifrost_core::Result<(Vec<u8>, String, Opt
         )))
     })?;
     Ok((bytes, path.display().to_string(), Some(path)))
+}
+
+fn normalize_env_ssh_key_value(value: String) -> String {
+    if value.contains("\\n") && !value.contains('\n') {
+        value.replace("\\n", "\n")
+    } else {
+        value
+    }
 }
 
 fn parse_ssh_private_key_bytes(raw: &[u8]) -> bifrost_core::Result<(Vec<u8>, Option<String>)> {
@@ -5060,12 +5087,36 @@ fn truncate(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use crate::cli::{RemoteCommandExecArgs, RemoteSearchArgs, RemoteTrafficListArgs};
-    use std::sync::OnceLock;
+    use std::sync::{Mutex, OnceLock};
 
     fn init_test_data_dir() {
         static TEST_DATA_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
         let dir = TEST_DATA_DIR.get_or_init(|| tempfile::tempdir().expect("create temp dir"));
         bifrost_storage::set_data_dir(dir.path().to_path_buf());
+    }
+
+    fn with_remote_ssh_key_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().expect("lock env");
+        let old = std::env::var(DEFAULT_REMOTE_SSH_KEY_ENV_VAR).ok();
+        match value {
+            Some(value) => unsafe {
+                std::env::set_var(DEFAULT_REMOTE_SSH_KEY_ENV_VAR, value);
+            },
+            None => unsafe {
+                std::env::remove_var(DEFAULT_REMOTE_SSH_KEY_ENV_VAR);
+            },
+        }
+        let result = f();
+        match old {
+            Some(value) => unsafe {
+                std::env::set_var(DEFAULT_REMOTE_SSH_KEY_ENV_VAR, value);
+            },
+            None => unsafe {
+                std::env::remove_var(DEFAULT_REMOTE_SSH_KEY_ENV_VAR);
+            },
+        }
+        result
     }
 
     fn sample_local_connection(client_id: &str, relay_url: &str) -> LocalConnection {
@@ -5939,6 +5990,70 @@ mod tests {
 
         assert_eq!(device_code, "BF-0123456789ABCDEF");
         assert_eq!(parsed_pkcs8, pkcs8.as_ref());
+    }
+
+    #[test]
+    fn test_load_ssh_key_reads_default_environment_source() {
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).expect("generate pkcs8");
+        let rendered = format!(
+            "{BIFROST_KEY_BEGIN}\nDevice-Code: BF-0123456789ABCDEF\n{}\n{BIFROST_KEY_END}\n",
+            base64::engine::general_purpose::STANDARD.encode(pkcs8.as_ref())
+        );
+
+        with_remote_ssh_key_env(Some(&rendered), || {
+            let loaded = load_ssh_key(DEFAULT_REMOTE_SSH_KEY_ENV_SPEC, None)
+                .expect("env source should load");
+
+            assert_eq!(loaded.device_code, "BF-0123456789ABCDEF");
+            assert_eq!(loaded.source_label, DEFAULT_REMOTE_SSH_KEY_ENV_SPEC);
+        });
+    }
+
+    #[test]
+    fn test_read_ssh_key_env_source_restores_escaped_newlines() {
+        let escaped = format!(
+            "{BIFROST_KEY_BEGIN}\\nDevice-Code: BF-0123456789ABCDEF\\nabc\\n{BIFROST_KEY_END}\\n"
+        );
+
+        with_remote_ssh_key_env(Some(&escaped), || {
+            let (raw, source_label, file_path) =
+                read_ssh_key_source(DEFAULT_REMOTE_SSH_KEY_ENV_SPEC).expect("env should read");
+            let text = String::from_utf8(raw).expect("env source is utf8");
+
+            assert_eq!(source_label, DEFAULT_REMOTE_SSH_KEY_ENV_SPEC);
+            assert!(file_path.is_none());
+            assert!(text.contains('\n'));
+            assert!(!text.contains("\\n"));
+        });
+    }
+
+    #[test]
+    fn test_read_ssh_key_env_source_requires_fixed_name() {
+        let err = read_ssh_key_source("env:OTHER_REMOTE_SSH_KEY")
+            .expect_err("arbitrary env var names should be rejected");
+
+        assert!(format!("{err}").contains(DEFAULT_REMOTE_SSH_KEY_ENV_SPEC));
+    }
+
+    #[test]
+    fn test_read_ssh_key_env_source_reports_missing_fixed_env() {
+        with_remote_ssh_key_env(None, || {
+            let err = read_ssh_key_source(DEFAULT_REMOTE_SSH_KEY_ENV_SPEC)
+                .expect_err("missing env should fail");
+
+            assert!(format!("{err}").contains("BIFROST_REMOTE_SSH_KEY is not set"));
+        });
+    }
+
+    #[test]
+    fn test_read_ssh_key_env_source_rejects_empty_value() {
+        with_remote_ssh_key_env(Some(" \n\t"), || {
+            let err = read_ssh_key_source(DEFAULT_REMOTE_SSH_KEY_ENV_SPEC)
+                .expect_err("empty env should fail");
+
+            assert!(format!("{err}").contains("BIFROST_REMOTE_SSH_KEY is empty"));
+        });
     }
 
     #[test]

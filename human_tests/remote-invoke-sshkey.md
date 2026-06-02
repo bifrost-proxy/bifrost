@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证本机 CLI 可以快速生成 Remote Invoke SSH key 文件，并验证 `bifrost remote conn up --ssh-key` 在多个 caller 沙箱中复用同一 SSH key 时，caller 身份使用本地随机持久 ID，而不是主机名、用户名或 SSH key fingerprint 派生值。目标是让 target 机器无需打开 WebUI 就能输出可分发的 key，同时避免多个 caller 竞争同一个 grant。
+验证本机 CLI 可以快速生成 Remote Invoke SSH key 文件，并验证 `bifrost remote conn up --ssh-key` 在多个 caller 沙箱中复用同一 SSH key 时，caller 身份使用本地随机持久 ID，而不是主机名、用户名或 SSH key fingerprint 派生值。目标是让 target 机器无需打开 WebUI 就能输出可分发的 key，同时让 caller 可通过文件路径或固定环境变量 `BIFROST_REMOTE_SSH_KEY` 使用 key，避免多个 caller 竞争同一个 grant。
 
 ## 前置条件
 
@@ -24,7 +24,7 @@
    ```bash
    BIFROST_DATA_DIR="$(mktemp -d)" bash e2e-tests/tests/test_setting_ssh_key_cli.sh
    ```
-2. 观察脚本中 `Create local remote-invoke SSH key to an output file`、`Status shows active key metadata`、`Generated key is accepted by caller-side --ssh-key parser` 和 `Revoke active key` 四段输出。
+2. 观察脚本中 `Create local remote-invoke SSH key to an output file`、`Status shows active key metadata`、`Generated key is accepted by caller-side --ssh-key parser from fixed env` 和 `Revoke active key` 四段输出。
 3. 确认脚本生成的 key 文件包含 `-----BEGIN BIFROST KEY-----` 和 `Device-Code: BF-...`。
 4. 确认脚本使用 `bifrost remote conn up --ssh-key <key>` 的 caller 侧解析路径读取生成 key；relay 端口故意不可达时，只允许出现网络连接失败，不允许出现 key 解析失败。
 
@@ -34,7 +34,7 @@
 - Unix/macOS 下 key 文件权限为 `0600`。
 - `bifrost setting ssh-key status` 显示 label、device code、fingerprint 和 grant mode。
 - `bifrost setting ssh-key export` 能导出与 active key 一致的文件，且不带 `--force` 时拒绝覆盖已有输出文件。
-- 生成的 key 可被 caller 侧 `--ssh-key` parser 接受。
+- 生成的 key 可被 caller 侧 `--ssh-key` parser 通过固定环境变量 `BIFROST_REMOTE_SSH_KEY` 接受。
 - `bifrost setting ssh-key revoke` 后 `status` 显示没有 active key。
 
 ### TC-RISK-01：同一 SSH key 在两个 caller 沙箱中生成不同 caller ID
@@ -58,6 +58,36 @@
 - 两条 grant 的 `caller_fingerprint` 分别匹配两个 caller 沙箱的随机 ID，互不覆盖。
 - 后续 `remote conn status`、`remote traffic search`、`remote traffic get` 仍可通过第一个 caller 的 saved connection 正常执行。
 
+### TC-RISK-02：`--ssh-key` 不带路径时从固定环境变量读取
+
+**操作步骤**
+
+1. 在 target 侧生成或导出 Bifrost SSH key 文件：
+   ```bash
+   BIFROST_DATA_DIR="$(mktemp -d)" bifrost setting ssh-key create --label "ci-target" --output ./bifrost-device.key
+   ```
+2. 在 caller 侧把 key 内容放入固定环境变量：
+   ```bash
+   export BIFROST_REMOTE_SSH_KEY="$(cat ./bifrost-device.key)"
+   ```
+3. 使用不带路径的 `--ssh-key` 发起连接：
+   ```bash
+   BIFROST_DATA_DIR="$(mktemp -d)" bifrost remote conn up --ssh-key --label "ci-agent"
+   ```
+4. 执行 `bifrost remote conn status`，确认 saved connection 可复用。
+5. 在自动化回归中执行：
+   ```bash
+   BIFROST_DATA_DIR="$(mktemp -d)" bash e2e-tests/tests/test_setting_ssh_key_cli.sh
+   BIFROST_DATA_DIR="$(mktemp -d)" bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh
+   ```
+
+**预期结果**
+
+- 第 3 步 CLI 不要求 `--ssh-key <path>`，而是读取固定环境变量 `BIFROST_REMOTE_SSH_KEY`。
+- 如果 `BIFROST_REMOTE_SSH_KEY` 未设置或为空，CLI 给出明确错误提示。
+- `remote-connections.json` 中 SSH key 连接的 `auth_method=ssh_publickey`；通过 env 模式连接时 `ssh_key_source=env:BIFROST_REMOTE_SSH_KEY`。
+- 不支持任意环境变量名；用户不需要也不能通过 `env:OTHER_NAME` 自定义。
+
 ## 清理步骤
 
 - 脚本退出时会清理 key 生成、relay、target、caller、mock server 临时目录和进程。
@@ -66,3 +96,13 @@
   pkill -f 'bifrost-sync-server.*--enable-remote-invoke' || true
   pkill -f 'python3 -m http.server' || true
   ```
+
+## 执行结果
+
+### 2026-06-02 固定环境变量 SSH key 回归
+
+| 用例 | 结果 | 证据 |
+| --- | --- | --- |
+| TC-RISK-00 | PASS | 执行 `bash e2e-tests/tests/test_setting_ssh_key_cli.sh` 通过；输出包含 `Generated key is accepted by caller-side --ssh-key parser from fixed env` 和最终 `PASS`，证明生成的 key 可通过固定 `BIFROST_REMOTE_SSH_KEY` + `--ssh-key` 无路径形式进入 caller 侧 parser。 |
+| TC-RISK-01 | PASS | 执行 `bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh` 通过；脚本启动本地 relay、target 与两个 caller，确认两个 caller 使用同一 SSH key 时 caller fingerprint 不同且 target grants 中存在对应 `ssh_publickey` grants。 |
+| TC-RISK-02 | PASS | 同一 `test_remote_invoke_ssh_e2e.sh` 中第二个 caller 将导出的 key 内容写入 `BIFROST_REMOTE_SSH_KEY` 后执行 `bifrost remote conn up --ssh-key --relay-url ...` 成功连接，并断言 `remote-connections.json` 中 `ssh_key_source=env:BIFROST_REMOTE_SSH_KEY`；后续 `remote conn status`、`remote traffic search`、`remote traffic get` 均通过。 |

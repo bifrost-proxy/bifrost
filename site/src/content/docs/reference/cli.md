@@ -97,6 +97,7 @@ bifrost [OPTIONS] [COMMAND]
 | `FORCE_COLOR` | CLI 输出 | 存在时强制彩色输出，优先级高于终端自动检测。 |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` | CLI 发起的外部 HTTP 请求 | 影响升级检查、同步、远程 relay 等需要访问网络的 CLI 请求；也可能由 `--cli-proxy` 写入 shell rc 文件。 |
 | `NO_PROXY` | CLI 发起的外部 HTTP 请求 | 配合代理环境变量使用，声明不走代理的 host 或域名后缀。 |
+| `BIFROST_REMOTE_SSH_KEY` | `remote conn up --ssh-key` | 固定的 Remote Invoke SSH key 环境变量；当 `--ssh-key` 不带路径时读取该变量内容。 |
 | `BIFROST_FORCE_UPDATE_CHECK` | 版本检查 | 强制执行更新检查；主要用于调试或测试更新提示。 |
 | `BIFROST_INSTALL_SKILL_SOURCE` | `install-skill` | 选择 skill 安装源；正常用户通常无需设置。 |
 | `BIFROST_AGENT_HOME` | Agent 运行时 | Agent 配置和记忆目录的兼容覆盖项；默认优先使用 `$BIFROST_DATA_DIR/agent/`。 |
@@ -636,6 +637,8 @@ Shell Access policy 是远程执行的最后一道本机策略，不是普通 CL
 bifrost setting ssh-key create --label "dev-mac" --output ./bifrost-device.key
 bifrost remote conn up <pair-code>
 bifrost remote conn up --ssh-key ./bifrost-device.key --label "dev-mac"
+export BIFROST_REMOTE_SSH_KEY="$(cat ./bifrost-device.key)"
+bifrost remote conn up --ssh-key --label "ci-agent"
 bifrost remote conn status
 bifrost remote conn down
 bifrost remote conn down --grant-id <grant-id>
@@ -668,6 +671,8 @@ bifrost remote keep-awake off
 bifrost remote keep-awake mode set force_on
 bifrost remote keep-awake mode get
 ```
+
+`--ssh-key` 带路径时读取指定 key 文件；不带值时读取固定环境变量 `BIFROST_REMOTE_SSH_KEY`。环境变量名称固定，不支持自定义名称。
 
 远程文件操作受远端 grant 的 file access policy 约束；`remote exec` 是最高权限路径，能运行任意 shell 命令，实际允许范围由远端 Shell Access policy 决定。
 

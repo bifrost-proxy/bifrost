@@ -189,6 +189,36 @@ bifrost setting ssh-key revoke
 - 第 1 轮：复核 `setting` 命名、API 优先/离线 fallback、文件权限、文档和 E2E 覆盖；运行 CLI 单测与新增 E2E。
 - 第 2 轮：复核生成 key 是否能被 caller 侧 loader 接受、human_tests 索引是否同步、输出是否适合 shell 重定向；复跑受影响测试。
 
+## 2026-06-02 Caller 侧固定环境变量读取 SSH Key
+
+### 目标
+
+让 CI/自动化 caller 无需把 SSH key 写入本地文件，也无需记忆任意 `env:NAME` 语法。`--ssh-key` 本身表示启用 SSH key 授权：
+
+```bash
+export BIFROST_REMOTE_SSH_KEY="$(cat ./bifrost-device.key)"
+bifrost remote conn up --ssh-key --label ci-agent
+```
+
+### 命令语义
+
+- `bifrost remote conn up <pair-code>`：继续使用一次性 pair code。
+- `bifrost remote conn up --ssh-key <path>`：从指定 key 文件读取。
+- `bifrost remote conn up --ssh-key`：从固定环境变量 `BIFROST_REMOTE_SSH_KEY` 读取。
+- `env:NAME` 不再作为可自由配置的用户入口；只允许固定 `env:BIFROST_REMOTE_SSH_KEY`，避免不同脚本使用不同环境变量名导致运维不可复用。
+
+### 错误提示
+
+- `--ssh-key` 无值且 `BIFROST_REMOTE_SSH_KEY` 未设置：提示设置固定环境变量或传 `--ssh-key <path>`。
+- `BIFROST_REMOTE_SSH_KEY` 为空：提示设置非空值或传文件路径。
+- `env:OTHER`：明确提示只支持固定 `env:BIFROST_REMOTE_SSH_KEY`。
+
+### 测试方案
+
+- 单元测试：覆盖 clap 将 `--ssh-key` 无值解析为固定 env source；覆盖 env 正常读取、缺失、空值、转义换行还原和非固定 env 名拒绝。
+- E2E：`test_setting_ssh_key_cli.sh` 使用固定 env 验证 caller parser；`test_remote_invoke_ssh_e2e.sh` 保留第一 caller 文件模式，并让第二 caller 通过 `BIFROST_REMOTE_SSH_KEY` 完成真实 SSH connect。
+- human_tests：更新 `remote-invoke-sshkey.md`，新增固定 env 用例并记录执行结果。
+
 - 单元测试：
   - `test_random_caller_fingerprint_has_expected_shape` 验证随机 caller ID 格式。
   - `test_load_or_create_caller_fingerprint_persists_per_data_dir` 验证同一数据目录复用。

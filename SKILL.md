@@ -631,6 +631,7 @@ bifrost install-skill -t all -y                # 自动安装到所有支持的�
 
 ```bash
 bifrost remote conn up --ssh-key <path>         # 使用导出的 SSH key 建立长期授权
+BIFROST_REMOTE_SSH_KEY="$(cat <path>)" bifrost remote conn up --ssh-key  # 固定 env
 bifrost remote conn up <code>                   # 使用一次性配对码建立授权
 bifrost remote conn status                      # 查看远端状态
 bifrost remote conn down [--all|--grant-id <g>] # 回收 grant
