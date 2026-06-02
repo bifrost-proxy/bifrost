@@ -167,6 +167,8 @@ bifrost --version
 ```bash
 bifrost remote conn status                                      # 已有连接？
 bifrost remote conn up --ssh-key ~/.bifrost/remote-device.key   # 或
+export BIFROST_REMOTE_SSH_KEY="$(cat ~/.bifrost/remote-device.key)"
+bifrost remote conn up --ssh-key                                # CI/自动化固定 env，或
 bifrost remote conn up <pair-code>
 bifrost remote conn up --ssh-key ~/.bifrost/remote-device.key --label "my-ci-bot"  # 自定义标签
 ```

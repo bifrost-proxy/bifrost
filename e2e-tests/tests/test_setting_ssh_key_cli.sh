@@ -105,12 +105,13 @@ if [[ -z "$device_code" ]]; then
     exit 1
 fi
 
-log "Generated key is accepted by caller-side --ssh-key parser"
+log "Generated key is accepted by caller-side --ssh-key parser from fixed env"
 set +e
 parse_output="$(
+    BIFROST_REMOTE_SSH_KEY="$(cat "$STDOUT_KEY_FILE")" \
     BIFROST_DATA_DIR="$CALLER_DATA_DIR" timeout 8 "$BIFROST_BIN" \
         remote --relay-url "http://127.0.0.1:9" \
-        conn up --ssh-key "$STDOUT_KEY_FILE" --device-code "$device_code" 2>&1
+        conn up --ssh-key --device-code "$device_code" 2>&1
 )"
 parse_status=$?
 set -e

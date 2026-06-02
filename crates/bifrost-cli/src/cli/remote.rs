@@ -40,7 +40,7 @@ pub enum RemoteCommands {
 pub enum RemoteConnCommands {
     #[command(
         about = "Establish or re-authorize the connection (first-time pairing or SSH key)",
-        long_about = "Establish or re-authorize the connection to a remote Bifrost instance.\n\n            Use this only for the initial pairing flow, or when authorization has expired / been revoked.\n            The pair code is one-time and should not be reused after a successful connect.\n            You can also connect with an exported SSH key file via `--ssh-key`.\n            After `up` succeeds, prefer `bifrost remote conn status` (or other read-only remote commands) instead of running `up` again."
+        long_about = "Establish or re-authorize the connection to a remote Bifrost instance.\n\n            Use this only for the initial pairing flow, or when authorization has expired / been revoked.\n            The pair code is one-time and should not be reused after a successful connect.\n            You can also connect with an exported SSH key file via `--ssh-key <path>` or with the fixed `BIFROST_REMOTE_SSH_KEY` env via `--ssh-key`.\n            After `up` succeeds, prefer `bifrost remote conn status` (or other read-only remote commands) instead of running `up` again."
     )]
     Up {
         #[arg(
@@ -50,9 +50,12 @@ pub enum RemoteConnCommands {
         pair_code: Option<String>,
         #[arg(
             long,
+            value_name = "PATH",
             value_hint = ValueHint::FilePath,
             conflicts_with = "pair_code",
-            help = "Use an exported Bifrost SSH key file, PKCS#8 Ed25519 private key, `env:NAME`, or `-` for stdin"
+            num_args = 0..=1,
+            default_missing_value = "env:BIFROST_REMOTE_SSH_KEY",
+            help = "Use SSH key auth. With PATH, read a key file; without PATH, read BIFROST_REMOTE_SSH_KEY"
         )]
         ssh_key: Option<String>,
         #[arg(

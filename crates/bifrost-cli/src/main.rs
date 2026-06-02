@@ -548,6 +548,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::{RemoteCommands, RemoteConnCommands};
     use bifrost_storage::UnifiedConfig;
     use tempfile::TempDir;
 
@@ -688,6 +689,32 @@ mod tests {
             true,
             Some(&Commands::Status { tui: false })
         ));
+    }
+
+    #[test]
+    fn remote_conn_up_ssh_key_without_value_uses_fixed_env_source() {
+        let cli = Cli::parse_from([
+            "bifrost",
+            "remote",
+            "conn",
+            "up",
+            "--ssh-key",
+            "--label",
+            "ci-agent",
+        ]);
+
+        let Some(Commands::Remote { action, .. }) = cli.command else {
+            panic!("expected remote command");
+        };
+        let RemoteCommands::Conn { action } = action else {
+            panic!("expected remote conn command");
+        };
+        let RemoteConnCommands::Up { ssh_key, label, .. } = action else {
+            panic!("expected remote conn up command");
+        };
+
+        assert_eq!(ssh_key.as_deref(), Some("env:BIFROST_REMOTE_SSH_KEY"));
+        assert_eq!(label.as_deref(), Some("ci-agent"));
     }
 
     #[test]
