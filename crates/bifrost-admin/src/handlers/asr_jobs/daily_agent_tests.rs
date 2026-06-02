@@ -1,3 +1,186 @@
+
+#[test]
+fn daily_agent_default_config_has_report_and_tomorrow_todo_agents() {
+    let config = AsrDailyAgentConfig::default();
+    let agents = normalized_daily_agents(&config);
+    assert_eq!(agents.len(), 2);
+    assert_eq!(agents[0].id, DEFAULT_DAILY_AGENT_ID);
+    assert_eq!(agents[0].output_dir, DEFAULT_DAILY_AGENT_OUTPUT_DIR);
+    assert_eq!(agents[1].id, DEFAULT_TOMORROW_TODO_AGENT_ID);
+    assert_eq!(agents[1].output_dir, DEFAULT_TOMORROW_TODO_OUTPUT_DIR);
+    assert!(agents[1].im_delivery.enabled);
+    assert_eq!(
+        agents[1].im_delivery.channel.as_deref(),
+        Some(DEFAULT_DAILY_AGENT_IM_CHANNEL)
+    );
+}
+
+#[test]
+fn daily_agent_legacy_config_is_upgraded_to_two_agents_without_losing_settings() {
+    let legacy = AsrDailyAgentConfig {
+        enabled: false,
+        agent_id: "meeting_notes".to_string(),
+        name: "meeting_notes".to_string(),
+        runner: "codex_runner".to_string(),
+        timeout_ms: 12345,
+        trigger_policy: AsrDailyAgentTriggerPolicy::ManualOnly,
+        session_key: Some("legacy-session".to_string()),
+        instructions_source: AsrDailyAgentInstructionsSource::Custom,
+        instructions: Some("legacy instructions".to_string()),
+        im_delivery: AsrDailyAgentImDeliveryConfig::default(),
+        output_dir: "meeting_notes".to_string(),
+        agents: Vec::new(),
+        report_sync_dir: Some("~/reports".to_string()),
+        last_report_sync: None,
+        last_run_at_ms: Some(11),
+        last_status: Some("success".to_string()),
+        last_error: None,
+        last_run_id: Some("run-legacy".to_string()),
+    };
+
+    let normalized = normalize_daily_agent_config(&legacy);
+    assert!(!normalized.enabled);
+    assert_eq!(normalized.agents.len(), 2);
+    assert_eq!(normalized.agents[0].id, "meeting_notes");
+    assert_eq!(normalized.agents[0].runner, "codex_runner");
+    assert_eq!(normalized.agents[0].trigger_policy, AsrDailyAgentTriggerPolicy::ManualOnly);
+    assert_eq!(normalized.agents[0].instructions.as_deref(), Some("legacy instructions"));
+    assert_eq!(normalized.agents[0].output_dir, "meeting_notes");
+    assert_eq!(normalized.agents[0].last_run_id.as_deref(), Some("run-legacy"));
+    assert_eq!(normalized.agents[1].id, DEFAULT_TOMORROW_TODO_AGENT_ID);
+    assert!(normalized.agents[1].im_delivery.enabled);
+}
+
+#[test]
+fn daily_agent_validation_rejects_non_english_tokens_and_duplicates() {
+    let mut config = AsrDailyAgentConfig::default();
+    config.agents[0].name = "中文".to_string();
+    assert!(validate_daily_agent_config(&config)
+        .unwrap_err()
+        .contains("name must use English"));
+
+    let mut config = AsrDailyAgentConfig::default();
+    config.agents[1].output_dir = config.agents[0].output_dir.clone();
+    assert!(validate_daily_agent_config(&config)
+        .unwrap_err()
+        .contains("Duplicate Daily Agent output_dir"));
+
+    let mut config = AsrDailyAgentConfig::default();
+    config.agents[1].id = config.agents[0].id.clone();
+    assert!(validate_daily_agent_config(&config)
+        .unwrap_err()
+        .contains("Duplicate Daily Agent id"));
+}
+
+#[test]
+fn daily_agent_workspace_creates_per_agent_instruction_and_output_dirs() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let task = AsrDirectoryTask {
+        id: "daily-agent-multi-workspace-task".to_string(),
+        name: "Daily Agent Multi Workspace Task".to_string(),
+        audio_dir: temp.path().join("audio"),
+        recursive: true,
+        enabled: true,
+        paused: false,
+        paused_at_ms: None,
+        schedule: AsrTaskSchedule::Hourly { minute: 0 },
+        language: "chinese".to_string(),
+        model: "Qwen3-ASR-1.7B".to_string(),
+        runtime_strategy: AsrRuntimeStrategy::ReusePerFile,
+        diarization: AsrDiarizationConfig::default(),
+        created_at_ms: 1,
+        updated_at_ms: 1,
+        last_run_at_ms: None,
+        next_run_at_ms: Some(1),
+        last_error: None,
+        daily_agent: AsrDailyAgentConfig::default(),
+        external_devices: Vec::new(),
+        import_policy: AsrExternalImportPolicy::default(),
+    };
+
+    let status = ensure_asr_daily_workspace(&task).unwrap();
+    let daily_dir = daily_dir_for_task(&task.id);
+
+    assert!(daily_dir.join("report").is_dir());
+    assert!(daily_dir.join("tomorrow_todo").is_dir());
+    assert!(daily_dir.join("agents/daily_report.md").is_file());
+    assert!(daily_dir.join("agents/tomorrow_todo.md").is_file());
+    assert!(std::fs::read_to_string(daily_dir.join("agents/tomorrow_todo.md"))
+        .unwrap()
+        .contains("明日 To Do List"));
+    assert_eq!(status.agents.len(), 2);
+}
+
+#[test]
+fn daily_agent_processed_state_keys_do_not_collide_for_same_date() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let mut task = AsrDirectoryTask {
+        id: "daily-agent-multi-records-task".to_string(),
+        name: "Daily Agent Multi Records Task".to_string(),
+        audio_dir: temp.path().join("audio"),
+        recursive: true,
+        enabled: true,
+        paused: false,
+        paused_at_ms: None,
+        schedule: AsrTaskSchedule::Hourly { minute: 0 },
+        language: "chinese".to_string(),
+        model: "Qwen3-ASR-1.7B".to_string(),
+        runtime_strategy: AsrRuntimeStrategy::ReusePerFile,
+        diarization: AsrDiarizationConfig::default(),
+        created_at_ms: 1,
+        updated_at_ms: 1,
+        last_run_at_ms: None,
+        next_run_at_ms: Some(1),
+        last_error: None,
+        daily_agent: AsrDailyAgentConfig::default(),
+        external_devices: Vec::new(),
+        import_policy: AsrExternalImportPolicy::default(),
+    };
+    ensure_asr_daily_workspace(&task).unwrap();
+    let daily_dir = daily_dir_for_task(&task.id);
+    std::fs::write(daily_dir.join("2026-05-22.md"), "source").unwrap();
+    std::fs::write(daily_dir.join("report/2026-05-22-report.md"), "# report").unwrap();
+    std::fs::write(
+        daily_dir.join("tomorrow_todo/2026-05-22-report.md"),
+        "# todo",
+    )
+    .unwrap();
+
+    let mut processed = AsrDailyAgentProcessedState::default();
+    for agent in normalized_daily_agents(&task.daily_agent) {
+        let agent_task = task_for_daily_agent(&task, &agent);
+        let report_path = daily_agent_output_dir(&agent_task).join("2026-05-22-report.md");
+        processed.documents.insert(
+            daily_agent_processed_key(&agent_task, "2026-05-22"),
+            AsrDailyAgentProcessedDocument {
+                agent_id: agent.id.clone(),
+                agent_name: agent.name.clone(),
+                output_dir: agent.output_dir.clone(),
+                date: "2026-05-22".to_string(),
+                source_sha256: "hash".to_string(),
+                source_len_bytes: 6,
+                processed_at_ms: 100,
+                runner: agent.runner.clone(),
+                report_path: Some(report_path.to_string_lossy().to_string()),
+                last_run_id: format!("run-{}", agent.id),
+            },
+        );
+    }
+
+    let records = build_daily_agent_records_for_task(&task, &processed);
+    task.daily_agent.agents.reverse();
+    let reversed_records = build_daily_agent_records_for_task(&task, &processed);
+
+    assert_eq!(records.len(), 2);
+    assert!(records.iter().any(|record| record.agent_id == "daily_report"));
+    assert!(records.iter().any(|record| record.agent_id == "tomorrow_todo"));
+    assert_eq!(reversed_records.len(), 2);
+}
+
 #[test]
 fn daily_agent_default_template_keeps_knowledge_modules_inside_report() {
     assert!(DEFAULT_ASR_DAILY_AGENTS_MD.contains("## 报告内知识沉淀模块"));
@@ -373,6 +556,9 @@ fn daily_agent_report_detail_uses_processed_state_report_path() {
     processed.documents.insert(
         "2026-05-20".to_string(),
         AsrDailyAgentProcessedDocument {
+            agent_id: DEFAULT_DAILY_AGENT_ID.to_string(),
+            agent_name: DEFAULT_DAILY_AGENT_NAME.to_string(),
+            output_dir: DEFAULT_DAILY_AGENT_OUTPUT_DIR.to_string(),
             date: "2026-05-20".to_string(),
             source_sha256: "abc123".to_string(),
             source_len_bytes: 42,
@@ -482,6 +668,9 @@ fn daily_agent_report_index_status_marks_unindexed_reports_without_backfill() {
     processed.documents.insert(
         "2026-05-14".to_string(),
         AsrDailyAgentProcessedDocument {
+            agent_id: DEFAULT_DAILY_AGENT_ID.to_string(),
+            agent_name: DEFAULT_DAILY_AGENT_NAME.to_string(),
+            output_dir: DEFAULT_DAILY_AGENT_OUTPUT_DIR.to_string(),
             date: "2026-05-14".to_string(),
             source_sha256: "abc123".to_string(),
             source_len_bytes: 14,
@@ -622,6 +811,9 @@ fn daily_agent_watch_summary_counts_processed_pending_and_report_only_documents(
     processed.documents.insert(
         "2026-05-20".to_string(),
         AsrDailyAgentProcessedDocument {
+            agent_id: DEFAULT_DAILY_AGENT_ID.to_string(),
+            agent_name: DEFAULT_DAILY_AGENT_NAME.to_string(),
+            output_dir: DEFAULT_DAILY_AGENT_OUTPUT_DIR.to_string(),
             date: "2026-05-20".to_string(),
             source_sha256: compute_sha256(&processed_source).unwrap(),
             source_len_bytes: source_size(&processed_source).unwrap(),
@@ -634,6 +826,9 @@ fn daily_agent_watch_summary_counts_processed_pending_and_report_only_documents(
     processed.documents.insert(
         "2026-05-21".to_string(),
         AsrDailyAgentProcessedDocument {
+            agent_id: DEFAULT_DAILY_AGENT_ID.to_string(),
+            agent_name: DEFAULT_DAILY_AGENT_NAME.to_string(),
+            output_dir: DEFAULT_DAILY_AGENT_OUTPUT_DIR.to_string(),
             date: "2026-05-21".to_string(),
             source_sha256: "old-hash".to_string(),
             source_len_bytes: 4,
@@ -658,7 +853,7 @@ fn daily_agent_watch_summary_counts_processed_pending_and_report_only_documents(
 
     assert_eq!(summary.daily_files, 2);
     assert_eq!(summary.processed_documents, 1);
-    assert_eq!(summary.pending_documents, 1);
+    assert_eq!(summary.pending_documents, 3);
     assert_eq!(summary.report_files, 2);
     assert_eq!(summary.indexed_reports, 1);
     assert_eq!(summary.unindexed_reports, 1);
@@ -690,6 +885,9 @@ fn daily_agent_records_preserve_processed_metadata_and_repair_missing_report_pat
     processed.documents.insert(
         "2026-05-15".to_string(),
         AsrDailyAgentProcessedDocument {
+            agent_id: DEFAULT_DAILY_AGENT_ID.to_string(),
+            agent_name: DEFAULT_DAILY_AGENT_NAME.to_string(),
+            output_dir: DEFAULT_DAILY_AGENT_OUTPUT_DIR.to_string(),
             date: "2026-05-15".to_string(),
             source_sha256: "abc123".to_string(),
             source_len_bytes: 42,
@@ -730,6 +928,9 @@ fn daily_agent_records_are_returned_newest_date_first() {
         processed.documents.insert(
             date.to_string(),
             AsrDailyAgentProcessedDocument {
+                agent_id: DEFAULT_DAILY_AGENT_ID.to_string(),
+                agent_name: DEFAULT_DAILY_AGENT_NAME.to_string(),
+                output_dir: DEFAULT_DAILY_AGENT_OUTPUT_DIR.to_string(),
                 date: date.to_string(),
                 source_sha256: format!("hash-{date}"),
                 source_len_bytes: 42,
@@ -875,6 +1076,51 @@ fn daily_agent_effective_status_marks_stale_running_as_interrupted() {
         .lock()
         .unwrap()
         .remove(task_id);
+}
+
+#[test]
+fn daily_agent_effective_status_uses_latest_agent_status() {
+    let task_id = "daily-agent-latest-status-task";
+    let mut task = AsrDirectoryTask {
+        id: task_id.to_string(),
+        name: "Daily Agent Latest Status Task".to_string(),
+        audio_dir: PathBuf::from("/tmp"),
+        recursive: true,
+        enabled: true,
+        paused: false,
+        paused_at_ms: None,
+        schedule: AsrTaskSchedule::Hourly { minute: 0 },
+        language: "chinese".to_string(),
+        model: "Qwen3-ASR-1.7B".to_string(),
+        runtime_strategy: AsrRuntimeStrategy::ReusePerFile,
+        diarization: AsrDiarizationConfig::default(),
+        created_at_ms: 1,
+        updated_at_ms: 1,
+        last_run_at_ms: None,
+        next_run_at_ms: Some(1),
+        last_error: None,
+        daily_agent: AsrDailyAgentConfig::default(),
+        external_devices: Vec::new(),
+        import_policy: AsrExternalImportPolicy::default(),
+    };
+    task.daily_agent.last_status = Some("success".to_string());
+    task.daily_agent.agents[0].last_status = Some("success".to_string());
+    task.daily_agent.agents[0].last_run_at_ms = Some(10);
+    task.daily_agent.agents[1].last_status = Some("running".to_string());
+    task.daily_agent.agents[1].last_run_at_ms = Some(20);
+
+    DAILY_AGENT_RUNNING_TASKS.lock().unwrap().remove(task_id);
+    assert_eq!(
+        daily_agent_effective_last_status(&task).as_deref(),
+        Some("interrupted")
+    );
+
+    DAILY_AGENT_RUNNING_TASKS.lock().unwrap().insert(task_id.to_string());
+    assert_eq!(
+        daily_agent_effective_last_status(&task).as_deref(),
+        Some("running")
+    );
+    DAILY_AGENT_RUNNING_TASKS.lock().unwrap().remove(task_id);
 }
 
 #[test]

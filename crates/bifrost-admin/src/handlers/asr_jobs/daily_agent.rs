@@ -1,162 +1,3 @@
-// ─── Daily Agent Runner ───────────────────────────────────────────────────────
-// ASR 任务完成后的后处理：触发 Agent 对每日转写做二次整理
-
-use std::collections::BTreeMap as DailyAgentBTreeMap;
-use std::collections::HashMap;
-use std::sync::Arc;
-
-const DEFAULT_DAILY_AGENT_TIMEOUT_MS: u64 = 7_200_000; // 2 hours
-const DEFAULT_ASR_DAILY_AGENTS_MD: &str = include_str!("daily_agent_template.md");
-const PROCESSED_STATE_VERSION: u32 = 1;
-const CONVERSATION_STATE_VERSION: u32 = 1;
-
-fn default_daily_agent_timeout_ms() -> u64 {
-    DEFAULT_DAILY_AGENT_TIMEOUT_MS
-}
-
-fn default_daily_agent_runner() -> String {
-    "bifrost_agent".to_string()
-}
-
-/// Per-task locks for Daily Agent runs (independent from ASR_JOB_RUN_LOCK).
-/// Each task gets its own async Mutex so different tasks can run concurrently.
-static DAILY_AGENT_TASK_LOCKS: Lazy<StdMutex<HashMap<String, Arc<Mutex<()>>>>> =
-    Lazy::new(|| StdMutex::new(HashMap::new()));
-
-/// Tracks which task IDs currently have a Daily Agent run in progress
-static DAILY_AGENT_RUNNING_TASKS: Lazy<StdMutex<HashSet<String>>> =
-    Lazy::new(|| StdMutex::new(HashSet::new()));
-
-/// Local mutex for task config writes from daily agent operations to prevent
-/// read-modify-write races on the task store.
-static DAILY_AGENT_TASK_CONFIG_LOCK: Lazy<StdMutex<()>> = Lazy::new(|| StdMutex::new(()));
-
-fn get_daily_agent_task_lock(task_id: &str) -> Arc<Mutex<()>> {
-    let mut locks = DAILY_AGENT_TASK_LOCKS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    locks
-        .entry(task_id.to_string())
-        .or_insert_with(|| Arc::new(Mutex::new(())))
-        .clone()
-}
-
-// ─── Data Models ──────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct AsrDailyAgentConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default = "default_daily_agent_runner")]
-    pub runner: String,
-    #[serde(default = "default_daily_agent_timeout_ms")]
-    pub timeout_ms: u64,
-    #[serde(default)]
-    pub trigger_policy: AsrDailyAgentTriggerPolicy,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_key: Option<String>,
-    #[serde(default)]
-    pub instructions_source: AsrDailyAgentInstructionsSource,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub instructions: Option<String>,
-    #[serde(default)]
-    pub im_delivery: AsrDailyAgentImDeliveryConfig,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub report_sync_dir: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_report_sync: Option<AsrDailyAgentReportSyncResult>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_run_at_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_status: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_error: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_run_id: Option<String>,
-}
-
-impl Default for AsrDailyAgentConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            runner: default_daily_agent_runner(),
-            timeout_ms: DEFAULT_DAILY_AGENT_TIMEOUT_MS,
-            trigger_policy: AsrDailyAgentTriggerPolicy::default(),
-            session_key: None,
-            instructions_source: AsrDailyAgentInstructionsSource::default(),
-            instructions: None,
-            im_delivery: AsrDailyAgentImDeliveryConfig::default(),
-            report_sync_dir: None,
-            last_report_sync: None,
-            last_run_at_ms: None,
-            last_status: None,
-            last_error: None,
-            last_run_id: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum AsrDailyAgentTriggerPolicy {
-    #[default]
-    AfterAsrRun,
-    ManualOnly,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum AsrDailyAgentInstructionsSource {
-    #[default]
-    Default,
-    Custom,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub(crate) struct AsrDailyAgentImDeliveryConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub channel: Option<String>,
-    #[serde(default)]
-    pub mode: AsrDailyAgentImDeliveryMode,
-    #[serde(default)]
-    pub send_policy: AsrDailyAgentImSendPolicy,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_sent_at_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_send_error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum AsrDailyAgentImDeliveryMode {
-    #[default]
-    FullReport,
-    Summary,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum AsrDailyAgentImSendPolicy {
-    #[default]
-    OnSuccessWithReport,
-    OnSuccess,
-    Always,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub(crate) struct AsrDailyAgentReportSyncResult {
-    pub target_dir: String,
-    pub total_files: usize,
-    pub copied_files: usize,
-    pub skipped_files: usize,
-    pub failed_files: usize,
-    pub synced_at_ms: u64,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub errors: Vec<String>,
-}
-
 // ─── Processed State ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -169,6 +10,12 @@ struct AsrDailyAgentProcessedState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AsrDailyAgentProcessedDocument {
+    #[serde(default = "default_daily_agent_id")]
+    pub agent_id: String,
+    #[serde(default = "default_daily_agent_name")]
+    pub agent_name: String,
+    #[serde(default = "default_daily_agent_output_dir")]
+    pub output_dir: String,
     pub date: String,
     pub source_sha256: String,
     pub source_len_bytes: u64,
@@ -251,12 +98,26 @@ struct AsrDailyWorkspaceStatus {
     git_initialized: bool,
     git_error: Option<String>,
     report_count: usize,
+    agents: Vec<AsrDailyWorkspaceAgentStatus>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AsrDailyWorkspaceAgentStatus {
+    agent_id: String,
+    name: String,
+    output_dir: String,
+    report_dir: String,
+    instructions_path: String,
+    instructions_exists: bool,
+    report_count: usize,
 }
 
 // ─── Run Result ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
 struct DailyAgentRunResult {
+    agent_id: String,
+    agent_name: String,
     run_id: String,
     status: String,
     trigger_source: String,
@@ -298,6 +159,16 @@ fn daily_agent_conversation_state_path(task_id: &str) -> PathBuf {
         .join("daily_agent_conversation.json")
 }
 
+fn daily_agent_conversation_state_path_for_task(task: &AsrDirectoryTask) -> PathBuf {
+    bifrost_storage::data_dir()
+        .join("asr/tasks")
+        .join(&task.id)
+        .join(format!(
+            "daily_agent_conversation_{}.json",
+            task.daily_agent.agent_id
+        ))
+}
+
 fn load_daily_agent_conversation_state(task_id: &str) -> AsrDailyAgentConversationState {
     let path = daily_agent_conversation_state_path(task_id);
     std::fs::read_to_string(&path)
@@ -306,11 +177,28 @@ fn load_daily_agent_conversation_state(task_id: &str) -> AsrDailyAgentConversati
         .unwrap_or_default()
 }
 
-fn save_daily_agent_conversation_state(
-    task_id: &str,
+fn load_daily_agent_conversation_state_for_task(
+    task: &AsrDirectoryTask,
+) -> AsrDailyAgentConversationState {
+    let path = daily_agent_conversation_state_path_for_task(task);
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .or_else(|| {
+            if task.daily_agent.agent_id == DEFAULT_DAILY_AGENT_ID {
+                Some(load_daily_agent_conversation_state(&task.id))
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default()
+}
+
+fn save_daily_agent_conversation_state_for_task(
+    task: &AsrDirectoryTask,
     state: &AsrDailyAgentConversationState,
 ) -> Result<(), String> {
-    let path = daily_agent_conversation_state_path(task_id);
+    let path = daily_agent_conversation_state_path_for_task(task);
     atomic_json_write(&path, state)
 }
 
@@ -354,7 +242,7 @@ fn build_daily_agent_change_plan(
     force: bool,
 ) -> Result<AsrDailyAgentChangePlan, String> {
     let daily_dir = daily_dir_for_task(&task.id);
-    let report_dir = daily_dir.join("report");
+    let report_dir = daily_agent_output_dir(task);
     let processed = load_daily_agent_processed_state(&task.id);
 
     // Scan daily/*.md files (exclude AGENTS.md, hidden files, report/)
@@ -409,7 +297,11 @@ fn build_daily_agent_change_plan(
         // Determine change kind
         let (change_kind, append_offset) = if force {
             (DailyAgentChangeKind::Force, None)
-        } else if let Some(prev) = processed.documents.get(date) {
+        } else if let Some(prev) = processed
+            .documents
+            .get(&daily_agent_processed_key(task, date))
+            .or_else(|| processed.documents.get(date))
+        {
             if prev.source_sha256 == source_sha256 {
                 (DailyAgentChangeKind::Unchanged, None)
             } else if source_len_bytes > prev.source_len_bytes {
@@ -509,6 +401,11 @@ fn build_daily_agent_prompt(
     chatgpt_first_turn: bool,
 ) -> Result<String, String> {
     let daily_dir = daily_dir_for_task(&task.id);
+    let instructions_file = daily_agent_instructions_path(task)
+        .strip_prefix(&daily_dir)
+        .unwrap_or_else(|_| Path::new("AGENTS.md"))
+        .to_string_lossy()
+        .to_string();
     let changed_entries: Vec<_> = plan
         .entries
         .iter()
@@ -519,7 +416,9 @@ fn build_daily_agent_prompt(
     let is_chatgpt_web = adapter == "chatgpt_web";
 
     let mut prompt = if is_file_capable {
-        String::from("请根据当前目录 AGENTS.md，检查并处理以下变更文件：\n\n")
+        format!(
+            "请根据当前目录 `{instructions_file}`，检查并处理以下变更文件：\n\n"
+        )
     } else {
         String::from("请根据以下 AGENTS.md 指令，对变更文件进行分析整理，直接以 Markdown 格式输出报告内容：\n\n")
     };
@@ -563,7 +462,7 @@ fn build_daily_agent_prompt(
                     );
                 }
 
-                let agents_path = daily_dir.join("AGENTS.md");
+                let agents_path = daily_agent_instructions_path(task);
                 if chatgpt_first_turn {
                     if let Ok(agents_content) = std::fs::read_to_string(&agents_path) {
                     prompt.push_str("\n---\n## AGENTS.md 内容：\n\n```markdown\n");
@@ -620,7 +519,12 @@ async fn maybe_enqueue_daily_agent_after_asr_run(task: &AsrDirectoryTask) {
     if !task.daily_agent.enabled {
         return;
     }
-    if task.daily_agent.trigger_policy != AsrDailyAgentTriggerPolicy::AfterAsrRun {
+    let agents = normalized_daily_agents(&task.daily_agent);
+    let runnable_agents: Vec<_> = agents
+        .into_iter()
+        .filter(|agent| agent.enabled && agent.trigger_policy == AsrDailyAgentTriggerPolicy::AfterAsrRun)
+        .collect();
+    if runnable_agents.is_empty() {
         return;
     }
     let summary = summarize_task_from_store(task);
@@ -635,14 +539,10 @@ async fn maybe_enqueue_daily_agent_after_asr_run(task: &AsrDirectoryTask) {
         );
         return;
     }
-    if !daily_agent_runner_ready(task) {
-        tracing::debug!(
-            task_id = %task.id,
-            runner = %task.daily_agent.runner,
-            "skipped daily agent: runner not configured"
-        );
-        return;
-    }
+    let runnable_agents: Vec<_> = runnable_agents
+        .into_iter()
+        .filter(daily_agent_runner_ready_for_agent)
+        .collect();
 
     // Check if already running
     {
@@ -663,15 +563,60 @@ async fn maybe_enqueue_daily_agent_after_asr_run(task: &AsrDirectoryTask) {
 
     // Spawn the daily agent run in background
     tokio::spawn(async move {
-        run_daily_agent(&task_clone, "asr_completion", None, false).await;
+        run_daily_agents(&task_clone, "asr_completion", None, false).await;
     });
 
     tracing::info!(
         task_id = %task_id,
         trigger_source = "asr_completion",
-        runner = %task.daily_agent.runner,
+        agents = runnable_agents.len(),
         "queued ASR daily agent run"
     );
+}
+
+async fn run_daily_agents(
+    task: &AsrDirectoryTask,
+    trigger_source: &str,
+    requested_date: Option<&str>,
+    force: bool,
+) -> Vec<DailyAgentRunResult> {
+    let agents = normalized_daily_agents(&task.daily_agent);
+    let runnable_agents: Vec<_> = agents
+        .into_iter()
+        .filter(|agent| agent.enabled && daily_agent_runner_ready_for_agent(agent))
+        .filter(|agent| {
+            trigger_source == "manual"
+                || agent.trigger_policy == AsrDailyAgentTriggerPolicy::AfterAsrRun
+        })
+        .collect();
+
+    let task_id = task.id.clone();
+    {
+        let mut running = DAILY_AGENT_RUNNING_TASKS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        running.insert(task_id.clone());
+    }
+
+    let task_lock = get_daily_agent_task_lock(&task_id);
+    let _lock = task_lock.lock().await;
+
+    let mut results = Vec::new();
+    for agent in runnable_agents {
+        let agent_task = task_for_daily_agent(task, &agent);
+        results.push(
+            run_daily_agent_locked(&agent_task, trigger_source, requested_date, force).await,
+        );
+    }
+
+    {
+        let mut running = DAILY_AGENT_RUNNING_TASKS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        running.remove(&task_id);
+    }
+
+    results
 }
 
 fn daily_agent_asr_completion_ready(summary: &TaskSummary) -> bool {
@@ -682,7 +627,16 @@ fn daily_agent_asr_completion_ready(summary: &TaskSummary) -> bool {
 }
 
 fn daily_agent_effective_last_status(task: &AsrDirectoryTask) -> Option<String> {
-    if task.daily_agent.last_status.as_deref() == Some("running") {
+    let agents = normalized_daily_agents(&task.daily_agent);
+    let latest_agent = agents
+        .iter()
+        .filter(|agent| agent.last_status.is_some())
+        .max_by_key(|agent| agent.last_run_at_ms.unwrap_or_default());
+    let latest_status = latest_agent
+        .and_then(|agent| agent.last_status.clone())
+        .or_else(|| task.daily_agent.last_status.clone());
+
+    if latest_status.as_deref() == Some("running") {
         let running = DAILY_AGENT_RUNNING_TASKS
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -690,10 +644,38 @@ fn daily_agent_effective_last_status(task: &AsrDirectoryTask) -> Option<String> 
             return Some("interrupted".to_string());
         }
     }
-    task.daily_agent.last_status.clone()
+    latest_status
 }
 
 async fn run_daily_agent(
+    task: &AsrDirectoryTask,
+    trigger_source: &str,
+    requested_date: Option<&str>,
+    force: bool,
+) -> DailyAgentRunResult {
+    let task_id = task.id.clone();
+    {
+        let mut running = DAILY_AGENT_RUNNING_TASKS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        running.insert(task_id.clone());
+    }
+
+    let task_lock = get_daily_agent_task_lock(&task_id);
+    let _lock = task_lock.lock().await;
+    let result = run_daily_agent_locked(task, trigger_source, requested_date, force).await;
+
+    {
+        let mut running = DAILY_AGENT_RUNNING_TASKS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        running.remove(&task_id);
+    }
+
+    result
+}
+
+async fn run_daily_agent_locked(
     task: &AsrDirectoryTask,
     trigger_source: &str,
     requested_date: Option<&str>,
@@ -706,6 +688,8 @@ async fn run_daily_agent(
 
     tracing::info!(
         task_id = %task_id,
+        agent_id = %task.daily_agent.agent_id,
+        agent_name = %task.daily_agent.name,
         run_id = %run_id,
         trigger_source,
         runner = %task.daily_agent.runner,
@@ -714,18 +698,7 @@ async fn run_daily_agent(
         "starting ASR daily agent run"
     );
 
-    // Mark as running
-    {
-        let mut running = DAILY_AGENT_RUNNING_TASKS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        running.insert(task_id.clone());
-    }
-    let _ = update_daily_agent_status(&task_id, "running", None, &run_id);
-
-    // Acquire per-task lock
-    let task_lock = get_daily_agent_task_lock(&task_id);
-    let _lock = task_lock.lock().await;
+    let _ = update_daily_agent_status(task, "running", None, &run_id);
 
     let result = run_daily_agent_inner(
         task,
@@ -735,14 +708,6 @@ async fn run_daily_agent(
         &run_id,
     )
     .await;
-
-    // Remove from running set
-    {
-        let mut running = DAILY_AGENT_RUNNING_TASKS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        running.remove(&task_id);
-    }
 
     // Determine success/failure
     let (status_str, error, reports_generated) = match &result {
@@ -761,7 +726,7 @@ async fn run_daily_agent(
     };
 
     // Persist daily agent state in task config
-    let _ = update_daily_agent_status(&task_id, &status_str, error.as_deref(), &run_id);
+    let _ = update_daily_agent_status(task, &status_str, error.as_deref(), &run_id);
 
     // IM delivery based on send_policy
     let success = error.is_none();
@@ -795,7 +760,7 @@ async fn run_daily_agent(
                 error = %e,
                 "ASR daily agent IM delivery failed"
             );
-            let _ = update_daily_agent_im_error(&task_id, &e);
+            let _ = update_daily_agent_im_error(task, &e);
         }
     }
 
@@ -803,6 +768,7 @@ async fn run_daily_agent(
 
     tracing::info!(
         task_id = %task_id,
+        agent_id = %task.daily_agent.agent_id,
         run_id = %run_id,
         status = %status_str,
         reports = reports_generated.len(),
@@ -811,6 +777,8 @@ async fn run_daily_agent(
     );
 
     DailyAgentRunResult {
+        agent_id: task.daily_agent.agent_id.clone(),
+        agent_name: task.daily_agent.name.clone(),
         run_id,
         status: status_str,
         trigger_source: trigger_source.to_string(),
@@ -864,7 +832,13 @@ struct DailyAgentImChannel<'a> {
 }
 
 fn daily_agent_im_channel(task: &AsrDirectoryTask) -> Option<DailyAgentImChannel<'_>> {
-    let channel = task.daily_agent.im_delivery.channel.as_deref()?.trim();
+    daily_agent_im_channel_for_config(&task.daily_agent.im_delivery)
+}
+
+fn daily_agent_im_channel_for_config(
+    config: &AsrDailyAgentImDeliveryConfig,
+) -> Option<DailyAgentImChannel<'_>> {
+    let channel = config.channel.as_deref()?.trim();
     if let Some(provider_id) = channel.strip_prefix("owner:") {
         let provider_id = provider_id.trim();
         if provider_id.is_empty() {
@@ -888,8 +862,13 @@ fn daily_agent_im_channel(task: &AsrDirectoryTask) -> Option<DailyAgentImChannel
     None
 }
 
+#[cfg(test)]
 fn daily_agent_runner_ready(task: &AsrDirectoryTask) -> bool {
     !task.daily_agent.runner.trim().is_empty()
+}
+
+fn daily_agent_runner_ready_for_agent(agent: &AsrDailyAgentItem) -> bool {
+    !agent.runner.trim().is_empty()
 }
 
 fn daily_agent_runner_is_bifrost(task: &AsrDirectoryTask) -> bool {
@@ -945,12 +924,12 @@ fn metadata_value(
 }
 
 fn persist_daily_agent_conversation_success(
-    task_id: &str,
+    task: &AsrDirectoryTask,
     adapter: &str,
     session_key: &str,
     metadata: Option<&DailyAgentBTreeMap<String, String>>,
 ) -> Result<(), String> {
-    let mut state = load_daily_agent_conversation_state(task_id);
+    let mut state = load_daily_agent_conversation_state_for_task(task);
     state.version = CONVERSATION_STATE_VERSION;
     state.adapter = Some(adapter.to_string());
     state.session_key = Some(session_key.to_string());
@@ -966,7 +945,7 @@ fn persist_daily_agent_conversation_success(
             state.thread_id = Some(thread_id);
         }
     }
-    save_daily_agent_conversation_state(task_id, &state)
+    save_daily_agent_conversation_state_for_task(task, &state)
 }
 
 async fn run_bifrost_agent_daily_runner(
@@ -1198,8 +1177,8 @@ async fn run_daily_agent_inner(
         .daily_agent
         .session_key
         .clone()
-        .unwrap_or_else(|| format!("asr-daily:{}", task.id));
-    let mut conversation_state = load_daily_agent_conversation_state(&task.id);
+        .unwrap_or_else(|| format!("asr-daily:{}:{}", task.id, task.daily_agent.agent_id));
+    let mut conversation_state = load_daily_agent_conversation_state_for_task(task);
 
     // 5. Dispatch to runner
     let conversation_success: Option<(String, Option<DailyAgentBTreeMap<String, String>>)>;
@@ -1312,7 +1291,7 @@ async fn run_daily_agent_inner(
 
     if let Some((adapter, metadata)) = conversation_success.as_ref() {
         persist_daily_agent_conversation_success(
-            &task.id,
+            task,
             adapter,
             &session_key,
             metadata.as_ref(),
@@ -1328,8 +1307,11 @@ async fn run_daily_agent_inner(
         .filter(|entry| entry.change_kind != DailyAgentChangeKind::Unchanged)
     {
         processed.documents.insert(
-            entry.date.clone(),
+            daily_agent_processed_key(task, &entry.date),
             AsrDailyAgentProcessedDocument {
+                agent_id: task.daily_agent.agent_id.clone(),
+                agent_name: task.daily_agent.name.clone(),
+                output_dir: task.daily_agent.output_dir.clone(),
                 date: entry.date.clone(),
                 source_sha256: entry.source_sha256.clone(),
                 source_len_bytes: entry.source_len_bytes,
@@ -1346,7 +1328,7 @@ async fn run_daily_agent_inner(
 
     if !reports_generated.is_empty() && task.daily_agent.report_sync_dir.is_some() {
         let sync_result = sync_daily_agent_report_files(task, &reports_generated)?;
-        update_daily_agent_report_sync_status(&task.id, sync_result.clone())?;
+        update_daily_agent_report_sync_status(task, sync_result.clone())?;
         if sync_result.failed_files > 0 {
             tracing::warn!(
                 task_id = %task.id,
@@ -1366,12 +1348,68 @@ async fn run_daily_agent_inner(
     Ok(reports_generated)
 }
 
+fn sync_daily_agent_item_status(
+    task_config: &mut AsrDailyAgentConfig,
+    agent_id: &str,
+    update: impl FnOnce(&mut AsrDailyAgentItem),
+) {
+    if task_config.agents.is_empty() {
+        task_config.agents = normalized_daily_agents(task_config);
+    }
+    if let Some(agent) = task_config
+        .agents
+        .iter_mut()
+        .find(|agent| normalize_daily_agent_token(&agent.id) == agent_id)
+    {
+        update(agent);
+    } else if agent_id == task_config.agent_id {
+        let mut item = daily_agent_item_from_legacy(task_config);
+        update(&mut item);
+        task_config.agents.push(item);
+    }
+}
+
+fn mirror_daily_agent_legacy_status(task_config: &mut AsrDailyAgentConfig, agent_id: &str) {
+    let primary_id = normalized_daily_agents(task_config)
+        .first()
+        .map(|agent| agent.id.clone())
+        .unwrap_or_else(default_daily_agent_id);
+    if agent_id == primary_id {
+        if let Some(agent) = task_config
+            .agents
+            .iter()
+            .find(|agent| normalize_daily_agent_token(&agent.id) == agent_id)
+            .cloned()
+        {
+            task_config.enabled = agent.enabled;
+            task_config.agent_id = agent.id;
+            task_config.name = agent.name;
+            task_config.runner = agent.runner;
+            task_config.timeout_ms = agent.timeout_ms;
+            task_config.trigger_policy = agent.trigger_policy;
+            task_config.session_key = agent.session_key;
+            task_config.instructions_source = agent.instructions_source;
+            task_config.instructions = agent.instructions;
+            task_config.im_delivery = agent.im_delivery;
+            task_config.output_dir = agent.output_dir;
+            task_config.report_sync_dir = agent.report_sync_dir;
+            task_config.last_report_sync = agent.last_report_sync;
+            task_config.last_run_at_ms = agent.last_run_at_ms;
+            task_config.last_status = agent.last_status;
+            task_config.last_error = agent.last_error;
+            task_config.last_run_id = agent.last_run_id;
+        }
+    }
+}
+
 fn update_daily_agent_status(
-    task_id: &str,
+    source_task: &AsrDirectoryTask,
     status: &str,
     error: Option<&str>,
     run_id: &str,
 ) -> Result<(), String> {
+    let task_id = source_task.id.as_str();
+    let agent_id = source_task.daily_agent.agent_id.clone();
     let _config_lock = DAILY_AGENT_TASK_CONFIG_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -1379,14 +1417,19 @@ fn update_daily_agent_status(
     let Some(task) = store.tasks.iter_mut().find(|t| t.id == task_id) else {
         return Err(format!("ASR task '{task_id}' not found"));
     };
-    task.daily_agent.last_run_at_ms = Some(now_ms());
-    task.daily_agent.last_status = Some(status.to_string());
-    task.daily_agent.last_error = error.map(|e| e.to_string());
-    task.daily_agent.last_run_id = Some(run_id.to_string());
+    sync_daily_agent_item_status(&mut task.daily_agent, &agent_id, |agent| {
+        agent.last_run_at_ms = Some(now_ms());
+        agent.last_status = Some(status.to_string());
+        agent.last_error = error.map(|e| e.to_string());
+        agent.last_run_id = Some(run_id.to_string());
+    });
+    mirror_daily_agent_legacy_status(&mut task.daily_agent, &agent_id);
     save_tasks(&store)
 }
 
-fn update_daily_agent_im_error(task_id: &str, error: &str) -> Result<(), String> {
+fn update_daily_agent_im_error(source_task: &AsrDirectoryTask, error: &str) -> Result<(), String> {
+    let task_id = source_task.id.as_str();
+    let agent_id = source_task.daily_agent.agent_id.clone();
     let _config_lock = DAILY_AGENT_TASK_CONFIG_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -1394,11 +1437,16 @@ fn update_daily_agent_im_error(task_id: &str, error: &str) -> Result<(), String>
     let Some(task) = store.tasks.iter_mut().find(|t| t.id == task_id) else {
         return Err(format!("ASR task '{task_id}' not found"));
     };
-    task.daily_agent.im_delivery.last_send_error = Some(error.to_string());
+    sync_daily_agent_item_status(&mut task.daily_agent, &agent_id, |agent| {
+        agent.im_delivery.last_send_error = Some(error.to_string());
+    });
+    mirror_daily_agent_legacy_status(&mut task.daily_agent, &agent_id);
     save_tasks(&store)
 }
 
-fn update_daily_agent_im_sent(task_id: &str) -> Result<(), String> {
+fn update_daily_agent_im_sent(source_task: &AsrDirectoryTask) -> Result<(), String> {
+    let task_id = source_task.id.as_str();
+    let agent_id = source_task.daily_agent.agent_id.clone();
     let _config_lock = DAILY_AGENT_TASK_CONFIG_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -1406,7 +1454,10 @@ fn update_daily_agent_im_sent(task_id: &str) -> Result<(), String> {
     let Some(task) = store.tasks.iter_mut().find(|t| t.id == task_id) else {
         return Err(format!("ASR task '{task_id}' not found"));
     };
-    task.daily_agent.im_delivery.last_sent_at_ms = Some(now_ms());
-    task.daily_agent.im_delivery.last_send_error = None;
+    sync_daily_agent_item_status(&mut task.daily_agent, &agent_id, |agent| {
+        agent.im_delivery.last_sent_at_ms = Some(now_ms());
+        agent.im_delivery.last_send_error = None;
+    });
+    mirror_daily_agent_legacy_status(&mut task.daily_agent, &agent_id);
     save_tasks(&store)
 }

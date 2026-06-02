@@ -1,0 +1,520 @@
+// ─── Daily Agent Runner ───────────────────────────────────────────────────────
+// ASR 任务完成后的后处理：触发 Agent 对每日转写做二次整理
+
+use std::collections::BTreeMap as DailyAgentBTreeMap;
+use std::collections::HashMap;
+use std::sync::Arc;
+
+const DEFAULT_DAILY_AGENT_TIMEOUT_MS: u64 = 7_200_000; // 2 hours
+const DEFAULT_ASR_DAILY_AGENTS_MD: &str = include_str!("daily_agent_template.md");
+const DEFAULT_ASR_TOMORROW_TODO_AGENT_MD: &str = include_str!("daily_agent_tomorrow_todo_template.md");
+const PROCESSED_STATE_VERSION: u32 = 1;
+const CONVERSATION_STATE_VERSION: u32 = 1;
+const DEFAULT_DAILY_AGENT_ID: &str = "daily_report";
+const DEFAULT_DAILY_AGENT_NAME: &str = "daily_report";
+const DEFAULT_DAILY_AGENT_OUTPUT_DIR: &str = "report";
+const DEFAULT_TOMORROW_TODO_AGENT_ID: &str = "tomorrow_todo";
+const DEFAULT_TOMORROW_TODO_AGENT_NAME: &str = "tomorrow_todo";
+const DEFAULT_TOMORROW_TODO_OUTPUT_DIR: &str = "tomorrow_todo";
+const DEFAULT_DAILY_AGENT_IM_CHANNEL: &str = "owner:feishu-main";
+
+fn default_daily_agent_timeout_ms() -> u64 {
+    DEFAULT_DAILY_AGENT_TIMEOUT_MS
+}
+
+fn default_daily_agent_runner() -> String {
+    "bifrost_agent".to_string()
+}
+
+fn default_daily_agent_id() -> String {
+    DEFAULT_DAILY_AGENT_ID.to_string()
+}
+
+fn default_daily_agent_name() -> String {
+    DEFAULT_DAILY_AGENT_NAME.to_string()
+}
+
+fn default_daily_agent_output_dir() -> String {
+    DEFAULT_DAILY_AGENT_OUTPUT_DIR.to_string()
+}
+
+fn daily_agent_enabled_by_default() -> bool {
+    true
+}
+
+/// Per-task locks for Daily Agent runs (independent from ASR_JOB_RUN_LOCK).
+/// Each task gets its own async Mutex so different tasks can run concurrently.
+static DAILY_AGENT_TASK_LOCKS: Lazy<StdMutex<HashMap<String, Arc<Mutex<()>>>>> =
+    Lazy::new(|| StdMutex::new(HashMap::new()));
+
+/// Tracks which task IDs currently have a Daily Agent run in progress
+static DAILY_AGENT_RUNNING_TASKS: Lazy<StdMutex<HashSet<String>>> =
+    Lazy::new(|| StdMutex::new(HashSet::new()));
+
+/// Local mutex for task config writes from daily agent operations to prevent
+/// read-modify-write races on the task store.
+static DAILY_AGENT_TASK_CONFIG_LOCK: Lazy<StdMutex<()>> = Lazy::new(|| StdMutex::new(()));
+
+fn get_daily_agent_task_lock(task_id: &str) -> Arc<Mutex<()>> {
+    let mut locks = DAILY_AGENT_TASK_LOCKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    locks
+        .entry(task_id.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
+// ─── Data Models ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AsrDailyAgentConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_daily_agent_id")]
+    pub agent_id: String,
+    #[serde(default = "default_daily_agent_name")]
+    pub name: String,
+    #[serde(default = "default_daily_agent_runner")]
+    pub runner: String,
+    #[serde(default = "default_daily_agent_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default)]
+    pub trigger_policy: AsrDailyAgentTriggerPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_key: Option<String>,
+    #[serde(default)]
+    pub instructions_source: AsrDailyAgentInstructionsSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    #[serde(default)]
+    pub im_delivery: AsrDailyAgentImDeliveryConfig,
+    #[serde(default = "default_daily_agent_output_dir")]
+    pub output_dir: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<AsrDailyAgentItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_sync_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_report_sync: Option<AsrDailyAgentReportSyncResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_id: Option<String>,
+}
+
+impl Default for AsrDailyAgentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            agent_id: default_daily_agent_id(),
+            name: default_daily_agent_name(),
+            runner: default_daily_agent_runner(),
+            timeout_ms: DEFAULT_DAILY_AGENT_TIMEOUT_MS,
+            trigger_policy: AsrDailyAgentTriggerPolicy::default(),
+            session_key: None,
+            instructions_source: AsrDailyAgentInstructionsSource::default(),
+            instructions: None,
+            im_delivery: AsrDailyAgentImDeliveryConfig::default(),
+            output_dir: default_daily_agent_output_dir(),
+            agents: default_daily_agent_items(),
+            report_sync_dir: None,
+            last_report_sync: None,
+            last_run_at_ms: None,
+            last_status: None,
+            last_error: None,
+            last_run_id: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AsrDailyAgentItem {
+    #[serde(default = "default_daily_agent_id")]
+    pub id: String,
+    #[serde(default = "default_daily_agent_name")]
+    pub name: String,
+    #[serde(default = "daily_agent_enabled_by_default")]
+    pub enabled: bool,
+    #[serde(default = "default_daily_agent_runner")]
+    pub runner: String,
+    #[serde(default = "default_daily_agent_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default)]
+    pub trigger_policy: AsrDailyAgentTriggerPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_key: Option<String>,
+    #[serde(default)]
+    pub instructions_source: AsrDailyAgentInstructionsSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    #[serde(default)]
+    pub im_delivery: AsrDailyAgentImDeliveryConfig,
+    #[serde(default = "default_daily_agent_output_dir")]
+    pub output_dir: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_sync_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_report_sync: Option<AsrDailyAgentReportSyncResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_id: Option<String>,
+}
+
+impl AsrDailyAgentItem {
+    fn daily_report() -> Self {
+        Self {
+            id: DEFAULT_DAILY_AGENT_ID.to_string(),
+            name: DEFAULT_DAILY_AGENT_NAME.to_string(),
+            enabled: true,
+            runner: default_daily_agent_runner(),
+            timeout_ms: DEFAULT_DAILY_AGENT_TIMEOUT_MS,
+            trigger_policy: AsrDailyAgentTriggerPolicy::AfterAsrRun,
+            session_key: None,
+            instructions_source: AsrDailyAgentInstructionsSource::Default,
+            instructions: None,
+            im_delivery: AsrDailyAgentImDeliveryConfig::default(),
+            output_dir: DEFAULT_DAILY_AGENT_OUTPUT_DIR.to_string(),
+            report_sync_dir: None,
+            last_report_sync: None,
+            last_run_at_ms: None,
+            last_status: None,
+            last_error: None,
+            last_run_id: None,
+        }
+    }
+
+    fn tomorrow_todo() -> Self {
+        Self {
+            id: DEFAULT_TOMORROW_TODO_AGENT_ID.to_string(),
+            name: DEFAULT_TOMORROW_TODO_AGENT_NAME.to_string(),
+            enabled: true,
+            runner: default_daily_agent_runner(),
+            timeout_ms: DEFAULT_DAILY_AGENT_TIMEOUT_MS,
+            trigger_policy: AsrDailyAgentTriggerPolicy::AfterAsrRun,
+            session_key: None,
+            instructions_source: AsrDailyAgentInstructionsSource::Default,
+            instructions: None,
+            im_delivery: AsrDailyAgentImDeliveryConfig {
+                enabled: true,
+                channel: Some(DEFAULT_DAILY_AGENT_IM_CHANNEL.to_string()),
+                mode: AsrDailyAgentImDeliveryMode::FullReport,
+                send_policy: AsrDailyAgentImSendPolicy::OnSuccessWithReport,
+                last_sent_at_ms: None,
+                last_send_error: None,
+            },
+            output_dir: DEFAULT_TOMORROW_TODO_OUTPUT_DIR.to_string(),
+            report_sync_dir: None,
+            last_report_sync: None,
+            last_run_at_ms: None,
+            last_status: None,
+            last_error: None,
+            last_run_id: None,
+        }
+    }
+}
+
+fn default_daily_agent_items() -> Vec<AsrDailyAgentItem> {
+    vec![
+        AsrDailyAgentItem::daily_report(),
+        AsrDailyAgentItem::tomorrow_todo(),
+    ]
+}
+
+fn daily_agent_item_from_legacy(config: &AsrDailyAgentConfig) -> AsrDailyAgentItem {
+    let primary_defaults = !config.agents.is_empty()
+        && config.agent_id == DEFAULT_DAILY_AGENT_ID
+        && config.name == DEFAULT_DAILY_AGENT_NAME
+        && config.runner == default_daily_agent_runner()
+        && config.output_dir == DEFAULT_DAILY_AGENT_OUTPUT_DIR;
+    if primary_defaults {
+        return config.agents[0].clone();
+    }
+    AsrDailyAgentItem {
+        id: if config.agent_id.trim().is_empty() {
+            default_daily_agent_id()
+        } else {
+            config.agent_id.trim().to_string()
+        },
+        name: if config.name.trim().is_empty() {
+            default_daily_agent_name()
+        } else {
+            config.name.trim().to_string()
+        },
+        enabled: true,
+        runner: config.runner.clone(),
+        timeout_ms: config.timeout_ms,
+        trigger_policy: config.trigger_policy.clone(),
+        session_key: config.session_key.clone(),
+        instructions_source: config.instructions_source.clone(),
+        instructions: config.instructions.clone(),
+        im_delivery: config.im_delivery.clone(),
+        output_dir: if config.output_dir.trim().is_empty() {
+            default_daily_agent_output_dir()
+        } else {
+            config.output_dir.trim().to_string()
+        },
+        report_sync_dir: config.report_sync_dir.clone(),
+        last_report_sync: config.last_report_sync.clone(),
+        last_run_at_ms: config.last_run_at_ms,
+        last_status: config.last_status.clone(),
+        last_error: config.last_error.clone(),
+        last_run_id: config.last_run_id.clone(),
+    }
+}
+
+fn daily_agent_config_from_item(item: &AsrDailyAgentItem) -> AsrDailyAgentConfig {
+    AsrDailyAgentConfig {
+        enabled: item.enabled,
+        agent_id: item.id.clone(),
+        name: item.name.clone(),
+        runner: item.runner.clone(),
+        timeout_ms: item.timeout_ms,
+        trigger_policy: item.trigger_policy.clone(),
+        session_key: item.session_key.clone(),
+        instructions_source: item.instructions_source.clone(),
+        instructions: item.instructions.clone(),
+        im_delivery: item.im_delivery.clone(),
+        output_dir: item.output_dir.clone(),
+        agents: Vec::new(),
+        report_sync_dir: item.report_sync_dir.clone(),
+        last_report_sync: item.last_report_sync.clone(),
+        last_run_at_ms: item.last_run_at_ms,
+        last_status: item.last_status.clone(),
+        last_error: item.last_error.clone(),
+        last_run_id: item.last_run_id.clone(),
+    }
+}
+
+fn normalize_daily_agent_token(value: &str) -> String {
+    value
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim_matches(['_', '-'])
+        .to_string()
+}
+
+fn is_valid_daily_agent_token(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+}
+
+fn normalize_daily_agent_item(mut item: AsrDailyAgentItem) -> AsrDailyAgentItem {
+    item.id = item.id.trim().to_string();
+    if item.id.is_empty() {
+        item.id = normalize_daily_agent_token(&item.name);
+    }
+    if item.id.is_empty() {
+        item.id = default_daily_agent_id();
+    }
+    item.name = item.name.trim().to_string();
+    if item.name.is_empty() {
+        item.name = item.id.clone();
+    }
+    item.output_dir = item.output_dir.trim().to_string();
+    if item.output_dir.is_empty() {
+        item.output_dir = item.name.clone();
+    }
+    item.runner = item.runner.trim().to_string();
+    item.session_key = item
+        .session_key
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    item.report_sync_dir = item
+        .report_sync_dir
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    item
+}
+
+fn normalized_daily_agents(config: &AsrDailyAgentConfig) -> Vec<AsrDailyAgentItem> {
+    let mut agents = if config.agents.is_empty() {
+        let mut agents = vec![daily_agent_item_from_legacy(config)];
+        let tomorrow_todo = AsrDailyAgentItem::tomorrow_todo();
+        if agents.iter().all(|agent| agent.id != tomorrow_todo.id)
+            && agents
+                .iter()
+                .all(|agent| agent.output_dir != tomorrow_todo.output_dir)
+        {
+            agents.push(tomorrow_todo);
+        }
+        agents
+    } else {
+        config.agents.clone()
+    };
+    agents = agents.into_iter().map(normalize_daily_agent_item).collect();
+    agents
+}
+
+fn normalize_daily_agent_config(config: &AsrDailyAgentConfig) -> AsrDailyAgentConfig {
+    let enabled = config.enabled;
+    let agents = normalized_daily_agents(config);
+    let Some(first_agent) = agents.first().cloned() else {
+        return AsrDailyAgentConfig {
+            enabled,
+            ..Default::default()
+        };
+    };
+    let mut normalized = daily_agent_config_from_item(&first_agent);
+    normalized.enabled = enabled;
+    normalized.agents = agents;
+    normalized
+}
+
+fn normalize_daily_agent_config_in_place(config: &mut AsrDailyAgentConfig) {
+    *config = normalize_daily_agent_config(config);
+}
+
+fn validate_daily_agent_item(item: &AsrDailyAgentItem) -> Result<(), String> {
+    if !is_valid_daily_agent_token(&item.id) {
+        return Err("Daily Agent id must use English letters, numbers, '_' or '-'".to_string());
+    }
+    if !is_valid_daily_agent_token(&item.name) {
+        return Err("Daily Agent name must use English letters, numbers, '_' or '-'".to_string());
+    }
+    if !is_valid_daily_agent_token(&item.output_dir) {
+        return Err("Daily Agent output_dir must use English letters, numbers, '_' or '-'".to_string());
+    }
+    if item.enabled && item.runner.trim().is_empty() {
+        return Err(format!("Daily Agent '{}' must select a runner", item.name));
+    }
+    if item.im_delivery.enabled && daily_agent_im_channel_for_config(&item.im_delivery).is_none() {
+        return Err(format!("Daily Agent '{}' must select an IM channel", item.name));
+    }
+    Ok(())
+}
+
+fn validate_daily_agent_config(config: &AsrDailyAgentConfig) -> Result<(), String> {
+    let agents = normalized_daily_agents(config);
+    let mut seen_ids = HashSet::new();
+    let mut seen_dirs = HashSet::new();
+    for agent in &agents {
+        validate_daily_agent_item(agent)?;
+        if !seen_ids.insert(agent.id.clone()) {
+            return Err(format!("Duplicate Daily Agent id '{}'", agent.id));
+        }
+        if !seen_dirs.insert(agent.output_dir.clone()) {
+            return Err(format!(
+                "Duplicate Daily Agent output_dir '{}'",
+                agent.output_dir
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn task_for_daily_agent(task: &AsrDirectoryTask, agent: &AsrDailyAgentItem) -> AsrDirectoryTask {
+    let mut task = task.clone();
+    task.daily_agent = daily_agent_config_from_item(agent);
+    task
+}
+
+fn daily_agent_instruction_content(task: &AsrDirectoryTask) -> String {
+    if task.daily_agent.agent_id == DEFAULT_TOMORROW_TODO_AGENT_ID {
+        DEFAULT_ASR_TOMORROW_TODO_AGENT_MD
+            .replace("{{task_name}}", &task.name)
+            .replace("{{daily_dir}}", ".")
+            .replace("{{report_dir}}", &format!("./{}/", task.daily_agent.output_dir))
+    } else {
+        DEFAULT_ASR_DAILY_AGENTS_MD
+            .replace("{{task_name}}", &task.name)
+            .replace("{{daily_dir}}", ".")
+            .replace("{{report_dir}}", &format!("./{}/", task.daily_agent.output_dir))
+    }
+}
+
+fn daily_agent_instructions_dir(task_id: &str) -> PathBuf {
+    daily_dir_for_task(task_id).join("agents")
+}
+
+fn daily_agent_instructions_path(task: &AsrDirectoryTask) -> PathBuf {
+    daily_agent_instructions_dir(&task.id).join(format!("{}.md", task.daily_agent.agent_id))
+}
+
+fn daily_agent_output_dir(task: &AsrDirectoryTask) -> PathBuf {
+    daily_dir_for_task(&task.id).join(&task.daily_agent.output_dir)
+}
+
+fn daily_agent_processed_key(task: &AsrDirectoryTask, date: &str) -> String {
+    format!("{}:{date}", task.daily_agent.agent_id)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AsrDailyAgentTriggerPolicy {
+    #[default]
+    AfterAsrRun,
+    ManualOnly,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AsrDailyAgentInstructionsSource {
+    #[default]
+    Default,
+    Custom,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct AsrDailyAgentImDeliveryConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    #[serde(default)]
+    pub mode: AsrDailyAgentImDeliveryMode,
+    #[serde(default)]
+    pub send_policy: AsrDailyAgentImSendPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_sent_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_send_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AsrDailyAgentImDeliveryMode {
+    #[default]
+    FullReport,
+    Summary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AsrDailyAgentImSendPolicy {
+    #[default]
+    OnSuccessWithReport,
+    OnSuccess,
+    Always,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct AsrDailyAgentReportSyncResult {
+    pub target_dir: String,
+    pub total_files: usize,
+    pub copied_files: usize,
+    pub skipped_files: usize,
+    pub failed_files: usize,
+    pub synced_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
+}

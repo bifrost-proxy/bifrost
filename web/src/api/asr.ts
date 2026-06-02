@@ -1589,12 +1589,36 @@ function emitSsePart(
 
 export interface AsrDailyAgentConfig {
   enabled: boolean;
+  agent_id: string;
+  name: string;
   runner: string;
   timeout_ms: number;
   trigger_policy: "after_asr_run" | "manual_only";
   session_key?: string;
   instructions_source: "default" | "custom";
   im_delivery: AsrDailyAgentImDeliveryConfig;
+  output_dir: string;
+  agents?: AsrDailyAgentItem[];
+  report_sync_dir?: string;
+  last_report_sync?: AsrDailyAgentReportSyncResult;
+  last_run_at_ms?: number;
+  last_status?: string;
+  last_error?: string;
+  last_run_id?: string;
+}
+
+export interface AsrDailyAgentItem {
+  id: string;
+  name: string;
+  enabled: boolean;
+  runner: string;
+  timeout_ms: number;
+  trigger_policy: "after_asr_run" | "manual_only";
+  session_key?: string;
+  instructions_source: "default" | "custom";
+  instructions?: string;
+  im_delivery: AsrDailyAgentImDeliveryConfig;
+  output_dir: string;
   report_sync_dir?: string;
   last_report_sync?: AsrDailyAgentReportSyncResult;
   last_run_at_ms?: number;
@@ -1631,6 +1655,15 @@ export interface AsrDailyAgentWorkspaceStatus {
   git_initialized: boolean;
   git_error?: string;
   report_count: number;
+  agents?: Array<{
+    agent_id: string;
+    name: string;
+    output_dir: string;
+    report_dir: string;
+    instructions_path: string;
+    instructions_exists: boolean;
+    report_count: number;
+  }>;
 }
 
 export interface AsrDailyAgentReportIndexStatus {
@@ -1657,11 +1690,16 @@ export interface AsrDailyAgentConfigResponse {
 
 export interface AsrDailyAgentInstructionsResponse {
   task_id: string;
+  agent_id?: string;
+  agent_name?: string;
   content: string;
   source: "file" | "default";
 }
 
 export interface AsrDailyAgentProcessedDocument {
+  agent_id: string;
+  agent_name: string;
+  output_dir: string;
   date: string;
   source_sha256: string;
   source_len_bytes: number;
@@ -1679,6 +1717,9 @@ export interface AsrDailyAgentRunsResponse {
 export interface AsrDailyAgentReportDetail {
   task_id: string;
   task_name: string;
+  agent_id?: string;
+  agent_name?: string;
+  output_dir?: string;
   date: string;
   path: string;
   size?: number;
@@ -1719,8 +1760,12 @@ export async function updateDailyAgentConfig(
 
 export async function getDailyAgentInstructions(
   taskId: string,
+  agentId?: string,
 ): Promise<AsrDailyAgentInstructionsResponse> {
-  const url = buildApiUrl(`/asr/tasks/${taskId}/daily-agent/agents`);
+  const params = new URLSearchParams();
+  if (agentId) params.set("agent_id", agentId);
+  const query = params.toString() ? `?${params.toString()}` : "";
+  const url = buildApiUrl(`/asr/tasks/${taskId}/daily-agent/agents${query}`);
   const response = await fetch(url, {
     headers: { Authorization: `Bearer ${getAdminToken()}` },
   });
@@ -1730,8 +1775,12 @@ export async function getDailyAgentInstructions(
 export async function updateDailyAgentInstructions(
   taskId: string,
   content: string,
+  agentId?: string,
 ): Promise<{ ok: boolean }> {
-  const url = buildApiUrl(`/asr/tasks/${taskId}/daily-agent/agents`);
+  const params = new URLSearchParams();
+  if (agentId) params.set("agent_id", agentId);
+  const query = params.toString() ? `?${params.toString()}` : "";
+  const url = buildApiUrl(`/asr/tasks/${taskId}/daily-agent/agents${query}`);
   const response = await fetch(url, {
     method: "PUT",
     headers: {
@@ -1745,11 +1794,12 @@ export async function updateDailyAgentInstructions(
 
 export async function triggerDailyAgentRun(
   taskId: string,
-  options?: { force?: boolean; date?: string },
+  options?: { force?: boolean; date?: string; agentId?: string },
 ): Promise<{ status: string; message: string }> {
   const params = new URLSearchParams();
   if (options?.force) params.set("force", "1");
   if (options?.date) params.set("date", options.date);
+  if (options?.agentId) params.set("agent_id", options.agentId);
   const query = params.toString() ? `?${params.toString()}` : "";
   const url = buildApiUrl(`/asr/tasks/${taskId}/daily-agent/run${query}`);
   const response = await fetch(url, {
@@ -1761,8 +1811,12 @@ export async function triggerDailyAgentRun(
 
 export async function sendDailyAgentReport(
   taskId: string,
+  agentId?: string,
 ): Promise<{ ok: boolean; sent_reports: string[] }> {
-  const url = buildApiUrl(`/asr/tasks/${taskId}/daily-agent/send`);
+  const params = new URLSearchParams();
+  if (agentId) params.set("agent_id", agentId);
+  const query = params.toString() ? `?${params.toString()}` : "";
+  const url = buildApiUrl(`/asr/tasks/${taskId}/daily-agent/send${query}`);
   const response = await fetch(url, {
     method: "POST",
     headers: { Authorization: `Bearer ${getAdminToken()}` },
@@ -1794,9 +1848,13 @@ export async function getDailyAgentRuns(
 export async function getDailyAgentReport(
   taskId: string,
   date: string,
+  agentId?: string,
 ): Promise<AsrDailyAgentReportDetail> {
+  const params = new URLSearchParams();
+  if (agentId) params.set("agent_id", agentId);
+  const query = params.toString() ? `?${params.toString()}` : "";
   const url = buildApiUrl(
-    `/asr/tasks/${encodeURIComponent(taskId)}/daily-agent/reports/${encodeURIComponent(date)}`,
+    `/asr/tasks/${encodeURIComponent(taskId)}/daily-agent/reports/${encodeURIComponent(date)}${query}`,
   );
   const response = await fetch(url, {
     headers: { Authorization: `Bearer ${getAdminToken()}` },

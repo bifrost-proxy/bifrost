@@ -7,13 +7,17 @@ fn add_task(task: AsrDirectoryTask) -> Result<(), String> {
 fn load_tasks() -> TaskStore {
     let path = task_store_path();
     let content = std::fs::read_to_string(path).ok();
-    content
+    let mut store = content
         .and_then(|content| serde_json::from_str::<TaskStore>(&content).ok())
         .filter(|store| store.version == TASK_STORE_VERSION)
         .unwrap_or(TaskStore {
             version: TASK_STORE_VERSION,
             tasks: Vec::new(),
-        })
+        });
+    for task in &mut store.tasks {
+        normalize_daily_agent_config_in_place(&mut task.daily_agent);
+    }
+    store
 }
 
 fn save_tasks(store: &TaskStore) -> Result<(), String> {

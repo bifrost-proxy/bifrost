@@ -114,9 +114,11 @@ fn sync_all_daily_agent_reports(task: &AsrDirectoryTask) -> Result<AsrDailyAgent
 }
 
 fn update_daily_agent_report_sync_status(
-    task_id: &str,
+    source_task: &AsrDirectoryTask,
     result: AsrDailyAgentReportSyncResult,
 ) -> Result<(), String> {
+    let task_id = source_task.id.as_str();
+    let agent_id = source_task.daily_agent.agent_id.clone();
     let _config_lock = DAILY_AGENT_TASK_CONFIG_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -124,7 +126,10 @@ fn update_daily_agent_report_sync_status(
     let Some(task) = store.tasks.iter_mut().find(|t| t.id == task_id) else {
         return Err(format!("ASR task '{task_id}' not found"));
     };
-    task.daily_agent.last_report_sync = Some(result);
+    sync_daily_agent_item_status(&mut task.daily_agent, &agent_id, |agent| {
+        agent.last_report_sync = Some(result.clone());
+    });
+    mirror_daily_agent_legacy_status(&mut task.daily_agent, &agent_id);
     task.updated_at_ms = now_ms();
     save_tasks(&store)
 }

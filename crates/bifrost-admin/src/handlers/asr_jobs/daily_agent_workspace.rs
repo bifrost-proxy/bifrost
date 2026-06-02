@@ -3,13 +3,31 @@
 /// Read workspace status without creating directories or files (for GET endpoint).
 fn read_workspace_status(task: &AsrDirectoryTask) -> AsrDailyWorkspaceStatus {
     let daily_dir = daily_dir_for_task(&task.id);
-    let report_dir = daily_dir.join("report");
-    let agents_path = daily_dir.join("AGENTS.md");
+    let legacy_task = task_for_daily_agent(task, &daily_agent_item_from_legacy(&task.daily_agent));
+    let report_dir = daily_agent_output_dir(&legacy_task);
+    let agents_path = daily_agent_instructions_path(&legacy_task);
 
     let agents_exists = agents_path.exists();
     let git_initialized = daily_dir.join(".git").exists();
 
-    let report_count = std::fs::read_dir(&report_dir)
+    let agents = build_workspace_agent_statuses(task);
+    let report_count = agents.iter().map(|agent| agent.report_count).sum();
+
+    AsrDailyWorkspaceStatus {
+        daily_dir: daily_dir.to_string_lossy().to_string(),
+        report_dir: report_dir.to_string_lossy().to_string(),
+        agents_path: agents_path.to_string_lossy().to_string(),
+        agents_exists,
+        git_available: true, // Assume available; actual check deferred to ensure_*
+        git_initialized,
+        git_error: None,
+        report_count,
+        agents,
+    }
+}
+
+fn count_markdown_files(dir: &Path) -> usize {
+    std::fs::read_dir(dir)
         .map(|entries| {
             entries
                 .filter_map(|e| e.ok())
@@ -21,31 +39,61 @@ fn read_workspace_status(task: &AsrDirectoryTask) -> AsrDailyWorkspaceStatus {
                 })
                 .count()
         })
-        .unwrap_or(0);
+        .unwrap_or(0)
+}
 
-    AsrDailyWorkspaceStatus {
-        daily_dir: daily_dir.to_string_lossy().to_string(),
-        report_dir: report_dir.to_string_lossy().to_string(),
-        agents_path: agents_path.to_string_lossy().to_string(),
-        agents_exists,
-        git_available: true, // Assume available; actual check deferred to ensure_*
-        git_initialized,
-        git_error: None,
-        report_count,
-    }
+fn build_workspace_agent_statuses(task: &AsrDirectoryTask) -> Vec<AsrDailyWorkspaceAgentStatus> {
+    normalized_daily_agents(&task.daily_agent)
+        .into_iter()
+        .map(|agent| {
+            let agent_task = task_for_daily_agent(task, &agent);
+            let report_dir = daily_agent_output_dir(&agent_task);
+            let instructions_path = daily_agent_instructions_path(&agent_task);
+            AsrDailyWorkspaceAgentStatus {
+                agent_id: agent.id,
+                name: agent.name,
+                output_dir: agent.output_dir,
+                report_dir: report_dir.to_string_lossy().to_string(),
+                instructions_path: instructions_path.to_string_lossy().to_string(),
+                instructions_exists: instructions_path.exists(),
+                report_count: count_markdown_files(&report_dir),
+            }
+        })
+        .collect()
 }
 
 fn ensure_asr_daily_workspace(
     task: &AsrDirectoryTask,
 ) -> Result<AsrDailyWorkspaceStatus, String> {
     let daily_dir = daily_dir_for_task(&task.id);
-    let report_dir = daily_dir.join("report");
-    let agents_path = daily_dir.join("AGENTS.md");
+    let legacy_task = task_for_daily_agent(task, &daily_agent_item_from_legacy(&task.daily_agent));
+    let report_dir = daily_agent_output_dir(&legacy_task);
+    let agents_path = daily_agent_instructions_path(&legacy_task);
+    let instructions_dir = daily_agent_instructions_dir(&task.id);
     let gitignore_path = daily_dir.join(".gitignore");
 
     // Create directories
     std::fs::create_dir_all(&daily_dir).map_err(|e| format!("create daily dir: {e}"))?;
-    std::fs::create_dir_all(&report_dir).map_err(|e| format!("create report dir: {e}"))?;
+    std::fs::create_dir_all(&instructions_dir).map_err(|e| format!("create agents dir: {e}"))?;
+
+    for agent in normalized_daily_agents(&task.daily_agent) {
+        let agent_task = task_for_daily_agent(task, &agent);
+        let output_dir = daily_agent_output_dir(&agent_task);
+        std::fs::create_dir_all(&output_dir).map_err(|e| format!("create output dir: {e}"))?;
+        let instructions_path = daily_agent_instructions_path(&agent_task);
+        if !instructions_path.exists() {
+            let content = if agent_task.daily_agent.instructions_source
+                == AsrDailyAgentInstructionsSource::Custom
+            {
+                agent_task.daily_agent.instructions.clone().unwrap_or_default()
+            } else {
+                daily_agent_instruction_content(&agent_task)
+            };
+            std::fs::write(&instructions_path, content.as_bytes()).map_err(|e| {
+                format!("write Daily Agent instructions {}: {e}", instructions_path.display())
+            })?;
+        }
+    }
 
     // Write AGENTS.md if not exists
     let agents_exists = if agents_path.exists() {
@@ -55,10 +103,7 @@ fn ensure_asr_daily_workspace(
             if task.daily_agent.instructions_source == AsrDailyAgentInstructionsSource::Custom {
                 task.daily_agent.instructions.clone().unwrap_or_default()
             } else {
-                DEFAULT_ASR_DAILY_AGENTS_MD
-                    .replace("{{task_name}}", &task.name)
-                    .replace("{{daily_dir}}", ".")
-                    .replace("{{report_dir}}", "./report/")
+                daily_agent_instruction_content(&legacy_task)
             };
         std::fs::write(&agents_path, content.as_bytes())
             .map_err(|e| format!("write AGENTS.md: {e}"))?;
@@ -74,19 +119,8 @@ fn ensure_asr_daily_workspace(
     let (git_available, git_initialized, git_error) = try_git_init(&daily_dir);
 
     // Count reports
-    let report_count = std::fs::read_dir(&report_dir)
-        .map(|entries| {
-            entries
-                .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.path()
-                        .extension()
-                        .map(|ext| ext == "md")
-                        .unwrap_or(false)
-                })
-                .count()
-        })
-        .unwrap_or(0);
+    let agents = build_workspace_agent_statuses(task);
+    let report_count = agents.iter().map(|agent| agent.report_count).sum();
 
     let status = AsrDailyWorkspaceStatus {
         daily_dir: daily_dir.to_string_lossy().to_string(),
@@ -97,6 +131,7 @@ fn ensure_asr_daily_workspace(
         git_initialized,
         git_error,
         report_count,
+        agents,
     };
 
     tracing::info!(
@@ -147,9 +182,9 @@ fn try_git_commit(daily_dir: &Path, message: &str) -> Option<String> {
         return None;
     }
 
-    // git add *.md report/ .gitignore (track daily source files too)
+    // git add daily sources, per-agent instructions/output directories, and .gitignore.
     let _ = std::process::Command::new("git")
-        .args(["add", "*.md", "report/", ".gitignore"])
+        .args(["add", "."])
         .current_dir(daily_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::null())

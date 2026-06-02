@@ -78,6 +78,7 @@ export default function ASR() {
   const selectedFileKey = searchParams.get("asrFile");
   const selectedDailyDate = searchParams.get("asrDay");
   const selectedDailyAgentReportDate = searchParams.get("asrDailyReport");
+  const selectedDailyAgentReportAgentId = searchParams.get("asrDailyAgent");
   const selectedTaskTabParam = searchParams.get("asrTaskTab");
   const selectedTaskTab: DirectoryTaskDetailTabKey = (() => {
     if (isDirectoryTaskDetailTabKey(selectedTaskTabParam)) {
@@ -1062,11 +1063,11 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
     }
   }, []);
 
-  const loadDailyAgentReport = useCallback(async (taskId: string, date: string) => {
+  const loadDailyAgentReport = useCallback(async (taskId: string, date: string, agentId?: string | null) => {
     setTaskDailyAgentReport(null);
     setTaskDailyAgentReportLoading(true);
     try {
-      setTaskDailyAgentReport(await getDailyAgentReport(taskId, date));
+      setTaskDailyAgentReport(await getDailyAgentReport(taskId, date, agentId || undefined));
     } catch (error) {
       message.error(
         error instanceof Error ? error.message : "Failed to load Daily Agent report",
@@ -1174,7 +1175,7 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
   }, [setSearchParams]);
 
   const openDailyAgentReport = useCallback(
-    (date: string) => {
+    (date: string, agentId?: string) => {
       setSearchParams(
         (prev) => {
           const next = new URLSearchParams(prev);
@@ -1184,6 +1185,11 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
           }
           next.set("asrTaskTab", "daily-agent-records");
           next.set("asrDailyReport", date);
+          if (agentId) {
+            next.set("asrDailyAgent", agentId);
+          } else {
+            next.delete("asrDailyAgent");
+          }
           next.delete("asrFile");
           next.delete("asrDay");
           return next;
@@ -1199,6 +1205,7 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
       (prev) => {
         const next = new URLSearchParams(prev);
         next.delete("asrDailyReport");
+        next.delete("asrDailyAgent");
         next.set("asrTaskTab", "daily-agent-records");
         return next;
       },
@@ -1260,8 +1267,8 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
       setTaskDailyAgentReport(null);
       return;
     }
-    void loadDailyAgentReport(selectedTaskId, selectedDailyAgentReportDate);
-  }, [asrSupported, loadDailyAgentReport, selectedDailyAgentReportDate, selectedTaskId]);
+    void loadDailyAgentReport(selectedTaskId, selectedDailyAgentReportDate, selectedDailyAgentReportAgentId);
+  }, [asrSupported, loadDailyAgentReport, selectedDailyAgentReportAgentId, selectedDailyAgentReportDate, selectedTaskId]);
 
   // Auto-refresh task detail every 3 seconds while the task or bulk chunk retry is running.
   useEffect(() => {
