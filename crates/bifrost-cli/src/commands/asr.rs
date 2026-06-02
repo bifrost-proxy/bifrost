@@ -34,6 +34,9 @@ const ASR_SAMPLE_BASE_URL: &str =
 
 pub fn handle_ai_command(action: AiCommands, admin_host: &str, admin_port: u16) -> Result<()> {
     match action {
+        AiCommands::Workflow { action } => {
+            super::ai_workflow::handle_workflow_command(action, admin_host, admin_port)
+        }
         AiCommands::Asr { action } => handle_asr_command(action, admin_host, admin_port),
         AiCommands::Voice { action } => {
             super::voice::handle_voice_command(action, admin_host, admin_port)

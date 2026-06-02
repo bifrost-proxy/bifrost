@@ -1,0 +1,53 @@
+{
+  "name": "AI Workflow React Flow Quick Debug",
+  "description": "Workflow 页面展示 React Flow DAG，并支持 Quick Debug 调试闭环",
+  "config": {
+    "baseUrl": "http://127.0.0.1:3000/_bifrost",
+    "timeout": 30000
+  },
+  "steps": [
+    { "action": "log", "message": "==== 打开 AI Workflow 页面 ====" },
+    { "action": "goto", "url": "/ai?aiSection=tools-workflow" },
+    { "action": "wait", "ms": 2000 },
+    {
+      "action": "assert",
+      "condition": "document.querySelector('[data-testid=ai-workflow-section]') !== null",
+      "message": "AI Workflow 页面已打开"
+    },
+    {
+      "action": "assert",
+      "condition": "document.querySelector('[data-testid=ai-workflow-reactflow-preview]') !== null",
+      "message": "React Flow 画布容器已展示"
+    },
+    {
+      "action": "assert",
+      "condition": "document.body.innerText.includes('Workflow Templates') && document.body.innerText.includes('Quick Debug Trace')",
+      "message": "模板与快速调试面板已展示"
+    },
+    {
+      "action": "evaluate",
+      "code": "(() => { const buttons = Array.from(document.querySelectorAll('button')); const target = buttons.find((button) => button.textContent && button.textContent.includes('Validate & Preview')); if (!target) return false; target.click(); return true; })()"
+    },
+    { "action": "wait", "ms": 1600 },
+    {
+      "action": "assert",
+      "condition": "document.querySelector('.react-flow') !== null && document.body.innerText.includes('transcribe_daily_audio') && document.body.innerText.includes('run_daily_agent')",
+      "message": "React Flow DAG 渲染出 ASR 与 Runner 节点"
+    },
+    {
+      "action": "assert",
+      "condition": "document.body.innerText.includes('audio_dir') && Array.from(document.querySelectorAll('input')).some((input) => input.value === './human-tests/audio')",
+      "message": "Quick Debug 暴露可编辑调试输入"
+    },
+    {
+      "action": "evaluate",
+      "code": "(() => { const buttons = Array.from(document.querySelectorAll('button')); const target = buttons.find((button) => button.textContent && button.textContent.includes('Quick Debug')); if (!target) return false; target.click(); return true; })()"
+    },
+    { "action": "wait", "ms": 2500 },
+    {
+      "action": "assert",
+      "condition": "document.body.innerText.includes('Validate') && document.body.innerText.includes('Preview') && document.body.innerText.includes('Dry-run Apply') && document.body.innerText.includes('Run + Logs')",
+      "message": "Quick Debug 已记录 validate、preview、dry-run、run 和 logs 步骤"
+    }
+  ]
+}

@@ -7,6 +7,7 @@ import ImGatewayTab from "../Settings/tabs/ImGatewayTab";
 import ASR from "../ASR";
 import { getAsrCapabilities } from "../../api/asr";
 import AgentChatSection from "./AgentChatSection";
+import WorkflowSection from "./WorkflowSection";
 import {
   AGENT_SECTION_NAV,
   type AgentSectionId,
@@ -22,6 +23,12 @@ type AiSection =
       id: "tools-asr";
       group: "tools";
       section: "asr";
+      label: string;
+    }
+  | {
+      id: "tools-workflow";
+      group: "tools";
+      section: "workflow";
       label: string;
     }
   | {
@@ -69,6 +76,12 @@ export default function AI() {
 
   const sections = useMemo<AiSection[]>(
     () => [
+      {
+        id: "tools-workflow" as const,
+        group: "tools" as const,
+        section: "workflow" as const,
+        label: "Workflow",
+      },
       ...(asrEntryEnabled
         ? [
             {
@@ -363,6 +376,8 @@ export default function AI() {
             <AgentTab hideSectionNav />
           ) : activeSection.group === "im-gateway" ? (
             <ImGatewayTab hideSectionNav />
+          ) : activeSection.group === "tools" && activeSection.section === "workflow" ? (
+            <WorkflowSection />
           ) : (
             <ASR />
           )}

@@ -80,6 +80,112 @@ pub(crate) async fn ensure_scheduler_started() {
     });
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct WorkflowAsrDirectoryRunConfig {
+    pub(crate) task_id: String,
+    pub(crate) task_name: String,
+    pub(crate) audio_dir: PathBuf,
+    pub(crate) recursive: bool,
+    pub(crate) language: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) runtime_strategy: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct WorkflowAsrDailyDocument {
+    pub(crate) date: String,
+    pub(crate) path: PathBuf,
+    pub(crate) size: Option<u64>,
+    pub(crate) modified_ms: Option<u64>,
+    pub(crate) text_chars: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct WorkflowAsrDirectoryRunResult {
+    pub(crate) task_id: String,
+    pub(crate) processed_now: usize,
+    pub(crate) failed_now: usize,
+    pub(crate) no_update: bool,
+    pub(crate) daily_documents: Vec<WorkflowAsrDailyDocument>,
+}
+
+pub(crate) async fn run_workflow_asr_directory_node(
+    config: WorkflowAsrDirectoryRunConfig,
+) -> Result<WorkflowAsrDirectoryRunResult, String> {
+    let now = now_ms();
+    let runtime_strategy = parse_workflow_asr_runtime_strategy(config.runtime_strategy.as_deref())?;
+    let mut store = load_tasks();
+    let task = AsrDirectoryTask {
+        id: config.task_id.clone(),
+        name: config.task_name.clone(),
+        audio_dir: config.audio_dir,
+        recursive: config.recursive,
+        enabled: false,
+        paused: false,
+        paused_at_ms: None,
+        schedule: AsrTaskSchedule::Daily { hour: 8, minute: 0 },
+        language: config.language.unwrap_or_else(|| "chinese".to_string()),
+        model: config
+            .model
+            .unwrap_or_else(|| bifrost_asr::runtime::DEFAULT_ASR_MODEL.to_string()),
+        runtime_strategy,
+        diarization: normalize_task_diarization_config(
+            bifrost_asr::profiles::AsrDiarizationConfig::speaker_aware_default(),
+        ),
+        created_at_ms: now,
+        updated_at_ms: now,
+        last_run_at_ms: None,
+        next_run_at_ms: None,
+        last_error: None,
+        daily_agent: AsrDailyAgentConfig::default(),
+        external_devices: Vec::new(),
+        import_policy: AsrExternalImportPolicy::default(),
+    };
+    if let Some(existing) = store.tasks.iter_mut().find(|existing| existing.id == task.id) {
+        let created_at_ms = existing.created_at_ms;
+        *existing = task.clone();
+        existing.created_at_ms = created_at_ms;
+    } else {
+        store.tasks.push(task.clone());
+    }
+    save_tasks(&store)?;
+
+    let (updated_task, processed_now, failed_now) = run_directory_task(task).await?;
+    let documents = list_daily_documents_for_task(
+        &bifrost_storage::data_dir(),
+        &updated_task.id,
+        &updated_task.name,
+    )?
+    .into_iter()
+    .map(|document| WorkflowAsrDailyDocument {
+        date: document.date,
+        path: document.path,
+        size: document.size,
+        modified_ms: document.modified_ms,
+        text_chars: document.text_chars,
+    })
+    .collect::<Vec<_>>();
+
+    Ok(WorkflowAsrDirectoryRunResult {
+        task_id: updated_task.id,
+        processed_now,
+        failed_now,
+        no_update: processed_now == 0 && failed_now == 0,
+        daily_documents: documents,
+    })
+}
+
+fn parse_workflow_asr_runtime_strategy(value: Option<&str>) -> Result<AsrRuntimeStrategy, String> {
+    match value.unwrap_or("reuse_per_file") {
+        "fork_per_chunk" => Ok(AsrRuntimeStrategy::ForkPerChunk),
+        "reuse_server" => Ok(AsrRuntimeStrategy::ReuseServer),
+        "reuse_per_file" | "" => Ok(AsrRuntimeStrategy::ReusePerFile),
+        "auto" => Ok(AsrRuntimeStrategy::Auto),
+        "compare" => Ok(AsrRuntimeStrategy::Compare),
+        other => Err(format!("unsupported ASR runtime strategy for Workflow: {other}")),
+    }
+}
+
 #[cfg(target_os = "macos")]
 async fn sync_external_device_tasks(trigger: &'static str) {
     for task in load_tasks()

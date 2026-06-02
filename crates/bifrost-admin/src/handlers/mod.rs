@@ -1,6 +1,7 @@
 pub mod agent_chat;
 pub mod agent_memories;
 pub mod agent_skills;
+pub mod ai_workflow;
 pub mod app_icon;
 pub mod asr;
 pub mod asr_cli_invoke;

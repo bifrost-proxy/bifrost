@@ -1,6 +1,7 @@
 pub mod admin_audit;
 mod admin_auth;
 pub mod admin_auth_db;
+pub mod ai_workflow;
 mod app_icon;
 pub mod asr_runtime;
 mod async_traffic;

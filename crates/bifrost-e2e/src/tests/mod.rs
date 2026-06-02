@@ -1,4 +1,5 @@
 pub mod admin_api;
+pub mod ai_workflow;
 pub mod body_cache;
 pub mod body_manipulation;
 pub mod brute_force;
@@ -44,6 +45,7 @@ pub fn all_tests() -> Vec<TestCase> {
     let mut tests = Vec::new();
     tests.extend(routing::get_all_tests());
     tests.extend(admin_api::get_all_tests());
+    tests.extend(ai_workflow::get_all_tests());
     tests.extend(brute_force::get_all_tests());
     tests.extend(replay_sse::get_all_tests());
     tests.extend(request::tests());

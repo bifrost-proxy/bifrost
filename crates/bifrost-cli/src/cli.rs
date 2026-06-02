@@ -613,6 +613,11 @@ pub enum AgentCommands {
 
 #[derive(Subcommand, Clone)]
 pub enum AiCommands {
+    #[command(about = "Validate, preview, save, and run AI workflow definitions")]
+    Workflow {
+        #[command(subcommand)]
+        action: AiWorkflowCommands,
+    },
     #[command(about = "Manage Qwen3-ASR speech-to-text")]
     #[cfg_attr(
         not(all(target_os = "macos", target_arch = "aarch64")),
@@ -630,6 +635,89 @@ pub enum AiCommands {
     Voice {
         #[command(subcommand)]
         action: AiVoiceCommands,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum AiWorkflowCommands {
+    #[command(about = "Print Workflow protocol schema and node kinds")]
+    Schema {
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+    },
+    #[command(about = "List built-in Workflow templates")]
+    Templates {
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+    },
+    #[command(about = "Print one built-in Workflow template as YAML or JSON")]
+    Template {
+        #[arg(default_value = "default-asr-transcription")]
+        template_id: String,
+        #[arg(long, default_value = "yaml", value_parser = ["yaml", "json"], help = "Template output format")]
+        format: String,
+        #[arg(long, value_hint = ValueHint::FilePath, help = "Write template draft to a file")]
+        output: Option<PathBuf>,
+    },
+    #[command(about = "Validate a Workflow JSON/YAML file")]
+    Validate {
+        #[arg(value_hint = ValueHint::FilePath)]
+        file: PathBuf,
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+    },
+    #[command(about = "Preview a Workflow JSON/YAML file")]
+    Preview {
+        #[arg(value_hint = ValueHint::FilePath)]
+        file: PathBuf,
+        #[arg(long, default_value = "markdown", value_parser = ["markdown", "json"], help = "Preview output format")]
+        format: String,
+    },
+    #[command(about = "Render Workflow spec as React Flow JSON")]
+    Render {
+        #[arg(value_hint = ValueHint::FilePath)]
+        file: PathBuf,
+    },
+    #[command(about = "Create or update a Workflow definition through the running service")]
+    Apply {
+        #[arg(value_hint = ValueHint::FilePath)]
+        file: PathBuf,
+        #[arg(long, help = "Expected current revision for optimistic locking")]
+        base_revision: Option<u64>,
+        #[arg(long, help = "Only validate and preview; do not save")]
+        dry_run: bool,
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+    },
+    #[command(about = "List saved Workflow definitions")]
+    List {
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+    },
+    #[command(about = "Export one saved Workflow definition")]
+    Export {
+        workflow_id: String,
+        #[arg(long, default_value = "yaml", value_parser = ["yaml", "json"], help = "Export format")]
+        format: String,
+    },
+    #[command(about = "Execute a saved Workflow and persist run traces")]
+    Run {
+        workflow_id: String,
+        #[arg(
+            long = "input",
+            value_name = "KEY=VALUE",
+            help = "Workflow input value; may be repeated"
+        )]
+        inputs: Vec<String>,
+        #[arg(long, help = "Print JSON")]
+        json: bool,
+    },
+    #[command(about = "Show one Workflow run record")]
+    Logs {
+        workflow_id: String,
+        run_id: String,
+        #[arg(long, help = "Print JSON")]
+        json: bool,
     },
 }
 

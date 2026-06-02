@@ -815,6 +815,10 @@ impl ProxyServer {
             info!("Proxy server listening on {} (HTTP/HTTPS only)", addr);
         }
 
+        if self.admin_state.is_some() {
+            bifrost_admin::ai_workflow::ensure_workflow_scheduler_started().await;
+        }
+
         if let Some(ready_tx) = ready_tx {
             let _ = ready_tx.send(());
         }

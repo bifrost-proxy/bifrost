@@ -1,5 +1,6 @@
 mod admin;
 pub mod agent;
+mod ai_workflow;
 mod asr;
 mod asr_tui;
 mod bifrost_file;

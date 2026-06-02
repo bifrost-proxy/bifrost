@@ -7,6 +7,7 @@ use crate::cors::apply_cors_headers;
 use crate::handlers::{
     agent_chat::handle_agent_chat,
     agent_memories::handle_agent_memories,
+    ai_workflow::handle_ai_workflow,
     app_icon::handle_app_icon,
     asr::handle_asr,
     audit::handle_audit,
@@ -97,6 +98,7 @@ impl AdminRouter {
             // Ensure the ASR scheduled-task scheduler is running on first API
             // request so tasks execute even if the ASR page is never visited.
             crate::handlers::asr_jobs::ensure_scheduler_started().await;
+            crate::ai_workflow::ensure_workflow_scheduler_started().await;
             Self::handle_api(req, state, push_manager, &admin_path, peer_addr).await
         } else {
             serve_static_file(&admin_path, req.headers())
@@ -125,7 +127,9 @@ impl AdminRouter {
             return handle_audit(req, path).await;
         }
 
-        if path.starts_with("/api/agent/chat") {
+        if path.starts_with("/api/ai/workflows") {
+            handle_ai_workflow(req, path).await
+        } else if path.starts_with("/api/agent/chat") {
             handle_agent_chat(req, state, path).await
         } else if path.starts_with("/api/agent/memories") {
             handle_agent_memories(req, path).await

@@ -172,6 +172,7 @@
 | [agent-codex-plan-mode.md](./agent-codex-plan-mode.md) | Agent Codex Plan Mode 对齐 | 6 | Codex collaboration mode / Plan Mode prompt 注入、Web UI 与 IM `/plan` 入口、Plan Mode composer 状态提示、外部 runner/Codex 隐藏内置控制命令、`<proposed_plan>` 独立输出与 history replay、Plan Mode 禁用 `update_plan`、`request_user_input` 策略、goal continuation prompt markdown 真实接线和真实 API proposal 回归 |
 | [agent-token-usage.md](./agent-token-usage.md) | Agent Token Usage 统计口径 | 6 | 区分累计 `total_tokens_used` 与当前 context `last_response_tokens`，Chat Completions `prompt_tokens` / Responses `input_tokens` 作为 context 快照，JSONL `context_tokens` 持久化与旧事件兼容，AI Chat 输入框上方 token HUD 展示实时消耗、context 占比和压缩状态，单元、真实服务 E2E 与截图验收入口 |
 | [chat-plan-density.md](./chat-plan-density.md) | Agent Chat Plan 密度与输入框高度 | 6 | Plan 面板紧凑展示、不展示二级标题行、todo 状态图标、超过 5 条 step 后内部滚动、输入框默认 2 行并扩高到 7 行上限、hint 不展示 session id、线程 tooltip 仅图标延迟触发、亮色/暗色主题可读性 |
+| [ai-workflow.md](./ai-workflow.md) | AI Workflow 自定义编排 | 32 | AI 模块新增可配置 Workflow，目标替换现有 ASR 定时任务：将“扫描指定目录并转录/合成 Daily Markdown”和“Daily Agent Runner 读取每日文档生成报告”拆成独立节点；内置默认 ASR 转录 Workflow 模板 `default-asr-transcription`，支持 API/CLI/WebUI 查看、套用、导出、修改、校验、预览、保存和运行；WebUI 使用 React Flow 可视化 Workflow DAG，并提供 Quick Debug 快速执行 validate、preview、check、save、execute、logs 完整真实调试闭环；基于 React Flow/xyflow、Node-RED、n8n、Langflow、Flowise、Dify、Temporal、Prefect、Airflow、Argo Workflows 外部资料补强选型、可借鉴能力与不采用边界；定义 `bifrost.ai.workflow/v1alpha1` 稳定协议和 `bifrost ai workflow` CLI，支持 Agent Runner 通过自然语言和 typed tools 创建/校验/预览/渲染/应用 Workflow；使用 React Flow 渲染、二次编辑和 run 详情只读高亮；支持多个 Daily Agent fan-out、脚本后处理、飞书/微信通知、`no_update` 跳过下游、重试与备用 Runner fallback、每次 run 的日志、事件、manifest、artifact、attempt 回溯、真实 script 执行、Workflow schedule 状态和 CLI 运行轨迹验证，并回归 Workflow ID 与输出路径安全校验 |
 | [agent-loop-process-isolation.md](./agent-loop-process-isolation.md) | Agent Loop 进程隔离 | 7 | 内置 Bifrost Agent 与外置 Runner 默认每会话独立 worker 子进程，主进程只转发输入/进度/结果，`/stop` 可停止 worker 且代理/Admin API 继续响应，SSE 断开自动清理 worker，并覆盖 E2E runner 当前可执行文件 worker pass-through、`/agent/chat` `/stop`/`/reset` 控制语义，以及 worker 独立进程写入 send_msg/schedule/history/timeline/work_dir 后主进程读取不 stale 的 CI 回归 |
 
 ### IM Gateway 测试
@@ -205,7 +206,7 @@
 
 ---
 
-**总计：142 个测试文件，2429 个测试用例**
+**总计：143 个测试文件，2460 个测试用例**
 
 ## 工作流程
 
