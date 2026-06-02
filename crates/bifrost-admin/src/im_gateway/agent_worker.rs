@@ -7,7 +7,7 @@ use bifrost_agent::persistence::ConversationRecorder;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 const WORKER_PROTOCOL_VERSION: u32 = 1;
 const WORKER_STOP_GRACE_MS: u64 = 1500;
@@ -18,7 +18,17 @@ static ACTIVE_WORKERS: once_cell::sync::Lazy<dashmap::DashMap<String, AgentWorke
 #[derive(Clone)]
 struct AgentWorkerStopHandle {
     pid: u32,
-    stop_tx: mpsc::UnboundedSender<()>,
+    stop_tx: mpsc::UnboundedSender<AgentWorkerStopRequest>,
+}
+
+pub struct AgentWorkerStopRequest {
+    ack_tx: oneshot::Sender<()>,
+}
+
+impl AgentWorkerStopRequest {
+    pub fn ack(self) {
+        let _ = self.ack_tx.send(());
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -248,7 +258,11 @@ enum AgentWorkerEventStream {
     Channel(mpsc::UnboundedReceiver<AgentWorkerEvent>),
 }
 
-pub fn register_active_worker(session_key: &str, pid: u32, stop_tx: mpsc::UnboundedSender<()>) {
+pub fn register_active_worker(
+    session_key: &str,
+    pid: u32,
+    stop_tx: mpsc::UnboundedSender<AgentWorkerStopRequest>,
+) {
     ACTIVE_WORKERS.insert(
         session_key.to_string(),
         AgentWorkerStopHandle { pid, stop_tx },
@@ -277,22 +291,61 @@ async fn stop_active_worker_entries(
     if entries.is_empty() {
         return;
     }
-    for (session_key, handle) in &entries {
-        tracing::info!(session_key = %session_key, pid = handle.pid, "agent worker: stopping active worker");
-        let _ = handle.stop_tx.send(());
-    }
-    if entries.iter().all(|(_, handle)| handle.pid == 0) {
-        return;
-    }
-    tokio::time::sleep(grace).await;
+    let mut signaled_entries = Vec::new();
     for (session_key, handle) in entries {
-        if handle.pid == 0 {
-            continue;
-        }
-        if let Err(error) = crate::im_gateway::external_cli::terminate_process_group(handle.pid) {
+        tracing::info!(session_key = %session_key, pid = handle.pid, "agent worker: stopping active worker");
+        let (ack_tx, ack_rx) = oneshot::channel();
+        if handle
+            .stop_tx
+            .send(AgentWorkerStopRequest { ack_tx })
+            .is_ok()
+        {
+            signaled_entries.push((session_key, handle.pid, ack_rx));
+        } else {
             tracing::warn!(
                 session_key = %session_key,
                 pid = handle.pid,
+                "agent worker: stop receiver is gone; skipping pid termination for stale active worker entry"
+            );
+        }
+    }
+    if signaled_entries.is_empty() || signaled_entries.iter().all(|(_, pid, _)| *pid == 0) {
+        return;
+    }
+    let deadline = tokio::time::Instant::now() + grace;
+    loop {
+        let mut index = 0;
+        while index < signaled_entries.len() {
+            match signaled_entries[index].2.try_recv() {
+                Ok(()) | Err(oneshot::error::TryRecvError::Closed) => {
+                    signaled_entries.swap_remove(index);
+                }
+                Err(oneshot::error::TryRecvError::Empty) => {
+                    index += 1;
+                }
+            }
+        }
+        if signaled_entries.is_empty() {
+            return;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        tokio::time::sleep(std::cmp::min(
+            Duration::from_millis(10),
+            deadline.saturating_duration_since(now),
+        ))
+        .await;
+    }
+    for (session_key, pid, _) in signaled_entries {
+        if pid == 0 {
+            continue;
+        }
+        if let Err(error) = crate::im_gateway::external_cli::terminate_process_group(pid) {
+            tracing::warn!(
+                session_key = %session_key,
+                pid,
                 %error,
                 "agent worker: failed to terminate active worker process group"
             );
@@ -312,8 +365,23 @@ pub async fn request_session_stop(session_key: &str) -> bool {
     let Some((_, handle)) = ACTIVE_WORKERS.remove(session_key) else {
         return false;
     };
-    let _ = handle.stop_tx.send(());
-    tokio::time::sleep(Duration::from_millis(WORKER_STOP_GRACE_MS)).await;
+    let (ack_tx, mut ack_rx) = oneshot::channel();
+    if handle
+        .stop_tx
+        .send(AgentWorkerStopRequest { ack_tx })
+        .is_err()
+    {
+        tracing::warn!(
+            session_key,
+            pid = handle.pid,
+            "agent worker: stop receiver is gone; skipping pid termination for stale active worker entry"
+        );
+        return false;
+    }
+    match tokio::time::timeout(Duration::from_millis(WORKER_STOP_GRACE_MS), &mut ack_rx).await {
+        Ok(Ok(())) | Ok(Err(_)) => return true,
+        Err(_) => {}
+    }
     // pid == 0 means in-process worker (no external process to kill)
     if handle.pid != 0 {
         let _ = crate::im_gateway::external_cli::terminate_process_group(handle.pid);
@@ -981,6 +1049,11 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    fn worker_env_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
     #[test]
     fn build_run_request_uses_protocol_version_and_session() {
         let config = bifrost_agent::AgentConfig::default();
@@ -1135,8 +1208,78 @@ mod tests {
         assert!(!request_session_stop("test-stop-all-workers").await);
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stale_active_worker_entry_does_not_kill_pid_when_stop_receiver_is_gone() {
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command as StdProcessCommand, Stdio as StdStdio};
+
+        let _ = drain_active_workers();
+        let mut child = StdProcessCommand::new("sh")
+            .arg("-c")
+            .arg("sleep 5")
+            .stdin(StdStdio::null())
+            .stdout(StdStdio::null())
+            .stderr(StdStdio::null())
+            .process_group(0)
+            .spawn()
+            .expect("spawn protected process");
+        let pid = child.id();
+        let (stop_tx, stop_rx) = mpsc::unbounded_channel();
+        drop(stop_rx);
+        register_active_worker("test-stale-worker-entry", pid, stop_tx);
+
+        let entries = drain_active_workers();
+        stop_active_worker_entries(entries, Duration::from_millis(20)).await;
+
+        assert!(
+            child.try_wait().expect("poll protected process").is_none(),
+            "stale worker registry entry must not terminate a pid when stop receiver is gone"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn acknowledged_active_worker_stop_does_not_kill_pid() {
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command as StdProcessCommand, Stdio as StdStdio};
+
+        let _ = drain_active_workers();
+        let mut child = StdProcessCommand::new("sh")
+            .arg("-c")
+            .arg("sleep 5")
+            .stdin(StdStdio::null())
+            .stdout(StdStdio::null())
+            .stderr(StdStdio::null())
+            .process_group(0)
+            .spawn()
+            .expect("spawn protected process");
+        let pid = child.id();
+        let (stop_tx, mut stop_rx) = mpsc::unbounded_channel();
+        register_active_worker("test-acked-worker-entry", pid, stop_tx);
+        let ack_task = tokio::spawn(async move {
+            if let Some(stop_request) = stop_rx.recv().await {
+                stop_request.ack();
+            }
+        });
+
+        let entries = drain_active_workers();
+        stop_active_worker_entries(entries, Duration::from_millis(20)).await;
+        ack_task.await.expect("ack task");
+
+        assert!(
+            child.try_wait().expect("poll protected process").is_none(),
+            "acknowledged worker stop must not be followed by pid termination"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
     #[tokio::test]
     async fn spawn_process_fallback_to_in_process_on_missing_executable() {
+        let _lock = worker_env_lock().lock().await;
         // Force external worker mode by setting the env var
         let _guard = EnvVarGuard::set("BIFROST_FORCE_AGENT_WORKER", "1");
         // Use a non-existent executable to trigger the fallback
@@ -1164,6 +1307,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_or_fallback_always_succeeds() {
+        let _lock = worker_env_lock().lock().await;
         // Ensure we're NOT in forced external worker mode
         let _guard = EnvVarGuard::remove("BIFROST_FORCE_AGENT_WORKER");
         let request = build_run_request(

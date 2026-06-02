@@ -10,6 +10,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::process::Command;
+use tokio::sync::oneshot;
 use tokio::time::timeout;
 
 const DEFAULT_RUNTIME: &str = "external_cli";
@@ -32,7 +33,17 @@ static ACTIVE_WORKER_SESSIONS: once_cell::sync::Lazy<
 #[derive(Clone)]
 struct ExternalCliWorkerStopHandle {
     pid: u32,
-    stop_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    stop_tx: tokio::sync::mpsc::UnboundedSender<ExternalCliWorkerStopRequest>,
+}
+
+struct ExternalCliWorkerStopRequest {
+    ack_tx: oneshot::Sender<()>,
+}
+
+impl ExternalCliWorkerStopRequest {
+    fn ack(self) {
+        let _ = self.ack_tx.send(());
+    }
 }
 
 pub(crate) fn terminate_process_group(pid: u32) -> Result<(), String> {
@@ -47,8 +58,23 @@ pub async fn request_worker_session_stop(session_key: &str) -> bool {
     let Some((_, handle)) = ACTIVE_WORKER_SESSIONS.remove(session_key) else {
         return false;
     };
-    let _ = handle.stop_tx.send(());
-    tokio::time::sleep(Duration::from_millis(WORKER_STOP_GRACE_MS)).await;
+    let (ack_tx, mut ack_rx) = oneshot::channel();
+    if handle
+        .stop_tx
+        .send(ExternalCliWorkerStopRequest { ack_tx })
+        .is_err()
+    {
+        tracing::warn!(
+            session_key,
+            pid = handle.pid,
+            "external_cli worker: stop receiver is gone; skipping pid termination for stale worker entry"
+        );
+        return false;
+    }
+    match tokio::time::timeout(Duration::from_millis(WORKER_STOP_GRACE_MS), &mut ack_rx).await {
+        Ok(Ok(())) | Ok(Err(_)) => return true,
+        Err(_) => {}
+    }
     let _ = terminate_process(handle.pid);
     true
 }
@@ -792,7 +818,8 @@ impl ExternalCliRuntime {
         let mut worker = worker_client
             .spawn(self.runs_root.clone(), request.clone())
             .await?;
-        let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let (stop_tx, mut stop_rx) =
+            tokio::sync::mpsc::unbounded_channel::<ExternalCliWorkerStopRequest>();
         if let (Some(session_key), Some(pid)) = (request.session_key.as_deref(), worker.child_id())
         {
             ACTIVE_WORKER_SESSIONS.insert(
@@ -801,15 +828,20 @@ impl ExternalCliRuntime {
             );
         }
         let session_key = request.session_key.clone();
+        let mut stop_ack = None;
         let result = tokio::select! {
-            _ = stop_rx.recv() => {
+            maybe_stop = stop_rx.recv() => {
                 let _ = worker.terminate().await;
+                stop_ack = maybe_stop;
                 Ok(ExternalCliRunResult::stopped(request.session_key.clone(), request.adapter.clone()))
             }
             result = worker.wait_final() => result,
         };
         if let Some(session_key) = session_key.as_deref() {
             ACTIVE_WORKER_SESSIONS.remove(session_key);
+        }
+        if let Some(stop_request) = stop_ack {
+            stop_request.ack();
         }
         result
     }
@@ -1593,12 +1625,13 @@ fn terminate_process_impl(pid: u32) -> Result<(), String> {
     }
 
     match signal_process_group_or_child(pid, nix::sys::signal::Signal::SIGTERM) {
-        Ok(()) => {
+        Ok(ProcessSignalOutcome::Signaled) => {
             schedule_process_group_force_kill(pid);
             Ok(())
         }
-        Err(Errno::ESRCH) => {
-            // Entire group is already gone — nothing to do
+        Ok(ProcessSignalOutcome::NotFound) | Err(Errno::ESRCH) => {
+            // Entire group is already gone — nothing to do, and do not schedule
+            // a delayed SIGKILL that could hit a reused pid/process group.
             Ok(())
         }
         Err(error) => Err(format!("failed to terminate process group {pid}: {error}")),
@@ -1606,10 +1639,17 @@ fn terminate_process_impl(pid: u32) -> Result<(), String> {
 }
 
 #[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProcessSignalOutcome {
+    Signaled,
+    NotFound,
+}
+
+#[cfg(unix)]
 fn signal_process_group_or_child(
     pid: u32,
     signal: nix::sys::signal::Signal,
-) -> Result<(), nix::errno::Errno> {
+) -> Result<ProcessSignalOutcome, nix::errno::Errno> {
     use nix::errno::Errno;
     use nix::sys::signal::kill;
     use nix::unistd::Pid;
@@ -1618,11 +1658,13 @@ fn signal_process_group_or_child(
     // Signal the process group first so shell-spawned children are covered.
     let group_pid = Pid::from_raw(-(pid as i32));
     match kill(group_pid, signal) {
-        Ok(()) | Err(Errno::ESRCH) => Ok(()),
+        Ok(()) => Ok(ProcessSignalOutcome::Signaled),
+        Err(Errno::ESRCH) => Ok(ProcessSignalOutcome::NotFound),
         Err(Errno::EPERM) => {
             let child_pid = Pid::from_raw(pid as i32);
             match kill(child_pid, signal) {
-                Ok(()) | Err(Errno::ESRCH) => Ok(()),
+                Ok(()) => Ok(ProcessSignalOutcome::Signaled),
+                Err(Errno::ESRCH) => Ok(ProcessSignalOutcome::NotFound),
                 Err(error) => Err(error),
             }
         }
@@ -1634,12 +1676,15 @@ fn signal_process_group_or_child(
 fn schedule_process_group_force_kill(pid: u32) {
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(PROCESS_KILL_GRACE_MS));
-        if let Err(error) = signal_process_group_or_child(pid, nix::sys::signal::Signal::SIGKILL) {
-            tracing::warn!(
-                pid,
-                %error,
-                "failed to force-kill process group after SIGTERM grace"
-            );
+        match signal_process_group_or_child(pid, nix::sys::signal::Signal::SIGKILL) {
+            Ok(ProcessSignalOutcome::Signaled | ProcessSignalOutcome::NotFound) => {}
+            Err(error) => {
+                tracing::warn!(
+                    pid,
+                    %error,
+                    "failed to force-kill process group after SIGTERM grace"
+                );
+            }
         }
     });
 }

@@ -36,6 +36,107 @@ fn terminate_process_group_force_kills_sigterm_ignoring_process() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn signal_process_group_reports_not_found_after_child_exits() {
+    use std::os::unix::process::CommandExt;
+    use std::process::Command as StdProcessCommand;
+
+    let mut child = StdProcessCommand::new("sh")
+        .arg("-c")
+        .arg("exit 0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .expect("spawn short-lived process");
+    let pid = child.id();
+    child.wait().expect("wait short-lived process");
+
+    assert_eq!(
+        signal_process_group_or_child(pid, nix::sys::signal::Signal::SIGTERM)
+            .expect("signal missing process group"),
+        ProcessSignalOutcome::NotFound
+    );
+    terminate_process_group(pid).expect("terminate missing process group is a no-op");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn stale_external_worker_entry_does_not_kill_pid_when_stop_receiver_is_gone() {
+    use std::os::unix::process::CommandExt;
+    use std::process::Command as StdProcessCommand;
+
+    let mut child = StdProcessCommand::new("sh")
+        .arg("-c")
+        .arg("sleep 5")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .expect("spawn protected external worker process");
+    let pid = child.id();
+    let (stop_tx, stop_rx) = tokio::sync::mpsc::unbounded_channel();
+    drop(stop_rx);
+    ACTIVE_WORKER_SESSIONS.insert(
+        "stale-external-worker".to_string(),
+        ExternalCliWorkerStopHandle { pid, stop_tx },
+    );
+
+    assert!(!request_worker_session_stop("stale-external-worker").await);
+    assert!(
+        child
+            .try_wait()
+            .expect("poll protected external worker process")
+            .is_none(),
+        "stale external worker registry entry must not terminate a pid when stop receiver is gone"
+    );
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn acknowledged_external_worker_stop_does_not_kill_pid() {
+    use std::os::unix::process::CommandExt;
+    use std::process::Command as StdProcessCommand;
+
+    let mut child = StdProcessCommand::new("sh")
+        .arg("-c")
+        .arg("sleep 5")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .expect("spawn protected external worker process");
+    let pid = child.id();
+    let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel();
+    ACTIVE_WORKER_SESSIONS.insert(
+        "acked-external-worker".to_string(),
+        ExternalCliWorkerStopHandle { pid, stop_tx },
+    );
+    let ack_task = tokio::spawn(async move {
+        if let Some(stop_request) = stop_rx.recv().await {
+            stop_request.ack();
+        }
+    });
+
+    assert!(request_worker_session_stop("acked-external-worker").await);
+    ack_task.await.expect("ack task");
+    assert!(
+        child
+            .try_wait()
+            .expect("poll protected external worker process")
+            .is_none(),
+        "acknowledged external worker stop must not be followed by pid termination"
+    );
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 #[test]
 fn external_cli_adapter_parser_maps_progress_events() {
     let stdout = r#"{"type":"run_started","content":"start"}

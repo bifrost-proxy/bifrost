@@ -97,7 +97,7 @@
 | [api-group.md](./api-group.md) | Group API | 13 | 团队组列表/详情、团队规则 CRUD、权限校验 |
 | [api-search.md](./api-search.md) | Search API | 16 | 全文搜索、搜索范围、过滤条件、分页、流式搜索 |
 | [api-auth.md](./api-auth.md) | Auth API | 12 | 鉴权状态查询、登录、密码管理、远程访问开关、JWT 会话吊销 |
-| [api-sync.md](./api-sync.md) | Sync API | 33 | 同步状态/配置/登录/登出/运行/Session，Env/Room/User 代理转发端点，CI/沙箱 token-only 默认 Provider 与 token+URL 直登，启动登录预检 |
+| [api-sync.md](./api-sync.md) | Sync API | 34 | 同步状态/配置/登录/登出/运行/Session，Env/Room/User 代理转发端点，CI/沙箱 token-only 默认 Provider 与 token+URL 直登，启动登录预检与调试环境变量禁用自动弹窗 |
 | [api-misc.md](./api-misc.md) | Misc API | 32 | Syntax 语法信息、App Icon、WebSocket 连接、Audit 审计日志、Bifrost File 导入导出 |
 
 ### 代理核心功能测试

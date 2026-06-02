@@ -304,13 +304,15 @@
 - 启动服务时必须配置临时数据目录，避免覆盖正在运行的服务数据
 - 必须采用立即编译运行的方式，避免使用已编译的二进制文件
 - **⛔ 必须加上 `--no-system-proxy`**：除非测试目标明确涉及系统代理功能（如 `test_system_proxy_e2e.sh`），否则启动 Bifrost 时必须携带 `--no-system-proxy` 参数。原因：Bifrost 默认会修改操作系统的系统代理配置，在开发/测试环境中这会导致网络中断，影响其他进程和开发体验。
+- **⛔ 必须禁用 Sync 自动登录弹窗**：除非测试目标明确涉及 Sync 启动自动登录引导，否则开发、调试、E2E、human_tests 启动 Bifrost 时必须设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`。原因：Sync 默认启用后会在远端可达且本地未登录时自动打开登录页；多数测试不需要这个交互，意外弹窗会干扰自动化、污染用户体验并造成误判。
 - 示例：
 
 ```bash
-BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl --no-system-proxy
+BIFROST_DATA_DIR=./.bifrost-test BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 cargo run --bin bifrost -- start -p 8800 --unsafe-ssl --no-system-proxy
 ```
 
 > **唯一豁免场景**：当测试用例的验证目标本身就是系统代理功能时（如需要验证 `--system-proxy` 开启/关闭行为），可以省略 `--no-system-proxy` 或显式使用 `--system-proxy`。此类场景必须在测试用例文档中明确标注。
+> **Sync 弹窗豁免场景**：当测试用例的验证目标本身就是启动登录预检、自动打开登录页或登录弹窗去重时，可以省略 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`。此类场景必须在测试用例文档中明确标注，并优先使用 `BIFROST_SYNC_LOGIN_BROWSER_DRY_RUN_FILE` 记录登录 URL，避免真实打开浏览器。
 
 ## 工作区测试要求
 

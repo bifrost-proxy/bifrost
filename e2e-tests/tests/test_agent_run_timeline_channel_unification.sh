@@ -229,7 +229,9 @@ assert any(call.get("tool_name") == "update_plan" for call in im_response.get("t
 row = next(item for item in sessions.get("sessions", []) if item.get("session_key") == session_key)
 assert row.get("has_timeline") is True, row
 assert row.get("timeline_event_count", 0) >= 6, row
-assert row.get("run_state") == "completed", row
+assert row.get("running") is False, row
+assert row.get("state") == "idle", row
+assert row.get("run_state") == "idle", row
 history_path = row.get("history_path")
 assert history_path, row
 print(history_path)

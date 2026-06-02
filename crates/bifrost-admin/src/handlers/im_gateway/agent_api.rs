@@ -944,13 +944,17 @@ pub(super) async fn handle_agent(
         let mut worker =
             crate::im_gateway::agent_worker::AgentWorkerClient::spawn_or_fallback(worker_request)
                 .await;
-        let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel::<
+            crate::im_gateway::agent_worker::AgentWorkerStopRequest,
+        >();
         let worker_pid = worker.child_id().unwrap_or(0);
         crate::im_gateway::agent_worker::register_active_worker(&session_key, worker_pid, stop_tx);
+        let mut stop_ack = None;
         let result = loop {
             tokio::select! {
-                _ = stop_rx.recv() => {
+                maybe_stop = stop_rx.recv() => {
                     let _ = worker.terminate().await;
+                    stop_ack = maybe_stop;
                     break Err("已收到 /stop，Agent worker 子进程已停止。".to_string());
                 }
                 event = worker.next_event() => {
@@ -994,6 +998,9 @@ pub(super) async fn handle_agent(
             None,
         );
         service.agent_session_manager.return_session(session);
+        if let Some(stop_request) = stop_ack {
+            stop_request.ack();
+        }
         match result {
             Ok(turn_result) => {
                 info!(

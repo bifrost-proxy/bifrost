@@ -28,14 +28,14 @@ Bifrost Sync API 提供云端同步管理功能，包括同步状态查询、配
 **预期结果**：
 - 返回 HTTP 200
 - 响应为 JSON 对象，包含以下字段：
-  - `enabled`：布尔值（初始为 `false`）
+  - `enabled`：布尔值（初始为 `true`）
   - `auto_sync`：布尔值
   - `remote_base_url`：字符串（远程服务地址）
   - `has_session`：`false`（未登录）
   - `reachable`：布尔值
   - `authorized`：`false`
   - `syncing`：`false`
-  - `reason`：`"disabled"`（因 enabled 为 false）
+  - `reason`：`"unauthorized"`、`"unreachable"` 或其他当前同步运行状态（取决于启动登录预检和远端可达性）
   - `last_sync_at`：`null`
   - `last_sync_action`：`null`
   - `last_error`：`null` 或字符串
@@ -621,6 +621,41 @@ Bifrost Sync API 提供云端同步管理功能，包括同步状态查询、配
 **真实执行记录**：
 - 2026-06-02：执行 `bash e2e-tests/tests/test_sync_startup_login_preflight_e2e.sh` 通过。脚本使用临时数据目录、本地 mock sync server、`--no-system-proxy` 和 `BIFROST_SYNC_LOGIN_BROWSER_DRY_RUN_FILE`，验证可达远端首次启动只记录 1 条 `/v4/sso/logout?next=...` 登录 URL，`sync-state.json` 写入 `startup_login_prompt`，同一数据目录重启后登录 URL 仍只有 1 条；不可达本地端口场景等待三次短间隔启动预检后没有记录登录 URL。
 - 2026-06-02：CI 回归 `test_sync_login_direct_e2e.sh` 发现启动预检重试等待会延迟 token 登录授权；修复后执行 `bash e2e-tests/tests/test_sync_login_direct_e2e.sh` 通过，验证 token 登录后 `/api/sync/status` 及时返回 `authorized:true` 和 `user_id:"ci-user"`。
+
+---
+
+### TC-ASN-34：启动登录预检 — 调试环境变量禁用自动弹窗
+
+**操作步骤**：
+1. 执行隔离 E2E 脚本：
+   ```bash
+   bash e2e-tests/tests/test_sync_startup_login_preflight_e2e.sh
+   ```
+2. 脚本中的 `environment disables startup login prompt` 场景会启动本地 mock sync server，并使用临时数据目录写入启用状态的 Sync 配置：
+   ```toml
+   [sync]
+   enabled = true
+   auto_sync = true
+   remote_base_url = "http://127.0.0.1:<mock_sync_port>"
+   probe_interval_secs = 2
+   connect_timeout_ms = 500
+   ```
+3. 启动 Bifrost 时额外设置：
+   ```bash
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1
+   ```
+4. 同时设置 `BIFROST_SYNC_LOGIN_BROWSER_DRY_RUN_FILE`，用文件记录本来要打开的登录 URL，避免真实弹浏览器。
+5. 等待管理端 ready 后继续等待 1 秒，检查 dry-run 文件中 `/v4/sso/logout?next=...` 登录 URL 数量。
+6. 如果生成了 `sync-state.json`，检查其中没有写入 `startup_login_prompt`。
+
+**预期结果**：
+- 即使 Sync 默认启用、远端可达且本地无 token，设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1` 后也不会自动打开登录页。
+- 禁用自动登录引导不会写入 `startup_login_prompt`，因此不会把“已经自动弹过”状态错误持久化。
+- 该环境变量只影响启动自动弹窗；手动 `bifrost sync login` 和 Admin API 空 body 登录仍可主动打开浏览器。
+- 未登录状态下后台 tick 不会继续探测远端并反复弹窗。
+
+**真实执行记录**：
+- 2026-06-02：执行 `bash e2e-tests/tests/test_sync_startup_login_preflight_e2e.sh` 通过。脚本真实启动当前源码构建的 Bifrost，新增 `environment disables startup login prompt` 场景设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、临时 `BIFROST_DATA_DIR`、`--no-system-proxy` 和 `BIFROST_SYNC_LOGIN_BROWSER_DRY_RUN_FILE`，确认远端可达且无 token 时 dry-run 登录 URL 数量仍为 0，并且没有持久化 `startup_login_prompt`。
 
 ---
 

@@ -26,6 +26,7 @@ const STARTUP_LOGIN_PREFLIGHT_MAX_ATTEMPTS: usize = 3;
 const STARTUP_LOGIN_PREFLIGHT_RETRY_DELAY_SECS: u64 = 15;
 const STARTUP_LOGIN_PREFLIGHT_RETRY_DELAY_MS_ENV: &str =
     "BIFROST_SYNC_STARTUP_LOGIN_PREFLIGHT_RETRY_DELAY_MS";
+const DISABLE_AUTO_LOGIN_PROMPT_ENV: &str = "BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT";
 const LOGIN_BROWSER_DRY_RUN_FILE_ENV: &str = "BIFROST_SYNC_LOGIN_BROWSER_DRY_RUN_FILE";
 
 pub type SharedSyncManager = Arc<SyncManager>;
@@ -703,6 +704,15 @@ impl SyncManager {
     }
 
     async fn startup_login_preflight_with_delay(&self, retry_delay: Duration) -> Result<()> {
+        if startup_login_preflight_disabled_by_env() {
+            tracing::info!(
+                target: "bifrost_sync::manager",
+                env = DISABLE_AUTO_LOGIN_PROMPT_ENV,
+                "sync startup login preflight skipped because auto login prompt is disabled by environment"
+            );
+            return Ok(());
+        }
+
         for attempt in 1..=STARTUP_LOGIN_PREFLIGHT_MAX_ATTEMPTS {
             let config = self.config_manager.config().await;
             if !config.sync.enabled {
@@ -1336,6 +1346,19 @@ fn startup_login_preflight_retry_delay() -> Duration {
         .unwrap_or_else(|| Duration::from_secs(STARTUP_LOGIN_PREFLIGHT_RETRY_DELAY_SECS))
 }
 
+fn startup_login_preflight_disabled_by_env() -> bool {
+    std::env::var(DISABLE_AUTO_LOGIN_PROMPT_ENV)
+        .ok()
+        .is_some_and(|value| is_truthy_env_value(&value))
+}
+
+fn is_truthy_env_value(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1432,6 +1455,22 @@ mod tests {
             .lines()
             .map(str::to_string)
             .collect()
+    }
+
+    #[test]
+    fn auto_login_prompt_env_accepts_truthy_values_only() {
+        for value in ["1", "true", "TRUE", "yes", "on", " on "] {
+            assert!(
+                is_truthy_env_value(value),
+                "{value:?} should disable prompt"
+            );
+        }
+        for value in ["", "0", "false", "no", "off", "disable"] {
+            assert!(
+                !is_truthy_env_value(value),
+                "{value:?} should not disable prompt"
+            );
+        }
     }
 
     #[test]
@@ -1632,6 +1671,28 @@ mod tests {
         assert!(read_dry_run_urls(&dry_run_file).is_empty());
         assert!(manager.state.lock().startup_login_prompt.is_none());
         assert_eq!(manager.runtime.read().await.reason, SyncReason::Unreachable);
+    }
+
+    #[tokio::test]
+    async fn startup_login_preflight_skips_when_disabled_by_env() {
+        let _env_lock = env_lock().lock().await;
+        let (remote_base_url, hits) = spawn_sso_check_server(vec![200]).await;
+        let (temp_dir, _config_manager, manager) = sync_manager_for_remote(&remote_base_url).await;
+        let dry_run_file = temp_dir.path().join("opened-login-urls.txt");
+        let _dry_run_guard = EnvVarGuard::set(
+            LOGIN_BROWSER_DRY_RUN_FILE_ENV,
+            dry_run_file.to_str().unwrap(),
+        );
+        let _disable_guard = EnvVarGuard::set(DISABLE_AUTO_LOGIN_PROMPT_ENV, "1");
+
+        manager
+            .startup_login_preflight_with_delay(Duration::from_millis(1))
+            .await
+            .unwrap();
+
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+        assert!(read_dry_run_urls(&dry_run_file).is_empty());
+        assert!(manager.state.lock().startup_login_prompt.is_none());
     }
 
     #[tokio::test]
