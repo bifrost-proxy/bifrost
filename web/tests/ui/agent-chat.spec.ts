@@ -675,6 +675,8 @@ test("AI Agent Chat supports slash plan mode from the composer", async ({ page }
   await page.getByTestId("agent-chat-send").click();
   await expect.poll(() => planCalls).toBe(1);
   await expect(page.getByTestId("agent-chat-active-plan-mode")).toContainText("Plan Mode");
+  await expect(page.getByTestId("agent-chat-send")).toHaveAttribute("aria-label", "Stop");
+  await expect(page.getByTestId("agent-chat-messages")).toContainText("Planning...");
   releasePlanResponse?.();
   await expect(page.getByTestId("agent-chat-messages")).toContainText(
     "Create a migration plan",
@@ -688,7 +690,16 @@ test("AI Agent Chat supports slash plan mode from the composer", async ({ page }
   await expect(page.getByTestId("agent-chat-messages")).toContainText(
     "Verify rollback",
   );
+  await expect(page.getByTestId("agent-chat-messages")).not.toContainText("Planning...");
   await expect(page.getByTestId("agent-chat-active-plan-mode")).toHaveCount(0);
+  await expect(page.getByTestId("agent-chat-plan-mode-pill")).toHaveCount(0);
+  await expect(page.getByTestId("agent-chat-input-hint")).toHaveText(
+    "Shift + Enter for a new line",
+  );
+  await expect(input).toBeEnabled();
+  await expect(input).toHaveValue("");
+  await expect(page.getByTestId("agent-chat-send")).toHaveAttribute("aria-label", "Send");
+  await expect(page.getByTestId("agent-chat-send")).toBeDisabled();
 
   await input.fill("/plan Create another migration plan");
   await page.getByTestId("agent-chat-send").click();

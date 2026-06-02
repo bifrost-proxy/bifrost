@@ -761,7 +761,9 @@ fn builtin_runner_call_stream_response(
         let mut worker =
             crate::im_gateway::agent_worker::AgentWorkerClient::spawn_or_fallback(worker_request)
                 .await;
-        let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel::<
+            crate::im_gateway::agent_worker::AgentWorkerStopRequest,
+        >();
         let worker_pid = worker.child_id().unwrap_or(0);
         crate::im_gateway::agent_worker::register_active_worker(
             &input.child_session_key,
@@ -776,10 +778,13 @@ fn builtin_runner_call_stream_response(
         let run_user_message = input.user_message.clone();
         loop {
             tokio::select! {
-                _ = stop_rx.recv() => {
+                maybe_stop = stop_rx.recv() => {
                     let _ = worker.terminate().await;
                     crate::im_gateway::agent_worker::clear_active_worker(&run_child_session_key);
                     agent_session_manager.return_session(session);
+                    if let Some(stop_request) = maybe_stop {
+                        stop_request.ack();
+                    }
                     let failed = serde_json::json!({
                         "eventType": "runner_call_failed",
                         "callId": run_call_id,

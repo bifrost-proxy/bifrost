@@ -105,10 +105,17 @@ start_bifrost() {
   local data_dir="$1"
   local port="$2"
   local open_file="$3"
+  local disable_auto_login_prompt="${4:-false}"
   local log_file="$data_dir/bifrost.log"
-  BIFROST_DATA_DIR="$data_dir" \
-    BIFROST_SYNC_LOGIN_BROWSER_DRY_RUN_FILE="$open_file" \
-    BIFROST_SYNC_STARTUP_LOGIN_PREFLIGHT_RETRY_DELAY_MS=100 \
+  local -a env_args=(
+    "BIFROST_DATA_DIR=$data_dir"
+    "BIFROST_SYNC_LOGIN_BROWSER_DRY_RUN_FILE=$open_file"
+    "BIFROST_SYNC_STARTUP_LOGIN_PREFLIGHT_RETRY_DELAY_MS=100"
+  )
+  if [[ "$disable_auto_login_prompt" == "true" ]]; then
+    env_args+=("BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1")
+  fi
+  env "${env_args[@]}" \
     "$BIFROST_BIN" start -p "$port" --unsafe-ssl --skip-cert-check --no-system-proxy \
     >"$log_file" 2>&1 &
   BIFROST_PID="$!"
@@ -159,6 +166,28 @@ PORT="$(unused_port)"
 start_bifrost "$DATA_DIR" "$PORT" "$OPEN_FILE"
 sleep 1
 [[ "$(open_count "$OPEN_FILE")" == "1" ]] || fail "expected restart to preserve one startup login open"
+stop_bifrost
+
+echo "[sync-startup-preflight] case: environment disables startup login prompt"
+DISABLED_DATA_DIR="$TEST_DIR/disabled-prompt-data"
+mkdir -p "$DISABLED_DATA_DIR"
+cat >"$DISABLED_DATA_DIR/config.toml" <<EOF
+[sync]
+enabled = true
+auto_sync = true
+remote_base_url = "${MOCK_URL}"
+probe_interval_secs = 2
+connect_timeout_ms = 500
+EOF
+DISABLED_OPEN_FILE="$TEST_DIR/disabled-opened-login-urls.txt"
+PORT="$(unused_port)"
+start_bifrost "$DISABLED_DATA_DIR" "$PORT" "$DISABLED_OPEN_FILE" true
+sleep 1
+[[ "$(open_count "$DISABLED_OPEN_FILE")" == "0" ]] || fail "disabled auto login prompt should not open login"
+if [[ -f "$DISABLED_DATA_DIR/sync-state.json" ]]; then
+  ! grep -q '"startup_login_prompt"' "$DISABLED_DATA_DIR/sync-state.json" \
+    || fail "disabled auto login prompt should not persist startup prompt state"
+fi
 stop_bifrost
 
 echo "[sync-startup-preflight] case: unreachable remote does not open after three probes"

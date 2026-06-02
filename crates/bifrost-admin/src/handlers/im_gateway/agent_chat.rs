@@ -1018,7 +1018,9 @@ pub(super) async fn process_agent_chat(
     worker_request.default_message_channel = message_channel;
     let mut worker =
         crate::im_gateway::agent_worker::AgentWorkerClient::spawn_or_fallback(worker_request).await;
-    let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel::<
+        crate::im_gateway::agent_worker::AgentWorkerStopRequest,
+    >();
     // pid=0 signals in-process worker (no external process to kill on stop)
     let worker_pid = worker.child_id().unwrap_or(0);
     crate::im_gateway::agent_worker::register_active_worker(session_key, worker_pid, stop_tx);
@@ -1026,6 +1028,7 @@ pub(super) async fn process_agent_chat(
     let mut result: Result<bifrost_agent::TurnResult, String> =
         Err("agent worker exited without result".to_string());
     let mut worker_history_path: Option<String> = None;
+    let mut stop_ack = None;
     loop {
         forward_pending_guides_to_worker(
             guide_channel.as_ref(),
@@ -1038,8 +1041,9 @@ pub(super) async fn process_agent_chat(
             _ = wait_for_guide_notification(guide_channel.as_ref()) => {
                 continue;
             }
-            _ = stop_rx.recv() => {
+            maybe_stop = stop_rx.recv() => {
                 let _ = worker.terminate().await;
+                stop_ack = maybe_stop;
                 result = Err("已收到 /stop，Agent worker 子进程已停止。".to_string());
                 break;
             }
@@ -1118,6 +1122,9 @@ pub(super) async fn process_agent_chat(
     );
     session_manager.return_session(session);
     session_manager.cleanup_expired();
+    if let Some(stop_request) = stop_ack {
+        stop_request.ack();
+    }
 
     // Separate main response and tool calls for card rendering
     let mut progress_failed = false;
