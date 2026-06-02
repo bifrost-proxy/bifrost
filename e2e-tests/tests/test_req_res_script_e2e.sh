@@ -86,10 +86,15 @@ write_scripts() {
     mkdir -p "$TEST_DATA_DIR/scripts/request"
     mkdir -p "$TEST_DATA_DIR/scripts/response"
     mkdir -p "$TEST_DATA_DIR/scripts/decode"
+    mkdir -p "$TEST_DATA_DIR/scripts/parser"
 
     cat > "$TEST_DATA_DIR/scripts/request/req_script.js" <<'EOF'
 request.headers["X-ReqScript"] = "enabled";
 request.headers["X-ReqScript-Protocol"] = request.protocol;
+
+if (request.path.indexOf("/https-req-method") >= 0) {
+  request.method = "PUT";
+}
 
 // 默认用固定 body，保证基础用例稳定；skip-decode 用例使用 /echo-skip 保留原始大 body。
 if (request.method === "POST" && request.path.indexOf("/echo-skip") < 0) {
@@ -117,6 +122,11 @@ if (response.request.path.indexOf("/anything/http-repro") >= 0 || response.reque
 if (response.request.path.indexOf("/res-body") >= 0 && response.body) {
   response.body = response.body + "::res-script";
 }
+if (response.request.path.indexOf("/mock-repro") >= 0) {
+  response.status = 211;
+  response.headers["x-mock-script"] = "ran";
+  response.body = (response.body || "") + "::mock-res-script";
+}
 EOF
 
     cat > "$TEST_DATA_DIR/scripts/decode/decode_script.js" <<'EOF'
@@ -136,6 +146,18 @@ if (ctx.phase === "request") {
     msg: "",
   };
 }
+EOF
+
+    cat > "$TEST_DATA_DIR/scripts/parser/local_echo.js" <<'EOF'
+ctx.output = {
+  code: "0",
+  data: JSON.stringify({
+    parser: "local_echo",
+    phase: ctx.phase,
+    bodyBase64: response.bodyBase64 || request.bodyBase64 || ""
+  }),
+  msg: ""
+};
 EOF
 }
 
@@ -234,6 +256,39 @@ https_request_via_proxy() {
         -o "$body_file" \
         -w '%{http_code}' \
         "$url" 2>/dev/null) || HTTP_STATUS="000"
+    HTTP_HEADERS="$(tr -d '\r' < "$headers_file")"
+    HTTP_BODY="$(cat "$body_file")"
+
+    rm -f "$headers_file" "$body_file"
+}
+
+https_post_via_proxy() {
+    local url="$1"
+    local data="${2:-}"
+    local headers_file
+    local body_file
+    headers_file="$(mktemp)"
+    body_file="$(mktemp)"
+
+    local curl_args=(
+        -s -k
+        -X POST
+        --connect-timeout 10
+        --max-time 20
+        --proxy "http://${PROXY_HOST}:${PROXY_PORT}"
+        --noproxy ""
+        -D "$headers_file"
+        -o "$body_file"
+        -w '%{http_code}'
+        -d "$data"
+    )
+    if [ -n "$TEST_ID" ]; then
+        curl_args+=(-H "X-Test-ID: $TEST_ID")
+    fi
+    curl_args+=("$url")
+
+    HTTP_STATUS=$(NO_PROXY="" no_proxy="" HTTP_PROXY="" http_proxy="" HTTPS_PROXY="" https_proxy="" \
+        curl "${curl_args[@]}" 2>/dev/null) || HTTP_STATUS="000"
     HTTP_HEADERS="$(tr -d '\r' < "$headers_file")"
     HTTP_BODY="$(cat "$body_file")"
 
@@ -384,6 +439,117 @@ test_https_res_script_local() {
     assert_equals "true" "$script_success" "Traffic detail should mark HTTPS resScript as successful"
 }
 
+test_https_req_script_local() {
+    local url="https://script-https.local/anything/https-req"
+    https_post_via_proxy "$url" "origin-https-body"
+    assert_status_2xx "$HTTP_STATUS" "HTTPS reqScript should allow proxy request"
+    assert_body_contains_ci '"x-reqscript": "enabled"' "$HTTP_BODY" "HTTPS reqScript should inject request header"
+    assert_body_contains_ci '"x-reqscript-protocol": "https"' "$HTTP_BODY" "HTTPS reqScript should expose https protocol"
+    assert_body_contains '"body": "body-from-reqscript"' "$HTTP_BODY" "HTTPS reqScript should update request body"
+
+    sleep 2
+    local id
+    id=$(wait_for_traffic_id "/anything/https-req" 30)
+    assert_not_empty "$id" "HTTPS reqScript traffic should be recorded"
+
+    local detail
+    detail=$(admin_get "/api/traffic/${id}")
+    local script_name
+    script_name=$(echo "$detail" | jq -r '.req_script_results[0].script_name // ""')
+    assert_equals "req_script" "$script_name" "Traffic detail should include HTTPS reqScript execution result"
+}
+
+test_https_req_script_method_local() {
+    local url="https://script-https.local/anything/https-req-method"
+    https_post_via_proxy "$url" "origin-https-body"
+    assert_status_2xx "$HTTP_STATUS" "HTTPS reqScript method rewrite should allow proxy request"
+    assert_body_contains '"method": "PUT"' "$HTTP_BODY" "HTTPS reqScript should update upstream request method"
+    assert_body_contains_ci '"x-reqscript": "enabled"' "$HTTP_BODY" "HTTPS reqScript method rewrite should still inject request header"
+
+    sleep 2
+    local id
+    id=$(wait_for_traffic_id "/anything/https-req-method" 30)
+    assert_not_empty "$id" "HTTPS reqScript method rewrite traffic should be recorded"
+
+    local detail
+    detail=$(admin_get "/api/traffic/${id}")
+    local script_name
+    script_name=$(echo "$detail" | jq -r '.req_script_results[0].script_name // ""')
+    assert_equals "req_script" "$script_name" "Traffic detail should include HTTPS reqScript method rewrite execution result"
+}
+
+test_https_decode_script_local() {
+    local url="https://script-https.local/anything/https-decode"
+    https_request_via_proxy "$url"
+    assert_status_2xx "$HTTP_STATUS" "HTTPS decode request should succeed"
+
+    sleep 2
+    local id
+    id=$(wait_for_traffic_id "/anything/https-decode" 30)
+    assert_not_empty "$id" "HTTPS decode traffic should be recorded"
+
+    local res_body
+    res_body=$(get_response_body_text "$id")
+    assert_body_contains "decoded-res::" "$res_body" "HTTPS decode should store decoded response body"
+    assert_body_contains "::req-path::/anything/https-decode" "$res_body" "HTTPS decode response phase should carry request snapshot"
+
+    local detail
+    detail=$(admin_get "/api/traffic/${id}")
+    local script_name
+    script_name=$(echo "$detail" | jq -r '.decode_res_script_results[0].script_name // ""')
+    assert_equals "decode_script" "$script_name" "Traffic detail should include HTTPS decode script execution result"
+}
+
+test_https_bp_decode_local() {
+    local url="https://script-https.local/anything/https-bp"
+    https_request_via_proxy "$url"
+    assert_status_2xx "$HTTP_STATUS" "HTTPS bp decode request should succeed"
+
+    sleep 2
+    local id
+    id=$(wait_for_traffic_id "/anything/https-bp" 30)
+    assert_not_empty "$id" "HTTPS bp decode traffic should be recorded"
+
+    local res_body
+    res_body=$(get_response_body_text "$id")
+    assert_body_contains '"parser":"local_echo"' "$res_body" "HTTPS decode://bp should store parser output"
+    assert_body_contains '"phase":"response"' "$res_body" "HTTPS decode://bp should run response parser phase"
+
+    local detail
+    detail=$(admin_get "/api/traffic/${id}")
+    local script_type
+    script_type=$(echo "$detail" | jq -r '.decode_res_script_results[0].script_type // ""')
+    assert_equals "parser" "$script_type" "Traffic detail should record HTTPS bp parser execution result"
+}
+
+test_mock_res_script() {
+    local url="http://mock-script.local/mock-repro"
+    http_get "$url"
+    assert_equals "211" "$HTTP_STATUS" "mock resScript should override mock status"
+    assert_header_value "x-mock-script" "ran" "$HTTP_HEADERS" "mock resScript should add response header"
+    assert_body_contains "::mock-res-script" "$HTTP_BODY" "mock resScript should rewrite mock response body"
+
+    sleep 2
+    local id
+    id=$(wait_for_traffic_id "/mock-repro" 30)
+    assert_not_empty "$id" "mock resScript traffic should be recorded"
+
+    local detail
+    detail=$(admin_get "/api/traffic/${id}")
+    local script_name
+    script_name=$(echo "$detail" | jq -r '.res_script_results[0].script_name // ""')
+    assert_equals "res_script" "$script_name" "Traffic detail should include mock resScript execution result"
+}
+
+test_res_script_preserves_multi_value_headers() {
+    local url="http://script-test.local/cookies/set?a=1&b=2"
+    http_get "$url"
+    local cookie_count
+    cookie_count=$(printf '%s\n' "$HTTP_HEADERS" | grep -ci '^Set-Cookie:')
+    assert_equals "2" "$cookie_count" "resScript success should preserve multiple Set-Cookie headers"
+    assert_header_value "X-ResScript" "enabled" "$HTTP_HEADERS" "resScript should still add response header"
+}
+
 main() {
     start_mock_servers
     write_scripts
@@ -393,6 +559,12 @@ main() {
     test_req_script
     test_res_script_body
     test_https_res_script_local
+    test_https_req_script_local
+    test_https_req_script_method_local
+    test_https_decode_script_local
+    test_https_bp_decode_local
+    test_mock_res_script
+    test_res_script_preserves_multi_value_headers
     test_decode_script_bodies
     test_max_decode_input_bytes_skip
     test_max_decompress_output_bytes_fallback

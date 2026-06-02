@@ -64,7 +64,7 @@ use crate::utils::url::{
 };
 
 mod content_type;
-mod decode;
+pub(in crate::proxy::http) mod decode;
 
 use self::content_type::{
     get_content_type, is_likely_text_content_type, is_sse_response, is_streaming_response,
@@ -83,8 +83,9 @@ use super::devtools::{
     take_devtools_client_req_id, take_devtools_client_req_id_from_uri,
 };
 use super::scripts::{
-    body_to_script_string, execute_request_scripts, execute_response_scripts,
-    header_map_to_hashmap, headers_to_hashmap, parse_url_parts, script_string_to_body,
+    apply_script_headers_to_header_map, body_to_script_string, execute_request_scripts,
+    execute_response_scripts, header_map_to_hashmap, headers_to_hashmap, parse_url_parts,
+    script_string_to_body,
 };
 
 fn apply_request_context(record: &mut TrafficRecord, ctx: &RequestContext) {
@@ -809,7 +810,7 @@ pub async fn handle_http_request(
     if let Some(mut mock_response) =
         generate_mock_response(&resolved_rules, &uri, verbose_logging, ctx).await
     {
-        let transformed_mock_body = if needs_body_processing(&resolved_rules) {
+        let mut transformed_mock_body = if needs_body_processing(&resolved_rules) {
             let (response, body) = apply_immediate_response_body_rules(
                 mock_response,
                 &resolved_rules,
@@ -824,6 +825,84 @@ pub async fn handle_http_request(
         } else {
             None
         };
+
+        let mut res_script_results = Vec::new();
+        if !resolved_rules.res_scripts.is_empty() {
+            let (mut res_parts, res_body) = mock_response.into_parts();
+            let mut final_body = if let Some(body) = transformed_mock_body.take() {
+                body
+            } else {
+                res_body
+                    .collect()
+                    .await
+                    .map_err(|e| {
+                        BifrostError::Network(format!("Failed to read immediate response: {}", e))
+                    })?
+                    .to_bytes()
+            };
+            let mut res_script_status = res_parts.status.as_u16();
+            let mut res_script_status_text = res_parts
+                .status
+                .canonical_reason()
+                .unwrap_or("OK")
+                .to_string();
+            let mut res_script_headers = header_map_to_hashmap(&res_parts.headers);
+            let original_script_headers = res_script_headers.clone();
+            let mut res_script_body = body_to_script_string(
+                &final_body,
+                response_content_encoding(&res_parts).as_deref(),
+                max_decompress_output_bytes,
+            );
+            let req_script_headers = headers_to_hashmap(&headers_to_pairs(req.headers()));
+            let mut values = resolved_rules.values.clone();
+            let state_values = get_values_from_state(&admin_state).await;
+            for (key, value) in state_values {
+                values.entry(key).or_insert(value);
+            }
+
+            let results = execute_response_scripts(
+                &admin_state,
+                &resolved_rules.res_scripts,
+                ctx,
+                &resolved_rules,
+                &record_url,
+                &method,
+                &req_script_headers,
+                &mut res_script_status,
+                &mut res_script_status_text,
+                &mut res_script_headers,
+                &mut res_script_body,
+                &values,
+            )
+            .await;
+
+            if results.iter().any(|result| result.success) {
+                if let Ok(new_status) = StatusCode::from_u16(res_script_status) {
+                    res_parts.status = new_status;
+                }
+                res_parts.headers = apply_script_headers_to_header_map(
+                    &res_parts.headers,
+                    &original_script_headers,
+                    &res_script_headers,
+                );
+                if let Some(ref new_body) = res_script_body {
+                    let encoded = script_string_to_body(
+                        new_body,
+                        response_content_encoding(&res_parts).as_deref(),
+                    );
+                    set_content_encoding_header(
+                        &mut res_parts.headers,
+                        encoded.content_encoding.as_deref(),
+                    );
+                    final_body = encoded.body;
+                }
+            }
+
+            normalize_res_headers(&mut res_parts, BodyMode::Known(final_body.len()), &method);
+            mock_response = Response::from_parts(res_parts, full_body(final_body.clone()));
+            transformed_mock_body = Some(final_body);
+            res_script_results = results;
+        }
 
         if verbose_logging {
             info!("[{}] [MOCK] returning mock response", ctx.id_str());
@@ -877,6 +956,9 @@ pub async fn handle_http_request(
             record.has_rule_hit = has_rules;
             record.matched_rules = crate::utils::build_matched_rules(&resolved_rules);
             apply_request_context(&mut record, ctx);
+            if !res_script_results.is_empty() {
+                record.res_script_results = Some(res_script_results.clone());
+            }
             record.response_body_ref = if let Some(ref body_store) = state.body_store {
                 let store = body_store.read();
                 store.store(ctx.id_str(), "res", mock_res_body.as_ref())
@@ -1252,6 +1334,7 @@ pub async fn handle_http_request(
     let req_script_results = if has_req_scripts && !skip_req_scripts {
         let mut script_method = method.clone();
         let mut script_headers = header_map_to_hashmap(&parts.headers);
+        let original_script_headers = script_headers.clone();
         let mut script_body = body_to_script_string(
             &final_body,
             header_content_encoding(&parts.headers).as_deref(),
@@ -1276,16 +1359,11 @@ pub async fn handle_http_request(
                 parts.method = new_method;
             }
 
-            let mut new_headers = hyper::HeaderMap::new();
-            for (key, value) in &script_headers {
-                if let (Ok(name), Ok(val)) = (
-                    hyper::header::HeaderName::from_bytes(key.as_bytes()),
-                    hyper::header::HeaderValue::from_str(value),
-                ) {
-                    new_headers.insert(name, val);
-                }
-            }
-            parts.headers = new_headers;
+            parts.headers = apply_script_headers_to_header_map(
+                &parts.headers,
+                &original_script_headers,
+                &script_headers,
+            );
 
             if let Some(ref new_body) = script_body {
                 let encoded = script_string_to_body(
@@ -2500,6 +2578,7 @@ pub async fn handle_http_request(
             .unwrap_or("OK")
             .to_string();
         let mut res_script_headers = header_map_to_hashmap(&res_parts.headers);
+        let original_script_headers = res_script_headers.clone();
         let mut res_script_body = body_to_script_string(
             &final_res_body,
             response_content_encoding(&res_parts).as_deref(),
@@ -2529,16 +2608,11 @@ pub async fn handle_http_request(
                 res_parts.status = new_status;
             }
 
-            let mut new_headers = hyper::HeaderMap::new();
-            for (key, value) in &res_script_headers {
-                if let (Ok(name), Ok(val)) = (
-                    hyper::header::HeaderName::from_bytes(key.as_bytes()),
-                    hyper::header::HeaderValue::from_str(value),
-                ) {
-                    new_headers.insert(name, val);
-                }
-            }
-            res_parts.headers = new_headers;
+            res_parts.headers = apply_script_headers_to_header_map(
+                &res_parts.headers,
+                &original_script_headers,
+                &res_script_headers,
+            );
 
             if let Some(ref new_body) = res_script_body {
                 let encoded = script_string_to_body(

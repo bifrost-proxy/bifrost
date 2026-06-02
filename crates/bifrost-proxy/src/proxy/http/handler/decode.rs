@@ -22,9 +22,9 @@ fn builtin_decode_utf8(input: &[u8]) -> Vec<u8> {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct DecodeForStorageResult {
-    pub(super) output: Bytes,
-    pub(super) results: Vec<bifrost_script::ScriptExecutionResult>,
+pub(in crate::proxy::http) struct DecodeForStorageResult {
+    pub(in crate::proxy::http) output: Bytes,
+    pub(in crate::proxy::http) results: Vec<bifrost_script::ScriptExecutionResult>,
 }
 
 fn truncate_string(s: String, max_len: usize) -> String {
@@ -47,7 +47,7 @@ fn limit_script_logs(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn apply_decode_scripts_for_storage(
+pub(in crate::proxy::http) async fn apply_decode_scripts_for_storage(
     admin_state: &Option<Arc<AdminState>>,
     script_names: &[String],
     phase: &str,

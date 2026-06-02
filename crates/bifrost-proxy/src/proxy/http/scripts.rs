@@ -4,6 +4,7 @@ use std::sync::Arc;
 use bifrost_admin::AdminState;
 use bifrost_script::{MatchedRuleInfo, RequestData, ResponseData, ScriptContext, ScriptType};
 use bytes::Bytes;
+use hyper::header::{HeaderName, HeaderValue};
 
 use crate::server::ResolvedRules;
 use crate::transform::{compress_body, try_decompress_body_with_limit, ContentInjectionResult};
@@ -58,6 +59,62 @@ pub(in crate::proxy::http) fn header_map_to_hashmap(
         map.insert(key.to_string(), value.to_str().unwrap_or("").to_string());
     }
     map
+}
+
+fn lower_header_map(headers: &HashMap<String, String>) -> HashMap<String, (String, String)> {
+    headers
+        .iter()
+        .map(|(key, value)| (key.to_ascii_lowercase(), (key.clone(), value.clone())))
+        .collect()
+}
+
+pub(in crate::proxy::http) fn apply_script_headers_to_header_map(
+    original_headers: &hyper::HeaderMap,
+    original_script_headers: &HashMap<String, String>,
+    updated_script_headers: &HashMap<String, String>,
+) -> hyper::HeaderMap {
+    let original_script_headers = lower_header_map(original_script_headers);
+    let updated_script_headers = lower_header_map(updated_script_headers);
+    let mut result = hyper::HeaderMap::new();
+    let mut rewritten = std::collections::HashSet::new();
+
+    for (name, value) in original_headers {
+        let lower_name = name.as_str().to_ascii_lowercase();
+        match updated_script_headers.get(&lower_name) {
+            Some((_, updated_value))
+                if original_script_headers
+                    .get(&lower_name)
+                    .map(|(_, original_value)| original_value == updated_value)
+                    .unwrap_or(false) =>
+            {
+                result.append(name.clone(), value.clone());
+            }
+            Some((updated_name, updated_value)) if rewritten.insert(lower_name) => {
+                if let (Ok(name), Ok(value)) = (
+                    HeaderName::from_bytes(updated_name.as_bytes()),
+                    HeaderValue::from_str(updated_value),
+                ) {
+                    result.insert(name, value);
+                }
+            }
+            Some(_) => {}
+            None => {}
+        }
+    }
+
+    for (lower_name, (updated_name, updated_value)) in &updated_script_headers {
+        if original_script_headers.contains_key(lower_name) || rewritten.contains(lower_name) {
+            continue;
+        }
+        if let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(updated_name.as_bytes()),
+            HeaderValue::from_str(updated_value),
+        ) {
+            result.insert(name, value);
+        }
+    }
+
+    result
 }
 
 pub(in crate::proxy::http) fn body_to_script_string(
@@ -258,4 +315,59 @@ pub(in crate::proxy::http) async fn execute_response_scripts(
     }
 
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_script_headers_preserves_unchanged_multi_value_headers() {
+        let mut original = hyper::HeaderMap::new();
+        original.append("set-cookie", "a=1; Path=/".parse().unwrap());
+        original.append("set-cookie", "b=2; Path=/".parse().unwrap());
+        original.insert("content-type", "text/plain".parse().unwrap());
+
+        let original_script_headers = header_map_to_hashmap(&original);
+        let mut updated_script_headers = original_script_headers.clone();
+        updated_script_headers.insert("x-script".to_string(), "ran".to_string());
+
+        let result = apply_script_headers_to_header_map(
+            &original,
+            &original_script_headers,
+            &updated_script_headers,
+        );
+
+        let cookies: Vec<_> = result
+            .get_all("set-cookie")
+            .iter()
+            .map(|value| value.to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(cookies, vec!["a=1; Path=/", "b=2; Path=/"]);
+        assert_eq!(result.get("x-script").unwrap(), "ran");
+    }
+
+    #[test]
+    fn apply_script_headers_rewrites_touched_multi_value_header_once() {
+        let mut original = hyper::HeaderMap::new();
+        original.append("set-cookie", "a=1; Path=/".parse().unwrap());
+        original.append("set-cookie", "b=2; Path=/".parse().unwrap());
+
+        let original_script_headers = header_map_to_hashmap(&original);
+        let mut updated_script_headers = original_script_headers.clone();
+        updated_script_headers.insert("set-cookie".to_string(), "c=3; Path=/".to_string());
+
+        let result = apply_script_headers_to_header_map(
+            &original,
+            &original_script_headers,
+            &updated_script_headers,
+        );
+
+        let cookies: Vec<_> = result
+            .get_all("set-cookie")
+            .iter()
+            .map(|value| value.to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(cookies, vec!["c=3; Path=/"]);
+    }
 }
