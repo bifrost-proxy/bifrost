@@ -28,7 +28,7 @@ Bifrost 主进程同时承载流量代理、Admin API、IM Gateway 与 Agent/Run
    - worker stop 先发 stdio stop，再超时 kill worker 进程组，同时 worker 内 stop 会清理自身已启动的 external CLI 子进程。
 3. 覆盖入口。
    - Web/Admin `/api/agent/chat/stream` 使用内置 Agent worker。
-   - IM built-in Agent `process_agent_chat()` 使用内置 Agent worker，并把主进程 guide queue 转发为 worker `Guide` 命令。
+   - IM built-in Agent `process_agent_chat()` 使用内置 Agent worker，并把主进程 guide queue 转发为 worker `Guide` 命令；主进程等待 worker event 时必须同时监听 guide channel notification，避免 worker 正在等待模型响应或长工具期间 guide 被卡到下一次 worker event 才转发。
    - Web/Admin `/api/im-gateway/agent/chat` 非流式测试入口使用内置 Agent worker。
    - `bifrost-e2e` 自定义 E2E runner 在 CI 中作为 `current_exe()` 启动 worker 时，也必须支持隐藏 `agent worker` 与 `agent external-runner-worker` pass-through 入口，避免 in-process E2E 服务把 worker 子进程误启动为普通测试 runner。
    - Slash runner-call 目标为 built-in Agent 时使用内置 Agent worker。
@@ -84,6 +84,7 @@ CI shell E2E worker 隔离回归：
 - `test_agent_chat_history_continue.sh`：worker 续聊恢复 JSONL runtime state，`plan_steps` 不丢失。
 - `test_agent_direct_path_switch.sh`：worker 返回 `work_dir_switched` 后主进程 session state 立即更新，后续 `/status` 显示新工作目录。
 - `test_agent_run_timeline_channel_unification.sh`：worker 写入 run_state 时保留请求来源 `api` / `web`，不把所有状态归因成 `worker` 或 `admin-api`。
+- `test_im_guide_queue_human_api.sh`：内置 IM Agent active turn 阻塞在 worker/mock model 时，busy 普通 IM 消息默认进入 guide；guide notify 必须唤醒主进程并立即转发给 worker，不等待 worker 产生下一条 event。
 
 ### 真实场景测试
 
@@ -103,7 +104,7 @@ CI shell E2E worker 隔离回归：
 
 - 复核用户目标：默认每个 Agent/Runner 会话独立进程；覆盖 built-in、IM、ChatGPT/Codex/custom runner；主进程只代理输入输出；stop 不依赖同进程 cooperative loop。
 - Review 范围：`agent_worker.rs`、`external_cli/mod.rs`、Admin/IM Agent handlers、runner-call、stop 聚合、CLI 隐藏子命令、E2E/human_tests。
-- 风险点：stdout 协议被日志污染、worker 进程组未隔离、session busy 未释放、外置 Runner stop 只停 orchestration 不停子 CLI、guide/queue 丢失、历史恢复不一致。
+- 风险点：stdout 协议被日志污染、worker 进程组未隔离、session busy 未释放、外置 Runner stop 只停 orchestration 不停子 CLI、guide/queue 丢失或因主进程未监听 guide notify 而延迟到 worker event 后才转发、历史恢复不一致。
 - 复测命令：`cargo fmt --all -- --check`、`cargo check -p bifrost-admin -p bifrost-cli`、`cargo test -p bifrost-admin agent_worker --lib`、`cargo test -p bifrost-admin external_cli --lib`、E2E、human_tests。
 
 ### 第 2 轮
