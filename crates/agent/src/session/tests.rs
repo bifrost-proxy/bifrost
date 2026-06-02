@@ -677,6 +677,59 @@ fn test_mid_turn_initial_context_excludes_base_instructions() {
 }
 
 #[test]
+fn test_mid_turn_plan_context_is_transient_model_context() {
+    use crate::tools::update_plan::{PlanStep, PlanStepStatus};
+
+    let mut session = AgentSession::new("test");
+    session.add_user_message("latest user request");
+    session.current_plan = Some(vec![
+        PlanStep {
+            step: "保留压缩前计划".to_string(),
+            status: PlanStepStatus::Completed,
+        },
+        PlanStep {
+            step: "继续执行当前 turn".to_string(),
+            status: PlanStepStatus::InProgress,
+        },
+    ]);
+    let prompt_prefix = vec![ChatMessage::system("base instructions")];
+
+    let messages = build_model_request_messages(&session, &prompt_prefix, None, true);
+    let plan_context = messages
+        .iter()
+        .find(|message| {
+            message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.contains("Current update_plan snapshot restored"))
+        })
+        .expect("transient plan context should be injected");
+
+    assert_eq!(plan_context.role, "developer");
+    assert!(plan_context
+        .content
+        .as_deref()
+        .is_some_and(|content| content.contains("保留压缩前计划")
+            && content.contains("继续执行当前 turn")
+            && content.contains("turn-local runtime state restoration hint")));
+    assert!(session.history.iter().all(|message| {
+        !message
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains("Current update_plan snapshot restored"))
+    }));
+
+    let messages_without_context =
+        build_model_request_messages(&session, &prompt_prefix, None, false);
+    assert!(messages_without_context.iter().all(|message| {
+        !message
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains("Current update_plan snapshot restored"))
+    }));
+}
+
+#[test]
 fn test_build_messages_dedupes_injected_mid_turn_context() {
     let mut session = AgentSession::new("test");
     let env_context = "<environment_context>\n<cwd>/tmp</cwd>\n</environment_context>";
@@ -768,7 +821,7 @@ async fn test_queued_continuation_compacts_before_next_model_request() {
         ChatMessage::user("<environment_context>\n<cwd>/tmp</cwd>\n</environment_context>"),
     ];
     let memory_message = ChatMessage::developer("memory context");
-    compact_mid_turn_if_needed(
+    let compacted = compact_mid_turn_if_needed(
         &client,
         &config,
         &mut session,
@@ -788,6 +841,7 @@ async fn test_queued_continuation_compacts_before_next_model_request() {
     .await
     .unwrap();
 
+    assert!(compacted);
     assert_eq!(session.compaction_count, 1);
     assert_eq!(session.total_tokens_used, Some(107));
     let expected_snapshot_tokens =

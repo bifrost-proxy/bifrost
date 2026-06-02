@@ -154,6 +154,13 @@ append ToolCallCompleted turn event
 
 Compaction prompt 必须继续参考 Codex：handoff summary 只描述当前进展、关键上下文和剩余工作，不额外向 compaction model 注入 `current_plan` 文本，也不把 `current_plan` 写入 compaction metadata。`current_plan` 只由 `plan_updated` / `plan_cleared` 事件恢复 UI 和 runtime gate；不要让 summary 阶段重新解释 checklist。
 
+2026-06-02 回归修复补充：上述约束只针对 compaction summary 生成请求和持久化 metadata。mid-turn compaction 发生后，同一个 turn 的后续模型请求必须从 runtime `session.current_plan` 临时恢复当前 plan snapshot，否则模型只能看到 handoff summary，容易把 11 步计划重写成 7 步粗粒度计划。这个恢复提示必须满足：
+
+- 只在 turn loop 内部、已经发生 mid-turn/emergency compaction 后启用。
+- 只作为下一次模型请求的 transient developer runtime context，不写入 `session.history`、不写入 JSONL，也不进入 compaction summary 请求。
+- 内容明确要求模型把它当作“当前 update_plan 快照恢复提示”，调用 `update_plan` 时仍提交完整当前快照。
+- 不跨普通新 user turn 注入；多轮对话之间仍依赖正常 history / `plan_updated` / `plan_cleared` runtime state，不把上一轮完整计划塞回模型上下文。
+
 ### 4. Runtime 收口门禁保留但不增殖
 
 现有 `plan_has_unfinished_steps()` / `plan_is_complete()` 可以保留。模型试图在 plan 未完成时结束，runtime 仍可注入提示要求补一次 `update_plan`。
@@ -173,6 +180,7 @@ Compaction prompt 必须继续参考 Codex：handoff summary 只描述当前进�
 - 当目标改变、子任务收敛或发现原计划不合适时，可以删除或重写步骤。
 - 避免把启动检查、每轮 review、每条测试命令都长期保留在同一 plan 中；最终交付证据放 final，不放进 plan。
 - Compaction / handoff prompt 不得要求保留 completed 历史步骤，也不得额外注入 plan 文本；plan 状态只属于 `plan_updated` / `plan_cleared` 结构化 runtime state 和审计记录，不属于 summary 的自然语言任务描述或 compaction metadata。
+- mid-turn compaction 后的下一次模型请求可以临时注入 `current_plan` 恢复提示，但该提示必须是 turn-local runtime context，不能持久化，不能跨新 user turn 重放。
 
 这部分只用于减少模型漂移；真正的防膨胀必须靠 runtime 快照语义保证。
 
@@ -203,6 +211,8 @@ Compaction prompt 必须继续参考 Codex：handoff summary 只描述当前进�
 - `empty_plan_snapshot_does_not_clear_unfinished_plan`：当前计划有未完成步骤时，空快照不清空 runtime state，也不发送空展示快照或写入 `plan_cleared`。
 - `persistence_replay_uses_last_plan_snapshot`：多个 `plan_updated` 回放后只保留最后一个。
 - `compaction_does_not_mutate_plan_runtime_state`：`compaction_performed` 不是 plan runtime source，不能覆盖或清空当前 plan。
+- `mid_turn_plan_context_is_transient_model_context`：mid-turn compaction 后的模型请求会从 `session.current_plan` 临时注入当前 plan snapshot，且不写入 `session.history`，关闭开关时不注入。
+- `queued_continuation_compacts_before_next_model_request`：guide / pending queue 继续 loop 前发生 mid-turn compaction 时返回已压缩信号，后续请求可启用 transient plan context。
 - `update_plan_tool_output_is_plain_text`：成功工具结果为 `Plan updated`，不包含 `UPDATE_PLAN:` 或参数 JSON。
 - `update_plan_runtime_event_is_returned_by_tool_result`：typed event 由 `UpdatePlanTool::execute()` 解析参数后放入 `ToolResult.runtime_events`，而不是从 `ToolResult.output` 或 completion 阶段反解析。
 - `failed_update_plan_does_not_emit_runtime_event`：工具失败时不产生 `PlanUpdate`，不会污染 `current_plan`。
