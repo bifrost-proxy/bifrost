@@ -1703,6 +1703,74 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 
 ---
 
+### TC-PRA-40C：HTTPS 解包链路 `reqScript` 回归
+
+**操作步骤**：
+1. 执行专项 E2E：
+   ```bash
+   CARGO_TARGET_DIR=target cargo build --release --bin bifrost
+   PROXY_PORT=8080 bash e2e-tests/tests/test_req_res_script_e2e.sh
+   ```
+2. 查看输出中的 `HTTPS reqScript should inject request header`、`HTTPS reqScript should update request body`、`HTTPS reqScript should update upstream request method`、`Traffic detail should include HTTPS reqScript execution result` 断言。
+
+**预期结果**：
+- HTTPS 解包链路命中 `reqScript://req_script` 后，上游 echo 响应体包含 `x-reqscript: enabled`
+- 上游 echo 响应体包含脚本改写后的 `body-from-reqscript`
+- `/anything/https-req-method` 场景中，上游 echo 响应体包含 `"method": "PUT"`
+- Traffic 详情包含 `req_script_results[0].script_name == "req_script"`
+
+---
+
+### TC-PRA-40D：HTTPS 解包链路 `decode` / `bp + decode://bp` 落库回归
+
+**操作步骤**：
+1. 执行专项 E2E：
+   ```bash
+   CARGO_TARGET_DIR=target cargo build --release --bin bifrost
+   PROXY_PORT=8080 bash e2e-tests/tests/test_req_res_script_e2e.sh
+   ```
+2. 查看输出中的 `HTTPS decode should store decoded response body`、`HTTPS decode://bp should store parser output`、`Traffic detail should record HTTPS bp parser execution result` 断言。
+
+**预期结果**：
+- HTTPS 解包链路命中 `decode://decode_script` 后，response body API 展示 `decoded-res::`
+- HTTPS 解包链路命中 `bp://local_echo decode://bp` 后，response body API 展示 parser 输出 `"parser":"local_echo"`
+- Traffic 详情包含 `decode_res_script_results`，其中普通 decode 为 `decode_script`，bp parser 的 `script_type` 为 `parser`
+
+---
+
+### TC-PRA-40E：mock immediate response `resScript` 回归
+
+**操作步骤**：
+1. 执行专项 E2E：
+   ```bash
+   CARGO_TARGET_DIR=target cargo build --release --bin bifrost
+   PROXY_PORT=8080 bash e2e-tests/tests/test_req_res_script_e2e.sh
+   ```
+2. 查看输出中的 `mock resScript should override mock status`、`mock resScript should rewrite mock response body`、`Traffic detail should include mock resScript execution result` 断言。
+
+**预期结果**：
+- mock response 命中 `resScript://res_script` 后客户端状态码变为 `211`
+- 响应头包含 `x-mock-script: ran`
+- Traffic 详情包含 `res_script_results[0].script_name == "res_script"`
+
+---
+
+### TC-PRA-40F：脚本成功执行时保留多值响应头
+
+**操作步骤**：
+1. 执行专项 E2E：
+   ```bash
+   CARGO_TARGET_DIR=target cargo build --release --bin bifrost
+   PROXY_PORT=8080 bash e2e-tests/tests/test_req_res_script_e2e.sh
+   ```
+2. 查看输出中的 `resScript success should preserve multiple Set-Cookie headers` 断言。
+
+**预期结果**：
+- 上游返回两个 `Set-Cookie` 时，`resScript` 成功执行后客户端仍收到两个 `Set-Cookie`
+- 响应头仍包含脚本添加的 `X-ResScript: enabled`
+
+---
+
 ### 七、高级特性
 
 ### TC-PRA-41：Values 引用 — 在操作值中使用 {varName}

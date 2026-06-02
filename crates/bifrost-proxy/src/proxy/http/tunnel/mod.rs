@@ -12,6 +12,7 @@ use bifrost_admin::{
     TrafficType, ADMIN_PATH_PREFIX,
 };
 use bifrost_core::{BifrostError, Protocol, Result};
+use bifrost_script::{RequestData, ResponseData};
 use bytes::{Bytes, BytesMut};
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
@@ -50,14 +51,16 @@ use super::devtools::{
     maybe_inject_devtools_bridge_html, take_devtools_client_req_id,
     take_devtools_client_req_id_from_uri,
 };
+use super::handler::decode::{apply_decode_scripts_for_storage, DecodeForStorageResult};
 use super::handler::{
     build_connection_error_response, build_error_body, build_overridden_error_response,
     needs_body_processing, needs_request_body_processing, needs_response_override,
     parse_and_record_sse_events, ConnectionErrorInfo,
 };
 use super::scripts::{
-    body_to_script_string, execute_response_scripts, header_map_to_hashmap,
-    header_pairs_to_hashmap, script_string_to_body,
+    apply_script_headers_to_header_map, body_to_script_string, execute_request_scripts,
+    execute_response_scripts, header_map_to_hashmap, header_pairs_to_hashmap, parse_url_parts,
+    script_string_to_body,
 };
 use super::ws_handshake::{
     header_values, negotiate_extensions, negotiate_protocol, read_http1_response_with_leftover,
@@ -267,6 +270,7 @@ pub fn requires_tls_interception_for_rules(resolved_rules: &ResolvedRules) -> bo
         || !resolved_rules.header_replace.is_empty()
         || !resolved_rules.req_scripts.is_empty()
         || !resolved_rules.res_scripts.is_empty()
+        || !resolved_rules.decode_scripts.is_empty()
         || resolved_rules.html_append.is_some()
         || resolved_rules.html_prepend.is_some()
         || resolved_rules.html_body.is_some()
@@ -2137,7 +2141,7 @@ async fn handle_intercepted_request_with_protocol(
 
     let (mut parts, body) = req.into_parts();
 
-    let actual_method = if let Some(ref method_override) = resolved_rules.method {
+    let mut actual_method = if let Some(ref method_override) = resolved_rules.method {
         if verbose_logging {
             info!(
                 "[{}] [METHOD] {} -> {}",
@@ -2181,8 +2185,12 @@ async fn handle_intercepted_request_with_protocol(
 
     let needs_req_processing = needs_request_body_processing(&resolved_rules);
     let has_req_body_override = resolved_rules.req_body.is_some();
-    let needs_req_body_read = needs_req_processing && !has_req_body_override;
+    let has_req_scripts = !resolved_rules.req_scripts.is_empty();
+    let has_res_scripts = !resolved_rules.res_scripts.is_empty();
+    let has_decode_scripts = !resolved_rules.decode_scripts.is_empty();
+    let needs_req_body_read = !has_req_body_override && (needs_req_processing || has_req_scripts);
 
+    let mut skip_req_scripts = false;
     let mut streaming_body: Option<BoxBody> = None;
     let mut req_body_capture: Option<BodyCaptureHandle> = None;
     let mut body_bytes = if needs_req_body_read {
@@ -2194,6 +2202,7 @@ async fn handle_intercepted_request_with_protocol(
                     len,
                     max_body_buffer_size
                 );
+                skip_req_scripts = true;
                 if admin_state.is_some() {
                     let (tee_body, capture) =
                         create_request_tee_body(body, admin_state.clone(), req_id.to_string());
@@ -2232,6 +2241,7 @@ async fn handle_intercepted_request_with_protocol(
                             size_display,
                             limit
                         );
+                        skip_req_scripts = true;
                         if admin_state.is_some() {
                             let (tee_body, capture) = create_request_tee_body(
                                 replay_body,
@@ -2283,6 +2293,7 @@ async fn handle_intercepted_request_with_protocol(
                         size_display,
                         limit
                     );
+                    skip_req_scripts = true;
                     if admin_state.is_some() {
                         let (tee_body, capture) = create_request_tee_body(
                             replay_body,
@@ -2359,13 +2370,83 @@ async fn handle_intercepted_request_with_protocol(
         set_content_encoding_header(&mut parts.headers, processed.content_encoding.as_deref());
         body_bytes = processed.body.to_vec();
     }
+    let mut values = HashMap::new();
+    if has_req_scripts || has_res_scripts || has_decode_scripts {
+        values = resolved_rules.values.clone();
+        let state_values = get_values_from_state(&admin_state).await;
+        for (key, value) in state_values {
+            values.entry(key).or_insert(value);
+        }
+    }
+
+    let req_script_results = if has_req_scripts && !skip_req_scripts {
+        let mut script_method = actual_method.to_string();
+        let mut script_headers = header_map_to_hashmap(&parts.headers);
+        let original_script_headers = script_headers.clone();
+        let mut script_body = body_to_script_string(
+            &Bytes::from(body_bytes.clone()),
+            parts
+                .headers
+                .get(hyper::header::CONTENT_ENCODING)
+                .and_then(|value| value.to_str().ok()),
+            max_decompress_output_bytes,
+        );
+
+        let results = execute_request_scripts(
+            &admin_state,
+            &resolved_rules.req_scripts,
+            &rule_ctx,
+            &resolved_rules,
+            &original_uri,
+            &mut script_method,
+            &mut script_headers,
+            &mut script_body,
+            &values,
+        )
+        .await;
+
+        if results.iter().any(|result| result.success) {
+            if let Ok(new_method) = script_method.parse() {
+                actual_method = new_method;
+            }
+            parts.headers = apply_script_headers_to_header_map(
+                &parts.headers,
+                &original_script_headers,
+                &script_headers,
+            );
+            if let Some(ref new_body) = script_body {
+                let encoded = script_string_to_body(
+                    new_body,
+                    get_content_encoding(
+                        &parts
+                            .headers
+                            .iter()
+                            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                            .collect::<Vec<_>>(),
+                    )
+                    .as_deref(),
+                );
+                set_content_encoding_header(
+                    &mut parts.headers,
+                    encoded.content_encoding.as_deref(),
+                );
+                body_bytes = encoded.body.to_vec();
+            }
+        }
+
+        results
+    } else {
+        Vec::new()
+    };
     let request_body_size = if !body_bytes.is_empty() {
         body_bytes.len()
     } else {
         req_content_length.unwrap_or(0)
     };
 
-    let mut new_req = Request::builder().method(actual_method).uri(&upstream_uri);
+    let mut new_req = Request::builder()
+        .method(actual_method.clone())
+        .uri(&upstream_uri);
 
     let mut skip_referer = false;
     let mut skip_ua = false;
@@ -3402,6 +3483,9 @@ async fn handle_intercepted_request_with_protocol(
 
                 record.has_rule_hit = has_rules;
                 record.matched_rules = crate::utils::build_matched_rules(&resolved_rules);
+                if !req_script_results.is_empty() {
+                    record.req_script_results = Some(req_script_results.clone());
+                }
 
                 record.request_body_ref = if let Some(ref capture) = req_body_capture {
                     capture.take()
@@ -3610,6 +3694,9 @@ async fn handle_intercepted_request_with_protocol(
 
         record.has_rule_hit = has_rules;
         record.matched_rules = crate::utils::build_matched_rules(&resolved_rules);
+        if !req_script_results.is_empty() {
+            record.req_script_results = Some(req_script_results.clone());
+        }
 
         record.request_body_ref = if let Some(ref capture) = req_body_capture {
             capture.take()
@@ -3782,7 +3869,7 @@ async fn handle_intercepted_request_with_protocol(
         final_body
     };
 
-    let res_script_results = if !resolved_rules.res_scripts.is_empty() {
+    let res_script_results = if has_res_scripts {
         let mut res_script_status = res_parts.status.as_u16();
         let mut res_script_status_text = res_parts
             .status
@@ -3790,6 +3877,7 @@ async fn handle_intercepted_request_with_protocol(
             .unwrap_or("OK")
             .to_string();
         let mut res_script_headers = header_map_to_hashmap(&res_parts.headers);
+        let original_script_headers = res_script_headers.clone();
         let current_res_headers: Vec<(String, String)> = res_parts
             .headers
             .iter()
@@ -3801,11 +3889,6 @@ async fn handle_intercepted_request_with_protocol(
             max_decompress_output_bytes,
         );
         let req_script_headers = header_pairs_to_hashmap(&final_req_headers);
-        let mut values = resolved_rules.values.clone();
-        let state_values = get_values_from_state(&admin_state).await;
-        for (key, value) in state_values {
-            values.entry(key).or_insert(value);
-        }
 
         let results = execute_response_scripts(
             &admin_state,
@@ -3828,16 +3911,11 @@ async fn handle_intercepted_request_with_protocol(
                 res_parts.status = new_status;
             }
 
-            let mut new_headers = hyper::HeaderMap::new();
-            for (key, value) in &res_script_headers {
-                if let (Ok(name), Ok(val)) = (
-                    hyper::header::HeaderName::from_bytes(key.as_bytes()),
-                    hyper::header::HeaderValue::from_str(value),
-                ) {
-                    new_headers.insert(name, val);
-                }
-            }
-            res_parts.headers = new_headers;
+            res_parts.headers = apply_script_headers_to_header_map(
+                &res_parts.headers,
+                &original_script_headers,
+                &res_script_headers,
+            );
 
             if let Some(ref new_body) = res_script_body {
                 let current_res_headers: Vec<(String, String)> = res_parts
@@ -3966,18 +4044,121 @@ async fn handle_intercepted_request_with_protocol(
                 10 * 1024 * 1024
             };
 
-            let store = body_store.read();
+            let final_req_content_encoding = get_content_encoding(&final_req_headers);
+            let decompressed_req = crate::transform::decompress_body_with_limit(
+                &Bytes::from(body_bytes.clone()),
+                final_req_content_encoding.as_deref(),
+                max_decompress_output_bytes,
+            );
+            let raw_req_body = decompressed_req.clone();
+            let req_headers_hashmap = header_pairs_to_hashmap(&final_req_headers);
+            let (req_host, req_path, req_proto) = parse_url_parts(&original_uri);
+            let request_data = RequestData {
+                url: original_uri.clone(),
+                method: actual_method.to_string(),
+                host: req_host,
+                path: req_path,
+                protocol: req_proto,
+                client_ip: client_ip.clone(),
+                client_app: client_app.clone(),
+                headers: req_headers_hashmap,
+                body: None,
+            };
+
             let final_res_content_encoding = response_content_encoding(&res_parts);
             let decompressed_res = crate::transform::decompress_body_with_limit(
                 &final_body,
                 final_res_content_encoding.as_deref(),
                 max_decompress_output_bytes,
             );
-            if let Some(body_ref) = store.store(req_id, "res", decompressed_res.as_ref()) {
-                state.update_traffic_by_id(req_id, move |record| {
-                    record.response_body_ref = Some(body_ref.clone());
-                });
-            }
+            let raw_res_body = decompressed_res.clone();
+            let final_res_headers: Vec<(String, String)> = res_parts
+                .headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect();
+            let response_data = ResponseData {
+                status: res_parts.status.as_u16(),
+                status_text: res_parts
+                    .status
+                    .canonical_reason()
+                    .unwrap_or("OK")
+                    .to_string(),
+                headers: header_pairs_to_hashmap(&final_res_headers),
+                body: None,
+                request: request_data.clone(),
+            };
+
+            let decoded_req_body = apply_decode_scripts_for_storage(
+                &admin_state,
+                &resolved_rules.decode_scripts,
+                "request",
+                &ctx,
+                &resolved_rules,
+                &request_data,
+                &response_data,
+                &values,
+                decompressed_req,
+            )
+            .await;
+            let DecodeForStorageResult {
+                output: decoded_req_output,
+                results: decoded_req_results,
+            } = decoded_req_body;
+
+            let decoded_res_body = apply_decode_scripts_for_storage(
+                &admin_state,
+                &resolved_rules.decode_scripts,
+                "response",
+                &ctx,
+                &resolved_rules,
+                &request_data,
+                &response_data,
+                &values,
+                decompressed_res,
+            )
+            .await;
+            let DecodeForStorageResult {
+                output: decoded_res_output,
+                results: decoded_res_results,
+            } = decoded_res_body;
+
+            let store = body_store.read();
+            let raw_request_body_ref = if has_decode_scripts && !raw_req_body.is_empty() {
+                store.store(req_id, "req_raw", raw_req_body.as_ref())
+            } else {
+                None
+            };
+            let raw_response_body_ref = if has_decode_scripts && !raw_res_body.is_empty() {
+                store.store(req_id, "res_raw", raw_res_body.as_ref())
+            } else {
+                None
+            };
+            let request_body_ref = if !decoded_req_output.is_empty() {
+                store.store(req_id, "req", decoded_req_output.as_ref())
+            } else {
+                None
+            };
+            let response_body_ref = store.store(req_id, "res", decoded_res_output.as_ref());
+            let has_decode_scripts_for_update = has_decode_scripts;
+            state.update_traffic_by_id(req_id, move |record| {
+                if let Some(body_ref) = request_body_ref.clone() {
+                    record.request_body_ref = Some(body_ref);
+                }
+                if let Some(body_ref) = response_body_ref.clone() {
+                    record.response_body_ref = Some(body_ref);
+                }
+                if has_decode_scripts_for_update {
+                    record.raw_request_body_ref = raw_request_body_ref.clone();
+                    record.raw_response_body_ref = raw_response_body_ref.clone();
+                    if !decoded_req_results.is_empty() {
+                        record.decode_req_script_results = Some(decoded_req_results.clone());
+                    }
+                    if !decoded_res_results.is_empty() {
+                        record.decode_res_script_results = Some(decoded_res_results.clone());
+                    }
+                }
+            });
         }
     }
 
@@ -5290,6 +5471,26 @@ mod tests {
             .map(|value| value.to_str().unwrap().to_string())
             .collect();
         assert_eq!(values, vec!["rule-value".to_string()]);
+    }
+
+    #[test]
+    fn decode_scripts_require_tls_interception() {
+        let rules = ResolvedRules {
+            decode_scripts: vec!["decode_script".to_string()],
+            ..ResolvedRules::default()
+        };
+
+        assert!(requires_tls_interception_for_rules(&rules));
+    }
+
+    #[test]
+    fn bp_scripts_alone_do_not_require_tls_interception() {
+        let rules = ResolvedRules {
+            bp_scripts: vec!["local_echo".to_string()],
+            ..ResolvedRules::default()
+        };
+
+        assert!(!requires_tls_interception_for_rules(&rules));
     }
 
     fn make_tls_config_with_ca() -> TlsConfig {
