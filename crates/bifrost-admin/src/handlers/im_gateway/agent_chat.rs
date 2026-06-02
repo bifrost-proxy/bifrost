@@ -729,6 +729,41 @@ pub(super) async fn handle_concurrent_event_during_chat(
     }
 }
 
+async fn wait_for_guide_notification(guide_channel: Option<&bifrost_agent::session::GuideChannel>) {
+    if let Some(channel) = guide_channel {
+        channel.notified().await;
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
+async fn forward_pending_guides_to_worker(
+    guide_channel: Option<&bifrost_agent::session::GuideChannel>,
+    queue_manager: &SessionQueueManager,
+    session_key: &str,
+    worker: &mut crate::im_gateway::agent_worker::AgentWorkerRun,
+) {
+    let Some(channel) = guide_channel else {
+        return;
+    };
+    let guides = channel.drain();
+    let Some(guide) = bifrost_agent::session::combine_guide_messages(guides) else {
+        return;
+    };
+    if guide.trim().is_empty() {
+        return;
+    }
+
+    queue_manager.mark_guides_handed_to_worker(session_key, std::slice::from_ref(&guide));
+    if let Err(error) = worker.send_guide(guide).await {
+        warn!(
+            session_key = %session_key,
+            error = %error,
+            "failed to forward guide message to agent worker"
+        );
+    }
+}
+
 /// Process an agent chat: run the full turn loop (with tool calls), send reply via Feishu, log the outbound message.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn process_agent_chat(
@@ -992,17 +1027,17 @@ pub(super) async fn process_agent_chat(
         Err("agent worker exited without result".to_string());
     let mut worker_history_path: Option<String> = None;
     loop {
-        if let Some(channel) = guide_channel.as_ref() {
-            let guides = channel.drain();
-            if let Some(guide) = bifrost_agent::session::combine_guide_messages(guides) {
-                if !guide.trim().is_empty() {
-                    queue_manager
-                        .mark_guides_handed_to_worker(session_key, std::slice::from_ref(&guide));
-                    let _ = worker.send_guide(guide).await;
-                }
-            }
-        }
+        forward_pending_guides_to_worker(
+            guide_channel.as_ref(),
+            queue_manager,
+            session_key,
+            &mut worker,
+        )
+        .await;
         tokio::select! {
+            _ = wait_for_guide_notification(guide_channel.as_ref()) => {
+                continue;
+            }
             _ = stop_rx.recv() => {
                 let _ = worker.terminate().await;
                 result = Err("已收到 /stop，Agent worker 子进程已停止。".to_string());
