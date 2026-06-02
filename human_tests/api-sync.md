@@ -8,7 +8,7 @@ Bifrost Sync API 提供云端同步管理功能，包括同步状态查询、配
 
 1. 启动 Bifrost 服务（使用临时数据目录避免污染正式环境）：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl
+   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl --no-system-proxy
    ```
 2. 确保端口 8800 可用且未被其他服务占用
 3. 部分用例需要有效的远程同步服务地址（默认配置即可）
@@ -584,6 +584,41 @@ Bifrost Sync API 提供云端同步管理功能，包括同步状态查询、配
 - URL-only 请求 HTTP 状态码为 400
 - URL-only 响应体包含 `"token is required"`
 - URL-only 请求不会写入新的 sync session token
+
+---
+
+### TC-ASN-33：启动登录预检 — 默认开启、可达自动弹一次、重启不重复、不可达不弹
+
+**操作步骤**：
+1. 执行隔离 E2E 脚本：
+   ```bash
+   bash e2e-tests/tests/test_sync_startup_login_preflight_e2e.sh
+   ```
+2. 脚本会启动一个本地 mock sync server，使用临时数据目录写入：
+   ```toml
+   [sync]
+   enabled = true
+   auto_sync = true
+   remote_base_url = "http://127.0.0.1:<mock_sync_port>"
+   probe_interval_secs = 2
+   connect_timeout_ms = 500
+   ```
+3. 脚本会设置 `BIFROST_SYNC_LOGIN_BROWSER_DRY_RUN_FILE`，以文件记录“本来要打开的登录 URL”，避免真实弹浏览器。
+4. 第一次启动 Bifrost，等待 dry-run 文件出现 1 条 `/v4/sso/logout?next=...` 登录 URL，并检查 `sync-state.json` 写入 `startup_login_prompt`。
+5. 使用同一临时数据目录重启 Bifrost，等待服务 ready 后确认 dry-run 文件仍只有 1 条登录 URL。
+6. 再使用另一个临时数据目录，把 `remote_base_url` 指向不可达本地端口，并设置较短的 `BIFROST_SYNC_STARTUP_LOGIN_PREFLIGHT_RETRY_DELAY_MS`。
+7. 等待足够覆盖三次短间隔启动预检后，确认不可达场景没有写入登录 URL。
+
+**预期结果**：
+- 新安装默认 Sync 配置为启用状态，启动登录预检会在无 token 时运行。
+- 可达 + 无 token + 从未自动弹过时，只自动打开 1 次登录 URL。
+- 自动打开后 `sync-state.json` 持久化 `startup_login_prompt`，后续重启不再自动打开登录 URL。
+- 不可达 + 无 token 时最多探测 3 次；3 次仍不可达时不自动打开登录 URL。
+- 未登录状态下不会继续按 `probe_interval_secs` 高频探测并反复弹窗。
+- 手动登录入口不受本用例限制，用户仍可主动执行 `bifrost sync login`。
+
+**真实执行记录**：
+- 2026-06-02：执行 `bash e2e-tests/tests/test_sync_startup_login_preflight_e2e.sh` 通过。脚本使用临时数据目录、本地 mock sync server、`--no-system-proxy` 和 `BIFROST_SYNC_LOGIN_BROWSER_DRY_RUN_FILE`，验证可达远端首次启动只记录 1 条 `/v4/sso/logout?next=...` 登录 URL，`sync-state.json` 写入 `startup_login_prompt`，同一数据目录重启后登录 URL 仍只有 1 条；不可达本地端口场景等待三次短间隔启动预检后没有记录登录 URL。
 
 ---
 

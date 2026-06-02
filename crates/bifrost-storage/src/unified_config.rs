@@ -286,7 +286,7 @@ pub const DEFAULT_REMOTE_BASE_URL: &str = "https://bifrost.bytedance.net";
 impl Default for SyncConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             auto_sync: true,
             remote_base_url: DEFAULT_REMOTE_BASE_URL.to_string(),
             probe_interval_secs: 5,
@@ -498,6 +498,8 @@ mod tests {
         assert!(config.tls.intercept_exclude.is_empty());
         assert_eq!(config.access.mode, AccessMode::Interactive);
         assert!(config.system_proxy.enabled);
+        assert!(config.sync.enabled);
+        assert_eq!(config.sync.remote_base_url, DEFAULT_REMOTE_BASE_URL);
         assert_eq!(config.ui.rules_sort_mode, "manual");
     }
 

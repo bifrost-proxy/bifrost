@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
@@ -21,6 +22,11 @@ use crate::types::{RemoteEnv, RemoteUser, SyncReason};
 
 const TOMBSTONE_MAX_AGE_SECS: i64 = 7 * 24 * 3600;
 const TOMBSTONE_MIN_AGE_SECS: i64 = 120;
+const STARTUP_LOGIN_PREFLIGHT_MAX_ATTEMPTS: usize = 3;
+const STARTUP_LOGIN_PREFLIGHT_RETRY_DELAY_SECS: u64 = 15;
+const STARTUP_LOGIN_PREFLIGHT_RETRY_DELAY_MS_ENV: &str =
+    "BIFROST_SYNC_STARTUP_LOGIN_PREFLIGHT_RETRY_DELAY_MS";
+const LOGIN_BROWSER_DRY_RUN_FILE_ENV: &str = "BIFROST_SYNC_LOGIN_BROWSER_DRY_RUN_FILE";
 
 pub type SharedSyncManager = Arc<SyncManager>;
 
@@ -36,11 +42,18 @@ struct DeletedRuleTombstone {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct StartupLoginPromptFile {
+    auto_prompted_at: String,
+    remote_base_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct SyncStateFile {
     token: Option<String>,
     user: Option<RemoteUser>,
     last_sync_at: Option<String>,
     last_sync_action: Option<SyncAction>,
+    startup_login_prompt: Option<StartupLoginPromptFile>,
     deleted_rules: HashMap<String, DeletedRuleTombstone>,
 }
 
@@ -274,7 +287,8 @@ impl SyncManager {
 
     pub async fn request_login(&self) -> Result<()> {
         let config = self.config_manager.config().await;
-        self.open_login_browser(&config.sync, true).await
+        self.open_login_browser(&config.sync, true).await?;
+        Ok(())
     }
 
     pub async fn save_token(&self, token: String) -> Result<()> {
@@ -528,6 +542,13 @@ impl SyncManager {
 
     async fn run(self: &Arc<Self>) {
         let mut receiver = self.config_manager.subscribe();
+        if let Err(error) = self.startup_login_preflight().await {
+            tracing::warn!(
+                target: "bifrost_sync::manager",
+                error = %error,
+                "sync startup login preflight failed"
+            );
+        }
         loop {
             let config = self.config_manager.config().await;
             let interval = Duration::from_secs(config.sync.probe_interval_secs.max(2));
@@ -565,6 +586,18 @@ impl SyncManager {
             return Ok(());
         }
 
+        let token = { self.state.lock().token.clone() };
+        if token.as_deref().unwrap_or("").is_empty() {
+            let mut runtime = self.runtime.write().await;
+            runtime.authorized = false;
+            runtime.syncing = false;
+            if runtime.reason != SyncReason::Unreachable {
+                runtime.reason = SyncReason::Unauthorized;
+            }
+            runtime.last_error = None;
+            return Ok(());
+        }
+
         let client = SyncHttpClient::new(&config.sync)?;
         let reachable = client.probe_reachable(&config.sync).await;
         tracing::debug!(
@@ -580,18 +613,6 @@ impl SyncManager {
             runtime.authorized = false;
             runtime.syncing = false;
             runtime.reason = SyncReason::Unreachable;
-            runtime.last_error = None;
-            return Ok(());
-        }
-
-        let token = { self.state.lock().token.clone() };
-        if token.as_deref().unwrap_or("").is_empty() {
-            let _ = self.open_login_browser(&config.sync, false).await;
-            let mut runtime = self.runtime.write().await;
-            runtime.reachable = true;
-            runtime.authorized = false;
-            runtime.syncing = false;
-            runtime.reason = SyncReason::Unauthorized;
             runtime.last_error = None;
             return Ok(());
         }
@@ -676,20 +697,132 @@ impl SyncManager {
         }
     }
 
-    async fn open_login_browser(&self, sync_config: &SyncConfig, force: bool) -> Result<()> {
+    async fn startup_login_preflight(&self) -> Result<()> {
+        self.startup_login_preflight_with_delay(startup_login_preflight_retry_delay())
+            .await
+    }
+
+    async fn startup_login_preflight_with_delay(&self, retry_delay: Duration) -> Result<()> {
+        for attempt in 1..=STARTUP_LOGIN_PREFLIGHT_MAX_ATTEMPTS {
+            let config = self.config_manager.config().await;
+            if !config.sync.enabled {
+                tracing::debug!(
+                    target: "bifrost_sync::manager",
+                    "sync startup login preflight skipped because sync is disabled"
+                );
+                return Ok(());
+            }
+            if self.has_session() {
+                tracing::debug!(
+                    target: "bifrost_sync::manager",
+                    "sync startup login preflight skipped because session token exists"
+                );
+                return Ok(());
+            }
+            if self.startup_login_already_prompted() {
+                tracing::debug!(
+                    target: "bifrost_sync::manager",
+                    "sync startup login preflight skipped because login was already auto prompted"
+                );
+                let mut runtime = self.runtime.write().await;
+                runtime.authorized = false;
+                runtime.syncing = false;
+                runtime.reason = SyncReason::Unauthorized;
+                runtime.last_error = None;
+                return Ok(());
+            }
+
+            let client = SyncHttpClient::new(&config.sync)?;
+            let reachable = client.probe_reachable(&config.sync).await;
+            tracing::debug!(
+                target: "bifrost_sync::manager",
+                attempt,
+                max_attempts = STARTUP_LOGIN_PREFLIGHT_MAX_ATTEMPTS,
+                reachable,
+                remote_base_url = %config.sync.remote_base_url,
+                "sync startup login preflight probed remote"
+            );
+            if reachable {
+                let opened = self.open_startup_login_browser(&config.sync).await?;
+                let mut runtime = self.runtime.write().await;
+                runtime.reachable = true;
+                runtime.authorized = false;
+                runtime.syncing = false;
+                runtime.reason = SyncReason::Unauthorized;
+                runtime.last_error = None;
+                drop(runtime);
+                tracing::info!(
+                    target: "bifrost_sync::manager",
+                    opened,
+                    remote_base_url = %config.sync.remote_base_url,
+                    "sync startup login preflight completed with reachable remote"
+                );
+                return Ok(());
+            }
+
+            {
+                let mut runtime = self.runtime.write().await;
+                runtime.reachable = false;
+                runtime.authorized = false;
+                runtime.syncing = false;
+                runtime.reason = SyncReason::Unreachable;
+                runtime.last_error = None;
+            }
+
+            if attempt < STARTUP_LOGIN_PREFLIGHT_MAX_ATTEMPTS {
+                tokio::time::sleep(retry_delay).await;
+            }
+        }
+
+        tracing::info!(
+            target: "bifrost_sync::manager",
+            attempts = STARTUP_LOGIN_PREFLIGHT_MAX_ATTEMPTS,
+            "sync startup login preflight stopped because remote stayed unreachable"
+        );
+        Ok(())
+    }
+
+    fn startup_login_already_prompted(&self) -> bool {
+        self.state
+            .lock()
+            .startup_login_prompt
+            .as_ref()
+            .is_some_and(|prompt| !prompt.auto_prompted_at.trim().is_empty())
+    }
+
+    async fn open_startup_login_browser(&self, sync_config: &SyncConfig) -> Result<bool> {
+        if self.startup_login_already_prompted() {
+            return Ok(false);
+        }
+        let opened = self.open_login_browser(sync_config, false).await?;
+        if opened {
+            let mut state = self.state.lock();
+            state.startup_login_prompt = Some(StartupLoginPromptFile {
+                auto_prompted_at: Utc::now().to_rfc3339(),
+                remote_base_url: sync_config
+                    .remote_base_url
+                    .trim_end_matches('/')
+                    .to_string(),
+            });
+            self.persist_state(&state)?;
+        }
+        Ok(opened)
+    }
+
+    async fn open_login_browser(&self, sync_config: &SyncConfig, force: bool) -> Result<bool> {
         let should_open = {
             let prompt = self.login_prompt.lock();
             force || prompt.last_opened_at.is_none()
         };
         if !should_open {
-            return Ok(());
+            return Ok(false);
         }
 
         let client = SyncHttpClient::new(sync_config)?;
         let login_url = client.login_url_with_reauth(sync_config, &self.local_callback_url);
         open_url_in_browser(&login_url)?;
         self.login_prompt.lock().last_opened_at = Some(Utc::now());
-        Ok(())
+        Ok(true)
     }
 
     async fn sync_rules(
@@ -1146,6 +1279,18 @@ fn merge_remote_into_local_rule(
 }
 
 fn open_url_in_browser(url: &str) -> Result<()> {
+    if let Ok(path) = std::env::var(LOGIN_BROWSER_DRY_RUN_FILE_ENV) {
+        let path = path.trim();
+        if !path.is_empty() {
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?;
+            writeln!(file, "{url}")?;
+            return Ok(());
+        }
+    }
+
     #[cfg(target_os = "macos")]
     let mut command = {
         let mut command = Command::new("open");
@@ -1173,10 +1318,111 @@ fn open_url_in_browser(url: &str) -> Result<()> {
     Ok(())
 }
 
+fn startup_login_preflight_retry_delay() -> Duration {
+    std::env::var(STARTUP_LOGIN_PREFLIGHT_RETRY_DELAY_MS_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_secs(STARTUP_LOGIN_PREFLIGHT_RETRY_DELAY_SECS))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::OnceLock;
     use tempfile::TempDir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::Mutex as TokioMutex;
+
+    fn env_lock() -> &'static TokioMutex<()> {
+        static LOCK: OnceLock<TokioMutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| TokioMutex::new(()))
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        old_value: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let old_value = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, old_value }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.old_value.as_deref() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    async fn spawn_sso_check_server(statuses: Vec<u16>) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_for_task = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let statuses = statuses.clone();
+                let hits = hits_for_task.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0_u8; 1024];
+                    let _ = stream.read(&mut buf).await;
+                    let hit = hits.fetch_add(1, Ordering::SeqCst);
+                    let status = statuses
+                        .get(hit)
+                        .copied()
+                        .or_else(|| statuses.last().copied())
+                        .unwrap_or(200);
+                    let reason = if status == 200 {
+                        "OK"
+                    } else {
+                        "Service Unavailable"
+                    };
+                    let response =
+                        format!("HTTP/1.1 {status} {reason}\r\nContent-Length: 0\r\n\r\n");
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        (format!("http://{addr}"), hits)
+    }
+
+    async fn sync_manager_for_remote(
+        remote_base_url: &str,
+    ) -> (TempDir, Arc<ConfigManager>, SyncManager) {
+        let temp_dir = TempDir::new().unwrap();
+        let config_manager = Arc::new(ConfigManager::new(temp_dir.path().to_path_buf()).unwrap());
+        config_manager
+            .update_sync_config(SyncConfigUpdate {
+                enabled: Some(true),
+                remote_base_url: Some(remote_base_url.to_string()),
+                connect_timeout_ms: Some(500),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let manager = SyncManager::new(config_manager.clone(), 9900).unwrap();
+        (temp_dir, config_manager, manager)
+    }
+
+    fn read_dry_run_urls(path: &std::path::Path) -> Vec<String> {
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
 
     #[test]
     fn merge_remote_into_local_preserves_local_metadata() {
@@ -1321,5 +1567,118 @@ mod tests {
             .save_login_session("token".to_string(), "relay.test".to_string())
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn startup_login_preflight_opens_once_when_third_probe_is_reachable() {
+        let _env_lock = env_lock().lock().await;
+        let (remote_base_url, hits) = spawn_sso_check_server(vec![503, 503, 200]).await;
+        let (temp_dir, _config_manager, manager) = sync_manager_for_remote(&remote_base_url).await;
+        let dry_run_file = temp_dir.path().join("opened-login-urls.txt");
+        let _dry_run_guard = EnvVarGuard::set(
+            LOGIN_BROWSER_DRY_RUN_FILE_ENV,
+            dry_run_file.to_str().unwrap(),
+        );
+
+        manager
+            .startup_login_preflight_with_delay(Duration::from_millis(1))
+            .await
+            .unwrap();
+
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
+        let opened = read_dry_run_urls(&dry_run_file);
+        assert_eq!(opened.len(), 1);
+        assert!(opened[0].contains("/v4/sso/logout?next="));
+        assert!(manager.state.lock().startup_login_prompt.is_some());
+
+        manager
+            .startup_login_preflight_with_delay(Duration::from_millis(1))
+            .await
+            .unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
+        assert_eq!(read_dry_run_urls(&dry_run_file).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn startup_login_preflight_stops_after_three_unreachable_probes() {
+        let _env_lock = env_lock().lock().await;
+        let (remote_base_url, hits) = spawn_sso_check_server(vec![503, 503, 503]).await;
+        let (temp_dir, _config_manager, manager) = sync_manager_for_remote(&remote_base_url).await;
+        let dry_run_file = temp_dir.path().join("opened-login-urls.txt");
+        let _dry_run_guard = EnvVarGuard::set(
+            LOGIN_BROWSER_DRY_RUN_FILE_ENV,
+            dry_run_file.to_str().unwrap(),
+        );
+
+        manager
+            .startup_login_preflight_with_delay(Duration::from_millis(1))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            STARTUP_LOGIN_PREFLIGHT_MAX_ATTEMPTS
+        );
+        assert!(read_dry_run_urls(&dry_run_file).is_empty());
+        assert!(manager.state.lock().startup_login_prompt.is_none());
+        assert_eq!(manager.runtime.read().await.reason, SyncReason::Unreachable);
+    }
+
+    #[tokio::test]
+    async fn startup_login_preflight_skips_when_auto_prompt_was_persisted() {
+        let _env_lock = env_lock().lock().await;
+        let (remote_base_url, hits) = spawn_sso_check_server(vec![200]).await;
+        let (temp_dir, _config_manager, manager) = sync_manager_for_remote(&remote_base_url).await;
+        {
+            let mut state = manager.state.lock();
+            state.startup_login_prompt = Some(StartupLoginPromptFile {
+                auto_prompted_at: "2026-06-02T00:00:00Z".to_string(),
+                remote_base_url: remote_base_url.clone(),
+            });
+            manager.persist_state(&state).unwrap();
+        }
+        let dry_run_file = temp_dir.path().join("opened-login-urls.txt");
+        let _dry_run_guard = EnvVarGuard::set(
+            LOGIN_BROWSER_DRY_RUN_FILE_ENV,
+            dry_run_file.to_str().unwrap(),
+        );
+
+        manager
+            .startup_login_preflight_with_delay(Duration::from_millis(1))
+            .await
+            .unwrap();
+
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+        assert!(read_dry_run_urls(&dry_run_file).is_empty());
+        assert_eq!(
+            manager.runtime.read().await.reason,
+            SyncReason::Unauthorized
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_login_preflight_skips_when_session_token_exists() {
+        let _env_lock = env_lock().lock().await;
+        let (remote_base_url, hits) = spawn_sso_check_server(vec![200]).await;
+        let (temp_dir, _config_manager, manager) = sync_manager_for_remote(&remote_base_url).await;
+        {
+            let mut state = manager.state.lock();
+            state.token = Some("existing-token".to_string());
+            manager.persist_state(&state).unwrap();
+        }
+        let dry_run_file = temp_dir.path().join("opened-login-urls.txt");
+        let _dry_run_guard = EnvVarGuard::set(
+            LOGIN_BROWSER_DRY_RUN_FILE_ENV,
+            dry_run_file.to_str().unwrap(),
+        );
+
+        manager
+            .startup_login_preflight_with_delay(Duration::from_millis(1))
+            .await
+            .unwrap();
+
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+        assert!(read_dry_run_urls(&dry_run_file).is_empty());
+        assert!(manager.state.lock().startup_login_prompt.is_none());
     }
 }
