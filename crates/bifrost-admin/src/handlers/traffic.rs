@@ -1093,9 +1093,13 @@ async fn clear_traffic_by_ids(
     if let Some(ref db_store) = state.traffic_db_store {
         let db_store_clone = db_store.clone();
         let ids_for_db = ids_to_delete.clone();
-        let _delete_task = tokio::task::spawn_blocking(move || {
+        if let Err(e) = tokio::task::spawn_blocking(move || {
             db_store_clone.delete_by_ids(&ids_for_db);
-        });
+        })
+        .await
+        {
+            tracing::warn!("Failed to join traffic db delete task: {}", e);
+        }
     }
 
     if let Some(ref body_store) = state.body_store {
@@ -1146,9 +1150,13 @@ async fn clear_all_traffic(
     if let Some(ref db_store) = state.traffic_db_store {
         let db_store_clone = db_store.clone();
         let active_ids_for_db = active_connection_ids.clone();
-        let _clear_task = tokio::task::spawn_blocking(move || {
+        if let Err(e) = tokio::task::spawn_blocking(move || {
             db_store_clone.clear_with_active_ids(&active_ids_for_db);
-        });
+        })
+        .await
+        {
+            tracing::warn!("Failed to join traffic db clear task: {}", e);
+        }
     }
 
     if let Some(ref body_store) = state.body_store {

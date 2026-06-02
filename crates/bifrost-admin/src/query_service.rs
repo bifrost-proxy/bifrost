@@ -330,9 +330,11 @@ impl AdminQueryService {
         if let Some(ref db_store) = self.state.traffic_db_store {
             let db_store_clone = db_store.clone();
             let ids_for_db = ids_to_delete.clone();
-            let _delete_task = tokio::task::spawn_blocking(move || {
+            tokio::task::spawn_blocking(move || {
                 db_store_clone.delete_by_ids(&ids_for_db);
-            });
+            })
+            .await
+            .map_err(|e| BifrostError::Config(format!("traffic delete task join failed: {e}")))?;
         }
 
         if let Some(ref body_store) = self.state.body_store {
@@ -376,9 +378,11 @@ impl AdminQueryService {
         if let Some(ref db_store) = self.state.traffic_db_store {
             let db_store_clone = db_store.clone();
             let active_ids_for_db = active_connection_ids.clone();
-            let _clear_task = tokio::task::spawn_blocking(move || {
+            tokio::task::spawn_blocking(move || {
                 db_store_clone.clear_with_active_ids(&active_ids_for_db);
-            });
+            })
+            .await
+            .map_err(|e| BifrostError::Config(format!("traffic clear task join failed: {e}")))?;
         }
 
         if let Some(ref body_store) = self.state.body_store {
