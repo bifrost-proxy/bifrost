@@ -8,7 +8,7 @@
 //! contract.
 
 use super::*;
-use crate::types::ToolRuntimeEvent;
+use crate::types::{CollaborationMode, ToolRuntimeEvent};
 
 pub(super) fn display_iteration(iteration: usize) -> u32 {
     u32::try_from(iteration + 1).unwrap_or(u32::MAX)
@@ -143,6 +143,7 @@ fn stopped_turn_result(
         work_dir_switched: None,
         title_updated: session.title.clone(),
         plan_steps: session.current_plan.clone(),
+        proposed_plan: None,
         goal_needs_continuation: false,
         goal_objective: None,
     }
@@ -776,6 +777,7 @@ pub async fn run_turn_with_mcp(
         &[],
         system_prompt_override,
         recorder,
+        CollaborationMode::Default,
     )
     .await
 }
@@ -791,6 +793,7 @@ pub async fn run_turn_with_mcp_multimodal(
     images: &[ChatImageInput],
     system_prompt_override: Option<&str>,
     mut recorder: Option<&mut ConversationRecorder>,
+    collaboration_mode: CollaborationMode,
 ) -> Result<TurnResult, String> {
     if !config.enabled {
         return Err("agent is disabled".to_string());
@@ -816,6 +819,7 @@ pub async fn run_turn_with_mcp_multimodal(
             work_dir_switched: Some(new_dir),
             title_updated: None,
             plan_steps: None,
+            proposed_plan: None,
             goal_needs_continuation: false,
             goal_objective: None,
         });
@@ -845,6 +849,7 @@ pub async fn run_turn_with_mcp_multimodal(
                 work_dir_switched: None,
                 title_updated: None,
                 plan_steps: None,
+                proposed_plan: None,
                 goal_needs_continuation: false,
                 goal_objective: None,
             });
@@ -871,6 +876,7 @@ pub async fn run_turn_with_mcp_multimodal(
             work_dir_switched: None,
             title_updated: None,
             plan_steps: None,
+            proposed_plan: None,
             goal_needs_continuation: false,
             goal_objective: None,
         });
@@ -895,6 +901,7 @@ pub async fn run_turn_with_mcp_multimodal(
             work_dir_switched: None,
             title_updated: None,
             plan_steps: None,
+            proposed_plan: None,
             goal_needs_continuation: false,
             goal_objective: None,
         });
@@ -919,6 +926,7 @@ pub async fn run_turn_with_mcp_multimodal(
             work_dir_switched: None,
             title_updated: None,
             plan_steps: None,
+            proposed_plan: None,
             goal_needs_continuation: false,
             goal_objective: None,
         });
@@ -946,6 +954,7 @@ pub async fn run_turn_with_mcp_multimodal(
             work_dir_switched: None,
             title_updated: None,
             plan_steps: None,
+            proposed_plan: None,
             goal_needs_continuation: false,
             goal_objective: None,
         });
@@ -980,6 +989,7 @@ pub async fn run_turn_with_mcp_multimodal(
                 work_dir_switched: None,
                 title_updated: None,
                 plan_steps: None,
+                proposed_plan: None,
                 goal_needs_continuation: false,
                 goal_objective: None,
             });
@@ -991,6 +1001,7 @@ pub async fn run_turn_with_mcp_multimodal(
             work_dir_switched: None,
             title_updated: None,
             plan_steps: None,
+            proposed_plan: None,
             goal_needs_continuation: false,
             goal_objective: None,
         });
@@ -1028,6 +1039,7 @@ pub async fn run_turn_with_mcp_multimodal(
             work_dir_switched: None,
             title_updated: None,
             plan_steps: None,
+            proposed_plan: None,
             goal_needs_continuation: false,
             goal_objective: None,
         });
@@ -1051,6 +1063,7 @@ pub async fn run_turn_with_mcp_multimodal(
                 work_dir_switched: None,
                 title_updated: None,
                 plan_steps: None,
+                proposed_plan: None,
                 goal_needs_continuation: false,
                 goal_objective: None,
             });
@@ -1065,6 +1078,7 @@ pub async fn run_turn_with_mcp_multimodal(
             work_dir_switched: None,
             title_updated: None,
             plan_steps: None,
+            proposed_plan: None,
             goal_needs_continuation: false,
             goal_objective: None,
         });
@@ -1087,6 +1101,7 @@ pub async fn run_turn_with_mcp_multimodal(
             work_dir_switched: None,
             title_updated: None,
             plan_steps: None,
+            proposed_plan: None,
             goal_needs_continuation: false,
             goal_objective: None,
         });
@@ -1153,6 +1168,7 @@ pub async fn run_turn_with_mcp_multimodal(
             work_dir_switched: None,
             title_updated: None,
             plan_steps: None,
+                proposed_plan: None,
             goal_needs_continuation: false,
             goal_objective: None,
         });
@@ -1213,6 +1229,7 @@ pub async fn run_turn_with_mcp_multimodal(
                         work_dir_switched: None,
                         title_updated: None,
                         plan_steps: session.current_plan.clone(),
+                        proposed_plan: None,
                         goal_needs_continuation: false,
                         goal_objective: None,
                     });
@@ -1241,6 +1258,7 @@ pub async fn run_turn_with_mcp_multimodal(
             work_dir_switched: None,
             title_updated: None,
             plan_steps: None,
+            proposed_plan: None,
             goal_needs_continuation: false,
             goal_objective: None,
         });
@@ -1285,6 +1303,7 @@ pub async fn run_turn_with_mcp_multimodal(
                 work_dir_switched: None,
                 title_updated: None,
                 plan_steps: None,
+                proposed_plan: None,
                 goal_needs_continuation: false,
                 goal_objective: None,
             });
@@ -1295,6 +1314,7 @@ pub async fn run_turn_with_mcp_multimodal(
             work_dir_switched: None,
             title_updated: None,
             plan_steps: None,
+            proposed_plan: None,
             goal_needs_continuation: false,
             goal_objective: None,
         });
@@ -1336,12 +1356,13 @@ pub async fn run_turn_with_mcp_multimodal(
     // system(base instructions) + developer sections + contextual user sections.
     // Route-level `system_prompt_override` is treated as a base prompt override,
     // not as a full prompt replacement, so tools/skills/AGENTS/env still apply.
-    let prompt_messages = prompt::build_prompt_messages_with_skill_registry(
+    let prompt_messages = prompt::build_prompt_messages_with_options(
         config,
         &base_instructions,
         session.work_dir.as_deref(),
         session.skill_registry.as_deref(),
         session.user_instructions.as_deref(),
+        collaboration_mode,
     );
     let prompt_prefix = prompt_messages.prefix;
 
@@ -1803,6 +1824,7 @@ pub async fn run_turn_with_mcp_multimodal(
                                     work_dir_switched: None,
                                     title_updated: None,
                                     plan_steps: None,
+                                    proposed_plan: None,
                                     goal_needs_continuation: false,
                                     goal_objective: None,
                                 });
@@ -1848,6 +1870,7 @@ pub async fn run_turn_with_mcp_multimodal(
                             work_dir_switched: None,
                             title_updated: None,
                             plan_steps: None,
+                            proposed_plan: None,
                             goal_needs_continuation: false,
                             goal_objective: None,
                         });
@@ -2044,10 +2067,22 @@ pub async fn run_turn_with_mcp_multimodal(
             }
 
             // Model finished — extract text response
-            let content = response
+            let raw_content = response
                 .content
                 .or(response.reasoning_content)
                 .unwrap_or_default();
+            let (content, proposed_plan) = if collaboration_mode.is_plan() {
+                let extracted = crate::proposed_plan::extract_proposed_plan(&raw_content);
+                (
+                    extracted.visible_text.trim().to_string(),
+                    extracted
+                        .proposed_plan
+                        .map(|plan| plan.trim().to_string())
+                        .filter(|plan| !plan.is_empty()),
+                )
+            } else {
+                (raw_content, None)
+            };
             crate::tools::goal::goal_runtime_apply(
                 session,
                 crate::tools::goal::GoalRuntimeEvent::TurnFinished {
@@ -2143,6 +2178,9 @@ pub async fn run_turn_with_mcp_multimodal(
                     .await;
             }
 
+            if let Some(plan) = proposed_plan.as_ref() {
+                progress::proposed_plan(session.progress_sender.as_ref(), plan.clone());
+            }
             progress::assistant_final(session.progress_sender.as_ref(), content.clone());
             return Ok(TurnResult {
                 response: content,
@@ -2150,6 +2188,7 @@ pub async fn run_turn_with_mcp_multimodal(
                 work_dir_switched: None,
                 title_updated: session.title.clone(),
                 plan_steps: session.current_plan.clone(),
+                proposed_plan,
                 goal_needs_continuation: session
                     .current_goal
                     .as_ref()
@@ -2343,7 +2382,13 @@ pub async fn run_turn_with_mcp_multimodal(
             let tool_started_at = record_tool_call_started(session, &mut recorder, tc, iteration);
             let stop_signal = session.stop_signal.clone();
             let tool_execution = async {
-                if let Some(result) =
+                if collaboration_mode.is_plan() && tc.name() == "update_plan" {
+                    crate::types::ToolResult {
+                        success: false,
+                        output: "update_plan is a TODO/checklist tool and is not allowed in Plan Mode. Use a <proposed_plan> block for the final plan instead.".to_string(),
+                        runtime_events: Vec::new(),
+                    }
+                } else if let Some(result) =
                     crate::tools::goal::execute_goal_tool(session, tc.name(), tc.arguments())
                 {
                     result
@@ -2489,6 +2534,7 @@ pub async fn run_turn_with_mcp_multimodal(
                     work_dir_switched: Some(new_dir),
                     title_updated: None,
                     plan_steps: None,
+                    proposed_plan: None,
                     goal_needs_continuation: false,
                     goal_objective: None,
                 });

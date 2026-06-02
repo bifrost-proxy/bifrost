@@ -560,15 +560,16 @@ test("AI Agent Chat runs compact as a control command without chat messages", as
   await openPage(page, "ai?aiSection=agent-chat&agentSection=chat");
   const input = page.getByTestId("agent-chat-input");
   await input.fill("/");
-  await expect(page.getByTestId("agent-chat-slash-command-option")).toHaveAttribute(
+  await expect(
+    page.getByTestId("agent-chat-slash-command-option").filter({ hasText: "/plan" }),
+  ).toHaveAttribute(
     "data-active",
     "true",
   );
   await input.press("ArrowDown");
   await expect(
-    page.getByTestId("agent-chat-slash-runner-option").filter({ hasText: "Bifrost Agent" }),
+    page.getByTestId("agent-chat-slash-command-option").filter({ hasText: "/compact" }),
   ).toHaveAttribute("data-active", "true");
-  await input.press("ArrowUp");
   await input.press("Enter");
 
   await expect.poll(() => compactCalls).toBe(1);
@@ -598,6 +599,77 @@ test("AI Agent Chat runs compact as a control command without chat messages", as
   await expect.poll(() => compactCalls).toBe(2);
   await expect(page.getByTestId("agent-chat-message-bubble-user")).toHaveCount(0);
   await expect(page.getByTestId("agent-chat-messages")).not.toContainText("/compact");
+});
+
+test("AI Agent Chat supports slash plan mode from the composer", async ({ page }) => {
+  let planCalls = 0;
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ sessions: [] }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "bifrost_agent",
+        runners: {
+          codex: { enabled: true, adapter: "codex" },
+        },
+        channels: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ content: "", work_dir: "/tmp/agent-plan" }),
+    });
+  });
+  await page.route("**/_bifrost/api/agent/chat/stream", async (route) => {
+    const body = route.request().postDataJSON();
+    expect(body).toMatchObject({
+      message: "Create a migration plan",
+      collaboration_mode: "plan",
+      work_dir: "/tmp/agent-plan",
+    });
+    expect(body.message).not.toContain("/plan");
+    planCalls += 1;
+    await route.fulfill({
+      status: 200,
+      contentType: "text/event-stream",
+      body:
+        'event: run_started\ndata: {"eventType":"run_started"}\n\n' +
+        'event: run_finished\ndata: {"eventType":"run_finished","response":"Plan mode request accepted."}\n\n',
+    });
+  });
+
+  await openPage(page, "ai?aiSection=agent-chat&agentSection=chat");
+  const input = page.getByTestId("agent-chat-input");
+  await input.fill("/");
+  await expect(
+    page.getByTestId("agent-chat-slash-command-option").filter({ hasText: "/plan" }),
+  ).toContainText("进入规划模式");
+  await page.getByTestId("agent-chat-slash-command-option").filter({ hasText: "/plan" }).click();
+  await expect(input).toHaveValue("/plan ");
+
+  await input.fill("/plan Create a migration plan");
+  await page.getByTestId("agent-chat-send").click();
+  await expect.poll(() => planCalls).toBe(1);
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Create a migration plan",
+  );
+  await expect(page.getByTestId("agent-chat-messages")).not.toContainText(
+    "/plan Create a migration plan",
+  );
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Plan mode request accepted.",
+  );
 });
 
 test("AI Agent Chat slash runner call selects a runner and renders the result", async ({

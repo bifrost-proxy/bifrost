@@ -46,6 +46,7 @@ pub mod memory_guard;
 pub mod memory_prompts;
 pub mod persistence;
 pub mod prompt;
+pub mod proposed_plan;
 pub mod responses;
 pub mod session;
 pub mod session_status;
@@ -78,4 +79,4 @@ pub use session_status::{
 pub use skills::{install_system_skills, SkillMetadata, SkillScope, SkillsManager};
 pub use tools::update_plan::{PlanStep, PlanStepStatus, UpdatePlanArgs};
 pub use tools::ToolRegistry;
-pub use types::{ChatImageInput, ChatMessage, ToolCallLog, TurnResult};
+pub use types::{ChatImageInput, ChatMessage, CollaborationMode, ToolCallLog, TurnResult};

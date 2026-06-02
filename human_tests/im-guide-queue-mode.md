@@ -32,9 +32,10 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8801 --unsa
   ```bash
   cargo test -p bifrost-admin -- queue_manager
   ```
-- **预期结果**: 所有 14 个测试用例通过：
+- **预期结果**: 所有 15 个测试用例通过：
   - `test_guide_inject_appends` — 引导消息按顺序累积
   - `test_guide_status_is_readonly` — 引导状态查询不影响待消费消息
+  - `test_guide_status_includes_worker_handoff_snapshot` — 已转交隔离 worker 的 guide 在 turn 完成前仍可被 `/status` 观测
   - `test_queue_push_pop` — 队列 FIFO 推入弹出
   - `test_queue_remove` — 按序号删除队列消息
   - `test_queue_max_size` — 队列满（10 条）时拒绝新消息
@@ -213,8 +214,10 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8801 --unsa
 - **预期结果**:
   - `runner = null` 或 `runner = "bifrost_agent"` 时 busy 默认策略为 guide。
   - 普通消息进入 `guide_status`，不会进入 `queue_status`。
+  - 普通消息被事件循环转交给隔离 worker 后，`/status` 仍能看到 `pending_guide_messages: ["默认引导消息"]`，直到当前 turn 完成并清理 session queue 状态。
   - `/q <消息>` 仍显式进入 queue，不受默认 guide 策略影响。
 - **执行记录（2026-05-21）**: PASS — 执行 `cargo test -p bifrost-admin busy_default_mode --lib`、`cargo test -p bifrost-admin apply_busy_message_default --lib` 和 `BIFROST_PORT=18897 MOCK_PORT=18898 bash e2e-tests/tests/test_im_guide_queue_human_api.sh`。E2E 通过 `/_bifrost/api/im-gateway/debug/mock-inbound` 注入真实 IM inbound 事件，在内置 Bifrost Agent active turn 期间发送普通消息，`/agent/chat` 的 `/status` 返回 pending guide `["默认引导消息"]`，最终 mock 模型请求也收到该 guide。
+- **回归执行记录（2026-06-02）**: PASS — CI run `26798673764` 的 macOS aarch64 shell shard 暴露隔离 worker handoff 后 `/status` 返回 `pending_guide_messages: []`。修复后执行 `source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin im_gateway::queue_manager::tests::test_guide_status_includes_worker_handoff_snapshot` 通过，验证 handed-off guide 快照清理边界；执行 `source ~/.zshrc && SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" BIFROST_E2E_HTTP_RETRIES=2 bash e2e-tests/tests/test_im_guide_queue_human_api.sh` 通过，验证真实 Bifrost + mock inbound 链路中默认 IM 消息仍作为 pending guide 展示并被 worker 消费。
 
 ### TC-GQ-16: 自定义 Runner busy 普通 IM 消息默认进入 queue，Codex 用 resume 接续
 

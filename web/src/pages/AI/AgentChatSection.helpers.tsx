@@ -710,6 +710,7 @@ export async function runAgentStream(params: {
   workDir?: string;
   runnerId?: string;
   runnerAdapter?: string;
+  collaborationMode?: "plan";
   onEvent: (event: Record<string, unknown>) => void;
   onDelta: (content: string) => void;
   onFinal: (content: string) => void;
@@ -745,6 +746,7 @@ export async function runAgentStream(params: {
               session_key: params.sessionKey,
               history_path: params.historyPath,
               work_dir: params.workDir,
+              collaboration_mode: params.collaborationMode,
             },
       ),
     },

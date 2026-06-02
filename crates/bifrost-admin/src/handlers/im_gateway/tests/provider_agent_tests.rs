@@ -310,6 +310,73 @@ pub(super) async fn request_agent_stop_stops_external_runner_by_session_key() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn clear_builtin_im_agent_session_removes_persisted_context_and_queue() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _guard = EnvGuard::set_data_dir(temp_dir.path());
+    let manager = bifrost_agent::AgentSessionManager::new(3600);
+    let queue_manager = crate::im_gateway::SessionQueueManager::new();
+    let session_key = "im:provider:user-clear";
+
+    let mut session = manager
+        .try_take_session(session_key)
+        .expect("session should be available");
+    session
+        .history
+        .push(bifrost_agent::ChatMessage::user("old user"));
+    session.remember_external_conversation_ref(
+        Some("old-conversation".to_string()),
+        Some("old-thread".to_string()),
+    );
+    manager.return_session(session);
+    queue_manager
+        .push_queue(session_key, "queued stale follow-up".to_string())
+        .expect("queue push");
+    queue_manager.inject_guide(session_key, "stale guide".to_string());
+
+    let data_dir = bifrost_agent::config::agent_home_dir();
+    let mut recorder =
+        bifrost_agent::persistence::ConversationRecorder::new(&data_dir, session_key);
+    recorder
+        .record_session_start(session_key, serde_json::json!({"source": "im"}))
+        .expect("record start");
+    recorder
+        .record_user_message(session_key, "old user")
+        .expect("record user");
+    let history_path = recorder.file_path().display().to_string();
+    assert!(std::path::Path::new(&history_path).exists());
+
+    crate::im_gateway::session_state::remember_session_state(
+        crate::im_gateway::session_state::ImAgentSessionState {
+            session_key: session_key.to_string(),
+            adapter: crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER.to_string(),
+            external_conversation_id: Some("old-conversation".to_string()),
+            external_thread_id: Some("old-thread".to_string()),
+            history_path: Some(history_path.clone()),
+            updated_at: 1,
+            ..Default::default()
+        },
+    )
+    .expect("remember state");
+
+    clear_builtin_im_agent_session(&manager, &queue_manager, session_key).await;
+
+    assert!(crate::im_gateway::session_state::load_session_state(
+        session_key,
+        crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+        None,
+    )
+    .is_none());
+    assert!(!std::path::Path::new(&history_path).exists());
+    assert!(queue_manager.queue_status(session_key).is_empty());
+    assert!(queue_manager.guide_status(session_key).is_empty());
+    let detail = manager
+        .get_session_detail(session_key)
+        .expect("cleared in-memory session should remain available");
+    assert_eq!(detail.message_count, 0);
+    assert!(detail.external_thread_id.is_none());
+}
+
 #[test]
 pub(super) fn im_status_text_formats_metrics_and_runner_metadata() {
     let manager = bifrost_agent::AgentSessionManager::new(3600);

@@ -1394,6 +1394,7 @@ pub(super) async fn agent_chat_final_reply_sends_local_markdown_images_as_im_ima
         &service.connection_manager,
         &service.agent_session_manager,
         &service.progress_registry,
+        &service.queue_manager,
         "weixin:image-reply-test",
         "生成图片",
         &[],

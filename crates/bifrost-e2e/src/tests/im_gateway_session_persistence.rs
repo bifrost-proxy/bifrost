@@ -189,6 +189,118 @@ pub fn get_all_tests() -> Vec<TestCase> {
             },
         ),
         TestCase::standalone(
+            "im_gateway_mock_inbound_clear_resets_builtin_agent_history",
+            "Validate IM mock inbound /clear clears built-in Agent persisted context before the next IM message",
+            "admin",
+            || async move {
+                let mock = ChatCompletionMock::start().await?;
+                let port = pick_unused_port()?;
+                let data_dir =
+                    std::env::temp_dir().join(format!("bifrost_e2e_im_clear_{port}"));
+                let _env_guard = DataDirEnvGuard::new(&data_dir);
+                let (_proxy, admin_state) =
+                    start_im_gateway_admin_with_data_dir(port, data_dir.clone()).await?;
+
+                let client = reqwest::Client::builder()
+                    .danger_accept_invalid_certs(true)
+                    .no_proxy()
+                    .build()
+                    .map_err(|e| format!("Failed to create client: {e}"))?;
+                let base = format!("http://127.0.0.1:{port}/_bifrost/api/im-gateway");
+                let provider_id = "mock-im-clear-provider";
+                let user_id = "mock-im-clear-user";
+                let session_key = format!("{provider_id}:{user_id}");
+
+                let patch_response = client
+                    .patch(format!("{base}/agent"))
+                    .json(&serde_json::json!({
+                        "enabled": true,
+                        "model": "mock-model",
+                        "model_provider": "mock",
+                        "max_turn_iterations": 4,
+                        "request_timeout_secs": 20,
+                        "memories": {
+                            "use_memories": false,
+                            "generate_memories": false
+                        },
+                        "model_providers": {
+                            "mock": {
+                                "name": "Mock",
+                                "base_url": mock.url(),
+                                "api_key": "test"
+                            }
+                        }
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("PATCH agent config failed: {e}"))?;
+                assert_status(&patch_response, 200)?;
+
+                let provider_response = client
+                    .post(format!("{base}/providers"))
+                    .json(&serde_json::json!({
+                        "id": provider_id,
+                        "provider_type": "feishu",
+                        "display_name": "Mock IM Clear Provider",
+                        "enabled": true,
+                        "app_id": "cli_mock",
+                        "app_secret": "mock-secret",
+                        "owner_open_id": user_id,
+                        "event_connection_enabled": false,
+                        "event_types": []
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("POST provider failed: {e}"))?;
+                assert_status(&provider_response, 200)?;
+
+                let first_marker = "IM_CLEAR_FIRST_CONTEXT_E2E";
+                let fresh_marker = "IM_CLEAR_FRESH_CONTEXT_E2E";
+                inject_mock_im_message(&client, &base, provider_id, user_id, first_marker).await?;
+                wait_for_mock_request_count(&mock, 1).await?;
+                let first_request = mock
+                    .requests
+                    .lock()
+                    .last()
+                    .cloned()
+                    .ok_or_else(|| "mock did not receive first IM request".to_string())?;
+                if !request_messages_contain(&first_request, first_marker) {
+                    return Err(format!(
+                        "Expected first IM request to contain first marker, got: {first_request}"
+                    ));
+                }
+
+                wait_for_session_state(&session_key, true).await?;
+                wait_for_session_state_status(&session_key, "ended").await?;
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+                inject_mock_im_message(&client, &base, provider_id, user_id, "/clear").await?;
+                wait_for_session_state(&session_key, false).await?;
+
+                admin_state.set_im_gateway_service(Arc::new(
+                    ImGatewayService::new_with_agent_proxy_port(&data_dir, Some(port)),
+                ));
+
+                inject_mock_im_message(&client, &base, provider_id, user_id, fresh_marker).await?;
+                wait_for_mock_request_count(&mock, 2).await?;
+                let fresh_request = mock
+                    .requests
+                    .lock()
+                    .last()
+                    .cloned()
+                    .ok_or_else(|| "mock did not receive fresh IM request".to_string())?;
+                if request_messages_contain(&fresh_request, first_marker)
+                    || !request_messages_contain(&fresh_request, fresh_marker)
+                {
+                    return Err(format!(
+                        "Expected IM /clear to prevent old context restore, got: {fresh_request}"
+                    ));
+                }
+
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
             "im_gateway_chatgpt_web_restores_conversation_after_service_restart",
             "Validate Chat Gateway chatgpt_web restores persisted conversationId after service restart and does not reuse it after /reset",
             "admin",
@@ -409,6 +521,70 @@ fn request_messages_contain(body: &serde_json::Value, needle: &str) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+async fn inject_mock_im_message(
+    client: &reqwest::Client,
+    base: &str,
+    provider_id: &str,
+    user_id: &str,
+    text: &str,
+) -> Result<(), String> {
+    let response = client
+        .post(format!("{base}/debug/mock-inbound"))
+        .json(&serde_json::json!({
+            "providerId": provider_id,
+            "userId": user_id,
+            "text": text
+        }))
+        .send()
+        .await
+        .map_err(|error| format!("POST mock inbound failed: {error}"))?;
+    assert_status(&response, 200)?;
+    Ok(())
+}
+
+async fn wait_for_mock_request_count(
+    mock: &ChatCompletionMock,
+    expected: usize,
+) -> Result<(), String> {
+    for _ in 0..100 {
+        if mock.requests.lock().len() >= expected {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    Err(format!(
+        "timed out waiting for mock request count {expected}, got {}",
+        mock.requests.lock().len()
+    ))
+}
+
+async fn wait_for_session_state(session_key: &str, should_exist: bool) -> Result<(), String> {
+    for _ in 0..100 {
+        let exists = session_state::load_latest_session_state(session_key, None, None).is_some();
+        if exists == should_exist {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    Err(format!(
+        "timed out waiting for IM session state existence={should_exist} for {session_key}"
+    ))
+}
+
+async fn wait_for_session_state_status(session_key: &str, expected: &str) -> Result<(), String> {
+    for _ in 0..100 {
+        let status = session_state::load_latest_session_state(session_key, None, None)
+            .and_then(|state| state.status);
+        if status.as_deref() == Some(expected) {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    Err(format!(
+        "timed out waiting for IM session state status={expected} for {session_key}"
+    ))
 }
 
 fn latest_chat_run_snapshot(data_dir: &std::path::Path) -> Result<serde_json::Value, String> {

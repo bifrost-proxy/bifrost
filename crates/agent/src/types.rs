@@ -5,6 +5,31 @@ use serde::{Deserialize, Serialize, Serializer};
 
 use crate::tools::update_plan::{PlanStep, UpdatePlanArgs};
 
+/// Per-turn collaboration mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CollaborationMode {
+    /// Execute normally. User intent can drive implementation.
+    #[default]
+    Default,
+    /// Conversational planning mode. Repo mutations are disallowed and the
+    /// final spec is emitted through `<proposed_plan>`.
+    Plan,
+}
+
+impl CollaborationMode {
+    pub fn is_plan(self) -> bool {
+        matches!(self, Self::Plan)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Plan => "plan",
+        }
+    }
+}
+
 /// A message in the Chat Completions API format.
 #[derive(Debug, Clone)]
 pub struct ChatMessage {
@@ -437,6 +462,9 @@ pub struct TurnResult {
     pub title_updated: Option<String>,
     /// If the agent updated the task plan during this turn.
     pub plan_steps: Option<Vec<PlanStep>>,
+    /// A decision-complete Plan Mode proposal extracted from
+    /// `<proposed_plan>` blocks, when present.
+    pub proposed_plan: Option<String>,
     /// Whether the active goal still needs continuation after this turn.
     pub goal_needs_continuation: bool,
     /// The objective of the active goal, if any.

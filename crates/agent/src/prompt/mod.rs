@@ -35,7 +35,7 @@ use bifrost_skills::SkillRegistry;
 
 use crate::config::AgentConfig;
 use crate::skills::{SkillMetadata, SkillMetadataBudget, SkillsManager};
-use crate::types::ChatMessage;
+use crate::types::{ChatMessage, CollaborationMode};
 
 pub use types::{
     BaseInstructions, EnvironmentContext, UserInstructions, ENVIRONMENT_CONTEXT_CLOSE_TAG,
@@ -55,6 +55,8 @@ pub use models::{ModelFamily, ModelMessages, PersonalityVariant};
 
 /// Default base instructions template loaded from external markdown file.
 const BASE_INSTRUCTIONS_DEFAULT: &str = include_str!("../prompts/base_instructions/default.md");
+const COLLABORATION_MODE_DEFAULT: &str = include_str!("../prompts/collaboration/default.md");
+const COLLABORATION_MODE_PLAN: &str = include_str!("../prompts/collaboration/plan.md");
 
 /// Return the built-in base instructions shown in WebUI when no override is configured.
 pub fn default_base_instructions() -> &'static str {
@@ -104,6 +106,24 @@ pub fn build_prompt_messages_with_skill_registry(
     registry: Option<&SkillRegistry>,
     user_instructions: Option<&str>,
 ) -> PromptMessages {
+    build_prompt_messages_with_options(
+        config,
+        base_instructions,
+        work_dir_override,
+        registry,
+        user_instructions,
+        CollaborationMode::Default,
+    )
+}
+
+pub fn build_prompt_messages_with_options(
+    config: &AgentConfig,
+    base_instructions: &str,
+    work_dir_override: Option<&str>,
+    registry: Option<&SkillRegistry>,
+    user_instructions: Option<&str>,
+    collaboration_mode: CollaborationMode,
+) -> PromptMessages {
     use crate::prompt::fragments::{ContextFragment, FragmentRegistry, PromptSlot};
     use crate::prompt::models::ModelMessages;
 
@@ -151,6 +171,13 @@ pub fn build_prompt_messages_with_skill_registry(
             final_guidelines,
         ));
     }
+
+    frag_registry.register(ContextFragment::new(
+        "collaboration_mode",
+        PromptSlot::SeparateDeveloper,
+        100,
+        collaboration_mode_instructions(collaboration_mode),
+    ));
 
     // Developer instructions → DeveloperPolicy slot
     let developer_section =
@@ -208,6 +235,13 @@ pub fn build_prompt_messages_with_skill_registry(
     PromptMessages {
         prefix,
         base_instructions: base_instructions.to_string(),
+    }
+}
+
+pub fn collaboration_mode_instructions(mode: CollaborationMode) -> &'static str {
+    match mode {
+        CollaborationMode::Default => COLLABORATION_MODE_DEFAULT,
+        CollaborationMode::Plan => COLLABORATION_MODE_PLAN,
     }
 }
 
@@ -502,6 +536,43 @@ mod tests {
         assert!(result.starts_with("Override prompt"));
         assert!(result.contains("<environment_context>"));
         assert!(result.contains("<user_instructions>"));
+    }
+
+    #[test]
+    fn test_plan_mode_prompt_is_separate_developer_message() {
+        let config = AgentConfig::default();
+        let result = build_prompt_messages_with_options(
+            &config,
+            "Base",
+            None,
+            None,
+            None,
+            CollaborationMode::Plan,
+        );
+        assert!(result.prefix.iter().any(|message| {
+            message.role == "developer"
+                && message
+                    .content
+                    .as_deref()
+                    .is_some_and(|content| content.contains("# Plan Mode"))
+                && message
+                    .content
+                    .as_deref()
+                    .is_some_and(|content| content.contains("<proposed_plan>"))
+        }));
+    }
+
+    #[test]
+    fn test_default_mode_prompt_declares_default_mode() {
+        let config = AgentConfig::default();
+        let result = build_prompt_messages_with_skill_registry(&config, "Base", None, None, None);
+        assert!(result.prefix.iter().any(|message| {
+            message.role == "developer"
+                && message
+                    .content
+                    .as_deref()
+                    .is_some_and(|content| content.contains("Collaboration Mode: Default"))
+        }));
     }
 
     #[test]

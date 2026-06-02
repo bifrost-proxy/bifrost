@@ -634,6 +634,8 @@ pub(super) async fn handle_agent(
             session_key: Option<String>,
             #[serde(default)]
             system_prompt: Option<String>,
+            #[serde(default, alias = "collaborationMode")]
+            collaboration_mode: Option<bifrost_agent::CollaborationMode>,
             #[serde(default)]
             work_dir: Option<String>,
             /// Optional JSONL history file to restore before continuing.
@@ -664,10 +666,22 @@ pub(super) async fn handle_agent(
         pub(super) fn default_chat_image_mime_type() -> String {
             "image/png".to_string()
         }
-        let body: ChatRequest = match read_body_json(req).await {
+        let mut body: ChatRequest = match read_body_json(req).await {
             Ok(v) => v,
             Err(resp) => return resp,
         };
+        let slash_mode = crate::im_gateway::agent_slash::parse_agent_slash_mode(&body.message);
+        body.message = slash_mode.message;
+        body.collaboration_mode = crate::im_gateway::agent_slash::merge_collaboration_mode(
+            body.collaboration_mode,
+            slash_mode.collaboration_mode,
+        );
+        if body.message.trim().is_empty() && body.images.is_empty() {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "message must not be empty after /plan",
+            );
+        }
         let config = service.agent_config_store.load();
         if !config.enabled {
             return error_response(StatusCode::SERVICE_UNAVAILABLE, "Agent is disabled");
@@ -769,20 +783,12 @@ pub(super) async fn handle_agent(
         }
 
         if matches!(body.message.trim(), "/clear" | "/reset") {
-            service.agent_session_manager.request_stop(&session_key);
-            if let Some(mut session) = service.agent_session_manager.try_take_session(&session_key)
-            {
-                session.clear();
-                service.agent_session_manager.return_session(session);
-            } else {
-                service.agent_session_manager.clear_session(&session_key);
-            }
-            service.queue_manager.clear_session(&session_key);
-            clear_persisted_agent_session_state(
+            clear_builtin_im_agent_session(
+                &service.agent_session_manager,
+                &service.queue_manager,
                 &session_key,
-                Some(crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER),
-                None,
-            );
+            )
+            .await;
             return json_response(&serde_json::json!({
                 "success": true,
                 "response": "会话已重置，可以开始新的对话。",
@@ -909,6 +915,7 @@ pub(super) async fn handle_agent(
             Some("api".to_string()),
         );
         worker_request.system_prompt = body.system_prompt.clone();
+        worker_request.collaboration_mode = body.collaboration_mode;
         worker_request.guide_messages = body
             .guide_message
             .clone()
@@ -981,7 +988,8 @@ pub(super) async fn handle_agent(
                     "success": true,
                     "response": turn_result.response,
                     "tool_calls": turn_result.tool_calls_log,
-                    "plan_steps": turn_result.plan_steps
+                    "plan_steps": turn_result.plan_steps,
+                    "proposed_plan": turn_result.proposed_plan
                 }))
             }
             Err(e) => {

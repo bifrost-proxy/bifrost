@@ -418,6 +418,7 @@ pub(super) fn progress_event_needs_immediate_flush(
             | bifrost_agent::AgentTurnProgressEvent::ToolFinished { .. }
             | bifrost_agent::AgentTurnProgressEvent::LongTaskStatus { .. }
             | bifrost_agent::AgentTurnProgressEvent::PlanUpdated { .. }
+            | bifrost_agent::AgentTurnProgressEvent::ProposedPlan { .. }
             | bifrost_agent::AgentTurnProgressEvent::TitleUpdated { .. }
             | bifrost_agent::AgentTurnProgressEvent::AssistantDelta { .. }
             | bifrost_agent::AgentTurnProgressEvent::AssistantFinal { .. }
@@ -490,6 +491,7 @@ pub(super) async fn run_agent_chat_with_interleave(
             connection_manager,
             agent_session_manager,
             progress_registry,
+            queue_manager,
             session_key,
             &msg_for_turn,
             &images_for_turn,
@@ -743,6 +745,7 @@ pub(super) async fn process_agent_chat(
     _connection_manager: &Arc<ImConnectionManager>,
     session_manager: &Arc<ImAgentSessionManager>,
     progress_registry: &Arc<ImAgentProgressRegistry>,
+    queue_manager: &Arc<SessionQueueManager>,
     session_key: &str,
     user_message: &str,
     images: &[bifrost_agent::ChatImageInput],
@@ -756,12 +759,26 @@ pub(super) async fn process_agent_chat(
         user_message_len = user_message.len(),
         "invoking agent chat (turn loop)"
     );
+    let slash_mode = crate::im_gateway::agent_slash::parse_agent_slash_mode(user_message);
+    let collaboration_mode = slash_mode.collaboration_mode;
+    let user_message = slash_mode.message;
+    if user_message.trim().is_empty() && images.is_empty() {
+        send_agent_reply(
+            client,
+            provider,
+            event,
+            "请在 /plan 后输入需要规划的内容。",
+            message_log_store,
+        )
+        .await;
+        return;
+    }
 
     // ── Session-free command fast path ────────────────────────────────────
     // Commands like /help, /remember, /memories, /forget don't need session
     // state and can respond immediately even while a turn loop is running.
     if let Some(response) =
-        bifrost_agent::handle_session_free_command(session_key, user_message, agent_config)
+        bifrost_agent::handle_session_free_command(session_key, &user_message, agent_config)
     {
         debug!(
             session_key = %session_key,
@@ -840,7 +857,7 @@ pub(super) async fn process_agent_chat(
                     feishu,
                     provider.clone(),
                     progress_target,
-                    user_message,
+                    &user_message,
                 )
                 .await
             {
@@ -947,14 +964,14 @@ pub(super) async fn process_agent_chat(
         session_key,
         crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
         None,
-        user_message,
+        &user_message,
         history_path.clone(),
         session.work_dir.clone(),
     );
 
     let mut worker_request = crate::im_gateway::agent_worker::build_run_request(
         session_key.to_string(),
-        user_message.to_string(),
+        user_message.clone(),
         images.to_vec(),
         agent_config,
         session.work_dir.clone(),
@@ -962,6 +979,7 @@ pub(super) async fn process_agent_chat(
         Some(format!("{:?}", provider.provider_type).to_lowercase()),
     );
     worker_request.system_prompt = system_prompt_override.map(ToString::to_string);
+    worker_request.collaboration_mode = collaboration_mode;
     worker_request.default_message_channel = message_channel;
     let mut worker =
         crate::im_gateway::agent_worker::AgentWorkerClient::spawn_or_fallback(worker_request).await;
@@ -978,6 +996,8 @@ pub(super) async fn process_agent_chat(
             let guides = channel.drain();
             if let Some(guide) = bifrost_agent::session::combine_guide_messages(guides) {
                 if !guide.trim().is_empty() {
+                    queue_manager
+                        .mark_guides_handed_to_worker(session_key, std::slice::from_ref(&guide));
                     let _ = worker.send_guide(guide).await;
                 }
             }

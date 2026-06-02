@@ -926,6 +926,7 @@ pub async fn run_manual_compaction_command(
             work_dir_switched: None,
             title_updated: session.title.clone(),
             plan_steps: session.current_plan.clone(),
+            proposed_plan: None,
             goal_needs_continuation: session
                 .current_goal
                 .as_ref()
@@ -977,6 +978,7 @@ pub async fn run_manual_compaction_command(
                 work_dir_switched: None,
                 title_updated: session.title.clone(),
                 plan_steps: session.current_plan.clone(),
+                proposed_plan: None,
                 goal_needs_continuation: session
                     .current_goal
                     .as_ref()
@@ -998,6 +1000,7 @@ pub async fn run_manual_compaction_command(
                 work_dir_switched: None,
                 title_updated: session.title.clone(),
                 plan_steps: session.current_plan.clone(),
+                proposed_plan: None,
                 goal_needs_continuation: session
                     .current_goal
                     .as_ref()

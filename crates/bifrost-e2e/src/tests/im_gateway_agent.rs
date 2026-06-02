@@ -577,7 +577,9 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     .iter()
                     .filter_map(|message| message.get("role").and_then(|value| value.as_str()))
                     .collect();
-                if roles.get(0..4) != Some(&["system", "developer", "user", "user"][..]) {
+                if roles.get(0..5)
+                    != Some(&["system", "developer", "user", "developer", "user"][..])
+                {
                     return Err(format!("Expected layered prompt roles, got: {roles:?}"));
                 }
                 let joined = messages
@@ -2032,6 +2034,11 @@ impl ChatCompletionMock {
                                                     == Some("user")
                                                 && messages
                                                     .get(3)
+                                                    .and_then(|m| m.get("role"))
+                                                    .and_then(|r| r.as_str())
+                                                    == Some("developer")
+                                                && messages
+                                                    .get(4)
                                                     .and_then(|m| m.get("role"))
                                                     .and_then(|r| r.as_str())
                                                     == Some("user")
