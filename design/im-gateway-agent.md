@@ -499,6 +499,8 @@ Developer/user instructions 优先级：
 - WebUI Edit Provider 保存时必须对被清空的单字段发送 `null`，不能省略字段；省略字段表示“保持当前 Provider 覆盖值不变”。
 - Instructions 在后续 turn 进入 Agent 时按最新 Provider 配置合成；已有且仍有历史上下文的 session 的显式工作目录保持不变，避免运行中任务被静默切换目录。
 - `/clear` 或 `/reset` 后的空 session 会重新按当前 Provider `agent_config.work_dir` 初始化，确保用户在 WebUI 修改 Provider 配置后重开 IM 对话立即生效。
+- IM 通道收到内置 Bifrost Agent 的 `/clear` 或 `/reset` 时必须由主进程先处理，不能把该命令当作普通消息交给 agent worker。主进程需要同步清理 `AgentSessionManager`、guide/queue 状态、active worker stop handle、`im_gateway/session_state.json` 中当前 built-in adapter 的 `historyPath` / `externalThreadId` / `externalConversationId`，以及该 state 指向的 JSONL timeline；否则 worker 内部 `session.clear()` 完成后，下一条 IM 消息仍会从旧持久化状态恢复上下文。
+- 外置 Runner 的 IM `/clear` 或 `/reset` 仍按 adapter + runnerId 精确清理，避免误删同一 IM session key 下其它 runner 的状态；清理前也要请求停止当前 runner 并清空 queue/guide，保证 Stop 后 Clear 不会留下待处理消息或旧进程状态。
 - Agent 初始化必须从最终 `work_dir` 创建 session，使 AGENTS.md 与 repo-local skills 都从该目录加载。
 - Agent 通过 `switch_workdir` 明确切换目录时，运行时会清空旧会话、重新挂载 skills/AGENTS.md 上下文，将最新目录持久化到当前 Provider `agent_config.work_dir`，并在 IM 回复中通知最新工作路径。
 - IM 长连接事件循环每次处理消息时从 Provider store 重新读取最新 Provider 配置，避免连接启动时的旧 provider snapshot 导致 WebUI 修改后不生效。
@@ -781,13 +783,26 @@ struct ChatMessage {
 
 | 命令 | 功能 | 实现 |
 |------|------|------|
-| `/clear` | 清空当前会话历史 | `session.messages.clear()` |
-| `/reset` | 重置会话（等同 /clear） | `session.messages.clear()` |
+| `/clear` | 清空当前会话历史并开始新对话 | 主进程清理内存 session、queue/guide、worker stop handle、IM session_state 和对应 JSONL history |
+| `/reset` | 重置会话（等同 /clear） | 与 `/clear` 相同 |
 
 **命令处理流程**：
 1. 检测消息是否以 `/clear` 或 `/reset` 开头
-2. 执行清空操作
-3. 返回确认消息（不调用模型）
+2. 若当前通道使用外置 Runner，按 adapter + runnerId 停止并清理该 runner 的持久状态；若使用内置 Bifrost Agent，由主进程直接清理 built-in adapter 的状态
+3. 清空 guide/queue，删除旧 `historyPath` 指向的 JSONL，避免下一条消息 fallback 恢复旧上下文
+4. 返回确认消息（不调用模型）
+
+### Stop 后 Clear 回归
+
+2026-06-02 修复 IM 通道中 `/stop` 后 `/clear` 无效的问题。旧流程里，内置 Bifrost Agent 的 IM `/clear` 进入 worker turn loop，worker 内部会清空临时 `AgentSession`，但主进程的 `im_gateway/session_state.json` 与旧 JSONL timeline 仍保留。下一条 IM 消息再次启动 worker 时，主进程先从旧 `historyPath` 恢复 history，worker 也会在缺少明确 historyPath 时按 session key fallback 到最新 JSONL，导致用户看到“Clear 成功”但旧对话被恢复。
+
+修复后的不变量：
+
+- IM built-in `/clear` / `/reset` 必须在主进程短路处理，不创建新的模型请求。
+- 清理后 `load_session_state(session_key, BUILTIN_AGENT_ADAPTER, None)` 返回空，state 指向的 JSONL 文件不存在。
+- 下一条 IM 普通消息使用同一 provider/user/session key 时，请求体只能包含新消息，不得包含 Clear 前的 user/assistant 旧上下文。
+- `/stop` 后无论 worker 是否已经退出，Clear 都要尝试清理 active worker handle 和 queue/guide；无 active worker 时清理应幂等成功。
+- Chat Gateway / 外置 Runner 的清理仍保持 adapter + runnerId 作用域，避免影响同一 IM 通道下其它 runner。
 
 ### 清理机制
 
@@ -912,7 +927,7 @@ tracing = "0.1"
 | Chat API 长期记忆真实链路 | 运行 `e2e-tests/tests/test_long_term_memory_human_api.sh`，验证 `POST /_bifrost/api/im-gateway/agent/chat` 在真实 Bifrost + mock Chat Completions 下触发自动记忆、Phase 2 consolidation、跨独立 session 消费 |
 | Chat API runtime gate 回归 | 运行 `e2e-tests/tests/test_update_plan_human_api.sh`，验证 `/agent/chat` 路径下 update_plan runtime 收口提醒仍会强制模型在结束前补齐最终 plan 状态 |
 | Chat API runtime limits 回归 | 运行 `e2e-tests/tests/test_agent_loop_runtime_limits.sh`，验证默认 1000 次 turn 上限与 600 秒超时配置在 `/agent/chat` 黑盒链路中生效 |
-| Chat API 引导/排队注入回归 | 通过 `/api/im-gateway/agent/chat` 的测试专用字段 `guide_message` / `guide_messages` / `queue_messages`，验证 turn-end guide drain、多条 guide 在进入 loop 前通过 `/status` 展示明细并合并消费、queued FIFO drain、guide 优先于 queue，以及空白注入被忽略 |
+| Chat API 引导/排队注入回归 | 通过 `/api/im-gateway/agent/chat` 的测试专用字段 `guide_message` / `guide_messages` / `queue_messages`，验证 turn-end guide drain、多条 guide 在进入 loop 前通过 `/status` 展示明细并合并消费、queued FIFO drain、guide 优先于 queue，以及空白注入被忽略；隔离 worker 已接收 guide 但尚未完成当前 turn 时，主进程 `/status` 必须继续展示 handed-off guide 快照 |
 | IM busy runner-aware 默认策略回归 | 真实 IM/debug inbound busy 链路按 runner 能力分流：内置 Bifrost Agent 普通追加消息默认进入 guide channel，只有 `/q` 进入 queue；ChatGPT Web、Codex 和其他自定义 runner 普通追加消息默认进入 queue |
 | Codex Runner 排队续聊回归 | Codex CLI 当前支持 `codex exec resume <thread_id> [PROMPT]` 进行下一轮接续，不支持运行中追加 guide。外部 runner 队列 drain 时必须继承上一轮 Codex JSONL 解析出的 `threadId`，让排队消息通过 resume 续同一个 Codex session |
 | 飞书进度卡片与 `/status` 指标格式化回归 | progress card 折叠标题、展开状态区和 `/status` 中的 Token、Context 数字统一使用 K/M/B 单位，最多一位小数并去掉 `.0`，例如 `38634 -> 38.6K`、`19333 -> 19.3K`、`250000 -> 250K`、`1000000 -> 1M` |
@@ -945,7 +960,7 @@ tracing = "0.1"
 | TC-GQ-05 | queued FIFO drain 黑盒回归 | 通过 `/agent/chat` 注入 `queue_messages`，验证在同一次 `run_turn_with_mcp` 中按 FIFO 逐条继续处理 |
 | TC-GQ-06 | guide 优先于 queue | 同时注入 `guide_message` 与 `queue_messages`，验证处理顺序为 initial → guide → queued FIFO |
 | TC-GQ-14 | 多 guide pending status 与合并消费 | 通过 `/agent/chat` 注入多条 `guide_messages`，运行中 `/status` 展示尚未进入 loop 的具体 guide 列表，随后 loop 将多条 guide 合并为一条 user message 继续处理 |
-| TC-GQ-15 | 内置 Agent busy 普通消息默认 guide | 通过 IM/debug inbound 在内置 Bifrost Agent active turn 期间发送普通消息，验证 `/status` 暴露 pending guide，且消息未进入 queue |
+| TC-GQ-15 | 内置 Agent busy 普通消息默认 guide | 通过 IM/debug inbound 在内置 Bifrost Agent active turn 期间发送普通消息，验证 `/status` 暴露 pending guide，且消息未进入 queue；当 guide 已从主进程 channel 转交给隔离 worker 后，`/status` 仍合并 handed-off guide 快照，避免运行中状态短暂显示“引导消息: 无” |
 | TC-GQ-16 | 自定义 Runner busy 普通消息默认 queue | 通过 IM/debug inbound 在自定义 runner active run 期间发送普通消息，验证消息等待当前 run 结束后再处理；Codex runner 若返回 `threadId`，下一条排队消息使用 `codex exec resume` 接续 |
 | TC-IMA-90A | 飞书流式进度卡片与 `/status` Token/Context KMB 格式化 | 构造百万级 Token 与几十万 Context 的 progress card，并调用 `/status`，验证折叠标题、展开状态区和状态文本均展示 `K/M/B` 单位，不再裸显长数字 |
 | TC-IMA-90B | `/status` runner 元信息与压缩次数回归 | 构造外部 runner session 和 compaction 记录，验证 `/status` 展示 Agent 类型、Runner 类型、Runner ID、历史对话轮次、`threadId` / `conversationId`，且恢复后压缩次数保持非 0 |

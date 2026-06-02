@@ -124,6 +124,27 @@ pub(super) async fn request_agent_stop_with_runs_root(
     internal_stopped || worker_stopped || external_worker_stopped || external_stopped
 }
 
+pub(super) async fn clear_builtin_im_agent_session(
+    manager: &bifrost_agent::AgentSessionManager,
+    queue_manager: &crate::im_gateway::SessionQueueManager,
+    session_key: &str,
+) {
+    manager.request_stop(session_key);
+    let _ = crate::im_gateway::agent_worker::request_session_stop(session_key).await;
+    if let Some(mut session) = manager.try_take_session(session_key) {
+        session.clear();
+        manager.return_session(session);
+    } else {
+        manager.clear_session(session_key);
+    }
+    queue_manager.clear_session(session_key);
+    clear_persisted_agent_session_state(
+        session_key,
+        Some(crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER),
+        None,
+    );
+}
+
 /// Extract a path segment that appears before a known suffix.
 /// E.g., `extract_segment_before("abc/status", "/status")` returns `Some("abc")`.
 pub(super) fn extract_segment_before<'a>(path: &'a str, suffix: &str) -> Option<&'a str> {

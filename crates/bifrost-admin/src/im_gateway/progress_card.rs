@@ -47,6 +47,7 @@ pub struct ImAgentProgressSnapshot {
     pub output: String,
     pub last_thought: Option<String>,
     pub plan_steps: Vec<PlanStep>,
+    pub proposed_plan: Option<String>,
     pub tool_calls: Vec<ToolCallLog>,
     pub latest_tool: Option<ProgressToolSummary>,
     pub status: Option<ActiveTurnStatus>,
@@ -65,6 +66,7 @@ impl ImAgentProgressSnapshot {
             output: String::new(),
             last_thought: None,
             plan_steps: Vec::new(),
+            proposed_plan: None,
             tool_calls: Vec::new(),
             latest_tool: None,
             status: None,
@@ -149,6 +151,12 @@ impl ImAgentProgressSnapshot {
                 self.plan_steps = steps;
                 if let Some(title) = title.filter(|value| !value.trim().is_empty()) {
                     self.title = Some(title);
+                }
+            }
+            AgentTurnProgressEvent::ProposedPlan { content } => {
+                if !content.trim().is_empty() {
+                    self.proposed_plan = Some(content);
+                    self.title = Some("实施方案".to_string());
                 }
             }
             AgentTurnProgressEvent::TitleUpdated { title } => {
@@ -368,7 +376,7 @@ impl FeishuProgressCardSession {
             sequence: 1,
             generation: self.generation,
             rendered_title: header_title(&self.snapshot).to_string(),
-            rendered_has_plan: !self.snapshot.plan_steps.is_empty(),
+            rendered_has_plan: has_plan_state(&self.snapshot),
             rendered_has_tool: has_tool_state(&self.snapshot),
             rendered_has_thinking: has_thinking_state(&self.snapshot),
             rendered_phase: self.snapshot.phase,
@@ -386,7 +394,7 @@ impl FeishuProgressCardSession {
             return Ok(());
         };
         let current_title = header_title(&self.snapshot).to_string();
-        let current_has_plan = !self.snapshot.plan_steps.is_empty();
+        let current_has_plan = has_plan_state(&self.snapshot);
         let current_has_tool = has_tool_state(&self.snapshot);
         let current_has_thinking = has_thinking_state(&self.snapshot);
         if handle.rendered_title != current_title
@@ -645,7 +653,7 @@ pub fn build_feishu_progress_card(
     streaming_mode: bool,
 ) -> serde_json::Value {
     let mut elements = Vec::new();
-    if !snapshot.plan_steps.is_empty() {
+    if !snapshot.plan_steps.is_empty() || snapshot.proposed_plan.is_some() {
         elements.push(build_plan_panel_element(snapshot));
     }
     if has_tool_state(snapshot) {
@@ -718,10 +726,14 @@ fn has_thinking_state(snapshot: &ImAgentProgressSnapshot) -> bool {
 }
 
 fn current_has_plan_hash(snapshot: &ImAgentProgressSnapshot) -> Option<u64> {
-    if snapshot.plan_steps.is_empty() {
+    if !has_plan_state(snapshot) {
         return None;
     }
     Some(element_hash(&build_plan_panel_element(snapshot)))
+}
+
+fn has_plan_state(snapshot: &ImAgentProgressSnapshot) -> bool {
+    !snapshot.plan_steps.is_empty() || snapshot.proposed_plan.is_some()
 }
 
 fn current_has_tool_hash(snapshot: &ImAgentProgressSnapshot) -> Option<u64> {
@@ -783,18 +795,33 @@ fn build_plan_panel_element(snapshot: &ImAgentProgressSnapshot) -> serde_json::V
         "header": {
             "title": {
                 "tag": "plain_text",
-                "content": format_plan_panel_title(&snapshot.plan_steps)
+                "content": format_plan_panel_title(snapshot)
             }
         },
         "elements": [{
             "tag": "markdown",
-            "content": format_plan_markdown(&snapshot.plan_steps),
+            "content": format_plan_panel_markdown(snapshot),
             "element_id": PLAN_ELEMENT_ID
         }]
     })
 }
 
-fn format_plan_panel_title(steps: &[PlanStep]) -> String {
+fn format_plan_panel_markdown(snapshot: &ImAgentProgressSnapshot) -> String {
+    if let Some(plan) = snapshot
+        .proposed_plan
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return crate::im_gateway::markdown_converter::convert_to_feishu_markdown(plan);
+    }
+    format_plan_markdown(&snapshot.plan_steps)
+}
+
+fn format_plan_panel_title(snapshot: &ImAgentProgressSnapshot) -> String {
+    if snapshot.proposed_plan.is_some() {
+        return "实施方案".to_string();
+    }
+    let steps = &snapshot.plan_steps;
     if steps.is_empty() {
         return "任务计划".to_string();
     }

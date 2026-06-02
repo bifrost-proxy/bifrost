@@ -464,6 +464,24 @@ pub(super) async fn run_event_loop_with_options(
                             continue;
                         }
 
+                        if matches!(agent_message.trim(), "/clear" | "/reset") {
+                            clear_builtin_im_agent_session(
+                                &agent_session_manager,
+                                &queue_manager,
+                                &session_key,
+                            )
+                            .await;
+                            send_agent_reply(
+                                &client,
+                                &provider,
+                                &event,
+                                "会话已重置，下一条消息将开始新的对话。",
+                                &message_log_store,
+                            )
+                            .await;
+                            continue;
+                        }
+
                         // Session is free — start processing with select! interleaving
                         let images =
                             resolve_event_images(&client, &provider, &event, &msg.images).await;
@@ -607,6 +625,24 @@ pub(super) async fn run_event_loop_with_options(
                             runner_id_override: Some(runner_id.to_string()),
                             runner_selected: true,
                         },
+                    )
+                    .await;
+                    continue;
+                }
+
+                if matches!(message_text.trim(), "/clear" | "/reset") {
+                    clear_builtin_im_agent_session(
+                        &agent_session_manager,
+                        &queue_manager,
+                        &session_key,
+                    )
+                    .await;
+                    send_agent_reply(
+                        &client,
+                        &provider,
+                        &event,
+                        "会话已重置，下一条消息将开始新的对话。",
+                        &message_log_store,
                     )
                     .await;
                     continue;
@@ -762,13 +798,17 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
     // happens to share the same IM session key.
     let trimmed_msg = input.message_text.trim();
     if trimmed_msg == "/clear" || trimmed_msg == "/reset" {
+        let _ = request_agent_stop(ctx.agent_session_manager, &input.session_key).await;
         if let Some(mut session) = ctx
             .agent_session_manager
             .try_take_session(&input.session_key)
         {
             session.clear();
             ctx.agent_session_manager.return_session(session);
+        } else {
+            ctx.agent_session_manager.clear_session(&input.session_key);
         }
+        ctx.queue_manager.clear_session(&input.session_key);
         if settings.adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID {
             crate::im_gateway::chatgpt_web::clear_session_conversation(&input.session_key).await;
         }

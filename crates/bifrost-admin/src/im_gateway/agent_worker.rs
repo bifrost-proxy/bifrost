@@ -38,6 +38,8 @@ pub struct AgentWorkerRunRequest {
     #[serde(default)]
     pub system_prompt: Option<String>,
     #[serde(default)]
+    pub collaboration_mode: Option<bifrost_agent::CollaborationMode>,
+    #[serde(default)]
     pub work_dir: Option<String>,
     #[serde(default)]
     pub history_path: Option<String>,
@@ -62,6 +64,8 @@ pub struct AgentWorkerRunResult {
     #[serde(default)]
     pub plan_steps: Option<Vec<bifrost_agent::PlanStep>>,
     #[serde(default)]
+    pub proposed_plan: Option<String>,
+    #[serde(default)]
     pub goal_needs_continuation: bool,
     #[serde(default)]
     pub goal_objective: Option<String>,
@@ -77,6 +81,7 @@ impl From<bifrost_agent::TurnResult> for AgentWorkerRunResult {
             work_dir_switched: value.work_dir_switched,
             title_updated: value.title_updated,
             plan_steps: value.plan_steps,
+            proposed_plan: value.proposed_plan,
             goal_needs_continuation: value.goal_needs_continuation,
             goal_objective: value.goal_objective,
             history_path: None,
@@ -92,6 +97,7 @@ impl From<AgentWorkerRunResult> for bifrost_agent::TurnResult {
             work_dir_switched: value.work_dir_switched,
             title_updated: value.title_updated,
             plan_steps: value.plan_steps,
+            proposed_plan: value.proposed_plan,
             goal_needs_continuation: value.goal_needs_continuation,
             goal_objective: value.goal_objective,
         }
@@ -475,6 +481,7 @@ pub fn build_run_request(
         queued_messages: Vec::new(),
         guide_messages: Vec::new(),
         system_prompt: None,
+        collaboration_mode: None,
         work_dir,
         history_path,
         source,
@@ -720,6 +727,9 @@ async fn run_builtin_agent_turn(
             &request.images,
             request.system_prompt.as_deref(),
             recorder.as_mut(),
+            request
+                .collaboration_mode
+                .unwrap_or(bifrost_agent::CollaborationMode::Default),
         )
         .await
     };
@@ -744,6 +754,9 @@ async fn run_builtin_agent_turn(
             &[],
             request.system_prompt.as_deref(),
             recorder.as_mut(),
+            request
+                .collaboration_mode
+                .unwrap_or(bifrost_agent::CollaborationMode::Default),
         )
         .await;
     }
@@ -971,6 +984,7 @@ mod tests {
             work_dir_switched: Some("/tmp/next".to_string()),
             title_updated: Some("Title".to_string()),
             plan_steps: None,
+            proposed_plan: Some("Plan".to_string()),
             goal_needs_continuation: true,
             goal_objective: Some("goal".to_string()),
         };
@@ -978,6 +992,7 @@ mod tests {
         let back = bifrost_agent::TurnResult::from(worker);
         assert_eq!(back.response, "ok");
         assert_eq!(back.work_dir_switched.as_deref(), Some("/tmp/next"));
+        assert_eq!(back.proposed_plan.as_deref(), Some("Plan"));
         assert!(back.goal_needs_continuation);
     }
 

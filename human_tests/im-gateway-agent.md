@@ -2537,3 +2537,27 @@ rm -rf ./.bifrost-test
 - **清理步骤**:
   - 测试结束后删除临时目录。
 - **执行记录（2026-05-29）**: PASS — 创建用例后立即执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin external_cli_run_writes_image_attachments_and_injects_prompt_paths --lib` 与 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin session_state_persists_message_content_parts --lib`，两项均通过，覆盖图片附件写入、prompt 路径注入、metadata 与 `content_parts` 持久化回放。
+
+### TC-IMA-138: IM 通道 `/clear` 清理 Stop 后的内置 Agent 持久上下文
+
+- **前置条件**:
+  - 使用临时 `BIFROST_DATA_DIR`，不复用用户真实会话目录。
+  - Agent 模型配置指向测试 mock Chat Completions 服务。
+  - 通过 `/_bifrost/api/im-gateway/debug/mock-inbound` 注入 IM 入站消息，使请求进入真实 IM event loop，而不是直接调用 `/agent/chat` 快捷 API。
+- **操作步骤**:
+  1. 创建启用的 mock IM provider，并使用同一 provider/user 注入第一条 IM 消息 `IM_CLEAR_FIRST_CONTEXT_E2E`。
+  2. 等待 mock 模型收到第一条请求，并确认请求体包含 `IM_CLEAR_FIRST_CONTEXT_E2E`。
+  3. 确认 `agent/im_gateway/session_state.json` 已为该 IM session 持久化 built-in Agent state。
+  4. 通过同一 IM provider/user 注入 `/clear` 或 `/reset`。
+  5. 等待 built-in Agent state 被删除，并确认旧 state 指向的 JSONL history 不再用于恢复。
+  6. 使用同一临时数据目录重建 `ImGatewayService`，模拟服务重启。
+  7. 再注入普通 IM 消息 `IM_CLEAR_FRESH_CONTEXT_E2E`。
+- **预期结果**:
+  - `/clear` 不触发模型请求，只返回会话重置确认。
+  - Clear 后 `load_session_state(session_key, BUILTIN_AGENT_ADAPTER, None)` 返回空。
+  - 重启后下一条 IM 普通消息的模型请求包含 `IM_CLEAR_FRESH_CONTEXT_E2E`，且不包含 `IM_CLEAR_FIRST_CONTEXT_E2E`。
+  - queue/guide 状态被同步清空；没有旧 Stop/worker 状态把旧上下文重新写回。
+- **清理步骤**:
+  - 测试结束后删除临时数据目录；不启动系统代理。
+  - 如手动启动过 Bifrost，使用同一 `BIFROST_DATA_DIR` 停止对应实例。
+- **执行记录（2026-06-02）**: PASS — 创建用例后立即执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin clear_builtin_im_agent_session_removes_persisted_context_and_queue --lib` 通过，验证 built-in IM Clear 清理 in-memory session、queue/guide、`session_state.json` 与 state 指向的 JSONL history；随后执行 `SKIP_FRONTEND_BUILD=1 cargo run -p bifrost-e2e -- --test im_gateway_mock_inbound_clear_resets_builtin_agent_history --test-timeout 180` 通过，使用 `/_bifrost/api/im-gateway/debug/mock-inbound` 进入真实 IM event loop，确认 `/clear` 后重建 `ImGatewayService` 再发送新 IM 消息时，模型请求只包含 `IM_CLEAR_FRESH_CONTEXT_E2E`，不再包含 Clear 前的 `IM_CLEAR_FIRST_CONTEXT_E2E`。

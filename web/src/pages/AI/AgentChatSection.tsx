@@ -48,7 +48,7 @@ import {
   queueItemsFromUnknown,
   type QueuedInput,
 } from "./AgentChatSection.queue";
-import { SelectedRunnerPill, SlashRunnerPanel, useRunnerCallHandler, useSlashRunnerSelection } from "./AgentChatSection.runnerCall";
+import { SelectedRunnerPill, SlashRunnerPanel, useRunnerCallHandler, useSlashRunnerSelection, type SlashCommandOption } from "./AgentChatSection.runnerCall";
 import { createAgentChatStyles } from "./AgentChatSection.styles";
 import { AgentChatTokenHud } from "./AgentChatSection.tokenHud";
 
@@ -57,6 +57,25 @@ const { TextArea } = Input;
 const { useBreakpoint } = Grid;
 const MAX_PASTED_IMAGES = 6;
 const HISTORY_EVENT_PAGE_SIZE = 300;
+type AgentCollaborationMode = "plan";
+
+function parseAgentPlanSlash(content: string): {
+  message: string;
+  collaborationMode?: AgentCollaborationMode;
+} {
+  const trimmed = content.trimStart();
+  if (!trimmed.startsWith("/plan")) {
+    return { message: content };
+  }
+  const rest = trimmed.slice("/plan".length);
+  if (rest.length > 0 && !/\s/.test(rest[0])) {
+    return { message: content };
+  }
+  return {
+    message: rest.trimStart(),
+    collaborationMode: "plan",
+  };
+}
 
 type HistoryPagePayload = {
   events?: HistoryEvent[];
@@ -1303,10 +1322,23 @@ export default function AgentChatSection() {
   };
 
   const handleSend = async (options?: { contentOverride?: string; silentCommand?: boolean }) => {
-    const content = (options?.contentOverride ?? draft).trim();
-    const silentCommand = options?.silentCommand === true || content === "/compact";
+    const rawContent = (options?.contentOverride ?? draft).trim();
     const imagesForSend = options?.contentOverride ? [] : pendingImages;
-    if ((!content && imagesForSend.length === 0) || supplementSubmitting) {
+    if ((!rawContent && imagesForSend.length === 0) || supplementSubmitting) {
+      return;
+    }
+    if (running) {
+      await handleRunningInput(rawContent);
+      return;
+    }
+    const parsedPlanSlash = parseAgentPlanSlash(rawContent);
+    const content = parsedPlanSlash.message.trim();
+    const silentCommand = options?.silentCommand === true || rawContent === "/compact";
+    if (!content && imagesForSend.length === 0) {
+      if (parsedPlanSlash.collaborationMode === "plan" && imagesForSend.length === 0) {
+        antdMessage.warning("Type a task after /plan to start Plan Mode.");
+        setDraft("/plan ");
+      }
       return;
     }
     if (slashRunner && !running && !silentCommand) {
@@ -1315,10 +1347,6 @@ export default function AgentChatSection() {
         return;
       }
       await handleRunnerCall(content, slashRunner);
-      return;
-    }
-    if (running) {
-      await handleRunningInput(content);
       return;
     }
     const userVisibleContent = content || imageCountLabel(imagesForSend.length);
@@ -1684,6 +1712,7 @@ export default function AgentChatSection() {
         workDir: workDir || undefined,
         runnerId,
         runnerAdapter: selectedRunnerAdapter(runnerOptions, runnerId),
+        collaborationMode: parsedPlanSlash.collaborationMode,
         onEvent: (event) => {
           setTelemetry((prev) => reduceTelemetry(prev, event));
           if (silentCommand) {
@@ -1796,9 +1825,19 @@ export default function AgentChatSection() {
     }
   };
 
-  const handleSlashCommand = (command: string) => {
+  const handleSlashCommand = (option: SlashCommandOption) => {
     setSlashRunner(undefined);
-    void handleSend({ contentOverride: command, silentCommand: true });
+    if (option.action === "insert") {
+      setDraft(option.insertText || `${option.command} `);
+      setTimeout(() => {
+        const input = document.querySelector<HTMLTextAreaElement>(
+          '[data-testid="agent-chat-input"]',
+        );
+        input?.focus();
+      }, 0);
+      return;
+    }
+    void handleSend({ contentOverride: option.command, silentCommand: true });
   };
 
   const slashOptionCount = slashCommandOptions.length + slashRunnerOptions.length;
@@ -1828,7 +1867,7 @@ export default function AgentChatSection() {
       if (!option) {
         return false;
       }
-      handleSlashCommand(option.command);
+      handleSlashCommand(option);
       return true;
     }
     const runner = slashRunnerOptions[slashActiveIndex - slashCommandOptions.length];
@@ -1844,6 +1883,7 @@ export default function AgentChatSection() {
     slashCommandOptions,
     slashOptionCount,
     slashRunnerOptions,
+    handleSlashCommand,
     setSlashRunner,
   ]);
 
@@ -2147,7 +2187,7 @@ export default function AgentChatSection() {
                   styles={styles}
                   onActiveIndexChange={setSlashActiveIndex}
                   onSelectCommand={(option) => {
-                    handleSlashCommand(option.command);
+                    handleSlashCommand(option);
                   }}
                   onSelect={(option) => {
                     setSlashRunner(option);

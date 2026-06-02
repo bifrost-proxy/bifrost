@@ -48,6 +48,9 @@ pub enum AgentTurnProgressEvent {
         steps: Vec<PlanStep>,
         title: Option<String>,
     },
+    ProposedPlan {
+        content: String,
+    },
     TitleUpdated {
         title: String,
     },

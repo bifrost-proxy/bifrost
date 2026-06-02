@@ -34,7 +34,7 @@ impl ToolHandler for RequestUserInputTool {
     }
 
     fn description(&self) -> &str {
-        "Request user input for one to three short questions and wait for the response. Bifrost currently validates the request but has no interactive wait channel in this runtime."
+        "Request user input for one to three short questions and wait for the response. Use only when an interactive user-input channel is attached, primarily in Plan Mode. Bifrost currently validates the request but has no interactive wait channel in this runtime."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

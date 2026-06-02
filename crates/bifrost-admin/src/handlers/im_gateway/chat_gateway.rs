@@ -929,6 +929,11 @@ fn builtin_runner_call_progress_event_payload(
             "steps": steps,
             "title": title,
         }),
+        bifrost_agent::AgentTurnProgressEvent::ProposedPlan { content } => serde_json::json!({
+            "eventType": "proposed_plan",
+            "sessionKey": session_key,
+            "content": content,
+        }),
         bifrost_agent::AgentTurnProgressEvent::TitleUpdated { title } => serde_json::json!({
             "eventType": "title_updated",
             "sessionKey": session_key,

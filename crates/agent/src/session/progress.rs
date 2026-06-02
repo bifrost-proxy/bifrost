@@ -13,3 +13,9 @@ pub(super) fn assistant_final(sender: Option<&AgentTurnProgressSender>, content:
         let _ = sender.send(AgentTurnProgressEvent::AssistantFinal { content });
     }
 }
+
+pub(super) fn proposed_plan(sender: Option<&AgentTurnProgressSender>, content: String) {
+    if let Some(sender) = sender {
+        let _ = sender.send(AgentTurnProgressEvent::ProposedPlan { content });
+    }
+}

@@ -8,7 +8,7 @@ import {
   type SetStateAction,
 } from "react";
 import { Button, Tag, Tooltip, Typography, message as antdMessage } from "antd";
-import { CloseOutlined, CompressOutlined, ExportOutlined, RobotOutlined } from "@ant-design/icons";
+import { BulbOutlined, CloseOutlined, CompressOutlined, ExportOutlined, RobotOutlined } from "@ant-design/icons";
 import {
   dedupeThreads,
   eventToProcessStep,
@@ -30,14 +30,25 @@ export type SlashCommandOption = {
   label: string;
   description: string;
   value: string;
+  action: "send" | "insert";
+  insertText?: string;
 };
 
 const SLASH_COMMAND_OPTIONS: SlashCommandOption[] = [
+  {
+    command: "/plan",
+    label: "Plan mode",
+    description: "进入规划模式，先产出方案再执行",
+    value: "plan",
+    action: "insert",
+    insertText: "/plan ",
+  },
   {
     command: "/compact",
     label: "Compact context",
     description: "立即压缩当前对话上下文",
     value: "compact",
+    action: "send",
   },
 ];
 
@@ -428,7 +439,7 @@ export function SlashRunnerPanel({
                 onMouseEnter={() => onActiveIndexChange(index)}
                 onClick={() => onSelectCommand(option)}
               >
-                <CompressOutlined />
+                {option.value === "plan" ? <BulbOutlined /> : <CompressOutlined />}
                 <span style={styles.slashRunnerOptionText}>
                   <strong>{option.command}</strong>
                   <Text type="secondary" style={{ marginLeft: 8 }}>

@@ -22,6 +22,8 @@ struct AgentChatRequest {
     session_key: Option<String>,
     #[serde(default)]
     system_prompt: Option<String>,
+    #[serde(default, alias = "collaborationMode")]
+    collaboration_mode: Option<bifrost_agent::CollaborationMode>,
     #[serde(default)]
     work_dir: Option<String>,
     #[serde(default)]
@@ -81,12 +83,24 @@ pub async fn handle_agent_chat(
 }
 
 async fn handle_stream(req: Request<Incoming>, state: SharedAdminState) -> Response<BoxBody> {
-    let body: AgentChatRequest = match read_body_json(req).await {
+    let mut body: AgentChatRequest = match read_body_json(req).await {
         Ok(value) => value,
         Err(response) => return response,
     };
     if body.message.trim().is_empty() && body.images.is_empty() {
         return error_response(StatusCode::BAD_REQUEST, "message must not be empty");
+    }
+    let slash_mode = crate::im_gateway::agent_slash::parse_agent_slash_mode(&body.message);
+    body.message = slash_mode.message;
+    body.collaboration_mode = crate::im_gateway::agent_slash::merge_collaboration_mode(
+        body.collaboration_mode,
+        slash_mode.collaboration_mode,
+    );
+    if body.message.trim().is_empty() && body.images.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "message must not be empty after /plan",
+        );
     }
 
     let Some(service) = state.im_gateway_service() else {
@@ -297,6 +311,7 @@ async fn run_agent_stream(
         Some("web".to_string()),
     );
     worker_request.system_prompt = body.system_prompt.clone();
+    worker_request.collaboration_mode = body.collaboration_mode;
     let mut worker =
         crate::im_gateway::agent_worker::AgentWorkerClient::spawn_or_fallback(worker_request).await;
     let (stop_tx, mut stop_rx) = mpsc::unbounded_channel::<()>();
@@ -390,6 +405,7 @@ async fn run_agent_stream(
                             "response": turn_result.response,
                             "toolCalls": turn_result.tool_calls_log,
                             "planSteps": turn_result.plan_steps,
+                            "proposedPlan": turn_result.proposed_plan,
                         });
                         let _ = send_sse_event(&tx, "run_finished", payload).await;
                         crate::im_gateway::agent_worker::clear_active_worker(&session_key);
@@ -785,6 +801,14 @@ fn progress_event_payload(
                 "sessionKey": session_key,
                 "steps": steps,
                 "title": title,
+            }),
+        ),
+        bifrost_agent::AgentTurnProgressEvent::ProposedPlan { content } => (
+            "proposed_plan",
+            json!({
+                "eventType": "proposed_plan",
+                "sessionKey": session_key,
+                "content": content,
             }),
         ),
         bifrost_agent::AgentTurnProgressEvent::TitleUpdated { title } => (

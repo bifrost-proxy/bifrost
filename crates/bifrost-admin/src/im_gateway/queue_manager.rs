@@ -41,6 +41,10 @@ pub struct SessionQueueManager {
     /// the turn loop at the next guide checkpoint.
     guide_slots: DashMap<String, GuideChannel>,
 
+    /// Guide messages that have been handed to an isolated worker process but
+    /// are still part of the current active turn from the main process view.
+    handed_off_guides: DashMap<String, VecDeque<String>>,
+
     /// Queue-mode FIFO: processed sequentially after each turn completes.
     queues: DashMap<String, SessionQueue>,
 }
@@ -52,6 +56,7 @@ impl SessionQueueManager {
     pub fn new() -> Self {
         Self {
             guide_slots: DashMap::new(),
+            handed_off_guides: DashMap::new(),
             queues: DashMap::new(),
         }
     }
@@ -77,10 +82,35 @@ impl SessionQueueManager {
 
     /// Get pending guide messages without modifying state.
     pub fn guide_status(&self, session_key: &str) -> Vec<String> {
-        self.guide_slots
+        let mut guides = self
+            .guide_slots
             .get(session_key)
             .map(|entry| entry.snapshot())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if let Some(entry) = self.handed_off_guides.get(session_key) {
+            for guide in entry.iter() {
+                if !guides.iter().any(|existing| existing == guide) {
+                    guides.push(guide.clone());
+                }
+            }
+        }
+        guides
+    }
+
+    /// Record guide messages handed to an isolated worker so status endpoints
+    /// can keep reporting them until the active turn finishes.
+    pub fn mark_guides_handed_to_worker(&self, session_key: &str, messages: &[String]) {
+        let mut entry = self
+            .handed_off_guides
+            .entry(session_key.to_string())
+            .or_default();
+        let handed_off = entry.value_mut();
+        for message in messages {
+            if !message.trim().is_empty() && !handed_off.iter().any(|existing| existing == message)
+            {
+                handed_off.push_back(message.clone());
+            }
+        }
     }
 
     // ── Queue mode ───────────────────────────────────────────────────────
@@ -137,6 +167,7 @@ impl SessionQueueManager {
     /// Clear all state (guide + queue) for a session.
     pub fn clear_session(&self, session_key: &str) {
         self.guide_slots.remove(session_key);
+        self.handed_off_guides.remove(session_key);
         self.queues.remove(session_key);
     }
 }
@@ -180,6 +211,23 @@ mod tests {
         let ch = mgr.get_or_create_guide_channel("s1");
         let taken: Vec<String> = ch.lock().unwrap().drain(..).collect();
         assert_eq!(taken, vec!["msg1".to_string(), "msg2".to_string()]);
+    }
+
+    #[test]
+    fn test_guide_status_includes_worker_handoff_snapshot() {
+        let mgr = SessionQueueManager::new();
+        mgr.inject_guide("s1", "guide before handoff".into());
+        let ch = mgr.get_or_create_guide_channel("s1");
+        let handed_off: Vec<String> = ch.lock().unwrap().drain(..).collect();
+
+        mgr.mark_guides_handed_to_worker("s1", &handed_off);
+
+        assert_eq!(
+            mgr.guide_status("s1"),
+            vec!["guide before handoff".to_string()]
+        );
+        mgr.clear_session("s1");
+        assert!(mgr.guide_status("s1").is_empty());
     }
 
     #[test]
