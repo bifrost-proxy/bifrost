@@ -882,6 +882,12 @@ struct TaskWatchFile {
 
 #[derive(Debug, Clone, Serialize)]
 struct TaskWatchDailyAgentDocument {
+    #[serde(default = "default_daily_agent_id")]
+    agent_id: String,
+    #[serde(default = "default_daily_agent_name")]
+    agent_name: String,
+    #[serde(default = "default_daily_agent_output_dir")]
+    output_dir: String,
     date: String,
     status: String,
     change_kind: String,
@@ -903,6 +909,7 @@ struct TaskWatchDailyAgentDocument {
 struct TaskWatchDailyAgent {
     enabled: bool,
     runner: String,
+    agents: Vec<AsrDailyAgentItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1091,6 +1098,7 @@ struct CreateTaskRequest {
     model: Option<String>,
     runtime_strategy: Option<AsrRuntimeStrategy>,
     diarization: Option<AsrDiarizationConfig>,
+    daily_agent: Option<AsrDailyAgentConfig>,
     external_devices: Option<Vec<AsrExternalDeviceBinding>>,
     import_policy: Option<AsrExternalImportPolicy>,
 }

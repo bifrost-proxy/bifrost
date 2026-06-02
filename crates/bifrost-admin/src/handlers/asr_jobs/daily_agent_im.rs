@@ -119,7 +119,7 @@ async fn send_daily_agent_im_message(
         }
     }
 
-    let _ = update_daily_agent_im_sent(&task.id);
+    let _ = update_daily_agent_im_sent(task);
 
     tracing::info!(
         task_id = %task.id,

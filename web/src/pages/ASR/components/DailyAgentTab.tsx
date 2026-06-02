@@ -22,11 +22,14 @@ import {
   SendOutlined,
   SyncOutlined,
   ThunderboltOutlined,
+  PlusOutlined,
+  DeleteOutlined,
 } from "@ant-design/icons";
 import type {
   AsrDailyAgentConfig,
   AsrDailyAgentConfigResponse,
   AsrDailyAgentInstructionsResponse,
+  AsrDailyAgentItem,
   AsrDailyAgentProcessedDocument,
   AsrDailyAgentRunsResponse,
 } from "../../../api/asr";
@@ -49,10 +52,18 @@ import {
 
 const { Text } = Typography;
 const { TextArea } = Input;
+const DAILY_AGENT_TOKEN_RE = /^[A-Za-z0-9_-]+$/;
+
+function normalizeAgentToken(value: string): string {
+  return value
+    .trim()
+    .replace(/[^A-Za-z0-9_-]/g, "_")
+    .replace(/^[_-]+|[_-]+$/g, "");
+}
 
 interface DailyAgentTabProps {
   taskId: string;
-  onOpenReport?: (date: string) => void;
+  onOpenReport?: (date: string, agentId?: string) => void;
 }
 
 interface ImChannelOption {
@@ -79,21 +90,27 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
   const [syncing, setSyncing] = useState(false);
   const [instructionsText, setInstructionsText] = useState("");
   const [instructionsDirty, setInstructionsDirty] = useState(false);
+  const [selectedAgentId, setSelectedAgentId] = useState<string>("daily_report");
   const [reportSyncDir, setReportSyncDir] = useState("");
   const [reportSyncDirDirty, setReportSyncDirDirty] = useState(false);
 
   const fetchAll = useCallback(async () => {
     setLoading(true);
     try {
-      const [config, instr, runners, providers, targets] = await Promise.all([
+      const [config, runners, providers, targets] = await Promise.all([
         getDailyAgentConfig(taskId),
-        getDailyAgentInstructions(taskId),
         imGatewayApi.getExternalCliConfig(),
         imGatewayApi.listProviders(),
         imGatewayApi.listTargets(),
       ]);
+      const agents = config.config.agents || [];
+      const nextSelectedAgentId = agents.some((agent) => agent.id === selectedAgentId)
+        ? selectedAgentId
+        : agents[0]?.id || "daily_report";
+      const instr = await getDailyAgentInstructions(taskId, nextSelectedAgentId);
       setConfigData(config);
       setInstructions(instr);
+      setSelectedAgentId(nextSelectedAgentId);
       setInstructionsText(instr.content);
       setInstructionsDirty(false);
       setReportSyncDir(config.config.report_sync_dir || "");
@@ -106,7 +123,7 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
     } finally {
       setLoading(false);
     }
-  }, [taskId]);
+  }, [selectedAgentId, taskId]);
 
   useEffect(() => {
     fetchAll();
@@ -136,6 +153,68 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
       ...runnerIds.map((id) => ({ label: id, value: id })),
     ];
   }, [runnerConfig?.runners]);
+
+  const agents = useMemo(
+    () => configData?.config.agents || [],
+    [configData?.config.agents]
+  );
+
+  const selectedAgent = useMemo(
+    () => agents.find((agent) => agent.id === selectedAgentId) || agents[0],
+    [agents, selectedAgentId]
+  );
+
+  const saveAgents = async (nextAgents: AsrDailyAgentItem[]) => {
+    await handleConfigUpdate({ agents: nextAgents });
+  };
+
+  const updateAgent = (agentId: string, patch: Partial<AsrDailyAgentItem>) => {
+    const nextAgents = agents.map((agent) =>
+      agent.id === agentId ? { ...agent, ...patch } : agent
+    );
+    void saveAgents(nextAgents);
+  };
+
+  const addAgent = () => {
+    const base = "custom_agent";
+    let index = agents.length + 1;
+    let id = `${base}_${index}`;
+    while (agents.some((agent) => agent.id === id)) {
+      index += 1;
+      id = `${base}_${index}`;
+    }
+    const template = agents[0] || configData?.config;
+    if (!template) return;
+    const nextAgent: AsrDailyAgentItem = {
+      id,
+      name: id,
+      enabled: true,
+      runner: template.runner || "bifrost_agent",
+      timeout_ms: template.timeout_ms || 7_200_000,
+      trigger_policy: "after_asr_run",
+      instructions_source: "default",
+      im_delivery: {
+        enabled: false,
+        mode: "full_report",
+        send_policy: "on_success_with_report",
+      },
+      output_dir: id,
+    };
+    setSelectedAgentId(id);
+    void saveAgents([...agents, nextAgent]);
+  };
+
+  const removeAgent = (agentId: string) => {
+    if (agents.length <= 1) {
+      message.warning("At least one Daily Agent is required");
+      return;
+    }
+    const nextAgents = agents.filter((agent) => agent.id !== agentId);
+    if (selectedAgentId === agentId) {
+      setSelectedAgentId(nextAgents[0]?.id || "daily_report");
+    }
+    void saveAgents(nextAgents);
+  };
 
   const handleRunnerChange = (value: string) => {
     void handleConfigUpdate({ runner: value });
@@ -186,7 +265,7 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
   const handleSaveInstructions = async () => {
     setSaving(true);
     try {
-      await updateDailyAgentInstructions(taskId, instructionsText);
+      await updateDailyAgentInstructions(taskId, instructionsText, selectedAgent?.id);
       message.success("Instructions saved");
       setInstructionsDirty(false);
     } catch (error: unknown) {
@@ -260,7 +339,7 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
 
   const handleSend = async () => {
     try {
-      const result = await sendDailyAgentReport(taskId);
+      const result = await sendDailyAgentReport(taskId, selectedAgent?.id);
       if (result.ok) {
         message.success(`Sent ${result.sent_reports.length} report(s)`);
       }
@@ -378,6 +457,119 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
             )}
           </Space>
         )}
+      </Card>
+
+      <Card size="small" title="Daily Agents" loading={loading && !config}>
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="Each ASR daily markdown is processed by enabled agents in order. Agent id/name/output directory must use English letters, numbers, '_' or '-'."
+        />
+        <Table<AsrDailyAgentItem>
+          data-testid="asr-daily-agents-table"
+          size="small"
+          rowKey="id"
+          dataSource={agents}
+          pagination={false}
+          columns={[
+            {
+              title: "Enabled",
+              dataIndex: "enabled",
+              width: 90,
+              render: (enabled, record) => (
+                <Switch
+                  checked={enabled}
+                  onChange={(checked) => updateAgent(record.id, { enabled: checked })}
+                />
+              ),
+            },
+            {
+              title: "Agent",
+              dataIndex: "name",
+              width: 180,
+              render: (value, record) => (
+                <Input
+                  size="small"
+                  value={value}
+                  status={DAILY_AGENT_TOKEN_RE.test(value) ? undefined : "error"}
+                  onChange={(event) => {
+                    const name = normalizeAgentToken(event.target.value);
+                    updateAgent(record.id, { name, output_dir: record.output_dir || name });
+                  }}
+                />
+              ),
+            },
+            {
+              title: "Output Dir",
+              dataIndex: "output_dir",
+              width: 170,
+              render: (value, record) => (
+                <Input
+                  size="small"
+                  value={value}
+                  status={DAILY_AGENT_TOKEN_RE.test(value) ? undefined : "error"}
+                  onChange={(event) =>
+                    updateAgent(record.id, { output_dir: normalizeAgentToken(event.target.value) })
+                  }
+                />
+              ),
+            },
+            {
+              title: "Runner",
+              dataIndex: "runner",
+              width: 220,
+              render: (value, record) => (
+                <Select
+                  size="small"
+                  value={value || undefined}
+                  onChange={(runner) => updateAgent(record.id, { runner })}
+                  style={{ width: 190 }}
+                  options={runnerOptions}
+                />
+              ),
+            },
+            {
+              title: "IM",
+              dataIndex: ["im_delivery", "enabled"],
+              width: 90,
+              render: (_, record) => (
+                <Switch
+                  checked={record.im_delivery.enabled}
+                  onChange={(enabled) => updateAgent(record.id, { im_delivery: { ...record.im_delivery, enabled } })}
+                />
+              ),
+            },
+            {
+              title: "Channel",
+              width: 240,
+              render: (_, record) => (
+                <Select
+                  size="small"
+                  allowClear
+                  value={record.im_delivery.channel || undefined}
+                  onChange={(channel) => updateAgent(record.id, { im_delivery: { ...record.im_delivery, channel: channel || "" } })}
+                  style={{ width: 220 }}
+                  options={imChannelOptions}
+                />
+              ),
+            },
+            {
+              title: "Actions",
+              width: 150,
+              render: (_, record) => (
+                <Space>
+                  <Button size="small" onClick={() => setSelectedAgentId(record.id)}>Edit MD</Button>
+                  <Button size="small" onClick={() => void triggerDailyAgentRun(taskId, { force: false, agentId: record.id })}>Run</Button>
+                  <Button size="small" danger icon={<DeleteOutlined />} onClick={() => removeAgent(record.id)} />
+                </Space>
+              ),
+            },
+          ]}
+        />
+        <Button style={{ marginTop: 12 }} icon={<PlusOutlined />} onClick={addAgent}>
+          Add Agent
+        </Button>
       </Card>
 
       {/* IM Delivery */}
@@ -621,8 +813,22 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
       {/* Instructions Editor */}
       <Card
         size="small"
-        title="Agent Instructions (AGENTS.md)"
+        title={`Agent Instructions (${selectedAgent?.name || selectedAgentId})`}
         extra={
+          <Space>
+          <Select
+            size="small"
+            value={selectedAgent?.id || selectedAgentId}
+            style={{ width: 180 }}
+            options={agents.map((agent) => ({ label: agent.name, value: agent.id }))}
+            onChange={async (agentId) => {
+              setSelectedAgentId(agentId);
+              const instr = await getDailyAgentInstructions(taskId, agentId);
+              setInstructions(instr);
+              setInstructionsText(instr.content);
+              setInstructionsDirty(false);
+            }}
+          />
           <Button
             type="primary"
             size="small"
@@ -633,6 +839,7 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
           >
             Save
           </Button>
+          </Space>
         }
       >
         <TextArea
@@ -712,12 +919,24 @@ export function DailyAgentRecordsTab({ taskId, onOpenReport }: DailyAgentTabProp
       {runsData && processedDocuments.length > 0 ? (
         <div data-testid="asr-daily-agent-run-results-table">
           <Table<AsrDailyAgentProcessedDocument>
-            rowKey="date"
+            rowKey={(record) => `${record.agent_id || "daily_report"}:${record.date}`}
             size="small"
             dataSource={processedDocuments}
             pagination={{ pageSize: 10, hideOnSinglePage: true }}
             columns={[
               { title: "Date", dataIndex: "date", width: 120 },
+              {
+                title: "Agent",
+                dataIndex: "agent_name",
+                width: 140,
+                render: (v, record) => <Tag>{v || record.agent_id}</Tag>,
+              },
+              {
+                title: "Output",
+                dataIndex: "output_dir",
+                width: 120,
+                render: (v) => <Text code>{v || "report"}</Text>,
+              },
               {
                 title: "Processed At",
                 dataIndex: "processed_at_ms",
@@ -760,9 +979,9 @@ export function DailyAgentRecordsTab({ taskId, onOpenReport }: DailyAgentTabProp
                     <Button
                       type="link"
                       size="small"
-                      data-testid={`asr-daily-agent-report-link-${record.date}`}
+                      data-testid={`asr-daily-agent-report-link-${record.agent_id}-${record.date}`}
                       style={{ padding: 0, height: "auto", fontSize: 11 }}
-                      onClick={() => onOpenReport?.(record.date)}
+                      onClick={() => onOpenReport?.(record.date, record.agent_id)}
                     >
                       {v.split("/").pop()}
                     </Button>

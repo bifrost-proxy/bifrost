@@ -55,11 +55,11 @@ pub async fn handle_asr_tasks(req: Request<Incoming>, path: &str) -> Response<Bo
             match parts.as_slice() {
                 [task_id, "daily-agent"] => get_daily_agent_config_response(task_id).await,
                 [task_id, "daily-agent", "agents"] => {
-                    get_daily_agent_instructions_response(task_id).await
+                    get_daily_agent_instructions_response(task_id, req).await
                 }
                 [task_id, "daily-agent", "runs"] => get_daily_agent_runs_response(task_id),
                 [task_id, "daily-agent", "reports", date] => {
-                    get_daily_agent_report_response(task_id, date)
+                    get_daily_agent_report_response(task_id, date, req)
                 }
                 _ => error_response(StatusCode::NOT_FOUND, "ASR task endpoint not found"),
             }
@@ -86,7 +86,7 @@ pub async fn handle_asr_tasks(req: Request<Incoming>, path: &str) -> Response<Bo
                 .collect::<Vec<_>>();
             match parts.as_slice() {
                 [task_id, "daily-agent", "run"] => post_daily_agent_run_response(task_id, req).await,
-                [task_id, "daily-agent", "send"] => post_daily_agent_send_response(task_id).await,
+                [task_id, "daily-agent", "send"] => post_daily_agent_send_response(task_id, req).await,
                 [task_id, "daily-agent", "sync"] => post_daily_agent_sync_response(task_id).await,
                 _ => error_response(StatusCode::NOT_FOUND, "ASR task endpoint not found"),
             }
@@ -313,6 +313,10 @@ async fn create_task_response(req: Request<Incoming>) -> Response<BoxBody> {
     let next_run_at_ms = enabled
         .then(|| schedule.initial_next_run_at_ms(now))
         .flatten();
+    let daily_agent = normalize_daily_agent_config(&create.daily_agent.unwrap_or_default());
+    if let Err(error) = validate_daily_agent_config(&daily_agent) {
+        return error_response(StatusCode::BAD_REQUEST, &error);
+    }
     let task = AsrDirectoryTask {
         id: uuid::Uuid::new_v4().as_simple().to_string(),
         name: create
@@ -338,7 +342,7 @@ async fn create_task_response(req: Request<Incoming>) -> Response<BoxBody> {
         last_run_at_ms: None,
         next_run_at_ms,
         last_error: None,
-        daily_agent: AsrDailyAgentConfig::default(),
+        daily_agent,
         external_devices,
         import_policy,
     };
@@ -444,7 +448,7 @@ fn update_task_config(
         task.diarization = normalize_task_diarization_config(diarization);
     }
     if let Some(daily_agent) = update.daily_agent {
-        task.daily_agent = daily_agent;
+        task.daily_agent = normalize_daily_agent_config(&daily_agent);
     }
     if let Some(bindings) = update.external_devices {
         task.external_devices =

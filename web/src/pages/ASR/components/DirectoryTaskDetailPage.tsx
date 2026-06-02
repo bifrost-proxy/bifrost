@@ -146,7 +146,7 @@ interface DirectoryTaskDetailPageProps {
   onResumeTask: (id: string) => void;
   onOpenFile: (file: AsrTaskFileRecord) => void;
   onOpenDailyDocument: (date: string) => void;
-  onOpenDailyAgentReport: (date: string) => void;
+  onOpenDailyAgentReport: (date: string, agentId?: string) => void;
   onChangeTaskTab: (tab: DirectoryTaskDetailTabKey) => void;
 }
 
@@ -434,6 +434,12 @@ export default function DirectoryTaskDetailPage({
                 </Descriptions.Item>
                 <Descriptions.Item label="Date">
                   {taskDailyAgentReport.date}
+                </Descriptions.Item>
+                <Descriptions.Item label="Agent">
+                  <Tag>{taskDailyAgentReport.agent_name || taskDailyAgentReport.agent_id || "daily_report"}</Tag>
+                </Descriptions.Item>
+                <Descriptions.Item label="Output Dir">
+                  <Text code>{taskDailyAgentReport.output_dir || "report"}</Text>
                 </Descriptions.Item>
                 <Descriptions.Item label="Path" span={2}>
                   <Text style={{ fontSize: 12 }} ellipsis={{ tooltip: taskDailyAgentReport.path }}>

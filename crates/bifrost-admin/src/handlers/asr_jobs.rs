@@ -77,6 +77,7 @@ include!("asr_jobs/chunk_runtime.rs");
 include!("asr_jobs/memory_bisect.rs");
 include!("asr_jobs/audio_processing.rs");
 include!("asr_jobs/store.rs");
+include!("asr_jobs/daily_agent_config.rs");
 include!("asr_jobs/daily_agent.rs");
 include!("asr_jobs/daily_agent_workspace.rs");
 include!("asr_jobs/daily_agent_records.rs");
