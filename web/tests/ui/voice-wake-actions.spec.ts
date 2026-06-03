@@ -285,11 +285,10 @@ async function installVoiceWakeMocks(page: Page, options: VoiceWakeMockOptions =
 
 test("ASR 页面提供录音、快捷键绑定和真实监听触发入口", async ({ page }) => {
   const mocks = await installVoiceWakeMocks(page);
-  await openPage(page, "ai?aiSection=tools-asr");
+  await openPage(page, "ai?aiSection=tools-asr&asrTab=voice");
 
   await expect(page.getByTestId("voice-wake-actions-card")).toBeVisible();
   await expect(page.getByTestId("voice-wake-record-button")).toBeVisible();
-  await expect(page.getByTestId("voice-wake-phrase-input")).toHaveAttribute("readonly", "");
   await expect(page.getByTestId("voice-wake-phrase-input")).toHaveValue("打开录音");
   await expect(page.getByTestId("voice-wake-voiceprint-select")).toBeVisible();
   await expect(page.getByTestId("voice-wake-voiceprint-select")).toContainText("Eden");
@@ -320,19 +319,19 @@ test("ASR 页面提供录音、快捷键绑定和真实监听触发入口", asyn
 
 test("Voice Wake 开关在没有声纹时禁用并展示提示", async ({ page }) => {
   const mocks = await installVoiceWakeMocks(page, { speakerProfiles: false, savedBinding: false });
-  await openPage(page, "ai?aiSection=tools-asr");
+  await openPage(page, "ai?aiSection=tools-asr&asrTab=voice");
 
   await expect(page.getByTestId("voice-wake-listener-switch")).toBeDisabled();
   await expect(page.getByTestId("voice-wake-start-listening")).toBeDisabled();
   await expect(page.getByTestId("voice-wake-listener-block-reason")).toContainText(
-    "Enroll a speaker voiceprint",
+    "Record wake audio",
   );
   expect(mocks.listenerStartBodies).toHaveLength(0);
 });
 
 test("Voice Wake 开关在没有保存指令时禁用并展示提示", async ({ page }) => {
   const mocks = await installVoiceWakeMocks(page, { speakerProfiles: true, savedBinding: false });
-  await openPage(page, "ai?aiSection=tools-asr");
+  await openPage(page, "ai?aiSection=tools-asr&asrTab=voice");
 
   await expect(page.getByTestId("voice-wake-listener-switch")).toBeDisabled();
   await expect(page.getByTestId("voice-wake-start-listening")).toBeDisabled();

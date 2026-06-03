@@ -241,6 +241,7 @@ async function waitForLiveMeter(page: Page) {
 }
 
 async function installAsrFileTranscriptionMock(page: Page) {
+  const jobId = "offline_mock_job";
   await page.route("**/_bifrost/api/asr/transcribe-stream**", async (route) => {
     await route.fulfill({
       status: 200,
@@ -254,6 +255,61 @@ async function installAsrFileTranscriptionMock(page: Page) {
       ].join("\n\n"),
     });
   });
+  await page.route("**/_bifrost/api/asr/offline-jobs**", async (route) => {
+    if (route.request().method() === "POST") {
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify({
+          job_id: jobId,
+          status: "queued",
+          source_name: "sample.wav",
+          model: "Qwen3-ASR-1.7B",
+          language: "chinese",
+          pipeline_profile: "offline-speaker-subtitle-local",
+          speaker_aware: true,
+          created_at_ms: Date.now(),
+          updated_at_ms: Date.now(),
+          artifacts: null,
+          events: [],
+        }),
+      });
+      return;
+    }
+    await route.fallback();
+  });
+  await page.route(`**/_bifrost/api/asr/offline-jobs/${jobId}`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        job_id: jobId,
+        status: "succeeded",
+        source_name: "sample.wav",
+        model: "Qwen3-ASR-1.7B",
+        language: "chinese",
+        pipeline_profile: "offline-speaker-subtitle-local",
+        speaker_aware: true,
+        created_at_ms: Date.now(),
+        updated_at_ms: Date.now(),
+        artifacts: {
+          timeline_json: "timeline_json",
+          txt: "txt",
+          srt: "srt",
+          vtt: "vtt",
+        },
+        events: [{ at_ms: Date.now(), stage: "done", message: "mock done" }],
+      }),
+    });
+  });
+  await page.route(`**/_bifrost/api/asr/offline-jobs/${jobId}/artifacts/**`, async (route) => {
+    const format = route.request().url().split("/").pop() || "txt";
+    await route.fulfill({
+      status: 200,
+      contentType: format === "timeline_json" ? "application/json" : "text/plain",
+      body: format === "timeline_json" ? "[]" : "测试文件",
+    });
+  });
 }
 
 test("ASR microphone input shows live level meter and resets on stop/cancel", async ({
@@ -261,7 +317,7 @@ test("ASR microphone input shows live level meter and resets on stop/cancel", as
 }) => {
   await installAsrMicrophoneMocks(page);
   await installAsrFileTranscriptionMock(page);
-  await openPage(page, "ai?aiSection=tools-asr");
+  await openPage(page, "ai?aiSection=tools-asr&asrTab=management");
 
   const workbench = page.getByTestId("asr-workbench-card");
   await expect(workbench).toBeVisible();
@@ -359,7 +415,7 @@ test("ASR microphone level meter remains readable in dark theme", async ({ page 
       JSON.stringify({ state: { mode: "dark" }, version: 0 }),
     );
   });
-  await openPage(page, "ai?aiSection=tools-asr");
+  await openPage(page, "ai?aiSection=tools-asr&asrTab=management");
 
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   const meter = page.locator('[aria-label="Microphone input level"]');
@@ -775,16 +831,14 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
   );
 
   await openPage(page, "ai?aiSection=tools-asr");
+  await expect(page.getByRole("tab", { name: "定时任务" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
   await expect(page.getByText("Directory Tasks")).toBeVisible();
-  const speechConverterTop = await page
-    .getByText("Speech Converter", { exact: true })
-    .boundingBox();
-  const directoryTasksTop = await page
-    .getByText("Directory Tasks", { exact: true })
-    .boundingBox();
-  const speechToTextTop = await page.getByText("Speech to Text", { exact: true }).boundingBox();
-  expect(speechConverterTop?.y).toBeLessThan(directoryTasksTop?.y ?? Infinity);
-  expect(directoryTasksTop?.y).toBeLessThan(speechToTextTop?.y ?? Infinity);
+  await expect(page.getByTestId("asr-workbench-card")).toHaveCount(0);
+  await expect(page.getByTestId("asr-diarization-setup-card")).toHaveCount(0);
+  await expect(page.getByTestId("voice-wake-actions-card")).toHaveCount(0);
   await expect(page.getByPlaceholder("Meeting audio watcher")).toHaveCount(0);
   await page.getByRole("button", { name: "New" }).click();
   const createDialog = page.getByRole("dialog", { name: "New Directory Task" });
@@ -859,7 +913,7 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
   await expect(page).not.toHaveURL(/asrDay=2026-05-14/);
   await taskPage.getByRole("tab", { name: "Daily Agent", exact: true }).click();
   await expect(taskPage.getByText("Configuration")).toBeVisible();
-  await expect(taskPage.getByText("Agent Instructions (AGENTS.md)")).toBeVisible();
+  await expect(taskPage.getByText("Agent Instructions (daily_report)")).toBeVisible();
   await expect(taskPage.getByText("Processed Documents")).toHaveCount(0);
   await taskPage.getByRole("tab", { name: "Daily Agent Records", exact: true }).click();
   await expect(taskPage.getByText("Run Results")).toBeVisible();
@@ -867,7 +921,7 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
     .getByTestId("asr-daily-agent-run-results-table")
     .locator(".ant-table-tbody tr.ant-table-row");
   await expect(runRows.first().locator("td").first()).toHaveText("2026-05-15");
-  const reportLink = page.getByTestId("asr-daily-agent-report-link-2026-05-14");
+  const reportLink = taskPage.getByRole("button", { name: "2026-05-14-report.md" });
   await expect(reportLink).toBeVisible();
   await reportLink.click();
   await expect(page).toHaveURL(/asrTaskTab=daily-agent-records/);
