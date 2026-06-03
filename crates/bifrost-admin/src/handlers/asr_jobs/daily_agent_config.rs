@@ -432,13 +432,19 @@ fn daily_agent_instruction_content(task: &AsrDirectoryTask) -> String {
     if task.daily_agent.agent_id == DEFAULT_TOMORROW_TODO_AGENT_ID {
         DEFAULT_ASR_TOMORROW_TODO_AGENT_MD
             .replace("{{task_name}}", &task.name)
-            .replace("{{daily_dir}}", ".")
-            .replace("{{report_dir}}", &format!("./{}/", task.daily_agent.output_dir))
+            .replace("{{daily_dir}}", "./input")
+            .replace(
+                "{{report_dir}}",
+                &format!("./output/{}/", task.daily_agent.output_dir),
+            )
     } else {
         DEFAULT_ASR_DAILY_AGENTS_MD
             .replace("{{task_name}}", &task.name)
-            .replace("{{daily_dir}}", ".")
-            .replace("{{report_dir}}", &format!("./{}/", task.daily_agent.output_dir))
+            .replace("{{daily_dir}}", "./input")
+            .replace(
+                "{{report_dir}}",
+                &format!("./output/{}/", task.daily_agent.output_dir),
+            )
     }
 }
 
@@ -446,12 +452,28 @@ fn daily_agent_instructions_dir(task_id: &str) -> PathBuf {
     daily_dir_for_task(task_id).join("agents")
 }
 
+fn daily_agent_work_dir(task: &AsrDirectoryTask) -> PathBuf {
+    daily_agent_instructions_dir(&task.id).join(&task.daily_agent.agent_id)
+}
+
 fn daily_agent_instructions_path(task: &AsrDirectoryTask) -> PathBuf {
-    daily_agent_instructions_dir(&task.id).join(format!("{}.md", task.daily_agent.agent_id))
+    daily_agent_work_dir(task).join("AGENTS.md")
+}
+
+fn daily_agent_input_dir(task: &AsrDirectoryTask) -> PathBuf {
+    daily_agent_work_dir(task).join("input")
+}
+
+fn daily_agent_output_root_dir(task: &AsrDirectoryTask) -> PathBuf {
+    daily_agent_work_dir(task).join("output")
 }
 
 fn daily_agent_output_dir(task: &AsrDirectoryTask) -> PathBuf {
-    daily_dir_for_task(&task.id).join(&task.daily_agent.output_dir)
+    daily_agent_output_root_dir(task).join(&task.daily_agent.output_dir)
+}
+
+fn daily_agent_source_copy_path(task: &AsrDirectoryTask, date: &str) -> PathBuf {
+    daily_agent_input_dir(task).join(format!("{date}.md"))
 }
 
 fn daily_agent_processed_key(task: &AsrDirectoryTask, date: &str) -> String {

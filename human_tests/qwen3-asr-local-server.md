@@ -292,14 +292,14 @@
 3. 打开 `http://127.0.0.1:18883/_bifrost/ai?aiSection=tools-asr`。
 4. 在 Directory Tasks 区域输入任务名、音频目录、递归开关；分别切换 Cycle 为 Daily、Weekly、Monthly，确认表单展示对应的时间、星期或日期控件；选择 Weekly Friday 09:15 后点击 Add。
 5. 确认任务表展示目录、`Weekly Fri 09:15`、processed/pending/failed/deleted-after-processing 总体进度、下一次运行时间，页面不再出现秒级 interval 输入或 `Every Ns` 文案。
-6. 点击任务行中的 View details，确认页面进入 `ai?aiSection=tools-asr&asrTask=<task_id>` 子页面，且页面没有 `dialog` / Drawer 弹窗；子页面展示 schedule、last/next run、processed/pending/failed/deleted-after-processing、逐文件 source path、status、recorded time、recorded time source、duration、finished time、output text path、timeline path 和错误信息。
-7. 在任务详情子页面检查底部文件结果表格：页面整体不出现横向溢出，超宽文件路径和结果路径只在表格内部横向滚动；分页默认显示 8 行，切换到 `20 / page` 后表格立即显示 20 行且选择器保持 `20 / page`。
+6. 点击任务行中的 View details，确认页面进入 `ai?aiSection=tools-asr&asrTask=<task_id>` 子页面，且页面没有 `dialog` / Drawer 弹窗；子页面顶部直接展示 tab 导航，第一个 tab 为 `Overview`，其中展示 schedule、last/next run、processed/pending/failed/deleted-after-processing、运行状态、音频占用和错误信息。
+7. 切换到 `Files` tab，在任务详情子页面检查文件结果表格：页面整体不出现横向溢出，超宽文件路径和结果路径只在表格内部横向滚动；文件列表始终按 `Recorded` 时间倒排，最新录音/文件在最前面；分页默认显示 8 行，切换到 `20 / page` 后表格立即显示 20 行且选择器保持 `20 / page`。
 8. 点击 Run 手动运行任务。
 9. 运行完成后检查：
    ```bash
    find "$BIFROST_DATA_DIR/asr/data/text" -type f
    ```
-10. 打开任务详情子页面后，切换到 Daily Docs tab，确认按 `YYYY-MM-DD` 展示日文档列表；点击某一天的 Open document，确认页面进入 `ai?aiSection=tools-asr&asrTask=<task_id>&asrDay=<YYYY-MM-DD>` 子页面，展示完整 Markdown 内容、文档路径、大小和更新时间，内容包含该日所有已转写文件的时间段文本；点击 Back to daily docs 后回到任务详情并移除 `asrDay`。
+10. 打开任务详情子页面后，切换到 Daily Docs tab，确认按 `YYYY-MM-DD` 展示日文档列表；点击某一天的 Open document，确认页面进入 `ai?aiSection=tools-asr&asrTask=<task_id>&asrDay=<YYYY-MM-DD>` 子页面，展示完整 Markdown 内容、文档路径、大小和更新时间，内容包含该日所有已转写文件的时间段文本；详情页正文不设置内部纵向滚动，长文档自然撑开页面并只使用最外层页面滚动条；点击 Back to daily docs 后回到任务详情并移除 `asrDay`。
 11. 调用 API 验证按天文档：
    ```bash
    curl -s "http://127.0.0.1:18883/_bifrost/api/asr/tasks/<task_id>/daily"

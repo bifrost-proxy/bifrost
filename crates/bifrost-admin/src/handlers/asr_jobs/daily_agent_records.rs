@@ -7,6 +7,9 @@ fn daily_agent_report_dirs_for_task(task_id: &str) -> Vec<PathBuf> {
     let mut case_compat = Vec::new();
     if let Some(task) = find_task(task_id) {
         for agent in normalized_daily_agents(&task.daily_agent) {
+            let agent_task = task_for_daily_agent(&task, &agent);
+            configured.push(daily_agent_output_dir(&agent_task));
+            configured.push(daily_agent_work_dir(&agent_task).join(&agent.output_dir));
             configured.push(daily_dir.join(agent.output_dir));
         }
     }
@@ -52,12 +55,27 @@ fn daily_agent_report_dirs_for_task(task_id: &str) -> Vec<PathBuf> {
 
 fn agent_output_dir_from_report_path(task: &AsrDirectoryTask, path: &Path) -> String {
     let daily_dir = daily_dir_for_task(&task.id);
-    path.parent()
+    let relative = path
+        .parent()
         .and_then(|parent| parent.strip_prefix(&daily_dir).ok())
-        .and_then(|relative| relative.components().next())
-        .and_then(|component| component.as_os_str().to_str())
-        .map(str::to_string)
-        .unwrap_or_else(default_daily_agent_output_dir)
+        .map(Path::to_path_buf);
+    if let Some(relative) = relative {
+        let parts: Vec<_> = relative
+            .components()
+            .filter_map(|component| component.as_os_str().to_str())
+            .collect();
+        if parts.first() == Some(&"agents") && parts.get(2) == Some(&"output") && parts.len() >= 4
+        {
+            return parts[3].to_string();
+        }
+        if parts.first() == Some(&"agents") && parts.len() >= 3 {
+            return parts[2].to_string();
+        }
+        if let Some(output_dir) = parts.first() {
+            return (*output_dir).to_string();
+        }
+    }
+    default_daily_agent_output_dir()
 }
 
 fn agent_for_output_dir(task: &AsrDirectoryTask, output_dir: &str) -> AsrDailyAgentItem {

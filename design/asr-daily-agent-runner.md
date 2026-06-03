@@ -12,17 +12,17 @@ ASR 定时任务完成音频转写后，自动触发 Daily Agent Runner 队列�
 
 ```text
 <BIFROST_DATA_DIR>/asr/data/text/<task_id>/daily/
-├── AGENTS.md                    # legacy 兼容指导手册
 ├── .gitignore                   # 排除 .DS_Store
 ├── .git/                        # best-effort 版本追踪
 ├── YYYY-MM-DD.md                # ASR 生成的每日转写（只读）
 ├── agents/
-│   ├── daily_report.md          # daily_report 指令
-│   └── tomorrow_todo.md         # tomorrow_todo 指令
-└── report/
-    └── YYYY-MM-DD-report.md     # Agent Runner 生成的报告
-└── tomorrow_todo/
-    └── YYYY-MM-DD-report.md     # 明日 To Do List 输出
+│   └── <agent_id>/
+│       ├── AGENTS.md            # 当前 Agent 的运行规范；Runner cwd 指向该目录
+│       ├── input/
+│       │   └── YYYY-MM-DD.md    # 每日转写源文件副本
+│       └── output/
+│           └── <output_dir>/
+│               └── YYYY-MM-DD-report.md
 ```
 
 ---
@@ -38,13 +38,14 @@ ASR 定时任务完成音频转写后，自动触发 Daily Agent Runner 队列�
 | 3 | Partial success 时是否触发 | 是。只要 daily markdown 有新增/更新就触发，prompt/report 中保留失败 chunk 证据 |
 | 4 | IM target 选择器 | WebUI 和 API 都只使用一个 `im_delivery.channel` 字段；值为 `owner:<provider_id>` 或 `target:<target_id>` |
 | 5 | IM 发送内容 | 默认 summary；`full_report` 发送原始报告内容；超长时按固定大小拆成多条 IM，不降级为 summary |
-| 6 | AGENTS.md 存储 | 双写：同时写入文件和 task config 的 `instructions` 副本（备份用途） |
+| 6 | AGENTS.md 存储 | 每个 Agent 独立写入 `daily/agents/<agent_id>/AGENTS.md`，并同步 task config 的 `instructions` 副本（备份用途） |
 | 7 | Git commit | Phase 1 只做 `git init`；Runner 运行后 best-effort `git add + commit` |
 | 8 | Report 覆盖策略 | 默认不覆盖，`force=true` 时才允许覆盖 |
 | 9 | Report 同步目录 | 可选 `report_sync_dir`；Runner 生成 report 后自动复制本轮 report，用户也可在 Daily Agent 配置页手动同步全部现有 report，便于 iCloud 等外部目录同步 |
 | 10 | Daily Agent 多实例 | `daily_agent.agents[]` 是新的真实配置；旧单 Agent 字段保留为兼容镜像 |
 | 11 | 默认 Agent | 默认启用两个 Agent：`daily_report` 输出到 `report/`；`tomorrow_todo` 输出到 `tomorrow_todo/`，并默认绑定 `owner:feishu-main` 发送完整报告 |
 | 12 | Agent 标识约束 | `id`、`name`、`output_dir` 必须只包含英文字符、数字、`_`、`-`，避免跨平台路径与 URL 参数歧义 |
+| 13 | Agent 工作目录 | Runner cwd 必须是 `daily/agents/<agent_id>`；源文件消费路径固定为 `input/YYYY-MM-DD.md`，报告输出路径固定为 `output/<output_dir>/YYYY-MM-DD-report.md` |
 
 ---
 
@@ -261,10 +262,11 @@ pub(crate) struct AsrDailyAgentConversationState {
 
 ### 3.7 Report 索引可见性
 
-Daily Agent 同时维护两类事实：
+Daily Agent 同时维护三类事实：
 
 - `daily_agent_processed.json`：系统内 Runner 成功处理后的增量索引；新 key 使用 `<agent_id>:<YYYY-MM-DD>`，legacy `YYYY-MM-DD` key 只作为 `daily_report` 兼容读取。
-- `daily/<output_dir>/*-report.md`：磁盘上已经存在的报告文件，可能由历史版本、外部 Agent 或人工流程生成；`report/` 和历史 `Report/` 兼容为 `daily_report`。
+- `daily/agents/<agent_id>/input/YYYY-MM-DD.md`：分发给该 Agent 的每日转写源文件副本。新增 Agent、保存配置、GET 初始化 workspace、ASR 转录完成触发 Daily Agent 前、手动运行前都必须同步，确保 Agent 只靠自己的工作目录也能运行。同步必须做差异判断：目标缺失、文件长度不同或内容不同才复制；内容一致时跳过，避免数千个 Daily Docs 时每次全量写盘。
+- `daily/agents/<agent_id>/output/<output_dir>/*-report.md`：磁盘上已经存在的报告文件，可能由历史版本、外部 Agent 或人工流程生成；旧版 `daily/<output_dir>/`、`daily/agents/<agent_id>/<output_dir>/` 和历史 `Report/` 继续兼容扫描。
 
 `GET /daily-agent` 返回 `report_index_status`，用于 UI 展示 report 文件与 processed state 的对齐状态：
 
@@ -289,7 +291,7 @@ Daily Agent 同时维护两类事实：
 
 ### 3.8 Report 同步状态
 
-`report_sync_dir` 只表示额外副本目录，不改变 `daily/report/` 作为系统事实源。同步时按 report 文件名复制到目标目录，目标文件内容一致时计入 skipped，内容不同或不存在时覆盖复制。路径支持 `~/...` 展开，目标目录不存在时创建；目标存在但不是目录时返回错误。
+`report_sync_dir` 只表示额外副本目录，不改变 `daily/agents/<agent_id>/output/<output_dir>/` 作为系统事实源。同步时按 report 文件名复制到目标目录，目标文件内容一致时计入 skipped，内容不同或不存在时覆盖复制。路径支持 `~/...` 展开，目标目录不存在时创建；目标存在但不是目录时返回错误。
 
 最近一次同步结果保存在 `last_report_sync`，用于 `Last Run Status` 展示：
 
@@ -305,7 +307,7 @@ Daily Agent 同时维护两类事实：
 }
 ```
 
-自动同步只处理本轮 Runner 生成或更新的 report；手动同步通过 WebUI 按钮调用 `/daily-agent/sync`，扫描并同步全部现有 `daily/report/` 和历史兼容 `daily/Report/` 报告。
+自动同步只处理本轮 Runner 生成或更新的 report；手动同步通过 WebUI 按钮调用 `/daily-agent/sync`，扫描并同步全部现有 `daily/agents/<agent_id>/output/<output_dir>/` 报告，同时兼容历史 `daily/report/`、`daily/Report/` 和 `daily/agents/<agent_id>/<output_dir>/` 报告。
 
 ---
 
@@ -335,12 +337,14 @@ fn ensure_asr_daily_workspace(task: &AsrDirectoryTask) -> Result<AsrDailyWorkspa
 **执行步骤**：
 
 1. 计算 `daily_dir = text_output_dir(data_dir) / task.id / "daily"`
-2. `mkdir -p daily/` 和 `mkdir -p daily/report/`
-3. 如果 `AGENTS.md` 不存在：
+2. `mkdir -p daily/agents/<agent_id>/input/` 和 `mkdir -p daily/agents/<agent_id>/output/<output_dir>/`
+3. 如果 `daily/agents/<agent_id>/AGENTS.md` 不存在：
    - `instructions_source == Custom && instructions.is_some()` → 写入 custom
    - 否则 → 写入内置默认模板（替换 `{{task_name}}`/`{{daily_dir}}`/`{{report_dir}}`）
-4. 写入 `.gitignore`（内容：`.DS_Store`）
-5. 尝试 `git init`（失败只 warn，不阻塞）
+4. 将 `daily/YYYY-MM-DD.md` 分发到所有 Agent 的 `input/YYYY-MM-DD.md`，新增 Agent 时也要补齐既有 Daily Docs。分发使用差异复制，内容一致的文件不刷新 mtime、不重复写盘。
+5. 历史任务中已存在的 `agents/<agent_id>/AGENTS.md` 需要做兼容迁移：只替换旧模板中“源文件在当前目录根部 / report 或 tomorrow_todo 输出目录”的路径说明，改为 `input/YYYY-MM-DD.md` 与 `output/<output_dir>/`，保留用户其它自定义指令。
+5. 写入 `.gitignore`（内容：`.DS_Store`）
+6. 尝试 `git init`（失败只 warn，不阻塞）
 
 **调用时机**：
 - 创建 ASR task 成功后
@@ -445,8 +449,8 @@ ExternalCliRuntime::run(ExternalCliRunRequest {
 ```text
 请根据当前目录 AGENTS.md，检查并处理以下变更文件：
 
-- 2026-05-15.md: change_kind=appended, source_sha256=..., report=report/2026-05-15-report.md
-- 2026-05-16.md: change_kind=new_file, source_sha256=..., report=report/2026-05-16-report.md
+- source=input/2026-05-15.md: change_kind=appended, source_sha256=..., report=output/report/2026-05-15-report.md
+- source=input/2026-05-16.md: change_kind=new_file, source_sha256=..., report=output/report/2026-05-16-report.md
 
 只刷新这些日期对应的 report。不要修改原始 YYYY-MM-DD.md。
 ```
@@ -556,7 +560,7 @@ ExternalCliRuntime::run(ExternalCliRunRequest {
 
 - Query: `agent_id=<id>`，缺省选择第一个 Agent。
 - Body: `{ "content": "..." }`
-- 写入 `daily/agents/<agent_id>.md`，同时保留 `daily/AGENTS.md` 作为 legacy 兼容入口。
+- 写入 `daily/agents/<agent_id>/AGENTS.md`，Runner cwd 指向该 agent 工作目录。
 - 更新对应 `agents[]` 项：`instructions_source=custom`, `instructions=<content>`。
 - Best-effort: `git add . && git commit -m "update ASR daily agent instructions"`
 - Git 失败返回 `git_warning` 但保存成功
@@ -610,14 +614,14 @@ ExternalCliRuntime::run(ExternalCliRunRequest {
 
 展示信息：
 - Workspace path / Git status / AGENTS.md 状态
-- Daily Agents 表格：启停、Runner、IM、Channel、独立 output dir、独立指令编辑入口、单 Agent Run、删除、新增 Agent。
+- Daily Agents 表格：启停、Agent 摘要、独立 output dir、Runner、IM 状态、Last Run 摘要、单 Agent Run、详情入口、删除、新增 Agent。
 - Report count / Last run (status, run_id, duration, error)
 - Report sync 状态：最近一次同步目标、总数、copied/skipped/failed、同步时间和错误摘要
 - IM delivery 状态 (provider, target, last sent, last error)
 
 操作按钮：
-- `Edit <agent_id>.md` / `Save config`
-- `Run now` 串行运行所有 enabled Agent；Agent 行内 `Run` 只运行该 Agent；`Send last report now` 按选中 Agent 发送；`Sync reports`
+- Agent 详情页提供 `Agent Configuration` / `IM Delivery` / `Last Run Status` / `Agent Instructions`，并在详情内保存单 Agent 的 Runner、Trigger Policy、Timeout、Session Key、Output Dir、IM Channel、Mode、Send Policy 和 Instructions。
+- Agent 行内 `Run` 和详情页 `Run Now` 只运行该 Agent；`Force Run` 只强制刷新该 Agent；`Send Report` 按当前 Agent 发送；列表页保留任务级 `Sync reports`。
 - `Refresh status` / `Open Daily Docs` / `Open Reports`
 
 ### 7.2.1 Task Detail - Daily Docs Row Action
@@ -625,7 +629,9 @@ ExternalCliRuntime::run(ExternalCliRunRequest {
 Daily Docs 表格的每个 `YYYY-MM-DD.md` 行在 `Action` 列同时提供：
 
 - `Open document`：保持原行为，进入 `asrDay=<date>` 的日文档详情页。
-- `Run Daily Agent`：调用 `POST /api/asr/tasks/{task_id}/daily-agent/run?date=<date>`，只对当前行日期排队 Daily Agent，不切换 tab、不影响其它日期文档。按钮在请求提交期间展示行级 loading，并在已有行级请求未完成时禁用其它行的同类动作，避免用户连续触发同一 task 的并发 run。
+- `Run All Agents`：调用 `POST /api/asr/tasks/{task_id}/daily-agent/run?date=<date>`，省略 `agent_id`，只对当前行日期按 `agents[]` 顺序排队全部 enabled Agent，不切换 tab、不影响其它日期文档。
+- Agent 下拉动作：同一按钮右侧菜单列出 `Run <agent_id>`；选择后调用 `POST /api/asr/tasks/{task_id}/daily-agent/run?date=<date>&agent_id=<agent_id>`，只运行指定 Agent。禁用 Agent 在菜单中不可选。
+- 按钮在请求提交期间展示行级 loading，并在已有行级请求未完成时禁用其它行的同类动作，避免用户连续触发同一 task 的并发 run。
 
 ---
 
@@ -788,7 +794,7 @@ ensure_asr_daily_workspace(task)
 │
 ├── 2. 创建目录
 │   ├── mkdir -p daily/
-│   └── mkdir -p daily/report/
+│   └── mkdir -p agents/<agent_id>/input + output/<output_dir>
 │
 ├── 3. AGENTS.md
 │   ├── [存在?] ─── Yes ──▶ 跳过
@@ -1005,7 +1011,7 @@ build_daily_agent_change_plan(task, trigger, date, force)
 
 1. ASR 原始 `YYYY-MM-DD.md` 由 `generate_daily_summaries()` 生成，Daily Agent 不修改
 2. 旧任务无 `daily_agent` 字段时升级为默认双 Agent；旧单 Agent 配置加载时保留 legacy runner/instructions/status 并补齐 `tomorrow_todo`
-3. 已存在的 `daily/AGENTS.md` 不被默认模板覆盖
+3. 已存在的 `daily/agents/<agent_id>/AGENTS.md` 不被默认模板覆盖
 4. Daily Agent 不得在 ASR 音频处理、chunk retry、daily markdown 刷新完成前启动
 5. Daily Agent 失败不影响 ASR task 状态
 6. `update_task_after_run()` 不触碰 `daily_agent` 字段
@@ -1045,7 +1051,7 @@ build_daily_agent_change_plan(task, trigger, date, force)
 |--------|------|
 | 缺少 `daily_agent` 字段 | 反序列化/加载后为默认双 Agent |
 | 旧单 Agent 配置 | 保留 legacy 字段并补齐 `tomorrow_todo` |
-| `ensure_asr_daily_workspace()` | 创建 daily/ + report/ + tomorrow_todo/ + agents/*.md + AGENTS.md + .gitignore |
+| `ensure_asr_daily_workspace()` | 创建 daily/ + agents/<agent_id>/AGENTS.md + input/ + output/<output_dir>/ + .gitignore，并分发 daily markdown 副本 |
 | 已存在 AGENTS.md | 不覆盖 |
 | git 不存在 | 不阻塞，返回 git_available=false |
 | `PUT /daily-agent/agents` | 保存 custom instructions + 写文件 |
@@ -1074,12 +1080,13 @@ build_daily_agent_change_plan(task, trigger, date, force)
 | 追加内容后再触发 | ChatGPT Web 只收新增 tail |
 | IM delivery 绑定 | 保存 `channel/mode/policy` |
 | 手动 Run now | report/ 生成文件 |
-| Daily Docs 行级 Run Daily Agent | 点击某日文档行操作后，请求只携带该行 `date`，不携带 `force`，后端 change plan 只包含该日期 |
+| Daily Docs 行级 Run All Agents | 点击某日文档行主按钮后，请求只携带该行 `date`，不携带 `force`/`agent_id`，后端 change plan 只包含该日期并按顺序运行全部 enabled Agent |
+| Daily Docs 行级 Run 单 Agent | 点击某日文档行 Agent 下拉项后，请求携带该行 `date` 和对应 `agent_id`，只运行指定 Agent |
 | Report sync dir 自动同步 | 配置 `report_sync_dir` 后 Runner 成功生成 report，会把本轮 report 复制到目标目录，并在 `last_report_sync` 记录 copied/skipped/failed |
 | 手动同步 report | 调用 `/daily-agent/sync` 后同步全部现有 report，目标目录已有同内容文件计入 skipped |
 | CLI 同步控制 | `daily set-sync-dir` 能设置/清除目录，`daily sync` 能手动同步并输出 target/total/copied/skipped/failed |
 | 打开 report 详情 | `/daily-agent/reports/{date}` 返回 report Markdown 全文，非法日期拒绝，缺失 report 返回 404 |
-| 历史 report 发现 | `/daily-agent/runs` 合并 `daily_agent_processed.json` 与磁盘 `daily/report/`、兼容 `daily/Report/` 下的 `YYYY-MM-DD-report.md`；即使 processed state 缺失，Daily Agent Records 也必须展示已有报告，并按日期倒序返回 |
+| 历史 report 发现 | `/daily-agent/runs` 合并 `daily_agent_processed.json` 与磁盘 `daily/agents/<agent_id>/output/<output_dir>/`，并兼容旧版 `daily/<output_dir>/`、`daily/agents/<agent_id>/<output_dir>/` 和 `daily/Report/` 下的 `YYYY-MM-DD-report.md`；即使 processed state 缺失，Daily Agent Records 也必须展示已有报告，并按日期倒序返回 |
 | 自动 completion hook | run detail 记录 trigger_source=asr_completion |
 | 未绑定 IM | 不发送，记录 skipped |
 | git 不存在 | 创建任务和保存 AGENTS.md 仍成功 |
@@ -1098,10 +1105,18 @@ build_daily_agent_change_plan(task, trigger, date, force)
 - Configuration 区域展示 Report Sync Dir 输入框和 Save 按钮；下方提供 Sync Reports 手动按钮，未配置目录时禁用。
 - Last Run Status 区域展示最近同步状态，包含 copied/total、skipped、同步目录和失败错误摘要。
 - Processed Documents 中任一 report 文件名可点击，进入全屏详情页并使用 Markdown 渲染器展示正文
-- Daily Docs 表格每行提供 `Run Daily Agent`，调用 date-scoped run API；行级动作与 `Open document` 共存，不能破坏 Daily Docs tab 的 URL 恢复和文档打开行为。
+- Daily Docs 表格每行提供 `Run All Agents` 主按钮和单 Agent 下拉菜单，调用 date-scoped run API；行级动作与 `Open document` 共存，不能破坏 Daily Docs tab 的 URL 恢复和文档打开行为。
 - Daily Agent Records 列表和 report 详情必须使用一致的状态来源：当 `daily_agent_processed.json` 中某日期记录了已存在的 `report_path` 时，`/daily-agent/reports/{date}` 必须读取同一个状态路径，而不是重新拼接另一个 workspace 路径导致列表可见、详情 404。
 - Daily Agent Records 不只依赖 `daily_agent_processed.json`：页面刷新时必须通过 `/daily-agent/runs` 展示磁盘中已存在的 `YYYY-MM-DD-report.md`，兼容历史任务里的 `Report` 大写目录；从该兜底记录打开详情时 `/daily-agent/reports/{date}` 必须读取同一真实文件。
 - Run Results 表格必须以最新数据优先展示，按 `date` 倒序排列；前端在消费 API 时保留同样的防御性排序，避免旧服务或 mock 数据无序导致用户先看到旧记录。
+- Daily Agent Records 的 Run Results 顶部必须支持按 Agent、Date、Runner 三个维度筛选；筛选只影响当前列表展示，不改变已生成 report 或后端 processed state。
+- Daily Agent Records 表格在窄窗口下必须把横向滚动限制在表格内部，不能撑宽整个 ASR task tab 或导致左侧列被页面级横向滚动裁切。
+- Daily Agent report 详情页正文不允许嵌套纵向滚动；Markdown 内容自然撑开页面，只使用 ASR 页面最外层滚动条。
+- Daily Agent tab 是 Agent 管理列表页，只保留任务级启用、Report Sync、Refresh、Add、Run、Edit、Delete 等列表管理动作；单个 Agent 的 Runner、Trigger Policy、Timeout、Session Key、Output Dir、IM Delivery、Last Run Status 和 Instructions 必须进入 Agent 详情页配置，避免列表和详情信息混排。
+- 每个 Agent 都可以在管理列表行和 Agent 详情页单独运行/调试；Daily Docs 行级 `Run Daily Agent` 必须提供 `Run All Agents` 默认动作，并在下拉菜单中列出各个 Agent 的单独运行动作，调用 API 时通过 `agent_id` 区分单 Agent，省略 `agent_id` 表示全部 Agent。
+- `Run All Agents` 对同一 task 的多个 Agent 必须串行执行并复用同一个 task-level running lock；多个 Agent 即使配置为同一个 ChatGPT Web runner，也不能并发抢占 runner。单个 Agent 的 runner 失败必须只记录到该 Agent 的 `last_status`、`last_error` 和 `run_id`，队列继续执行后续 Agent；默认 `session_key` 和 conversation state 必须包含 `task_id + agent_id`，避免不同 Agent 复用同一个 ChatGPT Web conversation。
+- Daily Agent 列表在窄窗口下必须保持稳定列宽并启用横向滚动，禁止把日期、输出目录、IM Channel 或 Actions 按单字符折行成竖排；关键单元格使用 nowrap。
+- ASR 首页顶层 tab 文案统一使用英文：`Scheduled Tasks`、`ASR Management`、`Voiceprint & Wake`。
 - report 详情页展示任务、日期、路径、大小、修改时间、处理时间和 Runner，并支持返回 Daily Agent 列表
 - 任务详情 tab 使用 URL 参数保持状态；刷新 `Daily Agent` tab 或 report 全屏详情页时，页面必须从 `asrTaskTab=daily-agent` / `asrDailyReport=YYYY-MM-DD` 恢复，不要求用户重新点击切换
 - 亮色/暗色主题下均可读可操作
@@ -1116,7 +1131,15 @@ build_daily_agent_change_plan(task, trigger, date, force)
 | TC-ASPB-28 | ASR 音频处理完成后自动触发 Daily Agent 生成 report 并写入 Git 历史 |
 | TC-ASPB-29 | 绑定 IM 通道后 Daily Agent 发送处理结论 |
 | TC-ASPB-35 | Daily Agent Processed Documents report 全屏 Markdown 详情 |
+| TC-ADA-07 | Daily Agent 管理列表与 Agent 详情页分离 |
+| TC-ADA-08 | ASR 顶层 tab 英文文案与窄窗口列表布局 |
+| TC-ADA-09 | Daily Docs 行级 Run Daily Agent 可选择全部或单个 Agent |
+| TC-ADA-10 | 多 Agent 共用 ChatGPT Web Runner 的串行运行与失败隔离 |
+| TC-ADA-11 | 每个 Agent 工作目录包含 input 副本并按 Runner 独立落档 |
 | TC-DAR-01 | Daily Agent Records 从已有 Report 目录兜底发现历史报告 |
+| TC-DAR-09 | Daily Agent Records 支持按 Agent、Date、Runner 筛选 |
+| TC-DAR-10 | Daily Agent Records 窄窗口表格横向滚动不撑宽 tab |
+| TC-DAR-11 | Daily Agent report 详情页不嵌套纵向滚动 |
 | TC-QASR-25 | Daily Docs 单文档行级 Run Daily Agent |
 
 ---

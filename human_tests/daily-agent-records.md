@@ -4,6 +4,7 @@
 
 Daily Agent Records 是 ASR 任务详情页中查看 Daily Agent 历史运行产物的记录页。它必须展示 `daily_agent_processed.json` 中已处理文档，也必须兜底发现任务 Daily 工作区中已经存在的 report 文件，避免历史任务只有 `daily/report/` 或 `daily/Report/` 文件但页面显示空状态。
 Run Results tab 中的记录必须按时间倒序展示，最新日期优先，避免用户打开详情页后先看到旧运行数据。
+Run Results tab 顶部必须支持按 Agent、Date、Runner 筛选记录，方便多 Agent 和多 Runner 场景下定位某一次结果。
 
 ## 前置条件
 
@@ -181,6 +182,82 @@ BIFROST_DATA_DIR="$(mktemp -d)" cargo run --bin bifrost -- start -p 18880 --unsa
 - 后续 `daily sync` 不返回 `Daily Agent report sync directory is not configured`。
 - 同步仍按 TC-DAR-06 复制 report，并在二次同步时返回 skipped。
 
+### TC-DAR-09 Daily Agent Records 支持按 Agent、Date、Runner 筛选
+
+操作步骤：
+
+1. 打开 ASR 任务详情页：
+   `http://127.0.0.1:3000/_bifrost/ai?aiSection=tools-asr&asrTask=<task_id>&asrTaskTab=daily-agent-records`。
+2. 确认 `Run Results` 顶部展示 Agent、Date、Runner 三个筛选控件。
+3. 在 Agent 筛选中选择 `tomorrow_todo`。
+4. 确认表格只展示 `tomorrow_todo` 的记录。
+5. 在 Date 筛选中选择 `2026-05-20`。
+6. 确认表格只展示该日期的记录，且仍满足 Agent 筛选。
+7. 在 Runner 筛选中选择 `abc`。
+8. 确认表格只展示该 Runner 的记录，且仍满足 Agent 和 Date 筛选。
+9. 依次清空 Runner、Date、Agent 筛选。
+
+预期结果：
+
+- 三个筛选控件均可见、可选择、可清空。
+- Agent 筛选只影响当前 Run Results 表格展示，不修改后端 processed state。
+- Date 筛选与 Agent 筛选可以叠加。
+- Runner 筛选与 Agent、Date 筛选可以叠加。
+- 清空筛选后恢复展示所有 Daily Agent records。
+
+### TC-DAR-10 Daily Agent Records 窄窗口表格横向滚动不撑宽 tab
+
+操作步骤：
+
+1. 使用窄窗口打开 ASR 任务详情页：
+   `http://127.0.0.1:3000/_bifrost/ai?aiSection=tools-asr&asrTask=<task_id>&asrTaskTab=daily-agent-records`。
+2. 确认页面停留在 `Daily Agent Records` tab。
+3. 查看 `Run Results` 表格在窄窗口下的横向滚动行为。
+4. 将表格内部横向滚动条拖到最右侧，确认可以看到 `Report` 列。
+5. 确认 ASR task tab 内容区本身没有被表格撑出页面级横向滚动。
+
+预期结果：
+
+- `Run Results` 表格内部存在横向滚动，能查看所有列。
+- 外层 ASR task tab 内容区不会因为 Records 表格列宽而产生页面级横向滚动。
+- 左侧 `Date` / `Agent` 列不会因为整页横向偏移而被裁切到不可读。
+- 筛选控件和 `Refresh` 按钮仍位于可见内容区内。
+
+### TC-DAR-11 Daily Agent report 详情页使用自身内容区滚动
+
+操作步骤：
+
+1. 打开 Daily Agent report 详情页：
+   `http://127.0.0.1:3000/_bifrost/ai?aiSection=tools-asr&asrTask=<task_id>&asrTaskTab=daily-agent-records&asrDailyReport=2026-05-20&asrDailyAgent=tomorrow_todo`。
+2. 等待 report 内容加载完成。
+3. 检查 report 页面根节点、Card body 和 Markdown 内容容器的纵向滚动行为。
+4. 使用 report 详情页内容区滚动到内容末尾。
+
+预期结果：
+
+- Daily Agent report 详情页不让浏览器窗口或 ASR 最外层页面滚动。
+- 详情页 Card body 负责纵向滚动。
+- Markdown 内容容器不设置 `max-height` 和纵向 `overflow:auto`。
+- 返回按钮、详情元信息和 report 正文仍正常展示。
+
+### TC-DAR-12 ASR 任务详情页滚动限制在当前 Tab 内部
+
+操作步骤：
+
+1. 使用较小浏览器视口打开 ASR 任务详情页：
+   `http://127.0.0.1:3000/_bifrost/ai?aiSection=tools-asr&asrTask=<task_id>&asrTaskTab=files`。
+2. 检查任务详情根节点、Card body 和 `.asr-task-detail-tabs > .ant-tabs-content-holder` 的纵向滚动行为。
+3. 切换到 `Daily Docs`、`Daily Agent`、`Daily Agent Records` tab 后重复检查。
+4. 尝试滚动浏览器窗口、任务详情根节点和 Card body。
+5. 尝试滚动当前 Tab 的内容区。
+
+预期结果：
+
+- 浏览器窗口、任务详情根节点和任务详情 Card body 不产生纵向滚动。
+- `.asr-task-detail-tabs > .ant-tabs-content-holder` 是当前 Tab 的纵向滚动容器。
+- Files、Daily Docs、Daily Agent、Daily Agent Records 四个 tab 都保持同样滚动模型。
+- 表格横向滚动仍限制在表格内部，不引入页面级横向滚动。
+
 ## 清理步骤
 
 1. 停止测试端口上的 Bifrost 进程。
@@ -197,3 +274,5 @@ BIFROST_DATA_DIR="$(mktemp -d)" cargo run --bin bifrost -- start -p 18880 --unsa
 | 2026-05-26 | TC-DAR-06 Daily Agent report 同步目录 CLI 控制 | `source ~/.zshrc && bash e2e-tests/tests/test_asr_task_cli.sh` | PASS：脚本使用临时 Bifrost、临时 ASR task 和临时同步目录，执行 `daily set-sync-dir <task_id> --dir <sync_dir>` 后输出同步目录；执行 `daily sync <task_id>` 后复制 `2026-05-17-report.md` 到同步目录，输出 `Copied: 1`、`Skipped: 0`；二次 `daily sync <task_id> --json` 返回 `total_files=1`、`copied_files=0`、`skipped_files=1`、`failed_files=0` |
 | 2026-05-26 | TC-DAR-07 Daily Agent WebUI report 同步目录与状态展示 | `source ~/.zshrc && pnpm --dir web exec playwright test tests/ui/asr-daily-agent-runner.spec.ts --grep "simple Runner"` | PASS：WebUI mock 验证 `Report Sync Dir` 输入框可保存 `report_sync_dir`，`Sync Reports` 按钮触发 `/daily-agent/sync`，toast 显示 `Synced 2 copied, 0 skipped`，Last Run Status 展示 `2 copied / 2 total` 和同步目录 |
 | 2026-06-03 | TC-DAR-08 Daily Agent CLI 同步目录 normalize 回归 | `source ~/.zshrc; SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_report_sync_dir_update_survives_task_normalization --lib -- --nocapture`；`source ~/.zshrc; bash e2e-tests/tests/test_asr_task_cli.sh` | PASS：单元回归验证 `set_primary_daily_agent_report_sync_dir` 同时更新 legacy 与 primary agent，`normalize_daily_agent_config` 后 `report_sync_dir` 不丢失；真实 CLI/API E2E 验证 `daily set-sync-dir` 后立刻 `daily sync` 成功复制 report，未再返回 `Daily Agent report sync directory is not configured` |
+| 2026-06-03 | TC-DAR-09 Daily Agent Records 支持按 Agent、Date、Runner 筛选 | `source ~/.zshrc; pnpm --dir web exec node --input-type=module <Playwright script>` 打开 `asrTaskTab=daily-agent-records`，选择 Agent=`tomorrow_todo`、Date=`2026-05-20`、Runner=`abc`，再依次清空筛选；同脚本打开 `asrTaskTab=daily` 复查 Daily Docs 表头高度 | PASS：Run Results 初始 9 行，Agent 筛选后 1 行，Date 叠加后 1 行，Runner 叠加后 1 行，样例行为 `2026-05-20 tomorrow_todo ... abc 2026-05-20-report.md`；清空筛选后恢复 9 行；Daily Docs 表头最大高度 40px |
+| 2026-06-03 | TC-DAR-12 ASR 任务详情页滚动限制在当前 Tab 内部 | `source ~/.zshrc; node <Playwright script>` 使用 900x520 视口打开历史任务 `a911c68b0f7a43afa29d1863cc02229a`，分别检查 `files`、`daily`、`daily-agent-records`；另用 1000x620 视口检查 `overview`、`daily-agent` | PASS：各 tab 中 `window.scrollY=0`、任务详情根节点 `scrollTop=0`、任务详情 Card body `scrollTop=0`；`.asr-task-detail-tabs > .ant-tabs-content-holder` 的 `overflow-y=auto` 且可滚动，Files tab `holderScroll=1595/client=261`、Daily Docs `552/261`、Records `588/261`；Overview 与 Daily Agent 也只在 tab content-holder 内滚动 |

@@ -1,4 +1,5 @@
 export const TASK_DETAIL_TAB_KEYS = [
+  "overview",
   "files",
   "daily",
   "daily-agent",

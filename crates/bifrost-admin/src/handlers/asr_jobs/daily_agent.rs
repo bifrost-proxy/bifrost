@@ -400,9 +400,9 @@ fn build_daily_agent_prompt(
     adapter: &str,
     chatgpt_first_turn: bool,
 ) -> Result<String, String> {
-    let daily_dir = daily_dir_for_task(&task.id);
+    let work_dir = daily_agent_work_dir(task);
     let instructions_file = daily_agent_instructions_path(task)
-        .strip_prefix(&daily_dir)
+        .strip_prefix(&work_dir)
         .unwrap_or_else(|_| Path::new("AGENTS.md"))
         .to_string_lossy()
         .to_string();
@@ -424,15 +424,20 @@ fn build_daily_agent_prompt(
     };
             for entry in &changed_entries {
                 if is_file_capable {
+                    let source_path = daily_agent_source_copy_path(task, &entry.date)
+                        .strip_prefix(&work_dir)
+                        .map(|path| path.to_string_lossy().to_string())
+                        .unwrap_or_else(|_| entry.source_path.clone());
+                    let report_path = PathBuf::from(&entry.report_target)
+                        .strip_prefix(&work_dir)
+                        .map(|path| path.to_string_lossy().to_string())
+                        .unwrap_or_else(|_| entry.report_target.clone());
                     prompt.push_str(&format!(
-                        "- {}.md: change_kind={:?}, source_sha256={}, report={}\n",
-                        entry.date,
+                        "- source={}, change_kind={:?}, source_sha256={}, report={}\n",
+                        source_path,
                         entry.change_kind,
                         &entry.source_sha256[..8],
-                        PathBuf::from(&entry.report_target)
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
+                        report_path
                     ));
                 } else {
                     prompt.push_str(&format!(
@@ -1113,7 +1118,10 @@ async fn run_external_daily_agent_prompt(
         work_dir: Some(daily_dir.to_path_buf()),
         instructions: None,
         adapter_config: effective.settings.adapter_config.clone(),
-        allow_work_dirs: vec![daily_dir.to_string_lossy().to_string()],
+        allow_work_dirs: vec![
+            daily_dir.to_string_lossy().to_string(),
+            daily_dir_for_task(&task.id).to_string_lossy().to_string(),
+        ],
         inject_bifrost_tools: effective.settings.inject_bifrost_tools,
         skill_paths: effective.settings.skill_paths.clone(),
     };
@@ -1169,6 +1177,7 @@ async fn run_daily_agent_inner(
 
     // 2. Build change plan
     let plan = build_daily_agent_change_plan(task, trigger_source, requested_date, force)?;
+    sync_daily_agent_plan_sources_to_work_dir(task, &plan)?;
 
     if plan.skipped {
         tracing::info!(
@@ -1199,7 +1208,7 @@ async fn run_daily_agent_inner(
     };
 
     // 4. Prepare conversation context
-    let daily_dir = daily_dir_for_task(&task.id);
+    let agent_work_dir = daily_agent_work_dir(task);
     let session_key = task
         .daily_agent
         .session_key
@@ -1241,7 +1250,7 @@ async fn run_daily_agent_inner(
                         task,
                         &runner_id,
                         prompt,
-                        &daily_dir,
+                        &agent_work_dir,
                         &session_key,
                         &conversation_state,
                         &effective,
@@ -1279,7 +1288,7 @@ async fn run_daily_agent_inner(
                     task,
                     &runner_id,
                     prompt,
-                    &daily_dir,
+                    &agent_work_dir,
                     &session_key,
                     &conversation_state,
                     &effective,
@@ -1292,7 +1301,7 @@ async fn run_daily_agent_inner(
         } else {
             let prompt = build_daily_agent_prompt(task, &plan, &adapter, false)?;
             let response =
-                run_bifrost_agent_daily_runner(task, &prompt, &daily_dir, &session_key).await?;
+                run_bifrost_agent_daily_runner(task, &prompt, &agent_work_dir, &session_key).await?;
             conversation_success = Some(("bifrost_agent".to_string(), None));
             tracing::info!(
                 task_id = %task.id,

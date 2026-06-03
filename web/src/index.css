@@ -101,8 +101,6 @@ mark.mark-current {
 
 .asr-markdown-content {
   min-height: 420px;
-  max-height: calc(100vh - 300px);
-  overflow: auto;
   padding: 18px;
   border: 1px solid var(--asr-markdown-border);
   border-radius: 6px;
@@ -202,6 +200,81 @@ mark.mark-current {
 .asr-markdown-content th {
   background: var(--asr-markdown-fill-strong);
   text-align: left;
+}
+
+.asr-task-detail-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.asr-task-detail-standalone-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.asr-task-detail-card.ant-card {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.asr-task-detail-card > .ant-card-head {
+  flex: 0 0 auto;
+}
+
+.asr-task-detail-card > .ant-card-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.asr-task-detail-card--tabs > .ant-card-body {
+  overflow: hidden;
+}
+
+.asr-task-detail-content.ant-space {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.asr-task-detail-content > .ant-space-item {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.asr-task-detail-tabs.ant-tabs {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.asr-task-detail-tabs > .ant-tabs-nav {
+  flex: 0 0 auto;
+}
+
+.asr-task-detail-tabs > .ant-tabs-content-holder {
+  flex: 1;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.asr-task-detail-tabs > .ant-tabs-content-holder > .ant-tabs-content {
+  min-height: 100%;
+}
+
+.asr-task-detail-tabs .ant-tabs-tabpane {
+  min-height: 100%;
 }
 
 .ant-spin-nested-loading,

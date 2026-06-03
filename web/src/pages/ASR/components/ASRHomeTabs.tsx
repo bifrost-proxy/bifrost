@@ -123,7 +123,7 @@ export default function ASRHomeTabs({
         items={[
           {
             key: "scheduled",
-            label: "定时任务",
+            label: "Scheduled Tasks",
             children: (
               <div data-testid="asr-home-tab-scheduled">
                 <DirectoryTasksPanel
@@ -146,7 +146,7 @@ export default function ASRHomeTabs({
           },
           {
             key: "management",
-            label: "ASR 管理",
+            label: "ASR Management",
             children: (
               <div data-testid="asr-home-tab-management">
                 <SpeechTab />
@@ -185,7 +185,7 @@ export default function ASRHomeTabs({
           },
           {
             key: "voice",
-            label: "声纹识别与唤醒",
+            label: "Voiceprint & Wake",
             children: (
               <div data-testid="asr-home-tab-voice">
                 <DiarizationSetupCard />
