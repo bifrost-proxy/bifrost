@@ -52,6 +52,7 @@ Bifrost 的规则引擎在全局 TLS 解包关闭时，仍会因为某些规则�
 - `TC-S5TRE-01`: 全局 TLS 关闭，`host://` 命中，HTTPS 通过 SOCKS5 请求成功，日志和 Traffic 不出现 HTTPS 解包记录。
 - `TC-S5TRE-02`: 全局 TLS 关闭，`proxy://` 命中，HTTPS 通过 SOCKS5 请求成功，日志和 Traffic 不出现 HTTPS 解包记录。
 - `TC-S5TRE-03`: 全局 TLS 关闭，`resHeaders://` 命中，HTTPS 通过 SOCKS5 自动解包并应用响应头，证明内容改写类规则没有退化。
+- `TC-S5TRE-04`: `routing_exceptions.txt` 是跨规则语义 fixture，必须由专项脚本执行；并行通用 rules runner 应把它列入 `FIXTURE_ONLY_RULES`，避免把 `host://` / `resHeaders://` 混合语义误套普通单规则断言。
 
 ### 真实场景测试
 
@@ -79,6 +80,7 @@ Bifrost 的规则引擎在全局 TLS 解包关闭时，仍会因为某些规则�
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - `cargo test -p bifrost-proxy requires_tls_interception_for_connect_rules --all-features`
 - `BIFROST_BIN=./target/release/bifrost bash e2e-tests/tests/test_socks5_tls_routing_exceptions.sh`
+- `BIFROST_E2E_RULE_JOBS=1 BIFROST_E2E_RETRY_FAILED_ONCE=1 bash e2e-tests/run_all_tests_parallel.sh -c socks5_tls --no-build --retry-failed-once`
 - `cargo test --workspace --all-features`
 - 按修改范围决定是否执行 `scripts/ci/local-ci.sh`；若不执行，需要在最终验证矩阵说明原因和风险。
 
