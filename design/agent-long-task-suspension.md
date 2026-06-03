@@ -1886,6 +1886,7 @@ Cooperative Long Task Loop 的最终交付标准不是“先有一个 in-turn wa
 - 已移除命令内容分类器：当前实现不再通过关键字、正则、GitHub Actions 脚本路径、构建命令名或工程专属路径推断 profile。短命令在初始 yield 内完成时仍 inline 返回；未完成的非 TTY session 统一使用 `adaptive`。
 - 已实现 `LongTaskStatus` progress event、`TurnSuspended`、`LongTaskWatchStarted`、`LongTaskHeartbeat`、`LongTaskOutputAvailable`、`LongTaskExited` 和 `TurnResumed` 事件。
 - 已实现退出后一次性压缩 tool result，包含 `resume_reason`、profile、elapsed、omitted heartbeats、最终输出和 `model_request_count_while_waiting=0`。
+- 已实现长任务等待期的用户消息抢占：runtime watcher 同时监听 `guide_channel` 与 exec poll；用户追加消息到达时立刻返回 `resume_reason=user_message` 的压缩 tool result，让模型先处理追加问题，并在回答后注入 runtime context 要求继续 `write_stdin` 跟进原 `session_id`，避免等长任务结束才响应用户。
 - 已将 `ExecSession::poll` 从固定 25ms sleep 检查改为 stdout/stderr reader、reader EOF/错误与 exit watcher 的 `Notify` 唤醒；无新输出时仍按 deadline 返回 `unchanged=true`，有输出或退出时由 runtime 事件尽快唤醒。
 - 已实现自适应 runtime poll interval cap：所有 adaptive session 最大 300s；terminal/user/stop 仍由 notify/stop signal 抢占。
 - 已实现 exec session 资源压力基础门禁：达到 session 上限时先清理 completed session，仍超限则返回 `resource_pressure` 错误，不 silent prune / silent kill running task。
@@ -1992,6 +1993,8 @@ Cooperative Long Task Loop 的最终交付标准不是“先有一个 in-turn wa
   - stop 与 significant output 同时到达时，终态为 stopped，不继续让模型基于输出执行下一步。
 - `user_message_and_exit_are_merged_into_one_resume`
   - 用户消息与 process exit 同时发生时合并成一次 resume context，模型同时看到 exit summary 和新用户指令。
+- `exec_command_long_task_user_message_interrupts_runtime_wait_then_continues`
+  - runtime watcher 等待长任务时收到 guide/user message，必须在长任务退出前恢复模型处理追加问题；追加问题处理完后，turn loop 注入继续监控原 `session_id` 的 runtime context，并验证后续 `write_stdin` 能拿到原任务最终输出。
 - `watcher_lost_keeps_session_explainable`
   - monitor panic、join error 或服务重启导致 OS child handle 丢失时，等待态转为可解释的 `WatcherLost` / `ProcessDetached` 摘要。
 - `exec_command_long_task_returns_waiting_state_without_second_model_request`

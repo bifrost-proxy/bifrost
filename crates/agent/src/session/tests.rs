@@ -1094,6 +1094,94 @@ async fn exec_command_long_task_waits_in_runtime_without_model_polling() {
         .any(|event| event.kind == CodexTurnEventKind::TurnResumed));
 }
 
+#[tokio::test]
+async fn exec_command_long_task_user_message_interrupts_runtime_wait_then_continues() {
+    let exec_calls = vec![ToolCallMessage::function_call(
+        "call-exec".to_string(),
+        "exec_command".to_string(),
+        r#"{"cmd":"printf start; sleep 0.8; printf done","yield_time_ms":50}"#.to_string(),
+    )];
+    let follow_up_calls = vec![ToolCallMessage::function_call(
+        "call-follow-up".to_string(),
+        "write_stdin".to_string(),
+        r#"{"session_id":1,"chars":"","yield_time_ms":1000}"#.to_string(),
+    )];
+    let (url, request_count) = counted_chat_response_url(vec![
+        chat_tool_calls_response(exec_calls, 22),
+        chat_text_response("answered the interjection", 24),
+        chat_tool_calls_response(follow_up_calls, 26),
+        chat_text_response("long task complete", 28),
+    ])
+    .await;
+    let mut config = provider_config_for_url(url);
+    config.model_context_window = Some(100_000);
+    config.model_auto_compact_token_limit = Some(80_000);
+    let client = AgentClient::new();
+    let tools = ToolRegistry::with_defaults();
+    let mut session = AgentSession::new("long-task-user-interruption");
+    let guide_channel: GuideChannel = Arc::new(GuideMessageChannel::new());
+    session.guide_channel = Some(guide_channel.clone());
+
+    let turn = tokio::spawn(async move {
+        let result = run_turn(
+            &client,
+            &config,
+            &mut session,
+            &tools,
+            "run a long command",
+            None,
+        )
+        .await;
+        (result, session)
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    guide_channel.push_back("先回答我：2+2 等于几？".to_string());
+
+    let request_wait_started = std::time::Instant::now();
+    while request_count.load(Ordering::SeqCst) < 2
+        && request_wait_started.elapsed() < std::time::Duration::from_millis(350)
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        request_count.load(Ordering::SeqCst) >= 2,
+        "guide message should resume the model before the long task exits"
+    );
+
+    let (result, session) = tokio::time::timeout(std::time::Duration::from_secs(5), turn)
+        .await
+        .expect("turn should finish")
+        .expect("turn task should not panic");
+    let result = result.unwrap();
+
+    assert_eq!(result.response, "long task complete");
+    assert_eq!(
+        request_count.load(Ordering::SeqCst),
+        4,
+        "model should handle the interjection, then continue following the long task"
+    );
+    let history_text = session
+        .history
+        .iter()
+        .filter_map(|message| message.content.as_deref())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        history_text.contains("resume_reason\":\"user_message"),
+        "{history_text}"
+    );
+    assert!(
+        history_text.contains("answered the interjection"),
+        "{history_text}"
+    );
+    assert!(
+        history_text.contains("Continue following the original long task"),
+        "{history_text}"
+    );
+    assert!(history_text.contains("done"), "{history_text}");
+}
+
 #[test]
 fn long_task_watch_interval_includes_bounded_jitter() {
     let base = 1_000;

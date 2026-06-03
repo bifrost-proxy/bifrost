@@ -414,6 +414,10 @@ pub(super) fn apply_tool_runtime_events(
 
 enum LongTaskWatchOutcome {
     Completed(crate::types::ToolResult),
+    Interrupted {
+        result: crate::types::ToolResult,
+        deferred: DeferredLongTask,
+    },
     Stopped,
 }
 
@@ -425,6 +429,21 @@ struct LongTaskCandidate {
     session_id: String,
     profile: String,
     initial_output: String,
+}
+
+#[derive(Clone, Debug)]
+struct DeferredLongTask {
+    session_id: String,
+    profile: String,
+}
+
+impl DeferredLongTask {
+    fn continuation_context(&self) -> String {
+        format!(
+            "<runtime_context>\nA long-running exec_command session was paused because the user sent a new message while the runtime was waiting.\n\nsession_id: {}\nprofile: {}\n\nThe user interjection has now been handled. Continue following the original long task before ending the turn: call write_stdin with this session_id and empty chars to poll/wait for progress, unless the user explicitly told you to stop or ignore that task.\n</runtime_context>",
+            self.session_id, self.profile
+        )
+    }
 }
 
 fn parse_long_task_candidate(
@@ -600,14 +619,57 @@ async fn maybe_watch_exec_long_task(
             },
         );
 
-        let Some(poll_result) = tools
-            .poll_exec_session(
-                &candidate.session_id,
-                wait_interval_ms,
-                Some(tool_output_limit),
-            )
-            .await
-        else {
+        let guide_channel = session.guide_channel.clone();
+        let guide_notification = async move {
+            let Some(channel) = guide_channel else {
+                std::future::pending::<()>().await;
+                return;
+            };
+            if !channel.has_pending() {
+                channel.notified().await;
+            }
+        };
+        let poll_future = tools.poll_exec_session(
+            &candidate.session_id,
+            wait_interval_ms,
+            Some(tool_output_limit),
+        );
+        let Some(poll_result) = (tokio::select! {
+            poll_result = poll_future => poll_result,
+            _ = guide_notification => {
+                let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                session.record_turn_event_entry(
+                    CodexTurnEvent::new(0, CodexTurnEventKind::TurnResumed)
+                        .with_iteration(u32::try_from(iteration + 1).unwrap_or(u32::MAX))
+                        .with_tool(tc.name(), tc.id.clone())
+                        .with_detail("user_message"),
+                );
+                let output = output_parts.join("\n");
+                return LongTaskWatchOutcome::Interrupted {
+                    result: crate::types::ToolResult {
+                        success: true,
+                        output: serde_json::json!({
+                            "session_id": candidate.session_id,
+                            "exit_code": null,
+                            "running": true,
+                            "resume_reason": "user_message",
+                            "profile": candidate.profile,
+                            "elapsed_ms": elapsed_ms,
+                            "omitted_heartbeats": total_omitted_heartbeats,
+                            "model_request_count_while_waiting": 0,
+                            "output": truncate_tool_output(&output, tool_output_limit.saturating_mul(4)),
+                            "hint": "A user message arrived while the long-running task was being watched. Answer the user message first, then continue monitoring this session with write_stdin unless the user asked to stop."
+                        })
+                        .to_string(),
+                        runtime_events: Vec::new(),
+                    },
+                    deferred: DeferredLongTask {
+                        session_id: candidate.session_id,
+                        profile: candidate.profile,
+                    },
+                };
+            }
+        }) else {
             return LongTaskWatchOutcome::Completed(result);
         };
         if !poll_result.success {
@@ -1567,6 +1629,7 @@ pub async fn run_turn_with_mcp_multimodal(
     };
 
     let mut mid_turn_compaction_plan_context_active = false;
+    let mut deferred_long_task: Option<DeferredLongTask> = None;
     for iteration in 0..max_iterations {
         // Drain steer queue before building the next model request (Codex parity).
         // Steer inputs injected mid-turn are appended as user messages so the
@@ -2137,6 +2200,42 @@ pub async fn run_turn_with_mcp_multimodal(
                 continue;
             }
 
+            if let Some(deferred) = deferred_long_task.take() {
+                let content = response
+                    .content
+                    .or(response.reasoning_content)
+                    .unwrap_or_default();
+                if !content.is_empty() {
+                    progress::assistant_delta(session.progress_sender.as_ref(), content.clone());
+                    session.add_assistant_message(&content);
+                    if let Some(ref mut rec) = recorder {
+                        let response_tokens =
+                            response.usage.as_ref().map(|usage| usage.total_tokens);
+                        let context_tokens =
+                            response.usage.as_ref().map(|usage| usage.context_tokens());
+                        if let Err(e) = rec.record_assistant_message_with_token_usage(
+                            &session.session_key,
+                            &content,
+                            response_tokens,
+                            context_tokens,
+                        ) {
+                            warn!(
+                                error = %e,
+                                "failed to record assistant message before long-task continuation"
+                            );
+                        }
+                    }
+                }
+                let context = deferred.continuation_context();
+                session.history.push(ChatMessage::developer(&context));
+                session.record_turn_event_entry(
+                    CodexTurnEvent::new(0, CodexTurnEventKind::TurnResumed)
+                        .with_iteration(u32::try_from(iteration + 1).unwrap_or(u32::MAX))
+                        .with_detail("continue_deferred_long_task"),
+                );
+                continue;
+            }
+
             // Model finished — extract text response
             let raw_content = response
                 .content
@@ -2547,6 +2646,10 @@ pub async fn run_turn_with_mcp_multimodal(
             .await
             {
                 LongTaskWatchOutcome::Completed(result) => result,
+                LongTaskWatchOutcome::Interrupted { result, deferred } => {
+                    deferred_long_task = Some(deferred);
+                    result
+                }
                 LongTaskWatchOutcome::Stopped => {
                     append_cancelled_tool_results(
                         session,
