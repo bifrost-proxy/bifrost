@@ -6,6 +6,7 @@ use std::time::Instant;
 use bifrost_core::{
     Protocol, RequestContext, ResolvedRules, Rule, RuleParser, RulesResolver, ValueStore,
 };
+use bifrost_script::ResponseData;
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use hyper::client::conn::http1::Builder as ClientBuilder;
@@ -19,6 +20,11 @@ use tokio_rustls::TlsConnector;
 use tracing::{error, info, warn};
 
 use crate::replay_db::{ReplayHistory, RuleConfig, RuleMode, MAX_CONCURRENT_REPLAYS};
+use crate::replay_scripts::{
+    apply_replay_decode_scripts, collect_script_rules, execute_replay_request_scripts,
+    execute_replay_response_scripts, request_data_from_replay, response_data_from_replay,
+    ReplayScriptRules,
+};
 use crate::request_rules::{apply_all_request_rules, build_applied_rules, AppliedRequest};
 use crate::state::SharedAdminState;
 use crate::traffic::{MatchedRule, RequestTiming, TrafficRecord};
@@ -133,12 +139,14 @@ impl ReplayExecutor {
             "[REPLAY] Starting replay request"
         );
 
-        let (resolved_rules, matched_rules) = self.resolve_rules(&request.rule_config, url, method);
+        let (resolved_rules, matched_rules, values) =
+            self.resolve_rules(&request.rule_config, url, method);
 
         let rules_to_apply = build_applied_rules(&resolved_rules);
+        let script_rules = collect_script_rules(&resolved_rules);
 
         let original_body = request.request.body.as_ref().map(|s| s.as_bytes());
-        let applied_request = apply_all_request_rules(
+        let mut applied_request = apply_all_request_rules(
             url,
             method,
             &request.request.headers,
@@ -147,6 +155,22 @@ impl ReplayExecutor {
             true,
         )
         .map_err(|e| ReplayError::Internal(format!("Failed to apply rules: {}", e)))?;
+
+        let mut req_script_results = Vec::new();
+        if !script_rules.req_scripts.is_empty() {
+            req_script_results = execute_replay_request_scripts(
+                &self.admin_state,
+                &script_rules.req_scripts,
+                &resolved_rules,
+                &replay_id,
+                &applied_request.url,
+                &mut applied_request.method,
+                &mut applied_request.headers,
+                &mut applied_request.body,
+                &values,
+            )
+            .await;
+        }
 
         info!(
             replay_id = %replay_id,
@@ -282,8 +306,26 @@ impl ReplayExecutor {
             )
         };
 
-        let (status, response_headers, response_body) =
+        let (mut status, mut response_headers, mut response_body) =
             self.apply_response_rules(&resolved_rules, status, response_headers, response_body);
+
+        let mut res_script_results = Vec::new();
+        if !script_rules.res_scripts.is_empty() {
+            res_script_results = execute_replay_response_scripts(
+                &self.admin_state,
+                &script_rules.res_scripts,
+                &resolved_rules,
+                &replay_id,
+                &applied_request.url,
+                &applied_request.method,
+                &applied_request.headers,
+                &mut status,
+                &mut response_headers,
+                &mut response_body,
+                &values,
+            )
+            .await;
+        }
 
         let duration_ms = start_time.elapsed().as_millis() as u64;
         timing.total_ms = duration_ms;
@@ -299,6 +341,11 @@ impl ReplayExecutor {
                 duration_ms,
                 &matched_rules,
                 &timing,
+                &resolved_rules,
+                &script_rules,
+                &values,
+                &req_script_results,
+                &res_script_results,
             )
             .await;
 
@@ -501,14 +548,14 @@ impl ReplayExecutor {
         rule_config: &RuleConfig,
         url: &str,
         method: &str,
-    ) -> (ResolvedRules, Vec<MatchedRule>) {
+    ) -> (ResolvedRules, Vec<MatchedRule>, HashMap<String, String>) {
         match rule_config.mode {
-            RuleMode::None => (ResolvedRules::default(), vec![]),
+            RuleMode::None => (ResolvedRules::default(), vec![], self.load_values()),
             RuleMode::Custom => {
                 if let Some(ref custom_rules) = rule_config.custom_rules {
                     self.resolve_custom_rules(custom_rules, url, method)
                 } else {
-                    (ResolvedRules::default(), vec![])
+                    (ResolvedRules::default(), vec![], self.load_values())
                 }
             }
             RuleMode::Enabled | RuleMode::Selected => {
@@ -528,7 +575,7 @@ impl ReplayExecutor {
         custom_rules: &str,
         url: &str,
         method: &str,
-    ) -> (ResolvedRules, Vec<MatchedRule>) {
+    ) -> (ResolvedRules, Vec<MatchedRule>, HashMap<String, String>) {
         let mut values = self.load_values();
         let parser = RuleParser::with_values(values.clone());
         let parsed_rules = match parser.parse_rules_with_inline_values(custom_rules) {
@@ -540,7 +587,7 @@ impl ReplayExecutor {
             }
             Err(e) => {
                 warn!(error = %e, "[REPLAY] Failed to parse custom rules");
-                return (ResolvedRules::default(), vec![]);
+                return (ResolvedRules::default(), vec![], values);
             }
         };
         let rules = parsed_rules
@@ -550,10 +597,10 @@ impl ReplayExecutor {
             .collect::<Vec<_>>();
 
         if rules.is_empty() {
-            return (ResolvedRules::default(), vec![]);
+            return (ResolvedRules::default(), vec![], values);
         }
 
-        let resolver = RulesResolver::new(rules).with_values(values);
+        let resolver = RulesResolver::new(rules).with_values(values.clone());
         let ctx = RequestContext::from_url(url).with_method(method);
         let resolved = resolver.resolve(&ctx);
 
@@ -570,7 +617,7 @@ impl ReplayExecutor {
             })
             .collect();
 
-        (resolved, matched)
+        (resolved, matched, values)
     }
 
     fn resolve_from_storage(
@@ -579,7 +626,7 @@ impl ReplayExecutor {
         url: &str,
         method: &str,
         selected_rules: Option<&Vec<String>>,
-    ) -> (ResolvedRules, Vec<MatchedRule>) {
+    ) -> (ResolvedRules, Vec<MatchedRule>, HashMap<String, String>) {
         let mut all_rules: Vec<Rule> = vec![];
         let mut values = self.load_values();
 
@@ -587,7 +634,7 @@ impl ReplayExecutor {
             Ok(files) => files,
             Err(e) => {
                 warn!(error = %e, "[REPLAY] Failed to load rules");
-                return (ResolvedRules::default(), vec![]);
+                return (ResolvedRules::default(), vec![], values);
             }
         };
 
@@ -646,10 +693,10 @@ impl ReplayExecutor {
         info!(total_rules = all_rules.len(), "[REPLAY] Total rules loaded");
 
         if all_rules.is_empty() {
-            return (ResolvedRules::default(), vec![]);
+            return (ResolvedRules::default(), vec![], values);
         }
 
-        let resolver = RulesResolver::new(all_rules.clone()).with_values(values);
+        let resolver = RulesResolver::new(all_rules.clone()).with_values(values.clone());
 
         let ctx = RequestContext::from_url(url).with_method(method);
         info!(
@@ -693,7 +740,7 @@ impl ReplayExecutor {
             "[REPLAY] Rules resolved"
         );
 
-        (resolved, applied_rules)
+        (resolved, applied_rules, values)
     }
 
     fn load_values(&self) -> HashMap<String, String> {
@@ -962,6 +1009,11 @@ impl ReplayExecutor {
         duration_ms: u64,
         applied_rules: &[MatchedRule],
         timing: &RequestTiming,
+        resolved_rules: &ResolvedRules,
+        script_rules: &ReplayScriptRules,
+        values: &HashMap<String, String>,
+        req_script_results: &[bifrost_script::ScriptExecutionResult],
+        res_script_results: &[bifrost_script::ScriptExecutionResult],
     ) -> String {
         let traffic_id = format!("{}-{}", replay_id, uuid::Uuid::new_v4());
         let timestamp = chrono::Utc::now().timestamp_millis() as u64;
@@ -987,25 +1039,86 @@ impl ReplayExecutor {
         let request_size = applied_request.body.as_ref().map(|b| b.len()).unwrap_or(0);
         let response_size = response_body.map(|b| b.len()).unwrap_or(0);
 
-        let request_body_ref = if let Some(ref body) = applied_request.body {
-            if let Some(ref body_store) = self.admin_state.body_store {
-                body_store.read().store(&traffic_id, "req", body)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let mut request_body_for_storage = applied_request.body.clone();
+        let mut response_body_for_storage = response_body.map(|body| Bytes::from(body.to_string()));
+        let mut raw_request_body_ref = None;
+        let mut raw_response_body_ref = None;
+        let mut decode_req_script_results = Vec::new();
+        let mut decode_res_script_results = Vec::new();
 
-        let response_body_ref = if let Some(body) = response_body {
-            if let Some(ref body_store) = self.admin_state.body_store {
-                body_store.read().store(&traffic_id, "res", body.as_bytes())
-            } else {
-                None
+        if !script_rules.decode_scripts.is_empty() {
+            let request_data = request_data_from_replay(
+                &applied_request.url,
+                &applied_request.method,
+                &applied_request.headers,
+                applied_request.body.as_ref(),
+            );
+            let response_data = response_data_from_replay(
+                status,
+                response_headers,
+                response_body,
+                request_data.clone(),
+            );
+
+            if let Some(body) = request_body_for_storage.clone() {
+                if let Some(ref body_store) = self.admin_state.body_store {
+                    raw_request_body_ref = body_store.read().store(&traffic_id, "req_raw", &body);
+                }
+                let (decoded, results) = apply_replay_decode_scripts(
+                    &self.admin_state,
+                    &script_rules.decode_scripts,
+                    &script_rules.bp_scripts,
+                    "request",
+                    replay_id,
+                    resolved_rules,
+                    &request_data,
+                    &ResponseData {
+                        request: request_data.clone(),
+                        ..Default::default()
+                    },
+                    values,
+                    body,
+                )
+                .await;
+                request_body_for_storage = Some(decoded);
+                decode_req_script_results = results;
             }
-        } else {
-            None
-        };
+
+            if let Some(body) = response_body_for_storage.clone() {
+                if let Some(ref body_store) = self.admin_state.body_store {
+                    raw_response_body_ref = body_store.read().store(&traffic_id, "res_raw", &body);
+                }
+                let (decoded, results) = apply_replay_decode_scripts(
+                    &self.admin_state,
+                    &script_rules.decode_scripts,
+                    &script_rules.bp_scripts,
+                    "response",
+                    replay_id,
+                    resolved_rules,
+                    &response_data.request,
+                    &response_data,
+                    values,
+                    body,
+                )
+                .await;
+                response_body_for_storage = Some(decoded);
+                decode_res_script_results = results;
+            }
+        }
+
+        let request_body_ref = request_body_for_storage.as_ref().and_then(|body| {
+            self.admin_state
+                .body_store
+                .as_ref()
+                .and_then(|body_store| body_store.read().store(&traffic_id, "req", body))
+        });
+
+        let response_body_ref = response_body_for_storage.as_ref().and_then(|body| {
+            self.admin_state
+                .body_store
+                .as_ref()
+                .and_then(|body_store| body_store.read().store(&traffic_id, "res", body))
+        });
 
         let has_changes = actual_url != original_url
             || applied_request.method != request.request.method
@@ -1051,8 +1164,8 @@ impl ReplayExecutor {
             request_body_ref,
             response_body_ref,
             derived_response_body_ref: None,
-            raw_request_body_ref: None,
-            raw_response_body_ref: None,
+            raw_request_body_ref,
+            raw_response_body_ref,
             actual_url: if has_changes {
                 Some(actual_url.clone())
             } else {
@@ -1070,10 +1183,26 @@ impl ReplayExecutor {
             },
             response_headers: None,
             error_message: None,
-            req_script_results: None,
-            res_script_results: None,
-            decode_req_script_results: None,
-            decode_res_script_results: None,
+            req_script_results: if req_script_results.is_empty() {
+                None
+            } else {
+                Some(req_script_results.to_vec())
+            },
+            res_script_results: if res_script_results.is_empty() {
+                None
+            } else {
+                Some(res_script_results.to_vec())
+            },
+            decode_req_script_results: if decode_req_script_results.is_empty() {
+                None
+            } else {
+                Some(decode_req_script_results)
+            },
+            decode_res_script_results: if decode_res_script_results.is_empty() {
+                None
+            } else {
+                Some(decode_res_script_results)
+            },
             devtools_client_req_id: None,
         };
 

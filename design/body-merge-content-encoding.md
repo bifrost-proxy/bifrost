@@ -21,6 +21,7 @@
 - Replay Admin API 不复用普通代理的完整 transform 管线，必须在 replay 专属路径补齐规则应用：
   - 请求侧执行 `reqHeaders` / `reqCookies` / `delete://reqHeaders.*` / `delete://urlParams.*` / `urlParams` / `urlReplace` / `reqBody` / `reqPrepend` / `reqAppend` / `reqReplace` / `reqMerge` / `reqType` / `reqCharset` / `forwardedFor` / `headerReplace://req.*` / `reqCors`。
   - 响应侧执行 `resHeaders` / `delete://resHeaders.*` / `statusCode` / `replaceStatus` / `resCookies` / `resCors` / `resType` / `resCharset` / `cache` / `attachment` / `responseFor` / `trailers` / `headerReplace://res.*` / `resBody` / `resPrepend` / `resAppend` / `resReplace` / `resMerge`，以及 HTML/JS/CSS 内容注入规则。
+  - 脚本侧执行 `reqScript` / `resScript`，并把执行结果写入 Replay 生成的 Traffic 详情；`decode://...` 与 `decode://bp` 作为落库前解码链路执行，解码后的请求/响应 Body 写入 Traffic body 视图，原始 Body 写入 raw body 引用。
   - `reqDelay` / `resDelay` / `reqSpeed` / `resSpeed` 属于真实代理传输时序控制；Replay Admin API 返回的是执行结果 JSON，不做传输节流语义复现。
 
 ## 依赖项
@@ -40,15 +41,17 @@
   - Replay 响应 JSON 经过 `resMerge` 后，`data.body` 里的 JSON 包含新增字段并覆盖相同 key。
   - Replay request 侧 `reqMerge`、URL 参数删除、请求头替换、Content-Type/charset、CORS 预检头与 forwarded-for 都体现在发给上游的请求中。
   - Replay response 侧响应头、状态码、cookie、CORS、Content-Type/charset、缓存、附件、responseFor、trailers、响应头替换、内容注入与 Body 修改都体现在 Admin API 的返回数据中。
+  - Replay `reqScript` / `resScript` 修改后的请求与响应会真实生效，Traffic detail 会记录 `req_script_results` / `res_script_results`。
+  - Replay `decode://bp` 会执行绑定的 `bp://` parser，并在 Traffic detail/body 中记录 request/response phase 的 parser 输出。
 - E2E 测试：
   - `body_reqMerge_gzip_json`：curl 发送 gzip JSON 请求，代理执行 `reqMerge`，上游收到仍可解压的 gzip JSON。
   - `body_resMerge_gzip_json`：上游返回 gzip JSON，代理执行 `resMerge`，客户端用 `--compressed` 读到合并后的 JSON，响应头仍是 gzip。
   - `body_https_reqMerge_gzip_json`：HTTPS 解包转发到 HTTP 上游时，gzip JSON 请求经过 `reqMerge` 后仍保持有效 gzip。
   - `body_https_resMerge_gzip_json`：HTTPS 解包转发到 HTTP 上游时，gzip JSON 响应经过 `resMerge` 后仍保持有效 gzip。
-  - `e2e-tests/tests/test_replay_rules.sh`：使用本地 echo/SSE/WebSocket 上游验证 Replay custom rules，其中 `request_body_mutations.txt` 覆盖 `reqPrepend` / `reqAppend` / `reqReplace`，`full_modify_matrix.txt` 覆盖 replay 请求修改、响应 metadata、响应 Body 修改和内容注入规则矩阵。
+  - `e2e-tests/tests/test_replay_rules.sh`：使用本地 echo/SSE/WebSocket 上游验证 Replay custom rules，其中 `request_body_mutations.txt` 覆盖 `reqPrepend` / `reqAppend` / `reqReplace`，`full_modify_matrix.txt` 覆盖 replay 请求修改、响应 metadata、响应 Body 修改和内容注入规则矩阵，`req_res_script.txt` 覆盖 Replay 的 Request/Response Script，`bp_decode.txt` 覆盖 Replay Traffic 落库前的 `decode://bp`。
 - 真实场景测试：
   - 更新 `human_tests/proxy-rules-advanced.md`，新增压缩 JSON 的 `reqMerge` / `resMerge` 回归用例，并按文档真实执行。
-  - 更新 `human_tests/api-replay.md`，新增 Replay Admin API 的 `resMerge` 响应 Body 回归用例和 replay 规则覆盖回归用例，并用临时代理端口真实执行。
+  - 更新 `human_tests/api-replay.md`，新增 Replay Admin API 的 `resMerge` 响应 Body 回归用例、replay 规则覆盖回归用例和 Replay 脚本/BPDecode 回归用例，并用临时代理端口真实执行。
   - 使用真实目标 `page_permission` 接口验证 `resMerge://({"test":"qwe"})` 命中后，最终 JSON 顶层包含 `"test":"qwe"`；验证规则需包含目标 host 的 TLS 解包前置规则。
 
 ## Review/Fix/Test 闭环方案

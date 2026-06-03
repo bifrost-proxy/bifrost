@@ -1385,6 +1385,12 @@ mod tests {
             std::env::set_var(key, value);
             Self { key, old_value }
         }
+
+        fn unset(key: &'static str) -> Self {
+            let old_value = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, old_value }
+        }
     }
 
     impl Drop for EnvVarGuard {
@@ -1621,6 +1627,7 @@ mod tests {
     #[tokio::test]
     async fn startup_login_preflight_opens_once_when_third_probe_is_reachable() {
         let _env_lock = env_lock().lock().await;
+        let _disable_guard = EnvVarGuard::unset(DISABLE_AUTO_LOGIN_PROMPT_ENV);
         let (remote_base_url, hits) = spawn_sso_check_server(vec![503, 503, 200]).await;
         let (temp_dir, _config_manager, manager) = sync_manager_for_remote(&remote_base_url).await;
         let dry_run_file = temp_dir.path().join("opened-login-urls.txt");
@@ -1651,6 +1658,7 @@ mod tests {
     #[tokio::test]
     async fn startup_login_preflight_stops_after_three_unreachable_probes() {
         let _env_lock = env_lock().lock().await;
+        let _disable_guard = EnvVarGuard::unset(DISABLE_AUTO_LOGIN_PROMPT_ENV);
         let (remote_base_url, hits) = spawn_sso_check_server(vec![503, 503, 503]).await;
         let (temp_dir, _config_manager, manager) = sync_manager_for_remote(&remote_base_url).await;
         let dry_run_file = temp_dir.path().join("opened-login-urls.txt");
@@ -1698,6 +1706,7 @@ mod tests {
     #[tokio::test]
     async fn startup_login_preflight_wake_interrupts_retry_wait() {
         let _env_lock = env_lock().lock().await;
+        let _disable_guard = EnvVarGuard::unset(DISABLE_AUTO_LOGIN_PROMPT_ENV);
         let (remote_base_url, hits) = spawn_sso_check_server(vec![503, 503, 503]).await;
         let (_temp_dir, _config_manager, manager) = sync_manager_for_remote(&remote_base_url).await;
         let manager = Arc::new(manager);
@@ -1729,6 +1738,7 @@ mod tests {
     #[tokio::test]
     async fn startup_login_preflight_skips_when_auto_prompt_was_persisted() {
         let _env_lock = env_lock().lock().await;
+        let _disable_guard = EnvVarGuard::unset(DISABLE_AUTO_LOGIN_PROMPT_ENV);
         let (remote_base_url, hits) = spawn_sso_check_server(vec![200]).await;
         let (temp_dir, _config_manager, manager) = sync_manager_for_remote(&remote_base_url).await;
         {
@@ -1761,6 +1771,7 @@ mod tests {
     #[tokio::test]
     async fn startup_login_preflight_skips_when_session_token_exists() {
         let _env_lock = env_lock().lock().await;
+        let _disable_guard = EnvVarGuard::unset(DISABLE_AUTO_LOGIN_PROMPT_ENV);
         let (remote_base_url, hits) = spawn_sso_check_server(vec![200]).await;
         let (temp_dir, _config_manager, manager) = sync_manager_for_remote(&remote_base_url).await;
         {
