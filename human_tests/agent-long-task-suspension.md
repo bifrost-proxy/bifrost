@@ -811,6 +811,45 @@
 
 - 通过。2026-05-25 按项目规则带 `source ~/.zshrc &&` 执行第 1、2、3、4、6、7 步均成功；本地 remote shell streaming 真实 E2E 结果为 Total 41、Passed 41、Failed 0；本地 traffic DB 真实 E2E 结果为 Total 10、Passed 10、Failed 0；本地 OpenAI-like SSE search 真实 E2E 结果为 Total 9、Passed 9、Failed 0。远端 CI 待最新提交完成后记录终态。
 
+### TC-ALT-18：长任务等待期用户追加消息抢占并继续跟进原任务
+
+**操作步骤**：
+
+1. 确认设计文档记录了当前实现的用户消息抢占语义：
+
+   ```bash
+   rg -n '用户消息抢占|resume_reason=user_message|继续 `write_stdin` 跟进原 `session_id`' design/agent-long-task-suspension.md
+   ```
+
+2. 确认 turn loop 同时监听 guide notification 和 exec poll，并在用户消息到达时保留 deferred long task：
+
+   ```bash
+   rg -n "DeferredLongTask|guide_notification|resume_reason.*user_message|continue_deferred_long_task" crates/agent/src/session/turn_loop.rs
+   ```
+
+3. 执行定向单元回归：
+
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-agent exec_command_long_task_user_message_interrupts_runtime_wait_then_continues -- --nocapture
+   ```
+
+4. 确认测试断言 guide 在长任务退出前触发第二次模型请求，并在回答追加问题后继续跟进原任务：
+
+   ```bash
+   rg -n "guide message should resume the model before the long task exits|model should handle the interjection, then continue following the long task|Continue following the original long task" crates/agent/src/session/tests.rs
+   ```
+
+**预期结果**：
+
+- runtime watcher 等待 `exec_command` 长任务时，用户 guide/追加消息会抢占等待，不需要等 sleep/build/CI 结束。
+- 原 `exec_command` tool call 先收到合法 tool result，内容包含 `resume_reason=user_message`、`running=true`、`session_id` 和等待期间的压缩输出。
+- 模型先处理用户追加问题；处理完成后 turn loop 注入 runtime context，要求继续跟进原 `session_id`。
+- 后续 `write_stdin` 能拿到原长任务最终输出，最终回复来自长任务完成后的模型轮次。
+
+**实际结果**：
+
+- 通过。2026-06-03 按项目规则带 `source ~/.zshrc &&` 执行第 1、2、4 步静态检查均成功；第 1 步使用单引号保护反引号，避免 shell 命令替换。执行 `source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-agent exec_command_long_task_user_message_interrupts_runtime_wait_then_continues -- --nocapture` 通过。测试使用真实 `exec_command(cmd="printf start; sleep 0.8; printf done", yield_time_ms=50)`，100ms 后向 `guide_channel` 注入“先回答我：2+2 等于几？”，断言第二次模型请求在 350ms 内出现，即没有等待 0.8s 长任务退出；模型先返回 `answered the interjection`，随后 runtime context 要求继续跟进原 `session_id`，模型调用 `write_stdin` 后最终输出包含 `done`，最终回复为 `long task complete`。
+
 ## 清理步骤
 
 1. 停止测试 Bifrost 进程。
