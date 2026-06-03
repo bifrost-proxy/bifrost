@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState, useCallback, useEffect } from 'react';
 import { theme, Button, Tooltip, message } from 'antd';
-import { CopyOutlined, FormatPainterOutlined, EditOutlined } from '@ant-design/icons';
+import { CopyOutlined, FormatPainterOutlined } from '@ant-design/icons';
 import hljs from 'highlight.js/lib/core';
 import json from 'highlight.js/lib/languages/json';
 import xml from 'highlight.js/lib/languages/xml';
@@ -120,8 +120,7 @@ export const HighLightBody = ({
 
   const [showAll, setShowAll] = useState(false);
   const [isFormatted, setIsFormatted] = useState(true);
-  const [isEditing, setIsEditing] = useState(false);
-  const wrapperRef = useTextSelection(!!data);
+  const wrapperRef = useTextSelection(!!data && !editable);
   const codeRef = useRef<HTMLElement>(null);
 
   const isJsonType = contentType === 'JSON';
@@ -188,27 +187,28 @@ export const HighLightBody = ({
   useEffect(() => {
     const el = codeRef.current;
     if (!el) return;
-    el.innerHTML = highlighted;
     const debugState = globalThis as { __bifrostLogNextHljsHtml?: boolean };
     if (debugState.__bifrostLogNextHljsHtml) {
       console.log("[resume-hljs-html]", el.innerHTML);
       debugState.__bifrostLogNextHljsHtml = false;
     }
-  }, [highlighted]);
+  }, [highlighted, editable]);
 
   useEffect(() => {
     if (!searchValue.value) return;
     startMarkSearch();
   }, [highlighted, searchValue.value, startMarkSearch]);
 
-  if (data == null) {
+  if (data == null && !editable) {
     return null;
   }
 
   if (editable) {
     const monacoLang = getHighlightLanguage(contentType);
-    const lineCount = (data ?? '').split('\n').length;
-    const editorHeight = Math.max(200, Math.min(lineCount * 20 + 16, 600));
+    const rawText = data ?? '';
+    const formattedInitial = isJsonType ? formatJsonContent(rawText).formatted : rawText;
+    const lineCount = formattedInitial.split('\n').length;
+    const editorHeight = Math.min(Math.max(200, lineCount * 20 + 40), 600);
 
     return (
       <div style={{ position: 'relative' }}>
@@ -236,13 +236,14 @@ export const HighLightBody = ({
           height={editorHeight}
           language={monacoLang}
           theme={resolvedTheme === 'dark' ? 'vs-dark' : 'light'}
-          value={data ?? ''}
+          defaultValue={formattedInitial}
           onChange={(value) => onBodyChange?.(value ?? '')}
           options={{
             minimap: { enabled: false },
             fontSize: 12,
             lineNumbers: 'on',
             scrollBeyondLastLine: false,
+            smoothScrolling: true,
             automaticLayout: true,
             tabSize: 2,
             wordWrap: 'on',
@@ -250,7 +251,9 @@ export const HighLightBody = ({
             padding: { top: 28, bottom: 4 },
             scrollbar: {
               vertical: 'auto',
-              horizontal: 'auto',
+              horizontal: 'hidden',
+              verticalScrollbarSize: 4,
+              alwaysConsumeMouseWheel: false,
             },
           }}
         />
@@ -308,7 +311,12 @@ export const HighLightBody = ({
           lineHeight: 1.4,
         }}
       >
-        <code ref={codeRef} className="hljs" style={{ fontFamily: 'inherit' }} />
+        <code
+          ref={codeRef}
+          className="hljs"
+          style={{ fontFamily: 'inherit' }}
+          dangerouslySetInnerHTML={{ __html: highlighted }}
+        />
       </pre>
       {shouldShowMore && (
         <Button

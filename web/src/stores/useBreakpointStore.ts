@@ -93,6 +93,17 @@ const applyResumeToTrafficDetail = (
   });
 };
 
+const scheduleTrafficRefetch = (requestId: string, delay = 1000, retries = 5) => {
+  setTimeout(() => {
+    const state = useTrafficStore.getState();
+    if (state.currentRecord?.id !== requestId) return;
+    state.fetchTrafficDetail(requestId);
+    if (retries > 1) {
+      scheduleTrafficRefetch(requestId, delay * 2, retries - 1);
+    }
+  }, delay);
+};
+
 export const useBreakpointStore = create<BreakpointState>((set, get) => ({
   enabled: false,
   hookRequest: false,
@@ -257,6 +268,7 @@ export const useBreakpointStore = create<BreakpointState>((set, get) => ({
           bodyToSend ?? pausedData?.originalBody ?? null,
         );
         get().removePaused(requestId);
+        scheduleTrafficRefetch(requestId);
         return true;
       }
       return false;

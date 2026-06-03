@@ -118,7 +118,7 @@ export const Body = ({
     );
   }
 
-  if (!displayData && !displayDataBase64) {
+  if (!displayData && !displayDataBase64 && !editable) {
     return (
       <>
         {sourceSwitch}
