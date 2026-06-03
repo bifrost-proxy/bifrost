@@ -74,6 +74,22 @@
 - 响应包含 `agent_id=tomorrow_todo`。
 - 响应保留指定 `date`。
 
+### TC-ADA-06 回归：diarization-only 失败不阻塞 Daily Agent 自动触发门禁
+
+操作步骤：
+1. 执行 `cargo test -p bifrost-admin daily_agent_after_asr_run_allows_diarization_no_segments_only -- --nocapture`。
+2. 执行 `cargo test -p bifrost-admin daily_agent_after_asr_run_blocks_regular_failed_files -- --nocapture`。
+3. 对照真实任务状态或 watch 快照，确认 `diarization_no_segments: sherpa-onnx returned no speaker segments` 的 failed 文件属于 Daily Agent 非阻塞失败；普通 `normalize failed`、pending、partial success 和 failed chunks 仍会阻塞自动触发。
+
+预期结果：
+- 第 1 条测试通过，说明只有 `diarization_no_segments` failed 文件时，Daily Agent 自动触发门禁放行。
+- 第 2 条测试通过，说明普通 failed 文件仍阻塞 Daily Agent 自动触发。
+- 该回归只改变 Daily Agent 触发门禁，不修改 ASR 文件失败状态、Daily Docs 生成结果或手动运行 API 语义。
+
+## 执行记录
+
+- 2026-06-03：执行 TC-ADA-06 回归验证。`cargo test -p bifrost-admin daily_agent_after_asr_run_allows_diarization_no_segments_only -- --nocapture` 与 `cargo test -p bifrost-admin daily_agent_after_asr_run_blocks_regular_failed_files -- --nocapture` 均通过，确认 diarization-only failed 文件不再阻塞 Daily Agent 自动触发门禁，普通 failed 文件仍阻塞。
+
 ## 清理步骤
 
 - 成功执行时，脚本自动停止测试服务并删除临时数据目录、临时音频目录。

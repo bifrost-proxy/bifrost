@@ -489,6 +489,29 @@ human_tests/asr-task-cli-tui.md
 
 如任一轮发现 TUI 退出恢复、API 性能、任务选择或消耗信息错误，追加第 3 轮直到关闭。
 
+## 2026-06-03 增量：Daily Agent 自动触发门禁与 diarization-only 失败
+
+### 问题
+
+真实任务 `76612de33e9740bc92440ce64a98a4cb` 在 2026-06-03 02:52 生成了新的 `.daily/2026-06-02.md`，但 Daily Agent 没有自动运行。排查发现 ASR 任务总体 `failed=3`，失败原因均为：
+
+```text
+diarization_no_segments: sherpa-onnx returned no speaker segments
+```
+
+旧门禁 `daily_agent_asr_completion_ready` 要求 `pending=0 && failed=0 && partial_success=0 && failed_chunk_count=0`，因此只要存在任何失败文件就跳过 Daily Agent。这个规则会把“无可用说话人分段的短音频/静音音频”与真正转写失败混为一谈，导致已生成的 Daily Docs 长期不被后处理。
+
+### 修复语义
+
+- 继续阻断：仍有 pending/processing 文件、partial success、failed chunks，或普通 ASR/normalize/模型失败。
+- 允许自动触发：`pending=0`、`partial_success=0`、`failed_chunk_count=0`，且所有 failed 文件都属于 `diarization_no_segments:`。
+- 这样 Daily Agent 可以基于已生成的 `.daily/*.md` 继续生成 report，同时不会把真实转写失败误认为完成。
+
+### 测试补充
+
+- 单元测试：覆盖 clean ASR、pending、普通 failed、partial、failed chunks，以及 `diarization_no_segments` failed-only 放行。
+- human_tests：在 `human_tests/asr-daily-agents.md` 新增回归用例，验证现场类型的 diarization-only 失败不会阻塞 Daily Agent 自动触发门禁。
+
 ## 实施顺序建议
 
 1. 新增 `run_progress.json` 写入/恢复逻辑和单元测试。

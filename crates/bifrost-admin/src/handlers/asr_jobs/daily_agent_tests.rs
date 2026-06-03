@@ -990,6 +990,12 @@ fn daily_agent_runner_is_single_required_value() {
 
 #[test]
 fn daily_agent_after_asr_run_requires_no_pending_files() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let audio_dir = temp.path().join("audio");
+    std::fs::create_dir_all(&audio_dir).unwrap();
+    let task = test_directory_task("daily-agent-asr-completion-task", audio_dir.clone());
     let clean = TaskSummary {
         discovered: 1,
         processed: 1,
@@ -1009,23 +1015,132 @@ fn daily_agent_after_asr_run_requires_no_pending_files() {
         diarized_files: 0,
         speaker_count: 0,
     };
-    assert!(daily_agent_asr_completion_ready(&clean));
+    assert!(daily_agent_asr_completion_ready(&task, &clean));
 
     let mut pending = clean.clone();
     pending.pending = 1;
-    assert!(!daily_agent_asr_completion_ready(&pending));
+    assert!(!daily_agent_asr_completion_ready(&task, &pending));
 
     let mut failed = clean.clone();
     failed.failed = 1;
-    assert!(!daily_agent_asr_completion_ready(&failed));
+    assert!(!daily_agent_asr_completion_ready(&task, &failed));
 
     let mut partial = clean.clone();
     partial.partial_success = 1;
-    assert!(!daily_agent_asr_completion_ready(&partial));
+    assert!(!daily_agent_asr_completion_ready(&task, &partial));
 
     let mut failed_chunks = clean;
     failed_chunks.failed_chunk_count = 1;
-    assert!(!daily_agent_asr_completion_ready(&failed_chunks));
+    assert!(!daily_agent_asr_completion_ready(&task, &failed_chunks));
+}
+
+#[test]
+fn daily_agent_after_asr_run_allows_diarization_no_segments_only() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let audio_dir = temp.path().join("audio");
+    std::fs::create_dir_all(&audio_dir).unwrap();
+    let task = test_directory_task("daily-agent-diarization-nonblocking-task", audio_dir.clone());
+    let source_path = audio_dir.join("empty-speaker-turns.wav");
+    std::fs::write(&source_path, b"audio").unwrap();
+    let mut record = file_record_from_info(
+        &task.id,
+        &source_path,
+        &SourceAudioInfo {
+            source_size: Some(5),
+            source_modified_ms: Some(1),
+            source_created_at_ms: None,
+            source_created_at_source: None,
+            media_duration_ms: Some(1_000),
+        },
+    );
+    record.status = FileStatus::Failed;
+    record.error =
+        Some("diarization_no_segments: sherpa-onnx returned no speaker segments".to_string());
+    save_file_store(
+        &task.id,
+        &FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::from([(source_key(&source_path), record)]),
+        },
+    )
+    .unwrap();
+
+    let summary = TaskSummary {
+        discovered: 1,
+        processed: 0,
+        pending: 0,
+        failed: 1,
+        partial_success: 0,
+        failed_chunk_count: 0,
+        deleted_after_processing: 0,
+        audio_source_bytes: 0,
+        audio_source_file_count: 0,
+        cleanable_source_bytes: 0,
+        cleanable_source_file_count: 0,
+        running: false,
+        diarization_enabled: true,
+        diarization_ready: true,
+        diarization_running: false,
+        diarized_files: 0,
+        speaker_count: 0,
+    };
+    assert!(daily_agent_asr_completion_ready(&task, &summary));
+}
+
+#[test]
+fn daily_agent_after_asr_run_blocks_regular_failed_files() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let audio_dir = temp.path().join("audio");
+    std::fs::create_dir_all(&audio_dir).unwrap();
+    let task = test_directory_task("daily-agent-regular-failed-task", audio_dir.clone());
+    let source_path = audio_dir.join("normalize-failed.wav");
+    std::fs::write(&source_path, b"audio").unwrap();
+    let mut record = file_record_from_info(
+        &task.id,
+        &source_path,
+        &SourceAudioInfo {
+            source_size: Some(5),
+            source_modified_ms: Some(1),
+            source_created_at_ms: None,
+            source_created_at_source: None,
+            media_duration_ms: Some(1_000),
+        },
+    );
+    record.status = FileStatus::Failed;
+    record.error = Some("normalize failed: unsupported audio".to_string());
+    save_file_store(
+        &task.id,
+        &FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::from([(source_key(&source_path), record)]),
+        },
+    )
+    .unwrap();
+
+    let summary = TaskSummary {
+        discovered: 1,
+        processed: 0,
+        pending: 0,
+        failed: 1,
+        partial_success: 0,
+        failed_chunk_count: 0,
+        deleted_after_processing: 0,
+        audio_source_bytes: 0,
+        audio_source_file_count: 0,
+        cleanable_source_bytes: 0,
+        cleanable_source_file_count: 0,
+        running: false,
+        diarization_enabled: true,
+        diarization_ready: true,
+        diarization_running: false,
+        diarized_files: 0,
+        speaker_count: 0,
+    };
+    assert!(!daily_agent_asr_completion_ready(&task, &summary));
 }
 
 #[test]

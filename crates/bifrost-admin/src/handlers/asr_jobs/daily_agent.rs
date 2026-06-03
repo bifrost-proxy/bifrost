@@ -528,7 +528,7 @@ async fn maybe_enqueue_daily_agent_after_asr_run(task: &AsrDirectoryTask) {
         return;
     }
     let summary = summarize_task_from_store(task);
-    if !daily_agent_asr_completion_ready(&summary) {
+    if !daily_agent_asr_completion_ready(task, &summary) {
         tracing::info!(
             task_id = %task.id,
             pending = summary.pending,
@@ -619,11 +619,38 @@ async fn run_daily_agents(
     results
 }
 
-fn daily_agent_asr_completion_ready(summary: &TaskSummary) -> bool {
-    summary.pending == 0
-        && summary.failed == 0
-        && summary.partial_success == 0
-        && summary.failed_chunk_count == 0
+fn daily_agent_asr_completion_ready(task: &AsrDirectoryTask, summary: &TaskSummary) -> bool {
+    if summary.pending != 0 || summary.partial_success != 0 || summary.failed_chunk_count != 0 {
+        return false;
+    }
+    if summary.failed == 0 {
+        return true;
+    }
+
+    let file_store = load_file_store(&task.id);
+    daily_agent_failed_files_are_non_blocking(summary.failed, &file_store)
+}
+
+fn daily_agent_failed_files_are_non_blocking(failed_count: usize, store: &FileStore) -> bool {
+    let mut actual_failed = 0;
+    for record in store
+        .files
+        .values()
+        .filter(|record| record.status == FileStatus::Failed)
+    {
+        actual_failed += 1;
+        if !daily_agent_non_blocking_failed_file(record) {
+            return false;
+        }
+    }
+    actual_failed > 0 && actual_failed == failed_count
+}
+
+fn daily_agent_non_blocking_failed_file(record: &FileRecord) -> bool {
+    record
+        .error
+        .as_deref()
+        .is_some_and(|error| error.starts_with("diarization_no_segments:"))
 }
 
 fn daily_agent_effective_last_status(task: &AsrDirectoryTask) -> Option<String> {
