@@ -17,7 +17,7 @@ ADMIN_HOST="${ADMIN_HOST:-127.0.0.1}"
 ADMIN_PORT="${ADMIN_PORT:-${PROXY_PORT}}"
 ADMIN_PATH_PREFIX="${ADMIN_PATH_PREFIX:-/_bifrost}"
 
-BIFROST_BIN="${PROJECT_DIR}/target/release/bifrost"
+BIFROST_BIN="${BIFROST_BIN:-${PROJECT_DIR}/target/release/bifrost}"
 if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
     BIFROST_BIN="${BIFROST_BIN}.exe"
 fi
@@ -221,6 +221,23 @@ macos_check_proxy_enabled_for_any_service() {
     [[ "$found" == "true" ]]
 }
 
+macos_set_external_http_proxy() {
+    local host="$1"
+    local port="$2"
+    local svc
+    while IFS= read -r svc; do
+        networksetup -setwebproxy "$svc" "$host" "$port" >/dev/null 2>&1 || return 1
+        networksetup -setwebproxystate "$svc" on >/dev/null 2>&1 || return 1
+    done < <(macos_find_services)
+}
+
+macos_clear_http_proxy() {
+    local svc
+    while IFS= read -r svc; do
+        networksetup -setwebproxystate "$svc" off >/dev/null 2>&1 || return 1
+    done < <(macos_find_services)
+}
+
 macos_proxy_snapshot() {
     local svc
     while IFS= read -r svc; do
@@ -241,6 +258,12 @@ macos_check_proxy_disabled_for_all_services() {
         fi
     done < <(macos_find_services)
     [[ "$all_disabled" == "true" ]]
+}
+
+macos_check_proxy_not_pointing_to() {
+    local expected_host="$1"
+    local expected_port="$2"
+    ! macos_check_proxy_enabled_for_any_service "$expected_host" "$expected_port"
 }
 
 wait_for_condition() {
@@ -301,6 +324,46 @@ windows_wait_proxy_disabled() {
     return 1
 }
 
+test_external_proxy_not_disabled_without_bifrost_ownership() {
+    stop_proxy
+    rm -f "${TEST_DATA_DIR}/proxy_backup.json" "${TEST_DATA_DIR}/proxy_state.json" 2>/dev/null || true
+    local external_host="127.0.0.1"
+    local external_port="$((PROXY_PORT + 127))"
+
+    case "$PLATFORM" in
+        Darwin)
+            if ! macos_set_external_http_proxy "$external_host" "$external_port"; then
+                _log_fail "macOS: 无法设置外部系统代理夹具" "${external_host}:${external_port}" "$(macos_proxy_snapshot)"
+                failed=$((failed + 1))
+                return
+            fi
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            _log_pass "Windows: 外部代理归属回归用例暂不修改注册表，跳过真实系统写入"
+            passed=$((passed + 1))
+            return
+            ;;
+    esac
+
+    start_proxy_without_system_proxy
+    local status
+    status="$(curl -s -X PUT "http://${ADMIN_HOST}:${ADMIN_PORT}${ADMIN_PATH_PREFIX}/api/proxy/system" \
+        -H 'Content-Type: application/json' \
+        -d '{"enabled":false}' || true)"
+
+    if echo "$status" | grep -q '"managed_by_bifrost":false' \
+        && macos_wait_proxy_enabled "$external_host" "$external_port" 10; then
+        _log_pass "macOS: 外部系统代理未被 Bifrost disable 误关闭"
+        passed=$((passed + 1))
+    else
+        _log_fail "macOS: 外部系统代理被误关闭或状态归属错误" "managed_by_bifrost=false 且 ${external_host}:${external_port} 保持启用" "status=${status}; snapshot=$(macos_proxy_snapshot)"
+        failed=$((failed + 1))
+    fi
+
+    stop_proxy
+    macos_clear_http_proxy || true
+}
+
 test_enable_on_startup() {
     start_proxy_with_system_proxy
     case "$PLATFORM" in
@@ -332,11 +395,11 @@ test_disable_on_startup() {
     start_proxy_without_system_proxy
     case "$PLATFORM" in
         Darwin)
-            if macos_wait_proxy_disabled 45; then
-                _log_pass "macOS: 未启用系统代理（符合预期）"
+            if wait_for_condition 45 1 macos_check_proxy_not_pointing_to "127.0.0.1" "$PROXY_PORT"; then
+                _log_pass "macOS: 未启用 Bifrost 系统代理（外部代理会保留）"
                 passed=$((passed + 1))
             else
-                _log_fail "macOS: 未启用系统代理检查失败" "Disabled" "$(macos_proxy_snapshot)"
+                _log_fail "macOS: 未启用 Bifrost 系统代理检查失败" "不指向 127.0.0.1:${PROXY_PORT}" "$(macos_proxy_snapshot)"
                 failed=$((failed + 1))
             fi
             ;;
@@ -414,11 +477,11 @@ test_crash_recovery() {
     start_proxy_without_system_proxy
     case "$PLATFORM" in
         Darwin)
-            if macos_wait_proxy_disabled 45; then
-                _log_pass "macOS: 再次启动未启用系统代理，崩溃恢复生效"
+            if wait_for_condition 45 1 macos_check_proxy_not_pointing_to "127.0.0.1" "$PROXY_PORT"; then
+                _log_pass "macOS: 再次启动未启用 Bifrost 系统代理，崩溃恢复生效"
                 passed=$((passed + 1))
             else
-                _log_fail "macOS: 崩溃恢复未生效" "Disabled" "$(macos_proxy_snapshot)"
+                _log_fail "macOS: 崩溃恢复未生效" "不指向 127.0.0.1:${PROXY_PORT}" "$(macos_proxy_snapshot)"
                 failed=$((failed + 1))
             fi
             ;;
@@ -450,6 +513,7 @@ main() {
 
     test_enable_on_startup
     test_disable_on_startup
+    test_external_proxy_not_disabled_without_bifrost_ownership
     test_restore_on_exit
     test_crash_recovery
 
