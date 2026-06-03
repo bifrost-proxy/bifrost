@@ -811,7 +811,53 @@
 
 - 通过。2026-05-25 按项目规则带 `source ~/.zshrc &&` 执行第 1、2、3、4、6、7 步均成功；本地 remote shell streaming 真实 E2E 结果为 Total 41、Passed 41、Failed 0；本地 traffic DB 真实 E2E 结果为 Total 10、Passed 10、Failed 0；本地 OpenAI-like SSE search 真实 E2E 结果为 Total 9、Passed 9、Failed 0。远端 CI 待最新提交完成后记录终态。
 
-### TC-ALT-18：长任务等待期用户追加消息抢占并继续跟进原任务
+### TC-ALT-18：Traffic DB E2E mock server 端口 fallback 回归
+
+**背景**：macOS CI shell shard 中 `test_traffic_db_e2e.sh` 曾在 Bifrost 启动后报 `Could not start mock server`。脚本先选择空闲 `MOCK_HTTP_PORT`，再启动 `http_echo_server.py`；如果端口在选择后、bind 前被抢占，echo server 支持 `--retries` fallback 到后续端口，但 Traffic DB 脚本仍轮询旧端口，导致假失败。
+
+**操作步骤**：
+
+1. 用 Python 临时占用将要传给脚本的 mock 端口，并在同一进程中启动 Traffic DB E2E，强制 `http_echo_server.py --retries 5` fallback：
+
+   ```bash
+   python3 - <<'PY'
+import os
+import socket
+import subprocess
+
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.bind(("127.0.0.1", 0))
+try:
+    port = s.getsockname()[1]
+    env = os.environ.copy()
+    env["MOCK_HTTP_PORT"] = str(port)
+    env["SKIP_BUILD"] = "true"
+    env["BIFROST_BIN"] = os.path.join(os.getcwd(), "target", "debug", "bifrost")
+    subprocess.run(["bash", "e2e-tests/tests/test_traffic_db_e2e.sh"], env=env, check=True)
+finally:
+    s.close()
+PY
+   ```
+
+2. 确认脚本输出包含 mock server fallback 提示：
+
+   ```bash
+   # 观察上一条命令输出中的：Mock server fell back from port <old> to <new>
+   ```
+
+3. 确认 Traffic DB E2E 的 10 个用例全部通过。
+
+**预期结果**：
+
+- `test_traffic_db_e2e.sh` 不再因为 mock server bind 前端口被抢占而失败。
+- 脚本从 mock server 日志解析实际绑定端口，并用实际端口生成代理流量。
+- Traffic Query、Updates、Pending、Detail、Compact、Sequence、Pagination、Filter、Body Retrieval、Clear 共 10 个用例全部通过。
+
+**实际结果**：
+
+- 2026-06-03 通过。执行上述 Python 端口抢占命令，脚本输出 `Mock server fell back from port 52155 to 52156`，Traffic DB E2E 汇总 `Total: 10`、`Passed: 10`、`Failed: 0`。
+
+### TC-ALT-19：长任务等待期用户追加消息抢占并继续跟进原任务
 
 **操作步骤**：
 
