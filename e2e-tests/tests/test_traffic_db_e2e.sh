@@ -185,6 +185,12 @@ stop_mock_server() {
         MOCK_PID=""
     fi
     if [[ -n "$MOCK_LOG_FILE" ]]; then
+        if [[ -n "${BIFROST_E2E_REPORT_DIR:-}" && -f "$MOCK_LOG_FILE" ]]; then
+            mkdir -p "$BIFROST_E2E_REPORT_DIR" 2>/dev/null || true
+            cp "$MOCK_LOG_FILE" \
+                "$BIFROST_E2E_REPORT_DIR/traffic-db-mock-${MOCK_HTTP_PORT:-unknown}.log" \
+                2>/dev/null || true
+        fi
         rm -f "$MOCK_LOG_FILE" 2>/dev/null || true
         MOCK_LOG_FILE=""
     fi

@@ -820,6 +820,35 @@
 - 默认离线路径真实启动 Bifrost、调用 CLI status、创建启用 diarization 的 ASR 任务，并断言 `summary.diarization_enabled=true`、`summary.diarization_ready=false`。
 - 全程使用临时数据目录、`--no-system-proxy` 与非 9900 端口。
 
+### TC-CS-35: macOS shell shard 资源压力与 traffic DB mock 日志回归
+
+**操作步骤**：
+1. 解析 `.github/workflows/ci.yml`，确认 Linux shell shard 仍为 4 路并发、macOS shell shard 降为 2 路并发：
+   ```bash
+   ruby -ryaml -e 'workflow = YAML.load_file(".github/workflows/ci.yml"); linux = workflow["jobs"]["e2e-shell"]["env"]["BIFROST_E2E_SHELL_JOBS"]; mac = workflow["jobs"]["e2e-macos-shell"]["env"]["BIFROST_E2E_SHELL_JOBS"]; raise "linux jobs mismatch: #{linux.inspect}" unless linux == "4"; raise "mac jobs mismatch: #{mac.inspect}" unless mac == "2"; puts "linux shell jobs=4, mac shell jobs=2"'
+   ```
+2. 对 traffic DB shell E2E 执行语法检查：
+   ```bash
+   bash -n e2e-tests/tests/test_traffic_db_e2e.sh
+   ```
+3. 静态检查 traffic DB mock server 日志会复制到 report dir：
+   ```bash
+   rg -n 'traffic-db-mock-|BIFROST_E2E_REPORT_DIR|MOCK_LOG_FILE' \
+     e2e-tests/tests/test_traffic_db_e2e.sh
+   ```
+4. 复核 GitHub Actions 失败 artifact 中原始根因：
+   ```bash
+   rg -n 'Killed: 9|Could not start mock server' \
+     /tmp/bifrost-ci-26899628938-mac-shard1/.e2e-reports
+   ```
+
+**预期结果**：
+- YAML 解析通过，Linux `e2e-shell` 保持 `BIFROST_E2E_SHELL_JOBS=4`，macOS `e2e-macos-shell` 为 `2`，降低 macOS runner 同时启动 Bifrost/mock 的资源峰值。
+- `test_traffic_db_e2e.sh` 语法检查通过。
+- 静态检查显示 mock server 临时日志会复制到 `$BIFROST_E2E_REPORT_DIR/traffic-db-mock-<port>.log`，失败 artifact 可保留 mock 退出原因。
+- artifact 复核能定位原始失败为 macOS shard 1 中多个 Bifrost 进程被系统 `Killed: 9`，且 traffic DB 用例只留下 `Could not start mock server`，缺少 mock 详细日志。
+- 静态回归不启动 Bifrost、不使用 9900、不修改系统代理。
+
 ## 本轮执行记录
 
 测试日期：2026-05-09
@@ -851,6 +880,7 @@
 | TC-CS-32 | 通过 | 2026-05-29 本轮执行：`bash -n e2e-tests/tests/test_agent_history_pagination_api.sh e2e-tests/tests/test_asr_task_append_during_run.sh e2e-tests/tests/test_asr_task_startup_recovery.sh` 通过；`rg -n 'SKIP_BUILD\|target/release/bifrost\|target/debug/bifrost\|bifrost binary is not executable\|skipping build, using' ...` 显示三个脚本均在 `SKIP_BUILD=true` 分支默认 release binary、本地构建分支默认 debug binary，且 binary 不可执行时明确失败；`/tmp/job-78509089317.log` 复核确认原始失败为三个脚本并行重复触发 Cargo build 后超过 900 秒 suite timeout。随后执行 `SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost` 生成 release binary，并分别运行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_agent_history_pagination_api.sh`、`SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" BIFROST_ASR_TASK_APPEND_E2E_PORT=19131 bash e2e-tests/tests/test_asr_task_append_during_run.sh`、`SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" BIFROST_ASR_TASK_RECOVERY_E2E_PORT=19132 bash e2e-tests/tests/test_asr_task_startup_recovery.sh`，三者分别输出 `agent history pagination API checks passed`、`[asr-task-append] PASS`、`[asr-task-startup-recovery] PASS`，均未进入 `cargo build`；真实执行使用临时数据目录、`--no-system-proxy` 与非 9900 端口。 |
 | TC-CS-33 | 通过 | 2026-05-29 本轮执行：`bash -n e2e-tests/tests/test_asr_task_cli.sh e2e-tests/tests/test_asr_diarization_cli.sh e2e-tests/tests/test_asr_model_autonomy.sh e2e-tests/tests/test_asr_voiceprint_enroll_cli.sh` 通过；`rg -n 'ADMIN_PORT="\$\{BIFROST_ASR_[A-Z_]+_E2E_PORT:-\$\{ADMIN_PORT:-18[0-9]+' ...` 显示四个 ASR CLI shell E2E 均优先使用显式 `BIFROST_ASR_*_E2E_PORT`，其次使用外层 `ADMIN_PORT`，最后使用本地默认固定端口；`rg -n 'Failed to connect to Bifrost admin API\|Invalid argument' /tmp/bifrost-ci-26643081691-mac-shard2/.e2e-reports/shell_test_asr_voiceprint_enroll_cli_sh.log` 复核原始失败为固定端口场景下 CLI finish enrollment 无法连接 admin API。执行 `SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost` 时发现并修复 `web/dist-gzip` stale 目录删除 `Directory not empty` 构建竞态；修复后 release 构建通过。随后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" ADMIN_PORT=19141 bash e2e-tests/tests/test_asr_voiceprint_enroll_cli.sh`，输出 `[asr-voiceprint-enroll-cli-e2e] ok`；真实执行使用临时数据目录、`--no-system-proxy` 与非 9900 端口。 |
 | TC-CS-34 | 通过 | 2026-06-04 本轮执行：`bash -n e2e-tests/tests/test_asr_diarization_cli.sh` 通过；`rg -n 'BIFROST_ASR_DIARIZATION_E2E_ONLINE\|skipping online model init\|diarization_ready' e2e-tests/tests/test_asr_diarization_cli.sh` 显示默认离线分支、显式联网开关和 ready 断言；`rg -n 'status code 429\|download diarization model' /tmp/bifrost-ci-26896054036-shard3/.e2e-reports/shell_test_asr_diarization_cli_sh.log` 复核原始 CI 失败为 HuggingFace 429。随后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" ADMIN_PORT=19143 bash e2e-tests/tests/test_asr_diarization_cli.sh`，输出 `skipping online model init` 与 `[asr-diarization-cli-e2e] ok`；真实链路启动 Bifrost、调用 CLI status、创建启用 diarization 的 ASR 任务，并在默认无模型资产时断言 `diarization_ready=false`。全程使用临时数据目录、`--no-system-proxy` 与非 9900 端口。 |
+| TC-CS-35 | 通过 | 2026-06-04 本轮执行：Ruby YAML 解析 `.github/workflows/ci.yml` 通过，确认 Linux `e2e-shell` 仍为 `BIFROST_E2E_SHELL_JOBS=4`，macOS `e2e-macos-shell` 降为 `2`；`bash -n e2e-tests/tests/test_traffic_db_e2e.sh` 通过；`rg -n 'traffic-db-mock-\|BIFROST_E2E_REPORT_DIR\|MOCK_LOG_FILE' e2e-tests/tests/test_traffic_db_e2e.sh` 显示 traffic DB mock 临时日志会复制到 report dir；`rg -n 'Killed: 9\|Could not start mock server' /tmp/bifrost-ci-26899628938-mac-shard1/.e2e-reports` 复核原始 macOS shard 1 失败包含多个 Bifrost `Killed: 9` 与 traffic DB `Could not start mock server`。该静态回归不启动 Bifrost，不使用 9900，不修改系统代理；完整 macOS shard 稳定性由推送后的 GitHub Actions run 验证。 |
 
 ## 清理步骤
 
