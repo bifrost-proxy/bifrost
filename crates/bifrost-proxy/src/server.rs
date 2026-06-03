@@ -247,6 +247,7 @@ pub struct RuleValue {
     pub rule_name: Option<String>,
     pub raw: Option<String>,
     pub line: Option<usize>,
+    pub auto_tls_intercept: bool,
 }
 
 #[derive(Clone)]
@@ -2231,6 +2232,7 @@ mod tests {
             rule_name: None,
             raw: None,
             line: None,
+            auto_tls_intercept: false,
         };
         assert_eq!(rule.protocol, Protocol::Host);
         assert_eq!(rule.value, "example.com");

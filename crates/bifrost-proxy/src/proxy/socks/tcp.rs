@@ -25,7 +25,8 @@ use tracing::{debug, error, info, warn};
 use crate::dns::DnsResolver;
 use crate::protocol::ProtocolDetector;
 use crate::proxy::http::{
-    requires_client_app_for_tls_decision, requires_tls_interception_for_connect_rules,
+    connect_via_upstream_http_proxy_tunnel, requires_client_app_for_tls_decision,
+    requires_tls_interception_for_connect_rules,
 };
 use crate::server::{
     full_body, BoxBody, NoOpRulesResolver, RulesResolver, TlsConfig, TlsInterceptConfig,
@@ -54,6 +55,10 @@ static SOCKS5_PROCESS_START_TS: LazyLock<u64> = LazyLock::new(|| {
         .map(|d| d.as_secs())
         .unwrap_or(0)
 });
+
+fn should_use_socks_upstream_proxy(rules: &crate::server::ResolvedRules) -> bool {
+    rules.proxy.is_some() && (rules.ignored.host || rules.host.is_none())
+}
 
 #[cfg(unix)]
 fn is_fd_limit_error(err: &std::io::Error) -> bool {
@@ -1009,6 +1014,7 @@ impl SocksHandler {
             SocksAddress::DomainName(domain) => domain.clone(),
         };
 
+        let mut upstream_proxy_rule: Option<String> = None;
         let (target_host, target_port) = if let Some(ref rules) = self.rules {
             debug!("SOCKS5: Resolving rules for URL: {}", url);
             let resolved = rules.resolve(&url, "CONNECT");
@@ -1048,6 +1054,12 @@ impl SocksHandler {
                         scheme, url, h, p
                     );
                     (h, p)
+                } else if should_use_socks_upstream_proxy(&scheme_resolved) {
+                    upstream_proxy_rule = scheme_resolved.proxy.clone();
+                    (host_str.clone(), port)
+                } else if should_use_socks_upstream_proxy(&resolved) {
+                    upstream_proxy_rule = resolved.proxy.clone();
+                    (host_str.clone(), port)
                 } else {
                     (host_str.clone(), port)
                 }
@@ -1056,29 +1068,50 @@ impl SocksHandler {
             (host_str.clone(), port)
         };
 
-        let target_addr = format!("{}:{}", target_host, target_port);
-        match TcpStream::connect(&target_addr).await {
+        let connect_result: std::result::Result<TcpStream, (SocksReply, BifrostError)> =
+            if let Some(ref proxy_rule) = upstream_proxy_rule {
+                connect_via_upstream_http_proxy_tunnel(proxy_rule, &target_host, target_port)
+                    .await
+                    .map_err(|e| (SocksReply::GeneralFailure, e))
+            } else {
+                let target_addr = format!("{}:{}", target_host, target_port);
+                TcpStream::connect(&target_addr).await.map_err(|e| {
+                    let reply = match e.kind() {
+                        std::io::ErrorKind::ConnectionRefused => SocksReply::ConnectionRefused,
+                        std::io::ErrorKind::AddrNotAvailable => SocksReply::HostUnreachable,
+                        _ => SocksReply::GeneralFailure,
+                    };
+                    (
+                        reply,
+                        BifrostError::Network(format!(
+                            "Failed to connect to {}: {}",
+                            target_addr, e
+                        )),
+                    )
+                })
+            };
+
+        match connect_result {
             Ok(target_stream) => {
                 if let Err(e) = target_stream.set_nodelay(true) {
                     debug!("Failed to set TCP_NODELAY on SOCKS5 connection: {}", e);
                 }
                 let local_addr = target_stream.local_addr().ok();
                 self.send_reply(SocksReply::Succeeded, local_addr).await?;
-                debug!("SOCKS5: Connected to {}", target_addr);
+                if let Some(ref proxy_rule) = upstream_proxy_rule {
+                    debug!(
+                        "SOCKS5: Connected to {}:{} via upstream proxy {}",
+                        target_host, target_port, proxy_rule
+                    );
+                } else {
+                    debug!("SOCKS5: Connected to {}:{}", target_host, target_port);
+                }
                 self.relay_data(target_stream, &target_host, target_port, &url)
                     .await
             }
-            Err(e) => {
-                let reply = match e.kind() {
-                    std::io::ErrorKind::ConnectionRefused => SocksReply::ConnectionRefused,
-                    std::io::ErrorKind::AddrNotAvailable => SocksReply::HostUnreachable,
-                    _ => SocksReply::GeneralFailure,
-                };
+            Err((reply, e)) => {
                 self.send_reply(reply, None).await?;
-                Err(BifrostError::Network(format!(
-                    "Failed to connect to {}: {}",
-                    target_addr, e
-                )))
+                Err(e)
             }
         }
     }
@@ -2208,6 +2241,7 @@ pub fn build_reply(reply: SocksReply, addr: Option<&SocksAddress>, port: u16) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proxy::http::{build_proxy_rule_url, build_upstream_proxy_connect_request};
 
     #[test]
     fn test_auth_method_from_u8() {
@@ -2456,6 +2490,51 @@ mod tests {
         assert!(config.auth_required);
         assert_eq!(config.username, Some("admin".to_string()));
         assert_eq!(config.password, Some("secret".to_string()));
+    }
+
+    #[test]
+    fn socks_proxy_rule_alone_uses_upstream_proxy() {
+        let rules = crate::server::ResolvedRules {
+            proxy: Some("127.0.0.1:8080".to_string()),
+            ..Default::default()
+        };
+        assert!(should_use_socks_upstream_proxy(&rules));
+    }
+
+    #[test]
+    fn socks_proxy_rule_with_host_rewrite_does_not_use_upstream_proxy() {
+        let rules = crate::server::ResolvedRules {
+            host: Some("127.0.0.1:8443".to_string()),
+            proxy: Some("127.0.0.1:8080".to_string()),
+            ..Default::default()
+        };
+        assert!(!should_use_socks_upstream_proxy(&rules));
+    }
+
+    #[test]
+    fn socks_proxy_rule_with_ignored_host_uses_upstream_proxy() {
+        let rules = crate::server::ResolvedRules {
+            host: Some("127.0.0.1:8443".to_string()),
+            proxy: Some("127.0.0.1:8080".to_string()),
+            ignored: crate::server::IgnoredFields {
+                host: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(should_use_socks_upstream_proxy(&rules));
+    }
+
+    #[test]
+    fn socks_upstream_proxy_connect_request_includes_target_and_auth() {
+        let proxy_url = build_proxy_rule_url("user:pass@127.0.0.1:8080").unwrap();
+        let request = build_upstream_proxy_connect_request(&proxy_url, "example.com", 443);
+        let request = String::from_utf8(request).unwrap();
+
+        assert!(request.starts_with("CONNECT example.com:443 HTTP/1.1\r\n"));
+        assert!(request.contains("Host: example.com:443\r\n"));
+        assert!(request.contains("Proxy-Authorization: Basic dXNlcjpwYXNz\r\n"));
+        assert!(request.ends_with("\r\n\r\n"));
     }
 
     struct MockSocksHandler {

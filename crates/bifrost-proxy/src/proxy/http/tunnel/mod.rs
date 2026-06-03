@@ -57,8 +57,9 @@ use super::handler::decode::{apply_decode_scripts_for_storage, DecodeForStorageR
 use super::handler::{
     apply_websocket_request_header_rules, apply_websocket_response_header_rules,
     build_connection_error_response, build_error_body, build_overridden_error_response,
-    merge_websocket_header_rule_candidates, needs_body_processing, needs_request_body_processing,
-    needs_response_override, parse_and_record_sse_events, ConnectionErrorInfo,
+    connect_via_upstream_http_proxy_tunnel, merge_websocket_header_rule_candidates,
+    needs_body_processing, needs_request_body_processing, needs_response_override,
+    parse_and_record_sse_events, ConnectionErrorInfo,
 };
 use super::scripts::{
     apply_script_headers_to_header_map, body_to_script_string, execute_request_scripts,
@@ -249,7 +250,7 @@ fn requires_tls_interception_for_host_rewrite(resolved_rules: &ResolvedRules) ->
 }
 
 pub fn requires_tls_interception_for_rules(resolved_rules: &ResolvedRules) -> bool {
-    !resolved_rules.res_headers.is_empty()
+    let has_interceptable_fields = !resolved_rules.res_headers.is_empty()
         || !resolved_rules.req_headers.is_empty()
         || !resolved_rules.delete_res_headers.is_empty()
         || !resolved_rules.delete_req_headers.is_empty()
@@ -299,12 +300,78 @@ pub fn requires_tls_interception_for_rules(resolved_rules: &ResolvedRules) -> bo
         || resolved_rules.cache.is_some()
         || resolved_rules.attachment.is_some()
         || resolved_rules.req_merge.is_some()
-        || resolved_rules.res_merge.is_some()
+        || resolved_rules.res_merge.is_some();
+
+    has_interceptable_fields
+        && resolved_rules.rules.iter().any(|rule| {
+            rule.auto_tls_intercept && protocol_requires_tls_interception(rule.protocol)
+        })
+}
+
+fn protocol_requires_tls_interception(protocol: Protocol) -> bool {
+    matches!(
+        protocol,
+        Protocol::ReqHeaders
+            | Protocol::ResHeaders
+            | Protocol::ReqBody
+            | Protocol::ResBody
+            | Protocol::ReqPrepend
+            | Protocol::ResPrepend
+            | Protocol::ReqAppend
+            | Protocol::ResAppend
+            | Protocol::ReqCookies
+            | Protocol::ResCookies
+            | Protocol::ReqCors
+            | Protocol::ResCors
+            | Protocol::ReqSpeed
+            | Protocol::ResSpeed
+            | Protocol::ReqType
+            | Protocol::ResType
+            | Protocol::ReqCharset
+            | Protocol::ResCharset
+            | Protocol::ReqReplace
+            | Protocol::ResReplace
+            | Protocol::ForwardedFor
+            | Protocol::ResponseFor
+            | Protocol::Method
+            | Protocol::Auth
+            | Protocol::Ua
+            | Protocol::Referer
+            | Protocol::UrlParams
+            | Protocol::Params
+            | Protocol::UrlReplace
+            | Protocol::ReplaceStatus
+            | Protocol::StatusCode
+            | Protocol::Cache
+            | Protocol::Attachment
+            | Protocol::ResMerge
+            | Protocol::HeaderReplace
+            | Protocol::HtmlAppend
+            | Protocol::HtmlPrepend
+            | Protocol::HtmlBody
+            | Protocol::JsAppend
+            | Protocol::JsPrepend
+            | Protocol::JsBody
+            | Protocol::CssAppend
+            | Protocol::CssPrepend
+            | Protocol::CssBody
+            | Protocol::ReqScript
+            | Protocol::ResScript
+            | Protocol::Decode
+            | Protocol::File
+            | Protocol::Tpl
+            | Protocol::RawFile
+            | Protocol::Delete
+    )
 }
 
 pub fn requires_tls_interception_for_connect_rules(resolved_rules: &ResolvedRules) -> bool {
     requires_tls_interception_for_rules(resolved_rules)
         || requires_tls_interception_for_host_rewrite(resolved_rules)
+}
+
+fn should_use_connect_upstream_proxy(resolved_rules: &ResolvedRules) -> bool {
+    resolved_rules.proxy.is_some() && (resolved_rules.ignored.host || resolved_rules.host.is_none())
 }
 
 fn has_request_body_rules(rules: &ResolvedRules) -> bool {
@@ -757,7 +824,9 @@ pub async fn handle_connect(
         );
     }
 
-    let has_rules = resolved_rules.host.is_some() || !resolved_rules.rules.is_empty();
+    let has_rules = resolved_rules.host.is_some()
+        || resolved_rules.proxy.is_some()
+        || !resolved_rules.rules.is_empty();
     if verbose_logging && has_rules {
         info!(
             "[{}] CONNECT tunnel rules matched: {}",
@@ -797,7 +866,15 @@ pub async fn handle_connect(
         (host.clone(), port)
     };
 
-    let connect_host = if !resolved_rules.dns_servers.is_empty() {
+    let upstream_proxy_rule = if should_use_connect_upstream_proxy(&resolved_rules) {
+        resolved_rules.proxy.clone()
+    } else {
+        None
+    };
+
+    let connect_host = if upstream_proxy_rule.is_some() {
+        target_host.clone()
+    } else if !resolved_rules.dns_servers.is_empty() {
         if let Some(ref resolver) = dns_resolver {
             if verbose_logging {
                 info!(
@@ -831,14 +908,18 @@ pub async fn handle_connect(
         target_host.clone()
     };
 
-    let target_stream = TcpStream::connect(format!("{}:{}", connect_host, target_port))
-        .await
-        .map_err(|e| {
-            BifrostError::Network(format!(
-                "Failed to connect to {}:{}: {}",
-                connect_host, target_port, e
-            ))
-        })?;
+    let target_stream = if let Some(ref proxy_rule) = upstream_proxy_rule {
+        connect_via_upstream_http_proxy_tunnel(proxy_rule, &target_host, target_port).await?
+    } else {
+        TcpStream::connect(format!("{}:{}", connect_host, target_port))
+            .await
+            .map_err(|e| {
+                BifrostError::Network(format!(
+                    "Failed to connect to {}:{}: {}",
+                    connect_host, target_port, e
+                ))
+            })?
+    };
 
     if let Err(e) = target_stream.set_nodelay(true) {
         warn!(
@@ -850,10 +931,14 @@ pub async fn handle_connect(
 
     if verbose_logging {
         info!(
-            "[{}] CONNECT tunnel established to {}:{}",
+            "[{}] CONNECT tunnel established to {}:{}{}",
             ctx.id_str(),
             target_host,
-            target_port
+            target_port,
+            upstream_proxy_rule
+                .as_ref()
+                .map(|proxy| format!(" via upstream proxy {proxy}"))
+                .unwrap_or_default()
         );
     }
 
@@ -5619,6 +5704,19 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    fn auto_tls_rule(protocol: Protocol) -> crate::server::RuleValue {
+        crate::server::RuleValue {
+            pattern: "auto-tls.local".to_string(),
+            protocol,
+            value: "test".to_string(),
+            options: std::collections::HashMap::new(),
+            rule_name: None,
+            raw: None,
+            line: None,
+            auto_tls_intercept: true,
+        }
+    }
+
     #[test]
     fn test_h2_body_recovery_policy_probes_bounded_responses() {
         assert_eq!(
@@ -5876,6 +5974,7 @@ mod tests {
     fn decode_scripts_require_tls_interception() {
         let rules = ResolvedRules {
             decode_scripts: vec!["decode_script".to_string()],
+            rules: vec![auto_tls_rule(Protocol::Decode)],
             ..ResolvedRules::default()
         };
 
@@ -5911,6 +6010,20 @@ mod tests {
         };
 
         assert!(!requires_tls_interception_for_connect_rules(&rules));
+        assert!(should_use_connect_upstream_proxy(&rules));
+    }
+
+    #[test]
+    fn connect_proxy_rule_with_host_rewrite_does_not_use_upstream_proxy() {
+        let rules = ResolvedRules {
+            host: Some("127.0.0.1:3443".to_string()),
+            host_protocol: Some(Protocol::Host),
+            proxy: Some("127.0.0.1:8888".to_string()),
+            ..ResolvedRules::default()
+        };
+
+        assert!(!requires_tls_interception_for_connect_rules(&rules));
+        assert!(!should_use_connect_upstream_proxy(&rules));
     }
 
     #[test]
@@ -5938,6 +6051,41 @@ mod tests {
                 "X-Bifrost-Test".to_string(),
                 "tls-intercept-required".to_string(),
             )],
+            rules: vec![auto_tls_rule(Protocol::ResHeaders)],
+            ..ResolvedRules::default()
+        };
+
+        assert!(requires_tls_interception_for_connect_rules(&rules));
+    }
+
+    #[test]
+    fn connect_content_mutation_without_host_scope_does_not_require_tls_interception() {
+        let rules = ResolvedRules {
+            res_headers: vec![(
+                "X-Bifrost-Test".to_string(),
+                "tls-intercept-not-allowed".to_string(),
+            )],
+            rules: vec![crate::server::RuleValue {
+                pattern: "*".to_string(),
+                protocol: Protocol::ResHeaders,
+                value: "X-Bifrost-Test=tls-intercept-not-allowed".to_string(),
+                options: std::collections::HashMap::new(),
+                rule_name: None,
+                raw: Some("* resHeaders://X-Bifrost-Test=tls-intercept-not-allowed".to_string()),
+                line: None,
+                auto_tls_intercept: false,
+            }],
+            ..ResolvedRules::default()
+        };
+
+        assert!(!requires_tls_interception_for_connect_rules(&rules));
+    }
+
+    #[test]
+    fn connect_delete_rule_with_host_scope_requires_tls_interception() {
+        let rules = ResolvedRules {
+            delete_res_headers: vec!["X-Remove-Me".to_string()],
+            rules: vec![auto_tls_rule(Protocol::Delete)],
             ..ResolvedRules::default()
         };
 

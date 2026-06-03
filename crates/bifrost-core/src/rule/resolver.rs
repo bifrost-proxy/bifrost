@@ -242,6 +242,9 @@ impl RulesResolver {
             ) {
                 continue;
             }
+            if !rule.matcher.can_trigger_tls_auto_intercept() {
+                continue;
+            }
             if rule.matcher.matches_host(&url_https, host)
                 || rule.matcher.matches_host(&url_http, host)
             {
@@ -566,6 +569,12 @@ mod tests {
             value.to_string(),
             format!("{} {}://{}", pattern, protocol.to_str(), value),
         )
+    }
+
+    fn parse_test_rule(line: &str) -> Vec<Rule> {
+        crate::rule::parser::RuleParser::new()
+            .parse_line(line)
+            .unwrap_or_else(|err| panic!("failed to parse test rule `{}`: {}", line, err))
     }
 
     fn create_test_rule_with_filters(
@@ -1461,6 +1470,55 @@ mod tests {
 
         let result = resolver.resolve(&ctx);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_has_response_rules_for_host_allows_explicit_domain_and_ip_scope() {
+        let mut rules = Vec::new();
+        rules.extend(parse_test_rule(
+            "tls-auto-domain.local resHeaders://X-Auto-Tls=domain",
+        ));
+        rules.extend(parse_test_rule("127.0.0.1 resHeaders://X-Auto-Tls=ip"));
+
+        let resolver = RulesResolver::new(rules);
+
+        assert!(resolver.has_response_rules_for_host("tls-auto-domain.local"));
+        assert!(resolver.has_response_rules_for_host("127.0.0.1"));
+        assert!(!resolver.has_response_rules_for_host("other.local"));
+    }
+
+    #[test]
+    fn test_has_response_rules_for_host_allows_host_scoped_wildcards() {
+        let mut rules = Vec::new();
+        rules.extend(parse_test_rule(
+            "*.tls-auto.local resHeaders://X-Auto-Tls=wildcard",
+        ));
+        rules.extend(parse_test_rule(
+            "^path.tls-auto.local/api/* resHeaders://X-Auto-Tls=path",
+        ));
+
+        let resolver = RulesResolver::new(rules);
+
+        assert!(resolver.has_response_rules_for_host("api.tls-auto.local"));
+        assert!(resolver.has_response_rules_for_host("path.tls-auto.local"));
+        assert!(!resolver.has_response_rules_for_host("tls-auto.local"));
+    }
+
+    #[test]
+    fn test_has_response_rules_for_host_rejects_pure_regex_and_wildcards() {
+        let mut rules = Vec::new();
+        rules.extend(parse_test_rule("* resHeaders://X-Auto-Tls=wildcard"));
+        rules.extend(parse_test_rule(
+            "*/api/* resHeaders://X-Auto-Tls=path-wildcard",
+        ));
+        rules.extend(parse_test_rule(
+            "/regex-auto\\.local/ resHeaders://X-Auto-Tls=regex",
+        ));
+
+        let resolver = RulesResolver::new(rules);
+
+        assert!(!resolver.has_response_rules_for_host("regex-auto.local"));
+        assert!(!resolver.has_response_rules_for_host("wildcard-auto.local"));
     }
 
     #[test]

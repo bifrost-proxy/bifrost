@@ -429,6 +429,7 @@ fn convert_core_result_to_proxy(core_result: &bifrost_core::ResolvedRules) -> Pr
             rule_name: resolved_rule.rule.file.clone(),
             raw: Some(resolved_rule.rule.raw.clone()),
             line: resolved_rule.rule.line,
+            auto_tls_intercept: resolved_rule.rule.matcher.can_trigger_tls_auto_intercept(),
         });
 
         match protocol {

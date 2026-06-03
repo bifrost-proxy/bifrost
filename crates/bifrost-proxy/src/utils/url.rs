@@ -503,6 +503,7 @@ mod tests {
                 rule_name: None,
                 raw: None,
                 line: None,
+                auto_tls_intercept: false,
             },
             RuleValue {
                 pattern: "https://example.com/other/".to_string(),
@@ -512,6 +513,7 @@ mod tests {
                 rule_name: None,
                 raw: None,
                 line: None,
+                auto_tls_intercept: false,
             },
             RuleValue {
                 pattern: "https://example.com/labor_cost/static/".to_string(),
@@ -521,6 +523,7 @@ mod tests {
                 rule_name: None,
                 raw: None,
                 line: None,
+                auto_tls_intercept: false,
             },
         ];
 
@@ -591,6 +594,7 @@ mod tests {
             line: Some(1),
             raw: None,
             rule_name: None,
+            auto_tls_intercept: false,
         }];
 
         assert!(host_rule_uses_exact_target_path(
