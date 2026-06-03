@@ -46,7 +46,6 @@ import {
   type VoiceRealtimeEvent,
   type VoiceRealtimeTranscriptSegment,
 } from "../../api/asr";
-import SpeechTab from "../Settings/tabs/SpeechTab";
 import {
   appendTranscriptDelta,
   buildTaskSchedule,
@@ -59,16 +58,13 @@ import {
   voiceRealtimeSegmentFromEvent,
   type WorkState,
 } from "./asrUtils";
+import ASRHomeTabs from "./components/ASRHomeTabs";
+import { isAsrHomeTabKey, type AsrHomeTabKey } from "./components/asrHomeRoute";
 import DirectoryTaskDetailPage from "./components/DirectoryTaskDetailPage";
 import {
   isDirectoryTaskDetailTabKey,
   type DirectoryTaskDetailTabKey,
 } from "./components/taskDetailRoute";
-import DirectoryTasksPanel from "./components/DirectoryTasksPanel";
-import DiarizationSetupCard from "./components/DiarizationSetupCard";
-import SpeechWorkbench from "./components/SpeechWorkbench";
-import VoiceWakeActionsCard from "./components/VoiceWakeActionsCard";
-
 export default function ASR() {
   const { token } = theme.useToken();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -79,6 +75,8 @@ export default function ASR() {
   const selectedDailyDate = searchParams.get("asrDay");
   const selectedDailyAgentReportDate = searchParams.get("asrDailyReport");
   const selectedDailyAgentReportAgentId = searchParams.get("asrDailyAgent");
+  const selectedHomeTabParam = searchParams.get("asrTab");
+  const selectedHomeTab: AsrHomeTabKey = isAsrHomeTabKey(selectedHomeTabParam) ? selectedHomeTabParam : "scheduled";
   const selectedTaskTabParam = searchParams.get("asrTaskTab");
   const selectedTaskTab: DirectoryTaskDetailTabKey = (() => {
     if (isDirectoryTaskDetailTabKey(selectedTaskTabParam)) {
@@ -1235,6 +1233,25 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
     [setSearchParams],
   );
 
+  const changeHomeTab = useCallback(
+    (tab: AsrHomeTabKey) => {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          next.set("aiSection", "tools-asr");
+          if (tab === "scheduled") {
+            next.delete("asrTab");
+          } else {
+            next.set("asrTab", tab);
+          }
+          return next;
+        },
+        { replace: false },
+      );
+    },
+    [setSearchParams],
+  );
+
   useEffect(() => {
     if (!asrSupported || !selectedTaskId) {
       setTaskDetail(null);
@@ -1425,56 +1442,51 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
   }
 
   return (
-    <div style={{ height: "100%", overflow: "auto" }}>
-      <SpeechTab />
-      <DiarizationSetupCard />
-      <VoiceWakeActionsCard />
-      <DirectoryTasksPanel
-        taskForm={taskForm}
-        taskScheduleKind={taskScheduleKind}
-        tasks={tasks}
-        tasksLoading={tasksLoading}
-        externalImportProgressByTask={externalImportProgressByTask}
-        onCreateTask={createDirectoryTask}
-        onUpdateTask={updateDirectoryTask}
-        onRunExternalImport={runExternalImport}
-        onOpenTask={openTaskDetail}
-        onRunTask={(id) => void runDirectoryTask(id)}
-        onPauseTask={(id, force, mode) => void pauseDirectoryTask(id, force, mode)}
-        onResumeTask={(id) => void resumeDirectoryTask(id)}
-        onRemoveTask={(id, confirmName) => void removeDirectoryTask(id, confirmName)}
-      />
-      <SpeechWorkbench
-        token={token}
-        ready={ready}
-        status={status}
-        params={workbenchParams}
-        onParamsChange={updateWorkbenchParams}
-        serviceBusy={serviceBusy}
-        workState={workState}
-        progress={progress}
-        selectedName={selectedName}
-        transcript={transcript}
-        realtimeSegments={realtimeSegments}
-        partialRealtimeSegment={partialRealtimeSegment}
-        offlineJob={offlineJob}
-        offlineArtifacts={offlineArtifacts}
-        speechStatus={speechStatus}
-        events={events}
-        errorText={errorText}
-        micLevels={micLevels}
-        micPeak={micPeak}
-        fileInputRef={fileInputRef}
-        busy={busy}
-        showFileProgress={showFileProgress}
-        onFile={handleFile}
-        onStartRecording={() => void startRecording()}
-        onStopRecording={stopRecording}
-        onStartService={() => void startWorkbenchService()}
-        onStopService={() => void stopWorkbenchService()}
-        onCancel={cancelWork}
-      />
-    </div>
+    <ASRHomeTabs
+      activeTab={selectedHomeTab}
+      onChangeTab={changeHomeTab}
+      token={token}
+      taskForm={taskForm}
+      taskScheduleKind={taskScheduleKind}
+      tasks={tasks}
+      tasksLoading={tasksLoading}
+      externalImportProgressByTask={externalImportProgressByTask}
+      onCreateTask={createDirectoryTask}
+      onUpdateTask={updateDirectoryTask}
+      onRunExternalImport={runExternalImport}
+      onOpenTask={openTaskDetail}
+      onRunTask={(id) => void runDirectoryTask(id)}
+      onPauseTask={(id, force, mode) => void pauseDirectoryTask(id, force, mode)}
+      onResumeTask={(id) => void resumeDirectoryTask(id)}
+      onRemoveTask={(id, confirmName) => void removeDirectoryTask(id, confirmName)}
+      ready={ready}
+      status={status}
+      params={workbenchParams}
+      onParamsChange={updateWorkbenchParams}
+      serviceBusy={serviceBusy}
+      workState={workState}
+      progress={progress}
+      selectedName={selectedName}
+      transcript={transcript}
+      realtimeSegments={realtimeSegments}
+      partialRealtimeSegment={partialRealtimeSegment}
+      offlineJob={offlineJob}
+      offlineArtifacts={offlineArtifacts}
+      speechStatus={speechStatus}
+      events={events}
+      errorText={errorText}
+      micLevels={micLevels}
+      micPeak={micPeak}
+      fileInputRef={fileInputRef}
+      busy={busy}
+      showFileProgress={showFileProgress}
+      onFile={handleFile}
+      onStartRecording={() => void startRecording()}
+      onStopRecording={stopRecording}
+      onStartService={() => void startWorkbenchService()}
+      onStopService={() => void stopWorkbenchService()}
+      onCancel={cancelWork}
+    />
   );
 }
 

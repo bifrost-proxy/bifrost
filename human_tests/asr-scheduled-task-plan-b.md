@@ -1018,6 +1018,38 @@
 - Daily Docs 中生成 `2026-05-25.md`，后续 Daily Agent 待处理文档可以看到 25 号汇总。
 - 如果本次 run 中某个文件失败，它不会在同一 run 的后续重扫中无限重试；历史 failed 文件仍会在新 run 开始时被尝试一次。
 
+### TC-ASPB-42 ASR 首页三 Tab 交互改造
+
+操作步骤：
+
+1. 使用临时数据目录启动最新服务，避免污染默认数据：
+   ```bash
+   BIFROST_DATA_DIR=./.bifrost-test-asr-tabs BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 cargo run --bin bifrost -- start -p 18898 --unsafe-ssl --skip-cert-check --no-system-proxy --access-mode allow_all
+   ```
+2. 打开 ASR 首页：
+   ```text
+   http://127.0.0.1:18898/_bifrost/ai?aiSection=tools-asr
+   ```
+3. 确认页面顶部显示三个 Tab，顺序分别是 `定时任务`、`ASR 管理`、`声纹识别与唤醒`。
+4. 在默认状态下检查 `定时任务` 被选中，页面只展示 Directory Tasks 列表/新建/运行管理，不展示 `Speech Converter`、`Speech to Text`、`Speaker Diarization` 和 `Voice Wake Actions` 卡片。
+5. 点击 `ASR 管理`，确认 URL 增加 `asrTab=management`，页面显示 `Model Management` 和 `Speech to Text`，不展示 Directory Tasks 和声纹唤醒卡片。
+6. 点击 `声纹识别与唤醒`，确认 URL 增加 `asrTab=voice`，页面显示 `Speaker Diarization` 和 `Voice Wake Actions`，不展示 Directory Tasks 和 ASR 工作台。
+7. 刷新浏览器，确认仍停留在 `声纹识别与唤醒` Tab。
+8. 直接访问任务详情深链：
+   ```text
+   http://127.0.0.1:18898/_bifrost/ai?aiSection=tools-asr&asrTask=<task_id>&asrTab=voice
+   ```
+   使用任意已存在任务或通过 `New` 创建一个空目录任务后替换 `<task_id>`。
+9. 分别切换亮色和暗色主题，重复查看三个 Tab 标题、选中态、卡片文字和按钮可读性。
+
+预期结果：
+
+- ASR 首页不再把模型管理、声纹识别、声纹唤醒、定时任务和转写工作台揉在一个滚动页面中。
+- 默认进入第一个 `定时任务` Tab，符合用户主要入口预期。
+- `asrTab=management` 和 `asrTab=voice` 可通过 URL 持久化，刷新后恢复同一 Tab。
+- `asrTask=<task_id>` 详情深链继续直接进入任务详情页，不被首页 Tab 包裹或拦截。
+- 亮色和暗色主题下 Tab 文案、选中态和各卡片内容均清晰可读，没有硬编码颜色导致的对比度问题。
+
 ## 清理步骤
 
 ```bash
@@ -1030,6 +1062,7 @@ rm -rf ./.bifrost-test-planb
 
 | 日期 | 用例 | 命令 / 操作 | 结果 |
 | --- | --- | --- | --- |
+| 2026-06-03 | TC-ASPB-42 ASR 首页三 Tab 交互改造 | `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_UI_TEST_RUN_ID=manual-asr-tabs BIFROST_UI_TEST_PORT=18898 BACKEND_PORT=18898 WEB_PORT=53991 ... pnpm --dir web exec playwright test tests/ui/asr-home-tabs.spec.ts --reporter=line` | PASS：真实浏览器打开 `/_bifrost/ai?aiSection=tools-asr` 默认选中 `定时任务`，仅展示 Directory Tasks；切到 `ASR 管理` 后 URL 写入 `asrTab=management` 且展示 `Model Management` 和 `Speech to Text`；切到 `声纹识别与唤醒` 后 URL 写入 `asrTab=voice` 且展示 `Speaker Diarization` 和 `Voice Wake Actions`；刷新后仍保持 voice Tab；`asrTask=<task_id>&asrTab=voice` 直接进入任务详情页，不渲染首页 Tab；测试使用临时数据目录、`--no-system-proxy` 和禁用 Sync 自动登录弹窗。 |
 | 2026-05-26 | TC-ASPB-41 运行中追加音频文件继续纳入同一 run | `cargo test -p bifrost-admin pending_batch_rescan_picks_up_appended_files_without_retrying_same_run_failures --lib`；`cargo test -p bifrost-admin pending_batch_sorts_older_source_time_first --lib`；`bash e2e-tests/tests/test_asr_task_append_during_run.sh` | PASS：单测证明运行中第二轮扫描会发现追加文件且同一 run 已尝试失败的文件不会无限重试，pending 队列按录音时间早到晚排序；E2E 使用临时 Bifrost 服务和 fake ASR runtime，手动 run 启动时只有第一个音频，running 后追加第二个音频，最终两个文件均为 success，详情文件顺序为 09:00 后 10:00，Daily Docs 生成 `2026-05-25`。 |
 | 2026-05-22 | TC-ASPB-21C watchdog 不因 physical footprint unavailable 误杀 asr-server | `cargo test -p bifrost-admin service_watchdog_kills_only_on_reliable_physical_footprint_over_limit --lib` | PASS：测试断言只有 `reliable=true` 且 footprint 超过阈值才触发 kill；RSS-only fallback 即使数值高于阈值也不触发 kill，等于阈值也不触发 kill。代码复核确认连续 `physical footprint unavailable` 或 sampler error 只写 warning 并继续，不清理 managed service state。 |
 | 2026-05-22 | TC-ASPB-21 reuse_per_file 服务死亡后当前 chunk 降级并自动重启 server | `cargo test -p bifrost-admin restart_failure_forks_only_current_chunk_and_keeps_retry_pending --lib` | PASS：测试模拟 managed server restart 失败后设置一次性 fork reason，即使 `server_url` 指向可成功的 test server，本 chunk 仍只走 `fork_per_chunk` 且没有 shadow server metric；状态保持 `restart_required=true`、`force_fork_for_remaining=false`，证明不会在 native/fork fallback 同时尝试 server 请求或重启，下一次 server-eligible chunk 才继续重启。 |
