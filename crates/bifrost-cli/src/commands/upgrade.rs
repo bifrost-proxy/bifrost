@@ -2,14 +2,89 @@ use bifrost_core::BifrostError;
 use colored::Colorize;
 use std::env;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use super::update_check::{get_latest_version, get_latest_version_fresh_with_diagnostics};
 use crate::process::{is_process_running, read_pid, read_runtime_info};
-use bifrost_core::version_check::{is_newer_version, VersionCache, GITHUB_RELEASE_URL};
-const GITHUB_DOWNLOAD_URL: &str = "https://github.com/bifrost-proxy/bifrost/releases/download";
+use bifrost_core::version_check::{
+    is_newer_version, make_release_tag, VersionCache, GITHUB_RELEASE_URL,
+};
+const GITHUB_BASE_URL: &str = "https://github.com";
+const DEFAULT_GITHUB_MIRROR_URLS: &[&str] = &[
+    "https://github.com",
+    "https://ghfast.top/https://github.com",
+    "https://github.moeyy.xyz/https://github.com",
+];
+const DOWNLOAD_CONNECT_TIMEOUT_SECS: u64 = 10;
+const DOWNLOAD_TIMEOUT_SECS: u64 = 120;
+const MIRROR_PROBE_TIMEOUT_SECS: u64 = 5;
+const DOWNLOAD_TRIES: usize = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DownloadTuning {
+    connect_timeout_secs: u64,
+    download_timeout_secs: u64,
+    mirror_probe_timeout_secs: u64,
+    download_tries: usize,
+}
+
+impl Default for DownloadTuning {
+    fn default() -> Self {
+        Self {
+            connect_timeout_secs: DOWNLOAD_CONNECT_TIMEOUT_SECS,
+            download_timeout_secs: DOWNLOAD_TIMEOUT_SECS,
+            mirror_probe_timeout_secs: MIRROR_PROBE_TIMEOUT_SECS,
+            download_tries: DOWNLOAD_TRIES,
+        }
+    }
+}
+
+impl DownloadTuning {
+    fn from_env() -> Self {
+        Self {
+            connect_timeout_secs: positive_env_u64(
+                "BIFROST_DOWNLOAD_CONNECT_TIMEOUT",
+                DOWNLOAD_CONNECT_TIMEOUT_SECS,
+            ),
+            download_timeout_secs: positive_env_u64(
+                "BIFROST_DOWNLOAD_TIMEOUT",
+                DOWNLOAD_TIMEOUT_SECS,
+            ),
+            mirror_probe_timeout_secs: positive_env_u64(
+                "BIFROST_MIRROR_PROBE_TIMEOUT",
+                MIRROR_PROBE_TIMEOUT_SECS,
+            ),
+            download_tries: positive_env_usize("BIFROST_DOWNLOAD_TRIES", DOWNLOAD_TRIES),
+        }
+    }
+}
+
+fn parse_positive_u64(value: Option<&str>, default: u64) -> u64 {
+    value
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+fn parse_positive_usize(value: Option<&str>, default: usize) -> usize {
+    value
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+fn positive_env_u64(name: &str, default: u64) -> u64 {
+    parse_positive_u64(env::var(name).ok().as_deref(), default)
+}
+
+fn positive_env_usize(name: &str, default: usize) -> usize {
+    parse_positive_usize(env::var(name).ok().as_deref(), default)
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum InstallMethod {
@@ -223,6 +298,255 @@ fn prompt_confirm(message: &str) -> bool {
     matches!(input.trim().to_lowercase().as_str(), "y" | "yes")
 }
 
+fn github_mirror_bases() -> Vec<String> {
+    let preferred = env::var("BIFROST_GITHUB_MIRROR")
+        .ok()
+        .map(|value| value.trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty());
+    let mut bases = Vec::new();
+
+    if let Some(preferred) = preferred.as_ref() {
+        bases.push(preferred.clone());
+    }
+
+    for base in DEFAULT_GITHUB_MIRROR_URLS {
+        let normalized = base.trim_end_matches('/').to_string();
+        if preferred.as_deref() != Some(normalized.as_str()) {
+            bases.push(normalized);
+        }
+    }
+
+    bases
+}
+
+fn mirror_display_name(base_url: &str) -> String {
+    base_url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or(base_url)
+        .to_string()
+}
+
+fn github_path_url(base_url: &str, github_path: &str) -> String {
+    format!(
+        "{}/{}",
+        base_url.trim_end_matches('/'),
+        github_path.trim_start_matches('/')
+    )
+}
+
+fn probe_github_url(url: &str, tuning: DownloadTuning) -> bool {
+    let client = match bifrost_core::direct_blocking_reqwest_client_builder()
+        .connect_timeout(Duration::from_secs(tuning.connect_timeout_secs))
+        .timeout(Duration::from_secs(tuning.mirror_probe_timeout_secs))
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return false,
+    };
+
+    let head_ok = client
+        .head(url)
+        .send()
+        .map(|response| response.status().is_success())
+        .unwrap_or(false);
+    if head_ok {
+        return true;
+    }
+
+    client
+        .get(url)
+        .header(reqwest::header::RANGE, "bytes=0-0")
+        .send()
+        .map(|response| {
+            response.status().is_success()
+                || response.status() == reqwest::StatusCode::PARTIAL_CONTENT
+        })
+        .unwrap_or(false)
+}
+
+fn select_fastest_github_base(github_path: &str, tuning: DownloadTuning) -> Option<String> {
+    let bases = github_mirror_bases();
+    if bases.is_empty() {
+        return None;
+    }
+    if bases.len() == 1 {
+        return bases.into_iter().next();
+    }
+
+    let (tx, rx) = mpsc::channel();
+    for (index, base) in bases.iter().cloned().enumerate() {
+        let tx = tx.clone();
+        let url = github_path_url(&base, github_path);
+        thread::spawn(move || {
+            let started = Instant::now();
+            if probe_github_url(&url, tuning) {
+                let _ = tx.send((index, base, started.elapsed()));
+            }
+        });
+    }
+    drop(tx);
+
+    rx.recv_timeout(Duration::from_secs(tuning.mirror_probe_timeout_secs + 1))
+        .ok()
+        .map(|(_, base, _)| base)
+}
+
+fn download_progress_line(downloaded: u64, total: Option<u64>, started: Instant) -> String {
+    let elapsed = started.elapsed().as_secs_f64().max(0.001);
+    let speed = downloaded as f64 / elapsed;
+    match total {
+        Some(total) if total > 0 => {
+            let percent = ((downloaded as f64 / total as f64) * 100.0).clamp(0.0, 100.0);
+            format!(
+                "Downloading… {:>5.1}% ({}/{}, {}/s)",
+                percent,
+                human_bytes(downloaded),
+                human_bytes(total),
+                human_bytes(speed as u64)
+            )
+        }
+        _ => format!(
+            "Downloading… {} ({}/s)",
+            human_bytes(downloaded),
+            human_bytes(speed as u64)
+        ),
+    }
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} {}", bytes, UNITS[unit])
+    } else {
+        format!("{:.1} {}", value, UNITS[unit])
+    }
+}
+
+fn download_file_with_progress(
+    url: &str,
+    output_path: &Path,
+    tuning: DownloadTuning,
+) -> Result<(), BifrostError> {
+    let client = bifrost_core::direct_blocking_reqwest_client_builder()
+        .connect_timeout(Duration::from_secs(tuning.connect_timeout_secs))
+        .timeout(Duration::from_secs(tuning.download_timeout_secs))
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .build()
+        .map_err(|error| BifrostError::Network(format!("Failed to build HTTP client: {error}")))?;
+
+    let mut last_error = None;
+    for attempt in 1..=tuning.download_tries {
+        if attempt > 1 {
+            println!(
+                "{}",
+                format!(
+                    "Retrying download ({}/{})...",
+                    attempt, tuning.download_tries
+                )
+                .bright_yellow()
+            );
+        }
+
+        match download_file_once_with_progress(&client, url, output_path) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let _ = fs::remove_file(output_path);
+                last_error = Some(error);
+                if attempt < tuning.download_tries {
+                    thread::sleep(Duration::from_secs(1));
+                }
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| BifrostError::Network(format!("Failed to download {}", url))))
+}
+
+fn download_file_once_with_progress(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    output_path: &Path,
+) -> Result<(), BifrostError> {
+    let mut response = client
+        .get(url)
+        .send()
+        .map_err(|error| BifrostError::Network(format!("Failed to download {url} — {error}")))?;
+
+    if !response.status().is_success() {
+        return Err(BifrostError::Network(format!(
+            "Failed to download {} — HTTP {}",
+            url,
+            response.status()
+        )));
+    }
+
+    let total = response.content_length();
+    let mut file = fs::File::create(output_path).map_err(BifrostError::Io)?;
+    let mut downloaded = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut last_render = Instant::now() - Duration::from_secs(1);
+    let started = Instant::now();
+
+    loop {
+        let read = response.read(&mut buffer).map_err(BifrostError::Io)?;
+        if read == 0 {
+            break;
+        }
+        file.write_all(&buffer[..read]).map_err(BifrostError::Io)?;
+        downloaded += read as u64;
+
+        if last_render.elapsed() >= Duration::from_millis(250) {
+            print!("\r{}", download_progress_line(downloaded, total, started));
+            io::stdout().flush().ok();
+            last_render = Instant::now();
+        }
+    }
+
+    file.flush().map_err(BifrostError::Io)?;
+    println!("\r{}", download_progress_line(downloaded, total, started));
+
+    if downloaded == 0 {
+        return Err(BifrostError::Network(format!(
+            "Failed to download {} — empty response",
+            url
+        )));
+    }
+
+    Ok(())
+}
+
+fn ordered_download_bases(github_path: &str, tuning: DownloadTuning) -> Vec<String> {
+    let bases = github_mirror_bases();
+    let selected = select_fastest_github_base(github_path, tuning);
+    let mut ordered = Vec::new();
+
+    if let Some(selected) = selected {
+        ordered.push(selected);
+    }
+
+    for base in bases {
+        if !ordered.iter().any(|existing| existing == &base) {
+            ordered.push(base);
+        }
+    }
+
+    if ordered.is_empty() {
+        ordered.push(GITHUB_BASE_URL.to_string());
+    }
+
+    ordered
+}
+
 fn print_update_info(current: &str, cache: &VersionCache) {
     let separator = "─".repeat(64);
     let release_url = format!("{}/v{}", GITHUB_RELEASE_URL, cache.latest_version);
@@ -368,30 +692,24 @@ fn upgrade_via_homebrew(target_version: &str) -> Result<(), BifrostError> {
 fn upgrade_via_script() -> Result<(), BifrostError> {
     println!("{}", "Upgrading via install script...".bright_cyan());
 
-    let output = Command::new("sh")
+    let status = Command::new("sh")
         .args([
             "-c",
             "curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash",
         ])
-        .output()
+        .status()
         .map_err(BifrostError::Io)?;
 
-    if output.status.success() {
+    if status.success() {
         println!(
             "{}",
             "✓ Upgrade completed successfully!".bright_green().bold()
         );
         Ok(())
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(BifrostError::Network(format!(
-            "Install script failed — {}",
-            if stderr.trim().is_empty() {
-                "check network connection and try again".to_string()
-            } else {
-                stderr.trim().to_string()
-            }
-        )))
+        Err(BifrostError::Network(
+            "Install script failed — check network connection and try again".to_string(),
+        ))
     }
 }
 
@@ -401,26 +719,63 @@ fn download_and_install(
     target_path: &PathBuf,
     temp_dir: &tempfile::TempDir,
 ) -> Result<(), BifrostError> {
+    let tuning = DownloadTuning::from_env();
     let archive_ext = if cfg!(windows) { "zip" } else { "tar.gz" };
     let archive_name = format!("bifrost-v{}-{}.{}", version, target, archive_ext);
-    let download_url = format!("{}/v{}/{}", GITHUB_DOWNLOAD_URL, version, archive_name);
-
-    println!("{} {}", "Downloading:".bright_cyan(), download_url.dimmed());
-
+    let archive_github_path = format!(
+        "bifrost-proxy/bifrost/releases/download/{}/{}",
+        make_release_tag(version),
+        archive_name
+    );
     let archive_path = temp_dir.path().join(&archive_name);
+    let mut last_error = None;
 
-    let output = Command::new("curl")
-        .args(["-fsSL", "-o", archive_path.to_str().unwrap(), &download_url])
-        .output()
-        .map_err(BifrostError::Io)?;
+    for (attempt, base) in ordered_download_bases(&archive_github_path, tuning)
+        .into_iter()
+        .enumerate()
+    {
+        let download_url = github_path_url(&base, &archive_github_path);
+        if attempt == 0 {
+            println!(
+                "{} {}",
+                "Selected fastest available source:".bright_cyan(),
+                mirror_display_name(&base).bright_white()
+            );
+        } else {
+            println!(
+                "{} {}",
+                "Retrying with source:".bright_yellow(),
+                mirror_display_name(&base).bright_white()
+            );
+        }
+        println!("{} {}", "Downloading:".bright_cyan(), download_url.dimmed());
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(BifrostError::Network(format!(
-            "Failed to download {} — {}",
-            archive_name,
-            stderr.trim()
-        )));
+        match download_file_with_progress(&download_url, &archive_path, tuning) {
+            Ok(()) => {
+                if attempt > 0 {
+                    println!(
+                        "{} {}",
+                        "Downloaded via fallback source:".bright_green(),
+                        mirror_display_name(&base).bright_white()
+                    );
+                }
+                last_error = None;
+                break;
+            }
+            Err(error) => {
+                let _ = fs::remove_file(&archive_path);
+                println!(
+                    "{} {}",
+                    "Download source failed:".bright_yellow(),
+                    error.to_string().dimmed()
+                );
+                last_error = Some(error);
+            }
+        }
+    }
+
+    if let Some(error) = last_error {
+        return Err(error);
     }
 
     println!("{}", "Extracting archive...".bright_cyan());
@@ -902,6 +1257,15 @@ mod tests {
     }
 
     #[test]
+    fn upgrade_via_script_source_keeps_terminal_output_visible() {
+        let source = include_str!("upgrade.rs");
+
+        assert!(source.contains("Command::new(\"sh\")"));
+        assert!(source.contains(".status()"));
+        assert!(!source.contains("let output = Command::new(\"sh\")"));
+    }
+
+    #[test]
     fn test_glibc_2_38_requires_musl_for_upgrade() {
         assert!(glibc_requires_musl_fallback(Some((2, 38))));
     }
@@ -972,5 +1336,62 @@ mod tests {
 
         let args = build_restart_args(Some(&info));
         assert_eq!(args, vec!["start", "-d", "-y", "-p", "8800"]);
+    }
+
+    #[test]
+    fn upgrade_download_progress_formats_percent_and_size() {
+        let started = Instant::now() - Duration::from_secs(2);
+        let line = download_progress_line(512, Some(1024), started);
+
+        assert!(line.contains("50.0%"));
+        assert!(line.contains("512 B/1.0 KiB"));
+        assert!(line.contains("/s"));
+    }
+
+    #[test]
+    fn upgrade_github_path_url_joins_mirror_and_release_path() {
+        assert_eq!(
+            github_path_url(
+                "https://ghfast.top/https://github.com/",
+                "bifrost-proxy/bifrost/releases/download/v0.0.88/a.tar.gz"
+            ),
+            "https://ghfast.top/https://github.com/bifrost-proxy/bifrost/releases/download/v0.0.88/a.tar.gz"
+        );
+    }
+
+    #[test]
+    fn upgrade_mirror_display_name_hides_full_path() {
+        assert_eq!(
+            mirror_display_name("https://ghfast.top/https://github.com"),
+            "ghfast.top"
+        );
+    }
+
+    #[test]
+    fn upgrade_download_tuning_parses_positive_values() {
+        let tuning = DownloadTuning {
+            connect_timeout_secs: parse_positive_u64(Some("7"), DOWNLOAD_CONNECT_TIMEOUT_SECS),
+            download_timeout_secs: parse_positive_u64(Some("90"), DOWNLOAD_TIMEOUT_SECS),
+            mirror_probe_timeout_secs: parse_positive_u64(Some("3"), MIRROR_PROBE_TIMEOUT_SECS),
+            download_tries: parse_positive_usize(Some("4"), DOWNLOAD_TRIES),
+        };
+
+        assert_eq!(
+            tuning,
+            DownloadTuning {
+                connect_timeout_secs: 7,
+                download_timeout_secs: 90,
+                mirror_probe_timeout_secs: 3,
+                download_tries: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn upgrade_download_tuning_rejects_invalid_values() {
+        assert_eq!(parse_positive_u64(Some("0"), 5), 5);
+        assert_eq!(parse_positive_u64(Some("abc"), 5), 5);
+        assert_eq!(parse_positive_usize(Some("0"), 2), 2);
+        assert_eq!(parse_positive_usize(Some("abc"), 2), 2);
     }
 }

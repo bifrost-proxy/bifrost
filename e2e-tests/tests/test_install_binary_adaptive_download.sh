@@ -156,11 +156,73 @@ test_download_falls_back_to_full_race_after_selected_failure() {
         "full mirror race remains as fallback"
 }
 
+test_download_file_enables_visible_progress_by_default() {
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    trap 'rm -rf "$tmpdir"' RETURN
+
+    build_downloader_list() {
+        echo curl
+    }
+
+    curl() {
+        printf '%s\n' "$*" > "$tmpdir/curl-args"
+        local output=""
+        while [[ $# -gt 0 ]]; do
+            if [[ "$1" == "-o" ]]; then
+                output="$2"
+                break
+            fi
+            shift
+        done
+        printf 'archive' > "$output"
+        return 0
+    }
+
+    download_file "https://github.com/${REPO}/releases/download/v1.0.0/test.txt" "$tmpdir/out" >/dev/null
+
+    if ! grep -q -- '--progress-bar' "$tmpdir/curl-args"; then
+        fail "curl progress is visible by default" "expected --progress-bar in: $(cat "$tmpdir/curl-args")"
+    fi
+    pass "curl progress is visible by default"
+}
+
+test_race_download_suppresses_candidate_progress() {
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    trap 'rm -rf "$tmpdir"' RETURN
+
+    build_mirror_url_list() {
+        echo "https://github.com"
+    }
+
+    build_downloader_list() {
+        echo curl
+    }
+
+    download_with_tool() {
+        printf '%s\n' "${BIFROST_DOWNLOAD_PROGRESS:-unset}" > "$tmpdir/progress-env"
+        printf 'archive' > "$3"
+        return 0
+    }
+
+    validate_downloaded_file() {
+        return 0
+    }
+
+    download_github_file_race "${REPO}/releases/download/v1.0.0/test.txt" "$tmpdir/out" >/dev/null
+
+    assert_eq "$(cat "$tmpdir/progress-env")" "0" \
+        "race candidate downloads keep progress quiet"
+}
+
 run_case "preferred mirror ordering" test_preferred_mirror_is_first_without_duplicates
 run_case "fastest mirror probe selection" test_select_fastest_github_base_skips_unavailable_default
 run_case "latest version redirect race" test_latest_version_uses_raced_redirect_result
 run_case "selected source full download" test_download_uses_selected_source_first
 run_case "fallback full mirror race" test_download_falls_back_to_full_race_after_selected_failure
+run_case "visible curl progress" test_download_file_enables_visible_progress_by_default
+run_case "quiet race candidate progress" test_race_download_suppresses_candidate_progress
 
 help_output=$(bash "$PROJECT_DIR/install-binary.sh" --help)
 if [[ "$help_output" != *"BIFROST_MIRROR_PROBE_TIMEOUT"* ]]; then

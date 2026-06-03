@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证 `install-binary.sh` 和 `install-binary.ps1` 在远程二进制安装时会自动探测更快的 GitHub/mirror 下载源，并在安装完成后默认规划并执行证书安装/信任、全量 skill 安装和 Bifrost 服务启动，形成一键安装、一键体验流程。为避免真实测试修改系统证书、skills 目录或系统代理，本用例使用脚本内置 dry-run post-install 路径和离线网络 stub 验证用户可感知命令编排。
+验证 `install-binary.sh`、`install-binary.ps1` 和 `bifrost upgrade` 在远程二进制安装/升级时会自动探测更快的 GitHub/mirror 下载源，并在下载阶段展示用户可感知进度；同时验证安装完成后默认规划并执行证书安装/信任、全量 skill 安装和 Bifrost 服务启动，形成一键安装、一键体验流程。为避免真实测试修改系统证书、skills 目录或系统代理，本用例使用脚本内置 dry-run post-install 路径和离线网络 stub 验证用户可感知命令编排。
 
 ## 前置条件
 
@@ -10,6 +10,7 @@
 - 除 TC-IBOC-08 外，不下载 release；所有用例都不启动真实 Bifrost 服务，不修改系统代理。
 - 所有用例都不安装真实 CA 证书，不写入真实 AI tool skills 目录。
 - 下载源自适应用例通过 shell stub 模拟网络探测和下载结果，不访问真实 GitHub 或镜像。
+- 下载进度用例通过 shell/Rust 单元测试验证终端输出参数与进度格式，不依赖真实大文件下载。
 - Windows installer 用例需要 `pwsh` 或 Windows PowerShell；如果当前机器不可用，必须记录为环境阻塞，不能宣称已执行通过。
 - CI Cargo 网络稳定性用例通过读取 GitHub Actions workflow，验证 CI/Release 统一关闭 Cargo HTTP/2 multiplexing、开启网络重试并提高 HTTP timeout。
 - 所有命令执行前使用：
@@ -230,7 +231,52 @@
 - 当选中源完整下载失败时，PowerShell installer 会继续回退到候选源列表中的 `github.com`。
 - `BIFROST_DOWNLOAD_TIMEOUT` 和 `BIFROST_DOWNLOAD_TRIES` 在 PowerShell installer 中可被解析。
 
-### TC-IBOC-10 CI Cargo 依赖下载 HTTP/2 抖动回归
+### TC-IBOC-10 安装脚本默认显示下载进度且竞速候选保持安静
+
+操作步骤：
+
+1. 执行：
+   ```bash
+   source ~/.zshrc
+   bash e2e-tests/tests/test_install_binary_adaptive_download.sh
+   ```
+2. 检查输出包含：
+   ```text
+   PASS curl progress is visible by default
+   PASS race candidate downloads keep progress quiet
+   ```
+
+预期结果：
+
+- `download_file` 默认调用 `curl` 时使用 `--progress-bar`，不再使用纯静默 `-s` 下载。
+- 全镜像竞速候选设置 `BIFROST_DOWNLOAD_PROGRESS=0`，避免多个并发下载器在同一终端输出互相覆盖。
+- 用户真实安装时至少能看到下载器提供的百分比、进度条或传输状态，不再长时间无反馈。
+
+### TC-IBOC-11 bifrost upgrade 复用最快源选择并显示下载进度
+
+操作步骤：
+
+1. 执行：
+   ```bash
+   source ~/.zshrc
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli upgrade_ --lib
+   ```
+2. 检查输出包含：
+   ```text
+   upgrade_download_progress_formats_percent_and_size ... ok
+   upgrade_github_path_url_joins_mirror_and_release_path ... ok
+   upgrade_mirror_display_name_hides_full_path ... ok
+   upgrade_download_tuning_parses_positive_values ... ok
+   upgrade_download_tuning_rejects_invalid_values ... ok
+   ```
+
+预期结果：
+
+- `bifrost upgrade` 的 release 下载路径可基于 `github.com` 或镜像 base 构造，支持 `BIFROST_GITHUB_MIRROR` 优先。
+- 下载进度行包含百分比、已下载/总大小和速度，例如 `Downloading…  50.0% (512 B/1.0 KiB, .../s)`。
+- `BIFROST_DOWNLOAD_CONNECT_TIMEOUT`、`BIFROST_DOWNLOAD_TIMEOUT`、`BIFROST_MIRROR_PROBE_TIMEOUT`、`BIFROST_DOWNLOAD_TRIES` 的正整数解析有效，非法值回退默认值。
+
+### TC-IBOC-12 CI Cargo 依赖下载 HTTP/2 抖动回归
 
 操作步骤：
 
@@ -275,3 +321,6 @@
 | 2026-05-29 | TC-IBOC-08 | `TMP_INSTALL_DIR=$(mktemp -d) ... bash install-binary.sh --no-post-install --no-modify-path` | PASS：真实 latest 探测安装 v0.0.84 到临时目录，archive 经 github.com 下载、checksum 经 ghfast.top 下载，校验通过，`bifrost --version` 输出 `bifrost 0.0.84`，临时目录已清理 |
 | 2026-05-29 | TC-IBOC-09 | `pwsh -NoProfile -File e2e-tests/tests/test_install_binary_windows_adaptive_download.ps1` | 未执行：当前 Mac 环境无 `pwsh` / `powershell`，命令返回 `zsh: command not found: pwsh`；已补测试脚本并通过源码 review，需 Windows/PowerShell 环境补跑 |
 | 2026-05-29 | TC-IBOC-10 | `grep -q 'CARGO_HTTP_MULTIPLEXING: "false"' .github/workflows/ci.yml && grep -q 'CARGO_NET_RETRY: "10"' .github/workflows/ci.yml && grep -q 'CARGO_HTTP_TIMEOUT: "120"' .github/workflows/ci.yml && grep -q 'CARGO_HTTP_MULTIPLEXING: "false"' .github/workflows/release.yml && grep -q 'CARGO_NET_RETRY: "10"' .github/workflows/release.yml && grep -q 'CARGO_HTTP_TIMEOUT: "120"' .github/workflows/release.yml` | PASS：CI 和 Release workflow 均设置 Cargo HTTP/2 multiplexing 关闭、10 次重试、120 秒 timeout |
+| 2026-06-03 | TC-IBOC-10 | `bash e2e-tests/tests/test_install_binary_adaptive_download.sh` | PASS：8 个顶层用例通过，包含 `curl --progress-bar` 默认可见和竞速候选 `BIFROST_DOWNLOAD_PROGRESS=0` 安静模式 |
+| 2026-06-03 | TC-IBOC-11 | `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli upgrade_ --lib` | PASS：9 个 upgrade 相关测试通过，覆盖进度格式、镜像 URL 拼接、镜像展示名、下载 env 参数解析和 script install 输出继承终端 |
+| 2026-06-03 | TC-IBOC-12 | `grep -q 'CARGO_HTTP_MULTIPLEXING: "false"' .github/workflows/ci.yml && grep -q 'CARGO_NET_RETRY: "10"' .github/workflows/ci.yml && grep -q 'CARGO_HTTP_TIMEOUT: "120"' .github/workflows/ci.yml && grep -q 'CARGO_HTTP_MULTIPLEXING: "false"' .github/workflows/release.yml && grep -q 'CARGO_NET_RETRY: "10"' .github/workflows/release.yml && grep -q 'CARGO_HTTP_TIMEOUT: "120"' .github/workflows/release.yml` | PASS：CI 和 Release workflow 均保留 Cargo HTTP/2 multiplexing 关闭、10 次重试、120 秒 timeout |

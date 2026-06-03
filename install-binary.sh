@@ -411,14 +411,22 @@ download_with_tool() {
     local url="$2"
     local output="$3"
     local output_dir output_name
+    local show_progress="${BIFROST_DOWNLOAD_PROGRESS:-1}"
 
     output_dir="$(cd "$(dirname "$output")" && pwd)"
     output_name="$(basename "$output")"
 
     case "$tool" in
         aria2c)
+            local aria2_summary_arg=()
+            if [[ "$show_progress" == "0" ]]; then
+                aria2_summary_arg=(--summary-interval=0 --console-log-level=warn)
+            else
+                aria2_summary_arg=(--summary-interval=1 --console-log-level=notice)
+            fi
             aria2c --no-conf -x 16 -s 16 --max-connection-per-server=16 \
                    --min-split-size=1M --allow-overwrite=true \
+                   "${aria2_summary_arg[@]}" \
                    --connect-timeout="${BIFROST_DOWNLOAD_CONNECT_TIMEOUT:-10}" \
                    --timeout="${BIFROST_DOWNLOAD_TIMEOUT:-120}" \
                    --max-tries="${BIFROST_DOWNLOAD_TRIES:-2}" \
@@ -426,14 +434,22 @@ download_with_tool() {
             ;;
         axel)
             local axel_timeout="${BIFROST_DOWNLOAD_TIMEOUT:-120}"
+            local axel_args=(-n 16 -o "$output")
+            if [[ "$show_progress" == "0" ]]; then
+                axel_args=(-q "${axel_args[@]}")
+            fi
             if has_command timeout; then
-                timeout "$axel_timeout" axel -n 16 -o "$output" "$url"
+                timeout "$axel_timeout" axel "${axel_args[@]}" "$url"
             else
-                axel -n 16 -o "$output" "$url"
+                axel "${axel_args[@]}" "$url"
             fi
             ;;
         wget)
-            wget -q \
+            local wget_progress_args=(-q)
+            if [[ "$show_progress" != "0" ]]; then
+                wget_progress_args=(--show-progress --progress=bar:force:noscroll)
+            fi
+            wget "${wget_progress_args[@]}" \
                 --connect-timeout="${BIFROST_DOWNLOAD_CONNECT_TIMEOUT:-10}" \
                 --timeout="${BIFROST_DOWNLOAD_TIMEOUT:-120}" \
                 --tries="${BIFROST_DOWNLOAD_TRIES:-2}" \
@@ -443,7 +459,11 @@ download_with_tool() {
         curl)
             local curl_retries="${BIFROST_DOWNLOAD_TRIES:-2}"
             curl_retries=$((curl_retries > 0 ? curl_retries - 1 : 0))
-            curl -fsSL \
+            local curl_progress_args=(-fsSL)
+            if [[ "$show_progress" != "0" ]]; then
+                curl_progress_args=(-fL --progress-bar)
+            fi
+            curl "${curl_progress_args[@]}" \
                 --connect-timeout "${BIFROST_DOWNLOAD_CONNECT_TIMEOUT:-10}" \
                 --max-time "${BIFROST_DOWNLOAD_TIMEOUT:-120}" \
                 --retry "$curl_retries" \
@@ -684,7 +704,8 @@ download_file() {
         fi
         is_first_attempt=0
 
-        if download_with_tool "$downloader" "$url" "$tmp_output" 2>/dev/null && validate_downloaded_file "$tmp_output"; then
+        print_step "Using downloader: $downloader"
+        if download_with_tool "$downloader" "$url" "$tmp_output" && validate_downloaded_file "$tmp_output"; then
             mv "$tmp_output" "$output"
             dl_ok=1
             break
@@ -750,7 +771,7 @@ download_github_file_race() {
             local race_output="${race_dir}/${index}.data"
 
             (
-                download_with_tool "$downloader" "$full_url" "$race_output" >/dev/null 2>&1 && \
+                BIFROST_DOWNLOAD_PROGRESS=0 download_with_tool "$downloader" "$full_url" "$race_output" >/dev/null 2>&1 && \
                     validate_downloaded_file "$race_output" 2>/dev/null && \
                     touch "${race_dir}/${index}.ok"
             ) &

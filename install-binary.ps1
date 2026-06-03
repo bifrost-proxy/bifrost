@@ -189,22 +189,53 @@ function Select-FastestGithubBase {
         return $mirrors[0]
     }
 
-    $bestMirror = $null
-    $bestElapsed = [double]::MaxValue
+    $jobs = @()
 
     foreach ($mirror in $mirrors) {
         $url = Join-GithubUrl -BaseUrl $mirror -GithubPath $GithubPath
-        $watch = [System.Diagnostics.Stopwatch]::StartNew()
-        $ok = Test-GithubUrl -Url $url
-        $watch.Stop()
+        $script = {
+            param($Mirror, $Url, $Timeout)
+            try {
+                Invoke-WebRequest -Uri $Url -Method Head -MaximumRedirection 5 -TimeoutSec $Timeout -UseBasicParsing -ErrorAction Stop | Out-Null
+                return $Mirror
+            }
+            catch {
+                try {
+                    $headers = @{ Range = "bytes=0-0" }
+                    Invoke-WebRequest -Uri $Url -Headers $headers -MaximumRedirection 5 -TimeoutSec $Timeout -UseBasicParsing -ErrorAction Stop | Out-Null
+                    return $Mirror
+                }
+                catch {
+                    return $null
+                }
+            }
+        }
+        $timeout = Get-IntEnv -Name "BIFROST_MIRROR_PROBE_TIMEOUT" -Default 5
+        $jobs += Start-Job -ScriptBlock $script -ArgumentList $mirror, $url, $timeout
+    }
 
-        if ($ok -and $watch.Elapsed.TotalMilliseconds -lt $bestElapsed) {
-            $bestMirror = $mirror
-            $bestElapsed = $watch.Elapsed.TotalMilliseconds
+    try {
+        $deadline = (Get-Date).AddSeconds((Get-IntEnv -Name "BIFROST_MIRROR_PROBE_TIMEOUT" -Default 5) + 1)
+        while ((Get-Date) -lt $deadline) {
+            foreach ($job in $jobs) {
+                if ($job.State -eq "Completed") {
+                    $result = Receive-Job -Job $job -ErrorAction SilentlyContinue
+                    if ($result) {
+                        return "$result"
+                    }
+                }
+            }
+            Start-Sleep -Milliseconds 200
+        }
+    }
+    finally {
+        foreach ($job in $jobs) {
+            Stop-Job -Job $job -ErrorAction SilentlyContinue | Out-Null
+            Remove-Job -Job $job -Force -ErrorAction SilentlyContinue | Out-Null
         }
     }
 
-    return $bestMirror
+    return $null
 }
 
 function Get-LatestVersionViaRedirect {
@@ -308,13 +339,50 @@ function Invoke-BifrostDownload {
 
     for ($attempt = 1; $attempt -le $tries; $attempt++) {
         try {
-            Invoke-WebRequest -Uri $Uri -OutFile $OutFile -TimeoutSec $timeout -UseBasicParsing -ErrorAction Stop
+            $handler = [System.Net.Http.HttpClientHandler]::new()
+            $handler.AllowAutoRedirect = $true
+            $client = [System.Net.Http.HttpClient]::new($handler)
+            $client.Timeout = [TimeSpan]::FromSeconds($timeout)
+            try {
+                $response = $client.GetAsync($Uri, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+                $response.EnsureSuccessStatusCode() | Out-Null
+
+                $total = $response.Content.Headers.ContentLength
+                $inputStream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+                $outputStream = [System.IO.File]::Open($OutFile, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+                try {
+                    $buffer = New-Object byte[] (64 * 1024)
+                    $downloaded = [int64]0
+                    while (($read = $inputStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                        $outputStream.Write($buffer, 0, $read)
+                        $downloaded += $read
+                        if ($total -and $total -gt 0) {
+                            $percent = [Math]::Min(100, [Math]::Round(($downloaded * 100.0) / $total, 1))
+                            Write-Progress -Activity "Downloading Bifrost" -Status "$percent% ($downloaded/$total bytes)" -PercentComplete $percent
+                        }
+                        else {
+                            Write-Progress -Activity "Downloading Bifrost" -Status "$downloaded bytes downloaded"
+                        }
+                    }
+                }
+                finally {
+                    $outputStream.Dispose()
+                    $inputStream.Dispose()
+                }
+            }
+            finally {
+                if ($response) { $response.Dispose() }
+                $client.Dispose()
+                $handler.Dispose()
+            }
+            Write-Progress -Activity "Downloading Bifrost" -Completed
             if ((Test-Path $OutFile) -and ((Get-Item $OutFile).Length -gt 0)) {
                 return $true
             }
             $lastError = "Downloaded file is empty: $OutFile"
         }
         catch {
+            Write-Progress -Activity "Downloading Bifrost" -Completed
             $lastError = $_
         }
 
