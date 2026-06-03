@@ -50,11 +50,23 @@ process_helper = Path("e2e-tests/test_utils/process.sh").read_text(errors="ignor
 if "BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1" not in process_helper:
     missing.append("e2e-tests/test_utils/process.sh")
 
+rust_missing = []
+for path in sorted(Path("crates").rglob("*.rs")) + sorted(Path("tests").rglob("*.rs")):
+    text = path.read_text(errors="ignore")
+    if 'CARGO_BIN_EXE_bifrost' not in text:
+        continue
+    if ".arg(\"start\")" not in text:
+        continue
+    if "BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT" not in text:
+        rust_missing.append(path.as_posix())
+
+missing.extend(rust_missing)
+
 if missing:
-    print("Scripts that may start Bifrost without disabling Sync login prompt:")
+    print("Bifrost startup tests/scripts that may open the Sync login prompt:")
     for item in missing:
         print(f"  - {item}")
     raise SystemExit(1)
 
-print("All E2E Bifrost startup scripts disable Sync auto-login prompt by default.")
+print("All Bifrost startup tests/scripts disable Sync auto-login prompt by default.")
 PY
