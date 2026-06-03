@@ -1099,7 +1099,7 @@ async fn exec_command_long_task_user_message_interrupts_runtime_wait_then_contin
     let exec_calls = vec![ToolCallMessage::function_call(
         "call-exec".to_string(),
         "exec_command".to_string(),
-        r#"{"cmd":"printf start; sleep 0.8; printf done","yield_time_ms":50}"#.to_string(),
+        r#"{"cmd":"sleep 0.8; printf done","yield_time_ms":50}"#.to_string(),
     )];
     let follow_up_calls = vec![ToolCallMessage::function_call(
         "call-follow-up".to_string(),

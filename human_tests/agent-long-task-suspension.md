@@ -848,7 +848,7 @@
 
 **实际结果**：
 
-- 通过。2026-06-03 按项目规则带 `source ~/.zshrc &&` 执行第 1、2、4 步静态检查均成功；第 1 步使用单引号保护反引号，避免 shell 命令替换。执行 `source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-agent exec_command_long_task_user_message_interrupts_runtime_wait_then_continues -- --nocapture` 通过。测试使用真实 `exec_command(cmd="printf start; sleep 0.8; printf done", yield_time_ms=50)`，100ms 后向 `guide_channel` 注入“先回答我：2+2 等于几？”，断言第二次模型请求在 350ms 内出现，即没有等待 0.8s 长任务退出；模型先返回 `answered the interjection`，随后 runtime context 要求继续跟进原 `session_id`，模型调用 `write_stdin` 后最终输出包含 `done`，最终回复为 `long task complete`。
+- 通过。2026-06-03 按项目规则带 `source ~/.zshrc &&` 执行第 1、2、4 步静态检查均成功；第 1 步使用单引号保护反引号，避免 shell 命令替换。执行 `source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-agent exec_command_long_task_user_message_interrupts_runtime_wait_then_continues -- --nocapture` 通过。测试使用真实 `exec_command(cmd="sleep 0.8; printf done", yield_time_ms=50)`，100ms 后向 `guide_channel` 注入“先回答我：2+2 等于几？”，断言第二次模型请求在 350ms 内出现，即没有等待 0.8s 长任务退出；模型先返回 `answered the interjection`，随后 runtime context 要求继续跟进原 `session_id`，模型调用 `write_stdin` 后最终输出包含 `done`，最终回复为 `long task complete`。
 
 ## 清理步骤
 
