@@ -134,8 +134,12 @@ send = next((r for r in records if r["path"].startswith("/im/v1/messages")), Non
 assert send is not None, "mock did not receive send request"
 assert send["path"].endswith("receive_id_type=open_id"), send
 assert send["body"]["receive_id"] == "owner-open-id", send
-assert send["body"]["msg_type"] == "text", send
-assert json.loads(send["body"]["content"])["text"] == "hello owner from cli", send
+assert send["body"]["msg_type"] == "interactive", send
+card = json.loads(send["body"]["content"])
+assert card["schema"] == "2.0", card
+assert card["header"]["title"]["content"] == "Bifrost", card
+assert card["body"]["elements"][0]["tag"] == "markdown", card
+assert card["body"]["elements"][0]["content"] == "hello owner from cli", card
 PY
 
 python3 - "$MOCK_DIR/pixel.png" <<'PY'

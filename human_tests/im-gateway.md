@@ -449,11 +449,12 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 - **预期结果**:
   - 单 enabled Provider 场景下，CLI 自动选择该 Provider，不要求额外输入。
   - `im send` 默认使用 `target_id=__owner__`，后端解析为该 Provider 的 `owner_open_id`。
-  - fake Feishu 收到的请求包含 `receive_id_type=open_id`、`receive_id=owner-open-id`、`msg_type=text`，文本内容为 `hello owner from cli`。
+  - fake Feishu 收到的请求包含 `receive_id_type=open_id`、`receive_id=owner-open-id`、`msg_type=interactive`，卡片 `schema=2.0`，标题为 `Bifrost`，正文 markdown 内容为 `hello owner from cli`。
   - CLI 输出包含 `Message sent` 与 fake Feishu 返回的 message id。
   - `im messages list` 未传 `--provider` 时复用 provider 选择逻辑，输出包含 `Owner` 与消息内容预览。
   - 多 Provider 交互式场景下，CLI 展示 provider 列表；多 Provider 非交互式场景下返回明确错误，要求传 `--provider`。
 - **执行记录（2026-05-06）**: PASS — 使用 `e2e-tests/tests/test_im_cli_provider_selection_send_owner.sh` 执行 TC-IMG-37；脚本用临时数据目录 `.bifrost-test-im-cli-provider`、端口 `18891` 和 fake Feishu OpenAPI 服务启动源码版 Bifrost；创建唯一 enabled Provider 后执行 `bifrost im send --text 'hello owner from cli'`，CLI 自动选择 `feishu-main` 并输出 `Message sent via provider 'feishu-main' to __owner__ (message_id: om_owner_cli)`；fake Feishu 捕获 `receive_id_type=open_id`、`receive_id=owner-open-id`、`msg_type=text` 和文本内容；`bifrost im messages list` 未传 `--provider` 时同样自动选择 Provider，输出包含 `Owner` 与消息内容预览；脚本最后清理临时数据和进程。
+- **执行记录（2026-06-03）**: PASS — 按 Feishu text 默认卡片化行为更新并执行 `bash e2e-tests/tests/test_im_cli_provider_selection_send_owner.sh`；fake Feishu 捕获 owner 文本发送请求 `msg_type=interactive`，`content` 解析后为 Card 2.0，标题 `Bifrost`，markdown 内容 `hello owner from cli`；CLI 输出仍包含 `Message sent` 与 `om_owner_cli`，`im messages list` 仍包含 `Owner` 和消息预览。
 
 ### TC-IMG-38: CLI 发送图片消息时先上传图片再发送 image 消息
 
