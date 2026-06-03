@@ -19,6 +19,7 @@ use hyper::body::Incoming;
 use hyper::header::{HeaderName, HeaderValue};
 use hyper::service::service_fn;
 use hyper::upgrade::Upgraded;
+use hyper::HeaderMap;
 use hyper::{Request, Response};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder as AutoServerBuilder;
@@ -53,9 +54,10 @@ use super::devtools::{
 };
 use super::handler::decode::{apply_decode_scripts_for_storage, DecodeForStorageResult};
 use super::handler::{
+    apply_websocket_request_header_rules, apply_websocket_response_header_rules,
     build_connection_error_response, build_error_body, build_overridden_error_response,
-    needs_body_processing, needs_request_body_processing, needs_response_override,
-    parse_and_record_sse_events, ConnectionErrorInfo,
+    merge_websocket_header_rule_candidates, needs_body_processing, needs_request_body_processing,
+    needs_response_override, parse_and_record_sse_events, ConnectionErrorInfo,
 };
 use super::scripts::{
     apply_script_headers_to_header_map, body_to_script_string, execute_request_scripts,
@@ -1881,7 +1883,10 @@ async fn handle_intercepted_request_with_protocol(
     let has_rules = !resolved_rules.rules.is_empty()
         || resolved_rules.host.is_some()
         || !resolved_rules.req_headers.is_empty()
-        || !resolved_rules.res_headers.is_empty();
+        || !resolved_rules.res_headers.is_empty()
+        || !resolved_rules.delete_req_headers.is_empty()
+        || !resolved_rules.delete_res_headers.is_empty()
+        || !resolved_rules.header_replace.is_empty();
 
     if verbose_logging {
         if has_rules {
@@ -4244,8 +4249,21 @@ async fn handle_intercepted_websocket(
     let incoming_cookies: std::collections::HashMap<String, String> =
         collect_all_cookies_from_headers(req.headers());
 
-    let resolved_rules = rules.resolve_with_context(
+    let mut resolved_rules = rules.resolve_with_context(
         &original_uri,
+        &method_str,
+        &incoming_headers,
+        &incoming_cookies,
+    );
+    let candidate_urls = vec![
+        format!("https://{}{}", original_host, path),
+        original_host.to_string(),
+        format!("{}:{}", original_host, original_port),
+    ];
+    resolved_rules = merge_websocket_header_rule_candidates(
+        resolved_rules,
+        rules.as_ref(),
+        &candidate_urls,
         &method_str,
         &incoming_headers,
         &incoming_cookies,
@@ -4254,7 +4272,10 @@ async fn handle_intercepted_websocket(
     let has_rules = !resolved_rules.rules.is_empty()
         || resolved_rules.host.is_some()
         || !resolved_rules.req_headers.is_empty()
-        || !resolved_rules.res_headers.is_empty();
+        || !resolved_rules.res_headers.is_empty()
+        || !resolved_rules.delete_req_headers.is_empty()
+        || !resolved_rules.delete_res_headers.is_empty()
+        || !resolved_rules.header_replace.is_empty();
 
     let (target_host, target_port, use_http, target_path) = if resolved_rules.ignored.host {
         debug!(
@@ -4321,6 +4342,8 @@ async fn handle_intercepted_websocket(
             path.to_string(),
         )
     };
+
+    apply_websocket_request_header_rules(req.headers_mut(), &resolved_rules);
 
     let connect_start = Instant::now();
     let target_stream = match TcpStream::connect(format!("{}:{}", target_host, target_port)).await {
@@ -4502,6 +4525,23 @@ async fn handle_intercepted_websocket(
         extensions: upstream_extensions,
     } = upstream_handshake;
     let upstream_protocol = upstream_protocol_owned.as_deref();
+    let mut passthrough_response_headers = HeaderMap::new();
+    for (name, value) in &upstream_headers {
+        let lower = name.to_ascii_lowercase();
+        if lower != "upgrade"
+            && lower != "connection"
+            && lower != "sec-websocket-accept"
+            && lower != "sec-websocket-protocol"
+            && lower != "sec-websocket-extensions"
+        {
+            if let (Ok(header_name), Ok(header_value)) =
+                (name.parse::<HeaderName>(), value.parse::<HeaderValue>())
+            {
+                passthrough_response_headers.insert(header_name, header_value);
+            }
+        }
+    }
+    apply_websocket_response_header_rules(&mut passthrough_response_headers, &resolved_rules);
 
     let client_protocol = req
         .headers()
@@ -4674,14 +4714,8 @@ async fn handle_intercepted_websocket(
         response = response.header("Sec-WebSocket-Extensions", extensions);
     }
 
-    for (name, value) in upstream_headers {
-        let lower = name.to_ascii_lowercase();
-        if lower != "upgrade"
-            && lower != "connection"
-            && lower != "sec-websocket-accept"
-            && lower != "sec-websocket-protocol"
-            && lower != "sec-websocket-extensions"
-        {
+    for (name, value) in passthrough_response_headers {
+        if let Some(name) = name {
             response = response.header(name, value);
         }
     }

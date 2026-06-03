@@ -1,4 +1,6 @@
 #!/bin/bash
+: "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
+export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
 # E2E Test: Group Management and Group Rules via sync-server + bifrost proxy + CLI
 # Tests full lifecycle: sync-server direct API → bifrost admin proxy → CLI commands
 

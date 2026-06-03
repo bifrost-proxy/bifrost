@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+: "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
+export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
+
 # Case 1: 1 GiB binary stdout byte-exact verification.
 #
 # Produces a deterministic 1 GiB byte stream (SHA-256 computed at source),

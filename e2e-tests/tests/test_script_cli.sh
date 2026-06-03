@@ -1,4 +1,7 @@
 #!/bin/bash
+: "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
+export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
+
 #
 # Bifrost Script CLI 端到端测试
 # 覆盖 script add/update/show(get)/run/list/delete，以及 show/get/run 单参数按 name 模糊匹配

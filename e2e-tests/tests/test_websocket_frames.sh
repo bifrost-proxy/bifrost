@@ -1,9 +1,12 @@
 #!/bin/bash
+: "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
+export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
+
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-BIFROST_BIN="${ROOT_DIR}/target/release/bifrost"
+BIFROST_BIN="${BIFROST_BIN:-${ROOT_DIR}/target/release/bifrost}"
 if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
     BIFROST_BIN="${BIFROST_BIN}.exe"
 fi
@@ -40,7 +43,9 @@ TESTS_FAILED=0
 BIFROST_DATA_DIR="${BIFROST_DATA_DIR:-}"
 BIFROST_PID=""
 WS_SERVER_PID=""
+WS_SERVER_LOG=""
 RULE_FIXTURE="$SCRIPT_DIR/../rules/websocket/decode_utf8_searchable.txt"
+HEADER_RULE_FIXTURE="$SCRIPT_DIR/../rules/websocket/header_rules.txt"
 
 cleanup() {
     if [[ -n "$BIFROST_PID" ]]; then
@@ -50,6 +55,9 @@ cleanup() {
     if [[ -n "$WS_SERVER_PID" ]]; then
         kill_pid "$WS_SERVER_PID"
         wait_pid "$WS_SERVER_PID"
+    fi
+    if [[ -n "$WS_SERVER_LOG" && -f "$WS_SERVER_LOG" ]]; then
+        rm -f "$WS_SERVER_LOG"
     fi
 
     if [[ -n "$BIFROST_DATA_DIR" && -d "$BIFROST_DATA_DIR" ]]; then
@@ -92,7 +100,8 @@ check_deps() {
 }
 
 start_ws_server() {
-    python3 "$SCRIPT_DIR/../mock_servers/ws_echo_server.py" --port "$WS_PORT" > /dev/null 2>&1 &
+    WS_SERVER_LOG="$(mktemp)"
+    PYTHONUNBUFFERED=1 python3 "$SCRIPT_DIR/../mock_servers/ws_echo_server.py" --port "$WS_PORT" > "$WS_SERVER_LOG" 2>&1 &
     WS_SERVER_PID=$!
     local max_wait=10
     if is_windows; then max_wait=20; fi
@@ -292,6 +301,76 @@ test_ws_frame_directions() {
     return 1
 }
 
+test_ws_handshake_header_rules() {
+    log_test "WebSocket handshake request/response header rules"
+
+    local rule_name="ws_header_rules_e2e"
+    local rule_content
+    rule_content="$(rule_fixture_content "$HEADER_RULE_FIXTURE" "WS_PORT=${WS_PORT}")"
+
+    delete_rule "$rule_name" >/dev/null 2>&1 || true
+    create_rule "$rule_name" "$rule_content" true >/dev/null 2>&1 || true
+    enable_rule "$rule_name" >/dev/null 2>&1 || true
+
+    clear_traffic >/dev/null 2>&1 || true
+    sleep 0.5
+
+    local timeout=15.0
+    if is_windows; then timeout=30.0; fi
+    if ! python3 "$SCRIPT_DIR/../test_utils/ws_stress_client.py" \
+        --proxy-host "$PROXY_HOST" \
+        --proxy-port "$PROXY_PORT" \
+        --host-header "$WS_HOST_HEADER" \
+        --path "/ws/header-rules" \
+        --messages 1 \
+        --expect-header "X-Bifrost-E2E-WS-Response=injected" \
+        --timeout "$timeout"; then
+        delete_rule "$rule_name" >/dev/null 2>&1 || true
+        fail "WebSocket handshake header rules were not visible to client/upstream"
+        return 1
+    fi
+
+    sleep 2
+    if [[ -n "$WS_SERVER_LOG" ]] && ! grep -qi "X-Bifrost-E2E-WS-Request: injected" "$WS_SERVER_LOG"; then
+        delete_rule "$rule_name" >/dev/null 2>&1 || true
+        echo "--- WebSocket mock server log (tail -80) ---"
+        tail -n 80 "$WS_SERVER_LOG" || true
+        echo "--- end WebSocket mock server log ---"
+        fail "WebSocket mock server did not receive injected request header"
+        return 1
+    fi
+
+    local traffic_id=""
+    local find_attempt=0
+    while [[ $find_attempt -lt 5 ]]; do
+        traffic_id=$(find_traffic_id_by_url "$ADMIN_HOST" "$ADMIN_PORT" "/ws/header-rules" 20)
+        if [[ -n "$traffic_id" && "$traffic_id" != "null" ]]; then
+            break
+        fi
+        sleep 2
+        find_attempt=$((find_attempt + 1))
+    done
+    if [[ -z "$traffic_id" || "$traffic_id" == "null" ]]; then
+        delete_rule "$rule_name" >/dev/null 2>&1 || true
+        fail "No WebSocket header-rule traffic recorded"
+        return 1
+    fi
+
+    local record request_header
+    record=$(get_traffic_detail "$traffic_id")
+    request_header=$(echo "$record" | jq -r '[.request_headers[]? | select((.[0] | ascii_downcase) == "x-bifrost-e2e-ws-request") | .[1]][0] // ""')
+
+    delete_rule "$rule_name" >/dev/null 2>&1 || true
+
+    if [[ "$request_header" != "injected" ]]; then
+        fail "Traffic request_headers missing WebSocket injected request header, got '${request_header}'"
+        return 1
+    fi
+
+    pass "Handshake request header reached upstream and response header reached client"
+    return 0
+}
+
 test_ws_connection_list() {
     log_test "WebSocket connection list API"
 
@@ -389,6 +468,7 @@ run_all_tests() {
     test_ws_text_frame_forwarding || true
     test_ws_frames_capture || true
     test_ws_frame_directions || true
+    test_ws_handshake_header_rules || true
     test_ws_binary_payload_decode_and_search || true
     test_ws_connection_list || true
 

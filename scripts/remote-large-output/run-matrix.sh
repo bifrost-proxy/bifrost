@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+: "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
+export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
+
 # PR #8 — End-to-end test matrix for bifrost remote exec streaming.
 #
 # Covers:

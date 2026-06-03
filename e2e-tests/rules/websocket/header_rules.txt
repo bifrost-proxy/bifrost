@@ -1,0 +1,2 @@
+# 测试目标: 验证 WebSocket 协议升级握手前后，reqHeaders 和 resHeaders 规则能分别作用到远端请求头和客户端响应头。
+ws://127.0.0.1:__WS_PORT__/ws/header-rules reqHeaders://(X-Bifrost-E2E-WS-Request: injected) resHeaders://(X-Bifrost-E2E-WS-Response: injected)

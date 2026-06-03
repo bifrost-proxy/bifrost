@@ -1573,7 +1573,7 @@ async fn execute_replay_websocket(
 
     info!(replay_id = %replay_id, url = %url, "Starting WebSocket proxy");
 
-    let (_resolved_rules, matched_rules, applied_request) =
+    let (resolved_rules, matched_rules, applied_request) =
         resolve_and_apply_rules(&state, &rule_config, &url, "GET", &upgrade_headers, None);
 
     info!(
@@ -1630,7 +1630,23 @@ async fn execute_replay_websocket(
         .unwrap_or(false);
 
     let accept_key = compute_accept_key(&ws_key);
-    let upstream_headers = upstream_resp.headers.clone();
+    let original_upstream_headers = upstream_resp.headers.clone();
+    let upstream_headers = crate::replay_response_rules::apply_websocket_response_header_rules(
+        &resolved_rules,
+        original_upstream_headers.clone(),
+    );
+    {
+        let original_headers_for_record = original_upstream_headers.clone();
+        let final_headers_for_record = upstream_headers.clone();
+        state.update_traffic_by_id(&traffic_id, move |record| {
+            record.original_response_headers = Some(original_headers_for_record.clone());
+            if final_headers_for_record != original_headers_for_record {
+                record.response_headers = Some(final_headers_for_record.clone());
+            } else {
+                record.response_headers = None;
+            }
+        });
+    }
 
     let replay_id_for_task = replay_id.clone();
     let traffic_id_for_task = traffic_id.clone();
@@ -2604,5 +2620,54 @@ fn record_history(
         }
     } else {
         warn!("[REPLAY] replay_db_store is None, cannot record history");
+    }
+}
+
+#[cfg(test)]
+mod websocket_rule_tests {
+    use super::*;
+    use crate::state::AdminState;
+    use bifrost_core::Protocol;
+
+    #[test]
+    fn replay_custom_websocket_rules_match_ws_urls() {
+        let state = Arc::new(AdminState::new(0));
+        let url = "ws://127.0.0.1:20809/ws/rule_headers";
+        let rule_config = RuleConfig {
+            mode: RuleMode::Custom,
+            selected_rules: vec![],
+            custom_rules: Some(format!(
+                "{url} reqHeaders://(X-Replay-WS-Request: injected) resHeaders://(X-Replay-WS-Response: injected)"
+            )),
+        };
+
+        let (resolved_rules, matched_rules, applied_request) =
+            resolve_and_apply_rules(&state, &rule_config, url, "GET", &[], None);
+
+        assert!(
+            matched_rules
+                .iter()
+                .any(|rule| rule.protocol == Protocol::ReqHeaders.to_str()),
+            "custom WebSocket reqHeaders rule should match ws:// replay URL"
+        );
+        assert!(
+            matched_rules
+                .iter()
+                .any(|rule| rule.protocol == Protocol::ResHeaders.to_str()),
+            "custom WebSocket resHeaders rule should match ws:// replay URL"
+        );
+        assert_eq!(
+            get_header_value(&applied_request.headers, "X-Replay-WS-Request"),
+            Some("injected")
+        );
+
+        let headers = crate::replay_response_rules::apply_websocket_response_header_rules(
+            &resolved_rules,
+            vec![],
+        );
+        assert_eq!(
+            get_header_value(&headers, "X-Replay-WS-Response"),
+            Some("injected")
+        );
     }
 }

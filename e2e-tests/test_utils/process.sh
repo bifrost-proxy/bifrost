@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# E2E scripts should never open the Sync login browser unless the test is
+# explicitly exercising startup login preflight. Keep this default in the
+# shared process helper so direct Bifrost launches inherit it.
+: "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
+export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
+
 is_windows() {
     local uname_out
     uname_out="$(uname -s 2>/dev/null)"

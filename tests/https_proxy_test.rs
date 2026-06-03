@@ -281,6 +281,54 @@ async fn start_websocket_echo_server(ready_tx: oneshot::Sender<u16>) {
     }
 }
 
+async fn start_websocket_header_probe_server(
+    ready_tx: oneshot::Sender<u16>,
+    captured_request: Arc<Mutex<Option<String>>>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    ready_tx.send(port).unwrap();
+
+    while let Ok((mut stream, _)) = listener.accept().await {
+        let captured_request = Arc::clone(&captured_request);
+        tokio::spawn(async move {
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0u8; 1024];
+                let n = match stream.read(&mut chunk).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => n,
+                };
+                request.extend_from_slice(&chunk[..n]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+
+            let request_text = String::from_utf8_lossy(&request).to_string();
+            *captured_request.lock() = Some(request_text.clone());
+
+            let sec_key = request_text
+                .lines()
+                .find(|line| line.to_lowercase().starts_with("sec-websocket-key:"))
+                .and_then(|line| line.split(':').nth(1))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+
+            let accept_key = compute_accept_key(&sec_key);
+            let response = format!(
+                "HTTP/1.1 101 Switching Protocols\r\n\
+                 Upgrade: websocket\r\n\
+                 Connection: Upgrade\r\n\
+                 Sec-WebSocket-Accept: {}\r\n\
+                 X-Upstream-WS: seen\r\n\r\n",
+                accept_key
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+    }
+}
+
 async fn start_tls_websocket_echo_server(
     ready_tx: oneshot::Sender<u16>,
     negotiated_alpn: Arc<Mutex<Vec<Option<Vec<u8>>>>>,
@@ -434,6 +482,80 @@ async fn start_tls_websocket_echo_server(
                     Err(_) => break,
                 }
             }
+        });
+    }
+}
+
+async fn start_tls_websocket_header_probe_server(
+    ready_tx: oneshot::Sender<u16>,
+    captured_request: Arc<Mutex<Option<String>>>,
+) {
+    use tokio_rustls::rustls;
+    use tokio_rustls::rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+    use tokio_rustls::TlsAcceptor;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    ready_tx.send(port).unwrap();
+
+    let rcgen::CertifiedKey { cert, signing_key } = rcgen::generate_simple_self_signed(vec![
+        "localhost".to_string(),
+        "intercepted.example.com".to_string(),
+    ])
+    .unwrap();
+    let key_der = signing_key.serialize_der();
+    let certs = vec![cert.der().clone()];
+    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_der));
+
+    let mut server_config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .unwrap();
+    server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let acceptor = TlsAcceptor::from(Arc::new(server_config));
+
+    while let Ok((stream, _)) = listener.accept().await {
+        let acceptor = acceptor.clone();
+        let captured_request = Arc::clone(&captured_request);
+        tokio::spawn(async move {
+            let mut stream = match acceptor.accept(stream).await {
+                Ok(stream) => stream,
+                Err(_) => return,
+            };
+
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0u8; 1024];
+                let n = match stream.read(&mut chunk).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => n,
+                };
+                request.extend_from_slice(&chunk[..n]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+
+            let request_text = String::from_utf8_lossy(&request).to_string();
+            *captured_request.lock() = Some(request_text.clone());
+
+            let sec_key = request_text
+                .lines()
+                .find(|line| line.to_lowercase().starts_with("sec-websocket-key:"))
+                .and_then(|line| line.split(':').nth(1))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+
+            let accept_key = compute_accept_key(&sec_key);
+            let response = format!(
+                "HTTP/1.1 101 Switching Protocols\r\n\
+                 Upgrade: websocket\r\n\
+                 Connection: Upgrade\r\n\
+                 Sec-WebSocket-Accept: {}\r\n\
+                 X-Upstream-WSS: seen\r\n\r\n",
+                accept_key
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
         });
     }
 }
@@ -789,6 +911,226 @@ async fn test_https_interception_accepts_h2_websocket_extended_connect() {
         .write_frame(WebSocketFrame::close(Some(1000), "done"))
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn test_http_websocket_applies_request_and_response_header_rules() {
+    let proxy = start_test_proxy().await;
+
+    let captured_request = Arc::new(Mutex::new(None));
+    let (ready_tx, ready_rx) = oneshot::channel();
+    tokio::spawn(start_websocket_header_probe_server(
+        ready_tx,
+        Arc::clone(&captured_request),
+    ));
+    let ws_port = ready_rx.await.unwrap();
+
+    add_test_rule(
+        &proxy,
+        "ws-header.test",
+        Protocol::Ws,
+        &format!("127.0.0.1:{}", ws_port),
+    );
+    add_test_rule(
+        &proxy,
+        "ws-header.test",
+        Protocol::ReqHeaders,
+        "X-Bifrost-WS-Request=injected",
+    );
+    add_test_rule(
+        &proxy,
+        "ws-header.test",
+        Protocol::ResHeaders,
+        "X-Bifrost-WS-Response=injected",
+    );
+
+    let mut stream = TcpStream::connect(proxy.addr()).await.unwrap();
+    let sec_key = "dGhlIHNhbXBsZSBub25jZQ==";
+    let request = format!(
+        "GET ws://ws-header.test/probe HTTP/1.1\r\n\
+         Host: ws-header.test\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Key: {}\r\n\
+         Sec-WebSocket-Version: 13\r\n\r\n",
+        sec_key
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+
+    let mut response = Vec::new();
+    loop {
+        let mut chunk = [0u8; 1024];
+        let n = stream.read(&mut chunk).await.unwrap();
+        assert!(
+            n > 0,
+            "proxy closed connection before websocket upgrade response"
+        );
+        response.extend_from_slice(&chunk[..n]);
+        if response.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+    }
+
+    let response_text = String::from_utf8_lossy(&response).to_string();
+    let captured_request_text = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if let Some(request) = captured_request.lock().clone() {
+                break request;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for upstream websocket handshake");
+
+    let response_lower = response_text.to_ascii_lowercase();
+    let request_lower = captured_request_text.to_ascii_lowercase();
+    let request_header_applied = request_lower.contains("x-bifrost-ws-request: injected");
+    let response_header_applied = response_lower.contains("x-bifrost-ws-response: injected");
+
+    assert!(
+        response_text.starts_with("HTTP/1.1 101"),
+        "unexpected websocket response: {}",
+        response_text
+    );
+    assert!(
+        response_lower.contains("x-upstream-ws: seen"),
+        "control upstream websocket response header should pass through: {}",
+        response_text
+    );
+    assert!(
+        request_header_applied && response_header_applied,
+        "expected WebSocket reqHeaders/resHeaders rules to apply; request_header_applied={}, response_header_applied={}\nupstream request:\n{}\ndownstream response:\n{}",
+        request_header_applied,
+        response_header_applied,
+        captured_request_text,
+        response_text
+    );
+}
+
+#[tokio::test]
+async fn test_https_interception_websocket_applies_request_and_response_header_rules() {
+    init_crypto_provider();
+
+    let config = ProxyConfig {
+        enable_tls_interception: true,
+        unsafe_ssl: true,
+        verbose_logging: true,
+        ..Default::default()
+    };
+    let proxy = start_test_proxy_with_config(config).await;
+
+    let captured_request = Arc::new(Mutex::new(None));
+    let (ready_tx, ready_rx) = oneshot::channel();
+    tokio::spawn(start_tls_websocket_header_probe_server(
+        ready_tx,
+        Arc::clone(&captured_request),
+    ));
+    let ws_port = ready_rx.await.unwrap();
+
+    add_test_rule(
+        &proxy,
+        "intercepted.example.com",
+        Protocol::Wss,
+        &format!("127.0.0.1:{}", ws_port),
+    );
+    add_test_rule(
+        &proxy,
+        "intercepted.example.com",
+        Protocol::ReqHeaders,
+        "X-Bifrost-WSS-Request=injected",
+    );
+    add_test_rule(
+        &proxy,
+        "intercepted.example.com",
+        Protocol::ResHeaders,
+        "X-Bifrost-WSS-Response=injected",
+    );
+
+    let mut tunnel = TcpStream::connect(proxy.addr()).await.unwrap();
+    let connect_request =
+        "CONNECT intercepted.example.com:443 HTTP/1.1\r\nHost: intercepted.example.com:443\r\n\r\n";
+    tunnel.write_all(connect_request.as_bytes()).await.unwrap();
+
+    let mut connect_response = vec![0u8; 1024];
+    let n = tunnel.read(&mut connect_response).await.unwrap();
+    let response_str = String::from_utf8_lossy(&connect_response[..n]);
+    assert!(
+        response_str.contains("200"),
+        "CONNECT should succeed, got: {}",
+        response_str
+    );
+
+    let client_config = make_insecure_test_client_config(vec![b"http/1.1".to_vec()]);
+    let connector = TlsConnector::from(Arc::new(client_config));
+    let server_name = ServerName::try_from("intercepted.example.com".to_string()).unwrap();
+    let mut tls_stream = connector.connect(server_name, tunnel).await.unwrap();
+    assert_eq!(
+        tls_stream.get_ref().1.alpn_protocol(),
+        Some(b"http/1.1".as_slice())
+    );
+
+    let sec_key = "dGhlIHNhbXBsZSBub25jZQ==";
+    let request = format!(
+        "GET /probe HTTP/1.1\r\n\
+         Host: intercepted.example.com\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Key: {}\r\n\
+         Sec-WebSocket-Version: 13\r\n\r\n",
+        sec_key
+    );
+    tls_stream.write_all(request.as_bytes()).await.unwrap();
+
+    let mut response = Vec::new();
+    loop {
+        let mut chunk = [0u8; 1024];
+        let n = tls_stream.read(&mut chunk).await.unwrap();
+        assert!(
+            n > 0,
+            "proxy closed connection before websocket upgrade response"
+        );
+        response.extend_from_slice(&chunk[..n]);
+        if response.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+    }
+
+    let response_text = String::from_utf8_lossy(&response).to_string();
+    let captured_request_text = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if let Some(request) = captured_request.lock().clone() {
+                break request;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for upstream websocket handshake");
+
+    let response_lower = response_text.to_ascii_lowercase();
+    let request_lower = captured_request_text.to_ascii_lowercase();
+    let request_header_applied = request_lower.contains("x-bifrost-wss-request: injected");
+    let response_header_applied = response_lower.contains("x-bifrost-wss-response: injected");
+
+    assert!(
+        response_text.starts_with("HTTP/1.1 101"),
+        "unexpected websocket response: {}",
+        response_text
+    );
+    assert!(
+        response_lower.contains("x-upstream-wss: seen"),
+        "control upstream websocket response header should pass through: {}",
+        response_text
+    );
+    assert!(
+        request_header_applied && response_header_applied,
+        "expected intercepted WebSocket reqHeaders/resHeaders rules to apply; request_header_applied={}, response_header_applied={}\nupstream request:\n{}\ndownstream response:\n{}",
+        request_header_applied,
+        response_header_applied,
+        captured_request_text,
+        response_text
+    );
 }
 
 #[tokio::test]
