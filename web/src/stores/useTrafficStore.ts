@@ -1858,13 +1858,15 @@ export const useTrafficStore = create<TrafficState>()(
       },
 
       fetchTrafficDetail: async (id: string) => {
+        const prevState = get();
+        const preserveBodies = prevState.currentRecord?.id === id;
         set({
           detailLoading: true,
           detailError: null,
-          requestBody: null,
-          responseBody: null,
-          requestRawBody: null,
-          responseRawBody: null,
+          requestBody: preserveBodies ? prevState.requestBody : null,
+          responseBody: preserveBodies ? prevState.responseBody : null,
+          requestRawBody: preserveBodies ? prevState.requestRawBody : null,
+          responseRawBody: preserveBodies ? prevState.responseRawBody : null,
         });
         try {
           const record = await api.getTrafficDetail(id);

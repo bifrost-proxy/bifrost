@@ -142,6 +142,26 @@ export interface ReplayHistoryUpdatedData {
   history_id?: string;
 }
 
+export interface BreakpointPausedPushData {
+  phase: string;
+  request_id: string;
+  method?: string;
+  url?: string;
+  status?: number;
+  headers: [string, string][];
+  body?: string;
+}
+
+export interface BreakpointSettingsPushData {
+  enabled: boolean;
+  hook_request: boolean;
+  hook_response: boolean;
+}
+
+export interface BreakpointResumedPushData {
+  request_id: string;
+}
+
 export type PushMessageType =
   | 'traffic_updates'
   | 'traffic_delta'
@@ -158,7 +178,10 @@ export type PushMessageType =
   | 'error'
   | 'disconnect'
   | 'replay_request_updated'
-  | 'replay_history_updated';
+  | 'replay_history_updated'
+  | 'breakpoint_paused'
+  | 'breakpoint_settings_updated'
+  | 'breakpoint_resumed';
 
 export interface PushMessage {
   type: PushMessageType;
@@ -178,7 +201,10 @@ export interface PushMessage {
   | ErrorData
   | DisconnectData
   | ReplayRequestUpdatedData
-  | ReplayHistoryUpdatedData;
+  | ReplayHistoryUpdatedData
+  | BreakpointPausedPushData
+  | BreakpointSettingsPushData
+  | BreakpointResumedPushData;
 }
 
 export interface ClientSubscription {
@@ -261,6 +287,9 @@ class PushService {
   private forceRefreshHandlers: Set<MessageHandler<DisconnectData>> = new Set();
   private replayRequestHandlers: Set<MessageHandler<ReplayRequestUpdatedData>> = new Set();
   private replayHistoryHandlers: Set<MessageHandler<ReplayHistoryUpdatedData>> = new Set();
+  private breakpointPausedHandlers: Set<MessageHandler<BreakpointPausedPushData>> = new Set();
+  private breakpointSettingsHandlers: Set<MessageHandler<BreakpointSettingsPushData>> = new Set();
+  private breakpointResumedHandlers: Set<MessageHandler<BreakpointResumedPushData>> = new Set();
 
   constructor(config: PushServiceConfig = {}) {
     this.config = {
@@ -501,6 +530,21 @@ class PushService {
         this.replayHistoryHandlers.forEach((handler) => handler(data));
         break;
       }
+      case 'breakpoint_paused': {
+        const data = message.data as BreakpointPausedPushData;
+        this.breakpointPausedHandlers.forEach((handler) => handler(data));
+        break;
+      }
+      case 'breakpoint_settings_updated': {
+        const data = message.data as BreakpointSettingsPushData;
+        this.breakpointSettingsHandlers.forEach((handler) => handler(data));
+        break;
+      }
+      case 'breakpoint_resumed': {
+        const data = message.data as BreakpointResumedPushData;
+        this.breakpointResumedHandlers.forEach((handler) => handler(data));
+        break;
+      }
     }
   }
 
@@ -562,7 +606,10 @@ class PushService {
       this.replaySavedRequestsHandlers.size > 0 ||
       this.replayGroupsHandlers.size > 0 ||
       this.replayRequestHandlers.size > 0 ||
-      this.replayHistoryHandlers.size > 0;
+      this.replayHistoryHandlers.size > 0 ||
+      this.breakpointPausedHandlers.size > 0 ||
+      this.breakpointSettingsHandlers.size > 0 ||
+      this.breakpointResumedHandlers.size > 0;
     if (!hasHandlers) {
       this.disconnect();
     }
@@ -670,6 +717,21 @@ class PushService {
   onReplayHistoryUpdated(handler: MessageHandler<ReplayHistoryUpdatedData>): () => void {
     this.replayHistoryHandlers.add(handler);
     return () => this.replayHistoryHandlers.delete(handler);
+  }
+
+  onBreakpointPaused(handler: MessageHandler<BreakpointPausedPushData>): () => void {
+    this.breakpointPausedHandlers.add(handler);
+    return () => this.breakpointPausedHandlers.delete(handler);
+  }
+
+  onBreakpointSettingsUpdated(handler: MessageHandler<BreakpointSettingsPushData>): () => void {
+    this.breakpointSettingsHandlers.add(handler);
+    return () => this.breakpointSettingsHandlers.delete(handler);
+  }
+
+  onBreakpointResumed(handler: MessageHandler<BreakpointResumedPushData>): () => void {
+    this.breakpointResumedHandlers.add(handler);
+    return () => this.breakpointResumedHandlers.delete(handler);
   }
 }
 

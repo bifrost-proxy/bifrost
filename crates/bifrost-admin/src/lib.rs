@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 pub mod admin_audit;
 mod admin_auth;
 pub mod admin_auth_db;
@@ -5,6 +7,7 @@ mod app_icon;
 pub mod asr_runtime;
 mod async_traffic;
 mod body_store;
+pub mod breakpoint;
 pub mod client_trust_tracker;
 pub mod connection_monitor;
 pub mod connection_registry;
@@ -17,6 +20,7 @@ pub mod ip_tls_pending;
 mod metrics;
 pub mod network;
 pub mod notification_db;
+pub mod openapi;
 mod port_rebind;
 pub mod push;
 mod query_service;

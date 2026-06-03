@@ -154,7 +154,7 @@ CREATE TABLE IF NOT EXISTS metadata (
 
 pub fn get_insert_sql() -> &'static str {
     r#"
-    INSERT INTO traffic_records (
+    INSERT OR REPLACE INTO traffic_records (
         sequence, id, timestamp, host, method, status, protocol,
         url, path, content_type, request_content_type,
         request_size, response_size, duration_ms,

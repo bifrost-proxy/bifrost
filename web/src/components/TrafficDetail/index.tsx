@@ -9,6 +9,7 @@ import type {
 } from "../../types";
 import { useTrafficDetailStore } from "../../stores/useTrafficDetailStore";
 import { useTrafficStore } from "../../stores/useTrafficStore";
+import { useBreakpointStore } from "../../stores/useBreakpointStore";
 import {
   getContentTypeFromHeader,
   isImageContentType,
@@ -209,6 +210,13 @@ export default function TrafficDetail({
     reset,
   } = useTrafficDetailStore();
   const [liveSseCount, setLiveSseCount] = useState<number | null>(null);
+  const pausedRequest = useBreakpointStore((state) =>
+    record ? state.pausedRequests.get(record.id) : undefined,
+  );
+  const pausedResponse = useBreakpointStore((state) =>
+    record ? state.pausedResponses.get(record.id) : undefined,
+  );
+  const updatePausedBody = useBreakpointStore((state) => state.updatePausedBody);
 
   useEffect(() => {
     reset();
@@ -318,6 +326,22 @@ export default function TrafficDetail({
     [requestBody, setRequestDisplayFormat],
   );
 
+  const handleRequestBodyChange = useCallback(
+    (value: string) => {
+      if (!record) return;
+      updatePausedBody(record.id, 'request', value);
+    },
+    [record, updatePausedBody],
+  );
+
+  const handleResponseBodyChange = useCallback(
+    (value: string) => {
+      if (!record) return;
+      updatePausedBody(record.id, 'response', value);
+    },
+    [record, updatePausedBody],
+  );
+
   const handleResponseBodySourceChange = useCallback(
     (source: 'decoded' | 'raw') => {
       setResponseBodySource(source);
@@ -363,6 +387,8 @@ export default function TrafficDetail({
 
   const requestTabs = useMemo(() => {
     if (!record) return [];
+    const requestBodyForView =
+      pausedRequest?.body ?? pausedRequest?.originalBody ?? requestBody;
 
     return [
       {
@@ -425,10 +451,10 @@ export default function TrafficDetail({
       {
         key: "Body",
         label: "Body",
-        enable: !!requestBody || !!requestRawBody,
+        enable: !!requestBodyForView || !!requestRawBody || !!pausedRequest,
         children: (
           <Body
-            data={requestBody}
+            data={requestBodyForView}
             rawData={requestRawBody?.data}
             rawDataBase64={requestRawBody?.data_base64}
             source={requestBodySource}
@@ -437,6 +463,8 @@ export default function TrafficDetail({
             searchValue={requestSearch}
             displayFormat={requestDisplayFormat}
             onSearch={setRequestSearch}
+            editable={!!pausedRequest}
+            onBodyChange={handleRequestBodyChange}
           />
         ),
       },
@@ -450,7 +478,7 @@ export default function TrafficDetail({
             url={record.url}
             protocol={record.protocol}
             headers={record.request_headers}
-            body={requestRawBody?.data ?? requestBody}
+            body={requestRawBody?.data ?? requestBodyForView}
             searchValue={requestSearch}
             onSearch={setRequestSearch}
           />
@@ -468,6 +496,7 @@ export default function TrafficDetail({
   }, [
     record,
     requestBody,
+    pausedRequest,
     requestSearch,
     setRequestSearch,
     requestPanelContentType,
@@ -550,6 +579,8 @@ export default function TrafficDetail({
 
   const responseTabs = useMemo(() => {
     if (!record) return [];
+    const responseBodyForView =
+      pausedResponse?.body ?? pausedResponse?.originalBody ?? responseBody;
     const hasMessages = record.is_websocket || record.is_sse;
     const socketCount = record.socket_status?.frame_count ?? record.frame_count ?? 0;
     const messageCount = record.is_sse ? liveSseCount ?? socketCount : socketCount;
@@ -646,10 +677,10 @@ export default function TrafficDetail({
       {
         key: "Body",
         label: "Body",
-        enable: !!responseBody || !!responseRawBody || canPreviewResponseImage,
+        enable: !!responseBodyForView || !!responseRawBody || canPreviewResponseImage || !!pausedResponse,
         children: (
           <Body
-            data={responseBody}
+            data={responseBodyForView}
             rawData={responseRawBody?.data}
             rawDataBase64={responseRawBody?.data_base64}
             source={responseBodySource}
@@ -660,6 +691,8 @@ export default function TrafficDetail({
             searchValue={responseSearch}
             displayFormat={responseDisplayFormat}
             onSearch={setResponseSearch}
+            editable={!!pausedResponse}
+            onBodyChange={handleResponseBodyChange}
           />
         ),
       },
@@ -672,7 +705,7 @@ export default function TrafficDetail({
             protocol={record.protocol}
             status={record.status}
             headers={effectiveResponseHeaders}
-            body={responseRawBody?.data ?? responseBody}
+            body={responseRawBody?.data ?? responseBodyForView}
             searchValue={responseSearch}
             onSearch={setResponseSearch}
             isTunnel={record.is_tunnel}
@@ -697,6 +730,7 @@ export default function TrafficDetail({
     traeLikeAssembly,
     douBaoLikeAssembly,
     responseBody,
+    pausedResponse,
     onResponseBodyChange,
     canPreviewResponseImage,
     responseSearch,

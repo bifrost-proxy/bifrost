@@ -1,4 +1,5 @@
 mod body_metadata;
+pub mod breakpoint;
 mod devtools;
 pub mod handler;
 mod scripts;

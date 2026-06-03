@@ -1,12 +1,13 @@
 import { useMemo, useRef, useState, useCallback, useEffect } from 'react';
 import { theme, Button, Tooltip, message } from 'antd';
-import { CopyOutlined, FormatPainterOutlined } from '@ant-design/icons';
+import { CopyOutlined, FormatPainterOutlined, EditOutlined } from '@ant-design/icons';
 import hljs from 'highlight.js/lib/core';
 import json from 'highlight.js/lib/languages/json';
 import xml from 'highlight.js/lib/languages/xml';
 import javascript from 'highlight.js/lib/languages/javascript';
 import css from 'highlight.js/lib/languages/css';
 import plaintext from 'highlight.js/lib/languages/plaintext';
+import Editor from '@monaco-editor/react';
 import '../../../../styles/hljs-github-theme.css';
 
 import type { RecordContentType, SessionTargetSearchState } from '../../../../types';
@@ -18,6 +19,7 @@ import {
   shouldDisableJsonStructuredView,
 } from '../../helper/contentType';
 import { copyToClipboard } from '../../../../utils/clipboard';
+import { useThemeStore } from '../../../../stores/useThemeStore';
 
 hljs.registerLanguage('json', json);
 hljs.registerLanguage('xml', xml);
@@ -101,6 +103,8 @@ interface HighLightBodyProps {
   contentType: RecordContentType;
   searchValue: SessionTargetSearchState;
   onSearch: (v: Partial<SessionTargetSearchState>) => void;
+  editable?: boolean;
+  onBodyChange?: (value: string) => void;
 }
 
 export const HighLightBody = ({
@@ -108,10 +112,15 @@ export const HighLightBody = ({
   contentType,
   searchValue,
   onSearch,
+  editable = false,
+  onBodyChange,
 }: HighLightBodyProps) => {
   const { token } = theme.useToken();
+  const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
+
   const [showAll, setShowAll] = useState(false);
   const [isFormatted, setIsFormatted] = useState(true);
+  const [isEditing, setIsEditing] = useState(false);
   const wrapperRef = useTextSelection(!!data);
   const codeRef = useRef<HTMLElement>(null);
 
@@ -180,6 +189,11 @@ export const HighLightBody = ({
     const el = codeRef.current;
     if (!el) return;
     el.innerHTML = highlighted;
+    const debugState = globalThis as { __bifrostLogNextHljsHtml?: boolean };
+    if (debugState.__bifrostLogNextHljsHtml) {
+      console.log("[resume-hljs-html]", el.innerHTML);
+      debugState.__bifrostLogNextHljsHtml = false;
+    }
   }, [highlighted]);
 
   useEffect(() => {
@@ -187,8 +201,61 @@ export const HighLightBody = ({
     startMarkSearch();
   }, [highlighted, searchValue.value, startMarkSearch]);
 
-  if (!data) {
+  if (data == null) {
     return null;
+  }
+
+  if (editable) {
+    const monacoLang = getHighlightLanguage(contentType);
+    const lineCount = (data ?? '').split('\n').length;
+    const editorHeight = Math.max(200, Math.min(lineCount * 20 + 16, 600));
+
+    return (
+      <div style={{ position: 'relative' }}>
+        <div
+          style={{
+            position: 'absolute',
+            top: 4,
+            right: 8,
+            zIndex: 1,
+            display: 'flex',
+            gap: 4,
+          }}
+        >
+          <Tooltip title="Copy">
+            <Button
+              type="text"
+              size="small"
+              icon={<CopyOutlined />}
+              onClick={handleCopy}
+              style={{ background: token.colorBgContainer }}
+            />
+          </Tooltip>
+        </div>
+        <Editor
+          height={editorHeight}
+          language={monacoLang}
+          theme={resolvedTheme === 'dark' ? 'vs-dark' : 'light'}
+          value={data ?? ''}
+          onChange={(value) => onBodyChange?.(value ?? '')}
+          options={{
+            minimap: { enabled: false },
+            fontSize: 12,
+            lineNumbers: 'on',
+            scrollBeyondLastLine: false,
+            automaticLayout: true,
+            tabSize: 2,
+            wordWrap: 'on',
+            readOnly: false,
+            padding: { top: 28, bottom: 4 },
+            scrollbar: {
+              vertical: 'auto',
+              horizontal: 'auto',
+            },
+          }}
+        />
+      </div>
+    );
   }
 
   return (

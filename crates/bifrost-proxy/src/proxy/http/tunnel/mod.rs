@@ -45,7 +45,8 @@ use self::host_rule::parse_host_rule;
 use self::io::{BufferedIo, CombinedAsyncRw};
 
 use super::body_metadata::{
-    normalize_res_headers, response_content_encoding, set_content_encoding_header, BodyMode,
+    normalize_req_headers, normalize_res_headers, response_content_encoding,
+    set_content_encoding_header, BodyMode,
 };
 use super::devtools::{
     attach_devtools_client_req_id, devtools_bridge_requested, is_devtools_client_req_id_header,
@@ -2479,6 +2480,97 @@ async fn handle_intercepted_request_with_protocol(
     } else {
         Vec::new()
     };
+    let host_header_value = if actual_use_http {
+        if actual_target_port == 80 {
+            actual_target_host.clone()
+        } else {
+            format!("{}:{}", actual_target_host, actual_target_port)
+        }
+    } else if actual_target_port == 443 {
+        actual_target_host.clone()
+    } else {
+        format!("{}:{}", actual_target_host, actual_target_port)
+    };
+
+    let request_body_is_streaming = streaming_body.is_some();
+
+    if body_bytes.is_empty() {
+        if let Some(body) = streaming_body.take() {
+            if let Ok(collected) = body.collect().await {
+                body_bytes = collected.to_bytes().to_vec();
+            }
+        }
+    }
+
+    if let Some(ref state) = admin_state {
+        if state.breakpoint_manager.hook_request_enabled() {
+            let mut pending =
+                TrafficRecord::new(req_id.to_string(), method_str.clone(), original_uri.clone());
+            attach_devtools_client_req_id(&mut pending, &devtools_client_req_id);
+            pending.host = original_host.to_string();
+            pending.request_headers = Some(super::handler::headers_to_pairs(&parts.headers));
+            if let Some(ref current) = pending.request_headers {
+                if !super::headers_pairs_equal_ignore_order(&original_req_headers, current) {
+                    pending.original_request_headers = Some(original_req_headers.clone());
+                }
+            }
+            pending.request_size = if !body_bytes.is_empty() {
+                body_bytes.len()
+            } else {
+                req_content_length.unwrap_or(0)
+            };
+            pending.request_content_type = parts
+                .headers
+                .get(hyper::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            apply_listener_context(
+                &mut pending,
+                listener_port,
+                &client_ip,
+                &client_app,
+                client_pid,
+                &client_path,
+            );
+            pending.has_rule_hit = has_rules;
+            pending.matched_rules = crate::utils::build_matched_rules(&resolved_rules);
+            pending.request_body_ref = if !body_bytes.is_empty() {
+                store_request_body(
+                    &admin_state,
+                    req_id,
+                    &body_bytes,
+                    req_content_encoding.as_deref(),
+                )
+            } else if let Some(ref capture) = req_body_capture {
+                capture.clone_ref()
+            } else {
+                None
+            };
+            if !req_script_results.is_empty() {
+                pending.req_script_results = Some(req_script_results.clone());
+            }
+            state.record_traffic(pending);
+        }
+    }
+
+    let mut edited_body = Bytes::from(body_bytes.clone());
+    super::breakpoint::breakpoint_request_hook(
+        &admin_state,
+        &push_manager,
+        req_id,
+        &method_str,
+        &original_uri,
+        &mut parts.headers,
+        Bytes::from(body_bytes.clone()),
+        &mut edited_body,
+    )
+    .await;
+    body_bytes = edited_body.to_vec();
+    normalize_req_headers(
+        &mut parts,
+        BodyMode::Known(body_bytes.len()),
+        req_content_length.is_some(),
+    );
     let request_body_size = if !body_bytes.is_empty() {
         body_bytes.len()
     } else {
@@ -2488,10 +2580,8 @@ async fn handle_intercepted_request_with_protocol(
     let mut new_req = Request::builder()
         .method(actual_method.clone())
         .uri(&upstream_uri);
-
     let mut skip_referer = false;
     let mut skip_ua = false;
-
     for (name, value) in parts.headers.iter() {
         if name == hyper::header::HOST {
             continue;
@@ -2538,17 +2628,6 @@ async fn handle_intercepted_request_with_protocol(
         }
     }
 
-    let host_header_value = if actual_use_http {
-        if actual_target_port == 80 {
-            actual_target_host.clone()
-        } else {
-            format!("{}:{}", actual_target_host, actual_target_port)
-        }
-    } else if actual_target_port == 443 {
-        actual_target_host.clone()
-    } else {
-        format!("{}:{}", actual_target_host, actual_target_port)
-    };
     new_req = new_req.header(hyper::header::HOST, &host_header_value);
     if streaming_body.is_none() {
         if !body_bytes.is_empty() || req_content_length.is_some() {
@@ -2580,7 +2659,6 @@ async fn handle_intercepted_request_with_protocol(
         }
     }
 
-    let request_body_is_streaming = streaming_body.is_some();
     let outgoing_body = match streaming_body {
         Some(body) => body,
         None => full_body(Bytes::from(body_bytes.clone())),
@@ -2684,15 +2762,17 @@ async fn handle_intercepted_request_with_protocol(
                 record.has_rule_hit = has_rules;
                 record.matched_rules = crate::utils::build_matched_rules(&resolved_rules);
                 record.error_message = Some(error_msg);
-                record.request_body_ref = if let Some(ref capture) = req_body_capture {
-                    capture.take()
-                } else {
+                record.request_body_ref = if !body_bytes.is_empty() {
                     store_request_body(
                         &admin_state,
                         req_id,
                         &body_bytes,
                         req_content_encoding.as_deref(),
                     )
+                } else if let Some(ref capture) = req_body_capture {
+                    capture.clone_ref().or_else(|| capture.take())
+                } else {
+                    None
                 };
 
                 let response_body = if needs_response_override(&resolved_rules) {
@@ -3528,15 +3608,17 @@ async fn handle_intercepted_request_with_protocol(
                     record.req_script_results = Some(req_script_results.clone());
                 }
 
-                record.request_body_ref = if let Some(ref capture) = req_body_capture {
-                    capture.take()
-                } else {
+                record.request_body_ref = if !body_bytes.is_empty() {
                     store_request_body(
                         &admin_state,
                         &record_id,
                         &body_bytes,
                         req_content_encoding.as_deref(),
                     )
+                } else if let Some(ref capture) = req_body_capture {
+                    capture.clone_ref().or_else(|| capture.take())
+                } else {
+                    None
                 };
 
                 if is_sse {
@@ -3571,6 +3653,180 @@ async fn handle_intercepted_request_with_protocol(
         }
 
         if is_sse {
+            let hook_enabled = admin_state
+                .as_ref()
+                .map(|s| s.breakpoint_manager.hook_response_enabled())
+                .unwrap_or(false);
+
+            if hook_enabled {
+                let res_body = res_body_incoming.take().unwrap();
+                let collected = res_body.collect().await;
+                if let Ok(collected) = collected {
+                    let res_bytes = collected.to_bytes();
+                    let mut final_body = res_bytes.clone();
+                    let pause_event_count = parse_and_record_sse_events(&final_body);
+
+                    if let Some(ref state) = admin_state {
+                        state.sse_hub.set_closed(&record_id);
+                        state.sse_hub.unregister(&record_id);
+
+                        let pause_content_type = res_parts
+                            .headers
+                            .get(hyper::header::CONTENT_TYPE)
+                            .and_then(|v| v.to_str().ok())
+                            .map(|s| s.to_string());
+                        let pause_body_ref = state.body_store.as_ref().and_then(|body_store| {
+                            let store = body_store.read();
+                            store.store(req_id, "sse_raw", final_body.as_ref())
+                        });
+                        let pause_derived_body_ref =
+                            state.body_store.as_ref().and_then(|body_store| {
+                                bifrost_admin::assemble_openai_like_response_body_from_text(
+                                    std::str::from_utf8(&final_body).ok()?,
+                                )
+                                .and_then(|assembled| {
+                                    body_store.read().store(
+                                        req_id,
+                                        "res_openai_like",
+                                        assembled.as_bytes(),
+                                    )
+                                })
+                            });
+                        let pause_response_size = final_body.len();
+                        let pause_total_ms = total_ms;
+
+                        state.update_traffic_by_id(&record_id, move |record| {
+                            record.status = res_parts.status.as_u16();
+                            record.content_type = pause_content_type.clone();
+                            record.response_size = pause_response_size;
+                            record.duration_ms = record.duration_ms.max(pause_total_ms);
+                            record.response_body_ref = pause_body_ref.clone();
+                            record.derived_response_body_ref = pause_derived_body_ref.clone();
+                            record.frame_count = pause_event_count;
+                            record.last_frame_id = pause_event_count as u64;
+                            record.socket_status = Some(bifrost_admin::SocketStatus {
+                                is_open: false,
+                                send_count: 0,
+                                receive_count: pause_event_count as u64,
+                                send_bytes: 0,
+                                receive_bytes: pause_response_size as u64,
+                                frame_count: pause_event_count,
+                                close_code: None,
+                                close_reason: Some("SSE stream completed".to_string()),
+                            });
+                        });
+                    }
+
+                    super::breakpoint::breakpoint_response_hook(
+                        &admin_state,
+                        &push_manager,
+                        req_id,
+                        &method_str,
+                        &original_uri,
+                        res_parts.status.as_u16(),
+                        &mut res_parts.headers,
+                        final_body.clone(),
+                        &mut final_body,
+                    )
+                    .await;
+
+                    normalize_res_headers(
+                        &mut res_parts,
+                        BodyMode::Known(final_body.len()),
+                        &method_str,
+                    );
+
+                    if let Some(ref state) = admin_state {
+                        let mut record = TrafficRecord::new(
+                            record_id.clone(),
+                            method_str.clone(),
+                            original_uri.clone(),
+                        );
+                        attach_devtools_client_req_id(&mut record, &devtools_client_req_id);
+                        record.status = res_parts.status.as_u16();
+                        record.content_type = res_parts
+                            .headers
+                            .get(hyper::header::CONTENT_TYPE)
+                            .and_then(|v| v.to_str().ok())
+                            .map(|s| s.to_string());
+                        record.response_size = final_body.len();
+                        record.duration_ms = total_ms;
+                        record.host = original_host.to_string();
+                        record.timing = Some(RequestTiming {
+                            dns_ms,
+                            connect_ms: None,
+                            tls_ms,
+                            send_ms: None,
+                            wait_ms: Some(wait_ms),
+                            first_byte_ms: Some(total_ms),
+                            receive_ms: Some(0u64),
+                            total_ms,
+                        });
+                        record.request_headers = Some(final_req_headers.clone());
+                        record.original_response_headers = Some(original_res_headers.clone());
+                        record.request_body_ref = if !body_bytes.is_empty() {
+                            store_request_body(
+                                &admin_state,
+                                req_id,
+                                &body_bytes,
+                                req_content_encoding.as_deref(),
+                            )
+                        } else if let Some(ref capture) = req_body_capture {
+                            capture.clone_ref().or_else(|| capture.take())
+                        } else {
+                            None
+                        };
+                        if let Some(ref body_store) = state.body_store {
+                            let store = body_store.read();
+                            record.response_body_ref =
+                                store.store(req_id, "sse_raw", final_body.as_ref());
+                            if let Ok(body_text) = std::str::from_utf8(&final_body) {
+                                record.derived_response_body_ref =
+                                    bifrost_admin::assemble_openai_like_response_body_from_text(
+                                        body_text,
+                                    )
+                                    .and_then(|assembled| {
+                                        store.store(req_id, "res_openai_like", assembled.as_bytes())
+                                    });
+                            }
+                        }
+                        apply_listener_context(
+                            &mut record,
+                            listener_port,
+                            &client_ip,
+                            &client_app,
+                            client_pid,
+                            &client_path,
+                        );
+                        record.has_rule_hit = has_rules;
+                        record.matched_rules = crate::utils::build_matched_rules(&resolved_rules);
+                        record.set_sse();
+                        if let Some(ref mut status) = record.socket_status {
+                            status.receive_bytes = final_body.len() as u64;
+                            let event_count = std::str::from_utf8(&final_body)
+                                .map(|s| {
+                                    s.split("\n\n")
+                                        .filter(|chunk| !chunk.trim().is_empty())
+                                        .count() as u64
+                                })
+                                .unwrap_or(0);
+                            status.receive_count = event_count;
+                            status.frame_count = event_count as usize;
+                        }
+                        state.update_traffic_by_id(&record_id, move |r| {
+                            *r = record.clone();
+                        });
+                    }
+
+                    let response_body = wrap_throttled_body(
+                        full_body(final_body.to_vec()),
+                        resolved_rules.res_speed,
+                    );
+                    let body = with_trailers(response_body, &resolved_rules);
+                    return Ok(Response::from_parts(res_parts, body));
+                }
+            }
+
             let res_body = res_body_incoming.take().unwrap();
             let tee_body = create_sse_tee_body(
                 res_body,
@@ -3739,15 +3995,17 @@ async fn handle_intercepted_request_with_protocol(
             record.req_script_results = Some(req_script_results.clone());
         }
 
-        record.request_body_ref = if let Some(ref capture) = req_body_capture {
-            capture.take()
-        } else {
+        record.request_body_ref = if !body_bytes.is_empty() {
             store_request_body(
                 &admin_state,
                 req_id,
                 &body_bytes,
                 req_content_encoding.as_deref(),
             )
+        } else if let Some(ref capture) = req_body_capture {
+            capture.clone_ref().or_else(|| capture.take())
+        } else {
+            None
         };
 
         if let Some(ref body_store) = state.body_store {
@@ -3981,7 +4239,7 @@ async fn handle_intercepted_request_with_protocol(
         Vec::new()
     };
 
-    let final_body = if inject_bifrost_badge {
+    let mut final_body = if inject_bifrost_badge {
         let badge_rules_json =
             super::handler::build_badge_rules_json(admin_state.as_deref(), listener_port).await;
         let final_res_content_type = res_parts
@@ -4031,6 +4289,73 @@ async fn handle_intercepted_request_with_protocol(
     } else {
         final_body
     };
+
+    if let Some(ref state) = admin_state {
+        if state.breakpoint_manager.hook_response_enabled() {
+            let final_status = res_parts.status.as_u16();
+            let final_content_type = res_parts
+                .headers
+                .get(hyper::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            let final_res_headers: Vec<(String, String)> = res_parts
+                .headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect();
+            let final_response_size =
+                calculate_response_size(final_status, &final_res_headers, final_body.len());
+            let pause_total_ms = start_time.elapsed().as_millis() as u64;
+            let original_res_headers_for_pause = original_res_headers.clone();
+            let pause_body_ref = state.body_store.as_ref().and_then(|body_store| {
+                let max_decompress_output_bytes = state
+                    .config_manager
+                    .as_ref()
+                    .and_then(|cm| cm.try_config())
+                    .map(|cfg| cfg.sandbox.limits.max_decompress_output_bytes)
+                    .unwrap_or(10 * 1024 * 1024);
+                let store = body_store.read();
+                let decompressed_res = crate::transform::decompress_body_with_limit(
+                    &final_body,
+                    response_content_encoding(&res_parts).as_deref(),
+                    max_decompress_output_bytes,
+                );
+                store.store(req_id, "res", decompressed_res.as_ref())
+            });
+
+            state.update_traffic_by_id(req_id, move |record| {
+                record.status = final_status;
+                record.content_type = final_content_type.clone();
+                record.response_size = final_response_size;
+                record.duration_ms = record.duration_ms.max(pause_total_ms);
+                record.response_headers = if final_res_headers != original_res_headers_for_pause {
+                    Some(final_res_headers.clone())
+                } else {
+                    None
+                };
+                record.response_body_ref = pause_body_ref.clone();
+                if let Some(ref mut timing) = record.timing {
+                    timing.total_ms = record.duration_ms;
+                    if timing.first_byte_ms.is_none() {
+                        timing.first_byte_ms = Some(record.duration_ms);
+                    }
+                }
+            });
+        }
+    }
+
+    super::breakpoint::breakpoint_response_hook(
+        &admin_state,
+        &push_manager,
+        req_id,
+        &method_str,
+        &original_uri,
+        res_parts.status.as_u16(),
+        &mut res_parts.headers,
+        final_body.clone(),
+        &mut final_body,
+    )
+    .await;
 
     normalize_res_headers(
         &mut res_parts,

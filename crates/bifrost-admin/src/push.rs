@@ -121,6 +121,15 @@ pub enum PushMessage {
 
     #[serde(rename = "notification")]
     Notification(NotificationPushData),
+
+    #[serde(rename = "breakpoint_paused")]
+    BreakpointPaused(BreakpointPausedPushData),
+
+    #[serde(rename = "breakpoint_settings_updated")]
+    BreakpointSettingsUpdated(BreakpointSettingsPushData),
+
+    #[serde(rename = "breakpoint_resumed")]
+    BreakpointResumed(BreakpointResumedPushData),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -262,6 +271,29 @@ pub struct NotificationPushData {
     pub message: String,
     pub metadata: Option<serde_json::Value>,
     pub unread_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BreakpointPausedPushData {
+    pub phase: String, // "request" or "response"
+    pub request_id: String,
+    pub method: Option<String>,
+    pub url: Option<String>,
+    pub status: Option<u16>,
+    pub headers: Vec<(String, String)>,
+    pub body: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BreakpointSettingsPushData {
+    pub enabled: bool,
+    pub hook_request: bool,
+    pub hook_response: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BreakpointResumedPushData {
+    pub request_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1461,6 +1493,48 @@ impl PushManager {
             }
         }
 
+        for client_id in clients_to_remove {
+            self.unregister_client(client_id);
+        }
+    }
+
+    pub fn broadcast_breakpoint_paused(&self, data: BreakpointPausedPushData) {
+        let msg = PushMessage::BreakpointPaused(data);
+        let mut clients_to_remove = Vec::new();
+        for client_ref in self.clients.iter() {
+            let client = client_ref.value();
+            if !client.send(msg.clone()) {
+                clients_to_remove.push(client.id);
+            }
+        }
+        for client_id in clients_to_remove {
+            self.unregister_client(client_id);
+        }
+    }
+
+    pub fn broadcast_breakpoint_settings_updated(&self, data: BreakpointSettingsPushData) {
+        let msg = PushMessage::BreakpointSettingsUpdated(data);
+        let mut clients_to_remove = Vec::new();
+        for client_ref in self.clients.iter() {
+            let client = client_ref.value();
+            if !client.send(msg.clone()) {
+                clients_to_remove.push(client.id);
+            }
+        }
+        for client_id in clients_to_remove {
+            self.unregister_client(client_id);
+        }
+    }
+
+    pub fn broadcast_breakpoint_resumed(&self, request_id: String) {
+        let msg = PushMessage::BreakpointResumed(BreakpointResumedPushData { request_id });
+        let mut clients_to_remove = Vec::new();
+        for client_ref in self.clients.iter() {
+            let client = client_ref.value();
+            if !client.send(msg.clone()) {
+                clients_to_remove.push(client.id);
+            }
+        }
         for client_id in clients_to_remove {
             self.unregister_client(client_id);
         }
