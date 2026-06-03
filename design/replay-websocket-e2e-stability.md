@@ -21,8 +21,8 @@
 ## 测试方案
 
 - 单元测试：无新增 Rust 公共函数；本次只调整 shell E2E 基础设施。
-- E2E 测试：执行 `e2e-tests/tests/test_replay_websocket_frames.sh`，验证 9 个 Replay WebSocket 子场景全部通过。
-- 真实场景测试：更新并执行 `human_tests/proxy-websocket-sse.md` 中 `TC-PWS-07`，验证隔离端口、日志诊断和最终 `PASSED=9 FAILED=0`。
+- E2E 测试：执行 `e2e-tests/tests/test_replay_websocket_frames.sh`，验证 10 个 Replay WebSocket 子场景全部通过。
+- 真实场景测试：更新并执行 `human_tests/proxy-websocket-sse.md` 中 `TC-PWS-07`，验证隔离端口、日志诊断、WebSocket Replay 请求/响应头规则和最终 `PASSED=10 FAILED=0`。
 
 ## 校验要求
 

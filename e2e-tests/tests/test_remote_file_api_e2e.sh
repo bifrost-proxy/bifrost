@@ -1,4 +1,6 @@
 #!/bin/bash
+: "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
+export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
 #
 # Remote File API — full CLI contract test.
 #

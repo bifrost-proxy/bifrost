@@ -63,7 +63,7 @@ if [[ -n "${DEVICE_RIGHT:-}" ]]; then
   printf 'duplicate audio payload %s\n' "$RUN_ID" > "$RIGHT_DIR/duplicate-copy.wav"
 fi
 
-BIFROST_DATA_DIR="$DATA_DIR" ./target/debug/bifrost start \
+BIFROST_DATA_DIR="$DATA_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 ./target/debug/bifrost start \
   -p "$PORT" \
   --unsafe-ssl \
   --no-system-proxy \

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 
 set -euo pipefail
+: "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
+export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
 
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
 

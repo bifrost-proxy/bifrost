@@ -1,4 +1,7 @@
 #!/bin/bash
+: "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
+export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
+
 #
 # Bifrost CLI 在线命令端到端测试（真实端到端验证版）
 #

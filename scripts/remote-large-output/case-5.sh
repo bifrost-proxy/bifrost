@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+: "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
+export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
+
 # Case 5: legacy envelope + stream_frame dual-track parallel validation.
 #
 # PR #6c injected parallel emission of stream_frame alongside the legacy

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+: "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
+export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
+
 # Case 3: 5× forced kill + resume with SHA-256 verification.
 #
 # Launches a streaming consumer that downloads a deterministic 64 MiB

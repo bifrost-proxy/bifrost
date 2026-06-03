@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+: "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
+export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
 #
 # Remote File Relay E2E — full caller → relay → target data path test.
 #

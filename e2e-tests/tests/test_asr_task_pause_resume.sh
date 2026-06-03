@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+: "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
+export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PORT="${BIFROST_ASR_TASK_PAUSE_E2E_PORT:-18882}"

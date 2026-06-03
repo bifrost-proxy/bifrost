@@ -1,4 +1,7 @@
 #!/bin/bash
+: "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
+export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
+
 #
 # 大文件 Body 处理保护策略 E2E 测试
 # 

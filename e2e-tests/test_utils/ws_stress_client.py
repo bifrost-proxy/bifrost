@@ -186,6 +186,7 @@ def run(
     protocol: str,
     expect_protocol: str,
     expect_extensions: str,
+    expect_header: list[str],
     sleep_before_send_s: float,
     no_send: bool,
     read_seconds: float,
@@ -239,6 +240,18 @@ def run(
             if expect_extensions not in got:
                 raise RuntimeError(
                     f"handshake failed: sec-websocket-extensions mismatch, got={got!r}"
+                )
+
+        for expected in expect_header:
+            if "=" not in expected:
+                raise RuntimeError(
+                    f"invalid --expect-header {expected!r}, expected NAME=VALUE"
+                )
+            name, value = expected.split("=", 1)
+            got = headers.get(name.strip().lower(), "")
+            if got != value:
+                raise RuntimeError(
+                    f"handshake failed: header {name.strip()!r} mismatch, got={got!r}"
                 )
 
         if sleep_before_send_s > 0:
@@ -342,6 +355,12 @@ def main():
     ap.add_argument("--protocol", default="")
     ap.add_argument("--expect-protocol", default="")
     ap.add_argument("--expect-extensions", default="")
+    ap.add_argument(
+        "--expect-header",
+        action="append",
+        default=[],
+        help="Assert a handshake response header as NAME=VALUE; may be repeated",
+    )
     ap.add_argument("--sleep-before-send", type=float, default=0.0)
     ap.add_argument("--no-send", action="store_true")
     ap.add_argument("--read-seconds", type=float, default=0.0)
@@ -365,6 +384,7 @@ def main():
         protocol=args.protocol,
         expect_protocol=args.expect_protocol,
         expect_extensions=args.expect_extensions,
+        expect_header=args.expect_header,
         sleep_before_send_s=args.sleep_before_send,
         no_send=args.no_send,
         read_seconds=args.read_seconds,

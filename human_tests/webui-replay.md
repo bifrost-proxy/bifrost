@@ -264,7 +264,31 @@ Replay 页面是 Bifrost 管理端的 HTTP 请求重放工具（类似 Postman�
 
 ---
 
-### TC-WRP-17：导入 curl 命令
+### TC-WRP-17：WebSocket Replay 应用请求头和响应头规则
+
+**操作步骤**：
+1. 执行 Replay WebSocket E2E 脚本：
+   ```bash
+   BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_replay_websocket_frames.sh
+   ```
+2. 检查脚本中的 `Replay WebSocket request/response header rules` 场景。
+
+**预期结果**：
+- Replay WebSocket 使用 `rule_config=custom` 执行时，上游请求头应用 `reqHeaders://(X-Replay-WS-Request: injected)`。
+- Replay 返回给客户端的 `101 Switching Protocols` 握手响应包含 `X-Replay-WS-Response: injected`。
+- Traffic 详情中的 `request_headers` 包含 `X-Replay-WS-Request: injected`。
+- Traffic 详情中的 `response_headers` 包含 `X-Replay-WS-Response: injected`。
+- 脚本最终输出 `Replay WebSocket E2E Results: PASSED=10 FAILED=0`。
+
+**本轮执行记录（2026-06-03）**：
+- 先执行 `SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost`，确保 `target/debug/bifrost` 对应当前源码。
+- 执行 `RUST_LOG=bifrost_admin::handlers::replay=debug BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_replay_websocket_frames.sh`。
+- 脚本启动本地 mock：`Starting replay WS server on 127.0.0.1:20259`、`Starting replay WSS server on 127.0.0.1:20260`，并启动隔离数据目录下的 Bifrost 测试代理 `127.0.0.1:19259`，未修改系统代理。
+- `Replay WebSocket request/response header rules` 场景通过；脚本最终输出 `Replay WebSocket E2E Results: PASSED=10 FAILED=0`。
+
+---
+
+### TC-WRP-18：导入 curl 命令
 
 **操作步骤**：
 1. 在 Replay 页面中找到导入功能（"Import" 或 "Import curl"）
@@ -284,7 +308,7 @@ Replay 页面是 Bifrost 管理端的 HTTP 请求重放工具（类似 Postman�
 
 ---
 
-### TC-WRP-18：Form-Data 请求体
+### TC-WRP-19：Form-Data 请求体
 
 **操作步骤**：
 1. 创建一个新请求，Method 设为 `POST`
@@ -303,7 +327,7 @@ Replay 页面是 Bifrost 管理端的 HTTP 请求重放工具（类似 Postman�
 
 ---
 
-### TC-WRP-19：URL-Encoded Form 请求体
+### TC-WRP-20：URL-Encoded Form 请求体
 
 **操作步骤**：
 1. 创建一个新请求，Method 设为 `POST`
@@ -322,7 +346,7 @@ Replay 页面是 Bifrost 管理端的 HTTP 请求重放工具（类似 Postman�
 
 ---
 
-### TC-WRP-20：纯文本请求体
+### TC-WRP-21：纯文本请求体
 
 **操作步骤**：
 1. 创建一个新请求，Method 设为 `POST`
@@ -339,7 +363,7 @@ Replay 页面是 Bifrost 管理端的 HTTP 请求重放工具（类似 Postman�
 
 ---
 
-### TC-WRP-21：请求体代码编辑器功能
+### TC-WRP-22：请求体代码编辑器功能
 
 **操作步骤**：
 1. 创建一个新请求
@@ -365,7 +389,7 @@ Replay 页面是 Bifrost 管理端的 HTTP 请求重放工具（类似 Postman�
 
 ---
 
-### TC-WRP-22：响应体代码高亮
+### TC-WRP-23：响应体代码高亮
 
 **操作步骤**：
 1. 发送 GET 请求到 `https://httpbin.org/get`
@@ -379,7 +403,7 @@ Replay 页面是 Bifrost 管理端的 HTTP 请求重放工具（类似 Postman�
 
 ---
 
-### TC-WRP-23：Replay HTTPS API 请求经 localhost 规则转发/透传不返回 502
+### TC-WRP-24：Replay HTTPS API 请求经 localhost 规则转发/透传不返回 502
 
 **前置条件**：
 1. 启动一个本地 HTTP echo 服务，例如：

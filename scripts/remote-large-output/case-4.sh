@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+: "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
+export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
+
 # Case 4: --output-file local write + SHA-256 digest.
 #
 # Verifies that `bifrost remote exec --stream --output-file <path>`

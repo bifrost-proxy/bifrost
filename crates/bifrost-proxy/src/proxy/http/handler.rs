@@ -14,7 +14,8 @@ use bytes::Bytes;
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use hyper::client::conn::http1;
-use hyper::header::HeaderValue;
+use hyper::header::{HeaderName, HeaderValue, AUTHORIZATION, REFERER, USER_AGENT};
+use hyper::HeaderMap;
 use hyper::{Request, Response, StatusCode, Uri};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
@@ -36,7 +37,8 @@ use super::ws_handshake::{
     header_values, negotiate_extensions, negotiate_protocol, read_http1_response_with_leftover,
 };
 use crate::server::{
-    full_body, with_trailers, BoxBody, ResolvedRules, RulesResolver, ADMIN_VIRTUAL_HOST,
+    full_body, with_trailers, BoxBody, HeaderReplaceTarget, ResolvedRules, RulesResolver,
+    ADMIN_VIRTUAL_HOST,
 };
 use crate::transform::apply_req_rules;
 use crate::transform::apply_res_rules;
@@ -94,6 +96,158 @@ fn apply_request_context(record: &mut TrafficRecord, ctx: &RequestContext) {
     record.client_app = ctx.client_app.clone();
     record.client_pid = ctx.client_pid;
     record.client_path = ctx.client_path.clone();
+}
+
+pub(in crate::proxy::http) fn apply_websocket_request_header_rules(
+    headers: &mut HeaderMap,
+    rules: &ResolvedRules,
+) {
+    for header_name in &rules.delete_req_headers {
+        if let Ok(name) = header_name.parse::<HeaderName>() {
+            headers.remove(name);
+        }
+    }
+
+    for (name, value) in &rules.req_headers {
+        if let (Ok(header_name), Ok(header_value)) =
+            (name.parse::<HeaderName>(), value.parse::<HeaderValue>())
+        {
+            headers.insert(header_name, header_value);
+        }
+    }
+
+    if let Some(ref ua) = rules.ua {
+        if let Ok(value) = ua.parse::<HeaderValue>() {
+            headers.insert(USER_AGENT, value);
+        }
+    }
+
+    if let Some(ref referer) = rules.referer {
+        if let Ok(value) = referer.parse::<HeaderValue>() {
+            headers.insert(REFERER, value);
+        }
+    }
+
+    if let Some(ref auth) = rules.auth {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(auth);
+        if let Ok(value) = format!("Basic {}", encoded).parse::<HeaderValue>() {
+            headers.insert(AUTHORIZATION, value);
+        }
+    }
+
+    apply_websocket_header_replace(headers, rules, HeaderReplaceTarget::Request);
+}
+
+pub(in crate::proxy::http) fn apply_websocket_response_header_rules(
+    headers: &mut HeaderMap,
+    rules: &ResolvedRules,
+) {
+    for header_name in &rules.delete_res_headers {
+        if let Ok(name) = header_name.parse::<HeaderName>() {
+            headers.remove(name);
+        }
+    }
+
+    for (name, value) in &rules.res_headers {
+        if let (Ok(header_name), Ok(header_value)) =
+            (name.parse::<HeaderName>(), value.parse::<HeaderValue>())
+        {
+            headers.insert(header_name, header_value);
+        }
+    }
+
+    apply_websocket_header_replace(headers, rules, HeaderReplaceTarget::Response);
+}
+
+pub(in crate::proxy::http) fn merge_websocket_header_rule_candidates(
+    mut base: ResolvedRules,
+    resolver: &dyn RulesResolver,
+    candidates: &[String],
+    method: &str,
+    incoming_headers: &HashMap<String, String>,
+    incoming_cookies: &HashMap<String, String>,
+) -> ResolvedRules {
+    for candidate_url in candidates {
+        let candidate = resolver.resolve_with_context(
+            candidate_url,
+            method,
+            incoming_headers,
+            incoming_cookies,
+        );
+
+        append_unique_pairs(&mut base.req_headers, candidate.req_headers);
+        append_unique_pairs(&mut base.res_headers, candidate.res_headers);
+        append_unique_strings(&mut base.delete_req_headers, candidate.delete_req_headers);
+        append_unique_strings(&mut base.delete_res_headers, candidate.delete_res_headers);
+        append_unique_header_replace(&mut base.header_replace, candidate.header_replace);
+
+        if base.ua.is_none() {
+            base.ua = candidate.ua;
+        }
+        if base.referer.is_none() {
+            base.referer = candidate.referer;
+        }
+        if base.auth.is_none() {
+            base.auth = candidate.auth;
+        }
+    }
+
+    base
+}
+
+fn append_unique_pairs(target: &mut Vec<(String, String)>, source: Vec<(String, String)>) {
+    for item in source {
+        if !target.contains(&item) {
+            target.push(item);
+        }
+    }
+}
+
+fn append_unique_strings(target: &mut Vec<String>, source: Vec<String>) {
+    for item in source {
+        if !target.contains(&item) {
+            target.push(item);
+        }
+    }
+}
+
+fn append_unique_header_replace(
+    target: &mut Vec<crate::server::HeaderReplaceRule>,
+    source: Vec<crate::server::HeaderReplaceRule>,
+) {
+    for item in source {
+        if !target.iter().any(|existing| {
+            existing.target == item.target
+                && existing.header_name == item.header_name
+                && existing.pattern == item.pattern
+                && existing.replacement == item.replacement
+        }) {
+            target.push(item);
+        }
+    }
+}
+
+fn apply_websocket_header_replace(
+    headers: &mut HeaderMap,
+    rules: &ResolvedRules,
+    target: HeaderReplaceTarget,
+) {
+    for rule in &rules.header_replace {
+        if rule.target != target {
+            continue;
+        }
+
+        if let Ok(header_name) = rule.header_name.parse::<HeaderName>() {
+            if let Some(current_value) = headers.get(&header_name) {
+                if let Ok(current_str) = current_value.to_str() {
+                    let new_value = current_str.replace(&rule.pattern, &rule.replacement);
+                    if let Ok(new_header_value) = new_value.parse::<HeaderValue>() {
+                        headers.insert(header_name, new_header_value);
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3078,12 +3232,43 @@ async fn handle_http_websocket(
         format!("{}://{}{}", http_scheme, host_header, path)
     };
 
-    let mut resolved_rules = rules.resolve(&ws_url, "GET");
-    if resolved_rules.rules.is_empty() && resolved_rules.host.is_none() {
-        resolved_rules = rules.resolve(&http_url, "GET");
-    }
-    let has_rules = !resolved_rules.rules.is_empty() || resolved_rules.host.is_some();
+    let incoming_headers: HashMap<String, String> = req
+        .headers()
+        .iter()
+        .map(|(key, value)| {
+            (
+                key.to_string().to_lowercase(),
+                value.to_str().unwrap_or("").to_string(),
+            )
+        })
+        .collect();
+    let incoming_cookies: HashMap<String, String> = collect_all_cookies_from_headers(req.headers());
 
+    let mut resolved_rules =
+        rules.resolve_with_context(&ws_url, "GET", &incoming_headers, &incoming_cookies);
+    if resolved_rules.rules.is_empty() && resolved_rules.host.is_none() {
+        resolved_rules =
+            rules.resolve_with_context(&http_url, "GET", &incoming_headers, &incoming_cookies);
+    }
+    let mut candidate_urls = vec![http_url, host_header.clone(), host.clone()];
+    candidate_urls.retain(|candidate| candidate != &ws_url);
+    resolved_rules = merge_websocket_header_rule_candidates(
+        resolved_rules,
+        rules.as_ref(),
+        &candidate_urls,
+        "GET",
+        &incoming_headers,
+        &incoming_cookies,
+    );
+    let has_rules = !resolved_rules.rules.is_empty()
+        || resolved_rules.host.is_some()
+        || !resolved_rules.req_headers.is_empty()
+        || !resolved_rules.res_headers.is_empty()
+        || !resolved_rules.delete_req_headers.is_empty()
+        || !resolved_rules.delete_res_headers.is_empty()
+        || !resolved_rules.header_replace.is_empty();
+
+    apply_websocket_request_header_rules(req.headers_mut(), &resolved_rules);
     let req_headers: Vec<(String, String)> = headers_to_pairs(req.headers());
 
     let (target_host, target_port, target_path) = if let Some(ref host_rule) = resolved_rules.host {
@@ -3205,6 +3390,23 @@ async fn handle_http_websocket(
     }
 
     let response_headers = upstream_resp.headers.clone();
+    let mut passthrough_response_headers = HeaderMap::new();
+    for (name, value) in &response_headers {
+        let lower = name.to_ascii_lowercase();
+        if lower != "upgrade"
+            && lower != "connection"
+            && lower != "sec-websocket-accept"
+            && lower != "sec-websocket-protocol"
+            && lower != "sec-websocket-extensions"
+        {
+            if let (Ok(header_name), Ok(header_value)) =
+                (name.parse::<HeaderName>(), value.parse::<HeaderValue>())
+            {
+                passthrough_response_headers.insert(header_name, header_value);
+            }
+        }
+    }
+    apply_websocket_response_header_rules(&mut passthrough_response_headers, &resolved_rules);
     let sec_accept = upstream_resp
         .header("Sec-WebSocket-Accept")
         .map(|v| v.to_string());
@@ -3342,14 +3544,8 @@ async fn handle_http_websocket(
         response = response.header("Sec-WebSocket-Extensions", extensions);
     }
 
-    for (name, value) in response_headers {
-        let lower = name.to_ascii_lowercase();
-        if lower != "upgrade"
-            && lower != "connection"
-            && lower != "sec-websocket-accept"
-            && lower != "sec-websocket-protocol"
-            && lower != "sec-websocket-extensions"
-        {
+    for (name, value) in passthrough_response_headers {
+        if let Some(name) = name {
             response = response.header(name, value);
         }
     }

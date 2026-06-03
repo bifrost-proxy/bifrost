@@ -134,6 +134,49 @@ pub(crate) fn apply_response_rules(
     (final_status, headers, final_body)
 }
 
+pub(crate) fn apply_websocket_response_header_rules(
+    resolved_rules: &ResolvedRules,
+    mut headers: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    let mut delete_res_headers = Vec::new();
+    let mut res_headers = Vec::new();
+    let mut header_replace = Vec::new();
+
+    for rule in &resolved_rules.rules {
+        match rule.rule.protocol {
+            Protocol::Delete => {
+                delete_res_headers.extend(parse_delete_value(&rule.resolved_value).res_headers);
+            }
+            Protocol::ResHeaders => {
+                res_headers.extend(parse_header_values(&rule.resolved_value));
+            }
+            Protocol::HeaderReplace => {
+                header_replace.extend(parse_header_replace_value(&rule.resolved_value));
+            }
+            _ => {}
+        }
+    }
+
+    for header_name in delete_res_headers {
+        remove_header(&mut headers, &header_name);
+    }
+    for (key, value) in res_headers {
+        set_header(&mut headers, key, value);
+    }
+    for rule in header_replace {
+        if rule.target == HeaderReplaceTarget::Response {
+            replace_header_value(
+                &mut headers,
+                &rule.header_name,
+                &rule.pattern,
+                &rule.replacement,
+            );
+        }
+    }
+
+    headers
+}
+
 fn set_header(headers: &mut Vec<(String, String)>, key: String, value: String) {
     remove_header(headers, &key);
     headers.push((key, value));
@@ -411,7 +454,7 @@ fn encode_attachment_filename(filename: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::apply_response_rules;
+    use super::{apply_response_rules, apply_websocket_response_header_rules};
     use bifrost_core::{RequestContext, RuleParser, RulesResolver};
 
     fn resolve(rule_text: &str) -> bifrost_core::ResolvedRules {
@@ -487,5 +530,26 @@ mod tests {
 
         assert!(header(&headers, "X-Remove").is_none());
         assert_eq!(header(&headers, "X-Keep"), Some("yes"));
+    }
+
+    #[test]
+    fn replay_websocket_response_rules_apply_headers_only() {
+        let rules = resolve(
+            "https://example.test/api statusCode://204 resHeaders://X-Replay-WS:injected delete://resHeaders.X-Remove headerReplace://res.X-Trace:old=new resBody://ignored",
+        );
+
+        let headers = apply_websocket_response_header_rules(
+            &rules,
+            vec![
+                ("X-Remove".to_string(), "1".to_string()),
+                ("X-Trace".to_string(), "old".to_string()),
+                ("X-Upstream".to_string(), "seen".to_string()),
+            ],
+        );
+
+        assert!(header(&headers, "X-Remove").is_none());
+        assert_eq!(header(&headers, "X-Trace"), Some("new"));
+        assert_eq!(header(&headers, "X-Replay-WS"), Some("injected"));
+        assert_eq!(header(&headers, "X-Upstream"), Some("seen"));
     }
 }

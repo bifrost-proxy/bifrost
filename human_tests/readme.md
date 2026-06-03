@@ -34,6 +34,7 @@
 | [voice-wake-actions.md](./voice-wake-actions.md) | Voice Wake Actions | 10 | 复用 Speaker Diarization 已录入声纹、本机唤醒音频样本采集、用户手动确认唤醒词、sherpa-onnx KWS 后台麦克风监听、快捷键输入框直接捕获组合键/单键/双击、CLI bind-audio `--phrase` 绑定、KWS+声纹双门禁、WebUI 开关启动门禁、独立 worker 跟随主服务停止、后台不可达错误提示、API events 落盘，以及 CLI 显式 execute 真实按键边界 |
 | [docs-implementation-sync.md](./docs-implementation-sync.md) | Docs 与实现同步质检 | 8 | docs/CLI/Scripts/规则协议说明与当前 `bifrost --help`、traffic/search/remote file help、ScriptType::Parser、bp/devtools/upstreamUnsafeSsl 协议、过滤器 resolver 边界、workspace crate 架构索引、Markdown 相对链接，以及规则语法示例保持一致 |
 | [rust-dependency-audit-ci.md](./rust-dependency-audit-ci.md) | Rust Dependency Audit CI | 4 | 使用 cargo-deny 与 cargo-udeps 进行 Rust 重复依赖和未使用依赖审计，验证 CI/local-ci 接入、显式跳过参数和工具缺失错误提示 |
+| [e2e-script-startup.md](./e2e-script-startup.md) | E2E Script Startup | 1 | E2E 脚本启动 Bifrost 测试服务时默认禁用 Sync 自动登录弹窗，公共 helper 与直接启动脚本均受静态守卫覆盖 |
 | [rule-filter-routing-diagnostics.md](./rule-filter-routing-diagnostics.md) | 规则过滤与网络包诊断 | 8 | `includeFilter:///account` 按普通前缀匹配 `/account-center`，长 `excludeFilter` 链全部按前缀生效，Whistle 风格 `excludeFilter://*/api` / `excludeFilter://*/alice/*` URL 通配符过滤可跳过当前规则，`upstreamUnsafeSsl://true` 按规则放行不安全 HTTPS 上游，Traffic 详情与 network `.bifrost` 导出保留 `actual_url`、`actual_host`、`listener_port`、`has_rule_hit` 等实际转发诊断字段，专用回归 fixture 不被通用规则 runner 误收集 |
 
 ### Web UI 测试
@@ -47,7 +48,7 @@
 | [webui-rules.md](./webui-rules.md) | Web UI Rules 页面 | 44 | 规则列表、创建/编辑/删除、排序方式 UI 配置持久化、语法高亮、自动补全、树形视图、Dynamic Island、Merged Rules 一键复制、Group active summary 与代理运行时本地 fallback、远端失败和快速本地变更稳定性、Group name 深链不返回 502、退出/重新登录后 Group ID 跳转保持、导入导出、桌面端编辑器快捷键回归、Undo 后保存清理黄点、编辑器内容恢复原文后 Save 按钮禁用回归 |
 | [webui-scripts.md](./webui-scripts.md) | Web UI Scripts 页面 | 25 | 脚本创建（Req/Res/Dec/Parser）、顶部 + 创建菜单、... 更多操作菜单、真实 Import 文件选择器、编辑、保存、测试运行、日志查看、名称校验、树形目录、Parser/Decode 运行时上下文字段补全、桌面端编辑器快捷键回归、Undo 后保存清理黄点 |
 | [webui-values.md](./webui-values.md) | Web UI Values 页面 | 20 | Value 列表、创建/编辑/删除、编辑器、规则引用、导入导出、桌面端编辑器快捷键回归、Undo 后保存清理黄点 |
-| [webui-replay.md](./webui-replay.md) | Web UI Replay 页面 | 23 | HTTP 请求重放、集合管理、SSE/WebSocket 重放、curl 导入、多种 Body 类型、localhost 转发与 passthrough 优先级回归 |
+| [webui-replay.md](./webui-replay.md) | Web UI Replay 页面 | 24 | HTTP 请求重放、集合管理、SSE/WebSocket 重放、Replay WebSocket 规则头回归、curl 导入、多种 Body 类型、localhost 转发与 passthrough 优先级回归 |
 | [webui-settings.md](./webui-settings.md) | Web UI Settings 页面 | 38 | Proxy/Certificate/TLS/Performance/Access Control/Appearance/Metrics/Sync 各 Tab |
 | [skill-creator.md](./skill-creator.md) | Skill Creator WebUI 与 Agent 子系统 | 15 | Skill Creator crate、Agent slash router、Admin CRUD、WebUI Skills 面板（只读详情/删除/导入 zip/固定分页）、E2E create-test-invoke-delete-import、executor 环境白名单、registry watcher 单 slug 热重载、checksum 缺失 manifest、packager import scope 保留、authoring.test 非法状态 |
 | [weixin-provider.md](./weixin-provider.md) | Weixin Provider | 8 | 原生 `weixin` IM provider 扫码登录、二维码自动轮询/刷新、微信文本消息触发 Agent、guide/queue/slash 命令回执、最终纯正文回写、History 表格窄宽度滚动与 Tooltip、图片消息下载后传给多模态模型、Agent 生成图片通过微信独立发送原图 |
@@ -107,7 +108,7 @@
 |------|---------|-----------|------|
 | [proxy-http-https.md](./proxy-http-https.md) | HTTP/HTTPS 代理 | 27 | HTTP 转发、HTTPS CONNECT、TLS 拦截、各类规则协议、模式匹配、host 路径前缀回归、host 精确路径不补尾斜杠回归、旧版 `^https://` path wildcard 兼容回归 |
 | [proxy-socks5.md](./proxy-socks5.md) | SOCKS5 代理 | 5 | SOCKS5 基本代理、DNS 解析、HTTPS 透传、UDP ASSOCIATE 启动就绪回归、统一代理 UDP relay 端口 fallback 与 Windows ARM runner 并发回归 |
-| [proxy-websocket-sse.md](./proxy-websocket-sse.md) | WebSocket/SSE 代理 | 8 | WebSocket/SSE 代理转发、帧/事件捕获、UI 消息面板、Replay WebSocket E2E 启动隔离与诊断、Frames API SSE 前置流量回归 |
+| [proxy-websocket-sse.md](./proxy-websocket-sse.md) | WebSocket/SSE 代理 | 9 | WebSocket/SSE 代理转发、帧/事件捕获、UI 消息面板、Replay WebSocket E2E 启动隔离与诊断、Frames API SSE 前置流量回归、WebSocket 升级握手头部规则回归 |
 | [proxy-rules-advanced.md](./proxy-rules-advanced.md) | 规则协议全量测试 | 77 | 40+ 规则操作协议：请求/响应修改、内容注入、控制、路由、脚本、高级特性（Values 引用、模板字符串、正则捕获），含 html/js/css 内容注入协议矩阵、htmlPrepend 插入 `<html>` 后、htmlAppend 插入 `</html>` 前，以及 HTTPS 转发到 HTTP 上游、gzip HTML 响应编码一致性、gzip JSON reqMerge/resMerge 合并回归、HTTPS 解包 gzip JSON reqMerge/resMerge 合并回归、脚本与 mock 路径压缩 Body 修改回归、HTTPS 解包链路 `reqScript`/`resScript`/`decode`/`bp decode` 回归、mock immediate response `resScript` 回归、多值 `Set-Cookie` 保留回归、mock 生成资源、通配域名根路径 htmlAppend 匹配、culture.shtml HTTPS MITM 背景图白屏、上游 HTTP/2 body 断流 fallback、无规则命中时已知长度响应头透明转发真实回归、reqHeaders Markdown value 中 `#` 注释行回归 |
 | [bp-protocol-parser.md](./bp-protocol-parser.md) | BP 协议脚本解析 | 17 | `bp://<script>` + `decode://bp` 本地/远程 parser 解析，远程脚本下载缓存，远程下载超时/超大响应失败且不污染缓存，Traffic 详情 decoded body 展示，Body 面板 raw/decoded 切换且 raw 精确展示解码前二进制，`bifrost search` 与 Search SSE 搜索解析后内容，本地 parser 名称路径穿越拒绝，内置 `build_in_bp` 自动释放覆盖与规则编辑智能提示/hover 说明，`decode://bp` 内置校验、`bp://` parser 脚本列表补全、本地 parser 跳转到 Scripts 页面、query 高亮不污染后续协议、远端 URL 和绝对路径兼容，`build_in_bp.js` 对 next_agent PSM 的 BAM metadata/Thrift 双向二进制解包路径验证、默认 Bifrost sync token 换取 server `bam_token`，以及参考脚本/相关文档不暴露明文默认域名 |
 | [proxy-auth-brute-force.md](./proxy-auth-brute-force.md) | 代理认证暴力破解防护 | 10 | HTTP/SOCKS5 代理认证 rate limiting：失败计数、10 次封禁（429/连接拒绝）、计数重置、IP 独立追踪 |

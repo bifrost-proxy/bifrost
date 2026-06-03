@@ -182,13 +182,13 @@
 - 脚本不使用 `9900` 作为测试代理端口，启动命令包含 `--no-system-proxy`。
 - 如果 mock 端口被占用，脚本会打印端口重分配信息，并继续使用新的空闲端口生成 replay URL。
 - 如果 WS/WSS mock 或 Bifrost 启动失败，脚本会输出对应日志 tail，而不是静默退出为 unknown failure。
-- 正常环境下最终输出 `Replay WebSocket E2E Results: PASSED=9 FAILED=0`。
+- 正常环境下最终输出 `Replay WebSocket E2E Results: PASSED=10 FAILED=0`。
 
 **本轮执行记录（2026-04-27）**：
 - 先执行 `bifrost status`，确认正式代理运行在 `0.0.0.0:9900`；本用例使用测试代理端口 `18881`，未修改系统代理。
 - 执行上述命令后，脚本打印 `Starting replay WS server on 127.0.0.1:18882`、`Starting replay WSS server on 127.0.0.1:18883`、`Starting Bifrost replay test proxy on 127.0.0.1:18881`。
-- Replay WebSocket echo、frames capture、ping/pong、long connection、permessage-deflate fragmentation、invalid control frame、oversize payload length、wss upstream、subprotocol negotiation 共 9 项均通过。
-- 最终结果为 `Replay WebSocket E2E Results: PASSED=9 FAILED=0`。
+- Replay WebSocket echo、frames capture、request/response header rules、ping/pong、long connection、permessage-deflate fragmentation、invalid control frame、oversize payload length、wss upstream、subprotocol negotiation 共 10 项均通过。
+- 最终结果为 `Replay WebSocket E2E Results: PASSED=10 FAILED=0`。
 
 ---
 
@@ -220,6 +220,42 @@
 - 使用临时数据目录 `/tmp/bifrost-frames-human.Q60DBr`、测试代理端口 `55581`、WebSocket fixture 端口 `55582`、SSE fixture 端口 `55583` 执行本用例；未使用正式端口 `9900`。
 - 脚本输出 `WebSocket traffic generated` 与 `SSE traffic generated`，确认 SSE shell function 调用路径已真实执行。
 - 12 个 Admin API 断言全部通过，最终摘要为 `Tests Run: 12`、`Tests Passed: 12`、`Tests Failed: 0`。
+
+---
+
+### TC-PWS-09：WebSocket 升级握手请求头和响应头规则生效
+
+**前置条件**：
+- 当前代码已包含 `e2e-tests/tests/test_websocket_frames.sh` 中的 WebSocket 头部规则脚本用例。
+- 当前代码已包含 `tests/https_proxy_test.rs` 中的 WebSocket 头部规则补充回归用例。
+- 测试必须使用本地临时端口启动 Bifrost 代理和 WS/WSS mock 服务，不修改系统代理。
+
+**操作步骤**：
+1. 执行普通 `ws://` 代理脚本 E2E，脚本会加载 `e2e-tests/rules/websocket/header_rules.txt` 规则用例：
+   ```bash
+   BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_websocket_frames.sh
+   ```
+2. 执行普通 `ws://` 代理头部规则补充回归：
+   ```bash
+   cargo test --test https_proxy_test test_http_websocket_applies_request_and_response_header_rules -- --nocapture
+   ```
+3. 执行 TLS intercept `wss://` 代理头部规则补充回归：
+   ```bash
+   cargo test --test https_proxy_test test_https_interception_websocket_applies_request_and_response_header_rules -- --nocapture
+   ```
+4. 检查测试输出中的断言结果。
+
+**预期结果**：
+- 普通 `ws://` 脚本场景下，`e2e-tests/rules/websocket/header_rules.txt` 中的 `reqHeaders` / `resHeaders` 规则生效，mock 远端收到 `X-Bifrost-E2E-WS-Request: injected`，客户端收到 `X-Bifrost-E2E-WS-Response: injected`，脚本最终输出 `Passed: 6`、`Failed: 0`。
+- 普通 `ws://` 补充回归场景下，上游探针收到 `X-Bifrost-WS-Request: injected`，客户端收到 `X-Bifrost-WS-Response: injected`。
+- TLS intercept `wss://` 场景下，上游探针收到 `X-Bifrost-WSS-Request: injected`，客户端收到 `X-Bifrost-WSS-Response: injected`。
+- 上游原生响应头仍能透传到客户端，证明 WebSocket 101 握手保持有效。
+- 测试过程中不启用系统代理，不依赖公网 WebSocket 服务。
+
+**本轮执行记录（2026-06-03）**：
+- 已执行 `BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_websocket_frames.sh`，脚本启动本地 WS mock 和 Bifrost 测试代理，并加载 `e2e-tests/rules/websocket/header_rules.txt`；`WebSocket handshake request/response header rules` 场景通过，mock 远端收到请求头，客户端收到响应头；最终 `Passed: 6`、`Failed: 0`。
+- 已执行 `cargo test --test https_proxy_test test_http_websocket_applies_request_and_response_header_rules -- --nocapture`，普通 `ws://` 真实代理升级握手通过；上游探针收到 `X-Bifrost-WS-Request: injected`，客户端收到 `X-Bifrost-WS-Response: injected`，上游原生 `X-Upstream-WS: seen` 仍透传。
+- 已执行 `cargo test --test https_proxy_test test_https_interception_websocket_applies_request_and_response_header_rules -- --nocapture`，TLS intercept `wss://` 真实代理升级握手通过；上游 TLS 探针收到 `X-Bifrost-WSS-Request: injected`，客户端收到 `X-Bifrost-WSS-Response: injected`，上游原生 `X-Upstream-WSS: seen` 仍透传。
 
 ---
 

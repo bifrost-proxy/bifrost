@@ -1,9 +1,12 @@
 #!/bin/bash
+: "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
+export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
+
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-BIFROST_BIN="${ROOT_DIR}/target/release/bifrost"
+BIFROST_BIN="${BIFROST_BIN:-${ROOT_DIR}/target/release/bifrost}"
 if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
     BIFROST_BIN="${BIFROST_BIN}.exe"
 fi
@@ -47,6 +50,7 @@ WS_SERVER_PID=""
 WSS_SERVER_PID=""
 WS_SERVER_LOG=""
 WSS_SERVER_LOG=""
+BIFROST_LOG_FILE=""
 RUN_DATA_DIR="$INITIAL_BIFROST_DATA_DIR"
 CREATED_RUN_DATA_DIR=0
 WS_BASE_URL=""
@@ -207,6 +211,7 @@ start_bifrost() {
     export BIFROST_DATA_DIR
 
     local log_file="$BIFROST_DATA_DIR/proxy.log"
+    BIFROST_LOG_FILE="$log_file"
     echo "Starting Bifrost replay test proxy on ${PROXY_HOST}:${PROXY_PORT} (data_dir=${BIFROST_DATA_DIR})"
     BIFROST_DATA_DIR="$BIFROST_DATA_DIR" "$BIFROST_BIN" -p "$PROXY_PORT" start --skip-cert-check --unsafe-ssl --no-system-proxy > "$log_file" 2>&1 &
     BIFROST_PID=$!
@@ -262,6 +267,39 @@ ws_replay_generate_echo_traffic_wss() {
         --path "${ADMIN_PATH_PREFIX}/api/replay/execute/ws?url=${encoded}" \
         --messages "$messages" \
         --timeout 20.0
+}
+
+ws_replay_generate_rule_header_traffic() {
+    local path_suffix="${1:-/ws/rule_headers}"
+    local url="${WS_BASE_URL}${path_suffix}"
+    local encoded rule_config
+    encoded="$(python3 -c "import urllib.parse; print(urllib.parse.quote('''$url''', safe=''))")"
+    rule_config="$(python3 - "$url" <<'PY'
+import json
+import sys
+import urllib.parse
+
+url = sys.argv[1]
+rule_text = (
+    f"{url} "
+    "reqHeaders://(X-Replay-WS-Request: injected) "
+    "resHeaders://(X-Replay-WS-Response: injected)"
+)
+print(urllib.parse.quote(json.dumps({
+    "mode": "custom",
+    "selected_rules": [],
+    "custom_rules": rule_text,
+}), safe=""))
+PY
+)"
+    python3 "$SCRIPT_DIR/../test_utils/ws_stress_client.py" \
+        --proxy-host "$ADMIN_HOST" \
+        --proxy-port "$ADMIN_PORT" \
+        --host-header "$ADMIN_HOST_HEADER" \
+        --path "${ADMIN_PATH_PREFIX}/api/replay/execute/ws?url=${encoded}&rule_config=${rule_config}" \
+        --messages 1 \
+        --timeout 15.0 \
+        --expect-header "X-Replay-WS-Response=injected"
 }
 
 ws_replay_connect_receive_only() {
@@ -406,6 +444,52 @@ test_ws_replay_frames_capture() {
     fi
 
     pass "Captured ${frame_count} frames via replay"
+    return 0
+}
+
+test_ws_replay_rule_headers_applied() {
+    log_test "Replay WebSocket request/response header rules"
+
+    clear_traffic >/dev/null 2>&1 || true
+    sleep 0.5
+
+    if ! ws_replay_generate_rule_header_traffic "/ws/rule_headers"; then
+        sleep 1
+        local diagnostic_traffic_id diagnostic_record
+        diagnostic_traffic_id=$(find_traffic_id_by_url "$ADMIN_HOST" "$ADMIN_PORT" "/ws/rule_headers" 5 || true)
+        if [[ -n "$diagnostic_traffic_id" && "$diagnostic_traffic_id" != "null" ]]; then
+            diagnostic_record=$(get_traffic_detail "$diagnostic_traffic_id" || true)
+            echo "Replay WebSocket header rule diagnostic:"
+            echo "$diagnostic_record" | jq '{matched_rules, request_headers, original_response_headers, response_headers}' || true
+        fi
+        tail_server_log "Bifrost replay proxy" "$BIFROST_LOG_FILE"
+        fail "Replay WebSocket handshake response header rule was not observed by client"
+        return 1
+    fi
+    sleep 1
+
+    local traffic_id
+    traffic_id=$(find_traffic_id_by_url "$ADMIN_HOST" "$ADMIN_PORT" "/ws/rule_headers" 50)
+    if [[ -z "$traffic_id" || "$traffic_id" == "null" ]]; then
+        fail "No WebSocket replay traffic recorded for rule header test"
+        return 1
+    fi
+
+    local record request_header response_header
+    record=$(get_traffic_detail "$traffic_id")
+    request_header=$(echo "$record" | jq -r '[.request_headers[]? | select((.[0] | ascii_downcase) == "x-replay-ws-request") | .[1]][0] // ""')
+    response_header=$(echo "$record" | jq -r '[.response_headers[]? | select((.[0] | ascii_downcase) == "x-replay-ws-response") | .[1]][0] // ""')
+
+    if [[ "$request_header" != "injected" ]]; then
+        fail "Replay WebSocket upstream request header rule missing in Traffic record, got '${request_header}'"
+        return 1
+    fi
+    if [[ "$response_header" != "injected" ]]; then
+        fail "Replay WebSocket response header rule missing in Traffic record, got '${response_header}'"
+        return 1
+    fi
+
+    pass "Replay WebSocket request and response header rules applied"
     return 0
 }
 
@@ -591,6 +675,7 @@ main() {
 
     test_ws_replay_echo_forwarding || true
     test_ws_replay_frames_capture || true
+    test_ws_replay_rule_headers_applied || true
     test_ws_replay_ping_pong_capture || true
     test_ws_replay_long_connection_over_30s || true
     test_ws_replay_permessage_deflate_fragmentation_decompress || true

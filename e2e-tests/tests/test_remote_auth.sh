@@ -1,6 +1,8 @@
 #!/bin/bash
 
 set -uo pipefail
+: "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
+export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
 
 # 避免环境中的代理变量干扰本地 curl（特别是 http_proxy/https_proxy）。
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY

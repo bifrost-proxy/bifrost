@@ -1,4 +1,7 @@
 #!/bin/bash
+: "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
+export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
+
 #
 # Bifrost Upgrade Restart E2E 测试
 # 测试 upgrade 完成后对运行中进程的检测与重启行为

@@ -1,4 +1,7 @@
 #!/bin/bash
+: "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
+export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
+
 #
 # Bifrost Values 系统端到端测试
 # 完整的 E2E 测试：Mock Server + Proxy + Client
