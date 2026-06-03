@@ -52,6 +52,40 @@ fn daily_agent_legacy_config_is_upgraded_to_two_agents_without_losing_settings()
 }
 
 #[test]
+fn daily_agent_report_sync_dir_update_survives_task_normalization() {
+    let mut config = AsrDailyAgentConfig::default();
+
+    set_primary_daily_agent_report_sync_dir(
+        &mut config,
+        Some(" /tmp/bifrost-daily-agent-reports ".to_string()),
+    );
+
+    assert_eq!(
+        config.report_sync_dir.as_deref(),
+        Some("/tmp/bifrost-daily-agent-reports")
+    );
+    assert_eq!(
+        config.agents[0].report_sync_dir.as_deref(),
+        Some("/tmp/bifrost-daily-agent-reports")
+    );
+
+    let normalized = normalize_daily_agent_config(&config);
+    assert_eq!(
+        normalized.report_sync_dir.as_deref(),
+        Some("/tmp/bifrost-daily-agent-reports")
+    );
+    assert_eq!(
+        normalized.agents[0].report_sync_dir.as_deref(),
+        Some("/tmp/bifrost-daily-agent-reports")
+    );
+
+    set_primary_daily_agent_report_sync_dir(&mut config, Some(" ".to_string()));
+    let normalized = normalize_daily_agent_config(&config);
+    assert_eq!(normalized.report_sync_dir, None);
+    assert_eq!(normalized.agents[0].report_sync_dir, None);
+}
+
+#[test]
 fn daily_agent_validation_rejects_non_english_tokens_and_duplicates() {
     let mut config = AsrDailyAgentConfig::default();
     config.agents[0].name = "中文".to_string();
