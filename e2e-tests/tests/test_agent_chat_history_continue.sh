@@ -17,8 +17,8 @@ with socket.socket() as s:
 PY
 }
 
-BIFROST_PORT="${BIFROST_PORT:-$(pick_port)}"
-MOCK_PORT="${MOCK_PORT:-$(pick_port)}"
+BIFROST_PORT="${BIFROST_PORT:-${ADMIN_PORT:-${PROXY_PORT:-$(pick_port)}}}"
+MOCK_PORT="${MOCK_PORT:-}"
 TEST_DIR="$(mktemp -d)"
 BIFROST_DATA_DIR="$TEST_DIR/data"
 AGENT_HOME="$BIFROST_DATA_DIR/agent"
@@ -26,6 +26,7 @@ HISTORY_FILE="$AGENT_HOME/sessions/2026/05/23/session-history-continue-1.jsonl"
 OUTSIDE_FILE="$TEST_DIR/outside.jsonl"
 BIFROST_LOG="$TEST_DIR/bifrost.log"
 MOCK_LOG="$TEST_DIR/mock.log"
+MOCK_PORT_FILE="$TEST_DIR/mock-port"
 RESPONSE_FILE="$TEST_DIR/response.json"
 BIFROST_BIN="${BIFROST_BIN:-}"
 
@@ -84,13 +85,14 @@ path.write_text("\n".join(json.dumps(event, ensure_ascii=False) for event in eve
 PY
 printf '{}\n' >"$OUTSIDE_FILE"
 
-python3 - "$MOCK_PORT" "$MOCK_LOG" <<'PY' &
+python3 - "$MOCK_PORT" "$MOCK_LOG" "$MOCK_PORT_FILE" <<'PY' &
 import json
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-port = int(sys.argv[1])
+requested_port = int(sys.argv[1]) if sys.argv[1] else 0
 log_path = sys.argv[2]
+port_path = sys.argv[3]
 
 def message_text(message):
     content = message.get("content")
@@ -145,9 +147,28 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+server = ThreadingHTTPServer(("127.0.0.1", requested_port), Handler)
+with open(port_path, "w", encoding="utf-8") as fh:
+    fh.write(str(server.server_address[1]))
+server.serve_forever()
 PY
 MOCK_PID=$!
+for _ in $(seq 1 120); do
+  if [[ -s "$MOCK_PORT_FILE" ]]; then
+    MOCK_PORT="$(cat "$MOCK_PORT_FILE")"
+    break
+  fi
+  if ! kill -0 "$MOCK_PID" >/dev/null 2>&1; then
+    echo "[agent-chat-history-continue] mock model exited before reporting port" >&2
+    [[ -f "$MOCK_LOG" ]] && cat "$MOCK_LOG" >&2 || true
+    exit 1
+  fi
+  sleep 0.25
+done
+if [[ -z "$MOCK_PORT" ]]; then
+  echo "[agent-chat-history-continue] mock model did not report a port" >&2
+  exit 1
+fi
 wait_http "http://127.0.0.1:$MOCK_PORT/health" "mock model"
 
 if [[ "${SKIP_BUILD:-false}" == "true" ]]; then
