@@ -320,6 +320,27 @@
 
 ---
 
+### TC-WLN-17：底部 Sync 状态栏跳转到 Settings Sync
+
+**前置条件**：使用临时数据目录启动 Bifrost，端口避开 `9900`，启动参数包含 `--no-system-proxy`。
+
+**操作步骤**：
+1. 在浏览器中打开 `http://127.0.0.1:8800/_bifrost/traffic`
+2. 点击底部状态栏中的 `Sync: ...` 区域
+3. 回到 Traffic 页后，使用键盘聚焦 `Sync: ...` 区域并按 Enter 或 Space
+
+**预期结果**：
+- 点击后 URL 变为 `/_bifrost/settings?tab=sync`
+- Settings 页面中 `Sync` Tab 处于选中状态
+- 状态栏 Sync 区域有 hover 反馈，并保持原有 Tooltip 状态说明
+- Enter 和 Space 键触发与鼠标点击相同的跳转行为
+- 亮色和暗色主题下状态栏文本、圆点和 hover 背景均清晰可读
+
+**本次执行记录（2026-06-03）**：
+- 通过。执行 `pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts --grep "底部 Sync 状态栏点击后跳转到 Settings Sync"`，真实 Chromium 打开 Traffic 页面，点击 `data-testid=statusbar-sync` 后 URL 变为 `/_bifrost/settings?tab=sync`，且 `Sync` Tab 的 `aria-selected=true`；随后回到 Traffic 页面，分别聚焦状态栏 Sync 区域并按 Enter、Space，均跳转到 `/_bifrost/settings?tab=sync`。
+
+---
+
 ## 清理
 
 测试完成后清理临时数据：
