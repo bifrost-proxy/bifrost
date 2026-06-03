@@ -302,6 +302,11 @@ pub fn requires_tls_interception_for_rules(resolved_rules: &ResolvedRules) -> bo
         || resolved_rules.res_merge.is_some()
 }
 
+pub fn requires_tls_interception_for_connect_rules(resolved_rules: &ResolvedRules) -> bool {
+    requires_tls_interception_for_rules(resolved_rules)
+        || requires_tls_interception_for_host_rewrite(resolved_rules)
+}
+
 fn has_request_body_rules(rules: &ResolvedRules) -> bool {
     rules.req_body.is_some()
         || rules.req_prepend.is_some()
@@ -654,7 +659,7 @@ pub async fn handle_connect(
     if !intercept
         && tls_config.ca_cert.is_some()
         && !matches!(resolved_rules.tls_intercept, Some(false))
-        && (requires_tls_interception_for_rules(&resolved_rules)
+        && (requires_tls_interception_for_connect_rules(&resolved_rules)
             || rules.has_response_rules_for_host(&host))
     {
         intercept = true;
@@ -5885,6 +5890,58 @@ mod tests {
         };
 
         assert!(!requires_tls_interception_for_rules(&rules));
+    }
+
+    #[test]
+    fn connect_host_rule_alone_does_not_require_tls_interception() {
+        let rules = ResolvedRules {
+            host: Some("127.0.0.1:3443".to_string()),
+            host_protocol: Some(Protocol::Host),
+            ..ResolvedRules::default()
+        };
+
+        assert!(!requires_tls_interception_for_connect_rules(&rules));
+    }
+
+    #[test]
+    fn connect_proxy_rule_alone_does_not_require_tls_interception() {
+        let rules = ResolvedRules {
+            proxy: Some("127.0.0.1:8888".to_string()),
+            ..ResolvedRules::default()
+        };
+
+        assert!(!requires_tls_interception_for_connect_rules(&rules));
+    }
+
+    #[test]
+    fn connect_plaintext_upstream_rewrite_requires_tls_interception() {
+        let http_rules = ResolvedRules {
+            host: Some("127.0.0.1:3000".to_string()),
+            host_protocol: Some(Protocol::Http),
+            ..ResolvedRules::default()
+        };
+        let ws_rules = ResolvedRules {
+            host: Some("127.0.0.1:3001".to_string()),
+            host_protocol: Some(Protocol::Ws),
+            ..ResolvedRules::default()
+        };
+
+        assert!(requires_tls_interception_for_connect_rules(&http_rules));
+        assert!(requires_tls_interception_for_connect_rules(&ws_rules));
+    }
+
+    #[test]
+    fn connect_content_mutation_requires_tls_interception_even_with_proxy_rule() {
+        let rules = ResolvedRules {
+            proxy: Some("127.0.0.1:8888".to_string()),
+            res_headers: vec![(
+                "X-Bifrost-Test".to_string(),
+                "tls-intercept-required".to_string(),
+            )],
+            ..ResolvedRules::default()
+        };
+
+        assert!(requires_tls_interception_for_connect_rules(&rules));
     }
 
     fn make_tls_config_with_ca() -> TlsConfig {

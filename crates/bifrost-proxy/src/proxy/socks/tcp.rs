@@ -24,7 +24,9 @@ use tracing::{debug, error, info, warn};
 
 use crate::dns::DnsResolver;
 use crate::protocol::ProtocolDetector;
-use crate::proxy::http::requires_client_app_for_tls_decision;
+use crate::proxy::http::{
+    requires_client_app_for_tls_decision, requires_tls_interception_for_connect_rules,
+};
 use crate::server::{
     full_body, BoxBody, NoOpRulesResolver, RulesResolver, TlsConfig, TlsInterceptConfig,
 };
@@ -1323,13 +1325,11 @@ impl SocksHandler {
                                 &tls_resolved_rules,
                             ) || (tls_config.ca_cert.is_some()
                                 && !matches!(tls_resolved_rules.tls_intercept, Some(false))
-                                && (crate::proxy::http::requires_tls_interception_for_rules(
+                                && (requires_tls_interception_for_connect_rules(
                                     &tls_resolved_rules,
-                                ) || (tls_resolved_rules.host.is_some()
-                                    && !tls_resolved_rules.ignored.host)
-                                    || self.rules.as_ref().is_some_and(|r| {
-                                        r.has_response_rules_for_host(original_host)
-                                    })));
+                                ) || self.rules.as_ref().is_some_and(|r| {
+                                    r.has_response_rules_for_host(original_host)
+                                })));
                             if do_intercept {
                                 debug!(
                                     "SOCKS5: TLS interception enabled for {}:{} (original_host={}, client_app={:?}, rule={:?}, global={})",

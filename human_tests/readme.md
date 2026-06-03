@@ -36,6 +36,7 @@
 | [rust-dependency-audit-ci.md](./rust-dependency-audit-ci.md) | Rust Dependency Audit CI | 4 | 使用 cargo-deny 与 cargo-udeps 进行 Rust 重复依赖和未使用依赖审计，验证 CI/local-ci 接入、显式跳过参数和工具缺失错误提示 |
 | [e2e-script-startup.md](./e2e-script-startup.md) | E2E Script Startup | 2 | E2E 脚本启动 Bifrost 测试服务时默认禁用 Sync 自动登录弹窗，公共 helper 与直接启动脚本均受静态守卫覆盖；Sync 登录预检专用脚本在父环境默认禁用时仍只通过 dry-run 文件验证弹窗行为 |
 | [rule-filter-routing-diagnostics.md](./rule-filter-routing-diagnostics.md) | 规则过滤与网络包诊断 | 8 | `includeFilter:///account` 按普通前缀匹配 `/account-center`，长 `excludeFilter` 链全部按前缀生效，Whistle 风格 `excludeFilter://*/api` / `excludeFilter://*/alice/*` URL 通配符过滤可跳过当前规则，`upstreamUnsafeSsl://true` 按规则放行不安全 HTTPS 上游，Traffic 详情与 network `.bifrost` 导出保留 `actual_url`、`actual_host`、`listener_port`、`has_rule_hit` 等实际转发诊断字段，专用回归 fixture 不被通用规则 runner 误收集 |
+| [rule-tls-intercept-routing-exceptions.md](./rule-tls-intercept-routing-exceptions.md) | 规则 TLS 解包路由例外 | 3 | SOCKS5 TLS 流量中 `host://` 纯路由和 `proxy://` 纯下游代理规则不自动开启 TLS 解包，内容改写类规则仍会在全局解包关闭时自动开启 TLS 解包并应用响应头 |
 
 ### Web UI 测试
 
@@ -209,7 +210,7 @@
 
 ---
 
-**总计：143 个测试文件，2441 个测试用例**
+**总计：144 个测试文件，2443 个测试用例**
 
 ## 工作流程
 

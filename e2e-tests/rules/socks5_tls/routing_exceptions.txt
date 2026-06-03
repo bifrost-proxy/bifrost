@@ -1,0 +1,9 @@
+# Test target: SOCKS5 TLS routing-only rules must not auto-enable TLS interception.
+# host:// only changes the upstream address and must stay raw TLS passthrough.
+socks-host-only.local host://127.0.0.1:__ECHO_HTTPS_PORT__
+
+# proxy:// only selects a downstream proxy and must not be classified as TLS content handling.
+127.0.0.1 proxy://127.0.0.1:__ECHO_PROXY_PORT__
+
+# Content mutation still requires TLS interception even when global interception is disabled.
+socks-mutation.local http://127.0.0.1:__ECHO_HTTP_PORT__ resHeaders://X-Bifrost-Auto-TLS=socks5-content-rule
