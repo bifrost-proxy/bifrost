@@ -7,6 +7,7 @@ export interface SystemProxyStatus {
   host: string;
   port: number;
   bypass: string;
+  managed_by_bifrost?: boolean;
 }
 
 export interface SystemProxySupportStatus {

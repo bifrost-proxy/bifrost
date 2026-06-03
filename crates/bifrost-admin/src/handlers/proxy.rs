@@ -19,6 +19,20 @@ struct SystemProxyStatus {
     host: String,
     port: u16,
     bypass: String,
+    managed_by_bifrost: bool,
+}
+
+impl SystemProxyStatus {
+    fn from_proxy(proxy: bifrost_core::ProxyBackup, managed_by_bifrost: bool) -> Self {
+        Self {
+            supported: true,
+            enabled: proxy.enable,
+            host: proxy.host,
+            port: proxy.port,
+            bypass: proxy.bypass,
+            managed_by_bifrost,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -112,7 +126,7 @@ async fn get_cli_proxy_status(state: SharedAdminState) -> Response<BoxBody> {
     json_response(&resp)
 }
 
-async fn get_system_proxy_status(_state: SharedAdminState) -> Response<BoxBody> {
+async fn get_system_proxy_status(state: SharedAdminState) -> Response<BoxBody> {
     if !SystemProxyManager::is_supported() {
         let status = SystemProxyStatus {
             supported: false,
@@ -120,19 +134,19 @@ async fn get_system_proxy_status(_state: SharedAdminState) -> Response<BoxBody> 
             host: String::new(),
             port: 0,
             bypass: String::new(),
+            managed_by_bifrost: false,
         };
         return json_response(&status);
     }
 
     match SystemProxyManager::get_current() {
         Ok(proxy) => {
-            let status = SystemProxyStatus {
-                supported: true,
-                enabled: proxy.enable,
-                host: proxy.host,
-                port: proxy.port,
-                bypass: proxy.bypass,
+            let managed_by_bifrost = if let Some(manager) = &state.system_proxy_manager {
+                manager.read().await.is_current_managed(&proxy)
+            } else {
+                false
             };
+            let status = SystemProxyStatus::from_proxy(proxy, managed_by_bifrost);
             json_response(&status)
         }
         Err(e) => error_response(
@@ -142,7 +156,10 @@ async fn get_system_proxy_status(_state: SharedAdminState) -> Response<BoxBody> 
     }
 }
 
-fn read_system_proxy_status() -> Result<SystemProxyStatus, String> {
+fn read_system_proxy_status(
+    expected_host: &str,
+    expected_port: u16,
+) -> Result<SystemProxyStatus, String> {
     if !SystemProxyManager::is_supported() {
         return Ok(SystemProxyStatus {
             supported: false,
@@ -150,19 +167,15 @@ fn read_system_proxy_status() -> Result<SystemProxyStatus, String> {
             host: String::new(),
             port: 0,
             bypass: String::new(),
+            managed_by_bifrost: false,
         });
     }
 
     let proxy = SystemProxyManager::get_current()
         .map_err(|e| format!("Failed to get system proxy: {}", e))?;
 
-    Ok(SystemProxyStatus {
-        supported: true,
-        enabled: proxy.enable,
-        host: proxy.host,
-        port: proxy.port,
-        bypass: proxy.bypass,
-    })
+    let managed_by_bifrost = proxy.target_matches(expected_host, expected_port);
+    Ok(SystemProxyStatus::from_proxy(proxy, managed_by_bifrost))
 }
 
 async fn wait_for_system_proxy_status(
@@ -170,14 +183,14 @@ async fn wait_for_system_proxy_status(
     expected_host: &str,
     expected_port: u16,
 ) -> Result<SystemProxyStatus, String> {
-    let mut latest = read_system_proxy_status()?;
+    let mut latest = read_system_proxy_status(expected_host, expected_port)?;
     if matches_expected_system_proxy(&latest, expected_enabled, expected_host, expected_port) {
         return Ok(latest);
     }
 
     for delay_ms in SYSTEM_PROXY_VERIFY_DELAYS_MS {
         sleep(Duration::from_millis(delay_ms)).await;
-        latest = read_system_proxy_status()?;
+        latest = read_system_proxy_status(expected_host, expected_port)?;
         if matches_expected_system_proxy(&latest, expected_enabled, expected_host, expected_port) {
             return Ok(latest);
         }
@@ -192,15 +205,11 @@ fn matches_expected_system_proxy(
     expected_host: &str,
     expected_port: u16,
 ) -> bool {
-    if status.enabled != expected_enabled {
-        return false;
+    if expected_enabled {
+        return status.enabled && status.host == expected_host && status.port == expected_port;
     }
 
-    if !expected_enabled {
-        return true;
-    }
-
-    status.host == expected_host && status.port == expected_port
+    !status.enabled || !status.managed_by_bifrost
 }
 
 async fn set_system_proxy(req: Request<Incoming>, state: SharedAdminState) -> Response<BoxBody> {
@@ -234,7 +243,7 @@ async fn set_system_proxy(req: Request<Incoming>, state: SharedAdminState) -> Re
 
     if let Some(ref manager) = state.system_proxy_manager {
         let host = "127.0.0.1";
-        let target_port = if request.enabled { state.port() } else { 0 };
+        let target_port = state.port();
 
         let final_result = {
             let mut manager = manager.write().await;
@@ -242,7 +251,7 @@ async fn set_system_proxy(req: Request<Incoming>, state: SharedAdminState) -> Re
             let result = if request.enabled {
                 manager.enable(host, state.port(), Some(&bypass))
             } else {
-                manager.force_disable()
+                manager.disable_managed().map(|_| ())
             };
 
             match &result {
@@ -256,7 +265,9 @@ async fn set_system_proxy(req: Request<Incoming>, state: SharedAdminState) -> Re
                             if request.enabled {
                                 manager.enable_with_gui_auth(host, state.port(), Some(&bypass))
                             } else {
-                                manager.disable_with_gui_auth()
+                                manager
+                                    .disable_if_matches_with_gui_auth(host, state.port())
+                                    .map(|_| ())
                             }
                         }
                         #[cfg(not(target_os = "macos"))]
@@ -284,9 +295,10 @@ async fn set_system_proxy(req: Request<Incoming>, state: SharedAdminState) -> Re
                     };
 
                 if let Some(ref config_manager) = state.config_manager {
+                    let enabled_by_bifrost = status.enabled && status.managed_by_bifrost;
                     let update = SystemProxyConfigUpdate {
-                        enabled: Some(status.enabled),
-                        bypass: if status.enabled {
+                        enabled: Some(enabled_by_bifrost),
+                        bypass: if enabled_by_bifrost {
                             Some(status.bypass.clone())
                         } else {
                             None
@@ -395,4 +407,47 @@ async fn get_proxy_address_info(state: SharedAdminState) -> Response<BoxBody> {
     };
 
     json_response(&info)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disable_verification_accepts_external_proxy_left_enabled() {
+        let status = SystemProxyStatus {
+            supported: true,
+            enabled: true,
+            host: "127.0.0.1".to_string(),
+            port: 6152,
+            bypass: String::new(),
+            managed_by_bifrost: false,
+        };
+
+        assert!(matches_expected_system_proxy(
+            &status,
+            false,
+            "127.0.0.1",
+            8800
+        ));
+    }
+
+    #[test]
+    fn disable_verification_rejects_bifrost_proxy_still_enabled() {
+        let status = SystemProxyStatus {
+            supported: true,
+            enabled: true,
+            host: "127.0.0.1".to_string(),
+            port: 8800,
+            bypass: String::new(),
+            managed_by_bifrost: true,
+        };
+
+        assert!(!matches_expected_system_proxy(
+            &status,
+            false,
+            "127.0.0.1",
+            8800
+        ));
+    }
 }

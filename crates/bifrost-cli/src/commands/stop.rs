@@ -3,6 +3,38 @@ use bifrost_storage::set_data_dir;
 use crate::config::get_bifrost_dir;
 use crate::process::{is_process_running, read_pid, read_runtime_info, remove_pid};
 
+fn host_matches_system_proxy(proxy_host: &str, runtime_host: &str) -> bool {
+    let proxy_host = proxy_host
+        .trim()
+        .trim_matches(['[', ']'])
+        .to_ascii_lowercase();
+    let runtime_host = runtime_host
+        .trim()
+        .trim_matches(['[', ']'])
+        .to_ascii_lowercase();
+
+    if proxy_host == runtime_host {
+        return true;
+    }
+
+    matches!(
+        (proxy_host.as_str(), runtime_host.as_str()),
+        ("localhost", "127.0.0.1")
+            | ("127.0.0.1", "localhost")
+            | ("::1", "127.0.0.1")
+            | ("127.0.0.1", "::1")
+            | ("::1", "localhost")
+            | ("localhost", "::1")
+    )
+}
+
+fn runtime_system_proxy_host(runtime_host: Option<&str>) -> &str {
+    match runtime_host {
+        Some("0.0.0.0") | Some("[::]") | Some("::") | None | Some("") => "127.0.0.1",
+        Some(host) => host,
+    }
+}
+
 fn cleanup_proxy_state(bifrost_dir: &std::path::Path) {
     if let Err(e) = bifrost_core::SystemProxyManager::recover_from_crash(bifrost_dir) {
         eprintln!("Failed to recover system proxy: {}", e);
@@ -22,7 +54,7 @@ fn ensure_system_proxy_disabled(bifrost_dir: &std::path::Path) {
         return;
     }
 
-    let runtime_port = read_runtime_info().map(|info| info.port);
+    let runtime_info = read_runtime_info();
 
     let current = match bifrost_core::SystemProxyManager::get_current() {
         Ok(c) => c,
@@ -33,23 +65,26 @@ fn ensure_system_proxy_disabled(bifrost_dir: &std::path::Path) {
         return;
     }
 
-    let is_bifrost_proxy = match runtime_port {
-        Some(port) => current.port == port,
-        None => {
-            let host = &current.host;
-            (host == "127.0.0.1" || host == "localhost" || host == "::1") && current.port > 0
-        }
-    };
+    let is_bifrost_proxy = runtime_info.as_ref().is_some_and(|info| {
+        current.port == info.port
+            && host_matches_system_proxy(
+                &current.host,
+                runtime_system_proxy_host(info.host.as_deref()),
+            )
+    });
 
     if !is_bifrost_proxy {
         return;
     }
 
     let mut manager = bifrost_core::SystemProxyManager::new(bifrost_dir.to_path_buf());
-    if let Err(e) = manager.force_disable() {
-        eprintln!("Failed to disable system proxy: {}", e);
-    } else {
-        println!("System proxy disabled.");
+    match manager.disable_if_matches(&current.host, current.port) {
+        Ok(bifrost_core::SystemProxyDisableOutcome::Disabled) => {
+            println!("System proxy disabled.");
+        }
+        Ok(bifrost_core::SystemProxyDisableOutcome::NotEnabled) => {}
+        Ok(bifrost_core::SystemProxyDisableOutcome::OwnedByOther) => {}
+        Err(e) => eprintln!("Failed to disable system proxy: {}", e),
     }
 }
 
@@ -142,4 +177,25 @@ pub fn run_stop() -> bifrost_core::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_matching_accepts_loopback_aliases() {
+        assert!(host_matches_system_proxy("localhost", "127.0.0.1"));
+        assert!(host_matches_system_proxy("[::1]", "localhost"));
+    }
+
+    #[test]
+    fn runtime_system_proxy_host_maps_wildcard_to_loopback() {
+        assert_eq!(runtime_system_proxy_host(Some("0.0.0.0")), "127.0.0.1");
+        assert_eq!(runtime_system_proxy_host(Some("::")), "127.0.0.1");
+        assert_eq!(
+            runtime_system_proxy_host(Some("192.168.1.2")),
+            "192.168.1.2"
+        );
+    }
 }

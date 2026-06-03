@@ -20,7 +20,7 @@
 | [cli-whitelist.md](./cli-whitelist.md) | CLI 白名单管理 | 31 | whitelist 全子命令：list/add/remove/allow-lan/status/mode/pending/approve/reject/clear-pending/add-temporary/remove-temporary |
 | [cli-admin.md](./cli-admin.md) | CLI Admin 管理 | 14 | admin remote status/enable/disable、admin passwd、admin revoke-all、admin audit |
 | [cli-config.md](./cli-config.md) | CLI 配置管理 | 22 | config show/get/set/add/remove/reset/clear-cache/disconnect/export/connections/memory |
-| [cli-system-proxy.md](./cli-system-proxy.md) | CLI 系统代理 | 10 | system-proxy status/enable/disable，含自定义 host/port/bypass |
+| [cli-system-proxy.md](./cli-system-proxy.md) | CLI 系统代理 | 12 | system-proxy status/enable/disable，含自定义 host/port/bypass，以及 Surge/外部系统代理归属边界回归 |
 | [cli-group.md](./cli-group.md) | CLI Group 管理 | 15 | group list/show、group rule list/show/add/update/enable/disable/delete，以及 Group CLI mock 单测并发稳定性回归 |
 | [temporary-port-rule-bindings.md](./temporary-port-rule-bindings.md) | 临时端口规则绑定 | 23 | `bifrost port` 临时端口绑定/查看/更新/销毁，规则名/规则文件/规则原文输入，端口级规则隔离，status 底部临时端口绑定规则区块，端口分配冲突与 HTML fixture 端口抢占回归，Traffic CLI/API/Web 端口展示回归，无规则命中流量端口归因回归，Settings Proxy 临时端口卡片回归，临时端口 Badge 规则视图回归，Traffic list/get 子命令 `--port` 解析回归，CLI help / 安装用 SKILL.md 文档同步验收，以及 light/dark 主题验证 |
 | [cli-import-export.md](./cli-import-export.md) | CLI 导入导出与杂项 | 27 | export/import、metrics、sync、version-check、upgrade、completions、install-skill，含 version-check 空输出与 install-skill 更多 agent 兼容回归验证，以及 version-check redirect 优先与 HTML highlights 降级验证 |

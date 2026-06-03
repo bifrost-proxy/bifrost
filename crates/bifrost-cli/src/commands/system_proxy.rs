@@ -87,38 +87,56 @@ pub fn handle_system_proxy_command(
                 println!("System proxy not supported on this platform");
                 return Ok(());
             }
-            if let Err(e) = manager.force_disable() {
-                let msg = e.to_string();
-                if msg.contains("RequiresAdmin") {
-                    println!("System proxy disable requires administrator privileges.");
-                    let proceed = dialoguer::Confirm::new()
-                        .with_prompt("Try disabling via sudo now?")
-                        .default(true)
-                        .interact();
-                    match proceed {
-                        Ok(true) => {
-                            #[cfg(target_os = "macos")]
-                            {
-                                if let Err(se) = manager.disable_with_privilege() {
-                                    eprintln!("Failed to disable with sudo: {}", se);
-                                } else {
-                                    println!("✓ System proxy disabled via sudo");
+            match manager.disable_managed() {
+                Ok(bifrost_core::SystemProxyDisableOutcome::Disabled) => {
+                    println!("✓ System proxy disabled");
+                }
+                Ok(bifrost_core::SystemProxyDisableOutcome::NotEnabled) => {
+                    println!("✓ System proxy already disabled");
+                }
+                Ok(bifrost_core::SystemProxyDisableOutcome::OwnedByOther) => {
+                    println!("System proxy is enabled by another application; left unchanged.");
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("RequiresAdmin") {
+                        println!("System proxy disable requires administrator privileges.");
+                        let proceed = dialoguer::Confirm::new()
+                            .with_prompt("Try disabling via sudo now?")
+                            .default(true)
+                            .interact();
+                        match proceed {
+                            Ok(true) => {
+                                #[cfg(target_os = "macos")]
+                                {
+                                    match manager.disable_managed_with_privilege() {
+                                        Ok(bifrost_core::SystemProxyDisableOutcome::Disabled) => {
+                                            println!("✓ System proxy disabled via sudo");
+                                        }
+                                        Ok(bifrost_core::SystemProxyDisableOutcome::NotEnabled) => {
+                                            println!("✓ System proxy already disabled");
+                                        }
+                                        Ok(
+                                            bifrost_core::SystemProxyDisableOutcome::OwnedByOther,
+                                        ) => {
+                                            println!("System proxy is enabled by another application; left unchanged.");
+                                        }
+                                        Err(se) => eprintln!("Failed to disable with sudo: {}", se),
+                                    }
+                                }
+                                #[cfg(not(target_os = "macos"))]
+                                {
+                                    eprintln!("Privilege escalation is only applicable on macOS.");
                                 }
                             }
-                            #[cfg(not(target_os = "macos"))]
-                            {
-                                eprintln!("Privilege escalation is only applicable on macOS.");
+                            _ => {
+                                println!("Cancelled.");
                             }
                         }
-                        _ => {
-                            println!("Cancelled.");
-                        }
+                    } else {
+                        eprintln!("Failed to disable system proxy: {}", e);
                     }
-                } else {
-                    eprintln!("Failed to disable system proxy: {}", e);
                 }
-            } else {
-                println!("✓ System proxy disabled");
             }
         }
     }

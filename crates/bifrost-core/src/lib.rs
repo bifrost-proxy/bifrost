@@ -50,4 +50,4 @@ pub use syntax::{
     get_template_variables, validate_filter_value, FilterValidationError, PatternInfo,
     ProtocolInfo, ProtocolValueSpec, SyntaxInfo, TemplateVariableInfo, ValueHint,
 };
-pub use system_proxy::{ProxyBackup, SystemProxyManager};
+pub use system_proxy::{ProxyBackup, SystemProxyDisableOutcome, SystemProxyManager};
