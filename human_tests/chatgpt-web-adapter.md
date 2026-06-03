@@ -612,8 +612,33 @@ cargo clippy -p bifrost-admin --all-targets --all-features -- -D warnings
 - 任一图片或 ZIP 下载失败都不能导致整个 Runner 失败；已成功下载的图片/ZIP 继续输出，失败项在最终回复中以“部分 ChatGPT Web 附件未能自动下载”汇总，并在日志中记录 `kind`、`label`、错误原因。
 - 既有 `<img>` / `generatedImages` 下载链路仍按原逻辑缓存原图并按 IM 图片模式发送。
 
+### TC-CWA-27：回归 - 授权流不进入 Conversation 重导航循环
+
+**前置条件**：存在 ChatGPT Web runner 的真实失败样本或等价页面状态，其中 `auth_probe.json` 仍显示 `loggedIn=true/accountStatus=403`，但 `failure_diagnostics.json` 的页面 URL 为 `https://chatgpt.com/auth/login`，正文包含“登录即可开始聊天”；或浏览器跳转到 Google / Apple / OpenAI 等第三方授权页面。
+
+**操作步骤**：
+1. 执行代码级登录页终止态回归：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin auth_flow_pages_are_not_retryable_conversation_navigation --lib -- --nocapture
+   ```
+2. 执行 ChatGPT Web adapter 定向回归：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin chatgpt_web --lib
+   ```
+3. 对照真实失败样本：
+   - `/Users/eden/.bifrost/im_gateway/runs/1780447535923-fb3febe2-74d3-4db4-ae80-f66b21f85523/auth_probe.json`
+   - `/Users/eden/.bifrost/im_gateway/runs/1780447535923-fb3febe2-74d3-4db4-ae80-f66b21f85523/failure_diagnostics.json`
+4. 如果后续用真实 runner 复测，应先停止当前卡住的 run 或换隔离数据目录，避免继续污染默认 ChatGPT 会话。
+
+**预期结果**：
+- ChatGPT 登录页、OpenAI 授权页、Google / Apple 等第三方授权页都被识别为授权流页面。
+- 授权流期间 runner 不再把页面误判为 stale conversation、429 或普通 `composer not ready`，也不会继续反复 `Page.navigate` 到原 conversation。
+- 如果用户在授权页面完成登录，runner 等待授权流结束；若页面没有自动回到原 conversation，才主动跳回目标 URL 一次并继续任务。
+- 如果授权流一直未完成，用户可见反馈应指向“需要重新登录 ChatGPT Web”，而不是长期刷新浏览器页面。
+
 ## 真实执行记录
 
+- 2026-06-03：执行 TC-CWA-27 通过。现场确认默认任务 `76612de33e9740bc92440ce64a98a4cb` 的 Daily Agent 当前 run `1780447855777-aa643349-f391-4050-8e48-fd166b2786e7` 使用 `runner=web` 且仍为 running；前一条真实失败样本 `1780447535923-fb3febe2-74d3-4db4-ae80-f66b21f85523` 中 `auth_probe.json` 为 `loggedIn=true/accountStatus=403`，但 `failure_diagnostics.json` 的实际页面为 `https://chatgpt.com/auth/login`，正文包含“登录即可开始聊天”，错误为 `browser_ui: composer not ready`。修复后执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin auth_flow_pages_are_not_retryable_conversation_navigation --lib -- --nocapture` 通过，验证 ChatGPT 登录页与 Google OAuth 页面都被识别为授权流页面，且不会进入 conversation 重导航分支。
 - 2026-05-26：执行 TC-CWA-26 代码级与默认 Runner CDP 真实点击回归通过。使用用户提供的真实 ChatGPT DOM 结构确认问题形态：最终 assistant message `4cd623b5-3870-49a3-bb64-ffd3b06c769b` 中 5 张信息卡和 `5 张图片 ZIP` 都是 `button.behavior-btn` / `entity-underline`，不是 `<img>` 或 `<a href>`；历史 run `1779784377984-e0206a71-0333-4ac6-8dd5-9dd090ce24ab` 的 `conversation_final.json` 为 `imageCount=0` 且最终 response 停在 `打包下载：`。默认 Runner CDP 使用已有登录态打开 `https://chatgpt.com/c/6a155ad4-1d74-83ec-bc1d-bc1faccf276b`，点击 `大模型竞争格局` 后 dialog 出现 `alt=大模型竞争格局` 的原图 `<img>`，图片 URL 为 `backend-api/estuary/content?id=file_00000000c37c7230a857de6a3fd1c397&fn=ai_infographic_01_overview.png`，同时页面预取其余 4 张 `ai_infographic_02_timeline.png`、`ai_infographic_03_anthropic_profit.png`、`ai_infographic_04_llm_intelligence.png`、`ai_infographic_05_today_news.png`；点击 `5 张图片 ZIP` 后收到 `downloadWillBegin` / `downloadProgress completed`，下载 URL 为 `backend-api/estuary/content?id=file_000000007e9871fda9b7c4b602594f18&fn=ai_infographics_5_images.zip`，文件 `/tmp/bifrost-chatgpt-web-live-download-20260526180404/ai_infographics_5_images.zip` 大小 `1499429` 字节。修复后 targeted 单测确认 DOM 提取源码扫描 `button.behavior-btn`、输出 `artifactCount` / `chatgpt_behavior_button`，Runner 会下载 behavior 图片为本地 PNG Markdown、写入 `downloadedArtifacts`，并把 ZIP 本地链接追加到最终投递文本。
 - 2026-05-26：执行 TC-CWA-25 通过。代码级命令 `cargo test -p bifrost-admin chatgpt_web_startup_auth --lib` 通过 2 项，确认服务层会收集所有 `adapter=chatgpt_web` 的 runner（包括未启用但可被显式选择的自定义 runner），且 dry-run 模式下缺失登录态会返回“would open login browser”。E2E 命令 `bash e2e-tests/tests/test_chatgpt_web_startup_auth_preflight.sh` 使用隔离数据目录和自定义 runner `web` 启动 Bifrost，设置 `BIFROST_CHATGPT_WEB_STARTUP_AUTH_DRY_RUN=1` 避免 CI 弹真实浏览器；日志出现 `would open login browser` 与 `chatgpt_web startup auth: login still required`，随后 Auth Status API 返回 `state=logged_out`、`loggedIn=false`、`statePath` 指向测试配置的 `startup-auth-e2e.json`，证明启动预检已在首次使用 runner 前执行。
 - 2026-05-25：执行 TC-CWA-24 通过。先用最新真实失败样本确认问题形态：微信入站 `你好` 后，IM 出站返回 `Runner failed: browser_ui: composer not ready`，正文包含 ChatGPT 登录页文案，并额外发送 `Diagnostic Screenshot`；对应历史 `auth_state.json` 的 `capturedAuthIdentity.expiresAt=2026-05-24T16:47:44+00:00` 已过期、`capturedAccountCheck.capturedAt=2026-05-14T17:22:53.680183+00:00` 陈旧，而失败 run 的 `auth_probe.json` 仍为 `accountStatus=403/loggedIn=true/state=logged_in`。修复后执行 `cargo test -p bifrost-admin chatgpt_web --lib`，62 项通过，包含 `auth_status_rejects_expired_authorization_identity`、`auth_status_rejects_stale_browser_account_check_when_native_forbidden`、`browser_account_check_proof_rejects_far_future_timestamp` 和 `auth_status_accepts_browser_account_check_when_native_probe_is_forbidden`。随后启动隔离数据目录临时服务：`BIFROST_DATA_DIR=$(mktemp -d) target/debug/bifrost start -p 18898 --unsafe-ssl --skip-cert-check --no-system-proxy --daemon`，注入同一过期 `auth_state.json` 与 mock `accounts/check=403`，调用 `GET /_bifrost/api/im-gateway/chat/adapters/chatgpt-web/auth/status?runnerId=web`，返回 `state=auth_required`、`loggedIn=false`、`identityComplete=false`、`accountCheckOk=false`、`accountStatus=403`，message 同时包含 `captured browser accounts/check proof is stale` 与 `authorization token expired at 2026-05-24 16:47:44 UTC`。测试结束已停止临时 Bifrost 进程并删除临时数据目录。

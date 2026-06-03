@@ -706,6 +706,41 @@ fn stale_conversation_wrong_page_retries_as_new_conversation() {
 }
 
 #[test]
+fn auth_flow_pages_are_not_retryable_conversation_navigation() {
+    let login_page = json!({
+        "readyState": "complete",
+        "url": "https://chatgpt.com/auth/login",
+        "title": "开始使用 | ChatGPT",
+        "bodyText": "登录即可开始聊天 使用 Google 账号继续 使用 Apple 账号继续",
+        "conversationId": null,
+        "pageKind": "new_conversation",
+        "visibleComposerCount": 0
+    });
+    assert!(page_state_is_auth_flow_page(&login_page));
+    let error = target_page_error(&login_page, Some("6a0cac55"));
+    assert!(error.starts_with("auth_required:"));
+    assert!(!should_retry_as_new_conversation(&error));
+    assert!(target_page_is_terminal_mismatch(
+        &login_page,
+        Some("6a0cac55")
+    ));
+
+    let google_oauth = json!({
+        "readyState": "complete",
+        "url": "https://accounts.google.com/o/oauth2/v2/auth?client_id=chatgpt",
+        "title": "Sign in - Google Accounts",
+        "bodyText": "Sign in Continue with Google",
+        "conversationId": null,
+        "pageKind": "new_conversation",
+        "visibleComposerCount": 0
+    });
+    assert!(page_state_is_auth_flow_page(&google_oauth));
+    let error = target_page_error(&google_oauth, Some("6a0cac55"));
+    assert!(error.starts_with("auth_required:"));
+    assert!(!should_retry_as_new_conversation(&error));
+}
+
+#[test]
 fn handoff_heartbeat_reports_browser_and_cdp_failures() {
     assert_eq!(
         handoff_heartbeat_error(true, false).as_deref(),

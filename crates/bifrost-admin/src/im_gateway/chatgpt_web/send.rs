@@ -20,6 +20,7 @@ const HANDOFF_PAGE_PROBE_TIMEOUT_SECS: u64 = 3;
 const TARGET_PAGE_STABLE_MS: u64 = 1_000;
 const TARGET_PAGE_POLL_MS: u64 = 250;
 const COMPOSER_PASTE_THRESHOLD_CHARS: usize = 120;
+const AUTH_FLOW_RECOVERY_TIMEOUT_SECS: u64 = 10 * 60;
 
 pub(in crate::im_gateway::chatgpt_web) async fn send_with_browser(
     config: &RuntimeConfig,
@@ -367,6 +368,14 @@ async fn send_with_browser_once(
         // the expected URL, wait_target_page / fallback logic handles it.
         let mut expected_conversation_id = conversation_id;
         let strong_consistency = config.chatgpt.is_strong_consistency();
+
+        recover_visible_auth_flow_if_needed(
+            cdp,
+            &navigate_url,
+            expected_conversation_id,
+            Duration::from_secs(AUTH_FLOW_RECOVERY_TIMEOUT_SECS),
+        )
+        .await?;
 
         // First wait_target_page: if the conversation URL redirects to the
         // homepage (deleted/expired conversation), fall back based on
@@ -2119,6 +2128,9 @@ async fn wait_composer(
     while tokio::time::Instant::now() < deadline {
         let diagnostic = inspect_page(cdp).await?;
         last = diagnostic.clone();
+        if page_state_is_auth_flow_page(&diagnostic) {
+            return Err(auth_required_page_error(&diagnostic));
+        }
         if target_page_matches(&diagnostic, expected_conversation_id, true) {
             // Brief settling wait — allows React to finish any micro-task
             // after DOM is ready. 100ms is sufficient; if hydration is still
@@ -2384,6 +2396,9 @@ async fn wait_target_page(
     while tokio::time::Instant::now() < deadline {
         let state = inspect_page(cdp).await?;
         last = state.clone();
+        if page_state_is_auth_flow_page(&state) {
+            return Err(auth_required_page_error(&state));
+        }
 
         let ready = state
             .get("readyState")
@@ -2516,6 +2531,9 @@ async fn assert_target_page(
     if target_page_matches(&state, expected_conversation_id, require_composer) {
         return Ok(());
     }
+    if page_state_is_auth_flow_page(&state) {
+        return Err(auth_required_page_error(&state));
+    }
     Err(target_page_error(&state, expected_conversation_id))
 }
 
@@ -2595,7 +2613,13 @@ pub(in crate::im_gateway::chatgpt_web) fn target_page_is_terminal_mismatch(
     }
 }
 
-fn target_page_error(state: &Value, expected_conversation_id: Option<&str>) -> String {
+pub(in crate::im_gateway::chatgpt_web) fn target_page_error(
+    state: &Value,
+    expected_conversation_id: Option<&str>,
+) -> String {
+    if page_state_is_auth_flow_page(state) {
+        return auth_required_page_error(state);
+    }
     let actual = state.get("conversationId").and_then(Value::as_str);
     let url = state.get("url").and_then(Value::as_str).unwrap_or_default();
     let page_kind = state
@@ -2614,6 +2638,112 @@ fn target_page_error(state: &Value, expected_conversation_id: Option<&str>) -> S
     format!(
         "browser_wrong_page: expected_conversation_id={:?} actual_conversation_id={:?} page_kind={} url={}{}",
         expected_conversation_id, actual, page_kind, url, body_hint
+    )
+}
+
+async fn recover_visible_auth_flow_if_needed(
+    cdp: &CdpClient,
+    navigate_url: &str,
+    expected_conversation_id: Option<&str>,
+    duration: Duration,
+) -> Result<(), String> {
+    let mut state = inspect_page(cdp).await?;
+    if !page_state_is_auth_flow_page(&state) {
+        return Ok(());
+    }
+    warn!(
+        page_state = %state,
+        expected_conversation_id,
+        "chatgpt_web send: browser entered auth flow; waiting instead of re-navigating"
+    );
+
+    let deadline = tokio::time::Instant::now() + duration;
+    while tokio::time::Instant::now() < deadline {
+        sleep(Duration::from_secs(1)).await;
+        state = inspect_page(cdp).await?;
+        if page_state_is_auth_flow_page(&state) {
+            continue;
+        }
+        if target_page_matches(&state, expected_conversation_id, false) {
+            info!(
+                page_state = %state,
+                expected_conversation_id,
+                "chatgpt_web send: auth flow returned to expected page"
+            );
+            return Ok(());
+        }
+        warn!(
+            %navigate_url,
+            page_state = %state,
+            expected_conversation_id,
+            "chatgpt_web send: auth flow finished away from target, navigating back once"
+        );
+        cdp.navigate_and_wait(navigate_url, Duration::from_secs(20))
+            .await?;
+        return Ok(());
+    }
+
+    Err(auth_required_page_error(&state))
+}
+
+/// This is not an auth validator. Full login-state validation remains in
+/// `auth_status_from_state`; this only prevents the send loop from treating a
+/// visible ChatGPT/OpenAI third-party auth flow as a stale conversation or
+/// composer delay.
+pub(in crate::im_gateway::chatgpt_web) fn page_state_is_auth_flow_page(state: &Value) -> bool {
+    let url = state.get("url").and_then(Value::as_str).unwrap_or_default();
+    let url_lower = url.to_ascii_lowercase();
+    if url_lower.contains("/auth/login")
+        || url_lower.contains("/auth/")
+        || url_lower.contains("auth.openai.com")
+        || url_lower.contains("auth0.openai.com")
+        || url_lower.contains("accounts.google.")
+        || url_lower.contains("appleid.apple.com")
+        || url_lower.contains("login.microsoftonline.com")
+    {
+        return true;
+    }
+    let title = state
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if title.contains("log in")
+        || title.contains("login")
+        || title.contains("开始使用")
+        || title.contains("chatgpt")
+            && state
+                .get("bodyText")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .contains("登录即可开始聊天")
+    {
+        return true;
+    }
+    let body = state
+        .get("bodyText")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    body.contains("log in to chatgpt")
+        || body.contains("sign up")
+        || body.contains("continue with google")
+        || body.contains("登录即可开始聊天")
+        || body.contains("使用 google 账号继续")
+}
+
+fn auth_required_page_error(state: &Value) -> String {
+    let url = state.get("url").and_then(Value::as_str).unwrap_or_default();
+    let title = state
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let ready = state
+        .get("readyState")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    format!(
+        "auth_required: ChatGPT Web browser is still in auth flow: url={url} title={title:?} readyState={ready}"
     )
 }
 
