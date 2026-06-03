@@ -63,6 +63,7 @@ const DEFAULT_TASK_FILE_PAGE_SIZE = 8;
 const TASK_FILE_PAGE_SIZE_OPTIONS = ["8", "10", "20", "50", "100"];
 const TASK_FILE_TABLE_SCROLL_X = 1750;
 const DAILY_DOCUMENT_PAGE_SIZE = 8;
+const DAILY_DOCUMENT_TABLE_SCROLL_X = 900;
 
 function pauseStatusLabel(task: AsrDirectoryTaskDetail): string {
   if (!task.paused) {
@@ -75,6 +76,18 @@ function pauseStatusLabel(task: AsrDirectoryTaskDetail): string {
 }
 
 type FileStatusFilter = "processing" | "pending" | "completed" | "failed" | "all";
+
+function recordedSortValue(record: AsrTaskFileRecord): number {
+  return record.source_created_at_ms ?? record.source_modified_ms ?? 0;
+}
+
+function compareTaskFilesByRecordedDesc(a: AsrTaskFileRecord, b: AsrTaskFileRecord): number {
+  const timeOrder = recordedSortValue(b) - recordedSortValue(a);
+  if (timeOrder !== 0) {
+    return timeOrder;
+  }
+  return a.key.localeCompare(b.key);
+}
 
 function fileElapsedMs(record: AsrTaskFileRecord, nowMs: number): number | undefined {
   if (!record.started_at_ms) {
@@ -237,7 +250,9 @@ export default function DirectoryTaskDetailPage({
   }, [taskDetail?.files]);
   const filteredTaskFiles = useMemo(
     () =>
-      (taskDetail?.files ?? []).filter((file) => matchesFileStatusFilter(file, fileStatusFilter)),
+      (taskDetail?.files ?? [])
+        .filter((file) => matchesFileStatusFilter(file, fileStatusFilter))
+        .sort(compareTaskFilesByRecordedDesc),
     [fileStatusFilter, taskDetail?.files],
   );
 
@@ -306,13 +321,36 @@ export default function DirectoryTaskDetailPage({
     }
   }, [taskDetail, onRefreshTask]);
 
+  const dailyAgentRunMenuItems = useMemo(() => {
+    const agents = taskDetail?.daily_agent?.agents || [];
+    return [
+      {
+        key: "__all__",
+        label: "Run All Agents",
+      },
+      ...agents.map((agent) => ({
+        key: agent.id,
+        label: `Run ${agent.name || agent.id}`,
+        disabled: !agent.enabled,
+      })),
+    ];
+  }, [taskDetail?.daily_agent?.agents]);
+
   const handleRunDailyAgentForDocument = useCallback(
-    async (date: string) => {
+    async (date: string, agentId?: string) => {
       if (!taskDetail || dailyAgentRunDate) return;
       setDailyAgentRunDate(date);
       try {
-        const result = await triggerDailyAgentRun(taskDetail.id, { date });
-        message.success(result.message || `Daily Agent run queued for ${date}`);
+        const result = await triggerDailyAgentRun(taskDetail.id, {
+          date,
+          agentId,
+        });
+        message.success(
+          result.message ||
+            (agentId
+              ? `Daily Agent ${agentId} run queued for ${date}`
+              : `All Daily Agents queued for ${date}`),
+        );
       } catch (error) {
         message.error(
           `Daily Agent run failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -326,23 +364,32 @@ export default function DirectoryTaskDetailPage({
 
   if (selectedFileKey) {
     return (
-      <div data-testid="asr-task-detail-page" style={{ height: "100%", overflow: "auto" }}>
-        <TaskFileTranscriptPage
-          key={selectedFileKey}
-          token={token}
-          file={selectedFile}
-          timeline={taskTimeline}
-          loading={taskTimelineLoading}
-          onBack={onBackToTaskFiles}
-        />
+      <div
+        className="asr-task-detail-page"
+        data-testid="asr-task-detail-page"
+      >
+        <div className="asr-task-detail-standalone-scroll">
+          <TaskFileTranscriptPage
+            key={selectedFileKey}
+            token={token}
+            file={selectedFile}
+            timeline={taskTimeline}
+            loading={taskTimelineLoading}
+            onBack={onBackToTaskFiles}
+          />
+        </div>
       </div>
     );
   }
 
   if (selectedDailyDate) {
     return (
-      <div data-testid="asr-task-daily-document-page" style={{ height: "100%", overflow: "auto" }}>
+      <div
+        className="asr-task-detail-page"
+        data-testid="asr-task-daily-document-page"
+      >
         <Card
+          className="asr-task-detail-card"
           title={
             <Space>
               <Button
@@ -356,31 +403,37 @@ export default function DirectoryTaskDetailPage({
           loading={taskDailyDocumentLoading}
         >
           {taskDailyDocument ? (
-            <Space direction="vertical" size={12} style={{ width: "100%" }}>
-              <Descriptions size="small" bordered column={2}>
-                <Descriptions.Item label="Task">
-                  {taskDailyDocument.task_name}
-                </Descriptions.Item>
-                <Descriptions.Item label="Date">{taskDailyDocument.date}</Descriptions.Item>
-                <Descriptions.Item label="Path" span={2}>
-                  <Text style={{ fontSize: 12 }} ellipsis={{ tooltip: taskDailyDocument.path }}>
-                    {taskDailyDocument.path}
-                  </Text>
-                </Descriptions.Item>
-                <Descriptions.Item label="Size">
-                  {formatBytes(taskDailyDocument.size)}
-                </Descriptions.Item>
-                <Descriptions.Item label="Modified">
-                  {formatTime(taskDailyDocument.modified_ms)}
-                </Descriptions.Item>
-              </Descriptions>
+            <Space direction="vertical" size={12} style={{ width: "100%", minWidth: 0 }}>
+              <div
+                data-testid="asr-daily-document-meta"
+                style={{ width: "100%", minWidth: 0, overflowX: "auto", overflowY: "hidden" }}
+              >
+                <Descriptions size="small" bordered column={2} style={{ minWidth: 720 }}>
+                  <Descriptions.Item label="Task">
+                    {taskDailyDocument.task_name}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="Date">{taskDailyDocument.date}</Descriptions.Item>
+                  <Descriptions.Item label="Path" span={2}>
+                    <Text
+                      style={{ display: "inline-block", fontSize: 12, whiteSpace: "nowrap" }}
+                      ellipsis={{ tooltip: taskDailyDocument.path }}
+                    >
+                      {taskDailyDocument.path}
+                    </Text>
+                  </Descriptions.Item>
+                  <Descriptions.Item label="Size">
+                    {formatBytes(taskDailyDocument.size)}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="Modified">
+                    {formatTime(taskDailyDocument.modified_ms)}
+                  </Descriptions.Item>
+                </Descriptions>
+              </div>
               <pre
                 data-testid="asr-daily-document-content"
                 style={{
                   margin: 0,
                   minHeight: 360,
-                  maxHeight: "calc(100vh - 320px)",
-                  overflow: "auto",
                   padding: 16,
                   border: `1px solid ${token.colorBorderSecondary}`,
                   borderRadius: 6,
@@ -410,10 +463,11 @@ export default function DirectoryTaskDetailPage({
   if (selectedDailyAgentReportDate) {
     return (
       <div
+        className="asr-task-detail-page"
         data-testid="asr-daily-agent-report-page"
-        style={{ height: "100%", overflow: "auto" }}
       >
         <Card
+          className="asr-task-detail-card"
           title={
             <Space>
               <Button
@@ -427,42 +481,54 @@ export default function DirectoryTaskDetailPage({
           loading={taskDailyAgentReportLoading}
         >
           {taskDailyAgentReport ? (
-            <Space direction="vertical" size={12} style={{ width: "100%" }}>
-              <Descriptions size="small" bordered column={2}>
-                <Descriptions.Item label="Task">
-                  {taskDailyAgentReport.task_name}
-                </Descriptions.Item>
-                <Descriptions.Item label="Date">
-                  {taskDailyAgentReport.date}
-                </Descriptions.Item>
-                <Descriptions.Item label="Agent">
-                  <Tag>{taskDailyAgentReport.agent_name || taskDailyAgentReport.agent_id || "daily_report"}</Tag>
-                </Descriptions.Item>
-                <Descriptions.Item label="Output Dir">
-                  <Text code>{taskDailyAgentReport.output_dir || "report"}</Text>
-                </Descriptions.Item>
-                <Descriptions.Item label="Path" span={2}>
-                  <Text style={{ fontSize: 12 }} ellipsis={{ tooltip: taskDailyAgentReport.path }}>
-                    {taskDailyAgentReport.path}
-                  </Text>
-                </Descriptions.Item>
-                <Descriptions.Item label="Size">
-                  {formatBytes(taskDailyAgentReport.size)}
-                </Descriptions.Item>
-                <Descriptions.Item label="Modified">
-                  {formatTime(taskDailyAgentReport.modified_ms)}
-                </Descriptions.Item>
-                <Descriptions.Item label="Processed At">
-                  {formatTime(taskDailyAgentReport.processed_at_ms)}
-                </Descriptions.Item>
-                <Descriptions.Item label="Runner">
-                  {taskDailyAgentReport.runner ? (
-                    <Tag>{taskDailyAgentReport.runner}</Tag>
-                  ) : (
-                    "-"
-                  )}
-                </Descriptions.Item>
-              </Descriptions>
+            <Space direction="vertical" size={12} style={{ width: "100%", minWidth: 0 }}>
+              <div
+                data-testid="asr-daily-agent-report-meta"
+                style={{ width: "100%", minWidth: 0, overflowX: "auto", overflowY: "hidden" }}
+              >
+                <Descriptions size="small" bordered column={2} style={{ minWidth: 900 }}>
+                  <Descriptions.Item label="Task">
+                    {taskDailyAgentReport.task_name}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="Date">
+                    {taskDailyAgentReport.date}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="Agent">
+                    <Tag>
+                      {taskDailyAgentReport.agent_name ||
+                        taskDailyAgentReport.agent_id ||
+                        "daily_report"}
+                    </Tag>
+                  </Descriptions.Item>
+                  <Descriptions.Item label="Output Dir">
+                    <Text code>{taskDailyAgentReport.output_dir || "report"}</Text>
+                  </Descriptions.Item>
+                  <Descriptions.Item label="Path" span={2}>
+                    <Text
+                      style={{ display: "inline-block", fontSize: 12, whiteSpace: "nowrap" }}
+                      ellipsis={{ tooltip: taskDailyAgentReport.path }}
+                    >
+                      {taskDailyAgentReport.path}
+                    </Text>
+                  </Descriptions.Item>
+                  <Descriptions.Item label="Size">
+                    {formatBytes(taskDailyAgentReport.size)}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="Modified">
+                    {formatTime(taskDailyAgentReport.modified_ms)}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="Processed At">
+                    {formatTime(taskDailyAgentReport.processed_at_ms)}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="Runner">
+                    {taskDailyAgentReport.runner ? (
+                      <Tag>{taskDailyAgentReport.runner}</Tag>
+                    ) : (
+                      "-"
+                    )}
+                  </Descriptions.Item>
+                </Descriptions>
+              </div>
               <MarkdownContent
                 token={token}
                 content={taskDailyAgentReport.content}
@@ -492,10 +558,168 @@ export default function DirectoryTaskDetailPage({
     bulkRetry && bulkRetry.queued_files > 0
       ? Math.round((bulkRetry.processed_files / bulkRetry.queued_files) * 100)
       : 0;
+  const overviewTabContent = taskDetail ? (
+    <Space direction="vertical" size={16} style={{ width: "100%" }}>
+      <Descriptions size="small" bordered column={2}>
+        <Descriptions.Item label="Directory" span={2}>
+          {taskDetail.audio_dir}
+        </Descriptions.Item>
+        <Descriptions.Item label="Schedule">
+          {taskDetail.enabled ? formatSchedule(taskDetail.schedule) : "Disabled"}
+        </Descriptions.Item>
+        <Descriptions.Item label="Run State">
+          <Tag
+            color={
+              taskDetail.paused
+                ? "warning"
+                : taskDetail.summary.running
+                  ? "processing"
+                  : "success"
+            }
+          >
+            {pauseStatusLabel(taskDetail)}
+          </Tag>
+        </Descriptions.Item>
+        <Descriptions.Item label="Next Run">
+          {formatTime(taskDetail.next_run_at_ms)}
+        </Descriptions.Item>
+        <Descriptions.Item label="Last Run">
+          {formatTime(taskDetail.last_run_at_ms)}
+        </Descriptions.Item>
+        <Descriptions.Item label="Mode">
+          {taskDetail.recursive ? "Recursive" : "Flat"}
+        </Descriptions.Item>
+        <Descriptions.Item label="Runtime">
+          {taskDetail.runtime_strategy}
+        </Descriptions.Item>
+        <Descriptions.Item label="Speaker Diarization">
+          {taskDetail.diarization?.enabled ? (
+            <Space wrap>
+              <Tag color={taskDetail.summary.diarization_ready ? "purple" : "warning"}>
+                {taskDetail.summary.diarization_ready ? "Ready" : "Needs setup"}
+              </Tag>
+              <Text>{taskDetail.diarization.profile}</Text>
+            </Space>
+          ) : (
+            "Disabled"
+          )}
+        </Descriptions.Item>
+        <Descriptions.Item label="Speakers">
+          {taskDetail.summary.diarized_files ?? 0} files,{" "}
+          {taskDetail.summary.speaker_count ?? 0} speakers
+        </Descriptions.Item>
+        <Descriptions.Item label="Processed">
+          {taskDetail.summary.processed}
+        </Descriptions.Item>
+        <Descriptions.Item label="Pending">
+          {taskDetail.summary.pending}
+        </Descriptions.Item>
+        <Descriptions.Item label="Failed">{taskDetail.summary.failed}</Descriptions.Item>
+        <Descriptions.Item label="Audio Files">
+          <Space>
+            <Text>{formatBytes(taskDetail.summary.audio_source_bytes)}</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              ({taskDetail.summary.audio_source_file_count} files)
+            </Text>
+          </Space>
+        </Descriptions.Item>
+        <Descriptions.Item label="Cleanable Originals">
+          <Space>
+            <Text>{formatBytes(cleanableSourceBytes)}</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              ({cleanableSourceFileCount} files)
+            </Text>
+          </Space>
+        </Descriptions.Item>
+        {summary && summary.partial_success > 0 ? (
+          <Descriptions.Item label="Partial Success">
+            <Space>
+              <Tag color="warning">{summary.partial_success}</Tag>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                ({summary.failed_chunk_count} failed chunks)
+              </Text>
+            </Space>
+          </Descriptions.Item>
+        ) : (
+          <Descriptions.Item label="Deleted After Processing">
+            {taskDetail.summary.deleted_after_processing}
+          </Descriptions.Item>
+        )}
+        <Descriptions.Item label="Last Error" span={2}>
+          {taskDetail.last_error || "-"}
+        </Descriptions.Item>
+      </Descriptions>
+      {bulkRetry ? (
+        <Alert
+          data-testid="asr-bulk-retry-status"
+          type={
+            bulkRetry.status === "failed"
+              ? "warning"
+              : bulkRetry.status === "completed"
+                ? "success"
+                : "info"
+          }
+          showIcon
+          message={
+            <Space wrap>
+              <Text strong>Bulk chunk retry</Text>
+              <Tag
+                color={
+                  bulkRetry.status === "failed"
+                    ? "warning"
+                    : bulkRetry.status === "completed"
+                      ? "success"
+                      : "processing"
+                }
+              >
+                {bulkRetry.status}
+              </Tag>
+              <Text>
+                {bulkRetry.processed_files}/{bulkRetry.queued_files} files
+              </Text>
+              <Text>
+                {bulkRetry.recovered_chunks}/{bulkRetry.total_failed_chunks} chunks recovered
+              </Text>
+              {bulkRetry.still_failed_chunks > 0 ? (
+                <Text type="warning">{bulkRetry.still_failed_chunks} still failed</Text>
+              ) : null}
+            </Space>
+          }
+          description={
+            <Space direction="vertical" size={6} style={{ width: "100%" }}>
+              <Text type="secondary">{bulkRetry.message}</Text>
+              {bulkRetry.current_source_path ? (
+                <Text
+                  style={{ fontSize: 12, width: "100%" }}
+                  ellipsis={{ tooltip: bulkRetry.current_source_path }}
+                >
+                  Current: {bulkRetry.current_source_path}
+                </Text>
+              ) : null}
+              {bulkRetryActive ? (
+                <Progress
+                  percent={bulkRetryPercent}
+                  size="small"
+                  status="active"
+                  format={() => `${bulkRetry.processed_files}/${bulkRetry.queued_files}`}
+                />
+              ) : null}
+              {bulkRetry.results.length > 0 ? (
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  Last file: {bulkRetry.results.at(-1)?.message}
+                </Text>
+              ) : null}
+            </Space>
+          }
+        />
+      ) : null}
+    </Space>
+  ) : null;
 
   return (
-    <div data-testid="asr-task-detail-page" style={{ height: "100%", overflow: "auto" }}>
+    <div className="asr-task-detail-page" data-testid="asr-task-detail-page">
       <Card
+        className="asr-task-detail-card asr-task-detail-card--tabs"
         title={
           <Space>
             <Button
@@ -615,165 +839,13 @@ export default function DirectoryTaskDetailPage({
         }
       >
         {taskDetail ? (
-          <Space direction="vertical" size={16} style={{ width: "100%" }}>
-            <Descriptions size="small" bordered column={2}>
-              <Descriptions.Item label="Directory" span={2}>
-                {taskDetail.audio_dir}
-              </Descriptions.Item>
-              <Descriptions.Item label="Schedule">
-                {taskDetail.enabled ? formatSchedule(taskDetail.schedule) : "Disabled"}
-              </Descriptions.Item>
-              <Descriptions.Item label="Run State">
-                <Tag
-                  color={
-                    taskDetail.paused
-                      ? "warning"
-                      : taskDetail.summary.running
-                        ? "processing"
-                        : "success"
-                  }
-                >
-                  {pauseStatusLabel(taskDetail)}
-                </Tag>
-              </Descriptions.Item>
-              <Descriptions.Item label="Next Run">
-                {formatTime(taskDetail.next_run_at_ms)}
-              </Descriptions.Item>
-              <Descriptions.Item label="Last Run">
-                {formatTime(taskDetail.last_run_at_ms)}
-              </Descriptions.Item>
-              <Descriptions.Item label="Mode">
-                {taskDetail.recursive ? "Recursive" : "Flat"}
-              </Descriptions.Item>
-              <Descriptions.Item label="Runtime">
-                {taskDetail.runtime_strategy}
-              </Descriptions.Item>
-              <Descriptions.Item label="Speaker Diarization">
-                {taskDetail.diarization?.enabled ? (
-                  <Space wrap>
-                    <Tag color={taskDetail.summary.diarization_ready ? "purple" : "warning"}>
-                      {taskDetail.summary.diarization_ready ? "Ready" : "Needs setup"}
-                    </Tag>
-                    <Text>{taskDetail.diarization.profile}</Text>
-                  </Space>
-                ) : (
-                  "Disabled"
-                )}
-              </Descriptions.Item>
-              <Descriptions.Item label="Speakers">
-                {taskDetail.summary.diarized_files ?? 0} files,{" "}
-                {taskDetail.summary.speaker_count ?? 0} speakers
-              </Descriptions.Item>
-              <Descriptions.Item label="Processed">
-                {taskDetail.summary.processed}
-              </Descriptions.Item>
-              <Descriptions.Item label="Pending">
-                {taskDetail.summary.pending}
-              </Descriptions.Item>
-              <Descriptions.Item label="Failed">{taskDetail.summary.failed}</Descriptions.Item>
-              <Descriptions.Item label="Audio Files">
-                <Space>
-                  <Text>{formatBytes(taskDetail.summary.audio_source_bytes)}</Text>
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    ({taskDetail.summary.audio_source_file_count} files)
-                  </Text>
-                </Space>
-              </Descriptions.Item>
-              <Descriptions.Item label="Cleanable Originals">
-                <Space>
-                  <Text>{formatBytes(cleanableSourceBytes)}</Text>
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    ({cleanableSourceFileCount} files)
-                  </Text>
-                </Space>
-              </Descriptions.Item>
-              {summary && summary.partial_success > 0 ? (
-                <Descriptions.Item label="Partial Success">
-                  <Space>
-                    <Tag color="warning">{summary.partial_success}</Tag>
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      ({summary.failed_chunk_count} failed chunks)
-                    </Text>
-                  </Space>
-                </Descriptions.Item>
-              ) : (
-                <Descriptions.Item label="Deleted After Processing">
-                  {taskDetail.summary.deleted_after_processing}
-                </Descriptions.Item>
-              )}
-              <Descriptions.Item label="Last Error" span={2}>
-                {taskDetail.last_error || "-"}
-              </Descriptions.Item>
-            </Descriptions>
-            {bulkRetry ? (
-              <Alert
-                data-testid="asr-bulk-retry-status"
-                type={
-                  bulkRetry.status === "failed"
-                    ? "warning"
-                    : bulkRetry.status === "completed"
-                      ? "success"
-                      : "info"
-                }
-                showIcon
-                message={
-                  <Space wrap>
-                    <Text strong>Bulk chunk retry</Text>
-                    <Tag
-                      color={
-                        bulkRetry.status === "failed"
-                          ? "warning"
-                          : bulkRetry.status === "completed"
-                            ? "success"
-                            : "processing"
-                      }
-                    >
-                      {bulkRetry.status}
-                    </Tag>
-                    <Text>
-                      {bulkRetry.processed_files}/{bulkRetry.queued_files} files
-                    </Text>
-                    <Text>
-                      {bulkRetry.recovered_chunks}/{bulkRetry.total_failed_chunks} chunks recovered
-                    </Text>
-                    {bulkRetry.still_failed_chunks > 0 ? (
-                      <Text type="warning">
-                        {bulkRetry.still_failed_chunks} still failed
-                      </Text>
-                    ) : null}
-                  </Space>
-                }
-                description={
-                  <Space direction="vertical" size={6} style={{ width: "100%" }}>
-                    <Text type="secondary">{bulkRetry.message}</Text>
-                    {bulkRetry.current_source_path ? (
-                      <Text
-                        style={{ fontSize: 12, width: "100%" }}
-                        ellipsis={{ tooltip: bulkRetry.current_source_path }}
-                      >
-                        Current: {bulkRetry.current_source_path}
-                      </Text>
-                    ) : null}
-                    {bulkRetryActive ? (
-                      <Progress
-                        percent={bulkRetryPercent}
-                        size="small"
-                        status="active"
-                        format={() =>
-                          `${bulkRetry.processed_files}/${bulkRetry.queued_files}`
-                        }
-                      />
-                    ) : null}
-                    {bulkRetry.results.length > 0 ? (
-                      <Text type="secondary" style={{ fontSize: 12 }}>
-                        Last file: {bulkRetry.results.at(-1)?.message}
-                      </Text>
-                    ) : null}
-                  </Space>
-                }
-              />
-            ) : null}
+          <Space
+            className="asr-task-detail-content"
+            direction="vertical"
+            size={16}
+          >
             <Tabs
+              className="asr-task-detail-tabs"
               activeKey={selectedTaskTab}
               onChange={(key) => {
                 if (isDirectoryTaskDetailTabKey(key)) {
@@ -781,6 +853,11 @@ export default function DirectoryTaskDetailPage({
                 }
               }}
               items={[
+                {
+                  key: "overview",
+                  label: "Overview",
+                  children: <div data-testid="asr-task-overview-tab">{overviewTabContent}</div>,
+                },
                 {
                   key: "files",
                   label: `Files (${taskDetail.files.length})`,
@@ -1060,11 +1137,24 @@ export default function DirectoryTaskDetailPage({
                   label: `Daily Docs (${dailyDocuments.length})`,
                   children: (
                     <div data-testid="asr-task-daily-docs-tab">
+                      <style>
+                        {`
+                          .asr-daily-documents-table .ant-table-thead > tr > th {
+                            height: 40px !important;
+                            padding-top: 8px !important;
+                            padding-bottom: 8px !important;
+                            vertical-align: middle !important;
+                            white-space: nowrap;
+                          }
+                        `}
+                      </style>
                       {dailyDocuments.length > 0 ? (
                         <Table<AsrTaskDailyDocument>
+                          className="asr-daily-documents-table"
                           rowKey="date"
                           size="small"
                           tableLayout="fixed"
+                          scroll={{ x: DAILY_DOCUMENT_TABLE_SCROLL_X }}
                           dataSource={dailyDocuments}
                           pagination={{
                             pageSize: DAILY_DOCUMENT_PAGE_SIZE,
@@ -1117,17 +1207,27 @@ export default function DirectoryTaskDetailPage({
                                   >
                                     Open document
                                   </Button>
-                                  <Button
+                                  <Dropdown.Button
                                     type="link"
                                     size="small"
                                     style={{ padding: 0 }}
                                     loading={dailyAgentRunDate === record.date}
                                     disabled={Boolean(dailyAgentRunDate)}
                                     data-testid={`asr-daily-doc-run-agent-${record.date}`}
-                                    onClick={() => handleRunDailyAgentForDocument(record.date)}
+                                    menu={{
+                                      items: dailyAgentRunMenuItems,
+                                      onClick: ({ key }) =>
+                                        handleRunDailyAgentForDocument(
+                                          record.date,
+                                          key === "__all__" ? undefined : key,
+                                        ),
+                                    }}
+                                    onClick={() =>
+                                      handleRunDailyAgentForDocument(record.date)
+                                    }
                                   >
-                                    Run Daily Agent
-                                  </Button>
+                                    Run All Agents
+                                  </Dropdown.Button>
                                 </Space>
                               ),
                             },

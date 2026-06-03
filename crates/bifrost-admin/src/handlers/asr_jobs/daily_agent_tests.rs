@@ -134,17 +134,121 @@ fn daily_agent_workspace_creates_per_agent_instruction_and_output_dirs() {
         import_policy: AsrExternalImportPolicy::default(),
     };
 
-    let status = ensure_asr_daily_workspace(&task).unwrap();
+    ensure_asr_daily_workspace(&task).unwrap();
     let daily_dir = daily_dir_for_task(&task.id);
 
-    assert!(daily_dir.join("report").is_dir());
-    assert!(daily_dir.join("tomorrow_todo").is_dir());
-    assert!(daily_dir.join("agents/daily_report.md").is_file());
-    assert!(daily_dir.join("agents/tomorrow_todo.md").is_file());
-    assert!(std::fs::read_to_string(daily_dir.join("agents/tomorrow_todo.md"))
+    std::fs::write(daily_dir.join("2026-05-22.md"), "daily source").unwrap();
+    let status = ensure_asr_daily_workspace(&task).unwrap();
+
+    assert!(daily_dir.join("agents/daily_report/input").is_dir());
+    assert!(daily_dir.join("agents/daily_report/output/report").is_dir());
+    assert!(daily_dir.join("agents/tomorrow_todo/input").is_dir());
+    assert!(daily_dir.join("agents/tomorrow_todo/output/tomorrow_todo").is_dir());
+    assert_eq!(
+        std::fs::read_to_string(daily_dir.join("agents/daily_report/input/2026-05-22.md"))
+            .unwrap(),
+        "daily source"
+    );
+    assert_eq!(
+        std::fs::read_to_string(daily_dir.join("agents/tomorrow_todo/input/2026-05-22.md"))
+            .unwrap(),
+        "daily source"
+    );
+
+    std::fs::write(daily_dir.join("2026-05-22.md"), "daily sourcf").unwrap();
+    ensure_asr_daily_workspace(&task).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(daily_dir.join("agents/daily_report/input/2026-05-22.md"))
+            .unwrap(),
+        "daily sourcf"
+    );
+    assert_eq!(
+        std::fs::read_to_string(daily_dir.join("agents/tomorrow_todo/input/2026-05-22.md"))
+            .unwrap(),
+        "daily sourcf"
+    );
+
+    assert!(daily_dir.join("agents/daily_report/AGENTS.md").is_file());
+    assert!(daily_dir.join("agents/tomorrow_todo/AGENTS.md").is_file());
+    assert!(std::fs::read_to_string(daily_dir.join("agents/tomorrow_todo/AGENTS.md"))
         .unwrap()
         .contains("明日 To Do List"));
     assert_eq!(status.agents.len(), 2);
+}
+
+#[test]
+fn daily_agent_source_copy_current_check_compares_content() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("2026-05-22.md");
+    let target = temp.path().join("agent/input/2026-05-22.md");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+
+    std::fs::write(&source, "same daily source").unwrap();
+    assert!(!daily_agent_source_copy_is_current(&source, &target).unwrap());
+
+    std::fs::write(&target, "same daily source").unwrap();
+    assert!(daily_agent_source_copy_is_current(&source, &target).unwrap());
+
+    std::fs::write(&target, "same daily sourcf").unwrap();
+    assert!(!daily_agent_source_copy_is_current(&source, &target).unwrap());
+}
+
+#[test]
+fn daily_agent_workspace_migrates_legacy_instruction_paths() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let task = AsrDirectoryTask {
+        id: "daily-agent-legacy-instructions-task".to_string(),
+        name: "Daily Agent Legacy Instructions Task".to_string(),
+        audio_dir: temp.path().join("audio"),
+        recursive: true,
+        enabled: true,
+        paused: false,
+        paused_at_ms: None,
+        schedule: AsrTaskSchedule::Hourly { minute: 0 },
+        language: "chinese".to_string(),
+        model: "Qwen3-ASR-1.7B".to_string(),
+        runtime_strategy: AsrRuntimeStrategy::ReusePerFile,
+        diarization: AsrDiarizationConfig::default(),
+        created_at_ms: 1,
+        updated_at_ms: 1,
+        last_run_at_ms: None,
+        next_run_at_ms: Some(1),
+        last_error: None,
+        daily_agent: AsrDailyAgentConfig::default(),
+        external_devices: Vec::new(),
+        import_policy: AsrExternalImportPolicy::default(),
+    };
+    let daily_dir = daily_dir_for_task(&task.id);
+    let daily_report_path = daily_dir.join("agents/daily_report/AGENTS.md");
+    let tomorrow_todo_path = daily_dir.join("agents/tomorrow_todo/AGENTS.md");
+    std::fs::create_dir_all(daily_report_path.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(tomorrow_todo_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &daily_report_path,
+        "keep custom\n- 原始按日转写文件位于当前目录，命名通常为 `YYYY-MM-DD.md`。\n- 每日报告输出到当前目录下的 `report/` 文件夹，命名为 `YYYY-MM-DD-report.md`。\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &tomorrow_todo_path,
+        "keep todo\n- 源文件是当前目录根部的 `YYYY-MM-DD.md`。\n- 默认输出目录是 `./tomorrow_todo/`。\n",
+    )
+    .unwrap();
+
+    ensure_asr_daily_workspace(&task).unwrap();
+
+    let daily_report = std::fs::read_to_string(daily_report_path).unwrap();
+    assert!(daily_report.contains("keep custom"));
+    assert!(daily_report.contains("`input/YYYY-MM-DD.md`"));
+    assert!(daily_report.contains("`./output/report`"));
+    assert!(!daily_report.contains("当前目录，命名通常为 `YYYY-MM-DD.md`"));
+
+    let tomorrow_todo = std::fs::read_to_string(tomorrow_todo_path).unwrap();
+    assert!(tomorrow_todo.contains("keep todo"));
+    assert!(tomorrow_todo.contains("`input/YYYY-MM-DD.md`"));
+    assert!(tomorrow_todo.contains("`./output/tomorrow_todo/`"));
+    assert!(!tomorrow_todo.contains("当前目录根部的 `YYYY-MM-DD.md`"));
 }
 
 #[test]
@@ -177,9 +281,13 @@ fn daily_agent_processed_state_keys_do_not_collide_for_same_date() {
     ensure_asr_daily_workspace(&task).unwrap();
     let daily_dir = daily_dir_for_task(&task.id);
     std::fs::write(daily_dir.join("2026-05-22.md"), "source").unwrap();
-    std::fs::write(daily_dir.join("report/2026-05-22-report.md"), "# report").unwrap();
     std::fs::write(
-        daily_dir.join("tomorrow_todo/2026-05-22-report.md"),
+        daily_dir.join("agents/daily_report/output/report/2026-05-22-report.md"),
+        "# report",
+    )
+    .unwrap();
+    std::fs::write(
+        daily_dir.join("agents/tomorrow_todo/output/tomorrow_todo/2026-05-22-report.md"),
         "# todo",
     )
     .unwrap();
@@ -331,7 +439,7 @@ fn daily_agent_change_plan_filters_to_requested_date() {
     assert_eq!(plan.entries[0].date, "2026-05-19");
     assert!(plan.entries[0]
         .report_target
-        .ends_with("daily-agent-date-filter-task/.daily/report/2026-05-19-report.md"));
+        .ends_with("daily-agent-date-filter-task/.daily/agents/daily_report/output/report/2026-05-19-report.md"));
 }
 
 #[tokio::test]

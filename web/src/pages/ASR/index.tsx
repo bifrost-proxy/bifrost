@@ -88,7 +88,7 @@ export default function ASR() {
     if (selectedDailyDate) {
       return "daily";
     }
-    return "files";
+    return "overview";
   })();
   const [capabilities, setCapabilities] = useState<AsrCapabilities | null>(null);
   const [status, setStatus] = useState<AsrStatus | null>(null);
@@ -1217,7 +1217,7 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
         (prev) => {
           const next = new URLSearchParams(prev);
           next.set("aiSection", "tools-asr");
-          if (tab === "files") {
+          if (tab === "overview") {
             next.delete("asrTaskTab");
           } else {
             next.set("asrTaskTab", tab);
@@ -1225,6 +1225,9 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
           next.delete("asrFile");
           next.delete("asrDay");
           next.delete("asrDailyReport");
+          if (tab !== "daily-agent") {
+            next.delete("asrDailyAgentEdit");
+          }
           return next;
         },
         { replace: false },

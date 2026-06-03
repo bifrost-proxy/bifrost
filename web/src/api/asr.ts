@@ -536,6 +536,7 @@ export interface AsrDirectoryTask {
   last_error?: string;
   external_devices?: AsrExternalDeviceBinding[];
   import_policy?: AsrExternalImportPolicy;
+  daily_agent?: AsrDailyAgentConfig;
   summary: AsrTaskSummary;
   bulk_retry?: AsrBulkRetryState;
 }

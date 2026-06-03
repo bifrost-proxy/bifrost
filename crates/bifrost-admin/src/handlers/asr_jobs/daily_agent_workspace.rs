@@ -1,31 +1,5 @@
 // ─── Daily Agent Workspace ───────────────────────────────────────────────────
 
-/// Read workspace status without creating directories or files (for GET endpoint).
-fn read_workspace_status(task: &AsrDirectoryTask) -> AsrDailyWorkspaceStatus {
-    let daily_dir = daily_dir_for_task(&task.id);
-    let legacy_task = task_for_daily_agent(task, &daily_agent_item_from_legacy(&task.daily_agent));
-    let report_dir = daily_agent_output_dir(&legacy_task);
-    let agents_path = daily_agent_instructions_path(&legacy_task);
-
-    let agents_exists = agents_path.exists();
-    let git_initialized = daily_dir.join(".git").exists();
-
-    let agents = build_workspace_agent_statuses(task);
-    let report_count = agents.iter().map(|agent| agent.report_count).sum();
-
-    AsrDailyWorkspaceStatus {
-        daily_dir: daily_dir.to_string_lossy().to_string(),
-        report_dir: report_dir.to_string_lossy().to_string(),
-        agents_path: agents_path.to_string_lossy().to_string(),
-        agents_exists,
-        git_available: true, // Assume available; actual check deferred to ensure_*
-        git_initialized,
-        git_error: None,
-        report_count,
-        agents,
-    }
-}
-
 fn count_markdown_files(dir: &Path) -> usize {
     std::fs::read_dir(dir)
         .map(|entries| {
@@ -62,6 +36,126 @@ fn build_workspace_agent_statuses(task: &AsrDirectoryTask) -> Vec<AsrDailyWorksp
         .collect()
 }
 
+fn is_daily_source_markdown_path(path: &Path) -> bool {
+    let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    path.is_file()
+        && filename.ends_with(".md")
+        && !filename.starts_with('.')
+        && filename != "AGENTS.md"
+        && is_valid_date_format(filename.trim_end_matches(".md"))
+}
+
+fn sync_daily_source_to_agent_work_dir(
+    task: &AsrDirectoryTask,
+    source_path: &Path,
+) -> Result<(), String> {
+    let Some(filename) = source_path.file_name() else {
+        return Ok(());
+    };
+    let target_path = daily_agent_input_dir(task).join(filename);
+    if let Some(parent) = target_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create agent source dir {}: {e}", parent.display()))?;
+    }
+    if daily_agent_source_copy_is_current(source_path, &target_path)? {
+        return Ok(());
+    }
+    std::fs::copy(source_path, &target_path).map_err(|e| {
+        format!(
+            "copy daily source {} to {}: {e}",
+            source_path.display(),
+            target_path.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn daily_agent_source_copy_is_current(source_path: &Path, target_path: &Path) -> Result<bool, String> {
+    if !target_path.exists() {
+        return Ok(false);
+    }
+    let source_meta = std::fs::metadata(source_path)
+        .map_err(|e| format!("read daily source metadata {}: {e}", source_path.display()))?;
+    let target_meta = std::fs::metadata(target_path)
+        .map_err(|e| format!("read agent source metadata {}: {e}", target_path.display()))?;
+    if source_meta.len() != target_meta.len() {
+        return Ok(false);
+    }
+    let source = std::fs::read(source_path)
+        .map_err(|e| format!("read daily source {}: {e}", source_path.display()))?;
+    let target = std::fs::read(target_path)
+        .map_err(|e| format!("read agent source {}: {e}", target_path.display()))?;
+    Ok(source == target)
+}
+
+fn sync_daily_sources_to_agent_workspaces(task: &AsrDirectoryTask) -> Result<(), String> {
+    let daily_dir = daily_dir_for_task(&task.id);
+    if !daily_dir.exists() {
+        return Ok(());
+    }
+    let sources: Vec<PathBuf> = std::fs::read_dir(&daily_dir)
+        .map_err(|e| format!("read daily source dir {}: {e}", daily_dir.display()))?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| is_daily_source_markdown_path(path))
+        .collect();
+
+    for agent in normalized_daily_agents(&task.daily_agent) {
+        let agent_task = task_for_daily_agent(task, &agent);
+        for source_path in &sources {
+            sync_daily_source_to_agent_work_dir(&agent_task, source_path)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn sync_daily_agent_plan_sources_to_work_dir(
+    task: &AsrDirectoryTask,
+    plan: &AsrDailyAgentChangePlan,
+) -> Result<(), String> {
+    for entry in &plan.entries {
+        let source_path = Path::new(&entry.source_path);
+        if source_path.exists() {
+            sync_daily_source_to_agent_work_dir(task, source_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn migrate_daily_agent_instructions_content(task: &AsrDirectoryTask, content: &str) -> String {
+    let report_dir = format!("./output/{}/", task.daily_agent.output_dir);
+    content
+        .replace(
+            "原始按日转写文件位于当前目录，命名通常为 `YYYY-MM-DD.md`。",
+            "原始按日转写文件副本位于当前目录的 `input/`，命名通常为 `input/YYYY-MM-DD.md`。",
+        )
+        .replace(
+            "每日报告输出到当前目录下的 `report/` 文件夹，命名为 `YYYY-MM-DD-report.md`。",
+            &format!(
+                "每日报告输出到当前目录下的 `{}` 文件夹，命名为 `YYYY-MM-DD-report.md`。",
+                report_dir.trim_end_matches('/')
+            ),
+        )
+        .replace(
+            "- 源文件是当前目录根部的 `YYYY-MM-DD.md`。",
+            "- 源文件是当前目录下的 `input/YYYY-MM-DD.md`。",
+        )
+        .replace(
+            "- 源文件是当前目录根部 `YYYY-MM-DD.md`。",
+            "- 源文件是当前目录下的 `input/YYYY-MM-DD.md`。",
+        )
+        .replace(
+            "- 默认输出目录是 `./report/`。",
+            &format!("- 默认输出目录是 `{report_dir}`。"),
+        )
+        .replace(
+            "- 默认输出目录是 `./tomorrow_todo/`。",
+            &format!("- 默认输出目录是 `{report_dir}`。"),
+        )
+}
+
 fn ensure_asr_daily_workspace(
     task: &AsrDirectoryTask,
 ) -> Result<AsrDailyWorkspaceStatus, String> {
@@ -69,15 +163,21 @@ fn ensure_asr_daily_workspace(
     let legacy_task = task_for_daily_agent(task, &daily_agent_item_from_legacy(&task.daily_agent));
     let report_dir = daily_agent_output_dir(&legacy_task);
     let agents_path = daily_agent_instructions_path(&legacy_task);
-    let instructions_dir = daily_agent_instructions_dir(&task.id);
     let gitignore_path = daily_dir.join(".gitignore");
 
     // Create directories
     std::fs::create_dir_all(&daily_dir).map_err(|e| format!("create daily dir: {e}"))?;
-    std::fs::create_dir_all(&instructions_dir).map_err(|e| format!("create agents dir: {e}"))?;
+    std::fs::create_dir_all(daily_agent_instructions_dir(&task.id))
+        .map_err(|e| format!("create agents dir: {e}"))?;
 
     for agent in normalized_daily_agents(&task.daily_agent) {
         let agent_task = task_for_daily_agent(task, &agent);
+        let work_dir = daily_agent_work_dir(&agent_task);
+        std::fs::create_dir_all(&work_dir).map_err(|e| format!("create agent work dir: {e}"))?;
+        std::fs::create_dir_all(daily_agent_input_dir(&agent_task))
+            .map_err(|e| format!("create agent input dir: {e}"))?;
+        std::fs::create_dir_all(daily_agent_output_root_dir(&agent_task))
+            .map_err(|e| format!("create agent output root dir: {e}"))?;
         let output_dir = daily_agent_output_dir(&agent_task);
         std::fs::create_dir_all(&output_dir).map_err(|e| format!("create output dir: {e}"))?;
         let instructions_path = daily_agent_instructions_path(&agent_task);
@@ -92,23 +192,22 @@ fn ensure_asr_daily_workspace(
             std::fs::write(&instructions_path, content.as_bytes()).map_err(|e| {
                 format!("write Daily Agent instructions {}: {e}", instructions_path.display())
             })?;
+        } else if let Ok(content) = std::fs::read_to_string(&instructions_path) {
+            let migrated = migrate_daily_agent_instructions_content(&agent_task, &content);
+            if migrated != content {
+                std::fs::write(&instructions_path, migrated.as_bytes()).map_err(|e| {
+                    format!(
+                        "migrate Daily Agent instructions {}: {e}",
+                        instructions_path.display()
+                    )
+                })?;
+            }
         }
     }
 
-    // Write AGENTS.md if not exists
-    let agents_exists = if agents_path.exists() {
-        true
-    } else {
-        let content =
-            if task.daily_agent.instructions_source == AsrDailyAgentInstructionsSource::Custom {
-                task.daily_agent.instructions.clone().unwrap_or_default()
-            } else {
-                daily_agent_instruction_content(&legacy_task)
-            };
-        std::fs::write(&agents_path, content.as_bytes())
-            .map_err(|e| format!("write AGENTS.md: {e}"))?;
-        true
-    };
+    sync_daily_sources_to_agent_workspaces(task)?;
+
+    let agents_exists = agents_path.exists();
 
     // Write .gitignore if not exists
     if !gitignore_path.exists() {

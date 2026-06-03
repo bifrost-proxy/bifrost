@@ -5,7 +5,10 @@ async fn get_daily_agent_config_response(task_id: &str) -> Response<BoxBody> {
         return error_response(StatusCode::NOT_FOUND, "ASR task not found");
     };
 
-    let workspace = read_workspace_status(&task);
+    let workspace = match ensure_asr_daily_workspace(&task) {
+        Ok(workspace) => workspace,
+        Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
+    };
     let processed = load_daily_agent_processed_state(task_id);
     let report_index_status = build_daily_agent_report_index_status(task_id, &processed);
 
@@ -132,6 +135,10 @@ async fn put_daily_agent_config_response(
 
     if let Err(e) = save_tasks(&store) {
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, &e);
+    }
+
+    if let Some(task) = find_task(task_id) {
+        let _ = ensure_asr_daily_workspace(&task);
     }
 
     json_response(&serde_json::json!({
@@ -599,9 +606,17 @@ fn daily_agent_report_path_for_agent_date(task_id: &str, agent_id: &str, date: &
         }
     }
 
-    Ok(daily_dir_for_task(task_id)
-        .join(output_dir)
-        .join(format!("{date}-report.md")))
+    if let Some(task) = task.as_ref() {
+        if let Some(agent) = normalized_daily_agents(&task.daily_agent)
+            .into_iter()
+            .find(|agent| agent.id == agent_id)
+        {
+            let agent_task = task_for_daily_agent(task, &agent);
+            return Ok(daily_agent_output_dir(&agent_task).join(format!("{date}-report.md")));
+        }
+    }
+
+    Ok(daily_dir_for_task(task_id).join(output_dir).join(format!("{date}-report.md")))
 }
 
 fn get_daily_agent_report_response(task_id: &str, date: &str, req: Request<Incoming>) -> Response<BoxBody> {

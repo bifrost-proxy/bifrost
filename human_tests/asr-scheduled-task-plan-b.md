@@ -414,7 +414,7 @@
 - Run/Resume 后该文件会重新进入 `processing`，获得新的 `started_at_ms`，chunk 进度从当前新运行重新计算。
 - WebUI 不再长期展示 `summary.running=false` 但文件仍是 `processing` 的假运行状态。
 
-### TC-ASPB-16A 任务详情默认优先展示未完成文件并支持状态筛选
+### TC-ASPB-16A 任务详情文件列表按 Recorded 倒排并支持状态筛选
 
 操作步骤：
 
@@ -431,11 +431,11 @@
 
 预期结果：
 
-- 当 `summary.pending > 0` 时，任务详情 `files` 返回中未完成文件默认排在已成功文件前面。
-- WebUI 文件表第一页能直接看到 `processing` 或 `pending` 文件，不会只展示已处理成功文件而让入口百分比和详情表产生矛盾。
+- WebUI 文件表始终按 `Recorded` 时间倒序展示，最新录音/文件排在最前面。
+- 状态筛选只缩小列表集合，不改变 `Recorded` 倒排语义。
 - WebUI 文件表顶部显示 `Processing`、`Pending`、`Completed`、`Failed`、`All` 五个筛选项及各自数量。
 - 切换筛选后，表格只展示对应状态文件，`Completed` 只包含 `success` 文件，`Failed` 包含 `failed` 和 `partial_success` 文件，`All` 展示全部文件。
-- 同一状态内仍按源文件路径排序，便于定位具体录音文件。
+- 缺少 `Recorded` 时间的旧文件使用 source modified time 兜底，并保持稳定排序。
 - 表格总数、入口百分比和 API `summary.processed/pending/failed` 一致。
 
 ### TC-ASPB-17 目录任务 runtime_strategy 默认值和 API 可见性
