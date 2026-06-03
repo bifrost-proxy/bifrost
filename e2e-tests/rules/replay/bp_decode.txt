@@ -1,0 +1,3 @@
+# 测试目标: 验证 replay custom rules 模式生成的 traffic record 会执行 decode://bp 绑定的 bp parser。
+127.0.0.1 decode://bp
+127.0.0.1 bp://replay_bp_parser

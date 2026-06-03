@@ -79,6 +79,58 @@ replay_rule_config_from_fixture() {
     custom_rule_config_from_fixture "$RULES_DIR/$fixture_name" "$@"
 }
 
+create_replay_script() {
+    local script_type="$1"
+    local script_name="$2"
+    local script_content="$3"
+
+    local payload
+    payload=$(jq -n --arg content "$script_content" '{content:$content}')
+    local response
+    response=$(curl -sS -X PUT "${ADMIN_BASE_URL}/api/scripts/${script_type}/${script_name}" \
+        -H "Content-Type: application/json" \
+        -d "$payload")
+
+    local saved_name
+    saved_name=$(printf '%s' "$response" | jq -r '.name // empty')
+    if [ "$saved_name" != "$script_name" ]; then
+        echo "Failed to save ${script_type} script ${script_name}: ${response}" >&2
+        return 1
+    fi
+}
+
+setup_replay_scripts() {
+    create_replay_script "request" "replay_req_script" '
+request.headers["X-Replay-ReqScript"] = "applied";
+request.headers["X-Replay-ReqScript-Path"] = request.path;
+request.headers["X-Replay-ReqScript-Value"] = ctx.values.replayScriptMarker || "";
+if (request.body) {
+  request.body = request.body + "::req-script";
+}
+' || exit 1
+
+    create_replay_script "response" "replay_res_script" '
+response.headers["X-Replay-ResScript"] = "applied";
+response.status = 209;
+if (response.body) {
+  response.body = response.body + "::res-script";
+}
+' || exit 1
+
+    create_replay_script "parser" "replay_bp_parser" '
+ctx.output = {
+  code: "0",
+  data: JSON.stringify({
+    replayBp: true,
+    phase: ctx.phase,
+    path: (response && response.request && response.request.path) || (request && request.path) || "",
+    body: (response && response.body) || (request && request.body) || ""
+  }),
+  msg: ""
+};
+' || exit 1
+}
+
 trap cleanup EXIT
 
 start_mock_server() {
@@ -86,7 +138,7 @@ start_mock_server() {
     python3 "$SCRIPT_DIR/../mock_servers/http_echo_server.py" "$MOCK_HTTP_PORT" > "$MOCK_LOG_DIR/http_echo.log" 2>&1 &
     MOCK_HTTP_PID=$!
     
-    local timeout=10
+    local timeout=20
     local waited=0
     while [ $waited -lt $timeout ]; do
         if curl -s "http://127.0.0.1:${MOCK_HTTP_PORT}/health" >/dev/null 2>&1; then
@@ -111,7 +163,7 @@ start_sse_server() {
     python3 "$SCRIPT_DIR/../mock_servers/sse_echo_server.py" --port "$MOCK_SSE_PORT" > "$MOCK_LOG_DIR/sse_echo.log" 2>&1 &
     MOCK_SSE_PID=$!
 
-    local timeout=10
+    local timeout=20
     local waited=0
     while [ $waited -lt $timeout ]; do
         if ! kill -0 "$MOCK_SSE_PID" 2>/dev/null; then
@@ -140,7 +192,7 @@ start_ws_server() {
     python3 "$SCRIPT_DIR/../mock_servers/http_ws_echo_server.py" "$MOCK_WS_PORT" > "$MOCK_LOG_DIR/ws_echo.log" 2>&1 &
     MOCK_WS_PID=$!
 
-    local timeout=10
+    local timeout=20
     local waited=0
     while [ $waited -lt $timeout ]; do
         if curl -s "http://127.0.0.1:${MOCK_WS_PORT}/" >/dev/null 2>&1; then
@@ -706,6 +758,90 @@ test_response_modification_rules() {
     fi
 }
 
+test_replay_req_res_script_rules() {
+    echo ""
+    echo "=== Test: Replay Request/Response Script Rules ==="
+
+    local url="http://127.0.0.1:${MOCK_HTTP_PORT}/replay-script"
+    local rule_config
+    rule_config=$(replay_rule_config_from_fixture req_res_script.txt)
+
+    local response
+    response=$(replay_request "$url" "POST" '[["Content-Type", "text/plain"]]' "origin-body" "$rule_config")
+
+    local status
+    status=$(printf '%s' "$response" | jq -r '.data.status // empty')
+
+    local body
+    body=$(printf '%s' "$response" | jq -r '.data.body // empty')
+
+    local res_header
+    res_header=$(printf '%s' "$response" | jq -r '.data.headers[]? | select(.[0] | ascii_downcase == "x-replay-resscript") | .[1]' | head -1)
+
+    if [ "$status" = "209" ] && [[ "$body" == *"x-replay-reqscript"* ]] && [[ "$body" == *"applied"* ]] && [[ "$body" == *"replay-inline-value"* ]] && [[ "$body" == *"origin-body::req-script"* ]] && [ "$res_header" = "applied" ] && [[ "$body" == *"::res-script" ]]; then
+        _log_pass "Replay reqScript/resScript rules modified upstream request and replay response"
+        passed=$((passed + 1))
+    else
+        _log_fail "Replay reqScript/resScript rules not fully applied" "status=209 req header/body/ctx.values and res header/body modified" "status=$status res_header=$res_header body=${body:0:300}"
+        failed=$((failed + 1))
+    fi
+
+    local traffic_id
+    traffic_id=$(printf '%s' "$response" | jq -r '.data.traffic_id // empty')
+    local detail
+    detail=$(curl -sS "${ADMIN_BASE_URL}/api/traffic/${traffic_id}")
+
+    local req_script_name res_script_name
+    req_script_name=$(printf '%s' "$detail" | jq -r '.req_script_results[0].script_name // empty')
+    res_script_name=$(printf '%s' "$detail" | jq -r '.res_script_results[0].script_name // empty')
+
+    if [ "$req_script_name" = "replay_req_script" ] && [ "$res_script_name" = "replay_res_script" ]; then
+        _log_pass "Replay traffic detail records reqScript/resScript execution results"
+        passed=$((passed + 1))
+    else
+        _log_fail "Replay traffic detail missing script execution results" "req replay_req_script + res replay_res_script" "req=$req_script_name res=$res_script_name detail=$detail"
+        failed=$((failed + 1))
+    fi
+}
+
+test_replay_bp_decode_rules() {
+    echo ""
+    echo "=== Test: Replay BP Decode Rules ==="
+
+    local url="http://127.0.0.1:${MOCK_HTTP_PORT}/replay-bp-decode"
+    local rule_config
+    rule_config=$(replay_rule_config_from_fixture bp_decode.txt)
+
+    local response
+    response=$(replay_request "$url" "POST" '[["Content-Type", "text/plain"]]' "bp-origin" "$rule_config")
+
+    local status
+    status=$(printf '%s' "$response" | jq -r '.data.status // empty')
+    local traffic_id
+    traffic_id=$(printf '%s' "$response" | jq -r '.data.traffic_id // empty')
+
+    local detail
+    detail=$(curl -sS "${ADMIN_BASE_URL}/api/traffic/${traffic_id}")
+
+    local req_parser_success res_parser_success
+    req_parser_success=$(printf '%s' "$detail" | jq -r '.decode_req_script_results[]? | select(.script_type == "parser" and .script_name == "replay_bp_parser") | .success' | head -1)
+    res_parser_success=$(printf '%s' "$detail" | jq -r '.decode_res_script_results[]? | select(.script_type == "parser" and .script_name == "replay_bp_parser") | .success' | head -1)
+
+    local req_body_response res_body_response req_body res_body
+    req_body_response=$(curl -sS "${ADMIN_BASE_URL}/api/traffic/${traffic_id}/request-body")
+    res_body_response=$(curl -sS "${ADMIN_BASE_URL}/api/traffic/${traffic_id}/response-body")
+    req_body=$(printf '%s' "$req_body_response" | jq -r '.data // empty')
+    res_body=$(printf '%s' "$res_body_response" | jq -r '.data // empty')
+
+    if [ "$status" = "200" ] && [ "$req_parser_success" = "true" ] && [ "$res_parser_success" = "true" ] && [[ "$req_body" == *'"replayBp":true'* ]] && [[ "$req_body" == *'"phase":"request"'* ]] && [[ "$res_body" == *'"phase":"response"'* ]]; then
+        _log_pass "Replay decode://bp applies parser results to replay traffic bodies"
+        passed=$((passed + 1))
+    else
+        _log_fail "Replay decode://bp did not record decoded parser output" "parser success and decoded request/response bodies" "status=$status req_success=$req_parser_success res_success=$res_parser_success req_body=$req_body res_body=${res_body:0:200} detail=$detail"
+        failed=$((failed + 1))
+    fi
+}
+
 test_replay_full_modify_matrix_rules() {
     echo ""
     echo "=== Test: Replay Full Modify Matrix Rules ==="
@@ -956,6 +1092,7 @@ main() {
     start_sse_server
     start_ws_server
     start_bifrost
+    setup_replay_scripts
     
     sleep 2
     
@@ -974,6 +1111,8 @@ main() {
     test_no_rules_mode
     test_sse_replay_with_rules
     test_response_modification_rules
+    test_replay_req_res_script_rules
+    test_replay_bp_decode_rules
     test_replay_full_modify_matrix_rules
     test_forward_localhost_api_rule
     test_websocket_replay_with_rules

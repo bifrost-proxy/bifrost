@@ -495,6 +495,56 @@ Replay Admin API 提供请求重放功能的管理接口，支持创建和管理
 
 ---
 
+### TC-ARP-22：Replay Request/Response Script 与 BPDecode 回归
+
+**前置条件**：
+1. 已从当前源码构建 `bifrost` 二进制，例如：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost
+   ```
+2. 使用临时 `BIFROST_DATA_DIR`，并确保启动参数包含 `--no-system-proxy` 且环境变量包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`。
+
+**操作步骤**：
+1. 执行 Replay 规则 Shell E2E：
+   ```bash
+   TEST_DATA_DIR="$(mktemp -d /tmp/bifrost-replay-script-bp-human-XXXXXX)"
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+   SKIP_FRONTEND_BUILD=1 \
+   BIFROST_BIN="$PWD/target/release/bifrost" \
+   PROXY_PORT=18888 \
+   MOCK_HTTP_PORT=13000 \
+   MOCK_SSE_PORT=13001 \
+   MOCK_WS_PORT=13002 \
+   BIFROST_DATA_DIR="$TEST_DATA_DIR" \
+   bash e2e-tests/tests/test_replay_rules.sh
+   rc=$?
+   rm -rf "$TEST_DATA_DIR"
+   exit "$rc"
+   ```
+2. 重点确认输出中包含：
+   - `Replay reqScript/resScript rules modified upstream request and replay response`
+   - `Replay traffic detail records reqScript/resScript execution results`
+   - `Replay decode://bp applies parser results to replay traffic bodies`
+   - `Failed: 0`
+
+**预期结果**：
+- 脚本退出码为 `0`
+- Replay custom rules 中的 `reqScript://replay_req_script` 会修改发到 mock 上游的请求头和请求体；其中 `X-Replay-ReqScript-Value` 来自规则文件内联 value `replayScriptMarker`
+- Replay custom rules 中的 `resScript://replay_res_script` 会修改 Admin API 返回的状态码、响应头和响应体
+- Replay 生成的 Traffic detail 包含 `req_script_results[0].script_name=replay_req_script` 和 `res_script_results[0].script_name=replay_res_script`
+- Replay custom rules 中的 `decode://bp` 会执行 `bp://replay_bp_parser`，Traffic request/response body 视图包含 parser 输出，并保留 raw body 引用
+
+**实际执行记录（2026-06-03）**：
+- 使用临时 `BIFROST_DATA_DIR=/tmp/bifrost-replay-script-bp-human-*` 执行 `SKIP_FRONTEND_BUILD=1 BIFROST_BIN=target/release/bifrost bash e2e-tests/tests/test_replay_rules.sh`
+- 脚本输出 `Passed: 31`、`Failed: 0`
+- 三个专项断言均通过：
+  - `Replay reqScript/resScript rules modified upstream request and replay response`，包含 request script 从 `ctx.values.replayScriptMarker` 注入的 `replay-inline-value`
+  - `Replay traffic detail records reqScript/resScript execution results`
+  - `Replay decode://bp applies parser results to replay traffic bodies`
+- 追加执行 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 SKIP_FRONTEND_BUILD=1 BIFROST_BIN=target/release/bifrost e2e-tests/run_all_tests_parallel.sh --no-build -j 4 --base-port 19000` 通过，确认 CI 的 `E2E Rules (Linux)` 同源路径中 `replay/bp_decode.txt` 与 `replay/req_res_script.txt` 均可被通用 rules runner 验证；总结果 `68 通过 / 0 失败`，总断言 `579`。
+
+---
+
 ## 清理
 
 测试完成后清理临时数据：
