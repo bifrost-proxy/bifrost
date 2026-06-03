@@ -13,6 +13,7 @@ PROXY_PORT="${PROXY_PORT:-}"
 ADMIN_PATH_PREFIX="${ADMIN_PATH_PREFIX:-/_bifrost}"
 MOCK_HTTP_PORT="${MOCK_HTTP_PORT:-}"
 MOCK_PID=""
+MOCK_LOG_FILE=""
 
 # 并发/CI 环境下禁止固定端口；未显式指定时自动分配。
 if [[ -z "${ADMIN_PORT}" ]]; then
@@ -139,16 +140,30 @@ run_test() {
 }
 
 start_mock_server() {
-    python3 "$SCRIPT_DIR/../mock_servers/http_echo_server.py" "$MOCK_HTTP_PORT" >/dev/null 2>&1 &
+    local requested_port="$MOCK_HTTP_PORT"
+    MOCK_LOG_FILE="$(mktemp "${TMPDIR:-/tmp}/bifrost-traffic-db-mock.XXXXXX.log")"
+    log_info "Starting mock server on 127.0.0.1:${requested_port}..."
+    python3 "$SCRIPT_DIR/../mock_servers/http_echo_server.py" --port "$MOCK_HTTP_PORT" --retries 5 >"$MOCK_LOG_FILE" 2>&1 &
     MOCK_PID=$!
     local start_ts
     start_ts="$(date +%s)"
     while true; do
+        local actual_port
+        actual_port="$(sed -nE 's/^Starting HTTP Echo Server on [^:]+:([0-9]+)\.\.\.$/\1/p' "$MOCK_LOG_FILE" 2>/dev/null | tail -n 1)"
+        if [[ -n "$actual_port" ]]; then
+            MOCK_HTTP_PORT="$actual_port"
+        fi
+
         if curl -sS -o /dev/null -w "" "http://127.0.0.1:${MOCK_HTTP_PORT}/get" 2>/dev/null; then
+            if [[ "$MOCK_HTTP_PORT" != "$requested_port" ]]; then
+                log_warn "Mock server fell back from port ${requested_port} to ${MOCK_HTTP_PORT}"
+            fi
             return 0
         fi
 
         if ! kill -0 "$MOCK_PID" 2>/dev/null; then
+            log_fail "Mock server exited before readiness"
+            cat "$MOCK_LOG_FILE" 2>/dev/null || true
             return 1
         fi
         local now_ts
@@ -158,6 +173,8 @@ start_mock_server() {
         fi
         sleep 0.2
     done
+    log_fail "Mock server did not become ready on 127.0.0.1:${MOCK_HTTP_PORT}"
+    cat "$MOCK_LOG_FILE" 2>/dev/null || true
     return 1
 }
 
@@ -166,6 +183,10 @@ stop_mock_server() {
         kill_pid "$MOCK_PID"
         wait_pid "$MOCK_PID"
         MOCK_PID=""
+    fi
+    if [[ -n "$MOCK_LOG_FILE" ]]; then
+        rm -f "$MOCK_LOG_FILE" 2>/dev/null || true
+        MOCK_LOG_FILE=""
     fi
 }
 
