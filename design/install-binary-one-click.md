@@ -8,15 +8,18 @@
 - 安装所有支持 AI 工具的 Bifrost skills。
 - 启动 Bifrost 服务，用户安装完成后可直接访问默认管理端和代理能力。
 
-目标是把原先“安装二进制后再手动处理证书、skill、启动服务”的多步流程合并为一次安装命令。高级用户和 CI 仍可通过参数或环境变量跳过自动步骤。
+目标是把原先“安装二进制后再手动处理证书、skill、启动服务”的多步流程合并为一次安装命令。高级用户和 CI 仍可通过参数或环境变量跳过自动步骤。本轮同时修复二进制下载长时间静默的问题，并让 `bifrost upgrade` 复用安装脚本的最快源选择能力。
 
 ## 实现逻辑
 
 - `install-binary.sh` 下载并安装 CLI 后调用 `run_post_install "$INSTALL_DIR/$binary_name"`。
 - Bash installer 下载 release 资产前会对 GitHub 直连和内置镜像源做轻量可用性探测，优先选择最快返回的源；如果被选中的源在完整下载阶段失败，再回退到所有镜像和下载器的竞速下载。
+- Bash installer 默认打开下载器可见进度：`curl` 使用 progress bar，`wget` 使用 forced progress bar，`aria2c` 使用 1 秒 summary，`axel` 保持默认进度输出；内部竞速候选通过 `BIFROST_DOWNLOAD_PROGRESS=0` 保持安静，避免并发进度条互相污染。
 - PowerShell installer 使用同一组镜像候选源和短超时探测，latest、archive、checksums 都通过选出的最快可用源下载；如果选中源完整下载失败，则继续按候选源列表回退。
+- PowerShell installer 在下载开始、结束时使用 `Write-Progress` 明确展示下载状态，避免终端完全无反馈。
+- `bifrost upgrade` 的手动安装路径使用与安装脚本一致的 GitHub / mirror 候选列表，先并发探测 release 资产 URL，选择最快可用源，再执行带进度百分比、已下载大小和速度的 streaming 下载；若选中源完整下载失败，继续回退剩余候选源。
 - 最新版本探测不再按 `github.com -> mirror` 串行等待完整超时；Bash 通过并发重定向探测抢最快结果，PowerShell 通过短超时探测先选源再读取 `releases/latest` 重定向，避免默认 GitHub 直连在受限网络中拖到完整下载超时。
-- `BIFROST_GITHUB_MIRROR` 仍作为优先候选源保留，`BIFROST_DOWNLOAD_CONNECT_TIMEOUT`（Bash）、`BIFROST_DOWNLOAD_TIMEOUT`、`BIFROST_DOWNLOAD_TRIES` 继续控制下载；新增 `BIFROST_MIRROR_PROBE_TIMEOUT` 控制镜像轻量探测超时，默认 5 秒。
+- `BIFROST_GITHUB_MIRROR` 仍作为优先候选源保留，`BIFROST_DOWNLOAD_CONNECT_TIMEOUT`、`BIFROST_DOWNLOAD_TIMEOUT`、`BIFROST_DOWNLOAD_TRIES` 继续控制下载；`BIFROST_MIRROR_PROBE_TIMEOUT` 控制镜像轻量探测超时，默认 5 秒。Bash installer 与 `bifrost upgrade` 均读取这些环境变量。
 - 默认 post-install 顺序固定为：
   1. `bifrost ca install`
   2. `bifrost install-skill --tool all -y`
@@ -37,6 +40,7 @@
 - `.github/workflows/release.yml`
 - `install-binary.sh`
 - `install-binary.ps1`
+- `crates/bifrost-cli/src/commands/upgrade.rs`
 - `crates/bifrost-cli/src/commands/ca.rs`
 - `crates/bifrost-cli/src/commands/install_skill.rs`
 - `crates/bifrost-cli/src/commands/start.rs`
@@ -49,7 +53,10 @@
 
 ### 单元测试
 
-- 本次修改为 shell installer 编排逻辑，不新增 Rust 公共函数。
+- `upgrade_download_progress_formats_percent_and_size`：验证 `bifrost upgrade` 进度行包含百分比、已下载大小、总大小和速度。
+- `upgrade_github_path_url_joins_mirror_and_release_path`：验证镜像 base 与 GitHub release path 拼接正确。
+- `upgrade_mirror_display_name_hides_full_path`：验证终端展示隐藏镜像 URL 后半段，避免过长路径污染输出。
+- `upgrade_download_tuning_parses_positive_values` / `upgrade_download_tuning_rejects_invalid_values`：验证 upgrade 下载超时、探测超时和重试次数解析与安装脚本一致。
 - 使用 `bash -n install-binary.sh` 覆盖 shell 语法。
 
 ### E2E 测试
@@ -60,6 +67,8 @@
   - stub `get_latest_version_via_redirect`，验证最新版本探测使用并发最快镜像结果。
   - stub `download_file`，验证完整下载优先使用已探测出的最快源。
   - stub `download_github_file_race`，验证最快源完整下载失败后仍回退到旧的全镜像竞速路径。
+  - stub `curl`，验证默认下载不再使用静默 `-s`，而是启用 `--progress-bar`。
+  - stub `download_with_tool`，验证并发竞速候选下载设置 `BIFROST_DOWNLOAD_PROGRESS=0`，避免多进度条混杂。
   - 验证 help 暴露 `BIFROST_MIRROR_PROBE_TIMEOUT`。
 - 新增 `e2e-tests/tests/test_install_binary_windows_adaptive_download.ps1`：
   - 设置 `BIFROST_INSTALL_BINARY_SKIP_MAIN=1` 后 dot-source `install-binary.ps1`，避免真实安装。
@@ -86,21 +95,23 @@
   - 验证命令顺序符合一键体验目标。
   - 验证全局 opt-out 和分步 opt-out。
   - 验证 help 文案可发现。
+  - 验证 Bash installer 默认下载进度可见，竞速候选进度被抑制。
+  - 验证 `bifrost upgrade` 的最快源选择、进度百分比和 env 超时/重试解析。
 
 ## Review/Fix/Test 闭环方案
 
 ### 第 1 轮
 
-- 复核用户目标：默认证书、skills、服务启动是否全部覆盖。
+- 复核用户目标：安装脚本下载进度、`bifrost upgrade` 下载进度、upgrade 最快源并发选择、既有 post-install 行为是否全部覆盖。
 - 复核变更范围：`git status --short`、`git diff`，确认未触碰既有 im-gateway 改动。
-- 代码 review：检查 `install-binary.sh` 在 `PATH` 未刷新、权限失败、CI opt-out、dry-run 下的行为。
-- 代码 review：检查镜像探测不会污染 `VERSION=$(get_latest_version)` stdout，不会破坏用户指定 `BIFROST_GITHUB_MIRROR`，被选中源失败后仍能回退旧下载路径；检查 PowerShell env 变量、latest、archive、checksum 下载路径与 Bash installer 保持一致。
-- 复测命令：`bash -n install-binary.sh`、`bash e2e-tests/tests/test_install_binary_adaptive_download.sh`、`bash e2e-tests/tests/test_install_binary_post_install.sh`、`pwsh -NoProfile -File e2e-tests/tests/test_install_binary_windows_adaptive_download.ps1`（若环境可用）。
+- 代码 review：检查 `install-binary.sh` 下载器进度参数、竞速候选安静模式、`PATH` 未刷新、权限失败、CI opt-out、dry-run 下的行为。
+- 代码 review：检查 upgrade 镜像探测不会破坏用户指定 `BIFROST_GITHUB_MIRROR`，被选中源失败后仍能回退旧下载路径；检查 PowerShell env 变量、latest、archive、checksum 下载路径与 Bash installer 保持一致。
+- 复测命令：`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli upgrade_ --lib`、`bash -n install-binary.sh`、`bash e2e-tests/tests/test_install_binary_adaptive_download.sh`、`bash e2e-tests/tests/test_install_binary_post_install.sh`、`pwsh -NoProfile -File e2e-tests/tests/test_install_binary_windows_adaptive_download.ps1`（若环境可用）。
 
 ### 第 2 轮
 
-- 再次对照第 1 轮 diff 和测试输出，检查文档、E2E、human_tests/readme 是否同步。
-- 复测命令：`bash -n install-binary.sh`、`bash e2e-tests/tests/test_install_binary_adaptive_download.sh`、`bash e2e-tests/tests/test_install_binary_post_install.sh`、`pwsh -NoProfile -File e2e-tests/tests/test_install_binary_windows_adaptive_download.ps1`（若环境可用）、human_tests 中列出的 dry-run 命令。
+- 再次对照第 1 轮 diff 和测试输出，检查文档、E2E、human_tests/readme、Cargo.lock 是否同步。
+- 复测命令：`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli upgrade_ --lib`、`bash -n install-binary.sh`、`bash e2e-tests/tests/test_install_binary_adaptive_download.sh`、`bash e2e-tests/tests/test_install_binary_post_install.sh`、`pwsh -NoProfile -File e2e-tests/tests/test_install_binary_windows_adaptive_download.ps1`（若环境可用）、human_tests 中列出的 dry-run 命令。
 
 ## 校验要求
 
@@ -108,6 +119,7 @@
 - `grep -q 'CARGO_NET_RETRY: "10"' .github/workflows/ci.yml`
 - `grep -q 'CARGO_HTTP_TIMEOUT: "120"' .github/workflows/ci.yml`
 - `bash -n install-binary.sh`
+- `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli upgrade_ --lib`
 - `bash e2e-tests/tests/test_install_binary_adaptive_download.sh`
 - `pwsh -NoProfile -File e2e-tests/tests/test_install_binary_windows_adaptive_download.ps1`
 - `bash e2e-tests/tests/test_install_binary_post_install.sh`
