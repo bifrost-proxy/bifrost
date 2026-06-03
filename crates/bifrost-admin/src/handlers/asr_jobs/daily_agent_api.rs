@@ -120,8 +120,7 @@ async fn put_daily_agent_config_response(
         }
     }
     if let Some(report_sync_dir) = update.report_sync_dir {
-        task.daily_agent.report_sync_dir =
-            Some(report_sync_dir.trim().to_string()).filter(|value| !value.is_empty());
+        set_primary_daily_agent_report_sync_dir(&mut task.daily_agent, Some(report_sync_dir));
     }
 
     if let Err(error) = validate_daily_agent_config(&task.daily_agent) {

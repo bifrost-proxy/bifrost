@@ -642,6 +642,7 @@ bifrost ai asr task daily sync <task> --dir "$HOME/Library/Mobile Documents/com~
 
 约束：
 - `set-sync-dir` 只更新配置，不触发复制；`--clear` 清空 `report_sync_dir`。
+- `set-sync-dir` 必须同时更新 legacy Daily Agent 配置和 primary agent 的 `report_sync_dir`；任务重新加载时会从 `agents[0]` 镜像 legacy 字段，不能让刚保存的同步目录在后续 `sync` 请求中被 normalize 覆盖。
 - `sync` 在已有配置上手动同步全部 report；传 `--dir` 时先保存该目录再同步。
 - 两个命令都复用 ASR task 的单任务自动选择/名称或 ID 前缀解析能力，并支持 `--json` 输出原始 API 响应。
 - 普通文本输出必须显示 target、total、copied、skipped、failed。

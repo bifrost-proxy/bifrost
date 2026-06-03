@@ -1429,6 +1429,24 @@ fn mirror_daily_agent_legacy_status(task_config: &mut AsrDailyAgentConfig, agent
     }
 }
 
+fn set_primary_daily_agent_report_sync_dir(
+    task_config: &mut AsrDailyAgentConfig,
+    report_sync_dir: Option<String>,
+) {
+    let report_sync_dir = report_sync_dir
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let primary_id = normalized_daily_agents(task_config)
+        .first()
+        .map(|agent| normalize_daily_agent_token(&agent.id))
+        .unwrap_or_else(default_daily_agent_id);
+    task_config.report_sync_dir = report_sync_dir.clone();
+    sync_daily_agent_item_status(task_config, &primary_id, |agent| {
+        agent.report_sync_dir = report_sync_dir;
+    });
+    mirror_daily_agent_legacy_status(task_config, &primary_id);
+}
+
 fn update_daily_agent_status(
     source_task: &AsrDirectoryTask,
     status: &str,

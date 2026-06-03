@@ -155,6 +155,32 @@ BIFROST_DATA_DIR="$(mktemp -d)" cargo run --bin bifrost -- start -p 18880 --unsa
 - 点击 `Sync Reports` 后页面显示成功提示。
 - `Last Run Status` 展示最近同步结果，包含 copied/total、skipped、Last Sync 和 Sync Dir；如失败则展示错误摘要。
 
+### TC-DAR-08 Daily Agent CLI 同步目录 normalize 回归
+
+操作步骤：
+
+1. 使用临时 `BIFROST_DATA_DIR` 启动 Bifrost，必须带 `--no-system-proxy`。
+2. 创建一个默认 ASR Directory Task，保留默认双 Daily Agent 配置。
+3. 执行：
+   ```bash
+   BIFROST_DATA_DIR=<temp> bifrost ai asr task daily set-sync-dir <task_id> --dir <sync_dir>
+   ```
+4. 触发一次会重新 `load_tasks()` 的后续请求：
+   ```bash
+   BIFROST_DATA_DIR=<temp> bifrost ai asr task daily sync <task_id>
+   ```
+5. 执行单元回归：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_report_sync_dir_update_survives_task_normalization --lib -- --nocapture
+   ```
+
+预期结果：
+
+- `set-sync-dir` 同时写入 legacy `daily_agent.report_sync_dir` 和 primary agent `agents[0].report_sync_dir`。
+- 任务经过 `load_tasks()` / `normalize_daily_agent_config` 后仍保留配置的同步目录。
+- 后续 `daily sync` 不返回 `Daily Agent report sync directory is not configured`。
+- 同步仍按 TC-DAR-06 复制 report，并在二次同步时返回 skipped。
+
 ## 清理步骤
 
 1. 停止测试端口上的 Bifrost 进程。
@@ -170,3 +196,4 @@ BIFROST_DATA_DIR="$(mktemp -d)" cargo run --bin bifrost -- start -p 18880 --unsa
 | 2026-05-21 | TC-DAR-04 Run Results 最新日期优先倒序展示 | `SKIP_FRONTEND_BUILD=1 BIFROST_DATA_DIR=/tmp/bifrost-dar-sort-human.sjmERC target/debug/bifrost start -p 55092 --unsafe-ssl --no-system-proxy --skip-cert-check -y`；创建临时 ASR task `a4e4520ba02c43a99508fea6785d732e`，在 `daily_agent_processed.json` 中按非倒序写入 `2026-05-14`、`2026-05-16`、`2026-05-15`，并请求 `/_bifrost/api/asr/tasks/<task_id>/daily-agent/runs` 与 `/_bifrost/api/asr/tasks/<task_id>/daily-agent/reports/2026-05-16` | PASS：`processed_documents` 返回日期顺序 `2026-05-16,2026-05-15,2026-05-14`；最新日期 report 详情返回 200 且正文包含 `Report 2026-05-16`；临时服务、数据目录和音频目录已清理 |
 | 2026-05-26 | TC-DAR-06 Daily Agent report 同步目录 CLI 控制 | `source ~/.zshrc && bash e2e-tests/tests/test_asr_task_cli.sh` | PASS：脚本使用临时 Bifrost、临时 ASR task 和临时同步目录，执行 `daily set-sync-dir <task_id> --dir <sync_dir>` 后输出同步目录；执行 `daily sync <task_id>` 后复制 `2026-05-17-report.md` 到同步目录，输出 `Copied: 1`、`Skipped: 0`；二次 `daily sync <task_id> --json` 返回 `total_files=1`、`copied_files=0`、`skipped_files=1`、`failed_files=0` |
 | 2026-05-26 | TC-DAR-07 Daily Agent WebUI report 同步目录与状态展示 | `source ~/.zshrc && pnpm --dir web exec playwright test tests/ui/asr-daily-agent-runner.spec.ts --grep "simple Runner"` | PASS：WebUI mock 验证 `Report Sync Dir` 输入框可保存 `report_sync_dir`，`Sync Reports` 按钮触发 `/daily-agent/sync`，toast 显示 `Synced 2 copied, 0 skipped`，Last Run Status 展示 `2 copied / 2 total` 和同步目录 |
+| 2026-06-03 | TC-DAR-08 Daily Agent CLI 同步目录 normalize 回归 | `source ~/.zshrc; SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_report_sync_dir_update_survives_task_normalization --lib -- --nocapture`；`source ~/.zshrc; bash e2e-tests/tests/test_asr_task_cli.sh` | PASS：单元回归验证 `set_primary_daily_agent_report_sync_dir` 同时更新 legacy 与 primary agent，`normalize_daily_agent_config` 后 `report_sync_dir` 不丢失；真实 CLI/API E2E 验证 `daily set-sync-dir` 后立刻 `daily sync` 成功复制 report，未再返回 `Daily Agent report sync directory is not configured` |
