@@ -549,6 +549,29 @@
 - 任务暂停或失败时保留已经写出的 partial artifact 路径、`text_chars`、`chunk_metrics` 和 fallback 信息，刷新页面或恢复任务后仍能看到已产出的片段。
 - 上传 SSE 在 full-file diarization 完成后按 speaker-aware unit 逐段发送 `final` segment，最终 `done` 仍带完整文本；不会为了低延迟绕过 speaker-aware unit planner。
 
+### TC-ADA-25：Diarization CLI E2E 默认离线稳定且在线限流不误判产品失败
+
+操作步骤：
+
+1. 静态确认 `test_asr_diarization_cli.sh` 默认跳过在线模型下载，并保留显式在线验证开关：
+   ```bash
+   source ~/.zshrc && rg -n "BIFROST_ASR_DIARIZATION_E2E_ONLINE|skipping online model init|set BIFROST_ASR_DIARIZATION_E2E_ONLINE=1" e2e-tests/tests/test_asr_diarization_cli.sh
+   ```
+2. 静态确认显式在线验证遇到外部模型源 429 / Too Many Requests 时做明确识别：
+   ```bash
+   source ~/.zshrc && rg -n "status code 429|too many requests|external model host returned rate limit" e2e-tests/tests/test_asr_diarization_cli.sh
+   ```
+3. 执行脚本语法检查：
+   ```bash
+   source ~/.zshrc && bash -n e2e-tests/tests/test_asr_diarization_cli.sh
+   ```
+
+预期结果：
+
+- 默认 CI 路径只验证 CLI status、任务创建、任务详情中 diarization 配置与 `diarization_ready=false`，不访问 Hugging Face / GitHub release 大模型文件。
+- 设置 `BIFROST_ASR_DIARIZATION_E2E_ONLINE=1` 后仍执行真实 `bifrost ai asr diarization init --json` 和模型落盘断言。
+- 在线验证只有返回消息明确包含外部模型源 `status code 429` 或 `Too Many Requests` 时输出 skip 并退出 0；非 429 的初始化失败仍继续进入原有断言并失败，避免掩盖产品缺陷。
+
 ## 清理步骤
 
 - 临时服务通过 trap 关闭。
@@ -581,3 +604,4 @@
 | 2026-05-28 | TC-ADA-16 回归 | CI Linux shard 3 暴露 live enrollment fixture 在非支持平台返回 `speaker_embedding_unsupported_platform`；已让 `BIFROST_ASR_VOICEPRINT_TEST_EMBEDDING=1` 在非 macOS arm64 上继续使用 deterministic embedding，真实运行未设置该变量时仍保持 unsupported。已执行 `SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost` 与 `SKIP_BUILD=true BIFROST_BIN=$PWD/target/debug/bifrost BIFROST_ASR_VOICEPRINT_E2E_PORT=18994 bash e2e-tests/tests/test_asr_voiceprint_enroll_cli.sh`，CLI enroll-live 和 speakers list 均通过 | 通过 |
 | 2026-05-29 | TC-ADA-23 | 已执行静态 worker 入口校验，确认离线 diarization、声纹 identify、实时 voice wake WAV 声纹校验和 enrollment finish 均通过当前 `bifrost` 二进制的 `asr-diarization-worker --request <json>` 子进程请求；已执行 `SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost` 和隐藏 worker `identify_pcm16` 静音请求，返回 `operation=identify`、`status=insufficient_audio` | 通过 |
 | 2026-05-29 | TC-ADA-24 | 已执行设计边界静态验收、Directory Task partial artifact 静态验收、上传 SSE 流式发送静态验收，以及 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin partial_transcription_artifacts_update_file_store --lib -- --nocapture` | 通过 |
+| 2026-06-03 | TC-ADA-25 | CI Linux shard 3 暴露 Hugging Face diarization 模型下载偶发 `status code 429`，已更新 `test_asr_diarization_cli.sh` 默认离线验证 CLI/API 配置链路，显式 `BIFROST_ASR_DIARIZATION_E2E_ONLINE=1` 才下载真实模型，且仅对明确外部限流返回 skip；已执行 `rg -n "BIFROST_ASR_DIARIZATION_E2E_ONLINE|skipping online model init|set BIFROST_ASR_DIARIZATION_E2E_ONLINE=1" e2e-tests/tests/test_asr_diarization_cli.sh`、`rg -n "status code 429|too many requests|external model host returned rate limit" e2e-tests/tests/test_asr_diarization_cli.sh` 与 `bash -n e2e-tests/tests/test_asr_diarization_cli.sh` | 通过 |
