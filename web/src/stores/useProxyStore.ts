@@ -57,11 +57,11 @@ export const useProxyStore = create<ProxyState>((set, get) => ({
         systemProxy: status,
         loading: false,
         error:
-          status.enabled === enabled
+          doesSystemProxyMatchRequest(status, enabled)
             ? null
             : `System proxy is still ${status.enabled ? "enabled" : "disabled"}`,
       });
-      return status.enabled === enabled;
+      return doesSystemProxyMatchRequest(status, enabled);
     } catch (e) {
       set({
         error: isConnectionIssueError(e) ? null : (e as Error).message,
@@ -74,3 +74,14 @@ export const useProxyStore = create<ProxyState>((set, get) => ({
 
   clearError: () => set({ error: null }),
 }));
+
+export function doesSystemProxyMatchRequest(
+  status: SystemProxyStatus,
+  enabled: boolean,
+): boolean {
+  if (enabled) {
+    return status.enabled && status.managed_by_bifrost !== false;
+  }
+
+  return !status.enabled || status.managed_by_bifrost === false;
+}

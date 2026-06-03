@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-测试 `bifrost system-proxy`（别名 `bifrost sp`）子命令的完整功能，包括查看系统代理状态、启用系统代理（含自定义 host/port/bypass）、禁用系统代理。
+测试 `bifrost system-proxy`（别名 `bifrost sp`）子命令的完整功能，包括查看系统代理状态、启用系统代理（含自定义 host/port/bypass）、禁用系统代理，以及 Surge 等外部系统代理与 Bifrost 自身系统代理的归属边界。
 
 ## 前置条件
 
@@ -180,6 +180,65 @@
 - 提示 `Try disabling via sudo now? [y/n]`
 - 输入 `y` 后成功禁用，输出 `✓ System proxy disabled via sudo`
 - 输入 `n` 后输出 `Cancelled.`
+
+---
+
+### TC-CSP-11：外部系统代理开启时，CLI 禁用不应清理外部代理
+
+**前置条件**：
+- macOS 环境；如本机安装 Surge，可直接开启 Surge 的系统代理；如未安装 Surge，用 `networksetup` 设置一个外部本机端口代理模拟：
+  ```bash
+  networksetup -setwebproxy "Wi-Fi" 127.0.0.1 6152
+  networksetup -setwebproxystate "Wi-Fi" on
+  ```
+- Bifrost 使用临时数据目录，且未执行 `system-proxy enable`。
+
+**操作步骤**：
+1. 执行命令查看状态：
+   ```bash
+   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- system-proxy status
+   ```
+2. 执行 Bifrost 禁用系统代理：
+   ```bash
+   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- system-proxy disable
+   ```
+3. 再次用 `networksetup -getwebproxy "Wi-Fi"` 或 Surge 状态确认外部代理。
+
+**预期结果**：
+- 第 1 步可以显示系统代理已启用，host/port 为 Surge 或模拟外部代理端口。
+- 第 2 步输出 `System proxy is enabled by another application; left unchanged.` 或等价“外部代理未归 Bifrost 管理”的提示，命令退出码为 0。
+- 第 3 步确认外部代理仍保持启用，host/port 未被 Bifrost 改写或关闭。
+- 不出现 `Proxy is still enabled` 这类把外部代理当作 Bifrost 关闭失败的误报。
+
+---
+
+### TC-CSP-12：外部代理开启时，`bifrost stop` 不应关闭外部代理
+
+**前置条件**：
+- macOS 环境，Surge 系统代理已开启，或按 TC-CSP-11 设置外部本机端口代理。
+- 使用临时数据目录启动 Bifrost，必须禁用 Bifrost 自身系统代理：
+  ```bash
+  BIFROST_DATA_DIR=./.bifrost-test BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 cargo run --bin bifrost -- start -p 8800 --unsafe-ssl --no-system-proxy
+  ```
+
+**操作步骤**：
+1. 确认 Bifrost 运行：
+   ```bash
+   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- status
+   ```
+2. 停止 Bifrost：
+   ```bash
+   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- stop
+   ```
+3. 退出 Surge 或关闭模拟外部代理，再访问一个网页或执行：
+   ```bash
+   curl -I https://example.com
+   ```
+
+**预期结果**：
+- `bifrost stop` 只停止 Bifrost 进程，不输出 `System proxy disabled.`，除非当前系统代理确实指向 Bifrost 端口。
+- Bifrost 停止后，Surge/外部代理仍保持原本状态，未被 Bifrost 清理。
+- 退出 Surge 或关闭外部代理后，系统不残留指向 Bifrost 的代理配置；网页访问或 `curl -I https://example.com` 可正常连通。
 
 ---
 
