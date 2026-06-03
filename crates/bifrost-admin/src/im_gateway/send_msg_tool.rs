@@ -108,7 +108,7 @@ impl ToolHandler for SendMsgTool {
             "provider_id": {"type": "string", "description": "Optional IM provider id. Omit to use the injected default channel."},
             "target_id": {"type": "string", "description": "Optional target id or raw source id. Omit to use the injected default channel."},
             "target_mode": {"type": "string", "enum": ["source_thread", "source_user", "owner", "configured_target"], "description": "How target_id should be resolved. Defaults to configured_target when target_id is provided."},
-            "text": {"type": "string", "description": "Plain text message body."},
+            "text": {"type": "string", "description": "Plain text message body. Feishu sends it as a Markdown card by default."},
             "markdown": {"type": "string", "description": "Markdown body. Channels without markdown support receive it as text."}
         });
         if default_provider_type != Some(ImProviderType::Weixin) {
@@ -238,11 +238,10 @@ impl SendMsgTool {
             return Ok(PreparedSendPayload::card(card, "[interactive card]"));
         }
 
-        if provider.provider_type == ImProviderType::Feishu && (markdown.is_some() || has_image) {
-            let card_markdown =
-                markdown
-                    .as_deref()
-                    .or(if has_image { text.as_deref() } else { None });
+        if provider.provider_type == ImProviderType::Feishu
+            && (text.is_some() || markdown.is_some() || has_image)
+        {
+            let card_markdown = markdown.as_deref().or(text.as_deref());
             let card = self
                 .build_feishu_card(
                     provider,
@@ -785,6 +784,63 @@ mod tests {
         assert_eq!(card["header"]["title"]["content"], "Report");
         assert_eq!(card["body"]["elements"][0]["tag"], "markdown");
         assert_eq!(card["body"]["elements"][0]["content"], "**hello**");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn feishu_text_send_msg_builds_interactive_card_by_default() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let provider = ImProviderConfig {
+            id: "feishu-main".to_string(),
+            provider_type: ImProviderType::Feishu,
+            display_name: "Feishu Main".to_string(),
+            enabled: true,
+            base_url: None,
+            app_id: None,
+            secret_ref: None,
+            owner_open_id: Some("owner".to_string()),
+            event_connection_enabled: false,
+            event_types: Vec::new(),
+            agent_config: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let tool = SendMsgTool::new(
+            Arc::new(ImProviderStore::new(temp_dir.path())),
+            Arc::new(ImTargetStore::new(temp_dir.path())),
+            Arc::new(ImMessageLogStore::new(temp_dir.path())),
+            Arc::new(ImConnectionManager::new()),
+            SendMsgToolContext::default(),
+        );
+
+        let payload = tool
+            .prepare_send_payload(
+                &provider,
+                SendMsgArgs {
+                    provider_id: None,
+                    target_id: None,
+                    target_mode: None,
+                    text: Some("**hello from text**".to_string()),
+                    markdown: None,
+                    card: None,
+                    image_key: None,
+                    image: None,
+                    image_alt: None,
+                    card_title: None,
+                },
+            )
+            .await
+            .expect("payload");
+
+        assert_eq!(payload.msg_type, "interactive");
+        let PreparedSendPayloadKind::Card(card) = payload.payload else {
+            panic!("expected card payload");
+        };
+        assert_eq!(card["schema"], "2.0");
+        assert_eq!(card["body"]["elements"][0]["tag"], "markdown");
+        assert_eq!(
+            card["body"]["elements"][0]["content"],
+            "**hello from text**"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

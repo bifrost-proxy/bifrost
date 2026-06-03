@@ -139,9 +139,11 @@ pub(super) fn online_notification_message_uses_provider_work_dir_override() {
 
     let message = build_online_notification_message_with_device_name(&provider, "eden-macbook");
 
-    assert!(message.starts_with("你好，Bifrost 助手上线了"));
-    assert!(message.contains("设备名称：eden-macbook"));
-    assert!(message.contains("工作目录：/custom/im-provider-workdir"));
+    assert!(message.starts_with("**Bifrost is online**"));
+    assert!(message.contains("- **Provider**: Feishu Main (`feishu-main`)"));
+    assert!(message.contains("- **Device**: eden-macbook"));
+    assert!(message.contains("- **Workspace**: `/custom/im-provider-workdir`"));
+    assert!(message.contains("- **Status**: Ready"));
 }
 
 #[test]
@@ -154,10 +156,21 @@ pub(super) fn online_notification_message_falls_back_to_process_work_dir() {
 
     let message = build_online_notification_message_with_device_name(&provider, "eden-macbook");
 
-    assert!(message.starts_with("你好，Bifrost 助手上线了"));
-    assert!(message.contains("设备名称：eden-macbook"));
-    assert!(message.contains("工作目录："));
+    assert!(message.starts_with("**Bifrost is online**"));
+    assert!(message.contains("- **Device**: eden-macbook"));
+    assert!(message.contains("- **Workspace**: `"));
     assert!(message.contains(&cwd));
+}
+
+#[test]
+pub(super) fn outbound_log_msg_type_marks_feishu_text_as_interactive() {
+    let provider = test_provider();
+    assert_eq!(outbound_log_msg_type(&provider, "text"), "interactive");
+    assert_eq!(outbound_log_msg_type(&provider, "image"), "image");
+
+    let mut weixin = test_provider();
+    weixin.provider_type = ImProviderType::Weixin;
+    assert_eq!(outbound_log_msg_type(&weixin, "text"), "text");
 }
 
 #[test]

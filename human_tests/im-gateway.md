@@ -147,7 +147,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
     -H 'Content-Type: application/json' \
     -d '{"target_id":"eden-user","msg_type":"text","content":"你好，Bifrost 助手上线了"}'
   ```
-- **预期结果**: 返回 `message_id`，飞书上 owner 收到消息
+- **预期结果**: 返回 `message_id`，飞书上 owner 收到 Markdown 卡片消息，消息记录的 `msg_type=interactive`，`content_preview` 包含发送内容
 
 ### TC-IMG-18: 消息记录 API — 查看 outbound 记录
 
@@ -155,7 +155,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   ```bash
   curl -s http://127.0.0.1:8800/_bifrost/api/im-gateway/providers/feishu-bot-1/messages?direction=outbound
   ```
-- **预期结果**: 返回数组含 direction=outbound, status=success, content_preview 包含发送内容
+- **预期结果**: 返回数组含 `direction=outbound`、`status=success`、`msg_type=interactive`、`content_preview` 包含发送内容
 
 ### TC-IMG-19: WebSocket 长连接建立
 
@@ -349,7 +349,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 - **预期结果**:
   - WebUI 显示 `Provider created and connected`。
   - 第 5 步状态响应包含 `state=connected`。
-  - 第 6 步消息记录包含一条 `direction=outbound`、`trigger=online`、`status=success` 的 owner 通知，`content_preview` 以 `你好，Bifrost 助手上线了` 开头，并包含 `设备名称：...` 与 `工作目录：~/work/github/bifrost`。
+  - 第 6 步消息记录包含一条 `direction=outbound`、`trigger=online`、`status=success`、`msg_type=interactive` 的 owner 通知，`content_preview` 以 `**Bifrost is online**` 开头，并包含 `Device` 与 `Workspace` 信息。
   - 全流程不需要重启 Bifrost。
   - Provider 列表与消息响应不包含 App Secret 明文。
 - **执行记录（2026-05-06）**: PASS — 使用临时端口 `18888` 源码服务和用户提供的真实飞书 AK/SK 通过 WebUI 创建 Provider；页面显示 `Provider created and connected`；未重启服务即查询到状态 `connected`；message log 包含 `trigger=online`、`status=success`、`content_preview=你好，Bifrost 助手上线了` 的 owner 通知；响应中未泄露 App Secret；最后删除清理成功。本用例后续要求上线通知同时包含 `工作目录：~/work/github/bifrost`。
@@ -971,11 +971,34 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
      curl -s http://127.0.0.1:18892/_bifrost/api/im-gateway/providers/<provider-id>/messages
      ```
 - **预期结果**:
-  - owner 收到的上线通知以 `你好，Bifrost 助手上线了` 开头。
-  - 通知正文包含 `设备名称：eden-macbook`，可用于区分多台电脑。
-  - 通知正文包含 `工作目录：/Users/eden/work/github/bifrost` 或 Provider 实际解析后的工作目录。
-  - 第 5 步 message log 的 `content_preview` 与 owner 实收通知一致，包含同一设备名称和工作目录。
+  - owner 收到的上线通知是 Feishu Markdown 卡片（微信通道降级为文本）。
+  - 通知正文以 `**Bifrost is online**` 开头，包含 `Provider`、`Device`、`Workspace` 和 `Status`。
+  - 第 5 步 message log 的 `msg_type=interactive`（Feishu）且 `content_preview` 与 owner 实收通知一致，包含同一设备名称和工作目录。
 - **清理步骤**:
   - 删除测试 Provider。
   - 停止临时服务并删除临时 `BIFROST_DATA_DIR`。
 - **执行记录（2026-05-26）**: PASS — 执行 `cargo test -p bifrost-admin online_notification_message_ --lib` 通过，覆盖固定设备名 `eden-macbook` 时上线通知同时包含 `设备名称：eden-macbook`、Provider 自定义工作目录和进程 cwd 回退目录；消息发送链路沿用 `build_online_notification_message` 生成的同一 `content_preview`。
+- **执行记录（2026-06-03）**: PASS — 使用当前源码重启默认服务：`BIFROST_DATA_DIR=/Users/eden/.bifrost BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 SKIP_FRONTEND_BUILD=1 cargo run --bin bifrost -- start -p 9900 --unsafe-ssl --no-system-proxy --daemon -y`。查询 `feishu-main` outbound 记录确认重启上线通知 `trigger=online`、`status=success`、`msg_type=interactive`，`content_preview` 为 `**Bifrost is online**`，包含 `Provider: feishu-main`、`Device: eden-work`、`Workspace: /Users/eden/work/github/bifrost` 和 `Status: Ready`。
+
+### TC-IMG-63: Feishu text 发送默认转为 Markdown 卡片
+
+- **前置条件**:
+  - 当前源码版 Bifrost 已在默认目录或临时目录启动，必须禁用系统代理。
+  - 存在真实可用的 Feishu Provider，例如 `feishu-main`，并配置 `owner_open_id`。
+- **操作步骤**:
+  1. 调用：
+     ```bash
+     MARKER="FEISHU_CARD_TEXT_DEFAULT_$(date +%Y%m%d_%H%M%S)"
+     curl -sS -X POST http://127.0.0.1:9900/_bifrost/api/im-gateway/messages/send \
+       -H 'content-type: application/json' \
+       -d "{\"provider_id\":\"feishu-main\",\"target_id\":\"owner\",\"msg_type\":\"text\",\"content\":\"**Bifrost Feishu Card Test**\\n\\n- **Marker**: \`$MARKER\`\\n- **Expected**: text request is delivered as an interactive Markdown card\"}"
+     ```
+  2. 在飞书中观察 owner 是否收到卡片消息。
+  3. 查询 `GET /_bifrost/api/im-gateway/providers/feishu-main/messages?direction=outbound&limit=20`。
+- **预期结果**:
+  - 第 1 步返回 `message_id`。
+  - 飞书实收消息为卡片，且 Markdown 粗体和列表渲染正常。
+  - 第 3 步包含 marker 对应记录，`direction=outbound`、`status=success`、`trigger=api`、`msg_type=interactive`。
+- **清理步骤**:
+  - 无需清理；保留一条测试消息记录用于观察。
+- **执行记录（2026-06-03）**: PASS — 使用默认服务 `9900` 和 provider `feishu-main` 发送 marker `FEISHU_CARD_TEXT_DEFAULT_20260603_143043`。API 返回 `message_id=om_x100b6ec8eff87cacc086e6db7f5da35`；消息记录 `id=dddcc129`、`status=success`、`trigger=api`、`msg_type=interactive`，`content_preview` 以 `**Bifrost Feishu Card Test**` 开头并包含 marker。

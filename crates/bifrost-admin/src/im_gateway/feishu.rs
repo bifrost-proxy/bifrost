@@ -36,6 +36,7 @@ const WS_PING_INTERVAL_SECS: u64 = 90;
 const WS_SERVER_SILENCE_TIMEOUT_SECS: u64 = 180;
 /// How often the silence watchdog wakes up to re-check `last_server_msg_at`.
 const WS_SILENCE_CHECK_INTERVAL_SECS: u64 = 15;
+const DEFAULT_TEXT_CARD_TITLE: &str = "Bifrost";
 
 // ---------------------------------------------------------------------------
 // Protobuf Frame types for Feishu WebSocket binary protocol
@@ -382,6 +383,51 @@ impl FeishuProvider {
     }
 }
 
+pub(crate) fn build_default_text_card(text: &str) -> serde_json::Value {
+    build_markdown_card(DEFAULT_TEXT_CARD_TITLE, text, "blue")
+}
+
+pub(crate) fn build_markdown_card(
+    title: &str,
+    markdown: &str,
+    template: &str,
+) -> serde_json::Value {
+    let title = title.trim();
+    let title = if title.is_empty() {
+        DEFAULT_TEXT_CARD_TITLE
+    } else {
+        title
+    };
+    let template = template.trim();
+    let template = if template.is_empty() {
+        "blue"
+    } else {
+        template
+    };
+    let markdown = crate::im_gateway::markdown_converter::convert_to_feishu_markdown(markdown);
+    serde_json::json!({
+        "schema": "2.0",
+        "config": {
+            "width_mode": "fill",
+            "update_multi": true
+        },
+        "header": {
+            "template": template,
+            "title": {
+                "tag": "plain_text",
+                "content": title
+            }
+        },
+        "body": {
+            "elements": [{
+                "tag": "markdown",
+                "content": markdown,
+                "element_id": "bifrost_text_message"
+            }]
+        }
+    })
+}
+
 // ---------------------------------------------------------------------------
 // ImProvider trait implementation
 // ---------------------------------------------------------------------------
@@ -470,15 +516,17 @@ impl ImProvider for FeishuProvider {
         let app_secret = config.secret_ref.as_deref().unwrap_or_default();
         let token = self.get_tenant_token(config, app_secret).await?;
 
-        // Feishu text message content format
-        let content = serde_json::json!({ "text": text }).to_string();
+        let card = build_default_text_card(text);
+        let content = serde_json::to_string(&card).map_err(|e| {
+            bifrost_core::BifrostError::Parse(format!("failed to serialize text card: {}", e))
+        })?;
 
         self.send_message_internal(
             base_url,
             &token,
             &target.receive_id_type,
             &target.receive_id,
-            "text",
+            "interactive",
             &content,
             None,
         )
@@ -2156,6 +2204,19 @@ fn json_object_keys(value: &serde_json::Value) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_default_text_card_wraps_plain_text_as_markdown_card() {
+        let card = build_default_text_card("**hello**\n\n- from Bifrost");
+
+        assert_eq!(card["schema"], "2.0");
+        assert_eq!(card["header"]["title"]["content"], "Bifrost");
+        assert_eq!(card["body"]["elements"][0]["tag"], "markdown");
+        assert_eq!(
+            card["body"]["elements"][0]["content"],
+            "**hello**\n\n- from Bifrost"
+        );
+    }
 
     #[test]
     fn test_token_cache_key_isolated_by_app_id() {

@@ -1079,7 +1079,7 @@ pub(super) async fn send_schedule_run_notification(
         "FAILED"
     };
     let msg = format!(
-        "Schedule '{}' executed\nStatus: {} ({:?})\nDuration: {}ms\nOutput:\n{}",
+        "**Schedule `{}` executed**\n\n- **Status**: {} ({:?})\n- **Duration**: {} ms\n\n**Output**\n```text\n{}\n```",
         schedule.id,
         status_label,
         task_run.status,
@@ -1102,7 +1102,7 @@ pub(super) async fn send_schedule_run_notification(
         target_id: Some(target.id),
         target_name: Some(target.display_name),
         message_id,
-        msg_type: Some("text".to_string()),
+        msg_type: Some(outbound_log_msg_type(&provider, "text")),
         content_preview: Some(truncate_str(&msg, 200)),
         trigger: Some(format!("schedule:{}", schedule.id)),
         error: error_msg,
