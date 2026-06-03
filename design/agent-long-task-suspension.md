@@ -94,6 +94,7 @@ model asks write_stdin again
 4. **交互任务仍可主动介入**：用户输入、模型明确要写 stdin、Ctrl-C 或 TTY 场景必须保留 `write_stdin` 路径。
 5. **恢复摘要可审计**：恢复模型时使用稳定结构化摘要，包含 session、strategy/evidence、exit、new_output、duration、truncation、missed heartbeats。
 6. **失败可解释**：watcher 丢失、进程不可达、服务重启、buffer 溢出、超时都要变成明确事件，而不是静默挂起。
+7. **最终空 poll 不丢上下文**：交互式命令输入后，最后一次 `write_stdin` 空 poll 可能只返回 `exit_code` 和空 `output`。测试 mock 与运行时判断必须基于累计 tool transcript 判定“已输入并退出”，不能因为 latest tool output 为空就重新发起同一个交互命令。
 
 ## Cooperative Long Task Loop 目标行为
 

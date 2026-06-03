@@ -16,10 +16,11 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
 PY
 }
 
-BIFROST_PORT="${BIFROST_PORT:-$(pick_free_port)}"
-MOCK_PORT="${MOCK_PORT:-$(pick_free_port)}"
+BIFROST_PORT="${BIFROST_PORT:-${ADMIN_PORT:-${PROXY_PORT:-$(pick_free_port)}}}"
+MOCK_PORT="${MOCK_PORT:-}"
 TEST_DIR="$(mktemp -d)"
 MOCK_LOG="$TEST_DIR/mock-requests.jsonl"
+MOCK_PORT_FILE="$TEST_DIR/mock-port"
 BIFROST_LOG="$TEST_DIR/bifrost.log"
 RESPONSE_FILE="$TEST_DIR/agent-response.json"
 INTERACTIVE_RESPONSE_FILE="$TEST_DIR/agent-interactive-response.json"
@@ -81,17 +82,18 @@ wait_http() {
   return 1
 }
 
-python3 - "$MOCK_PORT" "$MOCK_LOG" "$FINAL_TEXT" "$INTERACTIVE_FINAL_TEXT" <<'PY' &
+python3 - "$MOCK_PORT" "$MOCK_LOG" "$MOCK_PORT_FILE" "$FINAL_TEXT" "$INTERACTIVE_FINAL_TEXT" <<'PY' &
 import json
 import re
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-port = int(sys.argv[1])
+requested_port = int(sys.argv[1]) if sys.argv[1] else 0
 log_path = sys.argv[2]
-final_text = sys.argv[3]
-interactive_final_text = sys.argv[4]
+port_path = sys.argv[3]
+final_text = sys.argv[4]
+interactive_final_text = sys.argv[5]
 state = {"request_no": 0, "interactive_session_id": None}
 lock = threading.Lock()
 
@@ -177,7 +179,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             message = {"role": "assistant", "content": final_text}
             finish_reason = "stop"
-        elif "E2E_ANSWER=yes" in latest_tool and '"exit_code":0' in compact_latest_tool:
+        elif "E2E_ANSWER=yes" in joined_tools and '"exit_code":0' in compact_latest_tool:
             message = {"role": "assistant", "content": interactive_final_text}
             finish_reason = "stop"
         elif "E2E_CONFIRM?" in latest_tool:
@@ -298,9 +300,28 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(encoded)
 
 
-ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+server = ThreadingHTTPServer(("127.0.0.1", requested_port), Handler)
+with open(port_path, "w", encoding="utf-8") as fh:
+    fh.write(str(server.server_address[1]))
+server.serve_forever()
 PY
 MOCK_PID=$!
+for _ in $(seq 1 120); do
+  if [[ -s "$MOCK_PORT_FILE" ]]; then
+    MOCK_PORT="$(cat "$MOCK_PORT_FILE")"
+    break
+  fi
+  if ! kill -0 "$MOCK_PID" >/dev/null 2>&1; then
+    echo "[agent-long-task-cooperative-loop] mock model exited before reporting port" >&2
+    [[ -f "$MOCK_LOG" ]] && cat "$MOCK_LOG" >&2 || true
+    exit 1
+  fi
+  sleep 0.25
+done
+if [[ -z "$MOCK_PORT" ]]; then
+  echo "[agent-long-task-cooperative-loop] mock model did not report a port" >&2
+  exit 1
+fi
 wait_http "http://127.0.0.1:$MOCK_PORT/health" "mock model"
 
 if [[ "${SKIP_BUILD:-false}" != "true" ]]; then

@@ -974,6 +974,49 @@ PY
 
 - 通过。2026-06-03 按项目规则带 `source ~/.zshrc;` 执行上述 4 条静态审查命令均成功。审查结论：内部 Agent terminal 入口只有 `exec_command` / `write_stdin`，旧 shell alias 被拒绝；turn loop 只对 `exec_command` 的 structured running session 启用 watcher；MCP tool 通过 `send_request_with_timeout` / `tool_timeout_sec` 收敛但不具备 Bifrost `write_stdin` 语义；IM external CLI runner 以外部 runner 进程和 `timeout_secs` 为边界，内部 runtime watcher 不能替外部 runner 注入 stdin。
 
+### TC-ALT-21：交互式长任务最终空 poll 不重复发起命令
+
+**操作步骤**：
+
+1. 对交互式长任务 E2E 脚本执行语法检查：
+
+   ```bash
+   bash -n e2e-tests/tests/test_agent_long_task_cooperative_loop.sh
+   ```
+
+2. 静态检查脚本消费 CI shell 调度器端口、mock server 绑定后回传真实端口，并用累计 tool transcript 判断交互输入已完成：
+
+   ```bash
+   rg -n 'BIFROST_PORT=.*ADMIN_PORT|PROXY_PORT|MOCK_PORT_FILE|server_address|E2E_ANSWER=yes.*joined_tools' \
+     e2e-tests/tests/test_agent_long_task_cooperative_loop.sh
+   ```
+
+3. 使用已构建的 release binary 和外层注入端口真实执行长任务协作循环回归：
+
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" \
+     ADMIN_PORT=18141 PROXY_PORT=18141 \
+     bash e2e-tests/tests/test_agent_long_task_cooperative_loop.sh
+   ```
+
+4. 复核本轮 CI 失败 artifact 原始根因：
+
+   ```bash
+   rg -n 'test_agent_long_task_cooperative_loop.sh|agent-long-task-interactive-loop|exceeded maximum iterations|E2E_ANSWER=yes' \
+     /tmp/bifrost-ci-79358221612.log
+   ```
+
+**预期结果**：
+
+- 语法检查通过。
+- 静态检查显示脚本优先使用 `ADMIN_PORT` / `PROXY_PORT`，并由 Python mock server 绑定后写回真实端口。
+- mock 模型在最终空 poll 只返回 `exit_code:0` 时，仍能从累计 tool transcript 看到上一条 `E2E_ANSWER=yes`，返回 `COOPERATIVE_INTERACTIVE_LOOP_OK`，不会重新调用 `exec_command`。
+- 真实执行输出 `[agent-long-task-cooperative-loop] PASS`，覆盖普通长任务 runtime watcher 和交互式 TTY prompt 输入确认两条链路。
+
+**实际结果**：
+
+- 通过。2026-06-03 本轮执行：CI run `26900882610` 的 `E2E Shell (Linux, shard 2/3)` 失败日志显示 `test_agent_long_task_cooperative_loop.sh` 中 `agent-long-task-interactive-loop` 在最终空 poll 后重新发起交互命令，最终 `exceeded maximum iterations (4)`。修复后执行 `bash -n e2e-tests/tests/test_agent_long_task_cooperative_loop.sh` 通过；静态检查确认脚本消费 `ADMIN_PORT` / `PROXY_PORT`、mock server 动态回传端口，并用 `joined_tools` 判断 `E2E_ANSWER=yes`。随后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" ADMIN_PORT=18141 PROXY_PORT=18141 bash e2e-tests/tests/test_agent_long_task_cooperative_loop.sh`，输出 `[agent-long-task-cooperative-loop] PASS`；真实执行使用临时数据目录、`--no-system-proxy` 与非 9900 端口。
+
 ## 清理步骤
 
 1. 停止测试 Bifrost 进程。
