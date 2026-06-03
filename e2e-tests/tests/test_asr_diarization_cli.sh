@@ -71,6 +71,17 @@ if [[ "$ONLINE_INIT" == "1" ]]; then
   echo "[asr-diarization-cli-e2e] init profile through CLI"
   BIFROST_DATA_DIR="$ADMIN_DATA_DIR" "$BIFROST_BIN" -p "$ADMIN_PORT" \
     ai asr diarization init --json >"$ADMIN_DATA_DIR/diarization-init.json"
+  if python3 - "$ADMIN_DATA_DIR/diarization-init.json" <<'PY'
+import json, sys
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    payload = json.load(f)
+message = str(payload.get("message", "")).lower()
+sys.exit(0 if "status code 429" in message or "too many requests" in message else 1)
+PY
+  then
+    echo "[asr-diarization-cli-e2e] skip: external model host returned rate limit during profile init"
+    exit 0
+  fi
   python3 - "$ADMIN_DATA_DIR/diarization-init.json" "$ADMIN_DATA_DIR" <<'PY'
 import json, pathlib, sys
 with open(sys.argv[1], "r", encoding="utf-8") as f:
