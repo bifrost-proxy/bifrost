@@ -220,7 +220,7 @@ pub(super) async fn run_event_loop_with_options(
                 target_id: Some(owner_open_id.clone()),
                 target_name: Some("Owner".to_string()),
                 message_id,
-                msg_type: Some("text".to_string()),
+                msg_type: Some(outbound_log_msg_type(&provider, "text")),
                 content_preview: Some(online_msg.to_string()),
                 trigger: Some("online".to_string()),
                 error: error_msg,

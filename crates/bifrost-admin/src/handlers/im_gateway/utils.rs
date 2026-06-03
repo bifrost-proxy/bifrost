@@ -240,11 +240,25 @@ pub(super) fn build_online_notification_message_with_device_name(
     let device_name = clean_device_name(device_name).unwrap_or_else(|| "unknown".to_string());
     let work_dir = online_notification_work_dir(provider);
 
-    format!("你好，Bifrost 助手上线了\n设备名称：{device_name}\n工作目录：{work_dir}")
+    format!(
+        "**Bifrost is online**\n\n- **Provider**: {} (`{}`)\n- **Device**: {device_name}\n- **Workspace**: `{work_dir}`\n- **Status**: Ready",
+        provider.display_name, provider.id
+    )
 }
 
 pub(super) fn build_online_notification_message(provider: &ImProviderConfig) -> String {
     build_online_notification_message_with_device_name(provider, &current_device_name())
+}
+
+pub(super) fn outbound_log_msg_type(
+    provider: &ImProviderConfig,
+    requested_msg_type: &str,
+) -> String {
+    if provider.provider_type == ImProviderType::Feishu && requested_msg_type == "text" {
+        "interactive".to_string()
+    } else {
+        requested_msg_type.to_string()
+    }
 }
 
 /// Build a Feishu Card 2.0 JSON for real-time plan progress display.

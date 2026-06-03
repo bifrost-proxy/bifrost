@@ -209,18 +209,20 @@ assert agents[1]["im_delivery"]["enabled"] is True, agents[1]
 assert agents[1]["im_delivery"]["channel"] == "owner:feishu-main", agents[1]
 PY
 
-DAILY_DIR="$DATA_DIR/asr/data/text/$TASK_ID/daily"
-REPORT_DIR="$DAILY_DIR/agents/daily_report/output/report"
-TODO_DIR="$DAILY_DIR/agents/tomorrow_todo/output/tomorrow_todo"
-test -d "$DAILY_DIR/agents/daily_report"
-test -d "$DAILY_DIR/agents/tomorrow_todo"
-test -d "$DAILY_DIR/agents/daily_report/input"
-test -d "$DAILY_DIR/agents/tomorrow_todo/input"
+TASK_TEXT_DIR="$DATA_DIR/asr/data/text/$TASK_ID"
+DAILY_DIR="$TASK_TEXT_DIR/.daily"
+AGENTS_DIR="$DAILY_DIR/agents"
+REPORT_DIR="$AGENTS_DIR/daily_report/output/report"
+TODO_DIR="$AGENTS_DIR/tomorrow_todo/output/tomorrow_todo"
+test -d "$AGENTS_DIR/daily_report"
+test -d "$AGENTS_DIR/tomorrow_todo"
+test -d "$AGENTS_DIR/daily_report/input"
+test -d "$AGENTS_DIR/tomorrow_todo/input"
 test -d "$REPORT_DIR"
 test -d "$TODO_DIR"
-test -f "$DAILY_DIR/agents/daily_report/AGENTS.md"
-test -f "$DAILY_DIR/agents/tomorrow_todo/AGENTS.md"
-grep -q "明日 To Do List" "$DAILY_DIR/agents/tomorrow_todo/AGENTS.md"
+test -f "$AGENTS_DIR/daily_report/AGENTS.md"
+test -f "$AGENTS_DIR/tomorrow_todo/AGENTS.md"
+grep -q "明日 To Do List" "$AGENTS_DIR/tomorrow_todo/AGENTS.md"
 
 CONFIG_UPDATE_JSON="$E2E_DIR/config_update.json"
 python3 - <<'PY' "$CONFIG_JSON" "$CONFIG_UPDATE_JSON"
@@ -259,8 +261,9 @@ PY
 curl -fsS -X PUT "http://127.0.0.1:$PORT/_bifrost/api/asr/tasks/$TASK_ID/daily-agent/agents?agent_id=tomorrow_todo" \
   -H 'content-type: application/json' \
   -d @"$CUSTOM_PAYLOAD" >/dev/null
-grep -q "E2E_CUSTOM_TOMORROW_AGENT_MARKER" "$DAILY_DIR/agents/tomorrow_todo/AGENTS.md"
+grep -q "E2E_CUSTOM_TOMORROW_AGENT_MARKER" "$AGENTS_DIR/tomorrow_todo/AGENTS.md"
 
+mkdir -p "$DAILY_DIR"
 cat > "$DAILY_DIR/2026-05-22.md" <<'MD'
 # 2026-05-22
 今天讨论了发布计划，并明确明天需要整理上线 checklist。
@@ -315,12 +318,12 @@ assert {d["output_dir"] for d in docs} == {"report", "tomorrow_todo"}, docs
 assert {d["runner"] for d in docs} == {"bifrost_agent"}, docs
 assert len({(d["agent_id"], d["date"]) for d in docs}) == 2, docs
 for doc in docs:
-    assert "/daily/agents/" in doc.get("report_path", ""), doc
+    assert "/.daily/agents/" in doc.get("report_path", ""), doc
 PY
 grep -q "E2E_DAILY_AGENT_REAL_RUN" "$REPORT_DIR/2026-05-22-report.md"
 grep -q "E2E_DAILY_AGENT_REAL_RUN" "$TODO_DIR/2026-05-22-report.md"
-grep -q "整理上线 checklist" "$DAILY_DIR/agents/daily_report/input/2026-05-22.md"
-grep -q "整理上线 checklist" "$DAILY_DIR/agents/tomorrow_todo/input/2026-05-22.md"
+grep -q "整理上线 checklist" "$AGENTS_DIR/daily_report/input/2026-05-22.md"
+grep -q "整理上线 checklist" "$AGENTS_DIR/tomorrow_todo/input/2026-05-22.md"
 test ! -f "$DAILY_DIR/report/2026-05-22-report.md"
 test ! -f "$DAILY_DIR/tomorrow_todo/2026-05-22-report.md"
 
@@ -332,7 +335,7 @@ body=json.load(open(sys.argv[1]))
 assert body["agent_id"] == "tomorrow_todo", body
 assert body["output_dir"] == "tomorrow_todo", body
 assert "E2E_DAILY_AGENT_REAL_RUN" in body["content"], body
-assert "/daily/agents/tomorrow_todo/output/tomorrow_todo/" in body["path"], body
+assert "/.daily/agents/tomorrow_todo/output/tomorrow_todo/" in body["path"], body
 PY
 
 INSTR_JSON="$E2E_DIR/todo_instructions.json"

@@ -169,6 +169,7 @@ pub(super) async fn handle_messages_send(
             Err((status, message)) => return error_response(status, &message),
         };
     let content_preview = build_content_preview(&body.msg_type, &prepared);
+    let log_msg_type = outbound_log_msg_type(&resolved.provider, &body.msg_type);
 
     // Send via the configured provider implementation.
     let client = service.provider_client(&resolved.provider);
@@ -213,7 +214,7 @@ pub(super) async fn handle_messages_send(
         target_id: Some(resolved.log_target_id),
         target_name: Some(resolved.log_target_name),
         message_id,
-        msg_type: Some(body.msg_type.clone()),
+        msg_type: Some(log_msg_type),
         content_preview,
         trigger: Some("api".to_string()),
         error: error_msg,
