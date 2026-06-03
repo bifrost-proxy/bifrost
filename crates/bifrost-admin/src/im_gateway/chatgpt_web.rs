@@ -50,9 +50,10 @@ use send::send_with_browser;
 #[cfg(test)]
 use send::{
     composer_text_injection_mode, extract_conversation_id_from_url, handoff_heartbeat_error,
-    handoff_page_heartbeat_error, parse_send_sse, paste_modifier, send_button_ready_max_wait,
-    send_button_ready_retry_max_wait, should_retry_as_new_conversation,
-    target_page_is_terminal_mismatch, target_page_matches, ComposerTextInjectionMode,
+    handoff_page_heartbeat_error, page_state_is_auth_flow_page, parse_send_sse, paste_modifier,
+    send_button_ready_max_wait, send_button_ready_retry_max_wait, should_retry_as_new_conversation,
+    target_page_error, target_page_is_terminal_mismatch, target_page_matches,
+    ComposerTextInjectionMode,
 };
 use storage::{read_auth_state, write_auth_state, write_redacted_json};
 
