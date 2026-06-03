@@ -34,7 +34,7 @@
 | [voice-wake-actions.md](./voice-wake-actions.md) | Voice Wake Actions | 10 | 复用 Speaker Diarization 已录入声纹、本机唤醒音频样本采集、用户手动确认唤醒词、sherpa-onnx KWS 后台麦克风监听、快捷键输入框直接捕获组合键/单键/双击、CLI bind-audio `--phrase` 绑定、KWS+声纹双门禁、WebUI 开关启动门禁、独立 worker 跟随主服务停止、后台不可达错误提示、API events 落盘，以及 CLI 显式 execute 真实按键边界 |
 | [docs-implementation-sync.md](./docs-implementation-sync.md) | Docs 与实现同步质检 | 8 | docs/CLI/Scripts/规则协议说明与当前 `bifrost --help`、traffic/search/remote file help、ScriptType::Parser、bp/devtools/upstreamUnsafeSsl 协议、过滤器 resolver 边界、workspace crate 架构索引、Markdown 相对链接，以及规则语法示例保持一致 |
 | [rust-dependency-audit-ci.md](./rust-dependency-audit-ci.md) | Rust Dependency Audit CI | 4 | 使用 cargo-deny 与 cargo-udeps 进行 Rust 重复依赖和未使用依赖审计，验证 CI/local-ci 接入、显式跳过参数和工具缺失错误提示 |
-| [e2e-script-startup.md](./e2e-script-startup.md) | E2E Script Startup | 1 | E2E 脚本启动 Bifrost 测试服务时默认禁用 Sync 自动登录弹窗，公共 helper 与直接启动脚本均受静态守卫覆盖 |
+| [e2e-script-startup.md](./e2e-script-startup.md) | E2E Script Startup | 2 | E2E 脚本启动 Bifrost 测试服务时默认禁用 Sync 自动登录弹窗，公共 helper 与直接启动脚本均受静态守卫覆盖；Sync 登录预检专用脚本在父环境默认禁用时仍只通过 dry-run 文件验证弹窗行为 |
 | [rule-filter-routing-diagnostics.md](./rule-filter-routing-diagnostics.md) | 规则过滤与网络包诊断 | 8 | `includeFilter:///account` 按普通前缀匹配 `/account-center`，长 `excludeFilter` 链全部按前缀生效，Whistle 风格 `excludeFilter://*/api` / `excludeFilter://*/alice/*` URL 通配符过滤可跳过当前规则，`upstreamUnsafeSsl://true` 按规则放行不安全 HTTPS 上游，Traffic 详情与 network `.bifrost` 导出保留 `actual_url`、`actual_host`、`listener_port`、`has_rule_hit` 等实际转发诊断字段，专用回归 fixture 不被通用规则 runner 误收集 |
 
 ### Web UI 测试
@@ -107,6 +107,7 @@
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
 | [proxy-http-https.md](./proxy-http-https.md) | HTTP/HTTPS 代理 | 27 | HTTP 转发、HTTPS CONNECT、TLS 拦截、各类规则协议、模式匹配、host 路径前缀回归、host 精确路径不补尾斜杠回归、旧版 `^https://` path wildcard 兼容回归 |
+| [status-code-direct-response.md](./status-code-direct-response.md) | statusCode 直接响应 | 2 | `statusCode://code` 命中后直接返回且不请求 upstream，`replaceStatus://code` 保持请求 upstream 后替换状态码语义 |
 | [proxy-socks5.md](./proxy-socks5.md) | SOCKS5 代理 | 5 | SOCKS5 基本代理、DNS 解析、HTTPS 透传、UDP ASSOCIATE 启动就绪回归、统一代理 UDP relay 端口 fallback 与 Windows ARM runner 并发回归 |
 | [proxy-websocket-sse.md](./proxy-websocket-sse.md) | WebSocket/SSE 代理 | 9 | WebSocket/SSE 代理转发、帧/事件捕获、UI 消息面板、Replay WebSocket E2E 启动隔离与诊断、Frames API SSE 前置流量回归、WebSocket 升级握手头部规则回归 |
 | [proxy-rules-advanced.md](./proxy-rules-advanced.md) | 规则协议全量测试 | 77 | 40+ 规则操作协议：请求/响应修改、内容注入、控制、路由、脚本、高级特性（Values 引用、模板字符串、正则捕获），含 html/js/css 内容注入协议矩阵、htmlPrepend 插入 `<html>` 后、htmlAppend 插入 `</html>` 前，以及 HTTPS 转发到 HTTP 上游、gzip HTML 响应编码一致性、gzip JSON reqMerge/resMerge 合并回归、HTTPS 解包 gzip JSON reqMerge/resMerge 合并回归、脚本与 mock 路径压缩 Body 修改回归、HTTPS 解包链路 `reqScript`/`resScript`/`decode`/`bp decode` 回归、mock immediate response `resScript` 回归、多值 `Set-Cookie` 保留回归、mock 生成资源、通配域名根路径 htmlAppend 匹配、culture.shtml HTTPS MITM 背景图白屏、上游 HTTP/2 body 断流 fallback、无规则命中时已知长度响应头透明转发真实回归、reqHeaders Markdown value 中 `#` 注释行回归 |
@@ -114,7 +115,7 @@
 | [proxy-auth-brute-force.md](./proxy-auth-brute-force.md) | 代理认证暴力破解防护 | 10 | HTTP/SOCKS5 代理认证 rate limiting：失败计数、10 次封禁（429/连接拒绝）、计数重置、IP 独立追踪 |
 | [rule-merge-headers.md](./rule-merge-headers.md) | 规则合并 Header 覆盖 | 6 | reqHeaders/resHeaders 同名覆盖、路径深度优先级、真实代理场景验证、转发类无回归、两条同名 key 规则覆盖+客户端同名 header、HTTPS passthrough/tunnel 客户端同名 header 去重覆盖 |
 | [rule-merge-strategy.md](./rule-merge-strategy.md) | 规则合并策略全量验证 | 13 | 全量协议合并策略验证：转发类 first-match-wins、Mock 类 non-multi_match、标量值 single-match、Body/CORS/注入 last-wins、累积型 accumulate、KV 集合、特殊协议、控制类、E2E 真实代理场景 |
-| [rules-e2e-fixtures.md](./rules-e2e-fixtures.md) | Rules E2E Fixtures | 13 | replay 历史夹具 `__MOCK_HTTP_PORT__` 端口占位符、并行 runner 动态 echo 端口兼容，以及 Windows rules 共享 mock outage 后串行重试全部失败套件、suite 日志路径识别、timeout 诊断、CI 预算、bifrost-e2e admin 临时数据目录重复端口重跑隔离、macOS Rules CI 失败夹具语义回归、tunnel 请求侧规则一致性回归、urlParams `&` 分隔多参数解析回归、Rules CI harness 断言逻辑回归、Windows ARM Rules 慢平台 fixture timeout / CI 分片回归、Windows x86 Rules 4 分片 30 分钟 job envelope 预算回归和 Windows Rules CLI-only 构建依赖回归 |
+| [rules-e2e-fixtures.md](./rules-e2e-fixtures.md) | Rules E2E Fixtures | 14 | replay 历史夹具 `__MOCK_HTTP_PORT__` 端口占位符、并行 runner 动态 echo 端口兼容，以及 Windows rules 共享 mock outage 后串行重试全部失败套件、suite 日志路径识别、timeout 诊断、CI 预算、bifrost-e2e admin 临时数据目录重复端口重跑隔离、macOS Rules CI 失败夹具语义回归、tunnel 请求侧规则一致性回归、urlParams `&` 分隔多参数解析回归、Rules CI harness 断言逻辑回归、Windows ARM Rules 慢平台 fixture timeout / CI 分片回归、Windows x86 Rules 4 分片 30 分钟 job envelope 预算回归、Windows Rules CLI-only 构建依赖回归和 Windows ARM E2E Runner stale 数据目录文件占用回归 |
 | [rule-operators-audit-fix.md](./rule-operators-audit-fix.md) | 规则操作符审计修复 | 6 | forwardedFor/responseFor applier 实现、pac 未实现标记、test_rules.sh fake-pass 清理回归 |
 | [mock-file-serving.md](./mock-file-serving.md) | Mock File Serving | 6 | file://协议二进制文件（PNG/图片）返回、JSON/HTML 文本文件、tpl://模板变量替换、Content-Type 自动检测、HTTPS TLS 拦截路径回归 |
 | [traffic-cleanup.md](./traffic-cleanup.md) | 流量记录清理逻辑 | 7 | 记录数超 115% 触发清理到 80% 水位、清理期间新流量落盘、Body 缓存文件清理、磁盘总量清理 body 同步、过度删除回归验证 |

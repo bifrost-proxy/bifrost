@@ -15,6 +15,7 @@ use bifrost_proxy::{
 use bifrost_storage::RulesStorage;
 use bifrost_tls::{generate_root_ca, init_crypto_provider, DynamicCertGenerator, SniResolver};
 use std::collections::HashMap;
+use std::path::Path;
 use std::time::Duration;
 
 fn extract_inline_content(value: &str) -> &str {
@@ -191,6 +192,41 @@ fn collapse_legacy_mock_overrides(rules: Vec<String>) -> Vec<String> {
 
     collapsed
 }
+
+fn clean_stale_e2e_data_dir(temp_dir: &Path) -> Result<(), String> {
+    if !temp_dir.exists() {
+        return Ok(());
+    }
+
+    let retry_count = if cfg!(windows) { 100 } else { 20 };
+    let retry_delay = if cfg!(windows) {
+        Duration::from_millis(100)
+    } else {
+        Duration::from_millis(25)
+    };
+    let mut last_error = None;
+
+    for attempt in 0..retry_count {
+        match std::fs::remove_dir_all(temp_dir) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt + 1 < retry_count {
+                    std::thread::sleep(retry_delay);
+                }
+            }
+        }
+    }
+
+    let error = last_error
+        .map(|error| error.to_string())
+        .unwrap_or_else(|| "unknown error".to_string());
+    Err(format!(
+        "failed to clean stale e2e data dir {temp_dir:?} after {retry_count} attempts: {error}"
+    ))
+}
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -1272,10 +1308,7 @@ impl ProxyInstance {
         let connection_registry = ConnectionRegistry::new(true);
 
         let temp_dir = std::env::temp_dir().join(format!("bifrost_e2e_test_{}", port));
-        if temp_dir.exists() {
-            std::fs::remove_dir_all(&temp_dir)
-                .map_err(|e| format!("failed to clean stale e2e data dir {temp_dir:?}: {e}"))?;
-        }
+        clean_stale_e2e_data_dir(&temp_dir)?;
         let body_store = Arc::new(parking_lot::RwLock::new(BodyStore::new(
             temp_dir.clone(),
             2 * 1024 * 1024,
@@ -1465,10 +1498,7 @@ impl ProxyInstance {
         let connection_registry = ConnectionRegistry::new(true);
 
         let temp_dir = std::env::temp_dir().join(format!("bifrost_e2e_test_sync_{}", port));
-        if temp_dir.exists() {
-            std::fs::remove_dir_all(&temp_dir)
-                .map_err(|e| format!("failed to clean stale e2e data dir {temp_dir:?}: {e}"))?;
-        }
+        clean_stale_e2e_data_dir(&temp_dir)?;
         let body_store = Arc::new(parking_lot::RwLock::new(BodyStore::new(
             temp_dir.clone(),
             2 * 1024 * 1024,
@@ -1621,7 +1651,7 @@ impl Drop for ProxyInstance {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_cors_config;
+    use super::{clean_stale_e2e_data_dir, parse_cors_config};
 
     #[test]
     fn parse_cors_config_supports_multiline_legacy_format() {
@@ -1647,5 +1677,21 @@ mod tests {
         assert_eq!(config.headers.as_deref(), Some("Content-Type"));
         assert_eq!(config.credentials, Some(true));
         assert_eq!(config.max_age, Some(86400));
+    }
+
+    #[test]
+    fn clean_stale_e2e_data_dir_removes_existing_directory() {
+        let dir = std::env::temp_dir().join(format!(
+            "bifrost_e2e_clean_stale_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("traffic")).expect("create stale traffic dir");
+        std::fs::write(dir.join("traffic").join("traffic.db"), b"stale")
+            .expect("write stale traffic file");
+
+        clean_stale_e2e_data_dir(&dir).expect("clean stale e2e dir");
+
+        assert!(!dir.exists());
     }
 }

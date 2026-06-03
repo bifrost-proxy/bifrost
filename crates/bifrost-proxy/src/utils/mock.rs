@@ -60,8 +60,7 @@ pub async fn generate_mock_response(
     }
 
     if let Some(status) = rules.status_code {
-        if rules.host.is_none()
-            && rules.mock_file.is_none()
+        if rules.mock_file.is_none()
             && rules.mock_rawfile.is_none()
             && rules.mock_template.is_none()
             && rules.location_href.is_none()
@@ -150,7 +149,7 @@ pub async fn generate_mock_response(
     None
 }
 
-fn build_status_response(status: u16, rules: &ResolvedRules) -> Response<BoxBody> {
+pub(crate) fn build_status_response(status: u16, rules: &ResolvedRules) -> Response<BoxBody> {
     let status_code = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
     let body = rules
         .res_body
@@ -698,6 +697,27 @@ mod tests {
         let rules = ResolvedRules::default();
         let response = build_status_response(404, &rules);
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_status_code_with_host_generates_direct_response() {
+        let mut rules = ResolvedRules {
+            host: Some("127.0.0.1:65535".to_string()),
+            status_code: Some(418),
+            ..ResolvedRules::default()
+        };
+        rules
+            .res_headers
+            .push(("X-Bifrost-Test".to_string(), "direct".to_string()));
+
+        let uri: hyper::Uri = "http://example.test/api".parse().unwrap();
+        let ctx = RequestContext::new();
+        let response = generate_mock_response(&rules, &uri, false, &ctx)
+            .await
+            .expect("statusCode should generate direct response even when host is set");
+
+        assert_eq!(response.status(), StatusCode::IM_A_TEAPOT);
+        assert_eq!(response.headers().get("x-bifrost-test").unwrap(), "direct");
     }
 
     #[test]

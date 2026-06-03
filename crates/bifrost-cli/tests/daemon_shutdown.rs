@@ -11,6 +11,12 @@ mod unix_tests {
         kill(Pid::from_raw(pid as i32), Signal::SIGCONT).is_ok()
     }
 
+    fn bifrost_command() -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_bifrost"));
+        command.env("BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT", "1");
+        command
+    }
+
     #[test]
     fn stop_triggers_graceful_shutdown_in_daemon_mode() {
         let tmp = tempfile::tempdir().unwrap();
@@ -24,7 +30,7 @@ mod unix_tests {
             l.local_addr().unwrap().port()
         };
 
-        let output = Command::new(env!("CARGO_BIN_EXE_bifrost"))
+        let output = bifrost_command()
             .env("BIFROST_DATA_DIR", &data_dir)
             .arg("--log-dir")
             .arg(&log_dir)
@@ -62,7 +68,7 @@ mod unix_tests {
         };
         assert!(pid != 0, "invalid pid in runtime.json");
 
-        let stop_output = Command::new(env!("CARGO_BIN_EXE_bifrost"))
+        let stop_output = bifrost_command()
             .env("BIFROST_DATA_DIR", &data_dir)
             .arg("stop")
             .output()
@@ -140,7 +146,7 @@ mod unix_tests {
             l.local_addr().unwrap().port()
         };
 
-        let output = Command::new(env!("CARGO_BIN_EXE_bifrost"))
+        let output = bifrost_command()
             .env("BIFROST_DATA_DIR", &data_dir)
             .arg("--log-dir")
             .arg(&log_dir)
@@ -190,7 +196,7 @@ mod unix_tests {
             );
         }
 
-        let stop_output = Command::new(env!("CARGO_BIN_EXE_bifrost"))
+        let stop_output = bifrost_command()
             .env("BIFROST_DATA_DIR", &data_dir)
             .arg("stop")
             .output()

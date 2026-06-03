@@ -11,7 +11,7 @@ export interface ProtocolDoc {
 export const PROTOCOL_DOCS: Record<string, ProtocolDoc> = {
   statusCode: {
     name: 'statusCode',
-    description: 'Set or override the HTTP response status code',
+    description: 'Return the HTTP status code directly without contacting upstream',
     valueType: 'number',
     valueDescription: 'HTTP status code (100-599)',
     examples: ['statusCode://200', 'statusCode://404', 'statusCode://500'],

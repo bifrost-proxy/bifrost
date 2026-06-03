@@ -1886,7 +1886,9 @@ async fn handle_intercepted_request_with_protocol(
         || !resolved_rules.res_headers.is_empty()
         || !resolved_rules.delete_req_headers.is_empty()
         || !resolved_rules.delete_res_headers.is_empty()
-        || !resolved_rules.header_replace.is_empty();
+        || !resolved_rules.header_replace.is_empty()
+        || resolved_rules.status_code.is_some()
+        || resolved_rules.replace_status.is_some();
 
     if verbose_logging {
         if has_rules {
@@ -2009,6 +2011,40 @@ async fn handle_intercepted_request_with_protocol(
     };
 
     debug!("[{}] Intercepted: {} {}", req_id, method_str, upstream_uri);
+
+    if let Some(status) = resolved_rules.status_code {
+        if resolved_rules.mock_file.is_none()
+            && resolved_rules.mock_rawfile.is_none()
+            && resolved_rules.mock_template.is_none()
+            && resolved_rules.location_href.is_none()
+        {
+            if verbose_logging {
+                info!("[{}] [MOCK] status code: {}", req_id, status);
+            }
+            let response = crate::utils::mock::build_status_response(status, &resolved_rules);
+            if let Some(ref state) = admin_state {
+                record_mock_traffic(
+                    state,
+                    req_id,
+                    &method_str,
+                    &original_uri,
+                    original_host,
+                    &start_time,
+                    has_rules,
+                    &resolved_rules,
+                    &response,
+                    &req,
+                    &client_ip,
+                    client_app.as_deref(),
+                    client_pid,
+                    client_path.as_deref(),
+                    listener_port,
+                    &devtools_client_req_id,
+                );
+            }
+            return Ok(response);
+        }
+    }
 
     if let Some(ref redirect_url) = resolved_rules.redirect {
         let status = resolved_rules.redirect_status.unwrap_or(302);

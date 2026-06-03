@@ -109,6 +109,7 @@ start_bifrost() {
   local log_file="$data_dir/bifrost.log"
   local -a env_args=(
     "BIFROST_DATA_DIR=$data_dir"
+    "BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT="
     "BIFROST_SYNC_LOGIN_BROWSER_DRY_RUN_FILE=$open_file"
     "BIFROST_SYNC_STARTUP_LOGIN_PREFLIGHT_RETRY_DELAY_MS=100"
   )

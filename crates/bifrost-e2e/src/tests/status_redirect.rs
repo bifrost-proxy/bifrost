@@ -13,6 +13,12 @@ pub fn get_all_tests() -> Vec<TestCase> {
             test_statuscode_404,
         ),
         TestCase::standalone(
+            "status_statusCode_direct_no_upstream",
+            "statusCode 命中后不请求后端",
+            "status",
+            test_statuscode_direct_no_upstream,
+        ),
+        TestCase::standalone(
             "status_statusCode_500",
             "statusCode 返回 500",
             "status",
@@ -86,6 +92,44 @@ async fn test_statuscode_404() -> Result<(), String> {
     .map_err(|e| format!("curl failed: {}", e))?;
 
     result.assert_status(404)?;
+    Ok(())
+}
+
+async fn test_statuscode_direct_no_upstream() -> Result<(), String> {
+    let mock = EnhancedMockServer::start().await;
+    mock.set_response(200, "should_not_reach");
+
+    let port = portpicker::pick_unused_port().unwrap();
+    let _proxy = ProxyInstance::start(
+        port,
+        vec![&format!(
+            "test.local host://127.0.0.1:{} statusCode://451 resBody://(blocked)",
+            mock.port
+        )],
+    )
+    .await
+    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let result = CurlCommand::with_proxy(
+        &format!("http://127.0.0.1:{}", port),
+        "http://test.local/api",
+    )
+    .execute()
+    .await
+    .map_err(|e| format!("curl failed: {}", e))?;
+
+    result.assert_status(451)?;
+    result.assert_body_contains("blocked")?;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    if mock.request_count() != 0 {
+        return Err(format!(
+            "statusCode should not contact upstream, got {} requests",
+            mock.request_count()
+        ));
+    }
+
     Ok(())
 }
 

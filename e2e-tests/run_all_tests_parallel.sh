@@ -222,6 +222,7 @@ FIXTURE_ONLY_RULES=(
     "tls/passthrough_localhost.txt"
     "values/status_code_value.txt"
     "websocket/decode_utf8_searchable.txt"
+    "websocket/header_rules.txt"
 )
 
 WINDOWS_SKIP_RULES=(

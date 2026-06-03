@@ -406,6 +406,24 @@
 - `build-desktop-windows` 继续依赖 `build-cli-windows`，并下载同一 CLI artifact 执行 sidecar 准备与桌面端检查。
 - Windows rules E2E 的启动条件与实际依赖一致：只要求 CLI 二进制可用。
 
+### TC-REF-14：Windows ARM E2E Runner stale 数据目录文件占用回归
+
+**操作步骤**：
+1. 执行 stale 数据目录清理 helper 的单元回归：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-e2e clean_stale_e2e_data_dir_removes_existing_directory -- --nocapture
+   ```
+2. 执行一次会启动 `ProxyInstance::start_with_admin` 的 focused runner 回归，确认同端口临时目录清理不影响正常启动：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo run -p bifrost-e2e -- --test status_replaceStatus_200 --test-timeout 120
+   ```
+3. 推送后检查 GitHub Actions `CI` run 的 `E2E Runner (aarch64-pc-windows-msvc)` job：此前失败日志中的 `failed to clean stale e2e data dir ... The process cannot access the file because it is being used by another process. (os error 32)` 不应再次出现；若 Windows 仍短暂占用 `bifrost_e2e_test_<port>` 或 `bifrost_e2e_test_sync_<port>`，启动逻辑应等待旧后台资源释放后再创建新的 `BodyStore`、`WsPayloadStore` 与 `TrafficDbStore`。
+
+**预期结果**：
+- 清理 helper 单元回归通过，能删除包含旧 `traffic.db` 文件的 stale E2E 数据目录。
+- focused runner 回归通过，说明 `start_with_admin` 仍使用固定 `bifrost_e2e_test_<port>` 目录并保持现有 payload persistence 测试可观察路径。
+- Windows ARM E2E Runner 不再因为上一用例释放时序导致 stale 数据目录清理失败；如出现其他用例失败，应按新日志继续归因，不能再把 `os error 32` 目录清理失败视为未修复。
+
 ## 清理步骤
 
 1. 删除本测试创建的临时数据目录：
@@ -436,3 +454,4 @@
 - 2026-05-07：通过。更新并执行 TC-REF-06 与 TC-REF-12 的 Windows rules 20 分钟预算收敛验证；执行 `bash -n e2e-tests/test_rules.sh e2e-tests/run_all_tests_parallel.sh scripts/run_all_e2e.sh` 通过；执行 Ruby workflow 静态解析，输出 `windows rules matrix budget ok` 与 `windows rules timeout budget ok`，确认 `e2e-windows-rules` 只保留 `x86_64-pc-windows-msvc` 一项、job timeout 为 30 分钟、suite timeout 为 1200 秒、retry budget 为 180 秒。该静态回归不启动 Bifrost，不使用 9900，不修改系统代理；Windows x86 完整 rules job、Windows ARM CLI build/runner/desktop job 由推送后的 GitHub Actions `CI` run 验证。
 - 2026-05-08：通过。更新并执行 TC-REF-06 与 TC-REF-12 的 Windows x86 rules 20 分钟分片预算回归；执行 `bash -n e2e-tests/test_rules.sh e2e-tests/run_all_tests_parallel.sh scripts/run_all_e2e.sh` 通过；执行 Ruby workflow 静态解析，输出 `windows rules sharded budget ok`、`windows rules frontend setup removed` 与 `windows rules timeout budget ok`，确认 `e2e-windows-rules` 拆为 4 个 x86_64 shard（1/4 到 4/4）、job timeout 为 20 分钟、每个 shard suite timeout 为 1080 秒、retry budget 为 180 秒，且 Windows rules job 不再执行 pnpm/Node setup 或 `pnpm install`。执行 `BIFROST_E2E_RULE_JOBS=1 BIFROST_E2E_RETRY_FAILED_ONCE=1 BIFROST_E2E_FIXTURE_TIMEOUT=90 BIFROST_E2E_RETRY_FIXTURE_TIMEOUT=60 BIFROST_E2E_RETRY_BUDGET_SECS=120 BIFROST_E2E_RULE_RESULTS_DIR=.bifrost-e2e-runs/rules-win-shard-smoke-20260508 bash e2e-tests/run_all_tests_parallel.sh -c priority --no-build --shard 1/4`，使用动态 mock 端口（HTTP 60753、HTTPS 60754、WS 60757、WSS 60758、SSE 60790、Proxy 60792）和代理起始端口 16031，未使用 9900；priority 分片 2/2 套件通过，6/6 断言通过。完整 Windows x86 4-shard runtime 耗时由推送后的 GitHub Actions `CI` run 验证。
 - 2026-05-09：通过。基于 GitHub Actions `CI` run `25574281001` 的 `E2E Rules (x86_64-pc-windows-msvc, shard 1/4)` 失败日志确认 rules fixture 自身已 `Passed: 1`、`Failed: 0`，耗时 354 秒；失败发生在业务步骤结束后的 `Post Run Swatinem/rust-cache@v2` / `Post Run actions/checkout@v4`，属于 20 分钟 job envelope 不足覆盖 Windows 固定 setup 与 post cleanup。更新并执行 TC-REF-12；执行 `bash -n e2e-tests/test_rules.sh e2e-tests/run_all_tests_parallel.sh scripts/run_all_e2e.sh` 通过；执行 Ruby workflow 静态解析，输出 `windows rules sharded budget ok`、`windows rules frontend setup removed`，确认 `e2e-windows-rules` 仍拆为 4 个 x86_64 shard、每个 shard suite timeout 为 1080 秒、job timeout 提升到 30 分钟、Windows rules job 不执行 pnpm/Node setup 或 `pnpm install`。随后执行 `bash scripts/ci/local-ci.sh --skip-static --e2e-only rules`，使用动态 mock 端口（HTTP 50111、HTTPS 50112、WS 50113、WSS 50114、SSE 50115、Proxy 50116）和代理起始端口 14497，未使用 9900；rules 全量回归 66/66 套件通过，575/575 断言通过，失败数 0。完整 Windows x86 runtime 由推送后的 GitHub Actions `CI` run 验证。
+- 2026-06-03：通过。补充并执行 TC-REF-14；本地执行 `SKIP_FRONTEND_BUILD=1 CARGO_TARGET_DIR=/tmp/bifrost-push-verify-target cargo test -p bifrost-e2e clean_stale_e2e_data_dir_removes_existing_directory -- --nocapture`，1/1 通过，确认 stale 数据目录清理 helper 能删除包含旧 `traffic.db` 文件的目录；随后执行 `SKIP_FRONTEND_BUILD=1 CARGO_TARGET_DIR=/tmp/bifrost-push-verify-target cargo run -p bifrost-e2e -- --test status_replaceStatus_200 --test-timeout 120`，1/1 通过，确认 `ProxyInstance::start_with_admin` 固定数据目录清理后仍能正常启动。Windows ARM `os error 32` 文件占用释放时序由推送后的 GitHub Actions `CI` run 验证。
