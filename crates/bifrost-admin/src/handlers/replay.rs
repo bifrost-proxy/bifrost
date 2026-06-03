@@ -29,6 +29,11 @@ use crate::replay_db::{
     KeyValueItem, ReplayBody, ReplayGroup, ReplayHistory, ReplayRequest, ReplayRequestSummary,
     RequestType, RuleConfig, RuleMode, MAX_CONCURRENT_REPLAYS, MAX_HISTORY, MAX_REQUESTS,
 };
+use crate::replay_scripts::{
+    apply_replay_decode_scripts, collect_script_rules, execute_replay_request_scripts,
+    execute_replay_response_scripts, request_data_from_replay, response_data_from_replay,
+    ReplayScriptRules,
+};
 use crate::request_rules::{apply_all_request_rules, build_applied_rules, AppliedRequest};
 use crate::state::SharedAdminState;
 use crate::traffic::{FrameDirection, FrameType, MatchedRule, TrafficRecord};
@@ -329,7 +334,7 @@ async fn execute_replay_unified(
         custom_rules: None,
     });
 
-    let (resolved_rules, matched_rules, applied_request) = resolve_and_apply_rules(
+    let (resolved_rules, matched_rules, mut applied_request, values) = resolve_and_apply_rules(
         &state,
         &rule_config,
         &unified_req.url,
@@ -337,6 +342,23 @@ async fn execute_replay_unified(
         &unified_req.headers,
         unified_req.body.as_ref().map(|s| s.as_bytes()),
     );
+    let script_rules = collect_script_rules(&resolved_rules);
+
+    let mut req_script_results = Vec::new();
+    if !script_rules.req_scripts.is_empty() {
+        req_script_results = execute_replay_request_scripts(
+            &state,
+            &script_rules.req_scripts,
+            &resolved_rules,
+            &replay_id,
+            &applied_request.url,
+            &mut applied_request.method,
+            &mut applied_request.headers,
+            &mut applied_request.body,
+            &values,
+        )
+        .await;
+    }
 
     info!(
         replay_id = %replay_id,
@@ -534,8 +556,26 @@ async fn execute_replay_unified(
             Err(_) => None,
         };
 
-        let (status, response_headers, response_body) =
+        let (mut status, mut response_headers, mut response_body) =
             apply_response_rules(&resolved_rules, status, response_headers, response_body);
+
+        let mut res_script_results = Vec::new();
+        if !script_rules.res_scripts.is_empty() {
+            res_script_results = execute_replay_response_scripts(
+                &state,
+                &script_rules.res_scripts,
+                &resolved_rules,
+                &replay_id,
+                &applied_request.url,
+                &applied_request.method,
+                &applied_request.headers,
+                &mut status,
+                &mut response_headers,
+                &mut response_body,
+                &values,
+            )
+            .await;
+        }
 
         let duration_ms = start_time.elapsed().as_millis() as u64;
         drop(permit);
@@ -543,14 +583,19 @@ async fn execute_replay_unified(
         let traffic_id = record_traffic_for_unified(
             &state,
             &replay_id,
-            &unified_req,
             &applied_request,
             status,
             &response_headers,
             response_body.as_deref(),
             duration_ms,
             &matched_rules,
-        );
+            &resolved_rules,
+            &script_rules,
+            &values,
+            &req_script_results,
+            &res_script_results,
+        )
+        .await;
 
         record_history(
             &state,
@@ -669,16 +714,20 @@ async fn process_sse_response(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn record_traffic_for_unified(
+async fn record_traffic_for_unified(
     state: &SharedAdminState,
     replay_id: &str,
-    unified_req: &UnifiedReplayRequest,
     applied_request: &AppliedRequest,
     status: u16,
     response_headers: &[(String, String)],
     response_body: Option<&str>,
     duration_ms: u64,
     matched_rules: &[MatchedRule],
+    resolved_rules: &bifrost_core::ResolvedRules,
+    script_rules: &ReplayScriptRules,
+    values: &HashMap<String, String>,
+    req_script_results: &[bifrost_script::ScriptExecutionResult],
+    res_script_results: &[bifrost_script::ScriptExecutionResult],
 ) -> String {
     let traffic_id = format!("{}-{}", replay_id, uuid::Uuid::new_v4());
     let timestamp = chrono::Utc::now().timestamp_millis() as u64;
@@ -699,25 +748,86 @@ fn record_traffic_for_unified(
         .find(|(k, _)| k.to_lowercase() == "content-type")
         .map(|(_, v)| v.clone());
 
-    let request_body_ref = if let Some(ref body) = unified_req.body {
-        if let Some(ref body_store) = state.body_store {
-            body_store.read().store(&traffic_id, "req", body.as_bytes())
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    let mut request_body_for_storage = applied_request.body.clone();
+    let mut response_body_for_storage = response_body.map(|body| Bytes::from(body.to_string()));
+    let mut raw_request_body_ref = None;
+    let mut raw_response_body_ref = None;
+    let mut decode_req_script_results = Vec::new();
+    let mut decode_res_script_results = Vec::new();
 
-    let response_body_ref = if let Some(body) = response_body {
-        if let Some(ref body_store) = state.body_store {
-            body_store.read().store(&traffic_id, "res", body.as_bytes())
-        } else {
-            None
+    if !script_rules.decode_scripts.is_empty() {
+        let request_data = request_data_from_replay(
+            &applied_request.url,
+            &applied_request.method,
+            &applied_request.headers,
+            applied_request.body.as_ref(),
+        );
+        let response_data = response_data_from_replay(
+            status,
+            response_headers,
+            response_body,
+            request_data.clone(),
+        );
+
+        if let Some(body) = request_body_for_storage.clone() {
+            if let Some(ref body_store) = state.body_store {
+                raw_request_body_ref = body_store.read().store(&traffic_id, "req_raw", &body);
+            }
+            let (decoded, results) = apply_replay_decode_scripts(
+                state,
+                &script_rules.decode_scripts,
+                &script_rules.bp_scripts,
+                "request",
+                replay_id,
+                resolved_rules,
+                &request_data,
+                &bifrost_script::ResponseData {
+                    request: request_data.clone(),
+                    ..Default::default()
+                },
+                values,
+                body,
+            )
+            .await;
+            request_body_for_storage = Some(decoded);
+            decode_req_script_results = results;
         }
-    } else {
-        None
-    };
+
+        if let Some(body) = response_body_for_storage.clone() {
+            if let Some(ref body_store) = state.body_store {
+                raw_response_body_ref = body_store.read().store(&traffic_id, "res_raw", &body);
+            }
+            let (decoded, results) = apply_replay_decode_scripts(
+                state,
+                &script_rules.decode_scripts,
+                &script_rules.bp_scripts,
+                "response",
+                replay_id,
+                resolved_rules,
+                &response_data.request,
+                &response_data,
+                values,
+                body,
+            )
+            .await;
+            response_body_for_storage = Some(decoded);
+            decode_res_script_results = results;
+        }
+    }
+
+    let request_body_ref = request_body_for_storage.as_ref().and_then(|body| {
+        state
+            .body_store
+            .as_ref()
+            .and_then(|body_store| body_store.read().store(&traffic_id, "req", body))
+    });
+
+    let response_body_ref = response_body_for_storage.as_ref().and_then(|body| {
+        state
+            .body_store
+            .as_ref()
+            .and_then(|body_store| body_store.read().store(&traffic_id, "res", body))
+    });
 
     let record = TrafficRecord {
         id: traffic_id.clone(),
@@ -731,7 +841,7 @@ fn record_traffic_for_unified(
         protocol: scheme.to_string(),
         content_type: response_content_type,
         request_content_type,
-        request_size: unified_req.body.as_ref().map(|b| b.len()).unwrap_or(0),
+        request_size: applied_request.body.as_ref().map(|b| b.len()).unwrap_or(0),
         response_size: response_body.map(|b| b.len()).unwrap_or(0),
         duration_ms,
         listener_port: 0,
@@ -759,17 +869,33 @@ fn record_traffic_for_unified(
         request_body_ref,
         response_body_ref,
         derived_response_body_ref: None,
-        raw_request_body_ref: None,
-        raw_response_body_ref: None,
+        raw_request_body_ref,
+        raw_response_body_ref,
         actual_url: None,
         actual_host: None,
         original_request_headers: None,
         response_headers: None,
         error_message: None,
-        req_script_results: None,
-        res_script_results: None,
-        decode_req_script_results: None,
-        decode_res_script_results: None,
+        req_script_results: if req_script_results.is_empty() {
+            None
+        } else {
+            Some(req_script_results.to_vec())
+        },
+        res_script_results: if res_script_results.is_empty() {
+            None
+        } else {
+            Some(res_script_results.to_vec())
+        },
+        decode_req_script_results: if decode_req_script_results.is_empty() {
+            None
+        } else {
+            Some(decode_req_script_results)
+        },
+        decode_res_script_results: if decode_res_script_results.is_empty() {
+            None
+        } else {
+            Some(decode_res_script_results)
+        },
         devtools_client_req_id: None,
     };
 
@@ -1573,7 +1699,7 @@ async fn execute_replay_websocket(
 
     info!(replay_id = %replay_id, url = %url, "Starting WebSocket proxy");
 
-    let (resolved_rules, matched_rules, applied_request) =
+    let (resolved_rules, matched_rules, applied_request, _values) =
         resolve_and_apply_rules(&state, &rule_config, &url, "GET", &upgrade_headers, None);
 
     info!(
@@ -2264,14 +2390,23 @@ fn resolve_and_apply_rules(
     bifrost_core::ResolvedRules,
     Vec<MatchedRule>,
     AppliedRequest,
+    HashMap<String, String>,
 ) {
-    let (resolved_rules, matched_rules) = match rule_config.mode {
-        RuleMode::None => (bifrost_core::ResolvedRules::default(), vec![]),
+    let (resolved_rules, matched_rules, values) = match rule_config.mode {
+        RuleMode::None => (
+            bifrost_core::ResolvedRules::default(),
+            vec![],
+            load_values(state),
+        ),
         RuleMode::Custom => {
             if let Some(ref custom_rules) = rule_config.custom_rules {
                 resolve_custom_rules(state, custom_rules, url, method)
             } else {
-                (bifrost_core::ResolvedRules::default(), vec![])
+                (
+                    bifrost_core::ResolvedRules::default(),
+                    vec![],
+                    load_values(state),
+                )
             }
         }
         RuleMode::Enabled | RuleMode::Selected => {
@@ -2300,7 +2435,7 @@ fn resolve_and_apply_rules(
             }
         };
 
-    (resolved_rules, matched_rules, applied_request)
+    (resolved_rules, matched_rules, applied_request, values)
 }
 
 fn apply_response_rules(
@@ -2317,7 +2452,11 @@ fn resolve_custom_rules(
     custom_rules: &str,
     url: &str,
     method: &str,
-) -> (bifrost_core::ResolvedRules, Vec<MatchedRule>) {
+) -> (
+    bifrost_core::ResolvedRules,
+    Vec<MatchedRule>,
+    HashMap<String, String>,
+) {
     let mut values = load_values(state);
     let parser = RuleParser::with_values(values.clone());
     let parsed_rules = match parser.parse_rules_with_inline_values(custom_rules) {
@@ -2329,7 +2468,7 @@ fn resolve_custom_rules(
         }
         Err(e) => {
             warn!(error = %e, "[REPLAY] Failed to parse custom rules");
-            return (bifrost_core::ResolvedRules::default(), vec![]);
+            return (bifrost_core::ResolvedRules::default(), vec![], values);
         }
     };
     let rules = parsed_rules
@@ -2339,10 +2478,10 @@ fn resolve_custom_rules(
         .collect::<Vec<_>>();
 
     if rules.is_empty() {
-        return (bifrost_core::ResolvedRules::default(), vec![]);
+        return (bifrost_core::ResolvedRules::default(), vec![], values);
     }
 
-    let resolver = RulesResolver::new(rules).with_values(values);
+    let resolver = RulesResolver::new(rules).with_values(values.clone());
     let ctx = RequestContext::from_url(url).with_method(method);
     let resolved = resolver.resolve(&ctx);
 
@@ -2359,7 +2498,7 @@ fn resolve_custom_rules(
         })
         .collect();
 
-    (resolved, matched)
+    (resolved, matched, values)
 }
 
 fn resolve_from_storage(
@@ -2367,7 +2506,11 @@ fn resolve_from_storage(
     url: &str,
     method: &str,
     selected_rules: Option<&Vec<String>>,
-) -> (bifrost_core::ResolvedRules, Vec<MatchedRule>) {
+) -> (
+    bifrost_core::ResolvedRules,
+    Vec<MatchedRule>,
+    HashMap<String, String>,
+) {
     let rules_storage = &state.rules_storage;
     let mut all_rules: Vec<Rule> = vec![];
     let mut values = load_values(state);
@@ -2376,7 +2519,7 @@ fn resolve_from_storage(
         Ok(files) => files,
         Err(e) => {
             warn!(error = %e, "[REPLAY] Failed to load rules");
-            return (bifrost_core::ResolvedRules::default(), vec![]);
+            return (bifrost_core::ResolvedRules::default(), vec![], values);
         }
     };
 
@@ -2408,10 +2551,10 @@ fn resolve_from_storage(
     }
 
     if all_rules.is_empty() {
-        return (bifrost_core::ResolvedRules::default(), vec![]);
+        return (bifrost_core::ResolvedRules::default(), vec![], values);
     }
 
-    let resolver = RulesResolver::new(all_rules).with_values(values);
+    let resolver = RulesResolver::new(all_rules).with_values(values.clone());
     let ctx = RequestContext::from_url(url).with_method(method);
     let resolved = resolver.resolve(&ctx);
 
@@ -2428,7 +2571,7 @@ fn resolve_from_storage(
         })
         .collect();
 
-    (resolved, matched)
+    (resolved, matched, values)
 }
 
 fn load_values(state: &SharedAdminState) -> HashMap<String, String> {
@@ -2641,7 +2784,7 @@ mod websocket_rule_tests {
             )),
         };
 
-        let (resolved_rules, matched_rules, applied_request) =
+        let (resolved_rules, matched_rules, applied_request, _values) =
             resolve_and_apply_rules(&state, &rule_config, url, "GET", &[], None);
 
         assert!(

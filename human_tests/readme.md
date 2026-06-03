@@ -95,7 +95,7 @@
 | [api-system.md](./api-system.md) | System API | 16 | 系统信息、概览、内存诊断 |
 | [api-scripts.md](./api-scripts.md) | Scripts API | 30 | 脚本 CRUD、重命名、运行测试、名称校验、内置脚本保护 |
 | [api-push.md](./api-push.md) | Push WebSocket API | 11 | WebSocket 推送连接、订阅参数、流量/指标/概览实时推送、经代理访问管理端回归 |
-| [api-replay.md](./api-replay.md) | Replay API | 21 | 重放集合管理、请求 CRUD、执行重放、历史查看、路径前缀转发回归、响应 Body 规则 resMerge 回归、Replay request/response 规则覆盖回归、Replay 规则 Shell E2E 回归 |
+| [api-replay.md](./api-replay.md) | Replay API | 22 | 重放集合管理、请求 CRUD、执行重放、历史查看、路径前缀转发回归、响应 Body 规则 resMerge 回归、Replay request/response 规则覆盖回归、Replay 规则 Shell E2E 回归、Replay Request/Response Script 与 BPDecode 回归 |
 | [api-group.md](./api-group.md) | Group API | 13 | 团队组列表/详情、团队规则 CRUD、权限校验 |
 | [api-search.md](./api-search.md) | Search API | 16 | 全文搜索、搜索范围、过滤条件、分页、流式搜索 |
 | [api-auth.md](./api-auth.md) | Auth API | 12 | 鉴权状态查询、登录、密码管理、远程访问开关、JWT 会话吊销 |

@@ -656,6 +656,7 @@ Bifrost Sync API 提供云端同步管理功能，包括同步状态查询、配
 
 **真实执行记录**：
 - 2026-06-02：执行 `bash e2e-tests/tests/test_sync_startup_login_preflight_e2e.sh` 通过。脚本真实启动当前源码构建的 Bifrost，新增 `environment disables startup login prompt` 场景设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、临时 `BIFROST_DATA_DIR`、`--no-system-proxy` 和 `BIFROST_SYNC_LOGIN_BROWSER_DRY_RUN_FILE`，确认远端可达且无 token 时 dry-run 登录 URL 数量仍为 0，并且没有持久化 `startup_login_prompt`。
+- 2026-06-03：执行 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-sync --lib -- --test-threads=1` 通过，确认外层禁用自动登录弹窗环境变量不会污染登录预检单测；需要验证自动弹窗语义的用例会在 env lock 内临时 unset 该变量，仅 dry-run 记录登录 URL，不真实打开浏览器。
 
 ---
 

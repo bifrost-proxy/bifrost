@@ -25,6 +25,7 @@ pub(crate) mod replay_body_rules;
 pub mod replay_db;
 pub mod replay_executor;
 pub(crate) mod replay_response_rules;
+pub(crate) mod replay_scripts;
 pub mod request_rules;
 mod resource_alerts;
 pub mod resource_download;

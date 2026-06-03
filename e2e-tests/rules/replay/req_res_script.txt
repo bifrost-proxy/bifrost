@@ -1,0 +1,7 @@
+# 测试目标: 验证 replay custom rules 模式会执行 reqScript 和 resScript，并将脚本执行结果写入 replay traffic detail。
+127.0.0.1 reqScript://replay_req_script
+127.0.0.1 resScript://replay_res_script
+
+``` replayScriptMarker
+replay-inline-value
+```

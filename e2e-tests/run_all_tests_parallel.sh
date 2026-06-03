@@ -231,6 +231,11 @@ WINDOWS_SKIP_RULES=(
     "tls/tls_intercept_rule.txt"
     "forwarding/tunnel.txt"
     "pattern/protocol_wildcard.txt"
+    # Replay script/BPDecode fixtures are covered by Linux rules CI and
+    # test_replay_rules.sh. Keep them out of Windows rules sharding so adding
+    # syntax-only fixtures does not rebalance expensive Windows shards.
+    "replay/bp_decode.txt"
+    "replay/req_res_script.txt"
 )
 
 should_skip_on_windows() {
