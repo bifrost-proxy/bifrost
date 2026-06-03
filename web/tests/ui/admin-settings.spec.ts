@@ -74,6 +74,28 @@ test("版本更新弹窗 Upgrade Command Copy 写入剪贴板", async ({
   expect(clipboardText).toBe("bifrost upgrade");
 });
 
+test("底部 Sync 状态栏点击后跳转到 Settings Sync", async ({ page }) => {
+  await openPage(page, "traffic");
+
+  await page.getByTestId("statusbar-sync").click();
+
+  await expect(page).toHaveURL(/\/_bifrost\/settings\?tab=sync/);
+  await expect(page.getByRole("tab", { name: /Sync/ })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+
+  await openPage(page, "traffic");
+  await page.getByTestId("statusbar-sync").focus();
+  await page.keyboard.press("Enter");
+  await expect(page).toHaveURL(/\/_bifrost\/settings\?tab=sync/);
+
+  await openPage(page, "traffic");
+  await page.getByTestId("statusbar-sync").focus();
+  await page.keyboard.press("Space");
+  await expect(page).toHaveURL(/\/_bifrost\/settings\?tab=sync/);
+});
+
 test("Settings 访问控制支持模式切换、白名单、临时白名单和 LAN 开关", async ({
   page,
 }) => {

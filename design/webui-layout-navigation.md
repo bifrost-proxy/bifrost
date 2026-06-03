@@ -29,6 +29,25 @@ WebUI 左侧一级导航在窗口高度较小时会超过可视区域。当前�
 - 更新 `human_tests/webui-layout-navigation.md` 和 `human_tests/readme.md`。
 - 不涉及 README 用户命令或 API 文档更新。
 
+## 状态栏 Sync 快速入口
+
+### 问题
+
+底部状态栏已经展示 `Sync: Off/Syncing/Local/Sign in/Synced/Connected` 和详细 Tooltip，但用户想处理同步登录、远端地址、手动同步或断网重连时，仍需要先进入 Settings 再手动切换到 Sync Tab，路径偏长。
+
+### 实现方案
+
+1. `web/src/components/StatusBar/index.tsx` 中的 `statusbar-sync` 保持原有状态展示、Tooltip 和 `data-sync-state`/`data-sync-action` 测试属性。
+2. 为 Sync 状态区域增加点击行为，调用 React Router `navigate("/settings?tab=sync")`。
+3. 增加 `role="button"`、`tabIndex={0}` 和 Enter/Space 键处理，保证键盘可达。
+4. 使用 Ant Design token 的 `colorFillSecondary` 做 hover 背景，兼容亮色和暗色主题。
+
+### 验证计划
+
+- E2E 测试：`web/tests/ui/admin-settings.spec.ts` 打开 Traffic 页面，点击 `data-testid=statusbar-sync` 后断言 URL 为 `/_bifrost/settings?tab=sync` 且 Sync Tab `aria-selected=true`。
+- human_tests：新增 `TC-WLN-17`，覆盖鼠标点击、键盘触发、Tooltip 保留和亮/暗主题可读性。
+- 项目校验：执行前端类型检查/Playwright 用例，以及 rust-project-validate 中适用的 fmt、clippy、build、workspace test。
+
 ## 版本弹窗 Upgrade Command 复制回归
 
 ### 问题

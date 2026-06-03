@@ -1,4 +1,12 @@
-import { useEffect, useMemo, memo, useCallback, type CSSProperties } from "react";
+import {
+  useEffect,
+  useMemo,
+  memo,
+  useCallback,
+  type CSSProperties,
+  type KeyboardEvent,
+} from "react";
+import { useNavigate } from "react-router-dom";
 import { theme, Tooltip, Popover, Switch } from "antd";
 import { ArrowUpOutlined, ArrowDownOutlined } from "@ant-design/icons";
 import { useShallow } from "zustand/react/shallow";
@@ -51,6 +59,7 @@ function formatUptime(seconds: number): string {
 }
 
 const StatusBar = memo(function StatusBar() {
+  const navigate = useNavigate();
   const { token } = theme.useToken();
   const { overview, current, enablePush, disablePush } = useMetricsStore(
     useShallow((state) => ({
@@ -229,6 +238,21 @@ const StatusBar = memo(function StatusBar() {
     setModalVisible(true);
   }, [checkVersion, setModalVisible]);
 
+  const handleSyncClick = useCallback(() => {
+    navigate("/settings?tab=sync");
+  }, [navigate]);
+
+  const handleSyncKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLDivElement>) => {
+      if (event.key !== "Enter" && event.key !== " ") {
+        return;
+      }
+      event.preventDefault();
+      handleSyncClick();
+    },
+    [handleSyncClick],
+  );
+
   const styles: Record<string, CSSProperties> = {
     container: {
       height: 20,
@@ -288,6 +312,13 @@ const StatusBar = memo(function StatusBar() {
     valueStatus: {
       fontFamily: "monospace",
       minWidth: 52,
+    },
+    syncButton: {
+      cursor: "pointer",
+      borderRadius: 3,
+      padding: "1px 4px",
+      margin: "0 -4px",
+      transition: "background-color 0.2s",
     },
     statusDot: {
       width: 6,
@@ -366,10 +397,21 @@ const StatusBar = memo(function StatusBar() {
 
         <Tooltip title={syncIndicator.detail}>
           <div
-            style={styles.item}
+            style={{ ...styles.item, ...styles.syncButton }}
+            role="button"
+            tabIndex={0}
+            aria-label="Open sync settings"
             data-testid="statusbar-sync"
             data-sync-state={syncIndicator.state}
             data-sync-action={syncStatus?.last_sync_action ?? "unknown"}
+            onClick={handleSyncClick}
+            onKeyDown={handleSyncKeyDown}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.backgroundColor = token.colorFillSecondary;
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.backgroundColor = "transparent";
+            }}
           >
             <div style={styles.syncDot} />
             <span style={styles.label}>Sync:</span>
