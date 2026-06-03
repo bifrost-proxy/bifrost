@@ -62,12 +62,16 @@ with open(sys.argv[1], "r", encoding="utf-8") as f:
     status = json.load(f)
 assert status["profile"]["id"] == "sherpa-onnx-balanced", status
 assert status["profile"]["ready"] is False, status
+assert status["profile"]["requires_init"] is True, status
+assert "not initialized" in status["profile"]["message"], status
 PY
 
-echo "[asr-diarization-cli-e2e] init profile through CLI"
-BIFROST_DATA_DIR="$ADMIN_DATA_DIR" "$BIFROST_BIN" -p "$ADMIN_PORT" \
-  ai asr diarization init --json >"$ADMIN_DATA_DIR/diarization-init.json"
-python3 - "$ADMIN_DATA_DIR/diarization-init.json" "$ADMIN_DATA_DIR" <<'PY'
+ONLINE_INIT="${BIFROST_ASR_DIARIZATION_E2E_ONLINE:-0}"
+if [[ "$ONLINE_INIT" == "1" ]]; then
+  echo "[asr-diarization-cli-e2e] init profile through CLI"
+  BIFROST_DATA_DIR="$ADMIN_DATA_DIR" "$BIFROST_BIN" -p "$ADMIN_PORT" \
+    ai asr diarization init --json >"$ADMIN_DATA_DIR/diarization-init.json"
+  python3 - "$ADMIN_DATA_DIR/diarization-init.json" "$ADMIN_DATA_DIR" <<'PY'
 import json, pathlib, sys
 with open(sys.argv[1], "r", encoding="utf-8") as f:
     payload = json.load(f)
@@ -80,6 +84,9 @@ embedding = profile_dir / "embedding" / "3dspeaker_speech_eres2net_base_sv_zh-cn
 assert segmentation.is_file() and segmentation.stat().st_size > 1_000_000, segmentation
 assert embedding.is_file() and embedding.stat().st_size > 30_000_000, embedding
 PY
+else
+  echo "[asr-diarization-cli-e2e] skipping online model init; set BIFROST_ASR_DIARIZATION_E2E_ONLINE=1 to verify downloads"
+fi
 
 TASK_JSON="$(python3 - "$AUDIO_DIR" <<'PY'
 import json, sys
@@ -119,13 +126,14 @@ grep -q "sherpa-onnx-balanced" "$ADMIN_DATA_DIR/task-show.out"
 
 curl -fsS "http://127.0.0.1:${ADMIN_PORT}/_bifrost/api/asr/tasks/${TASK_ID}" \
   >"$ADMIN_DATA_DIR/task-detail.json"
-python3 - "$ADMIN_DATA_DIR/task-detail.json" <<'PY'
+python3 - "$ADMIN_DATA_DIR/task-detail.json" "$ONLINE_INIT" <<'PY'
 import json, sys
 with open(sys.argv[1], "r", encoding="utf-8") as f:
     detail = json.load(f)
+online = sys.argv[2] == "1"
 assert detail["diarization"]["enabled"] is True, detail
 assert detail["summary"]["diarization_enabled"] is True, detail["summary"]
-assert detail["summary"]["diarization_ready"] is True, detail["summary"]
+assert detail["summary"]["diarization_ready"] is online, detail["summary"]
 PY
 
 echo "[asr-diarization-cli-e2e] ok"
