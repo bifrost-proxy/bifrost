@@ -485,8 +485,13 @@ impl ToolHandler for ExecCommandTool {
             session_id_value(&poll.session_id)
         };
         let running = !poll.completed;
-        let long_task_candidate = running && !args.tty.unwrap_or(false);
-        let suggested_wait_profile = long_task_candidate.then_some("adaptive");
+        let tty = args.tty.unwrap_or(false);
+        let long_task_candidate = running;
+        let suggested_wait_profile = if long_task_candidate {
+            Some(if tty { "interactive" } else { "adaptive" })
+        } else {
+            None
+        };
         let response = json!({
             "chunk_id": poll.chunk_id,
             "wall_time_seconds": wall_time_seconds,

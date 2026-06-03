@@ -896,6 +896,84 @@ PY
 
 - 通过。2026-06-03 按项目规则带 `source ~/.zshrc &&` 执行第 1、2、4 步静态检查均成功；第 1 步使用单引号保护反引号，避免 shell 命令替换。执行 `source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-agent exec_command_long_task_user_message_interrupts_runtime_wait_then_continues -- --nocapture` 通过。测试使用真实 `exec_command(cmd="sleep 0.8; printf done", yield_time_ms=50)`，100ms 后向 `guide_channel` 注入“先回答我：2+2 等于几？”，断言第二次模型请求在 350ms 内出现，即没有等待 0.8s 长任务退出；模型先返回 `answered the interjection`，随后 runtime context 要求继续跟进原 `session_id`，模型调用 `write_stdin` 后最终输出包含 `done`，最终回复为 `long task complete`。
 
+### TC-ALT-19：交互式 TTY prompt 卡住回归验收
+
+**操作步骤**：
+
+1. 确认 `exec_command` 对运行中的 TTY session 返回 `interactive` profile：
+
+   ```bash
+   rg -n 'suggested_wait_profile.*interactive|long_task_candidate = running|tty' crates/agent/src/tools/exec_command.rs
+   ```
+
+2. 确认 turn loop 不再排除 `tty=true`，且 interactive profile 使用较小 stall 阈值和 stdin 决策提示：
+
+   ```bash
+   rg -n "INTERACTIVE_LONG_TASK_PROFILE|INTERACTIVE_LONG_TASK_STALL_THRESHOLD|long_task_stall_hint|interactive terminal" crates/agent/src/session/turn_loop.rs
+   ```
+
+3. 执行交互式 prompt 单元回归：
+
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-agent exec_command_tty_prompt_stall_returns_control_to_model_for_stdin_decision -- --nocapture
+   ```
+
+4. 确认测试模拟真实 PTY prompt、模型写 stdin 后再 poll，最终拿到确认输出：
+
+   ```bash
+   rg -n 'CONFIRM\?|ANSWER=yes|write_stdin|tty":true|interactive task complete' crates/agent/src/session/tests.rs
+   ```
+
+**预期结果**：
+
+- `exec_command(tty=true)` 若 initial yield 后仍在运行，会成为 long task candidate，profile 为 `interactive`。
+- runtime watcher 观察 PTY 输出和退出，但不自动写 stdin。
+- PTY prompt 输出后短暂无新增输出时，tool result 包含 `resume_reason=stalled`、`profile=interactive`、`running=true`、`session_id` 和包含 `write_stdin` 决策建议的 hint。
+- 模型可基于该 tool result 调用 `write_stdin` 输入确认；若 PTY 先回显输入，模型可继续空 poll，直到最终输出和 exit code 收敛。
+
+**实际结果**：
+
+- 通过。2026-06-03 按项目规则带 `source ~/.zshrc;` 执行第 1、2、4 步静态检查均成功；第 3 步执行 `source ~/.zshrc; SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-agent exec_command_tty_prompt_stall_returns_control_to_model_for_stdin_decision -- --nocapture` 通过。测试覆盖 `exec_command(tty=true)` 输出 `CONFIRM?` 后停止产出、runtime watcher 以 `profile=interactive` / `resume_reason=stalled` 归还模型、模型调用 `write_stdin("yes\n")`，并在 PTY 回显后继续 poll 到 `ANSWER=yes` 和最终回复 `interactive task complete`。
+
+### TC-ALT-20：命令执行入口漏识别审查
+
+**操作步骤**：
+
+1. 确认本地 Agent tool registry 只注册一个 terminal 执行入口和一个 stdin 入口，且旧 shell alias 被拒绝：
+
+   ```bash
+   rg -n "exec_command|write_stdin|shell_command|local_shell|shell_pty|unknown_shell_aliases_are_rejected" crates/agent/src/tools/mod.rs
+   ```
+
+2. 确认 turn loop 的 long-task watcher 只接管 `exec_command` 的 structured running session，不把普通文件工具、plan 工具或 goal 工具误当 terminal：
+
+   ```bash
+   rg -n 'tool_name != "exec_command"|maybe_watch_exec_long_task|parse_long_task_candidate|ToolRegistry' crates/agent/src/session/turn_loop.rs
+   ```
+
+3. 确认 MCP tool 有 per-request timeout，不会无限卡住 Bifrost Agent turn；同时确认 MCP 不提供 Bifrost `write_stdin` 语义：
+
+   ```bash
+   rg -n "tool_timeout_sec|DEFAULT_TOOL_TIMEOUT_SEC|send_request_with_timeout|tools/call" crates/agent/src/mcp/mod.rs crates/agent/src/config.rs
+   ```
+
+4. 确认 IM external CLI runner 是外部进程边界：只写入初始 prompt，按 runner timeout 收敛，不能由内部 runtime watcher 代替外部 runner 处理 stdin 确认：
+
+   ```bash
+   rg -n "write prompt to external cli|wait_with_output|timeout_secs|external cli timed out|ExternalCliWorkerRun" crates/bifrost-admin/src/im_gateway/external_cli/mod.rs crates/bifrost-admin/src/im_gateway/external_cli/command_spec.rs
+   ```
+
+**预期结果**：
+
+- 内部 Bifrost Agent 的 terminal session 全部走 `exec_command` / `write_stdin`，本次修复覆盖 pipe 和 PTY。
+- 普通本地工具不会启动命令或等待 stdin；旧 shell alias 不可见且运行时拒绝。
+- MCP tool 若阻塞会在配置的 `tool_timeout_sec` 后失败返回；需要 stdin 的交互不能靠 Bifrost runtime 注入，必须由对应 MCP 协议或工具自身处理。
+- IM external CLI runner 可能运行很久，但它是外部 agent 进程；Bifrost 可停止/超时该 runner，不能进入外部 runner 内部 tool loop 去写 stdin。
+
+**实际结果**：
+
+- 通过。2026-06-03 按项目规则带 `source ~/.zshrc;` 执行上述 4 条静态审查命令均成功。审查结论：内部 Agent terminal 入口只有 `exec_command` / `write_stdin`，旧 shell alias 被拒绝；turn loop 只对 `exec_command` 的 structured running session 启用 watcher；MCP tool 通过 `send_request_with_timeout` / `tool_timeout_sec` 收敛但不具备 Bifrost `write_stdin` 语义；IM external CLI runner 以外部 runner 进程和 `timeout_secs` 为边界，内部 runtime watcher 不能替外部 runner 注入 stdin。
+
 ## 清理步骤
 
 1. 停止测试 Bifrost 进程。

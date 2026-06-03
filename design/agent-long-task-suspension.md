@@ -573,7 +573,7 @@ resume_turn_from_monitor_event(session_key, monitor_id, resume_seq)
 
 - 未设置 `watch.mode` 且非 TTY 命令在 initial yield 后仍在运行：按 adaptive monitor 处理。
 - 命令在 initial yield 内完成：inline 返回，不启动 monitor。
-- TTY/readline/交互等待：默认 `manual`，除非用户或模型明确要求 runtime 观察。
+- TTY/readline/交互等待：runtime 默认可以观察但不能自动写 stdin；出现 prompt-like 输出后短时间无进展时恢复模型 loop，并要求模型根据最新输出决定 `write_stdin`、继续 poll、Ctrl-C 或改用非交互命令。
 
 ### `write_stdin` 保持手动监控和交互权
 
@@ -1051,7 +1051,7 @@ probe failure:
 | `history_long` | 30s | 2m 无输出且无 artifact/resource 变化 | 5m |
 | `external_status_available` | 30-60s | 5m 无外部状态变化；queued 也必须在 5m 内给模型一次 checkpoint | 5m |
 | `ready_signal_expected` | 30s | 60s 无 ready/error 且进程 alive | 5m |
-| `interactive_prompt_like` | 30s | prompt-like silence 不自动恢复；用户消息优先 | 5m |
+| `interactive_prompt_like` | 30s | 5s 内仍无新输出则恢复模型判断；用户消息优先 | 5m |
 
 模型通知退避硬上限为 5 分钟。runtime probe 可以继续 30 秒级低成本运行，但任何会恢复模型的 stall re-notice 都不得退避超过 5 分钟；外部状态源如果给出更长 retry-after，只能影响 runtime probe，不得让模型通知窗口超过 5 分钟。
 
@@ -1882,8 +1882,10 @@ Cooperative Long Task Loop 的最终交付标准不是“先有一个 in-turn wa
 - 已实现 `exec_command` running metadata、自适应 long task 候选建议和 `write_stdin` / runtime poll 的 `unchanged` metadata。
 - 已实现 `ExecSession` append-only transcript 基础能力，stdout/stderr reader 写入统一 transcript；initial tool result、runtime poll、manual `write_stdin` 都通过 cursor 派生增量输出，不再通过 drain 抢走彼此输出。
 - 已实现 `chunk_id` / `next_output_cursor.chunk_id` / `new_output_bytes` / `output_lossy` / `lost_chunk_count` / `truncated_bytes` 元数据，为后续完整 stdout/stderr byte cursor 留出协议空间。
-- 已实现 turn loop 内部 runtime watcher：`exec_command` 返回非 TTY 且仍在运行的 adaptive session 后，由 runtime poll 等待输出/退出，不再让模型反复调用 `write_stdin`。
-- 已移除命令内容分类器：当前实现不再通过关键字、正则、GitHub Actions 脚本路径、构建命令名或工程专属路径推断 profile。短命令在初始 yield 内完成时仍 inline 返回；未完成的非 TTY session 统一使用 `adaptive`。
+- 已实现 turn loop 内部 runtime watcher：`exec_command` 返回仍在运行的 session 后，由 runtime poll 等待输出/退出，不再让模型反复调用 `write_stdin`。
+- 已实现交互式 TTY running session 的 `interactive` profile：runtime 观察 PTY 输出但不自动写 stdin；连续短暂无输出后以 `resume_reason=stalled` 恢复模型，让模型根据 prompt/回显决定是否 `write_stdin` 输入确认、继续 poll、Ctrl-C 或改用非交互命令。
+- 已移除命令内容分类器：当前实现不再通过关键字、正则、GitHub Actions 脚本路径、构建命令名或工程专属路径推断 profile。短命令在 initial yield 内完成时仍 inline 返回；未完成的非 TTY session 统一使用 `adaptive`，未完成的 TTY session 使用 `interactive`。
+- 已完成命令执行入口复核：Bifrost Agent 本地可见 terminal 能力只有 `exec_command` / `write_stdin`，旧 `shell`、`shell_pty`、`shell_command`、`local_shell` 均不注册并有拒绝测试；MCP tool 有 `tool_timeout_sec` per-request timeout，不具备 Bifrost runtime 可写 stdin 的 terminal session 语义；IM external CLI runner 属于外部 agent 进程边界，Bifrost 只能传入初始 prompt 并按 runner timeout 收敛，无法代替外部 runner 处理其内部工具确认。
 - 已实现 `LongTaskStatus` progress event、`TurnSuspended`、`LongTaskWatchStarted`、`LongTaskHeartbeat`、`LongTaskOutputAvailable`、`LongTaskExited` 和 `TurnResumed` 事件。
 - 已实现退出后一次性压缩 tool result，包含 `resume_reason`、profile、elapsed、omitted heartbeats、最终输出和 `model_request_count_while_waiting=0`。
 - 已实现长任务等待期的用户消息抢占：runtime watcher 同时监听 `guide_channel` 与 exec poll；用户追加消息到达时立刻返回 `resume_reason=user_message` 的压缩 tool result，让模型先处理追加问题，并在回答后注入 runtime context 要求继续 `write_stdin` 跟进原 `session_id`，避免等长任务结束才响应用户。
@@ -2115,6 +2117,8 @@ Cooperative Long Task Loop 的最终交付标准不是“先有一个 in-turn wa
 - TC-ALT-14：合并状态机与 5 分钟退避上限静态验收，确认顶层状态收敛为 ActiveTurn / MonitoringExec / ResumingTurn / Terminal，模型通知和 runtime poll/probe 退避都不得超过 300s，且 terminal/user/stop/MonitorDegraded 立即处理。
 - TC-ALT-15：Codex-style short grace、资源治理、长任务识别与输出唤醒静态验收。
 - TC-ALT-16：真实 Bifrost 服务长任务协作循环验收，启动真实服务并通过 `/api/im-gateway/agent/chat` 验证长任务由 runtime watcher 等待完成，期间无模型空轮询。
+- TC-ALT-19：交互式 TTY prompt 卡住回归验收，确认 `exec_command(tty=true)` 运行中会进入 `interactive` watcher，短暂无输出后恢复模型 loop，并允许模型用 `write_stdin` 输入确认和继续 poll 到最终输出。
+- TC-ALT-20：命令执行入口漏识别审查，确认本地 terminal 能力只通过 `exec_command` / `write_stdin`，MCP 和 IM external CLI runner 的长任务/交互边界不被误判为内部 watcher 可控 session。
 
 ## Review/Fix/Test 闭环方案
 
