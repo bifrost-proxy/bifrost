@@ -2551,3 +2551,49 @@ cargo test --workspace --all-features
 - `design/im-gateway.md`
 - `human_tests/im-gateway.md`
 - `human_tests/readme.md`
+
+## 2026-06-04 IM 重启上线通知补充 Runner 与轮次上下文
+
+### 问题
+
+服务重启或 Provider 重新连接后，IM 通道 owner 会收到 `Bifrost is online` 状态消息，但旧消息只包含 Provider、设备和工作目录。用户无法从通知里判断当前通道绑定的是内置 Bifrost Agent、Codex Runner 还是 ChatGPT Web Runner，也无法知道当前 owner 绑定会话已经累计执行过多少轮用户输入；排查重启后“是不是接回原会话 / 当前 Runner 是谁”时需要再进入 WebUI 或发送 `/status`。
+
+### 实现逻辑
+
+- 上线通知发送前基于当前 Provider 计算 `OnlineNotificationAgentContext`：
+  - 先合并全局 Agent 配置与 Provider 专属 `agent_config`，得到当前生效 Runner。
+  - 内置 Runner 显示 `Runner Type: bifrost_agent`、`Runner ID: N/A`。
+  - 自定义 Runner 通过 `ExternalCliGatewayConfig` 解析 runner id 与 adapter，显示例如 `Runner Type: chatgpt_web`、`Runner ID: web-main`。
+  - 绑定 Session 使用现有 IM Agent session key 规则：`<provider_id>:<owner_open_id>`，owner 缺失时保持 `unknown` 后缀，保证与消息处理链路一致。
+- 会话轮次优先读取内存中的 session detail；如果当前 turn 正在执行，则读取 active turn status；重启后无内存状态时扫描该 session 最新持久化 history，并以 user message 数作为 `Completed User Turns`。
+- 通知正文保留原有 `Provider`、`Device`、`Workspace` 和 `Status` 字段，新增 `Runner Type`、`Runner ID`、`Bound Session`、`Completed User Turns`，避免破坏既有 message log 与 owner 通知观察路径。
+- 缺少上下文的纯格式化测试路径继续降级为 `bifrost_agent` / `N/A` / `0`，确保没有 Provider 专属 Runner 配置时行为稳定。
+
+### 测试方案
+
+- 单元测试：`online_notification_message_includes_runner_context_and_turns` 覆盖格式化输出包含 Runner 类型、Runner ID、绑定 session 和轮次。
+- 单元测试：`online_notification_context_resolves_external_runner_adapter_and_turns` 覆盖 Provider 自定义 Runner 解析到 `chatgpt_web`，并从当前 session history 统计 user turn count。
+- E2E 测试：新增 `e2e-tests/tests/test_im_online_notification_runner_context.sh`，使用 mock Feishu API 与预置持久化 session history，真实启动 Bifrost、创建 Provider、调用 connect，并断言 message log 与 mock Feishu 实收卡片都包含 Runner/Session/轮次以及原有目录字段。
+- 真实场景测试：更新并执行 `human_tests/im-gateway.md` 的 `TC-IMG-65`，覆盖重启/重连上线通知用户可观察内容。
+
+### Review/Fix/Test 闭环方案
+
+- 第 1 轮：复核用户目标和线上通知链路，检查 `event_loop.rs`、`utils.rs`、单元测试与 E2E 脚本；运行 focused unit 与新增 shell E2E，修复格式、死代码和断言问题。
+- 第 2 轮：复查文档、human_tests 索引、最新 `git diff` 和回归影响；复跑 focused unit、E2E、fmt/clippy 和 workspace all-features 测试。
+
+### 校验要求
+
+```bash
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin online_notification -- --nocapture
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin im_status_text -- --nocapture
+SKIP_FRONTEND_BUILD=1 e2e-tests/tests/test_im_online_notification_runner_context.sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+```
+
+### 文档更新
+
+- `design/im-gateway.md`
+- `human_tests/im-gateway.md`
+- `human_tests/readme.md`
