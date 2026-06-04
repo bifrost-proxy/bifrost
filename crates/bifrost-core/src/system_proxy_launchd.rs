@@ -710,6 +710,12 @@ mod tests {
         let status = launchd_status_for_config(&current_config).expect("status");
         let _ = std::fs::remove_file(plist_path);
 
+        if !cfg!(target_os = "macos") {
+            assert!(!status.supported);
+            assert!(!status.installed);
+            return;
+        }
+
         assert!(status.installed);
         assert!(status.needs_upgrade);
         assert!(status
