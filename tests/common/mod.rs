@@ -153,6 +153,7 @@ impl RulesResolver for TestRulesResolver {
                             rule_name: None,
                             raw: None,
                             line: None,
+                            auto_tls_intercept: true,
                         });
                     }
                 }

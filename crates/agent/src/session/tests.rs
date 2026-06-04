@@ -1290,6 +1290,77 @@ async fn exec_command_long_task_stall_detection_returns_control_to_model() {
         .any(|event| event.kind == CodexTurnEventKind::TurnResumed));
 }
 
+#[tokio::test]
+async fn exec_command_tty_prompt_stall_returns_control_to_model_for_stdin_decision() {
+    let tool_calls = vec![ToolCallMessage::function_call(
+        "call-tty".to_string(),
+        "exec_command".to_string(),
+        r#"{"cmd":"python3 -u -c 'import sys; print(\"CONFIRM?\", flush=True); line=sys.stdin.readline(); print(\"ANSWER=\" + line.strip(), flush=True)'","tty":true,"yield_time_ms":50}"#.to_string(),
+    )];
+    let follow_up_calls = vec![ToolCallMessage::function_call(
+        "call-write-stdin".to_string(),
+        "write_stdin".to_string(),
+        r#"{"session_id":1,"chars":"yes\n","yield_time_ms":1000}"#.to_string(),
+    )];
+    let final_poll_calls = vec![ToolCallMessage::function_call(
+        "call-final-poll".to_string(),
+        "write_stdin".to_string(),
+        r#"{"session_id":1,"chars":"","yield_time_ms":1000}"#.to_string(),
+    )];
+    let (url, request_count) = counted_chat_response_url(vec![
+        chat_tool_calls_response(tool_calls, 22),
+        chat_tool_calls_response(follow_up_calls, 24),
+        chat_tool_calls_response(final_poll_calls, 26),
+        chat_text_response("interactive task complete", 28),
+    ])
+    .await;
+    let mut config = provider_config_for_url(url);
+    config.model_context_window = Some(100_000);
+    config.model_auto_compact_token_limit = Some(80_000);
+    let client = AgentClient::new();
+    let tools = ToolRegistry::with_defaults();
+    let mut session = AgentSession::new("tty-prompt-stall");
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        run_turn(
+            &client,
+            &config,
+            &mut session,
+            &tools,
+            "run an interactive command and answer the prompt",
+            None,
+        ),
+    )
+    .await
+    .expect("interactive stall should return control to the model")
+    .unwrap();
+
+    assert_eq!(result.response, "interactive task complete");
+    assert_eq!(
+        request_count.load(Ordering::SeqCst),
+        4,
+        "runtime should resume for prompt handling, PTY echo, and final output"
+    );
+    let history_text = session
+        .history
+        .iter()
+        .filter_map(|message| message.content.as_deref())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        history_text.contains("\"profile\":\"interactive"),
+        "{history_text}"
+    );
+    assert!(history_text.contains("\"stalled\""), "{history_text}");
+    assert!(history_text.contains("CONFIRM?"), "{history_text}");
+    assert!(history_text.contains("ANSWER=yes"), "{history_text}");
+    assert!(session
+        .last_turn_events
+        .iter()
+        .any(|event| event.kind == CodexTurnEventKind::LongTaskStalled));
+}
+
 #[test]
 fn long_task_stall_threshold_default_is_30() {
     let config = AgentConfig::default();

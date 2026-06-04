@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use bifrost_admin::{
@@ -18,6 +18,7 @@ use hyper::header::{HeaderName, HeaderValue, AUTHORIZATION, REFERER, USER_AGENT}
 use hyper::HeaderMap;
 use hyper::{Request, Response, StatusCode, Uri};
 use hyper_util::rt::TokioIo;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tracing::{debug, error, info, warn};
@@ -392,7 +393,7 @@ pub(crate) fn headers_to_pairs(headers: &hyper::HeaderMap) -> Vec<(String, Strin
     pairs
 }
 
-fn build_proxy_rule_url(proxy_rule: &str) -> Result<Url> {
+pub(crate) fn build_proxy_rule_url(proxy_rule: &str) -> Result<Url> {
     let normalized = if proxy_rule.starts_with("http://") || proxy_rule.starts_with("https://") {
         proxy_rule.to_string()
     } else {
@@ -411,7 +412,7 @@ fn proxy_authority(host: &str, port: u16) -> String {
     }
 }
 
-fn build_upstream_proxy_auth_value(proxy_url: &Url) -> Option<String> {
+pub(crate) fn build_upstream_proxy_auth_value(proxy_url: &Url) -> Option<String> {
     if proxy_url.username().is_empty() {
         return None;
     }
@@ -425,6 +426,108 @@ fn build_upstream_proxy_auth_value(proxy_url: &Url) -> Option<String> {
         "Basic {}",
         base64::engine::general_purpose::STANDARD.encode(credentials)
     ))
+}
+
+fn proxy_connect_authority(host: &str, port: u16) -> String {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if host.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{}]:{}", host, port)
+    } else {
+        format!("{}:{}", host, port)
+    }
+}
+
+pub(crate) fn build_upstream_proxy_connect_request(
+    proxy_url: &Url,
+    target_host: &str,
+    target_port: u16,
+) -> Vec<u8> {
+    let authority = proxy_connect_authority(target_host, target_port);
+    let mut request =
+        format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\nConnection: keep-alive\r\n");
+    if let Some(auth_value) = build_upstream_proxy_auth_value(proxy_url) {
+        request.push_str("Proxy-Authorization: ");
+        request.push_str(&auth_value);
+        request.push_str("\r\n");
+    }
+    request.push_str("\r\n");
+    request.into_bytes()
+}
+
+pub(crate) async fn connect_via_upstream_http_proxy_tunnel(
+    proxy_rule: &str,
+    target_host: &str,
+    target_port: u16,
+) -> Result<TcpStream> {
+    let proxy_url = build_proxy_rule_url(proxy_rule)?;
+    if proxy_url.scheme() != "http" {
+        return Err(BifrostError::Network(format!(
+            "Upstream proxy tunnel only supports http proxy rules, got '{}'",
+            proxy_rule
+        )));
+    }
+
+    let proxy_host = proxy_url
+        .host_str()
+        .ok_or_else(|| BifrostError::Parse(format!("Missing proxy host in '{}'", proxy_rule)))?;
+    let proxy_port = proxy_url.port().unwrap_or(80);
+    let mut stream = TcpStream::connect((proxy_host, proxy_port)).await?;
+    let request = build_upstream_proxy_connect_request(&proxy_url, target_host, target_port);
+    stream.write_all(&request).await?;
+
+    let mut response = Vec::with_capacity(512);
+    let mut buf = [0u8; 256];
+    loop {
+        let n = tokio::time::timeout(Duration::from_secs(10), stream.read(&mut buf))
+            .await
+            .map_err(|_| {
+                BifrostError::Network(format!(
+                    "Timed out waiting for upstream proxy CONNECT response from {}:{}",
+                    proxy_host, proxy_port
+                ))
+            })??;
+        if n == 0 {
+            return Err(BifrostError::Network(format!(
+                "Upstream proxy {}:{} closed before CONNECT completed",
+                proxy_host, proxy_port
+            )));
+        }
+        response.extend_from_slice(&buf[..n]);
+        if response.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+        if response.len() > 16 * 1024 {
+            return Err(BifrostError::Network(format!(
+                "Upstream proxy {}:{} CONNECT response is too large",
+                proxy_host, proxy_port
+            )));
+        }
+    }
+
+    let response_text = String::from_utf8_lossy(&response);
+    let status = response_text
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or_else(|| {
+            BifrostError::Network(format!(
+                "Invalid upstream proxy CONNECT response from {}:{}",
+                proxy_host, proxy_port
+            ))
+        })?;
+
+    if !(200..300).contains(&status) {
+        return Err(BifrostError::Network(format!(
+            "Upstream proxy {}:{} rejected CONNECT {} with status {}",
+            proxy_host,
+            proxy_port,
+            proxy_connect_authority(target_host, target_port),
+            status
+        )));
+    }
+
+    Ok(stream)
 }
 
 fn build_proxy_forward_uri(

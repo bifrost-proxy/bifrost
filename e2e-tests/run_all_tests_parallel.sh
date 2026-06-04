@@ -215,6 +215,7 @@ FIXTURE_ONLY_RULES=(
     "socks5_tls/host_redirect.txt"
     "socks5_tls/mock_response.txt"
     "socks5_tls/res_header.txt"
+    "socks5_tls/routing_exceptions.txt"
     "socks5_udp/dns_redirect_domain.txt"
     "socks5_udp/dns_redirect_ip.txt"
     "system_proxy/basic_forwarding.txt"

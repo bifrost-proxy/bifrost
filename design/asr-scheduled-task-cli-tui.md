@@ -489,28 +489,32 @@ human_tests/asr-task-cli-tui.md
 
 如任一轮发现 TUI 退出恢复、API 性能、任务选择或消耗信息错误，追加第 3 轮直到关闭。
 
-## 2026-06-03 增量：Daily Agent 自动触发门禁与 diarization-only 失败
+## 2026-06-04 增量：Daily Agent 自动触发改为 daily 合成文档变更门禁
 
 ### 问题
 
-真实任务 `76612de33e9740bc92440ce64a98a4cb` 在 2026-06-03 02:52 生成了新的 `.daily/2026-06-02.md`，但 Daily Agent 没有自动运行。排查发现 ASR 任务总体 `failed=3`，失败原因均为：
+真实任务 `76612de33e9740bc92440ce64a98a4cb` 在 2026-06-04 04:12 生成了新的 `.daily/2026-06-03.md`，但 Daily Agent 没有自动运行。排查发现 ASR 任务最新 run 已结束并刷新了 daily 合成 Markdown，但总体仍有 failed 文件，其中既包含：
 
 ```text
 diarization_no_segments: sherpa-onnx returned no speaker segments
+diarization_no_asr_units: diarization produced no transcribable ASR units
 ```
 
-旧门禁 `daily_agent_asr_completion_ready` 要求 `pending=0 && failed=0 && partial_success=0 && failed_chunk_count=0`，因此只要存在任何失败文件就跳过 Daily Agent。这个规则会把“无可用说话人分段的短音频/静音音频”与真正转写失败混为一谈，导致已生成的 Daily Docs 长期不被后处理。
+旧门禁 `daily_agent_asr_completion_ready` 从 ASR 文件状态判断是否允许 Daily Agent 自动触发：只放行全成功或特定 `diarization_no_segments:` 失败。这个规则仍会把“ASR run 已结束且 daily 合成文档已更新”的有效结果挡住，导致 `2026-06-03.md` 已生成但 `2026-06-03-report.md` 不生成。
 
 ### 修复语义
 
-- 继续阻断：仍有 pending/processing 文件、partial success、failed chunks，或普通 ASR/normalize/模型失败。
-- 允许自动触发：`pending=0`、`partial_success=0`、`failed_chunk_count=0`，且所有 failed 文件都属于 `diarization_no_segments:`。
-- 这样 Daily Agent 可以基于已生成的 `.daily/*.md` 继续生成 report，同时不会把真实转写失败误认为完成。
+- 自动触发点仍在 ASR run 完成、`refresh_task_daily_summaries` 刷新 daily 合成文档之后。
+- 是否排队 Daily Agent 不再由 failed 文件类型决定，而是复用 `DailyAgentChangePlanner` 检查 enabled 且 `trigger_policy=after_asr_run` 的 Agent 是否存在 `NewFile`、`Appended` 或 `Rewritten` daily Markdown。
+- 只要任一可运行 Agent 有 daily 合成文档变更，就排队执行 `run_daily_agents(..., trigger_source=asr_completion, force=false)`；各 Agent 内部仍按自己的 processed state 只处理有变化的日期。
+- 如果所有 Agent 的 daily Markdown 均为 `Unchanged`，或没有 daily Markdown 文件，则跳过自动运行，避免空跑。
+- 这样即使本轮 ASR 有普通 failed 文件，只要 run 已经结束并产出了新的 `.daily/*.md`，Daily Agent 仍能继续生成 report；真正没有合成文档更新的 run 不会触发后处理。
 
 ### 测试补充
 
-- 单元测试：覆盖 clean ASR、pending、普通 failed、partial、failed chunks，以及 `diarization_no_segments` failed-only 放行。
-- human_tests：在 `human_tests/asr-daily-agents.md` 新增回归用例，验证现场类型的 diarization-only 失败不会阻塞 Daily Agent 自动触发门禁。
+- 单元测试：覆盖无 daily Markdown 不触发、已有 processed state 且 source hash 未变不触发、daily Markdown 新增/追加触发、存在普通 failed 和 `diarization_no_asr_units` failed 时只要 daily Markdown 变更仍触发、多 Agent 中任一 Agent 待处理即触发。
+- E2E：扩展 `e2e-tests/tests/test_asr_daily_agents_api.sh`，在已有 report 后追加 daily Markdown，不带 `force` 再运行，断言 processed run_id 更新且 prompt 包含 `change_kind=Appended`。
+- human_tests：更新 `human_tests/asr-daily-agents.md` 的回归用例，验证 ASR run 完成后以 daily 合成文档变更作为 Daily Agent 自动触发门禁，不再绑定某个 diarization 错误字符串。
 
 ## 实施顺序建议
 

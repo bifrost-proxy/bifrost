@@ -1,6 +1,6 @@
 use regex::Regex;
 
-use super::{MatchResult, Matcher};
+use super::{pattern_has_concrete_host_scope, MatchResult, Matcher};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PathWildcardType {
@@ -163,6 +163,10 @@ impl Matcher for PathWildcardMatcher {
             PathWildcardType::Double => 65,
             PathWildcardType::Triple => 60,
         }
+    }
+
+    fn can_trigger_tls_auto_intercept(&self) -> bool {
+        !self.negated && pattern_has_concrete_host_scope(&self.raw_pattern)
     }
 }
 

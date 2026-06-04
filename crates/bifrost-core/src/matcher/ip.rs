@@ -123,6 +123,10 @@ impl Matcher for IpMatcher {
             70 + (prefix_len as i32 / 4)
         }
     }
+
+    fn can_trigger_tls_auto_intercept(&self) -> bool {
+        !self.negated
+    }
 }
 
 #[derive(Debug, Clone)]

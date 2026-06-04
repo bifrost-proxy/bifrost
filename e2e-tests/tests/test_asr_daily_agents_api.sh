@@ -358,4 +358,70 @@ assert "output/report/2026-05-22-report.md" in dump, "daily_report target missin
 assert "output/tomorrow_todo/2026-05-22-report.md" in dump, "tomorrow_todo target missing from model prompt"
 PY
 
+RUN_IDS_BEFORE_APPEND="$E2E_DIR/run_ids_before_append.json"
+python3 - <<'PY' "$RUNS_JSON" "$RUN_IDS_BEFORE_APPEND"
+import json, sys
+body=json.load(open(sys.argv[1]))
+docs=[
+    d for d in body.get("processed_documents", [])
+    if d.get("date") == "2026-05-22" and d.get("agent_id") in {"daily_report", "tomorrow_todo"}
+]
+assert len({d.get("agent_id") for d in docs}) == 2, docs
+json.dump({d["agent_id"]: d["last_run_id"] for d in docs}, open(sys.argv[2], "w"), ensure_ascii=False)
+PY
+
+cat >> "$DAILY_DIR/2026-05-22.md" <<'MD'
+
+新增明日跟进动作：确认追加后的 daily markdown 会在非 force 运行中被识别为 Appended。
+MD
+
+APPEND_RUN_JSON="$E2E_DIR/run_response_appended.json"
+curl -fsS -X POST "http://127.0.0.1:$PORT/_bifrost/api/asr/tasks/$TASK_ID/daily-agent/run?date=2026-05-22" > "$APPEND_RUN_JSON"
+python3 - <<'PY' "$APPEND_RUN_JSON"
+import json, sys
+body=json.load(open(sys.argv[1]))
+assert body["status"] in ("queued", "already_running"), body
+assert body.get("date") == "2026-05-22", body
+PY
+
+APPENDED_RUN_DONE=0
+for _ in {1..120}; do
+  curl -fsS "http://127.0.0.1:$PORT/_bifrost/api/asr/tasks/$TASK_ID/daily-agent/runs" > "$RUNS_JSON"
+  if python3 - <<'PY' "$RUNS_JSON" "$RUN_IDS_BEFORE_APPEND" "$REPORT_DIR/2026-05-22-report.md" "$TODO_DIR/2026-05-22-report.md"
+import json, pathlib, sys
+body=json.load(open(sys.argv[1]))
+before=json.load(open(sys.argv[2]))
+docs=[
+    d for d in body.get("processed_documents", [])
+    if d.get("date") == "2026-05-22" and d.get("agent_id") in {"daily_report", "tomorrow_todo"}
+]
+if len({d.get("agent_id") for d in docs}) != 2:
+    raise SystemExit(1)
+for doc in docs:
+    if doc.get("last_run_id") == before.get(doc.get("agent_id")):
+        raise SystemExit(1)
+for path in sys.argv[3:]:
+    text=pathlib.Path(path).read_text(encoding="utf-8")
+    assert "E2E_DAILY_AGENT_REAL_RUN" in text, text
+PY
+  then
+    APPENDED_RUN_DONE=1
+    break
+  fi
+  sleep 1
+done
+if [[ "$APPENDED_RUN_DONE" != "1" ]]; then
+  curl -fsS "http://127.0.0.1:$PORT/_bifrost/api/asr/tasks/$TASK_ID/daily-agent" > "$E2E_DIR/final_config_after_append.json" || true
+  cat "$RUNS_JSON" >&2 || true
+  cat "$E2E_DIR/final_config_after_append.json" >&2 || true
+  exit 1
+fi
+
+python3 - <<'PY' "$MODEL_LOG"
+import json, sys
+lines=[json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+dump="\n".join(json.dumps(line, ensure_ascii=False) for line in lines)
+assert "change_kind=Appended" in dump, "appended daily markdown did not reach model prompt"
+PY
+
 echo "ASR daily agents API E2E passed: task=$TASK_ID data_dir=$DATA_DIR"

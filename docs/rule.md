@@ -150,6 +150,33 @@ example.com resBody://{mockBody}
 2. **日志查看**：使用 Bifrost Network 界面的 Overview 面板查看规则匹配情况
 3. **临时禁用**：使用 `#` 注释或 `lineProps://disabled` 暂时禁用规则
 
+### HTTPS 自动 TLS 解包边界
+
+当全局 TLS 拦截关闭时，Bifrost 仍会为了执行必须读取或修改 HTTPS 内层 HTTP 内容的规则而自动开启 TLS 解包，例如 `reqHeaders`、`resHeaders`、body 修改、脚本、mock 或状态码类规则。但这个自动解包有明确边界：
+
+- 仅用于 `host://` 改目标地址的规则不会自动开启 TLS 解包。
+- 仅用于 `proxy://` 选择下游代理的规则不会自动开启 TLS 解包；HTTPS `CONNECT` 会保持隧道透传并转发给下游代理。
+- 规则驱动的自动解包必须有明确 host 作用域：Domain、IP/CIDR、带具体域名或 IP 片段的 Wildcard/PathWildcard 可以触发。
+- 纯 regex 或纯 wildcard 范围过大，不能单独触发自动 TLS 解包，例如 `* resHeaders://...`、`*/api/* resHeaders://...`、`/api\/v\d+/ resHeaders://...`。
+- 如果确实需要让宽泛匹配规则处理 HTTPS 明文，请先把 pattern 收窄到明确域名/IP，或显式配置 `tlsIntercept://` / 全局 TLS include。
+
+示例：
+
+```txt
+# 不会自动解包，只改 CONNECT/SOCKS5 上游目标
+example.com host://127.0.0.1:3000
+
+# 不会自动解包，只把隧道交给下游代理
+example.com proxy://127.0.0.1:8080
+
+# 会自动解包，因为响应修改规则绑定到明确域名
+api.example.com resHeaders://X-Debug=1
+
+# 不会自动解包，因为 pattern 没有明确 host 作用域
+* resHeaders://X-Debug=1
+/api\/v\d+/ resHeaders://X-Debug=1
+```
+
 ### 上游 HTTP/3 规则
 
 `http3://` 用于为命中的请求启用“代理到目标服务”的上游 HTTP/3 尝试，默认关闭。

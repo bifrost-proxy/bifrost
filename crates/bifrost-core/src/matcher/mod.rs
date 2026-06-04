@@ -47,6 +47,53 @@ pub trait Matcher: Send + Sync {
     }
     fn is_negated(&self) -> bool;
     fn priority(&self) -> i32;
+    fn can_trigger_tls_auto_intercept(&self) -> bool {
+        false
+    }
+}
+
+pub(crate) fn pattern_has_concrete_host_scope(pattern: &str) -> bool {
+    let mut clean = pattern.strip_prefix('!').unwrap_or(pattern);
+    clean = clean.strip_prefix('^').unwrap_or(clean);
+
+    let clean = clean
+        .strip_prefix("http://")
+        .or_else(|| clean.strip_prefix("https://"))
+        .or_else(|| clean.strip_prefix("http*://"))
+        .or_else(|| clean.strip_prefix("ws://"))
+        .or_else(|| clean.strip_prefix("wss://"))
+        .or_else(|| clean.strip_prefix("ws*://"))
+        .or_else(|| clean.strip_prefix("tunnel://"))
+        .or_else(|| clean.strip_prefix("//"))
+        .unwrap_or(clean);
+
+    if clean.starts_with('/') {
+        return false;
+    }
+
+    let mut host = clean.split('/').next().unwrap_or(clean);
+    host = host.strip_prefix('$').unwrap_or(host);
+    if host.is_empty() {
+        return false;
+    }
+
+    let host_without_port = if host.starts_with('[') {
+        host.find(']').map(|end| &host[..=end]).unwrap_or(host)
+    } else if host.matches(':').count() == 1 {
+        let (candidate_host, candidate_port) = host.split_once(':').unwrap_or((host, ""));
+        if candidate_port
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '*')
+        {
+            candidate_host
+        } else {
+            host
+        }
+    } else {
+        host
+    };
+
+    host_without_port.chars().any(|c| c.is_ascii_alphanumeric())
 }
 
 #[cfg(test)]

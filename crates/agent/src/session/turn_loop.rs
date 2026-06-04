@@ -422,8 +422,10 @@ enum LongTaskWatchOutcome {
 }
 
 const ADAPTIVE_LONG_TASK_PROFILE: &str = "adaptive";
+const INTERACTIVE_LONG_TASK_PROFILE: &str = "interactive";
 const ADAPTIVE_LONG_TASK_MAX_WAIT_MS: u64 = 3_900_000;
 const ADAPTIVE_LONG_TASK_MAX_INTERVAL_MS: u64 = 300_000;
+const INTERACTIVE_LONG_TASK_STALL_THRESHOLD: u32 = 2;
 
 struct LongTaskCandidate {
     session_id: String,
@@ -446,20 +448,8 @@ impl DeferredLongTask {
     }
 }
 
-fn parse_long_task_candidate(
-    tool_name: &str,
-    arguments: &str,
-    output: &str,
-) -> Option<LongTaskCandidate> {
+fn parse_long_task_candidate(tool_name: &str, output: &str) -> Option<LongTaskCandidate> {
     if tool_name != "exec_command" {
-        return None;
-    }
-    let args: serde_json::Value = serde_json::from_str(arguments).ok()?;
-    if args
-        .get("tty")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false)
-    {
         return None;
     }
     let value: serde_json::Value = serde_json::from_str(output).ok()?;
@@ -522,8 +512,7 @@ async fn maybe_watch_exec_long_task(
     local_tool_count: usize,
     mcp_tool_count: usize,
 ) -> LongTaskWatchOutcome {
-    let Some(candidate) = parse_long_task_candidate(tc.name(), tc.arguments(), &result.output)
-    else {
+    let Some(candidate) = parse_long_task_candidate(tc.name(), &result.output) else {
         return LongTaskWatchOutcome::Completed(result);
     };
 
@@ -700,7 +689,7 @@ async fn maybe_watch_exec_long_task(
             // Stall detection: if consecutive unchanged heartbeats exceed the
             // configured threshold, return control to the model so it can
             // decide whether to continue, terminate, or take another action.
-            let stall_threshold = config.get_long_task_stall_threshold();
+            let stall_threshold = long_task_stall_threshold(&candidate.profile, config);
             if stall_threshold > 0 && unchanged_heartbeats >= stall_threshold {
                 let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                 session.record_turn_event_entry(
@@ -731,7 +720,7 @@ async fn maybe_watch_exec_long_task(
                         "omitted_heartbeats": total_omitted_heartbeats,
                         "model_request_count_while_waiting": 0,
                         "output": truncate_tool_output(&output, tool_output_limit.saturating_mul(4)),
-                        "hint": "The long-running task has produced no output for an extended period. You may poll it again with write_stdin, terminate it, or take another action."
+                        "hint": long_task_stall_hint(&candidate.profile)
                     })
                     .to_string(),
                     runtime_events: Vec::new(),
@@ -813,6 +802,24 @@ pub(super) fn long_task_profile_max_wait(
 
 pub(super) fn long_task_profile_max_interval_ms(_profile: &str) -> u64 {
     ADAPTIVE_LONG_TASK_MAX_INTERVAL_MS
+}
+
+fn long_task_stall_threshold(profile: &str, config: &AgentConfig) -> u32 {
+    if profile == INTERACTIVE_LONG_TASK_PROFILE {
+        config
+            .get_long_task_stall_threshold()
+            .min(INTERACTIVE_LONG_TASK_STALL_THRESHOLD)
+    } else {
+        config.get_long_task_stall_threshold()
+    }
+}
+
+fn long_task_stall_hint(profile: &str) -> &'static str {
+    if profile == INTERACTIVE_LONG_TASK_PROFILE {
+        "The interactive terminal is still running but has stopped producing output. Inspect the latest terminal output and decide whether to poll again, send the required stdin with write_stdin, terminate it, or choose a non-interactive command."
+    } else {
+        "The long-running task has produced no output for an extended period. You may poll it again with write_stdin, terminate it, or take another action."
+    }
 }
 
 pub(super) fn next_long_task_interval_ms(profile: &str, current_ms: u64) -> u64 {

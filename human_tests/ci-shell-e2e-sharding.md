@@ -849,6 +849,61 @@
 - artifact 复核能定位原始失败为 macOS shard 1 中多个 Bifrost 进程被系统 `Killed: 9`，且 traffic DB 用例只留下 `Could not start mock server`，缺少 mock 详细日志。
 - 静态回归不启动 Bifrost、不使用 9900、不修改系统代理。
 
+### TC-CS-36: Agent history continue mock server 动态端口回传回归
+
+**操作步骤**：
+1. 对 history continue shell E2E 脚本执行语法检查：
+   ```bash
+   bash -n e2e-tests/tests/test_agent_chat_history_continue.sh
+   ```
+2. 静态检查脚本消费 CI shell 调度器端口，并由 Python mock server 绑定后回传真实端口：
+   ```bash
+   rg -n 'BIFROST_PORT=.*ADMIN_PORT|PROXY_PORT|MOCK_PORT_FILE|server_address|requested_port = .* if sys.argv\[1\] else 0' \
+     e2e-tests/tests/test_agent_chat_history_continue.sh
+   ```
+3. 使用已构建的 release binary 和外层注入端口真实执行 history continue 回归：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" \
+     ADMIN_PORT=18131 PROXY_PORT=18131 \
+     bash e2e-tests/tests/test_agent_chat_history_continue.sh
+   ```
+4. 复核本轮 CI 失败 artifact 原始根因：
+   ```bash
+   rg -n 'test_agent_chat_history_continue.sh|REQUEST_CONNECT_REFUSED|chat/completions|history-continue' \
+     /tmp/bifrost-ci-79345071063.log
+   ```
+
+**预期结果**：
+- 语法检查通过。
+- 静态检查显示脚本优先使用 `ADMIN_PORT` / `PROXY_PORT` 作为 Bifrost 端口，不再绕过 shell 调度器端口隔离。
+- 静态检查显示 mock server 在 Python 进程中以 `requested_port=0` 绑定时通过 `server.server_address[1]` 写回实际端口，脚本再用该端口配置 Agent `base_url`。
+- 真实执行输出 `[agent-chat-history-continue] PASS`，验证压缩后的历史恢复、计划恢复、续聊写回与外部 history path 拒绝。
+- 原始 artifact 复核能定位旧失败为 mock `/chat/completions` 连接拒绝，而不是 history 恢复业务断言失败。
+
+### TC-CS-37: CI 模式不收集 ASR/voice runtime shell E2E，本地 full-shell 保留
+
+**操作步骤**：
+1. 执行脚本语法检查：
+   ```bash
+   bash -n scripts/run_all_e2e.sh scripts/ci/run-e2e-shell.sh
+   ```
+2. 检查 CI full-shell 列表不包含 ASR/voice runtime 相关脚本：
+   ```bash
+   bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests \
+     | rg -n 'test_asr_|test_qwen3_asr_|test_voice_input_runtime\.sh|test_voice_wake_actions\.sh'
+   ```
+3. 检查本地 full-shell 列表仍保留代表性 ASR/voice runtime 脚本：
+   ```bash
+   bash scripts/run_all_e2e.sh --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests \
+     | rg -n 'test_asr_diarization_cli\.sh|test_qwen3_asr_local_server\.sh|test_voice_input_runtime\.sh|test_asr_voiceprint_enroll_cli\.sh'
+   ```
+
+**预期结果**：
+- 第 1 步语法检查通过。
+- 第 2 步 `rg` 无输出且退出码为 1，表示 CI 模式不会收集 ASR 解码、模型初始化、声纹/diarization、Qwen3 ASR 或 voice runtime shell E2E。
+- 第 3 步能输出代表性 ASR/voice runtime 脚本，表示这些能力仍可在本地 full-shell 真实验证。
+- 三个命令都只列出或检查脚本，不启动 Bifrost、不下载模型、不访问外部模型源、不使用 9900、不修改系统代理。
+
 ## 本轮执行记录
 
 测试日期：2026-05-09
@@ -881,6 +936,8 @@
 | TC-CS-33 | 通过 | 2026-05-29 本轮执行：`bash -n e2e-tests/tests/test_asr_task_cli.sh e2e-tests/tests/test_asr_diarization_cli.sh e2e-tests/tests/test_asr_model_autonomy.sh e2e-tests/tests/test_asr_voiceprint_enroll_cli.sh` 通过；`rg -n 'ADMIN_PORT="\$\{BIFROST_ASR_[A-Z_]+_E2E_PORT:-\$\{ADMIN_PORT:-18[0-9]+' ...` 显示四个 ASR CLI shell E2E 均优先使用显式 `BIFROST_ASR_*_E2E_PORT`，其次使用外层 `ADMIN_PORT`，最后使用本地默认固定端口；`rg -n 'Failed to connect to Bifrost admin API\|Invalid argument' /tmp/bifrost-ci-26643081691-mac-shard2/.e2e-reports/shell_test_asr_voiceprint_enroll_cli_sh.log` 复核原始失败为固定端口场景下 CLI finish enrollment 无法连接 admin API。执行 `SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost` 时发现并修复 `web/dist-gzip` stale 目录删除 `Directory not empty` 构建竞态；修复后 release 构建通过。随后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" ADMIN_PORT=19141 bash e2e-tests/tests/test_asr_voiceprint_enroll_cli.sh`，输出 `[asr-voiceprint-enroll-cli-e2e] ok`；真实执行使用临时数据目录、`--no-system-proxy` 与非 9900 端口。 |
 | TC-CS-34 | 通过 | 2026-06-04 本轮执行：`bash -n e2e-tests/tests/test_asr_diarization_cli.sh` 通过；`rg -n 'BIFROST_ASR_DIARIZATION_E2E_ONLINE\|skipping online model init\|diarization_ready' e2e-tests/tests/test_asr_diarization_cli.sh` 显示默认离线分支、显式联网开关和 ready 断言；`rg -n 'status code 429\|download diarization model' /tmp/bifrost-ci-26896054036-shard3/.e2e-reports/shell_test_asr_diarization_cli_sh.log` 复核原始 CI 失败为 HuggingFace 429。随后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" ADMIN_PORT=19143 bash e2e-tests/tests/test_asr_diarization_cli.sh`，输出 `skipping online model init` 与 `[asr-diarization-cli-e2e] ok`；真实链路启动 Bifrost、调用 CLI status、创建启用 diarization 的 ASR 任务，并在默认无模型资产时断言 `diarization_ready=false`。全程使用临时数据目录、`--no-system-proxy` 与非 9900 端口。 |
 | TC-CS-35 | 通过 | 2026-06-04 本轮执行：Ruby YAML 解析 `.github/workflows/ci.yml` 通过，确认 Linux `e2e-shell` 仍为 `BIFROST_E2E_SHELL_JOBS=4`，macOS `e2e-macos-shell` 降为 `2`；`bash -n e2e-tests/tests/test_traffic_db_e2e.sh` 通过；`rg -n 'traffic-db-mock-\|BIFROST_E2E_REPORT_DIR\|MOCK_LOG_FILE' e2e-tests/tests/test_traffic_db_e2e.sh` 显示 traffic DB mock 临时日志会复制到 report dir；`rg -n 'Killed: 9\|Could not start mock server' /tmp/bifrost-ci-26899628938-mac-shard1/.e2e-reports` 复核原始 macOS shard 1 失败包含多个 Bifrost `Killed: 9` 与 traffic DB `Could not start mock server`。该静态回归不启动 Bifrost，不使用 9900，不修改系统代理；完整 macOS shard 稳定性由推送后的 GitHub Actions run 验证。 |
+| TC-CS-36 | 通过 | 2026-06-03 本轮执行：CI run `26896844438` 的 `E2E Shell (Linux, shard 2/3)` 失败日志显示 `test_agent_chat_history_continue.sh` 命中 `REQUEST_CONNECT_REFUSED`，Bifrost 请求 `http://127.0.0.1:34663/chat/completions` 失败，根因为脚本绕过调度器端口且 mock server 先挑端口再绑定存在并发抢占窗口。修复后执行 `bash -n e2e-tests/tests/test_agent_chat_history_continue.sh` 通过；`rg -n 'BIFROST_PORT=.*ADMIN_PORT\|PROXY_PORT\|MOCK_PORT_FILE\|server_address\|requested_port = .* if sys.argv\\[1\\] else 0' e2e-tests/tests/test_agent_chat_history_continue.sh` 显示脚本消费 `ADMIN_PORT` / `PROXY_PORT`，并由 Python mock server 绑定后写回真实端口。随后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" ADMIN_PORT=18131 PROXY_PORT=18131 bash e2e-tests/tests/test_agent_chat_history_continue.sh`，输出 `skipping build, using .../target/release/bifrost` 与 `[agent-chat-history-continue] PASS`；真实执行使用临时数据目录、`--no-system-proxy` 与非 9900 端口。 |
+| TC-CS-37 | 通过 | 2026-06-04 本轮执行：`bash -n scripts/run_all_e2e.sh scripts/ci/run-e2e-shell.sh` 通过；`bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests \| rg -n 'test_asr_\|test_qwen3_asr_\|test_voice_input_runtime\.sh\|test_voice_wake_actions\.sh'` 无输出且退出码为 1，确认 CI 模式不收集 ASR/voice runtime shell E2E；`bash scripts/run_all_e2e.sh --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests \| rg -n 'test_asr_diarization_cli\.sh\|test_qwen3_asr_local_server\.sh\|test_voice_input_runtime\.sh\|test_asr_voiceprint_enroll_cli\.sh'` 输出代表性脚本，确认本地 full-shell 仍可验证。列表命令不启动 Bifrost、不下载模型、不访问外部模型源、不使用 9900、不修改系统代理。 |
 
 ## 清理步骤
 
