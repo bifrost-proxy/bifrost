@@ -40,6 +40,7 @@ use crate::process::{
 const ASYNC_TRAFFIC_BUFFER_SIZE: usize = 10000;
 const MAX_PORT_INCREMENT_ATTEMPTS: u16 = 64;
 const PORT_REBIND_OLD_LISTENER_GRACE_PERIOD: Duration = Duration::from_millis(250);
+const SYSTEM_PROXY_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 
 fn parse_yes_no_answer(input: &str) -> Option<bool> {
     match input.trim().to_ascii_lowercase().as_str() {
@@ -248,6 +249,7 @@ struct SystemProxyReconcileConfig {
     proxy_port: u16,
     system_proxy_bypass: String,
     enabled_flag: Arc<AtomicBool>,
+    stop_flag: Arc<AtomicBool>,
     daemon_mode: bool,
 }
 
@@ -260,6 +262,7 @@ fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
         proxy_port,
         system_proxy_bypass,
         enabled_flag,
+        stop_flag,
         daemon_mode,
     } = config;
 
@@ -284,65 +287,79 @@ fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
                 return;
             }
 
-            let mut manager = system_proxy_manager.blocking_write();
-            let result = manager.enable(&proxy_host, proxy_port, Some(&system_proxy_bypass));
+            while !stop_flag.load(Ordering::Acquire) {
+                let mut manager = system_proxy_manager.blocking_write();
+                let result = manager.enable(&proxy_host, proxy_port, Some(&system_proxy_bypass));
 
-            let final_result = match &result {
-                Ok(()) => result,
-                Err(error) => {
-                    let msg = error.to_string();
-                    if msg.contains("RequiresAdmin") {
-                        #[cfg(target_os = "macos")]
-                        {
-                            if daemon_mode {
-                                println!("System proxy requires admin privileges; applying asynchronously via GUI authorization if approved...");
-                            } else {
-                                println!("System proxy requires admin privileges, requesting authorization asynchronously...");
+                let final_result = match &result {
+                    Ok(()) => result,
+                    Err(error) => {
+                        let msg = error.to_string();
+                        if msg.contains("RequiresAdmin") {
+                            #[cfg(target_os = "macos")]
+                            {
+                                if daemon_mode {
+                                    println!("System proxy requires admin privileges; applying asynchronously via GUI authorization if approved...");
+                                } else {
+                                    println!("System proxy requires admin privileges, requesting authorization asynchronously...");
+                                }
+                                manager.enable_with_gui_auth(
+                                    &proxy_host,
+                                    proxy_port,
+                                    Some(&system_proxy_bypass),
+                                )
                             }
-                            manager.enable_with_gui_auth(
-                                &proxy_host,
-                                proxy_port,
-                                Some(&system_proxy_bypass),
-                            )
-                        }
-                        #[cfg(not(target_os = "macos"))]
-                        {
+                            #[cfg(not(target_os = "macos"))]
+                            {
+                                result
+                            }
+                        } else {
                             result
                         }
-                    } else {
-                        result
                     }
-                }
-            };
+                };
 
-            match final_result {
-                Ok(()) => {
-                    enabled_flag.store(true, Ordering::Release);
-                    tracing::info!(
-                        target: "bifrost_cli::startup",
-                        elapsed_ms = started_at.elapsed().as_millis() as u64,
-                        host = %proxy_host,
-                        port = proxy_port,
-                        "system proxy applied asynchronously"
-                    );
-                }
-                Err(error) => {
-                    let msg = error.to_string();
-                    if msg.contains("UserCancelled") {
-                        println!("System proxy not enabled (authorization cancelled)");
-                    } else if msg.contains("RequiresAdmin") && daemon_mode {
-                        println!("System proxy requires administrator privileges; daemon will continue without changing system proxy. You can toggle it later via CLI or Admin UI.");
-                    } else if msg.contains("RequiresAdmin") {
-                        println!("System proxy requires administrator privileges and was not enabled.");
-                    } else {
-                        eprintln!("Failed to enable system proxy asynchronously: {}", error);
+                match final_result {
+                    Ok(()) => {
+                        enabled_flag.store(true, Ordering::Release);
+                        tracing::info!(
+                            target: "bifrost_cli::startup",
+                            elapsed_ms = started_at.elapsed().as_millis() as u64,
+                            host = %proxy_host,
+                            port = proxy_port,
+                            "system proxy applied or reconciled"
+                        );
                     }
-                    tracing::warn!(
-                        target: "bifrost_cli::startup",
-                        error = %error,
-                        elapsed_ms = started_at.elapsed().as_millis() as u64,
-                        "system proxy reconcile failed"
-                    );
+                    Err(error) => {
+                        let msg = error.to_string();
+                        if msg.contains("UserCancelled") {
+                            println!("System proxy not enabled (authorization cancelled)");
+                        } else if msg.contains("RequiresAdmin") && daemon_mode {
+                            println!("System proxy requires administrator privileges; daemon will continue without changing system proxy. You can toggle it later via CLI or Admin UI.");
+                        } else if msg.contains("RequiresAdmin") {
+                            println!("System proxy requires administrator privileges and was not enabled.");
+                        } else {
+                            eprintln!("Failed to enable system proxy asynchronously: {}", error);
+                        }
+                        tracing::warn!(
+                            target: "bifrost_cli::startup",
+                            error = %error,
+                            elapsed_ms = started_at.elapsed().as_millis() as u64,
+                            "system proxy reconcile failed"
+                        );
+                        if msg.contains("UserCancelled") || msg.contains("RequiresAdmin") {
+                            return;
+                        }
+                    }
+                }
+
+                drop(manager);
+                let sleep_until = Instant::now() + SYSTEM_PROXY_RECONCILE_INTERVAL;
+                while Instant::now() < sleep_until {
+                    if stop_flag.load(Ordering::Acquire) {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_secs(1));
                 }
             }
         });
@@ -457,6 +474,31 @@ fn abort_listener_after_grace_period(handle: tokio::task::JoinHandle<bifrost_cor
     });
 }
 
+fn recover_proxy_state_before_start(bifrost_dir: &std::path::Path) {
+    tracing::info!(
+        target: "bifrost_cli::startup",
+        data_dir = %bifrost_dir.display(),
+        "checking for stale system proxy state before startup"
+    );
+    if let Err(error) = bifrost_core::SystemProxyManager::recover_from_crash(bifrost_dir) {
+        eprintln!("Failed to recover system proxy from previous crash: {error}");
+        tracing::warn!(
+            error = %error,
+            data_dir = %bifrost_dir.display(),
+            "[SYSTEM_PROXY] Failed to recover system proxy before startup"
+        );
+    }
+
+    if let Err(error) = bifrost_core::ShellProxyManager::recover_from_crash(bifrost_dir) {
+        eprintln!("Failed to recover CLI proxy from previous crash: {error}");
+        tracing::warn!(
+            error = %error,
+            data_dir = %bifrost_dir.display(),
+            "Failed to recover CLI proxy before startup"
+        );
+    }
+}
+
 async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
     {
@@ -483,22 +525,78 @@ async fn wait_for_shutdown_signal() {
 
 struct SystemProxyRestoreGuard {
     system_proxy_manager: Arc<tokio::sync::RwLock<bifrost_core::SystemProxyManager>>,
+    stop_flag: Arc<AtomicBool>,
 }
 
 impl SystemProxyRestoreGuard {
     fn new(
         system_proxy_manager: Arc<tokio::sync::RwLock<bifrost_core::SystemProxyManager>>,
+        stop_flag: Arc<AtomicBool>,
     ) -> Self {
         Self {
             system_proxy_manager,
+            stop_flag,
         }
     }
 }
 
 impl Drop for SystemProxyRestoreGuard {
     fn drop(&mut self) {
+        tracing::info!(
+            target: "bifrost_cli::shutdown",
+            "system proxy restore guard triggered; stopping reconcile before restore"
+        );
+        self.stop_flag.store(true, Ordering::Release);
         if let Err(e) = self.system_proxy_manager.blocking_write().restore() {
             eprintln!("Failed to restore system proxy: {}", e);
+            tracing::warn!(
+                target: "bifrost_cli::shutdown",
+                error = %e,
+                "system proxy restore guard failed to restore proxy"
+            );
+        } else {
+            tracing::info!(
+                target: "bifrost_cli::shutdown",
+                "system proxy restore guard completed"
+            );
+        }
+    }
+}
+
+async fn restore_system_proxy_on_shutdown(
+    system_proxy_manager: &Arc<tokio::sync::RwLock<bifrost_core::SystemProxyManager>>,
+    enabled_flag: &Arc<AtomicBool>,
+    stop_flag: &Arc<AtomicBool>,
+    context: &'static str,
+) {
+    let started_at = Instant::now();
+    tracing::info!(
+        target: "bifrost_cli::shutdown",
+        context,
+        enabled_flag = enabled_flag.load(Ordering::Acquire),
+        "system proxy shutdown restore starting; stopping reconcile first"
+    );
+    stop_flag.store(true, Ordering::Release);
+    let mut manager = system_proxy_manager.write().await;
+    match manager.restore() {
+        Ok(()) => {
+            enabled_flag.store(false, Ordering::Release);
+            tracing::info!(
+                target: "bifrost_cli::shutdown",
+                context,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                "system proxy shutdown restore completed"
+            );
+        }
+        Err(error) => {
+            eprintln!("Failed to restore system proxy during shutdown: {error}");
+            tracing::warn!(
+                target: "bifrost_cli::shutdown",
+                context,
+                error = %error,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                "failed to restore system proxy"
+            );
         }
     }
 }
@@ -555,6 +653,10 @@ pub fn run_start(
         }
     }
 
+    let bifrost_dir = get_bifrost_dir()?;
+    set_data_dir(bifrost_dir.clone());
+    recover_proxy_state_before_start(&bifrost_dir);
+
     if !skip_cert_check {
         check_and_install_certificate(CertificateCheckOptions {
             auto_yes: yes,
@@ -568,9 +670,6 @@ pub fn run_start(
 
     #[cfg(not(unix))]
     let _ = (&log_dir, log_retention_days);
-
-    let bifrost_dir = get_bifrost_dir()?;
-    set_data_dir(bifrost_dir.clone());
 
     let config_manager = ConfigManager::new(bifrost_dir.clone())?;
     let stored_config = futures::executor::block_on(config_manager.config());
@@ -850,13 +949,17 @@ pub fn run_foreground(
     let system_proxy_manager = std::sync::Arc::new(tokio::sync::RwLock::new(
         bifrost_core::SystemProxyManager::new(bifrost_dir.clone()),
     ));
-    let _system_proxy_restore_guard = SystemProxyRestoreGuard::new(system_proxy_manager.clone());
     let mut shell_proxy_manager = bifrost_core::ShellProxyManager::new(bifrost_dir.clone());
     if let Err(e) = bifrost_core::ShellProxyManager::recover_from_crash(&bifrost_dir) {
         tracing::warn!("Failed to recover CLI proxy from previous crash: {}", e);
     }
 
     let system_proxy_enabled = Arc::new(AtomicBool::new(false));
+    let system_proxy_reconcile_stop = Arc::new(AtomicBool::new(false));
+    let _system_proxy_restore_guard = SystemProxyRestoreGuard::new(
+        system_proxy_manager.clone(),
+        system_proxy_reconcile_stop.clone(),
+    );
 
     let mut cli_proxy_enabled = false;
     let cli_proxy_no_proxy =
@@ -1396,6 +1499,7 @@ pub fn run_foreground(
                 proxy_port: current_port,
                 system_proxy_bypass: system_proxy_bypass.clone(),
                 enabled_flag: system_proxy_enabled.clone(),
+                stop_flag: system_proxy_reconcile_stop.clone(),
                 daemon_mode: false,
             });
 
@@ -1404,11 +1508,29 @@ pub fn run_foreground(
             loop {
                 tokio::select! {
                     listener_result = &mut listener_task => {
+                        if enable_system_proxy || system_proxy_enabled.load(Ordering::Acquire) {
+                            restore_system_proxy_on_shutdown(
+                                &system_proxy_manager,
+                                &system_proxy_enabled,
+                                &system_proxy_reconcile_stop,
+                                "foreground listener exit",
+                            )
+                            .await;
+                        }
                         return Err(listener_task_error(listener_result));
                     },
                     _ = &mut shutdown_signal => {
                         info!("Received shutdown signal");
                         println!("\nShutting down...");
+                        if enable_system_proxy || system_proxy_enabled.load(Ordering::Acquire) {
+                            restore_system_proxy_on_shutdown(
+                                &system_proxy_manager,
+                                &system_proxy_enabled,
+                                &system_proxy_reconcile_stop,
+                                "foreground signal",
+                            )
+                            .await;
+                        }
                         break;
                     },
                     request = port_rebind_rx.recv() => {
@@ -1550,6 +1672,7 @@ pub fn run_foreground(
             eprintln!("Failed to restore CLI proxy: {}", e);
         }
     }
+    system_proxy_reconcile_stop.store(true, Ordering::Release);
     remove_pid()?;
     println!("Bifrost proxy stopped.");
 
@@ -1812,6 +1935,7 @@ pub fn run_daemon(
                 tracing::warn!("Failed to recover CLI proxy from previous crash: {}", e);
             }
             let system_proxy_enabled = Arc::new(AtomicBool::new(false));
+            let system_proxy_reconcile_stop = Arc::new(AtomicBool::new(false));
 
             let mut cli_proxy_enabled = false;
             let cli_proxy_no_proxy =
@@ -1855,6 +1979,15 @@ pub fn run_daemon(
                         // 这里同时写到 stdout，确保 stop/测试能在 bifrost.log 中观察到“优雅退出”。
                         info!("Received shutdown signal");
                         println!("Received shutdown signal");
+                        if enable_system_proxy || system_proxy_enabled.load(Ordering::Acquire) {
+                            restore_system_proxy_on_shutdown(
+                                &system_proxy_manager,
+                                &system_proxy_enabled,
+                                &system_proxy_reconcile_stop,
+                                "daemon signal",
+                            )
+                            .await;
+                        }
                         Ok(())
                     }
                     result = async {
@@ -2162,6 +2295,7 @@ pub fn run_daemon(
                         proxy_port: system_proxy_port,
                         system_proxy_bypass: system_proxy_bypass.clone(),
                         enabled_flag: system_proxy_enabled.clone(),
+                        stop_flag: system_proxy_reconcile_stop.clone(),
                         daemon_mode: true,
                     });
 
@@ -2186,6 +2320,15 @@ pub fn run_daemon(
                     drop(ready_tx);
 
                     let listener_result = (&mut listener_task).await;
+                    if enable_system_proxy || system_proxy_enabled.load(Ordering::Acquire) {
+                        restore_system_proxy_on_shutdown(
+                            &system_proxy_manager,
+                            &system_proxy_enabled,
+                            &system_proxy_reconcile_stop,
+                            "daemon listener exit",
+                        )
+                        .await;
+                    }
 
                     rules_watcher_task.abort();
                     Err(listener_task_error(listener_result))
@@ -2212,6 +2355,7 @@ pub fn run_daemon(
                     eprintln!("Failed to restore CLI proxy: {}", e);
                 }
             }
+            system_proxy_reconcile_stop.store(true, Ordering::Release);
             if let Err(e) = system_proxy_manager.blocking_write().restore() {
                 eprintln!("Failed to restore system proxy: {}", e);
             }

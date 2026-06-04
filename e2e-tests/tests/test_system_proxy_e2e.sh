@@ -25,6 +25,7 @@ TEST_DATA_DIR=""
 RULES_TEMPLATE="${PROJECT_DIR}/e2e-tests/rules/system_proxy/basic_forwarding.txt"
 PROXY_PID=""
 ECHO_PID=""
+BLOCKER_PID=""
 PLATFORM="$(uname -s)"
 
 passed=0
@@ -37,6 +38,10 @@ cleanup() {
     if [[ -n "$ECHO_PID" ]]; then
         kill_pid "$ECHO_PID"
         wait_pid "$ECHO_PID"
+    fi
+    if [[ -n "$BLOCKER_PID" ]]; then
+        kill_pid "$BLOCKER_PID"
+        wait_pid "$BLOCKER_PID"
     fi
     if is_windows; then kill_bifrost_on_port "$PROXY_PORT"; fi
     if [[ -n "$TEST_DATA_DIR" ]] && [[ -d "$TEST_DATA_DIR" ]]; then
@@ -87,6 +92,50 @@ start_echo() {
     python3 "${PROJECT_DIR}/e2e-tests/mock_servers/http_echo_server.py" "${ECHO_HTTP_PORT}" &
     ECHO_PID=$!
     sleep 1
+}
+
+start_port_blocker() {
+    local port="$1"
+    python3 - "$port" > "${TEST_DATA_DIR}/port-blocker.log" 2>&1 <<'PY' &
+import socket
+import sys
+import time
+
+port = int(sys.argv[1])
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind(("127.0.0.1", port))
+sock.listen(1)
+print("ready", flush=True)
+try:
+    while True:
+        time.sleep(1)
+finally:
+    sock.close()
+PY
+    BLOCKER_PID=$!
+
+    local waited=0
+    while [[ $waited -lt 30 ]]; do
+        if grep -q "ready" "${TEST_DATA_DIR}/port-blocker.log" 2>/dev/null; then
+            return 0
+        fi
+        if ! kill -0 "$BLOCKER_PID" 2>/dev/null; then
+            cat "${TEST_DATA_DIR}/port-blocker.log" 2>/dev/null || true
+            return 1
+        fi
+        sleep 0.2
+        waited=$((waited + 1))
+    done
+    return 1
+}
+
+stop_port_blocker() {
+    if [[ -n "$BLOCKER_PID" ]]; then
+        kill_pid "$BLOCKER_PID"
+        wait_pid "$BLOCKER_PID"
+        BLOCKER_PID=""
+    fi
 }
 
 stop_proxy() {
@@ -235,6 +284,14 @@ macos_clear_http_proxy() {
     local svc
     while IFS= read -r svc; do
         networksetup -setwebproxystate "$svc" off >/dev/null 2>&1 || return 1
+    done < <(macos_find_services)
+}
+
+macos_clear_web_and_secure_proxy() {
+    local svc
+    while IFS= read -r svc; do
+        networksetup -setwebproxystate "$svc" off >/dev/null 2>&1 || return 1
+        networksetup -setsecurewebproxystate "$svc" off >/dev/null 2>&1 || return 1
     done < <(macos_find_services)
 }
 
@@ -444,6 +501,36 @@ test_restore_on_exit() {
     esac
 }
 
+test_sleep_wake_style_reconcile() {
+    stop_proxy
+    start_proxy_with_system_proxy
+    case "$PLATFORM" in
+        Darwin)
+            if ! macos_wait_proxy_enabled "127.0.0.1" "$PROXY_PORT" 45; then
+                _log_fail "macOS: 睡眠恢复收敛回归准备失败" "系统代理先指向 127.0.0.1:${PROXY_PORT}" "$(macos_proxy_snapshot)"
+                failed=$((failed + 1))
+                return
+            fi
+            if ! macos_clear_web_and_secure_proxy; then
+                _log_fail "macOS: 无法模拟睡眠恢复后的系统代理漂移" "关闭 Web/Secure Web 代理状态" "$(macos_proxy_snapshot)"
+                failed=$((failed + 1))
+                return
+            fi
+            if macos_wait_proxy_enabled "127.0.0.1" "$PROXY_PORT" 75; then
+                _log_pass "macOS: 睡眠恢复式系统代理漂移后已重新收敛到 Bifrost"
+                passed=$((passed + 1))
+            else
+                _log_fail "macOS: 睡眠恢复式系统代理漂移后未重新收敛" "127.0.0.1:${PROXY_PORT}" "$(macos_proxy_snapshot)"
+                failed=$((failed + 1))
+            fi
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            _log_pass "Windows: 睡眠恢复式系统代理漂移回归暂不修改注册表，跳过真实系统写入"
+            passed=$((passed + 1))
+            ;;
+    esac
+}
+
 test_crash_recovery() {
     stop_proxy
     start_proxy_with_system_proxy
@@ -497,6 +584,77 @@ test_crash_recovery() {
     esac
 }
 
+test_crash_recovery_runs_before_start_failure() {
+    stop_proxy
+    start_proxy_with_system_proxy
+    if [[ -n "$PROXY_PID" ]]; then
+        kill_pid_force "$PROXY_PID"
+        wait_pid "$PROXY_PID"
+    fi
+    PROXY_PID=""
+    rm -f "${TEST_DATA_DIR}/bifrost.pid" "${TEST_DATA_DIR}/runtime.json" 2>/dev/null || true
+    sleep 2
+
+    case "$PLATFORM" in
+        Darwin)
+            if ! macos_wait_proxy_enabled "127.0.0.1" "$PROXY_PORT" 45; then
+                _log_fail "macOS: 启动失败前恢复回归准备失败" "崩溃后系统代理仍指向 127.0.0.1:${PROXY_PORT}" "$(macos_proxy_snapshot)"
+                failed=$((failed + 1))
+                return
+            fi
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            if ! windows_wait_proxy_enabled "127.0.0.1:${PROXY_PORT}" 45; then
+                _log_fail "Windows: 启动失败前恢复回归准备失败" "127.0.0.1:${PROXY_PORT}" "$(windows_proxy_server)"
+                failed=$((failed + 1))
+                return
+            fi
+            ;;
+    esac
+
+    if ! start_port_blocker "$PROXY_PORT"; then
+        _log_fail "端口占用夹具启动失败" "127.0.0.1:${PROXY_PORT} 被占用" "$(cat "${TEST_DATA_DIR}/port-blocker.log" 2>/dev/null || true)"
+        failed=$((failed + 1))
+        return
+    fi
+
+    export BIFROST_DATA_DIR="${TEST_DATA_DIR}"
+    local output
+    output=$("$BIFROST_BIN" --port "${PROXY_PORT}" start \
+        --skip-cert-check --unsafe-ssl \
+        --rules-file "${TEST_DATA_DIR}/.bifrost/rules/test.txt" \
+        --no-system-proxy 2>&1)
+    local code=$?
+    stop_port_blocker
+
+    if [[ "$code" -eq 0 ]]; then
+        _log_fail "启动失败前恢复回归未触发端口失败" "start 因端口占用非零退出" "$output"
+        failed=$((failed + 1))
+        return
+    fi
+
+    case "$PLATFORM" in
+        Darwin)
+            if wait_for_condition 45 1 macos_check_proxy_not_pointing_to "127.0.0.1" "$PROXY_PORT"; then
+                _log_pass "macOS: 启动失败前已同步清理崩溃残留系统代理"
+                passed=$((passed + 1))
+            else
+                _log_fail "macOS: 启动失败前未清理崩溃残留系统代理" "不指向 127.0.0.1:${PROXY_PORT}" "output=${output}; snapshot=$(macos_proxy_snapshot)"
+                failed=$((failed + 1))
+            fi
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            if windows_wait_proxy_disabled 45; then
+                _log_pass "Windows: 启动失败前已同步清理崩溃残留系统代理"
+                passed=$((passed + 1))
+            else
+                _log_fail "Windows: 启动失败前未清理崩溃残留系统代理" "Disabled" "output=${output}; proxy=$(windows_proxy_server)"
+                failed=$((failed + 1))
+            fi
+            ;;
+    esac
+}
+
 main() {
     build_bifrost || { echo "编译失败"; exit 1; }
     setup_env
@@ -515,7 +673,9 @@ main() {
     test_disable_on_startup
     test_external_proxy_not_disabled_without_bifrost_ownership
     test_restore_on_exit
+    test_sleep_wake_style_reconcile
     test_crash_recovery
+    test_crash_recovery_runs_before_start_failure
 
     print_test_summary || exit 1
 }
