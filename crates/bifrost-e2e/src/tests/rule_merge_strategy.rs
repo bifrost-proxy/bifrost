@@ -2,6 +2,15 @@ use crate::curl::CurlCommand;
 use crate::mock::EnhancedMockServer;
 use crate::proxy::ProxyInstance;
 use crate::runner::TestCase;
+use std::time::Duration;
+
+const START_PROXY_MAX_ATTEMPTS: usize = 10;
+
+macro_rules! start_proxy_with_rules {
+    ($($rule:expr),+ $(,)?) => {{
+        start_proxy_with_owned_rules(vec![$($rule.to_string()),+]).await
+    }};
+}
 
 pub fn get_all_tests() -> Vec<TestCase> {
     vec![
@@ -104,6 +113,26 @@ pub fn get_all_tests() -> Vec<TestCase> {
     ]
 }
 
+async fn start_proxy_with_owned_rules(rules: Vec<String>) -> Result<(u16, ProxyInstance), String> {
+    for attempt in 1..=START_PROXY_MAX_ATTEMPTS {
+        let port = portpicker::pick_unused_port().ok_or("Failed to pick unused port")?;
+        let rule_refs: Vec<&str> = rules.iter().map(String::as_str).collect();
+        match ProxyInstance::start(port, rule_refs).await {
+            Ok(proxy) => return Ok((port, proxy)),
+            Err(e) if is_bind_race(&e.to_string()) && attempt < START_PROXY_MAX_ATTEMPTS => {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(e) => return Err(format!("Failed to start proxy: {e}")),
+        }
+    }
+
+    Err("Failed to start proxy after retrying port bind races".to_string())
+}
+
+fn is_bind_race(error: &str) -> bool {
+    error.contains("Failed to bind") || error.contains("already listening on this port")
+}
+
 async fn test_merge_host_first_match_wins_e2e() -> Result<(), String> {
     let mock1 = EnhancedMockServer::start().await;
     mock1.set_response(200, "first_server_wins");
@@ -111,16 +140,10 @@ async fn test_merge_host_first_match_wins_e2e() -> Result<(), String> {
     let mock2 = EnhancedMockServer::start().await;
     mock2.set_response(200, "second_server_loses");
 
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![
-            &format!("merge.test host://127.0.0.1:{}", mock1.port),
-            &format!("merge.test host://127.0.0.1:{}", mock2.port),
-        ],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_rules!(
+        format!("merge.test host://127.0.0.1:{}", mock1.port),
+        format!("merge.test host://127.0.0.1:{}", mock2.port),
+    )?;
 
     _proxy.wait_for_ready().await?;
 
@@ -142,16 +165,10 @@ async fn test_merge_host_with_passthrough_e2e() -> Result<(), String> {
     let mock = EnhancedMockServer::start().await;
     mock.set_response(200, "should_not_reach");
 
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![
-            "merge-pt.test file://(passthrough_active)",
-            &format!("merge-pt.test host://127.0.0.1:{}", mock.port),
-        ],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_rules!(
+        "merge-pt.test file://(passthrough_active)",
+        format!("merge-pt.test host://127.0.0.1:{}", mock.port),
+    )?;
 
     _proxy.wait_for_ready().await?;
 
@@ -170,16 +187,10 @@ async fn test_merge_host_with_passthrough_e2e() -> Result<(), String> {
 }
 
 async fn test_merge_mock_file_first_wins_e2e() -> Result<(), String> {
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![
-            "merge-file.test file://(mock_content_from_file)",
-            "merge-file.test resHeaders://X-Source=file-mock",
-        ],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_rules!(
+        "merge-file.test file://(mock_content_from_file)",
+        "merge-file.test resHeaders://X-Source=file-mock",
+    )?;
 
     _proxy.wait_for_ready().await?;
 
@@ -200,17 +211,11 @@ async fn test_merge_mock_file_first_wins_e2e() -> Result<(), String> {
 async fn test_merge_scalar_method_single_match_e2e() -> Result<(), String> {
     let mock = EnhancedMockServer::start().await;
 
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![
-            &format!("merge-method.test host://127.0.0.1:{}", mock.port),
-            "merge-method.test method://PUT",
-            "merge-method.test method://DELETE",
-        ],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_rules!(
+        format!("merge-method.test host://127.0.0.1:{}", mock.port),
+        "merge-method.test method://PUT",
+        "merge-method.test method://DELETE",
+    )?;
 
     _proxy.wait_for_ready().await?;
 
@@ -231,17 +236,11 @@ async fn test_merge_scalar_method_single_match_e2e() -> Result<(), String> {
 async fn test_merge_scalar_ua_single_match_e2e() -> Result<(), String> {
     let mock = EnhancedMockServer::start().await;
 
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![
-            &format!("merge-ua.test host://127.0.0.1:{}", mock.port),
-            "merge-ua.test ua://FirstAgent/1.0",
-            "merge-ua.test ua://SecondAgent/2.0",
-        ],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_rules!(
+        format!("merge-ua.test host://127.0.0.1:{}", mock.port),
+        "merge-ua.test ua://FirstAgent/1.0",
+        "merge-ua.test ua://SecondAgent/2.0",
+    )?;
 
     _proxy.wait_for_ready().await?;
 
@@ -260,16 +259,10 @@ async fn test_merge_scalar_ua_single_match_e2e() -> Result<(), String> {
 }
 
 async fn test_merge_scalar_statuscode_e2e() -> Result<(), String> {
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![
-            "merge-status.test file://(custom_body)",
-            "merge-status.test statusCode://201",
-        ],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_rules!(
+        "merge-status.test file://(custom_body)",
+        "merge-status.test statusCode://201",
+    )?;
 
     _proxy.wait_for_ready().await?;
 
@@ -290,17 +283,11 @@ async fn test_merge_scalar_statuscode_e2e() -> Result<(), String> {
 async fn test_merge_reqheaders_different_keys_merge_e2e() -> Result<(), String> {
     let mock = EnhancedMockServer::start().await;
 
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![
-            &format!("merge-reqh.test host://127.0.0.1:{}", mock.port),
-            "merge-reqh.test reqHeaders://X-First-Header=alpha",
-            "merge-reqh.test reqHeaders://X-Second-Header=beta",
-        ],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_rules!(
+        format!("merge-reqh.test host://127.0.0.1:{}", mock.port),
+        "merge-reqh.test reqHeaders://X-First-Header=alpha",
+        "merge-reqh.test reqHeaders://X-Second-Header=beta",
+    )?;
 
     _proxy.wait_for_ready().await?;
 
@@ -323,17 +310,11 @@ async fn test_merge_resheaders_different_keys_merge_e2e() -> Result<(), String> 
     let mock = EnhancedMockServer::start().await;
     mock.set_response(200, "ok");
 
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![
-            &format!("merge-resh.test host://127.0.0.1:{}", mock.port),
-            "merge-resh.test resHeaders://X-Res-Alpha=one",
-            "merge-resh.test resHeaders://X-Res-Beta=two",
-        ],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_rules!(
+        format!("merge-resh.test host://127.0.0.1:{}", mock.port),
+        "merge-resh.test resHeaders://X-Res-Alpha=one",
+        "merge-resh.test resHeaders://X-Res-Beta=two",
+    )?;
 
     _proxy.wait_for_ready().await?;
 
@@ -356,17 +337,11 @@ async fn test_merge_body_last_wins_e2e() -> Result<(), String> {
     let mock = EnhancedMockServer::start().await;
     mock.set_response(200, "original_body");
 
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![
-            &format!("merge-body.test host://127.0.0.1:{}", mock.port),
-            "merge-body.test resBody://(first_override)",
-            "merge-body.test resBody://(last_override_wins)",
-        ],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_rules!(
+        format!("merge-body.test host://127.0.0.1:{}", mock.port),
+        "merge-body.test resBody://(first_override)",
+        "merge-body.test resBody://(last_override_wins)",
+    )?;
 
     _proxy.wait_for_ready().await?;
 
@@ -388,16 +363,10 @@ async fn test_merge_req_replace_accumulate_e2e() -> Result<(), String> {
     let mock = EnhancedMockServer::start().await;
     mock.set_response(200, "ok");
 
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![&format!(
-            "merge-reqrepl.test host://127.0.0.1:{} reqReplace://aaa=bbb reqReplace://ccc=ddd",
-            mock.port
-        )],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_rules!(format!(
+        "merge-reqrepl.test host://127.0.0.1:{} reqReplace://aaa=bbb reqReplace://ccc=ddd",
+        mock.port
+    ),)?;
 
     _proxy.wait_for_ready().await?;
 
@@ -435,17 +404,11 @@ async fn test_merge_res_cors_last_wins_e2e() -> Result<(), String> {
     let mock = EnhancedMockServer::start().await;
     mock.set_response(200, "ok");
 
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![
-            &format!("merge-cors.test host://127.0.0.1:{}", mock.port),
-            "merge-cors.test resCors://http://first.example.com",
-            "merge-cors.test resCors://http://last.example.com",
-        ],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_rules!(
+        format!("merge-cors.test host://127.0.0.1:{}", mock.port),
+        "merge-cors.test resCors://http://first.example.com",
+        "merge-cors.test resCors://http://last.example.com",
+    )?;
 
     _proxy.wait_for_ready().await?;
 
@@ -468,18 +431,12 @@ async fn test_merge_forward_with_multiple_modifiers_e2e() -> Result<(), String> 
     let mock = EnhancedMockServer::start().await;
     mock.set_response(200, "forwarded_with_mods");
 
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![
-            &format!("merge-fwd.test host://127.0.0.1:{}", mock.port),
-            "merge-fwd.test reqHeaders://X-Forwarded-Tag=merge-test",
-            "merge-fwd.test resHeaders://X-Proxy-Applied=true",
-            "merge-fwd.test urlParams://(trace_id:abc123)",
-        ],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_rules!(
+        format!("merge-fwd.test host://127.0.0.1:{}", mock.port),
+        "merge-fwd.test reqHeaders://X-Forwarded-Tag=merge-test",
+        "merge-fwd.test resHeaders://X-Proxy-Applied=true",
+        "merge-fwd.test urlParams://(trace_id:abc123)",
+    )?;
 
     _proxy.wait_for_ready().await?;
 
@@ -511,17 +468,11 @@ async fn test_merge_forward_with_multiple_modifiers_e2e() -> Result<(), String> 
 async fn test_merge_cookies_accumulate_e2e() -> Result<(), String> {
     let mock = EnhancedMockServer::start().await;
 
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![
-            &format!("merge-cookie.test host://127.0.0.1:{}", mock.port),
-            "merge-cookie.test reqCookies://session_id=abc111",
-            "merge-cookie.test reqCookies://tracking_id=xyz999",
-        ],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_rules!(
+        format!("merge-cookie.test host://127.0.0.1:{}", mock.port),
+        "merge-cookie.test reqCookies://session_id=abc111",
+        "merge-cookie.test reqCookies://tracking_id=xyz999",
+    )?;
 
     _proxy.wait_for_ready().await?;
 
@@ -541,13 +492,9 @@ async fn test_merge_cookies_accumulate_e2e() -> Result<(), String> {
 }
 
 async fn test_merge_redirect_with_status_e2e() -> Result<(), String> {
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec!["merge-redir.test redirect://301:http://target.example.com/landing"],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_rules!(
+        "merge-redir.test redirect://301:http://target.example.com/landing"
+    )?;
 
     _proxy.wait_for_ready().await?;
 
@@ -569,16 +516,10 @@ async fn test_merge_tls_intercept_e2e() -> Result<(), String> {
     let mock = EnhancedMockServer::start().await;
     mock.set_response(200, "tls_intercepted_ok");
 
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![
-            "*.merge-tls.test tlsIntercept://",
-            &format!("merge-tls.test host://127.0.0.1:{}", mock.port),
-        ],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_rules!(
+        "*.merge-tls.test tlsIntercept://",
+        format!("merge-tls.test host://127.0.0.1:{}", mock.port),
+    )?;
 
     _proxy.wait_for_ready().await?;
 
@@ -600,17 +541,11 @@ async fn test_merge_tls_intercept_e2e() -> Result<(), String> {
 async fn test_merge_reqheaders_same_key_override_e2e() -> Result<(), String> {
     let mock = EnhancedMockServer::start().await;
 
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![
-            &format!("merge-sameh.test host://127.0.0.1:{}", mock.port),
-            "merge-sameh.test reqHeaders://X-Same-Key=first",
-            "merge-sameh.test reqHeaders://X-Same-Key=second",
-        ],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_rules!(
+        format!("merge-sameh.test host://127.0.0.1:{}", mock.port),
+        "merge-sameh.test reqHeaders://X-Same-Key=first",
+        "merge-sameh.test reqHeaders://X-Same-Key=second",
+    )?;
 
     _proxy.wait_for_ready().await?;
 
