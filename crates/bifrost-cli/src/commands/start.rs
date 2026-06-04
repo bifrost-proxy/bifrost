@@ -520,20 +520,24 @@ async fn wait_for_shutdown_signal() {
 
 struct SystemProxyRestoreGuard {
     system_proxy_manager: Arc<tokio::sync::RwLock<bifrost_core::SystemProxyManager>>,
+    stop_flag: Arc<AtomicBool>,
 }
 
 impl SystemProxyRestoreGuard {
     fn new(
         system_proxy_manager: Arc<tokio::sync::RwLock<bifrost_core::SystemProxyManager>>,
+        stop_flag: Arc<AtomicBool>,
     ) -> Self {
         Self {
             system_proxy_manager,
+            stop_flag,
         }
     }
 }
 
 impl Drop for SystemProxyRestoreGuard {
     fn drop(&mut self) {
+        self.stop_flag.store(true, Ordering::Release);
         if let Err(e) = self.system_proxy_manager.blocking_write().restore() {
             eprintln!("Failed to restore system proxy: {}", e);
         }
@@ -913,7 +917,6 @@ pub fn run_foreground(
     let system_proxy_manager = std::sync::Arc::new(tokio::sync::RwLock::new(
         bifrost_core::SystemProxyManager::new(bifrost_dir.clone()),
     ));
-    let _system_proxy_restore_guard = SystemProxyRestoreGuard::new(system_proxy_manager.clone());
     let mut shell_proxy_manager = bifrost_core::ShellProxyManager::new(bifrost_dir.clone());
     if let Err(e) = bifrost_core::ShellProxyManager::recover_from_crash(&bifrost_dir) {
         tracing::warn!("Failed to recover CLI proxy from previous crash: {}", e);
@@ -921,6 +924,10 @@ pub fn run_foreground(
 
     let system_proxy_enabled = Arc::new(AtomicBool::new(false));
     let system_proxy_reconcile_stop = Arc::new(AtomicBool::new(false));
+    let _system_proxy_restore_guard = SystemProxyRestoreGuard::new(
+        system_proxy_manager.clone(),
+        system_proxy_reconcile_stop.clone(),
+    );
 
     let mut cli_proxy_enabled = false;
     let cli_proxy_no_proxy =
