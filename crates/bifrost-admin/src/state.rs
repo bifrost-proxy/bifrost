@@ -798,6 +798,11 @@ impl AdminState {
         self
     }
 
+    pub fn with_breakpoint_timeout_ms(self, timeout_ms: u64) -> Self {
+        self.breakpoint_manager.set_timeout_ms(timeout_ms);
+        self
+    }
+
     pub fn with_app_icon_cache(mut self, cache: SharedAppIconCache) -> Self {
         self.app_icon_cache = Some(cache);
         self

@@ -22,6 +22,7 @@
 - [Scripts 模块与脚本开发](./scripts.md)
 - [Values 使用说明](./values.md)
 - [请求重放说明](./replay.md)
+- [Breakpoint 使用手册](./breakpoint.md)
 
 ## 其他
 

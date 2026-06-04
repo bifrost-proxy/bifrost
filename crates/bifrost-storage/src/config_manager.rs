@@ -14,8 +14,9 @@ use crate::unified_config::{
 };
 use crate::values::ValuesStorage;
 use crate::{
-    LegacyBifrostConfig, MAX_TRAFFIC_MAX_DB_SIZE_BYTES, MAX_TRAFFIC_MAX_RECORDS,
-    MIN_TRAFFIC_MAX_DB_SIZE_BYTES, MIN_TRAFFIC_MAX_RECORDS,
+    LegacyBifrostConfig, MAX_BREAKPOINT_TIMEOUT_MS, MAX_TRAFFIC_MAX_DB_SIZE_BYTES,
+    MAX_TRAFFIC_MAX_RECORDS, MIN_BREAKPOINT_TIMEOUT_MS, MIN_TRAFFIC_MAX_DB_SIZE_BYTES,
+    MIN_TRAFFIC_MAX_RECORDS,
 };
 
 pub type SharedConfigManager = Arc<ConfigManager>;
@@ -278,6 +279,17 @@ impl ConfigManager {
         }
         if let Some(ws_payload_max_open_files) = update.ws_payload_max_open_files {
             config.traffic.ws_payload_max_open_files = ws_payload_max_open_files;
+        }
+        if let Some(breakpoint_timeout_ms) = update.breakpoint_timeout_ms {
+            if !(MIN_BREAKPOINT_TIMEOUT_MS..=MAX_BREAKPOINT_TIMEOUT_MS)
+                .contains(&breakpoint_timeout_ms)
+            {
+                return Err(BifrostError::Config(format!(
+                    "traffic.breakpoint_timeout_ms must be between {} and {}",
+                    MIN_BREAKPOINT_TIMEOUT_MS, MAX_BREAKPOINT_TIMEOUT_MS
+                )));
+            }
+            config.traffic.breakpoint_timeout_ms = breakpoint_timeout_ms;
         }
 
         self.save_config(&config)?;
@@ -690,6 +702,7 @@ impl ConfigManager {
                 ws_payload_flush_interval_ms: legacy.traffic.ws_payload_flush_interval_ms,
                 ws_payload_max_open_files: legacy.traffic.ws_payload_max_open_files,
                 inject_bifrost_badge: true,
+                breakpoint_timeout_ms: crate::DEFAULT_BREAKPOINT_TIMEOUT_MS,
             },
             sandbox: SandboxConfig::default(),
             paths: PathsConfig::for_data_dir(data_dir),

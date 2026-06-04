@@ -52,17 +52,17 @@ async fn update_settings(
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "Invalid JSON"),
     };
 
-    state.breakpoint_manager.update_settings(settings.clone());
+    state.breakpoint_manager.update_settings(settings);
+    let effective_settings = state.breakpoint_manager.get_settings();
 
     if let Some(pm) = push_manager {
         pm.broadcast_breakpoint_settings_updated(crate::push::BreakpointSettingsPushData {
-            enabled: settings.enabled,
-            hook_request: settings.hook_request,
-            hook_response: settings.hook_response,
+            enabled: effective_settings.enabled,
+            max_body_bytes: effective_settings.max_body_bytes,
         });
     }
 
-    json_response(&settings)
+    json_response(&effective_settings)
 }
 
 async fn resume(

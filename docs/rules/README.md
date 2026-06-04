@@ -85,8 +85,9 @@
 - `tlsOptions` / `upstreamUnsafeSsl` / `sniCallback`
 - `passthrough` / `tunnel`
 - `devtools`
+- `breakpoint`
 
-详见：[routing.md](./routing.md)、[../operation.md](../operation.md) 与 [filters.md](./filters.md)
+详见：[routing.md](./routing.md)、[../operation.md](../operation.md)、[../breakpoint.md](../breakpoint.md) 与 [filters.md](./filters.md)
 
 ### 7) WebSocket
 

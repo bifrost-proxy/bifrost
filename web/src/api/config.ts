@@ -97,10 +97,17 @@ export interface ResourceAlerts {
 
 export interface PerformanceConfig {
   traffic: TrafficConfig;
+  breakpoint: BreakpointPerformanceConfig;
   body_store_stats: BodyStoreStats | null;
   frame_store_stats: FrameStoreStats | null;
   ws_payload_store_stats: WsPayloadStoreStats | null;
   resource_alerts: ResourceAlerts;
+}
+
+export interface BreakpointPerformanceConfig {
+  timeout_ms: number;
+  timeout_min_ms: number;
+  timeout_max_ms: number;
 }
 
 export interface SandboxFileConfig {
@@ -152,6 +159,7 @@ export interface UpdateTrafficConfigRequest {
   binary_traffic_performance_mode?: boolean;
   inject_bifrost_badge?: boolean;
   file_retention_days?: number;
+  breakpoint_timeout_ms?: number;
 }
 
 export async function getPerformanceConfig(): Promise<PerformanceConfig> {

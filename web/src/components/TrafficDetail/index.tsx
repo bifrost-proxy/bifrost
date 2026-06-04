@@ -388,7 +388,10 @@ export default function TrafficDetail({
   const requestTabs = useMemo(() => {
     if (!record) return [];
     const requestBodyForView =
-      pausedRequest?.body ?? pausedRequest?.originalBody ?? requestBody;
+      pausedRequest
+        ? pausedRequest.body ?? pausedRequest.originalBody
+        : requestBody;
+    const requestBodyEditable = !!pausedRequest && !pausedRequest.bodyOmitted;
 
     return [
       {
@@ -451,7 +454,7 @@ export default function TrafficDetail({
       {
         key: "Body",
         label: "Body",
-        enable: !!requestBodyForView || !!requestRawBody || !!pausedRequest,
+        enable: !!requestBodyForView || !!requestRawBody || requestBodyEditable,
         children: (
           <Body
             data={requestBodyForView}
@@ -463,7 +466,7 @@ export default function TrafficDetail({
             searchValue={requestSearch}
             displayFormat={requestDisplayFormat}
             onSearch={setRequestSearch}
-            editable={!!pausedRequest}
+            editable={requestBodyEditable}
             onBodyChange={handleRequestBodyChange}
           />
         ),
@@ -580,7 +583,10 @@ export default function TrafficDetail({
   const responseTabs = useMemo(() => {
     if (!record) return [];
     const responseBodyForView =
-      pausedResponse?.body ?? pausedResponse?.originalBody ?? responseBody;
+      pausedResponse
+        ? pausedResponse.body ?? pausedResponse.originalBody
+        : responseBody;
+    const responseBodyEditable = !!pausedResponse && !pausedResponse.bodyOmitted;
     const hasMessages = record.is_websocket || record.is_sse;
     const socketCount = record.socket_status?.frame_count ?? record.frame_count ?? 0;
     const messageCount = record.is_sse ? liveSseCount ?? socketCount : socketCount;
@@ -677,7 +683,7 @@ export default function TrafficDetail({
       {
         key: "Body",
         label: "Body",
-        enable: !!responseBodyForView || !!responseRawBody || canPreviewResponseImage || !!pausedResponse,
+        enable: !!responseBodyForView || !!responseRawBody || canPreviewResponseImage || responseBodyEditable,
         children: (
           <Body
             data={responseBodyForView}
@@ -691,7 +697,7 @@ export default function TrafficDetail({
             searchValue={responseSearch}
             displayFormat={responseDisplayFormat}
             onSearch={setResponseSearch}
-            editable={!!pausedResponse}
+            editable={responseBodyEditable}
             onBodyChange={handleResponseBodyChange}
           />
         ),

@@ -89,7 +89,9 @@ impl AdminRouter {
             return resp;
         }
 
-        let mut resp = if admin_path.starts_with("/public/cert") {
+        let mut resp = if admin_path == "/swagger" {
+            swagger::serve_swagger_ui()
+        } else if admin_path.starts_with("/public/cert") {
             handle_cert_public(req, state, &admin_path).await
         } else if admin_path.starts_with("/public/proxy") {
             handle_proxy_public(req, state, &admin_path).await

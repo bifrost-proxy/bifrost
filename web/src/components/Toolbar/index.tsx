@@ -6,7 +6,6 @@ import {
   MenuFoldOutlined,
   MenuUnfoldOutlined,
   FilterOutlined,
-  PauseCircleOutlined,
 } from "@ant-design/icons";
 import type { ToolbarFilters } from "../../types";
 
@@ -25,12 +24,8 @@ interface ToolbarProps {
   detailDetached?: boolean;
   onAttachDetailWindow?: () => void;
   breakpointEnabled?: boolean;
-  hookRequest?: boolean;
-  hookResponse?: boolean;
   breakpointLoading?: boolean;
   onBreakpointToggle?: (enabled: boolean) => void;
-  onHookRequestToggle?: (hook: boolean) => void;
-  onHookResponseToggle?: (hook: boolean) => void;
 }
 
 const filterGroups = {
@@ -56,12 +51,8 @@ export default function Toolbar({
   detailDetached,
   onAttachDetailWindow,
   breakpointEnabled = false,
-  hookRequest = false,
-  hookResponse = false,
   breakpointLoading,
   onBreakpointToggle,
-  onHookRequestToggle,
-  onHookResponseToggle,
 }: ToolbarProps) {
   const { token } = theme.useToken();
 
@@ -192,55 +183,36 @@ export default function Toolbar({
         <Popover
           trigger="hover"
           content={
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  gap: 12,
-                }}
-              >
-                <span style={{ fontSize: 12 }}>Hook Request</span>
-                <Switch
-                  size="small"
-                  checked={hookRequest}
-                  onChange={(v) => onHookRequestToggle?.(v)}
-                  disabled={!breakpointEnabled}
-                />
+            <div style={{ maxWidth: 320, fontSize: 12, lineHeight: 1.5 }}>
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>
+                Breakpoint global gate
               </div>
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  gap: 12,
-                }}
-              >
-                <span style={{ fontSize: 12 }}>Hook Response</span>
-                <Switch
-                  size="small"
-                  checked={hookResponse}
-                  onChange={(v) => onHookResponseToggle?.(v)}
-                  disabled={!breakpointEnabled}
-                />
+              <div>
+                On: matched rules using <code>breakpoint://request</code> or{" "}
+                <code>breakpoint://response</code> can pause traffic.
+              </div>
+              <div style={{ marginTop: 6 }}>
+                Off: no new traffic pauses, and pending breakpoint requests are
+                released.
+              </div>
+              <div style={{ marginTop: 6 }}>
+                This switch alone does not pause traffic. Choose request,
+                response, or both in the rule value.
               </div>
             </div>
           }
         >
-          <PauseCircleOutlined
+          <span
+            data-testid="toolbar-breakpoint-help"
             style={{
-              color: breakpointEnabled
-                ? token.colorPrimary
-                : token.colorTextSecondary,
-              fontSize: 14,
-              cursor: "pointer",
+              color: token.colorTextSecondary,
+              cursor: "help",
+              fontSize: 12,
             }}
-          />
+          >
+            Breakpoint
+          </span>
         </Popover>
-        <span style={{ color: token.colorTextSecondary, fontSize: 12 }}>
-          Breakpoint
-        </span>
         <Switch
           size="small"
           checked={breakpointEnabled}

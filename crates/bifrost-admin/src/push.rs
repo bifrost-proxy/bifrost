@@ -282,13 +282,15 @@ pub struct BreakpointPausedPushData {
     pub status: Option<u16>,
     pub headers: Vec<(String, String)>,
     pub body: Option<String>,
+    pub body_omitted: bool,
+    pub body_size: Option<usize>,
+    pub max_body_bytes: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BreakpointSettingsPushData {
     pub enabled: bool,
-    pub hook_request: bool,
-    pub hook_response: bool,
+    pub max_body_bytes: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1119,6 +1121,11 @@ impl PushManager {
                         "ws_payload_flush_bytes": config.traffic.ws_payload_flush_bytes,
                         "ws_payload_flush_interval_ms": config.traffic.ws_payload_flush_interval_ms,
                         "ws_payload_max_open_files": config.traffic.ws_payload_max_open_files,
+                    },
+                    "breakpoint": {
+                        "timeout_ms": config.traffic.breakpoint_timeout_ms,
+                        "timeout_min_ms": bifrost_storage::MIN_BREAKPOINT_TIMEOUT_MS,
+                        "timeout_max_ms": bifrost_storage::MAX_BREAKPOINT_TIMEOUT_MS,
                     },
                     "body_store_stats": body_store_stats,
                     "frame_store_stats": frame_store_stats,

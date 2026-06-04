@@ -1,4 +1,4 @@
-import { Alert, Badge, Button, Card, Col, Divider, Popconfirm, Row, Slider, Space, Switch, Typography, theme } from "antd";
+import { Alert, Badge, Button, Card, Col, Divider, InputNumber, Popconfirm, Row, Slider, Space, Switch, Typography, theme } from "antd";
 import {
   ThunderboltOutlined,
   FolderOutlined,
@@ -7,6 +7,7 @@ import {
   SwapOutlined,
 } from "@ant-design/icons";
 import type {
+  BreakpointPerformanceConfig,
   PerformanceConfig,
   ResourceAlertLevel,
   ResourceAlertStatus,
@@ -56,10 +57,15 @@ function statusMessage(status: ResourceAlertStatus | null | undefined): string |
   return status?.level && status.level !== "ok" ? status.message : null;
 }
 
+function formatTimeoutLabel(ms: number): string {
+  return `${Math.round(ms / 1000)}s`;
+}
+
 export interface PerformanceTabProps {
   perfLoading: boolean;
   performanceConfig: PerformanceConfig | null;
   trafficDraft?: TrafficConfig | null;
+  breakpointDraft?: BreakpointPerformanceConfig | null;
   maxRecordsMin: number;
   maxRecordsMax: number;
   maxRecordsStep: number;
@@ -69,6 +75,7 @@ export interface PerformanceTabProps {
   maxBodyBufferMarks: Record<number, string>;
   maxBodyProbeMarks: Record<number, string>;
   fileRetentionMarks: Record<number, string>;
+  breakpointTimeoutMarks: Record<number, string>;
   handleMaxRecordsChange: (value: number | null) => void;
   handleMaxDbSizeChange: (value: number) => void;
   handleMaxBodyMemorySizeChange: (value: number) => void;
@@ -76,6 +83,7 @@ export interface PerformanceTabProps {
   handleMaxBodyProbeSizeChange: (value: number) => void;
   handleEnableBinaryTrafficCaptureChange: (checked: boolean) => void;
   handleFileRetentionDaysChange: (value: number) => void;
+  handleBreakpointTimeoutChange: (value: number) => void;
   handleClearBodyCache: () => void;
   formatBytes: (bytes: number) => string;
 }
@@ -84,6 +92,7 @@ export default function PerformanceTab({
   perfLoading,
   performanceConfig,
   trafficDraft,
+  breakpointDraft,
   maxRecordsMin,
   maxRecordsMax,
   maxRecordsStep,
@@ -93,6 +102,7 @@ export default function PerformanceTab({
   maxBodyBufferMarks,
   maxBodyProbeMarks,
   fileRetentionMarks,
+  breakpointTimeoutMarks,
   handleMaxRecordsChange,
   handleMaxDbSizeChange,
   handleMaxBodyMemorySizeChange,
@@ -100,6 +110,7 @@ export default function PerformanceTab({
   handleMaxBodyProbeSizeChange,
   handleEnableBinaryTrafficCaptureChange,
   handleFileRetentionDaysChange,
+  handleBreakpointTimeoutChange,
   handleClearBodyCache,
   formatBytes,
 }: PerformanceTabProps) {
@@ -172,6 +183,104 @@ export default function PerformanceTab({
                   <Text code>
                     {(trafficDraft?.max_records || 0).toLocaleString()}
                   </Text>
+                </Col>
+              </Row>
+
+              <Divider style={{ margin: "12px 0" }} />
+
+              <Row justify="space-between" align="middle">
+                <Col flex="1" style={{ marginRight: 16 }}>
+                  <Space direction="vertical" size={0} style={{ width: "100%" }}>
+                    <Text>Breakpoint Auto-Resume Timeout</Text>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      Applies when a matched breakpoint rule pauses traffic
+                      and nobody clicks Resume. The request or response is
+                      automatically released after this timeout to avoid
+                      long network stalls and connection buildup. Lower
+                      values reduce latency risk; higher values give more
+                      time for manual debugging.
+                    </Text>
+                    <div data-testid="settings-performance-breakpoint-timeout">
+                      <Slider
+                        min={breakpointDraft?.timeout_min_ms ?? 0}
+                        max={breakpointDraft?.timeout_max_ms ?? 1}
+                        step={1000}
+                        value={breakpointDraft?.timeout_ms ?? 0}
+                        disabled={!breakpointDraft}
+                        onChange={handleBreakpointTimeoutChange}
+                        marks={breakpointDraft ? breakpointTimeoutMarks : {}}
+                        tooltip={{
+                          formatter: (value) =>
+                            value !== null && value !== undefined
+                              ? formatTimeoutLabel(value)
+                              : "",
+                        }}
+                      />
+                    </div>
+                    <div
+                      data-testid="settings-performance-breakpoint-timeout-bounds"
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        marginTop: -6,
+                      }}
+                    >
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        Min:{" "}
+                        {breakpointDraft
+                          ? `${formatTimeoutLabel(breakpointDraft.timeout_min_ms)} (${breakpointDraft.timeout_min_ms}ms)`
+                          : "Loading"}
+                      </Text>
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        Max:{" "}
+                        {breakpointDraft
+                          ? `${formatTimeoutLabel(breakpointDraft.timeout_max_ms)} (${breakpointDraft.timeout_max_ms}ms)`
+                          : "Loading"}
+                      </Text>
+                    </div>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      {breakpointDraft ? (
+                        <>
+                          Fixed safety range:{" "}
+                          {formatTimeoutLabel(breakpointDraft.timeout_min_ms)}
+                          {" - "}
+                          {formatTimeoutLabel(breakpointDraft.timeout_max_ms)}.
+                          Values outside this range are rejected to avoid long
+                          paused connections.
+                        </>
+                      ) : (
+                        "Loading fixed safety range..."
+                      )}
+                    </Text>
+                  </Space>
+                </Col>
+                <Col>
+                  <Space direction="vertical" size={4} align="end">
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      Current
+                    </Text>
+                    <div data-testid="settings-performance-breakpoint-timeout-input">
+                      <InputNumber
+                        min={breakpointDraft?.timeout_min_ms}
+                        max={breakpointDraft?.timeout_max_ms}
+                        step={1000}
+                        value={breakpointDraft?.timeout_ms}
+                        disabled={!breakpointDraft}
+                        onChange={(value) => {
+                          if (typeof value === "number") {
+                            handleBreakpointTimeoutChange(value);
+                          }
+                        }}
+                        addonAfter="ms"
+                        style={{ width: 160 }}
+                      />
+                    </div>
+                    <Text code>
+                      {breakpointDraft
+                        ? formatTimeoutLabel(breakpointDraft.timeout_ms)
+                        : "Loading"}
+                    </Text>
+                  </Space>
                 </Col>
               </Row>
 

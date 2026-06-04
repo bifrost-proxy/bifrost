@@ -72,6 +72,7 @@ bifrost install-skill -y
 - TLS 拦截能力：支持 CA 证书生成、按域名动态签发证书、按规则选择拦截/透传，并可对单条上游 HTTPS 规则显式允许不安全证书
 - 规则引擎：支持路由、请求/响应改写、注入、延迟、限速、Mock、脚本处理
 - 管理界面：内置 Web UI，支持规则编辑、流量查看、脚本管理、请求重放
+- Breakpoint：支持在 Web UI 中暂停命中 `breakpoint://request` / `breakpoint://response` 规则的 HTTP request/response，编辑 headers/body 后继续；详见 [`docs/breakpoint.md`](docs/breakpoint.md)
 - 资源风险告警：Performance 页与 `/_bifrost/api/system/memory` 会显示 body/ws 文件 writer 占用及接近句柄上限的告警状态
 - 脚本沙箱：基于 QuickJS，支持 `reqScript`、`resScript`、`decode`
 
@@ -148,5 +149,6 @@ internal-api.example.test https://10.37.102.138:8080 upstreamUnsafeSsl://true
 - Scripts 模块与脚本开发：[`docs/scripts.md`](docs/scripts.md)
 - Values 使用说明：[`docs/values.md`](docs/values.md)
 - 请求重放说明：[`docs/replay.md`](docs/replay.md)
+- Breakpoint 使用手册：[`docs/breakpoint.md`](docs/breakpoint.md)
 - 项目结构与模块说明：[`docs/architecture.md`](docs/architecture.md)
 - Agent Skill 安装说明：[`docs/agent-skill.md`](docs/agent-skill.md)

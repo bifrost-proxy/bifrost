@@ -1,3 +1,4 @@
+use bifrost_storage::{MAX_BREAKPOINT_TIMEOUT_MS, MIN_BREAKPOINT_TIMEOUT_MS};
 use serde::Serialize;
 
 #[derive(Debug, Serialize, Clone)]
@@ -31,7 +32,7 @@ pub fn generate_openapi_spec() -> OpenApiSpec {
         info: OpenApiInfo {
             title: "Bifrost Admin API".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
-            description: "Bifrost Proxy - Admin API cho Web UI, CLI và các công cụ quản lý proxy."
+            description: "Bifrost Proxy - Admin API for Web UI, CLI, and proxy management tools."
                 .to_string(),
         },
         servers: vec![OpenApiServer {
@@ -50,32 +51,95 @@ fn generate_components() -> serde_json::Value {
                 "type": "http",
                 "scheme": "bearer",
                 "bearerFormat": "JWT",
-                "description": "JWT token từ /api/auth/login"
+                "description": "JWT token from /api/auth/login"
             }
         },
         "schemas": {
             "BreakpointSettings": {
                 "type": "object",
+                "description": "Global breakpoint gate used by the toolbar and admin API. A matching breakpoint://request or breakpoint://response rule is also required before any traffic can pause.",
                 "properties": {
-                    "enabled": {"type": "boolean", "description": "Bật/tắt breakpoint"},
-                    "hook_request": {"type": "boolean", "description": "Chặn request trước khi gửi lên upstream"},
-                    "hook_response": {"type": "boolean", "description": "Chặn response trước khi trả về client"}
+                    "enabled": {"type": "boolean", "description": "Enable breakpoint globally. A matched breakpoint://request or breakpoint://response rule is still required before traffic can pause."},
+                    "max_body_bytes": {"type": "integer", "description": "Body size limit for breakpoint UI capture to avoid copying large payloads"}
+                }
+            },
+            "PerformanceBreakpointConfig": {
+                "type": "object",
+                "description": "Breakpoint timeout shown in Settings > Performance and applied to pending request/response pauses.",
+                "properties": {
+                    "timeout_ms": {"type": "integer", "description": "Auto-resume timeout for paused breakpoint traffic"},
+                    "timeout_min_ms": {"type": "integer", "description": "Fixed minimum accepted breakpoint timeout"},
+                    "timeout_max_ms": {"type": "integer", "description": "Fixed maximum accepted breakpoint timeout"}
+                }
+            },
+            "PerformanceTrafficConfig": {
+                "type": "object",
+                "properties": {
+                    "max_records": {"type": "integer"},
+                    "max_db_size_bytes": {"type": "integer"},
+                    "max_body_memory_size": {"type": "integer"},
+                    "max_body_buffer_size": {"type": "integer"},
+                    "max_body_probe_size": {"type": "integer"},
+                    "binary_traffic_performance_mode": {"type": "boolean"},
+                    "inject_bifrost_badge": {"type": "boolean"},
+                    "file_retention_days": {"type": "integer"},
+                    "sse_stream_flush_bytes": {"type": "integer"},
+                    "sse_stream_flush_interval_ms": {"type": "integer"},
+                    "ws_payload_flush_bytes": {"type": "integer"},
+                    "ws_payload_flush_interval_ms": {"type": "integer"},
+                    "ws_payload_max_open_files": {"type": "integer"}
+                }
+            },
+            "PerformanceConfig": {
+                "type": "object",
+                "properties": {
+                    "traffic": {"$ref": "#/components/schemas/PerformanceTrafficConfig"},
+                    "breakpoint": {"$ref": "#/components/schemas/PerformanceBreakpointConfig"},
+                    "body_store_stats": {"type": "object", "nullable": true},
+                    "frame_store_stats": {"type": "object", "nullable": true},
+                    "ws_payload_store_stats": {"type": "object", "nullable": true},
+                    "resource_alerts": {"type": "object"}
+                }
+            },
+            "UpdatePerformanceConfigRequest": {
+                "type": "object",
+                "description": "Partial update for Settings > Performance. Omit fields that should stay unchanged.",
+                "properties": {
+                    "max_records": {"type": "integer"},
+                    "max_db_size_bytes": {"type": "integer"},
+                    "max_body_memory_size": {"type": "integer"},
+                    "max_body_buffer_size": {"type": "integer"},
+                    "max_body_probe_size": {"type": "integer"},
+                    "binary_traffic_performance_mode": {"type": "boolean"},
+                    "inject_bifrost_badge": {"type": "boolean"},
+                    "file_retention_days": {"type": "integer"},
+                    "sse_stream_flush_bytes": {"type": "integer"},
+                    "sse_stream_flush_interval_ms": {"type": "integer"},
+                    "ws_payload_flush_bytes": {"type": "integer"},
+                    "ws_payload_flush_interval_ms": {"type": "integer"},
+                    "ws_payload_max_open_files": {"type": "integer"},
+                    "breakpoint_timeout_ms": {
+                        "type": "integer",
+                        "minimum": MIN_BREAKPOINT_TIMEOUT_MS,
+                        "maximum": MAX_BREAKPOINT_TIMEOUT_MS,
+                        "description": "Auto-resume timeout for Breakpoint. Configure phases with breakpoint://request or breakpoint://response rules; this field only controls how long a matched pause may wait."
+                    }
                 }
             },
             "BreakpointEdit": {
                 "type": "object",
                 "properties": {
-                    "request_id": {"type": "string", "description": "ID của request đang bị breakpoint"},
-                    "phase": {"type": "string", "enum": ["request", "response"], "description": "Pha breakpoint"},
+                    "request_id": {"type": "string", "description": "ID of the request currently paused by breakpoint"},
+                    "phase": {"type": "string", "enum": ["request", "response"], "description": "Breakpoint phase"},
                     "headers": {
                         "type": "object",
-                        "description": "Headers đã chỉnh sửa (key-value)",
+                        "description": "Edited headers (key-value)",
                         "additionalProperties": {"type": "string"}
                     },
                     "body": {
                         "type": "string",
                         "nullable": true,
-                        "description": "Body đã chỉnh sửa. null = giữ nguyên"
+                        "description": "Edited body. null keeps the original body"
                     }
                 }
             },
@@ -105,7 +169,7 @@ fn generate_components() -> serde_json::Value {
                 "type": "object",
                 "properties": {
                     "name": {"type": "string"},
-                    "content": {"type": "string"},
+                    "content": {"type": "string", "description": "Rule DSL content. Breakpoint phases are selected with breakpoint://request and breakpoint://response values inside rules."},
                     "enabled": {"type": "boolean"}
                 }
             },
@@ -147,7 +211,7 @@ fn generate_components() -> serde_json::Value {
             "WhitelistEntry": {
                 "type": "object",
                 "properties": {
-                    "ip": {"type": "string", "description": "IP hoặc CIDR"},
+                    "ip": {"type": "string", "description": "IP or CIDR"},
                     "type": {"type": "string", "enum": ["permanent", "temporary"]}
                 }
             },
@@ -155,7 +219,7 @@ fn generate_components() -> serde_json::Value {
                 "type": "object",
                 "properties": {
                     "enabled": {"type": "boolean", "description": "TLS interception switch"},
-                    "unsafe_ssl": {"type": "boolean", "description": "Bỏ qua xác thực upstream cert"},
+                    "unsafe_ssl": {"type": "boolean", "description": "Skip upstream certificate verification"},
                     "include": {"type": "array", "items": {"type": "string"}, "description": "Domain whitelist"},
                     "exclude": {"type": "array", "items": {"type": "string"}, "description": "Domain passthrough"},
                     "app_include": {"type": "array", "items": {"type": "string"}, "description": "App whitelist"},
@@ -213,25 +277,27 @@ fn generate_paths() -> serde_json::Value {
         "/api/breakpoint/settings": {
             "get": {
                 "tags": ["Breakpoint"],
-                "summary": "Lấy cấu hình breakpoint",
+                "summary": "Get breakpoint settings",
+                "description": "Returns the global Breakpoint toolbar gate and capture size limit. This endpoint does not configure request/response phases; phases are configured in rules.",
                 "operationId": "getBreakpointSettings",
                 "responses": {
                     "200": {
-                        "description": "Cấu hình breakpoint hiện tại",
+                        "description": "Current breakpoint settings",
                         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/BreakpointSettings"}}}
                     }
                 }
             },
             "post": {
                 "tags": ["Breakpoint"],
-                "summary": "Cập nhật cấu hình breakpoint",
+                "summary": "Update breakpoint settings",
+                "description": "Updates the global Breakpoint gate. Traffic only pauses when this gate is enabled and a matched rule authorizes breakpoint://request or breakpoint://response.",
                 "operationId": "updateBreakpointSettings",
                 "requestBody": {
                     "required": true,
                     "content": {"application/json": {"schema": {"$ref": "#/components/schemas/BreakpointSettings"}}}
                 },
                 "responses": {
-                    "200": {"description": "Đã cập nhật"},
+                    "200": {"description": "Updated"},
                     "400": {"description": "Bad request"}
                 }
             }
@@ -239,16 +305,16 @@ fn generate_paths() -> serde_json::Value {
         "/api/breakpoint/resume": {
             "post": {
                 "tags": ["Breakpoint"],
-                "summary": "Resume request/response đang bị breakpoint",
-                "description": "Gửi headers + body đã chỉnh sửa để tiếp tục request/response đang bị tạm dừng",
+                "summary": "Resume paused breakpoint request/response",
+                "description": "Submit edited headers and body from the Traffic detail UI or an external admin client to continue the paused request/response.",
                 "operationId": "resumeBreakpoint",
                 "requestBody": {
                     "required": true,
                     "content": {"application/json": {"schema": {"$ref": "#/components/schemas/BreakpointEdit"}}}
                 },
                 "responses": {
-                    "200": {"description": "Đã resume"},
-                    "404": {"description": "Không tìm thấy request đang chờ"}
+                    "200": {"description": "Resumed"},
+                    "404": {"description": "Pending request not found"}
                 }
             }
         },
@@ -259,17 +325,17 @@ fn generate_paths() -> serde_json::Value {
         "/api/auth/status": {
             "get": {
                 "tags": ["Auth"],
-                "summary": "Trạng thái xác thực",
+                "summary": "Authentication status",
                 "operationId": "getAuthStatus",
                 "responses": {
-                    "200": {"description": "Trạng thái auth"}
+                    "200": {"description": "Auth status"}
                 }
             }
         },
         "/api/auth/login": {
             "post": {
                 "tags": ["Auth"],
-                "summary": "Đăng nhập",
+                "summary": "Log in",
                 "operationId": "login",
                 "requestBody": {
                     "required": true,
@@ -277,25 +343,25 @@ fn generate_paths() -> serde_json::Value {
                 },
                 "responses": {
                     "200": {
-                        "description": "Đăng nhập thành công",
+                        "description": "Login succeeded",
                         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/LoginResponse"}}}
                     },
-                    "401": {"description": "Sai username/password"}
+                    "401": {"description": "Incorrect username or password"}
                 }
             }
         },
         "/api/auth/logout": {
             "post": {
                 "tags": ["Auth"],
-                "summary": "Đăng xuất",
+                "summary": "Log out",
                 "operationId": "logout",
-                "responses": {"200": {"description": "Đã đăng xuất"}}
+                "responses": {"200": {"description": "Logged out"}}
             }
         },
         "/api/auth/passwd": {
             "post": {
                 "tags": ["Auth"],
-                "summary": "Đổi mật khẩu",
+                "summary": "Change password",
                 "operationId": "changePassword",
                 "requestBody": {
                     "required": true,
@@ -309,15 +375,15 @@ fn generate_paths() -> serde_json::Value {
                     }}}
                 },
                 "responses": {
-                    "200": {"description": "Đã đổi mật khẩu"},
-                    "401": {"description": "Sai mật khẩu hiện tại"}
+                    "200": {"description": "Password changed"},
+                    "401": {"description": "Incorrect current password"}
                 }
             }
         },
         "/api/auth/remote": {
             "post": {
                 "tags": ["Auth"],
-                "summary": "Bật/tắt remote access",
+                "summary": "Enable or disable remote access",
                 "operationId": "toggleRemoteAccess",
                 "requestBody": {
                     "required": true,
@@ -326,15 +392,15 @@ fn generate_paths() -> serde_json::Value {
                         "properties": {"enabled": {"type": "boolean"}}
                     }}}
                 },
-                "responses": {"200": {"description": "Đã cập nhật"}}
+                "responses": {"200": {"description": "Updated"}}
             }
         },
         "/api/auth/revoke-all": {
             "post": {
                 "tags": ["Auth"],
-                "summary": "Thu hồi tất cả JWT session",
+                "summary": "Revoke all JWT sessions",
                 "operationId": "revokeAllSessions",
-                "responses": {"200": {"description": "Đã thu hồi"}}
+                "responses": {"200": {"description": "Revoked"}}
             }
         },
 
@@ -344,7 +410,7 @@ fn generate_paths() -> serde_json::Value {
         "/api/traffic": {
             "get": {
                 "tags": ["Traffic"],
-                "summary": "Liệt kê traffic records",
+                "summary": "List traffic records",
                 "operationId": "listTraffic",
                 "parameters": [
                     {"name": "limit", "in": "query", "schema": {"type": "integer", "default": 50}},
@@ -360,14 +426,14 @@ fn generate_paths() -> serde_json::Value {
                 ],
                 "responses": {
                     "200": {
-                        "description": "Danh sách traffic",
+                        "description": "Traffic list",
                         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TrafficListResponse"}}}
                     }
                 }
             },
             "delete": {
                 "tags": ["Traffic"],
-                "summary": "Xóa traffic records",
+                "summary": "Delete traffic records",
                 "operationId": "deleteTraffic",
                 "requestBody": {
                     "content": {"application/json": {"schema": {
@@ -375,48 +441,48 @@ fn generate_paths() -> serde_json::Value {
                         "properties": {"ids": {"type": "array", "items": {"type": "string"}}}
                     }}}
                 },
-                "responses": {"200": {"description": "Đã xóa"}}
+                "responses": {"200": {"description": "Deleted"}}
             }
         },
         "/api/traffic/{id}": {
             "get": {
                 "tags": ["Traffic"],
-                "summary": "Lấy chi tiết traffic record",
+                "summary": "Get traffic record details",
                 "operationId": "getTraffic",
                 "parameters": [
                     {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}, "description": "Traffic record ID, e.g. REQ-6a1f6c82-000318"}
                 ],
                 "responses": {
-                    "200": {"description": "Chi tiết traffic record"},
-                    "404": {"description": "Không tìm thấy"}
+                    "200": {"description": "Traffic record details"},
+                    "404": {"description": "Not found"}
                 }
             }
         },
         "/api/traffic/{id}/request-body": {
             "get": {
                 "tags": ["Traffic"],
-                "summary": "Lấy request body",
+                "summary": "Get request body",
                 "operationId": "getTrafficRequestBody",
                 "parameters": [
                     {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}
                 ],
                 "responses": {
                     "200": {"description": "Request body"},
-                    "404": {"description": "Không tìm thấy"}
+                    "404": {"description": "Not found"}
                 }
             }
         },
         "/api/traffic/{id}/response-body": {
             "get": {
                 "tags": ["Traffic"],
-                "summary": "Lấy response body",
+                "summary": "Get response body",
                 "operationId": "getTrafficResponseBody",
                 "parameters": [
                     {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}
                 ],
                 "responses": {
                     "200": {"description": "Response body"},
-                    "404": {"description": "Không tìm thấy"}
+                    "404": {"description": "Not found"}
                 }
             }
         },
@@ -427,14 +493,14 @@ fn generate_paths() -> serde_json::Value {
         "/api/search": {
             "post": {
                 "tags": ["Search"],
-                "summary": "Tìm kiếm traffic (full-text)",
+                "summary": "Search traffic (full-text)",
                 "operationId": "searchTraffic",
                 "requestBody": {
                     "required": true,
                     "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SearchQuery"}}}
                 },
                 "responses": {
-                    "200": {"description": "Kết quả tìm kiếm"}
+                    "200": {"description": "Search results"}
                 }
             }
         },
@@ -445,11 +511,12 @@ fn generate_paths() -> serde_json::Value {
         "/api/rules": {
             "get": {
                 "tags": ["Rules"],
-                "summary": "Liệt kê tất cả rules",
+                "summary": "List all rules",
+                "description": "Lists rule DSL entries. Breakpoint uses this generic rules API: add breakpoint://request or breakpoint://response in a matched rule to authorize pausing that phase.",
                 "operationId": "listRules",
                 "responses": {
                     "200": {
-                        "description": "Danh sách rules",
+                        "description": "Rules list",
                         "content": {"application/json": {"schema": {
                             "type": "array", "items": {"$ref": "#/components/schemas/RuleInfo"}
                         }}}
@@ -458,7 +525,8 @@ fn generate_paths() -> serde_json::Value {
             },
             "post": {
                 "tags": ["Rules"],
-                "summary": "Tạo rule mới",
+                "summary": "Create rule",
+                "description": "Creates a rule DSL entry. For Breakpoint, use breakpoint://request, breakpoint://response, or both values in matched rules.",
                 "operationId": "createRule",
                 "requestBody": {
                     "required": true,
@@ -467,32 +535,34 @@ fn generate_paths() -> serde_json::Value {
                         "required": ["name", "content"],
                         "properties": {
                             "name": {"type": "string"},
-                            "content": {"type": "string", "description": "Nội dung rule"}
+                            "content": {"type": "string", "description": "Rule content"}
                         }
                     }}}
                 },
                 "responses": {
-                    "200": {"description": "Đã tạo"},
-                    "400": {"description": "Rule đã tồn tại"}
+                    "200": {"description": "Created"},
+                    "400": {"description": "Rule already exists"}
                 }
             }
         },
         "/api/rules/{name}": {
             "get": {
                 "tags": ["Rules"],
-                "summary": "Lấy chi tiết rule",
+                "summary": "Get rule details",
+                "description": "Gets a rule DSL entry, including any breakpoint://request or breakpoint://response phase configuration.",
                 "operationId": "getRule",
                 "parameters": [
                     {"name": "name", "in": "path", "required": true, "schema": {"type": "string"}}
                 ],
                 "responses": {
-                    "200": {"description": "Chi tiết rule"},
-                    "404": {"description": "Không tìm thấy"}
+                    "200": {"description": "Rule details"},
+                    "404": {"description": "Not found"}
                 }
             },
             "put": {
                 "tags": ["Rules"],
-                "summary": "Cập nhật rule",
+                "summary": "Update rule",
+                "description": "Updates a rule DSL entry. Breakpoint phase configuration lives here, not in /api/breakpoint/settings.",
                 "operationId": "updateRule",
                 "parameters": [
                     {"name": "name", "in": "path", "required": true, "schema": {"type": "string"}}
@@ -504,54 +574,54 @@ fn generate_paths() -> serde_json::Value {
                         "properties": {"content": {"type": "string"}}
                     }}}
                 },
-                "responses": {"200": {"description": "Đã cập nhật"}}
+                "responses": {"200": {"description": "Updated"}}
             },
             "delete": {
                 "tags": ["Rules"],
-                "summary": "Xóa rule",
+                "summary": "Delete rule",
                 "operationId": "deleteRule",
                 "parameters": [
                     {"name": "name", "in": "path", "required": true, "schema": {"type": "string"}}
                 ],
-                "responses": {"200": {"description": "Đã xóa"}}
+                "responses": {"200": {"description": "Deleted"}}
             }
         },
         "/api/rules/{name}/enable": {
             "put": {
                 "tags": ["Rules"],
-                "summary": "Bật rule",
+                "summary": "Enable rule",
                 "operationId": "enableRule",
                 "parameters": [
                     {"name": "name", "in": "path", "required": true, "schema": {"type": "string"}}
                 ],
-                "responses": {"200": {"description": "Đã bật"}}
+                "responses": {"200": {"description": "Enabled"}}
             }
         },
         "/api/rules/{name}/disable": {
             "put": {
                 "tags": ["Rules"],
-                "summary": "Tắt rule",
+                "summary": "Disable rule",
                 "operationId": "disableRule",
                 "parameters": [
                     {"name": "name", "in": "path", "required": true, "schema": {"type": "string"}}
                 ],
-                "responses": {"200": {"description": "Đã tắt"}}
+                "responses": {"200": {"description": "Disabled"}}
             }
         },
         "/api/rules/active-summary": {
             "get": {
                 "tags": ["Rules"],
-                "summary": "Tổng hợp rules đang active",
+                "summary": "Active rules summary",
                 "operationId": "getActiveRules",
-                "responses": {"200": {"description": "Danh sách rule đang active"}}
+                "responses": {"200": {"description": "Active rules list"}}
             }
         },
         "/api/rules/reorder": {
             "put": {
                 "tags": ["Rules"],
-                "summary": "Sắp xếp lại thứ tự rules",
+                "summary": "Reorder rules",
                 "operationId": "reorderRules",
-                "responses": {"200": {"description": "Đã sắp xếp"}}
+                "responses": {"200": {"description": "Reordered"}}
             }
         },
 
@@ -561,14 +631,14 @@ fn generate_paths() -> serde_json::Value {
         "/api/scripts": {
             "get": {
                 "tags": ["Scripts"],
-                "summary": "Liệt kê scripts",
+                "summary": "List scripts",
                 "operationId": "listScripts",
                 "parameters": [
                     {"name": "type", "in": "query", "schema": {"type": "string", "enum": ["request", "response", "decode"]}}
                 ],
                 "responses": {
                     "200": {
-                        "description": "Danh sách scripts",
+                        "description": "Scripts list",
                         "content": {"application/json": {"schema": {
                             "type": "array", "items": {"$ref": "#/components/schemas/ScriptInfo"}
                         }}}
@@ -577,7 +647,7 @@ fn generate_paths() -> serde_json::Value {
             },
             "put": {
                 "tags": ["Scripts"],
-                "summary": "Upload script mới",
+                "summary": "Upload script",
                 "operationId": "uploadScript",
                 "requestBody": {
                     "required": true,
@@ -591,13 +661,13 @@ fn generate_paths() -> serde_json::Value {
                         }
                     }}}
                 },
-                "responses": {"200": {"description": "Đã upload"}}
+                "responses": {"200": {"description": "Uploaded"}}
             }
         },
         "/api/scripts/test": {
             "post": {
                 "tags": ["Scripts"],
-                "summary": "Test script với mock data",
+                "summary": "Test script with mock data",
                 "operationId": "testScript",
                 "requestBody": {
                     "required": true,
@@ -610,27 +680,27 @@ fn generate_paths() -> serde_json::Value {
                         }
                     }}}
                 },
-                "responses": {"200": {"description": "Kết quả test"}}
+                "responses": {"200": {"description": "Test result"}}
             }
         },
         "/api/scripts/{name}": {
             "get": {
                 "tags": ["Scripts"],
-                "summary": "Lấy script",
+                "summary": "Get script",
                 "operationId": "getScript",
                 "parameters": [
                     {"name": "name", "in": "path", "required": true, "schema": {"type": "string"}}
                 ],
-                "responses": {"200": {"description": "Nội dung script"}}
+                "responses": {"200": {"description": "Script content"}}
             },
             "delete": {
                 "tags": ["Scripts"],
-                "summary": "Xóa script",
+                "summary": "Delete script",
                 "operationId": "deleteScript",
                 "parameters": [
                     {"name": "name", "in": "path", "required": true, "schema": {"type": "string"}}
                 ],
-                "responses": {"200": {"description": "Đã xóa"}}
+                "responses": {"200": {"description": "Deleted"}}
             }
         },
 
@@ -640,10 +710,10 @@ fn generate_paths() -> serde_json::Value {
         "/api/values": {
             "get": {
                 "tags": ["Values"],
-                "summary": "Liệt kê tất cả values",
+                "summary": "List all values",
                 "operationId": "listValues",
                 "responses": {
-                    "200": {"description": "Danh sách values (key-value)"}
+                    "200": {"description": "Values list (key-value)"}
                 }
             }
         },
@@ -662,16 +732,16 @@ fn generate_paths() -> serde_json::Value {
                         "properties": {"value": {"type": "string"}}
                     }}}
                 },
-                "responses": {"200": {"description": "Đã lưu"}}
+                "responses": {"200": {"description": "Saved"}}
             },
             "delete": {
                 "tags": ["Values"],
-                "summary": "Xóa value",
+                "summary": "Delete value",
                 "operationId": "deleteValue",
                 "parameters": [
                     {"name": "name", "in": "path", "required": true, "schema": {"type": "string"}}
                 ],
-                "responses": {"200": {"description": "Đã xóa"}}
+                "responses": {"200": {"description": "Deleted"}}
             }
         },
 
@@ -681,31 +751,31 @@ fn generate_paths() -> serde_json::Value {
         "/api/whitelist": {
             "get": {
                 "tags": ["Whitelist"],
-                "summary": "Liệt kê whitelist",
+                "summary": "List whitelist",
                 "operationId": "listWhitelist",
                 "responses": {
-                    "200": {"description": "Danh sách whitelist"}
+                    "200": {"description": "Whitelist list"}
                 }
             },
             "post": {
                 "tags": ["Whitelist"],
-                "summary": "Thêm IP/CIDR vào whitelist",
+                "summary": "Add IP/CIDR to whitelist",
                 "operationId": "addWhitelist",
                 "requestBody": {
                     "required": true,
                     "content": {"application/json": {"schema": {
                         "type": "object",
                         "required": ["ip"],
-                        "properties": {"ip": {"type": "string", "description": "IP hoặc CIDR, e.g. 192.168.1.0/24"}}
+                        "properties": {"ip": {"type": "string", "description": "IP or CIDR, e.g. 192.168.1.0/24"}}
                     }}}
                 },
-                "responses": {"200": {"description": "Đã thêm"}}
+                "responses": {"200": {"description": "Added"}}
             }
         },
         "/api/whitelist/mode": {
             "get": {
                 "tags": ["Whitelist"],
-                "summary": "Lấy access mode",
+                "summary": "Get access mode",
                 "operationId": "getAccessMode",
                 "responses": {"200": {"description": "Current access mode"}}
             },
@@ -720,13 +790,13 @@ fn generate_paths() -> serde_json::Value {
                         "properties": {"mode": {"type": "string", "enum": ["local_only", "whitelist", "interactive", "allow_all"]}}
                     }}}
                 },
-                "responses": {"200": {"description": "Đã cập nhật"}}
+                "responses": {"200": {"description": "Updated"}}
             }
         },
         "/api/whitelist/allow-lan": {
             "get": {
                 "tags": ["Whitelist"],
-                "summary": "Trạng thái allow-lan",
+                "summary": "allow-lan status",
                 "operationId": "getAllowLan",
                 "responses": {"200": {"description": "allow-lan status"}}
             },
@@ -741,13 +811,13 @@ fn generate_paths() -> serde_json::Value {
                         "properties": {"allow_lan": {"type": "boolean"}}
                     }}}
                 },
-                "responses": {"200": {"description": "Đã cập nhật"}}
+                "responses": {"200": {"description": "Updated"}}
             }
         },
         "/api/whitelist/pending": {
             "get": {
                 "tags": ["Whitelist"],
-                "summary": "Danh sách pending requests",
+                "summary": "Pending requests list",
                 "operationId": "getPendingWhitelist",
                 "responses": {"200": {"description": "Pending authorization requests"}}
             }
@@ -755,7 +825,7 @@ fn generate_paths() -> serde_json::Value {
         "/api/whitelist/pending/approve": {
             "post": {
                 "tags": ["Whitelist"],
-                "summary": "Chấp nhận pending request",
+                "summary": "Approve pending request",
                 "operationId": "approvePending",
                 "requestBody": {
                     "required": true,
@@ -765,13 +835,13 @@ fn generate_paths() -> serde_json::Value {
                         "properties": {"ip": {"type": "string"}}
                     }}}
                 },
-                "responses": {"200": {"description": "Đã chấp nhận"}}
+                "responses": {"200": {"description": "Approved"}}
             }
         },
         "/api/whitelist/pending/reject": {
             "post": {
                 "tags": ["Whitelist"],
-                "summary": "Từ chối pending request",
+                "summary": "Reject pending request",
                 "operationId": "rejectPending",
                 "requestBody": {
                     "required": true,
@@ -781,7 +851,7 @@ fn generate_paths() -> serde_json::Value {
                         "properties": {"ip": {"type": "string"}}
                     }}}
                 },
-                "responses": {"200": {"description": "Đã từ chối"}}
+                "responses": {"200": {"description": "Rejected"}}
             }
         },
 
@@ -791,61 +861,78 @@ fn generate_paths() -> serde_json::Value {
         "/api/config": {
             "get": {
                 "tags": ["Config"],
-                "summary": "Lấy toàn bộ cấu hình proxy",
+                "summary": "Get full proxy configuration",
                 "operationId": "getConfig",
-                "responses": {"200": {"description": "Cấu hình hiện tại"}}
+                "responses": {"200": {"description": "Current configuration"}}
             }
         },
         "/api/config/tls": {
             "get": {
                 "tags": ["Config"],
-                "summary": "Lấy cấu hình TLS interception",
+                "summary": "Get TLS interception configuration",
                 "operationId": "getTlsConfig",
-                "responses": {"200": {"description": "Cấu hình TLS"}}
+                "responses": {"200": {"description": "TLS configuration"}}
             },
             "put": {
                 "tags": ["Config"],
-                "summary": "Cập nhật cấu hình TLS",
+                "summary": "Update TLS configuration",
                 "operationId": "updateTlsConfig",
                 "requestBody": {
                     "required": true,
                     "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ConfigTlsRequest"}}}
                 },
-                "responses": {"200": {"description": "Đã cập nhật"}}
+                "responses": {"200": {"description": "Updated"}}
             }
         },
         "/api/config/server": {
             "get": {
                 "tags": ["Config"],
-                "summary": "Lấy cấu hình server",
+                "summary": "Get server configuration",
                 "operationId": "getServerConfig",
-                "responses": {"200": {"description": "Cấu hình server"}}
+                "responses": {"200": {"description": "Server configuration"}}
             },
             "put": {
                 "tags": ["Config"],
-                "summary": "Cập nhật cấu hình server",
+                "summary": "Update server configuration",
                 "operationId": "updateServerConfig",
-                "responses": {"200": {"description": "Đã cập nhật"}}
+                "responses": {"200": {"description": "Updated"}}
             }
         },
         "/api/config/performance": {
             "get": {
                 "tags": ["Config"],
-                "summary": "Lấy cấu hình hiệu năng",
+                "summary": "Get performance configuration",
+                "description": "Returns traffic performance settings plus Breakpoint auto-resume timeout and fixed safety bounds.",
                 "operationId": "getPerformanceConfig",
-                "responses": {"200": {"description": "Cấu hình hiệu năng"}}
+                "responses": {
+                    "200": {
+                        "description": "Performance configuration",
+                        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PerformanceConfig"}}}
+                    }
+                }
             },
             "put": {
                 "tags": ["Config"],
-                "summary": "Cập nhật cấu hình hiệu năng",
+                "summary": "Update performance configuration",
+                "description": "Partially updates performance settings. Breakpoint timeout is configured here so the global Breakpoint settings stay focused on enablement and capture limits.",
                 "operationId": "updatePerformanceConfig",
-                "responses": {"200": {"description": "Đã cập nhật"}}
+                "requestBody": {
+                    "required": true,
+                    "content": {"application/json": {"schema": {"$ref": "#/components/schemas/UpdatePerformanceConfigRequest"}}}
+                },
+                "responses": {
+                    "200": {
+                        "description": "Updated",
+                        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PerformanceConfig"}}}
+                    },
+                    "400": {"description": "Invalid performance value"}
+                }
             }
         },
         "/api/config/connections": {
             "get": {
                 "tags": ["Config"],
-                "summary": "Danh sách connections đang active",
+                "summary": "Active connections list",
                 "operationId": "listConnections",
                 "responses": {"200": {"description": "Active connections"}}
             }
@@ -853,7 +940,7 @@ fn generate_paths() -> serde_json::Value {
         "/api/config/connections/disconnect": {
             "post": {
                 "tags": ["Config"],
-                "summary": "Ngắt kết nối theo domain",
+                "summary": "Disconnect by domain",
                 "operationId": "disconnectByDomain",
                 "requestBody": {
                     "required": true,
@@ -863,15 +950,15 @@ fn generate_paths() -> serde_json::Value {
                         "properties": {"domain": {"type": "string"}}
                     }}}
                 },
-                "responses": {"200": {"description": "Đã ngắt kết nối"}}
+                "responses": {"200": {"description": "Disconnected"}}
             }
         },
         "/api/config/performance/clear-cache": {
             "delete": {
                 "tags": ["Config"],
-                "summary": "Xóa body cache",
+                "summary": "Clear body cache",
                 "operationId": "clearBodyCache",
-                "responses": {"200": {"description": "Đã xóa cache"}}
+                "responses": {"200": {"description": "Deleted cache"}}
             }
         },
 
@@ -881,11 +968,11 @@ fn generate_paths() -> serde_json::Value {
         "/api/system": {
             "get": {
                 "tags": ["System"],
-                "summary": "Thông tin hệ thống cơ bản",
+                "summary": "Basic system information",
                 "operationId": "getSystemInfo",
                 "responses": {
                     "200": {
-                        "description": "Thông tin hệ thống",
+                        "description": "System information",
                         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SystemOverview"}}}
                     }
                 }
@@ -894,15 +981,15 @@ fn generate_paths() -> serde_json::Value {
         "/api/system/overview": {
             "get": {
                 "tags": ["System"],
-                "summary": "Tổng quan (rules/traffic/pending count)",
+                "summary": "Overview (rules/traffic/pending count)",
                 "operationId": "getSystemOverview",
-                "responses": {"200": {"description": "Tổng quan hệ thống"}}
+                "responses": {"200": {"description": "System overview"}}
             }
         },
         "/api/system/memory": {
             "get": {
                 "tags": ["System"],
-                "summary": "Chẩn đoán bộ nhớ",
+                "summary": "Memory diagnostics",
                 "operationId": "getMemoryDiagnostics",
                 "responses": {"200": {"description": "Memory diagnostics"}}
             }
@@ -910,12 +997,12 @@ fn generate_paths() -> serde_json::Value {
         "/api/system/version-check": {
             "get": {
                 "tags": ["System"],
-                "summary": "Kiểm tra phiên bản mới",
+                "summary": "Check for a new version",
                 "operationId": "checkVersion",
                 "parameters": [
                     {"name": "refresh", "in": "query", "schema": {"type": "boolean"}}
                 ],
-                "responses": {"200": {"description": "Kết quả kiểm tra phiên bản"}}
+                "responses": {"200": {"description": "Version check result"}}
             }
         },
 
@@ -925,11 +1012,11 @@ fn generate_paths() -> serde_json::Value {
         "/api/cert": {
             "get": {
                 "tags": ["Cert"],
-                "summary": "Thông tin CA certificate",
+                "summary": "CA certificate information",
                 "operationId": "getCertInfo",
                 "responses": {
                     "200": {
-                        "description": "Thông tin cert",
+                        "description": "Certificate information",
                         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CertInfo"}}}
                     }
                 }
@@ -942,7 +1029,7 @@ fn generate_paths() -> serde_json::Value {
         "/api/proxy/address": {
             "get": {
                 "tags": ["Proxy"],
-                "summary": "Địa chỉ proxy (IP, QR...)",
+                "summary": "Proxy address (IP, QR, etc.)",
                 "operationId": "getProxyAddress",
                 "responses": {"200": {"description": "Proxy address info"}}
             }
@@ -950,13 +1037,13 @@ fn generate_paths() -> serde_json::Value {
         "/api/proxy/system": {
             "get": {
                 "tags": ["Proxy"],
-                "summary": "Trạng thái system proxy",
+                "summary": "System proxy status",
                 "operationId": "getSystemProxy",
                 "responses": {"200": {"description": "System proxy status"}}
             },
             "put": {
                 "tags": ["Proxy"],
-                "summary": "Bật/tắt system proxy",
+                "summary": "Enable or disable system proxy",
                 "operationId": "toggleSystemProxy",
                 "requestBody": {
                     "required": true,
@@ -970,7 +1057,7 @@ fn generate_paths() -> serde_json::Value {
                         }
                     }}}
                 },
-                "responses": {"200": {"description": "Đã cập nhật"}}
+                "responses": {"200": {"description": "Updated"}}
             }
         },
 
@@ -999,7 +1086,7 @@ fn generate_paths() -> serde_json::Value {
         "/api/metrics/apps": {
             "get": {
                 "tags": ["Metrics"],
-                "summary": "Metrics theo ứng dụng",
+                "summary": "Metrics by app",
                 "operationId": "getMetricsByApp",
                 "responses": {"200": {"description": "Per-app metrics"}}
             }
@@ -1007,7 +1094,7 @@ fn generate_paths() -> serde_json::Value {
         "/api/metrics/hosts": {
             "get": {
                 "tags": ["Metrics"],
-                "summary": "Metrics theo host",
+                "summary": "Metrics by host",
                 "operationId": "getMetricsByHost",
                 "responses": {"200": {"description": "Per-host metrics"}}
             }
@@ -1019,7 +1106,7 @@ fn generate_paths() -> serde_json::Value {
         "/api/ports": {
             "get": {
                 "tags": ["Ports"],
-                "summary": "Liệt kê temporary ports",
+                "summary": "List temporary ports",
                 "operationId": "listPorts",
                 "responses": {"200": {"description": "Temporary port bindings"}}
             },
@@ -1045,7 +1132,7 @@ fn generate_paths() -> serde_json::Value {
         "/api/ports/{port}": {
             "get": {
                 "tags": ["Ports"],
-                "summary": "Chi tiết temporary port",
+                "summary": "Temporary port details",
                 "operationId": "getPort",
                 "parameters": [
                     {"name": "port", "in": "path", "required": true, "schema": {"type": "integer"}}
@@ -1054,7 +1141,7 @@ fn generate_paths() -> serde_json::Value {
             },
             "delete": {
                 "tags": ["Ports"],
-                "summary": "Hủy temporary port",
+                "summary": "Destroy temporary port",
                 "operationId": "destroyPort",
                 "parameters": [
                     {"name": "port", "in": "path", "required": true, "schema": {"type": "integer"}}
@@ -1069,7 +1156,7 @@ fn generate_paths() -> serde_json::Value {
         "/api/replay/execute": {
             "post": {
                 "tags": ["Replay"],
-                "summary": "Thực thi replay request",
+                "summary": "Execute replay request",
                 "operationId": "executeReplay",
                 "requestBody": {
                     "required": true,
@@ -1081,25 +1168,25 @@ fn generate_paths() -> serde_json::Value {
         "/api/replay/requests": {
             "get": {
                 "tags": ["Replay"],
-                "summary": "Liệt kê replay requests",
+                "summary": "List replay requests",
                 "operationId": "listReplayRequests",
                 "responses": {"200": {"description": "Saved replay requests"}}
             },
             "post": {
                 "tags": ["Replay"],
-                "summary": "Lưu replay request",
+                "summary": "Save replay request",
                 "operationId": "saveReplayRequest",
                 "requestBody": {
                     "required": true,
                     "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ReplayRequest"}}}
                 },
-                "responses": {"200": {"description": "Đã lưu"}}
+                "responses": {"200": {"description": "Saved"}}
             }
         },
         "/api/replay/history": {
             "get": {
                 "tags": ["Replay"],
-                "summary": "Lịch sử replay",
+                "summary": "Replay history",
                 "operationId": "getReplayHistory",
                 "responses": {"200": {"description": "Replay history"}}
             }
@@ -1111,19 +1198,19 @@ fn generate_paths() -> serde_json::Value {
         "/api/notifications": {
             "get": {
                 "tags": ["Notifications"],
-                "summary": "Liệt kê notifications",
+                "summary": "List notifications",
                 "operationId": "listNotifications",
                 "parameters": [
                     {"name": "limit", "in": "query", "schema": {"type": "integer", "default": 50}},
                     {"name": "offset", "in": "query", "schema": {"type": "integer", "default": 0}}
                 ],
-                "responses": {"200": {"description": "Danh sách notifications"}}
+                "responses": {"200": {"description": "Notifications list"}}
             }
         },
         "/api/notifications/unread-count": {
             "get": {
                 "tags": ["Notifications"],
-                "summary": "Số notifications chưa đọc",
+                "summary": "Unread notification count",
                 "operationId": "getUnreadCount",
                 "responses": {"200": {"description": "Unread count"}}
             }
@@ -1131,19 +1218,19 @@ fn generate_paths() -> serde_json::Value {
         "/api/notifications/mark-all-read": {
             "post": {
                 "tags": ["Notifications"],
-                "summary": "Đánh dấu tất cả đã đọc",
+                "summary": "Mark all as read",
                 "operationId": "markAllRead",
-                "responses": {"200": {"description": "Đã đánh dấu"}}
+                "responses": {"200": {"description": "Marked"}}
             }
         },
 
         // ═══════════════════════════════════════════════════════
-        // Remote Invoke (cơ bản)
+        // Remote Invoke (basic)
         // ═══════════════════════════════════════════════════════
         "/api/remote-invoke/status": {
             "get": {
                 "tags": ["Remote"],
-                "summary": "Trạng thái remote invoke",
+                "summary": "Remote invoke status",
                 "operationId": "getRemoteStatus",
                 "responses": {"200": {"description": "Remote invoke status"}}
             }
@@ -1151,7 +1238,7 @@ fn generate_paths() -> serde_json::Value {
         "/api/remote-invoke/grants": {
             "get": {
                 "tags": ["Remote"],
-                "summary": "Danh sách grants",
+                "summary": "Grants list",
                 "operationId": "listGrants",
                 "responses": {"200": {"description": "Grants list"}}
             }
@@ -1159,7 +1246,7 @@ fn generate_paths() -> serde_json::Value {
         "/api/remote-invoke/grants/{id}": {
             "delete": {
                 "tags": ["Remote"],
-                "summary": "Thu hồi grant",
+                "summary": "Revoke grant",
                 "operationId": "revokeGrant",
                 "parameters": [
                     {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}
@@ -1174,7 +1261,7 @@ fn generate_paths() -> serde_json::Value {
         "/api/websocket/connections": {
             "get": {
                 "tags": ["WebSocket"],
-                "summary": "Danh sách WebSocket connections",
+                "summary": "WebSocket connections list",
                 "operationId": "listWsConnections",
                 "responses": {"200": {"description": "WebSocket connections"}}
             }
@@ -1186,10 +1273,67 @@ fn generate_paths() -> serde_json::Value {
         "/api/syntax": {
             "get": {
                 "tags": ["Reference"],
-                "summary": "Thông tin syntax (protocols, template vars, filters...)",
+                "summary": "Syntax information (protocols, template variables, filters, etc.)",
                 "operationId": "getSyntax",
                 "responses": {"200": {"description": "Syntax reference"}}
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn schema<'a>(spec: &'a OpenApiSpec, name: &str) -> &'a serde_json::Value {
+        spec.components["schemas"]
+            .get(name)
+            .unwrap_or_else(|| panic!("missing schema {name}"))
+    }
+
+    #[test]
+    fn breakpoint_openapi_documents_current_configuration_surface() {
+        let spec = generate_openapi_spec();
+
+        assert!(spec.paths.get("/api/breakpoint/settings").is_some());
+        assert!(spec.paths.get("/api/breakpoint/resume").is_some());
+        assert!(spec.paths.get("/api/rules").is_some());
+        assert!(spec.paths.get("/api/config/performance").is_some());
+
+        let settings = &schema(&spec, "BreakpointSettings")["properties"];
+        assert!(settings.get("enabled").is_some());
+        assert!(settings.get("max_body_bytes").is_some());
+        assert!(settings.get("hook_request").is_none());
+        assert!(settings.get("hook_response").is_none());
+        assert!(settings.get("timeout_ms").is_none());
+
+        let performance = &schema(&spec, "PerformanceBreakpointConfig")["properties"];
+        assert!(performance.get("timeout_ms").is_some());
+        assert!(performance.get("timeout_min_ms").is_some());
+        assert!(performance.get("timeout_max_ms").is_some());
+    }
+
+    #[test]
+    fn performance_openapi_exposes_fixed_breakpoint_timeout_bounds() {
+        let spec = generate_openapi_spec();
+        let request =
+            &schema(&spec, "UpdatePerformanceConfigRequest")["properties"]["breakpoint_timeout_ms"];
+
+        assert_eq!(request["minimum"].as_u64(), Some(MIN_BREAKPOINT_TIMEOUT_MS));
+        assert_eq!(request["maximum"].as_u64(), Some(MAX_BREAKPOINT_TIMEOUT_MS));
+
+        let get_response_schema = &spec.paths["/api/config/performance"]["get"]["responses"]["200"]
+            ["content"]["application/json"]["schema"];
+        assert_eq!(
+            get_response_schema["$ref"].as_str(),
+            Some("#/components/schemas/PerformanceConfig")
+        );
+
+        let put_request_schema = &spec.paths["/api/config/performance"]["put"]["requestBody"]
+            ["content"]["application/json"]["schema"];
+        assert_eq!(
+            put_request_schema["$ref"].as_str(),
+            Some("#/components/schemas/UpdatePerformanceConfigRequest")
+        );
+    }
 }

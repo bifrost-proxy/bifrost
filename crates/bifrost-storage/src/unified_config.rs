@@ -9,6 +9,9 @@ pub const MAX_TRAFFIC_MAX_RECORDS: usize = 100_000;
 
 pub const MIN_TRAFFIC_MAX_DB_SIZE_BYTES: u64 = 100 * 1024;
 pub const MAX_TRAFFIC_MAX_DB_SIZE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+pub const DEFAULT_BREAKPOINT_TIMEOUT_MS: u64 = 30_000;
+pub const MIN_BREAKPOINT_TIMEOUT_MS: u64 = 5_000;
+pub const MAX_BREAKPOINT_TIMEOUT_MS: u64 = 300_000;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -320,6 +323,7 @@ pub struct TrafficConfig {
     pub ws_payload_flush_bytes: usize,
     pub ws_payload_flush_interval_ms: u64,
     pub ws_payload_max_open_files: usize,
+    pub breakpoint_timeout_ms: u64,
 }
 
 impl Default for TrafficConfig {
@@ -338,6 +342,7 @@ impl Default for TrafficConfig {
             ws_payload_flush_bytes: 512 * 1024,
             ws_payload_flush_interval_ms: 1000,
             ws_payload_max_open_files: 128,
+            breakpoint_timeout_ms: DEFAULT_BREAKPOINT_TIMEOUT_MS,
         }
     }
 }
@@ -352,6 +357,9 @@ impl TrafficConfig {
         self.max_db_size_bytes = self
             .max_db_size_bytes
             .clamp(MIN_TRAFFIC_MAX_DB_SIZE_BYTES, MAX_TRAFFIC_MAX_DB_SIZE_BYTES);
+        self.breakpoint_timeout_ms = self
+            .breakpoint_timeout_ms
+            .clamp(MIN_BREAKPOINT_TIMEOUT_MS, MAX_BREAKPOINT_TIMEOUT_MS);
     }
 }
 
@@ -421,6 +429,7 @@ pub struct TrafficConfigUpdate {
     pub ws_payload_flush_bytes: Option<usize>,
     pub ws_payload_flush_interval_ms: Option<u64>,
     pub ws_payload_max_open_files: Option<usize>,
+    pub breakpoint_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

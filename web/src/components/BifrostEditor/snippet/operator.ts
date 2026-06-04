@@ -14,6 +14,7 @@ import {
   HTTP_METHODS,
   CACHE_VALUES,
   CONTENT_TYPES,
+  BREAKPOINT_VALUE_COMPLETIONS,
   getProtocolDoc,
   formatProtocolHover,
 } from './protocol-docs';
@@ -82,6 +83,18 @@ function getSnippetsForProtocol(
 
   if (name.toLowerCase() === 'devtools') {
     return [`${name}://`];
+  }
+
+  if (name.toLowerCase() === 'breakpoint') {
+    return [
+      `${name}://request`,
+      `${name}://req`,
+      `${name}://response`,
+      `${name}://res`,
+      `${name}://request,response`,
+      `${name}://both`,
+      `${name}://all`,
+    ];
   }
 
   switch (valueType) {
@@ -157,6 +170,12 @@ function getSnippetsForProtocol(
       return [`${name}://utf-8`, `${name}://\${1:charset}`];
     case 'empty':
       return [`${name}://`];
+    case 'request|response':
+      return [
+        `${name}://request`,
+        `${name}://response`,
+        `${name}://request,response`,
+      ];
     case 'string':
       return genSnippetInlineAndVar(name);
     case 'ip_address':
@@ -602,6 +621,19 @@ function getProtocolValueSuggestions(protocol: string, range: IRange): languages
       });
       break;
     }
+
+    case 'breakpoint':
+      BREAKPOINT_VALUE_COMPLETIONS.forEach(({ value, detail, documentation }, index) => {
+        suggestions.push({
+          ...base,
+          label: value,
+          detail,
+          documentation,
+          insertText: value,
+          sortText: String(index).padStart(2, '0'),
+        });
+      });
+      break;
 
     default: {
       const result = getProtocolDoc(protocol);

@@ -2583,13 +2583,29 @@ async fn handle_intercepted_request_with_protocol(
     };
 
     let request_body_is_streaming = streaming_body.is_some();
+    let request_hook_enabled = admin_state
+        .as_ref()
+        .map(|state| {
+            state.breakpoint_manager.is_enabled()
+                && super::breakpoint::breakpoint_request_rule_enabled(&resolved_rules)
+        })
+        .unwrap_or(false);
+    let mut request_body_omitted_for_breakpoint = false;
 
     if let Some(ref state) = admin_state {
-        if state.breakpoint_manager.hook_request_enabled() {
+        if request_hook_enabled {
             if body_bytes.is_empty() {
                 if let Some(body) = streaming_body.take() {
-                    if let Ok(collected) = body.collect().await {
-                        body_bytes = collected.to_bytes().to_vec();
+                    let should_collect = req_content_length
+                        .map(|len| state.breakpoint_manager.body_within_capture_limit(len))
+                        .unwrap_or(false);
+                    if should_collect {
+                        if let Ok(collected) = body.collect().await {
+                            body_bytes = collected.to_bytes().to_vec();
+                        }
+                    } else {
+                        request_body_omitted_for_breakpoint = true;
+                        streaming_body = Some(body);
                     }
                 }
             }
@@ -2642,24 +2658,36 @@ async fn handle_intercepted_request_with_protocol(
         }
     }
 
-    let mut edited_body = Bytes::from(body_bytes.clone());
-    super::breakpoint::breakpoint_request_hook(
-        &admin_state,
-        &push_manager,
-        req_id,
-        &method_str,
-        &original_uri,
-        &mut parts.headers,
-        Bytes::from(body_bytes.clone()),
-        &mut edited_body,
-    )
-    .await;
-    body_bytes = edited_body.to_vec();
-    normalize_req_headers(
-        &mut parts,
-        BodyMode::Known(body_bytes.len()),
-        req_content_length.is_some(),
-    );
+    if request_hook_enabled {
+        let hook_body = Bytes::from(body_bytes.clone());
+        let mut edited_body = hook_body.clone();
+        let outcome = super::breakpoint::breakpoint_request_hook(
+            &admin_state,
+            &push_manager,
+            req_id,
+            &method_str,
+            &original_uri,
+            &mut parts.headers,
+            hook_body,
+            req_content_length,
+            request_body_omitted_for_breakpoint,
+            &mut edited_body,
+        )
+        .await;
+        if outcome.body_replaced {
+            body_bytes = edited_body.to_vec();
+        }
+    }
+    let req_body_mode = if streaming_body.is_some() {
+        if let Some(len) = req_content_length {
+            BodyMode::StreamWithLength(len)
+        } else {
+            BodyMode::Stream
+        }
+    } else {
+        BodyMode::Known(body_bytes.len())
+    };
+    normalize_req_headers(&mut parts, req_body_mode, req_content_length.is_some());
     let request_body_size = if !body_bytes.is_empty() {
         body_bytes.len()
     } else {
@@ -3422,7 +3450,7 @@ async fn handle_intercepted_request_with_protocol(
         .collect();
     let output_res_content_encoding = get_content_encoding(&res_headers);
 
-    let needs_processing = needs_body_processing(&resolved_rules);
+    let needs_body_rules_processing = needs_body_processing(&resolved_rules);
     let res_content_type_str = res_parts
         .headers
         .get(hyper::header::CONTENT_TYPE)
@@ -3433,11 +3461,6 @@ async fn handle_intercepted_request_with_protocol(
         inject_bifrost_badge && res_content_type_str.starts_with("text/html");
     let force_body_processing_for_devtools =
         devtools_bridge_requested(&resolved_rules) && res_content_type_str.starts_with("text/html");
-    let needs_processing =
-        needs_processing || force_body_processing_for_badge || force_body_processing_for_devtools;
-    let has_res_body_override = resolved_rules.res_body.is_some();
-    let needs_res_body_read = needs_processing && !has_res_body_override;
-
     let is_websocket = res_parts.status == hyper::StatusCode::SWITCHING_PROTOCOLS
         && res_parts
             .headers
@@ -3472,6 +3495,35 @@ async fn handle_intercepted_request_with_protocol(
         should_use_binary_performance_mode(&res_parts, binary_traffic_performance_mode)
             && !is_websocket
             && !is_sse;
+    let response_breakpoint_enabled = admin_state
+        .as_ref()
+        .map(|state| {
+            state.breakpoint_manager.is_enabled()
+                && super::breakpoint::breakpoint_response_rule_enabled(&resolved_rules)
+        })
+        .unwrap_or(false);
+    let response_breakpoint_can_buffer_body = response_breakpoint_enabled
+        && !is_websocket
+        && !is_sse
+        && !skip_binary_recording
+        && admin_state
+            .as_ref()
+            .and_then(|state| {
+                res_content_length
+                    .map(|len| state.breakpoint_manager.body_within_capture_limit(len))
+            })
+            .unwrap_or(false);
+    let response_breakpoint_header_only = response_breakpoint_enabled
+        && !is_websocket
+        && !is_sse
+        && !skip_binary_recording
+        && !response_breakpoint_can_buffer_body;
+    let needs_processing = needs_body_rules_processing
+        || force_body_processing_for_badge
+        || force_body_processing_for_devtools
+        || response_breakpoint_can_buffer_body;
+    let has_res_body_override = resolved_rules.res_body.is_some();
+    let needs_res_body_read = needs_processing && !has_res_body_override;
 
     let mut res_body_too_large = false;
     let mut res_body_limit = max_body_buffer_size;
@@ -3741,13 +3793,43 @@ async fn handle_intercepted_request_with_protocol(
             }
         }
 
-        if is_sse {
-            let hook_enabled = admin_state
-                .as_ref()
-                .map(|s| s.breakpoint_manager.hook_response_enabled())
-                .unwrap_or(false);
+        if response_breakpoint_header_only {
+            let mut ignored_body = Bytes::new();
+            super::breakpoint::breakpoint_response_hook(
+                &admin_state,
+                &push_manager,
+                req_id,
+                &method_str,
+                &original_uri,
+                res_parts.status.as_u16(),
+                &mut res_parts.headers,
+                Bytes::new(),
+                res_content_length,
+                true,
+                &mut ignored_body,
+            )
+            .await;
+        }
 
-            if hook_enabled {
+        if is_sse {
+            let hook_enabled = response_breakpoint_enabled;
+            let can_buffer_sse_for_breakpoint = hook_enabled
+                && admin_state
+                    .as_ref()
+                    .and_then(|s| {
+                        res_content_length
+                            .map(|len| s.breakpoint_manager.body_within_capture_limit(len))
+                    })
+                    .unwrap_or(false);
+
+            if hook_enabled && !can_buffer_sse_for_breakpoint {
+                warn!(
+                    "[{}] Breakpoint: skipping SSE response hook because content length is unknown or exceeds the breakpoint body limit",
+                    req_id
+                );
+            }
+
+            if can_buffer_sse_for_breakpoint {
                 let res_body = res_body_incoming.take().unwrap();
                 let collected = res_body.collect().await;
                 if let Ok(collected) = collected {
@@ -3806,7 +3888,7 @@ async fn handle_intercepted_request_with_protocol(
                         });
                     }
 
-                    super::breakpoint::breakpoint_response_hook(
+                    let outcome = super::breakpoint::breakpoint_response_hook(
                         &admin_state,
                         &push_manager,
                         req_id,
@@ -3815,15 +3897,19 @@ async fn handle_intercepted_request_with_protocol(
                         res_parts.status.as_u16(),
                         &mut res_parts.headers,
                         final_body.clone(),
+                        Some(final_body.len()),
+                        false,
                         &mut final_body,
                     )
                     .await;
 
-                    normalize_res_headers(
-                        &mut res_parts,
-                        BodyMode::Known(final_body.len()),
-                        &method_str,
-                    );
+                    if outcome.body_replaced {
+                        normalize_res_headers(
+                            &mut res_parts,
+                            BodyMode::Known(final_body.len()),
+                            &method_str,
+                        );
+                    }
 
                     if let Some(ref state) = admin_state {
                         let mut record = TrafficRecord::new(
@@ -4380,7 +4466,7 @@ async fn handle_intercepted_request_with_protocol(
     };
 
     if let Some(ref state) = admin_state {
-        if state.breakpoint_manager.hook_response_enabled() {
+        if response_breakpoint_enabled {
             let final_status = res_parts.status.as_u16();
             let final_content_type = res_parts
                 .headers
@@ -4433,18 +4519,23 @@ async fn handle_intercepted_request_with_protocol(
         }
     }
 
-    super::breakpoint::breakpoint_response_hook(
-        &admin_state,
-        &push_manager,
-        req_id,
-        &method_str,
-        &original_uri,
-        res_parts.status.as_u16(),
-        &mut res_parts.headers,
-        final_body.clone(),
-        &mut final_body,
-    )
-    .await;
+    let response_hook_enabled = response_breakpoint_enabled;
+    if response_hook_enabled {
+        super::breakpoint::breakpoint_response_hook(
+            &admin_state,
+            &push_manager,
+            req_id,
+            &method_str,
+            &original_uri,
+            res_parts.status.as_u16(),
+            &mut res_parts.headers,
+            final_body.clone(),
+            Some(final_body.len()),
+            false,
+            &mut final_body,
+        )
+        .await;
+    }
 
     normalize_res_headers(
         &mut res_parts,

@@ -125,6 +125,10 @@ export default function AppLayout() {
     setThemeMode(isDark ? "light" : "dark");
   };
 
+  const handleOpenApiClick = () => {
+    window.open("/_bifrost/swagger", "_blank", "noopener,noreferrer");
+  };
+
   const styles: Record<string, CSSProperties> = {
     layout: {
       display: "flex",
@@ -256,6 +260,20 @@ export default function AppLayout() {
       color: token.colorPrimary,
       backgroundColor: token.colorPrimaryBg,
     },
+    openApiLink: {
+      flexShrink: 0,
+      marginBottom: 6,
+      padding: "2px 0",
+      width: 44,
+      borderRadius: 6,
+      color: token.colorTextSecondary,
+      cursor: "pointer",
+      fontSize: 9,
+      lineHeight: "12px",
+      textAlign: "center",
+      userSelect: "none",
+      transition: "all 0.2s",
+    },
     activeBorder: {
       position: "absolute",
       left: 0,
@@ -347,6 +365,14 @@ export default function AppLayout() {
                 </div>
               );
             })}
+          </div>
+          <div
+            data-testid="app-sidebar-openapi"
+            style={styles.openApiLink}
+            onClick={handleOpenApiClick}
+            title="Open OpenAPI documentation"
+          >
+            OpenAPI
           </div>
           <div
             data-testid="theme-toggle"

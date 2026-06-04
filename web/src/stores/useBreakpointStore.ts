@@ -21,12 +21,14 @@ interface PausedBreakpoint {
   headers: [string, string][];
   body: string | null;
   originalBody: string | null;
+  bodyOmitted: boolean;
+  bodySize?: number;
+  maxBodyBytes?: number;
 }
 
 interface BreakpointState {
   enabled: boolean;
-  hookRequest: boolean;
-  hookResponse: boolean;
+  maxBodyBytes: number;
   loading: boolean;
   pausedRequests: Map<string, PausedBreakpoint>;
   pausedResponses: Map<string, PausedBreakpoint>;
@@ -34,8 +36,6 @@ interface BreakpointState {
 
   fetchSettings: () => Promise<void>;
   toggleEnabled: (enabled: boolean) => Promise<void>;
-  toggleHookRequest: (hook: boolean) => Promise<void>;
-  toggleHookResponse: (hook: boolean) => Promise<void>;
   applySettings: (settings: BreakpointSettings) => void;
 
   addPausedRequest: (data: PausedBreakpoint) => void;
@@ -60,6 +60,7 @@ const applyResumeToTrafficDetail = (
   phase: string,
   headers: [string, string][],
   body?: string | null,
+  bodyOmitted = false,
 ) => {
   useTrafficStore.setState((state) => {
     if (state.currentRecord?.id !== requestId) {
@@ -67,9 +68,11 @@ const applyResumeToTrafficDetail = (
     }
 
     const fallbackBody =
-      body ??
-      (phase === "request" ? state.requestBody : state.responseBody) ??
-      null;
+      bodyOmitted
+        ? (phase === "request" ? state.requestBody : state.responseBody) ?? null
+        : body ??
+          (phase === "request" ? state.requestBody : state.responseBody) ??
+          null;
 
     if (phase === "request") {
       return {
@@ -106,8 +109,7 @@ const scheduleTrafficRefetch = (requestId: string, delay = 1000, retries = 5) =>
 
 export const useBreakpointStore = create<BreakpointState>((set, get) => ({
   enabled: false,
-  hookRequest: false,
-  hookResponse: false,
+  maxBodyBytes: 1024 * 1024,
   loading: false,
   pausedRequests: new Map(),
   pausedResponses: new Map(),
@@ -118,8 +120,7 @@ export const useBreakpointStore = create<BreakpointState>((set, get) => ({
       const settings = await getBreakpointSettings();
       set({
         enabled: settings.enabled,
-        hookRequest: settings.hook_request,
-        hookResponse: settings.hook_response,
+        maxBodyBytes: settings.max_body_bytes,
         loading: false,
       });
     } catch {
@@ -133,13 +134,11 @@ export const useBreakpointStore = create<BreakpointState>((set, get) => ({
     try {
       const settings = await updateBreakpointSettings({
         enabled,
-        hook_request: enabled || state.hookRequest,
-        hook_response: enabled || state.hookResponse,
+        max_body_bytes: state.maxBodyBytes,
       });
       set({
         enabled: settings.enabled,
-        hookRequest: settings.hook_request,
-        hookResponse: settings.hook_response,
+        maxBodyBytes: settings.max_body_bytes,
         loading: false,
       });
       if (!settings.enabled) {
@@ -150,47 +149,10 @@ export const useBreakpointStore = create<BreakpointState>((set, get) => ({
     }
   },
 
-  toggleHookRequest: async (hook: boolean) => {
-    const state = get();
-    set({ loading: true });
-    try {
-      const settings = await updateBreakpointSettings({
-        enabled: state.enabled,
-        hook_request: hook,
-        hook_response: state.hookResponse,
-      });
-      set({
-        hookRequest: settings.hook_request,
-        loading: false,
-      });
-    } catch {
-      set({ loading: false });
-    }
-  },
-
-  toggleHookResponse: async (hook: boolean) => {
-    const state = get();
-    set({ loading: true });
-    try {
-      const settings = await updateBreakpointSettings({
-        enabled: state.enabled,
-        hook_request: state.hookRequest,
-        hook_response: hook,
-      });
-      set({
-        hookResponse: settings.hook_response,
-        loading: false,
-      });
-    } catch {
-      set({ loading: false });
-    }
-  },
-
   applySettings: (settings: BreakpointSettings) => {
     set({
       enabled: settings.enabled,
-      hookRequest: settings.hook_request,
-      hookResponse: settings.hook_response,
+      maxBodyBytes: settings.max_body_bytes,
     });
     if (!settings.enabled) {
       set({ pausedRequests: new Map(), pausedResponses: new Map() });
@@ -214,6 +176,7 @@ export const useBreakpointStore = create<BreakpointState>((set, get) => ({
       const next = new Map(get().pausedRequests);
       const current = next.get(requestId);
       if (!current) return;
+      if (current.bodyOmitted) return;
       next.set(requestId, {
         ...current,
         body: body === (current.originalBody ?? "") ? null : body,
@@ -225,6 +188,7 @@ export const useBreakpointStore = create<BreakpointState>((set, get) => ({
     const next = new Map(get().pausedResponses);
     const current = next.get(requestId);
     if (!current) return;
+    if (current.bodyOmitted) return;
     next.set(requestId, {
       ...current,
       body: body === (current.originalBody ?? "") ? null : body,
@@ -252,7 +216,9 @@ export const useBreakpointStore = create<BreakpointState>((set, get) => ({
         : get().pausedResponses.get(requestId);
     try {
       const bodyToSend =
-        body ?? (pausedData?.body == null ? pausedData?.originalBody : pausedData.body) ?? undefined;
+        pausedData?.bodyOmitted
+          ? undefined
+          : body ?? (pausedData?.body == null ? pausedData?.originalBody : pausedData.body) ?? undefined;
       const result = await resumeBreakpoint({
         request_id: requestId,
         phase,
@@ -265,7 +231,8 @@ export const useBreakpointStore = create<BreakpointState>((set, get) => ({
           requestId,
           phase,
           headers,
-          bodyToSend ?? pausedData?.originalBody ?? null,
+          pausedData?.bodyOmitted ? null : bodyToSend ?? pausedData?.originalBody ?? null,
+          !!pausedData?.bodyOmitted,
         );
         get().removePaused(requestId);
         scheduleTrafficRefetch(requestId);
@@ -285,13 +252,14 @@ export const useBreakpointStore = create<BreakpointState>((set, get) => ({
 
     pushService.onBreakpointPaused((data: BreakpointPausedPushData) => {
       const detailState = useTrafficStore.getState();
+      const bodyOmitted = !!data.body_omitted;
       const fallbackBody =
         data.body ??
-        (data.phase === "request"
+        (!bodyOmitted && data.phase === "request"
           ? detailState.currentRecord?.id === data.request_id
             ? detailState.requestBody
             : null
-          : detailState.currentRecord?.id === data.request_id
+          : !bodyOmitted && detailState.currentRecord?.id === data.request_id
             ? detailState.responseBody
             : null) ??
         null;
@@ -303,6 +271,9 @@ export const useBreakpointStore = create<BreakpointState>((set, get) => ({
         headers: data.headers,
         body: null,
         originalBody: fallbackBody,
+        bodyOmitted,
+        bodySize: data.body_size,
+        maxBodyBytes: data.max_body_bytes,
       };
       if (data.phase === "request") {
         get().addPausedRequest(paused);
@@ -321,7 +292,7 @@ export const useBreakpointStore = create<BreakpointState>((set, get) => ({
               ...state.currentRecord,
               request_headers: data.headers,
             },
-            requestBody: fallbackBody ?? state.requestBody,
+            requestBody: bodyOmitted ? state.requestBody : fallbackBody ?? state.requestBody,
           };
         }
 
@@ -333,7 +304,7 @@ export const useBreakpointStore = create<BreakpointState>((set, get) => ({
             original_response_headers:
               state.currentRecord.original_response_headers ?? data.headers,
           },
-          responseBody: fallbackBody ?? state.responseBody,
+          responseBody: bodyOmitted ? state.responseBody : fallbackBody ?? state.responseBody,
         };
       });
     });
@@ -341,8 +312,7 @@ export const useBreakpointStore = create<BreakpointState>((set, get) => ({
     pushService.onBreakpointSettingsUpdated((data: BreakpointSettingsPushData) => {
       get().applySettings({
         enabled: data.enabled,
-        hook_request: data.hook_request,
-        hook_response: data.hook_response,
+        max_body_bytes: data.max_body_bytes,
       });
     });
 

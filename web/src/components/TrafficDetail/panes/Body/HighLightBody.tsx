@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, useCallback, useEffect } from 'react';
+import { lazy, Suspense, useMemo, useRef, useState, useCallback, useEffect } from 'react';
 import { theme, Button, Tooltip, message } from 'antd';
 import { CopyOutlined, FormatPainterOutlined } from '@ant-design/icons';
 import hljs from 'highlight.js/lib/core';
@@ -7,7 +7,6 @@ import xml from 'highlight.js/lib/languages/xml';
 import javascript from 'highlight.js/lib/languages/javascript';
 import css from 'highlight.js/lib/languages/css';
 import plaintext from 'highlight.js/lib/languages/plaintext';
-import Editor from '@monaco-editor/react';
 import '../../../../styles/hljs-github-theme.css';
 
 import type { RecordContentType, SessionTargetSearchState } from '../../../../types';
@@ -27,6 +26,8 @@ hljs.registerLanguage('html', xml);
 hljs.registerLanguage('javascript', javascript);
 hljs.registerLanguage('css', css);
 hljs.registerLanguage('plaintext', plaintext);
+
+const MonacoEditor = lazy(() => import('@monaco-editor/react'));
 
 /**
  * Pretty-print a JSON string by re-indenting the original text.
@@ -232,31 +233,43 @@ export const HighLightBody = ({
             />
           </Tooltip>
         </div>
-        <Editor
-          height={editorHeight}
-          language={monacoLang}
-          theme={resolvedTheme === 'dark' ? 'vs-dark' : 'light'}
-          defaultValue={formattedInitial}
-          onChange={(value) => onBodyChange?.(value ?? '')}
-          options={{
-            minimap: { enabled: false },
-            fontSize: 12,
-            lineNumbers: 'on',
-            scrollBeyondLastLine: false,
-            smoothScrolling: true,
-            automaticLayout: true,
-            tabSize: 2,
-            wordWrap: 'on',
-            readOnly: false,
-            padding: { top: 28, bottom: 4 },
-            scrollbar: {
-              vertical: 'auto',
-              horizontal: 'hidden',
-              verticalScrollbarSize: 4,
-              alwaysConsumeMouseWheel: false,
-            },
-          }}
-        />
+        <Suspense
+          fallback={
+            <div
+              style={{
+                height: editorHeight,
+                background: token.colorBgLayout,
+                borderRadius: 4,
+              }}
+            />
+          }
+        >
+          <MonacoEditor
+            height={editorHeight}
+            language={monacoLang}
+            theme={resolvedTheme === 'dark' ? 'vs-dark' : 'light'}
+            defaultValue={formattedInitial}
+            onChange={(value) => onBodyChange?.(value ?? '')}
+            options={{
+              minimap: { enabled: false },
+              fontSize: 12,
+              lineNumbers: 'on',
+              scrollBeyondLastLine: false,
+              smoothScrolling: true,
+              automaticLayout: true,
+              tabSize: 2,
+              wordWrap: 'on',
+              readOnly: false,
+              padding: { top: 28, bottom: 4 },
+              scrollbar: {
+                vertical: 'auto',
+                horizontal: 'hidden',
+                verticalScrollbarSize: 4,
+                alwaysConsumeMouseWheel: false,
+              },
+            }}
+          />
+        </Suspense>
       </div>
     );
   }

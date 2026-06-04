@@ -26,7 +26,7 @@ const SWAGGER_HTML: &str = r#"<!DOCTYPE html>
   <script>
     window.onload = function() {
       window.ui = SwaggerUIBundle({
-        url: "./openapi.json",
+        url: "/_bifrost/api/openapi.json",
         dom_id: '#swagger-ui',
         deepLinking: true,
         presets: [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],

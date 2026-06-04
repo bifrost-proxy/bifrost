@@ -1,8 +1,9 @@
 use bifrost_storage::{
     CollapsedSections, FilterPanelConfig, PinnedFilter, PinnedFilterType, SandboxConfigUpdate,
     SandboxFileConfigUpdate, SandboxLimitsConfigUpdate, SandboxNetConfigUpdate, ServerConfigUpdate,
-    TlsConfigUpdate, TrafficConfigUpdate, UiConfigUpdate, DEFAULT_TRAFFIC_MAX_RECORDS,
-    MAX_TRAFFIC_MAX_RECORDS, MIN_TRAFFIC_MAX_RECORDS,
+    TlsConfigUpdate, TrafficConfigUpdate, UiConfigUpdate, DEFAULT_BREAKPOINT_TIMEOUT_MS,
+    DEFAULT_TRAFFIC_MAX_RECORDS, MAX_BREAKPOINT_TIMEOUT_MS, MAX_TRAFFIC_MAX_RECORDS,
+    MIN_BREAKPOINT_TIMEOUT_MS, MIN_TRAFFIC_MAX_RECORDS,
 };
 use bytes::Bytes;
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
@@ -96,8 +97,16 @@ pub struct TrafficConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BreakpointPerformanceConfig {
+    pub timeout_ms: u64,
+    pub timeout_min_ms: u64,
+    pub timeout_max_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PerformanceConfigResponse {
     pub traffic: TrafficConfig,
+    pub breakpoint: BreakpointPerformanceConfig,
     pub body_store_stats: Option<BodyStoreStats>,
     pub frame_store_stats: Option<FrameStoreStats>,
     pub ws_payload_store_stats: Option<WsPayloadStoreStats>,
@@ -119,6 +128,7 @@ pub struct UpdateTrafficConfigRequest {
     pub ws_payload_flush_bytes: Option<usize>,
     pub ws_payload_flush_interval_ms: Option<u64>,
     pub ws_payload_max_open_files: Option<usize>,
+    pub breakpoint_timeout_ms: Option<u64>,
 }
 
 pub async fn handle_config(
@@ -785,9 +795,20 @@ async fn get_performance_config(state: SharedAdminState) -> Response<BoxBody> {
             ws_payload_max_open_files: 128,
         }
     };
+    let breakpoint_config = BreakpointPerformanceConfig {
+        timeout_ms: if let Some(ref config_manager) = state.config_manager {
+            let config = config_manager.config().await;
+            config.traffic.breakpoint_timeout_ms
+        } else {
+            DEFAULT_BREAKPOINT_TIMEOUT_MS
+        },
+        timeout_min_ms: MIN_BREAKPOINT_TIMEOUT_MS,
+        timeout_max_ms: MAX_BREAKPOINT_TIMEOUT_MS,
+    };
 
     let response = PerformanceConfigResponse {
         traffic: traffic_config,
+        breakpoint: breakpoint_config,
         body_store_stats,
         frame_store_stats,
         ws_payload_store_stats,
@@ -839,6 +860,18 @@ async fn update_performance_config(
         }
     }
 
+    if let Some(timeout_ms) = request.breakpoint_timeout_ms {
+        if !(MIN_BREAKPOINT_TIMEOUT_MS..=MAX_BREAKPOINT_TIMEOUT_MS).contains(&timeout_ms) {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!(
+                    "breakpoint_timeout_ms must be between {} and {}",
+                    MIN_BREAKPOINT_TIMEOUT_MS, MAX_BREAKPOINT_TIMEOUT_MS
+                ),
+            );
+        }
+    }
+
     if let Some(ref config_manager) = state.config_manager {
         let update = TrafficConfigUpdate {
             max_records: request.max_records,
@@ -854,6 +887,7 @@ async fn update_performance_config(
             ws_payload_flush_bytes: request.ws_payload_flush_bytes,
             ws_payload_flush_interval_ms: request.ws_payload_flush_interval_ms,
             ws_payload_max_open_files: request.ws_payload_max_open_files,
+            breakpoint_timeout_ms: request.breakpoint_timeout_ms,
         };
 
         if let Err(e) = config_manager.update_traffic_config(update).await {
@@ -913,6 +947,10 @@ async fn update_performance_config(
 
     if let Some(binary_traffic_performance_mode) = request.binary_traffic_performance_mode {
         state.set_binary_traffic_performance_mode(binary_traffic_performance_mode);
+    }
+
+    if let Some(timeout_ms) = request.breakpoint_timeout_ms {
+        state.breakpoint_manager.set_timeout_ms(timeout_ms);
     }
 
     get_performance_config(state).await

@@ -33,6 +33,7 @@ import {
   clearBodyCache,
   type TlsConfig,
   type ProxySettings,
+  type BreakpointPerformanceConfig,
   type PerformanceConfig,
   type TrafficConfig,
   type UpdateTrafficConfigRequest,
@@ -161,6 +162,8 @@ export default function Settings() {
     useState<PerformanceConfig | null>(null);
   const [perfLoading, setPerfLoading] = useState(false);
   const [perfDraft, setPerfDraft] = useState<TrafficConfig | null>(null);
+  const [breakpointPerfDraft, setBreakpointPerfDraft] =
+    useState<BreakpointPerformanceConfig | null>(null);
   const perfUpdateTimers = useRef<Record<string, number>>({});
   const [appMetrics, setAppMetrics] = useState<AppMetrics[]>([]);
   const [appMetricsLoading, setAppMetricsLoading] = useState(false);
@@ -246,6 +249,7 @@ export default function Settings() {
       const config = await getPerformanceConfig();
       setPerformanceConfig(config);
       setPerfDraft(config.traffic);
+      setBreakpointPerfDraft(config.breakpoint);
     } catch (error) {
       if (!suppressRestartErrors && !isConnectionIssueError(error)) {
         console.error("Failed to fetch performance config");
@@ -577,11 +581,13 @@ export default function Settings() {
         const result = await updatePerformanceConfig(payload);
         setPerformanceConfig(result);
         setPerfDraft(result.traffic);
+        setBreakpointPerfDraft(result.breakpoint);
         message.success(successMessage);
       } catch {
         message.error(errorMessage);
         if (performanceConfig) {
           setPerfDraft(performanceConfig.traffic);
+          setBreakpointPerfDraft(performanceConfig.breakpoint);
         }
       } finally {
         setPerfLoading(false);
@@ -672,6 +678,20 @@ export default function Settings() {
       { file_retention_days: value },
       `File retention updated to ${value} days`,
       "Failed to update file retention days",
+    );
+  };
+
+  const handleBreakpointTimeoutChange = (value: number) => {
+    setBreakpointPerfDraft((prev) => {
+      const base = prev ?? performanceConfig?.breakpoint;
+      if (!base) return prev;
+      return { ...base, timeout_ms: value };
+    });
+    schedulePerformanceUpdate(
+      "breakpoint_timeout_ms",
+      { breakpoint_timeout_ms: value },
+      `Breakpoint timeout updated to ${value}ms`,
+      "Failed to update breakpoint timeout",
     );
   };
 
@@ -983,6 +1003,7 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
     : 0;
 
   const trafficDraft = perfDraft ?? performanceConfig?.traffic;
+  const breakpointDraft = breakpointPerfDraft ?? performanceConfig?.breakpoint;
 
   const maxRecordsMin = 1000;
   const maxRecordsMax = 100000;
@@ -1024,6 +1045,14 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
     1,
     (value) => `${value}d`,
   );
+  const breakpointTimeoutMarks = breakpointDraft
+    ? buildSliderMarks(
+        breakpointDraft.timeout_min_ms,
+        breakpointDraft.timeout_max_ms,
+        1000,
+        (value) => `${Math.round(value / 1000)}s`,
+      )
+    : {};
 
   const tabItems = [
     {
@@ -1138,6 +1167,7 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
           perfLoading={perfLoading}
           performanceConfig={performanceConfig}
           trafficDraft={trafficDraft}
+          breakpointDraft={breakpointDraft}
           maxRecordsMin={maxRecordsMin}
           maxRecordsMax={maxRecordsMax}
           maxRecordsStep={maxRecordsStep}
@@ -1147,6 +1177,7 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
           maxBodyBufferMarks={maxBodyBufferMarks}
           maxBodyProbeMarks={maxBodyProbeMarks}
           fileRetentionMarks={fileRetentionMarks}
+          breakpointTimeoutMarks={breakpointTimeoutMarks}
           handleMaxRecordsChange={handleMaxRecordsChange}
           handleMaxDbSizeChange={handleMaxDbSizeChange}
           handleMaxBodyMemorySizeChange={handleMaxBodyMemorySizeChange}
@@ -1154,6 +1185,7 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
               handleMaxBodyProbeSizeChange={handleMaxBodyProbeSizeChange}
               handleEnableBinaryTrafficCaptureChange={handleEnableBinaryTrafficCaptureChange}
               handleFileRetentionDaysChange={handleFileRetentionDaysChange}
+              handleBreakpointTimeoutChange={handleBreakpointTimeoutChange}
               handleClearBodyCache={handleClearBodyCache}
               formatBytes={formatBytes}
         />

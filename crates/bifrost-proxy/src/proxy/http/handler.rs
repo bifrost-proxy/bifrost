@@ -1651,33 +1651,49 @@ pub async fn handle_http_request(
     };
     normalize_req_headers(&mut parts, req_body_mode, content_length.is_some());
 
-    let should_buffer_request_for_breakpoint = admin_state
+    let request_hook_enabled = admin_state
         .as_ref()
-        .map(|state| state.breakpoint_manager.hook_request_enabled())
+        .map(|state| {
+            state.breakpoint_manager.is_enabled()
+                && super::breakpoint::breakpoint_request_rule_enabled(&resolved_rules)
+        })
         .unwrap_or(false);
-    if should_buffer_request_for_breakpoint && final_body.is_empty() {
+    let mut request_body_omitted_for_breakpoint = false;
+    if request_hook_enabled && final_body.is_empty() {
         if let Some(body) = streaming_body.take() {
-            match body.collect().await {
-                Ok(collected) => {
-                    final_body = collected.to_bytes();
+            let should_collect = admin_state
+                .as_ref()
+                .and_then(|state| {
+                    content_length
+                        .map(|len| state.breakpoint_manager.body_within_capture_limit(len))
+                })
+                .unwrap_or(false);
+            if should_collect {
+                match body.collect().await {
+                    Ok(collected) => {
+                        final_body = collected.to_bytes();
+                    }
+                    Err(e) => {
+                        return Err(BifrostError::Network(format!(
+                            "Failed to read request body for breakpoint: {}",
+                            e
+                        )));
+                    }
                 }
-                Err(e) => {
-                    return Err(BifrostError::Network(format!(
-                        "Failed to read request body for breakpoint: {}",
-                        e
-                    )));
-                }
+                normalize_req_headers(
+                    &mut parts,
+                    BodyMode::Known(final_body.len()),
+                    content_length.is_some(),
+                );
+            } else {
+                request_body_omitted_for_breakpoint = true;
+                streaming_body = Some(body);
             }
-            normalize_req_headers(
-                &mut parts,
-                BodyMode::Known(final_body.len()),
-                content_length.is_some(),
-            );
         }
     }
 
     if let Some(ref state) = admin_state {
-        if state.breakpoint_manager.hook_request_enabled() {
+        if request_hook_enabled {
             let mut pending =
                 TrafficRecord::new(ctx.id_str().to_string(), method.clone(), url.clone());
             attach_devtools_client_req_id(&mut pending, &devtools_client_req_id);
@@ -1720,17 +1736,28 @@ pub async fn handle_http_request(
         }
     }
 
-    super::breakpoint::breakpoint_request_hook(
-        &admin_state,
-        &push_manager,
-        ctx.id_str(),
-        &method,
-        &url,
-        &mut parts.headers,
-        final_body.clone(),
-        &mut final_body,
-    )
-    .await;
+    if request_hook_enabled {
+        let outcome = super::breakpoint::breakpoint_request_hook(
+            &admin_state,
+            &push_manager,
+            ctx.id_str(),
+            &method,
+            &url,
+            &mut parts.headers,
+            final_body.clone(),
+            content_length,
+            request_body_omitted_for_breakpoint,
+            &mut final_body,
+        )
+        .await;
+        if outcome.body_replaced {
+            normalize_req_headers(
+                &mut parts,
+                BodyMode::Known(final_body.len()),
+                content_length.is_some(),
+            );
+        }
+    }
 
     let req_headers = headers_to_pairs(&parts.headers);
 
@@ -2413,11 +2440,9 @@ pub async fn handle_http_request(
         inject_bifrost_badge && res_content_type.starts_with("text/html");
     let force_body_processing_for_devtools =
         devtools_bridge_requested(&resolved_rules) && res_content_type.starts_with("text/html");
-    let needs_processing = needs_body_processing(&resolved_rules)
+    let base_needs_processing = needs_body_processing(&resolved_rules)
         || force_body_processing_for_badge
         || force_body_processing_for_devtools;
-    let has_res_body_override = resolved_rules.res_body.is_some();
-    let needs_res_body_read = needs_processing && !has_res_body_override;
 
     let is_websocket = res_parts.status == StatusCode::SWITCHING_PROTOCOLS
         && res_parts
@@ -2442,7 +2467,33 @@ pub async fn handle_http_request(
         should_use_binary_performance_mode(&res_parts, binary_traffic_performance_mode)
             && !is_websocket
             && !is_sse
-            && !needs_processing;
+            && !base_needs_processing;
+    let response_breakpoint_enabled = admin_state
+        .as_ref()
+        .map(|state| {
+            state.breakpoint_manager.is_enabled()
+                && super::breakpoint::breakpoint_response_rule_enabled(&resolved_rules)
+        })
+        .unwrap_or(false);
+    let response_breakpoint_can_buffer_body = response_breakpoint_enabled
+        && !is_websocket
+        && !is_sse
+        && !skip_binary_recording
+        && admin_state
+            .as_ref()
+            .and_then(|state| {
+                res_content_length
+                    .map(|len| state.breakpoint_manager.body_within_capture_limit(len))
+            })
+            .unwrap_or(false);
+    let response_breakpoint_header_only = response_breakpoint_enabled
+        && !is_websocket
+        && !is_sse
+        && !skip_binary_recording
+        && !response_breakpoint_can_buffer_body;
+    let needs_processing = base_needs_processing || response_breakpoint_can_buffer_body;
+    let has_res_body_override = resolved_rules.res_body.is_some();
+    let needs_res_body_read = needs_processing && !has_res_body_override;
     let metrics_only_forwarding = should_use_metrics_only_forwarding_mode(
         skip_binary_recording,
         has_rules,
@@ -2703,6 +2754,24 @@ pub async fn handle_http_request(
 
                 state.record_traffic(record);
             }
+        }
+
+        if response_breakpoint_header_only {
+            let mut ignored_body = Bytes::new();
+            super::breakpoint::breakpoint_response_hook(
+                &admin_state,
+                &push_manager,
+                ctx.id_str(),
+                &method,
+                &url,
+                res_parts.status.as_u16(),
+                &mut res_parts.headers,
+                Bytes::new(),
+                res_content_length,
+                true,
+                &mut ignored_body,
+            )
+            .await;
         }
 
         if is_sse {
@@ -3038,9 +3107,7 @@ pub async fn handle_http_request(
     );
 
     if let Some(ref state) = admin_state {
-        if state.breakpoint_manager.hook_response_enabled()
-            && !state.breakpoint_manager.hook_request_enabled()
-        {
+        if response_breakpoint_enabled && !request_hook_enabled {
             let mut pending =
                 TrafficRecord::new(ctx.id_str().to_string(), method.clone(), url.clone());
             attach_devtools_client_req_id(&mut pending, &devtools_client_req_id);
@@ -3058,7 +3125,7 @@ pub async fn handle_http_request(
             state.record_traffic(pending);
         }
 
-        if state.breakpoint_manager.hook_response_enabled() {
+        if response_breakpoint_enabled {
             let pause_total_ms = start_time.elapsed().as_millis() as u64;
             let pause_status = res_parts.status.as_u16();
             let pause_content_type = res_parts
@@ -3118,24 +3185,31 @@ pub async fn handle_http_request(
         }
     }
 
-    super::breakpoint::breakpoint_response_hook(
-        &admin_state,
-        &push_manager,
-        ctx.id_str(),
-        &method,
-        &url,
-        res_parts.status.as_u16(),
-        &mut res_parts.headers,
-        final_res_body.clone(),
-        &mut final_res_body,
-    )
-    .await;
+    let response_hook_enabled = response_breakpoint_enabled;
+    if response_hook_enabled {
+        let outcome = super::breakpoint::breakpoint_response_hook(
+            &admin_state,
+            &push_manager,
+            ctx.id_str(),
+            &method,
+            &url,
+            res_parts.status.as_u16(),
+            &mut res_parts.headers,
+            final_res_body.clone(),
+            Some(final_res_body.len()),
+            false,
+            &mut final_res_body,
+        )
+        .await;
 
-    normalize_res_headers(
-        &mut res_parts,
-        BodyMode::Known(final_res_body.len()),
-        &method,
-    );
+        if outcome.body_replaced {
+            normalize_res_headers(
+                &mut res_parts,
+                BodyMode::Known(final_res_body.len()),
+                &method,
+            );
+        }
+    }
 
     let total_ms = start_time.elapsed().as_millis() as u64;
 

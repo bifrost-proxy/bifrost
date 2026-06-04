@@ -91,6 +91,7 @@ pub enum Protocol {
     UpstreamUnsafeSsl,
     SniCallback,
     DevTools,
+    Breakpoint,
 
     // 直连/透传
     Passthrough,
@@ -142,6 +143,7 @@ pub const MULTI_MATCH_PROTOCOLS: &[Protocol] = &[
     Protocol::Delete,
     Protocol::Skip,
     Protocol::DevTools,
+    Protocol::Breakpoint,
 ];
 
 pub fn protocol_aliases() -> HashMap<&'static str, &'static str> {
@@ -358,6 +360,7 @@ impl Protocol {
             "upstreamUnsafeSsl" => Some(Protocol::UpstreamUnsafeSsl),
             "sniCallback" => Some(Protocol::SniCallback),
             "devtools" => Some(Protocol::DevTools),
+            "breakpoint" => Some(Protocol::Breakpoint),
             "passthrough" => Some(Protocol::Passthrough),
             "tunnel" => Some(Protocol::Tunnel),
             _ => None,
@@ -439,6 +442,7 @@ impl Protocol {
             Protocol::UpstreamUnsafeSsl => "upstreamUnsafeSsl",
             Protocol::SniCallback => "sniCallback",
             Protocol::DevTools => "devtools",
+            Protocol::Breakpoint => "breakpoint",
             Protocol::Passthrough => "passthrough",
             Protocol::Tunnel => "tunnel",
         }
@@ -452,6 +456,7 @@ impl Protocol {
             | Protocol::UpstreamUnsafeSsl
             | Protocol::SniCallback
             | Protocol::DevTools
+            | Protocol::Breakpoint
             | Protocol::Passthrough
             | Protocol::Tunnel
             | Protocol::Skip => ProtocolCategory::Control,
@@ -562,7 +567,7 @@ impl std::fmt::Display for Protocol {
     }
 }
 
-pub const ALL_PROTOCOLS: [Protocol; 75] = [
+pub const ALL_PROTOCOLS: [Protocol; 76] = [
     Protocol::Host,
     Protocol::XHost,
     Protocol::Http,
@@ -636,6 +641,7 @@ pub const ALL_PROTOCOLS: [Protocol; 75] = [
     Protocol::UpstreamUnsafeSsl,
     Protocol::SniCallback,
     Protocol::DevTools,
+    Protocol::Breakpoint,
     Protocol::Passthrough,
     Protocol::Tunnel,
 ];
@@ -646,7 +652,7 @@ mod tests {
 
     #[test]
     fn test_protocol_count() {
-        assert_eq!(ALL_PROTOCOLS.len(), 75);
+        assert_eq!(ALL_PROTOCOLS.len(), 76);
     }
 
     #[test]
@@ -725,6 +731,7 @@ mod tests {
             "upstreamUnsafeSsl",
             "sniCallback",
             "devtools",
+            "breakpoint",
             "passthrough",
             "tunnel",
         ];
@@ -734,7 +741,7 @@ mod tests {
             assert!(result.is_some(), "Failed to parse protocol: {}", name);
         }
 
-        assert_eq!(protocol_names.len(), 75);
+        assert_eq!(protocol_names.len(), 76);
     }
 
     #[test]
@@ -856,6 +863,7 @@ mod tests {
             ProtocolCategory::Control
         );
         assert_eq!(Protocol::DevTools.category(), ProtocolCategory::Control);
+        assert_eq!(Protocol::Breakpoint.category(), ProtocolCategory::Control);
     }
 
     #[test]

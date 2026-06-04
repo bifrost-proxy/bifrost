@@ -2,8 +2,7 @@ import { get, post } from "./client";
 
 export interface BreakpointSettings {
   enabled: boolean;
-  hook_request: boolean;
-  hook_response: boolean;
+  max_body_bytes: number;
 }
 
 export interface BreakpointEdit {

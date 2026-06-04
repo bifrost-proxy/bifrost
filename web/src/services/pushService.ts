@@ -150,12 +150,14 @@ export interface BreakpointPausedPushData {
   status?: number;
   headers: [string, string][];
   body?: string;
+  body_omitted?: boolean;
+  body_size?: number;
+  max_body_bytes?: number;
 }
 
 export interface BreakpointSettingsPushData {
   enabled: boolean;
-  hook_request: boolean;
-  hook_response: boolean;
+  max_body_bytes: number;
 }
 
 export interface BreakpointResumedPushData {

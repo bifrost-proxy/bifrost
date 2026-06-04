@@ -142,6 +142,9 @@ fn get_protocol_description(protocol: Protocol) -> &'static str {
         Protocol::UpstreamUnsafeSsl => "Allow insecure upstream HTTPS certificates for this rule",
         Protocol::SniCallback => "Configure SNI callback metadata for CONNECT requests",
         Protocol::DevTools => "Enable Bifrost DevTools discovery for matched pages",
+        Protocol::Breakpoint => {
+            "Authorize request or response breakpoint phases for matched traffic"
+        }
         Protocol::Passthrough => "Pass through without modification",
         Protocol::Tunnel => "Redirect CONNECT tunnel target",
     }
@@ -186,6 +189,7 @@ fn get_protocol_value_type(protocol: Protocol) -> &'static str {
         Protocol::UpstreamUnsafeSsl => "boolean",
         Protocol::SniCallback => "callback_spec",
         Protocol::DevTools => "empty",
+        Protocol::Breakpoint => "request|response",
         Protocol::Delete
         | Protocol::Skip
         | Protocol::ReqCors
@@ -285,6 +289,7 @@ fn get_protocol_example(protocol: Protocol) -> &'static str {
         Protocol::UpstreamUnsafeSsl => "upstreamUnsafeSsl://true",
         Protocol::SniCallback => "sniCallback://plugin(custom-sni)",
         Protocol::DevTools => "devtools://",
+        Protocol::Breakpoint => "breakpoint://request",
         Protocol::Passthrough => "passthrough://",
         Protocol::Tunnel => "tunnel://127.0.0.1:443",
     }
@@ -369,6 +374,7 @@ pub fn get_all_protocols() -> Vec<ProtocolInfo> {
         Protocol::UpstreamUnsafeSsl,
         Protocol::SniCallback,
         Protocol::DevTools,
+        Protocol::Breakpoint,
         Protocol::Tunnel,
         Protocol::Passthrough,
     ];

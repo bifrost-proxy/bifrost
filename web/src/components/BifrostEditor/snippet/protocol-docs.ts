@@ -8,6 +8,44 @@ export interface ProtocolDoc {
   category: 'redirect' | 'response' | 'request' | 'performance' | 'header' | 'script' | 'filter' | 'log' | 'other';
 }
 
+export const BREAKPOINT_VALUE_COMPLETIONS = [
+  {
+    value: 'request',
+    detail: 'Pause matched requests before sending upstream',
+    documentation: 'Requires the global Breakpoint switch to be on. Only traffic matching this rule pauses in the request phase.',
+  },
+  {
+    value: 'req',
+    detail: 'Alias for request',
+    documentation: 'Requires the global Breakpoint switch to be on. This is a short alias for the request phase.',
+  },
+  {
+    value: 'response',
+    detail: 'Pause matched responses before returning to the client',
+    documentation: 'Requires the global Breakpoint switch to be on. Only traffic matching this rule pauses in the response phase.',
+  },
+  {
+    value: 'res',
+    detail: 'Alias for response',
+    documentation: 'Requires the global Breakpoint switch to be on. This is a short alias for the response phase.',
+  },
+  {
+    value: 'request,response',
+    detail: 'Pause both request and response phases',
+    documentation: 'Use this for a two-step breakpoint. The request must be resumed before the response phase can pause.',
+  },
+  {
+    value: 'both',
+    detail: 'Alias for request,response',
+    documentation: 'Enables both request and response phase breakpoints for matched traffic.',
+  },
+  {
+    value: 'all',
+    detail: 'Alias for request,response',
+    documentation: 'Enables all supported breakpoint phases for matched traffic.',
+  },
+];
+
 export const PROTOCOL_DOCS: Record<string, ProtocolDoc> = {
   statusCode: {
     name: 'statusCode',
@@ -198,6 +236,19 @@ export const PROTOCOL_DOCS: Record<string, ProtocolDoc> = {
       'bp://https://example.com/parser.js?sha256=<sha256> decode://bp',
     ],
     category: 'script',
+  },
+  breakpoint: {
+    name: 'breakpoint',
+    description: 'Authorize matched traffic to pause in the Breakpoint UI when the global Breakpoint switch is enabled',
+    valueType: 'request | response | request,response | req | res | both | all',
+    valueDescription: 'Breakpoint phase for the matched rule. Empty or unknown values do not pause traffic.',
+    valueSyntax: 'Use breakpoint://request for request phase, breakpoint://response for response phase, or breakpoint://request,response for both. req/res/both/all are supported aliases. The toolbar switch is only the global gate.',
+    examples: [
+      'breakpoint://request',
+      'breakpoint://response',
+      'breakpoint://request,response',
+    ],
+    category: 'other',
   },
   includeFilter: {
     name: 'includeFilter',
