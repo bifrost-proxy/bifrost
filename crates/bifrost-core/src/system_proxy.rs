@@ -1,4 +1,6 @@
 use std::path::PathBuf;
+#[cfg(target_os = "macos")]
+use std::time::Instant;
 use sysproxy::Sysproxy;
 
 use crate::{BifrostError, Result};
@@ -358,6 +360,9 @@ impl SystemProxyManager {
             return Self::recover_from_crash(&self.data_dir);
         }
 
+        #[cfg(target_os = "macos")]
+        let managed_target = self.load_managed_state().ok().map(|state| state.target);
+
         let original = match self
             .original_proxy
             .take()
@@ -407,27 +412,8 @@ impl SystemProxyManager {
                 original_port = original.port,
                 "Restoring macOS system proxy to saved original state"
             );
-            let result = if original.enable {
-                set_macos_all_services_proxy(&original.host, original.port, &original.bypass)
-            } else {
-                disable_macos_all_services_proxy()
-            };
-            if let Err(e) = result {
-                let msg = e.to_string();
-                if msg.contains("RequiresAdmin") {
-                    if original.enable {
-                        set_macos_all_services_proxy_with_gui_auth(
-                            &original.host,
-                            original.port,
-                            &original.bypass,
-                        )?;
-                    } else {
-                        disable_macos_all_services_proxy_with_gui_auth()?;
-                    }
-                } else {
-                    return Err(e);
-                }
-            }
+            let original_backup = ProxyBackup::from(&original);
+            self.apply_proxy_backup_for_target(&original_backup, managed_target.as_ref())?;
         }
 
         #[cfg(not(target_os = "macos"))]
@@ -758,11 +744,13 @@ impl SystemProxyManager {
     }
 
     fn restore_or_disable_current(&mut self) -> Result<()> {
+        let managed_state = self.load_managed_state().ok();
+        let managed_target = managed_state.as_ref().map(|state| state.target.clone());
         let original = self
             .original_proxy
             .take()
             .map(|proxy| ProxyBackup::from(&proxy))
-            .or_else(|| self.load_managed_state().ok().map(|state| state.original))
+            .or_else(|| managed_state.map(|state| state.original))
             .or_else(|| {
                 self.load_backup()
                     .ok()
@@ -770,7 +758,7 @@ impl SystemProxyManager {
             });
 
         if let Some(original) = original {
-            self.apply_proxy_backup(&original)?;
+            self.apply_proxy_backup_for_target(&original, managed_target.as_ref())?;
         } else {
             self.force_disable()?;
             return Ok(());
@@ -782,31 +770,29 @@ impl SystemProxyManager {
     }
 
     fn apply_proxy_backup(&self, proxy: &ProxyBackup) -> Result<()> {
+        self.apply_proxy_backup_for_target(proxy, None)
+    }
+
+    fn apply_proxy_backup_for_target(
+        &self,
+        proxy: &ProxyBackup,
+        #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] target: Option<&ProxyBackup>,
+    ) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
             tracing::info!(
                 original_enabled = proxy.enable,
                 original_host = %proxy.host,
                 original_port = proxy.port,
+                target_host = target.map(|target| target.host.as_str()).unwrap_or(""),
+                target_port = target.map(|target| target.port).unwrap_or(0),
                 "Applying saved macOS system proxy backup"
             );
-            let result = if proxy.enable {
-                set_macos_all_services_proxy(&proxy.host, proxy.port, &proxy.bypass)
-            } else {
-                disable_macos_all_services_proxy()
-            };
+            let result = apply_macos_proxy_backup(proxy, target);
             if let Err(e) = result {
                 let msg = e.to_string();
                 if msg.contains("RequiresAdmin") {
-                    if proxy.enable {
-                        set_macos_all_services_proxy_with_gui_auth(
-                            &proxy.host,
-                            proxy.port,
-                            &proxy.bypass,
-                        )?;
-                    } else {
-                        disable_macos_all_services_proxy_with_gui_auth()?;
-                    }
+                    apply_macos_proxy_backup_with_gui_auth(proxy, target)?;
                 } else {
                     return Err(e);
                 }
@@ -877,7 +863,7 @@ impl SystemProxyManager {
                         original_port = state.original.port,
                         "Restoring original system proxy because current proxy still matches Bifrost managed target"
                     );
-                    manager.apply_proxy_backup(&state.original)?;
+                    manager.apply_proxy_backup_for_target(&state.original, Some(&state.target))?;
                     tracing::info!("Recovered Bifrost-managed system proxy from previous crash");
                 }
                 CrashRecoveryDecision::PreserveExternal => {
@@ -915,37 +901,7 @@ impl SystemProxyManager {
             "Legacy system proxy backup found during crash recovery"
         );
 
-        let proxy: Sysproxy = backup.into();
-        #[cfg(target_os = "macos")]
-        {
-            let result = if proxy.enable {
-                set_macos_all_services_proxy(&proxy.host, proxy.port, &proxy.bypass)
-            } else {
-                disable_macos_all_services_proxy()
-            };
-            if let Err(e) = result {
-                let msg = e.to_string();
-                if msg.contains("RequiresAdmin") {
-                    if proxy.enable {
-                        set_macos_all_services_proxy_with_gui_auth(
-                            &proxy.host,
-                            proxy.port,
-                            &proxy.bypass,
-                        )?;
-                    } else {
-                        disable_macos_all_services_proxy_with_gui_auth()?;
-                    }
-                } else {
-                    return Err(e);
-                }
-            }
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            proxy.set_system_proxy().map_err(|e| {
-                BifrostError::Config(format!("Failed to restore system proxy from crash: {}", e))
-            })?;
-        }
+        manager.apply_proxy_backup(&backup)?;
 
         std::fs::remove_file(&backup_path)?;
         tracing::info!("Recovered system proxy from previous crash");
@@ -1080,6 +1036,19 @@ fn macos_any_service_proxy_matches(host: &str, port: u16) -> Result<bool> {
 }
 
 #[cfg(target_os = "macos")]
+fn macos_services_proxy_matches(host: &str, port: u16) -> Result<Vec<String>> {
+    let mut matching_services = Vec::new();
+    for service in list_macos_services()? {
+        if macos_service_proxy_matches(&service, "-getwebproxy", host, port)?
+            || macos_service_proxy_matches(&service, "-getsecurewebproxy", host, port)?
+        {
+            matching_services.push(service);
+        }
+    }
+    Ok(matching_services)
+}
+
+#[cfg(target_os = "macos")]
 fn macos_all_services_proxy_match(host: &str, port: u16) -> Result<bool> {
     let services = list_macos_services()?;
     if services.is_empty() {
@@ -1099,11 +1068,22 @@ fn macos_all_services_proxy_match(host: &str, port: u16) -> Result<bool> {
 #[cfg(target_os = "macos")]
 fn set_macos_all_services_proxy(host: &str, port: u16, bypass: &str) -> Result<()> {
     let services = list_macos_services()?;
+    set_macos_services_proxy(&services, host, port, bypass)
+}
+
+#[cfg(target_os = "macos")]
+fn set_macos_services_proxy(
+    services: &[String],
+    host: &str,
+    port: u16,
+    bypass: &str,
+) -> Result<()> {
+    let started_at = Instant::now();
     tracing::info!(
         service_count = services.len(),
         requested_host = %host,
         requested_port = port,
-        "Setting macOS web proxies for all network services"
+        "Setting macOS web proxies for selected network services"
     );
     let bypass_domains: Vec<String> = bypass
         .split(',')
@@ -1111,6 +1091,7 @@ fn set_macos_all_services_proxy(host: &str, port: u16, bypass: &str) -> Result<(
         .filter(|s| !s.is_empty())
         .collect();
     for svc in services {
+        let service_started_at = Instant::now();
         tracing::info!(
             service = %svc,
             requested_host = %host,
@@ -1120,15 +1101,15 @@ fn set_macos_all_services_proxy(host: &str, port: u16, bypass: &str) -> Result<(
         // HTTP
         run_networksetup(
             "networksetup",
-            &["-setwebproxy", &svc, host, &port.to_string()],
+            &["-setwebproxy", svc, host, &port.to_string()],
         )?;
-        run_networksetup("networksetup", &["-setwebproxystate", &svc, "on"])?;
+        run_networksetup("networksetup", &["-setwebproxystate", svc, "on"])?;
         // HTTPS
         run_networksetup(
             "networksetup",
-            &["-setsecurewebproxy", &svc, host, &port.to_string()],
+            &["-setsecurewebproxy", svc, host, &port.to_string()],
         )?;
-        run_networksetup("networksetup", &["-setsecurewebproxystate", &svc, "on"])?;
+        run_networksetup("networksetup", &["-setsecurewebproxystate", svc, "on"])?;
         // Bypass
         if !bypass_domains.is_empty() {
             let mut args = vec!["-setproxybypassdomains".to_string(), svc.clone()];
@@ -1136,25 +1117,173 @@ fn set_macos_all_services_proxy(host: &str, port: u16, bypass: &str) -> Result<(
             let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
             run_networksetup("networksetup", &str_args)?;
         }
+        tracing::info!(
+            service = %svc,
+            elapsed_ms = service_started_at.elapsed().as_millis(),
+            "macOS network service proxy set completed"
+        );
     }
+    tracing::info!(
+        service_count = services.len(),
+        elapsed_ms = started_at.elapsed().as_millis(),
+        "macOS selected network service proxy set completed"
+    );
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
 fn disable_macos_all_services_proxy() -> Result<()> {
     let services = list_macos_services()?;
+    disable_macos_services_proxy(&services)
+}
+
+#[cfg(target_os = "macos")]
+fn disable_macos_services_proxy(services: &[String]) -> Result<()> {
+    let started_at = Instant::now();
     tracing::info!(
         service_count = services.len(),
-        "Disabling macOS web proxies for all network services"
+        "Disabling macOS web proxies for selected network services"
     );
     for svc in services {
+        let service_started_at = Instant::now();
         tracing::info!(
             service = %svc,
             "Disabling macOS network service web proxies"
         );
-        run_networksetup("networksetup", &["-setwebproxystate", &svc, "off"])?;
-        run_networksetup("networksetup", &["-setsecurewebproxystate", &svc, "off"])?;
+        run_networksetup("networksetup", &["-setwebproxystate", svc, "off"])?;
+        run_networksetup("networksetup", &["-setsecurewebproxystate", svc, "off"])?;
+        tracing::info!(
+            service = %svc,
+            elapsed_ms = service_started_at.elapsed().as_millis(),
+            "macOS network service proxy disable completed"
+        );
     }
+    tracing::info!(
+        service_count = services.len(),
+        elapsed_ms = started_at.elapsed().as_millis(),
+        "macOS selected network service proxy disable completed"
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn apply_macos_proxy_backup(proxy: &ProxyBackup, target: Option<&ProxyBackup>) -> Result<()> {
+    let services = if let Some(target) = target {
+        let services = macos_services_proxy_matches(&target.host, target.port)?;
+        tracing::info!(
+            target_host = %target.host,
+            target_port = target.port,
+            matching_service_count = services.len(),
+            "Selected macOS network services still pointing at Bifrost target for restore"
+        );
+        services
+    } else {
+        list_macos_services()?
+    };
+
+    if services.is_empty() {
+        tracing::info!(
+            target_host = target.map(|target| target.host.as_str()).unwrap_or(""),
+            target_port = target.map(|target| target.port).unwrap_or(0),
+            "No macOS network services require system proxy restore"
+        );
+        return Ok(());
+    }
+
+    if proxy.enable {
+        set_macos_services_proxy(&services, &proxy.host, proxy.port, &proxy.bypass)
+    } else {
+        disable_macos_services_proxy(&services)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn apply_macos_proxy_backup_with_gui_auth(
+    proxy: &ProxyBackup,
+    target: Option<&ProxyBackup>,
+) -> Result<()> {
+    let services = if let Some(target) = target {
+        let services = macos_services_proxy_matches(&target.host, target.port)?;
+        tracing::info!(
+            target_host = %target.host,
+            target_port = target.port,
+            matching_service_count = services.len(),
+            "Selected macOS network services still pointing at Bifrost target for GUI-auth restore"
+        );
+        services
+    } else {
+        list_macos_services()?
+    };
+
+    if services.is_empty() {
+        tracing::info!("No macOS network services require GUI-auth system proxy restore");
+        return Ok(());
+    }
+
+    if proxy.enable {
+        set_macos_services_proxy_with_gui_auth(&services, &proxy.host, proxy.port, &proxy.bypass)
+    } else {
+        disable_macos_services_proxy_with_gui_auth(&services)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn set_macos_services_proxy_with_gui_auth(
+    services: &[String],
+    host: &str,
+    port: u16,
+    bypass: &str,
+) -> Result<()> {
+    let started_at = Instant::now();
+    let bypass_domains: Vec<String> = bypass
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    for svc in services {
+        let service_started_at = Instant::now();
+        run_networksetup_with_gui_auth(&["-setwebproxy", svc, host, &port.to_string()])?;
+        run_networksetup_with_gui_auth(&["-setwebproxystate", svc, "on"])?;
+        run_networksetup_with_gui_auth(&["-setsecurewebproxy", svc, host, &port.to_string()])?;
+        run_networksetup_with_gui_auth(&["-setsecurewebproxystate", svc, "on"])?;
+        if !bypass_domains.is_empty() {
+            let mut args = vec!["-setproxybypassdomains".to_string(), svc.clone()];
+            args.extend(bypass_domains.iter().cloned());
+            let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            run_networksetup_with_gui_auth(&str_args)?;
+        }
+        tracing::info!(
+            service = %svc,
+            elapsed_ms = service_started_at.elapsed().as_millis(),
+            "macOS network service GUI-auth proxy set completed"
+        );
+    }
+    tracing::info!(
+        service_count = services.len(),
+        elapsed_ms = started_at.elapsed().as_millis(),
+        "macOS selected network service GUI-auth proxy set completed"
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn disable_macos_services_proxy_with_gui_auth(services: &[String]) -> Result<()> {
+    let started_at = Instant::now();
+    for svc in services {
+        let service_started_at = Instant::now();
+        run_networksetup_with_gui_auth(&["-setwebproxystate", svc, "off"])?;
+        run_networksetup_with_gui_auth(&["-setsecurewebproxystate", svc, "off"])?;
+        tracing::info!(
+            service = %svc,
+            elapsed_ms = service_started_at.elapsed().as_millis(),
+            "macOS network service GUI-auth proxy disable completed"
+        );
+    }
+    tracing::info!(
+        service_count = services.len(),
+        elapsed_ms = started_at.elapsed().as_millis(),
+        "macOS selected network service GUI-auth proxy disable completed"
+    );
     Ok(())
 }
 
@@ -1246,34 +1375,13 @@ pub fn set_macos_all_services_proxy_with_gui_auth(
     bypass: &str,
 ) -> Result<()> {
     let services = list_macos_services()?;
-    let bypass_domains: Vec<String> = bypass
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    for svc in services {
-        run_networksetup_with_gui_auth(&["-setwebproxy", &svc, host, &port.to_string()])?;
-        run_networksetup_with_gui_auth(&["-setwebproxystate", &svc, "on"])?;
-        run_networksetup_with_gui_auth(&["-setsecurewebproxy", &svc, host, &port.to_string()])?;
-        run_networksetup_with_gui_auth(&["-setsecurewebproxystate", &svc, "on"])?;
-        if !bypass_domains.is_empty() {
-            let mut args = vec!["-setproxybypassdomains".to_string(), svc.clone()];
-            args.extend(bypass_domains.iter().cloned());
-            let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            run_networksetup_with_gui_auth(&str_args)?;
-        }
-    }
-    Ok(())
+    set_macos_services_proxy_with_gui_auth(&services, host, port, bypass)
 }
 
 #[cfg(target_os = "macos")]
 pub fn disable_macos_all_services_proxy_with_gui_auth() -> Result<()> {
     let services = list_macos_services()?;
-    for svc in services {
-        run_networksetup_with_gui_auth(&["-setwebproxystate", &svc, "off"])?;
-        run_networksetup_with_gui_auth(&["-setsecurewebproxystate", &svc, "off"])?;
-    }
-    Ok(())
+    disable_macos_services_proxy_with_gui_auth(&services)
 }
 
 #[cfg(target_os = "macos")]

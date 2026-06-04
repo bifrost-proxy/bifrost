@@ -41,6 +41,13 @@ const ASYNC_TRAFFIC_BUFFER_SIZE: usize = 10000;
 const MAX_PORT_INCREMENT_ATTEMPTS: u16 = 64;
 const PORT_REBIND_OLD_LISTENER_GRACE_PERIOD: Duration = Duration::from_millis(250);
 const SYSTEM_PROXY_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
+#[cfg(target_os = "macos")]
+const SYSTEM_PROXY_WAKE_CHECK_INTERVAL: Duration = Duration::from_secs(2);
+#[cfg(target_os = "macos")]
+const SYSTEM_PROXY_WAKE_GAP_THRESHOLD: Duration = Duration::from_secs(10);
+#[cfg(target_os = "macos")]
+const SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER_ENV: &str =
+    "BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER";
 
 fn parse_yes_no_answer(input: &str) -> Option<bool> {
     match input.trim().to_ascii_lowercase().as_str() {
@@ -365,6 +372,135 @@ fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
         });
 }
 
+#[cfg(target_os = "macos")]
+fn spawn_system_proxy_wake_reconcile_task(config: SystemProxyReconcileConfig) {
+    let SystemProxyReconcileConfig {
+        system_proxy_manager,
+        should_enable,
+        proxy_host,
+        proxy_port,
+        system_proxy_bypass,
+        enabled_flag,
+        stop_flag,
+        ..
+    } = config;
+
+    if !should_enable {
+        return;
+    }
+
+    let _ = std::thread::Builder::new()
+        .name("bifrost-system-proxy-wake-reconcile".to_string())
+        .spawn(move || {
+            let mut last_check = Instant::now();
+            while !stop_flag.load(Ordering::Acquire) {
+                std::thread::sleep(SYSTEM_PROXY_WAKE_CHECK_INTERVAL);
+                if stop_flag.load(Ordering::Acquire) {
+                    return;
+                }
+
+                let gap = last_check.elapsed();
+                last_check = Instant::now();
+                if gap < SYSTEM_PROXY_WAKE_GAP_THRESHOLD {
+                    continue;
+                }
+
+                tracing::info!(
+                    target: "bifrost_cli::startup",
+                    elapsed_since_last_check_ms = gap.as_millis() as u64,
+                    "system proxy scheduler or wake gap detected; reconciling immediately"
+                );
+                let lock_started_at = Instant::now();
+                let mut manager = system_proxy_manager.blocking_write();
+                tracing::info!(
+                    target: "bifrost_cli::startup",
+                    wait_elapsed_ms = lock_started_at.elapsed().as_millis() as u64,
+                    "acquired_system_proxy_lock for wake reconcile"
+                );
+                match manager.enable(&proxy_host, proxy_port, Some(&system_proxy_bypass)) {
+                    Ok(()) => {
+                        enabled_flag.store(true, Ordering::Release);
+                        tracing::info!(
+                            target: "bifrost_cli::startup",
+                            host = %proxy_host,
+                            port = proxy_port,
+                            "system proxy wake reconcile completed"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "bifrost_cli::startup",
+                            error = %error,
+                            "system proxy wake reconcile failed"
+                        );
+                    }
+                }
+            }
+        });
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_system_proxy_lifecycle_helper(
+    bifrost_dir: PathBuf,
+    parent_pid: u32,
+) -> Option<std::process::Child> {
+    if std::env::var(SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER_ENV)
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        tracing::info!(
+            target: "bifrost_cli::shutdown",
+            env = SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER_ENV,
+            "system proxy lifecycle helper disabled by environment"
+        );
+        return None;
+    }
+
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(error) => {
+            tracing::warn!(
+                target: "bifrost_cli::shutdown",
+                error = %error,
+                "failed to resolve current executable for system proxy lifecycle helper"
+            );
+            return None;
+        }
+    };
+
+    match std::process::Command::new(exe)
+        .arg("system-proxy")
+        .arg("lifecycle-helper")
+        .arg("--data-dir")
+        .arg(bifrost_dir)
+        .arg("--parent-pid")
+        .arg(parent_pid.to_string())
+        .arg("--poll-secs")
+        .arg("2")
+        .stdin(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => {
+            tracing::info!(
+                target: "bifrost_cli::shutdown",
+                helper_pid = child.id(),
+                parent_pid,
+                "system proxy lifecycle cleanup helper started"
+            );
+            Some(child)
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "bifrost_cli::shutdown",
+                error = %error,
+                parent_pid,
+                "failed to start system proxy lifecycle cleanup helper"
+            );
+            None
+        }
+    }
+}
+
 fn is_port_in_use(host: &str, port: u16) -> bool {
     let check_host = if host == "0.0.0.0" || host == "::" {
         "127.0.0.1"
@@ -547,7 +683,18 @@ impl Drop for SystemProxyRestoreGuard {
             "system proxy restore guard triggered; stopping reconcile before restore"
         );
         self.stop_flag.store(true, Ordering::Release);
-        if let Err(e) = self.system_proxy_manager.blocking_write().restore() {
+        let lock_started_at = Instant::now();
+        tracing::info!(
+            target: "bifrost_cli::shutdown",
+            "waiting_for_system_proxy_lock in restore guard"
+        );
+        let mut manager = self.system_proxy_manager.blocking_write();
+        tracing::info!(
+            target: "bifrost_cli::shutdown",
+            wait_elapsed_ms = lock_started_at.elapsed().as_millis() as u64,
+            "acquired_system_proxy_lock in restore guard"
+        );
+        if let Err(e) = manager.restore() {
             eprintln!("Failed to restore system proxy: {}", e);
             tracing::warn!(
                 target: "bifrost_cli::shutdown",
@@ -577,7 +724,19 @@ async fn restore_system_proxy_on_shutdown(
         "system proxy shutdown restore starting; stopping reconcile first"
     );
     stop_flag.store(true, Ordering::Release);
+    let lock_started_at = Instant::now();
+    tracing::info!(
+        target: "bifrost_cli::shutdown",
+        context,
+        "waiting_for_system_proxy_lock"
+    );
     let mut manager = system_proxy_manager.write().await;
+    tracing::info!(
+        target: "bifrost_cli::shutdown",
+        context,
+        wait_elapsed_ms = lock_started_at.elapsed().as_millis() as u64,
+        "acquired_system_proxy_lock"
+    );
     match manager.restore() {
         Ok(()) => {
             enabled_flag.store(false, Ordering::Release);
@@ -1492,6 +1651,25 @@ pub fn run_foreground(
             } else {
                 base_config.host.clone()
             };
+            #[cfg(target_os = "macos")]
+            let _system_proxy_lifecycle_helper = if enable_system_proxy {
+                spawn_system_proxy_lifecycle_helper(bifrost_dir.clone(), pid)
+            } else {
+                None
+            };
+            #[cfg(target_os = "macos")]
+            spawn_system_proxy_wake_reconcile_task(SystemProxyReconcileConfig {
+                bifrost_dir: bifrost_dir.clone(),
+                system_proxy_manager: system_proxy_manager.clone(),
+                should_enable: enable_system_proxy,
+                proxy_host: system_proxy_host.clone(),
+                proxy_port: current_port,
+                system_proxy_bypass: system_proxy_bypass.clone(),
+                enabled_flag: system_proxy_enabled.clone(),
+                stop_flag: system_proxy_reconcile_stop.clone(),
+                daemon_mode: false,
+            });
+
             spawn_system_proxy_reconcile_task(SystemProxyReconcileConfig {
                 bifrost_dir: bifrost_dir.clone(),
                 system_proxy_manager: system_proxy_manager.clone(),
@@ -2293,6 +2471,28 @@ pub fn run_daemon(
                         Some(temporary_port_manager),
                     );
 
+                    #[cfg(target_os = "macos")]
+                    let _system_proxy_lifecycle_helper = if enable_system_proxy {
+                        spawn_system_proxy_lifecycle_helper(
+                            bifrost_dir.clone(),
+                            std::process::id(),
+                        )
+                    } else {
+                        None
+                    };
+                    #[cfg(target_os = "macos")]
+                    spawn_system_proxy_wake_reconcile_task(SystemProxyReconcileConfig {
+                        bifrost_dir: bifrost_dir.clone(),
+                        system_proxy_manager: system_proxy_manager.clone(),
+                        should_enable: enable_system_proxy,
+                        proxy_host: system_proxy_host.clone(),
+                        proxy_port: system_proxy_port,
+                        system_proxy_bypass: system_proxy_bypass.clone(),
+                        enabled_flag: system_proxy_enabled.clone(),
+                        stop_flag: system_proxy_reconcile_stop.clone(),
+                        daemon_mode: true,
+                    });
+
                     spawn_system_proxy_reconcile_task(SystemProxyReconcileConfig {
                         bifrost_dir: bifrost_dir.clone(),
                         system_proxy_manager: system_proxy_manager.clone(),
@@ -2362,7 +2562,20 @@ pub fn run_daemon(
                 }
             }
             system_proxy_reconcile_stop.store(true, Ordering::Release);
-            if let Err(e) = system_proxy_manager.blocking_write().restore() {
+            let lock_started_at = Instant::now();
+            tracing::info!(
+                target: "bifrost_cli::shutdown",
+                context = "daemon fork fallback",
+                "waiting_for_system_proxy_lock"
+            );
+            let mut manager = system_proxy_manager.blocking_write();
+            tracing::info!(
+                target: "bifrost_cli::shutdown",
+                context = "daemon fork fallback",
+                wait_elapsed_ms = lock_started_at.elapsed().as_millis() as u64,
+                "acquired_system_proxy_lock"
+            );
+            if let Err(e) = manager.restore() {
                 eprintln!("Failed to restore system proxy: {}", e);
             }
 

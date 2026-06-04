@@ -533,7 +533,9 @@ test_sleep_wake_style_reconcile() {
 
 test_crash_recovery() {
     stop_proxy
+    export BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER=1
     start_proxy_with_system_proxy
+    unset BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER
     if [[ -n "$PROXY_PID" ]]; then
         kill_pid_force "$PROXY_PID"
         wait_pid "$PROXY_PID"
@@ -584,9 +586,39 @@ test_crash_recovery() {
     esac
 }
 
+test_lifecycle_helper_cleans_after_parent_crash() {
+    stop_proxy
+    unset BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER
+    start_proxy_with_system_proxy
+    if [[ -n "$PROXY_PID" ]]; then
+        kill_pid_force "$PROXY_PID"
+        wait_pid "$PROXY_PID"
+    fi
+    PROXY_PID=""
+    rm -f "${TEST_DATA_DIR}/bifrost.pid" "${TEST_DATA_DIR}/runtime.json" 2>/dev/null || true
+
+    case "$PLATFORM" in
+        Darwin)
+            if wait_for_condition 45 1 macos_check_proxy_not_pointing_to "127.0.0.1" "$PROXY_PORT"; then
+                _log_pass "macOS: 独立 lifecycle helper 已在主进程崩溃后清理 Bifrost 系统代理"
+                passed=$((passed + 1))
+            else
+                _log_fail "macOS: 独立 lifecycle helper 未清理主进程崩溃残留系统代理" "不指向 127.0.0.1:${PROXY_PORT}" "$(macos_proxy_snapshot); log=$(tail -n 80 "${TEST_DATA_DIR}/proxy.log" 2>/dev/null || true)"
+                failed=$((failed + 1))
+            fi
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            _log_pass "Windows: lifecycle helper 为 macOS 关机兜底路径，跳过"
+            passed=$((passed + 1))
+            ;;
+    esac
+}
+
 test_crash_recovery_runs_before_start_failure() {
     stop_proxy
+    export BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER=1
     start_proxy_with_system_proxy
+    unset BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER
     if [[ -n "$PROXY_PID" ]]; then
         kill_pid_force "$PROXY_PID"
         wait_pid "$PROXY_PID"
@@ -675,6 +707,7 @@ main() {
     test_restore_on_exit
     test_sleep_wake_style_reconcile
     test_crash_recovery
+    test_lifecycle_helper_cleans_after_parent_crash
     test_crash_recovery_runs_before_start_failure
 
     print_test_summary || exit 1

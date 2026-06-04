@@ -1826,6 +1826,20 @@ pub enum SystemProxyCommands {
     },
     #[command(about = "Disable system proxy")]
     Disable,
+    #[command(hide = true, about = "Run system proxy lifecycle cleanup helper")]
+    LifecycleHelper {
+        #[arg(long, value_hint = ValueHint::DirPath)]
+        data_dir: PathBuf,
+        #[arg(long)]
+        parent_pid: Option<u32>,
+        #[arg(long, default_value_t = 2)]
+        poll_secs: u64,
+    },
+    #[command(hide = true, about = "Clean stale Bifrost-managed system proxy state")]
+    Cleanup {
+        #[arg(long, value_hint = ValueHint::DirPath)]
+        data_dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Clone)]
