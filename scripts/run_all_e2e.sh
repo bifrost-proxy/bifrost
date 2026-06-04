@@ -301,17 +301,11 @@ heartbeat_while_running() {
   local command_pid="$2"
   local log_file="$3"
   local start_ts="$4"
-  local tick=0
+  local interval="${BIFROST_E2E_HEARTBEAT_INTERVAL:-30}"
 
   while kill -0 "$command_pid" 2>/dev/null; do
-    sleep 1
+    sleep "$interval"
     kill -0 "$command_pid" 2>/dev/null || break
-    tick=$((tick + 1))
-
-    if (( tick < 30 )); then
-      continue
-    fi
-    tick=0
 
     local now_ts
     local elapsed
