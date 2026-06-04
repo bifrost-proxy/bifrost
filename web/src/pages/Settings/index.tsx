@@ -145,10 +145,14 @@ export default function Settings() {
 
   const {
     systemProxy,
+    systemProxyLaunchd,
     cliProxy,
     loading: systemProxyLoading,
+    launchdLoading: systemProxyLaunchdLoading,
     toggleSystemProxy,
+    toggleSystemProxyLaunchd,
     fetchSystemProxy,
+    fetchSystemProxyLaunchd,
     fetchCliProxy,
   } = useProxyStore();
   const [tlsConfig, setTlsConfig] = useState<TlsConfig | null>(null);
@@ -333,6 +337,20 @@ export default function Settings() {
     } else {
       const proxyError = useProxyStore.getState().error;
       message.error(proxyError || "Failed to toggle system proxy");
+    }
+  };
+
+  const handleSystemProxyLaunchdToggle = async (enabled: boolean) => {
+    const success = await toggleSystemProxyLaunchd(enabled);
+    if (success) {
+      message.success(
+        enabled
+          ? "System proxy cleanup fallback installed"
+          : "System proxy cleanup fallback removed",
+      );
+    } else {
+      const proxyError = useProxyStore.getState().error;
+      message.error(proxyError || "Failed to update cleanup fallback");
     }
   };
 
@@ -717,6 +735,7 @@ export default function Settings() {
           fetchTlsConfigData(),
           fetchProxyAddressInfo(),
           fetchSystemProxy(),
+          fetchSystemProxyLaunchd(),
           fetchCliProxy(),
           fetchPerformanceConfig(),
         ]);
@@ -757,6 +776,7 @@ export default function Settings() {
     fetchProxySettings,
     fetchSyncStatusData,
     fetchSystemProxy,
+    fetchSystemProxyLaunchd,
     fetchTlsConfigData,
     fetchWhitelistStatus,
   ]);
@@ -1074,10 +1094,13 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
                 setDesktopPortDraft={setDesktopPortDraft}
                 onApplyDesktopProxyPort={handleDesktopProxyPortApply}
                 systemProxy={systemProxy}
+                systemProxyLaunchd={systemProxyLaunchd}
                 cliProxy={cliProxy}
                 systemProxyLoading={systemProxyLoading}
-          onToggleSystemProxy={handleSystemProxyToggle}
-          copyProxyConfig={copyProxyConfig}
+                systemProxyLaunchdLoading={systemProxyLaunchdLoading}
+                onToggleSystemProxy={handleSystemProxyToggle}
+                onToggleSystemProxyLaunchd={handleSystemProxyLaunchdToggle}
+                copyProxyConfig={copyProxyConfig}
           overview={overview}
           proxyAddressInfo={proxyAddressInfo}
           tlsConfig={tlsConfig}

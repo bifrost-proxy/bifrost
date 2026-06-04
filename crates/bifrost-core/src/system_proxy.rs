@@ -346,6 +346,15 @@ impl SystemProxyManager {
             .is_some_and(|state| current.target_matches(&state.target.host, state.target.port))
     }
 
+    pub fn managed_target_has_live_listener(data_dir: &std::path::Path) -> bool {
+        let manager = Self::new(data_dir.to_path_buf());
+        let Ok(state) = manager.load_managed_state() else {
+            return false;
+        };
+
+        managed_target_listener_is_alive(&state.target)
+    }
+
     pub fn restore(&mut self) -> Result<()> {
         if !Self::is_supported() {
             return Ok(());
@@ -925,6 +934,34 @@ fn decide_managed_state_recovery(
     } else {
         CrashRecoveryDecision::PreserveExternal
     }
+}
+
+fn managed_target_listener_is_alive(target: &ProxyBackup) -> bool {
+    if !target.enable || target.port == 0 {
+        return false;
+    }
+    let host = match normalize_proxy_host(&target.host).as_str() {
+        "" | "0.0.0.0" | "::" => "127.0.0.1".to_string(),
+        host => host.to_string(),
+    };
+    let address = format!("{host}:{}", target.port);
+    let Ok(socket_addr) = address.parse() else {
+        return false;
+    };
+    let timeout = std::time::Duration::from_millis(750);
+    for attempt in 1..=3 {
+        if std::net::TcpStream::connect_timeout(&socket_addr, timeout).is_ok() {
+            tracing::info!(
+                target_host = %target.host,
+                target_port = target.port,
+                attempt,
+                "Managed system proxy target still has a live listener"
+            );
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+    false
 }
 
 fn proxy_hosts_match(left: &str, right: &str) -> bool {
@@ -1739,6 +1776,20 @@ mod tests {
         };
 
         assert!(!backup.target_matches("127.0.0.1", 8800));
+    }
+
+    #[test]
+    fn managed_target_listener_detects_live_loopback_port() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("local addr").port();
+        let target = ProxyBackup {
+            enable: true,
+            host: "127.0.0.1".to_string(),
+            port,
+            bypass: String::new(),
+        };
+
+        assert!(managed_target_listener_is_alive(&target));
     }
 
     #[test]

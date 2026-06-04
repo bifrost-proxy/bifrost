@@ -42,6 +42,39 @@ struct SystemProxySupportStatus {
 }
 
 #[derive(Serialize)]
+struct SystemProxyLaunchdApiStatus {
+    supported: bool,
+    installed: bool,
+    loaded: bool,
+    label: String,
+    plist_path: String,
+    program: Option<String>,
+    data_dir: Option<String>,
+    installed_version: Option<String>,
+    current_version: String,
+    needs_upgrade: bool,
+    message: Option<String>,
+}
+
+impl From<bifrost_core::SystemProxyLaunchdStatus> for SystemProxyLaunchdApiStatus {
+    fn from(status: bifrost_core::SystemProxyLaunchdStatus) -> Self {
+        Self {
+            supported: status.supported,
+            installed: status.installed,
+            loaded: status.loaded,
+            label: status.label,
+            plist_path: status.plist_path.display().to_string(),
+            program: status.program.map(|path| path.display().to_string()),
+            data_dir: status.data_dir.map(|path| path.display().to_string()),
+            installed_version: status.installed_version,
+            current_version: status.current_version,
+            needs_upgrade: status.needs_upgrade,
+            message: status.message,
+        }
+    }
+}
+
+#[derive(Serialize)]
 struct CliProxyStatus {
     enabled: bool,
     shell: String,
@@ -53,6 +86,11 @@ struct CliProxyStatus {
 struct SetSystemProxyRequest {
     enabled: bool,
     bypass: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SetSystemProxyLaunchdRequest {
+    enabled: bool,
 }
 
 #[derive(Serialize)]
@@ -91,6 +129,11 @@ pub async fn handle_proxy(
         },
         "/api/proxy/system/support" => match method {
             Method::GET => get_system_proxy_support().await,
+            _ => method_not_allowed(),
+        },
+        "/api/proxy/system/launchd" | "/api/proxy/system/launchd/" => match method {
+            Method::GET => get_system_proxy_launchd_status(state).await,
+            Method::PUT => set_system_proxy_launchd(req, state).await,
             _ => method_not_allowed(),
         },
         "/api/proxy/address" | "/api/proxy/address/" => match method {
@@ -360,6 +403,152 @@ async fn get_system_proxy_support() -> Response<BoxBody> {
         platform: get_platform_name(),
     };
     json_response(&status)
+}
+
+async fn get_system_proxy_launchd_status(state: SharedAdminState) -> Response<BoxBody> {
+    let Some(config_manager) = &state.config_manager else {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Config manager not available",
+        );
+    };
+    let config = match bifrost_core::SystemProxyLaunchdConfig::new(
+        None,
+        None,
+        config_manager.data_dir().to_path_buf(),
+        None,
+    ) {
+        Ok(config) => config,
+        Err(error) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!(
+                    "Failed to prepare system proxy LaunchDaemon config: {}",
+                    error
+                ),
+            );
+        }
+    };
+    match bifrost_core::launchd_status_for_config(&config) {
+        Ok(status) => json_response(&SystemProxyLaunchdApiStatus::from(status)),
+        Err(error) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Failed to get system proxy LaunchDaemon status: {}", error),
+        ),
+    }
+}
+
+async fn set_system_proxy_launchd(
+    req: Request<Incoming>,
+    state: SharedAdminState,
+) -> Response<BoxBody> {
+    use http_body_util::BodyExt;
+
+    let body = match req.collect().await {
+        Ok(b) => b.to_bytes(),
+        Err(e) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Failed to read body: {}", e),
+            )
+        }
+    };
+
+    let request: SetSystemProxyLaunchdRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e)),
+    };
+
+    let result = if request.enabled {
+        install_system_proxy_launchd_from_state(&state)
+    } else {
+        match bifrost_core::uninstall_launchd_cleanup(None, None) {
+            Ok(status) => Ok(status),
+            Err(error) if error.to_string().contains("RequiresAdmin") => {
+                bifrost_core::uninstall_launchd_cleanup_with_gui_auth(None, None, None)
+            }
+            Err(error) => Err(error),
+        }
+    };
+
+    match result {
+        Ok(status) => json_response(&SystemProxyLaunchdApiStatus::from(status)),
+        Err(error) if error.to_string().contains("RequiresAdmin") => {
+            #[derive(Serialize)]
+            struct AdminError {
+                error: &'static str,
+                message: String,
+                suggested_command: Option<String>,
+            }
+            let suggested_command = if request.enabled {
+                suggested_launchd_install_command(&state)
+            } else {
+                std::env::current_exe()
+                    .ok()
+                    .map(|exe| format!("sudo {} system-proxy launchd uninstall", exe.display()))
+            };
+            json_response_with_status(
+                StatusCode::FORBIDDEN,
+                &AdminError {
+                    error: "requires_admin",
+                    message: "Installing or uninstalling the macOS system proxy cleanup LaunchDaemon requires administrator privileges.".to_string(),
+                    suggested_command,
+                },
+            )
+        }
+        Err(error) if error.to_string().contains("UserCancelled") => {
+            #[derive(Serialize)]
+            struct UserCancelledError {
+                error: &'static str,
+                message: &'static str,
+            }
+            json_response_with_status(
+                StatusCode::FORBIDDEN,
+                &UserCancelledError {
+                    error: "user_cancelled",
+                    message: "Authorization was cancelled by user.",
+                },
+            )
+        }
+        Err(error) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Failed to update system proxy LaunchDaemon: {}", error),
+        ),
+    }
+}
+
+fn install_system_proxy_launchd_from_state(
+    state: &SharedAdminState,
+) -> bifrost_core::Result<bifrost_core::SystemProxyLaunchdStatus> {
+    let Some(config_manager) = &state.config_manager else {
+        return Err(bifrost_core::BifrostError::Config(
+            "Config manager not available".to_string(),
+        ));
+    };
+    let config = bifrost_core::SystemProxyLaunchdConfig::new(
+        None,
+        None,
+        config_manager.data_dir().to_path_buf(),
+        None,
+    )?;
+    match bifrost_core::install_launchd_cleanup(&config) {
+        Ok(status) => Ok(status),
+        Err(error) if error.to_string().contains("RequiresAdmin") => {
+            bifrost_core::install_launchd_cleanup_with_gui_auth(&config)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn suggested_launchd_install_command(state: &SharedAdminState) -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let data_dir = state.config_manager.as_ref()?.data_dir();
+    Some(format!(
+        "sudo {} system-proxy launchd install --data-dir {} --program {}",
+        exe.display(),
+        data_dir.display(),
+        exe.display()
+    ))
 }
 
 fn get_platform_name() -> String {

@@ -126,9 +126,11 @@ const StatusBar = memo(function StatusBar() {
 
   const proxyStatus = useMemo(() => {
     if (!systemProxy) return { text: "Unknown", running: false };
+    const managedByCurrentBifrost =
+      systemProxy.enabled && systemProxy.managed_by_bifrost !== false;
     return {
-      text: systemProxy.enabled ? "Running" : "Stopped",
-      running: systemProxy.enabled,
+      text: managedByCurrentBifrost ? "Running" : "Stopped",
+      running: managedByCurrentBifrost,
     };
   }, [systemProxy]);
 
@@ -141,6 +143,10 @@ const StatusBar = memo(function StatusBar() {
 
   const proxyPopoverContent = useMemo(() => {
     if (!systemProxy) return null;
+    const managedByCurrentBifrost =
+      systemProxy.enabled && systemProxy.managed_by_bifrost !== false;
+    const ownedByOther =
+      systemProxy.enabled && systemProxy.managed_by_bifrost === false;
     if (!systemProxy.supported) {
       return (
         <div style={{ fontSize: 12, color: token.colorTextSecondary }}>
@@ -160,12 +166,26 @@ const StatusBar = memo(function StatusBar() {
           <span style={{ fontSize: 12 }}>System Proxy</span>
           <Switch
             size="small"
-            checked={systemProxy.enabled}
+            checked={managedByCurrentBifrost}
             loading={proxyLoading}
             onChange={handleToggleSystemProxy}
           />
         </div>
-        {systemProxy.enabled && (
+        {ownedByOther ? (
+          <div
+            style={{
+              fontSize: 11,
+              color: token.colorWarningText,
+              background: token.colorWarningBg,
+              border: `1px solid ${token.colorWarningBorder}`,
+              borderRadius: 6,
+              padding: "6px 8px",
+              marginTop: 6,
+            }}
+          >
+            Managed by another proxy: {systemProxy.host}:{systemProxy.port}
+          </div>
+        ) : managedByCurrentBifrost ? (
           <div
             style={{
               fontSize: 11,
@@ -176,7 +196,7 @@ const StatusBar = memo(function StatusBar() {
           >
             {systemProxy.host}:{systemProxy.port}
           </div>
-        )}
+        ) : null}
       </div>
     );
   }, [systemProxy, proxyLoading, handleToggleSystemProxy, token]);

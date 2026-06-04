@@ -1826,6 +1826,12 @@ pub enum SystemProxyCommands {
     },
     #[command(about = "Disable system proxy")]
     Disable,
+    #[cfg(target_os = "macos")]
+    #[command(about = "Manage macOS LaunchDaemon cleanup fallback")]
+    Launchd {
+        #[command(subcommand)]
+        action: SystemProxyLaunchdCommands,
+    },
     #[command(hide = true, about = "Run system proxy lifecycle cleanup helper")]
     LifecycleHelper {
         #[arg(long, value_hint = ValueHint::DirPath)]
@@ -1839,6 +1845,46 @@ pub enum SystemProxyCommands {
     Cleanup {
         #[arg(long, value_hint = ValueHint::DirPath)]
         data_dir: Option<PathBuf>,
+    },
+    #[cfg(target_os = "macos")]
+    #[command(hide = true, about = "Run macOS system proxy launchd cleanup daemon")]
+    CleanupDaemon {
+        #[arg(long, value_hint = ValueHint::DirPath)]
+        data_dir: PathBuf,
+        #[arg(long)]
+        installed_version: Option<String>,
+    },
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Subcommand, Clone)]
+pub enum SystemProxyLaunchdCommands {
+    #[command(about = "Show macOS LaunchDaemon cleanup fallback status")]
+    Status {
+        #[arg(long, help = "LaunchDaemon label")]
+        label: Option<String>,
+        #[arg(long, value_hint = ValueHint::FilePath, help = "LaunchDaemon plist path")]
+        plist_path: Option<PathBuf>,
+    },
+    #[command(about = "Install or repair macOS LaunchDaemon cleanup fallback")]
+    Install {
+        #[arg(long, value_hint = ValueHint::DirPath, help = "Bifrost data directory to clean")]
+        data_dir: Option<PathBuf>,
+        #[arg(long, value_hint = ValueHint::FilePath, help = "Bifrost executable path")]
+        program: Option<PathBuf>,
+        #[arg(long, help = "LaunchDaemon label")]
+        label: Option<String>,
+        #[arg(long, value_hint = ValueHint::FilePath, help = "LaunchDaemon plist path")]
+        plist_path: Option<PathBuf>,
+        #[arg(long, help = "Print the plist without installing it")]
+        dry_run: bool,
+    },
+    #[command(about = "Uninstall macOS LaunchDaemon cleanup fallback")]
+    Uninstall {
+        #[arg(long, help = "LaunchDaemon label")]
+        label: Option<String>,
+        #[arg(long, value_hint = ValueHint::FilePath, help = "LaunchDaemon plist path")]
+        plist_path: Option<PathBuf>,
     },
 }
 

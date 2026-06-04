@@ -277,6 +277,8 @@ macos_set_external_http_proxy() {
     while IFS= read -r svc; do
         networksetup -setwebproxy "$svc" "$host" "$port" >/dev/null 2>&1 || return 1
         networksetup -setwebproxystate "$svc" on >/dev/null 2>&1 || return 1
+        networksetup -setsecurewebproxy "$svc" "$host" "$port" >/dev/null 2>&1 || return 1
+        networksetup -setsecurewebproxystate "$svc" on >/dev/null 2>&1 || return 1
     done < <(macos_find_services)
 }
 
@@ -284,7 +286,53 @@ macos_clear_http_proxy() {
     local svc
     while IFS= read -r svc; do
         networksetup -setwebproxystate "$svc" off >/dev/null 2>&1 || return 1
+        networksetup -setsecurewebproxystate "$svc" off >/dev/null 2>&1 || return 1
     done < <(macos_find_services)
+}
+
+macos_save_proxy_snapshot_file() {
+    local file="$1"
+    : > "$file"
+    local svc
+    while IFS= read -r svc; do
+        local web secure web_enabled web_host web_port secure_enabled secure_host secure_port
+        web="$(networksetup -getwebproxy "$svc" 2>/dev/null || true)"
+        secure="$(networksetup -getsecurewebproxy "$svc" 2>/dev/null || true)"
+        web_enabled="$(echo "$web" | grep -i '^Enabled:' | awk '{print $2}')"
+        web_host="$(echo "$web" | grep -i '^Server:' | awk '{print $2}')"
+        web_port="$(echo "$web" | grep -i '^Port:' | awk '{print $2}')"
+        secure_enabled="$(echo "$secure" | grep -i '^Enabled:' | awk '{print $2}')"
+        secure_host="$(echo "$secure" | grep -i '^Server:' | awk '{print $2}')"
+        secure_port="$(echo "$secure" | grep -i '^Port:' | awk '{print $2}')"
+        printf '%s|%s|%s|%s|%s|%s|%s\n' \
+            "$svc" "$web_enabled" "$web_host" "$web_port" "$secure_enabled" "$secure_host" "$secure_port" >> "$file"
+    done < <(macos_find_services)
+}
+
+macos_restore_proxy_snapshot_file() {
+    local file="$1"
+    [[ -f "$file" ]] || return 0
+
+    local svc web_enabled web_host web_port secure_enabled secure_host secure_port
+    while IFS='|' read -r svc web_enabled web_host web_port secure_enabled secure_host secure_port; do
+        if [[ -n "$web_host" && -n "$web_port" ]]; then
+            networksetup -setwebproxy "$svc" "$web_host" "$web_port" >/dev/null 2>&1 || return 1
+        fi
+        if [[ "$web_enabled" == "Yes" ]]; then
+            networksetup -setwebproxystate "$svc" on >/dev/null 2>&1 || return 1
+        else
+            networksetup -setwebproxystate "$svc" off >/dev/null 2>&1 || return 1
+        fi
+
+        if [[ -n "$secure_host" && -n "$secure_port" ]]; then
+            networksetup -setsecurewebproxy "$svc" "$secure_host" "$secure_port" >/dev/null 2>&1 || return 1
+        fi
+        if [[ "$secure_enabled" == "Yes" ]]; then
+            networksetup -setsecurewebproxystate "$svc" on >/dev/null 2>&1 || return 1
+        else
+            networksetup -setsecurewebproxystate "$svc" off >/dev/null 2>&1 || return 1
+        fi
+    done < "$file"
 }
 
 macos_clear_web_and_secure_proxy() {
@@ -352,6 +400,25 @@ macos_wait_proxy_disabled() {
     wait_for_condition "$timeout" 1 macos_check_proxy_disabled_for_all_services
 }
 
+macos_system_proxy_status_json() {
+    curl -s "http://${ADMIN_HOST}:${ADMIN_PORT}${ADMIN_PATH_PREFIX}/api/proxy/system" || true
+}
+
+macos_enable_system_proxy_api() {
+    curl -s -X PUT "http://${ADMIN_HOST}:${ADMIN_PORT}${ADMIN_PATH_PREFIX}/api/proxy/system" \
+        -H 'Content-Type: application/json' \
+        -d '{"enabled":true}' >/dev/null
+}
+
+macos_ensure_bifrost_system_proxy_enabled() {
+    if macos_wait_proxy_enabled "127.0.0.1" "$PROXY_PORT" 10; then
+        return 0
+    fi
+
+    macos_enable_system_proxy_api
+    macos_wait_proxy_enabled "127.0.0.1" "$PROXY_PORT" 45
+}
+
 windows_wait_proxy_enabled() {
     local expected="$1"
     local timeout="${2:-30}"
@@ -386,12 +453,15 @@ test_external_proxy_not_disabled_without_bifrost_ownership() {
     rm -f "${TEST_DATA_DIR}/proxy_backup.json" "${TEST_DATA_DIR}/proxy_state.json" 2>/dev/null || true
     local external_host="127.0.0.1"
     local external_port="$((PROXY_PORT + 127))"
+    local previous_snapshot="${TEST_DATA_DIR}/macos-proxy-before-external-fixture.txt"
 
     case "$PLATFORM" in
         Darwin)
+            macos_save_proxy_snapshot_file "$previous_snapshot" || true
             if ! macos_set_external_http_proxy "$external_host" "$external_port"; then
                 _log_fail "macOS: 无法设置外部系统代理夹具" "${external_host}:${external_port}" "$(macos_proxy_snapshot)"
                 failed=$((failed + 1))
+                macos_restore_proxy_snapshot_file "$previous_snapshot" || true
                 return
             fi
             ;;
@@ -418,7 +488,7 @@ test_external_proxy_not_disabled_without_bifrost_ownership() {
     fi
 
     stop_proxy
-    macos_clear_http_proxy || true
+    macos_restore_proxy_snapshot_file "$previous_snapshot" || true
 }
 
 test_enable_on_startup() {
@@ -427,6 +497,9 @@ test_enable_on_startup() {
         Darwin)
             if macos_wait_proxy_enabled "127.0.0.1" "$PROXY_PORT" 45; then
                 _log_pass "macOS: 系统代理设置正确"
+                passed=$((passed + 1))
+            elif echo "$(macos_system_proxy_status_json)" | grep -q '"managed_by_bifrost":false'; then
+                _log_pass "macOS: 启动时检测到外部系统代理，未自动抢占"
                 passed=$((passed + 1))
             else
                 _log_fail "macOS: 未检测到正确的系统代理设置" "127.0.0.1:${PROXY_PORT}" "$(macos_proxy_snapshot)"
@@ -481,11 +554,11 @@ test_restore_on_exit() {
     sleep 2
     case "$PLATFORM" in
         Darwin)
-            if macos_wait_proxy_disabled 45; then
+            if wait_for_condition 45 1 macos_check_proxy_not_pointing_to "127.0.0.1" "$PROXY_PORT"; then
                 _log_pass "macOS: 代理退出后系统代理已恢复"
                 passed=$((passed + 1))
             else
-                _log_fail "macOS: 代理退出后系统代理未恢复" "全部服务 Disabled" "$(macos_proxy_snapshot)"
+                _log_fail "macOS: 代理退出后系统代理未恢复" "不指向 127.0.0.1:${PROXY_PORT}" "$(macos_proxy_snapshot)"
                 failed=$((failed + 1))
             fi
             ;;
@@ -506,7 +579,7 @@ test_sleep_wake_style_reconcile() {
     start_proxy_with_system_proxy
     case "$PLATFORM" in
         Darwin)
-            if ! macos_wait_proxy_enabled "127.0.0.1" "$PROXY_PORT" 45; then
+            if ! macos_ensure_bifrost_system_proxy_enabled; then
                 _log_fail "macOS: 睡眠恢复收敛回归准备失败" "系统代理先指向 127.0.0.1:${PROXY_PORT}" "$(macos_proxy_snapshot)"
                 failed=$((failed + 1))
                 return
@@ -536,6 +609,11 @@ test_crash_recovery() {
     export BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER=1
     start_proxy_with_system_proxy
     unset BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER
+    if [[ "$PLATFORM" == "Darwin" ]] && ! macos_ensure_bifrost_system_proxy_enabled; then
+        _log_fail "macOS: 崩溃恢复准备失败" "系统代理先指向 127.0.0.1:${PROXY_PORT}" "$(macos_proxy_snapshot)"
+        failed=$((failed + 1))
+        return
+    fi
     if [[ -n "$PROXY_PID" ]]; then
         kill_pid_force "$PROXY_PID"
         wait_pid "$PROXY_PID"
@@ -590,6 +668,11 @@ test_lifecycle_helper_cleans_after_parent_crash() {
     stop_proxy
     unset BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER
     start_proxy_with_system_proxy
+    if [[ "$PLATFORM" == "Darwin" ]] && ! macos_ensure_bifrost_system_proxy_enabled; then
+        _log_fail "macOS: lifecycle helper 回归准备失败" "系统代理先指向 127.0.0.1:${PROXY_PORT}" "$(macos_proxy_snapshot)"
+        failed=$((failed + 1))
+        return
+    fi
     if [[ -n "$PROXY_PID" ]]; then
         kill_pid_force "$PROXY_PID"
         wait_pid "$PROXY_PID"
@@ -614,11 +697,39 @@ test_lifecycle_helper_cleans_after_parent_crash() {
     esac
 }
 
+test_launchd_cleanup_plist_dry_run_contains_version_metadata() {
+    local output
+    output=$("$BIFROST_BIN" system-proxy launchd install \
+        --data-dir "$TEST_DATA_DIR" \
+        --program "$BIFROST_BIN" \
+        --label "com.bifrost.test-system-proxy-cleanup" \
+        --plist-path "${TEST_DATA_DIR}/com.bifrost.test-system-proxy-cleanup.plist" \
+        --dry-run 2>&1)
+    local code=$?
+
+    if [[ "$code" -eq 0 ]] \
+        && echo "$output" | grep -q "cleanup-daemon" \
+        && echo "$output" | grep -q -- "--installed-version" \
+        && echo "$output" | grep -q "BIFROST_LAUNCHD_INSTALLED_VERSION" \
+        && echo "$output" | grep -q "$TEST_DATA_DIR"; then
+        _log_pass "LaunchDaemon cleanup plist dry-run 包含 daemon、data-dir 和版本元数据"
+        passed=$((passed + 1))
+    else
+        _log_fail "LaunchDaemon cleanup plist dry-run 输出不完整" "包含 cleanup-daemon/data-dir/version metadata" "code=${code}; output=${output}"
+        failed=$((failed + 1))
+    fi
+}
+
 test_crash_recovery_runs_before_start_failure() {
     stop_proxy
     export BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER=1
     start_proxy_with_system_proxy
     unset BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER
+    if [[ "$PLATFORM" == "Darwin" ]] && ! macos_ensure_bifrost_system_proxy_enabled; then
+        _log_fail "macOS: 启动失败前恢复回归准备失败" "系统代理先指向 127.0.0.1:${PROXY_PORT}" "$(macos_proxy_snapshot)"
+        failed=$((failed + 1))
+        return
+    fi
     if [[ -n "$PROXY_PID" ]]; then
         kill_pid_force "$PROXY_PID"
         wait_pid "$PROXY_PID"
@@ -691,6 +802,7 @@ main() {
     build_bifrost || { echo "编译失败"; exit 1; }
     setup_env
     start_echo
+    test_launchd_cleanup_plist_dry_run_contains_version_metadata
 
     case "$PLATFORM" in
         Darwin|MINGW*|MSYS*|CYGWIN*)

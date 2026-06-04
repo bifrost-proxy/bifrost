@@ -1,5 +1,7 @@
 use bifrost_storage::{set_data_dir, ConfigManager};
 
+#[cfg(target_os = "macos")]
+use crate::cli::SystemProxyLaunchdCommands;
 use crate::cli::{Cli, SystemProxyCommands};
 use crate::config::get_bifrost_dir;
 use crate::process::is_process_running;
@@ -23,6 +25,13 @@ pub fn handle_system_proxy_command(
             poll_secs,
         } => {
             return run_system_proxy_lifecycle_helper(data_dir.clone(), *parent_pid, *poll_secs);
+        }
+        #[cfg(target_os = "macos")]
+        SystemProxyCommands::CleanupDaemon {
+            data_dir,
+            installed_version,
+        } => {
+            return run_system_proxy_cleanup_daemon(data_dir.clone(), installed_version.clone());
         }
         _ => {}
     }
@@ -159,12 +168,118 @@ pub fn handle_system_proxy_command(
                 }
             }
         }
+        #[cfg(target_os = "macos")]
+        SystemProxyCommands::Launchd { action } => {
+            handle_system_proxy_launchd_command(&action, Some(bifrost_dir.clone()))?;
+        }
         SystemProxyCommands::Cleanup { .. } | SystemProxyCommands::LifecycleHelper { .. } => {
-            unreachable!("hidden system-proxy cleanup commands are handled before config load")
+            unreachable!("hidden system-proxy helper commands are handled before config load")
+        }
+        #[cfg(target_os = "macos")]
+        SystemProxyCommands::CleanupDaemon { .. } => {
+            unreachable!("hidden system-proxy helper commands are handled before config load")
         }
     }
     manager.detach();
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn handle_system_proxy_launchd_command(
+    action: &SystemProxyLaunchdCommands,
+    default_data_dir: Option<std::path::PathBuf>,
+) -> bifrost_core::Result<()> {
+    match action {
+        SystemProxyLaunchdCommands::Status { label, plist_path } => {
+            let label = label
+                .as_deref()
+                .unwrap_or(bifrost_core::system_proxy_launchd::DEFAULT_LABEL);
+            let status = bifrost_core::launchd_status(label, plist_path.clone())?;
+            print_launchd_status(&status);
+        }
+        SystemProxyLaunchdCommands::Install {
+            data_dir,
+            program,
+            label,
+            plist_path,
+            dry_run,
+        } => {
+            let data_dir = data_dir
+                .clone()
+                .or(default_data_dir)
+                .unwrap_or(get_bifrost_dir()?);
+            let config = bifrost_core::SystemProxyLaunchdConfig::new(
+                label.clone(),
+                program.clone(),
+                data_dir,
+                plist_path.clone(),
+            )?;
+            if *dry_run {
+                print!("{}", bifrost_core::render_launchd_plist(&config));
+                return Ok(());
+            }
+            let status = match bifrost_core::install_launchd_cleanup(&config) {
+                Ok(status) => status,
+                Err(error) if error.to_string().contains("RequiresAdmin") => {
+                    bifrost_core::install_launchd_cleanup_with_gui_auth(&config)?
+                }
+                Err(error) => return Err(error),
+            };
+            println!("✓ macOS system proxy cleanup LaunchDaemon installed");
+            print_launchd_status(&status);
+        }
+        SystemProxyLaunchdCommands::Uninstall { label, plist_path } => {
+            let status =
+                match bifrost_core::uninstall_launchd_cleanup(label.as_deref(), plist_path.clone())
+                {
+                    Ok(status) => status,
+                    Err(error) if error.to_string().contains("RequiresAdmin") => {
+                        bifrost_core::uninstall_launchd_cleanup_with_gui_auth(
+                            label.as_deref(),
+                            plist_path.clone(),
+                            None,
+                        )?
+                    }
+                    Err(error) => return Err(error),
+                };
+            println!("✓ macOS system proxy cleanup LaunchDaemon uninstalled");
+            print_launchd_status(&status);
+        }
+    }
+    Ok(())
+}
+
+fn print_launchd_status(status: &bifrost_core::SystemProxyLaunchdStatus) {
+    println!("Supported:         {}", status.supported);
+    println!("Installed:         {}", status.installed);
+    println!("Loaded:            {}", status.loaded);
+    println!("Label:             {}", status.label);
+    println!("Plist:             {}", status.plist_path.display());
+    println!(
+        "Program:           {}",
+        status
+            .program
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "-".to_string())
+    );
+    println!(
+        "Data dir:          {}",
+        status
+            .data_dir
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "-".to_string())
+    );
+    println!(
+        "Installed version: {}",
+        status.installed_version.as_deref().unwrap_or("-")
+    );
+    println!("Current version:   {}", status.current_version);
+    println!("Needs upgrade:     {}", status.needs_upgrade);
+    if let Some(message) = &status.message {
+        println!("Message:           {message}");
+    }
 }
 
 fn cleanup_system_proxy_state(data_dir: &std::path::Path) -> bifrost_core::Result<()> {
@@ -182,6 +297,23 @@ fn cleanup_system_proxy_state(data_dir: &std::path::Path) -> bifrost_core::Resul
         "system proxy cleanup helper restore completed"
     );
     Ok(())
+}
+
+fn cleanup_system_proxy_state_on_launchd_stop(
+    data_dir: &std::path::Path,
+    signal_name: &str,
+) -> bifrost_core::Result<()> {
+    if bifrost_core::consume_stop_restore_suppression(data_dir) {
+        tracing::info!(
+            target: "bifrost_cli::shutdown",
+            data_dir = %data_dir.display(),
+            signal = signal_name,
+            "system proxy launchd cleanup daemon stop restore suppressed for install/uninstall"
+        );
+        return Ok(());
+    }
+
+    cleanup_system_proxy_state(data_dir)
 }
 
 fn run_system_proxy_lifecycle_helper(
@@ -301,6 +433,98 @@ fn run_system_proxy_lifecycle_helper(
                     consecutive_parent_misses = 0;
                 }
             }
+        }
+    }
+}
+
+fn run_system_proxy_cleanup_daemon(
+    data_dir: std::path::PathBuf,
+    installed_version: Option<String>,
+) -> bifrost_core::Result<()> {
+    set_data_dir(data_dir.clone());
+    tracing::info!(
+        target: "bifrost_cli::shutdown",
+        data_dir = %data_dir.display(),
+        installed_version = installed_version.as_deref().unwrap_or(""),
+        current_version = bifrost_core::system_proxy_launchd::CURRENT_VERSION,
+        "system proxy launchd cleanup daemon started"
+    );
+
+    let startup_started_at = std::time::Instant::now();
+    match bifrost_core::system_proxy_launchd::recover_if_no_live_runtime(&data_dir) {
+        Ok(true) => tracing::info!(
+            target: "bifrost_cli::shutdown",
+            elapsed_ms = startup_started_at.elapsed().as_millis() as u64,
+            "system proxy launchd cleanup daemon startup recovery completed"
+        ),
+        Ok(false) => tracing::info!(
+            target: "bifrost_cli::shutdown",
+            elapsed_ms = startup_started_at.elapsed().as_millis() as u64,
+            "system proxy launchd cleanup daemon startup recovery skipped"
+        ),
+        Err(error) => tracing::warn!(
+            target: "bifrost_cli::shutdown",
+            error = %error,
+            elapsed_ms = startup_started_at.elapsed().as_millis() as u64,
+            "system proxy launchd cleanup daemon startup recovery failed"
+        ),
+    }
+
+    #[cfg(unix)]
+    {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| {
+                bifrost_core::BifrostError::Config(format!(
+                    "Failed to start system proxy launchd cleanup daemon runtime: {error}"
+                ))
+            })?;
+        runtime.block_on(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+
+            let mut sigterm = signal(SignalKind::terminate()).map_err(|error| {
+                bifrost_core::BifrostError::Config(format!(
+                    "Failed to install SIGTERM handler for system proxy launchd cleanup daemon: {error}"
+                ))
+            })?;
+            let mut sigint = signal(SignalKind::interrupt()).map_err(|error| {
+                bifrost_core::BifrostError::Config(format!(
+                    "Failed to install SIGINT handler for system proxy launchd cleanup daemon: {error}"
+                ))
+            })?;
+            let mut sighup = signal(SignalKind::hangup()).map_err(|error| {
+                bifrost_core::BifrostError::Config(format!(
+                    "Failed to install SIGHUP handler for system proxy launchd cleanup daemon: {error}"
+                ))
+            })?;
+
+            loop {
+                tokio::select! {
+                    _ = sigterm.recv() => {
+                        tracing::info!(target: "bifrost_cli::shutdown", "system proxy launchd cleanup daemon received SIGTERM");
+                        return cleanup_system_proxy_state_on_launchd_stop(&data_dir, "SIGTERM");
+                    }
+                    _ = sigint.recv() => {
+                        tracing::info!(target: "bifrost_cli::shutdown", "system proxy launchd cleanup daemon received SIGINT");
+                        return cleanup_system_proxy_state_on_launchd_stop(&data_dir, "SIGINT");
+                    }
+                    _ = sighup.recv() => {
+                        tracing::info!(target: "bifrost_cli::shutdown", "system proxy launchd cleanup daemon received SIGHUP");
+                        return cleanup_system_proxy_state_on_launchd_stop(&data_dir, "SIGHUP");
+                    }
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(3600)) => {
+                        tracing::debug!(target: "bifrost_cli::shutdown", "system proxy launchd cleanup daemon heartbeat");
+                    }
+                }
+            }
+        })
+    }
+
+    #[cfg(not(unix))]
+    {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(3600));
         }
     }
 }
