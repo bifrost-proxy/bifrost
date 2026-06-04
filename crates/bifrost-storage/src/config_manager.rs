@@ -932,4 +932,33 @@ mod tests {
             .to_string()
             .contains("traffic.max_records must be between 1000 and"));
     }
+
+    #[tokio::test]
+    async fn test_update_traffic_config_rejects_out_of_range_breakpoint_timeout() {
+        let (_temp_dir, manager) = setup();
+
+        let err = manager
+            .update_traffic_config(TrafficConfigUpdate {
+                breakpoint_timeout_ms: Some(MIN_BREAKPOINT_TIMEOUT_MS - 1),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("traffic.breakpoint_timeout_ms must be between 5000 and 300000"));
+
+        let err = manager
+            .update_traffic_config(TrafficConfigUpdate {
+                breakpoint_timeout_ms: Some(MAX_BREAKPOINT_TIMEOUT_MS + 1),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("traffic.breakpoint_timeout_ms must be between 5000 and 300000"));
+    }
 }
