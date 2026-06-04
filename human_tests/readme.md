@@ -42,7 +42,7 @@
 
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
-| [breakpoint-hook.md](./breakpoint-hook.md) | Breakpoint Rule Gating | 14 | Toolbar 单一全局开关、`breakpoint://request` / `breakpoint://response` 规则应用、pause/resume、暂停期间关闭 breakpoint、breakpoint OFF 回归、large body 默认关闭性能回归、oversized body header-only pause、response timeout 自动放行、request/response 小 body 与 headers 编辑、规则编辑器智能提示、OpenAPI 与 UI 分工 |
+| [breakpoint-hook.md](./breakpoint-hook.md) | Breakpoint Rule Gating | 15 | Toolbar 单一全局开关、`breakpoint://request` / `breakpoint://response` 规则应用、pause/resume、暂停期间关闭 breakpoint、breakpoint OFF 回归、large body 默认关闭性能回归、oversized body header-only pause、response timeout 自动放行、request/response 小 body 与 headers 编辑、规则编辑器智能提示、OpenAPI 与 UI 分工、侧边栏 OpenAPI 入口 |
 | [remote-access-web-ui.md](./remote-access-web-ui.md) | 远程访问管理 Web UI | 17 | 远程访问配置、登录、会话管理、登录记录展示 |
 | [remote-access-brute-force-protection.md](./remote-access-brute-force-protection.md) | 远程访问暴力破解防护 | 13 | 登录失败计数、自动锁定、密码强度校验、本机恢复、前端锁定提示 |
 | [webui-traffic.md](./webui-traffic.md) | Web UI Traffic 页面 | 50 | 流量表格、详情面板、Tab 切换、Body 视图、筛选过滤（含主筛选器按代理端口过滤与临时停用单条条件）、右键菜单、Network .bifrost 导入导出空包防误报、WebSocket/SSE、搜索、高并发 CONNECT 压力 |

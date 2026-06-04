@@ -236,6 +236,39 @@ kill "$WS_PID" 2>/dev/null || true
 wait "$WS_PID" 2>/dev/null || true
 WS_PID=""
 
+log "turning breakpoint off releases pending request"
+create_rule "breakpoint-disable-release-e2e" "127.0.0.1:${MOCK_PORT}/disable-release breakpoint://request"
+curl -fsS -X POST "$(settings_url)" \
+    -H 'Content-Type: application/json' \
+    --data '{"enabled":true,"max_body_bytes":1048576}' >/dev/null
+
+DISABLE_READY_FILE="$TMP_DIR/ws-disable-release.ready"
+DISABLE_EVENT_FILE="$TMP_DIR/breakpoint-disable-release-event.json"
+node "$TMP_DIR/wait_breakpoint_push.js" "ws://127.0.0.1:$ADMIN_PORT${ADMIN_PATH_PREFIX}/api/push" "$DISABLE_READY_FILE" "$DISABLE_EVENT_FILE" &
+WS_PID=$!
+wait_for_file "$DISABLE_READY_FILE" 5 || fail "disable-release push websocket did not become ready"
+
+DISABLE_OUT="$TMP_DIR/disable-release-response.json"
+curl --noproxy "" -fsS -x "http://127.0.0.1:$ADMIN_PORT" \
+    -H 'Content-Type: text/plain' \
+    --data-binary 'disable-release-body' \
+    "http://127.0.0.1:$MOCK_PORT/disable-release" >"$DISABLE_OUT" &
+CURL_PID=$!
+
+wait_for_file "$DISABLE_EVENT_FILE" 5 || fail "did not receive disable-release breakpoint event"
+disable_event="$(cat "$DISABLE_EVENT_FILE")"
+assert_json_value "$disable_event" ".phase" "request"
+curl -fsS -X POST "$(settings_url)" \
+    -H 'Content-Type: application/json' \
+    --data '{"enabled":false,"max_body_bytes":1048576}' >/dev/null
+wait "$CURL_PID"
+CURL_PID=""
+wait "$WS_PID"
+WS_PID=""
+disable_response="$(cat "$DISABLE_OUT")"
+assert_json_value "$disable_response" ".len" "20"
+assert_json_value "$disable_response" ".prefix" "disable-release-"
+
 log "editable request breakpoint can modify small body and headers"
 create_rule "breakpoint-request-e2e" "127.0.0.1:${MOCK_PORT}/request-edit breakpoint://request"
 curl -fsS -X POST "$(settings_url)" \
