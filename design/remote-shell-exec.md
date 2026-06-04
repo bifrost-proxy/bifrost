@@ -4802,3 +4802,19 @@ bifrost-sync-server 优先实现（便于本地调试），验证通过后同步
 - 单元回归：`active_call_accepts_stdin_before_executor_start` 覆盖 pre-start frame 能进入 channel buffer。
 - 单元回归：`command_accepts_stdin_for_stdin_mode_or_pty` 覆盖 `stdin_mode=stream`、`stdin_mode=none` 和 `pty.enabled=true` 的判定边界。
 - 真实场景：`human_tests/remote-shell-exec.md` 的 TC-RSE-22 使用真实 remote PTY/stdin 链路验证首个 stdin frame 不丢失。
+
+### 十四、2026-06-04 stdin stream 单测并发预算回归
+
+本地 `cargo test --workspace --all-features` 在高并发和前端构建负载叠加时，`test_execute_shell_exec_forwards_stdin_stream` 偶发命中 `shell.exec wall-clock timeout after 5000 ms (policy 'stdin-shell')`。该用例目标是验证 mpsc stdin stream 会写入 child stdin，不是验证 wall-clock timeout 边界；真正的 wall-clock 行为由独立 `test_execute_shell_exec_wall_clock_timeout_still_enforced` 使用 400ms 命令 timeout 覆盖。
+
+本轮实现约束：
+
+1. 只调宽 `test_execute_shell_exec_forwards_stdin_stream` 夹具里的 `stdin-shell` policy `max_timeout_ms`，不改变产品默认 timeout 和 timeout enforcement 逻辑。
+2. 保留 stdin stream 断言：Python 从 stdin 读到 `hello remote stdin`，命令 `exit_code=0`。
+3. 继续复跑独立 wall-clock timeout 单测，确保 timeout enforcement 未被削弱。
+
+验证计划：
+
+- `cargo test -p bifrost-admin remote_invoke::executor::tests::test_execute_shell_exec_forwards_stdin_stream -- --nocapture`
+- `cargo test -p bifrost-admin remote_invoke::executor::tests::test_execute_shell_exec_wall_clock_timeout_still_enforced -- --nocapture`
+- `cargo test --workspace --all-features`

@@ -3673,7 +3673,7 @@ mod tests {
                         "exec_mode": "shell_text",
                         "allowed_shell_patterns": ["^(?s:.*)$"],
                         "stdin_allowed": true,
-                        "max_timeout_ms": 5000
+                        "max_timeout_ms": 15000
                     }),
                 }],
                 profiles: vec![],
