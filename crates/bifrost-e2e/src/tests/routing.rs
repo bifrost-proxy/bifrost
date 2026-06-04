@@ -5,6 +5,14 @@ use crate::runner::TestCase;
 use bifrost_core::{UserPassAccountConfig, UserPassAuthConfig};
 use std::time::Duration;
 
+const START_PROXY_MAX_ATTEMPTS: usize = 10;
+
+macro_rules! start_proxy_with_rules {
+    ($($rule:expr),+ $(,)?) => {{
+        start_proxy_with_owned_rules(vec![$($rule.to_string()),+]).await
+    }};
+}
+
 pub fn get_all_tests() -> Vec<TestCase> {
     vec![
         TestCase::standalone(
@@ -124,17 +132,51 @@ pub fn get_all_tests() -> Vec<TestCase> {
     ]
 }
 
+async fn start_proxy_with_owned_rules(rules: Vec<String>) -> Result<(u16, ProxyInstance), String> {
+    for attempt in 1..=START_PROXY_MAX_ATTEMPTS {
+        let port = portpicker::pick_unused_port().ok_or("Failed to pick unused port")?;
+        let rule_refs: Vec<&str> = rules.iter().map(String::as_str).collect();
+        match ProxyInstance::start(port, rule_refs).await {
+            Ok(proxy) => return Ok((port, proxy)),
+            Err(e) if is_bind_race(&e.to_string()) && attempt < START_PROXY_MAX_ATTEMPTS => {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(e) => return Err(format!("Failed to start proxy: {e}")),
+        }
+    }
+
+    Err("Failed to start proxy after retrying port bind races".to_string())
+}
+
+async fn start_proxy_with_userpass(
+    rules: Vec<String>,
+    userpass_auth: UserPassAuthConfig,
+) -> Result<(u16, ProxyInstance), String> {
+    for attempt in 1..=START_PROXY_MAX_ATTEMPTS {
+        let port = portpicker::pick_unused_port().ok_or("Failed to pick unused port")?;
+        let rule_refs: Vec<&str> = rules.iter().map(String::as_str).collect();
+        match ProxyInstance::start_with_userpass(port, rule_refs, userpass_auth.clone()).await {
+            Ok(proxy) => return Ok((port, proxy)),
+            Err(e) if is_bind_race(&e.to_string()) && attempt < START_PROXY_MAX_ATTEMPTS => {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(e) => return Err(format!("Failed to start proxy: {e}")),
+        }
+    }
+
+    Err("Failed to start proxy after retrying port bind races".to_string())
+}
+
+fn is_bind_race(error: &str) -> bool {
+    error.contains("Failed to bind") || error.contains("already listening on this port")
+}
+
 async fn test_routing_host_basic() -> Result<(), String> {
     let mock = EnhancedMockServer::start().await;
     mock.set_response(200, "host_basic_ok");
 
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![&format!("test.local host://127.0.0.1:{}", mock.port)],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) =
+        start_proxy_with_rules!(format!("test.local host://127.0.0.1:{}", mock.port))?;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -157,13 +199,8 @@ async fn test_routing_host_with_port() -> Result<(), String> {
     let mock = EnhancedMockServer::start().await;
     mock.set_response(200, "port_match_ok");
 
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![&format!("test.local:8080 host://127.0.0.1:{}", mock.port)],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) =
+        start_proxy_with_rules!(format!("test.local:8080 host://127.0.0.1:{}", mock.port))?;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -185,13 +222,8 @@ async fn test_routing_host_path_matching() -> Result<(), String> {
     let mock = EnhancedMockServer::start().await;
     mock.set_response(200, "path_match_ok");
 
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![&format!("test.local/api host://127.0.0.1:{}", mock.port)],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) =
+        start_proxy_with_rules!(format!("test.local/api host://127.0.0.1:{}", mock.port))?;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -217,16 +249,10 @@ async fn test_routing_xhost_priority() -> Result<(), String> {
     let mock2 = EnhancedMockServer::start().await;
     mock2.set_response(200, "xhost_server");
 
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![
-            &format!("test.local host://127.0.0.1:{}", mock1.port),
-            &format!("test.local xhost://127.0.0.1:{}", mock2.port),
-        ],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_rules!(
+        format!("test.local host://127.0.0.1:{}", mock1.port),
+        format!("test.local xhost://127.0.0.1:{}", mock2.port),
+    )?;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -245,10 +271,7 @@ async fn test_routing_xhost_priority() -> Result<(), String> {
 }
 
 async fn test_routing_redirect_302() -> Result<(), String> {
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(port, vec!["test.local redirect://http://new.example.com/"])
-        .await
-        .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_rules!("test.local redirect://http://new.example.com/")?;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -267,13 +290,8 @@ async fn test_routing_redirect_302() -> Result<(), String> {
 }
 
 async fn test_routing_redirect_301() -> Result<(), String> {
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec!["test.local redirect://http://example.com/permanent?301"],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) =
+        start_proxy_with_rules!("test.local redirect://http://example.com/permanent?301")?;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -292,10 +310,7 @@ async fn test_routing_redirect_301() -> Result<(), String> {
 }
 
 async fn test_routing_file_inline() -> Result<(), String> {
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(port, vec!["test.local file://(inline_content_test)"])
-        .await
-        .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_rules!("test.local file://(inline_content_test)")?;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -314,13 +329,8 @@ async fn test_routing_file_inline() -> Result<(), String> {
 }
 
 async fn test_routing_file_json() -> Result<(), String> {
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![r#"test.local file://({"status":"ok","code":200})"#],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) =
+        start_proxy_with_rules!(r#"test.local file://({"status":"ok","code":200})"#)?;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -340,13 +350,8 @@ async fn test_routing_file_json() -> Result<(), String> {
 }
 
 async fn test_routing_tpl_template() -> Result<(), String> {
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![r#"test.local tpl://({"timestamp":{{now}},"host":"{{host}}"})"#],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) =
+        start_proxy_with_rules!(r#"test.local tpl://({"timestamp":{{now}},"host":"{{host}}"})"#)?;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -366,17 +371,11 @@ async fn test_routing_tpl_template() -> Result<(), String> {
 }
 
 async fn test_routing_rawfile_inline() -> Result<(), String> {
-    let port = portpicker::pick_unused_port().unwrap();
     let raw_response = "HTTP/1.1 201 Created\r\nX-Custom:rawfile\r\nContent-Type:text/plain\r\n\r\nRaw Response Body";
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![&format!(
-            "test.local rawfile://({})",
-            raw_response.replace("\r\n", "\\r\\n")
-        )],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_rules!(format!(
+        "test.local rawfile://({})",
+        raw_response.replace("\r\n", "\\r\\n")
+    ))?;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -401,16 +400,10 @@ async fn test_routing_multiple_host_order() -> Result<(), String> {
     let mock2 = EnhancedMockServer::start().await;
     mock2.set_response(200, "second_server");
 
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![
-            &format!("test.local host://127.0.0.1:{}", mock1.port),
-            &format!("test.local host://127.0.0.1:{}", mock2.port),
-        ],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_rules!(
+        format!("test.local host://127.0.0.1:{}", mock1.port),
+        format!("test.local host://127.0.0.1:{}", mock2.port),
+    )?;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -432,17 +425,11 @@ async fn test_routing_host_vs_proxy() -> Result<(), String> {
     let mock = EnhancedMockServer::start().await;
     mock.set_response(200, "host_wins");
 
-    let port = portpicker::pick_unused_port().unwrap();
     let proxy_port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![
-            &format!("test.local host://127.0.0.1:{}", mock.port),
-            &format!("test.local proxy://127.0.0.1:{}", proxy_port),
-        ],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_rules!(
+        format!("test.local host://127.0.0.1:{}", mock.port),
+        format!("test.local proxy://127.0.0.1:{}", proxy_port),
+    )?;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -464,27 +451,13 @@ async fn test_routing_proxy_chain_with_auth() -> Result<(), String> {
     let proxy_echo = ProxyEchoServer::start().await;
     proxy_echo.set_response(200, "proxy_chain_ok");
 
-    let upstream_port = portpicker::pick_unused_port().unwrap();
-    let _upstream_proxy = ProxyInstance::start(
-        upstream_port,
-        vec![&format!(
-            "chain.test host://127.0.0.1:{}",
-            proxy_echo.port()
-        )],
-    )
-    .await
-    .map_err(|e| format!("Failed to start upstream proxy: {}", e))?;
+    let (upstream_port, _upstream_proxy) =
+        start_proxy_with_rules!(format!("chain.test host://127.0.0.1:{}", proxy_echo.port()))?;
 
-    let entry_port = portpicker::pick_unused_port().unwrap();
-    let _entry_proxy = ProxyInstance::start(
-        entry_port,
-        vec![&format!(
-            "chain.test proxy://user:pass@127.0.0.1:{}",
-            upstream_port
-        )],
-    )
-    .await
-    .map_err(|e| format!("Failed to start entry proxy: {}", e))?;
+    let (entry_port, _entry_proxy) = start_proxy_with_rules!(format!(
+        "chain.test proxy://user:pass@127.0.0.1:{}",
+        upstream_port
+    ))?;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -521,13 +494,8 @@ async fn test_routing_host_preserve_query() -> Result<(), String> {
     let mock = EnhancedMockServer::start().await;
     mock.set_response(200, "query_ok");
 
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![&format!("test.local host://127.0.0.1:{}", mock.port)],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) =
+        start_proxy_with_rules!(format!("test.local host://127.0.0.1:{}", mock.port))?;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -557,13 +525,8 @@ async fn test_routing_host_with_path_prefix() -> Result<(), String> {
     let mock = EnhancedMockServer::start().await;
     mock.set_response(200, "path_prefix_ok");
 
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![&format!("test.local/v1 host://127.0.0.1:{}/v2", mock.port)],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) =
+        start_proxy_with_rules!(format!("test.local/v1 host://127.0.0.1:{}/v2", mock.port))?;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -582,16 +545,10 @@ async fn test_routing_host_with_path_prefix() -> Result<(), String> {
 }
 
 async fn test_routing_statuscode_with_file() -> Result<(), String> {
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![
-            r#"test.local statusCode://404"#,
-            r#"test.local file://({"error":"not_found"})"#,
-        ],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_rules!(
+        r#"test.local statusCode://404"#,
+        r#"test.local file://({"error":"not_found"})"#,
+    )?;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -625,25 +582,16 @@ async fn test_routing_proxy_chain_upstream_auth_correct() -> Result<(), String> 
     let mock = EnhancedMockServer::start().await;
     mock.set_response(200, "upstream_auth_ok");
 
-    let upstream_port = portpicker::pick_unused_port().unwrap();
-    let _upstream_proxy = ProxyInstance::start_with_userpass(
-        upstream_port,
-        vec![&format!("authchain.test host://127.0.0.1:{}", mock.port)],
+    let (upstream_port, _upstream_proxy) = start_proxy_with_userpass(
+        vec![format!("authchain.test host://127.0.0.1:{}", mock.port)],
         make_upstream_auth_config(),
     )
-    .await
-    .map_err(|e| format!("Failed to start upstream proxy: {}", e))?;
+    .await?;
 
-    let entry_port = portpicker::pick_unused_port().unwrap();
-    let _entry_proxy = ProxyInstance::start(
-        entry_port,
-        vec![&format!(
-            "authchain.test proxy://proxyuser:proxypass@127.0.0.1:{}",
-            upstream_port
-        )],
-    )
-    .await
-    .map_err(|e| format!("Failed to start entry proxy: {}", e))?;
+    let (entry_port, _entry_proxy) = start_proxy_with_rules!(format!(
+        "authchain.test proxy://proxyuser:proxypass@127.0.0.1:{}",
+        upstream_port
+    ))?;
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -678,28 +626,19 @@ async fn test_routing_proxy_chain_upstream_auth_wrong() -> Result<(), String> {
     let mock = EnhancedMockServer::start().await;
     mock.set_response(200, "should_not_reach");
 
-    let upstream_port = portpicker::pick_unused_port().unwrap();
-    let _upstream_proxy = ProxyInstance::start_with_userpass(
-        upstream_port,
-        vec![&format!(
+    let (upstream_port, _upstream_proxy) = start_proxy_with_userpass(
+        vec![format!(
             "authchain-wrong.test host://127.0.0.1:{}",
             mock.port
         )],
         make_upstream_auth_config(),
     )
-    .await
-    .map_err(|e| format!("Failed to start upstream proxy: {}", e))?;
+    .await?;
 
-    let entry_port = portpicker::pick_unused_port().unwrap();
-    let _entry_proxy = ProxyInstance::start(
-        entry_port,
-        vec![&format!(
-            "authchain-wrong.test proxy://proxyuser:wrongpass@127.0.0.1:{}",
-            upstream_port
-        )],
-    )
-    .await
-    .map_err(|e| format!("Failed to start entry proxy: {}", e))?;
+    let (entry_port, _entry_proxy) = start_proxy_with_rules!(format!(
+        "authchain-wrong.test proxy://proxyuser:wrongpass@127.0.0.1:{}",
+        upstream_port
+    ))?;
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -720,28 +659,19 @@ async fn test_routing_proxy_chain_upstream_auth_missing() -> Result<(), String> 
     let mock = EnhancedMockServer::start().await;
     mock.set_response(200, "should_not_reach");
 
-    let upstream_port = portpicker::pick_unused_port().unwrap();
-    let _upstream_proxy = ProxyInstance::start_with_userpass(
-        upstream_port,
-        vec![&format!(
+    let (upstream_port, _upstream_proxy) = start_proxy_with_userpass(
+        vec![format!(
             "authchain-none.test host://127.0.0.1:{}",
             mock.port
         )],
         make_upstream_auth_config(),
     )
-    .await
-    .map_err(|e| format!("Failed to start upstream proxy: {}", e))?;
+    .await?;
 
-    let entry_port = portpicker::pick_unused_port().unwrap();
-    let _entry_proxy = ProxyInstance::start(
-        entry_port,
-        vec![&format!(
-            "authchain-none.test proxy://127.0.0.1:{}",
-            upstream_port
-        )],
-    )
-    .await
-    .map_err(|e| format!("Failed to start entry proxy: {}", e))?;
+    let (entry_port, _entry_proxy) = start_proxy_with_rules!(format!(
+        "authchain-none.test proxy://127.0.0.1:{}",
+        upstream_port
+    ))?;
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
