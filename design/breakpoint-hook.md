@@ -118,6 +118,7 @@ PR #174 引入该能力后，性能风险主要集中在三类路径：
 | `web/src/components/TrafficDetail/index.tsx` | header-only pause 禁用 body 编辑 |
 | `web/src/components/TrafficDetail/panes/Body/HighLightBody.tsx` | lazy-load Monaco editor |
 | `e2e-tests/tests/test_breakpoint_performance_guard.sh` | 新增性能防护 E2E |
+| `tests/rules_test.rs` | 同步全协议 registry 断言，确保 `breakpoint` 协议被 workspace 测试覆盖 |
 | `human_tests/breakpoint-hook.md` | 新增性能防护真实场景用例 |
 | `docs/breakpoint.md` | 新增用户使用手册 |
 | `README.md` / `docs/README.md` | 增加使用手册入口 |
@@ -129,6 +130,7 @@ PR #174 引入该能力后，性能风险主要集中在三类路径：
 - settings clamp：超过最大 body 上限后读取到有效上限。
 - Performance config：`breakpoint_timeout_ms` 持久化、越界校验、更新后立即影响 runtime timeout。
 - header-only pause：resume body 被丢弃。
+- protocol registry：`tests/rules_test.rs::test_all_protocols` 必须覆盖 `breakpoint`，并与 `ALL_PROTOCOLS` 当前数量保持一致，避免 workspace 全量测试因漏同步失败。
 
 ### E2E
 - 默认关闭：2 MiB request body 通过代理正常完成，不产生 breakpoint pause。
@@ -142,6 +144,7 @@ PR #174 引入该能力后，性能风险主要集中在三类路径：
 ### Human Tests
 - `human_tests/breakpoint-hook.md` 中 TC-BP-07/08/09 覆盖性能防护真实场景。
 - `human_tests/breakpoint-hook.md` 中 TC-BP-10/11 覆盖 request/response 小 body 与 headers 编辑。
+- `human_tests/breakpoint-hook.md` 中 TC-BP-15 覆盖 `breakpoint` 协议 registry 同步回归。
 - 既有 UI 用例 TC-BP-01..06 保留，用于后续 UI 回归。
 
 ## Review/Fix/Test 闭环
