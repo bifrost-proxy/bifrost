@@ -13,7 +13,7 @@ use tracing::{debug, warn};
 /// Subdirectory under the Bifrost data dir for agent data.
 const AGENT_SUBDIR: &str = "agent";
 /// Config file name.
-const CONFIG_FILENAME: &str = "config.toml";
+pub(crate) const CONFIG_FILENAME: &str = "config.toml";
 
 // ---------------------------------------------------------------------------
 // AgentConfig
@@ -622,40 +622,11 @@ impl AgentConfig {
     /// User-defined providers are merged field-by-field with built-in defaults:
     /// if a user-defined field is `None`, the built-in value is used as fallback.
     pub fn resolve_effective_config(&self) -> Result<EffectiveModelConfig, String> {
-        let provider_id = self.model_provider.as_deref().unwrap_or("aidp_crawl");
-
-        // Get built-in provider as the base
-        let builtin = get_builtin_provider(provider_id);
-
-        // Merge user-defined provider on top of built-in (field-by-field)
-        let provider = if let Some(user_provider) = self.model_providers.get(provider_id) {
-            ModelProviderConfig {
-                name: user_provider.name.clone().or(builtin.name),
-                base_url: user_provider.base_url.clone().or(builtin.base_url),
-                wire_api: user_provider.wire_api.or(builtin.wire_api),
-                env_key: user_provider.env_key.clone().or(builtin.env_key),
-                api_key: user_provider.api_key.clone().or(builtin.api_key),
-                http_headers: user_provider.http_headers.clone().or(builtin.http_headers),
-                env_http_headers: user_provider
-                    .env_http_headers
-                    .clone()
-                    .or(builtin.env_http_headers),
-                request_max_retries: user_provider
-                    .request_max_retries
-                    .or(builtin.request_max_retries),
-                stream_idle_timeout_ms: user_provider
-                    .stream_idle_timeout_ms
-                    .or(builtin.stream_idle_timeout_ms),
-                stream_max_retries: user_provider
-                    .stream_max_retries
-                    .or(builtin.stream_max_retries),
-            }
-        } else {
-            builtin
-        };
+        let (provider_id, provider) = self.resolve_model_provider_config();
 
         let base_url = provider
             .base_url
+            .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| format!("provider '{}' has no base_url", provider_id))?;
 
         // Resolve API key: api_key field takes precedence over env_key.
@@ -710,17 +681,8 @@ impl AgentConfig {
     pub fn resolve_api_key(&self) -> Result<String, String> {
         let effective = self.resolve_effective_config()?;
         if effective.api_key.is_empty() {
-            let provider_id = self.model_provider.as_deref().unwrap_or("aidp_crawl");
-            let builtin = get_builtin_provider(provider_id);
-            let env_key = if let Some(user_p) = self.model_providers.get(provider_id) {
-                user_p
-                    .env_key
-                    .as_deref()
-                    .or(builtin.env_key.as_deref())
-                    .unwrap_or("OPENAI_API_KEY")
-            } else {
-                builtin.env_key.as_deref().unwrap_or("OPENAI_API_KEY")
-            };
+            let (_, provider) = self.resolve_model_provider_config();
+            let env_key = provider.env_key.as_deref().unwrap_or("OPENAI_API_KEY");
             Err(format!("environment variable '{}' not set", env_key))
         } else {
             Ok(effective.api_key)
@@ -748,7 +710,7 @@ pub fn resolve_env_value(value: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Get a built-in provider config by ID.
-fn get_builtin_provider(id: &str) -> ModelProviderConfig {
+pub(crate) fn get_builtin_provider(id: &str) -> ModelProviderConfig {
     match id {
         // OpenAI - official API
         "openai" => ModelProviderConfig {

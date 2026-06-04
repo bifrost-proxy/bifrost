@@ -37,6 +37,7 @@ pub mod client;
 pub mod compact;
 pub mod compaction_hooks;
 pub mod config;
+mod config_preflight;
 pub mod history;
 pub mod mcp;
 pub mod memory;
