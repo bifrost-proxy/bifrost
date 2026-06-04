@@ -532,22 +532,34 @@ async fn maybe_enqueue_daily_agent_after_asr_run(task: &AsrDirectoryTask) {
     if runnable_agents.is_empty() {
         return;
     }
-    let summary = summarize_task_from_store(task);
-    if !daily_agent_asr_completion_ready(task, &summary) {
-        tracing::info!(
-            task_id = %task.id,
-            pending = summary.pending,
-            failed = summary.failed,
-            partial_success = summary.partial_success,
-            failed_chunk_count = summary.failed_chunk_count,
-            "skipped daily agent: ASR task still has incomplete files"
-        );
-        return;
-    }
     let runnable_agents: Vec<_> = runnable_agents
         .into_iter()
         .filter(daily_agent_runner_ready_for_agent)
         .collect();
+    if runnable_agents.is_empty() {
+        return;
+    }
+
+    match daily_agent_has_changed_daily_markdown(task, &runnable_agents) {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::info!(
+                task_id = %task.id,
+                trigger_source = "asr_completion",
+                "skipped daily agent: no daily markdown changes after ASR run"
+            );
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(
+                task_id = %task.id,
+                trigger_source = "asr_completion",
+                error = %error,
+                "skipped daily agent: failed to inspect daily markdown changes"
+            );
+            return;
+        }
+    }
 
     // Check if already running
     {
@@ -577,6 +589,24 @@ async fn maybe_enqueue_daily_agent_after_asr_run(task: &AsrDirectoryTask) {
         agents = runnable_agents.len(),
         "queued ASR daily agent run"
     );
+}
+
+fn daily_agent_has_changed_daily_markdown(
+    task: &AsrDirectoryTask,
+    agents: &[AsrDailyAgentItem],
+) -> Result<bool, String> {
+    for agent in agents {
+        let agent_task = task_for_daily_agent(task, agent);
+        let plan = build_daily_agent_change_plan(&agent_task, "asr_completion", None, false)?;
+        if plan
+            .entries
+            .iter()
+            .any(|entry| entry.change_kind != DailyAgentChangeKind::Unchanged)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 async fn run_daily_agents(
@@ -622,40 +652,6 @@ async fn run_daily_agents(
     }
 
     results
-}
-
-fn daily_agent_asr_completion_ready(task: &AsrDirectoryTask, summary: &TaskSummary) -> bool {
-    if summary.pending != 0 || summary.partial_success != 0 || summary.failed_chunk_count != 0 {
-        return false;
-    }
-    if summary.failed == 0 {
-        return true;
-    }
-
-    let file_store = load_file_store(&task.id);
-    daily_agent_failed_files_are_non_blocking(summary.failed, &file_store)
-}
-
-fn daily_agent_failed_files_are_non_blocking(failed_count: usize, store: &FileStore) -> bool {
-    let mut actual_failed = 0;
-    for record in store
-        .files
-        .values()
-        .filter(|record| record.status == FileStatus::Failed)
-    {
-        actual_failed += 1;
-        if !daily_agent_non_blocking_failed_file(record) {
-            return false;
-        }
-    }
-    actual_failed > 0 && actual_failed == failed_count
-}
-
-fn daily_agent_non_blocking_failed_file(record: &FileRecord) -> bool {
-    record
-        .error
-        .as_deref()
-        .is_some_and(|error| error.starts_with("diarization_no_segments:"))
 }
 
 fn daily_agent_effective_last_status(task: &AsrDirectoryTask) -> Option<String> {

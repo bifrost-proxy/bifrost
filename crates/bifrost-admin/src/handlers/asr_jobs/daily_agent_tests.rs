@@ -1131,114 +1131,65 @@ fn daily_agent_runner_is_single_required_value() {
 }
 
 #[test]
-fn daily_agent_after_asr_run_requires_no_pending_files() {
+fn daily_agent_after_asr_run_requires_changed_daily_markdown() {
     let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp = TempDir::new().unwrap();
     let _guard = EnvGuard::set_data_dir(temp.path());
     let audio_dir = temp.path().join("audio");
     std::fs::create_dir_all(&audio_dir).unwrap();
-    let task = test_directory_task("daily-agent-asr-completion-task", audio_dir.clone());
-    let clean = TaskSummary {
-        discovered: 1,
-        processed: 1,
-        pending: 0,
-        failed: 0,
-        partial_success: 0,
-        failed_chunk_count: 0,
-        deleted_after_processing: 0,
-        audio_source_bytes: 0,
-        audio_source_file_count: 0,
-        cleanable_source_bytes: 0,
-        cleanable_source_file_count: 0,
-        running: true,
-        diarization_enabled: false,
-        diarization_ready: true,
-        diarization_running: false,
-        diarized_files: 0,
-        speaker_count: 0,
-    };
-    assert!(daily_agent_asr_completion_ready(&task, &clean));
+    let task = test_directory_task("daily-agent-asr-completion-task", audio_dir);
+    ensure_asr_daily_workspace(&task).unwrap();
+    let agents = normalized_daily_agents(&task.daily_agent);
 
-    let mut pending = clean.clone();
-    pending.pending = 1;
-    assert!(!daily_agent_asr_completion_ready(&task, &pending));
+    assert!(!daily_agent_has_changed_daily_markdown(&task, &agents).unwrap());
 
-    let mut failed = clean.clone();
-    failed.failed = 1;
-    assert!(!daily_agent_asr_completion_ready(&task, &failed));
+    let daily_path = daily_dir_for_task(&task.id).join("2026-06-03.md");
+    std::fs::write(&daily_path, "initial daily transcript").unwrap();
+    assert!(daily_agent_has_changed_daily_markdown(&task, &agents).unwrap());
 
-    let mut partial = clean.clone();
-    partial.partial_success = 1;
-    assert!(!daily_agent_asr_completion_ready(&task, &partial));
+    let source_sha256 = compute_sha256(&daily_path).unwrap();
+    let source_len_bytes = std::fs::metadata(&daily_path).unwrap().len();
+    let mut processed = AsrDailyAgentProcessedState::default();
+    for agent in &agents {
+        let agent_task = task_for_daily_agent(&task, agent);
+        processed.documents.insert(
+            daily_agent_processed_key(&agent_task, "2026-06-03"),
+            AsrDailyAgentProcessedDocument {
+                agent_id: agent.id.clone(),
+                agent_name: agent.name.clone(),
+                output_dir: agent.output_dir.clone(),
+                date: "2026-06-03".to_string(),
+                source_sha256: source_sha256.clone(),
+                source_len_bytes,
+                processed_at_ms: 1,
+                runner: agent.runner.clone(),
+                report_path: None,
+                last_run_id: "previous-run".to_string(),
+            },
+        );
+    }
+    save_daily_agent_processed_state(&task.id, &processed).unwrap();
+    assert!(!daily_agent_has_changed_daily_markdown(&task, &agents).unwrap());
 
-    let mut failed_chunks = clean;
-    failed_chunks.failed_chunk_count = 1;
-    assert!(!daily_agent_asr_completion_ready(&task, &failed_chunks));
+    std::fs::write(&daily_path, "initial daily transcript\nnew appended text").unwrap();
+    assert!(daily_agent_has_changed_daily_markdown(&task, &agents).unwrap());
 }
 
 #[test]
-fn daily_agent_after_asr_run_allows_diarization_no_segments_only() {
+fn daily_agent_after_asr_run_ignores_failed_files_when_daily_markdown_changed() {
     let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp = TempDir::new().unwrap();
     let _guard = EnvGuard::set_data_dir(temp.path());
     let audio_dir = temp.path().join("audio");
     std::fs::create_dir_all(&audio_dir).unwrap();
-    let task = test_directory_task("daily-agent-diarization-nonblocking-task", audio_dir.clone());
-    let source_path = audio_dir.join("empty-speaker-turns.wav");
-    std::fs::write(&source_path, b"audio").unwrap();
-    let mut record = file_record_from_info(
-        &task.id,
-        &source_path,
-        &SourceAudioInfo {
-            source_size: Some(5),
-            source_modified_ms: Some(1),
-            source_created_at_ms: None,
-            source_created_at_source: None,
-            media_duration_ms: Some(1_000),
-        },
-    );
-    record.status = FileStatus::Failed;
-    record.error =
-        Some("diarization_no_segments: sherpa-onnx returned no speaker segments".to_string());
-    save_file_store(
-        &task.id,
-        &FileStore {
-            version: TASK_STORE_VERSION,
-            files: BTreeMap::from([(source_key(&source_path), record)]),
-        },
+    let task = test_directory_task("daily-agent-failed-files-with-daily-changes", audio_dir.clone());
+    ensure_asr_daily_workspace(&task).unwrap();
+    std::fs::write(
+        daily_dir_for_task(&task.id).join("2026-06-03.md"),
+        "daily markdown was refreshed even though some audio files failed",
     )
     .unwrap();
 
-    let summary = TaskSummary {
-        discovered: 1,
-        processed: 0,
-        pending: 0,
-        failed: 1,
-        partial_success: 0,
-        failed_chunk_count: 0,
-        deleted_after_processing: 0,
-        audio_source_bytes: 0,
-        audio_source_file_count: 0,
-        cleanable_source_bytes: 0,
-        cleanable_source_file_count: 0,
-        running: false,
-        diarization_enabled: true,
-        diarization_ready: true,
-        diarization_running: false,
-        diarized_files: 0,
-        speaker_count: 0,
-    };
-    assert!(daily_agent_asr_completion_ready(&task, &summary));
-}
-
-#[test]
-fn daily_agent_after_asr_run_blocks_regular_failed_files() {
-    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let temp = TempDir::new().unwrap();
-    let _guard = EnvGuard::set_data_dir(temp.path());
-    let audio_dir = temp.path().join("audio");
-    std::fs::create_dir_all(&audio_dir).unwrap();
-    let task = test_directory_task("daily-agent-regular-failed-task", audio_dir.clone());
     let source_path = audio_dir.join("normalize-failed.wav");
     std::fs::write(&source_path, b"audio").unwrap();
     let mut record = file_record_from_info(
@@ -1254,35 +1205,75 @@ fn daily_agent_after_asr_run_blocks_regular_failed_files() {
     );
     record.status = FileStatus::Failed;
     record.error = Some("normalize failed: unsupported audio".to_string());
+    let no_asr_units_path = audio_dir.join("no-asr-units.wav");
+    std::fs::write(&no_asr_units_path, b"audio").unwrap();
+    let mut no_asr_units = file_record_from_info(
+        &task.id,
+        &no_asr_units_path,
+        &SourceAudioInfo {
+            source_size: Some(5),
+            source_modified_ms: Some(1),
+            source_created_at_ms: None,
+            source_created_at_source: None,
+            media_duration_ms: Some(1_000),
+        },
+    );
+    no_asr_units.status = FileStatus::Failed;
+    no_asr_units.error = Some(
+        "diarization_no_asr_units: diarization produced no transcribable ASR units".to_string(),
+    );
     save_file_store(
         &task.id,
         &FileStore {
             version: TASK_STORE_VERSION,
-            files: BTreeMap::from([(source_key(&source_path), record)]),
+            files: BTreeMap::from([
+                (source_key(&source_path), record),
+                (source_key(&no_asr_units_path), no_asr_units),
+            ]),
         },
     )
     .unwrap();
 
-    let summary = TaskSummary {
-        discovered: 1,
-        processed: 0,
-        pending: 0,
-        failed: 1,
-        partial_success: 0,
-        failed_chunk_count: 0,
-        deleted_after_processing: 0,
-        audio_source_bytes: 0,
-        audio_source_file_count: 0,
-        cleanable_source_bytes: 0,
-        cleanable_source_file_count: 0,
-        running: false,
-        diarization_enabled: true,
-        diarization_ready: true,
-        diarization_running: false,
-        diarized_files: 0,
-        speaker_count: 0,
-    };
-    assert!(!daily_agent_asr_completion_ready(&task, &summary));
+    let agents = normalized_daily_agents(&task.daily_agent);
+    assert!(daily_agent_has_changed_daily_markdown(&task, &agents).unwrap());
+}
+
+#[test]
+fn daily_agent_after_asr_run_checks_all_agents_for_pending_markdown_changes() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let audio_dir = temp.path().join("audio");
+    std::fs::create_dir_all(&audio_dir).unwrap();
+    let task = test_directory_task("daily-agent-any-agent-changed-task", audio_dir);
+    ensure_asr_daily_workspace(&task).unwrap();
+    let agents = normalized_daily_agents(&task.daily_agent);
+    let daily_path = daily_dir_for_task(&task.id).join("2026-06-03.md");
+    std::fs::write(&daily_path, "shared daily transcript").unwrap();
+    let source_sha256 = compute_sha256(&daily_path).unwrap();
+    let source_len_bytes = std::fs::metadata(&daily_path).unwrap().len();
+
+    let primary_agent = &agents[0];
+    let primary_task = task_for_daily_agent(&task, primary_agent);
+    let mut processed = AsrDailyAgentProcessedState::default();
+    processed.documents.insert(
+        daily_agent_processed_key(&primary_task, "2026-06-03"),
+        AsrDailyAgentProcessedDocument {
+            agent_id: primary_agent.id.clone(),
+            agent_name: primary_agent.name.clone(),
+            output_dir: primary_agent.output_dir.clone(),
+            date: "2026-06-03".to_string(),
+            source_sha256,
+            source_len_bytes,
+            processed_at_ms: 1,
+            runner: primary_agent.runner.clone(),
+            report_path: None,
+            last_run_id: "primary-processed".to_string(),
+        },
+    );
+    save_daily_agent_processed_state(&task.id, &processed).unwrap();
+
+    assert!(daily_agent_has_changed_daily_markdown(&task, &agents).unwrap());
 }
 
 #[test]

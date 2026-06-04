@@ -74,17 +74,21 @@
 - 响应包含 `agent_id=tomorrow_todo`。
 - 响应保留指定 `date`。
 
-### TC-ADA-06 回归：diarization-only 失败不阻塞 Daily Agent 自动触发门禁
+### TC-ADA-06 回归：ASR 完成后 daily 合成文档变更触发 Daily Agent
 
 操作步骤：
-1. 执行 `cargo test -p bifrost-admin daily_agent_after_asr_run_allows_diarization_no_segments_only -- --nocapture`。
-2. 执行 `cargo test -p bifrost-admin daily_agent_after_asr_run_blocks_regular_failed_files -- --nocapture`。
-3. 对照真实任务状态或 watch 快照，确认 `diarization_no_segments: sherpa-onnx returned no speaker segments` 的 failed 文件属于 Daily Agent 非阻塞失败；普通 `normalize failed`、pending、partial success 和 failed chunks 仍会阻塞自动触发。
+1. 执行 `cargo test -p bifrost-admin daily_agent_after_asr_run_requires_changed_daily_markdown -- --nocapture`。
+2. 执行 `cargo test -p bifrost-admin daily_agent_after_asr_run_ignores_failed_files_when_daily_markdown_changed -- --nocapture`。
+3. 执行 `cargo test -p bifrost-admin daily_agent_after_asr_run_checks_all_agents_for_pending_markdown_changes -- --nocapture`。
+4. 执行 `e2e-tests/tests/test_asr_daily_agents_api.sh`，其中脚本会先生成 `2026-05-22-report.md`，再追加 `2026-05-22.md` 并不带 `force` 重新触发 Daily Agent。
+5. 对照真实任务状态或 watch 快照，确认 ASR run 已结束并刷新 `.daily/YYYY-MM-DD.md` 后，即使本轮存在 failed 文件，只要 daily 合成 Markdown 相对 processed state 有 `NewFile`、`Appended` 或 `Rewritten` 变更，就会继续推进 Daily Agent；如果 daily Markdown 未变化则跳过，避免空跑。
 
 预期结果：
-- 第 1 条测试通过，说明只有 `diarization_no_segments` failed 文件时，Daily Agent 自动触发门禁放行。
-- 第 2 条测试通过，说明普通 failed 文件仍阻塞 Daily Agent 自动触发。
-- 该回归只改变 Daily Agent 触发门禁，不修改 ASR 文件失败状态、Daily Docs 生成结果或手动运行 API 语义。
+- 第 1 条测试通过，说明没有 daily Markdown 或所有 Agent 均已处理同一 source hash 时不会自动触发；daily Markdown 追加后会触发。
+- 第 2 条测试通过，说明普通 failed 文件和 `diarization_no_asr_units` failed 文件不会阻塞已更新 daily Markdown 的后处理。
+- 第 3 条测试通过，说明多 Agent 场景下只要任一 enabled Agent 对该 daily Markdown 仍有待处理变更，就会推进后续运行。
+- 第 4 条 E2E 通过，说明真实 Admin API + Runner 链路中，非 force 的 appended daily Markdown 会更新两个 Agent 的 processed run_id，且 prompt 包含 `change_kind=Appended`。
+- 该回归只改变 Daily Agent 自动触发门禁，不修改 ASR 文件失败状态、Daily Docs 生成结果、手动 force run API 或 runner readiness 语义。
 
 ### TC-ADA-07 Daily Agent 管理列表与 Agent 详情页分离
 
@@ -174,7 +178,7 @@
 
 ## 执行记录
 
-- 2026-06-03：执行 TC-ADA-06 回归验证。`cargo test -p bifrost-admin daily_agent_after_asr_run_allows_diarization_no_segments_only -- --nocapture` 与 `cargo test -p bifrost-admin daily_agent_after_asr_run_blocks_regular_failed_files -- --nocapture` 均通过，确认 diarization-only failed 文件不再阻塞 Daily Agent 自动触发门禁，普通 failed 文件仍阻塞。
+- 2026-06-04：执行 TC-ADA-06 回归验证。`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_after_asr_run_requires_changed_daily_markdown -- --nocapture`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_after_asr_run_ignores_failed_files_when_daily_markdown_changed -- --nocapture`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_after_asr_run_checks_all_agents_for_pending_markdown_changes -- --nocapture` 均通过；`BIFROST_E2E_PORT=18997 BIFROST_DAILY_AGENT_MOCK_PORT=18998 SKIP_FRONTEND_BUILD=1 e2e-tests/tests/test_asr_daily_agents_api.sh` 通过，首轮临时 task 为 `f7cb1db771ef436d891a97d6d683f227`，第二轮复跑临时 task 为 `1ff9f0947a3e46bcb6f9bfd7817bf0da`。确认 ASR run 完成后以 daily 合成 Markdown 变更作为 Daily Agent 自动触发门禁；普通 failed 与 `diarization_no_asr_units` failed 不再阻塞已经刷新出的 daily report 后处理；无 daily 变更时仍跳过；非 force 的 appended daily Markdown 会推进两个 Agent 的 processed run_id 更新。
 - 2026-06-03：执行 TC-ADA-07 / TC-ADA-08 WebUI 验证。使用 Playwright 打开 `http://127.0.0.1:3000/_bifrost/ai?aiSection=tools-asr&asrTask=a911c68b0f7a43afa29d1863cc02229a&asrTaskTab=daily-agent`，确认 Daily Agent 首屏仅展示列表列，不出现 `Agent Configuration` / `Agent Instructions` 详情卡；点击 `daily_report` 行 `Edit` 后进入详情页，并显示 `Agent Configuration`、`IM Delivery`、`Last Run Status`、`Agent Instructions` 与返回按钮；900px 窄窗口下表格滚动容器 `clientWidth=742`、`scrollWidth=1180`，确认横向滚动替代竖排折行。另打开 `http://127.0.0.1:3000/_bifrost/ai?aiSection=tools-asr`，确认顶层 tab 为 `Scheduled Tasks`、`ASR Management`、`Voiceprint & Wake`，旧中文 tab 不再出现。
 - 2026-06-03：执行 TC-ADA-09 WebUI 验证。使用 Playwright 打开 `http://127.0.0.1:3000/_bifrost/ai?aiSection=tools-asr&asrTask=a911c68b0f7a43afa29d1863cc02229a&asrTaskTab=daily`，拦截 `POST /daily-agent/run` 避免真实触发任务。点击行级主按钮 `Run All Agents` 后，请求为 `/daily-agent/run?date=2026-05-20`，确认省略 `agent_id` 表示全部 Agent；打开右侧下拉菜单，菜单包含 `Run All Agents`、`Run daily_report`、`Run tomorrow_todo`；选择 `Run daily_report` 后，请求为 `/daily-agent/run?date=2026-05-20&agent_id=daily_report`。
 - 2026-06-03：执行 TC-ADA-10 真实 ChatGPT Web Runner 失败隔离验证。当前 `abc` runner 为 `chatgpt_web`，`daily_report` 与 `tomorrow_todo` 均临时使用 `abc`，timeout 缩短为 15000ms，IM Delivery 关闭；ChatGPT Web auth status 为 `auth_required`，`accountStatus=401`，提示 authorization token 已于 `2026-06-03 03:24:20 UTC` 过期。触发 `POST /daily-agent/run?date=2026-05-20&force=1` 后返回 `queued`；运行中再次触发返回 `already_running`。轮询结果显示 `daily_report` 生成新 `run_id=1780457232354-07553a92-e688-43b9-90d2-671adcd6d47c` 并因 `daily agent run timed out after 15000ms` 失败，随后 `tomorrow_todo` 也生成独立新 `run_id=1780457247477-662ecfbe-2d64-43ea-80ec-9da7360d06af` 并同样超时失败，确认第一个 ChatGPT Web runner 失败没有阻断第二个 Agent 执行；脚本最后已恢复原始 Daily Agent 配置。
