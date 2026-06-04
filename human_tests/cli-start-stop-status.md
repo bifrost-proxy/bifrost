@@ -737,6 +737,28 @@ PY
 
 ---
 
+### TC-CSS-30：daemon stop 不因 zombie 状态误升级到 SIGKILL（回归）
+
+**前置条件**：服务未运行，测试使用临时数据目录和动态端口。
+
+**操作步骤**：
+1. 执行 daemon shutdown focused test：
+   ```bash
+   cargo test -p bifrost-cli --test daemon_shutdown stop_triggers_graceful_shutdown_in_daemon_mode -- --nocapture
+   ```
+2. 观察 stop 命令输出和测试断言。
+
+**预期结果**：
+- 测试启动临时 `BIFROST_DATA_DIR` 下的 daemon，并使用 `--skip-cert-check --no-intercept` 避免证书交互和 TLS 拦截副作用。
+- `bifrost stop` 返回成功，输出不包含 `Sending SIGKILL`。
+- daemon 进程退出后，即使 Unix 系统短暂保留 zombie 状态，CLI 进程状态检测也不应把它误判为仍在运行。
+- 测试结束后临时目录自动清理，不修改系统代理。
+
+**执行记录**：
+- 2026-06-04 执行 `cargo test -p bifrost-cli --test daemon_shutdown stop_triggers_graceful_shutdown_in_daemon_mode -- --nocapture` 覆盖本用例。修复前本地全量测试失败，`bifrost stop` 输出 `Sending SIGKILL`；修复后 `is_process_running` 在非 Linux Unix 通过 `ps -o stat=` 排除 zombie 状态，focused test 通过。
+
+---
+
 
 ## 清理
 
