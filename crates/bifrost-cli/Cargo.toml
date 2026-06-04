@@ -27,6 +27,7 @@ bifrost-power = { path = "../bifrost-power" }
 bifrost-asr = { path = "../bifrost-asr", default-features = false, features = ["core"] }
 parking_lot.workspace = true
 tracing.workspace = true
+notify = "6"
 tokio.workspace = true
 clap.workspace = true
 clap_complete.workspace = true

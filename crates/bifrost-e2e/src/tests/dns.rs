@@ -2,9 +2,13 @@ use crate::curl::CurlCommand;
 use crate::mock::{EnhancedMockServer, HttpsMockServer, MockDnsServer};
 use crate::proxy::ProxyInstance;
 use crate::runner::TestCase;
+use bifrost_admin::AdminState;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
 use std::time::Duration;
+
+const START_PROXY_MAX_ATTEMPTS: usize = 5;
 
 pub fn get_all_tests() -> Vec<TestCase> {
     vec![
@@ -63,16 +67,11 @@ async fn test_dns_basic_rule_parsing() -> Result<(), String> {
     let mock = EnhancedMockServer::start().await;
     mock.set_response(200, "dns_rule_ok");
 
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![
-            "test.local dns://8.8.8.8",
-            &format!("test.local host://127.0.0.1:{}", mock.port),
-        ],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_owned_rules(vec![
+        "test.local dns://8.8.8.8".to_string(),
+        format!("test.local host://127.0.0.1:{}", mock.port),
+    ])
+    .await?;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -94,16 +93,11 @@ async fn test_dns_with_host_protocol() -> Result<(), String> {
     let mock = EnhancedMockServer::start().await;
     mock.set_response(200, "host_priority_ok");
 
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![
-            "api.example.com dns://8.8.8.8",
-            &format!("api.example.com host://127.0.0.1:{}", mock.port),
-        ],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_owned_rules(vec![
+        "api.example.com dns://8.8.8.8".to_string(),
+        format!("api.example.com host://127.0.0.1:{}", mock.port),
+    ])
+    .await?;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -125,16 +119,11 @@ async fn test_dns_wildcard_domain() -> Result<(), String> {
     let mock = EnhancedMockServer::start().await;
     mock.set_response(200, "wildcard_dns_ok");
 
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![
-            "*.example.com dns://8.8.8.8,8.8.4.4",
-            &format!("*.example.com host://127.0.0.1:{}", mock.port),
-        ],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_owned_rules(vec![
+        "*.example.com dns://8.8.8.8,8.8.4.4".to_string(),
+        format!("*.example.com host://127.0.0.1:{}", mock.port),
+    ])
+    .await?;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -167,16 +156,11 @@ async fn test_dns_multiple_servers() -> Result<(), String> {
     let mock = EnhancedMockServer::start().await;
     mock.set_response(200, "multi_dns_ok");
 
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![
-            "test.local dns://8.8.8.8,8.8.4.4,1.1.1.1",
-            &format!("test.local host://127.0.0.1:{}", mock.port),
-        ],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_owned_rules(vec![
+        "test.local dns://8.8.8.8,8.8.4.4,1.1.1.1".to_string(),
+        format!("test.local host://127.0.0.1:{}", mock.port),
+    ])
+    .await?;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -198,17 +182,12 @@ async fn test_dns_rule_priority() -> Result<(), String> {
     let mock = EnhancedMockServer::start().await;
     mock.set_response(200, "priority_ok");
 
-    let port = portpicker::pick_unused_port().unwrap();
-    let _proxy = ProxyInstance::start(
-        port,
-        vec![
-            "test.local dns://8.8.8.8",
-            "test.local dns://1.1.1.1",
-            &format!("test.local host://127.0.0.1:{}", mock.port),
-        ],
-    )
-    .await
-    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_owned_rules(vec![
+        "test.local dns://8.8.8.8".to_string(),
+        "test.local dns://1.1.1.1".to_string(),
+        format!("test.local host://127.0.0.1:{}", mock.port),
+    ])
+    .await?;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -236,11 +215,8 @@ async fn test_dns_http_forward_custom_resolver() -> Result<(), String> {
     )]))
     .await;
 
-    let port = portpicker::pick_unused_port().unwrap();
     let dns_rule = format!("mapped.test dns://{}", dns.server());
-    let _proxy = ProxyInstance::start(port, vec![&dns_rule])
-        .await
-        .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_owned_rules(vec![dns_rule]).await?;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -270,11 +246,8 @@ async fn test_dns_https_tunnel_custom_resolver() -> Result<(), String> {
     )]))
     .await;
 
-    let port = portpicker::pick_unused_port().unwrap();
     let dns_rule = format!("mapped.test dns://{}", dns.server());
-    let _proxy = ProxyInstance::start(port, vec![&dns_rule])
-        .await
-        .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy) = start_proxy_with_owned_rules(vec![dns_rule]).await?;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -308,11 +281,8 @@ async fn test_dns_https_intercept_custom_resolver() -> Result<(), String> {
     )]))
     .await;
 
-    let port = portpicker::pick_unused_port().unwrap();
     let dns_rule = format!("mapped.test dns://{}", dns.server());
-    let (_proxy, _admin_state) = ProxyInstance::start_with_admin(port, vec![&dns_rule], true, true)
-        .await
-        .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, _proxy, _admin_state) = start_proxy_with_admin_rules(vec![dns_rule]).await?;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -331,6 +301,44 @@ async fn test_dns_https_intercept_custom_resolver() -> Result<(), String> {
     https_mock.assert_request_received()?;
 
     Ok(())
+}
+
+async fn start_proxy_with_owned_rules(rules: Vec<String>) -> Result<(u16, ProxyInstance), String> {
+    for attempt in 1..=START_PROXY_MAX_ATTEMPTS {
+        let port = portpicker::pick_unused_port().ok_or("Failed to pick unused port")?;
+        let rule_refs: Vec<&str> = rules.iter().map(String::as_str).collect();
+        match ProxyInstance::start(port, rule_refs).await {
+            Ok(proxy) => return Ok((port, proxy)),
+            Err(e) if is_bind_race(&e.to_string()) && attempt < START_PROXY_MAX_ATTEMPTS => {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(e) => return Err(format!("Failed to start proxy: {e}")),
+        }
+    }
+
+    Err("Failed to start proxy after retrying port bind races".to_string())
+}
+
+async fn start_proxy_with_admin_rules(
+    rules: Vec<String>,
+) -> Result<(u16, ProxyInstance, Arc<AdminState>), String> {
+    for attempt in 1..=START_PROXY_MAX_ATTEMPTS {
+        let port = portpicker::pick_unused_port().ok_or("Failed to pick unused port")?;
+        let rule_refs: Vec<&str> = rules.iter().map(String::as_str).collect();
+        match ProxyInstance::start_with_admin(port, rule_refs, true, true).await {
+            Ok((proxy, admin_state)) => return Ok((port, proxy, admin_state)),
+            Err(e) if is_bind_race(&e.to_string()) && attempt < START_PROXY_MAX_ATTEMPTS => {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(e) => return Err(format!("Failed to start proxy: {e}")),
+        }
+    }
+
+    Err("Failed to start proxy after retrying port bind races".to_string())
+}
+
+fn is_bind_race(error: &str) -> bool {
+    error.contains("Failed to bind") || error.contains("already listening on this port")
 }
 
 #[cfg(test)]

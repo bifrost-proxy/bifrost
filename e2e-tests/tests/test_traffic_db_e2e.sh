@@ -143,18 +143,29 @@ start_mock_server() {
     local requested_port="$MOCK_HTTP_PORT"
     MOCK_LOG_FILE="$(mktemp "${TMPDIR:-/tmp}/bifrost-traffic-db-mock.XXXXXX.log")"
     log_info "Starting mock server on 127.0.0.1:${requested_port}..."
-    python3 "$SCRIPT_DIR/../mock_servers/http_echo_server.py" --port "$MOCK_HTTP_PORT" --retries 5 >"$MOCK_LOG_FILE" 2>&1 &
+    PYTHONUNBUFFERED=1 "${BIFROST_E2E_PYTHON_BIN:-python3}" \
+        "$SCRIPT_DIR/../mock_servers/http_echo_server.py" \
+        --port "$MOCK_HTTP_PORT" --retries 5 >"$MOCK_LOG_FILE" 2>&1 &
     MOCK_PID=$!
     local start_ts
     start_ts="$(date +%s)"
+    local ready_seen=0
     while true; do
         local actual_port
-        actual_port="$(sed -nE 's/^Starting HTTP Echo Server on [^:]+:([0-9]+)\.\.\.$/\1/p' "$MOCK_LOG_FILE" 2>/dev/null | tail -n 1)"
+        actual_port="$(sed -nE \
+            -e 's/^Starting HTTP Echo Server on [^:]+:([0-9]+)\.\.\.$/\1/p' \
+            -e 's/^NOTE: Requested port [0-9]+ was busy; bound to ([0-9]+) instead$/\1/p' \
+            "$MOCK_LOG_FILE" 2>/dev/null | tail -n 1)"
         if [[ -n "$actual_port" ]]; then
             MOCK_HTTP_PORT="$actual_port"
         fi
 
-        if curl -sS -o /dev/null -w "" "http://127.0.0.1:${MOCK_HTTP_PORT}/get" 2>/dev/null; then
+        if grep -q '^READY$' "$MOCK_LOG_FILE" 2>/dev/null; then
+            ready_seen=1
+        fi
+
+        if [[ "$ready_seen" -eq 1 ]] && curl -fsS --connect-timeout 2 --max-time 5 \
+            -o /dev/null "http://127.0.0.1:${MOCK_HTTP_PORT}/get" 2>/dev/null; then
             if [[ "$MOCK_HTTP_PORT" != "$requested_port" ]]; then
                 log_warn "Mock server fell back from port ${requested_port} to ${MOCK_HTTP_PORT}"
             fi
@@ -168,7 +179,7 @@ start_mock_server() {
         fi
         local now_ts
         now_ts="$(date +%s)"
-        if (( now_ts - start_ts >= 20 )); then
+        if (( now_ts - start_ts >= 60 )); then
             break
         fi
         sleep 0.2
