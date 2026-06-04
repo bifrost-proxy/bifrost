@@ -7,6 +7,7 @@ import xml from 'highlight.js/lib/languages/xml';
 import javascript from 'highlight.js/lib/languages/javascript';
 import css from 'highlight.js/lib/languages/css';
 import plaintext from 'highlight.js/lib/languages/plaintext';
+import Editor from '@monaco-editor/react';
 import '../../../../styles/hljs-github-theme.css';
 
 import type { RecordContentType, SessionTargetSearchState } from '../../../../types';
@@ -18,6 +19,7 @@ import {
   shouldDisableJsonStructuredView,
 } from '../../helper/contentType';
 import { copyToClipboard } from '../../../../utils/clipboard';
+import { useThemeStore } from '../../../../stores/useThemeStore';
 
 hljs.registerLanguage('json', json);
 hljs.registerLanguage('xml', xml);
@@ -101,6 +103,8 @@ interface HighLightBodyProps {
   contentType: RecordContentType;
   searchValue: SessionTargetSearchState;
   onSearch: (v: Partial<SessionTargetSearchState>) => void;
+  editable?: boolean;
+  onBodyChange?: (value: string) => void;
 }
 
 export const HighLightBody = ({
@@ -108,11 +112,15 @@ export const HighLightBody = ({
   contentType,
   searchValue,
   onSearch,
+  editable = false,
+  onBodyChange,
 }: HighLightBodyProps) => {
   const { token } = theme.useToken();
+  const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
+
   const [showAll, setShowAll] = useState(false);
   const [isFormatted, setIsFormatted] = useState(true);
-  const wrapperRef = useTextSelection(!!data);
+  const wrapperRef = useTextSelection(!!data && !editable);
   const codeRef = useRef<HTMLElement>(null);
 
   const isJsonType = contentType === 'JSON';
@@ -179,16 +187,78 @@ export const HighLightBody = ({
   useEffect(() => {
     const el = codeRef.current;
     if (!el) return;
-    el.innerHTML = highlighted;
-  }, [highlighted]);
+    const debugState = globalThis as { __bifrostLogNextHljsHtml?: boolean };
+    if (debugState.__bifrostLogNextHljsHtml) {
+      console.log("[resume-hljs-html]", el.innerHTML);
+      debugState.__bifrostLogNextHljsHtml = false;
+    }
+  }, [highlighted, editable]);
 
   useEffect(() => {
     if (!searchValue.value) return;
     startMarkSearch();
   }, [highlighted, searchValue.value, startMarkSearch]);
 
-  if (!data) {
+  if (data == null && !editable) {
     return null;
+  }
+
+  if (editable) {
+    const monacoLang = getHighlightLanguage(contentType);
+    const rawText = data ?? '';
+    const formattedInitial = isJsonType ? formatJsonContent(rawText).formatted : rawText;
+    const lineCount = formattedInitial.split('\n').length;
+    const editorHeight = Math.min(Math.max(200, lineCount * 20 + 40), 600);
+
+    return (
+      <div style={{ position: 'relative' }}>
+        <div
+          style={{
+            position: 'absolute',
+            top: 4,
+            right: 8,
+            zIndex: 1,
+            display: 'flex',
+            gap: 4,
+          }}
+        >
+          <Tooltip title="Copy">
+            <Button
+              type="text"
+              size="small"
+              icon={<CopyOutlined />}
+              onClick={handleCopy}
+              style={{ background: token.colorBgContainer }}
+            />
+          </Tooltip>
+        </div>
+        <Editor
+          height={editorHeight}
+          language={monacoLang}
+          theme={resolvedTheme === 'dark' ? 'vs-dark' : 'light'}
+          defaultValue={formattedInitial}
+          onChange={(value) => onBodyChange?.(value ?? '')}
+          options={{
+            minimap: { enabled: false },
+            fontSize: 12,
+            lineNumbers: 'on',
+            scrollBeyondLastLine: false,
+            smoothScrolling: true,
+            automaticLayout: true,
+            tabSize: 2,
+            wordWrap: 'on',
+            readOnly: false,
+            padding: { top: 28, bottom: 4 },
+            scrollbar: {
+              vertical: 'auto',
+              horizontal: 'hidden',
+              verticalScrollbarSize: 4,
+              alwaysConsumeMouseWheel: false,
+            },
+          }}
+        />
+      </div>
+    );
   }
 
   return (
@@ -241,7 +311,12 @@ export const HighLightBody = ({
           lineHeight: 1.4,
         }}
       >
-        <code ref={codeRef} className="hljs" style={{ fontFamily: 'inherit' }} />
+        <code
+          ref={codeRef}
+          className="hljs"
+          style={{ fontFamily: 'inherit' }}
+          dangerouslySetInnerHTML={{ __html: highlighted }}
+        />
       </pre>
       {shouldShowMore && (
         <Button

@@ -1,5 +1,4 @@
-import { Tag, Switch, Button, Space, theme, Tooltip, Dropdown, Modal } from "antd";
-import type { MenuProps } from "antd";
+import { Tag, Switch, Button, Space, theme, Tooltip, Popover } from "antd";
 import {
   DeleteOutlined,
   ExportOutlined,
@@ -7,16 +6,13 @@ import {
   MenuFoldOutlined,
   MenuUnfoldOutlined,
   FilterOutlined,
-  DownOutlined,
-  ClearOutlined,
+  PauseCircleOutlined,
 } from "@ant-design/icons";
 import type { ToolbarFilters } from "../../types";
 
 interface ToolbarProps {
   filters: ToolbarFilters;
   onClearAll: () => void;
-  onClearFiltered: () => void;
-  filteredCount: number;
   onFilterChange: (filters: ToolbarFilters) => void;
   systemProxyEnabled?: boolean;
   systemProxySupported?: boolean;
@@ -28,6 +24,13 @@ interface ToolbarProps {
   onDetailPanelToggle?: () => void;
   detailDetached?: boolean;
   onAttachDetailWindow?: () => void;
+  breakpointEnabled?: boolean;
+  hookRequest?: boolean;
+  hookResponse?: boolean;
+  breakpointLoading?: boolean;
+  onBreakpointToggle?: (enabled: boolean) => void;
+  onHookRequestToggle?: (hook: boolean) => void;
+  onHookResponseToggle?: (hook: boolean) => void;
 }
 
 const filterGroups = {
@@ -41,8 +44,6 @@ const filterGroups = {
 export default function Toolbar({
   filters,
   onClearAll,
-  onClearFiltered,
-  filteredCount,
   onFilterChange,
   systemProxyEnabled,
   systemProxySupported = true,
@@ -54,44 +55,15 @@ export default function Toolbar({
   onDetailPanelToggle,
   detailDetached,
   onAttachDetailWindow,
+  breakpointEnabled = false,
+  hookRequest = false,
+  hookResponse = false,
+  breakpointLoading,
+  onBreakpointToggle,
+  onHookRequestToggle,
+  onHookResponseToggle,
 }: ToolbarProps) {
   const { token } = theme.useToken();
-
-  const handleClearAll = () => {
-    Modal.confirm({
-      title: "Clear all traffic?",
-      content: "This action cannot be undone.",
-      okText: "Clear",
-      cancelText: "Cancel",
-      onOk: onClearAll,
-    });
-  };
-
-  const handleClearFiltered = () => {
-    Modal.confirm({
-      title: `Clear ${filteredCount} filtered requests?`,
-      content: "This will only clear requests matching current filter conditions. This action cannot be undone.",
-      okText: "Clear",
-      cancelText: "Cancel",
-      onOk: onClearFiltered,
-    });
-  };
-
-  const clearMenuItems: MenuProps["items"] = [
-    {
-      key: "all",
-      label: "Clear all",
-      icon: <DeleteOutlined />,
-      onClick: handleClearAll,
-    },
-    {
-      key: "filtered",
-      label: `Clear filtered (${filteredCount})`,
-      icon: <ClearOutlined />,
-      onClick: handleClearFiltered,
-      disabled: filteredCount === 0,
-    },
-  ];
 
   const handleTagClick = (group: keyof ToolbarFilters, tag: string) => {
     const currentTags = filters[group];
@@ -152,17 +124,15 @@ export default function Toolbar({
             margin: "0 4px",
           }}
         />
-        <Dropdown menu={{ items: clearMenuItems }} trigger={["click"]}>
+        <Tooltip title="Clear all traffic">
           <Button
             type="text"
             size="small"
             icon={<DeleteOutlined />}
-            data-testid="toolbar-clear-dropdown"
-            style={{ display: "flex", alignItems: "center", gap: 2 }}
-          >
-            <DownOutlined style={{ fontSize: 10 }} />
-          </Button>
-        </Dropdown>
+            onClick={onClearAll}
+            data-testid="toolbar-clear-all"
+          />
+        </Tooltip>
         <div
           style={{
             width: 1,
@@ -219,6 +189,72 @@ export default function Toolbar({
       </div>
 
       <Space size={8}>
+        <Popover
+          trigger="hover"
+          content={
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 12,
+                }}
+              >
+                <span style={{ fontSize: 12 }}>Hook Request</span>
+                <Switch
+                  size="small"
+                  checked={hookRequest}
+                  onChange={(v) => onHookRequestToggle?.(v)}
+                  disabled={!breakpointEnabled}
+                />
+              </div>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 12,
+                }}
+              >
+                <span style={{ fontSize: 12 }}>Hook Response</span>
+                <Switch
+                  size="small"
+                  checked={hookResponse}
+                  onChange={(v) => onHookResponseToggle?.(v)}
+                  disabled={!breakpointEnabled}
+                />
+              </div>
+            </div>
+          }
+        >
+          <PauseCircleOutlined
+            style={{
+              color: breakpointEnabled
+                ? token.colorPrimary
+                : token.colorTextSecondary,
+              fontSize: 14,
+              cursor: "pointer",
+            }}
+          />
+        </Popover>
+        <span style={{ color: token.colorTextSecondary, fontSize: 12 }}>
+          Breakpoint
+        </span>
+        <Switch
+          size="small"
+          checked={breakpointEnabled}
+          loading={breakpointLoading}
+          onChange={onBreakpointToggle}
+          data-testid="toolbar-breakpoint-toggle"
+        />
+        <div
+          style={{
+            width: 1,
+            height: 16,
+            backgroundColor: token.colorBorderSecondary,
+          }}
+        />
         <span style={{ color: token.colorTextSecondary, fontSize: 12 }}>
           System Proxy
         </span>

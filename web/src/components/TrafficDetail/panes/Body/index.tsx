@@ -42,6 +42,8 @@ interface BodyProps {
   searchValue: SessionTargetSearchState;
   displayFormat: DisplayFormat;
   onSearch: (v: Partial<SessionTargetSearchState>) => void;
+  editable?: boolean;
+  onBodyChange?: (value: string) => void;
 }
 
 export const Body = ({
@@ -56,6 +58,8 @@ export const Body = ({
   searchValue,
   displayFormat,
   onSearch,
+  editable = false,
+  onBodyChange,
 }: BodyProps) => {
   const { token } = theme.useToken();
   const normalizedRawContentType = rawContentType?.toLowerCase() ?? '';
@@ -114,7 +118,7 @@ export const Body = ({
     );
   }
 
-  if (!displayData && !displayDataBase64) {
+  if (!displayData && !displayDataBase64 && !editable) {
     return (
       <>
         {sourceSwitch}
@@ -156,6 +160,8 @@ export const Body = ({
         contentType={contentType}
         searchValue={searchValue}
         onSearch={onSearch}
+        editable={editable}
+        onBodyChange={onBodyChange}
       />
     </>
   );

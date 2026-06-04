@@ -12,6 +12,7 @@ use crate::handlers::{
     audit::handle_audit,
     auth::{extract_bearer_token, handle_auth},
     bifrost_file::handle_bifrost_file,
+    breakpoint::handle_breakpoint,
     cert::{handle_cert, handle_cert_public, handle_proxy_public},
     config::handle_config,
     cors_preflight,
@@ -33,6 +34,7 @@ use crate::handlers::{
     scripts::handle_scripts_request,
     search::handle_search,
     speech::handle_speech,
+    swagger,
     sync::{handle_sync, handle_sync_public},
     syntax::handle_syntax,
     system::handle_system,
@@ -117,6 +119,14 @@ impl AdminRouter {
             return resp;
         }
 
+        if path == "/api/docs" {
+            return swagger::serve_swagger_ui();
+        }
+
+        if path == "/api/openapi.json" {
+            return swagger::serve_openapi_spec();
+        }
+
         if path.starts_with("/api/auth") {
             return handle_auth(req, state, path, peer_addr).await;
         }
@@ -135,6 +145,8 @@ impl AdminRouter {
             handle_speech(req, path).await
         } else if path.starts_with("/api/voice") {
             handle_voice(req, state, path).await
+        } else if path.starts_with("/api/breakpoint") {
+            handle_breakpoint(req, state, push_manager.clone(), path).await
         } else if path.starts_with("/api/rules") {
             handle_rules(req, state, push_manager.clone(), path).await
         } else if path.starts_with("/api/devtools") {

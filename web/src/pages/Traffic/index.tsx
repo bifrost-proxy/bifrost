@@ -17,6 +17,7 @@ import {
   type PanelFilters,
 } from "../../stores/useTrafficStore";
 import { useProxyStore } from "../../stores/useProxyStore";
+import { useBreakpointStore } from "../../stores/useBreakpointStore";
 import { useFilterPanelStore } from "../../stores/useFilterPanelStore";
 import { useTrafficDetailWindowStore } from "../../stores/useTrafficDetailWindowStore";
 import { useSearchStore } from "../../stores/useSearchStore";
@@ -160,6 +161,25 @@ export default function Traffic() {
   const systemProxy = useProxyStore((state) => state.systemProxy);
   const systemProxyLoading = useProxyStore((state) => state.loading);
   const toggleSystemProxy = useProxyStore((state) => state.toggleSystemProxy);
+
+  const breakpointEnabled = useBreakpointStore((state) => state.enabled);
+  const hookRequest = useBreakpointStore((state) => state.hookRequest);
+  const hookResponse = useBreakpointStore((state) => state.hookResponse);
+  const breakpointLoading = useBreakpointStore((state) => state.loading);
+  const toggleBreakpoint = useBreakpointStore(
+    (state) => state.toggleEnabled,
+  );
+  const toggleHookRequest = useBreakpointStore(
+    (state) => state.toggleHookRequest,
+  );
+  const toggleHookResponse = useBreakpointStore(
+    (state) => state.toggleHookResponse,
+  );
+
+  useEffect(() => {
+    useBreakpointStore.getState().connectPush();
+    useBreakpointStore.getState().fetchSettings();
+  }, []);
 
   const filterPanelCollapsed = useFilterPanelStore(
     (state) => state.panelCollapsed,
@@ -655,18 +675,6 @@ export default function Traffic() {
     );
   }, [deferredFilterConditions, deferredPanelFilters, deferredToolbarFilters, records]);
 
-  const handleClearFiltered = useCallback(async () => {
-    const success = await clearTraffic(filteredRecords.map((r) => r.id));
-    if (success) {
-      message.success(
-        `${filteredRecords.length} filtered traffic records cleared`,
-      );
-      if (selectedId && filteredRecords.some((r) => r.id === selectedId)) {
-        setSelectedId(undefined);
-      }
-    }
-  }, [clearTraffic, filteredRecords, selectedId, setSelectedId]);
-
   const styles = useMemo<Record<string, CSSProperties>>(
     () => ({
       container: {
@@ -781,8 +789,6 @@ export default function Traffic() {
       <Toolbar
         filters={toolbarFilters}
         onClearAll={handleClearAll}
-        onClearFiltered={handleClearFiltered}
-        filteredCount={filteredRecords.length}
         onFilterChange={setToolbarFilters}
         systemProxyEnabled={systemProxy?.enabled}
         systemProxySupported={systemProxy?.supported}
@@ -794,6 +800,13 @@ export default function Traffic() {
         onDetailPanelToggle={handleDetailPanelToggle}
         detailDetached={detailDetached}
         onAttachDetailWindow={handleAttachDetailWindow}
+        breakpointEnabled={breakpointEnabled}
+        hookRequest={hookRequest}
+        hookResponse={hookResponse}
+        breakpointLoading={breakpointLoading}
+        onBreakpointToggle={toggleBreakpoint}
+        onHookRequestToggle={toggleHookRequest}
+        onHookResponseToggle={toggleHookResponse}
       />
 
       <div style={styles.mainContent}>

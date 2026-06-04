@@ -15,7 +15,8 @@ site/dist/
 .ui-backend.pid
 .ui-traffic.pid
 .env/
-log/
+log/ndleClearFiltered, clearMenuItems
+.opencode/
 .cargo-target-*/
 .bifrost-*/
 target-e2e-*/

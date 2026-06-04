@@ -554,6 +554,10 @@ impl BodyCaptureHandle {
     pub fn take(&self) -> Option<BodyRef> {
         self.body_ref.lock().ok()?.take()
     }
+
+    pub fn clone_ref(&self) -> Option<BodyRef> {
+        self.body_ref.lock().ok()?.clone()
+    }
 }
 
 struct RequestTeeBodyDropGuard {

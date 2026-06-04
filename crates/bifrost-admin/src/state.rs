@@ -14,6 +14,7 @@ use tokio::sync::RwLock;
 use crate::app_icon::SharedAppIconCache;
 use crate::async_traffic::{AsyncTrafficWriter, SharedAsyncTrafficWriter};
 use crate::body_store::SharedBodyStore;
+use crate::breakpoint::{BreakpointManager, SharedBreakpointManager};
 use crate::client_trust_tracker::ClientTlsTrustTracker;
 use crate::connection_monitor::{ConnectionMonitor, SharedConnectionMonitor};
 use crate::connection_registry::{ConnectionRegistry, SharedConnectionRegistry};
@@ -121,6 +122,7 @@ pub struct AdminState {
     pub ip_tls_pending_manager: Option<Arc<IpTlsPendingManager>>,
     pub client_trust_tracker: Option<SharedClientTrustTracker>,
     pub devtools_broker: SharedBrowserDebugBroker,
+    pub breakpoint_manager: SharedBreakpointManager,
     temporary_port_manager: parking_lot::RwLock<Option<SharedTemporaryPortManager>>,
     /// Keep-awake manager; None if not initialized (e.g. in tests).
     pub keepawake_manager: Option<bifrost_power::SharedKeepAwakeManager>,
@@ -180,6 +182,7 @@ impl AdminState {
             ip_tls_pending_manager: None,
             client_trust_tracker: None,
             devtools_broker: Arc::new(BrowserDebugBroker::new()),
+            breakpoint_manager: Arc::new(BreakpointManager::new()),
             temporary_port_manager: parking_lot::RwLock::new(None),
             keepawake_manager: None,
             remote_invoke_worker: parking_lot::RwLock::new(None),
