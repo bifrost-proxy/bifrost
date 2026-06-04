@@ -603,6 +603,20 @@ collect_failed_result_indices() {
     done
 }
 
+result_has_status() {
+    local result_file="$1"
+    [[ -f "$result_file" ]] || return 1
+
+    local key value
+    while IFS='=' read -r key value; do
+        if [[ "$key" == "STATUS" && -n "${value%$'\r'}" ]]; then
+            return 0
+        fi
+    done < "$result_file"
+
+    return 1
+}
+
 result_failure_mentions_mock_outage() {
     local idx="$1"
     local log_file
@@ -1049,8 +1063,43 @@ main() {
     local completed=0
     local running=0
     local next_index=0
+    local loop_sleep="0.1"
+    local run_started_secs="$SECONDS"
+    local runner_timeout="${BIFROST_E2E_RULE_RUNNER_TIMEOUT:-0}"
+
+    if is_windows; then
+        # MSYS bash is sensitive to frequent forks. Poll less aggressively on
+        # Windows and rely on result files as the primary completion signal.
+        loop_sleep="${BIFROST_E2E_WINDOWS_POLL_INTERVAL:-1}"
+    fi
 
     while [[ $completed -lt $total_suites ]]; do
+        if [[ "$runner_timeout" -gt 0 && $(( SECONDS - run_started_secs )) -ge "$runner_timeout" ]]; then
+            warn "规则测试总时长超过 ${runner_timeout}s，主动终止未完成套件并输出诊断"
+            for i in "${!pids[@]}"; do
+                [[ -n "${pids[$i]:-}" ]] || continue
+                local fixture_rel="${test_files[$i]#$RULES_DIR/}"
+                local rf="${RESULTS_DIR}/result_${i}.txt"
+                local lf="${RESULTS_DIR}/log_${i}.txt"
+                if ! result_has_status "$rf"; then
+                    {
+                        echo "TEST_FILE=$fixture_rel"
+                        echo "PROXY_PORT=$((BASE_PORT + i))"
+                        echo "STATUS=failed"
+                        echo "PASSED=0"
+                        echo "FAILED=1"
+                    } > "$rf"
+                    echo "[TIMEOUT] rule runner exceeded ${runner_timeout}s while ${fixture_rel} was still running" >> "$lf"
+                fi
+                kill_process_tree "${pids[$i]}"
+                kill_pid_force "${pids[$i]}"
+                unset 'pids[i]'
+            done
+            echo ""
+            aggregate_results || true
+            return 1
+        fi
+
         while [[ $running -lt $JOBS && $next_index -lt $total_suites ]]; do
             run_single_test "${test_files[$next_index]}" "$next_index" &
             pids[$next_index]=$!
@@ -1062,16 +1111,25 @@ main() {
         done
 
         for i in "${!pids[@]}"; do
-            if [[ -n "${pids[$i]}" ]] && ! kill -0 "${pids[$i]}" 2>/dev/null; then
+            if [[ -z "${pids[$i]:-}" ]]; then
+                continue
+            fi
+
+            local rf="${RESULTS_DIR}/result_${i}.txt"
+            if result_has_status "$rf" || ! kill -0 "${pids[$i]}" 2>/dev/null; then
                 wait "${pids[$i]}" 2>/dev/null || true
                 unset 'pids[i]'
                 completed=$((completed + 1))
                 running=$((running - 1))
                 local fixture_rel="${test_files[$i]#$RULES_DIR/}"
                 local result_status=""
-                local rf="${RESULTS_DIR}/result_${i}.txt"
                 if [[ -f "$rf" ]]; then
-                    result_status=$(grep "^STATUS=" "$rf" 2>/dev/null | head -1 | cut -d= -f2)
+                    while IFS='=' read -r key value; do
+                        if [[ "$key" == "STATUS" ]]; then
+                            result_status="${value%$'\r'}"
+                            break
+                        fi
+                    done < "$rf"
                 fi
                 local label="${fixture_rel}"
                 if [[ "$result_status" == "passed" ]]; then
@@ -1083,7 +1141,7 @@ main() {
             fi
         done
 
-        sleep 0.1
+        sleep "$loop_sleep"
     done
 
     echo ""

@@ -143,22 +143,31 @@
 - 日志流由独立子 shell 包裹 `tail -f "$log_file" | sed ...` 提供，命令结束后会对日志流子 shell 调用 `kill_process_tree`，不留下 `tail -f` 残留进程，也不影响 suite 结果收集。
 - 如果 Windows rules 后续仍失败，GitHub 会上传 `.e2e-reports/` 与 `.bifrost-e2e-ci/` artifact，避免再次出现无日志红灯。
 
-### TC-REF-06：Windows rules 全量 outage 重试预算不被 job timeout 截断
+### TC-REF-06：Windows rules fork 压力与 20 分钟内层预算回归
 
 **操作步骤**：
-1. 检查 Windows rules job timeout：
+1. 检查 Windows rules job 的内外层 timeout 配置：
    ```bash
-   ruby -ryaml -e 'workflow = YAML.load_file(".github/workflows/ci.yml"); job = workflow["jobs"]["e2e-windows-rules"]; include = job["strategy"]["matrix"]["include"]; raise "expected four windows rules shards" unless include.size == 4; raise "expected x86_64 windows rules" unless include.all? { |row| row["target"] == "x86_64-pc-windows-msvc" }; raise "expected 20 minute job timeout" unless job["timeout-minutes"] == 20; raise "expected 1080 second suite timeout" unless include.all? { |row| row["suite_timeout"] == "1080" }; raise "expected 180 second retry budget" unless job["env"]["BIFROST_E2E_RETRY_BUDGET_SECS"] == "180"; puts "windows rules timeout budget ok"'
+   ruby -ryaml -e 'workflow = YAML.load_file(".github/workflows/ci.yml"); job = workflow["jobs"]["e2e-windows-rules"]; include = job["strategy"]["matrix"]["include"]; env = job["env"]; raise "expected four windows rules shards" unless include.size == 4; raise "expected x86_64 windows rules" unless include.all? { |row| row["target"] == "x86_64-pc-windows-msvc" }; raise "expected 1260 second outer suite timeout" unless include.all? { |row| row["suite_timeout"] == "1260" }; raise "expected 1200 second inner rules timeout" unless env["BIFROST_E2E_RULE_RUNNER_TIMEOUT"] == "1200"; raise "expected 30 second heartbeat interval" unless env["BIFROST_E2E_HEARTBEAT_INTERVAL"] == "30"; raise "expected 180 second retry budget" unless env["BIFROST_E2E_RETRY_BUDGET_SECS"] == "180"; puts "windows rules timeout budget ok"'
    ```
-2. 在 GitHub Actions Windows rules job 中触发 rules E2E。
-3. 若 Windows x86 rules 进入共享 mock outage 后的失败路径，观察 suite watchdog 应在 1080 秒内终止并上传日志，而不是拖到 job 级 timeout。
+2. 检查外层 E2E wrapper 的 heartbeat 不再每秒 fork：
+   ```bash
+   rg -n 'BIFROST_E2E_HEARTBEAT_INTERVAL|sleep "\$interval"|tick=' scripts/run_all_e2e.sh
+   ```
+3. 检查 rules runner 的 Windows 主循环使用较低频轮询和 result-file 完成判定：
+   ```bash
+   rg -n 'result_has_status|BIFROST_E2E_WINDOWS_POLL_INTERVAL|BIFROST_E2E_RULE_RUNNER_TIMEOUT|result_has_status "\$rf" \|\| ! kill -0' e2e-tests/run_all_tests_parallel.sh
+   ```
+4. 在 GitHub Actions Windows rules job 中触发 rules E2E。
+5. 若 Windows x86 rules 再次出现 MSYS `fork: Resource temporarily unavailable` 或长时间未完成，观察内层 runner 应在 1200 秒内终止未完成 fixture、聚合失败摘要，并让后续 `Dump failed suite logs` / `Upload E2E logs` 执行。
 
 **预期结果**：
-- Windows rules job 的 `timeout-minutes` 为 `20`，只影响 `e2e-windows-rules` 矩阵。
-- Windows rules job 拆为 4 个 x86_64 shard，每个 shard 的 `BIFROST_E2E_SUITE_TIMEOUT` 为 `1080` 秒，让失败路径在 job timeout 前完成诊断。
+- Windows rules job 拆为 4 个 x86_64 shard，每个 shard 的外层 `BIFROST_E2E_SUITE_TIMEOUT` 为 `1260` 秒。
+- Windows rules job 的内层 `BIFROST_E2E_RULE_RUNNER_TIMEOUT` 为 `1200` 秒，让失败路径在 20 分钟内由 rules runner 自己完成诊断。
+- `scripts/run_all_e2e.sh` 的 heartbeat 默认间隔为 30 秒，避免 Windows 外层 wrapper 每秒 fork `sleep`。
+- `e2e-tests/run_all_tests_parallel.sh` 在 Windows 下默认 1 秒轮询，并用 `result_*.txt` 中的 `STATUS=` 作为 suite 完成信号，避免已完成子进程因 `kill -0` 仍可见而不被回收。
 - `BIFROST_E2E_RETRY_BUDGET_SECS` 仍保持 `180`，普通失败不会因为 job timeout 提升而被无限重试。
-- Windows rules 只保留 x86_64 rules fixture；Windows ARM 不再跑完整 rules shards，避免串行慢失败阻塞主干合入。
-- 若仍失败，应执行日志 dump/upload 步骤并保留可诊断 artifact。
+- 若仍失败，应执行日志 dump/upload 步骤并保留可诊断 artifact，不能再次出现 40 分钟以上无诊断红灯。
 
 ### TC-REF-07：bifrost-e2e admin 测试目录重复端口重跑隔离
 
