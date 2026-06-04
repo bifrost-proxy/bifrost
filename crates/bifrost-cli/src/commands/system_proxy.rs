@@ -249,6 +249,7 @@ pub(crate) fn handle_system_proxy_launchd_command(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn print_launchd_status(status: &bifrost_core::SystemProxyLaunchdStatus) {
     println!("Supported:         {}", status.supported);
     println!("Installed:         {}", status.installed);
@@ -299,6 +300,7 @@ fn cleanup_system_proxy_state(data_dir: &std::path::Path) -> bifrost_core::Resul
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn cleanup_system_proxy_state_on_launchd_stop(
     data_dir: &std::path::Path,
     signal_name: &str,
@@ -437,6 +439,7 @@ fn run_system_proxy_lifecycle_helper(
     }
 }
 
+#[cfg(target_os = "macos")]
 fn run_system_proxy_cleanup_daemon(
     data_dir: std::path::PathBuf,
     installed_version: Option<String>,
