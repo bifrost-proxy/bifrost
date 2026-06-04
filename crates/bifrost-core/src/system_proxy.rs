@@ -81,6 +81,12 @@ impl SystemProxyManager {
                 "System proxy is not supported on this platform".to_string(),
             ));
         }
+        tracing::info!(
+            requested_host = %host,
+            requested_port = port,
+            was_set = self.is_set,
+            "System proxy enable requested"
+        );
 
         let mut preserved_original: Option<Sysproxy> = None;
         if self.is_set {
@@ -184,6 +190,12 @@ impl SystemProxyManager {
         )?;
         #[cfg(target_os = "macos")]
         {
+            tracing::info!(
+                requested_host = %host,
+                requested_port = port,
+                bypass = %bypass_str,
+                "Applying Bifrost system proxy to all macOS network services"
+            );
             set_macos_all_services_proxy(host, port, bypass_str)?;
         }
 
@@ -336,6 +348,11 @@ impl SystemProxyManager {
         if !Self::is_supported() {
             return Ok(());
         }
+        tracing::info!(
+            data_dir = %self.data_dir.display(),
+            was_set = self.is_set,
+            "System proxy restore requested"
+        );
 
         if !self.is_set {
             return Self::recover_from_crash(&self.data_dir);
@@ -384,6 +401,12 @@ impl SystemProxyManager {
 
         #[cfg(target_os = "macos")]
         {
+            tracing::info!(
+                original_enabled = original.enable,
+                original_host = %original.host,
+                original_port = original.port,
+                "Restoring macOS system proxy to saved original state"
+            );
             let result = if original.enable {
                 set_macos_all_services_proxy(&original.host, original.port, &original.bypass)
             } else {
@@ -761,6 +784,12 @@ impl SystemProxyManager {
     fn apply_proxy_backup(&self, proxy: &ProxyBackup) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
+            tracing::info!(
+                original_enabled = proxy.enable,
+                original_host = %proxy.host,
+                original_port = proxy.port,
+                "Applying saved macOS system proxy backup"
+            );
             let result = if proxy.enable {
                 set_macos_all_services_proxy(&proxy.host, proxy.port, &proxy.bypass)
             } else {
@@ -798,11 +827,23 @@ impl SystemProxyManager {
         if !Self::is_supported() {
             return Ok(());
         }
+        tracing::info!(
+            data_dir = %data_dir.display(),
+            "System proxy crash recovery check starting"
+        );
 
         let manager = Self::new(data_dir.to_path_buf());
         let state_path = data_dir.join(STATE_FILE_NAME);
         if state_path.exists() {
             let state = manager.load_managed_state()?;
+            tracing::info!(
+                target_host = %state.target.host,
+                target_port = state.target.port,
+                original_enabled = state.original.enable,
+                original_host = %state.original.host,
+                original_port = state.original.port,
+                "Managed system proxy state found during crash recovery"
+            );
             let current = Self::get_current()?;
             let decision = {
                 #[cfg(target_os = "macos")]
@@ -828,6 +869,14 @@ impl SystemProxyManager {
             };
             match decision {
                 CrashRecoveryDecision::RestoreOriginal => {
+                    tracing::info!(
+                        target_host = %state.target.host,
+                        target_port = state.target.port,
+                        original_enabled = state.original.enable,
+                        original_host = %state.original.host,
+                        original_port = state.original.port,
+                        "Restoring original system proxy because current proxy still matches Bifrost managed target"
+                    );
                     manager.apply_proxy_backup(&state.original)?;
                     tracing::info!("Recovered Bifrost-managed system proxy from previous crash");
                 }
@@ -848,6 +897,10 @@ impl SystemProxyManager {
 
         let backup_path = data_dir.join(BACKUP_FILE_NAME);
         if !backup_path.exists() {
+            tracing::info!(
+                data_dir = %data_dir.display(),
+                "System proxy crash recovery check completed without managed state"
+            );
             return Ok(());
         }
 
@@ -855,6 +908,12 @@ impl SystemProxyManager {
         let backup: ProxyBackup = serde_json::from_str(&content).map_err(|e| {
             BifrostError::Config(format!("Failed to deserialize proxy backup: {}", e))
         })?;
+        tracing::info!(
+            original_enabled = backup.enable,
+            original_host = %backup.host,
+            original_port = backup.port,
+            "Legacy system proxy backup found during crash recovery"
+        );
 
         let proxy: Sysproxy = backup.into();
         #[cfg(target_os = "macos")]
@@ -1040,12 +1099,24 @@ fn macos_all_services_proxy_match(host: &str, port: u16) -> Result<bool> {
 #[cfg(target_os = "macos")]
 fn set_macos_all_services_proxy(host: &str, port: u16, bypass: &str) -> Result<()> {
     let services = list_macos_services()?;
+    tracing::info!(
+        service_count = services.len(),
+        requested_host = %host,
+        requested_port = port,
+        "Setting macOS web proxies for all network services"
+    );
     let bypass_domains: Vec<String> = bypass
         .split(',')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
     for svc in services {
+        tracing::info!(
+            service = %svc,
+            requested_host = %host,
+            requested_port = port,
+            "Setting macOS network service proxy to requested target"
+        );
         // HTTP
         run_networksetup(
             "networksetup",
@@ -1072,7 +1143,15 @@ fn set_macos_all_services_proxy(host: &str, port: u16, bypass: &str) -> Result<(
 #[cfg(target_os = "macos")]
 fn disable_macos_all_services_proxy() -> Result<()> {
     let services = list_macos_services()?;
+    tracing::info!(
+        service_count = services.len(),
+        "Disabling macOS web proxies for all network services"
+    );
     for svc in services {
+        tracing::info!(
+            service = %svc,
+            "Disabling macOS network service web proxies"
+        );
         run_networksetup("networksetup", &["-setwebproxystate", &svc, "off"])?;
         run_networksetup("networksetup", &["-setsecurewebproxystate", &svc, "off"])?;
     }

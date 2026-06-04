@@ -475,6 +475,11 @@ fn abort_listener_after_grace_period(handle: tokio::task::JoinHandle<bifrost_cor
 }
 
 fn recover_proxy_state_before_start(bifrost_dir: &std::path::Path) {
+    tracing::info!(
+        target: "bifrost_cli::startup",
+        data_dir = %bifrost_dir.display(),
+        "checking for stale system proxy state before startup"
+    );
     if let Err(error) = bifrost_core::SystemProxyManager::recover_from_crash(bifrost_dir) {
         eprintln!("Failed to recover system proxy from previous crash: {error}");
         tracing::warn!(
@@ -537,9 +542,23 @@ impl SystemProxyRestoreGuard {
 
 impl Drop for SystemProxyRestoreGuard {
     fn drop(&mut self) {
+        tracing::info!(
+            target: "bifrost_cli::shutdown",
+            "system proxy restore guard triggered; stopping reconcile before restore"
+        );
         self.stop_flag.store(true, Ordering::Release);
         if let Err(e) = self.system_proxy_manager.blocking_write().restore() {
             eprintln!("Failed to restore system proxy: {}", e);
+            tracing::warn!(
+                target: "bifrost_cli::shutdown",
+                error = %e,
+                "system proxy restore guard failed to restore proxy"
+            );
+        } else {
+            tracing::info!(
+                target: "bifrost_cli::shutdown",
+                "system proxy restore guard completed"
+            );
         }
     }
 }
@@ -550,12 +569,24 @@ async fn restore_system_proxy_on_shutdown(
     stop_flag: &Arc<AtomicBool>,
     context: &'static str,
 ) {
+    let started_at = Instant::now();
+    tracing::info!(
+        target: "bifrost_cli::shutdown",
+        context,
+        enabled_flag = enabled_flag.load(Ordering::Acquire),
+        "system proxy shutdown restore starting; stopping reconcile first"
+    );
     stop_flag.store(true, Ordering::Release);
     let mut manager = system_proxy_manager.write().await;
     match manager.restore() {
         Ok(()) => {
             enabled_flag.store(false, Ordering::Release);
-            tracing::info!(target: "bifrost_cli::shutdown", context, "system proxy restored");
+            tracing::info!(
+                target: "bifrost_cli::shutdown",
+                context,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                "system proxy shutdown restore completed"
+            );
         }
         Err(error) => {
             eprintln!("Failed to restore system proxy during shutdown: {error}");
@@ -563,6 +594,7 @@ async fn restore_system_proxy_on_shutdown(
                 target: "bifrost_cli::shutdown",
                 context,
                 error = %error,
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
                 "failed to restore system proxy"
             );
         }
