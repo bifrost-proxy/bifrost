@@ -97,6 +97,21 @@ pub fn is_process_running(pid: u32) -> bool {
         }
     }
 
+    #[cfg(not(target_os = "linux"))]
+    {
+        if let Ok(output) = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+        {
+            if output.status.success() {
+                let stat = String::from_utf8_lossy(&output.stdout);
+                if stat.trim_start().starts_with('Z') {
+                    return false;
+                }
+            }
+        }
+    }
+
     true
 }
 
