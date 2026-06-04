@@ -1508,6 +1508,15 @@ pub fn run_foreground(
             loop {
                 tokio::select! {
                     listener_result = &mut listener_task => {
+                        if enable_system_proxy || system_proxy_enabled.load(Ordering::Acquire) {
+                            restore_system_proxy_on_shutdown(
+                                &system_proxy_manager,
+                                &system_proxy_enabled,
+                                &system_proxy_reconcile_stop,
+                                "foreground listener exit",
+                            )
+                            .await;
+                        }
                         return Err(listener_task_error(listener_result));
                     },
                     _ = &mut shutdown_signal => {
@@ -2311,6 +2320,15 @@ pub fn run_daemon(
                     drop(ready_tx);
 
                     let listener_result = (&mut listener_task).await;
+                    if enable_system_proxy || system_proxy_enabled.load(Ordering::Acquire) {
+                        restore_system_proxy_on_shutdown(
+                            &system_proxy_manager,
+                            &system_proxy_enabled,
+                            &system_proxy_reconcile_stop,
+                            "daemon listener exit",
+                        )
+                        .await;
+                    }
 
                     rules_watcher_task.abort();
                     Err(listener_task_error(listener_result))

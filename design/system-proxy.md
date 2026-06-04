@@ -13,7 +13,7 @@ Bifrost 的 System Proxy 只应管理自己写入的系统代理配置。用户�
 - `bifrost start` 在证书检查和端口冲突检查之前同步执行 `SystemProxyManager::recover_from_crash`。这样电脑重启、睡眠唤醒后旧进程已经消失，或下一次启动因为端口被占用而失败时，也会先恢复 `proxy_state.json` 记录的原始系统代理，避免 Wi-Fi/网络服务继续指向已不存在的 Bifrost 端口。
 - `SystemProxyManager::restore` 不再只依赖当前进程内存态 `is_set`；当新进程只看到落盘的 `proxy_state.json` / `proxy_backup.json` 时，也会进入 crash recovery。macOS 恢复如果遇到 `networksetup` 权限错误，沿用 GUI 授权兜底，而不是静默保留残留代理。
 - 运行期 system proxy reconcile 不再是一次性启动动作。只要本次服务配置要求启用系统代理，后台线程会周期性复核当前系统代理是否仍指向 Bifrost 端口；电脑睡眠恢复后如果 macOS 网络服务刷新导致代理配置丢失或漂移，会重新收敛到当前 Bifrost 端口，保证服务仍可被浏览器/桌面应用使用。
-- 收到 SIGTERM/SIGINT/SIGHUP 时，前台和 daemon 分支都会优先停止系统代理 reconcile 线程并调用 `SystemProxyManager::restore`，再清理代理 listener、后台任务、ASR/浏览器/Agent worker 等资源。前台兜底 guard 也会在异常退出时先停止 reconcile，再执行 restore，避免恢复后被后台线程重新启用。关机/重启前的短窗口优先恢复 Wi-Fi/Web 代理，减少系统重启后仍绑定到已消失 Bifrost 端口的风险。
+- 收到 SIGTERM/SIGINT/SIGHUP 时，前台和 daemon 分支都会优先停止系统代理 reconcile 线程并调用 `SystemProxyManager::restore`，再清理代理 listener、后台任务、ASR/浏览器/Agent worker 等资源。前台/daemon listener 异常退出也会先执行同一套 restore，再返回 runtime error；前台兜底 guard 还会在其它异常退出时先停止 reconcile，再执行 restore，避免恢复后被后台线程重新启用。关机/重启前的短窗口优先恢复 Wi-Fi/Web 代理，减少系统重启后仍绑定到已消失 Bifrost 端口的风险。
 - macOS 恢复与归属判断必须逐个 network service 检查 `networksetup -getwebproxy` 和 `-getsecurewebproxy`。`scutil --proxy` 是聚合视图，可能出现 Wi-Fi 已恢复但 USB/Thunderbolt service 仍残留 Bifrost 端口的混合状态；只要任一 service 指向 Bifrost target，就必须按 Bifrost 管理状态恢复所有 service。
 - 日志覆盖启动恢复、关机清理和 service 级 macOS 写入路径。启动时记录 stale state 检查与 crash recovery 决策；关机信号路径记录停止 reconcile、restore 开始、耗时、成功或失败；core 层记录恢复到的原始 proxy host/port、是否保留外部代理，以及每个 macOS network service 的设置/关闭动作，方便重启或休眠恢复后按日志定位清理是否执行、执行到哪一步失败。
 
