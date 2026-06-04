@@ -1866,6 +1866,30 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 - `human_tests/im-gateway.md`
 - `human_tests/readme.md`
 
+## 2026-06-04 IM 内置 Agent worker env 测试隔离
+
+### 问题
+
+本地执行 `cargo test --workspace --all-features` 时，`im_event_loop_forwards_image_attachment_to_agent_chat` 偶发没有收到 mock chat request；单独重跑该用例可通过。根因是同一 workspace 并发测试中 `BIFROST_FORCE_AGENT_WORKER` 会影响 `AgentWorkerClient::spawn_or_fallback` 的 worker 选择，而 IM Gateway 内置 Agent mock 模型用例没有和 agent worker 自测共享同一把环境变量锁。
+
+### 实现逻辑
+
+- 在 `test_env` 中提供共享的 `agent_worker_env_lock()`，用于串行保护影响 agent worker 进程/进程内选择的全局环境变量。
+- `agent_worker` 自测继续验证 `BIFROST_FORCE_AGENT_WORKER` 强制外部 worker 与未设置时的 in-process worker 分支，但改为使用共享锁。
+- IM Gateway 内置 Agent mock 模型用例在执行前持有共享锁，并临时移除 `BIFROST_FORCE_AGENT_WORKER`，确保测试目标始终是内置 in-process worker 与 mock model request，而不是被其它测试的全局 env 污染。
+
+### 测试方案
+
+- `cargo test -p bifrost-admin handlers::im_gateway::tests::im_event_loop_forwards_image_attachment_to_agent_chat -- --nocapture`
+- `cargo test -p bifrost-admin 'im_gateway::agent_worker::tests::spawn_' -- --nocapture`
+- `cargo test --workspace --all-features`
+
+### 文档更新
+
+- `design/im-gateway.md`
+- `human_tests/im-gateway.md`
+- `human_tests/readme.md`
+
 ## 2026-05-26 Owner 上线通知追加设备名称
 
 ### 问题

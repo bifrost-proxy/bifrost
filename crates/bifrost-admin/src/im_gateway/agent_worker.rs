@@ -1049,11 +1049,6 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
-    fn worker_env_lock() -> &'static tokio::sync::Mutex<()> {
-        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
-    }
-
     #[test]
     fn build_run_request_uses_protocol_version_and_session() {
         let config = bifrost_agent::AgentConfig::default();
@@ -1279,7 +1274,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_process_fallback_to_in_process_on_missing_executable() {
-        let _lock = worker_env_lock().lock().await;
+        let _lock = crate::test_env::agent_worker_env_lock().lock().await;
         // Force external worker mode by setting the env var
         let _guard = EnvVarGuard::set("BIFROST_FORCE_AGENT_WORKER", "1");
         // Use a non-existent executable to trigger the fallback
@@ -1307,7 +1302,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_or_fallback_always_succeeds() {
-        let _lock = worker_env_lock().lock().await;
+        let _lock = crate::test_env::agent_worker_env_lock().lock().await;
         // Ensure we're NOT in forced external worker mode
         let _guard = EnvVarGuard::remove("BIFROST_FORCE_AGENT_WORKER");
         let request = build_run_request(
