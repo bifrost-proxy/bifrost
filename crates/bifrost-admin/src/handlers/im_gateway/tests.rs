@@ -149,6 +149,10 @@ pub(super) fn online_notification_message_uses_provider_work_dir_override() {
     assert!(message.contains("- **Provider**: Feishu Main (`feishu-main`)"));
     assert!(message.contains("- **Device**: eden-macbook"));
     assert!(message.contains("- **Workspace**: `/custom/im-provider-workdir`"));
+    assert!(message.contains("- **Runner Type**: `bifrost_agent`"));
+    assert!(message.contains("- **Runner ID**: `N/A`"));
+    assert!(message.contains("- **Bound Session**: `N/A`"));
+    assert!(message.contains("- **Completed User Turns**: 0"));
     assert!(message.contains("- **Status**: Ready"));
 }
 
@@ -166,6 +170,86 @@ pub(super) fn online_notification_message_falls_back_to_process_work_dir() {
     assert!(message.contains("- **Device**: eden-macbook"));
     assert!(message.contains("- **Workspace**: `"));
     assert!(message.contains(&cwd));
+}
+
+#[test]
+pub(super) fn online_notification_message_includes_runner_context_and_turns() {
+    let mut provider = test_provider();
+    provider.owner_open_id = Some("ou_owner".to_string());
+    let context = OnlineNotificationAgentContext {
+        runner_type: "chatgpt_web".to_string(),
+        runner_id: Some("web-main".to_string()),
+        session_key: "feishu-main:ou_owner".to_string(),
+        user_turn_count: 7,
+    };
+
+    let message =
+        build_online_notification_message_with_context(&provider, "eden-macbook", Some(&context));
+
+    assert!(message.contains("- **Runner Type**: `chatgpt_web`"));
+    assert!(message.contains("- **Runner ID**: `web-main`"));
+    assert!(message.contains("- **Bound Session**: `feishu-main:ou_owner`"));
+    assert!(message.contains("- **Completed User Turns**: 7"));
+}
+
+#[test]
+pub(super) fn online_notification_context_resolves_external_runner_adapter_and_turns() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let mut provider = test_provider();
+    provider.owner_open_id = Some("ou_owner".to_string());
+    provider.agent_config = Some(ImProviderAgentConfig {
+        runner: Some(bifrost_agent::AgentRunnerMode::Custom(
+            "web-main".to_string(),
+        )),
+        work_dir: Some("/custom/im-provider-workdir".to_string()),
+        base_instructions: None,
+        developer_instructions: None,
+        user_instructions: None,
+    });
+    let base_config = bifrost_agent::config::AgentConfig::default();
+    let external_config = crate::im_gateway::external_cli::ExternalCliGatewayConfig {
+        version: 1,
+        default_runner_id: "codex-default".to_string(),
+        runners: std::collections::BTreeMap::from([(
+            "web-main".to_string(),
+            crate::im_gateway::external_cli::ExternalCliAgentSettings {
+                adapter: "chatgpt_web".to_string(),
+                enabled: true,
+                ..Default::default()
+            },
+        )]),
+        channels: std::collections::BTreeMap::new(),
+    };
+    let manager = bifrost_agent::AgentSessionManager::new(3600);
+    let mut session = manager
+        .try_take_session_with_work_dir(
+            "feishu-main:ou_owner",
+            Some("/custom/im-provider-workdir".to_string()),
+        )
+        .expect("session should be available");
+    session
+        .history
+        .push(bifrost_agent::ChatMessage::user("first"));
+    session
+        .history
+        .push(bifrost_agent::ChatMessage::assistant("answer"));
+    session
+        .history
+        .push(bifrost_agent::ChatMessage::user("second"));
+    manager.return_session(session);
+
+    let context = build_online_notification_agent_context(
+        &provider,
+        &base_config,
+        &external_config,
+        &manager,
+    );
+
+    assert_eq!(context.runner_type, "chatgpt_web");
+    assert_eq!(context.runner_id.as_deref(), Some("web-main"));
+    assert_eq!(context.session_key, "feishu-main:ou_owner");
+    assert_eq!(context.user_turn_count, 2);
 }
 
 #[test]

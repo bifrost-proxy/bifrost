@@ -199,7 +199,7 @@ fn macos_computer_name() -> Option<String> {
     }
 }
 
-fn current_device_name() -> String {
+pub(super) fn current_device_name() -> String {
     ["BIFROST_DEVICE_NAME", "COMPUTERNAME"]
         .into_iter()
         .find_map(|key| {
@@ -233,21 +233,96 @@ fn online_notification_work_dir(provider: &ImProviderConfig) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct OnlineNotificationAgentContext {
+    pub(super) runner_type: String,
+    pub(super) runner_id: Option<String>,
+    pub(super) session_key: String,
+    pub(super) user_turn_count: u32,
+}
+
+pub(super) fn build_online_notification_agent_context(
+    provider: &ImProviderConfig,
+    base_agent_config: &crate::im_gateway::agent::ImAgentConfig,
+    external_cli_config: &crate::im_gateway::external_cli::ExternalCliGatewayConfig,
+    agent_session_manager: &bifrost_agent::AgentSessionManager,
+) -> OnlineNotificationAgentContext {
+    let effective_agent_config = effective_agent_config_for_provider(base_agent_config, provider);
+    let (runner_type, runner_id) = match effective_agent_config.runner.as_ref() {
+        Some(bifrost_agent::AgentRunnerMode::Custom(runner_id)) => {
+            let external =
+                crate::im_gateway::external_cli::effective_config_for_provider_and_runner(
+                    external_cli_config,
+                    Some(provider.id.as_str()),
+                    Some(runner_id.as_str()),
+                );
+            (external.settings.adapter, Some(external.runner_id))
+        }
+        _ => ("bifrost_agent".to_string(), None),
+    };
+    let session_key = build_session_key(&provider.id, provider.owner_open_id.as_deref());
+    let user_turn_count = online_notification_user_turn_count(agent_session_manager, &session_key);
+
+    OnlineNotificationAgentContext {
+        runner_type,
+        runner_id,
+        session_key,
+        user_turn_count,
+    }
+}
+
+fn online_notification_user_turn_count(
+    agent_session_manager: &bifrost_agent::AgentSessionManager,
+    session_key: &str,
+) -> u32 {
+    if let Some(detail) = agent_session_manager.get_session_detail(session_key) {
+        return u32::try_from(detail.user_turn_count).unwrap_or(u32::MAX);
+    }
+    if let Some(active) = agent_session_manager.get_active_turn_status(session_key) {
+        return u32::try_from(active.user_turn_count).unwrap_or(u32::MAX);
+    }
+
+    let data_dir = bifrost_agent::config::agent_home_dir();
+    bifrost_agent::persistence::list_conversations(&data_dir, Some(session_key))
+        .into_iter()
+        .rev()
+        .map(|path| bifrost_agent::persistence::scan_session_summary(&path).user_turns)
+        .find(|count| *count > 0)
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
 pub(super) fn build_online_notification_message_with_device_name(
     provider: &ImProviderConfig,
     device_name: &str,
 ) -> String {
-    let device_name = clean_device_name(device_name).unwrap_or_else(|| "unknown".to_string());
-    let work_dir = online_notification_work_dir(provider);
-
-    format!(
-        "**Bifrost is online**\n\n- **Provider**: {} (`{}`)\n- **Device**: {device_name}\n- **Workspace**: `{work_dir}`\n- **Status**: Ready",
-        provider.display_name, provider.id
-    )
+    build_online_notification_message_with_context(provider, device_name, None)
 }
 
-pub(super) fn build_online_notification_message(provider: &ImProviderConfig) -> String {
-    build_online_notification_message_with_device_name(provider, &current_device_name())
+pub(super) fn build_online_notification_message_with_context(
+    provider: &ImProviderConfig,
+    device_name: &str,
+    agent_context: Option<&OnlineNotificationAgentContext>,
+) -> String {
+    let device_name = clean_device_name(device_name).unwrap_or_else(|| "unknown".to_string());
+    let work_dir = online_notification_work_dir(provider);
+    let runner_type = agent_context
+        .map(|context| context.runner_type.as_str())
+        .unwrap_or("bifrost_agent");
+    let runner_id = agent_context
+        .and_then(|context| context.runner_id.as_deref())
+        .unwrap_or("N/A");
+    let session_key = agent_context
+        .map(|context| context.session_key.as_str())
+        .unwrap_or("N/A");
+    let user_turn_count = agent_context
+        .map(|context| context.user_turn_count)
+        .unwrap_or(0);
+
+    format!(
+        "**Bifrost is online**\n\n- **Provider**: {} (`{}`)\n- **Device**: {device_name}\n- **Workspace**: `{work_dir}`\n- **Runner Type**: `{runner_type}`\n- **Runner ID**: `{runner_id}`\n- **Bound Session**: `{session_key}`\n- **Completed User Turns**: {user_turn_count}\n- **Status**: Ready",
+        provider.display_name, provider.id
+    )
 }
 
 pub(super) fn outbound_log_msg_type(

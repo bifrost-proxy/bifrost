@@ -201,7 +201,17 @@ pub(super) async fn run_event_loop_with_options(
                 updated_at: 0,
             };
 
-            let online_msg = build_online_notification_message(&provider);
+            let online_context = build_online_notification_agent_context(
+                &provider,
+                &agent_config_store.load(),
+                &external_cli_config_store.load(),
+                &agent_session_manager,
+            );
+            let online_msg = build_online_notification_message_with_context(
+                &provider,
+                &current_device_name(),
+                Some(&online_context),
+            );
             let send_result = client
                 .send_text(&provider, &online_target, &online_msg)
                 .await;

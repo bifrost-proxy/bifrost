@@ -981,6 +981,32 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 - **执行记录（2026-05-26）**: PASS — 执行 `cargo test -p bifrost-admin online_notification_message_ --lib` 通过，覆盖固定设备名 `eden-macbook` 时上线通知同时包含 `设备名称：eden-macbook`、Provider 自定义工作目录和进程 cwd 回退目录；消息发送链路沿用 `build_online_notification_message` 生成的同一 `content_preview`。
 - **执行记录（2026-06-03）**: PASS — 使用当前源码重启默认服务：`BIFROST_DATA_DIR=/Users/eden/.bifrost BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 SKIP_FRONTEND_BUILD=1 cargo run --bin bifrost -- start -p 9900 --unsafe-ssl --no-system-proxy --daemon -y`。查询 `feishu-main` outbound 记录确认重启上线通知 `trigger=online`、`status=success`、`msg_type=interactive`，`content_preview` 为 `**Bifrost is online**`，包含 `Provider: feishu-main`、`Device: eden-work`、`Workspace: /Users/eden/work/github/bifrost` 和 `Status: Ready`。
 
+
+### TC-IMG-65: 重启/重连上线通知展示 Runner 与会话轮次
+
+- **前置条件**:
+  - 使用临时数据目录启动源码版 Bifrost，必须设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`，必须携带 `--no-system-proxy`。
+  - 存在一个配置了 `owner_open_id` 的 IM Provider，Provider 专属 Agent Runner 可配置为内置 `bifrost_agent` 或外部 Runner，例如 `chatgpt_web`。
+  - 该 owner 对应 session 已有至少一轮历史对话，或在临时数据目录中预置同 session key 的 history JSONL。
+- **操作步骤**:
+  1. 启动或重启 Bifrost，等待 Provider 自动连接；或手动调用 `POST /_bifrost/api/im-gateway/providers/<provider-id>/connect` 触发重连。
+  2. 查询该 Provider 的 outbound 消息记录：
+     ```bash
+     curl -sS http://127.0.0.1:<port>/_bifrost/api/im-gateway/providers/<provider-id>/messages?direction=outbound\&limit=20
+     ```
+  3. 打开 owner IM 会话，查看最新上线通知卡片。
+  4. 如果 Provider 绑定外部 Runner，确认 Runner 类型来自外部 Runner adapter；如果未绑定外部 Runner，确认显示为内置 `bifrost_agent`。
+- **预期结果**:
+  - 最新上线通知 `trigger=online`、`status=success`；Feishu 通道 `msg_type=interactive`，微信通道按现有能力降级为文本。
+  - 通知正文仍以 `**Bifrost is online**` 开头，并保留 `Provider`、`Device`、`Workspace`、`Status`。
+  - 通知新增并正确展示 `Runner Type`、`Runner ID`、`Bound Session`、`Completed User Turns`。
+  - `Bound Session` 与 IM Agent 会话 key 一致，格式为 `<provider_id>:<owner_open_id>`；`Completed User Turns` 与当前内存 session 或持久化 history 中 user message 数一致。
+  - 外部 Runner 场景下 `Runner Type` 显示 adapter（例如 `chatgpt_web`），`Runner ID` 显示用户配置的 runner id；内置 Runner 场景下 `Runner Type` 为 `bifrost_agent`，`Runner ID` 为 `N/A`。
+- **清理步骤**:
+  - 删除测试 Provider。
+  - 停止临时服务并删除临时 `BIFROST_DATA_DIR`。
+- **执行记录（2026-06-04）**: PASS — 执行 `SKIP_FRONTEND_BUILD=1 e2e-tests/tests/test_im_online_notification_runner_context.sh`，脚本使用 mock Feishu API、临时数据目录和预置 `feishu-main:ou_owner` 两轮 user history 启动当前源码 Bifrost；创建绑定 `web-main` / `chatgpt_web` 的 Provider 并调用 connect 后，message log 最新 `trigger=online` 记录为 `status=success`、`msg_type=interactive`，`content_preview` 包含 `Provider`、`Device`、`Workspace`、`Runner Type: chatgpt_web`、`Runner ID: web-main`、`Bound Session: feishu-main:ou_owner`、`Completed User Turns: 2` 与 `Status: Ready`；mock Feishu 实收卡片正文也包含 Runner 类型与轮次。
+
 ### TC-IMG-63: Feishu text 发送默认转为 Markdown 卡片
 
 - **前置条件**:
