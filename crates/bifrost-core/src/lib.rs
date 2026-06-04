@@ -13,6 +13,7 @@ pub mod rule;
 pub mod shell_proxy;
 pub mod syntax;
 pub mod system_proxy;
+pub mod system_proxy_launchd;
 pub mod text;
 pub mod version_check;
 
@@ -51,3 +52,9 @@ pub use syntax::{
     ProtocolInfo, ProtocolValueSpec, SyntaxInfo, TemplateVariableInfo, ValueHint,
 };
 pub use system_proxy::{ProxyBackup, SystemProxyDisableOutcome, SystemProxyManager};
+pub use system_proxy_launchd::{
+    consume_stop_restore_suppression, install_launchd_cleanup,
+    install_launchd_cleanup_with_gui_auth, launchd_status, launchd_status_for_config,
+    render_launchd_plist, uninstall_launchd_cleanup, uninstall_launchd_cleanup_with_gui_auth,
+    SystemProxyLaunchdConfig, SystemProxyLaunchdStatus,
+};

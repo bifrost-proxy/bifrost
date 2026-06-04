@@ -22,7 +22,6 @@ import {
   ApiOutlined,
   CopyOutlined,
   ExclamationCircleOutlined,
-  GlobalOutlined,
   LockOutlined,
   PlusOutlined,
   QrcodeOutlined,
@@ -32,7 +31,12 @@ import {
 } from "@ant-design/icons";
 import type { SystemOverview } from "../../../types";
 import { getProxyQRCodeUrl } from "../../../api/proxy";
-import type { CliProxyStatus, ProxyAddressInfo, SystemProxyStatus } from "../../../api/proxy";
+import type {
+  CliProxyStatus,
+  ProxyAddressInfo,
+  SystemProxyLaunchdStatus,
+  SystemProxyStatus,
+} from "../../../api/proxy";
 import {
   getTemporaryPortActiveSummary,
   getTemporaryPorts,
@@ -43,6 +47,7 @@ import {
 import type { ProxySettings, TlsConfig } from "../../../api/config";
 import { updateTlsConfig } from "../../../api/config";
 import { useTlsConfigStore } from "../../../stores/useTlsConfigStore";
+import SystemProxySection from "./SystemProxySection";
 
 const { Text } = Typography;
 
@@ -905,9 +910,12 @@ export interface ProxyTabProps {
   setDesktopPortDraft: (value: number) => void;
   onApplyDesktopProxyPort: () => void;
   systemProxy: SystemProxyStatus | null;
+  systemProxyLaunchd: SystemProxyLaunchdStatus | null;
   cliProxy: CliProxyStatus | null;
   systemProxyLoading: boolean;
+  systemProxyLaunchdLoading: boolean;
   onToggleSystemProxy: (enabled: boolean) => void;
+  onToggleSystemProxyLaunchd: (enabled: boolean) => void;
   copyProxyConfig: () => void;
   overview: SystemOverview | null;
   proxyAddressInfo: ProxyAddressInfo | null;
@@ -949,9 +957,12 @@ export default function ProxyTab({
   setDesktopPortDraft,
   onApplyDesktopProxyPort,
   systemProxy,
+  systemProxyLaunchd,
   cliProxy,
   systemProxyLoading,
+  systemProxyLaunchdLoading,
   onToggleSystemProxy,
+  onToggleSystemProxyLaunchd,
   copyProxyConfig,
   overview,
   proxyAddressInfo,
@@ -981,35 +992,6 @@ export default function ProxyTab({
   handleRemoveAppExcludePattern,
   appSuggestions,
 }: ProxyTabProps) {
-  const cliProxyDisplay = useMemo(() => {
-    if (!cliProxy) {
-      return {
-        tag: null as null | { color: string; text: string },
-        detail: "Loading...",
-      };
-    }
-
-    const tag = {
-      color: cliProxy.enabled ? "green" : "default",
-      text: cliProxy.enabled ? "Enabled" : "Disabled",
-    };
-
-    const shortFiles = (cliProxy.config_files || [])
-      .filter(Boolean)
-      .map((p) => p.split(/[/\\]/).pop() || p);
-
-    let filesText = "-";
-    if (shortFiles.length === 1) filesText = shortFiles[0];
-    else if (shortFiles.length === 2) filesText = `${shortFiles[0]}, ${shortFiles[1]}`;
-    else if (shortFiles.length > 2)
-      filesText = `${shortFiles[0]}, ${shortFiles[1]} (+${shortFiles.length - 2} more)`;
-
-    return {
-      tag,
-      detail: `Shell: ${cliProxy.shell || "-"} · Files: ${filesText}`,
-    };
-  }, [cliProxy]);
-
   return (
     <div>
       <Row gutter={[16, 16]}>
@@ -1104,112 +1086,18 @@ export default function ProxyTab({
           </Col>
         ) : null}
 
-        <Col xs={24}>
-          <Card
-            title={
-              <Space>
-                <GlobalOutlined />
-                <span>System Proxy</span>
-              </Space>
-            }
-            size="small"
-          >
-            <Space direction="vertical" style={{ width: "100%" }}>
-              <Row justify="space-between" align="middle">
-                <Col>
-                  <Text>Enable System Proxy</Text>
-                </Col>
-                <Col>
-                  {systemProxy ? (
-                    systemProxy.supported ? (
-                    <Switch
-                      checked={systemProxy.enabled}
-                      loading={systemProxyLoading}
-                      onChange={onToggleSystemProxy}
-                      data-testid="settings-system-proxy-switch"
-                    />
-                  ) : (
-                    <Tooltip title="System proxy is not supported on this platform">
-                      <Text type="secondary">Not Supported</Text>
-                    </Tooltip>
-                  )) : (
-                    <Text type="secondary">Loading...</Text>
-                  )}
-                </Col>
-              </Row>
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                Route all system traffic through this proxy
-              </Text>
-
-              <Divider style={{ margin: "12px 0" }} />
-
-              <Row justify="space-between" align="middle">
-                <Col>
-                  <Text>Inject Bifrost Badge</Text>
-                </Col>
-                <Col>
-                  {injectBifrostBadge === null ? (
-                    <Text type="secondary">Loading...</Text>
-                  ) : (
-                    <Switch
-                      checked={injectBifrostBadge}
-                      loading={injectBifrostBadgeLoading}
-                      onChange={onToggleInjectBifrostBadge}
-                      data-testid="settings-badge-injection-switch"
-                    />
-                  )}
-                </Col>
-              </Row>
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                Only applies to HTML pages. Indicates that traffic is flowing through Bifrost proxy.
-              </Text>
-
-              <Divider style={{ margin: "12px 0" }} />
-
-              <Row justify="space-between" align="middle">
-                <Col>
-                  <Space>
-                    <Text>CLI Proxy (ENV)</Text>
-                    <Tooltip title="Persist proxy environment variables in your shell config so new terminals inherit the proxy">
-                      <ExclamationCircleOutlined style={{ color: "#8c8c8c" }} />
-                    </Tooltip>
-                  </Space>
-                </Col>
-                <Col>
-                  {cliProxyDisplay.tag ? (
-                    <Tag
-                      color={cliProxyDisplay.tag.color}
-                      data-testid="settings-cli-proxy-tag"
-                    >
-                      {cliProxyDisplay.tag.text}
-                    </Tag>
-                  ) : (
-                    <Text type="secondary">Loading...</Text>
-                  )}
-                </Col>
-              </Row>
-              <Tooltip
-                title={
-                  cliProxy
-                    ? (
-                        <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
-                          {`Proxy URL: ${cliProxy.proxy_url}\nConfig files:\n${(cliProxy.config_files || []).join("\n") || "-"}`}
-                        </pre>
-                      )
-                    : undefined
-                }
-              >
-                <Text
-                  type="secondary"
-                  style={{ fontSize: 12 }}
-                  data-testid="settings-cli-proxy-detail"
-                >
-                  {cliProxyDisplay.detail}
-                </Text>
-              </Tooltip>
-            </Space>
-          </Card>
-        </Col>
+        <SystemProxySection
+          systemProxy={systemProxy}
+          systemProxyLaunchd={systemProxyLaunchd}
+          cliProxy={cliProxy}
+          systemProxyLoading={systemProxyLoading}
+          systemProxyLaunchdLoading={systemProxyLaunchdLoading}
+          injectBifrostBadge={injectBifrostBadge}
+          injectBifrostBadgeLoading={injectBifrostBadgeLoading}
+          onToggleSystemProxy={onToggleSystemProxy}
+          onToggleSystemProxyLaunchd={onToggleSystemProxyLaunchd}
+          onToggleInjectBifrostBadge={onToggleInjectBifrostBadge}
+        />
 
         <Col xs={24}>
           <TemporaryProxyPortsSection mainPort={overview?.server.port || 9900} />

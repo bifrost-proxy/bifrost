@@ -39,4 +39,18 @@ describe("doesSystemProxyMatchRequest", () => {
       ),
     ).toBe(false);
   });
+
+  it("does not treat an external proxy as successful enable", () => {
+    expect(
+      doesSystemProxyMatchRequest(
+        status({
+          enabled: true,
+          host: "127.0.0.1",
+          port: 9900,
+          managed_by_bifrost: false,
+        }),
+        true,
+      ),
+    ).toBe(false);
+  });
 });

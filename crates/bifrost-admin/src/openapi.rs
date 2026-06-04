@@ -1060,6 +1060,33 @@ fn generate_paths() -> serde_json::Value {
                 "responses": {"200": {"description": "Updated"}}
             }
         },
+        "/api/proxy/system/launchd": {
+            "get": {
+                "tags": ["Proxy"],
+                "summary": "macOS system proxy cleanup LaunchDaemon status",
+                "operationId": "getSystemProxyLaunchd",
+                "responses": {"200": {"description": "LaunchDaemon status"}}
+            },
+            "put": {
+                "tags": ["Proxy"],
+                "summary": "Install or uninstall macOS system proxy cleanup LaunchDaemon",
+                "operationId": "toggleSystemProxyLaunchd",
+                "requestBody": {
+                    "required": true,
+                    "content": {"application/json": {"schema": {
+                        "type": "object",
+                        "properties": {
+                            "enabled": {"type": "boolean"}
+                        },
+                        "required": ["enabled"]
+                    }}}
+                },
+                "responses": {
+                    "200": {"description": "Updated"},
+                    "403": {"description": "Administrator authorization cancelled or unavailable"}
+                }
+            }
+        },
 
         // ═══════════════════════════════════════════════════════
         // Metrics

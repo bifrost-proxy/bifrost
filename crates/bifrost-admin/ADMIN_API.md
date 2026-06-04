@@ -1098,6 +1098,60 @@ GET /api/proxy/system/support
 
 ### 8.4 获取 CLI 代理状态（环境变量）
 
+### 8.4 获取 macOS 系统代理 cleanup LaunchDaemon 状态
+
+```
+GET /api/proxy/system/launchd
+```
+
+**响应**:
+
+```json
+{
+  "supported": true,
+  "installed": true,
+  "loaded": true,
+  "label": "com.bifrost.system-proxy-cleanup",
+  "plist_path": "/Library/LaunchDaemons/com.bifrost.system-proxy-cleanup.plist",
+  "program": "/usr/local/bin/bifrost",
+  "data_dir": "/Users/me/.bifrost",
+  "installed_version": "0.0.88",
+  "current_version": "0.0.88",
+  "needs_upgrade": false,
+  "message": null
+}
+```
+
+### 8.5 安装或卸载 macOS 系统代理 cleanup LaunchDaemon
+
+```
+PUT /api/proxy/system/launchd
+```
+
+**请求体**:
+
+```json
+{
+  "enabled": true
+}
+```
+
+**说明**:
+- macOS 上安装/卸载需要管理员授权，服务端会通过系统 GUI 授权窗口请求密码或指纹。
+- 用户取消授权时返回 `user_cancelled`，Bifrost 主服务继续运行。
+- 已安装且版本一致时，启动流程不会重复安装；版本不一致时状态返回 `needs_upgrade=true`，再次启用会重新安装当前版本。
+
+**错误响应**（用户取消授权时）:
+
+```json
+{
+  "error": "user_cancelled",
+  "message": "Authorization was cancelled by user."
+}
+```
+
+### 8.6 获取 CLI 代理状态（环境变量）
+
 用于展示命令行代理（写入 shell rc 文件的 http_proxy 等变量）是否启用。
 
 ```

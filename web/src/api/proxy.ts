@@ -15,6 +15,20 @@ export interface SystemProxySupportStatus {
   platform: string;
 }
 
+export interface SystemProxyLaunchdStatus {
+  supported: boolean;
+  installed: boolean;
+  loaded: boolean;
+  label: string;
+  plist_path: string;
+  program?: string;
+  data_dir?: string;
+  installed_version?: string;
+  current_version: string;
+  needs_upgrade: boolean;
+  message?: string;
+}
+
 export interface CliProxyStatus {
   enabled: boolean;
   shell: string;
@@ -25,6 +39,10 @@ export interface CliProxyStatus {
 export interface SetSystemProxyRequest {
   enabled: boolean;
   bypass?: string;
+}
+
+export interface SetSystemProxyLaunchdRequest {
+  enabled: boolean;
 }
 
 export async function getSystemProxyStatus(): Promise<SystemProxyStatus> {
@@ -39,6 +57,16 @@ export async function setSystemProxy(
 
 export async function getSystemProxySupport(): Promise<SystemProxySupportStatus> {
   return get<SystemProxySupportStatus>("/proxy/system/support");
+}
+
+export async function getSystemProxyLaunchdStatus(): Promise<SystemProxyLaunchdStatus> {
+  return get<SystemProxyLaunchdStatus>("/proxy/system/launchd");
+}
+
+export async function setSystemProxyLaunchd(
+  request: SetSystemProxyLaunchdRequest,
+): Promise<SystemProxyLaunchdStatus> {
+  return put<SystemProxyLaunchdStatus>("/proxy/system/launchd", request);
 }
 
 export async function getCliProxyStatus(): Promise<CliProxyStatus> {
