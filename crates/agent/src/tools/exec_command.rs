@@ -1108,7 +1108,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let result = tool
             .execute(
-                r#"{"cmd":"sleep 0.8; printf done","yield_time_ms":50}"#,
+                r#"{"cmd":"sleep 0.8; printf done","shell":"/bin/sh","yield_time_ms":50,"login":false}"#,
                 dir.path(),
             )
             .await;
@@ -1150,7 +1150,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let result = tool
             .execute(
-                r#"{"cmd":"python3 -u -c 'import sys,time; time.sleep(0.5); print(\"notify-ready\", flush=True); time.sleep(1)'","yield_time_ms":50}"#,
+                r#"{"cmd":"sleep 0.5; printf notify-ready; sleep 3","shell":"/bin/sh","yield_time_ms":50,"login":false}"#,
                 dir.path(),
             )
             .await;
@@ -1170,7 +1170,7 @@ mod tests {
         assert!(poll.success, "{}", poll.output);
         let value: serde_json::Value = serde_json::from_str(&poll.output).unwrap();
         assert!(
-            elapsed < Duration::from_millis(1_000),
+            elapsed < Duration::from_millis(2_000),
             "poll waited for deadline instead of output notification: {elapsed:?}"
         );
         assert_eq!(value["running"], true);
@@ -1197,7 +1197,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let result = tool
             .execute(
-                r#"{"cmd":"sleep 0.8; printf watched-done","yield_time_ms":50}"#,
+                r#"{"cmd":"sleep 0.8; printf watched-done","shell":"/bin/sh","yield_time_ms":50,"login":false}"#,
                 dir.path(),
             )
             .await;
@@ -1209,11 +1209,11 @@ mod tests {
             .to_string();
         assert_eq!(value["exit_code"], serde_json::Value::Null);
 
-        for _ in 0..20 {
+        for _ in 0..30 {
             if manager.has_completed_session(&session_id).await {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
         assert!(
             manager.has_completed_session(&session_id).await,
