@@ -82,9 +82,29 @@ impl SystemProxyManager {
             ));
         }
 
+        let mut preserved_original: Option<Sysproxy> = None;
         if self.is_set {
+            #[cfg(target_os = "macos")]
+            let all_services_match =
+                macos_all_services_proxy_match(host, port).unwrap_or_else(|error| {
+                    tracing::warn!(
+                        error = %error,
+                        expected_host = %host,
+                        expected_port = port,
+                        "Failed to inspect all macOS network services before system proxy re-apply"
+                    );
+                    false
+                });
+
+            #[cfg(not(target_os = "macos"))]
+            let all_services_match = false;
+
             if let Ok(actual) = Self::get_current() {
-                if actual.enable && actual.host == host && actual.port == port {
+                if cfg!(target_os = "macos") {
+                    if all_services_match {
+                        return Ok(());
+                    }
+                } else if actual.enable && actual.host == host && actual.port == port {
                     return Ok(());
                 }
                 tracing::info!(
@@ -95,13 +115,52 @@ impl SystemProxyManager {
                     expected_port = port,
                     "System proxy was externally changed, re-applying"
                 );
+                preserved_original = self
+                    .original_proxy
+                    .clone()
+                    .or_else(|| {
+                        self.load_managed_state()
+                            .ok()
+                            .map(|state| state.original.into())
+                    })
+                    .or_else(|| Some(actual.into()));
             }
-            self.is_set = false;
         }
 
         #[cfg(target_os = "macos")]
-        let current = match Self::parse_macos_proxy() {
-            Some(proxy) => proxy,
+        let current = match preserved_original {
+            Some(original) => original,
+            None => match Self::parse_macos_proxy() {
+                Some(proxy) => proxy,
+                None => Sysproxy::get_system_proxy().map_err(|e| {
+                    BifrostError::Config(format!(
+                        "Failed to get current system proxy for backup: {}",
+                        e
+                    ))
+                })?,
+            },
+        };
+
+        #[cfg(target_os = "windows")]
+        let current = match preserved_original {
+            Some(original) => original,
+            None => match Self::parse_windows_proxy() {
+                Some(proxy) => proxy,
+                None => Sysproxy::get_system_proxy().unwrap_or_else(|e| {
+                    tracing::debug!(error = %e, "[SYSTEM_PROXY] Failed to get system proxy via winreg, using default");
+                    Sysproxy {
+                        enable: false,
+                        host: String::new(),
+                        port: 0,
+                        bypass: String::new(),
+                    }
+                }),
+            },
+        };
+
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let current = match preserved_original {
+            Some(original) => original,
             None => Sysproxy::get_system_proxy().map_err(|e| {
                 BifrostError::Config(format!(
                     "Failed to get current system proxy for backup: {}",
@@ -109,28 +168,6 @@ impl SystemProxyManager {
                 ))
             })?,
         };
-
-        #[cfg(target_os = "windows")]
-        let current = match Self::parse_windows_proxy() {
-            Some(proxy) => proxy,
-            None => Sysproxy::get_system_proxy().unwrap_or_else(|e| {
-                tracing::debug!(error = %e, "[SYSTEM_PROXY] Failed to get system proxy via winreg, using default");
-                Sysproxy {
-                    enable: false,
-                    host: String::new(),
-                    port: 0,
-                    bypass: String::new(),
-                }
-            }),
-        };
-
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        let current = Sysproxy::get_system_proxy().map_err(|e| {
-            BifrostError::Config(format!(
-                "Failed to get current system proxy for backup: {}",
-                e
-            ))
-        })?;
 
         self.original_proxy = Some(current.clone());
         self.save_backup(&current)?;
@@ -229,14 +266,37 @@ impl SystemProxyManager {
         }
 
         let current = Self::get_current()?;
-        if !current.enable {
+
+        #[cfg(target_os = "macos")]
+        let any_macos_service_matches =
+            macos_any_service_proxy_matches(expected_host, expected_port).unwrap_or_else(|error| {
+                tracing::warn!(
+                    error = %error,
+                    expected_host = %expected_host,
+                    expected_port,
+                    "Failed to inspect all macOS network services before system proxy disable"
+                );
+                false
+            });
+
+        #[cfg(not(target_os = "macos"))]
+        let any_macos_service_matches = false;
+
+        if !current.enable && !any_macos_service_matches {
             self.is_set = false;
             self.original_proxy = None;
             self.remove_state_files();
             return Ok(SystemProxyDisableOutcome::NotEnabled);
         }
 
-        if !current.target_matches(expected_host, expected_port) {
+        #[cfg(target_os = "macos")]
+        let matches_expected =
+            any_macos_service_matches || current.target_matches(expected_host, expected_port);
+
+        #[cfg(not(target_os = "macos"))]
+        let matches_expected = current.target_matches(expected_host, expected_port);
+
+        if !matches_expected {
             self.is_set = false;
             self.original_proxy = None;
             self.remove_state_files();
@@ -278,7 +338,7 @@ impl SystemProxyManager {
         }
 
         if !self.is_set {
-            return Ok(());
+            return Self::recover_from_crash(&self.data_dir);
         }
 
         let original = match self
@@ -701,11 +761,28 @@ impl SystemProxyManager {
     fn apply_proxy_backup(&self, proxy: &ProxyBackup) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
-            if proxy.enable {
+            let result = if proxy.enable {
                 set_macos_all_services_proxy(&proxy.host, proxy.port, &proxy.bypass)
             } else {
                 disable_macos_all_services_proxy()
+            };
+            if let Err(e) = result {
+                let msg = e.to_string();
+                if msg.contains("RequiresAdmin") {
+                    if proxy.enable {
+                        set_macos_all_services_proxy_with_gui_auth(
+                            &proxy.host,
+                            proxy.port,
+                            &proxy.bypass,
+                        )?;
+                    } else {
+                        disable_macos_all_services_proxy_with_gui_auth()?;
+                    }
+                } else {
+                    return Err(e);
+                }
             }
+            Ok(())
         }
 
         #[cfg(not(target_os = "macos"))]
@@ -727,18 +804,43 @@ impl SystemProxyManager {
         if state_path.exists() {
             let state = manager.load_managed_state()?;
             let current = Self::get_current()?;
-            if current.target_matches(&state.target.host, state.target.port) {
-                manager.apply_proxy_backup(&state.original)?;
-                tracing::info!("Recovered Bifrost-managed system proxy from previous crash");
-            } else {
-                tracing::info!(
-                    current_enabled = current.enable,
-                    current_host = %current.host,
-                    current_port = current.port,
-                    target_host = %state.target.host,
-                    target_port = state.target.port,
-                    "System proxy no longer points to Bifrost; preserving external proxy during crash recovery"
-                );
+            let decision = {
+                #[cfg(target_os = "macos")]
+                {
+                    match macos_any_service_proxy_matches(&state.target.host, state.target.port) {
+                        Ok(true) => CrashRecoveryDecision::RestoreOriginal,
+                        Ok(false) => decide_managed_state_recovery(&current, &state),
+                        Err(error) => {
+                            tracing::warn!(
+                                error = %error,
+                                target_host = %state.target.host,
+                                target_port = state.target.port,
+                                "Failed to inspect all macOS network services during crash recovery"
+                            );
+                            decide_managed_state_recovery(&current, &state)
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    decide_managed_state_recovery(&current, &state)
+                }
+            };
+            match decision {
+                CrashRecoveryDecision::RestoreOriginal => {
+                    manager.apply_proxy_backup(&state.original)?;
+                    tracing::info!("Recovered Bifrost-managed system proxy from previous crash");
+                }
+                CrashRecoveryDecision::PreserveExternal => {
+                    tracing::info!(
+                        current_enabled = current.enable,
+                        current_host = %current.host,
+                        current_port = current.port,
+                        target_host = %state.target.host,
+                        target_port = state.target.port,
+                        "System proxy no longer points to Bifrost; preserving external proxy during crash recovery"
+                    );
+                }
             }
             manager.remove_state_files();
             return Ok(());
@@ -790,6 +892,23 @@ impl SystemProxyManager {
         tracing::info!("Recovered system proxy from previous crash");
 
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CrashRecoveryDecision {
+    RestoreOriginal,
+    PreserveExternal,
+}
+
+fn decide_managed_state_recovery(
+    current: &ProxyBackup,
+    state: &ManagedProxyState,
+) -> CrashRecoveryDecision {
+    if current.target_matches(&state.target.host, state.target.port) {
+        CrashRecoveryDecision::RestoreOriginal
+    } else {
+        CrashRecoveryDecision::PreserveExternal
     }
 }
 
@@ -852,6 +971,70 @@ fn list_macos_services() -> Result<Vec<String>> {
         services.push(l.to_string());
     }
     Ok(services)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_service_proxy_matches(service: &str, getter: &str, host: &str, port: u16) -> Result<bool> {
+    use std::process::Command;
+    let output = Command::new("networksetup")
+        .args([getter, service])
+        .output()
+        .map_err(|e| BifrostError::Config(format!("Failed to execute networksetup: {}", e)))?;
+    if !output.status.success() {
+        return Err(BifrostError::Config(format!(
+            "networksetup {} failed for {}",
+            getter, service
+        )));
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut enabled = false;
+    let mut actual_host = String::new();
+    let mut actual_port = 0_u16;
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim();
+        match key {
+            "Enabled" => enabled = value.eq_ignore_ascii_case("yes"),
+            "Server" => actual_host = value.to_string(),
+            "Port" => actual_port = value.parse().unwrap_or(0),
+            _ => {}
+        }
+    }
+
+    Ok(enabled && actual_port == port && proxy_hosts_match(&actual_host, host))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_any_service_proxy_matches(host: &str, port: u16) -> Result<bool> {
+    for service in list_macos_services()? {
+        if macos_service_proxy_matches(&service, "-getwebproxy", host, port)?
+            || macos_service_proxy_matches(&service, "-getsecurewebproxy", host, port)?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_all_services_proxy_match(host: &str, port: u16) -> Result<bool> {
+    let services = list_macos_services()?;
+    if services.is_empty() {
+        return Ok(false);
+    }
+
+    for service in services {
+        if !macos_service_proxy_matches(&service, "-getwebproxy", host, port)?
+            || !macos_service_proxy_matches(&service, "-getsecurewebproxy", host, port)?
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 #[cfg(target_os = "macos")]
@@ -1369,5 +1552,63 @@ mod tests {
         };
 
         assert!(!backup.target_matches("127.0.0.1", 8800));
+    }
+
+    #[test]
+    fn crash_recovery_restores_when_current_points_to_managed_target() {
+        let state = ManagedProxyState {
+            original: ProxyBackup {
+                enable: false,
+                host: String::new(),
+                port: 0,
+                bypass: String::new(),
+            },
+            target: ProxyBackup {
+                enable: true,
+                host: "127.0.0.1".to_string(),
+                port: 9900,
+                bypass: String::new(),
+            },
+        };
+        let current = ProxyBackup {
+            enable: true,
+            host: "localhost".to_string(),
+            port: 9900,
+            bypass: String::new(),
+        };
+
+        assert_eq!(
+            decide_managed_state_recovery(&current, &state),
+            CrashRecoveryDecision::RestoreOriginal
+        );
+    }
+
+    #[test]
+    fn crash_recovery_preserves_external_proxy_on_different_port() {
+        let state = ManagedProxyState {
+            original: ProxyBackup {
+                enable: false,
+                host: String::new(),
+                port: 0,
+                bypass: String::new(),
+            },
+            target: ProxyBackup {
+                enable: true,
+                host: "127.0.0.1".to_string(),
+                port: 9900,
+                bypass: String::new(),
+            },
+        };
+        let current = ProxyBackup {
+            enable: true,
+            host: "127.0.0.1".to_string(),
+            port: 6152,
+            bypass: String::new(),
+        };
+
+        assert_eq!(
+            decide_managed_state_recovery(&current, &state),
+            CrashRecoveryDecision::PreserveExternal
+        );
     }
 }

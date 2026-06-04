@@ -242,6 +242,126 @@
 
 ---
 
+### TC-CSP-13：睡眠恢复后系统代理漂移时，Bifrost 应自动重新收敛并保持可用
+
+**前置条件**：
+- macOS 支持系统代理的环境。
+- 使用临时数据目录，避免污染正式配置：
+  ```bash
+  TEST_DATA_DIR="$(mktemp -d)"
+  BIFROST_DATA_DIR="$TEST_DATA_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 cargo build --bin bifrost
+  ```
+
+**操作步骤**：
+1. 启动 Bifrost 并显式启用系统代理：
+   ```bash
+   BIFROST_DATA_DIR="$TEST_DATA_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 ./target/debug/bifrost -p 18889 start --skip-cert-check --unsafe-ssl --system-proxy > "$TEST_DATA_DIR/proxy.log" 2>&1 &
+   PROXY_PID=$!
+   until curl -sS "http://127.0.0.1:18889/_bifrost/api/system" >/dev/null 2>&1; do sleep 0.2; done
+   ```
+2. 确认系统代理指向 Bifrost：
+   ```bash
+   networksetup -getwebproxy "Wi-Fi"
+   ```
+3. 模拟睡眠恢复后 macOS 网络服务刷新导致代理配置漂移：
+   ```bash
+   networksetup -setwebproxystate "Wi-Fi" off
+   networksetup -setsecurewebproxystate "Wi-Fi" off
+   ```
+4. 等待最多 75 秒，再次检查系统代理：
+   ```bash
+   for i in $(seq 1 75); do
+     networksetup -getwebproxy "Wi-Fi" | grep -q "Enabled: Yes" \
+       && networksetup -getwebproxy "Wi-Fi" | grep -q "Server: 127.0.0.1" \
+       && networksetup -getwebproxy "Wi-Fi" | grep -q "Port: 18889" \
+       && break
+     sleep 1
+   done
+   networksetup -getwebproxy "Wi-Fi"
+   ```
+5. 验证 Bifrost 服务仍可访问：
+   ```bash
+   curl -sS "http://127.0.0.1:18889/_bifrost/api/system" >/dev/null
+   ```
+6. 停止 Bifrost：
+   ```bash
+   kill "$PROXY_PID"
+   wait "$PROXY_PID" 2>/dev/null || true
+   ```
+
+**预期结果**：
+- 第 4 步最终显示 Wi-Fi Web Proxy 重新指向 `127.0.0.1:18889`。
+- 第 5 步 API 请求成功，说明睡眠恢复式配置漂移后 Bifrost 服务仍正常工作。
+- 第 6 步停止后系统代理恢复，不再指向 `127.0.0.1:18889`。
+
+---
+
+### TC-CSP-14：崩溃或重启后，下次启动失败前也必须清理 Bifrost 系统代理残留
+
+**前置条件**：
+- macOS 或 Windows 支持系统代理的环境。
+- 使用临时数据目录，避免污染正式配置：
+  ```bash
+  TEST_DATA_DIR="$(mktemp -d)"
+  BIFROST_DATA_DIR="$TEST_DATA_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 cargo build --bin bifrost
+  ```
+
+**操作步骤**：
+1. 启动 Bifrost 并显式启用系统代理：
+   ```bash
+   BIFROST_DATA_DIR="$TEST_DATA_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 ./target/debug/bifrost -p 18889 start --skip-cert-check --unsafe-ssl --system-proxy > "$TEST_DATA_DIR/proxy.log" 2>&1 &
+   PROXY_PID=$!
+   until curl -sS "http://127.0.0.1:18889/_bifrost/api/system" >/dev/null 2>&1; do sleep 0.2; done
+   ```
+2. 确认系统代理指向 Bifrost：
+   ```bash
+   networksetup -getwebproxy "Wi-Fi"
+   ```
+   预期 `Enabled: Yes`，`Server: 127.0.0.1`，`Port: 18889`。
+3. 模拟电脑重启、进程崩溃或异常中断：强制结束 Bifrost 进程，不执行 `bifrost stop`。
+   ```bash
+   kill -9 "$PROXY_PID"
+   wait "$PROXY_PID" 2>/dev/null || true
+   rm -f "$TEST_DATA_DIR/bifrost.pid" "$TEST_DATA_DIR/runtime.json"
+   ```
+4. 用一个临时进程占用同一个端口，模拟下次启动因为端口冲突失败：
+   ```bash
+   python3 - <<'PY' &
+   import socket, time
+   s = socket.socket()
+   s.bind(("127.0.0.1", 18889))
+   s.listen(1)
+   time.sleep(120)
+   PY
+   BLOCKER_PID=$!
+   ```
+5. 用同一个数据目录再次启动 Bifrost，并显式不启用系统代理：
+   ```bash
+   BIFROST_DATA_DIR="$TEST_DATA_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 ./target/debug/bifrost -p 18889 start --skip-cert-check --unsafe-ssl --no-system-proxy
+   ```
+6. 再次检查 Wi-Fi 系统代理：
+   ```bash
+   networksetup -getwebproxy "Wi-Fi"
+   ```
+7. 清理端口占用进程：
+   ```bash
+   kill "$BLOCKER_PID"
+   ```
+
+**预期结果**：
+- 第 5 步由于端口被占用而非零退出，输出包含端口已被占用或 bind 失败信息。
+- 即使第 5 步启动失败，第 6 步也显示 Wi-Fi 系统代理不再指向 `127.0.0.1:18889`；默认无代理环境下应为 `Enabled: No`。
+- `proxy_state.json` / `proxy_backup.json` 不再残留在 `TEST_DATA_DIR` 下。
+- 用户网络访问恢复，不再因为系统代理指向已不存在的 Bifrost 端口而断网。
+
+---
+
+## 执行记录
+
+- 2026-06-04：执行 `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_system_proxy_e2e.sh`，覆盖 TC-CSP-11、TC-CSP-12、TC-CSP-13、TC-CSP-14 相关真实系统代理场景。第一轮发现 macOS `scutil --proxy` 聚合视图漏掉非 Wi-Fi network service 残留，USB/Thunderbolt 等服务仍指向 `127.0.0.1:18889`；修复为逐 service 检查 `networksetup -getwebproxy` / `-getsecurewebproxy` 后重跑通过。第 1 轮 review 又发现 shutdown restore 后 reconcile 线程可能醒来重新 enable，补充 stop flag 后第三轮重跑：8/8 PASS，包含系统代理启用、`--no-system-proxy` 外部代理保留、外部代理 disable 归属边界、正常退出恢复、睡眠恢复式漂移重新收敛、崩溃后再次启动恢复、启动失败前同步清理残留。执行后确认 Wi-Fi Web Proxy 与 Secure Web Proxy 均恢复到测试前 `127.0.0.1:9900`。
+
+---
+
 ## 清理
 
 测试完成后清理临时数据并确保系统代理已关闭：
