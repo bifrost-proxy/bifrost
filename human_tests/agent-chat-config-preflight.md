@@ -79,6 +79,22 @@
 - 自定义 Provider 显式配置 `base_url` 且未配置 `env_key` / `api_key` / 鉴权 Header 时，预检通过。
 - 不会因为未知 Provider 自动要求 `OPENAI_API_KEY`。
 
+### TC-ACCP-05：静态鉴权 Header 不被默认环境变量误拦截
+
+操作步骤：
+
+1. 执行：
+   ```bash
+   source ~/.zshrc
+   cargo test -p bifrost-agent test_preflight_model_config_accepts_static_auth_header_without_env_key -- --nocapture
+   ```
+2. 检查测试输出通过。
+
+预期结果：
+
+- 模拟 `MODELHUB_AK` 未设置时，内置 `aidp_crawl` Provider 只要显式配置了非空静态 `api-key` Header，预检仍然通过。
+- 不会因为内置 Provider fallback 出来的默认 `env_key` / `env_http_headers` 缺失而误提示缺 AK。
+
 ## 清理步骤
 
 - 测试使用的唯一环境变量会在测试内清理。
@@ -92,3 +108,4 @@
 | 2026-06-04 | TC-ACCP-02 | `source ~/.zshrc; cargo test -p bifrost-agent test_preflight_model_config_reports_missing_model -- --nocapture` | PASS：缺模型名时提示 `未配置模型名称`，并包含 Web UI 配置路径和 `config.toml` |
 | 2026-06-04 | TC-ACCP-03 | `source ~/.zshrc; cargo test -p bifrost-agent chat_completion_rejects_empty_api_key_before_http_request -- --nocapture` | PASS：空 `api_key` 在 client HTTP 前返回配置预检错误，不出现 `Connection refused` |
 | 2026-06-04 | TC-ACCP-04 | `source ~/.zshrc; cargo test -p bifrost-agent test_preflight_model_config_allows_local_provider_without_key -- --nocapture` | PASS：未知自定义 Provider 不再隐式要求 `OPENAI_API_KEY`，无鉴权本地 Provider 预检通过 |
+| 2026-06-04 | TC-ACCP-05 | `source ~/.zshrc; cargo test -p bifrost-agent test_preflight_model_config_accepts_static_auth_header_without_env_key -- --nocapture` | PASS：`MODELHUB_AK` 未设置但静态 `api-key` Header 非空时，内置 `aidp_crawl` Provider 预检通过 |

@@ -37,10 +37,18 @@ impl AgentConfig {
         }
 
         let mut reported_env = HashSet::new();
-        if let Some(issue) = missing_api_key_issue(&provider, provider_label, &mut reported_env) {
+        let has_static_auth_header = has_non_empty_static_auth_header(&provider);
+        if let Some(issue) = missing_api_key_issue(
+            &provider,
+            provider_label,
+            has_static_auth_header,
+            &mut reported_env,
+        ) {
             issues.push(issue);
         }
-        for issue in missing_auth_header_issues(&provider, &mut reported_env) {
+        for issue in
+            missing_auth_header_issues(&provider, has_static_auth_header, &mut reported_env)
+        {
             issues.push(issue);
         }
 
@@ -112,6 +120,7 @@ fn empty_provider_fallback() -> ModelProviderConfig {
 fn missing_api_key_issue(
     provider: &ModelProviderConfig,
     provider_label: &str,
+    has_static_auth_header: bool,
     reported_env: &mut HashSet<String>,
 ) -> Option<String> {
     if let Some(api_key) = provider.api_key.as_deref() {
@@ -140,6 +149,10 @@ fn missing_api_key_issue(
         return None;
     }
 
+    if has_static_auth_header {
+        return None;
+    }
+
     let env_key = provider.env_key.as_deref()?.trim();
     if env_key.is_empty() {
         return Some(format!(
@@ -160,6 +173,7 @@ fn missing_api_key_issue(
 
 fn missing_auth_header_issues(
     provider: &ModelProviderConfig,
+    has_static_auth_header: bool,
     reported_env: &mut HashSet<String>,
 ) -> Vec<String> {
     let mut issues = Vec::new();
@@ -168,6 +182,9 @@ fn missing_auth_header_issues(
     };
     for (header_name, env_name) in headers {
         if !is_auth_header(header_name) {
+            continue;
+        }
+        if has_static_auth_header {
             continue;
         }
         let env_name = env_name.trim();
@@ -185,6 +202,18 @@ fn missing_auth_header_issues(
         }
     }
     issues
+}
+
+fn has_non_empty_static_auth_header(provider: &ModelProviderConfig) -> bool {
+    provider
+        .http_headers
+        .as_ref()
+        .map(|headers| {
+            headers
+                .iter()
+                .any(|(name, value)| is_auth_header(name) && !value.trim().is_empty())
+        })
+        .unwrap_or(false)
 }
 
 fn is_auth_header(header_name: &str) -> bool {
@@ -306,5 +335,29 @@ mod tests {
         config.preflight_model_config().unwrap();
 
         std::env::remove_var(env_name);
+    }
+
+    #[test]
+    fn test_preflight_model_config_accepts_static_auth_header_without_env_key() {
+        std::env::remove_var("MODELHUB_AK");
+        let mut model_providers = HashMap::new();
+        model_providers.insert(
+            "aidp_crawl".to_string(),
+            ModelProviderConfig {
+                http_headers: Some(HashMap::from([(
+                    "api-key".to_string(),
+                    "static-ak".to_string(),
+                )])),
+                ..empty_provider_fallback()
+            },
+        );
+        let config = AgentConfig {
+            model: Some("test-model".to_string()),
+            model_provider: Some("aidp_crawl".to_string()),
+            model_providers,
+            ..Default::default()
+        };
+
+        config.preflight_model_config().unwrap();
     }
 }

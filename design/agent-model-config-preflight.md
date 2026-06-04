@@ -19,6 +19,7 @@
 - 对内置 Provider 保留字段级 fallback；对未知自定义 Provider 不再隐式 fallback 到 `OPENAI_API_KEY`，避免本地无鉴权 Provider 被误判。
 - 检查 `model`、`base_url`、`api_key`、`env_key`。
 - 检查 `env_http_headers` 中的鉴权 Header：`Authorization`、`api-key`、`x-api-key`。
+- 如果 `http_headers` 中已显式配置非空静态鉴权 Header，则视为鉴权配置已满足，不再因为内置 Provider fallback 出来的 `env_key` 或鉴权 env header 缺失而误拦截。
 - 不要求可选 Header，例如 `X-TT-LOGID`、`OpenAI-Organization`、`OpenAI-Project`。
 
 `crates/agent/src/session/turn_loop.rs`：
@@ -45,6 +46,7 @@
 - `test_preflight_model_config_requires_auth_header_env_only`：鉴权 Header env 缺失会提示，可选 Header 不提示。
 - `test_preflight_model_config_allows_local_provider_without_key`：自定义本地 Provider 无 AK 时允许通过。
 - `test_preflight_model_config_accepts_api_key_env_reference`：`api_key = "$ENV_NAME"` 且环境变量存在时通过。
+- `test_preflight_model_config_accepts_static_auth_header_without_env_key`：内置 Provider 使用静态鉴权 Header 时，即使默认环境变量不存在也允许通过。
 
 ### E2E 测试
 
@@ -59,6 +61,7 @@
 - 缺模型名时返回友好提示。
 - 空 `api_key` 不再继续 HTTP 请求。
 - 自定义无鉴权 Provider 不被误拦截。
+- 静态鉴权 Header 不被内置 Provider 的默认环境变量 fallback 误拦截。
 
 ## Review/Fix/Test 闭环方案
 
