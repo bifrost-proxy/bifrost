@@ -192,6 +192,7 @@ pub async fn breakpoint_response_hook(
 
             if let Some(ref new_body) = edit.body {
                 *final_body = Bytes::from(new_body.clone());
+                set_content_encoding_header(parts_headers, None);
             }
         }
         Err(_) => {

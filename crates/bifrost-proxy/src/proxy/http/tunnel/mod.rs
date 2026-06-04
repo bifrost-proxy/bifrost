@@ -2494,16 +2494,15 @@ async fn handle_intercepted_request_with_protocol(
 
     let request_body_is_streaming = streaming_body.is_some();
 
-    if body_bytes.is_empty() {
-        if let Some(body) = streaming_body.take() {
-            if let Ok(collected) = body.collect().await {
-                body_bytes = collected.to_bytes().to_vec();
-            }
-        }
-    }
-
     if let Some(ref state) = admin_state {
         if state.breakpoint_manager.hook_request_enabled() {
+            if body_bytes.is_empty() {
+                if let Some(body) = streaming_body.take() {
+                    if let Ok(collected) = body.collect().await {
+                        body_bytes = collected.to_bytes().to_vec();
+                    }
+                }
+            }
             let mut pending =
                 TrafficRecord::new(req_id.to_string(), method_str.clone(), original_uri.clone());
             attach_devtools_client_req_id(&mut pending, &devtools_client_req_id);
