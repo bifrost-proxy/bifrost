@@ -574,6 +574,25 @@ SKIP_IN_CI_TESTS=(
   # test_tls_logic_simple runs `cargo test` (debug build), redundant with the
   # dedicated `cargo test --workspace` CI job and adds 5-10 min compile time.
   "test_tls_logic_simple.sh"
+  # ASR/voice runtime tests may initialize local models, native audio stacks, or
+  # external model downloads. Keep all ASR capability validation local-only so
+  # CI never fails because a runtime dependency or model host is unavailable.
+  "test_asr_daily_agent_template.sh"
+  "test_asr_daily_agents_api.sh"
+  "test_asr_diarization_cli.sh"
+  "test_asr_model_autonomy.sh"
+  "test_asr_platform_gating.sh"
+  "test_asr_speech_pipeline_orchestrator_real_service.sh"
+  "test_asr_task_append_during_run.sh"
+  "test_asr_task_cli.sh"
+  "test_asr_task_pause_resume.sh"
+  "test_asr_task_startup_recovery.sh"
+  "test_asr_task_tui.sh"
+  "test_asr_voiceprint_enroll_cli.sh"
+  "test_qwen3_asr_local_server.sh"
+  "test_qwen3_asr_runtime_guards.sh"
+  "test_voice_input_runtime.sh"
+  "test_voice_wake_actions.sh"
 )
 
 is_skipped_in_ci() {
