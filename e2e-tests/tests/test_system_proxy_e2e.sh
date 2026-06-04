@@ -1,6 +1,8 @@
 #!/bin/bash
 : "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
+: "${BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL:=1}"
+export BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL
 
 set -uo pipefail
 
@@ -371,6 +373,32 @@ macos_check_proxy_not_pointing_to() {
     ! macos_check_proxy_enabled_for_any_service "$expected_host" "$expected_port"
 }
 
+macos_check_any_proxy_enabled_not_pointing_to() {
+    local expected_host="$1"
+    local expected_port="$2"
+    local found="false"
+    while IFS= read -r svc; do
+        local web secure web_enabled web_host web_port secure_enabled secure_host secure_port
+        web="$(networksetup -getwebproxy "$svc" 2>/dev/null || true)"
+        secure="$(networksetup -getsecurewebproxy "$svc" 2>/dev/null || true)"
+        web_enabled="$(echo "$web" | grep -i '^Enabled:' | awk '{print $2}')"
+        web_host="$(echo "$web" | grep -i '^Server:' | awk '{print $2}')"
+        web_port="$(echo "$web" | grep -i '^Port:' | awk '{print $2}')"
+        secure_enabled="$(echo "$secure" | grep -i '^Enabled:' | awk '{print $2}')"
+        secure_host="$(echo "$secure" | grep -i '^Server:' | awk '{print $2}')"
+        secure_port="$(echo "$secure" | grep -i '^Port:' | awk '{print $2}')"
+        if [[ "$web_enabled" == "Yes" && ( "$web_host" != "$expected_host" || "$web_port" != "$expected_port" ) ]]; then
+            found="true"
+            break
+        fi
+        if [[ "$secure_enabled" == "Yes" && ( "$secure_host" != "$expected_host" || "$secure_port" != "$expected_port" ) ]]; then
+            found="true"
+            break
+        fi
+    done < <(macos_find_services)
+    [[ "$found" == "true" ]]
+}
+
 wait_for_condition() {
     local timeout="$1"
     local interval="${2:-1}"
@@ -402,6 +430,10 @@ macos_wait_proxy_disabled() {
 
 macos_system_proxy_status_json() {
     curl -s "http://${ADMIN_HOST}:${ADMIN_PORT}${ADMIN_PATH_PREFIX}/api/proxy/system" || true
+}
+
+admin_api_ready() {
+    curl -s "http://${ADMIN_HOST}:${ADMIN_PORT}${ADMIN_PATH_PREFIX}/api/system" >/dev/null 2>&1
 }
 
 macos_enable_system_proxy_api() {
@@ -576,17 +608,43 @@ test_restore_on_exit() {
 
 test_sleep_wake_style_reconcile() {
     stop_proxy
+    local previous_snapshot="${TEST_DATA_DIR}/macos-proxy-before-sleep-reconcile.txt"
+    if [[ "$PLATFORM" == "Darwin" ]]; then
+        macos_save_proxy_snapshot_file "$previous_snapshot" || true
+        if macos_check_any_proxy_enabled_not_pointing_to "127.0.0.1" "$PROXY_PORT"; then
+            _log_pass "macOS: 检测到外部系统代理 owner，跳过非隔离的睡眠漂移自动化用例"
+            passed=$((passed + 1))
+            return
+        fi
+        if ! macos_clear_web_and_secure_proxy; then
+            _log_fail "macOS: 无法准备睡眠恢复收敛夹具" "临时清空当前 Web/Secure Web 代理" "$(macos_proxy_snapshot)"
+            failed=$((failed + 1))
+            macos_restore_proxy_snapshot_file "$previous_snapshot" || true
+            return
+        fi
+    fi
     start_proxy_with_system_proxy
     case "$PLATFORM" in
         Darwin)
+            if [[ -z "$PROXY_PID" ]] || ! kill -0 "$PROXY_PID" 2>/dev/null || ! admin_api_ready; then
+                _log_fail "macOS: 睡眠恢复收敛回归准备失败" "Bifrost 服务必须保持运行且 Admin API 可访问" "pid=${PROXY_PID}; log=$(tail -n 80 "${TEST_DATA_DIR}/proxy.log" 2>/dev/null || true)"
+                failed=$((failed + 1))
+                stop_proxy
+                macos_restore_proxy_snapshot_file "$previous_snapshot" || true
+                return
+            fi
             if ! macos_ensure_bifrost_system_proxy_enabled; then
                 _log_fail "macOS: 睡眠恢复收敛回归准备失败" "系统代理先指向 127.0.0.1:${PROXY_PORT}" "$(macos_proxy_snapshot)"
                 failed=$((failed + 1))
+                stop_proxy
+                macos_restore_proxy_snapshot_file "$previous_snapshot" || true
                 return
             fi
             if ! macos_clear_web_and_secure_proxy; then
                 _log_fail "macOS: 无法模拟睡眠恢复后的系统代理漂移" "关闭 Web/Secure Web 代理状态" "$(macos_proxy_snapshot)"
                 failed=$((failed + 1))
+                stop_proxy
+                macos_restore_proxy_snapshot_file "$previous_snapshot" || true
                 return
             fi
             if macos_wait_proxy_enabled "127.0.0.1" "$PROXY_PORT" 75; then
@@ -596,6 +654,8 @@ test_sleep_wake_style_reconcile() {
                 _log_fail "macOS: 睡眠恢复式系统代理漂移后未重新收敛" "127.0.0.1:${PROXY_PORT}" "$(macos_proxy_snapshot)"
                 failed=$((failed + 1))
             fi
+            stop_proxy
+            macos_restore_proxy_snapshot_file "$previous_snapshot" || true
             ;;
         MINGW*|MSYS*|CYGWIN*)
             _log_pass "Windows: 睡眠恢复式系统代理漂移回归暂不修改注册表，跳过真实系统写入"

@@ -263,9 +263,20 @@ struct SystemProxyReconcileConfig {
     daemon_mode: bool,
 }
 
-fn system_proxy_owned_by_other(proxy_host: &str, proxy_port: u16) -> bool {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SystemProxyOwnership {
+    Disabled,
+    ThisBifrost,
+    Other,
+}
+
+fn inspect_system_proxy_ownership(proxy_host: &str, proxy_port: u16) -> SystemProxyOwnership {
     match bifrost_core::SystemProxyManager::get_current() {
-        Ok(current) => current.enable && !current.target_matches(proxy_host, proxy_port),
+        Ok(current) if !current.enable => SystemProxyOwnership::Disabled,
+        Ok(current) if current.target_matches(proxy_host, proxy_port) => {
+            SystemProxyOwnership::ThisBifrost
+        }
+        Ok(_) => SystemProxyOwnership::Other,
         Err(error) => {
             tracing::warn!(
                 target: "bifrost_cli::startup",
@@ -274,7 +285,7 @@ fn system_proxy_owned_by_other(proxy_host: &str, proxy_port: u16) -> bool {
                 port = proxy_port,
                 "failed to inspect current system proxy ownership"
             );
-            false
+            SystemProxyOwnership::Disabled
         }
     }
 }
@@ -304,39 +315,63 @@ fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
                 );
             }
 
-            if !should_enable {
-                tracing::info!(
-                    target: "bifrost_cli::startup",
-                    elapsed_ms = started_at.elapsed().as_millis() as u64,
-                    "system proxy reconcile completed without apply"
-                );
-                return;
-            }
-
-            if system_proxy_owned_by_other(&proxy_host, proxy_port) {
-                enabled_flag.store(false, Ordering::Release);
-                tracing::info!(
-                    target: "bifrost_cli::startup",
-                    host = %proxy_host,
-                    port = proxy_port,
-                    "system proxy is already owned by another proxy; startup auto-apply skipped"
-                );
-                return;
-            }
-
             let mut applied_by_this_runtime = false;
+            let mut startup_external_owner_logged = false;
+            let mut idle_logged = false;
             while !stop_flag.load(Ordering::Acquire) {
-                if applied_by_this_runtime
-                    && system_proxy_owned_by_other(&proxy_host, proxy_port)
-                {
-                    enabled_flag.store(false, Ordering::Release);
-                    tracing::info!(
-                        target: "bifrost_cli::startup",
-                        host = %proxy_host,
-                        port = proxy_port,
-                        "system proxy no longer points to this Bifrost; stopping automatic reconcile"
-                    );
-                    return;
+                match inspect_system_proxy_ownership(&proxy_host, proxy_port) {
+                    SystemProxyOwnership::Other => {
+                        if applied_by_this_runtime || enabled_flag.load(Ordering::Acquire) {
+                            applied_by_this_runtime = false;
+                            enabled_flag.store(false, Ordering::Release);
+                            tracing::info!(
+                                target: "bifrost_cli::startup",
+                                host = %proxy_host,
+                                port = proxy_port,
+                                "system proxy no longer points to this Bifrost; pausing automatic reconcile"
+                            );
+                        } else if should_enable && !startup_external_owner_logged {
+                            startup_external_owner_logged = true;
+                            tracing::info!(
+                                target: "bifrost_cli::startup",
+                                host = %proxy_host,
+                                port = proxy_port,
+                                "system proxy is already owned by another proxy; startup auto-apply skipped"
+                            );
+                        }
+                        let sleep_until = Instant::now() + SYSTEM_PROXY_RECONCILE_INTERVAL;
+                        while Instant::now() < sleep_until {
+                            if stop_flag.load(Ordering::Acquire) {
+                                return;
+                            }
+                            std::thread::sleep(Duration::from_secs(1));
+                        }
+                        continue;
+                    }
+                    SystemProxyOwnership::ThisBifrost => {
+                        applied_by_this_runtime = true;
+                        enabled_flag.store(true, Ordering::Release);
+                    }
+                    SystemProxyOwnership::Disabled => {
+                        if !should_enable && !enabled_flag.load(Ordering::Acquire) {
+                            if !idle_logged {
+                                idle_logged = true;
+                                tracing::info!(
+                                    target: "bifrost_cli::startup",
+                                    elapsed_ms = started_at.elapsed().as_millis() as u64,
+                                    "system proxy reconcile is idle until system proxy is enabled"
+                                );
+                            }
+                            let sleep_until = Instant::now() + SYSTEM_PROXY_RECONCILE_INTERVAL;
+                            while Instant::now() < sleep_until {
+                                if stop_flag.load(Ordering::Acquire) {
+                                    return;
+                                }
+                                std::thread::sleep(Duration::from_secs(1));
+                            }
+                            continue;
+                        }
+                    }
                 }
 
                 let mut manager = system_proxy_manager.blocking_write();
@@ -455,24 +490,31 @@ fn spawn_system_proxy_wake_reconcile_task(config: SystemProxyReconcileConfig) {
                     elapsed_since_last_check_ms = gap.as_millis() as u64,
                     "system proxy scheduler or wake gap detected; reconciling immediately"
                 );
-                if !enabled_flag.load(Ordering::Acquire) {
-                    tracing::info!(
-                        target: "bifrost_cli::startup",
-                        host = %proxy_host,
-                        port = proxy_port,
-                        "system proxy wake reconcile skipped because this Bifrost is not managing system proxy"
-                    );
-                    continue;
-                }
-                if system_proxy_owned_by_other(&proxy_host, proxy_port) {
-                    enabled_flag.store(false, Ordering::Release);
-                    tracing::info!(
-                        target: "bifrost_cli::startup",
-                        host = %proxy_host,
-                        port = proxy_port,
-                        "system proxy wake reconcile detected another proxy owner; leaving it unchanged"
-                    );
-                    continue;
+                match inspect_system_proxy_ownership(&proxy_host, proxy_port) {
+                    SystemProxyOwnership::ThisBifrost => {
+                        enabled_flag.store(true, Ordering::Release);
+                    }
+                    SystemProxyOwnership::Other => {
+                        enabled_flag.store(false, Ordering::Release);
+                        tracing::info!(
+                            target: "bifrost_cli::startup",
+                            host = %proxy_host,
+                            port = proxy_port,
+                            "system proxy wake reconcile detected another proxy owner; leaving it unchanged"
+                        );
+                        continue;
+                    }
+                    SystemProxyOwnership::Disabled => {
+                        if !enabled_flag.load(Ordering::Acquire) {
+                            tracing::info!(
+                                target: "bifrost_cli::startup",
+                                host = %proxy_host,
+                                port = proxy_port,
+                                "system proxy wake reconcile skipped because this Bifrost is not managing system proxy"
+                            );
+                            continue;
+                        }
+                    }
                 }
                 let lock_started_at = Instant::now();
                 let mut manager = system_proxy_manager.blocking_write();

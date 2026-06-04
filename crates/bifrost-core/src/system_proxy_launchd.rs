@@ -475,7 +475,7 @@ fn run_with_gui_auth(program: &Path, args: &[String], prompt: &str) -> Result<()
 fn build_gui_auth_script(shell_command: &str, prompt: &str) -> String {
     format!(
         r#"do shell script "{}" with administrator privileges with prompt "{}""#,
-        escape_applescript_string(&shell_command),
+        escape_applescript_string(shell_command),
         escape_applescript_string(prompt)
     )
 }
