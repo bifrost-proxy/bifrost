@@ -1430,6 +1430,69 @@ async fn test_stop_when_idle_does_not_call_model() {
 }
 
 #[tokio::test]
+async fn test_missing_model_config_returns_guidance_without_model_request() {
+    let env_name = "BIFROST_AGENT_TEST_TURN_MISSING_AK";
+    std::env::remove_var(env_name);
+    let (url, request_count) =
+        counted_chat_response_url(vec![chat_text_response("should not call", 1)]).await;
+    let mut model_providers = HashMap::new();
+    model_providers.insert(
+        "missing-ak".to_string(),
+        ModelProviderConfig {
+            name: Some("Missing AK".to_string()),
+            base_url: Some(url),
+            wire_api: Some(crate::config::ModelWireApi::ChatCompletions),
+            env_key: Some(env_name.to_string()),
+            api_key: None,
+            http_headers: None,
+            env_http_headers: None,
+            request_max_retries: None,
+            stream_idle_timeout_ms: None,
+            stream_max_retries: None,
+        },
+    );
+    let config = AgentConfig {
+        model: Some("test-model".to_string()),
+        model_provider: Some("missing-ak".to_string()),
+        model_providers,
+        ..Default::default()
+    };
+    let client = AgentClient::new();
+    let tools = ToolRegistry::new();
+    let mut session = AgentSession::new("missing-config");
+
+    let result = run_turn(&client, &config, &mut session, &tools, "这回", None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        request_count.load(Ordering::SeqCst),
+        0,
+        "model endpoint must not be called when required AK env is missing"
+    );
+    assert!(result.response.contains("内置 Agent 模型配置不完整"));
+    assert!(result.response.contains(env_name));
+    assert!(result
+        .response
+        .contains("Settings → Agent → Model Configuration"));
+    assert!(session
+        .history
+        .iter()
+        .any(|message| message.role == "user" && message.content.as_deref() == Some("这回")));
+    assert!(session.history.iter().any(|message| {
+        message.role == "assistant"
+            && message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.contains(env_name))
+    }));
+    assert!(session
+        .last_turn_events
+        .iter()
+        .any(|event| event.kind == CodexTurnEventKind::TurnCompleted));
+}
+
+#[tokio::test]
 async fn test_unknown_slash_input_falls_back_to_normal_chat_message() {
     let (url, request_count) =
         counted_chat_response_url(vec![chat_text_response("slash response", 24)]).await;

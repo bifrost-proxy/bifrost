@@ -199,6 +199,38 @@ fn stopped_turn_result(
     }
 }
 
+fn config_preflight_turn_result(
+    session: &mut AgentSession,
+    recorder: &mut Option<&mut ConversationRecorder>,
+    user_message: &str,
+    images: &[ChatImageInput],
+    response: String,
+) -> TurnResult {
+    session.add_user_message_with_images(user_message, images);
+    session.add_assistant_message(&response);
+    session.record_turn_event(CodexTurnEventKind::TurnCompleted);
+    if let Some(rec) = recorder.as_deref_mut() {
+        if let Err(e) =
+            rec.record_user_message_with_images(&session.session_key, user_message, images)
+        {
+            warn!(error = %e, "failed to record user message for config preflight");
+        }
+        if let Err(e) = rec.record_assistant_message(&session.session_key, &response) {
+            warn!(error = %e, "failed to record config preflight assistant message");
+        }
+    }
+    TurnResult {
+        response,
+        tool_calls_log: Vec::new(),
+        work_dir_switched: None,
+        title_updated: session.title.clone(),
+        plan_steps: session.current_plan.clone(),
+        proposed_plan: None,
+        goal_needs_continuation: false,
+        goal_objective: None,
+    }
+}
+
 fn append_cancelled_tool_results(
     session: &mut AgentSession,
     recorder: &mut Option<&mut ConversationRecorder>,
@@ -1087,6 +1119,15 @@ pub async fn run_turn_with_mcp_multimodal(
             ..
         }
     ) {
+        if let Err(response) = config.preflight_model_config() {
+            return Ok(config_preflight_turn_result(
+                session,
+                &mut recorder,
+                user_message,
+                images,
+                response,
+            ));
+        }
         return super::run_manual_compaction_command(client, config, session, recorder).await;
     }
 
@@ -1437,6 +1478,16 @@ pub async fn run_turn_with_mcp_multimodal(
             goal_needs_continuation: false,
             goal_objective: None,
         });
+    }
+
+    if let Err(response) = config.preflight_model_config() {
+        return Ok(config_preflight_turn_result(
+            session,
+            &mut recorder,
+            user_message,
+            images,
+            response,
+        ));
     }
 
     // A normal new user turn resumes an interrupted goal, matching Codex's

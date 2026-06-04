@@ -129,6 +129,7 @@ impl AgentClient {
         tools: &[ToolDefinition],
         output_schema: Option<&serde_json::Value>,
     ) -> Result<ModelResponse, String> {
+        config.preflight_model_config()?;
         let effective = config.resolve_effective_config()?;
         if effective.wire_api == ModelWireApi::Responses {
             return responses::stream_model_response(
@@ -735,48 +736,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chat_completion_does_not_send_empty_bearer_header() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let captured_headers = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-        let captured_headers_server = captured_headers.clone();
-
-        tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut buffer = Vec::new();
-            let mut header_end = None;
-            loop {
-                let mut chunk = [0_u8; 1024];
-                let n = stream.read(&mut chunk).await.unwrap();
-                if n == 0 {
-                    break;
-                }
-                buffer.extend_from_slice(&chunk[..n]);
-                header_end = buffer.windows(4).position(|w| w == b"\r\n\r\n");
-                if header_end.is_some() {
-                    break;
-                }
-            }
-            let headers = String::from_utf8_lossy(&buffer[..header_end.unwrap()]).to_string();
-            *captured_headers_server.lock().unwrap() = headers;
-
-            let payload = serde_json::json!({
-                "choices": [{
-                    "message": {"role": "assistant", "content": "ok"},
-                    "finish_reason": "stop"
-                }]
-            })
-            .to_string();
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                payload.len(),
-                payload
-            );
-            stream.write_all(response.as_bytes()).await.unwrap();
-        });
-
+    async fn chat_completion_rejects_empty_api_key_before_http_request() {
         let mut config = AgentConfig {
             model: Some("empty-auth-model".to_string()),
             model_provider: Some("empty-auth-provider".to_string()),
@@ -787,7 +747,7 @@ mod tests {
             "empty-auth-provider".to_string(),
             crate::config::ModelProviderConfig {
                 name: Some("empty-auth-provider".to_string()),
-                base_url: Some(format!("http://{addr}/chat/completions")),
+                base_url: Some("http://127.0.0.1:1/chat/completions".to_string()),
                 wire_api: Some(crate::config::ModelWireApi::ChatCompletions),
                 env_key: None,
                 api_key: Some(String::new()),
@@ -799,11 +759,16 @@ mod tests {
             },
         );
 
-        AgentClient::new()
+        let error = AgentClient::new()
             .chat_completion(&config, &[ChatMessage::user("hello")], &[])
             .await
-            .unwrap();
-        let headers = captured_headers.lock().unwrap();
-        assert!(!headers.to_lowercase().contains("authorization: bearer"));
+            .unwrap_err();
+
+        assert!(error.contains("内置 Agent 模型配置不完整"));
+        assert!(error.contains("api_key"));
+        assert!(
+            !error.contains("Connection refused"),
+            "preflight must reject before any HTTP request: {error}"
+        );
     }
 }
