@@ -11,7 +11,7 @@ macOS CI 的 rules/shell E2E 只依赖 `bifrost` CLI release binary，不依赖 
 - `e2e-macos-rules` 与 `e2e-macos-shell` 只依赖 `build-cli-macos-aarch64`，避免等待 x86_64 或 desktop bundle。
 - `bundle-desktop-macos` 继续依赖两个 CLI artifact，用作 Tauri sidecar，再执行 frontend build 与 desktop bundle 验证。
 - 避免让 E2E 依赖 matrix job，因为 GitHub Actions 的 `needs` 会等待 matrix job 的全部 child 完成。
-- `bundle-desktop-macos` 的 Rust toolchain 安装保留 rustup 缺失时的 bootstrap，并改为显式 `rustup toolchain install stable --target <target>`，最多重试 3 次，避免 `static.rust-lang.org` DNS 或短暂网络抖动让 macOS desktop bundle 在进入构建前失败。
+- macOS CLI 构建和 `bundle-desktop-macos` 的 Rust toolchain 安装保留 rustup 缺失时的 bootstrap，并改为显式 `rustup toolchain install stable --target <target>`，最多重试 3 次，避免 `static.rust-lang.org` DNS 或短暂网络抖动让 macOS CLI/desktop bundle 在进入构建前失败。
 - release workflow 的 macOS desktop bundle 路径同步使用同一重试策略；非 macOS release bundle 继续使用 `dtolnay/rust-toolchain@stable`。
 
 ## 依赖项
@@ -37,19 +37,19 @@ macOS CI 的 rules/shell E2E 只依赖 `bifrost` CLI release binary，不依赖 
   - `e2e-macos-rules`
   - `e2e-macos-shell`
 - 本地验证重点是确认这两个 job 的 `needs` 仅指向 aarch64 CLI 构建，并且下载 artifact 名称仍匹配。
-- 静态验证 `bundle-desktop-macos` 和 release macOS desktop bundle 的 toolchain 安装步骤包含 rustup bootstrap、3 次重试、`--profile minimal`、`--no-self-update` 和递增等待。
+- 静态验证 `build-cli-macos-aarch64`、`build-cli-macos-x86_64`、`bundle-desktop-macos` 和 release macOS desktop bundle 的 toolchain 安装步骤包含 rustup bootstrap、3 次重试、`--profile minimal`、`--no-self-update` 和递增等待。
 - 推送后通过 GitHub Actions `CI` workflow 验证 `Bundle macOS (x86_64-apple-darwin)` 不再因单次 rustup DNS 抖动直接失败。
 
 ### 真实场景测试
 
 - 新增 `human_tests/ci-macos-cli-e2e-split.md`。
 - 覆盖 macOS E2E 依赖、artifact 名称、desktop bundle 依赖与 workflow YAML 可解析性。
-- 新增 macOS desktop bundle toolchain retry 回归用例，覆盖 PR CI 和 release workflow 的配置一致性。
+- 新增 macOS CLI 与 desktop bundle toolchain retry 回归用例，覆盖 PR CI 和 release workflow 的配置一致性。
 
 ## 校验要求
 
 - 执行 workflow YAML 静态解析。
-- 执行 macOS desktop bundle Rust toolchain retry 静态检查。
+- 执行 macOS CLI 与 desktop bundle Rust toolchain retry 静态检查。
 - 执行 `cargo fmt --all -- --check`。
 - 执行 `cargo clippy --workspace --all-targets --all-features -- -D warnings`。
 - 修改范围为 CI workflow 与文档，`cargo test --workspace --all-features` 如因耗时未执行，必须在结果中明确说明。

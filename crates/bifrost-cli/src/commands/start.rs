@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{hash_map::DefaultHasher, BTreeMap, HashMap};
+use std::hash::{Hash, Hasher};
 use std::io::{self, IsTerminal, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -23,6 +24,7 @@ use bifrost_storage::{
 };
 use bifrost_sync::SyncManager;
 use bifrost_tls::{get_platform_name, CertInstaller, CertStatus};
+use notify::{Config as NotifyConfig, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::RwLock as ParkingRwLock;
 use tracing::info;
 
@@ -51,6 +53,8 @@ const SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER_ENV: &str =
 #[cfg(target_os = "macos")]
 const SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL_ENV: &str =
     "BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL";
+const RULES_FILESYSTEM_FALLBACK_SCAN_INTERVAL: Duration = Duration::from_secs(30);
+const RULES_FILESYSTEM_DEBOUNCE_DELAY: Duration = Duration::from_millis(150);
 
 fn parse_yes_no_answer(input: &str) -> Option<bool> {
     match input.trim().to_ascii_lowercase().as_str() {
@@ -1813,6 +1817,10 @@ pub fn run_foreground(
                 admin_state_arc.clone(),
                 Some(temporary_port_manager),
             );
+            let rules_filesystem_watcher_task = spawn_rules_filesystem_watcher_task(
+                admin_state_arc.config_manager.clone(),
+                admin_state_arc.rules_storage.clone(),
+            );
             log_startup_phase("rules_watcher.start", phase_started_at);
 
             let mut current_port = config.port;
@@ -2011,6 +2019,7 @@ pub fn run_foreground(
 
             listener_task.abort();
             rules_watcher_task.abort();
+            rules_filesystem_watcher_task.abort();
             admin_push_watcher_task.abort();
             body_cleanup_task.abort();
             ws_payload_cleanup_task.abort();
@@ -2669,6 +2678,10 @@ pub fn run_daemon(
                         admin_state_arc.clone(),
                         Some(temporary_port_manager),
                     );
+                    let rules_filesystem_watcher_task = spawn_rules_filesystem_watcher_task(
+                        admin_state_arc.config_manager.clone(),
+                        admin_state_arc.rules_storage.clone(),
+                    );
 
                     #[cfg(target_os = "macos")]
                     let _system_proxy_lifecycle_helper = if enable_system_proxy {
@@ -2736,6 +2749,7 @@ pub fn run_daemon(
                     }
 
                     rules_watcher_task.abort();
+                    rules_filesystem_watcher_task.abort();
                     Err(listener_task_error(listener_result))
                 }
                 => result,
@@ -2911,6 +2925,263 @@ fn log_resolver_rules(resolver: &DynamicRulesResolver) {
             );
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RulesFileFingerprint {
+    len: u64,
+    hash: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RulesFilesystemSnapshot {
+    entries: BTreeMap<PathBuf, RulesFileFingerprint>,
+}
+
+fn is_rules_storage_file(path: &Path) -> bool {
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+
+    if file_name.starts_with('.') {
+        return false;
+    }
+
+    matches!(
+        path.extension().and_then(|ext| ext.to_str()),
+        Some("bifrost" | "json")
+    )
+}
+
+fn collect_rules_filesystem_snapshot(base_dir: &Path) -> io::Result<RulesFilesystemSnapshot> {
+    let mut entries = BTreeMap::new();
+    collect_rules_filesystem_snapshot_dir(base_dir, base_dir, &mut entries)?;
+    Ok(RulesFilesystemSnapshot { entries })
+}
+
+fn collect_rules_filesystem_snapshot_dir(
+    base_dir: &Path,
+    current_dir: &Path,
+    entries: &mut BTreeMap<PathBuf, RulesFileFingerprint>,
+) -> io::Result<()> {
+    let read_dir = match std::fs::read_dir(current_dir) {
+        Ok(read_dir) => read_dir,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+
+    for entry in read_dir {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+
+        if file_type.is_dir() {
+            collect_rules_filesystem_snapshot_dir(base_dir, &path, entries)?;
+            continue;
+        }
+
+        if !file_type.is_file() || !is_rules_storage_file(&path) {
+            continue;
+        }
+
+        let content = std::fs::read(&path)?;
+        let mut hasher = DefaultHasher::new();
+        content.hash(&mut hasher);
+        let relative_path = path.strip_prefix(base_dir).unwrap_or(&path).to_path_buf();
+        entries.insert(
+            relative_path,
+            RulesFileFingerprint {
+                len: content.len() as u64,
+                hash: hasher.finish(),
+            },
+        );
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RulesFilesystemTrigger {
+    WatcherEvent,
+    FallbackScan,
+}
+
+fn is_rules_filesystem_event_relevant(kind: &EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) | EventKind::Any
+    )
+}
+
+fn spawn_rules_filesystem_watcher_task(
+    config_manager: Option<Arc<ConfigManager>>,
+    rules_storage: bifrost_storage::RulesStorage,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let Some(config_manager) = config_manager else {
+            tracing::warn!(
+                target: "bifrost_cli::rules",
+                "ConfigManager not available, rules filesystem watcher disabled"
+            );
+            return;
+        };
+
+        let base_dir = rules_storage.base_dir().clone();
+        if let Err(error) = std::fs::create_dir_all(&base_dir) {
+            tracing::warn!(
+                target: "bifrost_cli::rules",
+                base_dir = %base_dir.display(),
+                error = %error,
+                "failed to create rules directory before starting filesystem watcher"
+            );
+        }
+
+        let mut last_snapshot = match collect_rules_filesystem_snapshot(&base_dir) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                tracing::warn!(
+                    target: "bifrost_cli::rules",
+                    base_dir = %base_dir.display(),
+                    error = %error,
+                    "failed to collect initial rules filesystem snapshot"
+                );
+                RulesFilesystemSnapshot {
+                    entries: BTreeMap::new(),
+                }
+            }
+        };
+
+        let (event_tx, mut event_rx) =
+            tokio::sync::mpsc::unbounded_channel::<notify::Result<notify::Event>>();
+        let mut watcher = match RecommendedWatcher::new(
+            move |result| {
+                let _ = event_tx.send(result);
+            },
+            NotifyConfig::default().with_poll_interval(Duration::from_secs(5)),
+        ) {
+            Ok(mut watcher) => match watcher.watch(&base_dir, RecursiveMode::Recursive) {
+                Ok(()) => Some(watcher),
+                Err(error) => {
+                    tracing::warn!(
+                        target: "bifrost_cli::rules",
+                        base_dir = %base_dir.display(),
+                        error = %error,
+                        "failed to watch rules directory; fallback scan remains active"
+                    );
+                    None
+                }
+            },
+            Err(error) => {
+                tracing::warn!(
+                    target: "bifrost_cli::rules",
+                    base_dir = %base_dir.display(),
+                    error = %error,
+                    "failed to create rules filesystem watcher; fallback scan remains active"
+                );
+                None
+            }
+        };
+        let mut fallback_interval = tokio::time::interval(RULES_FILESYSTEM_FALLBACK_SCAN_INTERVAL);
+        fallback_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        fallback_interval.tick().await;
+
+        tracing::info!(
+            target: "bifrost_cli::rules",
+            base_dir = %base_dir.display(),
+            watched_files = last_snapshot.entries.len(),
+            watcher_active = watcher.is_some(),
+            fallback_interval_ms = RULES_FILESYSTEM_FALLBACK_SCAN_INTERVAL.as_millis() as u64,
+            "rules filesystem watcher started"
+        );
+
+        loop {
+            let trigger = tokio::select! {
+                maybe_event = event_rx.recv(), if watcher.is_some() => {
+                    match maybe_event {
+                        Some(Ok(event)) => {
+                            if !is_rules_filesystem_event_relevant(&event.kind) {
+                                continue;
+                            }
+                            tracing::debug!(
+                                target: "bifrost_cli::rules",
+                                event_kind = ?event.kind,
+                                paths = ?event.paths,
+                                "rules filesystem watcher event received"
+                            );
+                            RulesFilesystemTrigger::WatcherEvent
+                        }
+                        Some(Err(error)) => {
+                            tracing::warn!(
+                                target: "bifrost_cli::rules",
+                                error = %error,
+                                "rules filesystem watcher event failed"
+                            );
+                            continue;
+                        }
+                        None => {
+                            watcher = None;
+                            tracing::warn!(
+                                target: "bifrost_cli::rules",
+                                "rules filesystem watcher channel closed; fallback scan remains active"
+                            );
+                            continue;
+                        }
+                    }
+                }
+                _ = fallback_interval.tick() => RulesFilesystemTrigger::FallbackScan,
+            };
+
+            let changed_snapshot = match collect_rules_filesystem_snapshot(&base_dir) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "bifrost_cli::rules",
+                        base_dir = %base_dir.display(),
+                        error = %error,
+                        "failed to collect rules filesystem snapshot"
+                    );
+                    continue;
+                }
+            };
+
+            if changed_snapshot == last_snapshot {
+                continue;
+            }
+
+            tokio::time::sleep(RULES_FILESYSTEM_DEBOUNCE_DELAY).await;
+            let stable_snapshot = match collect_rules_filesystem_snapshot(&base_dir) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "bifrost_cli::rules",
+                        base_dir = %base_dir.display(),
+                        error = %error,
+                        "failed to collect debounced rules filesystem snapshot"
+                    );
+                    continue;
+                }
+            };
+
+            if stable_snapshot == last_snapshot {
+                continue;
+            }
+
+            last_snapshot = stable_snapshot;
+            tracing::info!(
+                target: "bifrost_cli::rules",
+                watched_files = last_snapshot.entries.len(),
+                trigger = ?trigger,
+                "rules files changed on disk, notifying runtime reload"
+            );
+            if let Err(error) = config_manager.notify(ConfigChangeEvent::RulesChanged) {
+                tracing::warn!(
+                    target: "bifrost_cli::rules",
+                    error = %error,
+                    "failed to notify rules filesystem change"
+                );
+            }
+        }
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3198,5 +3469,45 @@ mod tests {
         let dirs = resolve_valid_group_dirs(&admin_state);
 
         assert!(dirs.is_empty());
+    }
+
+    #[test]
+    fn rules_filesystem_snapshot_detects_same_length_content_changes() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let rule_path = temp_dir.path().join("local.bifrost");
+        std::fs::write(&rule_path, "a.test statusCode://201\n").unwrap();
+
+        let before = collect_rules_filesystem_snapshot(temp_dir.path()).unwrap();
+        std::fs::write(&rule_path, "b.test statusCode://202\n").unwrap();
+        let after = collect_rules_filesystem_snapshot(temp_dir.path()).unwrap();
+
+        assert_ne!(before, after);
+        assert_eq!(after.entries.len(), 1);
+    }
+
+    #[test]
+    fn rules_filesystem_snapshot_tracks_nested_rule_files() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let nested_dir = temp_dir.path().join("group-a");
+        std::fs::create_dir_all(&nested_dir).unwrap();
+        std::fs::write(nested_dir.join("rule.bifrost"), "a.test statusCode://201\n").unwrap();
+
+        let snapshot = collect_rules_filesystem_snapshot(temp_dir.path()).unwrap();
+
+        assert!(snapshot
+            .entries
+            .contains_key(Path::new("group-a/rule.bifrost")));
+    }
+
+    #[test]
+    fn rules_filesystem_snapshot_ignores_dot_json_cache_files() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::fs::write(temp_dir.path().join(".group_cache.json"), "{}").unwrap();
+        std::fs::write(temp_dir.path().join("legacy.json"), "{}").unwrap();
+
+        let snapshot = collect_rules_filesystem_snapshot(temp_dir.path()).unwrap();
+
+        assert_eq!(snapshot.entries.len(), 1);
+        assert!(snapshot.entries.contains_key(Path::new("legacy.json")));
     }
 }
