@@ -54,6 +54,10 @@ export default defineConfig(({ mode }) => {
           changeOrigin: true,
           ws: true,
         },
+        '/_bifrost/swagger': {
+          target: backendHttpTarget,
+          changeOrigin: true,
+        },
         '/_bifrost/public': {
           target: backendHttpTarget,
           changeOrigin: true,

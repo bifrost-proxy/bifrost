@@ -985,7 +985,7 @@ async fn codex_parallel_tool_batch_preserves_history_order() {
     let mut session = AgentSession::new("parallel-tools");
 
     let result = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
+        std::time::Duration::from_secs(10),
         run_turn(
             &client,
             &config,

@@ -30,7 +30,7 @@
 - Hover 说明明确：开关打开表示允许命中的 `breakpoint://request` / `breakpoint://response` 规则暂停；开关关闭会阻止新暂停并释放 pending。
 - Breakpoint 图标和控件状态与开关状态一致。
 
-**实际结果：** 待执行 `pnpm --dir web exec playwright test tests/ui/breakpoint-ui.spec.ts` 后记录。
+**实际结果：** 2026-06-04 执行 `SKIP_FRONTEND_BUILD=1 pnpm --dir web exec playwright test tests/ui/breakpoint-ui.spec.ts`，通过。测试确认 Toolbar 只展示一个 Breakpoint Switch，前置暂停图标已移除，Hover `Breakpoint` 文案显示全局门禁、`breakpoint://request` / `breakpoint://response` 和“单开关不会单独暂停流量”的说明。
 
 ---
 
@@ -52,7 +52,7 @@
 - TrafficDetail 显示暂停提示和 Resume 按钮。
 - Resume 后请求正常完成。
 
-**实际结果：** 待执行 `e2e-tests/tests/test_breakpoint_performance_guard.sh` 后记录。
+**实际结果：** 2026-06-04 执行 `CARGO_INCREMENTAL=0 e2e-tests/tests/test_breakpoint_performance_guard.sh`，通过。脚本使用本地 mock server 验证 `breakpoint://request` 命中后 request 在发送 upstream 前暂停，resume 后请求继续完成。
 
 ---
 
@@ -74,7 +74,7 @@
 - TrafficDetail 显示 response body 和暂停状态。
 - Resume 后 response 正常返回 client。
 
-**实际结果：** 待执行 `e2e-tests/tests/test_breakpoint_performance_guard.sh` 后记录。
+**实际结果：** 2026-06-04 执行 `CARGO_INCREMENTAL=0 e2e-tests/tests/test_breakpoint_performance_guard.sh`，通过。脚本验证 `breakpoint://response` 命中后 response 在返回 client 前暂停，resume 后 response 正常返回。
 
 ---
 
@@ -95,7 +95,7 @@
 - 每个阶段需要分别 resume。
 - 两次 resume 后请求正常完成。
 
-**实际结果：** 待执行 `e2e-tests/tests/test_breakpoint_performance_guard.sh` 后记录。
+**实际结果：** 2026-06-04 执行 `CARGO_INCREMENTAL=0 e2e-tests/tests/test_breakpoint_performance_guard.sh`，通过。脚本使用 `breakpoint://request,response` 验证同一请求先暂停 request，resume 后再暂停 response，两个阶段分别 resume 后请求完成。
 
 ---
 
@@ -112,7 +112,7 @@
 - 关闭 breakpoint 后 pending 请求被释放或取消。
 - TrafficDetail 不再显示暂停状态。
 
-**实际结果：** 待执行 `pnpm --dir web exec playwright test tests/ui/breakpoint-ui.spec.ts` 和 `e2e-tests/tests/test_breakpoint_performance_guard.sh` 后记录。
+**实际结果：** 2026-06-04 执行 `SKIP_FRONTEND_BUILD=1 pnpm --dir web exec playwright test tests/ui/breakpoint-ui.spec.ts` 与 `CARGO_INCREMENTAL=0 e2e-tests/tests/test_breakpoint_performance_guard.sh`，通过。UI 测试覆盖单开关语义；E2E 单独覆盖 request pending 后关闭 Breakpoint settings，curl 自动继续完成且 mock server 收到原始 body。
 
 ---
 
@@ -129,7 +129,7 @@
 - Breakpoint 关闭时无额外暂停或明显延迟。
 - Traffic 基础功能保持正常。
 
-**实际结果：** 待执行 `e2e-tests/tests/test_breakpoint_performance_guard.sh` 后记录。
+**实际结果：** 2026-06-04 执行 `CARGO_INCREMENTAL=0 e2e-tests/tests/test_breakpoint_performance_guard.sh`，通过。脚本验证默认关闭时 2 MiB large POST 正常转发且不产生 `breakpoint_paused`，全局开关打开但无 breakpoint 规则时请求也不暂停。
 
 ---
 
@@ -150,7 +150,7 @@
 - 不产生 `breakpoint_paused`。
 - 请求在 mock server 的正常耗时范围内完成。
 
-**实际结果：** 待执行 `e2e-tests/tests/test_breakpoint_performance_guard.sh` 后记录。
+**实际结果：** 2026-06-04 执行 `CARGO_INCREMENTAL=0 e2e-tests/tests/test_breakpoint_performance_guard.sh`，通过。脚本验证默认 settings、Performance timeout 默认值 `30000`、固定安全边界 `timeout_min_ms=5000` / `timeout_max_ms=300000`，2 MiB POST 通过代理完成。
 
 ---
 
@@ -171,7 +171,7 @@
 - Oversized body 不进入 WebUI editor。
 - Resume body 被服务端忽略，原请求体保持不变。
 
-**实际结果：** 待执行 `e2e-tests/tests/test_breakpoint_performance_guard.sh` 后记录。
+**实际结果：** 2026-06-04 执行 `CARGO_INCREMENTAL=0 e2e-tests/tests/test_breakpoint_performance_guard.sh`，通过。脚本收到 `body_omitted=true`、`body_size=4096`、`max_body_bytes=1024`，resume 传入伪造 body 后 mock server 仍收到原始 4 KiB body。
 
 ---
 
@@ -193,7 +193,7 @@
 - 响应内容正确。
 - pending breakpoint 在超时后被清理。
 
-**实际结果：** 待执行 `e2e-tests/tests/test_breakpoint_performance_guard.sh` 后记录。
+**实际结果：** 2026-06-04 执行 `CARGO_INCREMENTAL=0 e2e-tests/tests/test_breakpoint_performance_guard.sh`，通过。脚本把 `breakpoint_timeout_ms` 设置为固定下限 5000ms，未调用 resume，curl 在自动放行窗口内返回 `hello-breakpoint-timeout`。
 
 ---
 
@@ -214,7 +214,7 @@
 - Request breakpoint 可以编辑 headers。
 - Mock server 只依赖本地端口，不访问外网。
 
-**实际结果：** 待执行 `e2e-tests/tests/test_breakpoint_performance_guard.sh` 后记录。
+**实际结果：** 2026-06-04 执行 `CARGO_INCREMENTAL=0 e2e-tests/tests/test_breakpoint_performance_guard.sh`，通过。脚本收到 request 阶段 `body=original-request-body`，resume 后 mock server 返回 `len=19`、`prefix=edited-request-b`、`breakpoint_header=edited`。
 
 ---
 
@@ -236,7 +236,7 @@
 - curl 收到编辑后的响应内容和响应头。
 - Mock server 只依赖本地端口，不访问外网。
 
-**实际结果：** 待执行 `e2e-tests/tests/test_breakpoint_performance_guard.sh` 后记录。
+**实际结果：** 2026-06-04 执行 `CARGO_INCREMENTAL=0 e2e-tests/tests/test_breakpoint_performance_guard.sh`，通过。脚本收到 response 阶段 `body=hello-breakpoint-timeout`，resume 后 curl body 为 `edited-response-body`，响应头包含 `X-Breakpoint-Response: edited`。
 
 ---
 
@@ -255,7 +255,7 @@
 - 不产生 `breakpoint_paused` push。
 - Mock server 正常收到请求并返回响应。
 
-**实际结果：** 待执行 `e2e-tests/tests/test_breakpoint_performance_guard.sh` 后记录。
+**实际结果：** 2026-06-04 执行 `CARGO_INCREMENTAL=0 e2e-tests/tests/test_breakpoint_performance_guard.sh`，通过。脚本仅开启全局 settings，不创建 `breakpoint://...` 规则，POST 到本地 mock server 正常返回且等待窗口内没有 `breakpoint_paused` event。
 
 ---
 
@@ -276,7 +276,7 @@
 - hover 文档明确说明：Toolbar Switch 是全局门禁，规则 value 决定 request/response 阶段，`req`/`res`/`both`/`all` 是支持的别名，空值或未知值不触发暂停。
 - 单元测试通过。
 
-**实际结果：** 待执行 `pnpm --dir web test:unit src/components/BifrostEditor/snippet/protocol-docs.test.ts` 和 `pnpm --dir web exec playwright test tests/ui/breakpoint-ui.spec.ts` 后记录。
+**实际结果：** 2026-06-04 执行 `pnpm --dir web test:unit src/components/BifrostEditor/snippet/protocol-docs.test.ts` 与 `SKIP_FRONTEND_BUILD=1 pnpm --dir web exec playwright test tests/ui/breakpoint-ui.spec.ts`，通过。单元测试覆盖完整 value completion 别名集合；Playwright 覆盖真实 Rules 编辑器可触发 Breakpoint value suggestions。
 
 ---
 
@@ -298,7 +298,26 @@
 - Breakpoint timeout 只通过 Performance 配置暴露，并携带固定安全 bounds。
 - Breakpoint 阶段配置通过 Rules API / 规则 DSL 暴露。
 
-**实际结果：** 待执行 `cargo test -p bifrost-admin breakpoint_openapi --lib` 后记录。
+**实际结果：** 2026-06-04 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin openapi::tests --lib`，通过。2 个测试确认 OpenAPI 包含 Breakpoint settings/resume/rules/performance 路径，settings 不包含旧 hook/timeout 字段，`breakpoint_timeout_ms` 暴露固定 `minimum=5000` 与 `maximum=300000`。
+
+---
+
+### TC-BP-15: 侧边栏 OpenAPI 入口
+**目标：** 验证 WebUI 为 Swagger/OpenAPI 提供明确入口，位置在侧边栏底部主题切换按钮上方，并打开独立 OpenAPI 页面。
+
+**步骤：**
+1. 打开 WebUI 任意主页面，例如 Traffic。
+2. 查看左侧侧边栏底部。
+3. 确认主题切换按钮上方显示小号 `OpenAPI` 入口。
+4. 点击 `OpenAPI`。
+5. 确认打开的页面 URL 包含 `/_bifrost/swagger`。
+
+**预期结果：**
+- `OpenAPI` 入口不占用主导航项，不影响侧边栏滚动。
+- 入口位于主题切换上方。
+- 点击后打开独立 Swagger/OpenAPI 页面。
+
+**实际结果：** 2026-06-04 执行 `SKIP_FRONTEND_BUILD=1 pnpm --dir web exec playwright test tests/ui/breakpoint-ui.spec.ts`，通过。测试确认 `OpenAPI` 文案可见，位于 `theme-toggle` 上方，点击后弹出页面 URL 匹配 `/_bifrost/swagger`。
 
 ## 清理步骤
 - 结束测试脚本后确认临时 Bifrost 进程、mock server、WebSocket probe 均已退出。
