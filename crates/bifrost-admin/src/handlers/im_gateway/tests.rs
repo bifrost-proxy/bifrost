@@ -33,6 +33,12 @@ impl EnvVarGuard {
         std::env::set_var(key, value);
         Self { key, old_value }
     }
+
+    fn remove(key: &'static str) -> Self {
+        let old_value = std::env::var(key).ok();
+        std::env::remove_var(key);
+        Self { key, old_value }
+    }
 }
 
 impl Drop for EnvVarGuard {
@@ -897,6 +903,8 @@ mod provider_agent_tests;
 pub(super) async fn im_event_loop_uses_provider_agent_config_for_agent_chat() {
     let temp_dir = tempfile::tempdir().expect("temp data dir");
     let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let _worker_env_lock = crate::test_env::agent_worker_env_lock().lock().await;
+    let _force_worker_guard = EnvVarGuard::remove("BIFROST_FORCE_AGENT_WORKER");
     let mock = TestChatCompletionMock::start().await;
     let service = ImGatewayService::new(temp_dir.path());
 
@@ -1333,6 +1341,8 @@ pub(super) async fn im_event_loop_external_cli_session_records_runner_failure() 
 pub(super) async fn agent_chat_final_reply_sends_local_markdown_images_as_im_images() {
     let temp_dir = tempfile::tempdir().expect("temp data dir");
     let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let _worker_env_lock = crate::test_env::agent_worker_env_lock().lock().await;
+    let _force_worker_guard = EnvVarGuard::remove("BIFROST_FORCE_AGENT_WORKER");
     let image_path = temp_dir.path().join("chatgpt-web-image-1.png");
     std::fs::write(&image_path, b"fake png bytes").expect("write image");
     let response = format!(
@@ -1439,6 +1449,8 @@ pub(super) async fn agent_chat_final_reply_sends_local_markdown_images_as_im_ima
 pub(super) async fn im_event_loop_forwards_image_attachment_to_agent_chat() {
     let temp_dir = tempfile::tempdir().expect("temp data dir");
     let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let _worker_env_lock = crate::test_env::agent_worker_env_lock().lock().await;
+    let _force_worker_guard = EnvVarGuard::remove("BIFROST_FORCE_AGENT_WORKER");
     let mock = TestChatCompletionMock::start().await;
     let service = ImGatewayService::new(temp_dir.path());
 

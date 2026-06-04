@@ -1003,3 +1003,31 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 - **清理步骤**:
   - 无需清理；保留一条测试消息记录用于观察。
 - **执行记录（2026-06-03）**: PASS — 使用默认服务 `9900` 和 provider `feishu-main` 发送 marker `FEISHU_CARD_TEXT_DEFAULT_20260603_143043`。API 返回 `message_id=om_x100b6ec8eff87cacc086e6db7f5da35`；消息记录 `id=dddcc129`、`status=success`、`trigger=api`、`msg_type=interactive`，`content_preview` 以 `**Bifrost Feishu Card Test**` 开头并包含 marker。
+
+### TC-IMG-64: IM 内置 Agent mock 模型用例隔离 worker 环境变量
+
+- **前置条件**:
+  - 工作目录为项目根目录。
+  - 不启动 Bifrost 服务，不使用 9900，不修改系统代理。
+  - 本机可执行 Rust 单元测试。
+- **操作步骤**:
+  1. 复现/验证本地 workspace 暴露的 IM 图片消息 mock 模型用例：
+     ```bash
+     cargo test -p bifrost-admin handlers::im_gateway::tests::im_event_loop_forwards_image_attachment_to_agent_chat -- --nocapture
+     ```
+  2. 验证 agent worker 自测仍能覆盖强制外部 worker 与默认 in-process worker 两条分支：
+     ```bash
+     cargo test -p bifrost-admin 'im_gateway::agent_worker::tests::spawn_' -- --nocapture
+     ```
+  3. 执行 workspace 全量兜底：
+     ```bash
+     cargo test --workspace --all-features
+     ```
+- **预期结果**:
+  - 第 1 步 mock server 能收到 chat request，并断言图片 URL 数量为 `MAX_AGENT_IMAGES_PER_MESSAGE`。
+  - 第 2 步两个 agent worker 环境变量相关测试全部通过。
+  - 第 3 步不再因 `BIFROST_FORCE_AGENT_WORKER` 并发污染导致 IM 内置 Agent mock 模型用例偶发没有请求。
+  - 测试不启动真实服务、不使用 9900、不修改系统代理。
+- **清理步骤**:
+  - 无特殊清理；测试使用临时目录与进程内 mock server。
+- **执行记录（2026-06-04）**: PASS — 本地 `cargo test --workspace --all-features` 首次暴露 `im_event_loop_forwards_image_attachment_to_agent_chat` 偶发未收到 mock chat request，单独重跑通过，定位为 worker 环境变量并发隔离不足。修复后执行第 1 步通过；第 2 步执行 `cargo test -p bifrost-admin 'im_gateway::agent_worker::tests::spawn_' -- --nocapture`，2 个用例通过。workspace 全量继续由本地复跑和远端 CI 共同兜底。
