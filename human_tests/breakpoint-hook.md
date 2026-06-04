@@ -319,6 +319,28 @@
 
 **实际结果：** 2026-06-04 执行 `SKIP_FRONTEND_BUILD=1 pnpm --dir web exec playwright test tests/ui/breakpoint-ui.spec.ts`，通过。测试确认 `OpenAPI` 文案可见，位于 `theme-toggle` 上方，点击后弹出页面 URL 匹配 `/_bifrost/swagger`。
 
+---
+
+### TC-BP-15: 协议 registry 覆盖 breakpoint
+**目标：** 验证 `breakpoint` 已包含在核心规则协议 registry 测试清单中，避免新增协议后 workspace 全量测试因测试常量漏同步失败。
+
+**步骤：**
+1. 执行全协议清单单测：
+   ```bash
+   cargo test -p bifrost-tests --test rules_test test_all_protocols -- --nocapture
+   ```
+2. 执行完整规则测试文件：
+   ```bash
+   cargo test -p bifrost-tests --test rules_test
+   ```
+
+**预期结果：**
+- `test_all_protocols` 通过，`ALL_PROTOCOLS.len()` 与测试清单均为 76。
+- 测试清单包含 `breakpoint`，且 `Protocol::parse("breakpoint")` 成功。
+- 完整 `rules_test` 通过。
+
+**实际结果：** 2026-06-04 执行 `cargo test -p bifrost-tests --test rules_test test_all_protocols -- --nocapture`，单用例通过；执行 `cargo test -p bifrost-tests --test rules_test`，35 个规则协议测试全部通过。
+
 ## 清理步骤
 - 结束测试脚本后确认临时 Bifrost 进程、mock server、WebSocket probe 均已退出。
 - 删除临时 `BIFROST_DATA_DIR`。
