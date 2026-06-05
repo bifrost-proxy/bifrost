@@ -22,7 +22,7 @@ if [[ -n "${FEISHU_APP_ID:-}" && -n "${FEISHU_APP_SECRET:-}" && -n "${FEISHU_OWN
   echo "[im-agent-streaming-progress-card] Feishu credentials detected; real-card run must be driven by human_tests/TC-IMA-88..90 with the connected app."
 else
   echo "[im-agent-streaming-progress-card] Feishu credentials not present; skipped external Feishu API call."
-  echo "[im-agent-streaming-progress-card] Local shell E2E still verified JSON 2.0 streaming card structure, fixed CardKit element ids, optional plan/tool/thinking modules, visible latest thinking content, tool duration, guide/queue footer state, visible guide acknowledgement title, mock Feishu repost/recall behavior, finished-card retention, and turn-end inbound drain behavior."
+  echo "[im-agent-streaming-progress-card] Local shell E2E still verified JSON 2.0 streaming card structure, fixed CardKit element ids, optional plan/tool/thinking modules, visible latest thinking content, tool duration, guide/queue footer state, visible guide acknowledgement title, mock Feishu freeze-and-rollover behavior, finished-card retention, and turn-end inbound drain behavior."
 fi
 
 echo "[im-agent-streaming-progress-card] PASS"

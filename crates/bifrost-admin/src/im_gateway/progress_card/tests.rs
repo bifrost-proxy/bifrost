@@ -325,27 +325,20 @@ fn progress_update_uuid_stays_short_and_avoids_card_id() {
     );
 }
 
-#[derive(Clone, Copy)]
-enum MockRecallBehavior {
-    Success,
-    Failure,
-}
-
 struct MockFeishuProgressServer {
     base_url: String,
     card_counter: Arc<std::sync::atomic::AtomicUsize>,
     message_counter: Arc<std::sync::atomic::AtomicUsize>,
     recall_counter: Arc<std::sync::atomic::AtomicUsize>,
+    card_update_counter: Arc<std::sync::atomic::AtomicUsize>,
+    settings_update_counter: Arc<std::sync::atomic::AtomicUsize>,
 }
 
-async fn spawn_mock_feishu_progress_server(
-    recall_behavior: MockRecallBehavior,
-) -> MockFeishuProgressServer {
-    spawn_mock_feishu_progress_server_with_send_failure(recall_behavior, None).await
+async fn spawn_mock_feishu_progress_server() -> MockFeishuProgressServer {
+    spawn_mock_feishu_progress_server_with_send_failure(None).await
 }
 
 async fn spawn_mock_feishu_progress_server_with_send_failure(
-    recall_behavior: MockRecallBehavior,
     fail_message_send_number: Option<usize>,
 ) -> MockFeishuProgressServer {
     use bytes::Bytes;
@@ -360,6 +353,8 @@ async fn spawn_mock_feishu_progress_server_with_send_failure(
     let card_counter = Arc::new(AtomicUsize::new(0));
     let message_counter = Arc::new(AtomicUsize::new(0));
     let recall_counter = Arc::new(AtomicUsize::new(0));
+    let card_update_counter = Arc::new(AtomicUsize::new(0));
+    let settings_update_counter = Arc::new(AtomicUsize::new(0));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind mock feishu server");
@@ -367,6 +362,8 @@ async fn spawn_mock_feishu_progress_server_with_send_failure(
     let card_counter_for_server = Arc::clone(&card_counter);
     let message_counter_for_server = Arc::clone(&message_counter);
     let recall_counter_for_server = Arc::clone(&recall_counter);
+    let card_update_counter_for_server = Arc::clone(&card_update_counter);
+    let settings_update_counter_for_server = Arc::clone(&settings_update_counter);
     tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
@@ -376,11 +373,15 @@ async fn spawn_mock_feishu_progress_server_with_send_failure(
             let card_counter = Arc::clone(&card_counter_for_server);
             let message_counter = Arc::clone(&message_counter_for_server);
             let recall_counter = Arc::clone(&recall_counter_for_server);
+            let card_update_counter = Arc::clone(&card_update_counter_for_server);
+            let settings_update_counter = Arc::clone(&settings_update_counter_for_server);
             tokio::spawn(async move {
                 let service = service_fn(move |req: Request<Incoming>| {
                     let card_counter = Arc::clone(&card_counter);
                     let message_counter = Arc::clone(&message_counter);
                     let recall_counter = Arc::clone(&recall_counter);
+                    let card_update_counter = Arc::clone(&card_update_counter);
+                    let settings_update_counter = Arc::clone(&settings_update_counter);
                     async move {
                         let method = req.method().clone();
                         let path = req.uri().path().to_string();
@@ -413,6 +414,38 @@ async fn spawn_mock_feishu_progress_server_with_send_failure(
                                     .unwrap(),
                             );
                         }
+                        if method == Method::PUT
+                            && path.starts_with("/open-apis/cardkit/v1/cards/")
+                            && !path.contains("/elements/")
+                        {
+                            card_update_counter.fetch_add(1, Ordering::SeqCst);
+                            let body: serde_json::Value =
+                                serde_json::from_slice(&body).expect("update card json");
+                            let data = body["card"]["data"].as_str().unwrap_or_default();
+                            assert!(data.contains("streaming_mode"));
+                            return Ok::<_, hyper::Error>(
+                                Response::builder()
+                                    .status(StatusCode::OK)
+                                    .body(Full::new(Bytes::from_static(br#"{"code":0}"#)))
+                                    .unwrap(),
+                            );
+                        }
+                        if method == Method::PATCH
+                            && path.starts_with("/open-apis/cardkit/v1/cards/")
+                            && path.ends_with("/settings")
+                        {
+                            settings_update_counter.fetch_add(1, Ordering::SeqCst);
+                            let body: serde_json::Value =
+                                serde_json::from_slice(&body).expect("update settings json");
+                            let settings = body["settings"].as_str().unwrap_or_default();
+                            assert!(settings.contains("\"streaming_mode\":false"));
+                            return Ok::<_, hyper::Error>(
+                                Response::builder()
+                                    .status(StatusCode::OK)
+                                    .body(Full::new(Bytes::from_static(br#"{"code":0}"#)))
+                                    .unwrap(),
+                            );
+                        }
                         if method == Method::POST && path == "/open-apis/im/v1/messages" {
                             let body: serde_json::Value =
                                 serde_json::from_slice(&body).expect("send card json");
@@ -442,21 +475,10 @@ async fn spawn_mock_feishu_progress_server_with_send_failure(
                             && path.starts_with("/open-apis/im/v1/messages/")
                         {
                             recall_counter.fetch_add(1, Ordering::SeqCst);
-                            let (status, body) = match recall_behavior {
-                                MockRecallBehavior::Success => {
-                                    (StatusCode::OK, Bytes::from_static(br#"{"code":0}"#))
-                                }
-                                MockRecallBehavior::Failure => (
-                                    StatusCode::FORBIDDEN,
-                                    Bytes::from_static(
-                                        br#"{"code":99991663,"msg":"recall denied"}"#,
-                                    ),
-                                ),
-                            };
                             return Ok::<_, hyper::Error>(
                                 Response::builder()
-                                    .status(status)
-                                    .body(Full::new(body))
+                                    .status(StatusCode::OK)
+                                    .body(Full::new(Bytes::from_static(br#"{"code":0}"#)))
                                     .unwrap(),
                             );
                         }
@@ -478,6 +500,8 @@ async fn spawn_mock_feishu_progress_server_with_send_failure(
         card_counter,
         message_counter,
         recall_counter,
+        card_update_counter,
+        settings_update_counter,
     }
 }
 
@@ -514,10 +538,10 @@ fn mock_progress_target() -> ImTarget {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn queue_state_update_reposts_card_and_preserves_snapshot() {
+async fn queue_state_update_rolls_over_card_and_freezes_previous_snapshot() {
     use std::sync::atomic::Ordering;
 
-    let server = spawn_mock_feishu_progress_server(MockRecallBehavior::Success).await;
+    let server = spawn_mock_feishu_progress_server().await;
     let registry = ImAgentProgressRegistry::new();
     let session = registry
         .start_feishu(
@@ -589,14 +613,16 @@ async fn queue_state_update_reposts_card_and_preserves_snapshot() {
     );
     assert_eq!(server.card_counter.load(Ordering::SeqCst), 2);
     assert_eq!(server.message_counter.load(Ordering::SeqCst), 2);
-    assert_eq!(server.recall_counter.load(Ordering::SeqCst), 1);
+    assert_eq!(server.card_update_counter.load(Ordering::SeqCst), 1);
+    assert_eq!(server.settings_update_counter.load(Ordering::SeqCst), 1);
+    assert_eq!(server.recall_counter.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn queue_state_repost_continues_when_recall_fails() {
+async fn queue_state_rollover_sends_new_card_without_recall() {
     use std::sync::atomic::Ordering;
 
-    let server = spawn_mock_feishu_progress_server(MockRecallBehavior::Failure).await;
+    let server = spawn_mock_feishu_progress_server().await;
     let registry = ImAgentProgressRegistry::new();
     let session = registry
         .start_feishu(
@@ -615,10 +641,10 @@ async fn queue_state_repost_continues_when_recall_fails() {
                 "s1",
                 vec![QueueItem {
                     seq: 1,
-                    message: "queued after recall failure".to_string(),
+                    message: "queued after rollover".to_string(),
                 }],
                 false,
-                Some("消息已排队：queued after recall failure".to_string()),
+                Some("消息已排队：queued after rollover".to_string()),
             )
             .await
     );
@@ -629,14 +655,16 @@ async fn queue_state_repost_continues_when_recall_fails() {
     assert_eq!(message_info.message_id.as_deref(), Some("om_2"));
     assert_eq!(server.card_counter.load(Ordering::SeqCst), 2);
     assert_eq!(server.message_counter.load(Ordering::SeqCst), 2);
-    assert_eq!(server.recall_counter.load(Ordering::SeqCst), 1);
+    assert_eq!(server.card_update_counter.load(Ordering::SeqCst), 1);
+    assert_eq!(server.settings_update_counter.load(Ordering::SeqCst), 1);
+    assert_eq!(server.recall_counter.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn queue_state_repost_without_message_id_sends_new_card_directly() {
+async fn queue_state_rollover_without_message_id_still_freezes_by_card_id() {
     use std::sync::atomic::Ordering;
 
-    let server = spawn_mock_feishu_progress_server(MockRecallBehavior::Success).await;
+    let server = spawn_mock_feishu_progress_server().await;
     let registry = ImAgentProgressRegistry::new();
     let session = registry
         .start_feishu(
@@ -670,16 +698,16 @@ async fn queue_state_repost_without_message_id_sends_new_card_directly() {
     assert_eq!(message_info.message_id.as_deref(), Some("om_2"));
     assert_eq!(server.card_counter.load(Ordering::SeqCst), 2);
     assert_eq!(server.message_counter.load(Ordering::SeqCst), 2);
+    assert_eq!(server.card_update_counter.load(Ordering::SeqCst), 1);
+    assert_eq!(server.settings_update_counter.load(Ordering::SeqCst), 1);
     assert_eq!(server.recall_counter.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn queue_state_repost_failure_keeps_previous_handle() {
+async fn queue_state_rollover_send_failure_keeps_previous_running_handle() {
     use std::sync::atomic::Ordering;
 
-    let server =
-        spawn_mock_feishu_progress_server_with_send_failure(MockRecallBehavior::Success, Some(2))
-            .await;
+    let server = spawn_mock_feishu_progress_server_with_send_failure(Some(2)).await;
     let registry = ImAgentProgressRegistry::new();
     let session = registry
         .start_feishu(
@@ -713,14 +741,16 @@ async fn queue_state_repost_failure_keeps_previous_handle() {
     assert_eq!(session.snapshot().queue_items.len(), 1);
     assert_eq!(server.card_counter.load(Ordering::SeqCst), 2);
     assert_eq!(server.message_counter.load(Ordering::SeqCst), 2);
-    assert_eq!(server.recall_counter.load(Ordering::SeqCst), 1);
+    assert_eq!(server.card_update_counter.load(Ordering::SeqCst), 0);
+    assert_eq!(server.settings_update_counter.load(Ordering::SeqCst), 0);
+    assert_eq!(server.recall_counter.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn finished_card_queue_state_update_does_not_repost_or_recall() {
+async fn finished_card_queue_state_update_does_not_rollover_or_freeze() {
     use std::sync::atomic::Ordering;
 
-    let server = spawn_mock_feishu_progress_server(MockRecallBehavior::Success).await;
+    let server = spawn_mock_feishu_progress_server().await;
     let registry = ImAgentProgressRegistry::new();
     let session = registry
         .start_feishu(
@@ -763,10 +793,10 @@ async fn finished_card_queue_state_update_does_not_repost_or_recall() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn repost_existing_after_finished_card_returns_false_without_recall() {
+async fn rollover_existing_after_finished_card_returns_false_without_freezing_history() {
     use std::sync::atomic::Ordering;
 
-    let server = spawn_mock_feishu_progress_server(MockRecallBehavior::Success).await;
+    let server = spawn_mock_feishu_progress_server().await;
     let registry = ImAgentProgressRegistry::new();
     let session = registry
         .start_feishu(
@@ -783,7 +813,11 @@ async fn repost_existing_after_finished_card_returns_false_without_recall() {
         session.snapshot.phase = ImProgressPhase::Finished;
     }
 
-    assert!(!registry.repost_existing("s1", "new independent turn").await);
+    assert!(
+        !registry
+            .rollover_existing("s1", "new independent turn")
+            .await
+    );
 
     let session = session.lock().await;
     let message_info = session.message_info().expect("message info");
@@ -792,6 +826,8 @@ async fn repost_existing_after_finished_card_returns_false_without_recall() {
     assert_eq!(session.snapshot().title.as_deref(), Some("finished turn"));
     assert_eq!(server.card_counter.load(Ordering::SeqCst), 1);
     assert_eq!(server.message_counter.load(Ordering::SeqCst), 1);
+    assert_eq!(server.card_update_counter.load(Ordering::SeqCst), 0);
+    assert_eq!(server.settings_update_counter.load(Ordering::SeqCst), 0);
     assert_eq!(server.recall_counter.load(Ordering::SeqCst), 0);
 }
 
@@ -799,7 +835,7 @@ async fn repost_existing_after_finished_card_returns_false_without_recall() {
 async fn start_feishu_after_finished_card_sends_new_card_without_recalling_history() {
     use std::sync::atomic::Ordering;
 
-    let server = spawn_mock_feishu_progress_server(MockRecallBehavior::Success).await;
+    let server = spawn_mock_feishu_progress_server().await;
     let registry = ImAgentProgressRegistry::new();
     let first_session = registry
         .start_feishu(
@@ -816,7 +852,11 @@ async fn start_feishu_after_finished_card_sends_new_card_without_recalling_histo
         session.snapshot.phase = ImProgressPhase::Finished;
     }
 
-    assert!(!registry.repost_existing("s1", "new independent turn").await);
+    assert!(
+        !registry
+            .rollover_existing("s1", "new independent turn")
+            .await
+    );
     let second_session = registry
         .start_feishu(
             "s1",
@@ -838,160 +878,39 @@ async fn start_feishu_after_finished_card_sends_new_card_without_recalling_histo
     );
     assert_eq!(server.card_counter.load(Ordering::SeqCst), 2);
     assert_eq!(server.message_counter.load(Ordering::SeqCst), 2);
+    assert_eq!(server.card_update_counter.load(Ordering::SeqCst), 0);
+    assert_eq!(server.settings_update_counter.load(Ordering::SeqCst), 0);
     assert_eq!(server.recall_counter.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn repost_existing_recalls_old_message_and_sends_new_card() {
-    use bytes::Bytes;
-    use http_body_util::{BodyExt, Full};
-    use hyper::body::Incoming;
-    use hyper::server::conn::http1;
-    use hyper::service::service_fn;
-    use hyper::{Method, Request, Response, StatusCode};
-    use hyper_util::rt::TokioIo;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+async fn rollover_existing_freezes_old_card_and_sends_new_card() {
+    use std::sync::atomic::Ordering;
 
-    let card_counter = Arc::new(AtomicUsize::new(0));
-    let message_counter = Arc::new(AtomicUsize::new(0));
-    let recalled_old_message = Arc::new(AtomicBool::new(false));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind mock feishu server");
-    let port = listener.local_addr().expect("mock local addr").port();
-    let card_counter_for_server = Arc::clone(&card_counter);
-    let message_counter_for_server = Arc::clone(&message_counter);
-    let recalled_for_server = Arc::clone(&recalled_old_message);
-    tokio::spawn(async move {
-        loop {
-            let Ok((stream, _)) = listener.accept().await else {
-                break;
-            };
-            let io = TokioIo::new(stream);
-            let card_counter = Arc::clone(&card_counter_for_server);
-            let message_counter = Arc::clone(&message_counter_for_server);
-            let recalled = Arc::clone(&recalled_for_server);
-            tokio::spawn(async move {
-                let service = service_fn(move |req: Request<Incoming>| {
-                    let card_counter = Arc::clone(&card_counter);
-                    let message_counter = Arc::clone(&message_counter);
-                    let recalled = Arc::clone(&recalled);
-                    async move {
-                        let method = req.method().clone();
-                        let path = req.uri().path().to_string();
-                        let body = req
-                            .into_body()
-                            .collect()
-                            .await
-                            .expect("collect request body")
-                            .to_bytes();
-                        if method == Method::POST
-                            && path == "/open-apis/auth/v3/tenant_access_token/internal"
-                        {
-                            return Ok::<_, hyper::Error>(
-                                    Response::builder()
-                                        .status(StatusCode::OK)
-                                        .body(Full::new(Bytes::from_static(
-                                            br#"{"code":0,"tenant_access_token":"tenant-token","expire":7200}"#,
-                                        )))
-                                        .unwrap(),
-                                );
-                        }
-                        if method == Method::POST && path == "/open-apis/cardkit/v1/cards" {
-                            let idx = card_counter.fetch_add(1, Ordering::SeqCst) + 1;
-                            return Ok::<_, hyper::Error>(
-                                Response::builder()
-                                    .status(StatusCode::OK)
-                                    .body(Full::new(Bytes::from(format!(
-                                        r#"{{"code":0,"data":{{"card_id":"card_{idx}"}}}}"#
-                                    ))))
-                                    .unwrap(),
-                            );
-                        }
-                        if method == Method::POST && path == "/open-apis/im/v1/messages" {
-                            let body: serde_json::Value =
-                                serde_json::from_slice(&body).expect("send card json");
-                            let content = body["content"].as_str().unwrap_or_default();
-                            assert!(content.contains("card_"));
-                            let idx = message_counter.fetch_add(1, Ordering::SeqCst) + 1;
-                            return Ok::<_, hyper::Error>(
-                                Response::builder()
-                                    .status(StatusCode::OK)
-                                    .body(Full::new(Bytes::from(format!(
-                                        r#"{{"code":0,"data":{{"message_id":"om_{idx}"}}}}"#
-                                    ))))
-                                    .unwrap(),
-                            );
-                        }
-                        if method == Method::DELETE && path == "/open-apis/im/v1/messages/om_1" {
-                            recalled.store(true, Ordering::SeqCst);
-                            return Ok::<_, hyper::Error>(
-                                Response::builder()
-                                    .status(StatusCode::OK)
-                                    .body(Full::new(Bytes::from_static(br#"{"code":0}"#)))
-                                    .unwrap(),
-                            );
-                        }
-                        Ok::<_, hyper::Error>(
-                            Response::builder()
-                                .status(StatusCode::NOT_FOUND)
-                                .body(Full::new(Bytes::from_static(b"{}")))
-                                .unwrap(),
-                        )
-                    }
-                });
-                let _ = http1::Builder::new().serve_connection(io, service).await;
-            });
-        }
-    });
-
+    let server = spawn_mock_feishu_progress_server().await;
     let registry = ImAgentProgressRegistry::new();
-    let provider = ImProviderConfig {
-        id: "feishu-main".to_string(),
-        provider_type: super::super::types::ImProviderType::Feishu,
-        display_name: "Feishu Main".to_string(),
-        enabled: true,
-        base_url: Some(format!("http://127.0.0.1:{port}/open-apis")),
-        app_id: Some("cli_xxx".to_string()),
-        secret_ref: Some("secret".to_string()),
-        owner_open_id: None,
-        event_connection_enabled: true,
-        event_types: Vec::new(),
-        agent_config: None,
-        created_at: 0,
-        updated_at: 0,
-    };
-    let target = ImTarget {
-        id: "progress".to_string(),
-        provider_id: "feishu-main".to_string(),
-        display_name: "Progress".to_string(),
-        receive_id_type: "open_id".to_string(),
-        receive_id: "ou_owner".to_string(),
-        default_msg_type: "interactive".to_string(),
-        enabled: true,
-        created_at: 0,
-        updated_at: 0,
-    };
     let session = registry
         .start_feishu(
             "s1",
             Arc::new(FeishuProvider::new()),
-            provider,
-            target,
+            mock_feishu_provider(&server.base_url),
+            mock_progress_target(),
             "first turn",
         )
         .await
         .expect("start progress card");
 
-    assert!(registry.repost_existing("s1", "second turn").await);
+    assert!(registry.rollover_existing("s1", "second turn").await);
     let session = session.lock().await;
     let message_info = session.message_info().expect("message info");
     assert_eq!(message_info.card_id, "card_2");
     assert_eq!(message_info.message_id.as_deref(), Some("om_2"));
     assert_eq!(session.snapshot().title.as_deref(), Some("second turn"));
-    assert_eq!(card_counter.load(Ordering::SeqCst), 2);
-    assert_eq!(message_counter.load(Ordering::SeqCst), 2);
-    assert!(recalled_old_message.load(Ordering::SeqCst));
+    assert_eq!(server.card_counter.load(Ordering::SeqCst), 2);
+    assert_eq!(server.message_counter.load(Ordering::SeqCst), 2);
+    assert_eq!(server.card_update_counter.load(Ordering::SeqCst), 1);
+    assert_eq!(server.settings_update_counter.load(Ordering::SeqCst), 1);
+    assert_eq!(server.recall_counter.load(Ordering::SeqCst), 0);
 }
 #[tokio::test(flavor = "current_thread")]
 async fn recall_message_sends_delete_with_tenant_token() {

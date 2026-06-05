@@ -1318,7 +1318,7 @@ rm -rf ./.bifrost-test
 - **执行记录（2026-05-28）**: PASS — 执行 `cargo test -p bifrost-admin im_status_text_formats_metrics_and_runner_metadata --lib -- --nocapture`，结果 `1 passed`；验证外部 Runner status 展示 `External Runner Agent`、`codex`、`Codex threadId=thread-status-123`、历史对话轮次 `2`、`API 累计 token: 38.6K`、`显式压缩次数: 2`，并在 3 条历史下展示 `上下文管理: 按 token/context budget 与 compaction 管理`。
 - **历史执行记录（2026-05-21）**: PASS — `cargo test -p bifrost-admin im_status_text_formats_metrics_and_runner_metadata --lib` 通过，验证外部 Runner status 展示 `External Runner Agent`、`codex`、`Codex threadId=thread-status-123`、历史对话轮次 `2`、`API 累计 token: 38.6K` 和 `压缩次数: 2`。`cargo test -p bifrost-agent session_status --lib`、`cargo test -p bifrost-agent runtime_state --lib`、`cargo test -p bifrost-agent record_compaction_event_round_trip --lib`、`cargo test -p bifrost-agent scan_session_summary_uses_recorded_compaction_count_when_higher --lib` 均通过，验证 active `/status` K/M/B、compaction 事件恢复，并优先保留事件内已记录的更高压缩次数。
 
-### TC-IMA-91: 飞书流式进度卡片 - guide 消息进入后撤回并重发
+### TC-IMA-91: 飞书流式进度卡片 - guide 消息进入后冻结旧卡并新发
 
 - **前置条件**:
   - TC-IMA-90 的 Feishu Provider 和 Agent 配置可用。
@@ -1328,13 +1328,14 @@ rm -rf ./.bifrost-test
   2. 在卡片仍处于执行中时，直接发送一条新的普通消息作为 guide，例如“优先检查失败日志”。
   3. 观察 IM 会话中的卡片消息位置和底部折叠状态区。
 - **预期结果**:
-  - 新 guide 消息被注入 guide channel，系统 best-effort 撤回旧 progress card message，并重新发送一张新的 CardKit progress card。
+  - 新 guide 消息被注入 guide channel，系统发送一张新的 CardKit progress card，并 best-effort 把旧 progress card 更新为结束/冻结状态、关闭 streaming。
   - 新卡片出现在最新用户消息下方；折叠状态区标题可见“已收到引导：...”轻量提示，展开后显示“有待处理引导消息”。
-  - 新卡片保留当前工具、计划、thinking、context/token 等最新状态；撤回失败时只记录 warn，仍继续发送新卡片。
+  - 新卡片保留当前工具、计划、thinking、context/token 等最新状态；旧卡冻结失败时只记录 warn，不阻断新卡片发送。
+  - Feishu mock 不应收到 `DELETE /im/v1/messages/{message_id}`；旧卡通过 CardKit card entity/settings 更新冻结。
   - Agent 在当前工具调用批次结束后消费 guide，最终输出反映 guide 语义。
-- **执行记录（2026-06-05）**: PASS — 创建/更新用例后立即执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin queue_state_update_reposts_card_and_preserves_snapshot --lib`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin queue_state_repost_continues_when_recall_fails --lib`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin queue_state_repost_without_message_id_sends_new_card_directly --lib`，通过本地 Feishu OpenAPI mock 验证 running 中 guide/queue 状态更新会撤回旧 `message_id`、新建并发送 `card_2/om_2`，保留当前计划/工具快照，撤回失败或缺失 `message_id` 时仍发送新卡。
+- **执行记录（2026-06-06）**: PASS — 更新用例后立即执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin queue_state_update_rolls_over_card_and_freezes_previous_snapshot --lib`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin queue_state_rollover_sends_new_card_without_recall --lib`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin queue_state_rollover_without_message_id_still_freezes_by_card_id --lib`，通过本地 Feishu OpenAPI mock 验证 running 中 guide/queue 状态更新会新建并发送 `card_2/om_2`，旧 `card_1` 收到 CardKit full update 和 settings close，DELETE 调用次数为 0，并保留当前计划/工具快照。
 - **执行记录（2026-05-10）**:
-  - `bash e2e-tests/tests/test_im_agent_streaming_progress_card.sh`：PASS，本地 E2E 验证 guide pending 进入 progress card 状态区，且 Running 卡片可通过撤回/重发移动到最新用户消息下方。
+  - `bash e2e-tests/tests/test_im_agent_streaming_progress_card.sh`：PASS，本地 E2E 验证 guide pending 进入 progress card 状态区。
   - 修复后复测：`bash e2e-tests/tests/test_im_agent_streaming_progress_card.sh` PASS，断言状态区标题包含“已收到引导：...”，避免 guide 注入成功但用户无可见反馈。
   - 默认数据目录真实 Feishu 链路：测试中途发送的新 IM 消息被注入 guide，没有发送第二张 progress card。
 
@@ -1358,7 +1359,7 @@ rm -rf ./.bifrost-test
   - `CARGO_TARGET_DIR=target/agent-chat-queue-e2e BIFROST_E2E_RUNNER_JOBS=1 cargo run -p bifrost-e2e -- --test im_gateway_agent_chat_queue_state_persists_for_refresh --timeout 120 --port 18887`：PASS，真实启动 Admin + 慢速 mock model，验证 busy queue 写入后端、`sessions/all` 与 session detail 均返回同一 `queueItems`，并通过 `/stop` 释放当前 turn 后由后端继续 drain。
   - API-backed human 流程覆盖 TC-IMA-91A 的步骤 2-6；WebUI 刷新恢复依赖同一 `sessions/all` / detail payload，前端构建验证见 `pnpm --dir web run build`。
 
-### TC-IMA-92: 飞书流式进度卡片 - queue 消息进入后撤回并重发
+### TC-IMA-92: 飞书流式进度卡片 - queue 消息进入后冻结旧卡并新发
 
 - **前置条件**:
   - TC-IMA-90 的 Feishu Provider 和 Agent 配置可用。
@@ -1369,11 +1370,11 @@ rm -rf ./.bifrost-test
   3. 可选再发送 `/rq <序号>` 删除排队消息。
   4. 观察 IM 会话中的卡片消息和底部折叠状态区中的排队状态。
 - **预期结果**:
-  - `/q` 成功后系统 best-effort 撤回旧 progress card message，并重新发送一张新的 CardKit progress card。
+  - `/q` 成功后系统发送一张新的 CardKit progress card，并 best-effort 把旧 progress card 更新为结束/冻结状态、关闭 streaming。
   - 新卡片出现在最新用户消息下方；折叠状态区展开后显示当前排队消息数量。
-  - `/rq` 成功后也应按最新用户消息重新定位卡片；撤回失败时只记录 warn，仍继续发送新卡。
-  - 当前 turn 完成后，排队消息被继续处理，下一轮仍使用撤回旧卡并新发卡片的语义。
-- **执行记录（2026-06-05）**: PASS — 创建/更新用例后立即执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin queue_state_update_reposts_card_and_preserves_snapshot --lib`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin queue_state_repost_continues_when_recall_fails --lib`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin queue_state_repost_without_message_id_sends_new_card_directly --lib`，验证 running 中 queue 状态更新触发旧卡撤回与新卡发送，失败分支不阻断主流程。
+  - `/rq` 成功后也应按最新用户消息重新定位卡片；旧卡冻结失败时只记录 warn，仍继续发送新卡。
+  - 当前 turn 完成后，排队消息被继续处理，下一轮仍使用冻结旧卡并新发卡片的语义。
+- **执行记录（2026-06-06）**: PASS — 更新用例后立即执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin queue_state_update_rolls_over_card_and_freezes_previous_snapshot --lib`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin queue_state_rollover_sends_new_card_without_recall --lib`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin queue_state_rollover_send_failure_keeps_previous_running_handle --lib`，验证 running 中 queue 状态更新触发新卡发送与旧卡冻结；新卡发送失败时不冻结旧卡且保留旧 running handle。
 - **执行记录（2026-05-10）**:
   - `bash e2e-tests/tests/test_im_agent_streaming_progress_card.sh`：PASS，本地 E2E 验证 queue count 进入 progress card 状态区，且 renderer 输出 guide/queue 状态。
 
@@ -2565,52 +2566,50 @@ rm -rf ./.bifrost-test
   - 如手动启动过 Bifrost，使用同一 `BIFROST_DATA_DIR` 停止对应实例。
 - **执行记录（2026-06-02）**: PASS — 创建用例后立即执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin clear_builtin_im_agent_session_removes_persisted_context_and_queue --lib` 通过，验证 built-in IM Clear 清理 in-memory session、queue/guide、`session_state.json` 与 state 指向的 JSONL history；随后执行 `SKIP_FRONTEND_BUILD=1 cargo run -p bifrost-e2e -- --test im_gateway_mock_inbound_clear_resets_builtin_agent_history --test-timeout 180` 通过，使用 `/_bifrost/api/im-gateway/debug/mock-inbound` 进入真实 IM event loop，确认 `/clear` 后重建 `ImGatewayService` 再发送新 IM 消息时，模型请求只包含 `IM_CLEAR_FRESH_CONTEXT_E2E`，不再包含 Clear 前的 `IM_CLEAR_FIRST_CONTEXT_E2E`。
 
-### TC-IMA-139: 飞书 IM queue 下一轮进度卡片撤回并重发
+### TC-IMA-139: 飞书 IM queue 下一轮进度卡片冻结并新发
 
 - **前置条件**:
   - 使用当前源码和临时数据目录，不复用用户真实 Bifrost 数据。
-  - 准备 Feishu OpenAPI mock 服务，覆盖 `tenant_access_token`、`cardkit/v1/cards`、`im/v1/messages` 发送和 `DELETE /im/v1/messages/{message_id}` 撤回接口。
+  - 准备 Feishu OpenAPI mock 服务，覆盖 `tenant_access_token`、`cardkit/v1/cards` 创建/整卡更新/settings 更新、`im/v1/messages` 发送，以及 `DELETE /im/v1/messages/{message_id}` 计数。
   - IM Gateway 运行中有同一 `session_key` 的 Feishu progress card session，第一轮卡片已发送并持有旧 `message_id`。
 - **操作步骤**:
   1. 模拟第一轮 IM Agent 创建飞书 CardKit progress card，记录旧 `card_id` 与旧 `message_id`。
-  2. 在第一轮执行中发送 `/q <下一轮用户消息>`，确认 running 中卡片会撤回旧 `message_id` 并重发到最新用户消息下方。
+  2. 在第一轮执行中发送 `/q <下一轮用户消息>`，确认 running 中会发送新卡片到最新用户消息下方，并把旧卡冻结。
   3. 模拟第一轮结束后 queue 被 `run_agent_chat_with_interleave` 消费为下一轮。
-  4. 检查 Feishu mock 收到 `DELETE /open-apis/im/v1/messages/{旧 message_id}`。
-  5. 检查随后创建了新的 CardKit card entity，并向同一目标发送新的 interactive card message。
+  4. 检查 Feishu mock 没有收到 `DELETE /open-apis/im/v1/messages/{旧 message_id}`。
+  5. 检查旧 `card_id` 收到 CardKit full update 和 settings close，随后创建了新的 CardKit card entity，并向同一目标发送新的 interactive card message。
   6. 继续发送一次 progress event，确认后续更新使用新的 `card_id`。
 - **预期结果**:
-  - queue 消息尚未执行时，旧卡片也会被 best-effort 撤回，并新发一张保留当前快照和排队状态的 progress card。
-  - queue 消息成为下一轮后，如果上一张 progress card 仍处于 Running，系统 best-effort 撤回旧卡片，并新建卡片消息，使新进度卡片出现在最新用户消息下方。
-  - 撤回旧卡片失败时只记录 warn，不阻断新卡片发送；新卡片发送成功后 registry 持有新的 `card_id` / `message_id`。
-  - 已 Finished/Failed 的历史卡片不能被撤回；独立新一轮消息应直接创建下一张 progress card。
-  - Web/API/IM 旧行为不退化：Web Agent Chat 的 `restart_existing` 仍走原地更新语义，Feishu running guide/queue 与下一轮 Running queue 均走 repost 语义。
+  - queue 消息尚未执行时，旧卡片会被 best-effort 冻结，并新发一张保留当前快照和排队状态的 progress card。
+  - queue 消息成为下一轮后，如果上一张 progress card 仍处于 Running，系统 best-effort 冻结旧卡片，并新建卡片消息，使新进度卡片出现在最新用户消息下方。
+  - 旧卡冻结失败时只记录 warn，不阻断新卡片发送；新卡片发送成功后 registry 持有新的 `card_id` / `message_id`。
+  - 已 Finished/Failed 的历史卡片不能被改写或撤回；独立新一轮消息应直接创建下一张 progress card。
+  - Web/API/IM 旧行为不退化：Web Agent Chat 的 `restart_existing` 仍走原地更新语义，Feishu running guide/queue 与下一轮 Running queue 均走 freeze-and-rollover 语义。
 - **清理步骤**:
   - 停止 mock Feishu 服务；删除临时数据目录。
   - 如手动启动过 Bifrost，使用同一 `BIFROST_DATA_DIR` 停止对应实例。
-- **执行记录（2026-06-05）**: PASS — 更新用例后立即执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin progress_card --lib`，14 个 progress card 测试全部通过，覆盖 running 中 guide/queue repost、撤回失败继续新发、缺失 `message_id` 直接新发、新卡发送失败保留旧 handle、下一轮 repost 和撤回 API tenant token。
-- **执行记录（2026-06-05）**: PASS — 创建用例后立即执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin repost_existing_recalls_old_message_and_sends_new_card --lib`，使用本地 Feishu OpenAPI mock 验证第一张卡片发送为 `card_1/om_1`，下一轮启动 progress session 时触发 `DELETE /open-apis/im/v1/messages/om_1`，随后发送新卡片 `card_2/om_2`，registry snapshot 标题切换为下一轮用户消息。另执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin recall_message_sends_delete_with_tenant_token --lib` 验证撤回 API 使用 tenant token 调用 DELETE。
-- **执行记录（2026-06-06）**: PASS — 更新用例后立即执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin progress_card --lib`，17 个 progress card 测试全部通过，新增覆盖已完成卡片收到 queue state update 不撤回、不改写旧 snapshot；已完成卡片 `repost_existing` 返回 false 且不调用 DELETE；随后上层 `start_feishu` 新发 `card_2/om_2` 且旧 `om_1` 保留。
+- **执行记录（2026-06-06）**: PASS — 更新用例后立即执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin progress_card --lib`，17 个 progress card 测试全部通过，覆盖 running 中 guide/queue freeze-and-rollover、旧 card entity/settings 更新、DELETE 调用次数为 0、新卡发送失败保留旧 running handle、下一轮 `rollover_existing` 冻结旧卡并发送新卡；同时保留 `recall_message_sends_delete_with_tenant_token` 作为飞书撤回 API 独立能力测试。
 
 ### TC-IMA-140: 飞书 IM 已完成历史卡片不撤回
 
 - **前置条件**:
   - 使用当前源码和临时数据目录，不复用用户真实 Bifrost 数据。
-  - 准备 Feishu OpenAPI mock 服务，覆盖 CardKit create/send 和 `DELETE /im/v1/messages/{message_id}`。
+  - 准备 Feishu OpenAPI mock 服务，覆盖 CardKit create/send/update/settings 和 `DELETE /im/v1/messages/{message_id}` 计数。
   - 同一 `session_key` 已有一张 progress card，snapshot phase 已进入 `Finished` 或 `Failed`。
 - **操作步骤**:
   1. 模拟第一轮 IM Agent 结束，记录历史卡片 `card_id=card_1`、`message_id=om_1`。
   2. 对同一 `session_key` 发起下一条独立新消息。
-  3. 检查 progress registry 对旧 session 调用 `repost_existing` 的返回值。
-  4. 检查 Feishu mock 的 DELETE 调用次数。
+  3. 检查 progress registry 对旧 session 调用 `rollover_existing` 的返回值。
+  4. 检查 Feishu mock 的 DELETE、CardKit update/settings 调用次数。
   5. 检查新一轮是否直接创建并发送新的 CardKit card entity。
 - **预期结果**:
-  - `repost_existing` 对 Finished/Failed 旧卡返回 false。
-  - Feishu mock 未收到 `DELETE /im/v1/messages/om_1`。
+  - `rollover_existing` 对 Finished/Failed 旧卡返回 false。
+  - Feishu mock 未收到 `DELETE /im/v1/messages/om_1`，也未收到旧卡 freeze update/settings。
   - 旧卡片 snapshot 不被下一轮标题、queue 或 guide 状态改写。
   - 新一轮发送新的 progress card，例如 `card_2/om_2`；历史 `om_1` 仍留在消息流中。
 - **清理步骤**:
   - 停止 mock Feishu 服务；删除临时数据目录。
-- **执行记录（2026-06-06）**: PASS — 创建用例后立即执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin finished_card --lib`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin repost_existing_after_finished_card_returns_false_without_recall --lib`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin start_feishu_after_finished_card_sends_new_card_without_recalling_history --lib`，验证终态历史卡片不撤回、不改写，并由上层新发下一张 progress card。
+- **执行记录（2026-06-06）**: PASS — 创建用例后立即执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin finished_card --lib`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin rollover_existing_after_finished_card_returns_false_without_freezing_history --lib`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin start_feishu_after_finished_card_sends_new_card_without_recalling_history --lib`，验证终态历史卡片不撤回、不改写、不冻结，并由上层新发下一张 progress card。
 
 ### TC-IMA-141: IM Agent turn-end 窗口入站消息不丢失
 
@@ -2628,7 +2627,7 @@ rm -rf ./.bifrost-test
   - 已到达 channel 的边界消息会被 `drain_ready_events_after_turn` 处理，不停留到被 `clear_session` 清掉。
   - 同 session 新消息进入 guide channel；随后 turn-end guide drain 会把它转为 queue。
   - `pop_queue` 能取到该消息作为下一轮用户输入。
-  - progress card 可对 Running 卡片执行一次 recall/repost；消息不会只被 ACK 后丢失。
+  - progress card 可对 Running 卡片执行一次 freeze-and-rollover；消息不会只被 ACK 后丢失。
 - **清理步骤**:
   - 删除临时数据目录；停止 mock Feishu 服务。
 - **执行记录（2026-06-06）**: PASS — 创建用例后立即执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin drain_ready_events_after_turn_preserves_late_message_as_guide --lib`，真实构造 IM event channel、Feishu owner 文本事件、progress card mock 和 queue manager，验证 turn-end ready event 被 drain 到 guide，随后合并入 queue 并可作为下一轮消息 pop 出。

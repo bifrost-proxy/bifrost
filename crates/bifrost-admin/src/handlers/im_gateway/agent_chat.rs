@@ -952,7 +952,7 @@ pub(super) async fn process_agent_chat(
         };
         if let Some(feishu) = client.feishu() {
             let progress_result = if progress_registry
-                .repost_existing(session_key, &user_message)
+                .rollover_existing(session_key, &user_message)
                 .await
             {
                 Ok(())
@@ -1478,8 +1478,16 @@ mod tests {
     use hyper_util::rt::TokioIo;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    async fn spawn_progress_card_mock_server() -> (String, Arc<AtomicUsize>) {
+    struct ProgressCardMockCounters {
+        recall: Arc<AtomicUsize>,
+        card_update: Arc<AtomicUsize>,
+        settings_update: Arc<AtomicUsize>,
+    }
+
+    async fn spawn_progress_card_mock_server() -> (String, ProgressCardMockCounters) {
         let recall_counter = Arc::new(AtomicUsize::new(0));
+        let card_update_counter = Arc::new(AtomicUsize::new(0));
+        let settings_update_counter = Arc::new(AtomicUsize::new(0));
         let card_counter = Arc::new(AtomicUsize::new(0));
         let message_counter = Arc::new(AtomicUsize::new(0));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1487,6 +1495,8 @@ mod tests {
             .expect("bind mock feishu server");
         let port = listener.local_addr().expect("mock local addr").port();
         let recall_counter_for_server = Arc::clone(&recall_counter);
+        let card_update_counter_for_server = Arc::clone(&card_update_counter);
+        let settings_update_counter_for_server = Arc::clone(&settings_update_counter);
         tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
@@ -1494,11 +1504,15 @@ mod tests {
                 };
                 let io = TokioIo::new(stream);
                 let recall_counter = Arc::clone(&recall_counter_for_server);
+                let card_update_counter = Arc::clone(&card_update_counter_for_server);
+                let settings_update_counter = Arc::clone(&settings_update_counter_for_server);
                 let card_counter = Arc::clone(&card_counter);
                 let message_counter = Arc::clone(&message_counter);
                 tokio::spawn(async move {
                     let service = service_fn(move |req: Request<Incoming>| {
                         let recall_counter = Arc::clone(&recall_counter);
+                        let card_update_counter = Arc::clone(&card_update_counter);
+                        let settings_update_counter = Arc::clone(&settings_update_counter);
                         let card_counter = Arc::clone(&card_counter);
                         let message_counter = Arc::clone(&message_counter);
                         async move {
@@ -1530,6 +1544,30 @@ mod tests {
                                         .body(Full::new(Bytes::from(format!(
                                             r#"{{"code":0,"data":{{"card_id":"card_{idx}"}}}}"#
                                         ))))
+                                        .unwrap(),
+                                );
+                            }
+                            if method == Method::PUT
+                                && path.starts_with("/open-apis/cardkit/v1/cards/")
+                                && !path.contains("/elements/")
+                            {
+                                card_update_counter.fetch_add(1, Ordering::SeqCst);
+                                return Ok::<_, hyper::Error>(
+                                    Response::builder()
+                                        .status(StatusCode::OK)
+                                        .body(Full::new(Bytes::from_static(br#"{"code":0}"#)))
+                                        .unwrap(),
+                                );
+                            }
+                            if method == Method::PATCH
+                                && path.starts_with("/open-apis/cardkit/v1/cards/")
+                                && path.ends_with("/settings")
+                            {
+                                settings_update_counter.fetch_add(1, Ordering::SeqCst);
+                                return Ok::<_, hyper::Error>(
+                                    Response::builder()
+                                        .status(StatusCode::OK)
+                                        .body(Full::new(Bytes::from_static(br#"{"code":0}"#)))
                                         .unwrap(),
                                 );
                             }
@@ -1567,7 +1605,14 @@ mod tests {
                 });
             }
         });
-        (format!("http://127.0.0.1:{port}/open-apis"), recall_counter)
+        (
+            format!("http://127.0.0.1:{port}/open-apis"),
+            ProgressCardMockCounters {
+                recall: recall_counter,
+                card_update: card_update_counter,
+                settings_update: settings_update_counter,
+            },
+        )
     }
 
     fn mock_feishu_provider(base_url: String) -> ImProviderConfig {
@@ -1627,7 +1672,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn drain_ready_events_after_turn_preserves_late_message_as_guide() {
         let temp_dir = tempfile::tempdir().expect("temp data dir");
-        let (base_url, recall_counter) = spawn_progress_card_mock_server().await;
+        let (base_url, counters) = spawn_progress_card_mock_server().await;
         let feishu = Arc::new(crate::im_gateway::feishu::FeishuProvider::new());
         let provider = mock_feishu_provider(base_url);
         let client = ImProviderClient::Feishu(Arc::clone(&feishu));
@@ -1691,6 +1736,8 @@ mod tests {
             queue_manager.pop_queue("feishu-main:ou_owner").as_deref(),
             Some("late message at final boundary")
         );
-        assert_eq!(recall_counter.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.card_update.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.settings_update.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.recall.load(Ordering::SeqCst), 0);
     }
 }

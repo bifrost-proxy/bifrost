@@ -326,18 +326,20 @@ impl FeishuProgressCardSession {
         self.flush_snapshot().await
     }
 
-    pub async fn update_queue_state_and_repost(
+    pub async fn update_queue_state_and_rollover(
         &mut self,
         queue_items: Vec<QueueItem>,
         guide_pending: bool,
         notice: Option<String>,
     ) -> Result<bool> {
-        if !self.can_repost_current_card() {
+        if !self.can_rollover_current_card() {
             return Ok(false);
         }
         self.snapshot
             .update_queue_state(queue_items, guide_pending, notice);
-        self.repost_snapshot().await.map(|_| true)
+        self.rollover_snapshot("已冻结旧进度快照，后续进展见下方新卡片")
+            .await
+            .map(|_| true)
     }
 
     pub async fn restart_turn(&mut self, initial_message: &str) -> Result<()> {
@@ -346,43 +348,103 @@ impl FeishuProgressCardSession {
         self.flush_snapshot().await
     }
 
-    pub async fn repost_turn(&mut self, initial_message: &str) -> Result<bool> {
-        if !self.can_repost_current_card() {
+    pub async fn rollover_turn(&mut self, initial_message: &str) -> Result<bool> {
+        if !self.can_rollover_current_card() {
             return Ok(false);
         }
-        self.recall_current_message_before_repost().await;
+        let previous_handle = self.handle.clone();
+        let previous_snapshot = self.snapshot.clone();
+        let previous_generation = self.generation;
         let session_key = self.snapshot.session_key.clone();
         self.snapshot = ImAgentProgressSnapshot::new(session_key, initial_message);
-        self.send_initial_card().await.map(|_| true)
+        if let Err(error) = self.send_initial_card().await {
+            self.snapshot = previous_snapshot;
+            self.handle = previous_handle;
+            self.generation = previous_generation;
+            return Err(error);
+        }
+        self.freeze_previous_card_after_rollover(
+            previous_handle,
+            &previous_snapshot,
+            "已冻结上一轮进度快照，后续进展见下方新卡片",
+        )
+        .await;
+        Ok(true)
     }
 
-    fn can_repost_current_card(&self) -> bool {
+    fn can_rollover_current_card(&self) -> bool {
         matches!(self.snapshot.phase, ImProgressPhase::Running)
     }
 
-    async fn repost_snapshot(&mut self) -> Result<()> {
-        self.recall_current_message_before_repost().await;
-        self.send_initial_card().await.map(|_| ())
+    async fn rollover_snapshot(&mut self, freeze_notice: &str) -> Result<()> {
+        let previous_handle = self.handle.clone();
+        let previous_snapshot = self.snapshot.clone();
+        let previous_generation = self.generation;
+        if let Err(error) = self.send_initial_card().await {
+            self.handle = previous_handle;
+            self.generation = previous_generation;
+            return Err(error);
+        }
+        self.freeze_previous_card_after_rollover(
+            previous_handle,
+            &previous_snapshot,
+            freeze_notice,
+        )
+        .await;
+        Ok(())
     }
 
-    async fn recall_current_message_before_repost(&self) {
-        if let Some(message_id) = self
-            .handle
-            .as_ref()
-            .and_then(|handle| handle.message_id.as_deref())
+    async fn freeze_previous_card_after_rollover(
+        &self,
+        previous_handle: Option<FeishuProgressCardHandle>,
+        previous_snapshot: &ImAgentProgressSnapshot,
+        freeze_notice: &str,
+    ) {
+        let Some(mut handle) = previous_handle else {
+            return;
+        };
+        let mut frozen_snapshot = previous_snapshot.clone();
+        frozen_snapshot.phase = ImProgressPhase::Finished;
+        frozen_snapshot.activity_notice = Some(truncate_one_line(freeze_notice, 80));
+        let card = build_feishu_progress_card(&frozen_snapshot, false);
+        let (sequence, uuid) = handle.next_sequence();
+        if let Err(error) = self
+            .feishu
+            .update_card_entity(&self.provider, &handle.card_id, card, sequence, &uuid)
+            .await
         {
-            if let Err(error) = self.feishu.recall_message(&self.provider, message_id).await {
-                warn!(
-                    message_id = message_id,
-                    error = %error,
-                    "failed to recall previous Feishu progress card before reposting"
-                );
-            } else {
-                info!(
-                    message_id = message_id,
-                    "recalled previous Feishu progress card before reposting"
-                );
+            warn!(
+                card_id = %handle.card_id,
+                error = %error,
+                "failed to freeze previous Feishu progress card entity after rollover"
+            );
+        }
+        let summary = rollover_frozen_summary(&frozen_snapshot);
+        let settings = serde_json::json!({
+            "config": {
+                "streaming_mode": false,
+                "summary": {
+                    "content": summary
+                }
             }
+        });
+        let (sequence, uuid) = handle.next_sequence();
+        if let Err(error) = self
+            .feishu
+            .update_card_settings(&self.provider, &handle.card_id, settings, sequence, &uuid)
+            .await
+        {
+            warn!(
+                card_id = %handle.card_id,
+                error = %error,
+                "failed to close previous Feishu progress card streaming after rollover"
+            );
+        } else {
+            info!(
+                card_id = %handle.card_id,
+                message_id = handle.message_id.as_deref().unwrap_or(""),
+                "froze previous Feishu progress card after rollover"
+            );
         }
     }
 
@@ -653,7 +715,7 @@ impl ImAgentProgressRegistry {
         let result = session
             .lock()
             .await
-            .update_queue_state_and_repost(queue_items, guide_pending, notice)
+            .update_queue_state_and_rollover(queue_items, guide_pending, notice)
             .await;
         match result {
             Ok(updated) => updated,
@@ -708,19 +770,19 @@ impl ImAgentProgressRegistry {
         }
     }
 
-    pub async fn repost_existing(&self, session_key: &str, initial_message: &str) -> bool {
+    pub async fn rollover_existing(&self, session_key: &str, initial_message: &str) -> bool {
         let Some(session) = self.sessions.get(session_key) else {
             return false;
         };
         let session = Arc::clone(session.value());
-        let result = session.lock().await.repost_turn(initial_message).await;
+        let result = session.lock().await.rollover_turn(initial_message).await;
         match result {
-            Ok(reposted) => reposted,
+            Ok(rolled_over) => rolled_over,
             Err(error) => {
                 warn!(
                     session_key = session_key,
                     error = %error,
-                    "failed to repost existing IM progress card"
+                    "failed to roll over existing IM progress card"
                 );
                 false
             }
@@ -853,6 +915,15 @@ fn format_output_markdown(snapshot: &ImAgentProgressSnapshot) -> String {
         return "处理中...".to_string();
     }
     crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&snapshot.output)
+}
+
+fn rollover_frozen_summary(snapshot: &ImAgentProgressSnapshot) -> String {
+    snapshot
+        .activity_notice
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| truncate_str(value, 80))
+        .unwrap_or_else(|| "已冻结进度快照".to_string())
 }
 
 fn format_plan_markdown(steps: &[PlanStep]) -> String {

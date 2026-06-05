@@ -931,7 +931,7 @@ tracing = "0.1"
 | IM busy runner-aware 默认策略回归 | 真实 IM/debug inbound busy 链路按 runner 能力分流：内置 Bifrost Agent 普通追加消息默认进入 guide channel，只有 `/q` 进入 queue；ChatGPT Web、Codex 和其他自定义 runner 普通追加消息默认进入 queue |
 | Codex Runner 排队续聊回归 | Codex CLI 当前支持 `codex exec resume <thread_id> [PROMPT]` 进行下一轮接续，不支持运行中追加 guide。外部 runner 队列 drain 时必须继承上一轮 Codex JSONL 解析出的 `threadId`，让排队消息通过 resume 续同一个 Codex session |
 | 飞书进度卡片与 `/status` 指标格式化回归 | progress card 折叠标题、展开状态区和 `/status` 中的 Token、Context 数字统一使用 K/M/B 单位，最多一位小数并去掉 `.0`，例如 `38634 -> 38.6K`、`19333 -> 19.3K`、`250000 -> 250K`、`1000000 -> 1M` |
-| 飞书进度卡片撤回重发回归 | Feishu CardKit 无法移动既有消息；运行中 guide/queue 状态变化和 queue drain 下一轮都必须 best-effort 撤回旧 Running `message_id`，再新建并发送 card entity，使最新 progress card 位于最新用户消息下方；撤回失败只记录 warn，不阻断新卡发送；已 Finished/Failed 的历史卡片必须保留，后续独立新消息只能新发卡片，不得撤回旧卡 |
+| 飞书进度卡片冻结并新发回归 | Feishu CardKit 无法移动既有消息；运行中 guide/queue 状态变化和 queue drain 下一轮都必须先新建并发送 card entity，使最新 progress card 位于最新用户消息下方，再 best-effort 把旧 Running card 更新为结束/冻结快照并关闭 streaming；冻结失败只记录 warn，不阻断新卡发送；已 Finished/Failed 的历史卡片必须保留，后续独立新消息只能新发卡片，不得改写或撤回旧卡 |
 | IM turn-end 入站消息不丢失回归 | 内置 IM Agent 在模型最后输出或 `process_agent_chat` 刚结束时若收到同 session 新消息，event loop 必须在清理 guide/queue 前 drain 已到达 channel 的事件，并把消息落入 guide/queue 后继续下一轮，不能只 ACK 后丢失 |
 | `/status` runner 元信息回归 | IM `/status` 和 `/agent/chat` `/status` 展示当前 Agent 类型、Runner 类型、Runner ID、历史对话轮次、外部会话引用；Codex 展示 `threadId`，ChatGPT Web 展示 `conversationId` |
 | 压缩次数恢复回归 | session JSONL 中的 `compaction` 事件会恢复为 `SessionRuntimeState.compaction_count`，`/resume` 后 `/status` 不再把已发生的压缩次数重置为 0 |
@@ -966,7 +966,7 @@ tracing = "0.1"
 | TC-GQ-16 | 自定义 Runner busy 普通消息默认 queue | 通过 IM/debug inbound 在自定义 runner active run 期间发送普通消息，验证消息等待当前 run 结束后再处理；Codex runner 若返回 `threadId`，下一条排队消息使用 `codex exec resume` 接续 |
 | TC-IMA-90A | 飞书流式进度卡片与 `/status` Token/Context KMB 格式化 | 构造百万级 Token 与几十万 Context 的 progress card，并调用 `/status`，验证折叠标题、展开状态区和状态文本均展示 `K/M/B` 单位，不再裸显长数字 |
 | TC-IMA-90B | `/status` runner 元信息与压缩次数回归 | 构造外部 runner session 和 compaction 记录，验证 `/status` 展示 Agent 类型、Runner 类型、Runner ID、历史对话轮次、`threadId` / `conversationId`，且恢复后压缩次数保持非 0 |
-| TC-IMA-91/92/139/140 | 飞书流式进度卡片撤回并重发 | running 中 guide/queue 更新必须保留当前快照、撤回旧 `message_id` 并发送新卡；缺失 `message_id` 直接新发；撤回失败不阻断新卡；queue drain 下一轮在旧卡仍 Running 时撤回旧卡并新发；已完成历史卡片不撤回；turn-end 窗口消息会进入 guide/queue 并继续下一轮 |
+| TC-IMA-91/92/139/140 | 飞书流式进度卡片冻结并新发 | running 中 guide/queue 更新必须保留当前快照、发送新卡并冻结旧卡；缺失 `message_id` 不影响 freeze，因为 freeze 基于 `card_id`；新卡发送失败时保留旧 running handle；queue drain 下一轮在旧卡仍 Running 时冻结旧卡并新发；已完成历史卡片不改写不撤回；turn-end 窗口消息会进入 guide/queue 并继续下一轮 |
 | TC-IMA-91A | Web Agent Chat 后端持久排队与刷新恢复 | 同一 session 运行中在 WebUI 选择 Queue 发送追加消息；刷新页面后队列面板仍从后端 `queue_items` 恢复；上一轮结束后由后端自动处理排队消息，前端不再本地重发 |
 | TC-LTM-09 | 长期记忆真实对话链路 | 真实 Bifrost + mock Chat API 环境下验证自动记忆、Phase 2 consolidation、跨 session 消费 |
 | TC-IMA-83 | Agent 模型请求默认进入 Traffic | 真实 Bifrost 监听端口启动后，Agent 底层 Chat Completions 请求默认经 `http://127.0.0.1:<port>` 代理发出；mock 模型 host 可查询到 POST 记录，真实模型域名在 `--intercept-include` 下可解包为 HTTPS POST 明文记录 |
