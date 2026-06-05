@@ -1,5 +1,9 @@
 use std::collections::HashMap;
+#[cfg(target_os = "macos")]
+use std::path::Path;
 use std::path::PathBuf;
+#[cfg(target_os = "macos")]
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -43,6 +47,186 @@ pub type SharedAccessControl = Arc<RwLock<ClientAccessControl>>;
 pub type SharedValuesStorage = Arc<ParkingRwLock<ValuesStorage>>;
 pub type SharedSystemProxyManager = Arc<RwLock<SystemProxyManager>>;
 pub type SharedRuntimeConfig = Arc<RwLock<RuntimeConfig>>;
+
+#[cfg(target_os = "macos")]
+const SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER_ENV: &str =
+    "BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER";
+
+#[cfg(target_os = "macos")]
+pub struct SystemProxyLifecycleHelperState {
+    data_dir: PathBuf,
+    parent_pid: u32,
+    child: parking_lot::Mutex<Option<Child>>,
+}
+
+#[cfg(not(target_os = "macos"))]
+pub struct SystemProxyLifecycleHelperState;
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+enum SystemProxyLifecycleHelperStartReason {
+    Startup,
+    AdminApiEnable,
+}
+
+#[cfg(target_os = "macos")]
+impl SystemProxyLifecycleHelperState {
+    pub fn new(data_dir: PathBuf, parent_pid: u32) -> Self {
+        Self {
+            data_dir,
+            parent_pid,
+            child: parking_lot::Mutex::new(None),
+        }
+    }
+
+    pub fn ensure_started_after_startup_enable(&self) {
+        self.ensure_started(SystemProxyLifecycleHelperStartReason::Startup);
+    }
+
+    pub fn ensure_started_after_admin_api_enable(&self) {
+        self.ensure_started(SystemProxyLifecycleHelperStartReason::AdminApiEnable);
+    }
+
+    fn ensure_started(&self, reason: SystemProxyLifecycleHelperStartReason) {
+        if std::env::var(SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER_ENV)
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+        {
+            tracing::info!(
+                target: "bifrost_admin::proxy",
+                env = SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER_ENV,
+                "system proxy lifecycle helper disabled by environment"
+            );
+            return;
+        }
+
+        let mut child = self.child.lock();
+        if let Some(existing) = child.as_mut() {
+            match existing.try_wait() {
+                Ok(None) => return,
+                Ok(Some(status)) => tracing::warn!(
+                    target: "bifrost_admin::proxy",
+                    status = %status,
+                    reason = reason.as_str(),
+                    "system proxy lifecycle helper exited before requested enable path"
+                ),
+                Err(error) => tracing::warn!(
+                    target: "bifrost_admin::proxy",
+                    error = %error,
+                    reason = reason.as_str(),
+                    "failed to inspect system proxy lifecycle helper before requested enable path"
+                ),
+            }
+            *child = None;
+        }
+
+        match spawn_system_proxy_lifecycle_helper(&self.data_dir, self.parent_pid, reason) {
+            Ok(helper) => *child = Some(helper),
+            Err(error) => tracing::warn!(
+                target: "bifrost_admin::proxy",
+                error = %error,
+                parent_pid = self.parent_pid,
+                data_dir = %self.data_dir.display(),
+                reason = reason.as_str(),
+                "failed to start system proxy lifecycle helper"
+            ),
+        }
+    }
+
+    pub fn stop(&self) {
+        if let Some(mut child) = self.child.lock().take() {
+            if let Err(error) = child.kill() {
+                tracing::debug!(
+                    target: "bifrost_admin::proxy",
+                    error = %error,
+                    "failed to stop system proxy lifecycle helper after Admin API disable"
+                );
+            } else {
+                tracing::info!(
+                    target: "bifrost_admin::proxy",
+                    "system proxy lifecycle helper stopped after Admin API disable"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+impl SystemProxyLifecycleHelperState {
+    pub fn new(_data_dir: PathBuf, _parent_pid: u32) -> Self {
+        Self
+    }
+
+    pub fn ensure_started_after_startup_enable(&self) {}
+
+    pub fn ensure_started_after_admin_api_enable(&self) {}
+
+    pub fn stop(&self) {}
+}
+
+#[cfg(target_os = "macos")]
+impl SystemProxyLifecycleHelperStartReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Startup => "startup",
+            Self::AdminApiEnable => "admin_api_enable",
+        }
+    }
+
+    fn started_message(self) -> &'static str {
+        match self {
+            Self::Startup => "system proxy lifecycle cleanup helper started",
+            Self::AdminApiEnable => "system proxy lifecycle helper started after Admin API enable",
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_system_proxy_lifecycle_helper(
+    data_dir: &Path,
+    parent_pid: u32,
+    reason: SystemProxyLifecycleHelperStartReason,
+) -> std::io::Result<Child> {
+    let exe = std::env::current_exe()?;
+    let child = Command::new(exe)
+        .arg("system-proxy")
+        .arg("lifecycle-helper")
+        .arg("--data-dir")
+        .arg(data_dir)
+        .arg("--parent-pid")
+        .arg(parent_pid.to_string())
+        .arg("--poll-secs")
+        .arg("2")
+        .stdin(Stdio::null())
+        .spawn()?;
+    tracing::info!(
+        target: "bifrost_admin::proxy",
+        helper_pid = child.id(),
+        parent_pid,
+        data_dir = %data_dir.display(),
+        reason = reason.as_str(),
+        "{}",
+        reason.started_message()
+    );
+    Ok(child)
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for SystemProxyLifecycleHelperState {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.lock().take() {
+            if let Err(error) = child.kill() {
+                tracing::debug!(
+                    target: "bifrost_admin::proxy",
+                    error = %error,
+                    "failed to stop system proxy lifecycle helper during AdminState drop"
+                );
+            }
+        }
+    }
+}
+
+pub type SharedSystemProxyLifecycleHelperState = Arc<SystemProxyLifecycleHelperState>;
 
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
@@ -109,6 +293,7 @@ pub struct AdminState {
     pub runtime_config: SharedRuntimeConfig,
     pub connection_registry: SharedConnectionRegistry,
     pub config_manager: Option<SharedConfigManager>,
+    pub system_proxy_lifecycle_helper: Option<SharedSystemProxyLifecycleHelperState>,
     pub max_body_buffer_size: AtomicUsize,
     pub max_body_probe_size: AtomicUsize,
     pub binary_traffic_performance_mode: AtomicBool,
@@ -169,6 +354,7 @@ impl AdminState {
             runtime_config: Arc::new(RwLock::new(RuntimeConfig::default())),
             connection_registry: Arc::new(ConnectionRegistry::default()),
             config_manager: None,
+            system_proxy_lifecycle_helper: None,
             max_body_buffer_size: AtomicUsize::new(DEFAULT_MAX_BODY_BUFFER_SIZE),
             max_body_probe_size: AtomicUsize::new(DEFAULT_MAX_BODY_PROBE_SIZE),
             binary_traffic_performance_mode: AtomicBool::new(true),
@@ -779,6 +965,14 @@ impl AdminState {
 
     pub fn with_config_manager_shared(mut self, manager: SharedConfigManager) -> Self {
         self.config_manager = Some(manager);
+        self
+    }
+
+    pub fn with_system_proxy_lifecycle_helper_shared(
+        mut self,
+        helper: SharedSystemProxyLifecycleHelperState,
+    ) -> Self {
+        self.system_proxy_lifecycle_helper = Some(helper);
         self
     }
 

@@ -351,7 +351,7 @@ one-shot 与主进程、lifecycle helper 可能在短时间内同时观察同一
 
 - 用户取消 LaunchDaemon 授权不阻塞主服务。
 - 启动时系统代理开启后仍自动检查/安装 LaunchDaemon。
-- 运行中 Admin API/Web UI 开启 system proxy 后仍自动检查/安装 LaunchDaemon。
+- 运行中 Admin API/Web UI 开启 system proxy 后仍自动检查/安装 LaunchDaemon，并启动 lifecycle helper 覆盖本 session 后续崩溃。
 - 外部代理 ownership 保护不变。
 - 正常 stop / SIGTERM / listener exit restore 顺序不变。
 - 下次启动前 crash recovery 不变。
@@ -416,7 +416,7 @@ BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_system_proxy_e
 
 - TC-CSP-16：启动后异步安装 LaunchDaemon，授权后 `launchctl print system/com.bifrost.system-proxy-cleanup` 成功，但 `pgrep -fl "system-proxy cleanup-daemon"` 在短时间后不应存在常驻进程。
 - TC-CSP-17：Web UI 安装/卸载 one-shot LaunchDaemon；program/data_dir/mode 一致时不重复弹授权；旧 KeepAlive plist 被识别为 needs-upgrade。
-- TC-CSP-18：运行中服务通过 Admin API/Web UI 打开 system proxy 后自动检查/安装 one-shot LaunchDaemon。
+- TC-CSP-18：运行中服务通过 Admin API/Web UI 打开 system proxy 后自动检查/安装 one-shot LaunchDaemon，并验证日志包含 `system proxy lifecycle helper started after Admin API enable`。
 - 崩溃兜底：主进程 `kill -9` 后 lifecycle helper 仍在 2 秒 poll / 3 次 miss 后恢复 system proxy。
 
 执行记录必须包含：
@@ -480,6 +480,10 @@ cargo test --workspace --all-features
 ### 风险 1：去掉 KeepAlive 后无法覆盖运行期崩溃
 
 缓解：运行期崩溃本来由 lifecycle helper 覆盖。实施时必须复跑 helper 崩溃兜底 E2E 和 human_test。
+
+### 风险 1.1：运行中才通过 Admin API/Web UI 打开 system proxy 时没有 lifecycle helper
+
+缓解：Admin API/Web UI 的 enable 成功路径必须调用共享 lifecycle helper state 的 `ensure_started()`；启动时未启用 system proxy 的进程也要在 `AdminState` 中持有该 state。E2E 增加运行中 enable 后的 helper 启动日志断言，human_tests 在 TC-CSP-18 中要求验证该日志。
 
 ### 风险 2：launchd status 被误判为 unloaded
 

@@ -762,6 +762,44 @@ test_lifecycle_helper_cleans_after_parent_crash() {
     esac
 }
 
+test_admin_api_enable_starts_lifecycle_helper() {
+    stop_proxy
+    unset BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER
+    start_proxy_without_system_proxy
+    case "$PLATFORM" in
+        Darwin)
+            if [[ -z "$PROXY_PID" ]] || ! kill -0 "$PROXY_PID" 2>/dev/null || ! admin_api_ready; then
+                _log_fail "macOS: Admin API 启用 lifecycle helper 回归准备失败" "Bifrost 服务必须保持运行且 Admin API 可访问" "pid=${PROXY_PID}; log=$(tail -n 80 "${TEST_DATA_DIR}/proxy.log" 2>/dev/null || true)"
+                failed=$((failed + 1))
+                return
+            fi
+            if macos_check_any_proxy_enabled_not_pointing_to "127.0.0.1" "$PROXY_PORT"; then
+                _log_pass "macOS: 检测到外部系统代理 owner，跳过非隔离的 Admin API lifecycle helper 用例"
+                passed=$((passed + 1))
+                return
+            fi
+            macos_enable_system_proxy_api
+            if ! macos_wait_proxy_enabled "127.0.0.1" "$PROXY_PORT" 45; then
+                _log_fail "macOS: Admin API 启用系统代理失败" "系统代理指向 127.0.0.1:${PROXY_PORT}" "$(macos_proxy_snapshot); log=$(tail -n 80 "${TEST_DATA_DIR}/proxy.log" 2>/dev/null || true)"
+                failed=$((failed + 1))
+                return
+            fi
+            if wait_for_condition 15 1 grep -q "system proxy lifecycle helper started after Admin API enable" "${TEST_DATA_DIR}/proxy.log"; then
+                _log_pass "macOS: Admin API 运行时启用系统代理后已启动 lifecycle helper"
+                passed=$((passed + 1))
+            else
+                _log_fail "macOS: Admin API 运行时启用系统代理后未启动 lifecycle helper" "日志包含 lifecycle helper started after Admin API enable" "$(tail -n 120 "${TEST_DATA_DIR}/proxy.log" 2>/dev/null || true)"
+                failed=$((failed + 1))
+            fi
+            stop_proxy
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            _log_pass "Windows: lifecycle helper 为 macOS 运行期崩溃兜底路径，跳过"
+            passed=$((passed + 1))
+            ;;
+    esac
+}
+
 test_launchd_cleanup_plist_dry_run_contains_version_metadata() {
     local output
     output=$("$BIFROST_BIN" system-proxy launchd install \
@@ -887,6 +925,7 @@ main() {
     test_sleep_wake_style_reconcile
     test_crash_recovery
     test_lifecycle_helper_cleans_after_parent_crash
+    test_admin_api_enable_starts_lifecycle_helper
     test_crash_recovery_runs_before_start_failure
 
     print_test_summary || exit 1

@@ -362,7 +362,10 @@ async fn set_system_proxy(req: Request<Incoming>, state: SharedAdminState) -> Re
                     }
 
                     if enabled_by_bifrost {
+                        start_system_proxy_lifecycle_helper_after_runtime_enable(&state);
                         spawn_system_proxy_launchd_install_task_from_config(config_manager);
+                    } else {
+                        stop_system_proxy_lifecycle_helper_after_runtime_disable(&state);
                     }
                 }
 
@@ -569,6 +572,23 @@ fn system_proxy_launchd_needs_auto_install(
     needs_upgrade: bool,
 ) -> bool {
     !installed || !loaded || needs_upgrade
+}
+
+fn start_system_proxy_lifecycle_helper_after_runtime_enable(state: &SharedAdminState) {
+    if let Some(helper) = &state.system_proxy_lifecycle_helper {
+        helper.ensure_started_after_admin_api_enable();
+    } else {
+        tracing::warn!(
+            target: "bifrost_admin::proxy",
+            "system proxy enabled through Admin API without lifecycle helper state"
+        );
+    }
+}
+
+fn stop_system_proxy_lifecycle_helper_after_runtime_disable(state: &SharedAdminState) {
+    if let Some(helper) = &state.system_proxy_lifecycle_helper {
+        helper.stop();
+    }
 }
 
 #[cfg(target_os = "macos")]
