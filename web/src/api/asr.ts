@@ -1600,6 +1600,7 @@ export interface AsrDailyAgentConfig {
   im_delivery: AsrDailyAgentImDeliveryConfig;
   output_dir: string;
   agents?: AsrDailyAgentItem[];
+  terminology?: string;
   report_sync_dir?: string;
   last_report_sync?: AsrDailyAgentReportSyncResult;
   last_run_at_ms?: number;

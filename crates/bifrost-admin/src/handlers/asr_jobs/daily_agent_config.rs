@@ -17,6 +17,7 @@ const DEFAULT_TOMORROW_TODO_AGENT_ID: &str = "tomorrow_todo";
 const DEFAULT_TOMORROW_TODO_AGENT_NAME: &str = "tomorrow_todo";
 const DEFAULT_TOMORROW_TODO_OUTPUT_DIR: &str = "tomorrow_todo";
 const DEFAULT_DAILY_AGENT_IM_CHANNEL: &str = "owner:feishu-main";
+const DAILY_AGENT_TERMS_FILENAME: &str = "TERMS.md";
 
 fn default_daily_agent_timeout_ms() -> u64 {
     DEFAULT_DAILY_AGENT_TIMEOUT_MS
@@ -94,6 +95,8 @@ pub(crate) struct AsrDailyAgentConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<AsrDailyAgentItem>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminology: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_sync_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_report_sync: Option<AsrDailyAgentReportSyncResult>,
@@ -122,6 +125,7 @@ impl Default for AsrDailyAgentConfig {
             im_delivery: AsrDailyAgentImDeliveryConfig::default(),
             output_dir: default_daily_agent_output_dir(),
             agents: default_daily_agent_items(),
+            terminology: None,
             report_sync_dir: None,
             last_report_sync: None,
             last_run_at_ms: None,
@@ -286,6 +290,7 @@ fn daily_agent_config_from_item(item: &AsrDailyAgentItem) -> AsrDailyAgentConfig
         im_delivery: item.im_delivery.clone(),
         output_dir: item.output_dir.clone(),
         agents: Vec::new(),
+        terminology: None,
         report_sync_dir: item.report_sync_dir.clone(),
         last_report_sync: item.last_report_sync.clone(),
         last_run_at_ms: item.last_run_at_ms,
@@ -346,6 +351,12 @@ fn normalize_daily_agent_item(mut item: AsrDailyAgentItem) -> AsrDailyAgentItem 
     item
 }
 
+fn normalize_daily_agent_terminology(terminology: Option<String>) -> Option<String> {
+    terminology
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 fn normalized_daily_agents(config: &AsrDailyAgentConfig) -> Vec<AsrDailyAgentItem> {
     let mut agents = if config.agents.is_empty() {
         let mut agents = vec![daily_agent_item_from_legacy(config)];
@@ -377,6 +388,7 @@ fn normalize_daily_agent_config(config: &AsrDailyAgentConfig) -> AsrDailyAgentCo
     let mut normalized = daily_agent_config_from_item(&first_agent);
     normalized.enabled = enabled;
     normalized.agents = agents;
+    normalized.terminology = normalize_daily_agent_terminology(config.terminology.clone());
     normalized
 }
 
@@ -423,8 +435,14 @@ fn validate_daily_agent_config(config: &AsrDailyAgentConfig) -> Result<(), Strin
 }
 
 fn task_for_daily_agent(task: &AsrDirectoryTask, agent: &AsrDailyAgentItem) -> AsrDirectoryTask {
+    let inherited_report_sync_dir = task.daily_agent.report_sync_dir.clone();
+    let inherited_terminology = task.daily_agent.terminology.clone();
     let mut task = task.clone();
     task.daily_agent = daily_agent_config_from_item(agent);
+    task.daily_agent.terminology = normalize_daily_agent_terminology(inherited_terminology);
+    if task.daily_agent.report_sync_dir.is_none() {
+        task.daily_agent.report_sync_dir = inherited_report_sync_dir;
+    }
     task
 }
 
@@ -458,6 +476,10 @@ fn daily_agent_work_dir(task: &AsrDirectoryTask) -> PathBuf {
 
 fn daily_agent_instructions_path(task: &AsrDirectoryTask) -> PathBuf {
     daily_agent_work_dir(task).join("AGENTS.md")
+}
+
+fn daily_agent_terms_path(task: &AsrDirectoryTask) -> PathBuf {
+    daily_agent_work_dir(task).join(DAILY_AGENT_TERMS_FILENAME)
 }
 
 fn daily_agent_input_dir(task: &AsrDirectoryTask) -> PathBuf {

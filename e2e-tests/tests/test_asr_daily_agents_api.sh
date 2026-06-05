@@ -6,6 +6,7 @@ cd "$ROOT_DIR"
 
 DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bifrost-asr-daily-agents-e2e.XXXXXX")"
 AUDIO_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bifrost-asr-daily-agents-audio.XXXXXX")"
+SYNC_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bifrost-asr-daily-agents-sync.XXXXXX")"
 E2E_DIR="$DATA_DIR/e2e"
 PORT="${BIFROST_E2E_PORT:-18997}"
 MOCK_PORT="${BIFROST_DAILY_AGENT_MOCK_PORT:-18998}"
@@ -29,10 +30,11 @@ cleanup() {
     wait "$MOCK_PID" >/dev/null 2>&1 || true
   fi
   if [[ $status -eq 0 ]]; then
-    rm -rf "$DATA_DIR" "$AUDIO_DIR"
+    rm -rf "$DATA_DIR" "$AUDIO_DIR" "$SYNC_DIR"
   else
     echo "Keeping failed E2E data dir: $DATA_DIR" >&2
     echo "Keeping failed E2E audio dir: $AUDIO_DIR" >&2
+    echo "Keeping failed E2E sync dir: $SYNC_DIR" >&2
   fi
 }
 trap cleanup EXIT
@@ -225,7 +227,7 @@ test -f "$AGENTS_DIR/tomorrow_todo/AGENTS.md"
 grep -q "明日 To Do List" "$AGENTS_DIR/tomorrow_todo/AGENTS.md"
 
 CONFIG_UPDATE_JSON="$E2E_DIR/config_update.json"
-python3 - <<'PY' "$CONFIG_JSON" "$CONFIG_UPDATE_JSON"
+python3 - <<'PY' "$CONFIG_JSON" "$CONFIG_UPDATE_JSON" "$SYNC_DIR"
 import json, sys
 body=json.load(open(sys.argv[1]))
 config=body["config"]
@@ -238,12 +240,24 @@ payload={
     "agents": config["agents"],
     "runner": "bifrost_agent",
     "timeout_ms": 60000,
+    "terminology": "Jennie = Daily Agent 专有项目名\nQwen3-ASR = 语音识别模型\nE2E_TERMS_MARKER",
+    "report_sync_dir": sys.argv[3],
 }
 json.dump(payload, open(sys.argv[2], "w"), ensure_ascii=False)
 PY
 curl -fsS -X PUT "http://127.0.0.1:$PORT/_bifrost/api/asr/tasks/$TASK_ID/daily-agent" \
   -H 'content-type: application/json' \
   -d @"$CONFIG_UPDATE_JSON" >/dev/null
+curl -fsS "http://127.0.0.1:$PORT/_bifrost/api/asr/tasks/$TASK_ID/daily-agent" > "$E2E_DIR/config_after_terms.json"
+python3 - <<'PY' "$E2E_DIR/config_after_terms.json"
+import json, sys
+body=json.load(open(sys.argv[1]))
+assert body["config"]["terminology"].startswith("Jennie = Daily Agent"), body["config"]
+PY
+grep -q "E2E_TERMS_MARKER" "$AGENTS_DIR/daily_report/TERMS.md"
+grep -q "E2E_TERMS_MARKER" "$AGENTS_DIR/tomorrow_todo/TERMS.md"
+grep -q '`TERMS.md`' "$AGENTS_DIR/daily_report/AGENTS.md"
+grep -q '`TERMS.md`' "$AGENTS_DIR/tomorrow_todo/AGENTS.md"
 
 CUSTOM_INSTRUCTIONS="$E2E_DIR/tomorrow_agents.md"
 cat > "$CUSTOM_INSTRUCTIONS" <<'MD'
@@ -322,6 +336,9 @@ for doc in docs:
 PY
 grep -q "E2E_DAILY_AGENT_REAL_RUN" "$REPORT_DIR/2026-05-22-report.md"
 grep -q "E2E_DAILY_AGENT_REAL_RUN" "$TODO_DIR/2026-05-22-report.md"
+grep -q "E2E_DAILY_AGENT_REAL_RUN" "$SYNC_DIR/daily_report/2026-05-22-report.md"
+grep -q "E2E_DAILY_AGENT_REAL_RUN" "$SYNC_DIR/tomorrow_todo/2026-05-22-report.md"
+test ! -f "$SYNC_DIR/2026-05-22-report.md"
 grep -q "整理上线 checklist" "$AGENTS_DIR/daily_report/input/2026-05-22.md"
 grep -q "整理上线 checklist" "$AGENTS_DIR/tomorrow_todo/input/2026-05-22.md"
 test ! -f "$DAILY_DIR/report/2026-05-22-report.md"
@@ -336,6 +353,19 @@ assert body["agent_id"] == "tomorrow_todo", body
 assert body["output_dir"] == "tomorrow_todo", body
 assert "E2E_DAILY_AGENT_REAL_RUN" in body["content"], body
 assert "/.daily/agents/tomorrow_todo/output/tomorrow_todo/" in body["path"], body
+PY
+
+SYNC_STATUS_JSON="$E2E_DIR/sync_status.json"
+curl -fsS "http://127.0.0.1:$PORT/_bifrost/api/asr/tasks/$TASK_ID/daily-agent" > "$SYNC_STATUS_JSON"
+python3 - <<'PY' "$SYNC_STATUS_JSON" "$SYNC_DIR"
+import json, os, pathlib, sys
+body=json.load(open(sys.argv[1]))
+sync_root=pathlib.Path(sys.argv[2])
+agents={agent["id"]: agent for agent in body["config"]["agents"]}
+assert os.path.normpath(agents["daily_report"]["last_report_sync"]["target_dir"]) == os.path.normpath(sync_root / "daily_report"), agents["daily_report"]
+assert os.path.normpath(agents["tomorrow_todo"]["last_report_sync"]["target_dir"]) == os.path.normpath(sync_root / "tomorrow_todo"), agents["tomorrow_todo"]
+assert agents["daily_report"]["last_report_sync"]["total_files"] == 1, agents["daily_report"]
+assert agents["tomorrow_todo"]["last_report_sync"]["total_files"] == 1, agents["tomorrow_todo"]
 PY
 
 INSTR_JSON="$E2E_DIR/todo_instructions.json"
@@ -354,6 +384,7 @@ lines=[json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.
 assert len(lines) >= 4, len(lines)
 dump="\n".join(json.dumps(line, ensure_ascii=False) for line in lines)
 assert "E2E_CUSTOM_TOMORROW_AGENT_MARKER" in dump, "custom AGENTS.md marker never reached model context"
+assert "TERMS.md" in dump, "terminology relative file reference missing from model context"
 assert "output/report/2026-05-22-report.md" in dump, "daily_report target missing from model prompt"
 assert "output/tomorrow_todo/2026-05-22-report.md" in dump, "tomorrow_todo target missing from model prompt"
 PY

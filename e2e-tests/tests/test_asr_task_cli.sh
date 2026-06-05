@@ -246,8 +246,9 @@ grep -q "$SYNC_DIR" "$ADMIN_DATA_DIR/daily-set-sync-dir.out"
 BIFROST_DATA_DIR="$ADMIN_DATA_DIR" "$BIFROST_BIN" ai asr task daily sync "$TASK_ID" >"$ADMIN_DATA_DIR/daily-sync.out"
 grep -q "Copied:  *1" "$ADMIN_DATA_DIR/daily-sync.out"
 grep -q "Skipped:  *0" "$ADMIN_DATA_DIR/daily-sync.out"
-test -f "$SYNC_DIR/2026-05-17-report.md"
-grep -q "报告同步目录验证内容" "$SYNC_DIR/2026-05-17-report.md"
+test -f "$SYNC_DIR/daily_report/2026-05-17-report.md"
+grep -q "报告同步目录验证内容" "$SYNC_DIR/daily_report/2026-05-17-report.md"
+test ! -f "$SYNC_DIR/2026-05-17-report.md"
 BIFROST_DATA_DIR="$ADMIN_DATA_DIR" "$BIFROST_BIN" ai asr task daily sync "$TASK_ID" --json >"$ADMIN_DATA_DIR/daily-sync-second.json"
 python3 - "$ADMIN_DATA_DIR/daily-sync-second.json" "$SYNC_DIR" <<'PY'
 import json
