@@ -1055,19 +1055,41 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     "agent_status_panel",
                     "agent_footer",
                     "agent_thinking_panel",
-                    "agent_thinking",
                     "list_directory",
                     "37ms",
                     "1 条排队消息",
                     "有待处理引导消息",
                     "已收到引导：check latest logs",
                     "任务计划：Render latest status card",
-                    "思考过程：checking progress card sections",
+                    "**思考过程**",
                     "checking progress card sections",
                 ] {
                     if !body.contains(needle) {
                         return Err(format!("streaming card body missing {needle}: {body}"));
                     }
+                }
+                if body.contains("\"agent_thinking\"") {
+                    return Err(format!(
+                        "thinking content should not render legacy child element id: {body}"
+                    ));
+                }
+                let thinking_element = card["body"]["elements"]
+                    .as_array()
+                    .and_then(|elements| {
+                        elements
+                            .iter()
+                            .find(|element| element["element_id"] == "agent_thinking_panel")
+                    })
+                    .ok_or_else(|| "streaming card missing thinking element".to_string())?;
+                if thinking_element["tag"] != "markdown" {
+                    return Err(format!(
+                        "thinking element should be visible markdown, got {thinking_element}"
+                    ));
+                }
+                if thinking_element.get("expanded").is_some() {
+                    return Err(format!(
+                        "thinking element should not be collapsible, got {thinking_element}"
+                    ));
                 }
                 Ok(())
             },

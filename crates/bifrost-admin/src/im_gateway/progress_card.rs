@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use tokio::sync::Mutex;
-use tracing::warn;
+use tracing::{info, warn};
 
 use bifrost_agent::{
     ActiveTurnStatus, AgentContextSnapshot, AgentTurnProgressEvent, PlanStep, PlanStepStatus,
@@ -24,7 +24,6 @@ const TOOL_LOG_ELEMENT_ID: &str = "agent_tool_log";
 const STATUS_PANEL_ELEMENT_ID: &str = "agent_status_panel";
 const FOOTER_ELEMENT_ID: &str = "agent_footer";
 const THINKING_PANEL_ELEMENT_ID: &str = "agent_thinking_panel";
-const THINKING_ELEMENT_ID: &str = "agent_thinking";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImProgressCardCapability {
@@ -327,13 +326,46 @@ impl FeishuProgressCardSession {
         self.flush_snapshot().await
     }
 
+    pub async fn update_queue_state_and_repost(
+        &mut self,
+        queue_items: Vec<QueueItem>,
+        guide_pending: bool,
+        notice: Option<String>,
+    ) -> Result<bool> {
+        if !self.can_repost_current_card() {
+            return Ok(false);
+        }
+        self.snapshot
+            .update_queue_state(queue_items, guide_pending, notice);
+        self.repost_snapshot().await.map(|_| true)
+    }
+
     pub async fn restart_turn(&mut self, initial_message: &str) -> Result<()> {
         let session_key = self.snapshot.session_key.clone();
         self.snapshot = ImAgentProgressSnapshot::new(session_key, initial_message);
         self.flush_snapshot().await
     }
 
-    pub async fn repost_turn(&mut self, initial_message: &str) -> Result<()> {
+    pub async fn repost_turn(&mut self, initial_message: &str) -> Result<bool> {
+        if !self.can_repost_current_card() {
+            return Ok(false);
+        }
+        self.recall_current_message_before_repost().await;
+        let session_key = self.snapshot.session_key.clone();
+        self.snapshot = ImAgentProgressSnapshot::new(session_key, initial_message);
+        self.send_initial_card().await.map(|_| true)
+    }
+
+    fn can_repost_current_card(&self) -> bool {
+        matches!(self.snapshot.phase, ImProgressPhase::Running)
+    }
+
+    async fn repost_snapshot(&mut self) -> Result<()> {
+        self.recall_current_message_before_repost().await;
+        self.send_initial_card().await.map(|_| ())
+    }
+
+    async fn recall_current_message_before_repost(&self) {
         if let Some(message_id) = self
             .handle
             .as_ref()
@@ -345,13 +377,13 @@ impl FeishuProgressCardSession {
                     error = %error,
                     "failed to recall previous Feishu progress card before reposting"
                 );
+            } else {
+                info!(
+                    message_id = message_id,
+                    "recalled previous Feishu progress card before reposting"
+                );
             }
         }
-
-        let session_key = self.snapshot.session_key.clone();
-        self.snapshot = ImAgentProgressSnapshot::new(session_key, initial_message);
-        self.handle = None;
-        self.send_initial_card().await.map(|_| ())
     }
 
     pub async fn finish(&mut self, output: Option<String>, failed: bool) -> Result<()> {
@@ -407,6 +439,14 @@ impl FeishuProgressCardSession {
             rendered_status_hash: status_hash(&self.snapshot),
             rendered_thinking_hash: current_has_thinking_hash(&self.snapshot),
         });
+        if let Some(handle) = self.handle.as_ref() {
+            info!(
+                card_id = %handle.card_id,
+                message_id = handle.message_id.as_deref().unwrap_or(""),
+                generation = handle.generation,
+                "sent Feishu progress card"
+            );
+        }
         Ok(send_result)
     }
 
@@ -613,10 +653,10 @@ impl ImAgentProgressRegistry {
         let result = session
             .lock()
             .await
-            .update_queue_state_and_flush(queue_items, guide_pending, notice)
+            .update_queue_state_and_repost(queue_items, guide_pending, notice)
             .await;
         match result {
-            Ok(()) => true,
+            Ok(updated) => updated,
             Err(error) => {
                 warn!(
                     session_key = session_key,
@@ -675,7 +715,7 @@ impl ImAgentProgressRegistry {
         let session = Arc::clone(session.value());
         let result = session.lock().await.repost_turn(initial_message).await;
         match result {
-            Ok(()) => true,
+            Ok(reposted) => reposted,
             Err(error) => {
                 warn!(
                     session_key = session_key,
@@ -951,21 +991,9 @@ fn build_status_panel_element(snapshot: &ImAgentProgressSnapshot) -> serde_json:
 
 fn build_thinking_panel_element(snapshot: &ImAgentProgressSnapshot) -> serde_json::Value {
     serde_json::json!({
-        "tag": "collapsible_panel",
+        "tag": "markdown",
         "element_id": THINKING_PANEL_ELEMENT_ID,
-        "expanded": false,
-        "background_color": "grey",
-        "header": {
-            "title": {
-                "tag": "plain_text",
-                "content": format_thinking_panel_title(snapshot)
-            }
-        },
-        "elements": [{
-            "tag": "markdown",
-            "content": format_thinking_markdown(snapshot),
-            "element_id": THINKING_ELEMENT_ID
-        }]
+        "content": format!("**思考过程**\n\n{}", format_thinking_markdown(snapshot))
     })
 }
 
@@ -975,17 +1003,6 @@ fn format_thinking_markdown(snapshot: &ImAgentProgressSnapshot) -> String {
         .as_deref()
         .map(crate::im_gateway::markdown_converter::convert_to_feishu_markdown)
         .unwrap_or_else(|| "暂无思考过程".to_string())
-}
-
-fn format_thinking_panel_title(snapshot: &ImAgentProgressSnapshot) -> String {
-    let Some(thought) = snapshot
-        .last_thought
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    else {
-        return "思考过程".to_string();
-    };
-    format!("思考过程：{}", truncate_one_line(thought, 72))
 }
 
 fn format_tool_panel_title(snapshot: &ImAgentProgressSnapshot) -> String {
