@@ -10,6 +10,3 @@ serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true
