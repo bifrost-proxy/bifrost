@@ -666,12 +666,23 @@ test_sleep_wake_style_reconcile() {
 
 test_crash_recovery() {
     stop_proxy
+    local previous_snapshot="${TEST_DATA_DIR}/macos-proxy-before-crash-recovery.txt"
+    if [[ "$PLATFORM" == "Darwin" ]]; then
+        macos_save_proxy_snapshot_file "$previous_snapshot" || true
+        if ! macos_clear_web_and_secure_proxy; then
+            _log_fail "macOS: 崩溃恢复准备失败" "临时清空当前 Web/Secure Web 代理" "$(macos_proxy_snapshot)"
+            failed=$((failed + 1))
+            macos_restore_proxy_snapshot_file "$previous_snapshot" || true
+            return
+        fi
+    fi
     export BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER=1
     start_proxy_with_system_proxy
     unset BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER
     if [[ "$PLATFORM" == "Darwin" ]] && ! macos_ensure_bifrost_system_proxy_enabled; then
         _log_fail "macOS: 崩溃恢复准备失败" "系统代理先指向 127.0.0.1:${PROXY_PORT}" "$(macos_proxy_snapshot)"
         failed=$((failed + 1))
+        macos_restore_proxy_snapshot_file "$previous_snapshot" || true
         return
     fi
     if [[ -n "$PROXY_PID" ]]; then
@@ -711,6 +722,7 @@ test_crash_recovery() {
                 _log_fail "macOS: 崩溃恢复未生效" "不指向 127.0.0.1:${PROXY_PORT}" "$(macos_proxy_snapshot)"
                 failed=$((failed + 1))
             fi
+            macos_restore_proxy_snapshot_file "$previous_snapshot" || true
             ;;
         MINGW*|MSYS*|CYGWIN*)
             if windows_wait_proxy_disabled 45; then
@@ -757,6 +769,102 @@ test_lifecycle_helper_cleans_after_parent_crash() {
             ;;
         MINGW*|MSYS*|CYGWIN*)
             _log_pass "Windows: lifecycle helper 为 macOS 关机兜底路径，跳过"
+            passed=$((passed + 1))
+            ;;
+    esac
+}
+
+test_admin_api_enable_starts_lifecycle_helper() {
+    stop_proxy
+    unset BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER
+    start_proxy_without_system_proxy
+    case "$PLATFORM" in
+        Darwin)
+            if [[ -z "$PROXY_PID" ]] || ! kill -0 "$PROXY_PID" 2>/dev/null || ! admin_api_ready; then
+                _log_fail "macOS: Admin API 启用 lifecycle helper 回归准备失败" "Bifrost 服务必须保持运行且 Admin API 可访问" "pid=${PROXY_PID}; log=$(tail -n 80 "${TEST_DATA_DIR}/proxy.log" 2>/dev/null || true)"
+                failed=$((failed + 1))
+                return
+            fi
+            if macos_check_any_proxy_enabled_not_pointing_to "127.0.0.1" "$PROXY_PORT"; then
+                _log_pass "macOS: 检测到外部系统代理 owner，跳过非隔离的 Admin API lifecycle helper 用例"
+                passed=$((passed + 1))
+                return
+            fi
+            macos_enable_system_proxy_api
+            if ! macos_wait_proxy_enabled "127.0.0.1" "$PROXY_PORT" 45; then
+                _log_fail "macOS: Admin API 启用系统代理失败" "系统代理指向 127.0.0.1:${PROXY_PORT}" "$(macos_proxy_snapshot); log=$(tail -n 80 "${TEST_DATA_DIR}/proxy.log" 2>/dev/null || true)"
+                failed=$((failed + 1))
+                return
+            fi
+            if wait_for_condition 15 1 grep -q "system proxy lifecycle helper started after Admin API enable" "${TEST_DATA_DIR}/proxy.log"; then
+                _log_pass "macOS: Admin API 运行时启用系统代理后已启动 lifecycle helper"
+                passed=$((passed + 1))
+            else
+                _log_fail "macOS: Admin API 运行时启用系统代理后未启动 lifecycle helper" "日志包含 lifecycle helper started after Admin API enable" "$(tail -n 120 "${TEST_DATA_DIR}/proxy.log" 2>/dev/null || true)"
+                failed=$((failed + 1))
+            fi
+            stop_proxy
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            _log_pass "Windows: lifecycle helper 为 macOS 运行期崩溃兜底路径，跳过"
+            passed=$((passed + 1))
+            ;;
+    esac
+}
+
+test_admin_api_enable_lifecycle_helper_cleans_after_parent_crash() {
+    stop_proxy
+    unset BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER
+    local previous_snapshot="${TEST_DATA_DIR}/macos-proxy-before-admin-api-helper-crash.txt"
+    case "$PLATFORM" in
+        Darwin)
+            macos_save_proxy_snapshot_file "$previous_snapshot" || true
+            if ! macos_clear_web_and_secure_proxy; then
+                _log_fail "macOS: 无法准备 Admin API lifecycle helper 崩溃兜底夹具" "临时清空当前 Web/Secure Web 代理" "$(macos_proxy_snapshot)"
+                failed=$((failed + 1))
+                macos_restore_proxy_snapshot_file "$previous_snapshot" || true
+                return
+            fi
+            start_proxy_without_system_proxy
+            if [[ -z "$PROXY_PID" ]] || ! kill -0 "$PROXY_PID" 2>/dev/null || ! admin_api_ready; then
+                _log_fail "macOS: Admin API lifecycle helper 崩溃兜底准备失败" "Bifrost 服务必须保持运行且 Admin API 可访问" "pid=${PROXY_PID}; log=$(tail -n 80 "${TEST_DATA_DIR}/proxy.log" 2>/dev/null || true)"
+                failed=$((failed + 1))
+                stop_proxy
+                macos_restore_proxy_snapshot_file "$previous_snapshot" || true
+                return
+            fi
+            macos_enable_system_proxy_api
+            if ! macos_wait_proxy_enabled "127.0.0.1" "$PROXY_PORT" 45; then
+                _log_fail "macOS: Admin API lifecycle helper 崩溃兜底启用系统代理失败" "系统代理指向 127.0.0.1:${PROXY_PORT}" "$(macos_proxy_snapshot); log=$(tail -n 80 "${TEST_DATA_DIR}/proxy.log" 2>/dev/null || true)"
+                failed=$((failed + 1))
+                stop_proxy
+                macos_restore_proxy_snapshot_file "$previous_snapshot" || true
+                return
+            fi
+            if ! wait_for_condition 15 1 grep -q "system proxy lifecycle helper started after Admin API enable" "${TEST_DATA_DIR}/proxy.log"; then
+                _log_fail "macOS: Admin API lifecycle helper 崩溃兜底未启动 helper" "日志包含 lifecycle helper started after Admin API enable" "$(tail -n 120 "${TEST_DATA_DIR}/proxy.log" 2>/dev/null || true)"
+                failed=$((failed + 1))
+                stop_proxy
+                macos_restore_proxy_snapshot_file "$previous_snapshot" || true
+                return
+            fi
+            if [[ -n "$PROXY_PID" ]]; then
+                kill_pid_force "$PROXY_PID"
+                wait_pid "$PROXY_PID"
+            fi
+            PROXY_PID=""
+            rm -f "${TEST_DATA_DIR}/bifrost.pid" "${TEST_DATA_DIR}/runtime.json" 2>/dev/null || true
+            if wait_for_condition 45 1 macos_check_proxy_not_pointing_to "127.0.0.1" "$PROXY_PORT"; then
+                _log_pass "macOS: Admin API 运行时启用后的 lifecycle helper 已在主进程崩溃后清理系统代理"
+                passed=$((passed + 1))
+            else
+                _log_fail "macOS: Admin API 运行时启用后的 lifecycle helper 未清理崩溃残留系统代理" "不指向 127.0.0.1:${PROXY_PORT}" "$(macos_proxy_snapshot); log=$(tail -n 120 "${TEST_DATA_DIR}/proxy.log" 2>/dev/null || true)"
+                failed=$((failed + 1))
+            fi
+            macos_restore_proxy_snapshot_file "$previous_snapshot" || true
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            _log_pass "Windows: lifecycle helper 为 macOS 运行期崩溃兜底路径，跳过"
             passed=$((passed + 1))
             ;;
     esac
@@ -887,6 +995,8 @@ main() {
     test_sleep_wake_style_reconcile
     test_crash_recovery
     test_lifecycle_helper_cleans_after_parent_crash
+    test_admin_api_enable_starts_lifecycle_helper
+    test_admin_api_enable_lifecycle_helper_cleans_after_parent_crash
     test_crash_recovery_runs_before_start_failure
 
     print_test_summary || exit 1

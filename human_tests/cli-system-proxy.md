@@ -541,7 +541,7 @@
    ```
 6. 检查服务日志：
    ```bash
-   grep -E "LaunchDaemon cleanup install starting asynchronously after system proxy enable|LaunchDaemon cleanup installed asynchronously after system proxy enable|LaunchDaemon cleanup already installed and current after system proxy enable|LaunchDaemon cleanup install disabled by environment" "$TEST_DATA_DIR/proxy.log"
+   grep -E "system proxy lifecycle helper started after Admin API enable|LaunchDaemon cleanup install starting asynchronously after system proxy enable|LaunchDaemon cleanup installed asynchronously after system proxy enable|LaunchDaemon cleanup already installed and current after system proxy enable|LaunchDaemon cleanup install disabled by environment" "$TEST_DATA_DIR/proxy.log"
    ```
 7. 清理：
    ```bash
@@ -555,6 +555,8 @@
 **预期结果**：
 - 第 2 步响应显示 `enabled=true`、`host=127.0.0.1`、`port=18889`、`managed_by_bifrost=true`。
 - 系统代理由运行中的服务接管后，服务自动检查 cleanup LaunchDaemon；缺失、未加载、二进制/data-dir 不一致、旧 `KeepAlive` 常驻模式或缺少 `RunAtLoad` 时会异步触发授权安装，不需要用户再手动点击 `Boot/Shutdown Cleanup`。
+- 同一次 Admin API/Web UI 启用成功后，服务日志必须出现 `system proxy lifecycle helper started after Admin API enable`，确保启动时未启用 system proxy 的长驻进程在运行中启用后也具备主进程崩溃兜底恢复能力。
+- 对运行中才启用 system proxy 的服务执行 `kill -9` 后，lifecycle helper 必须在父进程确认消失后清理 `127.0.0.1:18889` 残留系统代理，防止系统代理继续指向已退出的 Bifrost 端口。
 - 仅版本号不一致时不会触发授权安装；`Installed version` 只作为诊断字段展示。
 - 用户授权成功后，`system-proxy launchd status` 显示 `Installed: true`、`Loaded: true`、`Installed mode: one-shot`、`Needs upgrade: false`。
 - 用户取消授权时，系统代理主开关保持已打开，服务继续运行，日志记录取消，不把取消误报为系统代理启用失败。
@@ -565,6 +567,8 @@
 ## 执行记录
 
 - 2026-06-05：真实执行 TC-CSP-18 的 Admin API 路径。使用 `/tmp/bifrost-csp18.*` 临时数据目录和 `target/debug/bifrost` 在 `18889` 端口启动服务，启动参数包含 `--no-system-proxy`、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`，并设置 `BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1` 避免本轮弹出真实授权窗口。服务 ready 后调用 `PUT /_bifrost/api/proxy/system {"enabled":true}`，响应为 `enabled=true host=127.0.0.1 port=18889 managed_by_bifrost=true`；随后日志出现 `system proxy LaunchDaemon cleanup install disabled by environment`，证明运行中服务通过 Admin API 打开系统代理后已触发 LaunchDaemon 自动检查路径。测试结束调用 API 关闭系统代理并停止临时服务，临时数据目录已清理。
+- 2026-06-05：针对 PR #187 合入后 review 评论补充真实执行 TC-CSP-18 的 Admin API lifecycle helper 回归。使用 `/tmp/bifrost-admin-helper.*` 临时数据目录和 `target/debug/bifrost` 在 `18891` 端口启动服务，启动参数包含 `--no-system-proxy`、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`，并设置 `BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1` 仅隔离 LaunchDaemon 授权弹窗。服务 ready 后调用 `PUT /_bifrost/api/proxy/system {"enabled":true}`，响应为 `enabled=true host=127.0.0.1 port=18891 managed_by_bifrost=true`；日志出现 `system proxy lifecycle helper started after Admin API enable`（helper pid `54898`）和 `system proxy LaunchDaemon cleanup install disabled by environment`。测试结束调用 API 关闭系统代理、停止临时服务并清理临时目录，结论 PASS。
+- 2026-06-05：针对 Codex review 建议补充运行中启用后的崩溃兜底回归。使用独立临时数据目录启动服务并通过 Admin API 打开 system proxy，确认日志出现 `system proxy lifecycle helper started after Admin API enable` 后对主进程执行 `kill -9`；等待 lifecycle helper 检测父进程消失后，系统代理不再指向本轮 Bifrost 端口。用例已同步到 `e2e-tests/tests/test_system_proxy_e2e.sh` 的 `test_admin_api_enable_lifecycle_helper_cleans_after_parent_crash`。
 - 2026-06-05：按 one-shot LaunchDaemon 改造补充执行 TC-CSP-16 的 CLI dry-run 验证。执行 `./target/debug/bifrost system-proxy launchd install --data-dir "$TEST_DATA_DIR" --program ./target/debug/bifrost --label com.bifrost.test-system-proxy-cleanup --plist-path "$TEST_DATA_DIR/com.bifrost.test-system-proxy-cleanup.plist" --dry-run`，确认输出包含 `RunAtLoad`、`cleanup-daemon`、`--installed-version` 和 data dir，且不包含 `KeepAlive`。执行 `./target/debug/bifrost system-proxy cleanup-daemon --data-dir "$TEST_DATA_DIR" --installed-version 0.0.1`，命令在 one-shot recovery 检查后退出，无常驻 cleanup-daemon 进程。
 - 2026-06-04：执行 `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_system_proxy_e2e.sh`，覆盖 TC-CSP-11、TC-CSP-12、TC-CSP-13、TC-CSP-14 相关真实系统代理场景。第一轮发现 macOS `scutil --proxy` 聚合视图漏掉非 Wi-Fi network service 残留，USB/Thunderbolt 等服务仍指向 `127.0.0.1:18889`；修复为逐 service 检查 `networksetup -getwebproxy` / `-getsecurewebproxy` 后重跑通过。第 1 轮 review 又发现 shutdown restore 后 reconcile 线程可能醒来重新 enable，补充 stop flag 后第三轮重跑：8/8 PASS，包含系统代理启用、`--no-system-proxy` 外部代理保留、外部代理 disable 归属边界、正常退出恢复、睡眠恢复式漂移重新收敛、崩溃后再次启动恢复、启动失败前同步清理残留。后续全面分析又发现前台 listener 异常退出路径只依赖 restore guard，可能未先停止 reconcile；已将 stop flag 纳入 restore guard，确保异常退出也先停止 reconcile 再恢复。执行后确认 Wi-Fi Web Proxy 与 Secure Web Proxy 均恢复到测试前 `127.0.0.1:9900`。
 - 2026-06-04：按重启/休眠排查要求补充日志验证点。启动恢复路径应输出 `checking for stale system proxy state before startup` 与 `System proxy crash recovery check starting`；关机/停止信号路径应输出 `system proxy shutdown restore starting; stopping reconcile first`、`System proxy restore requested`、`Restoring macOS system proxy to saved original state`、逐 network service 的 `Disabling macOS network service web proxies` 或 `Setting macOS network service proxy to requested target`，以及 `system proxy shutdown restore completed` 和耗时。异常退出兜底 guard 应输出 `system proxy restore guard triggered; stopping reconcile before restore`，失败场景应输出 `failed to restore system proxy` / `system proxy restore guard failed to restore proxy` / `system proxy reconcile failed`，用于定位重启前清理是否真正执行。

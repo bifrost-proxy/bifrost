@@ -122,7 +122,8 @@ pub use sse::{
 pub use state::{
     start_total_disk_cleanup_task, AdminState, RuntimeConfig, SharedAccessControl,
     SharedClientTrustTracker, SharedIpTlsPendingManager, SharedRuntimeConfig, SharedScriptManager,
-    SharedSystemProxyManager, SharedValuesStorage,
+    SharedSystemProxyLifecycleHelperState, SharedSystemProxyManager, SharedValuesStorage,
+    SystemProxyLifecycleHelperState,
 };
 pub use temp_ports::{
     RuleSetRef, SharedTemporaryPortManager, TemporaryPortActiveSummary, TemporaryPortBindRequest,

@@ -48,9 +48,6 @@ const SYSTEM_PROXY_WAKE_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 #[cfg(target_os = "macos")]
 const SYSTEM_PROXY_WAKE_GAP_THRESHOLD: Duration = Duration::from_secs(10);
 #[cfg(target_os = "macos")]
-const SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER_ENV: &str =
-    "BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER";
-#[cfg(target_os = "macos")]
 const SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL_ENV: &str =
     "BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL";
 const RULES_FILESYSTEM_FALLBACK_SCAN_INTERVAL: Duration = Duration::from_secs(30);
@@ -547,68 +544,6 @@ fn spawn_system_proxy_wake_reconcile_task(config: SystemProxyReconcileConfig) {
                 }
             }
         });
-}
-
-#[cfg(target_os = "macos")]
-fn spawn_system_proxy_lifecycle_helper(
-    bifrost_dir: PathBuf,
-    parent_pid: u32,
-) -> Option<std::process::Child> {
-    if std::env::var(SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER_ENV)
-        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-    {
-        tracing::info!(
-            target: "bifrost_cli::shutdown",
-            env = SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER_ENV,
-            "system proxy lifecycle helper disabled by environment"
-        );
-        return None;
-    }
-
-    let exe = match std::env::current_exe() {
-        Ok(exe) => exe,
-        Err(error) => {
-            tracing::warn!(
-                target: "bifrost_cli::shutdown",
-                error = %error,
-                "failed to resolve current executable for system proxy lifecycle helper"
-            );
-            return None;
-        }
-    };
-
-    match std::process::Command::new(exe)
-        .arg("system-proxy")
-        .arg("lifecycle-helper")
-        .arg("--data-dir")
-        .arg(bifrost_dir)
-        .arg("--parent-pid")
-        .arg(parent_pid.to_string())
-        .arg("--poll-secs")
-        .arg("2")
-        .stdin(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(child) => {
-            tracing::info!(
-                target: "bifrost_cli::shutdown",
-                helper_pid = child.id(),
-                parent_pid,
-                "system proxy lifecycle cleanup helper started"
-            );
-            Some(child)
-        }
-        Err(error) => {
-            tracing::warn!(
-                target: "bifrost_cli::shutdown",
-                error = %error,
-                parent_pid,
-                "failed to start system proxy lifecycle cleanup helper"
-            );
-            None
-        }
-    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1635,6 +1570,12 @@ pub fn run_foreground(
             let (port_rebind_manager, mut port_rebind_rx) = PortRebindManager::channel(8);
 
             let shared_config_manager = Arc::new(config_manager);
+            let system_proxy_lifecycle_helper_state = Arc::new(
+                bifrost_admin::SystemProxyLifecycleHelperState::new(
+                    bifrost_dir.clone(),
+                    std::process::id(),
+                ),
+            );
 
             let phase_started_at = Instant::now();
             let mut admin_state = AdminState::new(config.port)
@@ -1655,6 +1596,7 @@ pub fn run_foreground(
                 .with_ca_cert_path(ca_cert_path)
                 .with_system_proxy_manager_shared(system_proxy_manager.clone())
                 .with_config_manager_shared(shared_config_manager.clone())
+                .with_system_proxy_lifecycle_helper_shared(system_proxy_lifecycle_helper_state.clone())
                 .ensure_keepawake_manager_installed()
                 .with_max_body_buffer_size(stored_config.traffic.max_body_buffer_size)
                 .with_max_body_probe_size(stored_config.traffic.max_body_probe_size)
@@ -1857,11 +1799,9 @@ pub fn run_foreground(
                 base_config.host.clone()
             };
             #[cfg(target_os = "macos")]
-            let _system_proxy_lifecycle_helper = if enable_system_proxy {
-                spawn_system_proxy_lifecycle_helper(bifrost_dir.clone(), pid)
-            } else {
-                None
-            };
+            if enable_system_proxy {
+                system_proxy_lifecycle_helper_state.ensure_started_after_startup_enable();
+            }
             #[cfg(target_os = "macos")]
             spawn_system_proxy_wake_reconcile_task(SystemProxyReconcileConfig {
                 bifrost_dir: bifrost_dir.clone(),
@@ -2486,7 +2426,13 @@ pub fn run_daemon(
                         }
                     };
 
-                    let shared_config_manager = Arc::new(config_manager);
+            let shared_config_manager = Arc::new(config_manager);
+            let system_proxy_lifecycle_helper_state = Arc::new(
+                bifrost_admin::SystemProxyLifecycleHelperState::new(
+                    bifrost_dir.clone(),
+                    std::process::id(),
+                ),
+            );
 
                     let access_control =
                         ProxyServer::new(config.clone()).access_control().clone();
@@ -2509,6 +2455,9 @@ pub fn run_daemon(
                         .with_ca_cert_path(ca_cert_path)
                         .with_system_proxy_manager_shared(system_proxy_manager.clone())
                         .with_config_manager_shared(shared_config_manager.clone())
+                        .with_system_proxy_lifecycle_helper_shared(
+                            system_proxy_lifecycle_helper_state.clone(),
+                        )
                         .ensure_keepawake_manager_installed()
                         .with_max_body_buffer_size(stored_config.traffic.max_body_buffer_size)
                         .with_max_body_probe_size(stored_config.traffic.max_body_probe_size)
@@ -2684,14 +2633,9 @@ pub fn run_daemon(
                     );
 
                     #[cfg(target_os = "macos")]
-                    let _system_proxy_lifecycle_helper = if enable_system_proxy {
-                        spawn_system_proxy_lifecycle_helper(
-                            bifrost_dir.clone(),
-                            std::process::id(),
-                        )
-                    } else {
-                        None
-                    };
+                    if enable_system_proxy {
+                        system_proxy_lifecycle_helper_state.ensure_started_after_startup_enable();
+                    }
                     #[cfg(target_os = "macos")]
                     spawn_system_proxy_wake_reconcile_task(SystemProxyReconcileConfig {
                         bifrost_dir: bifrost_dir.clone(),
