@@ -1,0 +1,122 @@
+---
+title: "Installation and Startup"
+description: "Install and start Bifrost using the English documentation path."
+editUrl: false
+sidebar:
+  label: "Installation and Startup"
+  order: 20
+---
+
+> This page is automatically synced from `docs-en/getting-started.md`.
+> Language: **English** | [中文](../../../getting-started/installation/)
+
+# Installation and Startup
+
+This guide summarizes installation, startup, Admin UI access, environment variables, and uninstallation.
+
+## Install the CLI
+
+### One-line Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash
+```
+
+The script installs the `bifrost` binary and, by default, also performs first-run setup: it installs and trusts the Bifrost CA certificate, installs supported Bifrost AI skills, and starts Bifrost as a background service. Bash and PowerShell installers probe GitHub direct access and built-in mirrors, then use the fastest available release source. In restricted networks, set `BIFROST_GITHUB_MIRROR` or tune `BIFROST_MIRROR_PROBE_TIMEOUT`.
+
+Common options:
+
+```bash
+# Install into a custom directory
+curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash -s -- --dir /usr/local/bin
+
+# Install a specific version
+curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash -s -- --version v0.2.0
+
+# Install only the binary; skip CA, skills, and service startup
+curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash -s -- --no-post-install
+```
+
+### Homebrew on macOS
+
+```bash
+brew tap bifrost-proxy/bifrost
+brew install bifrost
+```
+
+### npm
+
+```bash
+npm i -g @bifrost-proxy/bifrost
+```
+
+### Build from Source
+
+Requirements: Rust 1.70+, Cargo, Node.js 22+, and pnpm.
+
+```bash
+git clone https://github.com/bifrost-proxy/bifrost.git
+cd bifrost
+./install.sh
+
+# Or build manually
+cd web && pnpm install && pnpm build && cd ..
+cargo build --release
+```
+
+### Manual Download
+
+Download prebuilt binaries from [GitHub Releases](https://github.com/bifrost-proxy/bifrost/releases).
+
+## Verify Installation
+
+```bash
+command -v bifrost
+bifrost --version
+```
+
+## Start the Proxy
+
+```bash
+# Default listener: 0.0.0.0:9900
+bifrost start
+
+# Custom port and host
+bifrost -p 9000 -H 127.0.0.1 start
+
+# Enable HTTP and SOCKS5
+bifrost -p 9900 --socks5-port 1080 start
+
+# Intercept TLS by domain
+bifrost start --intercept-include "*.api.local"
+
+# Daemon mode
+bifrost start --daemon
+```
+
+`bifrost start` enables the system proxy by default so browsers and desktop apps can enter Bifrost without extra configuration. TLS interception is opt-in; prefer domain allowlists, app allowlists, or rule-level `tlsIntercept://` instead of global interception. Use `--no-system-proxy` only for CI, sandboxes, or cases where you explicitly do not want to change system networking.
+
+## Admin UI
+
+After startup, open:
+
+```text
+http://127.0.0.1:9900/_bifrost/
+```
+
+Common API roots include `/_bifrost/api/rules/*`, `/_bifrost/api/values/*`, `/_bifrost/api/traffic/*`, `/_bifrost/api/scripts/*`, and `/_bifrost/api/replay/*`.
+
+## Environment Variables
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `BIFROST_DATA_DIR` | Data directory | `~/.bifrost` |
+| `RUST_LOG` | Logging level and filters | `info` |
+| `WEB_PORT` | Web UI development server port | `3000` |
+
+## Uninstall
+
+```bash
+./uninstall.sh
+./uninstall.sh --purge
+```

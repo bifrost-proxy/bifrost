@@ -47,6 +47,12 @@ www.example.com host://api.backend.com
 www.example.com host://api.backend.com:3000
 ```
 
+### HTTPS CONNECT 行为
+
+`host://` 只是改变请求的上游目标地址。对 HTTPS `CONNECT` 或 SOCKS5 建立的 TLS 隧道，如果没有全局 TLS 拦截、TLS include、`tlsIntercept://`，且没有其他需要读取/修改 HTTPS 内层内容的明确 host 作用域规则，命中 `host://` 不会自动开启 TLS 解包。
+
+如果希望按 HTTPS path、请求/响应头或 body 做处理，需要使用明确域名/IP pattern 的内容类规则，或显式配置 TLS 拦截。
+
 ### 通配符匹配
 
 ```bash
@@ -233,6 +239,22 @@ pattern proxy://proxy_host:proxy_port
 # 带认证的代理（通过 URL）
 example.com proxy://user:pass@proxy.com:8080
 ```
+
+### HTTPS CONNECT 行为
+
+`proxy://` 只选择下游代理出口。对 HTTPS `CONNECT` 或 SOCKS5 建立的 TLS 隧道，命中纯 `proxy://` 规则时，Bifrost 会向下游 HTTP 代理发送 `CONNECT original_host:original_port` 并透传原始 TLS 字节，不会因为这条规则自动解包。
+
+仍会触发解包的情况：
+
+- 全局 TLS 拦截已开启，或目标命中 TLS include / 应用 include。
+- 规则显式配置了 `tlsIntercept://`。
+- 同一目标命中需要读取/修改 HTTPS 内层 HTTP 的规则，并且该规则 pattern 有明确 host 作用域，例如 `api.example.com resHeaders://X-Debug=1`、`*.example.com reqHeaders://X-Env=test`、`192.168.1.10 resBody://...`。
+
+不会单独触发自动解包的情况：
+
+- 纯路由：`example.com host://127.0.0.1:3000`。
+- 纯下游代理：`example.com proxy://127.0.0.1:8080`。
+- 纯 wildcard / regex 内容规则：`* resHeaders://X-Debug=1`、`*/api/* resHeaders://X-Debug=1`、`/api\/v\d+/ resHeaders://X-Debug=1`。
 
 ### 测试用例
 

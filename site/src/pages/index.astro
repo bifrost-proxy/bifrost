@@ -5,8 +5,13 @@ const baseUrl = import.meta.env.BASE_URL.endsWith("/")
   ? import.meta.env.BASE_URL
   : `${import.meta.env.BASE_URL}/`;
 const docsRoot = new URL("docs/", `https://bifrost.local${baseUrl}`).pathname;
+const englishDocsRoot = new URL("en/reference/", `https://bifrost.local${baseUrl}`).pathname;
 const installationUrl = new URL(
   "getting-started/installation/",
+  `https://bifrost.local${baseUrl}`,
+).pathname;
+const englishInstallationUrl = new URL(
+  "en/getting-started/installation/",
   `https://bifrost.local${baseUrl}`,
 ).pathname;
 const networkImageUrl = new URL(
@@ -40,6 +45,7 @@ const networkImageUrl = new URL(
           <a href="#protocols">协议</a>
           <a href="#quickstart">快速开始</a>
           <a href={docsRoot}>文档</a>
+          <a href={englishDocsRoot} lang="en">English Docs</a>
           <a href="https://github.com/bifrost-proxy/bifrost">GitHub</a>
         </nav>
       </header>
@@ -58,6 +64,7 @@ const networkImageUrl = new URL(
             </p>
             <div class="hero-actions">
               <a class="primary-action" href={installationUrl}>开始使用</a>
+              <a class="secondary-action" href={englishInstallationUrl}>English Guide</a>
               <a class="secondary-action" href="https://github.com/bifrost-proxy/bifrost"
                 >查看源码</a
               >

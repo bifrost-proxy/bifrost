@@ -1,5 +1,7 @@
 # Bifrost 文档总览
 
+> Language: **中文** | [English](../docs-en/README.md)
+
 本文档目录用于承载 README 之外的详细说明，避免首页过长。
 
 ## 入门
