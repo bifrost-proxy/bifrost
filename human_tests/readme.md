@@ -91,7 +91,7 @@
 | [api-values.md](./api-values.md) | Values API | 15 | Values CRUD、列表查询、边界条件、错误处理 |
 | [api-whitelist.md](./api-whitelist.md) | Whitelist API | 27 | 白名单增删、模式切换、allow-lan、临时白名单、待授权管理、SSE 事件流 |
 | [api-cert.md](./api-cert.md) | Cert API | 8 | 证书信息、CA 下载、QR 码生成 |
-| [mobile-device-trust.md](./mobile-device-trust.md) | Mobile Device Trust Wizard | 17 | 普通手机证书安装向导、本机 CA WebUI 一键安装和状态自动刷新、Android ADB 检测与 guided install 边界、Android 当前 CA 状态检测、iOS USB 检测、iOS mobileconfig/QR、LAN 公开下载免授权、Settings Certificate UI 左侧固定导航与单列章节、iOS 统一图文安装与信任流程、Apple Configurator 与扫码/文件 profile 送达方式、手机端交互回归、全局设备连接提示、目标设备自动滚动/高亮/安装按钮动画、CLI `ca install --mobile` / `ca install --ios` 和浅色/暗色主题验证 |
+| [mobile-device-trust.md](./mobile-device-trust.md) | Mobile Device Trust Wizard | 18 | 普通手机证书安装向导、Universal Trust Probe 真实 HTTPS 信任检测、本机 CA WebUI 一键安装和状态自动刷新、Android ADB 检测与 guided install 边界、Android 当前 CA 状态检测、iOS USB 检测、iOS mobileconfig/QR、LAN 公开下载免授权、Settings Certificate UI 左侧固定导航与单列章节、iOS 统一图文安装与信任流程、Apple Configurator 与扫码/文件 profile 送达方式、手机端交互回归、全局设备连接提示、目标设备自动滚动/高亮/安装按钮动画、CLI `ca install --mobile` / `ca install --ios` 和浅色/暗色主题验证 |
 | [api-proxy.md](./api-proxy.md) | Proxy API | 13 | 系统代理控制、CLI 代理状态、代理地址、QR 码 |
 | [api-config.md](./api-config.md) | Config API | 21 | 全量配置、TLS 配置、性能配置、缓存清理、连接断开 |
 | [api-config-advanced.md](./api-config-advanced.md) | Config API（高级） | 30 | Sandbox 沙箱配置、Server 服务器配置、UI 配置、IP-TLS Pending 管理、活跃连接管理 |
@@ -213,7 +213,7 @@
 
 ---
 
-**总计：144 个测试文件，2444 个测试用例**
+**总计：144 个测试文件，2445 个测试用例**
 
 ## 工作流程
 

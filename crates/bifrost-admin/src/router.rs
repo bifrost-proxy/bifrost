@@ -40,6 +40,7 @@ use crate::handlers::{
     syntax::handle_syntax,
     system::handle_system,
     traffic::handle_traffic,
+    trust_probe::{handle_trust_probe_api, handle_trust_probe_public},
     user::handle_user,
     values::handle_values,
     voice::handle_voice,
@@ -98,6 +99,8 @@ impl AdminRouter {
             handle_mobile_public(req, state, &admin_path).await
         } else if admin_path.starts_with("/public/proxy") {
             handle_proxy_public(req, state, &admin_path).await
+        } else if admin_path.starts_with("/public/trust-probe") {
+            handle_trust_probe_public(req, state, &admin_path).await
         } else if admin_path.starts_with("/public/sync-login") {
             handle_sync_public(req, state, &admin_path).await
         } else if admin_path.starts_with("/api/") {
@@ -162,6 +165,8 @@ impl AdminRouter {
             handle_metrics(req, state, path).await
         } else if path.starts_with("/api/mobile-devices") {
             handle_mobile_devices(req, state, path, peer_addr).await
+        } else if path.starts_with("/api/trust-probe") {
+            handle_trust_probe_api(req, state, path).await
         } else if path.starts_with("/api/ports") {
             handle_ports(req, state, path).await
         } else if path.starts_with("/api/power") {

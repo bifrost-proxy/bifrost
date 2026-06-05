@@ -265,6 +265,170 @@ pub fn get_all_tests() -> Vec<TestCase> {
             },
         ),
         TestCase::standalone(
+            "admin_trust_probe_verifies_https_trust_with_current_ca",
+            "Validate Trust Probe creates a public landing page, checks the probe port, and verifies HTTPS trust with the current CA",
+            "admin",
+            || async move {
+                let port = pick_unused_port()?;
+                let (_proxy, _admin_state) =
+                    ProxyInstance::start_with_admin(port, vec![], false, true)
+                        .await
+                        .map_err(|e| format!("Failed to start proxy with admin: {}", e))?;
+
+                let client = reqwest::Client::builder()
+                    .danger_accept_invalid_certs(true)
+                    .no_proxy()
+                    .build()
+                    .map_err(|e| format!("Failed to create client: {}", e))?;
+
+                let create_response = client
+                    .post(format!(
+                        "http://127.0.0.1:{}/_bifrost/api/trust-probe/sessions",
+                        port
+                    ))
+                    .json(&serde_json::json!({
+                        "host": "127.0.0.1",
+                        "ttlSeconds": 600
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("POST trust probe session failed: {}", e))?;
+
+                assert_status(&create_response, 201)?;
+                let session: serde_json::Value = create_response
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse trust probe session JSON: {}", e))?;
+                let session_id = session
+                    .get("sessionId")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| format!("Missing sessionId in trust probe response: {session}"))?;
+                let landing_url = session
+                    .get("landingUrl")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| format!("Missing landingUrl in trust probe response: {session}"))?;
+                let qr_code_url = session
+                    .get("qrCodeUrl")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| format!("Missing qrCodeUrl in trust probe response: {session}"))?;
+                let probe_port = session
+                    .get("probePort")
+                    .and_then(|value| value.as_u64())
+                    .ok_or_else(|| format!("Missing probePort in trust probe response: {session}"))?;
+                let ca_download_url = session
+                    .get("caDownloadUrl")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| format!("Missing caDownloadUrl in trust probe response: {session}"))?;
+                let token = url::Url::parse(landing_url)
+                    .map_err(|e| format!("Invalid landingUrl: {e}"))?
+                    .query_pairs()
+                    .find(|(key, _)| key == "t")
+                    .map(|(_, value)| value.to_string())
+                    .ok_or_else(|| format!("Missing token in landingUrl: {landing_url}"))?;
+
+                let landing_response = client
+                    .get(landing_url)
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET trust probe landing page failed: {}", e))?;
+                assert_status(&landing_response, 200)?;
+                assert_header_contains(&landing_response, "content-type", "text/html")?;
+                let landing_html = landing_response
+                    .text()
+                    .await
+                    .map_err(|e| format!("Failed to read landing HTML: {}", e))?;
+                if !landing_html.contains("Bifrost Trust Probe")
+                    || !landing_html.contains("tlsCheckUrl")
+                {
+                    return Err(format!("Unexpected trust probe landing page: {landing_html}"));
+                }
+
+                let landing_head_response = client
+                    .head(landing_url)
+                    .send()
+                    .await
+                    .map_err(|e| format!("HEAD trust probe landing page failed: {}", e))?;
+                assert_status(&landing_head_response, 200)?;
+                assert_header_contains(&landing_head_response, "content-type", "text/html")?;
+
+                let qr_response = client
+                    .get(qr_code_url)
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET trust probe QR failed: {}", e))?;
+                assert_status(&qr_response, 200)?;
+                assert_header_contains(&qr_response, "content-type", "image/svg+xml")?;
+
+                let qr_head_response = client
+                    .head(qr_code_url)
+                    .send()
+                    .await
+                    .map_err(|e| format!("HEAD trust probe QR failed: {}", e))?;
+                assert_status(&qr_head_response, 200)?;
+                assert_header_contains(&qr_head_response, "content-type", "image/svg+xml")?;
+
+                let netcheck_url = format!(
+                    "http://127.0.0.1:{probe_port}/_bifrost/trust-probe/netcheck?sid={session_id}&t={token}"
+                );
+                let netcheck_response = client
+                    .get(netcheck_url)
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET trust probe netcheck failed: {}", e))?;
+                assert_status(&netcheck_response, 200)?;
+
+                let ca_response = client
+                    .get(ca_download_url)
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET trust probe CA failed: {}", e))?;
+                assert_status(&ca_response, 200)?;
+                let ca_pem = ca_response
+                    .bytes()
+                    .await
+                    .map_err(|e| format!("Failed to read CA bytes: {}", e))?;
+                let ca_cert = reqwest::Certificate::from_pem(&ca_pem)
+                    .map_err(|e| format!("Failed to parse Bifrost CA as PEM: {}", e))?;
+                let trusted_client = reqwest::Client::builder()
+                    .add_root_certificate(ca_cert)
+                    .no_proxy()
+                    .build()
+                    .map_err(|e| format!("Failed to create trusted client: {}", e))?;
+                let tls_check_url = format!(
+                    "https://127.0.0.1:{probe_port}/_bifrost/trust-probe/check?sid={session_id}&t={token}"
+                );
+                let tls_response = trusted_client
+                    .get(tls_check_url)
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET trust probe HTTPS check failed: {}", e))?;
+                assert_status(&tls_response, 200)?;
+
+                let status_response = client
+                    .get(format!(
+                        "http://127.0.0.1:{}/_bifrost/api/trust-probe/sessions/{}",
+                        port, session_id
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET trust probe session failed: {}", e))?;
+                assert_status(&status_response, 200)?;
+                let status_json: serde_json::Value = status_response
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse trust probe status JSON: {}", e))?;
+                if status_json.get("status").and_then(|value| value.as_str())
+                    != Some("tls_trusted")
+                {
+                    return Err(format!("Expected tls_trusted status, got: {status_json}"));
+                }
+                if status_json.get("tlsTrusted").and_then(|value| value.as_bool()) != Some(true) {
+                    return Err(format!("Expected tlsTrusted=true, got: {status_json}"));
+                }
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
             "admin_api_mobile_install_requires_explicit_confirmation",
             "Validate Android CA install API rejects requests that do not confirm phone-side manual trust",
             "admin",

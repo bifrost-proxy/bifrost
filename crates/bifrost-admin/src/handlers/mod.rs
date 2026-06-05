@@ -40,6 +40,7 @@ pub mod sync;
 pub mod syntax;
 pub mod system;
 pub mod traffic;
+pub mod trust_probe;
 pub mod user;
 pub mod values;
 pub mod voice;

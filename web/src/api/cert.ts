@@ -94,6 +94,43 @@ export interface InstallSession {
   steps: InstallStep[];
 }
 
+export type TrustProbeStatus =
+  | "created"
+  | "page_opened"
+  | "network_reachable"
+  | "tls_trusted"
+  | "tls_failed"
+  | "network_failed"
+  | "expired";
+
+export interface TrustProbeEvent {
+  type: string;
+  at: string;
+  message?: string | null;
+}
+
+export interface TrustProbeSession {
+  sessionId: string;
+  status: TrustProbeStatus;
+  opened: boolean;
+  networkReachable: boolean;
+  tlsTrusted: boolean;
+  clientIp?: string | null;
+  userAgent?: string | null;
+  platformHint?: string | null;
+  lastError?: string | null;
+  events: TrustProbeEvent[];
+  expiresAt: string;
+  host: string;
+  adminPort: number;
+  probePort: number;
+  landingUrl: string;
+  qrCodeUrl: string;
+  caDownloadUrl: string;
+  proxyQrCodeUrl: string;
+  caFingerprintSha256?: string | null;
+}
+
 export const MOBILE_INSTALL_CONFIRMATION =
   "push_and_open_mobile_certificate_installer";
 export const LOCAL_CA_INSTALL_CONFIRMATION = "install_local_ca_certificate";
@@ -127,6 +164,20 @@ export async function installMobileCa(
       confirmation: MOBILE_INSTALL_CONFIRMATION,
     },
   );
+}
+
+export async function createTrustProbeSession(
+  host: string,
+  ttlSeconds = 600,
+): Promise<TrustProbeSession> {
+  return post<TrustProbeSession>('/trust-probe/sessions', {
+    host,
+    ttlSeconds,
+  });
+}
+
+export async function getTrustProbeSession(sessionId: string): Promise<TrustProbeSession> {
+  return get<TrustProbeSession>(`/trust-probe/sessions/${encodeURIComponent(sessionId)}`);
 }
 
 export function getCertDownloadUrl(): string {

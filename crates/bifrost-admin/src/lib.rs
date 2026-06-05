@@ -167,3 +167,4 @@ pub use version_check::{SharedVersionChecker, VersionCheckResponse, VersionCheck
 pub const ADMIN_PATH_PREFIX: &str = "/_bifrost";
 pub const CERT_PUBLIC_PATH_PREFIX: &str = "/_bifrost/public/cert";
 pub const MOBILE_PUBLIC_PATH_PREFIX: &str = "/_bifrost/public/mobile";
+pub const TRUST_PROBE_PUBLIC_PATH_PREFIX: &str = "/_bifrost/public/trust-probe";

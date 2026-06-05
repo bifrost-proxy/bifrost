@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证 Settings -> Certificate 中的手机证书安装向导、管理端全局 USB 设备监听自动提示、CLI `ca install --mobile` / `ca install --ios`，以及对应 Admin API。该功能默认只承诺普通手机的 guided install：Bifrost 可推送证书或提供 iOS profile，但最终安装和信任必须在手机端由用户确认。iOS Web UI 使用同一条安装和信任流程讲解，Apple Configurator 与扫码/文件安装只是把 profile 送到 iPhone 的两种入口。
+验证 Settings -> Certificate 中的手机证书安装向导、Universal Trust Probe、管理端全局 USB 设备监听自动提示、CLI `ca install --mobile` / `ca install --ios`，以及对应 Admin API。该功能默认只承诺普通手机的 guided install：Bifrost 可推送证书或提供 iOS profile，但最终安装和信任必须在手机端由用户确认。iOS Web UI 使用同一条安装和信任流程讲解，Apple Configurator 与扫码/文件安装只是把 profile 送到 iPhone 的两种入口。Trust Probe 的核心判断不是读取设备证书库，而是目标设备自己完成一次由当前 Bifrost CA 签发证书的真实 HTTPS 握手。
 
 ## 前置条件
 
@@ -159,11 +159,14 @@
 **预期结果**：
 
 - 页面左侧展示固定导航 `Certificate Setup`。
-- 左侧导航包含 `Local install`、`iOS devices`、`Android devices`、`Certificate downloads`。
+- 左侧导航包含 `Local install`、`Trust probe`、`iOS devices`、`Android devices`、`Certificate downloads`。
 - 右侧内容为单列章节，不把 Android 和 iOS 做成左右并列卡片。
-- 右侧章节顺序为 `Local Certificate Install`、`iOS Mobile Installation`、`Android Mobile Installation`、`Certificate Downloads and QR Codes`。
+- 右侧章节顺序为 `Local Certificate Install`、`Universal Trust Probe`、`iOS Mobile Installation`、`Android Mobile Installation`、`Certificate Downloads and QR Codes`。
 - `Local Certificate Install` 章节在本机 CA 未完全信任时展示 `Install and Trust CA` 或 `Trust CA` 按钮，按钮说明等价于执行 `bifrost ca install`；CA 文件不可用时按钮禁用。
 - 点击本机安装按钮并完成系统授权后，页面会持续刷新本机 CA 状态，最终自动显示 `Installed and trusted`；不需要用户重新强刷页面才能看到信任完成状态。
+- `Universal Trust Probe` 章节可以选择本机局域网 IP，点击 `Generate Trust Probe QR` 后展示二维码、实时状态和最近事件。
+- Trust Probe 状态分三层展示：页面是否打开、probe 端口是否可达、HTTPS trust check 是否通过。
+- Trust Probe 成功文案只承诺“当前设备浏览器信任 Bifrost CA”，并说明个别 App 仍可能因为 certificate pinning、自定义 TLS 或 Android user CA 策略无法解密。
 - iOS 章节展示在 Android 章节之前。
 - iPhone/iPad 区域先展示 `iOS uses one shared install and trust flow`，并明确四步：送达 profile、在 Settings 安装 profile、进入 `Settings > General > About > Certificate Trust Settings`、开启 Bifrost CA 完全信任。
 - iPhone/iPad 区域随后展示 `1. Choose how to send the profile`。
@@ -404,6 +407,32 @@
 - root/emulator/test device 可读取 Android user CA store 且当前 CA 指纹匹配时，设备卡片显示 `CA installed`。
 - 页面文案仍提示 Android 7+ App 可能不信任用户 CA，证书 pinning 或未配置 Network Security Config 的 App 不保证可被 HTTPS 解密。
 - 全局设备弹窗同样展示该 CA 状态，不只展示设备 ID。
+
+### TC-MDT-15：Universal Trust Probe 用真实 HTTPS 握手验证设备信任
+
+**操作步骤**：
+
+1. 打开 Certificate Tab 的 `Universal Trust Probe` 章节。
+2. 在 `Local network address` 中选择当前电脑的局域网 IP。
+3. 点击 `Generate Trust Probe QR`。
+4. 使用目标手机扫码打开 HTTP landing page。
+5. 在手机页面等待检测完成；如失败，按手机页面的 iOS/Android 下一步提示安装并信任 CA 后点击 Retry。
+6. 在电脑管理端观察 Trust Probe 实时状态。
+7. 自动化验证可执行：
+   ```bash
+   cargo run -p bifrost-e2e -- --test admin_trust_probe_verifies_https_trust_with_current_ca --test-timeout 120
+   ```
+
+**预期结果**：
+
+- 管理端生成二维码后显示 session 状态、`Page waiting`、`Probe port pending`、`HTTPS trust pending`。
+- 手机打开 HTTP landing page 后，管理端状态变为 `Device opened page`。
+- 手机能访问 probe 端口时，管理端显示 `Probe port reachable`。
+- 手机 HTTPS trust check 成功时，管理端显示 `CA trusted`、`HTTPS trust passed`，并展示代理地址 `<host>:<adminPort>` 和 proxy QR 链接。
+- 如果 netcheck 成功但 HTTPS trust check 失败，管理端显示 `Trust failed`，手机页提示安装 CA、iOS 开启完全信任或 Android App 信任边界。
+- 如果 landing page 能打开但 probe 端口不可达，管理端显示 `Probe unreachable`，并提示检查防火墙、局域网隔离和 IP 选择。
+- 成功文案不承诺所有 App 都能被解密，只说明当前设备浏览器 TLS 链路已信任 Bifrost CA。
+- 自动化 E2E 使用当前 Bifrost CA 作为 root CA 访问 HTTPS check，并断言 session 最终为 `tls_trusted`。
 
 ## 清理步骤
 
