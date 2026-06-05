@@ -147,6 +147,13 @@ impl SystemProxyLifecycleHelperState {
                     "system proxy lifecycle helper stopped after Admin API disable"
                 );
             }
+            if let Err(error) = child.wait() {
+                tracing::debug!(
+                    target: "bifrost_admin::proxy",
+                    error = %error,
+                    "failed to reap system proxy lifecycle helper after Admin API disable"
+                );
+            }
         }
     }
 }
@@ -220,6 +227,13 @@ impl Drop for SystemProxyLifecycleHelperState {
                     target: "bifrost_admin::proxy",
                     error = %error,
                     "failed to stop system proxy lifecycle helper during AdminState drop"
+                );
+            }
+            if let Err(error) = child.wait() {
+                tracing::debug!(
+                    target: "bifrost_admin::proxy",
+                    error = %error,
+                    "failed to reap system proxy lifecycle helper during AdminState drop"
                 );
             }
         }
