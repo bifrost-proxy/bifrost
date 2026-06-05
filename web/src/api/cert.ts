@@ -1,4 +1,4 @@
-import { get } from './client';
+import { get, post } from './client';
 import { buildPublicUrl } from '../runtime';
 
 export interface CertInfo {
@@ -8,13 +8,112 @@ export interface CertInfo {
   installed: boolean;
   trusted: boolean;
   status_message: string;
+  sha256_fingerprint?: string | null;
   local_ips: string[];
   download_urls: string[];
   qrcode_urls: string[];
 }
 
+export type MobilePlatform = "android" | "ios";
+export type DeviceTrustCapability =
+  | "guide_only"
+  | "push_and_open_installer"
+  | "managed_auto_trust"
+  | "rooted_test_device";
+export type DeviceStatus = "connected" | "unauthorized" | "offline" | "unsupported";
+export type InstallMode = "normal_guide" | "managed_auto_trust" | "lab_root_mode";
+
+export interface MobileDevice {
+  id: string;
+  name?: string | null;
+  managed_install_target?: string | null;
+  platform: MobilePlatform;
+  status: DeviceStatus;
+  capability: DeviceTrustCapability;
+  status_message: string;
+}
+
+export interface AdbDiscovery {
+  adb_available: boolean;
+  adb_path?: string | null;
+  devices: MobileDevice[];
+  message: string;
+}
+
+export interface IosDiscovery {
+  supported: boolean;
+  devices: MobileDevice[];
+  configurator: ConfiguratorDiscovery;
+  message: string;
+}
+
+export interface ConfiguratorDiscovery {
+  supported: boolean;
+  cfgutil_available: boolean;
+  cfgutil_path?: string | null;
+  message: string;
+}
+
+export interface MobileDevicesResponse {
+  android: AdbDiscovery;
+  ios: IosDiscovery;
+  ios_profile_url: string;
+  ios_profile_qrcode_url: string;
+  ordinary_device_notice: string;
+  managed_device_notice: string;
+}
+
+export interface InstallStep {
+  name: string;
+  success: boolean;
+  message: string;
+}
+
+export interface InstallSession {
+  session_id: string;
+  device_id: string;
+  platform: MobilePlatform;
+  mode: InstallMode;
+  capability: DeviceTrustCapability;
+  completed: boolean;
+  requires_user_confirmation: boolean;
+  summary: string;
+  steps: InstallStep[];
+}
+
+export const MOBILE_INSTALL_CONFIRMATION =
+  "push_and_open_mobile_certificate_installer";
+export const LOCAL_CA_INSTALL_CONFIRMATION = "install_local_ca_certificate";
+
 export async function getCertInfo(): Promise<CertInfo> {
   return get<CertInfo>('/cert/info');
+}
+
+export async function installLocalCa(): Promise<CertInfo> {
+  return post<CertInfo>('/cert/install', {
+    confirmation: LOCAL_CA_INSTALL_CONFIRMATION,
+  });
+}
+
+export async function getMobileDevices(): Promise<MobileDevicesResponse> {
+  return get<MobileDevicesResponse>('/mobile-devices');
+}
+
+export async function refreshMobileDevices(): Promise<MobileDevicesResponse> {
+  return post<MobileDevicesResponse>('/mobile-devices/refresh');
+}
+
+export async function installMobileCa(
+  deviceId: string,
+  mode: InstallMode = "normal_guide",
+): Promise<InstallSession> {
+  return post<InstallSession>(
+    `/mobile-devices/${encodeURIComponent(deviceId)}/install-ca`,
+    {
+      mode,
+      confirmation: MOBILE_INSTALL_CONFIRMATION,
+    },
+  );
 }
 
 export function getCertDownloadUrl(): string {
@@ -23,6 +122,18 @@ export function getCertDownloadUrl(): string {
 
 export function getCertQRCodeUrl(ip?: string): string {
   const baseUrl = buildPublicUrl('/cert/qrcode');
+  if (ip) {
+    return `${baseUrl}?ip=${encodeURIComponent(ip)}`;
+  }
+  return baseUrl;
+}
+
+export function getIosMobileConfigUrl(): string {
+  return buildPublicUrl('/mobile/ios-profile.mobileconfig');
+}
+
+export function getIosMobileConfigQRCodeUrl(ip?: string): string {
+  const baseUrl = buildPublicUrl('/mobile/ios-profile.mobileconfig/qrcode');
   if (ip) {
     return `${baseUrl}?ip=${encodeURIComponent(ip)}`;
   }

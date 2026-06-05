@@ -13,7 +13,9 @@ use bifrost_proxy::{
     TlsConfig,
 };
 use bifrost_storage::RulesStorage;
-use bifrost_tls::{generate_root_ca, init_crypto_provider, DynamicCertGenerator, SniResolver};
+use bifrost_tls::{
+    generate_root_ca, init_crypto_provider, save_root_ca, DynamicCertGenerator, SniResolver,
+};
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
@@ -1286,7 +1288,7 @@ impl ProxyInstance {
         let ca_key = ca.private_key_der();
         let ca = Arc::new(ca);
         let cert_generator = Arc::new(DynamicCertGenerator::new(ca.clone()));
-        let sni_resolver = Arc::new(SniResolver::new(ca));
+        let sni_resolver = Arc::new(SniResolver::new(ca.clone()));
         let tls_config = Arc::new(TlsConfig {
             ca_cert: Some(ca_cert.to_vec()),
             ca_key: Some(ca_key.secret_der().to_vec()),
@@ -1310,6 +1312,10 @@ impl ProxyInstance {
 
         let temp_dir = std::env::temp_dir().join(format!("bifrost_e2e_test_{}", port));
         clean_stale_e2e_data_dir(&temp_dir)?;
+        let ca_cert_path = temp_dir.join("certs").join("ca.crt");
+        let ca_key_path = temp_dir.join("certs").join("ca.key");
+        save_root_ca(&ca_cert_path, &ca_key_path, ca.as_ref())
+            .map_err(|e| format!("Failed to save E2E CA files: {}", e))?;
         let body_store = Arc::new(parking_lot::RwLock::new(BodyStore::new(
             temp_dir.clone(),
             2 * 1024 * 1024,
@@ -1366,6 +1372,7 @@ impl ProxyInstance {
             .with_traffic_db_store_shared(traffic_db_store)
             .with_async_traffic_writer(async_traffic_writer)
             .with_frame_store_shared(frame_store)
+            .with_ca_cert_path(ca_cert_path)
             .with_rules_storage(rules_storage)
             .with_values_storage(values_storage)
             .with_auth_db(auth_db)

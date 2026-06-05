@@ -18,6 +18,7 @@ path = "src/main.rs"
 bifrost-admin = { path = "../bifrost-admin" }
 bifrost-command = { path = "../bifrost-command" }
 bifrost-core = { path = "../bifrost-core" }
+bifrost-device = { path = "../bifrost-device" }
 bifrost-proxy = { path = "../bifrost-proxy" }
 bifrost-sync = { path = "../bifrost-sync" }
 bifrost-tls = { path = "../bifrost-tls" }

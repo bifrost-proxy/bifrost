@@ -153,6 +153,194 @@ pub fn get_all_tests() -> Vec<TestCase> {
             },
         ),
         TestCase::standalone(
+            "admin_api_mobile_devices_lists_android_ios_discovery",
+            "Validate mobile device discovery API returns Android ADB status, iOS USB status, and product notices",
+            "admin",
+            || async move {
+                let port = pick_unused_port()?;
+                let (_proxy, _admin_state) =
+                    ProxyInstance::start_with_admin(port, vec![], false, true)
+                        .await
+                        .map_err(|e| format!("Failed to start proxy with admin: {}", e))?;
+
+                let client = reqwest::Client::builder()
+                    .danger_accept_invalid_certs(true)
+                    .no_proxy()
+                    .build()
+                    .map_err(|e| format!("Failed to create client: {}", e))?;
+
+                let response = client
+                    .get(format!(
+                        "http://127.0.0.1:{}/_bifrost/api/mobile-devices",
+                        port
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET mobile devices failed: {}", e))?;
+
+                assert_status(&response, 200)?;
+                let json: serde_json::Value = response
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse mobile devices JSON: {}", e))?;
+
+                if json.pointer("/android/adb_available").is_none() {
+                    return Err(format!("Expected android.adb_available field, got: {json}"));
+                }
+                if json.pointer("/ios/supported").is_none() {
+                    return Err(format!("Expected ios.supported field, got: {json}"));
+                }
+                if !json
+                    .pointer("/ios/devices")
+                    .map(|value| value.is_array())
+                    .unwrap_or(false)
+                {
+                    return Err(format!("Expected ios.devices array, got: {json}"));
+                }
+                let ordinary_notice = json
+                    .get("ordinary_device_notice")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default();
+                if !ordinary_notice.contains("require final confirmation") {
+                    return Err(format!(
+                        "Expected ordinary device notice to explain phone confirmation, got: {ordinary_notice}"
+                    ));
+                }
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
+            "admin_public_ios_mobileconfig_uses_current_ca",
+            "Validate iOS mobileconfig and QR endpoints are generated from the current CA",
+            "admin",
+            || async move {
+                let port = pick_unused_port()?;
+                let (_proxy, _admin_state) =
+                    ProxyInstance::start_with_admin(port, vec![], false, true)
+                        .await
+                        .map_err(|e| format!("Failed to start proxy with admin: {}", e))?;
+
+                let client = reqwest::Client::builder()
+                    .danger_accept_invalid_certs(true)
+                    .no_proxy()
+                    .build()
+                    .map_err(|e| format!("Failed to create client: {}", e))?;
+
+                let profile_response = client
+                    .get(format!(
+                        "http://127.0.0.1:{}/_bifrost/public/mobile/ios-profile.mobileconfig",
+                        port
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET iOS mobileconfig failed: {}", e))?;
+
+                assert_status(&profile_response, 200)?;
+                assert_header_contains(
+                    &profile_response,
+                    "content-type",
+                    "application/x-apple-aspen-config",
+                )?;
+                let profile = profile_response
+                    .text()
+                    .await
+                    .map_err(|e| format!("Failed to read iOS mobileconfig body: {}", e))?;
+                if !profile.contains("com.apple.security.root")
+                    || !profile.contains("Certificate Trust Settings")
+                {
+                    return Err(format!("Unexpected mobileconfig body: {profile}"));
+                }
+
+                let qrcode_response = client
+                    .get(format!(
+                        "http://127.0.0.1:{}/_bifrost/public/mobile/ios-profile.mobileconfig/qrcode?ip=127.0.0.1",
+                        port
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET iOS mobileconfig QR failed: {}", e))?;
+                assert_status(&qrcode_response, 200)?;
+                assert_header_contains(&qrcode_response, "content-type", "image/svg+xml")?;
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
+            "admin_api_mobile_install_requires_explicit_confirmation",
+            "Validate Android CA install API rejects requests that do not confirm phone-side manual trust",
+            "admin",
+            || async move {
+                let port = pick_unused_port()?;
+                let (_proxy, _admin_state) =
+                    ProxyInstance::start_with_admin(port, vec![], false, true)
+                        .await
+                        .map_err(|e| format!("Failed to start proxy with admin: {}", e))?;
+
+                let client = reqwest::Client::builder()
+                    .danger_accept_invalid_certs(true)
+                    .no_proxy()
+                    .build()
+                    .map_err(|e| format!("Failed to create client: {}", e))?;
+
+                let response = client
+                    .post(format!(
+                        "http://127.0.0.1:{}/_bifrost/api/mobile-devices/test-device/install-ca",
+                        port
+                    ))
+                    .json(&serde_json::json!({ "mode": "normal_guide" }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("POST mobile install failed: {}", e))?;
+
+                assert_status(&response, 400)?;
+                let body = response
+                    .text()
+                    .await
+                    .map_err(|e| format!("Failed to read mobile install error: {}", e))?;
+                if !body.contains("Missing install confirmation") {
+                    return Err(format!("Expected confirmation error, got: {body}"));
+                }
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
+            "admin_api_local_ca_install_requires_explicit_confirmation",
+            "Validate local CA install API rejects requests without explicit confirmation",
+            "admin",
+            || async move {
+                let port = pick_unused_port()?;
+                let (_proxy, _admin_state) =
+                    ProxyInstance::start_with_admin(port, vec![], false, true)
+                        .await
+                        .map_err(|e| format!("Failed to start proxy with admin: {}", e))?;
+
+                let client = reqwest::Client::builder()
+                    .danger_accept_invalid_certs(true)
+                    .no_proxy()
+                    .build()
+                    .map_err(|e| format!("Failed to create client: {}", e))?;
+
+                let response = client
+                    .post(format!(
+                        "http://127.0.0.1:{}/_bifrost/api/cert/install",
+                        port
+                    ))
+                    .json(&serde_json::json!({}))
+                    .send()
+                    .await
+                    .map_err(|e| format!("POST local CA install failed: {}", e))?;
+
+                assert_status(&response, 400)?;
+                let body = response
+                    .text()
+                    .await
+                    .map_err(|e| format!("Failed to read local CA install error: {}", e))?;
+                if !body.contains("Missing local CA install confirmation") {
+                    return Err(format!("Expected local confirmation error, got: {body}"));
+                }
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
             "admin_api_system_memory",
             "Validate GET /api/system/memory returns memory diagnostics with process info",
             "admin",

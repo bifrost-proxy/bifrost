@@ -1,0 +1,15 @@
+[package]
+name = "bifrost-device"
+version = "0.0.91"
+edition = "2021"
+description = "Mobile device trust helpers for Bifrost"
+
+[dependencies]
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

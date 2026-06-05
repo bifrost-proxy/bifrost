@@ -1,8 +1,13 @@
+use std::net::{IpAddr, SocketAddr};
+
+use bifrost_device::read_certificate_der_from_file;
 use bifrost_tls::{CertInstaller, CertStatus};
+use http_body_util::BodyExt;
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
 use qrcode::render::svg;
 use qrcode::QrCode;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::{
     cors_preflight, error_response, full_body, json_response, method_not_allowed,
@@ -19,6 +24,7 @@ struct CertInfo {
     installed: bool,
     trusted: bool,
     status_message: String,
+    sha256_fingerprint: Option<String>,
     local_ips: Vec<String>,
     download_urls: Vec<String>,
     qrcode_urls: Vec<String>,
@@ -32,16 +38,28 @@ struct CertStateView {
     status_message: String,
 }
 
+const LOCAL_INSTALL_CONFIRMATION: &str = "install_local_ca_certificate";
+
+#[derive(Debug, Deserialize)]
+struct LocalInstallBody {
+    confirmation: Option<String>,
+}
+
 pub async fn handle_cert(
     req: Request<Incoming>,
     state: SharedAdminState,
     path: &str,
+    peer_addr: Option<SocketAddr>,
 ) -> Response<BoxBody> {
     let method = req.method().clone();
 
     match path {
         "/api/cert" | "/api/cert/" | "/api/cert/info" => match method {
             Method::GET => get_cert_info(req, state).await,
+            _ => method_not_allowed(),
+        },
+        "/api/cert/install" | "/api/cert/install/" => match method {
+            Method::POST => install_local_ca(req, state, peer_addr).await,
             _ => method_not_allowed(),
         },
         _ => error_response(StatusCode::NOT_FOUND, "Not Found"),
@@ -146,6 +164,10 @@ async fn get_cert_qrcode(req: Request<Incoming>, state: SharedAdminState) -> Res
 }
 
 async fn get_cert_info(_req: Request<Incoming>, state: SharedAdminState) -> Response<BoxBody> {
+    json_response(&build_cert_info(&state))
+}
+
+fn build_cert_info(state: &SharedAdminState) -> CertInfo {
     let available = state
         .ca_cert_path
         .as_ref()
@@ -169,19 +191,108 @@ async fn get_cert_info(_req: Request<Incoming>, state: SharedAdminState) -> Resp
         .map(|ip| format!("http://{}:{}/_bifrost/public/cert/qrcode", ip, port))
         .collect();
 
-    let info = CertInfo {
+    CertInfo {
         available,
         status: cert_state.status.to_string(),
         status_label: cert_state.status_label.to_string(),
         installed: cert_state.installed,
         trusted: cert_state.trusted,
         status_message: cert_state.status_message,
+        sha256_fingerprint: certificate_sha256_fingerprint(state.ca_cert_path.as_deref()),
         local_ips,
         download_urls,
         qrcode_urls,
+    }
+}
+
+async fn install_local_ca(
+    req: Request<Incoming>,
+    state: SharedAdminState,
+    peer_addr: Option<SocketAddr>,
+) -> Response<BoxBody> {
+    if !is_local_peer(peer_addr) {
+        return error_response(
+            StatusCode::FORBIDDEN,
+            "Local CA installation is only available from the local admin UI.",
+        );
+    }
+
+    let body = match req.collect().await {
+        Ok(body) => body.to_bytes(),
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Failed to read request body: {error}"),
+            );
+        }
+    };
+    let request = if body.is_empty() {
+        LocalInstallBody { confirmation: None }
+    } else {
+        match serde_json::from_slice::<LocalInstallBody>(&body) {
+            Ok(request) => request,
+            Err(error) => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("Invalid install request JSON: {error}"),
+                );
+            }
+        }
+    };
+    if request.confirmation.as_deref() != Some(LOCAL_INSTALL_CONFIRMATION) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "Missing local CA install confirmation.",
+        );
+    }
+
+    let Some(cert_path) = state
+        .ca_cert_path
+        .as_ref()
+        .filter(|path| path.exists())
+        .cloned()
+    else {
+        return error_response(StatusCode::NOT_FOUND, "CA certificate not configured");
     };
 
-    json_response(&info)
+    let install_result = tokio::task::spawn_blocking(move || {
+        let installer = CertInstaller::new(&cert_path);
+        installer.install_and_trust_gui()
+    })
+    .await;
+
+    match install_result {
+        Ok(Ok(())) => json_response(&build_cert_info(&state)),
+        Ok(Err(error)) => error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &format!("Failed to install and trust local CA certificate: {error}"),
+        ),
+        Err(error) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Local CA installation task failed: {error}"),
+        ),
+    }
+}
+
+fn is_local_peer(peer_addr: Option<SocketAddr>) -> bool {
+    match peer_addr.map(|addr| addr.ip()) {
+        Some(IpAddr::V4(ip)) => ip.is_loopback(),
+        Some(IpAddr::V6(ip)) => ip.is_loopback(),
+        None => true,
+    }
+}
+
+fn certificate_sha256_fingerprint(cert_path: Option<&std::path::Path>) -> Option<String> {
+    let cert_path = cert_path.filter(|path| path.exists())?;
+    let cert_data = read_certificate_der_from_file(cert_path).ok()?;
+    let digest = Sha256::digest(cert_data);
+    Some(
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02X}"))
+            .collect::<Vec<_>>()
+            .join(":"),
+    )
 }
 
 fn resolve_cert_state(cert_path: Option<&std::path::Path>) -> CertStateView {

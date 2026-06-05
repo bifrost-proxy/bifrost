@@ -12,6 +12,7 @@ bifrost-core = { path = "../bifrost-core" }
 bifrost-tls = { path = "../bifrost-tls" }
 bifrost-storage = { path = "../bifrost-storage" }
 bifrost-sync = { path = "../bifrost-sync" }
+bifrost-device = { path = "../bifrost-device" }
 bifrost-script = { path = "../bifrost-script" }
 bifrost-power = { path = "../bifrost-power" }
 bifrost-asr = { path = "../bifrost-asr", default-features = false, features = ["core"] }

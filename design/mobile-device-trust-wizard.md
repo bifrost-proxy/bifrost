@@ -1,0 +1,175 @@
+# Mobile Device Trust Wizard
+
+## 功能模块详细描述
+
+Mobile Device Trust Wizard 把现有 CA 下载、二维码和证书状态能力扩展为手机证书安装向导。
+
+产品边界分两类：
+
+- 普通个人手机：Bifrost 可以检测 Android USB 设备、推送 CA、打开系统安装入口，或为 iOS 提供 `.mobileconfig` 下载/二维码；手机端仍必须由用户确认安装和信任。
+- 企业/测试受管设备：只有 Android Device Owner/Profile Owner/委派证书安装器，或 iOS Apple Configurator/MDM/MDM enrollment profile 这类受管路径，才允许真正自动安装并启用信任。本次支持 macOS + Apple Configurator/cfgutil 的高级路径；普通网页/二维码下载仍必须手动启用完全信任。
+
+## 实现逻辑
+
+### 1. 设备层 crate
+
+新增 `crates/bifrost-device`：
+
+- `model.rs` 定义 `MobilePlatform`、`DeviceTrustCapability`、`DeviceStatus`、`InstallMode`、`MobileDevice`、`InstallSession`。
+- `adb.rs` 负责：
+  - 检测 `BIFROST_ADB_PATH` 或 `PATH` 中的 `adb`。
+  - 解析 `adb devices -l` 输出。
+  - 普通 Android guided install：`adb push` CA 到 `/sdcard/Download/bifrost-ca.crt`，再尝试 `am start` 打开证书安装入口，失败时 fallback 到安全设置页。
+- `mobileconfig.rs` 负责：
+  - 从 PEM/DER 证书文件提取 DER。
+  - 生成 iOS `.mobileconfig`，PayloadType 为 `com.apple.security.root`，并明确写入手动启用完全信任的说明。
+- `ios.rs` 负责：
+  - macOS 上通过 `ioreg` 检测 USB iPhone/iPad。
+  - 检测 Apple Configurator 的 `cfgutil` 是否可用。
+  - 高级路径调用 `cfgutil -e <ECID> install-profile <profile.mobileconfig>`。Bifrost 通过 `cfgutil --format JSON list` 读取每台设备的自定义名称、UDID、ECID 和型号；多台 iPhone/iPad 同时连接时，页面和 CLI 均让用户选择目标设备，并按所选设备 ECID 定向安装，避免误装。
+
+### 2. Admin API
+
+新增路由：
+
+- `POST /_bifrost/api/cert/install`
+- `GET /_bifrost/api/mobile-devices`
+- `POST /_bifrost/api/mobile-devices/refresh`
+- `POST /_bifrost/api/mobile-devices/{id}/install-ca`
+- `GET /_bifrost/api/mobile-devices/install-sessions/{session_id}`
+- `GET /_bifrost/public/mobile/ios-profile.mobileconfig`
+- `GET /_bifrost/public/mobile/ios-profile.mobileconfig/qrcode`
+
+安全边界：
+
+- `/api/cert/install` 等价于 `bifrost ca install` 的本机系统信任安装流程，仅允许 loopback / 桌面 WebView 访问；请求体必须携带确认字符串 `install_local_ca_certificate`，避免远程 Admin 或裸 POST 误触发本机 keychain/sudo 安装提示。
+- `/api/mobile-devices*` 仅允许 loopback / 桌面 WebView 访问，避免远程 Admin 触发本机 USB 操作。
+- `/_bifrost/public/cert*` 与 `/_bifrost/public/mobile*` 是公开下载路径，必须允许任意 LAN 客户端访问，不要求交互式授权或白名单；否则手机扫码会拿到非 profile 响应并提示描述文件无效。
+- `install-ca` 支持 Android `normal_guide` 和 iOS `managed_auto_trust`。请求体必须携带确认字符串 `push_and_open_mobile_certificate_installer`，并且只有本地 Admin/WebView 能触发。
+- 安装操作记录 tracing audit log。
+- `/api/cert/info` 新增 `sha256_fingerprint`，供用户在手机上核对 CA 指纹。
+
+### 3. Web UI
+
+在 Settings -> Certificate 的 Mobile Installation 卡片中新增：
+
+- 普通设备提示：Bifrost 只能推送/打开安装流程，手机端仍需确认。
+- Local Certificate Install 区块在本机 CA 未安装或已安装但未信任时展示 `Install and Trust CA` / `Trust CA` 按钮；点击后调用 `/api/cert/install`，行为等价于 `bifrost ca install`，成功后立即刷新本机证书状态。由于 macOS 安装证书和设为信任可能存在短暂状态传播延迟，前端会继续轮询 `/api/cert/info`，直到状态变为 `Installed and trusted` 或超时。
+- Android USB 区块：检测设备、展示 ADB/设备授权状态、对 connected 设备执行 guided install。
+- 全局设备监听提示：管理端主布局挂载 `MobileDeviceTrustPrompt`，用户在任意页面时每 3 秒静默轮询本地 `/api/mobile-devices/refresh`；检测到 connected Android 或 iOS 设备时弹出确认窗口。若同时发现多台设备，弹窗列出每台设备的自定义名称、型号、ID 和 ECID，用户可以选择目标设备后直接点击 `Install Selected`，也可以点击 `Open Certificate Setup` 跳转到 `Settings > Certificate`。跳转时 URL 携带 `mobile_device` / `mobile_platform`，Certificate 页拿到目标设备后自动滚动到对应卡片，高亮该卡片，并让对应安装按钮播放脉冲动画，确保用户知道从哪里继续操作；用户选择 Not now 后只在当前页面会话内记录设备 id，避免旧 localStorage 记录导致后续连接永远不弹。远程 Admin 访问本地 USB API 会得到 403，轮询静默忽略，不打扰远程页面。
+- Certificate 页自身仍每 3 秒刷新设备列表，负责展示 Android ADB、iOS profile、Apple Configurator 和安装 session；它不再弹局部重复提示。
+- Certificate 页使用左侧固定导航和右侧单列章节，不再把 Android 和 iOS 做成并列卡片。导航顺序为 Local install、iOS devices、Android devices、Certificate downloads；右侧内容按同样顺序排列，iOS 设备安装必须在 Android 之前，证书文件下载和二维码下载放在最后。
+- iPhone/iPad 区块：
+  - 顶部先展示统一 iOS 流程：把 profile 送到 iPhone -> 在 Settings 安装描述文件 -> Settings > General > About > Certificate Trust Settings -> 打开 Bifrost CA 完全信任。Apple Configurator 和手动扫码/文件安装只作为“送达 profile”的两种入口，不在 UI 上拆成互相割裂的两套模式。
+  - 统一流程之后先展示“选择 profile 送达方式”。Apple Configurator/cfgutil 检测状态、每台 iOS 设备的自定义名称/型号/ID/ECID 和 `Configurator Install` 按钮作为自动送达入口；手动扫码/下载 `.mobileconfig` / LAN profile QR 作为手动送达入口。点击某一台的 Configurator 按钮时，Bifrost 通过该设备 ECID 从电脑侧定向发送 profile；如果 iPhone 仍要求屏幕确认，则继续按同一套 Settings 安装和信任步骤操作。
+  - 手动扫码送达入口使用 `web/src/assets/ios/ios_qr_1.jpeg` 和 `web/src/assets/ios/ios_qr_2.jpeg` 展示唯一区别步骤：用 iPhone Camera 扫 LAN QR 并点击黄色链接，然后允许下载 configuration profile。
+  - 送达方式之后展示共享步骤 `ios_1.png` 到 `ios_7.png`；每一步用图片文件名作为步骤标识，图下文案明确说明：选择 iPhone、确认 profile 已到达、进入 Settings 的 Downloaded Profile、安装 Bifrost CA profile、接受未签名 profile 警告、进入 Settings > General > About、最后在 Certificate Trust Settings 打开 Bifrost CA 完全信任。
+  - `cfgutil` 返回 `ConfigurationUtilityKit.error Code: 625` / “需要用户在设备上交互” 时，Bifrost 将其视为已把安装流程交给 iPhone 的待确认状态，而不是硬失败。
+  - MDM/监督设备路径只做说明，不把普通下载、扫码或普通 USB 连接误描述成静默自动信任。
+- 保留原证书文件 QR，支持手动下载 CA。
+- 新增 UI 使用 Ant Design token，不新增硬编码主题色；light/dark 主题由现有 Settings 页面统一验证。
+
+### 4. CLI
+
+保留 `bifrost ca install` 的原有本机系统信任语义；新增移动设备路径：
+
+- `bifrost ca install --mobile`：进入 Android USB guided install。
+- `bifrost ca install --mobile --device <serial>`：指定 ADB serial，适合脚本执行。
+- `bifrost ca install --mobile --yes`：非交互模式；只有一个 ready 设备时自动选择，有多个 ready 设备时要求显式 `--device`。
+- `bifrost ca install --ios`：生成 `bifrost-ca.mobileconfig` 并输出 iPhone/iPad 手动安装和完全信任步骤，不尝试静默控制手机。
+- `bifrost ca install --ios --configurator`：macOS + Apple Configurator 高级路径；检测 `cfgutil` 和 USB iOS 设备后调用 `cfgutil -e <ECID> install-profile`。单台设备自动选择；多台设备在交互终端中显示自定义名称/型号/ID 并让用户选择；非交互模式需要传 `--device <id-or-ecid>`。
+
+CLI 不承诺普通手机自动启用根 CA 信任；iOS 的自动 SSL/TLS 信任只归属于 Apple Configurator/MDM/监督设备路径。
+
+## 依赖项
+
+- `crates/bifrost-device`
+- `crates/bifrost-admin/src/handlers/mobile_devices.rs`
+- `crates/bifrost-admin/src/handlers/cert.rs`
+- `web/src/api/cert.ts`
+- `web/src/pages/Settings/tabs/CertificateTab.tsx`
+- `crates/bifrost-cli/src/commands/ca.rs`
+- `crates/bifrost-e2e/src/tests/admin_api.rs`
+
+## 测试方案
+
+### 单元测试
+
+- `bifrost-device`：
+  - `parse_adb_devices` 正确解析 connected/unauthorized/offline 状态。
+  - `generate_ios_mobileconfig` 包含 `com.apple.security.root` 和手动信任提示。
+  - PEM 证书可提取 DER。
+  - `cfgutil_install_profile_args` 使用 `install-profile <profile.mobileconfig>` 子命令；指定设备时使用 `-e <ECID> install-profile <profile.mobileconfig>`。
+- `bifrost-admin`：
+  - mobile devices API loopback 限制逻辑。
+  - CertInfo SHA-256 指纹按 DER 证书生成。
+- `bifrost-cli`：
+  - `ca install --mobile` 单个 connected Android 自动选择。
+  - 多个 connected Android 且 `--yes` 时必须传 `--device`。
+  - 指定 unauthorized/offline 设备时拒绝安装。
+  - `ca install --ios --configurator` 参数解析正确。
+
+### E2E 测试
+
+在 `crates/bifrost-e2e/src/tests/admin_api.rs` 中新增：
+
+- `admin_api_mobile_devices_lists_android_discovery`：验证设备发现 API 返回 ADB 状态和普通手机确认提示。
+- `admin_public_ios_mobileconfig_uses_current_ca`：验证 iOS mobileconfig 和二维码 public endpoint。
+- `LAN public mobile profile`：真实场景用 LAN 地址验证 profile endpoint 不触发交互式授权，返回 `application/x-apple-aspen-config` 且 plist 有效。
+- `admin_api_mobile_install_requires_explicit_confirmation`：验证 Android install 操作必须显式确认。
+- `admin_api_local_ca_install_requires_explicit_confirmation`：验证本机 CA install 操作必须显式确认，自动测试不误触系统证书安装。
+- `cli_ca_install_mobile_single_device_fake_adb`：通过 fake ADB 验证 `ca install --mobile --yes` 单设备自动选择并执行 push/open。
+- `cli_ca_install_mobile_multiple_devices_requires_device_fake_adb`：通过 fake ADB 验证多个 ready 设备的非交互选择边界。
+- `CLI iOS guide`：真实场景验证 `bifrost ca install --ios` 输出 profile 路径、手动安装步骤、Certificate Trust Settings、Configurator 后续命令。
+
+### 真实场景测试
+
+新增 `human_tests/mobile-device-trust.md`：
+
+- TC-MDT-01：API 设备发现返回普通手机确认边界。
+- TC-MDT-02：iOS mobileconfig 下载包含 root payload 与 Certificate Trust Settings 提示。
+- TC-MDT-03：iOS profile QR endpoint 返回 SVG。
+- TC-MDT-04：Android install 缺少确认时拒绝。
+- TC-MDT-05：Settings Certificate UI 不承诺自动信任，并展示左侧固定导航；右侧单列按 Local install、iOS、Android、Certificate downloads 顺序组织。
+- TC-MDT-06：浅色/暗色主题下手机安装向导可读可操作。
+- TC-MDT-07：任意管理端页面检测到 connected Android/iOS 后弹出全局确认窗口；多设备时弹窗展示设备名称/型号/ID/ECID，支持选择目标设备直接安装或跳转 Certificate 页面；Certificate 页设备列表继续自动刷新，并自动滚动、高亮目标设备卡片和脉冲提示安装按钮。
+- TC-MDT-08：CLI `ca install --mobile --yes` 在 fake ADB 单设备场景自动选择并执行 guided install。
+- TC-MDT-09：CLI `ca install --mobile --yes` 在 fake ADB 多设备场景要求 `--device`。
+- TC-MDT-10：CLI `ca install --ios` 生成 profile 并输出手动信任步骤。
+- TC-MDT-11：Settings iPhone/iPad 区域先展示统一流程概览，再展示 Apple Configurator 和手动扫码/文件两种 profile 送达方式；扫码方式展示 `ios_qr_1` / `ios_qr_2`；按 cfgutil 可用状态启用或禁用每台设备的安装按钮；多台 iOS 设备同时显示自定义名称、型号、ID、ECID，并按所选设备 ECID 定向安装。
+- TC-MDT-12：Apple Configurator 返回需要手机端交互时，页面显示待用户确认而非失败。
+- TC-MDT-13：Settings iPhone/iPad 在送达方式之后展示 `ios_1` 到 `ios_7` 共享图文步骤，明确 Configurator 和扫码/文件安装只差在送达 profile，后续 profile 安装与 Certificate Trust Settings 完全信任是同一条流程。
+
+## Review/Fix/Test 闭环方案
+
+第 1 轮：
+
+- 复核用户目标、普通/受管模式边界、API 安全限制、UI 文案。
+- 执行 `git status --short`、`git diff`。
+- 运行 `cargo test -p bifrost-device`、`cargo test -p bifrost-admin mobile_devices cert`、相关 E2E、human_tests。
+- 修复发现的问题并复跑失败路径。
+
+第 2 轮：
+
+- 基于最新 diff 复查新增 crate、Admin handler、Web UI、design、human_tests 索引。
+- 复跑受影响测试和格式检查。
+- 若发现 UI 文案误导、测试缺口或接口状态不一致，继续追加第 3 轮。
+
+## 校验要求
+
+- 先执行本次相关 E2E 和 human_tests。
+- 最后执行 rust-project-validate：
+  - `cargo fmt --all -- --check`
+  - `cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --all -- --check`
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- `cargo test -p bifrost-device`
+- `cargo test -p bifrost-cli ca_install_mobile`
+- `cargo test -p bifrost-admin`
+- `cargo test -p bifrost-e2e admin_api`
+  - `cargo test --workspace --all-features`
+  - 需要时执行 `scripts/ci/local-ci.sh`
+
+## 文档更新要求
+
+- 更新 `human_tests/readme.md`。
+- 本次新增 CLI 参数，已在 `bifrost ca install --help` 中暴露；不新增协议或 README 面向用户章节，README 暂不更新。

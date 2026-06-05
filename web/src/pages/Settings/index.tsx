@@ -1143,6 +1143,7 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
           certInfo={certInfo}
           getCertDownloadUrl={getCertDownloadUrl}
           getCertQRCodeUrl={getCertQRCodeUrl}
+          onCertInfoChange={setCertInfo}
         />
       ),
     },
