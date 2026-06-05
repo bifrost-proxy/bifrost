@@ -1,0 +1,29 @@
+> Language: **English** | [中文](../docs/overview.md)
+
+# What Is Bifrost
+
+Bifrost is a high-performance proxy server written in Rust. It is inspired by Whistle, but its goal is broader than forwarding requests: it combines rules, scripting, traffic observability, TLS MITM, replay, and a Web UI into one workflow.
+
+## Who Should Use It
+
+- Frontend and backend engineers who need a local proxy for API debugging.
+- QA engineers who need to capture traffic, rewrite requests, and verify edge cases.
+- Advanced users who need custom scripts and complex rule orchestration.
+- Teams that need a desktop-friendly workflow for network debugging and protocol inspection.
+
+## Core Capabilities
+
+- HTTP/1.1, HTTP/2, HTTP/3, HTTPS, SOCKS5, WebSocket, and SSE support.
+- TLS MITM, CA management, and domain-level intercept or passthrough control.
+- Rich Rules syntax for rewrite, routing, mock responses, injection, delay, and throttling.
+- QuickJS-based sandbox scripting for dynamic logic.
+- Built-in Web UI for traffic inspection, rule editing, request replay, and script logs.
+- Temporary port bindings so one long-running Bifrost service can isolate multiple tasks by entry port.
+- Remote invoke for authorized remote traffic queries, remote file access, and policy-bound shell commands.
+- Agent Skill installation so coding agents can use real traffic evidence for automation.
+
+## Product Forms
+
+- `CLI`: service deployment, scripting, and automation.
+- `Desktop`: daily local proxy debugging.
+- `Web UI`: visual traffic inspection and rule management.

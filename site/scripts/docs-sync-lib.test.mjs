@@ -34,6 +34,8 @@ test("buildPagesSync discovers every docs markdown file recursively", async () =
     {
       "docs/README.md": "# Docs\n\n[CLI](./cli.md)",
       "docs/cli.md": "# CLI",
+      "docs-en/README.md": "# Documentation Overview\n\n[CLI](./cli.md)",
+      "docs-en/cli.md": "# CLI Command Reference",
       "docs/future/new-topic.md": "# Future Topic",
       "docs/future/README.md": "# Future Index",
       "docs/.draft.md": "# Hidden",
@@ -43,6 +45,8 @@ test("buildPagesSync discovers every docs markdown file recursively", async () =
       const sources = pages.map((page) => page.source).sort();
 
       assert.deepEqual(sources, [
+        "docs-en/README.md",
+        "docs-en/cli.md",
         "docs/README.md",
         "docs/cli.md",
         "docs/future/README.md",
@@ -60,6 +64,50 @@ test("buildPagesSync discovers every docs markdown file recursively", async () =
         pages.find((page) => page.source === "docs/future/new-topic.md")?.target,
         "reference/future/new-topic.md",
       );
+      assert.equal(
+        pages.find((page) => page.source === "docs-en/README.md")?.target,
+        "en/reference/index.mdx",
+      );
+      assert.equal(
+        pages.find((page) => page.source === "docs-en/cli.md")?.target,
+        "en/reference/cli.md",
+      );
+    },
+  );
+});
+
+test("rewriteMarkdownLinks keeps English docs within English site routes", async () => {
+  await withFixture(
+    {
+      "docs/README.md": "# Docs\n\n[CLI](./cli.md)",
+      "docs/cli.md": "# CLI",
+      "docs-en/README.md": "# Documentation Overview\n\n[CLI](./cli.md)",
+      "docs-en/cli.md": "# CLI Command Reference",
+      "docs-en/rules/README.md": "# Rules\n\n[Routing](./routing.md)",
+      "docs-en/rules/routing.md": "# Routing Rules",
+    },
+    async (root) => {
+      const pages = buildPagesSync(root);
+      const map = sourceToTargetMap(pages);
+      const englishIndex = pages.find((candidate) => candidate.source === "docs-en/README.md");
+      const englishIndexMarkdown = fs.readFileSync(
+        path.join(root, "docs-en/README.md"),
+        "utf8",
+      );
+      const rewrittenIndex = rewriteMarkdownLinks(englishIndexMarkdown, englishIndex, map);
+
+      assert.match(rewrittenIndex, /\[CLI\]\(\.\/cli\/\)/);
+
+      const englishRules = pages.find(
+        (candidate) => candidate.source === "docs-en/rules/README.md",
+      );
+      const englishRulesMarkdown = fs.readFileSync(
+        path.join(root, "docs-en/rules/README.md"),
+        "utf8",
+      );
+      const rewrittenRules = rewriteMarkdownLinks(englishRulesMarkdown, englishRules, map);
+
+      assert.match(rewrittenRules, /\[Routing\]\(\.\/routing\/\)/);
     },
   );
 });
@@ -110,12 +158,22 @@ test("syncDocs removes stale generated pages and writes source metadata", async 
     {
       "docs/README.md": "# Docs",
       "docs/new-topic.md": "# New Topic",
+      "docs-en/README.md": "# Documentation Overview",
+      "docs-en/new-topic.md": "# New Topic",
       "site/src/content/docs/reference/stale.md": [
         "---",
         "title: Stale",
         "---",
         "",
         "> 此页面由 `docs/old.md` 自动同步生成。",
+        "",
+      ].join("\n"),
+      "site/src/content/docs/en/reference/stale.md": [
+        "---",
+        "title: Stale",
+        "---",
+        "",
+        "> This page is automatically synced from `docs-en/old.md`.",
         "",
       ].join("\n"),
     },
@@ -126,11 +184,21 @@ test("syncDocs removes stale generated pages and writes source metadata", async 
         docsOutputRoot: output,
       });
 
-      assert.equal(pages.length, 2);
+      assert.equal(pages.length, 4);
       assert.equal(fs.existsSync(path.join(output, "reference/stale.md")), false);
+      assert.equal(fs.existsSync(path.join(output, "en/reference/stale.md")), false);
       const generated = fs.readFileSync(path.join(output, "reference/new-topic.md"), "utf8");
       assert.match(generated, /> 此页面由 `docs\/new-topic\.md` 自动同步生成。/);
       assert.match(generated, /sidebar:\n  label: "New Topic"\n  order:/);
+      const englishGenerated = fs.readFileSync(
+        path.join(output, "en/reference/new-topic.md"),
+        "utf8",
+      );
+      assert.match(
+        englishGenerated,
+        /> This page is automatically synced from `docs-en\/new-topic\.md`\./,
+      );
+      assert.match(englishGenerated, /sidebar:\n  label: "New Topic"\n  order:/);
     },
   );
 });

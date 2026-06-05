@@ -14,7 +14,10 @@ for (const page of pages) {
   }
 
   const content = fs.readFileSync(targetPath, "utf8");
-  if (!content.includes(`> 此页面由 \`${page.source}\` 自动同步生成。`)) {
+  const marker = page.source.startsWith("docs-en/")
+    ? `> This page is automatically synced from \`${page.source}\`.`
+    : `> 此页面由 \`${page.source}\` 自动同步生成。`;
+  if (!content.includes(marker)) {
     errors.push(`generated target does not record source ${page.source}: ${page.target}`);
   }
 }

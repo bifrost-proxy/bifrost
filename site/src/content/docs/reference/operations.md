@@ -346,6 +346,7 @@ key1=value1&key2=value2&keyN=valueN
 | `upstreamUnsafeSsl` | 仅对命中规则的上游 HTTPS 连接跳过证书校验 |
 | `sniCallback` | 配置 SNI 回调元数据（CONNECT 请求） |
 | `devtools` | 为命中的代理页面开启显式 DevTools 控制授权 |
+| `breakpoint` | 为命中流量授权 Breakpoint request/response 暂停阶段 |
 | `passthrough` | 直连透传，不做任何修改 |
 | `tunnel` | 重定向 CONNECT 隧道目标 |
 | `delete` | 删除/阻断请求 |
@@ -457,6 +458,24 @@ https://example.com/ devtools://
 ```
 
 该能力应只在明确需要远程控制或调试代理页面时开启。
+
+### `breakpoint`
+
+`breakpoint://request` / `breakpoint://response` 是 Breakpoint 的规则级授权。Toolbar 中的 Breakpoint Switch 只是全局门禁；只有全局开关开启且请求命中了包含 `breakpoint` 协议的规则，对应阶段才会暂停。
+
+```txt
+127.0.0.1:18080 breakpoint://request
+127.0.0.1:18080 breakpoint://response
+127.0.0.1:18080 breakpoint://request,response
+```
+
+说明：
+
+- `request` / `req`：在请求发往 upstream 前暂停。
+- `response` / `res`：在响应返回 client 前暂停。
+- `request,response`、`req,res`、`both` 或 `all`：同一条命中流量先暂停 request，resume 后再暂停 response。
+- 空 value 或未知 value 不触发暂停。
+- 仅打开 Toolbar 开关不会暂停任何流量；关闭 Toolbar 开关会阻止新暂停并释放 pending breakpoint。
 
 ### `http3`
 

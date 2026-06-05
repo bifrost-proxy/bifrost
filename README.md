@@ -11,7 +11,9 @@
   <a href="https://github.com/bifrost-proxy/bifrost/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
 </p>
 
-> [帮助文档](https://github.com/bifrost-proxy/bifrost/tree/main/docs)
+> Language: **中文** | [English](README.en.md)
+>
+> [帮助文档](https://github.com/bifrost-proxy/bifrost/tree/main/docs) · [English docs](docs-en/README.md) · [Documentation site](https://bifrost-proxy.github.io/bifrost/)
 
 Bifrost 是一个用 Rust 编写的高性能，AI 友好的代理服务器，灵感来源于 [Whistle](https://github.com/avwo/whistle)。它提供请求拦截、规则修改、TLS 拦截、脚本扩展、流量查看、请求重放以及 Web UI 管理能力。
 

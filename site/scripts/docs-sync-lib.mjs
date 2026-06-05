@@ -8,6 +8,7 @@ const __dirname = path.dirname(__filename);
 
 export const repoRoot = path.resolve(__dirname, "../..");
 export const docsRoot = path.join(repoRoot, "docs");
+export const docsEnRoot = path.join(repoRoot, "docs-en");
 export const outputRoot = path.join(repoRoot, "site", "src", "content", "docs");
 
 const knownPages = new Map(
@@ -246,6 +247,251 @@ const knownPages = new Map(
   ].map(([source, config]) => [normalizePath(source), config]),
 );
 
+const knownEnglishPages = new Map(
+  [
+    [
+      "docs-en/README.md",
+      {
+        target: "en/reference/index.mdx",
+        title: "Documentation Overview",
+        description: "Bifrost documentation directory and recommended reading paths.",
+        order: 1,
+      },
+    ],
+    [
+      "docs-en/overview.md",
+      {
+        target: "en/getting-started/overview.mdx",
+        title: "Project Overview",
+        description: "Understand Bifrost positioning, scope, and common use cases.",
+        order: 10,
+      },
+    ],
+    [
+      "docs-en/getting-started.md",
+      {
+        target: "en/getting-started/installation.mdx",
+        title: "Installation and Startup",
+        description: "Install and start Bifrost using the English documentation path.",
+        order: 20,
+      },
+    ],
+    [
+      "docs-en/cli-quick-start.md",
+      {
+        target: "en/getting-started/cli-quick-start.md",
+        title: "CLI Quick Start",
+        description: "Task-oriented Bifrost CLI workflows.",
+        order: 30,
+      },
+    ],
+    [
+      "docs-en/desktop.md",
+      {
+        target: "en/getting-started/desktop.md",
+        title: "Desktop Installation and Build",
+        description: "Desktop app installation, local build steps, and notes.",
+        order: 40,
+      },
+    ],
+    [
+      "docs-en/cli.md",
+      {
+        target: "en/reference/cli.md",
+        title: "CLI Command Reference",
+        description: "Bifrost CLI commands, flags, environment variables, and workflows.",
+        order: 110,
+      },
+    ],
+    [
+      "docs-en/rule.md",
+      {
+        target: "en/reference/rule-engine.md",
+        title: "Rule Engine",
+        description: "Bifrost rule system overview and configuration entry points.",
+        order: 120,
+      },
+    ],
+    [
+      "docs-en/operation.md",
+      {
+        target: "en/reference/operations.md",
+        title: "Operation Reference",
+        description: "Rule operation value formats and common usage.",
+        order: 130,
+      },
+    ],
+    [
+      "docs-en/pattern.md",
+      {
+        target: "en/reference/patterns.md",
+        title: "Matching Patterns",
+        description: "Domain, path, wildcard, regex, and negated pattern behavior.",
+        order: 140,
+      },
+    ],
+    [
+      "docs-en/scripts.md",
+      {
+        target: "en/reference/scripting.md",
+        title: "Scripting",
+        description: "QuickJS scripting capabilities, restrictions, and usage.",
+        order: 150,
+      },
+    ],
+    [
+      "docs-en/values.md",
+      {
+        target: "en/reference/values.md",
+        title: "Values Guide",
+        description: "Values storage, rule references, CLI management, and script access.",
+        order: 160,
+      },
+    ],
+    [
+      "docs-en/replay.md",
+      {
+        target: "en/reference/replay.md",
+        title: "Request Replay",
+        description: "Request replay capabilities, supported cases, and usage guidance.",
+        order: 170,
+      },
+    ],
+    [
+      "docs-en/architecture.md",
+      {
+        target: "en/reference/architecture.md",
+        title: "Project Structure",
+        description: "Repository layout and core module descriptions.",
+        order: 180,
+      },
+    ],
+    [
+      "docs-en/agent-skill.md",
+      {
+        target: "en/reference/agent-skill.md",
+        title: "Agent Skill Installation",
+        description: "Install and use the Bifrost Agent Skill.",
+        order: 190,
+      },
+    ],
+    [
+      "docs-en/breakpoint.md",
+      {
+        target: "en/reference/breakpoint.md",
+        title: "Breakpoint",
+        description: "Pause, inspect, edit, and resume matched HTTP traffic.",
+        order: 195,
+      },
+    ],
+    [
+      "docs-en/rules/README.md",
+      {
+        target: "en/reference/rules/index.md",
+        title: "Rules Overview",
+        description: "Bifrost Rules syntax and capability catalog.",
+        order: 200,
+      },
+    ],
+    [
+      "docs-en/rules/routing.md",
+      {
+        title: "Routing",
+        description: "Rule routing, forwarding, and proxy control.",
+        order: 210,
+      },
+    ],
+    [
+      "docs-en/rules/request-modification.md",
+      {
+        title: "Request Modification",
+        description: "Request headers, body, and related rewrite operations.",
+        order: 220,
+      },
+    ],
+    [
+      "docs-en/rules/response-modification.md",
+      {
+        title: "Response Modification",
+        description: "Response headers, body, and related rewrite operations.",
+        order: 230,
+      },
+    ],
+    [
+      "docs-en/rules/url-manipulation.md",
+      {
+        title: "URL Manipulation",
+        description: "URL, path, and query-parameter rewrite capabilities.",
+        order: 240,
+      },
+    ],
+    [
+      "docs-en/rules/body-manipulation.md",
+      {
+        title: "Body Manipulation",
+        description: "Request and response body manipulation capabilities.",
+        order: 250,
+      },
+    ],
+    [
+      "docs-en/rules/timing-throttle.md",
+      {
+        title: "Delay and Throttling",
+        description: "Delay, speed limiting, and throttling capabilities.",
+        order: 260,
+      },
+    ],
+    [
+      "docs-en/rules/status-redirect.md",
+      {
+        title: "Status and Redirect",
+        description: "Status-code control, redirects, and response branching.",
+        order: 270,
+      },
+    ],
+    [
+      "docs-en/rules/filters.md",
+      {
+        title: "Filters",
+        description: "Request and response filter configuration.",
+        order: 280,
+      },
+    ],
+    [
+      "docs-en/rules/websocket.md",
+      {
+        title: "WebSocket",
+        description: "WebSocket routing rules and usage.",
+        order: 290,
+      },
+    ],
+    [
+      "docs-en/rules/scripts.md",
+      {
+        title: "Script Rules",
+        description: "Attach scripts to Rules.",
+        order: 300,
+      },
+    ],
+    [
+      "docs-en/rules/patterns.md",
+      {
+        title: "Rule Patterns",
+        description: "Rule matching patterns and priority details.",
+        order: 310,
+      },
+    ],
+    [
+      "docs-en/rules/rule-priority.md",
+      {
+        title: "Rule Priority",
+        description: "Rule conflict and priority handling.",
+        order: 320,
+      },
+    ],
+  ].map(([source, config]) => [normalizePath(source), config]),
+);
+
 export function normalizePath(value) {
   return value.replaceAll(path.sep, "/");
 }
@@ -272,7 +518,13 @@ export function titleFromMarkdown(markdown, fallback) {
 function titleFromPath(relativeSource) {
   const parsed = path.posix.parse(normalizePath(relativeSource));
   if (parsed.base === "README.md") {
-    return parsed.dir === "docs" ? "文档总览" : path.posix.basename(parsed.dir);
+    if (parsed.dir === "docs") {
+      return "文档总览";
+    }
+    if (parsed.dir === "docs-en") {
+      return "Documentation Overview";
+    }
+    return path.posix.basename(parsed.dir);
   }
   return parsed.name
     .split("-")
@@ -282,25 +534,30 @@ function titleFromPath(relativeSource) {
 }
 
 function defaultTargetForSource(source) {
-  const relative = normalizePath(source).replace(/^docs\//, "");
+  const normalized = normalizePath(source);
+  const isEnglish = normalized.startsWith("docs-en/");
+  const relative = normalized.replace(/^(docs|docs-en)\//, "");
   const parsed = path.posix.parse(relative);
 
   if (relative === "README.md") {
-    return "reference/index.mdx";
+    return isEnglish ? "en/reference/index.mdx" : "reference/index.mdx";
   }
   if (parsed.base === "README.md") {
-    return `reference/${parsed.dir}/index.md`;
+    return `${isEnglish ? "en/" : ""}reference/${parsed.dir}/index.md`;
   }
-  return `reference/${relative}`;
+  return `${isEnglish ? "en/" : ""}reference/${relative}`;
 }
 
 function defaultDescription(title, source) {
+  if (source.startsWith("docs-en/")) {
+    return `Automatically synced English ${title} documentation from ${source}.`;
+  }
   return `从 ${source} 自动同步生成的 ${title} 文档。`;
 }
 
 function defaultOrder(source, index) {
   const normalized = normalizePath(source);
-  if (normalized.startsWith("docs/rules/")) {
+  if (normalized.startsWith("docs/rules/") || normalized.startsWith("docs-en/rules/")) {
     return 600 + index;
   }
   return 900 + index;
@@ -327,13 +584,13 @@ function walkMarkdownFiles(rootDir, currentDir = rootDir, results = []) {
 
 export function discoverDocSourcesSync(root = docsRoot) {
   return walkMarkdownFiles(root)
-    .map((relative) => `docs/${relative}`)
+    .map((relative) => `${path.basename(root)}/${relative}`)
     .sort((left, right) => left.localeCompare(right));
 }
 
 function createPage({ source, markdown, index }) {
   const normalizedSource = normalizePath(source);
-  const override = knownPages.get(normalizedSource) ?? {};
+  const override = knownPages.get(normalizedSource) ?? knownEnglishPages.get(normalizedSource) ?? {};
   const target = normalizePath(override.target ?? defaultTargetForSource(normalizedSource));
   const fallbackTitle = override.title ?? titleFromPath(normalizedSource);
   const title = override.title ?? titleFromMarkdown(markdown, fallbackTitle);
@@ -350,7 +607,10 @@ function createPage({ source, markdown, index }) {
 }
 
 export function buildPagesSync(root = repoRoot) {
-  const sources = discoverDocSourcesSync(path.join(root, "docs"));
+  const sourceRoots = [path.join(root, "docs"), path.join(root, "docs-en")].filter((sourceRoot) =>
+    fs.existsSync(sourceRoot),
+  );
+  const sources = sourceRoots.flatMap((sourceRoot) => discoverDocSourcesSync(sourceRoot));
   return sources.map((source, index) => {
     const markdown = fs.readFileSync(path.join(root, source), "utf8");
     return createPage({ source, markdown, index });
@@ -372,7 +632,9 @@ function frontmatter(page) {
     `  order: ${page.order}`,
     "---",
     "",
-    `> 此页面由 \`${page.source}\` 自动同步生成。`,
+    page.source.startsWith("docs-en/")
+      ? `> This page is automatically synced from \`${page.source}\`.`
+      : `> 此页面由 \`${page.source}\` 自动同步生成。`,
     "",
   ].join("\n");
 }
@@ -478,7 +740,8 @@ async function cleanGeneratedDocs(root) {
       const content = await fsp.readFile(file, "utf8");
       if (
         content.includes("<!-- Generated from docs/") ||
-        /^> 此页面由 `docs\/.+` 自动同步生成。$/m.test(content)
+        /^> 此页面由 `docs\/.+` 自动同步生成。$/m.test(content) ||
+        /^> This page is automatically synced from `docs-en\/.+`\.$/m.test(content)
       ) {
         await fsp.unlink(file);
       }
@@ -527,7 +790,7 @@ export async function syncDocs({
   const generatedAt = path.join(docsOutputRoot, ".generated-at");
   await fsp.writeFile(
     generatedAt,
-    `Synced ${pages.length} docs from ${path.relative(root, path.join(root, "docs"))}\n`,
+    `Synced ${pages.length} docs from docs and docs-en\n`,
     "utf8",
   );
 
