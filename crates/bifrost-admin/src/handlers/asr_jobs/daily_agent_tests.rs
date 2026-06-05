@@ -68,6 +68,10 @@ fn daily_agent_report_sync_dir_update_survives_task_normalization() {
         config.agents[0].report_sync_dir.as_deref(),
         Some("/tmp/bifrost-daily-agent-reports")
     );
+    assert_eq!(
+        config.agents[1].report_sync_dir.as_deref(),
+        Some("/tmp/bifrost-daily-agent-reports")
+    );
 
     let normalized = normalize_daily_agent_config(&config);
     assert_eq!(
@@ -78,11 +82,16 @@ fn daily_agent_report_sync_dir_update_survives_task_normalization() {
         normalized.agents[0].report_sync_dir.as_deref(),
         Some("/tmp/bifrost-daily-agent-reports")
     );
+    assert_eq!(
+        normalized.agents[1].report_sync_dir.as_deref(),
+        Some("/tmp/bifrost-daily-agent-reports")
+    );
 
     set_primary_daily_agent_report_sync_dir(&mut config, Some(" ".to_string()));
     let normalized = normalize_daily_agent_config(&config);
     assert_eq!(normalized.report_sync_dir, None);
     assert_eq!(normalized.agents[0].report_sync_dir, None);
+    assert_eq!(normalized.agents[1].report_sync_dir, None);
 }
 
 #[test]
@@ -846,19 +855,13 @@ fn daily_agent_report_index_status_marks_unindexed_reports_without_backfill() {
 }
 
 #[test]
-fn daily_agent_report_sync_copies_reports_and_skips_identical_targets() {
+fn daily_agent_report_sync_copies_reports_into_agent_subdirectories() {
     let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp = TempDir::new().unwrap();
     let _guard = EnvGuard::set_data_dir(temp.path());
     let task_id = "daily-agent-report-sync-task";
-    let daily_dir = daily_dir_for_task(task_id);
-    let report_dir = daily_dir.join("report");
     let sync_dir = temp.path().join("icloud-sync");
-    std::fs::create_dir_all(&report_dir).unwrap();
     std::fs::create_dir_all(&sync_dir).unwrap();
-    std::fs::write(report_dir.join("2026-05-14-report.md"), "report one").unwrap();
-    std::fs::write(report_dir.join("2026-05-15-report.md"), "report two").unwrap();
-    std::fs::write(sync_dir.join("2026-05-14-report.md"), "report one").unwrap();
 
     let mut task = AsrDirectoryTask {
         id: task_id.to_string(),
@@ -882,22 +885,66 @@ fn daily_agent_report_sync_copies_reports_and_skips_identical_targets() {
         external_devices: Vec::new(),
         import_policy: AsrExternalImportPolicy::default(),
     };
-    task.daily_agent.report_sync_dir = Some(sync_dir.to_string_lossy().to_string());
-
-    let reports: Vec<String> = list_daily_agent_report_files(task_id)
-        .into_iter()
-        .map(|path| path.to_string_lossy().to_string())
-        .collect();
-    let result = sync_daily_agent_report_files(&task, &reports).unwrap();
-
-    assert_eq!(result.total_files, 2);
-    assert_eq!(result.copied_files, 1);
-    assert_eq!(result.skipped_files, 1);
-    assert_eq!(result.failed_files, 0);
-    assert_eq!(
-        std::fs::read_to_string(sync_dir.join("2026-05-15-report.md")).unwrap(),
-        "report two"
+    set_primary_daily_agent_report_sync_dir(
+        &mut task.daily_agent,
+        Some(sync_dir.to_string_lossy().to_string()),
     );
+    ensure_asr_daily_workspace(&task).unwrap();
+
+    let daily_report_agent = normalized_daily_agents(&task.daily_agent)
+        .into_iter()
+        .find(|agent| agent.id == "daily_report")
+        .unwrap();
+    let daily_report_task = task_for_daily_agent(&task, &daily_report_agent);
+    let daily_report_path = daily_agent_output_dir(&daily_report_task).join("2026-05-14-report.md");
+    std::fs::write(&daily_report_path, "report one").unwrap();
+    std::fs::create_dir_all(sync_dir.join("daily_report")).unwrap();
+    std::fs::write(sync_dir.join("daily_report/2026-05-14-report.md"), "report one").unwrap();
+
+    let tomorrow_agent = normalized_daily_agents(&task.daily_agent)
+        .into_iter()
+        .find(|agent| agent.id == "tomorrow_todo")
+        .unwrap();
+    let tomorrow_task = task_for_daily_agent(&task, &tomorrow_agent);
+    let tomorrow_report_path = daily_agent_output_dir(&tomorrow_task).join("2026-05-14-report.md");
+    std::fs::write(&tomorrow_report_path, "todo one").unwrap();
+
+    let daily_result = sync_daily_agent_report_files(
+        &daily_report_task,
+        &[daily_report_path.to_string_lossy().to_string()],
+    )
+    .unwrap();
+    let tomorrow_result = sync_daily_agent_report_files(
+        &tomorrow_task,
+        &[tomorrow_report_path.to_string_lossy().to_string()],
+    )
+    .unwrap();
+
+    assert_eq!(daily_result.total_files, 1);
+    assert_eq!(daily_result.copied_files, 0);
+    assert_eq!(daily_result.skipped_files, 1);
+    assert_eq!(daily_result.failed_files, 0);
+    assert_eq!(
+        daily_result.target_dir,
+        sync_dir.join("daily_report").to_string_lossy()
+    );
+    assert_eq!(tomorrow_result.total_files, 1);
+    assert_eq!(tomorrow_result.copied_files, 1);
+    assert_eq!(tomorrow_result.skipped_files, 0);
+    assert_eq!(tomorrow_result.failed_files, 0);
+    assert_eq!(
+        tomorrow_result.target_dir,
+        sync_dir.join("tomorrow_todo").to_string_lossy()
+    );
+    assert_eq!(
+        std::fs::read_to_string(sync_dir.join("daily_report/2026-05-14-report.md")).unwrap(),
+        "report one"
+    );
+    assert_eq!(
+        std::fs::read_to_string(sync_dir.join("tomorrow_todo/2026-05-14-report.md")).unwrap(),
+        "todo one"
+    );
+    assert!(!sync_dir.join("2026-05-14-report.md").exists());
 }
 
 #[test]

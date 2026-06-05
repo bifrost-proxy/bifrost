@@ -516,6 +516,27 @@ diarization_no_asr_units: diarization produced no transcribable ASR units
 - E2E：扩展 `e2e-tests/tests/test_asr_daily_agents_api.sh`，在已有 report 后追加 daily Markdown，不带 `force` 再运行，断言 processed run_id 更新且 prompt 包含 `change_kind=Appended`。
 - human_tests：更新 `human_tests/asr-daily-agents.md` 的回归用例，验证 ASR run 完成后以 daily 合成文档变更作为 Daily Agent 自动触发门禁，不再绑定某个 diarization 错误字符串。
 
+## 2026-06-05 增量：Daily Agent 报告完成后自动按 Agent 分目录同步
+
+### 问题背景
+
+Daily Agent 页面提供任务级 `report_sync_dir` 和 `Sync Reports` 操作，但旧同步路径把报告直接复制到同步根目录，多个 Agent 在同一天生成的 `YYYY-MM-DD-report.md` 会争用同一个文件名。另一个问题是任务级同步目录只镜像到主 Agent：`tomorrow_todo` 这类后续 Agent 跑完后没有继承同步目录，因此即使报告生成成功也不会自动同步。
+
+### 修复语义
+
+- 任务级 `report_sync_dir` 是所有 Daily Agents 共用的同步根目录；保存该目录时同步写入每个 Agent item，历史配置中 Agent item 为空时也从任务级字段继承。
+- 每个 Agent 成功生成 report 后立即同步本轮生成的 report，不等待用户手动点击 `Sync Reports`。
+- 同步目标按 Agent 分目录：`<report_sync_dir>/<agent_id>/YYYY-MM-DD-report.md`，避免不同 Agent 同一天报告覆盖或误判为相同内容跳过。
+- 手动 `Sync Reports` 遍历全部已配置 Agent，返回任务级汇总结果，同时分别更新各 Agent 的 `last_report_sync`。
+- 既有 processed state、IM delivery、Git commit 和 change plan 语义不变。
+
+### 测试补充
+
+- 单元测试：覆盖任务级同步目录同步到所有 Agent、同一天两个 Agent 报告复制到不同 agent 子目录且不会落到同步根目录。
+- E2E：扩展 `e2e-tests/tests/test_asr_daily_agents_api.sh`，配置同步根目录后触发两个 Agent 真实运行，断言 `daily_report` 与 `tomorrow_todo` 的报告自动出现在各自子目录，并检查 `last_report_sync.target_dir`。
+- CLI E2E：更新 `e2e-tests/tests/test_asr_task_cli.sh`，手动 `daily sync` 断言报告复制到 `daily_report/` 子目录。
+- human_tests：更新 `human_tests/asr-daily-agents.md` 的自动同步回归用例。
+
 ## 实施顺序建议
 
 1. 新增 `run_progress.json` 写入/恢复逻辑和单元测试。

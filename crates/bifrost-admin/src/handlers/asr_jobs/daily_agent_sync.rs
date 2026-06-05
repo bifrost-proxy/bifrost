@@ -22,19 +22,33 @@ fn configured_daily_agent_report_sync_dir(task: &AsrDirectoryTask) -> Option<Pat
         .map(expand_daily_agent_sync_dir)
 }
 
+fn daily_agent_report_sync_target_dir(task: &AsrDirectoryTask) -> Result<PathBuf, String> {
+    let root_dir = configured_daily_agent_report_sync_dir(task)
+        .ok_or_else(|| "Daily Agent report sync directory is not configured".to_string())?;
+
+    if root_dir.exists() && !root_dir.is_dir() {
+        return Err(format!(
+            "Daily Agent report sync target is not a directory: {}",
+            root_dir.display()
+        ));
+    }
+
+    let agent_dir = normalize_daily_agent_token(&task.daily_agent.agent_id);
+    let agent_dir = if agent_dir.is_empty() {
+        normalize_daily_agent_token(&task.daily_agent.output_dir)
+    } else {
+        agent_dir
+    };
+
+    Ok(root_dir.join(agent_dir))
+}
+
 fn sync_daily_agent_report_files(
     task: &AsrDirectoryTask,
     report_paths: &[String],
 ) -> Result<AsrDailyAgentReportSyncResult, String> {
-    let target_dir = configured_daily_agent_report_sync_dir(task)
-        .ok_or_else(|| "Daily Agent report sync directory is not configured".to_string())?;
+    let target_dir = daily_agent_report_sync_target_dir(task)?;
 
-    if target_dir.exists() && !target_dir.is_dir() {
-        return Err(format!(
-            "Daily Agent report sync target is not a directory: {}",
-            target_dir.display()
-        ));
-    }
     std::fs::create_dir_all(&target_dir)
         .map_err(|error| format!("create report sync directory {}: {error}", target_dir.display()))?;
 
@@ -105,12 +119,53 @@ fn sync_daily_agent_report_files(
     Ok(result)
 }
 
-fn sync_all_daily_agent_reports(task: &AsrDirectoryTask) -> Result<AsrDailyAgentReportSyncResult, String> {
-    let reports: Vec<String> = list_daily_agent_report_files(&task.id)
-        .into_iter()
-        .map(|path| path.to_string_lossy().to_string())
-        .collect();
-    sync_daily_agent_report_files(task, &reports)
+fn sync_all_daily_agent_reports_by_agent(
+    task: &AsrDirectoryTask,
+) -> Result<(AsrDailyAgentReportSyncResult, Vec<(AsrDirectoryTask, AsrDailyAgentReportSyncResult)>), String> {
+    let root_dir = configured_daily_agent_report_sync_dir(task)
+        .ok_or_else(|| "Daily Agent report sync directory is not configured".to_string())?;
+
+    if root_dir.exists() && !root_dir.is_dir() {
+        return Err(format!(
+            "Daily Agent report sync target is not a directory: {}",
+            root_dir.display()
+        ));
+    }
+    std::fs::create_dir_all(&root_dir)
+        .map_err(|error| format!("create report sync directory {}: {error}", root_dir.display()))?;
+
+    let reports = list_daily_agent_report_files(&task.id);
+    let mut grouped_reports: BTreeMap<String, (AsrDirectoryTask, Vec<String>)> = BTreeMap::new();
+    for report_path in reports {
+        let output_dir = agent_output_dir_from_report_path(task, &report_path);
+        let agent = agent_for_output_dir(task, &output_dir);
+        let agent_task = task_for_daily_agent(task, &agent);
+        grouped_reports
+            .entry(agent.id.clone())
+            .or_insert_with(|| (agent_task, Vec::new()))
+            .1
+            .push(report_path.to_string_lossy().to_string());
+    }
+
+    let mut aggregate = AsrDailyAgentReportSyncResult {
+        target_dir: root_dir.to_string_lossy().to_string(),
+        total_files: 0,
+        synced_at_ms: now_ms(),
+        ..Default::default()
+    };
+    let mut per_agent = Vec::new();
+
+    for (_, (agent_task, agent_reports)) in grouped_reports {
+        let result = sync_daily_agent_report_files(&agent_task, &agent_reports)?;
+        aggregate.total_files += result.total_files;
+        aggregate.copied_files += result.copied_files;
+        aggregate.skipped_files += result.skipped_files;
+        aggregate.failed_files += result.failed_files;
+        aggregate.errors.extend(result.errors.clone());
+        per_agent.push((agent_task, result));
+    }
+
+    Ok((aggregate, per_agent))
 }
 
 fn update_daily_agent_report_sync_status(

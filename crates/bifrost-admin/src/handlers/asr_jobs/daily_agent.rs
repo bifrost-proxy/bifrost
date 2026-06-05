@@ -1446,9 +1446,12 @@ fn set_primary_daily_agent_report_sync_dir(
         .map(|agent| normalize_daily_agent_token(&agent.id))
         .unwrap_or_else(default_daily_agent_id);
     task_config.report_sync_dir = report_sync_dir.clone();
-    sync_daily_agent_item_status(task_config, &primary_id, |agent| {
-        agent.report_sync_dir = report_sync_dir;
-    });
+    if task_config.agents.is_empty() {
+        task_config.agents = normalized_daily_agents(task_config);
+    }
+    for agent in &mut task_config.agents {
+        agent.report_sync_dir = report_sync_dir.clone();
+    }
     mirror_daily_agent_legacy_status(task_config, &primary_id);
 }
 

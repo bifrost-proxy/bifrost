@@ -423,8 +423,12 @@ fn validate_daily_agent_config(config: &AsrDailyAgentConfig) -> Result<(), Strin
 }
 
 fn task_for_daily_agent(task: &AsrDirectoryTask, agent: &AsrDailyAgentItem) -> AsrDirectoryTask {
+    let inherited_report_sync_dir = task.daily_agent.report_sync_dir.clone();
     let mut task = task.clone();
     task.daily_agent = daily_agent_config_from_item(agent);
+    if task.daily_agent.report_sync_dir.is_none() {
+        task.daily_agent.report_sync_dir = inherited_report_sync_dir;
+    }
     task
 }
 

@@ -373,19 +373,16 @@ async fn post_daily_agent_sync_response(task_id: &str) -> Response<BoxBody> {
     let Some(task) = find_task(task_id) else {
         return error_response(StatusCode::NOT_FOUND, "ASR task not found");
     };
-    let agent = normalized_daily_agents(&task.daily_agent)
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| daily_agent_item_from_legacy(&task.daily_agent));
-    let task = task_for_daily_agent(&task, &agent);
 
-    let sync_result = match sync_all_daily_agent_reports(&task) {
+    let (sync_result, per_agent_results) = match sync_all_daily_agent_reports_by_agent(&task) {
         Ok(result) => result,
         Err(error) => return error_response(StatusCode::BAD_REQUEST, &error),
     };
 
-    if let Err(error) = update_daily_agent_report_sync_status(&task, sync_result.clone()) {
-        return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error);
+    for (agent_task, agent_result) in per_agent_results {
+        if let Err(error) = update_daily_agent_report_sync_status(&agent_task, agent_result) {
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error);
+        }
     }
 
     if sync_result.failed_files > 0 {
