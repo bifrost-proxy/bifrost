@@ -102,6 +102,8 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
   const [detailAgentId, setDetailAgentId] = useState<string | null>(null);
   const [reportSyncDir, setReportSyncDir] = useState("");
   const [reportSyncDirDirty, setReportSyncDirDirty] = useState(false);
+  const [terminology, setTerminology] = useState("");
+  const [terminologyDirty, setTerminologyDirty] = useState(false);
 
   const fetchAll = useCallback(async () => {
     setLoading(true);
@@ -125,6 +127,8 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
       setInstructionsDirty(false);
       setReportSyncDir(config.config.report_sync_dir || "");
       setReportSyncDirDirty(false);
+      setTerminology(config.config.terminology || "");
+      setTerminologyDirty(false);
       setRunnerConfig(runners);
       setImProviders(providers);
       setImTargets(targets);
@@ -333,6 +337,20 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
       fetchAll();
     } catch (error: unknown) {
       message.error(`Failed to save sync directory: ${errorMessage(error)}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleSaveTerminology = async () => {
+    setSaving(true);
+    try {
+      await updateDailyAgentConfig(taskId, { terminology });
+      message.success("Terminology saved");
+      setTerminologyDirty(false);
+      fetchAll();
+    } catch (error: unknown) {
+      message.error(`Failed to save terminology: ${errorMessage(error)}`);
     } finally {
       setSaving(false);
     }
@@ -807,58 +825,93 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
       <Card size="small" title="Daily Agents" loading={loading && !config}>
-        <Space
-          style={{
-            justifyContent: "space-between",
-            width: "100%",
-            marginBottom: 12,
-          }}
-        >
-          <Space wrap>
-            <Text type="secondary">Task</Text>
-            <Switch
-              checked={config?.enabled}
-              onChange={(enabled) => handleConfigUpdate({ enabled })}
-              loading={saving}
-              size="small"
-            />
-            <Space.Compact style={{ width: 440 }}>
-              <Input
-                data-testid="asr-daily-agent-report-sync-dir"
-                size="small"
-                value={reportSyncDir}
-                placeholder="Optional report sync directory"
-                onChange={(event) => {
-                  setReportSyncDir(event.target.value);
-                  setReportSyncDirDirty(true);
-                }}
-                onPressEnter={handleSaveReportSyncDir}
-                disabled={saving}
-              />
-              <Button
-                size="small"
-                icon={<SaveOutlined />}
-                onClick={handleSaveReportSyncDir}
-                disabled={!reportSyncDirDirty}
+        <Space direction="vertical" size={8} style={{ width: "100%", marginBottom: 12 }}>
+          <Space
+            style={{
+              justifyContent: "space-between",
+              width: "100%",
+            }}
+          >
+            <Space wrap>
+              <Text type="secondary">Task</Text>
+              <Switch
+                checked={config?.enabled}
+                onChange={(enabled) => handleConfigUpdate({ enabled })}
                 loading={saving}
+                size="small"
+              />
+              <Space.Compact style={{ width: 440 }}>
+                <Input
+                  data-testid="asr-daily-agent-report-sync-dir"
+                  size="small"
+                  value={reportSyncDir}
+                  placeholder="Optional report sync directory"
+                  onChange={(event) => {
+                    setReportSyncDir(event.target.value);
+                    setReportSyncDirDirty(true);
+                  }}
+                  onPressEnter={handleSaveReportSyncDir}
+                  disabled={saving}
+                />
+                <Button
+                  size="small"
+                  icon={<SaveOutlined />}
+                  onClick={handleSaveReportSyncDir}
+                  disabled={!reportSyncDirDirty}
+                  loading={saving}
+                >
+                  Save
+                </Button>
+              </Space.Compact>
+              <Button
+                data-testid="asr-daily-agent-sync-reports-button"
+                size="small"
+                icon={<SyncOutlined />}
+                onClick={handleSyncReports}
+                loading={syncing}
+                disabled={!config?.report_sync_dir?.trim()}
               >
-                Save
+                Sync Reports
               </Button>
-            </Space.Compact>
-            <Button
-              data-testid="asr-daily-agent-sync-reports-button"
-              size="small"
-              icon={<SyncOutlined />}
-              onClick={handleSyncReports}
-              loading={syncing}
-              disabled={!config?.report_sync_dir?.trim()}
-            >
-              Sync Reports
+            </Space>
+            <Button icon={<ReloadOutlined />} onClick={fetchAll} loading={loading}>
+              Refresh
             </Button>
           </Space>
-          <Button icon={<ReloadOutlined />} onClick={fetchAll} loading={loading}>
-            Refresh
-          </Button>
+          <div
+            style={{
+              alignItems: "flex-start",
+              display: "flex",
+              flexWrap: "wrap",
+              gap: 8,
+              width: "100%",
+            }}
+          >
+            <Text type="secondary" style={{ width: 88, lineHeight: "24px" }}>
+              Terminology
+            </Text>
+            <TextArea
+              data-testid="asr-daily-agent-terminology"
+              value={terminology}
+              placeholder="Project names, people, abbreviations, fixed translations..."
+              autoSize={{ minRows: 2, maxRows: 5 }}
+              onChange={(event) => {
+                setTerminology(event.target.value);
+                setTerminologyDirty(true);
+              }}
+              disabled={saving}
+              style={{ flex: "1 1 320px", maxWidth: 720 }}
+            />
+            <Button
+              size="small"
+              icon={<SaveOutlined />}
+              onClick={handleSaveTerminology}
+              disabled={!terminologyDirty}
+              loading={saving}
+            >
+              Save
+            </Button>
+          </div>
         </Space>
         <Alert
           type="info"

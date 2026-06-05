@@ -537,6 +537,32 @@ Daily Agent 页面提供任务级 `report_sync_dir` 和 `Sync Reports` 操作，
 - CLI E2E：更新 `e2e-tests/tests/test_asr_task_cli.sh`，手动 `daily sync` 断言报告复制到 `daily_report/` 子目录。
 - human_tests：更新 `human_tests/asr-daily-agents.md` 的自动同步回归用例。
 
+## 2026-06-05 增量：Daily Agent 全局专有名词配置
+
+### 问题背景
+
+Daily Agent 运行时需要参考随任务不断变化的专有名词、项目代号、人名、缩写和固定翻译。旧模型只能把这些内容手写进每个 Agent 的 `AGENTS.md`，多 Agent 场景会重复维护；ChatGPT Web Runner 又会复用固定 conversation，只有首轮注入 `AGENTS.md`，后续轮次无法感知每天或每次任务更新的术语。
+
+### 实现语义
+
+- `daily_agent.terminology` 是任务级全局文本配置，由 Daily Agent 页面提供 `Terminology` 文本输入框保存；空白内容归一化为未配置。
+- Workspace 初始化、保存配置、读取配置和运行前都会把术语写入每个 enabled/known Agent 工作目录根目录的 `TERMS.md`。该文件位于 `.daily/agents/<agent_id>/TERMS.md`，与 `AGENTS.md`、`input/`、`output/` 同级。
+- `AGENTS.md` 通过 Bifrost 托管块引用相对路径 `TERMS.md`，说明 Runner 运行前必须读取该文件；托管块可重复刷新，不覆盖用户自定义指令正文。清空术语时删除 `TERMS.md` 并移除托管块。
+- Bifrost Agent、Codex 和其他文件型 Runner 的 prompt 只引用 `TERMS.md` 相对文件路径，不内联术语正文，保证工作目录是单一事实源。
+- `chatgpt_web` Runner 每次构造 prompt 时都从 `TERMS.md` 或最新配置读取术语，并把 `## 专有名词配置（每次运行动态注入）` 放在 prompt 最前面；不依赖固定 conversation 首轮缓存，后续轮次也会注入最新术语。
+- 单 Agent task projection 必须继承任务级术语，避免 normalize 或按 agent 串行运行时丢失全局配置。
+
+### 测试补充
+
+- 单元测试：覆盖术语归一化、配置 normalize、`task_for_daily_agent` 继承、每个 Agent 写入 `TERMS.md` 和 `AGENTS.md` 相对引用，以及 ChatGPT Web 首轮/后续轮次都前置注入术语。
+- E2E：扩展 `e2e-tests/tests/test_asr_daily_agents_api.sh`，通过 API 保存全局术语，断言两个默认 Agent 都生成 `TERMS.md`、`AGENTS.md` 引用 `TERMS.md`，真实 run 仍生成并同步报告。
+- human_tests：新增 `TC-ADA-13`，验证 Daily Agent 全局术语配置在 WebUI/API、文件型 Runner 工作目录和 ChatGPT Web prompt 策略三类入口上的用户可感知行为。
+
+### Review/Fix/Test 闭环
+
+- 第 1 轮复核配置模型、workspace 写入、prompt 注入顺序和 WebUI 保存入口；运行 Daily Agent targeted 单测与 API E2E。
+- 第 2 轮复核 custom `AGENTS.md` 保存不会覆盖 `TERMS.md` 托管引用、清空术语会清理托管文件、report sync 多 Agent 行为不回退；复跑受影响单测、E2E 和 human_tests。
+
 ## 实施顺序建议
 
 1. 新增 `run_progress.json` 写入/恢复逻辑和单元测试。

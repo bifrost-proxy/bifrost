@@ -54,6 +54,8 @@ async fn put_daily_agent_config_response(
         #[serde(default)]
         im_delivery: Option<UpdateImDeliveryConfig>,
         #[serde(default)]
+        terminology: Option<String>,
+        #[serde(default)]
         report_sync_dir: Option<String>,
     }
 
@@ -121,6 +123,9 @@ async fn put_daily_agent_config_response(
         if let Some(send_policy) = im.send_policy {
             task.daily_agent.im_delivery.send_policy = send_policy;
         }
+    }
+    if update.terminology.is_some() {
+        task.daily_agent.terminology = normalize_daily_agent_terminology(update.terminology);
     }
     if let Some(report_sync_dir) = update.report_sync_dir {
         set_primary_daily_agent_report_sync_dir(&mut task.daily_agent, Some(report_sync_dir));
@@ -226,7 +231,11 @@ async fn put_daily_agent_instructions_response(
 
     let daily_dir = daily_dir_for_task(task_id);
     let agents_path = daily_agent_instructions_path(&agent_task);
-    if let Err(e) = std::fs::write(&agents_path, update.content.as_bytes()) {
+    let content = ensure_daily_agent_terms_reference(
+        &update.content,
+        normalize_daily_agent_terminology(agent_task.daily_agent.terminology.clone()).is_some(),
+    );
+    if let Err(e) = std::fs::write(&agents_path, content.as_bytes()) {
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("write Daily Agent instructions: {e}"),
@@ -242,7 +251,7 @@ async fn put_daily_agent_instructions_response(
         let agent_id = agent.id.clone();
         sync_daily_agent_item_status(&mut task.daily_agent, &agent_id, |item| {
             item.instructions_source = AsrDailyAgentInstructionsSource::Custom;
-            item.instructions = Some(update.content.clone());
+            item.instructions = Some(content.clone());
         });
         mirror_daily_agent_legacy_status(&mut task.daily_agent, &agent_id);
         task.updated_at_ms = now_ms();

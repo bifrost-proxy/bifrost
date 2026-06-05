@@ -1,5 +1,8 @@
 // ─── Daily Agent Workspace ───────────────────────────────────────────────────
 
+const DAILY_AGENT_TERMS_REFERENCE_BEGIN: &str = "<!-- BIFROST_DAILY_AGENT_TERMS_BEGIN -->";
+const DAILY_AGENT_TERMS_REFERENCE_END: &str = "<!-- BIFROST_DAILY_AGENT_TERMS_END -->";
+
 fn count_markdown_files(dir: &Path) -> usize {
     std::fs::read_dir(dir)
         .map(|entries| {
@@ -156,6 +159,80 @@ fn migrate_daily_agent_instructions_content(task: &AsrDirectoryTask, content: &s
         )
 }
 
+fn daily_agent_terms_reference_block() -> String {
+    format!(
+        "{DAILY_AGENT_TERMS_REFERENCE_BEGIN}\n## 专有名词配置\n\n运行前必须读取当前工作目录根目录下的 `{DAILY_AGENT_TERMS_FILENAME}`，并把其中的专有名词、缩写、项目名、人名或固定表达作为本次报告的优先参考。该路径是相对于当前 Agent 工作目录的相对文件路径。\n{DAILY_AGENT_TERMS_REFERENCE_END}\n"
+    )
+}
+
+fn replace_managed_daily_agent_terms_reference(content: &str, replacement: Option<&str>) -> String {
+    let Some(begin) = content.find(DAILY_AGENT_TERMS_REFERENCE_BEGIN) else {
+        if let Some(replacement) = replacement {
+            let mut next = content.trim_end().to_string();
+            if !next.is_empty() {
+                next.push_str("\n\n");
+            }
+            next.push_str(replacement);
+            return next;
+        }
+        return content.to_string();
+    };
+    let Some(end_from_begin) = content[begin..].find(DAILY_AGENT_TERMS_REFERENCE_END) else {
+        return content.to_string();
+    };
+    let end = begin + end_from_begin + DAILY_AGENT_TERMS_REFERENCE_END.len();
+    let mut next = String::new();
+    next.push_str(content[..begin].trim_end());
+    if let Some(replacement) = replacement {
+        if !next.is_empty() {
+            next.push_str("\n\n");
+        }
+        next.push_str(replacement.trim_end());
+    }
+    let suffix = content[end..].trim_start_matches(['\r', '\n']);
+    if !suffix.is_empty() {
+        if !next.is_empty() {
+            next.push_str("\n\n");
+        }
+        next.push_str(suffix);
+    }
+    next
+}
+
+fn ensure_daily_agent_terms_reference(content: &str, has_terms: bool) -> String {
+    if has_terms {
+        let block = daily_agent_terms_reference_block();
+        replace_managed_daily_agent_terms_reference(content, Some(&block))
+    } else {
+        replace_managed_daily_agent_terms_reference(content, None)
+    }
+}
+
+fn sync_daily_agent_terms_file(task: &AsrDirectoryTask) -> Result<bool, String> {
+    let terms_path = daily_agent_terms_path(task);
+    let Some(content) = normalize_daily_agent_terminology(task.daily_agent.terminology.clone())
+    else {
+        if terms_path.exists() {
+            std::fs::remove_file(&terms_path)
+                .map_err(|e| format!("remove Daily Agent terms {}: {e}", terms_path.display()))?;
+        }
+        return Ok(false);
+    };
+    let content = if content.ends_with('\n') {
+        content
+    } else {
+        format!("{content}\n")
+    };
+    if let Ok(existing) = std::fs::read_to_string(&terms_path) {
+        if existing == content {
+            return Ok(true);
+        }
+    }
+    std::fs::write(&terms_path, content.as_bytes())
+        .map_err(|e| format!("write Daily Agent terms {}: {e}", terms_path.display()))?;
+    Ok(true)
+}
+
 fn ensure_asr_daily_workspace(
     task: &AsrDirectoryTask,
 ) -> Result<AsrDailyWorkspaceStatus, String> {
@@ -180,6 +257,7 @@ fn ensure_asr_daily_workspace(
             .map_err(|e| format!("create agent output root dir: {e}"))?;
         let output_dir = daily_agent_output_dir(&agent_task);
         std::fs::create_dir_all(&output_dir).map_err(|e| format!("create output dir: {e}"))?;
+        let has_terms = sync_daily_agent_terms_file(&agent_task)?;
         let instructions_path = daily_agent_instructions_path(&agent_task);
         if !instructions_path.exists() {
             let content = if agent_task.daily_agent.instructions_source
@@ -189,13 +267,15 @@ fn ensure_asr_daily_workspace(
             } else {
                 daily_agent_instruction_content(&agent_task)
             };
+            let content = ensure_daily_agent_terms_reference(&content, has_terms);
             std::fs::write(&instructions_path, content.as_bytes()).map_err(|e| {
                 format!("write Daily Agent instructions {}: {e}", instructions_path.display())
             })?;
         } else if let Ok(content) = std::fs::read_to_string(&instructions_path) {
             let migrated = migrate_daily_agent_instructions_content(&agent_task, &content);
-            if migrated != content {
-                std::fs::write(&instructions_path, migrated.as_bytes()).map_err(|e| {
+            let referenced = ensure_daily_agent_terms_reference(&migrated, has_terms);
+            if referenced != content {
+                std::fs::write(&instructions_path, referenced.as_bytes()).map_err(|e| {
                     format!(
                         "migrate Daily Agent instructions {}: {e}",
                         instructions_path.display()

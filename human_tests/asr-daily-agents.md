@@ -192,8 +192,28 @@
 - `daily_report.last_report_sync.target_dir` 指向 `<sync_root>/daily_report`，`tomorrow_todo.last_report_sync.target_dir` 指向 `<sync_root>/tomorrow_todo`。
 - 两个 Agent 的 `last_report_sync.total_files` 均为 1，且 `failed_files=0`。
 
+### TC-ADA-13 Daily Agent 全局专有名词配置自动注入
+
+操作步骤：
+1. 执行 `BIFROST_E2E_PORT=18997 BIFROST_DAILY_AGENT_MOCK_PORT=18998 SKIP_FRONTEND_BUILD=1 e2e-tests/tests/test_asr_daily_agents_api.sh`。
+2. 脚本通过 `PUT /_bifrost/api/asr/tasks/{task_id}/daily-agent` 保存任务级 `terminology`，内容包含 `Jennie = Daily Agent 专有项目名`、`Qwen3-ASR = 语音识别模型` 和 `E2E_TERMS_MARKER`。
+3. 脚本请求 `GET /_bifrost/api/asr/tasks/{task_id}/daily-agent`，检查返回的 `config.terminology`。
+4. 脚本检查 `.daily/agents/daily_report/TERMS.md` 与 `.daily/agents/tomorrow_todo/TERMS.md`。
+5. 脚本检查两个 Agent 的 `AGENTS.md` 是否包含相对文件引用 `` `TERMS.md` ``。
+6. 脚本触发两个默认 Agent 真实运行，并检查 mock model 收到的 prompt/context 中包含 `TERMS.md` 相对引用，且报告生成与按 Agent 分目录同步仍成功。
+7. 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_terminology --lib -- --nocapture` 和 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_prompt_uses_file_list_for_file_capable_runners --lib -- --nocapture`，验证 ChatGPT Web 首轮和后续轮次都会把术语块放在 prompt 最前面。
+
+预期结果：
+- `config.terminology` 按保存内容返回，空白不会污染配置。
+- 每个 Agent 工作目录根目录都有最新 `TERMS.md`，内容包含 `E2E_TERMS_MARKER`。
+- 每个 Agent 的 `AGENTS.md` 都通过托管块引用相对路径 `TERMS.md`，用户自定义指令正文不被覆盖。
+- Bifrost Agent/Codex 等文件型 Runner 的 prompt 使用相对文件引用，不内联专有名词正文。
+- GPT Web Runner 首轮和后续轮次的 prompt 都以 `## 专有名词配置（每次运行动态注入）` 开头，并包含最新术语正文。
+- 专有名词配置不影响两个 Agent 生成 report、processed records、IM 配置和 report sync 分目录同步。
+
 ## 执行记录
 
+- 2026-06-05：执行 TC-ADA-13 回归验证。`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_terminology --lib -- --nocapture` 通过，确认全局术语会在 normalize 后保留，并在 `task_for_daily_agent` 派生单 Agent task 时继承；`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_prompt_uses_file_list_for_file_capable_runners --lib -- --nocapture` 通过，确认文件型 Runner prompt 只引用相对 `TERMS.md`，ChatGPT Web 首轮和后续轮次都以 `## 专有名词配置（每次运行动态注入）` 开头并包含术语正文；`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_workspace_creates_per_agent_instruction_and_output_dirs --lib -- --nocapture` 通过，确认两个默认 Agent 都写入 `TERMS.md` 且 `AGENTS.md` 包含相对引用；`BIFROST_E2E_PORT=18997 BIFROST_DAILY_AGENT_MOCK_PORT=18998 SKIP_FRONTEND_BUILD=1 e2e-tests/tests/test_asr_daily_agents_api.sh` 复跑通过，最终临时 task 为 `94b31bc914364597892f5c459e8e4fd3`，验证 API 保存 `terminology`、两个 Agent 工作目录生成 `TERMS.md`、`AGENTS.md` 引用 `TERMS.md`、真实 run 生成 report 并继续按 Agent 分目录自动同步。
 - 2026-06-05：执行 TC-ADA-12 回归验证。首次运行 `BIFROST_E2E_PORT=18997 BIFROST_DAILY_AGENT_MOCK_PORT=18998 SKIP_FRONTEND_BUILD=1 e2e-tests/tests/test_asr_daily_agents_api.sh` 时，产品已成功自动同步 `daily_report` 和 `tomorrow_todo`，但脚本用逐字路径比较误判了包含 `T//` 的临时目录；修正为 `os.path.normpath` 后复跑通过，临时 task 为 `f9d476d4aaa8412cbb3f3432712dd079`。验证结果：两个 Agent 跑完后无需点击 `Sync Reports`，同步根目录自动出现 `daily_report/2026-05-22-report.md` 和 `tomorrow_todo/2026-05-22-report.md`，根目录下不存在未分目录的 `2026-05-22-report.md`，两个 Agent 的 `last_report_sync.target_dir` 分别指向各自子目录且 `total_files=1`、`failed_files=0`。
 - 2026-06-04：执行 TC-ADA-06 回归验证。`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_after_asr_run_requires_changed_daily_markdown -- --nocapture`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_after_asr_run_ignores_failed_files_when_daily_markdown_changed -- --nocapture`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_after_asr_run_checks_all_agents_for_pending_markdown_changes -- --nocapture` 均通过；`BIFROST_E2E_PORT=18997 BIFROST_DAILY_AGENT_MOCK_PORT=18998 SKIP_FRONTEND_BUILD=1 e2e-tests/tests/test_asr_daily_agents_api.sh` 通过，首轮临时 task 为 `f7cb1db771ef436d891a97d6d683f227`，第二轮复跑临时 task 为 `1ff9f0947a3e46bcb6f9bfd7817bf0da`。确认 ASR run 完成后以 daily 合成 Markdown 变更作为 Daily Agent 自动触发门禁；普通 failed 与 `diarization_no_asr_units` failed 不再阻塞已经刷新出的 daily report 后处理；无 daily 变更时仍跳过；非 force 的 appended daily Markdown 会推进两个 Agent 的 processed run_id 更新。
 - 2026-06-03：执行 TC-ADA-07 / TC-ADA-08 WebUI 验证。使用 Playwright 打开 `http://127.0.0.1:3000/_bifrost/ai?aiSection=tools-asr&asrTask=a911c68b0f7a43afa29d1863cc02229a&asrTaskTab=daily-agent`，确认 Daily Agent 首屏仅展示列表列，不出现 `Agent Configuration` / `Agent Instructions` 详情卡；点击 `daily_report` 行 `Edit` 后进入详情页，并显示 `Agent Configuration`、`IM Delivery`、`Last Run Status`、`Agent Instructions` 与返回按钮；900px 窄窗口下表格滚动容器 `clientWidth=742`、`scrollWidth=1180`，确认横向滚动替代竖排折行。另打开 `http://127.0.0.1:3000/_bifrost/ai?aiSection=tools-asr`，确认顶层 tab 为 `Scheduled Tasks`、`ASR Management`、`Voiceprint & Wake`，旧中文 tab 不再出现。

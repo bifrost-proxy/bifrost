@@ -240,6 +240,7 @@ payload={
     "agents": config["agents"],
     "runner": "bifrost_agent",
     "timeout_ms": 60000,
+    "terminology": "Jennie = Daily Agent 专有项目名\nQwen3-ASR = 语音识别模型\nE2E_TERMS_MARKER",
     "report_sync_dir": sys.argv[3],
 }
 json.dump(payload, open(sys.argv[2], "w"), ensure_ascii=False)
@@ -247,6 +248,16 @@ PY
 curl -fsS -X PUT "http://127.0.0.1:$PORT/_bifrost/api/asr/tasks/$TASK_ID/daily-agent" \
   -H 'content-type: application/json' \
   -d @"$CONFIG_UPDATE_JSON" >/dev/null
+curl -fsS "http://127.0.0.1:$PORT/_bifrost/api/asr/tasks/$TASK_ID/daily-agent" > "$E2E_DIR/config_after_terms.json"
+python3 - <<'PY' "$E2E_DIR/config_after_terms.json"
+import json, sys
+body=json.load(open(sys.argv[1]))
+assert body["config"]["terminology"].startswith("Jennie = Daily Agent"), body["config"]
+PY
+grep -q "E2E_TERMS_MARKER" "$AGENTS_DIR/daily_report/TERMS.md"
+grep -q "E2E_TERMS_MARKER" "$AGENTS_DIR/tomorrow_todo/TERMS.md"
+grep -q '`TERMS.md`' "$AGENTS_DIR/daily_report/AGENTS.md"
+grep -q '`TERMS.md`' "$AGENTS_DIR/tomorrow_todo/AGENTS.md"
 
 CUSTOM_INSTRUCTIONS="$E2E_DIR/tomorrow_agents.md"
 cat > "$CUSTOM_INSTRUCTIONS" <<'MD'
@@ -373,6 +384,7 @@ lines=[json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.
 assert len(lines) >= 4, len(lines)
 dump="\n".join(json.dumps(line, ensure_ascii=False) for line in lines)
 assert "E2E_CUSTOM_TOMORROW_AGENT_MARKER" in dump, "custom AGENTS.md marker never reached model context"
+assert "TERMS.md" in dump, "terminology relative file reference missing from model context"
 assert "output/report/2026-05-22-report.md" in dump, "daily_report target missing from model prompt"
 assert "output/tomorrow_todo/2026-05-22-report.md" in dump, "tomorrow_todo target missing from model prompt"
 PY

@@ -30,6 +30,7 @@ fn daily_agent_legacy_config_is_upgraded_to_two_agents_without_losing_settings()
         im_delivery: AsrDailyAgentImDeliveryConfig::default(),
         output_dir: "meeting_notes".to_string(),
         agents: Vec::new(),
+        terminology: Some("  Alpha 项目 = A  ".to_string()),
         report_sync_dir: Some("~/reports".to_string()),
         last_report_sync: None,
         last_run_at_ms: Some(11),
@@ -47,6 +48,7 @@ fn daily_agent_legacy_config_is_upgraded_to_two_agents_without_losing_settings()
     assert_eq!(normalized.agents[0].instructions.as_deref(), Some("legacy instructions"));
     assert_eq!(normalized.agents[0].output_dir, "meeting_notes");
     assert_eq!(normalized.agents[0].last_run_id.as_deref(), Some("run-legacy"));
+    assert_eq!(normalized.terminology.as_deref(), Some("Alpha 项目 = A"));
     assert_eq!(normalized.agents[1].id, DEFAULT_TOMORROW_TODO_AGENT_ID);
     assert!(normalized.agents[1].im_delivery.enabled);
 }
@@ -95,6 +97,52 @@ fn daily_agent_report_sync_dir_update_survives_task_normalization() {
 }
 
 #[test]
+fn daily_agent_terminology_survives_normalization_and_agent_task_projection() {
+    let mut config = AsrDailyAgentConfig {
+        terminology: Some("  Jennie = 内部项目代号\nASR = 自动语音识别  ".to_string()),
+        ..Default::default()
+    };
+
+    let normalized = normalize_daily_agent_config(&config);
+    assert_eq!(
+        normalized.terminology.as_deref(),
+        Some("Jennie = 内部项目代号\nASR = 自动语音识别")
+    );
+    assert_eq!(normalized.agents.len(), 2);
+
+    let task = AsrDirectoryTask {
+        id: "daily-agent-terms-config-task".to_string(),
+        name: "Daily Agent Terms Config Task".to_string(),
+        audio_dir: PathBuf::new(),
+        recursive: true,
+        enabled: true,
+        paused: false,
+        paused_at_ms: None,
+        schedule: AsrTaskSchedule::Hourly { minute: 0 },
+        language: "chinese".to_string(),
+        model: "Qwen3-ASR-1.7B".to_string(),
+        runtime_strategy: AsrRuntimeStrategy::ReusePerFile,
+        diarization: AsrDiarizationConfig::default(),
+        created_at_ms: 1,
+        updated_at_ms: 1,
+        last_run_at_ms: None,
+        next_run_at_ms: Some(1),
+        last_error: None,
+        daily_agent: normalized.clone(),
+        external_devices: Vec::new(),
+        import_policy: AsrExternalImportPolicy::default(),
+    };
+    let tomorrow_task = task_for_daily_agent(&task, &normalized.agents[1]);
+    assert_eq!(
+        tomorrow_task.daily_agent.terminology.as_deref(),
+        normalized.terminology.as_deref()
+    );
+
+    config.terminology = Some("   ".to_string());
+    assert_eq!(normalize_daily_agent_config(&config).terminology, None);
+}
+
+#[test]
 fn daily_agent_validation_rejects_non_english_tokens_and_duplicates() {
     let mut config = AsrDailyAgentConfig::default();
     config.agents[0].name = "中文".to_string();
@@ -120,7 +168,7 @@ fn daily_agent_workspace_creates_per_agent_instruction_and_output_dirs() {
     let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp = TempDir::new().unwrap();
     let _guard = EnvGuard::set_data_dir(temp.path());
-    let task = AsrDirectoryTask {
+    let mut task = AsrDirectoryTask {
         id: "daily-agent-multi-workspace-task".to_string(),
         name: "Daily Agent Multi Workspace Task".to_string(),
         audio_dir: temp.path().join("audio"),
@@ -142,6 +190,7 @@ fn daily_agent_workspace_creates_per_agent_instruction_and_output_dirs() {
         external_devices: Vec::new(),
         import_policy: AsrExternalImportPolicy::default(),
     };
+    task.daily_agent.terminology = Some("Jennie = 内部项目代号\nQwen3-ASR = 语音模型".to_string());
 
     ensure_asr_daily_workspace(&task).unwrap();
     let daily_dir = daily_dir_for_task(&task.id);
@@ -179,6 +228,17 @@ fn daily_agent_workspace_creates_per_agent_instruction_and_output_dirs() {
 
     assert!(daily_dir.join("agents/daily_report/AGENTS.md").is_file());
     assert!(daily_dir.join("agents/tomorrow_todo/AGENTS.md").is_file());
+    assert_eq!(
+        std::fs::read_to_string(daily_dir.join("agents/daily_report/TERMS.md")).unwrap(),
+        "Jennie = 内部项目代号\nQwen3-ASR = 语音模型\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(daily_dir.join("agents/tomorrow_todo/TERMS.md")).unwrap(),
+        "Jennie = 内部项目代号\nQwen3-ASR = 语音模型\n"
+    );
+    assert!(std::fs::read_to_string(daily_dir.join("agents/daily_report/AGENTS.md"))
+        .unwrap()
+        .contains("`TERMS.md`"));
     assert!(std::fs::read_to_string(daily_dir.join("agents/tomorrow_todo/AGENTS.md"))
         .unwrap()
         .contains("明日 To Do List"));
@@ -383,6 +443,7 @@ fn daily_agent_prompt_uses_file_list_for_file_capable_runners() {
         import_policy: AsrExternalImportPolicy::default(),
     };
     task.daily_agent.runner = "codex-runner".to_string();
+    task.daily_agent.terminology = Some("Jennie = 内部项目代号\nBeta 客户 = 测试客户".to_string());
     ensure_asr_daily_workspace(&task).unwrap();
     std::fs::write(
         daily_dir_for_task(&task.id).join("2026-05-19.md"),
@@ -394,14 +455,20 @@ fn daily_agent_prompt_uses_file_list_for_file_capable_runners() {
     let codex_prompt = build_daily_agent_prompt(&task, &plan, "codex", false).unwrap();
     assert!(codex_prompt.contains("2026-05-19.md"));
     assert!(codex_prompt.contains("change_kind=NewFile"));
+    assert!(codex_prompt.contains("专有名词文件 `TERMS.md`"));
+    assert!(!codex_prompt.contains("Jennie = 内部项目代号"));
     assert!(!codex_prompt.contains("AGENTS.md 内容"));
     assert!(!codex_prompt.contains("变更文件内容"));
 
     let chatgpt_first = build_daily_agent_prompt(&task, &plan, "chatgpt_web", true).unwrap();
+    assert!(chatgpt_first.starts_with("## 专有名词配置（每次运行动态注入）"));
+    assert!(chatgpt_first.contains("Jennie = 内部项目代号"));
     assert!(chatgpt_first.contains("AGENTS.md 内容"));
     assert!(chatgpt_first.contains("今日新增转写内容"));
 
     let chatgpt_next = build_daily_agent_prompt(&task, &plan, "chatgpt_web", false).unwrap();
+    assert!(chatgpt_next.starts_with("## 专有名词配置（每次运行动态注入）"));
+    assert!(chatgpt_next.contains("Jennie = 内部项目代号"));
     assert!(!chatgpt_next.contains("AGENTS.md 内容"));
     assert!(chatgpt_next.contains("后续轮次"));
     assert!(chatgpt_next.contains("今日新增转写内容"));
