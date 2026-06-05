@@ -4,7 +4,7 @@
 
 IM Gateway Agent 在收到来自 IM 的消息后，需要用同一张进度卡片持续展示 Agent loop 的执行状态，直到 loop 结束。卡片在执行期间保持流式更新；结束时写入最终输出并关闭流式模式。
 
-本设计的核心约束是“一个 IM Agent turn 对应一张进度卡片”。收到 IM 消息后立即创建并发送 CardKit streaming card；Agent loop 生命周期内只更新这张卡片的固定组件。guide/queue 变化进入底部状态栏并触发同卡刷新，loop 结束时最后 flush 最终输出，再关闭 `streaming_mode=false`。
+本设计的核心约束是“一个 IM Agent turn 对应一张进度卡片”。收到 IM 消息后立即创建并发送 CardKit streaming card；Agent loop 生命周期内只更新这张卡片的固定组件。guide/queue 变化进入底部状态栏并触发同卡刷新；当 queue 消息在上一轮结束后被消费为下一轮用户消息时，旧卡片会 best-effort 撤回并在新用户消息下方重发新卡片，后续进展更新新卡片。loop 结束时最后 flush 最终输出，再关闭 `streaming_mode=false`。
 
 ## 目标
 
@@ -17,7 +17,7 @@ IM Gateway Agent 在收到来自 IM 的消息后，需要用同一张进度卡�
 - 过程思考信息独立进入底部折叠面板，折叠标题展示一行摘要，展开后展示最后一次正在输出的完整过程文本，不混入最终输出区域。
 - 最终输出模块始终放在卡片最后，用过程模块先展示执行进展，再用最终回复收束。
 - guide 消息进入时更新同一张卡片的底部 guide 状态。
-- queue 消息进入或删除时更新同一张卡片的底部排队状态。
+- queue 消息进入或删除时更新同一张卡片的底部排队状态；queue 消息真正进入下一轮执行时撤回上一轮卡片并重发到最新用户消息之后。
 - 架构上不把能力写死为 Feishu 私有逻辑；IM Gateway 提供 provider-neutral progress snapshot / renderer / capability 入口，Feishu 是第一版实现。
 
 ## 非目标
@@ -80,6 +80,10 @@ IM message received
   -> loop finished
        -> final output update
        -> close streaming_mode=false with final summary
+  -> queued message becomes next turn
+       -> DELETE /im/v1/messages/{old_message_id} best-effort recall previous card
+       -> create and send a new CardKit card entity below the latest user message
+       -> subsequent progress events update the new card_id
 ```
 
 ## 实现逻辑
@@ -91,6 +95,7 @@ IM message received
 - `run_agent_chat_with_interleave` / `process_agent_chat` 创建 progress session，并把 progress sender 注入 AgentSession。
 - `run_progress_event_coalescer` 对 status 类事件按 300ms 合并刷新，工具、计划、标题、过程文本、最终输出和结束事件立即刷新；Feishu session 继续按 section fingerprint 过滤未变化模块，避免 status-only 更新打出多次无效 CardKit API。
 - `handle_busy_message` 在 guide / queue / remove queue 成功后通知 progress session 更新同一张卡片折叠状态区，并在状态区标题里加入一条轻量可见提示；如果没有活跃卡片或刷新失败，再回退发送普通确认卡片。
+- `process_agent_chat` 在下一轮启动 progress session 时优先调用 `repost_existing`：先用飞书消息撤回 API best-effort 撤回旧卡片消息，再重置 snapshot、创建新的 CardKit card entity 并发送新 interactive 消息。撤回失败只记录 warn，不阻断下一轮新卡片发送；新卡片发送失败则返回错误并由 registry 记录 warn。
 - 当 `set_title` 工具刷新标题时，通过 CardKit 整卡更新刷新 header；如果没有工具标题，则初始标题使用用户消息。
 - CardKit 更新 uuid 使用短随机值，不拼接 `card_id`；loop 结束时即使最终内容 flush 失败，也会 best-effort 关闭 `streaming_mode=false`。
 - progress outbound message log 记录真实 Feishu `message_id`，并把 CardKit `card_id` 写入 target 线索，便于排查具体卡片更新链路。
@@ -109,11 +114,14 @@ IM message received
 - 计划面板使用 `agent_plan_panel` 组件级更新标题和内容，标题优先展示 in-progress step。
 - 过程文本使用默认折叠的 `agent_thinking_panel`，标题展示最后一次 `AssistantDelta` 的一行摘要，展开后展示完整内容。
 - guide/queue 更新不创建新 card entity，不撤回旧消息，只刷新同一 card 的折叠状态区。
+- queue 消息被消费为下一轮时，progress registry 应调用 Feishu 撤回旧消息 API，并创建新的 card entity / message；撤回失败不得阻断新卡片发送。
+- Feishu 撤回旧消息 API 必须使用 tenant token 调用 `DELETE /im/v1/messages/{message_id}`。
 - CardKit 更新 uuid 长度保持在 Feishu 字段限制内；final flush 失败时仍尝试关闭 streaming。
 
 ### E2E 测试
 
 - 新增 IM Agent streaming card 回归，验证 progress renderer 输出 JSON 2.0 streaming card、固定组件 id、可选 plan/tool/thinking 模块、工具耗时和 guide/queue 状态区。
+- 新增或复用 IM Gateway mock inbound E2E，验证 queue 消息进入下一轮时触发 `repost_existing`，后续 progress event 指向新卡片。
 - 对真实 Agent loop 路径执行最小模型 mock，确认工具调用、计划更新、最终输出能进入 progress event。
 
 ### 真实场景测试
@@ -122,6 +130,7 @@ IM message received
   - 正常 Agent loop：卡片持续更新，结束后关闭 streaming，标题跟随 `set_title`。
   - guide 消息：同一卡片折叠状态区展示待处理 guide，不撤回不重发。
   - queue 消息：同一卡片折叠状态区展示排队数量，不撤回不重发。
+  - queue 消息成为下一轮：撤回上一轮卡片，新卡片出现在最新用户消息下方，后续进展更新新卡片。
 - 更新 `human_tests/readme.md` 索引。
 
 ## Review/Fix/Test 闭环方案

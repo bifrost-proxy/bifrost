@@ -886,16 +886,24 @@ pub(super) async fn process_agent_chat(
             updated_at: 0,
         };
         if let Some(feishu) = client.feishu() {
-            match progress_registry
-                .start_feishu(
-                    session_key,
-                    feishu,
-                    provider.clone(),
-                    progress_target,
-                    &user_message,
-                )
+            let progress_result = if progress_registry
+                .repost_existing(session_key, &user_message)
                 .await
             {
+                Ok(())
+            } else {
+                progress_registry
+                    .start_feishu(
+                        session_key,
+                        feishu,
+                        provider.clone(),
+                        progress_target,
+                        &user_message,
+                    )
+                    .await
+                    .map(|_| ())
+            };
+            match progress_result {
                 Ok(_) => {
                     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<
                         bifrost_agent::AgentTurnProgressEvent,

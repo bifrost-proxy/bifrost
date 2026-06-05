@@ -2561,3 +2561,26 @@ rm -rf ./.bifrost-test
   - 测试结束后删除临时数据目录；不启动系统代理。
   - 如手动启动过 Bifrost，使用同一 `BIFROST_DATA_DIR` 停止对应实例。
 - **执行记录（2026-06-02）**: PASS — 创建用例后立即执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin clear_builtin_im_agent_session_removes_persisted_context_and_queue --lib` 通过，验证 built-in IM Clear 清理 in-memory session、queue/guide、`session_state.json` 与 state 指向的 JSONL history；随后执行 `SKIP_FRONTEND_BUILD=1 cargo run -p bifrost-e2e -- --test im_gateway_mock_inbound_clear_resets_builtin_agent_history --test-timeout 180` 通过，使用 `/_bifrost/api/im-gateway/debug/mock-inbound` 进入真实 IM event loop，确认 `/clear` 后重建 `ImGatewayService` 再发送新 IM 消息时，模型请求只包含 `IM_CLEAR_FRESH_CONTEXT_E2E`，不再包含 Clear 前的 `IM_CLEAR_FIRST_CONTEXT_E2E`。
+
+### TC-IMA-139: 飞书 IM queue 下一轮进度卡片撤回并重发
+
+- **前置条件**:
+  - 使用当前源码和临时数据目录，不复用用户真实 Bifrost 数据。
+  - 准备 Feishu OpenAPI mock 服务，覆盖 `tenant_access_token`、`cardkit/v1/cards`、`im/v1/messages` 发送和 `DELETE /im/v1/messages/{message_id}` 撤回接口。
+  - IM Gateway 运行中有同一 `session_key` 的 Feishu progress card session，第一轮卡片已发送并持有旧 `message_id`。
+- **操作步骤**:
+  1. 模拟第一轮 IM Agent 创建飞书 CardKit progress card，记录旧 `card_id` 与旧 `message_id`。
+  2. 在第一轮执行中发送 `/q <下一轮用户消息>`，确认当前卡片只更新 queue 状态，不立即撤回。
+  3. 模拟第一轮结束后 queue 被 `run_agent_chat_with_interleave` 消费为下一轮。
+  4. 检查 Feishu mock 收到 `DELETE /open-apis/im/v1/messages/{旧 message_id}`。
+  5. 检查随后创建了新的 CardKit card entity，并向同一目标发送新的 interactive card message。
+  6. 继续发送一次 progress event，确认后续更新使用新的 `card_id`。
+- **预期结果**:
+  - queue 消息尚未执行时，旧卡片保持原位并只展示排队状态。
+  - queue 消息成为下一轮后，系统 best-effort 撤回旧卡片，并新建卡片消息，使新进度卡片出现在最新用户消息下方。
+  - 撤回旧卡片失败时只记录 warn，不阻断新卡片发送；新卡片发送成功后 registry 持有新的 `card_id` / `message_id`。
+  - Web/API/IM 旧行为不退化：guide 更新仍不撤回，Web Agent Chat 的 `restart_existing` 仍走原地更新语义。
+- **清理步骤**:
+  - 停止 mock Feishu 服务；删除临时数据目录。
+  - 如手动启动过 Bifrost，使用同一 `BIFROST_DATA_DIR` 停止对应实例。
+- **执行记录（2026-06-05）**: PASS — 创建用例后立即执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin repost_existing_recalls_old_message_and_sends_new_card --lib`，使用本地 Feishu OpenAPI mock 验证第一张卡片发送为 `card_1/om_1`，下一轮启动 progress session 时触发 `DELETE /open-apis/im/v1/messages/om_1`，随后发送新卡片 `card_2/om_2`，registry snapshot 标题切换为下一轮用户消息。另执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin recall_message_sends_delete_with_tenant_token --lib` 验证撤回 API 使用 tenant token 调用 DELETE。
