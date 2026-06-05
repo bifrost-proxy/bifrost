@@ -552,6 +552,23 @@ pub(super) async fn run_agent_chat_with_interleave(
             }
         }
 
+        drain_ready_events_after_turn(
+            rx,
+            &current_provider,
+            session_key,
+            ReadyEventDrainContext {
+                queue_manager,
+                client,
+                message_log_store,
+                agent_session_manager,
+                progress_registry,
+                agent_config_store,
+                provider_store,
+                event_store,
+            },
+        )
+        .await;
+
         // After turn completes, drain any unconsumed guide message into the queue
         // so it's not lost when clear_session removes the guide slot.
         // This handles the race where a guide message arrives after the session's
@@ -590,6 +607,54 @@ pub(super) async fn run_agent_chat_with_interleave(
                 break;
             }
         }
+    }
+}
+
+struct ReadyEventDrainContext<'a> {
+    queue_manager: &'a Arc<SessionQueueManager>,
+    client: &'a ImProviderClient,
+    message_log_store: &'a Arc<ImMessageLogStore>,
+    agent_session_manager: &'a Arc<ImAgentSessionManager>,
+    progress_registry: &'a Arc<ImAgentProgressRegistry>,
+    agent_config_store: &'a Arc<ImAgentConfigStore>,
+    provider_store: &'a Arc<ImProviderStore>,
+    event_store: &'a Arc<ImEventStore>,
+}
+
+async fn drain_ready_events_after_turn(
+    rx: &mut mpsc::UnboundedReceiver<ImEvent>,
+    provider: &ImProviderConfig,
+    active_session_key: &str,
+    ctx: ReadyEventDrainContext<'_>,
+) {
+    let mut drained_count = 0usize;
+    while drained_count < 64 {
+        let Ok(event) = rx.try_recv() else {
+            break;
+        };
+        drained_count += 1;
+        handle_concurrent_event_during_chat(
+            &event,
+            provider,
+            active_session_key,
+            ctx.queue_manager,
+            ctx.client,
+            ctx.message_log_store,
+            ctx.agent_session_manager,
+            ctx.progress_registry,
+            ctx.agent_config_store,
+            ctx.provider_store,
+            ctx.event_store,
+            BusyMessageDefaultMode::Guide,
+        )
+        .await;
+    }
+    if drained_count > 0 {
+        info!(
+            session_key = %active_session_key,
+            drained_count,
+            "drained ready IM events after agent turn completion"
+        );
     }
 }
 
@@ -886,16 +951,24 @@ pub(super) async fn process_agent_chat(
             updated_at: 0,
         };
         if let Some(feishu) = client.feishu() {
-            match progress_registry
-                .start_feishu(
-                    session_key,
-                    feishu,
-                    provider.clone(),
-                    progress_target,
-                    &user_message,
-                )
+            let progress_result = if progress_registry
+                .rollover_existing(session_key, &user_message)
                 .await
             {
+                Ok(())
+            } else {
+                progress_registry
+                    .start_feishu(
+                        session_key,
+                        feishu,
+                        provider.clone(),
+                        progress_target,
+                        &user_message,
+                    )
+                    .await
+                    .map(|_| ())
+            };
+            match progress_result {
                 Ok(_) => {
                     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<
                         bifrost_agent::AgentTurnProgressEvent,
@@ -1391,4 +1464,280 @@ pub(super) async fn process_agent_chat(
         message_log_store,
     )
     .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use http_body_util::{BodyExt, Full};
+    use hyper::body::Incoming;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper::{Method, Request, Response, StatusCode};
+    use hyper_util::rt::TokioIo;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct ProgressCardMockCounters {
+        recall: Arc<AtomicUsize>,
+        card_update: Arc<AtomicUsize>,
+        settings_update: Arc<AtomicUsize>,
+    }
+
+    async fn spawn_progress_card_mock_server() -> (String, ProgressCardMockCounters) {
+        let recall_counter = Arc::new(AtomicUsize::new(0));
+        let card_update_counter = Arc::new(AtomicUsize::new(0));
+        let settings_update_counter = Arc::new(AtomicUsize::new(0));
+        let card_counter = Arc::new(AtomicUsize::new(0));
+        let message_counter = Arc::new(AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock feishu server");
+        let port = listener.local_addr().expect("mock local addr").port();
+        let recall_counter_for_server = Arc::clone(&recall_counter);
+        let card_update_counter_for_server = Arc::clone(&card_update_counter);
+        let settings_update_counter_for_server = Arc::clone(&settings_update_counter);
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let io = TokioIo::new(stream);
+                let recall_counter = Arc::clone(&recall_counter_for_server);
+                let card_update_counter = Arc::clone(&card_update_counter_for_server);
+                let settings_update_counter = Arc::clone(&settings_update_counter_for_server);
+                let card_counter = Arc::clone(&card_counter);
+                let message_counter = Arc::clone(&message_counter);
+                tokio::spawn(async move {
+                    let service = service_fn(move |req: Request<Incoming>| {
+                        let recall_counter = Arc::clone(&recall_counter);
+                        let card_update_counter = Arc::clone(&card_update_counter);
+                        let settings_update_counter = Arc::clone(&settings_update_counter);
+                        let card_counter = Arc::clone(&card_counter);
+                        let message_counter = Arc::clone(&message_counter);
+                        async move {
+                            let method = req.method().clone();
+                            let path = req.uri().path().to_string();
+                            let _body = req
+                                .into_body()
+                                .collect()
+                                .await
+                                .expect("collect request body")
+                                .to_bytes();
+                            if method == Method::POST
+                                && path == "/open-apis/auth/v3/tenant_access_token/internal"
+                            {
+                                return Ok::<_, hyper::Error>(
+                                    Response::builder()
+                                        .status(StatusCode::OK)
+                                        .body(Full::new(Bytes::from_static(
+                                            br#"{"code":0,"tenant_access_token":"tenant-token","expire":7200}"#,
+                                        )))
+                                        .unwrap(),
+                                );
+                            }
+                            if method == Method::POST && path == "/open-apis/cardkit/v1/cards" {
+                                let idx = card_counter.fetch_add(1, Ordering::SeqCst) + 1;
+                                return Ok::<_, hyper::Error>(
+                                    Response::builder()
+                                        .status(StatusCode::OK)
+                                        .body(Full::new(Bytes::from(format!(
+                                            r#"{{"code":0,"data":{{"card_id":"card_{idx}"}}}}"#
+                                        ))))
+                                        .unwrap(),
+                                );
+                            }
+                            if method == Method::PUT
+                                && path.starts_with("/open-apis/cardkit/v1/cards/")
+                                && !path.contains("/elements/")
+                            {
+                                card_update_counter.fetch_add(1, Ordering::SeqCst);
+                                return Ok::<_, hyper::Error>(
+                                    Response::builder()
+                                        .status(StatusCode::OK)
+                                        .body(Full::new(Bytes::from_static(br#"{"code":0}"#)))
+                                        .unwrap(),
+                                );
+                            }
+                            if method == Method::PATCH
+                                && path.starts_with("/open-apis/cardkit/v1/cards/")
+                                && path.ends_with("/settings")
+                            {
+                                settings_update_counter.fetch_add(1, Ordering::SeqCst);
+                                return Ok::<_, hyper::Error>(
+                                    Response::builder()
+                                        .status(StatusCode::OK)
+                                        .body(Full::new(Bytes::from_static(br#"{"code":0}"#)))
+                                        .unwrap(),
+                                );
+                            }
+                            if method == Method::POST && path == "/open-apis/im/v1/messages" {
+                                let idx = message_counter.fetch_add(1, Ordering::SeqCst) + 1;
+                                return Ok::<_, hyper::Error>(
+                                    Response::builder()
+                                        .status(StatusCode::OK)
+                                        .body(Full::new(Bytes::from(format!(
+                                            r#"{{"code":0,"data":{{"message_id":"om_{idx}"}}}}"#
+                                        ))))
+                                        .unwrap(),
+                                );
+                            }
+                            if method == Method::DELETE
+                                && path.starts_with("/open-apis/im/v1/messages/")
+                            {
+                                recall_counter.fetch_add(1, Ordering::SeqCst);
+                                return Ok::<_, hyper::Error>(
+                                    Response::builder()
+                                        .status(StatusCode::OK)
+                                        .body(Full::new(Bytes::from_static(br#"{"code":0}"#)))
+                                        .unwrap(),
+                                );
+                            }
+                            Ok::<_, hyper::Error>(
+                                Response::builder()
+                                    .status(StatusCode::NOT_FOUND)
+                                    .body(Full::new(Bytes::from_static(b"{}")))
+                                    .unwrap(),
+                            )
+                        }
+                    });
+                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                });
+            }
+        });
+        (
+            format!("http://127.0.0.1:{port}/open-apis"),
+            ProgressCardMockCounters {
+                recall: recall_counter,
+                card_update: card_update_counter,
+                settings_update: settings_update_counter,
+            },
+        )
+    }
+
+    fn mock_feishu_provider(base_url: String) -> ImProviderConfig {
+        ImProviderConfig {
+            id: "feishu-main".to_string(),
+            provider_type: crate::im_gateway::types::ImProviderType::Feishu,
+            display_name: "Feishu Main".to_string(),
+            enabled: true,
+            base_url: Some(base_url),
+            app_id: Some("cli_xxx".to_string()),
+            secret_ref: Some("secret".to_string()),
+            owner_open_id: Some("ou_owner".to_string()),
+            event_connection_enabled: true,
+            event_types: Vec::new(),
+            agent_config: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn mock_progress_target() -> ImTarget {
+        ImTarget {
+            id: "progress".to_string(),
+            provider_id: "feishu-main".to_string(),
+            display_name: "Progress".to_string(),
+            receive_id_type: "open_id".to_string(),
+            receive_id: "ou_owner".to_string(),
+            default_msg_type: "interactive".to_string(),
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn mock_owner_text_event(event_id: &str, text: &str) -> ImEvent {
+        ImEvent {
+            event_id: event_id.to_string(),
+            provider_id: "feishu-main".to_string(),
+            provider_type: crate::im_gateway::types::ImProviderType::Feishu,
+            event_type: "message.receive".to_string(),
+            source: crate::im_gateway::types::ImEventSource {
+                chat_id: None,
+                user_id: Some("ou_owner".to_string()),
+                message_id: Some(format!("om_{event_id}")),
+            },
+            message: Some(crate::im_gateway::types::ImEventMessage {
+                text: text.to_string(),
+                mentions: Vec::new(),
+                images: Vec::new(),
+                raw_type: Some("text".to_string()),
+            }),
+            received_at: now_ms(),
+            raw_digest: None,
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn drain_ready_events_after_turn_preserves_late_message_as_guide() {
+        let temp_dir = tempfile::tempdir().expect("temp data dir");
+        let (base_url, counters) = spawn_progress_card_mock_server().await;
+        let feishu = Arc::new(crate::im_gateway::feishu::FeishuProvider::new());
+        let provider = mock_feishu_provider(base_url);
+        let client = ImProviderClient::Feishu(Arc::clone(&feishu));
+        let queue_manager = Arc::new(SessionQueueManager::new());
+        let progress_registry = Arc::new(ImAgentProgressRegistry::new());
+        progress_registry
+            .start_feishu(
+                "feishu-main:ou_owner",
+                Arc::clone(&feishu),
+                provider.clone(),
+                mock_progress_target(),
+                "active turn",
+            )
+            .await
+            .expect("start progress card");
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(mock_owner_text_event(
+            "late_1",
+            "late message at final boundary",
+        ))
+        .expect("send late event");
+
+        let provider_store = Arc::new(ImProviderStore::new(temp_dir.path()));
+        let event_store = Arc::new(ImEventStore::new(temp_dir.path()));
+        let message_log_store = Arc::new(ImMessageLogStore::new(temp_dir.path()));
+        let agent_session_manager = Arc::new(ImAgentSessionManager::new(3600));
+        let agent_config_store = Arc::new(ImAgentConfigStore::new(&temp_dir.path().join("agent")));
+
+        drain_ready_events_after_turn(
+            &mut rx,
+            &provider,
+            "feishu-main:ou_owner",
+            ReadyEventDrainContext {
+                queue_manager: &queue_manager,
+                client: &client,
+                message_log_store: &message_log_store,
+                agent_session_manager: &agent_session_manager,
+                progress_registry: &progress_registry,
+                agent_config_store: &agent_config_store,
+                provider_store: &provider_store,
+                event_store: &event_store,
+            },
+        )
+        .await;
+
+        let guides = queue_manager.guide_status("feishu-main:ou_owner");
+        assert_eq!(guides, vec!["late message at final boundary".to_string()]);
+        let drained: Vec<String> = queue_manager
+            .get_or_create_guide_channel("feishu-main:ou_owner")
+            .lock()
+            .unwrap()
+            .drain(..)
+            .collect();
+        let combined =
+            bifrost_agent::session::combine_guide_messages(drained).expect("combined guide");
+        queue_manager
+            .push_queue("feishu-main:ou_owner", combined)
+            .expect("push combined guide into queue");
+        assert_eq!(
+            queue_manager.pop_queue("feishu-main:ou_owner").as_deref(),
+            Some("late message at final boundary")
+        );
+        assert_eq!(counters.card_update.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.settings_update.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.recall.load(Ordering::SeqCst), 0);
+    }
 }
