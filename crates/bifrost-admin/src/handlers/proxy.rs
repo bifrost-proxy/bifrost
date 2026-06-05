@@ -109,6 +109,9 @@ struct ProxyAddress {
 }
 
 const SYSTEM_PROXY_VERIFY_DELAYS_MS: [u64; 4] = [200, 400, 800, 1600];
+#[cfg(target_os = "macos")]
+const SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL_ENV: &str =
+    "BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL";
 
 pub async fn handle_proxy(
     req: Request<Incoming>,
@@ -353,6 +356,10 @@ async fn set_system_proxy(req: Request<Incoming>, state: SharedAdminState) -> Re
                     } else {
                         tracing::info!("System proxy config persisted: enabled={}", status.enabled);
                     }
+
+                    if enabled_by_bifrost {
+                        spawn_system_proxy_launchd_install_task_from_config(config_manager);
+                    }
                 }
 
                 json_response(&status)
@@ -551,6 +558,108 @@ fn suggested_launchd_install_command(state: &SharedAdminState) -> Option<String>
     ))
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn system_proxy_launchd_needs_auto_install(
+    installed: bool,
+    loaded: bool,
+    needs_upgrade: bool,
+) -> bool {
+    !installed || !loaded || needs_upgrade
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_system_proxy_launchd_install_task_from_config(
+    config_manager: &bifrost_storage::ConfigManager,
+) {
+    if std::env::var(SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL_ENV)
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        tracing::info!(
+            target: "bifrost_admin::proxy",
+            env = SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL_ENV,
+            "system proxy LaunchDaemon cleanup install disabled by environment"
+        );
+        return;
+    }
+
+    let config = match bifrost_core::SystemProxyLaunchdConfig::new(
+        None,
+        None,
+        config_manager.data_dir().to_path_buf(),
+        None,
+    ) {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::warn!(
+                target: "bifrost_admin::proxy",
+                error = %error,
+                "failed to prepare system proxy LaunchDaemon cleanup install after system proxy enable"
+            );
+            return;
+        }
+    };
+
+    let status = match bifrost_core::launchd_status_for_config(&config) {
+        Ok(status) => status,
+        Err(error) => {
+            tracing::warn!(
+                target: "bifrost_admin::proxy",
+                error = %error,
+                "failed to inspect system proxy LaunchDaemon cleanup status after system proxy enable"
+            );
+            return;
+        }
+    };
+
+    if !system_proxy_launchd_needs_auto_install(
+        status.installed,
+        status.loaded,
+        status.needs_upgrade,
+    ) {
+        tracing::info!(
+            target: "bifrost_admin::proxy",
+            installed_version = status.installed_version.as_deref().unwrap_or(""),
+            current_version = status.current_version,
+            "system proxy LaunchDaemon cleanup already installed and current after system proxy enable"
+        );
+        return;
+    }
+
+    std::thread::spawn(move || {
+        tracing::info!(
+            target: "bifrost_admin::proxy",
+            installed = status.installed,
+            loaded = status.loaded,
+            needs_upgrade = status.needs_upgrade,
+            "system proxy LaunchDaemon cleanup install starting asynchronously after system proxy enable"
+        );
+        match bifrost_core::install_launchd_cleanup_with_gui_auth(&config) {
+            Ok(status) => tracing::info!(
+                target: "bifrost_admin::proxy",
+                installed_version = status.installed_version.as_deref().unwrap_or(""),
+                current_version = status.current_version,
+                "system proxy LaunchDaemon cleanup installed asynchronously after system proxy enable"
+            ),
+            Err(error) if error.to_string().contains("UserCancelled") => tracing::info!(
+                target: "bifrost_admin::proxy",
+                "system proxy LaunchDaemon cleanup install cancelled by user after system proxy enable"
+            ),
+            Err(error) => tracing::warn!(
+                target: "bifrost_admin::proxy",
+                error = %error,
+                "system proxy LaunchDaemon cleanup install failed after system proxy enable"
+            ),
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn spawn_system_proxy_launchd_install_task_from_config(
+    _config_manager: &bifrost_storage::ConfigManager,
+) {
+}
+
 fn get_platform_name() -> String {
     #[cfg(target_os = "macos")]
     {
@@ -638,5 +747,17 @@ mod tests {
             "127.0.0.1",
             8800
         ));
+    }
+
+    #[test]
+    fn launchd_auto_install_needed_when_missing_unloaded_or_stale() {
+        assert!(system_proxy_launchd_needs_auto_install(false, false, false));
+        assert!(system_proxy_launchd_needs_auto_install(true, false, false));
+        assert!(system_proxy_launchd_needs_auto_install(true, true, true));
+    }
+
+    #[test]
+    fn launchd_auto_install_skips_current_loaded_daemon() {
+        assert!(!system_proxy_launchd_needs_auto_install(true, true, false));
     }
 }
