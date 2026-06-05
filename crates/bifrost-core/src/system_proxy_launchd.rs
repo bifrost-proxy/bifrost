@@ -28,9 +28,19 @@ pub struct SystemProxyLaunchdStatus {
     pub program: Option<PathBuf>,
     pub data_dir: Option<PathBuf>,
     pub installed_version: Option<String>,
+    pub installed_mode: Option<SystemProxyLaunchdMode>,
     pub current_version: String,
     pub needs_upgrade: bool,
+    pub needs_upgrade_reason: Option<String>,
     pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemProxyLaunchdMode {
+    OneShot,
+    KeepAlive,
+    Unknown,
 }
 
 impl SystemProxyLaunchdConfig {
@@ -85,8 +95,6 @@ pub fn render_launchd_plist(config: &SystemProxyLaunchdConfig) -> String {
     <string>{version}</string>
   </array>
   <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
   <true/>
   <key>StandardOutPath</key>
   <string>{stdout_path}</string>
@@ -246,8 +254,10 @@ fn launchd_status_with_expected(
             program: None,
             data_dir: None,
             installed_version: None,
+            installed_mode: None,
             current_version: CURRENT_VERSION.to_string(),
             needs_upgrade: false,
+            needs_upgrade_reason: None,
             message: Some("LaunchDaemon cleanup is only supported on macOS".to_string()),
         });
     }
@@ -261,22 +271,20 @@ fn launchd_status_with_expected(
     let installed_version = parsed
         .as_ref()
         .and_then(|parsed| parsed.installed_version.clone());
-    let needs_upgrade = installed
-        && (installed_version.as_deref() != Some(CURRENT_VERSION)
-            || program.as_ref().zip(expected_program.as_ref()).is_some_and(
-                |(installed_program, current_program)| installed_program != current_program,
-            )
-            || data_dir
-                .as_ref()
-                .zip(expected_data_dir.as_ref())
-                .is_some_and(|(installed_data_dir, expected_data_dir)| {
-                    installed_data_dir != expected_data_dir
-                }));
-    let message = if needs_upgrade {
-        Some(
-            "Installed cleanup LaunchDaemon does not match the current Bifrost binary, data directory, or version"
-                .to_string(),
-        )
+    let installed_mode = parsed.as_ref().map(installed_launchd_mode);
+    let needs_upgrade_reason = launchd_needs_upgrade_reason(
+        installed,
+        parsed.as_ref(),
+        program.as_ref(),
+        data_dir.as_ref(),
+        expected_program.as_ref(),
+        expected_data_dir.as_ref(),
+    );
+    let needs_upgrade = needs_upgrade_reason.is_some();
+    let message = if let Some(reason) = &needs_upgrade_reason {
+        Some(format!(
+            "Installed cleanup LaunchDaemon needs update: {reason}"
+        ))
     } else if installed && !loaded {
         Some("Cleanup LaunchDaemon plist exists but is not loaded".to_string())
     } else {
@@ -292,8 +300,10 @@ fn launchd_status_with_expected(
         program,
         data_dir,
         installed_version,
+        installed_mode,
         current_version: CURRENT_VERSION.to_string(),
         needs_upgrade,
+        needs_upgrade_reason,
         message,
     })
 }
@@ -538,6 +548,8 @@ struct ParsedLaunchdPlist {
     program: Option<PathBuf>,
     data_dir: Option<PathBuf>,
     installed_version: Option<String>,
+    run_at_load: Option<bool>,
+    keep_alive: Option<bool>,
 }
 
 fn parse_installed_plist(content: &str) -> ParsedLaunchdPlist {
@@ -556,12 +568,75 @@ fn parse_installed_plist(content: &str) -> ParsedLaunchdPlist {
         .find(|pair| pair[0] == "--installed-version")
         .map(|pair| pair[1].clone())
         .or_else(|| extract_env_value(content, "BIFROST_LAUNCHD_INSTALLED_VERSION"));
+    let run_at_load = extract_xml_bool_after_key(content, "RunAtLoad");
+    let keep_alive = extract_xml_bool_after_key(content, "KeepAlive");
 
     ParsedLaunchdPlist {
         program,
         data_dir,
         installed_version,
+        run_at_load,
+        keep_alive,
     }
+}
+
+fn installed_launchd_mode(parsed: &ParsedLaunchdPlist) -> SystemProxyLaunchdMode {
+    if parsed.keep_alive == Some(true) {
+        SystemProxyLaunchdMode::KeepAlive
+    } else if parsed.run_at_load == Some(true) {
+        SystemProxyLaunchdMode::OneShot
+    } else {
+        SystemProxyLaunchdMode::Unknown
+    }
+}
+
+fn launchd_needs_upgrade_reason(
+    installed: bool,
+    parsed: Option<&ParsedLaunchdPlist>,
+    program: Option<&PathBuf>,
+    data_dir: Option<&PathBuf>,
+    expected_program: Option<&PathBuf>,
+    expected_data_dir: Option<&PathBuf>,
+) -> Option<String> {
+    if !installed {
+        return None;
+    }
+
+    let Some(parsed) = parsed else {
+        return Some("installed plist could not be parsed".to_string());
+    };
+
+    if parsed.keep_alive == Some(true) {
+        return Some("installed plist uses legacy KeepAlive mode".to_string());
+    }
+    if parsed.run_at_load != Some(true) {
+        return Some("installed plist is missing RunAtLoad one-shot mode".to_string());
+    }
+    match (program, expected_program) {
+        (None, Some(_)) => return Some("installed plist is missing program path".to_string()),
+        (Some(installed_program), Some(current_program))
+            if installed_program != current_program =>
+        {
+            return Some(
+                "installed program path differs from the current Bifrost binary".to_string(),
+            );
+        }
+        _ => {}
+    }
+    match (data_dir, expected_data_dir) {
+        (None, Some(_)) => return Some("installed plist is missing data directory".to_string()),
+        (Some(installed_data_dir), Some(expected_data_dir))
+            if installed_data_dir != expected_data_dir =>
+        {
+            return Some(
+                "installed data directory differs from the current Bifrost data directory"
+                    .to_string(),
+            );
+        }
+        _ => {}
+    }
+
+    None
 }
 
 fn extract_xml_strings(content: &str) -> Vec<String> {
@@ -582,6 +657,18 @@ fn extract_env_value(content: &str, key: &str) -> Option<String> {
     let key_marker = format!("<key>{}</key>", escape_xml(key));
     let after_key = content.split_once(&key_marker)?.1;
     extract_xml_strings(after_key).into_iter().next()
+}
+
+fn extract_xml_bool_after_key(content: &str, key: &str) -> Option<bool> {
+    let key_marker = format!("<key>{}</key>", escape_xml(key));
+    let after_key = content.split_once(&key_marker)?.1.trim_start();
+    if after_key.starts_with("<true/>") || after_key.starts_with("<true />") {
+        Some(true)
+    } else if after_key.starts_with("<false/>") || after_key.starts_with("<false />") {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 fn escape_xml(input: &str) -> String {
@@ -621,6 +708,8 @@ mod tests {
         assert!(plist.contains("--installed-version"));
         assert!(plist.contains(CURRENT_VERSION));
         assert!(plist.contains("/tmp/bifrost-data"));
+        assert!(plist.contains("<key>RunAtLoad</key>"));
+        assert!(!plist.contains("<key>KeepAlive</key>"));
     }
 
     #[test]
@@ -637,6 +726,118 @@ mod tests {
         assert_eq!(parsed.program, Some(PathBuf::from("/tmp/bifrost")));
         assert_eq!(parsed.data_dir, Some(PathBuf::from("/tmp/bifrost-data")));
         assert_eq!(parsed.installed_version.as_deref(), Some(CURRENT_VERSION));
+        assert_eq!(parsed.run_at_load, Some(true));
+        assert_eq!(parsed.keep_alive, None);
+        assert_eq!(
+            installed_launchd_mode(&parsed),
+            SystemProxyLaunchdMode::OneShot
+        );
+    }
+
+    #[test]
+    fn status_for_config_ignores_version_only_mismatch() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let plist_path = std::env::temp_dir().join(format!("com.bifrost.test.{unique}.plist"));
+        let mut installed_config = SystemProxyLaunchdConfig::new(
+            Some(format!("com.bifrost.test.{unique}")),
+            Some(std::env::current_exe().expect("current exe")),
+            PathBuf::from("/tmp/bifrost-data"),
+            Some(plist_path.clone()),
+        )
+        .expect("installed config");
+        installed_config.installed_version = "0.0.1-before-upgrade".to_string();
+        std::fs::write(&plist_path, render_launchd_plist(&installed_config)).expect("write plist");
+
+        let current_config = SystemProxyLaunchdConfig::new(
+            Some(format!("com.bifrost.test.{unique}")),
+            Some(std::env::current_exe().expect("current exe")),
+            PathBuf::from("/tmp/bifrost-data"),
+            Some(plist_path.clone()),
+        )
+        .expect("current config");
+        let status = launchd_status_for_config(&current_config).expect("status");
+        let _ = std::fs::remove_file(plist_path);
+
+        if !cfg!(target_os = "macos") {
+            assert!(!status.supported);
+            assert!(!status.installed);
+            return;
+        }
+
+        assert!(status.installed);
+        assert_eq!(
+            status.installed_version.as_deref(),
+            Some("0.0.1-before-upgrade")
+        );
+        assert_eq!(status.installed_mode, Some(SystemProxyLaunchdMode::OneShot));
+        assert!(!status.needs_upgrade);
+        assert_eq!(status.needs_upgrade_reason, None);
+    }
+
+    #[test]
+    fn keep_alive_launchd_plist_requires_upgrade_to_one_shot() {
+        let config = SystemProxyLaunchdConfig::new(
+            Some("com.bifrost.test".to_string()),
+            Some(PathBuf::from("/tmp/bifrost")),
+            PathBuf::from("/tmp/bifrost-data"),
+            Some(PathBuf::from("/tmp/com.bifrost.test.plist")),
+        )
+        .expect("config");
+        let plist = render_launchd_plist(&config).replace(
+            "  <key>StandardOutPath</key>",
+            "  <key>KeepAlive</key>\n  <true/>\n  <key>StandardOutPath</key>",
+        );
+        let parsed = parse_installed_plist(&plist);
+        let reason = launchd_needs_upgrade_reason(
+            true,
+            Some(&parsed),
+            parsed.program.as_ref(),
+            parsed.data_dir.as_ref(),
+            Some(&config.program),
+            Some(&config.data_dir),
+        );
+
+        assert_eq!(parsed.keep_alive, Some(true));
+        assert_eq!(
+            installed_launchd_mode(&parsed),
+            SystemProxyLaunchdMode::KeepAlive
+        );
+        assert!(reason
+            .as_deref()
+            .expect("reason")
+            .contains("legacy KeepAlive"));
+    }
+
+    #[test]
+    fn missing_run_at_load_launchd_plist_requires_upgrade() {
+        let config = SystemProxyLaunchdConfig::new(
+            Some("com.bifrost.test".to_string()),
+            Some(PathBuf::from("/tmp/bifrost")),
+            PathBuf::from("/tmp/bifrost-data"),
+            Some(PathBuf::from("/tmp/com.bifrost.test.plist")),
+        )
+        .expect("config");
+        let plist =
+            render_launchd_plist(&config).replace("  <key>RunAtLoad</key>\n  <true/>\n", "");
+        let parsed = parse_installed_plist(&plist);
+        let reason = launchd_needs_upgrade_reason(
+            true,
+            Some(&parsed),
+            parsed.program.as_ref(),
+            parsed.data_dir.as_ref(),
+            Some(&config.program),
+            Some(&config.data_dir),
+        );
+
+        assert_eq!(parsed.run_at_load, None);
+        assert_eq!(
+            installed_launchd_mode(&parsed),
+            SystemProxyLaunchdMode::Unknown
+        );
+        assert!(reason.as_deref().expect("reason").contains("RunAtLoad"));
     }
 
     #[test]

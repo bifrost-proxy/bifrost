@@ -276,8 +276,20 @@ fn print_launchd_status(status: &bifrost_core::SystemProxyLaunchdStatus) {
         "Installed version: {}",
         status.installed_version.as_deref().unwrap_or("-")
     );
+    println!(
+        "Installed mode:    {}",
+        match status.installed_mode {
+            Some(bifrost_core::SystemProxyLaunchdMode::OneShot) => "one-shot",
+            Some(bifrost_core::SystemProxyLaunchdMode::KeepAlive) => "keep-alive",
+            Some(bifrost_core::SystemProxyLaunchdMode::Unknown) => "unknown",
+            None => "-",
+        }
+    );
     println!("Current version:   {}", status.current_version);
     println!("Needs upgrade:     {}", status.needs_upgrade);
+    if let Some(reason) = &status.needs_upgrade_reason {
+        println!("Upgrade reason:    {reason}");
+    }
     if let Some(message) = &status.message {
         println!("Message:           {message}");
     }
@@ -298,24 +310,6 @@ fn cleanup_system_proxy_state(data_dir: &std::path::Path) -> bifrost_core::Resul
         "system proxy cleanup helper restore completed"
     );
     Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn cleanup_system_proxy_state_on_launchd_stop(
-    data_dir: &std::path::Path,
-    signal_name: &str,
-) -> bifrost_core::Result<()> {
-    if bifrost_core::consume_stop_restore_suppression(data_dir) {
-        tracing::info!(
-            target: "bifrost_cli::shutdown",
-            data_dir = %data_dir.display(),
-            signal = signal_name,
-            "system proxy launchd cleanup daemon stop restore suppressed for install/uninstall"
-        );
-        return Ok(());
-    }
-
-    cleanup_system_proxy_state(data_dir)
 }
 
 fn run_system_proxy_lifecycle_helper(
@@ -473,61 +467,12 @@ fn run_system_proxy_cleanup_daemon(
         ),
     }
 
-    #[cfg(unix)]
-    {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|error| {
-                bifrost_core::BifrostError::Config(format!(
-                    "Failed to start system proxy launchd cleanup daemon runtime: {error}"
-                ))
-            })?;
-        runtime.block_on(async move {
-            use tokio::signal::unix::{signal, SignalKind};
-
-            let mut sigterm = signal(SignalKind::terminate()).map_err(|error| {
-                bifrost_core::BifrostError::Config(format!(
-                    "Failed to install SIGTERM handler for system proxy launchd cleanup daemon: {error}"
-                ))
-            })?;
-            let mut sigint = signal(SignalKind::interrupt()).map_err(|error| {
-                bifrost_core::BifrostError::Config(format!(
-                    "Failed to install SIGINT handler for system proxy launchd cleanup daemon: {error}"
-                ))
-            })?;
-            let mut sighup = signal(SignalKind::hangup()).map_err(|error| {
-                bifrost_core::BifrostError::Config(format!(
-                    "Failed to install SIGHUP handler for system proxy launchd cleanup daemon: {error}"
-                ))
-            })?;
-
-            loop {
-                tokio::select! {
-                    _ = sigterm.recv() => {
-                        tracing::info!(target: "bifrost_cli::shutdown", "system proxy launchd cleanup daemon received SIGTERM");
-                        return cleanup_system_proxy_state_on_launchd_stop(&data_dir, "SIGTERM");
-                    }
-                    _ = sigint.recv() => {
-                        tracing::info!(target: "bifrost_cli::shutdown", "system proxy launchd cleanup daemon received SIGINT");
-                        return cleanup_system_proxy_state_on_launchd_stop(&data_dir, "SIGINT");
-                    }
-                    _ = sighup.recv() => {
-                        tracing::info!(target: "bifrost_cli::shutdown", "system proxy launchd cleanup daemon received SIGHUP");
-                        return cleanup_system_proxy_state_on_launchd_stop(&data_dir, "SIGHUP");
-                    }
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(3600)) => {
-                        tracing::debug!(target: "bifrost_cli::shutdown", "system proxy launchd cleanup daemon heartbeat");
-                    }
-                }
-            }
-        })
-    }
-
-    #[cfg(not(unix))]
-    {
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(3600));
-        }
-    }
+    tracing::info!(
+        target: "bifrost_cli::shutdown",
+        data_dir = %data_dir.display(),
+        installed_version = installed_version.as_deref().unwrap_or(""),
+        current_version = bifrost_core::system_proxy_launchd::CURRENT_VERSION,
+        "system proxy launchd cleanup daemon exiting after one-shot recovery check"
+    );
+    Ok(())
 }
