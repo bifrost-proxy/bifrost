@@ -22,6 +22,18 @@ export type DeviceTrustCapability =
   | "rooted_test_device";
 export type DeviceStatus = "connected" | "unauthorized" | "offline" | "unsupported";
 export type InstallMode = "normal_guide" | "managed_auto_trust" | "lab_root_mode";
+export type DeviceCertificateState =
+  | "unknown"
+  | "not_installed"
+  | "pushed_to_device"
+  | "installed";
+
+export interface DeviceCertificateStatus {
+  state: DeviceCertificateState;
+  trusted?: boolean | null;
+  fingerprint_match?: boolean | null;
+  message: string;
+}
 
 export interface MobileDevice {
   id: string;
@@ -30,6 +42,7 @@ export interface MobileDevice {
   platform: MobilePlatform;
   status: DeviceStatus;
   capability: DeviceTrustCapability;
+  certificate_status?: DeviceCertificateStatus | null;
   status_message: string;
 }
 

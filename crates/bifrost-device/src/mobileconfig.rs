@@ -34,13 +34,17 @@ impl Default for MobileConfigOptions {
 
 pub fn read_certificate_der_from_file(path: &Path) -> Result<Vec<u8>, MobileConfigError> {
     let data = fs::read(path)?;
-    if data.starts_with(b"-----BEGIN CERTIFICATE-----") {
-        return decode_pem_certificate(&String::from_utf8_lossy(&data));
-    }
-    Ok(data)
+    read_certificate_der_from_bytes(&data)
 }
 
-fn decode_pem_certificate(pem: &str) -> Result<Vec<u8>, MobileConfigError> {
+pub fn read_certificate_der_from_bytes(data: &[u8]) -> Result<Vec<u8>, MobileConfigError> {
+    if data.starts_with(b"-----BEGIN CERTIFICATE-----") {
+        return decode_pem_certificate(&String::from_utf8_lossy(data));
+    }
+    Ok(data.to_vec())
+}
+
+pub(crate) fn decode_pem_certificate(pem: &str) -> Result<Vec<u8>, MobileConfigError> {
     let begin = "-----BEGIN CERTIFICATE-----";
     let end = "-----END CERTIFICATE-----";
     let Some(start) = pem.find(begin) else {

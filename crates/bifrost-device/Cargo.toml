@@ -8,5 +8,6 @@ description = "Mobile device trust helpers for Bifrost"
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
+sha2 = "0.10"
 thiserror.workspace = true
 uuid.workspace = true

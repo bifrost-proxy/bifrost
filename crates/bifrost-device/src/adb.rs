@@ -1,13 +1,16 @@
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::mobileconfig::{decode_pem_certificate, read_certificate_der_from_bytes};
 use crate::model::{
-    DeviceStatus, DeviceTrustCapability, InstallMode, InstallSession, InstallStep, MobileDevice,
-    MobilePlatform,
+    DeviceCertificateState, DeviceCertificateStatus, DeviceStatus, DeviceTrustCapability,
+    InstallMode, InstallSession, InstallStep, MobileDevice, MobilePlatform,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,6 +28,13 @@ pub struct AndroidInstallOptions {
     pub ca_cert_path: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+pub struct AndroidCaStatusOptions {
+    pub adb_path: PathBuf,
+    pub device_id: String,
+    pub ca_cert_path: PathBuf,
+}
+
 #[derive(Debug, Error)]
 pub enum AdbError {
     #[error("ADB is not available")]
@@ -36,6 +46,10 @@ pub enum AdbError {
 }
 
 pub fn discover_android_devices() -> AdbDiscovery {
+    discover_android_devices_with_ca(None)
+}
+
+pub fn discover_android_devices_with_ca(ca_cert_path: Option<&Path>) -> AdbDiscovery {
     let Some(adb_path) = find_adb() else {
         return AdbDiscovery {
             adb_available: false,
@@ -48,7 +62,20 @@ pub fn discover_android_devices() -> AdbDiscovery {
     match Command::new(&adb_path).arg("devices").arg("-l").output() {
         Ok(output) if output.status.success() => {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            let devices = parse_adb_devices(&stdout);
+            let mut devices = parse_adb_devices(&stdout);
+            if let Some(ca_cert_path) = ca_cert_path {
+                for device in devices
+                    .iter_mut()
+                    .filter(|device| device.status == DeviceStatus::Connected)
+                {
+                    device.certificate_status =
+                        Some(check_android_ca_status(AndroidCaStatusOptions {
+                            adb_path: adb_path.clone(),
+                            device_id: device.id.clone(),
+                            ca_cert_path: ca_cert_path.to_path_buf(),
+                        }));
+                }
+            }
             let message = if devices.is_empty() {
                 "ADB is available, but no Android USB devices were reported.".to_string()
             } else {
@@ -131,6 +158,7 @@ fn parse_adb_device_line(line: &str) -> Option<MobileDevice> {
         platform: MobilePlatform::Android,
         status,
         capability,
+        certificate_status: None,
         status_message,
     })
 }
@@ -220,13 +248,87 @@ pub fn install_android_ca(options: AndroidInstallOptions) -> Result<InstallSessi
     Ok(session(options.device_id, completed, steps))
 }
 
+pub fn check_android_ca_status(options: AndroidCaStatusOptions) -> DeviceCertificateStatus {
+    let local_file = match fs::read(&options.ca_cert_path) {
+        Ok(data) => data,
+        Err(error) => {
+            return DeviceCertificateStatus {
+                state: DeviceCertificateState::Unknown,
+                trusted: None,
+                fingerprint_match: None,
+                message: format!("Could not read the local Bifrost CA certificate: {error}"),
+            };
+        }
+    };
+    let local_der = match read_certificate_der_from_bytes(&local_file) {
+        Ok(der) => der,
+        Err(error) => {
+            return DeviceCertificateStatus {
+                state: DeviceCertificateState::Unknown,
+                trusted: None,
+                fingerprint_match: None,
+                message: format!("Could not parse the local Bifrost CA certificate: {error}"),
+            };
+        }
+    };
+    let local_fingerprint = sha256_hex(&local_der);
+    let pushed_to_download =
+        remote_downloaded_certificate_matches(&options.adb_path, &options.device_id, &local_file)
+            .unwrap_or(false);
+
+    match read_android_user_ca_store(&options.adb_path, &options.device_id) {
+        Ok(Some(store_pem)) => {
+            let installed = android_user_store_contains_fingerprint(&store_pem, &local_fingerprint);
+            if installed {
+                DeviceCertificateStatus {
+                    state: DeviceCertificateState::Installed,
+                    trusted: Some(true),
+                    fingerprint_match: Some(true),
+                    message: "Current Bifrost CA is installed in Android's user certificate store. Android 7+ apps may still ignore user CAs unless their Network Security Config allows them."
+                        .to_string(),
+                }
+            } else if pushed_to_download {
+                DeviceCertificateStatus {
+                    state: DeviceCertificateState::PushedToDevice,
+                    trusted: None,
+                    fingerprint_match: Some(false),
+                    message: "Current Bifrost CA file is on the phone, but it was not found in the readable Android user certificate store. Finish the certificate installer on the phone."
+                        .to_string(),
+                }
+            } else {
+                DeviceCertificateStatus {
+                    state: DeviceCertificateState::NotInstalled,
+                    trusted: Some(false),
+                    fingerprint_match: Some(false),
+                    message: "Bifrost could read Android's user certificate store and did not find the current Bifrost CA."
+                        .to_string(),
+                }
+            }
+        }
+        Ok(None) | Err(_) if pushed_to_download => DeviceCertificateStatus {
+            state: DeviceCertificateState::PushedToDevice,
+            trusted: None,
+            fingerprint_match: None,
+            message: "Current Bifrost CA file is on the phone. Ordinary Android ADB cannot verify the private user certificate store, so finish the installer and confirm on the phone."
+                .to_string(),
+        },
+        Ok(None) | Err(_) => DeviceCertificateStatus {
+            state: DeviceCertificateState::Unknown,
+            trusted: None,
+            fingerprint_match: None,
+            message: "Bifrost can see this Android device, but ordinary ADB cannot verify whether the CA is installed. Rooted/emulator test devices can expose the user certificate store for verification."
+                .to_string(),
+        },
+    }
+}
+
 struct CommandResult {
     success: bool,
     message: String,
 }
 
 fn run_adb(adb_path: &Path, args: &[&str]) -> Result<CommandResult, AdbError> {
-    let output = Command::new(adb_path).args(args).output()?;
+    let output = run_adb_output(adb_path, args)?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let message = if output.status.success() {
@@ -244,6 +346,104 @@ fn run_adb(adb_path: &Path, args: &[&str]) -> Result<CommandResult, AdbError> {
         success: output.status.success(),
         message,
     })
+}
+
+fn run_adb_output(adb_path: &Path, args: &[&str]) -> Result<Output, AdbError> {
+    Ok(Command::new(adb_path).args(args).output()?)
+}
+
+fn remote_downloaded_certificate_matches(
+    adb_path: &Path,
+    device_id: &str,
+    local_file: &[u8],
+) -> Result<bool, AdbError> {
+    let output = run_adb_output(
+        adb_path,
+        &[
+            "-s",
+            device_id,
+            "shell",
+            "sh",
+            "-c",
+            "if [ -f /sdcard/Download/bifrost-ca.crt ]; then cat /sdcard/Download/bifrost-ca.crt; else exit 2; fi",
+        ],
+    )?;
+    Ok(output.status.success() && output.stdout == local_file)
+}
+
+fn read_android_user_ca_store(
+    adb_path: &Path,
+    device_id: &str,
+) -> Result<Option<String>, AdbError> {
+    const READ_USER_CA_STORE: &str = "if [ -d /data/misc/user/0/cacerts-added ]; then ls -la /data/misc/user/0/cacerts-added >/dev/null 2>&1 || exit 13; cat /data/misc/user/0/cacerts-added/* 2>/dev/null || true; else exit 2; fi";
+    let direct = run_adb_output(
+        adb_path,
+        &["-s", device_id, "shell", "sh", "-c", READ_USER_CA_STORE],
+    )?;
+    if direct.status.success() {
+        return Ok(Some(String::from_utf8_lossy(&direct.stdout).to_string()));
+    }
+
+    let rooted = run_adb_output(
+        adb_path,
+        &[
+            "-s",
+            device_id,
+            "shell",
+            "su",
+            "0",
+            "sh",
+            "-c",
+            READ_USER_CA_STORE,
+        ],
+    )?;
+    if rooted.status.success() {
+        return Ok(Some(String::from_utf8_lossy(&rooted.stdout).to_string()));
+    }
+    Ok(None)
+}
+
+fn android_user_store_contains_fingerprint(store_pem: &str, local_fingerprint: &str) -> bool {
+    pem_certificate_blocks(store_pem).iter().any(|cert_der| {
+        normalize_fingerprint(&sha256_hex(cert_der)) == normalize_fingerprint(local_fingerprint)
+    })
+}
+
+fn pem_certificate_blocks(input: &str) -> Vec<Vec<u8>> {
+    let begin = "-----BEGIN CERTIFICATE-----";
+    let end = "-----END CERTIFICATE-----";
+    let mut certs = Vec::new();
+    let mut remaining = input;
+    while let Some(start) = remaining.find(begin) {
+        let after_start = &remaining[start..];
+        let Some(end_offset) = after_start.find(end) else {
+            break;
+        };
+        let block_end = end_offset + end.len();
+        let block = &after_start[..block_end];
+        if let Ok(cert) = decode_pem_certificate(block) {
+            certs.push(cert);
+        }
+        remaining = &after_start[block_end..];
+    }
+    certs
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+fn normalize_fingerprint(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_hexdigit())
+        .flat_map(|ch| ch.to_uppercase())
+        .collect()
 }
 
 fn session(device_id: String, completed: bool, steps: Vec<InstallStep>) -> InstallSession {
@@ -326,5 +526,67 @@ List of devices attached
 "#;
 
         assert!(parse_adb_devices(output).is_empty());
+    }
+
+    #[test]
+    fn android_user_store_matches_current_ca_fingerprint() {
+        let cert = b"test-cert";
+        let fingerprint = sha256_hex(cert);
+        let store = "-----BEGIN CERTIFICATE-----\ndGVzdC1jZXJ0\n-----END CERTIFICATE-----\n";
+
+        assert!(android_user_store_contains_fingerprint(store, &fingerprint));
+    }
+
+    #[test]
+    fn android_user_store_rejects_different_ca_fingerprint() {
+        let fingerprint = sha256_hex(b"current-bifrost-ca");
+        let store = "-----BEGIN CERTIFICATE-----\nb3RoZXItY2E=\n-----END CERTIFICATE-----\n";
+
+        assert!(!android_user_store_contains_fingerprint(
+            store,
+            &fingerprint
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn android_ca_status_reports_pushed_when_user_store_is_not_readable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let test_dir = std::env::temp_dir().join(format!("bifrost-adb-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&test_dir).expect("create temp test dir");
+        let cert_path = test_dir.join("ca.crt");
+        fs::write(
+            &cert_path,
+            "-----BEGIN CERTIFICATE-----\ndGVzdC1jZXJ0\n-----END CERTIFICATE-----\n",
+        )
+        .expect("write cert");
+        let adb_path = test_dir.join("adb");
+        fs::write(
+            &adb_path,
+            format!(
+                "#!/bin/sh\ncase \"$*\" in\n  *Download*) cat '{}'; exit 0 ;;\n  *cacerts-added*) exit 2 ;;\n  *) exit 0 ;;\nesac\n",
+                cert_path.display()
+            ),
+        )
+        .expect("write fake adb");
+        let mut permissions = fs::metadata(&adb_path)
+            .expect("stat fake adb")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&adb_path, permissions).expect("chmod fake adb");
+
+        let status = check_android_ca_status(AndroidCaStatusOptions {
+            adb_path,
+            device_id: "android-1".to_string(),
+            ca_cert_path: cert_path,
+        });
+
+        assert_eq!(status.state, DeviceCertificateState::PushedToDevice);
+        assert_eq!(status.trusted, None);
+        assert!(status
+            .message
+            .contains("Ordinary Android ADB cannot verify"));
+        let _ = fs::remove_dir_all(test_dir);
     }
 }

@@ -27,6 +27,23 @@ pub enum DeviceStatus {
     Unsupported,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceCertificateState {
+    Unknown,
+    NotInstalled,
+    PushedToDevice,
+    Installed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceCertificateStatus {
+    pub state: DeviceCertificateState,
+    pub trusted: Option<bool>,
+    pub fingerprint_match: Option<bool>,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MobileDevice {
     pub id: String,
@@ -35,6 +52,7 @@ pub struct MobileDevice {
     pub platform: MobilePlatform,
     pub status: DeviceStatus,
     pub capability: DeviceTrustCapability,
+    pub certificate_status: Option<DeviceCertificateStatus>,
     pub status_message: String,
 }
 

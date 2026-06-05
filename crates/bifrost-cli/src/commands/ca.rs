@@ -2,10 +2,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bifrost_device::{
-    discover_android_devices, discover_ios_devices, generate_ios_mobileconfig, install_android_ca,
-    install_ios_profile_with_configurator, read_certificate_der_from_file, AdbDiscovery,
-    AndroidInstallOptions, DeviceStatus, InstallSession, IosConfiguratorInstallOptions,
-    MobileConfigOptions, MobileDevice,
+    discover_android_devices_with_ca, discover_ios_devices, generate_ios_mobileconfig,
+    install_android_ca, install_ios_profile_with_configurator, read_certificate_der_from_file,
+    AdbDiscovery, AndroidInstallOptions, DeviceCertificateState, DeviceStatus, InstallSession,
+    IosConfiguratorInstallOptions, MobileConfigOptions, MobileDevice,
 };
 use bifrost_proxy::{ProxyConfig, TlsConfig};
 use bifrost_tls::{
@@ -345,7 +345,7 @@ fn handle_mobile_ca_install(
     requested_device_id: Option<&str>,
     non_interactive: bool,
 ) -> bifrost_core::Result<()> {
-    let discovery = discover_android_devices();
+    let discovery = discover_android_devices_with_ca(Some(ca_cert_path));
     let Some(adb_path) = discovery.adb_path.as_ref().map(PathBuf::from) else {
         return Err(bifrost_core::BifrostError::Config(discovery.message));
     };
@@ -360,6 +360,7 @@ fn handle_mobile_ca_install(
     println!("Bifrost will push the CA certificate and open Android's installer flow.");
     println!("Personal phones still require final confirmation on the phone.");
     println!("Android apps that do not trust user CAs or use certificate pinning may still reject interception.");
+    print_android_certificate_status(&device);
     println!();
 
     let session = install_android_ca(AndroidInstallOptions {
@@ -371,7 +372,30 @@ fn handle_mobile_ca_install(
         bifrost_core::BifrostError::Config(format!("Failed to start mobile CA install: {error}"))
     })?;
     print_install_session(&session);
+    let refreshed = discover_android_devices_with_ca(Some(ca_cert_path));
+    if let Some(device) = refreshed
+        .devices
+        .iter()
+        .find(|candidate| candidate.id == device.id)
+    {
+        print_android_certificate_status(device);
+    }
     Ok(())
+}
+
+fn print_android_certificate_status(device: &MobileDevice) {
+    if let Some(status) = &device.certificate_status {
+        let state = match status.state {
+            DeviceCertificateState::Unknown => "unknown",
+            DeviceCertificateState::NotInstalled => "not installed",
+            DeviceCertificateState::PushedToDevice => "pushed to device",
+            DeviceCertificateState::Installed => "installed",
+        };
+        println!("Android CA status: {state}");
+        println!("  {}", status.message);
+    } else {
+        println!("Android CA status: not checked");
+    }
 }
 
 fn select_android_device(
@@ -748,6 +772,7 @@ mod tests {
             platform: bifrost_device::MobilePlatform::Android,
             status,
             capability: bifrost_device::DeviceTrustCapability::PushAndOpenInstaller,
+            certificate_status: None,
             status_message: "status message".to_string(),
         }
     }

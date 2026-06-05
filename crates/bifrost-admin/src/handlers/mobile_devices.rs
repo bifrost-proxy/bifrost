@@ -3,10 +3,11 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use bifrost_device::{
-    discover_android_devices, discover_ios_devices, generate_ios_mobileconfig, install_android_ca,
-    install_ios_profile_with_configurator, read_certificate_der_from_file, AdbDiscovery,
-    AndroidInstallOptions, DeviceStatus, InstallMode, InstallSession,
-    IosConfiguratorInstallOptions, IosDiscovery, MobileConfigOptions, MobilePlatform,
+    discover_android_devices, discover_android_devices_with_ca, discover_ios_devices,
+    generate_ios_mobileconfig, install_android_ca, install_ios_profile_with_configurator,
+    read_certificate_der_from_file, AdbDiscovery, AndroidInstallOptions, DeviceStatus, InstallMode,
+    InstallSession, IosConfiguratorInstallOptions, IosDiscovery, MobileConfigOptions,
+    MobilePlatform,
 };
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
@@ -104,8 +105,9 @@ pub async fn handle_mobile_public(
 
 fn list_mobile_devices(state: SharedAdminState) -> Response<BoxBody> {
     let port = state.port();
+    let ca_cert_path = state.ca_cert_path.as_deref().filter(|path| path.exists());
     let response = MobileDevicesResponse {
-        android: discover_android_devices(),
+        android: discover_android_devices_with_ca(ca_cert_path),
         ios: discover_ios_devices(),
         ios_profile_url: format!(
             "http://127.0.0.1:{port}/_bifrost/public/mobile/ios-profile.mobileconfig"

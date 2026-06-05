@@ -39,7 +39,9 @@ import {
   installMobileCa,
   refreshMobileDevices,
   type CertInfo,
+  type DeviceCertificateState,
   type InstallSession,
+  type MobileDevice,
   type MobileDevicesResponse,
 } from "../../../api/cert";
 import { normalizeApiErrorMessage } from "../../../api/client";
@@ -213,14 +215,35 @@ function mobileDeviceTitle(device: { id: string; name?: string | null }) {
   return device.name?.trim() || device.id;
 }
 
-function mobileDeviceDescription(
-  device: {
-    id: string;
-    managed_install_target?: string | null;
-    status_message: string;
-  },
-  extra?: string,
-) {
+function certificateStateLabel(state: DeviceCertificateState) {
+  switch (state) {
+    case "installed":
+      return "CA installed";
+    case "pushed_to_device":
+      return "CA pushed";
+    case "not_installed":
+      return "CA not installed";
+    case "unknown":
+    default:
+      return "CA unknown";
+  }
+}
+
+function certificateStateColor(state: DeviceCertificateState) {
+  switch (state) {
+    case "installed":
+      return "green";
+    case "pushed_to_device":
+      return "gold";
+    case "not_installed":
+      return "red";
+    case "unknown":
+    default:
+      return "default";
+  }
+}
+
+function mobileDeviceDescription(device: MobileDevice, extra?: string) {
   return (
     <Space direction="vertical" size={2}>
       <Text type="secondary" style={{ fontSize: 12 }}>
@@ -235,6 +258,11 @@ function mobileDeviceDescription(
       <Text type="secondary" style={{ fontSize: 12 }}>
         {extra ? `${device.status_message} ${extra}` : device.status_message}
       </Text>
+      {device.certificate_status ? (
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          {device.certificate_status.message}
+        </Text>
+      ) : null}
     </Space>
   );
 }
@@ -472,19 +500,23 @@ export default function CertificateTab({
     }
   }, [onCertInfoChange]);
 
-  const handleInstallAndroid = useCallback(async (deviceId: string) => {
-    setInstallingDeviceId(deviceId);
-    setInstallSession(null);
-    try {
-      const session = await installMobileCa(deviceId);
-      setInstallSession(session);
-      message.success("CA pushed to Android. Finish the confirmation on the phone.");
-    } catch (error) {
-      message.error(normalizeApiErrorMessage(error, "Failed to start Android install flow"));
-    } finally {
-      setInstallingDeviceId(null);
-    }
-  }, []);
+  const handleInstallAndroid = useCallback(
+    async (deviceId: string) => {
+      setInstallingDeviceId(deviceId);
+      setInstallSession(null);
+      try {
+        const session = await installMobileCa(deviceId);
+        setInstallSession(session);
+        await loadMobileDevices(true, true);
+        message.success("CA pushed to Android. Finish the confirmation on the phone.");
+      } catch (error) {
+        message.error(normalizeApiErrorMessage(error, "Failed to start Android install flow"));
+      } finally {
+        setInstallingDeviceId(null);
+      }
+    },
+    [loadMobileDevices],
+  );
 
   const handleInstallIosConfigurator = useCallback(async (deviceId: string) => {
     setInstallingIosConfiguratorDeviceId(deviceId);
@@ -1065,6 +1097,11 @@ export default function CertificateTab({
                           >
                             {device.status}
                           </Tag>
+                          {device.certificate_status ? (
+                            <Tag color={certificateStateColor(device.certificate_status.state)}>
+                              {certificateStateLabel(device.certificate_status.state)}
+                            </Tag>
+                          ) : null}
                         </Space>
                       }
                       description={mobileDeviceDescription(device)}

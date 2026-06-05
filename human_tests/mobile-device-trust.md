@@ -265,6 +265,7 @@
 
 - CLI 输出包含 `Mobile CA install guide`。
 - CLI 输出包含 `Personal phones still require final confirmation on the phone`。
+- CLI 输出包含 `Android CA status`，并明确显示 `unknown`、`pushed to device`、`not installed` 或 `installed` 之一。
 - fake ADB 日志包含 `devices -l`。
 - fake ADB 日志包含 `-s android-1 push`。
 - fake ADB 日志包含 `android.intent.action.VIEW`。
@@ -383,6 +384,26 @@
 - `ios_7` 说明进入 Certificate Trust Settings，并打开 Bifrost CA 的 full trust。
 - 页面文案明确表达 Configurator 和扫码/文件只是送达方式；安装描述文件和开启完全信任是后续共同阶段，不把下载或安装 profile 描述成已经完成 HTTPS 信任。
 - 浅色和暗色主题下，七张截图、步骤标题和说明文字均可读，没有重叠或按钮遮挡。
+
+### TC-MDT-14：Android 设备卡片展示当前 CA 状态并区分普通 ADB 与 root/emulator 验证能力
+
+**操作步骤**：
+
+1. 打开 `http://127.0.0.1:8800/_bifrost/settings?tab=certificate#certificate-mobile-android`。
+2. 连接一台已授权 USB 调试的 Android 设备，或使用 fake ADB / emulator 测试环境。
+3. 点击 Android 区域的 `Detect Devices`。
+4. 查看目标 Android 设备卡片。
+5. 点击该设备的 `Install`，在手机上完成系统证书安装确认。
+6. 等待页面自动刷新一到两轮。
+7. 如果使用 root/emulator/test device，确保 `/data/misc/user/0/cacerts-added` 可由 ADB 或 `su 0` 读取，再重复检测。
+
+**预期结果**：
+
+- 设备卡片除 ADB 连接状态外，还展示 CA 状态标签：`CA unknown`、`CA pushed`、`CA not installed` 或 `CA installed`。
+- 普通未 root Android 设备不被误标为已安装；如果 Bifrost 只能确认 `/sdcard/Download/bifrost-ca.crt` 与当前 CA 文件一致，则显示 `CA pushed` 并提示普通 ADB 无法验证私有 user CA store。
+- root/emulator/test device 可读取 Android user CA store 且当前 CA 指纹匹配时，设备卡片显示 `CA installed`。
+- 页面文案仍提示 Android 7+ App 可能不信任用户 CA，证书 pinning 或未配置 Network Security Config 的 App 不保证可被 HTTPS 解密。
+- 全局设备弹窗同样展示该 CA 状态，不只展示设备 ID。
 
 ## 清理步骤
 

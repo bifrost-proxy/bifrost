@@ -17,6 +17,21 @@ function deviceDisplayName(device: MobileDevice): string {
   return device.name?.trim() || device.id;
 }
 
+function certificateStateLabel(device: MobileDevice): string | null {
+  switch (device.certificate_status?.state) {
+    case "installed":
+      return "CA installed";
+    case "pushed_to_device":
+      return "CA pushed";
+    case "not_installed":
+      return "CA not installed";
+    case "unknown":
+      return "CA unknown";
+    default:
+      return null;
+  }
+}
+
 function connectedDevices(info: MobileDevicesResponse | null): MobileDevice[] {
   if (!info) {
     return [];
@@ -212,6 +227,7 @@ export default function MobileDeviceTrustPrompt() {
           dataSource={visibleDevices}
           renderItem={(device) => {
             const selected = selectedDevice?.id === device.id;
+            const caStateLabel = certificateStateLabel(device);
             return (
               <List.Item
                 onClick={() => setSelectedDeviceId(device.id)}
@@ -233,6 +249,7 @@ export default function MobileDeviceTrustPrompt() {
                       <Tag color={device.platform === "ios" ? "blue" : "green"}>
                         {device.platform}
                       </Tag>
+                      {caStateLabel ? <Tag>{caStateLabel}</Tag> : null}
                       <Tag color={device.capability === "managed_auto_trust" ? "purple" : "gold"}>
                         {device.capability === "managed_auto_trust"
                           ? "Configurator"
@@ -254,6 +271,11 @@ export default function MobileDeviceTrustPrompt() {
                       <Text type="secondary" style={{ fontSize: 12 }}>
                         {device.status_message}
                       </Text>
+                      {device.certificate_status ? (
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          {device.certificate_status.message}
+                        </Text>
+                      ) : null}
                     </Space>
                   }
                 />

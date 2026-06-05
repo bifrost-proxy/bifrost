@@ -4,7 +4,8 @@ pub mod mobileconfig;
 pub mod model;
 
 pub use adb::{
-    discover_android_devices, install_android_ca, parse_adb_devices, AdbDiscovery,
+    check_android_ca_status, discover_android_devices, discover_android_devices_with_ca,
+    install_android_ca, parse_adb_devices, AdbDiscovery, AndroidCaStatusOptions,
     AndroidInstallOptions,
 };
 pub use ios::{
@@ -16,6 +17,6 @@ pub use mobileconfig::{
     generate_ios_mobileconfig, read_certificate_der_from_file, MobileConfigOptions,
 };
 pub use model::{
-    DeviceStatus, DeviceTrustCapability, InstallCaRequest, InstallMode, InstallSession,
-    InstallStep, MobileDevice, MobilePlatform,
+    DeviceCertificateState, DeviceCertificateStatus, DeviceStatus, DeviceTrustCapability,
+    InstallCaRequest, InstallMode, InstallSession, InstallStep, MobileDevice, MobilePlatform,
 };

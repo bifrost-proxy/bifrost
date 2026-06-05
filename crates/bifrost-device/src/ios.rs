@@ -254,6 +254,7 @@ fn parse_ioreg_device_block(block: &str) -> Option<MobileDevice> {
         platform: MobilePlatform::Ios,
         status: DeviceStatus::Connected,
         capability: DeviceTrustCapability::GuideOnly,
+        certificate_status: None,
         status_message:
             "Detected over USB. Download the iOS profile, install it on the phone, then enable full trust in Certificate Trust Settings."
                 .to_string(),
@@ -333,6 +334,7 @@ pub fn parse_cfgutil_list_devices(output: &str) -> Vec<MobileDevice> {
                 platform: MobilePlatform::Ios,
                 status: DeviceStatus::Connected,
                 capability: DeviceTrustCapability::ManagedAutoTrust,
+                certificate_status: None,
                 status_message:
                     "Detected over USB through Apple Configurator. Select this device to install the Bifrost CA profile with cfgutil; unsupervised devices may still require iPhone confirmation."
                         .to_string(),

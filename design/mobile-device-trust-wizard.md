@@ -20,6 +20,7 @@ Mobile Device Trust Wizard 把现有 CA 下载、二维码和证书状态能力�
   - 检测 `BIFROST_ADB_PATH` 或 `PATH` 中的 `adb`。
   - 解析 `adb devices -l` 输出。
   - 普通 Android guided install：`adb push` CA 到 `/sdcard/Download/bifrost-ca.crt`，再尝试 `am start` 打开证书安装入口，失败时 fallback 到安全设置页。
+  - Android CA 状态探针：对 connected 设备检查 `/sdcard/Download/bifrost-ca.crt` 是否与当前 CA 文件一致；对 root/emulator/test 设备尝试读取 `/data/misc/user/0/cacerts-added`，按当前 CA DER 的 SHA-256 指纹比对是否已经进入 Android 用户证书库。普通未 root 设备通常无法读取该私有证书库，因此状态会明确显示为“已推送但无法由普通 ADB 确认”或“未知”，不会误称已信任。
 - `mobileconfig.rs` 负责：
   - 从 PEM/DER 证书文件提取 DER。
   - 生成 iOS `.mobileconfig`，PayloadType 为 `com.apple.security.root`，并明确写入手动启用完全信任的说明。
@@ -55,9 +56,9 @@ Mobile Device Trust Wizard 把现有 CA 下载、二维码和证书状态能力�
 
 - 普通设备提示：Bifrost 只能推送/打开安装流程，手机端仍需确认。
 - Local Certificate Install 区块在本机 CA 未安装或已安装但未信任时展示 `Install and Trust CA` / `Trust CA` 按钮；点击后调用 `/api/cert/install`，行为等价于 `bifrost ca install`，成功后立即刷新本机证书状态。由于 macOS 安装证书和设为信任可能存在短暂状态传播延迟，前端会继续轮询 `/api/cert/info`，直到状态变为 `Installed and trusted` 或超时。
-- Android USB 区块：检测设备、展示 ADB/设备授权状态、对 connected 设备执行 guided install。
+- Android USB 区块：检测设备、展示 ADB/设备授权状态和当前 CA 状态；对 connected 设备执行 guided install。CA 状态分为 `unknown`、`not_installed`、`pushed_to_device`、`installed`。其中 `installed` 仅在 Bifrost 能读取 Android 用户证书库并匹配当前 CA 指纹时显示；普通个人手机若只完成了 push/open installer，则 UI 只显示 `pushed_to_device` 并提示继续在手机上确认。
 - 全局设备监听提示：管理端主布局挂载 `MobileDeviceTrustPrompt`，用户在任意页面时每 3 秒静默轮询本地 `/api/mobile-devices/refresh`；检测到 connected Android 或 iOS 设备时弹出确认窗口。若同时发现多台设备，弹窗列出每台设备的自定义名称、型号、ID 和 ECID，用户可以选择目标设备后直接点击 `Install Selected`，也可以点击 `Open Certificate Setup` 跳转到 `Settings > Certificate`。跳转时 URL 携带 `mobile_device` / `mobile_platform`，Certificate 页拿到目标设备后自动滚动到对应卡片，高亮该卡片，并让对应安装按钮播放脉冲动画，确保用户知道从哪里继续操作；用户选择 Not now 后只在当前页面会话内记录设备 id，避免旧 localStorage 记录导致后续连接永远不弹。远程 Admin 访问本地 USB API 会得到 403，轮询静默忽略，不打扰远程页面。
-- Certificate 页自身仍每 3 秒刷新设备列表，负责展示 Android ADB、iOS profile、Apple Configurator 和安装 session；它不再弹局部重复提示。
+- Certificate 页自身仍每 3 秒刷新设备列表，负责展示 Android ADB、Android CA 状态、iOS profile、Apple Configurator 和安装 session；它不再弹局部重复提示。Android 用户在手机端完成安装后，如果设备是 root/emulator 且证书库可读，页面会自动刷新为 `CA installed`；普通设备仍提示系统证书库不可由普通 ADB 验证。
 - Certificate 页使用左侧固定导航和右侧单列章节，不再把 Android 和 iOS 做成并列卡片。导航顺序为 Local install、iOS devices、Android devices、Certificate downloads；右侧内容按同样顺序排列，iOS 设备安装必须在 Android 之前，证书文件下载和二维码下载放在最后。
 - iPhone/iPad 区块：
   - 顶部先展示统一 iOS 流程：把 profile 送到 iPhone -> 在 Settings 安装描述文件 -> Settings > General > About > Certificate Trust Settings -> 打开 Bifrost CA 完全信任。Apple Configurator 和手动扫码/文件安装只作为“送达 profile”的两种入口，不在 UI 上拆成互相割裂的两套模式。
@@ -80,6 +81,7 @@ Mobile Device Trust Wizard 把现有 CA 下载、二维码和证书状态能力�
 - `bifrost ca install --ios --configurator`：macOS + Apple Configurator 高级路径；检测 `cfgutil` 和 USB iOS 设备后调用 `cfgutil -e <ECID> install-profile`。单台设备自动选择；多台设备在交互终端中显示自定义名称/型号/ID 并让用户选择；非交互模式需要传 `--device <id-or-ecid>`。
 
 CLI 不承诺普通手机自动启用根 CA 信任；iOS 的自动 SSL/TLS 信任只归属于 Apple Configurator/MDM/监督设备路径。
+Android CLI 会在安装前后输出 `Android CA status`。普通设备通常只能显示 `pushed to device` 或 `unknown`；root/emulator/test 设备可通过用户证书库指纹比对显示 `installed`。
 
 ## 依赖项
 
@@ -118,6 +120,7 @@ CLI 不承诺普通手机自动启用根 CA 信任；iOS 的自动 SSL/TLS 信�
 - `LAN public mobile profile`：真实场景用 LAN 地址验证 profile endpoint 不触发交互式授权，返回 `application/x-apple-aspen-config` 且 plist 有效。
 - `admin_api_mobile_install_requires_explicit_confirmation`：验证 Android install 操作必须显式确认。
 - `admin_api_local_ca_install_requires_explicit_confirmation`：验证本机 CA install 操作必须显式确认，自动测试不误触系统证书安装。
+- `bifrost-device` 单元测试：验证 Android user CA store PEM 指纹匹配和不匹配路径。
 - `cli_ca_install_mobile_single_device_fake_adb`：通过 fake ADB 验证 `ca install --mobile --yes` 单设备自动选择并执行 push/open。
 - `cli_ca_install_mobile_multiple_devices_requires_device_fake_adb`：通过 fake ADB 验证多个 ready 设备的非交互选择边界。
 - `CLI iOS guide`：真实场景验证 `bifrost ca install --ios` 输出 profile 路径、手动安装步骤、Certificate Trust Settings、Configurator 后续命令。
@@ -139,6 +142,7 @@ CLI 不承诺普通手机自动启用根 CA 信任；iOS 的自动 SSL/TLS 信�
 - TC-MDT-11：Settings iPhone/iPad 区域先展示统一流程概览，再展示 Apple Configurator 和手动扫码/文件两种 profile 送达方式；扫码方式展示 `ios_qr_1` / `ios_qr_2`；按 cfgutil 可用状态启用或禁用每台设备的安装按钮；多台 iOS 设备同时显示自定义名称、型号、ID、ECID，并按所选设备 ECID 定向安装。
 - TC-MDT-12：Apple Configurator 返回需要手机端交互时，页面显示待用户确认而非失败。
 - TC-MDT-13：Settings iPhone/iPad 在送达方式之后展示 `ios_1` 到 `ios_7` 共享图文步骤，明确 Configurator 和扫码/文件安装只差在送达 profile，后续 profile 安装与 Certificate Trust Settings 完全信任是同一条流程。
+- TC-MDT-14：Android 设备卡片展示当前 CA 状态；普通 ADB 不承诺能验证 user CA store，root/emulator 可通过 `/data/misc/user/0/cacerts-added` 指纹匹配显示已安装。
 
 ## Review/Fix/Test 闭环方案
 
