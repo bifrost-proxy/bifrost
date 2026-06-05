@@ -7,6 +7,7 @@
 ## statusCode
 
 直接返回指定的 HTTP 状态码，不向后端服务器发送请求。
+`statusCode` 只负责拦截上游请求并生成本地响应，不会短路同一条命中规则里的其他请求/响应改写能力；例如 `reqHeaders`、`reqBody`、`resHeaders`、`resBody`、`resAppend` 等仍会按各自阶段执行，并记录到 Traffic 轨迹中。
 
 ### 语法
 
@@ -73,6 +74,7 @@ www.example.com statusCode://200 resBody://({"ok": true})
 | 返回 500 | `test.com statusCode://500`                 | HTTP 状态码 500     |
 | 返回 200 | `test.com statusCode://200`                 | HTTP 状态码 200     |
 | 带 Body  | `test.com statusCode://404 resBody://(err)` | 404 + Body 为 "err" |
+| 组合规则 | `test.com statusCode://451 reqHeaders://X-Debug=1 reqBody://(rewritten) resHeaders://X-Mock=1 resBody://(base) resAppend://(-tail)` | 不请求后端，返回 451 + 响应头 `X-Mock: 1` + Body `base-tail`，Traffic 记录改写后的请求头和请求体 |
 
 ---
 
@@ -180,6 +182,9 @@ http://www.example.com redirect://`https://www.example.com${path}`
 # 状态码 + Body + 头部（使用块变量）
 www.example.com statusCode://404 resBody://{not-found} resHeaders://(X-Error: true)
 
+# 直接响应 + 请求/响应规则流水线
+www.example.com statusCode://451 reqHeaders://X-Debug=1 reqBody://(rewritten) resHeaders://X-Mock=1 resBody://(base) resAppend://(-tail)
+
 # 重定向 + CORS
 www.example.com redirect://https://new.com/ resCors://*
 
@@ -206,4 +211,5 @@ Not Found
 2. **replaceStatus 请求后端**：使用 `replaceStatus` 时，请求会正常发送，只修改返回的状态码
 3. **redirect 优先级**：`redirect` 会立即返回重定向响应，后续规则不会执行
 4. **状态码与 Body**：使用 `statusCode` 时，默认 Body 为空，需要配合 `resBody` 设置
-5. **缓存影响**：301 重定向会被浏览器缓存，调试时建议使用 302
+5. **规则流水线**：`statusCode` 的直接响应仍会执行同一命中规则里的请求头/请求体改写、响应头/响应体改写和脚本规则，但不会建立上游连接
+6. **缓存影响**：301 重定向会被浏览器缓存，调试时建议使用 302

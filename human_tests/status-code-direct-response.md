@@ -3,6 +3,7 @@
 ## 功能模块说明
 
 验证 `statusCode://code` 命中后直接返回指定 HTTP 状态码，不向后端服务器发送请求；同时验证 `replaceStatus://code` 仍会请求后端，只替换响应状态码。
+回归验证 `statusCode` 只阻断上游请求，不短路同一条命中规则里的请求头、请求体、响应头和响应体规则处理。
 
 ## 前置条件
 
@@ -64,10 +65,26 @@
 - 响应 Body 包含后端返回的 `server error`。
 - 该结果证明 `replaceStatus` 是请求后端后的响应状态码替换，不等同于 `statusCode` 的直接响应。
 
+### TC-SCDR-03：statusCode 不短路请求/响应规则流水线
+
+**操作步骤**：
+
+1. 执行 E2E 回归场景命令：
+   ```bash
+   cargo run -p bifrost-e2e -- --test status_statusCode_preserves_rule_pipeline --test-timeout 120
+   ```
+
+**预期结果**：
+
+- 客户端收到 HTTP `451`。
+- mock upstream 请求计数为 `0`，证明 `statusCode` 仍然不请求后端。
+- 响应头包含 `x-status-response: applied`，响应 Body 精确为 `base-tail`，证明 `resHeaders`、`resBody`、`resAppend` 没有被短路。
+- Traffic 记录中包含改写后的请求头 `X-Status-Pipeline: applied` 和请求体 `rewritten-request-body`，证明 `reqHeaders`、`reqBody` 也正常执行并可观察。
+
 ## 清理步骤
 
 1. TC-SCDR-01 的 `trap` 会清理本次脚本启动的 Bifrost 进程、mock server 和临时数据目录。
-2. TC-SCDR-02 的 E2E runner 会清理本次启动的 Bifrost 进程与 mock server。
+2. TC-SCDR-02 和 TC-SCDR-03 的 E2E runner 会清理本次启动的 Bifrost 进程与 mock server。
 
 ## 执行记录
 
@@ -79,3 +96,11 @@
 - CI `E2E Rules (Linux)` 首轮暴露 `combination/multi_rules.txt` 仍把完整链路用例写成 `statusCode://202`，已改为 `replaceStatus://202` 以匹配“请求后端后替换状态码”的断言目标。
 - 已执行 `BIFROST_E2E_PROXY_READY_TIMEOUT=120 SKIP_FRONTEND_BUILD=1 ... bash e2e-tests/test_rules.sh --use-binary -p <port> e2e-tests/rules/combination/multi_rules.txt`，结果 19 passed。
 - 已执行 `SKIP_FRONTEND_BUILD=1 BIFROST_BIN=target/release/bifrost bash e2e-tests/tests/test_websocket_frames.sh`，结果 6 passed，确认 WebSocket header rule fixture 仍由专门脚本覆盖。
+
+### 2026-06-05
+
+- 修复前执行 `cargo run -p bifrost-e2e -- --test status_statusCode_preserves_rule_pipeline --test-timeout 120`，结果失败：Traffic 中缺少改写后的 `X-Status-Pipeline` 请求头，确认 `statusCode` 直接响应提前返回导致请求规则未执行。
+- 修复后执行 `cargo run -p bifrost-e2e -- --test status_statusCode_preserves_rule_pipeline --test-timeout 120`，结果 1 passed，确认请求头、请求体、响应头、响应体规则均执行且未请求 upstream。
+- 修复后执行 `cargo run -p bifrost-e2e -- --test status_statusCode_direct_no_upstream --test-timeout 120`，结果 1 passed，确认不请求 upstream 语义未回归。
+- 修复后执行 `cargo run -p bifrost-e2e -- --test status_statusCode_with_body --test-timeout 120`，结果 1 passed，确认 `statusCode + resBody` 语义未回归。
+- 修复后执行 `cargo run -p bifrost-e2e -- --test status_combined_statusCode_headers --test-timeout 120`，结果 1 passed，确认 `statusCode + resHeaders` 语义未回归。

@@ -55,11 +55,11 @@ use super::devtools::{
 };
 use super::handler::decode::{apply_decode_scripts_for_storage, DecodeForStorageResult};
 use super::handler::{
-    apply_websocket_request_header_rules, apply_websocket_response_header_rules,
-    build_connection_error_response, build_error_body, build_overridden_error_response,
-    connect_via_upstream_http_proxy_tunnel, merge_websocket_header_rule_candidates,
-    needs_body_processing, needs_request_body_processing, needs_response_override,
-    parse_and_record_sse_events, ConnectionErrorInfo,
+    apply_immediate_response_body_rules, apply_websocket_request_header_rules,
+    apply_websocket_response_header_rules, build_connection_error_response, build_error_body,
+    build_overridden_error_response, connect_via_upstream_http_proxy_tunnel,
+    merge_websocket_header_rule_candidates, needs_body_processing, needs_request_body_processing,
+    needs_response_override, parse_and_record_sse_events, ConnectionErrorInfo,
 };
 use super::scripts::{
     apply_script_headers_to_header_map, body_to_script_string, execute_request_scripts,
@@ -2103,40 +2103,6 @@ async fn handle_intercepted_request_with_protocol(
 
     debug!("[{}] Intercepted: {} {}", req_id, method_str, upstream_uri);
 
-    if let Some(status) = resolved_rules.status_code {
-        if resolved_rules.mock_file.is_none()
-            && resolved_rules.mock_rawfile.is_none()
-            && resolved_rules.mock_template.is_none()
-            && resolved_rules.location_href.is_none()
-        {
-            if verbose_logging {
-                info!("[{}] [MOCK] status code: {}", req_id, status);
-            }
-            let response = crate::utils::mock::build_status_response(status, &resolved_rules);
-            if let Some(ref state) = admin_state {
-                record_mock_traffic(
-                    state,
-                    req_id,
-                    &method_str,
-                    &original_uri,
-                    original_host,
-                    &start_time,
-                    has_rules,
-                    &resolved_rules,
-                    &response,
-                    &req,
-                    &client_ip,
-                    client_app.as_deref(),
-                    client_pid,
-                    client_path.as_deref(),
-                    listener_port,
-                    &devtools_client_req_id,
-                );
-            }
-            return Ok(response);
-        }
-    }
-
     if let Some(ref redirect_url) = resolved_rules.redirect {
         let status = resolved_rules.redirect_status.unwrap_or(302);
         if verbose_logging {
@@ -2693,6 +2659,77 @@ async fn handle_intercepted_request_with_protocol(
     } else {
         req_content_length.unwrap_or(0)
     };
+
+    if let Some(status) = resolved_rules.status_code {
+        if resolved_rules.mock_file.is_none()
+            && resolved_rules.mock_rawfile.is_none()
+            && resolved_rules.mock_template.is_none()
+            && resolved_rules.location_href.is_none()
+        {
+            if verbose_logging {
+                info!("[{}] [MOCK] status code: {}", req_id, status);
+            }
+            let mut response = crate::utils::mock::build_status_response(status, &resolved_rules);
+            let mut response_body = None;
+            if needs_body_processing(&resolved_rules) {
+                match apply_immediate_response_body_rules(
+                    response,
+                    &resolved_rules,
+                    &method_str,
+                    max_decompress_output_bytes,
+                    verbose_logging,
+                    &rule_ctx,
+                )
+                .await
+                {
+                    Ok((processed_response, processed_body)) => {
+                        response = processed_response;
+                        response_body = Some(processed_body);
+                    }
+                    Err(e) => {
+                        error!(
+                            "[{}] Failed to process statusCode response body: {}",
+                            req_id, e
+                        );
+                        return Ok(Response::builder()
+                            .status(502)
+                            .body(full_body(b"Bad Gateway".to_vec()))
+                            .unwrap());
+                    }
+                }
+            }
+
+            if let Some(ref state) = admin_state {
+                let final_req_headers = super::handler::headers_to_pairs(&parts.headers);
+                record_direct_status_traffic(
+                    state,
+                    req_id,
+                    &method_str,
+                    &original_uri,
+                    original_host,
+                    &start_time,
+                    has_rules,
+                    &resolved_rules,
+                    &response,
+                    &final_req_headers,
+                    &original_req_headers,
+                    &body_bytes,
+                    req_content_encoding.as_deref(),
+                    &req_body_capture,
+                    response_body,
+                    &req_script_results,
+                    &client_ip,
+                    &client_app,
+                    client_pid,
+                    &client_path,
+                    listener_port,
+                    &devtools_client_req_id,
+                );
+            }
+
+            return Ok(response);
+        }
+    }
 
     let mut new_req = Request::builder()
         .method(actual_method.clone())
@@ -5655,6 +5692,111 @@ fn record_mock_traffic(
         mock_status,
         record.original_response_headers.as_deref().unwrap_or(&[]),
         0,
+    );
+    state.record_traffic(record);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_direct_status_traffic(
+    state: &Arc<AdminState>,
+    req_id: &str,
+    method: &str,
+    url: &str,
+    host: &str,
+    start_time: &Instant,
+    has_rules: bool,
+    resolved_rules: &ResolvedRules,
+    response: &Response<BoxBody>,
+    request_headers: &[(String, String)],
+    original_request_headers: &[(String, String)],
+    request_body: &[u8],
+    request_content_encoding: Option<&str>,
+    req_body_capture: &Option<BodyCaptureHandle>,
+    response_body: Option<Bytes>,
+    req_script_results: &[bifrost_script::ScriptExecutionResult],
+    client_ip: &str,
+    client_app: &Option<String>,
+    client_pid: Option<u32>,
+    client_path: &Option<String>,
+    listener_port: u16,
+    devtools_client_req_id: &Option<String>,
+) {
+    let total_ms = start_time.elapsed().as_millis() as u64;
+    let traffic_type = TrafficType::Https;
+
+    state
+        .metrics_collector
+        .add_bytes_sent_by_type(traffic_type, 0);
+    state
+        .metrics_collector
+        .increment_requests_by_type(traffic_type);
+
+    let mock_status = response.status().as_u16();
+    let mock_res_headers = super::headers_to_pairs(response.headers());
+    let mock_res_body = response_body
+        .or_else(|| resolved_rules.res_body.clone())
+        .unwrap_or_else(|| {
+            Bytes::from(
+                hyper::StatusCode::from_u16(mock_status)
+                    .ok()
+                    .and_then(|status| status.canonical_reason())
+                    .unwrap_or(""),
+            )
+        });
+    let mock_body_len = mock_res_body.len();
+
+    let mut record = TrafficRecord::new(req_id.to_string(), method.to_string(), url.to_string());
+    attach_devtools_client_req_id(&mut record, devtools_client_req_id);
+    record.status = mock_status;
+    record.duration_ms = total_ms;
+    record.host = host.to_string();
+    record.timing = Some(RequestTiming {
+        dns_ms: None,
+        connect_ms: None,
+        tls_ms: None,
+        send_ms: None,
+        wait_ms: Some(total_ms),
+        first_byte_ms: None,
+        receive_ms: None,
+        total_ms,
+    });
+    record.request_headers = Some(request_headers.to_vec());
+    if !super::headers_pairs_equal_ignore_order(original_request_headers, request_headers) {
+        record.original_request_headers = Some(original_request_headers.to_vec());
+    }
+    record.request_size = request_body.len();
+    record.request_body_ref = if !request_body.is_empty() {
+        store_request_body(
+            &Some(Arc::clone(state)),
+            req_id,
+            request_body,
+            request_content_encoding,
+        )
+    } else if let Some(capture) = req_body_capture {
+        capture.clone_ref().or_else(|| capture.take())
+    } else {
+        None
+    };
+    record.original_response_headers = Some(mock_res_headers);
+    record.has_rule_hit = has_rules;
+    record.matched_rules = crate::utils::build_matched_rules(resolved_rules);
+    apply_listener_context(
+        &mut record,
+        listener_port,
+        client_ip,
+        client_app,
+        client_pid,
+        client_path,
+    );
+    if !req_script_results.is_empty() {
+        record.req_script_results = Some(req_script_results.to_vec());
+    }
+    record.response_body_ref =
+        store_response_body(&Some(Arc::clone(state)), req_id, &mock_res_body);
+    record.response_size = calculate_response_size(
+        mock_status,
+        record.original_response_headers.as_deref().unwrap_or(&[]),
+        mock_body_len,
     );
     state.record_traffic(record);
 }

@@ -204,6 +204,23 @@ fn append_unique_pairs(target: &mut Vec<(String, String)>, source: Vec<(String, 
     }
 }
 
+struct DirectStatusRequestSnapshot {
+    method: String,
+    headers: Vec<(String, String)>,
+    original_headers: Option<Vec<(String, String)>>,
+    body: Bytes,
+    content_encoding: Option<String>,
+    req_script_results: Vec<bifrost_script::ScriptExecutionResult>,
+}
+
+fn is_direct_status_response(rules: &ResolvedRules) -> bool {
+    rules.status_code.is_some()
+        && rules.mock_file.is_none()
+        && rules.mock_rawfile.is_none()
+        && rules.mock_template.is_none()
+        && rules.location_href.is_none()
+}
+
 fn append_unique_strings(target: &mut Vec<String>, source: Vec<String>) {
     for item in source {
         if !target.contains(&item) {
@@ -731,7 +748,7 @@ pub fn needs_response_override(rules: &ResolvedRules) -> bool {
     rules.res_body.is_some() || rules.status_code.is_some() || rules.replace_status.is_some()
 }
 
-async fn apply_immediate_response_body_rules(
+pub(in crate::proxy::http) async fn apply_immediate_response_body_rules(
     response: Response<BoxBody>,
     rules: &ResolvedRules,
     method: &str,
@@ -789,6 +806,332 @@ async fn apply_immediate_response_body_rules(
         Response::from_parts(parts, full_body(final_body.clone())),
         final_body,
     ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_direct_status_request_snapshot(
+    req: Request<Incoming>,
+    resolved_rules: &ResolvedRules,
+    method: &str,
+    url: &str,
+    max_body_buffer_size: usize,
+    max_body_probe_size: usize,
+    max_decompress_output_bytes: usize,
+    verbose_logging: bool,
+    ctx: &RequestContext,
+    admin_state: &Option<Arc<AdminState>>,
+) -> Result<DirectStatusRequestSnapshot> {
+    let (mut parts, body) = req.into_parts();
+    let mut actual_method = parts.method.clone();
+    let original_req_headers = headers_to_pairs(&parts.headers);
+    let req_content_encoding = header_content_encoding(&parts.headers);
+
+    apply_req_rules(&mut parts, resolved_rules, verbose_logging, ctx);
+    let output_req_content_encoding = header_content_encoding(&parts.headers);
+
+    if parts.headers.get_all(hyper::header::COOKIE).iter().count() > 1 {
+        let merged = crate::transform::merge_cookie_header_values(&parts.headers);
+        parts.headers.remove(hyper::header::COOKIE);
+        if !merged.is_empty() {
+            if let Ok(value) = merged.parse::<HeaderValue>() {
+                parts.headers.insert(hyper::header::COOKIE, value);
+            }
+        }
+    }
+
+    let content_length = parts
+        .headers
+        .get(hyper::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok());
+    let has_transfer_encoding = parts.headers.contains_key(hyper::header::TRANSFER_ENCODING);
+    let needs_req_processing = needs_request_body_processing(resolved_rules);
+    let has_req_body_override = resolved_rules.req_body.is_some();
+    let has_req_scripts = !resolved_rules.req_scripts.is_empty();
+    let needs_req_body_read = !has_req_body_override && (needs_req_processing || has_req_scripts);
+    let mut skip_req_scripts = false;
+
+    let mut final_body = if needs_req_body_read {
+        let req_content_type = parts
+            .headers
+            .get(hyper::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_lowercase();
+        let limit = if !is_likely_text_content_type(&req_content_type) {
+            let probe = max_body_probe_size.min(max_body_buffer_size);
+            if probe == 0 {
+                max_body_buffer_size
+            } else {
+                probe
+            }
+        } else {
+            max_body_buffer_size
+        };
+        match read_body_bounded(body, limit).await {
+            Ok(BoundedBody::Complete(bytes)) => {
+                let req_content_type = parts
+                    .headers
+                    .get(hyper::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok());
+                if has_request_body_rules(resolved_rules) {
+                    let processed = apply_body_rules_preserving_encoding(
+                        bytes,
+                        resolved_rules,
+                        Phase::Request,
+                        req_content_type,
+                        ContentInjectionEncoding {
+                            source: req_content_encoding.as_deref(),
+                            output: output_req_content_encoding.as_deref(),
+                            max_decompress_output_bytes,
+                        },
+                        verbose_logging,
+                        ctx,
+                    );
+                    set_content_encoding_header(
+                        &mut parts.headers,
+                        processed.content_encoding.as_deref(),
+                    );
+                    processed.body
+                } else {
+                    bytes
+                }
+            }
+            Ok(BoundedBody::Exceeded(mut replay_body)) => {
+                let size_display = content_length
+                    .map(|len| len.to_string())
+                    .unwrap_or_else(|| format!(">{}", limit));
+                warn!(
+                    "[{}] [REQ_BODY] body too large ({} bytes > {} limit), skipping body rules and scripts for statusCode direct response",
+                    ctx.id_str(),
+                    size_display,
+                    limit
+                );
+                skip_req_scripts = true;
+                while let Some(frame) = replay_body.frame().await {
+                    let _ = frame.map_err(|e| {
+                        BifrostError::Network(format!(
+                            "Failed to drain oversized direct status request body: {}",
+                            e
+                        ))
+                    })?;
+                }
+                Bytes::new()
+            }
+            Err(e) => {
+                return Err(BifrostError::Network(format!(
+                    "Failed to read request body: {}",
+                    e
+                )))
+            }
+        }
+    } else if let Some(ref new_body) = resolved_rules.req_body {
+        if verbose_logging {
+            info!(
+                "[{}] [REQ_BODY] replaced: {} bytes -> {} bytes",
+                ctx.id_str(),
+                content_length.unwrap_or(0),
+                new_body.len()
+            );
+        }
+        let mut body = body;
+        while let Some(frame) = body.frame().await {
+            if frame.is_err() {
+                break;
+            }
+        }
+        let req_content_type = parts
+            .headers
+            .get(hyper::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok());
+        let processed = apply_body_rules_preserving_encoding(
+            new_body.clone(),
+            resolved_rules,
+            Phase::Request,
+            req_content_type,
+            ContentInjectionEncoding {
+                source: None,
+                output: output_req_content_encoding.as_deref(),
+                max_decompress_output_bytes,
+            },
+            verbose_logging,
+            ctx,
+        );
+        set_content_encoding_header(&mut parts.headers, processed.content_encoding.as_deref());
+        processed.body
+    } else if content_length.unwrap_or(0) == 0 && !has_transfer_encoding {
+        Bytes::new()
+    } else {
+        drop(body);
+        Bytes::new()
+    };
+
+    let mut values = HashMap::new();
+    if has_req_scripts {
+        values = resolved_rules.values.clone();
+        let state_values = get_values_from_state(admin_state).await;
+        for (key, value) in state_values {
+            values.entry(key).or_insert(value);
+        }
+    }
+
+    let req_script_results = if has_req_scripts && !skip_req_scripts {
+        let mut script_method = method.to_string();
+        let mut script_headers = header_map_to_hashmap(&parts.headers);
+        let original_script_headers = script_headers.clone();
+        let mut script_body = body_to_script_string(
+            &final_body,
+            header_content_encoding(&parts.headers).as_deref(),
+            max_decompress_output_bytes,
+        );
+
+        let results = execute_request_scripts(
+            admin_state,
+            &resolved_rules.req_scripts,
+            ctx,
+            resolved_rules,
+            url,
+            &mut script_method,
+            &mut script_headers,
+            &mut script_body,
+            &values,
+        )
+        .await;
+
+        if results.iter().any(|result| result.success) {
+            if let Ok(new_method) = script_method.parse() {
+                actual_method = new_method;
+            }
+            parts.headers = apply_script_headers_to_header_map(
+                &parts.headers,
+                &original_script_headers,
+                &script_headers,
+            );
+            if let Some(ref new_body) = script_body {
+                let encoded = script_string_to_body(
+                    new_body,
+                    header_content_encoding(&parts.headers).as_deref(),
+                );
+                set_content_encoding_header(
+                    &mut parts.headers,
+                    encoded.content_encoding.as_deref(),
+                );
+                final_body = encoded.body;
+            }
+        }
+
+        results
+    } else {
+        Vec::new()
+    };
+
+    normalize_req_headers(
+        &mut parts,
+        BodyMode::Known(final_body.len()),
+        content_length.is_some(),
+    );
+    let headers = headers_to_pairs(&parts.headers);
+    let original_headers = if headers_pairs_equal_ignore_order(&original_req_headers, &headers) {
+        None
+    } else {
+        Some(original_req_headers)
+    };
+
+    Ok(DirectStatusRequestSnapshot {
+        method: actual_method.to_string(),
+        headers,
+        original_headers,
+        body: final_body,
+        content_encoding: header_content_encoding(&parts.headers),
+        req_script_results,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_direct_status_traffic(
+    state: &Arc<AdminState>,
+    ctx: &RequestContext,
+    record_url: &str,
+    uri: &Uri,
+    start_time: &Instant,
+    has_rules: bool,
+    resolved_rules: &ResolvedRules,
+    response: &Response<BoxBody>,
+    request_snapshot: &DirectStatusRequestSnapshot,
+    response_body: Option<Bytes>,
+    res_script_results: &[bifrost_script::ScriptExecutionResult],
+    devtools_client_req_id: &Option<String>,
+) {
+    let total_ms = start_time.elapsed().as_millis() as u64;
+    let mock_host = uri.host().unwrap_or("unknown").to_string();
+    let mock_status = response.status().as_u16();
+    let mock_res_headers = headers_to_pairs(response.headers());
+    let mock_res_body = response_body
+        .or_else(|| resolved_rules.res_body.clone())
+        .unwrap_or_else(|| {
+            Bytes::from(
+                hyper::StatusCode::from_u16(mock_status)
+                    .ok()
+                    .and_then(|status| status.canonical_reason())
+                    .unwrap_or(""),
+            )
+        });
+    let mock_body_len = mock_res_body.len();
+    let traffic_type = get_traffic_type_from_url(record_url);
+
+    state
+        .metrics_collector
+        .add_bytes_sent_by_type(traffic_type, 0);
+    state
+        .metrics_collector
+        .increment_requests_by_type(traffic_type);
+
+    let mut record = TrafficRecord::new(
+        ctx.id_str().to_string(),
+        request_snapshot.method.clone(),
+        record_url.to_string(),
+    );
+    attach_devtools_client_req_id(&mut record, devtools_client_req_id);
+    record.status = mock_status;
+    record.duration_ms = total_ms;
+    record.host = mock_host;
+    record.timing = Some(RequestTiming {
+        dns_ms: None,
+        connect_ms: None,
+        tls_ms: None,
+        send_ms: None,
+        wait_ms: Some(total_ms),
+        first_byte_ms: None,
+        receive_ms: None,
+        total_ms,
+    });
+    record.request_headers = Some(request_snapshot.headers.clone());
+    record.original_request_headers = request_snapshot.original_headers.clone();
+    record.request_size = request_snapshot.body.len();
+    record.request_body_ref = store_request_body(
+        &Some(Arc::clone(state)),
+        ctx.id_str(),
+        &request_snapshot.body,
+        request_snapshot.content_encoding.as_deref(),
+    );
+    record.original_response_headers = Some(mock_res_headers);
+    record.has_rule_hit = has_rules;
+    record.matched_rules = crate::utils::build_matched_rules(resolved_rules);
+    apply_request_context(&mut record, ctx);
+    if !request_snapshot.req_script_results.is_empty() {
+        record.req_script_results = Some(request_snapshot.req_script_results.clone());
+    }
+    if !res_script_results.is_empty() {
+        record.res_script_results = Some(res_script_results.to_vec());
+    }
+    record.response_body_ref =
+        store_response_body(&Some(Arc::clone(state)), ctx.id_str(), &mock_res_body);
+    record.response_size = calculate_response_size(
+        mock_status,
+        record.original_response_headers.as_deref().unwrap_or(&[]),
+        mock_body_len,
+    );
+    state.record_traffic(record);
 }
 
 #[derive(Clone)]
@@ -1062,6 +1405,144 @@ pub async fn handle_http_request(
         } else {
             debug!("[{}] [RULES] none matched", ctx.id_str());
         }
+    }
+
+    if is_direct_status_response(&resolved_rules) {
+        let request_snapshot = build_direct_status_request_snapshot(
+            req,
+            &resolved_rules,
+            &method,
+            &url,
+            max_body_buffer_size,
+            max_body_probe_size,
+            max_decompress_output_bytes,
+            verbose_logging,
+            ctx,
+            &admin_state,
+        )
+        .await?;
+        let status = resolved_rules.status_code.unwrap_or(200);
+        let mut mock_response = crate::utils::mock::build_status_response(status, &resolved_rules);
+        let mut transformed_mock_body = if needs_body_processing(&resolved_rules) {
+            let (response, body) = apply_immediate_response_body_rules(
+                mock_response,
+                &resolved_rules,
+                &request_snapshot.method,
+                max_decompress_output_bytes,
+                verbose_logging,
+                ctx,
+            )
+            .await?;
+            mock_response = response;
+            Some(body)
+        } else {
+            None
+        };
+
+        let mut res_script_results = Vec::new();
+        if !resolved_rules.res_scripts.is_empty() {
+            let (mut res_parts, res_body) = mock_response.into_parts();
+            let mut final_body = if let Some(body) = transformed_mock_body.take() {
+                body
+            } else {
+                res_body
+                    .collect()
+                    .await
+                    .map_err(|e| {
+                        BifrostError::Network(format!("Failed to read immediate response: {}", e))
+                    })?
+                    .to_bytes()
+            };
+            let mut res_script_status = res_parts.status.as_u16();
+            let mut res_script_status_text = res_parts
+                .status
+                .canonical_reason()
+                .unwrap_or("OK")
+                .to_string();
+            let mut res_script_headers = header_map_to_hashmap(&res_parts.headers);
+            let original_script_headers = res_script_headers.clone();
+            let mut res_script_body = body_to_script_string(
+                &final_body,
+                response_content_encoding(&res_parts).as_deref(),
+                max_decompress_output_bytes,
+            );
+            let req_script_headers = headers_to_hashmap(&request_snapshot.headers);
+            let mut values = resolved_rules.values.clone();
+            let state_values = get_values_from_state(&admin_state).await;
+            for (key, value) in state_values {
+                values.entry(key).or_insert(value);
+            }
+
+            let results = execute_response_scripts(
+                &admin_state,
+                &resolved_rules.res_scripts,
+                ctx,
+                &resolved_rules,
+                &record_url,
+                &request_snapshot.method,
+                &req_script_headers,
+                &mut res_script_status,
+                &mut res_script_status_text,
+                &mut res_script_headers,
+                &mut res_script_body,
+                &values,
+            )
+            .await;
+
+            if results.iter().any(|result| result.success) {
+                if let Ok(new_status) = StatusCode::from_u16(res_script_status) {
+                    res_parts.status = new_status;
+                }
+                res_parts.headers = apply_script_headers_to_header_map(
+                    &res_parts.headers,
+                    &original_script_headers,
+                    &res_script_headers,
+                );
+                if let Some(ref new_body) = res_script_body {
+                    let encoded = script_string_to_body(
+                        new_body,
+                        response_content_encoding(&res_parts).as_deref(),
+                    );
+                    set_content_encoding_header(
+                        &mut res_parts.headers,
+                        encoded.content_encoding.as_deref(),
+                    );
+                    final_body = encoded.body;
+                }
+            }
+
+            normalize_res_headers(
+                &mut res_parts,
+                BodyMode::Known(final_body.len()),
+                &request_snapshot.method,
+            );
+            mock_response = Response::from_parts(res_parts, full_body(final_body.clone()));
+            transformed_mock_body = Some(final_body);
+            res_script_results = results;
+        }
+
+        if verbose_logging {
+            info!("[{}] [MOCK] returning mock response", ctx.id_str());
+        }
+
+        if let Some(ref state) = admin_state {
+            record_direct_status_traffic(
+                state,
+                ctx,
+                &record_url,
+                &uri,
+                &start_time,
+                has_rules,
+                &resolved_rules,
+                &mock_response,
+                &request_snapshot,
+                transformed_mock_body.clone(),
+                &res_script_results,
+                &devtools_client_req_id,
+            );
+        }
+
+        return Ok(mock_response);
     }
 
     if let Some(mut mock_response) =

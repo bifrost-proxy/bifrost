@@ -181,10 +181,23 @@ server.serve_forever()
 PY
 python3 "$MOCK_SERVER" "$MOCK_PORT_FILE" "$MOCK_SEND_LOG" &
 MOCK_PID=$!
-for _ in $(seq 1 80); do
-  [[ -s "$MOCK_PORT_FILE" ]] && break
+MOCK_READY=0
+for _ in $(seq 1 200); do
+  if [[ -s "$MOCK_PORT_FILE" ]]; then
+    MOCK_READY=1
+    break
+  fi
+  if ! kill -0 "$MOCK_PID" >/dev/null 2>&1; then
+    echo "[weixin-provider] mock server exited before writing port file" >&2
+    wait "$MOCK_PID" >/dev/null 2>&1 || true
+    exit 1
+  fi
   sleep 0.1
 done
+if [[ "$MOCK_READY" != "1" ]]; then
+  echo "[weixin-provider] mock server did not write port file: $MOCK_PORT_FILE" >&2
+  exit 1
+fi
 MOCK_PORT="$(cat "$MOCK_PORT_FILE")"
 MOCK_BASE_URL="http://127.0.0.1:$MOCK_PORT"
 

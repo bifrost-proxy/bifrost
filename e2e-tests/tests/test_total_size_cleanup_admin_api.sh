@@ -32,7 +32,7 @@ server_pid=$!
 
 waited=0
 mock_ready=0
-while [ $waited -lt 20 ]; do
+while [ $waited -lt 60 ]; do
   if grep -q "READY" "$MOCK_LOG" 2>/dev/null; then
     mock_ready=1
     break
@@ -46,7 +46,7 @@ while [ $waited -lt 20 ]; do
   waited=$((waited + 1))
 done
 if [ "$mock_ready" -eq 0 ]; then
-  echo "ERROR: Mock server on port $HTTP_PORT not ready after 10s" >&2
+  echo "ERROR: Mock server on port $HTTP_PORT not ready after 30s" >&2
   cat "$MOCK_LOG" >&2
   exit 1
 fi

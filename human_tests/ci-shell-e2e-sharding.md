@@ -880,6 +880,43 @@
 - 真实执行输出 `[agent-chat-history-continue] PASS`，验证压缩后的历史恢复、计划恢复、续聊写回与外部 history path 拒绝。
 - 原始 artifact 复核能定位旧失败为 mock `/chat/completions` 连接拒绝，而不是 history 恢复业务断言失败。
 
+### TC-CS-38: macOS shell shard mock 启动等待回归
+
+**操作步骤**：
+1. 对本轮失败相关脚本执行语法检查：
+   ```bash
+   bash -n e2e-tests/tests/test_weixin_provider_e2e.sh e2e-tests/tests/test_total_size_cleanup_admin_api.sh
+   ```
+2. 静态检查 Weixin mock server 会等待端口文件、检测子进程提前退出，并在超时时输出明确诊断：
+   ```bash
+   rg -n 'MOCK_READY|mock server exited before writing port file|mock server did not write port file|seq 1 200' \
+     e2e-tests/tests/test_weixin_provider_e2e.sh
+   ```
+3. 静态检查 total size cleanup mock server ready 等待预算提升到 30 秒：
+   ```bash
+   rg -n 'while \[ \$waited -lt 60 \]|not ready after 30s' \
+     e2e-tests/tests/test_total_size_cleanup_admin_api.sh
+   ```
+4. 使用临时数据目录与本地端口真实执行两个失败相关脚本：
+   ```bash
+   BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+     bash e2e-tests/tests/test_weixin_provider_e2e.sh
+   BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+     bash e2e-tests/tests/test_total_size_cleanup_admin_api.sh
+   ```
+5. 复核 GitHub Actions 失败日志原始根因：
+   ```bash
+   GH_REPO=bifrost-proxy/bifrost gh run view 27004966405 --job 79697959967 --log \
+     | rg -n 'test_weixin_provider_e2e.sh|weixin_mock_port|test_total_size_cleanup_admin_api.sh|Mock server on port'
+   ```
+
+**预期结果**：
+- 语法检查通过。
+- Weixin provider E2E 不再在端口文件缺失时直接 `cat` 失败，而是最多等待 20 秒，并在 mock 子进程退出或超时时给出可诊断错误。
+- total size cleanup E2E 在 macOS CI 资源压力下给 mock server 30 秒 ready 窗口，降低 Python mock 启动慢导致的假失败。
+- 两个脚本本地真实执行通过，均使用临时数据目录、`--no-system-proxy` 和非 9900 端口。
+- 原始 CI 失败日志能定位旧问题为 `weixin_mock_port: No such file or directory` 和 `Mock server on port ... not ready after 10s`，不是 `statusCode` 规则功能回归。
+
 ### TC-CS-37: CI 模式不收集 ASR/voice runtime shell E2E，本地 full-shell 保留
 
 **操作步骤**：
