@@ -14,6 +14,7 @@ mod unix_tests {
     fn bifrost_command() -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_bifrost"));
         command.env("BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT", "1");
+        command.env("BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL", "1");
         command
     }
 
@@ -41,6 +42,7 @@ mod unix_tests {
             .arg("127.0.0.1")
             .arg("--daemon")
             .arg("--skip-cert-check")
+            .arg("--no-system-proxy")
             .arg("--no-intercept")
             .output()
             .unwrap();
@@ -157,6 +159,7 @@ mod unix_tests {
             .arg("127.0.0.1")
             .arg("--daemon")
             .arg("--skip-cert-check")
+            .arg("--no-system-proxy")
             .arg("--no-intercept")
             .output()
             .unwrap();

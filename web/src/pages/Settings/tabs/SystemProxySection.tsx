@@ -137,9 +137,13 @@ export default function SystemProxySection({
                   type="warning"
                   showIcon
                   message="Cleanup fallback needs upgrade"
-                  description={`Installed: ${
-                    systemProxyLaunchd.installed_version || "-"
-                  } · Current: ${systemProxyLaunchd.current_version}`}
+                  description={
+                    systemProxyLaunchd.needs_upgrade_reason ||
+                    systemProxyLaunchd.message ||
+                    `Installed helper mode or paths are outdated. Version: ${
+                      systemProxyLaunchd.installed_version || "-"
+                    }`
+                  }
                 />
               ) : systemProxyLaunchd.message ? (
                 <Text type="secondary" style={{ fontSize: 12 }}>
@@ -147,9 +151,9 @@ export default function SystemProxySection({
                 </Text>
               ) : (
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  Restores Bifrost-managed system proxy settings during shutdown,
-                  reboot, or crash recovery to avoid stale proxy ports after
-                  restart. Version:{" "}
+                  Restores Bifrost-managed system proxy settings during crash
+                  recovery and after restart without keeping an idle daemon
+                  process alive. Version:{" "}
                   {systemProxyLaunchd.installed_version ||
                     systemProxyLaunchd.current_version ||
                     "-"}

@@ -1116,8 +1116,10 @@ GET /api/proxy/system/launchd
   "program": "/usr/local/bin/bifrost",
   "data_dir": "/Users/me/.bifrost",
   "installed_version": "0.0.88",
+  "installed_mode": "one_shot",
   "current_version": "0.0.88",
   "needs_upgrade": false,
+  "needs_upgrade_reason": null,
   "message": null
 }
 ```
@@ -1139,7 +1141,8 @@ PUT /api/proxy/system/launchd
 **说明**:
 - macOS 上安装/卸载需要管理员授权，服务端会通过系统 GUI 授权窗口请求密码或指纹。
 - 用户取消授权时返回 `user_cancelled`，Bifrost 主服务继续运行。
-- 已安装且版本一致时，启动流程不会重复安装；版本不一致时状态返回 `needs_upgrade=true`，再次启用会重新安装当前版本。
+- 已安装且 `program`、`data_dir` 和 `installed_mode=one_shot` 一致时，启动流程不会重复安装；`installed_version` 仅用于诊断展示，不会单独触发 `needs_upgrade=true`。
+- 旧版 `KeepAlive` 常驻 plist、缺少 `RunAtLoad`、二进制路径或 data dir 不一致时，状态返回 `needs_upgrade=true` 和 `needs_upgrade_reason`，再次启用会重新安装当前 one-shot helper。
 
 **错误响应**（用户取消授权时）:
 

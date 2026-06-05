@@ -24,8 +24,10 @@ export interface SystemProxyLaunchdStatus {
   program?: string;
   data_dir?: string;
   installed_version?: string;
+  installed_mode?: "one_shot" | "keep_alive" | "unknown";
   current_version: string;
   needs_upgrade: boolean;
+  needs_upgrade_reason?: string;
   message?: string;
 }
 

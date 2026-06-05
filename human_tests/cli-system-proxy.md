@@ -411,7 +411,7 @@
 
 **前置条件**：
 - macOS 环境，当前用户具备管理员授权能力。
-- cleanup LaunchDaemon 未安装，或已安装但版本与当前 `target/debug/bifrost` 不一致。可先执行：
+- cleanup LaunchDaemon 未安装、未加载，或已安装但 `program`、`data_dir`、运行模式与当前 `target/debug/bifrost` 不一致。旧版 `KeepAlive` 常驻 plist 应被识别为需要升级；仅 `Installed version` 与 `Current version` 不一致不应触发重新安装。可先执行：
   ```bash
   ./target/debug/bifrost system-proxy launchd status
   ```
@@ -454,13 +454,13 @@
 **预期结果**：
 - 第 2 步服务 API 在授权完成前已经 ready，证明 LaunchDaemon 安装不阻塞主服务启动。
 - 第 3 步出现 macOS GUI 授权窗口，支持密码或指纹授权；用户取消授权时服务仍继续运行，只记录取消日志。
-- 第 4 步显示 `Installed: true`、`Loaded: true`、`Needs upgrade: false`，`Installed version` 与 `Current version` 一致。
-- plist 中 ProgramArguments 包含 `system-proxy cleanup-daemon --data-dir "$TEST_DATA_DIR" --installed-version <current>`。
-- daemon 启动后如果看到 `runtime.json` 中的 Bifrost pid 仍存活，应跳过 startup cleanup，不会误清正在运行的系统代理。
+- 第 4 步显示 `Installed: true`、`Loaded: true`、`Installed mode: one-shot`、`Needs upgrade: false`。
+- plist 中 ProgramArguments 包含 `system-proxy cleanup-daemon --data-dir "$TEST_DATA_DIR" --installed-version <current>`，包含 `RunAtLoad`，且不包含 `KeepAlive`。
+- one-shot daemon 启动后如果看到 `runtime.json` 中的 Bifrost pid 仍存活，应跳过 startup cleanup，然后退出，不会误清正在运行的系统代理，也不会在空闲时保留 cleanup-daemon 进程。
 
 ---
 
-### TC-CSP-17：Web UI 可通过 GUI 授权安装/卸载 macOS LaunchDaemon cleanup，版本一致时不重复安装
+### TC-CSP-17：Web UI 可通过 GUI 授权安装/卸载 macOS one-shot LaunchDaemon cleanup，结构一致时不重复安装
 
 **前置条件**：
 - 已按 TC-CSP-16 构建 `target/debug/bifrost`。
@@ -482,11 +482,11 @@
    ./target/debug/bifrost system-proxy launchd status
    ```
 5. 回到 Web UI，再打开 `Boot/Shutdown Cleanup`；观察 macOS GUI 授权窗口，输入密码或指纹授权安装。
-6. 再次检查状态和版本：
+6. 再次检查状态、运行模式和版本诊断信息：
    ```bash
    ./target/debug/bifrost system-proxy launchd status
    ```
-7. 在 LaunchDaemon 已安装且版本一致的情况下，停止并重新启动 Bifrost：
+7. 在 LaunchDaemon 已安装且 `program`、`data_dir`、`Installed mode: one-shot` 均一致的情况下，停止并重新启动 Bifrost：
    ```bash
    ./target/debug/bifrost -p 18889 stop || true
    BIFROST_DATA_DIR="$TEST_DATA_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 RUST_LOG=bifrost_cli::startup=info ./target/debug/bifrost -p 18889 start --skip-cert-check --unsafe-ssl --system-proxy > "$TEST_DATA_DIR/restart.log" 2>&1 &
@@ -499,9 +499,9 @@
 
 **预期结果**：
 - Web UI 关闭开关时触发 GUI 授权卸载，授权成功后 CLI status 显示 `Installed: false`、`Loaded: false`。
-- Web UI 打开开关时触发 GUI 授权安装，授权成功后 CLI status 显示 `Installed: true`、`Loaded: true`、`Needs upgrade: false`。
+- Web UI 打开开关时触发 GUI 授权安装，授权成功后 CLI status 显示 `Installed: true`、`Loaded: true`、`Installed mode: one-shot`、`Needs upgrade: false`。
 - 若用户取消授权，Web UI 显示授权取消或失败，服务继续运行，系统代理主开关状态不被错误修改。
-- 第 7-8 步不会再次弹出授权窗口；日志显示已安装且版本一致并跳过重复安装。
+- 第 7-8 步不会再次弹出授权窗口；日志显示已安装且结构一致并跳过重复安装。即使 `Installed version` 与 `Current version` 不一致，只要 `program`、`data_dir` 和 one-shot 模式一致，也不应重复弹授权。
 
 ---
 
@@ -554,8 +554,9 @@
 
 **预期结果**：
 - 第 2 步响应显示 `enabled=true`、`host=127.0.0.1`、`port=18889`、`managed_by_bifrost=true`。
-- 系统代理由运行中的服务接管后，服务自动检查 cleanup LaunchDaemon；缺失、未加载或版本/二进制/data-dir 不一致时会异步触发授权安装，不需要用户再手动点击 `Boot/Shutdown Cleanup`。
-- 用户授权成功后，`system-proxy launchd status` 显示 `Installed: true`、`Loaded: true`、`Needs upgrade: false`。
+- 系统代理由运行中的服务接管后，服务自动检查 cleanup LaunchDaemon；缺失、未加载、二进制/data-dir 不一致、旧 `KeepAlive` 常驻模式或缺少 `RunAtLoad` 时会异步触发授权安装，不需要用户再手动点击 `Boot/Shutdown Cleanup`。
+- 仅版本号不一致时不会触发授权安装；`Installed version` 只作为诊断字段展示。
+- 用户授权成功后，`system-proxy launchd status` 显示 `Installed: true`、`Loaded: true`、`Installed mode: one-shot`、`Needs upgrade: false`。
 - 用户取消授权时，系统代理主开关保持已打开，服务继续运行，日志记录取消，不把取消误报为系统代理启用失败。
 - 设置 `BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1` 的调试验证中，系统代理仍可打开，但日志显示 LaunchDaemon 自动安装检查被环境变量禁用。
 
@@ -564,13 +565,14 @@
 ## 执行记录
 
 - 2026-06-05：真实执行 TC-CSP-18 的 Admin API 路径。使用 `/tmp/bifrost-csp18.*` 临时数据目录和 `target/debug/bifrost` 在 `18889` 端口启动服务，启动参数包含 `--no-system-proxy`、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`，并设置 `BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1` 避免本轮弹出真实授权窗口。服务 ready 后调用 `PUT /_bifrost/api/proxy/system {"enabled":true}`，响应为 `enabled=true host=127.0.0.1 port=18889 managed_by_bifrost=true`；随后日志出现 `system proxy LaunchDaemon cleanup install disabled by environment`，证明运行中服务通过 Admin API 打开系统代理后已触发 LaunchDaemon 自动检查路径。测试结束调用 API 关闭系统代理并停止临时服务，临时数据目录已清理。
+- 2026-06-05：按 one-shot LaunchDaemon 改造补充执行 TC-CSP-16 的 CLI dry-run 验证。执行 `./target/debug/bifrost system-proxy launchd install --data-dir "$TEST_DATA_DIR" --program ./target/debug/bifrost --label com.bifrost.test-system-proxy-cleanup --plist-path "$TEST_DATA_DIR/com.bifrost.test-system-proxy-cleanup.plist" --dry-run`，确认输出包含 `RunAtLoad`、`cleanup-daemon`、`--installed-version` 和 data dir，且不包含 `KeepAlive`。执行 `./target/debug/bifrost system-proxy cleanup-daemon --data-dir "$TEST_DATA_DIR" --installed-version 0.0.1`，命令在 one-shot recovery 检查后退出，无常驻 cleanup-daemon 进程。
 - 2026-06-04：执行 `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_system_proxy_e2e.sh`，覆盖 TC-CSP-11、TC-CSP-12、TC-CSP-13、TC-CSP-14 相关真实系统代理场景。第一轮发现 macOS `scutil --proxy` 聚合视图漏掉非 Wi-Fi network service 残留，USB/Thunderbolt 等服务仍指向 `127.0.0.1:18889`；修复为逐 service 检查 `networksetup -getwebproxy` / `-getsecurewebproxy` 后重跑通过。第 1 轮 review 又发现 shutdown restore 后 reconcile 线程可能醒来重新 enable，补充 stop flag 后第三轮重跑：8/8 PASS，包含系统代理启用、`--no-system-proxy` 外部代理保留、外部代理 disable 归属边界、正常退出恢复、睡眠恢复式漂移重新收敛、崩溃后再次启动恢复、启动失败前同步清理残留。后续全面分析又发现前台 listener 异常退出路径只依赖 restore guard，可能未先停止 reconcile；已将 stop flag 纳入 restore guard，确保异常退出也先停止 reconcile 再恢复。执行后确认 Wi-Fi Web Proxy 与 Secure Web Proxy 均恢复到测试前 `127.0.0.1:9900`。
 - 2026-06-04：按重启/休眠排查要求补充日志验证点。启动恢复路径应输出 `checking for stale system proxy state before startup` 与 `System proxy crash recovery check starting`；关机/停止信号路径应输出 `system proxy shutdown restore starting; stopping reconcile first`、`System proxy restore requested`、`Restoring macOS system proxy to saved original state`、逐 network service 的 `Disabling macOS network service web proxies` 或 `Setting macOS network service proxy to requested target`，以及 `system proxy shutdown restore completed` 和耗时。异常退出兜底 guard 应输出 `system proxy restore guard triggered; stopping reconcile before restore`，失败场景应输出 `failed to restore system proxy` / `system proxy restore guard failed to restore proxy` / `system proxy reconcile failed`，用于定位重启前清理是否真正执行。
 - 2026-06-04：全面审查退出顺序后补强 listener 异常退出路径。前台和 daemon listener task 非 signal 结束时，也应先输出 `system proxy shutdown restore starting; stopping reconcile first` 并执行 restore，再进入 listener error 返回和后续任务清理；日志 context 分别为 `foreground listener exit` / `daemon listener exit`。
 - 2026-06-04：本轮新增 lifecycle helper、wake-gap reconcile、target-aware macOS restore 与锁/耗时日志。真实执行记录待本机按 TC-CSP-13、TC-CSP-15 以及 `e2e-tests/tests/test_system_proxy_e2e.sh` 补充；验证重点为 helper 启动日志、主进程 `kill -9` 后无需下一次启动即可清理、helper 连续 3 次父 PID 不可见才确认退出、睡眠恢复后尽快 reconcile、shutdown restore 出现 `waiting_for_system_proxy_lock` / `acquired_system_proxy_lock`，以及 restore 只对仍指向 Bifrost target 的 network service 输出 service 级 elapsed 日志。
-- 2026-06-04：真实执行 TC-CSP-16、TC-CSP-17。使用 `/tmp/bifrost-launchd-human2.KxevxD` 临时数据目录和 `target/debug/bifrost` 启动 18889 服务，确认服务 ready 先于 LaunchDaemon 授权安装；启动时如果 `/Library/LaunchDaemons/com.bifrost.system-proxy-cleanup.plist` 已安装且 version/binary/data-dir 匹配，日志显示 `system proxy LaunchDaemon cleanup already installed and current`，不会再次弹出授权。通过 Web UI `Boot/Shutdown Cleanup` 开关真实触发 macOS GUI 授权卸载/安装，授权后 API 与 CLI 均显示 `installed=false loaded=false` / `installed=true loaded=true needs_upgrade=false`。授权弹窗文案已收敛为英文短描述，说明 Bifrost network protection helper 用于异常退出后自动恢复 system proxy settings。
+- 2026-06-04：真实执行 TC-CSP-16、TC-CSP-17。使用 `/tmp/bifrost-launchd-human2.KxevxD` 临时数据目录和 `target/debug/bifrost` 启动 18889 服务，确认服务 ready 先于 LaunchDaemon 授权安装；启动时如果 `/Library/LaunchDaemons/com.bifrost.system-proxy-cleanup.plist` 已安装且 binary/data-dir/运行模式匹配，日志显示 `system proxy LaunchDaemon cleanup already installed and current`，不会再次弹出授权。通过 Web UI `Boot/Shutdown Cleanup` 开关真实触发 macOS GUI 授权卸载/安装，授权后 API 与 CLI 均显示 `installed=false loaded=false` / `installed=true loaded=true needs_upgrade=false`。授权弹窗文案已收敛为英文短描述，说明 Bifrost network protection helper 用于异常退出后自动恢复 system proxy settings。
 - 2026-06-04：真实验证外部代理占用与覆盖/恢复语义。测试前系统代理由正式 9900 服务占用；18889 服务启动时日志输出 `system proxy is already owned by another proxy; startup auto-apply skipped`，未抢占 9900。18889 Settings Proxy 页面中 `Enable System Proxy` 开关显示关闭，并以 warning 提示 `System proxy is occupied by another proxy`，API 返回 `enabled=true host=127.0.0.1 port=9900 managed_by_bifrost=false`。在 18889 Web UI 手动打开 System Proxy 后，系统代理切到 `127.0.0.1:18889` 且 `managed_by_bifrost=true`；再次关闭后恢复到 `127.0.0.1:9900` 且 `managed_by_bifrost=false`。
-- 2026-06-04：真实验证主进程强杀保护。先在 18889 Web UI 手动打开 System Proxy，使系统代理从 9900 切到 18889 并保存 9900 为 original；随后对 18889 主进程执行 `kill -9`。2 秒轮询内 `./target/debug/bifrost system-proxy status` 显示恢复为 `Host: 127.0.0.1`、`Port: 9900`。18889 服务不可访问，`system-proxy cleanup-daemon` 仍 `Installed: true`、`Loaded: true`，证明运行期异常退出由 lifecycle helper 快速恢复，LaunchDaemon 继续作为系统生命周期兜底。
+- 2026-06-04：真实验证主进程强杀保护。先在 18889 Web UI 手动打开 System Proxy，使系统代理从 9900 切到 18889 并保存 9900 为 original；随后对 18889 主进程执行 `kill -9`。2 秒轮询内 `./target/debug/bifrost system-proxy status` 显示恢复为 `Host: 127.0.0.1`、`Port: 9900`。18889 服务不可访问，证明运行期异常退出由 lifecycle helper 快速恢复；LaunchDaemon 只负责系统启动/bootstrap/kickstart 后的一次性遗留清理。
 
 ---
 

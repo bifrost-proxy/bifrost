@@ -727,6 +727,11 @@ test_crash_recovery() {
 test_lifecycle_helper_cleans_after_parent_crash() {
     stop_proxy
     unset BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER
+    if [[ "$PLATFORM" == "Darwin" ]] && macos_check_any_proxy_enabled_not_pointing_to "127.0.0.1" "$PROXY_PORT"; then
+        _log_pass "macOS: 检测到外部系统代理 owner，跳过非隔离的 lifecycle helper 崩溃兜底用例"
+        passed=$((passed + 1))
+        return
+    fi
     start_proxy_with_system_proxy
     if [[ "$PLATFORM" == "Darwin" ]] && ! macos_ensure_bifrost_system_proxy_enabled; then
         _log_fail "macOS: lifecycle helper 回归准备失败" "系统代理先指向 127.0.0.1:${PROXY_PORT}" "$(macos_proxy_snapshot)"
@@ -771,11 +776,13 @@ test_launchd_cleanup_plist_dry_run_contains_version_metadata() {
         && echo "$output" | grep -q "cleanup-daemon" \
         && echo "$output" | grep -q -- "--installed-version" \
         && echo "$output" | grep -q "BIFROST_LAUNCHD_INSTALLED_VERSION" \
+        && echo "$output" | grep -q "<key>RunAtLoad</key>" \
+        && ! echo "$output" | grep -q "<key>KeepAlive</key>" \
         && echo "$output" | grep -q "$TEST_DATA_DIR"; then
-        _log_pass "LaunchDaemon cleanup plist dry-run 包含 daemon、data-dir 和版本元数据"
+        _log_pass "LaunchDaemon cleanup plist dry-run 包含 daemon/data-dir/version，并使用 one-shot RunAtLoad 且不写 KeepAlive"
         passed=$((passed + 1))
     else
-        _log_fail "LaunchDaemon cleanup plist dry-run 输出不完整" "包含 cleanup-daemon/data-dir/version metadata" "code=${code}; output=${output}"
+        _log_fail "LaunchDaemon cleanup plist dry-run 输出不完整" "包含 cleanup-daemon/data-dir/version/RunAtLoad 且不包含 KeepAlive" "code=${code}; output=${output}"
         failed=$((failed + 1))
     fi
 }

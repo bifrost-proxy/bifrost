@@ -51,8 +51,10 @@ struct SystemProxyLaunchdApiStatus {
     program: Option<String>,
     data_dir: Option<String>,
     installed_version: Option<String>,
+    installed_mode: Option<bifrost_core::SystemProxyLaunchdMode>,
     current_version: String,
     needs_upgrade: bool,
+    needs_upgrade_reason: Option<String>,
     message: Option<String>,
 }
 
@@ -67,8 +69,10 @@ impl From<bifrost_core::SystemProxyLaunchdStatus> for SystemProxyLaunchdApiStatu
             program: status.program.map(|path| path.display().to_string()),
             data_dir: status.data_dir.map(|path| path.display().to_string()),
             installed_version: status.installed_version,
+            installed_mode: status.installed_mode,
             current_version: status.current_version,
             needs_upgrade: status.needs_upgrade,
+            needs_upgrade_reason: status.needs_upgrade_reason,
             message: status.message,
         }
     }
@@ -621,6 +625,7 @@ fn spawn_system_proxy_launchd_install_task_from_config(
             target: "bifrost_admin::proxy",
             installed_version = status.installed_version.as_deref().unwrap_or(""),
             current_version = status.current_version,
+            installed_mode = ?status.installed_mode,
             "system proxy LaunchDaemon cleanup already installed and current after system proxy enable"
         );
         return;
@@ -632,6 +637,7 @@ fn spawn_system_proxy_launchd_install_task_from_config(
             installed = status.installed,
             loaded = status.loaded,
             needs_upgrade = status.needs_upgrade,
+            needs_upgrade_reason = status.needs_upgrade_reason.as_deref().unwrap_or(""),
             "system proxy LaunchDaemon cleanup install starting asynchronously after system proxy enable"
         );
         match bifrost_core::install_launchd_cleanup_with_gui_auth(&config) {
