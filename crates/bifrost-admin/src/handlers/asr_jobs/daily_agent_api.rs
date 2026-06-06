@@ -383,9 +383,26 @@ async fn post_daily_agent_sync_response(task_id: &str) -> Response<BoxBody> {
         return error_response(StatusCode::NOT_FOUND, "ASR task not found");
     };
 
-    let (sync_result, per_agent_results) = match sync_all_daily_agent_reports_by_agent(&task) {
+    let (sync_result, per_agent_results) = match sync_all_daily_agent_reports_by_agent_isolated(task.clone()).await {
         Ok(result) => result,
-        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error),
+        Err(error) => {
+            let message = error.message();
+            let status = match error {
+                DailyAgentReportSyncExecutionError::Busy => StatusCode::CONFLICT,
+                DailyAgentReportSyncExecutionError::TimedOut => StatusCode::GATEWAY_TIMEOUT,
+                DailyAgentReportSyncExecutionError::Sync(_) => StatusCode::BAD_REQUEST,
+                DailyAgentReportSyncExecutionError::Join(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            let sync_result = failed_daily_agent_report_sync_result(&task, 0, message);
+            let _ = update_daily_agent_report_sync_status(&task, sync_result.clone());
+            return json_response_with_status(
+                status,
+                &serde_json::json!({
+                    "ok": false,
+                    "sync": sync_result,
+                }),
+            );
+        }
     };
 
     for (agent_task, agent_result) in per_agent_results {

@@ -988,8 +988,8 @@ fn daily_agent_report_sync_copies_reports_into_agent_subdirectories() {
     .unwrap();
 
     assert_eq!(daily_result.total_files, 1);
-    assert_eq!(daily_result.copied_files, 0);
-    assert_eq!(daily_result.skipped_files, 1);
+    assert_eq!(daily_result.copied_files, 1);
+    assert_eq!(daily_result.skipped_files, 0);
     assert_eq!(daily_result.failed_files, 0);
     assert_eq!(
         daily_result.target_dir,
@@ -1012,6 +1012,135 @@ fn daily_agent_report_sync_copies_reports_into_agent_subdirectories() {
         "todo one"
     );
     assert!(!sync_dir.join("2026-05-14-report.md").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn daily_agent_report_sync_overwrites_unreadable_target_without_reading_target_hash() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let task_id = "daily-agent-report-sync-unreadable-target-task";
+    let sync_dir = temp.path().join("icloud-sync");
+    std::fs::create_dir_all(&sync_dir).unwrap();
+
+    let mut task = AsrDirectoryTask {
+        id: task_id.to_string(),
+        name: "Daily Agent Report Sync Unreadable Target Task".to_string(),
+        audio_dir: temp.path().join("audio"),
+        recursive: true,
+        enabled: true,
+        paused: false,
+        paused_at_ms: None,
+        schedule: AsrTaskSchedule::Hourly { minute: 0 },
+        language: "chinese".to_string(),
+        model: "Qwen3-ASR-1.7B".to_string(),
+        runtime_strategy: AsrRuntimeStrategy::ReusePerFile,
+        diarization: AsrDiarizationConfig::default(),
+        created_at_ms: 1,
+        updated_at_ms: 1,
+        last_run_at_ms: None,
+        next_run_at_ms: Some(1),
+        last_error: None,
+        daily_agent: AsrDailyAgentConfig::default(),
+        external_devices: Vec::new(),
+        import_policy: AsrExternalImportPolicy::default(),
+    };
+    set_primary_daily_agent_report_sync_dir(
+        &mut task.daily_agent,
+        Some(sync_dir.to_string_lossy().to_string()),
+    );
+    ensure_asr_daily_workspace(&task).unwrap();
+
+    let daily_report_agent = normalized_daily_agents(&task.daily_agent)
+        .into_iter()
+        .find(|agent| agent.id == "daily_report")
+        .unwrap();
+    let daily_report_task = task_for_daily_agent(&task, &daily_report_agent);
+    let daily_report_path = daily_agent_output_dir(&daily_report_task).join("2026-05-14-report.md");
+    std::fs::write(&daily_report_path, "fresh report").unwrap();
+
+    let target_dir = sync_dir.join("daily_report");
+    std::fs::create_dir_all(&target_dir).unwrap();
+    let target_path = target_dir.join("2026-05-14-report.md");
+    std::fs::write(&target_path, "stale report").unwrap();
+    std::fs::set_permissions(&target_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let result = sync_daily_agent_report_files(
+        &daily_report_task,
+        &[daily_report_path.to_string_lossy().to_string()],
+    )
+    .unwrap();
+
+    assert_eq!(result.total_files, 1);
+    assert_eq!(result.copied_files, 1);
+    assert_eq!(result.skipped_files, 0);
+    assert_eq!(result.failed_files, 0);
+    assert_eq!(std::fs::read_to_string(&target_path).unwrap(), "fresh report");
+}
+
+#[test]
+fn daily_agent_report_sync_auto_after_generation_uses_isolated_copy_path() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let task_id = "daily-agent-auto-sync-task";
+    let sync_dir = temp.path().join("icloud-sync");
+    std::fs::create_dir_all(&sync_dir).unwrap();
+
+    let mut task = test_directory_task(task_id, temp.path().join("audio"));
+    set_primary_daily_agent_report_sync_dir(
+        &mut task.daily_agent,
+        Some(sync_dir.to_string_lossy().to_string()),
+    );
+    ensure_asr_daily_workspace(&task).unwrap();
+    save_tasks(&TaskStore {
+        version: TASK_STORE_VERSION,
+        tasks: vec![task.clone()],
+    })
+    .unwrap();
+
+    let daily_report_agent = normalized_daily_agents(&task.daily_agent)
+        .into_iter()
+        .find(|agent| agent.id == "daily_report")
+        .unwrap();
+    let daily_report_task = task_for_daily_agent(&task, &daily_report_agent);
+    let daily_report_path = daily_agent_output_dir(&daily_report_task).join("2026-05-14-report.md");
+    std::fs::write(&daily_report_path, "fresh auto report").unwrap();
+
+    let target_dir = sync_dir.join("daily_report");
+    std::fs::create_dir_all(&target_dir).unwrap();
+    let target_path = target_dir.join("2026-05-14-report.md");
+    std::fs::write(&target_path, "stale auto report").unwrap();
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(sync_daily_agent_reports_after_generation(
+            &daily_report_task,
+            &[daily_report_path.to_string_lossy().to_string()],
+        ))
+        .unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(&target_path).unwrap(),
+        "fresh auto report"
+    );
+    let store = load_tasks();
+    let stored_task = store.tasks.iter().find(|task| task.id == task_id).unwrap();
+    let stored_agent = normalized_daily_agents(&stored_task.daily_agent)
+        .into_iter()
+        .find(|agent| agent.id == "daily_report")
+        .unwrap();
+    let sync = stored_agent.last_report_sync.unwrap();
+    assert_eq!(sync.target_dir, target_dir.to_string_lossy());
+    assert_eq!(sync.total_files, 1);
+    assert_eq!(sync.copied_files, 1);
+    assert_eq!(sync.skipped_files, 0);
+    assert_eq!(sync.failed_files, 0);
 }
 
 #[test]

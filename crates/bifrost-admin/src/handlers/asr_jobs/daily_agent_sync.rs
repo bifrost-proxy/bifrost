@@ -1,5 +1,32 @@
 // ─── Daily Agent Report Sync ─────────────────────────────────────────────────
 
+const DAILY_AGENT_REPORT_SYNC_TIMEOUT: Duration = Duration::from_secs(8);
+
+static DAILY_AGENT_REPORT_SYNC_SEMAPHORE: Lazy<std::sync::Arc<tokio::sync::Semaphore>> =
+    Lazy::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(1)));
+
+#[derive(Debug)]
+enum DailyAgentReportSyncExecutionError {
+    Busy,
+    TimedOut,
+    Join(String),
+    Sync(String),
+}
+
+impl DailyAgentReportSyncExecutionError {
+    fn message(&self) -> String {
+        match self {
+            Self::Busy => "Daily Agent report sync is already running".to_string(),
+            Self::TimedOut => format!(
+                "Daily Agent report sync exceeded {} seconds and will continue in the blocking worker",
+                DAILY_AGENT_REPORT_SYNC_TIMEOUT.as_secs()
+            ),
+            Self::Join(error) => format!("Daily Agent report sync worker failed: {error}"),
+            Self::Sync(error) => error.clone(),
+        }
+    }
+}
+
 fn expand_daily_agent_sync_dir(path: &str) -> PathBuf {
     let trimmed = path.trim();
     if trimmed == "~" {
@@ -22,6 +49,20 @@ fn configured_daily_agent_report_sync_dir(task: &AsrDirectoryTask) -> Option<Pat
         .map(expand_daily_agent_sync_dir)
 }
 
+fn daily_agent_report_sync_agent_dir(task: &AsrDirectoryTask) -> String {
+    let agent_dir = normalize_daily_agent_token(&task.daily_agent.agent_id);
+    if agent_dir.is_empty() {
+        normalize_daily_agent_token(&task.daily_agent.output_dir)
+    } else {
+        agent_dir
+    }
+}
+
+fn daily_agent_report_sync_target_path_unchecked(task: &AsrDirectoryTask) -> Option<PathBuf> {
+    configured_daily_agent_report_sync_dir(task)
+        .map(|root_dir| root_dir.join(daily_agent_report_sync_agent_dir(task)))
+}
+
 fn daily_agent_report_sync_target_dir(task: &AsrDirectoryTask) -> Result<PathBuf, String> {
     let root_dir = configured_daily_agent_report_sync_dir(task)
         .ok_or_else(|| "Daily Agent report sync directory is not configured".to_string())?;
@@ -33,14 +74,7 @@ fn daily_agent_report_sync_target_dir(task: &AsrDirectoryTask) -> Result<PathBuf
         ));
     }
 
-    let agent_dir = normalize_daily_agent_token(&task.daily_agent.agent_id);
-    let agent_dir = if agent_dir.is_empty() {
-        normalize_daily_agent_token(&task.daily_agent.output_dir)
-    } else {
-        agent_dir
-    };
-
-    Ok(root_dir.join(agent_dir))
+    Ok(root_dir.join(daily_agent_report_sync_agent_dir(task)))
 }
 
 fn sync_daily_agent_report_files(
@@ -75,27 +109,32 @@ fn sync_daily_agent_report_files(
         }
 
         let target = target_dir.join(file_name);
-        if target.exists() {
-            let same_file = source
-                .canonicalize()
-                .ok()
-                .zip(target.canonicalize().ok())
-                .is_some_and(|(left, right)| left == right);
-            let same_content = compute_sha256(&source)
-                .ok()
-                .zip(compute_sha256(&target).ok())
-                .is_some_and(|(left, right)| left == right);
-            if same_file || same_content {
-                result.skipped_files += 1;
-                continue;
-            }
+        if source == target {
+            result.skipped_files += 1;
+            continue;
         }
 
-        match std::fs::copy(&source, &target) {
-            Ok(_) => {
+        let temp_target = target_dir.join(format!(
+            ".{}.{}.{}.tmp",
+            file_name.to_string_lossy(),
+            std::process::id(),
+            now_ms()
+        ));
+        match std::fs::copy(&source, &temp_target).and_then(|_| {
+            match std::fs::rename(&temp_target, &target) {
+                Ok(()) => Ok(()),
+                Err(error) if target.exists() => {
+                    std::fs::remove_file(&target)?;
+                    std::fs::rename(&temp_target, &target).map_err(|_| error)
+                }
+                Err(error) => Err(error),
+            }
+        }) {
+            Ok(()) => {
                 result.copied_files += 1;
             }
             Err(error) => {
+                let _ = std::fs::remove_file(&temp_target);
                 result.failed_files += 1;
                 result.errors.push(format!(
                     "copy {} to {}: {error}",
@@ -166,6 +205,70 @@ fn sync_all_daily_agent_reports_by_agent(
     }
 
     Ok((aggregate, per_agent))
+}
+
+async fn sync_daily_agent_report_files_isolated(
+    task: AsrDirectoryTask,
+    report_paths: Vec<String>,
+) -> Result<AsrDailyAgentReportSyncResult, DailyAgentReportSyncExecutionError> {
+    let permit = DAILY_AGENT_REPORT_SYNC_SEMAPHORE
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| DailyAgentReportSyncExecutionError::Busy)?;
+    let join = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        sync_daily_agent_report_files(&task, &report_paths)
+    });
+
+    match tokio::time::timeout(DAILY_AGENT_REPORT_SYNC_TIMEOUT, join).await {
+        Ok(Ok(Ok(result))) => Ok(result),
+        Ok(Ok(Err(error))) => Err(DailyAgentReportSyncExecutionError::Sync(error)),
+        Ok(Err(error)) => Err(DailyAgentReportSyncExecutionError::Join(error.to_string())),
+        Err(_) => Err(DailyAgentReportSyncExecutionError::TimedOut),
+    }
+}
+
+async fn sync_all_daily_agent_reports_by_agent_isolated(
+    task: AsrDirectoryTask,
+) -> Result<
+    (
+        AsrDailyAgentReportSyncResult,
+        Vec<(AsrDirectoryTask, AsrDailyAgentReportSyncResult)>,
+    ),
+    DailyAgentReportSyncExecutionError,
+> {
+    let permit = DAILY_AGENT_REPORT_SYNC_SEMAPHORE
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| DailyAgentReportSyncExecutionError::Busy)?;
+    let join = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        sync_all_daily_agent_reports_by_agent(&task)
+    });
+
+    match tokio::time::timeout(DAILY_AGENT_REPORT_SYNC_TIMEOUT, join).await {
+        Ok(Ok(Ok(result))) => Ok(result),
+        Ok(Ok(Err(error))) => Err(DailyAgentReportSyncExecutionError::Sync(error)),
+        Ok(Err(error)) => Err(DailyAgentReportSyncExecutionError::Join(error.to_string())),
+        Err(_) => Err(DailyAgentReportSyncExecutionError::TimedOut),
+    }
+}
+
+fn failed_daily_agent_report_sync_result(
+    task: &AsrDirectoryTask,
+    total_files: usize,
+    error: String,
+) -> AsrDailyAgentReportSyncResult {
+    AsrDailyAgentReportSyncResult {
+        target_dir: daily_agent_report_sync_target_path_unchecked(task)
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        total_files,
+        failed_files: total_files.max(1),
+        synced_at_ms: now_ms(),
+        errors: vec![error],
+        ..Default::default()
+    }
 }
 
 fn update_daily_agent_report_sync_status(

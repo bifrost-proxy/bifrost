@@ -258,8 +258,8 @@ with open(sys.argv[1], "r", encoding="utf-8") as f:
 sync = result["sync"]
 assert sync["target_dir"] == sys.argv[2], sync
 assert sync["total_files"] == 1, sync
-assert sync["copied_files"] == 0, sync
-assert sync["skipped_files"] == 1, sync
+assert sync["copied_files"] == 1, sync
+assert sync["skipped_files"] == 0, sync
 assert sync["failed_files"] == 0, sync
 PY
 
