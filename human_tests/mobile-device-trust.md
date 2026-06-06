@@ -432,7 +432,7 @@
 - 手机能访问 probe 端口时，管理端显示 `Probe port reachable`。
 - 手机 HTTPS trust check 成功时，管理端显示 `CA trusted`、`HTTPS trust passed`，并展示代理地址 `<host>:<adminPort>` 和 proxy QR 链接。
 - 手机页成功后展示的代理地址是可点击复制的按钮，点击后显示 `Copied` 或清晰提示手动复制。
-- 如果 netcheck 成功但 HTTPS trust check 失败，管理端显示 `Trust failed`，手机页提示安装 CA、iOS 开启完全信任或 Android App 信任边界。
+- 如果 netcheck 成功但 HTTPS trust check 失败，管理端显示 `Trust failed`，手机页提示安装 CA、iOS 开启完全信任或 Android App 信任边界，并明确提示安装/信任后仍失败时需要完整重启浏览器再重试。
 - 如果 landing page 能打开但 probe 端口不可达，管理端显示 `Probe unreachable`，并提示检查防火墙、局域网隔离和 IP 选择。
 - 成功文案不承诺所有 App 都能被解密，只说明当前设备浏览器 TLS 链路已信任 Bifrost CA。
 - 自动化 E2E 使用当前 Bifrost CA 作为 root CA 访问 HTTPS check，并断言 session 最终为 `tls_trusted`。

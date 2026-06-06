@@ -1215,11 +1215,12 @@ function showProxyConfig() {{
 function showTlsFailed() {{
   const platform = detectPlatform();
   show('<span class="bad">HTTPS trust check failed.</span>');
-  let steps = "<p>Install and trust Bifrost CA, then return here and retry.</p>";
+  let restartHint = "<p>If you just installed or trusted the CA, fully quit and restart this browser, then open this page again. Some browsers keep old certificate trust decisions until restart.</p>";
+  let steps = "<p>Install and trust Bifrost CA, then return here and retry.</p>" + restartHint;
   if (platform === "ios") {{
-    steps = "<ol><li>Install the Bifrost CA profile.</li><li>Open Settings &gt; General &gt; About &gt; Certificate Trust Settings.</li><li>Turn on full trust for Bifrost CA.</li></ol>";
+    steps = "<ol><li>Install the Bifrost CA profile.</li><li>Open Settings &gt; General &gt; About &gt; Certificate Trust Settings.</li><li>Turn on full trust for Bifrost CA.</li><li>Fully quit and restart this browser, then retry.</li></ol>" + restartHint;
   }} else if (platform === "android") {{
-    steps = "<ol><li>Install the Bifrost CA certificate.</li><li>Retry in this browser.</li><li>For Android apps, remember that some apps ignore user CAs or use certificate pinning.</li></ol>";
+    steps = "<ol><li>Install the Bifrost CA certificate.</li><li>Fully quit and restart this browser, then retry.</li><li>For Android apps, remember that some apps ignore user CAs or use certificate pinning.</li></ol>" + restartHint;
   }}
   showNext(steps + "<a class='button' href='" + window.__BIFROST_TRUST_PROBE__.caDownloadUrl + "'>Download CA</a><button onclick='runProbe()'>Retry</button>");
 }}

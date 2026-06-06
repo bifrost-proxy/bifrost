@@ -367,7 +367,7 @@ export default function AvailabilityCheckPanel({
                   type="warning"
                   showIcon
                   message="HTTPS trust check failed"
-                  description="The device reached the probe port, but the browser could not complete the HTTPS handshake. Install the CA, enable full trust on iOS, check device time, then retry."
+                  description="The device reached the probe port, but the browser could not complete the HTTPS handshake. Install the CA, enable full trust on iOS, check device time, then fully restart the browser and retry. Some browsers keep old certificate trust decisions until restart."
                 />
               ) : trustProbeSession.status === "network_failed" ? (
                 <Alert
