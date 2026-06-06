@@ -1394,6 +1394,8 @@ function show(html) {{ document.getElementById("result").innerHTML = html; }}
 function showNext(html) {{ document.getElementById("next").innerHTML = html; }}
 function showProxyAccess(html) {{ document.getElementById("proxy-access").innerHTML = html; }}
 function showProxyConfiguration(html) {{ document.getElementById("proxy-configuration").innerHTML = html; }}
+let probeLoopRunning = false;
+let probeHasRun = false;
 async function postReport(type, extra) {{
   const cfg = window.__BIFROST_TRUST_PROBE__;
   try {{
@@ -1432,9 +1434,21 @@ async function runProbe() {{
   await checkCertificateTrust();
   await checkProxyConfiguration();
 }}
+async function runProbeLoop() {{
+  if (probeLoopRunning) return;
+  probeLoopRunning = true;
+  try {{
+    await runProbe();
+    probeHasRun = true;
+  }} finally {{
+    probeLoopRunning = false;
+  }}
+}}
 async function checkCertificateTrust() {{
   const cfg = window.__BIFROST_TRUST_PROBE__;
-  show("Device opened the probe page. Checking probe port...");
+  if (!probeHasRun) {{
+    show("Device opened the probe page. Checking probe port...");
+  }}
   try {{
     const net = await fetch(cfg.netcheckUrl + "&r=" + encodeURIComponent(randomSuffix()), {{
       cache: "no-store",
@@ -1443,7 +1457,7 @@ async function checkCertificateTrust() {{
     if (!net.ok) {{
       await postReport("network_failed", {{ status: net.status }});
       show('<span class="bad">Probe port is not reachable.</span>');
-      showNext("<p>Check that this phone and computer are on the same network, the selected IP is correct, and firewall rules allow the probe port.</p><button onclick='runProbe()'>Retry</button>");
+      showNext("<p>Check that this phone and computer are on the same network, the selected IP is correct, and firewall rules allow the probe port.</p><button onclick='runProbeLoop()'>Retry</button>");
       return false;
     }}
     await postReport("netcheck_ok");
@@ -1451,7 +1465,7 @@ async function checkCertificateTrust() {{
   }} catch (error) {{
     await postReport("network_failed", {{ message: String(error) }});
     show('<span class="bad">Probe port is not reachable.</span>');
-    showNext("<p>Check that this phone and computer are on the same network, the selected IP is correct, and firewall rules allow the probe port.</p><button onclick='runProbe()'>Retry</button>");
+    showNext("<p>Check that this phone and computer are on the same network, the selected IP is correct, and firewall rules allow the probe port.</p><button onclick='runProbeLoop()'>Retry</button>");
     return false;
   }}
   try {{
@@ -1477,7 +1491,9 @@ async function checkCertificateTrust() {{
 }}
 async function checkProxyAccess() {{
   const cfg = window.__BIFROST_TRUST_PROBE__;
-  showProxyAccess("Checking whether this device is authorized to use the Bifrost proxy...");
+  if (!probeHasRun) {{
+    showProxyAccess("Checking whether this device is authorized to use the Bifrost proxy...");
+  }}
   try {{
     const response = await fetch(cfg.proxyAccessUrl + "&r=" + encodeURIComponent(randomSuffix()), {{
       cache: "no-store",
@@ -1499,7 +1515,9 @@ async function checkProxyAccess() {{
 }}
 async function checkProxyConfiguration() {{
   const cfg = window.__BIFROST_TRUST_PROBE__;
-  showProxyConfiguration("Checking whether this browser is actually using the Bifrost proxy...");
+  if (!probeHasRun) {{
+    showProxyConfiguration("Checking whether this browser is actually using the Bifrost proxy...");
+  }}
   try {{
     const response = await fetch(cfg.proxyConfiguredUrl + "&r=" + encodeURIComponent(randomSuffix()), {{
       cache: "no-store",
@@ -1641,11 +1659,12 @@ function showTlsFailed() {{
   }} else if (platform === "android") {{
     steps = "<ol><li>Install the Bifrost CA certificate.</li><li>Fully quit and restart this browser, then retry.</li><li>For Android apps, remember that some apps ignore user CAs or use certificate pinning.</li></ol>" + restartHint;
   }}
-  showNext(steps + "<button onclick='runProbe()'>Retry</button>");
+  showNext(steps + "<button onclick='runProbeLoop()'>Retry</button>");
 }}
 renderIosWifiProxyTools();
 setInterval(syncProbeConfig, 1000);
-runProbe();
+runProbeLoop();
+setInterval(runProbeLoop, 1000);
 </script>
 </body>
 </html>"#,

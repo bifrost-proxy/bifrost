@@ -108,6 +108,7 @@ Android CLI 会在安装前后输出 `Android CA status`。普通设备通常只
   - `GET /_bifrost/public/trust-probe/{session_id}/qrcode?t=<token>` 返回扫码二维码。
   - `POST /_bifrost/public/trust-probe/{session_id}/report?t=<token>` 接收手机页面通过 HTTP 回报的 `page_opened`、`network_failed`、`tls_failed` 等事件。
   - `GET /_bifrost/public/trust-probe/{session_id}/proxy-access?t=<token>` 使用访问控制模块检查当前客户端 IP 是否已被允许使用代理；待授权时会写入 pending authorization，让管理端能继续审批。
+  - 手机页会每秒自动重跑 proxy access、HTTPS trust 和 proxy configured 三项检查，不要求用户刷新页面才能看到授权、信任或代理配置状态变化；管理端 Availability Check 卡片同样持续轮询 session 状态直到过期。
   - 手机页会请求 `http://bifrost-proxy-check.invalid/_bifrost/trust-probe/proxy-configured?sid=<session_id>&t=<token>`。该 `.invalid` 域名只有在浏览器已经配置 HTTP proxy 时才会被送到 Bifrost；Bifrost 在代理入口截获该请求并记录 `proxy_configured_ok`。如果请求失败，手机页通过 HTTP report 回写 `proxy_config_failed`，并优先提示用户手动配置 Wi-Fi 代理：`Settings > Wi-Fi > current network > Configure Proxy > Manual`。iOS Wi-Fi Proxy Profile 作为实验选项，下载链接中的 SSID 来自 Bifrost 服务端检测、管理端输入或手机页输入；profile 文案明确说明不包含 Wi-Fi 密码或 join credentials，但卸载 profile 可能移除 managed Wi-Fi 网络条目，因此必须勾选风险确认后才能下载。
 - 双协议 probe server：
   - 默认尝试监听 `admin_port + 2`，端口冲突时自动选择空闲端口，并在 session 响应中返回实际 `probePort`。

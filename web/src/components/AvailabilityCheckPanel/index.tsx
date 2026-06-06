@@ -148,13 +148,6 @@ export default function AvailabilityCheckPanel({
     if (trustProbeSession.status === "expired") {
       return;
     }
-    if (
-      trustProbeSession.status === "tls_trusted" &&
-      (trustProbeSession.proxyConfigured || trustProbeSession.proxyConfigurationMessage)
-    ) {
-      return;
-    }
-
     const timer = window.setInterval(async () => {
       try {
         const next = await getTrustProbeSession(trustProbeSession.sessionId);

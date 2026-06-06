@@ -430,6 +430,7 @@
 - 管理端生成二维码后显示 session 状态、`Page waiting`、`Proxy config pending`、`Probe port pending`、`HTTPS trust pending`、`Proxy access pending`。
 - 手机页标题为 `Bifrost Availability Check`，并显示代理访问授权检查结果。
 - 手机页显示代理配置检查结果：已配置代理时显示 `Proxy is configured`；未配置代理时显示 `Proxy is not configured yet`。
+- 手机页每秒自动重跑代理授权、probe 端口、HTTPS trust 和代理配置检测；完成 CA 信任、管理端授权或 Wi-Fi 代理配置后，手机页和管理端状态应自动更新，不需要手动刷新页面。
 - 手机页代理未配置时优先提示手动进入 iPhone `Settings > Wi-Fi > current network > Configure Proxy > Manual`，填写 Bifrost `host:port` 后重试；实验 profile 入口放在手动步骤之后。
 - 手机页和管理端说明 Wi-Fi Proxy Profile 不包含 Wi-Fi 密码或入网凭据，但它是 managed Wi-Fi 配置，卸载 profile 可能移除对应 Wi-Fi 网络条目；安装过程中不应该要求用户输入 Wi-Fi 密码。
 - 手机页包含 `iOS Wi-Fi Proxy Profile` 工具区，优先显示 Bifrost 服务端下发的 Wi-Fi 名称；若服务端未检测到 Wi-Fi 名称，页面展示 Wi-Fi 名称输入框，用户输入当前 iPhone Wi-Fi 名并点击 `Use this Wi-Fi name` 后，下载按钮变为可用。

@@ -479,6 +479,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     || !landing_html.contains("proxyAccessUrl")
                     || !landing_html.contains("proxyConfiguredUrl")
                     || !landing_html.contains("checkProxyConfiguration")
+                    || !landing_html.contains("runProbeLoop")
                     || !landing_html.contains("copyProxyAddress")
                     || !landing_html.contains("iOS Proxy Setup")
                     || !landing_html.contains("iosWifiProxyProfileUrl")
