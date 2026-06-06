@@ -165,7 +165,7 @@
 - 打开 `#certificate-mobile-ios`、`#certificate-local-install` 等锚点时，左侧导航有选中态且页面滚动到对应章节；点击 `Availability check` 会滚动到页面最顶部的可用性检查卡片，而不是跳到二维码下载区域。
 - `Local Certificate Install` 章节在本机 CA 未完全信任时展示 `Install and Trust CA` 或 `Trust CA` 按钮，按钮说明等价于执行 `bifrost ca install`；CA 文件不可用时按钮禁用。
 - 点击本机安装按钮并完成系统授权后，页面会持续刷新本机 CA 状态，最终自动显示 `Installed and trusted`；不需要用户重新强刷页面才能看到信任完成状态。
-- `Availability Check` 章节位于页面顶部，可以选择本机局域网 IP，点击 `Generate Availability Check` 后展示二维码、分享链接、实时状态和最近事件。
+- `Availability Check` 章节位于页面顶部，可以选择本机局域网 IP；在证书页顶部入口中会自动展示固定二维码、分享链接、实时状态和最近事件，不需要额外点击生成或刷新按钮。
 - Availability Check 状态展示代理访问授权、页面是否打开、probe 端口是否可达、HTTPS trust check 是否通过。
 - Availability Check 成功文案只承诺“当前设备浏览器信任 Bifrost CA”，并说明个别 App 仍可能因为 certificate pinning、自定义 TLS 或 Android user CA 策略无法解密。
 - iOS 章节展示在 Android 章节之前。
@@ -416,7 +416,7 @@
 
 1. 打开 Certificate Tab 顶部的 `Availability Check` 章节。
 2. 在 `Local network address` 中选择当前电脑的局域网 IP。
-3. 点击 `Generate Availability Check`。
+3. 确认页面自动展示固定 Availability Check 二维码和分享链接，不需要点击额外的生成或刷新按钮。
 4. 使用目标手机扫码打开 HTTP landing page。
 5. 在手机页面等待检测完成；如失败，按手机页面的 iOS/Android 下一步提示安装并信任 CA 后点击 Retry。
 6. 在电脑管理端观察 Availability Check 实时状态。

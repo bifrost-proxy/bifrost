@@ -492,7 +492,7 @@ export default function AvailabilityCheckPanel({
       ) : null}
 
       <Row gutter={[12, 12]} align="bottom">
-        <Col xs={24} sm={compact ? 24 : 12} md={compact ? 24 : 10}>
+        <Col xs={24} sm={compact || autoCreate ? 24 : 12} md={compact ? 24 : autoCreate ? 12 : 10}>
           <Text type="secondary" style={{ fontSize: 12 }}>
             Local network address
           </Text>
@@ -513,22 +513,20 @@ export default function AvailabilityCheckPanel({
             data-testid={`${testIdPrefix}-host`}
           />
         </Col>
-        <Col xs={24} sm={compact ? 24 : 12} md={compact ? 24 : 14}>
-          <Button
-            type={compact ? "default" : "primary"}
-            icon={<QrcodeOutlined />}
-            loading={creatingTrustProbe}
-            disabled={!effectiveCertInfo?.available || !trustProbeHost}
-            onClick={() => void handleCreateTrustProbe()}
-            data-testid={`${testIdPrefix}-create`}
-          >
-            {autoCreate
-              ? "Refresh Availability Check"
-              : trustProbeSession
-                ? "Regenerate Availability Check"
-                : "Generate Availability Check"}
-          </Button>
-        </Col>
+        {!autoCreate ? (
+          <Col xs={24} sm={compact ? 24 : 12} md={compact ? 24 : 14}>
+            <Button
+              type={compact ? "default" : "primary"}
+              icon={<QrcodeOutlined />}
+              loading={creatingTrustProbe}
+              disabled={!effectiveCertInfo?.available || !trustProbeHost}
+              onClick={() => void handleCreateTrustProbe()}
+              data-testid={`${testIdPrefix}-create`}
+            >
+              {trustProbeSession ? "Regenerate Availability Check" : "Generate Availability Check"}
+            </Button>
+          </Col>
+        ) : null}
       </Row>
 
       {effectiveCertInfo?.sha256_fingerprint && !compact ? (
