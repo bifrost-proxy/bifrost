@@ -21,7 +21,11 @@ export type DeviceTrustCapability =
   | "managed_auto_trust"
   | "rooted_test_device";
 export type DeviceStatus = "connected" | "unauthorized" | "offline" | "unsupported";
-export type InstallMode = "normal_guide" | "managed_auto_trust" | "lab_root_mode";
+export type InstallMode =
+  | "normal_guide"
+  | "managed_auto_trust"
+  | "proxy_config"
+  | "lab_root_mode";
 export type DeviceCertificateState =
   | "unknown"
   | "not_installed"
@@ -72,6 +76,9 @@ export interface MobileDevicesResponse {
   ios: IosDiscovery;
   ios_profile_url: string;
   ios_profile_qrcode_url: string;
+  ios_wifi_proxy_profile_url: string;
+  ios_wifi_proxy_profile_qrcode_url: string;
+  suggested_wifi_ssid?: string | null;
   ordinary_device_notice: string;
   managed_device_notice: string;
 }
@@ -142,6 +149,7 @@ export interface TrustProbeSession {
 
 export const MOBILE_INSTALL_CONFIRMATION =
   "push_and_open_mobile_certificate_installer";
+export const IOS_PROXY_CONFIG_CONFIRMATION = "install_ios_wifi_proxy_profile";
 export const LOCAL_CA_INSTALL_CONFIRMATION = "install_local_ca_certificate";
 
 export async function getCertInfo(): Promise<CertInfo> {
@@ -171,6 +179,23 @@ export async function installMobileCa(
     {
       mode,
       confirmation: MOBILE_INSTALL_CONFIRMATION,
+    },
+  );
+}
+
+export async function installIosWifiProxyProfile(
+  deviceId: string,
+  ssid: string,
+  proxyHost?: string,
+  proxyPort?: number,
+): Promise<InstallSession> {
+  return post<InstallSession>(
+    `/mobile-devices/${encodeURIComponent(deviceId)}/install-ios-proxy-profile`,
+    {
+      ssid,
+      proxy_host: proxyHost,
+      proxy_port: proxyPort,
+      confirmation: IOS_PROXY_CONFIG_CONFIRMATION,
     },
   );
 }
@@ -211,4 +236,38 @@ export function getIosMobileConfigQRCodeUrl(ip?: string): string {
     return `${baseUrl}?ip=${encodeURIComponent(ip)}`;
   }
   return baseUrl;
+}
+
+export function getIosWifiProxyConfigUrl(
+  ssid: string,
+  ip?: string,
+  port?: number,
+): string {
+  const baseUrl = buildPublicUrl('/mobile/ios-wifi-proxy.mobileconfig');
+  const params = new URLSearchParams();
+  params.set('ssid', ssid);
+  if (ip) {
+    params.set('ip', ip);
+  }
+  if (port) {
+    params.set('port', String(port));
+  }
+  return `${baseUrl}?${params.toString()}`;
+}
+
+export function getIosWifiProxyConfigQRCodeUrl(
+  ssid: string,
+  ip?: string,
+  port?: number,
+): string {
+  const baseUrl = buildPublicUrl('/mobile/ios-wifi-proxy.mobileconfig/qrcode');
+  const params = new URLSearchParams();
+  params.set('ssid', ssid);
+  if (ip) {
+    params.set('ip', ip);
+  }
+  if (port) {
+    params.set('port', String(port));
+  }
+  return `${baseUrl}?${params.toString()}`;
 }

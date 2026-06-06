@@ -14,7 +14,8 @@ pub use ios::{
     IosConfiguratorError, IosConfiguratorInstallOptions, IosDiscovery,
 };
 pub use mobileconfig::{
-    generate_ios_mobileconfig, read_certificate_der_from_file, MobileConfigOptions,
+    generate_ios_mobileconfig, generate_ios_wifi_proxy_mobileconfig,
+    read_certificate_der_from_file, IosWifiProxyProfileOptions, MobileConfigOptions,
 };
 pub use model::{
     DeviceCertificateState, DeviceCertificateStatus, DeviceStatus, DeviceTrustCapability,

@@ -261,6 +261,91 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     .map_err(|e| format!("GET iOS mobileconfig QR failed: {}", e))?;
                 assert_status(&qrcode_response, 200)?;
                 assert_header_contains(&qrcode_response, "content-type", "image/svg+xml")?;
+
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
+            "admin_public_ios_wifi_proxy_mobileconfig_contains_proxy_payload",
+            "Validate public iOS Wi-Fi proxy mobileconfig and QR endpoints are available without auth and include CA plus proxy payloads",
+            "admin",
+            || async move {
+                let port = pick_unused_port()?;
+                let (_proxy, _admin_state) =
+                    ProxyInstance::start_with_admin(port, vec![], false, true)
+                        .await
+                        .map_err(|e| format!("Failed to start proxy with admin: {}", e))?;
+
+                let client = reqwest::Client::builder()
+                    .danger_accept_invalid_certs(true)
+                    .no_proxy()
+                    .build()
+                    .map_err(|e| format!("Failed to create client: {}", e))?;
+                let ssid = "Bifrost Test Wi-Fi";
+                let encoded_ssid = urlencoding::encode(ssid);
+
+                let profile_response = client
+                    .get(format!(
+                        "http://127.0.0.1:{}/_bifrost/public/mobile/ios-wifi-proxy.mobileconfig?ssid={}&ip=127.0.0.1&port={}",
+                        port, encoded_ssid, port
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET iOS Wi-Fi proxy mobileconfig failed: {}", e))?;
+
+                assert_status(&profile_response, 200)?;
+                assert_header_contains(
+                    &profile_response,
+                    "content-type",
+                    "application/x-apple-aspen-config",
+                )?;
+                let profile = profile_response
+                    .text()
+                    .await
+                    .map_err(|e| format!("Failed to read iOS Wi-Fi proxy mobileconfig body: {}", e))?;
+                for expected in [
+                    "com.apple.security.root",
+                    "com.apple.wifi.managed",
+                    "SSID_STR",
+                    ssid,
+                    "ProxyType",
+                    "Manual",
+                    "ProxyServer",
+                    "127.0.0.1",
+                    "ProxyServerPort",
+                    &port.to_string(),
+                ] {
+                    if !profile.contains(expected) {
+                        return Err(format!(
+                            "Expected iOS Wi-Fi proxy profile to contain {expected:?}, got: {profile}"
+                        ));
+                    }
+                }
+
+                let qrcode_response = client
+                    .get(format!(
+                        "http://127.0.0.1:{}/_bifrost/public/mobile/ios-wifi-proxy.mobileconfig/qrcode?ssid={}&ip=127.0.0.1&port={}",
+                        port, encoded_ssid, port
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET iOS Wi-Fi proxy mobileconfig QR failed: {}", e))?;
+                assert_status(&qrcode_response, 200)?;
+                assert_header_contains(&qrcode_response, "content-type", "image/svg+xml")?;
+
+                let wrong_port_response = client
+                    .get(format!(
+                        "http://127.0.0.1:{}/_bifrost/public/mobile/ios-wifi-proxy.mobileconfig?ssid={}&ip=127.0.0.1&port={}",
+                        port,
+                        encoded_ssid,
+                        port + 1
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        format!("GET iOS Wi-Fi proxy mobileconfig with wrong port failed: {}", e)
+                    })?;
+                assert_status(&wrong_port_response, 400)?;
                 Ok(())
             },
         ),

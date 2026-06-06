@@ -483,6 +483,36 @@
 - 目标设备打开检查页后，会自动检查代理授权、probe 端口可达性和 HTTPS CA trust。
 - `Allow` / `Deny` 操作不受 Availability Check 区块影响；审批后 pending 列表正常刷新。
 
+### TC-MDT-18：iOS Wi-Fi Proxy Profile POC 支持扫码下载和 Configurator 直推
+
+**操作步骤**：
+
+1. 启动 Bifrost，打开 `Settings > Certificate > iOS Mobile Installation`。
+2. 确认 `iPhone Wi-Fi SSID` 已自动填入当前 Wi-Fi 名称；如果为空，手动输入 iPhone 当前连接的精确 SSID。
+3. 在 `Proxy address` 选择当前电脑的局域网 IP。
+4. 执行公开 profile 下载验证：
+   ```bash
+   curl -sS "http://127.0.0.1:8800/_bifrost/public/mobile/ios-wifi-proxy.mobileconfig?ssid=<SSID>&ip=127.0.0.1&port=8800" -o /tmp/bifrost-ios-wifi-proxy.mobileconfig
+   plutil -lint /tmp/bifrost-ios-wifi-proxy.mobileconfig
+   grep -E "com.apple.security.root|com.apple.wifi.managed|SSID_STR|ProxyType|ProxyServer|ProxyServerPort" /tmp/bifrost-ios-wifi-proxy.mobileconfig
+   curl -sS "http://127.0.0.1:8800/_bifrost/public/mobile/ios-wifi-proxy.mobileconfig/qrcode?ssid=<SSID>&ip=127.0.0.1&port=8800" | head -5
+   ```
+5. 在页面点击 `Download iOS Wi-Fi Proxy Profile` 或扫描 Wi-Fi proxy profile QR，确认 iPhone 提示下载/安装 configuration profile。
+6. 连接 iPhone 到 Mac，点击 `Refresh Devices`，确认列表中显示目标 iPhone 的自定义名称、型号、ID 和 ECID。
+7. 点击该设备行的 `Proxy Config`。
+8. 如果 iPhone 弹出 profile 安装确认，在手机上完成安装。
+9. 如安装完成后 Availability Check 仍显示代理不可用，断开并重新连接 iPhone Wi-Fi，再重新运行 Availability Check。
+
+**预期结果**：
+
+- 公开 Wi-Fi proxy profile endpoint 不需要授权，返回 `application/x-apple-aspen-config`，`plutil -lint` 通过。
+- profile 同时包含 `com.apple.security.root` 和 `com.apple.wifi.managed`，Wi-Fi payload 包含用户输入的 SSID、`ProxyType=Manual`、所选 `ProxyServer` 和 Bifrost 端口。
+- Wi-Fi proxy profile QR 返回 `image/svg+xml`，不会出现 403 或二维码白屏。
+- `Proxy Config` 与 `Configurator Install` 并列展示；缺少 SSID、缺少 proxy address、未安装 cfgutil 或设备未 connected 时按钮禁用。
+- 点击 `Proxy Config` 后，Bifrost 使用该设备 ECID 定向下发 profile；如果 `cfgutil` 返回 Code 625 或需要用户交互，页面显示需要在 iPhone 上确认，而不是误报硬失败。
+- 手机确认安装后，Availability Check 能用于验证代理授权、probe 端口和 HTTPS 信任是否改善。
+- 如果普通 iPhone 不接受“同 SSID、无 Wi-Fi 密码、只写代理配置”的 profile 或安装后不接管现有 Wi-Fi 代理，记录为 POC 边界，不把该能力文案改成确定承诺。
+
 ## 清理步骤
 
 ```bash
@@ -490,5 +520,6 @@ rm -rf ./.bifrost-mobile-test
 rm -rf ./.bifrost-mobile-cli-test
 rm -f /tmp/bifrost-ca.mobileconfig
 rm -f /tmp/bifrost-lan-ios.mobileconfig
+rm -f /tmp/bifrost-ios-wifi-proxy.mobileconfig
 rm -f /tmp/bifrost-fake-adb-single /tmp/bifrost-fake-adb-single.log /tmp/bifrost-fake-adb-multi
 ```

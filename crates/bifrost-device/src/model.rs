@@ -69,6 +69,7 @@ pub enum InstallMode {
     #[default]
     NormalGuide,
     ManagedAutoTrust,
+    ProxyConfig,
     LabRootMode,
 }
 
