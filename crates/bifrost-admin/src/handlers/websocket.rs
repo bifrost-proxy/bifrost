@@ -250,9 +250,20 @@ async fn handle_websocket_connection<S>(
                             let previous = client_clone.get_subscription();
                             let needs_initial_traffic =
                                 subscription.need_traffic && !previous.need_traffic;
+                            let new_settings_scopes: Vec<String> = subscription
+                                .settings_scopes
+                                .iter()
+                                .filter(|scope| !previous.settings_scopes.contains(*scope))
+                                .cloned()
+                                .collect();
                             client_clone.update_subscription(subscription);
                             if needs_initial_traffic {
                                 push_manager_receiver.send_initial_traffic(&client_clone);
+                            }
+                            for scope in new_settings_scopes {
+                                push_manager_receiver
+                                    .send_settings_scope_to_client(&client_clone, &scope)
+                                    .await;
                             }
                         }
                         last_pong_ms_receiver.store(now_ms(), std::sync::atomic::Ordering::Relaxed);

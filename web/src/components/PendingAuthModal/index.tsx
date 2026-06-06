@@ -1,9 +1,7 @@
 import { useCallback } from "react";
-import { useNavigate } from "react-router-dom";
 import {
   Badge,
   Button,
-  Divider,
   List,
   Modal,
   Popconfirm,
@@ -17,10 +15,8 @@ import {
   CloseOutlined,
   ClearOutlined,
   WarningOutlined,
-  SettingOutlined,
 } from "@ant-design/icons";
 import { usePendingAuthStore } from "../../stores/usePendingAuthStore";
-import AvailabilityCheckPanel from "../AvailabilityCheckPanel";
 
 const { Text } = Typography;
 
@@ -40,7 +36,6 @@ export default function PendingAuthModal() {
   const approvePending = usePendingAuthStore((s) => s.approvePending);
   const rejectPending = usePendingAuthStore((s) => s.rejectPending);
   const clearPending = usePendingAuthStore((s) => s.clearPending);
-  const navigate = useNavigate();
 
   const handleApprove = useCallback(
     async (ip: string) => {
@@ -75,10 +70,6 @@ export default function PendingAuthModal() {
     }
   }, [clearPending]);
 
-  const handleGoToSettings = useCallback(() => {
-    navigate("/settings?tab=access");
-  }, [navigate]);
-
   return (
     <Modal
       open={pendingCount > 0}
@@ -110,36 +101,20 @@ export default function PendingAuthModal() {
               </Button>
             </Popconfirm>
           )}
-          <Button
-            icon={<SettingOutlined />}
-            onClick={handleGoToSettings}
-            data-testid="pending-auth-modal-settings"
-          >
-            Access Control Settings
-          </Button>
         </Space>
       }
       closable={false}
       maskClosable={false}
       keyboard={false}
       centered
-      width={720}
+      width={560}
       zIndex={999}
       data-testid="pending-auth-modal"
     >
       <div data-testid="pending-auth-modal-content">
         <Text type="secondary" style={{ display: "block", marginBottom: 12 }}>
-          The following devices are requesting proxy access. You can allow or
-          deny each request.
+          The following devices are requesting proxy access. Allow trusted devices only.
         </Text>
-        <AvailabilityCheckPanel
-          active={pendingCount > 0}
-          autoCreate
-          compact
-          showEvents={false}
-          testIdPrefix="pending-auth-availability-check"
-        />
-        <Divider style={{ margin: "16px 0 12px" }} />
         <List
           size="small"
           dataSource={pendingList}

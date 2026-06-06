@@ -201,7 +201,7 @@
 
 1. 打开任意非 Certificate 页面，例如 `http://127.0.0.1:8800/_bifrost/traffic`，不刷新页面。
 2. Mock `/api/mobile-devices/refresh` 第一轮返回空设备列表，第二轮返回一个 `status=connected` 的 Android 或 iOS 设备。
-3. 等待 3 秒以上，让页面轮询完成。
+3. 等待服务端通过 `/api/push` 的 `mobile_devices` settings scope 推送 connected 设备快照。
 4. 点击弹窗中的 `Open Certificate Setup`。
 
 **预期结果**：
@@ -211,9 +211,9 @@
 - iOS 设备自动弹出 `Install Bifrost CA profile on connected iPhone?` 全局确认窗口。
 - 弹窗按钮文案为 `Open Certificate Setup`，确认后跳转到 `Settings > Certificate`，URL 包含 `mobile_device=<device id>` 和 `mobile_platform=<android|ios>`。
 - 弹窗说明手机仍需确认安装和信任；不会直接声称已自动信任。
-- 点击 `Not now` 后，同一设备 id 在当前页面会话中不会在下一轮轮询重复弹出。
+- 点击 `Not now` 后，同一设备 id 在当前页面会话中不会在下一次设备快照推送后重复弹出。
 - 旧的浏览器 localStorage 记录不会阻止新页面会话弹出。
-- 进入 Certificate 页后，设备列表继续自动刷新并展示对应 Android/iOS 安装引导。
+- 进入 Certificate 页后，设备列表继续通过 `mobile_devices` 推送自动刷新并展示对应 Android/iOS 安装引导。
 - 目标设备卡片自动滚动到可见区域，即使用户原本在非 Certificate 页面或证书页高度较长，也不需要手动滚动查找。
 - 目标设备卡片以主色边框/背景高亮；Android 目标设备的 `Install` 按钮或 iOS 目标设备的 `Configurator Install` 按钮播放脉冲动画。
 
@@ -428,6 +428,7 @@
 **预期结果**：
 
 - 管理端生成二维码后显示 session 状态、`Page waiting`、`Proxy config pending`、`Probe port pending`、`HTTPS trust pending`、`Proxy access pending`。
+- Certificate 页 Availability Check 卡片顶部直接展示当前已连接、需要做可用性检查的移动设备；每台设备显示自定义名称或 ID、iOS/Android 平台、连接状态和 CA 状态。这个目标设备列表不需要等手机扫码后才出现。
 - 手机页标题为 `Bifrost Availability Check`，并显示代理访问授权检查结果。
 - 手机页显示代理配置检查结果：已配置代理时显示 `Proxy is configured`；未配置代理时显示 `Proxy is not configured yet`。
 - 手机页每秒自动重跑代理授权、probe 端口、HTTPS trust 和代理配置检测；完成 CA 信任、管理端授权或 Wi-Fi 代理配置后，手机页和管理端状态应自动更新，不需要手动刷新页面。
@@ -435,12 +436,12 @@
 - 手机页和管理端说明 Wi-Fi Proxy Profile 不包含 Wi-Fi 密码或入网凭据，但它是 managed Wi-Fi 配置，卸载 profile 可能移除对应 Wi-Fi 网络条目；安装过程中不应该要求用户输入 Wi-Fi 密码。
 - 手机页包含 `iOS Wi-Fi Proxy Profile` 工具区，优先显示 Bifrost 服务端下发的 Wi-Fi 名称；若服务端未检测到 Wi-Fi 名称，页面展示 Wi-Fi 名称输入框，用户输入当前 iPhone Wi-Fi 名并点击 `Use this Wi-Fi name` 后，下载按钮变为可用。
 - 手机页下载实验 Wi-Fi proxy profile 前必须勾选“removing this profile may remove this Wi-Fi entry”风险确认；未勾选时下载链接保持禁用。
-- 管理端 Availability Check 卡片包含 `Wi-Fi name for iOS proxy profile` 输入框；输入 Wi-Fi 名并点击 `Send Wi-Fi Name` 后，手机公开页通过 session 轮询在约 1 秒内同步更新 Wi-Fi 名和下载链接。
-- 管理端顶部 Availability Check、代理交互式授权弹窗中的 Availability Check、Certificate 页 iOS 区块、手机公开检测页的 Wi-Fi 名称配置区域下方，都直接展示 `Experimental managed Wi-Fi profile` 风险说明；说明必须写清 profile 不包含 Wi-Fi 密码，但卸载 profile 可能移除 iOS managed Wi-Fi 网络条目。
-- 在任意 Availability Check 卡片或 iOS 区块保存 Wi-Fi 名称后，其他已打开的 Availability Check 卡片和对应手机公开页会收到同一 SSID；如果用户扫的是代理授权弹窗里的二维码，后来在证书页保存 Wi-Fi 名称，手机页也应在约 1 秒内更新。
-- 手机页输入 Wi-Fi 名后会通过公开 `report` 写回同一个 session；管理端轮询后能看到 `wifi_ssid_updated` 事件和最新 Wi-Fi 名。
+- 管理端 Availability Check 卡片包含 `Wi-Fi name for iOS proxy profile` 输入框；输入 Wi-Fi 名并点击 `Send Wi-Fi Name` 后，管理端通过 `trust_probe` push 更新当前 session，手机公开页在下一次公开页自检循环中同步更新 Wi-Fi 名和下载链接。
+- 管理端顶部 Availability Check、Certificate 页 iOS 区块、手机公开检测页的 Wi-Fi 名称配置区域下方，都直接展示 `Experimental managed Wi-Fi profile` 风险说明；说明必须写清 profile 不包含 Wi-Fi 密码，但卸载 profile 可能移除 iOS managed Wi-Fi 网络条目。
+- 在任意 Availability Check 卡片或 iOS 区块保存 Wi-Fi 名称后，其他已打开的 Availability Check 卡片和对应手机公开页会收到同一 SSID。
+- 手机页输入 Wi-Fi 名后会通过公开 `report` 写回同一个 session；管理端通过 `trust_probe` push 能看到 `wifi_ssid_updated` 事件和最新 Wi-Fi 名。
 - Availability Check 链接是固定 URL，不包含 `?t=<token>`；二维码内容也指向同一个固定 URL。手机页使用 `localStorage.bifrostAvailabilityDeviceId` 识别同一浏览器设备，刷新页面后仍归到同一台设备。
-- 多台设备可以同时打开同一个 Availability Check 链接。管理端卡片展示 `Connected devices` 列表，每台设备单独显示短 device id、platform hint、client IP、最近活跃时间、页面打开、网络、HTTPS trust、代理授权和代理配置状态。
+- 多台设备可以同时打开同一个 Availability Check 链接。管理端卡片展示扫码后进入检测页的 `Connected devices` live status 列表，每台浏览器设备单独显示短 device id、platform hint、client IP、最近活跃时间、页面打开、网络、HTTPS trust、代理授权和代理配置状态。
 - 手机打开 HTTP landing page 后，管理端状态变为 `Device opened page`。
 - 手机浏览器通过已配置代理访问专用 `.invalid` 探针 URL 后，管理端显示 `Proxy config detected`。
 - 手机能访问 probe 端口时，管理端显示 `Probe port reachable`。
@@ -484,26 +485,20 @@
 - interactive 模式下未授权局域网设备会被记录为 pending authorization，便于用户在管理端批准；loopback 或已授权设备显示 `allowed`。
 - landing page HTML 包含 `proxyConfiguredUrl` 和 `checkProxyConfiguration`，用于自动检查目标设备浏览器是否真的配置了 Bifrost HTTP proxy。
 
-### TC-MDT-17：代理交互式授权弹窗展示 Availability Check 二维码和链接
+### TC-MDT-17：代理交互式授权弹窗保持简洁
 
 **操作步骤**：
 
 1. 启动 Bifrost，并让访问控制处于 interactive 模式。
 2. 从一台未授权局域网设备访问代理，触发管理端 `Pending Authorization Requests` 弹窗。
 3. 观察弹窗内容，不切换到 Certificate 页面。
-4. 使用目标设备扫描弹窗中的 Availability Check 二维码，或复制/打开弹窗中的 Availability Check 链接。
-5. 继续在弹窗里批准或拒绝该设备授权请求。
+4. 继续在弹窗里批准或拒绝该设备授权请求。
 
 **预期结果**：
 
 - 弹窗仍显示每个待授权设备的 IP、首次出现时间、尝试次数，以及 `Allow` / `Deny` 操作。
-- 弹窗中部展示 Availability Check 提示，说明遇到证书或代理问题时可用扫码/链接检查可用性。
-- 弹窗打开时会自动生成一组 Availability Check session；用户无需先进入 Certificate 页面再点击生成。
-- 弹窗展示局域网地址选择、二维码、可打开的检查链接和 `Copy link` 按钮；二维码和链接指向公开 landing page。
-- 管理端轮询 session 状态 2 秒以上后，二维码 URL 和链接保持固定 URL，不包含 `?t=<token>`，直接打开链接返回检查页而不是 `Missing trust probe token`。
-- 二维码以普通图片展示，不出现 Ant Design 预览灰色遮罩或只显示小二维码图标的白屏/灰屏状态。
-- 目标设备打开检查页后，会自动检查代理授权、probe 端口可达性和 HTTPS CA trust。
-- `Allow` / `Deny` 操作不受 Availability Check 区块影响；审批后 pending 列表正常刷新。
+- 弹窗不展示 Availability Check 二维码、链接、Wi-Fi 名称输入或 managed Wi-Fi profile 风险说明；用户排障时应进入 Certificate 页顶部 Availability Check 卡片。
+- `Allow` / `Deny` 操作直接可见；审批后 pending 列表正常刷新。
 
 ### TC-MDT-18：iOS Wi-Fi Proxy Profile POC 支持扫码下载和 Configurator 直推
 
@@ -531,7 +526,7 @@
 - profile 同时包含 `com.apple.security.root` 和 `com.apple.wifi.managed`，Wi-Fi payload 包含 Bifrost 服务端检测或用户输入的 SSID、`ProxyType=Manual`、所选 `ProxyServer` 和 Bifrost 端口。
 - profile 不包含 `<key>Password</key>`、`<key>Passphrase</key>` 或其他 Wi-Fi 密码字段；描述文案明确说明不携带 Wi-Fi 密码或 join credentials，并提示卸载 profile 可能移除 managed Wi-Fi 网络条目。
 - Wi-Fi proxy profile QR 返回 `image/svg+xml`，不会出现 403 或二维码白屏。
-- `Wi-Fi network for proxy profile` 区域下方展示 `Experimental managed Wi-Fi profile` 风险说明；该说明和 Availability Check 卡片、代理授权弹窗、手机公开页中的 Wi-Fi 名称配置风险说明保持一致。
+- `Wi-Fi network for proxy profile` 区域下方展示 `Experimental managed Wi-Fi profile` 风险说明；该说明和 Availability Check 卡片、手机公开页中的 Wi-Fi 名称配置风险说明保持一致。
 - `Proxy Config` 与 `Configurator Install` 并列展示；缺少 SSID、缺少 proxy address、未安装 cfgutil、设备未 connected 或未勾选 managed Wi-Fi 风险确认时按钮禁用；在管理端手动输入 SSID 并勾选风险确认后，相关下载入口和 `Proxy Config` 按钮恢复可用。
 - 点击 `Proxy Config` 后，Bifrost 使用该设备 ECID 定向下发 profile；如果 `cfgutil` 返回 Code 625 或需要用户交互，页面显示需要在 iPhone 上确认，而不是误报硬失败。
 - 手机确认安装后，Availability Check 能用于验证代理授权、probe 端口和 HTTPS 信任是否改善。

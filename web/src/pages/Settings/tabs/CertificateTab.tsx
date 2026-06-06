@@ -52,6 +52,7 @@ import {
 } from "../../../api/cert";
 import { normalizeApiErrorMessage } from "../../../api/client";
 import AvailabilityCheckPanel from "../../../components/AvailabilityCheckPanel";
+import { pushService, type SettingsScope } from "../../../services/pushService";
 import {
   getSharedIosWifiProxySsid,
   setSharedIosWifiProxySsid,
@@ -282,6 +283,19 @@ function mobileDeviceDescription(device: MobileDevice, extra?: string) {
   );
 }
 
+function withSettingsScope(scope: SettingsScope): SettingsScope[] {
+  return Array.from(
+    new Set([...(pushService.getSubscription().settings_scopes ?? []), scope]),
+  );
+}
+
+function mobileDevicesFromPushData(data: unknown): MobileDevicesResponse | null {
+  if (!data || typeof data !== "object") {
+    return null;
+  }
+  return data as MobileDevicesResponse;
+}
+
 export default function CertificateTab({
   certInfo,
   getCertDownloadUrl,
@@ -375,11 +389,24 @@ export default function CertificateTab({
   }, [detectedIosProxySsid]);
 
   useEffect(() => {
-    const timer = window.setInterval(() => {
-      void loadMobileDevices(true, true);
-    }, 3000);
-    return () => window.clearInterval(timer);
-  }, [loadMobileDevices]);
+    pushService.connect({
+      ...pushService.getSubscription(),
+      settings_scopes: withSettingsScope("mobile_devices"),
+    });
+    const unsubscribe = pushService.onSettingsUpdate((update) => {
+      if (update.scope !== "mobile_devices") {
+        return;
+      }
+      const next = mobileDevicesFromPushData(update.data);
+      if (next) {
+        setMobileInfo(next);
+      }
+    });
+    return () => {
+      unsubscribe();
+      pushService.disconnectIfIdle();
+    };
+  }, []);
 
   useEffect(() => {
     let frameId: number | null = null;
@@ -750,7 +777,12 @@ export default function CertificateTab({
             }
             size="small"
           >
-            <AvailabilityCheckPanel certInfo={certInfo} testIdPrefix="settings-trust-probe" />
+            <AvailabilityCheckPanel
+              certInfo={certInfo}
+              mobileInfo={mobileInfo}
+              autoCreate
+              testIdPrefix="settings-trust-probe"
+            />
           </Card>
 
         <Card
@@ -941,7 +973,7 @@ export default function CertificateTab({
               data-testid="settings-mobile-ios-ssid-sync-hint"
             >
               This Wi-Fi name is shared with open Availability Check panels. If the phone has the
-              check page open, it polls the session once per second and updates the profile link.
+              check page open, it keeps checking the same session and updates the profile link.
             </Text>
             <Alert
               type="warning"
@@ -1194,7 +1226,15 @@ export default function CertificateTab({
               <Row gutter={[16, 16]} data-testid="settings-mobile-ios-profile-qr-list">
                 {(certInfo.local_ips.length > 0 ? certInfo.local_ips : [""]).map((ip, index) => (
                   <Col key={ip || index}>
-                    <div style={{ textAlign: "center" }}>
+                    <div style={{ textAlign: "center", width: 180 }}>
+                      <Space direction="vertical" size={2} style={{ marginBottom: 8 }}>
+                        <Text strong style={{ fontSize: 12 }}>
+                          Install Bifrost CA profile
+                        </Text>
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          Scan this QR to download the certificate profile.
+                        </Text>
+                      </Space>
                       <Image
                         src={getIosMobileConfigQRCodeUrl(ip || undefined)}
                         alt={`iOS Profile QR Code - ${ip || "current host"}`}
@@ -1213,7 +1253,7 @@ export default function CertificateTab({
                       {ip ? (
                         <div style={{ marginTop: 4 }}>
                           <Text type="secondary" style={{ fontSize: 12 }}>
-                            {ip}
+                            Certificate profile from {ip}
                           </Text>
                         </div>
                       ) : null}
@@ -1222,7 +1262,15 @@ export default function CertificateTab({
                 ))}
                 {iosProxySsid.trim() && iosProxyHost ? (
                   <Col data-testid="settings-mobile-ios-wifi-proxy-qr-list">
-                    <div style={{ textAlign: "center" }}>
+                    <div style={{ textAlign: "center", width: 220 }}>
+                      <Space direction="vertical" size={2} style={{ marginBottom: 8 }}>
+                        <Text strong style={{ fontSize: 12 }}>
+                          Configure Wi-Fi proxy
+                        </Text>
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          Scan after confirming the managed Wi-Fi profile risk.
+                        </Text>
+                      </Space>
                       {ackManagedWifiProfileRisk ? (
                         <Image
                           src={getIosWifiProxyConfigQRCodeUrl(iosProxySsid.trim(), iosProxyHost)}
@@ -1256,7 +1304,7 @@ export default function CertificateTab({
                       )}
                       <div style={{ marginTop: 4 }}>
                         <Text type="secondary" style={{ fontSize: 12 }}>
-                          Experimental Wi-Fi proxy profile: {iosProxySsid.trim()} to {iosProxyHost}:
+                          Experimental proxy profile: {iosProxySsid.trim()} to {iosProxyHost}:
                           {window.location.port || "9900"}
                         </Text>
                       </div>

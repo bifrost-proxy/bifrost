@@ -22,6 +22,7 @@ import { usePairingRequestStore } from "../../stores/usePairingRequestStore";
 import { useNotificationStore } from "../../stores/useNotificationStore";
 import StatusBar from "../StatusBar";
 import MobileDeviceTrustPrompt from "../MobileDeviceTrustPrompt";
+import AvailabilityCheckNotificationCenter from "../AvailabilityCheckNotificationCenter";
 import { setNavigateCallback, type ReferenceLocation } from "../BifrostEditor";
 import { getDesktopPlatform, isDesktopShell } from "../../runtime";
 import { useThemeStore } from "../../stores/useThemeStore";
@@ -345,6 +346,7 @@ export default function AppLayout() {
       ) : null}
       <div style={styles.main}>
         <MobileDeviceTrustPrompt />
+        <AvailabilityCheckNotificationCenter />
         <div style={styles.sidebar}>
           <div style={styles.menuScroll} data-testid="app-sidebar-nav-scroll">
             {menuItems.filter((item) => !item.hidden).map((item) => {

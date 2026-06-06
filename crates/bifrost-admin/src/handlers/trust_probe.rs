@@ -30,6 +30,7 @@ use super::{
     method_not_allowed, public_response_builder, BoxBody,
 };
 use crate::network;
+use crate::push::{SharedPushManager, SETTINGS_SCOPE_TRUST_PROBE};
 use crate::state::SharedAdminState;
 
 static TRUST_PROBE_MANAGER: Lazy<TrustProbeManager> = Lazy::new(TrustProbeManager::new);
@@ -40,6 +41,21 @@ const MAX_ACTIVE_SESSIONS: usize = 32;
 const TOKEN_QUERY_KEY: &str = "t";
 pub const TRUST_PROBE_PROXY_CONFIG_HOST: &str = "bifrost-proxy-check.invalid";
 pub const TRUST_PROBE_PROXY_CONFIG_PATH: &str = "/_bifrost/trust-probe/proxy-configured";
+
+pub fn list_active_sessions() -> Vec<TrustProbeSessionView> {
+    TRUST_PROBE_MANAGER.list_sessions()
+}
+
+fn broadcast_trust_probe_update(push_manager: Option<&SharedPushManager>) {
+    let Some(push_manager) = push_manager.cloned() else {
+        return;
+    };
+    tokio::spawn(async move {
+        push_manager
+            .broadcast_settings_scope(SETTINGS_SCOPE_TRUST_PROBE)
+            .await;
+    });
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -266,6 +282,21 @@ impl TrustProbeManager {
             return Err("CA private key is not configured, so the trust probe cannot sign its HTTPS certificate.".to_string());
         }
         let ca_fingerprint_sha256 = certificate_sha256_fingerprint(&ca_cert_path);
+        {
+            let sessions = self.sessions.lock();
+            if let Some(session) = sessions
+                .values()
+                .filter(|session| {
+                    !session.is_expired()
+                        && session.host == host
+                        && session.admin_port == admin_port
+                        && session.ca_fingerprint_sha256 == ca_fingerprint_sha256
+                })
+                .max_by_key(|session| session.created_at)
+            {
+                return Ok(session.to_view(""));
+            }
+        }
         let probe_port = self
             .ensure_probe_server(
                 &host,
@@ -362,6 +393,18 @@ impl TrustProbeManager {
         self.cleanup_expired_sessions();
         let sessions = self.sessions.lock();
         sessions.get(&session_id).map(|session| session.to_view(""))
+    }
+
+    fn list_sessions(&self) -> Vec<TrustProbeSessionView> {
+        self.cleanup_expired_sessions();
+        let sessions = self.sessions.lock();
+        let mut views: Vec<_> = sessions
+            .values()
+            .filter(|session| !session.is_expired())
+            .map(|session| session.to_view(""))
+            .collect();
+        views.sort_by_key(|session| Reverse(session.expires_at));
+        views
     }
 
     fn get_public_session(&self, session_id: Uuid, token: &str) -> Option<TrustProbeSessionView> {
@@ -1046,16 +1089,21 @@ pub async fn handle_trust_probe_proxy_configured_request(
 pub async fn handle_trust_probe_api(
     req: Request<Incoming>,
     state: SharedAdminState,
+    push_manager: Option<SharedPushManager>,
     path: &str,
 ) -> Response<BoxBody> {
     match (req.method().clone(), path) {
         (Method::POST, "/api/trust-probe/sessions")
-        | (Method::POST, "/api/trust-probe/sessions/") => create_probe_session(req, state).await,
+        | (Method::POST, "/api/trust-probe/sessions/") => {
+            create_probe_session(req, state, push_manager.as_ref()).await
+        }
+        (Method::GET, "/api/trust-probe/sessions")
+        | (Method::GET, "/api/trust-probe/sessions/") => list_probe_sessions(),
         (Method::GET, _) if path.starts_with("/api/trust-probe/sessions/") => {
             get_probe_session(path)
         }
         (Method::PATCH, _) if path.starts_with("/api/trust-probe/sessions/") => {
-            update_probe_session(req, path).await
+            update_probe_session(req, push_manager.as_ref(), path).await
         }
         _ => {
             if path.starts_with("/api/trust-probe/") {
@@ -1067,7 +1115,15 @@ pub async fn handle_trust_probe_api(
     }
 }
 
-async fn update_probe_session(req: Request<Incoming>, path: &str) -> Response<BoxBody> {
+fn list_probe_sessions() -> Response<BoxBody> {
+    json_response(&TRUST_PROBE_MANAGER.list_sessions())
+}
+
+async fn update_probe_session(
+    req: Request<Incoming>,
+    push_manager: Option<&SharedPushManager>,
+    path: &str,
+) -> Response<BoxBody> {
     let Some(session_id) = path
         .strip_prefix("/api/trust-probe/sessions/")
         .and_then(|value| value.trim_end_matches('/').parse::<Uuid>().ok())
@@ -1093,7 +1149,10 @@ async fn update_probe_session(req: Request<Incoming>, path: &str) -> Response<Bo
         }
     };
     match TRUST_PROBE_MANAGER.update_session(session_id, request) {
-        Some(session) => json_response(&session),
+        Some(session) => {
+            broadcast_trust_probe_update(push_manager);
+            json_response(&session)
+        }
         None => error_response(
             StatusCode::NOT_FOUND,
             "Availability check session not found",
@@ -1104,16 +1163,17 @@ async fn update_probe_session(req: Request<Incoming>, path: &str) -> Response<Bo
 pub async fn handle_trust_probe_public(
     req: Request<Incoming>,
     state: SharedAdminState,
+    push_manager: Option<SharedPushManager>,
     path: &str,
 ) -> Response<BoxBody> {
     if req.method() == Method::OPTIONS {
         return cors_preflight();
     }
     if path.trim_end_matches('/') == "/public/trust-probe" {
-        return render_fixed_probe_landing(req, state).await;
+        return render_fixed_probe_landing(req, state, push_manager.as_ref()).await;
     }
     if path.trim_end_matches('/') == "/public/trust-probe/qrcode" {
-        return render_fixed_probe_qrcode(req, state).await;
+        return render_fixed_probe_qrcode(req, state, push_manager.as_ref()).await;
     }
     let Some((session_id, action)) = parse_public_probe_path(path) else {
         return error_response(StatusCode::NOT_FOUND, "Not Found");
@@ -1152,9 +1212,11 @@ pub async fn handle_trust_probe_public(
         (Method::HEAD, Some("qrcode")) => render_probe_qrcode_head(session_id, &token),
         (Method::GET, Some("session")) => render_probe_public_session(session_id, &token),
         (Method::GET, Some("proxy-access")) => {
-            check_proxy_access(req, state, session_id, token).await
+            check_proxy_access(req, state, push_manager.as_ref(), session_id, token).await
         }
-        (Method::POST, Some("report")) => report_probe_result(req, session_id, token).await,
+        (Method::POST, Some("report")) => {
+            report_probe_result(req, push_manager.as_ref(), session_id, token).await
+        }
         _ => method_not_allowed(),
     }
 }
@@ -1162,6 +1224,7 @@ pub async fn handle_trust_probe_public(
 async fn render_fixed_probe_landing(
     req: Request<Incoming>,
     state: SharedAdminState,
+    push_manager: Option<&SharedPushManager>,
 ) -> Response<BoxBody> {
     let host = match public_probe_host_from_request(&req) {
         Some(host) => host,
@@ -1172,6 +1235,7 @@ async fn render_fixed_probe_landing(
         .await
     {
         Ok(session) => {
+            broadcast_trust_probe_update(push_manager);
             if req.method() == Method::HEAD {
                 return public_response_builder(StatusCode::OK)
                     .header("Content-Type", "text/html; charset=utf-8")
@@ -1199,6 +1263,7 @@ async fn render_fixed_probe_landing(
 async fn render_fixed_probe_qrcode(
     req: Request<Incoming>,
     state: SharedAdminState,
+    push_manager: Option<&SharedPushManager>,
 ) -> Response<BoxBody> {
     let host = query_param(req.uri().query(), "host")
         .or_else(|| public_probe_host_from_request(&req))
@@ -1213,7 +1278,10 @@ async fn render_fixed_probe_qrcode(
         .get_or_create_public_session(&state, &host)
         .await
     {
-        Ok(session) => session,
+        Ok(session) => {
+            broadcast_trust_probe_update(push_manager);
+            session
+        }
         Err(error) => return error_response(StatusCode::BAD_REQUEST, &error),
     };
     render_qrcode_for_url(&session.landing_url)
@@ -1222,6 +1290,7 @@ async fn render_fixed_probe_qrcode(
 async fn create_probe_session(
     req: Request<Incoming>,
     state: SharedAdminState,
+    push_manager: Option<&SharedPushManager>,
 ) -> Response<BoxBody> {
     let body = match req.collect().await {
         Ok(body) => body.to_bytes(),
@@ -1243,7 +1312,10 @@ async fn create_probe_session(
     };
 
     match TRUST_PROBE_MANAGER.create_session(&state, request).await {
-        Ok(session) => json_response_with_status(StatusCode::CREATED, &session),
+        Ok(session) => {
+            broadcast_trust_probe_update(push_manager);
+            json_response_with_status(StatusCode::CREATED, &session)
+        }
         Err(error) => error_response(StatusCode::BAD_REQUEST, &error),
     }
 }
@@ -1288,6 +1360,7 @@ fn render_probe_public_session(session_id: Uuid, token: &str) -> Response<BoxBod
 
 async fn report_probe_result(
     req: Request<Incoming>,
+    push_manager: Option<&SharedPushManager>,
     session_id: Uuid,
     token: String,
 ) -> Response<BoxBody> {
@@ -1322,12 +1395,14 @@ async fn report_probe_result(
             "Availability check session not found",
         );
     }
+    broadcast_trust_probe_update(push_manager);
     json_response(&serde_json::json!({ "ok": true }))
 }
 
 async fn check_proxy_access(
     req: Request<Incoming>,
     state: SharedAdminState,
+    push_manager: Option<&SharedPushManager>,
     session_id: Uuid,
     token: String,
 ) -> Response<BoxBody> {
@@ -1347,6 +1422,7 @@ async fn check_proxy_access(
                 "Availability check session not found",
             );
         }
+        broadcast_trust_probe_update(push_manager);
         return json_response(&TrustProbeProxyAccessView {
             status: TrustProbeProxyAccessStatus::Unavailable,
             authorized: false,
@@ -1371,6 +1447,7 @@ async fn check_proxy_access(
                 "Availability check session not found",
             );
         }
+        broadcast_trust_probe_update(push_manager);
         return json_response(&TrustProbeProxyAccessView {
             status: TrustProbeProxyAccessStatus::Unavailable,
             authorized: false,
@@ -1418,6 +1495,7 @@ async fn check_proxy_access(
             "Availability check session not found",
         );
     }
+    broadcast_trust_probe_update(push_manager);
 
     json_response(&TrustProbeProxyAccessView {
         status,

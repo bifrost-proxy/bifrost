@@ -12,7 +12,7 @@ import type {
 import type { ScriptInfo } from '../api/scripts';
 import type { ValueItem } from '../api/values';
 import type { TlsConfig, PerformanceConfig, PendingIpTls } from '../api/config';
-import type { CertInfo } from '../api/cert';
+import type { CertInfo, MobileDevicesResponse, TrustProbeSession } from '../api/cert';
 import type {
   CliProxyStatus,
   ProxyAddressInfo,
@@ -90,7 +90,9 @@ export type SettingsScope =
   | 'pending_authorizations'
   | 'pending_ip_tls'
   | 'client_trust'
-  | 'notifications';
+  | 'notifications'
+  | 'trust_probe'
+  | 'mobile_devices';
 
 export interface SettingsUpdateData {
   scope: SettingsScope;
@@ -104,7 +106,9 @@ export interface SettingsUpdateData {
     | CliProxyStatus
     | WhitelistStatus
     | PendingAuth[]
-    | PendingIpTls[];
+    | PendingIpTls[]
+    | TrustProbeSession[]
+    | MobileDevicesResponse;
 }
 
 export interface ReplaySavedRequestsData {

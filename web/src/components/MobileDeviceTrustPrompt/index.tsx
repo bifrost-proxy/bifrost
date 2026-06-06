@@ -4,12 +4,12 @@ import { Alert, Button, List, Modal, Space, Tag, Typography, message } from "ant
 import { AndroidOutlined, AppleOutlined, MobileOutlined, SendOutlined } from "@ant-design/icons";
 import {
   installMobileCa,
-  refreshMobileDevices,
   type InstallMode,
   type MobileDevice,
   type MobileDevicesResponse,
 } from "../../api/cert";
 import { normalizeApiErrorMessage } from "../../api/client";
+import { pushService, type SettingsScope } from "../../services/pushService";
 
 const { Text } = Typography;
 
@@ -41,6 +41,19 @@ function connectedDevices(info: MobileDevicesResponse | null): MobileDevice[] {
   );
 }
 
+function withSettingsScope(scope: SettingsScope): SettingsScope[] {
+  return Array.from(
+    new Set([...(pushService.getSubscription().settings_scopes ?? []), scope]),
+  );
+}
+
+function mobileDevicesFromPushData(data: unknown): MobileDevicesResponse | null {
+  if (!data || typeof data !== "object") {
+    return null;
+  }
+  return data as MobileDevicesResponse;
+}
+
 export default function MobileDeviceTrustPrompt() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -69,13 +82,19 @@ export default function MobileDeviceTrustPrompt() {
     setSuppressPrompt(isCertificateSettingsPage);
   }, [isCertificateSettingsPage]);
 
-  const pollDevices = useCallback(async () => {
-    if (installingDeviceId) {
-      return;
-    }
-
-    try {
-      const info = await refreshMobileDevices();
+  useEffect(() => {
+    pushService.connect({
+      ...pushService.getSubscription(),
+      settings_scopes: withSettingsScope("mobile_devices"),
+    });
+    const unsubscribe = pushService.onSettingsUpdate((update) => {
+      if (update.scope !== "mobile_devices" || installingDeviceId) {
+        return;
+      }
+      const info = mobileDevicesFromPushData(update.data);
+      if (!info) {
+        return;
+      }
       setMobileInfo(info);
       const candidates = connectedDevices(info).filter(
         (device) => !dismissedDeviceIds.has(device.id),
@@ -85,19 +104,12 @@ export default function MobileDeviceTrustPrompt() {
           ? current
           : candidates[0]?.id ?? null,
       );
-    } catch {
-      // Mobile USB operations are local-only. Remote Admin pages receive 403 here,
-      // which should not interrupt ordinary browsing.
-    }
+    });
+    return () => {
+      unsubscribe();
+      pushService.disconnectIfIdle();
+    };
   }, [dismissedDeviceIds, installingDeviceId]);
-
-  useEffect(() => {
-    void pollDevices();
-    const timer = window.setInterval(() => {
-      void pollDevices();
-    }, 3000);
-    return () => window.clearInterval(timer);
-  }, [pollDevices]);
 
   const dismissVisibleDevices = useCallback(() => {
     setDismissedDeviceIds((prev) => {

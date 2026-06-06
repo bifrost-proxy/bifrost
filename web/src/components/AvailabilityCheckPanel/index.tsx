@@ -16,14 +16,16 @@ import { CopyOutlined, QrcodeOutlined } from "@ant-design/icons";
 import {
   createTrustProbeSession,
   getCertInfo,
-  getTrustProbeSession,
   updateTrustProbeSessionWifiSsid,
   type CertInfo,
+  type MobileDevice,
+  type MobileDevicesResponse,
   type TrustProbeDevice,
   type TrustProbeSession,
   type TrustProbeStatus,
 } from "../../api/cert";
 import { normalizeApiErrorMessage } from "../../api/client";
+import { pushService, type SettingsScope } from "../../services/pushService";
 import {
   getSharedIosWifiProxySsid,
   setSharedIosWifiProxySsid,
@@ -41,6 +43,7 @@ interface AvailabilityCheckPanelProps {
   autoCreate?: boolean;
   compact?: boolean;
   showEvents?: boolean;
+  mobileInfo?: MobileDevicesResponse | null;
   testIdPrefix?: string;
 }
 
@@ -87,6 +90,47 @@ function shortDeviceId(deviceId: string) {
     return deviceId;
   }
   return `${deviceId.slice(0, 8)}...${deviceId.slice(-6)}`;
+}
+
+function connectedMobileDevices(info?: MobileDevicesResponse | null): MobileDevice[] {
+  if (!info) {
+    return [];
+  }
+  return [...info.ios.devices, ...info.android.devices].filter(
+    (device) => device.status === "connected",
+  );
+}
+
+function mobileDeviceDisplayName(device: MobileDevice) {
+  return device.name?.trim() || device.id;
+}
+
+function mobileDeviceCertificateLabel(device: MobileDevice): string {
+  switch (device.certificate_status?.state) {
+    case "installed":
+      return device.certificate_status.trusted ? "CA trusted" : "CA installed";
+    case "pushed_to_device":
+      return "CA pushed";
+    case "not_installed":
+      return "CA not installed";
+    case "unknown":
+    default:
+      return "CA unknown";
+  }
+}
+
+function mobileDeviceCertificateColor(device: MobileDevice): string {
+  switch (device.certificate_status?.state) {
+    case "installed":
+      return device.certificate_status.trusted ? "green" : "orange";
+    case "pushed_to_device":
+      return "blue";
+    case "not_installed":
+      return "red";
+    case "unknown":
+    default:
+      return "default";
+  }
 }
 
 function DeviceStatusTags({ device }: { device: TrustProbeDevice }) {
@@ -148,12 +192,23 @@ function preserveTrustProbeUrls(
   };
 }
 
+function withSettingsScope(scope: SettingsScope): SettingsScope[] {
+  return Array.from(
+    new Set([...(pushService.getSubscription().settings_scopes ?? []), scope]),
+  );
+}
+
+function trustProbeSessionsFromPushData(data: unknown): TrustProbeSession[] {
+  return Array.isArray(data) ? (data as TrustProbeSession[]) : [];
+}
+
 export default function AvailabilityCheckPanel({
   certInfo,
   active = true,
   autoCreate = false,
   compact = false,
   showEvents = true,
+  mobileInfo,
   testIdPrefix = "availability-check",
 }: AvailabilityCheckPanelProps) {
   const [loadedCertInfo, setLoadedCertInfo] = useState<CertInfo | null>(null);
@@ -196,27 +251,36 @@ export default function AvailabilityCheckPanel({
   }, [effectiveCertInfo?.local_ips, trustProbeHost]);
 
   useEffect(() => {
-    if (!trustProbeSession) {
+    const sessionId = trustProbeSession?.sessionId;
+    if (!sessionId || trustProbeSession.status === "expired") {
       return;
     }
-    if (trustProbeSession.status === "expired") {
-      return;
-    }
-    const timer = window.setInterval(async () => {
-      try {
-        const next = await getTrustProbeSession(trustProbeSession.sessionId);
-        setTrustProbeSession((current) => {
-          if (!current || current.sessionId !== next.sessionId) {
-            return next;
-          }
-          return preserveTrustProbeUrls(next, current);
-        });
-      } catch {
-        window.clearInterval(timer);
+    pushService.connect({
+      ...pushService.getSubscription(),
+      settings_scopes: withSettingsScope("trust_probe"),
+    });
+    const unsubscribe = pushService.onSettingsUpdate((update) => {
+      if (update.scope !== "trust_probe") {
+        return;
       }
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [trustProbeSession]);
+      const next = trustProbeSessionsFromPushData(update.data).find(
+        (session) => session.sessionId === sessionId,
+      );
+      if (!next) {
+        return;
+      }
+      setTrustProbeSession((current) => {
+        if (!current || current.sessionId !== next.sessionId) {
+          return next;
+        }
+        return preserveTrustProbeUrls(next, current);
+      });
+    });
+    return () => {
+      unsubscribe();
+      pushService.disconnectIfIdle();
+    };
+  }, [trustProbeSession?.sessionId, trustProbeSession?.status]);
 
   useEffect(() => {
     const sessionSsid = trustProbeSession?.suggestedWifiSsid?.trim();
@@ -360,6 +424,7 @@ export default function AvailabilityCheckPanel({
   }, [trustProbeSession, wifiSsidDraft]);
 
   const qrSize = compact ? 112 : 180;
+  const detectedMobileDevices = connectedMobileDevices(mobileInfo);
 
   return (
     <Space direction="vertical" style={{ width: "100%" }} size={compact ? "small" : "middle"}>
@@ -373,6 +438,58 @@ export default function AvailabilityCheckPanel({
             : "Share the link or scan the QR code from the target device. The page checks proxy authorization, probe port reachability, and a real HTTPS request signed by the current Bifrost CA."
         }
       />
+
+      {!compact ? (
+        <div data-testid={`${testIdPrefix}-target-devices`}>
+          <Space direction="vertical" size={6} style={{ width: "100%" }}>
+            <Space wrap size={[8, 4]}>
+              <Text strong style={{ fontSize: 13 }}>
+                Devices to check
+              </Text>
+              <Tag color={detectedMobileDevices.length ? "blue" : "default"}>
+                {detectedMobileDevices.length}
+              </Tag>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                Connected phones are shown here before you scan the availability link.
+              </Text>
+            </Space>
+            {detectedMobileDevices.length ? (
+              <List
+                size="small"
+                dataSource={detectedMobileDevices}
+                data-testid={`${testIdPrefix}-target-device-list`}
+                renderItem={(device) => (
+                  <List.Item>
+                    <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                      <Space wrap size={[8, 4]}>
+                        <Text strong>{mobileDeviceDisplayName(device)}</Text>
+                        <Tag color={device.platform === "ios" ? "purple" : "blue"}>
+                          {device.platform === "ios" ? "iOS" : "Android"}
+                        </Tag>
+                        <Tag color="green">{device.status}</Tag>
+                        <Tag color={mobileDeviceCertificateColor(device)}>
+                          {mobileDeviceCertificateLabel(device)}
+                        </Tag>
+                      </Space>
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        Open the link or scan the QR code below from this device. Bifrost will
+                        track the browser with a local device ID after the check page opens.
+                      </Text>
+                    </Space>
+                  </List.Item>
+                )}
+              />
+            ) : (
+              <Alert
+                type="info"
+                showIcon
+                message="No connected phone detected yet"
+                description="Connect an iPhone or Android device over USB, or share the availability link with any phone on the same LAN. Devices that open the check page will appear in the live status list."
+              />
+            )}
+          </Space>
+        </div>
+      ) : null}
 
       <Row gutter={[12, 12]} align="bottom">
         <Col xs={24} sm={compact ? 24 : 12} md={compact ? 24 : 10}>
@@ -405,7 +522,11 @@ export default function AvailabilityCheckPanel({
             onClick={() => void handleCreateTrustProbe()}
             data-testid={`${testIdPrefix}-create`}
           >
-            {trustProbeSession ? "Regenerate Availability Check" : "Generate Availability Check"}
+            {autoCreate
+              ? "Refresh Availability Check"
+              : trustProbeSession
+                ? "Regenerate Availability Check"
+                : "Generate Availability Check"}
           </Button>
         </Col>
       </Row>
@@ -611,8 +732,8 @@ export default function AvailabilityCheckPanel({
                 />
               ) : (
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  Scan the QR code from the target device. This page polls once per second until the
-                  check succeeds, fails, or the session expires.
+                  Scan the QR code from the target device. Bifrost updates this status over the
+                  live connection when the device opens the page or completes a check step.
                 </Text>
               )}
 
@@ -653,7 +774,7 @@ export default function AvailabilityCheckPanel({
                 ) : null}
                 <Text type="secondary" style={{ display: "block", fontSize: 12, marginTop: 4 }}>
                   Saved Wi-Fi names are shared with other Availability Check panels. Phone pages
-                  poll the same session once per second and update their profile link automatically.
+                  keep the same session open and update their profile link automatically.
                 </Text>
                 <Alert
                   type="warning"

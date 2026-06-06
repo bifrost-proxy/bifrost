@@ -139,10 +139,25 @@ pub async fn handle_mobile_public(
 }
 
 fn list_mobile_devices(state: SharedAdminState) -> Response<BoxBody> {
+    json_response(&build_mobile_devices_response(&state))
+}
+
+pub fn mobile_devices_snapshot(state: &SharedAdminState) -> serde_json::Value {
+    serde_json::to_value(build_mobile_devices_response(state)).unwrap_or_else(|_| {
+        serde_json::json!({
+            "android": { "devices": [] },
+            "ios": { "devices": [] },
+            "ordinary_device_notice": "Mobile device discovery is unavailable.",
+            "managed_device_notice": "Mobile device discovery is unavailable."
+        })
+    })
+}
+
+fn build_mobile_devices_response(state: &SharedAdminState) -> MobileDevicesResponse {
     let port = state.port();
     let ca_cert_path = state.ca_cert_path.as_deref().filter(|path| path.exists());
     let wifi_detection = current_wifi_ssid_detection();
-    let response = MobileDevicesResponse {
+    MobileDevicesResponse {
         android: discover_android_devices_with_ca(ca_cert_path),
         ios: discover_ios_devices(),
         ios_profile_url: format!(
@@ -163,8 +178,7 @@ fn list_mobile_devices(state: SharedAdminState) -> Response<BoxBody> {
             "Personal Android and iOS devices require final confirmation on the phone before the CA is installed or fully trusted.",
         managed_device_notice:
             "Managed Android/iOS devices can support automatic trust only through Device Owner/Profile Owner, MDM, Apple Configurator, or equivalent fleet tooling.",
-    };
-    json_response(&response)
+    }
 }
 
 async fn install_ios_proxy_profile(
