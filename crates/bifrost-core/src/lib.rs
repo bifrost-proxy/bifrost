@@ -8,12 +8,14 @@ pub mod logging;
 pub mod matcher;
 pub mod panic_handler;
 pub mod process_alias;
+pub mod process_start_time;
 pub mod protocol;
 pub mod rule;
 pub mod shell_proxy;
 pub mod syntax;
 pub mod system_proxy;
 pub mod system_proxy_launchd;
+pub mod system_proxy_recovery;
 pub mod text;
 pub mod version_check;
 
@@ -37,6 +39,10 @@ pub use matcher::{
 };
 pub use panic_handler::{install_panic_hook, spawn_with_panic_guard};
 pub use process_alias::process_alias_executable;
+pub use process_start_time::{
+    current_process_start_time_ms, get_process_start_time_ms, start_times_match, StartTimeMatch,
+    START_TIME_MATCH_TOLERANCE_MS,
+};
 pub use protocol::*;
 pub use rule::{
     create_shared_store, extract_inline_variables, parse_line, parse_rules, parse_rules_tolerant,
@@ -51,11 +57,17 @@ pub use syntax::{
     get_template_variables, validate_filter_value, FilterValidationError, PatternInfo,
     ProtocolInfo, ProtocolValueSpec, SyntaxInfo, TemplateVariableInfo, ValueHint,
 };
-pub use system_proxy::{ProxyBackup, SystemProxyDisableOutcome, SystemProxyManager};
+pub use system_proxy::{
+    repair_system_proxy_lock_permissions, ProxyBackup, SystemProxyDisableOutcome,
+    SystemProxyManager,
+};
 pub use system_proxy_launchd::{
     consume_stop_restore_suppression, install_launchd_cleanup,
     install_launchd_cleanup_with_gui_auth, launchd_status, launchd_status_for_config,
     render_launchd_plist, uninstall_launchd_cleanup, uninstall_launchd_cleanup_with_gui_auth,
     SystemProxyLaunchdConfig, SystemProxyLaunchdMode, SystemProxyLaunchdRecoveryOutcome,
     SystemProxyLaunchdStatus,
+};
+pub use system_proxy_recovery::{
+    is_retryable_recovery_error, retry_with_policy, RECOVERY_RETRY_INTERVAL, RECOVERY_RETRY_WINDOW,
 };

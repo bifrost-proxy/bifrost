@@ -629,8 +629,163 @@
 
 ---
 
+### TC-CSP-20：PID 复用场景下 lifecycle helper 应执行受保护恢复（macOS + Windows）
+
+**前置条件**：
+- macOS 或 Windows 任一支持系统代理的环境（Windows 启用 WinINET）。Bifrost 不在 Linux 上写系统代理，因此 Linux 不在本用例覆盖范围内；helper 行为本身由 `bifrost-core` 单元测试在 Linux runner 上做编译/解析层面回归。
+- 使用临时数据目录：
+  ```bash
+  TEST_DATA_DIR="$(mktemp -d)"
+  ```
+
+**操作步骤**：
+1. 启动 Bifrost 启用系统代理（记录 PID 与 started_at）：
+   ```bash
+   BIFROST_DATA_DIR="$TEST_DATA_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 ./target/debug/bifrost -p 18889 start --skip-cert-check --unsafe-ssl --system-proxy > "$TEST_DATA_DIR/proxy.log" 2>&1 &
+   PROXY_PID=$!
+   until curl -sS "http://127.0.0.1:18889/_bifrost/api/system" >/dev/null 2>&1; do sleep 0.2; done
+   ```
+2. 检查 helper 启动日志包含 `parent_started_at_ms`：
+   ```bash
+   grep "system proxy lifecycle cleanup helper started" "$TEST_DATA_DIR/proxy.log"
+   ```
+3. 强杀主进程并立即用相同 PID 启动其它进程占位（构造 PID 复用）。可借助单元测试内置的 mock 钩子或在临时脚本中 fork 多个进程直至复用同 PID（实际 CI 中由 `pid_reuse_detected_when_start_time_mismatches_current_process` 和 LaunchDaemon runtime identity 单元测试覆盖确定性场景）。
+4. 观察 helper 日志：
+   ```bash
+   grep -E "pid_reuse_check=mismatch|running guarded cleanup|system proxy cleanup helper restore starting" "$TEST_DATA_DIR/proxy.log"
+   ```
+
+**预期结果**：
+- helper 启动日志包含 `parent_started_at_ms=<u64>` 字段。
+- 当 helper 观测到 `parent pid` 仍存活但 `start_time` 不再匹配 `parent_started_at_ms`（容差 2000ms 内），日志输出 `pid_reuse_check=mismatch` 与 `running guarded cleanup`，并进入 `recover_from_crash`。
+- 如果当前系统代理仍指向旧 Bifrost target，则恢复原始代理或禁用残留代理；如果已经被外部代理接管，则 guarded recovery 保留外部代理不变。
+- 跨平台一致：macOS 通过 `proc_pidinfo`+`PROC_PIDTBSDINFO` 取 start_time；Windows 通过 `GetProcessTimes`。Linux 不启动 helper，不在本用例覆盖范围；`bifrost-core` 在 Linux runner 上仍会执行 `process_start_time` 单元测试，确保 `/proc/<pid>/stat` 解析逻辑回归。
+
+---
+
+### TC-CSP-21：系统代理跨进程 lock 文件应安全可迁移（macOS）
+
+**前置条件**：
+- macOS 环境（Bifrost 当前只在 macOS 上对该 lock 做 chmod 0666，因为 Windows 不走 POSIX 模式位，Linux 不写系统代理）。
+- 临时数据目录：
+  ```bash
+  TEST_DATA_DIR="$(mktemp -d)"
+  ```
+
+**操作步骤**：
+1. 以 root 身份（或 sudo）启动一次 Bifrost 启用系统代理后立即停止：
+   ```bash
+   sudo BIFROST_DATA_DIR="$TEST_DATA_DIR" ./target/debug/bifrost -p 18889 start --no-system-proxy &
+   sleep 1
+   sudo kill $!
+   wait $! 2>/dev/null || true
+   ```
+2. 检查 lock 文件权限：
+   ```bash
+   ls -l "$TEST_DATA_DIR/.system_proxy.lock"
+   stat -c '%a' "$TEST_DATA_DIR/.system_proxy.lock" 2>/dev/null \
+     || stat -f '%Lp' "$TEST_DATA_DIR/.system_proxy.lock"
+   ```
+
+**预期结果**：
+- lock 文件存在，权限位为 `0666`（即使创建时进程的 umask 限制 group/other 写权限，也通过 fd 级 `fchmod(0o666)` 强制放开）。
+- 普通用户与 root 启动的 helper / cleanup-daemon / 主进程都可获得 advisory lock，避免 root 启动的服务给 lock 文件留下普通用户无法访问的权限。
+- symlink 形式的 `.system_proxy.lock` 必须被拒绝，不能被 root LaunchDaemon 跟随 chmod；该路径由 Rust 单元测试 `system_proxy_lock_rejects_symlink` 覆盖。
+- 旧版本留下的 strict regular lock 可通过隐藏命令 `system-proxy repair-lock --data-dir "$TEST_DATA_DIR"` 迁移到 `0666`；迁移内部仍使用 `O_NOFOLLOW` + fd 校验 + `fchmod`。
+- 该用例由 Rust 单元测试 `system_proxy_lock_is_world_writable_after_creation` / `system_proxy_lock_rejects_symlink` 在 macOS CI 上执行，Linux/Windows 不写系统代理或不使用 POSIX mode 因此不覆盖。
+
+---
+
+### TC-CSP-22：lifecycle helper recover_from_crash 应在 60 秒内有限重试
+
+**前置条件**：
+- macOS 或 Windows（运行期 helper 平台）。Linux 不启动 helper，不在本用例覆盖范围；`bifrost-core` 单元测试仍会在 Linux runner 上执行重试策略测试。
+- 临时数据目录：`TEST_DATA_DIR="$(mktemp -d)"`。
+
+**操作步骤**：
+1. 由 `bifrost-core` 的 `system_proxy_recovery::tests::retry_with_policy_returns_after_success`、`retry_with_policy_gives_up_after_window` 这两个单元测试在 CI 跨平台执行：
+   ```bash
+   cargo test -p bifrost-core system_proxy_recovery
+   ```
+2. helper 真实路径下，可在测试环境注入瞬时失败（如临时禁用 `networksetup`）后强杀主进程，观察日志：
+   ```bash
+   grep -E "system proxy recover_from_crash failed; will retry|system proxy recover_from_crash succeeded after retry" "$TEST_DATA_DIR/proxy.log"
+   ```
+
+**预期结果**：
+- `RECOVERY_RETRY_WINDOW = 60s`、`RECOVERY_RETRY_INTERVAL = 5s`，重试期间 helper 不立即退出。
+- 区分可重试错误（`is_retryable_recovery_error`：networksetup 暂不可用、网络服务枚举为空、临时 IO 错误）与不可重试错误（解析失败、状态文件损坏）。
+- 60 秒窗口超时仍未恢复时记录最后一次错误并退出，避免 helper 永远阻塞。
+- Rust 单元测试 `system_proxy_recovery::tests::*` 在 macOS / Linux / Windows 上均编译通过；运行期 helper 行为只在 macOS / Windows 验证。
+
+---
+
+### TC-CSP-23：lifecycle helper 在 Windows 上同样能在主进程崩溃后清理系统代理（macOS + Windows 范围）
+
+**前置条件**：
+- 仅适用于 macOS / Windows。Bifrost 不对 Linux 提供系统代理写入能力，因此 Linux 上不会启动 lifecycle helper，本用例不在 Linux 平台执行。
+- macOS：参考 TC-CSP-15 已覆盖。
+- Windows：Windows 10+，临时数据目录，PowerShell。
+
+**Windows 操作步骤**（PowerShell）：
+1. 启动 Bifrost：
+   ```powershell
+   $env:BIFROST_DATA_DIR = (New-Item -ItemType Directory -Path "$env:TEMP\bifrost-test-$(Get-Random)").FullName
+   Start-Process -FilePath ".\target\debug\bifrost.exe" -ArgumentList "-p","18889","start","--skip-cert-check","--unsafe-ssl","--system-proxy" -PassThru
+   ```
+2. 验证 helper 日志包含 `system proxy lifecycle cleanup helper started`；Windows 下 helper 通过 `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` 启动，独立于父进程。
+3. 用 `Stop-Process -Id <PID> -Force` 模拟崩溃，等待最多 45 秒：
+   ```powershell
+   Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -Name ProxyEnable
+   ```
+
+**Linux 行为说明**：
+- Bifrost 当前不在 Linux 上写系统代理，因此 lifecycle helper 在 Linux 也直接 short-circuit 返回，日志输出 `system proxy lifecycle helper is only supported on macOS and Windows; skipping`。CI Linux 矩阵只验证 `cargo test --workspace --all-features` 通过，不验证 helper 行为。
+
+**预期结果**：
+- Windows：`ProxyEnable` 为 `0`，`ProxyServer` 不再指向 `127.0.0.1:18889`，且通知 `WinINET` 设置生效。
+- macOS：参见 TC-CSP-15。
+- Linux：helper 不被启动；`SystemProxyLifecycleHelperState::ensure_started` short-circuit；CI 矩阵 (`ubuntu-latest` / `windows-latest` / `macos-latest`) 均执行 `cargo test --workspace --all-features` 通过。
+
+---
+
+### TC-CSP-24：Admin API 关闭系统代理失败或未收敛时，lifecycle helper 不应被提前关闭
+
+**前置条件**：
+- 任意支持系统代理的平台。
+- 启动 Bifrost 并通过 Admin API 启用系统代理；helper 已经存在。
+
+**操作步骤**：
+1. 通过 Admin API 关闭系统代理，但模拟外部代理覆盖或网络服务无法关闭：
+   ```bash
+   networksetup -setwebproxy "Wi-Fi" 127.0.0.1 18889
+   networksetup -setwebproxystate "Wi-Fi" on
+   curl -sS -X PUT "http://127.0.0.1:18889/_bifrost/api/proxy/system" \
+     -H "Content-Type: application/json" \
+     -d '{"enabled":false}'
+   ```
+2. 检查日志：
+   ```bash
+   grep -E "system proxy admin toggle did not converge to a clean state; lifecycle helper left running|system proxy lifecycle helper stopped after Admin API disable" "$TEST_DATA_DIR/proxy.log"
+   ```
+3. 强杀主进程：
+   ```bash
+   kill -9 "$PROXY_PID"
+   ```
+4. 等待最多 45 秒检查系统代理。
+
+**预期结果**：
+- 当 `request.enabled=false` 但 `status.enabled=true`（未收敛），日志输出 `system proxy admin toggle did not converge to a clean state; lifecycle helper left running`，helper **不被** 停止。
+- 仅在 `!request.enabled && !status.enabled` 已确认收敛时，才输出 `system proxy lifecycle helper stopped after Admin API disable` 并 `stop()` helper。
+- 第 4 步主进程崩溃后，仍存活的 helper 接管清理，系统代理不再指向 `127.0.0.1:18889`。
+- 修复前的回归路径（"disable 失败但 helper 已被 detach/forget 而 stop"）不可复现。
+
+---
+
 ## 执行记录
 
+- 2026-06-07：使用当前修复后的独立 target 二进制真实执行系统代理 shell E2E。命令：`BIFROST_BIN="$PWD/.bifrost-verify-target/debug/bifrost" SKIP_BUILD=true BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 bash e2e-tests/tests/test_system_proxy_e2e.sh`。结果 14/14 PASS，覆盖 LaunchDaemon plist one-shot dry-run、外部代理不抢占、外部代理 disable 不误关、正常退出恢复、崩溃后再次启动恢复、无 backup/state 但 runtime target 匹配时清理残留、Admin API 运行中启用后主进程崩溃由 helper 清理、cleanup-daemon 无状态快速退出、启动失败前同步清理残留。脚本中 `Killed: 9` / `Terminated: 15` 为用例主动强杀或清理进程的预期动作；检测到本机存在外部系统代理 owner 时，两个非隔离 helper 用例按脚本规则跳过以避免误动正式代理。
+- 2026-06-07：针对守护进程稳定性 review 修复执行 TC-CSP-20/TC-CSP-21 的确定性验证。执行 `CARGO_TARGET_DIR=./.bifrost-verify-target SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-core system_proxy --all-features`，结果 35/35 PASS，覆盖 `system_proxy_lock_is_world_writable_after_creation`、`system_proxy_lock_rejects_symlink`、`runtime_identity_is_not_alive_when_start_time_mismatches`、`runtime_identity_is_alive_when_start_time_matches`、`last_runtime_target_has_live_listener_resolves_localhost` 等回归；执行 `CARGO_TARGET_DIR=./.bifrost-verify-target SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli pid_reuse_detected_when_start_time_mismatches_current_process --all-features`，结果 lib/main 双路径均 PASS，验证 lifecycle helper 能识别 PID start_time mismatch。真实 CLI 执行 `bifrost system-proxy repair-lock --data-dir "$TEST_DATA_DIR"`，确认创建 `.system_proxy.lock` 后 `stat -f '%Lp'` 为 `666`；随后将 `.system_proxy.lock` 替换为 symlink 再执行同一命令，返回 `Too many levels of symbolic links (os error 62)`，结论 PASS：repair-lock 使用 nofollow + fd chmod，拒绝 symlink。
 - 2026-06-06：针对 P0/P1 review 修复真实执行 TC-CSP-16、TC-CSP-18、TC-CSP-19 及系统代理回归套件。执行 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true bash e2e-tests/tests/test_system_proxy_e2e.sh`，脚本使用临时 `BIFROST_DATA_DIR` 和 `18889` 端口，验证 LaunchDaemon plist one-shot dry-run、外部代理归属边界、崩溃后恢复、无 backup/state 但 runtime target 匹配时的残留清理、Admin API 运行中启用 system proxy 后 lifecycle helper 崩溃兜底、cleanup-daemon 无状态快速退出，以及启动失败前同步清理残留系统代理。结果 14/14 PASS，其中新增输出 `LaunchDaemon cleanup daemon 无状态时快速完成 one-shot retry-aware 检查`，证明 retry-aware one-shot 在明确无需恢复时不会等待完整 retry 窗口；测试结束后 `./target/debug/bifrost system-proxy status` 显示系统代理恢复到正式服务 `127.0.0.1:9900`。
 - 2026-06-06：真实执行 TC-CSP-19 及系统代理回归套件。执行 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true bash e2e-tests/tests/test_system_proxy_e2e.sh`，脚本使用临时 `BIFROST_DATA_DIR` 和 `18889` 端口，显式写入 `runtime.json` 的 `host=0.0.0.0 port=18889`，删除 `proxy_state.json` / `proxy_backup.json`，再将 macOS Web/Secure Web proxy 设置为 `127.0.0.1:18889` 后以 `--no-system-proxy` 启动当前构建。结果 13/13 PASS，其中新增用例输出 `macOS: 无 backup/state 时按 runtime target 清理崩溃残留系统代理`，证明无 managed state 时仍会按上次 runtime target 清理残留代理；测试结束后系统代理恢复到正式 9900 服务。
 - 2026-06-05：真实执行 TC-CSP-18 的 Admin API 路径。使用 `/tmp/bifrost-csp18.*` 临时数据目录和 `target/debug/bifrost` 在 `18889` 端口启动服务，启动参数包含 `--no-system-proxy`、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`，并设置 `BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1` 避免本轮弹出真实授权窗口。服务 ready 后调用 `PUT /_bifrost/api/proxy/system {"enabled":true}`，响应为 `enabled=true host=127.0.0.1 port=18889 managed_by_bifrost=true`；随后日志出现 `system proxy LaunchDaemon cleanup install disabled by environment`，证明运行中服务通过 Admin API 打开系统代理后已触发 LaunchDaemon 自动检查路径。测试结束调用 API 关闭系统代理并停止临时服务，临时数据目录已清理。

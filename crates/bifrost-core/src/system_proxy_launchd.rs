@@ -1,12 +1,16 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::{BifrostError, Result, SystemProxyManager};
+use crate::system_proxy_recovery::{
+    is_retryable_recovery_error, recovery_retry_delay, RECOVERY_RETRY_INTERVAL,
+    RECOVERY_RETRY_WINDOW,
+};
+use crate::{BifrostError, Result, StartTimeMatch, SystemProxyManager};
 
 pub const DEFAULT_LABEL: &str = "com.bifrost.system-proxy-cleanup";
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const CLEANUP_DAEMON_STARTUP_RETRY_WINDOW: Duration = Duration::from_secs(60);
-pub const CLEANUP_DAEMON_STARTUP_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+pub const CLEANUP_DAEMON_STARTUP_RETRY_WINDOW: Duration = RECOVERY_RETRY_WINDOW;
+pub const CLEANUP_DAEMON_STARTUP_RETRY_INTERVAL: Duration = RECOVERY_RETRY_INTERVAL;
 const STOP_SUPPRESSION_FILE_NAME: &str = ".system_proxy_launchd_stop_suppressed";
 const STOP_SUPPRESSION_TTL_SECS: u64 = 300;
 
@@ -368,13 +372,11 @@ fn recover_if_no_live_runtime_with_policy(
             Ok(true) => return Ok(SystemProxyLaunchdRecoveryOutcome::Recovered),
             Ok(false) => return Ok(SystemProxyLaunchdRecoveryOutcome::Skipped),
             Err(error) => {
-                if !is_retryable_cleanup_daemon_recovery_error(&error)
-                    || started_at.elapsed() >= retry_window
-                {
+                if !is_retryable_recovery_error(&error) || started_at.elapsed() >= retry_window {
                     return Err(error);
                 }
 
-                let delay = cleanup_daemon_retry_delay(started_at, retry_window, retry_interval);
+                let delay = recovery_retry_delay(started_at, retry_window, retry_interval);
                 tracing::warn!(
                     target: "bifrost_core::system_proxy_launchd",
                     data_dir = %data_dir.display(),
@@ -389,22 +391,6 @@ fn recover_if_no_live_runtime_with_policy(
             }
         }
     }
-}
-
-fn cleanup_daemon_retry_delay(
-    started_at: Instant,
-    retry_window: Duration,
-    retry_interval: Duration,
-) -> Duration {
-    let remaining = retry_window.saturating_sub(started_at.elapsed());
-    retry_interval.min(remaining).max(Duration::from_millis(1))
-}
-
-fn is_retryable_cleanup_daemon_recovery_error(error: &BifrostError) -> bool {
-    let message = error.to_string();
-    message.contains("networksetup")
-        || message.contains("No enabled macOS network services")
-        || message.contains("Failed to execute launchctl")
 }
 
 pub fn consume_stop_restore_suppression(data_dir: &Path) -> bool {
@@ -422,20 +408,70 @@ pub fn consume_stop_restore_suppression(data_dir: &Path) -> bool {
 }
 
 fn runtime_pid_is_alive(data_dir: &Path) -> bool {
+    let Some(identity) = load_runtime_identity(data_dir) else {
+        return false;
+    };
+    runtime_identity_is_alive(&identity)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RuntimeIdentity {
+    pid: u32,
+    started_at_ms: Option<u64>,
+}
+
+fn load_runtime_identity(data_dir: &Path) -> Option<RuntimeIdentity> {
     let runtime_path = data_dir.join("runtime.json");
-    let pid = std::fs::read_to_string(&runtime_path)
+    if let Some(identity) = std::fs::read_to_string(&runtime_path)
         .ok()
         .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
-        .and_then(|value| value.get("pid").and_then(|pid| pid.as_u64()))
-        .or_else(|| {
-            std::fs::read_to_string(data_dir.join("bifrost.pid"))
-                .ok()
-                .and_then(|content| content.trim().parse::<u64>().ok())
+        .and_then(|value| {
+            let pid = value
+                .get("pid")
+                .and_then(|pid| pid.as_u64())
+                .and_then(runtime_pid_from_u64)?;
+            let started_at_ms = value.get("started_at_ms").and_then(|value| value.as_u64());
+            Some(RuntimeIdentity { pid, started_at_ms })
         })
-        .filter(|pid| *pid > 0 && *pid <= u32::MAX as u64)
-        .map(|pid| pid as u32);
+    {
+        return Some(identity);
+    }
 
-    pid.is_some_and(process_is_running)
+    std::fs::read_to_string(data_dir.join("bifrost.pid"))
+        .ok()
+        .and_then(|content| content.trim().parse::<u64>().ok())
+        .and_then(runtime_pid_from_u64)
+        .map(|pid| RuntimeIdentity {
+            pid,
+            started_at_ms: None,
+        })
+}
+
+fn runtime_pid_from_u64(pid: u64) -> Option<u32> {
+    (pid > 0 && pid <= u32::MAX as u64).then_some(pid as u32)
+}
+
+fn runtime_identity_is_alive(identity: &RuntimeIdentity) -> bool {
+    if !process_is_running(identity.pid) {
+        return false;
+    }
+
+    match crate::start_times_match(
+        identity.started_at_ms,
+        crate::get_process_start_time_ms(identity.pid),
+    ) {
+        StartTimeMatch::Match | StartTimeMatch::Unknown => true,
+        StartTimeMatch::Mismatch { recorded, observed } => {
+            tracing::warn!(
+                target: "bifrost_core::system_proxy_launchd",
+                pid = identity.pid,
+                recorded_started_at_ms = recorded,
+                observed_started_at_ms = observed,
+                "runtime pid is alive but start time does not match; treating runtime as stale"
+            );
+            false
+        }
+    }
 }
 
 fn process_is_running(pid: u32) -> bool {
@@ -1026,21 +1062,15 @@ mod tests {
         let corrupt_state_error =
             BifrostError::Config("Failed to deserialize proxy state: expected value".to_string());
 
-        assert!(is_retryable_cleanup_daemon_recovery_error(
-            &networksetup_error
-        ));
-        assert!(is_retryable_cleanup_daemon_recovery_error(
-            &empty_services_error
-        ));
-        assert!(!is_retryable_cleanup_daemon_recovery_error(
-            &corrupt_state_error
-        ));
+        assert!(is_retryable_recovery_error(&networksetup_error));
+        assert!(is_retryable_recovery_error(&empty_services_error));
+        assert!(!is_retryable_recovery_error(&corrupt_state_error));
     }
 
     #[test]
     fn cleanup_daemon_retry_delay_is_capped_by_remaining_window() {
         let started_at = Instant::now() - Duration::from_millis(90);
-        let delay = cleanup_daemon_retry_delay(
+        let delay = recovery_retry_delay(
             started_at,
             Duration::from_millis(100),
             Duration::from_millis(50),
@@ -1048,5 +1078,28 @@ mod tests {
 
         assert!(delay <= Duration::from_millis(10));
         assert!(delay >= Duration::from_millis(1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_identity_is_not_alive_when_start_time_mismatches() {
+        let identity = RuntimeIdentity {
+            pid: std::process::id(),
+            started_at_ms: crate::current_process_start_time_ms()
+                .map(|started_at_ms| started_at_ms.saturating_add(10_000)),
+        };
+
+        assert!(!runtime_identity_is_alive(&identity));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_identity_is_alive_when_start_time_matches() {
+        let identity = RuntimeIdentity {
+            pid: std::process::id(),
+            started_at_ms: crate::current_process_start_time_ms(),
+        };
+
+        assert!(runtime_identity_is_alive(&identity));
     }
 }

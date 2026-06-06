@@ -698,6 +698,7 @@ mod tests {
             port: 18888,
             socks5_port: Some(18889),
             host: Some("0.0.0.0".to_string()),
+            started_at_ms: None,
         };
         let system_proxy = SystemProxyStatus {
             supported: true,
@@ -788,6 +789,7 @@ mod tests {
             port: 18888,
             socks5_port: None,
             host: Some("0.0.0.0".to_string()),
+            started_at_ms: None,
         };
         let addresses = ProxyAddressInfo {
             addresses: vec![

@@ -364,8 +364,20 @@ async fn set_system_proxy(req: Request<Incoming>, state: SharedAdminState) -> Re
                     if enabled_by_bifrost {
                         start_system_proxy_lifecycle_helper_after_runtime_enable(&state);
                         spawn_system_proxy_launchd_install_task_from_config(config_manager);
-                    } else {
+                    } else if !request.enabled && !status.enabled {
+                        // Only stop the helper when the user explicitly disabled and the
+                        // verified status confirms the proxy is off. Otherwise (e.g. enable
+                        // failed or external owner took over), keep the helper alive so an
+                        // abnormal Bifrost exit can still trigger cleanup.
                         stop_system_proxy_lifecycle_helper_after_runtime_disable(&state);
+                    } else {
+                        tracing::warn!(
+                            target: "bifrost_admin::proxy",
+                            requested_enable = request.enabled,
+                            status_enabled = status.enabled,
+                            managed_by_bifrost = status.managed_by_bifrost,
+                            "system proxy admin toggle did not converge to a clean state; lifecycle helper left running"
+                        );
                     }
                 }
 

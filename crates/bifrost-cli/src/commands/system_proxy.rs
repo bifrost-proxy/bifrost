@@ -22,9 +22,19 @@ pub fn handle_system_proxy_command(
         SystemProxyCommands::LifecycleHelper {
             data_dir,
             parent_pid,
+            parent_started_at_ms,
             poll_secs,
         } => {
-            return run_system_proxy_lifecycle_helper(data_dir.clone(), *parent_pid, *poll_secs);
+            return run_system_proxy_lifecycle_helper(
+                data_dir.clone(),
+                *parent_pid,
+                *parent_started_at_ms,
+                *poll_secs,
+            );
+        }
+        #[cfg(target_os = "macos")]
+        SystemProxyCommands::RepairLock { data_dir } => {
+            return bifrost_core::repair_system_proxy_lock_permissions(data_dir);
         }
         #[cfg(target_os = "macos")]
         SystemProxyCommands::CleanupDaemon {
@@ -176,6 +186,10 @@ pub fn handle_system_proxy_command(
             unreachable!("hidden system-proxy helper commands are handled before config load")
         }
         #[cfg(target_os = "macos")]
+        SystemProxyCommands::RepairLock { .. } => {
+            unreachable!("hidden system-proxy helper commands are handled before config load")
+        }
+        #[cfg(target_os = "macos")]
         SystemProxyCommands::CleanupDaemon { .. } => {
             unreachable!("hidden system-proxy helper commands are handled before config load")
         }
@@ -302,7 +316,18 @@ fn cleanup_system_proxy_state(data_dir: &std::path::Path) -> bifrost_core::Resul
         "system proxy cleanup helper restore starting"
     );
     let started_at = std::time::Instant::now();
-    bifrost_core::SystemProxyManager::recover_from_crash(data_dir)?;
+    bifrost_core::retry_with_policy(
+        bifrost_core::RECOVERY_RETRY_WINDOW,
+        bifrost_core::RECOVERY_RETRY_INTERVAL,
+        |attempt| {
+            tracing::debug!(
+                target: "bifrost_cli::shutdown",
+                attempt,
+                "system proxy cleanup helper invoking recover_from_crash"
+            );
+            bifrost_core::SystemProxyManager::recover_from_crash(data_dir)
+        },
+    )?;
     tracing::info!(
         target: "bifrost_cli::shutdown",
         data_dir = %data_dir.display(),
@@ -312,9 +337,21 @@ fn cleanup_system_proxy_state(data_dir: &std::path::Path) -> bifrost_core::Resul
     Ok(())
 }
 
+fn pid_reuse_detected(parent_pid: Option<u32>, recorded_started_at_ms: Option<u64>) -> bool {
+    let Some(pid) = parent_pid else {
+        return false;
+    };
+    let observed = bifrost_core::get_process_start_time_ms(pid);
+    matches!(
+        bifrost_core::start_times_match(recorded_started_at_ms, observed),
+        bifrost_core::StartTimeMatch::Mismatch { .. }
+    )
+}
+
 fn run_system_proxy_lifecycle_helper(
     data_dir: std::path::PathBuf,
     parent_pid: Option<u32>,
+    parent_started_at_ms: Option<u64>,
     poll_secs: u64,
 ) -> bifrost_core::Result<()> {
     set_data_dir(data_dir.clone());
@@ -324,10 +361,20 @@ fn run_system_proxy_lifecycle_helper(
         target: "bifrost_cli::shutdown",
         data_dir = %data_dir.display(),
         parent_pid = parent_pid.unwrap_or_default(),
+        parent_started_at_ms = parent_started_at_ms.unwrap_or_default(),
         poll_secs = poll_interval.as_secs(),
         required_parent_misses,
         "system proxy lifecycle helper started"
     );
+
+    if pid_reuse_detected(parent_pid, parent_started_at_ms) {
+        tracing::warn!(
+            target: "bifrost_cli::shutdown",
+            parent_pid = parent_pid.unwrap_or_default(),
+            "system proxy lifecycle helper detected pid_reuse_check=mismatch at startup; running guarded cleanup"
+        );
+        return cleanup_system_proxy_state(&data_dir);
+    }
 
     #[cfg(unix)]
     {
@@ -374,6 +421,14 @@ fn run_system_proxy_lifecycle_helper(
                         return cleanup_system_proxy_state(&data_dir);
                     }
                     _ = tokio::time::sleep(poll_interval) => {
+                        if pid_reuse_detected(parent_pid, parent_started_at_ms) {
+                            tracing::warn!(
+                                target: "bifrost_cli::shutdown",
+                                parent_pid = parent_pid.unwrap_or_default(),
+                                "system proxy lifecycle helper detected pid_reuse_check=mismatch during poll; running guarded cleanup"
+                            );
+                            return cleanup_system_proxy_state(&data_dir);
+                        }
                         if let Some(pid) = parent_pid {
                             if !is_process_running(pid) {
                                 consecutive_parent_misses += 1;
@@ -407,6 +462,14 @@ fn run_system_proxy_lifecycle_helper(
         let mut consecutive_parent_misses = 0_u32;
         loop {
             std::thread::sleep(poll_interval);
+            if pid_reuse_detected(parent_pid, parent_started_at_ms) {
+                tracing::warn!(
+                    target: "bifrost_cli::shutdown",
+                    parent_pid = parent_pid.unwrap_or_default(),
+                    "system proxy lifecycle helper detected pid_reuse_check=mismatch during poll; running guarded cleanup"
+                );
+                return cleanup_system_proxy_state(&data_dir);
+            }
             if let Some(pid) = parent_pid {
                 if !is_process_running(pid) {
                     consecutive_parent_misses += 1;
@@ -477,4 +540,17 @@ fn run_system_proxy_cleanup_daemon(
         "system proxy launchd cleanup daemon exiting after one-shot recovery check"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pid_reuse_detected_when_start_time_mismatches_current_process() {
+        let recorded = bifrost_core::current_process_start_time_ms()
+            .map(|started_at_ms| started_at_ms.saturating_add(10_000));
+
+        assert!(pid_reuse_detected(Some(std::process::id()), recorded));
+    }
 }

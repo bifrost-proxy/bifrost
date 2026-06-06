@@ -1795,6 +1795,7 @@ pub fn run_foreground(
                 port: config.port,
                 socks5_port: config.socks5_port,
                 host: Some(config.host.clone()),
+                started_at_ms: bifrost_core::current_process_start_time_ms(),
             };
             write_runtime_info(&runtime_info)?;
             #[cfg(target_os = "macos")]
@@ -1811,7 +1812,6 @@ pub fn run_foreground(
             } else {
                 base_config.host.clone()
             };
-            #[cfg(target_os = "macos")]
             if enable_system_proxy {
                 system_proxy_lifecycle_helper_state.ensure_started_after_startup_enable();
             }
@@ -1926,6 +1926,7 @@ pub fn run_foreground(
                             port: actual_port,
                             socks5_port: base_config.socks5_port,
                             host: Some(base_config.host.clone()),
+                            started_at_ms: bifrost_core::current_process_start_time_ms(),
                         };
                         if let Err(error) = write_runtime_info(&runtime_info) {
                             tracing::warn!("Failed to update runtime info after port rebind: {}", error);
@@ -2307,6 +2308,7 @@ pub fn run_daemon(
                     port: config.port,
                     socks5_port: config.socks5_port,
                     host: Some(config.host.clone()),
+                    started_at_ms: bifrost_core::current_process_start_time_ms(),
                 };
                 write_runtime_info(&runtime_info).expect("Failed to write runtime info");
                 #[cfg(target_os = "macos")]
@@ -2645,7 +2647,6 @@ pub fn run_daemon(
                         admin_state_arc.rules_storage.clone(),
                     );
 
-                    #[cfg(target_os = "macos")]
                     if enable_system_proxy {
                         system_proxy_lifecycle_helper_state.ensure_started_after_startup_enable();
                     }

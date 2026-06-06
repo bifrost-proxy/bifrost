@@ -76,12 +76,14 @@ fn acquire_system_proxy_file_lock(
 ) -> Result<SystemProxyFileLock> {
     std::fs::create_dir_all(data_dir)?;
     let lock_path = data_dir.join(LOCK_FILE_NAME);
-    let file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&lock_path)?;
+    let file = match open_system_proxy_lock_file(data_dir, true) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            repair_system_proxy_lock_permissions_with_gui_auth(data_dir)?;
+            open_system_proxy_lock_file(data_dir, true)?
+        }
+        Err(error) => return Err(error.into()),
+    };
     tracing::info!(
         data_dir = %data_dir.display(),
         lock_path = %lock_path.display(),
@@ -98,6 +100,113 @@ fn acquire_system_proxy_file_lock(
         "acquired system proxy cross-process file lock"
     );
     Ok(SystemProxyFileLock { file, context })
+}
+
+#[cfg(target_os = "macos")]
+fn open_system_proxy_lock_file(data_dir: &Path, create: bool) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let lock_path = data_dir.join(LOCK_FILE_NAME);
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    if create {
+        options.create(true).mode(0o666);
+    }
+    let file = options.open(&lock_path)?;
+    relax_lock_file_mode_if_needed(&file, &lock_path)?;
+    Ok(file)
+}
+
+#[cfg(target_os = "macos")]
+pub fn repair_system_proxy_lock_permissions(data_dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(data_dir)?;
+    let _ = open_system_proxy_lock_file(data_dir, true)?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn repair_system_proxy_lock_permissions(_data_dir: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn relax_lock_file_mode_if_needed(file: &File, lock_path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() {
+        return Err(std::io::Error::other(format!(
+            "Refusing to use non-regular system proxy lock file: {}",
+            lock_path.display()
+        )));
+    }
+    if metadata.nlink() != 1 {
+        return Err(std::io::Error::other(format!(
+            "Refusing to use hard-linked system proxy lock file: {}",
+            lock_path.display()
+        )));
+    }
+
+    let current_mode = metadata.permissions().mode() & 0o777;
+    if current_mode != 0o666 {
+        let result = unsafe { libc::fchmod(file.as_raw_fd(), 0o666) };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        tracing::info!(
+            target: "bifrost_core::system_proxy",
+            lock_path = %lock_path.display(),
+            previous_mode = format!("{:o}", current_mode),
+            "relaxed system proxy lock file permissions to 0666"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn repair_system_proxy_lock_permissions_with_gui_auth(data_dir: &Path) -> Result<()> {
+    let program = std::env::current_exe().map_err(|error| {
+        BifrostError::Config(format!("Failed to resolve current executable: {error}"))
+    })?;
+    let shell_command = format!(
+        "{} system-proxy repair-lock --data-dir {}",
+        shell_quote_path(&program),
+        shell_quote_path(data_dir)
+    );
+    let script = format!(
+        r#"do shell script "{}" with administrator privileges with prompt "{}""#,
+        escape_apple_script(&shell_command),
+        escape_apple_script("Bifrost needs to repair the system proxy cleanup lock file.")
+    );
+    let output = std::process::Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .map_err(|error| BifrostError::Config(format!("Failed to execute osascript: {error}")))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(BifrostError::Config(format!(
+            "RequiresAdmin: failed to repair system proxy lock permissions: {} {}",
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn shell_quote_path(path: &Path) -> String {
+    let value = path.to_string_lossy();
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(target_os = "macos")]
+fn escape_apple_script(input: &str) -> String {
+    input.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 impl From<&Sysproxy> for ProxyBackup {
@@ -1158,6 +1267,8 @@ fn runtime_host_to_system_proxy_host(host: &str) -> String {
 }
 
 fn managed_target_listener_is_alive(target: &ProxyBackup) -> bool {
+    use std::net::ToSocketAddrs;
+
     if !target.enable || target.port == 0 {
         return false;
     }
@@ -1165,20 +1276,26 @@ fn managed_target_listener_is_alive(target: &ProxyBackup) -> bool {
         "" | "0.0.0.0" | "::" => "127.0.0.1".to_string(),
         host => host.to_string(),
     };
-    let address = format!("{host}:{}", target.port);
-    let Ok(socket_addr) = address.parse() else {
+    let Ok(socket_addrs) = (host.as_str(), target.port).to_socket_addrs() else {
         return false;
     };
+    let socket_addrs = socket_addrs.collect::<Vec<_>>();
+    if socket_addrs.is_empty() {
+        return false;
+    }
     let timeout = std::time::Duration::from_millis(750);
     for attempt in 1..=3 {
-        if std::net::TcpStream::connect_timeout(&socket_addr, timeout).is_ok() {
-            tracing::info!(
-                target_host = %target.host,
-                target_port = target.port,
-                attempt,
-                "Managed system proxy target still has a live listener"
-            );
-            return true;
+        for socket_addr in &socket_addrs {
+            if std::net::TcpStream::connect_timeout(socket_addr, timeout).is_ok() {
+                tracing::info!(
+                    target_host = %target.host,
+                    target_port = target.port,
+                    resolved_addr = %socket_addr,
+                    attempt,
+                    "Managed system proxy target still has a live listener"
+                );
+                return true;
+            }
         }
         std::thread::sleep(std::time::Duration::from_millis(150));
     }
@@ -2186,6 +2303,69 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn system_proxy_lock_is_world_writable_after_creation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let data_dir =
+            std::env::temp_dir().join(format!("bifrost-system-proxy-lock-mode-{unique}"));
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        // Drop the lock before chmod-checking; releasing flock is fine, but
+        // we want to inspect the persisted mode bits.
+        {
+            let _lock = acquire_system_proxy_file_lock(&data_dir, "test_mode_create")
+                .expect("acquire fresh lock");
+        }
+        let lock_path = data_dir.join(LOCK_FILE_NAME);
+        let mode = std::fs::metadata(&lock_path)
+            .expect("stat lock")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o666, "lock file mode should be 0o666 on creation");
+
+        // Tighten the mode and re-acquire: the helper must heal it back to 0o666.
+        std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600))
+            .expect("tighten lock mode");
+        {
+            let _lock = acquire_system_proxy_file_lock(&data_dir, "test_mode_relax")
+                .expect("re-acquire lock");
+        }
+        let mode = std::fs::metadata(&lock_path)
+            .expect("stat lock")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o666, "lock file mode should be relaxed to 0o666");
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn system_proxy_lock_rejects_symlink() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let data_dir =
+            std::env::temp_dir().join(format!("bifrost-system-proxy-lock-symlink-{unique}"));
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        let target = data_dir.join("target");
+        std::fs::write(&target, "target").expect("write target");
+        let lock_path = data_dir.join(LOCK_FILE_NAME);
+        std::os::unix::fs::symlink(&target, &lock_path).expect("create symlink");
+
+        let result = acquire_system_proxy_file_lock(&data_dir, "test_symlink");
+
+        assert!(result.is_err(), "symlink lock must be rejected");
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn system_proxy_file_lock_serializes_cross_process_entries() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2311,6 +2491,29 @@ mod tests {
         std::fs::write(
             data_dir.join(RUNTIME_FILE_NAME),
             format!(r#"{{"pid":12345,"host":"127.0.0.1","port":{port}}}"#),
+        )
+        .expect("write runtime");
+
+        assert!(SystemProxyManager::last_runtime_target_has_live_listener(
+            &data_dir
+        ));
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn last_runtime_target_has_live_listener_resolves_localhost() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("local addr").port();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let data_dir =
+            std::env::temp_dir().join(format!("bifrost-runtime-localhost-target-{unique}"));
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        std::fs::write(
+            data_dir.join(RUNTIME_FILE_NAME),
+            format!(r#"{{"pid":12345,"host":"localhost","port":{port}}}"#),
         )
         .expect("write runtime");
 
