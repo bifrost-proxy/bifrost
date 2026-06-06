@@ -274,6 +274,7 @@ dependencies = [
  "bifrost-asr",
  "bifrost-command",
  "bifrost-core",
+ "bifrost-device",
  "bifrost-power",
  "bifrost-script",
  "bifrost-storage",
@@ -407,6 +408,7 @@ dependencies = [
  "bifrost-asr",
  "bifrost-command",
  "bifrost-core",
+ "bifrost-device",
  "bifrost-power",
  "bifrost-proxy",
  "bifrost-script",
@@ -481,6 +483,18 @@ dependencies = [
  "ureq",
  "url",
  "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "bifrost-device"
+version = "0.0.91"
+dependencies = [
+ "base64 0.22.1",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
  "uuid",
 ]
 

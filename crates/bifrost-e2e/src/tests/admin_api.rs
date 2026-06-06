@@ -153,6 +153,649 @@ pub fn get_all_tests() -> Vec<TestCase> {
             },
         ),
         TestCase::standalone(
+            "admin_api_mobile_devices_lists_android_ios_discovery",
+            "Validate mobile device discovery API returns Android ADB status, iOS USB status, and product notices",
+            "admin",
+            || async move {
+                let port = pick_unused_port()?;
+                let (_proxy, _admin_state) =
+                    ProxyInstance::start_with_admin(port, vec![], false, true)
+                        .await
+                        .map_err(|e| format!("Failed to start proxy with admin: {}", e))?;
+
+                let client = reqwest::Client::builder()
+                    .danger_accept_invalid_certs(true)
+                    .no_proxy()
+                    .build()
+                    .map_err(|e| format!("Failed to create client: {}", e))?;
+
+                let response = client
+                    .get(format!(
+                        "http://127.0.0.1:{}/_bifrost/api/mobile-devices",
+                        port
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET mobile devices failed: {}", e))?;
+
+                assert_status(&response, 200)?;
+                let json: serde_json::Value = response
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse mobile devices JSON: {}", e))?;
+
+                if json.pointer("/android/adb_available").is_none() {
+                    return Err(format!("Expected android.adb_available field, got: {json}"));
+                }
+                if json.pointer("/ios/supported").is_none() {
+                    return Err(format!("Expected ios.supported field, got: {json}"));
+                }
+                if !json
+                    .pointer("/ios/devices")
+                    .map(|value| value.is_array())
+                    .unwrap_or(false)
+                {
+                    return Err(format!("Expected ios.devices array, got: {json}"));
+                }
+                let ordinary_notice = json
+                    .get("ordinary_device_notice")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default();
+                if !ordinary_notice.contains("require final confirmation") {
+                    return Err(format!(
+                        "Expected ordinary device notice to explain phone confirmation, got: {ordinary_notice}"
+                    ));
+                }
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
+            "admin_public_ios_mobileconfig_uses_current_ca",
+            "Validate iOS mobileconfig and QR endpoints are generated from the current CA",
+            "admin",
+            || async move {
+                let port = pick_unused_port()?;
+                let (_proxy, _admin_state) =
+                    ProxyInstance::start_with_admin(port, vec![], false, true)
+                        .await
+                        .map_err(|e| format!("Failed to start proxy with admin: {}", e))?;
+
+                let client = reqwest::Client::builder()
+                    .danger_accept_invalid_certs(true)
+                    .no_proxy()
+                    .build()
+                    .map_err(|e| format!("Failed to create client: {}", e))?;
+
+                let profile_response = client
+                    .get(format!(
+                        "http://127.0.0.1:{}/_bifrost/public/mobile/ios-profile.mobileconfig",
+                        port
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET iOS mobileconfig failed: {}", e))?;
+
+                assert_status(&profile_response, 200)?;
+                assert_header_contains(
+                    &profile_response,
+                    "content-type",
+                    "application/x-apple-aspen-config",
+                )?;
+                let profile = profile_response
+                    .text()
+                    .await
+                    .map_err(|e| format!("Failed to read iOS mobileconfig body: {}", e))?;
+                if !profile.contains("com.apple.security.root")
+                    || !profile.contains("Certificate Trust Settings")
+                {
+                    return Err(format!("Unexpected mobileconfig body: {profile}"));
+                }
+
+                let qrcode_response = client
+                    .get(format!(
+                        "http://127.0.0.1:{}/_bifrost/public/mobile/ios-profile.mobileconfig/qrcode?ip=127.0.0.1",
+                        port
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET iOS mobileconfig QR failed: {}", e))?;
+                assert_status(&qrcode_response, 200)?;
+                assert_header_contains(&qrcode_response, "content-type", "image/svg+xml")?;
+
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
+            "admin_public_ios_wifi_proxy_mobileconfig_contains_proxy_payload",
+            "Validate public iOS Wi-Fi proxy mobileconfig and QR endpoints are available without auth and include CA plus proxy payloads",
+            "admin",
+            || async move {
+                let port = pick_unused_port()?;
+                let (_proxy, _admin_state) =
+                    ProxyInstance::start_with_admin(port, vec![], false, true)
+                        .await
+                        .map_err(|e| format!("Failed to start proxy with admin: {}", e))?;
+
+                let client = reqwest::Client::builder()
+                    .danger_accept_invalid_certs(true)
+                    .no_proxy()
+                    .build()
+                    .map_err(|e| format!("Failed to create client: {}", e))?;
+                let ssid = "Bifrost Test Wi-Fi";
+                let encoded_ssid = urlencoding::encode(ssid);
+
+                let profile_response = client
+                    .get(format!(
+                        "http://127.0.0.1:{}/_bifrost/public/mobile/ios-wifi-proxy.mobileconfig?ssid={}&ip=127.0.0.1&port={}",
+                        port, encoded_ssid, port
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET iOS Wi-Fi proxy mobileconfig failed: {}", e))?;
+
+                assert_status(&profile_response, 200)?;
+                assert_header_contains(
+                    &profile_response,
+                    "content-type",
+                    "application/x-apple-aspen-config",
+                )?;
+                let profile = profile_response
+                    .text()
+                    .await
+                    .map_err(|e| format!("Failed to read iOS Wi-Fi proxy mobileconfig body: {}", e))?;
+                for expected in [
+                    "com.apple.security.root",
+                    "com.apple.wifi.managed",
+                    "SSID_STR",
+                    ssid,
+                    "ProxyType",
+                    "Manual",
+                    "ProxyServer",
+                    "127.0.0.1",
+                    "ProxyServerPort",
+                    &port.to_string(),
+                ] {
+                    if !profile.contains(expected) {
+                        return Err(format!(
+                            "Expected iOS Wi-Fi proxy profile to contain {expected:?}, got: {profile}"
+                        ));
+                    }
+                }
+
+                let qrcode_response = client
+                    .get(format!(
+                        "http://127.0.0.1:{}/_bifrost/public/mobile/ios-wifi-proxy.mobileconfig/qrcode?ssid={}&ip=127.0.0.1&port={}",
+                        port, encoded_ssid, port
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET iOS Wi-Fi proxy mobileconfig QR failed: {}", e))?;
+                assert_status(&qrcode_response, 200)?;
+                assert_header_contains(&qrcode_response, "content-type", "image/svg+xml")?;
+
+                let wrong_port_response = client
+                    .get(format!(
+                        "http://127.0.0.1:{}/_bifrost/public/mobile/ios-wifi-proxy.mobileconfig?ssid={}&ip=127.0.0.1&port={}",
+                        port,
+                        encoded_ssid,
+                        port + 1
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        format!("GET iOS Wi-Fi proxy mobileconfig with wrong port failed: {}", e)
+                    })?;
+                assert_status(&wrong_port_response, 400)?;
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
+            "admin_trust_probe_verifies_https_trust_with_current_ca",
+            "Validate Availability Check creates a public landing page, checks proxy access, the probe port, and HTTPS trust with the current CA",
+            "admin",
+            || async move {
+                let port = pick_unused_port()?;
+                let (_proxy, _admin_state) =
+                    ProxyInstance::start_with_admin(port, vec![], false, true)
+                        .await
+                        .map_err(|e| format!("Failed to start proxy with admin: {}", e))?;
+
+                let client = reqwest::Client::builder()
+                    .danger_accept_invalid_certs(true)
+                    .no_proxy()
+                    .build()
+                    .map_err(|e| format!("Failed to create client: {}", e))?;
+
+                let create_response = client
+                    .post(format!(
+                        "http://127.0.0.1:{}/_bifrost/api/trust-probe/sessions",
+                        port
+                    ))
+                    .json(&serde_json::json!({
+                        "host": "127.0.0.1",
+                        "ttlSeconds": 600
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("POST trust probe session failed: {}", e))?;
+
+                assert_status(&create_response, 201)?;
+                let session: serde_json::Value = create_response
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse trust probe session JSON: {}", e))?;
+                let session_id = session
+                    .get("sessionId")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| format!("Missing sessionId in trust probe response: {session}"))?;
+                let landing_url = session
+                    .get("landingUrl")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| format!("Missing landingUrl in trust probe response: {session}"))?;
+                let qr_code_url = session
+                    .get("qrCodeUrl")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| format!("Missing qrCodeUrl in trust probe response: {session}"))?;
+                let proxy_qr_code_url = session
+                    .get("proxyQrCodeUrl")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| {
+                        format!("Missing proxyQrCodeUrl in trust probe response: {session}")
+                    })?;
+                let probe_port = session
+                    .get("probePort")
+                    .and_then(|value| value.as_u64())
+                    .ok_or_else(|| format!("Missing probePort in trust probe response: {session}"))?;
+                let ca_download_url = session
+                    .get("caDownloadUrl")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| format!("Missing caDownloadUrl in trust probe response: {session}"))?;
+                let parsed_landing_url =
+                    url::Url::parse(landing_url).map_err(|e| format!("Invalid landingUrl: {e}"))?;
+                if parsed_landing_url.query().is_some() {
+                    return Err(format!(
+                        "Expected fixed availability check URL without token query, got: {landing_url}"
+                    ));
+                }
+                if !landing_url.ends_with("/_bifrost/public/trust-probe") {
+                    return Err(format!(
+                        "Expected fixed availability check path, got: {landing_url}"
+                    ));
+                }
+                let device_a = "e2e-ios-device";
+                let device_b = "e2e-android-device";
+
+                let update_response = client
+                    .patch(format!(
+                        "http://127.0.0.1:{}/_bifrost/api/trust-probe/sessions/{}",
+                        port, session_id
+                    ))
+                    .json(&serde_json::json!({ "wifiSsid": "Office Wi-Fi" }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("PATCH trust probe session failed: {}", e))?;
+                assert_status(&update_response, 200)?;
+                let updated_session: serde_json::Value = update_response
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse updated trust probe session: {}", e))?;
+                if updated_session
+                    .get("suggestedWifiSsid")
+                    .and_then(|value| value.as_str())
+                    != Some("Office Wi-Fi")
+                {
+                    return Err(format!(
+                        "Expected updated suggestedWifiSsid, got: {updated_session}"
+                    ));
+                }
+
+                let public_session_response = client
+                    .get(format!(
+                        "http://127.0.0.1:{port}/_bifrost/public/trust-probe/{session_id}/session?deviceId={device_a}"
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET public trust probe session failed: {}", e))?;
+                assert_status(&public_session_response, 200)?;
+                let public_session: serde_json::Value = public_session_response
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse public trust probe session: {}", e))?;
+                if public_session
+                    .get("suggestedWifiSsid")
+                    .and_then(|value| value.as_str())
+                    != Some("Office Wi-Fi")
+                {
+                    return Err(format!(
+                        "Expected public session to expose updated Wi-Fi name, got: {public_session}"
+                    ));
+                }
+
+                let landing_response = client
+                    .get(landing_url)
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET trust probe landing page failed: {}", e))?;
+                assert_status(&landing_response, 200)?;
+                assert_header_contains(&landing_response, "content-type", "text/html")?;
+                let landing_html = landing_response
+                    .text()
+                    .await
+                    .map_err(|e| format!("Failed to read landing HTML: {}", e))?;
+                if !landing_html.contains("Bifrost Availability Check")
+                    || !landing_html.contains("tlsCheckUrl")
+                    || !landing_html.contains("proxyAccessUrl")
+                    || !landing_html.contains("proxyConfiguredUrl")
+                    || !landing_html.contains("checkProxyConfiguration")
+                    || !landing_html.contains("runProbeLoop")
+                    || !landing_html.contains("copyProxyAddress")
+                    || !landing_html.contains("iOS Proxy Setup")
+                    || !landing_html.contains("iosWifiProxyProfileUrl")
+                    || !landing_html.contains("sessionPublicUrl")
+                    || !landing_html.contains("bifrostAvailabilityDeviceId")
+                    || !landing_html.contains("deviceId")
+                    || !landing_html.contains("withDevice")
+                    || !landing_html.contains("Download Experimental Wi-Fi Proxy Profile")
+                    || !landing_html.contains("managedWifiRiskAccepted")
+                    || !landing_html.contains("suggestedWifiSsid")
+                    || !landing_html.contains("Wi-Fi name for this check")
+                    || !landing_html.contains("Experimental managed Wi-Fi profile")
+                    || !landing_html.contains("Manual Wi-Fi proxy setup is the safe cleanup path")
+                {
+                    return Err(format!("Unexpected trust probe landing page: {landing_html}"));
+                }
+
+                let landing_head_response = client
+                    .head(landing_url)
+                    .send()
+                    .await
+                    .map_err(|e| format!("HEAD trust probe landing page failed: {}", e))?;
+                assert_status(&landing_head_response, 200)?;
+                assert_header_contains(&landing_head_response, "content-type", "text/html")?;
+
+                let qr_response = client
+                    .get(qr_code_url)
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET trust probe QR failed: {}", e))?;
+                assert_status(&qr_response, 200)?;
+                assert_header_contains(&qr_response, "content-type", "image/svg+xml")?;
+
+                let qr_head_response = client
+                    .head(qr_code_url)
+                    .send()
+                    .await
+                    .map_err(|e| format!("HEAD trust probe QR failed: {}", e))?;
+                assert_status(&qr_head_response, 200)?;
+                assert_header_contains(&qr_head_response, "content-type", "image/svg+xml")?;
+
+                let proxy_qr_response = client
+                    .get(proxy_qr_code_url)
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET proxy QR failed: {}", e))?;
+                assert_status(&proxy_qr_response, 200)?;
+                assert_header_contains(&proxy_qr_response, "content-type", "image/svg+xml")?;
+
+                let proxy_access_url = format!(
+                    "http://127.0.0.1:{port}/_bifrost/public/trust-probe/{session_id}/proxy-access?deviceId={device_a}"
+                );
+                let proxy_access_response = client
+                    .get(proxy_access_url)
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET trust probe proxy access failed: {}", e))?;
+                assert_status(&proxy_access_response, 200)?;
+                let proxy_access_json: serde_json::Value = proxy_access_response
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse proxy access JSON: {}", e))?;
+                if proxy_access_json.get("status").and_then(|value| value.as_str())
+                    != Some("allowed")
+                {
+                    return Err(format!(
+                        "Expected proxy access allowed for loopback, got: {proxy_access_json}"
+                    ));
+                }
+
+                let proxied_client = reqwest::Client::builder()
+                    .proxy(
+                        reqwest::Proxy::http(format!("http://127.0.0.1:{port}"))
+                            .map_err(|e| format!("Failed to configure proxy client: {e}"))?,
+                    )
+                    .build()
+                    .map_err(|e| format!("Failed to create proxy-configured client: {}", e))?;
+                let proxy_configured_response = proxied_client
+                    .get(format!(
+                        "http://bifrost-proxy-check.invalid/_bifrost/trust-probe/proxy-configured?sid={session_id}&deviceId={device_a}"
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET trust probe proxy configured check failed: {}", e))?;
+                assert_status(&proxy_configured_response, 200)?;
+                let proxy_configured_json: serde_json::Value = proxy_configured_response
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse proxy configured JSON: {}", e))?;
+                if proxy_configured_json
+                    .get("configured")
+                    .and_then(|value| value.as_bool())
+                    != Some(true)
+                {
+                    return Err(format!(
+                        "Expected proxy configured check to pass, got: {proxy_configured_json}"
+                    ));
+                }
+
+                let netcheck_url = format!(
+                    "http://127.0.0.1:{probe_port}/_bifrost/trust-probe/netcheck?sid={session_id}&deviceId={device_a}"
+                );
+                let netcheck_response = client
+                    .get(netcheck_url)
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET trust probe netcheck failed: {}", e))?;
+                assert_status(&netcheck_response, 200)?;
+
+                let ca_response = client
+                    .get(ca_download_url)
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET trust probe CA failed: {}", e))?;
+                assert_status(&ca_response, 200)?;
+                let ca_pem = ca_response
+                    .bytes()
+                    .await
+                    .map_err(|e| format!("Failed to read CA bytes: {}", e))?;
+                let ca_cert = reqwest::Certificate::from_pem(&ca_pem)
+                    .map_err(|e| format!("Failed to parse Bifrost CA as PEM: {}", e))?;
+                let trusted_client = reqwest::Client::builder()
+                    .add_root_certificate(ca_cert)
+                    .no_proxy()
+                    .build()
+                    .map_err(|e| format!("Failed to create trusted client: {}", e))?;
+                let tls_check_url = format!(
+                    "https://127.0.0.1:{probe_port}/_bifrost/trust-probe/check?sid={session_id}&deviceId={device_a}"
+                );
+                let tls_response = trusted_client
+                    .get(tls_check_url)
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET trust probe HTTPS check failed: {}", e))?;
+                assert_status(&tls_response, 200)?;
+
+                let second_device_report = client
+                    .post(format!(
+                        "http://127.0.0.1:{port}/_bifrost/public/trust-probe/{session_id}/report?deviceId={device_b}"
+                    ))
+                    .json(&serde_json::json!({
+                        "type": "page_opened",
+                        "deviceId": device_b,
+                        "userAgent": "Bifrost E2E Android Browser",
+                        "platformHint": "android"
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("POST second device report failed: {}", e))?;
+                assert_status(&second_device_report, 200)?;
+                let second_proxy_access_response = client
+                    .get(format!(
+                        "http://127.0.0.1:{port}/_bifrost/public/trust-probe/{session_id}/proxy-access?deviceId={device_b}"
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET second device proxy access failed: {}", e))?;
+                assert_status(&second_proxy_access_response, 200)?;
+
+                let status_response = client
+                    .get(format!(
+                        "http://127.0.0.1:{}/_bifrost/api/trust-probe/sessions/{}",
+                        port, session_id
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET trust probe session failed: {}", e))?;
+                assert_status(&status_response, 200)?;
+                let status_json: serde_json::Value = status_response
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse trust probe status JSON: {}", e))?;
+                if status_json.get("status").and_then(|value| value.as_str())
+                    != Some("tls_trusted")
+                {
+                    return Err(format!("Expected tls_trusted status, got: {status_json}"));
+                }
+                if status_json.get("tlsTrusted").and_then(|value| value.as_bool()) != Some(true) {
+                    return Err(format!("Expected tlsTrusted=true, got: {status_json}"));
+                }
+                if status_json
+                    .get("proxyConfigured")
+                    .and_then(|value| value.as_bool())
+                    != Some(true)
+                {
+                    return Err(format!(
+                        "Expected proxyConfigured=true, got: {status_json}"
+                    ));
+                }
+                let devices = status_json
+                    .get("devices")
+                    .and_then(|value| value.as_array())
+                    .ok_or_else(|| format!("Expected devices array, got: {status_json}"))?;
+                if devices.len() < 2 {
+                    return Err(format!(
+                        "Expected at least two tracked availability devices, got: {status_json}"
+                    ));
+                }
+                let device_a_status = devices
+                    .iter()
+                    .find(|device| {
+                        device.get("deviceId").and_then(|value| value.as_str()) == Some(device_a)
+                    })
+                    .ok_or_else(|| format!("Missing first device in session status: {status_json}"))?;
+                if device_a_status
+                    .get("tlsTrusted")
+                    .and_then(|value| value.as_bool())
+                    != Some(true)
+                {
+                    return Err(format!(
+                        "Expected first device TLS trust success, got: {device_a_status}"
+                    ));
+                }
+                let device_b_status = devices
+                    .iter()
+                    .find(|device| {
+                        device.get("deviceId").and_then(|value| value.as_str()) == Some(device_b)
+                    })
+                    .ok_or_else(|| format!("Missing second device in session status: {status_json}"))?;
+                if device_b_status
+                    .get("platformHint")
+                    .and_then(|value| value.as_str())
+                    != Some("android")
+                {
+                    return Err(format!(
+                        "Expected second device platform hint, got: {device_b_status}"
+                    ));
+                }
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
+            "admin_api_mobile_install_requires_explicit_confirmation",
+            "Validate Android CA install API rejects requests that do not confirm phone-side manual trust",
+            "admin",
+            || async move {
+                let port = pick_unused_port()?;
+                let (_proxy, _admin_state) =
+                    ProxyInstance::start_with_admin(port, vec![], false, true)
+                        .await
+                        .map_err(|e| format!("Failed to start proxy with admin: {}", e))?;
+
+                let client = reqwest::Client::builder()
+                    .danger_accept_invalid_certs(true)
+                    .no_proxy()
+                    .build()
+                    .map_err(|e| format!("Failed to create client: {}", e))?;
+
+                let response = client
+                    .post(format!(
+                        "http://127.0.0.1:{}/_bifrost/api/mobile-devices/test-device/install-ca",
+                        port
+                    ))
+                    .json(&serde_json::json!({ "mode": "normal_guide" }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("POST mobile install failed: {}", e))?;
+
+                assert_status(&response, 400)?;
+                let body = response
+                    .text()
+                    .await
+                    .map_err(|e| format!("Failed to read mobile install error: {}", e))?;
+                if !body.contains("Missing install confirmation") {
+                    return Err(format!("Expected confirmation error, got: {body}"));
+                }
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
+            "admin_api_local_ca_install_requires_explicit_confirmation",
+            "Validate local CA install API rejects requests without explicit confirmation",
+            "admin",
+            || async move {
+                let port = pick_unused_port()?;
+                let (_proxy, _admin_state) =
+                    ProxyInstance::start_with_admin(port, vec![], false, true)
+                        .await
+                        .map_err(|e| format!("Failed to start proxy with admin: {}", e))?;
+
+                let client = reqwest::Client::builder()
+                    .danger_accept_invalid_certs(true)
+                    .no_proxy()
+                    .build()
+                    .map_err(|e| format!("Failed to create client: {}", e))?;
+
+                let response = client
+                    .post(format!(
+                        "http://127.0.0.1:{}/_bifrost/api/cert/install",
+                        port
+                    ))
+                    .json(&serde_json::json!({}))
+                    .send()
+                    .await
+                    .map_err(|e| format!("POST local CA install failed: {}", e))?;
+
+                assert_status(&response, 400)?;
+                let body = response
+                    .text()
+                    .await
+                    .map_err(|e| format!("Failed to read local CA install error: {}", e))?;
+                if !body.contains("Missing local CA install confirmation") {
+                    return Err(format!("Expected local confirmation error, got: {body}"));
+                }
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
             "admin_api_system_memory",
             "Validate GET /api/system/memory returns memory diagnostics with process info",
             "admin",

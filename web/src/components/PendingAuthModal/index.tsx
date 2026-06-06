@@ -1,5 +1,4 @@
 import { useCallback } from "react";
-import { useNavigate } from "react-router-dom";
 import {
   Badge,
   Button,
@@ -9,13 +8,13 @@ import {
   Space,
   Typography,
   message,
+  theme,
 } from "antd";
 import {
   CheckOutlined,
   CloseOutlined,
   ClearOutlined,
   WarningOutlined,
-  SettingOutlined,
 } from "@ant-design/icons";
 import { usePendingAuthStore } from "../../stores/usePendingAuthStore";
 
@@ -31,12 +30,12 @@ function formatTimeAgo(timestamp: number) {
 }
 
 export default function PendingAuthModal() {
+  const { token } = theme.useToken();
   const pendingList = usePendingAuthStore((s) => s.pendingList);
   const pendingCount = usePendingAuthStore((s) => s.pendingCount);
   const approvePending = usePendingAuthStore((s) => s.approvePending);
   const rejectPending = usePendingAuthStore((s) => s.rejectPending);
   const clearPending = usePendingAuthStore((s) => s.clearPending);
-  const navigate = useNavigate();
 
   const handleApprove = useCallback(
     async (ip: string) => {
@@ -71,20 +70,16 @@ export default function PendingAuthModal() {
     }
   }, [clearPending]);
 
-  const handleGoToSettings = useCallback(() => {
-    navigate("/settings?tab=access");
-  }, [navigate]);
-
   return (
     <Modal
       open={pendingCount > 0}
       title={
         <Space>
-          <WarningOutlined style={{ color: "#faad14" }} />
+          <WarningOutlined style={{ color: token.colorWarning }} />
           <span>Pending Authorization Requests</span>
           <Badge
             count={pendingCount}
-            style={{ backgroundColor: "#faad14" }}
+            style={{ backgroundColor: token.colorWarning }}
           />
         </Space>
       }
@@ -106,27 +101,19 @@ export default function PendingAuthModal() {
               </Button>
             </Popconfirm>
           )}
-          <Button
-            icon={<SettingOutlined />}
-            onClick={handleGoToSettings}
-            data-testid="pending-auth-modal-settings"
-          >
-            Access Control Settings
-          </Button>
         </Space>
       }
       closable={false}
       maskClosable={false}
       keyboard={false}
       centered
-      width={520}
+      width={560}
       zIndex={999}
       data-testid="pending-auth-modal"
     >
       <div data-testid="pending-auth-modal-content">
         <Text type="secondary" style={{ display: "block", marginBottom: 12 }}>
-          The following devices are requesting proxy access. You can allow or
-          deny each request.
+          The following devices are requesting proxy access. Allow trusted devices only.
         </Text>
         <List
           size="small"

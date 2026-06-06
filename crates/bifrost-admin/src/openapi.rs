@@ -1022,6 +1022,29 @@ fn generate_paths() -> serde_json::Value {
                 }
             }
         },
+        "/api/cert/install": {
+            "post": {
+                "tags": ["Cert"],
+                "summary": "Install and trust local CA certificate",
+                "operationId": "installLocalCa",
+                "requestBody": {
+                    "required": true,
+                    "content": {"application/json": {"schema": {
+                        "type": "object",
+                        "properties": {
+                            "confirmation": {"type": "string"}
+                        },
+                        "required": ["confirmation"]
+                    }}}
+                },
+                "responses": {
+                    "200": {
+                        "description": "Updated certificate information",
+                        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CertInfo"}}}
+                    }
+                }
+            }
+        },
 
         // ═══════════════════════════════════════════════════════
         // Proxy

@@ -142,6 +142,10 @@ pub use ws_payload_store::{
 };
 
 pub use handlers::remote_invoke::SharedRemoteInvokeWorker;
+pub use handlers::trust_probe::{
+    handle_trust_probe_proxy_configured_request, TRUST_PROBE_PROXY_CONFIG_HOST,
+    TRUST_PROBE_PROXY_CONFIG_PATH,
+};
 pub use remote_invoke::{
     identity::Identity as RemoteInvokeIdentity, types::RemoteInvokeConfig,
     worker::RemoteInvokeWorker,
@@ -166,3 +170,6 @@ pub use version_check::{SharedVersionChecker, VersionCheckResponse, VersionCheck
 
 pub const ADMIN_PATH_PREFIX: &str = "/_bifrost";
 pub const CERT_PUBLIC_PATH_PREFIX: &str = "/_bifrost/public/cert";
+pub const MOBILE_PUBLIC_PATH_PREFIX: &str = "/_bifrost/public/mobile";
+pub const PROXY_PUBLIC_PATH_PREFIX: &str = "/_bifrost/public/proxy";
+pub const TRUST_PROBE_PUBLIC_PATH_PREFIX: &str = "/_bifrost/public/trust-probe";

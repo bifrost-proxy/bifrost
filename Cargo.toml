@@ -9,6 +9,7 @@ members = [
   "crates/bifrost-tls",
   "crates/bifrost-storage",
   "crates/bifrost-sync",
+  "crates/bifrost-device",
   "crates/bifrost-asr",
   "crates/bifrost-admin",
   "crates/bifrost-cli",

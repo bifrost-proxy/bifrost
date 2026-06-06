@@ -12,6 +12,7 @@ pub mod im_gateway_agent;
 pub mod im_gateway_session_persistence;
 pub mod install_skill;
 pub mod matchers;
+pub mod mobile_device;
 pub mod mock_traffic;
 pub mod protocols;
 pub mod public;
@@ -77,6 +78,7 @@ pub fn all_tests() -> Vec<TestCase> {
     tests.extend(install_skill::get_all_tests());
     tests.extend(group_rules::get_all_tests());
     tests.extend(mock_traffic::get_all_tests());
+    tests.extend(mobile_device::get_all_tests());
     tests.extend(im_gateway_agent::get_all_tests());
     tests.extend(im_gateway_session_persistence::get_all_tests());
     tests.extend(skill_creator::get_all_tests());

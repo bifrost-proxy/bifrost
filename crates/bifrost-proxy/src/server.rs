@@ -11,8 +11,10 @@ use futures_util::FutureExt;
 use regex::Regex;
 
 use bifrost_admin::{
-    handle_sync_login_callback, is_cert_public_request, is_valid_admin_request, AdminRouter,
-    AdminSecurityConfig, AdminState, SharedPushManager, ADMIN_PATH_PREFIX, CERT_PUBLIC_PATH_PREFIX,
+    handle_sync_login_callback, handle_trust_probe_proxy_configured_request,
+    is_cert_public_request, is_valid_admin_request, AdminRouter, AdminSecurityConfig, AdminState,
+    SharedPushManager, ADMIN_PATH_PREFIX, TRUST_PROBE_PROXY_CONFIG_HOST,
+    TRUST_PROBE_PROXY_CONFIG_PATH,
 };
 
 pub(crate) const ADMIN_VIRTUAL_HOST: &str = "bifrost.local";
@@ -966,11 +968,10 @@ impl ProxyServer {
                             allow_remote_admin_bypass
                         );
                     } else {
-                        warn!(
-                            "Access denied for client {} (not in whitelist)",
+                        debug!(
+                            "Deferring access denial for {} until the HTTP request path is known",
                             peer_addr.ip()
                         );
-                        continue;
                     }
                 }
                 AccessDecision::Prompt(ip) => {
@@ -982,16 +983,10 @@ impl ProxyServer {
                             allow_remote_admin_bypass
                         );
                     } else {
-                        {
-                            let access_control = self.access_control.read().await;
-                            access_control.add_pending_authorization(ip);
-                        }
-                        warn!(
-                            "Non-whitelisted client {} added to pending authorization. \
-                        Approve via admin UI or use `bifrost whitelist add {}`",
-                            ip, ip
+                        debug!(
+                            "Deferring interactive authorization for {} until the HTTP request path is known",
+                            ip
                         );
-                        continue;
                     }
                 }
             }
@@ -1420,7 +1415,11 @@ async fn handle_request(
         );
     }
 
-    let is_public_cert_path = path.starts_with(CERT_PUBLIC_PATH_PREFIX);
+    if is_trust_probe_proxy_configured_request(&req) {
+        return Ok(handle_trust_probe_proxy_configured_request(req, peer_addr).await);
+    }
+
+    let is_public_cert_path = is_cert_public_request(&req);
     let is_loopback = peer_addr.ip().is_loopback();
     if !is_public_cert_path && !is_loopback {
         let ac = access_control.read().await;
@@ -1512,7 +1511,7 @@ async fn handle_request(
                 return Ok(convert_admin_response(
                     AdminRouter::handle(req, state, push_manager, Some(peer_addr)).await,
                 ));
-            } else if path.starts_with(CERT_PUBLIC_PATH_PREFIX) && is_cert_public_request(&req) {
+            } else if is_cert_public_request(&req) {
                 debug!(
                     "Public cert request from {}: {} {}",
                     peer_addr, method, path
@@ -1989,6 +1988,13 @@ fn is_proxy_request_targeting_other(
     }
 
     true
+}
+
+fn is_trust_probe_proxy_configured_request(req: &Request<Incoming>) -> bool {
+    let uri = req.uri();
+    uri.scheme_str() == Some("http")
+        && uri.host() == Some(TRUST_PROBE_PROXY_CONFIG_HOST)
+        && uri.path() == TRUST_PROBE_PROXY_CONFIG_PATH
 }
 
 fn rewrite_virtual_host_request(req: Request<Incoming>) -> Request<Incoming> {

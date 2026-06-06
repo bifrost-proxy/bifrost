@@ -23,6 +23,7 @@ use crate::handlers::{
     group_rules::handle_group_rules,
     im_gateway::handle_im_gateway,
     metrics::handle_metrics,
+    mobile_devices::{handle_mobile_devices, handle_mobile_public},
     notification::handle_notification,
     ports::handle_ports,
     power::handle_power,
@@ -39,6 +40,7 @@ use crate::handlers::{
     syntax::handle_syntax,
     system::handle_system,
     traffic::handle_traffic,
+    trust_probe::{handle_trust_probe_api, handle_trust_probe_public},
     user::handle_user,
     values::handle_values,
     voice::handle_voice,
@@ -93,8 +95,12 @@ impl AdminRouter {
             swagger::serve_swagger_ui()
         } else if admin_path.starts_with("/public/cert") {
             handle_cert_public(req, state, &admin_path).await
+        } else if admin_path.starts_with("/public/mobile") {
+            handle_mobile_public(req, state, &admin_path).await
         } else if admin_path.starts_with("/public/proxy") {
             handle_proxy_public(req, state, &admin_path).await
+        } else if admin_path.starts_with("/public/trust-probe") {
+            handle_trust_probe_public(req, state, push_manager.clone(), &admin_path).await
         } else if admin_path.starts_with("/public/sync-login") {
             handle_sync_public(req, state, &admin_path).await
         } else if admin_path.starts_with("/api/") {
@@ -157,6 +163,10 @@ impl AdminRouter {
             handle_traffic(req, state, push_manager.clone(), path).await
         } else if path.starts_with("/api/metrics") {
             handle_metrics(req, state, path).await
+        } else if path.starts_with("/api/mobile-devices") {
+            handle_mobile_devices(req, state, path, peer_addr).await
+        } else if path.starts_with("/api/trust-probe") {
+            handle_trust_probe_api(req, state, push_manager.clone(), path).await
         } else if path.starts_with("/api/ports") {
             handle_ports(req, state, path).await
         } else if path.starts_with("/api/power") {
@@ -183,7 +193,7 @@ impl AdminRouter {
                 )
             }
         } else if path.starts_with("/api/cert") {
-            handle_cert(req, state, path).await
+            handle_cert(req, state, path, peer_addr).await
         } else if path.starts_with("/api/proxy") {
             handle_proxy(req, state, path).await
         } else if path.starts_with("/api/config") {

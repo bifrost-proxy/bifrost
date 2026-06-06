@@ -3,8 +3,8 @@ use std::process::Command;
 
 use bifrost_cli::cli::{
     AiAsrCommands, AiAsrTaskCommands, AiAsrTaskDailyCommands, AiCommands, AiVoiceCommands,
-    AiVoiceWakeBindingCommands, AiVoiceWakeCommands, AiVoiceWakeListenerCommands, Cli, Commands,
-    RemoteCommands, SettingCommands, SyncCommands,
+    AiVoiceWakeBindingCommands, AiVoiceWakeCommands, AiVoiceWakeListenerCommands, CaCommands, Cli,
+    Commands, RemoteCommands, SettingCommands, SyncCommands,
 };
 use clap::Parser;
 
@@ -1372,6 +1372,76 @@ fn ca_subcommands_parse() {
             "ca help should contain '{}' subcommand",
             sub
         );
+    }
+}
+
+#[test]
+fn ca_install_mobile_options_parse() {
+    let help = run_help(&["ca", "install"]);
+    assert!(
+        help.contains("--mobile"),
+        "ca install help should contain --mobile"
+    );
+    assert!(
+        help.contains("--device"),
+        "ca install help should contain --device"
+    );
+    assert!(
+        help.contains("--yes"),
+        "ca install help should contain --yes"
+    );
+
+    let cli = Cli::try_parse_from([
+        "bifrost",
+        "ca",
+        "install",
+        "--mobile",
+        "--device",
+        "android-1",
+        "--yes",
+    ])
+    .expect("ca install --mobile should parse");
+
+    match cli.command.expect("command should exist") {
+        Commands::Ca {
+            action:
+                CaCommands::Install {
+                    mobile,
+                    ios,
+                    configurator,
+                    device,
+                    yes,
+                },
+        } => {
+            assert!(mobile);
+            assert!(!ios);
+            assert!(!configurator);
+            assert_eq!(device.as_deref(), Some("android-1"));
+            assert!(yes);
+        }
+        _ => panic!("unexpected command"),
+    }
+
+    let ios_cli = Cli::try_parse_from(["bifrost", "ca", "install", "--ios", "--configurator"])
+        .expect("ca install --ios --configurator should parse");
+    match ios_cli.command.expect("command should exist") {
+        Commands::Ca {
+            action:
+                CaCommands::Install {
+                    mobile,
+                    ios,
+                    configurator,
+                    device,
+                    yes,
+                },
+        } => {
+            assert!(!mobile);
+            assert!(ios);
+            assert!(configurator);
+            assert!(device.is_none());
+            assert!(!yes);
+        }
+        _ => panic!("unexpected command"),
     }
 }
 

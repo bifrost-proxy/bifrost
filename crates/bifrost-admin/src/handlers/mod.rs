@@ -22,6 +22,7 @@ pub mod group;
 pub mod group_rules;
 pub mod im_gateway;
 pub mod metrics;
+pub mod mobile_devices;
 pub mod notification;
 pub mod ports;
 pub mod power;
@@ -39,6 +40,7 @@ pub mod sync;
 pub mod syntax;
 pub mod system;
 pub mod traffic;
+pub mod trust_probe;
 pub mod user;
 pub mod values;
 pub mod voice;
@@ -53,7 +55,7 @@ use serde::Serialize;
 
 pub type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
 pub const ADMIN_CORS_ALLOW_HEADERS: &str = "Content-Type, Authorization, X-Client-Id";
-pub const PUBLIC_CORS_ALLOW_METHODS: &str = "GET, OPTIONS";
+pub const PUBLIC_CORS_ALLOW_METHODS: &str = "GET, HEAD, OPTIONS";
 
 pub fn full_body(body: impl Into<Bytes>) -> BoxBody {
     http_body_util::Full::new(body.into())

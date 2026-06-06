@@ -1744,7 +1744,31 @@ pub enum PortCommands {
 #[derive(Subcommand, Clone)]
 pub enum CaCommands {
     #[command(about = "Install and trust CA certificate")]
-    Install,
+    Install {
+        #[arg(
+            long,
+            help = "Install the CA to a connected mobile device instead of the local system trust store"
+        )]
+        mobile: bool,
+        #[arg(long, help = "Show iPhone/iPad profile installation and trust steps")]
+        ios: bool,
+        #[arg(
+            long,
+            requires = "ios",
+            help = "Use macOS Apple Configurator cfgutil to install the iOS profile. Unsupervised devices may still require Trust, unlock, or onscreen confirmation."
+        )]
+        configurator: bool,
+        #[arg(
+            long,
+            help = "Target Android ADB serial, or iOS USB device id when used with --ios"
+        )]
+        device: Option<String>,
+        #[arg(
+            long,
+            help = "Skip interactive mobile device selection. With one ready device it is selected automatically; with multiple ready devices pass --device."
+        )]
+        yes: bool,
+    },
     #[command(about = "Generate CA certificate")]
     Generate {
         #[arg(short, long, help = "Force regenerate")]

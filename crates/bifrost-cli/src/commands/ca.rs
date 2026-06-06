@@ -1,6 +1,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use bifrost_device::{
+    discover_android_devices_with_ca, discover_ios_devices, generate_ios_mobileconfig,
+    install_android_ca, install_ios_profile_with_configurator, read_certificate_der_from_file,
+    AdbDiscovery, AndroidInstallOptions, DeviceCertificateState, DeviceStatus, InstallSession,
+    IosConfiguratorInstallOptions, MobileConfigOptions, MobileDevice,
+};
 use bifrost_proxy::{ProxyConfig, TlsConfig};
 use bifrost_tls::{
     ensure_valid_ca, generate_root_ca, get_platform_name, load_root_ca, parse_cert_info,
@@ -53,13 +59,25 @@ pub fn handle_ca_command(action: CaCommands) -> bifrost_core::Result<()> {
     let ca_cert_path = cert_dir.join("ca.crt");
 
     match action {
-        CaCommands::Install => {
+        CaCommands::Install {
+            mobile,
+            ios,
+            configurator,
+            device,
+            yes,
+        } => {
             ensure_ca_exists(&ca_cert_path, &ca_key_path)?;
 
-            let installer = CertInstaller::new(&ca_cert_path);
-            installer.install_and_trust()?;
-            println!("CA certificate installed and trusted successfully.");
-            println!("Certificate: {}", ca_cert_path.display());
+            if ios || configurator {
+                handle_ios_ca_install(&ca_cert_path, device.as_deref(), configurator, yes)?;
+            } else if mobile || device.is_some() {
+                handle_mobile_ca_install(&ca_cert_path, device.as_deref(), yes)?;
+            } else {
+                let installer = CertInstaller::new(&ca_cert_path);
+                installer.install_and_trust()?;
+                println!("CA certificate installed and trusted successfully.");
+                println!("Certificate: {}", ca_cert_path.display());
+            }
         }
         CaCommands::Generate { force } => {
             if ca_cert_path.exists() && !force {
@@ -231,6 +249,285 @@ pub fn handle_ca_command(action: CaCommands) -> bifrost_core::Result<()> {
     }
 
     Ok(())
+}
+
+fn handle_ios_ca_install(
+    ca_cert_path: &Path,
+    requested_device_id: Option<&str>,
+    use_configurator: bool,
+    non_interactive: bool,
+) -> bifrost_core::Result<()> {
+    let profile_path = ca_cert_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("bifrost-ca.mobileconfig");
+    let cert_der = read_certificate_der_from_file(ca_cert_path)
+        .map_err(|error| bifrost_core::BifrostError::Config(error.to_string()))?;
+    let profile = generate_ios_mobileconfig(&cert_der, &MobileConfigOptions::default());
+    std::fs::write(&profile_path, profile)?;
+
+    println!("iOS CA install guide");
+    println!("====================");
+    println!("Profile: {}", profile_path.display());
+    println!("Certificate: {}", ca_cert_path.display());
+    println!();
+    println!("Default path for personal iPhone/iPad:");
+    println!("  1. Open the .mobileconfig profile on the iPhone and install it.");
+    println!("  2. Open Settings > General > About > Certificate Trust Settings.");
+    println!("  3. Turn on full trust for Bifrost CA.");
+    println!();
+    println!("Important: profiles opened from a website, QR code, AirDrop, email, or Files do not enable SSL/TLS trust automatically.");
+    println!();
+
+    let discovery = discover_ios_devices();
+    println!("USB detection: {}", discovery.message);
+    println!("Apple Configurator: {}", discovery.configurator.message);
+
+    if !use_configurator {
+        println!();
+        if discovery.configurator.cfgutil_available {
+            println!("To try the official computer-side install path on macOS, re-run:");
+        } else {
+            println!("To try the official computer-side install path on macOS, install Apple Configurator and re-run:");
+        }
+        println!("  bifrost ca install --ios --configurator");
+        println!();
+        println!("Configurator-installed certificate payloads are trusted for SSL/TLS automatically. Unsupervised devices may still ask you to Trust this Mac, unlock the phone, or follow onscreen prompts.");
+        return Ok(());
+    }
+
+    let Some(cfgutil_path) = discovery
+        .configurator
+        .cfgutil_path
+        .as_ref()
+        .map(PathBuf::from)
+    else {
+        return Err(bifrost_core::BifrostError::Config(
+            discovery.configurator.message,
+        ));
+    };
+    let device = select_single_ios_device_for_configurator(
+        &discovery.devices,
+        requested_device_id,
+        non_interactive,
+    )?;
+
+    println!();
+    println!(
+        "Installing through Apple Configurator to: {}",
+        device_display_name(&device)
+    );
+    println!("If the iPhone is locked or has not trusted this Mac, unlock it and tap Trust when prompted.");
+    println!();
+
+    let session = install_ios_profile_with_configurator(IosConfiguratorInstallOptions {
+        cfgutil_path,
+        device_id: device.id.clone(),
+        cfgutil_target: device.managed_install_target.clone(),
+        profile_path,
+    })
+    .map_err(|error| {
+        bifrost_core::BifrostError::Config(format!(
+            "Failed to install iOS profile through Apple Configurator: {error}"
+        ))
+    })?;
+    print_install_session(&session);
+    if session.completed {
+        println!(
+            "Configurator-installed certificate payloads are trusted for SSL/TLS automatically."
+        );
+    }
+    Ok(())
+}
+
+fn handle_mobile_ca_install(
+    ca_cert_path: &Path,
+    requested_device_id: Option<&str>,
+    non_interactive: bool,
+) -> bifrost_core::Result<()> {
+    let discovery = discover_android_devices_with_ca(Some(ca_cert_path));
+    let Some(adb_path) = discovery.adb_path.as_ref().map(PathBuf::from) else {
+        return Err(bifrost_core::BifrostError::Config(discovery.message));
+    };
+
+    let device = select_android_device(&discovery, requested_device_id, non_interactive)?;
+
+    println!("Mobile CA install guide");
+    println!("=======================");
+    println!("Target Android device: {}", device_display_name(&device));
+    println!("Certificate: {}", ca_cert_path.display());
+    println!();
+    println!("Bifrost will push the CA certificate and open Android's installer flow.");
+    println!("Personal phones still require final confirmation on the phone.");
+    println!("Android apps that do not trust user CAs or use certificate pinning may still reject interception.");
+    print_android_certificate_status(&device);
+    println!();
+
+    let session = install_android_ca(AndroidInstallOptions {
+        adb_path,
+        device_id: device.id.clone(),
+        ca_cert_path: ca_cert_path.to_path_buf(),
+    })
+    .map_err(|error| {
+        bifrost_core::BifrostError::Config(format!("Failed to start mobile CA install: {error}"))
+    })?;
+    print_install_session(&session);
+    let refreshed = discover_android_devices_with_ca(Some(ca_cert_path));
+    if let Some(device) = refreshed
+        .devices
+        .iter()
+        .find(|candidate| candidate.id == device.id)
+    {
+        print_android_certificate_status(device);
+    }
+    Ok(())
+}
+
+fn print_android_certificate_status(device: &MobileDevice) {
+    if let Some(status) = &device.certificate_status {
+        let state = match status.state {
+            DeviceCertificateState::Unknown => "unknown",
+            DeviceCertificateState::NotInstalled => "not installed",
+            DeviceCertificateState::PushedToDevice => "pushed to device",
+            DeviceCertificateState::Installed => "installed",
+        };
+        println!("Android CA status: {state}");
+        println!("  {}", status.message);
+    } else {
+        println!("Android CA status: not checked");
+    }
+}
+
+fn select_android_device(
+    discovery: &AdbDiscovery,
+    requested_device_id: Option<&str>,
+    non_interactive: bool,
+) -> bifrost_core::Result<MobileDevice> {
+    if let Some(device_id) = requested_device_id {
+        let Some(device) = discovery
+            .devices
+            .iter()
+            .find(|device| device.id == device_id)
+        else {
+            return Err(bifrost_core::BifrostError::NotFound(format!(
+                "Android device not found: {device_id}"
+            )));
+        };
+        if device.status != DeviceStatus::Connected {
+            return Err(bifrost_core::BifrostError::Config(format!(
+                "Android device is not ready: {}",
+                device.status_message
+            )));
+        }
+        return Ok(device.clone());
+    }
+
+    let connected = connected_android_devices(&discovery.devices);
+    match connected.as_slice() {
+        [] => Err(bifrost_core::BifrostError::Config(format!(
+            "{} Enable USB debugging, approve this computer on the phone, then re-run `bifrost ca install --mobile`.",
+            discovery.message
+        ))),
+        [device] => Ok((*device).clone()),
+        devices if non_interactive => Err(bifrost_core::BifrostError::Config(format!(
+            "Multiple ready Android devices detected ({}). Pass --device <serial> to select one.",
+            devices.len()
+        ))),
+        devices => {
+            let options = devices
+                .iter()
+                .map(device_display_name)
+                .collect::<Vec<_>>();
+            let selection = Select::new()
+                .with_prompt("Select the Android device to install the CA on")
+                .items(&options)
+                .default(0)
+                .interact()
+                .map_err(|error| {
+                    bifrost_core::BifrostError::Config(format!(
+                        "Unable to select Android device interactively: {error}. Pass --device <serial> to run non-interactively."
+                    ))
+                })?;
+            Ok(devices[selection].clone())
+        }
+    }
+}
+
+fn connected_android_devices(devices: &[MobileDevice]) -> Vec<MobileDevice> {
+    devices
+        .iter()
+        .filter(|device| device.status == DeviceStatus::Connected)
+        .cloned()
+        .collect()
+}
+
+fn select_single_ios_device_for_configurator(
+    devices: &[MobileDevice],
+    requested_device_id: Option<&str>,
+    non_interactive: bool,
+) -> bifrost_core::Result<MobileDevice> {
+    let connected = devices
+        .iter()
+        .filter(|device| device.status == DeviceStatus::Connected)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if let Some(device_id) = requested_device_id {
+        let Some(device) = connected.iter().find(|device| {
+            device.id == device_id || device.managed_install_target.as_deref() == Some(device_id)
+        }) else {
+            return Err(bifrost_core::BifrostError::NotFound(format!(
+                "Connected iOS device not found: {device_id}"
+            )));
+        };
+        return Ok(device.clone());
+    }
+
+    match connected.as_slice() {
+        [] => Err(bifrost_core::BifrostError::Config(
+            "No connected iPhone/iPad was detected. Connect the device over USB, unlock it, tap Trust for this Mac if prompted, then re-run `bifrost ca install --ios --configurator`."
+                .to_string(),
+        )),
+        [device] => Ok((*device).clone()),
+        devices if non_interactive => Err(bifrost_core::BifrostError::Config(format!(
+            "Multiple iPhone/iPad devices are connected ({}). Pass --device <id> to choose which device receives the profile.",
+            devices.len()
+        ))),
+        devices => {
+            let labels = devices.iter().map(device_display_name).collect::<Vec<_>>();
+            let selection = Select::new()
+                .with_prompt("Select the iPhone/iPad to install the CA profile on")
+                .items(&labels)
+                .default(0)
+                .interact()
+                .map_err(|error| {
+                    bifrost_core::BifrostError::Config(format!(
+                        "Unable to select iOS device interactively: {error}. Pass --device <id> to run non-interactively."
+                    ))
+                })?;
+            Ok(devices[selection].clone())
+        }
+    }
+}
+
+fn device_display_name(device: &MobileDevice) -> String {
+    match device.name.as_deref() {
+        Some(name) if !name.trim().is_empty() => format!("{name} ({})", device.id),
+        _ => device.id.clone(),
+    }
+}
+
+fn print_install_session(session: &InstallSession) {
+    println!("Install session: {}", session.session_id);
+    for step in &session.steps {
+        let marker = if step.success { "✓" } else { "✗" };
+        println!("  {marker} {}: {}", step.name, step.message);
+    }
+    println!();
+    println!("{}", session.summary);
+    if session.requires_user_confirmation {
+        println!("Next step: finish installation and trust confirmation on the phone.");
+    }
 }
 
 pub fn load_tls_config(config: &ProxyConfig) -> bifrost_core::Result<Arc<TlsConfig>> {
@@ -465,5 +762,69 @@ mod tests {
             certificate_resolution(&CertStatus::InstalledAndTrusted, opts(false, false)),
             CertificateResolution::AlreadyTrusted
         );
+    }
+
+    fn android_device(id: &str, status: DeviceStatus) -> MobileDevice {
+        MobileDevice {
+            id: id.to_string(),
+            name: None,
+            managed_install_target: None,
+            platform: bifrost_device::MobilePlatform::Android,
+            status,
+            capability: bifrost_device::DeviceTrustCapability::PushAndOpenInstaller,
+            certificate_status: None,
+            status_message: "status message".to_string(),
+        }
+    }
+
+    fn discovery(devices: Vec<MobileDevice>) -> AdbDiscovery {
+        AdbDiscovery {
+            adb_available: true,
+            adb_path: Some("/tmp/adb".to_string()),
+            devices,
+            message: "ADB found devices.".to_string(),
+        }
+    }
+
+    #[test]
+    fn mobile_ca_install_auto_selects_single_connected_device() {
+        let selected = select_android_device(
+            &discovery(vec![android_device("android-1", DeviceStatus::Connected)]),
+            None,
+            true,
+        )
+        .expect("single connected device should be selected");
+
+        assert_eq!(selected.id, "android-1");
+    }
+
+    #[test]
+    fn mobile_ca_install_requires_device_for_multiple_non_interactive_devices() {
+        let err = select_android_device(
+            &discovery(vec![
+                android_device("android-1", DeviceStatus::Connected),
+                android_device("android-2", DeviceStatus::Connected),
+            ]),
+            None,
+            true,
+        )
+        .expect_err("multiple devices should require --device in non-interactive mode");
+
+        assert!(err.to_string().contains("--device <serial>"));
+    }
+
+    #[test]
+    fn mobile_ca_install_rejects_requested_unauthorized_device() {
+        let err = select_android_device(
+            &discovery(vec![android_device(
+                "android-1",
+                DeviceStatus::Unauthorized,
+            )]),
+            Some("android-1"),
+            true,
+        )
+        .expect_err("unauthorized device cannot be installed");
+
+        assert!(err.to_string().contains("not ready"));
     }
 }

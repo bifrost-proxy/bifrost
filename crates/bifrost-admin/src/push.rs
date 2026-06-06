@@ -37,6 +37,8 @@ pub const SETTINGS_SCOPE_PENDING_AUTHORIZATIONS: &str = "pending_authorizations"
 pub const SETTINGS_SCOPE_PENDING_IP_TLS: &str = "pending_ip_tls";
 pub const SETTINGS_SCOPE_CLIENT_TRUST: &str = "client_trust";
 pub const SETTINGS_SCOPE_NOTIFICATIONS: &str = "notifications";
+pub const SETTINGS_SCOPE_TRUST_PROBE: &str = "trust_probe";
+pub const SETTINGS_SCOPE_MOBILE_DEVICES: &str = "mobile_devices";
 
 fn generate_client_id() -> u64 {
     CLIENT_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
@@ -970,6 +972,12 @@ impl PushManager {
             .any(|item| item == scope)
     }
 
+    fn has_settings_scope_subscribers(&self, scope: &str) -> bool {
+        self.clients.iter().any(|client_ref| {
+            Self::has_settings_scope(&client_ref.value().get_subscription(), scope)
+        })
+    }
+
     fn build_values_data(&self) -> Option<ValuesData> {
         let values_storage = self.state.values_storage.as_ref()?;
         let guard = values_storage.read();
@@ -1270,6 +1278,12 @@ impl PushManager {
                     "recent": recent,
                 })
             }
+            SETTINGS_SCOPE_TRUST_PROBE => {
+                json!(crate::handlers::trust_probe::list_active_sessions())
+            }
+            SETTINGS_SCOPE_MOBILE_DEVICES => {
+                crate::handlers::mobile_devices::mobile_devices_snapshot(&self.state)
+            }
             _ => return None,
         };
 
@@ -1366,6 +1380,15 @@ impl PushManager {
         }
         for client_id in clients_to_remove {
             self.unregister_client(client_id);
+        }
+    }
+
+    pub async fn send_settings_scope_to_client(&self, client: &Arc<PushClient>, scope: &str) {
+        let Some(data) = self.build_settings_update(scope).await else {
+            return;
+        };
+        if Self::has_settings_scope(&client.get_subscription(), scope) {
+            client.send(PushMessage::SettingsUpdate(data));
         }
     }
 
@@ -1729,6 +1752,20 @@ pub fn start_push_tasks(manager: SharedPushManager) -> Vec<tokio::task::JoinHand
             interval.tick().await;
             if manager_history.client_count() > 0 {
                 manager_history.broadcast_history().await;
+            }
+        }
+    }));
+
+    let manager_mobile_devices = manager.clone();
+    handles.push(tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(3));
+        loop {
+            interval.tick().await;
+            if manager_mobile_devices.has_settings_scope_subscribers(SETTINGS_SCOPE_MOBILE_DEVICES)
+            {
+                manager_mobile_devices
+                    .broadcast_settings_scope(SETTINGS_SCOPE_MOBILE_DEVICES)
+                    .await;
             }
         }
     }));
