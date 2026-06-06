@@ -123,6 +123,26 @@ export interface TrustProbeEvent {
   message?: string | null;
 }
 
+export interface TrustProbeDevice {
+  deviceId: string;
+  status: TrustProbeStatus;
+  opened: boolean;
+  proxyAccessStatus?: TrustProbeProxyAccessStatus | null;
+  proxyAccessAllowed?: boolean | null;
+  proxyAccessMessage?: string | null;
+  proxyConfigured: boolean;
+  proxyConfigurationMessage?: string | null;
+  networkReachable: boolean;
+  tlsTrusted: boolean;
+  clientIp?: string | null;
+  userAgent?: string | null;
+  platformHint?: string | null;
+  lastError?: string | null;
+  firstSeen: string;
+  lastSeen: string;
+  events: TrustProbeEvent[];
+}
+
 export interface TrustProbeSession {
   sessionId: string;
   status: TrustProbeStatus;
@@ -140,6 +160,7 @@ export interface TrustProbeSession {
   userAgent?: string | null;
   platformHint?: string | null;
   lastError?: string | null;
+  devices: TrustProbeDevice[];
   events: TrustProbeEvent[];
   expiresAt: string;
   host: string;

@@ -410,12 +410,20 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     .get("caDownloadUrl")
                     .and_then(|value| value.as_str())
                     .ok_or_else(|| format!("Missing caDownloadUrl in trust probe response: {session}"))?;
-                let token = url::Url::parse(landing_url)
-                    .map_err(|e| format!("Invalid landingUrl: {e}"))?
-                    .query_pairs()
-                    .find(|(key, _)| key == "t")
-                    .map(|(_, value)| value.to_string())
-                    .ok_or_else(|| format!("Missing token in landingUrl: {landing_url}"))?;
+                let parsed_landing_url =
+                    url::Url::parse(landing_url).map_err(|e| format!("Invalid landingUrl: {e}"))?;
+                if parsed_landing_url.query().is_some() {
+                    return Err(format!(
+                        "Expected fixed availability check URL without token query, got: {landing_url}"
+                    ));
+                }
+                if !landing_url.ends_with("/_bifrost/public/trust-probe") {
+                    return Err(format!(
+                        "Expected fixed availability check path, got: {landing_url}"
+                    ));
+                }
+                let device_a = "e2e-ios-device";
+                let device_b = "e2e-android-device";
 
                 let update_response = client
                     .patch(format!(
@@ -443,7 +451,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
 
                 let public_session_response = client
                     .get(format!(
-                        "http://127.0.0.1:{port}/_bifrost/public/trust-probe/{session_id}/session?t={token}"
+                        "http://127.0.0.1:{port}/_bifrost/public/trust-probe/{session_id}/session?deviceId={device_a}"
                     ))
                     .send()
                     .await
@@ -484,6 +492,9 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     || !landing_html.contains("iOS Proxy Setup")
                     || !landing_html.contains("iosWifiProxyProfileUrl")
                     || !landing_html.contains("sessionPublicUrl")
+                    || !landing_html.contains("bifrostAvailabilityDeviceId")
+                    || !landing_html.contains("deviceId")
+                    || !landing_html.contains("withDevice")
                     || !landing_html.contains("Download Experimental Wi-Fi Proxy Profile")
                     || !landing_html.contains("managedWifiRiskAccepted")
                     || !landing_html.contains("suggestedWifiSsid")
@@ -527,7 +538,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 assert_header_contains(&proxy_qr_response, "content-type", "image/svg+xml")?;
 
                 let proxy_access_url = format!(
-                    "http://127.0.0.1:{port}/_bifrost/public/trust-probe/{session_id}/proxy-access?t={token}"
+                    "http://127.0.0.1:{port}/_bifrost/public/trust-probe/{session_id}/proxy-access?deviceId={device_a}"
                 );
                 let proxy_access_response = client
                     .get(proxy_access_url)
@@ -556,7 +567,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     .map_err(|e| format!("Failed to create proxy-configured client: {}", e))?;
                 let proxy_configured_response = proxied_client
                     .get(format!(
-                        "http://bifrost-proxy-check.invalid/_bifrost/trust-probe/proxy-configured?sid={session_id}&t={token}"
+                        "http://bifrost-proxy-check.invalid/_bifrost/trust-probe/proxy-configured?sid={session_id}&deviceId={device_a}"
                     ))
                     .send()
                     .await
@@ -577,7 +588,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 }
 
                 let netcheck_url = format!(
-                    "http://127.0.0.1:{probe_port}/_bifrost/trust-probe/netcheck?sid={session_id}&t={token}"
+                    "http://127.0.0.1:{probe_port}/_bifrost/trust-probe/netcheck?sid={session_id}&deviceId={device_a}"
                 );
                 let netcheck_response = client
                     .get(netcheck_url)
@@ -604,7 +615,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     .build()
                     .map_err(|e| format!("Failed to create trusted client: {}", e))?;
                 let tls_check_url = format!(
-                    "https://127.0.0.1:{probe_port}/_bifrost/trust-probe/check?sid={session_id}&t={token}"
+                    "https://127.0.0.1:{probe_port}/_bifrost/trust-probe/check?sid={session_id}&deviceId={device_a}"
                 );
                 let tls_response = trusted_client
                     .get(tls_check_url)
@@ -612,6 +623,29 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     .await
                     .map_err(|e| format!("GET trust probe HTTPS check failed: {}", e))?;
                 assert_status(&tls_response, 200)?;
+
+                let second_device_report = client
+                    .post(format!(
+                        "http://127.0.0.1:{port}/_bifrost/public/trust-probe/{session_id}/report?deviceId={device_b}"
+                    ))
+                    .json(&serde_json::json!({
+                        "type": "page_opened",
+                        "deviceId": device_b,
+                        "userAgent": "Bifrost E2E Android Browser",
+                        "platformHint": "android"
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("POST second device report failed: {}", e))?;
+                assert_status(&second_device_report, 200)?;
+                let second_proxy_access_response = client
+                    .get(format!(
+                        "http://127.0.0.1:{port}/_bifrost/public/trust-probe/{session_id}/proxy-access?deviceId={device_b}"
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET second device proxy access failed: {}", e))?;
+                assert_status(&second_proxy_access_response, 200)?;
 
                 let status_response = client
                     .get(format!(
@@ -641,6 +675,45 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 {
                     return Err(format!(
                         "Expected proxyConfigured=true, got: {status_json}"
+                    ));
+                }
+                let devices = status_json
+                    .get("devices")
+                    .and_then(|value| value.as_array())
+                    .ok_or_else(|| format!("Expected devices array, got: {status_json}"))?;
+                if devices.len() < 2 {
+                    return Err(format!(
+                        "Expected at least two tracked availability devices, got: {status_json}"
+                    ));
+                }
+                let device_a_status = devices
+                    .iter()
+                    .find(|device| {
+                        device.get("deviceId").and_then(|value| value.as_str()) == Some(device_a)
+                    })
+                    .ok_or_else(|| format!("Missing first device in session status: {status_json}"))?;
+                if device_a_status
+                    .get("tlsTrusted")
+                    .and_then(|value| value.as_bool())
+                    != Some(true)
+                {
+                    return Err(format!(
+                        "Expected first device TLS trust success, got: {device_a_status}"
+                    ));
+                }
+                let device_b_status = devices
+                    .iter()
+                    .find(|device| {
+                        device.get("deviceId").and_then(|value| value.as_str()) == Some(device_b)
+                    })
+                    .ok_or_else(|| format!("Missing second device in session status: {status_json}"))?;
+                if device_b_status
+                    .get("platformHint")
+                    .and_then(|value| value.as_str())
+                    != Some("android")
+                {
+                    return Err(format!(
+                        "Expected second device platform hint, got: {device_b_status}"
                     ));
                 }
                 Ok(())

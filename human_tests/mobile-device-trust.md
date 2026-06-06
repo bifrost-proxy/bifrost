@@ -439,16 +439,20 @@
 - 管理端顶部 Availability Check、代理交互式授权弹窗中的 Availability Check、Certificate 页 iOS 区块、手机公开检测页的 Wi-Fi 名称配置区域下方，都直接展示 `Experimental managed Wi-Fi profile` 风险说明；说明必须写清 profile 不包含 Wi-Fi 密码，但卸载 profile 可能移除 iOS managed Wi-Fi 网络条目。
 - 在任意 Availability Check 卡片或 iOS 区块保存 Wi-Fi 名称后，其他已打开的 Availability Check 卡片和对应手机公开页会收到同一 SSID；如果用户扫的是代理授权弹窗里的二维码，后来在证书页保存 Wi-Fi 名称，手机页也应在约 1 秒内更新。
 - 手机页输入 Wi-Fi 名后会通过公开 `report` 写回同一个 session；管理端轮询后能看到 `wifi_ssid_updated` 事件和最新 Wi-Fi 名。
+- Availability Check 链接是固定 URL，不包含 `?t=<token>`；二维码内容也指向同一个固定 URL。手机页使用 `localStorage.bifrostAvailabilityDeviceId` 识别同一浏览器设备，刷新页面后仍归到同一台设备。
+- 多台设备可以同时打开同一个 Availability Check 链接。管理端卡片展示 `Connected devices` 列表，每台设备单独显示短 device id、platform hint、client IP、最近活跃时间、页面打开、网络、HTTPS trust、代理授权和代理配置状态。
 - 手机打开 HTTP landing page 后，管理端状态变为 `Device opened page`。
 - 手机浏览器通过已配置代理访问专用 `.invalid` 探针 URL 后，管理端显示 `Proxy config detected`。
 - 手机能访问 probe 端口时，管理端显示 `Probe port reachable`。
 - 手机 HTTPS trust check 成功时，管理端显示 `CA trusted`、`HTTPS trust passed`，并展示代理地址 `<host>:<adminPort>` 和 proxy QR 链接。
 - 手机页成功后展示的代理地址是可点击复制的按钮，点击后显示 `Copied` 或清晰提示手动复制。
 - 如果 netcheck 成功但 HTTPS trust check 失败，管理端显示 `Trust failed`，手机页提示安装 CA、iOS 开启完全信任或 Android App 信任边界，并明确提示安装/信任后仍失败时需要完整重启浏览器再重试。
+- 如果 CA 尚未安装或尚未被浏览器信任，手机页证书信任区域保持稳定的失败引导；每秒自动检测不应让该区域在 `Checking HTTPS trust` 和失败步骤之间反复闪烁。
 - 如果 landing page 能打开但 probe 端口不可达，管理端显示 `Probe unreachable`，并提示检查防火墙、局域网隔离和 IP 选择。
 - 成功文案不承诺所有 App 都能被解密，只说明当前设备浏览器 TLS 链路已信任 Bifrost CA。
 - 自动化 E2E 使用当前 Bifrost CA 作为 root CA 访问 HTTPS check，并断言 session 最终为 `tls_trusted`。
 - 自动化 E2E 使用配置了 Bifrost HTTP proxy 的客户端访问 `bifrost-proxy-check.invalid` 专用探针，并断言 session 最终包含 `proxyConfigured=true`。
+- 自动化 E2E 使用两个不同 `deviceId` 模拟两台移动设备：第一台完成 netcheck、HTTPS trust 和 proxy configured；第二台只上报页面打开和代理授权检查；最终断言 `GET /api/trust-probe/sessions/{id}` 返回至少两个 `devices[]` 条目，且两台设备状态互不覆盖。
 
 ### TC-MDT-16：Availability Check 公开入口和代理授权检查不被访问控制误拦截
 
@@ -461,18 +465,22 @@
      -d '{"host":"192.168.8.34"}' | jq .
    ```
 2. 用返回的 `landingUrl` 执行 `curl -sSI`；用返回的 `qrCodeUrl`、`proxyQrCodeUrl` 分别执行 `curl -sS -D <headers> -o <body>`，按真实浏览器打开方式验证 GET。
-3. 用返回的 token 访问：
+3. 用固定 `landingUrl` 直接打开，不追加 token；再用不同 `deviceId` 访问 proxy-access：
    ```bash
-   curl -sS "http://192.168.8.34:8800/_bifrost/public/trust-probe/<session_id>/proxy-access?t=<token>" | jq .
+   curl -sSI "http://192.168.8.34:8800/_bifrost/public/trust-probe"
+   curl -sS "http://192.168.8.34:8800/_bifrost/public/trust-probe/<session_id>/proxy-access?deviceId=human-ios-1" | jq .
+   curl -sS "http://192.168.8.34:8800/_bifrost/public/trust-probe/<session_id>/proxy-access?deviceId=human-android-1" | jq .
    ```
 4. 如果 Bifrost 当前是 interactive 访问控制且客户端不是 loopback，打开管理端访问授权列表检查 pending 记录。
 
 **预期结果**：
 
 - `landingUrl` 返回 HTTP 200，页面标题包含 `Bifrost Availability Check`。
+- `landingUrl` 不包含 token query；直接打开固定 URL 不会返回 `Missing trust probe token`。
 - `qrCodeUrl` 返回 HTTP 200 和 `image/svg+xml`。
 - `proxyQrCodeUrl` 返回 HTTP 200 和 `image/svg+xml`，不会因为未授权设备访问而返回 403。
 - `proxy-access` 返回 JSON，`status` 为 `allowed`、`pending`、`denied` 或 `unavailable` 之一，并包含可读的 `message`。
+- 管理端 session JSON 的 `devices[]` 中出现对应 `deviceId`，多台设备同时检查时各自状态独立。
 - interactive 模式下未授权局域网设备会被记录为 pending authorization，便于用户在管理端批准；loopback 或已授权设备显示 `allowed`。
 - landing page HTML 包含 `proxyConfiguredUrl` 和 `checkProxyConfiguration`，用于自动检查目标设备浏览器是否真的配置了 Bifrost HTTP proxy。
 
@@ -492,7 +500,7 @@
 - 弹窗中部展示 Availability Check 提示，说明遇到证书或代理问题时可用扫码/链接检查可用性。
 - 弹窗打开时会自动生成一组 Availability Check session；用户无需先进入 Certificate 页面再点击生成。
 - 弹窗展示局域网地址选择、二维码、可打开的检查链接和 `Copy link` 按钮；二维码和链接指向公开 landing page。
-- 管理端轮询 session 状态 2 秒以上后，二维码 URL 和链接仍保留 `?t=<token>`，直接打开链接返回检查页而不是 `Missing trust probe token`。
+- 管理端轮询 session 状态 2 秒以上后，二维码 URL 和链接保持固定 URL，不包含 `?t=<token>`，直接打开链接返回检查页而不是 `Missing trust probe token`。
 - 二维码以普通图片展示，不出现 Ant Design 预览灰色遮罩或只显示小二维码图标的白屏/灰屏状态。
 - 目标设备打开检查页后，会自动检查代理授权、probe 端口可达性和 HTTPS CA trust。
 - `Allow` / `Deny` 操作不受 Availability Check 区块影响；审批后 pending 列表正常刷新。

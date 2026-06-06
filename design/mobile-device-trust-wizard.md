@@ -101,15 +101,17 @@ Android CLI 会在安装前后输出 `Android CA status`。普通设备通常只
   - Admin API：
   - `POST /_bifrost/api/trust-probe/sessions` 创建短期探针会话。请求中的 `host` 必须是 Bifrost 发现到的本机 IP，不能传任意域名或公网地址。
   - `GET /_bifrost/api/trust-probe/sessions/{session_id}` 查询实时状态。
-  - `PATCH /_bifrost/api/trust-probe/sessions/{session_id}` 更新 Wi-Fi 名称等可配置字段。管理端 Availability Check 卡片使用该接口把用户输入的 SSID 写入 probe manager，并同步到所有未过期的 active session，避免顶部卡片、代理交互式授权弹窗和手机公开页各自持有不同 session 时 SSID 互相不可见。手机公开页通过 token 化 public session 轮询实时同步。
+  - `PATCH /_bifrost/api/trust-probe/sessions/{session_id}` 更新 Wi-Fi 名称等可配置字段。管理端 Availability Check 卡片使用该接口把用户输入的 SSID 写入 probe manager，并同步到所有未过期的 active session，避免顶部卡片、代理交互式授权弹窗和手机公开页各自持有不同 session 时 SSID 互相不可见。手机公开页通过 public session 轮询实时同步。
 - Public landing：
-  - `GET /_bifrost/public/trust-probe/{session_id}?t=<token>` 返回自包含 HTML 检测页，不依赖登录和主 Web UI bundle。
-  - `GET /_bifrost/public/trust-probe/{session_id}/session?t=<token>` 返回该公开页面可用的最小 session 配置，包括 `suggestedWifiSsid`、SSID 提示和代理配置检测结果。手机页每秒轮询该接口；用户也可以直接在手机页输入 Wi-Fi 名称并通过 `report` 回写，后端会把该 SSID 同步到所有未过期的 active Availability Check session。
-  - `GET /_bifrost/public/trust-probe/{session_id}/qrcode?t=<token>` 返回扫码二维码。
-  - `POST /_bifrost/public/trust-probe/{session_id}/report?t=<token>` 接收手机页面通过 HTTP 回报的 `page_opened`、`network_failed`、`tls_failed` 等事件。
-  - `GET /_bifrost/public/trust-probe/{session_id}/proxy-access?t=<token>` 使用访问控制模块检查当前客户端 IP 是否已被允许使用代理；待授权时会写入 pending authorization，让管理端能继续审批。
+  - `GET /_bifrost/public/trust-probe` 返回固定的自包含 HTML 检测页，不依赖登录和主 Web UI bundle，也不在 URL 中携带 token。服务端按请求 Host 复用同一个未过期 Availability Check session；如果没有活跃 session，则为该 Host 创建一个短期 session。
+  - `GET /_bifrost/public/trust-probe/qrcode?host=<local-ip>` 返回固定 landing URL 的扫码二维码。二维码内容是 `http://<local-ip>:<adminPort>/_bifrost/public/trust-probe`，避免旧 token 过期或遗漏导致 `Missing trust probe token`。
+  - 手机公开页首次打开时在浏览器 `localStorage` 写入 `bifrostAvailabilityDeviceId`，后续刷新继续使用同一个 device id；所有 `session`、`report`、`proxy-access`、netcheck、HTTPS check 和 proxy configured 请求都会附带 `deviceId`。该 id 只用于管理端状态聚合，不作为权限凭据。
+  - `GET /_bifrost/public/trust-probe/{session_id}/session?deviceId=<id>` 返回该公开页面可用的最小 session 配置，包括 `suggestedWifiSsid`、SSID 提示和代理配置检测结果。手机页每秒轮询该接口；用户也可以直接在手机页输入 Wi-Fi 名称并通过 `report` 回写，后端会把该 SSID 同步到所有未过期的 active Availability Check session。
+  - `POST /_bifrost/public/trust-probe/{session_id}/report?deviceId=<id>` 接收手机页面通过 HTTP 回报的 `page_opened`、`network_failed`、`tls_failed` 等事件。
+  - `GET /_bifrost/public/trust-probe/{session_id}/proxy-access?deviceId=<id>` 使用访问控制模块检查当前客户端 IP 是否已被允许使用代理；待授权时会写入 pending authorization，让管理端能继续审批。
   - 手机页会每秒自动重跑 proxy access、HTTPS trust 和 proxy configured 三项检查，不要求用户刷新页面才能看到授权、信任或代理配置状态变化；管理端 Availability Check 卡片同样持续轮询 session 状态直到过期。
-  - 手机页会请求 `http://bifrost-proxy-check.invalid/_bifrost/trust-probe/proxy-configured?sid=<session_id>&t=<token>`。该 `.invalid` 域名只有在浏览器已经配置 HTTP proxy 时才会被送到 Bifrost；Bifrost 在代理入口截获该请求并记录 `proxy_configured_ok`。如果请求失败，手机页通过 HTTP report 回写 `proxy_config_failed`，并优先提示用户手动配置 Wi-Fi 代理：`Settings > Wi-Fi > current network > Configure Proxy > Manual`。iOS Wi-Fi Proxy Profile 作为实验选项，下载链接中的 SSID 来自 Bifrost 服务端检测、管理端输入或手机页输入；profile 文案明确说明不包含 Wi-Fi 密码或 join credentials，但卸载 profile 可能移除 managed Wi-Fi 网络条目，因此必须勾选风险确认后才能下载。
+  - 手机页会请求 `http://bifrost-proxy-check.invalid/_bifrost/trust-probe/proxy-configured?sid=<session_id>&deviceId=<id>`。该 `.invalid` 域名只有在浏览器已经配置 HTTP proxy 时才会被送到 Bifrost；Bifrost 在代理入口截获该请求并记录 `proxy_configured_ok`。如果请求失败，手机页通过 HTTP report 回写 `proxy_config_failed`，并优先提示用户手动配置 Wi-Fi 代理：`Settings > Wi-Fi > current network > Configure Proxy > Manual`。iOS Wi-Fi Proxy Profile 作为实验选项，下载链接中的 SSID 来自 Bifrost 服务端检测、管理端输入或手机页输入；profile 文案明确说明不包含 Wi-Fi 密码或 join credentials，但卸载 profile 可能移除 managed Wi-Fi 网络条目，因此必须勾选风险确认后才能下载。
+  - 一个 Availability Check session 支持多台手机/浏览器同时打开同一个固定链接。管理端 session view 返回 `devices[]`，每个设备单独展示 localStorage device id、platform hint、client IP、最近活跃时间、页面打开、probe 端口、HTTPS trust、proxy access 和 proxy configured 状态。session 顶层状态保留聚合视图，用于兼容旧 UI 和测试。
 - 双协议 probe server：
   - 默认尝试监听 `admin_port + 2`，端口冲突时自动选择空闲端口，并在 session 响应中返回实际 `probePort`。
   - 同一端口通过 TCP `peek` 首字节区分 HTTP 与 TLS。HTTP 路径提供 `/_bifrost/trust-probe/netcheck`，HTTPS 路径提供 `/_bifrost/trust-probe/check`。
@@ -202,7 +204,7 @@ Android CLI 会在安装前后输出 `Android CA status`。普通设备通常只
 - TC-MDT-14：Android 设备卡片展示当前 CA 状态；普通 ADB 不承诺能验证 user CA store，root/emulator 可通过 `/data/misc/user/0/cacerts-added` 指纹匹配显示已安装。
 - TC-MDT-15：Availability Check 使用局域网 IP 生成二维码；扫码设备依次检查代理访问授权、页面已打开、probe 端口可达、HTTPS 信任检查通过/失败，再检查代理是否已经配置；成功后展示可点击复制的代理配置和公开 proxy QR，失败时展示 iOS/Android 下一步安装和信任指引；代理未配置时明确提示下载按服务端检测或用户输入 Wi-Fi 名称生成的 iOS Wi-Fi Proxy Profile，或手动配置当前 Wi-Fi 的 HTTP Proxy。
 - TC-MDT-16：公开 landing、Availability Check QR、公开 proxy QR 和 proxy-access endpoint 不受交互式访问控制误拦截；未授权局域网设备会被记录到 pending authorization。
-- TC-MDT-17：代理交互式授权弹窗展示 Availability Check 二维码和链接，打开弹窗后自动生成 session，轮询状态后二维码/链接仍保留 `?t=<token>` 且二维码不出现预览遮罩白屏，目标设备可扫码进入检查页，Allow/Deny 审批流程不受影响。
+- TC-MDT-17：代理交互式授权弹窗展示 Availability Check 二维码和链接，打开弹窗后自动生成 session，轮询状态后二维码/链接保持固定 URL 且二维码不出现预览遮罩白屏，目标设备可扫码进入检查页，Allow/Deny 审批流程不受影响。
 - TC-MDT-18：iOS Wi-Fi Proxy Profile POC。验证扫码下载路径返回 `CA + Wi-Fi proxy` profile，iOS 设备列表的 `Proxy Config` 按钮能通过 Apple Configurator 定向下发到所选 iPhone；手机确认安装后，使用 Availability Check 验证代理配置、代理授权、probe 端口和 HTTPS 信任状态是否改善，并记录是否需要断开重连 Wi-Fi。
 
 ## Review/Fix/Test 闭环方案

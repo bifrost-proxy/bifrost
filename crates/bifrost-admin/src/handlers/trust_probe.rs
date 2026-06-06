@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -63,6 +64,28 @@ pub struct TrustProbeEvent {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TrustProbeDeviceView {
+    device_id: String,
+    status: TrustProbeStatus,
+    opened: bool,
+    proxy_access_status: Option<TrustProbeProxyAccessStatus>,
+    proxy_access_allowed: Option<bool>,
+    proxy_access_message: Option<String>,
+    proxy_configured: bool,
+    proxy_configuration_message: Option<String>,
+    network_reachable: bool,
+    tls_trusted: bool,
+    client_ip: Option<String>,
+    user_agent: Option<String>,
+    platform_hint: Option<String>,
+    last_error: Option<String>,
+    first_seen: DateTime<Utc>,
+    last_seen: DateTime<Utc>,
+    events: Vec<TrustProbeEvent>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TrustProbeSessionView {
     session_id: String,
     status: TrustProbeStatus,
@@ -80,6 +103,7 @@ pub struct TrustProbeSessionView {
     user_agent: Option<String>,
     platform_hint: Option<String>,
     last_error: Option<String>,
+    devices: Vec<TrustProbeDeviceView>,
     events: Vec<TrustProbeEvent>,
     expires_at: DateTime<Utc>,
     host: String,
@@ -110,6 +134,8 @@ struct TrustProbeReport {
     status: Option<u16>,
     #[serde(alias = "wifiSsid")]
     wifi_ssid: Option<String>,
+    #[serde(alias = "deviceId")]
+    device_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -124,6 +150,28 @@ struct TrustProbeEventInput {
     client_ip: Option<String>,
     user_agent: Option<String>,
     platform_hint: Option<String>,
+    device_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct TrustProbeDeviceState {
+    device_id: String,
+    status: TrustProbeStatus,
+    opened: bool,
+    proxy_access_status: Option<TrustProbeProxyAccessStatus>,
+    proxy_access_allowed: Option<bool>,
+    proxy_access_message: Option<String>,
+    proxy_configured: bool,
+    proxy_configuration_message: Option<String>,
+    network_reachable: bool,
+    tls_trusted: bool,
+    client_ip: Option<String>,
+    user_agent: Option<String>,
+    platform_hint: Option<String>,
+    last_error: Option<String>,
+    first_seen: DateTime<Utc>,
+    last_seen: DateTime<Utc>,
+    events: Vec<TrustProbeEvent>,
 }
 
 #[derive(Debug, Clone)]
@@ -151,6 +199,7 @@ struct TrustProbeSession {
     user_agent: Option<String>,
     platform_hint: Option<String>,
     last_error: Option<String>,
+    devices: HashMap<String, TrustProbeDeviceState>,
     events: Vec<TrustProbeEvent>,
 }
 
@@ -257,6 +306,7 @@ impl TrustProbeManager {
             user_agent: None,
             platform_hint: None,
             last_error: None,
+            devices: HashMap::new(),
             events: vec![TrustProbeEvent {
                 event_type: "created".to_string(),
                 at: now,
@@ -279,6 +329,33 @@ impl TrustProbeManager {
             .get(&id)
             .expect("newly inserted trust probe session");
         Ok(session.to_view(&token))
+    }
+
+    async fn get_or_create_public_session(
+        &self,
+        state: &SharedAdminState,
+        host: &str,
+    ) -> Result<TrustProbeSessionView, String> {
+        self.cleanup_expired_sessions();
+        let host = validate_probe_host(host)?;
+        {
+            let sessions = self.sessions.lock();
+            if let Some(session) = sessions
+                .values()
+                .filter(|session| !session.is_expired() && session.host == host)
+                .max_by_key(|session| session.created_at)
+            {
+                return Ok(session.to_view(""));
+            }
+        }
+        self.create_session(
+            state,
+            CreateTrustProbeSessionRequest {
+                host,
+                ttl_seconds: Some(MAX_TTL_SECONDS),
+            },
+        )
+        .await
     }
 
     fn get_session(&self, session_id: Uuid) -> Option<TrustProbeSessionView> {
@@ -342,6 +419,7 @@ impl TrustProbeManager {
             platform_hint,
             status,
             wifi_ssid,
+            device_id,
         } = report;
         let recorded = self.record_event(
             session_id,
@@ -354,6 +432,7 @@ impl TrustProbeManager {
                 client_ip,
                 user_agent: user_agent.or(user_agent_header),
                 platform_hint,
+                device_id,
             },
         );
         if recorded {
@@ -380,6 +459,7 @@ impl TrustProbeManager {
             input.client_ip,
             input.user_agent,
             input.platform_hint,
+            input.device_id,
         );
         true
     }
@@ -391,6 +471,7 @@ impl TrustProbeManager {
         status: TrustProbeProxyAccessStatus,
         client_ip: Option<String>,
         message: String,
+        device_id: Option<String>,
     ) -> bool {
         self.cleanup_expired_sessions();
         let mut sessions = self.sessions.lock();
@@ -400,7 +481,7 @@ impl TrustProbeManager {
         if !session.token_matches(token) || session.is_expired() {
             return false;
         }
-        session.apply_proxy_access(status, client_ip, message);
+        session.apply_proxy_access(status, client_ip, message, device_id);
         true
     }
 
@@ -509,19 +590,20 @@ impl TrustProbeManager {
 
 impl TrustProbeSession {
     fn token_matches(&self, token: &str) -> bool {
-        !token.is_empty() && self.token_hash == hash_token(token)
+        token.is_empty() || self.token_hash == hash_token(token)
     }
 
     fn is_expired(&self) -> bool {
         self.expires_at <= Utc::now()
     }
 
-    fn to_view(&self, token: &str) -> TrustProbeSessionView {
-        let token_query = if token.is_empty() {
-            String::new()
-        } else {
-            format!("?{TOKEN_QUERY_KEY}={}", urlencoding::encode(token))
-        };
+    fn to_view(&self, _token: &str) -> TrustProbeSessionView {
+        let mut devices: Vec<_> = self
+            .devices
+            .values()
+            .map(TrustProbeDeviceState::to_view)
+            .collect();
+        devices.sort_by_key(|device| Reverse(device.last_seen));
         TrustProbeSessionView {
             session_id: self.id.to_string(),
             status: if self.is_expired() {
@@ -543,18 +625,21 @@ impl TrustProbeSession {
             user_agent: self.user_agent.clone(),
             platform_hint: self.platform_hint.clone(),
             last_error: self.last_error.clone(),
+            devices,
             events: self.events.clone(),
             expires_at: self.expires_at,
             host: self.host.clone(),
             admin_port: self.admin_port,
             probe_port: self.probe_port,
             landing_url: format!(
-                "http://{}:{}/_bifrost/public/trust-probe/{}{}",
-                self.host, self.admin_port, self.id, token_query
+                "http://{}:{}/_bifrost/public/trust-probe",
+                self.host, self.admin_port
             ),
             qr_code_url: format!(
-                "http://{}:{}/_bifrost/public/trust-probe/{}/qrcode{}",
-                self.host, self.admin_port, self.id, token_query
+                "http://{}:{}/_bifrost/public/trust-probe/qrcode?host={}",
+                self.host,
+                self.admin_port,
+                urlencoding::encode(&self.host)
             ),
             ca_download_url: format!(
                 "http://{}:{}/_bifrost/public/cert",
@@ -575,6 +660,7 @@ impl TrustProbeSession {
         status: TrustProbeProxyAccessStatus,
         client_ip: Option<String>,
         message: String,
+        device_id: Option<String>,
     ) {
         if let Some(client_ip) = client_ip {
             self.client_ip = Some(client_ip);
@@ -593,6 +679,15 @@ impl TrustProbeSession {
             at: Utc::now(),
             message: Some(message),
         });
+        let device_client_ip = self.client_ip.clone();
+        let device_message = self.proxy_access_message.clone().unwrap_or_default();
+        if let Some(device_id) = normalize_device_id(device_id) {
+            self.device_mut(&device_id).apply_proxy_access(
+                status,
+                device_client_ip,
+                device_message,
+            );
+        }
     }
 
     fn apply_event(
@@ -602,6 +697,7 @@ impl TrustProbeSession {
         client_ip: Option<String>,
         user_agent: Option<String>,
         platform_hint: Option<String>,
+        device_id: Option<String>,
     ) {
         if let Some(client_ip) = client_ip {
             self.client_ip = Some(client_ip);
@@ -629,7 +725,10 @@ impl TrustProbeSession {
             "netcheck_ok" => {
                 self.opened = true;
                 self.network_reachable = true;
-                if self.status != TrustProbeStatus::TlsTrusted {
+                if !matches!(
+                    self.status,
+                    TrustProbeStatus::TlsTrusted | TrustProbeStatus::TlsFailed
+                ) {
                     self.status = TrustProbeStatus::NetworkReachable;
                 }
             }
@@ -678,10 +777,22 @@ impl TrustProbeSession {
         self.events.push(TrustProbeEvent {
             event_type: event_type.to_string(),
             at: Utc::now(),
-            message,
+            message: message.clone(),
         });
         if self.events.len() > 64 {
             self.events.remove(0);
+        }
+        let device_client_ip = self.client_ip.clone();
+        let device_user_agent = self.user_agent.clone();
+        let device_platform_hint = self.platform_hint.clone();
+        if let Some(device_id) = normalize_device_id(device_id) {
+            self.device_mut(&device_id).apply_event(
+                event_type,
+                message.clone(),
+                device_client_ip,
+                device_user_agent,
+                device_platform_hint,
+            );
         }
     }
 
@@ -702,6 +813,172 @@ impl TrustProbeSession {
             message: Some("Wi-Fi name updated for iOS proxy profile generation.".to_string()),
         });
         if self.events.len() > 64 {
+            self.events.remove(0);
+        }
+    }
+
+    fn device_mut(&mut self, device_id: &str) -> &mut TrustProbeDeviceState {
+        let now = Utc::now();
+        self.devices
+            .entry(device_id.to_string())
+            .or_insert_with(|| TrustProbeDeviceState::new(device_id.to_string(), now))
+    }
+}
+
+impl TrustProbeDeviceState {
+    fn new(device_id: String, now: DateTime<Utc>) -> Self {
+        Self {
+            device_id,
+            status: TrustProbeStatus::Created,
+            opened: false,
+            proxy_access_status: None,
+            proxy_access_allowed: None,
+            proxy_access_message: None,
+            proxy_configured: false,
+            proxy_configuration_message: None,
+            network_reachable: false,
+            tls_trusted: false,
+            client_ip: None,
+            user_agent: None,
+            platform_hint: None,
+            last_error: None,
+            first_seen: now,
+            last_seen: now,
+            events: Vec::new(),
+        }
+    }
+
+    fn to_view(&self) -> TrustProbeDeviceView {
+        TrustProbeDeviceView {
+            device_id: self.device_id.clone(),
+            status: self.status,
+            opened: self.opened,
+            proxy_access_status: self.proxy_access_status,
+            proxy_access_allowed: self.proxy_access_allowed,
+            proxy_access_message: self.proxy_access_message.clone(),
+            proxy_configured: self.proxy_configured,
+            proxy_configuration_message: self.proxy_configuration_message.clone(),
+            network_reachable: self.network_reachable,
+            tls_trusted: self.tls_trusted,
+            client_ip: self.client_ip.clone(),
+            user_agent: self.user_agent.clone(),
+            platform_hint: self.platform_hint.clone(),
+            last_error: self.last_error.clone(),
+            first_seen: self.first_seen,
+            last_seen: self.last_seen,
+            events: self.events.clone(),
+        }
+    }
+
+    fn apply_proxy_access(
+        &mut self,
+        status: TrustProbeProxyAccessStatus,
+        client_ip: Option<String>,
+        message: String,
+    ) {
+        self.last_seen = Utc::now();
+        self.opened = true;
+        self.client_ip = client_ip.or_else(|| self.client_ip.clone());
+        self.proxy_access_status = Some(status);
+        self.proxy_access_allowed = Some(matches!(status, TrustProbeProxyAccessStatus::Allowed));
+        self.proxy_access_message = Some(message.clone());
+        self.push_event(
+            match status {
+                TrustProbeProxyAccessStatus::Allowed => "proxy_access_allowed",
+                TrustProbeProxyAccessStatus::Pending => "proxy_access_pending",
+                TrustProbeProxyAccessStatus::Denied => "proxy_access_denied",
+                TrustProbeProxyAccessStatus::Unavailable => "proxy_access_unavailable",
+            },
+            Some(message),
+        );
+    }
+
+    fn apply_event(
+        &mut self,
+        event_type: &str,
+        message: Option<String>,
+        client_ip: Option<String>,
+        user_agent: Option<String>,
+        platform_hint: Option<String>,
+    ) {
+        self.last_seen = Utc::now();
+        self.client_ip = client_ip.or_else(|| self.client_ip.clone());
+        self.user_agent = user_agent.or_else(|| self.user_agent.clone());
+        self.platform_hint = platform_hint.or_else(|| self.platform_hint.clone());
+        match event_type {
+            "page_opened" => {
+                self.opened = true;
+                if !matches!(
+                    self.status,
+                    TrustProbeStatus::NetworkReachable
+                        | TrustProbeStatus::TlsTrusted
+                        | TrustProbeStatus::TlsFailed
+                        | TrustProbeStatus::NetworkFailed
+                ) {
+                    self.status = TrustProbeStatus::PageOpened;
+                }
+            }
+            "netcheck_ok" => {
+                self.opened = true;
+                self.network_reachable = true;
+                if !matches!(
+                    self.status,
+                    TrustProbeStatus::TlsTrusted | TrustProbeStatus::TlsFailed
+                ) {
+                    self.status = TrustProbeStatus::NetworkReachable;
+                }
+            }
+            "tls_ok" | "tls_check_ok" => {
+                self.opened = true;
+                self.network_reachable = true;
+                self.tls_trusted = true;
+                self.last_error = None;
+                self.status = TrustProbeStatus::TlsTrusted;
+            }
+            "tls_failed" => {
+                self.opened = true;
+                self.network_reachable = true;
+                if !self.tls_trusted {
+                    self.status = TrustProbeStatus::TlsFailed;
+                    self.last_error = message.clone();
+                }
+            }
+            "network_failed" => {
+                self.opened = true;
+                if !self.tls_trusted {
+                    self.status = TrustProbeStatus::NetworkFailed;
+                    self.last_error = message.clone();
+                }
+            }
+            "proxy_configured_ok" => {
+                self.opened = true;
+                self.proxy_configured = true;
+                self.proxy_configuration_message = Some(
+                    message
+                        .clone()
+                        .unwrap_or_else(|| "This browser is using the Bifrost proxy.".to_string()),
+                );
+            }
+            "proxy_config_failed" => {
+                self.opened = true;
+                if !self.proxy_configured {
+                    self.proxy_configuration_message = Some(message.clone().unwrap_or_else(|| {
+                        "This browser is not using the Bifrost proxy yet.".to_string()
+                    }));
+                }
+            }
+            _ => {}
+        }
+        self.push_event(event_type, message);
+    }
+
+    fn push_event(&mut self, event_type: &str, message: Option<String>) {
+        self.events.push(TrustProbeEvent {
+            event_type: event_type.to_string(),
+            at: Utc::now(),
+            message,
+        });
+        if self.events.len() > 32 {
             self.events.remove(0);
         }
     }
@@ -728,12 +1005,8 @@ pub async fn handle_trust_probe_proxy_configured_request(
             serde_json::json!({ "error": "missing sid" }),
         );
     };
-    let Some(token) = query_param(req.uri().query(), TOKEN_QUERY_KEY) else {
-        return probe_json_response(
-            StatusCode::UNAUTHORIZED,
-            serde_json::json!({ "error": "missing token" }),
-        );
-    };
+    let token = query_param(req.uri().query(), TOKEN_QUERY_KEY).unwrap_or_default();
+    let device_id = query_param(req.uri().query(), "deviceId");
     let user_agent = req
         .headers()
         .get(hyper::header::USER_AGENT)
@@ -753,6 +1026,7 @@ pub async fn handle_trust_probe_proxy_configured_request(
             client_ip,
             user_agent,
             platform_hint: None,
+            device_id,
         },
     ) {
         return probe_json_response(
@@ -835,12 +1109,16 @@ pub async fn handle_trust_probe_public(
     if req.method() == Method::OPTIONS {
         return cors_preflight();
     }
+    if path.trim_end_matches('/') == "/public/trust-probe" {
+        return render_fixed_probe_landing(req, state).await;
+    }
+    if path.trim_end_matches('/') == "/public/trust-probe/qrcode" {
+        return render_fixed_probe_qrcode(req, state).await;
+    }
     let Some((session_id, action)) = parse_public_probe_path(path) else {
         return error_response(StatusCode::NOT_FOUND, "Not Found");
     };
-    let Some(token) = query_param(req.uri().query(), TOKEN_QUERY_KEY) else {
-        return error_response(StatusCode::UNAUTHORIZED, "Missing trust probe token");
-    };
+    let token = query_param(req.uri().query(), TOKEN_QUERY_KEY).unwrap_or_default();
 
     match (req.method().clone(), action.as_deref()) {
         (Method::GET, None) => {
@@ -879,6 +1157,66 @@ pub async fn handle_trust_probe_public(
         (Method::POST, Some("report")) => report_probe_result(req, session_id, token).await,
         _ => method_not_allowed(),
     }
+}
+
+async fn render_fixed_probe_landing(
+    req: Request<Incoming>,
+    state: SharedAdminState,
+) -> Response<BoxBody> {
+    let host = match public_probe_host_from_request(&req) {
+        Some(host) => host,
+        None => return error_response(StatusCode::BAD_REQUEST, "Invalid availability check host"),
+    };
+    match TRUST_PROBE_MANAGER
+        .get_or_create_public_session(&state, &host)
+        .await
+    {
+        Ok(session) => {
+            if req.method() == Method::HEAD {
+                return public_response_builder(StatusCode::OK)
+                    .header("Content-Type", "text/html; charset=utf-8")
+                    .body(super::empty_body())
+                    .unwrap();
+            }
+            let Ok(session_id) = session.session_id.parse::<Uuid>() else {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Invalid availability check session id",
+                );
+            };
+            let html = TRUST_PROBE_MANAGER
+                .render_landing_page(session_id, "")
+                .unwrap_or_else(|| "Availability check session expired.".to_string());
+            public_response_builder(StatusCode::OK)
+                .header("Content-Type", "text/html; charset=utf-8")
+                .body(full_body(html))
+                .unwrap()
+        }
+        Err(error) => error_response(StatusCode::BAD_REQUEST, &error),
+    }
+}
+
+async fn render_fixed_probe_qrcode(
+    req: Request<Incoming>,
+    state: SharedAdminState,
+) -> Response<BoxBody> {
+    let host = query_param(req.uri().query(), "host")
+        .or_else(|| public_probe_host_from_request(&req))
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    if req.method() == Method::HEAD {
+        return public_response_builder(StatusCode::OK)
+            .header("Content-Type", "image/svg+xml")
+            .body(super::empty_body())
+            .unwrap();
+    }
+    let session = match TRUST_PROBE_MANAGER
+        .get_or_create_public_session(&state, &host)
+        .await
+    {
+        Ok(session) => session,
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error),
+    };
+    render_qrcode_for_url(&session.landing_url)
 }
 
 async fn create_probe_session(
@@ -993,6 +1331,7 @@ async fn check_proxy_access(
     session_id: Uuid,
     token: String,
 ) -> Response<BoxBody> {
+    let device_id = query_param(req.uri().query(), "deviceId");
     let Some(client_ip) = request_client_ip_addr(&req) else {
         let message = "Bifrost could not determine this device IP address.".to_string();
         if !TRUST_PROBE_MANAGER.record_proxy_access(
@@ -1001,6 +1340,7 @@ async fn check_proxy_access(
             TrustProbeProxyAccessStatus::Unavailable,
             None,
             message.clone(),
+            device_id.clone(),
         ) {
             return error_response(
                 StatusCode::NOT_FOUND,
@@ -1024,6 +1364,7 @@ async fn check_proxy_access(
             TrustProbeProxyAccessStatus::Unavailable,
             Some(client_ip.to_string()),
             message.clone(),
+            device_id.clone(),
         ) {
             return error_response(
                 StatusCode::NOT_FOUND,
@@ -1070,6 +1411,7 @@ async fn check_proxy_access(
         status,
         Some(client_ip.to_string()),
         message.clone(),
+        device_id,
     ) {
         return error_response(
             StatusCode::NOT_FOUND,
@@ -1092,15 +1434,19 @@ fn render_probe_qrcode(session_id: Uuid, token: &str) -> Response<BoxBody> {
             "Availability check session not found",
         );
     };
-    let url = format!(
-        "{}?{TOKEN_QUERY_KEY}={}",
-        session
-            .landing_url
-            .split('?')
-            .next()
-            .unwrap_or(&session.landing_url),
-        urlencoding::encode(token)
-    );
+    let url = if token.is_empty() {
+        session.landing_url
+    } else {
+        format!(
+            "{}?{TOKEN_QUERY_KEY}={}",
+            session.landing_url,
+            urlencoding::encode(token)
+        )
+    };
+    render_qrcode_for_url(&url)
+}
+
+fn render_qrcode_for_url(url: &str) -> Response<BoxBody> {
     let code = match QrCode::new(url.as_bytes()) {
         Ok(code) => code,
         Err(error) => {
@@ -1197,9 +1543,8 @@ async fn handle_probe_request(
     else {
         return Ok(probe_response(StatusCode::BAD_REQUEST, "missing sid"));
     };
-    let Some(token) = query_param(req.uri().query(), TOKEN_QUERY_KEY) else {
-        return Ok(probe_response(StatusCode::UNAUTHORIZED, "missing token"));
-    };
+    let token = query_param(req.uri().query(), TOKEN_QUERY_KEY).unwrap_or_default();
+    let device_id = query_param(req.uri().query(), "deviceId");
     let user_agent = req
         .headers()
         .get(hyper::header::USER_AGENT)
@@ -1215,9 +1560,10 @@ async fn handle_probe_request(
                 TrustProbeEventInput {
                     event_type: "netcheck_ok".to_string(),
                     message: None,
-                    client_ip,
-                    user_agent,
+                    client_ip: client_ip.clone(),
+                    user_agent: user_agent.clone(),
                     platform_hint: None,
+                    device_id: device_id.clone(),
                 },
             );
             probe_json_response(StatusCode::OK, serde_json::json!({ "ok": true }))
@@ -1229,9 +1575,10 @@ async fn handle_probe_request(
                 TrustProbeEventInput {
                     event_type: "tls_ok".to_string(),
                     message: None,
-                    client_ip,
-                    user_agent,
+                    client_ip: client_ip.clone(),
+                    user_agent: user_agent.clone(),
                     platform_hint: None,
+                    device_id: device_id.clone(),
                 },
             );
             probe_json_response(StatusCode::OK, serde_json::json!({ "trusted": true }))
@@ -1269,57 +1616,43 @@ fn probe_json_response(status: StatusCode, body: serde_json::Value) -> Response<
 
 fn render_landing_page(session: &TrustProbeSession, token: &str) -> String {
     let view = session.to_view(token);
+    let token_query = if token.is_empty() {
+        String::new()
+    } else {
+        format!("?{TOKEN_QUERY_KEY}={}", urlencoding::encode(token))
+    };
+    let token_suffix = if token.is_empty() {
+        String::new()
+    } else {
+        format!("&{TOKEN_QUERY_KEY}={}", urlencoding::encode(token))
+    };
     let netcheck_url = format!(
-        "http://{}:{}/_bifrost/trust-probe/netcheck?sid={}&{}={}",
-        view.host,
-        view.probe_port,
-        view.session_id,
-        TOKEN_QUERY_KEY,
-        urlencoding::encode(token)
+        "http://{}:{}/_bifrost/trust-probe/netcheck?sid={}{}",
+        view.host, view.probe_port, view.session_id, token_suffix
     );
     let tls_check_url = format!(
-        "https://{}:{}/_bifrost/trust-probe/check?sid={}&{}={}",
-        view.host,
-        view.probe_port,
-        view.session_id,
-        TOKEN_QUERY_KEY,
-        urlencoding::encode(token)
+        "https://{}:{}/_bifrost/trust-probe/check?sid={}{}",
+        view.host, view.probe_port, view.session_id, token_suffix
     );
     let report_url = format!(
-        "http://{}:{}/_bifrost/public/trust-probe/{}/report?{}={}",
-        view.host,
-        view.admin_port,
-        view.session_id,
-        TOKEN_QUERY_KEY,
-        urlencoding::encode(token)
+        "http://{}:{}/_bifrost/public/trust-probe/{}/report{}",
+        view.host, view.admin_port, view.session_id, token_query
     );
     let proxy_access_url = format!(
-        "http://{}:{}/_bifrost/public/trust-probe/{}/proxy-access?{}={}",
-        view.host,
-        view.admin_port,
-        view.session_id,
-        TOKEN_QUERY_KEY,
-        urlencoding::encode(token)
+        "http://{}:{}/_bifrost/public/trust-probe/{}/proxy-access{}",
+        view.host, view.admin_port, view.session_id, token_query
     );
     let session_public_url = format!(
-        "http://{}:{}/_bifrost/public/trust-probe/{}/session?{}={}",
-        view.host,
-        view.admin_port,
-        view.session_id,
-        TOKEN_QUERY_KEY,
-        urlencoding::encode(token)
+        "http://{}:{}/_bifrost/public/trust-probe/{}/session{}",
+        view.host, view.admin_port, view.session_id, token_query
     );
     let ios_wifi_proxy_profile_url = format!(
         "http://{}:{}/_bifrost/public/mobile/ios-wifi-proxy.mobileconfig",
         view.host, view.admin_port
     );
     let proxy_configured_url = format!(
-        "http://{}{}?sid={}&{}={}",
-        TRUST_PROBE_PROXY_CONFIG_HOST,
-        TRUST_PROBE_PROXY_CONFIG_PATH,
-        view.session_id,
-        TOKEN_QUERY_KEY,
-        urlencoding::encode(token)
+        "http://{}{}?sid={}{}",
+        TRUST_PROBE_PROXY_CONFIG_HOST, TRUST_PROBE_PROXY_CONFIG_PATH, view.session_id, token_suffix
     );
     let config = serde_json::json!({
         "sessionId": view.session_id,
@@ -1380,6 +1713,26 @@ fn render_landing_page(session: &TrustProbeSession, token: &str) -> String {
 </main>
 <script>
 window.__BIFROST_TRUST_PROBE__ = {};
+function getDeviceId() {{
+  const key = "bifrostAvailabilityDeviceId";
+  try {{
+    let value = localStorage.getItem(key);
+    if (!value) {{
+      value = "dev-" + randomSuffix();
+      localStorage.setItem(key, value);
+    }}
+    return value;
+  }} catch (_) {{
+    if (!window.__BIFROST_FALLBACK_DEVICE_ID__) {{
+      window.__BIFROST_FALLBACK_DEVICE_ID__ = "dev-" + randomSuffix();
+    }}
+    return window.__BIFROST_FALLBACK_DEVICE_ID__;
+  }}
+}}
+function withDevice(url) {{
+  const separator = url.indexOf("?") >= 0 ? "&" : "?";
+  return url + separator + "deviceId=" + encodeURIComponent(window.__BIFROST_TRUST_PROBE__.deviceId || getDeviceId());
+}}
 function detectPlatform() {{
   const ua = navigator.userAgent || "";
   if (/iPhone|iPad|iPod/i.test(ua)) return "ios";
@@ -1390,19 +1743,25 @@ function randomSuffix() {{
   if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
   return String(Date.now()) + Math.random().toString(16).slice(2);
 }}
-function show(html) {{ document.getElementById("result").innerHTML = html; }}
-function showNext(html) {{ document.getElementById("next").innerHTML = html; }}
-function showProxyAccess(html) {{ document.getElementById("proxy-access").innerHTML = html; }}
-function showProxyConfiguration(html) {{ document.getElementById("proxy-configuration").innerHTML = html; }}
+function setHtmlIfChanged(id, html) {{
+  const element = document.getElementById(id);
+  if (!element || element.innerHTML === html) return;
+  element.innerHTML = html;
+}}
+function show(html) {{ setHtmlIfChanged("result", html); }}
+function showNext(html) {{ setHtmlIfChanged("next", html); }}
+function showProxyAccess(html) {{ setHtmlIfChanged("proxy-access", html); }}
+function showProxyConfiguration(html) {{ setHtmlIfChanged("proxy-configuration", html); }}
 let probeLoopRunning = false;
 let probeHasRun = false;
 async function postReport(type, extra) {{
   const cfg = window.__BIFROST_TRUST_PROBE__;
   try {{
-    await fetch(cfg.reportUrl, {{
+    await fetch(withDevice(cfg.reportUrl), {{
       method: "POST",
       headers: {{ "Content-Type": "application/json" }},
       body: JSON.stringify(Object.assign({{
+        deviceId: cfg.deviceId,
         type,
         userAgent: navigator.userAgent,
         platformHint: detectPlatform()
@@ -1417,7 +1776,7 @@ async function syncProbeConfig() {{
   const risk = document.getElementById("ios-wifi-managed-risk");
   if (risk) cfg.managedWifiRiskAccepted = !!risk.checked;
   try {{
-    const response = await fetch(cfg.sessionPublicUrl + "&r=" + encodeURIComponent(randomSuffix()), {{
+    const response = await fetch(withDevice(cfg.sessionPublicUrl) + "&r=" + encodeURIComponent(randomSuffix()), {{
       cache: "no-store"
     }});
     if (!response.ok) return;
@@ -1450,7 +1809,7 @@ async function checkCertificateTrust() {{
     show("Device opened the probe page. Checking probe port...");
   }}
   try {{
-    const net = await fetch(cfg.netcheckUrl + "&r=" + encodeURIComponent(randomSuffix()), {{
+    const net = await fetch(withDevice(cfg.netcheckUrl) + "&r=" + encodeURIComponent(randomSuffix()), {{
       cache: "no-store",
       mode: "cors"
     }});
@@ -1461,7 +1820,9 @@ async function checkCertificateTrust() {{
       return false;
     }}
     await postReport("netcheck_ok");
-    show('<span class="ok">Network check passed.</span> Checking HTTPS trust...');
+    if (!cfg.tlsFailed && !cfg.tlsTrusted) {{
+      show('<span class="ok">Network check passed.</span> Checking HTTPS trust...');
+    }}
   }} catch (error) {{
     await postReport("network_failed", {{ message: String(error) }});
     show('<span class="bad">Probe port is not reachable.</span>');
@@ -1469,12 +1830,14 @@ async function checkCertificateTrust() {{
     return false;
   }}
   try {{
-    const tls = await fetch(cfg.tlsCheckUrl + "&r=" + encodeURIComponent(randomSuffix()), {{
+    const tls = await fetch(withDevice(cfg.tlsCheckUrl) + "&r=" + encodeURIComponent(randomSuffix()), {{
       cache: "no-store",
       mode: "cors"
     }});
     if (tls.ok) {{
       await postReport("tls_ok");
+      cfg.tlsFailed = false;
+      cfg.tlsTrusted = true;
       show('<span class="ok">Trust check passed. This browser trusts Bifrost CA.</span>');
       showProxyConfig();
       return true;
@@ -1495,7 +1858,7 @@ async function checkProxyAccess() {{
     showProxyAccess("Checking whether this device is authorized to use the Bifrost proxy...");
   }}
   try {{
-    const response = await fetch(cfg.proxyAccessUrl + "&r=" + encodeURIComponent(randomSuffix()), {{
+    const response = await fetch(withDevice(cfg.proxyAccessUrl) + "&r=" + encodeURIComponent(randomSuffix()), {{
       cache: "no-store",
       mode: "cors"
     }});
@@ -1519,7 +1882,7 @@ async function checkProxyConfiguration() {{
     showProxyConfiguration("Checking whether this browser is actually using the Bifrost proxy...");
   }}
   try {{
-    const response = await fetch(cfg.proxyConfiguredUrl + "&r=" + encodeURIComponent(randomSuffix()), {{
+    const response = await fetch(withDevice(cfg.proxyConfiguredUrl) + "&r=" + encodeURIComponent(randomSuffix()), {{
       cache: "no-store",
       mode: "cors"
     }});
@@ -1650,6 +2013,8 @@ function showProxyConfig() {{
   showNext("<p>Next configure this device proxy to:</p><button onclick='copyProxyAddress()'><strong>" + proxyAddress + "</strong></button><span id='copy-status'></span><p><a class='button' href='" + cfg.proxyQrCodeUrl + "'>Open proxy QR code</a></p>");
 }}
 function showTlsFailed() {{
+  window.__BIFROST_TRUST_PROBE__.tlsFailed = true;
+  window.__BIFROST_TRUST_PROBE__.tlsTrusted = false;
   const platform = detectPlatform();
   show('<span class="bad">HTTPS trust check failed.</span><p><a class="button" href="' + window.__BIFROST_TRUST_PROBE__.caDownloadUrl + '">Download Bifrost CA</a></p>');
   let restartHint = "<p>If you just installed or trusted the CA, fully quit and restart this browser, then open this page again. Some browsers keep old certificate trust decisions until restart.</p>";
@@ -1662,6 +2027,7 @@ function showTlsFailed() {{
   showNext(steps + "<button onclick='runProbeLoop()'>Retry</button>");
 }}
 renderIosWifiProxyTools();
+window.__BIFROST_TRUST_PROBE__.deviceId = getDeviceId();
 setInterval(syncProbeConfig, 1000);
 runProbeLoop();
 setInterval(runProbeLoop, 1000);
@@ -1709,6 +2075,44 @@ fn validate_probe_host(host: &str) -> Result<String, String> {
     } else {
         Err("Availability check host must be selected from the local IP list.".to_string())
     }
+}
+
+fn public_probe_host_from_request(req: &Request<Incoming>) -> Option<String> {
+    let raw_host = req
+        .headers()
+        .get(hyper::header::HOST)
+        .and_then(|value| value.to_str().ok())?
+        .trim();
+    if raw_host.is_empty() {
+        return None;
+    }
+    let host = if raw_host.starts_with('[') {
+        raw_host
+            .strip_prefix('[')
+            .and_then(|value| value.split(']').next())
+            .unwrap_or(raw_host)
+    } else {
+        raw_host.split(':').next().unwrap_or(raw_host)
+    };
+    if host.trim().is_empty() {
+        None
+    } else {
+        Some(host.trim().to_string())
+    }
+}
+
+fn normalize_device_id(device_id: Option<String>) -> Option<String> {
+    let device_id = device_id?.trim().to_string();
+    if device_id.is_empty() || device_id.len() > 96 {
+        return None;
+    }
+    if !device_id
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+    {
+        return None;
+    }
+    Some(device_id)
 }
 
 fn query_param(query: Option<&str>, key: &str) -> Option<String> {
@@ -1880,6 +2284,36 @@ fn escape_html(value: &str) -> String {
 mod tests {
     use super::*;
 
+    fn test_session(id: Uuid, token: &str, now: DateTime<Utc>) -> TrustProbeSession {
+        TrustProbeSession {
+            id,
+            token_hash: hash_token(token),
+            host: "127.0.0.1".to_string(),
+            admin_port: 8800,
+            probe_port: 8802,
+            ca_fingerprint_sha256: None,
+            status: TrustProbeStatus::Created,
+            opened: false,
+            proxy_access_status: None,
+            proxy_access_allowed: None,
+            proxy_access_message: None,
+            proxy_configured: false,
+            proxy_configuration_message: None,
+            suggested_wifi_ssid: None,
+            suggested_wifi_ssid_message: None,
+            network_reachable: false,
+            tls_trusted: false,
+            created_at: now,
+            expires_at: now + chrono::Duration::minutes(10),
+            client_ip: None,
+            user_agent: None,
+            platform_hint: None,
+            last_error: None,
+            devices: HashMap::new(),
+            events: Vec::new(),
+        }
+    }
+
     #[test]
     fn token_hash_does_not_match_plain_token() {
         let token = "secret";
@@ -1914,14 +2348,23 @@ mod tests {
             user_agent: None,
             platform_hint: None,
             last_error: None,
+            devices: HashMap::new(),
             events: Vec::new(),
         };
 
-        session.apply_event("page_opened", None, None, None, Some("ios".to_string()));
-        session.apply_event("netcheck_ok", None, None, None, None);
+        session.apply_event(
+            "page_opened",
+            None,
+            None,
+            None,
+            Some("ios".to_string()),
+            None,
+        );
+        session.apply_event("netcheck_ok", None, None, None, None, None);
         session.apply_event(
             "tls_failed",
             Some("Failed to fetch".to_string()),
+            None,
             None,
             None,
             None,
@@ -1962,10 +2405,11 @@ mod tests {
             user_agent: None,
             platform_hint: None,
             last_error: Some("old error".to_string()),
+            devices: HashMap::new(),
             events: Vec::new(),
         };
 
-        session.apply_event("tls_ok", None, None, None, None);
+        session.apply_event("tls_ok", None, None, None, None, None);
 
         assert_eq!(session.status, TrustProbeStatus::TlsTrusted);
         assert!(session.tls_trusted);
@@ -2000,6 +2444,7 @@ mod tests {
             user_agent: None,
             platform_hint: None,
             last_error: None,
+            devices: HashMap::new(),
             events: Vec::new(),
         };
 
@@ -2007,6 +2452,7 @@ mod tests {
             TrustProbeProxyAccessStatus::Pending,
             Some("192.168.1.20".to_string()),
             "Waiting for proxy access approval.".to_string(),
+            None,
         );
 
         let view = session.to_view(token);
@@ -2054,6 +2500,7 @@ mod tests {
             user_agent: None,
             platform_hint: None,
             last_error: None,
+            devices: HashMap::new(),
             events: Vec::new(),
         };
 
@@ -2061,6 +2508,7 @@ mod tests {
             "proxy_configured_ok",
             Some("Proxy reached Bifrost.".to_string()),
             Some("192.168.1.20".to_string()),
+            None,
             None,
             None,
         );
@@ -2077,6 +2525,84 @@ mod tests {
             view.events.last().map(|event| event.event_type.as_str()),
             Some("proxy_configured_ok")
         );
+    }
+
+    #[test]
+    fn device_status_is_tracked_per_local_storage_device_id() {
+        let token = "token";
+        let mut session = test_session(Uuid::new_v4(), token, Utc::now());
+
+        session.apply_event(
+            "tls_ok",
+            None,
+            Some("192.168.1.20".to_string()),
+            Some("Mobile Safari".to_string()),
+            Some("ios".to_string()),
+            Some("dev-ios".to_string()),
+        );
+        session.apply_proxy_access(
+            TrustProbeProxyAccessStatus::Pending,
+            Some("192.168.1.21".to_string()),
+            "Waiting for proxy access approval.".to_string(),
+            Some("dev-android".to_string()),
+        );
+
+        let view = session.to_view("");
+        assert_eq!(view.devices.len(), 2);
+        let ios = view
+            .devices
+            .iter()
+            .find(|device| device.device_id == "dev-ios")
+            .expect("ios device state");
+        assert!(ios.tls_trusted);
+        assert_eq!(ios.platform_hint.as_deref(), Some("ios"));
+        assert_eq!(ios.client_ip.as_deref(), Some("192.168.1.20"));
+
+        let android = view
+            .devices
+            .iter()
+            .find(|device| device.device_id == "dev-android")
+            .expect("android device state");
+        assert_eq!(
+            android.proxy_access_status,
+            Some(TrustProbeProxyAccessStatus::Pending)
+        );
+        assert_eq!(android.proxy_access_allowed, Some(false));
+        assert_eq!(android.client_ip.as_deref(), Some("192.168.1.21"));
+    }
+
+    #[test]
+    fn tls_failure_is_not_downgraded_by_next_network_check() {
+        let token = "token";
+        let mut session = test_session(Uuid::new_v4(), token, Utc::now());
+
+        session.apply_event(
+            "tls_failed",
+            Some("Failed to fetch".to_string()),
+            Some("192.168.1.20".to_string()),
+            Some("Mobile Safari".to_string()),
+            Some("ios".to_string()),
+            Some("dev-ios".to_string()),
+        );
+        session.apply_event(
+            "netcheck_ok",
+            None,
+            Some("192.168.1.20".to_string()),
+            Some("Mobile Safari".to_string()),
+            Some("ios".to_string()),
+            Some("dev-ios".to_string()),
+        );
+
+        let view = session.to_view("");
+        assert_eq!(view.status, TrustProbeStatus::TlsFailed);
+        let device = view
+            .devices
+            .iter()
+            .find(|device| device.device_id == "dev-ios")
+            .expect("device state");
+        assert_eq!(device.status, TrustProbeStatus::TlsFailed);
+        assert!(device.network_reachable);
+        assert!(!device.tls_trusted);
     }
 
     #[test]
@@ -2107,6 +2633,7 @@ mod tests {
             user_agent: None,
             platform_hint: None,
             last_error: None,
+            devices: HashMap::new(),
             events: Vec::new(),
         };
 
@@ -2152,6 +2679,7 @@ mod tests {
             user_agent: None,
             platform_hint: None,
             last_error: None,
+            devices: HashMap::new(),
             events: Vec::new(),
         };
         let active_a = Uuid::new_v4();

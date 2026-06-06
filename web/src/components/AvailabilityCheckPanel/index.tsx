@@ -19,6 +19,7 @@ import {
   getTrustProbeSession,
   updateTrustProbeSessionWifiSsid,
   type CertInfo,
+  type TrustProbeDevice,
   type TrustProbeSession,
   type TrustProbeStatus,
 } from "../../api/cert";
@@ -79,6 +80,59 @@ function trustProbeStatusColor(status: TrustProbeStatus) {
     default:
       return "default";
   }
+}
+
+function shortDeviceId(deviceId: string) {
+  if (deviceId.length <= 18) {
+    return deviceId;
+  }
+  return `${deviceId.slice(0, 8)}...${deviceId.slice(-6)}`;
+}
+
+function DeviceStatusTags({ device }: { device: TrustProbeDevice }) {
+  return (
+    <Space wrap size={[4, 4]}>
+      <Tag color={device.opened ? "green" : "default"}>
+        Page {device.opened ? "opened" : "waiting"}
+      </Tag>
+      <Tag color={device.networkReachable ? "green" : "default"}>
+        Network {device.networkReachable ? "ok" : "pending"}
+      </Tag>
+      <Tag
+        color={device.tlsTrusted ? "green" : device.status === "tls_failed" ? "red" : "default"}
+      >
+        Trust{" "}
+        {device.tlsTrusted ? "passed" : device.status === "tls_failed" ? "failed" : "pending"}
+      </Tag>
+      <Tag
+        color={
+          device.proxyAccessAllowed
+            ? "green"
+            : device.proxyAccessStatus === "pending"
+              ? "orange"
+              : "default"
+        }
+      >
+        Access {device.proxyAccessStatus ?? "pending"}
+      </Tag>
+      <Tag
+        color={
+          device.proxyConfigured
+            ? "green"
+            : device.proxyConfigurationMessage
+              ? "red"
+              : "default"
+        }
+      >
+        Proxy{" "}
+        {device.proxyConfigured
+          ? "configured"
+          : device.proxyConfigurationMessage
+            ? "missing"
+            : "pending"}
+      </Tag>
+    </Space>
+  );
 }
 
 function preserveTrustProbeUrls(
@@ -442,6 +496,57 @@ export default function AvailabilityCheckPanel({
                       : "pending"}
                 </Tag>
               </Space>
+
+              {trustProbeSession.devices?.length ? (
+                <List
+                  size="small"
+                  header={
+                    <Space size={6}>
+                      <Text strong style={{ fontSize: 12 }}>
+                        Connected devices
+                      </Text>
+                      <Tag>{trustProbeSession.devices.length}</Tag>
+                    </Space>
+                  }
+                  dataSource={trustProbeSession.devices}
+                  data-testid={`${testIdPrefix}-devices`}
+                  renderItem={(device) => (
+                    <List.Item>
+                      <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                        <Space wrap size={[8, 4]}>
+                          <Text strong style={{ fontSize: 12 }}>
+                            {shortDeviceId(device.deviceId)}
+                          </Text>
+                          {device.platformHint ? (
+                            <Tag color={device.platformHint === "ios" ? "purple" : "blue"}>
+                              {device.platformHint}
+                            </Tag>
+                          ) : null}
+                          {device.clientIp ? (
+                            <Text code style={{ fontSize: 12 }}>
+                              {device.clientIp}
+                            </Text>
+                          ) : null}
+                          <Text type="secondary" style={{ fontSize: 12 }}>
+                            last seen {new Date(device.lastSeen).toLocaleTimeString()}
+                          </Text>
+                        </Space>
+                        <DeviceStatusTags device={device} />
+                        {device.lastError ? (
+                          <Text type="secondary" style={{ fontSize: 12 }}>
+                            {device.lastError}
+                          </Text>
+                        ) : null}
+                      </Space>
+                    </List.Item>
+                  )}
+                />
+              ) : (
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  No device has opened this availability check link yet. Multiple devices can use
+                  the same fixed link; Bifrost will track each browser by a local device ID.
+                </Text>
+              )}
 
               {!trustProbeSession.proxyConfigured && trustProbeSession.proxyConfigurationMessage ? (
                 <Alert
