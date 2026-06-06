@@ -11,8 +11,10 @@ use futures_util::FutureExt;
 use regex::Regex;
 
 use bifrost_admin::{
-    handle_sync_login_callback, is_cert_public_request, is_valid_admin_request, AdminRouter,
-    AdminSecurityConfig, AdminState, SharedPushManager, ADMIN_PATH_PREFIX,
+    handle_sync_login_callback, handle_trust_probe_proxy_configured_request,
+    is_cert_public_request, is_valid_admin_request, AdminRouter, AdminSecurityConfig, AdminState,
+    SharedPushManager, ADMIN_PATH_PREFIX, TRUST_PROBE_PROXY_CONFIG_HOST,
+    TRUST_PROBE_PROXY_CONFIG_PATH,
 };
 
 pub(crate) const ADMIN_VIRTUAL_HOST: &str = "bifrost.local";
@@ -1413,6 +1415,10 @@ async fn handle_request(
         );
     }
 
+    if is_trust_probe_proxy_configured_request(&req) {
+        return Ok(handle_trust_probe_proxy_configured_request(req, peer_addr).await);
+    }
+
     let is_public_cert_path = is_cert_public_request(&req);
     let is_loopback = peer_addr.ip().is_loopback();
     if !is_public_cert_path && !is_loopback {
@@ -1982,6 +1988,13 @@ fn is_proxy_request_targeting_other(
     }
 
     true
+}
+
+fn is_trust_probe_proxy_configured_request(req: &Request<Incoming>) -> bool {
+    let uri = req.uri();
+    uri.scheme_str() == Some("http")
+        && uri.host() == Some(TRUST_PROBE_PROXY_CONFIG_HOST)
+        && uri.path() == TRUST_PROBE_PROXY_CONFIG_PATH
 }
 
 fn rewrite_virtual_host_request(req: Request<Incoming>) -> Request<Incoming> {

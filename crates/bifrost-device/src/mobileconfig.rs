@@ -194,7 +194,7 @@ pub fn generate_ios_wifi_proxy_mobileconfig(
       <key>EncryptionType</key>
       <string>Any</string>
       <key>PayloadDescription</key>
-      <string>Configures the selected Wi-Fi network to use Bifrost as its manual HTTP proxy.</string>
+      <string>Configures manual HTTP proxy for the managed Wi-Fi network named {ssid}. This payload does not contain a Wi-Fi password or join credentials. Removing this profile may remove the managed Wi-Fi network entry from iOS.</string>
       <key>PayloadDisplayName</key>
       <string>Bifrost Wi-Fi Proxy</string>
       <key>PayloadIdentifier</key>
@@ -216,7 +216,7 @@ pub fn generate_ios_wifi_proxy_mobileconfig(
     </dict>
   </array>
   <key>PayloadDescription</key>
-  <string>Installs Bifrost CA and configures Wi-Fi SSID {ssid} to use Bifrost proxy {proxy_host}:{proxy_port}. Personal iPhone and iPad devices still require profile installation confirmation and may require enabling full trust for Bifrost CA.</string>
+  <string>Installs Bifrost CA and configures the managed Wi-Fi network {ssid} to use Bifrost proxy {proxy_host}:{proxy_port}. This profile does not contain a Wi-Fi password or join credentials. Removing this profile may remove the managed Wi-Fi network entry from iOS. Personal iPhone and iPad devices still require profile installation confirmation and may require enabling full trust for Bifrost CA.</string>
   <key>PayloadDisplayName</key>
   <string>{display_name}</string>
   <key>PayloadIdentifier</key>
@@ -289,6 +289,10 @@ mod tests {
         assert!(profile.contains("<string>192.168.8.34</string>"));
         assert!(profile.contains("<key>ProxyServerPort</key>"));
         assert!(profile.contains("<integer>9900</integer>"));
+        assert!(profile.contains("does not contain a Wi-Fi password"));
+        assert!(profile.contains("Removing this profile may remove the managed Wi-Fi network"));
+        assert!(!profile.contains("<key>Password</key>"));
+        assert!(!profile.contains("<key>Passphrase</key>"));
     }
 
     #[test]

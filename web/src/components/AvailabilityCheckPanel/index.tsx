@@ -3,6 +3,7 @@ import {
   Alert,
   Button,
   Col,
+  Input,
   List,
   Row,
   Select,
@@ -16,13 +17,22 @@ import {
   createTrustProbeSession,
   getCertInfo,
   getTrustProbeSession,
+  updateTrustProbeSessionWifiSsid,
   type CertInfo,
   type TrustProbeSession,
   type TrustProbeStatus,
 } from "../../api/cert";
 import { normalizeApiErrorMessage } from "../../api/client";
+import {
+  getSharedIosWifiProxySsid,
+  setSharedIosWifiProxySsid,
+  subscribeSharedIosWifiProxySsid,
+} from "../../utils/iosWifiProxySsid";
 
 const { Text, Paragraph } = Typography;
+
+const MANAGED_WIFI_PROFILE_RISK_TEXT =
+  "Experimental profile note: Bifrost's iOS Wi-Fi proxy profile uses Apple's managed Wi-Fi payload. It does not contain a Wi-Fi password, but uninstalling the profile can remove that managed Wi-Fi network entry from iOS. Manual Wi-Fi proxy setup is the safe cleanup path.";
 
 interface AvailabilityCheckPanelProps {
   certInfo?: CertInfo | null;
@@ -95,6 +105,8 @@ export default function AvailabilityCheckPanel({
   const [loadedCertInfo, setLoadedCertInfo] = useState<CertInfo | null>(null);
   const [trustProbeHost, setTrustProbeHost] = useState<string>("");
   const [trustProbeSession, setTrustProbeSession] = useState<TrustProbeSession | null>(null);
+  const [wifiSsidDraft, setWifiSsidDraft] = useState(() => getSharedIosWifiProxySsid());
+  const [updatingWifiSsid, setUpdatingWifiSsid] = useState(false);
   const [creatingTrustProbe, setCreatingTrustProbe] = useState(false);
   const autoCreatedHostRef = useRef<string | null>(null);
   const effectiveCertInfo = certInfo ?? loadedCertInfo;
@@ -133,9 +145,12 @@ export default function AvailabilityCheckPanel({
     if (!trustProbeSession) {
       return;
     }
+    if (trustProbeSession.status === "expired") {
+      return;
+    }
     if (
-      trustProbeSession.status === "tls_trusted" ||
-      trustProbeSession.status === "expired"
+      trustProbeSession.status === "tls_trusted" &&
+      (trustProbeSession.proxyConfigured || trustProbeSession.proxyConfigurationMessage)
     ) {
       return;
     }
@@ -156,6 +171,54 @@ export default function AvailabilityCheckPanel({
     return () => window.clearInterval(timer);
   }, [trustProbeSession]);
 
+  useEffect(() => {
+    const sessionSsid = trustProbeSession?.suggestedWifiSsid?.trim();
+    setWifiSsidDraft(sessionSsid || getSharedIosWifiProxySsid());
+  }, [trustProbeSession?.sessionId, trustProbeSession?.suggestedWifiSsid]);
+
+  const applyWifiSsidToCurrentSession = useCallback(
+    async (ssid: string, silent = false) => {
+      const normalized = ssid.trim();
+      if (!trustProbeSession || !normalized) {
+        return;
+      }
+      if (trustProbeSession.suggestedWifiSsid?.trim() === normalized) {
+        return;
+      }
+      try {
+        const next = await updateTrustProbeSessionWifiSsid(
+          trustProbeSession.sessionId,
+          normalized,
+        );
+        setTrustProbeSession((current) => {
+          if (!current || current.sessionId !== next.sessionId) {
+            return next;
+          }
+          return preserveTrustProbeUrls(next, current);
+        });
+      } catch (error) {
+        if (!silent) {
+          message.error(normalizeApiErrorMessage(error, "Failed to update Wi-Fi name"));
+        }
+      }
+    },
+    [trustProbeSession],
+  );
+
+  useEffect(() => {
+    return subscribeSharedIosWifiProxySsid((ssid) => {
+      setWifiSsidDraft(ssid);
+      void applyWifiSsidToCurrentSession(ssid, true);
+    });
+  }, [applyWifiSsidToCurrentSession]);
+
+  useEffect(() => {
+    const sharedSsid = getSharedIosWifiProxySsid();
+    if (sharedSsid) {
+      void applyWifiSsidToCurrentSession(sharedSsid, true);
+    }
+  }, [applyWifiSsidToCurrentSession, trustProbeSession?.sessionId]);
+
   const handleCreateTrustProbe = useCallback(
     async (silent = false) => {
       if (!trustProbeHost) {
@@ -167,7 +230,13 @@ export default function AvailabilityCheckPanel({
       setCreatingTrustProbe(true);
       try {
         const session = await createTrustProbeSession(trustProbeHost);
-        setTrustProbeSession(session);
+        const sharedSsid = getSharedIosWifiProxySsid() || wifiSsidDraft.trim();
+        if (sharedSsid && session.suggestedWifiSsid?.trim() !== sharedSsid) {
+          const next = await updateTrustProbeSessionWifiSsid(session.sessionId, sharedSsid);
+          setTrustProbeSession(preserveTrustProbeUrls(next, session));
+        } else {
+          setTrustProbeSession(session);
+        }
         if (!silent) {
           message.success("Availability check link and QR code are ready.");
         }
@@ -179,7 +248,7 @@ export default function AvailabilityCheckPanel({
         setCreatingTrustProbe(false);
       }
     },
-    [trustProbeHost],
+    [trustProbeHost, wifiSsidDraft],
   );
 
   useEffect(() => {
@@ -215,6 +284,33 @@ export default function AvailabilityCheckPanel({
       message.warning("Select and copy the link manually.");
     }
   }, [trustProbeSession?.landingUrl]);
+
+  const handleUpdateWifiSsid = useCallback(async () => {
+    if (!trustProbeSession) {
+      return;
+    }
+    const ssid = wifiSsidDraft.trim();
+    if (!ssid) {
+      message.warning("Enter the Wi-Fi name shown on the target device first.");
+      return;
+    }
+    setUpdatingWifiSsid(true);
+    try {
+      const next = await updateTrustProbeSessionWifiSsid(trustProbeSession.sessionId, ssid);
+      setTrustProbeSession((current) => {
+        if (!current || current.sessionId !== next.sessionId) {
+          return next;
+        }
+        return preserveTrustProbeUrls(next, current);
+      });
+      setSharedIosWifiProxySsid(ssid);
+      message.success("Wi-Fi name sent to the availability check page.");
+    } catch (error) {
+      message.error(normalizeApiErrorMessage(error, "Failed to update Wi-Fi name"));
+    } finally {
+      setUpdatingWifiSsid(false);
+    }
+  }, [trustProbeSession, wifiSsidDraft]);
 
   const qrSize = compact ? 112 : 180;
 
@@ -336,7 +432,46 @@ export default function AvailabilityCheckPanel({
                     ? "needs approval"
                     : trustProbeSession.proxyAccessStatus ?? "pending"}
                 </Tag>
+                <Tag
+                  color={
+                    trustProbeSession.proxyConfigured
+                      ? "green"
+                      : trustProbeSession.proxyConfigurationMessage
+                        ? "red"
+                        : "default"
+                  }
+                >
+                  Proxy config{" "}
+                  {trustProbeSession.proxyConfigured
+                    ? "detected"
+                    : trustProbeSession.proxyConfigurationMessage
+                      ? "missing"
+                      : "pending"}
+                </Tag>
               </Space>
+
+              {!trustProbeSession.proxyConfigured && trustProbeSession.proxyConfigurationMessage ? (
+                <Alert
+                  type="warning"
+                  showIcon
+                  message="Proxy is not configured on this device yet"
+                  description={
+                    <Space direction="vertical" size={4}>
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        {trustProbeSession.proxyConfigurationMessage}
+                      </Text>
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        On iPhone, use the Availability Check page to download the iOS Wi-Fi Proxy
+                        Profile, or manually set the current Wi-Fi HTTP Proxy to{" "}
+                        <Text code>
+                          {trustProbeSession.host}:{trustProbeSession.adminPort}
+                        </Text>
+                        .
+                      </Text>
+                    </Space>
+                  }
+                />
+              ) : null}
 
               {trustProbeSession.status === "tls_trusted" ? (
                 <Alert
@@ -388,6 +523,48 @@ export default function AvailabilityCheckPanel({
                   Last error: {trustProbeSession.lastError}
                 </Text>
               ) : null}
+
+              <div>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  Wi-Fi name for iOS proxy profile
+                </Text>
+                <Row gutter={[8, 8]} align="middle" style={{ marginTop: 4 }}>
+                  <Col xs={24} md={compact ? 24 : 14}>
+                    <Input
+                      value={wifiSsidDraft}
+                      placeholder="Exact Wi-Fi name shown on the phone"
+                      onChange={(event) => setWifiSsidDraft(event.target.value)}
+                      onPressEnter={() => void handleUpdateWifiSsid()}
+                      data-testid={`${testIdPrefix}-wifi-ssid`}
+                    />
+                  </Col>
+                  <Col xs={24} md={compact ? 24 : 10}>
+                    <Button
+                      loading={updatingWifiSsid}
+                      onClick={() => void handleUpdateWifiSsid()}
+                      data-testid={`${testIdPrefix}-wifi-ssid-update`}
+                    >
+                      Send Wi-Fi Name
+                    </Button>
+                  </Col>
+                </Row>
+                {trustProbeSession.suggestedWifiSsidMessage ? (
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {trustProbeSession.suggestedWifiSsidMessage}
+                  </Text>
+                ) : null}
+                <Text type="secondary" style={{ display: "block", fontSize: 12, marginTop: 4 }}>
+                  Saved Wi-Fi names are shared with other Availability Check panels. Phone pages
+                  poll the same session once per second and update their profile link automatically.
+                </Text>
+                <Alert
+                  type="warning"
+                  showIcon
+                  message="Experimental managed Wi-Fi profile"
+                  description={MANAGED_WIFI_PROFILE_RISK_TEXT}
+                  style={{ marginTop: 8 }}
+                />
+              </div>
 
               {showEvents ? (
                 <List

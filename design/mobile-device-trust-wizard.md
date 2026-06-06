@@ -9,7 +9,7 @@ Mobile Device Trust Wizard 把现有 CA 下载、二维码和证书状态能力�
 - 普通个人手机：Bifrost 可以检测 Android USB 设备、推送 CA、打开系统安装入口，或为 iOS 提供 `.mobileconfig` 下载/二维码；手机端仍必须由用户确认安装和信任。
 - 企业/测试受管设备：只有 Android Device Owner/Profile Owner/委派证书安装器，或 iOS Apple Configurator/MDM/MDM enrollment profile 这类受管路径，才允许真正自动安装并启用信任。本次支持 macOS + Apple Configurator/cfgutil 的高级路径；普通网页/二维码下载仍必须手动启用完全信任。
 
-新增 Bifrost Availability Check / 可用性检查，用于验证“目标设备是否能使用 Bifrost”。它不读取 iOS/Android 私有证书库，也不依赖 USB、ADB、Apple Configurator 或 MDM，而是让目标设备扫码打开 HTTP 落地页，自动检查代理访问授权、探针端口可达性，再发起一次由当前 Bifrost CA 签发证书的真实 HTTPS 请求。HTTPS 请求成功表示当前设备浏览器 TLS 栈已经信任 Bifrost CA；失败则说明 CA 未安装、未启用完全信任、证书不匹配、设备时间异常或探针端口被拦截。
+新增 Bifrost Availability Check / 可用性检查，用于验证“目标设备是否能使用 Bifrost”。它不读取 iOS/Android 私有证书库，也不依赖 USB、ADB、Apple Configurator 或 MDM，而是让目标设备扫码打开 HTTP 落地页，自动检查代理访问授权、浏览器是否真的配置了 Bifrost 代理、探针端口可达性，再发起一次由当前 Bifrost CA 签发证书的真实 HTTPS 请求。HTTPS 请求成功表示当前设备浏览器 TLS 栈已经信任 Bifrost CA；失败则说明 CA 未安装、未启用完全信任、证书不匹配、设备时间异常或探针端口被拦截。
 
 ## 实现逻辑
 
@@ -26,7 +26,7 @@ Mobile Device Trust Wizard 把现有 CA 下载、二维码和证书状态能力�
 - `mobileconfig.rs` 负责：
   - 从 PEM/DER 证书文件提取 DER。
   - 生成 iOS `.mobileconfig`，PayloadType 为 `com.apple.security.root`，并明确写入手动启用完全信任的说明。
-  - 生成 iOS Wi-Fi Proxy `.mobileconfig`，在同一个 profile 中包含 `com.apple.security.root` 和 `com.apple.wifi.managed`。Wi-Fi payload 写入用户确认的 `SSID_STR`、`ProxyType=Manual`、`ProxyServer` 和 `ProxyServerPort`，用于 POC 验证普通 iPhone 能否通过 profile 配置同名 Wi-Fi 的手动代理。
+  - 生成 iOS Wi-Fi Proxy `.mobileconfig`，在同一个 profile 中包含 `com.apple.security.root` 和 `com.apple.wifi.managed`。Wi-Fi payload 写入服务端检测到或用户提供的当前 Wi-Fi `SSID_STR`、`ProxyType=Manual`、`ProxyServer` 和 `ProxyServerPort`，用于 POC 验证普通 iPhone 能否通过 managed Wi-Fi profile 修改同名 Wi-Fi 的手动代理。profile 不写入 `Password`、`Passphrase` 或其他 Wi-Fi 入网凭据，避免要求用户再次输入 Wi-Fi 密码；但 iOS 会把该 payload 作为 managed Wi-Fi 配置，卸载 profile 时可能移除该 Wi-Fi 网络条目，因此 UI 必须把手动 Wi-Fi 代理设置作为安全推荐，把 profile 标记为实验性并要求用户确认风险。
 - `ios.rs` 负责：
   - macOS 上通过 `ioreg` 检测 USB iPhone/iPad。
   - 检测 Apple Configurator 的 `cfgutil` 是否可用。
@@ -73,7 +73,7 @@ Mobile Device Trust Wizard 把现有 CA 下载、二维码和证书状态能力�
 - iPhone/iPad 区块：
   - 顶部先展示统一 iOS 流程：把 profile 送到 iPhone -> 在 Settings 安装描述文件 -> Settings > General > About > Certificate Trust Settings -> 打开 Bifrost CA 完全信任。Apple Configurator 和手动扫码/文件安装只作为“送达 profile”的两种入口，不在 UI 上拆成互相割裂的两套模式。
   - 统一流程之后先展示“选择 profile 送达方式”。Apple Configurator/cfgutil 检测状态、每台 iOS 设备的自定义名称/型号/ID/ECID 和 `Configurator Install` 按钮作为自动送达入口；手动扫码/下载 `.mobileconfig` / LAN profile QR 作为手动送达入口。点击某一台的 Configurator 按钮时，Bifrost 通过该设备 ECID 从电脑侧定向发送 profile；如果 iPhone 仍要求屏幕确认，则继续按同一套 Settings 安装和信任步骤操作。
-  - iOS 区块额外提供 Wi-Fi Proxy Profile POC：页面显示 `Wi-Fi SSID` 和 `Proxy address`，Mac 能识别当前 Wi-Fi 时自动填 SSID，否则要求用户输入 iPhone 当前连接的精确 Wi-Fi 名称。每台 connected iPhone 的设备行增加 `Proxy Config` 按钮，与 `Configurator Install` 并列；点击后通过 `cfgutil -e <ECID> install-profile` 定向下发包含 CA 和 Wi-Fi 代理 payload 的 profile。手动路径提供 `Download iOS Wi-Fi Proxy Profile` 和对应 QR，手机扫码/下载后仍需要确认安装 profile。
+  - iOS 区块额外提供 Wi-Fi Proxy Profile POC：页面优先显示服务端检测到的当前 Mac Wi-Fi 名称和 `Proxy address`；如果 macOS 隐私/TCC 返回 `<redacted>` 或检测失败，管理端允许用户输入 iPhone 当前 Wi-Fi 名称作为兜底。所有 Wi-Fi 名称配置入口（Certificate 页 iOS 区块、Availability Check 卡片、代理交互式授权弹窗的 compact Availability Check、手机公开检测页）必须在输入区域下方直接展示 managed Wi-Fi profile 风险说明，强调 profile 不包含 Wi-Fi 密码但卸载可能移除 iOS managed Wi-Fi 网络条目。每台 connected iPhone 的设备行增加 `Proxy Config` 按钮，与 `Configurator Install` 并列；点击后通过 `cfgutil -e <ECID> install-profile` 定向下发包含 CA 和 Wi-Fi 代理 payload 的 profile。手动路径提供实验性 Wi-Fi proxy profile 下载和对应 QR，手机扫码/下载后仍需要确认安装 profile。由于卸载该 profile 可能移除 managed Wi-Fi 条目，管理端必须先要求用户勾选风险确认，未确认时禁用 `Proxy Config`、下载按钮和二维码。
   - 手动扫码送达入口使用 `web/src/assets/ios/ios_qr_1.jpeg` 和 `web/src/assets/ios/ios_qr_2.jpeg` 展示唯一区别步骤：用 iPhone Camera 扫 LAN QR 并点击黄色链接，然后允许下载 configuration profile。
   - 送达方式之后展示共享步骤 `ios_1.png` 到 `ios_7.png`；每一步用图片文件名作为步骤标识，图下文案明确说明：选择 iPhone、确认 profile 已到达、进入 Settings 的 Downloaded Profile、安装 Bifrost CA profile、接受未签名 profile 警告、进入 Settings > General > About、最后在 Certificate Trust Settings 打开 Bifrost CA 完全信任。
   - `cfgutil` 返回 `ConfigurationUtilityKit.error Code: 625` / “需要用户在设备上交互” 时，Bifrost 将其视为已把安装流程交给 iPhone 的待确认状态，而不是硬失败。
@@ -98,14 +98,17 @@ Android CLI 会在安装前后输出 `Android CA status`。普通设备通常只
 
 可用性检查由三个部分组成：
 
-- Admin API：
+  - Admin API：
   - `POST /_bifrost/api/trust-probe/sessions` 创建短期探针会话。请求中的 `host` 必须是 Bifrost 发现到的本机 IP，不能传任意域名或公网地址。
   - `GET /_bifrost/api/trust-probe/sessions/{session_id}` 查询实时状态。
+  - `PATCH /_bifrost/api/trust-probe/sessions/{session_id}` 更新 Wi-Fi 名称等可配置字段。管理端 Availability Check 卡片使用该接口把用户输入的 SSID 写入 probe manager，并同步到所有未过期的 active session，避免顶部卡片、代理交互式授权弹窗和手机公开页各自持有不同 session 时 SSID 互相不可见。手机公开页通过 token 化 public session 轮询实时同步。
 - Public landing：
   - `GET /_bifrost/public/trust-probe/{session_id}?t=<token>` 返回自包含 HTML 检测页，不依赖登录和主 Web UI bundle。
+  - `GET /_bifrost/public/trust-probe/{session_id}/session?t=<token>` 返回该公开页面可用的最小 session 配置，包括 `suggestedWifiSsid`、SSID 提示和代理配置检测结果。手机页每秒轮询该接口；用户也可以直接在手机页输入 Wi-Fi 名称并通过 `report` 回写，后端会把该 SSID 同步到所有未过期的 active Availability Check session。
   - `GET /_bifrost/public/trust-probe/{session_id}/qrcode?t=<token>` 返回扫码二维码。
   - `POST /_bifrost/public/trust-probe/{session_id}/report?t=<token>` 接收手机页面通过 HTTP 回报的 `page_opened`、`network_failed`、`tls_failed` 等事件。
   - `GET /_bifrost/public/trust-probe/{session_id}/proxy-access?t=<token>` 使用访问控制模块检查当前客户端 IP 是否已被允许使用代理；待授权时会写入 pending authorization，让管理端能继续审批。
+  - 手机页会请求 `http://bifrost-proxy-check.invalid/_bifrost/trust-probe/proxy-configured?sid=<session_id>&t=<token>`。该 `.invalid` 域名只有在浏览器已经配置 HTTP proxy 时才会被送到 Bifrost；Bifrost 在代理入口截获该请求并记录 `proxy_configured_ok`。如果请求失败，手机页通过 HTTP report 回写 `proxy_config_failed`，并优先提示用户手动配置 Wi-Fi 代理：`Settings > Wi-Fi > current network > Configure Proxy > Manual`。iOS Wi-Fi Proxy Profile 作为实验选项，下载链接中的 SSID 来自 Bifrost 服务端检测、管理端输入或手机页输入；profile 文案明确说明不包含 Wi-Fi 密码或 join credentials，但卸载 profile 可能移除 managed Wi-Fi 网络条目，因此必须勾选风险确认后才能下载。
 - 双协议 probe server：
   - 默认尝试监听 `admin_port + 2`，端口冲突时自动选择空闲端口，并在 session 响应中返回实际 `probePort`。
   - 同一端口通过 TCP `peek` 首字节区分 HTTP 与 TLS。HTTP 路径提供 `/_bifrost/trust-probe/netcheck`，HTTPS 路径提供 `/_bifrost/trust-probe/check`。
@@ -117,6 +120,7 @@ Android CLI 会在安装前后输出 `Android CA status`。普通设备通常只
 - `created`：管理端生成二维码，等待设备扫码。
 - `page_opened`：目标设备已打开 HTTP 落地页。
 - `proxy_access_allowed` / `proxy_access_pending` / `proxy_access_denied` / `proxy_access_unavailable`：目标设备代理访问授权检查结果，作为 session event 与 view 字段展示。
+- `proxy_configured_ok` / `proxy_config_failed`：目标设备浏览器是否真的把 HTTP 请求发到了 Bifrost 代理。该状态独立于代理授权；授权通过但未配置代理时，页面会提示安装 Wi-Fi Proxy Profile 或手动配置当前 Wi-Fi 的 HTTP Proxy。
 - `network_reachable`：目标设备能访问 probe 端口的 HTTP netcheck。
 - `tls_trusted`：目标设备完成 HTTPS trust check。
 - `tls_failed`：netcheck 成功但 HTTPS 握手/请求失败。
@@ -128,7 +132,7 @@ Android CLI 会在安装前后输出 `Android CA status`。普通设备通常只
 - 成功只说明当前扫码设备的当前浏览器 TLS 链路信任 Bifrost CA。
 - 不承诺所有 App 都一定能被 Bifrost 解密；Android App 可能默认不信任用户 CA，部分 App 有 certificate pinning 或自定义 TLS 栈。
 - 失败也不等价于“证书一定没安装”；还可能是探针端口被防火墙拦截、设备时间错误、扫码设备和电脑不在同一网络、IP 选择错误，或浏览器在安装/信任 CA 后仍缓存旧的证书信任判断，需要完整重启浏览器后再重试。
-- Wi-Fi Proxy Profile 是 POC 能力：Apple profile schema 支持 Wi-Fi manual proxy payload，但普通 iPhone 对“同 SSID、无 Wi-Fi 密码、只写代理配置”的安装和接管行为需要真实设备验证。若安装成功但未立即生效，应断开并重新连接 Wi-Fi，再运行 Availability Check；如果仍不生效，需要评估是否必须让用户输入 Wi-Fi 密码生成完整 managed Wi-Fi profile，或仅保留手动 Wi-Fi 设置引导。
+- Wi-Fi Proxy Profile 是 POC 能力：Apple profile schema 支持 Wi-Fi manual proxy payload，但它是 managed Wi-Fi 网络配置，不是“只 patch 现有 Wi-Fi proxy 字段”。普通 iPhone 删除该 profile 时可能同时删除对应 Wi-Fi 网络条目，导致用户需要重新连接 Wi-Fi。安全默认路径必须是手动配置 Wi-Fi HTTP Proxy 并手动改回 Off；profile 只能作为实验性便捷路径。
 
 ## 依赖项
 
@@ -171,7 +175,7 @@ Android CLI 会在安装前后输出 `Android CA status`。普通设备通常只
 - `LAN public mobile profile`：真实场景用 LAN 地址验证 profile endpoint 不触发交互式授权，返回 `application/x-apple-aspen-config` 且 plist 有效。
 - `admin_api_mobile_install_requires_explicit_confirmation`：验证 Android install 操作必须显式确认。
 - `admin_api_local_ca_install_requires_explicit_confirmation`：验证本机 CA install 操作必须显式确认，自动测试不误触系统证书安装。
-- `admin_trust_probe_verifies_https_trust_with_current_ca`：创建 Availability Check 会话，打开 public landing/qrcode，访问 public proxy QR、proxy-access、HTTP netcheck，再用当前 Bifrost CA 作为 root CA 访问 HTTPS check，最后断言 session 状态为 `tls_trusted`。
+- `admin_trust_probe_verifies_https_trust_with_current_ca`：创建 Availability Check 会话，打开 public landing/qrcode，访问 public proxy QR、proxy-access；使用配置了 Bifrost HTTP proxy 的客户端访问 `bifrost-proxy-check.invalid` 专用探针，断言 `proxyConfigured=true`；再访问 HTTP netcheck，并用当前 Bifrost CA 作为 root CA 访问 HTTPS check，最后断言 session 状态为 `tls_trusted`。
 - `bifrost-device` 单元测试：验证 Android user CA store PEM 指纹匹配和不匹配路径。
 - `cli_ca_install_mobile_single_device_fake_adb`：通过 fake ADB 验证 `ca install --mobile --yes` 单设备自动选择并执行 push/open。
 - `cli_ca_install_mobile_multiple_devices_requires_device_fake_adb`：通过 fake ADB 验证多个 ready 设备的非交互选择边界。
@@ -195,10 +199,10 @@ Android CLI 会在安装前后输出 `Android CA status`。普通设备通常只
 - TC-MDT-12：Apple Configurator 返回需要手机端交互时，页面显示待用户确认而非失败。
 - TC-MDT-13：Settings iPhone/iPad 在送达方式之后展示 `ios_1` 到 `ios_7` 共享图文步骤，明确 Configurator 和扫码/文件安装只差在送达 profile，后续 profile 安装与 Certificate Trust Settings 完全信任是同一条流程。
 - TC-MDT-14：Android 设备卡片展示当前 CA 状态；普通 ADB 不承诺能验证 user CA store，root/emulator 可通过 `/data/misc/user/0/cacerts-added` 指纹匹配显示已安装。
-- TC-MDT-15：Availability Check 使用局域网 IP 生成二维码；扫码设备依次检查代理访问授权、页面已打开、probe 端口可达、HTTPS 信任检查通过/失败；成功后展示可点击复制的代理配置和公开 proxy QR，失败时展示 iOS/Android 下一步安装和信任指引。
+- TC-MDT-15：Availability Check 使用局域网 IP 生成二维码；扫码设备依次检查代理访问授权、页面已打开、probe 端口可达、HTTPS 信任检查通过/失败，再检查代理是否已经配置；成功后展示可点击复制的代理配置和公开 proxy QR，失败时展示 iOS/Android 下一步安装和信任指引；代理未配置时明确提示下载按服务端检测或用户输入 Wi-Fi 名称生成的 iOS Wi-Fi Proxy Profile，或手动配置当前 Wi-Fi 的 HTTP Proxy。
 - TC-MDT-16：公开 landing、Availability Check QR、公开 proxy QR 和 proxy-access endpoint 不受交互式访问控制误拦截；未授权局域网设备会被记录到 pending authorization。
 - TC-MDT-17：代理交互式授权弹窗展示 Availability Check 二维码和链接，打开弹窗后自动生成 session，轮询状态后二维码/链接仍保留 `?t=<token>` 且二维码不出现预览遮罩白屏，目标设备可扫码进入检查页，Allow/Deny 审批流程不受影响。
-- TC-MDT-18：iOS Wi-Fi Proxy Profile POC。验证扫码下载路径返回 `CA + Wi-Fi proxy` profile，iOS 设备列表的 `Proxy Config` 按钮能通过 Apple Configurator 定向下发到所选 iPhone；手机确认安装后，使用 Availability Check 验证代理授权、probe 端口和 HTTPS 信任状态是否改善，并记录是否需要断开重连 Wi-Fi。
+- TC-MDT-18：iOS Wi-Fi Proxy Profile POC。验证扫码下载路径返回 `CA + Wi-Fi proxy` profile，iOS 设备列表的 `Proxy Config` 按钮能通过 Apple Configurator 定向下发到所选 iPhone；手机确认安装后，使用 Availability Check 验证代理配置、代理授权、probe 端口和 HTTPS 信任状态是否改善，并记录是否需要断开重连 Wi-Fi。
 
 ## Review/Fix/Test 闭环方案
 

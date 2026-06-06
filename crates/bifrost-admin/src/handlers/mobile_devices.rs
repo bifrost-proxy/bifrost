@@ -42,6 +42,7 @@ struct MobileDevicesResponse {
     ios_wifi_proxy_profile_url: String,
     ios_wifi_proxy_profile_qrcode_url: String,
     suggested_wifi_ssid: Option<String>,
+    suggested_wifi_ssid_message: Option<String>,
     ordinary_device_notice: &'static str,
     managed_device_notice: &'static str,
 }
@@ -140,6 +141,7 @@ pub async fn handle_mobile_public(
 fn list_mobile_devices(state: SharedAdminState) -> Response<BoxBody> {
     let port = state.port();
     let ca_cert_path = state.ca_cert_path.as_deref().filter(|path| path.exists());
+    let wifi_detection = current_wifi_ssid_detection();
     let response = MobileDevicesResponse {
         android: discover_android_devices_with_ca(ca_cert_path),
         ios: discover_ios_devices(),
@@ -155,7 +157,8 @@ fn list_mobile_devices(state: SharedAdminState) -> Response<BoxBody> {
         ios_wifi_proxy_profile_qrcode_url: format!(
             "http://127.0.0.1:{port}/_bifrost/public/mobile/ios-wifi-proxy.mobileconfig/qrcode"
         ),
-        suggested_wifi_ssid: current_wifi_ssid(),
+        suggested_wifi_ssid: wifi_detection.ssid,
+        suggested_wifi_ssid_message: wifi_detection.message,
         ordinary_device_notice:
             "Personal Android and iOS devices require final confirmation on the phone before the CA is installed or fully trusted.",
         managed_device_notice:
@@ -697,7 +700,7 @@ fn wifi_proxy_options_from_query(
 ) -> Result<IosWifiProxyProfileOptions, String> {
     let ssid = normalize_ssid(
         &query_param(query, "ssid")
-            .or_else(current_wifi_ssid)
+            .or_else(|| current_wifi_ssid_detection().ssid)
             .unwrap_or_default(),
     )?;
     let proxy_host = normalize_proxy_host(query_param(query, "ip").as_deref())?;
@@ -794,10 +797,51 @@ fn ca_cert_available(state: &SharedAdminState) -> bool {
         .unwrap_or(false)
 }
 
-fn current_wifi_ssid() -> Option<String> {
+struct WifiSsidDetection {
+    ssid: Option<String>,
+    message: Option<String>,
+}
+
+fn current_wifi_ssid_detection() -> WifiSsidDetection {
     if !cfg!(target_os = "macos") {
-        return None;
+        return WifiSsidDetection {
+            ssid: None,
+            message: Some(
+                "Automatic Wi-Fi name detection is currently only supported on macOS.".to_string(),
+            ),
+        };
     }
+    let Some(device) = current_wifi_device() else {
+        return WifiSsidDetection {
+            ssid: None,
+            message: Some("Bifrost could not find the macOS Wi-Fi interface.".to_string()),
+        };
+    };
+    if let Some(ssid) = ssid_for_wifi_device_networksetup(&device) {
+        return WifiSsidDetection {
+            ssid: Some(ssid),
+            message: None,
+        };
+    }
+    match ssid_for_wifi_device_ipconfig(&device) {
+        Some(ssid) if ssid == "<redacted>" => WifiSsidDetection {
+            ssid: None,
+            message: Some(
+                "macOS is hiding the current Wi-Fi name from this Bifrost process. Grant location permission to the app or use manual Wi-Fi proxy setup for now.".to_string(),
+            ),
+        },
+        Some(ssid) => WifiSsidDetection {
+            ssid: Some(ssid),
+            message: None,
+        },
+        None => WifiSsidDetection {
+            ssid: None,
+            message: Some("Bifrost could not detect the current Wi-Fi name from macOS.".to_string()),
+        },
+    }
+}
+
+fn current_wifi_device() -> Option<String> {
     let output = Command::new("networksetup")
         .arg("-listallhardwareports")
         .output()
@@ -815,14 +859,14 @@ fn current_wifi_ssid() -> Option<String> {
         }
         if saw_wifi {
             if let Some(device) = line.strip_prefix("Device:").map(str::trim) {
-                return ssid_for_wifi_device(device);
+                return Some(device.to_string());
             }
         }
     }
     None
 }
 
-fn ssid_for_wifi_device(device: &str) -> Option<String> {
+fn ssid_for_wifi_device_networksetup(device: &str) -> Option<String> {
     let output = Command::new("networksetup")
         .args(["-getairportnetwork", device])
         .output()
@@ -838,6 +882,23 @@ fn ssid_for_wifi_device(device: &str) -> Option<String> {
                 .map(|(_, ssid)| ssid.trim().to_string())
         })
         .filter(|ssid| !ssid.is_empty())
+}
+
+fn ssid_for_wifi_device_ipconfig(device: &str) -> Option<String> {
+    let output = Command::new("ipconfig")
+        .arg("getsummary")
+        .arg(device)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout.lines().find_map(|line| {
+        let line = line.trim();
+        let value = line.strip_prefix("SSID :")?.trim();
+        (!value.is_empty()).then(|| value.to_string())
+    })
 }
 
 fn is_local_peer(peer_addr: Option<SocketAddr>) -> bool {

@@ -4,6 +4,7 @@ import {
   Alert,
   Button,
   Card,
+  Checkbox,
   Col,
   Divider,
   Image,
@@ -51,6 +52,11 @@ import {
 } from "../../../api/cert";
 import { normalizeApiErrorMessage } from "../../../api/client";
 import AvailabilityCheckPanel from "../../../components/AvailabilityCheckPanel";
+import {
+  getSharedIosWifiProxySsid,
+  setSharedIosWifiProxySsid,
+  subscribeSharedIosWifiProxySsid,
+} from "../../../utils/iosWifiProxySsid";
 import iosStep1Image from "../../../assets/ios/ios_1.png";
 import iosStep2Image from "../../../assets/ios/ios_2.png";
 import iosStep3Image from "../../../assets/ios/ios_3.png";
@@ -65,6 +71,8 @@ const { Text, Paragraph } = Typography;
 
 const LOCAL_CA_TRUST_POLL_ATTEMPTS = 20;
 const LOCAL_CA_TRUST_POLL_INTERVAL_MS = 1000;
+const MANAGED_WIFI_PROFILE_RISK_TEXT =
+  "Experimental profile note: Bifrost's iOS Wi-Fi proxy profile uses Apple's managed Wi-Fi payload. It does not contain a Wi-Fi password, but uninstalling the profile can remove that managed Wi-Fi network entry from iOS. Manual Wi-Fi proxy setup is the safe cleanup path.";
 
 const CERTIFICATE_SECTION_IDS = [
   "certificate-trust-probe",
@@ -292,8 +300,11 @@ export default function CertificateTab({
     string | null
   >(null);
   const [installingIosProxyDeviceId, setInstallingIosProxyDeviceId] = useState<string | null>(null);
-  const [iosProxySsid, setIosProxySsid] = useState("");
   const [iosProxyHost, setIosProxyHost] = useState("");
+  const [manualIosProxySsid, setManualIosProxySsid] = useState(() =>
+    getSharedIosWifiProxySsid(),
+  );
+  const [ackManagedWifiProfileRisk, setAckManagedWifiProfileRisk] = useState(false);
   const [installSession, setInstallSession] = useState<InstallSession | null>(null);
   const [installingLocalCa, setInstallingLocalCa] = useState(false);
   const [activeSectionId, setActiveSectionId] = useState<string>(() => {
@@ -306,6 +317,8 @@ export default function CertificateTab({
       : CERTIFICATE_SECTION_IDS[0];
   });
   const certStatus = certInfo?.status ?? "unknown";
+  const detectedIosProxySsid = mobileInfo?.suggested_wifi_ssid?.trim() ?? "";
+  const iosProxySsid = detectedIosProxySsid || manualIosProxySsid.trim();
   const certStatusLabel = certInfo?.status_label ?? "Check failed";
   const certStatusColor =
     certStatus === "installed_and_trusted"
@@ -341,18 +354,25 @@ export default function CertificateTab({
   }, [loadMobileDevices]);
 
   useEffect(() => {
-    if (iosProxySsid || !mobileInfo?.suggested_wifi_ssid) {
-      return;
-    }
-    setIosProxySsid(mobileInfo.suggested_wifi_ssid);
-  }, [iosProxySsid, mobileInfo?.suggested_wifi_ssid]);
-
-  useEffect(() => {
     if (iosProxyHost || !certInfo?.local_ips?.length) {
       return;
     }
     setIosProxyHost(certInfo.local_ips[0]);
   }, [certInfo?.local_ips, iosProxyHost]);
+
+  useEffect(() => {
+    return subscribeSharedIosWifiProxySsid((ssid) => {
+      if (!detectedIosProxySsid) {
+        setManualIosProxySsid(ssid);
+      }
+    });
+  }, [detectedIosProxySsid]);
+
+  useEffect(() => {
+    if (detectedIosProxySsid) {
+      setSharedIosWifiProxySsid(detectedIosProxySsid);
+    }
+  }, [detectedIosProxySsid]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -568,7 +588,9 @@ export default function CertificateTab({
     async (deviceId: string) => {
       const ssid = iosProxySsid.trim();
       if (!ssid) {
-        message.warning("Enter the iPhone Wi-Fi SSID before sending the proxy profile.");
+        message.warning(
+          "Enter the exact Wi-Fi name shown on the iPhone before sending the proxy profile.",
+        );
         return;
       }
       if (!iosProxyHost) {
@@ -578,6 +600,7 @@ export default function CertificateTab({
       setInstallingIosProxyDeviceId(deviceId);
       setInstallSession(null);
       try {
+        setSharedIosWifiProxySsid(ssid);
         const session = await installIosWifiProxyProfile(deviceId, ssid, iosProxyHost);
         setInstallSession(session);
         if (session.completed && !session.requires_user_confirmation) {
@@ -843,21 +866,42 @@ export default function CertificateTab({
             <Alert
               type="info"
               showIcon
-              message="Optional: configure the iPhone Wi-Fi proxy with a profile"
-              description="Proxy Config sends a Wi-Fi managed profile for the SSID below. The iPhone still asks for profile installation confirmation. If iOS does not apply the proxy to the existing network, disconnect and reconnect Wi-Fi, then retry Availability Check."
+              message="Recommended: configure Wi-Fi proxy manually"
+              description="On ordinary iPhone, the safe cleanup path is Settings > Wi-Fi > current network > Configure Proxy > Manual, then later set it back to Off. The profile option below is experimental: iOS treats it as a managed Wi-Fi configuration, and removing the profile may also remove that Wi-Fi entry from the phone."
             />
             <Row gutter={[12, 12]} align="bottom">
               <Col xs={24} md={12}>
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  iPhone Wi-Fi SSID
+                  Wi-Fi network for proxy profile
                 </Text>
-                <Input
-                  value={iosProxySsid}
-                  onChange={(event) => setIosProxySsid(event.target.value)}
-                  placeholder="Enter the exact Wi-Fi name"
-                  data-testid="settings-mobile-ios-proxy-ssid"
-                  style={{ marginTop: 4 }}
-                />
+                {detectedIosProxySsid ? (
+                  <div style={{ marginTop: 4, minHeight: 32, display: "flex", alignItems: "center" }}>
+                    <Text code data-testid="settings-mobile-ios-proxy-ssid">
+                      {detectedIosProxySsid}
+                    </Text>
+                  </div>
+                ) : (
+                  <Input
+                    value={manualIosProxySsid}
+                    onChange={(event) => setManualIosProxySsid(event.target.value)}
+                    onBlur={(event) => {
+                      const ssid = event.target.value.trim();
+                      if (ssid) {
+                        setSharedIosWifiProxySsid(ssid);
+                      }
+                    }}
+                    onPressEnter={(event) => {
+                      const ssid = event.currentTarget.value.trim();
+                      if (ssid) {
+                        setSharedIosWifiProxySsid(ssid);
+                        message.success("Wi-Fi name shared with Availability Check pages.");
+                      }
+                    }}
+                    placeholder="Exact Wi-Fi name shown on the iPhone"
+                    data-testid="settings-mobile-ios-proxy-ssid-input"
+                    style={{ marginTop: 4 }}
+                  />
+                )}
               </Col>
               <Col xs={24} md={12}>
                 <Text type="secondary" style={{ fontSize: 12 }}>
@@ -877,6 +921,35 @@ export default function CertificateTab({
                 />
               </Col>
             </Row>
+            {!detectedIosProxySsid ? (
+              <Space direction="vertical" size={2}>
+                <Text type="secondary" data-testid="settings-mobile-ios-proxy-ssid-missing">
+                  {mobileInfo?.suggested_wifi_ssid_message ??
+                    "Not detected. Enter the exact Wi-Fi name shown on the iPhone."}
+                </Text>
+                <a
+                  href="x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices"
+                  data-testid="settings-mobile-ios-location-services"
+                >
+                  Open macOS Location Services
+                </a>
+              </Space>
+            ) : null}
+            <Text
+              type="secondary"
+              style={{ display: "block", fontSize: 12 }}
+              data-testid="settings-mobile-ios-ssid-sync-hint"
+            >
+              This Wi-Fi name is shared with open Availability Check panels. If the phone has the
+              check page open, it polls the session once per second and updates the profile link.
+            </Text>
+            <Alert
+              type="warning"
+              showIcon
+              message="Experimental managed Wi-Fi profile"
+              description={MANAGED_WIFI_PROFILE_RISK_TEXT}
+              data-testid="settings-mobile-ios-wifi-risk-near-ssid"
+            />
             <Divider style={{ margin: "4px 0" }} />
             <Alert
               type={mobileInfo?.ios.configurator.cfgutil_available ? "success" : "info"}
@@ -921,72 +994,79 @@ export default function CertificateTab({
                     data-mobile-device-id={device.id}
                     data-mobile-device-platform="ios"
                     style={highlighted ? highlightedDeviceStyle : undefined}
-                    actions={[
-                      <Tooltip
-                        key="configurator"
-                        title={
-                          mobileInfo?.ios.configurator.cfgutil_available
-                            ? "Install profile through Apple Configurator"
-                            : "Install Apple Configurator on this Mac first"
-                        }
-                      >
-                        <Button
-                          icon={<SendOutlined />}
-                          size="small"
-                          className={highlighted ? "mobile-device-install-cta-pulse" : undefined}
-                          disabled={
-                            !certInfo?.available ||
-                            !mobileInfo?.ios.configurator.cfgutil_available ||
-                            device.status !== "connected"
-                          }
-                          loading={installingIosConfiguratorDeviceId === device.id}
-                          onClick={() => void handleInstallIosConfigurator(device.id)}
-                          data-mobile-install-cta="true"
-                          data-testid="settings-mobile-install-ios-configurator"
-                        >
-                          Configurator Install
-                        </Button>
-                      </Tooltip>,
-                      <Tooltip
-                        key="proxy-config"
-                        title={
-                          mobileInfo?.ios.configurator.cfgutil_available
-                            ? "Send a Wi-Fi proxy profile through Apple Configurator"
-                            : "Install Apple Configurator on this Mac first"
-                        }
-                      >
-                        <Button
-                          icon={<SendOutlined />}
-                          size="small"
-                          disabled={
-                            !certInfo?.available ||
-                            !mobileInfo?.ios.configurator.cfgutil_available ||
-                            device.status !== "connected" ||
-                            !iosProxySsid.trim() ||
-                            !iosProxyHost
-                          }
-                          loading={installingIosProxyDeviceId === device.id}
-                          onClick={() => void handleInstallIosProxyProfile(device.id)}
-                          data-testid="settings-mobile-install-ios-proxy-config"
-                        >
-                          Proxy Config
-                        </Button>
-                      </Tooltip>,
-                    ]}
                   >
-                    <List.Item.Meta
-                      title={
-                        <Space wrap>
-                          <Text>{mobileDeviceTitle(device)}</Text>
-                          <Tag color="blue">{device.status}</Tag>
-                          <Tag color="purple">advanced</Tag>
-                        </Space>
-                      }
-                      description={mobileDeviceDescription(
-                        device,
-                        "For Configurator install, unlock the iPhone and trust this Mac first.",
-                      )}
-                    />
+                    <Space direction="vertical" size="small" style={{ width: "100%" }}>
+                      <List.Item.Meta
+                        title={
+                          <Space wrap>
+                            <Text>{mobileDeviceTitle(device)}</Text>
+                            <Tag color="blue">{device.status}</Tag>
+                            <Tag color="purple">advanced</Tag>
+                          </Space>
+                        }
+                        description={mobileDeviceDescription(
+                          device,
+                          "For Configurator install, unlock the iPhone and trust this Mac first.",
+                        )}
+                      />
+                      <Space
+                        direction="vertical"
+                        size={6}
+                        style={{ width: "100%", maxWidth: 260 }}
+                      >
+                        <Tooltip
+                          title={
+                            mobileInfo?.ios.configurator.cfgutil_available
+                              ? "Install profile through Apple Configurator"
+                              : "Install Apple Configurator on this Mac first"
+                          }
+                        >
+                          <Button
+                            icon={<SendOutlined />}
+                            size="small"
+                            className={highlighted ? "mobile-device-install-cta-pulse" : undefined}
+                            disabled={
+                              !certInfo?.available ||
+                              !mobileInfo?.ios.configurator.cfgutil_available ||
+                              device.status !== "connected"
+                            }
+                            loading={installingIosConfiguratorDeviceId === device.id}
+                            onClick={() => void handleInstallIosConfigurator(device.id)}
+                            data-mobile-install-cta="true"
+                            data-testid="settings-mobile-install-ios-configurator"
+                            style={{ width: "100%" }}
+                          >
+                            Configurator Install
+                          </Button>
+                        </Tooltip>
+                        <Tooltip
+                          title={
+                            mobileInfo?.ios.configurator.cfgutil_available
+                              ? "Send a Wi-Fi proxy profile through Apple Configurator"
+                              : "Install Apple Configurator on this Mac first"
+                          }
+                        >
+                          <Button
+                            icon={<SendOutlined />}
+                            size="small"
+                            disabled={
+                              !certInfo?.available ||
+                              !mobileInfo?.ios.configurator.cfgutil_available ||
+                              device.status !== "connected" ||
+                              !iosProxySsid.trim() ||
+                              !iosProxyHost ||
+                              !ackManagedWifiProfileRisk
+                            }
+                            loading={installingIosProxyDeviceId === device.id}
+                            onClick={() => void handleInstallIosProxyProfile(device.id)}
+                            data-testid="settings-mobile-install-ios-proxy-config"
+                            style={{ width: "100%" }}
+                          >
+                            Proxy Config
+                          </Button>
+                        </Tooltip>
+                      </Space>
+                    </Space>
                   </List.Item>
                 );
               }}
@@ -1077,18 +1157,41 @@ export default function CertificateTab({
               Download iOS Profile
             </Button>
             {iosProxySsid.trim() && iosProxyHost ? (
+              <Alert
+                type="warning"
+                showIcon
+                message="Experimental managed Wi-Fi profile"
+                description={
+                  <Space direction="vertical" size={6}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      This profile uses Apple's managed Wi-Fi payload. It does not contain the Wi-Fi
+                      password, but uninstalling the profile can remove the managed Wi-Fi network
+                      entry from iOS. Use manual Wi-Fi proxy settings when you need clean removal.
+                    </Text>
+                    <Checkbox
+                      checked={ackManagedWifiProfileRisk}
+                      onChange={(event) => setAckManagedWifiProfileRisk(event.target.checked)}
+                      data-testid="settings-mobile-ios-managed-wifi-risk"
+                    >
+                      I understand removing this profile may remove this Wi-Fi entry.
+                    </Checkbox>
+                  </Space>
+                }
+              />
+            ) : null}
+            {iosProxySsid.trim() && iosProxyHost ? (
               <Button
                 icon={<DownloadOutlined />}
                 href={getIosWifiProxyConfigUrl(iosProxySsid.trim(), iosProxyHost)}
                 download="bifrost-ios-wifi-proxy.mobileconfig"
-                disabled={!certInfo?.available}
+                disabled={!certInfo?.available || !ackManagedWifiProfileRisk}
                 data-testid="settings-mobile-ios-wifi-proxy-profile"
               >
-                Download iOS Wi-Fi Proxy Profile
+                Download Experimental Wi-Fi Proxy Profile
               </Button>
             ) : null}
             {certInfo?.available ? (
-              <Row gutter={[16, 16]}>
+              <Row gutter={[16, 16]} data-testid="settings-mobile-ios-profile-qr-list">
                 {(certInfo.local_ips.length > 0 ? certInfo.local_ips : [""]).map((ip, index) => (
                   <Col key={ip || index}>
                     <div style={{ textAlign: "center" }}>
@@ -1117,31 +1220,49 @@ export default function CertificateTab({
                     </div>
                   </Col>
                 ))}
-              </Row>
-            ) : null}
-            {certInfo?.available && iosProxySsid.trim() && iosProxyHost ? (
-              <Row gutter={[16, 16]} data-testid="settings-mobile-ios-wifi-proxy-qr-list">
-                <Col>
-                  <div style={{ textAlign: "center" }}>
-                    <Image
-                      src={getIosWifiProxyConfigQRCodeUrl(iosProxySsid.trim(), iosProxyHost)}
-                      alt={`iOS Wi-Fi Proxy Profile QR Code - ${iosProxyHost}`}
-                      width={120}
-                      height={120}
-                      preview={{
-                        mask: <QrcodeOutlined style={{ fontSize: 20 }} />,
-                      }}
-                      fallback="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mN8/+F9PQAJpAN4pokyXwAAAABJRU5ErkJggg=="
-                      data-testid="settings-mobile-ios-wifi-proxy-qrcode"
-                    />
-                    <div style={{ marginTop: 4 }}>
-                      <Text type="secondary" style={{ fontSize: 12 }}>
-                        Wi-Fi proxy profile: {iosProxySsid.trim()} to {iosProxyHost}:
-                        {window.location.port || "9900"}
-                      </Text>
+                {iosProxySsid.trim() && iosProxyHost ? (
+                  <Col data-testid="settings-mobile-ios-wifi-proxy-qr-list">
+                    <div style={{ textAlign: "center" }}>
+                      {ackManagedWifiProfileRisk ? (
+                        <Image
+                          src={getIosWifiProxyConfigQRCodeUrl(iosProxySsid.trim(), iosProxyHost)}
+                          alt={`iOS Wi-Fi Proxy Profile QR Code - ${iosProxyHost}`}
+                          width={120}
+                          height={120}
+                          preview={{
+                            mask: <QrcodeOutlined style={{ fontSize: 20 }} />,
+                          }}
+                          fallback="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mN8/+F9PQAJpAN4pokyXwAAAABJRU5ErkJggg=="
+                          data-testid="settings-mobile-ios-wifi-proxy-qrcode"
+                        />
+                      ) : (
+                        <div
+                          style={{
+                            width: 120,
+                            height: 120,
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            border: `1px solid ${token.colorBorderSecondary}`,
+                            borderRadius: token.borderRadius,
+                            color: token.colorTextSecondary,
+                            fontSize: 12,
+                            textAlign: "center",
+                            padding: 8,
+                          }}
+                        >
+                          Confirm risk to show QR
+                        </div>
+                      )}
+                      <div style={{ marginTop: 4 }}>
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          Experimental Wi-Fi proxy profile: {iosProxySsid.trim()} to {iosProxyHost}:
+                          {window.location.port || "9900"}
+                        </Text>
+                      </div>
                     </div>
-                  </div>
-                </Col>
+                  </Col>
+                ) : null}
               </Row>
             ) : null}
             <Divider style={{ margin: "4px 0" }} />
@@ -1237,54 +1358,56 @@ export default function CertificateTab({
                     data-mobile-device-id={device.id}
                     data-mobile-device-platform="android"
                     style={highlighted ? highlightedDeviceStyle : undefined}
-                    actions={[
-                      <Tooltip
-                        key="install"
-                        title={
-                          device.status === "connected"
-                            ? "Push CA and open Android installer"
-                            : "Resolve the device status before installation"
-                        }
-                      >
-                        <Button
-                          icon={<SendOutlined />}
-                          size="small"
-                          className={highlighted ? "mobile-device-install-cta-pulse" : undefined}
-                          disabled={!certInfo?.available || device.status !== "connected"}
-                          loading={installingDeviceId === device.id}
-                          onClick={() => void handleInstallAndroid(device.id)}
-                          data-mobile-install-cta="true"
-                          data-testid="settings-mobile-install-android"
-                        >
-                          Install
-                        </Button>
-                      </Tooltip>,
-                    ]}
                   >
-                    <List.Item.Meta
-                      title={
-                        <Space wrap>
-                          <Text>{mobileDeviceTitle(device)}</Text>
-                          <Tag
-                            color={
-                              device.status === "connected"
-                                ? "green"
-                                : device.status === "unauthorized"
-                                  ? "orange"
-                                  : "default"
-                            }
-                          >
-                            {device.status}
-                          </Tag>
-                          {device.certificate_status ? (
-                            <Tag color={certificateStateColor(device.certificate_status.state)}>
-                              {certificateStateLabel(device.certificate_status.state)}
+                    <Space direction="vertical" size="small" style={{ width: "100%" }}>
+                      <List.Item.Meta
+                        title={
+                          <Space wrap>
+                            <Text>{mobileDeviceTitle(device)}</Text>
+                            <Tag
+                              color={
+                                device.status === "connected"
+                                  ? "green"
+                                  : device.status === "unauthorized"
+                                    ? "orange"
+                                    : "default"
+                              }
+                            >
+                              {device.status}
                             </Tag>
-                          ) : null}
-                        </Space>
-                      }
-                      description={mobileDeviceDescription(device)}
-                    />
+                            {device.certificate_status ? (
+                              <Tag color={certificateStateColor(device.certificate_status.state)}>
+                                {certificateStateLabel(device.certificate_status.state)}
+                              </Tag>
+                            ) : null}
+                          </Space>
+                        }
+                        description={mobileDeviceDescription(device)}
+                      />
+                      <div style={{ width: "100%", maxWidth: 260 }}>
+                        <Tooltip
+                          title={
+                            device.status === "connected"
+                              ? "Push CA and open Android installer"
+                              : "Resolve the device status before installation"
+                          }
+                        >
+                          <Button
+                            icon={<SendOutlined />}
+                            size="small"
+                            className={highlighted ? "mobile-device-install-cta-pulse" : undefined}
+                            disabled={!certInfo?.available || device.status !== "connected"}
+                            loading={installingDeviceId === device.id}
+                            onClick={() => void handleInstallAndroid(device.id)}
+                            data-mobile-install-cta="true"
+                            data-testid="settings-mobile-install-android"
+                            style={{ width: "100%" }}
+                          >
+                            Install
+                          </Button>
+                        </Tooltip>
+                      </div>
+                    </Space>
                   </List.Item>
                 );
               }}

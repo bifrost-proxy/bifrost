@@ -417,6 +417,52 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     .map(|(_, value)| value.to_string())
                     .ok_or_else(|| format!("Missing token in landingUrl: {landing_url}"))?;
 
+                let update_response = client
+                    .patch(format!(
+                        "http://127.0.0.1:{}/_bifrost/api/trust-probe/sessions/{}",
+                        port, session_id
+                    ))
+                    .json(&serde_json::json!({ "wifiSsid": "Office Wi-Fi" }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("PATCH trust probe session failed: {}", e))?;
+                assert_status(&update_response, 200)?;
+                let updated_session: serde_json::Value = update_response
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse updated trust probe session: {}", e))?;
+                if updated_session
+                    .get("suggestedWifiSsid")
+                    .and_then(|value| value.as_str())
+                    != Some("Office Wi-Fi")
+                {
+                    return Err(format!(
+                        "Expected updated suggestedWifiSsid, got: {updated_session}"
+                    ));
+                }
+
+                let public_session_response = client
+                    .get(format!(
+                        "http://127.0.0.1:{port}/_bifrost/public/trust-probe/{session_id}/session?t={token}"
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET public trust probe session failed: {}", e))?;
+                assert_status(&public_session_response, 200)?;
+                let public_session: serde_json::Value = public_session_response
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse public trust probe session: {}", e))?;
+                if public_session
+                    .get("suggestedWifiSsid")
+                    .and_then(|value| value.as_str())
+                    != Some("Office Wi-Fi")
+                {
+                    return Err(format!(
+                        "Expected public session to expose updated Wi-Fi name, got: {public_session}"
+                    ));
+                }
+
                 let landing_response = client
                     .get(landing_url)
                     .send()
@@ -431,7 +477,18 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 if !landing_html.contains("Bifrost Availability Check")
                     || !landing_html.contains("tlsCheckUrl")
                     || !landing_html.contains("proxyAccessUrl")
+                    || !landing_html.contains("proxyConfiguredUrl")
+                    || !landing_html.contains("checkProxyConfiguration")
                     || !landing_html.contains("copyProxyAddress")
+                    || !landing_html.contains("iOS Proxy Setup")
+                    || !landing_html.contains("iosWifiProxyProfileUrl")
+                    || !landing_html.contains("sessionPublicUrl")
+                    || !landing_html.contains("Download Experimental Wi-Fi Proxy Profile")
+                    || !landing_html.contains("managedWifiRiskAccepted")
+                    || !landing_html.contains("suggestedWifiSsid")
+                    || !landing_html.contains("Wi-Fi name for this check")
+                    || !landing_html.contains("Experimental managed Wi-Fi profile")
+                    || !landing_html.contains("Manual Wi-Fi proxy setup is the safe cleanup path")
                 {
                     return Err(format!("Unexpected trust probe landing page: {landing_html}"));
                 }
@@ -486,6 +543,35 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 {
                     return Err(format!(
                         "Expected proxy access allowed for loopback, got: {proxy_access_json}"
+                    ));
+                }
+
+                let proxied_client = reqwest::Client::builder()
+                    .proxy(
+                        reqwest::Proxy::http(format!("http://127.0.0.1:{port}"))
+                            .map_err(|e| format!("Failed to configure proxy client: {e}"))?,
+                    )
+                    .build()
+                    .map_err(|e| format!("Failed to create proxy-configured client: {}", e))?;
+                let proxy_configured_response = proxied_client
+                    .get(format!(
+                        "http://bifrost-proxy-check.invalid/_bifrost/trust-probe/proxy-configured?sid={session_id}&t={token}"
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET trust probe proxy configured check failed: {}", e))?;
+                assert_status(&proxy_configured_response, 200)?;
+                let proxy_configured_json: serde_json::Value = proxy_configured_response
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse proxy configured JSON: {}", e))?;
+                if proxy_configured_json
+                    .get("configured")
+                    .and_then(|value| value.as_bool())
+                    != Some(true)
+                {
+                    return Err(format!(
+                        "Expected proxy configured check to pass, got: {proxy_configured_json}"
                     ));
                 }
 
@@ -546,6 +632,15 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 }
                 if status_json.get("tlsTrusted").and_then(|value| value.as_bool()) != Some(true) {
                     return Err(format!("Expected tlsTrusted=true, got: {status_json}"));
+                }
+                if status_json
+                    .get("proxyConfigured")
+                    .and_then(|value| value.as_bool())
+                    != Some(true)
+                {
+                    return Err(format!(
+                        "Expected proxyConfigured=true, got: {status_json}"
+                    ));
                 }
                 Ok(())
             },

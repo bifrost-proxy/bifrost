@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -36,6 +37,8 @@ const DEFAULT_TTL_SECONDS: i64 = 600;
 const MAX_TTL_SECONDS: i64 = 1800;
 const MAX_ACTIVE_SESSIONS: usize = 32;
 const TOKEN_QUERY_KEY: &str = "t";
+pub const TRUST_PROBE_PROXY_CONFIG_HOST: &str = "bifrost-proxy-check.invalid";
+pub const TRUST_PROBE_PROXY_CONFIG_PATH: &str = "/_bifrost/trust-probe/proxy-configured";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -67,6 +70,10 @@ pub struct TrustProbeSessionView {
     proxy_access_status: Option<TrustProbeProxyAccessStatus>,
     proxy_access_allowed: Option<bool>,
     proxy_access_message: Option<String>,
+    proxy_configured: bool,
+    proxy_configuration_message: Option<String>,
+    suggested_wifi_ssid: Option<String>,
+    suggested_wifi_ssid_message: Option<String>,
     network_reachable: bool,
     tls_trusted: bool,
     client_ip: Option<String>,
@@ -101,6 +108,14 @@ struct TrustProbeReport {
     user_agent: Option<String>,
     platform_hint: Option<String>,
     status: Option<u16>,
+    #[serde(alias = "wifiSsid")]
+    wifi_ssid: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateTrustProbeSessionRequest {
+    wifi_ssid: Option<String>,
 }
 
 struct TrustProbeEventInput {
@@ -124,6 +139,10 @@ struct TrustProbeSession {
     proxy_access_status: Option<TrustProbeProxyAccessStatus>,
     proxy_access_allowed: Option<bool>,
     proxy_access_message: Option<String>,
+    proxy_configured: bool,
+    proxy_configuration_message: Option<String>,
+    suggested_wifi_ssid: Option<String>,
+    suggested_wifi_ssid_message: Option<String>,
     network_reachable: bool,
     tls_trusted: bool,
     created_at: DateTime<Utc>,
@@ -213,6 +232,7 @@ impl TrustProbeManager {
         let token_hash = hash_token(&token);
         let now = Utc::now();
         let expires_at = now + chrono::Duration::seconds(ttl_seconds);
+        let wifi_detection = current_wifi_ssid_detection();
         let session = TrustProbeSession {
             id,
             token_hash,
@@ -225,6 +245,10 @@ impl TrustProbeManager {
             proxy_access_status: None,
             proxy_access_allowed: None,
             proxy_access_message: None,
+            proxy_configured: false,
+            proxy_configuration_message: None,
+            suggested_wifi_ssid: wifi_detection.ssid,
+            suggested_wifi_ssid_message: wifi_detection.message,
             network_reachable: false,
             tls_trusted: false,
             created_at: now,
@@ -263,6 +287,36 @@ impl TrustProbeManager {
         sessions.get(&session_id).map(|session| session.to_view(""))
     }
 
+    fn get_public_session(&self, session_id: Uuid, token: &str) -> Option<TrustProbeSessionView> {
+        self.cleanup_expired_sessions();
+        let sessions = self.sessions.lock();
+        let session = sessions.get(&session_id)?;
+        if !session.token_matches(token) || session.is_expired() {
+            return None;
+        }
+        Some(session.to_view(token))
+    }
+
+    fn update_session(
+        &self,
+        session_id: Uuid,
+        request: UpdateTrustProbeSessionRequest,
+    ) -> Option<TrustProbeSessionView> {
+        self.cleanup_expired_sessions();
+        let mut sessions = self.sessions.lock();
+        if sessions
+            .get(&session_id)
+            .map(|session| session.is_expired())
+            .unwrap_or(true)
+        {
+            return None;
+        }
+        if let Some(ssid) = request.wifi_ssid {
+            Self::apply_wifi_ssid_to_active_sessions(&mut sessions, ssid);
+        }
+        sessions.get(&session_id).map(|session| session.to_view(""))
+    }
+
     fn render_landing_page(&self, session_id: Uuid, token: &str) -> Option<String> {
         self.cleanup_expired_sessions();
         let sessions = self.sessions.lock();
@@ -281,21 +335,34 @@ impl TrustProbeManager {
         client_ip: Option<String>,
         user_agent_header: Option<String>,
     ) -> bool {
-        self.record_event(
+        let TrustProbeReport {
+            event_type,
+            message,
+            user_agent,
+            platform_hint,
+            status,
+            wifi_ssid,
+        } = report;
+        let recorded = self.record_event(
             session_id,
             token,
             TrustProbeEventInput {
-                event_type: report.event_type,
-                message: report.message.or_else(|| {
-                    report
-                        .status
-                        .map(|status| format!("Probe request returned HTTP {status}"))
+                event_type,
+                message: message.or_else(|| {
+                    status.map(|status| format!("Probe request returned HTTP {status}"))
                 }),
                 client_ip,
-                user_agent: report.user_agent.or(user_agent_header),
-                platform_hint: report.platform_hint,
+                user_agent: user_agent.or(user_agent_header),
+                platform_hint,
             },
-        )
+        );
+        if recorded {
+            if let Some(ssid) = wifi_ssid {
+                let mut sessions = self.sessions.lock();
+                Self::apply_wifi_ssid_to_active_sessions(&mut sessions, ssid);
+            }
+        }
+        recorded
     }
 
     fn record_event(&self, session_id: Uuid, token: &str, input: TrustProbeEventInput) -> bool {
@@ -422,6 +489,22 @@ impl TrustProbeManager {
             }
         }
     }
+
+    fn apply_wifi_ssid_to_active_sessions(
+        sessions: &mut HashMap<Uuid, TrustProbeSession>,
+        ssid: String,
+    ) {
+        let ssid = ssid.trim();
+        if ssid.is_empty() || ssid.len() > 128 {
+            return;
+        }
+        for session in sessions
+            .values_mut()
+            .filter(|session| !session.is_expired())
+        {
+            session.apply_wifi_ssid(ssid.to_string());
+        }
+    }
 }
 
 impl TrustProbeSession {
@@ -450,6 +533,10 @@ impl TrustProbeSession {
             proxy_access_status: self.proxy_access_status,
             proxy_access_allowed: self.proxy_access_allowed,
             proxy_access_message: self.proxy_access_message.clone(),
+            proxy_configured: self.proxy_configured,
+            proxy_configuration_message: self.proxy_configuration_message.clone(),
+            suggested_wifi_ssid: self.suggested_wifi_ssid.clone(),
+            suggested_wifi_ssid_message: self.suggested_wifi_ssid_message.clone(),
             network_reachable: self.network_reachable,
             tls_trusted: self.tls_trusted,
             client_ip: self.client_ip.clone(),
@@ -553,6 +640,23 @@ impl TrustProbeSession {
                 self.last_error = None;
                 self.status = TrustProbeStatus::TlsTrusted;
             }
+            "proxy_configured_ok" => {
+                self.opened = true;
+                self.proxy_configured = true;
+                self.proxy_configuration_message = Some(
+                    message
+                        .clone()
+                        .unwrap_or_else(|| "This browser is using the Bifrost proxy.".to_string()),
+                );
+            }
+            "proxy_config_failed" => {
+                self.opened = true;
+                if !self.proxy_configured {
+                    self.proxy_configuration_message = Some(message.clone().unwrap_or_else(|| {
+                        "This browser is not using the Bifrost proxy yet.".to_string()
+                    }));
+                }
+            }
             "network_failed" => {
                 self.opened = true;
                 if !self.tls_trusted {
@@ -580,6 +684,89 @@ impl TrustProbeSession {
             self.events.remove(0);
         }
     }
+
+    fn apply_wifi_ssid(&mut self, ssid: String) {
+        let ssid = ssid.trim();
+        if ssid.is_empty() || ssid.len() > 128 {
+            return;
+        }
+        if self.suggested_wifi_ssid.as_deref() == Some(ssid) {
+            return;
+        }
+        self.suggested_wifi_ssid = Some(ssid.to_string());
+        self.suggested_wifi_ssid_message =
+            Some("Wi-Fi name was provided by the user for this availability check.".to_string());
+        self.events.push(TrustProbeEvent {
+            event_type: "wifi_ssid_updated".to_string(),
+            at: Utc::now(),
+            message: Some("Wi-Fi name updated for iOS proxy profile generation.".to_string()),
+        });
+        if self.events.len() > 64 {
+            self.events.remove(0);
+        }
+    }
+}
+
+pub async fn handle_trust_probe_proxy_configured_request(
+    req: Request<Incoming>,
+    peer_addr: SocketAddr,
+) -> Response<BoxBody> {
+    if req.method() == Method::OPTIONS {
+        return probe_json_response(StatusCode::NO_CONTENT, serde_json::json!({}));
+    }
+    if req.method() != Method::GET {
+        return probe_json_response(
+            StatusCode::METHOD_NOT_ALLOWED,
+            serde_json::json!({ "error": "method not allowed" }),
+        );
+    }
+    let Some(session_id) =
+        query_param(req.uri().query(), "sid").and_then(|value| value.parse::<Uuid>().ok())
+    else {
+        return probe_json_response(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({ "error": "missing sid" }),
+        );
+    };
+    let Some(token) = query_param(req.uri().query(), TOKEN_QUERY_KEY) else {
+        return probe_json_response(
+            StatusCode::UNAUTHORIZED,
+            serde_json::json!({ "error": "missing token" }),
+        );
+    };
+    let user_agent = req
+        .headers()
+        .get(hyper::header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_string());
+    let client_ip = Some(peer_addr.ip().to_string());
+    let message = format!(
+        "This browser reached Bifrost through the configured proxy from {}.",
+        peer_addr.ip()
+    );
+    if !TRUST_PROBE_MANAGER.record_event(
+        session_id,
+        &token,
+        TrustProbeEventInput {
+            event_type: "proxy_configured_ok".to_string(),
+            message: Some(message.clone()),
+            client_ip,
+            user_agent,
+            platform_hint: None,
+        },
+    ) {
+        return probe_json_response(
+            StatusCode::NOT_FOUND,
+            serde_json::json!({ "error": "Availability check session not found" }),
+        );
+    }
+    probe_json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "configured": true,
+            "message": message,
+        }),
+    )
 }
 
 pub async fn handle_trust_probe_api(
@@ -593,6 +780,9 @@ pub async fn handle_trust_probe_api(
         (Method::GET, _) if path.starts_with("/api/trust-probe/sessions/") => {
             get_probe_session(path)
         }
+        (Method::PATCH, _) if path.starts_with("/api/trust-probe/sessions/") => {
+            update_probe_session(req, path).await
+        }
         _ => {
             if path.starts_with("/api/trust-probe/") {
                 method_not_allowed()
@@ -600,6 +790,40 @@ pub async fn handle_trust_probe_api(
                 error_response(StatusCode::NOT_FOUND, "Not Found")
             }
         }
+    }
+}
+
+async fn update_probe_session(req: Request<Incoming>, path: &str) -> Response<BoxBody> {
+    let Some(session_id) = path
+        .strip_prefix("/api/trust-probe/sessions/")
+        .and_then(|value| value.trim_end_matches('/').parse::<Uuid>().ok())
+    else {
+        return error_response(StatusCode::BAD_REQUEST, "Invalid trust probe session id");
+    };
+    let body = match req.collect().await {
+        Ok(body) => body.to_bytes(),
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Failed to read trust probe session update body: {error}"),
+            );
+        }
+    };
+    let request = match serde_json::from_slice::<UpdateTrustProbeSessionRequest>(&body) {
+        Ok(request) => request,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Invalid trust probe session update JSON: {error}"),
+            );
+        }
+    };
+    match TRUST_PROBE_MANAGER.update_session(session_id, request) {
+        Some(session) => json_response(&session),
+        None => error_response(
+            StatusCode::NOT_FOUND,
+            "Availability check session not found",
+        ),
     }
 }
 
@@ -648,6 +872,7 @@ pub async fn handle_trust_probe_public(
         }
         (Method::GET, Some("qrcode")) => render_probe_qrcode(session_id, &token),
         (Method::HEAD, Some("qrcode")) => render_probe_qrcode_head(session_id, &token),
+        (Method::GET, Some("session")) => render_probe_public_session(session_id, &token),
         (Method::GET, Some("proxy-access")) => {
             check_proxy_access(req, state, session_id, token).await
         }
@@ -694,6 +919,28 @@ fn get_probe_session(path: &str) -> Response<BoxBody> {
     };
     match TRUST_PROBE_MANAGER.get_session(session_id) {
         Some(session) => json_response(&session),
+        None => error_response(
+            StatusCode::NOT_FOUND,
+            "Availability check session not found",
+        ),
+    }
+}
+
+fn render_probe_public_session(session_id: Uuid, token: &str) -> Response<BoxBody> {
+    match TRUST_PROBE_MANAGER.get_public_session(session_id, token) {
+        Some(session) => public_response_builder(StatusCode::OK)
+            .header("Content-Type", "application/json")
+            .body(full_body(
+                serde_json::json!({
+                    "sessionId": session.session_id,
+                    "suggestedWifiSsid": session.suggested_wifi_ssid,
+                    "suggestedWifiSsidMessage": session.suggested_wifi_ssid_message,
+                    "proxyConfigured": session.proxy_configured,
+                    "proxyConfigurationMessage": session.proxy_configuration_message,
+                })
+                .to_string(),
+            ))
+            .unwrap(),
         None => error_response(
             StatusCode::NOT_FOUND,
             "Availability check session not found",
@@ -1054,6 +1301,26 @@ fn render_landing_page(session: &TrustProbeSession, token: &str) -> String {
         TOKEN_QUERY_KEY,
         urlencoding::encode(token)
     );
+    let session_public_url = format!(
+        "http://{}:{}/_bifrost/public/trust-probe/{}/session?{}={}",
+        view.host,
+        view.admin_port,
+        view.session_id,
+        TOKEN_QUERY_KEY,
+        urlencoding::encode(token)
+    );
+    let ios_wifi_proxy_profile_url = format!(
+        "http://{}:{}/_bifrost/public/mobile/ios-wifi-proxy.mobileconfig",
+        view.host, view.admin_port
+    );
+    let proxy_configured_url = format!(
+        "http://{}{}?sid={}&{}={}",
+        TRUST_PROBE_PROXY_CONFIG_HOST,
+        TRUST_PROBE_PROXY_CONFIG_PATH,
+        view.session_id,
+        TOKEN_QUERY_KEY,
+        urlencoding::encode(token)
+    );
     let config = serde_json::json!({
         "sessionId": view.session_id,
         "token": token,
@@ -1062,11 +1329,16 @@ fn render_landing_page(session: &TrustProbeSession, token: &str) -> String {
         "probePort": view.probe_port,
         "caFingerprintSha256": view.ca_fingerprint_sha256,
         "caDownloadUrl": view.ca_download_url,
+        "iosWifiProxyProfileUrl": ios_wifi_proxy_profile_url,
         "proxyQrCodeUrl": view.proxy_qr_code_url,
+        "proxyConfiguredUrl": proxy_configured_url,
         "netcheckUrl": netcheck_url,
         "tlsCheckUrl": tls_check_url,
         "proxyAccessUrl": proxy_access_url,
         "reportUrl": report_url,
+        "sessionPublicUrl": session_public_url,
+        "suggestedWifiSsid": view.suggested_wifi_ssid,
+        "suggestedWifiSsidMessage": view.suggested_wifi_ssid_message,
     });
     format!(
         r#"<!doctype html>
@@ -1084,9 +1356,14 @@ fn render_landing_page(session: &TrustProbeSession, token: &str) -> String {
     .ok {{ color: #16833a; }}
     .warn {{ color: #9a6500; }}
     .bad {{ color: #c7352f; }}
+    .warning-box {{ border: 1px solid #d6a100; border-radius: 8px; padding: 10px 12px; background: color-mix(in srgb, #ffd666 18%, Canvas); margin: 10px 0; }}
     code {{ word-break: break-all; }}
     a, button {{ font: inherit; }}
     button, .button {{ display: inline-block; margin: 6px 8px 6px 0; padding: 10px 12px; border-radius: 6px; border: 1px solid currentColor; background: transparent; color: inherit; text-decoration: none; }}
+    .button-disabled {{ opacity: 0.45; pointer-events: none; }}
+    label {{ display: block; margin: 10px 0 4px; font-weight: 600; }}
+    input {{ box-sizing: border-box; width: 100%; padding: 10px 12px; border-radius: 6px; border: 1px solid color-mix(in srgb, CanvasText 24%, transparent); background: Canvas; color: CanvasText; font: inherit; }}
+    small {{ color: color-mix(in srgb, CanvasText 72%, transparent); }}
     ol {{ padding-left: 20px; }}
   </style>
 </head>
@@ -1097,6 +1374,8 @@ fn render_landing_page(session: &TrustProbeSession, token: &str) -> String {
   <p>CA SHA-256 fingerprint:<br><code>{}</code></p>
   <section class="status" id="proxy-access">Checking proxy access authorization...</section>
   <section class="status" id="result">Preparing trust check...</section>
+  <section class="status" id="proxy-configuration">Checking whether this browser is using the Bifrost proxy...</section>
+  <section class="status" id="ios-wifi-proxy-tools"></section>
   <section id="next"></section>
 </main>
 <script>
@@ -1114,6 +1393,7 @@ function randomSuffix() {{
 function show(html) {{ document.getElementById("result").innerHTML = html; }}
 function showNext(html) {{ document.getElementById("next").innerHTML = html; }}
 function showProxyAccess(html) {{ document.getElementById("proxy-access").innerHTML = html; }}
+function showProxyConfiguration(html) {{ document.getElementById("proxy-configuration").innerHTML = html; }}
 async function postReport(type, extra) {{
   const cfg = window.__BIFROST_TRUST_PROBE__;
   try {{
@@ -1128,10 +1408,32 @@ async function postReport(type, extra) {{
     }});
   }} catch (_) {{}}
 }}
+async function syncProbeConfig() {{
+  const cfg = window.__BIFROST_TRUST_PROBE__;
+  const active = document.activeElement;
+  if (active && active.id === "ios-wifi-ssid-input") return;
+  const risk = document.getElementById("ios-wifi-managed-risk");
+  if (risk) cfg.managedWifiRiskAccepted = !!risk.checked;
+  try {{
+    const response = await fetch(cfg.sessionPublicUrl + "&r=" + encodeURIComponent(randomSuffix()), {{
+      cache: "no-store"
+    }});
+    if (!response.ok) return;
+    const data = await response.json();
+    cfg.suggestedWifiSsid = data.suggestedWifiSsid || "";
+    cfg.suggestedWifiSsidMessage = data.suggestedWifiSsidMessage || "";
+    renderIosWifiProxyTools();
+  }} catch (_) {{}}
+}}
 async function runProbe() {{
   const cfg = window.__BIFROST_TRUST_PROBE__;
   await postReport("page_opened");
   await checkProxyAccess();
+  await checkCertificateTrust();
+  await checkProxyConfiguration();
+}}
+async function checkCertificateTrust() {{
+  const cfg = window.__BIFROST_TRUST_PROBE__;
   show("Device opened the probe page. Checking probe port...");
   try {{
     const net = await fetch(cfg.netcheckUrl + "&r=" + encodeURIComponent(randomSuffix()), {{
@@ -1142,7 +1444,7 @@ async function runProbe() {{
       await postReport("network_failed", {{ status: net.status }});
       show('<span class="bad">Probe port is not reachable.</span>');
       showNext("<p>Check that this phone and computer are on the same network, the selected IP is correct, and firewall rules allow the probe port.</p><button onclick='runProbe()'>Retry</button>");
-      return;
+      return false;
     }}
     await postReport("netcheck_ok");
     show('<span class="ok">Network check passed.</span> Checking HTTPS trust...');
@@ -1150,7 +1452,7 @@ async function runProbe() {{
     await postReport("network_failed", {{ message: String(error) }});
     show('<span class="bad">Probe port is not reachable.</span>');
     showNext("<p>Check that this phone and computer are on the same network, the selected IP is correct, and firewall rules allow the probe port.</p><button onclick='runProbe()'>Retry</button>");
-    return;
+    return false;
   }}
   try {{
     const tls = await fetch(cfg.tlsCheckUrl + "&r=" + encodeURIComponent(randomSuffix()), {{
@@ -1161,13 +1463,16 @@ async function runProbe() {{
       await postReport("tls_ok");
       show('<span class="ok">Trust check passed. This browser trusts Bifrost CA.</span>');
       showProxyConfig();
+      return true;
     }} else {{
       await postReport("tls_failed", {{ status: tls.status }});
       showTlsFailed();
+      return false;
     }}
   }} catch (error) {{
     await postReport("tls_failed", {{ message: String(error) }});
     showTlsFailed();
+    return false;
   }}
 }}
 async function checkProxyAccess() {{
@@ -1192,10 +1497,124 @@ async function checkProxyAccess() {{
     showProxyAccess('<span class="warn">Proxy access check failed.</span><br><small>' + escapeText(String(error)) + '</small>');
   }}
 }}
+async function checkProxyConfiguration() {{
+  const cfg = window.__BIFROST_TRUST_PROBE__;
+  showProxyConfiguration("Checking whether this browser is actually using the Bifrost proxy...");
+  try {{
+    const response = await fetch(cfg.proxyConfiguredUrl + "&r=" + encodeURIComponent(randomSuffix()), {{
+      cache: "no-store",
+      mode: "cors"
+    }});
+    if (response.ok) {{
+      const data = await response.json().catch(function() {{ return {{}}; }});
+      showProxyConfiguration('<span class="ok">Proxy is configured.</span><br><small>' + escapeText(data.message || "This browser reached Bifrost through the configured proxy.") + '</small>');
+      return;
+    }}
+    await postReport("proxy_config_failed", {{ status: response.status }});
+    showProxyConfigurationMissing("Proxy check returned HTTP " + response.status + ".");
+  }} catch (error) {{
+    await postReport("proxy_config_failed", {{ message: String(error) }});
+    showProxyConfigurationMissing("This browser did not reach Bifrost through the proxy.");
+  }}
+}}
+function showProxyConfigurationMissing(message) {{
+  const cfg = window.__BIFROST_TRUST_PROBE__;
+  showProxyConfiguration(
+    '<span class="bad">Proxy is not configured yet.</span><br>' +
+    '<small>' + escapeText(message || "") + '</small>' +
+    '<ol>' +
+    '<li>Recommended for iPhone: configure it manually in Settings &gt; Wi-Fi &gt; current network &gt; Configure Proxy &gt; Manual.</li>' +
+    '<li>Set Server to <code>' + escapeText(cfg.host) + '</code> and Port to <code>' + escapeText(String(cfg.adminPort)) + '</code>, then rerun this check.</li>' +
+    '<li>Use the experimental Wi-Fi profile only if you accept that uninstalling it may remove the managed Wi-Fi network entry.</li>' +
+    '</ol>' +
+    '<button onclick="focusIosWifiSsid()">Show experimental profile option</button>'
+  );
+}}
 function escapeText(value) {{
   return String(value || "").replace(/[&<>"']/g, function(ch) {{
     return ({{ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }})[ch];
   }});
+}}
+function buildIosWifiProxyProfileUrl() {{
+  const cfg = window.__BIFROST_TRUST_PROBE__;
+  const ssid = String(cfg.suggestedWifiSsid || "").trim();
+  if (!ssid) return "";
+  return cfg.iosWifiProxyProfileUrl +
+    "?ssid=" + encodeURIComponent(ssid) +
+    "&ip=" + encodeURIComponent(cfg.host) +
+    "&port=" + encodeURIComponent(String(cfg.adminPort));
+}}
+function updateIosWifiProxyProfileLink() {{
+  const cfg = window.__BIFROST_TRUST_PROBE__;
+  const link = document.getElementById("ios-wifi-proxy-profile-link");
+  const hint = document.getElementById("ios-wifi-proxy-profile-hint");
+  if (!link || !hint) return;
+  const url = buildIosWifiProxyProfileUrl();
+  if (!url) {{
+    link.removeAttribute("href");
+    link.classList.add("button-disabled");
+    hint.textContent = cfg.suggestedWifiSsidMessage || "Bifrost could not detect this Mac's current Wi-Fi SSID. Use manual Wi-Fi proxy setup for now.";
+    return;
+  }}
+  const risk = document.getElementById("ios-wifi-managed-risk");
+  if (risk) cfg.managedWifiRiskAccepted = !!risk.checked;
+  if (!risk || !risk.checked) {{
+    link.removeAttribute("href");
+    link.classList.add("button-disabled");
+    hint.textContent = "Confirm the managed Wi-Fi removal risk before downloading this experimental profile.";
+    return;
+  }}
+  link.href = url;
+  link.classList.remove("button-disabled");
+  hint.textContent = "This profile configures Wi-Fi proxy " + window.__BIFROST_TRUST_PROBE__.host + ":" + window.__BIFROST_TRUST_PROBE__.adminPort + " for Wi-Fi \"" + window.__BIFROST_TRUST_PROBE__.suggestedWifiSsid + "\".";
+}}
+function renderIosWifiProxyTools() {{
+  const cfg = window.__BIFROST_TRUST_PROBE__;
+  const target = document.getElementById("ios-wifi-proxy-tools");
+  if (!target) return;
+  const ssid = String(cfg.suggestedWifiSsid || "").trim();
+  const riskChecked = cfg.managedWifiRiskAccepted ? " checked" : "";
+  const ssidHtml = ssid ? "<p>Wi-Fi name for this check: <code>" + escapeText(ssid) + "</code></p>" : "<p><span class='warn'>" + escapeText(cfg.suggestedWifiSsidMessage || "Bifrost could not detect this Mac's current Wi-Fi SSID.") + "</span></p>";
+  target.innerHTML =
+    "<h2>iOS Proxy Setup</h2>" +
+    "<p><strong>Recommended:</strong> set the proxy manually in Settings &gt; Wi-Fi &gt; current network &gt; Configure Proxy &gt; Manual. Set Server to <code>" +
+    escapeText(cfg.host) +
+    "</code> and Port to <code>" +
+    escapeText(String(cfg.adminPort)) +
+    "</code>. Turn it back to Off when finished.</p>" +
+    "<p><strong>Experimental profile:</strong> Bifrost can generate a managed Wi-Fi profile that sets the current Wi-Fi network proxy to <strong>" +
+    escapeText(cfg.host + ":" + cfg.adminPort) +
+    "</strong>. It does not contain or ask for the Wi-Fi password, but iOS may remove the managed Wi-Fi network entry when you uninstall this profile.</p>" +
+    ssidHtml +
+    "<label for='ios-wifi-ssid-input'>Wi-Fi name</label>" +
+    "<input id='ios-wifi-ssid-input' autocomplete='off' value='" + escapeText(ssid) + "' placeholder='Enter the exact Wi-Fi name shown on this iPhone'>" +
+    "<p><button onclick='submitWifiSsid()'>Use this Wi-Fi name</button></p>" +
+    "<div class='warning-box'><strong>Experimental managed Wi-Fi profile</strong><br><small>Bifrost's iOS Wi-Fi proxy profile uses Apple's managed Wi-Fi payload. It does not contain a Wi-Fi password, but uninstalling the profile can remove that managed Wi-Fi network entry from iOS. Manual Wi-Fi proxy setup is the safe cleanup path.</small></div>" +
+    "<label><input id='ios-wifi-managed-risk' type='checkbox' onchange='window.__BIFROST_TRUST_PROBE__.managedWifiRiskAccepted = this.checked; updateIosWifiProxyProfileLink()'" + riskChecked + "> I understand removing this profile may remove this Wi-Fi entry.</label>" +
+    "<p><a id='ios-wifi-proxy-profile-link' class='button button-disabled'>Download Experimental Wi-Fi Proxy Profile</a></p>" +
+    "<small id='ios-wifi-proxy-profile-hint'>Preparing Wi-Fi proxy profile link...</small>" +
+    "<p><small>If iOS installs the profile but the proxy does not take effect, disconnect and reconnect Wi-Fi, then run this Availability Check again. If you later remove the profile and Wi-Fi disappears, reconnect to the Wi-Fi network manually.</small></p>";
+  updateIosWifiProxyProfileLink();
+}}
+async function submitWifiSsid() {{
+  const input = document.getElementById("ios-wifi-ssid-input");
+  const ssid = input ? input.value.trim() : "";
+  if (!ssid) {{
+    const hint = document.getElementById("ios-wifi-proxy-profile-hint");
+    if (hint) hint.textContent = "Enter the exact Wi-Fi name first.";
+    return;
+  }}
+  window.__BIFROST_TRUST_PROBE__.suggestedWifiSsid = ssid;
+  window.__BIFROST_TRUST_PROBE__.suggestedWifiSsidMessage = "Wi-Fi name was provided on this device.";
+  updateIosWifiProxyProfileLink();
+  await postReport("wifi_ssid_updated", {{ wifiSsid: ssid, message: "Wi-Fi name was provided on the availability check page." }});
+  await syncProbeConfig();
+}}
+function focusIosWifiSsid() {{
+  const target = document.getElementById("ios-wifi-proxy-tools");
+  if (target) {{
+    target.scrollIntoView({{ behavior: "smooth", block: "center" }});
+  }}
 }}
 async function copyProxyAddress() {{
   const cfg = window.__BIFROST_TRUST_PROBE__;
@@ -1214,7 +1633,7 @@ function showProxyConfig() {{
 }}
 function showTlsFailed() {{
   const platform = detectPlatform();
-  show('<span class="bad">HTTPS trust check failed.</span>');
+  show('<span class="bad">HTTPS trust check failed.</span><p><a class="button" href="' + window.__BIFROST_TRUST_PROBE__.caDownloadUrl + '">Download Bifrost CA</a></p>');
   let restartHint = "<p>If you just installed or trusted the CA, fully quit and restart this browser, then open this page again. Some browsers keep old certificate trust decisions until restart.</p>";
   let steps = "<p>Install and trust Bifrost CA, then return here and retry.</p>" + restartHint;
   if (platform === "ios") {{
@@ -1222,8 +1641,10 @@ function showTlsFailed() {{
   }} else if (platform === "android") {{
     steps = "<ol><li>Install the Bifrost CA certificate.</li><li>Fully quit and restart this browser, then retry.</li><li>For Android apps, remember that some apps ignore user CAs or use certificate pinning.</li></ol>" + restartHint;
   }}
-  showNext(steps + "<a class='button' href='" + window.__BIFROST_TRUST_PROBE__.caDownloadUrl + "'>Download CA</a><button onclick='runProbe()'>Retry</button>");
+  showNext(steps + "<button onclick='runProbe()'>Retry</button>");
 }}
+renderIosWifiProxyTools();
+setInterval(syncProbeConfig, 1000);
 runProbe();
 </script>
 </body>
@@ -1300,6 +1721,109 @@ fn request_client_ip_addr(req: &Request<Incoming>) -> Option<IpAddr> {
     request_client_ip(req).and_then(|value| value.parse::<IpAddr>().ok())
 }
 
+struct WifiSsidDetection {
+    ssid: Option<String>,
+    message: Option<String>,
+}
+
+fn current_wifi_ssid_detection() -> WifiSsidDetection {
+    if !cfg!(target_os = "macos") {
+        return WifiSsidDetection {
+            ssid: None,
+            message: Some(
+                "Automatic Wi-Fi name detection is currently only supported on macOS.".to_string(),
+            ),
+        };
+    }
+    let Some(device) = current_wifi_device() else {
+        return WifiSsidDetection {
+            ssid: None,
+            message: Some("Bifrost could not find the macOS Wi-Fi interface.".to_string()),
+        };
+    };
+    if let Some(ssid) = current_wifi_ssid_from_networksetup(&device) {
+        return WifiSsidDetection {
+            ssid: Some(ssid),
+            message: None,
+        };
+    }
+    match current_wifi_ssid_from_ipconfig(&device) {
+        Some(ssid) if ssid == "<redacted>" => WifiSsidDetection {
+            ssid: None,
+            message: Some(
+                "macOS is hiding the current Wi-Fi name from this Bifrost process. Grant location permission to the app or use manual Wi-Fi proxy setup for now.".to_string(),
+            ),
+        },
+        Some(ssid) => WifiSsidDetection {
+            ssid: Some(ssid),
+            message: None,
+        },
+        None => WifiSsidDetection {
+            ssid: None,
+            message: Some("Bifrost could not detect the current Wi-Fi name from macOS.".to_string()),
+        },
+    }
+}
+
+fn current_wifi_device() -> Option<String> {
+    let output = Command::new("networksetup")
+        .arg("-listallhardwareports")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut in_wifi_block = false;
+    let mut device = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(name) = line.strip_prefix("Hardware Port: ") {
+            in_wifi_block = name == "Wi-Fi" || name == "AirPort";
+            continue;
+        }
+        if in_wifi_block {
+            if let Some(value) = line.strip_prefix("Device: ") {
+                device = Some(value.trim().to_string());
+                break;
+            }
+        }
+    }
+    device
+}
+
+fn current_wifi_ssid_from_networksetup(device: &str) -> Option<String> {
+    let output = Command::new("networksetup")
+        .arg("-getairportnetwork")
+        .arg(device)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.split_once(':')
+        .map(|(_, ssid)| ssid.trim().to_string())
+        .filter(|ssid| !ssid.is_empty() && ssid != "<redacted>")
+}
+
+fn current_wifi_ssid_from_ipconfig(device: &str) -> Option<String> {
+    let output = Command::new("ipconfig")
+        .arg("getsummary")
+        .arg(device)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines().find_map(|line| {
+        let line = line.trim();
+        let value = line.strip_prefix("SSID :")?.trim();
+        (!value.is_empty()).then(|| value.to_string())
+    })
+}
+
 fn ca_key_path_from_cert_path(ca_cert_path: &Path) -> PathBuf {
     ca_cert_path.with_file_name("ca.key")
 }
@@ -1359,6 +1883,10 @@ mod tests {
             proxy_access_status: None,
             proxy_access_allowed: None,
             proxy_access_message: None,
+            proxy_configured: false,
+            proxy_configuration_message: None,
+            suggested_wifi_ssid: None,
+            suggested_wifi_ssid_message: None,
             network_reachable: false,
             tls_trusted: false,
             created_at: Utc::now(),
@@ -1403,6 +1931,10 @@ mod tests {
             proxy_access_status: None,
             proxy_access_allowed: None,
             proxy_access_message: None,
+            proxy_configured: false,
+            proxy_configuration_message: None,
+            suggested_wifi_ssid: None,
+            suggested_wifi_ssid_message: None,
             network_reachable: true,
             tls_trusted: false,
             created_at: Utc::now(),
@@ -1437,6 +1969,10 @@ mod tests {
             proxy_access_status: None,
             proxy_access_allowed: None,
             proxy_access_message: None,
+            proxy_configured: false,
+            proxy_configuration_message: None,
+            suggested_wifi_ssid: None,
+            suggested_wifi_ssid_message: None,
             network_reachable: false,
             tls_trusted: false,
             created_at: Utc::now(),
@@ -1469,5 +2005,174 @@ mod tests {
             view.events.last().map(|event| event.event_type.as_str()),
             Some("proxy_access_pending")
         );
+    }
+
+    #[test]
+    fn proxy_configuration_status_is_recorded_in_view() {
+        let id = Uuid::new_v4();
+        let token = "token";
+        let mut session = TrustProbeSession {
+            id,
+            token_hash: hash_token(token),
+            host: "127.0.0.1".to_string(),
+            admin_port: 8800,
+            probe_port: 8802,
+            ca_fingerprint_sha256: None,
+            status: TrustProbeStatus::PageOpened,
+            opened: true,
+            proxy_access_status: None,
+            proxy_access_allowed: None,
+            proxy_access_message: None,
+            proxy_configured: false,
+            proxy_configuration_message: None,
+            suggested_wifi_ssid: Some("Office Wi-Fi".to_string()),
+            suggested_wifi_ssid_message: None,
+            network_reachable: false,
+            tls_trusted: false,
+            created_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::minutes(10),
+            client_ip: None,
+            user_agent: None,
+            platform_hint: None,
+            last_error: None,
+            events: Vec::new(),
+        };
+
+        session.apply_event(
+            "proxy_configured_ok",
+            Some("Proxy reached Bifrost.".to_string()),
+            Some("192.168.1.20".to_string()),
+            None,
+            None,
+        );
+
+        let view = session.to_view(token);
+        assert!(view.proxy_configured);
+        assert_eq!(
+            view.proxy_configuration_message.as_deref(),
+            Some("Proxy reached Bifrost.")
+        );
+        assert_eq!(view.suggested_wifi_ssid.as_deref(), Some("Office Wi-Fi"));
+        assert_eq!(view.client_ip.as_deref(), Some("192.168.1.20"));
+        assert_eq!(
+            view.events.last().map(|event| event.event_type.as_str()),
+            Some("proxy_configured_ok")
+        );
+    }
+
+    #[test]
+    fn user_wifi_ssid_is_recorded_in_view() {
+        let id = Uuid::new_v4();
+        let token = "token";
+        let mut session = TrustProbeSession {
+            id,
+            token_hash: hash_token(token),
+            host: "127.0.0.1".to_string(),
+            admin_port: 8800,
+            probe_port: 8802,
+            ca_fingerprint_sha256: None,
+            status: TrustProbeStatus::Created,
+            opened: false,
+            proxy_access_status: None,
+            proxy_access_allowed: None,
+            proxy_access_message: None,
+            proxy_configured: false,
+            proxy_configuration_message: None,
+            suggested_wifi_ssid: None,
+            suggested_wifi_ssid_message: None,
+            network_reachable: false,
+            tls_trusted: false,
+            created_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::minutes(10),
+            client_ip: None,
+            user_agent: None,
+            platform_hint: None,
+            last_error: None,
+            events: Vec::new(),
+        };
+
+        session.apply_wifi_ssid("Office Wi-Fi".to_string());
+
+        let view = session.to_view(token);
+        assert_eq!(view.suggested_wifi_ssid.as_deref(), Some("Office Wi-Fi"));
+        assert!(view
+            .suggested_wifi_ssid_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("provided by the user"));
+        assert_eq!(
+            view.events.last().map(|event| event.event_type.as_str()),
+            Some("wifi_ssid_updated")
+        );
+    }
+
+    #[test]
+    fn user_wifi_ssid_is_synced_to_all_active_sessions() {
+        let now = Utc::now();
+        let session = |id: Uuid, expires_at: DateTime<Utc>| TrustProbeSession {
+            id,
+            token_hash: hash_token("token"),
+            host: "127.0.0.1".to_string(),
+            admin_port: 8800,
+            probe_port: 8802,
+            ca_fingerprint_sha256: None,
+            status: TrustProbeStatus::Created,
+            opened: false,
+            proxy_access_status: None,
+            proxy_access_allowed: None,
+            proxy_access_message: None,
+            proxy_configured: false,
+            proxy_configuration_message: None,
+            suggested_wifi_ssid: None,
+            suggested_wifi_ssid_message: None,
+            network_reachable: false,
+            tls_trusted: false,
+            created_at: now,
+            expires_at,
+            client_ip: None,
+            user_agent: None,
+            platform_hint: None,
+            last_error: None,
+            events: Vec::new(),
+        };
+        let active_a = Uuid::new_v4();
+        let active_b = Uuid::new_v4();
+        let expired = Uuid::new_v4();
+        let mut sessions = HashMap::from([
+            (
+                active_a,
+                session(active_a, now + chrono::Duration::minutes(10)),
+            ),
+            (
+                active_b,
+                session(active_b, now + chrono::Duration::minutes(10)),
+            ),
+            (
+                expired,
+                session(expired, now - chrono::Duration::minutes(1)),
+            ),
+        ]);
+
+        TrustProbeManager::apply_wifi_ssid_to_active_sessions(
+            &mut sessions,
+            "Office Wi-Fi".to_string(),
+        );
+
+        assert_eq!(
+            sessions
+                .get(&active_a)
+                .and_then(|session| session.suggested_wifi_ssid.as_deref()),
+            Some("Office Wi-Fi")
+        );
+        assert_eq!(
+            sessions
+                .get(&active_b)
+                .and_then(|session| session.suggested_wifi_ssid.as_deref()),
+            Some("Office Wi-Fi")
+        );
+        assert!(sessions
+            .get(&expired)
+            .and_then(|session| session.suggested_wifi_ssid.as_deref())
+            .is_none());
     }
 }

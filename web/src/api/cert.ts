@@ -1,4 +1,4 @@
-import { get, post } from './client';
+import { get, patch, post } from './client';
 import { buildPublicUrl } from '../runtime';
 
 export interface CertInfo {
@@ -79,6 +79,7 @@ export interface MobileDevicesResponse {
   ios_wifi_proxy_profile_url: string;
   ios_wifi_proxy_profile_qrcode_url: string;
   suggested_wifi_ssid?: string | null;
+  suggested_wifi_ssid_message?: string | null;
   ordinary_device_notice: string;
   managed_device_notice: string;
 }
@@ -129,6 +130,10 @@ export interface TrustProbeSession {
   proxyAccessStatus?: TrustProbeProxyAccessStatus | null;
   proxyAccessAllowed?: boolean | null;
   proxyAccessMessage?: string | null;
+  proxyConfigured: boolean;
+  proxyConfigurationMessage?: string | null;
+  suggestedWifiSsid?: string | null;
+  suggestedWifiSsidMessage?: string | null;
   networkReachable: boolean;
   tlsTrusted: boolean;
   clientIp?: string | null;
@@ -212,6 +217,15 @@ export async function createTrustProbeSession(
 
 export async function getTrustProbeSession(sessionId: string): Promise<TrustProbeSession> {
   return get<TrustProbeSession>(`/trust-probe/sessions/${encodeURIComponent(sessionId)}`);
+}
+
+export async function updateTrustProbeSessionWifiSsid(
+  sessionId: string,
+  wifiSsid: string,
+): Promise<TrustProbeSession> {
+  return patch<TrustProbeSession>(`/trust-probe/sessions/${encodeURIComponent(sessionId)}`, {
+    wifiSsid,
+  });
 }
 
 export function getCertDownloadUrl(): string {
