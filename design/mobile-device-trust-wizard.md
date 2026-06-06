@@ -9,7 +9,7 @@ Mobile Device Trust Wizard 把现有 CA 下载、二维码和证书状态能力�
 - 普通个人手机：Bifrost 可以检测 Android USB 设备、推送 CA、打开系统安装入口，或为 iOS 提供 `.mobileconfig` 下载/二维码；手机端仍必须由用户确认安装和信任。
 - 企业/测试受管设备：只有 Android Device Owner/Profile Owner/委派证书安装器，或 iOS Apple Configurator/MDM/MDM enrollment profile 这类受管路径，才允许真正自动安装并启用信任。本次支持 macOS + Apple Configurator/cfgutil 的高级路径；普通网页/二维码下载仍必须手动启用完全信任。
 
-新增 Bifrost Universal Trust Probe / 信任探针，用于验证“当前设备/当前浏览器是否已经信任 Bifrost CA”。它不读取 iOS/Android 私有证书库，也不依赖 USB、ADB、Apple Configurator 或 MDM，而是让目标设备扫码打开 HTTP 落地页，再发起一次由当前 Bifrost CA 签发证书的真实 HTTPS 请求。HTTPS 请求成功表示当前设备浏览器 TLS 栈已经信任 Bifrost CA；失败则说明 CA 未安装、未启用完全信任、证书不匹配、设备时间异常或探针端口被拦截。
+新增 Bifrost Availability Check / 可用性检查，用于验证“目标设备是否能使用 Bifrost”。它不读取 iOS/Android 私有证书库，也不依赖 USB、ADB、Apple Configurator 或 MDM，而是让目标设备扫码打开 HTTP 落地页，自动检查代理访问授权、探针端口可达性，再发起一次由当前 Bifrost CA 签发证书的真实 HTTPS 请求。HTTPS 请求成功表示当前设备浏览器 TLS 栈已经信任 Bifrost CA；失败则说明 CA 未安装、未启用完全信任、证书不匹配、设备时间异常或探针端口被拦截。
 
 ## 实现逻辑
 
@@ -48,6 +48,7 @@ Mobile Device Trust Wizard 把现有 CA 下载、二维码和证书状态能力�
 - `/api/cert/install` 等价于 `bifrost ca install` 的本机系统信任安装流程，仅允许 loopback / 桌面 WebView 访问；请求体必须携带确认字符串 `install_local_ca_certificate`，避免远程 Admin 或裸 POST 误触发本机 keychain/sudo 安装提示。
 - `/api/mobile-devices*` 仅允许 loopback / 桌面 WebView 访问，避免远程 Admin 触发本机 USB 操作。
 - `/_bifrost/public/cert*` 与 `/_bifrost/public/mobile*` 是公开下载路径，必须允许任意 LAN 客户端访问，不要求交互式授权或白名单；否则手机扫码会拿到非 profile 响应并提示描述文件无效。
+- `/_bifrost/public/proxy*` 同样是公开二维码路径，必须允许任意 LAN 客户端访问；否则可用性检查成功后的 `Open proxy QR code` 会被访问控制拦截成 403。
 - `install-ca` 支持 Android `normal_guide` 和 iOS `managed_auto_trust`。请求体必须携带确认字符串 `push_and_open_mobile_certificate_installer`，并且只有本地 Admin/WebView 能触发。
 - 安装操作记录 tracing audit log。
 - `/api/cert/info` 新增 `sha256_fingerprint`，供用户在手机上核对 CA 指纹。
@@ -61,7 +62,7 @@ Mobile Device Trust Wizard 把现有 CA 下载、二维码和证书状态能力�
 - Android USB 区块：检测设备、展示 ADB/设备授权状态和当前 CA 状态；对 connected 设备执行 guided install。CA 状态分为 `unknown`、`not_installed`、`pushed_to_device`、`installed`。其中 `installed` 仅在 Bifrost 能读取 Android 用户证书库并匹配当前 CA 指纹时显示；普通个人手机若只完成了 push/open installer，则 UI 只显示 `pushed_to_device` 并提示继续在手机上确认。
 - 全局设备监听提示：管理端主布局挂载 `MobileDeviceTrustPrompt`，用户在任意页面时每 3 秒静默轮询本地 `/api/mobile-devices/refresh`；检测到 connected Android 或 iOS 设备时弹出确认窗口。若同时发现多台设备，弹窗列出每台设备的自定义名称、型号、ID 和 ECID，用户可以选择目标设备后直接点击 `Install Selected`，也可以点击 `Open Certificate Setup` 跳转到 `Settings > Certificate`。跳转时 URL 携带 `mobile_device` / `mobile_platform`，Certificate 页拿到目标设备后自动滚动到对应卡片，高亮该卡片，并让对应安装按钮播放脉冲动画，确保用户知道从哪里继续操作；用户选择 Not now 后只在当前页面会话内记录设备 id，避免旧 localStorage 记录导致后续连接永远不弹。远程 Admin 访问本地 USB API 会得到 403，轮询静默忽略，不打扰远程页面。
 - Certificate 页自身仍每 3 秒刷新设备列表，负责展示 Android ADB、Android CA 状态、iOS profile、Apple Configurator 和安装 session；它不再弹局部重复提示。Android 用户在手机端完成安装后，如果设备是 root/emulator 且证书库可读，页面会自动刷新为 `CA installed`；普通设备仍提示系统证书库不可由普通 ADB 验证。
-- Certificate 页使用左侧固定导航和右侧单列章节，不再把 Android 和 iOS 做成并列卡片。导航顺序为 Local install、iOS devices、Android devices、Certificate downloads；右侧内容按同样顺序排列，iOS 设备安装必须在 Android 之前，证书文件下载和二维码下载放在最后。
+- Certificate 页使用左侧固定导航和右侧单列章节，不再把 Android 和 iOS 做成并列卡片。导航和右侧内容顺序为 Availability Check、Local install、iOS devices、Android devices、Certificate downloads；可用性检查是手机/跨设备排障的最高优先级入口，iOS 设备安装必须在 Android 之前，证书文件下载和二维码下载放在最后。
 - iPhone/iPad 区块：
   - 顶部先展示统一 iOS 流程：把 profile 送到 iPhone -> 在 Settings 安装描述文件 -> Settings > General > About > Certificate Trust Settings -> 打开 Bifrost CA 完全信任。Apple Configurator 和手动扫码/文件安装只作为“送达 profile”的两种入口，不在 UI 上拆成互相割裂的两套模式。
   - 统一流程之后先展示“选择 profile 送达方式”。Apple Configurator/cfgutil 检测状态、每台 iOS 设备的自定义名称/型号/ID/ECID 和 `Configurator Install` 按钮作为自动送达入口；手动扫码/下载 `.mobileconfig` / LAN profile QR 作为手动送达入口。点击某一台的 Configurator 按钮时，Bifrost 通过该设备 ECID 从电脑侧定向发送 profile；如果 iPhone 仍要求屏幕确认，则继续按同一套 Settings 安装和信任步骤操作。
@@ -85,9 +86,9 @@ Mobile Device Trust Wizard 把现有 CA 下载、二维码和证书状态能力�
 CLI 不承诺普通手机自动启用根 CA 信任；iOS 的自动 SSL/TLS 信任只归属于 Apple Configurator/MDM/监督设备路径。
 Android CLI 会在安装前后输出 `Android CA status`。普通设备通常只能显示 `pushed to device` 或 `unknown`；root/emulator/test 设备可通过用户证书库指纹比对显示 `installed`。
 
-### 5. Universal Trust Probe
+### 5. Availability Check
 
-信任探针由三个部分组成：
+可用性检查由三个部分组成：
 
 - Admin API：
   - `POST /_bifrost/api/trust-probe/sessions` 创建短期探针会话。请求中的 `host` 必须是 Bifrost 发现到的本机 IP，不能传任意域名或公网地址。
@@ -96,15 +97,18 @@ Android CLI 会在安装前后输出 `Android CA status`。普通设备通常只
   - `GET /_bifrost/public/trust-probe/{session_id}?t=<token>` 返回自包含 HTML 检测页，不依赖登录和主 Web UI bundle。
   - `GET /_bifrost/public/trust-probe/{session_id}/qrcode?t=<token>` 返回扫码二维码。
   - `POST /_bifrost/public/trust-probe/{session_id}/report?t=<token>` 接收手机页面通过 HTTP 回报的 `page_opened`、`network_failed`、`tls_failed` 等事件。
+  - `GET /_bifrost/public/trust-probe/{session_id}/proxy-access?t=<token>` 使用访问控制模块检查当前客户端 IP 是否已被允许使用代理；待授权时会写入 pending authorization，让管理端能继续审批。
 - 双协议 probe server：
   - 默认尝试监听 `admin_port + 2`，端口冲突时自动选择空闲端口，并在 session 响应中返回实际 `probePort`。
   - 同一端口通过 TCP `peek` 首字节区分 HTTP 与 TLS。HTTP 路径提供 `/_bifrost/trust-probe/netcheck`，HTTPS 路径提供 `/_bifrost/trust-probe/check`。
   - HTTPS 证书由当前 Bifrost CA 给所选 IP 动态签发，IP 写入 SAN。设备浏览器能成功 `fetch(https://ip:probePort/...)` 时，Bifrost 将 session 标记为 `tls_trusted`。
+  - 检测成功后，手机页展示可点击复制的代理地址 `<host>:<adminPort>`，并提供公开 proxy QR 链接。
 
 状态机：
 
 - `created`：管理端生成二维码，等待设备扫码。
 - `page_opened`：目标设备已打开 HTTP 落地页。
+- `proxy_access_allowed` / `proxy_access_pending` / `proxy_access_denied` / `proxy_access_unavailable`：目标设备代理访问授权检查结果，作为 session event 与 view 字段展示。
 - `network_reachable`：目标设备能访问 probe 端口的 HTTP netcheck。
 - `tls_trusted`：目标设备完成 HTTPS trust check。
 - `tls_failed`：netcheck 成功但 HTTPS 握手/请求失败。
@@ -140,7 +144,7 @@ Android CLI 会在安装前后输出 `Android CA status`。普通设备通常只
 - `bifrost-admin`：
   - mobile devices API loopback 限制逻辑。
   - CertInfo SHA-256 指纹按 DER 证书生成。
-  - Trust Probe token hash、状态机流转、TLS 成功覆盖历史失败。
+  - Availability Check token hash、状态机流转、TLS 成功覆盖历史失败、proxy access 状态记录。
 - `bifrost-cli`：
   - `ca install --mobile` 单个 connected Android 自动选择。
   - 多个 connected Android 且 `--yes` 时必须传 `--device`。
@@ -156,7 +160,7 @@ Android CLI 会在安装前后输出 `Android CA status`。普通设备通常只
 - `LAN public mobile profile`：真实场景用 LAN 地址验证 profile endpoint 不触发交互式授权，返回 `application/x-apple-aspen-config` 且 plist 有效。
 - `admin_api_mobile_install_requires_explicit_confirmation`：验证 Android install 操作必须显式确认。
 - `admin_api_local_ca_install_requires_explicit_confirmation`：验证本机 CA install 操作必须显式确认，自动测试不误触系统证书安装。
-- `admin_trust_probe_verifies_https_trust_with_current_ca`：创建 Trust Probe 会话，打开 public landing/qrcode，访问 HTTP netcheck，再用当前 Bifrost CA 作为 root CA 访问 HTTPS check，最后断言 session 状态为 `tls_trusted`。
+- `admin_trust_probe_verifies_https_trust_with_current_ca`：创建 Availability Check 会话，打开 public landing/qrcode，访问 public proxy QR、proxy-access、HTTP netcheck，再用当前 Bifrost CA 作为 root CA 访问 HTTPS check，最后断言 session 状态为 `tls_trusted`。
 - `bifrost-device` 单元测试：验证 Android user CA store PEM 指纹匹配和不匹配路径。
 - `cli_ca_install_mobile_single_device_fake_adb`：通过 fake ADB 验证 `ca install --mobile --yes` 单设备自动选择并执行 push/open。
 - `cli_ca_install_mobile_multiple_devices_requires_device_fake_adb`：通过 fake ADB 验证多个 ready 设备的非交互选择边界。
@@ -170,7 +174,7 @@ Android CLI 会在安装前后输出 `Android CA status`。普通设备通常只
 - TC-MDT-02：iOS mobileconfig 下载包含 root payload 与 Certificate Trust Settings 提示。
 - TC-MDT-03：iOS profile QR endpoint 返回 SVG。
 - TC-MDT-04：Android install 缺少确认时拒绝。
-- TC-MDT-05：Settings Certificate UI 不承诺自动信任，并展示左侧固定导航；右侧单列按 Local install、iOS、Android、Certificate downloads 顺序组织。
+- TC-MDT-05：Settings Certificate UI 不承诺自动信任，并展示左侧固定导航；右侧单列按 Availability Check、Local install、iOS、Android、Certificate downloads 顺序组织。
 - TC-MDT-06：浅色/暗色主题下手机安装向导可读可操作。
 - TC-MDT-07：任意管理端页面检测到 connected Android/iOS 后弹出全局确认窗口；多设备时弹窗展示设备名称/型号/ID/ECID，支持选择目标设备直接安装或跳转 Certificate 页面；Certificate 页设备列表继续自动刷新，并自动滚动、高亮目标设备卡片和脉冲提示安装按钮。
 - TC-MDT-08：CLI `ca install --mobile --yes` 在 fake ADB 单设备场景自动选择并执行 guided install。
@@ -180,7 +184,7 @@ Android CLI 会在安装前后输出 `Android CA status`。普通设备通常只
 - TC-MDT-12：Apple Configurator 返回需要手机端交互时，页面显示待用户确认而非失败。
 - TC-MDT-13：Settings iPhone/iPad 在送达方式之后展示 `ios_1` 到 `ios_7` 共享图文步骤，明确 Configurator 和扫码/文件安装只差在送达 profile，后续 profile 安装与 Certificate Trust Settings 完全信任是同一条流程。
 - TC-MDT-14：Android 设备卡片展示当前 CA 状态；普通 ADB 不承诺能验证 user CA store，root/emulator 可通过 `/data/misc/user/0/cacerts-added` 指纹匹配显示已安装。
-- TC-MDT-15：Universal Trust Probe 使用局域网 IP 生成二维码；扫码设备依次显示页面已打开、probe 端口可达、HTTPS 信任检查通过/失败；成功后展示代理配置，失败时展示 iOS/Android 下一步安装和信任指引。
+- TC-MDT-15：Availability Check 使用局域网 IP 生成二维码；扫码设备依次检查代理访问授权、页面已打开、probe 端口可达、HTTPS 信任检查通过/失败；成功后展示可点击复制的代理配置和公开 proxy QR，失败时展示 iOS/Android 下一步安装和信任指引。
 
 ## Review/Fix/Test 闭环方案
 
@@ -214,4 +218,4 @@ Android CLI 会在安装前后输出 `Android CA status`。普通设备通常只
 ## 文档更新要求
 
 - 更新 `human_tests/readme.md`。
-- 本次新增 CLI 参数，已在 `bifrost ca install --help` 中暴露；不新增协议或 README 面向用户章节，README 暂不更新。
+- 更新 README 和 `docs/getting-started.md`，把设备可用性检查作为手机/跨设备排障的高优先级入口说明。

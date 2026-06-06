@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use bifrost_core::AccessDecision;
 use bifrost_tls::{init_crypto_provider, load_root_ca, DynamicCertGenerator};
 use chrono::{DateTime, Utc};
 use http_body_util::BodyExt;
@@ -63,6 +64,9 @@ pub struct TrustProbeSessionView {
     session_id: String,
     status: TrustProbeStatus,
     opened: bool,
+    proxy_access_status: Option<TrustProbeProxyAccessStatus>,
+    proxy_access_allowed: Option<bool>,
+    proxy_access_message: Option<String>,
     network_reachable: bool,
     tls_trusted: bool,
     client_ip: Option<String>,
@@ -117,6 +121,9 @@ struct TrustProbeSession {
     ca_fingerprint_sha256: Option<String>,
     status: TrustProbeStatus,
     opened: bool,
+    proxy_access_status: Option<TrustProbeProxyAccessStatus>,
+    proxy_access_allowed: Option<bool>,
+    proxy_access_message: Option<String>,
     network_reachable: bool,
     tls_trusted: bool,
     created_at: DateTime<Utc>,
@@ -126,6 +133,24 @@ struct TrustProbeSession {
     platform_hint: Option<String>,
     last_error: Option<String>,
     events: Vec<TrustProbeEvent>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrustProbeProxyAccessStatus {
+    Allowed,
+    Pending,
+    Denied,
+    Unavailable,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrustProbeProxyAccessView {
+    status: TrustProbeProxyAccessStatus,
+    authorized: bool,
+    client_ip: Option<String>,
+    message: String,
 }
 
 #[derive(Debug)]
@@ -197,6 +222,9 @@ impl TrustProbeManager {
             ca_fingerprint_sha256,
             status: TrustProbeStatus::Created,
             opened: false,
+            proxy_access_status: None,
+            proxy_access_allowed: None,
+            proxy_access_message: None,
             network_reachable: false,
             tls_trusted: false,
             created_at: now,
@@ -289,6 +317,26 @@ impl TrustProbeManager {
         true
     }
 
+    fn record_proxy_access(
+        &self,
+        session_id: Uuid,
+        token: &str,
+        status: TrustProbeProxyAccessStatus,
+        client_ip: Option<String>,
+        message: String,
+    ) -> bool {
+        self.cleanup_expired_sessions();
+        let mut sessions = self.sessions.lock();
+        let Some(session) = sessions.get_mut(&session_id) else {
+            return false;
+        };
+        if !session.token_matches(token) || session.is_expired() {
+            return false;
+        }
+        session.apply_proxy_access(status, client_ip, message);
+        true
+    }
+
     async fn ensure_probe_server(
         &self,
         host: &str,
@@ -351,7 +399,7 @@ impl TrustProbeManager {
             for session in sessions.values_mut() {
                 if session.expires_at <= now && session.status != TrustProbeStatus::Expired {
                     session.status = TrustProbeStatus::Expired;
-                    session.last_error = Some("Trust probe session expired.".to_string());
+                    session.last_error = Some("Availability check session expired.".to_string());
                     session.events.push(TrustProbeEvent {
                         event_type: "expired".to_string(),
                         at: now,
@@ -399,6 +447,9 @@ impl TrustProbeSession {
                 self.status
             },
             opened: self.opened,
+            proxy_access_status: self.proxy_access_status,
+            proxy_access_allowed: self.proxy_access_allowed,
+            proxy_access_message: self.proxy_access_message.clone(),
             network_reachable: self.network_reachable,
             tls_trusted: self.tls_trusted,
             client_ip: self.client_ip.clone(),
@@ -430,6 +481,31 @@ impl TrustProbeSession {
             ),
             ca_fingerprint_sha256: self.ca_fingerprint_sha256.clone(),
         }
+    }
+
+    fn apply_proxy_access(
+        &mut self,
+        status: TrustProbeProxyAccessStatus,
+        client_ip: Option<String>,
+        message: String,
+    ) {
+        if let Some(client_ip) = client_ip {
+            self.client_ip = Some(client_ip);
+        }
+        self.proxy_access_status = Some(status);
+        self.proxy_access_allowed = Some(matches!(status, TrustProbeProxyAccessStatus::Allowed));
+        self.proxy_access_message = Some(message.clone());
+        self.events.push(TrustProbeEvent {
+            event_type: match status {
+                TrustProbeProxyAccessStatus::Allowed => "proxy_access_allowed",
+                TrustProbeProxyAccessStatus::Pending => "proxy_access_pending",
+                TrustProbeProxyAccessStatus::Denied => "proxy_access_denied",
+                TrustProbeProxyAccessStatus::Unavailable => "proxy_access_unavailable",
+            }
+            .to_string(),
+            at: Utc::now(),
+            message: Some(message),
+        });
     }
 
     fn apply_event(
@@ -529,7 +605,7 @@ pub async fn handle_trust_probe_api(
 
 pub async fn handle_trust_probe_public(
     req: Request<Incoming>,
-    _state: SharedAdminState,
+    state: SharedAdminState,
     path: &str,
 ) -> Response<BoxBody> {
     if req.method() == Method::OPTIONS {
@@ -545,7 +621,10 @@ pub async fn handle_trust_probe_public(
     match (req.method().clone(), action.as_deref()) {
         (Method::GET, None) => {
             let Some(html) = TRUST_PROBE_MANAGER.render_landing_page(session_id, &token) else {
-                return error_response(StatusCode::NOT_FOUND, "Trust probe session not found");
+                return error_response(
+                    StatusCode::NOT_FOUND,
+                    "Availability check session not found",
+                );
             };
             public_response_builder(StatusCode::OK)
                 .header("Content-Type", "text/html; charset=utf-8")
@@ -557,7 +636,10 @@ pub async fn handle_trust_probe_public(
                 .render_landing_page(session_id, &token)
                 .is_none()
             {
-                return error_response(StatusCode::NOT_FOUND, "Trust probe session not found");
+                return error_response(
+                    StatusCode::NOT_FOUND,
+                    "Availability check session not found",
+                );
             }
             public_response_builder(StatusCode::OK)
                 .header("Content-Type", "text/html; charset=utf-8")
@@ -566,6 +648,9 @@ pub async fn handle_trust_probe_public(
         }
         (Method::GET, Some("qrcode")) => render_probe_qrcode(session_id, &token),
         (Method::HEAD, Some("qrcode")) => render_probe_qrcode_head(session_id, &token),
+        (Method::GET, Some("proxy-access")) => {
+            check_proxy_access(req, state, session_id, token).await
+        }
         (Method::POST, Some("report")) => report_probe_result(req, session_id, token).await,
         _ => method_not_allowed(),
     }
@@ -609,7 +694,10 @@ fn get_probe_session(path: &str) -> Response<BoxBody> {
     };
     match TRUST_PROBE_MANAGER.get_session(session_id) {
         Some(session) => json_response(&session),
-        None => error_response(StatusCode::NOT_FOUND, "Trust probe session not found"),
+        None => error_response(
+            StatusCode::NOT_FOUND,
+            "Availability check session not found",
+        ),
     }
 }
 
@@ -618,12 +706,7 @@ async fn report_probe_result(
     session_id: Uuid,
     token: String,
 ) -> Response<BoxBody> {
-    let client_ip = req
-        .headers()
-        .get("x-bifrost-peer-ip")
-        .or_else(|| req.headers().get("x-forwarded-for"))
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.to_string());
+    let client_ip = request_client_ip(&req);
     let user_agent_header = req
         .headers()
         .get(hyper::header::USER_AGENT)
@@ -649,14 +732,118 @@ async fn report_probe_result(
     };
     if !TRUST_PROBE_MANAGER.record_report(session_id, &token, report, client_ip, user_agent_header)
     {
-        return error_response(StatusCode::NOT_FOUND, "Trust probe session not found");
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "Availability check session not found",
+        );
     }
     json_response(&serde_json::json!({ "ok": true }))
 }
 
+async fn check_proxy_access(
+    req: Request<Incoming>,
+    state: SharedAdminState,
+    session_id: Uuid,
+    token: String,
+) -> Response<BoxBody> {
+    let Some(client_ip) = request_client_ip_addr(&req) else {
+        let message = "Bifrost could not determine this device IP address.".to_string();
+        if !TRUST_PROBE_MANAGER.record_proxy_access(
+            session_id,
+            &token,
+            TrustProbeProxyAccessStatus::Unavailable,
+            None,
+            message.clone(),
+        ) {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "Availability check session not found",
+            );
+        }
+        return json_response(&TrustProbeProxyAccessView {
+            status: TrustProbeProxyAccessStatus::Unavailable,
+            authorized: false,
+            client_ip: None,
+            message,
+        });
+    };
+
+    let Some(access_control) = state.access_control.as_ref() else {
+        let message =
+            "Proxy access control is not available for this Bifrost instance.".to_string();
+        if !TRUST_PROBE_MANAGER.record_proxy_access(
+            session_id,
+            &token,
+            TrustProbeProxyAccessStatus::Unavailable,
+            Some(client_ip.to_string()),
+            message.clone(),
+        ) {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "Availability check session not found",
+            );
+        }
+        return json_response(&TrustProbeProxyAccessView {
+            status: TrustProbeProxyAccessStatus::Unavailable,
+            authorized: false,
+            client_ip: Some(client_ip.to_string()),
+            message,
+        });
+    };
+
+    let ac = access_control.read().await;
+    let decision = ac.check_access(&client_ip);
+    let (status, authorized, message) = match decision {
+        AccessDecision::Allow => (
+            TrustProbeProxyAccessStatus::Allowed,
+            true,
+            format!("This device ({client_ip}) is authorized to use the Bifrost proxy."),
+        ),
+        AccessDecision::Prompt(ip) => {
+            ac.add_pending_authorization(ip);
+            (
+                TrustProbeProxyAccessStatus::Pending,
+                false,
+                format!(
+                    "This device ({client_ip}) is waiting for proxy access approval in Bifrost."
+                ),
+            )
+        }
+        AccessDecision::Deny => (
+            TrustProbeProxyAccessStatus::Denied,
+            false,
+            format!("This device ({client_ip}) is not allowed to use the Bifrost proxy."),
+        ),
+    };
+    drop(ac);
+
+    if !TRUST_PROBE_MANAGER.record_proxy_access(
+        session_id,
+        &token,
+        status,
+        Some(client_ip.to_string()),
+        message.clone(),
+    ) {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "Availability check session not found",
+        );
+    }
+
+    json_response(&TrustProbeProxyAccessView {
+        status,
+        authorized,
+        client_ip: Some(client_ip.to_string()),
+        message,
+    })
+}
+
 fn render_probe_qrcode(session_id: Uuid, token: &str) -> Response<BoxBody> {
     let Some(session) = TRUST_PROBE_MANAGER.get_session(session_id) else {
-        return error_response(StatusCode::NOT_FOUND, "Trust probe session not found");
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "Availability check session not found",
+        );
     };
     let url = format!(
         "{}?{TOKEN_QUERY_KEY}={}",
@@ -693,7 +880,10 @@ fn render_probe_qrcode_head(session_id: Uuid, token: &str) -> Response<BoxBody> 
         .render_landing_page(session_id, token)
         .is_none()
     {
-        return error_response(StatusCode::NOT_FOUND, "Trust probe session not found");
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "Availability check session not found",
+        );
     }
     public_response_builder(StatusCode::OK)
         .header("Content-Type", "image/svg+xml")
@@ -856,6 +1046,14 @@ fn render_landing_page(session: &TrustProbeSession, token: &str) -> String {
         TOKEN_QUERY_KEY,
         urlencoding::encode(token)
     );
+    let proxy_access_url = format!(
+        "http://{}:{}/_bifrost/public/trust-probe/{}/proxy-access?{}={}",
+        view.host,
+        view.admin_port,
+        view.session_id,
+        TOKEN_QUERY_KEY,
+        urlencoding::encode(token)
+    );
     let config = serde_json::json!({
         "sessionId": view.session_id,
         "token": token,
@@ -867,6 +1065,7 @@ fn render_landing_page(session: &TrustProbeSession, token: &str) -> String {
         "proxyQrCodeUrl": view.proxy_qr_code_url,
         "netcheckUrl": netcheck_url,
         "tlsCheckUrl": tls_check_url,
+        "proxyAccessUrl": proxy_access_url,
         "reportUrl": report_url,
     });
     format!(
@@ -875,7 +1074,7 @@ fn render_landing_page(session: &TrustProbeSession, token: &str) -> String {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Bifrost Trust Probe</title>
+  <title>Bifrost Availability Check</title>
   <style>
     :root {{ color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
     body {{ margin: 0; padding: 24px; background: Canvas; color: CanvasText; }}
@@ -883,6 +1082,7 @@ fn render_landing_page(session: &TrustProbeSession, token: &str) -> String {
     h1 {{ font-size: 24px; margin: 0 0 12px; }}
     .status {{ border: 1px solid color-mix(in srgb, CanvasText 18%, transparent); border-radius: 8px; padding: 14px; margin: 16px 0; }}
     .ok {{ color: #16833a; }}
+    .warn {{ color: #9a6500; }}
     .bad {{ color: #c7352f; }}
     code {{ word-break: break-all; }}
     a, button {{ font: inherit; }}
@@ -892,9 +1092,10 @@ fn render_landing_page(session: &TrustProbeSession, token: &str) -> String {
 </head>
 <body>
 <main>
-  <h1>Bifrost Trust Probe</h1>
-  <p>This page checks whether this device browser trusts the current Bifrost CA.</p>
+  <h1>Bifrost Availability Check</h1>
+  <p>This page checks whether this device can use Bifrost and whether this browser trusts the current Bifrost CA.</p>
   <p>CA SHA-256 fingerprint:<br><code>{}</code></p>
+  <section class="status" id="proxy-access">Checking proxy access authorization...</section>
   <section class="status" id="result">Preparing trust check...</section>
   <section id="next"></section>
 </main>
@@ -912,6 +1113,7 @@ function randomSuffix() {{
 }}
 function show(html) {{ document.getElementById("result").innerHTML = html; }}
 function showNext(html) {{ document.getElementById("next").innerHTML = html; }}
+function showProxyAccess(html) {{ document.getElementById("proxy-access").innerHTML = html; }}
 async function postReport(type, extra) {{
   const cfg = window.__BIFROST_TRUST_PROBE__;
   try {{
@@ -929,6 +1131,7 @@ async function postReport(type, extra) {{
 async function runProbe() {{
   const cfg = window.__BIFROST_TRUST_PROBE__;
   await postReport("page_opened");
+  await checkProxyAccess();
   show("Device opened the probe page. Checking probe port...");
   try {{
     const net = await fetch(cfg.netcheckUrl + "&r=" + encodeURIComponent(randomSuffix()), {{
@@ -957,7 +1160,7 @@ async function runProbe() {{
     if (tls.ok) {{
       await postReport("tls_ok");
       show('<span class="ok">Trust check passed. This browser trusts Bifrost CA.</span>');
-      showNext("<p>Next configure this device proxy to:<br><strong>" + cfg.host + ":" + cfg.adminPort + "</strong></p><a class='button' href='" + cfg.proxyQrCodeUrl + "'>Open proxy QR code</a>");
+      showProxyConfig();
     }} else {{
       await postReport("tls_failed", {{ status: tls.status }});
       showTlsFailed();
@@ -966,6 +1169,48 @@ async function runProbe() {{
     await postReport("tls_failed", {{ message: String(error) }});
     showTlsFailed();
   }}
+}}
+async function checkProxyAccess() {{
+  const cfg = window.__BIFROST_TRUST_PROBE__;
+  showProxyAccess("Checking whether this device is authorized to use the Bifrost proxy...");
+  try {{
+    const response = await fetch(cfg.proxyAccessUrl + "&r=" + encodeURIComponent(randomSuffix()), {{
+      cache: "no-store",
+      mode: "cors"
+    }});
+    const data = await response.json();
+    if (data.status === "allowed") {{
+      showProxyAccess('<span class="ok">Proxy access is authorized.</span><br><small>' + escapeText(data.message || "") + '</small>');
+    }} else if (data.status === "pending") {{
+      showProxyAccess('<span class="warn">Proxy access is waiting for approval.</span><br><small>' + escapeText(data.message || "") + '</small>');
+    }} else if (data.status === "denied") {{
+      showProxyAccess('<span class="bad">Proxy access is denied.</span><br><small>' + escapeText(data.message || "") + '</small>');
+    }} else {{
+      showProxyAccess('<span class="warn">Proxy access status is unavailable.</span><br><small>' + escapeText(data.message || "") + '</small>');
+    }}
+  }} catch (error) {{
+    showProxyAccess('<span class="warn">Proxy access check failed.</span><br><small>' + escapeText(String(error)) + '</small>');
+  }}
+}}
+function escapeText(value) {{
+  return String(value || "").replace(/[&<>"']/g, function(ch) {{
+    return ({{ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }})[ch];
+  }});
+}}
+async function copyProxyAddress() {{
+  const cfg = window.__BIFROST_TRUST_PROBE__;
+  const value = cfg.host + ":" + cfg.adminPort;
+  try {{
+    await navigator.clipboard.writeText(value);
+    document.getElementById("copy-status").textContent = "Copied";
+  }} catch (_) {{
+    document.getElementById("copy-status").textContent = "Select and copy manually";
+  }}
+}}
+function showProxyConfig() {{
+  const cfg = window.__BIFROST_TRUST_PROBE__;
+  const proxyAddress = cfg.host + ":" + cfg.adminPort;
+  showNext("<p>Next configure this device proxy to:</p><button onclick='copyProxyAddress()'><strong>" + proxyAddress + "</strong></button><span id='copy-status'></span><p><a class='button' href='" + cfg.proxyQrCodeUrl + "'>Open proxy QR code</a></p>");
 }}
 function showTlsFailed() {{
   const platform = detectPlatform();
@@ -1007,7 +1252,7 @@ fn parse_public_probe_path(path: &str) -> Option<(Uuid, Option<String>)> {
 fn validate_probe_host(host: &str) -> Result<String, String> {
     let host = host.trim();
     let ip = host.parse::<IpAddr>().map_err(|_| {
-        "Trust probe host must be one of this computer's local IP addresses.".to_string()
+        "Availability check host must be one of this computer's local IP addresses.".to_string()
     })?;
     let allowed: Vec<IpAddr> = network::get_local_ips()
         .into_iter()
@@ -1021,7 +1266,7 @@ fn validate_probe_host(host: &str) -> Result<String, String> {
     if allowed.contains(&ip) {
         Ok(ip.to_string())
     } else {
-        Err("Trust probe host must be selected from the local IP list.".to_string())
+        Err("Availability check host must be selected from the local IP list.".to_string())
     }
 }
 
@@ -1037,6 +1282,21 @@ fn query_param(query: Option<&str>, key: &str) -> Option<String> {
             }
         })
     })
+}
+
+fn request_client_ip(req: &Request<Incoming>) -> Option<String> {
+    req.headers()
+        .get("x-bifrost-peer-ip")
+        .or_else(|| req.headers().get("x-forwarded-for"))
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+}
+
+fn request_client_ip_addr(req: &Request<Incoming>) -> Option<IpAddr> {
+    request_client_ip(req).and_then(|value| value.parse::<IpAddr>().ok())
 }
 
 fn ca_key_path_from_cert_path(ca_cert_path: &Path) -> PathBuf {
@@ -1095,6 +1355,9 @@ mod tests {
             ca_fingerprint_sha256: None,
             status: TrustProbeStatus::Created,
             opened: false,
+            proxy_access_status: None,
+            proxy_access_allowed: None,
+            proxy_access_message: None,
             network_reachable: false,
             tls_trusted: false,
             created_at: Utc::now(),
@@ -1136,6 +1399,9 @@ mod tests {
             ca_fingerprint_sha256: None,
             status: TrustProbeStatus::TlsFailed,
             opened: true,
+            proxy_access_status: None,
+            proxy_access_allowed: None,
+            proxy_access_message: None,
             network_reachable: true,
             tls_trusted: false,
             created_at: Utc::now(),
@@ -1152,5 +1418,55 @@ mod tests {
         assert_eq!(session.status, TrustProbeStatus::TlsTrusted);
         assert!(session.tls_trusted);
         assert!(session.last_error.is_none());
+    }
+
+    #[test]
+    fn proxy_access_status_is_recorded_in_view() {
+        let id = Uuid::new_v4();
+        let token = "token";
+        let mut session = TrustProbeSession {
+            id,
+            token_hash: hash_token(token),
+            host: "127.0.0.1".to_string(),
+            admin_port: 8800,
+            probe_port: 8802,
+            ca_fingerprint_sha256: None,
+            status: TrustProbeStatus::PageOpened,
+            opened: true,
+            proxy_access_status: None,
+            proxy_access_allowed: None,
+            proxy_access_message: None,
+            network_reachable: false,
+            tls_trusted: false,
+            created_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::minutes(10),
+            client_ip: None,
+            user_agent: None,
+            platform_hint: None,
+            last_error: None,
+            events: Vec::new(),
+        };
+
+        session.apply_proxy_access(
+            TrustProbeProxyAccessStatus::Pending,
+            Some("192.168.1.20".to_string()),
+            "Waiting for proxy access approval.".to_string(),
+        );
+
+        let view = session.to_view(token);
+        assert_eq!(
+            view.proxy_access_status,
+            Some(TrustProbeProxyAccessStatus::Pending)
+        );
+        assert_eq!(view.proxy_access_allowed, Some(false));
+        assert_eq!(
+            view.proxy_access_message.as_deref(),
+            Some("Waiting for proxy access approval.")
+        );
+        assert_eq!(view.client_ip.as_deref(), Some("192.168.1.20"));
+        assert_eq!(
+            view.events.last().map(|event| event.event_type.as_str()),
+            Some("proxy_access_pending")
+        );
     }
 }

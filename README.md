@@ -56,6 +56,16 @@ bifrost status
 http://127.0.0.1:9900/_bifrost/
 ```
 
+## 设备可用性检查
+
+手机、平板或另一台电脑配置代理前，优先打开 Web UI 的 `Settings -> Certificate -> Availability Check`。选择当前电脑的局域网 IP 后生成二维码或链接，用目标设备访问即可自动检查三件事：
+
+- 该设备是否已被 Bifrost 代理访问控制允许。
+- 设备是否能访问 Bifrost 的探针端口。
+- 当前浏览器是否已经信任 Bifrost CA 签发的 HTTPS 证书。
+
+检查通过后，页面会显示可点击复制的代理地址 `<局域网 IP>:<端口>`，也可以打开代理二维码继续配置。若检查失败，页面会按 iOS/Android 给出下一步：安装 CA、iOS 进入 `设置 > 通用 > 关于本机 > 证书信任设置` 开启完全信任，或到管理端批准该设备的代理访问。
+
 ## 和AI集成
 ```bash
 bifrost install-skill -y

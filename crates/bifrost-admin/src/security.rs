@@ -2,7 +2,10 @@ use std::net::SocketAddr;
 
 use hyper::Request;
 
-use crate::{CERT_PUBLIC_PATH_PREFIX, MOBILE_PUBLIC_PATH_PREFIX, TRUST_PROBE_PUBLIC_PATH_PREFIX};
+use crate::{
+    CERT_PUBLIC_PATH_PREFIX, MOBILE_PUBLIC_PATH_PREFIX, PROXY_PUBLIC_PATH_PREFIX,
+    TRUST_PROBE_PUBLIC_PATH_PREFIX,
+};
 
 #[derive(Debug, Clone)]
 pub struct AdminSecurityConfig {
@@ -29,6 +32,7 @@ pub fn is_cert_public_request<T>(req: &Request<T>) -> bool {
     let path = req.uri().path();
     if !path.starts_with(CERT_PUBLIC_PATH_PREFIX)
         && !path.starts_with(MOBILE_PUBLIC_PATH_PREFIX)
+        && !path.starts_with(PROXY_PUBLIC_PATH_PREFIX)
         && !path.starts_with(TRUST_PROBE_PUBLIC_PATH_PREFIX)
     {
         return false;
@@ -151,6 +155,16 @@ mod tests {
     fn test_accept_public_mobile_profile_request() {
         let req = create_request(
             "http://127.0.0.1:9900/_bifrost/public/mobile/ios-profile.mobileconfig",
+            Some("127.0.0.1:9900"),
+        );
+
+        assert!(is_cert_public_request(&req));
+    }
+
+    #[test]
+    fn test_accept_public_proxy_qrcode_request() {
+        let req = create_request(
+            "http://127.0.0.1:9900/_bifrost/public/proxy/qrcode?ip=192.168.1.2",
             Some("127.0.0.1:9900"),
         );
 

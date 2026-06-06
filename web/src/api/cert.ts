@@ -103,6 +103,12 @@ export type TrustProbeStatus =
   | "network_failed"
   | "expired";
 
+export type TrustProbeProxyAccessStatus =
+  | "allowed"
+  | "pending"
+  | "denied"
+  | "unavailable";
+
 export interface TrustProbeEvent {
   type: string;
   at: string;
@@ -113,6 +119,9 @@ export interface TrustProbeSession {
   sessionId: string;
   status: TrustProbeStatus;
   opened: boolean;
+  proxyAccessStatus?: TrustProbeProxyAccessStatus | null;
+  proxyAccessAllowed?: boolean | null;
+  proxyAccessMessage?: string | null;
   networkReachable: boolean;
   tlsTrusted: boolean;
   clientIp?: string | null;

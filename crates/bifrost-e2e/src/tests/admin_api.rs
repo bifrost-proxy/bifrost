@@ -266,7 +266,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
         ),
         TestCase::standalone(
             "admin_trust_probe_verifies_https_trust_with_current_ca",
-            "Validate Trust Probe creates a public landing page, checks the probe port, and verifies HTTPS trust with the current CA",
+            "Validate Availability Check creates a public landing page, checks proxy access, the probe port, and HTTPS trust with the current CA",
             "admin",
             || async move {
                 let port = pick_unused_port()?;
@@ -311,6 +311,12 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     .get("qrCodeUrl")
                     .and_then(|value| value.as_str())
                     .ok_or_else(|| format!("Missing qrCodeUrl in trust probe response: {session}"))?;
+                let proxy_qr_code_url = session
+                    .get("proxyQrCodeUrl")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| {
+                        format!("Missing proxyQrCodeUrl in trust probe response: {session}")
+                    })?;
                 let probe_port = session
                     .get("probePort")
                     .and_then(|value| value.as_u64())
@@ -337,8 +343,10 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     .text()
                     .await
                     .map_err(|e| format!("Failed to read landing HTML: {}", e))?;
-                if !landing_html.contains("Bifrost Trust Probe")
+                if !landing_html.contains("Bifrost Availability Check")
                     || !landing_html.contains("tlsCheckUrl")
+                    || !landing_html.contains("proxyAccessUrl")
+                    || !landing_html.contains("copyProxyAddress")
                 {
                     return Err(format!("Unexpected trust probe landing page: {landing_html}"));
                 }
@@ -366,6 +374,35 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     .map_err(|e| format!("HEAD trust probe QR failed: {}", e))?;
                 assert_status(&qr_head_response, 200)?;
                 assert_header_contains(&qr_head_response, "content-type", "image/svg+xml")?;
+
+                let proxy_qr_response = client
+                    .get(proxy_qr_code_url)
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET proxy QR failed: {}", e))?;
+                assert_status(&proxy_qr_response, 200)?;
+                assert_header_contains(&proxy_qr_response, "content-type", "image/svg+xml")?;
+
+                let proxy_access_url = format!(
+                    "http://127.0.0.1:{port}/_bifrost/public/trust-probe/{session_id}/proxy-access?t={token}"
+                );
+                let proxy_access_response = client
+                    .get(proxy_access_url)
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET trust probe proxy access failed: {}", e))?;
+                assert_status(&proxy_access_response, 200)?;
+                let proxy_access_json: serde_json::Value = proxy_access_response
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse proxy access JSON: {}", e))?;
+                if proxy_access_json.get("status").and_then(|value| value.as_str())
+                    != Some("allowed")
+                {
+                    return Err(format!(
+                        "Expected proxy access allowed for loopback, got: {proxy_access_json}"
+                    ));
+                }
 
                 let netcheck_url = format!(
                     "http://127.0.0.1:{probe_port}/_bifrost/trust-probe/netcheck?sid={session_id}&t={token}"
