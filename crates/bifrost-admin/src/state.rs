@@ -1,5 +1,9 @@
 use std::collections::HashMap;
 #[cfg(target_os = "macos")]
+use std::ffi::OsString;
+#[cfg(target_os = "macos")]
+use std::os::unix::process::CommandExt;
+#[cfg(target_os = "macos")]
 use std::path::Path;
 use std::path::PathBuf;
 #[cfg(target_os = "macos")]
@@ -51,6 +55,9 @@ pub type SharedRuntimeConfig = Arc<RwLock<RuntimeConfig>>;
 #[cfg(target_os = "macos")]
 const SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER_ENV: &str =
     "BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER";
+#[cfg(target_os = "macos")]
+const SYSTEM_PROXY_LIFECYCLE_HELPER_PROGRAM_ENV: &str =
+    "BIFROST_SYSTEM_PROXY_LIFECYCLE_HELPER_PROGRAM";
 
 #[cfg(target_os = "macos")]
 pub struct SystemProxyLifecycleHelperState {
@@ -194,8 +201,9 @@ fn spawn_system_proxy_lifecycle_helper(
     parent_pid: u32,
     reason: SystemProxyLifecycleHelperStartReason,
 ) -> std::io::Result<Child> {
-    let exe = std::env::current_exe()?;
-    let child = Command::new(exe)
+    let exe = resolve_system_proxy_lifecycle_helper_program()?;
+    let mut command = Command::new(&exe);
+    command
         .arg("system-proxy")
         .arg("lifecycle-helper")
         .arg("--data-dir")
@@ -205,17 +213,76 @@ fn spawn_system_proxy_lifecycle_helper(
         .arg("--poll-secs")
         .arg("2")
         .stdin(Stdio::null())
-        .spawn()?;
+        .process_group(0);
+    let child = command.spawn()?;
     tracing::info!(
         target: "bifrost_admin::proxy",
         helper_pid = child.id(),
         parent_pid,
         data_dir = %data_dir.display(),
+        helper_program = %exe.display(),
         reason = reason.as_str(),
         "{}",
         reason.started_message()
     );
     Ok(child)
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_system_proxy_lifecycle_helper_program() -> std::io::Result<PathBuf> {
+    if let Ok(program) = std::env::var(SYSTEM_PROXY_LIFECYCLE_HELPER_PROGRAM_ENV) {
+        let program = PathBuf::from(program);
+        if program.exists() {
+            return Ok(program);
+        }
+        tracing::warn!(
+            target: "bifrost_admin::proxy",
+            helper_program = %program.display(),
+            env = SYSTEM_PROXY_LIFECYCLE_HELPER_PROGRAM_ENV,
+            "configured system proxy lifecycle helper program does not exist; falling back"
+        );
+    }
+
+    let current_exe = std::env::current_exe();
+    let arg0 = std::env::args_os().next();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    resolve_system_proxy_lifecycle_helper_program_from_candidates(current_exe, arg0, &cwd)
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_system_proxy_lifecycle_helper_program_from_candidates(
+    current_exe: std::io::Result<PathBuf>,
+    arg0: Option<OsString>,
+    cwd: &Path,
+) -> std::io::Result<PathBuf> {
+    if let Ok(path) = current_exe.as_ref() {
+        if path.exists() {
+            return Ok(path.clone());
+        }
+    }
+
+    if let Some(arg0) = arg0 {
+        let arg0 = PathBuf::from(arg0);
+        let candidate = if arg0.is_absolute() {
+            arg0
+        } else {
+            cwd.join(arg0)
+        };
+        if candidate.exists() {
+            tracing::warn!(
+                target: "bifrost_admin::proxy",
+                helper_program = %candidate.display(),
+                current_exe = current_exe
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|error| error.to_string()),
+                "falling back to argv[0] for system proxy lifecycle helper program"
+            );
+            return Ok(candidate);
+        }
+    }
+
+    current_exe
 }
 
 #[cfg(target_os = "macos")]
@@ -1481,6 +1548,45 @@ mod tests {
 
     fn cleanup_test_dir(dir: &PathBuf) {
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn lifecycle_helper_program_falls_back_to_existing_argv0_when_current_exe_is_stale() {
+        let dir = create_test_dir();
+        let helper = dir.join("bifrost-helper");
+        fs::write(&helper, b"test").expect("write helper");
+        let stale_current = dir.join("stale-current-exe");
+
+        let resolved = resolve_system_proxy_lifecycle_helper_program_from_candidates(
+            Ok(stale_current),
+            Some(helper.clone().into_os_string()),
+            &dir,
+        )
+        .expect("resolve helper");
+
+        assert_eq!(resolved, helper);
+        cleanup_test_dir(&dir);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn lifecycle_helper_program_keeps_existing_current_exe() {
+        let dir = create_test_dir();
+        let current = dir.join("current-bifrost");
+        fs::write(&current, b"test").expect("write current");
+        let argv0 = dir.join("argv0-bifrost");
+        fs::write(&argv0, b"test").expect("write argv0");
+
+        let resolved = resolve_system_proxy_lifecycle_helper_program_from_candidates(
+            Ok(current.clone()),
+            Some(argv0.into_os_string()),
+            &dir,
+        )
+        .expect("resolve helper");
+
+        assert_eq!(resolved, current);
+        cleanup_test_dir(&dir);
     }
 
     #[test]

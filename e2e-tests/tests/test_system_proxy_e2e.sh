@@ -939,6 +939,28 @@ test_launchd_cleanup_plist_dry_run_contains_version_metadata() {
     fi
 }
 
+test_launchd_cleanup_daemon_no_state_exits_quickly() {
+    rm -f "${TEST_DATA_DIR}/proxy_backup.json" "${TEST_DATA_DIR}/proxy_state.json" \
+        "${TEST_DATA_DIR}/bifrost.pid" "${TEST_DATA_DIR}/runtime.json" 2>/dev/null || true
+
+    local started
+    started=$(date +%s)
+    local output
+    output=$("$BIFROST_BIN" system-proxy cleanup-daemon \
+        --data-dir "$TEST_DATA_DIR" \
+        --installed-version "0.0.1-test" 2>&1)
+    local code=$?
+    local elapsed=$(( $(date +%s) - started ))
+
+    if [[ "$code" -eq 0 && "$elapsed" -lt 10 ]]; then
+        _log_pass "LaunchDaemon cleanup daemon 无状态时快速完成 one-shot retry-aware 检查"
+        passed=$((passed + 1))
+    else
+        _log_fail "LaunchDaemon cleanup daemon 无状态路径未快速退出" "code=0 且 elapsed<10s" "code=${code}; elapsed=${elapsed}; output=${output}"
+        failed=$((failed + 1))
+    fi
+}
+
 test_crash_recovery_runs_before_start_failure() {
     stop_proxy
     export BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER=1
@@ -1042,6 +1064,7 @@ main() {
     test_lifecycle_helper_cleans_after_parent_crash
     test_admin_api_enable_starts_lifecycle_helper
     test_admin_api_enable_lifecycle_helper_cleans_after_parent_crash
+    test_launchd_cleanup_daemon_no_state_exits_quickly
     test_crash_recovery_runs_before_start_failure
 
     print_test_summary || exit 1

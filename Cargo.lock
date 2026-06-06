@@ -464,6 +464,7 @@ dependencies = [
  "dirs 5.0.1",
  "ipnet",
  "lazy_static 1.5.0",
+ "libc",
  "lru 0.16.3",
  "once_cell",
  "parking_lot",

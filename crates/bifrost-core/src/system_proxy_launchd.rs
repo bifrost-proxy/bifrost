@@ -1,9 +1,12 @@
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::{BifrostError, Result, SystemProxyManager};
 
 pub const DEFAULT_LABEL: &str = "com.bifrost.system-proxy-cleanup";
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const CLEANUP_DAEMON_STARTUP_RETRY_WINDOW: Duration = Duration::from_secs(60);
+pub const CLEANUP_DAEMON_STARTUP_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const STOP_SUPPRESSION_FILE_NAME: &str = ".system_proxy_launchd_stop_suppressed";
 const STOP_SUPPRESSION_TTL_SECS: u64 = 300;
 
@@ -41,6 +44,12 @@ pub enum SystemProxyLaunchdMode {
     OneShot,
     KeepAlive,
     Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemProxyLaunchdRecoveryOutcome {
+    Recovered,
+    Skipped,
 }
 
 impl SystemProxyLaunchdConfig {
@@ -334,6 +343,68 @@ pub fn recover_if_no_live_runtime(data_dir: &Path) -> Result<bool> {
     }
     SystemProxyManager::recover_from_crash(data_dir)?;
     Ok(true)
+}
+
+pub fn recover_if_no_live_runtime_with_startup_retry(
+    data_dir: &Path,
+) -> Result<SystemProxyLaunchdRecoveryOutcome> {
+    recover_if_no_live_runtime_with_policy(
+        data_dir,
+        CLEANUP_DAEMON_STARTUP_RETRY_WINDOW,
+        CLEANUP_DAEMON_STARTUP_RETRY_INTERVAL,
+    )
+}
+
+fn recover_if_no_live_runtime_with_policy(
+    data_dir: &Path,
+    retry_window: Duration,
+    retry_interval: Duration,
+) -> Result<SystemProxyLaunchdRecoveryOutcome> {
+    let started_at = Instant::now();
+    let mut attempt = 1_u32;
+
+    loop {
+        match recover_if_no_live_runtime(data_dir) {
+            Ok(true) => return Ok(SystemProxyLaunchdRecoveryOutcome::Recovered),
+            Ok(false) => return Ok(SystemProxyLaunchdRecoveryOutcome::Skipped),
+            Err(error) => {
+                if !is_retryable_cleanup_daemon_recovery_error(&error)
+                    || started_at.elapsed() >= retry_window
+                {
+                    return Err(error);
+                }
+
+                let delay = cleanup_daemon_retry_delay(started_at, retry_window, retry_interval);
+                tracing::warn!(
+                    target: "bifrost_core::system_proxy_launchd",
+                    data_dir = %data_dir.display(),
+                    attempt,
+                    retry_delay_ms = delay.as_millis() as u64,
+                    retry_window_ms = retry_window.as_millis() as u64,
+                    error = %error,
+                    "system proxy cleanup daemon startup recovery failed with a retryable error; retrying"
+                );
+                std::thread::sleep(delay);
+                attempt = attempt.saturating_add(1);
+            }
+        }
+    }
+}
+
+fn cleanup_daemon_retry_delay(
+    started_at: Instant,
+    retry_window: Duration,
+    retry_interval: Duration,
+) -> Duration {
+    let remaining = retry_window.saturating_sub(started_at.elapsed());
+    retry_interval.min(remaining).max(Duration::from_millis(1))
+}
+
+fn is_retryable_cleanup_daemon_recovery_error(error: &BifrostError) -> bool {
+    let message = error.to_string();
+    message.contains("networksetup")
+        || message.contains("No enabled macOS network services")
+        || message.contains("Failed to execute launchctl")
 }
 
 pub fn consume_stop_restore_suppression(data_dir: &Path) -> bool {
@@ -943,5 +1014,39 @@ mod tests {
         )
         .expect_err("invalid label");
         assert!(error.to_string().contains("Invalid LaunchDaemon label"));
+    }
+
+    #[test]
+    fn cleanup_daemon_retries_networksetup_startup_errors() {
+        let networksetup_error =
+            BifrostError::Config("networksetup -listallnetworkservices failed".to_string());
+        let empty_services_error = BifrostError::Config(
+            "No enabled macOS network services were returned by networksetup".to_string(),
+        );
+        let corrupt_state_error =
+            BifrostError::Config("Failed to deserialize proxy state: expected value".to_string());
+
+        assert!(is_retryable_cleanup_daemon_recovery_error(
+            &networksetup_error
+        ));
+        assert!(is_retryable_cleanup_daemon_recovery_error(
+            &empty_services_error
+        ));
+        assert!(!is_retryable_cleanup_daemon_recovery_error(
+            &corrupt_state_error
+        ));
+    }
+
+    #[test]
+    fn cleanup_daemon_retry_delay_is_capped_by_remaining_window() {
+        let started_at = Instant::now() - Duration::from_millis(90);
+        let delay = cleanup_daemon_retry_delay(
+            started_at,
+            Duration::from_millis(100),
+            Duration::from_millis(50),
+        );
+
+        assert!(delay <= Duration::from_millis(10));
+        assert!(delay >= Duration::from_millis(1));
     }
 }

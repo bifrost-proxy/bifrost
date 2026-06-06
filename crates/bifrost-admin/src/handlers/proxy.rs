@@ -651,6 +651,14 @@ fn spawn_system_proxy_launchd_install_task_from_config(
         return;
     }
 
+    tracing::warn!(
+        target: "bifrost_admin::proxy",
+        installed = status.installed,
+        loaded = status.loaded,
+        needs_upgrade = status.needs_upgrade,
+        needs_upgrade_reason = status.needs_upgrade_reason.as_deref().unwrap_or(""),
+        "system proxy LaunchDaemon cleanup is not ready after system proxy enable; reboot-time cleanup is unavailable until authorization install succeeds"
+    );
     std::thread::spawn(move || {
         tracing::info!(
             target: "bifrost_admin::proxy",
@@ -667,14 +675,14 @@ fn spawn_system_proxy_launchd_install_task_from_config(
                 current_version = status.current_version,
                 "system proxy LaunchDaemon cleanup installed asynchronously after system proxy enable"
             ),
-            Err(error) if error.to_string().contains("UserCancelled") => tracing::info!(
+            Err(error) if error.to_string().contains("UserCancelled") => tracing::warn!(
                 target: "bifrost_admin::proxy",
-                "system proxy LaunchDaemon cleanup install cancelled by user after system proxy enable"
+                "system proxy LaunchDaemon cleanup install cancelled by user after system proxy enable; reboot-time cleanup remains unavailable"
             ),
             Err(error) => tracing::warn!(
                 target: "bifrost_admin::proxy",
                 error = %error,
-                "system proxy LaunchDaemon cleanup install failed after system proxy enable"
+                "system proxy LaunchDaemon cleanup install failed after system proxy enable; reboot-time cleanup remains unavailable"
             ),
         }
     });

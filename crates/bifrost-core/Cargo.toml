@@ -31,5 +31,8 @@ tokio = { workspace = true, features = ["sync"] }
 ureq.workspace = true
 reqwest = { workspace = true, features = ["blocking", "json"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile.workspace = true

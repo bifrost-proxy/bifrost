@@ -448,13 +448,15 @@ fn run_system_proxy_cleanup_daemon(
     );
 
     let startup_started_at = std::time::Instant::now();
-    match bifrost_core::system_proxy_launchd::recover_if_no_live_runtime(&data_dir) {
-        Ok(true) => tracing::info!(
+    match bifrost_core::system_proxy_launchd::recover_if_no_live_runtime_with_startup_retry(
+        &data_dir,
+    ) {
+        Ok(bifrost_core::SystemProxyLaunchdRecoveryOutcome::Recovered) => tracing::info!(
             target: "bifrost_cli::shutdown",
             elapsed_ms = startup_started_at.elapsed().as_millis() as u64,
             "system proxy launchd cleanup daemon startup recovery completed"
         ),
-        Ok(false) => tracing::info!(
+        Ok(bifrost_core::SystemProxyLaunchdRecoveryOutcome::Skipped) => tracing::info!(
             target: "bifrost_cli::shutdown",
             elapsed_ms = startup_started_at.elapsed().as_millis() as u64,
             "system proxy launchd cleanup daemon startup recovery skipped"

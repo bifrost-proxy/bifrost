@@ -518,6 +518,10 @@
 - 第 4 步显示 `Installed: true`、`Loaded: true`、`Installed mode: one-shot`、`Needs upgrade: false`。
 - plist 中 ProgramArguments 包含 `system-proxy cleanup-daemon --data-dir "$TEST_DATA_DIR" --installed-version <current>`，包含 `RunAtLoad`，且不包含 `KeepAlive`。
 - one-shot daemon 启动后如果看到 `runtime.json` 中的 Bifrost pid 仍存活，应跳过 startup cleanup，然后退出，不会误清正在运行的系统代理，也不会在空闲时保留 cleanup-daemon 进程。
+- one-shot daemon 在明确没有 `proxy_state.json` / `proxy_backup.json` / `runtime.json` 可恢复时应快速退出，不等待完整 retry 窗口；只有 `networksetup` 暂不可用或 macOS network service 暂时枚举为空这类启动期 transient 失败才在 60 秒窗口内有限重试。
+- lifecycle helper 启动日志应包含 helper pid 和 `helper_program`，helper 由独立 process group 启动；开发环境中 `current_exe()` 指向陈旧路径时应能回退到现存 `argv[0]`。
+- 所有 restore/recover/enable 路径应通过 `.system_proxy.lock` 串行化，日志包含 `waiting for system proxy cross-process file lock` 与 `acquired system proxy cross-process file lock`，避免主进程、helper、LaunchDaemon 同时写 macOS network service。
+- LaunchDaemon 未安装、未加载或需要升级时，CLI start 应输出 boot/shutdown cleanup 尚未 ready 的提示；Admin API/Web UI 运行中打开系统代理时，日志应明确记录 reboot-time cleanup 在授权安装成功前不可用。用户取消授权时服务继续运行，但日志/提示必须说明重启期 cleanup 仍不可用。
 
 ---
 
@@ -627,6 +631,7 @@
 
 ## 执行记录
 
+- 2026-06-06：针对 P0/P1 review 修复真实执行 TC-CSP-16、TC-CSP-18、TC-CSP-19 及系统代理回归套件。执行 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true bash e2e-tests/tests/test_system_proxy_e2e.sh`，脚本使用临时 `BIFROST_DATA_DIR` 和 `18889` 端口，验证 LaunchDaemon plist one-shot dry-run、外部代理归属边界、崩溃后恢复、无 backup/state 但 runtime target 匹配时的残留清理、Admin API 运行中启用 system proxy 后 lifecycle helper 崩溃兜底、cleanup-daemon 无状态快速退出，以及启动失败前同步清理残留系统代理。结果 14/14 PASS，其中新增输出 `LaunchDaemon cleanup daemon 无状态时快速完成 one-shot retry-aware 检查`，证明 retry-aware one-shot 在明确无需恢复时不会等待完整 retry 窗口；测试结束后 `./target/debug/bifrost system-proxy status` 显示系统代理恢复到正式服务 `127.0.0.1:9900`。
 - 2026-06-06：真实执行 TC-CSP-19 及系统代理回归套件。执行 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true bash e2e-tests/tests/test_system_proxy_e2e.sh`，脚本使用临时 `BIFROST_DATA_DIR` 和 `18889` 端口，显式写入 `runtime.json` 的 `host=0.0.0.0 port=18889`，删除 `proxy_state.json` / `proxy_backup.json`，再将 macOS Web/Secure Web proxy 设置为 `127.0.0.1:18889` 后以 `--no-system-proxy` 启动当前构建。结果 13/13 PASS，其中新增用例输出 `macOS: 无 backup/state 时按 runtime target 清理崩溃残留系统代理`，证明无 managed state 时仍会按上次 runtime target 清理残留代理；测试结束后系统代理恢复到正式 9900 服务。
 - 2026-06-05：真实执行 TC-CSP-18 的 Admin API 路径。使用 `/tmp/bifrost-csp18.*` 临时数据目录和 `target/debug/bifrost` 在 `18889` 端口启动服务，启动参数包含 `--no-system-proxy`、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`，并设置 `BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1` 避免本轮弹出真实授权窗口。服务 ready 后调用 `PUT /_bifrost/api/proxy/system {"enabled":true}`，响应为 `enabled=true host=127.0.0.1 port=18889 managed_by_bifrost=true`；随后日志出现 `system proxy LaunchDaemon cleanup install disabled by environment`，证明运行中服务通过 Admin API 打开系统代理后已触发 LaunchDaemon 自动检查路径。测试结束调用 API 关闭系统代理并停止临时服务，临时数据目录已清理。
 - 2026-06-05：针对 PR #187 合入后 review 评论补充真实执行 TC-CSP-18 的 Admin API lifecycle helper 回归。使用 `/tmp/bifrost-admin-helper.*` 临时数据目录和 `target/debug/bifrost` 在 `18891` 端口启动服务，启动参数包含 `--no-system-proxy`、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`，并设置 `BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1` 仅隔离 LaunchDaemon 授权弹窗。服务 ready 后调用 `PUT /_bifrost/api/proxy/system {"enabled":true}`，响应为 `enabled=true host=127.0.0.1 port=18891 managed_by_bifrost=true`；日志出现 `system proxy lifecycle helper started after Admin API enable`（helper pid `54898`）和 `system proxy LaunchDaemon cleanup install disabled by environment`。测试结束调用 API 关闭系统代理、停止临时服务并清理临时目录，结论 PASS。

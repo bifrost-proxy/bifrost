@@ -56,5 +56,6 @@ pub use system_proxy_launchd::{
     consume_stop_restore_suppression, install_launchd_cleanup,
     install_launchd_cleanup_with_gui_auth, launchd_status, launchd_status_for_config,
     render_launchd_plist, uninstall_launchd_cleanup, uninstall_launchd_cleanup_with_gui_auth,
-    SystemProxyLaunchdConfig, SystemProxyLaunchdMode, SystemProxyLaunchdStatus,
+    SystemProxyLaunchdConfig, SystemProxyLaunchdMode, SystemProxyLaunchdRecoveryOutcome,
+    SystemProxyLaunchdStatus,
 };

@@ -607,6 +607,9 @@ fn spawn_system_proxy_launchd_install_task(
         return;
     }
 
+    eprintln!(
+        "System proxy boot/shutdown cleanup is not ready yet; macOS may ask for administrator authorization. Until that install succeeds, reboot-time cleanup is not protected by LaunchDaemon."
+    );
     std::thread::spawn(move || {
         tracing::info!(
             target: "bifrost_cli::startup",
@@ -622,15 +625,25 @@ fn spawn_system_proxy_launchd_install_task(
                 current_version = status.current_version,
                 "system proxy LaunchDaemon cleanup installed asynchronously"
             ),
-            Err(error) if error.to_string().contains("UserCancelled") => tracing::info!(
-                target: "bifrost_cli::startup",
-                "system proxy LaunchDaemon cleanup install cancelled by user"
-            ),
-            Err(error) => tracing::warn!(
-                target: "bifrost_cli::startup",
-                error = %error,
-                "system proxy LaunchDaemon cleanup install failed"
-            ),
+            Err(error) if error.to_string().contains("UserCancelled") => {
+                eprintln!(
+                    "System proxy boot/shutdown cleanup authorization was cancelled; reboot-time cleanup will remain unavailable until LaunchDaemon install succeeds."
+                );
+                tracing::info!(
+                    target: "bifrost_cli::startup",
+                    "system proxy LaunchDaemon cleanup install cancelled by user"
+                )
+            }
+            Err(error) => {
+                eprintln!(
+                    "System proxy boot/shutdown cleanup failed to install: {error}. Reboot-time cleanup will remain unavailable until this succeeds."
+                );
+                tracing::warn!(
+                    target: "bifrost_cli::startup",
+                    error = %error,
+                    "system proxy LaunchDaemon cleanup install failed"
+                )
+            }
         }
     });
 }
