@@ -407,6 +407,67 @@
 
 ---
 
+### TC-CSP-19：无 backup/state 时，应按上次 runtime target 清理 Bifrost 系统代理残留
+
+**前置条件**：
+- macOS 支持系统代理的环境。
+- 使用临时数据目录，避免污染正式配置：
+  ```bash
+  TEST_DATA_DIR="$(mktemp -d)"
+  BIFROST_DATA_DIR="$TEST_DATA_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 cargo build --bin bifrost
+  ```
+
+**操作步骤**：
+1. 保存当前系统代理快照，便于测试后恢复：
+   ```bash
+   networksetup -getwebproxy "Wi-Fi" > "$TEST_DATA_DIR/wifi-web-before.txt"
+   networksetup -getsecurewebproxy "Wi-Fi" > "$TEST_DATA_DIR/wifi-secure-before.txt"
+   ```
+2. 删除崩溃恢复的 managed state 和 backup，模拟关机/历史版本清理后只剩 runtime 信息：
+   ```bash
+   rm -f "$TEST_DATA_DIR/proxy_state.json" "$TEST_DATA_DIR/proxy_backup.json"
+   ```
+3. 写入上一次 Bifrost runtime target：
+   ```bash
+   cat > "$TEST_DATA_DIR/runtime.json" <<'EOF'
+   {
+     "pid": 999999,
+     "port": 18889,
+     "host": "0.0.0.0"
+   }
+   EOF
+   echo 999999 > "$TEST_DATA_DIR/bifrost.pid"
+   ```
+4. 将 Wi-Fi Web/Secure Web 代理设置为与 runtime target 等价的 `127.0.0.1:18889`：
+   ```bash
+   networksetup -setwebproxy "Wi-Fi" 127.0.0.1 18889
+   networksetup -setwebproxystate "Wi-Fi" on
+   networksetup -setsecurewebproxy "Wi-Fi" 127.0.0.1 18889
+   networksetup -setsecurewebproxystate "Wi-Fi" on
+   ```
+5. 使用同一数据目录启动 Bifrost，但显式不启用系统代理：
+   ```bash
+   BIFROST_DATA_DIR="$TEST_DATA_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 ./target/debug/bifrost -p 18889 start --skip-cert-check --unsafe-ssl --no-system-proxy > "$TEST_DATA_DIR/proxy.log" 2>&1 &
+   PROXY_PID=$!
+   until curl -sS "http://127.0.0.1:18889/_bifrost/api/system" >/dev/null 2>&1; do sleep 0.2; done
+   ```
+6. 检查 Wi-Fi Web/Secure Web 代理：
+   ```bash
+   networksetup -getwebproxy "Wi-Fi"
+   networksetup -getsecurewebproxy "Wi-Fi"
+   grep -E "last Bifrost runtime target|Recovered stale Bifrost system proxy" "$TEST_DATA_DIR/proxy.log"
+   ```
+7. 停止临时服务并按快照恢复系统代理。
+
+**预期结果**：
+- 第 5 步启动前恢复会读取 `runtime.json` 的 `host=0.0.0.0 port=18889`，映射为系统代理 target `127.0.0.1:18889`。
+- 第 6 步显示 Wi-Fi Web/Secure Web 代理不再指向 `127.0.0.1:18889`；默认无代理环境下应为 `Enabled: No`。
+- 日志包含 `No managed proxy state found, but current system proxy matches last Bifrost runtime target` 或 `Recovered stale Bifrost system proxy from last runtime target`。
+- `proxy_state.json` / `proxy_backup.json` 缺失不再导致 cleanup 直接跳过。
+- 如果当前系统代理指向其他 host/port，则必须保留外部代理不变。
+
+---
+
 ### TC-CSP-16：启用系统代理启动后，应异步触发 macOS LaunchDaemon cleanup 授权安装且不阻塞服务 ready
 
 **前置条件**：
@@ -566,6 +627,7 @@
 
 ## 执行记录
 
+- 2026-06-06：真实执行 TC-CSP-19 及系统代理回归套件。执行 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true bash e2e-tests/tests/test_system_proxy_e2e.sh`，脚本使用临时 `BIFROST_DATA_DIR` 和 `18889` 端口，显式写入 `runtime.json` 的 `host=0.0.0.0 port=18889`，删除 `proxy_state.json` / `proxy_backup.json`，再将 macOS Web/Secure Web proxy 设置为 `127.0.0.1:18889` 后以 `--no-system-proxy` 启动当前构建。结果 13/13 PASS，其中新增用例输出 `macOS: 无 backup/state 时按 runtime target 清理崩溃残留系统代理`，证明无 managed state 时仍会按上次 runtime target 清理残留代理；测试结束后系统代理恢复到正式 9900 服务。
 - 2026-06-05：真实执行 TC-CSP-18 的 Admin API 路径。使用 `/tmp/bifrost-csp18.*` 临时数据目录和 `target/debug/bifrost` 在 `18889` 端口启动服务，启动参数包含 `--no-system-proxy`、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`，并设置 `BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1` 避免本轮弹出真实授权窗口。服务 ready 后调用 `PUT /_bifrost/api/proxy/system {"enabled":true}`，响应为 `enabled=true host=127.0.0.1 port=18889 managed_by_bifrost=true`；随后日志出现 `system proxy LaunchDaemon cleanup install disabled by environment`，证明运行中服务通过 Admin API 打开系统代理后已触发 LaunchDaemon 自动检查路径。测试结束调用 API 关闭系统代理并停止临时服务，临时数据目录已清理。
 - 2026-06-05：针对 PR #187 合入后 review 评论补充真实执行 TC-CSP-18 的 Admin API lifecycle helper 回归。使用 `/tmp/bifrost-admin-helper.*` 临时数据目录和 `target/debug/bifrost` 在 `18891` 端口启动服务，启动参数包含 `--no-system-proxy`、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`，并设置 `BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1` 仅隔离 LaunchDaemon 授权弹窗。服务 ready 后调用 `PUT /_bifrost/api/proxy/system {"enabled":true}`，响应为 `enabled=true host=127.0.0.1 port=18891 managed_by_bifrost=true`；日志出现 `system proxy lifecycle helper started after Admin API enable`（helper pid `54898`）和 `system proxy LaunchDaemon cleanup install disabled by environment`。测试结束调用 API 关闭系统代理、停止临时服务并清理临时目录，结论 PASS。
 - 2026-06-05：针对 Codex review 建议补充运行中启用后的崩溃兜底回归。使用独立临时数据目录启动服务并通过 Admin API 打开 system proxy，确认日志出现 `system proxy lifecycle helper started after Admin API enable` 后对主进程执行 `kill -9`；等待 lifecycle helper 检测父进程消失后，系统代理不再指向本轮 Bifrost 端口。用例已同步到 `e2e-tests/tests/test_system_proxy_e2e.sh` 的 `test_admin_api_enable_lifecycle_helper_cleans_after_parent_crash`。

@@ -310,12 +310,19 @@ fn launchd_status_with_expected(
 
 pub fn recover_if_no_live_runtime(data_dir: &Path) -> Result<bool> {
     if runtime_pid_is_alive(data_dir) {
-        tracing::info!(
+        if SystemProxyManager::last_runtime_target_has_live_listener(data_dir) {
+            tracing::info!(
+                target: "bifrost_core::system_proxy_launchd",
+                data_dir = %data_dir.display(),
+                "system proxy cleanup daemon skipped startup cleanup because Bifrost runtime and proxy listener are alive"
+            );
+            return Ok(false);
+        }
+        tracing::warn!(
             target: "bifrost_core::system_proxy_launchd",
             data_dir = %data_dir.display(),
-            "system proxy cleanup daemon skipped startup cleanup because Bifrost runtime is alive"
+            "system proxy cleanup daemon found a live runtime pid without a live proxy listener; continuing startup cleanup"
         );
-        return Ok(false);
     }
     if SystemProxyManager::managed_target_has_live_listener(data_dir) {
         tracing::info!(

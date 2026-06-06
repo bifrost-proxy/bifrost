@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::time::Instant;
 use sysproxy::Sysproxy;
@@ -7,6 +7,7 @@ use crate::{BifrostError, Result};
 
 const DEFAULT_BYPASS: &str = "localhost,127.0.0.1,::1,*.local";
 const BACKUP_FILE_NAME: &str = "proxy_backup.json";
+const RUNTIME_FILE_NAME: &str = "runtime.json";
 const STATE_FILE_NAME: &str = "proxy_state.json";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -353,6 +354,14 @@ impl SystemProxyManager {
         };
 
         managed_target_listener_is_alive(&state.target)
+    }
+
+    pub fn last_runtime_target_has_live_listener(data_dir: &std::path::Path) -> bool {
+        let Some(target) = load_last_runtime_proxy_target(data_dir) else {
+            return false;
+        };
+
+        managed_target_listener_is_alive(&target)
     }
 
     pub fn restore(&mut self) -> Result<()> {
@@ -892,6 +901,60 @@ impl SystemProxyManager {
 
         let backup_path = data_dir.join(BACKUP_FILE_NAME);
         if !backup_path.exists() {
+            if let Some(runtime_target) = load_last_runtime_proxy_target(data_dir) {
+                let current = Self::get_current()?;
+                let current_matches_runtime = {
+                    #[cfg(target_os = "macos")]
+                    {
+                        match macos_any_service_proxy_matches(
+                            &runtime_target.host,
+                            runtime_target.port,
+                        ) {
+                            Ok(matches) => matches,
+                            Err(error) => {
+                                tracing::warn!(
+                                    error = %error,
+                                    target_host = %runtime_target.host,
+                                    target_port = runtime_target.port,
+                                    "Failed to inspect macOS network services for last runtime target during crash recovery"
+                                );
+                                current_proxy_matches_target(&current, &runtime_target)
+                            }
+                        }
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        current_proxy_matches_target(&current, &runtime_target)
+                    }
+                };
+
+                if current_matches_runtime {
+                    let disabled = ProxyBackup {
+                        enable: false,
+                        host: String::new(),
+                        port: 0,
+                        bypass: String::new(),
+                    };
+                    tracing::info!(
+                        target_host = %runtime_target.host,
+                        target_port = runtime_target.port,
+                        "No managed proxy state found, but current system proxy matches last Bifrost runtime target; disabling stale Bifrost proxy"
+                    );
+                    manager.apply_proxy_backup_for_target(&disabled, Some(&runtime_target))?;
+                    manager.remove_state_files();
+                    tracing::info!("Recovered stale Bifrost system proxy from last runtime target");
+                    return Ok(());
+                }
+
+                tracing::info!(
+                    current_enabled = current.enable,
+                    current_host = %current.host,
+                    current_port = current.port,
+                    target_host = %runtime_target.host,
+                    target_port = runtime_target.port,
+                    "No managed proxy state found and current system proxy does not match last Bifrost runtime target"
+                );
+            }
             tracing::info!(
                 data_dir = %data_dir.display(),
                 "System proxy crash recovery check completed without managed state"
@@ -929,10 +992,43 @@ fn decide_managed_state_recovery(
     current: &ProxyBackup,
     state: &ManagedProxyState,
 ) -> CrashRecoveryDecision {
-    if current.target_matches(&state.target.host, state.target.port) {
+    if current_proxy_matches_target(current, &state.target) {
         CrashRecoveryDecision::RestoreOriginal
     } else {
         CrashRecoveryDecision::PreserveExternal
+    }
+}
+
+fn current_proxy_matches_target(current: &ProxyBackup, target: &ProxyBackup) -> bool {
+    current.target_matches(&target.host, target.port)
+}
+
+fn load_last_runtime_proxy_target(data_dir: &Path) -> Option<ProxyBackup> {
+    let content = std::fs::read_to_string(data_dir.join(RUNTIME_FILE_NAME)).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let port = value
+        .get("port")
+        .and_then(|port| port.as_u64())
+        .filter(|port| *port > 0 && *port <= u16::MAX as u64)
+        .map(|port| port as u16)?;
+    let host = value
+        .get("host")
+        .and_then(|host| host.as_str())
+        .map(runtime_host_to_system_proxy_host)
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+
+    Some(ProxyBackup {
+        enable: true,
+        host,
+        port,
+        bypass: String::new(),
+    })
+}
+
+fn runtime_host_to_system_proxy_host(host: &str) -> String {
+    match normalize_proxy_host(host).as_str() {
+        "" | "0.0.0.0" | "::" => "127.0.0.1".to_string(),
+        normalized => normalized.to_string(),
     }
 }
 
@@ -1848,5 +1944,109 @@ mod tests {
             decide_managed_state_recovery(&current, &state),
             CrashRecoveryDecision::PreserveExternal
         );
+    }
+
+    #[test]
+    fn last_runtime_proxy_target_reads_runtime_host_and_port() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!("bifrost-runtime-target-{unique}"));
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        std::fs::write(
+            data_dir.join(RUNTIME_FILE_NAME),
+            r#"{"pid":12345,"host":"localhost","port":18889}"#,
+        )
+        .expect("write runtime");
+
+        let target = load_last_runtime_proxy_target(&data_dir).expect("runtime target");
+
+        assert_eq!(target.host, "localhost");
+        assert_eq!(target.port, 18889);
+        assert!(target.enable);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn last_runtime_proxy_target_maps_wildcard_host_to_loopback() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let data_dir =
+            std::env::temp_dir().join(format!("bifrost-runtime-wildcard-target-{unique}"));
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        std::fs::write(
+            data_dir.join(RUNTIME_FILE_NAME),
+            r#"{"pid":12345,"host":"0.0.0.0","port":9900}"#,
+        )
+        .expect("write runtime");
+
+        let target = load_last_runtime_proxy_target(&data_dir).expect("runtime target");
+
+        assert_eq!(target.host, "127.0.0.1");
+        assert_eq!(target.port, 9900);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn last_runtime_proxy_target_ignores_invalid_or_missing_port() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let data_dir =
+            std::env::temp_dir().join(format!("bifrost-runtime-invalid-target-{unique}"));
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        std::fs::write(
+            data_dir.join(RUNTIME_FILE_NAME),
+            r#"{"pid":12345,"host":"127.0.0.1","port":70000}"#,
+        )
+        .expect("write runtime");
+
+        assert!(load_last_runtime_proxy_target(&data_dir).is_none());
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn current_proxy_matches_last_runtime_target_with_loopback_alias() {
+        let current = ProxyBackup {
+            enable: true,
+            host: "localhost".to_string(),
+            port: 9900,
+            bypass: String::new(),
+        };
+        let target = ProxyBackup {
+            enable: true,
+            host: "127.0.0.1".to_string(),
+            port: 9900,
+            bypass: String::new(),
+        };
+
+        assert!(current_proxy_matches_target(&current, &target));
+    }
+
+    #[test]
+    fn last_runtime_target_has_live_listener_detects_runtime_port() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("local addr").port();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let data_dir =
+            std::env::temp_dir().join(format!("bifrost-runtime-listener-target-{unique}"));
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        std::fs::write(
+            data_dir.join(RUNTIME_FILE_NAME),
+            format!(r#"{{"pid":12345,"host":"127.0.0.1","port":{port}}}"#),
+        )
+        .expect("write runtime");
+
+        assert!(SystemProxyManager::last_runtime_target_has_live_listener(
+            &data_dir
+        ));
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 }
