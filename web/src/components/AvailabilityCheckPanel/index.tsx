@@ -1,0 +1,416 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  Alert,
+  Button,
+  Col,
+  List,
+  Row,
+  Select,
+  Space,
+  Tag,
+  Typography,
+  message,
+} from "antd";
+import { CopyOutlined, QrcodeOutlined } from "@ant-design/icons";
+import {
+  createTrustProbeSession,
+  getCertInfo,
+  getTrustProbeSession,
+  type CertInfo,
+  type TrustProbeSession,
+  type TrustProbeStatus,
+} from "../../api/cert";
+import { normalizeApiErrorMessage } from "../../api/client";
+
+const { Text, Paragraph } = Typography;
+
+interface AvailabilityCheckPanelProps {
+  certInfo?: CertInfo | null;
+  active?: boolean;
+  autoCreate?: boolean;
+  compact?: boolean;
+  showEvents?: boolean;
+  testIdPrefix?: string;
+}
+
+function trustProbeStatusLabel(status: TrustProbeStatus) {
+  switch (status) {
+    case "created":
+      return "Waiting for scan";
+    case "page_opened":
+      return "Device opened page";
+    case "network_reachable":
+      return "Network reachable";
+    case "tls_trusted":
+      return "CA trusted";
+    case "tls_failed":
+      return "Trust failed";
+    case "network_failed":
+      return "Probe unreachable";
+    case "expired":
+      return "Expired";
+    default:
+      return "Unknown";
+  }
+}
+
+function trustProbeStatusColor(status: TrustProbeStatus) {
+  switch (status) {
+    case "tls_trusted":
+      return "green";
+    case "network_reachable":
+    case "page_opened":
+      return "blue";
+    case "tls_failed":
+    case "network_failed":
+    case "expired":
+      return "red";
+    case "created":
+    default:
+      return "default";
+  }
+}
+
+function preserveTrustProbeUrls(
+  next: TrustProbeSession,
+  previous: TrustProbeSession,
+): TrustProbeSession {
+  return {
+    ...next,
+    landingUrl: previous.landingUrl,
+    qrCodeUrl: previous.qrCodeUrl,
+    caDownloadUrl: previous.caDownloadUrl,
+    proxyQrCodeUrl: previous.proxyQrCodeUrl,
+  };
+}
+
+export default function AvailabilityCheckPanel({
+  certInfo,
+  active = true,
+  autoCreate = false,
+  compact = false,
+  showEvents = true,
+  testIdPrefix = "availability-check",
+}: AvailabilityCheckPanelProps) {
+  const [loadedCertInfo, setLoadedCertInfo] = useState<CertInfo | null>(null);
+  const [trustProbeHost, setTrustProbeHost] = useState<string>("");
+  const [trustProbeSession, setTrustProbeSession] = useState<TrustProbeSession | null>(null);
+  const [creatingTrustProbe, setCreatingTrustProbe] = useState(false);
+  const autoCreatedHostRef = useRef<string | null>(null);
+  const effectiveCertInfo = certInfo ?? loadedCertInfo;
+
+  useEffect(() => {
+    if (!active || certInfo || loadedCertInfo) {
+      return;
+    }
+
+    let cancelled = false;
+    void getCertInfo()
+      .then((info) => {
+        if (!cancelled) {
+          setLoadedCertInfo(info);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setLoadedCertInfo(null);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [active, certInfo, loadedCertInfo]);
+
+  useEffect(() => {
+    if (trustProbeHost || !effectiveCertInfo?.local_ips?.length) {
+      return;
+    }
+    setTrustProbeHost(effectiveCertInfo.local_ips[0]);
+  }, [effectiveCertInfo?.local_ips, trustProbeHost]);
+
+  useEffect(() => {
+    if (!trustProbeSession) {
+      return;
+    }
+    if (
+      trustProbeSession.status === "tls_trusted" ||
+      trustProbeSession.status === "expired"
+    ) {
+      return;
+    }
+
+    const timer = window.setInterval(async () => {
+      try {
+        const next = await getTrustProbeSession(trustProbeSession.sessionId);
+        setTrustProbeSession((current) => {
+          if (!current || current.sessionId !== next.sessionId) {
+            return next;
+          }
+          return preserveTrustProbeUrls(next, current);
+        });
+      } catch {
+        window.clearInterval(timer);
+      }
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [trustProbeSession]);
+
+  const handleCreateTrustProbe = useCallback(
+    async (silent = false) => {
+      if (!trustProbeHost) {
+        if (!silent) {
+          message.warning("Select a local network address first.");
+        }
+        return;
+      }
+      setCreatingTrustProbe(true);
+      try {
+        const session = await createTrustProbeSession(trustProbeHost);
+        setTrustProbeSession(session);
+        if (!silent) {
+          message.success("Availability check link and QR code are ready.");
+        }
+      } catch (error) {
+        if (!silent) {
+          message.error(normalizeApiErrorMessage(error, "Failed to create availability check"));
+        }
+      } finally {
+        setCreatingTrustProbe(false);
+      }
+    },
+    [trustProbeHost],
+  );
+
+  useEffect(() => {
+    if (
+      !active ||
+      !autoCreate ||
+      !trustProbeHost ||
+      creatingTrustProbe ||
+      trustProbeSession?.host === trustProbeHost ||
+      autoCreatedHostRef.current === trustProbeHost
+    ) {
+      return;
+    }
+    autoCreatedHostRef.current = trustProbeHost;
+    void handleCreateTrustProbe(true);
+  }, [
+    active,
+    autoCreate,
+    creatingTrustProbe,
+    handleCreateTrustProbe,
+    trustProbeHost,
+    trustProbeSession?.host,
+  ]);
+
+  const copyLandingUrl = useCallback(async () => {
+    if (!trustProbeSession?.landingUrl) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(trustProbeSession.landingUrl);
+      message.success("Availability check link copied.");
+    } catch {
+      message.warning("Select and copy the link manually.");
+    }
+  }, [trustProbeSession?.landingUrl]);
+
+  const qrSize = compact ? 112 : 180;
+
+  return (
+    <Space direction="vertical" style={{ width: "100%" }} size={compact ? "small" : "middle"}>
+      <Alert
+        type="info"
+        showIcon
+        message={compact ? "Use Availability Check when this device cannot use the proxy" : "Check whether a phone can use Bifrost"}
+        description={
+          compact
+            ? "Scan the QR code or open the link from the device. Bifrost will check proxy authorization, probe reachability, and HTTPS CA trust."
+            : "Share the link or scan the QR code from the target device. The page checks proxy authorization, probe port reachability, and a real HTTPS request signed by the current Bifrost CA."
+        }
+      />
+
+      <Row gutter={[12, 12]} align="bottom">
+        <Col xs={24} sm={compact ? 24 : 12} md={compact ? 24 : 10}>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            Local network address
+          </Text>
+          <Select
+            style={{ width: "100%", marginTop: 4 }}
+            value={trustProbeHost || undefined}
+            placeholder="Select a LAN IP"
+            onChange={(value) => {
+              setTrustProbeHost(value);
+              setTrustProbeSession(null);
+              autoCreatedHostRef.current = null;
+            }}
+            options={(effectiveCertInfo?.local_ips ?? []).map((ip) => ({
+              value: ip,
+              label: ip,
+            }))}
+            disabled={!effectiveCertInfo?.available || !effectiveCertInfo?.local_ips?.length}
+            data-testid={`${testIdPrefix}-host`}
+          />
+        </Col>
+        <Col xs={24} sm={compact ? 24 : 12} md={compact ? 24 : 14}>
+          <Button
+            type={compact ? "default" : "primary"}
+            icon={<QrcodeOutlined />}
+            loading={creatingTrustProbe}
+            disabled={!effectiveCertInfo?.available || !trustProbeHost}
+            onClick={() => void handleCreateTrustProbe()}
+            data-testid={`${testIdPrefix}-create`}
+          >
+            {trustProbeSession ? "Regenerate Availability Check" : "Generate Availability Check"}
+          </Button>
+        </Col>
+      </Row>
+
+      {effectiveCertInfo?.sha256_fingerprint && !compact ? (
+        <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 0 }}>
+          CA SHA-256 fingerprint: <Text code>{effectiveCertInfo.sha256_fingerprint}</Text>
+        </Paragraph>
+      ) : null}
+
+      {trustProbeSession ? (
+        <Row gutter={[16, 16]} align="top" data-testid={`${testIdPrefix}-session`}>
+          <Col xs={24} sm={compact ? 24 : 10} md={compact ? 24 : 8}>
+            <div style={{ textAlign: compact ? "left" : "center" }}>
+              <img
+                src={trustProbeSession.qrCodeUrl}
+                alt="Availability Check QR Code"
+                width={qrSize}
+                height={qrSize}
+                style={{
+                  width: qrSize,
+                  height: qrSize,
+                  padding: 8,
+                  background: "var(--color-bg-container)",
+                  border: "1px solid var(--color-border)",
+                  borderRadius: 4,
+                  display: "block",
+                  objectFit: "contain",
+                  margin: compact ? 0 : "0 auto",
+                }}
+                data-testid={`${testIdPrefix}-qrcode`}
+              />
+              <Space direction="vertical" size={2} style={{ marginTop: 6, width: "100%" }}>
+                <a
+                  href={trustProbeSession.landingUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  data-testid={`${testIdPrefix}-link`}
+                >
+                  Open availability check page
+                </a>
+                <Button
+                  size="small"
+                  icon={<CopyOutlined />}
+                  onClick={() => void copyLandingUrl()}
+                  data-testid={`${testIdPrefix}-copy`}
+                >
+                  Copy link
+                </Button>
+              </Space>
+            </div>
+          </Col>
+          <Col xs={24} sm={compact ? 24 : 14} md={compact ? 24 : 16}>
+            <Space direction="vertical" style={{ width: "100%" }} size={compact ? "small" : "middle"}>
+              <Space wrap>
+                <Tag color={trustProbeStatusColor(trustProbeSession.status)}>
+                  {trustProbeStatusLabel(trustProbeSession.status)}
+                </Tag>
+                <Tag color={trustProbeSession.opened ? "green" : "default"}>
+                  Page {trustProbeSession.opened ? "opened" : "waiting"}
+                </Tag>
+                <Tag color={trustProbeSession.networkReachable ? "green" : "default"}>
+                  Probe port {trustProbeSession.networkReachable ? "reachable" : "pending"}
+                </Tag>
+                <Tag color={trustProbeSession.tlsTrusted ? "green" : "default"}>
+                  HTTPS trust {trustProbeSession.tlsTrusted ? "passed" : "pending"}
+                </Tag>
+                <Tag color={trustProbeSession.proxyAccessAllowed ? "green" : "default"}>
+                  Proxy access{" "}
+                  {trustProbeSession.proxyAccessStatus === "pending"
+                    ? "needs approval"
+                    : trustProbeSession.proxyAccessStatus ?? "pending"}
+                </Tag>
+              </Space>
+
+              {trustProbeSession.status === "tls_trusted" ? (
+                <Alert
+                  type="success"
+                  showIcon
+                  message="Current device browser trusts Bifrost CA"
+                  description={
+                    <Space direction="vertical" size={4}>
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        This confirms a real HTTPS handshake with a certificate signed by Bifrost
+                        CA. Some apps can still bypass system trust with certificate pinning or
+                        custom TLS policy.
+                      </Text>
+                      <Text>
+                        Proxy:{" "}
+                        <Text code>
+                          {trustProbeSession.host}:{trustProbeSession.adminPort}
+                        </Text>
+                      </Text>
+                      <a href={trustProbeSession.proxyQrCodeUrl} target="_blank" rel="noreferrer">
+                        Open proxy QR code
+                      </a>
+                    </Space>
+                  }
+                />
+              ) : trustProbeSession.status === "tls_failed" ? (
+                <Alert
+                  type="warning"
+                  showIcon
+                  message="HTTPS trust check failed"
+                  description="The device reached the probe port, but the browser could not complete the HTTPS handshake. Install the CA, enable full trust on iOS, check device time, then retry."
+                />
+              ) : trustProbeSession.status === "network_failed" ? (
+                <Alert
+                  type="error"
+                  showIcon
+                  message="Probe port is not reachable"
+                  description="The phone opened the landing page but could not reach the probe port. Check firewall rules, local network isolation, and the selected IP address."
+                />
+              ) : (
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  Scan the QR code from the target device. This page polls once per second until the
+                  check succeeds, fails, or the session expires.
+                </Text>
+              )}
+
+              {trustProbeSession.lastError ? (
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  Last error: {trustProbeSession.lastError}
+                </Text>
+              ) : null}
+
+              {showEvents ? (
+                <List
+                  size="small"
+                  dataSource={trustProbeSession.events.slice(-5).reverse()}
+                  locale={{ emptyText: "No probe events yet" }}
+                  renderItem={(event) => (
+                    <List.Item>
+                      <Space direction="vertical" size={0}>
+                        <Text style={{ fontSize: 12 }}>{event.type}</Text>
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          {new Date(event.at).toLocaleTimeString()}
+                          {event.message ? ` - ${event.message}` : ""}
+                        </Text>
+                      </Space>
+                    </List.Item>
+                  )}
+                />
+              ) : null}
+            </Space>
+          </Col>
+        </Row>
+      ) : null}
+    </Space>
+  );
+}

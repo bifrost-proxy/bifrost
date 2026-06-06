@@ -462,6 +462,27 @@
 - `proxy-access` 返回 JSON，`status` 为 `allowed`、`pending`、`denied` 或 `unavailable` 之一，并包含可读的 `message`。
 - interactive 模式下未授权局域网设备会被记录为 pending authorization，便于用户在管理端批准；loopback 或已授权设备显示 `allowed`。
 
+### TC-MDT-17：代理交互式授权弹窗展示 Availability Check 二维码和链接
+
+**操作步骤**：
+
+1. 启动 Bifrost，并让访问控制处于 interactive 模式。
+2. 从一台未授权局域网设备访问代理，触发管理端 `Pending Authorization Requests` 弹窗。
+3. 观察弹窗内容，不切换到 Certificate 页面。
+4. 使用目标设备扫描弹窗中的 Availability Check 二维码，或复制/打开弹窗中的 Availability Check 链接。
+5. 继续在弹窗里批准或拒绝该设备授权请求。
+
+**预期结果**：
+
+- 弹窗仍显示每个待授权设备的 IP、首次出现时间、尝试次数，以及 `Allow` / `Deny` 操作。
+- 弹窗中部展示 Availability Check 提示，说明遇到证书或代理问题时可用扫码/链接检查可用性。
+- 弹窗打开时会自动生成一组 Availability Check session；用户无需先进入 Certificate 页面再点击生成。
+- 弹窗展示局域网地址选择、二维码、可打开的检查链接和 `Copy link` 按钮；二维码和链接指向公开 landing page。
+- 管理端轮询 session 状态 2 秒以上后，二维码 URL 和链接仍保留 `?t=<token>`，直接打开链接返回检查页而不是 `Missing trust probe token`。
+- 二维码以普通图片展示，不出现 Ant Design 预览灰色遮罩或只显示小二维码图标的白屏/灰屏状态。
+- 目标设备打开检查页后，会自动检查代理授权、probe 端口可达性和 HTTPS CA trust。
+- `Allow` / `Deny` 操作不受 Availability Check 区块影响；审批后 pending 列表正常刷新。
+
 ## 清理步骤
 
 ```bash

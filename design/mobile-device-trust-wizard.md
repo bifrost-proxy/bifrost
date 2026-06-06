@@ -63,6 +63,7 @@ Mobile Device Trust Wizard 把现有 CA 下载、二维码和证书状态能力�
 - 全局设备监听提示：管理端主布局挂载 `MobileDeviceTrustPrompt`，用户在任意页面时每 3 秒静默轮询本地 `/api/mobile-devices/refresh`；检测到 connected Android 或 iOS 设备时弹出确认窗口。若同时发现多台设备，弹窗列出每台设备的自定义名称、型号、ID 和 ECID，用户可以选择目标设备后直接点击 `Install Selected`，也可以点击 `Open Certificate Setup` 跳转到 `Settings > Certificate`。跳转时 URL 携带 `mobile_device` / `mobile_platform`，Certificate 页拿到目标设备后自动滚动到对应卡片，高亮该卡片，并让对应安装按钮播放脉冲动画，确保用户知道从哪里继续操作；用户选择 Not now 后只在当前页面会话内记录设备 id，避免旧 localStorage 记录导致后续连接永远不弹。远程 Admin 访问本地 USB API 会得到 403，轮询静默忽略，不打扰远程页面。
 - Certificate 页自身仍每 3 秒刷新设备列表，负责展示 Android ADB、Android CA 状态、iOS profile、Apple Configurator 和安装 session；它不再弹局部重复提示。Android 用户在手机端完成安装后，如果设备是 root/emulator 且证书库可读，页面会自动刷新为 `CA installed`；普通设备仍提示系统证书库不可由普通 ADB 验证。
 - Certificate 页使用左侧固定导航和右侧单列章节，不再把 Android 和 iOS 做成并列卡片。导航和右侧内容顺序为 Availability Check、Local install、iOS devices、Android devices、Certificate downloads；可用性检查是手机/跨设备排障的最高优先级入口，iOS 设备安装必须在 Android 之前，证书文件下载和二维码下载放在最后。
+- 代理交互式授权弹窗同步展示 Availability Check 紧凑入口。未授权设备触发 `Pending Authorization Requests` 时，弹窗中部自动生成一组可用性检查二维码和链接，提示用户遇到证书、代理授权或局域网连通问题时可直接用目标设备扫码检查；审批列表的 Allow/Deny 操作保持不变。
 - iPhone/iPad 区块：
   - 顶部先展示统一 iOS 流程：把 profile 送到 iPhone -> 在 Settings 安装描述文件 -> Settings > General > About > Certificate Trust Settings -> 打开 Bifrost CA 完全信任。Apple Configurator 和手动扫码/文件安装只作为“送达 profile”的两种入口，不在 UI 上拆成互相割裂的两套模式。
   - 统一流程之后先展示“选择 profile 送达方式”。Apple Configurator/cfgutil 检测状态、每台 iOS 设备的自定义名称/型号/ID/ECID 和 `Configurator Install` 按钮作为自动送达入口；手动扫码/下载 `.mobileconfig` / LAN profile QR 作为手动送达入口。点击某一台的 Configurator 按钮时，Bifrost 通过该设备 ECID 从电脑侧定向发送 profile；如果 iPhone 仍要求屏幕确认，则继续按同一套 Settings 安装和信任步骤操作。
@@ -185,6 +186,8 @@ Android CLI 会在安装前后输出 `Android CA status`。普通设备通常只
 - TC-MDT-13：Settings iPhone/iPad 在送达方式之后展示 `ios_1` 到 `ios_7` 共享图文步骤，明确 Configurator 和扫码/文件安装只差在送达 profile，后续 profile 安装与 Certificate Trust Settings 完全信任是同一条流程。
 - TC-MDT-14：Android 设备卡片展示当前 CA 状态；普通 ADB 不承诺能验证 user CA store，root/emulator 可通过 `/data/misc/user/0/cacerts-added` 指纹匹配显示已安装。
 - TC-MDT-15：Availability Check 使用局域网 IP 生成二维码；扫码设备依次检查代理访问授权、页面已打开、probe 端口可达、HTTPS 信任检查通过/失败；成功后展示可点击复制的代理配置和公开 proxy QR，失败时展示 iOS/Android 下一步安装和信任指引。
+- TC-MDT-16：公开 landing、Availability Check QR、公开 proxy QR 和 proxy-access endpoint 不受交互式访问控制误拦截；未授权局域网设备会被记录到 pending authorization。
+- TC-MDT-17：代理交互式授权弹窗展示 Availability Check 二维码和链接，打开弹窗后自动生成 session，轮询状态后二维码/链接仍保留 `?t=<token>` 且二维码不出现预览遮罩白屏，目标设备可扫码进入检查页，Allow/Deny 审批流程不受影响。
 
 ## Review/Fix/Test 闭环方案
 

@@ -3,12 +3,14 @@ import { useNavigate } from "react-router-dom";
 import {
   Badge,
   Button,
+  Divider,
   List,
   Modal,
   Popconfirm,
   Space,
   Typography,
   message,
+  theme,
 } from "antd";
 import {
   CheckOutlined,
@@ -18,6 +20,7 @@ import {
   SettingOutlined,
 } from "@ant-design/icons";
 import { usePendingAuthStore } from "../../stores/usePendingAuthStore";
+import AvailabilityCheckPanel from "../AvailabilityCheckPanel";
 
 const { Text } = Typography;
 
@@ -31,6 +34,7 @@ function formatTimeAgo(timestamp: number) {
 }
 
 export default function PendingAuthModal() {
+  const { token } = theme.useToken();
   const pendingList = usePendingAuthStore((s) => s.pendingList);
   const pendingCount = usePendingAuthStore((s) => s.pendingCount);
   const approvePending = usePendingAuthStore((s) => s.approvePending);
@@ -80,11 +84,11 @@ export default function PendingAuthModal() {
       open={pendingCount > 0}
       title={
         <Space>
-          <WarningOutlined style={{ color: "#faad14" }} />
+          <WarningOutlined style={{ color: token.colorWarning }} />
           <span>Pending Authorization Requests</span>
           <Badge
             count={pendingCount}
-            style={{ backgroundColor: "#faad14" }}
+            style={{ backgroundColor: token.colorWarning }}
           />
         </Space>
       }
@@ -119,7 +123,7 @@ export default function PendingAuthModal() {
       maskClosable={false}
       keyboard={false}
       centered
-      width={520}
+      width={720}
       zIndex={999}
       data-testid="pending-auth-modal"
     >
@@ -128,6 +132,14 @@ export default function PendingAuthModal() {
           The following devices are requesting proxy access. You can allow or
           deny each request.
         </Text>
+        <AvailabilityCheckPanel
+          active={pendingCount > 0}
+          autoCreate
+          compact
+          showEvents={false}
+          testIdPrefix="pending-auth-availability-check"
+        />
+        <Divider style={{ margin: "16px 0 12px" }} />
         <List
           size="small"
           dataSource={pendingList}

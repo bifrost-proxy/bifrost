@@ -9,7 +9,6 @@ import {
   Image,
   List,
   Row,
-  Select,
   Space,
   Steps,
   Tag,
@@ -32,12 +31,10 @@ import {
   SendOutlined,
 } from "@ant-design/icons";
 import {
-  createTrustProbeSession,
   getIosMobileConfigQRCodeUrl,
   getIosMobileConfigUrl,
   getCertInfo,
   getMobileDevices,
-  getTrustProbeSession,
   installLocalCa,
   installMobileCa,
   refreshMobileDevices,
@@ -46,10 +43,9 @@ import {
   type InstallSession,
   type MobileDevice,
   type MobileDevicesResponse,
-  type TrustProbeSession,
-  type TrustProbeStatus,
 } from "../../../api/cert";
 import { normalizeApiErrorMessage } from "../../../api/client";
+import AvailabilityCheckPanel from "../../../components/AvailabilityCheckPanel";
 import iosStep1Image from "../../../assets/ios/ios_1.png";
 import iosStep2Image from "../../../assets/ios/ios_2.png";
 import iosStep3Image from "../../../assets/ios/ios_3.png";
@@ -249,44 +245,6 @@ function certificateStateColor(state: DeviceCertificateState) {
   }
 }
 
-function trustProbeStatusLabel(status: TrustProbeStatus) {
-  switch (status) {
-    case "created":
-      return "Waiting for scan";
-    case "page_opened":
-      return "Device opened page";
-    case "network_reachable":
-      return "Network reachable";
-    case "tls_trusted":
-      return "CA trusted";
-    case "tls_failed":
-      return "Trust failed";
-    case "network_failed":
-      return "Probe unreachable";
-    case "expired":
-      return "Expired";
-    default:
-      return "Unknown";
-  }
-}
-
-function trustProbeStatusColor(status: TrustProbeStatus) {
-  switch (status) {
-    case "tls_trusted":
-      return "green";
-    case "network_reachable":
-    case "page_opened":
-      return "blue";
-    case "tls_failed":
-    case "network_failed":
-    case "expired":
-      return "red";
-    case "created":
-    default:
-      return "default";
-  }
-}
-
 function mobileDeviceDescription(device: MobileDevice, extra?: string) {
   return (
     <Space direction="vertical" size={2}>
@@ -330,9 +288,6 @@ export default function CertificateTab({
   >(null);
   const [installSession, setInstallSession] = useState<InstallSession | null>(null);
   const [installingLocalCa, setInstallingLocalCa] = useState(false);
-  const [trustProbeHost, setTrustProbeHost] = useState<string>("");
-  const [trustProbeSession, setTrustProbeSession] = useState<TrustProbeSession | null>(null);
-  const [creatingTrustProbe, setCreatingTrustProbe] = useState(false);
   const [activeSectionId, setActiveSectionId] = useState<string>(() => {
     if (typeof window === "undefined") {
       return CERTIFICATE_SECTION_IDS[0];
@@ -354,34 +309,6 @@ export default function CertificateTab({
           : "default";
   const certStatusIcon =
     certStatus === "installed_and_trusted" ? <CheckOutlined /> : <CloseOutlined />;
-
-  useEffect(() => {
-    if (trustProbeHost || !certInfo?.local_ips?.length) {
-      return;
-    }
-    setTrustProbeHost(certInfo.local_ips[0]);
-  }, [certInfo?.local_ips, trustProbeHost]);
-
-  useEffect(() => {
-    if (!trustProbeSession) {
-      return;
-    }
-    if (
-      trustProbeSession.status === "tls_trusted" ||
-      trustProbeSession.status === "expired"
-    ) {
-      return;
-    }
-    const timer = window.setInterval(async () => {
-      try {
-        const next = await getTrustProbeSession(trustProbeSession.sessionId);
-        setTrustProbeSession(next);
-      } catch {
-        window.clearInterval(timer);
-      }
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [trustProbeSession]);
 
   const loadMobileDevices = useCallback(async (refresh = false, silent = false) => {
     if (!silent) {
@@ -575,23 +502,6 @@ export default function CertificateTab({
     }
   }, [onCertInfoChange]);
 
-  const handleCreateTrustProbe = useCallback(async () => {
-    if (!trustProbeHost) {
-      message.warning("Select a local network address first.");
-      return;
-    }
-    setCreatingTrustProbe(true);
-    try {
-      const session = await createTrustProbeSession(trustProbeHost);
-      setTrustProbeSession(session);
-      message.success("Availability check link and QR code are ready.");
-    } catch (error) {
-      message.error(normalizeApiErrorMessage(error, "Failed to create trust probe session"));
-    } finally {
-      setCreatingTrustProbe(false);
-    }
-  }, [trustProbeHost]);
-
   const handleInstallAndroid = useCallback(
     async (deviceId: string) => {
       setInstallingDeviceId(deviceId);
@@ -746,184 +656,18 @@ export default function CertificateTab({
 
       <Col xs={24} md={18} lg={19} xl={20}>
         <Space direction="vertical" style={{ width: "100%" }} size="middle">
-        <Card
-          id="certificate-trust-probe"
-          title={
-            <Space>
-              <MobileOutlined />
-              <span>Availability Check</span>
-            </Space>
-          }
-          size="small"
-        >
-          <Space direction="vertical" style={{ width: "100%" }} size="middle">
-            <Alert
-              type="info"
-              showIcon
-              message="Check whether a phone can use Bifrost"
-              description="Share the link or scan the QR code from the target device. The page checks proxy authorization, probe port reachability, and a real HTTPS request signed by the current Bifrost CA."
-            />
-
-            <Row gutter={[12, 12]} align="bottom">
-              <Col xs={24} sm={12} md={10}>
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  Local network address
-                </Text>
-                <Select
-                  style={{ width: "100%", marginTop: 4 }}
-                  value={trustProbeHost || undefined}
-                  placeholder="Select a LAN IP"
-                  onChange={setTrustProbeHost}
-                  options={(certInfo?.local_ips ?? []).map((ip) => ({
-                    value: ip,
-                    label: ip,
-                  }))}
-                  disabled={!certInfo?.available || !certInfo?.local_ips?.length}
-                  data-testid="settings-trust-probe-host"
-                />
-              </Col>
-              <Col xs={24} sm={12} md={14}>
-                <Button
-                  type="primary"
-                  icon={<QrcodeOutlined />}
-                  loading={creatingTrustProbe}
-                  disabled={!certInfo?.available || !trustProbeHost}
-                  onClick={() => void handleCreateTrustProbe()}
-                  data-testid="settings-trust-probe-create"
-                >
-                  Generate Availability Check
-                </Button>
-              </Col>
-            </Row>
-
-            {certInfo?.sha256_fingerprint ? (
-              <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 0 }}>
-                CA SHA-256 fingerprint: <Text code>{certInfo.sha256_fingerprint}</Text>
-              </Paragraph>
-            ) : null}
-
-            {trustProbeSession ? (
-              <Row gutter={[16, 16]} align="top" data-testid="settings-trust-probe-session">
-                <Col xs={24} sm={10} md={8}>
-                  <div style={{ textAlign: "center" }}>
-                    <Image
-                      src={trustProbeSession.qrCodeUrl}
-                      alt="Availability Check QR Code"
-                      width={180}
-                      height={180}
-                      preview={{
-                        mask: <QrcodeOutlined style={{ fontSize: 20 }} />,
-                      }}
-                      fallback="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mN8/+F9PQAJpAN4pokyXwAAAABJRU5ErkJggg=="
-                      data-testid="settings-trust-probe-qrcode"
-                    />
-                    <div style={{ marginTop: 6 }}>
-                      <a href={trustProbeSession.landingUrl} target="_blank" rel="noreferrer">
-                        Open availability check page
-                      </a>
-                    </div>
-                  </div>
-                </Col>
-                <Col xs={24} sm={14} md={16}>
-                  <Space direction="vertical" style={{ width: "100%" }} size="middle">
-                    <Space wrap>
-                      <Tag color={trustProbeStatusColor(trustProbeSession.status)}>
-                        {trustProbeStatusLabel(trustProbeSession.status)}
-                      </Tag>
-                      <Tag color={trustProbeSession.opened ? "green" : "default"}>
-                        Page {trustProbeSession.opened ? "opened" : "waiting"}
-                      </Tag>
-                      <Tag color={trustProbeSession.networkReachable ? "green" : "default"}>
-                        Probe port {trustProbeSession.networkReachable ? "reachable" : "pending"}
-                      </Tag>
-                      <Tag color={trustProbeSession.tlsTrusted ? "green" : "default"}>
-                        HTTPS trust {trustProbeSession.tlsTrusted ? "passed" : "pending"}
-                      </Tag>
-                      <Tag color={trustProbeSession.proxyAccessAllowed ? "green" : "default"}>
-                        Proxy access{" "}
-                        {trustProbeSession.proxyAccessStatus === "pending"
-                          ? "needs approval"
-                          : trustProbeSession.proxyAccessStatus ?? "pending"}
-                      </Tag>
-                    </Space>
-
-                    {trustProbeSession.status === "tls_trusted" ? (
-                      <Alert
-                        type="success"
-                        showIcon
-                        message="Current device browser trusts Bifrost CA"
-                        description={
-                          <Space direction="vertical" size={4}>
-                            <Text type="secondary" style={{ fontSize: 12 }}>
-                              This confirms a real HTTPS handshake with a certificate signed by
-                              Bifrost CA. Some apps can still bypass system trust with certificate
-                              pinning or custom TLS policy.
-                            </Text>
-                            <Text>
-                              Proxy:{" "}
-                              <Text code>
-                                {trustProbeSession.host}:{trustProbeSession.adminPort}
-                              </Text>
-                            </Text>
-                            <a
-                              href={trustProbeSession.proxyQrCodeUrl}
-                              target="_blank"
-                              rel="noreferrer"
-                            >
-                              Open proxy QR code
-                            </a>
-                          </Space>
-                        }
-                      />
-                    ) : trustProbeSession.status === "tls_failed" ? (
-                      <Alert
-                        type="warning"
-                        showIcon
-                        message="HTTPS trust check failed"
-                        description="The device reached the probe port, but the browser could not complete the HTTPS handshake. Install the CA, enable full trust on iOS, check device time, then retry."
-                      />
-                    ) : trustProbeSession.status === "network_failed" ? (
-                      <Alert
-                        type="error"
-                        showIcon
-                        message="Probe port is not reachable"
-                        description="The phone opened the landing page but could not reach the probe port. Check firewall rules, local network isolation, and the selected IP address."
-                      />
-                    ) : (
-                      <Text type="secondary" style={{ fontSize: 12 }}>
-                        Scan the QR code from the target device. This page polls once per second
-                        until the trust check succeeds, fails, or the session expires.
-                      </Text>
-                    )}
-
-                    {trustProbeSession.lastError ? (
-                      <Text type="secondary" style={{ fontSize: 12 }}>
-                        Last error: {trustProbeSession.lastError}
-                      </Text>
-                    ) : null}
-
-                    <List
-                      size="small"
-                      dataSource={trustProbeSession.events.slice(-5).reverse()}
-                      locale={{ emptyText: "No probe events yet" }}
-                      renderItem={(event) => (
-                        <List.Item>
-                          <Space direction="vertical" size={0}>
-                            <Text style={{ fontSize: 12 }}>{event.type}</Text>
-                            <Text type="secondary" style={{ fontSize: 12 }}>
-                              {new Date(event.at).toLocaleTimeString()}
-                              {event.message ? ` - ${event.message}` : ""}
-                            </Text>
-                          </Space>
-                        </List.Item>
-                      )}
-                    />
-                  </Space>
-                </Col>
-              </Row>
-            ) : null}
-          </Space>
-        </Card>
+          <Card
+            id="certificate-trust-probe"
+            title={
+              <Space>
+                <MobileOutlined />
+                <span>Availability Check</span>
+              </Space>
+            }
+            size="small"
+          >
+            <AvailabilityCheckPanel certInfo={certInfo} testIdPrefix="settings-trust-probe" />
+          </Card>
 
         <Card
           id="certificate-local-install"
