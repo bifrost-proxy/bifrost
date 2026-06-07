@@ -17,6 +17,7 @@ interface GlobalDataSyncState {
   versionCheckIntervalId: number | null;
   visibilityPaused: boolean;
   forceRefresh: boolean;
+  trafficEnabled: boolean;
 }
 
 const globalState: GlobalDataSyncState = {
@@ -24,13 +25,14 @@ const globalState: GlobalDataSyncState = {
   versionCheckIntervalId: null,
   visibilityPaused: false,
   forceRefresh: false,
+  trafficEnabled: false,
 };
 
 function shouldAutoOpenVersionModal(): boolean {
   return !navigator.webdriver;
 }
 
-export function useGlobalDataSync() {
+export function useGlobalDataSync({ trafficEnabled = true }: { trafficEnabled?: boolean } = {}) {
   const initRef = useRef(false);
 
   useEffect(() => {
@@ -43,13 +45,14 @@ export function useGlobalDataSync() {
     const proxyStore = useProxyStore.getState();
     const filterPanelStore = useFilterPanelStore.getState();
     const metricsStore = useMetricsStore.getState();
-    const trafficStore = useTrafficStore.getState();
     const versionStore = useVersionStore.getState();
 
     const pauseRealtime = () => {
       if (globalState.visibilityPaused) return;
       globalState.visibilityPaused = true;
-      useTrafficStore.getState().disablePush();
+      if (globalState.trafficEnabled) {
+        useTrafficStore.getState().disablePush();
+      }
       useMetricsStore.getState().disablePush();
       pushService.disconnect();
     };
@@ -60,10 +63,12 @@ export function useGlobalDataSync() {
       }
       if (!globalState.visibilityPaused) return;
       globalState.visibilityPaused = false;
-      const currentTrafficStore = useTrafficStore.getState();
-      if (currentTrafficStore.polling && currentTrafficStore.usePush) {
-        currentTrafficStore.enablePush();
-        void currentTrafficStore.catchUpUpdates();
+      if (globalState.trafficEnabled) {
+        const currentTrafficStore = useTrafficStore.getState();
+        if (currentTrafficStore.polling && currentTrafficStore.usePush) {
+          currentTrafficStore.enablePush();
+          void currentTrafficStore.catchUpUpdates();
+        }
       }
       useMetricsStore.getState().enablePush({
         needOverview: true,
@@ -109,16 +114,11 @@ export function useGlobalDataSync() {
         proxyStore.fetchCliProxy(),
         filterPanelStore.loadFromServer(),
         metricsStore.fetchOverview(),
-        trafficStore.fetchInitialData(),
         versionStore.checkVersion({ skipCache: true }),
       ]);
 
       if (globalState.forceRefresh) {
         return;
-      }
-
-      if (!useTrafficStore.getState().paused) {
-        useTrafficStore.getState().startPolling();
       }
 
       metricsStore.enablePush({
@@ -161,6 +161,9 @@ export function useGlobalDataSync() {
       if (!connected || globalState.visibilityPaused || globalState.forceRefresh) {
         return;
       }
+      if (!globalState.trafficEnabled) {
+        return;
+      }
       const currentTrafficStore = useTrafficStore.getState();
       if (currentTrafficStore.polling && currentTrafficStore.usePush) {
         void currentTrafficStore.catchUpUpdates();
@@ -181,8 +184,35 @@ export function useGlobalDataSync() {
       globalState.initialized = false;
       globalState.visibilityPaused = false;
       globalState.forceRefresh = false;
+      globalState.trafficEnabled = false;
     };
   }, []);
+
+  useEffect(() => {
+    globalState.trafficEnabled = trafficEnabled;
+    const trafficStore = useTrafficStore.getState();
+    if (!trafficEnabled || globalState.forceRefresh) {
+      trafficStore.disablePush();
+      trafficStore.stopPolling();
+      return;
+    }
+
+    let cancelled = false;
+    void trafficStore.fetchInitialData().finally(() => {
+      if (cancelled || globalState.forceRefresh || !globalState.trafficEnabled) {
+        return;
+      }
+      if (!useTrafficStore.getState().paused) {
+        useTrafficStore.getState().startPolling();
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      useTrafficStore.getState().disablePush();
+      useTrafficStore.getState().stopPolling();
+    };
+  }, [trafficEnabled]);
 }
 
 export function resetGlobalDataSync() {

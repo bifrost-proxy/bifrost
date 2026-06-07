@@ -22,7 +22,7 @@ test("AI Agent Chat thread list loads in batches and virtualizes rows", async ({
     };
   });
 
-  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",

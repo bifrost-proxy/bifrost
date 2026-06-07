@@ -75,10 +75,36 @@ fn enrich_detail_with_history_runner_metadata(detail: &mut bifrost_agent::Sessio
 async fn load_history_entries_blocking(
     data_dir: PathBuf,
     session_key: Option<String>,
+    max_files: Option<usize>,
 ) -> Result<Vec<HistorySessionEntry>, String> {
     tokio::task::spawn_blocking(move || {
-        let files =
+        let mut files =
             bifrost_agent::persistence::list_conversations(&data_dir, session_key.as_deref());
+        if session_key.is_none() {
+            if max_files.is_some() {
+                let mut latest_by_parsed_key: std::collections::HashMap<String, PathBuf> =
+                    std::collections::HashMap::new();
+                for path in files {
+                    let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    let (parsed_key, _timestamp) = parse_session_filename(filename);
+                    latest_by_parsed_key
+                        .entry(parsed_key)
+                        .and_modify(|existing| {
+                            if path > *existing {
+                                *existing = path.clone();
+                            }
+                        })
+                        .or_insert(path);
+                }
+                files = latest_by_parsed_key.into_values().collect();
+                files.sort();
+            }
+            if let Some(max_files) = max_files {
+                if files.len() > max_files {
+                    files.drain(0..files.len() - max_files);
+                }
+            }
+        }
         Ok::<Vec<HistorySessionEntry>, String>(
             files
                 .into_iter()
@@ -219,6 +245,13 @@ pub(super) async fn handle_agent(
         if req.method() != Method::GET {
             return method_not_allowed();
         }
+        let query_params = parse_query_params(req.uri().query().unwrap_or_default());
+        let list_limit = query_params
+            .get("limit")
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .map(|value| value.min(200));
+        let history_scan_limit = list_limit.map(|limit| limit.saturating_mul(4).max(100));
         let active_sessions = service.agent_session_manager.list_sessions();
         let running_turns = service.agent_session_manager.list_active_turn_statuses();
         let active_info_by_key: std::collections::HashMap<String, bifrost_agent::SessionInfo> =
@@ -231,15 +264,16 @@ pub(super) async fn handle_agent(
             .map(|status| status.session_key.clone())
             .collect();
         let data_dir = bifrost_agent::config::agent_home_dir();
-        let history_entries = match load_history_entries_blocking(data_dir, None).await {
-            Ok(entries) => entries,
-            Err(error) => {
-                return error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("failed to scan agent sessions: {error}"),
-                );
-            }
-        };
+        let history_entries =
+            match load_history_entries_blocking(data_dir, None, history_scan_limit).await {
+                Ok(entries) => entries,
+                Err(error) => {
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("failed to scan agent sessions: {error}"),
+                    );
+                }
+            };
         let mut history_by_key: std::collections::HashMap<
             String,
             (
@@ -364,12 +398,13 @@ pub(super) async fn handle_agent(
                 &service.queue_manager,
                 &s.session_key,
             );
-            let run_state = active_session_list_run_state(s.running, &s.run_state);
+            let has_active_turn = false;
+            let run_state = active_session_list_run_state(has_active_turn, &s.run_state);
             unified.push(serde_json::json!({
                 "session_key": s.session_key,
                 "status": "active",
-                "running": s.running,
-                "state": if s.running { "running" } else { "idle" },
+                "running": has_active_turn,
+                "state": if has_active_turn { "running" } else { "idle" },
                 "source": s.source,
                 "work_dir": s.work_dir,
                 "turns": s.message_count,
@@ -540,6 +575,9 @@ pub(super) async fn handle_agent(
             t_b.cmp(&t_a)
         });
         dedupe_unified_sessions_by_key(&mut unified);
+        if let Some(limit) = list_limit {
+            unified.truncate(limit);
+        }
 
         let active_count = unified
             .iter()
@@ -561,7 +599,7 @@ pub(super) async fn handle_agent(
             return method_not_allowed();
         }
         let data_dir = bifrost_agent::config::agent_home_dir();
-        let history_entries = match load_history_entries_blocking(data_dir, None).await {
+        let history_entries = match load_history_entries_blocking(data_dir, None, None).await {
             Ok(entries) => entries,
             Err(error) => {
                 return error_response(
@@ -1732,6 +1770,8 @@ fn active_status_session_detail(
 fn active_session_list_run_state(running: bool, session_run_state: &str) -> String {
     if running {
         "running".to_string()
+    } else if session_run_state == "running" {
+        "completed".to_string()
     } else {
         session_run_state.to_string()
     }
@@ -1766,6 +1806,9 @@ fn persisted_session_projection(
             return terminal_persisted_session_projection(run_state, true, true);
         }
         if state.adapter == crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER {
+            return terminal_persisted_session_projection("completed", true, false);
+        }
+        if state.latest_run_id.is_none() {
             return terminal_persisted_session_projection("completed", true, false);
         }
         return PersistedSessionProjection {
@@ -2419,6 +2462,7 @@ mod tests {
             active_session_list_run_state(session.running, &session.run_state),
             "idle"
         );
+        assert_eq!(active_session_list_run_state(false, "running"), "completed");
     }
 
     #[test]
@@ -2622,9 +2666,10 @@ mod tests {
     }
 
     #[test]
-    fn all_external_runners_without_terminal_history_stay_running_for_remote_semantics() {
+    fn external_runners_with_run_id_without_terminal_history_stay_running_for_remote_semantics() {
         for adapter in ["codex", "chatgpt_web", "custom_cli"] {
-            let state = persisted_state("external-running", adapter, "running");
+            let mut state = persisted_state("external-running", adapter, "running");
+            state.latest_run_id = Some("run-123".to_string());
 
             let projection = persisted_session_projection(&state, None);
 
@@ -2633,6 +2678,21 @@ mod tests {
             assert_eq!(projection.state, "running", "{adapter}");
             assert_eq!(projection.run_state, "running", "{adapter}");
             assert!(!projection.stale_running, "{adapter}");
+        }
+    }
+
+    #[test]
+    fn external_runners_without_run_id_project_stale_running_to_completed() {
+        for adapter in ["codex", "chatgpt_web", "custom_cli"] {
+            let state = persisted_state("external-stale-running", adapter, "running");
+
+            let projection = persisted_session_projection(&state, None);
+
+            assert!(!projection.running, "{adapter}");
+            assert_eq!(projection.status, "ended", "{adapter}");
+            assert_eq!(projection.state, "ended", "{adapter}");
+            assert_eq!(projection.run_state, "completed", "{adapter}");
+            assert!(projection.stale_running, "{adapter}");
         }
     }
 
@@ -2675,7 +2735,8 @@ mod tests {
             .record_run_state(session_key, "completed", Some("test"), Some("external"))
             .expect("record run state");
 
-        let state = persisted_state(session_key, "codex", "running");
+        let mut state = persisted_state(session_key, "codex", "running");
+        state.latest_run_id = Some("run-current".to_string());
         let summary = persisted_state_history_summary(&state);
 
         assert!(

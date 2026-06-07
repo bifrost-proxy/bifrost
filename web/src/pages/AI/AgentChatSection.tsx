@@ -602,7 +602,7 @@ export default function AgentChatSection() {
 
   const refreshThreads = useCallback(async () => {
     try {
-      const response = await apiFetch("/api/im-gateway/agent/sessions/all");
+      const response = await apiFetch("/api/im-gateway/agent/sessions/all?limit=80");
       if (!response.ok) {
         return;
       }
