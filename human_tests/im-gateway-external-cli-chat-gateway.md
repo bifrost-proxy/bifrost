@@ -552,6 +552,48 @@
 2. Trae 不再报错 `permission_mode = "default" is not supported in exec mode`。
 3. 如果用户显式选择 `plan`、`bypass_permissions`、`auto` 或 `custom`，后端才生成对应 `--permission-mode <value>`。
 
+### TC-IEC-28: Codex Runner Web Chat 实时工具过程与最终结果展示
+
+操作步骤：
+1. 确认本机真实 Codex CLI 可用：
+   ```bash
+   /opt/homebrew/bin/codex --version
+   /opt/homebrew/bin/codex exec --help
+   ```
+2. 直接运行真实 Codex CLI，要求它执行一次 `pwd` 并输出固定最终答案，同时记录 stdout JSONL 每行到达时间。
+3. 使用临时数据目录启动 Bifrost，必须禁用系统代理和 Sync 自动登录弹窗：
+   ```bash
+   BIFROST_DATA_DIR=/tmp/bifrost-codex-runner-e2e \
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+   cargo run --bin bifrost -- start -p 18891 --unsafe-ssl --no-system-proxy --skip-cert-check
+   ```
+4. 配置 `codex` runner，adapter 为 `codex`，executable 为 `/opt/homebrew/bin/codex`，sandbox 为 `read-only`，`skipGitRepoCheck=true`。
+5. 在 WebUI Agent Chat 中选择 Codex runner，发送：
+   ```text
+   Run exactly one shell command using your shell tool: pwd. Then reply exactly: BIFROST_CODEX_WEB_UI_STREAM_OK
+   ```
+6. 打开同一 session 的历史页，检查过程块和最终消息。
+
+预期结果：
+1. 直接 CLI 调用在进程结束前输出 `thread.started`、`turn.started`、`item.started command_execution`、`item.completed command_execution`、`item.completed agent_message`、`turn.completed`；`item.started command_execution` 早于最终答案到达。
+2. Web Chat 运行中可见 `exec_command` 工具过程，完成后最终消息包含 `BIFROST_CODEX_WEB_UI_STREAM_OK`。
+3. 历史 timeline 中存在 `tool_call/tool_result`，`tool_name` 为 `exec_command`，arguments 包含 Codex 输出的 shell command，result 包含 `pwd` 输出。
+4. 不出现外层 `codex` wrapper 的单次工具调用噪音；只展示 Codex JSONL 归一化后的状态、工具或最终事件。
+5. Codex CLI 当前不暴露隐藏 chain-of-thought；页面不能伪造思考文本，只能展示公开输出的状态、工具过程、结果和最终答案。
+
+### TC-IEC-29: Codex Runner 飞书 IM Progress Card 与 Web History 展示一致
+
+操作步骤：
+1. 使用 TC-IEC-28 的临时服务和 `codex` runner 配置，确保 delivery mode 为 `progress_card`。
+2. 从飞书 IM 通道或 Chat Gateway 模拟同一 provider/session 触发 Codex runner，并要求执行 `pwd` 后输出固定文本。
+3. 打开 WebUI history 页面查看该 session。
+
+预期结果：
+1. progress card 在运行中展示 Codex 状态或 `exec_command` 工具过程，完成后收敛为最终结果，不停留在 running。
+2. Web history 中显示 `Runner: codex`、过程块默认可见、最终答案可见。
+3. Web history 与 IM progress card 使用同一 canonical timeline：工具名称、参数、结果、成功状态一致。
+4. 若本次只通过 Chat Gateway 做基础验证，也必须至少确认 timeline 中的 `tool_call/tool_result` 可被 IM progress card 复用；真实飞书发送可作为人工补充验收。
+
 ## 最近执行记录
 
 - 2026-05-13：执行 TC-IEC-01/02/03/04/08/09/10/11/12/13，临时服务端口 `18880`，`BIFROST_DATA_DIR=/tmp/bifrost-im-external-cli-test`，均通过；TC-IEC-12 使用 `sleep 23` 慢进程验证 active run 可停止，run 收敛为 `status:"stopped"`，`response:"External CLI run was stopped by request."`，且未残留 `sleep 23` 测试进程。
@@ -571,6 +613,7 @@
 - 2026-05-24：新增 TC-IEC-23，自动 E2E 通过仅 debug/dev 构建启用的 `BIFROST_CHATGPT_WEB_E2E_MOCK=1` 覆盖 ChatGPT Web Chat Gateway 重启恢复 `conversationId` 与 `/reset` 后不复活旧 conversation；本轮以 `cargo run -p bifrost-e2e -- --test im_gateway_chatgpt_web_restores_conversation_after_service_restart --test-timeout 180` 作为执行证据。
 - 2026-05-25：执行 TC-IEC-24，命令 `source ~/.zshrc && cargo test -p bifrost-admin request_agent_stop_stops_external_runner_by_session_key --lib` 通过；mock runner 在 `sleep 2` 阶段收到 session key stop marker，最终状态为 `Stopped`。
 - 2026-06-07：执行 TC-IEC-25/26/27，临时服务端口 `18890`，`BIFROST_DATA_DIR=/tmp/bifrost-traex-runner-e2e`，启动命令使用 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 cargo run --bin bifrost -- start -p 18890 --unsafe-ssl --no-system-proxy --skip-cert-check`；WebUI Trae run 修复 `permissionMode=default` 后可完成，Feishu session `feishu-main:ou_64f88363f262c64aba91f0b9e1aaed81` 的 history 显示 `Traex`、`Runner: traex`、`Ready`，过程块默认展开并显示 Trae 状态事件，最终答案可见；确认 Trae JSONL 简单问答只输出状态/最终消息时，Bifrost 不伪造工具事件，也不再显示外层 wrapper 工具调用。自动 E2E `RUN_REAL_TRAEX_E2E=1 SKIP_BUILD=true BIFROST_TRAEX_BIN=/Users/eden/.local/bin/traex e2e-tests/tests/test_im_gateway_traex_runner_streaming.sh` 通过，run `1780796012473-3e6b1d8a-51e5-45e5-a7c2-fef5d35b44f0` 返回 `BIFROST_TRAEX_E2E_STREAM_OK`，并断言 snapshot 不包含 `--permission-mode default`。
+- 2026-06-07：执行 TC-IEC-28/29 基础链路，真实 Codex CLI 为 `/opt/homebrew/bin/codex`，版本 `codex-cli 0.136.0`；直接 CLI 计时验证 `thread.started`/`turn.started` 在进程结束前输出，`item.started command_execution` 与 `item.completed command_execution` 早于最终答案。自动 E2E `RUN_REAL_CODEX_E2E=1 BIFROST_CODEX_BIN=/opt/homebrew/bin/codex e2e-tests/tests/test_im_gateway_codex_runner_streaming.sh` 通过，run `1780806229800-fef7a0fa-5e06-4c30-b3b2-7604fec9751e` 返回 `BIFROST_CODEX_E2E_STREAM_OK`，并断言 `tool_started` 早于 `run_finished`。临时 WebUI 服务端口 `18891`，`BIFROST_DATA_DIR=/tmp/bifrost-codex-runner-ui`，Chat Gateway run `1780806481288-d1be0aaa-a68e-4279-be45-22fb9293bdd2` 返回 `BIFROST_CODEX_WEB_UI_STREAM_OK2`；Web history 显示 `Runner: codex`、`Ran 1 command`、单条 `exec_command` 和最终答案。飞书 IM 未做真实发送，本轮通过同一 session timeline 的 `tool_call/tool_result` 验证 progress card 可复用数据；真实飞书发送保留为人工补充验收。
 
 ## 清理步骤
 

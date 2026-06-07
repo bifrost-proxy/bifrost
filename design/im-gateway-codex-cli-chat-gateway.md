@@ -146,6 +146,26 @@ RunStopped
 
 adapter 允许输出能力缺失。例如某个 CLI 不提供 tool started 事件，就只输出 assistant delta 和 final；UI 仍然能正常展示，只是工具面板为空。
 
+### 5.1 Codex CLI 实时输出可行性
+
+2026-06-07 使用本机真实 Codex CLI `codex-cli 0.136.0` 验证，`codex exec --json` 会在进程结束前逐行输出 JSONL：
+
+- `thread.started` / `turn.started`：启动和 turn 状态，约 1 秒内即可到达。
+- `item.started` 且 `item.type=command_execution`：工具执行开始，包含真实 shell command。
+- `item.completed` 且 `item.type=command_execution`：工具执行结束，包含 `aggregated_output`、`exit_code` 和状态。
+- `item.completed` 且 `item.type=agent_message`：最终 assistant 消息。
+- `turn.completed`：turn 完成和 usage，其中可能包含 `reasoning_output_tokens`。
+
+因此 Codex runner 的实时展示可以做到：状态实时、工具开始实时、工具结束和输出实时、最终回答实时进入同一条 Web/IM timeline。实现上不需要新建 WebUI 或飞书卡片分支，只需把 Codex `command_execution` 归一化为既有 `ToolStarted` / `ToolFinished`：
+
+- tool name 固定为 `exec_command`，贴近内置 Bifrost Agent 的工具名。
+- arguments 使用 Codex JSONL 中的 `item.command`。
+- result 使用 Codex JSONL 中的 `item.aggregated_output`。
+- success 使用 `item.exit_code == 0`。
+- call id 使用 Codex JSONL 中的 `item.id`，保证 started/finished 可归并为同一次工具调用。
+
+Codex CLI 当前不会在 JSONL 中暴露隐藏 chain-of-thought。即使配置 `model_reasoning_summary="auto"`，本次真实验证也只输出了 `usage.reasoning_output_tokens`，没有可展示的 reasoning 文本。因此 Bifrost 只能展示 Codex CLI 明确输出的 status/tool/result/final/reasoning summary 事件；不能也不应伪造或展示隐藏思考内容。
+
 ### 6. 能力声明与降级
 
 每个 adapter 需要声明能力，WebUI 和 API 根据能力展示配置项：
@@ -826,6 +846,8 @@ Runs 页面用于排查 Chat Gateway 和真实 IM Agent 执行。列表字段：
 - `chat_gateway_request_normalizes_im_context`：验证 HTTP 请求转换为 `NormalizedInboundMessage`。
 - `chat_gateway_rejects_unallowed_work_dir`：验证未授权工程目录被拒绝。
 - `external_cli_adapter_parser_maps_progress_events`：验证 adapter 私有事件转为 `AgentTurnProgressEvent`；Codex JSONL 是首个覆盖样例。
+- `codex_cli_parser_maps_real_command_execution_events`：验证真实 Codex `item.started/item.completed command_execution` 被归一化为 `ToolStarted/ToolFinished`，并保留 command、output、exit code。
+- `codex_command_execution_progress_is_recorded_as_exec_command_tool_steps`：验证 Codex 工具过程进入 canonical timeline 后显示为 `exec_command` 的 tool call/result，而不是外层 runner wrapper。
 - `external_cli_adapter_capabilities_drive_config_schema`：验证 adapter 能力声明会决定 WebUI/API 可配置字段，未声明能力不会被错误下发。
 - `external_cli_runtime_accepts_manifest_adapter`：验证简单 manifest adapter 能构造 `CommandSpec` 并复用 run dir / artifact / event pipeline。
 - `chat_gateway_real_im_requires_permission`：验证默认不会发送到真实 IM。
@@ -839,6 +861,7 @@ Runs 页面用于排查 Chat Gateway 和真实 IM Agent 执行。列表字段：
 - `im_gateway_external_cli_chat_gateway_skill_context`：构造 repo/global/system skill，断言 prompt envelope 包含 metadata 和路径。
 - `im_gateway_external_cli_chat_gateway_stop`：启动长运行 mock external CLI，调用 stop，断言进程结束、状态为 stopped。
 - `im_gateway_codex_adapter_contract`：用 Codex adapter 覆盖 `codex exec --json`、`--cd`、`--add-dir`、`--output-last-message` 的命令构造和 final response 提取。
+- `test_im_gateway_codex_runner_streaming.sh`：显式启用真实 Codex CLI 后启动临时 Bifrost，调用 `/chat/stream` 触发 `pwd`，断言 `tool_started` 在 `run_finished` 前到达、`tool_finished` 和 final response 都进入 run detail 与 session timeline。
 - `im_gateway_agent_config_webui_flow`：浏览器打开 Settings -> IM Gateway，配置 Agent Defaults、通道覆盖、Preview Effective Config 和 Run Test Message，断言最终快照、事件时间线和 run detail 可见。
 - `im_gateway_agent_config_webui_theme`：在亮色/暗色主题下检查 Agent Defaults、通道 Agent tab、Chat Gateway 测试抽屉和 Runs 详情没有不可读文本、重叠或危险配置提示丢失。
 
@@ -848,6 +871,7 @@ Runs 页面用于排查 Chat Gateway 和真实 IM Agent 执行。列表字段：
 
 - 通过 HTTP Chat Gateway 触发外部 CLI Agent，不依赖真实 IM 入站。
 - Codex adapter 作为首个内置 adapter 可以完成同一流程。
+- Codex runner 实时过程：Web Chat 运行中可看到 `exec_command` 工具开始/结束，完成后历史过程块默认可见；飞书 IM 通道复用同一 progress card/timeline，不显示外层 runner wrapper 噪音。
 - 同步响应包含 final response、run_id、artifacts。
 - 流式响应可看到进度事件。
 - 非 allowlist work_dir 被拒绝。

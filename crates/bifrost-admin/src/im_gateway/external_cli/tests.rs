@@ -194,6 +194,59 @@ fn codex_cli_parser_maps_real_jsonl_events() {
 }
 
 #[test]
+fn codex_cli_parser_maps_real_command_execution_events() {
+    let stdout = r#"{"type":"thread.started","thread_id":"019ea049-6138-7303-ab6e-dacccbd437a7"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"/bin/zsh -lc pwd","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"/bin/zsh -lc pwd","aggregated_output":"/Users/eden/work/github/bifrost-traex-runner\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"BIFROST_CODEX_REALTIME_DIRECT_OK"}}
+{"type":"turn.completed","usage":{"input_tokens":59589,"cached_input_tokens":6912,"output_tokens":221,"reasoning_output_tokens":156}}"#;
+
+    let events = parse_progress_events(stdout);
+
+    assert_eq!(events.len(), 6);
+    assert_eq!(
+        events[2].event_type,
+        ExternalCliProgressEventType::ToolStarted
+    );
+    assert_eq!(events[2].title.as_deref(), Some("exec_command"));
+    assert_eq!(events[2].content, "/bin/zsh -lc pwd");
+    assert_eq!(
+        events[2]
+            .raw
+            .get("arguments")
+            .and_then(|value| value.get("command"))
+            .and_then(serde_json::Value::as_str),
+        Some("/bin/zsh -lc pwd")
+    );
+    assert_eq!(
+        events[3].event_type,
+        ExternalCliProgressEventType::ToolFinished
+    );
+    assert_eq!(events[3].title.as_deref(), Some("exec_command"));
+    assert_eq!(
+        events[3].content,
+        "/Users/eden/work/github/bifrost-traex-runner\n"
+    );
+    assert_eq!(
+        events[3]
+            .raw
+            .get("success")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        events[4].event_type,
+        ExternalCliProgressEventType::AssistantFinal
+    );
+    assert_eq!(events[4].content, "BIFROST_CODEX_REALTIME_DIRECT_OK");
+    assert_eq!(
+        events[5].event_type,
+        ExternalCliProgressEventType::RunFinished
+    );
+}
+
+#[test]
 fn traex_cli_parser_maps_real_jsonl_events() {
     let stdout = r#"{"type":"thread.started","thread_id":"019e9f78-traex"}
 {"type":"turn.started"}

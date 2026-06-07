@@ -2004,8 +2004,38 @@ fn parse_codex_cli_event(
             title: Some("Codex turn".to_string()),
             raw: raw.clone(),
         }),
+        "item.started" => {
+            let item_type = value_text_path(raw, &["item", "type"])?;
+            match item_type.as_str() {
+                "command_execution" => Some(codex_command_execution_event(
+                    raw,
+                    ExternalCliProgressEventType::ToolStarted,
+                )),
+                "tool_call" => Some(ExternalCliProgressEvent {
+                    event_type: ExternalCliProgressEventType::ToolStarted,
+                    content: value_text_path(raw, &["item", "arguments"])
+                        .or_else(|| value_text_path(raw, &["item", "command"]))
+                        .unwrap_or_default(),
+                    title: value_text_path(raw, &["item", "name"]).or(Some(item_type)),
+                    raw: raw.clone(),
+                }),
+                _ => Some(ExternalCliProgressEvent {
+                    event_type: ExternalCliProgressEventType::Status,
+                    content: value_text_path(raw, &["item", "status"])
+                        .unwrap_or_else(|| format!("{item_type} started")),
+                    title: Some(item_type),
+                    raw: raw.clone(),
+                }),
+            }
+        }
         "item.completed" => {
             let item_type = value_text_path(raw, &["item", "type"])?;
+            if item_type == "command_execution" {
+                return Some(codex_command_execution_event(
+                    raw,
+                    ExternalCliProgressEventType::ToolFinished,
+                ));
+            }
             let content = value_text_path(raw, &["item", "text"])
                 .or_else(|| value_text_path(raw, &["item", "message"]))
                 .or_else(|| value_text_path(raw, &["item", "title"]))
@@ -2027,6 +2057,42 @@ fn parse_codex_cli_event(
             })
         }
         _ => None,
+    }
+}
+
+fn codex_command_execution_event(
+    raw: &serde_json::Value,
+    event_type: ExternalCliProgressEventType,
+) -> ExternalCliProgressEvent {
+    let command = value_text_path(raw, &["item", "command"]).unwrap_or_default();
+    let output = value_text_path(raw, &["item", "aggregated_output"]).unwrap_or_default();
+    let exit_code = raw
+        .get("item")
+        .and_then(|item| item.get("exit_code"))
+        .and_then(serde_json::Value::as_i64);
+    let mut enriched_raw = raw.clone();
+    if let Some(object) = enriched_raw.as_object_mut() {
+        object
+            .entry("tool_name".to_string())
+            .or_insert_with(|| serde_json::json!("exec_command"));
+        object
+            .entry("arguments".to_string())
+            .or_insert_with(|| serde_json::json!({ "command": command }));
+        if let Some(exit_code) = exit_code {
+            object
+                .entry("success".to_string())
+                .or_insert_with(|| serde_json::json!(exit_code == 0));
+        }
+    }
+    ExternalCliProgressEvent {
+        content: match &event_type {
+            ExternalCliProgressEventType::ToolStarted => command,
+            ExternalCliProgressEventType::ToolFinished => output,
+            _ => String::new(),
+        },
+        event_type,
+        title: Some("exec_command".to_string()),
+        raw: enriched_raw,
     }
 }
 

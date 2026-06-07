@@ -2079,13 +2079,15 @@ pub(super) fn record_external_cli_progress_event_to_timeline(
             let call_id = external_progress_call_id(adapter, event);
             let tool_name = external_progress_tool_name(event, adapter);
             let arguments = external_progress_tool_arguments(event);
-            if let Err(error) = recorder.record_tool_call_with_id(
-                session_key,
-                &tool_name,
-                &arguments,
-                Some(&call_id),
-            ) {
-                tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner completed tool call");
+            if !timeline_has_tool_call(recorder, session_key, &call_id) {
+                if let Err(error) = recorder.record_tool_call_with_id(
+                    session_key,
+                    &tool_name,
+                    &arguments,
+                    Some(&call_id),
+                ) {
+                    tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner completed tool call");
+                }
             }
             let success = event
                 .raw
@@ -2135,6 +2137,26 @@ pub(super) fn record_external_cli_progress_event_to_timeline(
         }
         EventType::AssistantFinal => {}
     }
+}
+
+fn timeline_has_tool_call(
+    recorder: &bifrost_agent::persistence::ConversationRecorder,
+    session_key: &str,
+    call_id: &str,
+) -> bool {
+    bifrost_agent::persistence::load_conversation_events(recorder.file_path())
+        .map(|events| {
+            events.iter().any(|event| {
+                event.session_key == session_key
+                    && event.event_type == bifrost_agent::persistence::event_types::TOOL_CALL
+                    && event
+                        .content
+                        .get("call_id")
+                        .and_then(|value| value.as_str())
+                        == Some(call_id)
+            })
+        })
+        .unwrap_or(false)
 }
 
 fn external_progress_call_id(
@@ -2657,6 +2679,70 @@ mod tests {
             event.event_type == bifrost_agent::persistence::event_types::TOOL_RESULT
                 && event.content.get("result").and_then(|v| v.as_str()) == Some("pwd ok")
                 && event.content.get("success").and_then(|v| v.as_bool()) == Some(true)
+        }));
+    }
+
+    #[test]
+    fn codex_command_execution_progress_is_recorded_as_exec_command_tool_steps() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
+        let session_key = "codex-command-execution-history";
+        let data_dir = bifrost_agent::config::agent_home_dir();
+        let mut recorder =
+            bifrost_agent::persistence::ConversationRecorder::new(&data_dir, session_key);
+        recorder
+            .record_session_start(
+                session_key,
+                serde_json::json!({"source": "admin-api", "adapter": "codex"}),
+            )
+            .expect("record start");
+
+        let events = crate::im_gateway::external_cli::parse_progress_events(
+            r#"{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"/bin/zsh -lc pwd","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"/bin/zsh -lc pwd","aggregated_output":"/tmp/work\n","exit_code":0,"status":"completed"}}"#,
+        );
+        assert_eq!(events.len(), 2);
+        for event in &events {
+            record_external_cli_progress_event_to_timeline(
+                &mut recorder,
+                session_key,
+                "web",
+                "codex",
+                "codex",
+                event,
+            );
+        }
+
+        let persisted = bifrost_agent::persistence::load_conversation_events(recorder.file_path())
+            .expect("load progress events");
+        let tool_call_count = persisted
+            .iter()
+            .filter(|event| {
+                event.event_type == bifrost_agent::persistence::event_types::TOOL_CALL
+                    && event.content.get("call_id").and_then(|v| v.as_str()) == Some("item_0")
+            })
+            .count();
+        assert_eq!(tool_call_count, 1);
+        assert!(persisted.iter().any(|event| {
+            event.event_type == bifrost_agent::persistence::event_types::TOOL_CALL
+                && event.content.get("tool_name").and_then(|v| v.as_str()) == Some("exec_command")
+                && event.content.get("call_id").and_then(|v| v.as_str()) == Some("item_0")
+                && event
+                    .content
+                    .get("arguments")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|value| value.contains("/bin/zsh -lc pwd"))
+        }));
+        assert!(persisted.iter().any(|event| {
+            event.event_type == bifrost_agent::persistence::event_types::TOOL_RESULT
+                && event.content.get("tool_name").and_then(|v| v.as_str()) == Some("exec_command")
+                && event.content.get("call_id").and_then(|v| v.as_str()) == Some("item_0")
+                && event.content.get("success").and_then(|v| v.as_bool()) == Some(true)
+                && event
+                    .content
+                    .get("result")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|value| value.contains("/tmp/work"))
         }));
     }
 
