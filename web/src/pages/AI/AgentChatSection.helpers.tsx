@@ -1292,13 +1292,14 @@ export function eventToProcessStep(event: Record<string, unknown>): ProcessStep 
   const eventType = typeof event.eventType === "string" ? event.eventType : "";
   if (eventType === "status") {
     const content = stringFrom(event.content);
-    if (!content || content === "turn started" || content === "turn completed") {
+    if (!isReadableProgressStatus(content)) {
       return null;
     }
+    const readableContent = content ?? "";
     const title = stringFrom(event.title);
     return {
       type: "thinking",
-      summary: title ? `${title}: ${content}` : content,
+      summary: title ? `${title}: ${readableContent}` : readableContent,
       status: "success",
       startedAt: Date.now() / 1000,
     };
@@ -1624,10 +1625,8 @@ export function ProcessStepsBlock({
   const commandCount = visibleSteps.filter((step) => step.type === "tool").length;
   const summaryCount = commandCount || visibleSteps.length;
   const durationLabel = formatProcessStepsDuration(visibleSteps, nowSeconds);
-  const summaryText = `${isRunning ? "Running" : "Ran"} ${
-    summaryCount
-  } command${summaryCount > 1 ? "s" : ""}${
-    runningCount > 0 ? ` (${runningCount} active)` : ""
+  const summaryText = `${isRunning ? "正在运行" : "已运行"} ${summaryCount} 条命令${
+    runningCount > 0 ? ` · ${runningCount} 条执行中` : ""
   }${durationLabel ? ` · ${durationLabel}` : ""}`;
 
   const toggleToolExpand = (index: number) => {
@@ -1745,6 +1744,27 @@ export function ProcessStepsBlock({
         </div>
       )}
     </div>
+  );
+}
+
+function isReadableProgressStatus(value?: string) {
+  const content = value?.trim();
+  if (!content) {
+    return false;
+  }
+  const lower = content.toLowerCase();
+  if (
+    lower === "running" ||
+    lower === "turn started" ||
+    lower === "turn completed" ||
+    lower === "run started" ||
+    lower === "run completed" ||
+    lower.startsWith("model rerouted:")
+  ) {
+    return false;
+  }
+  return !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+    content,
   );
 }
 

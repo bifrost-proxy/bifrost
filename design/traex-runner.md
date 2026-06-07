@@ -59,7 +59,7 @@ Web Chat 和 IM event loop 使用 `record_external_cli_progress_event_to_timelin
 - `ToolFinished` 写入 tool call + tool result，优先使用 Trae 原始事件中的 call id、tool name、arguments。
 - `AssistantFinal` 在 runner 仍运行时写入过程 timeline，作为 Trae/Codex 公开的模型 content 展示；底部最终回答仍由 run result/turn finish 统一记录为 assistant message。
 
-前端 `ProcessStepsBlock` 运行中默认展开，完成后默认折叠。运行中按实时 conversation timeline 展示模型公开 content/status 与工具摘要；工具行默认只展示摘要，点击后展开输入/输出详情。工具摘要优先从 arguments 中提取命令片段，避免 Web Chat 只显示一串 `exec_command`。
+前端 `ProcessStepsBlock` 运行中默认展开，完成后默认折叠。运行中按实时 conversation timeline 从上到下展示模型公开 content、必要状态和工具调用；工具行默认只展示可读命令标题，点击后展开输入/输出详情。噪音状态（run id、turn started/completed、model rerouted）不进入过程列表，避免卡片顶部被内部事件淹没。
 
 Web timeline 会按 `call_id` 合并工具 start/result，并跳过重复 start。后端在写 conversation timeline 时也会跳过同一 `call_id` 的重复 `ToolStarted`，避免 Trae/Codex 重复输出 `item.started` 时造成 WebView active command 计数虚高。
 
@@ -80,7 +80,7 @@ Web timeline 会按 `call_id` 合并工具 start/result，并跳过重复 start�
 - `external_cli_runtime_streams_stdout_before_process_exit`：验证 stdout 事件在进程退出前已经推送。
 - `external_progress_maps_to_agent_turn_progress_events`：验证 external progress 可转 IM progress card 事件。
 - `external_runner_progress_events_are_recorded_as_visible_timeline_steps`：验证 status/tool 事件写入可见 timeline。
-- `assistant_final_is_pipeline_content_until_turn_finished`：验证 Trae/Codex 公开 `agent_message` 在 runner 仍运行时进入 Pipeline 过程，不提前占用底部最终结论。
+- `assistant_final_is_pipeline_content_until_turn_finished`：验证 Trae/Codex 公开 `agent_message` 在 runner 仍运行时进入过程区域，不提前占用底部最终结论。
 - `timed_out_external_cli_result_reports_failure_reply`：验证 Trae 超时等非成功状态按失败收敛，不把早期 `agent_message` 当作成功结果。
 - `duplicate_running_tool_started_updates_existing_pipeline_item`：验证重复 `item.started` 不重复插入工具过程，且工具详情输出预览限长。
 - `external_runner_duplicate_tool_started_is_recorded_once`：验证后端 timeline 持久化不会重复写入同一 `call_id` 的工具 start。
@@ -89,7 +89,7 @@ Web timeline 会按 `call_id` 合并工具 start/result，并跳过重复 start�
 ### E2E 测试
 
 - 使用临时 `BIFROST_DATA_DIR` 启动服务，配置 `traex` runner，调用 `/chat/stream`，断言 NDJSON 中包含 Trae progress event、最终 `run_finished`、run detail artifacts 和 timeline。
-- 使用 WebUI 真实浏览器打开 Agent Chat，发送 Trae runner 长任务消息，断言运行中过程块默认展开并持续更新，工具摘要展示命令片段；完成后过程块默认折叠且最终回答位于底部。
+- 使用 WebUI 真实浏览器打开 Agent Chat，发送 Trae runner 长任务消息，断言运行中过程块默认展开并持续更新，工具行展示命令片段；完成后过程块默认折叠且最终回答位于底部。
 
 ### 真实场景测试
 

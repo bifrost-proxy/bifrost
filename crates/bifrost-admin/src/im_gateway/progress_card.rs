@@ -92,7 +92,7 @@ impl ImAgentProgressSnapshot {
         match event {
             AgentTurnProgressEvent::Status(status) => {
                 let state = status.state.trim();
-                if !state.is_empty() && state != "running" {
+                if is_human_readable_progress_status(state) {
                     self.push_timeline(ProgressTimelineItem::status(state.to_string()));
                 }
                 self.context = Some(context_snapshot_from_status(&status));
@@ -299,6 +299,33 @@ fn context_snapshot_from_status(status: &ActiveTurnStatus) -> AgentContextSnapsh
         last_response_tokens: status.last_response_tokens,
         total_tokens_used: status.total_tokens_used,
     }
+}
+
+fn is_human_readable_progress_status(status: &str) -> bool {
+    let status = status.trim();
+    if status.is_empty() || status.eq_ignore_ascii_case("running") {
+        return false;
+    }
+    let lower = status.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "turn started" | "turn completed" | "run started" | "run completed"
+    ) || lower.starts_with("model rerouted:")
+    {
+        return false;
+    }
+    if looks_like_uuid(status) {
+        return false;
+    }
+    true
+}
+
+fn looks_like_uuid(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        })
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1281,26 +1308,14 @@ fn build_process_loop_elements(snapshot: &ImAgentProgressSnapshot) -> Vec<serde_
 
     let mut elements = Vec::new();
     let mut markdown_lines = Vec::<String>::new();
-    let mut loop_index = 0;
-    let mut loop_item_index = 0;
+    let mut item_index = 0;
     let mut markdown_element_count = 0;
 
     for (timeline_index, item) in snapshot.timeline.iter().enumerate() {
-        if loop_index == 0 || item.kind == ProgressTimelineKind::Thinking {
-            flush_process_markdown(
-                &mut elements,
-                &mut markdown_lines,
-                &mut markdown_element_count,
-            );
-            loop_index += 1;
-            loop_item_index = 0;
-            markdown_lines.push(format!("**Loop {loop_index}**"));
-        }
-
         match item.kind {
             ProgressTimelineKind::Thinking | ProgressTimelineKind::Status => {
-                loop_item_index += 1;
-                markdown_lines.push(format_process_timeline_line(loop_item_index, item));
+                item_index += 1;
+                markdown_lines.push(format_process_timeline_line(item_index, item));
             }
             ProgressTimelineKind::Tool => {
                 flush_process_markdown(
@@ -1308,11 +1323,7 @@ fn build_process_loop_elements(snapshot: &ImAgentProgressSnapshot) -> Vec<serde_
                     &mut markdown_lines,
                     &mut markdown_element_count,
                 );
-                elements.push(build_process_tool_detail_element(
-                    timeline_index,
-                    loop_index,
-                    item,
-                ));
+                elements.push(build_process_tool_detail_element(timeline_index, item));
             }
         }
     }
@@ -1359,7 +1370,6 @@ fn build_process_markdown_element(element_id: String, content: String) -> serde_
 
 fn build_process_tool_detail_element(
     index: usize,
-    loop_index: usize,
     item: &ProgressTimelineItem,
 ) -> serde_json::Value {
     serde_json::json!({
@@ -1370,7 +1380,7 @@ fn build_process_tool_detail_element(
         "header": {
             "title": {
                 "tag": "plain_text",
-                "content": format_process_tool_panel_title(loop_index, item)
+                "content": format_process_tool_panel_title(item)
             }
         },
         "elements": [{
@@ -1388,31 +1398,29 @@ fn process_dynamic_element_id(prefix: &str, index: usize) -> String {
 }
 
 fn format_process_panel_title(snapshot: &ImAgentProgressSnapshot) -> String {
-    let loop_count = process_loop_count(snapshot);
     let tool_count = process_tool_count(snapshot);
     let base = match snapshot.phase {
-        ImProgressPhase::Running => "执行 Pipeline",
-        ImProgressPhase::Finished => "Pipeline 过程",
-        ImProgressPhase::Failed => "失败前 Pipeline",
+        ImProgressPhase::Running => "执行过程",
+        ImProgressPhase::Finished => "执行过程",
+        ImProgressPhase::Failed => "失败前过程",
     };
     if tool_count == 0 {
-        format!("{base}：{loop_count} 轮 Loop")
+        base.to_string()
     } else {
-        format!("{base}：{loop_count} 轮 Loop · 已运行 {tool_count} 条命令")
+        format!("{base}：已运行 {tool_count} 条命令")
     }
 }
 
-fn format_process_tool_panel_title(loop_index: usize, item: &ProgressTimelineItem) -> String {
+fn format_process_tool_panel_title(item: &ProgressTimelineItem) -> String {
     let verb = match item.success {
-        Some(true) => "已运行",
+        Some(true) => "已完成",
         Some(false) => "运行失败",
         None => "正在运行",
     };
     format!(
-        "Loop {} 工具摘要：{} · {} · {}",
-        loop_index,
-        truncate_one_line(&item.title, 28),
+        "{}：{} · {}",
         verb,
+        truncate_one_line(&item.title, 28),
         truncate_one_line(&item.summary, 48)
     )
 }
@@ -1425,20 +1433,10 @@ fn process_tool_count(snapshot: &ImAgentProgressSnapshot) -> usize {
         .count()
 }
 
-fn process_loop_count(snapshot: &ImAgentProgressSnapshot) -> usize {
-    let mut count = 0;
-    for item in &snapshot.timeline {
-        if count == 0 || item.kind == ProgressTimelineKind::Thinking {
-            count += 1;
-        }
-    }
-    count
-}
-
 fn format_process_timeline_line(index: usize, item: &ProgressTimelineItem) -> String {
     match item.kind {
         ProgressTimelineKind::Thinking => format!(
-            "{}. [模型] {}",
+            "{}. {}",
             index,
             crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&truncate_str(
                 &item.detail,
@@ -1446,7 +1444,7 @@ fn format_process_timeline_line(index: usize, item: &ProgressTimelineItem) -> St
             ))
         ),
         ProgressTimelineKind::Status => format!(
-            "{}. [状态] {}",
+            "{}. 状态：{}",
             index,
             crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&item.summary)
         ),
@@ -1457,7 +1455,7 @@ fn format_process_timeline_line(index: usize, item: &ProgressTimelineItem) -> St
                 None => "执行中",
             };
             format!(
-                "{}. [工具摘要] `{}` · {} · {}",
+                "{}. `{}` · {} · {}",
                 index,
                 truncate_one_line(&item.title, 32),
                 status,

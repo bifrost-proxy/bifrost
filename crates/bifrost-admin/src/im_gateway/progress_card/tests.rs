@@ -103,11 +103,11 @@ fn assistant_final_is_pipeline_content_until_turn_finished() {
 
     let running_card = build_feishu_progress_card(&snapshot, true);
     let running_serialized = serde_json::to_string(&running_card).unwrap();
-    assert!(running_serialized.contains("**Loop 1**"));
-    assert!(running_serialized.contains("**Loop 2**"));
     assert!(running_serialized.contains("我先看分支差异"));
     assert!(running_serialized.contains("接下来逐个模块检查"));
     assert!(!running_serialized.contains("最终结论"));
+    assert!(!running_serialized.contains("Loop"));
+    assert!(!running_serialized.contains("Pipeline"));
 
     snapshot.apply_event(AgentTurnProgressEvent::TurnFinished {
         content: "最终结论：未发现阻塞问题。".to_string(),
@@ -142,6 +142,18 @@ fn duplicate_running_tool_started_updates_existing_pipeline_item() {
 }
 
 #[test]
+fn noisy_runner_statuses_are_hidden_from_process_timeline() {
+    assert!(!is_human_readable_progress_status(
+        "019ea1ba-28b8-7670-befe-a979605ce0bf"
+    ));
+    assert!(!is_human_readable_progress_status("turn started"));
+    assert!(!is_human_readable_progress_status(
+        "model rerouted: Test-O-New-Thinking -> claude_46_opus"
+    ));
+    assert!(is_human_readable_progress_status("正在读取当前分支差异"));
+}
+
+#[test]
 fn feishu_progress_card_expands_process_while_running_and_collapses_after_finish() {
     let mut snapshot = ImAgentProgressSnapshot::new("s1", "stream task");
     snapshot.apply_event(AgentTurnProgressEvent::AssistantDelta {
@@ -156,10 +168,11 @@ fn feishu_progress_card_expands_process_while_running_and_collapses_after_finish
     let running_serialized = serde_json::to_string(&running_card).unwrap();
     assert!(running_serialized.contains(PROCESS_PANEL_ELEMENT_ID));
     assert!(running_serialized.contains(r#""expanded":true"#));
-    assert!(running_serialized.contains("**Loop 1**"));
-    assert!(running_serialized.contains("[模型]"));
-    assert!(running_serialized.contains("工具摘要"));
-    assert!(running_serialized.contains("正在运行 `exec_command`"));
+    assert!(running_serialized.contains("我会先检查代码路径"));
+    assert!(running_serialized.contains("正在运行：exec_command"));
+    assert!(!running_serialized.contains("Loop"));
+    assert!(!running_serialized.contains("[模型]"));
+    assert!(!running_serialized.contains("工具摘要"));
 
     snapshot.apply_event(AgentTurnProgressEvent::ToolFinished {
         log: ToolCallLog {
@@ -183,16 +196,19 @@ fn feishu_progress_card_expands_process_while_running_and_collapses_after_finish
 
     let finished_serialized = serde_json::to_string(&finished_card).unwrap();
     assert!(finished_serialized.contains("最终结论：测试通过。"));
-    assert!(finished_serialized.contains("Pipeline 过程：1 轮 Loop · 已运行 1 条命令"));
-    assert!(finished_serialized.contains("Loop 1 工具摘要：exec_command · 已运行"));
+    assert!(finished_serialized.contains("执行过程：已运行 1 条命令"));
+    assert!(finished_serialized.contains("已完成：exec_command"));
     assert!(finished_serialized.contains("test result: ok"));
+    assert!(!finished_serialized.contains("Pipeline"));
+    assert!(!finished_serialized.contains("Loop"));
+    assert!(!finished_serialized.contains("工具摘要"));
     let process_elements = elements[1]["elements"].as_array().unwrap();
     assert_eq!(process_elements[1]["element_id"], "ap_t_1");
     assert_eq!(process_elements[1]["expanded"], false);
     assert!(process_elements[1]["header"]["title"]["content"]
         .as_str()
         .unwrap()
-        .contains("工具摘要"));
+        .contains("已完成：exec_command"));
 }
 
 #[test]
@@ -544,12 +560,12 @@ fn feishu_progress_card_uses_json_2_streaming_and_stable_elements() {
     assert_eq!(process_element["tag"], "collapsible_panel");
     assert_eq!(process_element["expanded"], true);
     let process_content = process_element["elements"][0]["content"].as_str().unwrap();
-    assert!(process_content.contains("**Loop 1**"));
-    assert!(process_content.contains("[模型]"));
     assert!(
         process_content.contains("Inspecting files before running tests."),
         "process content should show the latest thought: {process_content}"
     );
+    assert!(!process_content.contains("Loop"));
+    assert!(!process_content.contains("[模型]"));
     let process_elements = process_element["elements"].as_array().unwrap();
     assert_eq!(process_elements[1]["element_id"], "ap_t_1");
     assert_eq!(process_elements[1]["tag"], "collapsible_panel");
@@ -557,7 +573,7 @@ fn feishu_progress_card_uses_json_2_streaming_and_stable_elements() {
     assert!(process_elements[1]["header"]["title"]["content"]
         .as_str()
         .unwrap()
-        .contains("Loop 1 工具摘要"));
+        .contains("已完成：shell"));
     assert!(process_elements[1]["elements"][0]["content"]
         .as_str()
         .unwrap()
@@ -565,7 +581,7 @@ fn feishu_progress_card_uses_json_2_streaming_and_stable_elements() {
     assert!(process_elements[2]["content"]
         .as_str()
         .unwrap()
-        .contains("**Loop 2**"));
+        .contains("Now I will write the final summary."));
 }
 
 #[test]

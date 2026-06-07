@@ -1062,9 +1062,8 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     "有待处理引导消息",
                     "已收到引导：check latest logs",
                     "任务计划：Render latest status card",
-                    "Pipeline 过程",
-                    "**Loop 1**",
-                    "Loop 1 工具摘要",
+                    "执行过程",
+                    "已完成：list_directory",
                     "checking progress card sections",
                 ] {
                     if !body.contains(needle) {
@@ -1076,6 +1075,10 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     "agent_tool_panel",
                     "agent_tool_log",
                     "agent_thinking_panel",
+                    "Pipeline",
+                    "Loop 1",
+                    "工具摘要",
+                    "[模型]",
                 ] {
                     if body.contains(legacy_id) {
                         return Err(format!(
