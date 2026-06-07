@@ -172,6 +172,152 @@ describe("historyEventsToMessages", () => {
     expect(messages[1].content).toContain("Plan Mode result");
     expect(messages[1].content).toContain("- Verify");
   });
+
+  it("deduplicates repeated external runner tool events by call id", () => {
+    const messages = historyEventsToMessages([
+      {
+        timestamp: 0,
+        event_type: "session_start",
+        session_key: "trae-streaming",
+        content: { runtime: "external_cli", adapter: "traex" },
+      },
+      {
+        timestamp: 1,
+        event_type: "user_message",
+        session_key: "trae-streaming",
+        content: { message: "review this branch" },
+      },
+      {
+        timestamp: 2,
+        event_type: "assistant_delta",
+        session_key: "trae-streaming",
+        content: { message: "我先看 diff。" },
+      },
+      {
+        timestamp: 3,
+        event_type: "tool_call",
+        session_key: "trae-streaming",
+        content: {
+          tool_name: "exec_command",
+          call_id: "item_1",
+          arguments: JSON.stringify({ command: "git diff --stat main..HEAD" }),
+        },
+      },
+      {
+        timestamp: 3,
+        event_type: "tool_call",
+        session_key: "trae-streaming",
+        content: {
+          tool_name: "exec_command",
+          call_id: "item_1",
+          arguments: JSON.stringify({ command: "git diff --stat main..HEAD" }),
+        },
+      },
+      {
+        timestamp: 4,
+        event_type: "tool_result",
+        session_key: "trae-streaming",
+        content: {
+          tool_name: "exec_command",
+          call_id: "item_1",
+          result: "3 files changed",
+          success: true,
+        },
+      },
+    ]);
+
+    const assistant = messages.find((message) => message.role === "assistant");
+    const steps = assistant?.processSteps || [];
+    expect(steps).toHaveLength(2);
+    expect(steps[0]).toMatchObject({
+      type: "thinking",
+      summary: "我先看 diff。",
+    });
+    expect(steps[1]).toMatchObject({
+      type: "tool",
+      summary: "exec_command",
+      callId: "item_1",
+      args: JSON.stringify({ command: "git diff --stat main..HEAD" }),
+      result: "3 files changed",
+      status: "success",
+    });
+  });
+
+  it("places external runner content before trailing running tools in the same loop", () => {
+    const messages = historyEventsToMessages([
+      {
+        timestamp: 0,
+        event_type: "session_start",
+        session_key: "trae-streaming-order",
+        content: { runtime: "external_cli", adapter: "traex" },
+      },
+      {
+        timestamp: 1,
+        event_type: "user_message",
+        session_key: "trae-streaming-order",
+        content: { message: "review" },
+      },
+      {
+        timestamp: 2,
+        event_type: "tool_call",
+        session_key: "trae-streaming-order",
+        content: {
+          tool_name: "exec_command",
+          call_id: "item_1",
+          arguments: JSON.stringify({ command: "git diff --stat" }),
+        },
+      },
+      {
+        timestamp: 3,
+        event_type: "assistant_delta",
+        session_key: "trae-streaming-order",
+        content: { message: "Let me inspect the diff first." },
+      },
+      {
+        timestamp: 4,
+        event_type: "tool_result",
+        session_key: "trae-streaming-order",
+        content: {
+          tool_name: "exec_command",
+          call_id: "item_1",
+          result: "ok",
+          success: true,
+        },
+      },
+    ]);
+
+    const steps = messages.find((message) => message.role === "assistant")?.processSteps || [];
+    expect(steps.map((step) => step.type)).toEqual(["thinking", "tool"]);
+    expect(steps[0].summary).toBe("Let me inspect the diff first.");
+    expect(steps[1]).toMatchObject({ callId: "item_1", status: "success" });
+  });
+
+  it("keeps non external runner assistant deltas as assistant content", () => {
+    const messages = historyEventsToMessages([
+      {
+        timestamp: 0,
+        event_type: "session_start",
+        session_key: "chatgpt-web-history",
+        content: { adapter: "chatgpt_web" },
+      },
+      {
+        timestamp: 1,
+        event_type: "user_message",
+        session_key: "chatgpt-web-history",
+        content: { message: "hello" },
+      },
+      {
+        timestamp: 2,
+        event_type: "assistant_delta",
+        session_key: "chatgpt-web-history",
+        content: { message: "normal streamed answer" },
+      },
+    ]);
+
+    const assistant = messages.find((message) => message.role === "assistant");
+    expect(assistant?.content).toBe("normal streamed answer");
+    expect(assistant?.processSteps || []).toHaveLength(0);
+  });
 });
 
 describe("agent token metric formatting", () => {

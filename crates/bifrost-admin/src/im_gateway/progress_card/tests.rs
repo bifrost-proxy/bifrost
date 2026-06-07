@@ -187,12 +187,46 @@ fn feishu_progress_card_expands_process_while_running_and_collapses_after_finish
     assert!(finished_serialized.contains("Loop 1 工具摘要：exec_command · 已运行"));
     assert!(finished_serialized.contains("test result: ok"));
     let process_elements = elements[1]["elements"].as_array().unwrap();
-    assert_eq!(process_elements[1]["element_id"], "agent_process_tool_1");
+    assert_eq!(process_elements[1]["element_id"], "ap_t_1");
     assert_eq!(process_elements[1]["expanded"], false);
     assert!(process_elements[1]["header"]["title"]["content"]
         .as_str()
         .unwrap()
         .contains("工具摘要"));
+}
+
+#[test]
+fn feishu_progress_card_process_element_ids_stay_within_feishu_limits() {
+    let mut snapshot = ImAgentProgressSnapshot::new("s1", "many tools");
+    for index in 0..18 {
+        snapshot.apply_event(AgentTurnProgressEvent::AssistantDelta {
+            content: format!("Loop {} thinking", index + 1),
+        });
+        snapshot.apply_event(AgentTurnProgressEvent::ToolFinished {
+            log: ToolCallLog {
+                tool_name: "exec_command".to_string(),
+                arguments: format!(r#"{{"cmd":"echo {index}"}}"#),
+                result: "ok".to_string(),
+                success: true,
+            },
+            duration_ms: 10,
+        });
+    }
+
+    let card = build_feishu_progress_card(&snapshot, true);
+    let mut element_ids = Vec::new();
+    collect_element_ids(&card, &mut element_ids);
+    assert!(
+        element_ids.iter().any(|id| id == "ap_t_35"),
+        "test must cover two-digit process tool ids: {element_ids:?}"
+    );
+    assert!(
+        element_ids.iter().any(|id| id == "ap_td_35"),
+        "test must cover two-digit process tool detail ids: {element_ids:?}"
+    );
+    for element_id in element_ids {
+        assert_feishu_element_id_is_valid(&element_id);
+    }
 }
 
 #[test]
@@ -475,7 +509,7 @@ fn feishu_progress_card_uses_json_2_streaming_and_stable_elements() {
         PLAN_ELEMENT_ID,
         PROCESS_PANEL_ELEMENT_ID,
         PROCESS_LOG_ELEMENT_ID,
-        "agent_process_tool_1",
+        "ap_t_1",
         "已收到引导：rerun failed path",
     ] {
         assert!(
@@ -517,7 +551,7 @@ fn feishu_progress_card_uses_json_2_streaming_and_stable_elements() {
         "process content should show the latest thought: {process_content}"
     );
     let process_elements = process_element["elements"].as_array().unwrap();
-    assert_eq!(process_elements[1]["element_id"], "agent_process_tool_1");
+    assert_eq!(process_elements[1]["element_id"], "ap_t_1");
     assert_eq!(process_elements[1]["tag"], "collapsible_panel");
     assert_eq!(process_elements[1]["expanded"], false);
     assert!(process_elements[1]["header"]["title"]["content"]
@@ -561,6 +595,49 @@ fn progress_update_uuid_stays_short_and_avoids_card_id() {
     assert!(
         !update_uuid.contains(&long_card_id),
         "uuid must not include card_id"
+    );
+}
+
+fn collect_element_ids(value: &serde_json::Value, element_ids: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(element_id) = map.get("element_id").and_then(|value| value.as_str()) {
+                element_ids.push(element_id.to_string());
+            }
+            for child in map.values() {
+                collect_element_ids(child, element_ids);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_element_ids(item, element_ids);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn assert_feishu_element_id_is_valid(element_id: &str) {
+    assert!(
+        !element_id.is_empty(),
+        "element_id must not be empty: {element_id:?}"
+    );
+    assert!(
+        element_id.len() <= 20,
+        "element_id exceeds Feishu 20 character limit: {element_id}"
+    );
+    assert!(
+        element_id
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| byte.is_ascii_alphabetic()),
+        "element_id must start with an alphabetic character: {element_id}"
+    );
+    assert!(
+        element_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
+        "element_id can only contain alphabets, numbers, and underscores: {element_id}"
     );
 }
 

@@ -1861,7 +1861,11 @@ export default function AgentChatSection() {
               return changed ? next : prev;
             });
           }
-          if (event.eventType === "assistant_delta" && typeof event.content === "string") {
+          if (
+            event.eventType === "assistant_delta" &&
+            typeof event.content === "string" &&
+            runnerId === "bifrost_agent"
+          ) {
             appendAssistantDelta(event.content);
             return;
           }

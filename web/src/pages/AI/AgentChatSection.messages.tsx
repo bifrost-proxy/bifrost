@@ -111,6 +111,7 @@ export function AgentChatMessageList({
     const executionSteps = processSteps.filter((step) => step.type !== "compaction");
     const hasProcessSteps = processSteps.length > 0;
     const hasExecutionSteps = executionSteps.length > 0;
+    const hasThinkingSteps = executionSteps.some((step) => step.type === "thinking");
     const shouldShowGenerating = isRunningPlaceholder && running && !hasProcessSteps;
     const shouldShowContent =
       shouldShowGenerating ||
@@ -121,7 +122,11 @@ export function AgentChatMessageList({
         part.type === "image_url" && Boolean(part.image_url?.url),
     );
     const shouldShowProcessFallback =
-      !isUser && hasExecutionSteps && !shouldShowContent && !message.runnerCall;
+      !isUser &&
+      hasExecutionSteps &&
+      !hasThinkingSteps &&
+      !shouldShowContent &&
+      !message.runnerCall;
     const isCompactionOnlyStatus =
       !isUser &&
       compactionSteps.length > 0 &&

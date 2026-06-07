@@ -2066,13 +2066,15 @@ pub(super) fn record_external_cli_progress_event_to_timeline(
             let call_id = external_progress_call_id(adapter, event);
             let tool_name = external_progress_tool_name(event, adapter);
             let arguments = external_progress_tool_arguments(event);
-            if let Err(error) = recorder.record_tool_call_with_id(
-                session_key,
-                &tool_name,
-                &arguments,
-                Some(&call_id),
-            ) {
-                tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner tool started");
+            if !timeline_has_tool_call(recorder, session_key, &call_id) {
+                if let Err(error) = recorder.record_tool_call_with_id(
+                    session_key,
+                    &tool_name,
+                    &arguments,
+                    Some(&call_id),
+                ) {
+                    tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner tool started");
+                }
             }
         }
         EventType::ToolFinished => {
@@ -2135,7 +2137,13 @@ pub(super) fn record_external_cli_progress_event_to_timeline(
                 }
             }
         }
-        EventType::AssistantFinal => {}
+        EventType::AssistantFinal => {
+            if !event.content.trim().is_empty() {
+                if let Err(error) = recorder.record_assistant_delta(session_key, &event.content) {
+                    tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner assistant content");
+                }
+            }
+        }
     }
 }
 
@@ -2651,6 +2659,23 @@ mod tests {
             "traex",
             &crate::im_gateway::external_cli::ExternalCliProgressEvent {
                 event_type:
+                    crate::im_gateway::external_cli::ExternalCliProgressEventType::AssistantFinal,
+                content: "I will inspect the diff first.".to_string(),
+                title: Some("agent_message".to_string()),
+                raw: serde_json::json!({
+                    "type": "item.completed",
+                    "item": {"type": "agent_message"}
+                }),
+            },
+        );
+        record_external_cli_progress_event_to_timeline(
+            &mut recorder,
+            session_key,
+            "web",
+            "traex",
+            "traex",
+            &crate::im_gateway::external_cli::ExternalCliProgressEvent {
+                event_type:
                     crate::im_gateway::external_cli::ExternalCliProgressEventType::ToolFinished,
                 content: "pwd ok".to_string(),
                 title: Some("exec_command".to_string()),
@@ -2669,6 +2694,11 @@ mod tests {
             event.event_type == bifrost_agent::persistence::event_types::ASSISTANT_DELTA
                 && event.content.get("message").and_then(|v| v.as_str())
                     == Some("status: model rerouted")
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == bifrost_agent::persistence::event_types::ASSISTANT_DELTA
+                && event.content.get("message").and_then(|v| v.as_str())
+                    == Some("I will inspect the diff first.")
         }));
         assert!(events.iter().any(|event| {
             event.event_type == bifrost_agent::persistence::event_types::TOOL_CALL
@@ -2744,6 +2774,65 @@ mod tests {
                     .and_then(|v| v.as_str())
                     .is_some_and(|value| value.contains("/tmp/work"))
         }));
+    }
+
+    #[test]
+    fn external_runner_duplicate_tool_started_is_recorded_once() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
+        let session_key = "external-duplicate-tool-start";
+        let data_dir = bifrost_agent::config::agent_home_dir();
+        let mut recorder =
+            bifrost_agent::persistence::ConversationRecorder::new(&data_dir, session_key);
+        recorder
+            .record_session_start(
+                session_key,
+                serde_json::json!({"source": "admin-api", "adapter": "traex"}),
+            )
+            .expect("record start");
+
+        let event = crate::im_gateway::external_cli::ExternalCliProgressEvent {
+            event_type: crate::im_gateway::external_cli::ExternalCliProgressEventType::ToolStarted,
+            content: "git diff --stat".to_string(),
+            title: Some("exec_command".to_string()),
+            raw: serde_json::json!({
+                "type": "item.started",
+                "item": {
+                    "id": "item_duplicate",
+                    "type": "command_execution",
+                    "command": "git diff --stat"
+                },
+                "arguments": {"command": "git diff --stat"}
+            }),
+        };
+        record_external_cli_progress_event_to_timeline(
+            &mut recorder,
+            session_key,
+            "web",
+            "traex",
+            "traex",
+            &event,
+        );
+        record_external_cli_progress_event_to_timeline(
+            &mut recorder,
+            session_key,
+            "web",
+            "traex",
+            "traex",
+            &event,
+        );
+
+        let persisted = bifrost_agent::persistence::load_conversation_events(recorder.file_path())
+            .expect("load progress events");
+        let tool_call_count = persisted
+            .iter()
+            .filter(|event| {
+                event.event_type == bifrost_agent::persistence::event_types::TOOL_CALL
+                    && event.content.get("call_id").and_then(|v| v.as_str())
+                        == Some("item_duplicate")
+            })
+            .count();
+        assert_eq!(tool_call_count, 1);
     }
 
     #[test]

@@ -19,6 +19,7 @@ export type ProcessStep = {
   args?: string;
   /** Tool result string */
   result?: string;
+  callId?: string;
   status?: "running" | "success" | "failed";
   startedAt?: number;
   completedAt?: number;
@@ -1289,9 +1290,51 @@ export function normalizeExternalRunnerEvent(event: Record<string, unknown>) {
  */
 export function eventToProcessStep(event: Record<string, unknown>): ProcessStep | null {
   const eventType = typeof event.eventType === "string" ? event.eventType : "";
+  if (eventType === "status") {
+    const content = stringFrom(event.content);
+    if (!content || content === "turn started" || content === "turn completed") {
+      return null;
+    }
+    const title = stringFrom(event.title);
+    return {
+      type: "thinking",
+      summary: title ? `${title}: ${content}` : content,
+      status: "success",
+      startedAt: Date.now() / 1000,
+    };
+  }
+  if (eventType === "assistant_final" || eventType === "assistant_delta") {
+    const content = stringFrom(event.content);
+    if (!content) {
+      return null;
+    }
+    return {
+      type: "thinking",
+      summary: content,
+      status: "success",
+      startedAt: Date.now() / 1000,
+    };
+  }
   if (eventType === "tool_started") {
-    const name = stringFrom(event.toolName) || "tool";
-    const args = stringFrom(event.arguments);
+    const raw = isRecord(event.raw) ? event.raw : {};
+    const rawArguments = isRecord(raw.arguments) ? raw.arguments : undefined;
+    const rawItem = isRecord(raw.item) ? raw.item : undefined;
+    const argumentText = stringFrom(event.arguments);
+    const parsedArguments = argumentText ? parseJsonObject(argumentText) : null;
+    const name =
+      stringFrom(event.toolName) ||
+      stringFrom(event.title) ||
+      stringFrom(raw.tool_name) ||
+      "tool";
+    const command =
+      stringFrom(rawArguments?.command) ||
+      stringFrom(rawItem?.command) ||
+      stringFromUnknown(parsedArguments?.command) ||
+      stringFromUnknown(parsedArguments?.cmd) ||
+      stringFromUnknown(parsedArguments?.query) ||
+      argumentText ||
+      stringFrom(event.content);
+    const args = command ? JSON.stringify({ command }) : argumentText;
     // Extract a short target from arguments (e.g. file path)
     let target = "";
     if (args) {
@@ -1310,6 +1353,7 @@ export function eventToProcessStep(event: Record<string, unknown>): ProcessStep 
       summary: target ? `${name} → ${target}` : name,
       detail: args,
       args: args || undefined,
+      callId: stringFrom(raw.id) || stringFrom(rawItem?.id),
       status: "running",
       startedAt: Date.now() / 1000,
     };
@@ -1479,6 +1523,57 @@ function formatCompactDuration(seconds: number) {
   return `${secs}s`;
 }
 
+function formatProcessStepSummary(step: ProcessStep) {
+  if (step.type !== "tool") {
+    return step.summary;
+  }
+  const argumentSummary = summarizeToolArguments(step.args || step.detail);
+  if (!argumentSummary) {
+    return step.summary;
+  }
+  return `${step.summary}: ${argumentSummary}`;
+}
+
+function summarizeToolArguments(value?: string) {
+  if (!value) {
+    return "";
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "";
+  }
+  const parsed = parseJsonObject(trimmed);
+  const command =
+    stringFromUnknown(parsed?.command) ||
+    stringFromUnknown(parsed?.cmd) ||
+    stringFromUnknown(parsed?.args) ||
+    stringFromUnknown(parsed?.content);
+  return truncateInline(command || trimmed, 140);
+}
+
+function parseJsonObject(value: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function stringFromUnknown(value: unknown) {
+  return typeof value === "string" ? value : undefined;
+}
+
+function truncateInline(value: string, maxLength: number) {
+  const compact = value.replace(/\s+/g, " ").trim();
+  if (compact.length <= maxLength) {
+    return compact;
+  }
+  return `${compact.slice(0, Math.max(0, maxLength - 1))}…`;
+}
+
 /**
  * Collapsible "thinking process" block inside a message bubble.
  * Shows thinking steps interleaved with tool calls.
@@ -1491,7 +1586,7 @@ export function ProcessStepsBlock({
   running: boolean;
 }) {
   const { token } = theme.useToken();
-  const [expanded, setExpanded] = useState(() => !isRunning);
+  const [expanded, setExpanded] = useState(() => isRunning);
   const [expandedTools, setExpandedTools] = useState<Set<number>>(new Set());
   const [nowSeconds, setNowSeconds] = useState(() => Date.now() / 1000);
   const visibleSteps = isRunning
@@ -1506,10 +1601,17 @@ export function ProcessStepsBlock({
     if (!isRunning) {
       return;
     }
+    setExpanded(true);
     const timer = window.setInterval(() => {
       setNowSeconds(Date.now() / 1000);
     }, 1000);
     return () => window.clearInterval(timer);
+  }, [isRunning]);
+
+  useEffect(() => {
+    if (!isRunning) {
+      setExpanded(false);
+    }
   }, [isRunning]);
 
   if (visibleSteps.length === 0) return null;
@@ -1547,15 +1649,24 @@ export function ProcessStepsBlock({
         color: textColor,
       }}
     >
-      <div
+      <button
+        type="button"
+        aria-expanded={expanded}
+        aria-label={expanded ? "Collapse execution process" : "Expand execution process"}
         onClick={() => setExpanded(!expanded)}
         style={{
+          appearance: "none",
+          background: "transparent",
+          border: 0,
+          padding: 0,
           cursor: "pointer",
           display: "flex",
           alignItems: "center",
           gap: 6,
           userSelect: "none",
           width: "fit-content",
+          color: "inherit",
+          font: "inherit",
         }}
       >
         {isRunning ? (
@@ -1568,7 +1679,7 @@ export function ProcessStepsBlock({
         <Text type="secondary" style={{ fontSize: 12, color: textColor }}>
           {summaryText}
         </Text>
-      </div>
+      </button>
       {expanded && (
         <div style={{ marginTop: 6, paddingLeft: 18 }}>
           {visibleSteps.map((step, index) => {
@@ -1583,6 +1694,7 @@ export function ProcessStepsBlock({
             }
             // Tool or other step
             const isToolExpanded = expandedTools.has(index);
+            const stepSummary = formatProcessStepSummary(step);
             return (
               <div key={`${index}-${step.summary}`} style={{ marginBottom: 5 }}>
                 <div
@@ -1611,9 +1723,9 @@ export function ProcessStepsBlock({
                   <Text
                     type="secondary"
                     style={{ fontSize: 11, color: textColor }}
-                    ellipsis={{ tooltip: step.summary }}
+                    ellipsis={{ tooltip: stepSummary }}
                   >
-                    {step.summary}
+                    {stepSummary}
                   </Text>
                 </div>
                 {step.type === "tool" && isToolExpanded && (

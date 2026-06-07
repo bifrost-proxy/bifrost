@@ -57,9 +57,11 @@ Web Chat 和 IM event loop 使用 `record_external_cli_progress_event_to_timelin
 - `Status` 与 `AssistantDelta` 写入 assistant delta。
 - `ToolStarted` 写入 tool call。
 - `ToolFinished` 写入 tool call + tool result，优先使用 Trae 原始事件中的 call id、tool name、arguments。
-- `AssistantFinal` 不重复写入，最终回答仍由 run result 统一记录为 assistant message。
+- `AssistantFinal` 在 runner 仍运行时写入过程 timeline，作为 Trae/Codex 公开的模型 content 展示；底部最终回答仍由 run result/turn finish 统一记录为 assistant message。
 
-前端 `ProcessStepsBlock` 对已完成消息默认展开，turn group 只要包含过程步骤也默认展开。这样用户打开最终历史时可以直接看到过程信息，而不是只看到一条最终回答或折叠的 “Ran Xs”。
+前端 `ProcessStepsBlock` 运行中默认展开，完成后默认折叠。运行中按实时 conversation timeline 展示模型公开 content/status 与工具摘要；工具行默认只展示摘要，点击后展开输入/输出详情。工具摘要优先从 arguments 中提取命令片段，避免 Web Chat 只显示一串 `exec_command`。
+
+Web timeline 会按 `call_id` 合并工具 start/result，并跳过重复 start。后端在写 conversation timeline 时也会跳过同一 `call_id` 的重复 `ToolStarted`，避免 Trae/Codex 重复输出 `item.started` 时造成 WebView active command 计数虚高。
 
 ## 依赖项
 
@@ -81,11 +83,13 @@ Web Chat 和 IM event loop 使用 `record_external_cli_progress_event_to_timelin
 - `assistant_final_is_pipeline_content_until_turn_finished`：验证 Trae/Codex 公开 `agent_message` 在 runner 仍运行时进入 Pipeline 过程，不提前占用底部最终结论。
 - `timed_out_external_cli_result_reports_failure_reply`：验证 Trae 超时等非成功状态按失败收敛，不把早期 `agent_message` 当作成功结果。
 - `duplicate_running_tool_started_updates_existing_pipeline_item`：验证重复 `item.started` 不重复插入工具过程，且工具详情输出预览限长。
+- `external_runner_duplicate_tool_started_is_recorded_once`：验证后端 timeline 持久化不会重复写入同一 `call_id` 的工具 start。
+- `historyEventsToMessages deduplicates repeated external runner tool events by call id`：验证 Web timeline 按 `call_id` 合并重复 start 与 result，保留输入输出。
 
 ### E2E 测试
 
 - 使用临时 `BIFROST_DATA_DIR` 启动服务，配置 `traex` runner，调用 `/chat/stream`，断言 NDJSON 中包含 Trae progress event、最终 `run_finished`、run detail artifacts 和 timeline。
-- 使用 WebUI 真实浏览器打开 Agent Chat，发送 Trae runner 消息，断言运行中可见 process，完成后过程块默认展开且最终回答可见。
+- 使用 WebUI 真实浏览器打开 Agent Chat，发送 Trae runner 长任务消息，断言运行中过程块默认展开并持续更新，工具摘要展示命令片段；完成后过程块默认折叠且最终回答位于底部。
 
 ### 真实场景测试
 

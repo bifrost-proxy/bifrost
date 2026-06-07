@@ -653,6 +653,41 @@
 3. Pipeline 中持续展示模型公开 content 和工具摘要；工具详情默认折叠，展开后展示输入与输出预览，完整输出仍保存在 run artifacts。
 4. 大输出工具不会导致后续飞书卡片更新丢失，最终结论仍位于卡片底部。
 
+### TC-IEC-33: Trae Web Chat 长任务实时过程展示
+
+操作步骤：
+1. 启动当前分支的本地 Bifrost 服务，端口使用 `9900`，必须携带 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1` 与 `--no-system-proxy`。
+2. 确认 Web Chat 默认 runner 或当前会话 runner 为 `traex`，work_dir 指向当前分支 worktree。
+3. 在 WebUI Agent Chat 选择 Trae runner，发送一个较长 review 请求，例如：
+   ```text
+   对当前工作区当前分支 codex/traex-runner-streaming 做一次代码 review，仅 review，不做修改。请重点检查 Trae/external runner streaming、Web Chat/飞书进度卡片、默认 timeout、过程信息流式展示、工具调用摘要、最终结果位置、以及最近几个提交的回归风险。你需要真实读取 git diff、相关 Rust/TS 代码、E2E 和 human_tests 文档后再给结论。
+   ```
+4. 运行中观察 WebView 消息流与本地 session history 文件。
+5. 等待任务完成后刷新同一 history 页面，再观察最终布局。
+
+预期结果：
+1. 运行中 WebView 不只显示 `Running N commands` 汇总行；过程块默认展开，并能持续看到模型公开 content/status 与工具摘要。
+2. 工具摘要行展示 `exec_command: <命令片段>`，而不是只重复显示一串 `exec_command`。
+3. Trae/Codex 重复输出同一 `call_id` 的 `item.started` 时，WebView 不重复插入相同工具行，active commands 不会持续虚高。
+4. 单条工具详情默认折叠，点击工具行后可查看输入和输出；输出过长时只在 WebView 中展示预览，完整输出保留在 run artifacts。
+5. 完成后过程块默认折叠，最终 review 结论显示在该轮消息底部；用户仍可以手动展开过程块查看历史过程。
+
+### TC-IEC-34: Feishu progress card 过程元素 ID 合法性回归
+
+操作步骤：
+1. 使用当前分支运行 progress card 单元回归：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin feishu_progress_card_process_element_ids_stay_within_feishu_limits -- --nocapture
+   ```
+2. 构造包含 18 轮模型 content + 工具摘要的 progress card，确认卡片 JSON 中包含两位数工具元素 ID。
+3. 递归检查卡片中所有 `element_id`。
+4. 复查最近飞书真实运行日志中是否存在 `code=300301` / `elementID format error`。
+
+预期结果：
+1. 过程工具元素使用短 ID（如 `ap_t_35` / `ap_td_35`），不会再生成 `agent_process_tool_10` 或 `agent_process_tool_10_detail` 这类超过飞书限制的 ID。
+2. 所有 `element_id` 均以字母开头，只包含字母、数字和下划线，且长度不超过 20。
+3. 飞书 progress card 后续 patch 不会因为元素 ID 格式错误被拒绝，长任务中间过程可以持续刷新。
+
 ## 最近执行记录
 
 - 2026-05-13：执行 TC-IEC-01/02/03/04/08/09/10/11/12/13，临时服务端口 `18880`，`BIFROST_DATA_DIR=/tmp/bifrost-im-external-cli-test`，均通过；TC-IEC-12 使用 `sleep 23` 慢进程验证 active run 可停止，run 收敛为 `status:"stopped"`，`response:"External CLI run was stopped by request."`，且未残留 `sleep 23` 测试进程。
@@ -677,6 +712,8 @@
 - 2026-06-07：补充执行 TC-IEC-29/30 的飞书 progress card 过程折叠回归验证，命令 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin progress_card -- --nocapture` 通过 20 个测试，断言全局状态在顶部、执行 Pipeline 在中间、最终结论在底部；运行中 Pipeline 默认展开，完成后 Pipeline 默认折叠；Pipeline 内按 Loop 先展示模型输出，再展示工具摘要，单条工具详情默认折叠且展开后展示输入/输出。命令 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin codex_cli_parser_maps_reasoning_summary_to_assistant_delta -- --nocapture` 通过，确认公开 reasoning summary 进入过程 timeline。真实 Codex E2E `RUN_REAL_CODEX_E2E=1 BIFROST_CODEX_BIN=/opt/homebrew/bin/codex e2e-tests/tests/test_im_gateway_codex_runner_streaming.sh` 通过，run `1780814063688-a2641c31-d00d-4906-9f01-a19940194cef`；真实 Trae E2E `RUN_REAL_TRAEX_E2E=1 SKIP_BUILD=true BIFROST_TRAEX_BIN=/Users/eden/.local/bin/traex e2e-tests/tests/test_im_gateway_traex_runner_streaming.sh` 通过，run `1780814083507-7b776ac0-6448-43ce-8ca8-7b90406ce14a`。真实飞书发送待本地服务重启后由飞书链路人工触发验证。
 - 2026-06-07：执行 TC-IEC-31 的本地回归分析，真实飞书消息 `om_x100b6d659c70dd00b1ae9657765ca2a` 对应 Trae run `1780817198147-3a72a280-b4bc-44b0-9dfe-789f5f48d1c2`，`runtime_snapshot.json` 确认 executable 为 `/Users/eden/.local/bin/traex`、workDir 为 `/Users/eden/work/github/bifrost-traex-runner`；`normalized_events.jsonl` 有 59 条事件，包含多个 `agent_message`、`tool_started`、`tool_finished`，但 `result.json.status` 为 `timed_out`。补充回归测试 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin progress_card -- --nocapture` 通过 21 个测试，新增断言运行中的 `AssistantFinal/agent_message` 进入 Pipeline 且不提前写底部最终结论；`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin timed_out_external_cli_result_reports_failure_reply -- --nocapture` 通过，确认 `TimedOut` 生成失败文案而不是使用早期 agent message。
 - 2026-06-07：执行 TC-IEC-32 的问题复核，真实 Trae run `1780819082852-cfa6cdf8-b605-4ad0-a213-2bb778000d49` 有 55 条 normalized events（4 条 `assistant_final`、32 条 `tool_started`、16 条 `tool_finished`），说明 Trae 过程事件已经实时读到；问题在于配置仍带 180 秒超时以及卡片中重复 tool started 和超长输出详情导致中间更新不稳定。补充回归测试覆盖 Trae 默认无 timeout、重复 running tool 去重和工具详情输出预览限长；真实 Trae E2E `RUN_REAL_TRAEX_E2E=1 SKIP_BUILD=true BIFROST_TRAEX_BIN=/Users/eden/.local/bin/traex e2e-tests/tests/test_im_gateway_traex_runner_streaming.sh` 通过，run `1780821058530-058460b9-a487-4184-a01e-8eadeaf347f8`，并断言 `runtime_snapshot.timeoutSecs` 为空。
+- 2026-06-07：执行 TC-IEC-33 的真实 Web Chat 长任务验证，当前分支服务使用 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 cargo run --bin bifrost -- start -p 9900 -H 0.0.0.0 --allow-lan --daemon --unsafe-ssl --skip-cert-check --no-system-proxy` 启动，最终 PID `59573`，系统代理保持禁用；Web Chat 通过 `runnerId=traex`、`adapter=traex`、workDir `/Users/eden/work/github/bifrost-traex-runner` 触发真实 Trae review，session `admin-chat-webview-trae2-1780826332`，history `/Users/eden/.bifrost/agent/sessions/2026/06/07/session-admin-chat-webview-trae2-1780826332-1780826332.jsonl`。流式响应自然结束为 `status:"succeeded"`，过程中出现多段 `assistant_final/agent_message` 与 `tool_started/tool_finished`，WebView 运行中可看到 `I'll review the current branch...`、`Let me read the key files...`、`Now let me check...` 等公开 content 穿插在 `exec_command: <命令>` 工具摘要之间。完成后刷新 history 页面，过程块默认折叠且不再显示 `我先执行一步检查。`，摘要按钮显示 `Ran 22 commands · 6m 57s`；点击摘要后可展开看到 content -> tool 摘要的交叉过程，且最终 review 结论位于过程块下方。点击首条 `exec_command` 工具行后显示 `Input:` 与 `Output:` 预览，长输出保留 `展开更多` 控件。
+- 2026-06-07：执行 TC-IEC-34 的 Feishu progress card 卡住问题回归分析，真实飞书消息对应 Trae run `1780827766302-6a2c209c-84f6-4e64-b487-dcaaa8837361` 已成功完成，canonical history 包含大量 `assistant_delta`、`assistant_message`、`tool_call` 和 `tool_result`，但飞书日志出现 `code=300301` 与 `ElementID agent_process_tool_11_detail: Code 1002: elementID format error. Only alphabets, numbers, and underscores are allowed. It must start with an alphabet and not exceed 20 characters.`；确认根因是 progress card 第 10 条以后动态过程元素 ID 超过飞书 20 字符限制。修复后命令 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin progress_card -- --nocapture` 通过 23 个测试，新增用例覆盖 `ap_t_35` / `ap_td_35` 两位数工具 ID，并递归断言所有 `element_id` 符合飞书格式限制。
 
 ## 清理步骤
 

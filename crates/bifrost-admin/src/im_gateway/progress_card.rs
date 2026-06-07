@@ -26,6 +26,9 @@ const FOOTER_ELEMENT_ID: &str = "agent_footer";
 const THINKING_PANEL_ELEMENT_ID: &str = "agent_thinking_panel";
 const PROCESS_PANEL_ELEMENT_ID: &str = "agent_process_panel";
 const PROCESS_LOG_ELEMENT_ID: &str = "agent_process_log";
+const PROCESS_DYNAMIC_LOG_ELEMENT_PREFIX: &str = "ap_log";
+const PROCESS_TOOL_ELEMENT_PREFIX: &str = "ap_t";
+const PROCESS_TOOL_DETAIL_ELEMENT_PREFIX: &str = "ap_td";
 const PROCESS_TOOL_INPUT_PREVIEW_CHARS: usize = 300;
 const PROCESS_TOOL_OUTPUT_PREVIEW_CHARS: usize = 700;
 
@@ -1333,7 +1336,10 @@ fn flush_process_markdown(
     let element_id = if *markdown_element_count == 0 {
         PROCESS_LOG_ELEMENT_ID.to_string()
     } else {
-        format!("agent_process_log_{}", *markdown_element_count + 1)
+        process_dynamic_element_id(
+            PROCESS_DYNAMIC_LOG_ELEMENT_PREFIX,
+            *markdown_element_count + 1,
+        )
     };
     elements.push(build_process_markdown_element(
         element_id,
@@ -1358,7 +1364,7 @@ fn build_process_tool_detail_element(
 ) -> serde_json::Value {
     serde_json::json!({
         "tag": "collapsible_panel",
-        "element_id": format!("agent_process_tool_{index}"),
+        "element_id": process_dynamic_element_id(PROCESS_TOOL_ELEMENT_PREFIX, index),
         "expanded": false,
         "background_color": "grey",
         "header": {
@@ -1372,9 +1378,13 @@ fn build_process_tool_detail_element(
             "content": crate::im_gateway::markdown_converter::convert_to_feishu_markdown(
                 &item.detail
             ),
-            "element_id": format!("agent_process_tool_{index}_detail")
+            "element_id": process_dynamic_element_id(PROCESS_TOOL_DETAIL_ELEMENT_PREFIX, index)
         }]
     })
+}
+
+fn process_dynamic_element_id(prefix: &str, index: usize) -> String {
+    format!("{prefix}_{index}")
 }
 
 fn format_process_panel_title(snapshot: &ImAgentProgressSnapshot) -> String {
