@@ -497,12 +497,168 @@ mark.mark-current {
 
 .agent-chat-markdown img {
   display: block;
-  max-width: 100%;
-  max-height: min(90vh, 900px);
+  max-width: min(100%, 520px);
+  max-height: min(60vh, 420px);
   height: auto;
   margin: 12px auto 12px 0;
   border-radius: 8px;
   object-fit: contain;
+}
+
+.agent-chat-markdown img[data-agent-chat-image-id],
+img[data-agent-chat-image-id] {
+  cursor: zoom-in;
+}
+
+.agent-chat-markdown img[data-agent-chat-image-id] {
+  min-width: min(120px, 70vw);
+  min-height: 90px;
+  border: 1px solid var(--ant-color-border-secondary, #f0f0f0);
+  background: var(--ant-color-fill-quaternary, rgba(0, 0, 0, 0.02));
+}
+
+.agent-chat-image-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 48px;
+  background: rgba(0, 0, 0, 0.82);
+  backdrop-filter: blur(10px);
+  animation: agent-chat-lightbox-fade-in 180ms ease-out both;
+}
+
+.agent-chat-image-lightbox.is-closing {
+  animation: agent-chat-lightbox-fade-out 180ms ease-in both;
+}
+
+.agent-chat-image-lightbox-stage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: min(100%, 1280px);
+  height: min(100%, 900px);
+  animation: agent-chat-lightbox-scale-in 180ms ease-out both;
+}
+
+.agent-chat-image-lightbox.is-closing .agent-chat-image-lightbox-stage {
+  animation: agent-chat-lightbox-scale-out 180ms ease-in both;
+}
+
+.agent-chat-image-lightbox-img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 8px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+  user-select: none;
+}
+
+.agent-chat-image-lightbox-close {
+  position: fixed;
+  top: 24px;
+  right: 24px;
+  z-index: 3002;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.22);
+}
+
+.agent-chat-image-lightbox-nav {
+  position: fixed;
+  top: 50%;
+  z-index: 3002;
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.22);
+  transform: translateY(-50%);
+}
+
+.agent-chat-image-lightbox-prev {
+  left: 24px;
+}
+
+.agent-chat-image-lightbox-next {
+  right: 24px;
+}
+
+.agent-chat-image-lightbox-close:hover,
+.agent-chat-image-lightbox-close:focus,
+.agent-chat-image-lightbox-nav:hover,
+.agent-chat-image-lightbox-nav:focus {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.2);
+  border-color: rgba(255, 255, 255, 0.38);
+}
+
+.agent-chat-image-lightbox-count {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  z-index: 3002;
+  padding: 4px 10px;
+  border-radius: 999px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.42);
+  font-size: 12px;
+  line-height: 18px;
+  transform: translateX(-50%);
+}
+
+@keyframes agent-chat-lightbox-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes agent-chat-lightbox-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@keyframes agent-chat-lightbox-scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes agent-chat-lightbox-scale-out {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+
+@media (max-width: 720px) {
+  .agent-chat-image-lightbox {
+    padding: 56px 12px;
+  }
+
+  .agent-chat-image-lightbox-close {
+    top: 14px;
+    right: 14px;
+  }
+
+  .agent-chat-image-lightbox-prev {
+    left: 12px;
+  }
+
+  .agent-chat-image-lightbox-next {
+    right: 12px;
+  }
 }
 
 .agent-chat-markdown > img:first-child,

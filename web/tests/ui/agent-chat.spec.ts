@@ -3648,6 +3648,18 @@ test("AI Agent Chat uses detail runner metadata instead of source for selected r
 });
 
 test("AI Agent Chat renders local generated image attachments", async ({ page }) => {
+  await page.addInitScript(() => {
+    const originalScrollIntoView = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = function patchedScrollIntoView(this: Element) {
+      (window as Window & { __agentChatScrolledImageIds?: string[] }).__agentChatScrolledImageIds =
+        [
+          ...((window as Window & { __agentChatScrolledImageIds?: string[] })
+            .__agentChatScrolledImageIds || []),
+          this.getAttribute("data-agent-chat-image-id") || "",
+        ];
+      return originalScrollIntoView.call(this);
+    };
+  });
   await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
     await route.fulfill({
       status: 200,
@@ -3685,6 +3697,24 @@ test("AI Agent Chat renders local generated image attachments", async ({ page })
               content:
                 "![Generated sun](/Users/eden/.bifrost/agent/im_gateway/attachments/chatgpt_web/run/image.png)",
             },
+            {
+              role: "user",
+              content: "and inspect this attachment",
+              content_parts: [
+                { type: "text", text: "and inspect this attachment" },
+                {
+                  type: "image_url",
+                  image_url: {
+                    url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lZ0fWQAAAABJRU5ErkJggg==",
+                  },
+                },
+              ],
+            },
+            {
+              role: "assistant",
+              content:
+                "![Generated moon](/Users/eden/.bifrost/agent/im_gateway/attachments/chatgpt_web/run/moon.png)",
+            },
           ],
         }),
       });
@@ -3698,6 +3728,19 @@ test("AI Agent Chat renders local generated image attachments", async ({ page })
         contentType: "image/png",
         body: Buffer.from(
           "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lZ0fWQAAAABJRU5ErkJggg==",
+          "base64",
+        ),
+      });
+    },
+  );
+  await page.route(
+    "**/_bifrost/api/im-gateway/attachments/chatgpt_web/run/moon.png",
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "image/png",
+        body: Buffer.from(
+          "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR42mP8z8BQz0AEYBxVSFIBAC03A/0fR0gCAAAAAElFTkSuQmCC",
           "base64",
         ),
       });
@@ -3717,6 +3760,51 @@ test("AI Agent Chat renders local generated image attachments", async ({ page })
   await expect
     .poll(async () => image.evaluate((element) => (element as HTMLImageElement).naturalWidth))
     .toBe(1);
+
+  await expect(page.getByTestId("agent-chat-previewable-image")).toHaveCount(3);
+  await image.click();
+  await expect(page.getByTestId("agent-chat-image-lightbox")).toBeVisible();
+  await expect(page.getByTestId("agent-chat-image-lightbox-count")).toHaveText("1 / 3");
+  await expect(page.getByTestId("agent-chat-image-lightbox-img")).toHaveAttribute(
+    "src",
+    /\/_bifrost\/api\/im-gateway\/attachments\/chatgpt_web\/run\/image\.png$/,
+  );
+
+  await page.getByTestId("agent-chat-image-lightbox-next").click();
+  await expect(page.getByTestId("agent-chat-image-lightbox-count")).toHaveText("2 / 3");
+  await expect(page.getByTestId("agent-chat-image-lightbox-img")).toHaveAttribute(
+    "src",
+    /^data:image\/png;base64,/,
+  );
+
+  await page.keyboard.press("ArrowRight");
+  await expect(page.getByTestId("agent-chat-image-lightbox-count")).toHaveText("3 / 3");
+  await expect(page.getByTestId("agent-chat-image-lightbox-img")).toHaveAttribute(
+    "src",
+    /\/_bifrost\/api\/im-gateway\/attachments\/chatgpt_web\/run\/moon\.png$/,
+  );
+
+  await page.keyboard.press("ArrowLeft");
+  await expect(page.getByTestId("agent-chat-image-lightbox-count")).toHaveText("2 / 3");
+  await page.getByTestId("agent-chat-image-lightbox").click({ position: { x: 12, y: 12 } });
+  await expect(page.getByTestId("agent-chat-image-lightbox")).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as Window & { __agentChatScrolledImageIds?: string[] })
+            .__agentChatScrolledImageIds || [],
+      ),
+    )
+    .toContain("session-image-attachment-session-2-part-0");
+
+  await page.getByTestId("theme-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await image.scrollIntoViewIfNeeded();
+  await image.click();
+  await expect(page.getByTestId("agent-chat-image-lightbox")).toBeVisible();
+  await page.getByTestId("agent-chat-image-lightbox-close").click();
+  await expect(page.getByTestId("agent-chat-image-lightbox")).toHaveCount(0);
 });
 
 test("AI Agent Chat thread context menu deletes after inline confirmation", async ({

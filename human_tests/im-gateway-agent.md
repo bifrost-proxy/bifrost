@@ -2654,3 +2654,27 @@ rm -rf ./.bifrost-test
 - **清理步骤**:
   - 删除临时数据目录；停止 mock Feishu 服务。
 - **执行记录（2026-06-06）**: PASS — 创建用例后立即执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin drain_ready_events_after_turn_preserves_late_message_as_guide --lib`，真实构造 IM event channel、Feishu owner 文本事件、progress card mock 和 queue manager，验证 turn-end ready event 被 drain 到 guide，随后合并入 queue 并可作为下一轮消息 pop 出。
+
+### TC-IMA-142: Agent Chat 对话图片全屏预览与连续切换
+
+- **前置条件**:
+  - 使用当前源码启动 WebUI，或使用 Playwright mock Agent Chat session。
+  - 会话中至少包含 3 张图片：assistant Markdown 图片、user `content_parts.image_url` 图片、后续 assistant Markdown 图片。
+  - 测试需覆盖亮色和暗色主题，不复用用户重要历史。
+- **操作步骤**:
+  1. 打开 `/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=<image-session>&view=active`。
+  2. 点击第一张 assistant Markdown 图片缩略图。
+  3. 在全屏预览浮层中点击右侧箭头，切换到下一张图片。
+  4. 按键盘 `ArrowRight` 切换到第三张图片，再按 `ArrowLeft` 返回第二张图片。
+  5. 点击图片区外的空白遮罩关闭浮层。
+  6. 切换到暗色主题，再次点击图片打开浮层，并点击右上角关闭按钮关闭。
+- **预期结果**:
+  - 点击对话内图片后出现全屏浮层，图片居中放大展示，右上角有关闭按钮。
+  - 浮层打开和关闭有 opacity/scale 过渡动画。
+  - 左右箭头按钮和键盘方向键都能按整个对话记录中的图片顺序切换，不按单轮对话分组。
+  - 点击非图片空白区或关闭按钮均可关闭浮层。
+  - 关闭后页面自动滚动回当前预览图片所在位置。
+  - 亮色和暗色主题下缩略图、遮罩、关闭按钮、左右箭头都清晰可见。
+- **清理步骤**:
+  - 删除 Playwright 临时 test-results；如手动启动过 Bifrost，停止对应临时数据目录服务。
+- **执行记录（2026-06-08）**: PASS — 创建用例后立即执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts -g "renders local generated image attachments" --reporter=line` 通过。用例构造包含 assistant Markdown 图片、user `content_parts.image_url` 图片、后续 assistant Markdown 图片的会话，验证点击图片打开全屏浮层，右箭头、`ArrowRight`、`ArrowLeft` 按整个会话图片顺序切换，点击遮罩关闭并触发 `scrollIntoView` 回到当前图片；随后切换暗色主题，再次打开并通过右上角关闭按钮关闭。

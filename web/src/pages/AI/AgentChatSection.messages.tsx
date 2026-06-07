@@ -1,11 +1,13 @@
-import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import {
+  CloseOutlined,
   CompressOutlined,
   DownOutlined,
+  LeftOutlined,
   LoadingOutlined,
   RightOutlined,
 } from "@ant-design/icons";
-import { Space, Typography } from "antd";
+import { Button, Space, Typography } from "antd";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -19,6 +21,7 @@ import { RunnerCallChip } from "./AgentChatSection.runnerCall";
 
 const { Text, Paragraph } = Typography;
 const PROCESS_ONLY_FALLBACK = "我先执行一步检查。";
+const IMAGE_PREVIEW_CLOSE_MS = 180;
 
 type MessageItem = {
   message: ChatMessage;
@@ -34,6 +37,12 @@ type MessageGroup =
       assistants: MessageItem[];
       completed: boolean;
     };
+
+type PreviewImage = {
+  id: string;
+  src: string;
+  alt: string;
+};
 
 function isVisibleMessage(message: ChatMessage, running: boolean) {
   if (message.runnerCall) {
@@ -85,6 +94,8 @@ export function AgentChatMessageList({
     colorFillQuaternary: string;
   };
 }) {
+  const [previewImageId, setPreviewImageId] = useState<string | null>(null);
+  const [previewClosing, setPreviewClosing] = useState(false);
   const lastAssistantIndex = messages.reduce(
     (lastIndex, message, index) =>
       message.role === "assistant" && isVisibleMessage(message, running)
@@ -96,6 +107,71 @@ export function AgentChatMessageList({
     messages[lastAssistantIndex],
   );
   const groups = buildMessageGroups(messages, running);
+  const previewImages = useMemo(() => collectPreviewImages(messages, running), [messages, running]);
+  const activePreviewIndex = previewImageId
+    ? previewImages.findIndex((image) => image.id === previewImageId)
+    : -1;
+  const activePreviewImage =
+    activePreviewIndex >= 0 ? previewImages[activePreviewIndex] : undefined;
+  const previewCount = previewImages.length;
+
+  const scrollPreviewImageIntoView = useCallback((imageId: string | null) => {
+    if (!imageId) {
+      return;
+    }
+    const image = Array.from(
+      document.querySelectorAll<HTMLElement>("[data-agent-chat-image-id]"),
+    ).find((element) => element.getAttribute("data-agent-chat-image-id") === imageId);
+    image?.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
+  }, []);
+
+  const openPreviewImage = useCallback((imageId: string) => {
+    setPreviewClosing(false);
+    setPreviewImageId(imageId);
+  }, []);
+
+  const closePreviewImage = useCallback(() => {
+    if (!previewImageId || previewClosing) {
+      return;
+    }
+    const closingImageId = previewImageId;
+    setPreviewClosing(true);
+    window.setTimeout(() => {
+      setPreviewImageId((current) => (current === closingImageId ? null : current));
+      setPreviewClosing(false);
+      scrollPreviewImageIntoView(closingImageId);
+    }, IMAGE_PREVIEW_CLOSE_MS);
+  }, [previewClosing, previewImageId, scrollPreviewImageIntoView]);
+
+  const switchPreviewImage = useCallback((direction: -1 | 1) => {
+    if (activePreviewIndex < 0 || previewCount <= 1) {
+      return;
+    }
+    const nextIndex = (activePreviewIndex + direction + previewCount) % previewCount;
+    setPreviewClosing(false);
+    setPreviewImageId(previewImages[nextIndex]?.id || null);
+  }, [activePreviewIndex, previewCount, previewImages]);
+
+  useEffect(() => {
+    if (!previewImageId) {
+      return;
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closePreviewImage();
+      } else if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        switchPreviewImage(-1);
+      } else if (event.key === "ArrowRight") {
+        event.preventDefault();
+        switchPreviewImage(1);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [closePreviewImage, previewImageId, switchPreviewImage]);
+
   const renderMessage = (
     message: ChatMessage,
     index: number,
@@ -204,7 +280,18 @@ export function AgentChatMessageList({
                       Generating...
                     </Text>
                   ) : (
-                    <div className="agent-chat-markdown">
+                    <div
+                      className="agent-chat-markdown"
+                      onClick={(event) => {
+                        const image = (event.target as HTMLElement).closest(
+                          "img[data-agent-chat-image-id]",
+                        );
+                        const imageId = image?.getAttribute("data-agent-chat-image-id");
+                        if (imageId) {
+                          openPreviewImage(imageId);
+                        }
+                      }}
+                    >
                       <Markdown
                         remarkPlugins={[remarkGfm]}
                         components={{
@@ -213,12 +300,32 @@ export function AgentChatMessageList({
                               {children}
                             </a>
                           ),
-                          img: ({ src, alt }) => (
-                            <img
-                              src={resolveAgentMarkdownImageSrc(src)}
-                              alt={alt || ""}
-                            />
-                          ),
+                          img: ({ src, alt }) => {
+                            const imageId = previewMarkdownImageIdFor(
+                              message.id,
+                              resolveAgentMarkdownImageSrc(src),
+                              alt || "",
+                            );
+                            return (
+                              <img
+                                src={resolveAgentMarkdownImageSrc(src)}
+                                alt={alt || ""}
+                                tabIndex={0}
+                                data-testid="agent-chat-previewable-image"
+                                data-agent-chat-image-id={imageId}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  openPreviewImage(imageId);
+                                }}
+                                onKeyDown={(event) => {
+                                  if (event.key === "Enter" || event.key === " ") {
+                                    event.preventDefault();
+                                    openPreviewImage(imageId);
+                                  }
+                                }}
+                              />
+                            );
+                          },
                         }}
                       >
                         {message.content}
@@ -234,7 +341,19 @@ export function AgentChatMessageList({
                       key={`${message.id}-image-${imageIndex}`}
                       src={resolveAgentMarkdownImageSrc(part.image_url?.url)}
                       alt={`Attached image ${imageIndex + 1}`}
+                      tabIndex={0}
+                      data-testid="agent-chat-previewable-image"
+                      data-agent-chat-image-id={previewImageIdFor(message.id, "part", imageIndex)}
                       style={styles.messageImageThumb}
+                      onClick={() =>
+                        openPreviewImage(previewImageIdFor(message.id, "part", imageIndex))
+                      }
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          openPreviewImage(previewImageIdFor(message.id, "part", imageIndex));
+                        }
+                      }}
                     />
                   ))}
                 </div>
@@ -297,28 +416,150 @@ export function AgentChatMessageList({
     );
   };
   return (
-    <Space direction="vertical" size={12} style={{ width: "100%", minWidth: 0 }}>
-      {groups.map((group) =>
-        group.type === "single" ? (
-          renderMessage(group.item.message, group.item.index)
-        ) : group.completed ? (
-          <CompletedTurnGroup
-            key={group.key}
-            group={group}
-            renderMessage={renderMessage}
-            token={token}
+    <>
+      <Space direction="vertical" size={12} style={{ width: "100%", minWidth: 0 }}>
+        {groups.map((group) =>
+          group.type === "single" ? (
+            renderMessage(group.item.message, group.item.index)
+          ) : group.completed ? (
+            <CompletedTurnGroup
+              key={group.key}
+              group={group}
+              renderMessage={renderMessage}
+              token={token}
+            />
+          ) : (
+            <RunningTurnGroup
+              key={group.key}
+              group={group}
+              renderMessage={renderMessage}
+              token={token}
+            />
+          ),
+        )}
+      </Space>
+      {activePreviewImage ? (
+        <div
+          className={`agent-chat-image-lightbox${previewClosing ? " is-closing" : ""}`}
+          data-testid="agent-chat-image-lightbox"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Image preview"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              closePreviewImage();
+            }
+          }}
+        >
+          <Button
+            shape="circle"
+            aria-label="Close image preview"
+            data-testid="agent-chat-image-lightbox-close"
+            icon={<CloseOutlined />}
+            className="agent-chat-image-lightbox-close"
+            onClick={closePreviewImage}
           />
-        ) : (
-          <RunningTurnGroup
-            key={group.key}
-            group={group}
-            renderMessage={renderMessage}
-            token={token}
-          />
-        ),
-      )}
-    </Space>
+          {previewCount > 1 ? (
+            <Button
+              shape="circle"
+              aria-label="Previous image"
+              data-testid="agent-chat-image-lightbox-prev"
+              icon={<LeftOutlined />}
+              className="agent-chat-image-lightbox-nav agent-chat-image-lightbox-prev"
+              onClick={() => switchPreviewImage(-1)}
+            />
+          ) : null}
+          <div className="agent-chat-image-lightbox-stage">
+            <img
+              key={activePreviewImage.id}
+              src={activePreviewImage.src}
+              alt={activePreviewImage.alt}
+              data-testid="agent-chat-image-lightbox-img"
+              className="agent-chat-image-lightbox-img"
+            />
+          </div>
+          {previewCount > 1 ? (
+            <Button
+              shape="circle"
+              aria-label="Next image"
+              data-testid="agent-chat-image-lightbox-next"
+              icon={<RightOutlined />}
+              className="agent-chat-image-lightbox-nav agent-chat-image-lightbox-next"
+              onClick={() => switchPreviewImage(1)}
+            />
+          ) : null}
+          {previewCount > 1 ? (
+            <div
+              className="agent-chat-image-lightbox-count"
+              data-testid="agent-chat-image-lightbox-count"
+            >
+              {activePreviewIndex + 1} / {previewCount}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </>
   );
+}
+
+function previewImageIdFor(messageId: string, source: "markdown" | "part", index: number) {
+  return `${messageId}-${source}-${index}`;
+}
+
+function previewMarkdownImageIdFor(messageId: string, src: string | undefined, alt: string) {
+  return `${messageId}-markdown-${hashPreviewImageKey(`${src || ""}\u0000${alt}`)}`;
+}
+
+function hashPreviewImageKey(value: string) {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
+  }
+  return hash.toString(36);
+}
+
+function collectPreviewImages(messages: ChatMessage[], running: boolean): PreviewImage[] {
+  return messages.flatMap((message) => {
+    if (!isVisibleMessage(message, running)) {
+      return [];
+    }
+    const markdownImages = extractMarkdownImages(message.content).map((image) => ({
+      id: previewMarkdownImageIdFor(
+        message.id,
+        resolveAgentMarkdownImageSrc(image.src),
+        image.alt,
+      ),
+      src: resolveAgentMarkdownImageSrc(image.src),
+      alt: image.alt,
+    }));
+    const partImages = (message.contentParts || [])
+      .filter(
+        (part): part is Extract<typeof part, { type: "image_url" }> =>
+          part.type === "image_url" && Boolean(part.image_url?.url),
+      )
+      .map((part, index) => ({
+        id: previewImageIdFor(message.id, "part", index),
+        src: resolveAgentMarkdownImageSrc(part.image_url?.url),
+        alt: `Attached image ${index + 1}`,
+      }));
+    return [...markdownImages, ...partImages];
+  });
+}
+
+function extractMarkdownImages(content: string) {
+  const images: Array<{ alt: string; src: string }> = [];
+  const imagePattern = /!\[([^\]]*)\]\((<[^>]+>|[^)\s]+)(?:\s+["'][^"']*["'])?\)/g;
+  let match: RegExpExecArray | null;
+  while ((match = imagePattern.exec(content)) !== null) {
+    const rawSrc = match[2] || "";
+    const src = rawSrc.startsWith("<") && rawSrc.endsWith(">")
+      ? rawSrc.slice(1, -1)
+      : rawSrc;
+    if (src) {
+      images.push({ alt: match[1] || "", src });
+    }
+  }
+  return images;
 }
 
 function buildMessageGroups(messages: ChatMessage[], running: boolean): MessageGroup[] {

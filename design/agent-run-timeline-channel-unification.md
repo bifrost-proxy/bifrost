@@ -182,6 +182,18 @@ process block 自身也必须显示工具执行耗时：`Ran 1 command · 4m 33s
 - 消息区离开底部时，在 composer 正上方居中显示圆形滚动到底部按钮；按钮用 opacity + transform 淡入淡出，点击后复用现有直接滚到底部逻辑，不额外持久化任何 UI-only 滚动状态。
 - `New Chat` 是创建新的独立 session，不属于当前 running turn 的输入或 stop 控制；即使当前选中的线程处于 `Running`，按钮也必须可用。后端 active worker 和 busy 保护按 `session_key` 隔离，只有同一个 session 的并发输入需要进入 guide/queue 或 busy 分支。
 
+### 对话图片全屏预览
+
+Agent Chat 消息中的 Markdown 图片和多模态 `content_parts` 图片统一注册为当前会话图片序列。序列按消息渲染顺序从上到下收集，不按 turn 分组，因此用户可以在全屏浮窗中从某一次输出的图片连续切到前后对话中的图片。
+
+点击任意图片打开全屏浮窗：
+
+- 浮窗覆盖整个视口，右上角提供关闭按钮，点击图片区以外的遮罩也关闭。
+- 打开和关闭使用 opacity + scale 过渡动画；关闭动画结束后再卸载浮窗。
+- 图片数大于 1 时显示左右箭头和当前位置计数；按钮与键盘 `ArrowLeft` / `ArrowRight` 都按序切换，`Escape` 关闭。
+- 关闭时按当前预览图片的稳定 image id 查找消息区内原图并 `scrollIntoView({ block: "center" })`，让用户回到刚查看的位置。
+- 该能力只改变展示层，不修改 JSONL、消息内容或图片附件路径。
+
 测试方案：
 
 - 单元/组件：覆盖 completed turn 默认只显示最终输出和 `已处理` 摘要，展开后恢复 process block 与中间 delta。
@@ -189,6 +201,7 @@ process block 自身也必须显示工具执行耗时：`Ran 1 command · 4m 33s
 - E2E 额外覆盖 640px 视口，断言消息区没有横向溢出且 message track 与滚动区之间保留左右 padding。
 - E2E 覆盖消息区离开底部时滚动按钮淡入、位置居中在 composer 上方、点击后滚到底部并淡出。
 - E2E 覆盖选中 running 线程时 `New Chat` 仍可点击并创建新 session。
+- E2E 覆盖 Markdown 图片和 `content_parts` 图片点击后打开全屏浮窗、左右按钮和键盘切换、点击遮罩关闭、关闭后滚回图片位置。
 - human_tests：在 `human_tests/agent-session-persistence.md` 增加完成态折叠回归，按真实 WebUI 或 Playwright mock 逐条执行。
 - Review/Fix/Test：两轮复核折叠默认态、展开态、运行态、暗色主题、历史深链与现有 process block 交互。
 
