@@ -116,6 +116,32 @@ fn assistant_final_is_pipeline_content_until_turn_finished() {
 }
 
 #[test]
+fn duplicate_running_tool_started_updates_existing_pipeline_item() {
+    let mut snapshot = ImAgentProgressSnapshot::new("s1", "review task");
+    snapshot.apply_event(AgentTurnProgressEvent::ToolStarted {
+        tool_name: "exec_command".to_string(),
+        arguments: "git diff --stat".to_string(),
+    });
+    snapshot.apply_event(AgentTurnProgressEvent::ToolStarted {
+        tool_name: "exec_command".to_string(),
+        arguments: "git diff --stat".to_string(),
+    });
+    snapshot.apply_event(AgentTurnProgressEvent::ToolFinished {
+        log: ToolCallLog {
+            tool_name: "exec_command".to_string(),
+            arguments: "git diff --stat".to_string(),
+            result: "large output".repeat(200),
+            success: true,
+        },
+        duration_ms: 42,
+    });
+
+    assert_eq!(snapshot.timeline.len(), 1);
+    assert!(snapshot.timeline[0].completed);
+    assert!(snapshot.timeline[0].detail.len() < 1200);
+}
+
+#[test]
 fn feishu_progress_card_expands_process_while_running_and_collapses_after_finish() {
     let mut snapshot = ImAgentProgressSnapshot::new("s1", "stream task");
     snapshot.apply_event(AgentTurnProgressEvent::AssistantDelta {

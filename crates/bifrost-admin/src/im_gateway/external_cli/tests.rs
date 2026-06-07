@@ -358,6 +358,7 @@ fn traex_adapter_builds_exec_command_with_prompt_stdin() {
     let spec = build_command_spec(&request, Path::new("/tmp/last.md")).unwrap();
 
     assert_eq!(spec.executable, "traex");
+    assert_eq!(spec.timeout_secs, None);
     assert!(has_arg_pair(&spec.args, "--cd", "/tmp/work"));
     assert!(spec.args.contains(&"exec".to_string()));
     assert!(spec.args.contains(&"--json".to_string()));

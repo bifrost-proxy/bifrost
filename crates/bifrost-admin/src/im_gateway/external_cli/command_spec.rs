@@ -10,7 +10,7 @@ pub(super) fn build_command_spec(
             args: vec![request.operation.clone()],
             env: BTreeMap::new(),
             work_dir: None,
-            timeout_secs: request.adapter_config.timeout_secs.unwrap_or(7200),
+            timeout_secs: request.adapter_config.timeout_secs.or(Some(7200)),
         });
     }
     let config = &request.adapter_config;
@@ -90,7 +90,7 @@ pub(super) fn build_command_spec(
         args,
         env: config.env.clone(),
         work_dir: request.work_dir.clone(),
-        timeout_secs: config.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS),
+        timeout_secs: config.timeout_secs,
     })
 }
 

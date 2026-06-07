@@ -26,6 +26,8 @@ const FOOTER_ELEMENT_ID: &str = "agent_footer";
 const THINKING_PANEL_ELEMENT_ID: &str = "agent_thinking_panel";
 const PROCESS_PANEL_ELEMENT_ID: &str = "agent_process_panel";
 const PROCESS_LOG_ELEMENT_ID: &str = "agent_process_log";
+const PROCESS_TOOL_INPUT_PREVIEW_CHARS: usize = 300;
+const PROCESS_TOOL_OUTPUT_PREVIEW_CHARS: usize = 700;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImProgressCardCapability {
@@ -116,7 +118,8 @@ impl ImAgentProgressSnapshot {
                     result_preview: None,
                     duration_ms: None,
                 });
-                self.push_timeline(ProgressTimelineItem::tool_started(tool_name, arguments));
+                let summary = format!("正在运行 `{}`", truncate_one_line(&tool_name, 32));
+                self.upsert_running_timeline_tool(tool_name, arguments, summary);
             }
             AgentTurnProgressEvent::ToolFinished { log, duration_ms } => {
                 self.latest_tool = Some(ProgressToolSummary {
@@ -218,12 +221,11 @@ impl ImAgentProgressSnapshot {
     }
 
     fn finish_timeline_tool(&mut self, log: &ToolCallLog, duration_ms: u64) {
-        if let Some(item) = self
-            .timeline
-            .iter_mut()
-            .rev()
-            .find(|item| item.kind == ProgressTimelineKind::Tool && !item.completed)
-        {
+        if let Some(item) = self.timeline.iter_mut().rev().find(|item| {
+            item.kind == ProgressTimelineKind::Tool
+                && !item.completed
+                && timeline_tool_matches(item, log)
+        }) {
             item.title = log.tool_name.clone();
             item.summary = format_tool_timeline_summary(log, duration_ms);
             item.detail = format_tool_timeline_detail(&log.arguments, &log.result, duration_ms);
@@ -235,16 +237,16 @@ impl ImAgentProgressSnapshot {
     }
 
     fn upsert_running_timeline_tool(&mut self, title: String, arguments: String, summary: String) {
-        if let Some(item) = self
-            .timeline
-            .iter_mut()
-            .rev()
-            .find(|item| item.kind == ProgressTimelineKind::Tool && !item.completed)
-        {
+        if let Some(item) = self.timeline.iter_mut().rev().find(|item| {
+            item.kind == ProgressTimelineKind::Tool
+                && !item.completed
+                && item.title == title
+                && item.detail == format_tool_input_preview(&arguments)
+        }) {
             item.title = title;
             item.summary = summary;
             if item.detail.trim().is_empty() {
-                item.detail = format!("输入：`{}`", truncate_str(&arguments, 300));
+                item.detail = format_tool_input_preview(&arguments);
             }
             return;
         }
@@ -372,7 +374,7 @@ impl ProgressTimelineItem {
             kind: ProgressTimelineKind::Tool,
             title: tool_name,
             summary,
-            detail: format!("输入：`{}`", truncate_str(&arguments, 300)),
+            detail: format_tool_input_preview(&arguments),
             completed: false,
             success: None,
         }
@@ -1487,10 +1489,23 @@ fn format_tool_timeline_summary(log: &ToolCallLog, duration_ms: u64) -> String {
     summary
 }
 
+fn timeline_tool_matches(item: &ProgressTimelineItem, log: &ToolCallLog) -> bool {
+    item.title == log.tool_name
+        && (log.arguments.trim().is_empty()
+            || item.detail == format_tool_input_preview(&log.arguments))
+}
+
+fn format_tool_input_preview(arguments: &str) -> String {
+    format!(
+        "输入：`{}`",
+        truncate_str(arguments, PROCESS_TOOL_INPUT_PREVIEW_CHARS)
+    )
+}
+
 fn format_tool_timeline_detail(arguments: &str, result: &str, duration_ms: u64) -> String {
     let mut detail = String::new();
     if !arguments.trim().is_empty() {
-        detail.push_str(&format!("输入：`{}`", truncate_str(arguments, 600)));
+        detail.push_str(&format_tool_input_preview(arguments));
     }
     if duration_ms > 0 {
         if !detail.is_empty() {
@@ -1503,7 +1518,7 @@ fn format_tool_timeline_detail(arguments: &str, result: &str, duration_ms: u64) 
             detail.push_str("\n\n");
         }
         detail.push_str("输出：\n```text\n");
-        detail.push_str(&truncate_str(result, 1800));
+        detail.push_str(&truncate_str(result, PROCESS_TOOL_OUTPUT_PREVIEW_CHARS));
         detail.push_str("\n```");
     }
     if detail.is_empty() {

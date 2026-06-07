@@ -100,7 +100,6 @@ payload = {
                 "executable": traex_bin,
                 "sandbox": "read-only",
                 "skipGitRepoCheck": True,
-                "timeoutSecs": 180,
                 "permissionMode": "default",
             },
             "injectBifrostTools": False,
@@ -192,6 +191,7 @@ with urllib.request.urlopen(
 
 snapshot = detail.get("snapshot") or {}
 assert snapshot.get("adapter") == "traex", detail
+assert snapshot.get("timeoutSecs") in (None, 0), snapshot
 args = snapshot.get("args") or []
 joined = " ".join(args)
 assert "--permission-mode default" not in joined, args

@@ -513,7 +513,7 @@
    ```bash
    curl -sS -X PATCH http://127.0.0.1:18890/_bifrost/api/im-gateway/chat/config \
      -H 'content-type: application/json' \
-     -d '{"version":1,"defaultRunnerId":"traex","runners":{"traex":{"enabled":true,"adapter":"traex","adapterConfig":{"executable":"/Users/eden/.local/bin/traex","sandbox":"read-only","skipGitRepoCheck":true,"timeoutSecs":180},"injectBifrostTools":false,"skillPaths":[],"deliveryMode":"progress_card"}},"channels":{}}'
+     -d '{"version":1,"defaultRunnerId":"traex","runners":{"traex":{"enabled":true,"adapter":"traex","adapterConfig":{"executable":"/Users/eden/.local/bin/traex","sandbox":"read-only","skipGitRepoCheck":true},"injectBifrostTools":false,"skillPaths":[],"deliveryMode":"progress_card"}},"channels":{}}'
    ```
 3. 打开 `http://127.0.0.1:18890/_bifrost/ai?aiSection=agent-chat&agentSection=chat&view=active`。
 4. 选择或确认当前 Runner 为 `traex`，发送 `Reply exactly BIFROST_TRAEX_WEB_UI_STREAM_OK`。
@@ -639,6 +639,20 @@
 4. 若 run 超时，卡片状态为失败，最终结论明确显示 `Runner failed: external CLI timed out...`，不能显示为已完成，也不能把早期 `agent_message` 当作成功结果。
 5. `result.json.status` 为 `timed_out` 时，session 状态和 IM progress card 都按失败路径处理。
 
+### TC-IEC-32: Trae 长任务默认无超时且过程卡片稳定刷新
+
+操作步骤：
+1. 将 `traex` runner 的 `adapterConfig.timeoutSecs` 清空或省略，并确认 `feishu-main` channel override 为 `runnerId=traex`、`deliveryMode=progress_card`。
+2. 从飞书发送一个需要多轮 review 和多次工具调用的请求。
+3. 观察运行中的 progress card Pipeline 区域。
+4. 检查对应 run 的 `runtime_snapshot.json` 和 `normalized_events.jsonl`。
+
+预期结果：
+1. `runtime_snapshot.json` 中不再出现 180 秒默认超时；未显式配置 timeout 时，Bifrost 不主动按固定秒数杀掉外部 runner。
+2. Trae 重复输出同一条 `command_execution item.started` 时，Pipeline 不重复插入相同的运行中工具行。
+3. Pipeline 中持续展示模型公开 content 和工具摘要；工具详情默认折叠，展开后展示输入与输出预览，完整输出仍保存在 run artifacts。
+4. 大输出工具不会导致后续飞书卡片更新丢失，最终结论仍位于卡片底部。
+
 ## 最近执行记录
 
 - 2026-05-13：执行 TC-IEC-01/02/03/04/08/09/10/11/12/13，临时服务端口 `18880`，`BIFROST_DATA_DIR=/tmp/bifrost-im-external-cli-test`，均通过；TC-IEC-12 使用 `sleep 23` 慢进程验证 active run 可停止，run 收敛为 `status:"stopped"`，`response:"External CLI run was stopped by request."`，且未残留 `sleep 23` 测试进程。
@@ -662,6 +676,7 @@
 - 2026-06-07：补充执行 TC-IEC-29 的飞书 progress card 状态/model 回归验证，命令 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin progress_card --lib -- --nocapture` 通过 18 个测试，新增断言外部 runner 卡片展示 `Runner: codex`、`Adapter: codex`、模型标签、外部会话、队列/引导、工作路径和最新工具，且不展示 `Loop`、`Context`、`Token`、`压缩`、`N/A` 等内置 Agent 空指标；命令 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin codex_ --lib -- --nocapture` 通过 14 个测试，确认 Codex run metadata 写入显式模型或默认模型标签；真实 Codex E2E `RUN_REAL_CODEX_E2E=1 BIFROST_CODEX_BIN=/opt/homebrew/bin/codex e2e-tests/tests/test_im_gateway_codex_runner_streaming.sh` 通过，run `1780809274058-4e032b02-5d7b-4793-9f15-5eee8d80d695`。
 - 2026-06-07：补充执行 TC-IEC-29/30 的飞书 progress card 过程折叠回归验证，命令 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin progress_card -- --nocapture` 通过 20 个测试，断言全局状态在顶部、执行 Pipeline 在中间、最终结论在底部；运行中 Pipeline 默认展开，完成后 Pipeline 默认折叠；Pipeline 内按 Loop 先展示模型输出，再展示工具摘要，单条工具详情默认折叠且展开后展示输入/输出。命令 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin codex_cli_parser_maps_reasoning_summary_to_assistant_delta -- --nocapture` 通过，确认公开 reasoning summary 进入过程 timeline。真实 Codex E2E `RUN_REAL_CODEX_E2E=1 BIFROST_CODEX_BIN=/opt/homebrew/bin/codex e2e-tests/tests/test_im_gateway_codex_runner_streaming.sh` 通过，run `1780814063688-a2641c31-d00d-4906-9f01-a19940194cef`；真实 Trae E2E `RUN_REAL_TRAEX_E2E=1 SKIP_BUILD=true BIFROST_TRAEX_BIN=/Users/eden/.local/bin/traex e2e-tests/tests/test_im_gateway_traex_runner_streaming.sh` 通过，run `1780814083507-7b776ac0-6448-43ce-8ca8-7b90406ce14a`。真实飞书发送待本地服务重启后由飞书链路人工触发验证。
 - 2026-06-07：执行 TC-IEC-31 的本地回归分析，真实飞书消息 `om_x100b6d659c70dd00b1ae9657765ca2a` 对应 Trae run `1780817198147-3a72a280-b4bc-44b0-9dfe-789f5f48d1c2`，`runtime_snapshot.json` 确认 executable 为 `/Users/eden/.local/bin/traex`、workDir 为 `/Users/eden/work/github/bifrost-traex-runner`；`normalized_events.jsonl` 有 59 条事件，包含多个 `agent_message`、`tool_started`、`tool_finished`，但 `result.json.status` 为 `timed_out`。补充回归测试 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin progress_card -- --nocapture` 通过 21 个测试，新增断言运行中的 `AssistantFinal/agent_message` 进入 Pipeline 且不提前写底部最终结论；`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin timed_out_external_cli_result_reports_failure_reply -- --nocapture` 通过，确认 `TimedOut` 生成失败文案而不是使用早期 agent message。
+- 2026-06-07：执行 TC-IEC-32 的问题复核，真实 Trae run `1780819082852-cfa6cdf8-b605-4ad0-a213-2bb778000d49` 有 55 条 normalized events（4 条 `assistant_final`、32 条 `tool_started`、16 条 `tool_finished`），说明 Trae 过程事件已经实时读到；问题在于配置仍带 180 秒超时以及卡片中重复 tool started 和超长输出详情导致中间更新不稳定。补充回归测试覆盖 Trae 默认无 timeout、重复 running tool 去重和工具详情输出预览限长；真实 Trae E2E `RUN_REAL_TRAEX_E2E=1 SKIP_BUILD=true BIFROST_TRAEX_BIN=/Users/eden/.local/bin/traex e2e-tests/tests/test_im_gateway_traex_runner_streaming.sh` 通过，run `1780821058530-058460b9-a487-4184-a01e-8eadeaf347f8`，并断言 `runtime_snapshot.timeoutSecs` 为空。
 
 ## 清理步骤
 

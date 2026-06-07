@@ -16,7 +16,6 @@ use tokio::time::timeout;
 const DEFAULT_RUNTIME: &str = "external_cli";
 const DEFAULT_ADAPTER: &str = "codex";
 pub const TRAEX_ADAPTER: &str = "traex";
-const DEFAULT_TIMEOUT_SECS: u64 = 900;
 const CONFIG_FILENAME: &str = "im_gateway_external_cli_agent.json";
 const CONFIG_VERSION: u32 = 1;
 const MAX_EXTERNAL_RUNNER_IMAGES_PER_MESSAGE: usize = 6;
@@ -627,7 +626,7 @@ struct CommandSnapshot {
     runtime: String,
     adapter: String,
     params: serde_json::Value,
-    timeout_secs: u64,
+    timeout_secs: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -636,7 +635,7 @@ struct CommandSpec {
     args: Vec<String>,
     env: BTreeMap<String, String>,
     work_dir: Option<PathBuf>,
-    timeout_secs: u64,
+    timeout_secs: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -1642,7 +1641,13 @@ async fn run_command(
     let stdout_task = tokio::spawn(read_stdout_events(stdout, progress_tx));
     let stderr_task = tokio::spawn(read_stderr_lines(stderr));
 
-    match timeout(Duration::from_secs(spec.timeout_secs), child.wait()).await {
+    let wait_result = if let Some(timeout_secs) = spec.timeout_secs {
+        timeout(Duration::from_secs(timeout_secs), child.wait()).await
+    } else {
+        Ok(child.wait().await)
+    };
+
+    match wait_result {
         Ok(Ok(exit_status)) => {
             let (stdout, events) = stdout_task
                 .await
@@ -1687,7 +1692,7 @@ async fn run_command(
             stderr.extend_from_slice(
                 format!(
                     "external cli timed out after {} seconds\n",
-                    spec.timeout_secs
+                    spec.timeout_secs.unwrap_or_default()
                 )
                 .as_bytes(),
             );
@@ -2028,12 +2033,7 @@ pub fn external_progress_to_agent_turn_event(
             Some(bifrost_agent::AgentTurnProgressEvent::ToolFinished {
                 log: bifrost_agent::ToolCallLog {
                     tool_name: event_title_or_default(event, "runner"),
-                    arguments: event
-                        .raw
-                        .get("arguments")
-                        .or_else(|| event.raw.get("args"))
-                        .map(serde_json::Value::to_string)
-                        .unwrap_or_default(),
+                    arguments: external_progress_arguments_text(event),
                     result: event.content.clone(),
                     success: event
                         .raw
@@ -2060,6 +2060,35 @@ pub fn external_progress_to_agent_turn_event(
             })
         }
     }
+}
+
+fn external_progress_arguments_text(event: &ExternalCliProgressEvent) -> String {
+    event
+        .raw
+        .get("arguments")
+        .and_then(|value| {
+            value
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| value.as_str())
+        })
+        .or_else(|| event.raw.get("args").and_then(serde_json::Value::as_str))
+        .or_else(|| {
+            event
+                .raw
+                .get("item")
+                .and_then(|item| item.get("command"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .or_else(|| {
+            event
+                .raw
+                .get("item")
+                .and_then(|item| item.get("arguments"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .map(str::to_string)
+        .unwrap_or_default()
 }
 
 fn event_title_or_default(event: &ExternalCliProgressEvent, default: &str) -> String {

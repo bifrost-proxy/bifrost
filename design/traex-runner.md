@@ -24,6 +24,8 @@ Bifrost 的 Agent Runner 已经把 Codex、ChatGPT Web、custom CLI 收敛到同
 - 不把外层 `traex` wrapper 调用作为用户可见工具步骤写进 timeline；用户应该看到 Trae 自己输出的状态、工具和最终回答。
 - 不伪造 Trae 没有输出的细粒度工具事件。若 Trae 本次 JSONL 只提供状态和最终消息，Bifrost 只展示真实状态和最终消息；若 Trae 输出 tool started/finished，Bifrost 再展示工具步骤。
 - 不向 Trae exec 传递不支持的 `--permission-mode default`。配置为空或 `default` 时必须省略该参数，让 Trae 使用自身 headless 默认值。
+- 未显式配置 `timeoutSecs` 时，不对 Trae/external runner 设置固定超时；长任务由用户显式 `/stop` 或 runner 自然结束控制。
+- 飞书 progress card 展示工具输入/输出预览，完整 stdout/stderr 与 normalized events 保存在 run artifacts；重复的 running tool start 事件必须去重，避免卡片体过大导致中间刷新丢失。
 - 不影响飞书 IM progress card 的最终收敛和普通 final reply 投递策略。
 
 ### 必须真实验证
@@ -69,7 +71,7 @@ Web Chat 和 IM event loop 使用 `record_external_cli_progress_event_to_timelin
 
 ### 单元测试
 
-- `traex_adapter_builds_exec_command_with_prompt_stdin`：验证默认 Trae exec 命令和参数顺序。
+- `traex_adapter_builds_exec_command_with_prompt_stdin`：验证默认 Trae exec 命令、参数顺序和不设置固定 timeout。
 - `traex_adapter_builds_resume_command_from_thread_id`：验证 threadId 续接命令。
 - `traex_adapter_omits_default_permission_mode_for_exec`：验证空/default permission mode 不传给 Trae。
 - `traex_cli_parser_maps_real_jsonl_events`：验证 Trae JSONL 事件可归一化。
@@ -78,6 +80,7 @@ Web Chat 和 IM event loop 使用 `record_external_cli_progress_event_to_timelin
 - `external_runner_progress_events_are_recorded_as_visible_timeline_steps`：验证 status/tool 事件写入可见 timeline。
 - `assistant_final_is_pipeline_content_until_turn_finished`：验证 Trae/Codex 公开 `agent_message` 在 runner 仍运行时进入 Pipeline 过程，不提前占用底部最终结论。
 - `timed_out_external_cli_result_reports_failure_reply`：验证 Trae 超时等非成功状态按失败收敛，不把早期 `agent_message` 当作成功结果。
+- `duplicate_running_tool_started_updates_existing_pipeline_item`：验证重复 `item.started` 不重复插入工具过程，且工具详情输出预览限长。
 
 ### E2E 测试
 
