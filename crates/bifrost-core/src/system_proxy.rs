@@ -1,13 +1,21 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::time::Instant;
+#[cfg(target_os = "macos")]
+use std::{
+    fs::{File, OpenOptions},
+    os::fd::AsRawFd,
+};
 use sysproxy::Sysproxy;
 
 use crate::{BifrostError, Result};
 
 const DEFAULT_BYPASS: &str = "localhost,127.0.0.1,::1,*.local";
 const BACKUP_FILE_NAME: &str = "proxy_backup.json";
+const RUNTIME_FILE_NAME: &str = "runtime.json";
 const STATE_FILE_NAME: &str = "proxy_state.json";
+#[cfg(target_os = "macos")]
+const LOCK_FILE_NAME: &str = ".system_proxy.lock";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProxyBackup {
@@ -34,6 +42,171 @@ pub enum SystemProxyDisableOutcome {
 struct ManagedProxyState {
     original: ProxyBackup,
     target: ProxyBackup,
+    #[serde(default = "managed_proxy_state_applied_default")]
+    applied: bool,
+}
+
+fn managed_proxy_state_applied_default() -> bool {
+    true
+}
+
+#[cfg(target_os = "macos")]
+struct SystemProxyFileLock {
+    file: File,
+    context: &'static str,
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for SystemProxyFileLock {
+    fn drop(&mut self) {
+        if unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) } != 0 {
+            tracing::warn!(
+                context = self.context,
+                error = %std::io::Error::last_os_error(),
+                "failed to release system proxy cross-process file lock"
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn acquire_system_proxy_file_lock(
+    data_dir: &Path,
+    context: &'static str,
+) -> Result<SystemProxyFileLock> {
+    std::fs::create_dir_all(data_dir)?;
+    let lock_path = data_dir.join(LOCK_FILE_NAME);
+    let file = match open_system_proxy_lock_file(data_dir, true) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            repair_system_proxy_lock_permissions_with_gui_auth(data_dir)?;
+            open_system_proxy_lock_file(data_dir, true)?
+        }
+        Err(error) => return Err(error.into()),
+    };
+    tracing::info!(
+        data_dir = %data_dir.display(),
+        lock_path = %lock_path.display(),
+        context,
+        "waiting for system proxy cross-process file lock"
+    );
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    tracing::info!(
+        data_dir = %data_dir.display(),
+        lock_path = %lock_path.display(),
+        context,
+        "acquired system proxy cross-process file lock"
+    );
+    Ok(SystemProxyFileLock { file, context })
+}
+
+#[cfg(target_os = "macos")]
+fn open_system_proxy_lock_file(data_dir: &Path, create: bool) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let lock_path = data_dir.join(LOCK_FILE_NAME);
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    if create {
+        options.create(true).mode(0o666);
+    }
+    let file = options.open(&lock_path)?;
+    relax_lock_file_mode_if_needed(&file, &lock_path)?;
+    Ok(file)
+}
+
+#[cfg(target_os = "macos")]
+pub fn repair_system_proxy_lock_permissions(data_dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(data_dir)?;
+    let _ = open_system_proxy_lock_file(data_dir, true)?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn repair_system_proxy_lock_permissions(_data_dir: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn relax_lock_file_mode_if_needed(file: &File, lock_path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() {
+        return Err(std::io::Error::other(format!(
+            "Refusing to use non-regular system proxy lock file: {}",
+            lock_path.display()
+        )));
+    }
+    if metadata.nlink() != 1 {
+        return Err(std::io::Error::other(format!(
+            "Refusing to use hard-linked system proxy lock file: {}",
+            lock_path.display()
+        )));
+    }
+
+    let current_mode = metadata.permissions().mode() & 0o777;
+    if current_mode != 0o666 {
+        let result = unsafe { libc::fchmod(file.as_raw_fd(), 0o666) };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        tracing::info!(
+            target: "bifrost_core::system_proxy",
+            lock_path = %lock_path.display(),
+            previous_mode = format!("{:o}", current_mode),
+            "relaxed system proxy lock file permissions to 0666"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn repair_system_proxy_lock_permissions_with_gui_auth(data_dir: &Path) -> Result<()> {
+    let program = std::env::current_exe().map_err(|error| {
+        BifrostError::Config(format!("Failed to resolve current executable: {error}"))
+    })?;
+    let shell_command = format!(
+        "{} system-proxy repair-lock --data-dir {}",
+        shell_quote_path(&program),
+        shell_quote_path(data_dir)
+    );
+    let script = format!(
+        r#"do shell script "{}" with administrator privileges with prompt "{}""#,
+        escape_apple_script(&shell_command),
+        escape_apple_script("Bifrost needs to repair the system proxy cleanup lock file.")
+    );
+    let output = std::process::Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .map_err(|error| BifrostError::Config(format!("Failed to execute osascript: {error}")))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(BifrostError::Config(format!(
+            "RequiresAdmin: failed to repair system proxy lock permissions: {} {}",
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn shell_quote_path(path: &Path) -> String {
+    let value = path.to_string_lossy();
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(target_os = "macos")]
+fn escape_apple_script(input: &str) -> String {
+    input.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 impl From<&Sysproxy> for ProxyBackup {
@@ -83,6 +256,9 @@ impl SystemProxyManager {
                 "System proxy is not supported on this platform".to_string(),
             ));
         }
+        #[cfg(target_os = "macos")]
+        let _system_proxy_file_lock = acquire_system_proxy_file_lock(&self.data_dir, "enable")?;
+
         tracing::info!(
             requested_host = %host,
             requested_port = port,
@@ -189,6 +365,7 @@ impl SystemProxyManager {
                 port,
                 bypass: bypass_str.to_string(),
             },
+            false,
         )?;
         #[cfg(target_os = "macos")]
         {
@@ -199,6 +376,12 @@ impl SystemProxyManager {
                 "Applying Bifrost system proxy to all macOS network services"
             );
             set_macos_all_services_proxy(host, port, bypass_str)?;
+            if let Err(error) = self.mark_managed_state_applied() {
+                tracing::warn!(
+                    error = %error,
+                    "failed to mark macOS system proxy state applied after enabling"
+                );
+            }
         }
 
         #[cfg(not(target_os = "macos"))]
@@ -213,6 +396,7 @@ impl SystemProxyManager {
             proxy
                 .set_system_proxy()
                 .map_err(|e| BifrostError::Config(format!("Failed to set system proxy: {}", e)))?;
+            self.mark_managed_state_applied()?;
         }
 
         self.is_set = true;
@@ -239,6 +423,17 @@ impl SystemProxyManager {
     }
 
     pub fn force_disable(&mut self) -> Result<()> {
+        if !Self::is_supported() {
+            return Ok(());
+        }
+        #[cfg(target_os = "macos")]
+        let _system_proxy_file_lock =
+            acquire_system_proxy_file_lock(&self.data_dir, "force_disable")?;
+
+        self.force_disable_without_file_lock()
+    }
+
+    fn force_disable_without_file_lock(&mut self) -> Result<()> {
         if !Self::is_supported() {
             return Ok(());
         }
@@ -278,6 +473,9 @@ impl SystemProxyManager {
         if !Self::is_supported() {
             return Ok(SystemProxyDisableOutcome::NotEnabled);
         }
+        #[cfg(target_os = "macos")]
+        let _system_proxy_file_lock =
+            acquire_system_proxy_file_lock(&self.data_dir, "disable_if_matches")?;
 
         let current = Self::get_current()?;
 
@@ -355,6 +553,14 @@ impl SystemProxyManager {
         managed_target_listener_is_alive(&state.target)
     }
 
+    pub fn last_runtime_target_has_live_listener(data_dir: &std::path::Path) -> bool {
+        let Some(target) = load_last_runtime_proxy_target(data_dir) else {
+            return false;
+        };
+
+        managed_target_listener_is_alive(&target)
+    }
+
     pub fn restore(&mut self) -> Result<()> {
         if !Self::is_supported() {
             return Ok(());
@@ -368,6 +574,8 @@ impl SystemProxyManager {
         if !self.is_set {
             return Self::recover_from_crash(&self.data_dir);
         }
+        #[cfg(target_os = "macos")]
+        let _system_proxy_file_lock = acquire_system_proxy_file_lock(&self.data_dir, "restore")?;
 
         #[cfg(target_os = "macos")]
         let managed_target = self.load_managed_state().ok().map(|state| state.target);
@@ -712,11 +920,21 @@ impl SystemProxyManager {
         Ok(())
     }
 
-    fn save_managed_state(&self, original: &Sysproxy, target: &Sysproxy) -> Result<()> {
+    fn save_managed_state(
+        &self,
+        original: &Sysproxy,
+        target: &Sysproxy,
+        applied: bool,
+    ) -> Result<()> {
         let state = ManagedProxyState {
             original: ProxyBackup::from(original),
             target: ProxyBackup::from(target),
+            applied,
         };
+        self.write_managed_state(&state)
+    }
+
+    fn write_managed_state(&self, state: &ManagedProxyState) -> Result<()> {
         let content = serde_json::to_string_pretty(&state)
             .map_err(|e| BifrostError::Config(format!("Failed to serialize proxy state: {}", e)))?;
 
@@ -726,6 +944,15 @@ impl SystemProxyManager {
 
         std::fs::write(self.state_file_path(), content)?;
         Ok(())
+    }
+
+    fn mark_managed_state_applied(&self) -> Result<()> {
+        let mut state = self.load_managed_state()?;
+        if state.applied {
+            return Ok(());
+        }
+        state.applied = true;
+        self.write_managed_state(&state)
     }
 
     fn load_backup(&self) -> Result<Sysproxy> {
@@ -769,7 +996,7 @@ impl SystemProxyManager {
         if let Some(original) = original {
             self.apply_proxy_backup_for_target(&original, managed_target.as_ref())?;
         } else {
-            self.force_disable()?;
+            self.force_disable_without_file_lock()?;
             return Ok(());
         }
 
@@ -822,6 +1049,10 @@ impl SystemProxyManager {
         if !Self::is_supported() {
             return Ok(());
         }
+        #[cfg(target_os = "macos")]
+        let _system_proxy_file_lock =
+            acquire_system_proxy_file_lock(data_dir, "recover_from_crash")?;
+
         tracing::info!(
             data_dir = %data_dir.display(),
             "System proxy crash recovery check starting"
@@ -885,6 +1116,13 @@ impl SystemProxyManager {
                         "System proxy no longer points to Bifrost; preserving external proxy during crash recovery"
                     );
                 }
+                CrashRecoveryDecision::DiscardPendingApply => {
+                    tracing::info!(
+                        target_host = %state.target.host,
+                        target_port = state.target.port,
+                        "Pending system proxy state was never applied; removing stale state without changing current proxy"
+                    );
+                }
             }
             manager.remove_state_files();
             return Ok(());
@@ -892,6 +1130,60 @@ impl SystemProxyManager {
 
         let backup_path = data_dir.join(BACKUP_FILE_NAME);
         if !backup_path.exists() {
+            if let Some(runtime_target) = load_last_runtime_proxy_target(data_dir) {
+                let current = Self::get_current()?;
+                let current_matches_runtime = {
+                    #[cfg(target_os = "macos")]
+                    {
+                        match macos_any_service_proxy_matches(
+                            &runtime_target.host,
+                            runtime_target.port,
+                        ) {
+                            Ok(matches) => matches,
+                            Err(error) => {
+                                tracing::warn!(
+                                    error = %error,
+                                    target_host = %runtime_target.host,
+                                    target_port = runtime_target.port,
+                                    "Failed to inspect macOS network services for last runtime target during crash recovery"
+                                );
+                                current_proxy_matches_target(&current, &runtime_target)
+                            }
+                        }
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        current_proxy_matches_target(&current, &runtime_target)
+                    }
+                };
+
+                if current_matches_runtime {
+                    let disabled = ProxyBackup {
+                        enable: false,
+                        host: String::new(),
+                        port: 0,
+                        bypass: String::new(),
+                    };
+                    tracing::info!(
+                        target_host = %runtime_target.host,
+                        target_port = runtime_target.port,
+                        "No managed proxy state found, but current system proxy matches last Bifrost runtime target; disabling stale Bifrost proxy"
+                    );
+                    manager.apply_proxy_backup_for_target(&disabled, Some(&runtime_target))?;
+                    manager.remove_state_files();
+                    tracing::info!("Recovered stale Bifrost system proxy from last runtime target");
+                    return Ok(());
+                }
+
+                tracing::info!(
+                    current_enabled = current.enable,
+                    current_host = %current.host,
+                    current_port = current.port,
+                    target_host = %runtime_target.host,
+                    target_port = runtime_target.port,
+                    "No managed proxy state found and current system proxy does not match last Bifrost runtime target"
+                );
+            }
             tracing::info!(
                 data_dir = %data_dir.display(),
                 "System proxy crash recovery check completed without managed state"
@@ -923,20 +1215,60 @@ impl SystemProxyManager {
 enum CrashRecoveryDecision {
     RestoreOriginal,
     PreserveExternal,
+    DiscardPendingApply,
 }
 
 fn decide_managed_state_recovery(
     current: &ProxyBackup,
     state: &ManagedProxyState,
 ) -> CrashRecoveryDecision {
-    if current.target_matches(&state.target.host, state.target.port) {
+    if !state.applied && !current_proxy_matches_target(current, &state.target) {
+        return CrashRecoveryDecision::DiscardPendingApply;
+    }
+
+    if current_proxy_matches_target(current, &state.target) {
         CrashRecoveryDecision::RestoreOriginal
     } else {
         CrashRecoveryDecision::PreserveExternal
     }
 }
 
+fn current_proxy_matches_target(current: &ProxyBackup, target: &ProxyBackup) -> bool {
+    current.target_matches(&target.host, target.port)
+}
+
+fn load_last_runtime_proxy_target(data_dir: &Path) -> Option<ProxyBackup> {
+    let content = std::fs::read_to_string(data_dir.join(RUNTIME_FILE_NAME)).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let port = value
+        .get("port")
+        .and_then(|port| port.as_u64())
+        .filter(|port| *port > 0 && *port <= u16::MAX as u64)
+        .map(|port| port as u16)?;
+    let host = value
+        .get("host")
+        .and_then(|host| host.as_str())
+        .map(runtime_host_to_system_proxy_host)
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+
+    Some(ProxyBackup {
+        enable: true,
+        host,
+        port,
+        bypass: String::new(),
+    })
+}
+
+fn runtime_host_to_system_proxy_host(host: &str) -> String {
+    match normalize_proxy_host(host).as_str() {
+        "" | "0.0.0.0" | "::" => "127.0.0.1".to_string(),
+        normalized => normalized.to_string(),
+    }
+}
+
 fn managed_target_listener_is_alive(target: &ProxyBackup) -> bool {
+    use std::net::ToSocketAddrs;
+
     if !target.enable || target.port == 0 {
         return false;
     }
@@ -944,20 +1276,26 @@ fn managed_target_listener_is_alive(target: &ProxyBackup) -> bool {
         "" | "0.0.0.0" | "::" => "127.0.0.1".to_string(),
         host => host.to_string(),
     };
-    let address = format!("{host}:{}", target.port);
-    let Ok(socket_addr) = address.parse() else {
+    let Ok(socket_addrs) = (host.as_str(), target.port).to_socket_addrs() else {
         return false;
     };
+    let socket_addrs = socket_addrs.collect::<Vec<_>>();
+    if socket_addrs.is_empty() {
+        return false;
+    }
     let timeout = std::time::Duration::from_millis(750);
     for attempt in 1..=3 {
-        if std::net::TcpStream::connect_timeout(&socket_addr, timeout).is_ok() {
-            tracing::info!(
-                target_host = %target.host,
-                target_port = target.port,
-                attempt,
-                "Managed system proxy target still has a live listener"
-            );
-            return true;
+        for socket_addr in &socket_addrs {
+            if std::net::TcpStream::connect_timeout(socket_addr, timeout).is_ok() {
+                tracing::info!(
+                    target_host = %target.host,
+                    target_port = target.port,
+                    resolved_addr = %socket_addr,
+                    attempt,
+                    "Managed system proxy target still has a live listener"
+                );
+                return true;
+            }
         }
         std::thread::sleep(std::time::Duration::from_millis(150));
     }
@@ -1021,6 +1359,11 @@ fn list_macos_services() -> Result<Vec<String>> {
             continue;
         }
         services.push(l.to_string());
+    }
+    if services.is_empty() {
+        return Err(BifrostError::Config(
+            "No enabled macOS network services were returned by networksetup".to_string(),
+        ));
     }
     Ok(services)
 }
@@ -1487,6 +1830,10 @@ impl SystemProxyManager {
         port: u16,
         bypass: Option<&str>,
     ) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        let _system_proxy_file_lock =
+            acquire_system_proxy_file_lock(&self.data_dir, "enable_with_privilege")?;
+
         let bypass_str = bypass.unwrap_or(DEFAULT_BYPASS);
         let current = Sysproxy::get_system_proxy().unwrap_or_else(|e| {
             tracing::warn!("Failed to get current system proxy, using default: {}", e);
@@ -1507,8 +1854,15 @@ impl SystemProxyManager {
                 port,
                 bypass: bypass_str.to_string(),
             },
+            false,
         )?;
         set_macos_all_services_proxy_with_sudo(host, port, bypass_str)?;
+        if let Err(error) = self.mark_managed_state_applied() {
+            tracing::warn!(
+                error = %error,
+                "failed to mark macOS system proxy state applied after privileged enable"
+            );
+        }
         self.is_set = true;
         Ok(())
     }
@@ -1526,6 +1880,10 @@ impl SystemProxyManager {
         expected_host: &str,
         expected_port: u16,
     ) -> Result<SystemProxyDisableOutcome> {
+        #[cfg(target_os = "macos")]
+        let _system_proxy_file_lock =
+            acquire_system_proxy_file_lock(&self.data_dir, "disable_if_matches_with_privilege")?;
+
         let current = Self::get_current()?;
         if !current.enable {
             self.remove_state_files();
@@ -1572,12 +1930,20 @@ impl SystemProxyManager {
     }
 
     pub fn disable_with_privilege(&mut self) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        let _system_proxy_file_lock =
+            acquire_system_proxy_file_lock(&self.data_dir, "disable_with_privilege")?;
+
         disable_macos_all_services_proxy_with_sudo()?;
         self.is_set = false;
         Ok(())
     }
 
     pub fn restore_with_privilege(&mut self) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        let _system_proxy_file_lock =
+            acquire_system_proxy_file_lock(&self.data_dir, "restore_with_privilege")?;
+
         let original = self
             .original_proxy
             .take()
@@ -1608,6 +1974,10 @@ impl SystemProxyManager {
         port: u16,
         bypass: Option<&str>,
     ) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        let _system_proxy_file_lock =
+            acquire_system_proxy_file_lock(&self.data_dir, "enable_with_gui_auth")?;
+
         let bypass_str = bypass.unwrap_or(DEFAULT_BYPASS);
         let current = Sysproxy::get_system_proxy().unwrap_or_else(|e| {
             tracing::warn!("Failed to get current system proxy, using default: {}", e);
@@ -1628,8 +1998,15 @@ impl SystemProxyManager {
                 port,
                 bypass: bypass_str.to_string(),
             },
+            false,
         )?;
         set_macos_all_services_proxy_with_gui_auth(host, port, bypass_str)?;
+        if let Err(error) = self.mark_managed_state_applied() {
+            tracing::warn!(
+                error = %error,
+                "failed to mark macOS system proxy state applied after GUI-auth enable"
+            );
+        }
         self.is_set = true;
         tracing::info!(
             "System proxy enabled with GUI auth: {}:{} (bypass: {})",
@@ -1641,6 +2018,10 @@ impl SystemProxyManager {
     }
 
     pub fn disable_with_gui_auth(&mut self) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        let _system_proxy_file_lock =
+            acquire_system_proxy_file_lock(&self.data_dir, "disable_with_gui_auth")?;
+
         disable_macos_all_services_proxy_with_gui_auth()?;
         self.is_set = false;
         self.remove_backup();
@@ -1653,6 +2034,10 @@ impl SystemProxyManager {
         expected_host: &str,
         expected_port: u16,
     ) -> Result<SystemProxyDisableOutcome> {
+        #[cfg(target_os = "macos")]
+        let _system_proxy_file_lock =
+            acquire_system_proxy_file_lock(&self.data_dir, "disable_if_matches_with_gui_auth")?;
+
         let current = Self::get_current()?;
         if !current.enable {
             self.remove_state_files();
@@ -1699,6 +2084,10 @@ impl SystemProxyManager {
     }
 
     pub fn restore_with_gui_auth(&mut self) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        let _system_proxy_file_lock =
+            acquire_system_proxy_file_lock(&self.data_dir, "restore_with_gui_auth")?;
+
         let original = self
             .original_proxy
             .take()
@@ -1807,6 +2196,7 @@ mod tests {
                 port: 9900,
                 bypass: String::new(),
             },
+            applied: true,
         };
         let current = ProxyBackup {
             enable: true,
@@ -1836,6 +2226,7 @@ mod tests {
                 port: 9900,
                 bypass: String::new(),
             },
+            applied: true,
         };
         let current = ProxyBackup {
             enable: true,
@@ -1848,5 +2239,287 @@ mod tests {
             decide_managed_state_recovery(&current, &state),
             CrashRecoveryDecision::PreserveExternal
         );
+    }
+
+    #[test]
+    fn crash_recovery_discards_pending_apply_when_target_was_never_set() {
+        let state = ManagedProxyState {
+            original: ProxyBackup {
+                enable: true,
+                host: "127.0.0.1".to_string(),
+                port: 6152,
+                bypass: String::new(),
+            },
+            target: ProxyBackup {
+                enable: true,
+                host: "127.0.0.1".to_string(),
+                port: 9900,
+                bypass: String::new(),
+            },
+            applied: false,
+        };
+        let current = ProxyBackup {
+            enable: true,
+            host: "127.0.0.1".to_string(),
+            port: 6152,
+            bypass: String::new(),
+        };
+
+        assert_eq!(
+            decide_managed_state_recovery(&current, &state),
+            CrashRecoveryDecision::DiscardPendingApply
+        );
+    }
+
+    #[test]
+    fn crash_recovery_restores_pending_apply_when_target_is_visible() {
+        let state = ManagedProxyState {
+            original: ProxyBackup {
+                enable: true,
+                host: "127.0.0.1".to_string(),
+                port: 6152,
+                bypass: String::new(),
+            },
+            target: ProxyBackup {
+                enable: true,
+                host: "127.0.0.1".to_string(),
+                port: 9900,
+                bypass: String::new(),
+            },
+            applied: false,
+        };
+        let current = ProxyBackup {
+            enable: true,
+            host: "127.0.0.1".to_string(),
+            port: 9900,
+            bypass: String::new(),
+        };
+
+        assert_eq!(
+            decide_managed_state_recovery(&current, &state),
+            CrashRecoveryDecision::RestoreOriginal
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn system_proxy_lock_is_world_writable_after_creation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let data_dir =
+            std::env::temp_dir().join(format!("bifrost-system-proxy-lock-mode-{unique}"));
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        // Drop the lock before chmod-checking; releasing flock is fine, but
+        // we want to inspect the persisted mode bits.
+        {
+            let _lock = acquire_system_proxy_file_lock(&data_dir, "test_mode_create")
+                .expect("acquire fresh lock");
+        }
+        let lock_path = data_dir.join(LOCK_FILE_NAME);
+        let mode = std::fs::metadata(&lock_path)
+            .expect("stat lock")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o666, "lock file mode should be 0o666 on creation");
+
+        // Tighten the mode and re-acquire: the helper must heal it back to 0o666.
+        std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600))
+            .expect("tighten lock mode");
+        {
+            let _lock = acquire_system_proxy_file_lock(&data_dir, "test_mode_relax")
+                .expect("re-acquire lock");
+        }
+        let mode = std::fs::metadata(&lock_path)
+            .expect("stat lock")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o666, "lock file mode should be relaxed to 0o666");
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn system_proxy_lock_rejects_symlink() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let data_dir =
+            std::env::temp_dir().join(format!("bifrost-system-proxy-lock-symlink-{unique}"));
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        let target = data_dir.join("target");
+        std::fs::write(&target, "target").expect("write target");
+        let lock_path = data_dir.join(LOCK_FILE_NAME);
+        std::os::unix::fs::symlink(&target, &lock_path).expect("create symlink");
+
+        let result = acquire_system_proxy_file_lock(&data_dir, "test_symlink");
+
+        assert!(result.is_err(), "symlink lock must be rejected");
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn system_proxy_file_lock_serializes_cross_process_entries() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!("bifrost-system-proxy-lock-{unique}"));
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        let first =
+            acquire_system_proxy_file_lock(&data_dir, "test_first").expect("acquire first lock");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let thread_data_dir = data_dir.clone();
+
+        let handle = std::thread::spawn(move || {
+            let _second = acquire_system_proxy_file_lock(&thread_data_dir, "test_second")
+                .expect("acquire second lock");
+            tx.send(()).expect("send acquired");
+        });
+
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
+            "second lock acquired before first lock was released"
+        );
+        drop(first);
+        rx.recv_timeout(std::time::Duration::from_secs(2))
+            .expect("second lock acquired after first lock release");
+        handle.join().expect("join lock thread");
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn last_runtime_proxy_target_reads_runtime_host_and_port() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!("bifrost-runtime-target-{unique}"));
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        std::fs::write(
+            data_dir.join(RUNTIME_FILE_NAME),
+            r#"{"pid":12345,"host":"localhost","port":18889}"#,
+        )
+        .expect("write runtime");
+
+        let target = load_last_runtime_proxy_target(&data_dir).expect("runtime target");
+
+        assert_eq!(target.host, "localhost");
+        assert_eq!(target.port, 18889);
+        assert!(target.enable);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn last_runtime_proxy_target_maps_wildcard_host_to_loopback() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let data_dir =
+            std::env::temp_dir().join(format!("bifrost-runtime-wildcard-target-{unique}"));
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        std::fs::write(
+            data_dir.join(RUNTIME_FILE_NAME),
+            r#"{"pid":12345,"host":"0.0.0.0","port":9900}"#,
+        )
+        .expect("write runtime");
+
+        let target = load_last_runtime_proxy_target(&data_dir).expect("runtime target");
+
+        assert_eq!(target.host, "127.0.0.1");
+        assert_eq!(target.port, 9900);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn last_runtime_proxy_target_ignores_invalid_or_missing_port() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let data_dir =
+            std::env::temp_dir().join(format!("bifrost-runtime-invalid-target-{unique}"));
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        std::fs::write(
+            data_dir.join(RUNTIME_FILE_NAME),
+            r#"{"pid":12345,"host":"127.0.0.1","port":70000}"#,
+        )
+        .expect("write runtime");
+
+        assert!(load_last_runtime_proxy_target(&data_dir).is_none());
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn current_proxy_matches_last_runtime_target_with_loopback_alias() {
+        let current = ProxyBackup {
+            enable: true,
+            host: "localhost".to_string(),
+            port: 9900,
+            bypass: String::new(),
+        };
+        let target = ProxyBackup {
+            enable: true,
+            host: "127.0.0.1".to_string(),
+            port: 9900,
+            bypass: String::new(),
+        };
+
+        assert!(current_proxy_matches_target(&current, &target));
+    }
+
+    #[test]
+    fn last_runtime_target_has_live_listener_detects_runtime_port() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("local addr").port();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let data_dir =
+            std::env::temp_dir().join(format!("bifrost-runtime-listener-target-{unique}"));
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        std::fs::write(
+            data_dir.join(RUNTIME_FILE_NAME),
+            format!(r#"{{"pid":12345,"host":"127.0.0.1","port":{port}}}"#),
+        )
+        .expect("write runtime");
+
+        assert!(SystemProxyManager::last_runtime_target_has_live_listener(
+            &data_dir
+        ));
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn last_runtime_target_has_live_listener_resolves_localhost() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("local addr").port();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let data_dir =
+            std::env::temp_dir().join(format!("bifrost-runtime-localhost-target-{unique}"));
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        std::fs::write(
+            data_dir.join(RUNTIME_FILE_NAME),
+            format!(r#"{{"pid":12345,"host":"localhost","port":{port}}}"#),
+        )
+        .expect("write runtime");
+
+        assert!(SystemProxyManager::last_runtime_target_has_live_listener(
+            &data_dir
+        ));
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 }

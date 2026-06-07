@@ -1862,6 +1862,8 @@ pub enum SystemProxyCommands {
         data_dir: PathBuf,
         #[arg(long)]
         parent_pid: Option<u32>,
+        #[arg(long)]
+        parent_started_at_ms: Option<u64>,
         #[arg(long, default_value_t = 2)]
         poll_secs: u64,
     },
@@ -1869,6 +1871,12 @@ pub enum SystemProxyCommands {
     Cleanup {
         #[arg(long, value_hint = ValueHint::DirPath)]
         data_dir: Option<PathBuf>,
+    },
+    #[cfg(target_os = "macos")]
+    #[command(hide = true, about = "Repair macOS system proxy lock permissions")]
+    RepairLock {
+        #[arg(long, value_hint = ValueHint::DirPath)]
+        data_dir: PathBuf,
     },
     #[cfg(target_os = "macos")]
     #[command(hide = true, about = "Run macOS system proxy launchd cleanup daemon")]

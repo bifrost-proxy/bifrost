@@ -691,6 +691,37 @@ async fn run_daily_agent_locked(
     }
 }
 
+async fn sync_daily_agent_reports_after_generation(
+    task: &AsrDirectoryTask,
+    reports_generated: &[String],
+) -> Result<(), String> {
+    if reports_generated.is_empty() || task.daily_agent.report_sync_dir.is_none() {
+        return Ok(());
+    }
+
+    let sync_result =
+        match sync_daily_agent_report_files_isolated(task.clone(), reports_generated.to_vec()).await
+        {
+            Ok(result) => result,
+            Err(error) => failed_daily_agent_report_sync_result(
+                task,
+                reports_generated.len(),
+                error.message(),
+            ),
+        };
+    update_daily_agent_report_sync_status(task, sync_result.clone())?;
+    if sync_result.failed_files > 0 {
+        tracing::warn!(
+            task_id = %task.id,
+            failed_files = sync_result.failed_files,
+            errors = ?sync_result.errors,
+            "ASR daily agent report sync failed after report generation"
+        );
+    }
+
+    Ok(())
+}
+
 /// Build IM content for reports. FullReport returns the report text; send-time
 /// delivery handles chunking and preserves errors without summary fallback.
 fn build_im_content_for_reports(task: &AsrDirectoryTask, reports: &[String]) -> String {
@@ -1232,18 +1263,7 @@ async fn run_daily_agent_inner(
     processed.version = PROCESSED_STATE_VERSION;
     save_daily_agent_processed_state(&task.id, &processed)?;
 
-    if !reports_generated.is_empty() && task.daily_agent.report_sync_dir.is_some() {
-        let sync_result = sync_daily_agent_report_files(task, &reports_generated)?;
-        update_daily_agent_report_sync_status(task, sync_result.clone())?;
-        if sync_result.failed_files > 0 {
-            tracing::warn!(
-                task_id = %task.id,
-                failed_files = sync_result.failed_files,
-                errors = ?sync_result.errors,
-                "ASR daily agent report sync failed after report generation"
-            );
-        }
-    }
+    sync_daily_agent_reports_after_generation(task, &reports_generated).await?;
 
     tracing::info!(
         task_id = %task.id,

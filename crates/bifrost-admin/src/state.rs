@@ -1,8 +1,11 @@
 use std::collections::HashMap;
-#[cfg(target_os = "macos")]
+use std::ffi::OsString;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::path::PathBuf;
-#[cfg(target_os = "macos")]
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -48,33 +51,30 @@ pub type SharedValuesStorage = Arc<ParkingRwLock<ValuesStorage>>;
 pub type SharedSystemProxyManager = Arc<RwLock<SystemProxyManager>>;
 pub type SharedRuntimeConfig = Arc<RwLock<RuntimeConfig>>;
 
-#[cfg(target_os = "macos")]
 const SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER_ENV: &str =
     "BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER";
+const SYSTEM_PROXY_LIFECYCLE_HELPER_PROGRAM_ENV: &str =
+    "BIFROST_SYSTEM_PROXY_LIFECYCLE_HELPER_PROGRAM";
 
-#[cfg(target_os = "macos")]
 pub struct SystemProxyLifecycleHelperState {
     data_dir: PathBuf,
     parent_pid: u32,
+    parent_started_at_ms: Option<u64>,
     child: parking_lot::Mutex<Option<Child>>,
 }
 
-#[cfg(not(target_os = "macos"))]
-pub struct SystemProxyLifecycleHelperState;
-
-#[cfg(target_os = "macos")]
 #[derive(Clone, Copy)]
 enum SystemProxyLifecycleHelperStartReason {
     Startup,
     AdminApiEnable,
 }
 
-#[cfg(target_os = "macos")]
 impl SystemProxyLifecycleHelperState {
     pub fn new(data_dir: PathBuf, parent_pid: u32) -> Self {
         Self {
             data_dir,
             parent_pid,
+            parent_started_at_ms: bifrost_core::current_process_start_time_ms(),
             child: parking_lot::Mutex::new(None),
         }
     }
@@ -88,6 +88,27 @@ impl SystemProxyLifecycleHelperState {
     }
 
     fn ensure_started(&self, reason: SystemProxyLifecycleHelperStartReason) {
+        // The lifecycle helper is intentionally limited to macOS and Windows: those
+        // are the only platforms where Bifrost actually manages an OS-level system
+        // proxy that needs an external watchdog if the parent crashes. On Linux
+        // (and any other targets) we skip the helper entirely instead of spawning
+        // a subprocess that has nothing to do.
+        if !cfg!(any(target_os = "macos", target_os = "windows")) {
+            tracing::debug!(
+                target: "bifrost_admin::proxy",
+                reason = reason.as_str(),
+                "system proxy lifecycle helper is only supported on macOS and Windows; skipping"
+            );
+            return;
+        }
+        if !bifrost_core::SystemProxyManager::is_supported() {
+            tracing::debug!(
+                target: "bifrost_admin::proxy",
+                reason = reason.as_str(),
+                "system proxy not supported on this platform; lifecycle helper not started"
+            );
+            return;
+        }
         if std::env::var(SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER_ENV)
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
             .unwrap_or(false)
@@ -120,7 +141,12 @@ impl SystemProxyLifecycleHelperState {
             *child = None;
         }
 
-        match spawn_system_proxy_lifecycle_helper(&self.data_dir, self.parent_pid, reason) {
+        match spawn_system_proxy_lifecycle_helper(
+            &self.data_dir,
+            self.parent_pid,
+            self.parent_started_at_ms,
+            reason,
+        ) {
             Ok(helper) => *child = Some(helper),
             Err(error) => tracing::warn!(
                 target: "bifrost_admin::proxy",
@@ -133,6 +159,7 @@ impl SystemProxyLifecycleHelperState {
         }
     }
 
+    /// Stops the helper child and waits for it. Used after Admin API disable confirmed cleanup.
     pub fn stop(&self) {
         if let Some(mut child) = self.child.lock().take() {
             if let Err(error) = child.kill() {
@@ -156,22 +183,22 @@ impl SystemProxyLifecycleHelperState {
             }
         }
     }
-}
 
-#[cfg(not(target_os = "macos"))]
-impl SystemProxyLifecycleHelperState {
-    pub fn new(_data_dir: PathBuf, _parent_pid: u32) -> Self {
-        Self
+    /// Detaches the helper child without killing it, leaving the watchdog process alive.
+    /// Used during AdminState drop so that an abnormal Bifrost shutdown still benefits from
+    /// the lifecycle helper observing the parent exit and cleaning up.
+    pub fn detach(&self) {
+        if let Some(child) = self.child.lock().take() {
+            tracing::info!(
+                target: "bifrost_admin::proxy",
+                helper_pid = child.id(),
+                "detaching system proxy lifecycle helper without kill"
+            );
+            std::mem::forget(child);
+        }
     }
-
-    pub fn ensure_started_after_startup_enable(&self) {}
-
-    pub fn ensure_started_after_admin_api_enable(&self) {}
-
-    pub fn stop(&self) {}
 }
 
-#[cfg(target_os = "macos")]
 impl SystemProxyLifecycleHelperStartReason {
     fn as_str(self) -> &'static str {
         match self {
@@ -188,14 +215,15 @@ impl SystemProxyLifecycleHelperStartReason {
     }
 }
 
-#[cfg(target_os = "macos")]
 fn spawn_system_proxy_lifecycle_helper(
     data_dir: &Path,
     parent_pid: u32,
+    parent_started_at_ms: Option<u64>,
     reason: SystemProxyLifecycleHelperStartReason,
 ) -> std::io::Result<Child> {
-    let exe = std::env::current_exe()?;
-    let child = Command::new(exe)
+    let exe = resolve_system_proxy_lifecycle_helper_program()?;
+    let mut command = Command::new(&exe);
+    command
         .arg("system-proxy")
         .arg("lifecycle-helper")
         .arg("--data-dir")
@@ -204,13 +232,32 @@ fn spawn_system_proxy_lifecycle_helper(
         .arg(parent_pid.to_string())
         .arg("--poll-secs")
         .arg("2")
-        .stdin(Stdio::null())
-        .spawn()?;
+        .stdin(Stdio::null());
+    if let Some(started_at_ms) = parent_started_at_ms {
+        command
+            .arg("--parent-started-at-ms")
+            .arg(started_at_ms.to_string());
+    }
+    #[cfg(unix)]
+    {
+        command.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS so the helper survives parent exit
+        // and is not attached to the parent console.
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+    }
+    let child = command.spawn()?;
     tracing::info!(
         target: "bifrost_admin::proxy",
         helper_pid = child.id(),
         parent_pid,
+        parent_started_at_ms = parent_started_at_ms.unwrap_or_default(),
         data_dir = %data_dir.display(),
+        helper_program = %exe.display(),
         reason = reason.as_str(),
         "{}",
         reason.started_message()
@@ -218,25 +265,67 @@ fn spawn_system_proxy_lifecycle_helper(
     Ok(child)
 }
 
-#[cfg(target_os = "macos")]
+fn resolve_system_proxy_lifecycle_helper_program() -> std::io::Result<PathBuf> {
+    if let Ok(program) = std::env::var(SYSTEM_PROXY_LIFECYCLE_HELPER_PROGRAM_ENV) {
+        let program = PathBuf::from(program);
+        if program.exists() {
+            return Ok(program);
+        }
+        tracing::warn!(
+            target: "bifrost_admin::proxy",
+            helper_program = %program.display(),
+            env = SYSTEM_PROXY_LIFECYCLE_HELPER_PROGRAM_ENV,
+            "configured system proxy lifecycle helper program does not exist; falling back"
+        );
+    }
+
+    let current_exe = std::env::current_exe();
+    let arg0 = std::env::args_os().next();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    resolve_system_proxy_lifecycle_helper_program_from_candidates(current_exe, arg0, &cwd)
+}
+
+fn resolve_system_proxy_lifecycle_helper_program_from_candidates(
+    current_exe: std::io::Result<PathBuf>,
+    arg0: Option<OsString>,
+    cwd: &Path,
+) -> std::io::Result<PathBuf> {
+    if let Ok(path) = current_exe.as_ref() {
+        if path.exists() {
+            return Ok(path.clone());
+        }
+    }
+
+    if let Some(arg0) = arg0 {
+        let arg0 = PathBuf::from(arg0);
+        let candidate = if arg0.is_absolute() {
+            arg0
+        } else {
+            cwd.join(arg0)
+        };
+        if candidate.exists() {
+            tracing::warn!(
+                target: "bifrost_admin::proxy",
+                helper_program = %candidate.display(),
+                current_exe = current_exe
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|error| error.to_string()),
+                "falling back to argv[0] for system proxy lifecycle helper program"
+            );
+            return Ok(candidate);
+        }
+    }
+
+    current_exe
+}
+
 impl Drop for SystemProxyLifecycleHelperState {
     fn drop(&mut self) {
-        if let Some(mut child) = self.child.lock().take() {
-            if let Err(error) = child.kill() {
-                tracing::debug!(
-                    target: "bifrost_admin::proxy",
-                    error = %error,
-                    "failed to stop system proxy lifecycle helper during AdminState drop"
-                );
-            }
-            if let Err(error) = child.wait() {
-                tracing::debug!(
-                    target: "bifrost_admin::proxy",
-                    error = %error,
-                    "failed to reap system proxy lifecycle helper during AdminState drop"
-                );
-            }
-        }
+        // Detach (do not kill): if Bifrost is exiting abnormally, the helper must
+        // outlive the parent so it can observe parent exit and clean up the system proxy.
+        // Cooperative shutdowns call stop() explicitly before drop.
+        self.detach();
     }
 }
 
@@ -1481,6 +1570,43 @@ mod tests {
 
     fn cleanup_test_dir(dir: &PathBuf) {
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn lifecycle_helper_program_falls_back_to_existing_argv0_when_current_exe_is_stale() {
+        let dir = create_test_dir();
+        let helper = dir.join("bifrost-helper");
+        fs::write(&helper, b"test").expect("write helper");
+        let stale_current = dir.join("stale-current-exe");
+
+        let resolved = resolve_system_proxy_lifecycle_helper_program_from_candidates(
+            Ok(stale_current),
+            Some(helper.clone().into_os_string()),
+            &dir,
+        )
+        .expect("resolve helper");
+
+        assert_eq!(resolved, helper);
+        cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn lifecycle_helper_program_keeps_existing_current_exe() {
+        let dir = create_test_dir();
+        let current = dir.join("current-bifrost");
+        fs::write(&current, b"test").expect("write current");
+        let argv0 = dir.join("argv0-bifrost");
+        fs::write(&argv0, b"test").expect("write argv0");
+
+        let resolved = resolve_system_proxy_lifecycle_helper_program_from_candidates(
+            Ok(current.clone()),
+            Some(argv0.into_os_string()),
+            &dir,
+        )
+        .expect("resolve helper");
+
+        assert_eq!(resolved, current);
+        cleanup_test_dir(&dir);
     }
 
     #[test]

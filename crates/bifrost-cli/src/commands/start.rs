@@ -607,6 +607,9 @@ fn spawn_system_proxy_launchd_install_task(
         return;
     }
 
+    eprintln!(
+        "System proxy boot/shutdown cleanup is not ready yet; macOS may ask for administrator authorization. Until that install succeeds, reboot-time cleanup is not protected by LaunchDaemon."
+    );
     std::thread::spawn(move || {
         tracing::info!(
             target: "bifrost_cli::startup",
@@ -622,15 +625,25 @@ fn spawn_system_proxy_launchd_install_task(
                 current_version = status.current_version,
                 "system proxy LaunchDaemon cleanup installed asynchronously"
             ),
-            Err(error) if error.to_string().contains("UserCancelled") => tracing::info!(
-                target: "bifrost_cli::startup",
-                "system proxy LaunchDaemon cleanup install cancelled by user"
-            ),
-            Err(error) => tracing::warn!(
-                target: "bifrost_cli::startup",
-                error = %error,
-                "system proxy LaunchDaemon cleanup install failed"
-            ),
+            Err(error) if error.to_string().contains("UserCancelled") => {
+                eprintln!(
+                    "System proxy boot/shutdown cleanup authorization was cancelled; reboot-time cleanup will remain unavailable until LaunchDaemon install succeeds."
+                );
+                tracing::info!(
+                    target: "bifrost_cli::startup",
+                    "system proxy LaunchDaemon cleanup install cancelled by user"
+                )
+            }
+            Err(error) => {
+                eprintln!(
+                    "System proxy boot/shutdown cleanup failed to install: {error}. Reboot-time cleanup will remain unavailable until this succeeds."
+                );
+                tracing::warn!(
+                    target: "bifrost_cli::startup",
+                    error = %error,
+                    "system proxy LaunchDaemon cleanup install failed"
+                )
+            }
         }
     });
 }
@@ -1782,6 +1795,7 @@ pub fn run_foreground(
                 port: config.port,
                 socks5_port: config.socks5_port,
                 host: Some(config.host.clone()),
+                started_at_ms: bifrost_core::current_process_start_time_ms(),
             };
             write_runtime_info(&runtime_info)?;
             #[cfg(target_os = "macos")]
@@ -1798,7 +1812,6 @@ pub fn run_foreground(
             } else {
                 base_config.host.clone()
             };
-            #[cfg(target_os = "macos")]
             if enable_system_proxy {
                 system_proxy_lifecycle_helper_state.ensure_started_after_startup_enable();
             }
@@ -1913,6 +1926,7 @@ pub fn run_foreground(
                             port: actual_port,
                             socks5_port: base_config.socks5_port,
                             host: Some(base_config.host.clone()),
+                            started_at_ms: bifrost_core::current_process_start_time_ms(),
                         };
                         if let Err(error) = write_runtime_info(&runtime_info) {
                             tracing::warn!("Failed to update runtime info after port rebind: {}", error);
@@ -2294,6 +2308,7 @@ pub fn run_daemon(
                     port: config.port,
                     socks5_port: config.socks5_port,
                     host: Some(config.host.clone()),
+                    started_at_ms: bifrost_core::current_process_start_time_ms(),
                 };
                 write_runtime_info(&runtime_info).expect("Failed to write runtime info");
                 #[cfg(target_os = "macos")]
@@ -2632,7 +2647,6 @@ pub fn run_daemon(
                         admin_state_arc.rules_storage.clone(),
                     );
 
-                    #[cfg(target_os = "macos")]
                     if enable_system_proxy {
                         system_proxy_lifecycle_helper_state.ensure_started_after_startup_enable();
                     }

@@ -291,7 +291,9 @@ Daily Agent 同时维护三类事实：
 
 ### 3.8 Report 同步状态
 
-`report_sync_dir` 只表示额外副本目录，不改变 `.daily/agents/<agent_id>/output/<output_dir>/` 作为系统事实源。同步时按 report 文件名复制到目标目录，目标文件内容一致时计入 skipped，内容不同或不存在时覆盖复制。路径支持 `~/...` 展开，目标目录不存在时创建；目标存在但不是目录时返回错误。
+`report_sync_dir` 只表示额外副本目录，不改变 `.daily/agents/<agent_id>/output/<output_dir>/` 作为系统事实源。同步时按 report 文件名复制到目标目录；为避免 iCloud、CloudDocs、网络盘等目标目录中的占位文件在读取 hash 时触发云端下载或长时间阻塞，目标文件存在时不读取目标内容做 SHA256 比对，而是通过同目录临时文件 + rename 覆盖目标。只有源路径与目标路径完全相同时计入 skipped。路径支持 `~/...` 展开，目标目录不存在时创建；目标存在但不是目录时返回错误。
+
+同步文件系统调用必须通过 blocking worker 隔离，并设置超时和全局并发门禁。手动 `/daily-agent/sync` 超时或已有同步进行中时返回结构化失败结果并更新 `last_report_sync`；阻塞的文件系统调用即使被 iCloud 拖住，也不得占住代理 admin/proxy runtime。自动同步只记录 `last_report_sync` 和 warning，不得让成功生成 report 的 Daily Agent run 因外部同步目录失败而变成失败。
 
 最近一次同步结果保存在 `last_report_sync`，用于 `Last Run Status` 展示：
 
@@ -1082,8 +1084,8 @@ build_daily_agent_change_plan(task, trigger, date, force)
 | 手动 Run now | report/ 生成文件 |
 | Daily Docs 行级 Run All Agents | 点击某日文档行主按钮后，请求只携带该行 `date`，不携带 `force`/`agent_id`，后端 change plan 只包含该日期并按顺序运行全部 enabled Agent |
 | Daily Docs 行级 Run 单 Agent | 点击某日文档行 Agent 下拉项后，请求携带该行 `date` 和对应 `agent_id`，只运行指定 Agent |
-| Report sync dir 自动同步 | 配置 `report_sync_dir` 后 Runner 成功生成 report，会把本轮 report 复制到目标目录，并在 `last_report_sync` 记录 copied/skipped/failed |
-| 手动同步 report | 调用 `/daily-agent/sync` 后同步全部现有 report，目标目录已有同内容文件计入 skipped |
+| Report sync dir 自动同步 | 配置 `report_sync_dir` 后 Runner 成功生成 report，会把本轮 report 复制到目标目录，并在 `last_report_sync` 记录 copied/skipped/failed；外部目录超时只记录同步错误，不影响 report 生成成功状态 |
+| 手动同步 report | 调用 `/daily-agent/sync` 后同步全部现有 report，目标目录已有文件时不读取目标 hash，使用临时文件覆盖；iCloud/外部目录卡住时 API 超时返回失败结果但代理进程继续响应其他请求 |
 | CLI 同步控制 | `daily set-sync-dir` 能设置/清除目录，`daily sync` 能手动同步并输出 target/total/copied/skipped/failed |
 | 打开 report 详情 | `/daily-agent/reports/{date}` 返回 report Markdown 全文，非法日期拒绝，缺失 report 返回 404 |
 | 历史 report 发现 | `/daily-agent/runs` 合并 `daily_agent_processed.json` 与磁盘 `.daily/agents/<agent_id>/output/<output_dir>/`，并兼容旧版 `daily/<output_dir>/`、`.daily/agents/<agent_id>/<output_dir>/` 和 `daily/Report/` 下的 `YYYY-MM-DD-report.md`；即使 processed state 缺失，Daily Agent Records 也必须展示已有报告，并按日期倒序返回 |

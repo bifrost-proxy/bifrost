@@ -364,8 +364,20 @@ async fn set_system_proxy(req: Request<Incoming>, state: SharedAdminState) -> Re
                     if enabled_by_bifrost {
                         start_system_proxy_lifecycle_helper_after_runtime_enable(&state);
                         spawn_system_proxy_launchd_install_task_from_config(config_manager);
-                    } else {
+                    } else if !request.enabled && !status.enabled {
+                        // Only stop the helper when the user explicitly disabled and the
+                        // verified status confirms the proxy is off. Otherwise (e.g. enable
+                        // failed or external owner took over), keep the helper alive so an
+                        // abnormal Bifrost exit can still trigger cleanup.
                         stop_system_proxy_lifecycle_helper_after_runtime_disable(&state);
+                    } else {
+                        tracing::warn!(
+                            target: "bifrost_admin::proxy",
+                            requested_enable = request.enabled,
+                            status_enabled = status.enabled,
+                            managed_by_bifrost = status.managed_by_bifrost,
+                            "system proxy admin toggle did not converge to a clean state; lifecycle helper left running"
+                        );
                     }
                 }
 
@@ -651,6 +663,14 @@ fn spawn_system_proxy_launchd_install_task_from_config(
         return;
     }
 
+    tracing::warn!(
+        target: "bifrost_admin::proxy",
+        installed = status.installed,
+        loaded = status.loaded,
+        needs_upgrade = status.needs_upgrade,
+        needs_upgrade_reason = status.needs_upgrade_reason.as_deref().unwrap_or(""),
+        "system proxy LaunchDaemon cleanup is not ready after system proxy enable; reboot-time cleanup is unavailable until authorization install succeeds"
+    );
     std::thread::spawn(move || {
         tracing::info!(
             target: "bifrost_admin::proxy",
@@ -667,14 +687,14 @@ fn spawn_system_proxy_launchd_install_task_from_config(
                 current_version = status.current_version,
                 "system proxy LaunchDaemon cleanup installed asynchronously after system proxy enable"
             ),
-            Err(error) if error.to_string().contains("UserCancelled") => tracing::info!(
+            Err(error) if error.to_string().contains("UserCancelled") => tracing::warn!(
                 target: "bifrost_admin::proxy",
-                "system proxy LaunchDaemon cleanup install cancelled by user after system proxy enable"
+                "system proxy LaunchDaemon cleanup install cancelled by user after system proxy enable; reboot-time cleanup remains unavailable"
             ),
             Err(error) => tracing::warn!(
                 target: "bifrost_admin::proxy",
                 error = %error,
-                "system proxy LaunchDaemon cleanup install failed after system proxy enable"
+                "system proxy LaunchDaemon cleanup install failed after system proxy enable; reboot-time cleanup remains unavailable"
             ),
         }
     });

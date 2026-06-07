@@ -137,8 +137,8 @@ BIFROST_DATA_DIR="$(mktemp -d)" cargo run --bin bifrost -- start -p 18880 --unsa
 
 - `set-sync-dir` 输出包含配置的同步目录。
 - 首次 `sync` 输出包含 `Copied: 1`、`Skipped: 0`、`Failed: 0`。
-- 同步目录中存在 `2026-05-17-report.md`，内容与原 report 一致。
-- 第二次 `sync --json` 返回 `sync.total_files=1`、`copied_files=0`、`skipped_files=1`、`failed_files=0`。
+- 同步目录中存在 `daily_report/2026-05-17-report.md`，内容与原 report 一致；同步根目录下不存在未分 Agent 的 `2026-05-17-report.md`。
+- 第二次 `sync --json` 返回 `sync.total_files=1`、`copied_files=1`、`skipped_files=0`、`failed_files=0`；目标文件存在时通过覆盖写副本完成，不读取目标文件 hash。
 
 ### TC-DAR-07 Daily Agent WebUI report 同步目录与状态展示
 
@@ -180,7 +180,35 @@ BIFROST_DATA_DIR="$(mktemp -d)" cargo run --bin bifrost -- start -p 18880 --unsa
 - `set-sync-dir` 同时写入 legacy `daily_agent.report_sync_dir` 和 primary agent `agents[0].report_sync_dir`。
 - 任务经过 `load_tasks()` / `normalize_daily_agent_config` 后仍保留配置的同步目录。
 - 后续 `daily sync` 不返回 `Daily Agent report sync directory is not configured`。
-- 同步仍按 TC-DAR-06 复制 report，并在二次同步时返回 skipped。
+- 同步仍按 TC-DAR-06 复制 report，并在二次同步时覆盖目标副本而不是读取目标 hash。
+
+### TC-DAR-13 Daily Agent report 同步外部目录卡死回归
+
+操作步骤：
+
+1. 使用临时 `BIFROST_DATA_DIR` 启动 Bifrost，必须带 `--no-system-proxy` 和 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`。
+2. 创建一个 ASR Directory Task，并准备一个已生成的 Daily Agent report。
+3. 配置 `report_sync_dir` 为一个外部同步目录替身，例如临时目录下的 `icloud-sync`。
+4. 在目标 `daily_report/2026-05-14-report.md` 预先写入旧内容，并将该目标文件权限改为不可读。
+5. 执行：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_report_sync_overwrites_unreadable_target_without_reading_target_hash --lib -- --nocapture
+   ```
+6. 执行自动同步回归：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_report_sync_auto_after_generation_uses_isolated_copy_path --lib -- --nocapture
+   ```
+7. 执行 CLI/API 回归：
+   ```bash
+   bash e2e-tests/tests/test_asr_task_cli.sh
+   ```
+
+预期结果：
+
+- 同步过程不读取目标文件 hash；不可读的已有目标文件会被临时文件 + rename 覆盖为新 report。
+- 每日任务执行结束后的自动同步也走同一套隔离复制路径，并把 `last_report_sync` 写回对应 Agent。
+- `daily sync` 首次和二次执行都能返回，二次同步返回 `copied_files=1`、`skipped_files=0`、`failed_files=0`。
+- 如果真实外部目录/I/O 超过同步超时，`/_bifrost/api/asr/tasks/<task_id>/daily-agent/sync` 返回结构化失败结果，代理进程仍能响应其他 admin/proxy 请求。
 
 ### TC-DAR-09 Daily Agent Records 支持按 Agent、Date、Runner 筛选
 
@@ -271,8 +299,9 @@ BIFROST_DATA_DIR="$(mktemp -d)" cargo run --bin bifrost -- start -p 18880 --unsa
 | 2026-05-20 | TC-DAR-02 processed state 元数据优先且补齐 report_path | 同一真实服务与临时数据目录；创建临时 ASR task `aa81bf23510c4eb2b727c42c8ba93514`，写入 `daily/report/2026-05-15-report.md` 与 `asr/tasks/<task_id>/daily_agent_processed.json`，其中 `runner=web`、`last_run_id=run-1`、`report_path=null`；请求 `/_bifrost/api/asr/tasks/<task_id>/daily-agent/runs` | PASS：响应 1 条记录，没有重复行；保留 `runner=web`、`last_run_id=run-1`、`processed_at_ms=100`、`source_sha256=abc123`；`report_path` 补齐为 `daily/report/2026-05-15-report.md` |
 | 2026-05-21 | TC-DAR-03 Daily Agent 配置页展示 report 索引状态 | `BIFROST_DATA_DIR=/tmp/bifrost-dar-index-human.w5hMjx target/debug/bifrost start -p 18881 --unsafe-ssl --no-system-proxy --skip-cert-check -y`；创建临时 ASR task `eeb1f24cdef34d5ab31b0c3c8745482c`，写入 2 个 report 文件和只包含 `2026-05-14` 的 `daily_agent_processed.json`；请求 `/_bifrost/api/asr/tasks/<task_id>/daily-agent` 并复查状态文件 keys | PASS：`report_index_status` 返回 `report_files=2`、`processed_documents=1`、`indexed_reports=1`、`unindexed_reports=1`、`unindexed_dates=["2026-05-15"]`；状态文件仍只包含 `2026-05-14`，未自动回填 |
 | 2026-05-21 | TC-DAR-04 Run Results 最新日期优先倒序展示 | `SKIP_FRONTEND_BUILD=1 BIFROST_DATA_DIR=/tmp/bifrost-dar-sort-human.sjmERC target/debug/bifrost start -p 55092 --unsafe-ssl --no-system-proxy --skip-cert-check -y`；创建临时 ASR task `a4e4520ba02c43a99508fea6785d732e`，在 `daily_agent_processed.json` 中按非倒序写入 `2026-05-14`、`2026-05-16`、`2026-05-15`，并请求 `/_bifrost/api/asr/tasks/<task_id>/daily-agent/runs` 与 `/_bifrost/api/asr/tasks/<task_id>/daily-agent/reports/2026-05-16` | PASS：`processed_documents` 返回日期顺序 `2026-05-16,2026-05-15,2026-05-14`；最新日期 report 详情返回 200 且正文包含 `Report 2026-05-16`；临时服务、数据目录和音频目录已清理 |
-| 2026-05-26 | TC-DAR-06 Daily Agent report 同步目录 CLI 控制 | `source ~/.zshrc && bash e2e-tests/tests/test_asr_task_cli.sh` | PASS：脚本使用临时 Bifrost、临时 ASR task 和临时同步目录，执行 `daily set-sync-dir <task_id> --dir <sync_dir>` 后输出同步目录；执行 `daily sync <task_id>` 后复制 `2026-05-17-report.md` 到同步目录，输出 `Copied: 1`、`Skipped: 0`；二次 `daily sync <task_id> --json` 返回 `total_files=1`、`copied_files=0`、`skipped_files=1`、`failed_files=0` |
+| 2026-05-26 | TC-DAR-06 Daily Agent report 同步目录 CLI 控制 | `source ~/.zshrc && bash e2e-tests/tests/test_asr_task_cli.sh` | PASS：脚本使用临时 Bifrost、临时 ASR task 和临时同步目录，执行 `daily set-sync-dir <task_id> --dir <sync_dir>` 后输出同步目录；执行 `daily sync <task_id>` 后复制 `2026-05-17-report.md` 到同步目录，输出 `Copied: 1`、`Skipped: 0`；2026-06-06 起二次 `daily sync <task_id> --json` 预期为覆盖目标副本，返回 `total_files=1`、`copied_files=1`、`skipped_files=0`、`failed_files=0` |
 | 2026-05-26 | TC-DAR-07 Daily Agent WebUI report 同步目录与状态展示 | `source ~/.zshrc && pnpm --dir web exec playwright test tests/ui/asr-daily-agent-runner.spec.ts --grep "simple Runner"` | PASS：WebUI mock 验证 `Report Sync Dir` 输入框可保存 `report_sync_dir`，`Sync Reports` 按钮触发 `/daily-agent/sync`，toast 显示 `Synced 2 copied, 0 skipped`，Last Run Status 展示 `2 copied / 2 total` 和同步目录 |
 | 2026-06-03 | TC-DAR-08 Daily Agent CLI 同步目录 normalize 回归 | `source ~/.zshrc; SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_report_sync_dir_update_survives_task_normalization --lib -- --nocapture`；`source ~/.zshrc; bash e2e-tests/tests/test_asr_task_cli.sh` | PASS：单元回归验证 `set_primary_daily_agent_report_sync_dir` 同时更新 legacy 与 primary agent，`normalize_daily_agent_config` 后 `report_sync_dir` 不丢失；真实 CLI/API E2E 验证 `daily set-sync-dir` 后立刻 `daily sync` 成功复制 report，未再返回 `Daily Agent report sync directory is not configured` |
 | 2026-06-03 | TC-DAR-09 Daily Agent Records 支持按 Agent、Date、Runner 筛选 | `source ~/.zshrc; pnpm --dir web exec node --input-type=module <Playwright script>` 打开 `asrTaskTab=daily-agent-records`，选择 Agent=`tomorrow_todo`、Date=`2026-05-20`、Runner=`abc`，再依次清空筛选；同脚本打开 `asrTaskTab=daily` 复查 Daily Docs 表头高度 | PASS：Run Results 初始 9 行，Agent 筛选后 1 行，Date 叠加后 1 行，Runner 叠加后 1 行，样例行为 `2026-05-20 tomorrow_todo ... abc 2026-05-20-report.md`；清空筛选后恢复 9 行；Daily Docs 表头最大高度 40px |
 | 2026-06-03 | TC-DAR-12 ASR 任务详情页滚动限制在当前 Tab 内部 | `source ~/.zshrc; node <Playwright script>` 使用 900x520 视口打开历史任务 `a911c68b0f7a43afa29d1863cc02229a`，分别检查 `files`、`daily`、`daily-agent-records`；另用 1000x620 视口检查 `overview`、`daily-agent` | PASS：各 tab 中 `window.scrollY=0`、任务详情根节点 `scrollTop=0`、任务详情 Card body `scrollTop=0`；`.asr-task-detail-tabs > .ant-tabs-content-holder` 的 `overflow-y=auto` 且可滚动，Files tab `holderScroll=1595/client=261`、Daily Docs `552/261`、Records `588/261`；Overview 与 Daily Agent 也只在 tab content-holder 内滚动 |
+| 2026-06-06 | TC-DAR-13 Daily Agent report 同步外部目录卡死回归 | `source ~/.zshrc; SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_report_sync_overwrites_unreadable_target_without_reading_target_hash --lib -- --nocapture`；`source ~/.zshrc; SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_report_sync_auto_after_generation_uses_isolated_copy_path --lib -- --nocapture`；`source ~/.zshrc; bash e2e-tests/tests/test_asr_task_cli.sh` | PASS：目标文件已存在且不可读时同步不读取目标 hash，使用临时文件覆盖为新 report；每日任务执行结束后的自动同步同样走隔离复制路径并写回 Agent `last_report_sync`；真实 CLI/API E2E 首次和二次 `daily sync` 均成功，二次返回 `copied_files=1`、`skipped_files=0`、`failed_files=0` |

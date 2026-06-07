@@ -12,6 +12,8 @@ pub struct RuntimeInfo {
     pub socks5_port: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub started_at_ms: Option<u64>,
 }
 
 pub fn get_pid_file() -> bifrost_core::Result<PathBuf> {

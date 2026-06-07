@@ -1287,6 +1287,7 @@ mod tests {
             port: 8080,
             socks5_port: Some(1080),
             host: Some("0.0.0.0".to_string()),
+            started_at_ms: None,
         };
 
         let args = build_restart_args(Some(&info));
@@ -1313,6 +1314,7 @@ mod tests {
             port: 9900,
             socks5_port: None,
             host: Some("127.0.0.1".to_string()),
+            started_at_ms: None,
         };
 
         let args = build_restart_args(Some(&info));
@@ -1332,6 +1334,7 @@ mod tests {
             port: 8800,
             socks5_port: None,
             host: None,
+            started_at_ms: None,
         };
 
         let args = build_restart_args(Some(&info));
