@@ -1010,6 +1010,16 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                             .await;
                         }));
                         progress_enabled = true;
+                        let runner_summary = external_cli_progress_runner_summary(
+                            &effective.runner_id,
+                            &settings.adapter,
+                            &request,
+                            None,
+                        );
+                        let _ = ctx
+                            .progress_registry
+                            .update_runner_summary(&input.session_key, runner_summary)
+                            .await;
                     }
                     Err(error) => {
                         warn!(
@@ -1138,6 +1148,16 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                     session.work_dir.clone(),
                 );
                 if progress_enabled {
+                    let runner_summary = external_cli_progress_runner_summary(
+                        &effective.runner_id,
+                        &settings.adapter,
+                        &request_for_progress,
+                        Some(&result.metadata),
+                    );
+                    let _ = ctx
+                        .progress_registry
+                        .update_runner_summary(&input.session_key, runner_summary)
+                        .await;
                     if let Some(progress_tx) = progress_tx_for_finish.take() {
                         let _ =
                             progress_tx.send(bifrost_agent::AgentTurnProgressEvent::TurnFinished {
@@ -1561,6 +1581,73 @@ fn external_cli_adapter_label(adapter: &str) -> &'static str {
         "ChatGPT Web"
     } else {
         "Runner"
+    }
+}
+
+fn external_cli_progress_runner_summary(
+    runner_id: &str,
+    adapter: &str,
+    request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
+    metadata: Option<&std::collections::BTreeMap<String, String>>,
+) -> crate::im_gateway::progress_card::ProgressRunnerSummary {
+    let configured_model = request
+        .adapter_config
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let metadata_model = metadata
+        .and_then(|metadata| metadata.get("model"))
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let model = configured_model.or(metadata_model).map(str::to_string);
+    let model_source = if configured_model.is_some() {
+        Some("runner 配置".to_string())
+    } else {
+        metadata
+            .and_then(|metadata| metadata.get("modelSource"))
+            .map(String::as_str)
+            .map(format_runner_model_source)
+            .filter(|value| !value.trim().is_empty())
+    };
+    let external_thread_id = metadata.and_then(|metadata| {
+        metadata
+            .get("threadId")
+            .or_else(|| metadata.get("thread_id"))
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    });
+    let external_conversation_id = metadata.and_then(|metadata| {
+        metadata
+            .get("conversationId")
+            .or_else(|| metadata.get("conversation_id"))
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    });
+    crate::im_gateway::progress_card::ProgressRunnerSummary {
+        runner_id: runner_id.trim().to_string(),
+        adapter: adapter.trim().to_string(),
+        model,
+        model_source,
+        work_dir: request
+            .work_dir
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        external_thread_id,
+        external_conversation_id,
+    }
+}
+
+fn format_runner_model_source(source: &str) -> String {
+    match source.trim() {
+        "runner config" => "runner 配置".to_string(),
+        "codex default" => "Codex 默认".to_string(),
+        value => value.to_string(),
     }
 }
 

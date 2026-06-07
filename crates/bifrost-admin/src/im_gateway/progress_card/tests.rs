@@ -68,6 +68,51 @@ fn progress_snapshot_tracks_tool_plan_queue_and_final_output() {
     );
 }
 
+#[test]
+fn external_runner_status_footer_uses_runner_metadata_instead_of_agent_metrics() {
+    let mut snapshot = ImAgentProgressSnapshot::new("s1", "codex task");
+    snapshot.runner = Some(ProgressRunnerSummary {
+        runner_id: "codex".to_string(),
+        adapter: "codex".to_string(),
+        model: Some("gpt-test".to_string()),
+        model_source: Some("runner 配置".to_string()),
+        work_dir: Some("/tmp/bifrost-codex".to_string()),
+        external_thread_id: Some("thread-123".to_string()),
+        external_conversation_id: None,
+    });
+    snapshot.latest_tool = Some(ProgressToolSummary {
+        tool_name: "exec_command".to_string(),
+        arguments: Some("{\"command\":\"pwd\"}".to_string()),
+        success: Some(true),
+        result_preview: Some("/tmp/bifrost-codex".to_string()),
+        duration_ms: Some(12),
+    });
+    snapshot.queue_items.push(QueueItem {
+        seq: 1,
+        message: "queued message".to_string(),
+    });
+    snapshot.guide_pending = true;
+    snapshot.phase = ImProgressPhase::Finished;
+
+    let title = format_status_panel_title(&snapshot);
+    let footer = format_footer_markdown(&snapshot);
+
+    assert!(title.contains("Runner：codex"));
+    assert!(title.contains("模型：gpt-test（runner 配置）"));
+    assert!(footer.contains("状态：已完成"));
+    assert!(footer.contains("Runner：`codex` · Adapter：`codex`"));
+    assert!(footer.contains("模型：gpt-test（runner 配置）"));
+    assert!(footer.contains("外部会话：Codex threadId=thread-123"));
+    assert!(footer.contains("队列：1 条排队消息 · 引导：有待处理引导消息"));
+    assert!(footer.contains("工作路径：`/tmp/bifrost-codex`"));
+    assert!(footer.contains("最新工具：`exec_command` · 完成"));
+    assert!(!footer.contains("Loop"));
+    assert!(!footer.contains("Token"));
+    assert!(!footer.contains("Context"));
+    assert!(!footer.contains("压缩"));
+    assert!(!footer.contains("N/A"));
+}
+
 fn active_status(compaction_count: u32) -> ActiveTurnStatus {
     ActiveTurnStatus {
         session_key: "s1".to_string(),

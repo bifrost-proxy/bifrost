@@ -166,6 +166,18 @@ adapter 允许输出能力缺失。例如某个 CLI 不提供 tool started 事�
 
 Codex CLI 当前不会在 JSONL 中暴露隐藏 chain-of-thought。即使配置 `model_reasoning_summary="auto"`，本次真实验证也只输出了 `usage.reasoning_output_tokens`，没有可展示的 reasoning 文本。因此 Bifrost 只能展示 Codex CLI 明确输出的 status/tool/result/final/reasoning summary 事件；不能也不应伪造或展示隐藏思考内容。
 
+### 5.2 飞书 Progress Card 的外部 Runner 状态
+
+飞书 progress card 需要复用内置 Agent 的卡片布局，但外部 CLI runner 不能照搬内置 Agent 的 loop/context/token/compaction 指标。Codex CLI 进程托管层只能可靠获得 runner、adapter、显式配置的 model、工作目录、外部 thread/conversation、工具开始/结束和最终答案；当 Codex CLI 没有显式 `--model` 配置时，卡片只能展示“Codex 默认模型（未显式配置）”，不能猜测具体模型名。
+
+因此外部 runner 的卡片状态面板规则为：
+
+- 状态标题显示 `Runner` 和模型标签；配置了 `adapterConfig.model` 时显示真实模型名和来源。
+- 状态正文显示运行状态、Runner、Adapter、模型、外部会话、队列/引导、工作路径和最新工具摘要。
+- 不展示内置 Agent 专属的 `Loop 0/0`、`Context ~0 / N/A`、`Token N/A`、`压缩 0 次` 等空指标。
+- run result metadata 同步写入 `model`、`modelSource`、`modelLabel`，供 Web History、run detail 和后续 IM 展示复用。
+- 工具过程仍走 canonical `ToolStarted` / `ToolFinished`，飞书卡片和 Web History 看到的是同一组 `exec_command` 语义。
+
 ### 6. 能力声明与降级
 
 每个 adapter 需要声明能力，WebUI 和 API 根据能力展示配置项：
@@ -848,6 +860,8 @@ Runs 页面用于排查 Chat Gateway 和真实 IM Agent 执行。列表字段：
 - `external_cli_adapter_parser_maps_progress_events`：验证 adapter 私有事件转为 `AgentTurnProgressEvent`；Codex JSONL 是首个覆盖样例。
 - `codex_cli_parser_maps_real_command_execution_events`：验证真实 Codex `item.started/item.completed command_execution` 被归一化为 `ToolStarted/ToolFinished`，并保留 command、output、exit code。
 - `codex_command_execution_progress_is_recorded_as_exec_command_tool_steps`：验证 Codex 工具过程进入 canonical timeline 后显示为 `exec_command` 的 tool call/result，而不是外层 runner wrapper。
+- `external_runner_status_footer_uses_runner_metadata_instead_of_agent_metrics`：验证飞书 progress card 的外部 runner 状态显示 runner/model/workdir/tool 等真实信息，不显示内置 Agent 的 Loop/Context/Token/压缩空指标。
+- `codex_request_metadata_includes_configured_or_default_model_label`：验证 Codex run metadata 对显式模型和默认模型标签均可追踪。
 - `external_cli_adapter_capabilities_drive_config_schema`：验证 adapter 能力声明会决定 WebUI/API 可配置字段，未声明能力不会被错误下发。
 - `external_cli_runtime_accepts_manifest_adapter`：验证简单 manifest adapter 能构造 `CommandSpec` 并复用 run dir / artifact / event pipeline。
 - `chat_gateway_real_im_requires_permission`：验证默认不会发送到真实 IM。

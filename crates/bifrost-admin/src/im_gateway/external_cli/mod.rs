@@ -1030,6 +1030,7 @@ impl ExternalCliRuntime {
         };
         let mut metadata = run_output.metadata;
         append_external_cli_metadata(&request.adapter, &run_output.events, &mut metadata);
+        append_external_cli_request_metadata(&request, &mut metadata);
         if !saved_images.is_empty() {
             metadata.insert(
                 "attachments.images".to_string(),
@@ -1471,6 +1472,36 @@ fn append_external_cli_metadata(
             .filter(|value| !value.is_empty())
     }) {
         metadata.insert("threadId".to_string(), thread_id.to_string());
+    }
+}
+
+fn append_external_cli_request_metadata(
+    request: &ExternalCliRunRequest,
+    metadata: &mut BTreeMap<String, String>,
+) {
+    if let Some(model) = request
+        .adapter_config
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        metadata
+            .entry("model".to_string())
+            .or_insert_with(|| model.to_string());
+        metadata
+            .entry("modelSource".to_string())
+            .or_insert_with(|| "runner config".to_string());
+        metadata
+            .entry("modelLabel".to_string())
+            .or_insert_with(|| model.to_string());
+    } else if is_codex_like_adapter(&request.adapter) {
+        metadata
+            .entry("modelLabel".to_string())
+            .or_insert_with(|| "Codex default model (not explicitly configured)".to_string());
+        metadata
+            .entry("modelSource".to_string())
+            .or_insert_with(|| "codex default".to_string());
     }
 }
 

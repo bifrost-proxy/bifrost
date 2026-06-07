@@ -45,6 +45,7 @@ pub struct ImAgentProgressSnapshot {
     pub title: Option<String>,
     pub output: String,
     pub last_thought: Option<String>,
+    pub runner: Option<ProgressRunnerSummary>,
     pub plan_steps: Vec<PlanStep>,
     pub proposed_plan: Option<String>,
     pub tool_calls: Vec<ToolCallLog>,
@@ -64,6 +65,7 @@ impl ImAgentProgressSnapshot {
             title: Some(default_card_title(initial_message)),
             output: String::new(),
             last_thought: None,
+            runner: None,
             plan_steps: Vec::new(),
             proposed_plan: None,
             tool_calls: Vec::new(),
@@ -229,6 +231,17 @@ fn context_snapshot_from_status(status: &ActiveTurnStatus) -> AgentContextSnapsh
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProgressRunnerSummary {
+    pub runner_id: String,
+    pub adapter: String,
+    pub model: Option<String>,
+    pub model_source: Option<String>,
+    pub work_dir: Option<String>,
+    pub external_thread_id: Option<String>,
+    pub external_conversation_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProgressToolSummary {
     pub tool_name: String,
@@ -323,6 +336,14 @@ impl FeishuProgressCardSession {
     ) -> Result<()> {
         self.snapshot
             .update_queue_state(queue_items, guide_pending, notice);
+        self.flush_snapshot().await
+    }
+
+    pub async fn update_runner_summary_and_flush(
+        &mut self,
+        runner: ProgressRunnerSummary,
+    ) -> Result<()> {
+        self.snapshot.runner = Some(runner);
         self.flush_snapshot().await
     }
 
@@ -730,6 +751,33 @@ impl ImAgentProgressRegistry {
         }
     }
 
+    pub async fn update_runner_summary(
+        &self,
+        session_key: &str,
+        runner: ProgressRunnerSummary,
+    ) -> bool {
+        let Some(session) = self.sessions.get(session_key) else {
+            return false;
+        };
+        let session = Arc::clone(session.value());
+        let result = session
+            .lock()
+            .await
+            .update_runner_summary_and_flush(runner)
+            .await;
+        match result {
+            Ok(()) => true,
+            Err(error) => {
+                warn!(
+                    session_key = session_key,
+                    error = %error,
+                    "failed to update IM progress card runner summary"
+                );
+                false
+            }
+        }
+    }
+
     pub async fn finish(
         &self,
         session_key: &str,
@@ -1099,6 +1147,16 @@ fn format_tool_panel_title(snapshot: &ImAgentProgressSnapshot) -> String {
 }
 
 fn format_status_panel_title(snapshot: &ImAgentProgressSnapshot) -> String {
+    if snapshot_has_external_runner(snapshot) {
+        let runner_id = external_runner_id(snapshot);
+        let model = external_runner_model_label(snapshot);
+        let title = format!("Runner：{} · 模型：{}", truncate_str(&runner_id, 24), model);
+        return if let Some(notice) = snapshot.activity_notice.as_deref() {
+            format!("{title} · {notice}")
+        } else {
+            title
+        };
+    }
     let token_title = match snapshot.status.as_ref() {
         Some(status) => match (status.total_tokens_used, status.last_response_tokens) {
             (Some(total), Some(last)) => format!(
@@ -1151,6 +1209,142 @@ fn format_status_panel_title(snapshot: &ImAgentProgressSnapshot) -> String {
     }
 }
 
+fn snapshot_has_external_runner(snapshot: &ImAgentProgressSnapshot) -> bool {
+    snapshot.runner.is_some()
+        || snapshot
+            .status
+            .as_ref()
+            .is_some_and(is_external_runner_status)
+}
+
+fn is_external_runner_status(status: &bifrost_agent::ActiveTurnStatus) -> bool {
+    status
+        .runner_id
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        || status
+            .runner_type
+            .as_deref()
+            .is_some_and(|value| value.trim() != "bifrost_agent")
+        || status.agent_type.as_deref() == Some("External Runner Agent")
+}
+
+fn external_runner_id(snapshot: &ImAgentProgressSnapshot) -> String {
+    snapshot
+        .runner
+        .as_ref()
+        .map(|runner| runner.runner_id.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            snapshot
+                .status
+                .as_ref()
+                .and_then(|status| status.runner_id.as_deref())
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("external")
+        .to_string()
+}
+
+fn external_runner_adapter(snapshot: &ImAgentProgressSnapshot) -> String {
+    snapshot
+        .runner
+        .as_ref()
+        .map(|runner| runner.adapter.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            snapshot
+                .status
+                .as_ref()
+                .and_then(|status| status.runner_type.as_deref())
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("external")
+        .to_string()
+}
+
+fn external_runner_model_label(snapshot: &ImAgentProgressSnapshot) -> String {
+    let Some(runner) = snapshot.runner.as_ref() else {
+        return "未显式配置".to_string();
+    };
+    match runner
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(model) => match runner
+            .model_source
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(source) => format!("{}（{}）", truncate_one_line(model, 48), source),
+            None => truncate_one_line(model, 48),
+        },
+        None if runner.adapter.trim() == "codex" || runner.runner_id.trim() == "codex" => {
+            "Codex 默认模型（未显式配置）".to_string()
+        }
+        None => "默认模型（未显式配置）".to_string(),
+    }
+}
+
+fn external_runner_work_dir(snapshot: &ImAgentProgressSnapshot) -> Option<&str> {
+    snapshot
+        .runner
+        .as_ref()
+        .and_then(|runner| runner.work_dir.as_deref())
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            snapshot
+                .status
+                .as_ref()
+                .and_then(|status| status.work_dir.as_deref())
+        })
+}
+
+fn external_runner_conversation_ref(snapshot: &ImAgentProgressSnapshot) -> String {
+    let thread_id = snapshot
+        .runner
+        .as_ref()
+        .and_then(|runner| runner.external_thread_id.as_deref())
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            snapshot
+                .status
+                .as_ref()
+                .and_then(|status| status.external_thread_id.as_deref())
+        });
+    let conversation_id = snapshot
+        .runner
+        .as_ref()
+        .and_then(|runner| runner.external_conversation_id.as_deref())
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            snapshot
+                .status
+                .as_ref()
+                .and_then(|status| status.external_conversation_id.as_deref())
+        });
+    bifrost_agent::format_conversation_ref(thread_id, conversation_id)
+}
+
+fn format_external_tool_line(snapshot: &ImAgentProgressSnapshot) -> Option<String> {
+    let tool = snapshot.latest_tool.as_ref()?;
+    let status = match tool.success {
+        Some(true) => "完成",
+        Some(false) => "失败",
+        None => "执行中",
+    };
+    Some(format!(
+        "最新工具：`{}` · {}",
+        truncate_one_line(&tool.tool_name, 32),
+        status
+    ))
+}
+
 fn format_tool_details_markdown(
     logs: &[ToolCallLog],
     latest: Option<&ProgressToolSummary>,
@@ -1201,6 +1395,29 @@ fn format_footer_markdown(snapshot: &ImAgentProgressSnapshot) -> String {
     } else {
         "无待处理引导消息"
     };
+    if snapshot_has_external_runner(snapshot) {
+        let prefix = snapshot
+            .activity_notice
+            .as_deref()
+            .map(|notice| format!("提示：{notice}\n"))
+            .unwrap_or_default();
+        let tool_line = format_external_tool_line(snapshot)
+            .map(|line| format!("\n{line}"))
+            .unwrap_or_default();
+        return format!(
+            "{}状态：{}\nRunner：`{}` · Adapter：`{}`\n模型：{}\n外部会话：{}\n队列：{} · 引导：{}\n工作路径：`{}`{}",
+            prefix,
+            phase,
+            external_runner_id(snapshot),
+            external_runner_adapter(snapshot),
+            external_runner_model_label(snapshot),
+            external_runner_conversation_ref(snapshot),
+            queue_text,
+            guide_text,
+            external_runner_work_dir(snapshot).unwrap_or("N/A"),
+            tool_line
+        );
+    }
     match &snapshot.status {
         Some(status) => {
             let token_text = status

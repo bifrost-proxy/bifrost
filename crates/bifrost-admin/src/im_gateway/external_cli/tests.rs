@@ -1090,6 +1090,77 @@ fn effective_config_marks_channel_overrides() {
     assert_eq!(effective.runner_id, "mock-runner");
 }
 
+#[test]
+fn codex_request_metadata_includes_configured_or_default_model_label() {
+    let configured_request = ExternalCliRunRequest {
+        images: Vec::new(),
+        message: "hello".to_string(),
+        operation: default_operation(),
+        params: serde_json::Value::Null,
+        provider_id: None,
+        runner_id: Some("codex".to_string()),
+        session_key: None,
+        runtime: DEFAULT_RUNTIME.to_string(),
+        adapter: "codex".to_string(),
+        work_dir: None,
+        instructions: None,
+        adapter_config: ExternalCliAdapterConfig {
+            model: Some("gpt-test".to_string()),
+            ..Default::default()
+        },
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    };
+    let mut configured_metadata = std::collections::BTreeMap::new();
+
+    append_external_cli_request_metadata(&configured_request, &mut configured_metadata);
+
+    assert_eq!(
+        configured_metadata.get("model").map(String::as_str),
+        Some("gpt-test")
+    );
+    assert_eq!(
+        configured_metadata.get("modelSource").map(String::as_str),
+        Some("runner config")
+    );
+    assert_eq!(
+        configured_metadata.get("modelLabel").map(String::as_str),
+        Some("gpt-test")
+    );
+
+    let default_request = ExternalCliRunRequest {
+        images: Vec::new(),
+        message: "hello".to_string(),
+        operation: default_operation(),
+        params: serde_json::Value::Null,
+        provider_id: None,
+        runner_id: Some("codex".to_string()),
+        session_key: None,
+        runtime: DEFAULT_RUNTIME.to_string(),
+        adapter: "codex".to_string(),
+        work_dir: None,
+        instructions: None,
+        adapter_config: ExternalCliAdapterConfig::default(),
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    };
+    let mut default_metadata = std::collections::BTreeMap::new();
+
+    append_external_cli_request_metadata(&default_request, &mut default_metadata);
+
+    assert_eq!(default_metadata.get("model"), None);
+    assert_eq!(
+        default_metadata.get("modelSource").map(String::as_str),
+        Some("codex default")
+    );
+    assert_eq!(
+        default_metadata.get("modelLabel").map(String::as_str),
+        Some("Codex default model (not explicitly configured)")
+    );
+}
+
 fn has_arg_pair(args: &[String], left: &str, right: &str) -> bool {
     args.windows(2)
         .any(|pair| pair[0] == left && pair[1] == right)
