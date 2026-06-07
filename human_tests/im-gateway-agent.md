@@ -2678,3 +2678,26 @@ rm -rf ./.bifrost-test
 - **清理步骤**:
   - 删除 Playwright 临时 test-results；如手动启动过 Bifrost，停止对应临时数据目录服务。
 - **执行记录（2026-06-08）**: PASS — 创建用例后立即执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts -g "renders local generated image attachments" --reporter=line` 通过。用例构造包含 assistant Markdown 图片、user `content_parts.image_url` 图片、后续 assistant Markdown 图片的会话，验证点击图片打开全屏浮层，右箭头、`ArrowRight`、`ArrowLeft` 按整个会话图片顺序切换，点击遮罩关闭并触发 `scrollIntoView` 回到当前图片；随后切换暗色主题，再次打开并通过右上角关闭按钮关闭。
+
+### TC-IMA-143: IM 通道 `/cwd` 指令切换工作目录
+
+- **前置条件**:
+  - 使用当前源码和临时数据目录启动 Bifrost，不复用用户真实 `~/.bifrost` 数据。
+  - 创建一个启用 Agent 的 Feishu Provider，owner 为 `ou_owner`，初始 `agent_config.work_dir` 指向一个存在的临时目录。
+  - 准备另一个存在的临时目录作为目标工作目录，并准备一个确定不存在的绝对路径用于错误分支。
+- **操作步骤**:
+  1. 通过 IM mock inbound 入口向该 Provider 注入文本消息：`/cwd <目标临时目录绝对路径>`。
+  2. 轮询 `GET /_bifrost/api/im-gateway/providers/<provider_id>`。
+  3. 检查 Provider 的 `agent_config.work_dir` 已更新为目标目录。
+  4. 再注入文本消息：`/cwd /definitely/not/exist/bifrost-im-cwd-e2e`。
+  5. 再次读取 Provider 配置。
+  6. 在 Web Agent Chat 或 Chat Gateway 中输入同样的 `/cwd <路径>`，确认该入口不执行 IM 指令语义。
+- **预期结果**:
+  - IM 通道收到合法 `/cwd <绝对路径>` 后，不进入模型，直接切换当前 Provider 工作目录。
+  - 成功切换时返回人类可读提示，下一条 IM 消息使用新的工作目录。
+  - 当前 IM session 的旧 history / 外部 Runner 线程状态被清理，避免重启后恢复到旧目录。
+  - 路径不存在、相对路径或文件路径时返回错误提示，且不修改 Provider 工作目录。
+  - `/cwd` 指令只在 IM 通道生效，不注册为 WebUI/API Agent slash 命令。
+- **清理步骤**:
+  - 停止临时 Bifrost 服务；删除临时数据目录和临时工作目录。
+- **执行记录（2026-06-08）**: PASS — 创建用例后立即执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin im_cwd_command --lib -- --nocapture`，覆盖合法绝对目录、缺少路径、相对路径、不存在路径、文件路径、Provider work_dir 持久化和 idle session 重置；执行 `SKIP_FRONTEND_BUILD=1 cargo run -p bifrost-e2e -- --test im_gateway_mock_inbound_cwd_command_switches_provider_work_dir --test-timeout 180`，通过 mock inbound IM 入口注入 `/cwd <临时目录>` 并轮询 Provider API 确认切换成功，再注入不存在路径确认不会覆盖为非法目录。

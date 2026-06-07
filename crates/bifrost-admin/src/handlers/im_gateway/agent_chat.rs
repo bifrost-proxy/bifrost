@@ -5,9 +5,19 @@ use super::*;
 pub(super) struct IdleImCommandContext<'a> {
     pub(super) client: &'a ImProviderClient,
     pub(super) provider: &'a ImProviderConfig,
+    pub(super) provider_store: &'a Arc<ImProviderStore>,
     pub(super) event: &'a ImEvent,
     pub(super) message_log_store: &'a Arc<ImMessageLogStore>,
     pub(super) agent_session_manager: &'a Arc<ImAgentSessionManager>,
+}
+
+struct ImCwdCommandContext<'a> {
+    client: &'a ImProviderClient,
+    provider: &'a ImProviderConfig,
+    provider_store: &'a Arc<ImProviderStore>,
+    event: &'a ImEvent,
+    message_log_store: &'a Arc<ImMessageLogStore>,
+    session_manager: &'a Arc<ImAgentSessionManager>,
 }
 
 pub(super) async fn handle_idle_im_command(
@@ -55,6 +65,23 @@ pub(super) async fn handle_idle_im_command(
         return true;
     }
 
+    if handle_im_cwd_command(
+        trimmed,
+        session_key,
+        ImCwdCommandContext {
+            client: ctx.client,
+            provider: ctx.provider,
+            provider_store: ctx.provider_store,
+            event: ctx.event,
+            message_log_store: ctx.message_log_store,
+            session_manager: ctx.agent_session_manager,
+        },
+    )
+    .await
+    {
+        return true;
+    }
+
     if let Some(response) =
         bifrost_agent::handle_session_free_command(session_key, msg_text, agent_config)
     {
@@ -70,6 +97,118 @@ pub(super) async fn handle_idle_im_command(
     }
 
     false
+}
+
+pub(super) fn parse_im_cwd_command(message: &str) -> Option<Result<PathBuf, String>> {
+    let trimmed = message.trim();
+    if trimmed == "/cwd" {
+        return Some(Err("用法: /cwd <绝对路径>".to_string()));
+    }
+    let rest = trimmed.strip_prefix("/cwd ")?;
+    let mut path_text = rest.trim();
+    if path_text.is_empty() {
+        return Some(Err("用法: /cwd <绝对路径>".to_string()));
+    }
+    if path_text.len() >= 2 {
+        let bytes = path_text.as_bytes();
+        let first = bytes[0];
+        let last = bytes[bytes.len() - 1];
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            path_text = &path_text[1..path_text.len() - 1];
+        }
+    }
+    let path = PathBuf::from(path_text);
+    if !path.is_absolute() {
+        return Some(Err(
+            "请使用绝对路径，例如 /cwd /Users/eden/work/github/bifrost".to_string(),
+        ));
+    }
+    let metadata = match std::fs::metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(_) => return Some(Err(format!("路径不存在: {}", path.display()))),
+    };
+    if !metadata.is_dir() {
+        return Some(Err(format!("路径存在但不是目录: {}", path.display())));
+    }
+    Some(Ok(std::fs::canonicalize(&path).unwrap_or(path)))
+}
+
+pub(super) fn format_im_cwd_error(reason: &str) -> String {
+    format!("❌ 无法切换工作目录：{reason}\n\n用法: /cwd <绝对路径>")
+}
+
+pub(super) fn apply_im_cwd_switch_to_session(
+    provider_store: &Arc<ImProviderStore>,
+    provider_id: &str,
+    session_key: &str,
+    session: &mut bifrost_agent::AgentSession,
+    work_dir: &Path,
+) -> String {
+    let canonical_work_dir =
+        std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
+    let work_dir = canonical_work_dir.display().to_string();
+    persist_provider_agent_work_dir(provider_store, provider_id, &work_dir);
+    clear_persisted_agent_session_state(session_key, None, None);
+    session.reinitialize_work_dir(work_dir.clone());
+    format!("已切换工作目录到:\n`{work_dir}`\n\n下一条消息将使用新的工作目录。")
+}
+
+pub(super) fn apply_im_cwd_switch(
+    provider_store: &Arc<ImProviderStore>,
+    session_manager: &Arc<ImAgentSessionManager>,
+    provider_id: &str,
+    session_key: &str,
+    work_dir: &Path,
+) -> Result<String, String> {
+    let canonical_work_dir =
+        std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
+    let Some(mut session) = session_manager.try_take_session_with_work_dir(
+        session_key,
+        Some(canonical_work_dir.display().to_string()),
+    ) else {
+        return Err("当前 Agent 正在处理中，/cwd 需要等待当前任务完成后执行。".to_string());
+    };
+    let reply = apply_im_cwd_switch_to_session(
+        provider_store,
+        provider_id,
+        session_key,
+        &mut session,
+        &canonical_work_dir,
+    );
+    session_manager.return_session(session);
+    Ok(reply)
+}
+
+async fn handle_im_cwd_command(
+    message: &str,
+    session_key: &str,
+    ctx: ImCwdCommandContext<'_>,
+) -> bool {
+    let Some(command) = parse_im_cwd_command(message) else {
+        return false;
+    };
+    let reply = match command {
+        Ok(path) => match apply_im_cwd_switch(
+            ctx.provider_store,
+            ctx.session_manager,
+            &ctx.provider.id,
+            session_key,
+            &path,
+        ) {
+            Ok(reply) => reply,
+            Err(reason) => format_im_cwd_error(&reason),
+        },
+        Err(reason) => format_im_cwd_error(&reason),
+    };
+    send_agent_reply(
+        ctx.client,
+        ctx.provider,
+        ctx.event,
+        &reply,
+        ctx.message_log_store,
+    )
+    .await;
+    true
 }
 
 pub(super) async fn resolve_event_images(
@@ -227,6 +366,56 @@ pub(super) async fn handle_busy_message(
             "当前没有正在执行的 Agent loop。"
         };
         send_agent_reply(client, provider, event, reply, message_log_store).await;
+        return;
+    }
+
+    if let Some(command) = parse_im_cwd_command(trimmed) {
+        match command {
+            Ok(path) => {
+                let queued_command = format!("/cwd {}", path.display());
+                match queue_manager.push_queue(session_key, queued_command) {
+                    Ok(items) => {
+                        let guide_pending = !queue_manager.guide_status(session_key).is_empty();
+                        let updated = progress_registry
+                            .update_queue_state(
+                                session_key,
+                                items.clone(),
+                                guide_pending,
+                                Some(format!("已将工作目录切换排队：{}", path.display())),
+                            )
+                            .await;
+                        if !updated {
+                            let reply = format!(
+                                "⏳ 当前任务仍在处理中，已将工作目录切换排队。\n\n当前任务结束后将切换到:\n`{}`",
+                                path.display()
+                            );
+                            send_agent_reply(client, provider, event, &reply, message_log_store)
+                                .await;
+                        }
+                    }
+                    Err(err) => {
+                        send_agent_reply(
+                            client,
+                            provider,
+                            event,
+                            &format!("❌ {err}"),
+                            message_log_store,
+                        )
+                        .await;
+                    }
+                }
+            }
+            Err(reason) => {
+                send_agent_reply(
+                    client,
+                    provider,
+                    event,
+                    &format_im_cwd_error(&reason),
+                    message_log_store,
+                )
+                .await;
+            }
+        }
         return;
     }
 
@@ -859,6 +1048,23 @@ pub(super) async fn process_agent_chat(
         user_message_len = user_message.len(),
         "invoking agent chat (turn loop)"
     );
+    if handle_im_cwd_command(
+        user_message,
+        session_key,
+        ImCwdCommandContext {
+            client,
+            provider,
+            provider_store,
+            event,
+            message_log_store,
+            session_manager,
+        },
+    )
+    .await
+    {
+        return;
+    }
+
     let slash_mode = crate::im_gateway::agent_slash::parse_agent_slash_mode(user_message);
     let collaboration_mode = slash_mode.collaboration_mode;
     let user_message = slash_mode.message;

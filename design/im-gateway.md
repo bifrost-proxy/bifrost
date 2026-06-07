@@ -1866,6 +1866,58 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 - `human_tests/im-gateway.md`
 - `human_tests/readme.md`
 
+## 2026-06-08 IM 通道 `/cwd` 工作目录切换指令
+
+### 问题
+
+IM 通道此前主要依赖内置 Agent 的 `switch_workdir` 工具来切换工作目录。该方式需要模型理解用户意图并调用工具，反馈路径不够确定；外部 Runner 绑定的 IM 通道也缺少一个不进入模型、可直接切换 Provider 工作目录的用户指令。
+
+### 实现逻辑
+
+- 在 IM event loop 的空闲命令快路径新增 `/cwd <绝对路径>` 指令，且只在 IM 通道入口拦截，不注册到 WebUI/API 的 Agent slash router。
+- 指令解析要求：
+  - `/cwd` 后必须跟随路径。
+  - 路径必须是绝对路径。
+  - 路径必须存在且是目录；文件路径和不存在路径返回错误提示，不修改配置。
+  - 支持用单引号或双引号包住包含空格的绝对路径。
+- 切换成功后：
+  - 持久化当前 Provider 的 `agent_config.work_dir`，保持原有 runner 和 instructions 覆盖不变。
+  - 对当前 IM session 应用新的 work_dir，并清空旧 history/外部线程元数据。
+  - 清理该 session 的持久化状态和 history，避免服务重启后恢复到旧工作目录或旧 Runner 线程。
+- 如果当前 session 正在运行：
+  - 先校验路径；无效路径立即返回错误。
+  - 有效 `/cwd` 会作为控制指令进入 queue，当前任务结束后执行切换，不作为模型用户消息或外部 Runner 输入。
+- 外部 Runner 队列内部也识别 `/cwd`，执行到该指令时直接切换工作目录并继续处理后续队列消息。
+
+### 测试方案
+
+- 单元测试：`im_cwd_command_parses_existing_absolute_directory` 覆盖引号路径和 canonicalize。
+- 单元测试：`im_cwd_command_rejects_invalid_paths` 覆盖非命令、缺少路径、相对路径、不存在路径和文件路径。
+- 单元测试：`im_cwd_command_persists_provider_and_reinitializes_idle_session` 覆盖 Provider work_dir 持久化、prompt 覆盖保留、当前 session 工作目录更新和旧消息清空。
+- E2E 测试：`im_gateway_mock_inbound_cwd_command_switches_provider_work_dir` 通过 mock inbound IM 事件注入 `/cwd <临时目录>`，轮询 Provider API 确认工作目录切换；再注入不存在路径，确认不会覆盖为非法目录。
+- 真实场景测试：新增并执行 `human_tests/im-gateway-agent.md` 的 `TC-IMA-143`。
+
+### Review/Fix/Test 闭环方案
+
+- 第 1 轮：复核 `/cwd` 只在 IM event loop 生效，检查内置 Agent、外部 Runner、busy queue 和 invalid path 分支；运行 focused unit 与 E2E。
+- 第 2 轮：复查 Provider 持久化、session state 清理、human_tests/readme 索引和最新 diff；复跑 focused tests、fmt/clippy/workspace all-features。
+
+### 校验要求
+
+```bash
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin im_cwd_command --lib -- --nocapture
+SKIP_FRONTEND_BUILD=1 cargo run -p bifrost-e2e -- --test im_gateway_mock_inbound_cwd_command_switches_provider_work_dir --test-timeout 180
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+```
+
+### 文档更新
+
+- `design/im-gateway.md`
+- `human_tests/im-gateway-agent.md`
+- `human_tests/readme.md`
+
 ## 2026-06-04 IM 内置 Agent worker env 测试隔离
 
 ### 问题

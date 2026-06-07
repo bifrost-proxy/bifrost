@@ -430,6 +430,7 @@ pub(super) async fn run_event_loop_with_options(
                             IdleImCommandContext {
                                 client: &client,
                                 provider: &provider,
+                                provider_store: &provider_store,
                                 event: &event,
                                 message_log_store: &message_log_store,
                                 agent_session_manager: &agent_session_manager,
@@ -594,6 +595,7 @@ pub(super) async fn run_event_loop_with_options(
                     IdleImCommandContext {
                         client: &client,
                         provider: &provider,
+                        provider_store: &provider_store,
                         event: &event,
                         message_log_store: &message_log_store,
                         agent_session_manager: &agent_session_manager,
@@ -920,6 +922,42 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
     let target_open_id = agent_reply_target_id(ctx.provider, ctx.event).unwrap_or_default();
 
     loop {
+        if let Some(command) = parse_im_cwd_command(&current_message) {
+            let reply = match command {
+                Ok(path) => apply_im_cwd_switch_to_session(
+                    ctx.provider_store,
+                    &ctx.provider.id,
+                    &input.session_key,
+                    &mut session,
+                    &path,
+                ),
+                Err(reason) => format_im_cwd_error(&reason),
+            };
+            send_agent_reply(
+                ctx.client,
+                ctx.provider,
+                ctx.event,
+                &reply,
+                ctx.message_log_store,
+            )
+            .await;
+            let unconsumed_guides: Vec<String> = guide_channel.lock().unwrap().drain(..).collect();
+            if let Some(unconsumed) =
+                bifrost_agent::session::combine_guide_messages(unconsumed_guides)
+            {
+                if !unconsumed.trim().is_empty() {
+                    let _ = ctx.queue_manager.push_queue(&input.session_key, unconsumed);
+                }
+            }
+            match ctx.queue_manager.pop_queue(&input.session_key) {
+                Some(next_message) => {
+                    current_message = next_message;
+                    continue;
+                }
+                None => break,
+            }
+        }
+
         let mut request = crate::im_gateway::external_cli::run_request_from_settings(
             current_message.clone(),
             Some(ctx.provider.id.clone()),

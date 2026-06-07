@@ -472,6 +472,96 @@ pub fn get_all_tests() -> Vec<TestCase> {
             },
         ),
         TestCase::standalone(
+            "im_gateway_mock_inbound_cwd_command_switches_provider_work_dir",
+            "Validate IM-only /cwd command switches provider work_dir and rejects invalid paths",
+            "admin",
+            || async move {
+                let port = pick_unused_port()?;
+                let (_proxy, _admin_state) = start_im_gateway_admin(port).await?;
+
+                let client = reqwest::Client::builder()
+                    .danger_accept_invalid_certs(true)
+                    .no_proxy()
+                    .build()
+                    .map_err(|e| format!("Failed to create client: {}", e))?;
+                let base = format!("http://127.0.0.1:{port}/_bifrost/api/im-gateway");
+
+                let initial_dir = tempfile::tempdir()
+                    .map_err(|e| format!("create initial work dir failed: {e}"))?;
+                let target_dir = tempfile::tempdir()
+                    .map_err(|e| format!("create target work dir failed: {e}"))?;
+                let target_dir = std::fs::canonicalize(target_dir.path())
+                    .map_err(|e| format!("canonicalize target work dir failed: {e}"))?;
+                let initial_dir = std::fs::canonicalize(initial_dir.path())
+                    .map_err(|e| format!("canonicalize initial work dir failed: {e}"))?;
+
+                let create_response = client
+                    .post(format!("{base}/providers"))
+                    .json(&json!({
+                        "id": "cwd-command-provider",
+                        "provider_type": "feishu",
+                        "display_name": "CWD Command Provider",
+                        "enabled": true,
+                        "event_connection_enabled": false,
+                        "owner_open_id": "ou_owner",
+                        "agent_config": {
+                            "work_dir": initial_dir.display().to_string()
+                        }
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("POST provider failed: {e}"))?;
+                assert_status(&create_response, 200)?;
+
+                let cwd_response = client
+                    .post(format!("{base}/debug/mock-inbound"))
+                    .json(&json!({
+                        "providerId": "cwd-command-provider",
+                        "userId": "ou_owner",
+                        "text": format!("/cwd {}", target_dir.display())
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("POST mock inbound /cwd failed: {e}"))?;
+                assert_status(&cwd_response, 200)?;
+
+                wait_for_provider_work_dir(&client, &base, "cwd-command-provider", &target_dir)
+                    .await?;
+
+                let invalid_response = client
+                    .post(format!("{base}/debug/mock-inbound"))
+                    .json(&json!({
+                        "providerId": "cwd-command-provider",
+                        "userId": "ou_owner",
+                        "text": "/cwd /definitely/not/exist/bifrost-im-cwd-e2e"
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("POST mock inbound invalid /cwd failed: {e}"))?;
+                assert_status(&invalid_response, 200)?;
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+                let provider: serde_json::Value = client
+                    .get(format!("{base}/providers/cwd-command-provider"))
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET provider after invalid /cwd failed: {e}"))?
+                    .json()
+                    .await
+                    .map_err(|e| format!("parse provider after invalid /cwd failed: {e}"))?;
+                let expected_work_dir = target_dir.display().to_string();
+                if provider
+                    .pointer("/agent_config/work_dir")
+                    .and_then(|value| value.as_str())
+                    != Some(expected_work_dir.as_str())
+                {
+                    return Err(format!("Invalid /cwd should not change work_dir: {provider}"));
+                }
+
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
             "im_gateway_agent_chat_codex_prompt_layers",
             "Validate POST /api/im-gateway/agent/chat sends system/developer/user prompt layers",
             "admin",
@@ -2542,6 +2632,38 @@ fn request_contains_image_url(body: &serde_json::Value) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+async fn wait_for_provider_work_dir(
+    client: &reqwest::Client,
+    base: &str,
+    provider_id: &str,
+    expected_work_dir: &std::path::Path,
+) -> Result<(), String> {
+    let expected = expected_work_dir.display().to_string();
+    let mut last_provider = serde_json::Value::Null;
+    for _ in 0..40 {
+        let provider: serde_json::Value = client
+            .get(format!("{base}/providers/{provider_id}"))
+            .send()
+            .await
+            .map_err(|e| format!("GET provider while waiting for /cwd failed: {e}"))?
+            .json()
+            .await
+            .map_err(|e| format!("parse provider while waiting for /cwd failed: {e}"))?;
+        if provider
+            .pointer("/agent_config/work_dir")
+            .and_then(|value| value.as_str())
+            == Some(expected.as_str())
+        {
+            return Ok(());
+        }
+        last_provider = provider;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    Err(format!(
+        "Timed out waiting for provider work_dir {expected}; last provider: {last_provider}"
+    ))
 }
 
 async fn start_im_gateway_admin(port: u16) -> Result<(ProxyInstance, Arc<AdminState>), String> {

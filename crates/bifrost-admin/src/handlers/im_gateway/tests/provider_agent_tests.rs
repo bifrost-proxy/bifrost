@@ -202,6 +202,105 @@ pub(super) fn provider_switch_workdir_persists_provider_agent_override() {
 }
 
 #[test]
+pub(super) fn im_cwd_command_parses_existing_absolute_directory() {
+    let work_dir = tempfile::tempdir().expect("work dir");
+    let command = format!("/cwd \"{}\"", work_dir.path().display());
+
+    let parsed = parse_im_cwd_command(&command)
+        .expect("cwd command")
+        .expect("valid cwd");
+
+    assert_eq!(parsed, std::fs::canonicalize(work_dir.path()).unwrap());
+}
+
+#[test]
+pub(super) fn im_cwd_command_rejects_invalid_paths() {
+    assert!(parse_im_cwd_command("/cwdish /tmp").is_none());
+    assert!(parse_im_cwd_command("请看 /cwd /tmp").is_none());
+    assert_eq!(
+        parse_im_cwd_command("/cwd")
+            .expect("cwd command")
+            .expect_err("missing path"),
+        "用法: /cwd <绝对路径>"
+    );
+    assert!(parse_im_cwd_command("/cwd relative/path")
+        .expect("cwd command")
+        .expect_err("relative path")
+        .contains("请使用绝对路径"));
+    assert!(
+        parse_im_cwd_command("/cwd /definitely/not/exist/bifrost-cwd-test")
+            .expect("cwd command")
+            .expect_err("missing path")
+            .contains("路径不存在")
+    );
+
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let file_path = temp_dir.path().join("file.txt");
+    std::fs::write(&file_path, "not a directory").expect("write file");
+    assert!(
+        parse_im_cwd_command(&format!("/cwd {}", file_path.display()))
+            .expect("cwd command")
+            .expect_err("file path")
+            .contains("不是目录")
+    );
+}
+
+#[test]
+pub(super) fn im_cwd_command_persists_provider_and_reinitializes_idle_session() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let store = Arc::new(ImProviderStore::new(temp_dir.path()));
+    let mut provider = test_provider();
+    provider.id = "im-cwd-provider".to_string();
+    provider.agent_config = Some(ImProviderAgentConfig {
+        runner: None,
+        work_dir: Some("/old/workdir".to_string()),
+        base_instructions: Some("keep provider prompt".to_string()),
+        developer_instructions: None,
+        user_instructions: None,
+    });
+    store.add(provider).expect("add provider");
+
+    let manager = Arc::new(bifrost_agent::AgentSessionManager::new(3600));
+    let mut session = manager
+        .try_take_session_with_work_dir("feishu-main:ou_owner", Some("/old/workdir".to_string()))
+        .expect("session");
+    session
+        .history
+        .push(bifrost_agent::ChatMessage::user("old message"));
+    manager.return_session(session);
+
+    let new_work_dir = tempfile::tempdir().expect("new work dir");
+    let reply = apply_im_cwd_switch(
+        &store,
+        &manager,
+        "im-cwd-provider",
+        "feishu-main:ou_owner",
+        new_work_dir.path(),
+    )
+    .expect("apply cwd");
+
+    let canonical = std::fs::canonicalize(new_work_dir.path()).unwrap();
+    let canonical_str = canonical.display().to_string();
+    assert!(reply.contains(&canonical_str));
+    let updated = store.get("im-cwd-provider").expect("provider");
+    let agent_config = updated.agent_config.expect("agent config");
+    assert_eq!(
+        agent_config.work_dir.as_deref(),
+        Some(canonical_str.as_str())
+    );
+    assert_eq!(
+        agent_config.base_instructions.as_deref(),
+        Some("keep provider prompt")
+    );
+
+    let detail = manager
+        .get_session_detail("feishu-main:ou_owner")
+        .expect("session detail");
+    assert_eq!(detail.work_dir.as_deref(), Some(canonical_str.as_str()));
+    assert_eq!(detail.message_count, 0);
+}
+
+#[test]
 pub(super) fn agent_api_status_detail_applies_work_dir_for_fresh_status_session() {
     let manager = bifrost_agent::AgentSessionManager::new(3600);
 
