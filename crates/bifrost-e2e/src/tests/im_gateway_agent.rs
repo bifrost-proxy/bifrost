@@ -1050,45 +1050,72 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     "agent_output",
                     "agent_plan_panel",
                     "agent_plan",
-                    "agent_tool_panel",
-                    "agent_tool_log",
+                    "agent_process_panel",
+                    "agent_process_log",
+                    "agent_process_tool_1",
                     "agent_status_panel",
                     "agent_footer",
-                    "agent_thinking_panel",
                     "list_directory",
                     "37ms",
                     "1 条排队消息",
                     "有待处理引导消息",
                     "已收到引导：check latest logs",
                     "任务计划：Render latest status card",
-                    "**思考过程**",
+                    "Pipeline 过程",
+                    "**Loop 1**",
+                    "Loop 1 工具摘要",
                     "checking progress card sections",
                 ] {
                     if !body.contains(needle) {
                         return Err(format!("streaming card body missing {needle}: {body}"));
                     }
                 }
-                if body.contains("\"agent_thinking\"") {
-                    return Err(format!(
-                        "thinking content should not render legacy child element id: {body}"
-                    ));
+                for legacy_id in [
+                    "\"agent_thinking\"",
+                    "agent_tool_panel",
+                    "agent_tool_log",
+                    "agent_thinking_panel",
+                ] {
+                    if body.contains(legacy_id) {
+                        return Err(format!(
+                            "process timeline should not render legacy element id {legacy_id}: {body}"
+                        ));
+                    }
                 }
-                let thinking_element = card["body"]["elements"]
+                let process_element = card["body"]["elements"]
                     .as_array()
                     .and_then(|elements| {
                         elements
                             .iter()
-                            .find(|element| element["element_id"] == "agent_thinking_panel")
+                            .find(|element| element["element_id"] == "agent_process_panel")
                     })
-                    .ok_or_else(|| "streaming card missing thinking element".to_string())?;
-                if thinking_element["tag"] != "markdown" {
+                    .ok_or_else(|| "streaming card missing process element".to_string())?;
+                if process_element["tag"] != "collapsible_panel" {
                     return Err(format!(
-                        "thinking element should be visible markdown, got {thinking_element}"
+                        "process element should be collapsible, got {process_element}"
                     ));
                 }
-                if thinking_element.get("expanded").is_some() {
+                if process_element["expanded"] != false {
                     return Err(format!(
-                        "thinking element should not be collapsible, got {thinking_element}"
+                        "finished process element should be collapsed, got {process_element}"
+                    ));
+                }
+                let tool_element = process_element["elements"]
+                    .as_array()
+                    .and_then(|elements| {
+                        elements
+                            .iter()
+                            .find(|element| element["element_id"] == "agent_process_tool_1")
+                    })
+                    .ok_or_else(|| "streaming card missing process tool element".to_string())?;
+                if tool_element["tag"] != "collapsible_panel" {
+                    return Err(format!(
+                        "tool process element should be collapsible, got {tool_element}"
+                    ));
+                }
+                if tool_element["expanded"] != false {
+                    return Err(format!(
+                        "tool process element should be collapsed by default, got {tool_element}"
                     ));
                 }
                 Ok(())

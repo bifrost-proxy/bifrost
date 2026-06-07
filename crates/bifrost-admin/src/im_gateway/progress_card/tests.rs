@@ -73,6 +73,49 @@ fn progress_snapshot_tracks_tool_plan_queue_and_final_output() {
 }
 
 #[test]
+fn assistant_final_is_pipeline_content_until_turn_finished() {
+    let mut snapshot = ImAgentProgressSnapshot::new("s1", "review task");
+    snapshot.apply_event(AgentTurnProgressEvent::AssistantFinal {
+        content: "我先看分支差异。".to_string(),
+    });
+    snapshot.apply_event(AgentTurnProgressEvent::ToolStarted {
+        tool_name: "exec_command".to_string(),
+        arguments: "git diff --stat".to_string(),
+    });
+    snapshot.apply_event(AgentTurnProgressEvent::ToolFinished {
+        log: ToolCallLog {
+            tool_name: "exec_command".to_string(),
+            arguments: "git diff --stat".to_string(),
+            result: "56 files changed".to_string(),
+            success: true,
+        },
+        duration_ms: 10,
+    });
+    snapshot.apply_event(AgentTurnProgressEvent::AssistantFinal {
+        content: "接下来逐个模块检查。".to_string(),
+    });
+
+    assert!(snapshot.output.is_empty());
+    assert_eq!(snapshot.timeline.len(), 3);
+    assert_eq!(snapshot.timeline[0].kind, ProgressTimelineKind::Thinking);
+    assert_eq!(snapshot.timeline[1].kind, ProgressTimelineKind::Tool);
+    assert_eq!(snapshot.timeline[2].kind, ProgressTimelineKind::Thinking);
+
+    let running_card = build_feishu_progress_card(&snapshot, true);
+    let running_serialized = serde_json::to_string(&running_card).unwrap();
+    assert!(running_serialized.contains("**Loop 1**"));
+    assert!(running_serialized.contains("**Loop 2**"));
+    assert!(running_serialized.contains("我先看分支差异"));
+    assert!(running_serialized.contains("接下来逐个模块检查"));
+    assert!(!running_serialized.contains("最终结论"));
+
+    snapshot.apply_event(AgentTurnProgressEvent::TurnFinished {
+        content: "最终结论：未发现阻塞问题。".to_string(),
+    });
+    assert_eq!(snapshot.output, "最终结论：未发现阻塞问题。");
+}
+
+#[test]
 fn feishu_progress_card_expands_process_while_running_and_collapses_after_finish() {
     let mut snapshot = ImAgentProgressSnapshot::new("s1", "stream task");
     snapshot.apply_event(AgentTurnProgressEvent::AssistantDelta {

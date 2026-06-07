@@ -1148,7 +1148,16 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
             }
         }
         match result {
-            Ok(result) => {
+            Ok(mut result) => {
+                let run_succeeded = matches!(
+                    result.status,
+                    crate::im_gateway::external_cli::ExternalCliRunStatus::Succeeded
+                );
+                if !run_succeeded {
+                    let failure_reply = external_cli_non_success_reply(&result);
+                    result.response = failure_reply.clone();
+                    result.responses = vec![failure_reply];
+                }
                 remember_external_cli_result_metadata(&mut runner_metadata, &result.metadata);
                 record_external_cli_result(
                     &mut session,
@@ -1179,10 +1188,16 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                         .update_runner_summary(&input.session_key, runner_summary)
                         .await;
                     if let Some(progress_tx) = progress_tx_for_finish.take() {
-                        let _ =
-                            progress_tx.send(bifrost_agent::AgentTurnProgressEvent::TurnFinished {
+                        let event = if run_succeeded {
+                            bifrost_agent::AgentTurnProgressEvent::TurnFinished {
                                 content: result.response.clone(),
-                            });
+                            }
+                        } else {
+                            bifrost_agent::AgentTurnProgressEvent::TurnFailed {
+                                error: result.response.clone(),
+                            }
+                        };
+                        let _ = progress_tx.send(event);
                         drop(progress_tx);
                     }
                     if let Some(task) = progress_task.take() {
@@ -1190,7 +1205,11 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                     }
                     let _ = ctx
                         .progress_registry
-                        .finish(&input.session_key, Some(result.response.clone()), false)
+                        .finish(
+                            &input.session_key,
+                            Some(result.response.clone()),
+                            !run_succeeded,
+                        )
                         .await;
                 } else if !matches!(
                     delivery_mode,
@@ -1332,6 +1351,34 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
     );
     ctx.queue_manager.clear_session(&input.session_key);
     ctx.agent_session_manager.return_session(session);
+}
+
+fn external_cli_non_success_reply(
+    result: &crate::im_gateway::external_cli::ExternalCliRunResult,
+) -> String {
+    match result.status {
+        crate::im_gateway::external_cli::ExternalCliRunStatus::TimedOut => format!(
+            "Runner failed: external CLI timed out after {} seconds.\n\n_run: `{}`_",
+            std::cmp::max(1, result.duration_ms / 1000),
+            result.run_id
+        ),
+        crate::im_gateway::external_cli::ExternalCliRunStatus::Stopped => format!(
+            "Runner stopped before completion.\n\n_run: `{}`_",
+            result.run_id
+        ),
+        crate::im_gateway::external_cli::ExternalCliRunStatus::Failed => {
+            let detail = if result.response.trim().is_empty() {
+                match result.exit_code {
+                    Some(code) => format!("exit_code={code}"),
+                    None => "external CLI exited unsuccessfully".to_string(),
+                }
+            } else {
+                truncate_str(&result.response, 260)
+            };
+            format!("Runner failed: {detail}\n\n_run: `{}`_", result.run_id)
+        }
+        crate::im_gateway::external_cli::ExternalCliRunStatus::Succeeded => result.response.clone(),
+    }
 }
 
 pub(super) fn apply_external_cli_resume_metadata(
@@ -1714,5 +1761,52 @@ async fn maybe_stop_external_cli_for_event(event: &ImEvent, active_session_key: 
     .await
     {
         debug!(session_key = %active_session_key, error = %error, "external cli session stop was not applied");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn external_cli_result_with_status(
+        status: crate::im_gateway::external_cli::ExternalCliRunStatus,
+    ) -> crate::im_gateway::external_cli::ExternalCliRunResult {
+        crate::im_gateway::external_cli::ExternalCliRunResult {
+            run_id: "run-timeout".to_string(),
+            session_key: Some("s1".to_string()),
+            runtime: "external_cli".to_string(),
+            adapter: "traex".to_string(),
+            status,
+            exit_code: None,
+            response: "early agent message".to_string(),
+            responses: Vec::new(),
+            started_at: 1,
+            finished_at: 181_000,
+            duration_ms: 180_999,
+            artifacts: crate::im_gateway::external_cli::ExternalCliRunArtifacts {
+                run_dir: String::new(),
+                prompt: String::new(),
+                command_snapshot: String::new(),
+                stdout: String::new(),
+                stderr: String::new(),
+                normalized_events: String::new(),
+                last_message: String::new(),
+            },
+            events: Vec::new(),
+            metadata: std::collections::BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn timed_out_external_cli_result_reports_failure_reply() {
+        let result = external_cli_result_with_status(
+            crate::im_gateway::external_cli::ExternalCliRunStatus::TimedOut,
+        );
+
+        let reply = external_cli_non_success_reply(&result);
+
+        assert!(reply.contains("timed out after 180 seconds"));
+        assert!(reply.contains("run-timeout"));
+        assert!(!reply.contains("early agent message"));
     }
 }

@@ -76,6 +76,8 @@ Web Chat 和 IM event loop 使用 `record_external_cli_progress_event_to_timelin
 - `external_cli_runtime_streams_stdout_before_process_exit`：验证 stdout 事件在进程退出前已经推送。
 - `external_progress_maps_to_agent_turn_progress_events`：验证 external progress 可转 IM progress card 事件。
 - `external_runner_progress_events_are_recorded_as_visible_timeline_steps`：验证 status/tool 事件写入可见 timeline。
+- `assistant_final_is_pipeline_content_until_turn_finished`：验证 Trae/Codex 公开 `agent_message` 在 runner 仍运行时进入 Pipeline 过程，不提前占用底部最终结论。
+- `timed_out_external_cli_result_reports_failure_reply`：验证 Trae 超时等非成功状态按失败收敛，不把早期 `agent_message` 当作成功结果。
 
 ### E2E 测试
 

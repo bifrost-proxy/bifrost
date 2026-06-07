@@ -188,7 +188,12 @@ impl ImAgentProgressSnapshot {
             }
             AgentTurnProgressEvent::AssistantFinal { content } => {
                 if !content.trim().is_empty() {
-                    self.output = content;
+                    if matches!(self.phase, ImProgressPhase::Running) {
+                        self.push_timeline(ProgressTimelineItem::thinking(content.clone()));
+                        self.last_thought = Some(content);
+                    } else {
+                        self.output = content;
+                    }
                 }
             }
             AgentTurnProgressEvent::TurnFinished { content } => {
