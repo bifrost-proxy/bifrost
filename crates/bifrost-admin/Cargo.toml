@@ -1,6 +1,6 @@
 [package]
 name = "bifrost-admin"
-version = "0.0.92"
+version = "0.0.93"
 edition = "2021"
 description = "Admin API and web interface for Bifrost proxy"
 
