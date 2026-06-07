@@ -691,6 +691,22 @@
 5. 连续多个工具调用默认合并为“已运行 N 条命令”的一级折叠组；展开该组后，单条工具仍保持折叠，用户可继续展开查看输入/输出。
 6. 模型公开 content 直接按时间顺序展示，不额外添加 `1.`、`2.`、`3.` 这类编号前缀。
 
+### TC-IEC-35: 外部 Runner 运行中消息默认排队并续接原生 thread
+
+操作步骤：
+1. 启动一个长时间运行的 Codex 或 Trae external runner session，确保同一 `sessionKey` 处于 active 状态。
+2. 在该 session 运行期间，从同一 IM 会话或 Web Chat session 再发送一条普通用户消息，不使用 `/stop`。
+3. 读取即时响应或 progress card 队列状态。
+4. 当前 run 完成后，读取下一轮 run 的 `runtime_snapshot.json`。
+5. 分别对 Codex 和 Trae runner 执行上述检查。
+
+预期结果：
+1. Codex 和 Trae 这类 external/custom runner 运行中不做 guide 注入；普通新消息默认进入排队队列。
+2. `/stop` 仍作为控制命令立即尝试停止当前外部 runner，不作为普通排队消息。
+3. 当前 run 完成后自动处理下一条排队消息。
+4. Codex 下一轮使用已保存的 `threadId` 构造 `codex exec resume ... <threadId> -`。
+5. Trae 下一轮使用已保存的 `threadId` 构造 `traex exec resume ... <threadId> -`，不能退化为新建 `traex exec --json ... -`。
+
 ## 最近执行记录
 
 - 2026-05-13：执行 TC-IEC-01/02/03/04/08/09/10/11/12/13，临时服务端口 `18880`，`BIFROST_DATA_DIR=/tmp/bifrost-im-external-cli-test`，均通过；TC-IEC-12 使用 `sleep 23` 慢进程验证 active run 可停止，run 收敛为 `status:"stopped"`，`response:"External CLI run was stopped by request."`，且未残留 `sleep 23` 测试进程。
@@ -720,6 +736,7 @@
 - 2026-06-07：根据真实飞书截图继续执行 TC-IEC-34 文案回归，去除执行过程中的 `Loop 1/2`、`Pipeline`、`工具摘要`、`[模型]`、纯 run id、`turn started` 与 `model rerouted` 等内部提示；过程区域改为从上到下展示公开模型内容和工具调用，工具详情仍保持可展开。命令 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin progress_card -- --nocapture` 与 `SKIP_FRONTEND_BUILD=1 cargo run -p bifrost-e2e -- --test im_gateway_agent_streaming_progress_card_renderer --jobs 1 --timeout 120` 均通过。
 - 2026-06-07：继续执行 TC-IEC-34 的工具密集场景回归，飞书 progress card 将连续 3 条工具调用默认合并为 `已运行 3 条命令` 一级折叠组，展开后每条工具仍是独立折叠项；同时把过程 Markdown 从双空行压缩为单换行，减少行高和竖向占用。新增 `consecutive_process_tools_are_grouped_by_default` 回归测试。
 - 2026-06-07：继续执行 TC-IEC-34 的过程文案回归，飞书 progress card 的模型公开 content 不再添加 `1.`、`2.`、`3.` 编号前缀，按时间顺序直接展示原文；新增断言覆盖 `1. 我先看分支差异` / `1. 我会先检查代码路径` 不应出现在卡片 JSON 中。
+- 2026-06-07：执行 TC-IEC-35 的代码路径复核与单元回归，确认 IM event loop 和 Web Chat `/stream` 对 external/custom runner 的运行中新消息默认走 `SessionQueueManager` 排队，不做 guide 注入；`/stop` 仍单独尝试停止当前外部进程。补充 Trae 排队续跑回归，修复 `apply_external_cli_resume_metadata` 只给 Codex 注入 `threadId` 的问题，确保 Trae queued continuation 也能走 `traex exec resume ... <threadId> -`。命令 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin busy_message_mode -- --nocapture` 通过 9 个测试，`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin 'adapter_builds_resume_command_from_thread_id' -- --nocapture` 通过 Codex/Trae 2 个 resume 命令构造测试。
 
 ## 清理步骤
 

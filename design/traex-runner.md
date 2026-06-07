@@ -63,6 +63,8 @@ Web Chat 和 IM event loop 使用 `record_external_cli_progress_event_to_timelin
 
 Web timeline 会按 `call_id` 合并工具 start/result，并跳过重复 start。后端在写 conversation timeline 时也会跳过同一 `call_id` 的重复 `ToolStarted`，避免 Trae/Codex 重复输出 `item.started` 时造成 WebView active command 计数虚高。
 
+外部 runner（Codex/Trae）运行中不做 guide 注入：同 session 的新用户消息默认进入 `SessionQueueManager` 排队，`/stop` 作为单独控制命令立即尝试停止当前外部进程。当前 run 结束后，IM/Web Chat runner loop 会弹出下一条排队消息再启动下一轮外部 runner；Codex 和 Trae 都会复用上一轮保存的 `threadId` 走 `exec resume`，避免排队续跑丢失 runner 原生会话上下文。
+
 ## 依赖项
 
 - 本机已安装 `traex` CLI，并支持 `exec --json --output-last-message`。

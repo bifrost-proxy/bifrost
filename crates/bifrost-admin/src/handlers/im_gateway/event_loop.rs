@@ -1416,7 +1416,10 @@ pub(super) fn apply_external_cli_resume_metadata(
         }
         return;
     }
-    if request.adapter != "codex" {
+    if !matches!(
+        request.adapter.as_str(),
+        "codex" | crate::im_gateway::external_cli::TRAEX_ADAPTER
+    ) {
         return;
     }
     if request
