@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Button, Card, Col, Empty, Grid, Input, Modal, Row, Segmented, Select, Space, Tag, Typography, message as antdMessage, theme } from "antd";
-import { BulbOutlined, DeleteOutlined, DownOutlined, FolderOpenOutlined, BorderOutlined, PlusOutlined, RobotOutlined, SendOutlined, SettingOutlined } from "@ant-design/icons";
+import { BulbOutlined, DeleteOutlined, DownOutlined, FolderOpenOutlined, BorderOutlined, LeftOutlined, PlusOutlined, RobotOutlined, SendOutlined, SettingOutlined } from "@ant-design/icons";
 import { apiFetch } from "../../api/apiFetch";
 import { buildApiUrl } from "../../runtime";
 import { getClientId } from "../../services/clientId";
@@ -57,6 +57,7 @@ const { TextArea } = Input;
 const { useBreakpoint } = Grid;
 const MAX_PASTED_IMAGES = 6;
 const HISTORY_EVENT_PAGE_SIZE = 300;
+const THREAD_RAIL_COLLAPSED_STORAGE_KEY = "bifrost.agentChat.threadRailCollapsed";
 type AgentCollaborationMode = "plan";
 
 function parseAgentPlanSlash(content: string): {
@@ -235,6 +236,12 @@ export default function AgentChatSection() {
   const [queuedInputs, setQueuedInputs] = useState<QueuedInput[]>([]);
   const [nowSeconds, setNowSeconds] = useState(() => Math.floor(Date.now() / 1000));
   const [threads, setThreads] = useState<AgentThreadSummary[]>([]);
+  const [threadRailCollapsed, setThreadRailCollapsed] = useState(() => {
+    if (typeof window === "undefined") {
+      return false;
+    }
+    return window.localStorage.getItem(THREAD_RAIL_COLLAPSED_STORAGE_KEY) === "true";
+  });
   const [telemetry, setTelemetry] = useState<RunTelemetry>(EMPTY_TELEMETRY);
   const [workDir, setWorkDir] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -403,18 +410,22 @@ export default function AgentChatSection() {
           ? page.next_cursor
           : historyEventStartIndexRef.current;
       setHistoryHasOlder(Boolean(page.has_more));
-      const restored = historyEventsToMessages(events, {
-        ensureRunningAssistant: isThreadActive(matchedThread),
-        runningState: matchedThread?.run_state || matchedThread?.state,
-      });
-      replaceLoadedMessages(restored, shouldStickToBottom);
       const nextTelemetry = historyEventsToTelemetry(
         events,
         matchedThread,
         telemetryFromThread(matchedThread),
       );
+      const terminalTimeline =
+        nextTelemetry.phase === "finished" || nextTelemetry.phase === "failed";
+      const timelineRunning = nextTelemetry.phase === "running";
+      const restored = historyEventsToMessages(events, {
+        ensureRunningAssistant:
+          timelineRunning || (!terminalTimeline && isThreadActive(matchedThread)),
+        runningState: matchedThread?.run_state || matchedThread?.state,
+      });
+      replaceLoadedMessages(restored, shouldStickToBottom);
       setTelemetry(nextTelemetry);
-      setRunning(nextTelemetry.phase === "running" || isThreadActive(matchedThread));
+      setRunning(timelineRunning || (!terminalTimeline && isThreadActive(matchedThread)));
       return { restored, nextTelemetry };
     },
     [replaceLoadedMessages],
@@ -528,15 +539,16 @@ export default function AgentChatSection() {
         agent_type: telemetry.status?.agent_type,
       });
   const currentRunnerTag = formatRunnerTag(telemetry.status, selectedThread, runnerId);
-  const displayRunning = running || isThreadActive(selectedThread);
+  const terminalTimeline = telemetry.phase === "finished" || telemetry.phase === "failed";
+  const displayRunning = running || (!terminalTimeline && isThreadActive(selectedThread));
   const currentStateTag = formatCurrentStateTag(telemetry, selectedThread, displayRunning);
-  const guideSupported = runnerId === "bifrost_agent";
   const builtInAgentCommandsSupported = supportsBuiltInAgentCommands({
     runnerId,
     runnerOptions,
     selectedThread,
     status: telemetry.status,
   });
+  const guideSupported = builtInAgentCommandsSupported;
   const {
     slashRunner,
     setSlashRunner,
@@ -637,6 +649,13 @@ export default function AgentChatSection() {
   useEffect(() => {
     threadsRef.current = threads;
   }, [threads]);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      THREAD_RAIL_COLLAPSED_STORAGE_KEY,
+      threadRailCollapsed ? "true" : "false",
+    );
+  }, [threadRailCollapsed]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -1224,8 +1243,8 @@ export default function AgentChatSection() {
   );
 
   const styles = useMemo(
-    () => createAgentChatStyles(isCompact, isNarrow, token),
-    [isCompact, isNarrow, token],
+    () => createAgentChatStyles(isCompact, isNarrow, threadRailCollapsed, token),
+    [isCompact, isNarrow, threadRailCollapsed, token],
   );
 
   const applyQueueEvent = (event: Record<string, unknown>) => {
@@ -1239,23 +1258,24 @@ export default function AgentChatSection() {
     content: string,
     mode: "guide" | "queue" | "stop" | "remove",
   ) => {
-    const isExternalRunner = runnerId !== "bifrost_agent";
-    const rendersMessage = mode === "guide" || mode === "stop";
+    const effectiveMode = mode === "guide" && !guideSupported ? "queue" : mode;
+    const queuesRunningInput = effectiveMode === "queue";
+    const rendersMessage = effectiveMode === "guide" || effectiveMode === "stop";
     const message =
-      mode === "queue" && !content.startsWith("/q ")
+      queuesRunningInput && !content.startsWith("/q ")
         ? `/q ${content}`
-        : mode === "remove"
+        : effectiveMode === "remove"
           ? content
           : content;
     const userMessage: ChatMessage = {
       id: `user-${Date.now()}`,
       role: "user",
-      content: mode === "stop" ? "/stop" : content,
+      content: effectiveMode === "stop" ? "/stop" : content,
       timestamp: Date.now() / 1000,
       meta:
-        mode === "stop"
+        effectiveMode === "stop"
           ? "Control"
-          : mode === "queue" || isExternalRunner
+          : queuesRunningInput
             ? "Queued user"
             : "Guide user",
     };
@@ -1264,9 +1284,9 @@ export default function AgentChatSection() {
       id: assistantId,
       role: "assistant",
       content:
-        mode === "stop"
+        effectiveMode === "stop"
           ? "Stopping..."
-          : mode === "queue" || isExternalRunner
+          : queuesRunningInput
             ? "Queueing..."
             : "Injecting guide...",
       timestamp: Date.now() / 1000,
@@ -2438,18 +2458,31 @@ export default function AgentChatSection() {
           </div>
         </Card>
 
-        <div style={styles.sideRail}>
-          <AgentThreadListCard
-            threads={threads}
-            sessionKey={sessionKey}
-            historyPath={historyPath}
-            view={queryView}
-            nowSeconds={nowSeconds}
-            styles={styles}
-            onOpenThread={handleOpenThread}
-            onDeleteThread={handleDeleteThread}
+        {threadRailCollapsed ? (
+          <Button
+            shape="circle"
+            icon={<LeftOutlined />}
+            aria-label="Expand threads"
+            title="Expand threads"
+            data-testid="agent-chat-threads-expand"
+            style={styles.threadRailExpandButton}
+            onClick={() => setThreadRailCollapsed(false)}
           />
-        </div>
+        ) : (
+          <div style={styles.sideRail}>
+            <AgentThreadListCard
+              threads={threads}
+              sessionKey={sessionKey}
+              historyPath={historyPath}
+              view={queryView}
+              nowSeconds={nowSeconds}
+              styles={styles}
+              onOpenThread={handleOpenThread}
+              onDeleteThread={handleDeleteThread}
+              onCollapse={() => setThreadRailCollapsed(true)}
+            />
+          </div>
+        )}
 
         <AgentChatSettingsModal
           open={settingsOpen}

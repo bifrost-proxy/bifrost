@@ -624,6 +624,57 @@ test("AI 一级页整合 Agent 子导航并按 URL 切换独立编辑卡片", as
   await expect(page.getByTestId("agent-settings-section-runtime")).toBeVisible();
 });
 
+test("Agent Runners 新增弹窗只展示当前支持的 Adapter", async ({ page }) => {
+  await page.route("**/_bifrost/api/im-gateway/agent", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        enabled: true,
+        work_dir: "/tmp/agent-ui",
+        model_providers: {},
+        mcp_servers: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/providers", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+  });
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        defaultRunnerId: "codex",
+        runners: {
+          codex: { enabled: true, adapter: "codex", adapterConfig: {} },
+          traex: { enabled: true, adapter: "traex", adapterConfig: {} },
+          web: { enabled: true, adapter: "chatgpt_web", adapterConfig: {} },
+        },
+        channels: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/providers", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+  });
+
+  await openPage(page, "ai?aiSection=agent-runners&agentSection=runners");
+  await expect(page.getByTestId("agent-settings-section-runners")).toBeVisible();
+
+  await page.getByRole("button", { name: "Add Runner" }).click();
+  const dialog = page.getByRole("dialog", { name: "Add Runner" });
+  await expect(dialog).toBeVisible();
+  await dialog.getByLabel("Adapter").click();
+
+  const adapterDropdown = page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)");
+  await expect(adapterDropdown).toContainText("Codex CLI");
+  await expect(adapterDropdown).toContainText("Trae CLI");
+  await expect(adapterDropdown).toContainText("ChatGPT Web");
+  await expect(adapterDropdown).not.toContainText("Custom");
+  await expect(adapterDropdown).not.toContainText("Mock");
+});
+
 test("AI Agent Chat section 展示聊天工作台并支持真实流式发送", async ({ page }) => {
   await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
     await route.fulfill({

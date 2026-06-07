@@ -51,8 +51,6 @@ const ADAPTER_OPTIONS = [
   { label: "Codex CLI", value: "codex" },
   { label: "Trae CLI", value: "traex" },
   { label: "ChatGPT Web", value: "chatgpt_web" },
-  { label: "Custom", value: "custom" },
-  { label: "Mock", value: "mock" },
 ];
 
 const DELIVERY_OPTIONS = [

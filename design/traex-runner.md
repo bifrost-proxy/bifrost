@@ -17,6 +17,7 @@ Bifrost 的 Agent Runner 已经把 Codex、ChatGPT Web、custom CLI 收敛到同
 - Web Chat `/chat/stream` 与 slash runner-call stream 必须把 Trae progress event 实时写入同一份 conversation timeline。
 - IM event loop 必须把 Trae progress event 同时推给 progress card 和 conversation timeline。
 - WebUI Runners 配置面支持选择 Trae CLI，并在最终消息中默认展开已完成的过程块。
+- WebUI Runners 配置面只展示当前可用的 Codex CLI、Trae CLI、ChatGPT Web 三类 Adapter；`custom`/`mock` 作为内部兼容和未来扩展能力保留在协议层，不暴露给用户选择。
 
 ### 必须不破坏
 
@@ -63,7 +64,11 @@ Web Chat 和 IM event loop 使用 `record_external_cli_progress_event_to_timelin
 
 Web timeline 会按 `call_id` 合并工具 start/result，并跳过重复 start。后端在写 conversation timeline 时也会跳过同一 `call_id` 的重复 `ToolStarted`，避免 Trae/Codex 重复输出 `item.started` 时造成 WebView active command 计数虚高。
 
-外部 runner（Codex/Trae）运行中不做 guide 注入：同 session 的新用户消息默认进入 `SessionQueueManager` 排队，`/stop` 作为单独控制命令立即尝试停止当前外部进程。当前 run 结束后，IM/Web Chat runner loop 会弹出下一条排队消息再启动下一轮外部 runner；Codex 和 Trae 都会复用上一轮保存的 `threadId` 走 `exec resume`，避免排队续跑丢失 runner 原生会话上下文。
+外部 runner（Codex/Trae）运行中不做 guide 注入：同 session 的新用户消息默认进入 `SessionQueueManager` 排队，`/stop` 作为单独控制命令立即尝试停止当前外部进程。Web Chat 交互层也必须隐藏 Guide/Queue 切换，只展示 queue 状态；即使某个入口误传 guide，也会在提交前降级为 queue。当前 run 结束后，IM/Web Chat runner loop 会弹出下一条排队消息再启动下一轮外部 runner；Codex 和 Trae 都会复用上一轮保存的 `threadId` 走 `exec resume`，避免排队续跑丢失 runner 原生会话上下文。
+
+Agent Chat 右侧 Threads 列表支持折叠：卡片标题右侧按钮向右收起，收起后只保留右上悬浮向左展开按钮，状态写入 `localStorage`，刷新页面后保持。Threads runner 标记优先使用 `runner_id`/`runner_type`/`agent_type`，缺失时才从 `source`/`title` fallback 识别 Trae/Codex/ChatGPT，避免 Trae 会话误显示为 `Bf`。
+
+Runners 配置页的 Adapter 下拉只展示产品化入口：Codex CLI、Trae CLI、ChatGPT Web。后端仍接受历史或测试用途的 `custom`/`mock` adapter，保证已有配置和自动化测试不被破坏，但新建/编辑弹窗不再把这些未来扩展项暴露给普通用户。
 
 ## 依赖项
 
@@ -92,6 +97,8 @@ Web timeline 会按 `call_id` 合并工具 start/result，并跳过重复 start�
 
 - 使用临时 `BIFROST_DATA_DIR` 启动服务，配置 `traex` runner，调用 `/chat/stream`，断言 NDJSON 中包含 Trae progress event、最终 `run_finished`、run detail artifacts 和 timeline。
 - 使用 WebUI 真实浏览器打开 Agent Chat，发送 Trae runner 长任务消息，断言运行中过程块默认展开并持续更新，工具行展示命令片段；完成后过程块默认折叠且最终回答位于底部。
+- 使用 Playwright 断言 external runner 运行中输入只显示 Queue 并发送 `/q ...`；断言 Threads 折叠状态写入 localStorage，刷新后仍保持；断言 Trae fallback thread mark 不显示为 `Bf`。
+- 使用 Playwright 打开 Agent Runners 的 Add Runner 弹窗，断言 Adapter 下拉包含 Codex CLI、Trae CLI、ChatGPT Web，且不包含 Custom、Mock。
 
 ### 真实场景测试
 

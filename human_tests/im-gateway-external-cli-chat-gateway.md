@@ -337,7 +337,7 @@
 2. 检查 AI -> Agent -> General 中存在 `Default Runner` 控件，选项包含 `Bifrost Agent` 和已配置的自定义 runner ID（如 `codex`、`abc`），不出现 `External CLI (Codex)` 这类旧固定文案。
 3. 打开 `http://127.0.0.1:18882/_bifrost/ai?agentSection=runners`。
 4. 检查 Runners 页面默认展示 runner 列表，而不是直接展示大表单；页面内不再出现 `Default Custom Runner` 或默认 runner 下拉。
-5. 点击 `Add Runner`，弹窗填写自定义 Runner ID、Adapter、Executable、Arguments、Skill Paths、Instructions 等配置；保存后列表中出现新 runner。
+5. 点击 `Add Runner`，弹窗填写自定义 Runner ID、Adapter、Executable、Arguments、Skill Paths、Instructions 等配置；Adapter 下拉只展示 `Codex CLI`、`Trae CLI`、`ChatGPT Web`，不展示内部/未来扩展项 `Custom`、`Mock`；保存后列表中出现新 runner。
 6. 编辑已有 runner，确认仍通过弹窗修改配置；每个 runner 都可独立选择 adapter。
 7. 打开 `http://127.0.0.1:18882/_bifrost/ai?imGatewaySection=connections`。
 8. 编辑一个 IM Provider，检查弹窗内 `Agent Runner` 控件选项包含 `Inherit global default`、`Bifrost Agent` 和各自定义 runner ID。
@@ -356,6 +356,7 @@
 4. IM Provider 可以通过 `agent_config.runner` 覆盖全局 runner，也可以清空为继承全局默认。
 5. Provider 列表卡片展示当前覆盖状态；未覆盖时显示 `Global default`，自定义 runner 显示 runner ID。
 6. 亮色和暗色主题下控件文案、下拉菜单和说明文字清晰可见。
+7. Agent Runners 新建/编辑弹窗不向普通用户暴露 `Custom`、`Mock` adapter；历史配置或自动化测试使用这些 adapter 时仍由协议层兼容。
 
 ### TC-IEC-19: Codex Runner 工作目录按 Provider -> Global 降级并显式传给 CLI
 
@@ -707,6 +708,25 @@
 4. Codex 下一轮使用已保存的 `threadId` 构造 `codex exec resume ... <threadId> -`。
 5. Trae 下一轮使用已保存的 `threadId` 构造 `traex exec resume ... <threadId> -`，不能退化为新建 `traex exec --json ... -`。
 
+### TC-IEC-36: Agent Chat 外部 Runner 运行中交互与 Threads 面板回归
+
+操作步骤：
+1. 使用 WebUI Agent Chat 选择或默认进入 Trae/Codex external runner。
+2. 启动一个长时间运行的 external runner session。
+3. 运行中在输入框输入一条普通追加消息。
+4. 观察输入框上方运行中工具栏和实际 stream 请求。
+5. 点击右侧 Threads 标题右侧的折叠按钮，刷新页面，再点击悬浮展开按钮。
+6. 准备一个缺少 `runner_id` 但 `source` 或 `title` 包含 Trae/Traex 的 thread 摘要。
+
+预期结果：
+1. 运行中 external runner 不展示 `Guide` 切换或按钮，只展示 Queue 状态。
+2. 追加消息通过 `/q <message>` 进入队列，不以 guide 方式发送。
+3. 内置 Bifrost Agent 仍保留 Guide/Queue 切换和 guide 注入能力。
+4. Threads 面板标题右侧按钮向右收起；收起后面板消失，只显示右上悬浮向左展开按钮。
+5. 折叠状态写入 `localStorage`，刷新页面后仍保持；展开后写回未折叠状态。
+6. Trae/Traex thread 的 runner 标记显示 Trae 短标（`Tr`），不误显示 `Bf`；明确 runner metadata 为 Bifrost Agent 的历史 thread 仍显示 `Bf`。
+7. 如果 thread 摘要仍是 stale running，但 history timeline 已写入 `run_state_changed: completed` 和最终 assistant message，Web Chat 必须以 completed timeline 为准收敛为 Ready/Send，不再显示额外 `Thinking...`。
+
 ## 最近执行记录
 
 - 2026-05-13：执行 TC-IEC-01/02/03/04/08/09/10/11/12/13，临时服务端口 `18880`，`BIFROST_DATA_DIR=/tmp/bifrost-im-external-cli-test`，均通过；TC-IEC-12 使用 `sleep 23` 慢进程验证 active run 可停止，run 收敛为 `status:"stopped"`，`response:"External CLI run was stopped by request."`，且未残留 `sleep 23` 测试进程。
@@ -737,6 +757,8 @@
 - 2026-06-07：继续执行 TC-IEC-34 的工具密集场景回归，飞书 progress card 将连续 3 条工具调用默认合并为 `已运行 3 条命令` 一级折叠组，展开后每条工具仍是独立折叠项；同时把过程 Markdown 从双空行压缩为单换行，减少行高和竖向占用。新增 `consecutive_process_tools_are_grouped_by_default` 回归测试。
 - 2026-06-07：继续执行 TC-IEC-34 的过程文案回归，飞书 progress card 的模型公开 content 不再添加 `1.`、`2.`、`3.` 编号前缀，按时间顺序直接展示原文；新增断言覆盖 `1. 我先看分支差异` / `1. 我会先检查代码路径` 不应出现在卡片 JSON 中。
 - 2026-06-07：执行 TC-IEC-35 的代码路径复核与单元回归，确认 IM event loop 和 Web Chat `/stream` 对 external/custom runner 的运行中新消息默认走 `SessionQueueManager` 排队，不做 guide 注入；`/stop` 仍单独尝试停止当前外部进程。补充 Trae 排队续跑回归，修复 `apply_external_cli_resume_metadata` 只给 Codex 注入 `threadId` 的问题，确保 Trae queued continuation 也能走 `traex exec resume ... <threadId> -`。命令 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin busy_message_mode -- --nocapture` 通过 9 个测试，`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin 'adapter_builds_resume_command_from_thread_id' -- --nocapture` 通过 Codex/Trae 2 个 resume 命令构造测试。
+- 2026-06-07：执行 TC-IEC-36 的 WebUI 交互回归，命令 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts -g "(persists collapsed thread rail|queues running input for external runners|supports running stop, guide, queue|uses detail runner metadata)" --reporter=line` 通过 4 个测试。覆盖 external runner 运行中只展示 Queue 且请求为 `/q follow up while running`、内置 Bifrost Agent 仍支持 guide/queue/stop、Threads 折叠状态写入 localStorage 并在刷新后保持、缺少 runner_id 但 source/title 指向 Trae 的 thread mark 显示 `Tr` 而非 `Bf`，同时确认明确 Bifrost metadata 的历史 thread 仍显示 `Bf`。真实 WebView 验证中，Trae 第二轮 queued continuation 已自动从 queue panel 转为新的 user bubble 并执行完成，但页面仍停在 Running；后续补充 `AI Agent Chat lets completed history override stale running thread summary` 回归并修复 timeline completed 覆盖 stale thread running 摘要，复跑 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts -g "(stale running thread summary|queues running input for external runners|supports running stop, guide, queue)" --reporter=line` 通过 3 个测试。
+- 2026-06-07：补充执行 TC-IEC-18 的 Agent Runners Adapter 菜单回归，命令 `pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts -g "Agent Runners 新增弹窗只展示当前支持的 Adapter" --reporter=line` 通过 1 个测试；截图级验证 Add Runner 弹窗 Adapter 下拉只展示 `Codex CLI`、`Trae CLI`、`ChatGPT Web`，不再展示 `Custom`、`Mock`。
 
 ## 清理步骤
 

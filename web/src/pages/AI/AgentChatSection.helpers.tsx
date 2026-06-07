@@ -486,8 +486,14 @@ export function formatThreadRunnerMark(thread: AgentThreadSummary) {
   ) {
     return "Bf";
   }
-  const title = (thread.title || "").toLowerCase();
-  if (title.includes("chatgpt web") || title.includes("webgpt")) {
+  const fallback = [thread.source, thread.title].filter(Boolean).join(" ").toLowerCase();
+  if (fallback.includes("codex")) {
+    return "Cx";
+  }
+  if (fallback.includes("traex") || fallback.includes("trae")) {
+    return "Tr";
+  }
+  if (fallback.includes("chatgpt") || fallback.includes("webgpt")) {
     return "GPT";
   }
   return "Bf";
@@ -597,13 +603,16 @@ export function formatCurrentStateTag(
   thread: AgentThreadSummary | undefined,
   running: boolean,
 ) {
-  if (running || thread?.running === true) {
-    return "Running";
-  }
   if (telemetry.phase === "failed") {
     return "Error";
   }
-  if (thread || telemetry.phase === "finished" || telemetry.status?.state) {
+  if (telemetry.phase === "finished") {
+    return "Ready";
+  }
+  if (running || thread?.running === true) {
+    return "Running";
+  }
+  if (thread || telemetry.status?.state) {
     return "Ready";
   }
   return "New";

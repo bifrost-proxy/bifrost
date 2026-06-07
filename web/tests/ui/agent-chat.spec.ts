@@ -2574,6 +2574,116 @@ test("AI Agent Chat keeps polling running history timeline after refresh", async
   expect(historyCalls).toBeGreaterThanOrEqual(2);
 });
 
+test("AI Agent Chat lets completed history override stale running thread summary", async ({
+  page,
+}) => {
+  const historyPath = "/tmp/stale-running-completed.jsonl";
+  const startedAt = Math.floor(Date.now() / 1000) - 20;
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "traex",
+        runners: { traex: { enabled: true, adapter: "traex" } },
+        channels: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ content: "", work_dir: "/tmp/workspace" }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessions: [
+          {
+            session_key: "stale-running-completed",
+            status: "active",
+            running: true,
+            title: "Stale running completed",
+            history_path: historyPath,
+            has_timeline: true,
+            run_state: "running",
+            runner_id: "traex",
+            runner_type: "traex",
+            source: "web",
+          },
+        ],
+      }),
+    });
+  });
+  await page.route(
+    `**/_bifrost/api/im-gateway/agent/sessions/history/${encodeURIComponent(historyPath)}**`,
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          events: [
+            {
+              timestamp: startedAt,
+              event_type: "session_start",
+              session_key: "stale-running-completed",
+              content: { runner_id: "traex", runtime: "external_cli", source: "admin-api" },
+            },
+            {
+              timestamp: startedAt + 1,
+              event_type: "run_state_changed",
+              session_key: "stale-running-completed",
+              content: { state: "running", agent_kind: "traex", source_channel: "web" },
+            },
+            {
+              timestamp: startedAt + 2,
+              event_type: "user_message",
+              session_key: "stale-running-completed",
+              content: { message: "Queued message" },
+            },
+            {
+              timestamp: startedAt + 3,
+              event_type: "assistant_delta",
+              session_key: "stale-running-completed",
+              content: { message: "Completed from queued run." },
+            },
+            {
+              timestamp: startedAt + 4,
+              event_type: "run_state_changed",
+              session_key: "stale-running-completed",
+              content: { state: "completed", agent_kind: "traex", source_channel: "web" },
+            },
+            {
+              timestamp: startedAt + 5,
+              event_type: "assistant_message",
+              session_key: "stale-running-completed",
+              content: { message: "Completed from queued run." },
+            },
+          ],
+        }),
+      });
+    },
+  );
+
+  await openPage(
+    page,
+    `ai?aiSection=agent-chat&agentSection=chat&session=stale-running-completed&view=history&historyPath=${encodeURIComponent(historyPath)}`,
+  );
+
+  await expect(page.getByTestId("agent-chat-runner-tag")).toContainText("traex");
+  await expect(page.getByTestId("agent-chat-state-tag")).toContainText("Ready");
+  await expect(page.getByTestId("agent-chat-send")).toHaveAttribute("aria-label", "Send");
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Completed from queued run.",
+  );
+  await expect(page.getByTestId("agent-chat-thinking-tail")).toHaveCount(0);
+});
+
 test("AI Agent Chat can start a new chat while the selected thread is running", async ({
   page,
 }) => {
@@ -2944,6 +3054,13 @@ test("AI Agent Chat uses detail runner metadata instead of source for selected r
       body: JSON.stringify({
         sessions: [
           {
+            session_key: "trae-title-fallback",
+            status: "active",
+            running: false,
+            title: "Runner: 你好",
+            source: "Traex",
+          },
+          {
             session_key: "source-runner-mismatch",
             status: "active",
             running: false,
@@ -2983,6 +3100,9 @@ test("AI Agent Chat uses detail runner metadata instead of source for selected r
   await expect(
     page.getByRole("button", { name: /Bf ChatGPT Web: legacy title/ }),
   ).toHaveAttribute("aria-current", "true");
+  await expect(
+    page.getByRole("button", { name: /Tr Runner: 你好/ }),
+  ).toBeVisible();
 });
 
 test("AI Agent Chat renders local generated image attachments", async ({ page }) => {
@@ -3294,6 +3414,144 @@ test("AI Agent Chat sends pasted images to external runner stream", async ({
   );
 });
 
+test("AI Agent Chat persists collapsed thread rail", async ({ page }) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ sessions: [] }) });
+  });
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "bifrost_agent",
+        runners: {},
+        channels: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ content: "", work_dir: "/tmp/workspace" }) });
+  });
+
+  await openPage(page, "ai?aiSection=agent-chat&agentSection=chat");
+  await expect(page.getByTestId("agent-chat-thread-list")).toBeVisible();
+  await page.getByTestId("agent-chat-threads-collapse").click();
+  await expect(page.getByTestId("agent-chat-thread-list")).toHaveCount(0);
+  await expect(page.getByTestId("agent-chat-threads-expand")).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.localStorage.getItem("bifrost.agentChat.threadRailCollapsed"),
+      ),
+    )
+    .toBe("true");
+
+  await page.reload();
+  await expect(page.getByTestId("agent-chat-thread-list")).toHaveCount(0);
+  await expect(page.getByTestId("agent-chat-threads-expand")).toBeVisible();
+  await page.getByTestId("agent-chat-threads-expand").click();
+  await expect(page.getByTestId("agent-chat-thread-list")).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.localStorage.getItem("bifrost.agentChat.threadRailCollapsed"),
+      ),
+    )
+    .toBe("false");
+});
+
+test("AI Agent Chat queues running input for external runners", async ({
+  page,
+}) => {
+  const messages: string[] = [];
+  let releaseFirst: (() => void) | undefined;
+  const firstRequestCanFinish = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ sessions: [] }) });
+  });
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "traex",
+        runners: { traex: { enabled: true, adapter: "traex" } },
+        channels: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ content: "", work_dir: "/tmp/workspace" }) });
+  });
+  await page.route("**/_bifrost/api/im-gateway/chat/stream", async (route) => {
+    const payload = route.request().postDataJSON();
+    messages.push(payload.message);
+    expect(payload).toMatchObject({
+      runnerId: "traex",
+      adapter: "traex",
+    });
+    if (payload.message === "Start external long task") {
+      await firstRequestCanFinish;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/x-ndjson",
+        body:
+          '{"eventType":"run_started","status":{"runner_id":"traex","runner_type":"traex"}}\n' +
+          '{"eventType":"run_finished","status":"succeeded","response":"External long task done"}\n',
+      });
+      return;
+    }
+    if (payload.message === "/q follow up while running") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/x-ndjson",
+        body:
+          '{"eventType":"run_finished","response":"queued","queued":true,"queueItems":[{"seq":1,"message":"follow up while running"}]}\n',
+      });
+      return;
+    }
+    if (payload.message === "/stop") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/x-ndjson",
+        body:
+          '{"eventType":"run_finished","response":"stopped","stopped":true}\n',
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 500,
+      contentType: "text/plain",
+      body: `unexpected message: ${String(payload.message)}`,
+    });
+  });
+
+  await openPage(page, "ai?aiSection=agent-chat&agentSection=chat");
+  await page.getByTestId("agent-chat-input").fill("Start external long task");
+  await page.getByTestId("agent-chat-send").click();
+  await expect(page.getByTestId("agent-chat-send")).toHaveAttribute("aria-label", "Stop");
+
+  await page.getByTestId("agent-chat-input").fill("follow up while running");
+  await expect(page.getByText("This runner queues follow-up messages")).toBeVisible();
+  await expect(page.getByText("Queue", { exact: true })).toBeVisible();
+  await expect(page.getByText("Guide")).toHaveCount(0);
+  await page.getByTestId("agent-chat-send").click();
+  await expect(page.getByTestId("agent-chat-queue-panel")).toContainText(
+    "follow up while running",
+  );
+
+  await page.getByTestId("agent-chat-send").click();
+  await expect(page.getByTestId("agent-chat-messages")).toContainText("stopped");
+  releaseFirst?.();
+  await expect
+    .poll(() => messages.join("|"))
+    .toBe("Start external long task|/q follow up while running|/stop");
+});
+
 test("AI Agent Chat supports running stop, guide, queue, and queue removal", async ({
   page,
 }) => {
@@ -3301,6 +3559,24 @@ test("AI Agent Chat supports running stop, guide, queue, and queue removal", asy
   let releaseFirst: (() => void) | undefined;
   const firstRequestCanFinish = new Promise<void>((resolve) => {
     releaseFirst = resolve;
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ sessions: [] }) });
+  });
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "bifrost_agent",
+        runners: {},
+        channels: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ content: "", work_dir: "/tmp/workspace" }) });
   });
   await page.route("**/_bifrost/api/agent/chat/stream", async (route) => {
     const payload = route.request().postDataJSON();
