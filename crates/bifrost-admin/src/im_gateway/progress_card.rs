@@ -239,7 +239,7 @@ impl ImAgentProgressSnapshot {
             item.title = title;
             item.summary = summary;
             if item.detail.trim().is_empty() {
-                item.detail = format!("参数：`{}`", truncate_str(&arguments, 300));
+                item.detail = format!("输入：`{}`", truncate_str(&arguments, 300));
             }
             return;
         }
@@ -367,7 +367,7 @@ impl ProgressTimelineItem {
             kind: ProgressTimelineKind::Tool,
             title: tool_name,
             summary,
-            detail: format!("参数：`{}`", truncate_str(&arguments, 300)),
+            detail: format!("输入：`{}`", truncate_str(&arguments, 300)),
             completed: false,
             success: None,
         }
@@ -993,30 +993,21 @@ pub fn build_feishu_progress_card(
         "element_id": OUTPUT_ELEMENT_ID
     });
 
-    if matches!(
-        snapshot.phase,
-        ImProgressPhase::Finished | ImProgressPhase::Failed
-    ) {
-        elements.push(output_element);
-        append_process_elements(snapshot, &mut elements);
-        elements.push(build_status_panel_element(snapshot));
-    } else {
-        if !snapshot.plan_steps.is_empty() || snapshot.proposed_plan.is_some() {
-            elements.push(build_plan_panel_element(snapshot));
-        }
-        if has_process_state(snapshot) {
-            append_process_elements(snapshot, &mut elements);
-        } else {
-            if has_tool_state(snapshot) {
-                elements.push(build_tool_panel_element(snapshot));
-            }
-            if has_thinking_state(snapshot) {
-                elements.push(build_thinking_panel_element(snapshot));
-            }
-        }
-        elements.push(build_status_panel_element(snapshot));
-        elements.push(output_element);
+    elements.push(build_status_panel_element(snapshot));
+    if !snapshot.plan_steps.is_empty() || snapshot.proposed_plan.is_some() {
+        elements.push(build_plan_panel_element(snapshot));
     }
+    if has_process_state(snapshot) {
+        append_process_elements(snapshot, &mut elements);
+    } else {
+        if has_tool_state(snapshot) {
+            elements.push(build_tool_panel_element(snapshot));
+        }
+        if has_thinking_state(snapshot) {
+            elements.push(build_thinking_panel_element(snapshot));
+        }
+    }
+    elements.push(output_element);
 
     serde_json::json!({
         "schema": "2.0",
@@ -1229,7 +1220,7 @@ fn format_tool_summary_markdown(tool: Option<&ProgressToolSummary>) -> String {
         tool.tool_name, status
     );
     if let Some(arguments) = tool.arguments.as_deref().filter(|value| !value.is_empty()) {
-        text.push_str(&format!("\n参数：`{}`", truncate_str(arguments, 120)));
+        text.push_str(&format!("\n输入：`{}`", truncate_str(arguments, 120)));
     }
     if let Some(result) = tool
         .result_preview
@@ -1252,14 +1243,6 @@ fn append_process_elements(
         return;
     }
     elements.push(build_process_panel_element(snapshot));
-    for (index, item) in snapshot
-        .timeline
-        .iter()
-        .enumerate()
-        .filter(|(_, item)| item.kind == ProgressTimelineKind::Tool)
-    {
-        elements.push(build_process_tool_detail_element(snapshot, index, item));
-    }
 }
 
 fn build_process_panel_element(snapshot: &ImAgentProgressSnapshot) -> serde_json::Value {
@@ -1274,17 +1257,96 @@ fn build_process_panel_element(snapshot: &ImAgentProgressSnapshot) -> serde_json
                 "content": format_process_panel_title(snapshot)
             }
         },
-        "elements": [{
-            "tag": "markdown",
-            "content": format_process_timeline_markdown(snapshot),
-            "element_id": PROCESS_LOG_ELEMENT_ID
-        }]
+        "elements": build_process_loop_elements(snapshot)
+    })
+}
+
+fn build_process_loop_elements(snapshot: &ImAgentProgressSnapshot) -> Vec<serde_json::Value> {
+    if snapshot.timeline.is_empty() {
+        return vec![build_process_markdown_element(
+            PROCESS_LOG_ELEMENT_ID.to_string(),
+            "暂无过程信息".to_string(),
+        )];
+    }
+
+    let mut elements = Vec::new();
+    let mut markdown_lines = Vec::<String>::new();
+    let mut loop_index = 0;
+    let mut loop_item_index = 0;
+    let mut markdown_element_count = 0;
+
+    for (timeline_index, item) in snapshot.timeline.iter().enumerate() {
+        if loop_index == 0 || item.kind == ProgressTimelineKind::Thinking {
+            flush_process_markdown(
+                &mut elements,
+                &mut markdown_lines,
+                &mut markdown_element_count,
+            );
+            loop_index += 1;
+            loop_item_index = 0;
+            markdown_lines.push(format!("**Loop {loop_index}**"));
+        }
+
+        match item.kind {
+            ProgressTimelineKind::Thinking | ProgressTimelineKind::Status => {
+                loop_item_index += 1;
+                markdown_lines.push(format_process_timeline_line(loop_item_index, item));
+            }
+            ProgressTimelineKind::Tool => {
+                flush_process_markdown(
+                    &mut elements,
+                    &mut markdown_lines,
+                    &mut markdown_element_count,
+                );
+                elements.push(build_process_tool_detail_element(
+                    timeline_index,
+                    loop_index,
+                    item,
+                ));
+            }
+        }
+    }
+
+    flush_process_markdown(
+        &mut elements,
+        &mut markdown_lines,
+        &mut markdown_element_count,
+    );
+    elements
+}
+
+fn flush_process_markdown(
+    elements: &mut Vec<serde_json::Value>,
+    markdown_lines: &mut Vec<String>,
+    markdown_element_count: &mut usize,
+) {
+    if markdown_lines.is_empty() {
+        return;
+    }
+    let element_id = if *markdown_element_count == 0 {
+        PROCESS_LOG_ELEMENT_ID.to_string()
+    } else {
+        format!("agent_process_log_{}", *markdown_element_count + 1)
+    };
+    elements.push(build_process_markdown_element(
+        element_id,
+        markdown_lines.join("\n\n"),
+    ));
+    markdown_lines.clear();
+    *markdown_element_count += 1;
+}
+
+fn build_process_markdown_element(element_id: String, content: String) -> serde_json::Value {
+    serde_json::json!({
+        "tag": "markdown",
+        "content": content,
+        "element_id": element_id
     })
 }
 
 fn build_process_tool_detail_element(
-    snapshot: &ImAgentProgressSnapshot,
     index: usize,
+    loop_index: usize,
     item: &ProgressTimelineItem,
 ) -> serde_json::Value {
     serde_json::json!({
@@ -1295,7 +1357,7 @@ fn build_process_tool_detail_element(
         "header": {
             "title": {
                 "tag": "plain_text",
-                "content": format_process_tool_panel_title(snapshot, item)
+                "content": format_process_tool_panel_title(loop_index, item)
             }
         },
         "elements": [{
@@ -1309,34 +1371,32 @@ fn build_process_tool_detail_element(
 }
 
 fn format_process_panel_title(snapshot: &ImAgentProgressSnapshot) -> String {
-    let message_count = snapshot.timeline.len();
+    let loop_count = process_loop_count(snapshot);
     let tool_count = process_tool_count(snapshot);
     let base = match snapshot.phase {
-        ImProgressPhase::Running => "执行过程",
-        ImProgressPhase::Finished => "过程信息",
-        ImProgressPhase::Failed => "失败前过程",
+        ImProgressPhase::Running => "执行 Pipeline",
+        ImProgressPhase::Finished => "Pipeline 过程",
+        ImProgressPhase::Failed => "失败前 Pipeline",
     };
     if tool_count == 0 {
-        format!("{base}：{message_count} 条消息")
+        format!("{base}：{loop_count} 轮 Loop")
     } else {
-        format!("{base}：{message_count} 条消息 · 已运行 {tool_count} 条命令")
+        format!("{base}：{loop_count} 轮 Loop · 已运行 {tool_count} 条命令")
     }
 }
 
-fn format_process_tool_panel_title(
-    snapshot: &ImAgentProgressSnapshot,
-    item: &ProgressTimelineItem,
-) -> String {
+fn format_process_tool_panel_title(loop_index: usize, item: &ProgressTimelineItem) -> String {
     let verb = match item.success {
         Some(true) => "已运行",
         Some(false) => "运行失败",
         None => "正在运行",
     };
     format!(
-        "{} {} 条命令：{}",
+        "Loop {} 工具摘要：{} · {} · {}",
+        loop_index,
+        truncate_one_line(&item.title, 28),
         verb,
-        process_tool_count(snapshot),
-        truncate_one_line(&item.title, 36)
+        truncate_one_line(&item.summary, 48)
     )
 }
 
@@ -1348,23 +1408,20 @@ fn process_tool_count(snapshot: &ImAgentProgressSnapshot) -> usize {
         .count()
 }
 
-fn format_process_timeline_markdown(snapshot: &ImAgentProgressSnapshot) -> String {
-    if snapshot.timeline.is_empty() {
-        return "暂无过程信息".to_string();
+fn process_loop_count(snapshot: &ImAgentProgressSnapshot) -> usize {
+    let mut count = 0;
+    for item in &snapshot.timeline {
+        if count == 0 || item.kind == ProgressTimelineKind::Thinking {
+            count += 1;
+        }
     }
-    snapshot
-        .timeline
-        .iter()
-        .enumerate()
-        .map(|(index, item)| format_process_timeline_line(index + 1, item))
-        .collect::<Vec<_>>()
-        .join("\n\n")
+    count
 }
 
 fn format_process_timeline_line(index: usize, item: &ProgressTimelineItem) -> String {
     match item.kind {
         ProgressTimelineKind::Thinking => format!(
-            "{}. [思考] {}",
+            "{}. [模型] {}",
             index,
             crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&truncate_str(
                 &item.detail,
@@ -1383,7 +1440,7 @@ fn format_process_timeline_line(index: usize, item: &ProgressTimelineItem) -> St
                 None => "执行中",
             };
             format!(
-                "{}. [工具] `{}` · {} · {}",
+                "{}. [工具摘要] `{}` · {} · {}",
                 index,
                 truncate_one_line(&item.title, 32),
                 status,
@@ -1428,7 +1485,7 @@ fn format_tool_timeline_summary(log: &ToolCallLog, duration_ms: u64) -> String {
 fn format_tool_timeline_detail(arguments: &str, result: &str, duration_ms: u64) -> String {
     let mut detail = String::new();
     if !arguments.trim().is_empty() {
-        detail.push_str(&format!("参数：`{}`", truncate_str(arguments, 600)));
+        detail.push_str(&format!("输入：`{}`", truncate_str(arguments, 600)));
     }
     if duration_ms > 0 {
         if !detail.is_empty() {

@@ -188,10 +188,11 @@ Codex/Trae 当前 JSONL 的 `turn.completed.usage` 会输出最近一轮 token u
 
 飞书 progress card 的过程展示规则：
 
-- 运行中使用 `collapsible_panel` 展开“执行过程”，按事件到达顺序交叉展示公开思考/进展文本、状态和工具摘要。
-- 工具摘要只在过程区显示一行；每个工具调用额外生成一个默认折叠的工具详情面板，展开后可查看参数、耗时和输出预览。
-- 完成后最终回答移动到卡片顶部，过程信息与状态面板默认折叠；用户仍可手动展开查看完整过程和工具详情。
-- 失败时最终失败信息仍在顶部，过程信息保留为可展开诊断信息。
+- 运行中使用 `collapsible_panel` 展开“执行 Pipeline”，过程区按 Loop 组织：每轮先展示模型公开思考或 content，再展示该轮工具摘要。
+- 工具摘要只在过程区显示一行；每个工具调用在 Pipeline 内生成一个默认折叠的工具详情面板，展开后可查看输入、耗时和输出预览。
+- 卡片布局固定为：全局状态在最顶部，执行 Pipeline / 过程信息在中间，最终回答在最底部。
+- 完成后 Pipeline 过程信息与状态面板默认折叠；用户仍可手动展开 Pipeline，再展开单条工具详情查看完整输入输出，最终回答仍保持在底部可见。
+- 失败时最终失败信息仍在底部，过程信息保留为可展开诊断信息。
 - Codex/Trae 只展示 CLI JSONL 明确输出的 reasoning summary/status/tool/final 文本；隐藏 chain-of-thought 不可见，也不会伪造。
 
 ### 6. 能力声明与降级
@@ -877,7 +878,7 @@ Runs 页面用于排查 Chat Gateway 和真实 IM Agent 执行。列表字段：
 - `codex_cli_parser_maps_real_command_execution_events`：验证真实 Codex `item.started/item.completed command_execution` 被归一化为 `ToolStarted/ToolFinished`，并保留 command、output、exit code。
 - `codex_command_execution_progress_is_recorded_as_exec_command_tool_steps`：验证 Codex 工具过程进入 canonical timeline 后显示为 `exec_command` 的 tool call/result，而不是外层 runner wrapper。
 - `external_runner_status_footer_uses_runner_metadata_instead_of_agent_metrics`：验证飞书 progress card 的外部 runner 状态显示 runner/model/workdir/tool 等真实信息，不显示内置 Agent 的 Loop/Context/Token/压缩空指标。
-- `feishu_progress_card_expands_process_while_running_and_collapses_after_finish`：验证运行中过程区默认展开、工具详情默认折叠、完成后最终结论在顶部且过程区默认折叠。
+- `feishu_progress_card_expands_process_while_running_and_collapses_after_finish`：验证状态面板位于顶部、运行中过程区默认展开、工具详情默认折叠、完成后最终结论位于底部且过程区默认折叠。
 - `codex_cli_parser_maps_reasoning_summary_to_assistant_delta`：验证 Codex/Trae 明确输出的 reasoning summary 会进入公开过程 timeline。
 - `codex_request_metadata_includes_configured_or_default_model_label`：验证 Codex run metadata 对显式模型和默认模型标签均可追踪。
 - `external_cli_adapter_capabilities_drive_config_schema`：验证 adapter 能力声明会决定 WebUI/API 可配置字段，未声明能力不会被错误下发。

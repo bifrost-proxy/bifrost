@@ -87,8 +87,9 @@ fn feishu_progress_card_expands_process_while_running_and_collapses_after_finish
     let running_serialized = serde_json::to_string(&running_card).unwrap();
     assert!(running_serialized.contains(PROCESS_PANEL_ELEMENT_ID));
     assert!(running_serialized.contains(r#""expanded":true"#));
-    assert!(running_serialized.contains("[思考]"));
-    assert!(running_serialized.contains("[工具]"));
+    assert!(running_serialized.contains("**Loop 1**"));
+    assert!(running_serialized.contains("[模型]"));
+    assert!(running_serialized.contains("工具摘要"));
     assert!(running_serialized.contains("正在运行 `exec_command`"));
 
     snapshot.apply_event(AgentTurnProgressEvent::ToolFinished {
@@ -106,15 +107,23 @@ fn feishu_progress_card_expands_process_while_running_and_collapses_after_finish
 
     let finished_card = build_feishu_progress_card(&snapshot, false);
     let elements = finished_card["body"]["elements"].as_array().unwrap();
-    assert_eq!(elements[0]["element_id"], OUTPUT_ELEMENT_ID);
+    assert_eq!(elements[0]["element_id"], STATUS_PANEL_ELEMENT_ID);
     assert_eq!(elements[1]["element_id"], PROCESS_PANEL_ELEMENT_ID);
     assert_eq!(elements[1]["expanded"], false);
+    assert_eq!(elements.last().unwrap()["element_id"], OUTPUT_ELEMENT_ID);
 
     let finished_serialized = serde_json::to_string(&finished_card).unwrap();
     assert!(finished_serialized.contains("最终结论：测试通过。"));
-    assert!(finished_serialized.contains("过程信息：2 条消息 · 已运行 1 条命令"));
-    assert!(finished_serialized.contains("已运行 1 条命令：exec_command"));
+    assert!(finished_serialized.contains("Pipeline 过程：1 轮 Loop · 已运行 1 条命令"));
+    assert!(finished_serialized.contains("Loop 1 工具摘要：exec_command · 已运行"));
     assert!(finished_serialized.contains("test result: ok"));
+    let process_elements = elements[1]["elements"].as_array().unwrap();
+    assert_eq!(process_elements[1]["element_id"], "agent_process_tool_1");
+    assert_eq!(process_elements[1]["expanded"], false);
+    assert!(process_elements[1]["header"]["title"]["content"]
+        .as_str()
+        .unwrap()
+        .contains("工具摘要"));
 }
 
 #[test]
@@ -363,6 +372,18 @@ fn feishu_progress_card_uses_json_2_streaming_and_stable_elements() {
         tool_name: "shell".to_string(),
         arguments: "{}".to_string(),
     });
+    populated.apply_event(AgentTurnProgressEvent::ToolFinished {
+        log: ToolCallLog {
+            tool_name: "shell".to_string(),
+            arguments: "{}".to_string(),
+            result: "tests passed".to_string(),
+            success: true,
+        },
+        duration_ms: 42,
+    });
+    populated.apply_event(AgentTurnProgressEvent::AssistantDelta {
+        content: "Now I will write the final summary.".to_string(),
+    });
     populated.apply_event(AgentTurnProgressEvent::PlanUpdated {
         title: Some("Build".to_string()),
         steps: vec![PlanStep {
@@ -404,8 +425,9 @@ fn feishu_progress_card_uses_json_2_streaming_and_stable_elements() {
         );
     }
     assert_eq!(populated_card["header"]["title"]["content"], "Build");
+    assert_eq!(populated_body[0]["element_id"], STATUS_PANEL_ELEMENT_ID);
     assert_eq!(
-        populated_body[0]["header"]["title"]["content"],
+        populated_body[1]["header"]["title"]["content"],
         "任务计划：Run tests"
     );
     assert_eq!(
@@ -419,12 +441,28 @@ fn feishu_progress_card_uses_json_2_streaming_and_stable_elements() {
     assert_eq!(process_element["tag"], "collapsible_panel");
     assert_eq!(process_element["expanded"], true);
     let process_content = process_element["elements"][0]["content"].as_str().unwrap();
-    assert!(process_content.contains("[思考]"));
-    assert!(process_content.contains("[工具]"));
+    assert!(process_content.contains("**Loop 1**"));
+    assert!(process_content.contains("[模型]"));
     assert!(
         process_content.contains("Inspecting files before running tests."),
         "process content should show the latest thought: {process_content}"
     );
+    let process_elements = process_element["elements"].as_array().unwrap();
+    assert_eq!(process_elements[1]["element_id"], "agent_process_tool_1");
+    assert_eq!(process_elements[1]["tag"], "collapsible_panel");
+    assert_eq!(process_elements[1]["expanded"], false);
+    assert!(process_elements[1]["header"]["title"]["content"]
+        .as_str()
+        .unwrap()
+        .contains("Loop 1 工具摘要"));
+    assert!(process_elements[1]["elements"][0]["content"]
+        .as_str()
+        .unwrap()
+        .contains("tests passed"));
+    assert!(process_elements[2]["content"]
+        .as_str()
+        .unwrap()
+        .contains("**Loop 2**"));
 }
 
 #[test]
