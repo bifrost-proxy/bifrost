@@ -8,7 +8,7 @@ use crate::tools::goal::GoalState;
 use crate::tools::update_plan::PlanStep;
 use crate::types::{ChatImageInput, ChatMessage, ToolCallMessage};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
@@ -678,38 +678,132 @@ pub fn load_conversation_events_page(
     path: &Path,
     options: ConversationEventPageOptions,
 ) -> Result<ConversationEventPage, String> {
-    let events = load_conversation_events(path)?;
-    let total_count = events.len();
     let limit = options.limit.filter(|value| *value > 0);
+    let paged_request =
+        limit.is_some() || options.cursor.is_some() || options.since.is_some() || options.tail;
+    if !paged_request {
+        let events = load_conversation_events(path)?;
+        let total_count = events.len();
+        return Ok(ConversationEventPage {
+            events,
+            total_count,
+            start_index: 0,
+            end_index: total_count,
+            next_cursor: None,
+            has_more: false,
+        });
+    }
 
-    let (start_index, end_index, has_more, next_cursor) = if let Some(since) = options.since {
-        let start = since.min(total_count);
-        (start, total_count, false, Some(total_count))
-    } else if options.tail {
-        let limit = limit.unwrap_or(total_count);
-        let start = total_count.saturating_sub(limit);
-        (start, total_count, start > 0, Some(start))
+    let file = std::fs::File::open(path).map_err(|e| format!("open conversation file: {e}"))?;
+    let reader = std::io::BufReader::new(file);
+
+    if let Some(since) = options.since {
+        let mut events = Vec::new();
+        let mut total_count = 0usize;
+        for (line_no, line) in reader.lines().enumerate() {
+            let line = line.map_err(|e| format!("read line: {e}"))?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let event_index = total_count;
+            total_count += 1;
+            if event_index < since {
+                continue;
+            }
+            events.push(parse_conversation_event_line(line_no, &line)?);
+        }
+        let start_index = since.min(total_count);
+        return Ok(ConversationEventPage {
+            events,
+            total_count,
+            start_index,
+            end_index: total_count,
+            next_cursor: Some(total_count),
+            has_more: false,
+        });
+    }
+
+    let mut total_count = 0usize;
+    let mut selected_lines: VecDeque<(usize, usize, String)> = VecDeque::new();
+    let keep_limit = if options.tail {
+        limit
     } else if let Some(cursor) = options.cursor {
-        let end = cursor.min(total_count);
-        let limit = limit.unwrap_or(end);
-        let start = end.saturating_sub(limit);
-        (start, end, start > 0, Some(start))
-    } else if let Some(limit) = limit {
-        let end = limit.min(total_count);
-        (0, end, end < total_count, Some(end))
+        Some(limit.unwrap_or(cursor))
     } else {
-        (0, total_count, false, None)
+        limit
     };
+    for (line_no, line) in reader.lines().enumerate() {
+        let line = line.map_err(|e| format!("read line: {e}"))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let event_index = total_count;
+        total_count += 1;
 
-    let page_events = events[start_index..end_index].to_vec();
+        if let Some(cursor) = options.cursor {
+            if event_index >= cursor {
+                continue;
+            }
+        }
+
+        if options.tail || options.cursor.is_some() {
+            selected_lines.push_back((event_index, line_no, line));
+            if let Some(limit) = keep_limit {
+                while selected_lines.len() > limit {
+                    selected_lines.pop_front();
+                }
+            }
+            continue;
+        }
+
+        if let Some(limit) = keep_limit {
+            if selected_lines.len() < limit {
+                selected_lines.push_back((event_index, line_no, line));
+            }
+        }
+    }
+
+    let mut events = Vec::with_capacity(selected_lines.len());
+    let mut start_index = 0usize;
+    let mut end_index = 0usize;
+    for (position, (event_index, line_no, line)) in selected_lines.into_iter().enumerate() {
+        if position == 0 {
+            start_index = event_index;
+        }
+        end_index = event_index + 1;
+        events.push(parse_conversation_event_line(line_no, &line)?);
+    }
+    if events.is_empty() {
+        if let Some(cursor) = options.cursor {
+            start_index = cursor.min(total_count);
+            end_index = start_index;
+        } else if options.tail {
+            start_index = total_count;
+            end_index = total_count;
+        }
+    }
+    let has_more =
+        start_index > 0 || (!options.tail && options.cursor.is_none() && end_index < total_count);
+    let next_cursor = if options.tail || options.cursor.is_some() {
+        Some(start_index)
+    } else if limit.is_some() {
+        Some(end_index)
+    } else {
+        None
+    };
     Ok(ConversationEventPage {
-        events: page_events,
+        events,
         total_count,
         start_index,
         end_index,
         next_cursor,
         has_more,
     })
+}
+
+fn parse_conversation_event_line(line_no: usize, line: &str) -> Result<ConversationEvent, String> {
+    serde_json::from_str::<ConversationEvent>(line)
+        .map_err(|error| format!("parse event at line {}: {error}", line_no + 1))
 }
 
 fn load_conversation_events_lossy(path: &Path) -> Result<Vec<ConversationEvent>, String> {
@@ -1579,6 +1673,40 @@ mod tests {
         assert!(!delta.has_more);
         assert_eq!(delta.events.len(), 1);
         assert_eq!(delta.events[0].event_type, ASSISTANT_MESSAGE);
+    }
+
+    #[test]
+    fn test_load_conversation_events_page_does_not_parse_unselected_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                "{not valid json}\n",
+                "{\"timestamp\":1,\"event_type\":\"user_message\",\"session_key\":\"paged-events\",\"content\":{\"message\":\"old\"}}\n",
+                "{\"timestamp\":2,\"event_type\":\"user_message\",\"session_key\":\"paged-events\",\"content\":{\"message\":\"new\"}}\n",
+                "{\"timestamp\":3,\"event_type\":\"assistant_message\",\"session_key\":\"paged-events\",\"content\":{\"message\":\"done\"}}\n",
+            ),
+        )
+        .unwrap();
+
+        let page = load_conversation_events_page(
+            &path,
+            ConversationEventPageOptions {
+                limit: Some(2),
+                tail: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(page.total_count, 4);
+        assert_eq!(page.start_index, 2);
+        assert_eq!(page.end_index, 4);
+        assert_eq!(page.events.len(), 2);
+        assert_eq!(page.events[0].content["message"], "new");
+        assert_eq!(page.events[1].content["message"], "done");
+        assert!(load_conversation_events(&path).is_err());
     }
 
     #[test]

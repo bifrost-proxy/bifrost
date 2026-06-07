@@ -269,6 +269,7 @@ export default function AgentChatSection() {
   const historyEventStartIndexRef = useRef<number | undefined>(undefined);
   const historyEventEndIndexRef = useRef<number | undefined>(undefined);
   const historyOlderCursorRef = useRef<number | undefined>(undefined);
+  const historyLoadingOlderRef = useRef(false);
   const loadOlderHistoryPageRef = useRef<() => void>(() => {});
   const initialThreadAutoSelectRef = useRef(false);
 
@@ -455,6 +456,7 @@ export default function AgentChatSection() {
       !timelineHistoryPath ||
       cursor === undefined ||
       cursor <= 0 ||
+      historyLoadingOlderRef.current ||
       historyLoadingOlder ||
       !historyHasOlder
     ) {
@@ -464,6 +466,7 @@ export default function AgentChatSection() {
     const previousScrollHeight = element?.scrollHeight ?? 0;
     const previousScrollTop = element?.scrollTop ?? 0;
     const previousEndIndex = historyEventEndIndexRef.current;
+    historyLoadingOlderRef.current = true;
     setHistoryLoadingOlder(true);
     try {
       const page = await fetchHistoryPage(timelineHistoryPath, {
@@ -493,6 +496,7 @@ export default function AgentChatSection() {
         error instanceof Error ? error.message : "Failed to load older Agent history",
       );
     } finally {
+      historyLoadingOlderRef.current = false;
       setHistoryLoadingOlder(false);
     }
   }, [

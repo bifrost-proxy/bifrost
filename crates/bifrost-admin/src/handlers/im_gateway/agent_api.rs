@@ -1,9 +1,39 @@
 use super::*;
 use bytes::Bytes;
 use futures_util::StreamExt;
+use std::path::{Path, PathBuf};
 use tokio_stream::wrappers::BroadcastStream;
 
 // ---------------------------------------------------------------------------
+
+type HistorySessionEntry = (
+    PathBuf,
+    String,
+    bifrost_agent::persistence::SessionFileSummary,
+);
+
+async fn load_history_entries_blocking(
+    data_dir: PathBuf,
+    session_key: Option<String>,
+) -> Result<Vec<HistorySessionEntry>, String> {
+    tokio::task::spawn_blocking(move || {
+        let files =
+            bifrost_agent::persistence::list_conversations(&data_dir, session_key.as_deref());
+        Ok::<Vec<HistorySessionEntry>, String>(
+            files
+                .into_iter()
+                .map(|path| {
+                    let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    let (parsed_key, _timestamp) = parse_session_filename(filename);
+                    let summary = bifrost_agent::persistence::scan_session_summary(&path);
+                    (path, parsed_key, summary)
+                })
+                .collect(),
+        )
+    })
+    .await
+    .map_err(|error| format!("history scan task failed: {error}"))?
+}
 
 pub(super) async fn handle_agent(
     req: Request<Incoming>,
@@ -141,7 +171,15 @@ pub(super) async fn handle_agent(
             .map(|status| status.session_key.clone())
             .collect();
         let data_dir = bifrost_agent::config::agent_home_dir();
-        let files = bifrost_agent::persistence::list_conversations(&data_dir, None);
+        let history_entries = match load_history_entries_blocking(data_dir, None).await {
+            Ok(entries) => entries,
+            Err(error) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("failed to scan agent sessions: {error}"),
+                );
+            }
+        };
         let mut history_by_key: std::collections::HashMap<
             String,
             (
@@ -149,14 +187,11 @@ pub(super) async fn handle_agent(
                 bifrost_agent::persistence::SessionFileSummary,
             ),
         > = std::collections::HashMap::new();
-        for p in &files {
-            let filename = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let (parsed_key, _timestamp) = parse_session_filename(filename);
-            let summary = bifrost_agent::persistence::scan_session_summary(p);
+        for (p, parsed_key, summary) in &history_entries {
             let session_key = summary
                 .session_key
                 .as_deref()
-                .unwrap_or(&parsed_key)
+                .unwrap_or(parsed_key)
                 .to_string();
             if is_runner_call_session_key(&session_key) {
                 continue;
@@ -166,7 +201,7 @@ pub(super) async fn handle_agent(
                 .map(|(_, existing)| summary.end_time > existing.end_time)
                 .unwrap_or(true);
             if replace {
-                history_by_key.insert(session_key, (p.clone(), summary));
+                history_by_key.insert(session_key, (p.clone(), summary.clone()));
             }
         }
         let active_keys: std::collections::HashSet<String> = active_sessions
@@ -296,10 +331,7 @@ pub(super) async fn handle_agent(
         }
 
         // Add history sessions (excluding those already active or expired)
-        for p in files {
-            let filename = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let (parsed_key, _timestamp) = parse_session_filename(filename);
-            let summary = bifrost_agent::persistence::scan_session_summary(&p);
+        for (p, parsed_key, summary) in history_entries {
             // Prefer the original session key from JSONL content (handles sanitized filenames)
             let session_key = summary
                 .session_key
@@ -447,17 +479,24 @@ pub(super) async fn handle_agent(
             return method_not_allowed();
         }
         let data_dir = bifrost_agent::config::agent_home_dir();
-        let files = bifrost_agent::persistence::list_conversations(&data_dir, None);
-        let history: Vec<serde_json::Value> = files
+        let history_entries = match load_history_entries_blocking(data_dir, None).await {
+            Ok(entries) => entries,
+            Err(error) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("failed to scan agent sessions: {error}"),
+                );
+            }
+        };
+        let history: Vec<serde_json::Value> = history_entries
             .iter()
-            .map(|p| {
+            .map(|(p, parsed_key, summary)| {
                 let filename = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                let (parsed_key, timestamp) = parse_session_filename(filename);
-                let summary = bifrost_agent::persistence::scan_session_summary(p);
+                let (_filename_key, timestamp) = parse_session_filename(filename);
                 let session_key = summary
                     .session_key
                     .as_deref()
-                    .unwrap_or(&parsed_key)
+                    .unwrap_or(parsed_key)
                     .to_string();
                 serde_json::json!({
                     "path": p.display().to_string(),
@@ -471,7 +510,7 @@ pub(super) async fn handle_agent(
                     "event_count": summary.event_count,
                     "work_dir": summary.work_dir,
                     "source": summary.source,
-                    "title": summary.title.or(summary.first_user_message),
+                    "title": summary.title.clone().or_else(|| summary.first_user_message.clone()),
                     "start_time": summary.start_time,
                     "end_time": summary.end_time,
                     "duration_secs": summary.end_time.saturating_sub(summary.start_time),
@@ -513,28 +552,39 @@ pub(super) async fn handle_agent(
                 .map(|value| matches!(value.as_str(), "1" | "true" | "yes"))
                 .unwrap_or(false);
             let paged_request = limit.is_some() || cursor.is_some() || since.is_some() || tail;
+            let page_path = path.clone();
             let page_result = if paged_request {
-                bifrost_agent::persistence::load_conversation_events_page(
-                    &path,
-                    bifrost_agent::persistence::ConversationEventPageOptions {
-                        limit,
-                        cursor,
-                        tail,
-                        since,
-                    },
-                )
-            } else {
-                bifrost_agent::persistence::load_conversation_events(&path).map(|events| {
-                    let total_count = events.len();
-                    bifrost_agent::persistence::ConversationEventPage {
-                        events,
-                        total_count,
-                        start_index: 0,
-                        end_index: total_count,
-                        next_cursor: None,
-                        has_more: false,
-                    }
+                tokio::task::spawn_blocking(move || {
+                    bifrost_agent::persistence::load_conversation_events_page(
+                        &page_path,
+                        bifrost_agent::persistence::ConversationEventPageOptions {
+                            limit,
+                            cursor,
+                            tail,
+                            since,
+                        },
+                    )
                 })
+                .await
+                .map_err(|error| format!("history page task failed: {error}"))
+                .and_then(|result| result)
+            } else {
+                tokio::task::spawn_blocking(move || {
+                    bifrost_agent::persistence::load_conversation_events(&page_path).map(|events| {
+                        let total_count = events.len();
+                        bifrost_agent::persistence::ConversationEventPage {
+                            events,
+                            total_count,
+                            start_index: 0,
+                            end_index: total_count,
+                            next_cursor: None,
+                            has_more: false,
+                        }
+                    })
+                })
+                .await
+                .map_err(|error| format!("history load task failed: {error}"))
+                .and_then(|result| result)
             };
             match page_result {
                 Ok(page) => {
@@ -591,10 +641,29 @@ pub(super) async fn handle_agent(
             let active_status = service
                 .agent_session_manager
                 .get_active_turn_status(&session_key);
-            let detail = service
+            let detail = if let Some(detail) = service
                 .agent_session_manager
                 .get_session_detail(&session_key)
-                .or_else(|| history_session_detail(&session_key));
+            {
+                Some(detail)
+            } else {
+                let history_session_key = session_key.clone();
+                match tokio::task::spawn_blocking(move || {
+                    history_session_detail(&history_session_key)
+                })
+                .await
+                {
+                    Ok(detail) => detail,
+                    Err(error) => {
+                        warn!(
+                            session_key = %session_key,
+                            error = %error,
+                            "history session detail task failed"
+                        );
+                        None
+                    }
+                }
+            };
             if let Some(detail) = detail {
                 return json_response(&session_detail_response(
                     detail,

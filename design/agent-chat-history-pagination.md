@@ -7,12 +7,14 @@ Agent Chat 历史页需要从“打开时全量读取 JSONL 并全量渲染”�
 ## 实现逻辑
 
 - 后端 `GET /api/im-gateway/agent/sessions/history/{path}` 保留无参数全量返回的兼容行为。
+- 后端 `sessions/all`、`sessions/history` 与 history detail 文件读取放入 `spawn_blocking`，避免在 Tokio async worker 上同步扫描和解析 JSONL，降低对代理主链路的影响。
 - 新增查询参数：
   - `tail=true&limit=N`：返回最新 N 条事件，响应带 `start_index`、`end_index`、`next_cursor`、`has_more`、`total_count`。
   - `cursor=K&limit=N`：把 `K` 作为 end-exclusive cursor，返回 `[K-N, K)` 的旧事件页。
   - `since=K`：返回 `[K, total_count)` 的新增事件，用于 running 轮询。
+- 分页读取在 `tail`、`cursor`、`since` 路径只解析被选中的事件行；尾页/旧页仍会顺序统计行数，但不会把未展示的旧 JSONL 全量反序列化成事件。
 - 前端 `historyPath` 详情首屏只请求 `tail=true&limit=300`。
-- 前端保留已加载事件窗口，加载旧页时 prepend 到窗口并保持滚动位置；运行中轮询按 `end_index` 使用 `since` 增量追加。
+- 前端保留已加载事件窗口，加载旧页时 prepend 到窗口并保持滚动位置；运行中轮询按 `end_index` 使用 `since` 增量追加；旧页加载使用 ref 级防重，避免滚动事件在 React state 生效前重复触发同一页请求。
 - 会话列表 `/agent/sessions/all` 继续只返回摘要字段；详情内容只通过选中的 history detail API 加载。
 
 ## 依赖项
@@ -23,9 +25,10 @@ Agent Chat 历史页需要从“打开时全量读取 JSONL 并全量渲染”�
 
 ## 测试方案
 
-- 单元测试：`test_load_conversation_events_page_supports_tail_cursor_and_since` 验证 tail、cursor、since 三种分页语义。
+- 单元测试：`test_load_conversation_events_page_supports_tail_cursor_and_since` 验证 tail、cursor、since 三种分页语义；`test_load_conversation_events_page_does_not_parse_unselected_lines` 验证尾页分页不反序列化未选中的旧行。
 - E2E 测试：`e2e-tests/tests/test_agent_history_pagination_api.sh` 用独立 `BIFROST_DATA_DIR` 生成测试 JSONL，验证 summary/list 不返回 events、tail 只返回尾页、cursor 返回旧页、since 返回增量。
-- 真实场景测试：`human_tests/agent-chat-history-pagination.md` 覆盖列表摘要、详情尾页、旧页加载、运行中增量轮询。
+- WebUI 测试：`tests/ui/agent-chat.spec.ts` 的 `AI Agent Chat loads history detail progressively` 验证首屏只请求 tail，并且连续加载旧页后能看到完整线程。
+- 真实场景测试：`human_tests/agent-chat-history-pagination.md` 覆盖列表摘要、详情尾页、旧页加载、运行中增量轮询、分页不解析未选中旧行、WebUI 多页加载完整历史。
 
 ## Review/Fix/Test 闭环方案
 
@@ -34,7 +37,8 @@ Agent Chat 历史页需要从“打开时全量读取 JSONL 并全量渲染”�
 
 ## 校验要求
 
-- `pnpm --dir web exec tsc --noEmit`
+- `pnpm --dir web exec tsc -b`
+- `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts -g "loads history detail progressively"`
 - `cargo test -p bifrost-agent test_load_conversation_events_page_supports_tail_cursor_and_since`
 - `cargo test -p bifrost-admin agent_history`
 - `bash e2e-tests/tests/test_agent_history_pagination_api.sh`

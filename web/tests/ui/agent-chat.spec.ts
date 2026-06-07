@@ -1634,6 +1634,7 @@ test("AI Agent Chat restores JSONL history and continues with history path", asy
 test("AI Agent Chat loads history detail progressively", async ({ page }) => {
   const historyPath = "/tmp/progressive-history.jsonl";
   const historyUrls: string[] = [];
+  let unexpectedFullHistoryRequest = false;
   await page.route(
     `**/_bifrost/api/im-gateway/agent/sessions/history/${encodeURIComponent(historyPath)}**`,
     async (route) => {
@@ -1659,14 +1660,40 @@ test("AI Agent Chat loads history detail progressively", async ({ page }) => {
               },
             ],
             count: 2,
-            total_count: 4,
+            total_count: 5,
+            start_index: 3,
+            end_index: 5,
+            next_cursor: 3,
+            has_more: true,
+          }),
+        });
+        return;
+      }
+      if (url.searchParams.get("cursor") === "3") {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            events: [
+              {
+                timestamp: 3,
+                event_type: "assistant_message",
+                session_key: "progressive-history",
+                content: { message: "Middle answer" },
+              },
+            ],
+            count: 1,
+            total_count: 5,
             start_index: 2,
-            end_index: 4,
+            end_index: 3,
             next_cursor: 2,
             has_more: true,
           }),
         });
         return;
+      }
+      if (url.searchParams.get("cursor") !== "2") {
+        unexpectedFullHistoryRequest = true;
       }
       expect(url.searchParams.get("cursor")).toBe("2");
       await route.fulfill({
@@ -1688,7 +1715,7 @@ test("AI Agent Chat loads history detail progressively", async ({ page }) => {
             },
           ],
           count: 2,
-          total_count: 4,
+          total_count: 5,
           start_index: 0,
           end_index: 2,
           next_cursor: 0,
@@ -1710,12 +1737,25 @@ test("AI Agent Chat loads history detail progressively", async ({ page }) => {
     "Oldest question",
   );
   expect(new URL(historyUrls[0]).searchParams.get("tail")).toBe("true");
+  expect(new URL(historyUrls[0]).searchParams.has("cursor")).toBe(false);
+  await page.getByTestId("agent-chat-load-older").click();
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Middle answer",
+  );
   await page.getByTestId("agent-chat-load-older").click();
   await expect(page.getByTestId("agent-chat-messages")).toContainText(
     "Oldest question",
   );
-  expect(historyUrls.some((url) => new URL(url).searchParams.get("cursor") === "2"))
-    .toBe(true);
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Newest answer",
+  );
+  expect(
+    historyUrls.some((url) => new URL(url).searchParams.get("cursor") === "3"),
+  ).toBe(true);
+  expect(
+    historyUrls.some((url) => new URL(url).searchParams.get("cursor") === "2"),
+  ).toBe(true);
+  expect(unexpectedFullHistoryRequest).toBe(false);
 });
 
 test("AI Agent Chat keeps running history token HUD synced with live status", async ({
