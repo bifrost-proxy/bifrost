@@ -689,6 +689,7 @@
 3. 飞书 progress card 后续 patch 不会因为元素 ID 格式错误被拒绝，长任务中间过程可以持续刷新。
 4. 执行过程不展示 `Loop 1`、`Pipeline`、`工具摘要`、`[模型]`、run id、`turn started` 或 `model rerouted` 等内部/噪音提示。
 5. 连续多个工具调用默认合并为“已运行 N 条命令”的一级折叠组；展开该组后，单条工具仍保持折叠，用户可继续展开查看输入/输出。
+6. 模型公开 content 直接按时间顺序展示，不额外添加 `1.`、`2.`、`3.` 这类编号前缀。
 
 ## 最近执行记录
 
@@ -718,6 +719,7 @@
 - 2026-06-07：执行 TC-IEC-34 的 Feishu progress card 卡住问题回归分析，真实飞书消息对应 Trae run `1780827766302-6a2c209c-84f6-4e64-b487-dcaaa8837361` 已成功完成，canonical history 包含大量 `assistant_delta`、`assistant_message`、`tool_call` 和 `tool_result`，但飞书日志出现 `code=300301` 与 `ElementID agent_process_tool_11_detail: Code 1002: elementID format error. Only alphabets, numbers, and underscores are allowed. It must start with an alphabet and not exceed 20 characters.`；确认根因是 progress card 第 10 条以后动态过程元素 ID 超过飞书 20 字符限制。修复后命令 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin progress_card -- --nocapture` 通过 23 个测试，新增用例覆盖 `ap_t_35` / `ap_td_35` 两位数工具 ID，并递归断言所有 `element_id` 符合飞书格式限制。
 - 2026-06-07：根据真实飞书截图继续执行 TC-IEC-34 文案回归，去除执行过程中的 `Loop 1/2`、`Pipeline`、`工具摘要`、`[模型]`、纯 run id、`turn started` 与 `model rerouted` 等内部提示；过程区域改为从上到下展示公开模型内容和工具调用，工具详情仍保持可展开。命令 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin progress_card -- --nocapture` 与 `SKIP_FRONTEND_BUILD=1 cargo run -p bifrost-e2e -- --test im_gateway_agent_streaming_progress_card_renderer --jobs 1 --timeout 120` 均通过。
 - 2026-06-07：继续执行 TC-IEC-34 的工具密集场景回归，飞书 progress card 将连续 3 条工具调用默认合并为 `已运行 3 条命令` 一级折叠组，展开后每条工具仍是独立折叠项；同时把过程 Markdown 从双空行压缩为单换行，减少行高和竖向占用。新增 `consecutive_process_tools_are_grouped_by_default` 回归测试。
+- 2026-06-07：继续执行 TC-IEC-34 的过程文案回归，飞书 progress card 的模型公开 content 不再添加 `1.`、`2.`、`3.` 编号前缀，按时间顺序直接展示原文；新增断言覆盖 `1. 我先看分支差异` / `1. 我会先检查代码路径` 不应出现在卡片 JSON 中。
 
 ## 清理步骤
 

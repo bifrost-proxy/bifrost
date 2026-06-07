@@ -1309,7 +1309,6 @@ fn build_process_loop_elements(snapshot: &ImAgentProgressSnapshot) -> Vec<serde_
 
     let mut elements = Vec::new();
     let mut markdown_lines = Vec::<String>::new();
-    let mut item_index = 0;
     let mut markdown_element_count = 0;
 
     let mut timeline_index = 0;
@@ -1317,8 +1316,7 @@ fn build_process_loop_elements(snapshot: &ImAgentProgressSnapshot) -> Vec<serde_
         let item = &snapshot.timeline[timeline_index];
         match item.kind {
             ProgressTimelineKind::Thinking | ProgressTimelineKind::Status => {
-                item_index += 1;
-                markdown_lines.push(format_process_timeline_line(item_index, item));
+                markdown_lines.push(format_process_timeline_line(item));
                 timeline_index += 1;
             }
             ProgressTimelineKind::Tool => {
@@ -1504,19 +1502,16 @@ fn process_tool_count(snapshot: &ImAgentProgressSnapshot) -> usize {
         .count()
 }
 
-fn format_process_timeline_line(index: usize, item: &ProgressTimelineItem) -> String {
+fn format_process_timeline_line(item: &ProgressTimelineItem) -> String {
     match item.kind {
-        ProgressTimelineKind::Thinking => format!(
-            "{}. {}",
-            index,
+        ProgressTimelineKind::Thinking => {
             crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&truncate_str(
                 &item.detail,
-                600
+                600,
             ))
-        ),
+        }
         ProgressTimelineKind::Status => format!(
-            "{}. 状态：{}",
-            index,
+            "状态：{}",
             crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&item.summary)
         ),
         ProgressTimelineKind::Tool => {
@@ -1526,8 +1521,7 @@ fn format_process_timeline_line(index: usize, item: &ProgressTimelineItem) -> St
                 None => "执行中",
             };
             format!(
-                "{}. `{}` · {} · {}",
-                index,
+                "`{}` · {} · {}",
                 truncate_one_line(&item.title, 32),
                 status,
                 crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&item.summary)

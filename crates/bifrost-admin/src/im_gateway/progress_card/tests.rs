@@ -105,6 +105,8 @@ fn assistant_final_is_pipeline_content_until_turn_finished() {
     let running_serialized = serde_json::to_string(&running_card).unwrap();
     assert!(running_serialized.contains("我先看分支差异"));
     assert!(running_serialized.contains("接下来逐个模块检查"));
+    assert!(!running_serialized.contains("1. 我先看分支差异"));
+    assert!(!running_serialized.contains("2. 接下来逐个模块检查"));
     assert!(!running_serialized.contains("最终结论"));
     assert!(!running_serialized.contains("Loop"));
     assert!(!running_serialized.contains("Pipeline"));
@@ -215,6 +217,7 @@ fn feishu_progress_card_expands_process_while_running_and_collapses_after_finish
     assert!(running_serialized.contains(PROCESS_PANEL_ELEMENT_ID));
     assert!(running_serialized.contains(r#""expanded":true"#));
     assert!(running_serialized.contains("我会先检查代码路径"));
+    assert!(!running_serialized.contains("1. 我会先检查代码路径"));
     assert!(running_serialized.contains("正在运行：exec_command"));
     assert!(!running_serialized.contains("Loop"));
     assert!(!running_serialized.contains("[模型]"));
