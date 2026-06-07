@@ -39,7 +39,7 @@ import {
   type SessionDetail,
 } from "./AgentChatSection.helpers";
 import { historyEventsToMessages, historyEventsToTelemetry } from "./AgentChatSection.timeline";
-import { isRunStateActive, isThreadActive, useRunningTimelinePolling } from "./AgentChatSection.timelinePolling";
+import { isRunStateActive, isThreadActive } from "./AgentChatSection.timelinePolling";
 import { AgentChatMessageList } from "./AgentChatSection.messages";
 import { AgentChatPlan, AgentChatPromptChips } from "./AgentChatSection.composerExtras";
 import { AgentChatSettingsModal, AgentThreadListCard } from "./AgentChatSection.panels";
@@ -59,6 +59,18 @@ const MAX_PASTED_IMAGES = 6;
 const HISTORY_EVENT_PAGE_SIZE = 300;
 const THREAD_RAIL_COLLAPSED_STORAGE_KEY = "bifrost.agentChat.threadRailCollapsed";
 type AgentCollaborationMode = "plan";
+
+type AgentSessionEventPayload = {
+  eventType?: string;
+  event_type?: string;
+  sessionKey?: string;
+  session_key?: string;
+  historyPath?: string;
+  history_path?: string;
+  endIndex?: number;
+  end_index?: number;
+  reason?: string;
+};
 
 function parseAgentPlanSlash(content: string): {
   message: string;
@@ -264,6 +276,10 @@ export default function AgentChatSection() {
   const pendingInstantScrollRef = useRef(true);
   const userNearBottomRef = useRef(true);
   const loadedConversationKeyRef = useRef<string | undefined>(undefined);
+  const selectedHistoryPathRef = useRef<string | undefined>(undefined);
+  const selectedSessionKeyRef = useRef<string | undefined>(undefined);
+  const selectedThreadRef = useRef<AgentThreadSummary | undefined>(undefined);
+  const telemetryPhaseRef = useRef<RunTelemetry["phase"]>(EMPTY_TELEMETRY.phase);
   const threadsRef = useRef<AgentThreadSummary[]>([]);
   const historyEventsRef = useRef<HistoryEvent[]>([]);
   const historyEventStartIndexRef = useRef<number | undefined>(undefined);
@@ -418,7 +434,8 @@ export default function AgentChatSection() {
       );
       const terminalTimeline =
         nextTelemetry.phase === "finished" || nextTelemetry.phase === "failed";
-      const timelineRunning = nextTelemetry.phase === "running";
+      const timelineRunning =
+        nextTelemetry.phase === "running" && isThreadActive(matchedThread);
       const restored = historyEventsToMessages(events, {
         ensureRunningAssistant:
           timelineRunning || (!terminalTimeline && isThreadActive(matchedThread)),
@@ -448,6 +465,14 @@ export default function AgentChatSection() {
       ),
     [historyPath, queryView, sessionKey, threads],
   );
+
+  useEffect(() => {
+    selectedThreadRef.current = selectedThread;
+  }, [selectedThread]);
+
+  useEffect(() => {
+    telemetryPhaseRef.current = telemetry.phase;
+  }, [telemetry.phase]);
 
   const loadOlderHistoryPage = useCallback(async () => {
     const timelineHistoryPath = historyPath || selectedThread?.history_path;
@@ -608,8 +633,10 @@ export default function AgentChatSection() {
         }
         return incoming;
       });
+      return selectedQueueThread;
     } catch {
       // Keep chat usable even if the session index is temporarily unavailable.
+      return undefined;
     }
   }, [historyPath, queryView, sessionKey]);
 
@@ -629,14 +656,6 @@ export default function AgentChatSection() {
 
   useEffect(() => {
     refreshThreads();
-    const refreshFromSessionEvent = () => {
-      if (document.visibilityState === "visible") {
-        void refreshThreads();
-      }
-    };
-    const eventsUrl = `${buildApiUrl("/im-gateway/agent/sessions/events")}?x_client_id=${encodeURIComponent(getClientId())}`;
-    const eventSource = new EventSource(eventsUrl);
-    eventSource.addEventListener("sessions_changed", refreshFromSessionEvent);
     const refreshIfVisible = () => {
       if (document.visibilityState === "visible") {
         void refreshThreads();
@@ -644,8 +663,6 @@ export default function AgentChatSection() {
     };
     document.addEventListener("visibilitychange", refreshIfVisible);
     return () => {
-      eventSource.removeEventListener("sessions_changed", refreshFromSessionEvent);
-      eventSource.close();
       document.removeEventListener("visibilitychange", refreshIfVisible);
     };
   }, [refreshThreads]);
@@ -653,6 +670,11 @@ export default function AgentChatSection() {
   useEffect(() => {
     threadsRef.current = threads;
   }, [threads]);
+
+  useEffect(() => {
+    selectedHistoryPathRef.current = historyPath || queryHistoryPath;
+    selectedSessionKeyRef.current = querySessionKey || sessionKey;
+  }, [historyPath, queryHistoryPath, querySessionKey, sessionKey]);
 
   useEffect(() => {
     window.localStorage.setItem(
@@ -812,6 +834,13 @@ export default function AgentChatSection() {
                 tail: true,
                 limit: HISTORY_EVENT_PAGE_SIZE,
               });
+              if (
+                selectedSessionKeyRef.current !== nextSessionKey ||
+                (selectedHistoryPathRef.current &&
+                  selectedHistoryPathRef.current !== timelineHistoryPath)
+              ) {
+                return;
+              }
               timelineEvents = payload.events || [];
               const timelineThread = matchedThread || fallbackHistoryThread;
               historyEventsRef.current = timelineEvents;
@@ -930,7 +959,7 @@ export default function AgentChatSection() {
       limit: HISTORY_EVENT_PAGE_SIZE,
     })
       .then((payload) => {
-        if (cancelled) {
+        if (cancelled || selectedHistoryPathRef.current !== nextHistoryPath) {
           return;
         }
         const matchedThread = threadsRef.current.find((thread) =>
@@ -1001,6 +1030,7 @@ export default function AgentChatSection() {
       events: HistoryEvent[],
       page: Pick<HistoryPagePayload, "start_index" | "end_index" | "next_cursor" | "has_more">,
       shouldStickToBottom: boolean,
+      authoritativeThread?: AgentThreadSummary,
     ) => {
       if (events.length === 0) {
         historyEventEndIndexRef.current =
@@ -1022,7 +1052,7 @@ export default function AgentChatSection() {
       const { nextTelemetry } = applyHistoryEventWindow(
         mergedEvents,
         page,
-        selectedThread,
+        authoritativeThread,
         shouldStickToBottom,
       );
       if (wasAppending) {
@@ -1035,21 +1065,149 @@ export default function AgentChatSection() {
       }
       return nextTelemetry;
     },
-    [applyHistoryEventWindow, selectedThread],
+    [applyHistoryEventWindow],
   );
 
-  useRunningTimelinePolling({
-    historyPath,
-    historyEventEndIndexRef,
-    mergeTimelineEvents,
+  const catchUpTimelineFromEvent = useCallback(
+    async (
+      eventPayload?: AgentSessionEventPayload,
+      options: { forceTail?: boolean } = {},
+    ) => {
+      const currentSessionKey = querySessionKey || sessionKey;
+      const eventSessionKey = eventPayload?.sessionKey || eventPayload?.session_key;
+      const eventHistoryPath = eventPayload?.historyPath || eventPayload?.history_path;
+      const currentThread = selectedThreadRef.current;
+      const currentHistoryPath =
+        historyPath ||
+        queryHistoryPath ||
+        currentThread?.history_path ||
+        (eventSessionKey === currentSessionKey ? eventHistoryPath : undefined);
+      if (!currentHistoryPath) {
+        return false;
+      }
+      if (eventHistoryPath && eventHistoryPath !== currentHistoryPath) {
+        return false;
+      }
+      if (!eventHistoryPath && eventSessionKey && eventSessionKey !== currentSessionKey) {
+        return false;
+      }
+      const endIndex = eventPayload?.endIndex ?? eventPayload?.end_index;
+      const currentEndIndex = historyEventEndIndexRef.current;
+      if (
+        !options.forceTail &&
+        endIndex !== undefined &&
+        currentEndIndex !== undefined &&
+        endIndex <= currentEndIndex
+      ) {
+        return true;
+      }
+      const fetchTail = options.forceTail || currentEndIndex === undefined;
+      let page = await fetchHistoryPage(
+        currentHistoryPath,
+        fetchTail
+          ? { tail: true, limit: HISTORY_EVENT_PAGE_SIZE }
+          : { since: currentEndIndex },
+      );
+      if (
+        selectedSessionKeyRef.current !== currentSessionKey ||
+        (selectedHistoryPathRef.current &&
+          selectedHistoryPathRef.current !== currentHistoryPath)
+      ) {
+        return false;
+      }
+      if (
+        !fetchTail &&
+        currentEndIndex !== undefined &&
+        page.start_index !== undefined &&
+        page.start_index !== currentEndIndex
+      ) {
+        await refreshThreads();
+        page = await fetchHistoryPage(currentHistoryPath, {
+          tail: true,
+          limit: HISTORY_EVENT_PAGE_SIZE,
+        });
+        if (
+          selectedSessionKeyRef.current !== currentSessionKey ||
+          (selectedHistoryPathRef.current &&
+            selectedHistoryPathRef.current !== currentHistoryPath)
+        ) {
+          return false;
+        }
+      }
+      const nextTelemetry = mergeTimelineEvents(
+        page.events || [],
+        page,
+        userNearBottomRef.current,
+        currentThread,
+      );
+      if (nextTelemetry) {
+        const terminal =
+          nextTelemetry.phase === "finished" || nextTelemetry.phase === "failed";
+        const stillRunning =
+          !terminal && (nextTelemetry.phase === "running" || isThreadActive(currentThread));
+        setRunning(stillRunning);
+        if (!stillRunning && nextTelemetry.phase === "running") {
+          setTelemetry((prev) =>
+            prev.phase === "running" ? { ...prev, phase: "finished" } : prev,
+          );
+        }
+      }
+      return true;
+    },
+    [
+      historyPath,
+      mergeTimelineEvents,
+      queryHistoryPath,
+      querySessionKey,
+      refreshThreads,
+      sessionKey,
+    ],
+  );
+
+  useEffect(() => {
+    const parseEvent = (event: MessageEvent<string>) => {
+      try {
+        return JSON.parse(event.data) as AgentSessionEventPayload;
+      } catch {
+        return undefined;
+      }
+    };
+    const refreshFromSessionEvent = (event: MessageEvent<string>) => {
+      const payload = parseEvent(event);
+      if (document.visibilityState === "visible") {
+        void refreshThreads();
+      }
+      if (payload?.reason === "lagged") {
+        void catchUpTimelineFromEvent(undefined, { forceTail: true });
+      }
+    };
+    const refreshTimeline = (event: MessageEvent<string>) => {
+      const payload = parseEvent(event);
+      void catchUpTimelineFromEvent(payload);
+    };
+    const catchUpOnReconnect = () => {
+      if (
+        telemetryPhaseRef.current === "running" ||
+        isThreadActive(selectedThreadRef.current)
+      ) {
+        void catchUpTimelineFromEvent(undefined, { forceTail: true });
+      }
+    };
+    const eventsUrl = `${buildApiUrl("/im-gateway/agent/sessions/events")}?x_client_id=${encodeURIComponent(getClientId())}`;
+    const eventSource = new EventSource(eventsUrl);
+    eventSource.addEventListener("connected", catchUpOnReconnect);
+    eventSource.addEventListener("sessions_changed", refreshFromSessionEvent);
+    eventSource.addEventListener("timeline_changed", refreshTimeline);
+    return () => {
+      eventSource.removeEventListener("connected", catchUpOnReconnect);
+      eventSource.removeEventListener("sessions_changed", refreshFromSessionEvent);
+      eventSource.removeEventListener("timeline_changed", refreshTimeline);
+      eventSource.close();
+    };
+  }, [
+    catchUpTimelineFromEvent,
     refreshThreads,
-    replaceLoadedMessages,
-    selectedThread,
-    setRunning,
-    setTelemetry,
-    telemetryPhase: telemetry.phase,
-    userNearBottomRef,
-  });
+  ]);
 
   useEffect(() => {
     const requestedSessionKey = searchParams.get("session") || undefined;

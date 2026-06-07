@@ -22,9 +22,10 @@ Bifrost 的 Agent Runner 已经把 Codex、ChatGPT Web、custom CLI 收敛到同
 ### 必须不破坏
 
 - 不改变 Codex、ChatGPT Web、custom CLI 的 runner 选择语义、work_dir 继承和持久化会话恢复。
+- Codex/Trae 默认作为无人值守 external runner 启动，必须默认 full access，避免 CLI 在 IM/Web 长任务中等待二次授权；用户显式配置 sandbox/permission/approval 时才按显式配置收窄。
 - 不把外层 `traex` wrapper 调用作为用户可见工具步骤写进 timeline；用户应该看到 Trae 自己输出的状态、工具和最终回答。
 - 不伪造 Trae 没有输出的细粒度工具事件。若 Trae 本次 JSONL 只提供状态和最终消息，Bifrost 只展示真实状态和最终消息；若 Trae 输出 tool started/finished，Bifrost 再展示工具步骤。
-- 不向 Trae exec 传递不支持的 `--permission-mode default`。配置为空或 `default` 时必须省略该参数，让 Trae 使用自身 headless 默认值。
+- 不向 Trae exec 传递不支持的 `--permission-mode default`。配置为空或 `default` 时必须映射为 `--permission-mode bypass_permissions`，并默认启用 full access，避免无人值守 IM/Web 链路等待交互式授权。
 - 未显式配置 `timeoutSecs` 时，不对 Trae/external runner 设置固定超时；长任务由用户显式 `/stop` 或 runner 自然结束控制。
 - 飞书 progress card 展示工具输入/输出预览，完整 stdout/stderr 与 normalized events 保存在 run artifacts；重复的 running tool start 事件必须去重，避免卡片体过大导致中间刷新丢失。
 - 不影响飞书 IM progress card 的最终收敛和普通 final reply 投递策略。
@@ -33,7 +34,7 @@ Bifrost 的 Agent Runner 已经把 Codex、ChatGPT Web、custom CLI 收敛到同
 
 - 使用真实 Trae CLI 执行一个 Web Chat turn，确认最终历史页显示 `Runner: traex`、过程块默认展开、最终答案可见。
 - 使用真实飞书 IM 入站或已保存的飞书 session history 验证 Trae runner 输出进入同一条 timeline，并且 Web Chat 历史页能看到过程和最终结果。
-- 验证 Trae `permissionMode` 空/default 配置不会生成 `--permission-mode default`，避免 exec 模式报错。
+- 验证 Trae `permissionMode` 空/default 配置不会生成 `--permission-mode default`，并会映射为 headless full access，避免 exec 模式报错或等待交互式授权。
 - 验证没有外层 wrapper 工具调用噪音，timeline 中只保留 Trae JSONL 归一化后的事件。
 
 ## 实现逻辑
@@ -42,7 +43,9 @@ Bifrost 的 Agent Runner 已经把 Codex、ChatGPT Web、custom CLI 收敛到同
 
 `command_spec.rs` 新增 `traex` adapter 分支。默认 args 为空时，运行时生成 Trae exec/resume 命令，并把 `--cd` 放在 `exec` 前面，确保 Trae 以目标工程目录启动。`--output-last-message` 继续使用 External CLI runtime 已有的 final response 文件契约。
 
-Trae 的 `permissionMode` 与 Codex 的 approval policy 不同，因此单独映射为 `--permission-mode`。WebUI 把 “Headless default” 保存为空值，后端也把空字符串和 `default` 都视为省略。
+Codex 与 Trae 的默认配置都面向无人值守 runner：未显式设置 `dangerFullAccess`、`sandbox` 或 Codex `approvalPolicy` 时，Codex 默认追加 `--dangerously-bypass-approvals-and-sandbox`；显式设置 sandbox/approval 时保留收窄配置。Trae 未显式设置 permission mode 时默认走 `bypass_permissions` 并追加 `--dangerously-bypass-approvals-and-sandbox`。
+
+Trae 的 `permissionMode` 与 Codex 的 approval policy 不同，因此单独映射为 `--permission-mode`。WebUI 把 “Headless default” 保存为空值；后端把空字符串和历史 `default` 都映射为 `bypass_permissions`，并默认追加 `--dangerously-bypass-approvals-and-sandbox`。用户显式选择 `plan`、`auto` 或 `custom` 时保留该选择，不默认启用 full access；显式设置 `dangerFullAccess` 可覆盖该行为。
 
 ### 实时输出
 
@@ -60,13 +63,15 @@ Web Chat 和 IM event loop 使用 `record_external_cli_progress_event_to_timelin
 - `ToolFinished` 写入 tool call + tool result，优先使用 Trae 原始事件中的 call id、tool name、arguments。
 - `AssistantFinal` 在 runner 仍运行时写入过程 timeline，作为 Trae/Codex 公开的模型 content 展示；底部最终回答仍由 run result/turn finish 统一记录为 assistant message。
 
-前端 `ProcessStepsBlock` 运行中默认展开，完成后默认折叠。运行中按实时 conversation timeline 从上到下展示模型公开 content、必要状态和工具调用；模型公开 content 直接展示原文，不额外添加 `1.` / `2.` 这类序号。工具行默认只展示可读命令标题，点击后展开输入/输出详情。飞书 progress card 会把连续工具调用折叠成“已运行 N 条命令”的一级分组，展开后再显示单条工具详情折叠项。噪音状态（run id、turn started/completed、model rerouted）不进入过程列表，避免卡片顶部被内部事件淹没。
+前端 `ProcessStepsBlock` 运行中默认展开，完成后默认折叠。运行中按实时 conversation timeline 从上到下展示模型公开 content 和工具调用；模型公开 content 直接展示原文，不额外添加 `1.` / `2.` 这类序号。工具行默认只展示可读命令标题，点击后展开输入/输出详情。`run_state_changed` 仍是后端判定 running/completed 的内部事实源，但不渲染成 `Run state: Running` 这类用户可见过程项；UI 顶部状态标签和 thread summary 才负责表达整体状态。飞书 progress card 会把连续工具调用折叠成“已运行 N 条命令”的一级分组，展开后再显示单条工具详情折叠项。噪音状态（run id、turn started/completed、model rerouted）不进入过程列表，避免卡片顶部被内部事件淹没。
 
 Web timeline 会按 `call_id` 合并工具 start/result，并跳过重复 start。后端在写 conversation timeline 时也会跳过同一 `call_id` 的重复 `ToolStarted`，避免 Trae/Codex 重复输出 `item.started` 时造成 WebView active command 计数虚高。
 
+运行中的 Web Chat 不使用前端定时轮询作为状态源。后端每次向 conversation timeline 写入外部 runner 事件后，通过已有 `sessions/events` SSE 推送轻量 `timeline_changed`，payload 只包含 `sessionKey`、`historyPath` 和可用的 `endIndex`。前端只接受当前打开的 `historyPath/sessionKey` 对应事件，多个线程同时运行时不会互相写入消息区；收到事件后按本地 `endIndex` 调用 history `since` 增量接口补齐。EventSource 连接不跟随普通 thread summary 刷新重建，而是通过 ref 读取当前线程和运行状态，避免多线程同时推送时发生连接抖动或旧响应覆盖。只有 SSE lagged、重连或返回的 `start_index` 与本地 `endIndex` 不连续时，才触发一次 tail/history 或 sessions/all 校准，避免运行页把 `/sessions/all` 变成高频心跳并拖高主进程 CPU。
+
 外部 runner（Codex/Trae）运行中不做 guide 注入：同 session 的新用户消息默认进入 `SessionQueueManager` 排队，`/stop` 作为单独控制命令立即尝试停止当前外部进程。Web Chat 交互层也必须隐藏 Guide/Queue 切换，只展示 queue 状态；即使某个入口误传 guide，也会在提交前降级为 queue。当前 run 结束后，IM/Web Chat runner loop 会弹出下一条排队消息再启动下一轮外部 runner；Codex 和 Trae 都会复用上一轮保存的 `threadId` 走 `exec resume`，避免排队续跑丢失 runner 原生会话上下文。
 
-Agent Chat 右侧 Threads 列表支持折叠：卡片标题右侧按钮向右收起，收起后只保留右上悬浮向左展开按钮，状态写入 `localStorage`，刷新页面后保持。Threads runner 标记优先使用 `runner_id`/`runner_type`/`agent_type`，缺失时才从 `source`/`title` fallback 识别 Trae/Codex/ChatGPT，避免 Trae 会话误显示为 `Bf`。
+Agent Chat 右侧 Threads 列表支持折叠：卡片标题右侧按钮向右收起，收起后只保留右上悬浮向左展开按钮，状态写入 `localStorage`，刷新页面后保持。Threads runner 标记优先使用 `runner_id`/`runner_type`/`agent_type`，缺失时才从 `source`/`title` fallback 识别 Trae/Codex/ChatGPT，避免 Trae 会话误显示为 `Bf`。历史 JSONL 摘要和 session detail API 都必须保留 external runner metadata；服务重启后继续同一个 session 时，以绑定的 runner/thread/conversation 为准续接，无法恢复原生 thread 时才显式降级为同 runner 的新 thread，不能静默退回内置 Bifrost Agent。
 
 Runners 配置页的 Adapter 下拉只展示产品化入口：Codex CLI、Trae CLI、ChatGPT Web。后端仍接受历史或测试用途的 `custom`/`mock` adapter，保证已有配置和自动化测试不被破坏，但新建/编辑弹窗不再把这些未来扩展项暴露给普通用户。
 
@@ -82,7 +87,11 @@ Runners 配置页的 Adapter 下拉只展示产品化入口：Codex CLI、Trae C
 
 - `traex_adapter_builds_exec_command_with_prompt_stdin`：验证默认 Trae exec 命令、参数顺序和不设置固定 timeout。
 - `traex_adapter_builds_resume_command_from_thread_id`：验证 threadId 续接命令。
-- `traex_adapter_omits_default_permission_mode_for_exec`：验证空/default permission mode 不传给 Trae。
+- `traex_adapter_defaults_to_bypass_permissions_for_exec`：验证空 permission mode 默认映射为 headless full access。
+- `traex_adapter_maps_default_permission_mode_to_headless_full_access`：验证历史 `default` 不传给 Trae，而是映射为 `bypass_permissions` 并启用 full access。
+- `traex_adapter_respects_explicit_non_bypass_permission_mode`：验证显式 `plan`、`auto` 或 `custom` 不被默认 full access 覆盖。
+- `codex_adapter_defaults_to_danger_full_access_for_headless_runs`：验证 Codex 空配置默认追加 full access 参数。
+- `codex_adapter_respects_explicit_sandbox_without_danger_full_access`：验证显式 sandbox 不被默认 full access 覆盖。
 - `traex_cli_parser_maps_real_jsonl_events`：验证 Trae JSONL 事件可归一化。
 - `external_cli_runtime_streams_stdout_before_process_exit`：验证 stdout 事件在进程退出前已经推送。
 - `external_progress_maps_to_agent_turn_progress_events`：验证 external progress 可转 IM progress card 事件。
@@ -97,12 +106,12 @@ Runners 配置页的 Adapter 下拉只展示产品化入口：Codex CLI、Trae C
 
 - 使用临时 `BIFROST_DATA_DIR` 启动服务，配置 `traex` runner，调用 `/chat/stream`，断言 NDJSON 中包含 Trae progress event、最终 `run_finished`、run detail artifacts 和 timeline。
 - 使用 WebUI 真实浏览器打开 Agent Chat，发送 Trae runner 长任务消息，断言运行中过程块默认展开并持续更新，工具行展示命令片段；完成后过程块默认折叠且最终回答位于底部。
-- 使用 Playwright 断言 external runner 运行中输入只显示 Queue 并发送 `/q ...`；断言 Threads 折叠状态写入 localStorage，刷新后仍保持；断言 Trae fallback thread mark 不显示为 `Bf`。
+- 使用 Playwright 断言 external runner 运行中输入只显示 Queue 并发送 `/q ...`；断言 Threads 折叠状态写入 localStorage，刷新后仍保持；断言 Trae fallback thread mark 不显示为 `Bf`；断言运行中 history 由 `timeline_changed` SSE 触发增量更新，其他线程的 timeline 事件不会污染当前消息区，且不会高频请求 `/sessions/all`。
 - 使用 Playwright 打开 Agent Runners 的 Add Runner 弹窗，断言 Adapter 下拉包含 Codex CLI、Trae CLI、ChatGPT Web，且不包含 Custom、Mock。
 
 ### 真实场景测试
 
-- 更新 `human_tests/im-gateway-external-cli-chat-gateway.md`，新增 Trae Web Chat、飞书 IM progress card、permission mode default 省略三个用例。
+- 更新 `human_tests/im-gateway-external-cli-chat-gateway.md`，新增 Trae Web Chat、飞书 IM progress card、permission mode 默认 headless full access 三个用例。
 - 按用例真实执行：临时端口、临时数据目录、`--no-system-proxy`、禁用 Sync 自动登录弹窗。
 - WebUI 亮色/暗色至少验证 Agent Chat 过程块可读性；本轮主要变更不新增硬编码主题色。
 

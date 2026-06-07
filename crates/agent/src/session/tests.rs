@@ -1952,6 +1952,24 @@ fn test_session_manager_broadcasts_session_list_changes() {
     assert_eq!(updated.session_key.as_deref(), Some("event-session"));
     assert_eq!(updated.reason, "updated");
 
+    manager.emit_timeline_changed(
+        "event-session",
+        "/tmp/session-event.jsonl",
+        Some(12),
+        "progress",
+    );
+    let timeline = events
+        .try_recv()
+        .expect("timeline update should broadcast update");
+    assert_eq!(timeline.event_type, "timeline_changed");
+    assert_eq!(timeline.session_key.as_deref(), Some("event-session"));
+    assert_eq!(
+        timeline.history_path.as_deref(),
+        Some("/tmp/session-event.jsonl")
+    );
+    assert_eq!(timeline.end_index, Some(12));
+    assert_eq!(timeline.reason, "progress");
+
     manager.return_session(session);
     let returned = events.try_recv().expect("return should broadcast change");
     assert_eq!(returned.session_key.as_deref(), Some("event-session"));

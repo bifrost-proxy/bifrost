@@ -541,17 +541,23 @@
 3. Web history 中同一 turn 显示 `Runner: traex`，过程块默认展开，最终答案可见。
 4. 飞书通道与 Web Chat 历史使用同一 timeline 语义，不出现 Web 有过程但 IM 无过程，或 IM 有 wrapper 工具噪音的分裂表现。
 
-### TC-IEC-27: Trae Permission Mode 默认值不会传递为非法 exec 参数
+### TC-IEC-27: Codex/Trae Permission 默认 Headless Full Access
 
 操作步骤：
-1. 配置 `traex` runner 时将 WebUI Permission Mode 保持为 `Headless default`，或 API 中省略 `permissionMode` / 传空值。
-2. 触发一次 Trae Chat Gateway run。
-3. 读取本次 run 的 `runtime_snapshot.json` 和最终状态。
+1. 配置 `traex` runner 时将 WebUI Permission Mode 保持为 `Headless default`，或 API 中省略 `permissionMode` / 传空值 / 传历史值 `default`。
+2. 触发一次 Trae Chat Gateway run，读取本次 run 的 `runtime_snapshot.json` 和最终状态。
+3. 再显式选择 `plan`、`auto` 或 `custom` 中任一非 bypass 模式，触发一次 run 并读取 `runtime_snapshot.json`。
+4. 配置 `codex` runner 时保持默认 adapterConfig，不显式设置 `dangerFullAccess`、`sandbox` 或 `approvalPolicy`。
+5. 触发一次 Codex Chat Gateway run，读取本次 run 的 `runtime_snapshot.json`。
+6. 再显式为 Codex 配置 `sandbox` 或 `approvalPolicy`，触发一次 run 并读取 `runtime_snapshot.json`。
 
 预期结果：
 1. `runtime_snapshot.args` 不包含 `--permission-mode default`。
 2. Trae 不再报错 `permission_mode = "default" is not supported in exec mode`。
-3. 如果用户显式选择 `plan`、`bypass_permissions`、`auto` 或 `custom`，后端才生成对应 `--permission-mode <value>`。
+3. 默认/空值/历史 `default` 会生成 `--permission-mode bypass_permissions` 和 `--dangerously-bypass-approvals-and-sandbox`，避免 Trae 在 IM/Web 无人值守链路里等待交互式授权。
+4. 如果用户显式选择 `plan`、`auto` 或 `custom`，后端生成对应 `--permission-mode <value>`，且不默认追加 full access；显式选择 `bypass_permissions` 时默认视为 full access。
+5. Codex 默认空配置会生成 `--dangerously-bypass-approvals-and-sandbox`，避免 IM/Web 无人值守链路等待二次授权。
+6. Codex 显式配置 `sandbox` 或 `approvalPolicy` 时不被默认 full access 覆盖，除非同时显式设置 `dangerFullAccess=true`。
 
 ### TC-IEC-28: Codex Runner Web Chat 实时工具过程与最终结果展示
 
@@ -727,6 +733,26 @@
 6. Trae/Traex thread 的 runner 标记显示 Trae 短标（`Tr`），不误显示 `Bf`；明确 runner metadata 为 Bifrost Agent 的历史 thread 仍显示 `Bf`。
 7. 如果 thread 摘要仍是 stale running，但 history timeline 已写入 `run_state_changed: completed` 和最终 assistant message，Web Chat 必须以 completed timeline 为准收敛为 Ready/Send，不再显示额外 `Thinking...`。
 
+### TC-IEC-37: Agent Chat 外部 Runner 历史恢复状态唯一真源回归
+
+操作步骤：
+1. 使用默认 9900 端口和默认数据目录启动当前源码 Bifrost，启动命令必须包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1` 与 `--no-system-proxy`。
+2. 打开一个历史上绑定 ChatGPT Web Runner 的会话，刷新 history URL，并检查顶部 Runner 标签、Threads 短标和详情 API。
+3. 在该历史会话继续发送一条新消息，等待 runner 完成。
+4. 重启 Bifrost 服务后再次打开同一个会话，继续发送一条短消息。
+5. 打开一个历史上绑定 Trae Runner 的 Feishu/Web 会话，其 JSONL 中已包含 completed `run_state_changed` 和最终 `assistant_message`，但 session state 可能仍有 stale running。
+6. 刷新该 history URL，展开已完成轮次的过程块。
+7. 对一个新建 Web Chat 会话发送消息，观察运行中的 ChatUI 过程块。
+
+预期结果：
+1. ChatGPT Web 历史会话始终显示 `Runner: web` / `chatgpt_web`，续聊请求走 `/api/im-gateway/chat/stream`，不会静默切回内置 Bifrost Agent。
+2. 服务重启后，session detail API 仍从 history/session binding 恢复 `runner_id`、`runner_type` 和 external conversation/thread id；无法恢复原生线程时才显式降级为同 runner 的新线程。
+3. Trae/ChatGPT Web 会话的 thread 短标不误显示 `Bf`，除非 metadata 明确是内置 Bifrost Agent。
+4. 已完成的 history 以 completed timeline 或 thread summary 为唯一真源收敛为 Ready/Send，不继续显示 Running、Thinking 或 running placeholder；刷新页面后状态保持一致。
+5. 已完成轮次的过程块默认折叠，展开后不重复展示最终 assistant 内容。
+6. ChatUI 过程块不展示 `Run state: Running` 内部状态行；运行中只展示模型公开 content、工具组/工具摘要和必要的 Thinking 尾部提示。
+7. 未来由 runner-call 子线程产生的用户可见消息会写回父 session canonical JSONL，刷新父会话不丢最后一轮消息；历史旧数据不做兼容回填。
+
 ## 最近执行记录
 
 - 2026-05-13：执行 TC-IEC-01/02/03/04/08/09/10/11/12/13，临时服务端口 `18880`，`BIFROST_DATA_DIR=/tmp/bifrost-im-external-cli-test`，均通过；TC-IEC-12 使用 `sleep 23` 慢进程验证 active run 可停止，run 收敛为 `status:"stopped"`，`response:"External CLI run was stopped by request."`，且未残留 `sleep 23` 测试进程。
@@ -759,6 +785,7 @@
 - 2026-06-07：执行 TC-IEC-35 的代码路径复核与单元回归，确认 IM event loop 和 Web Chat `/stream` 对 external/custom runner 的运行中新消息默认走 `SessionQueueManager` 排队，不做 guide 注入；`/stop` 仍单独尝试停止当前外部进程。补充 Trae 排队续跑回归，修复 `apply_external_cli_resume_metadata` 只给 Codex 注入 `threadId` 的问题，确保 Trae queued continuation 也能走 `traex exec resume ... <threadId> -`。命令 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin busy_message_mode -- --nocapture` 通过 9 个测试，`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin 'adapter_builds_resume_command_from_thread_id' -- --nocapture` 通过 Codex/Trae 2 个 resume 命令构造测试。
 - 2026-06-07：执行 TC-IEC-36 的 WebUI 交互回归，命令 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts -g "(persists collapsed thread rail|queues running input for external runners|supports running stop, guide, queue|uses detail runner metadata)" --reporter=line` 通过 4 个测试。覆盖 external runner 运行中只展示 Queue 且请求为 `/q follow up while running`、内置 Bifrost Agent 仍支持 guide/queue/stop、Threads 折叠状态写入 localStorage 并在刷新后保持、缺少 runner_id 但 source/title 指向 Trae 的 thread mark 显示 `Tr` 而非 `Bf`，同时确认明确 Bifrost metadata 的历史 thread 仍显示 `Bf`。真实 WebView 验证中，Trae 第二轮 queued continuation 已自动从 queue panel 转为新的 user bubble 并执行完成，但页面仍停在 Running；后续补充 `AI Agent Chat lets completed history override stale running thread summary` 回归并修复 timeline completed 覆盖 stale thread running 摘要，复跑 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts -g "(stale running thread summary|queues running input for external runners|supports running stop, guide, queue)" --reporter=line` 通过 3 个测试。
 - 2026-06-07：补充执行 TC-IEC-18 的 Agent Runners Adapter 菜单回归，命令 `pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts -g "Agent Runners 新增弹窗只展示当前支持的 Adapter" --reporter=line` 通过 1 个测试；截图级验证 Add Runner 弹窗 Adapter 下拉只展示 `Codex CLI`、`Trae CLI`、`ChatGPT Web`，不再展示 `Custom`、`Mock`。
+- 2026-06-07：执行 TC-IEC-37 的状态唯一真源回归，命令 `cargo test -p bifrost-agent scan_session_summary_tracks_external_runner_metadata -- --nocapture`、`cargo test -p bifrost-admin active_history_detail_uses_chatgpt_web_binding_from_history_state -- --nocapture`、`cargo test -p bifrost-admin runner_call_visible_messages_are_recorded_in_parent_history -- --nocapture`、`pnpm --dir web exec tsc -b`、`pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts -g "initial load|stops running history polling|completed history override|running history timeline" --reporter=line` 均通过。随后用默认 9900 服务真实验证：`admin-chat-1779725144963` 顶部显示 `Runner: web` 且续聊返回 `OK`，JSONL 追加 `agent_kind=web` running/completed 与 `assistant_message OK`；`admin-chat-1780845051758` 刷新后顶部为 Ready，消息区 `thinkingTail=0`、`runningGroups=0`、`Run state: Running` 不可见，running placeholder 不可见。
 
 ## 清理步骤
 

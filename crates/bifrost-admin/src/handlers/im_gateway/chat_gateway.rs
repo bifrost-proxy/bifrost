@@ -244,6 +244,12 @@ pub(super) async fn handle_chat_gateway(
                     let mut current_request = request;
                     loop {
                         remember_external_cli_started_state(&current_request, &runner_id_for_state);
+                        emit_external_cli_timeline_changed_from_request(
+                            &agent_session_manager,
+                            &current_request,
+                            &runner_id_for_state,
+                            "web_turn_started",
+                        );
                         let started =
                             serde_json::json!({"eventType":"run_started","content":"started"});
                         let _ = tx
@@ -261,18 +267,30 @@ pub(super) async fn handle_chat_gateway(
                         let http_progress_tx = tx.clone();
                         let progress_request = request_snapshot.clone();
                         let progress_runner_id = runner_id_for_state.clone();
+                        let progress_agent_session_manager = agent_session_manager.clone();
                         let progress_task = tokio::spawn(async move {
                             let mut recorder = external_cli_timeline_recorder(
                                 &progress_request,
                                 &progress_runner_id,
                             );
                             while let Some(event) = progress_rx.recv().await {
-                                record_external_cli_web_progress_event(
+                                if let Some(end_index) = record_external_cli_web_progress_event(
                                     recorder.as_mut(),
                                     &progress_request,
                                     &progress_runner_id,
                                     &event,
-                                );
+                                ) {
+                                    if let (Some(session_key), Some(recorder)) =
+                                        (progress_request.session_key.as_deref(), recorder.as_ref())
+                                    {
+                                        progress_agent_session_manager.emit_timeline_changed(
+                                            session_key,
+                                            &recorder.file_path().display().to_string(),
+                                            Some(end_index),
+                                            "web_progress",
+                                        );
+                                    }
+                                }
                                 if matches!(
                                     event.event_type,
                                     crate::im_gateway::external_cli::ExternalCliProgressEventType::RunStarted
@@ -299,6 +317,12 @@ pub(super) async fn handle_chat_gateway(
                                     &request_snapshot,
                                     &runner_id_for_state,
                                     &result,
+                                );
+                                emit_external_cli_timeline_changed_from_request(
+                                    &agent_session_manager,
+                                    &request_snapshot,
+                                    &runner_id_for_state,
+                                    "web_turn_finished",
                                 );
                                 if !streams_progress {
                                     for event in &result.events {
@@ -445,12 +469,24 @@ pub(super) async fn handle_chat_gateway(
                 );
                 let request_for_state = request.clone();
                 remember_external_cli_started_state(&request_for_state, &effective.runner_id);
+                emit_external_cli_timeline_changed_from_request(
+                    &_service.agent_session_manager,
+                    &request_for_state,
+                    &effective.runner_id,
+                    "web_turn_started",
+                );
                 match runtime.run(request).await {
                     Ok(result) => {
                         remember_external_cli_result_state(
                             &request_for_state,
                             &effective.runner_id,
                             &result,
+                        );
+                        emit_external_cli_timeline_changed_from_request(
+                            &_service.agent_session_manager,
+                            &request_for_state,
+                            &effective.runner_id,
+                            "web_turn_finished",
                         );
                         json_response(&result)
                     }
@@ -666,6 +702,12 @@ async fn runner_call_stream_response(
             started_at,
         );
         remember_external_cli_started_state(&request_snapshot, &effective.runner_id);
+        emit_external_cli_timeline_changed_from_request(
+            &service_agent_sessions,
+            &request_snapshot,
+            &effective.runner_id,
+            "web_runner_call_started",
+        );
         let streams_progress = request.adapter != crate::im_gateway::chatgpt_web::ADAPTER_ID;
         let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<
             crate::im_gateway::external_cli::ExternalCliProgressEvent,
@@ -673,16 +715,28 @@ async fn runner_call_stream_response(
         let call_progress_tx = tx.clone();
         let progress_request = request_snapshot.clone();
         let progress_runner_id = effective.runner_id.clone();
+        let progress_agent_session_manager = service_agent_sessions.clone();
         let progress_task = tokio::spawn(async move {
             let mut recorder =
                 external_cli_timeline_recorder(&progress_request, &progress_runner_id);
             while let Some(event) = progress_rx.recv().await {
-                record_external_cli_web_progress_event(
+                if let Some(end_index) = record_external_cli_web_progress_event(
                     recorder.as_mut(),
                     &progress_request,
                     &progress_runner_id,
                     &event,
-                );
+                ) {
+                    if let (Some(session_key), Some(recorder)) =
+                        (progress_request.session_key.as_deref(), recorder.as_ref())
+                    {
+                        progress_agent_session_manager.emit_timeline_changed(
+                            session_key,
+                            &recorder.file_path().display().to_string(),
+                            Some(end_index),
+                            "web_runner_call_progress",
+                        );
+                    }
+                }
                 let line = serde_json::to_value(&event).unwrap_or_else(|_| serde_json::json!({}));
                 let _ = send_ndjson_event(&call_progress_tx, &line).await;
             }
@@ -694,6 +748,12 @@ async fn runner_call_stream_response(
                     &request_snapshot,
                     &effective.runner_id,
                     &result,
+                );
+                emit_external_cli_timeline_changed_from_request(
+                    &service_agent_sessions,
+                    &request_snapshot,
+                    &effective.runner_id,
+                    "web_runner_call_finished",
                 );
                 if !streams_progress {
                     for event in &result.events {
@@ -1260,6 +1320,106 @@ fn update_session_runner_call_messages(
     });
 }
 
+fn append_runner_call_started_to_parent_history(
+    source_session_key: &str,
+    caller_adapter: &str,
+    caller_runner_id: Option<&str>,
+    visible_user: &str,
+    running_message: &str,
+    target_runner_id: &str,
+) {
+    let Some(state) = crate::im_gateway::session_state::load_session_state(
+        source_session_key,
+        caller_adapter,
+        caller_runner_id,
+    ) else {
+        return;
+    };
+    let Some(history_path) = state.history_path.as_deref() else {
+        return;
+    };
+    let data_dir = bifrost_agent::config::agent_home_dir();
+    let path = match bifrost_agent::persistence::validate_conversation_path(
+        &data_dir,
+        std::path::Path::new(history_path),
+    ) {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!(
+                session_key = %source_session_key,
+                history_path = %history_path,
+                error = %error,
+                "runner call parent history path is invalid"
+            );
+            return;
+        }
+    };
+    let mut recorder =
+        bifrost_agent::persistence::ConversationRecorder::from_existing_file(path, None);
+    if let Err(error) = recorder.record_run_state(
+        source_session_key,
+        "running",
+        Some("web"),
+        Some(target_runner_id),
+    ) {
+        tracing::warn!(session_key = %source_session_key, error = %error, "failed to record runner call started state in parent history");
+    }
+    if let Err(error) = recorder.record_user_message(source_session_key, visible_user) {
+        tracing::warn!(session_key = %source_session_key, error = %error, "failed to record runner call user message in parent history");
+    }
+    if let Err(error) = recorder.record_assistant_message(source_session_key, running_message) {
+        tracing::warn!(session_key = %source_session_key, error = %error, "failed to record runner call running message in parent history");
+    }
+}
+
+fn append_runner_call_result_to_parent_history(
+    source_session_key: &str,
+    caller_adapter: &str,
+    caller_runner_id: Option<&str>,
+    visible: &str,
+    target_runner_id: &str,
+) {
+    let Some(state) = crate::im_gateway::session_state::load_session_state(
+        source_session_key,
+        caller_adapter,
+        caller_runner_id,
+    ) else {
+        return;
+    };
+    let Some(history_path) = state.history_path.as_deref() else {
+        return;
+    };
+    let data_dir = bifrost_agent::config::agent_home_dir();
+    let path = match bifrost_agent::persistence::validate_conversation_path(
+        &data_dir,
+        std::path::Path::new(history_path),
+    ) {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!(
+                session_key = %source_session_key,
+                history_path = %history_path,
+                error = %error,
+                "runner call parent history path is invalid"
+            );
+            return;
+        }
+    };
+    let mut recorder =
+        bifrost_agent::persistence::ConversationRecorder::from_existing_file(path, None);
+    if let Err(error) = recorder.record_run_state(
+        source_session_key,
+        "completed",
+        Some("web"),
+        Some(target_runner_id),
+    ) {
+        tracing::warn!(session_key = %source_session_key, error = %error, "failed to record runner call completed state in parent history");
+    }
+    if let Err(error) = recorder.record_assistant_message(source_session_key, visible) {
+        tracing::warn!(session_key = %source_session_key, error = %error, "failed to record runner call result in parent history");
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn remember_runner_call_started_for_caller(
     agent_session_manager: &std::sync::Arc<bifrost_agent::AgentSessionManager>,
@@ -1274,6 +1434,14 @@ fn remember_runner_call_started_for_caller(
     let visible_user = runner_call_visible_user(target_runner_id, raw_user_message);
     let running_message = runner_call_running_message(target_runner_id);
     let (caller_adapter, caller_runner_id, _) = caller_scope;
+    append_runner_call_started_to_parent_history(
+        source_session_key,
+        caller_adapter,
+        caller_runner_id.as_deref(),
+        &visible_user,
+        &running_message,
+        target_runner_id,
+    );
     if caller_adapter == crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER {
         if let Some(mut session) =
             agent_session_manager.try_take_session_with_work_dir(source_session_key, None)
@@ -1416,6 +1584,13 @@ fn remember_runner_call_result_for_caller(
         created_at: finished_at,
     };
     let (caller_adapter, caller_runner_id, _) = caller_scope;
+    append_runner_call_result_to_parent_history(
+        source_session_key,
+        caller_adapter,
+        caller_runner_id.as_deref(),
+        &visible,
+        target_runner_id,
+    );
     if caller_adapter == crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER {
         if let Some(mut session) =
             agent_session_manager.try_take_session_with_work_dir(source_session_key, None)
@@ -1943,6 +2118,23 @@ fn external_cli_timeline_recorder(
     Some(recorder)
 }
 
+fn emit_external_cli_timeline_changed_from_request(
+    agent_session_manager: &bifrost_agent::AgentSessionManager,
+    request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
+    runner_id: &str,
+    reason: &str,
+) {
+    let Some(session_key) = request.session_key.as_deref() else {
+        return;
+    };
+    let Some(history_path) = request_history_path(request)
+        .or_else(|| persisted_history_path_for_request(request, runner_id))
+    else {
+        return;
+    };
+    agent_session_manager.emit_timeline_changed(session_key, &history_path, None, reason);
+}
+
 fn record_external_cli_web_turn_started(
     request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
     runner_id: &str,
@@ -1999,13 +2191,9 @@ fn record_external_cli_web_progress_event(
     request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
     runner_id: &str,
     event: &crate::im_gateway::external_cli::ExternalCliProgressEvent,
-) {
-    let Some(session_key) = request.session_key.as_deref() else {
-        return;
-    };
-    let Some(recorder) = recorder else {
-        return;
-    };
+) -> Option<usize> {
+    let session_key = request.session_key.as_deref()?;
+    let recorder = recorder?;
     record_external_cli_progress_event_to_timeline(
         recorder,
         session_key,
@@ -2013,7 +2201,7 @@ fn record_external_cli_web_progress_event(
         runner_id,
         &request.adapter,
         event,
-    );
+    )
 }
 
 pub(super) fn record_external_cli_progress_event_to_timeline(
@@ -2023,9 +2211,10 @@ pub(super) fn record_external_cli_progress_event_to_timeline(
     runner_id: &str,
     adapter: &str,
     event: &crate::im_gateway::external_cli::ExternalCliProgressEvent,
-) {
+) -> Option<usize> {
     use crate::im_gateway::external_cli::ExternalCliProgressEventType as EventType;
 
+    let mut changed = false;
     match event.event_type {
         EventType::RunStarted => {
             if let Err(error) = recorder.record_run_state(
@@ -2035,6 +2224,8 @@ pub(super) fn record_external_cli_progress_event_to_timeline(
                 Some(runner_id),
             ) {
                 tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner progress state");
+            } else {
+                changed = true;
             }
         }
         EventType::Status => {
@@ -2052,6 +2243,8 @@ pub(super) fn record_external_cli_progress_event_to_timeline(
                 };
                 if let Err(error) = recorder.record_assistant_delta(session_key, &message) {
                     tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner status delta");
+                } else {
+                    changed = true;
                 }
             }
         }
@@ -2059,6 +2252,8 @@ pub(super) fn record_external_cli_progress_event_to_timeline(
             if !event.content.trim().is_empty() {
                 if let Err(error) = recorder.record_assistant_delta(session_key, &event.content) {
                     tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner assistant delta");
+                } else {
+                    changed = true;
                 }
             }
         }
@@ -2074,6 +2269,8 @@ pub(super) fn record_external_cli_progress_event_to_timeline(
                     Some(&call_id),
                 ) {
                     tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner tool started");
+                } else {
+                    changed = true;
                 }
             }
         }
@@ -2089,6 +2286,8 @@ pub(super) fn record_external_cli_progress_event_to_timeline(
                     Some(&call_id),
                 ) {
                     tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner completed tool call");
+                } else {
+                    changed = true;
                 }
             }
             let success = event
@@ -2109,6 +2308,8 @@ pub(super) fn record_external_cli_progress_event_to_timeline(
                 Some(&call_id),
             ) {
                 tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner tool finished");
+            } else {
+                changed = true;
             }
         }
         EventType::RunFinished => {
@@ -2119,6 +2320,8 @@ pub(super) fn record_external_cli_progress_event_to_timeline(
                 Some(runner_id),
             ) {
                 tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner completed progress state");
+            } else {
+                changed = true;
             }
         }
         EventType::RunFailed => {
@@ -2129,11 +2332,15 @@ pub(super) fn record_external_cli_progress_event_to_timeline(
                 Some(runner_id),
             ) {
                 tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner failed progress state");
+            } else {
+                changed = true;
             }
             if !event.content.trim().is_empty() {
                 let message = format!("Runner failed: {}", event.content.trim());
                 if let Err(error) = recorder.record_assistant_delta(session_key, &message) {
                     tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner failure delta");
+                } else {
+                    changed = true;
                 }
             }
         }
@@ -2141,10 +2348,13 @@ pub(super) fn record_external_cli_progress_event_to_timeline(
             if !event.content.trim().is_empty() {
                 if let Err(error) = recorder.record_assistant_delta(session_key, &event.content) {
                     tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner assistant content");
+                } else {
+                    changed = true;
                 }
             }
         }
     }
+    changed.then(|| recorder.event_count()).flatten()
 }
 
 fn timeline_has_tool_call(
@@ -3037,6 +3247,100 @@ mod tests {
             finished.messages[1].content,
             "Runner `bifrost_agent` completed this call.\n\ndone"
         );
+    }
+
+    #[test]
+    fn runner_call_visible_messages_are_recorded_in_parent_history() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
+        let manager = std::sync::Arc::new(bifrost_agent::AgentSessionManager::new(60));
+        let source_session_key = "source-web-history";
+        let caller_scope = (
+            "chatgpt_web".to_string(),
+            Some("web".to_string()),
+            "web".to_string(),
+        );
+        let data_dir = bifrost_agent::config::agent_home_dir();
+        let mut recorder =
+            bifrost_agent::persistence::ConversationRecorder::new(&data_dir, source_session_key);
+        recorder
+            .record_session_start(
+                source_session_key,
+                serde_json::json!({
+                    "source": "admin-api",
+                    "runtime": "external_cli",
+                    "adapter": "chatgpt_web",
+                    "runner_id": "web",
+                }),
+            )
+            .expect("record start");
+        recorder
+            .record_user_message(source_session_key, "first prompt")
+            .expect("record parent user");
+        recorder
+            .record_assistant_message(source_session_key, "first response")
+            .expect("record parent assistant");
+        let history_path = recorder.file_path().display().to_string();
+        crate::im_gateway::session_state::remember_session_state(
+            crate::im_gateway::session_state::ImAgentSessionState {
+                session_key: source_session_key.to_string(),
+                adapter: "chatgpt_web".to_string(),
+                runner_id: Some("web".to_string()),
+                history_path: Some(history_path.clone()),
+                ..crate::im_gateway::session_state::ImAgentSessionState::default()
+            },
+        )
+        .expect("remember parent state");
+
+        remember_runner_call_started_for_caller(
+            &manager,
+            &caller_scope,
+            source_session_key,
+            "call-visible-history",
+            "web",
+            "chatgpt_web",
+            "generate four images",
+            1_000,
+        );
+        remember_runner_call_result_for_caller(
+            &manager,
+            &caller_scope,
+            source_session_key,
+            "call-visible-history",
+            "web",
+            "chatgpt_web",
+            "generate four images",
+            "generated four images",
+            1_000,
+            2_000,
+        );
+
+        let events = bifrost_agent::persistence::load_conversation_events(recorder.file_path())
+            .expect("load parent history");
+        assert!(events.iter().any(|event| {
+            event.event_type == bifrost_agent::persistence::event_types::USER_MESSAGE
+                && event
+                    .content
+                    .get("message")
+                    .and_then(|value| value.as_str())
+                    == Some("Run with web: generate four images")
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == bifrost_agent::persistence::event_types::ASSISTANT_MESSAGE
+                && event
+                    .content
+                    .get("message")
+                    .and_then(|value| value.as_str())
+                    == Some("Runner `web` is running...")
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == bifrost_agent::persistence::event_types::ASSISTANT_MESSAGE
+                && event
+                    .content
+                    .get("message")
+                    .and_then(|value| value.as_str())
+                    == Some("Runner `web` completed this call.\n\ngenerated four images")
+        }));
     }
 
     #[test]

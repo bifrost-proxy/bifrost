@@ -6,6 +6,7 @@ const AGENT_SESSION_EVENTS_ROUTE =
   "**/_bifrost/api/im-gateway/agent/sessions/events*";
 
 async function routeAgentSessionEvents(page: Page, body?: string) {
+  await page.unroute(AGENT_SESSION_EVENTS_ROUTE).catch(() => {});
   await page.route(AGENT_SESSION_EVENTS_ROUTE, async (route) => {
     await route.fulfill({
       status: 200,
@@ -1905,6 +1906,7 @@ test("AI Agent Chat continues external runner history with canonical history pat
 }) => {
   const historyPath = "/tmp/external-runner-history.jsonl";
   let externalPayload: Record<string, unknown> | undefined;
+  const historyUrls: string[] = [];
   await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
     await route.fulfill({
       status: 200,
@@ -1951,6 +1953,7 @@ test("AI Agent Chat continues external runner history with canonical history pat
   await page.route(
     `**/_bifrost/api/im-gateway/agent/sessions/history/${encodeURIComponent(historyPath)}**`,
     async (route) => {
+      historyUrls.push(route.request().url());
       await route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -1973,6 +1976,13 @@ test("AI Agent Chat continues external runner history with canonical history pat
       });
     },
   );
+  await page.route("**/_bifrost/api/agent/chat/stream", async (route) => {
+    await route.fulfill({
+      status: 500,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "builtin agent stream should not be used" }),
+    });
+  });
   await page.route("**/_bifrost/api/im-gateway/chat/stream", async (route) => {
     externalPayload = route.request().postDataJSON();
     await route.fulfill({
@@ -1992,6 +2002,7 @@ test("AI Agent Chat continues external runner history with canonical history pat
   await expect(page.getByTestId("agent-chat-messages")).toContainText(
     "Earlier GPT Web answer",
   );
+  expect(new URL(historyUrls[0]).searchParams.get("tail")).toBe("true");
   await expect(page.getByTestId("agent-chat-runner-tag")).toContainText("web");
   await page.getByTestId("agent-chat-input").fill("Continue via GPT Web");
   await page.getByTestId("agent-chat-send").click();
@@ -2437,7 +2448,7 @@ test("AI Agent Chat restores active timeline process steps from history path", a
       }),
     )
     .toBe(true);
-  await processBlock.getByText(/Ran|Running/).click();
+  await processBlock.getByRole("button").click();
   await expect(processBlock).not.toContainText("Run state: Running");
   await expect(processBlock).toContainText("exec_command");
   await processBlock.getByText("exec_command").click();
@@ -2445,12 +2456,34 @@ test("AI Agent Chat restores active timeline process steps from history path", a
   await expect(processBlock).toContainText("ok");
 });
 
-test("AI Agent Chat keeps polling running history timeline after refresh", async ({
+test("AI Agent Chat updates running history timeline from SSE without cross-thread mixing", async ({
   page,
 }) => {
   const historyPath = "/tmp/running-refresh-session.jsonl";
+  const otherHistoryPath = "/tmp/other-running-session.jsonl";
   const runningStartedAt = Math.floor(Date.now() / 1000) - 3;
   let historyCalls = 0;
+  await routeAgentSessionEvents(
+    page,
+    [
+      'event: timeline_changed',
+      `data: ${JSON.stringify({
+        eventType: "timeline_changed",
+        sessionKey: "other-running-refresh",
+        historyPath: otherHistoryPath,
+        endIndex: 99,
+      })}`,
+      '',
+      'event: timeline_changed',
+      `data: ${JSON.stringify({
+        eventType: "timeline_changed",
+        sessionKey: "running-refresh",
+        historyPath,
+        endIndex: 7,
+      })}`,
+      '',
+    ].join("\n"),
+  );
   await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
     await route.fulfill({
       status: 200,
@@ -2495,7 +2528,8 @@ test("AI Agent Chat keeps polling running history timeline after refresh", async
     `**/_bifrost/api/im-gateway/agent/sessions/history/${encodeURIComponent(historyPath)}**`,
     async (route) => {
       historyCalls += 1;
-      const events = [
+      const requestUrl = new URL(route.request().url());
+      const initialEvents = [
         {
           timestamp: runningStartedAt - 10,
           event_type: "user_message",
@@ -2514,46 +2548,51 @@ test("AI Agent Chat keeps polling running history timeline after refresh", async
           session_key: "running-refresh",
           content: { message: "Question before refresh" },
         },
-        ...(historyCalls >= 2
-          ? [
-              {
-                timestamp: runningStartedAt + 0.5,
-                event_type: "assistant_delta",
-                session_key: "running-refresh",
-                content: { message: "I am checking the refreshed run state." },
-              },
-              {
-                timestamp: runningStartedAt + 1,
-                event_type: "tool_call",
-                session_key: "running-refresh",
-                content: {
-                  tool_name: "exec_command",
-                  arguments: "{\"cmd\":\"cargo test\"}",
-                },
-              },
-              {
-                timestamp: runningStartedAt + 2,
-                event_type: "tool_result",
-                session_key: "running-refresh",
-                content: {
-                  tool_name: "exec_command",
-                  result: "still running output",
-                  success: true,
-                },
-              },
-              {
-                timestamp: runningStartedAt + 2.5,
-                event_type: "assistant_delta",
-                session_key: "running-refresh",
-                content: { message: "The command is still being observed." },
-              },
-            ]
-          : []),
       ];
+      const incrementalEvents = [
+        {
+          timestamp: runningStartedAt + 0.5,
+          event_type: "assistant_delta",
+          session_key: "running-refresh",
+          content: { message: "I am checking the refreshed run state." },
+        },
+        {
+          timestamp: runningStartedAt + 1,
+          event_type: "tool_call",
+          session_key: "running-refresh",
+          content: {
+            tool_name: "exec_command",
+            arguments: "{\"cmd\":\"cargo test\"}",
+          },
+        },
+        {
+          timestamp: runningStartedAt + 2,
+          event_type: "tool_result",
+          session_key: "running-refresh",
+          content: {
+            tool_name: "exec_command",
+            result: "still running output",
+            success: true,
+          },
+        },
+        {
+          timestamp: runningStartedAt + 2.5,
+          event_type: "assistant_delta",
+          session_key: "running-refresh",
+          content: { message: "The command is still being observed." },
+        },
+      ];
+      const isIncremental = requestUrl.searchParams.has("since");
+      const events = isIncremental ? incrementalEvents : [...initialEvents, ...incrementalEvents];
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ events }),
+        body: JSON.stringify({
+          events,
+          start_index: isIncremental ? 3 : 0,
+          end_index: 7,
+          has_more: false,
+        }),
       });
     },
   );
@@ -2571,6 +2610,9 @@ test("AI Agent Chat keeps polling running history timeline after refresh", async
   );
   await expect(page.getByTestId("agent-chat-messages")).toContainText(
     "The command is still being observed.",
+  );
+  await expect(page.getByTestId("agent-chat-messages")).not.toContainText(
+    "other-running-refresh",
   );
   const runningSummary = page.getByTestId("agent-chat-turn-running-summary");
   await expect(runningSummary).toContainText(/已处理 \d+s/);
@@ -2605,13 +2647,14 @@ test("AI Agent Chat keeps polling running history timeline after refresh", async
       }),
     )
     .toBe(true);
-  await processBlock.getByText(/Ran|Running/).click();
-  await expect(processBlock).toContainText("Run state: Running");
+  await processBlock.getByRole("button").click();
+  await expect(processBlock).not.toContainText("Run state: Running");
   await expect(processBlock).toContainText("exec_command");
   await processBlock.getByText("exec_command").click();
   await expect(processBlock).toContainText("cargo test");
   await expect(processBlock).toContainText("still running output");
-  expect(historyCalls).toBeGreaterThanOrEqual(2);
+  expect(historyCalls).toBeGreaterThan(0);
+  expect(historyCalls).toBeLessThanOrEqual(3);
 });
 
 test("AI Agent Chat lets completed history override stale running thread summary", async ({
@@ -2721,6 +2764,459 @@ test("AI Agent Chat lets completed history override stale running thread summary
   await expect(page.getByTestId("agent-chat-messages")).toContainText(
     "Completed from queued run.",
   );
+  await expect(page.getByTestId("agent-chat-thinking-tail")).toHaveCount(0);
+  await expect(page.getByTestId("agent-chat-process-block")).toHaveCount(0);
+  await expect(page.getByText("Completed from queued run.")).toHaveCount(1);
+  await page.getByTestId("agent-chat-turn-collapse-toggle").click();
+  await expect(page.getByText("Completed from queued run.")).toHaveCount(1);
+});
+
+test("AI Agent Chat stops running history from terminal SSE without hot thread refresh", async ({
+  page,
+}) => {
+  const historyPath = "/tmp/running-summary-stops.jsonl";
+  const startedAt = Math.floor(Date.now() / 1000) - 10;
+  let sessionListRequests = 0;
+  let incrementalHistoryRequests = 0;
+  await routeAgentSessionEvents(
+    page,
+    [
+      'event: timeline_changed',
+      `data: ${JSON.stringify({
+        eventType: "timeline_changed",
+        sessionKey: "running-summary-stops",
+        historyPath,
+        endIndex: 6,
+      })}`,
+      '',
+    ].join("\n"),
+  );
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "traex",
+        runners: { traex: { enabled: true, adapter: "traex" } },
+        channels: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ content: "", work_dir: "/tmp/workspace" }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+    sessionListRequests += 1;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessions: [
+          {
+            session_key: "running-summary-stops",
+            status: "active",
+            running: true,
+            title: "Running summary stops",
+            history_path: historyPath,
+            has_timeline: true,
+            run_state: "running",
+            state: "running",
+            runner_id: "traex",
+            runner_type: "traex",
+            source: "web",
+          },
+        ],
+      }),
+    });
+  });
+  await page.route(
+    `**/_bifrost/api/im-gateway/agent/sessions/history/${encodeURIComponent(historyPath)}**`,
+    async (route) => {
+      const requestUrl = new URL(route.request().url());
+      const terminalEvents = [
+        {
+          timestamp: startedAt + 4,
+          event_type: "run_state_changed",
+          session_key: "running-summary-stops",
+          content: { state: "completed", agent_kind: "traex", source_channel: "web" },
+        },
+        {
+          timestamp: startedAt + 5,
+          event_type: "assistant_message",
+          session_key: "running-summary-stops",
+          content: { message: "The run is done." },
+        },
+      ];
+      if (requestUrl.searchParams.has("since")) {
+        incrementalHistoryRequests += 1;
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            events: terminalEvents,
+            start_index: 4,
+            end_index: 6,
+            has_more: false,
+          }),
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          events: [
+            {
+              timestamp: startedAt,
+              event_type: "session_start",
+              session_key: "running-summary-stops",
+              content: {
+                runner_id: "traex",
+                runner_type: "traex",
+                runtime: "external_cli",
+                source: "admin-api",
+              },
+            },
+            {
+              timestamp: startedAt + 1,
+              event_type: "run_state_changed",
+              session_key: "running-summary-stops",
+              content: { state: "running", agent_kind: "traex", source_channel: "web" },
+            },
+            {
+              timestamp: startedAt + 2,
+              event_type: "user_message",
+              session_key: "running-summary-stops",
+              content: { message: "Will the spinner stop?" },
+            },
+            {
+              timestamp: startedAt + 3,
+              event_type: "assistant_delta",
+              session_key: "running-summary-stops",
+              content: { message: "The model already produced a final-looking update." },
+            },
+            ...terminalEvents,
+          ],
+          start_index: 0,
+          end_index: 6,
+          has_more: false,
+        }),
+      });
+    },
+  );
+
+  await openPage(
+    page,
+    `ai?aiSection=agent-chat&agentSection=chat&session=running-summary-stops&view=history&historyPath=${encodeURIComponent(historyPath)}`,
+  );
+
+  await expect(page.getByTestId("agent-chat-state-tag")).toContainText("Ready");
+  await expect(page.getByTestId("agent-chat-send")).toHaveAttribute("aria-label", "Send");
+  await expect(page.getByTestId("agent-chat-thinking-tail")).toHaveCount(0);
+  expect(incrementalHistoryRequests).toBeLessThanOrEqual(1);
+  const listRequestsAfterStop = sessionListRequests;
+  await page.waitForTimeout(1800);
+  expect(sessionListRequests).toBe(listRequestsAfterStop);
+});
+
+test("AI Agent Chat ignores stale running history responses after switching threads", async ({
+  page,
+}) => {
+  const historyA = "/tmp/switch-running-a.jsonl";
+  const historyB = "/tmp/switch-running-b.jsonl";
+  let releaseA: (() => void) | undefined;
+  const holdA = new Promise<void>((resolve) => {
+    releaseA = resolve;
+  });
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "traex",
+        runners: { traex: { enabled: true, adapter: "traex" } },
+        channels: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ content: "", work_dir: "/tmp/workspace" }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessions: [
+          {
+            session_key: "switch-a",
+            status: "active",
+            running: true,
+            title: "Switch A",
+            history_path: historyA,
+            has_timeline: true,
+            run_state: "running",
+            runner_id: "traex",
+            runner_type: "traex",
+            source: "web",
+          },
+          {
+            session_key: "switch-b",
+            status: "active",
+            running: true,
+            title: "Switch B",
+            history_path: historyB,
+            has_timeline: true,
+            run_state: "running",
+            runner_id: "traex",
+            runner_type: "traex",
+            source: "web",
+          },
+        ],
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/history/**", async (route) => {
+    const requestUrl = route.request().url();
+    const isA = requestUrl.includes(encodeURIComponent(historyA));
+    if (isA) {
+      await holdA;
+    }
+    const sessionKey = isA ? "switch-a" : "switch-b";
+    const marker = isA ? "STALE_A_RESPONSE" : "CURRENT_B_RESPONSE";
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        events: [
+          {
+            timestamp: Math.floor(Date.now() / 1000),
+            event_type: "user_message",
+            session_key: sessionKey,
+            content: { message: `${marker} user` },
+          },
+          {
+            timestamp: Math.floor(Date.now() / 1000) + 1,
+            event_type: "assistant_delta",
+            session_key: sessionKey,
+            content: { message: `${marker} assistant` },
+          },
+        ],
+        start_index: 0,
+        end_index: 2,
+        has_more: false,
+      }),
+    });
+  });
+
+  await openPage(
+    page,
+    `ai?aiSection=agent-chat&agentSection=chat&session=switch-a&view=history&historyPath=${encodeURIComponent(historyA)}`,
+  );
+  await openPage(
+    page,
+    `ai?aiSection=agent-chat&agentSection=chat&session=switch-b&view=history&historyPath=${encodeURIComponent(historyB)}`,
+  );
+  await expect(page.getByTestId("agent-chat-messages")).toContainText("CURRENT_B_RESPONSE");
+  releaseA?.();
+  await page.waitForTimeout(500);
+  await expect(page.getByTestId("agent-chat-messages")).toContainText("CURRENT_B_RESPONSE");
+  await expect(page.getByTestId("agent-chat-messages")).not.toContainText("STALE_A_RESPONSE");
+});
+
+test("AI Agent Chat active view restores same-session running history path", async ({
+  page,
+}) => {
+  const historyPath = "/tmp/active-sse-history.jsonl";
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "web",
+        runners: { web: { enabled: true, adapter: "chatgpt_web" } },
+        channels: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ content: "", work_dir: "/tmp/workspace" }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessions: [
+          {
+            session_key: "active-sse-session",
+            status: "active",
+            running: true,
+            title: "Active SSE session",
+            history_path: historyPath,
+            has_timeline: true,
+            run_state: "running",
+            runner_id: "web",
+            runner_type: "chatgpt_web",
+            source: "web",
+          },
+        ],
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/active-sse-session", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        session_key: "active-sse-session",
+        source: "web",
+        runner_id: "web",
+        runner_type: "chatgpt_web",
+        history_path: historyPath,
+        has_timeline: true,
+        run_state: "running",
+        messages: [],
+      }),
+    });
+  });
+  await page.route(
+    `**/_bifrost/api/im-gateway/agent/sessions/history/${encodeURIComponent(historyPath)}**`,
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          events: [
+            {
+              timestamp: Math.floor(Date.now() / 1000),
+              event_type: "user_message",
+              session_key: "active-sse-session",
+              content: { message: "Active SSE question" },
+            },
+            {
+              timestamp: Math.floor(Date.now() / 1000) + 1,
+              event_type: "assistant_delta",
+              session_key: "active-sse-session",
+              content: { message: "Active SSE running update" },
+            },
+          ],
+          start_index: 0,
+          end_index: 2,
+          has_more: false,
+        }),
+      });
+    },
+  );
+
+  await openPage(
+    page,
+    "ai?aiSection=agent-chat&agentSection=chat&session=active-sse-session&view=active",
+  );
+
+  await expect(page.getByTestId("agent-chat-runner-tag")).toContainText("web");
+  await expect(page.getByTestId("agent-chat-state-tag")).toContainText("Running");
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Active SSE running update",
+  );
+});
+
+test("AI Agent Chat lets idle thread summary override stale running history on initial load", async ({
+  page,
+}) => {
+  const historyPath = "/tmp/initial-idle-stale-running.jsonl";
+  const startedAt = Math.floor(Date.now() / 1000) - 30;
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "bifrost_agent",
+        runners: { bifrost_agent: { enabled: true, adapter: "builtin" } },
+        channels: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ content: "", work_dir: "/tmp/workspace" }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessions: [
+          {
+            session_key: "initial-idle-stale-running",
+            status: "active",
+            running: false,
+            state: "idle",
+            run_state: "idle",
+            title: "Initial idle stale running",
+            history_path: historyPath,
+            has_timeline: true,
+            source: "web",
+          },
+        ],
+      }),
+    });
+  });
+  await page.route(
+    `**/_bifrost/api/im-gateway/agent/sessions/history/${encodeURIComponent(historyPath)}**`,
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          events: [
+            {
+              timestamp: startedAt,
+              event_type: "run_state_changed",
+              session_key: "initial-idle-stale-running",
+              content: { state: "running", agent_kind: "builtin", source_channel: "web" },
+            },
+            {
+              timestamp: startedAt + 1,
+              event_type: "user_message",
+              session_key: "initial-idle-stale-running",
+              content: { message: "stale question" },
+            },
+          ],
+          start_index: 0,
+          end_index: 2,
+          has_more: false,
+        }),
+      });
+    },
+  );
+
+  await openPage(
+    page,
+    `ai?aiSection=agent-chat&agentSection=chat&session=initial-idle-stale-running&view=history&historyPath=${encodeURIComponent(historyPath)}`,
+  );
+
+  await expect(page.getByTestId("agent-chat-state-tag")).toContainText("Ready");
+  await expect(page.getByTestId("agent-chat-turn-running-group")).toHaveCount(0);
   await expect(page.getByTestId("agent-chat-thinking-tail")).toHaveCount(0);
 });
 
@@ -3807,7 +4303,7 @@ test("AI Agent Chat streams long task output previews into tool output", async (
   await expect(processBlock).toBeVisible();
   await expect(processBlock).toContainText("Ran 1 command");
   await expect(processBlock).not.toContainText("streamed stdout chunk");
-  await processBlock.getByText(/Ran|Running/).click();
+  await processBlock.getByRole("button").click();
   await expect(processBlock).toContainText("exec_command");
   await processBlock.getByText("exec_command").click();
   await expect(processBlock).toContainText("Input");

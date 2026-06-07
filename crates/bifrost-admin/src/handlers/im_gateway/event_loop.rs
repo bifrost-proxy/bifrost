@@ -963,6 +963,12 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
             &effective.runner_id,
             &request,
         );
+        emit_external_cli_timeline_changed(
+            ctx.agent_session_manager,
+            recorder.as_ref(),
+            &input.session_key,
+            "im_turn_started",
+        );
         let mut progress_enabled = false;
         let mut progress_tx_for_finish = None;
         let mut progress_task = None;
@@ -1066,14 +1072,21 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                 result = &mut run_future => break result,
                 Some(progress_event) = external_progress_rx.recv() => {
                     if let Some(recorder) = recorder.as_mut() {
-                        super::chat_gateway::record_external_cli_progress_event_to_timeline(
+                        if let Some(end_index) = super::chat_gateway::record_external_cli_progress_event_to_timeline(
                             recorder,
                             &input.session_key,
                             "im",
                             &effective.runner_id,
                             &settings.adapter,
                             &progress_event,
-                        );
+                        ) {
+                            ctx.agent_session_manager.emit_timeline_changed(
+                                &input.session_key,
+                                &recorder.file_path().display().to_string(),
+                                Some(end_index),
+                                "im_progress",
+                            );
+                        }
                     }
                     if progress_enabled {
                         if let (Some(progress_tx), Some(agent_event)) = (
@@ -1117,14 +1130,23 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
         };
         while let Ok(progress_event) = external_progress_rx.try_recv() {
             if let Some(recorder) = recorder.as_mut() {
-                super::chat_gateway::record_external_cli_progress_event_to_timeline(
-                    recorder,
-                    &input.session_key,
-                    "im",
-                    &effective.runner_id,
-                    &settings.adapter,
-                    &progress_event,
-                );
+                if let Some(end_index) =
+                    super::chat_gateway::record_external_cli_progress_event_to_timeline(
+                        recorder,
+                        &input.session_key,
+                        "im",
+                        &effective.runner_id,
+                        &settings.adapter,
+                        &progress_event,
+                    )
+                {
+                    ctx.agent_session_manager.emit_timeline_changed(
+                        &input.session_key,
+                        &recorder.file_path().display().to_string(),
+                        Some(end_index),
+                        "im_progress",
+                    );
+                }
             }
             if progress_enabled {
                 if let (Some(progress_tx), Some(agent_event)) = (
@@ -1164,6 +1186,12 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                     &mut recorder,
                     &input.session_key,
                     &result,
+                );
+                emit_external_cli_timeline_changed(
+                    ctx.agent_session_manager,
+                    recorder.as_ref(),
+                    &input.session_key,
+                    "im_turn_finished",
                 );
                 remember_session_state_values(
                     &input.session_key,
@@ -1260,6 +1288,12 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                     &request,
                     &error,
                     &reply,
+                );
+                emit_external_cli_timeline_changed(
+                    ctx.agent_session_manager,
+                    recorder.as_ref(),
+                    &input.session_key,
+                    "im_turn_failed",
                 );
                 if progress_enabled {
                     if let Some(progress_tx) = progress_tx_for_finish.take() {
@@ -1549,6 +1583,23 @@ fn record_external_cli_input(
             warn!(error = %error, "failed to record external cli user message");
         }
     }
+}
+
+fn emit_external_cli_timeline_changed(
+    agent_session_manager: &std::sync::Arc<bifrost_agent::AgentSessionManager>,
+    recorder: Option<&ConversationRecorder>,
+    session_key: &str,
+    reason: &str,
+) {
+    let Some(recorder) = recorder else {
+        return;
+    };
+    agent_session_manager.emit_timeline_changed(
+        session_key,
+        &recorder.file_path().display().to_string(),
+        recorder.event_count(),
+        reason,
+    );
 }
 
 fn record_external_cli_result(

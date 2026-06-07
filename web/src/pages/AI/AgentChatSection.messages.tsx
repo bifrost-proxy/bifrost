@@ -45,7 +45,7 @@ function isVisibleMessage(message: ChatMessage, running: boolean) {
     message.content === "Agent is running..." ||
     message.content === "Runner is running...";
   return (
-    message.content.trim().length > 0 ||
+    (message.content.trim().length > 0 && !isRunningPlaceholder) ||
     hasImages ||
     hasProcessSteps ||
     (running && isRunningPlaceholder)
@@ -446,9 +446,7 @@ function CompletedTurnGroup({
     colorTextTertiary: string;
   };
 }) {
-  const [expanded, setExpanded] = useState(() =>
-    group.assistants.some((item) => (item.message.processSteps?.length || 0) > 0),
-  );
+  const [expanded, setExpanded] = useState(false);
   const finalAssistantItem = findFinalAssistantItem(group.assistants);
   const durationLabel = formatTurnDuration(
     durationSeconds(group.user.message.timestamp, finalAssistantItem?.message.timestamp),

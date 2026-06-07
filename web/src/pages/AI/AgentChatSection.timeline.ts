@@ -1,7 +1,6 @@
 import {
   EMPTY_TELEMETRY,
   finishTool,
-  formatLabel,
   numberFrom,
   parsePlanSteps,
   stringFrom,
@@ -27,6 +26,12 @@ export function historyEventsToMessages(
   let latestRunState: string | undefined;
   let lastEventWasAssistantDelta = false;
   let externalRunnerTimeline = false;
+  const finalAssistantMessages = new Set(
+    events
+      .filter((event) => event.event_type === "assistant_message")
+      .map((event) => normalizedAssistantText(event.content.message))
+      .filter((content): content is string => Boolean(content)),
+  );
 
   const appendProcessStep = (step: ProcessStep) => {
     const lastMessage = messages[messages.length - 1];
@@ -95,7 +100,10 @@ export function historyEventsToMessages(
       const content =
         stringFrom(event.content.message) || stringFrom(event.content.content) || "";
       if (externalRunnerTimeline) {
-        if (content.trim().length > 0) {
+        if (
+          content.trim().length > 0 &&
+          !finalAssistantMessages.has(normalizedAssistantText(content) || "")
+        ) {
           appendProcessStep({
             type: "thinking",
             summary: content,
@@ -261,19 +269,12 @@ export function historyEventsToMessages(
     appendProcessStep(step);
   });
 
-  const runningState = latestRunState || options.runningState || "running";
   const shouldEnsureRunningAssistant =
     !isTerminalRunState(latestRunState) &&
     (isActiveRunState(latestRunState) ||
       isActiveRunState(options.runningState) ||
       options.ensureRunningAssistant === true);
-  if (shouldEnsureRunningAssistant && pendingSteps.length > 0 && !hasRunStateStep(pendingSteps)) {
-    pendingSteps = [runningStatusStep(runningState), ...pendingSteps];
-  }
   flushPendingSteps();
-  if (shouldEnsureRunningAssistant) {
-    ensureRunningStatusStepOnLatestProgressMessage(messages, runningState);
-  }
   if (shouldEnsureRunningAssistant && messages[messages.length - 1]?.role === "user") {
     messages.push({
       id: `history-running-${messages.length}`,
@@ -281,9 +282,7 @@ export function historyEventsToMessages(
       content: "Agent is running...",
       timestamp: events[events.length - 1]?.timestamp,
       meta: "Agent progress",
-      processSteps: [
-        runningStatusStep(runningState),
-      ],
+      processSteps: [],
     });
   }
   return hideIntermediateAssistantTimestamps(
@@ -314,6 +313,14 @@ function insertProcessStep(steps: ProcessStep[], step: ProcessStep) {
     insertAt -= 1;
   }
   return [...steps.slice(0, insertAt), step, ...steps.slice(insertAt)];
+}
+
+function normalizedAssistantText(value: unknown) {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return normalized.length > 0 ? normalized : undefined;
 }
 
 function hideIntermediateAssistantTimestamps(messages: ChatMessage[]) {
@@ -349,41 +356,6 @@ function hideIntermediateAssistantTimestamps(messages: ChatMessage[]) {
   return next;
 }
 
-function ensureRunningStatusStepOnLatestProgressMessage(
-  messages: ChatMessage[],
-  runningState: string,
-) {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message.role !== "assistant") {
-      continue;
-    }
-    if (!message.processSteps?.length) {
-      continue;
-    }
-    if (hasRunStateStep(message.processSteps)) {
-      return;
-    }
-    messages[index] = {
-      ...message,
-      processSteps: [runningStatusStep(runningState), ...message.processSteps],
-    };
-    return;
-  }
-}
-
-function runningStatusStep(state: string): ProcessStep {
-  return {
-    type: "status",
-    summary: `Run state: ${formatLabel(state)}`,
-    status: "running",
-  };
-}
-
-function hasRunStateStep(steps: ProcessStep[]) {
-  return steps.some((step) => step.type === "status" && step.summary.startsWith("Run state:"));
-}
-
 function isActiveRunState(state?: string) {
   return isRunStateActive(state);
 }
@@ -394,17 +366,7 @@ function isTerminalRunState(state?: string) {
 
 function historyEventToProcessStep(event: HistoryEvent): ProcessStep | null {
   if (event.event_type === "run_state_changed") {
-    const state = stringFrom(event.content.state) || "running";
-    return {
-      type: "status",
-      summary: `Run state: ${formatLabel(state)}`,
-      detail: stringFrom(event.content.source_channel),
-      status: isActiveRunState(state)
-        ? "running"
-        : state === "failed" || state === "cancelled"
-          ? "failed"
-          : "success",
-    };
+    return null;
   }
   if (event.event_type === "plan_updated" && Array.isArray(event.content.plan)) {
     return {

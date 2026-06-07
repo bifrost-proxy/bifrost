@@ -100,7 +100,9 @@ fn append_traex_config_args(
     is_resume: bool,
 ) {
     remove_overridden_traex_args(args, config);
-    if config.danger_full_access.unwrap_or(false) {
+    let permission_mode = effective_traex_permission_mode(config);
+    let danger_full_access = effective_traex_danger_full_access(config, permission_mode.as_deref());
+    if danger_full_access {
         remove_codex_arg_with_value(args, "--sandbox");
     }
     let mut generated = Vec::new();
@@ -117,19 +119,17 @@ fn append_traex_config_args(
         generated.push("--model".to_string());
         generated.push(model.to_string());
     }
-    if let Some(permission_mode) = config.permission_mode.as_deref().map(str::trim) {
-        if !permission_mode.is_empty() && permission_mode != "default" {
-            generated.push("--permission-mode".to_string());
-            generated.push(permission_mode.to_string());
-        }
+    if let Some(permission_mode) = permission_mode {
+        generated.push("--permission-mode".to_string());
+        generated.push(permission_mode);
     }
     if let Some(sandbox) = config.sandbox.as_deref() {
-        if !is_resume && !config.danger_full_access.unwrap_or(false) {
+        if !is_resume && !danger_full_access {
             generated.push("--sandbox".to_string());
             generated.push(sandbox.to_string());
         }
     }
-    if config.danger_full_access.unwrap_or(false) {
+    if danger_full_access {
         generated.push("--dangerously-bypass-approvals-and-sandbox".to_string());
     }
     if config.skip_git_repo_check.unwrap_or(false) {
@@ -162,6 +162,23 @@ fn append_traex_config_args(
     insert_codex_args_before_stdin(args, generated);
 }
 
+fn effective_traex_permission_mode(config: &ExternalCliAdapterConfig) -> Option<String> {
+    let configured = config.permission_mode.as_deref().map(str::trim);
+    match configured {
+        Some(value) if !value.is_empty() && value != "default" => Some(value.to_string()),
+        _ => Some("bypass_permissions".to_string()),
+    }
+}
+
+fn effective_traex_danger_full_access(
+    config: &ExternalCliAdapterConfig,
+    permission_mode: Option<&str>,
+) -> bool {
+    config
+        .danger_full_access
+        .unwrap_or_else(|| permission_mode == Some("bypass_permissions"))
+}
+
 fn remove_overridden_traex_args(args: &mut Vec<String>, config: &ExternalCliAdapterConfig) {
     if config.profile.is_some() {
         remove_codex_arg_with_value(args, "--profile");
@@ -169,9 +186,7 @@ fn remove_overridden_traex_args(args: &mut Vec<String>, config: &ExternalCliAdap
     if config.model.is_some() {
         remove_codex_arg_with_value(args, "--model");
     }
-    if config.permission_mode.is_some() {
-        remove_codex_arg_with_value(args, "--permission-mode");
-    }
+    remove_codex_arg_with_value(args, "--permission-mode");
     if config.sandbox.is_some() {
         remove_codex_arg_with_value(args, "--sandbox");
     }
@@ -189,7 +204,8 @@ fn append_codex_config_args(
     is_resume: bool,
 ) {
     remove_overridden_codex_args(args, config);
-    if config.danger_full_access.unwrap_or(false) {
+    let danger_full_access = effective_codex_danger_full_access(config);
+    if danger_full_access {
         remove_codex_arg_with_value(args, "--sandbox");
     }
     let mut generated = Vec::new();
@@ -213,12 +229,12 @@ fn append_codex_config_args(
         generated.push(model.to_string());
     }
     if let Some(sandbox) = config.sandbox.as_deref() {
-        if !is_resume && !config.danger_full_access.unwrap_or(false) {
+        if !is_resume && !danger_full_access {
             generated.push("--sandbox".to_string());
             generated.push(sandbox.to_string());
         }
     }
-    if config.danger_full_access.unwrap_or(false) {
+    if danger_full_access {
         generated.push("--dangerously-bypass-approvals-and-sandbox".to_string());
     }
     if config.dangerously_bypass_hook_trust.unwrap_or(false) {
@@ -267,6 +283,12 @@ fn append_codex_config_args(
         generated.push("--ephemeral".to_string());
     }
     insert_codex_args_before_stdin(args, generated);
+}
+
+fn effective_codex_danger_full_access(config: &ExternalCliAdapterConfig) -> bool {
+    config
+        .danger_full_access
+        .unwrap_or_else(|| config.sandbox.is_none() && config.approval_policy.is_none())
 }
 
 fn remove_overridden_codex_args(args: &mut Vec<String>, config: &ExternalCliAdapterConfig) {

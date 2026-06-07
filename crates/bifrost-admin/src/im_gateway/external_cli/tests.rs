@@ -322,6 +322,71 @@ fn codex_adapter_builds_exec_command_with_prompt_stdin() {
 }
 
 #[test]
+fn codex_adapter_defaults_to_danger_full_access_for_headless_runs() {
+    let request = ExternalCliRunRequest {
+        images: Vec::new(),
+        message: "hello".to_string(),
+        operation: default_operation(),
+        params: serde_json::Value::Null,
+        provider_id: Some("provider-a".to_string()),
+        runner_id: None,
+        session_key: Some("im:feishu:chat-a".to_string()),
+        runtime: DEFAULT_RUNTIME.to_string(),
+        adapter: DEFAULT_ADAPTER.to_string(),
+        work_dir: Some(PathBuf::from("/tmp/work")),
+        instructions: None,
+        adapter_config: ExternalCliAdapterConfig {
+            executable: Some("codex".to_string()),
+            ..Default::default()
+        },
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    };
+
+    let spec = build_command_spec(&request, Path::new("/tmp/last.md")).unwrap();
+
+    assert!(spec
+        .args
+        .contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
+    assert!(!spec.args.contains(&"--sandbox".to_string()));
+    assert_eq!(spec.args.last().map(String::as_str), Some("-"));
+}
+
+#[test]
+fn codex_adapter_respects_explicit_sandbox_without_danger_full_access() {
+    let request = ExternalCliRunRequest {
+        images: Vec::new(),
+        message: "hello".to_string(),
+        operation: default_operation(),
+        params: serde_json::Value::Null,
+        provider_id: Some("provider-a".to_string()),
+        runner_id: None,
+        session_key: Some("im:feishu:chat-a".to_string()),
+        runtime: DEFAULT_RUNTIME.to_string(),
+        adapter: DEFAULT_ADAPTER.to_string(),
+        work_dir: Some(PathBuf::from("/tmp/work")),
+        instructions: None,
+        adapter_config: ExternalCliAdapterConfig {
+            executable: Some("codex".to_string()),
+            sandbox: Some("workspace-write".to_string()),
+            ..Default::default()
+        },
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    };
+
+    let spec = build_command_spec(&request, Path::new("/tmp/last.md")).unwrap();
+
+    assert!(has_arg_pair(&spec.args, "--sandbox", "workspace-write"));
+    assert!(!spec
+        .args
+        .contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
+    assert_eq!(spec.args.last().map(String::as_str), Some("-"));
+}
+
+#[test]
 fn traex_adapter_builds_exec_command_with_prompt_stdin() {
     let request = ExternalCliRunRequest {
         images: Vec::new(),
@@ -386,7 +451,45 @@ fn traex_adapter_builds_exec_command_with_prompt_stdin() {
 }
 
 #[test]
-fn traex_adapter_omits_default_permission_mode_for_exec() {
+fn traex_adapter_defaults_to_bypass_permissions_for_exec() {
+    let request = ExternalCliRunRequest {
+        images: Vec::new(),
+        message: "hello".to_string(),
+        operation: default_operation(),
+        params: serde_json::Value::Null,
+        provider_id: Some("provider-a".to_string()),
+        runner_id: Some("traex".to_string()),
+        session_key: Some("im:feishu:chat-a".to_string()),
+        runtime: DEFAULT_RUNTIME.to_string(),
+        adapter: TRAEX_ADAPTER.to_string(),
+        work_dir: Some(PathBuf::from("/tmp/work")),
+        instructions: None,
+        adapter_config: ExternalCliAdapterConfig {
+            executable: Some("traex".to_string()),
+            skip_git_repo_check: Some(true),
+            ..Default::default()
+        },
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    };
+
+    let spec = build_command_spec(&request, Path::new("/tmp/last.md")).unwrap();
+
+    assert!(has_arg_pair(
+        &spec.args,
+        "--permission-mode",
+        "bypass_permissions"
+    ));
+    assert!(!spec.args.contains(&"default".to_string()));
+    assert!(spec
+        .args
+        .contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
+    assert_eq!(spec.args.last().map(String::as_str), Some("-"));
+}
+
+#[test]
+fn traex_adapter_maps_default_permission_mode_to_headless_full_access() {
     let request = ExternalCliRunRequest {
         images: Vec::new(),
         message: "hello".to_string(),
@@ -402,6 +505,7 @@ fn traex_adapter_omits_default_permission_mode_for_exec() {
         adapter_config: ExternalCliAdapterConfig {
             executable: Some("traex".to_string()),
             permission_mode: Some("default".to_string()),
+            sandbox: Some("workspace-write".to_string()),
             skip_git_repo_check: Some(true),
             ..Default::default()
         },
@@ -412,8 +516,52 @@ fn traex_adapter_omits_default_permission_mode_for_exec() {
 
     let spec = build_command_spec(&request, Path::new("/tmp/last.md")).unwrap();
 
-    assert!(!spec.args.contains(&"--permission-mode".to_string()));
+    assert!(has_arg_pair(
+        &spec.args,
+        "--permission-mode",
+        "bypass_permissions"
+    ));
     assert!(!spec.args.contains(&"default".to_string()));
+    assert!(!spec.args.contains(&"--sandbox".to_string()));
+    assert!(spec
+        .args
+        .contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
+    assert_eq!(spec.args.last().map(String::as_str), Some("-"));
+}
+
+#[test]
+fn traex_adapter_respects_explicit_non_bypass_permission_mode() {
+    let request = ExternalCliRunRequest {
+        images: Vec::new(),
+        message: "hello".to_string(),
+        operation: default_operation(),
+        params: serde_json::Value::Null,
+        provider_id: Some("provider-a".to_string()),
+        runner_id: Some("traex".to_string()),
+        session_key: Some("im:feishu:chat-a".to_string()),
+        runtime: DEFAULT_RUNTIME.to_string(),
+        adapter: TRAEX_ADAPTER.to_string(),
+        work_dir: Some(PathBuf::from("/tmp/work")),
+        instructions: None,
+        adapter_config: ExternalCliAdapterConfig {
+            executable: Some("traex".to_string()),
+            permission_mode: Some("plan".to_string()),
+            sandbox: Some("workspace-write".to_string()),
+            skip_git_repo_check: Some(true),
+            ..Default::default()
+        },
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    };
+
+    let spec = build_command_spec(&request, Path::new("/tmp/last.md")).unwrap();
+
+    assert!(has_arg_pair(&spec.args, "--permission-mode", "plan"));
+    assert!(has_arg_pair(&spec.args, "--sandbox", "workspace-write"));
+    assert!(!spec
+        .args
+        .contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
     assert_eq!(spec.args.last().map(String::as_str), Some("-"));
 }
 

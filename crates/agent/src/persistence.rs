@@ -56,6 +56,7 @@ pub struct ConversationRecorder {
     file_path: PathBuf,
     writer: Option<BufWriter<std::fs::File>>,
     max_bytes: Option<usize>,
+    event_count: Option<usize>,
 }
 
 impl ConversationRecorder {
@@ -78,6 +79,7 @@ impl ConversationRecorder {
             file_path,
             writer: None,
             max_bytes: None,
+            event_count: Some(0),
         }
     }
 
@@ -98,11 +100,13 @@ impl ConversationRecorder {
             file_path,
             writer: None,
             max_bytes: max_bytes.filter(|value| *value > 0),
+            event_count: None,
         }
     }
 
     /// Record a conversation event.
     pub fn record(&mut self, event: ConversationEvent) -> Result<(), String> {
+        let current_event_count = self.ensure_event_count()?;
         let writer = self.get_or_create_writer()?;
 
         let line = serde_json::to_string(&event).map_err(|e| format!("serialize event: {e}"))?;
@@ -112,7 +116,10 @@ impl ConversationRecorder {
         // Flush immediately so events are durable even if the process crashes
         // or the recorder is held open across turns.
         writer.flush().map_err(|e| format!("flush event: {e}"))?;
-        self.enforce_max_bytes()?;
+        self.event_count = Some(current_event_count.saturating_add(1));
+        if self.enforce_max_bytes()? {
+            self.event_count = Some(count_conversation_event_lines(&self.file_path)?);
+        }
 
         Ok(())
     }
@@ -382,6 +389,20 @@ impl ConversationRecorder {
         &self.file_path
     }
 
+    /// Number of non-empty JSONL events recorded in this file after the last write.
+    pub fn event_count(&self) -> Option<usize> {
+        self.event_count
+    }
+
+    fn ensure_event_count(&mut self) -> Result<usize, String> {
+        if let Some(count) = self.event_count {
+            return Ok(count);
+        }
+        let count = count_conversation_event_lines(&self.file_path)?;
+        self.event_count = Some(count);
+        Ok(count)
+    }
+
     /// Get or create the writer, creating parent directories as needed.
     fn get_or_create_writer(&mut self) -> Result<&mut BufWriter<std::fs::File>, String> {
         if self.writer.is_none() {
@@ -402,14 +423,14 @@ impl ConversationRecorder {
         Ok(self.writer.as_mut().unwrap())
     }
 
-    fn enforce_max_bytes(&mut self) -> Result<(), String> {
+    fn enforce_max_bytes(&mut self) -> Result<bool, String> {
         let Some(max_bytes) = self.max_bytes else {
-            return Ok(());
+            return Ok(false);
         };
         let metadata = std::fs::metadata(&self.file_path)
             .map_err(|e| format!("stat session file for max_bytes: {e}"))?;
         if metadata.len() as usize <= max_bytes {
-            return Ok(());
+            return Ok(false);
         }
 
         if let Some(writer) = self.writer.as_mut() {
@@ -439,8 +460,24 @@ impl ConversationRecorder {
         };
         std::fs::write(&self.file_path, next)
             .map_err(|e| format!("write trimmed session file: {e}"))?;
-        Ok(())
+        Ok(true)
     }
+}
+
+fn count_conversation_event_lines(path: &Path) -> Result<usize, String> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    let file = std::fs::File::open(path).map_err(|e| format!("open conversation file: {e}"))?;
+    let reader = std::io::BufReader::new(file);
+    let mut count = 0usize;
+    for line in reader.lines() {
+        let line = line.map_err(|e| format!("read conversation file: {e}"))?;
+        if !line.trim().is_empty() {
+            count = count.saturating_add(1);
+        }
+    }
+    Ok(count)
 }
 
 impl Drop for ConversationRecorder {
@@ -927,6 +964,8 @@ pub struct SessionFileSummary {
     pub event_count: u32,
     pub work_dir: Option<String>,
     pub source: String,
+    pub runner_type: Option<String>,
+    pub runner_id: Option<String>,
     /// The original session key as stored in the JSONL events (may differ from the sanitized filename).
     pub session_key: Option<String>,
     /// Session title (intent/topic) set by the agent via set_title tool.
@@ -990,6 +1029,17 @@ pub fn scan_session_summary(path: &Path) -> SessionFileSummary {
                     }
                     if let Some(wd) = obj.get("work_dir").and_then(|v| v.as_str()) {
                         summary.work_dir = Some(wd.to_string());
+                    }
+                    if let Some(runner_type) = obj
+                        .get("adapter")
+                        .or_else(|| obj.get("runner_type"))
+                        .or_else(|| obj.get("runtime"))
+                        .and_then(|v| v.as_str())
+                    {
+                        summary.runner_type = Some(runner_type.to_string());
+                    }
+                    if let Some(runner_id) = obj.get("runner_id").and_then(|v| v.as_str()) {
+                        summary.runner_id = Some(runner_id.to_string());
                     }
                 }
             }
@@ -1944,6 +1994,33 @@ mod tests {
         let summary = scan_session_summary(recorder.file_path());
         assert_eq!(summary.run_state.as_deref(), Some("completed"));
         assert_eq!(summary.event_count, 3);
+    }
+
+    #[test]
+    fn scan_session_summary_tracks_external_runner_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut recorder = ConversationRecorder::new(dir.path(), "external-runner-session");
+        recorder
+            .record_session_start(
+                "external-runner-session",
+                serde_json::json!({
+                    "source": "admin-api",
+                    "runtime": "external_cli",
+                    "adapter": "traex",
+                    "runner_id": "traex",
+                    "work_dir": "/tmp/work",
+                }),
+            )
+            .unwrap();
+        recorder
+            .record_user_message("external-runner-session", "hello")
+            .unwrap();
+        recorder.close();
+
+        let summary = scan_session_summary(recorder.file_path());
+        assert_eq!(summary.runner_type.as_deref(), Some("traex"));
+        assert_eq!(summary.runner_id.as_deref(), Some("traex"));
+        assert_eq!(summary.work_dir.as_deref(), Some("/tmp/work"));
     }
 
     #[test]

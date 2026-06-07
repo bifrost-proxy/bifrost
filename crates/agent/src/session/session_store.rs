@@ -19,6 +19,8 @@ pub struct AgentSessionEvent {
     pub session_key: Option<String>,
     pub reason: String,
     pub timestamp_ms: u64,
+    pub history_path: Option<String>,
+    pub end_index: Option<usize>,
 }
 
 /// Manages multiple agent sessions with concurrent access.
@@ -58,6 +60,25 @@ impl AgentSessionManager {
             session_key: session_key.map(str::to_string),
             reason: reason.to_string(),
             timestamp_ms: current_time_ms(),
+            history_path: None,
+            end_index: None,
+        });
+    }
+
+    pub fn emit_timeline_changed(
+        &self,
+        session_key: &str,
+        history_path: &str,
+        end_index: Option<usize>,
+        reason: &str,
+    ) {
+        let _ = self.session_events.send(AgentSessionEvent {
+            event_type: "timeline_changed".to_string(),
+            session_key: Some(session_key.to_string()),
+            reason: reason.to_string(),
+            timestamp_ms: current_time_ms(),
+            history_path: Some(history_path.to_string()),
+            end_index,
         });
     }
 
