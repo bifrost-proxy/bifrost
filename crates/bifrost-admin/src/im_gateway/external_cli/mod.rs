@@ -613,6 +613,8 @@ pub struct ExternalCliRunDetail {
     pub stdout: String,
     pub stderr: String,
     pub artifacts: ExternalCliRunArtifacts,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1156,12 +1158,19 @@ pub async fn read_run_detail(
     let last_message_path = run_dir.join("last_message.md");
     let stdout_path = run_dir.join("cli.stdout.log");
     let stderr_path = run_dir.join("cli.stderr.log");
+    let result_path = run_dir.join("result.json");
 
     let snapshot: serde_json::Value = read_json(&snapshot_path).await?;
     let events = read_events_jsonl(&events_path).await?;
     let stdout = read_text_or_default(&stdout_path).await?;
     let stderr = read_text_or_default(&stderr_path).await?;
     let response = final_response(&last_message_path, &stdout, &events).await?;
+    let metadata = match read_json(&result_path).await {
+        Ok(value) => serde_json::from_value::<ExternalCliRunResult>(value)
+            .map(|result| result.metadata)
+            .unwrap_or_default(),
+        Err(_) => BTreeMap::new(),
+    };
 
     Ok(ExternalCliRunDetail {
         run_id: run_id.to_string(),
@@ -1170,6 +1179,7 @@ pub async fn read_run_detail(
         response,
         stdout,
         stderr,
+        metadata,
         artifacts: ExternalCliRunArtifacts {
             run_dir: run_dir.display().to_string(),
             prompt: run_dir.join("prompt.md").display().to_string(),
@@ -1459,20 +1469,70 @@ fn append_external_cli_metadata(
     if !is_codex_like_adapter(adapter) {
         return;
     }
-    if metadata.contains_key("threadId") {
-        return;
+    if !metadata.contains_key("threadId") {
+        if let Some(thread_id) = events.iter().find_map(|event| {
+            event
+                .raw
+                .get("thread_id")
+                .or_else(|| event.raw.get("threadId"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        }) {
+            metadata.insert("threadId".to_string(), thread_id.to_string());
+        }
     }
-    if let Some(thread_id) = events.iter().find_map(|event| {
+    append_external_cli_usage_metadata(events, metadata);
+}
+
+fn append_external_cli_usage_metadata(
+    events: &[ExternalCliProgressEvent],
+    metadata: &mut BTreeMap<String, String>,
+) {
+    let Some(usage) = events.iter().rev().find_map(|event| {
         event
             .raw
-            .get("thread_id")
-            .or_else(|| event.raw.get("threadId"))
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-    }) {
-        metadata.insert("threadId".to_string(), thread_id.to_string());
+            .get("usage")
+            .and_then(serde_json::Value::as_object)
+    }) else {
+        return;
+    };
+
+    let input = usage_u64(usage, "input_tokens");
+    let output = usage_u64(usage, "output_tokens");
+    let cached = usage_u64(usage, "cached_input_tokens");
+    let reasoning = usage_u64(usage, "reasoning_output_tokens");
+    if let Some(value) = input {
+        metadata
+            .entry("usageInputTokens".to_string())
+            .or_insert_with(|| value.to_string());
     }
+    if let Some(value) = cached {
+        metadata
+            .entry("usageCachedInputTokens".to_string())
+            .or_insert_with(|| value.to_string());
+    }
+    if let Some(value) = output {
+        metadata
+            .entry("usageOutputTokens".to_string())
+            .or_insert_with(|| value.to_string());
+    }
+    if let Some(value) = reasoning {
+        metadata
+            .entry("usageReasoningOutputTokens".to_string())
+            .or_insert_with(|| value.to_string());
+    }
+    if let Some(total) = usage_u64(usage, "total_tokens").or_else(|| {
+        Some(input.unwrap_or(0).saturating_add(output.unwrap_or(0))).filter(|value| *value > 0)
+    }) {
+        metadata
+            .entry("usageTotalTokens".to_string())
+            .or_insert_with(|| total.to_string());
+    }
+}
+
+fn usage_u64(map: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<u64> {
+    map.get(key).and_then(serde_json::Value::as_u64)
 }
 
 fn append_external_cli_request_metadata(
@@ -1496,12 +1556,22 @@ fn append_external_cli_request_metadata(
             .entry("modelLabel".to_string())
             .or_insert_with(|| model.to_string());
     } else if is_codex_like_adapter(&request.adapter) {
+        let (label, source) = match request.adapter.trim() {
+            TRAEX_ADAPTER => (
+                "Trae default model (not explicitly configured)",
+                "trae default",
+            ),
+            _ => (
+                "Codex default model (not explicitly configured)",
+                "codex default",
+            ),
+        };
         metadata
             .entry("modelLabel".to_string())
-            .or_insert_with(|| "Codex default model (not explicitly configured)".to_string());
+            .or_insert_with(|| label.to_string());
         metadata
             .entry("modelSource".to_string())
-            .or_insert_with(|| "codex default".to_string());
+            .or_insert_with(|| source.to_string());
     }
 }
 
@@ -1916,6 +1986,8 @@ pub fn external_progress_to_agent_turn_event(
     session_key: &str,
     adapter: &str,
     runner_id: Option<&str>,
+    model: Option<&str>,
+    model_source: Option<&str>,
     work_dir: Option<&Path>,
     event: &ExternalCliProgressEvent,
 ) -> Option<bifrost_agent::AgentTurnProgressEvent> {
@@ -1929,6 +2001,8 @@ pub fn external_progress_to_agent_turn_event(
             };
             status.runner_type = Some(adapter.to_string());
             status.runner_id = runner_id.map(str::to_string);
+            status.model = model.map(str::to_string);
+            status.model_provider = model_source.map(str::to_string);
             status.work_dir = work_dir.map(|path| path.display().to_string());
             Some(bifrost_agent::AgentTurnProgressEvent::Status(Box::new(
                 status,
@@ -2069,10 +2143,13 @@ fn parse_codex_cli_event(
             }
             let content = value_text_path(raw, &["item", "text"])
                 .or_else(|| value_text_path(raw, &["item", "message"]))
+                .or_else(|| value_text_path(raw, &["item", "summary"]))
+                .or_else(|| value_text_path(raw, &["item", "content"]))
                 .or_else(|| value_text_path(raw, &["item", "title"]))
                 .unwrap_or_default();
             let normalized_type = match item_type.as_str() {
                 "agent_message" => ExternalCliProgressEventType::AssistantFinal,
+                "reasoning" | "reasoning_summary" => ExternalCliProgressEventType::AssistantDelta,
                 // Codex CLI currently emits non-fatal config warnings as
                 // `item.completed` with `item.type=error`. The process exit
                 // status remains the source of truth for run failure.

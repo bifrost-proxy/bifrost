@@ -19,7 +19,7 @@ pub(super) async fn handle_idle_im_command(
     let trimmed = msg_text.trim();
     if trimmed == "/status" {
         let detail = ctx.agent_session_manager.get_session_detail(session_key);
-        let status_context = status_context_from_agent_runner(agent_config.runner.as_ref());
+        let status_context = status_context_from_agent_config(agent_config);
         let default_work_dir = agent_config.resolve_work_dir().display().to_string();
         let reply = build_im_status_text(
             detail.as_ref(),
@@ -751,7 +751,7 @@ pub(super) async fn handle_concurrent_event_during_chat(
                 agent_session_manager,
                 progress_registry,
                 default_mode: active_session_default_mode,
-                status_context: status_context_from_agent_runner(agent_config.runner.as_ref()),
+                status_context: status_context_from_agent_config(&agent_config),
                 default_work_dir: Some(agent_config.resolve_work_dir().display().to_string()),
             },
         )
@@ -773,7 +773,7 @@ pub(super) async fn handle_concurrent_event_during_chat(
                     agent_session_manager,
                     progress_registry,
                     default_mode: busy_default_mode_for_agent_config(&agent_config),
-                    status_context: status_context_from_agent_runner(agent_config.runner.as_ref()),
+                    status_context: status_context_from_agent_config(&agent_config),
                     default_work_dir: Some(agent_config.resolve_work_dir().display().to_string()),
                 },
             )

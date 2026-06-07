@@ -414,6 +414,16 @@ pub(super) fn build_im_status_text(
                 .or(context.runner_id.as_ref())
                 .map(String::as_str)
                 .unwrap_or("N/A");
+            let model_text = bifrost_agent::format_model_ref(
+                d.model
+                    .as_ref()
+                    .or(context.model.as_ref())
+                    .map(String::as_str),
+                d.model_provider
+                    .as_ref()
+                    .or(context.model_provider.as_ref())
+                    .map(String::as_str),
+            );
             let conversation_ref = bifrost_agent::format_conversation_ref(
                 d.external_thread_id
                     .as_ref()
@@ -435,11 +445,12 @@ pub(super) fn build_im_status_text(
             let context_management_text =
                 bifrost_agent::format_context_management_status(d.message_count);
             format!(
-                "会话状态:\n- 工作路径: {}\n- Agent 类型: {}\n- Runner 类型: {}\n- Runner ID: {}\n- 外部会话: {}\n- 历史对话轮次: {}\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- 显式压缩次数: {}\n- 上下文管理: {}\n- 历史版本: {}\n- 状态: 空闲{}",
+                "会话状态:\n- 工作路径: {}\n- Agent 类型: {}\n- Runner 类型: {}\n- Runner ID: {}\n- 模型: {}\n- 外部会话: {}\n- 历史对话轮次: {}\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- 显式压缩次数: {}\n- 上下文管理: {}\n- 历史版本: {}\n- 状态: 空闲{}",
                 work_dir,
                 agent_type,
                 runner_type,
                 runner_id,
+                model_text,
                 conversation_ref,
                 d.user_turn_count,
                 d.message_count,
@@ -461,7 +472,7 @@ pub(super) fn build_agent_api_status_text(
     detail: Option<&SessionDetail>,
     config: &bifrost_agent::config::AgentConfig,
 ) -> String {
-    let context = status_context_from_agent_runner(config.runner.as_ref());
+    let context = status_context_from_agent_config(config);
     let default_work_dir = config.resolve_work_dir().display().to_string();
     match detail {
         Some(d) => {
@@ -487,6 +498,16 @@ pub(super) fn build_agent_api_status_text(
                 .or(context.runner_id.as_ref())
                 .map(String::as_str)
                 .unwrap_or("N/A");
+            let model_text = bifrost_agent::format_model_ref(
+                d.model
+                    .as_ref()
+                    .or(context.model.as_ref())
+                    .map(String::as_str),
+                d.model_provider
+                    .as_ref()
+                    .or(context.model_provider.as_ref())
+                    .map(String::as_str),
+            );
             let conversation_ref = bifrost_agent::format_conversation_ref(
                 d.external_thread_id
                     .as_ref()
@@ -508,11 +529,12 @@ pub(super) fn build_agent_api_status_text(
             let context_management_text =
                 bifrost_agent::format_context_management_status(d.message_count);
             format!(
-                "会话状态:\n- 工作路径: {}\n- Agent 类型: {}\n- Runner 类型: {}\n- Runner ID: {}\n- 外部会话: {}\n- 历史对话轮次: {}\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- Context 用量: ~{} / {} ({:.1}%)\n- 显式压缩次数: {}\n- 上下文管理: {}\n- 历史版本: {}\n- MCP 工具数: 0",
+                "会话状态:\n- 工作路径: {}\n- Agent 类型: {}\n- Runner 类型: {}\n- Runner ID: {}\n- 模型: {}\n- 外部会话: {}\n- 历史对话轮次: {}\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- Context 用量: ~{} / {} ({:.1}%)\n- 显式压缩次数: {}\n- 上下文管理: {}\n- 历史版本: {}\n- MCP 工具数: 0",
                 work_dir,
                 agent_type,
                 runner_type,
                 runner_id,
+                model_text,
                 conversation_ref,
                 d.user_turn_count,
                 d.message_count,
@@ -543,10 +565,21 @@ pub(super) fn status_context_from_agent_runner(
             agent_type: Some("Bifrost Agent".to_string()),
             runner_type: Some("bifrost_agent".to_string()),
             runner_id: None,
+            model: None,
+            model_provider: None,
             external_conversation_id: None,
             external_thread_id: None,
         },
     }
+}
+
+pub(super) fn status_context_from_agent_config(
+    config: &bifrost_agent::config::AgentConfig,
+) -> bifrost_agent::StatusRuntimeContext {
+    let mut context = status_context_from_agent_runner(config.runner.as_ref());
+    context.model = config.model.clone();
+    context.model_provider = config.model_provider.clone();
+    context
 }
 
 pub(super) fn status_context_from_external_runner(
@@ -557,6 +590,8 @@ pub(super) fn status_context_from_external_runner(
         agent_type: Some("External Runner Agent".to_string()),
         runner_type: Some(adapter.to_string()),
         runner_id: Some(runner_id.to_string()),
+        model: None,
+        model_provider: None,
         external_conversation_id: None,
         external_thread_id: None,
     }

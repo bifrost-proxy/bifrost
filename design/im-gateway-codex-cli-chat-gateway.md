@@ -168,15 +168,31 @@ Codex CLI 当前不会在 JSONL 中暴露隐藏 chain-of-thought。即使配置 
 
 ### 5.2 飞书 Progress Card 的外部 Runner 状态
 
-飞书 progress card 需要复用内置 Agent 的卡片布局，但外部 CLI runner 不能照搬内置 Agent 的 loop/context/token/compaction 指标。Codex CLI 进程托管层只能可靠获得 runner、adapter、显式配置的 model、工作目录、外部 thread/conversation、工具开始/结束和最终答案；当 Codex CLI 没有显式 `--model` 配置时，卡片只能展示“Codex 默认模型（未显式配置）”，不能猜测具体模型名。
+飞书 progress card 需要复用内置 Agent 的卡片布局，但外部 CLI runner 不能照搬内置 Agent 的 loop/context/compaction 指标。Codex/Trae CLI 进程托管层能可靠获得 runner、adapter、显式配置的 model、工作目录、外部 thread/conversation、当前公开状态、工具开始/结束和最终答案；当 CLI 没有显式 `--model` 配置时，卡片只能展示默认模型标签，不能猜测具体模型名。
+
+Codex/Trae 当前 JSONL 的 `turn.completed.usage` 会输出最近一轮 token usage，例如 `input_tokens`、`cached_input_tokens`、`output_tokens` 和 `reasoning_output_tokens`。Bifrost 将其归一化为 run metadata，并在卡片与 Web History 中展示：
+
+- `Token`：总计、输入、输出、缓存输入、推理输出。
+- `Context`：最近一轮 `input_tokens` 作为“最近输入 context”近似值。
+- `当前状态`：来自 `turn.started`、工具开始/结束、公开 status 事件或运行阶段。
+
+边界：Codex/Trae CLI 当前没有稳定输出 context window 上限、压缩阈值、内部压缩次数或“即将压缩”状态。Bifrost 不能据此精确预测外部 runner 的内部压缩时机，只能展示最近输入 token 与 token usage；内置 Bifrost Agent 仍继续使用自身 `context_window_tokens`、`context_usage_percent` 和 `compaction_count` 做精确状态展示。
 
 因此外部 runner 的卡片状态面板规则为：
 
 - 状态标题显示 `Runner` 和模型标签；配置了 `adapterConfig.model` 时显示真实模型名和来源。
-- 状态正文显示运行状态、Runner、Adapter、模型、外部会话、队列/引导、工作路径和最新工具摘要。
-- 不展示内置 Agent 专属的 `Loop 0/0`、`Context ~0 / N/A`、`Token N/A`、`压缩 0 次` 等空指标。
-- run result metadata 同步写入 `model`、`modelSource`、`modelLabel`，供 Web History、run detail 和后续 IM 展示复用。
+- 状态正文显示运行状态、Runner、Adapter、模型、外部会话、队列/引导、工作路径、最新工具摘要、token usage 和最近输入 context。
+- 不展示内置 Agent 专属的 `Loop 0/0`、`压缩 0 次` 等空指标；外部 runner 的 context window 或压缩次数未知时保持 N/A，不伪造。
+- run result metadata 同步写入 `model`、`modelSource`、`modelLabel`、`usageInputTokens`、`usageOutputTokens`、`usageTotalTokens` 等字段，供 Web History、run detail 和后续 IM 展示复用。
 - 工具过程仍走 canonical `ToolStarted` / `ToolFinished`，飞书卡片和 Web History 看到的是同一组 `exec_command` 语义。
+
+飞书 progress card 的过程展示规则：
+
+- 运行中使用 `collapsible_panel` 展开“执行过程”，按事件到达顺序交叉展示公开思考/进展文本、状态和工具摘要。
+- 工具摘要只在过程区显示一行；每个工具调用额外生成一个默认折叠的工具详情面板，展开后可查看参数、耗时和输出预览。
+- 完成后最终回答移动到卡片顶部，过程信息与状态面板默认折叠；用户仍可手动展开查看完整过程和工具详情。
+- 失败时最终失败信息仍在顶部，过程信息保留为可展开诊断信息。
+- Codex/Trae 只展示 CLI JSONL 明确输出的 reasoning summary/status/tool/final 文本；隐藏 chain-of-thought 不可见，也不会伪造。
 
 ### 6. 能力声明与降级
 
@@ -861,6 +877,8 @@ Runs 页面用于排查 Chat Gateway 和真实 IM Agent 执行。列表字段：
 - `codex_cli_parser_maps_real_command_execution_events`：验证真实 Codex `item.started/item.completed command_execution` 被归一化为 `ToolStarted/ToolFinished`，并保留 command、output、exit code。
 - `codex_command_execution_progress_is_recorded_as_exec_command_tool_steps`：验证 Codex 工具过程进入 canonical timeline 后显示为 `exec_command` 的 tool call/result，而不是外层 runner wrapper。
 - `external_runner_status_footer_uses_runner_metadata_instead_of_agent_metrics`：验证飞书 progress card 的外部 runner 状态显示 runner/model/workdir/tool 等真实信息，不显示内置 Agent 的 Loop/Context/Token/压缩空指标。
+- `feishu_progress_card_expands_process_while_running_and_collapses_after_finish`：验证运行中过程区默认展开、工具详情默认折叠、完成后最终结论在顶部且过程区默认折叠。
+- `codex_cli_parser_maps_reasoning_summary_to_assistant_delta`：验证 Codex/Trae 明确输出的 reasoning summary 会进入公开过程 timeline。
 - `codex_request_metadata_includes_configured_or_default_model_label`：验证 Codex run metadata 对显式模型和默认模型标签均可追踪。
 - `external_cli_adapter_capabilities_drive_config_schema`：验证 adapter 能力声明会决定 WebUI/API 可配置字段，未声明能力不会被错误下发。
 - `external_cli_runtime_accepts_manifest_adapter`：验证简单 manifest adapter 能构造 `CommandSpec` 并复用 run dir / artifact / event pipeline。
@@ -875,7 +893,7 @@ Runs 页面用于排查 Chat Gateway 和真实 IM Agent 执行。列表字段：
 - `im_gateway_external_cli_chat_gateway_skill_context`：构造 repo/global/system skill，断言 prompt envelope 包含 metadata 和路径。
 - `im_gateway_external_cli_chat_gateway_stop`：启动长运行 mock external CLI，调用 stop，断言进程结束、状态为 stopped。
 - `im_gateway_codex_adapter_contract`：用 Codex adapter 覆盖 `codex exec --json`、`--cd`、`--add-dir`、`--output-last-message` 的命令构造和 final response 提取。
-- `test_im_gateway_codex_runner_streaming.sh`：显式启用真实 Codex CLI 后启动临时 Bifrost，调用 `/chat/stream` 触发 `pwd`，断言 `tool_started` 在 `run_finished` 前到达、`tool_finished` 和 final response 都进入 run detail 与 session timeline。
+- `test_im_gateway_codex_runner_streaming.sh`：显式启用真实 Codex CLI 后启动临时 Bifrost，调用 `/chat/stream` 触发 `pwd`，断言 `tool_started` 在 `run_finished` 前到达、`tool_finished`、usage metadata 和 final response 都进入 run detail 与 session timeline；同一 timeline 供飞书 progress card 的过程折叠展示复用。
 - `im_gateway_agent_config_webui_flow`：浏览器打开 Settings -> IM Gateway，配置 Agent Defaults、通道覆盖、Preview Effective Config 和 Run Test Message，断言最终快照、事件时间线和 run detail 可见。
 - `im_gateway_agent_config_webui_theme`：在亮色/暗色主题下检查 Agent Defaults、通道 Agent tab、Chat Gateway 测试抽屉和 Runs 详情没有不可读文本、重叠或危险配置提示丢失。
 

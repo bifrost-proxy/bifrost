@@ -207,6 +207,12 @@ args = snapshot.get("args") or []
 assert "exec" in args and "--json" in args and "--output-last-message" in args, args
 assert any(event.get("eventType") == "tool_started" for event in detail.get("events") or []), detail
 assert any(event.get("eventType") == "tool_finished" for event in detail.get("events") or []), detail
+metadata = detail.get("metadata") or {}
+assert metadata.get("modelSource") == "codex default", metadata
+assert metadata.get("modelLabel") == "Codex default model (not explicitly configured)", metadata
+for key in ("usageInputTokens", "usageOutputTokens", "usageTotalTokens"):
+    value = metadata.get(key)
+    assert value and int(value) > 0, metadata
 
 session_paths = glob.glob(
     os.path.join(test_dir, "agent", "sessions", "**", "session-codex-e2e-streaming-*.jsonl"),

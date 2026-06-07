@@ -24,6 +24,8 @@ const TOOL_LOG_ELEMENT_ID: &str = "agent_tool_log";
 const STATUS_PANEL_ELEMENT_ID: &str = "agent_status_panel";
 const FOOTER_ELEMENT_ID: &str = "agent_footer";
 const THINKING_PANEL_ELEMENT_ID: &str = "agent_thinking_panel";
+const PROCESS_PANEL_ELEMENT_ID: &str = "agent_process_panel";
+const PROCESS_LOG_ELEMENT_ID: &str = "agent_process_log";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImProgressCardCapability {
@@ -50,6 +52,7 @@ pub struct ImAgentProgressSnapshot {
     pub proposed_plan: Option<String>,
     pub tool_calls: Vec<ToolCallLog>,
     pub latest_tool: Option<ProgressToolSummary>,
+    pub timeline: Vec<ProgressTimelineItem>,
     pub status: Option<ActiveTurnStatus>,
     pub context: Option<AgentContextSnapshot>,
     pub queue_items: Vec<QueueItem>,
@@ -70,6 +73,7 @@ impl ImAgentProgressSnapshot {
             proposed_plan: None,
             tool_calls: Vec::new(),
             latest_tool: None,
+            timeline: Vec::new(),
             status: None,
             context: None,
             queue_items: Vec::new(),
@@ -82,6 +86,10 @@ impl ImAgentProgressSnapshot {
     pub fn apply_event(&mut self, event: AgentTurnProgressEvent) {
         match event {
             AgentTurnProgressEvent::Status(status) => {
+                let state = status.state.trim();
+                if !state.is_empty() && state != "running" {
+                    self.push_timeline(ProgressTimelineItem::status(state.to_string()));
+                }
                 self.context = Some(context_snapshot_from_status(&status));
                 self.status = Some(*status);
             }
@@ -102,12 +110,13 @@ impl ImAgentProgressSnapshot {
                 arguments,
             } => {
                 self.latest_tool = Some(ProgressToolSummary {
-                    tool_name,
-                    arguments: Some(arguments),
+                    tool_name: tool_name.clone(),
+                    arguments: Some(arguments.clone()),
                     success: None,
                     result_preview: None,
                     duration_ms: None,
                 });
+                self.push_timeline(ProgressTimelineItem::tool_started(tool_name, arguments));
             }
             AgentTurnProgressEvent::ToolFinished { log, duration_ms } => {
                 self.latest_tool = Some(ProgressToolSummary {
@@ -117,6 +126,7 @@ impl ImAgentProgressSnapshot {
                     result_preview: Some(truncate_str(&log.result, 160)),
                     duration_ms: Some(duration_ms),
                 });
+                self.finish_timeline_tool(&log, duration_ms);
                 self.tool_calls.push(log);
             }
             AgentTurnProgressEvent::LongTaskStatus {
@@ -147,6 +157,11 @@ impl ImAgentProgressSnapshot {
                     result_preview: Some(preview),
                     duration_ms: Some(elapsed_ms),
                 });
+                self.upsert_running_timeline_tool(
+                    "exec_command".to_string(),
+                    format!("session_id={session_id}"),
+                    format!("长任务状态：{state}，已运行 {elapsed_ms}ms"),
+                );
             }
             AgentTurnProgressEvent::PlanUpdated { steps, title } => {
                 self.plan_steps = steps;
@@ -167,6 +182,7 @@ impl ImAgentProgressSnapshot {
             }
             AgentTurnProgressEvent::AssistantDelta { content } => {
                 if !content.trim().is_empty() {
+                    self.push_timeline(ProgressTimelineItem::thinking(content.clone()));
                     self.last_thought = Some(content);
                 }
             }
@@ -183,9 +199,53 @@ impl ImAgentProgressSnapshot {
             }
             AgentTurnProgressEvent::TurnFailed { error } => {
                 self.phase = ImProgressPhase::Failed;
+                self.push_timeline(ProgressTimelineItem::status(format!(
+                    "执行失败：{}",
+                    truncate_one_line(&error, 120)
+                )));
                 self.output = format!("Agent 执行失败：{}", truncate_str(&error, 300));
             }
         }
+    }
+
+    fn push_timeline(&mut self, item: ProgressTimelineItem) {
+        self.timeline.push(item);
+    }
+
+    fn finish_timeline_tool(&mut self, log: &ToolCallLog, duration_ms: u64) {
+        if let Some(item) = self
+            .timeline
+            .iter_mut()
+            .rev()
+            .find(|item| item.kind == ProgressTimelineKind::Tool && !item.completed)
+        {
+            item.title = log.tool_name.clone();
+            item.summary = format_tool_timeline_summary(log, duration_ms);
+            item.detail = format_tool_timeline_detail(&log.arguments, &log.result, duration_ms);
+            item.completed = true;
+            item.success = Some(log.success);
+            return;
+        }
+        self.push_timeline(ProgressTimelineItem::tool_finished(log, duration_ms));
+    }
+
+    fn upsert_running_timeline_tool(&mut self, title: String, arguments: String, summary: String) {
+        if let Some(item) = self
+            .timeline
+            .iter_mut()
+            .rev()
+            .find(|item| item.kind == ProgressTimelineKind::Tool && !item.completed)
+        {
+            item.title = title;
+            item.summary = summary;
+            if item.detail.trim().is_empty() {
+                item.detail = format!("参数：`{}`", truncate_str(&arguments, 300));
+            }
+            return;
+        }
+        let mut item = ProgressTimelineItem::tool_started(title, arguments);
+        item.summary = summary;
+        self.push_timeline(item);
     }
 
     fn apply_context_snapshot(&mut self, context: AgentContextSnapshot) {
@@ -237,9 +297,19 @@ pub struct ProgressRunnerSummary {
     pub adapter: String,
     pub model: Option<String>,
     pub model_source: Option<String>,
+    pub token_usage: Option<ProgressRunnerTokenUsage>,
     pub work_dir: Option<String>,
     pub external_thread_id: Option<String>,
     pub external_conversation_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProgressRunnerTokenUsage {
+    pub input_tokens: Option<u64>,
+    pub cached_input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub reasoning_output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -249,6 +319,70 @@ pub struct ProgressToolSummary {
     pub success: Option<bool>,
     pub result_preview: Option<String>,
     pub duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgressTimelineKind {
+    Thinking,
+    Tool,
+    Status,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgressTimelineItem {
+    pub kind: ProgressTimelineKind,
+    pub title: String,
+    pub summary: String,
+    pub detail: String,
+    pub completed: bool,
+    pub success: Option<bool>,
+}
+
+impl ProgressTimelineItem {
+    fn thinking(content: String) -> Self {
+        Self {
+            kind: ProgressTimelineKind::Thinking,
+            title: "思考".to_string(),
+            summary: truncate_one_line(&content, 120),
+            detail: content,
+            completed: true,
+            success: None,
+        }
+    }
+
+    fn status(content: String) -> Self {
+        Self {
+            kind: ProgressTimelineKind::Status,
+            title: "状态".to_string(),
+            summary: truncate_one_line(&content, 120),
+            detail: content,
+            completed: true,
+            success: None,
+        }
+    }
+
+    fn tool_started(tool_name: String, arguments: String) -> Self {
+        let summary = format!("正在运行 `{}`", truncate_one_line(&tool_name, 32));
+        Self {
+            kind: ProgressTimelineKind::Tool,
+            title: tool_name,
+            summary,
+            detail: format!("参数：`{}`", truncate_str(&arguments, 300)),
+            completed: false,
+            success: None,
+        }
+    }
+
+    fn tool_finished(log: &ToolCallLog, duration_ms: u64) -> Self {
+        Self {
+            kind: ProgressTimelineKind::Tool,
+            title: log.tool_name.clone(),
+            summary: format_tool_timeline_summary(log, duration_ms),
+            detail: format_tool_timeline_detail(&log.arguments, &log.result, duration_ms),
+            completed: true,
+            success: Some(log.success),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -261,12 +395,14 @@ pub struct FeishuProgressCardHandle {
     pub rendered_has_plan: bool,
     pub rendered_has_tool: bool,
     pub rendered_has_thinking: bool,
+    pub rendered_has_process: bool,
     pub rendered_phase: ImProgressPhase,
     rendered_output_hash: u64,
     rendered_plan_hash: Option<u64>,
     rendered_tool_hash: Option<u64>,
     rendered_status_hash: u64,
     rendered_thinking_hash: Option<u64>,
+    rendered_process_hash: Option<u64>,
 }
 
 impl FeishuProgressCardHandle {
@@ -515,12 +651,14 @@ impl FeishuProgressCardSession {
             rendered_has_plan: has_plan_state(&self.snapshot),
             rendered_has_tool: has_tool_state(&self.snapshot),
             rendered_has_thinking: has_thinking_state(&self.snapshot),
+            rendered_has_process: has_process_state(&self.snapshot),
             rendered_phase: self.snapshot.phase,
             rendered_output_hash: output_hash(&self.snapshot),
             rendered_plan_hash: current_has_plan_hash(&self.snapshot),
             rendered_tool_hash: current_has_tool_hash(&self.snapshot),
             rendered_status_hash: status_hash(&self.snapshot),
             rendered_thinking_hash: current_has_thinking_hash(&self.snapshot),
+            rendered_process_hash: current_has_process_hash(&self.snapshot),
         });
         if let Some(handle) = self.handle.as_ref() {
             info!(
@@ -539,12 +677,16 @@ impl FeishuProgressCardSession {
         };
         let current_title = header_title(&self.snapshot).to_string();
         let current_has_plan = has_plan_state(&self.snapshot);
-        let current_has_tool = has_tool_state(&self.snapshot);
-        let current_has_thinking = has_thinking_state(&self.snapshot);
+        let current_has_process = has_process_state(&self.snapshot);
+        let current_has_tool = has_tool_state(&self.snapshot) && !current_has_process;
+        let current_has_thinking = has_thinking_state(&self.snapshot) && !current_has_process;
+        let current_process_hash = current_has_process_hash(&self.snapshot);
         if handle.rendered_title != current_title
             || handle.rendered_has_plan != current_has_plan
             || handle.rendered_has_tool != current_has_tool
             || handle.rendered_has_thinking != current_has_thinking
+            || handle.rendered_has_process != current_has_process
+            || handle.rendered_process_hash != current_process_hash
             || handle.rendered_phase != self.snapshot.phase
         {
             let card = build_feishu_progress_card(&self.snapshot, true);
@@ -556,12 +698,14 @@ impl FeishuProgressCardSession {
             handle.rendered_has_plan = current_has_plan;
             handle.rendered_has_tool = current_has_tool;
             handle.rendered_has_thinking = current_has_thinking;
+            handle.rendered_has_process = current_has_process;
             handle.rendered_phase = self.snapshot.phase;
             handle.rendered_output_hash = output_hash(&self.snapshot);
             handle.rendered_plan_hash = current_has_plan_hash(&self.snapshot);
             handle.rendered_tool_hash = current_has_tool_hash(&self.snapshot);
             handle.rendered_status_hash = status_hash(&self.snapshot);
             handle.rendered_thinking_hash = current_has_thinking_hash(&self.snapshot);
+            handle.rendered_process_hash = current_process_hash;
             return Ok(());
         }
 
@@ -843,21 +987,36 @@ pub fn build_feishu_progress_card(
     streaming_mode: bool,
 ) -> serde_json::Value {
     let mut elements = Vec::new();
-    if !snapshot.plan_steps.is_empty() || snapshot.proposed_plan.is_some() {
-        elements.push(build_plan_panel_element(snapshot));
-    }
-    if has_tool_state(snapshot) {
-        elements.push(build_tool_panel_element(snapshot));
-    }
-    elements.push(build_status_panel_element(snapshot));
-    if has_thinking_state(snapshot) {
-        elements.push(build_thinking_panel_element(snapshot));
-    }
-    elements.push(serde_json::json!({
+    let output_element = serde_json::json!({
         "tag": "markdown",
         "content": format_output_markdown(snapshot),
         "element_id": OUTPUT_ELEMENT_ID
-    }));
+    });
+
+    if matches!(
+        snapshot.phase,
+        ImProgressPhase::Finished | ImProgressPhase::Failed
+    ) {
+        elements.push(output_element);
+        append_process_elements(snapshot, &mut elements);
+        elements.push(build_status_panel_element(snapshot));
+    } else {
+        if !snapshot.plan_steps.is_empty() || snapshot.proposed_plan.is_some() {
+            elements.push(build_plan_panel_element(snapshot));
+        }
+        if has_process_state(snapshot) {
+            append_process_elements(snapshot, &mut elements);
+        } else {
+            if has_tool_state(snapshot) {
+                elements.push(build_tool_panel_element(snapshot));
+            }
+            if has_thinking_state(snapshot) {
+                elements.push(build_thinking_panel_element(snapshot));
+            }
+        }
+        elements.push(build_status_panel_element(snapshot));
+        elements.push(output_element);
+    }
 
     serde_json::json!({
         "schema": "2.0",
@@ -908,6 +1067,10 @@ fn has_tool_state(snapshot: &ImAgentProgressSnapshot) -> bool {
     snapshot.latest_tool.is_some() || !snapshot.tool_calls.is_empty()
 }
 
+fn has_process_state(snapshot: &ImAgentProgressSnapshot) -> bool {
+    !snapshot.timeline.is_empty()
+}
+
 fn has_thinking_state(snapshot: &ImAgentProgressSnapshot) -> bool {
     snapshot
         .last_thought
@@ -927,17 +1090,24 @@ fn has_plan_state(snapshot: &ImAgentProgressSnapshot) -> bool {
 }
 
 fn current_has_tool_hash(snapshot: &ImAgentProgressSnapshot) -> Option<u64> {
-    if !has_tool_state(snapshot) {
+    if !has_tool_state(snapshot) || has_process_state(snapshot) {
         return None;
     }
     Some(element_hash(&build_tool_panel_element(snapshot)))
 }
 
 fn current_has_thinking_hash(snapshot: &ImAgentProgressSnapshot) -> Option<u64> {
-    if !has_thinking_state(snapshot) {
+    if !has_thinking_state(snapshot) || has_process_state(snapshot) {
         return None;
     }
     Some(element_hash(&build_thinking_panel_element(snapshot)))
+}
+
+fn current_has_process_hash(snapshot: &ImAgentProgressSnapshot) -> Option<u64> {
+    if !has_process_state(snapshot) {
+        return None;
+    }
+    Some(process_elements_hash(snapshot))
 }
 
 fn output_hash(snapshot: &ImAgentProgressSnapshot) -> u64 {
@@ -946,6 +1116,12 @@ fn output_hash(snapshot: &ImAgentProgressSnapshot) -> u64 {
 
 fn status_hash(snapshot: &ImAgentProgressSnapshot) -> u64 {
     element_hash(&build_status_panel_element(snapshot))
+}
+
+fn process_elements_hash(snapshot: &ImAgentProgressSnapshot) -> u64 {
+    let mut elements = Vec::new();
+    append_process_elements(snapshot, &mut elements);
+    stable_hash(&serde_json::to_string(&elements).unwrap_or_default())
 }
 
 fn element_hash(element: &serde_json::Value) -> u64 {
@@ -1068,6 +1244,155 @@ fn format_tool_summary_markdown(tool: Option<&ProgressToolSummary>) -> String {
     text
 }
 
+fn append_process_elements(
+    snapshot: &ImAgentProgressSnapshot,
+    elements: &mut Vec<serde_json::Value>,
+) {
+    if !has_process_state(snapshot) {
+        return;
+    }
+    elements.push(build_process_panel_element(snapshot));
+    for (index, item) in snapshot
+        .timeline
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| item.kind == ProgressTimelineKind::Tool)
+    {
+        elements.push(build_process_tool_detail_element(snapshot, index, item));
+    }
+}
+
+fn build_process_panel_element(snapshot: &ImAgentProgressSnapshot) -> serde_json::Value {
+    serde_json::json!({
+        "tag": "collapsible_panel",
+        "element_id": PROCESS_PANEL_ELEMENT_ID,
+        "expanded": matches!(snapshot.phase, ImProgressPhase::Running),
+        "background_color": "grey",
+        "header": {
+            "title": {
+                "tag": "plain_text",
+                "content": format_process_panel_title(snapshot)
+            }
+        },
+        "elements": [{
+            "tag": "markdown",
+            "content": format_process_timeline_markdown(snapshot),
+            "element_id": PROCESS_LOG_ELEMENT_ID
+        }]
+    })
+}
+
+fn build_process_tool_detail_element(
+    snapshot: &ImAgentProgressSnapshot,
+    index: usize,
+    item: &ProgressTimelineItem,
+) -> serde_json::Value {
+    serde_json::json!({
+        "tag": "collapsible_panel",
+        "element_id": format!("agent_process_tool_{index}"),
+        "expanded": false,
+        "background_color": "grey",
+        "header": {
+            "title": {
+                "tag": "plain_text",
+                "content": format_process_tool_panel_title(snapshot, item)
+            }
+        },
+        "elements": [{
+            "tag": "markdown",
+            "content": crate::im_gateway::markdown_converter::convert_to_feishu_markdown(
+                &item.detail
+            ),
+            "element_id": format!("agent_process_tool_{index}_detail")
+        }]
+    })
+}
+
+fn format_process_panel_title(snapshot: &ImAgentProgressSnapshot) -> String {
+    let message_count = snapshot.timeline.len();
+    let tool_count = process_tool_count(snapshot);
+    let base = match snapshot.phase {
+        ImProgressPhase::Running => "执行过程",
+        ImProgressPhase::Finished => "过程信息",
+        ImProgressPhase::Failed => "失败前过程",
+    };
+    if tool_count == 0 {
+        format!("{base}：{message_count} 条消息")
+    } else {
+        format!("{base}：{message_count} 条消息 · 已运行 {tool_count} 条命令")
+    }
+}
+
+fn format_process_tool_panel_title(
+    snapshot: &ImAgentProgressSnapshot,
+    item: &ProgressTimelineItem,
+) -> String {
+    let verb = match item.success {
+        Some(true) => "已运行",
+        Some(false) => "运行失败",
+        None => "正在运行",
+    };
+    format!(
+        "{} {} 条命令：{}",
+        verb,
+        process_tool_count(snapshot),
+        truncate_one_line(&item.title, 36)
+    )
+}
+
+fn process_tool_count(snapshot: &ImAgentProgressSnapshot) -> usize {
+    snapshot
+        .timeline
+        .iter()
+        .filter(|item| item.kind == ProgressTimelineKind::Tool)
+        .count()
+}
+
+fn format_process_timeline_markdown(snapshot: &ImAgentProgressSnapshot) -> String {
+    if snapshot.timeline.is_empty() {
+        return "暂无过程信息".to_string();
+    }
+    snapshot
+        .timeline
+        .iter()
+        .enumerate()
+        .map(|(index, item)| format_process_timeline_line(index + 1, item))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn format_process_timeline_line(index: usize, item: &ProgressTimelineItem) -> String {
+    match item.kind {
+        ProgressTimelineKind::Thinking => format!(
+            "{}. [思考] {}",
+            index,
+            crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&truncate_str(
+                &item.detail,
+                600
+            ))
+        ),
+        ProgressTimelineKind::Status => format!(
+            "{}. [状态] {}",
+            index,
+            crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&item.summary)
+        ),
+        ProgressTimelineKind::Tool => {
+            let status = match item.success {
+                Some(true) => "完成",
+                Some(false) => "失败",
+                None => "执行中",
+            };
+            format!(
+                "{}. [工具] `{}` · {} · {}",
+                index,
+                truncate_one_line(&item.title, 32),
+                status,
+                crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&item.summary)
+            )
+        }
+    }
+}
+
 fn build_tool_panel_element(snapshot: &ImAgentProgressSnapshot) -> serde_json::Value {
     serde_json::json!({
         "tag": "collapsible_panel",
@@ -1086,6 +1411,44 @@ fn build_tool_panel_element(snapshot: &ImAgentProgressSnapshot) -> serde_json::V
             "element_id": TOOL_LOG_ELEMENT_ID
         }]
     })
+}
+
+fn format_tool_timeline_summary(log: &ToolCallLog, duration_ms: u64) -> String {
+    let status = if log.success { "已完成" } else { "失败" };
+    let mut summary = format!("{} `{}`", status, truncate_one_line(&log.tool_name, 32));
+    if duration_ms > 0 {
+        summary.push_str(&format!(" · {duration_ms}ms"));
+    }
+    if !log.result.trim().is_empty() {
+        summary.push_str(&format!(" · {}", truncate_one_line(&log.result, 80)));
+    }
+    summary
+}
+
+fn format_tool_timeline_detail(arguments: &str, result: &str, duration_ms: u64) -> String {
+    let mut detail = String::new();
+    if !arguments.trim().is_empty() {
+        detail.push_str(&format!("参数：`{}`", truncate_str(arguments, 600)));
+    }
+    if duration_ms > 0 {
+        if !detail.is_empty() {
+            detail.push('\n');
+        }
+        detail.push_str(&format!("耗时：{duration_ms}ms"));
+    }
+    if !result.trim().is_empty() {
+        if !detail.is_empty() {
+            detail.push_str("\n\n");
+        }
+        detail.push_str("输出：\n```text\n");
+        detail.push_str(&truncate_str(result, 1800));
+        detail.push_str("\n```");
+    }
+    if detail.is_empty() {
+        "暂无工具详情".to_string()
+    } else {
+        detail
+    }
 }
 
 fn build_status_panel_element(snapshot: &ImAgentProgressSnapshot) -> serde_json::Value {
@@ -1202,6 +1565,12 @@ fn format_status_panel_title(snapshot: &ImAgentProgressSnapshot) -> String {
             None => "Token：统计中".to_string(),
         },
     };
+    let token_title = snapshot
+        .status
+        .as_ref()
+        .and_then(internal_runner_model_label)
+        .map(|model| format!("模型：{model} · {token_title}"))
+        .unwrap_or(token_title);
     if let Some(notice) = snapshot.activity_notice.as_deref() {
         format!("{token_title} · {notice}")
     } else {
@@ -1266,29 +1635,98 @@ fn external_runner_adapter(snapshot: &ImAgentProgressSnapshot) -> String {
 }
 
 fn external_runner_model_label(snapshot: &ImAgentProgressSnapshot) -> String {
-    let Some(runner) = snapshot.runner.as_ref() else {
-        return "未显式配置".to_string();
-    };
-    match runner
+    if let Some(status_model) = snapshot
+        .status
+        .as_ref()
+        .and_then(internal_runner_model_label)
+    {
+        return status_model;
+    }
+    let runner = snapshot.runner.as_ref();
+    let runner_model = runner
+        .and_then(|runner| runner.model.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let runner_source = runner
+        .and_then(|runner| runner.model_source.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match runner_model {
+        Some(model) => match runner_source {
+            Some(source) => format!("{}（{}）", truncate_one_line(model, 48), source),
+            None => truncate_one_line(model, 48),
+        },
+        None if runner.is_some_and(|runner| {
+            runner.adapter.trim() == "codex" || runner.runner_id.trim() == "codex"
+        }) =>
+        {
+            "Codex 默认模型（未显式配置）".to_string()
+        }
+        None if runner.is_some_and(|runner| {
+            runner.adapter.trim() == "traex" || runner.runner_id.trim() == "traex"
+        }) =>
+        {
+            "Trae 默认模型（未显式配置）".to_string()
+        }
+        None => "默认模型（未显式配置）".to_string(),
+    }
+}
+
+fn external_runner_token_usage_line(snapshot: &ImAgentProgressSnapshot) -> Option<String> {
+    let usage = snapshot.runner.as_ref()?.token_usage.as_ref()?;
+    let total = usage
+        .total_tokens
+        .map(bifrost_agent::format_status_metric_count)
+        .unwrap_or_else(|| "N/A".to_string());
+    let input = usage
+        .input_tokens
+        .map(bifrost_agent::format_status_metric_count)
+        .unwrap_or_else(|| "N/A".to_string());
+    let output = usage
+        .output_tokens
+        .map(bifrost_agent::format_status_metric_count)
+        .unwrap_or_else(|| "N/A".to_string());
+    let mut parts = vec![format!("输入 {input}"), format!("输出 {output}")];
+    if let Some(cached) = usage.cached_input_tokens {
+        parts.push(format!(
+            "缓存输入 {}",
+            bifrost_agent::format_status_metric_count(cached)
+        ));
+    }
+    if let Some(reasoning) = usage.reasoning_output_tokens {
+        parts.push(format!(
+            "推理输出 {}",
+            bifrost_agent::format_status_metric_count(reasoning)
+        ));
+    }
+    Some(format!("Token：总计 {total} · {}", parts.join(" · ")))
+}
+
+fn external_runner_context_usage_line(snapshot: &ImAgentProgressSnapshot) -> Option<String> {
+    let usage = snapshot.runner.as_ref()?.token_usage.as_ref()?;
+    let input = usage.input_tokens?;
+    Some(format!(
+        "Context：最近输入 {} / N/A",
+        bifrost_agent::format_status_metric_count(input)
+    ))
+}
+
+fn external_runner_state_line(snapshot: &ImAgentProgressSnapshot) -> Option<String> {
+    let state = snapshot
+        .status
+        .as_ref()
+        .map(|status| status.state.trim())
+        .filter(|value| !value.is_empty() && *value != "running")?;
+    Some(format!("当前状态：{}", truncate_one_line(state, 48)))
+}
+
+fn internal_runner_model_label(status: &bifrost_agent::ActiveTurnStatus) -> Option<String> {
+    status
         .model
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-    {
-        Some(model) => match runner
-            .model_source
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            Some(source) => format!("{}（{}）", truncate_one_line(model, 48), source),
-            None => truncate_one_line(model, 48),
-        },
-        None if runner.adapter.trim() == "codex" || runner.runner_id.trim() == "codex" => {
-            "Codex 默认模型（未显式配置）".to_string()
-        }
-        None => "默认模型（未显式配置）".to_string(),
-    }
+        .map(|model| bifrost_agent::format_model_ref(Some(model), status.model_provider.as_deref()))
 }
 
 fn external_runner_work_dir(snapshot: &ImAgentProgressSnapshot) -> Option<&str> {
@@ -1404,13 +1842,25 @@ fn format_footer_markdown(snapshot: &ImAgentProgressSnapshot) -> String {
         let tool_line = format_external_tool_line(snapshot)
             .map(|line| format!("\n{line}"))
             .unwrap_or_default();
+        let token_line = external_runner_token_usage_line(snapshot)
+            .map(|line| format!("\n{line}"))
+            .unwrap_or_default();
+        let context_line = external_runner_context_usage_line(snapshot)
+            .map(|line| format!("\n{line}"))
+            .unwrap_or_default();
+        let state_line = external_runner_state_line(snapshot)
+            .map(|line| format!("\n{line}"))
+            .unwrap_or_default();
         return format!(
-            "{}状态：{}\nRunner：`{}` · Adapter：`{}`\n模型：{}\n外部会话：{}\n队列：{} · 引导：{}\n工作路径：`{}`{}",
+            "{}状态：{}{}\nRunner：`{}` · Adapter：`{}`\n模型：{}{}{}\n外部会话：{}\n队列：{} · 引导：{}\n工作路径：`{}`{}",
             prefix,
             phase,
+            state_line,
             external_runner_id(snapshot),
             external_runner_adapter(snapshot),
             external_runner_model_label(snapshot),
+            token_line,
+            context_line,
             external_runner_conversation_ref(snapshot),
             queue_text,
             guide_text,
@@ -1443,8 +1893,11 @@ fn format_footer_markdown(snapshot: &ImAgentProgressSnapshot) -> String {
                     )
                 ),
             };
+            let model_line = internal_runner_model_label(status)
+                .map(|model| format!("\n模型：{model}"))
+                .unwrap_or_default();
             format!(
-                "{}状态：{} · Loop {}/{}（已完成 {}）\nContext：{}\nToken：累计 {}，最近 {}\n压缩：{} 次 · 队列：{} · 引导：{}\n工作路径：`{}`",
+                "{}状态：{} · Loop {}/{}（已完成 {}）{}\nContext：{}\nToken：累计 {}，最近 {}\n压缩：{} 次 · 队列：{} · 引导：{}\n工作路径：`{}`",
                 snapshot
                     .activity_notice
                     .as_deref()
@@ -1454,6 +1907,7 @@ fn format_footer_markdown(snapshot: &ImAgentProgressSnapshot) -> String {
                 status.current_loop_iteration,
                 status.max_loop_iterations,
                 status.completed_loop_iterations,
+                model_line,
                 context_text,
                 token_text,
                 last_token_text,

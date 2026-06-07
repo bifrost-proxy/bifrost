@@ -404,17 +404,17 @@ pub(super) fn im_status_text_formats_metrics_and_runner_metadata() {
     let detail = manager
         .get_session_detail("status-runner-metadata")
         .expect("detail");
-    let text = build_im_status_text(
-        Some(&detail),
-        &status_context_from_agent_runner(Some(&bifrost_agent::AgentRunnerMode::Custom(
-            "codex".to_string(),
-        ))),
-        None,
-    );
+    let mut context = status_context_from_agent_runner(Some(
+        &bifrost_agent::AgentRunnerMode::Custom("codex".to_string()),
+    ));
+    context.model = Some("trae-model".to_string());
+    context.model_provider = Some("runner config".to_string());
+    let text = build_im_status_text(Some(&detail), &context, None);
 
     assert!(text.contains("Agent 类型: External Runner Agent"));
     assert!(text.contains("Runner 类型: codex"));
     assert!(text.contains("Runner ID: codex"));
+    assert!(text.contains("模型: trae-model（runner config）"));
     assert!(text.contains("外部会话: Codex threadId=thread-status-123"));
     assert!(text.contains("历史对话轮次: 2"));
     assert!(text.contains("API 累计 token: 38.6K"));
@@ -449,9 +449,15 @@ pub(super) fn im_status_text_uses_resolved_default_work_dir_when_session_has_no_
         Some(&detail),
         &bifrost_agent::config::AgentConfig::default(),
     );
+    let default_config = bifrost_agent::config::AgentConfig::default();
+    let default_model = bifrost_agent::format_model_ref(
+        default_config.model.as_deref(),
+        default_config.model_provider.as_deref(),
+    );
 
     assert!(text.contains(&format!("工作路径: {current_dir}")));
     assert!(api_text.contains(&format!("工作路径: {current_dir}")));
+    assert!(api_text.contains(&format!("模型: {default_model}")));
     assert!(!text.contains("工作路径: N/A"));
     assert!(!api_text.contains("工作路径: N/A"));
 }

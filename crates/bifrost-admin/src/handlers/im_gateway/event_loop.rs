@@ -408,8 +408,8 @@ pub(super) async fn run_event_loop_with_options(
                                     agent_session_manager: &agent_session_manager,
                                     progress_registry: &progress_registry,
                                     default_mode: busy_default_mode,
-                                    status_context: status_context_from_agent_runner(
-                                        effective_agent_config.runner.as_ref(),
+                                    status_context: status_context_from_agent_config(
+                                        &effective_agent_config,
                                     ),
                                     default_work_dir: Some(
                                         effective_agent_config
@@ -577,9 +577,7 @@ pub(super) async fn run_event_loop_with_options(
                             agent_session_manager: &agent_session_manager,
                             progress_registry: &progress_registry,
                             default_mode: busy_default_mode,
-                            status_context: status_context_from_agent_runner(
-                                agent_config.runner.as_ref(),
-                            ),
+                            status_context: status_context_from_agent_config(&agent_config),
                             default_work_dir: Some(
                                 agent_config.resolve_work_dir().display().to_string(),
                             ),
@@ -851,8 +849,18 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
     }
 
     let delivery_mode = input.delivery_override.unwrap_or(settings.delivery_mode);
-    let status_context =
+    let mut status_context =
         status_context_from_external_runner(&effective.runner_id, &settings.adapter);
+    if let Some(model) = settings
+        .adapter_config
+        .model
+        .as_ref()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        status_context.model = Some(model);
+        status_context.model_provider = Some("runner config".to_string());
+    }
 
     let provider_agent_config =
         effective_agent_config_for_provider(&ctx.agent_config_store.load(), ctx.provider);
@@ -1074,6 +1082,12 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                                 &input.session_key,
                                 &settings.adapter,
                                 Some(&effective.runner_id),
+                                request_for_progress.adapter_config.model.as_deref(),
+                                request_for_progress
+                                    .adapter_config
+                                    .model
+                                    .as_ref()
+                                    .map(|_| "runner config"),
                                 request_for_progress.work_dir.as_deref(),
                                 &progress_event,
                             ),
@@ -1119,6 +1133,12 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                         &input.session_key,
                         &settings.adapter,
                         Some(&effective.runner_id),
+                        request_for_progress.adapter_config.model.as_deref(),
+                        request_for_progress
+                            .adapter_config
+                            .model
+                            .as_ref()
+                            .map(|_| "runner config"),
                         request_for_progress.work_dir.as_deref(),
                         &progress_event,
                     ),
@@ -1634,6 +1654,7 @@ fn external_cli_progress_runner_summary(
         adapter: adapter.trim().to_string(),
         model,
         model_source,
+        token_usage: metadata.and_then(external_cli_token_usage_from_metadata),
         work_dir: request
             .work_dir
             .as_ref()
@@ -1643,10 +1664,33 @@ fn external_cli_progress_runner_summary(
     }
 }
 
+fn external_cli_token_usage_from_metadata(
+    metadata: &std::collections::BTreeMap<String, String>,
+) -> Option<crate::im_gateway::progress_card::ProgressRunnerTokenUsage> {
+    let usage = crate::im_gateway::progress_card::ProgressRunnerTokenUsage {
+        input_tokens: metadata_u64(metadata, "usageInputTokens"),
+        cached_input_tokens: metadata_u64(metadata, "usageCachedInputTokens"),
+        output_tokens: metadata_u64(metadata, "usageOutputTokens"),
+        reasoning_output_tokens: metadata_u64(metadata, "usageReasoningOutputTokens"),
+        total_tokens: metadata_u64(metadata, "usageTotalTokens"),
+    };
+    (usage.input_tokens.is_some()
+        || usage.cached_input_tokens.is_some()
+        || usage.output_tokens.is_some()
+        || usage.reasoning_output_tokens.is_some()
+        || usage.total_tokens.is_some())
+    .then_some(usage)
+}
+
+fn metadata_u64(metadata: &std::collections::BTreeMap<String, String>, key: &str) -> Option<u64> {
+    metadata.get(key)?.trim().parse().ok()
+}
+
 fn format_runner_model_source(source: &str) -> String {
     match source.trim() {
         "runner config" => "runner 配置".to_string(),
         "codex default" => "Codex 默认".to_string(),
+        "trae default" => "Trae 默认".to_string(),
         value => value.to_string(),
     }
 }

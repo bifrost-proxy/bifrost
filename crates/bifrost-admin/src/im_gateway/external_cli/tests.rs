@@ -886,6 +886,8 @@ fn external_progress_maps_to_agent_turn_progress_events() {
         "session-a",
         TRAEX_ADAPTER,
         Some("traex"),
+        Some("trae-model"),
+        Some("runner config"),
         Some(Path::new("/tmp/work")),
         &event,
     )
@@ -896,6 +898,32 @@ fn external_progress_maps_to_agent_turn_progress_events() {
             assert_eq!(content, "thinking out loud");
         }
         other => panic!("unexpected mapped event: {other:?}"),
+    }
+
+    let status_event = ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::Status,
+        content: "running".to_string(),
+        title: None,
+        raw: serde_json::json!({"type":"status","content":"running"}),
+    };
+    let mapped_status = external_progress_to_agent_turn_event(
+        "session-a",
+        TRAEX_ADAPTER,
+        Some("traex"),
+        Some("trae-model"),
+        Some("runner config"),
+        Some(Path::new("/tmp/work")),
+        &status_event,
+    )
+    .expect("mapped status event");
+    match mapped_status {
+        bifrost_agent::AgentTurnProgressEvent::Status(status) => {
+            assert_eq!(status.runner_type.as_deref(), Some(TRAEX_ADAPTER));
+            assert_eq!(status.runner_id.as_deref(), Some("traex"));
+            assert_eq!(status.model.as_deref(), Some("trae-model"));
+            assert_eq!(status.model_provider.as_deref(), Some("runner config"));
+        }
+        other => panic!("unexpected mapped status event: {other:?}"),
     }
 }
 
@@ -1158,6 +1186,80 @@ fn codex_request_metadata_includes_configured_or_default_model_label() {
     assert_eq!(
         default_metadata.get("modelLabel").map(String::as_str),
         Some("Codex default model (not explicitly configured)")
+    );
+
+    let trae_request = ExternalCliRunRequest {
+        adapter: TRAEX_ADAPTER.to_string(),
+        runner_id: Some("traex".to_string()),
+        ..default_request
+    };
+    let mut trae_metadata = std::collections::BTreeMap::new();
+
+    append_external_cli_request_metadata(&trae_request, &mut trae_metadata);
+
+    assert_eq!(trae_metadata.get("model"), None);
+    assert_eq!(
+        trae_metadata.get("modelSource").map(String::as_str),
+        Some("trae default")
+    );
+    assert_eq!(
+        trae_metadata.get("modelLabel").map(String::as_str),
+        Some("Trae default model (not explicitly configured)")
+    );
+}
+
+#[test]
+fn codex_like_metadata_includes_turn_usage_tokens() {
+    let events = parse_progress_events(
+        r#"{"type":"thread.started","thread_id":"thread-usage"}
+{"type":"turn.completed","usage":{"input_tokens":59589,"cached_input_tokens":6912,"output_tokens":221,"reasoning_output_tokens":156}}"#,
+    );
+    let mut metadata = std::collections::BTreeMap::new();
+
+    append_external_cli_metadata(TRAEX_ADAPTER, &events, &mut metadata);
+
+    assert_eq!(
+        metadata.get("threadId").map(String::as_str),
+        Some("thread-usage")
+    );
+    assert_eq!(
+        metadata.get("usageInputTokens").map(String::as_str),
+        Some("59589")
+    );
+    assert_eq!(
+        metadata.get("usageCachedInputTokens").map(String::as_str),
+        Some("6912")
+    );
+    assert_eq!(
+        metadata.get("usageOutputTokens").map(String::as_str),
+        Some("221")
+    );
+    assert_eq!(
+        metadata
+            .get("usageReasoningOutputTokens")
+            .map(String::as_str),
+        Some("156")
+    );
+    assert_eq!(
+        metadata.get("usageTotalTokens").map(String::as_str),
+        Some("59810")
+    );
+}
+
+#[test]
+fn codex_cli_parser_maps_reasoning_summary_to_assistant_delta() {
+    let events = parse_progress_events(
+        r#"{"type":"item.completed","item":{"id":"reasoning_0","type":"reasoning_summary","summary":"I checked the workspace and will run the focused tests."}}"#,
+    );
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].event_type,
+        ExternalCliProgressEventType::AssistantDelta
+    );
+    assert_eq!(
+        events[0].content,
+        "I checked the workspace and will run the focused tests."
     );
 }
 

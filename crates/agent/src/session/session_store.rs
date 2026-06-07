@@ -388,6 +388,8 @@ impl AgentSessionManager {
                 agent_type: s.agent_type.clone(),
                 runner_type: s.runner_type.clone(),
                 runner_id: s.runner_id.clone(),
+                model: None,
+                model_provider: None,
                 external_conversation_id: s.external_conversation_id.clone(),
                 external_thread_id: s.external_thread_id.clone(),
                 title: s
@@ -580,6 +582,8 @@ pub struct SessionDetail {
     pub agent_type: Option<String>,
     pub runner_type: Option<String>,
     pub runner_id: Option<String>,
+    pub model: Option<String>,
+    pub model_provider: Option<String>,
     pub external_conversation_id: Option<String>,
     pub external_thread_id: Option<String>,
     /// Session title (intent/topic) set by the agent via set_title tool.

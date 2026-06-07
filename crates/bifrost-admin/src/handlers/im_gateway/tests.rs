@@ -527,6 +527,8 @@ pub(super) fn progress_events_flush_immediately_only_for_visible_chat_updates() 
         agent_type: Some("Bifrost Agent".to_string()),
         runner_type: Some("bifrost_agent".to_string()),
         runner_id: None,
+        model: None,
+        model_provider: None,
         external_conversation_id: None,
         external_thread_id: None,
         turn_timing: None,

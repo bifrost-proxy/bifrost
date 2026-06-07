@@ -717,7 +717,7 @@ pub(super) async fn handle_agent(
                     service.queue_manager.guide_status(&session_key),
                 );
                 status.pending_guide_messages = pending_guides.clone();
-                let status_context = status_context_from_agent_runner(config.runner.as_ref());
+                let status_context = status_context_from_agent_config(&config);
                 return json_response(&serde_json::json!({
                     "success": true,
                     "response": bifrost_agent::format_active_turn_status_text_with_context(
@@ -1548,6 +1548,8 @@ fn active_status_session_detail(
         "agent_type": status.agent_type.clone(),
         "runner_type": status.runner_type.clone(),
         "runner_id": status.runner_id.clone(),
+        "model": status.model.clone(),
+        "model_provider": status.model_provider.clone(),
         "external_conversation_id": status.external_conversation_id.clone(),
         "external_thread_id": status.external_thread_id.clone(),
         "title": null,
@@ -1871,6 +1873,15 @@ fn overlay_active_status_on_session_detail(
             serde_json::json!(status.runner_id.clone()),
         );
     }
+    if status.model.is_some() {
+        object.insert("model".to_string(), serde_json::json!(status.model.clone()));
+    }
+    if status.model_provider.is_some() {
+        object.insert(
+            "model_provider".to_string(),
+            serde_json::json!(status.model_provider.clone()),
+        );
+    }
     if status.external_conversation_id.is_some() {
         object.insert(
             "external_conversation_id".to_string(),
@@ -1959,6 +1970,8 @@ fn history_session_detail(session_key: &str) -> Option<bifrost_agent::SessionDet
         agent_type: None,
         runner_type: None,
         runner_id: None,
+        model: None,
+        model_provider: None,
         external_conversation_id: None,
         external_thread_id: None,
         title: summary.title.or(summary.first_user_message),
@@ -2069,6 +2082,21 @@ async fn external_runner_session_detail(session_key: &str) -> Option<bifrost_age
         _ => "completed",
     }
     .to_string();
+    let model = run_detail
+        .as_ref()
+        .and_then(|detail| detail.metadata.get("model").cloned());
+    let model_provider = run_detail
+        .as_ref()
+        .and_then(|detail| detail.metadata.get("modelSource").cloned());
+    let usage_total_tokens = run_detail
+        .as_ref()
+        .and_then(|detail| detail.metadata.get("usageTotalTokens"))
+        .and_then(|value| value.trim().parse::<u64>().ok());
+    let estimated_tokens = run_detail
+        .as_ref()
+        .and_then(|detail| detail.metadata.get("usageInputTokens"))
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .unwrap_or_default();
     Some(bifrost_agent::SessionDetail {
         session_key: state.session_key,
         user_id: None,
@@ -2077,8 +2105,8 @@ async fn external_runner_session_detail(session_key: &str) -> Option<bifrost_age
         created_at,
         last_active_at: updated_at,
         compaction_count: 0,
-        total_tokens_used: None,
-        estimated_tokens: 0,
+        total_tokens_used: usage_total_tokens,
+        estimated_tokens,
         history_version: 0,
         work_dir: state.work_dir,
         source: "admin-api".to_string(),
@@ -2089,6 +2117,8 @@ async fn external_runner_session_detail(session_key: &str) -> Option<bifrost_age
         }),
         runner_type: Some(state.adapter),
         runner_id: state.runner_id,
+        model,
+        model_provider,
         external_conversation_id: state.external_conversation_id,
         external_thread_id: state.external_thread_id,
         title: state.title.or(state.last_user_message),
@@ -2272,6 +2302,8 @@ mod tests {
             agent_type: None,
             runner_type: None,
             runner_id: None,
+            model: None,
+            model_provider: None,
             external_conversation_id: None,
             external_thread_id: None,
             title: Some("history title".to_string()),
@@ -2307,6 +2339,8 @@ mod tests {
             agent_type: Some("Bifrost Agent".to_string()),
             runner_type: Some("bifrost_agent".to_string()),
             runner_id: None,
+            model: Some("gpt-5".to_string()),
+            model_provider: Some("openai".to_string()),
             external_conversation_id: None,
             external_thread_id: None,
             turn_timing: None,

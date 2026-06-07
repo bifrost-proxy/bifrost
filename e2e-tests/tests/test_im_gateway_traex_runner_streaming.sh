@@ -197,6 +197,12 @@ joined = " ".join(args)
 assert "--permission-mode default" not in joined, args
 assert "--cd" in args and "exec" in args and "--json" in args and "--output-last-message" in args, args
 assert detail.get("events"), detail
+metadata = detail.get("metadata") or {}
+assert metadata.get("modelSource") == "trae default", metadata
+assert metadata.get("modelLabel") == "Trae default model (not explicitly configured)", metadata
+for key in ("usageInputTokens", "usageOutputTokens", "usageTotalTokens"):
+    value = metadata.get(key)
+    assert value and int(value) > 0, metadata
 
 session_paths = glob.glob(
     os.path.join(test_dir, "agent", "sessions", "**", "session-traex-e2e-streaming-*.jsonl"),
