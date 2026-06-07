@@ -1052,7 +1052,8 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     "agent_plan",
                     "agent_process_panel",
                     "agent_process_log",
-                    "agent_process_tool_1",
+                    "ap_t_1",
+                    "ap_td_1",
                     "agent_status_panel",
                     "agent_footer",
                     "list_directory",
@@ -1105,7 +1106,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     .and_then(|elements| {
                         elements
                             .iter()
-                            .find(|element| element["element_id"] == "agent_process_tool_1")
+                            .find(|element| element["element_id"] == "ap_t_1")
                     })
                     .ok_or_else(|| "streaming card missing process tool element".to_string())?;
                 if tool_element["tag"] != "collapsible_panel" {
