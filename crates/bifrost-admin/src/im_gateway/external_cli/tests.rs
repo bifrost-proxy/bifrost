@@ -194,6 +194,32 @@ fn codex_cli_parser_maps_real_jsonl_events() {
 }
 
 #[test]
+fn traex_cli_parser_maps_real_jsonl_events() {
+    let stdout = r#"{"type":"thread.started","thread_id":"019e9f78-traex"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"model rerouted"}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"BIFROST_TRAEX_OK"}}
+{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}"#;
+
+    let events = parse_progress_events(stdout);
+
+    assert_eq!(events.len(), 5);
+    assert_eq!(
+        events[0].event_type,
+        ExternalCliProgressEventType::RunStarted
+    );
+    assert_eq!(events[0].content, "019e9f78-traex");
+    assert_eq!(events[1].event_type, ExternalCliProgressEventType::Status);
+    assert_eq!(events[2].event_type, ExternalCliProgressEventType::Status);
+    assert_eq!(events[2].content, "model rerouted");
+    assert_eq!(
+        events[3].event_type,
+        ExternalCliProgressEventType::AssistantFinal
+    );
+    assert_eq!(events[3].content, "BIFROST_TRAEX_OK");
+}
+
+#[test]
 fn codex_adapter_builds_exec_command_with_prompt_stdin() {
     let request = ExternalCliRunRequest {
         images: Vec::new(),
@@ -239,6 +265,155 @@ fn codex_adapter_builds_exec_command_with_prompt_stdin() {
         "--output-last-message",
         "/tmp/last.md"
     ));
+    assert_eq!(spec.args.last().map(String::as_str), Some("-"));
+}
+
+#[test]
+fn traex_adapter_builds_exec_command_with_prompt_stdin() {
+    let request = ExternalCliRunRequest {
+        images: Vec::new(),
+        message: "hello".to_string(),
+        operation: default_operation(),
+        params: serde_json::Value::Null,
+        provider_id: Some("provider-a".to_string()),
+        runner_id: Some("traex".to_string()),
+        session_key: Some("im:feishu:chat-a".to_string()),
+        runtime: DEFAULT_RUNTIME.to_string(),
+        adapter: TRAEX_ADAPTER.to_string(),
+        work_dir: Some(PathBuf::from("/tmp/work")),
+        instructions: Some("be concise".to_string()),
+        adapter_config: ExternalCliAdapterConfig {
+            executable: Some("traex".to_string()),
+            profile: Some("bifrost".to_string()),
+            model: Some("gpt-test".to_string()),
+            sandbox: Some("workspace-write".to_string()),
+            permission_mode: Some("auto".to_string()),
+            skip_git_repo_check: Some(true),
+            ignore_user_config: Some(true),
+            ignore_rules: Some(true),
+            add_dirs: vec!["/tmp/extra".to_string()],
+            config_overrides: vec!["shell_environment_policy.inherit=all".to_string()],
+            enable_features: vec!["web_search".to_string()],
+            ephemeral: Some(true),
+            ..Default::default()
+        },
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    };
+
+    let spec = build_command_spec(&request, Path::new("/tmp/last.md")).unwrap();
+
+    assert_eq!(spec.executable, "traex");
+    assert!(has_arg_pair(&spec.args, "--cd", "/tmp/work"));
+    assert!(spec.args.contains(&"exec".to_string()));
+    assert!(spec.args.contains(&"--json".to_string()));
+    assert!(has_arg_pair(
+        &spec.args,
+        "--output-last-message",
+        "/tmp/last.md"
+    ));
+    assert!(has_arg_pair(&spec.args, "--profile", "bifrost"));
+    assert!(has_arg_pair(&spec.args, "--model", "gpt-test"));
+    assert!(has_arg_pair(&spec.args, "--sandbox", "workspace-write"));
+    assert!(has_arg_pair(&spec.args, "--permission-mode", "auto"));
+    assert!(has_arg_pair(&spec.args, "--add-dir", "/tmp/extra"));
+    assert!(has_arg_pair(
+        &spec.args,
+        "--config",
+        "shell_environment_policy.inherit=all"
+    ));
+    assert!(has_arg_pair(&spec.args, "--enable", "web_search"));
+    assert!(spec.args.contains(&"--skip-git-repo-check".to_string()));
+    assert!(spec.args.contains(&"--ignore-user-config".to_string()));
+    assert!(spec.args.contains(&"--ignore-rules".to_string()));
+    assert!(spec.args.contains(&"--ephemeral".to_string()));
+    assert_eq!(spec.args.last().map(String::as_str), Some("-"));
+}
+
+#[test]
+fn traex_adapter_omits_default_permission_mode_for_exec() {
+    let request = ExternalCliRunRequest {
+        images: Vec::new(),
+        message: "hello".to_string(),
+        operation: default_operation(),
+        params: serde_json::Value::Null,
+        provider_id: Some("provider-a".to_string()),
+        runner_id: Some("traex".to_string()),
+        session_key: Some("im:feishu:chat-a".to_string()),
+        runtime: DEFAULT_RUNTIME.to_string(),
+        adapter: TRAEX_ADAPTER.to_string(),
+        work_dir: Some(PathBuf::from("/tmp/work")),
+        instructions: None,
+        adapter_config: ExternalCliAdapterConfig {
+            executable: Some("traex".to_string()),
+            permission_mode: Some("default".to_string()),
+            skip_git_repo_check: Some(true),
+            ..Default::default()
+        },
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    };
+
+    let spec = build_command_spec(&request, Path::new("/tmp/last.md")).unwrap();
+
+    assert!(!spec.args.contains(&"--permission-mode".to_string()));
+    assert!(!spec.args.contains(&"default".to_string()));
+    assert_eq!(spec.args.last().map(String::as_str), Some("-"));
+}
+
+#[test]
+fn traex_adapter_builds_resume_command_from_thread_id() {
+    let request = ExternalCliRunRequest {
+        images: Vec::new(),
+        message: "hello again".to_string(),
+        operation: default_operation(),
+        params: serde_json::json!({ "threadId": "thread-existing" }),
+        provider_id: Some("provider-a".to_string()),
+        runner_id: Some("traex".to_string()),
+        session_key: Some("schedule:one".to_string()),
+        runtime: DEFAULT_RUNTIME.to_string(),
+        adapter: TRAEX_ADAPTER.to_string(),
+        work_dir: Some(PathBuf::from("/tmp/work")),
+        instructions: None,
+        adapter_config: ExternalCliAdapterConfig {
+            executable: Some("traex".to_string()),
+            profile: Some("not-supported-by-resume".to_string()),
+            model: Some("gpt-test".to_string()),
+            sandbox: Some("workspace-write".to_string()),
+            permission_mode: Some("bypass_permissions".to_string()),
+            danger_full_access: Some(true),
+            add_dirs: vec!["/tmp/extra".to_string()],
+            ephemeral: Some(true),
+            ..Default::default()
+        },
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    };
+
+    let spec = build_command_spec(&request, Path::new("/tmp/last.md")).unwrap();
+
+    assert_eq!(spec.executable, "traex");
+    assert!(has_arg_pair(&spec.args, "--cd", "/tmp/work"));
+    assert!(spec.args.contains(&"exec".to_string()));
+    assert!(spec.args.contains(&"resume".to_string()));
+    assert!(spec.args.contains(&"--json".to_string()));
+    assert!(has_arg_pair(&spec.args, "--model", "gpt-test"));
+    assert!(has_arg_pair(
+        &spec.args,
+        "--permission-mode",
+        "bypass_permissions"
+    ));
+    assert!(spec
+        .args
+        .contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
+    assert!(spec.args.contains(&"--ephemeral".to_string()));
+    assert!(spec.args.contains(&"thread-existing".to_string()));
+    assert!(!spec.args.contains(&"--profile".to_string()));
+    assert!(!spec.args.contains(&"--sandbox".to_string()));
+    assert!(!spec.args.contains(&"--add-dir".to_string()));
     assert_eq!(spec.args.last().map(String::as_str), Some("-"));
 }
 
@@ -587,6 +762,88 @@ async fn external_cli_runtime_runs_mock_command_and_writes_artifacts() {
     assert_eq!(result.events.len(), 2);
     assert!(Path::new(&result.artifacts.command_snapshot).exists());
     assert!(Path::new(&result.artifacts.normalized_events).exists());
+}
+
+#[tokio::test]
+async fn external_cli_runtime_streams_stdout_before_process_exit() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let runtime = ExternalCliRuntime::new(temp_dir.path());
+    let request = ExternalCliRunRequest {
+        images: Vec::new(),
+        message: "hello stream".to_string(),
+        operation: default_operation(),
+        params: serde_json::Value::Null,
+        provider_id: Some("provider-a".to_string()),
+        runner_id: None,
+        session_key: Some("chat-gateway-stream-test".to_string()),
+        runtime: DEFAULT_RUNTIME.to_string(),
+        adapter: "mock".to_string(),
+        work_dir: None,
+        instructions: None,
+        adapter_config: ExternalCliAdapterConfig {
+            executable: Some("sh".to_string()),
+            args: vec![
+                "-c".to_string(),
+                "cat >/dev/null; printf '%s\n' '{\"type\":\"assistant_delta\",\"delta\":\"streaming now\"}'; sleep 1; printf '%s\n' '{\"type\":\"assistant_final\",\"content\":\"stream final\"}'".to_string(),
+            ],
+            timeout_secs: Some(10),
+            ..Default::default()
+        },
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    };
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let run = tokio::spawn(async move {
+        runtime
+            .run_with_progress(request, Some(progress_tx))
+            .await
+            .unwrap()
+    });
+
+    let first = tokio::time::timeout(Duration::from_millis(800), progress_rx.recv())
+        .await
+        .expect("progress event should arrive before process exit")
+        .expect("progress channel open");
+
+    assert_eq!(
+        first.event_type,
+        ExternalCliProgressEventType::AssistantDelta
+    );
+    assert_eq!(first.content, "streaming now");
+    assert!(
+        !run.is_finished(),
+        "mock command sleeps after first event, so runtime must still be active"
+    );
+    let result = run.await.unwrap();
+    assert_eq!(result.response, "stream final");
+    assert_eq!(result.events.len(), 2);
+}
+
+#[test]
+fn external_progress_maps_to_agent_turn_progress_events() {
+    let event = ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::AssistantDelta,
+        content: "thinking out loud".to_string(),
+        title: None,
+        raw: serde_json::json!({"type":"assistant_delta","delta":"thinking out loud"}),
+    };
+
+    let mapped = external_progress_to_agent_turn_event(
+        "session-a",
+        TRAEX_ADAPTER,
+        Some("traex"),
+        Some(Path::new("/tmp/work")),
+        &event,
+    )
+    .expect("mapped event");
+
+    match mapped {
+        bifrost_agent::AgentTurnProgressEvent::AssistantDelta { content } => {
+            assert_eq!(content, "thinking out loud");
+        }
+        other => panic!("unexpected mapped event: {other:?}"),
+    }
 }
 
 #[tokio::test]

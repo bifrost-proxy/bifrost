@@ -10,11 +10,12 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::process::Command;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 
 const DEFAULT_RUNTIME: &str = "external_cli";
 const DEFAULT_ADAPTER: &str = "codex";
+pub const TRAEX_ADAPTER: &str = "traex";
 const DEFAULT_TIMEOUT_SECS: u64 = 900;
 const CONFIG_FILENAME: &str = "im_gateway_external_cli_agent.json";
 const CONFIG_VERSION: u32 = 1;
@@ -126,7 +127,17 @@ async fn run_worker_stdio_async() -> Result<(), String> {
     })?;
     let request = *request;
     let runtime = ExternalCliRuntime::new(PathBuf::from(&request.runs_root));
-    let run = tokio::spawn(async move { runtime.run_in_current_process(request.request).await });
+    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+    let progress_task = tokio::spawn(async move {
+        while let Some(event) = progress_rx.recv().await {
+            let _ = send_external_cli_worker_event(&ExternalCliWorkerEvent::Progress { event });
+        }
+    });
+    let run = tokio::spawn(async move {
+        runtime
+            .run_in_current_process_with_progress(request.request, Some(progress_tx))
+            .await
+    });
     tokio::pin!(stop_rx);
     tokio::pin!(run);
     tokio::select! {
@@ -137,7 +148,10 @@ async fn run_worker_stdio_async() -> Result<(), String> {
         }
         result = &mut run => {
             match result {
-                Ok(Ok(result)) => send_external_cli_worker_event(&ExternalCliWorkerEvent::Finished { result: Box::new(result) })?,
+                Ok(Ok(result)) => {
+                    let _ = progress_task.await;
+                    send_external_cli_worker_event(&ExternalCliWorkerEvent::Finished { result: Box::new(result) })?
+                },
                 Ok(Err(error)) => send_external_cli_worker_event(&ExternalCliWorkerEvent::Failed { error })?,
                 Err(error) if error.is_cancelled() => send_external_cli_worker_event(&ExternalCliWorkerEvent::Stopped)?,
                 Err(error) => send_external_cli_worker_event(&ExternalCliWorkerEvent::Failed { error: format!("external runner worker task failed: {error}") })?,
@@ -227,6 +241,8 @@ pub struct ExternalCliAdapterConfig {
     pub sandbox: Option<String>,
     #[serde(default, alias = "approvalPolicy", alias = "approval-policy")]
     pub approval_policy: Option<String>,
+    #[serde(default, alias = "permissionMode", alias = "permission-mode")]
+    pub permission_mode: Option<String>,
     #[serde(default, alias = "reasoningEffort", alias = "reasoning-effort")]
     pub reasoning_effort: Option<String>,
     #[serde(default, alias = "reasoningSummary", alias = "reasoning-summary")]
@@ -627,6 +643,7 @@ struct CommandOutput {
     exit_code: Option<i32>,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
+    events: Vec<ExternalCliProgressEvent>,
 }
 
 #[derive(Clone, Debug)]
@@ -660,6 +677,9 @@ enum ExternalCliWorkerEvent {
     },
     Finished {
         result: Box<ExternalCliRunResult>,
+    },
+    Progress {
+        event: ExternalCliProgressEvent,
     },
     Failed {
         error: String,
@@ -763,7 +783,10 @@ impl ExternalCliWorkerRun {
         }
     }
 
-    async fn wait_final(&mut self) -> Result<ExternalCliRunResult, String> {
+    async fn wait_final(
+        &mut self,
+        progress_tx: Option<mpsc::UnboundedSender<ExternalCliProgressEvent>>,
+    ) -> Result<ExternalCliRunResult, String> {
         loop {
             let Some(line) =
                 self.events.next_line().await.map_err(|error| {
@@ -783,6 +806,11 @@ impl ExternalCliWorkerRun {
                 format!("parse external runner worker event failed: {error}; line={line}")
             })? {
                 ExternalCliWorkerEvent::Started { .. } => {}
+                ExternalCliWorkerEvent::Progress { event } => {
+                    if let Some(progress_tx) = progress_tx.as_ref() {
+                        let _ = progress_tx.send(event);
+                    }
+                }
                 ExternalCliWorkerEvent::Finished { result } => return Ok(*result),
                 ExternalCliWorkerEvent::Failed { error } => return Err(error),
                 ExternalCliWorkerEvent::Stopped => {
@@ -807,12 +835,24 @@ impl ExternalCliRuntime {
         &self,
         request: ExternalCliRunRequest,
     ) -> Result<ExternalCliRunResult, String> {
+        self.run_with_progress(request, None).await
+    }
+
+    pub async fn run_with_progress(
+        &self,
+        request: ExternalCliRunRequest,
+        progress_tx: Option<mpsc::UnboundedSender<ExternalCliProgressEvent>>,
+    ) -> Result<ExternalCliRunResult, String> {
         if std::env::var_os("BIFROST_EXTERNAL_CLI_WORKER").is_some() {
-            return self.run_in_current_process(request).await;
+            return self
+                .run_in_current_process_with_progress(request, progress_tx)
+                .await;
         }
         #[cfg(test)]
         if std::env::var_os("BIFROST_FORCE_EXTERNAL_CLI_WORKER").is_none() {
-            return self.run_in_current_process(request).await;
+            return self
+                .run_in_current_process_with_progress(request, progress_tx)
+                .await;
         }
         let worker_client = ExternalCliWorkerClient::current_exe()?;
         let mut worker = worker_client
@@ -835,7 +875,7 @@ impl ExternalCliRuntime {
                 stop_ack = maybe_stop;
                 Ok(ExternalCliRunResult::stopped(request.session_key.clone(), request.adapter.clone()))
             }
-            result = worker.wait_final() => result,
+            result = worker.wait_final(progress_tx) => result,
         };
         if let Some(session_key) = session_key.as_deref() {
             ACTIVE_WORKER_SESSIONS.remove(session_key);
@@ -846,9 +886,10 @@ impl ExternalCliRuntime {
         result
     }
 
-    async fn run_in_current_process(
+    async fn run_in_current_process_with_progress(
         &self,
         request: ExternalCliRunRequest,
+        progress_tx: Option<mpsc::UnboundedSender<ExternalCliProgressEvent>>,
     ) -> Result<ExternalCliRunResult, String> {
         validate_run_request(&request)?;
         validate_work_dir(&request)?;
@@ -936,8 +977,14 @@ impl ExternalCliRuntime {
             }
         } else {
             let session_key_for_stop = request.session_key.clone();
-            let command_output =
-                run_command(&run_id, session_key_for_stop.as_deref(), spec, prompt).await?;
+            let command_output = run_command(
+                &run_id,
+                session_key_for_stop.as_deref(),
+                spec,
+                prompt,
+                progress_tx,
+            )
+            .await?;
             remove_active_sessions_for_run(&run_id);
             let was_stopped = tokio::fs::try_exists(&stop_marker_path)
                 .await
@@ -951,7 +998,11 @@ impl ExternalCliRuntime {
                     raw: serde_json::json!({ "type": "run_stopped" }),
                 }]
             } else {
-                parse_progress_events(&stdout_text)
+                if command_output.events.is_empty() {
+                    parse_progress_events(&stdout_text)
+                } else {
+                    command_output.events.clone()
+                }
             };
             let response = if was_stopped {
                 "External CLI run was stopped by request.".to_string()
@@ -1404,7 +1455,7 @@ fn append_external_cli_metadata(
     events: &[ExternalCliProgressEvent],
     metadata: &mut BTreeMap<String, String>,
 ) {
-    if adapter != DEFAULT_ADAPTER {
+    if !is_codex_like_adapter(adapter) {
         return;
     }
     if metadata.contains_key("threadId") {
@@ -1444,6 +1495,7 @@ async fn run_command(
     session_key: Option<&str>,
     spec: CommandSpec,
     prompt: String,
+    progress_tx: Option<mpsc::UnboundedSender<ExternalCliProgressEvent>>,
 ) -> Result<CommandOutput, String> {
     let mut command = Command::new(&spec.executable);
     command
@@ -1478,14 +1530,26 @@ async fn run_command(
             .map_err(|error| format!("write prompt to external cli failed: {error}"))?;
     }
 
-    match timeout(
-        Duration::from_secs(spec.timeout_secs),
-        child.wait_with_output(),
-    )
-    .await
-    {
-        Ok(Ok(output)) => {
-            let status = if output.status.success() {
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "external cli stdout unavailable".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "external cli stderr unavailable".to_string())?;
+    let stdout_task = tokio::spawn(read_stdout_events(stdout, progress_tx));
+    let stderr_task = tokio::spawn(read_stderr_lines(stderr));
+
+    match timeout(Duration::from_secs(spec.timeout_secs), child.wait()).await {
+        Ok(Ok(exit_status)) => {
+            let (stdout, events) = stdout_task
+                .await
+                .map_err(|error| format!("join external cli stdout task failed: {error}"))??;
+            let stderr = stderr_task
+                .await
+                .map_err(|error| format!("join external cli stderr task failed: {error}"))??;
+            let status = if exit_status.success() {
                 ExternalCliRunStatus::Succeeded
             } else {
                 ExternalCliRunStatus::Failed
@@ -1494,9 +1558,10 @@ async fn run_command(
             remove_active_sessions_for_run(run_id);
             Ok(CommandOutput {
                 status,
-                exit_code: output.status.code(),
-                stdout: output.stdout,
-                stderr: output.stderr,
+                exit_code: exit_status.code(),
+                stdout,
+                stderr,
+                events,
             })
         }
         Ok(Err(error)) => {
@@ -1511,17 +1576,69 @@ async fn run_command(
                     tracing::warn!(pid, error = %error, "failed to terminate timed-out process group");
                 }
             }
+            let _ = child.kill().await;
+            let (stdout, events) = stdout_task
+                .await
+                .map_err(|error| format!("join external cli stdout task failed: {error}"))??;
+            let mut stderr = stderr_task
+                .await
+                .map_err(|error| format!("join external cli stderr task failed: {error}"))??;
+            stderr.extend_from_slice(
+                format!(
+                    "external cli timed out after {} seconds\n",
+                    spec.timeout_secs
+                )
+                .as_bytes(),
+            );
             ACTIVE_RUNS.remove(run_id);
             remove_active_sessions_for_run(run_id);
             Ok(CommandOutput {
                 status: ExternalCliRunStatus::TimedOut,
                 exit_code: None,
-                stdout: Vec::new(),
-                stderr: format!("external cli timed out after {} seconds", spec.timeout_secs)
-                    .into_bytes(),
+                stdout,
+                stderr,
+                events,
             })
         }
     }
+}
+
+async fn read_stdout_events(
+    stdout: tokio::process::ChildStdout,
+    progress_tx: Option<mpsc::UnboundedSender<ExternalCliProgressEvent>>,
+) -> Result<(Vec<u8>, Vec<ExternalCliProgressEvent>), String> {
+    let mut lines = tokio::io::BufReader::new(stdout).lines();
+    let mut bytes = Vec::new();
+    let mut events = Vec::new();
+    while let Some(line) = lines
+        .next_line()
+        .await
+        .map_err(|error| format!("read external cli stdout failed: {error}"))?
+    {
+        bytes.extend_from_slice(line.as_bytes());
+        bytes.push(b'\n');
+        if let Some(event) = parse_progress_event_line(&line) {
+            if let Some(progress_tx) = progress_tx.as_ref() {
+                let _ = progress_tx.send(event.clone());
+            }
+            events.push(event);
+        }
+    }
+    Ok((bytes, events))
+}
+
+async fn read_stderr_lines(stderr: tokio::process::ChildStderr) -> Result<Vec<u8>, String> {
+    let mut lines = tokio::io::BufReader::new(stderr).lines();
+    let mut bytes = Vec::new();
+    while let Some(line) = lines
+        .next_line()
+        .await
+        .map_err(|error| format!("read external cli stderr failed: {error}"))?
+    {
+        bytes.extend_from_slice(line.as_bytes());
+        bytes.push(b'\n');
+    }
+    Ok(bytes)
 }
 
 fn remove_active_sessions_for_run(run_id: &str) {
@@ -1710,18 +1827,20 @@ fn terminate_process_impl(pid: u32) -> Result<(), String> {
 pub fn parse_progress_events(stdout: &str) -> Vec<ExternalCliProgressEvent> {
     let mut events = Vec::new();
     for line in stdout.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(raw) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-            continue;
-        };
-        if let Some(event) = parse_progress_event(raw) {
+        if let Some(event) = parse_progress_event_line(line) {
             events.push(event);
         }
     }
     events
+}
+
+fn parse_progress_event_line(line: &str) -> Option<ExternalCliProgressEvent> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let raw = serde_json::from_str::<serde_json::Value>(trimmed).ok()?;
+    parse_progress_event(raw)
 }
 
 fn parse_progress_event(raw: serde_json::Value) -> Option<ExternalCliProgressEvent> {
@@ -1760,6 +1879,105 @@ fn parse_progress_event(raw: serde_json::Value) -> Option<ExternalCliProgressEve
         title,
         raw,
     })
+}
+
+pub fn external_progress_to_agent_turn_event(
+    session_key: &str,
+    adapter: &str,
+    runner_id: Option<&str>,
+    work_dir: Option<&Path>,
+    event: &ExternalCliProgressEvent,
+) -> Option<bifrost_agent::AgentTurnProgressEvent> {
+    match event.event_type {
+        ExternalCliProgressEventType::RunStarted | ExternalCliProgressEventType::Status => {
+            let mut status = bifrost_agent::ActiveTurnStatus::new(session_key);
+            status.state = if event.content.trim().is_empty() {
+                "running".to_string()
+            } else {
+                event.content.trim().to_string()
+            };
+            status.runner_type = Some(adapter.to_string());
+            status.runner_id = runner_id.map(str::to_string);
+            status.work_dir = work_dir.map(|path| path.display().to_string());
+            Some(bifrost_agent::AgentTurnProgressEvent::Status(Box::new(
+                status,
+            )))
+        }
+        ExternalCliProgressEventType::AssistantDelta => {
+            Some(bifrost_agent::AgentTurnProgressEvent::AssistantDelta {
+                content: event.content.clone(),
+            })
+        }
+        ExternalCliProgressEventType::AssistantFinal => {
+            Some(bifrost_agent::AgentTurnProgressEvent::AssistantFinal {
+                content: event.content.clone(),
+            })
+        }
+        ExternalCliProgressEventType::ToolStarted => {
+            Some(bifrost_agent::AgentTurnProgressEvent::ToolStarted {
+                tool_name: event_title_or_default(event, "runner"),
+                arguments: event.content.clone(),
+            })
+        }
+        ExternalCliProgressEventType::ToolFinished => {
+            Some(bifrost_agent::AgentTurnProgressEvent::ToolFinished {
+                log: bifrost_agent::ToolCallLog {
+                    tool_name: event_title_or_default(event, "runner"),
+                    arguments: event
+                        .raw
+                        .get("arguments")
+                        .or_else(|| event.raw.get("args"))
+                        .map(serde_json::Value::to_string)
+                        .unwrap_or_default(),
+                    result: event.content.clone(),
+                    success: event
+                        .raw
+                        .get("success")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(true),
+                },
+                duration_ms: event
+                    .raw
+                    .get("durationMs")
+                    .or_else(|| event.raw.get("duration_ms"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+            })
+        }
+        ExternalCliProgressEventType::RunFinished => {
+            Some(bifrost_agent::AgentTurnProgressEvent::TurnFinished {
+                content: event.content.clone(),
+            })
+        }
+        ExternalCliProgressEventType::RunFailed => {
+            Some(bifrost_agent::AgentTurnProgressEvent::TurnFailed {
+                error: event.content.clone(),
+            })
+        }
+    }
+}
+
+fn event_title_or_default(event: &ExternalCliProgressEvent, default: &str) -> String {
+    event
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            event
+                .raw
+                .get("tool_name")
+                .or_else(|| event.raw.get("name"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or(default)
+        .to_string()
+}
+
+fn is_codex_like_adapter(adapter: &str) -> bool {
+    matches!(adapter, DEFAULT_ADAPTER | TRAEX_ADAPTER)
 }
 
 fn parse_codex_cli_event(

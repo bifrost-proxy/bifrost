@@ -471,6 +471,9 @@ export function formatThreadRunnerMark(thread: AgentThreadSummary) {
   if (explicitRunner.includes("codex")) {
     return "Cx";
   }
+  if (explicitRunner.includes("traex") || explicitRunner.includes("trae")) {
+    return "Tr";
+  }
   if (explicitRunner.includes("chatgpt") || explicitRunner.includes("webgpt")) {
     return "GPT";
   }
@@ -1488,7 +1491,7 @@ export function ProcessStepsBlock({
   running: boolean;
 }) {
   const { token } = theme.useToken();
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(() => !isRunning);
   const [expandedTools, setExpandedTools] = useState<Set<number>>(new Set());
   const [nowSeconds, setNowSeconds] = useState(() => Date.now() / 1000);
   const visibleSteps = isRunning

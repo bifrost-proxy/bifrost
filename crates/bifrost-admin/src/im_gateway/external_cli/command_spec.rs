@@ -49,6 +49,35 @@ pub(super) fn build_command_spec(
             }
             args.push("-".to_string());
         }
+    } else if request.adapter == TRAEX_ADAPTER {
+        if args.is_empty() {
+            if codex_thread_id_from_params(request).is_some() {
+                args = vec![
+                    "exec".to_string(),
+                    "resume".to_string(),
+                    "--json".to_string(),
+                ];
+            } else {
+                args = vec!["exec".to_string(), "--json".to_string()];
+            }
+        }
+        if let Some(work_dir) = request.work_dir.as_ref() {
+            ensure_traex_work_dir_arg(&mut args, work_dir);
+        }
+        ensure_codex_last_message_arg(&mut args, last_message_path);
+        if !config.args.is_empty() {
+            let is_resume = codex_thread_id_from_params(request).is_some();
+            append_traex_config_args(&mut args, config, is_resume);
+        }
+        if config.args.is_empty() {
+            let resume_thread_id = codex_thread_id_from_params(request);
+            let is_resume = resume_thread_id.is_some();
+            append_traex_config_args(&mut args, config, is_resume);
+            if let Some(thread_id) = resume_thread_id {
+                args.push(thread_id);
+            }
+            args.push("-".to_string());
+        }
     } else if config.executable.is_none() && args.is_empty() {
         return Err(format!(
             "adapter '{}' requires explicit adapterConfig.args",
@@ -63,6 +92,95 @@ pub(super) fn build_command_spec(
         work_dir: request.work_dir.clone(),
         timeout_secs: config.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS),
     })
+}
+
+fn append_traex_config_args(
+    args: &mut Vec<String>,
+    config: &ExternalCliAdapterConfig,
+    is_resume: bool,
+) {
+    remove_overridden_traex_args(args, config);
+    if config.danger_full_access.unwrap_or(false) {
+        remove_codex_arg_with_value(args, "--sandbox");
+    }
+    let mut generated = Vec::new();
+    append_repeatable_codex_pairs(&mut generated, "--config", &config.config_overrides);
+    append_repeatable_codex_pairs(&mut generated, "--enable", &config.enable_features);
+    append_repeatable_codex_pairs(&mut generated, "--disable", &config.disable_features);
+    if let Some(profile) = config.profile.as_deref() {
+        if !is_resume {
+            generated.push("--profile".to_string());
+            generated.push(profile.to_string());
+        }
+    }
+    if let Some(model) = config.model.as_deref() {
+        generated.push("--model".to_string());
+        generated.push(model.to_string());
+    }
+    if let Some(permission_mode) = config.permission_mode.as_deref().map(str::trim) {
+        if !permission_mode.is_empty() && permission_mode != "default" {
+            generated.push("--permission-mode".to_string());
+            generated.push(permission_mode.to_string());
+        }
+    }
+    if let Some(sandbox) = config.sandbox.as_deref() {
+        if !is_resume && !config.danger_full_access.unwrap_or(false) {
+            generated.push("--sandbox".to_string());
+            generated.push(sandbox.to_string());
+        }
+    }
+    if config.danger_full_access.unwrap_or(false) {
+        generated.push("--dangerously-bypass-approvals-and-sandbox".to_string());
+    }
+    if config.skip_git_repo_check.unwrap_or(false) {
+        generated.push("--skip-git-repo-check".to_string());
+    }
+    if config.ignore_user_config.unwrap_or(false) {
+        generated.push("--ignore-user-config".to_string());
+    }
+    if config.ignore_rules.unwrap_or(false) {
+        generated.push("--ignore-rules".to_string());
+    }
+    if !is_resume {
+        append_repeatable_codex_pairs(&mut generated, "--add-dir", &config.add_dirs);
+        if let Some(output_schema) = config.output_schema.as_deref().map(str::trim) {
+            if !output_schema.is_empty() {
+                generated.push("--output-schema".to_string());
+                generated.push(output_schema.to_string());
+            }
+        }
+        if let Some(color) = config.color.as_deref().map(str::trim) {
+            if !color.is_empty() {
+                generated.push("--color".to_string());
+                generated.push(color.to_string());
+            }
+        }
+    }
+    if config.ephemeral.unwrap_or(false) {
+        generated.push("--ephemeral".to_string());
+    }
+    insert_codex_args_before_stdin(args, generated);
+}
+
+fn remove_overridden_traex_args(args: &mut Vec<String>, config: &ExternalCliAdapterConfig) {
+    if config.profile.is_some() {
+        remove_codex_arg_with_value(args, "--profile");
+    }
+    if config.model.is_some() {
+        remove_codex_arg_with_value(args, "--model");
+    }
+    if config.permission_mode.is_some() {
+        remove_codex_arg_with_value(args, "--permission-mode");
+    }
+    if config.sandbox.is_some() {
+        remove_codex_arg_with_value(args, "--sandbox");
+    }
+    if config.output_schema.is_some() {
+        remove_codex_arg_with_value(args, "--output-schema");
+    }
+    if config.color.is_some() {
+        remove_codex_arg_with_value(args, "--color");
+    }
 }
 
 fn append_codex_config_args(
@@ -273,8 +391,16 @@ fn ensure_codex_work_dir_arg(args: &mut Vec<String>, work_dir: &Path) {
     args.insert(insert_at, "--cd".to_string());
 }
 
+fn ensure_traex_work_dir_arg(args: &mut Vec<String>, work_dir: &Path) {
+    if args.iter().any(|arg| arg == "--cd" || arg == "-C") {
+        return;
+    }
+    args.insert(0, work_dir.display().to_string());
+    args.insert(0, "--cd".to_string());
+}
+
 fn ensure_codex_last_message_arg(args: &mut Vec<String>, last_message_path: &Path) {
-    if !matches!(args.first().map(String::as_str), Some("exec" | "e")) {
+    if !args.iter().any(|arg| matches!(arg.as_str(), "exec" | "e")) {
         return;
     }
     if args

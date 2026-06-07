@@ -854,20 +854,6 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
     let status_context =
         status_context_from_external_runner(&effective.runner_id, &settings.adapter);
 
-    if matches!(
-        delivery_mode,
-        crate::im_gateway::external_cli::ExternalCliDeliveryMode::ProgressCard
-    ) {
-        send_agent_reply(
-            ctx.client,
-            ctx.provider,
-            ctx.event,
-            "已开始处理 Runner 任务。",
-            ctx.message_log_store,
-        )
-        .await;
-    }
-
     let provider_agent_config =
         effective_agent_config_for_provider(&ctx.agent_config_store.load(), ctx.provider);
     let Some(mut session) = ctx
@@ -923,22 +909,9 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
         .as_ref()
         .map(crate::im_gateway::session_state::metadata_from_state)
         .unwrap_or_default();
+    let target_open_id = agent_reply_target_id(ctx.provider, ctx.event).unwrap_or_default();
 
     loop {
-        if matches!(
-            delivery_mode,
-            crate::im_gateway::external_cli::ExternalCliDeliveryMode::ProgressCard
-        ) {
-            send_agent_reply(
-                ctx.client,
-                ctx.provider,
-                ctx.event,
-                "已开始处理 Runner 任务。",
-                ctx.message_log_store,
-            )
-            .await;
-        }
-
         let mut request = crate::im_gateway::external_cli::run_request_from_settings(
             current_message.clone(),
             Some(ctx.provider.id.clone()),
@@ -982,14 +955,123 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
             &effective.runner_id,
             &request,
         );
+        let mut progress_enabled = false;
+        let mut progress_tx_for_finish = None;
+        let mut progress_task = None;
+        if matches!(
+            delivery_mode,
+            crate::im_gateway::external_cli::ExternalCliDeliveryMode::ProgressCard
+        ) && !target_open_id.is_empty()
+        {
+            let progress_target = crate::im_gateway::types::ImTarget {
+                id: "__agent_progress__".to_string(),
+                provider_id: ctx.provider.id.clone(),
+                display_name: "Agent Progress".to_string(),
+                enabled: true,
+                receive_id_type: "open_id".to_string(),
+                receive_id: target_open_id.to_string(),
+                default_msg_type: "interactive".to_string(),
+                created_at: 0,
+                updated_at: 0,
+            };
+            if let Some(feishu) = ctx.client.feishu() {
+                let progress_result = if ctx
+                    .progress_registry
+                    .rollover_existing(&input.session_key, &current_message)
+                    .await
+                {
+                    Ok(())
+                } else {
+                    ctx.progress_registry
+                        .start_feishu(
+                            &input.session_key,
+                            feishu,
+                            ctx.provider.clone(),
+                            progress_target,
+                            &current_message,
+                        )
+                        .await
+                        .map(|_| ())
+                };
+                match progress_result {
+                    Ok(_) => {
+                        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<
+                            bifrost_agent::AgentTurnProgressEvent,
+                        >();
+                        progress_tx_for_finish = Some(progress_tx.clone());
+                        let progress_registry = Arc::clone(ctx.progress_registry);
+                        let session_key_for_progress = input.session_key.clone();
+                        progress_task = Some(tokio::spawn(async move {
+                            super::agent_chat::run_progress_event_coalescer(
+                                progress_registry,
+                                session_key_for_progress,
+                                &mut progress_rx,
+                            )
+                            .await;
+                        }));
+                        progress_enabled = true;
+                    }
+                    Err(error) => {
+                        warn!(
+                            session_key = %input.session_key,
+                            error = %error,
+                            "failed to start external runner progress card; falling back to final reply"
+                        );
+                    }
+                }
+            }
+        }
+        if matches!(
+            delivery_mode,
+            crate::im_gateway::external_cli::ExternalCliDeliveryMode::ProgressCard
+        ) && !progress_enabled
+        {
+            send_agent_reply(
+                ctx.client,
+                ctx.provider,
+                ctx.event,
+                "已开始处理 Runner 任务。",
+                ctx.message_log_store,
+            )
+            .await;
+        }
         let runtime = crate::im_gateway::external_cli::ExternalCliRuntime::new(
             crate::im_gateway::external_cli::default_runs_root(),
         );
-        let run_future = runtime.run(request.clone());
+        let (external_progress_tx, mut external_progress_rx) =
+            tokio::sync::mpsc::unbounded_channel();
+        let request_for_progress = request.clone();
+        let run_future = runtime.run_with_progress(request.clone(), Some(external_progress_tx));
         tokio::pin!(run_future);
         let result = loop {
             tokio::select! {
                 result = &mut run_future => break result,
+                Some(progress_event) = external_progress_rx.recv() => {
+                    if let Some(recorder) = recorder.as_mut() {
+                        super::chat_gateway::record_external_cli_progress_event_to_timeline(
+                            recorder,
+                            &input.session_key,
+                            "im",
+                            &effective.runner_id,
+                            &settings.adapter,
+                            &progress_event,
+                        );
+                    }
+                    if progress_enabled {
+                        if let (Some(progress_tx), Some(agent_event)) = (
+                            progress_tx_for_finish.as_ref(),
+                            crate::im_gateway::external_cli::external_progress_to_agent_turn_event(
+                                &input.session_key,
+                                &settings.adapter,
+                                Some(&effective.runner_id),
+                                request_for_progress.work_dir.as_deref(),
+                                &progress_event,
+                            ),
+                        ) {
+                            let _ = progress_tx.send(agent_event);
+                        }
+                    }
+                }
                 Some(next_event) = ctx.rx.recv() => {
                     maybe_stop_external_cli_for_event(&next_event, &input.session_key).await;
                     handle_concurrent_event_during_chat(
@@ -1009,6 +1091,32 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                 }
             }
         };
+        while let Ok(progress_event) = external_progress_rx.try_recv() {
+            if let Some(recorder) = recorder.as_mut() {
+                super::chat_gateway::record_external_cli_progress_event_to_timeline(
+                    recorder,
+                    &input.session_key,
+                    "im",
+                    &effective.runner_id,
+                    &settings.adapter,
+                    &progress_event,
+                );
+            }
+            if progress_enabled {
+                if let (Some(progress_tx), Some(agent_event)) = (
+                    progress_tx_for_finish.as_ref(),
+                    crate::im_gateway::external_cli::external_progress_to_agent_turn_event(
+                        &input.session_key,
+                        &settings.adapter,
+                        Some(&effective.runner_id),
+                        request_for_progress.work_dir.as_deref(),
+                        &progress_event,
+                    ),
+                ) {
+                    let _ = progress_tx.send(agent_event);
+                }
+            }
+        }
         match result {
             Ok(result) => {
                 remember_external_cli_result_metadata(&mut runner_metadata, &result.metadata);
@@ -1029,7 +1137,22 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                         .map(|recorder| recorder.file_path().display().to_string()),
                     session.work_dir.clone(),
                 );
-                if !matches!(
+                if progress_enabled {
+                    if let Some(progress_tx) = progress_tx_for_finish.take() {
+                        let _ =
+                            progress_tx.send(bifrost_agent::AgentTurnProgressEvent::TurnFinished {
+                                content: result.response.clone(),
+                            });
+                        drop(progress_tx);
+                    }
+                    if let Some(task) = progress_task.take() {
+                        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
+                    }
+                    let _ = ctx
+                        .progress_registry
+                        .finish(&input.session_key, Some(result.response.clone()), false)
+                        .await;
+                } else if !matches!(
                     delivery_mode,
                     crate::im_gateway::external_cli::ExternalCliDeliveryMode::NoIm
                 ) {
@@ -1079,14 +1202,31 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                     &error,
                     &reply,
                 );
-                send_agent_reply(
-                    ctx.client,
-                    ctx.provider,
-                    ctx.event,
-                    &reply,
-                    ctx.message_log_store,
-                )
-                .await;
+                if progress_enabled {
+                    if let Some(progress_tx) = progress_tx_for_finish.take() {
+                        let _ =
+                            progress_tx.send(bifrost_agent::AgentTurnProgressEvent::TurnFailed {
+                                error: reply.clone(),
+                            });
+                        drop(progress_tx);
+                    }
+                    if let Some(task) = progress_task.take() {
+                        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
+                    }
+                    let _ = ctx
+                        .progress_registry
+                        .finish(&input.session_key, Some(reply.clone()), true)
+                        .await;
+                } else {
+                    send_agent_reply(
+                        ctx.client,
+                        ctx.provider,
+                        ctx.event,
+                        &reply,
+                        ctx.message_log_store,
+                    )
+                    .await;
+                }
                 // Send diagnostic screenshot via IM if available.
                 if let Some(path) = screenshot_path {
                     if let Some(target) = build_agent_reply_target(
@@ -1309,7 +1449,7 @@ fn record_external_cli_input(
     session: &mut bifrost_agent::session::AgentSession,
     recorder: &mut Option<ConversationRecorder>,
     session_key: &str,
-    runner_id: &str,
+    _runner_id: &str,
     request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
 ) {
     append_session_message(session, bifrost_agent::ChatMessage::user(&request.message));
@@ -1317,21 +1457,6 @@ fn record_external_cli_input(
     if let Some(rec) = recorder.as_mut() {
         if let Err(error) = rec.record_user_message(session_key, &request.message) {
             warn!(error = %error, "failed to record external cli user message");
-        }
-        let arguments = serde_json::json!({
-            "runtime": request.runtime,
-            "adapter": request.adapter,
-            "runner_id": runner_id,
-            "operation": request.operation,
-            "provider_id": request.provider_id,
-            "work_dir": request.work_dir.as_ref().map(|path| path.display().to_string()),
-            "message_length": request.message.chars().count(),
-        })
-        .to_string();
-        if let Err(error) =
-            rec.record_tool_call_with_id(session_key, &request.adapter, &arguments, None)
-        {
-            warn!(error = %error, "failed to record external cli tool call");
         }
     }
 }
@@ -1374,31 +1499,6 @@ fn record_external_cli_result(
         {
             warn!(error = %error, "failed to record external cli run state");
         }
-        let tool_result = serde_json::json!({
-            "run_id": result.run_id,
-            "runtime": result.runtime,
-            "adapter": result.adapter,
-            "status": result.status,
-            "exit_code": result.exit_code,
-            "duration_ms": result.duration_ms,
-            "artifacts": result.artifacts,
-            "event_types": result.events.iter().map(|event| format!("{:?}", event.event_type)).collect::<Vec<_>>(),
-            "response_preview": truncate_str(&result.response, 500),
-        })
-        .to_string();
-        let success = matches!(
-            result.status,
-            crate::im_gateway::external_cli::ExternalCliRunStatus::Succeeded
-        );
-        if let Err(error) = rec.record_tool_result_with_call_id(
-            session_key,
-            &result.adapter,
-            &tool_result,
-            success,
-            Some(&result.run_id),
-        ) {
-            warn!(error = %error, "failed to record external cli tool result");
-        }
         if let Err(error) = rec.record_assistant_message(session_key, &result.response) {
             warn!(error = %error, "failed to record external cli assistant message");
         }
@@ -1410,7 +1510,7 @@ fn record_external_cli_failure(
     recorder: &mut Option<ConversationRecorder>,
     session_key: &str,
     request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
-    error: &str,
+    _error: &str,
     reply: &str,
 ) {
     append_session_message(session, bifrost_agent::ChatMessage::assistant(reply));
@@ -1419,24 +1519,6 @@ fn record_external_cli_failure(
             rec.record_run_state(session_key, "failed", Some("im"), Some(&request.adapter))
         {
             warn!(error = %record_error, "failed to record external cli failure state");
-        }
-        let tool_result = serde_json::json!({
-            "runtime": request.runtime,
-            "adapter": request.adapter,
-            "operation": request.operation,
-            "provider_id": request.provider_id,
-            "work_dir": request.work_dir.as_ref().map(|path| path.display().to_string()),
-            "error": error,
-        })
-        .to_string();
-        if let Err(record_error) = rec.record_tool_result_with_call_id(
-            session_key,
-            &request.adapter,
-            &tool_result,
-            false,
-            None,
-        ) {
-            warn!(error = %record_error, "failed to record external cli failure result");
         }
         if let Err(record_error) = rec.record_assistant_message(session_key, reply) {
             warn!(error = %record_error, "failed to record external cli failure message");

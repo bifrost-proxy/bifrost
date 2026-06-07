@@ -1263,18 +1263,15 @@ pub(super) async fn im_event_loop_provider_external_cli_runner_bypasses_disabled
             .get("message")
             .and_then(|value| value.as_str())
             == Some("run external cli")));
-    assert!(events.iter().any(|event| event.event_type == "tool_call"
-        && event
-            .content
-            .get("tool_name")
-            .and_then(|value| value.as_str())
-            == Some("mock")));
-    assert!(events.iter().any(|event| event.event_type == "tool_result"
-        && event
-            .content
-            .get("success")
-            .and_then(|value| value.as_bool())
-            == Some(true)));
+    assert!(
+        !events.iter().any(|event| event.event_type == "tool_call"
+            && event
+                .content
+                .get("tool_name")
+                .and_then(|value| value.as_str())
+                == Some("mock")),
+        "external runner wrapper calls should not be shown as user-visible tools"
+    );
     assert!(events
         .iter()
         .any(|event| event.event_type == "assistant_message"
@@ -1400,17 +1397,19 @@ pub(super) async fn im_event_loop_external_cli_session_records_runner_failure() 
     );
     let events = bifrost_agent::persistence::load_conversation_events(&files[0])
         .expect("load failed external runner session events");
-    assert!(events.iter().any(|event| event.event_type == "tool_result"
-        && event
-            .content
-            .get("success")
-            .and_then(|value| value.as_bool())
-            == Some(false)
-        && event
-            .content
-            .get("result")
-            .and_then(|value| value.as_str())
-            .is_some_and(|value| value.contains("spawn external cli failed"))));
+    assert!(events.iter().any(|event| {
+        event.event_type == bifrost_agent::persistence::event_types::RUN_STATE_CHANGED
+            && event.content.get("state").and_then(|value| value.as_str()) == Some("failed")
+    }));
+    assert!(
+        !events.iter().any(|event| event.event_type == "tool_result"
+            && event
+                .content
+                .get("result")
+                .and_then(|value| value.as_str())
+                .is_some_and(|value| value.contains("spawn external cli failed"))),
+        "external runner failures should be recorded as run state and assistant message, not wrapper tool results"
+    );
     assert!(events
         .iter()
         .any(|event| event.event_type == "assistant_message"

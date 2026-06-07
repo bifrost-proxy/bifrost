@@ -500,6 +500,58 @@
 3. 不会等待 sleep 完成后输出迟到的 `assistant_final`。
 4. 该行为覆盖 IM 忙碌态 `/stop`、空闲态 `/stop` 和 `/agent/chat` `/stop` 共用入口。
 
+### TC-IEC-25: Trae Runner Web Chat 实时过程与最终过程默认可见
+
+操作步骤：
+1. 使用临时数据目录启动 Bifrost，启动命令必须包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1` 和 `--no-system-proxy`：
+   ```bash
+   BIFROST_DATA_DIR=/tmp/bifrost-traex-runner-e2e \
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+   cargo run --bin bifrost -- start -p 18890 --unsafe-ssl --no-system-proxy --skip-cert-check
+   ```
+2. 配置 `traex` runner，adapter 为 `traex`，executable 为本机真实 Trae CLI，sandbox 为 `read-only`，`skipGitRepoCheck=true`，delivery mode 为 `progress_card` 或 `final_reply`：
+   ```bash
+   curl -sS -X PATCH http://127.0.0.1:18890/_bifrost/api/im-gateway/chat/config \
+     -H 'content-type: application/json' \
+     -d '{"version":1,"defaultRunnerId":"traex","runners":{"traex":{"enabled":true,"adapter":"traex","adapterConfig":{"executable":"/Users/eden/.local/bin/traex","sandbox":"read-only","skipGitRepoCheck":true,"timeoutSecs":180},"injectBifrostTools":false,"skillPaths":[],"deliveryMode":"progress_card"}},"channels":{}}'
+   ```
+3. 打开 `http://127.0.0.1:18890/_bifrost/ai?aiSection=agent-chat&agentSection=chat&view=active`。
+4. 选择或确认当前 Runner 为 `traex`，发送 `Reply exactly BIFROST_TRAEX_WEB_UI_STREAM_OK`。
+5. 运行中观察消息气泡的过程区域；完成后刷新或打开历史 session，检查最终消息。
+
+预期结果：
+1. run 使用 `adapter:"traex"`、`runner_id:"traex"`，run detail artifact 中 `runtime_snapshot.args` 包含 `--cd <work_dir> exec --json --output-last-message <last_message.md> -`。
+2. 运行中可以看到 Trae JSONL 归一化后的 process event；完成后最终消息包含 `BIFROST_TRAEX_WEB_UI_STREAM_OK`。
+3. 完成后的过程块默认展开，页面不需要用户再次点开才能看到过程信息。
+4. timeline 中不出现外层 `traex` wrapper 的单次工具调用噪音；只展示 Trae 自己输出的状态、工具或最终事件。
+
+### TC-IEC-26: Trae Runner 飞书 IM Progress Card 与 Web History 展示一致
+
+操作步骤：
+1. 延续 TC-IEC-25 的临时服务和 `traex` runner 配置。
+2. 将 `feishu-main` Provider 的 Agent Runner 配置为 `traex`，工作目录为当前测试 worktree。
+3. 从飞书 IM 通道发送一条普通消息，例如 `你好` 或 `你是谁`。
+4. 观察飞书 IM 中的 progress card 更新和最终结果。
+5. 打开对应 session history URL，检查 Web Chat 历史渲染。
+
+预期结果：
+1. 飞书消息命中 `traex` runner，session JSONL 中记录 `adapter:"traex"`、`runner_id:"traex"`。
+2. progress card 在运行中展示 Trae 状态或工具过程，完成后收敛为最终结果，不停留在 running。
+3. Web history 中同一 turn 显示 `Runner: traex`，过程块默认展开，最终答案可见。
+4. 飞书通道与 Web Chat 历史使用同一 timeline 语义，不出现 Web 有过程但 IM 无过程，或 IM 有 wrapper 工具噪音的分裂表现。
+
+### TC-IEC-27: Trae Permission Mode 默认值不会传递为非法 exec 参数
+
+操作步骤：
+1. 配置 `traex` runner 时将 WebUI Permission Mode 保持为 `Headless default`，或 API 中省略 `permissionMode` / 传空值。
+2. 触发一次 Trae Chat Gateway run。
+3. 读取本次 run 的 `runtime_snapshot.json` 和最终状态。
+
+预期结果：
+1. `runtime_snapshot.args` 不包含 `--permission-mode default`。
+2. Trae 不再报错 `permission_mode = "default" is not supported in exec mode`。
+3. 如果用户显式选择 `plan`、`bypass_permissions`、`auto` 或 `custom`，后端才生成对应 `--permission-mode <value>`。
+
 ## 最近执行记录
 
 - 2026-05-13：执行 TC-IEC-01/02/03/04/08/09/10/11/12/13，临时服务端口 `18880`，`BIFROST_DATA_DIR=/tmp/bifrost-im-external-cli-test`，均通过；TC-IEC-12 使用 `sleep 23` 慢进程验证 active run 可停止，run 收敛为 `status:"stopped"`，`response:"External CLI run was stopped by request."`，且未残留 `sleep 23` 测试进程。
@@ -518,6 +570,7 @@
 - 2026-05-24：执行 TC-IEC-21/22，临时服务端口 `18894`，`BIFROST_DATA_DIR=/tmp/bifrost-im-session-human.BK5xH7`，启动命令使用 `cargo run --bin bifrost -- start -p 18894 --unsafe-ssl --no-system-proxy`；mock Codex 第一次写入 `thread-human-1`，重启服务后第二次 Chat Gateway run `1779614415676-e874b7c3-6450-407e-9b27-98400a5de4b5` 的 `runtime_snapshot.args` 为 `exec --cd ... resume --json --output-last-message ... thread-human-1 -`，证明默认续接；随后 `/reset` 返回 `{"success":true,"cleared":true}`，第三次 run `1779614617852-f6cfc201-8263-436c-8f1a-7f2a537de88a` 的 `runtime_snapshot.args` 不包含 `resume` 或 `thread-human-1`，并写入 `externalThreadId:"thread-human-2"`，证明主动重建后不会复活旧线程。
 - 2026-05-24：新增 TC-IEC-23，自动 E2E 通过仅 debug/dev 构建启用的 `BIFROST_CHATGPT_WEB_E2E_MOCK=1` 覆盖 ChatGPT Web Chat Gateway 重启恢复 `conversationId` 与 `/reset` 后不复活旧 conversation；本轮以 `cargo run -p bifrost-e2e -- --test im_gateway_chatgpt_web_restores_conversation_after_service_restart --test-timeout 180` 作为执行证据。
 - 2026-05-25：执行 TC-IEC-24，命令 `source ~/.zshrc && cargo test -p bifrost-admin request_agent_stop_stops_external_runner_by_session_key --lib` 通过；mock runner 在 `sleep 2` 阶段收到 session key stop marker，最终状态为 `Stopped`。
+- 2026-06-07：执行 TC-IEC-25/26/27，临时服务端口 `18890`，`BIFROST_DATA_DIR=/tmp/bifrost-traex-runner-e2e`，启动命令使用 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 cargo run --bin bifrost -- start -p 18890 --unsafe-ssl --no-system-proxy --skip-cert-check`；WebUI Trae run 修复 `permissionMode=default` 后可完成，Feishu session `feishu-main:ou_64f88363f262c64aba91f0b9e1aaed81` 的 history 显示 `Traex`、`Runner: traex`、`Ready`，过程块默认展开并显示 Trae 状态事件，最终答案可见；确认 Trae JSONL 简单问答只输出状态/最终消息时，Bifrost 不伪造工具事件，也不再显示外层 wrapper 工具调用。自动 E2E `RUN_REAL_TRAEX_E2E=1 SKIP_BUILD=true BIFROST_TRAEX_BIN=/Users/eden/.local/bin/traex e2e-tests/tests/test_im_gateway_traex_runner_streaming.sh` 通过，run `1780796012473-3e6b1d8a-51e5-45e5-a7c2-fef5d35b44f0` 返回 `BIFROST_TRAEX_E2E_STREAM_OK`，并断言 snapshot 不包含 `--permission-mode default`。
 
 ## 清理步骤
 
@@ -542,5 +595,6 @@
      /tmp/real-codex-stream.ndjson \
      /tmp/bifrost-real-codex-direct-last.md \
      /tmp/bifrost-im-external-cli-light.png \
-     /tmp/bifrost-im-external-cli-dark.png
+     /tmp/bifrost-im-external-cli-dark.png \
+     /tmp/bifrost-traex-runner-e2e
    ```

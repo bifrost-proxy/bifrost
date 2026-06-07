@@ -441,7 +441,9 @@ function CompletedTurnGroup({
     colorTextTertiary: string;
   };
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(() =>
+    group.assistants.some((item) => (item.message.processSteps?.length || 0) > 0),
+  );
   const finalAssistantItem = findFinalAssistantItem(group.assistants);
   const durationLabel = formatTurnDuration(
     durationSeconds(group.user.message.timestamp, finalAssistantItem?.message.timestamp),

@@ -253,7 +253,46 @@ pub(super) async fn handle_chat_gateway(
                             )))))
                             .await;
                         let request_snapshot = current_request.clone();
-                        let run_result = runtime.run(current_request).await;
+                        let streams_progress =
+                            current_request.adapter != crate::im_gateway::chatgpt_web::ADAPTER_ID;
+                        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<
+                            crate::im_gateway::external_cli::ExternalCliProgressEvent,
+                        >();
+                        let http_progress_tx = tx.clone();
+                        let progress_request = request_snapshot.clone();
+                        let progress_runner_id = runner_id_for_state.clone();
+                        let progress_task = tokio::spawn(async move {
+                            let mut recorder = external_cli_timeline_recorder(
+                                &progress_request,
+                                &progress_runner_id,
+                            );
+                            while let Some(event) = progress_rx.recv().await {
+                                record_external_cli_web_progress_event(
+                                    recorder.as_mut(),
+                                    &progress_request,
+                                    &progress_runner_id,
+                                    &event,
+                                );
+                                if matches!(
+                                    event.event_type,
+                                    crate::im_gateway::external_cli::ExternalCliProgressEventType::RunStarted
+                                        | crate::im_gateway::external_cli::ExternalCliProgressEventType::RunFinished
+                                ) {
+                                    continue;
+                                }
+                                let line = serde_json::to_string(&event)
+                                    .unwrap_or_else(|_| "{}".to_string());
+                                let _ = http_progress_tx
+                                    .send(Ok(hyper::body::Frame::data(bytes::Bytes::from(
+                                        format!("{line}\n"),
+                                    ))))
+                                    .await;
+                            }
+                        });
+                        let run_result = runtime
+                            .run_with_progress(current_request, Some(progress_tx))
+                            .await;
+                        let _ = progress_task.await;
                         match run_result {
                             Ok(result) => {
                                 remember_external_cli_result_state(
@@ -261,21 +300,23 @@ pub(super) async fn handle_chat_gateway(
                                     &runner_id_for_state,
                                     &result,
                                 );
-                                for event in &result.events {
-                                    if matches!(
-                                        event.event_type,
-                                        crate::im_gateway::external_cli::ExternalCliProgressEventType::RunStarted
-                                            | crate::im_gateway::external_cli::ExternalCliProgressEventType::RunFinished
-                                    ) {
-                                        continue;
+                                if !streams_progress {
+                                    for event in &result.events {
+                                        if matches!(
+                                            event.event_type,
+                                            crate::im_gateway::external_cli::ExternalCliProgressEventType::RunStarted
+                                                | crate::im_gateway::external_cli::ExternalCliProgressEventType::RunFinished
+                                        ) {
+                                            continue;
+                                        }
+                                        let line = serde_json::to_string(event)
+                                            .unwrap_or_else(|_| "{}".to_string());
+                                        let _ = tx
+                                            .send(Ok(hyper::body::Frame::data(bytes::Bytes::from(
+                                                format!("{line}\n"),
+                                            ))))
+                                            .await;
                                     }
-                                    let line = serde_json::to_string(event)
-                                        .unwrap_or_else(|_| "{}".to_string());
-                                    let _ = tx
-                                        .send(Ok(hyper::body::Frame::data(bytes::Bytes::from(
-                                            format!("{line}\n"),
-                                        ))))
-                                        .await;
                                 }
                                 let finished = serde_json::json!({"eventType":"run_finished","runId":result.run_id,"status":result.status,"response":result.response});
                                 let _ = tx
@@ -625,17 +666,41 @@ async fn runner_call_stream_response(
             started_at,
         );
         remember_external_cli_started_state(&request_snapshot, &effective.runner_id);
-        match runtime.run(request).await {
+        let streams_progress = request.adapter != crate::im_gateway::chatgpt_web::ADAPTER_ID;
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<
+            crate::im_gateway::external_cli::ExternalCliProgressEvent,
+        >();
+        let call_progress_tx = tx.clone();
+        let progress_request = request_snapshot.clone();
+        let progress_runner_id = effective.runner_id.clone();
+        let progress_task = tokio::spawn(async move {
+            let mut recorder =
+                external_cli_timeline_recorder(&progress_request, &progress_runner_id);
+            while let Some(event) = progress_rx.recv().await {
+                record_external_cli_web_progress_event(
+                    recorder.as_mut(),
+                    &progress_request,
+                    &progress_runner_id,
+                    &event,
+                );
+                let line = serde_json::to_value(&event).unwrap_or_else(|_| serde_json::json!({}));
+                let _ = send_ndjson_event(&call_progress_tx, &line).await;
+            }
+        });
+        match runtime.run_with_progress(request, Some(progress_tx)).await {
             Ok(result) => {
+                let _ = progress_task.await;
                 remember_external_cli_result_state(
                     &request_snapshot,
                     &effective.runner_id,
                     &result,
                 );
-                for event in &result.events {
-                    let line =
-                        serde_json::to_value(event).unwrap_or_else(|_| serde_json::json!({}));
-                    let _ = send_ndjson_event(&tx, &line).await;
+                if !streams_progress {
+                    for event in &result.events {
+                        let line =
+                            serde_json::to_value(event).unwrap_or_else(|_| serde_json::json!({}));
+                        let _ = send_ndjson_event(&tx, &line).await;
+                    }
                 }
                 remember_runner_call_for_caller(
                     &service_agent_sessions,
@@ -658,6 +723,7 @@ async fn runner_call_stream_response(
                 let _ = send_ndjson_event(&tx, &finished).await;
             }
             Err(error) => {
+                let _ = progress_task.await;
                 let failed = serde_json::json!({
                     "eventType": "runner_call_failed",
                     "callId": call_id.clone(),
@@ -1895,21 +1961,6 @@ fn record_external_cli_web_turn_started(
     if let Err(error) = recorder.record_user_message(session_key, &request.message) {
         tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner user message");
     }
-    let arguments = serde_json::json!({
-        "runtime": request.runtime,
-        "adapter": request.adapter,
-        "runner_id": runner_id,
-        "operation": request.operation,
-        "provider_id": request.provider_id,
-        "work_dir": request.work_dir.as_ref().map(|path| path.display().to_string()),
-        "message_length": request.message.chars().count(),
-    })
-    .to_string();
-    if let Err(error) =
-        recorder.record_tool_call_with_id(session_key, &request.adapter, &arguments, None)
-    {
-        tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner tool call");
-    }
 }
 
 fn record_external_cli_web_turn_result(
@@ -1936,36 +1987,224 @@ fn record_external_cli_web_turn_result(
     {
         tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner final state");
     }
-    let tool_result = serde_json::json!({
-        "run_id": result.run_id,
-        "runtime": result.runtime,
-        "adapter": result.adapter,
-        "status": result.status,
-        "exit_code": result.exit_code,
-        "duration_ms": result.duration_ms,
-        "artifacts": result.artifacts,
-        "event_types": result.events.iter().map(|event| format!("{:?}", event.event_type)).collect::<Vec<_>>(),
-        "response_preview": truncate_str(&result.response, 500),
-    })
-    .to_string();
-    let success = matches!(
-        result.status,
-        crate::im_gateway::external_cli::ExternalCliRunStatus::Succeeded
-    );
-    if let Err(error) = recorder.record_tool_result_with_call_id(
-        session_key,
-        &result.adapter,
-        &tool_result,
-        success,
-        Some(&result.run_id),
-    ) {
-        tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner tool result");
-    }
     if !result.response.trim().is_empty() {
         if let Err(error) = recorder.record_assistant_message(session_key, &result.response) {
             tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner assistant message");
         }
     }
+}
+
+fn record_external_cli_web_progress_event(
+    recorder: Option<&mut bifrost_agent::persistence::ConversationRecorder>,
+    request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
+    runner_id: &str,
+    event: &crate::im_gateway::external_cli::ExternalCliProgressEvent,
+) {
+    let Some(session_key) = request.session_key.as_deref() else {
+        return;
+    };
+    let Some(recorder) = recorder else {
+        return;
+    };
+    record_external_cli_progress_event_to_timeline(
+        recorder,
+        session_key,
+        "web",
+        runner_id,
+        &request.adapter,
+        event,
+    );
+}
+
+pub(super) fn record_external_cli_progress_event_to_timeline(
+    recorder: &mut bifrost_agent::persistence::ConversationRecorder,
+    session_key: &str,
+    source_channel: &str,
+    runner_id: &str,
+    adapter: &str,
+    event: &crate::im_gateway::external_cli::ExternalCliProgressEvent,
+) {
+    use crate::im_gateway::external_cli::ExternalCliProgressEventType as EventType;
+
+    match event.event_type {
+        EventType::RunStarted => {
+            if let Err(error) = recorder.record_run_state(
+                session_key,
+                "running",
+                Some(source_channel),
+                Some(runner_id),
+            ) {
+                tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner progress state");
+            }
+        }
+        EventType::Status => {
+            let content = event.content.trim();
+            if !content.is_empty() && content != "turn started" && content != "turn completed" {
+                let message = if let Some(title) = event
+                    .title
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    format!("{title}: {content}")
+                } else {
+                    content.to_string()
+                };
+                if let Err(error) = recorder.record_assistant_delta(session_key, &message) {
+                    tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner status delta");
+                }
+            }
+        }
+        EventType::AssistantDelta => {
+            if !event.content.trim().is_empty() {
+                if let Err(error) = recorder.record_assistant_delta(session_key, &event.content) {
+                    tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner assistant delta");
+                }
+            }
+        }
+        EventType::ToolStarted => {
+            let call_id = external_progress_call_id(adapter, event);
+            let tool_name = external_progress_tool_name(event, adapter);
+            let arguments = external_progress_tool_arguments(event);
+            if let Err(error) = recorder.record_tool_call_with_id(
+                session_key,
+                &tool_name,
+                &arguments,
+                Some(&call_id),
+            ) {
+                tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner tool started");
+            }
+        }
+        EventType::ToolFinished => {
+            let call_id = external_progress_call_id(adapter, event);
+            let tool_name = external_progress_tool_name(event, adapter);
+            let arguments = external_progress_tool_arguments(event);
+            if let Err(error) = recorder.record_tool_call_with_id(
+                session_key,
+                &tool_name,
+                &arguments,
+                Some(&call_id),
+            ) {
+                tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner completed tool call");
+            }
+            let success = event
+                .raw
+                .get("success")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
+            let result = if event.content.trim().is_empty() {
+                event.raw.to_string()
+            } else {
+                event.content.clone()
+            };
+            if let Err(error) = recorder.record_tool_result_with_call_id(
+                session_key,
+                &tool_name,
+                &result,
+                success,
+                Some(&call_id),
+            ) {
+                tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner tool finished");
+            }
+        }
+        EventType::RunFinished => {
+            if let Err(error) = recorder.record_run_state(
+                session_key,
+                "completed",
+                Some(source_channel),
+                Some(runner_id),
+            ) {
+                tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner completed progress state");
+            }
+        }
+        EventType::RunFailed => {
+            if let Err(error) = recorder.record_run_state(
+                session_key,
+                "failed",
+                Some(source_channel),
+                Some(runner_id),
+            ) {
+                tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner failed progress state");
+            }
+            if !event.content.trim().is_empty() {
+                let message = format!("Runner failed: {}", event.content.trim());
+                if let Err(error) = recorder.record_assistant_delta(session_key, &message) {
+                    tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner failure delta");
+                }
+            }
+        }
+        EventType::AssistantFinal => {}
+    }
+}
+
+fn external_progress_call_id(
+    adapter: &str,
+    event: &crate::im_gateway::external_cli::ExternalCliProgressEvent,
+) -> String {
+    event
+        .raw
+        .get("call_id")
+        .or_else(|| event.raw.get("id"))
+        .or_else(|| event.raw.get("item").and_then(|item| item.get("id")))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            format!(
+                "{}-{}-{}",
+                adapter,
+                external_progress_tool_name(event, "runner"),
+                stable_json_hash(&event.raw)
+            )
+        })
+}
+
+fn external_progress_tool_name(
+    event: &crate::im_gateway::external_cli::ExternalCliProgressEvent,
+    default: &str,
+) -> String {
+    event
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            event
+                .raw
+                .get("tool_name")
+                .or_else(|| event.raw.get("name"))
+                .or_else(|| event.raw.get("item").and_then(|item| item.get("name")))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or(default)
+        .to_string()
+}
+
+fn external_progress_tool_arguments(
+    event: &crate::im_gateway::external_cli::ExternalCliProgressEvent,
+) -> String {
+    event
+        .raw
+        .get("arguments")
+        .or_else(|| event.raw.get("args"))
+        .or_else(|| event.raw.get("item").and_then(|item| item.get("arguments")))
+        .or_else(|| event.raw.get("item").and_then(|item| item.get("args")))
+        .map(serde_json::Value::to_string)
+        .unwrap_or_else(|| {
+            if event.content.trim().is_empty() {
+                "{}".to_string()
+            } else {
+                serde_json::json!({ "content": event.content }).to_string()
+            }
+        })
+}
+
+fn stable_json_hash(value: &serde_json::Value) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.to_string().hash(&mut hasher);
+    hasher.finish()
 }
 
 fn append_external_runner_turn_messages(
@@ -2351,6 +2590,73 @@ mod tests {
             event.event_type == bifrost_agent::persistence::event_types::ASSISTANT_MESSAGE
                 && event.content.get("message").and_then(|v| v.as_str())
                     == Some("new GPT Web response")
+        }));
+    }
+
+    #[test]
+    fn external_runner_progress_events_are_recorded_as_visible_timeline_steps() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
+        let session_key = "external-progress-history";
+        let data_dir = bifrost_agent::config::agent_home_dir();
+        let mut recorder =
+            bifrost_agent::persistence::ConversationRecorder::new(&data_dir, session_key);
+        recorder
+            .record_session_start(
+                session_key,
+                serde_json::json!({"source": "admin-api", "adapter": "traex"}),
+            )
+            .expect("record start");
+
+        record_external_cli_progress_event_to_timeline(
+            &mut recorder,
+            session_key,
+            "web",
+            "traex",
+            "traex",
+            &crate::im_gateway::external_cli::ExternalCliProgressEvent {
+                event_type: crate::im_gateway::external_cli::ExternalCliProgressEventType::Status,
+                content: "model rerouted".to_string(),
+                title: Some("status".to_string()),
+                raw: serde_json::json!({"type":"item.completed"}),
+            },
+        );
+        record_external_cli_progress_event_to_timeline(
+            &mut recorder,
+            session_key,
+            "web",
+            "traex",
+            "traex",
+            &crate::im_gateway::external_cli::ExternalCliProgressEvent {
+                event_type:
+                    crate::im_gateway::external_cli::ExternalCliProgressEventType::ToolFinished,
+                content: "pwd ok".to_string(),
+                title: Some("exec_command".to_string()),
+                raw: serde_json::json!({
+                    "type": "tool_finished",
+                    "id": "tool-1",
+                    "arguments": {"cmd": "pwd"},
+                    "success": true
+                }),
+            },
+        );
+
+        let events = bifrost_agent::persistence::load_conversation_events(recorder.file_path())
+            .expect("load progress events");
+        assert!(events.iter().any(|event| {
+            event.event_type == bifrost_agent::persistence::event_types::ASSISTANT_DELTA
+                && event.content.get("message").and_then(|v| v.as_str())
+                    == Some("status: model rerouted")
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == bifrost_agent::persistence::event_types::TOOL_CALL
+                && event.content.get("tool_name").and_then(|v| v.as_str()) == Some("exec_command")
+                && event.content.get("call_id").and_then(|v| v.as_str()) == Some("tool-1")
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == bifrost_agent::persistence::event_types::TOOL_RESULT
+                && event.content.get("result").and_then(|v| v.as_str()) == Some("pwd ok")
+                && event.content.get("success").and_then(|v| v.as_bool()) == Some(true)
         }));
     }
 
