@@ -589,8 +589,8 @@
 3. 打开 WebUI history 页面查看该 session。
 
 预期结果：
-1. progress card 在运行中展开“执行过程”，按时间顺序展示公开模型 content 和工具调用；工具详情面板默认折叠，展开后能看到输入、耗时和输出预览。
-2. progress card 的全局状态位于卡片顶部，执行过程信息位于中间，完成后最终结论位于卡片底部；过程和状态面板默认折叠，但可以手动展开过程，再展开单条工具详情查看完整信息，卡片不再停留在 running。
+1. progress card 在运行中展开“执行过程”，按时间顺序展示公开模型 content 和工具调用；连续多个工具调用默认合并成“已运行 N 条命令”的一级折叠组。
+2. progress card 的全局状态位于卡片顶部，执行过程信息位于中间，完成后最终结论位于卡片底部；过程和状态面板默认折叠，但可以手动展开过程，再展开工具分组和单条工具详情查看完整信息，卡片不再停留在 running。
 3. progress card 的状态面板展示 `Runner: codex`、`Adapter: codex`、模型标签、外部会话、队列/引导状态和工作路径。
 4. 如果 runner 显式配置了 `adapterConfig.model`，模型标签展示该模型名；如果没有显式配置，只展示 `Codex 默认模型（未显式配置）`，不能猜测具体模型。
 5. progress card 不展示内置 Bifrost Agent 专属的空指标，例如 `Loop 0/0`、`Context ~0 / N/A`、`Token N/A`、`压缩 0 次`。
@@ -634,7 +634,7 @@
 
 预期结果：
 1. Trae 输出的公开 `agent_message` 不提前占用底部最终结论，而是作为执行过程中的模型 content/思考信息展示。
-2. 执行过程按时间顺序展示模型 content 和工具调用；工具调用行默认折叠，展开后可查看输入、耗时和输出。
+2. 执行过程按时间顺序展示模型 content 和工具调用；连续工具调用默认折叠为一组，展开组后再展开单条工具查看输入、耗时和输出。
 3. 底部最终结论只来自 turn 结束时的最终结果；运行中不应只因为早期 `agent_message` 就展示最终结论。
 4. 若 run 超时，卡片状态为失败，最终结论明确显示 `Runner failed: external CLI timed out...`，不能显示为已完成，也不能把早期 `agent_message` 当作成功结果。
 5. `result.json.status` 为 `timed_out` 时，session 状态和 IM progress card 都按失败路径处理。
@@ -650,7 +650,7 @@
 预期结果：
 1. `runtime_snapshot.json` 中不再出现 180 秒默认超时；未显式配置 timeout 时，Bifrost 不主动按固定秒数杀掉外部 runner。
 2. Trae 重复输出同一条 `command_execution item.started` 时，执行过程不重复插入相同的运行中工具行。
-3. 执行过程中持续展示模型公开 content 和工具调用；工具详情默认折叠，展开后展示输入与输出预览，完整输出仍保存在 run artifacts。
+3. 执行过程中持续展示模型公开 content 和工具调用；连续工具调用默认折叠为一组，组内单条工具详情默认折叠，展开后展示输入与输出预览，完整输出仍保存在 run artifacts。
 4. 大输出工具不会导致后续飞书卡片更新丢失，最终结论仍位于卡片底部。
 
 ### TC-IEC-33: Trae Web Chat 长任务实时过程展示
@@ -688,6 +688,7 @@
 2. 所有 `element_id` 均以字母开头，只包含字母、数字和下划线，且长度不超过 20。
 3. 飞书 progress card 后续 patch 不会因为元素 ID 格式错误被拒绝，长任务中间过程可以持续刷新。
 4. 执行过程不展示 `Loop 1`、`Pipeline`、`工具摘要`、`[模型]`、run id、`turn started` 或 `model rerouted` 等内部/噪音提示。
+5. 连续多个工具调用默认合并为“已运行 N 条命令”的一级折叠组；展开该组后，单条工具仍保持折叠，用户可继续展开查看输入/输出。
 
 ## 最近执行记录
 
@@ -716,6 +717,7 @@
 - 2026-06-07：执行 TC-IEC-33 的真实 Web Chat 长任务验证，当前分支服务使用 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 cargo run --bin bifrost -- start -p 9900 -H 0.0.0.0 --allow-lan --daemon --unsafe-ssl --skip-cert-check --no-system-proxy` 启动，最终 PID `59573`，系统代理保持禁用；Web Chat 通过 `runnerId=traex`、`adapter=traex`、workDir `/Users/eden/work/github/bifrost-traex-runner` 触发真实 Trae review，session `admin-chat-webview-trae2-1780826332`，history `/Users/eden/.bifrost/agent/sessions/2026/06/07/session-admin-chat-webview-trae2-1780826332-1780826332.jsonl`。流式响应自然结束为 `status:"succeeded"`，过程中出现多段 `assistant_final/agent_message` 与 `tool_started/tool_finished`，WebView 运行中可看到 `I'll review the current branch...`、`Let me read the key files...`、`Now let me check...` 等公开 content 穿插在 `exec_command: <命令>` 工具摘要之间。完成后刷新 history 页面，过程块默认折叠且不再显示 `我先执行一步检查。`，摘要按钮显示 `Ran 22 commands · 6m 57s`；点击摘要后可展开看到 content -> tool 摘要的交叉过程，且最终 review 结论位于过程块下方。点击首条 `exec_command` 工具行后显示 `Input:` 与 `Output:` 预览，长输出保留 `展开更多` 控件。
 - 2026-06-07：执行 TC-IEC-34 的 Feishu progress card 卡住问题回归分析，真实飞书消息对应 Trae run `1780827766302-6a2c209c-84f6-4e64-b487-dcaaa8837361` 已成功完成，canonical history 包含大量 `assistant_delta`、`assistant_message`、`tool_call` 和 `tool_result`，但飞书日志出现 `code=300301` 与 `ElementID agent_process_tool_11_detail: Code 1002: elementID format error. Only alphabets, numbers, and underscores are allowed. It must start with an alphabet and not exceed 20 characters.`；确认根因是 progress card 第 10 条以后动态过程元素 ID 超过飞书 20 字符限制。修复后命令 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin progress_card -- --nocapture` 通过 23 个测试，新增用例覆盖 `ap_t_35` / `ap_td_35` 两位数工具 ID，并递归断言所有 `element_id` 符合飞书格式限制。
 - 2026-06-07：根据真实飞书截图继续执行 TC-IEC-34 文案回归，去除执行过程中的 `Loop 1/2`、`Pipeline`、`工具摘要`、`[模型]`、纯 run id、`turn started` 与 `model rerouted` 等内部提示；过程区域改为从上到下展示公开模型内容和工具调用，工具详情仍保持可展开。命令 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin progress_card -- --nocapture` 与 `SKIP_FRONTEND_BUILD=1 cargo run -p bifrost-e2e -- --test im_gateway_agent_streaming_progress_card_renderer --jobs 1 --timeout 120` 均通过。
+- 2026-06-07：继续执行 TC-IEC-34 的工具密集场景回归，飞书 progress card 将连续 3 条工具调用默认合并为 `已运行 3 条命令` 一级折叠组，展开后每条工具仍是独立折叠项；同时把过程 Markdown 从双空行压缩为单换行，减少行高和竖向占用。新增 `consecutive_process_tools_are_grouped_by_default` 回归测试。
 
 ## 清理步骤
 

@@ -29,6 +29,7 @@ const PROCESS_LOG_ELEMENT_ID: &str = "agent_process_log";
 const PROCESS_DYNAMIC_LOG_ELEMENT_PREFIX: &str = "ap_log";
 const PROCESS_TOOL_ELEMENT_PREFIX: &str = "ap_t";
 const PROCESS_TOOL_DETAIL_ELEMENT_PREFIX: &str = "ap_td";
+const PROCESS_TOOL_GROUP_ELEMENT_PREFIX: &str = "ap_tg";
 const PROCESS_TOOL_INPUT_PREVIEW_CHARS: usize = 300;
 const PROCESS_TOOL_OUTPUT_PREVIEW_CHARS: usize = 700;
 
@@ -1311,11 +1312,14 @@ fn build_process_loop_elements(snapshot: &ImAgentProgressSnapshot) -> Vec<serde_
     let mut item_index = 0;
     let mut markdown_element_count = 0;
 
-    for (timeline_index, item) in snapshot.timeline.iter().enumerate() {
+    let mut timeline_index = 0;
+    while timeline_index < snapshot.timeline.len() {
+        let item = &snapshot.timeline[timeline_index];
         match item.kind {
             ProgressTimelineKind::Thinking | ProgressTimelineKind::Status => {
                 item_index += 1;
                 markdown_lines.push(format_process_timeline_line(item_index, item));
+                timeline_index += 1;
             }
             ProgressTimelineKind::Tool => {
                 flush_process_markdown(
@@ -1323,7 +1327,19 @@ fn build_process_loop_elements(snapshot: &ImAgentProgressSnapshot) -> Vec<serde_
                     &mut markdown_lines,
                     &mut markdown_element_count,
                 );
-                elements.push(build_process_tool_detail_element(timeline_index, item));
+                let batch_start = timeline_index;
+                let mut batch = Vec::new();
+                while timeline_index < snapshot.timeline.len()
+                    && snapshot.timeline[timeline_index].kind == ProgressTimelineKind::Tool
+                {
+                    batch.push((timeline_index, &snapshot.timeline[timeline_index]));
+                    timeline_index += 1;
+                }
+                if batch.len() == 1 {
+                    elements.push(build_process_tool_detail_element(batch_start, item));
+                } else {
+                    elements.push(build_process_tool_group_element(batch_start, &batch));
+                }
             }
         }
     }
@@ -1354,7 +1370,7 @@ fn flush_process_markdown(
     };
     elements.push(build_process_markdown_element(
         element_id,
-        markdown_lines.join("\n\n"),
+        markdown_lines.join("\n"),
     ));
     markdown_lines.clear();
     *markdown_element_count += 1;
@@ -1393,6 +1409,29 @@ fn build_process_tool_detail_element(
     })
 }
 
+fn build_process_tool_group_element(
+    index: usize,
+    items: &[(usize, &ProgressTimelineItem)],
+) -> serde_json::Value {
+    let children: Vec<serde_json::Value> = items
+        .iter()
+        .map(|(item_index, item)| build_process_tool_detail_element(*item_index, item))
+        .collect();
+    serde_json::json!({
+        "tag": "collapsible_panel",
+        "element_id": process_dynamic_element_id(PROCESS_TOOL_GROUP_ELEMENT_PREFIX, index),
+        "expanded": false,
+        "background_color": "grey",
+        "header": {
+            "title": {
+                "tag": "plain_text",
+                "content": format_process_tool_group_title(items)
+            }
+        },
+        "elements": children
+    })
+}
+
 fn process_dynamic_element_id(prefix: &str, index: usize) -> String {
     format!("{prefix}_{index}")
 }
@@ -1417,12 +1456,44 @@ fn format_process_tool_panel_title(item: &ProgressTimelineItem) -> String {
         Some(false) => "运行失败",
         None => "正在运行",
     };
-    format!(
-        "{}：{} · {}",
-        verb,
-        truncate_one_line(&item.title, 28),
-        truncate_one_line(&item.summary, 48)
-    )
+    let duration = process_tool_duration_label(item);
+    match duration {
+        Some(duration) => format!(
+            "{}：{} · {}",
+            verb,
+            truncate_one_line(&item.title, 28),
+            duration
+        ),
+        None => format!("{}：{}", verb, truncate_one_line(&item.title, 28)),
+    }
+}
+
+fn format_process_tool_group_title(items: &[(usize, &ProgressTimelineItem)]) -> String {
+    let failed_count = items
+        .iter()
+        .filter(|(_, item)| item.success == Some(false))
+        .count();
+    let running_count = items
+        .iter()
+        .filter(|(_, item)| item.success.is_none())
+        .count();
+    if failed_count > 0 {
+        format!("已运行 {} 条命令，{} 条失败", items.len(), failed_count)
+    } else if running_count > 0 {
+        format!("正在运行 {} 条命令", items.len())
+    } else {
+        format!("已运行 {} 条命令", items.len())
+    }
+}
+
+fn process_tool_duration_label(item: &ProgressTimelineItem) -> Option<String> {
+    item.summary
+        .split(" · ")
+        .find(|part| {
+            part.strip_suffix("ms")
+                .is_some_and(|prefix| prefix.chars().all(|ch| ch.is_ascii_digit()))
+        })
+        .map(ToString::to_string)
 }
 
 fn process_tool_count(snapshot: &ImAgentProgressSnapshot) -> usize {

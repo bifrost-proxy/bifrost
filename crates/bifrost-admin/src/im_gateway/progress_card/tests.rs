@@ -154,6 +154,52 @@ fn noisy_runner_statuses_are_hidden_from_process_timeline() {
 }
 
 #[test]
+fn consecutive_process_tools_are_grouped_by_default() {
+    let mut snapshot = ImAgentProgressSnapshot::new("s1", "review task");
+    snapshot.apply_event(AgentTurnProgressEvent::AssistantDelta {
+        content: "我先读取关键文件。".to_string(),
+    });
+    for index in 0..3 {
+        snapshot.apply_event(AgentTurnProgressEvent::ToolFinished {
+            log: ToolCallLog {
+                tool_name: "exec_command".to_string(),
+                arguments: format!(r#"{{"cmd":"git diff -- file{index}.rs"}}"#),
+                result: "ok".to_string(),
+                success: true,
+            },
+            duration_ms: 20 + index,
+        });
+    }
+
+    let card = build_feishu_progress_card(&snapshot, true);
+    let process_element = card["body"]["elements"]
+        .as_array()
+        .and_then(|elements| {
+            elements
+                .iter()
+                .find(|element| element["element_id"] == PROCESS_PANEL_ELEMENT_ID)
+        })
+        .expect("process element");
+    let process_elements = process_element["elements"].as_array().unwrap();
+    assert_eq!(process_elements.len(), 2);
+    assert_eq!(process_elements[1]["element_id"], "ap_tg_1");
+    assert_eq!(process_elements[1]["expanded"], false);
+    assert_eq!(
+        process_elements[1]["header"]["title"]["content"],
+        "已运行 3 条命令"
+    );
+    let grouped_tools = process_elements[1]["elements"].as_array().unwrap();
+    assert_eq!(grouped_tools.len(), 3);
+    assert_eq!(grouped_tools[0]["element_id"], "ap_t_1");
+    assert_eq!(grouped_tools[0]["expanded"], false);
+    assert_eq!(grouped_tools[1]["element_id"], "ap_t_2");
+    assert_eq!(grouped_tools[2]["element_id"], "ap_t_3");
+    let serialized = serde_json::to_string(&card).unwrap();
+    assert!(serialized.contains("已完成：exec_command · 20ms"));
+    assert!(!serialized.contains("ok ok ok"));
+}
+
+#[test]
 fn feishu_progress_card_expands_process_while_running_and_collapses_after_finish() {
     let mut snapshot = ImAgentProgressSnapshot::new("s1", "stream task");
     snapshot.apply_event(AgentTurnProgressEvent::AssistantDelta {
