@@ -529,6 +529,17 @@ jobs:
         with:
           key: cli-build-aarch64-apple-darwin
           save-if: always()
+      - name: Cache sherpa-onnx archive
+        uses: actions/cache@v4
+        with:
+          path: .ci-cache/sherpa-onnx
+          key: sherpa-onnx-${{ hashFiles('Cargo.lock') }}-aarch64-apple-darwin
+          restore-keys: |
+            sherpa-onnx-${{ hashFiles('Cargo.lock') }}-
+            sherpa-onnx-
+      - name: Prepare sherpa-onnx archive
+        shell: bash
+        run: bash scripts/ci/prepare-sherpa-onnx-archive.sh aarch64-apple-darwin
       - name: Build CLI
         run: cargo build -p bifrost-cli --release --target aarch64-apple-darwin
       - name: Upload release binary
@@ -761,6 +772,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: e2e-aarch64-apple-darwin
+      - name: Cache sherpa-onnx archive
+        uses: actions/cache@v4
+        with:
+          path: .ci-cache/sherpa-onnx
+          key: sherpa-onnx-${{ hashFiles('Cargo.lock') }}-aarch64-apple-darwin
+          restore-keys: |
+            sherpa-onnx-${{ hashFiles('Cargo.lock') }}-
+            sherpa-onnx-
+      - name: Prepare sherpa-onnx archive
+        shell: bash
+        run: bash scripts/ci/prepare-sherpa-onnx-archive.sh aarch64-apple-darwin
       - name: E2E runner tests
         shell: bash
         run: bash scripts/ci/run-e2e-runner.sh

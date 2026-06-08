@@ -222,6 +222,21 @@ jobs:
         with:
           key: cli-${{ matrix.target }}
 
+      - name: Cache sherpa-onnx archive
+        if: matrix.target == 'aarch64-apple-darwin'
+        uses: actions/cache@v4
+        with:
+          path: .ci-cache/sherpa-onnx
+          key: sherpa-onnx-${{ hashFiles('Cargo.lock') }}-${{ matrix.target }}
+          restore-keys: |
+            sherpa-onnx-${{ hashFiles('Cargo.lock') }}-
+            sherpa-onnx-
+
+      - name: Prepare sherpa-onnx archive
+        if: matrix.target == 'aarch64-apple-darwin'
+        shell: bash
+        run: bash scripts/ci/prepare-sherpa-onnx-archive.sh ${{ matrix.target }}
+
       - name: Build (native)
         if: ${{ !matrix.cross }}
         env:
