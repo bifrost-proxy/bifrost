@@ -398,7 +398,7 @@ pub(super) async fn handle_agent(
                 &service.queue_manager,
                 &s.session_key,
             );
-            let has_active_turn = false;
+            let has_active_turn = s.running;
             let run_state = active_session_list_run_state(has_active_turn, &s.run_state);
             unified.push(serde_json::json!({
                 "session_key": s.session_key,
