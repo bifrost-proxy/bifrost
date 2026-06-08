@@ -49,9 +49,8 @@ const DEFAULT_RUNNER: ExternalCliAgentSettings = {
 
 const ADAPTER_OPTIONS = [
   { label: "Codex CLI", value: "codex" },
+  { label: "Trae CLI", value: "traex" },
   { label: "ChatGPT Web", value: "chatgpt_web" },
-  { label: "Custom", value: "custom" },
-  { label: "Mock", value: "mock" },
 ];
 
 const DELIVERY_OPTIONS = [
@@ -97,6 +96,10 @@ function runnerToFormValues(runner: ExternalCliAgentSettings) {
     pollIntervalMs: runner.adapterConfig?.chatgpt?.pollIntervalMs || 1000,
     chatgptTimeoutSecs:
       runner.adapterConfig?.timeoutSecs || runner.adapterConfig?.chatgpt?.timeoutSecs || 7200,
+    permissionMode:
+      runner.adapterConfig?.permissionMode && runner.adapterConfig.permissionMode !== "default"
+        ? runner.adapterConfig.permissionMode
+        : undefined,
     instructions: runner.instructions,
     skillPaths: runner.skillPaths?.join("\n"),
     injectBifrostTools: runner.injectBifrostTools,
@@ -142,6 +145,9 @@ function formToRunner(values: Record<string, unknown>): ExternalCliAgentSettings
     adapterConfig: {
       ...(values.executable ? { executable: String(values.executable).trim() } : {}),
       ...(args.length ? { args } : {}),
+      ...(values.permissionMode && String(values.permissionMode).trim() !== "default"
+        ? { permissionMode: String(values.permissionMode).trim() }
+        : {}),
     },
     injectBifrostTools: values.injectBifrostTools !== false,
     skillPaths: lines(values.skillPaths),
@@ -728,6 +734,18 @@ export default function ExternalCliPanel({
                   </Form.Item>
                   <Form.Item name="args" label="Arguments">
                     <Input.TextArea rows={3} placeholder="One argument per line" />
+                  </Form.Item>
+                  <Form.Item name="permissionMode" label="Permission Mode">
+                    <Select
+                      allowClear
+                      options={[
+                        { label: "Headless default", value: "" },
+                        { label: "Plan", value: "plan" },
+                        { label: "Bypass Permissions", value: "bypass_permissions" },
+                        { label: "Auto", value: "auto" },
+                        { label: "Custom", value: "custom" },
+                      ]}
+                    />
                   </Form.Item>
                   <Form.Item name="skillPaths" label="Skill Paths">
                     <Input.TextArea rows={3} placeholder="Skill folder or SKILL.md path per line" />

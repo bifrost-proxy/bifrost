@@ -6,6 +6,7 @@ type ThemeToken = ReturnType<typeof theme.useToken>["token"];
 export function createAgentChatStyles(
   isCompact: boolean,
   isNarrow: boolean,
+  threadRailCollapsed: boolean,
   token: ThemeToken,
 ): Record<string, CSSProperties> {
   const horizontalPadding = isNarrow ? 12 : isCompact ? 16 : 24;
@@ -19,11 +20,12 @@ export function createAgentChatStyles(
       overflow: "hidden",
     },
     body: {
+      position: "relative",
       flex: 1,
       minHeight: 0,
       display: "grid",
       minWidth: 0,
-      gridTemplateColumns: isNarrow
+      gridTemplateColumns: isNarrow || threadRailCollapsed
         ? "minmax(0, 1fr)"
         : isCompact
         ? "minmax(0, 1fr) minmax(180px, 240px)"
@@ -37,6 +39,48 @@ export function createAgentChatStyles(
       minHeight: 0,
       display: "flex",
       flexDirection: "column",
+    },
+    threadRailExpandButton: {
+      position: "absolute",
+      top: 18,
+      right: 12,
+      zIndex: 8,
+      width: 34,
+      height: 34,
+      minWidth: 34,
+      padding: 0,
+      borderRadius: "50%",
+      color: token.colorText,
+      background: token.colorBgElevated,
+      border: `1px solid ${token.colorBorderSecondary}`,
+      boxShadow: token.boxShadowSecondary,
+      display: isNarrow ? "none" : "inline-flex",
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    threadCardTitle: {
+      width: "100%",
+      minWidth: 0,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: 8,
+    },
+    threadCardTitleMain: {
+      minWidth: 0,
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 8,
+      overflow: "hidden",
+      whiteSpace: "nowrap",
+      textOverflow: "ellipsis",
+    },
+    threadCollapseButton: {
+      flexShrink: 0,
+      width: 28,
+      height: 28,
+      minWidth: 28,
+      padding: 0,
     },
     titleContent: {
       minWidth: 0,

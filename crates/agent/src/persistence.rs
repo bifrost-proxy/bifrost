@@ -8,7 +8,7 @@ use crate::tools::goal::GoalState;
 use crate::tools::update_plan::PlanStep;
 use crate::types::{ChatImageInput, ChatMessage, ToolCallMessage};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
@@ -56,6 +56,7 @@ pub struct ConversationRecorder {
     file_path: PathBuf,
     writer: Option<BufWriter<std::fs::File>>,
     max_bytes: Option<usize>,
+    event_count: Option<usize>,
 }
 
 impl ConversationRecorder {
@@ -78,6 +79,7 @@ impl ConversationRecorder {
             file_path,
             writer: None,
             max_bytes: None,
+            event_count: Some(0),
         }
     }
 
@@ -98,11 +100,13 @@ impl ConversationRecorder {
             file_path,
             writer: None,
             max_bytes: max_bytes.filter(|value| *value > 0),
+            event_count: None,
         }
     }
 
     /// Record a conversation event.
     pub fn record(&mut self, event: ConversationEvent) -> Result<(), String> {
+        let current_event_count = self.ensure_event_count()?;
         let writer = self.get_or_create_writer()?;
 
         let line = serde_json::to_string(&event).map_err(|e| format!("serialize event: {e}"))?;
@@ -112,7 +116,10 @@ impl ConversationRecorder {
         // Flush immediately so events are durable even if the process crashes
         // or the recorder is held open across turns.
         writer.flush().map_err(|e| format!("flush event: {e}"))?;
-        self.enforce_max_bytes()?;
+        self.event_count = Some(current_event_count.saturating_add(1));
+        if self.enforce_max_bytes()? {
+            self.event_count = Some(count_conversation_event_lines(&self.file_path)?);
+        }
 
         Ok(())
     }
@@ -382,6 +389,20 @@ impl ConversationRecorder {
         &self.file_path
     }
 
+    /// Number of non-empty JSONL events recorded in this file after the last write.
+    pub fn event_count(&self) -> Option<usize> {
+        self.event_count
+    }
+
+    fn ensure_event_count(&mut self) -> Result<usize, String> {
+        if let Some(count) = self.event_count {
+            return Ok(count);
+        }
+        let count = count_conversation_event_lines(&self.file_path)?;
+        self.event_count = Some(count);
+        Ok(count)
+    }
+
     /// Get or create the writer, creating parent directories as needed.
     fn get_or_create_writer(&mut self) -> Result<&mut BufWriter<std::fs::File>, String> {
         if self.writer.is_none() {
@@ -402,14 +423,14 @@ impl ConversationRecorder {
         Ok(self.writer.as_mut().unwrap())
     }
 
-    fn enforce_max_bytes(&mut self) -> Result<(), String> {
+    fn enforce_max_bytes(&mut self) -> Result<bool, String> {
         let Some(max_bytes) = self.max_bytes else {
-            return Ok(());
+            return Ok(false);
         };
         let metadata = std::fs::metadata(&self.file_path)
             .map_err(|e| format!("stat session file for max_bytes: {e}"))?;
         if metadata.len() as usize <= max_bytes {
-            return Ok(());
+            return Ok(false);
         }
 
         if let Some(writer) = self.writer.as_mut() {
@@ -439,8 +460,24 @@ impl ConversationRecorder {
         };
         std::fs::write(&self.file_path, next)
             .map_err(|e| format!("write trimmed session file: {e}"))?;
-        Ok(())
+        Ok(true)
     }
+}
+
+fn count_conversation_event_lines(path: &Path) -> Result<usize, String> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    let file = std::fs::File::open(path).map_err(|e| format!("open conversation file: {e}"))?;
+    let reader = std::io::BufReader::new(file);
+    let mut count = 0usize;
+    for line in reader.lines() {
+        let line = line.map_err(|e| format!("read conversation file: {e}"))?;
+        if !line.trim().is_empty() {
+            count = count.saturating_add(1);
+        }
+    }
+    Ok(count)
 }
 
 impl Drop for ConversationRecorder {
@@ -678,38 +715,132 @@ pub fn load_conversation_events_page(
     path: &Path,
     options: ConversationEventPageOptions,
 ) -> Result<ConversationEventPage, String> {
-    let events = load_conversation_events(path)?;
-    let total_count = events.len();
     let limit = options.limit.filter(|value| *value > 0);
+    let paged_request =
+        limit.is_some() || options.cursor.is_some() || options.since.is_some() || options.tail;
+    if !paged_request {
+        let events = load_conversation_events(path)?;
+        let total_count = events.len();
+        return Ok(ConversationEventPage {
+            events,
+            total_count,
+            start_index: 0,
+            end_index: total_count,
+            next_cursor: None,
+            has_more: false,
+        });
+    }
 
-    let (start_index, end_index, has_more, next_cursor) = if let Some(since) = options.since {
-        let start = since.min(total_count);
-        (start, total_count, false, Some(total_count))
-    } else if options.tail {
-        let limit = limit.unwrap_or(total_count);
-        let start = total_count.saturating_sub(limit);
-        (start, total_count, start > 0, Some(start))
+    let file = std::fs::File::open(path).map_err(|e| format!("open conversation file: {e}"))?;
+    let reader = std::io::BufReader::new(file);
+
+    if let Some(since) = options.since {
+        let mut events = Vec::new();
+        let mut total_count = 0usize;
+        for (line_no, line) in reader.lines().enumerate() {
+            let line = line.map_err(|e| format!("read line: {e}"))?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let event_index = total_count;
+            total_count += 1;
+            if event_index < since {
+                continue;
+            }
+            events.push(parse_conversation_event_line(line_no, &line)?);
+        }
+        let start_index = since.min(total_count);
+        return Ok(ConversationEventPage {
+            events,
+            total_count,
+            start_index,
+            end_index: total_count,
+            next_cursor: Some(total_count),
+            has_more: false,
+        });
+    }
+
+    let mut total_count = 0usize;
+    let mut selected_lines: VecDeque<(usize, usize, String)> = VecDeque::new();
+    let keep_limit = if options.tail {
+        limit
     } else if let Some(cursor) = options.cursor {
-        let end = cursor.min(total_count);
-        let limit = limit.unwrap_or(end);
-        let start = end.saturating_sub(limit);
-        (start, end, start > 0, Some(start))
-    } else if let Some(limit) = limit {
-        let end = limit.min(total_count);
-        (0, end, end < total_count, Some(end))
+        Some(limit.unwrap_or(cursor))
     } else {
-        (0, total_count, false, None)
+        limit
     };
+    for (line_no, line) in reader.lines().enumerate() {
+        let line = line.map_err(|e| format!("read line: {e}"))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let event_index = total_count;
+        total_count += 1;
 
-    let page_events = events[start_index..end_index].to_vec();
+        if let Some(cursor) = options.cursor {
+            if event_index >= cursor {
+                continue;
+            }
+        }
+
+        if options.tail || options.cursor.is_some() {
+            selected_lines.push_back((event_index, line_no, line));
+            if let Some(limit) = keep_limit {
+                while selected_lines.len() > limit {
+                    selected_lines.pop_front();
+                }
+            }
+            continue;
+        }
+
+        if let Some(limit) = keep_limit {
+            if selected_lines.len() < limit {
+                selected_lines.push_back((event_index, line_no, line));
+            }
+        }
+    }
+
+    let mut events = Vec::with_capacity(selected_lines.len());
+    let mut start_index = 0usize;
+    let mut end_index = 0usize;
+    for (position, (event_index, line_no, line)) in selected_lines.into_iter().enumerate() {
+        if position == 0 {
+            start_index = event_index;
+        }
+        end_index = event_index + 1;
+        events.push(parse_conversation_event_line(line_no, &line)?);
+    }
+    if events.is_empty() {
+        if let Some(cursor) = options.cursor {
+            start_index = cursor.min(total_count);
+            end_index = start_index;
+        } else if options.tail {
+            start_index = total_count;
+            end_index = total_count;
+        }
+    }
+    let has_more =
+        start_index > 0 || (!options.tail && options.cursor.is_none() && end_index < total_count);
+    let next_cursor = if options.tail || options.cursor.is_some() {
+        Some(start_index)
+    } else if limit.is_some() {
+        Some(end_index)
+    } else {
+        None
+    };
     Ok(ConversationEventPage {
-        events: page_events,
+        events,
         total_count,
         start_index,
         end_index,
         next_cursor,
         has_more,
     })
+}
+
+fn parse_conversation_event_line(line_no: usize, line: &str) -> Result<ConversationEvent, String> {
+    serde_json::from_str::<ConversationEvent>(line)
+        .map_err(|error| format!("parse event at line {}: {error}", line_no + 1))
 }
 
 fn load_conversation_events_lossy(path: &Path) -> Result<Vec<ConversationEvent>, String> {
@@ -833,6 +964,8 @@ pub struct SessionFileSummary {
     pub event_count: u32,
     pub work_dir: Option<String>,
     pub source: String,
+    pub runner_type: Option<String>,
+    pub runner_id: Option<String>,
     /// The original session key as stored in the JSONL events (may differ from the sanitized filename).
     pub session_key: Option<String>,
     /// Session title (intent/topic) set by the agent via set_title tool.
@@ -896,6 +1029,17 @@ pub fn scan_session_summary(path: &Path) -> SessionFileSummary {
                     }
                     if let Some(wd) = obj.get("work_dir").and_then(|v| v.as_str()) {
                         summary.work_dir = Some(wd.to_string());
+                    }
+                    if let Some(runner_type) = obj
+                        .get("adapter")
+                        .or_else(|| obj.get("runner_type"))
+                        .or_else(|| obj.get("runtime"))
+                        .and_then(|v| v.as_str())
+                    {
+                        summary.runner_type = Some(runner_type.to_string());
+                    }
+                    if let Some(runner_id) = obj.get("runner_id").and_then(|v| v.as_str()) {
+                        summary.runner_id = Some(runner_id.to_string());
                     }
                 }
             }
@@ -1582,6 +1726,40 @@ mod tests {
     }
 
     #[test]
+    fn test_load_conversation_events_page_does_not_parse_unselected_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                "{not valid json}\n",
+                "{\"timestamp\":1,\"event_type\":\"user_message\",\"session_key\":\"paged-events\",\"content\":{\"message\":\"old\"}}\n",
+                "{\"timestamp\":2,\"event_type\":\"user_message\",\"session_key\":\"paged-events\",\"content\":{\"message\":\"new\"}}\n",
+                "{\"timestamp\":3,\"event_type\":\"assistant_message\",\"session_key\":\"paged-events\",\"content\":{\"message\":\"done\"}}\n",
+            ),
+        )
+        .unwrap();
+
+        let page = load_conversation_events_page(
+            &path,
+            ConversationEventPageOptions {
+                limit: Some(2),
+                tail: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(page.total_count, 4);
+        assert_eq!(page.start_index, 2);
+        assert_eq!(page.end_index, 4);
+        assert_eq!(page.events.len(), 2);
+        assert_eq!(page.events[0].content["message"], "new");
+        assert_eq!(page.events[1].content["message"], "done");
+        assert!(load_conversation_events(&path).is_err());
+    }
+
+    #[test]
     fn test_load_session_runtime_state_restores_latest_goal() {
         let dir = tempfile::tempdir().unwrap();
         let mut recorder = ConversationRecorder::new(dir.path(), "goal-runtime");
@@ -1816,6 +1994,33 @@ mod tests {
         let summary = scan_session_summary(recorder.file_path());
         assert_eq!(summary.run_state.as_deref(), Some("completed"));
         assert_eq!(summary.event_count, 3);
+    }
+
+    #[test]
+    fn scan_session_summary_tracks_external_runner_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut recorder = ConversationRecorder::new(dir.path(), "external-runner-session");
+        recorder
+            .record_session_start(
+                "external-runner-session",
+                serde_json::json!({
+                    "source": "admin-api",
+                    "runtime": "external_cli",
+                    "adapter": "traex",
+                    "runner_id": "traex",
+                    "work_dir": "/tmp/work",
+                }),
+            )
+            .unwrap();
+        recorder
+            .record_user_message("external-runner-session", "hello")
+            .unwrap();
+        recorder.close();
+
+        let summary = scan_session_summary(recorder.file_path());
+        assert_eq!(summary.runner_type.as_deref(), Some("traex"));
+        assert_eq!(summary.runner_id.as_deref(), Some("traex"));
+        assert_eq!(summary.work_dir.as_deref(), Some("/tmp/work"));
     }
 
     #[test]

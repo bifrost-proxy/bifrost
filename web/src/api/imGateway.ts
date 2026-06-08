@@ -40,6 +40,7 @@ export interface ExternalCliAdapterConfig {
   model?: string;
   sandbox?: string;
   approvalPolicy?: string;
+  permissionMode?: string;
   reasoningEffort?: string;
   reasoningSummary?: string;
   dangerFullAccess?: boolean;

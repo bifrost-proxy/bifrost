@@ -19,6 +19,8 @@ pub struct AgentSessionEvent {
     pub session_key: Option<String>,
     pub reason: String,
     pub timestamp_ms: u64,
+    pub history_path: Option<String>,
+    pub end_index: Option<usize>,
 }
 
 /// Manages multiple agent sessions with concurrent access.
@@ -58,6 +60,25 @@ impl AgentSessionManager {
             session_key: session_key.map(str::to_string),
             reason: reason.to_string(),
             timestamp_ms: current_time_ms(),
+            history_path: None,
+            end_index: None,
+        });
+    }
+
+    pub fn emit_timeline_changed(
+        &self,
+        session_key: &str,
+        history_path: &str,
+        end_index: Option<usize>,
+        reason: &str,
+    ) {
+        let _ = self.session_events.send(AgentSessionEvent {
+            event_type: "timeline_changed".to_string(),
+            session_key: Some(session_key.to_string()),
+            reason: reason.to_string(),
+            timestamp_ms: current_time_ms(),
+            history_path: Some(history_path.to_string()),
+            end_index,
         });
     }
 
@@ -388,6 +409,8 @@ impl AgentSessionManager {
                 agent_type: s.agent_type.clone(),
                 runner_type: s.runner_type.clone(),
                 runner_id: s.runner_id.clone(),
+                model: None,
+                model_provider: None,
                 external_conversation_id: s.external_conversation_id.clone(),
                 external_thread_id: s.external_thread_id.clone(),
                 title: s
@@ -580,6 +603,8 @@ pub struct SessionDetail {
     pub agent_type: Option<String>,
     pub runner_type: Option<String>,
     pub runner_id: Option<String>,
+    pub model: Option<String>,
+    pub model_provider: Option<String>,
     pub external_conversation_id: Option<String>,
     pub external_thread_id: Option<String>,
     /// Session title (intent/topic) set by the agent via set_title tool.

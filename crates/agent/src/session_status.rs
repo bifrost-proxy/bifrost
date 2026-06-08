@@ -128,6 +128,8 @@ pub struct ActiveTurnStatus {
     pub agent_type: Option<String>,
     pub runner_type: Option<String>,
     pub runner_id: Option<String>,
+    pub model: Option<String>,
+    pub model_provider: Option<String>,
     pub external_conversation_id: Option<String>,
     pub external_thread_id: Option<String>,
     /// Turn timing metrics (TTFT, TTFM, total duration).
@@ -165,6 +167,8 @@ impl ActiveTurnStatus {
             agent_type: None,
             runner_type: None,
             runner_id: None,
+            model: None,
+            model_provider: None,
             external_conversation_id: None,
             external_thread_id: None,
             turn_timing: None,
@@ -178,6 +182,8 @@ pub struct StatusRuntimeContext {
     pub agent_type: Option<String>,
     pub runner_type: Option<String>,
     pub runner_id: Option<String>,
+    pub model: Option<String>,
+    pub model_provider: Option<String>,
     pub external_conversation_id: Option<String>,
     pub external_thread_id: Option<String>,
 }
@@ -284,6 +290,8 @@ pub(crate) fn refresh_active_turn_status(
         status.agent_type = session.agent_type.clone();
         status.runner_type = session.runner_type.clone();
         status.runner_id = session.runner_id.clone();
+        status.model = config.model.clone();
+        status.model_provider = config.model_provider.clone();
         status.external_conversation_id = session.external_conversation_id.clone();
         status.external_thread_id = session.external_thread_id.clone();
         status.pending_guide_messages = session
@@ -345,6 +353,18 @@ pub fn format_active_turn_status_text_with_context(
         .or(context.runner_id.as_ref())
         .map(String::as_str)
         .unwrap_or("N/A");
+    let model_text = format_model_ref(
+        status
+            .model
+            .as_ref()
+            .or(context.model.as_ref())
+            .map(String::as_str),
+        status
+            .model_provider
+            .as_ref()
+            .or(context.model_provider.as_ref())
+            .map(String::as_str),
+    );
     let conversation_text = format_conversation_ref(
         status
             .external_thread_id
@@ -379,9 +399,11 @@ pub fn format_active_turn_status_text_with_context(
         "会话状态:\n\
          - 状态: 🔵 正在处理中\n\
          - 工作路径: {}\n\
+         - 当前状态: {}\n\
          - Agent 类型: {}\n\
          - Runner 类型: {}\n\
          - Runner ID: {}\n\
+         - 模型: {}\n\
          - 外部会话: {}\n\
          - 历史对话轮次: {}\n\
          - Loop: 第 {} 次 / 最多 {} 次（已完成 {} 次）\n\
@@ -395,9 +417,11 @@ pub fn format_active_turn_status_text_with_context(
          - MCP 工具数: {}\n\
          - 本地工具数: {}",
         work_dir_text,
+        status.state,
         agent_type,
         runner_type,
         runner_id,
+        model_text,
         conversation_text,
         status.user_turn_count,
         status.current_loop_iteration,
@@ -414,6 +438,19 @@ pub fn format_active_turn_status_text_with_context(
         status.mcp_tool_count,
         status.local_tool_count
     )
+}
+
+pub fn format_model_ref(model: Option<&str>, provider: Option<&str>) -> String {
+    let model = model.map(str::trim).filter(|value| !value.is_empty());
+    let provider = provider.map(str::trim).filter(|value| !value.is_empty());
+    match (model, provider) {
+        (Some(model), Some(provider)) => {
+            format!("{model}（{}）", truncate_status_text(provider, 48))
+        }
+        (Some(model), None) => model.to_string(),
+        (None, Some(provider)) => format!("N/A（{}）", truncate_status_text(provider, 48)),
+        (None, None) => "N/A".to_string(),
+    }
 }
 
 pub fn format_context_management_status(message_count: usize) -> String {
@@ -517,6 +554,8 @@ mod tests {
             agent_type: Some("Bifrost Agent".to_string()),
             runner_type: Some("bifrost_agent".to_string()),
             runner_id: None,
+            model: Some("gpt-5".to_string()),
+            model_provider: Some("openai".to_string()),
             external_conversation_id: None,
             external_thread_id: Some("thread-runtime".to_string()),
             turn_timing: None,
@@ -525,8 +564,10 @@ mod tests {
 
         let text = format_active_turn_status_text(&status);
         assert!(text.contains("工作路径: /tmp/bifrost-work"));
+        assert!(text.contains("当前状态: model_response"));
         assert!(text.contains("Agent 类型: Bifrost Agent"));
         assert!(text.contains("Runner 类型: bifrost_agent"));
+        assert!(text.contains("模型: gpt-5（openai）"));
         assert!(text.contains("外部会话: Codex threadId=thread-runtime"));
         assert!(text.contains("历史对话轮次: 4"));
         assert!(text.contains("Loop: 第 3 次 / 最多 1000 次"));

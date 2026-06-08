@@ -202,6 +202,267 @@ pub(super) fn provider_switch_workdir_persists_provider_agent_override() {
 }
 
 #[test]
+pub(super) fn im_cwd_command_parses_existing_absolute_directory() {
+    let work_dir = tempfile::tempdir().expect("work dir");
+    let command = format!("/cwd \"{}\"", work_dir.path().display());
+
+    let parsed = parse_im_cwd_command(&command)
+        .expect("cwd command")
+        .expect("valid cwd");
+
+    assert_eq!(parsed, std::fs::canonicalize(work_dir.path()).unwrap());
+}
+
+#[test]
+pub(super) fn im_cwd_command_rejects_invalid_paths() {
+    assert!(parse_im_cwd_command("/cwdish /tmp").is_none());
+    assert!(parse_im_cwd_command("请看 /cwd /tmp").is_none());
+    assert_eq!(
+        parse_im_cwd_command("/cwd")
+            .expect("cwd command")
+            .expect_err("missing path"),
+        "用法: /cwd <绝对路径>"
+    );
+    assert!(parse_im_cwd_command("/cwd relative/path")
+        .expect("cwd command")
+        .expect_err("relative path")
+        .contains("请使用绝对路径"));
+    assert!(
+        parse_im_cwd_command("/cwd /definitely/not/exist/bifrost-cwd-test")
+            .expect("cwd command")
+            .expect_err("missing path")
+            .contains("路径不存在")
+    );
+
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let file_path = temp_dir.path().join("file.txt");
+    std::fs::write(&file_path, "not a directory").expect("write file");
+    assert!(
+        parse_im_cwd_command(&format!("/cwd {}", file_path.display()))
+            .expect("cwd command")
+            .expect_err("file path")
+            .contains("不是目录")
+    );
+}
+
+#[test]
+pub(super) fn im_help_includes_im_only_commands_without_dropping_builtins() {
+    let help = append_im_channel_help(
+        "可用命令:\n\n内置命令:\n  /help           显示此帮助信息".to_string(),
+    );
+
+    assert!(help.contains("内置命令:"));
+    assert!(help.contains("/help"));
+    assert!(help.contains("IM 通道命令:"));
+    assert!(help.contains("/cwd <绝对路径>"));
+    assert!(help.contains("/runner [Runner]"));
+    assert!(help.contains("/q <消息>"));
+    assert!(help.contains("/rq <序号>"));
+    assert!(help.contains("/g <引导内容>"));
+    assert!(help.contains("运行中会排队"));
+}
+
+#[test]
+pub(super) fn im_runner_command_lists_builtin_and_configured_runners() {
+    let mut config = crate::im_gateway::external_cli::ExternalCliGatewayConfig {
+        default_runner_id: "codex".to_string(),
+        ..Default::default()
+    };
+    config.runners.insert(
+        "traex".to_string(),
+        crate::im_gateway::external_cli::ExternalCliAgentSettings {
+            adapter: "traex".to_string(),
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(
+        parse_im_runner_command("/runner"),
+        Some(ImRunnerCommand::List)
+    );
+    assert_eq!(
+        parse_im_runner_command("/Runner traex"),
+        Some(ImRunnerCommand::Switch("traex".to_string()))
+    );
+    assert_eq!(parse_im_runner_command("/runnerish"), None);
+
+    let runner_list = format_im_runner_list(&config);
+    assert!(runner_list.contains("bifrost_agent"));
+    assert!(runner_list.contains("codex"));
+    assert!(runner_list.contains("traex"));
+}
+
+#[test]
+pub(super) fn im_runner_command_rejects_unknown_runner() {
+    let config = crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+
+    let error = resolve_im_runner_selection(&config, "missing").expect_err("missing runner");
+
+    assert!(error.contains("找不到 Runner"));
+    assert!(error.contains("missing"));
+    assert!(error.contains("bifrost_agent"));
+}
+
+#[test]
+pub(super) fn im_runner_command_persists_external_runner_and_reinitializes_idle_session() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let store = Arc::new(ImProviderStore::new(temp_dir.path()));
+    let mut provider = test_provider();
+    provider.id = "im-runner-provider".to_string();
+    provider.agent_config = Some(ImProviderAgentConfig {
+        runner: Some(bifrost_agent::AgentRunnerMode::BifrostAgent),
+        work_dir: Some("/keep/workdir".to_string()),
+        base_instructions: Some("keep provider prompt".to_string()),
+        developer_instructions: None,
+        user_instructions: None,
+    });
+    store.add(provider).expect("add provider");
+
+    let manager = Arc::new(bifrost_agent::AgentSessionManager::new(3600));
+    let mut session = manager
+        .try_take_session_with_work_dir("feishu-main:ou_owner", Some("/keep/workdir".to_string()))
+        .expect("session");
+    session
+        .history
+        .push(bifrost_agent::ChatMessage::user("old message"));
+    manager.return_session(session);
+
+    let mut config = crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+    config.runners.insert(
+        "traex".to_string(),
+        crate::im_gateway::external_cli::ExternalCliAgentSettings {
+            adapter: "traex".to_string(),
+            ..Default::default()
+        },
+    );
+
+    let reply = apply_im_runner_switch(
+        &store,
+        &manager,
+        "im-runner-provider",
+        "feishu-main:ou_owner",
+        &config,
+        "traex",
+    )
+    .expect("apply runner");
+
+    assert!(reply.contains("traex"));
+    let updated = store.get("im-runner-provider").expect("provider");
+    let agent_config = updated.agent_config.expect("agent config");
+    assert_eq!(
+        agent_config.runner,
+        Some(bifrost_agent::AgentRunnerMode::Custom("traex".to_string()))
+    );
+    assert_eq!(agent_config.work_dir.as_deref(), Some("/keep/workdir"));
+    assert_eq!(
+        agent_config.base_instructions.as_deref(),
+        Some("keep provider prompt")
+    );
+
+    let detail = manager
+        .get_session_detail("feishu-main:ou_owner")
+        .expect("session detail");
+    assert_eq!(detail.message_count, 0);
+    assert_eq!(detail.runner_type.as_deref(), Some("traex"));
+    assert_eq!(detail.runner_id.as_deref(), Some("traex"));
+}
+
+#[test]
+pub(super) fn im_runner_command_can_pin_builtin_runner() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let store = Arc::new(ImProviderStore::new(temp_dir.path()));
+    let mut provider = test_provider();
+    provider.id = "im-runner-builtin-provider".to_string();
+    provider.agent_config = Some(ImProviderAgentConfig {
+        runner: Some(bifrost_agent::AgentRunnerMode::Custom("traex".to_string())),
+        work_dir: None,
+        base_instructions: None,
+        developer_instructions: None,
+        user_instructions: None,
+    });
+    store.add(provider).expect("add provider");
+
+    let manager = Arc::new(bifrost_agent::AgentSessionManager::new(3600));
+    let config = crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+
+    apply_im_runner_switch(
+        &store,
+        &manager,
+        "im-runner-builtin-provider",
+        "feishu-main:ou_owner",
+        &config,
+        "bifrost_agent",
+    )
+    .expect("apply builtin runner");
+
+    let updated = store.get("im-runner-builtin-provider").expect("provider");
+    assert_eq!(
+        updated.agent_config.and_then(|config| config.runner),
+        Some(bifrost_agent::AgentRunnerMode::BifrostAgent)
+    );
+    let detail = manager
+        .get_session_detail("feishu-main:ou_owner")
+        .expect("session detail");
+    assert_eq!(detail.runner_type.as_deref(), Some("bifrost_agent"));
+    assert_eq!(detail.runner_id, None);
+}
+
+#[test]
+pub(super) fn im_cwd_command_persists_provider_and_reinitializes_idle_session() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let store = Arc::new(ImProviderStore::new(temp_dir.path()));
+    let mut provider = test_provider();
+    provider.id = "im-cwd-provider".to_string();
+    provider.agent_config = Some(ImProviderAgentConfig {
+        runner: None,
+        work_dir: Some("/old/workdir".to_string()),
+        base_instructions: Some("keep provider prompt".to_string()),
+        developer_instructions: None,
+        user_instructions: None,
+    });
+    store.add(provider).expect("add provider");
+
+    let manager = Arc::new(bifrost_agent::AgentSessionManager::new(3600));
+    let mut session = manager
+        .try_take_session_with_work_dir("feishu-main:ou_owner", Some("/old/workdir".to_string()))
+        .expect("session");
+    session
+        .history
+        .push(bifrost_agent::ChatMessage::user("old message"));
+    manager.return_session(session);
+
+    let new_work_dir = tempfile::tempdir().expect("new work dir");
+    let reply = apply_im_cwd_switch(
+        &store,
+        &manager,
+        "im-cwd-provider",
+        "feishu-main:ou_owner",
+        new_work_dir.path(),
+    )
+    .expect("apply cwd");
+
+    let canonical = std::fs::canonicalize(new_work_dir.path()).unwrap();
+    let canonical_str = canonical.display().to_string();
+    assert!(reply.contains(&canonical_str));
+    let updated = store.get("im-cwd-provider").expect("provider");
+    let agent_config = updated.agent_config.expect("agent config");
+    assert_eq!(
+        agent_config.work_dir.as_deref(),
+        Some(canonical_str.as_str())
+    );
+    assert_eq!(
+        agent_config.base_instructions.as_deref(),
+        Some("keep provider prompt")
+    );
+
+    let detail = manager
+        .get_session_detail("feishu-main:ou_owner")
+        .expect("session detail");
+    assert_eq!(detail.work_dir.as_deref(), Some(canonical_str.as_str()));
+    assert_eq!(detail.message_count, 0);
+}
+
+#[test]
 pub(super) fn agent_api_status_detail_applies_work_dir_for_fresh_status_session() {
     let manager = bifrost_agent::AgentSessionManager::new(3600);
 
@@ -404,17 +665,17 @@ pub(super) fn im_status_text_formats_metrics_and_runner_metadata() {
     let detail = manager
         .get_session_detail("status-runner-metadata")
         .expect("detail");
-    let text = build_im_status_text(
-        Some(&detail),
-        &status_context_from_agent_runner(Some(&bifrost_agent::AgentRunnerMode::Custom(
-            "codex".to_string(),
-        ))),
-        None,
-    );
+    let mut context = status_context_from_agent_runner(Some(
+        &bifrost_agent::AgentRunnerMode::Custom("codex".to_string()),
+    ));
+    context.model = Some("trae-model".to_string());
+    context.model_provider = Some("runner config".to_string());
+    let text = build_im_status_text(Some(&detail), &context, None);
 
     assert!(text.contains("Agent 类型: External Runner Agent"));
     assert!(text.contains("Runner 类型: codex"));
     assert!(text.contains("Runner ID: codex"));
+    assert!(text.contains("模型: trae-model（runner config）"));
     assert!(text.contains("外部会话: Codex threadId=thread-status-123"));
     assert!(text.contains("历史对话轮次: 2"));
     assert!(text.contains("API 累计 token: 38.6K"));
@@ -449,9 +710,15 @@ pub(super) fn im_status_text_uses_resolved_default_work_dir_when_session_has_no_
         Some(&detail),
         &bifrost_agent::config::AgentConfig::default(),
     );
+    let default_config = bifrost_agent::config::AgentConfig::default();
+    let default_model = bifrost_agent::format_model_ref(
+        default_config.model.as_deref(),
+        default_config.model_provider.as_deref(),
+    );
 
     assert!(text.contains(&format!("工作路径: {current_dir}")));
     assert!(api_text.contains(&format!("工作路径: {current_dir}")));
+    assert!(api_text.contains(&format!("模型: {default_model}")));
     assert!(!text.contains("工作路径: N/A"));
     assert!(!api_text.contains("工作路径: N/A"));
 }

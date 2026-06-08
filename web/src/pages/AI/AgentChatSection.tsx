@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Button, Card, Col, Empty, Grid, Input, Modal, Row, Segmented, Select, Space, Tag, Typography, message as antdMessage, theme } from "antd";
-import { BulbOutlined, DeleteOutlined, DownOutlined, FolderOpenOutlined, BorderOutlined, PlusOutlined, RobotOutlined, SendOutlined, SettingOutlined } from "@ant-design/icons";
+import { BulbOutlined, DeleteOutlined, DownOutlined, FolderOpenOutlined, BorderOutlined, LeftOutlined, PlusOutlined, RobotOutlined, SendOutlined, SettingOutlined } from "@ant-design/icons";
 import { apiFetch } from "../../api/apiFetch";
 import { buildApiUrl } from "../../runtime";
 import { getClientId } from "../../services/clientId";
@@ -39,7 +39,7 @@ import {
   type SessionDetail,
 } from "./AgentChatSection.helpers";
 import { historyEventsToMessages, historyEventsToTelemetry } from "./AgentChatSection.timeline";
-import { isRunStateActive, isThreadActive, useRunningTimelinePolling } from "./AgentChatSection.timelinePolling";
+import { isRunStateActive, isThreadActive } from "./AgentChatSection.timelinePolling";
 import { AgentChatMessageList } from "./AgentChatSection.messages";
 import { AgentChatPlan, AgentChatPromptChips } from "./AgentChatSection.composerExtras";
 import { AgentChatSettingsModal, AgentThreadListCard } from "./AgentChatSection.panels";
@@ -57,7 +57,20 @@ const { TextArea } = Input;
 const { useBreakpoint } = Grid;
 const MAX_PASTED_IMAGES = 6;
 const HISTORY_EVENT_PAGE_SIZE = 300;
+const THREAD_RAIL_COLLAPSED_STORAGE_KEY = "bifrost.agentChat.threadRailCollapsed";
 type AgentCollaborationMode = "plan";
+
+type AgentSessionEventPayload = {
+  eventType?: string;
+  event_type?: string;
+  sessionKey?: string;
+  session_key?: string;
+  historyPath?: string;
+  history_path?: string;
+  endIndex?: number;
+  end_index?: number;
+  reason?: string;
+};
 
 function parseAgentPlanSlash(content: string): {
   message: string;
@@ -235,6 +248,12 @@ export default function AgentChatSection() {
   const [queuedInputs, setQueuedInputs] = useState<QueuedInput[]>([]);
   const [nowSeconds, setNowSeconds] = useState(() => Math.floor(Date.now() / 1000));
   const [threads, setThreads] = useState<AgentThreadSummary[]>([]);
+  const [threadRailCollapsed, setThreadRailCollapsed] = useState(() => {
+    if (typeof window === "undefined") {
+      return false;
+    }
+    return window.localStorage.getItem(THREAD_RAIL_COLLAPSED_STORAGE_KEY) === "true";
+  });
   const [telemetry, setTelemetry] = useState<RunTelemetry>(EMPTY_TELEMETRY);
   const [workDir, setWorkDir] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -257,11 +276,16 @@ export default function AgentChatSection() {
   const pendingInstantScrollRef = useRef(true);
   const userNearBottomRef = useRef(true);
   const loadedConversationKeyRef = useRef<string | undefined>(undefined);
+  const selectedHistoryPathRef = useRef<string | undefined>(undefined);
+  const selectedSessionKeyRef = useRef<string | undefined>(undefined);
+  const selectedThreadRef = useRef<AgentThreadSummary | undefined>(undefined);
+  const telemetryPhaseRef = useRef<RunTelemetry["phase"]>(EMPTY_TELEMETRY.phase);
   const threadsRef = useRef<AgentThreadSummary[]>([]);
   const historyEventsRef = useRef<HistoryEvent[]>([]);
   const historyEventStartIndexRef = useRef<number | undefined>(undefined);
   const historyEventEndIndexRef = useRef<number | undefined>(undefined);
   const historyOlderCursorRef = useRef<number | undefined>(undefined);
+  const historyLoadingOlderRef = useRef(false);
   const loadOlderHistoryPageRef = useRef<() => void>(() => {});
   const initialThreadAutoSelectRef = useRef(false);
 
@@ -403,18 +427,23 @@ export default function AgentChatSection() {
           ? page.next_cursor
           : historyEventStartIndexRef.current;
       setHistoryHasOlder(Boolean(page.has_more));
-      const restored = historyEventsToMessages(events, {
-        ensureRunningAssistant: isThreadActive(matchedThread),
-        runningState: matchedThread?.run_state || matchedThread?.state,
-      });
-      replaceLoadedMessages(restored, shouldStickToBottom);
       const nextTelemetry = historyEventsToTelemetry(
         events,
         matchedThread,
         telemetryFromThread(matchedThread),
       );
+      const terminalTimeline =
+        nextTelemetry.phase === "finished" || nextTelemetry.phase === "failed";
+      const timelineRunning =
+        nextTelemetry.phase === "running" && isThreadActive(matchedThread);
+      const restored = historyEventsToMessages(events, {
+        ensureRunningAssistant:
+          timelineRunning || (!terminalTimeline && isThreadActive(matchedThread)),
+        runningState: matchedThread?.run_state || matchedThread?.state,
+      });
+      replaceLoadedMessages(restored, shouldStickToBottom);
       setTelemetry(nextTelemetry);
-      setRunning(nextTelemetry.phase === "running" || isThreadActive(matchedThread));
+      setRunning(timelineRunning || (!terminalTimeline && isThreadActive(matchedThread)));
       return { restored, nextTelemetry };
     },
     [replaceLoadedMessages],
@@ -437,6 +466,14 @@ export default function AgentChatSection() {
     [historyPath, queryView, sessionKey, threads],
   );
 
+  useEffect(() => {
+    selectedThreadRef.current = selectedThread;
+  }, [selectedThread]);
+
+  useEffect(() => {
+    telemetryPhaseRef.current = telemetry.phase;
+  }, [telemetry.phase]);
+
   const loadOlderHistoryPage = useCallback(async () => {
     const timelineHistoryPath = historyPath || selectedThread?.history_path;
     const cursor = historyOlderCursorRef.current;
@@ -444,6 +481,7 @@ export default function AgentChatSection() {
       !timelineHistoryPath ||
       cursor === undefined ||
       cursor <= 0 ||
+      historyLoadingOlderRef.current ||
       historyLoadingOlder ||
       !historyHasOlder
     ) {
@@ -453,6 +491,7 @@ export default function AgentChatSection() {
     const previousScrollHeight = element?.scrollHeight ?? 0;
     const previousScrollTop = element?.scrollTop ?? 0;
     const previousEndIndex = historyEventEndIndexRef.current;
+    historyLoadingOlderRef.current = true;
     setHistoryLoadingOlder(true);
     try {
       const page = await fetchHistoryPage(timelineHistoryPath, {
@@ -482,6 +521,7 @@ export default function AgentChatSection() {
         error instanceof Error ? error.message : "Failed to load older Agent history",
       );
     } finally {
+      historyLoadingOlderRef.current = false;
       setHistoryLoadingOlder(false);
     }
   }, [
@@ -528,15 +568,16 @@ export default function AgentChatSection() {
         agent_type: telemetry.status?.agent_type,
       });
   const currentRunnerTag = formatRunnerTag(telemetry.status, selectedThread, runnerId);
-  const displayRunning = running || isThreadActive(selectedThread);
+  const terminalTimeline = telemetry.phase === "finished" || telemetry.phase === "failed";
+  const displayRunning = running || (!terminalTimeline && isThreadActive(selectedThread));
   const currentStateTag = formatCurrentStateTag(telemetry, selectedThread, displayRunning);
-  const guideSupported = runnerId === "bifrost_agent";
   const builtInAgentCommandsSupported = supportsBuiltInAgentCommands({
     runnerId,
     runnerOptions,
     selectedThread,
     status: telemetry.status,
   });
+  const guideSupported = builtInAgentCommandsSupported;
   const {
     slashRunner,
     setSlashRunner,
@@ -561,7 +602,7 @@ export default function AgentChatSection() {
 
   const refreshThreads = useCallback(async () => {
     try {
-      const response = await apiFetch("/api/im-gateway/agent/sessions/all");
+      const response = await apiFetch("/api/im-gateway/agent/sessions/all?limit=80");
       if (!response.ok) {
         return;
       }
@@ -592,8 +633,10 @@ export default function AgentChatSection() {
         }
         return incoming;
       });
+      return selectedQueueThread;
     } catch {
       // Keep chat usable even if the session index is temporarily unavailable.
+      return undefined;
     }
   }, [historyPath, queryView, sessionKey]);
 
@@ -613,14 +656,6 @@ export default function AgentChatSection() {
 
   useEffect(() => {
     refreshThreads();
-    const refreshFromSessionEvent = () => {
-      if (document.visibilityState === "visible") {
-        void refreshThreads();
-      }
-    };
-    const eventsUrl = `${buildApiUrl("/im-gateway/agent/sessions/events")}?x_client_id=${encodeURIComponent(getClientId())}`;
-    const eventSource = new EventSource(eventsUrl);
-    eventSource.addEventListener("sessions_changed", refreshFromSessionEvent);
     const refreshIfVisible = () => {
       if (document.visibilityState === "visible") {
         void refreshThreads();
@@ -628,8 +663,6 @@ export default function AgentChatSection() {
     };
     document.addEventListener("visibilitychange", refreshIfVisible);
     return () => {
-      eventSource.removeEventListener("sessions_changed", refreshFromSessionEvent);
-      eventSource.close();
       document.removeEventListener("visibilitychange", refreshIfVisible);
     };
   }, [refreshThreads]);
@@ -637,6 +670,18 @@ export default function AgentChatSection() {
   useEffect(() => {
     threadsRef.current = threads;
   }, [threads]);
+
+  useEffect(() => {
+    selectedHistoryPathRef.current = historyPath || queryHistoryPath;
+    selectedSessionKeyRef.current = querySessionKey || sessionKey;
+  }, [historyPath, queryHistoryPath, querySessionKey, sessionKey]);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      THREAD_RAIL_COLLAPSED_STORAGE_KEY,
+      threadRailCollapsed ? "true" : "false",
+    );
+  }, [threadRailCollapsed]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -789,6 +834,13 @@ export default function AgentChatSection() {
                 tail: true,
                 limit: HISTORY_EVENT_PAGE_SIZE,
               });
+              if (
+                selectedSessionKeyRef.current !== nextSessionKey ||
+                (selectedHistoryPathRef.current &&
+                  selectedHistoryPathRef.current !== timelineHistoryPath)
+              ) {
+                return;
+              }
               timelineEvents = payload.events || [];
               const timelineThread = matchedThread || fallbackHistoryThread;
               historyEventsRef.current = timelineEvents;
@@ -907,7 +959,7 @@ export default function AgentChatSection() {
       limit: HISTORY_EVENT_PAGE_SIZE,
     })
       .then((payload) => {
-        if (cancelled) {
+        if (cancelled || selectedHistoryPathRef.current !== nextHistoryPath) {
           return;
         }
         const matchedThread = threadsRef.current.find((thread) =>
@@ -978,6 +1030,7 @@ export default function AgentChatSection() {
       events: HistoryEvent[],
       page: Pick<HistoryPagePayload, "start_index" | "end_index" | "next_cursor" | "has_more">,
       shouldStickToBottom: boolean,
+      authoritativeThread?: AgentThreadSummary,
     ) => {
       if (events.length === 0) {
         historyEventEndIndexRef.current =
@@ -999,7 +1052,7 @@ export default function AgentChatSection() {
       const { nextTelemetry } = applyHistoryEventWindow(
         mergedEvents,
         page,
-        selectedThread,
+        authoritativeThread,
         shouldStickToBottom,
       );
       if (wasAppending) {
@@ -1012,21 +1065,149 @@ export default function AgentChatSection() {
       }
       return nextTelemetry;
     },
-    [applyHistoryEventWindow, selectedThread],
+    [applyHistoryEventWindow],
   );
 
-  useRunningTimelinePolling({
-    historyPath,
-    historyEventEndIndexRef,
-    mergeTimelineEvents,
+  const catchUpTimelineFromEvent = useCallback(
+    async (
+      eventPayload?: AgentSessionEventPayload,
+      options: { forceTail?: boolean } = {},
+    ) => {
+      const currentSessionKey = querySessionKey || sessionKey;
+      const eventSessionKey = eventPayload?.sessionKey || eventPayload?.session_key;
+      const eventHistoryPath = eventPayload?.historyPath || eventPayload?.history_path;
+      const currentThread = selectedThreadRef.current;
+      const currentHistoryPath =
+        historyPath ||
+        queryHistoryPath ||
+        currentThread?.history_path ||
+        (eventSessionKey === currentSessionKey ? eventHistoryPath : undefined);
+      if (!currentHistoryPath) {
+        return false;
+      }
+      if (eventHistoryPath && eventHistoryPath !== currentHistoryPath) {
+        return false;
+      }
+      if (!eventHistoryPath && eventSessionKey && eventSessionKey !== currentSessionKey) {
+        return false;
+      }
+      const endIndex = eventPayload?.endIndex ?? eventPayload?.end_index;
+      const currentEndIndex = historyEventEndIndexRef.current;
+      if (
+        !options.forceTail &&
+        endIndex !== undefined &&
+        currentEndIndex !== undefined &&
+        endIndex <= currentEndIndex
+      ) {
+        return true;
+      }
+      const fetchTail = options.forceTail || currentEndIndex === undefined;
+      let page = await fetchHistoryPage(
+        currentHistoryPath,
+        fetchTail
+          ? { tail: true, limit: HISTORY_EVENT_PAGE_SIZE }
+          : { since: currentEndIndex },
+      );
+      if (
+        selectedSessionKeyRef.current !== currentSessionKey ||
+        (selectedHistoryPathRef.current &&
+          selectedHistoryPathRef.current !== currentHistoryPath)
+      ) {
+        return false;
+      }
+      if (
+        !fetchTail &&
+        currentEndIndex !== undefined &&
+        page.start_index !== undefined &&
+        page.start_index !== currentEndIndex
+      ) {
+        await refreshThreads();
+        page = await fetchHistoryPage(currentHistoryPath, {
+          tail: true,
+          limit: HISTORY_EVENT_PAGE_SIZE,
+        });
+        if (
+          selectedSessionKeyRef.current !== currentSessionKey ||
+          (selectedHistoryPathRef.current &&
+            selectedHistoryPathRef.current !== currentHistoryPath)
+        ) {
+          return false;
+        }
+      }
+      const nextTelemetry = mergeTimelineEvents(
+        page.events || [],
+        page,
+        userNearBottomRef.current,
+        currentThread,
+      );
+      if (nextTelemetry) {
+        const terminal =
+          nextTelemetry.phase === "finished" || nextTelemetry.phase === "failed";
+        const stillRunning =
+          !terminal && (nextTelemetry.phase === "running" || isThreadActive(currentThread));
+        setRunning(stillRunning);
+        if (!stillRunning && nextTelemetry.phase === "running") {
+          setTelemetry((prev) =>
+            prev.phase === "running" ? { ...prev, phase: "finished" } : prev,
+          );
+        }
+      }
+      return true;
+    },
+    [
+      historyPath,
+      mergeTimelineEvents,
+      queryHistoryPath,
+      querySessionKey,
+      refreshThreads,
+      sessionKey,
+    ],
+  );
+
+  useEffect(() => {
+    const parseEvent = (event: MessageEvent<string>) => {
+      try {
+        return JSON.parse(event.data) as AgentSessionEventPayload;
+      } catch {
+        return undefined;
+      }
+    };
+    const refreshFromSessionEvent = (event: MessageEvent<string>) => {
+      const payload = parseEvent(event);
+      if (document.visibilityState === "visible") {
+        void refreshThreads();
+      }
+      if (payload?.reason === "lagged") {
+        void catchUpTimelineFromEvent(undefined, { forceTail: true });
+      }
+    };
+    const refreshTimeline = (event: MessageEvent<string>) => {
+      const payload = parseEvent(event);
+      void catchUpTimelineFromEvent(payload);
+    };
+    const catchUpOnReconnect = () => {
+      if (
+        telemetryPhaseRef.current === "running" ||
+        isThreadActive(selectedThreadRef.current)
+      ) {
+        void catchUpTimelineFromEvent(undefined, { forceTail: true });
+      }
+    };
+    const eventsUrl = `${buildApiUrl("/im-gateway/agent/sessions/events")}?x_client_id=${encodeURIComponent(getClientId())}`;
+    const eventSource = new EventSource(eventsUrl);
+    eventSource.addEventListener("connected", catchUpOnReconnect);
+    eventSource.addEventListener("sessions_changed", refreshFromSessionEvent);
+    eventSource.addEventListener("timeline_changed", refreshTimeline);
+    return () => {
+      eventSource.removeEventListener("connected", catchUpOnReconnect);
+      eventSource.removeEventListener("sessions_changed", refreshFromSessionEvent);
+      eventSource.removeEventListener("timeline_changed", refreshTimeline);
+      eventSource.close();
+    };
+  }, [
+    catchUpTimelineFromEvent,
     refreshThreads,
-    replaceLoadedMessages,
-    selectedThread,
-    setRunning,
-    setTelemetry,
-    telemetryPhase: telemetry.phase,
-    userNearBottomRef,
-  });
+  ]);
 
   useEffect(() => {
     const requestedSessionKey = searchParams.get("session") || undefined;
@@ -1224,8 +1405,8 @@ export default function AgentChatSection() {
   );
 
   const styles = useMemo(
-    () => createAgentChatStyles(isCompact, isNarrow, token),
-    [isCompact, isNarrow, token],
+    () => createAgentChatStyles(isCompact, isNarrow, threadRailCollapsed, token),
+    [isCompact, isNarrow, threadRailCollapsed, token],
   );
 
   const applyQueueEvent = (event: Record<string, unknown>) => {
@@ -1239,23 +1420,24 @@ export default function AgentChatSection() {
     content: string,
     mode: "guide" | "queue" | "stop" | "remove",
   ) => {
-    const isExternalRunner = runnerId !== "bifrost_agent";
-    const rendersMessage = mode === "guide" || mode === "stop";
+    const effectiveMode = mode === "guide" && !guideSupported ? "queue" : mode;
+    const queuesRunningInput = effectiveMode === "queue";
+    const rendersMessage = effectiveMode === "guide" || effectiveMode === "stop";
     const message =
-      mode === "queue" && !content.startsWith("/q ")
+      queuesRunningInput && !content.startsWith("/q ")
         ? `/q ${content}`
-        : mode === "remove"
+        : effectiveMode === "remove"
           ? content
           : content;
     const userMessage: ChatMessage = {
       id: `user-${Date.now()}`,
       role: "user",
-      content: mode === "stop" ? "/stop" : content,
+      content: effectiveMode === "stop" ? "/stop" : content,
       timestamp: Date.now() / 1000,
       meta:
-        mode === "stop"
+        effectiveMode === "stop"
           ? "Control"
-          : mode === "queue" || isExternalRunner
+          : queuesRunningInput
             ? "Queued user"
             : "Guide user",
     };
@@ -1264,9 +1446,9 @@ export default function AgentChatSection() {
       id: assistantId,
       role: "assistant",
       content:
-        mode === "stop"
+        effectiveMode === "stop"
           ? "Stopping..."
-          : mode === "queue" || isExternalRunner
+          : queuesRunningInput
             ? "Queueing..."
             : "Injecting guide...",
       timestamp: Date.now() / 1000,
@@ -1861,7 +2043,11 @@ export default function AgentChatSection() {
               return changed ? next : prev;
             });
           }
-          if (event.eventType === "assistant_delta" && typeof event.content === "string") {
+          if (
+            event.eventType === "assistant_delta" &&
+            typeof event.content === "string" &&
+            runnerId === "bifrost_agent"
+          ) {
             appendAssistantDelta(event.content);
             return;
           }
@@ -2434,18 +2620,31 @@ export default function AgentChatSection() {
           </div>
         </Card>
 
-        <div style={styles.sideRail}>
-          <AgentThreadListCard
-            threads={threads}
-            sessionKey={sessionKey}
-            historyPath={historyPath}
-            view={queryView}
-            nowSeconds={nowSeconds}
-            styles={styles}
-            onOpenThread={handleOpenThread}
-            onDeleteThread={handleDeleteThread}
+        {threadRailCollapsed ? (
+          <Button
+            shape="circle"
+            icon={<LeftOutlined />}
+            aria-label="Expand threads"
+            title="Expand threads"
+            data-testid="agent-chat-threads-expand"
+            style={styles.threadRailExpandButton}
+            onClick={() => setThreadRailCollapsed(false)}
           />
-        </div>
+        ) : (
+          <div style={styles.sideRail}>
+            <AgentThreadListCard
+              threads={threads}
+              sessionKey={sessionKey}
+              historyPath={historyPath}
+              view={queryView}
+              nowSeconds={nowSeconds}
+              styles={styles}
+              onOpenThread={handleOpenThread}
+              onDeleteThread={handleDeleteThread}
+              onCollapse={() => setThreadRailCollapsed(true)}
+            />
+          </div>
+        )}
 
         <AgentChatSettingsModal
           open={settingsOpen}

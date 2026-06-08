@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, type CSSProperties } from "react";
-import { BrowserRouter, HashRouter, Routes, Route, Navigate } from "react-router-dom";
+import { BrowserRouter, HashRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { ConfigProvider, Modal, Steps, App as AntApp, message, theme, Typography } from "antd";
 import AppLayout from "./components/Layout";
 import BifrostFileDropZone from "./components/BifrostFileDropZone";
@@ -62,9 +62,6 @@ function AppShell({ desktopPlatform }: { desktopPlatform: ReturnType<typeof getD
   const desktopCoreTargetPort = useDesktopCoreStore((state) => state.targetPort);
   const desktopCoreDetail = useDesktopCoreStore((state) => state.detail);
   const hideDesktopCore = useDesktopCoreStore((state) => state.hide);
-
-  useGlobalDataSync();
-  useEditorCompletion();
 
   useEffect(() => {
     const cleanup = initThemeListener();
@@ -266,6 +263,7 @@ function AppShell({ desktopPlatform }: { desktopPlatform: ReturnType<typeof getD
       {isDesktopShell() ? (
         <HashRouter>
           <BifrostFileDropZone>
+            <GlobalRouteEffects />
             <PendingAuthModal />
             <PendingIpTlsModal />
             <PairingApprovalModal />
@@ -301,6 +299,7 @@ function AppShell({ desktopPlatform }: { desktopPlatform: ReturnType<typeof getD
       ) : (
         <BrowserRouter basename={getAdminPrefix()}>
           <BifrostFileDropZone>
+            <GlobalRouteEffects />
             <PendingAuthModal />
             <PendingIpTlsModal />
             <PairingApprovalModal />
@@ -337,6 +336,17 @@ function AppShell({ desktopPlatform }: { desktopPlatform: ReturnType<typeof getD
       </AntApp>
     </ConfigProvider>
   );
+}
+
+function GlobalRouteEffects() {
+  const location = useLocation();
+  const trafficEnabled =
+    location.pathname === "/traffic" || location.pathname === "/traffic/detail";
+
+  useGlobalDataSync({ trafficEnabled });
+  useEditorCompletion();
+
+  return null;
 }
 
 function DesktopTransitionMask({ resolvedTheme }: { resolvedTheme: "light" | "dark" }) {

@@ -1,9 +1,125 @@
 use super::*;
 use bytes::Bytes;
 use futures_util::StreamExt;
+use std::path::{Path, PathBuf};
 use tokio_stream::wrappers::BroadcastStream;
 
 // ---------------------------------------------------------------------------
+
+type HistorySessionEntry = (
+    PathBuf,
+    String,
+    bifrost_agent::persistence::SessionFileSummary,
+);
+
+fn is_builtin_runner_value(value: &str) -> bool {
+    matches!(value, "bifrost_agent" | "builtin" | "bifrost")
+}
+
+fn is_external_runner_metadata(runner_type: Option<&str>, runner_id: Option<&str>) -> bool {
+    runner_type
+        .map(|value| !is_builtin_runner_value(value))
+        .unwrap_or(false)
+        || runner_id
+            .map(|value| !is_builtin_runner_value(value))
+            .unwrap_or(false)
+}
+
+fn merge_history_runner_metadata(
+    runner_type: Option<String>,
+    runner_id: Option<String>,
+    history: Option<&bifrost_agent::persistence::SessionFileSummary>,
+) -> (Option<String>, Option<String>) {
+    let Some(summary) = history else {
+        return (runner_type, runner_id);
+    };
+    if is_external_runner_metadata(summary.runner_type.as_deref(), summary.runner_id.as_deref()) {
+        (
+            summary.runner_type.clone().or(runner_type),
+            summary.runner_id.clone().or(runner_id),
+        )
+    } else {
+        (runner_type, runner_id)
+    }
+}
+
+fn enrich_detail_with_history_runner_metadata(detail: &mut bifrost_agent::SessionDetail) {
+    let Some(history_path) = detail.history_path.as_deref() else {
+        return;
+    };
+    let summary = bifrost_agent::persistence::scan_session_summary(Path::new(history_path));
+    if !is_external_runner_metadata(summary.runner_type.as_deref(), summary.runner_id.as_deref()) {
+        return;
+    }
+    let runner_type = summary.runner_type.or(detail.runner_type.take());
+    let runner_id = summary.runner_id.or(detail.runner_id.take());
+    let state_adapter = runner_type
+        .as_deref()
+        .or(runner_id.as_deref())
+        .unwrap_or_default();
+    if let Some(state) = crate::im_gateway::session_state::load_session_state(
+        &detail.session_key,
+        state_adapter,
+        runner_id.as_deref(),
+    ) {
+        detail.external_conversation_id = state.external_conversation_id;
+        detail.external_thread_id = state.external_thread_id;
+    }
+    detail.runner_type = runner_type;
+    detail.runner_id = runner_id;
+    if detail.agent_type.as_deref() == Some("Bifrost Agent") || detail.agent_type.is_none() {
+        detail.agent_type = Some("external_cli".to_string());
+    }
+}
+
+async fn load_history_entries_blocking(
+    data_dir: PathBuf,
+    session_key: Option<String>,
+    max_files: Option<usize>,
+) -> Result<Vec<HistorySessionEntry>, String> {
+    tokio::task::spawn_blocking(move || {
+        let mut files =
+            bifrost_agent::persistence::list_conversations(&data_dir, session_key.as_deref());
+        if session_key.is_none() {
+            if max_files.is_some() {
+                let mut latest_by_parsed_key: std::collections::HashMap<String, PathBuf> =
+                    std::collections::HashMap::new();
+                for path in files {
+                    let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    let (parsed_key, _timestamp) = parse_session_filename(filename);
+                    latest_by_parsed_key
+                        .entry(parsed_key)
+                        .and_modify(|existing| {
+                            if path > *existing {
+                                *existing = path.clone();
+                            }
+                        })
+                        .or_insert(path);
+                }
+                files = latest_by_parsed_key.into_values().collect();
+                files.sort();
+            }
+            if let Some(max_files) = max_files {
+                if files.len() > max_files {
+                    files.drain(0..files.len() - max_files);
+                }
+            }
+        }
+        Ok::<Vec<HistorySessionEntry>, String>(
+            files
+                .into_iter()
+                .map(|path| {
+                    let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    let (parsed_key, _timestamp) = parse_session_filename(filename);
+                    let summary = bifrost_agent::persistence::scan_session_summary(&path);
+                    (path, parsed_key, summary)
+                })
+                .collect(),
+        )
+    })
+    .await
+    .map_err(|error| format!("history scan task failed: {error}"))?
+}
 
 pub(super) async fn handle_agent(
     req: Request<Incoming>,
@@ -129,6 +245,13 @@ pub(super) async fn handle_agent(
         if req.method() != Method::GET {
             return method_not_allowed();
         }
+        let query_params = parse_query_params(req.uri().query().unwrap_or_default());
+        let list_limit = query_params
+            .get("limit")
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .map(|value| value.min(200));
+        let history_scan_limit = list_limit.map(|limit| limit.saturating_mul(4).max(100));
         let active_sessions = service.agent_session_manager.list_sessions();
         let running_turns = service.agent_session_manager.list_active_turn_statuses();
         let active_info_by_key: std::collections::HashMap<String, bifrost_agent::SessionInfo> =
@@ -141,7 +264,16 @@ pub(super) async fn handle_agent(
             .map(|status| status.session_key.clone())
             .collect();
         let data_dir = bifrost_agent::config::agent_home_dir();
-        let files = bifrost_agent::persistence::list_conversations(&data_dir, None);
+        let history_entries =
+            match load_history_entries_blocking(data_dir, None, history_scan_limit).await {
+                Ok(entries) => entries,
+                Err(error) => {
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("failed to scan agent sessions: {error}"),
+                    );
+                }
+            };
         let mut history_by_key: std::collections::HashMap<
             String,
             (
@@ -149,14 +281,11 @@ pub(super) async fn handle_agent(
                 bifrost_agent::persistence::SessionFileSummary,
             ),
         > = std::collections::HashMap::new();
-        for p in &files {
-            let filename = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let (parsed_key, _timestamp) = parse_session_filename(filename);
-            let summary = bifrost_agent::persistence::scan_session_summary(p);
+        for (p, parsed_key, summary) in &history_entries {
             let session_key = summary
                 .session_key
                 .as_deref()
-                .unwrap_or(&parsed_key)
+                .unwrap_or(parsed_key)
                 .to_string();
             if is_runner_call_session_key(&session_key) {
                 continue;
@@ -166,7 +295,7 @@ pub(super) async fn handle_agent(
                 .map(|(_, existing)| summary.end_time > existing.end_time)
                 .unwrap_or(true);
             if replace {
-                history_by_key.insert(session_key, (p.clone(), summary));
+                history_by_key.insert(session_key, (p.clone(), summary.clone()));
             }
         }
         let active_keys: std::collections::HashSet<String> = active_sessions
@@ -204,6 +333,13 @@ pub(super) async fn handle_agent(
             }
             let info = active_info_by_key.get(&s.session_key);
             let history = history_by_key.get(&s.session_key);
+            let (runner_type, runner_id) = merge_history_runner_metadata(
+                s.runner_type
+                    .or_else(|| info.and_then(|item| item.runner_type.clone())),
+                s.runner_id
+                    .or_else(|| info.and_then(|item| item.runner_id.clone())),
+                history.map(|(_, summary)| summary),
+            );
             let duration_secs = s.updated_at.saturating_sub(s.started_at);
             let queue_snapshot = crate::handlers::agent_chat::queue_snapshot_payload(
                 &service.queue_manager,
@@ -227,8 +363,8 @@ pub(super) async fn handle_agent(
                 "context_usage_percent": s.context_usage_percent,
                 "last_response_tokens": s.last_response_tokens,
                 "agent_type": s.agent_type.or_else(|| info.and_then(|item| item.agent_type.clone())),
-                "runner_type": s.runner_type.or_else(|| info.and_then(|item| item.runner_type.clone())),
-                "runner_id": s.runner_id.or_else(|| info.and_then(|item| item.runner_id.clone())),
+                "runner_type": runner_type,
+                "runner_id": runner_id,
                 "external_conversation_id": s.external_conversation_id,
                 "external_thread_id": s.external_thread_id,
                 "title": info.and_then(|item| item.title.clone()),
@@ -252,17 +388,23 @@ pub(super) async fn handle_agent(
                 continue;
             }
             let history = history_by_key.get(&s.session_key);
+            let (runner_type, runner_id) = merge_history_runner_metadata(
+                s.runner_type,
+                s.runner_id,
+                history.map(|(_, summary)| summary),
+            );
             let duration_secs = s.last_active_at.saturating_sub(s.created_at);
             let queue_snapshot = crate::handlers::agent_chat::queue_snapshot_payload(
                 &service.queue_manager,
                 &s.session_key,
             );
-            let run_state = active_session_list_run_state(s.running, &s.run_state);
+            let has_active_turn = false;
+            let run_state = active_session_list_run_state(has_active_turn, &s.run_state);
             unified.push(serde_json::json!({
                 "session_key": s.session_key,
                 "status": "active",
-                "running": s.running,
-                "state": if s.running { "running" } else { "idle" },
+                "running": has_active_turn,
+                "state": if has_active_turn { "running" } else { "idle" },
                 "source": s.source,
                 "work_dir": s.work_dir,
                 "turns": s.message_count,
@@ -273,8 +415,8 @@ pub(super) async fn handle_agent(
                 "compaction_count": s.compaction_count,
                 "estimated_tokens": s.estimated_tokens,
                 "agent_type": s.agent_type,
-                "runner_type": s.runner_type,
-                "runner_id": s.runner_id,
+                "runner_type": runner_type,
+                "runner_id": runner_id,
                 "external_conversation_id": s.external_conversation_id,
                 "external_thread_id": s.external_thread_id,
                 "title": s.title,
@@ -296,10 +438,7 @@ pub(super) async fn handle_agent(
         }
 
         // Add history sessions (excluding those already active or expired)
-        for p in files {
-            let filename = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let (parsed_key, _timestamp) = parse_session_filename(filename);
-            let summary = bifrost_agent::persistence::scan_session_summary(&p);
+        for (p, parsed_key, summary) in history_entries {
             // Prefer the original session key from JSONL content (handles sanitized filenames)
             let session_key = summary
                 .session_key
@@ -336,6 +475,16 @@ pub(super) async fn handle_agent(
                 "history_path": p.display().to_string(),
                 "has_timeline": true,
                 "timeline_event_count": summary.event_count,
+                "agent_type": if is_external_runner_metadata(
+                    summary.runner_type.as_deref(),
+                    summary.runner_id.as_deref(),
+                ) {
+                    Some("external_cli".to_string())
+                } else {
+                    None
+                },
+                "runner_type": summary.runner_type,
+                "runner_id": summary.runner_id,
                 "run_state": history_session_list_run_state(&summary),
                 "title": summary.title.or(summary.first_user_message),
             }));
@@ -426,6 +575,9 @@ pub(super) async fn handle_agent(
             t_b.cmp(&t_a)
         });
         dedupe_unified_sessions_by_key(&mut unified);
+        if let Some(limit) = list_limit {
+            unified.truncate(limit);
+        }
 
         let active_count = unified
             .iter()
@@ -447,17 +599,24 @@ pub(super) async fn handle_agent(
             return method_not_allowed();
         }
         let data_dir = bifrost_agent::config::agent_home_dir();
-        let files = bifrost_agent::persistence::list_conversations(&data_dir, None);
-        let history: Vec<serde_json::Value> = files
+        let history_entries = match load_history_entries_blocking(data_dir, None, None).await {
+            Ok(entries) => entries,
+            Err(error) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("failed to scan agent sessions: {error}"),
+                );
+            }
+        };
+        let history: Vec<serde_json::Value> = history_entries
             .iter()
-            .map(|p| {
+            .map(|(p, parsed_key, summary)| {
                 let filename = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                let (parsed_key, timestamp) = parse_session_filename(filename);
-                let summary = bifrost_agent::persistence::scan_session_summary(p);
+                let (_filename_key, timestamp) = parse_session_filename(filename);
                 let session_key = summary
                     .session_key
                     .as_deref()
-                    .unwrap_or(&parsed_key)
+                    .unwrap_or(parsed_key)
                     .to_string();
                 serde_json::json!({
                     "path": p.display().to_string(),
@@ -471,7 +630,17 @@ pub(super) async fn handle_agent(
                     "event_count": summary.event_count,
                     "work_dir": summary.work_dir,
                     "source": summary.source,
-                    "title": summary.title.or(summary.first_user_message),
+                    "agent_type": if is_external_runner_metadata(
+                        summary.runner_type.as_deref(),
+                        summary.runner_id.as_deref(),
+                    ) {
+                        Some("external_cli".to_string())
+                    } else {
+                        None
+                    },
+                    "runner_type": summary.runner_type.clone(),
+                    "runner_id": summary.runner_id.clone(),
+                    "title": summary.title.clone().or_else(|| summary.first_user_message.clone()),
                     "start_time": summary.start_time,
                     "end_time": summary.end_time,
                     "duration_secs": summary.end_time.saturating_sub(summary.start_time),
@@ -513,28 +682,39 @@ pub(super) async fn handle_agent(
                 .map(|value| matches!(value.as_str(), "1" | "true" | "yes"))
                 .unwrap_or(false);
             let paged_request = limit.is_some() || cursor.is_some() || since.is_some() || tail;
+            let page_path = path.clone();
             let page_result = if paged_request {
-                bifrost_agent::persistence::load_conversation_events_page(
-                    &path,
-                    bifrost_agent::persistence::ConversationEventPageOptions {
-                        limit,
-                        cursor,
-                        tail,
-                        since,
-                    },
-                )
-            } else {
-                bifrost_agent::persistence::load_conversation_events(&path).map(|events| {
-                    let total_count = events.len();
-                    bifrost_agent::persistence::ConversationEventPage {
-                        events,
-                        total_count,
-                        start_index: 0,
-                        end_index: total_count,
-                        next_cursor: None,
-                        has_more: false,
-                    }
+                tokio::task::spawn_blocking(move || {
+                    bifrost_agent::persistence::load_conversation_events_page(
+                        &page_path,
+                        bifrost_agent::persistence::ConversationEventPageOptions {
+                            limit,
+                            cursor,
+                            tail,
+                            since,
+                        },
+                    )
                 })
+                .await
+                .map_err(|error| format!("history page task failed: {error}"))
+                .and_then(|result| result)
+            } else {
+                tokio::task::spawn_blocking(move || {
+                    bifrost_agent::persistence::load_conversation_events(&page_path).map(|events| {
+                        let total_count = events.len();
+                        bifrost_agent::persistence::ConversationEventPage {
+                            events,
+                            total_count,
+                            start_index: 0,
+                            end_index: total_count,
+                            next_cursor: None,
+                            has_more: false,
+                        }
+                    })
+                })
+                .await
+                .map_err(|error| format!("history load task failed: {error}"))
+                .and_then(|result| result)
             };
             match page_result {
                 Ok(page) => {
@@ -591,11 +771,31 @@ pub(super) async fn handle_agent(
             let active_status = service
                 .agent_session_manager
                 .get_active_turn_status(&session_key);
-            let detail = service
+            let detail = if let Some(detail) = service
                 .agent_session_manager
                 .get_session_detail(&session_key)
-                .or_else(|| history_session_detail(&session_key));
-            if let Some(detail) = detail {
+            {
+                Some(detail)
+            } else {
+                let history_session_key = session_key.clone();
+                match tokio::task::spawn_blocking(move || {
+                    history_session_detail(&history_session_key)
+                })
+                .await
+                {
+                    Ok(detail) => detail,
+                    Err(error) => {
+                        warn!(
+                            session_key = %session_key,
+                            error = %error,
+                            "history session detail task failed"
+                        );
+                        None
+                    }
+                }
+            };
+            if let Some(mut detail) = detail {
+                enrich_detail_with_history_runner_metadata(&mut detail);
                 return json_response(&session_detail_response(
                     detail,
                     &service.queue_manager,
@@ -717,7 +917,7 @@ pub(super) async fn handle_agent(
                     service.queue_manager.guide_status(&session_key),
                 );
                 status.pending_guide_messages = pending_guides.clone();
-                let status_context = status_context_from_agent_runner(config.runner.as_ref());
+                let status_context = status_context_from_agent_config(&config);
                 return json_response(&serde_json::json!({
                     "success": true,
                     "response": bifrost_agent::format_active_turn_status_text_with_context(
@@ -1054,8 +1254,9 @@ fn agent_session_events_response(service: &ImGatewayService) -> Response<BoxBody
             |result| async move {
                 match result {
                     Ok(event) => {
+                        let event_name = event.event_type.clone();
                         let data = serde_json::to_string(&event).ok()?;
-                        Some(format!("event: sessions_changed\ndata: {data}\n\n"))
+                        Some(format!("event: {event_name}\ndata: {data}\n\n"))
                     }
                     Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(_)) => {
                         Some(
@@ -1548,6 +1749,8 @@ fn active_status_session_detail(
         "agent_type": status.agent_type.clone(),
         "runner_type": status.runner_type.clone(),
         "runner_id": status.runner_id.clone(),
+        "model": status.model.clone(),
+        "model_provider": status.model_provider.clone(),
         "external_conversation_id": status.external_conversation_id.clone(),
         "external_thread_id": status.external_thread_id.clone(),
         "title": null,
@@ -1567,6 +1770,8 @@ fn active_status_session_detail(
 fn active_session_list_run_state(running: bool, session_run_state: &str) -> String {
     if running {
         "running".to_string()
+    } else if session_run_state == "running" {
+        "completed".to_string()
     } else {
         session_run_state.to_string()
     }
@@ -1601,6 +1806,9 @@ fn persisted_session_projection(
             return terminal_persisted_session_projection(run_state, true, true);
         }
         if state.adapter == crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER {
+            return terminal_persisted_session_projection("completed", true, false);
+        }
+        if state.latest_run_id.is_none() {
             return terminal_persisted_session_projection("completed", true, false);
         }
         return PersistedSessionProjection {
@@ -1871,6 +2079,15 @@ fn overlay_active_status_on_session_detail(
             serde_json::json!(status.runner_id.clone()),
         );
     }
+    if status.model.is_some() {
+        object.insert("model".to_string(), serde_json::json!(status.model.clone()));
+    }
+    if status.model_provider.is_some() {
+        object.insert(
+            "model_provider".to_string(),
+            serde_json::json!(status.model_provider.clone()),
+        );
+    }
     if status.external_conversation_id.is_some() {
         object.insert(
             "external_conversation_id".to_string(),
@@ -1933,6 +2150,8 @@ fn history_session_detail(session_key: &str) -> Option<bifrost_agent::SessionDet
         .session_key
         .clone()
         .unwrap_or_else(|| session_key.to_string());
+    let is_external_runner =
+        is_external_runner_metadata(summary.runner_type.as_deref(), summary.runner_id.as_deref());
     Some(bifrost_agent::SessionDetail {
         session_key: resolved_key,
         user_id: None,
@@ -1956,9 +2175,11 @@ fn history_session_detail(session_key: &str) -> Option<bifrost_agent::SessionDet
         history_version: 0,
         work_dir: summary.work_dir,
         source: summary.source,
-        agent_type: None,
-        runner_type: None,
-        runner_id: None,
+        agent_type: is_external_runner.then(|| "external_cli".to_string()),
+        runner_type: summary.runner_type,
+        runner_id: summary.runner_id,
+        model: None,
+        model_provider: None,
         external_conversation_id: None,
         external_thread_id: None,
         title: summary.title.or(summary.first_user_message),
@@ -2069,6 +2290,21 @@ async fn external_runner_session_detail(session_key: &str) -> Option<bifrost_age
         _ => "completed",
     }
     .to_string();
+    let model = run_detail
+        .as_ref()
+        .and_then(|detail| detail.metadata.get("model").cloned());
+    let model_provider = run_detail
+        .as_ref()
+        .and_then(|detail| detail.metadata.get("modelSource").cloned());
+    let usage_total_tokens = run_detail
+        .as_ref()
+        .and_then(|detail| detail.metadata.get("usageTotalTokens"))
+        .and_then(|value| value.trim().parse::<u64>().ok());
+    let estimated_tokens = run_detail
+        .as_ref()
+        .and_then(|detail| detail.metadata.get("usageInputTokens"))
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .unwrap_or_default();
     Some(bifrost_agent::SessionDetail {
         session_key: state.session_key,
         user_id: None,
@@ -2077,8 +2313,8 @@ async fn external_runner_session_detail(session_key: &str) -> Option<bifrost_age
         created_at,
         last_active_at: updated_at,
         compaction_count: 0,
-        total_tokens_used: None,
-        estimated_tokens: 0,
+        total_tokens_used: usage_total_tokens,
+        estimated_tokens,
         history_version: 0,
         work_dir: state.work_dir,
         source: "admin-api".to_string(),
@@ -2089,6 +2325,8 @@ async fn external_runner_session_detail(session_key: &str) -> Option<bifrost_age
         }),
         runner_type: Some(state.adapter),
         runner_id: state.runner_id,
+        model,
+        model_provider,
         external_conversation_id: state.external_conversation_id,
         external_thread_id: state.external_thread_id,
         title: state.title.or(state.last_user_message),
@@ -2224,6 +2462,7 @@ mod tests {
             active_session_list_run_state(session.running, &session.run_state),
             "idle"
         );
+        assert_eq!(active_session_list_run_state(false, "running"), "completed");
     }
 
     #[test]
@@ -2272,6 +2511,8 @@ mod tests {
             agent_type: None,
             runner_type: None,
             runner_id: None,
+            model: None,
+            model_provider: None,
             external_conversation_id: None,
             external_thread_id: None,
             title: Some("history title".to_string()),
@@ -2307,6 +2548,8 @@ mod tests {
             agent_type: Some("Bifrost Agent".to_string()),
             runner_type: Some("bifrost_agent".to_string()),
             runner_id: None,
+            model: Some("gpt-5".to_string()),
+            model_provider: Some("openai".to_string()),
             external_conversation_id: None,
             external_thread_id: None,
             turn_timing: None,
@@ -2423,9 +2666,10 @@ mod tests {
     }
 
     #[test]
-    fn all_external_runners_without_terminal_history_stay_running_for_remote_semantics() {
+    fn external_runners_with_run_id_without_terminal_history_stay_running_for_remote_semantics() {
         for adapter in ["codex", "chatgpt_web", "custom_cli"] {
-            let state = persisted_state("external-running", adapter, "running");
+            let mut state = persisted_state("external-running", adapter, "running");
+            state.latest_run_id = Some("run-123".to_string());
 
             let projection = persisted_session_projection(&state, None);
 
@@ -2434,6 +2678,21 @@ mod tests {
             assert_eq!(projection.state, "running", "{adapter}");
             assert_eq!(projection.run_state, "running", "{adapter}");
             assert!(!projection.stale_running, "{adapter}");
+        }
+    }
+
+    #[test]
+    fn external_runners_without_run_id_project_stale_running_to_completed() {
+        for adapter in ["codex", "chatgpt_web", "custom_cli"] {
+            let state = persisted_state("external-stale-running", adapter, "running");
+
+            let projection = persisted_session_projection(&state, None);
+
+            assert!(!projection.running, "{adapter}");
+            assert_eq!(projection.status, "ended", "{adapter}");
+            assert_eq!(projection.state, "ended", "{adapter}");
+            assert_eq!(projection.run_state, "completed", "{adapter}");
+            assert!(projection.stale_running, "{adapter}");
         }
     }
 
@@ -2476,7 +2735,8 @@ mod tests {
             .record_run_state(session_key, "completed", Some("test"), Some("external"))
             .expect("record run state");
 
-        let state = persisted_state(session_key, "codex", "running");
+        let mut state = persisted_state(session_key, "codex", "running");
+        state.latest_run_id = Some("run-current".to_string());
         let summary = persisted_state_history_summary(&state);
 
         assert!(
@@ -2806,6 +3066,170 @@ mod tests {
 
         let detail = history_session_detail("history-explicit-title").expect("history detail");
         assert_eq!(detail.title.as_deref(), Some("Bifrost Edge"));
+    }
+
+    #[test]
+    fn history_session_detail_preserves_external_runner_metadata() {
+        let _lock = AGENT_API_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = AgentApiEnvGuard::new(dir.path());
+        let sessions_dir = dir.path().join("agent/sessions/2026/05/25");
+        std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        std::fs::write(
+            sessions_dir.join("session-history-traex-runner-1779690000.jsonl"),
+            r#"{"timestamp":1,"event_type":"session_start","session_key":"history-traex-runner","content":{"source":"admin-api","runtime":"external_cli","adapter":"traex","runner_id":"traex","work_dir":"/tmp/work"}}"#
+                .to_string()
+                + "\n"
+                + r#"{"timestamp":2,"event_type":"user_message","session_key":"history-traex-runner","content":{"message":"first user title"}}"#
+                + "\n",
+        )
+        .expect("write jsonl");
+
+        let detail = history_session_detail("history-traex-runner").expect("history detail");
+        assert_eq!(detail.runner_type.as_deref(), Some("traex"));
+        assert_eq!(detail.runner_id.as_deref(), Some("traex"));
+        assert_eq!(detail.work_dir.as_deref(), Some("/tmp/work"));
+    }
+
+    #[test]
+    fn active_history_detail_uses_external_runner_binding_from_history_state() {
+        let _lock = AGENT_API_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = AgentApiEnvGuard::new(dir.path());
+        let sessions_dir = dir.path().join("agent/sessions/2026/05/25");
+        std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        let history_path = sessions_dir.join("session-active-traex-runner-1779690000.jsonl");
+        std::fs::write(
+            &history_path,
+            r#"{"timestamp":1,"event_type":"session_start","session_key":"active-traex-runner","content":{"source":"admin-api","runtime":"external_cli","adapter":"traex","runner_id":"traex","work_dir":"/tmp/work"}}"#
+                .to_string()
+                + "\n"
+                + r#"{"timestamp":2,"event_type":"user_message","session_key":"active-traex-runner","content":{"message":"hello"}}"#
+                + "\n",
+        )
+        .expect("write jsonl");
+        crate::im_gateway::session_state::remember_session_state(
+            crate::im_gateway::session_state::ImAgentSessionState {
+                session_key: "active-traex-runner".to_string(),
+                adapter: "traex".to_string(),
+                runner_id: Some("traex".to_string()),
+                external_thread_id: Some("thread-traex".to_string()),
+                history_path: Some(history_path.display().to_string()),
+                ..crate::im_gateway::session_state::ImAgentSessionState::default()
+            },
+        )
+        .expect("remember state");
+
+        let mut detail = bifrost_agent::SessionDetail {
+            session_key: "active-traex-runner".to_string(),
+            user_id: None,
+            message_count: 0,
+            user_turn_count: 0,
+            created_at: 1,
+            last_active_at: 2,
+            compaction_count: 0,
+            total_tokens_used: None,
+            estimated_tokens: 0,
+            history_version: 0,
+            work_dir: None,
+            source: "admin-api".to_string(),
+            agent_type: Some("Bifrost Agent".to_string()),
+            runner_type: Some("bifrost_agent".to_string()),
+            runner_id: None,
+            model: None,
+            model_provider: None,
+            external_conversation_id: None,
+            external_thread_id: None,
+            title: None,
+            messages: Vec::new(),
+            goal_status: None,
+            goal_objective: None,
+            history_path: Some(history_path.display().to_string()),
+            has_timeline: true,
+            timeline_event_count: 2,
+            run_state: "idle".to_string(),
+        };
+
+        enrich_detail_with_history_runner_metadata(&mut detail);
+        assert_eq!(detail.runner_type.as_deref(), Some("traex"));
+        assert_eq!(detail.runner_id.as_deref(), Some("traex"));
+        assert_eq!(detail.external_thread_id.as_deref(), Some("thread-traex"));
+        assert_eq!(detail.agent_type.as_deref(), Some("external_cli"));
+    }
+
+    #[test]
+    fn active_history_detail_uses_chatgpt_web_binding_from_history_state() {
+        let _lock = AGENT_API_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = AgentApiEnvGuard::new(dir.path());
+        let sessions_dir = dir.path().join("agent/sessions/2026/05/25");
+        std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        let history_path = sessions_dir.join("session-active-web-runner-1779690000.jsonl");
+        std::fs::write(
+            &history_path,
+            r#"{"timestamp":1,"event_type":"session_start","session_key":"active-web-runner","content":{"source":"admin-api","runtime":"external_cli","adapter":"chatgpt_web","runner_id":"web","work_dir":"/tmp/work"}}"#
+                .to_string()
+                + "\n"
+                + r#"{"timestamp":2,"event_type":"assistant_message","session_key":"active-web-runner","content":{"message":"web answer"}}"#
+                + "\n",
+        )
+        .expect("write jsonl");
+        crate::im_gateway::session_state::remember_session_state(
+            crate::im_gateway::session_state::ImAgentSessionState {
+                session_key: "active-web-runner".to_string(),
+                adapter: "chatgpt_web".to_string(),
+                runner_id: Some("web".to_string()),
+                external_conversation_id: Some("conversation-web".to_string()),
+                history_path: Some(history_path.display().to_string()),
+                ..crate::im_gateway::session_state::ImAgentSessionState::default()
+            },
+        )
+        .expect("remember state");
+
+        let mut detail = bifrost_agent::SessionDetail {
+            session_key: "active-web-runner".to_string(),
+            user_id: None,
+            message_count: 0,
+            user_turn_count: 0,
+            created_at: 1,
+            last_active_at: 2,
+            compaction_count: 0,
+            total_tokens_used: None,
+            estimated_tokens: 0,
+            history_version: 0,
+            work_dir: None,
+            source: "admin-api".to_string(),
+            agent_type: Some("Bifrost Agent".to_string()),
+            runner_type: Some("bifrost_agent".to_string()),
+            runner_id: None,
+            model: None,
+            model_provider: None,
+            external_conversation_id: None,
+            external_thread_id: None,
+            title: None,
+            messages: Vec::new(),
+            goal_status: None,
+            goal_objective: None,
+            history_path: Some(history_path.display().to_string()),
+            has_timeline: true,
+            timeline_event_count: 2,
+            run_state: "idle".to_string(),
+        };
+
+        enrich_detail_with_history_runner_metadata(&mut detail);
+        assert_eq!(detail.runner_type.as_deref(), Some("chatgpt_web"));
+        assert_eq!(detail.runner_id.as_deref(), Some("web"));
+        assert_eq!(
+            detail.external_conversation_id.as_deref(),
+            Some("conversation-web")
+        );
+        assert_eq!(detail.agent_type.as_deref(), Some("external_cli"));
     }
 }
 

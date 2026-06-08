@@ -1,7 +1,6 @@
 import {
   EMPTY_TELEMETRY,
   finishTool,
-  formatLabel,
   numberFrom,
   parsePlanSteps,
   stringFrom,
@@ -26,6 +25,26 @@ export function historyEventsToMessages(
   let pendingSteps: ProcessStep[] = [];
   let latestRunState: string | undefined;
   let lastEventWasAssistantDelta = false;
+  let externalRunnerTimeline = false;
+  const finalAssistantMessages = new Set(
+    events
+      .filter((event) => event.event_type === "assistant_message")
+      .map((event) => normalizedAssistantText(event.content.message))
+      .filter((content): content is string => Boolean(content)),
+  );
+
+  const appendProcessStep = (step: ProcessStep) => {
+    const lastMessage = messages[messages.length - 1];
+    if (lastMessage?.role === "assistant") {
+      const index = messages.length - 1;
+      messages[index] = {
+        ...messages[index],
+        processSteps: insertProcessStep(messages[index].processSteps || [], step),
+      };
+    } else {
+      pendingSteps = insertProcessStep(pendingSteps, step);
+    }
+  };
 
   const flushPendingSteps = () => {
     if (pendingSteps.length === 0) {
@@ -52,6 +71,13 @@ export function historyEventsToMessages(
   };
 
   events.forEach((event, index) => {
+    if (event.event_type === "session_start") {
+      const adapter = stringFrom(event.content.adapter);
+      externalRunnerTimeline =
+        externalRunnerTimeline ||
+        stringFrom(event.content.runtime) === "external_cli" ||
+        isExternalCliAdapter(adapter);
+    }
     if (event.event_type === "run_state_changed") {
       latestRunState = stringFrom(event.content.state) || latestRunState;
     }
@@ -73,6 +99,21 @@ export function historyEventsToMessages(
     if (event.event_type === "assistant_delta") {
       const content =
         stringFrom(event.content.message) || stringFrom(event.content.content) || "";
+      if (externalRunnerTimeline) {
+        if (
+          content.trim().length > 0 &&
+          !finalAssistantMessages.has(normalizedAssistantText(content) || "")
+        ) {
+          appendProcessStep({
+            type: "thinking",
+            summary: content,
+            status: "success",
+            startedAt: event.timestamp,
+          });
+        }
+        lastEventWasAssistantDelta = false;
+        return;
+      }
       if (content.trim().length > 0) {
         const lastMessage = messages[messages.length - 1];
         if (
@@ -140,12 +181,58 @@ export function historyEventsToMessages(
       return;
     }
     lastEventWasAssistantDelta = false;
-    if (event.event_type === "tool_result") {
-      const name = stringFrom(event.content.tool_name) || stringFrom(event.content.toolName);
+    if (event.event_type === "run_state_changed" && hasLatestStatusStep(step.summary)) {
+      return;
+    }
+    if (event.event_type === "tool_call") {
       const lastMessage = messages[messages.length - 1];
       if (lastMessage?.role === "assistant") {
         const lastSteps = [...(lastMessage.processSteps || [])];
-        const lastPendingIndex = findPendingToolStep(lastSteps, name);
+        const existingIndex = findMatchingToolStep(
+          lastSteps,
+          step.callId,
+          step.summary,
+        );
+        if (existingIndex >= 0) {
+          lastSteps[existingIndex] = {
+            ...lastSteps[existingIndex],
+            ...step,
+            result: lastSteps[existingIndex].result,
+            completedAt: lastSteps[existingIndex].completedAt,
+            durationMs: lastSteps[existingIndex].durationMs,
+            status: lastSteps[existingIndex].status || step.status,
+          };
+          messages[messages.length - 1] = {
+            ...lastMessage,
+            processSteps: lastSteps,
+          };
+          return;
+        }
+      }
+      const existingPendingIndex = findMatchingToolStep(
+        pendingSteps,
+        step.callId,
+        step.summary,
+      );
+      if (existingPendingIndex >= 0) {
+        pendingSteps[existingPendingIndex] = {
+          ...pendingSteps[existingPendingIndex],
+          ...step,
+          result: pendingSteps[existingPendingIndex].result,
+          completedAt: pendingSteps[existingPendingIndex].completedAt,
+          durationMs: pendingSteps[existingPendingIndex].durationMs,
+          status: pendingSteps[existingPendingIndex].status || step.status,
+        };
+        return;
+      }
+    }
+    if (event.event_type === "tool_result") {
+      const name = stringFrom(event.content.tool_name) || stringFrom(event.content.toolName);
+      const callId = stringFrom(event.content.call_id) || stringFrom(event.content.callId);
+      const lastMessage = messages[messages.length - 1];
+      if (lastMessage?.role === "assistant") {
+        const lastSteps = [...(lastMessage.processSteps || [])];
+        const lastPendingIndex = findPendingToolStep(lastSteps, callId, name);
         if (lastPendingIndex >= 0) {
           lastSteps[lastPendingIndex] = {
             ...lastSteps[lastPendingIndex],
@@ -164,7 +251,7 @@ export function historyEventsToMessages(
           return;
         }
       }
-      const pendingIndex = findPendingToolStep(pendingSteps, name);
+      const pendingIndex = findPendingToolStep(pendingSteps, callId, name);
       if (pendingIndex >= 0) {
         pendingSteps[pendingIndex] = {
           ...pendingSteps[pendingIndex],
@@ -179,30 +266,15 @@ export function historyEventsToMessages(
         return;
       }
     }
-    const lastMessage = messages[messages.length - 1];
-    if (lastMessage?.role === "assistant") {
-      messages[messages.length - 1] = {
-        ...lastMessage,
-        processSteps: [...(lastMessage.processSteps || []), step],
-      };
-    } else {
-      pendingSteps.push(step);
-    }
+    appendProcessStep(step);
   });
 
-  const runningState = latestRunState || options.runningState || "running";
   const shouldEnsureRunningAssistant =
     !isTerminalRunState(latestRunState) &&
     (isActiveRunState(latestRunState) ||
       isActiveRunState(options.runningState) ||
       options.ensureRunningAssistant === true);
-  if (shouldEnsureRunningAssistant && pendingSteps.length > 0 && !hasRunStateStep(pendingSteps)) {
-    pendingSteps = [runningStatusStep(runningState), ...pendingSteps];
-  }
   flushPendingSteps();
-  if (shouldEnsureRunningAssistant) {
-    ensureRunningStatusStepOnLatestProgressMessage(messages, runningState);
-  }
   if (shouldEnsureRunningAssistant && messages[messages.length - 1]?.role === "user") {
     messages.push({
       id: `history-running-${messages.length}`,
@@ -210,14 +282,45 @@ export function historyEventsToMessages(
       content: "Agent is running...",
       timestamp: events[events.length - 1]?.timestamp,
       meta: "Agent progress",
-      processSteps: [
-        runningStatusStep(runningState),
-      ],
+      processSteps: [],
     });
   }
   return hideIntermediateAssistantTimestamps(
     messages.filter((item) => item.content.trim().length > 0 || item.processSteps?.length),
   );
+
+  function hasLatestStatusStep(summary: string) {
+    const lastMessage = messages[messages.length - 1];
+    const lastSteps = lastMessage?.role === "assistant" ? lastMessage.processSteps || [] : [];
+    const latestStep =
+      lastSteps.length > 0
+        ? lastSteps[lastSteps.length - 1]
+        : pendingSteps[pendingSteps.length - 1];
+    return latestStep?.type === "status" && latestStep.summary === summary;
+  }
+}
+
+function insertProcessStep(steps: ProcessStep[], step: ProcessStep) {
+  if (step.type !== "thinking") {
+    return [...steps, step];
+  }
+  let insertAt = steps.length;
+  while (
+    insertAt > 0 &&
+    steps[insertAt - 1]?.type === "tool" &&
+    steps[insertAt - 1]?.status === "running"
+  ) {
+    insertAt -= 1;
+  }
+  return [...steps.slice(0, insertAt), step, ...steps.slice(insertAt)];
+}
+
+function normalizedAssistantText(value: unknown) {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return normalized.length > 0 ? normalized : undefined;
 }
 
 function hideIntermediateAssistantTimestamps(messages: ChatMessage[]) {
@@ -253,41 +356,6 @@ function hideIntermediateAssistantTimestamps(messages: ChatMessage[]) {
   return next;
 }
 
-function ensureRunningStatusStepOnLatestProgressMessage(
-  messages: ChatMessage[],
-  runningState: string,
-) {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message.role !== "assistant") {
-      continue;
-    }
-    if (!message.processSteps?.length) {
-      continue;
-    }
-    if (hasRunStateStep(message.processSteps)) {
-      return;
-    }
-    messages[index] = {
-      ...message,
-      processSteps: [runningStatusStep(runningState), ...message.processSteps],
-    };
-    return;
-  }
-}
-
-function runningStatusStep(state: string): ProcessStep {
-  return {
-    type: "status",
-    summary: `Run state: ${formatLabel(state)}`,
-    status: "running",
-  };
-}
-
-function hasRunStateStep(steps: ProcessStep[]) {
-  return steps.some((step) => step.type === "status" && step.summary.startsWith("Run state:"));
-}
-
 function isActiveRunState(state?: string) {
   return isRunStateActive(state);
 }
@@ -298,17 +366,7 @@ function isTerminalRunState(state?: string) {
 
 function historyEventToProcessStep(event: HistoryEvent): ProcessStep | null {
   if (event.event_type === "run_state_changed") {
-    const state = stringFrom(event.content.state) || "running";
-    return {
-      type: "status",
-      summary: `Run state: ${formatLabel(state)}`,
-      detail: stringFrom(event.content.source_channel),
-      status: isActiveRunState(state)
-        ? "running"
-        : state === "failed" || state === "cancelled"
-          ? "failed"
-          : "success",
-    };
+    return null;
   }
   if (event.event_type === "plan_updated" && Array.isArray(event.content.plan)) {
     return {
@@ -327,6 +385,7 @@ function historyEventToProcessStep(event: HistoryEvent): ProcessStep | null {
       summary: name,
       detail: stringFrom(event.content.arguments),
       args: stringFrom(event.content.arguments),
+      callId: stringFrom(event.content.call_id) || stringFrom(event.content.callId),
       status: "running",
       startedAt: event.timestamp,
     };
@@ -337,6 +396,7 @@ function historyEventToProcessStep(event: HistoryEvent): ProcessStep | null {
       type: "tool",
       summary: name,
       result: stringFrom(event.content.result),
+      callId: stringFrom(event.content.call_id) || stringFrom(event.content.callId),
       status: event.content.success === false ? "failed" : "success",
       completedAt: event.timestamp,
     };
@@ -355,10 +415,36 @@ function normalizeTimestampSeconds(timestamp: number) {
   return timestamp > 1_000_000_000_000 ? timestamp / 1000 : timestamp;
 }
 
-function findPendingToolStep(steps: ProcessStep[], name?: string) {
+function isExternalCliAdapter(adapter?: string) {
+  return adapter === "codex" || adapter === "traex" || adapter === "mock" || adapter === "custom";
+}
+
+function findMatchingToolStep(steps: ProcessStep[], callId?: string, name?: string) {
   for (let index = steps.length - 1; index >= 0; index -= 1) {
     const step = steps[index];
-    if (step.type === "tool" && step.status === "running" && (!name || step.summary === name)) {
+    if (step.type !== "tool") {
+      continue;
+    }
+    if (callId && step.callId === callId) {
+      return index;
+    }
+    if (!callId && name && step.summary === name) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function findPendingToolStep(steps: ProcessStep[], callId?: string, name?: string) {
+  for (let index = steps.length - 1; index >= 0; index -= 1) {
+    const step = steps[index];
+    if (step.type !== "tool" || step.status !== "running") {
+      continue;
+    }
+    if (callId && step.callId === callId) {
+      return index;
+    }
+    if (!callId && name && step.summary === name) {
       return index;
     }
   }

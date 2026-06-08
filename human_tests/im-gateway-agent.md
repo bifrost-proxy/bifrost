@@ -2430,14 +2430,37 @@ rm -rf ./.bifrost-test
   - 新一轮 running 的 process steps 不会挂到上一轮 assistant 回答上。
   - 如果第一条 timeline 事件就是工具执行，工具摘要前仍要展示一段 assistant 过程说明，不能出现空白 assistant 段。
   - 工具摘要默认低对比度折叠展示，不在摘要上下保留大块空白。
+  - ChatUI 过程块不展示 `Run state: Running` 这类内部状态行；整体状态只通过顶部状态标签和线程摘要表达。
   - 当整体 run 已结束后，即使历史里残留 running 状态事件，展开工具详情也不能继续展示 `Run state: Running` 或 `(N active)`。
   - 压缩摘要模型请求如果遇到 429、timeout、connection、overloaded、5xx 等可恢复错误，按时间梯度最多重试 5 次；仍失败后终止当前任务并交给人工处理，不能继续无限发送消息。
   - 压缩摘要模型请求如果遇到 `context_length_exceeded` / context window / token limit 等已知超窗错误，先降级裁剪较旧 history，再重试生成摘要；仍无法压缩时终止当前任务，不能循环触发新消息。
 - **清理步骤**:
   - 关闭 Playwright 浏览器；如手动启动过服务，停止对应临时端口服务并删除临时数据目录。
-- **执行记录（2026-05-28）**: PASS — 创建用例后立即执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "running history timeline" --reporter=line` 通过。测试构造上一轮 user/assistant 后追加当前轮 user，thread summary 标记 `running=true`，首次 history 读取没有 `run_state_changed` 或 tool 事件，随后轮询读取到 `assistant_delta`、`exec_command` 的 `tool_call/tool_result` 和下一段 `assistant_delta`；断言最后一个 user 下方出现新的 assistant process 卡片，展开后可见 `Run state: Running`、`exec_command`、`cargo test` 和 `still running output`，消息底部在时间上方保留 `Thinking...` 提示。补充执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "deep link|active timeline process|running history timeline" --reporter=line` 通过，4 条真实 Chromium UI 回归覆盖：第一条事件为工具调用时会显示 `我先执行一步检查。` 作为 assistant 过程说明；工具摘要默认折叠且紧贴文本不产生大块空白；完成态 process block 展开后不再显示 `Run state: Running` 或 `active`；running history 仍保留底部 `Thinking...` 提示。再次补充执行 `WEB_PORT=3000 BACKEND_PORT=8800 pnpm --dir web dev --host 127.0.0.1`，真实打开 `http://127.0.0.1:3000/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=admin-chat-1779949709059&view=active` 并量测两个 `agent-chat-process-block`：实际高度均为 `18.84375px`，`marginTop=0px`、`marginBottom=2px`、`paddingTop=0px`、`paddingBottom=0px`，确认截图中的 `750x22.85` 多余盒模型空间已移除。
+- **执行记录（2026-05-28）**: PASS — 创建用例后立即执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "running history timeline" --reporter=line` 通过。测试构造上一轮 user/assistant 后追加当前轮 user，thread summary 标记 `running=true`，首次 history 读取没有 `run_state_changed` 或 tool 事件，随后轮询读取到 `assistant_delta`、`exec_command` 的 `tool_call/tool_result` 和下一段 `assistant_delta`；断言最后一个 user 下方出现新的 assistant process 卡片，展开后可见 `exec_command`、`cargo test` 和 `still running output`，消息底部在时间上方保留 `Thinking...` 提示。补充执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "deep link|active timeline process|running history timeline" --reporter=line` 通过，4 条真实 Chromium UI 回归覆盖：第一条事件为工具调用时会显示 `我先执行一步检查。` 作为 assistant 过程说明；工具摘要默认折叠且紧贴文本不产生大块空白；完成态 process block 展开后不再显示 `Run state: Running` 或 `active`；running history 仍保留底部 `Thinking...` 提示。再次补充执行 `WEB_PORT=3000 BACKEND_PORT=8800 pnpm --dir web dev --host 127.0.0.1`，真实打开 `http://127.0.0.1:3000/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=admin-chat-1779949709059&view=active` 并量测两个 `agent-chat-process-block`：实际高度均为 `18.84375px`，`marginTop=0px`、`marginBottom=2px`、`paddingTop=0px`、`paddingBottom=0px`，确认截图中的 `750x22.85` 多余盒模型空间已移除。
 - **压缩命令回归执行记录（2026-05-28）**: PASS — 执行 `pnpm --dir web exec tsc -b` 通过；执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "compact as a control command" --reporter=line`，真实 Chromium 验证 slash 面板默认选中 `/compact`、上下键可切到 Runner 再切回命令、回车直接触发 `message:"/compact"` 请求且输入框清空，消息区没有 `/compact` 用户气泡、没有 `我先执行一步检查。`、没有工具输出，只展示 `上下文已自动压缩`；同一用例继续手动输入 `/compact` 点击发送，断言仍不生成用户气泡。执行 `cargo test -p bifrost-agent test_unknown_slash_input_falls_back_to_normal_chat_message -- --nocapture` 通过，验证 `/demo` 调用模型并作为普通用户消息进入 history；执行 `cargo test -p bifrost-agent test_manual_compaction_command_does_not_record_user_message -- --nocapture` 通过，验证 manual compaction 只记录 `compaction` 事件，不记录 `/compact` user_message。
 - **压缩失败回归执行记录（2026-05-28）**: PASS — 使用 `bifrost traffic get 811767 --request-body --response-body --format json-pretty` 获取真实失败请求，确认压缩摘要请求返回 `400 context_length_exceeded`，服务端提示配置上限 `922000` tokens、实际请求 `1714286` tokens。执行 `cargo test -p bifrost-agent test_compaction_ -- --nocapture` 通过，覆盖压缩请求发出前按 safe budget 预裁剪、`context_length_exceeded` 后批量降级裁剪 history 再重试、transient/429/5xx 类错误最多 5 次退避重试后失败且不改写 history；执行 `cargo test -p bifrost-agent test_is_retryable_error -- --nocapture` 通过，确认普通模型请求把 `429` / rate limit / timeout / connection 等归类为 retryable。
+
+### TC-IMA-132B: Agent Chat 运行中 history 由 SSE 推送增量更新且不热刷线程列表
+
+- **前置条件**:
+  - WebUI 打开绑定 `history_path` 的 running Agent Chat history 页面。
+  - 至少准备两个不同的 running 线程 A/B，二者都有不同的 `session_key` 与 `history_path`。
+  - 后端 `sessions/events` SSE 可推送 `timeline_changed`，payload 包含 `sessionKey`、`historyPath` 与 `endIndex`。
+- **操作步骤**:
+  1. 打开线程 A 的 history URL。
+  2. 让 SSE 先推送线程 B 的 `timeline_changed`。
+  3. 再让 SSE 推送线程 A 的 `timeline_changed`，且 A 的 JSONL 新增 assistant delta 与工具事件。
+  4. 观察消息区、Network 请求和 Bifrost 主进程 CPU。
+  5. 模拟 SSE lagged 或 `start_index != 本地 endIndex`，观察是否只触发一次 tail/list 校准。
+- **预期结果**:
+  - 线程 B 的事件不会修改线程 A 消息区，也不会把 running/thinking 状态写到当前对话。
+  - 线程 A 的事件触发 history `since=<本地 endIndex>` 增量请求，并把新增模型内容/工具摘要追加到当前过程块。
+  - 正常运行中不会每 1-2 秒请求 `/api/im-gateway/agent/sessions/all`；该接口只在初始加载、页面重新可见、`sessions_changed`、lagged 或 index 缺口校准时调用。
+  - 停留在 running Chat 页面时，主进程不应因前端热刷线程列表长期接近 100% CPU。
+- **清理步骤**:
+  - 关闭浏览器；停止临时端口服务并删除临时数据目录。
+- **执行记录（2026-06-08）**: PASS — 执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts -g "running history timeline|terminal SSE|stale running history responses|active view restores|completed history override|initial load" --reporter=line`，6 条真实 Chromium UI 回归通过。用例显式先推送其他线程 `timeline_changed`，再推送当前 history 的 `timeline_changed`，断言消息区只追加当前线程内容，工具详情可展开；终态 SSE 使 Ready/Send 状态收敛且不热刷 `sessions/all`；完成态过程块默认折叠；idle summary 可覆盖 stale running history；快速切换线程时延迟返回的旧 history 不覆盖当前消息区；active view 刷新后可从同 session 的 `history_path` 恢复 running timeline。执行 `pnpm --dir web exec tsc -b` 通过；执行 `cargo test -p bifrost-agent test_session_manager_broadcasts_session_list_changes -- --nocapture` 通过，验证 `timeline_changed` 事件携带 `history_path/end_index`。
+- **执行记录（2026-06-08）**: PASS — 使用默认数据目录重启当前源码 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 cargo run --bin bifrost -- start -p 9900 -H 0.0.0.0 --allow-lan --daemon --unsafe-ssl --skip-cert-check --no-system-proxy`，PID `16484`。在 in-app browser 打开 `http://localhost:9900/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=admin-chat-1779725144963&view=active`，通过 Web runner 发起 `SSE 成功路径回归测试：请只回复 OK。`，不刷新页面时 UI 从 `Runner: web / Running` 自动收敛为 `Runner: web / Ready`，消息区显示 `已处理 53s OK`，不包含 `Generating...` 或 `Run state:`；刷新后仍为 `Ready` 且无残留 running/thinking。运行中采样主进程 PID `16484` CPU 多数为 0-2%，短峰值 38%，未复现停留 Chat 页面持续 100%。
 
 ### TC-IMA-133: Agent Chat Threads 通过长连接感知 IM 新 Loop
 
@@ -2631,3 +2654,76 @@ rm -rf ./.bifrost-test
 - **清理步骤**:
   - 删除临时数据目录；停止 mock Feishu 服务。
 - **执行记录（2026-06-06）**: PASS — 创建用例后立即执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin drain_ready_events_after_turn_preserves_late_message_as_guide --lib`，真实构造 IM event channel、Feishu owner 文本事件、progress card mock 和 queue manager，验证 turn-end ready event 被 drain 到 guide，随后合并入 queue 并可作为下一轮消息 pop 出。
+
+### TC-IMA-142: Agent Chat 对话图片全屏预览与连续切换
+
+- **前置条件**:
+  - 使用当前源码启动 WebUI，或使用 Playwright mock Agent Chat session。
+  - 会话中至少包含 3 张图片：assistant Markdown 图片、user `content_parts.image_url` 图片、后续 assistant Markdown 图片。
+  - 测试需覆盖亮色和暗色主题，不复用用户重要历史。
+- **操作步骤**:
+  1. 打开 `/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=<image-session>&view=active`。
+  2. 点击第一张 assistant Markdown 图片缩略图。
+  3. 在全屏预览浮层中点击右侧箭头，切换到下一张图片。
+  4. 按键盘 `ArrowRight` 切换到第三张图片，再按 `ArrowLeft` 返回第二张图片。
+  5. 点击图片区外的空白遮罩关闭浮层。
+  6. 切换到暗色主题，再次点击图片打开浮层，并点击右上角关闭按钮关闭。
+- **预期结果**:
+  - 点击对话内图片后出现全屏浮层，图片居中放大展示，右上角有关闭按钮。
+  - 浮层打开和关闭有 opacity/scale 过渡动画。
+  - 左右箭头按钮和键盘方向键都能按整个对话记录中的图片顺序切换，不按单轮对话分组。
+  - 点击非图片空白区或关闭按钮均可关闭浮层。
+  - 关闭后页面自动滚动回当前预览图片所在位置。
+  - 亮色和暗色主题下缩略图、遮罩、关闭按钮、左右箭头都清晰可见。
+- **清理步骤**:
+  - 删除 Playwright 临时 test-results；如手动启动过 Bifrost，停止对应临时数据目录服务。
+- **执行记录（2026-06-08）**: PASS — 创建用例后立即执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts -g "renders local generated image attachments" --reporter=line` 通过。用例构造包含 assistant Markdown 图片、user `content_parts.image_url` 图片、后续 assistant Markdown 图片的会话，验证点击图片打开全屏浮层，右箭头、`ArrowRight`、`ArrowLeft` 按整个会话图片顺序切换，点击遮罩关闭并触发 `scrollIntoView` 回到当前图片；随后切换暗色主题，再次打开并通过右上角关闭按钮关闭。
+
+### TC-IMA-143: IM 通道 `/cwd` 指令切换工作目录
+
+- **前置条件**:
+  - 使用当前源码和临时数据目录启动 Bifrost，不复用用户真实 `~/.bifrost` 数据。
+  - 创建一个启用 Agent 的 Feishu Provider，owner 为 `ou_owner`，初始 `agent_config.work_dir` 指向一个存在的临时目录。
+  - 准备另一个存在的临时目录作为目标工作目录，并准备一个确定不存在的绝对路径用于错误分支。
+- **操作步骤**:
+  1. 通过 IM mock inbound 入口向该 Provider 注入文本消息：`/cwd <目标临时目录绝对路径>`。
+  2. 轮询 `GET /_bifrost/api/im-gateway/providers/<provider_id>`。
+  3. 检查 Provider 的 `agent_config.work_dir` 已更新为目标目录。
+  4. 再注入文本消息：`/cwd /definitely/not/exist/bifrost-im-cwd-e2e`。
+  5. 再次读取 Provider 配置。
+  6. 在 Web Agent Chat 或 Chat Gateway 中输入同样的 `/cwd <路径>`，确认该入口不执行 IM 指令语义。
+- **预期结果**:
+  - IM 通道收到合法 `/cwd <绝对路径>` 后，不进入模型，直接切换当前 Provider 工作目录。
+  - 成功切换时返回人类可读提示，下一条 IM 消息使用新的工作目录。
+  - 当前 IM session 的旧 history / 外部 Runner 线程状态被清理，避免重启后恢复到旧目录。
+  - 路径不存在、相对路径或文件路径时返回错误提示，且不修改 Provider 工作目录。
+  - `/cwd` 指令只在 IM 通道生效，不注册为 WebUI/API Agent slash 命令。
+- **清理步骤**:
+  - 停止临时 Bifrost 服务；删除临时数据目录和临时工作目录。
+- **执行记录（2026-06-08）**: PASS — 创建用例后立即执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin im_cwd_command --lib -- --nocapture`，覆盖合法绝对目录、缺少路径、相对路径、不存在路径、文件路径、Provider work_dir 持久化和 idle session 重置；执行 `SKIP_FRONTEND_BUILD=1 cargo run -p bifrost-e2e -- --test im_gateway_mock_inbound_cwd_command_switches_provider_work_dir --test-timeout 180`，通过 mock inbound IM 入口注入 `/cwd <临时目录>` 并轮询 Provider API 确认切换成功，再注入不存在路径确认不会覆盖为非法目录。
+
+### TC-IMA-144: IM 通道 `/runner` 指令查看与切换 Runner
+
+- **前置条件**:
+  - 使用当前源码和临时数据目录启动 Bifrost，不复用用户真实 `~/.bifrost` 数据。
+  - 创建一个启用 Agent 的 Feishu Provider，owner 为 `ou_owner`。
+  - External CLI runner 配置中至少存在 `codex` 和 `traex` 两个 runner；内置 Runner 名称固定为 `bifrost_agent`。
+- **操作步骤**:
+  1. 通过 IM mock inbound 入口向该 Provider 注入文本消息：`/runner`。
+  2. 检查 IM 回复列出 `bifrost_agent`、`codex`、`traex` 等支持的 Runner 名称。
+  3. 注入文本消息：`/runner traex`。
+  4. 读取 `GET /_bifrost/api/im-gateway/providers/<provider_id>`，检查 Provider 的 `agent_config.runner` 已更新为 `traex`。
+  5. 注入文本消息：`/runner missing-runner`。
+  6. 再次读取 Provider 配置，确认仍保持 `traex`。
+  7. 注入文本消息：`/runner bifrost_agent`，检查 Provider 的 `agent_config.runner` 显式更新为 `bifrost_agent`。
+  8. 在 Web Agent Chat 或 Chat Gateway 中输入同样的 `/runner traex`，确认该入口不执行 IM 指令语义。
+- **预期结果**:
+  - `/runner` 不进入模型，直接返回支持的 Runner 名称列表。
+  - `/runner <Runner>` 只接受存在的 Runner 或 `bifrost_agent`。
+  - 切换成功后当前 IM Provider 绑定的 Runner 被持久化，下一条 IM 消息使用新的 Runner。
+  - 切换时当前 IM session 的旧 history / 外部 Runner 线程状态被清理，避免恢复旧 Runner 线程。
+  - 未知 Runner 返回错误并附带支持列表，不修改 Provider 配置。
+  - `/runner` 指令只在 IM 通道生效，不注册为 WebUI/API Agent slash 命令。
+- **清理步骤**:
+  - 停止临时 Bifrost 服务；删除临时数据目录。
+- **执行记录（2026-06-08）**: PASS — 创建用例后立即执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin im_runner_command --lib -- --nocapture`，覆盖 `/runner` 解析、列表输出、未知 Runner、切换外部 Runner、切回内置 Runner、Provider runner 持久化和 idle session 重置；执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin im_help_includes_im_only_commands_without_dropping_builtins --lib -- --nocapture`，验证 IM `/help` 同步展示 `/runner [Runner]`。

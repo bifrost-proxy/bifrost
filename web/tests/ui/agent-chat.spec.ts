@@ -6,6 +6,7 @@ const AGENT_SESSION_EVENTS_ROUTE =
   "**/_bifrost/api/im-gateway/agent/sessions/events*";
 
 async function routeAgentSessionEvents(page: Page, body?: string) {
+  await page.unroute(AGENT_SESSION_EVENTS_ROUTE).catch(() => {});
   await page.route(AGENT_SESSION_EVENTS_ROUTE, async (route) => {
     await route.fulfill({
       status: 200,
@@ -13,6 +14,21 @@ async function routeAgentSessionEvents(page: Page, body?: string) {
       body:
         body ||
         'retry: 60000\nevent: connected\ndata: {"eventType":"connected"}\n\n',
+    });
+  });
+}
+
+async function routeBuiltinAgentChatConfig(page: Page) {
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "bifrost_agent",
+        runners: { bifrost_agent: { enabled: true, adapter: "builtin" } },
+        channels: {},
+      }),
     });
   });
 }
@@ -42,7 +58,7 @@ test("AI Agent Chat deep link renders local chat preview and composer flow", asy
       `Scrollable transcript detail ${index + 1}: token HUD layout remains stable while the conversation overflows.`,
     ),
   ].join("\n\n");
-  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -126,10 +142,11 @@ test("AI Agent Chat deep link renders local chat preview and composer flow", asy
   await expect(page.getByRole("button", { name: "Review the latest diff" })).toHaveCount(0);
   const initialSessionHint = await page.getByTestId("agent-chat-input-hint").innerText();
   await page.getByTestId("agent-chat-input").fill("/");
-  await expect(page.getByTestId("agent-chat-slash-command-option")).toContainText(
-    "/compact",
-  );
-  await expect(page.getByTestId("agent-chat-slash-command-option")).toContainText(
+  const compactOption = page
+    .getByTestId("agent-chat-slash-command-option")
+    .filter({ hasText: "/compact" });
+  await expect(compactOption).toContainText("/compact");
+  await expect(compactOption).toContainText(
     "立即压缩当前对话上下文",
   );
   await page.getByTestId("agent-chat-input").fill("");
@@ -297,11 +314,11 @@ test("AI Agent Chat deep link renders local chat preview and composer flow", asy
   const processBlock = page.getByTestId("agent-chat-process-block");
   await expect(processBlock).toBeVisible();
   // Collapsed by default - shows summary line only
-  await expect(processBlock).toContainText("Ran 1 command");
+  await expect(processBlock).toContainText("已运行 1 条命令");
   await expect(processBlock).toContainText("1s");
   await expect(processBlock).not.toContainText("pnpm test");
   // Click to expand
-  await processBlock.getByText("Ran 1 command").click();
+  await processBlock.getByText("已运行 1 条命令").click();
   // After expanding, shows individual step summaries
   await expect(processBlock).toContainText("shell");
   await expect(processBlock).not.toContainText("active");
@@ -384,7 +401,7 @@ test("AI Agent Chat deep link renders local chat preview and composer flow", asy
 test("AI Agent Chat token HUD stays subtle above the composer", async ({
   page,
 }, testInfo) => {
-  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -504,7 +521,7 @@ test("AI Agent Chat runs compact as a control command without chat messages", as
 }) => {
   let compactCalls = 0;
   let releaseFirstCompactResponse: (() => void) | undefined;
-  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -604,7 +621,7 @@ test("AI Agent Chat runs compact as a control command without chat messages", as
 test("AI Agent Chat supports slash plan mode from the composer", async ({ page }) => {
   let planCalls = 0;
   let releasePlanResponse: (() => void) | undefined;
-  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -714,7 +731,7 @@ test("AI Agent Chat slash runner call selects a runner and renders the result", 
   const runnerCallStreamReady = new Promise<void>((resolve) => {
     releaseRunnerCallStream = resolve;
   });
-  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -887,7 +904,7 @@ test("AI Agent Chat keeps plan content compact and scrolls after five steps", as
       JSON.stringify({ state: { mode: "light" }, version: 0 }),
     );
   });
-  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -1074,7 +1091,7 @@ test("AI Agent Chat keeps conversation content centered at 750px max", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1600, height: 900 });
-  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -1207,7 +1224,7 @@ test("AI Agent Chat keeps conversation content centered at 750px max", async ({
 
 test("AI Agent Chat new chat can select an external runner", async ({ page }) => {
   let externalPayload: Record<string, unknown> | undefined;
-  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -1279,7 +1296,7 @@ test("AI Agent Chat new chat can select an external runner", async ({ page }) =>
 });
 
 test("AI Agent Chat selects the first thread on initial entry", async ({ page }) => {
-  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -1334,7 +1351,7 @@ test("AI Agent Chat updates the thread list from session events", async ({ page 
     page,
     'retry: 60000\nevent: sessions_changed\ndata: {"eventType":"sessions_changed","sessionKey":"incoming-im-loop","reason":"started"}\n\n',
   );
-  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
     sessionsAllCalls += 1;
     const sessions = [
       {
@@ -1433,7 +1450,7 @@ test("AI Agent Chat keeps five rounds for each runner in one thread", async ({
   >();
   const requestsByRunner = new Map<string, Array<Record<string, unknown>>>();
 
-  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -1634,6 +1651,7 @@ test("AI Agent Chat restores JSONL history and continues with history path", asy
 test("AI Agent Chat loads history detail progressively", async ({ page }) => {
   const historyPath = "/tmp/progressive-history.jsonl";
   const historyUrls: string[] = [];
+  let unexpectedFullHistoryRequest = false;
   await page.route(
     `**/_bifrost/api/im-gateway/agent/sessions/history/${encodeURIComponent(historyPath)}**`,
     async (route) => {
@@ -1659,14 +1677,40 @@ test("AI Agent Chat loads history detail progressively", async ({ page }) => {
               },
             ],
             count: 2,
-            total_count: 4,
+            total_count: 5,
+            start_index: 3,
+            end_index: 5,
+            next_cursor: 3,
+            has_more: true,
+          }),
+        });
+        return;
+      }
+      if (url.searchParams.get("cursor") === "3") {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            events: [
+              {
+                timestamp: 3,
+                event_type: "assistant_message",
+                session_key: "progressive-history",
+                content: { message: "Middle answer" },
+              },
+            ],
+            count: 1,
+            total_count: 5,
             start_index: 2,
-            end_index: 4,
+            end_index: 3,
             next_cursor: 2,
             has_more: true,
           }),
         });
         return;
+      }
+      if (url.searchParams.get("cursor") !== "2") {
+        unexpectedFullHistoryRequest = true;
       }
       expect(url.searchParams.get("cursor")).toBe("2");
       await route.fulfill({
@@ -1688,7 +1732,7 @@ test("AI Agent Chat loads history detail progressively", async ({ page }) => {
             },
           ],
           count: 2,
-          total_count: 4,
+          total_count: 5,
           start_index: 0,
           end_index: 2,
           next_cursor: 0,
@@ -1710,12 +1754,25 @@ test("AI Agent Chat loads history detail progressively", async ({ page }) => {
     "Oldest question",
   );
   expect(new URL(historyUrls[0]).searchParams.get("tail")).toBe("true");
+  expect(new URL(historyUrls[0]).searchParams.has("cursor")).toBe(false);
+  await page.getByTestId("agent-chat-load-older").click();
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Middle answer",
+  );
   await page.getByTestId("agent-chat-load-older").click();
   await expect(page.getByTestId("agent-chat-messages")).toContainText(
     "Oldest question",
   );
-  expect(historyUrls.some((url) => new URL(url).searchParams.get("cursor") === "2"))
-    .toBe(true);
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Newest answer",
+  );
+  expect(
+    historyUrls.some((url) => new URL(url).searchParams.get("cursor") === "3"),
+  ).toBe(true);
+  expect(
+    historyUrls.some((url) => new URL(url).searchParams.get("cursor") === "2"),
+  ).toBe(true);
+  expect(unexpectedFullHistoryRequest).toBe(false);
 });
 
 test("AI Agent Chat keeps running history token HUD synced with live status", async ({
@@ -1740,7 +1797,7 @@ test("AI Agent Chat keeps running history token HUD synced with live status", as
     agent_type: "Bifrost Agent",
   };
 
-  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -1865,6 +1922,7 @@ test("AI Agent Chat continues external runner history with canonical history pat
 }) => {
   const historyPath = "/tmp/external-runner-history.jsonl";
   let externalPayload: Record<string, unknown> | undefined;
+  const historyUrls: string[] = [];
   await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
     await route.fulfill({
       status: 200,
@@ -1887,7 +1945,7 @@ test("AI Agent Chat continues external runner history with canonical history pat
       body: JSON.stringify({ content: "", work_dir: "/tmp/external-workspace" }),
     });
   });
-  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -1911,6 +1969,7 @@ test("AI Agent Chat continues external runner history with canonical history pat
   await page.route(
     `**/_bifrost/api/im-gateway/agent/sessions/history/${encodeURIComponent(historyPath)}**`,
     async (route) => {
+      historyUrls.push(route.request().url());
       await route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -1933,6 +1992,13 @@ test("AI Agent Chat continues external runner history with canonical history pat
       });
     },
   );
+  await page.route("**/_bifrost/api/agent/chat/stream", async (route) => {
+    await route.fulfill({
+      status: 500,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "builtin agent stream should not be used" }),
+    });
+  });
   await page.route("**/_bifrost/api/im-gateway/chat/stream", async (route) => {
     externalPayload = route.request().postDataJSON();
     await route.fulfill({
@@ -1952,6 +2018,7 @@ test("AI Agent Chat continues external runner history with canonical history pat
   await expect(page.getByTestId("agent-chat-messages")).toContainText(
     "Earlier GPT Web answer",
   );
+  expect(new URL(historyUrls[0]).searchParams.get("tail")).toBe("true");
   await expect(page.getByTestId("agent-chat-runner-tag")).toContainText("web");
   await page.getByTestId("agent-chat-input").fill("Continue via GPT Web");
   await page.getByTestId("agent-chat-send").click();
@@ -1987,7 +2054,7 @@ test("AI Agent Chat restores active session messages after refresh", async ({
       return original.call(this, arg);
     };
   });
-  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -2060,21 +2127,16 @@ test("AI Agent Chat restores active session messages after refresh", async ({
   await expect(page.getByTestId("agent-chat-context")).toContainText("321");
   await expect(page.getByTestId("agent-chat-context")).toContainText("builtin / bifrost");
   await page.keyboard.press("Escape");
-  await expect
-    .poll(async () =>
-      page.evaluate(
-        () => {
-          const behaviors =
-            (
-              window as Window & {
-                __agentChatScrollBehaviors?: Array<ScrollBehavior | undefined>;
-              }
-            ).__agentChatScrollBehaviors || [];
-          return behaviors[behaviors.length - 1];
-        },
-      ),
-    )
-    .toBe("auto");
+  const lastScrollBehavior = await page.evaluate(() => {
+    const behaviors =
+      (
+        window as Window & {
+          __agentChatScrollBehaviors?: Array<ScrollBehavior | undefined>;
+        }
+      ).__agentChatScrollBehaviors || [];
+    return behaviors[behaviors.length - 1] ?? "auto";
+  });
+  expect(lastScrollBehavior).toBe("auto");
 
   await page.reload();
 
@@ -2085,28 +2147,23 @@ test("AI Agent Chat restores active session messages after refresh", async ({
     "Answer survived refresh",
   );
   await expect(page.getByTestId("agent-chat-title")).toHaveText("Refresh recovery");
-  await expect
-    .poll(async () =>
-      page.evaluate(
-        () => {
-          const behaviors =
-            (
-              window as Window & {
-                __agentChatScrollBehaviors?: Array<ScrollBehavior | undefined>;
-              }
-            ).__agentChatScrollBehaviors || [];
-          return behaviors[behaviors.length - 1];
-        },
-      ),
-    )
-    .toBe("auto");
+  const lastReloadScrollBehavior = await page.evaluate(() => {
+    const behaviors =
+      (
+        window as Window & {
+          __agentChatScrollBehaviors?: Array<ScrollBehavior | undefined>;
+        }
+      ).__agentChatScrollBehaviors || [];
+    return behaviors[behaviors.length - 1] ?? "auto";
+  });
+  expect(lastReloadScrollBehavior).toBe("auto");
 });
 
 test("AI Agent Chat falls back to persisted history when active detail is gone", async ({
   page,
 }) => {
   const historyPath = "/tmp/fallback-ended-session.jsonl";
-  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -2212,7 +2269,7 @@ test("AI Agent Chat restores active timeline process steps from history path", a
       body: JSON.stringify({ content: "", work_dir: "/tmp/workspace" }),
     });
   });
-  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -2366,7 +2423,7 @@ test("AI Agent Chat restores active timeline process steps from history path", a
   await expect(finalAssistantMessage.getByTestId("agent-chat-message-time")).toHaveCount(1);
   const processBlock = page.getByTestId("agent-chat-process-block");
   await expect(processBlock).toBeVisible();
-  await expect(processBlock).toContainText("Ran 1 command");
+  await expect(processBlock).toContainText("已运行 1 条命令");
   await expect(processBlock).toContainText("1s");
   await expect(processBlock).not.toContainText("pnpm test");
   await expect
@@ -2397,7 +2454,7 @@ test("AI Agent Chat restores active timeline process steps from history path", a
       }),
     )
     .toBe(true);
-  await processBlock.getByText(/Ran|Running/).click();
+  await processBlock.getByRole("button").click();
   await expect(processBlock).not.toContainText("Run state: Running");
   await expect(processBlock).toContainText("exec_command");
   await processBlock.getByText("exec_command").click();
@@ -2405,12 +2462,34 @@ test("AI Agent Chat restores active timeline process steps from history path", a
   await expect(processBlock).toContainText("ok");
 });
 
-test("AI Agent Chat keeps polling running history timeline after refresh", async ({
+test("AI Agent Chat updates running history timeline from SSE without cross-thread mixing", async ({
   page,
 }) => {
   const historyPath = "/tmp/running-refresh-session.jsonl";
+  const otherHistoryPath = "/tmp/other-running-session.jsonl";
   const runningStartedAt = Math.floor(Date.now() / 1000) - 3;
   let historyCalls = 0;
+  await routeAgentSessionEvents(
+    page,
+    [
+      'event: timeline_changed',
+      `data: ${JSON.stringify({
+        eventType: "timeline_changed",
+        sessionKey: "other-running-refresh",
+        historyPath: otherHistoryPath,
+        endIndex: 99,
+      })}`,
+      '',
+      'event: timeline_changed',
+      `data: ${JSON.stringify({
+        eventType: "timeline_changed",
+        sessionKey: "running-refresh",
+        historyPath,
+        endIndex: 7,
+      })}`,
+      '',
+    ].join("\n"),
+  );
   await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
     await route.fulfill({
       status: 200,
@@ -2430,7 +2509,7 @@ test("AI Agent Chat keeps polling running history timeline after refresh", async
       body: JSON.stringify({ content: "", work_dir: "/tmp/workspace" }),
     });
   });
-  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -2455,7 +2534,8 @@ test("AI Agent Chat keeps polling running history timeline after refresh", async
     `**/_bifrost/api/im-gateway/agent/sessions/history/${encodeURIComponent(historyPath)}**`,
     async (route) => {
       historyCalls += 1;
-      const events = [
+      const requestUrl = new URL(route.request().url());
+      const initialEvents = [
         {
           timestamp: runningStartedAt - 10,
           event_type: "user_message",
@@ -2474,46 +2554,51 @@ test("AI Agent Chat keeps polling running history timeline after refresh", async
           session_key: "running-refresh",
           content: { message: "Question before refresh" },
         },
-        ...(historyCalls >= 2
-          ? [
-              {
-                timestamp: runningStartedAt + 0.5,
-                event_type: "assistant_delta",
-                session_key: "running-refresh",
-                content: { message: "I am checking the refreshed run state." },
-              },
-              {
-                timestamp: runningStartedAt + 1,
-                event_type: "tool_call",
-                session_key: "running-refresh",
-                content: {
-                  tool_name: "exec_command",
-                  arguments: "{\"cmd\":\"cargo test\"}",
-                },
-              },
-              {
-                timestamp: runningStartedAt + 2,
-                event_type: "tool_result",
-                session_key: "running-refresh",
-                content: {
-                  tool_name: "exec_command",
-                  result: "still running output",
-                  success: true,
-                },
-              },
-              {
-                timestamp: runningStartedAt + 2.5,
-                event_type: "assistant_delta",
-                session_key: "running-refresh",
-                content: { message: "The command is still being observed." },
-              },
-            ]
-          : []),
       ];
+      const incrementalEvents = [
+        {
+          timestamp: runningStartedAt + 0.5,
+          event_type: "assistant_delta",
+          session_key: "running-refresh",
+          content: { message: "I am checking the refreshed run state." },
+        },
+        {
+          timestamp: runningStartedAt + 1,
+          event_type: "tool_call",
+          session_key: "running-refresh",
+          content: {
+            tool_name: "exec_command",
+            arguments: "{\"cmd\":\"cargo test\"}",
+          },
+        },
+        {
+          timestamp: runningStartedAt + 2,
+          event_type: "tool_result",
+          session_key: "running-refresh",
+          content: {
+            tool_name: "exec_command",
+            result: "still running output",
+            success: true,
+          },
+        },
+        {
+          timestamp: runningStartedAt + 2.5,
+          event_type: "assistant_delta",
+          session_key: "running-refresh",
+          content: { message: "The command is still being observed." },
+        },
+      ];
+      const isIncremental = requestUrl.searchParams.has("since");
+      const events = isIncremental ? incrementalEvents : [...initialEvents, ...incrementalEvents];
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ events }),
+        body: JSON.stringify({
+          events,
+          start_index: isIncremental ? 3 : 0,
+          end_index: 7,
+          has_more: false,
+        }),
       });
     },
   );
@@ -2531,6 +2616,9 @@ test("AI Agent Chat keeps polling running history timeline after refresh", async
   );
   await expect(page.getByTestId("agent-chat-messages")).toContainText(
     "The command is still being observed.",
+  );
+  await expect(page.getByTestId("agent-chat-messages")).not.toContainText(
+    "other-running-refresh",
   );
   const runningSummary = page.getByTestId("agent-chat-turn-running-summary");
   await expect(runningSummary).toContainText(/已处理 \d+s/);
@@ -2565,13 +2653,577 @@ test("AI Agent Chat keeps polling running history timeline after refresh", async
       }),
     )
     .toBe(true);
-  await processBlock.getByText(/Ran|Running/).click();
-  await expect(processBlock).toContainText("Run state: Running");
+  await processBlock.getByRole("button").click();
+  await expect(processBlock).not.toContainText("Run state: Running");
   await expect(processBlock).toContainText("exec_command");
   await processBlock.getByText("exec_command").click();
   await expect(processBlock).toContainText("cargo test");
   await expect(processBlock).toContainText("still running output");
-  expect(historyCalls).toBeGreaterThanOrEqual(2);
+  expect(historyCalls).toBeGreaterThan(0);
+  expect(historyCalls).toBeLessThanOrEqual(3);
+});
+
+test("AI Agent Chat lets completed history override stale running thread summary", async ({
+  page,
+}) => {
+  const historyPath = "/tmp/stale-running-completed.jsonl";
+  const startedAt = Math.floor(Date.now() / 1000) - 20;
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "traex",
+        runners: { traex: { enabled: true, adapter: "traex" } },
+        channels: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ content: "", work_dir: "/tmp/workspace" }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessions: [
+          {
+            session_key: "stale-running-completed",
+            status: "active",
+            running: true,
+            title: "Stale running completed",
+            history_path: historyPath,
+            has_timeline: true,
+            run_state: "running",
+            runner_id: "traex",
+            runner_type: "traex",
+            source: "web",
+          },
+        ],
+      }),
+    });
+  });
+  await page.route(
+    `**/_bifrost/api/im-gateway/agent/sessions/history/${encodeURIComponent(historyPath)}**`,
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          events: [
+            {
+              timestamp: startedAt,
+              event_type: "session_start",
+              session_key: "stale-running-completed",
+              content: { runner_id: "traex", runtime: "external_cli", source: "admin-api" },
+            },
+            {
+              timestamp: startedAt + 1,
+              event_type: "run_state_changed",
+              session_key: "stale-running-completed",
+              content: { state: "running", agent_kind: "traex", source_channel: "web" },
+            },
+            {
+              timestamp: startedAt + 2,
+              event_type: "user_message",
+              session_key: "stale-running-completed",
+              content: { message: "Queued message" },
+            },
+            {
+              timestamp: startedAt + 3,
+              event_type: "assistant_delta",
+              session_key: "stale-running-completed",
+              content: { message: "Completed from queued run." },
+            },
+            {
+              timestamp: startedAt + 4,
+              event_type: "run_state_changed",
+              session_key: "stale-running-completed",
+              content: { state: "completed", agent_kind: "traex", source_channel: "web" },
+            },
+            {
+              timestamp: startedAt + 5,
+              event_type: "assistant_message",
+              session_key: "stale-running-completed",
+              content: { message: "Completed from queued run." },
+            },
+          ],
+        }),
+      });
+    },
+  );
+
+  await openPage(
+    page,
+    `ai?aiSection=agent-chat&agentSection=chat&session=stale-running-completed&view=history&historyPath=${encodeURIComponent(historyPath)}`,
+  );
+
+  await expect(page.getByTestId("agent-chat-runner-tag")).toContainText("traex");
+  await expect(page.getByTestId("agent-chat-state-tag")).toContainText("Ready");
+  await expect(page.getByTestId("agent-chat-send")).toHaveAttribute("aria-label", "Send");
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Completed from queued run.",
+  );
+  await expect(page.getByTestId("agent-chat-thinking-tail")).toHaveCount(0);
+  await expect(page.getByTestId("agent-chat-process-block")).toHaveCount(0);
+  await expect(page.getByText("Completed from queued run.")).toHaveCount(1);
+  await page.getByTestId("agent-chat-turn-collapse-toggle").click();
+  await expect(page.getByText("Completed from queued run.")).toHaveCount(1);
+});
+
+test("AI Agent Chat stops running history from terminal SSE without hot thread refresh", async ({
+  page,
+}) => {
+  const historyPath = "/tmp/running-summary-stops.jsonl";
+  const startedAt = Math.floor(Date.now() / 1000) - 10;
+  let sessionListRequests = 0;
+  let incrementalHistoryRequests = 0;
+  await routeAgentSessionEvents(
+    page,
+    [
+      'event: timeline_changed',
+      `data: ${JSON.stringify({
+        eventType: "timeline_changed",
+        sessionKey: "running-summary-stops",
+        historyPath,
+        endIndex: 6,
+      })}`,
+      '',
+    ].join("\n"),
+  );
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "traex",
+        runners: { traex: { enabled: true, adapter: "traex" } },
+        channels: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ content: "", work_dir: "/tmp/workspace" }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
+    sessionListRequests += 1;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessions: [
+          {
+            session_key: "running-summary-stops",
+            status: "active",
+            running: true,
+            title: "Running summary stops",
+            history_path: historyPath,
+            has_timeline: true,
+            run_state: "running",
+            state: "running",
+            runner_id: "traex",
+            runner_type: "traex",
+            source: "web",
+          },
+        ],
+      }),
+    });
+  });
+  await page.route(
+    `**/_bifrost/api/im-gateway/agent/sessions/history/${encodeURIComponent(historyPath)}**`,
+    async (route) => {
+      const requestUrl = new URL(route.request().url());
+      const terminalEvents = [
+        {
+          timestamp: startedAt + 4,
+          event_type: "run_state_changed",
+          session_key: "running-summary-stops",
+          content: { state: "completed", agent_kind: "traex", source_channel: "web" },
+        },
+        {
+          timestamp: startedAt + 5,
+          event_type: "assistant_message",
+          session_key: "running-summary-stops",
+          content: { message: "The run is done." },
+        },
+      ];
+      if (requestUrl.searchParams.has("since")) {
+        incrementalHistoryRequests += 1;
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            events: terminalEvents,
+            start_index: 4,
+            end_index: 6,
+            has_more: false,
+          }),
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          events: [
+            {
+              timestamp: startedAt,
+              event_type: "session_start",
+              session_key: "running-summary-stops",
+              content: {
+                runner_id: "traex",
+                runner_type: "traex",
+                runtime: "external_cli",
+                source: "admin-api",
+              },
+            },
+            {
+              timestamp: startedAt + 1,
+              event_type: "run_state_changed",
+              session_key: "running-summary-stops",
+              content: { state: "running", agent_kind: "traex", source_channel: "web" },
+            },
+            {
+              timestamp: startedAt + 2,
+              event_type: "user_message",
+              session_key: "running-summary-stops",
+              content: { message: "Will the spinner stop?" },
+            },
+            {
+              timestamp: startedAt + 3,
+              event_type: "assistant_delta",
+              session_key: "running-summary-stops",
+              content: { message: "The model already produced a final-looking update." },
+            },
+            ...terminalEvents,
+          ],
+          start_index: 0,
+          end_index: 6,
+          has_more: false,
+        }),
+      });
+    },
+  );
+
+  await openPage(
+    page,
+    `ai?aiSection=agent-chat&agentSection=chat&session=running-summary-stops&view=history&historyPath=${encodeURIComponent(historyPath)}`,
+  );
+
+  await expect(page.getByTestId("agent-chat-state-tag")).toContainText("Ready");
+  await expect(page.getByTestId("agent-chat-send")).toHaveAttribute("aria-label", "Send");
+  await expect(page.getByTestId("agent-chat-thinking-tail")).toHaveCount(0);
+  expect(incrementalHistoryRequests).toBeLessThanOrEqual(1);
+  const listRequestsAfterStop = sessionListRequests;
+  await page.waitForTimeout(1800);
+  expect(sessionListRequests).toBe(listRequestsAfterStop);
+});
+
+test("AI Agent Chat ignores stale running history responses after switching threads", async ({
+  page,
+}) => {
+  const historyA = "/tmp/switch-running-a.jsonl";
+  const historyB = "/tmp/switch-running-b.jsonl";
+  let releaseA: (() => void) | undefined;
+  const holdA = new Promise<void>((resolve) => {
+    releaseA = resolve;
+  });
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "traex",
+        runners: { traex: { enabled: true, adapter: "traex" } },
+        channels: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ content: "", work_dir: "/tmp/workspace" }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessions: [
+          {
+            session_key: "switch-a",
+            status: "active",
+            running: true,
+            title: "Switch A",
+            history_path: historyA,
+            has_timeline: true,
+            run_state: "running",
+            runner_id: "traex",
+            runner_type: "traex",
+            source: "web",
+          },
+          {
+            session_key: "switch-b",
+            status: "active",
+            running: true,
+            title: "Switch B",
+            history_path: historyB,
+            has_timeline: true,
+            run_state: "running",
+            runner_id: "traex",
+            runner_type: "traex",
+            source: "web",
+          },
+        ],
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/history/**", async (route) => {
+    const requestUrl = route.request().url();
+    const isA = requestUrl.includes(encodeURIComponent(historyA));
+    if (isA) {
+      await holdA;
+    }
+    const sessionKey = isA ? "switch-a" : "switch-b";
+    const marker = isA ? "STALE_A_RESPONSE" : "CURRENT_B_RESPONSE";
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        events: [
+          {
+            timestamp: Math.floor(Date.now() / 1000),
+            event_type: "user_message",
+            session_key: sessionKey,
+            content: { message: `${marker} user` },
+          },
+          {
+            timestamp: Math.floor(Date.now() / 1000) + 1,
+            event_type: "assistant_delta",
+            session_key: sessionKey,
+            content: { message: `${marker} assistant` },
+          },
+        ],
+        start_index: 0,
+        end_index: 2,
+        has_more: false,
+      }),
+    });
+  });
+
+  await openPage(
+    page,
+    `ai?aiSection=agent-chat&agentSection=chat&session=switch-a&view=history&historyPath=${encodeURIComponent(historyA)}`,
+  );
+  await openPage(
+    page,
+    `ai?aiSection=agent-chat&agentSection=chat&session=switch-b&view=history&historyPath=${encodeURIComponent(historyB)}`,
+  );
+  await expect(page.getByTestId("agent-chat-messages")).toContainText("CURRENT_B_RESPONSE");
+  releaseA?.();
+  await page.waitForTimeout(500);
+  await expect(page.getByTestId("agent-chat-messages")).toContainText("CURRENT_B_RESPONSE");
+  await expect(page.getByTestId("agent-chat-messages")).not.toContainText("STALE_A_RESPONSE");
+});
+
+test("AI Agent Chat active view restores same-session running history path", async ({
+  page,
+}) => {
+  const historyPath = "/tmp/active-sse-history.jsonl";
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "web",
+        runners: { web: { enabled: true, adapter: "chatgpt_web" } },
+        channels: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ content: "", work_dir: "/tmp/workspace" }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessions: [
+          {
+            session_key: "active-sse-session",
+            status: "active",
+            running: true,
+            title: "Active SSE session",
+            history_path: historyPath,
+            has_timeline: true,
+            run_state: "running",
+            runner_id: "web",
+            runner_type: "chatgpt_web",
+            source: "web",
+          },
+        ],
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/active-sse-session", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        session_key: "active-sse-session",
+        source: "web",
+        runner_id: "web",
+        runner_type: "chatgpt_web",
+        history_path: historyPath,
+        has_timeline: true,
+        run_state: "running",
+        messages: [],
+      }),
+    });
+  });
+  await page.route(
+    `**/_bifrost/api/im-gateway/agent/sessions/history/${encodeURIComponent(historyPath)}**`,
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          events: [
+            {
+              timestamp: Math.floor(Date.now() / 1000),
+              event_type: "user_message",
+              session_key: "active-sse-session",
+              content: { message: "Active SSE question" },
+            },
+            {
+              timestamp: Math.floor(Date.now() / 1000) + 1,
+              event_type: "assistant_delta",
+              session_key: "active-sse-session",
+              content: { message: "Active SSE running update" },
+            },
+          ],
+          start_index: 0,
+          end_index: 2,
+          has_more: false,
+        }),
+      });
+    },
+  );
+
+  await openPage(
+    page,
+    "ai?aiSection=agent-chat&agentSection=chat&session=active-sse-session&view=active",
+  );
+
+  await expect(page.getByTestId("agent-chat-runner-tag")).toContainText("web");
+  await expect(page.getByTestId("agent-chat-state-tag")).toContainText("Running");
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Active SSE running update",
+  );
+});
+
+test("AI Agent Chat lets idle thread summary override stale running history on initial load", async ({
+  page,
+}) => {
+  const historyPath = "/tmp/initial-idle-stale-running.jsonl";
+  const startedAt = Math.floor(Date.now() / 1000) - 30;
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "bifrost_agent",
+        runners: { bifrost_agent: { enabled: true, adapter: "builtin" } },
+        channels: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ content: "", work_dir: "/tmp/workspace" }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessions: [
+          {
+            session_key: "initial-idle-stale-running",
+            status: "active",
+            running: false,
+            state: "idle",
+            run_state: "idle",
+            title: "Initial idle stale running",
+            history_path: historyPath,
+            has_timeline: true,
+            source: "web",
+          },
+        ],
+      }),
+    });
+  });
+  await page.route(
+    `**/_bifrost/api/im-gateway/agent/sessions/history/${encodeURIComponent(historyPath)}**`,
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          events: [
+            {
+              timestamp: startedAt,
+              event_type: "run_state_changed",
+              session_key: "initial-idle-stale-running",
+              content: { state: "running", agent_kind: "builtin", source_channel: "web" },
+            },
+            {
+              timestamp: startedAt + 1,
+              event_type: "user_message",
+              session_key: "initial-idle-stale-running",
+              content: { message: "stale question" },
+            },
+          ],
+          start_index: 0,
+          end_index: 2,
+          has_more: false,
+        }),
+      });
+    },
+  );
+
+  await openPage(
+    page,
+    `ai?aiSection=agent-chat&agentSection=chat&session=initial-idle-stale-running&view=history&historyPath=${encodeURIComponent(historyPath)}`,
+  );
+
+  await expect(page.getByTestId("agent-chat-state-tag")).toContainText("Ready");
+  await expect(page.getByTestId("agent-chat-turn-running-group")).toHaveCount(0);
+  await expect(page.getByTestId("agent-chat-thinking-tail")).toHaveCount(0);
 });
 
 test("AI Agent Chat can start a new chat while the selected thread is running", async ({
@@ -2597,7 +3249,7 @@ test("AI Agent Chat can start a new chat while the selected thread is running", 
       body: JSON.stringify({ content: "", work_dir: "/tmp/workspace" }),
     });
   });
-  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -2675,7 +3327,7 @@ test("AI Agent Chat thread list scrolls and selects only the active duplicate", 
             last_active_time: 100 - index,
             duration_secs: 80 - index,
           }));
-  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -2739,7 +3391,7 @@ test("AI Agent Chat thread list scrolls and selects only the active duplicate", 
   await expect(page.getByRole("button", { name: /Ended duplicate/ })).toHaveCount(0);
   await expect(page.getByRole("button", { name: /Bf Active duplicate.*Web.*duration/ })).toBeVisible();
   await expect(page.getByRole("button", { name: /Bf Ended thread 0.*Feishu.*duration 1m/ })).toBeVisible();
-  await expect(page.getByRole("button", { name: /Bf Ended thread 1\b.*Web.*duration 1m/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /GPT Ended thread 1\b.*Web.*duration 1m/ })).toBeVisible();
   await expect(page.getByRole("button", { name: /Ended thread 0.*Ended/ })).toHaveCount(0);
   await expect(page.locator('[aria-label="running"]')).toHaveCount(1);
   await expect(page.locator('[data-testid="agent-chat-thread-item"][data-selected="true"]')).toHaveCount(1);
@@ -2794,7 +3446,7 @@ test("AI Agent Chat thread list scrolls and selects only the active duplicate", 
 test("AI Agent Chat selects completed external runner rows without history path", async ({
   page,
 }) => {
-  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -2854,7 +3506,7 @@ test("AI Agent Chat selects completed external runner rows without history path"
 test("AI Agent Chat clicking the selected thread keeps loaded messages", async ({
   page,
 }) => {
-  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -2937,12 +3589,19 @@ test("AI Agent Chat clicking the selected thread keeps loaded messages", async (
 test("AI Agent Chat uses detail runner metadata instead of source for selected row", async ({
   page,
 }) => {
-  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
         sessions: [
+          {
+            session_key: "trae-title-fallback",
+            status: "active",
+            running: false,
+            title: "Runner: 你好",
+            source: "Traex",
+          },
           {
             session_key: "source-runner-mismatch",
             status: "active",
@@ -2983,10 +3642,25 @@ test("AI Agent Chat uses detail runner metadata instead of source for selected r
   await expect(
     page.getByRole("button", { name: /Bf ChatGPT Web: legacy title/ }),
   ).toHaveAttribute("aria-current", "true");
+  await expect(
+    page.getByRole("button", { name: /Tr Runner: 你好/ }),
+  ).toBeVisible();
 });
 
 test("AI Agent Chat renders local generated image attachments", async ({ page }) => {
-  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+  await page.addInitScript(() => {
+    const originalScrollIntoView = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = function patchedScrollIntoView(this: Element) {
+      (window as Window & { __agentChatScrolledImageIds?: string[] }).__agentChatScrolledImageIds =
+        [
+          ...((window as Window & { __agentChatScrolledImageIds?: string[] })
+            .__agentChatScrolledImageIds || []),
+          this.getAttribute("data-agent-chat-image-id") || "",
+        ];
+      return originalScrollIntoView.call(this);
+    };
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -3023,6 +3697,24 @@ test("AI Agent Chat renders local generated image attachments", async ({ page })
               content:
                 "![Generated sun](/Users/eden/.bifrost/agent/im_gateway/attachments/chatgpt_web/run/image.png)",
             },
+            {
+              role: "user",
+              content: "and inspect this attachment",
+              content_parts: [
+                { type: "text", text: "and inspect this attachment" },
+                {
+                  type: "image_url",
+                  image_url: {
+                    url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lZ0fWQAAAABJRU5ErkJggg==",
+                  },
+                },
+              ],
+            },
+            {
+              role: "assistant",
+              content:
+                "![Generated moon](/Users/eden/.bifrost/agent/im_gateway/attachments/chatgpt_web/run/moon.png)",
+            },
           ],
         }),
       });
@@ -3036,6 +3728,19 @@ test("AI Agent Chat renders local generated image attachments", async ({ page })
         contentType: "image/png",
         body: Buffer.from(
           "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lZ0fWQAAAABJRU5ErkJggg==",
+          "base64",
+        ),
+      });
+    },
+  );
+  await page.route(
+    "**/_bifrost/api/im-gateway/attachments/chatgpt_web/run/moon.png",
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "image/png",
+        body: Buffer.from(
+          "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR42mP8z8BQz0AEYBxVSFIBAC03A/0fR0gCAAAAAElFTkSuQmCC",
           "base64",
         ),
       });
@@ -3055,6 +3760,51 @@ test("AI Agent Chat renders local generated image attachments", async ({ page })
   await expect
     .poll(async () => image.evaluate((element) => (element as HTMLImageElement).naturalWidth))
     .toBe(1);
+
+  await expect(page.getByTestId("agent-chat-previewable-image")).toHaveCount(3);
+  await image.click();
+  await expect(page.getByTestId("agent-chat-image-lightbox")).toBeVisible();
+  await expect(page.getByTestId("agent-chat-image-lightbox-count")).toHaveText("1 / 3");
+  await expect(page.getByTestId("agent-chat-image-lightbox-img")).toHaveAttribute(
+    "src",
+    /\/_bifrost\/api\/im-gateway\/attachments\/chatgpt_web\/run\/image\.png$/,
+  );
+
+  await page.getByTestId("agent-chat-image-lightbox-next").click();
+  await expect(page.getByTestId("agent-chat-image-lightbox-count")).toHaveText("2 / 3");
+  await expect(page.getByTestId("agent-chat-image-lightbox-img")).toHaveAttribute(
+    "src",
+    /^data:image\/png;base64,/,
+  );
+
+  await page.keyboard.press("ArrowRight");
+  await expect(page.getByTestId("agent-chat-image-lightbox-count")).toHaveText("3 / 3");
+  await expect(page.getByTestId("agent-chat-image-lightbox-img")).toHaveAttribute(
+    "src",
+    /\/_bifrost\/api\/im-gateway\/attachments\/chatgpt_web\/run\/moon\.png$/,
+  );
+
+  await page.keyboard.press("ArrowLeft");
+  await expect(page.getByTestId("agent-chat-image-lightbox-count")).toHaveText("2 / 3");
+  await page.getByTestId("agent-chat-image-lightbox").click({ position: { x: 12, y: 12 } });
+  await expect(page.getByTestId("agent-chat-image-lightbox")).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as Window & { __agentChatScrolledImageIds?: string[] })
+            .__agentChatScrolledImageIds || [],
+      ),
+    )
+    .toContain("session-image-attachment-session-2-part-0");
+
+  await page.getByTestId("theme-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await image.scrollIntoViewIfNeeded();
+  await image.click();
+  await expect(page.getByTestId("agent-chat-image-lightbox")).toBeVisible();
+  await page.getByTestId("agent-chat-image-lightbox-close").click();
+  await expect(page.getByTestId("agent-chat-image-lightbox")).toHaveCount(0);
 });
 
 test("AI Agent Chat thread context menu deletes after inline confirmation", async ({
@@ -3076,7 +3826,7 @@ test("AI Agent Chat thread context menu deletes after inline confirmation", asyn
     },
   ];
 
-  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -3132,6 +3882,7 @@ test("AI Agent Chat thread context menu deletes after inline confirmation", asyn
 test("AI Agent Chat composer keeps Shift Enter multiline and sends on Enter", async ({
   page,
 }) => {
+  await routeBuiltinAgentChatConfig(page);
   await page.route("**/_bifrost/api/agent/chat/stream", async (route) => {
     expect(route.request().postDataJSON()).toMatchObject({
       message: "Line one\nLine two",
@@ -3153,9 +3904,7 @@ test("AI Agent Chat composer keeps Shift Enter multiline and sends on Enter", as
   await input.pressSequentially("Line two");
 
   await expect(input).toHaveValue("Line one\nLine two");
-  await expect(page.getByTestId("agent-chat-messages")).not.toContainText(
-    "Line one\nLine two",
-  );
+  await expect(page.getByTestId("agent-chat-message-user")).toHaveCount(0);
 
   await input.press("Enter");
 
@@ -3171,7 +3920,7 @@ test("AI Agent Chat supports pasted image previews and pure image send", async (
   page,
 }) => {
   const requests: Array<Record<string, unknown>> = [];
-  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -3249,7 +3998,7 @@ test("AI Agent Chat sends pasted images to external runner stream", async ({
   page,
 }) => {
   let requestPayload: Record<string, unknown> | undefined;
-  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ sessions: [] }) });
   });
   await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
@@ -3294,6 +4043,144 @@ test("AI Agent Chat sends pasted images to external runner stream", async ({
   );
 });
 
+test("AI Agent Chat persists collapsed thread rail", async ({ page }) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ sessions: [] }) });
+  });
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "bifrost_agent",
+        runners: {},
+        channels: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ content: "", work_dir: "/tmp/workspace" }) });
+  });
+
+  await openPage(page, "ai?aiSection=agent-chat&agentSection=chat");
+  await expect(page.getByTestId("agent-chat-thread-list")).toBeVisible();
+  await page.getByTestId("agent-chat-threads-collapse").click();
+  await expect(page.getByTestId("agent-chat-thread-list")).toHaveCount(0);
+  await expect(page.getByTestId("agent-chat-threads-expand")).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.localStorage.getItem("bifrost.agentChat.threadRailCollapsed"),
+      ),
+    )
+    .toBe("true");
+
+  await page.reload();
+  await expect(page.getByTestId("agent-chat-thread-list")).toHaveCount(0);
+  await expect(page.getByTestId("agent-chat-threads-expand")).toBeVisible();
+  await page.getByTestId("agent-chat-threads-expand").click();
+  await expect(page.getByTestId("agent-chat-thread-list")).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.localStorage.getItem("bifrost.agentChat.threadRailCollapsed"),
+      ),
+    )
+    .toBe("false");
+});
+
+test("AI Agent Chat queues running input for external runners", async ({
+  page,
+}) => {
+  const messages: string[] = [];
+  let releaseFirst: (() => void) | undefined;
+  const firstRequestCanFinish = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ sessions: [] }) });
+  });
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "traex",
+        runners: { traex: { enabled: true, adapter: "traex" } },
+        channels: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ content: "", work_dir: "/tmp/workspace" }) });
+  });
+  await page.route("**/_bifrost/api/im-gateway/chat/stream", async (route) => {
+    const payload = route.request().postDataJSON();
+    messages.push(payload.message);
+    expect(payload).toMatchObject({
+      runnerId: "traex",
+      adapter: "traex",
+    });
+    if (payload.message === "Start external long task") {
+      await firstRequestCanFinish;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/x-ndjson",
+        body:
+          '{"eventType":"run_started","status":{"runner_id":"traex","runner_type":"traex"}}\n' +
+          '{"eventType":"run_finished","status":"succeeded","response":"External long task done"}\n',
+      });
+      return;
+    }
+    if (payload.message === "/q follow up while running") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/x-ndjson",
+        body:
+          '{"eventType":"run_finished","response":"queued","queued":true,"queueItems":[{"seq":1,"message":"follow up while running"}]}\n',
+      });
+      return;
+    }
+    if (payload.message === "/stop") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/x-ndjson",
+        body:
+          '{"eventType":"run_finished","response":"stopped","stopped":true}\n',
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 500,
+      contentType: "text/plain",
+      body: `unexpected message: ${String(payload.message)}`,
+    });
+  });
+
+  await openPage(page, "ai?aiSection=agent-chat&agentSection=chat");
+  await page.getByTestId("agent-chat-input").fill("Start external long task");
+  await page.getByTestId("agent-chat-send").click();
+  await expect(page.getByTestId("agent-chat-send")).toHaveAttribute("aria-label", "Stop");
+
+  await page.getByTestId("agent-chat-input").fill("follow up while running");
+  await expect(page.getByText("This runner queues follow-up messages")).toBeVisible();
+  await expect(page.getByText("Queue", { exact: true })).toBeVisible();
+  await expect(page.getByText("Guide")).toHaveCount(0);
+  await page.getByTestId("agent-chat-send").click();
+  await expect(page.getByTestId("agent-chat-queue-panel")).toContainText(
+    "follow up while running",
+  );
+
+  await page.getByTestId("agent-chat-send").click();
+  await expect(page.getByTestId("agent-chat-messages")).toContainText("stopped");
+  releaseFirst?.();
+  await expect
+    .poll(() => messages.join("|"))
+    .toBe("Start external long task|/q follow up while running|/stop");
+});
+
 test("AI Agent Chat supports running stop, guide, queue, and queue removal", async ({
   page,
 }) => {
@@ -3301,6 +4188,24 @@ test("AI Agent Chat supports running stop, guide, queue, and queue removal", asy
   let releaseFirst: (() => void) | undefined;
   const firstRequestCanFinish = new Promise<void>((resolve) => {
     releaseFirst = resolve;
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ sessions: [] }) });
+  });
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "bifrost_agent",
+        runners: {},
+        channels: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ content: "", work_dir: "/tmp/workspace" }) });
   });
   await page.route("**/_bifrost/api/agent/chat/stream", async (route) => {
     const payload = route.request().postDataJSON();
@@ -3392,6 +4297,7 @@ test("AI Agent Chat supports running stop, guide, queue, and queue removal", asy
 });
 
 test("AI Agent Chat surfaces run errors in the telemetry panel", async ({ page }) => {
+  await routeBuiltinAgentChatConfig(page);
   await page.route("**/_bifrost/api/agent/chat/stream", async (route) => {
     await route.fulfill({
       status: 200,
@@ -3420,6 +4326,7 @@ test("AI Agent Chat surfaces run errors in the telemetry panel", async ({ page }
 test("AI Agent Chat consumes assistant_final without a trailing SSE separator", async ({
   page,
 }) => {
+  await routeBuiltinAgentChatConfig(page);
   await page.route("**/_bifrost/api/agent/chat/stream", async (route) => {
     await route.fulfill({
       status: 200,
@@ -3443,7 +4350,7 @@ test("AI Agent Chat consumes assistant_final without a trailing SSE separator", 
 test("AI Agent Chat streams long task output previews into tool output", async ({
   page,
 }) => {
-  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all", async (route) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -3487,11 +4394,12 @@ test("AI Agent Chat streams long task output previews into tool output", async (
   await page.getByTestId("agent-chat-input").fill("Watch the long command");
   await page.getByTestId("agent-chat-send").click();
 
+  await page.getByTestId("agent-chat-turn-collapse-toggle").click();
   const processBlock = page.getByTestId("agent-chat-process-block");
   await expect(processBlock).toBeVisible();
-  await expect(processBlock).toContainText("Ran 1 command");
+  await expect(processBlock).toContainText("已运行 1 条命令");
   await expect(processBlock).not.toContainText("streamed stdout chunk");
-  await processBlock.getByText(/Ran|Running/).click();
+  await processBlock.getByRole("button").click();
   await expect(processBlock).toContainText("exec_command");
   await processBlock.getByText("exec_command").click();
   await expect(processBlock).toContainText("Input");
@@ -3501,6 +4409,7 @@ test("AI Agent Chat streams long task output previews into tool output", async (
 });
 
 test("AI Agent Chat surfaces busy sessions as recoverable errors", async ({ page }) => {
+  await routeBuiltinAgentChatConfig(page);
   await page.route("**/_bifrost/api/agent/chat/stream", async (route) => {
     await route.fulfill({
       status: 200,

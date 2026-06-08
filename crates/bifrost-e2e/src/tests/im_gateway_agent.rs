@@ -472,6 +472,96 @@ pub fn get_all_tests() -> Vec<TestCase> {
             },
         ),
         TestCase::standalone(
+            "im_gateway_mock_inbound_cwd_command_switches_provider_work_dir",
+            "Validate IM-only /cwd command switches provider work_dir and rejects invalid paths",
+            "admin",
+            || async move {
+                let port = pick_unused_port()?;
+                let (_proxy, _admin_state) = start_im_gateway_admin(port).await?;
+
+                let client = reqwest::Client::builder()
+                    .danger_accept_invalid_certs(true)
+                    .no_proxy()
+                    .build()
+                    .map_err(|e| format!("Failed to create client: {}", e))?;
+                let base = format!("http://127.0.0.1:{port}/_bifrost/api/im-gateway");
+
+                let initial_dir = tempfile::tempdir()
+                    .map_err(|e| format!("create initial work dir failed: {e}"))?;
+                let target_dir = tempfile::tempdir()
+                    .map_err(|e| format!("create target work dir failed: {e}"))?;
+                let target_dir = std::fs::canonicalize(target_dir.path())
+                    .map_err(|e| format!("canonicalize target work dir failed: {e}"))?;
+                let initial_dir = std::fs::canonicalize(initial_dir.path())
+                    .map_err(|e| format!("canonicalize initial work dir failed: {e}"))?;
+
+                let create_response = client
+                    .post(format!("{base}/providers"))
+                    .json(&json!({
+                        "id": "cwd-command-provider",
+                        "provider_type": "feishu",
+                        "display_name": "CWD Command Provider",
+                        "enabled": true,
+                        "event_connection_enabled": false,
+                        "owner_open_id": "ou_owner",
+                        "agent_config": {
+                            "work_dir": initial_dir.display().to_string()
+                        }
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("POST provider failed: {e}"))?;
+                assert_status(&create_response, 200)?;
+
+                let cwd_response = client
+                    .post(format!("{base}/debug/mock-inbound"))
+                    .json(&json!({
+                        "providerId": "cwd-command-provider",
+                        "userId": "ou_owner",
+                        "text": format!("/cwd {}", target_dir.display())
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("POST mock inbound /cwd failed: {e}"))?;
+                assert_status(&cwd_response, 200)?;
+
+                wait_for_provider_work_dir(&client, &base, "cwd-command-provider", &target_dir)
+                    .await?;
+
+                let invalid_response = client
+                    .post(format!("{base}/debug/mock-inbound"))
+                    .json(&json!({
+                        "providerId": "cwd-command-provider",
+                        "userId": "ou_owner",
+                        "text": "/cwd /definitely/not/exist/bifrost-im-cwd-e2e"
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("POST mock inbound invalid /cwd failed: {e}"))?;
+                assert_status(&invalid_response, 200)?;
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+                let provider: serde_json::Value = client
+                    .get(format!("{base}/providers/cwd-command-provider"))
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET provider after invalid /cwd failed: {e}"))?
+                    .json()
+                    .await
+                    .map_err(|e| format!("parse provider after invalid /cwd failed: {e}"))?;
+                let expected_work_dir = target_dir.display().to_string();
+                if provider
+                    .pointer("/agent_config/work_dir")
+                    .and_then(|value| value.as_str())
+                    != Some(expected_work_dir.as_str())
+                {
+                    return Err(format!("Invalid /cwd should not change work_dir: {provider}"));
+                }
+
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
             "im_gateway_agent_chat_codex_prompt_layers",
             "Validate POST /api/im-gateway/agent/chat sends system/developer/user prompt layers",
             "admin",
@@ -1050,45 +1140,76 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     "agent_output",
                     "agent_plan_panel",
                     "agent_plan",
-                    "agent_tool_panel",
-                    "agent_tool_log",
+                    "agent_process_panel",
+                    "agent_process_log",
+                    "ap_t_1",
+                    "ap_td_1",
                     "agent_status_panel",
                     "agent_footer",
-                    "agent_thinking_panel",
                     "list_directory",
                     "37ms",
                     "1 条排队消息",
                     "有待处理引导消息",
                     "已收到引导：check latest logs",
                     "任务计划：Render latest status card",
-                    "**思考过程**",
+                    "执行过程",
+                    "已完成：list_directory",
                     "checking progress card sections",
                 ] {
                     if !body.contains(needle) {
                         return Err(format!("streaming card body missing {needle}: {body}"));
                     }
                 }
-                if body.contains("\"agent_thinking\"") {
-                    return Err(format!(
-                        "thinking content should not render legacy child element id: {body}"
-                    ));
+                for legacy_id in [
+                    "\"agent_thinking\"",
+                    "agent_tool_panel",
+                    "agent_tool_log",
+                    "agent_thinking_panel",
+                    "Pipeline",
+                    "Loop 1",
+                    "工具摘要",
+                    "[模型]",
+                ] {
+                    if body.contains(legacy_id) {
+                        return Err(format!(
+                            "process timeline should not render legacy element id {legacy_id}: {body}"
+                        ));
+                    }
                 }
-                let thinking_element = card["body"]["elements"]
+                let process_element = card["body"]["elements"]
                     .as_array()
                     .and_then(|elements| {
                         elements
                             .iter()
-                            .find(|element| element["element_id"] == "agent_thinking_panel")
+                            .find(|element| element["element_id"] == "agent_process_panel")
                     })
-                    .ok_or_else(|| "streaming card missing thinking element".to_string())?;
-                if thinking_element["tag"] != "markdown" {
+                    .ok_or_else(|| "streaming card missing process element".to_string())?;
+                if process_element["tag"] != "collapsible_panel" {
                     return Err(format!(
-                        "thinking element should be visible markdown, got {thinking_element}"
+                        "process element should be collapsible, got {process_element}"
                     ));
                 }
-                if thinking_element.get("expanded").is_some() {
+                if process_element["expanded"] != false {
                     return Err(format!(
-                        "thinking element should not be collapsible, got {thinking_element}"
+                        "finished process element should be collapsed, got {process_element}"
+                    ));
+                }
+                let tool_element = process_element["elements"]
+                    .as_array()
+                    .and_then(|elements| {
+                        elements
+                            .iter()
+                            .find(|element| element["element_id"] == "ap_t_1")
+                    })
+                    .ok_or_else(|| "streaming card missing process tool element".to_string())?;
+                if tool_element["tag"] != "collapsible_panel" {
+                    return Err(format!(
+                        "tool process element should be collapsible, got {tool_element}"
+                    ));
+                }
+                if tool_element["expanded"] != false {
+                    return Err(format!(
+                        "tool process element should be collapsed by default, got {tool_element}"
                     ));
                 }
                 Ok(())
@@ -2511,6 +2632,38 @@ fn request_contains_image_url(body: &serde_json::Value) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+async fn wait_for_provider_work_dir(
+    client: &reqwest::Client,
+    base: &str,
+    provider_id: &str,
+    expected_work_dir: &std::path::Path,
+) -> Result<(), String> {
+    let expected = expected_work_dir.display().to_string();
+    let mut last_provider = serde_json::Value::Null;
+    for _ in 0..40 {
+        let provider: serde_json::Value = client
+            .get(format!("{base}/providers/{provider_id}"))
+            .send()
+            .await
+            .map_err(|e| format!("GET provider while waiting for /cwd failed: {e}"))?
+            .json()
+            .await
+            .map_err(|e| format!("parse provider while waiting for /cwd failed: {e}"))?;
+        if provider
+            .pointer("/agent_config/work_dir")
+            .and_then(|value| value.as_str())
+            == Some(expected.as_str())
+        {
+            return Ok(());
+        }
+        last_provider = provider;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    Err(format!(
+        "Timed out waiting for provider work_dir {expected}; last provider: {last_provider}"
+    ))
 }
 
 async fn start_im_gateway_admin(port: u16) -> Result<(ProxyInstance, Arc<AdminState>), String> {

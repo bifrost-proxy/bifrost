@@ -7,6 +7,7 @@ import {
   ExclamationCircleOutlined,
   FolderOpenOutlined,
   HistoryOutlined,
+  RightOutlined,
   PlayCircleOutlined,
   SyncOutlined,
   WarningOutlined,
@@ -59,6 +60,7 @@ type AgentThreadListCardProps = {
   styles: Record<string, CSSProperties>;
   onOpenThread: (thread: AgentThreadSummary) => void;
   onDeleteThread: (thread: AgentThreadSummary) => void;
+  onCollapse?: () => void;
 };
 
 export function AgentThreadListCard({
@@ -70,6 +72,7 @@ export function AgentThreadListCard({
   styles,
   onOpenThread,
   onDeleteThread,
+  onCollapse,
 }: AgentThreadListCardProps) {
   const { token } = theme.useToken();
   const threadScrollRef = useRef<HTMLDivElement>(null);
@@ -159,10 +162,24 @@ export function AgentThreadListCard({
       style={styles.threadCard}
       bodyStyle={styles.threadCardBody}
       title={
-        <Space>
-          <HistoryOutlined />
-          <span>Threads</span>
-        </Space>
+        <div style={styles.threadCardTitle}>
+          <span style={styles.threadCardTitleMain}>
+            <HistoryOutlined />
+            <span>Threads</span>
+          </span>
+          {onCollapse ? (
+            <Button
+              size="small"
+              type="text"
+              icon={<RightOutlined />}
+              aria-label="Collapse threads"
+              title="Collapse threads"
+              data-testid="agent-chat-threads-collapse"
+              style={styles.threadCollapseButton}
+              onClick={onCollapse}
+            />
+          ) : null}
+        </div>
       }
     >
       <div
