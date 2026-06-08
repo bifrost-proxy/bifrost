@@ -13,6 +13,8 @@ pub const CLEANUP_DAEMON_STARTUP_RETRY_WINDOW: Duration = RECOVERY_RETRY_WINDOW;
 pub const CLEANUP_DAEMON_STARTUP_RETRY_INTERVAL: Duration = RECOVERY_RETRY_INTERVAL;
 const STOP_SUPPRESSION_FILE_NAME: &str = ".system_proxy_launchd_stop_suppressed";
 const STOP_SUPPRESSION_TTL_SECS: u64 = 300;
+const RUNTIME_FILE_NAME: &str = "runtime.json";
+const PID_FILE_NAME: &str = "bifrost.pid";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SystemProxyLaunchdConfig {
@@ -322,7 +324,8 @@ fn launchd_status_with_expected(
 }
 
 pub fn recover_if_no_live_runtime(data_dir: &Path) -> Result<bool> {
-    if runtime_pid_is_alive(data_dir) {
+    let runtime_alive = runtime_pid_is_alive(data_dir);
+    if runtime_alive {
         if SystemProxyManager::last_runtime_target_has_live_listener(data_dir) {
             tracing::info!(
                 target: "bifrost_core::system_proxy_launchd",
@@ -346,6 +349,9 @@ pub fn recover_if_no_live_runtime(data_dir: &Path) -> Result<bool> {
         return Ok(false);
     }
     SystemProxyManager::recover_from_crash(data_dir)?;
+    if !runtime_alive {
+        remove_stale_runtime_files(data_dir);
+    }
     Ok(true)
 }
 
@@ -421,7 +427,7 @@ struct RuntimeIdentity {
 }
 
 fn load_runtime_identity(data_dir: &Path) -> Option<RuntimeIdentity> {
-    let runtime_path = data_dir.join("runtime.json");
+    let runtime_path = data_dir.join(RUNTIME_FILE_NAME);
     if let Some(identity) = std::fs::read_to_string(&runtime_path)
         .ok()
         .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
@@ -437,7 +443,7 @@ fn load_runtime_identity(data_dir: &Path) -> Option<RuntimeIdentity> {
         return Some(identity);
     }
 
-    std::fs::read_to_string(data_dir.join("bifrost.pid"))
+    std::fs::read_to_string(data_dir.join(PID_FILE_NAME))
         .ok()
         .and_then(|content| content.trim().parse::<u64>().ok())
         .and_then(runtime_pid_from_u64)
@@ -477,17 +483,47 @@ fn runtime_identity_is_alive(identity: &RuntimeIdentity) -> bool {
 fn process_is_running(pid: u32) -> bool {
     #[cfg(unix)]
     {
-        std::process::Command::new("/bin/kill")
-            .arg("-0")
-            .arg(pid.to_string())
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
+        if pid > libc::pid_t::MAX as u32 {
+            return false;
+        }
+        let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        if result == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
     #[cfg(not(unix))]
     {
         let _ = pid;
         false
+    }
+}
+
+fn remove_stale_runtime_files(data_dir: &Path) {
+    let mut removed = Vec::new();
+    for file_name in [RUNTIME_FILE_NAME, PID_FILE_NAME] {
+        let path = data_dir.join(file_name);
+        match std::fs::remove_file(&path) {
+            Ok(()) => removed.push(file_name),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(
+                    target: "bifrost_core::system_proxy_launchd",
+                    path = %path.display(),
+                    error = %error,
+                    "failed to remove stale Bifrost runtime file after startup cleanup"
+                );
+            }
+        }
+    }
+
+    if !removed.is_empty() {
+        tracing::info!(
+            target: "bifrost_core::system_proxy_launchd",
+            data_dir = %data_dir.display(),
+            files = ?removed,
+            "removed stale Bifrost runtime files after startup cleanup"
+        );
     }
 }
 
@@ -1101,5 +1137,31 @@ mod tests {
         };
 
         assert!(runtime_identity_is_alive(&identity));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_is_running_returns_false_for_missing_pid_without_shelling_out() {
+        assert!(!process_is_running(u32::MAX));
+    }
+
+    #[test]
+    fn remove_stale_runtime_files_removes_runtime_and_pid_files() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!("bifrost-stale-runtime-{unique}"));
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        let runtime_path = data_dir.join(RUNTIME_FILE_NAME);
+        let pid_path = data_dir.join(PID_FILE_NAME);
+        std::fs::write(&runtime_path, r#"{"pid":999999,"port":9900}"#).expect("write runtime");
+        std::fs::write(&pid_path, "999999").expect("write pid");
+
+        remove_stale_runtime_files(&data_dir);
+
+        assert!(!runtime_path.exists());
+        assert!(!pid_path.exists());
+        let _ = std::fs::remove_dir_all(data_dir);
     }
 }

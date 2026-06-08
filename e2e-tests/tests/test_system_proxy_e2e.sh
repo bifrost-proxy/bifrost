@@ -942,6 +942,10 @@ test_launchd_cleanup_plist_dry_run_contains_version_metadata() {
 test_launchd_cleanup_daemon_no_state_exits_quickly() {
     rm -f "${TEST_DATA_DIR}/proxy_backup.json" "${TEST_DATA_DIR}/proxy_state.json" \
         "${TEST_DATA_DIR}/bifrost.pid" "${TEST_DATA_DIR}/runtime.json" 2>/dev/null || true
+    cat > "${TEST_DATA_DIR}/runtime.json" <<EOF
+{"pid":999999,"port":${PROXY_PORT},"host":"0.0.0.0","started_at_ms":1}
+EOF
+    printf '999999\n' > "${TEST_DATA_DIR}/bifrost.pid"
 
     local started
     started=$(date +%s)
@@ -952,11 +956,14 @@ test_launchd_cleanup_daemon_no_state_exits_quickly() {
     local code=$?
     local elapsed=$(( $(date +%s) - started ))
 
-    if [[ "$code" -eq 0 && "$elapsed" -lt 10 ]]; then
-        _log_pass "LaunchDaemon cleanup daemon 无状态时快速完成 one-shot retry-aware 检查"
+    if [[ "$code" -eq 0 && "$elapsed" -lt 10 ]] \
+        && ! echo "$output" | grep -q "No such process" \
+        && [[ ! -e "${TEST_DATA_DIR}/runtime.json" ]] \
+        && [[ ! -e "${TEST_DATA_DIR}/bifrost.pid" ]]; then
+        _log_pass "LaunchDaemon cleanup daemon 无状态时快速完成 one-shot retry-aware 检查，并清理 stale runtime 文件"
         passed=$((passed + 1))
     else
-        _log_fail "LaunchDaemon cleanup daemon 无状态路径未快速退出" "code=0 且 elapsed<10s" "code=${code}; elapsed=${elapsed}; output=${output}"
+        _log_fail "LaunchDaemon cleanup daemon 无状态路径未快速退出或未清理 stale runtime" "code=0、elapsed<10s、无 No such process、runtime.json/bifrost.pid 被删除" "code=${code}; elapsed=${elapsed}; runtime_exists=$([[ -e "${TEST_DATA_DIR}/runtime.json" ]] && echo yes || echo no); pid_exists=$([[ -e "${TEST_DATA_DIR}/bifrost.pid" ]] && echo yes || echo no); output=${output}"
         failed=$((failed + 1))
     fi
 }

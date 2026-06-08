@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { SystemProxyStatus } from "../api/proxy";
-import { doesSystemProxyMatchRequest } from "./useProxyStore";
+import {
+  doesSystemProxyMatchRequest,
+  isSystemProxyConfiguredEnabled,
+  isSystemProxyLiveEnabledByBifrost,
+} from "./useProxyStore";
 
 const status = (overrides: Partial<SystemProxyStatus>): SystemProxyStatus => ({
   supported: true,
@@ -52,5 +56,31 @@ describe("doesSystemProxyMatchRequest", () => {
         true,
       ),
     ).toBe(false);
+  });
+});
+
+describe("system proxy status helpers", () => {
+  it("keeps the settings switch on when cleanup has disabled the live OS proxy", () => {
+    const cleanedUp = status({
+      enabled: false,
+      managed_by_bifrost: false,
+      configured_enabled: true,
+    });
+
+    expect(isSystemProxyConfiguredEnabled(cleanedUp)).toBe(true);
+    expect(isSystemProxyLiveEnabledByBifrost(cleanedUp)).toBe(false);
+  });
+
+  it("falls back to live Bifrost ownership for older status payloads", () => {
+    expect(
+      isSystemProxyConfiguredEnabled(
+        status({
+          enabled: true,
+          host: "127.0.0.1",
+          port: 8800,
+          managed_by_bifrost: true,
+        }),
+      ),
+    ).toBe(true);
   });
 });

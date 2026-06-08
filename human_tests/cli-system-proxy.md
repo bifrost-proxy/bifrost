@@ -518,6 +518,7 @@
 - 第 4 步显示 `Installed: true`、`Loaded: true`、`Installed mode: one-shot`、`Needs upgrade: false`。
 - plist 中 ProgramArguments 包含 `system-proxy cleanup-daemon --data-dir "$TEST_DATA_DIR" --installed-version <current>`，包含 `RunAtLoad`，且不包含 `KeepAlive`。
 - one-shot daemon 启动后如果看到 `runtime.json` 中的 Bifrost pid 仍存活，应跳过 startup cleanup，然后退出，不会误清正在运行的系统代理，也不会在空闲时保留 cleanup-daemon 进程。
+- one-shot daemon 确认旧 runtime pid 已不存在并完成 startup recovery 后，应删除 stale `runtime.json` / `bifrost.pid`，且 stderr 不应出现 `/bin/kill` 形式的 `No such process` 噪声。
 - one-shot daemon 在明确没有 `proxy_state.json` / `proxy_backup.json` / `runtime.json` 可恢复时应快速退出，不等待完整 retry 窗口；只有 `networksetup` 暂不可用或 macOS network service 暂时枚举为空这类启动期 transient 失败才在 60 秒窗口内有限重试。
 - lifecycle helper 启动日志应包含 helper pid 和 `helper_program`，helper 由独立 process group 启动；开发环境中 `current_exe()` 指向陈旧路径时应能回退到现存 `argv[0]`。
 - 所有 restore/recover/enable 路径应通过 `.system_proxy.lock` 串行化，日志包含 `waiting for system proxy cross-process file lock` 与 `acquired system proxy cross-process file lock`，避免主进程、helper、LaunchDaemon 同时写 macOS network service。
@@ -782,8 +783,48 @@
 
 ---
 
+### TC-CSP-25：cleanup-daemon 修复 OS 代理现场后，不应重置 Bifrost 系统代理配置开关
+
+**前置条件**：
+- macOS 机器。
+- 使用临时 `TEST_DATA_DIR`，并启动一次 Bifrost，使 `config.toml` 中 `[system_proxy].enabled = true`。
+- 准备一个可连接的 Bifrost 代理端口，例如 `18889`。
+
+**操作步骤**：
+1. 启动 Bifrost 并启用系统代理：
+   ```bash
+   BIFROST_DATA_DIR="$TEST_DATA_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+     ./target/debug/bifrost -H 127.0.0.1 -p 18889 start --unsafe-ssl --system-proxy
+   ```
+2. 确认 Admin API 同时返回 live 和 configured 状态：
+   ```bash
+   curl -s "http://127.0.0.1:18889/_bifrost/api/proxy/system" | jq '{enabled, managed_by_bifrost, configured_enabled}'
+   ```
+3. 模拟异常退出或重启后的 cleanup 路径，使 OS 系统代理被恢复/关闭，但不要调用 Admin API 关闭开关：
+   ```bash
+   kill -9 "$PROXY_PID"
+   sudo ./target/debug/bifrost system-proxy cleanup-daemon --data-dir "$TEST_DATA_DIR"
+   ```
+4. 检查配置文件：
+   ```bash
+   grep -A3 '^\[system_proxy\]' "$TEST_DATA_DIR/config.toml"
+   ```
+5. 再次启动 Bifrost，打开 Settings -> Proxy，查看 `Enable System Proxy` 开关；或直接请求：
+   ```bash
+   curl -s "http://127.0.0.1:18889/_bifrost/api/proxy/system" | jq '{enabled, managed_by_bifrost, configured_enabled}'
+   ```
+
+**预期结果**：
+- cleanup-daemon 可以把 macOS live OS 代理恢复为关闭或原始外部代理；这是正确的现场清理。
+- cleanup-daemon 不修改 `$TEST_DATA_DIR/config.toml`，`[system_proxy].enabled` 保持 `true`，除非用户显式通过 CLI/Admin API/UI 关闭。
+- Admin API 返回 `configured_enabled=true`，即使 cleanup 刚执行完导致 live `enabled=false`。
+- Settings、StatusBar、Traffic toolbar 的系统代理开关以 `configured_enabled` 为准保持打开；如 live OS 代理暂未接管，应展示 pending/warning，而不是把用户配置误显示为关闭。
+
+---
+
 ## 执行记录
 
+- 2026-06-08：针对强制宕机后 one-shot cleanup 观察到的日志优化点和 configured/live 状态混用回归补充验证。执行 `cargo test -p bifrost-core system_proxy_launchd -- --nocapture`，结果 15/15 PASS，验证 missing pid 不再 shell out、stale runtime 文件可清理；执行 `cargo test -p bifrost-core system_proxy -- --nocapture`，结果 37/37 PASS，覆盖 system proxy ownership、LaunchDaemon 与 retry 相关单测；执行 `cargo test -p bifrost-admin proxy::tests -- --nocapture`，结果 4/4 PASS；执行 `pnpm --dir web test:unit -- --run useProxyStore`，结果 18 个 test files / 62 tests PASS，覆盖 cleanup 后 configured switch 仍保持打开；执行 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 bash e2e-tests/tests/test_system_proxy_e2e.sh`，第一轮发现 no-state cleanup 功能正确但耗时 12 秒，修复为并发读取 macOS network service 代理状态后第二轮 14/14 PASS，验证 cleanup-daemon 快速退出、无 `No such process` stderr，并删除 stale `runtime.json` / `bifrost.pid`；执行 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 bash e2e-tests/tests/test_proxy_admin_api.sh`，结果 6/6 PASS，验证 `/api/proxy/system` 返回 `enabled` 和 `configured_enabled`；执行 TC-CSP-25 focused 自动化验证，临时 data dir 中 `[system_proxy].enabled = true`，Admin API 返回 `configured_enabled=true`，cleanup-daemon 后 config 仍为 `true` 且 stale `runtime.json` / `bifrost.pid` 已删除。
 - 2026-06-07：使用当前修复后的独立 target 二进制真实执行系统代理 shell E2E。命令：`BIFROST_BIN="$PWD/.bifrost-verify-target/debug/bifrost" SKIP_BUILD=true BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 bash e2e-tests/tests/test_system_proxy_e2e.sh`。结果 14/14 PASS，覆盖 LaunchDaemon plist one-shot dry-run、外部代理不抢占、外部代理 disable 不误关、正常退出恢复、崩溃后再次启动恢复、无 backup/state 但 runtime target 匹配时清理残留、Admin API 运行中启用后主进程崩溃由 helper 清理、cleanup-daemon 无状态快速退出、启动失败前同步清理残留。脚本中 `Killed: 9` / `Terminated: 15` 为用例主动强杀或清理进程的预期动作；检测到本机存在外部系统代理 owner 时，两个非隔离 helper 用例按脚本规则跳过以避免误动正式代理。
 - 2026-06-07：针对守护进程稳定性 review 修复执行 TC-CSP-20/TC-CSP-21 的确定性验证。执行 `CARGO_TARGET_DIR=./.bifrost-verify-target SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-core system_proxy --all-features`，结果 35/35 PASS，覆盖 `system_proxy_lock_is_world_writable_after_creation`、`system_proxy_lock_rejects_symlink`、`runtime_identity_is_not_alive_when_start_time_mismatches`、`runtime_identity_is_alive_when_start_time_matches`、`last_runtime_target_has_live_listener_resolves_localhost` 等回归；执行 `CARGO_TARGET_DIR=./.bifrost-verify-target SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli pid_reuse_detected_when_start_time_mismatches_current_process --all-features`，结果 lib/main 双路径均 PASS，验证 lifecycle helper 能识别 PID start_time mismatch。真实 CLI 执行 `bifrost system-proxy repair-lock --data-dir "$TEST_DATA_DIR"`，确认创建 `.system_proxy.lock` 后 `stat -f '%Lp'` 为 `666`；随后将 `.system_proxy.lock` 替换为 symlink 再执行同一命令，返回 `Too many levels of symbolic links (os error 62)`，结论 PASS：repair-lock 使用 nofollow + fd chmod，拒绝 symlink。
 - 2026-06-06：针对 P0/P1 review 修复真实执行 TC-CSP-16、TC-CSP-18、TC-CSP-19 及系统代理回归套件。执行 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true bash e2e-tests/tests/test_system_proxy_e2e.sh`，脚本使用临时 `BIFROST_DATA_DIR` 和 `18889` 端口，验证 LaunchDaemon plist one-shot dry-run、外部代理归属边界、崩溃后恢复、无 backup/state 但 runtime target 匹配时的残留清理、Admin API 运行中启用 system proxy 后 lifecycle helper 崩溃兜底、cleanup-daemon 无状态快速退出，以及启动失败前同步清理残留系统代理。结果 14/14 PASS，其中新增输出 `LaunchDaemon cleanup daemon 无状态时快速完成 one-shot retry-aware 检查`，证明 retry-aware one-shot 在明确无需恢复时不会等待完整 retry 窗口；测试结束后 `./target/debug/bifrost system-proxy status` 显示系统代理恢复到正式服务 `127.0.0.1:9900`。

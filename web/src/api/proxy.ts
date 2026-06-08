@@ -3,11 +3,15 @@ import { buildPublicUrl } from "../runtime";
 
 export interface SystemProxyStatus {
   supported: boolean;
+  /** Current OS system proxy state. */
   enabled: boolean;
   host: string;
   port: number;
   bypass: string;
   managed_by_bifrost?: boolean;
+  /** Persisted Bifrost preference, independent from crash cleanup recovery. */
+  configured_enabled?: boolean;
+  configured_bypass?: string;
 }
 
 export interface SystemProxySupportStatus {

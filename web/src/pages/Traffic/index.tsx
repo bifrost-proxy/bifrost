@@ -16,7 +16,10 @@ import {
   filterRecords,
   type PanelFilters,
 } from "../../stores/useTrafficStore";
-import { useProxyStore } from "../../stores/useProxyStore";
+import {
+  isSystemProxyConfiguredEnabled,
+  useProxyStore,
+} from "../../stores/useProxyStore";
 import { useBreakpointStore } from "../../stores/useBreakpointStore";
 import { useFilterPanelStore } from "../../stores/useFilterPanelStore";
 import { useTrafficDetailWindowStore } from "../../stores/useTrafficDetailWindowStore";
@@ -782,7 +785,9 @@ export default function Traffic() {
         filters={toolbarFilters}
         onClearAll={handleClearAll}
         onFilterChange={setToolbarFilters}
-        systemProxyEnabled={systemProxy?.enabled}
+        systemProxyEnabled={
+          systemProxy ? isSystemProxyConfiguredEnabled(systemProxy) : false
+        }
         systemProxySupported={systemProxy?.supported}
         systemProxyLoading={systemProxyLoading}
         onSystemProxyToggle={handleSystemProxyToggle}
