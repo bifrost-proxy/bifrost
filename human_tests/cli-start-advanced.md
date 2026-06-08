@@ -583,18 +583,21 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- stop
 **操作步骤**：
 1. 执行以下命令启动服务：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- -l debug start -p 8800 --unsafe-ssl
+   RUST_LOG=debug BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- -l debug start -p 8800 --unsafe-ssl --no-system-proxy
    ```
 2. 通过代理发起请求：
    ```bash
    curl -x http://127.0.0.1:8800 http://httpbin.org/get
    ```
-3. 观察终端日志输出
+3. 检查日志文件输出：
+   ```bash
+   grep -R "DEBUG" ./.bifrost-test/logs/bifrost*.log
+   ```
 
 **预期结果**：
 - 服务正常启动
-- 终端日志输出包含 `DEBUG` 级别的详细日志信息
-- 日志中可见请求转发、连接建立等详细调试信息
+- 文件日志输出包含 `DEBUG` 级别的详细日志信息
+- stdout/stderr 不出现 tracing 标准日志行，除非显式传入 `--log-output console` 或 `--log-output console,file`
 - `verbose_logging` 自动设为 `true`（debug 级别触发详细业务日志）
 
 ---
@@ -604,17 +607,20 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- stop
 **操作步骤**：
 1. 执行以下命令启动服务：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- -l trace start -p 8800 --unsafe-ssl
+   RUST_LOG=trace BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- -l trace start -p 8800 --unsafe-ssl --no-system-proxy
    ```
 2. 通过代理发起请求：
    ```bash
    curl -x http://127.0.0.1:8800 http://httpbin.org/get
    ```
-3. 观察终端日志输出
+3. 检查日志文件输出：
+   ```bash
+   grep -R "TRACE" ./.bifrost-test/logs/bifrost*.log
+   ```
 
 **预期结果**：
 - 服务正常启动
-- 终端日志输出包含 `TRACE` 级别的最详细日志信息
+- 文件日志输出包含 `TRACE` 级别的最详细日志信息
 - 日志量明显多于 debug 级别
 - 包含底层连接、字节流等跟踪信息
 
@@ -625,7 +631,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- stop
 **操作步骤**：
 1. 执行以下命令启动服务：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- --log-output file start -p 8800 --unsafe-ssl
+   RUST_LOG=info BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- --log-output file start -p 8800 --unsafe-ssl --no-system-proxy
    ```
 2. 观察终端是否有日志输出
 3. 通过代理发起请求：
@@ -645,7 +651,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- stop
 
 ---
 
-### TC-CSA-23：--log-output console 仅输出日志到终端
+### TC-CSA-23：--log-output console 输出日志到终端且保留文件日志
 
 **操作步骤**：
 1. 清理旧日志文件：
@@ -654,7 +660,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- stop
    ```
 2. 执行以下命令启动服务：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- --log-output console start -p 8800 --unsafe-ssl
+   RUST_LOG=info BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- --log-output console start -p 8800 --unsafe-ssl --no-system-proxy
    ```
 3. 通过代理发起请求：
    ```bash
@@ -662,13 +668,13 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- stop
    ```
 4. 检查日志文件目录：
    ```bash
-   ls -la .bifrost-test/logs/ 2>&1
+   ls -la .bifrost-test/logs/
    ```
 
 **预期结果**：
 - 服务正常启动
 - 终端有日志输出，包含请求处理信息
-- 步骤 4 日志文件目录不存在或为空（日志不写入文件）
+- 步骤 4 日志文件目录存在且包含日志文件
 
 ---
 
@@ -734,17 +740,17 @@ rm -rf /tmp/bifrost-test-logs
 **操作步骤**：
 1. 执行以下命令启动服务（`RUST_LOG` 设为 debug，`--log-level` 设为 warn）：
    ```bash
-   RUST_LOG=debug BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- -l warn start -p 8800 --unsafe-ssl
+   RUST_LOG=debug BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- -l warn start -p 8800 --unsafe-ssl --no-system-proxy
    ```
 2. 通过代理发起请求：
    ```bash
    curl -x http://127.0.0.1:8800 http://httpbin.org/get
    ```
-3. 观察终端日志输出级别
+3. 检查文件日志输出级别
 
 **预期结果**：
 - 服务正常启动
-- 终端日志输出包含 `DEBUG` 级别日志（`RUST_LOG` 优先）
+- 文件日志输出包含 `DEBUG` 级别日志（`RUST_LOG` 优先）
 - `--log-level warn` 被 `RUST_LOG=debug` 覆盖
 - 符合日志级别优先级：`RUST_LOG` > `--log-level` > 默认值 `info`
 
