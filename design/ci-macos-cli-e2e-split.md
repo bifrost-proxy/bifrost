@@ -57,3 +57,24 @@ macOS CI 的 rules/shell E2E 只依赖 `bifrost` CLI release binary，不依赖 
 ## 文档更新要求
 
 - 更新 `human_tests/readme.md` 的 CI/DevOps 索引与总计。
+
+## 2026-06-08 sherpa-onnx 预编译归档缓存
+
+### 背景
+
+`bifrost-cli` 在 `aarch64-apple-darwin` 目标上会启用 `bifrost-asr/full-local-asr`，从而编译 `sherpa-onnx-sys`。该 crate 的 build script 默认在 Cargo 构建阶段直接下载 `https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.2/sherpa-onnx-v1.13.2-osx-arm64-static-lib.tar.bz2`。GitHub Release asset URL 本身存在，但同一 URL 在本地和 CI 中都出现过间歇性 504，导致 Cargo build script panic 并让 macOS arm64 CLI build 红灯。
+
+### 实现逻辑
+
+- 新增 `scripts/ci/prepare-sherpa-onnx-archive.sh`，从 `Cargo.lock` 解析 `sherpa-onnx-sys` 版本，按 Rust target 推导官方归档名。
+- 归档下载使用 `curl --retry --retry-all-errors`，成功后用 `tar -tjf` 验证归档可读，再写入 `.ci-cache/sherpa-onnx`。
+- 脚本在 GitHub Actions 中写入 `SHERPA_ONNX_ARCHIVE_DIR`，让 `sherpa-onnx-sys` build script 走本地归档路径，避免 Cargo 构建阶段直接访问 GitHub Release asset。
+- CI `build-cli-macos-aarch64` 与 `e2e-macos-runner` 接入 `actions/cache` + 预下载脚本。
+- Release workflow 的 `aarch64-apple-darwin` CLI build 同步接入同一缓存和预下载脚本，避免发布路径重复暴露同一网络脆弱点。
+
+### 测试方案
+
+- 单元测试：无 Rust 逻辑变更，不新增 Rust 单测。
+- E2E 测试：不新增产品 E2E；由 GitHub Actions `CI` run 验证真实 macOS arm64 build。
+- 真实场景测试：新增 `human_tests/ci-sherpa-onnx-prebuilt.md`，覆盖脚本本地归档准备和 workflow 接线静态验证。
+- 轻量本地验证：`bash -n scripts/ci/prepare-sherpa-onnx-archive.sh`，使用 `file://` mock release 目录执行脚本，解析 `.github/workflows/ci.yml` 与 `.github/workflows/release.yml` 中的缓存/准备步骤。

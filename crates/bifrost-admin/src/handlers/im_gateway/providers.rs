@@ -132,15 +132,57 @@ pub(super) async fn handle_provider_by_id(
             };
             apply_provider_patch(&mut existing, &patch);
             match service.provider_store.update(existing) {
-                Ok(()) => json_response(&serde_json::json!({"success": true})),
+                Ok(()) => {
+                    if disables_provider_connection(&patch) {
+                        service.connection_manager.stop_connection(id);
+                    }
+                    json_response(&serde_json::json!({"success": true}))
+                }
                 Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
             }
         }
         Method::DELETE => match service.provider_store.delete(id) {
-            Ok(()) => json_response(&serde_json::json!({"success": true})),
+            Ok(()) => {
+                service.connection_manager.stop_connection(id);
+                service.weixin_login_pending.write().remove(id);
+                json_response(&serde_json::json!({"success": true}))
+            }
             Err(e) => error_response(StatusCode::NOT_FOUND, &e.to_string()),
         },
         _ => method_not_allowed(),
+    }
+}
+
+fn disables_provider_connection(patch: &serde_json::Value) -> bool {
+    patch
+        .get("enabled")
+        .and_then(|value| value.as_bool())
+        .is_some_and(|enabled| !enabled)
+        || patch
+            .get("event_connection_enabled")
+            .and_then(|value| value.as_bool())
+            .is_some_and(|enabled| !enabled)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::disables_provider_connection;
+
+    #[test]
+    fn provider_patch_detects_connection_disabling_changes() {
+        assert!(disables_provider_connection(&serde_json::json!({
+            "enabled": false
+        })));
+        assert!(disables_provider_connection(&serde_json::json!({
+            "event_connection_enabled": false
+        })));
+        assert!(!disables_provider_connection(&serde_json::json!({
+            "enabled": true,
+            "event_connection_enabled": true
+        })));
+        assert!(!disables_provider_connection(&serde_json::json!({
+            "display_name": "Renamed"
+        })));
     }
 }
 

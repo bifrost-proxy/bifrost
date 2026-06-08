@@ -390,16 +390,13 @@ impl ImGatewayService {
     pub async fn auto_connect_providers(self: &Arc<Self>) {
         let providers = self.provider_store.list();
         for mut provider in providers {
-            // Only auto-connect providers that have a secret configured
-            let has_secret = provider
-                .secret_ref
-                .as_deref()
-                .is_some_and(|s| !s.is_empty());
-
-            if !has_secret {
+            if !should_run_provider_event_connection(&provider) {
                 info!(
                     provider_id = %provider.id,
-                    "skipping auto-connect: missing secret"
+                    enabled = provider.enabled,
+                    event_connection_enabled = provider.event_connection_enabled,
+                    has_secret = provider.secret_ref.as_deref().is_some_and(|s| !s.is_empty()),
+                    "skipping auto-connect: provider event connection inactive"
                 );
                 continue;
             }
@@ -615,6 +612,16 @@ impl ImGatewayService {
                                 debug!(provider_id = %pid, "supervisor: provider no longer configured, skipping");
                                 continue;
                             };
+                            if !should_run_provider_event_connection(&provider) {
+                                debug!(
+                                    provider_id = %pid,
+                                    enabled = provider.enabled,
+                                    event_connection_enabled = provider.event_connection_enabled,
+                                    has_secret = provider.secret_ref.as_deref().is_some_and(|s| !s.is_empty()),
+                                    "supervisor: provider event connection inactive, skipping"
+                                );
+                                continue;
+                            }
                             let Some(app_secret) = provider.secret_ref.clone() else {
                                 continue;
                             };
@@ -688,3 +695,55 @@ impl ImGatewayService {
 }
 
 pub type SharedImGatewayService = Arc<ImGatewayService>;
+
+pub(super) fn should_run_provider_event_connection(provider: &ImProviderConfig) -> bool {
+    provider.enabled
+        && provider.event_connection_enabled
+        && provider
+            .secret_ref
+            .as_deref()
+            .is_some_and(|secret| !secret.is_empty())
+}
+
+#[cfg(test)]
+mod provider_event_connection_tests {
+    use super::*;
+
+    fn provider_with_secret() -> ImProviderConfig {
+        ImProviderConfig {
+            id: "provider-main".to_string(),
+            provider_type: crate::im_gateway::types::ImProviderType::Weixin,
+            display_name: "Provider Main".to_string(),
+            enabled: true,
+            base_url: None,
+            app_id: Some("app".to_string()),
+            secret_ref: Some("secret".to_string()),
+            owner_open_id: None,
+            event_connection_enabled: true,
+            event_types: vec!["message.receive".to_string()],
+            agent_config: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn event_connection_requires_enabled_long_connection_and_secret() {
+        let mut provider = provider_with_secret();
+        assert!(should_run_provider_event_connection(&provider));
+
+        provider.enabled = false;
+        assert!(!should_run_provider_event_connection(&provider));
+
+        provider.enabled = true;
+        provider.event_connection_enabled = false;
+        assert!(!should_run_provider_event_connection(&provider));
+
+        provider.event_connection_enabled = true;
+        provider.secret_ref = Some(String::new());
+        assert!(!should_run_provider_event_connection(&provider));
+
+        provider.secret_ref = None;
+        assert!(!should_run_provider_event_connection(&provider));
+    }
+}

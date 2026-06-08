@@ -1057,3 +1057,28 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 - **清理步骤**:
   - 无特殊清理；测试使用临时目录与进程内 mock server。
 - **执行记录（2026-06-04）**: PASS — 本地 `cargo test --workspace --all-features` 首次暴露 `im_event_loop_forwards_image_attachment_to_agent_chat` 偶发未收到 mock chat request，单独重跑通过，定位为 worker 环境变量并发隔离不足。修复后执行第 1 步通过；第 2 步执行 `cargo test -p bifrost-admin 'im_gateway::agent_worker::tests::spawn_' -- --nocapture`，2 个用例通过。workspace 全量继续由本地复跑和远端 CI 共同兜底。
+
+### TC-IMG-66: 删除或禁用微信 Provider 后停止 getupdates 轮询
+
+- **前置条件**:
+  - 使用临时数据目录启动当前源码版 Bifrost，必须设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`，必须携带 `--no-system-proxy` 和 `--skip-cert-check`。
+  - 准备一个本地 mock Weixin iLink 服务，至少实现 `/ilink/bot/get_bot_qrcode`、`/ilink/bot/get_qrcode_status`、`/ilink/bot/getupdates`、`/ilink/bot/sendmessage`，并把每次 `getupdates` 的 `Authorization` token 写入日志。
+  - 创建 `weixin-mock` Provider，`enabled=true`、`event_connection_enabled=true`、`base_url` 指向 mock iLink 服务，完成扫码登录并连接。
+- **操作步骤**:
+  1. 等待 `weixin-mock` 至少产生 1 次 `getupdates` 请求，并记录 mock 日志中 `Bearer mock-token` 的当前计数。
+  2. 在 WebUI `AI -> IM Gateway -> Connections` 删除 `weixin-mock`，或执行：
+     ```bash
+     curl -sS -X DELETE http://127.0.0.1:<port>/_bifrost/api/im-gateway/providers/weixin-mock
+     ```
+  3. 等待 7 秒以上，再次统计 mock 日志中 `Bearer mock-token` 的计数。
+  4. 创建 `weixin-disabled` Provider，`enabled=true`、`event_connection_enabled=false`、`app_secret=disabled-token`、`base_url` 仍指向 mock iLink 服务。
+  5. 重启同一临时数据目录的 Bifrost，等待 4 秒以上，统计 mock 日志中 `Bearer disabled-token` 的计数。
+- **预期结果**:
+  - 第 2 步删除返回成功，`GET /_bifrost/api/im-gateway/providers/weixin-mock` 返回 404 或不再出现在列表中。
+  - 第 3 步删除后 `Bearer mock-token` 计数不再按 3 秒轮询周期增长；允许删除瞬间最多 1 次 in-flight 请求竞态，但不得持续新增。
+  - 第 5 步 `event_connection_enabled=false` 的 `weixin-disabled` 在重启后不会自动连接，mock 日志中 `Bearer disabled-token` 计数为 0。
+  - Bifrost 日志不再持续出现已删除 Provider 的 `weixin poll failed provider_id=weixin-mock` 或 `weixin-main`。
+- **清理步骤**:
+  - 停止临时 Bifrost 进程和 mock iLink 进程。
+  - 删除临时 `BIFROST_DATA_DIR`。
+- **执行记录（2026-06-08）**: PASS — 执行 `SKIP_FRONTEND_BUILD=1 e2e-tests/tests/test_weixin_provider_e2e.sh`，脚本使用 mock iLink 和临时数据目录完成微信扫码登录、连接、收发消息；删除 `weixin-mock` 后等待 7.2 秒，`Bearer mock-token` 的 `getupdates` 计数未持续增长，且 provider API 已返回 404；随后创建 `event_connection_enabled=false` 的 `weixin-disabled` 并重启同一数据目录，等待 4.2 秒后 mock 日志中 `Bearer disabled-token` 计数为 0。

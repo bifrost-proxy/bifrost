@@ -1866,6 +1866,49 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 - `human_tests/im-gateway.md`
 - `human_tests/readme.md`
 
+## 2026-06-08 Provider 删除/禁用停止长连接轮询
+
+### 问题
+
+用户在 WebUI `IM Gateway / Connections` 删除微信 Provider 后，日志仍持续出现 `weixin poll failed provider_id=weixin-main`。原因是 Connections 删除按钮调用 `DELETE /api/im-gateway/providers/:id`，后端只从 `ImProviderStore` 删除持久化配置，没有同步调用 `ImConnectionManager::stop_connection(id)`。微信 Provider 的 `connect_events()` 已经把启动时的 config clone 到独立 Tokio 轮询任务中，因此 provider 从列表消失后，当前进程里的 `getupdates` poll task 仍会每 3 秒请求一次 iLink。
+
+同一生命周期还有两个边界：PATCH 把 Provider `enabled=false` 或 `event_connection_enabled=false` 时应停止当前长连接；服务启动自动连接和 60 秒 supervisor 重连也必须尊重 `enabled && event_connection_enabled && secret_ref 非空`，否则被用户关闭的通道可能在重启后再次被拉起。
+
+### 实现逻辑
+
+- `DELETE /providers/:id` 成功删除 provider 后立即调用 `connection_manager.stop_connection(id)`，并清理同 id 的微信登录 pending 状态。
+- `PATCH /providers/:id` 如果把 `enabled` 或 `event_connection_enabled` 改为 `false`，持久化成功后立即停止当前长连接。
+- 新增 `should_run_provider_event_connection()`，统一判断 provider 是否应被自动连接/重连：必须同时满足 `enabled=true`、`event_connection_enabled=true`、`secret_ref` 非空。
+- `auto_connect_providers()` 和 reconnect supervisor 都使用该判断，避免启动或重连用户已禁用的通道。
+
+### 测试方案
+
+- 单元测试：`provider_patch_detects_connection_disabling_changes` 覆盖 PATCH 禁用字段识别。
+- 单元测试：`event_connection_requires_enabled_long_connection_and_secret` 覆盖自动连接条件。
+- E2E 测试：扩展 `e2e-tests/tests/test_weixin_provider_e2e.sh`，使用 mock iLink 记录 `getupdates` token；连接后删除 provider，等待超过两个 poll 周期，断言删除后不继续轮询；再创建 `event_connection_enabled=false` 且有 secret 的微信 provider，重启 Bifrost 后断言不会自动 poll。
+- 真实场景测试：更新并执行 `human_tests/im-gateway.md` 的 `TC-IMG-66`，覆盖 WebUI/API 删除微信 Connections 后日志不再持续出现 `weixin poll failed`。
+
+### Review/Fix/Test 闭环方案
+
+- 第 1 轮：复核删除、禁用、自动连接、supervisor 四条生命周期路径；执行 focused unit 和微信 E2E，修复断言、竞态或遗漏路径。
+- 第 2 轮：复查最新 diff、human_tests 索引和用户症状；复跑 focused unit、E2E、fmt/clippy/workspace 测试。
+
+### 校验要求
+
+```bash
+cargo test -p bifrost-admin provider_patch_detects_connection_disabling_changes event_connection_requires_enabled_long_connection_and_secret --lib
+SKIP_FRONTEND_BUILD=1 e2e-tests/tests/test_weixin_provider_e2e.sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+```
+
+### 文档更新
+
+- `design/im-gateway.md`
+- `human_tests/im-gateway.md`
+- `human_tests/readme.md`
+
 ## 2026-06-08 IM 通道 `/cwd` 工作目录切换指令
 
 ### 问题
