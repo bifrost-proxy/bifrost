@@ -777,8 +777,41 @@
 4. 失败、停止、超时路径仍按最终 result status 收敛，不因忽略 progress `RunFinished` 而永久 running。
 5. 自动 E2E 在临时数据目录和随机端口启动当前源码 Bifrost，构造先输出 `turn.completed`、延迟 5 秒再输出 `agent_message` 的 external runner；中途 `/agent/sessions/all` 必须返回 `running:true`、`status:"active"`、`state:"running"`、`run_state:"running"`，最终必须返回 `ended/completed`，且 JSONL 中最终 `assistant_message` 早于 `run_state_changed: completed`。
 
+### TC-IEC-39: 飞书 Codex/Trae Runner 默认启用 progress card
+
+操作步骤：
+1. 执行 focused 单元回归：
+   ```bash
+   cargo test -p bifrost-admin feishu_codex_like_external_runner_defaults_to_progress_card_without_channel_override --lib -- --nocapture
+   ```
+2. 检查测试构造的 effective config：Provider 类型为 Feishu，adapter 分别为 `traex` 和 `codex`，runner 级 `deliveryMode` 为 `final_reply`，`sources.deliveryMode` 为 `runner`。
+3. 检查测试中的显式覆盖分支：`sources.deliveryMode=channel` 时保留 `final_reply`；input override 为 `no_im` 时保留 `no_im`；非 Feishu Provider 保留 runner 默认值。
+
+预期结果：
+1. Feishu + Trae/Codex external runner 在没有 channel 显式 delivery override 时解析为 `ProgressCard`。
+2. `final_reply` 作为 runner 默认值不会再让飞书通道跳过卡片，只输出最终文本。
+3. 显式 channel deliveryMode 和 route/input delivery override 优先级不变，用户仍可主动选择 `final_reply` 或 `no_im`。
+4. Weixin、ChatGPT Web、自定义非 Codex-like adapter 不受该默认策略影响。
+
+### TC-IEC-40: Web History 最终回复展开保留 external runner 过程
+
+操作步骤：
+1. 执行前端 timeline 回归：
+   ```bash
+   pnpm --dir web exec vitest run src/pages/AI/AgentChatSection.timeline.test.ts
+   ```
+2. 重点检查 `attaches external runner process steps to the final assistant message` 用例：构造 Feishu + `traex` 的 history，事件顺序包含 `assistant_delta`、`tool_call`、`tool_result`、`run_state_changed: completed` 和最终 `assistant_message`。
+3. 如需真实 WebUI 复核，打开对应 history 深链，展开已完成轮次的 `已处理 <duration>` 过程块，观察最终 assistant 回复下方是否显示 thinking/tool 过程。
+
+预期结果：
+1. history 转换后只有同一轮的用户消息和最终 assistant 消息，不生成额外 `Agent is running...` 占位 assistant。
+2. 最终 assistant 消息的 `processSteps` 包含 thinking 和工具执行结果，展开后可看到过程信息。
+3. 最终 assistant 内容仍是真实最终回复，不被过程占位文案替代。
+4. 非 external runner 的普通 assistant delta 仍作为普通 assistant 内容展示，不被误收进过程块。
+
 ## 最近执行记录
 
+- 2026-06-08：执行 TC-IEC-39/40 的本轮回归验证。命令 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin feishu_codex_like_external_runner_defaults_to_progress_card_without_channel_override --lib -- --nocapture` 通过，确认 Feishu + Trae/Codex external runner 在没有 channel delivery override 时解析为 `ProgressCard`，且显式 channel/input override 与非 Feishu Provider 行为不变。命令 `pnpm --dir web exec vitest run src/pages/AI/AgentChatSection.timeline.test.ts` 通过，1 个测试文件 10 个用例全部通过，确认 external runner 的 thinking/tool `processSteps` 挂在最终 assistant message 上，不再生成额外 `Agent is running...` 占位消息。
 - 2026-05-13：执行 TC-IEC-01/02/03/04/08/09/10/11/12/13，临时服务端口 `18880`，`BIFROST_DATA_DIR=/tmp/bifrost-im-external-cli-test`，均通过；TC-IEC-12 使用 `sleep 23` 慢进程验证 active run 可停止，run 收敛为 `status:"stopped"`，`response:"External CLI run was stopped by request."`，且未残留 `sleep 23` 测试进程。
 - 2026-05-13：执行 TC-IEC-05/06 及 stop 迟到输出回归单测，`cargo test -p bifrost-admin external_cli -- --nocapture`，5 个测试通过。
 - 2026-05-13：执行 TC-IEC-14，使用 Playwright 打开 `http://127.0.0.1:18880/_bifrost/ai?imGatewaySection=external-cli`，亮色与暗色两种 `colorScheme` 下均能看到 External CLI、Global Defaults、Channel Override，截图保存到 `/tmp/bifrost-im-external-cli-light.png` 与 `/tmp/bifrost-im-external-cli-dark.png`。

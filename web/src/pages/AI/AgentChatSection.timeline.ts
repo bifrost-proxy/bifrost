@@ -143,19 +143,21 @@ export function historyEventsToMessages(
     }
 
     if (event.event_type === "assistant_message") {
-      flushPendingSteps();
       lastEventWasAssistantDelta = false;
       const content = event.content.message;
       if (typeof content === "string" && content.trim().length > 0) {
+        const processSteps = pendingSteps.length > 0 ? pendingSteps : undefined;
         messages.push({
           id: `history-${index}`,
           role: "assistant",
           content,
           timestamp: event.timestamp,
           meta: "History assistant",
-          processSteps: pendingSteps.length > 0 ? pendingSteps : undefined,
+          processSteps,
         });
         pendingSteps = [];
+      } else {
+        flushPendingSteps();
       }
       return;
     }

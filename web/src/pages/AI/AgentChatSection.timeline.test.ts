@@ -243,6 +243,81 @@ describe("historyEventsToMessages", () => {
     });
   });
 
+  it("attaches external runner process steps to the final assistant message", () => {
+    const messages = historyEventsToMessages([
+      {
+        timestamp: 0,
+        event_type: "session_start",
+        session_key: "feishu-main:ou_user",
+        content: { runtime: "external_cli", adapter: "traex" },
+      },
+      {
+        timestamp: 1,
+        event_type: "user_message",
+        session_key: "feishu-main:ou_user",
+        content: { message: "当前分支有什么修改？" },
+      },
+      {
+        timestamp: 2,
+        event_type: "assistant_delta",
+        session_key: "feishu-main:ou_user",
+        content: { message: "我先看一下分支状态。" },
+      },
+      {
+        timestamp: 3,
+        event_type: "tool_call",
+        session_key: "feishu-main:ou_user",
+        content: {
+          tool_name: "exec_command",
+          call_id: "tool_1",
+          arguments: JSON.stringify({ command: "git status --short --branch" }),
+        },
+      },
+      {
+        timestamp: 4,
+        event_type: "tool_result",
+        session_key: "feishu-main:ou_user",
+        content: {
+          tool_name: "exec_command",
+          call_id: "tool_1",
+          result: "## codex/fix-traex-feishu-progress",
+          success: true,
+        },
+      },
+      {
+        timestamp: 5,
+        event_type: "run_state_changed",
+        session_key: "feishu-main:ou_user",
+        content: { state: "completed" },
+      },
+      {
+        timestamp: 6,
+        event_type: "assistant_message",
+        session_key: "feishu-main:ou_user",
+        content: { message: "当前分支没有未提交修改。" },
+      },
+    ]);
+
+    expect(messages).toHaveLength(2);
+    expect(messages[1]).toMatchObject({
+      role: "assistant",
+      content: "当前分支没有未提交修改。",
+    });
+    expect(messages[1].content).not.toBe("Agent is running...");
+    expect(messages[1].processSteps).toHaveLength(2);
+    expect(messages[1].processSteps?.[0]).toMatchObject({
+      type: "thinking",
+      summary: "我先看一下分支状态。",
+    });
+    expect(messages[1].processSteps?.[1]).toMatchObject({
+      type: "tool",
+      summary: "exec_command",
+      callId: "tool_1",
+      status: "success",
+      result: "## codex/fix-traex-feishu-progress",
+    });
+  });
+
   it("places external runner content before trailing running tools in the same loop", () => {
     const messages = historyEventsToMessages([
       {

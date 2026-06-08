@@ -878,6 +878,57 @@ pub(super) fn test_provider() -> ImProviderConfig {
     }
 }
 
+#[test]
+pub(super) fn feishu_codex_like_external_runner_defaults_to_progress_card_without_channel_override()
+{
+    let provider = test_provider();
+    let settings = crate::im_gateway::external_cli::ExternalCliAgentSettings {
+        adapter: crate::im_gateway::external_cli::TRAEX_ADAPTER.to_string(),
+        delivery_mode: crate::im_gateway::external_cli::ExternalCliDeliveryMode::FinalReply,
+        ..Default::default()
+    };
+    let runner_sources =
+        std::collections::BTreeMap::from([("deliveryMode".to_string(), "runner".to_string())]);
+
+    assert_eq!(
+        resolve_external_cli_delivery_mode(&provider, &settings, &runner_sources, None),
+        crate::im_gateway::external_cli::ExternalCliDeliveryMode::ProgressCard
+    );
+
+    let codex_settings = crate::im_gateway::external_cli::ExternalCliAgentSettings {
+        adapter: "codex".to_string(),
+        delivery_mode: crate::im_gateway::external_cli::ExternalCliDeliveryMode::FinalReply,
+        ..Default::default()
+    };
+    assert_eq!(
+        resolve_external_cli_delivery_mode(&provider, &codex_settings, &runner_sources, None),
+        crate::im_gateway::external_cli::ExternalCliDeliveryMode::ProgressCard
+    );
+
+    let channel_sources =
+        std::collections::BTreeMap::from([("deliveryMode".to_string(), "channel".to_string())]);
+    assert_eq!(
+        resolve_external_cli_delivery_mode(&provider, &settings, &channel_sources, None),
+        crate::im_gateway::external_cli::ExternalCliDeliveryMode::FinalReply
+    );
+    assert_eq!(
+        resolve_external_cli_delivery_mode(
+            &provider,
+            &settings,
+            &runner_sources,
+            Some(crate::im_gateway::external_cli::ExternalCliDeliveryMode::NoIm),
+        ),
+        crate::im_gateway::external_cli::ExternalCliDeliveryMode::NoIm
+    );
+
+    let mut weixin_provider = test_provider();
+    weixin_provider.provider_type = ImProviderType::Weixin;
+    assert_eq!(
+        resolve_external_cli_delivery_mode(&weixin_provider, &settings, &runner_sources, None),
+        crate::im_gateway::external_cli::ExternalCliDeliveryMode::FinalReply
+    );
+}
+
 mod schedule_agent_tests;
 
 #[test]

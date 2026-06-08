@@ -802,6 +802,31 @@ struct ExternalCliChatInput {
     runner_selected: bool,
 }
 
+pub(super) fn resolve_external_cli_delivery_mode(
+    provider: &ImProviderConfig,
+    settings: &crate::im_gateway::external_cli::ExternalCliAgentSettings,
+    sources: &std::collections::BTreeMap<String, String>,
+    input_override: Option<crate::im_gateway::external_cli::ExternalCliDeliveryMode>,
+) -> crate::im_gateway::external_cli::ExternalCliDeliveryMode {
+    if let Some(delivery_mode) = input_override {
+        return delivery_mode;
+    }
+    if provider.provider_type == ImProviderType::Feishu
+        && is_im_progress_card_external_adapter(&settings.adapter)
+        && sources.get("deliveryMode").map(String::as_str) != Some("channel")
+    {
+        return crate::im_gateway::external_cli::ExternalCliDeliveryMode::ProgressCard;
+    }
+    settings.delivery_mode
+}
+
+fn is_im_progress_card_external_adapter(adapter: &str) -> bool {
+    matches!(
+        adapter,
+        "codex" | crate::im_gateway::external_cli::TRAEX_ADAPTER
+    )
+}
+
 async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: ExternalCliChatInput) {
     let config = ctx.external_cli_config_store.load();
     let effective = crate::im_gateway::external_cli::effective_config_for_provider_and_runner(
@@ -879,7 +904,12 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
         return;
     }
 
-    let delivery_mode = input.delivery_override.unwrap_or(settings.delivery_mode);
+    let delivery_mode = resolve_external_cli_delivery_mode(
+        ctx.provider,
+        &settings,
+        &effective.sources,
+        input.delivery_override,
+    );
     let mut status_context =
         status_context_from_external_runner(&effective.runner_id, &settings.adapter);
     if let Some(model) = settings
