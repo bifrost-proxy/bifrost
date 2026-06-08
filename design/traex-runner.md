@@ -28,6 +28,7 @@ Bifrost 的 Agent Runner 已经把 Codex、ChatGPT Web、custom CLI 收敛到同
 - 不向 Trae exec 传递不支持的 `--permission-mode default`。配置为空或 `default` 时必须默认启用 full access；当前 Trae CLI 不允许同时设置 sandbox override 和 permission mode override，因此 full access 模式只传 `--dangerously-bypass-approvals-and-sandbox`，不再同时传 `--permission-mode bypass_permissions`。
 - 未显式配置 `timeoutSecs` 时，不对 Trae/external runner 设置固定超时；长任务由用户显式 `/stop` 或 runner 自然结束控制。
 - 飞书 progress card 展示工具输入/输出预览，完整 stdout/stderr 与 normalized events 保存在 run artifacts；重复的 running tool start 事件必须去重，避免卡片体过大导致中间刷新丢失。
+- 飞书绑定 Codex/Trae external runner 时，如果 IM channel 没有显式配置 `deliveryMode`，必须默认使用 progress card；runner 级默认 `final_reply` 只作为非飞书或显式 channel 继承外的普通回退，不能让飞书过程卡片被静默短路。
 - 不影响飞书 IM progress card 的最终收敛和普通 final reply 投递策略。
 
 ### 必须真实验证
@@ -67,6 +68,8 @@ Web Chat 和 IM event loop 使用 `record_external_cli_progress_event_to_timelin
 
 Web timeline 会按 `call_id` 合并工具 start/result，并跳过重复 start。后端在写 conversation timeline 时也会跳过同一 `call_id` 的重复 `ToolStarted`，避免 Trae/Codex 重复输出 `item.started` 时造成 WebView active command 计数虚高。
 
+历史回放时，external runner 的 pending thinking/tool process steps 必须挂在同一轮最终 `assistant_message` 上。不能在最终回复前先 flush 成 `Agent is running...` 占位消息，否则用户在 Web UI 展开最终结果时会看不到过程信息，且时间戳/折叠状态会误导为两条 assistant 回复。
+
 运行中的 Web Chat 不使用前端定时轮询作为状态源。后端每次向 conversation timeline 写入外部 runner 事件后，通过已有 `sessions/events` SSE 推送轻量 `timeline_changed`，payload 只包含 `sessionKey`、`historyPath` 和可用的 `endIndex`。前端只接受当前打开的 `historyPath/sessionKey` 对应事件，多个线程同时运行时不会互相写入消息区；收到事件后按本地 `endIndex` 调用 history `since` 增量接口补齐。EventSource 连接不跟随普通 thread summary 刷新重建，而是通过 ref 读取当前线程和运行状态，避免多线程同时推送时发生连接抖动或旧响应覆盖。只有 SSE lagged、重连或返回的 `start_index` 与本地 `endIndex` 不连续时，才触发一次 tail/history 或 sessions/all 校准，避免运行页把 `/sessions/all` 变成高频心跳并拖高主进程 CPU。
 
 外部 runner（Codex/Trae）运行中不做 guide 注入：同 session 的新用户消息默认进入 `SessionQueueManager` 排队，`/stop` 作为单独控制命令立即尝试停止当前外部进程。Web Chat 交互层也必须隐藏 Guide/Queue 切换，只展示 queue 状态；即使某个入口误传 guide，也会在提交前降级为 queue。当前 run 结束后，IM/Web Chat runner loop 会弹出下一条排队消息再启动下一轮外部 runner；Codex 和 Trae 都会复用上一轮保存的 `threadId` 走 `exec resume`，避免排队续跑丢失 runner 原生会话上下文。
@@ -101,6 +104,8 @@ Runners 配置页的 Adapter 下拉只展示产品化入口：Codex CLI、Trae C
 - `duplicate_running_tool_started_updates_existing_pipeline_item`：验证重复 `item.started` 不重复插入工具过程，且工具详情输出预览限长。
 - `external_runner_duplicate_tool_started_is_recorded_once`：验证后端 timeline 持久化不会重复写入同一 `call_id` 的工具 start。
 - `historyEventsToMessages deduplicates repeated external runner tool events by call id`：验证 Web timeline 按 `call_id` 合并重复 start 与 result，保留输入输出。
+- `feishu_codex_like_external_runner_defaults_to_progress_card_without_channel_override`：验证飞书 Codex/Trae runner 即使 runner 级配置为 `final_reply`，没有 channel delivery override 时仍使用 progress card；显式 channel/input override 仍优先。
+- `historyEventsToMessages attaches external runner process steps to the final assistant message`：验证已保存的飞书/Trae history 展开最终 assistant 时可以看到同轮 thinking/tool 过程，而不会产生单独 `Agent is running...` 占位结果。
 
 ### E2E 测试
 
@@ -112,6 +117,7 @@ Runners 配置页的 Adapter 下拉只展示产品化入口：Codex CLI、Trae C
 ### 真实场景测试
 
 - 更新 `human_tests/im-gateway-external-cli-chat-gateway.md`，新增 Trae Web Chat、飞书 IM progress card、permission mode 默认 headless full access 三个用例。
+- 对本轮回归新增飞书 Codex/Trae progress card 默认投递和 Web history 最终回复过程挂载用例。
 - 按用例真实执行：临时端口、临时数据目录、`--no-system-proxy`、禁用 Sync 自动登录弹窗。
 - WebUI 亮色/暗色至少验证 Agent Chat 过程块可读性；本轮主要变更不新增硬编码主题色。
 
