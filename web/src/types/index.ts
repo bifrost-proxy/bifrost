@@ -603,6 +603,8 @@ export interface TlsConfig {
   intercept_include: string[];
   app_intercept_exclude: string[];
   app_intercept_include: string[];
+  ip_intercept_exclude: string[];
+  ip_intercept_include: string[];
   unsafe_ssl: boolean;
   disconnect_on_config_change: boolean;
 }

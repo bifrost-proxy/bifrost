@@ -4,12 +4,16 @@
 
 Windows `E2E Runner` job 负责在 `x86_64-pc-windows-msvc` 和 `aarch64-pc-windows-msvc` hosted runner 上执行 `scripts/ci/run-e2e-runner.sh`，该入口最终通过 `cargo run -p bifrost-e2e` 编译并运行自定义 E2E runner。
 
+Windows `E2E Rules` job 负责执行 `e2e-tests/run_all_tests_parallel.sh` 的规则 fixture shard。该脚本在 Windows 上使用共享 mock servers，并把并行度强制降为 1，以避免多个 fixture 同时启动/停止 mock servers。
+
 ## 实现逻辑
 
-- GitHub Actions 当前失败发生在 `E2E Runner (x86_64-pc-windows-msvc)` 的 `cargo run -p bifrost-e2e` 编译阶段。
-- 失败日志显示多个 Rust 工具链路径在并行编译早期同时触发 `rust-src` 下载，随后 rustup 报 `failed to install component: 'rust-src', detected conflict: 'lib\rustlib\src\rust\library\Cargo.toml'`。
+- 历史 GitHub Actions 失败曾发生在 `E2E Runner (x86_64-pc-windows-msvc)` 的 `cargo run -p bifrost-e2e` 编译阶段。
+- 该历史失败日志显示多个 Rust 工具链路径在并行编译早期同时触发 `rust-src` 下载，随后 rustup 报 `failed to install component: 'rust-src', detected conflict: 'lib\rustlib\src\rust\library\Cargo.toml'`。
 - Windows E2E runner 的 `dtolnay/rust-toolchain@stable` 步骤显式声明 `components: rust-src`，让组件安装在 cargo 并行编译前由单个 Actions step 完成。
 - `scripts/run_all_e2e.sh` 在解析 `CARGO_BIN` 后，如果调用方未显式设置 `RUSTC`，会通过 `rustup which rustc` 绑定同一当前工具链的真实 `rustc` 路径，并在 E2E Runtime Context 打印 `Rustc bin`。这避免 Windows Git Bash `PATH` 解析或 rustup shim fallback 把 Cargo 1.95 和 Rustc 1.65 混用，导致 `--check-cfg` 被旧 rustc 当作 unstable flag。
+- PR #200 本轮失败发生在 `E2E Rules (x86_64-pc-windows-msvc, shard 2/4)` 的 retry 阶段，失败摘要为 `Mock 服务器未运行，但指定了 --skip-mock-servers`。
+- Windows rules E2E 的失败重试会在每个失败 fixture 补跑前调用 `ensure_mock_servers_alive`，确认共享 mock servers 仍存活；如果补跑仍然命中 mock outage，会立即重启 mock servers 并对同一 fixture 做一次有界补跑。这样避免 `test_rules.sh --skip-mock-servers` 在重试阶段因共享 mock 掉线而把多个无关 fixture 误判失败。
 - Linux/macOS runner 当前没有同类失败；本次仅收敛 Windows runner matrix，避免扩大 CI 变更面。
 
 ## 依赖项
@@ -17,6 +21,7 @@ Windows `E2E Runner` job 负责在 `x86_64-pc-windows-msvc` 和 `aarch64-pc-wind
 - `.github/workflows/ci.yml`
 - `scripts/ci/run-e2e-runner.sh`
 - `scripts/run_all_e2e.sh`
+- `e2e-tests/run_all_tests_parallel.sh`
 - `crates/bifrost-e2e`
 
 ## 测试方案
@@ -32,11 +37,13 @@ Windows `E2E Runner` job 负责在 `x86_64-pc-windows-msvc` 和 `aarch64-pc-wind
 - 执行 `bash scripts/run_all_e2e.sh --ci --skip-rules --skip-shell --skip-runner --skip-ui --skip-build`，确认 Runtime Context 输出 Cargo/Rustc 路径且不启动任何 suite。
 - 静态检查 `scripts/run_all_e2e.sh`，确认默认 `RUSTC` 来自 `rustup which rustc`，且 Runtime Context 输出 `Rustc bin`。
 - 推送分支后观察 GitHub Actions `CI` workflow，确认 `E2E Runner (x86_64-pc-windows-msvc)` 不再在 `rust-src` component conflict 处失败。
+- 静态检查 `e2e-tests/run_all_tests_parallel.sh`，确认 Windows rules E2E 的失败重试会在 fixture 补跑前确认 mock servers 存活，并对 mock outage 重试失败执行一次重启后补跑。
 
 ### 真实场景测试
 
 - 新增 `human_tests/ci-windows-e2e-runner.md`。
 - 执行静态 workflow 和脚本检查，验证 Windows E2E runner 的 toolchain step 已预安装 `rust-src`，且 E2E 入口会显式绑定 `RUSTC`。
+- 更新 `human_tests/ci-windows-e2e-runner.md`，覆盖 Windows rules E2E 重试阶段 mock servers 掉线回归。
 - 推送后使用 `github-actions-pat` 的 fail-fast watcher 观察最新 CI run。
 
 ## Review/Fix/Test 闭环方案
@@ -49,6 +56,8 @@ Windows `E2E Runner` job 负责在 `x86_64-pc-windows-msvc` 和 `aarch64-pc-wind
 - `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/ci.yml")'`
 - 静态断言 `e2e-windows-runner` 的 toolchain step 包含 `components: rust-src`
 - 静态断言 `scripts/run_all_e2e.sh` 通过 `rustup which rustc` 设置默认 `RUSTC`
+- `bash -n e2e-tests/run_all_tests_parallel.sh`
+- 静态断言 Windows rules E2E retry loop 在补跑前调用 `ensure_mock_servers_alive`，并在 mock outage 重试失败后重启 mock servers 再补跑一次
 - GitHub Actions 最新 `CI` run fail-fast watch
 
 ## 文档更新要求

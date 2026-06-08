@@ -53,6 +53,24 @@
 - Runtime Context 包含 `Rustc bin`，便于 CI 日志诊断 Cargo/Rustc 是否匹配。
 - 命令可正常退出，不启动 Bifrost 服务、不运行 runner。
 
+### TC-CWER-04: Windows rules E2E retry 阶段重拉 mock servers
+
+**操作步骤**：
+1. 检查 `e2e-tests/run_all_tests_parallel.sh`。
+2. 定位 `retry_failed_suites_once` 函数中的失败 fixture 串行重试 loop。
+3. 确认 Windows 分支在每个失败 fixture 补跑前调用 `ensure_mock_servers_alive`。
+4. 确认如果补跑后 `result_failure_mentions_mock_outage "$idx"` 为真，脚本会再次调用 `ensure_mock_servers_alive`，清理该 fixture 的临时结果后对同一 fixture 再补跑一次。
+5. 执行 shell 语法检查：
+   ```bash
+   bash -n e2e-tests/run_all_tests_parallel.sh
+   ```
+
+**预期结果**：
+- Windows rules E2E 不会只在 retry loop 开始前检查一次共享 mock servers。
+- 如果 retry 阶段仍因 mock outage 失败，脚本会重启 mock servers 并对同一 fixture 做一次有界补跑。
+- 该保护不改变普通规则断言失败的语义：非 mock outage 失败仍保留失败结果。
+- `bash -n` 语法检查通过。
+
 ## 清理步骤
 
 - 无本地清理需求；本测试不创建临时服务实例、不写入数据目录、不修改系统代理。
@@ -60,3 +78,4 @@
 ## 执行记录
 
 - 2026-05-19：TC-CWER-01 通过 `ruby -e 'require "yaml"; ...'` 静态检查；TC-CWER-03 通过 `bash -n scripts/run_all_e2e.sh scripts/ci/run-e2e-runner.sh`、`rg -n 'rustup which rustc|Rustc bin|export RUSTC' scripts/run_all_e2e.sh` 和 `bash scripts/run_all_e2e.sh --ci --skip-rules --skip-shell --skip-runner --skip-ui --skip-build` 验证，Runtime Context 输出当前 Cargo/Rustc 真实路径且未启动任何 suite；TC-CWER-02 首次推送已越过 `rust-src` component conflict，但暴露 Cargo 1.95 / Rustc 1.65 混用导致的 `--check-cfg` 失败，最终结果由后续 GitHub Actions `CI` run 观察确认。
+- 2026-06-08：TC-CWER-04 通过。执行 `bash -n e2e-tests/run_all_tests_parallel.sh` 通过；执行 `rg -n 'is_windows && ! ensure_mock_servers_alive|result_failure_mentions_mock_outage|重启 Mock 后补跑一次' e2e-tests/run_all_tests_parallel.sh` 命中 retry loop，确认 Windows rules E2E 会在每个失败 fixture 补跑前确认 mock servers 存活，并在 mock outage 重试失败后重启 mock servers 对同一 fixture 再补跑一次。远端验证由 PR #200 下一次 GitHub Actions `CI` run 的 Windows `E2E Rules (x86_64-pc-windows-msvc, shard 2/4)` 结果确认。

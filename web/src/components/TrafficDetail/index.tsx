@@ -612,6 +612,7 @@ export default function TrafficDetail({
             isTunnel={record.is_tunnel}
             host={record.host}
             clientApp={record.client_app}
+            clientIp={record.client_ip}
           />
         ),
       },
@@ -717,6 +718,7 @@ export default function TrafficDetail({
             isTunnel={record.is_tunnel}
             host={record.host}
             clientApp={record.client_app}
+            clientIp={record.client_ip}
           />
         ),
       },

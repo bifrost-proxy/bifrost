@@ -109,6 +109,7 @@ const startTrackedBackend = async () => {
         "-p",
         String(backendPort),
         "--unsafe-ssl",
+        "--no-system-proxy",
         "--access-mode",
         "allow_all",
       ],
@@ -126,6 +127,7 @@ const startTrackedBackend = async () => {
         "-p",
         String(backendPort),
         "--unsafe-ssl",
+        "--no-system-proxy",
         "--access-mode",
         "allow_all",
       ],
@@ -138,6 +140,7 @@ const startTrackedBackend = async () => {
       PROXY_URL: BASE_PROXY_URL,
       BIFROST_UI_TEST_PORT: String(backendPort),
       BIFROST_DATA_DIR: dataDir,
+      BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT: "1",
       CARGO_TARGET_DIR: targetDir,
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -163,10 +166,11 @@ async function fetchTrafficList(request: APIRequestContext) {
 
 async function fetchTrafficDetail(request: APIRequestContext, id: string) {
   const response = await request.get(`${apiBase}/traffic/${id}`);
-  return (await response.json()) as {
+  return (await response.json()) as Record<string, unknown> & {
     id: string;
     response_size: number;
     client_app?: string | null;
+    client_ip?: string | null;
     socket_status?: { is_open?: boolean };
   };
 }
@@ -518,13 +522,16 @@ test.describe.serial("traffic push regressions", () => {
     }
   });
 
-  test("CONNECT 详情的 Response 面板加入应用解包白名单后提示需要重连", async ({
+  test("CONNECT 详情的 Response 面板可按应用和非本机 Client IP 开启", async ({
     page,
     request,
   }) => {
     await clearTraffic(request);
     const tlsConfigRes = await request.get(`${apiBase}/config/tls`);
     const originalTlsConfig = await tlsConfigRes.json();
+    const whitelistRes = await request.get(`${apiBase}/whitelist`);
+    const originalWhitelist = (await whitelistRes.json()) as { whitelist?: string[] };
+    const syntheticClientIp = "192.168.50.24";
     const server = await startTunnelEchoServer();
     let serverClosed = false;
     let tunnel: Awaited<ReturnType<typeof openConnectTunnel>> | null = null;
@@ -540,7 +547,6 @@ test.describe.serial("traffic push regressions", () => {
       );
       const row = page.locator(`[data-testid="traffic-row"][data-record-id="${connectId}"]`);
       await expect(row).toBeVisible();
-      await row.click();
 
       let clientApp: string | null = null;
       await expect
@@ -556,8 +562,23 @@ test.describe.serial("traffic push regressions", () => {
 
       expect(clientApp).toBeTruthy();
 
+      const actualDetail = await fetchTrafficDetail(request, connectId);
+      await page.route(`**/_bifrost/api/traffic/${connectId}`, async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            ...actualDetail,
+            client_ip: syntheticClientIp,
+          }),
+        });
+      });
+      await row.click();
+
       await expect(page.getByTestId("response-tab-header")).toBeVisible();
       await expect(page.getByRole("button", { name: "Intercept this app" })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Intercept this client" })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Allow this client" })).toBeVisible();
       await expect(page.locator("body")).toContainText(TLS_RECONNECT_NOTICE);
       await page.getByRole("button", { name: "Intercept this app" }).click();
       const confirmDialog = page.getByRole("dialog", {
@@ -582,6 +603,44 @@ test.describe.serial("traffic push regressions", () => {
         })
         .toBe(true);
 
+      await page.getByRole("button", { name: "Intercept this client" }).click();
+      const ipDialog = page.getByRole("dialog", {
+        name: "Add Client IP to Intercept List",
+      });
+      await expect(ipDialog).toBeVisible();
+      await ipDialog.getByRole("button", { name: "Add" }).click();
+
+      await expect
+        .poll(async () => {
+          const response = await request.get(`${apiBase}/config/tls`);
+          const body = (await response.json()) as {
+            ip_intercept_include?: string[];
+          };
+          return body.ip_intercept_include?.includes(syntheticClientIp) ?? false;
+        })
+        .toBe(true);
+
+      await page.getByRole("button", { name: "Allow this client" }).click();
+      const whitelistDialog = page.getByRole("dialog", {
+        name: "Add Client to Whitelist",
+      });
+      await expect(whitelistDialog).toBeVisible();
+      await whitelistDialog.getByRole("button", { name: "Add" }).click();
+
+      await expect
+        .poll(async () => {
+          const response = await request.get(`${apiBase}/whitelist`);
+          const body = (await response.json()) as {
+            whitelist?: string[];
+          };
+          const whitelist = body.whitelist ?? [];
+          return (
+            whitelist.includes(syntheticClientIp) ||
+            whitelist.includes(`${syntheticClientIp}/32`)
+          );
+        })
+        .toBe(true);
+
       await tunnel.close();
       tunnel = null;
       await server.close();
@@ -594,6 +653,15 @@ test.describe.serial("traffic push regressions", () => {
         await server.close();
       }
       await request.put(`${apiBase}/config/tls`, { data: originalTlsConfig });
+      const originalWhitelistEntries = originalWhitelist.whitelist ?? [];
+      const hadSyntheticClientIp =
+        originalWhitelistEntries.includes(syntheticClientIp) ||
+        originalWhitelistEntries.includes(`${syntheticClientIp}/32`);
+      if (!hadSyntheticClientIp) {
+        await request.delete(`${apiBase}/whitelist`, {
+          data: { ip_or_cidr: syntheticClientIp },
+        });
+      }
     }
   });
 
