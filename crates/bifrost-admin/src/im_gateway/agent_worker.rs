@@ -160,35 +160,34 @@ impl AgentWorkerClient {
         }
     }
 
-    /// 启动 agent worker，如果外部进程启动失败则自动回退到进程内执行。
-    /// 此方法永远不会失败，确保 Agent 始终可用。
-    pub async fn spawn_or_fallback(request: AgentWorkerRunRequest) -> AgentWorkerRun {
+    /// 启动 agent worker。生产环境必须使用外部 worker 进程；启动失败时返回错误，
+    /// 避免把 Agent loop 静默回退到主进程内执行。
+    pub async fn spawn_or_fallback(
+        request: AgentWorkerRunRequest,
+    ) -> Result<AgentWorkerRun, String> {
         #[cfg(test)]
         if std::env::var_os("BIFROST_FORCE_AGENT_WORKER").is_none() {
-            return spawn_in_process_worker(request);
+            return Ok(spawn_in_process_worker(request));
         }
         let client = match Self::current_exe() {
             Ok(client) => client,
             Err(error) => {
-                tracing::warn!(
-                    %error,
-                    "resolve agent worker executable failed, falling back to in-process execution"
-                );
-                return spawn_in_process_worker(request);
+                return Err(format!("resolve agent worker executable failed: {error}"));
             }
         };
-        // Clone request for in-process fallback in case external process setup fails
-        let fallback_request = request.clone();
+        Self::spawn_or_fallback_with_client(client, request).await
+    }
+
+    async fn spawn_or_fallback_with_client(
+        client: AgentWorkerClient,
+        request: AgentWorkerRunRequest,
+    ) -> Result<AgentWorkerRun, String> {
         match client.spawn_process(request).await {
-            Ok(worker) => worker,
-            Err(error) => {
-                tracing::warn!(
-                    executable = %client.executable.display(),
-                    %error,
-                    "agent worker process failed, falling back to in-process execution"
-                );
-                spawn_in_process_worker(fallback_request)
-            }
+            Ok(worker) => Ok(worker),
+            Err(error) => Err(format!(
+                "agent worker process failed (executable: {}): {error}",
+                client.executable.display()
+            )),
         }
     }
 
@@ -255,6 +254,7 @@ pub struct AgentWorkerRun {
 
 enum AgentWorkerEventStream {
     Process(tokio::io::Lines<BufReader<tokio::process::ChildStdout>>),
+    #[cfg(test)]
     Channel(mpsc::UnboundedReceiver<AgentWorkerEvent>),
 }
 
@@ -421,6 +421,7 @@ impl AgentWorkerRun {
                     )
                 })
             }
+            #[cfg(test)]
             AgentWorkerEventStream::Channel(events) => Ok(events.recv().await),
         }
     }
@@ -458,6 +459,7 @@ impl AgentWorkerRun {
     }
 }
 
+#[cfg(test)]
 fn spawn_in_process_worker(request: AgentWorkerRunRequest) -> AgentWorkerRun {
     let (command_tx, mut command_rx) = mpsc::unbounded_channel::<AgentWorkerCommand>();
     let (event_tx, event_rx) = mpsc::unbounded_channel::<AgentWorkerEvent>();
@@ -1301,7 +1303,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spawn_or_fallback_always_succeeds() {
+    async fn spawn_or_fallback_uses_in_process_worker_in_tests_without_force_env() {
         let _lock = crate::test_env::agent_worker_env_lock().lock().await;
         // Ensure we're NOT in forced external worker mode
         let _guard = EnvVarGuard::remove("BIFROST_FORCE_AGENT_WORKER");
@@ -1314,10 +1316,37 @@ mod tests {
             None,
             None,
         );
-        let worker = AgentWorkerClient::spawn_or_fallback(request).await;
+        let worker = AgentWorkerClient::spawn_or_fallback(request)
+            .await
+            .expect("test fallback worker");
         // In test mode (without BIFROST_FORCE_AGENT_WORKER), should use in-process worker
         assert!(worker.child_id().is_none());
         // Should be able to terminate without error
         let _ = worker.terminate().await;
+    }
+
+    #[tokio::test]
+    async fn spawn_or_fallback_fails_closed_when_forced_worker_cannot_start() {
+        let _lock = crate::test_env::agent_worker_env_lock().lock().await;
+        let _guard = EnvVarGuard::set("BIFROST_FORCE_AGENT_WORKER", "1");
+        let client = AgentWorkerClient::with_executable("/definitely/missing/bifrost-agent-worker");
+        let request = build_run_request(
+            "test-fail-closed",
+            "hello",
+            Vec::new(),
+            &bifrost_agent::AgentConfig::default(),
+            None,
+            None,
+            None,
+        );
+        let error = match AgentWorkerClient::spawn_or_fallback_with_client(client, request).await {
+            Err(error) => error,
+            Ok(_) => panic!("missing worker executable should fail"),
+        };
+        assert!(
+            error.contains("agent worker process failed")
+                && (error.contains("No such file") || error.contains("not found")),
+            "{error}"
+        );
     }
 }

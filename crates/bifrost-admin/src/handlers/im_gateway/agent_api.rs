@@ -1142,8 +1142,20 @@ pub(super) async fn handle_agent(
             .collect();
         worker_request.queued_messages = body.queue_messages.clone();
         let mut worker =
-            crate::im_gateway::agent_worker::AgentWorkerClient::spawn_or_fallback(worker_request)
-                .await;
+            match crate::im_gateway::agent_worker::AgentWorkerClient::spawn_or_fallback(
+                worker_request,
+            )
+            .await
+            {
+                Ok(worker) => worker,
+                Err(error) => {
+                    service.agent_session_manager.return_session(session);
+                    return json_response(&serde_json::json!({
+                        "success": false,
+                        "error": format!("Agent worker 启动失败: {error}"),
+                    }));
+                }
+            };
         let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel::<
             crate::im_gateway::agent_worker::AgentWorkerStopRequest,
         >();

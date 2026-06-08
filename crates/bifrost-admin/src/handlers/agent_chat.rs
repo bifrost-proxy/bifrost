@@ -313,7 +313,22 @@ async fn run_agent_stream(
     worker_request.system_prompt = body.system_prompt.clone();
     worker_request.collaboration_mode = body.collaboration_mode;
     let mut worker =
-        crate::im_gateway::agent_worker::AgentWorkerClient::spawn_or_fallback(worker_request).await;
+        match crate::im_gateway::agent_worker::AgentWorkerClient::spawn_or_fallback(worker_request)
+            .await
+        {
+            Ok(worker) => worker,
+            Err(error) => {
+                service.agent_session_manager.return_session(session);
+                let payload = json!({
+                    "eventType": "run_finished",
+                    "sessionKey": session_key,
+                    "response": format!("Agent worker 启动失败: {error}"),
+                    "error": error,
+                });
+                let _ = send_sse_event(&tx, "run_finished", payload).await;
+                return;
+            }
+        };
     let (stop_tx, mut stop_rx) =
         mpsc::unbounded_channel::<crate::im_gateway::agent_worker::AgentWorkerStopRequest>();
     let worker_pid = worker.child_id().unwrap_or(0);

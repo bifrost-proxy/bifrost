@@ -885,8 +885,26 @@ fn builtin_runner_call_stream_response(
         );
         worker_request.default_message_channel = config.default_message_channel.clone();
         let mut worker =
-            crate::im_gateway::agent_worker::AgentWorkerClient::spawn_or_fallback(worker_request)
-                .await;
+            match crate::im_gateway::agent_worker::AgentWorkerClient::spawn_or_fallback(
+                worker_request,
+            )
+            .await
+            {
+                Ok(worker) => worker,
+                Err(error) => {
+                    agent_session_manager.return_session(session);
+                    let failed = serde_json::json!({
+                        "eventType": "runner_call_failed",
+                        "callId": input.call_id.clone(),
+                        "callerSessionKey": input.caller_session_key.clone(),
+                        "childSessionKey": input.child_session_key.clone(),
+                        "response": format!("Agent worker 启动失败: {error}"),
+                        "error": error,
+                    });
+                    let _ = send_ndjson_event(&tx, &failed).await;
+                    return;
+                }
+            };
         let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel::<
             crate::im_gateway::agent_worker::AgentWorkerStopRequest,
         >();
