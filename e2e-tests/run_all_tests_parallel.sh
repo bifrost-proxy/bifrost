@@ -793,11 +793,40 @@ retry_failed_suites_once() {
             sleep_seconds 0.1
             wait_free=$((wait_free + 1))
         done
+
+        if is_windows && ! ensure_mock_servers_alive; then
+            warn "Mock 服务器不可用，无法重试 ${rule_rel}"
+            {
+                echo "TEST_FILE=$rule_rel"
+                echo "PROXY_PORT=$proxy_port"
+                echo "STATUS=failed"
+                echo "PASSED=0"
+                echo "FAILED=1"
+            } > "$result_file"
+            echo "Mock servers unavailable before Windows retry for ${rule_rel}" > "$log_file"
+            retried=$((retried + 1))
+            continue
+        fi
+
         run_single_test "$rule_file" "$idx"
         retried=$((retried + 1))
 
         local status=""
         status=$(grep '^STATUS=' "$result_file" 2>/dev/null | tail -1 | cut -d'=' -f2-)
+        if [[ "$status" != "passed" ]] && is_windows && result_failure_mentions_mock_outage "$idx"; then
+            warn "重试命中 Mock 服务器掉线，重启 Mock 后补跑一次: ${rule_rel}"
+            if ensure_mock_servers_alive; then
+                rm -rf "$data_dir" "$log_file" "$result_file"
+                kill_bifrost_on_port "$proxy_port"
+                wait_free=0
+                while ! port_is_available "$proxy_port" 2>/dev/null && [[ $wait_free -lt 100 ]]; do
+                    sleep_seconds 0.1
+                    wait_free=$((wait_free + 1))
+                done
+                run_single_test "$rule_file" "$idx"
+                status=$(grep '^STATUS=' "$result_file" 2>/dev/null | tail -1 | cut -d'=' -f2-)
+            fi
+        fi
         if [[ "$status" == "passed" ]]; then
             echo -e "${GREEN}✓${NC} 重试通过: ${rule_rel}"
         else
