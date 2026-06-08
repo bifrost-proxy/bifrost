@@ -41,6 +41,9 @@ Bifrost 主进程同时承载流量代理、Admin API、IM Gateway 与 Agent/Run
    - `/stop` 聚合 internal cooperative signal、内置 Agent worker、外置 Runner worker、legacy external CLI run stop；`/_bifrost/api/im-gateway/agent/chat` 的 `/stop` 作为控制成功响应返回 200 + `stopped=true`，不把 worker stopped 当作 500。
    - `/clear`/`/reset` 在 `/_bifrost/api/im-gateway/agent/chat` 中同样走 session-free 控制路径：停止 active worker、清理内存 session/queue，并删除 built-in Agent adapter 持久化 session state 与 JSONL history，确保服务重启后不会恢复旧上下文。
    - SSE 断开或 stop 后清理 worker，避免孤儿进程。
+5. 事故回归加固。
+   - `exec_command` pipe 模式在 Unix 下使用独立 process group 启动 shell；Ctrl-C、session terminate 和 session drop 都先终止整个 process group，再兜底 kill 直接 child，避免 `zsh -ic -> python` 等孙进程在主服务退出后变成孤儿。
+   - 生产环境内置 Agent worker 启动失败时 fail closed，调用方返回明确错误并释放 active session，不再静默回退到主进程内执行 Agent loop；测试环境仍可在未设置 `BIFROST_FORCE_AGENT_WORKER` 时使用 in-process worker 以保持单测可控。
 
 ## 依赖项
 
@@ -56,6 +59,9 @@ Bifrost 主进程同时承载流量代理、Admin API、IM Gateway 与 Agent/Run
 - `agent_worker::build_run_request_uses_protocol_version_and_session`：验证 worker 请求携带协议版本、session、work_dir、source。
 - `agent_worker::turn_result_roundtrip_preserves_stop_fields`：验证 worker result 与 `TurnResult` 转换不丢字段。
 - `agent_worker::validate_request_rejects_bad_protocol`：验证协议版本不兼容时拒绝。
+- `agent_worker::spawn_or_fallback_uses_in_process_worker_in_tests_without_force_env`：验证仅测试环境允许未强制 worker 时使用进程内 fallback。
+- `agent_worker::spawn_or_fallback_fails_closed_when_forced_worker_cannot_start`：验证 worker 可执行文件不可启动时返回错误，不进入主进程 loop。
+- `exec_command_ctrl_c_terminates_pipe_process_group_children`：验证 pipe exec session 终止时后台孙进程也被同组清理。
 - `external_cli` targeted tests：验证 external CLI runtime、stop by run/session、Codex adapter、IM event loop external runner 仍通过；测试环境默认绕过 worker，真实 E2E 覆盖 worker 进程。
 
 ### E2E 测试
@@ -97,6 +103,8 @@ CI shell E2E worker 隔离回归：
 - TC-ALPI-05：`/stop` 能停止外置 Runner worker。
 - TC-ALPI-06：CI/E2E runner 进程作为 `current_exe()` 时可启动 worker，`/agent/chat` 的 `/stop` 和 `/reset` 控制语义保持 200 成功响应并清理持久化历史。
 - TC-ALPI-07：worker 独立进程写入 send_msg/schedule/history/timeline/work_dir 后，主进程 API 读取到最新落盘状态，覆盖 CI shell E2E 失败路径。
+- TC-ALPI-08：`exec_command` 启动嵌套 shell/后台子进程后，停止 session 会清理整个 process group，不留下孤儿 `zsh/python/sleep`。
+- TC-ALPI-09：模拟内置 Agent worker 启动失败时，请求返回明确错误并释放 session，不在主进程内回退执行。
 
 ## Review/Fix/Test 闭环方案
 

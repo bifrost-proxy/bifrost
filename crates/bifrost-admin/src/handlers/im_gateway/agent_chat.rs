@@ -1568,88 +1568,100 @@ pub(super) async fn process_agent_chat(
     worker_request.system_prompt = system_prompt_override.map(ToString::to_string);
     worker_request.collaboration_mode = collaboration_mode;
     worker_request.default_message_channel = message_channel;
-    let mut worker =
-        crate::im_gateway::agent_worker::AgentWorkerClient::spawn_or_fallback(worker_request).await;
-    let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel::<
-        crate::im_gateway::agent_worker::AgentWorkerStopRequest,
-    >();
-    // pid=0 signals in-process worker (no external process to kill on stop)
-    let worker_pid = worker.child_id().unwrap_or(0);
-    crate::im_gateway::agent_worker::register_active_worker(session_key, worker_pid, stop_tx);
-
     let mut result: Result<bifrost_agent::TurnResult, String> =
         Err("agent worker exited without result".to_string());
     let mut worker_history_path: Option<String> = None;
     let mut stop_ack = None;
-    loop {
-        forward_pending_guides_to_worker(
-            guide_channel.as_ref(),
-            queue_manager,
-            session_key,
-            &mut worker,
-        )
-        .await;
-        tokio::select! {
-            _ = wait_for_guide_notification(guide_channel.as_ref()) => {
-                continue;
-            }
-            maybe_stop = stop_rx.recv() => {
-                let _ = worker.terminate().await;
-                stop_ack = maybe_stop;
-                result = Err("已收到 /stop，Agent worker 子进程已停止。".to_string());
-                break;
-            }
-            event = worker.next_event() => {
-                match event {
-                    Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Started { .. })) => {}
-                    Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Progress { event })) => {
-                        if let bifrost_agent::AgentTurnProgressEvent::TitleUpdated { title } = &event {
-                            session.title = Some(title.clone());
-                            session_manager.update_active_session_preview(
-                                session_key,
-                                Some(title.clone()),
-                                None,
-                                None,
-                                None,
-                                None,
-                            );
-                        }
-                        if let bifrost_agent::AgentTurnProgressEvent::Status(status) = &event {
-                            session_manager.update_active_turn_status_from_worker((**status).clone());
-                        }
-                        if progress_enabled {
-                            if let Some(tx) = progress_tx_for_finish.as_ref() {
-                                let _ = tx.send(event);
-                            }
-                        } else if let Some(tx) = session.plan_sender.as_ref() {
-                            if let bifrost_agent::AgentTurnProgressEvent::PlanUpdated { steps, title } = event {
-                                let _ = tx.send((steps, title));
-                            }
-                        }
+
+    match crate::im_gateway::agent_worker::AgentWorkerClient::spawn_or_fallback(worker_request)
+        .await
+    {
+        Ok(mut worker) => {
+            let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel::<
+                crate::im_gateway::agent_worker::AgentWorkerStopRequest,
+            >();
+            // pid=0 signals in-process worker (test-only fallback; no external process to kill).
+            let worker_pid = worker.child_id().unwrap_or(0);
+            crate::im_gateway::agent_worker::register_active_worker(
+                session_key,
+                worker_pid,
+                stop_tx,
+            );
+
+            loop {
+                forward_pending_guides_to_worker(
+                    guide_channel.as_ref(),
+                    queue_manager,
+                    session_key,
+                    &mut worker,
+                )
+                .await;
+                tokio::select! {
+                    _ = wait_for_guide_notification(guide_channel.as_ref()) => {
+                        continue;
                     }
-                    Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Finished { result: turn_result })) => {
-                        worker_history_path = turn_result.history_path.clone();
-                        result = Ok(bifrost_agent::TurnResult::from(turn_result));
-                        break;
-                    }
-                    Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Failed { error })) => {
-                        result = Err(error);
-                        break;
-                    }
-                    Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Stopped)) => {
+                    maybe_stop = stop_rx.recv() => {
+                        let _ = worker.terminate().await;
+                        stop_ack = maybe_stop;
                         result = Err("已收到 /stop，Agent worker 子进程已停止。".to_string());
                         break;
                     }
-                    Ok(None) => break,
-                    Err(error) => {
-                        result = Err(format!("agent worker failed: {error}"));
-                        break;
+                    event = worker.next_event() => {
+                        match event {
+                            Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Started { .. })) => {}
+                            Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Progress { event })) => {
+                                if let bifrost_agent::AgentTurnProgressEvent::TitleUpdated { title } = &event {
+                                    session.title = Some(title.clone());
+                                    session_manager.update_active_session_preview(
+                                        session_key,
+                                        Some(title.clone()),
+                                        None,
+                                        None,
+                                        None,
+                                        None,
+                                    );
+                                }
+                                if let bifrost_agent::AgentTurnProgressEvent::Status(status) = &event {
+                                    session_manager.update_active_turn_status_from_worker((**status).clone());
+                                }
+                                if progress_enabled {
+                                    if let Some(tx) = progress_tx_for_finish.as_ref() {
+                                        let _ = tx.send(event);
+                                    }
+                                } else if let Some(tx) = session.plan_sender.as_ref() {
+                                    if let bifrost_agent::AgentTurnProgressEvent::PlanUpdated { steps, title } = event {
+                                        let _ = tx.send((steps, title));
+                                    }
+                                }
+                            }
+                            Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Finished { result: turn_result })) => {
+                                worker_history_path = turn_result.history_path.clone();
+                                result = Ok(bifrost_agent::TurnResult::from(turn_result));
+                                break;
+                            }
+                            Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Failed { error })) => {
+                                result = Err(error);
+                                break;
+                            }
+                            Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Stopped)) => {
+                                result = Err("已收到 /stop，Agent worker 子进程已停止。".to_string());
+                                break;
+                            }
+                            Ok(None) => break,
+                            Err(error) => {
+                                result = Err(format!("agent worker failed: {error}"));
+                                break;
+                            }
+                        }
                     }
                 }
             }
+            crate::im_gateway::agent_worker::clear_active_worker(session_key);
+        }
+        Err(error) => {
+            result = Err(format!("Agent worker 启动失败: {error}"));
         }
     }
-    crate::im_gateway::agent_worker::clear_active_worker(session_key);
 
     if let Some(history_path) = worker_history_path.as_deref() {
         let _ = restore_session_from_history_path(

@@ -24,7 +24,7 @@ use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{Mutex, Notify};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 pub const MIN_YIELD_TIME_MS: u64 = 250;
 pub const MIN_EMPTY_WRITE_STDIN_YIELD_TIME_MS: u64 = 5_000;
@@ -35,6 +35,7 @@ pub const DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS: u64 = 300_000;
 pub const MAX_EXEC_SESSIONS: usize = 64;
 const EXIT_STATUS_POLL_INTERVAL_MS: u64 = 100;
 const TRAILING_OUTPUT_GRACE_MS: u64 = 100;
+const PROCESS_GROUP_KILL_GRACE_MS: u64 = 500;
 
 pub struct ExecCommandTool {
     session_manager: Arc<ExecSessionManager>,
@@ -741,7 +742,7 @@ impl ExecSession {
         match &self.backend {
             ExecBackend::Pipe { child, .. } => {
                 let mut child = child.lock().await;
-                let _ = child.start_kill();
+                terminate_pipe_child(&mut child, true);
             }
             ExecBackend::Pty { child, .. } => {
                 let mut child = child.lock().await;
@@ -798,7 +799,7 @@ impl Drop for ExecSession {
         match &self.backend {
             ExecBackend::Pipe { child, .. } => {
                 if let Ok(mut child) = child.try_lock() {
-                    let _ = child.start_kill();
+                    terminate_pipe_child(&mut child, false);
                 }
             }
             ExecBackend::Pty { child, .. } => {
@@ -871,13 +872,17 @@ fn create_pipe_exec_session(
         cwd = %work_dir.display(),
         "creating exec pipe session"
     );
-    let mut child = Command::new(&command.program)
+    let mut command_builder = Command::new(&command.program);
+    command_builder
         .args(&command.args)
         .current_dir(work_dir)
         .envs(std::env::vars_os())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    command_builder.process_group(0);
+    let mut child = command_builder
         .spawn()
         .map_err(|error| format!("failed to spawn command: {error}"))?;
 
@@ -913,6 +918,60 @@ fn create_pipe_exec_session(
     spawn_pipe_reader(session.clone(), stdout, false);
     spawn_pipe_reader(session.clone(), stderr, true);
     Ok(session)
+}
+
+fn terminate_pipe_child(child: &mut Child, schedule_force_kill: bool) {
+    let Some(pid) = child.id() else {
+        let _ = child.start_kill();
+        return;
+    };
+    if let Err(error) = signal_exec_process_group_or_child(pid, ExecSignal::Terminate) {
+        warn!(pid, %error, "failed to terminate exec process group; falling back to child kill");
+        let _ = child.start_kill();
+    }
+    if schedule_force_kill {
+        schedule_exec_process_group_force_kill(pid);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ExecSignal {
+    Terminate,
+    Kill,
+}
+
+#[cfg(unix)]
+fn signal_exec_process_group_or_child(pid: u32, signal: ExecSignal) -> Result<(), String> {
+    use nix::errno::Errno;
+    use nix::sys::signal::{kill, Signal};
+    use nix::unistd::Pid;
+
+    let signal = match signal {
+        ExecSignal::Terminate => Signal::SIGTERM,
+        ExecSignal::Kill => Signal::SIGKILL,
+    };
+    let raw_pid = i32::try_from(pid).map_err(|_| format!("pid out of range: {pid}"))?;
+    let group_pid = Pid::from_raw(-raw_pid);
+    match kill(group_pid, signal) {
+        Ok(()) => Ok(()),
+        Err(Errno::ESRCH) => kill(Pid::from_raw(raw_pid), signal)
+            .map_err(|error| format!("signal child process {pid}: {error}")),
+        Err(error) => Err(format!("signal process group {pid}: {error}")),
+    }
+}
+
+#[cfg(not(unix))]
+fn signal_exec_process_group_or_child(_pid: u32, _signal: ExecSignal) -> Result<(), String> {
+    Err("process group signaling is not supported on this platform".to_string())
+}
+
+fn schedule_exec_process_group_force_kill(pid: u32) {
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(PROCESS_GROUP_KILL_GRACE_MS));
+        if let Err(error) = signal_exec_process_group_or_child(pid, ExecSignal::Kill) {
+            debug!(pid, %error, "exec process group force kill skipped or failed");
+        }
+    });
 }
 
 fn spawn_pipe_reader<R>(session: Arc<ExecSession>, mut reader: R, stderr: bool)
@@ -1339,6 +1398,90 @@ mod tests {
         }
         assert!(!final_poll["exit_code"].is_null(), "{final_poll}");
         assert!(!manager.has_session(&session_id));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exec_command_ctrl_c_terminates_pipe_process_group_children() {
+        use nix::errno::Errno;
+        use nix::sys::signal::kill;
+        use nix::unistd::Pid;
+
+        fn process_exists(pid: i32) -> bool {
+            match kill(Pid::from_raw(pid), None) {
+                Ok(()) => true,
+                Err(Errno::EPERM) => true,
+                Err(Errno::ESRCH) => false,
+                Err(_) => false,
+            }
+        }
+
+        let manager = Arc::new(ExecSessionManager::new());
+        let tool = ExecCommandTool::new(manager.clone());
+        let dir = tempdir().unwrap();
+        let pid_file = dir.path().join("grandchild.pid");
+        let cmd = format!(
+            "sleep 30 & child=$!; echo $child > {}; wait $child",
+            pid_file.display()
+        );
+        let args = serde_json::json!({
+            "cmd": cmd,
+            "shell": "/bin/sh",
+            "login": false,
+            "yield_time_ms": 50
+        })
+        .to_string();
+        let result = tool.execute(&args, dir.path()).await;
+        assert!(result.success, "{}", result.output);
+        let value: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        let session_id = value["session_id"]
+            .as_i64()
+            .expect("session id")
+            .to_string();
+
+        for _ in 0..20 {
+            if pid_file.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let grandchild_pid: i32 = std::fs::read_to_string(&pid_file)
+            .expect("grandchild pid file")
+            .trim()
+            .parse()
+            .expect("grandchild pid");
+        assert!(process_exists(grandchild_pid));
+
+        let mut final_poll = serde_json::Value::Null;
+        let mut chars = Some("\u{3}".to_string());
+        for _ in 0..20 {
+            let poll = manager
+                .write_and_poll(ExecWriteArgs {
+                    session_id: session_id.clone(),
+                    chars: chars.take(),
+                    since_chunk_id: None,
+                    yield_time_ms: Some(100),
+                    max_output_tokens: None,
+                })
+                .await;
+            assert!(poll.success, "{}", poll.output);
+            final_poll = serde_json::from_str(&poll.output).unwrap();
+            if !final_poll["exit_code"].is_null() {
+                break;
+            }
+        }
+        assert!(!final_poll["exit_code"].is_null(), "{final_poll}");
+
+        for _ in 0..20 {
+            if !process_exists(grandchild_pid) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            !process_exists(grandchild_pid),
+            "grandchild process {grandchild_pid} should be killed with exec process group"
+        );
     }
 
     #[tokio::test]

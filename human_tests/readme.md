@@ -181,7 +181,7 @@
 | [agent-token-usage.md](./agent-token-usage.md) | Agent Token Usage 统计口径 | 6 | 区分累计 `total_tokens_used` 与当前 context `last_response_tokens`，Chat Completions `prompt_tokens` / Responses `input_tokens` 作为 context 快照，JSONL `context_tokens` 持久化与旧事件兼容，AI Chat 输入框上方 token HUD 展示实时消耗、context 占比和压缩状态，单元、真实服务 E2E 与截图验收入口 |
 | [agent-chat-config-preflight.md](./agent-chat-config-preflight.md) | Agent Chat Config Preflight | 5 | 内置 Agent Chat 发送前检查模型名、Provider base_url、AK/env/auth header，缺配置时返回 Settings → Agent → Model Configuration 与 config.toml 指引，空 api_key 在 HTTP 前拦截，自定义无鉴权 Provider 不被误拦截，静态鉴权 Header 不被默认 env fallback 误拦截 |
 | [chat-plan-density.md](./chat-plan-density.md) | Agent Chat Plan 密度与输入框高度 | 6 | Plan 面板紧凑展示、不展示二级标题行、todo 状态图标、超过 5 条 step 后内部滚动、输入框默认 2 行并扩高到 7 行上限、hint 不展示 session id、线程 tooltip 仅图标延迟触发、亮色/暗色主题可读性 |
-| [agent-loop-process-isolation.md](./agent-loop-process-isolation.md) | Agent Loop 进程隔离 | 7 | 内置 Bifrost Agent 与外置 Runner 默认每会话独立 worker 子进程，主进程只转发输入/进度/结果，`/stop` 可停止 worker 且代理/Admin API 继续响应，SSE 断开自动清理 worker，并覆盖 E2E runner 当前可执行文件 worker pass-through、`/agent/chat` `/stop`/`/reset` 控制语义，以及 worker 独立进程写入 send_msg/schedule/history/timeline/work_dir 后主进程读取不 stale 的 CI 回归 |
+| [agent-loop-process-isolation.md](./agent-loop-process-isolation.md) | Agent Loop 进程隔离 | 9 | 内置 Bifrost Agent 与外置 Runner 默认每会话独立 worker 子进程，主进程只转发输入/进度/结果，`/stop` 可停止 worker 且代理/Admin API 继续响应，SSE 断开自动清理 worker，并覆盖 E2E runner 当前可执行文件 worker pass-through、`/agent/chat` `/stop`/`/reset` 控制语义，worker 独立进程写入 send_msg/schedule/history/timeline/work_dir 后主进程读取不 stale，以及 exec process group 清理和生产 worker fail-closed 回归 |
 
 ### IM Gateway 测试
 

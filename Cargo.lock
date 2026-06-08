@@ -363,6 +363,7 @@ dependencies = [
  "futures",
  "include_dir",
  "keyring",
+ "nix 0.28.0",
  "open",
  "portable-pty",
  "rand 0.8.5",

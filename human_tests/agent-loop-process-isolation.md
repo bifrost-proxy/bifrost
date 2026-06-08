@@ -190,6 +190,39 @@ BIFROST_DATA_DIR="$TEST_DIR" ./target/debug/bifrost start -p 18881 --unsafe-ssl 
 - direct path switch 后 `/status` 显示新工作目录。
 - timeline run_state 同时包含 `api` 和 `web` 来源，不出现把 worker 子进程误作为用户渠道的状态。
 
+### TC-ALPI-08：exec_command 停止时清理整个 pipe process group
+
+操作步骤：
+
+1. 执行聚焦单测：
+   ```bash
+   cargo test -p bifrost-agent exec_command_ctrl_c_terminates_pipe_process_group_children -- --nocapture
+   ```
+2. 观察测试中创建的 shell 后台 `sleep` 子进程是否随 session Ctrl-C 一起退出。
+
+预期结果：
+
+- 命令退出码为 `0`。
+- 测试断言后台孙进程 PID 不再存在，证明 `exec_command` 不会只杀直接 shell child 后遗留孙进程。
+
+### TC-ALPI-09：生产 worker 启动失败不回退到主进程执行
+
+操作步骤：
+
+1. 执行聚焦单测：
+   ```bash
+   cargo test -p bifrost-admin spawn_or_fallback_fails_closed_when_forced_worker_cannot_start --lib -- --nocapture
+   ```
+2. 执行正常测试 fallback 单测：
+   ```bash
+   cargo test -p bifrost-admin spawn_or_fallback_uses_in_process_worker_in_tests_without_force_env --lib -- --nocapture
+   ```
+
+预期结果：
+
+- 强制 worker 且可执行文件缺失时返回启动错误，不进入进程内 Agent loop。
+- 未强制 worker 的测试路径仍可使用 in-process worker，避免单测需要依赖真实外部 worker。
+
 ## 清理步骤
 
 ```bash
@@ -208,3 +241,6 @@ rm -f /tmp/bifrost-agent-worker-human.sse /tmp/bifrost-agent-worker-disconnect.s
 | 2026-05-29 | TC-ALPI-06 | 执行 `BIFROST_E2E_RETRY_FAILED_ONCE=1 SKIP_FRONTEND_BUILD=1 cargo run -p bifrost-e2e -- --port 18080 --jobs 1 --timeout 900 --test im_gateway_agent_chat_ --test-timeout 180`，验证 `bifrost-e2e` 当前可执行文件可作为 worker pass-through，且 `/agent/chat` `/stop` 与 `/reset` 控制语义不回归 | 通过：5/5 passed |
 | 2026-05-29 | TC-ALPI-01/02/03/04/05 | 重新执行 `bash e2e-tests/tests/test_agent_worker_process_isolation.sh`，覆盖本轮 worker state 修复后内置/外置 worker、stop、SSE 断开清理和 Admin API 存活 | 通过 |
 | 2026-05-29 | TC-ALPI-07 | 依次执行 `test_agent_send_msg_feishu_card.sh`、`test_agent_send_msg_default_channel.sh`、`test_agent_chat_history_continue.sh`、`test_agent_direct_path_switch.sh`、`test_agent_run_timeline_channel_unification.sh`，均使用 `SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost` 和独立临时端口/数据目录 | 通过：5/5 PASS |
+| 2026-06-08 | TC-ALPI-08 | 执行 `cargo test -p bifrost-agent exec_command_ctrl_c_terminates_pipe_process_group_children -- --nocapture`，验证 pipe exec session 停止时会清理同 process group 的后台 `sleep` 孙进程 | 通过：1/1 passed |
+| 2026-06-08 | TC-ALPI-09 | 执行 `cargo test -p bifrost-admin spawn_or_fallback --lib -- --nocapture`，验证测试 fallback 仍可控，且强制 worker 启动失败时返回错误、不进入主进程 loop | 通过：2/2 passed |
+| 2026-06-08 | TC-ALPI-01/02/03/04/05 | 执行 `bash e2e-tests/tests/test_agent_worker_process_isolation.sh`，使用当前源码构建 bifrost 并以临时数据目录、`--no-system-proxy` 验证内置/外置 worker、stop、SSE 断开清理和 Admin API 存活 | 通过：`[agent-worker-process-isolation-e2e] PASS` |
