@@ -2701,3 +2701,29 @@ rm -rf ./.bifrost-test
 - **清理步骤**:
   - 停止临时 Bifrost 服务；删除临时数据目录和临时工作目录。
 - **执行记录（2026-06-08）**: PASS — 创建用例后立即执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin im_cwd_command --lib -- --nocapture`，覆盖合法绝对目录、缺少路径、相对路径、不存在路径、文件路径、Provider work_dir 持久化和 idle session 重置；执行 `SKIP_FRONTEND_BUILD=1 cargo run -p bifrost-e2e -- --test im_gateway_mock_inbound_cwd_command_switches_provider_work_dir --test-timeout 180`，通过 mock inbound IM 入口注入 `/cwd <临时目录>` 并轮询 Provider API 确认切换成功，再注入不存在路径确认不会覆盖为非法目录。
+
+### TC-IMA-144: IM 通道 `/runner` 指令查看与切换 Runner
+
+- **前置条件**:
+  - 使用当前源码和临时数据目录启动 Bifrost，不复用用户真实 `~/.bifrost` 数据。
+  - 创建一个启用 Agent 的 Feishu Provider，owner 为 `ou_owner`。
+  - External CLI runner 配置中至少存在 `codex` 和 `traex` 两个 runner；内置 Runner 名称固定为 `bifrost_agent`。
+- **操作步骤**:
+  1. 通过 IM mock inbound 入口向该 Provider 注入文本消息：`/runner`。
+  2. 检查 IM 回复列出 `bifrost_agent`、`codex`、`traex` 等支持的 Runner 名称。
+  3. 注入文本消息：`/runner traex`。
+  4. 读取 `GET /_bifrost/api/im-gateway/providers/<provider_id>`，检查 Provider 的 `agent_config.runner` 已更新为 `traex`。
+  5. 注入文本消息：`/runner missing-runner`。
+  6. 再次读取 Provider 配置，确认仍保持 `traex`。
+  7. 注入文本消息：`/runner bifrost_agent`，检查 Provider 的 `agent_config.runner` 显式更新为 `bifrost_agent`。
+  8. 在 Web Agent Chat 或 Chat Gateway 中输入同样的 `/runner traex`，确认该入口不执行 IM 指令语义。
+- **预期结果**:
+  - `/runner` 不进入模型，直接返回支持的 Runner 名称列表。
+  - `/runner <Runner>` 只接受存在的 Runner 或 `bifrost_agent`。
+  - 切换成功后当前 IM Provider 绑定的 Runner 被持久化，下一条 IM 消息使用新的 Runner。
+  - 切换时当前 IM session 的旧 history / 外部 Runner 线程状态被清理，避免恢复旧 Runner 线程。
+  - 未知 Runner 返回错误并附带支持列表，不修改 Provider 配置。
+  - `/runner` 指令只在 IM 通道生效，不注册为 WebUI/API Agent slash 命令。
+- **清理步骤**:
+  - 停止临时 Bifrost 服务；删除临时数据目录。
+- **执行记录（2026-06-08）**: PASS — 创建用例后立即执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin im_runner_command --lib -- --nocapture`，覆盖 `/runner` 解析、列表输出、未知 Runner、切换外部 Runner、切回内置 Runner、Provider runner 持久化和 idle session 重置；执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin im_help_includes_im_only_commands_without_dropping_builtins --lib -- --nocapture`，验证 IM `/help` 同步展示 `/runner [Runner]`。

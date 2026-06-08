@@ -866,6 +866,41 @@ pub(super) fn persist_provider_agent_work_dir(
     }
 }
 
+pub(super) fn persist_provider_agent_runner(
+    provider_store: &Arc<ImProviderStore>,
+    provider_id: &str,
+    runner: bifrost_agent::AgentRunnerMode,
+) {
+    let Some(mut provider) = provider_store.get(provider_id) else {
+        warn!(
+            provider_id = %provider_id,
+            runner = ?runner,
+            "failed to persist switched runner because provider was not found"
+        );
+        return;
+    };
+
+    let agent_config = provider.agent_config.get_or_insert(ImProviderAgentConfig {
+        runner: None,
+        work_dir: None,
+        base_instructions: None,
+        developer_instructions: None,
+        user_instructions: None,
+    });
+    if agent_config.runner.as_ref() == Some(&runner) {
+        return;
+    }
+    agent_config.runner = Some(runner);
+    normalize_provider_agent_config(&mut provider);
+    if let Err(error) = provider_store.update(provider) {
+        warn!(
+            provider_id = %provider_id,
+            error = %error,
+            "failed to persist switched provider runner"
+        );
+    }
+}
+
 pub(super) fn normalize_provider_agent_config(provider: &mut ImProviderConfig) {
     let Some(agent_config) = provider.agent_config.as_mut() else {
         return;

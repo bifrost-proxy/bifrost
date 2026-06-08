@@ -246,6 +246,168 @@ pub(super) fn im_cwd_command_rejects_invalid_paths() {
 }
 
 #[test]
+pub(super) fn im_help_includes_im_only_commands_without_dropping_builtins() {
+    let help = append_im_channel_help(
+        "可用命令:\n\n内置命令:\n  /help           显示此帮助信息".to_string(),
+    );
+
+    assert!(help.contains("内置命令:"));
+    assert!(help.contains("/help"));
+    assert!(help.contains("IM 通道命令:"));
+    assert!(help.contains("/cwd <绝对路径>"));
+    assert!(help.contains("/runner [Runner]"));
+    assert!(help.contains("/q <消息>"));
+    assert!(help.contains("/rq <序号>"));
+    assert!(help.contains("/g <引导内容>"));
+    assert!(help.contains("运行中会排队"));
+}
+
+#[test]
+pub(super) fn im_runner_command_lists_builtin_and_configured_runners() {
+    let mut config = crate::im_gateway::external_cli::ExternalCliGatewayConfig {
+        default_runner_id: "codex".to_string(),
+        ..Default::default()
+    };
+    config.runners.insert(
+        "traex".to_string(),
+        crate::im_gateway::external_cli::ExternalCliAgentSettings {
+            adapter: "traex".to_string(),
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(
+        parse_im_runner_command("/runner"),
+        Some(ImRunnerCommand::List)
+    );
+    assert_eq!(
+        parse_im_runner_command("/Runner traex"),
+        Some(ImRunnerCommand::Switch("traex".to_string()))
+    );
+    assert_eq!(parse_im_runner_command("/runnerish"), None);
+
+    let runner_list = format_im_runner_list(&config);
+    assert!(runner_list.contains("bifrost_agent"));
+    assert!(runner_list.contains("codex"));
+    assert!(runner_list.contains("traex"));
+}
+
+#[test]
+pub(super) fn im_runner_command_rejects_unknown_runner() {
+    let config = crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+
+    let error = resolve_im_runner_selection(&config, "missing").expect_err("missing runner");
+
+    assert!(error.contains("找不到 Runner"));
+    assert!(error.contains("missing"));
+    assert!(error.contains("bifrost_agent"));
+}
+
+#[test]
+pub(super) fn im_runner_command_persists_external_runner_and_reinitializes_idle_session() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let store = Arc::new(ImProviderStore::new(temp_dir.path()));
+    let mut provider = test_provider();
+    provider.id = "im-runner-provider".to_string();
+    provider.agent_config = Some(ImProviderAgentConfig {
+        runner: Some(bifrost_agent::AgentRunnerMode::BifrostAgent),
+        work_dir: Some("/keep/workdir".to_string()),
+        base_instructions: Some("keep provider prompt".to_string()),
+        developer_instructions: None,
+        user_instructions: None,
+    });
+    store.add(provider).expect("add provider");
+
+    let manager = Arc::new(bifrost_agent::AgentSessionManager::new(3600));
+    let mut session = manager
+        .try_take_session_with_work_dir("feishu-main:ou_owner", Some("/keep/workdir".to_string()))
+        .expect("session");
+    session
+        .history
+        .push(bifrost_agent::ChatMessage::user("old message"));
+    manager.return_session(session);
+
+    let mut config = crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+    config.runners.insert(
+        "traex".to_string(),
+        crate::im_gateway::external_cli::ExternalCliAgentSettings {
+            adapter: "traex".to_string(),
+            ..Default::default()
+        },
+    );
+
+    let reply = apply_im_runner_switch(
+        &store,
+        &manager,
+        "im-runner-provider",
+        "feishu-main:ou_owner",
+        &config,
+        "traex",
+    )
+    .expect("apply runner");
+
+    assert!(reply.contains("traex"));
+    let updated = store.get("im-runner-provider").expect("provider");
+    let agent_config = updated.agent_config.expect("agent config");
+    assert_eq!(
+        agent_config.runner,
+        Some(bifrost_agent::AgentRunnerMode::Custom("traex".to_string()))
+    );
+    assert_eq!(agent_config.work_dir.as_deref(), Some("/keep/workdir"));
+    assert_eq!(
+        agent_config.base_instructions.as_deref(),
+        Some("keep provider prompt")
+    );
+
+    let detail = manager
+        .get_session_detail("feishu-main:ou_owner")
+        .expect("session detail");
+    assert_eq!(detail.message_count, 0);
+    assert_eq!(detail.runner_type.as_deref(), Some("traex"));
+    assert_eq!(detail.runner_id.as_deref(), Some("traex"));
+}
+
+#[test]
+pub(super) fn im_runner_command_can_pin_builtin_runner() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let store = Arc::new(ImProviderStore::new(temp_dir.path()));
+    let mut provider = test_provider();
+    provider.id = "im-runner-builtin-provider".to_string();
+    provider.agent_config = Some(ImProviderAgentConfig {
+        runner: Some(bifrost_agent::AgentRunnerMode::Custom("traex".to_string())),
+        work_dir: None,
+        base_instructions: None,
+        developer_instructions: None,
+        user_instructions: None,
+    });
+    store.add(provider).expect("add provider");
+
+    let manager = Arc::new(bifrost_agent::AgentSessionManager::new(3600));
+    let config = crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+
+    apply_im_runner_switch(
+        &store,
+        &manager,
+        "im-runner-builtin-provider",
+        "feishu-main:ou_owner",
+        &config,
+        "bifrost_agent",
+    )
+    .expect("apply builtin runner");
+
+    let updated = store.get("im-runner-builtin-provider").expect("provider");
+    assert_eq!(
+        updated.agent_config.and_then(|config| config.runner),
+        Some(bifrost_agent::AgentRunnerMode::BifrostAgent)
+    );
+    let detail = manager
+        .get_session_detail("feishu-main:ou_owner")
+        .expect("session detail");
+    assert_eq!(detail.runner_type.as_deref(), Some("bifrost_agent"));
+    assert_eq!(detail.runner_id, None);
+}
+
+#[test]
 pub(super) fn im_cwd_command_persists_provider_and_reinitializes_idle_session() {
     let temp_dir = tempfile::tempdir().expect("temp data dir");
     let store = Arc::new(ImProviderStore::new(temp_dir.path()));

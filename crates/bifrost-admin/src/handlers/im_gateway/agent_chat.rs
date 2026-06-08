@@ -6,6 +6,8 @@ pub(super) struct IdleImCommandContext<'a> {
     pub(super) client: &'a ImProviderClient,
     pub(super) provider: &'a ImProviderConfig,
     pub(super) provider_store: &'a Arc<ImProviderStore>,
+    pub(super) external_cli_config_store:
+        &'a Arc<crate::im_gateway::external_cli::ExternalCliConfigStore>,
     pub(super) event: &'a ImEvent,
     pub(super) message_log_store: &'a Arc<ImMessageLogStore>,
     pub(super) agent_session_manager: &'a Arc<ImAgentSessionManager>,
@@ -19,6 +21,31 @@ struct ImCwdCommandContext<'a> {
     message_log_store: &'a Arc<ImMessageLogStore>,
     session_manager: &'a Arc<ImAgentSessionManager>,
 }
+
+struct ImRunnerCommandContext<'a> {
+    client: &'a ImProviderClient,
+    provider: &'a ImProviderConfig,
+    provider_store: &'a Arc<ImProviderStore>,
+    external_cli_config_store: &'a Arc<crate::im_gateway::external_cli::ExternalCliConfigStore>,
+    event: &'a ImEvent,
+    message_log_store: &'a Arc<ImMessageLogStore>,
+    session_manager: &'a Arc<ImAgentSessionManager>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ImRunnerCommand {
+    List,
+    Switch(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ImRunnerSelection {
+    runner_id: String,
+    runner: bifrost_agent::AgentRunnerMode,
+    adapter: Option<String>,
+}
+
+const BUILTIN_IM_RUNNER_ID: &str = "bifrost_agent";
 
 pub(super) async fn handle_idle_im_command(
     msg_text: &str,
@@ -82,9 +109,32 @@ pub(super) async fn handle_idle_im_command(
         return true;
     }
 
+    if handle_im_runner_command(
+        trimmed,
+        session_key,
+        ImRunnerCommandContext {
+            client: ctx.client,
+            provider: ctx.provider,
+            provider_store: ctx.provider_store,
+            external_cli_config_store: ctx.external_cli_config_store,
+            event: ctx.event,
+            message_log_store: ctx.message_log_store,
+            session_manager: ctx.agent_session_manager,
+        },
+    )
+    .await
+    {
+        return true;
+    }
+
     if let Some(response) =
         bifrost_agent::handle_session_free_command(session_key, msg_text, agent_config)
     {
+        let response = if trimmed == "/help" {
+            append_im_channel_help(response)
+        } else {
+            response
+        };
         send_agent_reply(
             ctx.client,
             ctx.provider,
@@ -97,6 +147,18 @@ pub(super) async fn handle_idle_im_command(
     }
 
     false
+}
+
+pub(super) fn append_im_channel_help(mut help_text: String) -> String {
+    help_text.push_str(
+        "\n\nIM 通道命令:\n\
+         /cwd <绝对路径>  切换当前 IM 通道绑定的工作目录；路径必须存在且是目录，运行中会排队到当前任务结束后执行\n\
+         /runner [Runner]  查看或切换当前 IM 通道绑定的 Runner\n\
+         /q <消息>       将消息加入队列，当前任务结束后自动继续处理\n\
+         /rq <序号>      取消一条排队消息\n\
+         /g <引导内容>   给正在运行的内置 Agent 注入引导；外部 Runner 会按队列处理",
+    );
+    help_text
 }
 
 pub(super) fn parse_im_cwd_command(message: &str) -> Option<Result<PathBuf, String>> {
@@ -133,8 +195,158 @@ pub(super) fn parse_im_cwd_command(message: &str) -> Option<Result<PathBuf, Stri
     Some(Ok(std::fs::canonicalize(&path).unwrap_or(path)))
 }
 
+pub(super) fn parse_im_runner_command(message: &str) -> Option<ImRunnerCommand> {
+    let trimmed = message.trim();
+    let mut parts = trimmed.splitn(2, char::is_whitespace);
+    let command = parts.next()?;
+    if !command.eq_ignore_ascii_case("/runner") {
+        return None;
+    }
+    let runner_id = parts.next().unwrap_or("").trim();
+    if runner_id.is_empty() {
+        Some(ImRunnerCommand::List)
+    } else {
+        Some(ImRunnerCommand::Switch(runner_id.to_string()))
+    }
+}
+
+pub(super) fn format_im_runner_list(
+    config: &crate::im_gateway::external_cli::ExternalCliGatewayConfig,
+) -> String {
+    let mut names = std::collections::BTreeSet::new();
+    names.insert(BUILTIN_IM_RUNNER_ID.to_string());
+    if !config.default_runner_id.trim().is_empty() {
+        names.insert(config.default_runner_id.trim().to_string());
+    }
+    names.extend(
+        config
+            .runners
+            .keys()
+            .map(|runner_id| runner_id.trim())
+            .filter(|runner_id| !runner_id.is_empty())
+            .map(ToString::to_string),
+    );
+    names.into_iter().collect::<Vec<_>>().join("\n")
+}
+
+pub(super) fn resolve_im_runner_selection(
+    config: &crate::im_gateway::external_cli::ExternalCliGatewayConfig,
+    runner_id: &str,
+) -> Result<ImRunnerSelection, String> {
+    let runner_id = runner_id.trim();
+    if runner_id.is_empty() {
+        return Err("用法: /runner <Runner>".to_string());
+    }
+    if runner_id == BUILTIN_IM_RUNNER_ID {
+        return Ok(ImRunnerSelection {
+            runner_id: BUILTIN_IM_RUNNER_ID.to_string(),
+            runner: bifrost_agent::AgentRunnerMode::BifrostAgent,
+            adapter: None,
+        });
+    }
+    let Some(settings) = config.runners.get(runner_id) else {
+        return Err(format!(
+            "找不到 Runner: `{}`\n\n支持的 Runner:\n{}",
+            runner_id,
+            format_im_runner_list(config)
+        ));
+    };
+    Ok(ImRunnerSelection {
+        runner_id: runner_id.to_string(),
+        runner: bifrost_agent::AgentRunnerMode::Custom(runner_id.to_string()),
+        adapter: Some(settings.adapter.clone()),
+    })
+}
+
+pub(super) fn apply_im_runner_switch_to_session(
+    provider_store: &Arc<ImProviderStore>,
+    provider_id: &str,
+    session_key: &str,
+    session: &mut bifrost_agent::AgentSession,
+    selection: &ImRunnerSelection,
+) -> String {
+    persist_provider_agent_runner(provider_store, provider_id, selection.runner.clone());
+    clear_persisted_agent_session_state(session_key, None, None);
+    session.clear();
+    match &selection.runner {
+        bifrost_agent::AgentRunnerMode::BifrostAgent => session.mark_bifrost_agent_runtime(),
+        bifrost_agent::AgentRunnerMode::Custom(_) => {
+            session.mark_external_runner_runtime(
+                &selection.runner_id,
+                selection.adapter.as_deref().unwrap_or(&selection.runner_id),
+            );
+        }
+    }
+    format!(
+        "已切换 Runner 到:\n`{}`\n\n下一条消息将使用新的 Runner。",
+        selection.runner_id
+    )
+}
+
+pub(super) fn apply_im_runner_switch(
+    provider_store: &Arc<ImProviderStore>,
+    session_manager: &Arc<ImAgentSessionManager>,
+    provider_id: &str,
+    session_key: &str,
+    config: &crate::im_gateway::external_cli::ExternalCliGatewayConfig,
+    runner_id: &str,
+) -> Result<String, String> {
+    let selection = resolve_im_runner_selection(config, runner_id)?;
+    let Some(mut session) = session_manager.try_take_session_with_work_dir(session_key, None)
+    else {
+        return Err("当前 Agent 正在处理中，Runner 切换需要等待当前任务完成后执行。".to_string());
+    };
+    let reply = apply_im_runner_switch_to_session(
+        provider_store,
+        provider_id,
+        session_key,
+        &mut session,
+        &selection,
+    );
+    session_manager.return_session(session);
+    Ok(reply)
+}
+
+pub(super) fn format_im_runner_error(reason: &str) -> String {
+    format!("无法切换 Runner：{reason}")
+}
+
 pub(super) fn format_im_cwd_error(reason: &str) -> String {
     format!("❌ 无法切换工作目录：{reason}\n\n用法: /cwd <绝对路径>")
+}
+
+async fn handle_im_runner_command(
+    message: &str,
+    session_key: &str,
+    ctx: ImRunnerCommandContext<'_>,
+) -> bool {
+    let Some(command) = parse_im_runner_command(message) else {
+        return false;
+    };
+    let config = ctx.external_cli_config_store.load();
+    let reply = match command {
+        ImRunnerCommand::List => format_im_runner_list(&config),
+        ImRunnerCommand::Switch(runner_id) => match apply_im_runner_switch(
+            ctx.provider_store,
+            ctx.session_manager,
+            &ctx.provider.id,
+            session_key,
+            &config,
+            &runner_id,
+        ) {
+            Ok(reply) => reply,
+            Err(reason) => format_im_runner_error(&reason),
+        },
+    };
+    send_agent_reply(
+        ctx.client,
+        ctx.provider,
+        ctx.event,
+        &reply,
+        ctx.message_log_store,
+    )
+    .await;
+    true
 }
 
 pub(super) fn apply_im_cwd_switch_to_session(
@@ -366,6 +578,21 @@ pub(super) async fn handle_busy_message(
             "当前没有正在执行的 Agent loop。"
         };
         send_agent_reply(client, provider, event, reply, message_log_store).await;
+        return;
+    }
+
+    if let Some(command) = parse_im_runner_command(trimmed) {
+        let config = ctx.external_cli_config_store.load();
+        let reply = match command {
+            ImRunnerCommand::List => format_im_runner_list(&config),
+            ImRunnerCommand::Switch(runner_id) => {
+                match resolve_im_runner_selection(&config, &runner_id) {
+                    Ok(_) => "当前任务正在处理中，请等待任务结束后再切换 Runner。".to_string(),
+                    Err(reason) => format_im_runner_error(&reason),
+                }
+            }
+        };
+        send_agent_reply(client, provider, event, &reply, message_log_store).await;
         return;
     }
 
@@ -646,6 +873,7 @@ pub(super) async fn run_agent_chat_with_interleave(
     mcp_manager: &mut ImMcpManager,
     message_log_store: &Arc<ImMessageLogStore>,
     event_store: &Arc<ImEventStore>,
+    external_cli_config_store: &Arc<crate::im_gateway::external_cli::ExternalCliConfigStore>,
 ) {
     // Set up the guide channel before starting the turn
     let guide_channel = queue_manager.get_or_create_guide_channel(session_key);
@@ -664,6 +892,34 @@ pub(super) async fn run_agent_chat_with_interleave(
         let msg_for_turn = current_msg.clone();
         let images_for_turn = current_images.clone();
         current_images.clear();
+
+        if handle_idle_im_command(
+            &msg_for_turn,
+            session_key,
+            &agent_config,
+            IdleImCommandContext {
+                client,
+                provider: &current_provider,
+                provider_store,
+                external_cli_config_store,
+                event: initial_event,
+                message_log_store,
+                agent_session_manager,
+            },
+        )
+        .await
+        {
+            match queue_manager.pop_queue(session_key) {
+                Some(next_msg) => {
+                    current_msg = next_msg;
+                    continue;
+                }
+                None => {
+                    queue_manager.clear_session(session_key);
+                    break;
+                }
+            }
+        }
 
         // Run agent chat with interleaved event processing
         let chat_future = AssertUnwindSafe(process_agent_chat(
@@ -734,6 +990,7 @@ pub(super) async fn run_agent_chat_with_interleave(
                         agent_config_store,
                         provider_store,
                         event_store,
+                        external_cli_config_store,
                         BusyMessageDefaultMode::Guide,
                     )
                     .await;
@@ -754,6 +1011,7 @@ pub(super) async fn run_agent_chat_with_interleave(
                 agent_config_store,
                 provider_store,
                 event_store,
+                external_cli_config_store,
             },
         )
         .await;
@@ -808,6 +1066,7 @@ struct ReadyEventDrainContext<'a> {
     agent_config_store: &'a Arc<ImAgentConfigStore>,
     provider_store: &'a Arc<ImProviderStore>,
     event_store: &'a Arc<ImEventStore>,
+    external_cli_config_store: &'a Arc<crate::im_gateway::external_cli::ExternalCliConfigStore>,
 }
 
 async fn drain_ready_events_after_turn(
@@ -834,6 +1093,7 @@ async fn drain_ready_events_after_turn(
             ctx.agent_config_store,
             ctx.provider_store,
             ctx.event_store,
+            ctx.external_cli_config_store,
             BusyMessageDefaultMode::Guide,
         )
         .await;
@@ -865,6 +1125,7 @@ pub(super) async fn handle_concurrent_event_during_chat(
     agent_config_store: &Arc<ImAgentConfigStore>,
     provider_store: &Arc<ImProviderStore>,
     event_store: &Arc<ImEventStore>,
+    external_cli_config_store: &Arc<crate::im_gateway::external_cli::ExternalCliConfigStore>,
     active_session_default_mode: BusyMessageDefaultMode,
 ) {
     let provider = provider_store
@@ -924,6 +1185,11 @@ pub(super) async fn handle_concurrent_event_during_chat(
         if let Some(response) =
             bifrost_agent::handle_session_free_command(&session_key, &msg_text, &agent_config)
         {
+            let response = if msg_text.trim() == "/help" {
+                append_im_channel_help(response)
+            } else {
+                response
+            };
             send_agent_reply(client, &provider, event, &response, message_log_store).await;
             return;
         }
@@ -939,6 +1205,7 @@ pub(super) async fn handle_concurrent_event_during_chat(
                 message_log_store,
                 agent_session_manager,
                 progress_registry,
+                external_cli_config_store,
                 default_mode: active_session_default_mode,
                 status_context: status_context_from_agent_config(&agent_config),
                 default_work_dir: Some(agent_config.resolve_work_dir().display().to_string()),
@@ -961,6 +1228,7 @@ pub(super) async fn handle_concurrent_event_during_chat(
                     message_log_store,
                     agent_session_manager,
                     progress_registry,
+                    external_cli_config_store,
                     default_mode: busy_default_mode_for_agent_config(&agent_config),
                     status_context: status_context_from_agent_config(&agent_config),
                     default_work_dir: Some(agent_config.resolve_work_dir().display().to_string()),
@@ -1086,6 +1354,11 @@ pub(super) async fn process_agent_chat(
     if let Some(response) =
         bifrost_agent::handle_session_free_command(session_key, &user_message, agent_config)
     {
+        let response = if user_message.trim() == "/help" {
+            append_im_channel_help(response)
+        } else {
+            response
+        };
         debug!(
             session_key = %session_key,
             "handled session-free command without taking session"
@@ -1907,6 +2180,8 @@ mod tests {
         let message_log_store = Arc::new(ImMessageLogStore::new(temp_dir.path()));
         let agent_session_manager = Arc::new(ImAgentSessionManager::new(3600));
         let agent_config_store = Arc::new(ImAgentConfigStore::new(&temp_dir.path().join("agent")));
+        let external_cli_config_store =
+            Arc::new(crate::im_gateway::external_cli::ExternalCliConfigStore::new(temp_dir.path()));
 
         drain_ready_events_after_turn(
             &mut rx,
@@ -1921,6 +2196,7 @@ mod tests {
                 agent_config_store: &agent_config_store,
                 provider_store: &provider_store,
                 event_store: &event_store,
+                external_cli_config_store: &external_cli_config_store,
             },
         )
         .await;

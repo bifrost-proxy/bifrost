@@ -407,6 +407,7 @@ pub(super) async fn run_event_loop_with_options(
                                     message_log_store: &message_log_store,
                                     agent_session_manager: &agent_session_manager,
                                     progress_registry: &progress_registry,
+                                    external_cli_config_store: &external_cli_config_store,
                                     default_mode: busy_default_mode,
                                     status_context: status_context_from_agent_config(
                                         &effective_agent_config,
@@ -431,6 +432,7 @@ pub(super) async fn run_event_loop_with_options(
                                 client: &client,
                                 provider: &provider,
                                 provider_store: &provider_store,
+                                external_cli_config_store: &external_cli_config_store,
                                 event: &event,
                                 message_log_store: &message_log_store,
                                 agent_session_manager: &agent_session_manager,
@@ -519,6 +521,7 @@ pub(super) async fn run_event_loop_with_options(
                             &mut mcp_manager,
                             &message_log_store,
                             &event_store,
+                            &external_cli_config_store,
                         )
                         .await;
                     }
@@ -577,6 +580,7 @@ pub(super) async fn run_event_loop_with_options(
                             message_log_store: &message_log_store,
                             agent_session_manager: &agent_session_manager,
                             progress_registry: &progress_registry,
+                            external_cli_config_store: &external_cli_config_store,
                             default_mode: busy_default_mode,
                             status_context: status_context_from_agent_config(&agent_config),
                             default_work_dir: Some(
@@ -596,6 +600,7 @@ pub(super) async fn run_event_loop_with_options(
                         client: &client,
                         provider: &provider,
                         provider_store: &provider_store,
+                        external_cli_config_store: &external_cli_config_store,
                         event: &event,
                         message_log_store: &message_log_store,
                         agent_session_manager: &agent_session_manager,
@@ -687,6 +692,7 @@ pub(super) async fn run_event_loop_with_options(
                     &mut mcp_manager,
                     &message_log_store,
                     &event_store,
+                    &external_cli_config_store,
                 )
                 .await;
             }
@@ -707,6 +713,29 @@ pub(super) async fn run_event_loop_with_options(
                     .unwrap_or_else(|| raw_message_text.to_string());
                 let session_key =
                     build_session_key(&event.provider_id, event.source.user_id.as_deref());
+
+                if parse_im_runner_command(&message_text).is_some() {
+                    let agent_config =
+                        effective_agent_config_for_provider(&agent_config_store.load(), &provider);
+                    if handle_idle_im_command(
+                        &message_text,
+                        &session_key,
+                        &agent_config,
+                        IdleImCommandContext {
+                            client: &client,
+                            provider: &provider,
+                            provider_store: &provider_store,
+                            external_cli_config_store: &external_cli_config_store,
+                            event: &event,
+                            message_log_store: &message_log_store,
+                            agent_session_manager: &agent_session_manager,
+                        },
+                    )
+                    .await
+                    {
+                        continue;
+                    }
+                }
 
                 run_external_cli_agent_chat(
                     ExternalCliChatContext {
@@ -881,6 +910,7 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                 message_log_store: ctx.message_log_store,
                 agent_session_manager: ctx.agent_session_manager,
                 progress_registry: ctx.progress_registry,
+                external_cli_config_store: ctx.external_cli_config_store,
                 default_mode: BusyMessageDefaultMode::Queue,
                 status_context,
                 default_work_dir: Some(
@@ -1161,6 +1191,7 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                         ctx.agent_config_store,
                         ctx.provider_store,
                         ctx.event_store,
+                        ctx.external_cli_config_store,
                         BusyMessageDefaultMode::Queue,
                     ).await;
                 }

@@ -2363,10 +2363,65 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
+## 2026-06-08 IM `/help` 命令补充通道专属指令
+
+### 问题
+
+IM `/help` 复用了内置 Agent slash router 的帮助文本，只展示 `/clear`、`/compact`、`/status` 等内置命令。实际 IM 通道还支持 `/cwd <绝对路径>`、`/runner [Runner]`、`/q <消息>`、`/rq <序号>`、`/g <引导内容>`，其中 `/cwd` 和 `/runner` 是只在 IM 入口生效的控制指令。旧帮助文本会让用户误以为这些真实可用能力不存在。
+
+### 实现逻辑
+
+- 保持 `bifrost_agent::SlashCommandRouter::help_text()` 不变，避免 WebUI/API 普通 Agent `/help` 误展示 IM 专属命令。
+- 在 IM idle/session-free `/help` 快路径中，对内置帮助文本追加"IM 通道命令"分组。
+- IM 分组列出：
+  - `/cwd <绝对路径>`：切换当前 IM 通道绑定的工作目录；路径必须存在且是目录；运行中会排队到当前任务结束后执行。
+  - `/runner [Runner]`：不带参数时列出当前支持的 Runner 名称；带参数时切换当前 IM 通道绑定的 Runner。
+  - `/q <消息>`：加入队列。
+  - `/rq <序号>`：取消排队消息。
+  - `/g <引导内容>`：给内置 Agent 注入引导；外部 Runner 按队列处理。
+
+### 测试方案
+
+- 单元测试：`im_help_includes_im_only_commands_without_dropping_builtins` 验证 IM help 保留内置命令并追加 `/cwd`、`/runner`、`/q`、`/rq`、`/g`。
+- 回归测试：复跑 `im_cwd_command` focused tests，确认帮助改动不影响 `/cwd` 解析、非法路径和 Provider work_dir 持久化。
+
 ### 文档更新
 
 - `design/im-gateway.md`
 - `human_tests/im-gateway-agent.md`
+- `human_tests/readme.md`
+
+## 2026-06-08 IM 通道 `/runner` Runner 切换指令
+
+### 问题
+
+IM 通道此前只能在 WebUI Provider 配置里切换默认 Runner，用户在飞书/微信侧无法快速确认当前可用 Runner 或切换当前通道绑定的 Runner。Trae/Codex/ChatGPT Web 等外部 Runner 验证需要一个不进入模型、只在 IM 入口生效的控制指令。
+
+### 实现逻辑
+
+- 在 IM idle 命令快路径中新增 `/runner`：
+  - `/runner`：读取 `ExternalCliGatewayConfig`，直接输出支持的 Runner 名称列表。列表包含内置 `bifrost_agent`、默认外部 runner id，以及配置文件中的全部外部 runner id。
+  - `/runner <Runner>`：检查 `<Runner>` 是否是 `bifrost_agent` 或存在于 external CLI runner 配置；不存在时返回错误并附带支持列表。
+- 切换成功后写入当前 Provider 的 `agent_config.runner`：
+  - `bifrost_agent` 持久化为 `AgentRunnerMode::BifrostAgent`，显式覆盖全局默认 Runner。
+  - 外部 Runner 持久化为 `AgentRunnerMode::Custom(<runner_id>)`。
+- 切换时清理当前 IM session 的运行历史与持久化 thread/conversation 状态，避免下一轮继续恢复旧 Runner 的线程。
+- 运行中收到 `/runner`：
+  - `/runner` 列表可以即时返回。
+  - `/runner <Runner>` 不抢占当前任务，也不进入模型；返回提示要求当前任务结束后再切换，避免跨 Runner drain 队列造成后续消息被错误 runtime 消费。
+- 外部 Runner route 也只在消息本身是 `/runner` 时提前拦截；`/clear`、`/reset` 仍保留外部 Runner 自己的 adapter/runner 作用域清理逻辑。
+
+### 测试方案
+
+- 单元测试：`im_runner_command_*` 覆盖 `/runner` 解析、列表输出、未知 Runner、切换外部 Runner、切回内置 Runner、Provider 持久化和 idle session 重置。
+- 回归测试：`im_help_includes_im_only_commands_without_dropping_builtins` 覆盖 IM help 新增 `/runner [Runner]`；`im_cwd_command` 复跑确认队列控制命令路径不被破坏。
+- 真实场景测试：`human_tests/im-gateway-agent.md` 新增 TC-IMA-144，覆盖 IM `/runner` 列表、有效切换、未知 Runner 和 WebUI/API 不暴露该指令。
+
+### 文档更新
+
+- `design/im-gateway.md`
+- `human_tests/im-gateway-agent.md`
+- `human_tests/im-help-command.md`
 - `human_tests/readme.md`
 
 ## 2026-05-06 CLI IM Provider 选择与默认 Owner 发送
