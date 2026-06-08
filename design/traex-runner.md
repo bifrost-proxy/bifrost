@@ -25,7 +25,7 @@ Bifrost 的 Agent Runner 已经把 Codex、ChatGPT Web、custom CLI 收敛到同
 - Codex/Trae 默认作为无人值守 external runner 启动，必须默认 full access，避免 CLI 在 IM/Web 长任务中等待二次授权；用户显式配置 sandbox/permission/approval 时才按显式配置收窄。
 - 不把外层 `traex` wrapper 调用作为用户可见工具步骤写进 timeline；用户应该看到 Trae 自己输出的状态、工具和最终回答。
 - 不伪造 Trae 没有输出的细粒度工具事件。若 Trae 本次 JSONL 只提供状态和最终消息，Bifrost 只展示真实状态和最终消息；若 Trae 输出 tool started/finished，Bifrost 再展示工具步骤。
-- 不向 Trae exec 传递不支持的 `--permission-mode default`。配置为空或 `default` 时必须映射为 `--permission-mode bypass_permissions`，并默认启用 full access，避免无人值守 IM/Web 链路等待交互式授权。
+- 不向 Trae exec 传递不支持的 `--permission-mode default`。配置为空或 `default` 时必须默认启用 full access；当前 Trae CLI 不允许同时设置 sandbox override 和 permission mode override，因此 full access 模式只传 `--dangerously-bypass-approvals-and-sandbox`，不再同时传 `--permission-mode bypass_permissions`。
 - 未显式配置 `timeoutSecs` 时，不对 Trae/external runner 设置固定超时；长任务由用户显式 `/stop` 或 runner 自然结束控制。
 - 飞书 progress card 展示工具输入/输出预览，完整 stdout/stderr 与 normalized events 保存在 run artifacts；重复的 running tool start 事件必须去重，避免卡片体过大导致中间刷新丢失。
 - 不影响飞书 IM progress card 的最终收敛和普通 final reply 投递策略。
@@ -43,9 +43,9 @@ Bifrost 的 Agent Runner 已经把 Codex、ChatGPT Web、custom CLI 收敛到同
 
 `command_spec.rs` 新增 `traex` adapter 分支。默认 args 为空时，运行时生成 Trae exec/resume 命令，并把 `--cd` 放在 `exec` 前面，确保 Trae 以目标工程目录启动。`--output-last-message` 继续使用 External CLI runtime 已有的 final response 文件契约。
 
-Codex 与 Trae 的默认配置都面向无人值守 runner：未显式设置 `dangerFullAccess`、`sandbox` 或 Codex `approvalPolicy` 时，Codex 默认追加 `--dangerously-bypass-approvals-and-sandbox`；显式设置 sandbox/approval 时保留收窄配置。Trae 未显式设置 permission mode 时默认走 `bypass_permissions` 并追加 `--dangerously-bypass-approvals-and-sandbox`。
+Codex 与 Trae 的默认配置都面向无人值守 runner：未显式设置 `dangerFullAccess`、`sandbox` 或 Codex `approvalPolicy` 时，Codex 默认追加 `--dangerously-bypass-approvals-and-sandbox`；显式设置 sandbox/approval 时保留收窄配置。Trae 未显式设置 permission mode 时默认追加 `--dangerously-bypass-approvals-and-sandbox`，并且不同时生成 `--permission-mode`，避免 Trae CLI 报 `sandbox_mode` 与 `permission_mode` override 冲突。
 
-Trae 的 `permissionMode` 与 Codex 的 approval policy 不同，因此单独映射为 `--permission-mode`。WebUI 把 “Headless default” 保存为空值；后端把空字符串和历史 `default` 都映射为 `bypass_permissions`，并默认追加 `--dangerously-bypass-approvals-and-sandbox`。用户显式选择 `plan`、`auto` 或 `custom` 时保留该选择，不默认启用 full access；显式设置 `dangerFullAccess` 可覆盖该行为。
+Trae 的 `permissionMode` 与 Codex 的 approval policy 不同，因此单独映射为 `--permission-mode`。WebUI 把 “Headless default” 保存为空值；后端把空字符串和历史 `default` 都视为 headless full access，只输出 `--dangerously-bypass-approvals-and-sandbox`。用户显式选择 `plan`、`auto` 或 `custom` 时保留该选择，不默认启用 full access；显式设置 `dangerFullAccess` 可覆盖该行为，且 full access 优先级高于 permission mode，避免生成互斥 CLI 参数。
 
 ### 实时输出
 
@@ -87,8 +87,8 @@ Runners 配置页的 Adapter 下拉只展示产品化入口：Codex CLI、Trae C
 
 - `traex_adapter_builds_exec_command_with_prompt_stdin`：验证默认 Trae exec 命令、参数顺序和不设置固定 timeout。
 - `traex_adapter_builds_resume_command_from_thread_id`：验证 threadId 续接命令。
-- `traex_adapter_defaults_to_bypass_permissions_for_exec`：验证空 permission mode 默认映射为 headless full access。
-- `traex_adapter_maps_default_permission_mode_to_headless_full_access`：验证历史 `default` 不传给 Trae，而是映射为 `bypass_permissions` 并启用 full access。
+- `traex_adapter_defaults_to_headless_full_access_for_exec`：验证空 permission mode 默认映射为 headless full access，且不同时生成 `--permission-mode`。
+- `traex_adapter_maps_default_permission_mode_to_headless_full_access`：验证历史 `default` 不传给 Trae，而是启用 full access 且不同时生成 `--permission-mode`。
 - `traex_adapter_respects_explicit_non_bypass_permission_mode`：验证显式 `plan`、`auto` 或 `custom` 不被默认 full access 覆盖。
 - `codex_adapter_defaults_to_danger_full_access_for_headless_runs`：验证 Codex 空配置默认追加 full access 参数。
 - `codex_adapter_respects_explicit_sandbox_without_danger_full_access`：验证显式 sandbox 不被默认 full access 覆盖。

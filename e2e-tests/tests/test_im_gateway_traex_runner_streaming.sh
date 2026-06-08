@@ -195,6 +195,10 @@ assert snapshot.get("timeoutSecs") in (None, 0), snapshot
 args = snapshot.get("args") or []
 joined = " ".join(args)
 assert "--permission-mode default" not in joined, args
+assert not (
+    "--permission-mode" in args
+    and "--dangerously-bypass-approvals-and-sandbox" in args
+), args
 assert "--cd" in args and "exec" in args and "--json" in args and "--output-last-message" in args, args
 assert detail.get("events"), detail
 metadata = detail.get("metadata") or {}

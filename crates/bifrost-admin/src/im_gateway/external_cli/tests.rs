@@ -451,7 +451,7 @@ fn traex_adapter_builds_exec_command_with_prompt_stdin() {
 }
 
 #[test]
-fn traex_adapter_defaults_to_bypass_permissions_for_exec() {
+fn traex_adapter_defaults_to_headless_full_access_for_exec() {
     let request = ExternalCliRunRequest {
         images: Vec::new(),
         message: "hello".to_string(),
@@ -476,11 +476,8 @@ fn traex_adapter_defaults_to_bypass_permissions_for_exec() {
 
     let spec = build_command_spec(&request, Path::new("/tmp/last.md")).unwrap();
 
-    assert!(has_arg_pair(
-        &spec.args,
-        "--permission-mode",
-        "bypass_permissions"
-    ));
+    assert!(!spec.args.contains(&"--permission-mode".to_string()));
+    assert!(!spec.args.contains(&"bypass_permissions".to_string()));
     assert!(!spec.args.contains(&"default".to_string()));
     assert!(spec
         .args
@@ -516,11 +513,8 @@ fn traex_adapter_maps_default_permission_mode_to_headless_full_access() {
 
     let spec = build_command_spec(&request, Path::new("/tmp/last.md")).unwrap();
 
-    assert!(has_arg_pair(
-        &spec.args,
-        "--permission-mode",
-        "bypass_permissions"
-    ));
+    assert!(!spec.args.contains(&"--permission-mode".to_string()));
+    assert!(!spec.args.contains(&"bypass_permissions".to_string()));
     assert!(!spec.args.contains(&"default".to_string()));
     assert!(!spec.args.contains(&"--sandbox".to_string()));
     assert!(spec
@@ -603,11 +597,8 @@ fn traex_adapter_builds_resume_command_from_thread_id() {
     assert!(spec.args.contains(&"resume".to_string()));
     assert!(spec.args.contains(&"--json".to_string()));
     assert!(has_arg_pair(&spec.args, "--model", "gpt-test"));
-    assert!(has_arg_pair(
-        &spec.args,
-        "--permission-mode",
-        "bypass_permissions"
-    ));
+    assert!(!spec.args.contains(&"--permission-mode".to_string()));
+    assert!(!spec.args.contains(&"bypass_permissions".to_string()));
     assert!(spec
         .args
         .contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));

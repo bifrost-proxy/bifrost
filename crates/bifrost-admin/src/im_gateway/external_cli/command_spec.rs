@@ -119,7 +119,7 @@ fn append_traex_config_args(
         generated.push("--model".to_string());
         generated.push(model.to_string());
     }
-    if let Some(permission_mode) = permission_mode {
+    if let Some(permission_mode) = permission_mode.filter(|_| !danger_full_access) {
         generated.push("--permission-mode".to_string());
         generated.push(permission_mode);
     }
