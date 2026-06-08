@@ -501,6 +501,9 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     || !landing_html.contains("Wi-Fi name for this check")
                     || !landing_html.contains("Experimental managed Wi-Fi profile")
                     || !landing_html.contains("Manual Wi-Fi proxy setup is the safe cleanup path")
+                    || !landing_html.contains("isTrustProbeProxyBypassRequired")
+                    || !landing_html.contains("trust_probe_must_bypass_proxy")
+                    || !landing_html.contains("Direct probe request went through the configured proxy")
                 {
                     return Err(format!("Unexpected trust probe landing page: {landing_html}"));
                 }
@@ -590,8 +593,15 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 let netcheck_url = format!(
                     "http://127.0.0.1:{probe_port}/_bifrost/trust-probe/netcheck?sid={session_id}&deviceId={device_a}"
                 );
+                let proxied_netcheck_response = proxied_client
+                    .get(&netcheck_url)
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET proxied trust probe netcheck failed: {}", e))?;
+                assert_status(&proxied_netcheck_response, 409)?;
+
                 let netcheck_response = client
-                    .get(netcheck_url)
+                    .get(&netcheck_url)
                     .send()
                     .await
                     .map_err(|e| format!("GET trust probe netcheck failed: {}", e))?;
@@ -609,16 +619,33 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     .map_err(|e| format!("Failed to read CA bytes: {}", e))?;
                 let ca_cert = reqwest::Certificate::from_pem(&ca_pem)
                     .map_err(|e| format!("Failed to parse Bifrost CA as PEM: {}", e))?;
+                let ca_cert_for_proxy = reqwest::Certificate::from_pem(&ca_pem)
+                    .map_err(|e| format!("Failed to parse Bifrost CA as PEM for proxy: {}", e))?;
                 let trusted_client = reqwest::Client::builder()
                     .add_root_certificate(ca_cert)
                     .no_proxy()
                     .build()
                     .map_err(|e| format!("Failed to create trusted client: {}", e))?;
+                let proxied_trusted_client = reqwest::Client::builder()
+                    .add_root_certificate(ca_cert_for_proxy)
+                    .proxy(
+                        reqwest::Proxy::http(format!("http://127.0.0.1:{port}"))
+                            .map_err(|e| format!("Failed to configure trusted proxy client: {e}"))?,
+                    )
+                    .build()
+                    .map_err(|e| format!("Failed to create trusted proxy client: {}", e))?;
                 let tls_check_url = format!(
                     "https://127.0.0.1:{probe_port}/_bifrost/trust-probe/check?sid={session_id}&deviceId={device_a}"
                 );
+                let proxied_tls_response = proxied_trusted_client
+                    .get(&tls_check_url)
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET proxied trust probe HTTPS check failed: {}", e))?;
+                assert_status(&proxied_tls_response, 200)?;
+
                 let tls_response = trusted_client
-                    .get(tls_check_url)
+                    .get(&tls_check_url)
                     .send()
                     .await
                     .map_err(|e| format!("GET trust probe HTTPS check failed: {}", e))?;

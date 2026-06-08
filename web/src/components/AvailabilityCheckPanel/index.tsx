@@ -22,7 +22,6 @@ import {
   type MobileDevicesResponse,
   type TrustProbeDevice,
   type TrustProbeSession,
-  type TrustProbeStatus,
 } from "../../api/cert";
 import { normalizeApiErrorMessage } from "../../api/client";
 import { pushService, type SettingsScope } from "../../services/pushService";
@@ -42,47 +41,8 @@ interface AvailabilityCheckPanelProps {
   active?: boolean;
   autoCreate?: boolean;
   compact?: boolean;
-  showEvents?: boolean;
   mobileInfo?: MobileDevicesResponse | null;
   testIdPrefix?: string;
-}
-
-function trustProbeStatusLabel(status: TrustProbeStatus) {
-  switch (status) {
-    case "created":
-      return "Waiting for scan";
-    case "page_opened":
-      return "Device opened page";
-    case "network_reachable":
-      return "Network reachable";
-    case "tls_trusted":
-      return "CA trusted";
-    case "tls_failed":
-      return "Trust failed";
-    case "network_failed":
-      return "Probe unreachable";
-    case "expired":
-      return "Expired";
-    default:
-      return "Unknown";
-  }
-}
-
-function trustProbeStatusColor(status: TrustProbeStatus) {
-  switch (status) {
-    case "tls_trusted":
-      return "green";
-    case "network_reachable":
-    case "page_opened":
-      return "blue";
-    case "tls_failed":
-    case "network_failed":
-    case "expired":
-      return "red";
-    case "created":
-    default:
-      return "default";
-  }
 }
 
 function shortDeviceId(deviceId: string) {
@@ -145,7 +105,7 @@ function DeviceStatusTags({ device }: { device: TrustProbeDevice }) {
       <Tag
         color={device.tlsTrusted ? "green" : device.status === "tls_failed" ? "red" : "default"}
       >
-        Trust{" "}
+        Browser HTTPS{" "}
         {device.tlsTrusted ? "passed" : device.status === "tls_failed" ? "failed" : "pending"}
       </Tag>
       <Tag
@@ -192,6 +152,15 @@ function preserveTrustProbeUrls(
   };
 }
 
+function sameOriginResourceUrl(url: string): string {
+  try {
+    const parsed = new URL(url, window.location.origin);
+    return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+  } catch {
+    return url;
+  }
+}
+
 function withSettingsScope(scope: SettingsScope): SettingsScope[] {
   return Array.from(
     new Set([...(pushService.getSubscription().settings_scopes ?? []), scope]),
@@ -207,7 +176,6 @@ export default function AvailabilityCheckPanel({
   active = true,
   autoCreate = false,
   compact = false,
-  showEvents = true,
   mobileInfo,
   testIdPrefix = "availability-check",
 }: AvailabilityCheckPanelProps) {
@@ -540,7 +508,7 @@ export default function AvailabilityCheckPanel({
           <Col xs={24} sm={compact ? 24 : 10} md={compact ? 24 : 8}>
             <div style={{ textAlign: compact ? "left" : "center" }}>
               <img
-                src={trustProbeSession.qrCodeUrl}
+                src={sameOriginResourceUrl(trustProbeSession.qrCodeUrl)}
                 alt="Availability Check QR Code"
                 width={qrSize}
                 height={qrSize}
@@ -579,43 +547,6 @@ export default function AvailabilityCheckPanel({
           </Col>
           <Col xs={24} sm={compact ? 24 : 14} md={compact ? 24 : 16}>
             <Space direction="vertical" style={{ width: "100%" }} size={compact ? "small" : "middle"}>
-              <Space wrap>
-                <Tag color={trustProbeStatusColor(trustProbeSession.status)}>
-                  {trustProbeStatusLabel(trustProbeSession.status)}
-                </Tag>
-                <Tag color={trustProbeSession.opened ? "green" : "default"}>
-                  Page {trustProbeSession.opened ? "opened" : "waiting"}
-                </Tag>
-                <Tag color={trustProbeSession.networkReachable ? "green" : "default"}>
-                  Probe port {trustProbeSession.networkReachable ? "reachable" : "pending"}
-                </Tag>
-                <Tag color={trustProbeSession.tlsTrusted ? "green" : "default"}>
-                  HTTPS trust {trustProbeSession.tlsTrusted ? "passed" : "pending"}
-                </Tag>
-                <Tag color={trustProbeSession.proxyAccessAllowed ? "green" : "default"}>
-                  Proxy access{" "}
-                  {trustProbeSession.proxyAccessStatus === "pending"
-                    ? "needs approval"
-                    : trustProbeSession.proxyAccessStatus ?? "pending"}
-                </Tag>
-                <Tag
-                  color={
-                    trustProbeSession.proxyConfigured
-                      ? "green"
-                      : trustProbeSession.proxyConfigurationMessage
-                        ? "red"
-                        : "default"
-                  }
-                >
-                  Proxy config{" "}
-                  {trustProbeSession.proxyConfigured
-                    ? "detected"
-                    : trustProbeSession.proxyConfigurationMessage
-                      ? "missing"
-                      : "pending"}
-                </Tag>
-              </Space>
-
               {trustProbeSession.devices?.length ? (
                 <List
                   size="small"
@@ -637,7 +568,7 @@ export default function AvailabilityCheckPanel({
                             {shortDeviceId(device.deviceId)}
                           </Text>
                           {device.platformHint ? (
-                            <Tag color={device.platformHint === "ios" ? "purple" : "blue"}>
+                            <Tag color={device.platformHint.startsWith("ios") ? "purple" : "blue"}>
                               {device.platformHint}
                             </Tag>
                           ) : null}
@@ -694,13 +625,14 @@ export default function AvailabilityCheckPanel({
                 <Alert
                   type="success"
                   showIcon
-                  message="Current device browser trusts Bifrost CA"
+                  message="Browser HTTPS probe passed"
                   description={
                     <Space direction="vertical" size={4}>
                       <Text type="secondary" style={{ fontSize: 12 }}>
-                        This confirms a real HTTPS handshake with a certificate signed by Bifrost
-                        CA. Some apps can still bypass system trust with certificate pinning or
-                        custom TLS policy.
+                        This confirms this browser completed the dedicated HTTPS probe with a
+                        certificate signed by Bifrost CA. It does not prove Android has installed
+                        the CA for every app; apps can still reject Bifrost through Android user CA
+                        policy, certificate pinning, or custom TLS policy.
                       </Text>
                       <Text>
                         Proxy:{" "}
@@ -718,7 +650,7 @@ export default function AvailabilityCheckPanel({
                 <Alert
                   type="warning"
                   showIcon
-                  message="HTTPS trust check failed"
+                  message="Browser HTTPS probe failed"
                   description="The device reached the probe port, but the browser could not complete the HTTPS handshake. Install the CA, enable full trust on iOS, check device time, then fully restart the browser and retry. Some browsers keep old certificate trust decisions until restart."
                 />
               ) : trustProbeSession.status === "network_failed" ? (
@@ -783,24 +715,6 @@ export default function AvailabilityCheckPanel({
                 />
               </div>
 
-              {showEvents ? (
-                <List
-                  size="small"
-                  dataSource={trustProbeSession.events.slice(-5).reverse()}
-                  locale={{ emptyText: "No probe events yet" }}
-                  renderItem={(event) => (
-                    <List.Item>
-                      <Space direction="vertical" size={0}>
-                        <Text style={{ fontSize: 12 }}>{event.type}</Text>
-                        <Text type="secondary" style={{ fontSize: 12 }}>
-                          {new Date(event.at).toLocaleTimeString()}
-                          {event.message ? ` - ${event.message}` : ""}
-                        </Text>
-                      </Space>
-                    </List.Item>
-                  )}
-                />
-              ) : null}
             </Space>
           </Col>
         </Row>

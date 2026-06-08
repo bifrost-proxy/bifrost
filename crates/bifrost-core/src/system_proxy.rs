@@ -1141,7 +1141,7 @@ impl SystemProxyManager {
                         ) {
                             Ok(matches) => matches,
                             Err(error) => {
-                                tracing::warn!(
+                                tracing::debug!(
                                     error = %error,
                                     target_host = %runtime_target.host,
                                     target_port = runtime_target.port,

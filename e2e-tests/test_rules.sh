@@ -3381,6 +3381,8 @@ start_specialized_proxy() {
     local xdg_data_home="${TEST_DATA_DIR}/xdg-data"
     mkdir -p "$home_dir" "$xdg_config_home" "$xdg_data_home"
 
+    # These focused rule parser checks assert tracing log content, so they
+    # explicitly opt in to console logs while normal CLI starts stay file-only.
     if [[ -n "$rust_log_value" ]]; then
         env \
             HOME="${home_dir}" \
@@ -3388,14 +3390,14 @@ start_specialized_proxy() {
             XDG_DATA_HOME="${xdg_data_home}" \
             BIFROST_DATA_DIR="${TEST_DATA_DIR}" \
             RUST_LOG="${rust_log_value}" \
-            "$bifrost_bin" --port "${PROXY_PORT}" start -y --no-intercept --skip-cert-check --unsafe-ssl --no-system-proxy --rules-file "${rules_file}" >"${proxy_log}" 2>&1 &
+            "$bifrost_bin" --port "${PROXY_PORT}" --log-output console start -y --no-intercept --skip-cert-check --unsafe-ssl --no-system-proxy --rules-file "${rules_file}" >"${proxy_log}" 2>&1 &
     else
         env \
             HOME="${home_dir}" \
             XDG_CONFIG_HOME="${xdg_config_home}" \
             XDG_DATA_HOME="${xdg_data_home}" \
             BIFROST_DATA_DIR="${TEST_DATA_DIR}" \
-            "$bifrost_bin" --port "${PROXY_PORT}" start -y --no-intercept --skip-cert-check --unsafe-ssl --no-system-proxy --rules-file "${rules_file}" >"${proxy_log}" 2>&1 &
+            "$bifrost_bin" --port "${PROXY_PORT}" --log-output console start -y --no-intercept --skip-cert-check --unsafe-ssl --no-system-proxy --rules-file "${rules_file}" >"${proxy_log}" 2>&1 &
     fi
     PROXY_PID=$!
 

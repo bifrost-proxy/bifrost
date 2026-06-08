@@ -86,7 +86,7 @@ fi
 
 echo "[chatgpt-web-startup-auth] start bifrost on ${PORT}"
 BIFROST_DATA_DIR="$DATA_DIR" BIFROST_CHATGPT_WEB_STARTUP_AUTH_DRY_RUN=1 \
-  "$BIFROST_BIN" start \
+  "$BIFROST_BIN" --log-output console,file start \
   -p "$PORT" \
   --unsafe-ssl \
   --skip-cert-check \

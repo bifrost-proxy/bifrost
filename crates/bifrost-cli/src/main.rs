@@ -108,9 +108,29 @@ fn command_uses_stdout_protocol(command: Option<&Commands>) -> bool {
     )
 }
 
+fn command_needs_console_logs(command: Option<&Commands>) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        matches!(
+            command,
+            Some(Commands::SystemProxy {
+                action: cli::SystemProxyCommands::CleanupDaemon { .. },
+            })
+        )
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = command;
+        false
+    }
+}
+
 fn effective_log_outputs(cli: &Cli) -> Vec<LogOutput> {
     if command_uses_stdout_protocol(cli.command.as_ref()) {
         vec![LogOutput::File]
+    } else if command_needs_console_logs(cli.command.as_ref()) {
+        vec![LogOutput::Console, LogOutput::File]
     } else {
         LogOutput::parse(&cli.log_output)
     }
@@ -139,7 +159,15 @@ fn main() {
             .with_retention_days(cli.log_retention_days);
 
         match init_logging_with_config(&log_config) {
-            Ok(guard) => Some(guard),
+            Ok(guard) => {
+                tracing::info!(
+                    target: "bifrost_cli::logging",
+                    log_dir = %log_config.log_dir.display(),
+                    outputs = ?log_config.outputs,
+                    "logging initialized"
+                );
+                Some(guard)
+            }
             Err(e) => {
                 eprintln!("Failed to initialize logging: {}", e);
                 std::process::exit(1);
@@ -689,6 +717,60 @@ mod tests {
             true,
             Some(&Commands::Status { tui: false })
         ));
+    }
+
+    #[test]
+    fn default_log_output_writes_file_only() {
+        let cli = Cli::parse_from(["bifrost", "start", "--no-system-proxy"]);
+
+        assert_eq!(cli.log_output, "file");
+        assert_eq!(effective_log_outputs(&cli), vec![LogOutput::File]);
+    }
+
+    #[test]
+    fn explicit_log_output_can_enable_console() {
+        let cli = Cli::parse_from([
+            "bifrost",
+            "--log-output",
+            "console,file",
+            "start",
+            "--no-system-proxy",
+        ]);
+        let outputs = effective_log_outputs(&cli);
+
+        assert!(outputs.contains(&LogOutput::Console));
+        assert!(outputs.contains(&LogOutput::File));
+    }
+
+    #[test]
+    fn explicit_console_log_output_keeps_file_logging() {
+        let cli = Cli::parse_from([
+            "bifrost",
+            "--log-output",
+            "console",
+            "start",
+            "--no-system-proxy",
+        ]);
+        let outputs = effective_log_outputs(&cli);
+
+        assert!(outputs.contains(&LogOutput::Console));
+        assert!(outputs.contains(&LogOutput::File));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn launchd_cleanup_daemon_keeps_console_logs_for_standard_paths() {
+        let cli = Cli::parse_from([
+            "bifrost",
+            "system-proxy",
+            "cleanup-daemon",
+            "--data-dir",
+            "/tmp/bifrost-launchd-log-test",
+        ]);
+        let outputs = effective_log_outputs(&cli);
+
+        assert!(outputs.contains(&LogOutput::Console));
+        assert!(outputs.contains(&LogOutput::File));
     }
 
     #[test]

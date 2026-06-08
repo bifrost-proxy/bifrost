@@ -83,9 +83,9 @@ pub struct Cli {
 
     #[arg(
         long,
-        default_value = "console",
+        default_value = "file",
         value_parser = ["console", "file", "console,file"],
-        help = "Log output targets: console, file, or both (comma-separated)"
+        help = "Log output targets: file (default) or console/console,file (also keeps file logging)"
     )]
     pub log_output: String,
 

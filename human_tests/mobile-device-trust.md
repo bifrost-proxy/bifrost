@@ -147,6 +147,28 @@
 - 响应体包含 `Missing local CA install confirmation`。
 - 不会触发 macOS keychain、sudo、Windows UAC 或 Linux trust store 安装提示。
 
+### TC-MDT-04B：Web UI 本机 CA 安装在 macOS Authorization API 失败时走管理员授权 fallback
+
+**操作步骤**：
+
+1. 在 macOS 上使用未安装当前 Bifrost CA 的临时数据目录启动服务：
+   ```bash
+   BIFROST_DATA_DIR=./.bifrost-mobile-webui-install \
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+   cargo run --bin bifrost -- start -p 18893 --unsafe-ssl --skip-cert-check --no-system-proxy
+   ```
+2. 打开 `http://localhost:18893/_bifrost/settings?tab=certificate#certificate-local-install`。
+3. 点击 `Install and Trust CA`。
+4. 如果 macOS Security.framework Authorization API 无法取得授权，继续观察是否出现系统管理员授权弹窗。
+5. 输入管理员凭据或取消授权后观察页面提示。
+
+**预期结果**：
+
+- 不再直接显示 `Failed to request macOS authorization: Unable to obtain authorization for this operation`。
+- Authorization API 失败时，Bifrost 使用 AppleScript `do shell script ... with administrator privileges` fallback 触发标准 macOS 管理员授权弹窗。
+- 用户输入管理员凭据并授权后，接口返回成功，页面状态自动刷新为 `Installed and trusted`。
+- 用户取消授权时，页面显示取消/失败提示，但不会静默声称已安装。
+
 ### TC-MDT-05：Settings Certificate UI 展示手机安装向导且不承诺自动信任
 
 **操作步骤**：
@@ -166,7 +188,7 @@
 - `Local Certificate Install` 章节在本机 CA 未完全信任时展示 `Install and Trust CA` 或 `Trust CA` 按钮，按钮说明等价于执行 `bifrost ca install`；CA 文件不可用时按钮禁用。
 - 点击本机安装按钮并完成系统授权后，页面会持续刷新本机 CA 状态，最终自动显示 `Installed and trusted`；不需要用户重新强刷页面才能看到信任完成状态。
 - `Availability Check` 章节位于页面顶部，可以选择本机局域网 IP；在证书页顶部入口中会自动展示固定二维码、分享链接、实时状态和最近事件，不需要额外点击生成或刷新按钮。
-- Availability Check 状态展示代理访问授权、页面是否打开、probe 端口是否可达、HTTPS trust check 是否通过。
+- Availability Check 状态展示代理访问授权、页面是否打开、probe 端口是否可达、浏览器 HTTPS probe 是否通过。
 - Availability Check 成功文案只承诺“当前设备浏览器信任 Bifrost CA”，并说明个别 App 仍可能因为 certificate pinning、自定义 TLS 或 Android user CA 策略无法解密。
 - iOS 章节展示在 Android 章节之前。
 - iPhone/iPad 区域先展示 `iOS uses one shared install and trust flow`，并明确四步：送达 profile、在 Settings 安装 profile、进入 `Settings > General > About > Certificate Trust Settings`、开启 Bifrost CA 完全信任。
@@ -427,11 +449,11 @@
 
 **预期结果**：
 
-- 管理端生成二维码后显示 session 状态、`Page waiting`、`Proxy config pending`、`Probe port pending`、`HTTPS trust pending`、`Proxy access pending`。
+- 管理端生成二维码后不再展示 session 聚合状态条；扫码后的检测结果集中在 `Connected devices` 列表中按设备展示 `Page`、`Network`、`Browser HTTPS`、`Access`、`Proxy` 状态。
 - Certificate 页 Availability Check 卡片顶部直接展示当前已连接、需要做可用性检查的移动设备；每台设备显示自定义名称或 ID、iOS/Android 平台、连接状态和 CA 状态。这个目标设备列表不需要等手机扫码后才出现。
 - 手机页标题为 `Bifrost Availability Check`，并显示代理访问授权检查结果。
 - 手机页显示代理配置检查结果：已配置代理时显示 `Proxy is configured`；未配置代理时显示 `Proxy is not configured yet`。
-- 手机页每秒自动重跑代理授权、probe 端口、HTTPS trust 和代理配置检测；完成 CA 信任、管理端授权或 Wi-Fi 代理配置后，手机页和管理端状态应自动更新，不需要手动刷新页面。
+- 手机页每秒自动重跑代理授权、probe 端口、浏览器 HTTPS probe 和代理配置检测；完成浏览器 CA 信任、管理端授权或 Wi-Fi 代理配置后，手机页和管理端状态应自动更新，不需要手动刷新页面。
 - 手机页代理未配置时优先提示手动进入 iPhone `Settings > Wi-Fi > current network > Configure Proxy > Manual`，填写 Bifrost `host:port` 后重试；实验 profile 入口放在手动步骤之后。
 - 手机页和管理端说明 Wi-Fi Proxy Profile 不包含 Wi-Fi 密码或入网凭据，但它是 managed Wi-Fi 配置，卸载 profile 可能移除对应 Wi-Fi 网络条目；安装过程中不应该要求用户输入 Wi-Fi 密码。
 - 手机页包含 `iOS Wi-Fi Proxy Profile` 工具区，优先显示 Bifrost 服务端下发的 Wi-Fi 名称；若服务端未检测到 Wi-Fi 名称，页面展示 Wi-Fi 名称输入框，用户输入当前 iPhone Wi-Fi 名并点击 `Use this Wi-Fi name` 后，下载按钮变为可用。
@@ -441,19 +463,22 @@
 - 在任意 Availability Check 卡片或 iOS 区块保存 Wi-Fi 名称后，其他已打开的 Availability Check 卡片和对应手机公开页会收到同一 SSID。
 - 手机页输入 Wi-Fi 名后会通过公开 `report` 写回同一个 session；管理端通过 `trust_probe` push 能看到 `wifi_ssid_updated` 事件和最新 Wi-Fi 名。
 - Availability Check 链接是固定 URL，不包含 `?t=<token>`；二维码内容也指向同一个固定 URL。手机页使用 `localStorage.bifrostAvailabilityDeviceId` 识别同一浏览器设备，刷新页面后仍归到同一台设备。
-- 多台设备可以同时打开同一个 Availability Check 链接。管理端卡片展示扫码后进入检测页的 `Connected devices` live status 列表，每台浏览器设备单独显示短 device id、platform hint、client IP、最近活跃时间、页面打开、网络、HTTPS trust、代理授权和代理配置状态。
-- 手机打开 HTTP landing page 后，管理端状态变为 `Device opened page`。
+- Certificate 页从 `localhost` 打开时，二维码图片本身必须通过当前 WebUI same-origin 路径加载；即使系统代理指向另一个 Bifrost 端口且未 bypass `10.x` LAN 地址，二维码也不能因为图片请求走代理而消失。二维码编码的目标 URL 仍然是局域网公开检测页。
+- 创建 session 或管理端 HEAD 探活不会提前占用 probe 端口；目标设备 GET 打开公开 Availability Check landing page 后，Bifrost 才按需监听该 session 的实际 `probePort`。本机 `127.0.0.1` 预览和 LAN IP 手机检查不能互相关闭对方的 probe listener。
+- 多台设备可以同时打开同一个 Availability Check 链接。管理端卡片展示扫码后进入检测页的 `Connected devices` live status 列表，每台浏览器设备单独显示短 device id、platform hint、client IP、最近活跃时间、页面打开、网络、浏览器 HTTPS probe、代理授权和代理配置状态。
+- 手机打开 HTTP landing page 后，管理端 `Connected devices` 中该设备的 `Page` 状态变为 `Page opened`。
 - 手机浏览器通过已配置代理访问专用 `.invalid` 探针 URL 后，管理端显示 `Proxy config detected`。
 - 手机能访问 probe 端口时，管理端显示 `Probe port reachable`。
-- 手机 HTTPS trust check 成功时，管理端显示 `CA trusted`、`HTTPS trust passed`，并展示代理地址 `<host>:<adminPort>` 和 proxy QR 链接。
+- 手机浏览器 HTTPS probe 成功时，管理端显示 `Browser HTTPS passed`，并展示代理地址 `<host>:<adminPort>` 和 proxy QR 链接；该通过态只代表当前浏览器完成直连 HTTPS probe，不代表 Android 已为所有 App 安装或信任 Bifrost CA。
 - 手机页成功后展示的代理地址是可点击复制的按钮，点击后显示 `Copied` 或清晰提示手动复制。
-- 如果 netcheck 成功但 HTTPS trust check 失败，管理端显示 `Trust failed`，手机页提示安装 CA、iOS 开启完全信任或 Android App 信任边界，并明确提示安装/信任后仍失败时需要完整重启浏览器再重试。
-- 如果 CA 尚未安装或尚未被浏览器信任，手机页证书信任区域保持稳定的失败引导；每秒自动检测不应让该区域在 `Checking HTTPS trust` 和失败步骤之间反复闪烁。
+- 如果 netcheck 成功但浏览器 HTTPS probe 失败，管理端显示 `Browser HTTPS failed`，手机页提示安装 CA、iOS 开启完全信任或 Android App 信任边界，并明确提示安装/信任后仍失败时需要完整重启浏览器再重试。
+- 如果 CA 尚未安装或尚未被浏览器信任，手机页证书信任区域保持稳定的失败引导；每秒自动检测不应让该区域在 `Checking browser HTTPS probe` 和失败步骤之间反复闪烁。
+- 如果 active trust-probe 的 `netcheck` 或 `check` URL 被配置了 Bifrost HTTP proxy 的客户端以 absolute-form 请求送进代理入口，Bifrost 必须拒绝该请求并保持对应设备的网络/浏览器 HTTPS probe 为失败或 pending；只有 `bifrost-proxy-check.invalid` 专用探针允许经代理进入并标记 `Proxy config detected`。
 - 如果 landing page 能打开但 probe 端口不可达，管理端显示 `Probe unreachable`，并提示检查防火墙、局域网隔离和 IP 选择。
-- 成功文案不承诺所有 App 都能被解密，只说明当前设备浏览器 TLS 链路已信任 Bifrost CA。
-- 自动化 E2E 使用当前 Bifrost CA 作为 root CA 访问 HTTPS check，并断言 session 最终为 `tls_trusted`。
+- 成功文案不承诺所有 App 都能被解密，只说明当前设备浏览器 TLS 链路已完成 Bifrost HTTPS probe。
+- 自动化 E2E 使用当前 Bifrost CA 作为 root CA 直连 HTTPS check，并断言 session 最终为 `tls_trusted`。
 - 自动化 E2E 使用配置了 Bifrost HTTP proxy 的客户端访问 `bifrost-proxy-check.invalid` 专用探针，并断言 session 最终包含 `proxyConfigured=true`。
-- 自动化 E2E 使用两个不同 `deviceId` 模拟两台移动设备：第一台完成 netcheck、HTTPS trust 和 proxy configured；第二台只上报页面打开和代理授权检查；最终断言 `GET /api/trust-probe/sessions/{id}` 返回至少两个 `devices[]` 条目，且两台设备状态互不覆盖。
+- 自动化 E2E 使用两个不同 `deviceId` 模拟两台移动设备：第一台完成 netcheck、浏览器 HTTPS probe 和 proxy configured；第二台只上报页面打开和代理授权检查；最终断言 `GET /api/trust-probe/sessions/{id}` 返回至少两个 `devices[]` 条目，且两台设备状态互不覆盖。
 
 ### TC-MDT-16：Availability Check 公开入口和代理授权检查不被访问控制误拦截
 

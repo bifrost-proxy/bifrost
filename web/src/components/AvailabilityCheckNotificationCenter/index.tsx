@@ -13,13 +13,13 @@ function deviceLabel(device: TrustProbeDevice) {
 
 function deviceStatus(device: TrustProbeDevice) {
   if (device.tlsTrusted) {
-    return { label: "CA trusted", color: "green" };
+    return { label: "Browser HTTPS passed", color: "green" };
   }
   if (device.status === "tls_failed") {
-    return { label: "Trust failed", color: "orange" };
+    return { label: "Browser HTTPS failed", color: "orange" };
   }
   if (device.networkReachable) {
-    return { label: "Checking trust", color: "blue" };
+    return { label: "Checking HTTPS", color: "blue" };
   }
   if (device.opened) {
     return { label: "Opened page", color: "blue" };
@@ -144,8 +144,8 @@ export default function AvailabilityCheckNotificationCenter() {
         >
           <Space direction="vertical" size="small" style={{ width: "100%" }}>
             <Text type="secondary" style={{ fontSize: 12 }}>
-              A device opened the availability check page. Review proxy access, CA trust, and proxy
-              configuration from the certificate page.
+              A device opened the availability check page. Review proxy access, browser HTTPS
+              probe, and proxy configuration from the certificate page.
             </Text>
             {devices.slice(0, 4).map(({ session, device }) => {
               const status = deviceStatus(device);

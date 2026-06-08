@@ -136,12 +136,12 @@ fn start_external_device_event_watcher() {
         {
             Ok(child) => child,
             Err(error) => {
-                tracing::warn!(%error, "failed to start macOS Disk Arbitration activity watcher");
+                tracing::debug!(%error, "failed to start macOS Disk Arbitration activity watcher");
                 return;
             }
         };
         let Some(stdout) = child.stdout.take() else {
-            tracing::warn!("macOS Disk Arbitration activity watcher has no stdout");
+            tracing::debug!("macOS Disk Arbitration activity watcher has no stdout");
             let _ = child.kill().await;
             return;
         };
@@ -166,10 +166,10 @@ fn start_external_device_event_watcher() {
         }
         match child.wait().await {
             Ok(status) => {
-                tracing::warn!(%status, "macOS Disk Arbitration activity watcher exited");
+                tracing::debug!(%status, "macOS Disk Arbitration activity watcher exited");
             }
             Err(error) => {
-                tracing::warn!(%error, "macOS Disk Arbitration activity watcher wait failed");
+                tracing::debug!(%error, "macOS Disk Arbitration activity watcher wait failed");
             }
         }
     });

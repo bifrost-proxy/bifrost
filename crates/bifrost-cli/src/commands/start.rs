@@ -1806,6 +1806,12 @@ pub fn run_foreground(
                 total_elapsed_ms = startup_started_at.elapsed().as_millis() as u64,
                 "foreground runtime initialization completed"
             );
+            let mobile_availability_tasks =
+                bifrost_admin::mobile_availability::spawn_terminal_panel(
+                    admin_state_arc.clone(),
+                    access_control.clone(),
+                    push_manager.clone(),
+                );
 
             let system_proxy_host = if base_config.host == "0.0.0.0" {
                 "127.0.0.1".to_string()
@@ -1984,6 +1990,9 @@ pub fn run_foreground(
                 task.abort();
             }
             for task in metrics_tasks {
+                task.abort();
+            }
+            for task in mobile_availability_tasks {
                 task.abort();
             }
 

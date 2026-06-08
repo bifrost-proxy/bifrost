@@ -67,18 +67,26 @@ wait_for_admin_api() {
 wait_for_log_observation_window() {
     local waited=0
     while [[ "$waited" -lt 40 ]]; do
-        if grep -q "remote invoke relay registration waiting for sync session token" "${TEST_DATA_DIR}/bifrost.log" 2>/dev/null; then
+        if collect_bifrost_logs | grep -q "remote invoke relay registration waiting for sync session token"; then
             break
         fi
         if ! kill -0 "$BIFROST_PID" 2>/dev/null; then
             echo "bifrost exited before remote invoke log observation completed" >&2
-            cat "${TEST_DATA_DIR}/bifrost.log" >&2 || true
+            collect_bifrost_logs >&2 || true
             return 1
         fi
         sleep 0.25
         waited=$((waited + 1))
     done
     sleep 5
+}
+
+collect_bifrost_logs() {
+    cat "${TEST_DATA_DIR}/bifrost.log" 2>/dev/null || true
+    if [[ -d "${TEST_DATA_DIR}/logs" ]]; then
+        find "${TEST_DATA_DIR}/logs" -maxdepth 1 -name 'bifrost*.log' -type f -print0 2>/dev/null \
+            | xargs -0 cat 2>/dev/null || true
+    fi
 }
 
 main() {
@@ -96,7 +104,7 @@ main() {
     wait_for_log_observation_window || exit 1
 
     local log_content
-    log_content="$(cat "${TEST_DATA_DIR}/bifrost.log")"
+    log_content="$(collect_bifrost_logs)"
     assert_body_contains \
         "remote invoke relay registration waiting for sync session token" \
         "$log_content" \
@@ -107,7 +115,7 @@ main() {
         "missing sync token should not be emitted as relay registration ERROR"
 
     local waiting_count
-    waiting_count="$(grep -c "remote invoke relay registration waiting for sync session token" "${TEST_DATA_DIR}/bifrost.log" || true)"
+    waiting_count="$(collect_bifrost_logs | grep -c "remote invoke relay registration waiting for sync session token" || true)"
     assert_equals "1" "$waiting_count" "missing sync token waiting message should be logged once"
 
     print_test_summary || exit 1

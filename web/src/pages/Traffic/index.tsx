@@ -17,7 +17,7 @@ import {
   type PanelFilters,
 } from "../../stores/useTrafficStore";
 import {
-  isSystemProxyConfiguredEnabled,
+  isSystemProxyLiveEnabledByBifrost,
   useProxyStore,
 } from "../../stores/useProxyStore";
 import { useBreakpointStore } from "../../stores/useBreakpointStore";
@@ -786,7 +786,7 @@ export default function Traffic() {
         onClearAll={handleClearAll}
         onFilterChange={setToolbarFilters}
         systemProxyEnabled={
-          systemProxy ? isSystemProxyConfiguredEnabled(systemProxy) : false
+          systemProxy ? isSystemProxyLiveEnabledByBifrost(systemProxy) : false
         }
         systemProxySupported={systemProxy?.supported}
         systemProxyLoading={systemProxyLoading}

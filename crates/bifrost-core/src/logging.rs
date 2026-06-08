@@ -15,18 +15,20 @@ impl LogOutput {
     pub fn parse(s: &str) -> Vec<LogOutput> {
         s.split(',')
             .filter_map(|part| match part.trim().to_lowercase().as_str() {
-                "console" => Some(LogOutput::Console),
+                "console" => None,
                 "file" => Some(LogOutput::File),
                 "both" => None,
                 _ => None,
             })
             .collect::<Vec<_>>()
             .into_iter()
-            .chain(if s.to_lowercase().contains("both") {
-                vec![LogOutput::Console, LogOutput::File]
-            } else {
-                vec![]
-            })
+            .chain(
+                if s.to_lowercase().contains("console") || s.to_lowercase().contains("both") {
+                    vec![LogOutput::Console, LogOutput::File]
+                } else {
+                    vec![]
+                },
+            )
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
             .collect()
@@ -46,7 +48,7 @@ impl Default for LogConfig {
     fn default() -> Self {
         Self {
             level: "info".to_string(),
-            outputs: vec![LogOutput::Console, LogOutput::File],
+            outputs: vec![LogOutput::File],
             log_dir: PathBuf::from("."),
             retention_days: 7,
             file_prefix: "bifrost".to_string(),
@@ -429,7 +431,7 @@ mod tests {
     fn test_log_output_parse() {
         let outputs = LogOutput::parse("console");
         assert!(outputs.contains(&LogOutput::Console));
-        assert!(!outputs.contains(&LogOutput::File));
+        assert!(outputs.contains(&LogOutput::File));
 
         let outputs = LogOutput::parse("file");
         assert!(!outputs.contains(&LogOutput::Console));

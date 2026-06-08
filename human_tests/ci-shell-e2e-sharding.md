@@ -148,6 +148,7 @@
 **预期结果**：
 - 脚本语法检查通过。
 - 脚本输出 `Starting HTTPS mock server on 127.0.0.1:11297` 与 `HTTPS mock server ready`，说明不依赖外部共享 fixture。
+- 如果 `HTTPS_MOCK_PORT` 已被非 `https_echo_server` 服务占用，脚本输出 `Selected alternate HTTPS mock port ... because requested port was occupied by a non-mock service`，并使用新端口启动自己的 mock。
 - 脚本创建 `unsafe-ssl-fixture.test https://127.0.0.1:11297` 转发规则，确保 Bifrost 作为上游 TLS client 真实受 `unsafe_ssl` 配置影响，而不是 curl 自己通过 CONNECT 直连。
 - 脚本通过 `ADMIN_CLIENT_START_UNSAFE_SSL=0` 以安全默认启动 Bifrost，CLI 启动参数不会掩盖 unsafe_ssl API 动态切换。
 - unsafe_ssl false/true/false 三段代理请求全部执行，不再因为 mock 缺失跳过。
@@ -941,6 +942,43 @@
 - 第 3 步能输出代表性 ASR/voice runtime 脚本，表示这些能力仍可在本地 full-shell 真实验证。
 - 三个命令都只列出或检查脚本，不启动 Bifrost、不下载模型、不访问外部模型源、不使用 9900、不修改系统代理。
 
+### TC-CS-39: temporary port listener 端口竞态重试回归
+
+**操作步骤**：
+1. 执行脚本语法检查：
+   ```bash
+   bash -n e2e-tests/tests/test_temporary_port_bindings.sh
+   ```
+2. 使用预构建 binary 执行真实 temporary port 绑定回归：
+   ```bash
+   SKIP_BUILD=true bash e2e-tests/tests/test_temporary_port_bindings.sh
+   ```
+
+**预期结果**：
+- 脚本语法检查通过。
+- `port bind --port <port>` 在目标端口被并发进程抢占并返回 `another process is already listening` 时，会重新分配测试端口并有限重试。
+- 成功路径下 temporary port 绑定顺序、rule-file、inline rule、update、Traffic API/CLI listener port 断言保持不变。
+- 汇总为 `Passed: 55`、`Failed: 0`，退出码为 0。
+
+### TC-CS-40: shell E2E 清理阶段不因 `Killed` 误判失败
+
+**操作步骤**：
+1. 执行共享清理 helper 与代表性 shell 用例语法检查：
+   ```bash
+   bash -n e2e-tests/test_utils/process.sh \
+     e2e-tests/tests/test_metrics_hosts_apps_admin_api.sh \
+     e2e-tests/tests/test_rule_semantics_regressions.sh \
+     e2e-tests/tests/test_proxy_chain_auth_e2e.sh \
+     e2e-tests/tests/test_host_rule_path_rewrite.sh \
+     e2e-tests/tests/test_multiline_rule_filter_e2e.sh
+   ```
+2. 使用预构建 binary 分别执行上述真实 shell 用例，所有 Bifrost 启动都使用临时数据目录、非 9900 端口和 `--no-system-proxy`。
+
+**预期结果**：
+- 脚本语法检查通过。
+- 代表性用例断言全部通过，退出码为 0。
+- EXIT trap 清理 Bifrost 后台进程时优先 graceful stop 并 wait，不再输出 `Killed ...`，避免 Linux shell shard 把已通过用例误判为失败。
+
 ## 本轮执行记录
 
 测试日期：2026-05-09
@@ -950,6 +988,7 @@
 | TC-CS-10 | 通过 | `rg -n "include-hidden-files: true" .github/workflows/ci.yml \| wc -l` 输出 `8`；`bash scripts/run_all_e2e.sh --extract-failure-reason "$TMP_LOG"` 输出 `browserType.launch: Host system is missing dependencies`；本地执行 `source ~/.zshrc && BIFROST_E2E_SHARD_INDEX=3 BIFROST_E2E_SHARD_TOTAL=3 BIFROST_E2E_SHELL_JOBS=16 TIMEOUT=90 bash scripts/ci/run-e2e-shell.sh`，24/24 通过，`test_devtools_page_bridge_api.sh` 在并行 shard 3 中 44s 通过。 |
 | TC-CS-11 | 通过 | 2026-04-30 本轮执行：`bash -n e2e-tests/tests/test_cli_offline_commands_e2e.sh` 通过；`rg -n 'grep\s+(-[^ ]*)?q[^ ]*\s+"[^"]*\\\|' e2e-tests/tests/test_cli_offline_commands_e2e.sh` 无输出；`bash e2e-tests/tests/test_cli_offline_commands_e2e.sh` 汇总 `通过: 106`、`失败: 0`，其中 `rule rename --help`、`rule reorder --help`、`script rename --help` 均通过。 |
 | TC-CS-12 | 通过 | 2026-05-01 本轮执行：`bash -n e2e-tests/tests/test_unsafe_ssl_e2e.sh e2e-tests/test_utils/admin_client.sh` 通过；随后使用 `TEST_ROOT="$(mktemp -d /tmp/bifrost-unsafe-ssl-human.XXXXXX)" PROXY_PORT=11295 ADMIN_PORT=11295 HTTPS_MOCK_PORT=11297 BIFROST_DATA_DIR="$TEST_ROOT/data" SERVER_LOG_DIR="$TEST_ROOT/logs" SKIP_BUILD=true bash e2e-tests/tests/test_unsafe_ssl_e2e.sh` 执行真实场景。脚本输出 `Starting HTTPS mock server on 127.0.0.1:11297`、`HTTPS mock server ready`、`Created unsafe_ssl forwarding rule to https://127.0.0.1:11297`，并完成 unsafe_ssl false/true/false 三段代理请求，汇总 `Results: 5/5 passed`，退出码 0；全程使用临时目录和 11295/11297，未使用 9900。 |
+| TC-CS-12 | 通过 | 2026-06-08 追加执行：`SKIP_BUILD=true PROXY_PORT=20291 ADMIN_PORT=20291 HTTPS_MOCK_PORT=20293 BIFROST_DATA_DIR=<临时目录> SERVER_LOG_DIR=<临时目录> bash e2e-tests/tests/test_unsafe_ssl_e2e.sh`，本机 20293 被非 mock trust-probe 服务占用时，脚本输出 `Selected alternate HTTPS mock port 60671 because requested port was occupied by a non-mock service`，随后启动自有 HTTPS echo mock，5/5 通过。 |
 | TC-CS-13 | 通过 | 2026-05-03 本轮执行：`bash -n scripts/run_all_e2e.sh` 通过；`rg -n 'run_shell_tests_parallel\(\)\|run_shell_batch_parallel\(\)\|return 0' scripts/run_all_e2e.sh` 显示两个调度函数及其显式 `return 0`。完整 shard 3 本机执行卡在大端口段扫描前置探针，随后改用同一入口的最小 shard 验证返回码路径：`BIFROST_UI_TEST_RUNNER_PORT=18080 BIFROST_E2E_SHARD_INDEX=3 BIFROST_E2E_SHARD_TOTAL=999 BIFROST_E2E_SHELL_JOBS=16 TIMEOUT=90 bash scripts/ci/run-e2e-shell.sh` 选中 `test_body_cache_sync_cleanup_admin_api.sh`，输出 `[PASS] shell:test_body_cache_sync_cleanup_admin_api.sh`，最终 `Total suites : 1 / Passed : 1 / Failed : 0`，外层退出码 0。完整 macOS shard 3 由推送后的 GitHub Actions 继续验证。 |
 | TC-CS-14 | 通过 | 2026-05-03 本轮执行：`bash -n e2e-tests/tests/test_replay_rules.sh` 通过；`rg -n 'sse/custom\?count=20&interval=0\.5\|"timeout_ms":5000\|>=8s alive\|kept alive beyond timeout_ms' e2e-tests/tests/test_replay_rules.sh` 显示 4 个预期匹配；随后使用 `TEST_ROOT="$(mktemp -d /tmp/bifrost-replay-human.XXXXXX)" PROXY_PORT=18881 MOCK_HTTP_PORT=18882 MOCK_SSE_PORT=18883 MOCK_WS_PORT=18884 BIFROST_DATA_DIR="$TEST_ROOT/data" SERVER_LOG_DIR="$TEST_ROOT/logs" SKIP_BUILD=true BIFROST_E2E_REPORT_DIR="$TEST_ROOT/reports" bash e2e-tests/tests/test_replay_rules.sh` 执行真实场景。`SSE Replay with Rules` 输出 `SSE Replay: connection event received and stream kept alive beyond timeout_ms`，全脚本汇总 `Passed: 21`、`Failed: 0`，退出码 0；全程使用临时目录和 18881-18884，未使用 9900。 |
 | TC-CS-15 | 通过 | 2026-05-03 本轮执行：`bash -n e2e-tests/test_utils/admin_client.sh e2e-tests/tests/test_unsafe_ssl_e2e.sh` 通过；`rg -n 'admin_probe_existing_bifrost\|admin_is_bifrost_admin_response\|/api/auth/status\|Bifrost admin API not available' e2e-tests/test_utils/admin_client.sh e2e-tests/tests/test_unsafe_ssl_e2e.sh` 显示管理端响应结构校验逻辑。随后启动非 Bifrost HTTP 服务占用 `127.0.0.1:18885`，服务对 `/_bifrost/api/auth/status` 返回 OpenAI-like JSON，执行 `ADMIN_PORT=18885 ADMIN_HOST=127.0.0.1 ADMIN_PATH_PREFIX=/_bifrost bash -c 'source e2e-tests/test_utils/admin_client.sh; if admin_probe_existing_bifrost; then exit 1; else exit 0; fi'` 退出码 0，确认 helper 不会误复用错误服务。最后使用 `PROXY_PORT=18886 ADMIN_PORT=18886 HTTPS_MOCK_PORT=18887 BIFROST_DATA_DIR=<临时目录>/data SERVER_LOG_DIR=<临时目录>/logs SKIP_BUILD=true bash e2e-tests/tests/test_unsafe_ssl_e2e.sh` 执行完整 unsafe_ssl 场景，输出 `Created unsafe_ssl forwarding rule to https://127.0.0.1:18887` 和 `Results: 5/5 passed`，退出码 0；全程未使用 9900。 |
@@ -975,6 +1014,8 @@
 | TC-CS-35 | 通过 | 2026-06-04 本轮执行：Ruby YAML 解析 `.github/workflows/ci.yml` 通过，确认 Linux `e2e-shell` 仍为 `BIFROST_E2E_SHELL_JOBS=4`，macOS `e2e-macos-shell` 降为 `2`；`bash -n e2e-tests/tests/test_traffic_db_e2e.sh` 通过；`rg -n 'traffic-db-mock-\|BIFROST_E2E_REPORT_DIR\|MOCK_LOG_FILE' e2e-tests/tests/test_traffic_db_e2e.sh` 显示 traffic DB mock 临时日志会复制到 report dir；`rg -n 'Killed: 9\|Could not start mock server' /tmp/bifrost-ci-26899628938-mac-shard1/.e2e-reports` 复核原始 macOS shard 1 失败包含多个 Bifrost `Killed: 9` 与 traffic DB `Could not start mock server`。该静态回归不启动 Bifrost，不使用 9900，不修改系统代理；完整 macOS shard 稳定性由推送后的 GitHub Actions run 验证。 |
 | TC-CS-36 | 通过 | 2026-06-03 本轮执行：CI run `26896844438` 的 `E2E Shell (Linux, shard 2/3)` 失败日志显示 `test_agent_chat_history_continue.sh` 命中 `REQUEST_CONNECT_REFUSED`，Bifrost 请求 `http://127.0.0.1:34663/chat/completions` 失败，根因为脚本绕过调度器端口且 mock server 先挑端口再绑定存在并发抢占窗口。修复后执行 `bash -n e2e-tests/tests/test_agent_chat_history_continue.sh` 通过；`rg -n 'BIFROST_PORT=.*ADMIN_PORT\|PROXY_PORT\|MOCK_PORT_FILE\|server_address\|requested_port = .* if sys.argv\\[1\\] else 0' e2e-tests/tests/test_agent_chat_history_continue.sh` 显示脚本消费 `ADMIN_PORT` / `PROXY_PORT`，并由 Python mock server 绑定后写回真实端口。随后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" ADMIN_PORT=18131 PROXY_PORT=18131 bash e2e-tests/tests/test_agent_chat_history_continue.sh`，输出 `skipping build, using .../target/release/bifrost` 与 `[agent-chat-history-continue] PASS`；真实执行使用临时数据目录、`--no-system-proxy` 与非 9900 端口。 |
 | TC-CS-37 | 通过 | 2026-06-04 本轮执行：`bash -n scripts/run_all_e2e.sh scripts/ci/run-e2e-shell.sh` 通过；`bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests \| rg -n 'test_asr_\|test_qwen3_asr_\|test_voice_input_runtime\.sh\|test_voice_wake_actions\.sh'` 无输出且退出码为 1，确认 CI 模式不收集 ASR/voice runtime shell E2E；`bash scripts/run_all_e2e.sh --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests \| rg -n 'test_asr_diarization_cli\.sh\|test_qwen3_asr_local_server\.sh\|test_voice_input_runtime\.sh\|test_asr_voiceprint_enroll_cli\.sh'` 输出代表性脚本，确认本地 full-shell 仍可验证。列表命令不启动 Bifrost、不下载模型、不访问外部模型源、不使用 9900、不修改系统代理。 |
+| TC-CS-39 | 通过 | 2026-06-08 本轮执行：`SKIP_BUILD=true e2e-tests/tests/test_temporary_port_bindings.sh` 通过，输出 `Passed: 55`、`Failed: 0`；验证成功 listener 绑定在端口竞态时可重试，且 temporary port 绑定顺序、rule-file、inline rule、update、Traffic API/CLI listener port 等断言保持通过。 |
+| TC-CS-40 | 通过 | 2026-06-08 本轮执行：`bash -n e2e-tests/test_utils/process.sh e2e-tests/tests/test_metrics_hosts_apps_admin_api.sh e2e-tests/tests/test_rule_semantics_regressions.sh e2e-tests/tests/test_proxy_chain_auth_e2e.sh e2e-tests/tests/test_host_rule_path_rewrite.sh e2e-tests/tests/test_multiline_rule_filter_e2e.sh` 通过；随后使用预构建 `target/release/bifrost` 分别执行 `test_metrics_hosts_apps_admin_api.sh`、`test_multiline_rule_filter_e2e.sh`、`test_rule_semantics_regressions.sh`、`test_host_rule_path_rewrite.sh`、`test_proxy_chain_auth_e2e.sh`，五个脚本均退出码 0，输出中不再出现清理阶段 `Killed ...`。 |
 
 ## 清理步骤
 

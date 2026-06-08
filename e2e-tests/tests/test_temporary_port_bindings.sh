@@ -35,6 +35,27 @@ assign_local_test_port() {
     allocate_local_test_port "$var_name"
 }
 
+bind_port_with_retry() {
+    local port_var="$1"
+    local output_file="$2"
+    shift 2
+
+    local attempt
+    local port
+    for attempt in {1..5}; do
+        port="${!port_var}"
+        if "$BIFROST_BIN" port bind --port "${port}" "$@" > "${output_file}" 2>&1; then
+            return 0
+        fi
+        if grep -qi "another process is already listening" "${output_file}"; then
+            assign_local_test_port "${port_var}"
+            continue
+        fi
+        return 1
+    done
+    return 1
+}
+
 if [[ -z "${MAIN_PORT:-}" ]]; then
     assign_local_test_port MAIN_PORT
 fi
@@ -281,7 +302,7 @@ main() {
 
     start_proxy
 
-    "$BIFROST_BIN" port bind --port "${TEMP_PORT}" --rule temp-bound --rule temp-badge > "${TEST_DATA_DIR}/bind.log"
+    bind_port_with_retry TEMP_PORT "${TEST_DATA_DIR}/bind.log" --rule temp-bound --rule temp-badge
     assert_body_contains "Temporary port" "$(cat "${TEST_DATA_DIR}/bind.log")" "port bind output"
     "$BIFROST_BIN" port show "${TEMP_PORT}" > "${TEST_DATA_DIR}/show.log"
     assert_body_contains "temp-bound" "$(cat "${TEST_DATA_DIR}/show.log")" "port show includes bound rule"
@@ -347,7 +368,7 @@ main() {
 
     "$BIFROST_BIN" rule add temp-first -c "order.test status://211 resBody://(first)"
     "$BIFROST_BIN" rule add temp-second -c "order.test status://212 resBody://(second)"
-    "$BIFROST_BIN" port bind --port "${ORDER_PORT}" --rule temp-first --rule temp-second > "${TEST_DATA_DIR}/order-bind.log"
+    bind_port_with_retry ORDER_PORT "${TEST_DATA_DIR}/order-bind.log" --rule temp-first --rule temp-second
     "$BIFROST_BIN" port active "${ORDER_PORT}" > "${TEST_DATA_DIR}/order-active.log"
     local first_line second_line
     first_line="$(grep -n "temp-first" "${TEST_DATA_DIR}/order-active.log" | head -1 | cut -d: -f1)"
@@ -416,15 +437,15 @@ main() {
 
     local rule_file="${TEST_DATA_DIR}/file-rule.bifrost"
     printf '%s\n' "file-only.test status://213 resBody://(file-rule)" > "${rule_file}"
-    "$BIFROST_BIN" port bind --port "${FILE_PORT}" --rule-file "${rule_file}" > "${TEST_DATA_DIR}/file-bind.log"
+    bind_port_with_retry FILE_PORT "${TEST_DATA_DIR}/file-bind.log" --rule-file "${rule_file}"
     assert_body_contains "file-rule.bifrost" "$(cat "${TEST_DATA_DIR}/file-bind.log")" "rule-file binding output includes file name"
     assert_body_contains "file-rule" "$(proxy_body "${FILE_PORT}" "http://file-only.test/from-file")" "rule file binding should proxy"
 
-    "$BIFROST_BIN" port bind --port "${INLINE_PORT}" --rule-text "inline-only.test status://214 resBody://(inline-rule)" > "${TEST_DATA_DIR}/inline-bind.log"
+    bind_port_with_retry INLINE_PORT "${TEST_DATA_DIR}/inline-bind.log" --rule-text "inline-only.test status://214 resBody://(inline-rule)"
     assert_body_contains "inline:inline-only.test" "$(cat "${TEST_DATA_DIR}/inline-bind.log")" "rule-text binding output includes inline preview"
     assert_body_contains "inline-rule" "$(proxy_body "${INLINE_PORT}" "http://inline-only.test/from-inline")" "inline rule binding should proxy"
 
-    "$BIFROST_BIN" port bind --port "${UPDATE_PORT}" --rule temp-bound > "${TEST_DATA_DIR}/update-bind.log"
+    bind_port_with_retry UPDATE_PORT "${TEST_DATA_DIR}/update-bind.log" --rule temp-bound
     "$BIFROST_BIN" port update "${UPDATE_PORT}" --rule-text "updated-only.test status://215 resBody://(updated-rule)" > "${TEST_DATA_DIR}/update.log"
     assert_body_contains "inline:updated-only.test" "$(cat "${TEST_DATA_DIR}/update.log")" "port update accepts rule text"
     assert_body_contains "updated-rule" "$(proxy_body "${UPDATE_PORT}" "http://updated-only.test/after-update")" "updated temporary port should use new inline rule"

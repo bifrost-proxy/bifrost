@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,7 +22,7 @@ use qrcode::QrCode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, Mutex as AsyncMutex};
 use tokio_rustls::TlsAcceptor;
 use uuid::Uuid;
 
@@ -38,12 +39,103 @@ static TRUST_PROBE_MANAGER: Lazy<TrustProbeManager> = Lazy::new(TrustProbeManage
 const DEFAULT_TTL_SECONDS: i64 = 600;
 const MAX_TTL_SECONDS: i64 = 1800;
 const MAX_ACTIVE_SESSIONS: usize = 32;
+const PROBE_SERVER_IDLE_TTL: Duration = Duration::from_secs(60);
+const PROBE_SERVER_IDLE_REAPER_INTERVAL: Duration = Duration::from_secs(15);
 const TOKEN_QUERY_KEY: &str = "t";
 pub const TRUST_PROBE_PROXY_CONFIG_HOST: &str = "bifrost-proxy-check.invalid";
 pub const TRUST_PROBE_PROXY_CONFIG_PATH: &str = "/_bifrost/trust-probe/proxy-configured";
 
 pub fn list_active_sessions() -> Vec<TrustProbeSessionView> {
     TRUST_PROBE_MANAGER.list_sessions()
+}
+
+pub fn is_active_trust_probe_target(host: &str, port: u16) -> bool {
+    TRUST_PROBE_MANAGER.is_active_probe_target(host, port)
+}
+
+pub fn infer_device_platform_hint(user_agent: &str) -> Option<String> {
+    let ua = user_agent.trim();
+    if ua.is_empty() {
+        return None;
+    }
+    let lower = ua.to_ascii_lowercase();
+    let os = if lower.contains("iphone") || lower.contains("ipad") || lower.contains("ipod") {
+        Some("ios")
+    } else if lower.contains("harmonyos") || lower.contains("openharmony") {
+        Some("harmonyos")
+    } else if lower.contains("android") {
+        Some("android")
+    } else if lower.contains("windows phone") {
+        Some("windows phone")
+    } else if lower.contains("windows nt") {
+        Some("windows")
+    } else if lower.contains("macintosh") || lower.contains("mac os x") {
+        Some("macos")
+    } else if lower.contains("cros") {
+        Some("chromeos")
+    } else if lower.contains("linux") || lower.contains("x11") {
+        Some("linux")
+    } else {
+        None
+    };
+
+    let app = if lower.contains("micromessenger") {
+        Some("wechat")
+    } else if lower.contains("alipayclient") {
+        Some("alipay")
+    } else if lower.contains("dingtalk") {
+        Some("dingtalk")
+    } else if lower.contains("lark") || lower.contains("feishu") {
+        Some("lark")
+    } else if lower.contains("mqqbrowser") || lower.contains("qqbrowser") {
+        Some("qqbrowser")
+    } else if lower.contains("samsungbrowser") {
+        Some("samsung browser")
+    } else if lower.contains("huaweibrowser") {
+        Some("huawei browser")
+    } else if lower.contains("miuibrowser") {
+        Some("miui browser")
+    } else if lower.contains("ucbrowser") {
+        Some("uc browser")
+    } else if lower.contains("quark") {
+        Some("quark")
+    } else if lower.contains("baidubrowser") {
+        Some("baidu browser")
+    } else if lower.contains("sogoumobilebrowser") || lower.contains("metasr") {
+        Some("sogou browser")
+    } else if lower.contains("edga")
+        || lower.contains("edgios")
+        || lower.contains("edg/")
+        || lower.contains("edge/")
+    {
+        Some("edge")
+    } else if lower.contains("opr/") || lower.contains("opera") {
+        Some("opera")
+    } else if lower.contains("fxios") || lower.contains("firefox") {
+        Some("firefox")
+    } else if lower.contains("crios") || lower.contains("chrome/") {
+        Some("chrome")
+    } else if lower.contains("safari/") {
+        Some("safari")
+    } else {
+        None
+    };
+
+    match (os, app) {
+        (Some(os), Some(app)) => Some(format!("{os} {app}")),
+        (Some(os), None) => Some(os.to_string()),
+        (None, Some(app)) => Some(app.to_string()),
+        (None, None) => Some("browser".to_string()),
+    }
+}
+
+pub async fn get_or_create_terminal_probe_session(
+    state: &SharedAdminState,
+    host: &str,
+) -> Result<TrustProbeSessionView, String> {
+    TRUST_PROBE_MANAGER
+        .get_or_create_public_session(state, host)
+        .await
 }
 
 fn broadcast_trust_probe_update(push_manager: Option<&SharedPushManager>) {
@@ -130,6 +222,66 @@ pub struct TrustProbeSessionView {
     ca_download_url: String,
     proxy_qr_code_url: String,
     ca_fingerprint_sha256: Option<String>,
+}
+
+impl TrustProbeDeviceView {
+    pub fn device_id(&self) -> &str {
+        &self.device_id
+    }
+
+    pub fn status(&self) -> TrustProbeStatus {
+        self.status
+    }
+
+    pub fn opened(&self) -> bool {
+        self.opened
+    }
+
+    pub fn proxy_access_status(&self) -> Option<TrustProbeProxyAccessStatus> {
+        self.proxy_access_status
+    }
+
+    pub fn proxy_configured(&self) -> bool {
+        self.proxy_configured
+    }
+
+    pub fn network_reachable(&self) -> bool {
+        self.network_reachable
+    }
+
+    pub fn tls_trusted(&self) -> bool {
+        self.tls_trusted
+    }
+
+    pub fn client_ip(&self) -> Option<&str> {
+        self.client_ip.as_deref()
+    }
+
+    pub fn user_agent(&self) -> Option<&str> {
+        self.user_agent.as_deref()
+    }
+
+    pub fn platform_hint(&self) -> Option<&str> {
+        self.platform_hint.as_deref()
+    }
+
+    pub fn last_seen(&self) -> DateTime<Utc> {
+        self.last_seen
+    }
+}
+
+impl TrustProbeSessionView {
+    pub fn devices(&self) -> &[TrustProbeDeviceView] {
+        &self.devices
+    }
+
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    pub fn landing_url(&self) -> &str {
+        &self.landing_url
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -237,25 +389,32 @@ struct TrustProbeProxyAccessView {
     message: String,
 }
 
-#[derive(Debug)]
-struct ProbeServerHandle {
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ProbeServerKey {
     host: String,
     ca_fingerprint_sha256: Option<String>,
+}
+
+#[derive(Debug)]
+struct ProbeServerHandle {
     port: u16,
     shutdown_tx: Option<oneshot::Sender<()>>,
+    last_activity_ms: Arc<AtomicI64>,
 }
 
 #[derive(Debug)]
 pub struct TrustProbeManager {
     sessions: Mutex<HashMap<Uuid, TrustProbeSession>>,
-    server: Mutex<Option<ProbeServerHandle>>,
+    servers: Arc<Mutex<HashMap<ProbeServerKey, ProbeServerHandle>>>,
+    ensure_lock: AsyncMutex<()>,
 }
 
 impl TrustProbeManager {
     fn new() -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
-            server: Mutex::new(None),
+            servers: Arc::new(Mutex::new(HashMap::new())),
+            ensure_lock: AsyncMutex::new(()),
         }
     }
 
@@ -297,15 +456,7 @@ impl TrustProbeManager {
                 return Ok(session.to_view(""));
             }
         }
-        let probe_port = self
-            .ensure_probe_server(
-                &host,
-                admin_port.saturating_add(2),
-                &ca_cert_path,
-                &ca_key_path,
-                ca_fingerprint_sha256.clone(),
-            )
-            .await?;
+        let probe_port = admin_port.saturating_add(2);
 
         let id = Uuid::new_v4();
         let token = format!("{}{}", Uuid::new_v4(), Uuid::new_v4());
@@ -407,6 +558,17 @@ impl TrustProbeManager {
         views
     }
 
+    fn is_active_probe_target(&self, host: &str, port: u16) -> bool {
+        self.cleanup_expired_sessions();
+        let sessions = self.sessions.lock();
+        sessions
+            .values()
+            .filter(|session| !session.is_expired())
+            .any(|session| {
+                session.probe_port == port && probe_target_hosts_match(&session.host, host)
+            })
+    }
+
     fn get_public_session(&self, session_id: Uuid, token: &str) -> Option<TrustProbeSessionView> {
         self.cleanup_expired_sessions();
         let sessions = self.sessions.lock();
@@ -414,6 +576,10 @@ impl TrustProbeManager {
         if !session.token_matches(token) || session.is_expired() {
             return None;
         }
+        self.touch_probe_server_activity(&ProbeServerKey {
+            host: session.host.clone(),
+            ca_fingerprint_sha256: session.ca_fingerprint_sha256.clone(),
+        });
         Some(session.to_view(token))
     }
 
@@ -445,6 +611,63 @@ impl TrustProbeManager {
             return None;
         }
         Some(render_landing_page(session, token))
+    }
+
+    async fn ensure_session_probe_server(
+        &self,
+        state: &SharedAdminState,
+        session_id: Uuid,
+        token: &str,
+    ) -> Result<TrustProbeSessionView, String> {
+        self.cleanup_expired_sessions();
+        let (host, admin_port, ca_fingerprint_sha256) = {
+            let sessions = self.sessions.lock();
+            let session = sessions
+                .get(&session_id)
+                .ok_or_else(|| "Availability check session not found".to_string())?;
+            if !session.token_matches(token) || session.is_expired() {
+                return Err("Availability check session not found".to_string());
+            }
+            (
+                session.host.clone(),
+                session.admin_port,
+                session.ca_fingerprint_sha256.clone(),
+            )
+        };
+
+        let ca_cert_path = state
+            .ca_cert_path
+            .as_ref()
+            .filter(|path| path.exists())
+            .cloned()
+            .ok_or_else(|| "CA certificate is not configured.".to_string())?;
+        let ca_key_path = ca_key_path_from_cert_path(&ca_cert_path);
+        if !ca_key_path.exists() {
+            return Err("CA private key is not configured, so the trust probe cannot sign its HTTPS certificate.".to_string());
+        }
+        let probe_port = self
+            .ensure_probe_server(
+                &host,
+                admin_port.saturating_add(2),
+                &ca_cert_path,
+                &ca_key_path,
+                ca_fingerprint_sha256.clone(),
+            )
+            .await?;
+
+        let mut sessions = self.sessions.lock();
+        for session in sessions.values_mut().filter(|session| {
+            !session.is_expired()
+                && session.host == host
+                && session.admin_port == admin_port
+                && session.ca_fingerprint_sha256 == ca_fingerprint_sha256
+        }) {
+            session.probe_port = probe_port;
+        }
+        sessions
+            .get(&session_id)
+            .map(|session| session.to_view(token))
+            .ok_or_else(|| "Availability check session not found".to_string())
     }
 
     fn record_report(
@@ -489,21 +712,28 @@ impl TrustProbeManager {
 
     fn record_event(&self, session_id: Uuid, token: &str, input: TrustProbeEventInput) -> bool {
         self.cleanup_expired_sessions();
-        let mut sessions = self.sessions.lock();
-        let Some(session) = sessions.get_mut(&session_id) else {
-            return false;
+        let key = {
+            let mut sessions = self.sessions.lock();
+            let Some(session) = sessions.get_mut(&session_id) else {
+                return false;
+            };
+            if !session.token_matches(token) || session.is_expired() {
+                return false;
+            }
+            session.apply_event(
+                &input.event_type,
+                input.message,
+                input.client_ip,
+                input.user_agent,
+                input.platform_hint,
+                input.device_id,
+            );
+            ProbeServerKey {
+                host: session.host.clone(),
+                ca_fingerprint_sha256: session.ca_fingerprint_sha256.clone(),
+            }
         };
-        if !session.token_matches(token) || session.is_expired() {
-            return false;
-        }
-        session.apply_event(
-            &input.event_type,
-            input.message,
-            input.client_ip,
-            input.user_agent,
-            input.platform_hint,
-            input.device_id,
-        );
+        self.touch_probe_server_activity(&key);
         true
     }
 
@@ -517,14 +747,21 @@ impl TrustProbeManager {
         device_id: Option<String>,
     ) -> bool {
         self.cleanup_expired_sessions();
-        let mut sessions = self.sessions.lock();
-        let Some(session) = sessions.get_mut(&session_id) else {
-            return false;
+        let key = {
+            let mut sessions = self.sessions.lock();
+            let Some(session) = sessions.get_mut(&session_id) else {
+                return false;
+            };
+            if !session.token_matches(token) || session.is_expired() {
+                return false;
+            }
+            session.apply_proxy_access(status, client_ip, message, device_id);
+            ProbeServerKey {
+                host: session.host.clone(),
+                ca_fingerprint_sha256: session.ca_fingerprint_sha256.clone(),
+            }
         };
-        if !session.token_matches(token) || session.is_expired() {
-            return false;
-        }
-        session.apply_proxy_access(status, client_ip, message, device_id);
+        self.touch_probe_server_activity(&key);
         true
     }
 
@@ -536,19 +773,31 @@ impl TrustProbeManager {
         ca_key_path: &Path,
         ca_fingerprint_sha256: Option<String>,
     ) -> Result<u16, String> {
-        {
-            let server = self.server.lock();
-            if let Some(server) = server.as_ref() {
-                if server.host == host && server.ca_fingerprint_sha256 == ca_fingerprint_sha256 {
-                    return Ok(server.port);
-                }
+        let key = ProbeServerKey {
+            host: host.to_string(),
+            ca_fingerprint_sha256: ca_fingerprint_sha256.clone(),
+        };
+        let existing_port = { self.servers.lock().get(&key).map(|server| server.port) };
+        if let Some(port) = existing_port {
+            if probe_server_port_is_listening(port).await {
+                self.touch_probe_server_activity(&key);
+                return Ok(port);
             }
         }
 
-        let old = self.server.lock().take();
-        if let Some(mut old) = old {
-            if let Some(tx) = old.shutdown_tx.take() {
-                let _ = tx.send(());
+        let _ensure_guard = self.ensure_lock.lock().await;
+        let existing_port = { self.servers.lock().get(&key).map(|server| server.port) };
+        if let Some(port) = existing_port {
+            if probe_server_port_is_listening(port).await {
+                self.touch_probe_server_activity(&key);
+                return Ok(port);
+            }
+            let mut servers = self.servers.lock();
+            if let Some(server) = servers.get(&key) {
+                if server.port != port {
+                    return Ok(server.port);
+                }
+                servers.remove(&key);
             }
         }
 
@@ -572,20 +821,48 @@ impl TrustProbeManager {
             .local_addr()
             .map_err(|error| format!("Failed to inspect trust probe port: {error}"))?
             .port();
+        let last_activity_ms = Arc::new(AtomicI64::new(now_epoch_millis()));
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        tokio::spawn(run_probe_server(listener, server_config, shutdown_rx));
-        *self.server.lock() = Some(ProbeServerHandle {
-            host: host.to_string(),
-            ca_fingerprint_sha256,
+        tokio::spawn(run_probe_server(
+            listener,
+            server_config,
+            shutdown_rx,
+            last_activity_ms.clone(),
+        ));
+        tokio::spawn(reap_idle_probe_server(
+            self.servers.clone(),
+            key.clone(),
             port,
-            shutdown_tx: Some(shutdown_tx),
-        });
+            last_activity_ms.clone(),
+        ));
+        let mut servers = self.servers.lock();
+        if let Some(existing) = servers.get(&key) {
+            let _ = shutdown_tx.send(());
+            return Ok(existing.port);
+        }
+        servers.insert(
+            key,
+            ProbeServerHandle {
+                port,
+                shutdown_tx: Some(shutdown_tx),
+                last_activity_ms,
+            },
+        );
         Ok(port)
+    }
+
+    fn touch_probe_server_activity(&self, key: &ProbeServerKey) -> bool {
+        let servers = self.servers.lock();
+        let Some(server) = servers.get(key) else {
+            return false;
+        };
+        touch_probe_activity(&server.last_activity_ms);
+        true
     }
 
     fn cleanup_expired_sessions(&self) {
         let now = Utc::now();
-        let has_active_session = {
+        let active_server_keys = {
             let mut sessions = self.sessions.lock();
             for session in sessions.values_mut() {
                 if session.expires_at <= now && session.status != TrustProbeStatus::Expired {
@@ -598,19 +875,27 @@ impl TrustProbeManager {
                     });
                 }
             }
-            sessions.values().any(|session| session.expires_at > now)
+            sessions
+                .values()
+                .filter(|session| session.expires_at > now)
+                .map(|session| ProbeServerKey {
+                    host: session.host.clone(),
+                    ca_fingerprint_sha256: session.ca_fingerprint_sha256.clone(),
+                })
+                .collect::<std::collections::HashSet<_>>()
         };
-        if !has_active_session {
-            self.stop_probe_server();
-        }
-    }
-
-    fn stop_probe_server(&self) {
-        let old = self.server.lock().take();
-        if let Some(mut old) = old {
-            if let Some(tx) = old.shutdown_tx.take() {
+        let mut servers = self.servers.lock();
+        servers.retain(|key, server| {
+            if active_server_keys.contains(key) {
+                return true;
+            }
+            if let Some(tx) = server.shutdown_tx.take() {
                 let _ = tx.send(());
             }
+            false
+        });
+        if active_server_keys.is_empty() {
+            servers.clear();
         }
     }
 
@@ -631,6 +916,92 @@ impl TrustProbeManager {
     }
 }
 
+async fn probe_server_port_is_listening(port: u16) -> bool {
+    tokio::time::timeout(
+        Duration::from_millis(250),
+        TcpStream::connect((Ipv4Addr::LOCALHOST, port)),
+    )
+    .await
+    .is_ok_and(|result| result.is_ok())
+}
+
+fn now_epoch_millis() -> i64 {
+    Utc::now().timestamp_millis()
+}
+
+fn touch_probe_activity(last_activity_ms: &AtomicI64) {
+    last_activity_ms.store(now_epoch_millis(), Ordering::Relaxed);
+}
+
+fn normalize_platform_hint(
+    platform_hint: Option<String>,
+    user_agent: Option<&str>,
+) -> Option<String> {
+    let platform_hint = platform_hint
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty() && !is_unknown_platform_hint(value));
+    platform_hint.or_else(|| user_agent.and_then(infer_device_platform_hint))
+}
+
+fn is_unknown_platform_hint(value: &str) -> bool {
+    let value = value.trim().to_ascii_lowercase();
+    value.is_empty()
+        || value == "unknown"
+        || value == "unknown browser"
+        || value == "unknown device"
+        || value == "unknown platform"
+}
+
+async fn reap_idle_probe_server(
+    servers: Arc<Mutex<HashMap<ProbeServerKey, ProbeServerHandle>>>,
+    key: ProbeServerKey,
+    port: u16,
+    last_activity_ms: Arc<AtomicI64>,
+) {
+    loop {
+        tokio::time::sleep(PROBE_SERVER_IDLE_REAPER_INTERVAL).await;
+        if shutdown_idle_probe_server_if_due(
+            &servers,
+            &key,
+            port,
+            &last_activity_ms,
+            PROBE_SERVER_IDLE_TTL,
+        ) {
+            return;
+        }
+    }
+}
+
+fn shutdown_idle_probe_server_if_due(
+    servers: &Arc<Mutex<HashMap<ProbeServerKey, ProbeServerHandle>>>,
+    key: &ProbeServerKey,
+    port: u16,
+    last_activity_ms: &Arc<AtomicI64>,
+    idle_ttl: Duration,
+) -> bool {
+    let idle_for_ms = now_epoch_millis() - last_activity_ms.load(Ordering::Relaxed);
+    if idle_for_ms < idle_ttl.as_millis() as i64 {
+        return false;
+    }
+
+    let mut servers = servers.lock();
+    let Some(server) = servers.get_mut(key) else {
+        return true;
+    };
+    if server.port != port || !Arc::ptr_eq(&server.last_activity_ms, last_activity_ms) {
+        return true;
+    }
+    let idle_for_ms = now_epoch_millis() - server.last_activity_ms.load(Ordering::Relaxed);
+    if idle_for_ms < idle_ttl.as_millis() as i64 {
+        return false;
+    }
+    if let Some(tx) = server.shutdown_tx.take() {
+        let _ = tx.send(());
+    }
+    servers.remove(key);
+    true
+}
+
 impl TrustProbeSession {
     fn token_matches(&self, token: &str) -> bool {
         token.is_empty() || self.token_hash == hash_token(token)
@@ -646,7 +1017,7 @@ impl TrustProbeSession {
             .values()
             .map(TrustProbeDeviceState::to_view)
             .collect();
-        devices.sort_by_key(|device| Reverse(device.last_seen));
+        devices.sort_by(compare_trust_probe_device_views);
         TrustProbeSessionView {
             session_id: self.id.to_string(),
             status: if self.is_expired() {
@@ -745,10 +1116,12 @@ impl TrustProbeSession {
         if let Some(client_ip) = client_ip {
             self.client_ip = Some(client_ip);
         }
-        if let Some(user_agent) = user_agent.filter(|value| !value.trim().is_empty()) {
+        let user_agent = user_agent.filter(|value| !value.trim().is_empty());
+        let platform_hint = normalize_platform_hint(platform_hint, user_agent.as_deref());
+        if let Some(user_agent) = user_agent {
             self.user_agent = Some(user_agent);
         }
-        if let Some(platform_hint) = platform_hint.filter(|value| !value.trim().is_empty()) {
+        if let Some(platform_hint) = platform_hint {
             self.platform_hint = Some(platform_hint);
         }
 
@@ -868,6 +1241,27 @@ impl TrustProbeSession {
     }
 }
 
+fn compare_trust_probe_device_views(
+    left: &TrustProbeDeviceView,
+    right: &TrustProbeDeviceView,
+) -> std::cmp::Ordering {
+    compare_optional_ip(left.client_ip.as_deref(), right.client_ip.as_deref())
+        .then_with(|| left.device_id.cmp(&right.device_id))
+}
+
+fn compare_optional_ip(left: Option<&str>, right: Option<&str>) -> std::cmp::Ordering {
+    match (left.and_then(parse_ip_addr), right.and_then(parse_ip_addr)) {
+        (Some(left), Some(right)) => left.cmp(&right),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => left.unwrap_or_default().cmp(right.unwrap_or_default()),
+    }
+}
+
+fn parse_ip_addr(value: &str) -> Option<IpAddr> {
+    value.parse::<IpAddr>().ok()
+}
+
 impl TrustProbeDeviceState {
     fn new(device_id: String, now: DateTime<Utc>) -> Self {
         Self {
@@ -946,8 +1340,16 @@ impl TrustProbeDeviceState {
     ) {
         self.last_seen = Utc::now();
         self.client_ip = client_ip.or_else(|| self.client_ip.clone());
-        self.user_agent = user_agent.or_else(|| self.user_agent.clone());
-        self.platform_hint = platform_hint.or_else(|| self.platform_hint.clone());
+        let user_agent = user_agent
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| self.user_agent.clone());
+        self.platform_hint =
+            normalize_platform_hint(platform_hint, user_agent.as_deref()).or_else(|| {
+                self.platform_hint
+                    .clone()
+                    .filter(|value| !is_unknown_platform_hint(value))
+            });
+        self.user_agent = user_agent;
         match event_type {
             "page_opened" => {
                 self.opened = true;
@@ -1169,10 +1571,11 @@ pub async fn handle_trust_probe_public(
     if req.method() == Method::OPTIONS {
         return cors_preflight();
     }
-    if path.trim_end_matches('/') == "/public/trust-probe" {
+    let normalized_path = path.trim_end_matches('/');
+    if normalized_path == "/public/trust-probe" || normalized_path == "/tp" {
         return render_fixed_probe_landing(req, state, push_manager.as_ref()).await;
     }
-    if path.trim_end_matches('/') == "/public/trust-probe/qrcode" {
+    if normalized_path == "/public/trust-probe/qrcode" {
         return render_fixed_probe_qrcode(req, state, push_manager.as_ref()).await;
     }
     let Some((session_id, action)) = parse_public_probe_path(path) else {
@@ -1182,6 +1585,12 @@ pub async fn handle_trust_probe_public(
 
     match (req.method().clone(), action.as_deref()) {
         (Method::GET, None) => {
+            if let Err(error) = TRUST_PROBE_MANAGER
+                .ensure_session_probe_server(&state, session_id, &token)
+                .await
+            {
+                return error_response(StatusCode::BAD_REQUEST, &error);
+            }
             let Some(html) = TRUST_PROBE_MANAGER.render_landing_page(session_id, &token) else {
                 return error_response(
                     StatusCode::NOT_FOUND,
@@ -1210,7 +1619,9 @@ pub async fn handle_trust_probe_public(
         }
         (Method::GET, Some("qrcode")) => render_probe_qrcode(session_id, &token),
         (Method::HEAD, Some("qrcode")) => render_probe_qrcode_head(session_id, &token),
-        (Method::GET, Some("session")) => render_probe_public_session(session_id, &token),
+        (Method::GET, Some("session")) => {
+            render_probe_public_session(state, session_id, &token).await
+        }
         (Method::GET, Some("proxy-access")) => {
             check_proxy_access(req, state, push_manager.as_ref(), session_id, token).await
         }
@@ -1248,6 +1659,12 @@ async fn render_fixed_probe_landing(
                     "Invalid availability check session id",
                 );
             };
+            if let Err(error) = TRUST_PROBE_MANAGER
+                .ensure_session_probe_server(&state, session_id, "")
+                .await
+            {
+                return error_response(StatusCode::BAD_REQUEST, &error);
+            }
             let html = TRUST_PROBE_MANAGER
                 .render_landing_page(session_id, "")
                 .unwrap_or_else(|| "Availability check session expired.".to_string());
@@ -1336,7 +1753,17 @@ fn get_probe_session(path: &str) -> Response<BoxBody> {
     }
 }
 
-fn render_probe_public_session(session_id: Uuid, token: &str) -> Response<BoxBody> {
+async fn render_probe_public_session(
+    state: SharedAdminState,
+    session_id: Uuid,
+    token: &str,
+) -> Response<BoxBody> {
+    if let Err(error) = TRUST_PROBE_MANAGER
+        .ensure_session_probe_server(&state, session_id, token)
+        .await
+    {
+        return error_response(StatusCode::BAD_REQUEST, &error);
+    }
     match TRUST_PROBE_MANAGER.get_public_session(session_id, token) {
         Some(session) => public_response_builder(StatusCode::OK)
             .header("Content-Type", "application/json")
@@ -1566,6 +1993,7 @@ async fn run_probe_server(
     listener: TcpListener,
     server_config: Arc<bifrost_tls::rustls::ServerConfig>,
     mut shutdown_rx: oneshot::Receiver<()>,
+    last_activity_ms: Arc<AtomicI64>,
 ) {
     let acceptor = TlsAcceptor::from(server_config);
     loop {
@@ -1577,16 +2005,23 @@ async fn run_probe_server(
                 let Ok((stream, peer_addr)) = accepted else {
                     continue;
                 };
+                touch_probe_activity(&last_activity_ms);
                 let acceptor = acceptor.clone();
+                let activity = last_activity_ms.clone();
                 tokio::spawn(async move {
-                    handle_probe_connection(stream, peer_addr, acceptor).await;
+                    handle_probe_connection(stream, peer_addr, acceptor, activity).await;
                 });
             }
         }
     }
 }
 
-async fn handle_probe_connection(stream: TcpStream, peer_addr: SocketAddr, acceptor: TlsAcceptor) {
+async fn handle_probe_connection(
+    stream: TcpStream,
+    peer_addr: SocketAddr,
+    acceptor: TlsAcceptor,
+    last_activity_ms: Arc<AtomicI64>,
+) {
     let mut first = [0u8; 1];
     let is_tls = match tokio::time::timeout(Duration::from_secs(5), stream.peek(&mut first)).await {
         Ok(Ok(size)) if size > 0 => first[0] == 0x16,
@@ -1598,11 +2033,19 @@ async fn handle_probe_connection(stream: TcpStream, peer_addr: SocketAddr, accep
             return;
         };
         let io = TokioIo::new(stream);
-        let service = service_fn(move |req| handle_probe_request(req, peer_addr, true));
+        let activity = last_activity_ms.clone();
+        let service = service_fn(move |req| {
+            touch_probe_activity(&activity);
+            handle_probe_request(req, peer_addr, true)
+        });
         let _ = http1::Builder::new().serve_connection(io, service).await;
     } else {
         let io = TokioIo::new(stream);
-        let service = service_fn(move |req| handle_probe_request(req, peer_addr, false));
+        let activity = last_activity_ms.clone();
+        let service = service_fn(move |req| {
+            touch_probe_activity(&activity);
+            handle_probe_request(req, peer_addr, false)
+        });
         let _ = http1::Builder::new().serve_connection(io, service).await;
     }
 }
@@ -1781,7 +2224,7 @@ fn render_landing_page(session: &TrustProbeSession, token: &str) -> String {
 <body>
 <main>
   <h1>Bifrost Availability Check</h1>
-  <p>This page checks whether this device can use Bifrost and whether this browser trusts the current Bifrost CA.</p>
+  <p>This page checks proxy access, direct probe reachability, and whether this browser can complete the Bifrost HTTPS probe. It does not prove every Android app trusts the CA.</p>
   <p>CA SHA-256 fingerprint:<br><code>{}</code></p>
   <section class="status" id="proxy-access">Checking proxy access authorization...</section>
   <section class="status" id="result">Preparing trust check...</section>
@@ -1813,9 +2256,42 @@ function withDevice(url) {{
 }}
 function detectPlatform() {{
   const ua = navigator.userAgent || "";
+  const os = detectPlatformOs(ua);
+  const app = detectPlatformApp(ua);
+  if (os && app) return os + " " + app;
+  return os || app || "browser";
+}}
+function detectPlatformOs(ua) {{
   if (/iPhone|iPad|iPod/i.test(ua)) return "ios";
+  if (/HarmonyOS|OpenHarmony/i.test(ua)) return "harmonyos";
   if (/Android/i.test(ua)) return "android";
-  return "unknown";
+  if (/Windows Phone/i.test(ua)) return "windows phone";
+  if (/Windows NT/i.test(ua)) return "windows";
+  if (/Macintosh|Mac OS X/i.test(ua)) return "macos";
+  if (/CrOS/i.test(ua)) return "chromeos";
+  if (/Linux|X11/i.test(ua)) return "linux";
+  return "";
+}}
+function detectPlatformApp(ua) {{
+  const lower = String(ua || "").toLowerCase();
+  if (/MicroMessenger/i.test(ua)) return "wechat";
+  if (/AlipayClient/i.test(ua)) return "alipay";
+  if (/DingTalk/i.test(ua)) return "dingtalk";
+  if (/Lark|Feishu/i.test(ua)) return "lark";
+  if (/MQQBrowser|QQBrowser/i.test(ua)) return "qqbrowser";
+  if (/SamsungBrowser/i.test(ua)) return "samsung browser";
+  if (/HuaweiBrowser/i.test(ua)) return "huawei browser";
+  if (/MiuiBrowser/i.test(ua)) return "miui browser";
+  if (/UCBrowser/i.test(ua)) return "uc browser";
+  if (/Quark/i.test(ua)) return "quark";
+  if (/BaiduBrowser/i.test(ua)) return "baidu browser";
+  if (/SogouMobileBrowser|MetaSr/i.test(ua)) return "sogou browser";
+  if (/EdgA|EdgiOS/i.test(ua) || lower.includes("edg/") || lower.includes("edge/")) return "edge";
+  if (lower.includes("opr/") || /Opera/i.test(ua)) return "opera";
+  if (/FxiOS|Firefox/i.test(ua)) return "firefox";
+  if (/CriOS/i.test(ua) || lower.includes("chrome/")) return "chrome";
+  if (lower.includes("safari/")) return "safari";
+  return "";
 }}
 function randomSuffix() {{
   if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
@@ -1892,14 +2368,23 @@ async function checkCertificateTrust() {{
       mode: "cors"
     }});
     if (!net.ok) {{
-      await postReport("network_failed", {{ status: net.status }});
-      show('<span class="bad">Probe port is not reachable.</span>');
-      showNext("<p>Check that this phone and computer are on the same network, the selected IP is correct, and firewall rules allow the probe port.</p><button onclick='runProbeLoop()'>Retry</button>");
+      const bypassRequired = await isTrustProbeProxyBypassRequired(net);
+      await postReport("network_failed", {{
+        status: net.status,
+        message: bypassRequired ? "Direct probe request went through the configured proxy." : undefined
+      }});
+      if (bypassRequired) {{
+        show('<span class="warn">Direct probe request went through the configured proxy.</span>');
+        showNext("<p>The probe port is running, but this browser sent the direct reachability check through the proxy. Add this computer IP to the proxy bypass list, or open this page without proxying this host, then retry.</p><button onclick='runProbeLoop()'>Retry</button>");
+      }} else {{
+        show('<span class="bad">Probe port is not reachable.</span>');
+        showNext("<p>Check that this phone and computer are on the same network, the selected IP is correct, and firewall rules allow the probe port.</p><button onclick='runProbeLoop()'>Retry</button>");
+      }}
       return false;
     }}
     await postReport("netcheck_ok");
     if (!cfg.tlsFailed && !cfg.tlsTrusted) {{
-      show('<span class="ok">Network check passed.</span> Checking HTTPS trust...');
+      show('<span class="ok">Network check passed.</span> Checking browser HTTPS probe...');
     }}
   }} catch (error) {{
     await postReport("network_failed", {{ message: String(error) }});
@@ -1916,7 +2401,7 @@ async function checkCertificateTrust() {{
       await postReport("tls_ok");
       cfg.tlsFailed = false;
       cfg.tlsTrusted = true;
-      show('<span class="ok">Trust check passed. This browser trusts Bifrost CA.</span>');
+      show('<span class="ok">Browser HTTPS probe passed. Some Android apps may still reject Bifrost CA.</span>');
       showProxyConfig();
       return true;
     }} else {{
@@ -1927,6 +2412,15 @@ async function checkCertificateTrust() {{
   }} catch (error) {{
     await postReport("tls_failed", {{ message: String(error) }});
     showTlsFailed();
+    return false;
+  }}
+}}
+async function isTrustProbeProxyBypassRequired(response) {{
+  if (response.status !== 409) return false;
+  try {{
+    const data = await response.clone().json();
+    return data && data.error === "trust_probe_must_bypass_proxy";
+  }} catch (_) {{
     return false;
   }}
 }}
@@ -2093,8 +2587,8 @@ function showProxyConfig() {{
 function showTlsFailed() {{
   window.__BIFROST_TRUST_PROBE__.tlsFailed = true;
   window.__BIFROST_TRUST_PROBE__.tlsTrusted = false;
-  const platform = detectPlatform();
-  show('<span class="bad">HTTPS trust check failed.</span><p><a class="button" href="' + window.__BIFROST_TRUST_PROBE__.caDownloadUrl + '">Download Bifrost CA</a></p>');
+  const platform = detectPlatformOs(navigator.userAgent || "");
+  show('<span class="bad">Browser HTTPS probe failed.</span><p><a class="button" href="' + window.__BIFROST_TRUST_PROBE__.caDownloadUrl + '">Download Bifrost CA</a></p>');
   let restartHint = "<p>If you just installed or trusted the CA, fully quit and restart this browser, then open this page again. Some browsers keep old certificate trust decisions until restart.</p>";
   let steps = "<p>Install and trust Bifrost CA, then return here and retry.</p>" + restartHint;
   if (platform === "ios") {{
@@ -2329,6 +2823,15 @@ fn ca_key_path_from_cert_path(ca_cert_path: &Path) -> PathBuf {
     ca_cert_path.with_file_name("ca.key")
 }
 
+fn is_loopback_probe_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
+}
+
+fn probe_target_hosts_match(session_host: &str, request_host: &str) -> bool {
+    session_host == request_host
+        || (is_loopback_probe_host(session_host) && is_loopback_probe_host(request_host))
+}
+
 fn hash_token(token: &str) -> String {
     let digest = Sha256::digest(token.as_bytes());
     digest
@@ -2392,10 +2895,241 @@ mod tests {
         }
     }
 
+    fn test_probe_server_handle(port: u16) -> ProbeServerHandle {
+        ProbeServerHandle {
+            port,
+            shutdown_tx: None,
+            last_activity_ms: Arc::new(AtomicI64::new(now_epoch_millis())),
+        }
+    }
+
+    fn test_probe_server_handle_with_activity(
+        port: u16,
+        last_activity_ms: Arc<AtomicI64>,
+    ) -> ProbeServerHandle {
+        ProbeServerHandle {
+            port,
+            shutdown_tx: None,
+            last_activity_ms,
+        }
+    }
+
     #[test]
     fn token_hash_does_not_match_plain_token() {
         let token = "secret";
         assert_ne!(hash_token(token), token);
+    }
+
+    #[test]
+    fn infer_device_platform_hint_covers_common_os_browser_and_apps() {
+        assert_eq!(
+            infer_device_platform_hint("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36 Edg/149.0.0.0").as_deref(),
+            Some("macos edge")
+        );
+        assert_eq!(
+            infer_device_platform_hint("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36").as_deref(),
+            Some("windows chrome")
+        );
+        assert_eq!(
+            infer_device_platform_hint("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1").as_deref(),
+            Some("ios safari")
+        );
+        assert_eq!(
+            infer_device_platform_hint("Mozilla/5.0 (Linux; Android 15; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Mobile Safari/537.36 MicroMessenger/8.0.50").as_deref(),
+            Some("android wechat")
+        );
+        assert_eq!(
+            infer_device_platform_hint("Mozilla/5.0 (Linux; Android 15; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/28.0 Chrome/122.0 Mobile Safari/537.36").as_deref(),
+            Some("android samsung browser")
+        );
+        assert_eq!(
+            infer_device_platform_hint("CustomClient/1.0").as_deref(),
+            Some("browser")
+        );
+    }
+
+    #[test]
+    fn landing_page_platform_detection_avoids_regex_slash_escaping() {
+        let session = test_session(Uuid::new_v4(), "token", Utc::now());
+        let html = render_landing_page(&session, "token");
+        assert!(html.contains("lower.includes(\"edg/\")"));
+        assert!(html.contains("lower.includes(\"chrome/\")"));
+        assert!(!html.contains("\\\\/"));
+    }
+
+    #[test]
+    fn manager_matches_only_active_probe_target() {
+        let manager = TrustProbeManager::new();
+        let now = Utc::now();
+        let session = test_session(Uuid::new_v4(), "token", now);
+        manager.sessions.lock().insert(session.id, session);
+
+        assert!(manager.is_active_probe_target("127.0.0.1", 8802));
+        assert!(manager.is_active_probe_target("localhost", 8802));
+        assert!(manager.is_active_probe_target("[::1]", 8802));
+        assert!(!manager.is_active_probe_target("127.0.0.1", 8803));
+        assert!(!manager.is_active_probe_target("10.0.0.8", 8802));
+    }
+
+    #[test]
+    fn cleanup_keeps_probe_server_for_each_active_host() {
+        let manager = TrustProbeManager::new();
+        let now = Utc::now();
+        let active = test_session(Uuid::new_v4(), "active", now);
+        let mut expired = test_session(Uuid::new_v4(), "expired", now);
+        expired.host = "10.0.0.8".to_string();
+        expired.expires_at = now - chrono::Duration::seconds(1);
+
+        manager.sessions.lock().insert(active.id, active);
+        manager.sessions.lock().insert(expired.id, expired);
+        manager.servers.lock().insert(
+            ProbeServerKey {
+                host: "127.0.0.1".to_string(),
+                ca_fingerprint_sha256: None,
+            },
+            test_probe_server_handle(8802),
+        );
+        manager.servers.lock().insert(
+            ProbeServerKey {
+                host: "10.0.0.8".to_string(),
+                ca_fingerprint_sha256: None,
+            },
+            test_probe_server_handle(8802),
+        );
+
+        manager.cleanup_expired_sessions();
+        let servers = manager.servers.lock();
+        assert!(servers.contains_key(&ProbeServerKey {
+            host: "127.0.0.1".to_string(),
+            ca_fingerprint_sha256: None,
+        }));
+        assert!(!servers.contains_key(&ProbeServerKey {
+            host: "10.0.0.8".to_string(),
+            ca_fingerprint_sha256: None,
+        }));
+    }
+
+    #[tokio::test]
+    async fn probe_server_port_listening_probe_tracks_local_tcp_listener() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind test listener");
+        let port = listener.local_addr().expect("test listener address").port();
+
+        assert!(probe_server_port_is_listening(port).await);
+        drop(listener);
+        assert!(!probe_server_port_is_listening(port).await);
+    }
+
+    #[tokio::test]
+    async fn ensure_probe_server_reuses_healthy_existing_port_without_rebinding() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind test listener");
+        let port = listener.local_addr().expect("test listener address").port();
+        let manager = TrustProbeManager::new();
+        manager.servers.lock().insert(
+            ProbeServerKey {
+                host: "127.0.0.1".to_string(),
+                ca_fingerprint_sha256: None,
+            },
+            test_probe_server_handle(port),
+        );
+
+        let ensured = manager
+            .ensure_probe_server(
+                "127.0.0.1",
+                port.saturating_add(1),
+                Path::new("/missing-ca-cert.pem"),
+                Path::new("/missing-ca-key.pem"),
+                None,
+            )
+            .await
+            .expect("healthy existing listener should be reused before CA loading");
+
+        assert_eq!(ensured, port);
+        assert_eq!(manager.servers.lock().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ensure_probe_server_removes_stale_existing_port_before_rebinding() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind test listener");
+        let port = listener.local_addr().expect("test listener address").port();
+        drop(listener);
+        let manager = TrustProbeManager::new();
+        manager.servers.lock().insert(
+            ProbeServerKey {
+                host: "127.0.0.1".to_string(),
+                ca_fingerprint_sha256: None,
+            },
+            test_probe_server_handle(port),
+        );
+
+        let result = manager
+            .ensure_probe_server(
+                "127.0.0.1",
+                port,
+                Path::new("/missing-ca-cert.pem"),
+                Path::new("/missing-ca-key.pem"),
+                None,
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(manager.servers.lock().is_empty());
+    }
+
+    #[test]
+    fn idle_probe_reaper_removes_matching_idle_listener() {
+        let servers = Arc::new(Mutex::new(HashMap::new()));
+        let key = ProbeServerKey {
+            host: "127.0.0.1".to_string(),
+            ca_fingerprint_sha256: None,
+        };
+        let activity = Arc::new(AtomicI64::new(
+            now_epoch_millis() - PROBE_SERVER_IDLE_TTL.as_millis() as i64 - 1,
+        ));
+        servers.lock().insert(
+            key.clone(),
+            test_probe_server_handle_with_activity(8802, activity.clone()),
+        );
+
+        assert!(shutdown_idle_probe_server_if_due(
+            &servers,
+            &key,
+            8802,
+            &activity,
+            PROBE_SERVER_IDLE_TTL
+        ));
+        assert!(servers.lock().is_empty());
+    }
+
+    #[test]
+    fn idle_probe_reaper_does_not_remove_replaced_listener() {
+        let servers = Arc::new(Mutex::new(HashMap::new()));
+        let key = ProbeServerKey {
+            host: "127.0.0.1".to_string(),
+            ca_fingerprint_sha256: None,
+        };
+        let old_activity = Arc::new(AtomicI64::new(
+            now_epoch_millis() - PROBE_SERVER_IDLE_TTL.as_millis() as i64 - 1,
+        ));
+        let replacement_activity = Arc::new(AtomicI64::new(now_epoch_millis()));
+        servers.lock().insert(
+            key.clone(),
+            test_probe_server_handle_with_activity(8802, replacement_activity),
+        );
+
+        assert!(shutdown_idle_probe_server_if_due(
+            &servers,
+            &key,
+            8802,
+            &old_activity,
+            PROBE_SERVER_IDLE_TTL
+        ));
+        assert!(servers.lock().contains_key(&key));
     }
 
     #[test]
@@ -2627,6 +3361,13 @@ mod tests {
 
         let view = session.to_view("");
         assert_eq!(view.devices.len(), 2);
+        assert_eq!(
+            view.devices
+                .iter()
+                .map(|device| device.client_ip.as_deref().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            vec!["192.168.1.20", "192.168.1.21"]
+        );
         let ios = view
             .devices
             .iter()

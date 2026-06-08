@@ -695,6 +695,16 @@ pub async fn handle_connect(
         &tls_config,
         &resolved_rules,
     );
+    let force_trust_probe_passthrough = bifrost_admin::is_active_trust_probe_target(&host, port);
+    if force_trust_probe_passthrough {
+        intercept = false;
+        debug!(
+            "[{}] TLS interception skipped for active trust probe target {}:{}",
+            ctx.id_str(),
+            host,
+            port
+        );
+    }
 
     if !is_local_client {
         if let Some(ref state) = admin_state {
@@ -711,6 +721,7 @@ pub async fn handle_connect(
     }
 
     if !intercept
+        && !force_trust_probe_passthrough
         && is_local_client
         && host.eq_ignore_ascii_case(ADMIN_VIRTUAL_HOST)
         && tls_config.ca_cert.is_some()
@@ -724,6 +735,7 @@ pub async fn handle_connect(
     }
 
     if !intercept
+        && !force_trust_probe_passthrough
         && tls_config.ca_cert.is_some()
         && !matches!(resolved_rules.tls_intercept, Some(false))
         && (requires_tls_interception_for_connect_rules(&resolved_rules)

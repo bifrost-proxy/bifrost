@@ -52,6 +52,7 @@ use bifrost_core::{
 };
 
 const NOISY_CONN_ERROR_LOG_INTERVAL: Duration = Duration::from_secs(5);
+const TRUST_PROBE_ROUTE_PREFIX: &str = "/_bifrost/trust-probe/";
 
 #[derive(Default)]
 struct NoisyConnErrorLogState {
@@ -1419,6 +1420,17 @@ async fn handle_request(
         return Ok(handle_trust_probe_proxy_configured_request(req, peer_addr).await);
     }
 
+    if is_proxy_request_to_trust_probe_direct_target(&req) {
+        warn!(
+            "[{}] Rejected proxy-routed availability probe from {}: {} {}; trust probe must connect directly to the probe port",
+            ctx.id_str(),
+            peer_addr,
+            method,
+            uri
+        );
+        return Ok(trust_probe_proxy_bypass_required_response(&method));
+    }
+
     let is_public_cert_path = is_cert_public_request(&req);
     let is_loopback = peer_addr.ip().is_loopback();
     if !is_public_cert_path && !is_loopback {
@@ -1997,6 +2009,50 @@ fn is_trust_probe_proxy_configured_request(req: &Request<Incoming>) -> bool {
         && uri.path() == TRUST_PROBE_PROXY_CONFIG_PATH
 }
 
+fn proxy_request_trust_probe_target<B>(req: &Request<B>) -> Option<(String, u16)> {
+    let uri = req.uri();
+    let scheme = uri.scheme_str()?;
+    let host = uri.host()?;
+    if !matches!(scheme, "http" | "https") {
+        return None;
+    }
+    if !uri.path().starts_with(TRUST_PROBE_ROUTE_PREFIX) {
+        return None;
+    }
+    if scheme == "http" && host == TRUST_PROBE_PROXY_CONFIG_HOST {
+        return None;
+    }
+
+    let default_port = if scheme == "https" { 443 } else { 80 };
+    Some((host.to_string(), uri.port_u16().unwrap_or(default_port)))
+}
+
+fn is_proxy_request_to_trust_probe_direct_target<B>(req: &Request<B>) -> bool {
+    proxy_request_trust_probe_target(req).is_some()
+}
+
+fn trust_probe_proxy_bypass_required_response(method: &Method) -> Response<BoxBody> {
+    let mut builder = Response::builder()
+        .status(if *method == Method::OPTIONS { 204 } else { 409 })
+        .header("access-control-allow-origin", "*")
+        .header("access-control-allow-methods", "GET, OPTIONS")
+        .header("access-control-allow-headers", "content-type");
+
+    if *method != Method::OPTIONS {
+        builder = builder.header("content-type", "application/json");
+    }
+
+    builder
+        .body(if *method == Method::OPTIONS {
+            empty_body()
+        } else {
+            full_body(
+                r#"{"error":"trust_probe_must_bypass_proxy","message":"Availability trust probe must connect directly to the probe port; only bifrost-proxy-check.invalid is allowed through the configured proxy."}"#,
+            )
+        })
+        .unwrap()
+}
+
 fn rewrite_virtual_host_request(req: Request<Incoming>) -> Request<Incoming> {
     let (mut parts, body) = req.into_parts();
     let path = parts.uri.path();
@@ -2212,6 +2268,57 @@ mod tests {
         assert!(is_admin_request_path("/_bifrost/api/traffic"));
         assert!(!is_admin_request_path("/api/_bifrost"));
         assert!(!is_admin_request_path("/_bifrostish/api"));
+    }
+
+    #[test]
+    fn test_proxy_request_trust_probe_target_extracts_absolute_probe_url() {
+        let req = Request::builder()
+            .uri("http://10.0.0.2:8802/_bifrost/trust-probe/netcheck?sid=s1&deviceId=d1")
+            .body(())
+            .unwrap();
+
+        assert_eq!(
+            proxy_request_trust_probe_target(&req),
+            Some(("10.0.0.2".to_string(), 8802))
+        );
+    }
+
+    #[test]
+    fn test_proxy_request_trust_probe_target_uses_scheme_default_port() {
+        let req = Request::builder()
+            .uri("https://10.0.0.2/_bifrost/trust-probe/check?sid=s1&deviceId=d1")
+            .body(())
+            .unwrap();
+
+        assert_eq!(
+            proxy_request_trust_probe_target(&req),
+            Some(("10.0.0.2".to_string(), 443))
+        );
+    }
+
+    #[test]
+    fn test_proxy_request_trust_probe_target_ignores_origin_form_and_proxy_config_probe() {
+        let origin_form_req = Request::builder()
+            .uri("/_bifrost/trust-probe/netcheck?sid=s1")
+            .body(())
+            .unwrap();
+        let proxy_config_req = Request::builder()
+            .uri("http://bifrost-proxy-check.invalid/_bifrost/trust-probe/proxy-configured?sid=s1")
+            .body(())
+            .unwrap();
+
+        assert_eq!(proxy_request_trust_probe_target(&origin_form_req), None);
+        assert_eq!(proxy_request_trust_probe_target(&proxy_config_req), None);
+    }
+
+    #[test]
+    fn test_proxy_request_to_trust_probe_direct_target_rejects_stale_probe_ports() {
+        let req = Request::builder()
+            .uri("http://127.0.0.1:8802/_bifrost/trust-probe/netcheck?sid=s1")
+            .body(())
+            .unwrap();
+
+        assert!(is_proxy_request_to_trust_probe_direct_target(&req));
     }
 
     #[test]

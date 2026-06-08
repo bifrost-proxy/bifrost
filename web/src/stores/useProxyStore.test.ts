@@ -60,7 +60,7 @@ describe("doesSystemProxyMatchRequest", () => {
 });
 
 describe("system proxy status helpers", () => {
-  it("keeps the settings switch on when cleanup has disabled the live OS proxy", () => {
+  it("separates the stored preference from live Bifrost ownership", () => {
     const cleanedUp = status({
       enabled: false,
       managed_by_bifrost: false,
