@@ -195,6 +195,20 @@ Codex/Trae 当前 JSONL 的 `turn.completed.usage` 会输出最近一轮 token u
 - 失败时最终失败信息仍在底部，过程信息保留为可展开诊断信息。
 - Codex/Trae 只展示 CLI JSONL 明确输出的 reasoning summary/status/tool/final 文本；隐藏 chain-of-thought 不可见，也不会伪造。
 
+### 5.3 外部 Runner 完成状态的权威来源
+
+外部 CLI 的 stdout JSONL 是实时过程流，不等同于最终可见答案已经持久化。Codex/Trae 可能先输出 `turn.completed` / `RunFinished` 类进度事件，随后 runtime 才读取 `last_message.md`、归一化最终 response、写入 session state 和 canonical history。如果 WebUI 在这个窗口仅根据 progress `RunFinished` 把会话置为 Ready，会出现“已处理 <1s / Ready，但答案几秒后才出现”的用户可见错觉。
+
+完成状态必须遵守以下顺序：
+
+1. `RunStarted` progress event 可以写入 `run_state_changed: running`，用于让 WebUI/IM 立即显示运行中。
+2. `AssistantDelta`、`AssistantFinal`、tool started/finished 等 progress event 只能写入过程 timeline；其中 `AssistantFinal` 在外部 runner history 中仍作为过程内容展示，不能提前成为最终 assistant message。
+3. progress `RunFinished` 不能写入 `run_state_changed: completed`。它只表示 CLI 公开事件流里出现了 turn 完成信号，不表示 Bifrost 已拿到最终 response。
+4. `ExternalCliRunResult` 生成后，`record_external_cli_web_turn_result` 必须先写最终 `assistant_message`，再写 terminal `run_state_changed: completed/failed`。
+5. `sessions/all`、session detail、Web History 和 IM progress card 只能把第 4 步之后的 terminal run_state 当作 Ready/完成依据。
+
+回归测试必须覆盖 stdout 中 `turn.completed` 早于最终 response 的场景，断言中间 timeline 仍保持 running，最终答案可见后才 completed。
+
 ### 6. 能力声明与降级
 
 每个 adapter 需要声明能力，WebUI 和 API 根据能力展示配置项：

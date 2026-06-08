@@ -753,6 +753,30 @@
 6. ChatUI 过程块不展示 `Run state: Running` 内部状态行；运行中只展示模型公开 content、工具组/工具摘要和必要的 Thinking 尾部提示。
 7. 未来由 runner-call 子线程产生的用户可见消息会写回父 session canonical JSONL，刷新父会话不丢最后一轮消息；历史旧数据不做兼容回填。
 
+### TC-IEC-38: Trae/Codex stdout turn.completed 不提前结束 Web Chat
+
+操作步骤：
+1. 执行 focused 单元回归：
+   ```bash
+   cargo test -p bifrost-admin external_runner_progress_run_finished_does_not_complete_before_final_response --lib -- --nocapture
+   ```
+2. 执行最终写入顺序回归：
+   ```bash
+   cargo test -p bifrost-admin external_runner_final_result_records_message_before_completed_state --lib -- --nocapture
+   ```
+3. 如果需要真实 WebUI 复核，启动当前源码 Bifrost，命令必须包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、临时 `BIFROST_DATA_DIR` 和 `--no-system-proxy`，选择 Trae 或 Codex external runner，发送会触发延迟最终答案的请求，观察 history timeline。
+4. 执行真实服务 E2E：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost e2e-tests/tests/test_im_gateway_external_runner_delayed_final_state.sh
+   ```
+
+预期结果：
+1. stdout progress 中出现 `RunFinished` / `turn.completed` 后，canonical JSONL 不写入 `run_state_changed: completed`，session summary 仍保持 `running`。
+2. 最终 `ExternalCliRunResult` 写入时，canonical JSONL 中最终 `assistant_message` 位于 `run_state_changed: completed` 之前。
+3. Web Chat 在最终答案落入 history 前不提前显示 Ready；最终答案出现后才收敛为 Ready/Send。
+4. 失败、停止、超时路径仍按最终 result status 收敛，不因忽略 progress `RunFinished` 而永久 running。
+5. 自动 E2E 在临时数据目录和随机端口启动当前源码 Bifrost，构造先输出 `turn.completed`、延迟 5 秒再输出 `agent_message` 的 external runner；中途 `/agent/sessions/all` 必须返回 `running:true`、`status:"active"`、`state:"running"`、`run_state:"running"`，最终必须返回 `ended/completed`，且 JSONL 中最终 `assistant_message` 早于 `run_state_changed: completed`。
+
 ## 最近执行记录
 
 - 2026-05-13：执行 TC-IEC-01/02/03/04/08/09/10/11/12/13，临时服务端口 `18880`，`BIFROST_DATA_DIR=/tmp/bifrost-im-external-cli-test`，均通过；TC-IEC-12 使用 `sleep 23` 慢进程验证 active run 可停止，run 收敛为 `status:"stopped"`，`response:"External CLI run was stopped by request."`，且未残留 `sleep 23` 测试进程。
@@ -787,6 +811,7 @@
 - 2026-06-07：补充执行 TC-IEC-18 的 Agent Runners Adapter 菜单回归，命令 `pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts -g "Agent Runners 新增弹窗只展示当前支持的 Adapter" --reporter=line` 通过 1 个测试；截图级验证 Add Runner 弹窗 Adapter 下拉只展示 `Codex CLI`、`Trae CLI`、`ChatGPT Web`，不再展示 `Custom`、`Mock`。
 - 2026-06-07：执行 TC-IEC-37 的状态唯一真源回归，命令 `cargo test -p bifrost-agent scan_session_summary_tracks_external_runner_metadata -- --nocapture`、`cargo test -p bifrost-admin active_history_detail_uses_chatgpt_web_binding_from_history_state -- --nocapture`、`cargo test -p bifrost-admin runner_call_visible_messages_are_recorded_in_parent_history -- --nocapture`、`pnpm --dir web exec tsc -b`、`pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts -g "initial load|stops running history polling|completed history override|running history timeline" --reporter=line` 均通过。随后用默认 9900 服务真实验证：`admin-chat-1779725144963` 顶部显示 `Runner: web` 且续聊返回 `OK`，JSONL 追加 `agent_kind=web` running/completed 与 `assistant_message OK`；`admin-chat-1780845051758` 刷新后顶部为 Ready，消息区 `thinkingTail=0`、`runningGroups=0`、`Run state: Running` 不可见，running placeholder 不可见。
 - 2026-06-08：补充执行 TC-IEC-27 的 Trae CLI 参数冲突回归。真实飞书 IM 会话 `feishu-main:ou_64f88363f262c64aba91f0b9e1aaed81` 的 run `1780879951643-4487fc45-367c-4e2b-9c4d-be987ef0c370` 失败，`cli.stderr.log` 为 `Error: sandbox_mode and permission_mode overrides cannot both be set`，`runtime_snapshot.args` 同时包含 `--permission-mode bypass_permissions` 和 `--dangerously-bypass-approvals-and-sandbox`。修复后 focused 单测 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin traex_adapter_ --lib -- --nocapture` 通过 5 个测试，断言默认/default/resume full access 只生成 dangerous full access，不再同时生成 `--permission-mode`；真实 Trae E2E `RUN_REAL_TRAEX_E2E=1 BIFROST_TRAEX_BIN=/Users/eden/.local/bin/traex e2e-tests/tests/test_im_gateway_traex_runner_streaming.sh` 通过，run `1780880340108-0246e9c7-cb2f-4244-a667-c7002d4f1dba` 成功完成，并断言 `runtime_snapshot.args` 不同时包含 `--permission-mode` 与 `--dangerously-bypass-approvals-and-sandbox`。
+- 2026-06-08：执行 TC-IEC-38 的 Trae/Codex stdout `turn.completed` 不提前结束回归。focused 单测 `cargo test -p bifrost-admin external_runner_ --lib -- --nocapture` 通过 20 个 external runner 相关测试。随后使用临时服务端口 `18938`、`BIFROST_DATA_DIR=/tmp/bifrost-traex-delayed-final-verify`、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 cargo run --bin bifrost -- start -p 18938 --unsafe-ssl --skip-cert-check --no-system-proxy` 启动当前源码服务，配置 mock runner `traex-delayed-final` 先输出 `turn.completed`、睡眠 5 秒再输出 `agent_message: BIFROST_DELAYED_FINAL_OK`；早期 `turn.completed` 后查询 `/agent/sessions/all` 返回 `running:true`、`status:"active"`、`state:"running"`、`run_state:"running"`，最终 stream 返回 `BIFROST_DELAYED_FINAL_OK` 且 session 收敛为 `status:"ended"`、`run_state:"completed"`，JSONL 顺序为 `assistant_message` 早于 `run_state_changed: completed`。自动 E2E `SKIP_BUILD=true BIFROST_BIN=/Users/eden/work/github/bifrost/target/debug/bifrost e2e-tests/tests/test_im_gateway_external_runner_delayed_final_state.sh` 通过，覆盖同一真实服务链路。
 
 ## 清理步骤
 
