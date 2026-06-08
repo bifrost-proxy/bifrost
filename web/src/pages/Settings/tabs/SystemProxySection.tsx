@@ -6,6 +6,10 @@ import type {
   SystemProxyLaunchdStatus,
   SystemProxyStatus,
 } from "../../../api/proxy";
+import {
+  isSystemProxyConfiguredEnabled,
+  isSystemProxyLiveEnabledByBifrost,
+} from "../../../stores/useProxyStore";
 
 const { Text } = Typography;
 
@@ -60,10 +64,18 @@ export default function SystemProxySection({
     !!systemProxyLaunchd?.loaded &&
     !systemProxyLaunchd?.needs_upgrade;
   const showLaunchdControls = systemProxyLaunchd?.supported === true;
-  const systemProxyEnabledByBifrost =
-    !!systemProxy?.enabled && systemProxy.managed_by_bifrost !== false;
+  const systemProxyConfiguredEnabled = systemProxy
+    ? isSystemProxyConfiguredEnabled(systemProxy)
+    : false;
+  const systemProxyEnabledByBifrost = systemProxy
+    ? isSystemProxyLiveEnabledByBifrost(systemProxy)
+    : false;
   const systemProxyOwnedByOther =
     !!systemProxy?.enabled && systemProxy.managed_by_bifrost === false;
+  const systemProxyConfiguredButInactive =
+    systemProxyConfiguredEnabled &&
+    !systemProxyEnabledByBifrost &&
+    !systemProxyOwnedByOther;
 
   return (
     <Col xs={24}>
@@ -85,7 +97,7 @@ export default function SystemProxySection({
               {systemProxy ? (
                 systemProxy.supported ? (
                   <Switch
-                    checked={systemProxyEnabledByBifrost}
+                    checked={systemProxyConfiguredEnabled}
                     loading={systemProxyLoading}
                     onChange={onToggleSystemProxy}
                     data-testid="settings-system-proxy-switch"
@@ -106,6 +118,13 @@ export default function SystemProxySection({
               showIcon
               message="System proxy is occupied by another proxy"
               description={`Current system proxy points to ${systemProxy.host}:${systemProxy.port}. Turn this on to let Bifrost take over and restore it when turned off.`}
+            />
+          ) : systemProxyConfiguredButInactive ? (
+            <Alert
+              type="warning"
+              showIcon
+              message="System proxy is configured but not active"
+              description="Bifrost will keep this preference and re-apply it when the runtime enables system proxy again."
             />
           ) : (
             <Text type="secondary" style={{ fontSize: 12 }}>

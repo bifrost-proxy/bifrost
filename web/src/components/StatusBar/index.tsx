@@ -11,7 +11,11 @@ import { theme, Tooltip, Popover, Switch } from "antd";
 import { ArrowUpOutlined, ArrowDownOutlined } from "@ant-design/icons";
 import { useShallow } from "zustand/react/shallow";
 import { useMetricsStore } from "../../stores/useMetricsStore";
-import { useProxyStore } from "../../stores/useProxyStore";
+import {
+  isSystemProxyConfiguredEnabled,
+  isSystemProxyLiveEnabledByBifrost,
+  useProxyStore,
+} from "../../stores/useProxyStore";
 import { useVersionStore } from "../../stores/useVersionStore";
 import { useSyncStore } from "../../stores/useSyncStore";
 import type { SyncStatus } from "../../api/sync";
@@ -126,10 +130,10 @@ const StatusBar = memo(function StatusBar() {
 
   const proxyStatus = useMemo(() => {
     if (!systemProxy) return { text: "Unknown", running: false };
-    const managedByCurrentBifrost =
-      systemProxy.enabled && systemProxy.managed_by_bifrost !== false;
+    const configured = isSystemProxyConfiguredEnabled(systemProxy);
+    const managedByCurrentBifrost = isSystemProxyLiveEnabledByBifrost(systemProxy);
     return {
-      text: managedByCurrentBifrost ? "Running" : "Stopped",
+      text: managedByCurrentBifrost ? "Running" : configured ? "Not Applied" : "Stopped",
       running: managedByCurrentBifrost,
     };
   }, [systemProxy]);
@@ -143,8 +147,8 @@ const StatusBar = memo(function StatusBar() {
 
   const proxyPopoverContent = useMemo(() => {
     if (!systemProxy) return null;
-    const managedByCurrentBifrost =
-      systemProxy.enabled && systemProxy.managed_by_bifrost !== false;
+    const configured = isSystemProxyConfiguredEnabled(systemProxy);
+    const managedByCurrentBifrost = isSystemProxyLiveEnabledByBifrost(systemProxy);
     const ownedByOther =
       systemProxy.enabled && systemProxy.managed_by_bifrost === false;
     if (!systemProxy.supported) {
@@ -166,7 +170,7 @@ const StatusBar = memo(function StatusBar() {
           <span style={{ fontSize: 12 }}>System Proxy</span>
           <Switch
             size="small"
-            checked={managedByCurrentBifrost}
+            checked={configured}
             loading={proxyLoading}
             onChange={handleToggleSystemProxy}
           />
@@ -195,6 +199,20 @@ const StatusBar = memo(function StatusBar() {
             }}
           >
             {systemProxy.host}:{systemProxy.port}
+          </div>
+        ) : configured ? (
+          <div
+            style={{
+              fontSize: 11,
+              color: token.colorWarningText,
+              background: token.colorWarningBg,
+              border: `1px solid ${token.colorWarningBorder}`,
+              borderRadius: 6,
+              padding: "6px 8px",
+              marginTop: 6,
+            }}
+          >
+            Configured on, not currently applied
           </div>
         ) : null}
       </div>

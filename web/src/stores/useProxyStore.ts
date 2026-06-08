@@ -125,8 +125,16 @@ export function doesSystemProxyMatchRequest(
   enabled: boolean,
 ): boolean {
   if (enabled) {
-    return status.enabled && status.managed_by_bifrost !== false;
+    return isSystemProxyLiveEnabledByBifrost(status);
   }
 
   return !status.enabled || status.managed_by_bifrost === false;
+}
+
+export function isSystemProxyConfiguredEnabled(status: SystemProxyStatus): boolean {
+  return status.configured_enabled ?? isSystemProxyLiveEnabledByBifrost(status);
+}
+
+export function isSystemProxyLiveEnabledByBifrost(status: SystemProxyStatus): boolean {
+  return status.enabled && status.managed_by_bifrost !== false;
 }

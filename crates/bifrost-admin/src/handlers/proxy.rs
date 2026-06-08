@@ -10,16 +10,20 @@ use super::{
 use crate::state::SharedAdminState;
 use bifrost_core::ShellProxyManager;
 use bifrost_core::SystemProxyManager;
-use bifrost_storage::SystemProxyConfigUpdate;
+use bifrost_storage::{NewSystemProxyConfig as SystemProxyConfig, SystemProxyConfigUpdate};
 
 #[derive(Serialize)]
 struct SystemProxyStatus {
     supported: bool,
+    /// Current OS system proxy state.
     enabled: bool,
     host: String,
     port: u16,
     bypass: String,
     managed_by_bifrost: bool,
+    /// User's persisted Bifrost preference. Cleanup recovery must not mutate it.
+    configured_enabled: bool,
+    configured_bypass: String,
 }
 
 impl SystemProxyStatus {
@@ -31,7 +35,27 @@ impl SystemProxyStatus {
             port: proxy.port,
             bypass: proxy.bypass,
             managed_by_bifrost,
+            configured_enabled: false,
+            configured_bypass: String::new(),
         }
+    }
+
+    fn unsupported(config: &SystemProxyConfig) -> Self {
+        Self {
+            supported: false,
+            enabled: false,
+            host: String::new(),
+            port: 0,
+            bypass: String::new(),
+            managed_by_bifrost: false,
+            configured_enabled: config.enabled,
+            configured_bypass: config.bypass.clone(),
+        }
+    }
+
+    fn apply_config(&mut self, config: &SystemProxyConfig) {
+        self.configured_enabled = config.enabled;
+        self.configured_bypass = config.bypass.clone();
     }
 }
 
@@ -177,16 +201,9 @@ async fn get_cli_proxy_status(state: SharedAdminState) -> Response<BoxBody> {
 }
 
 async fn get_system_proxy_status(state: SharedAdminState) -> Response<BoxBody> {
+    let config = current_system_proxy_config(&state).await;
     if !SystemProxyManager::is_supported() {
-        let status = SystemProxyStatus {
-            supported: false,
-            enabled: false,
-            host: String::new(),
-            port: 0,
-            bypass: String::new(),
-            managed_by_bifrost: false,
-        };
-        return json_response(&status);
+        return json_response(&SystemProxyStatus::unsupported(&config));
     }
 
     match SystemProxyManager::get_current() {
@@ -196,7 +213,8 @@ async fn get_system_proxy_status(state: SharedAdminState) -> Response<BoxBody> {
             } else {
                 false
             };
-            let status = SystemProxyStatus::from_proxy(proxy, managed_by_bifrost);
+            let mut status = SystemProxyStatus::from_proxy(proxy, managed_by_bifrost);
+            status.apply_config(&config);
             json_response(&status)
         }
         Err(e) => error_response(
@@ -211,14 +229,7 @@ fn read_system_proxy_status(
     expected_port: u16,
 ) -> Result<SystemProxyStatus, String> {
     if !SystemProxyManager::is_supported() {
-        return Ok(SystemProxyStatus {
-            supported: false,
-            enabled: false,
-            host: String::new(),
-            port: 0,
-            bypass: String::new(),
-            managed_by_bifrost: false,
-        });
+        return Ok(SystemProxyStatus::unsupported(&SystemProxyConfig::default()));
     }
 
     let proxy = SystemProxyManager::get_current()
@@ -333,7 +344,7 @@ async fn set_system_proxy(req: Request<Incoming>, state: SharedAdminState) -> Re
 
         match final_result {
             Ok(()) => {
-                let status =
+                let mut status =
                     match wait_for_system_proxy_status(request.enabled, host, target_port).await {
                         Ok(status) => status,
                         Err(e) => {
@@ -360,6 +371,9 @@ async fn set_system_proxy(req: Request<Incoming>, state: SharedAdminState) -> Re
                     } else {
                         tracing::info!("System proxy config persisted: enabled={}", status.enabled);
                     }
+
+                    let config = config_manager.config().await;
+                    status.apply_config(&config.system_proxy);
 
                     if enabled_by_bifrost {
                         start_system_proxy_lifecycle_helper_after_runtime_enable(&state);
@@ -421,6 +435,14 @@ async fn set_system_proxy(req: Request<Incoming>, state: SharedAdminState) -> Re
             "System proxy manager not initialized",
         )
     }
+}
+
+async fn current_system_proxy_config(state: &SharedAdminState) -> SystemProxyConfig {
+    if let Some(config_manager) = &state.config_manager {
+        return config_manager.config().await.system_proxy;
+    }
+
+    SystemProxyConfig::default()
 }
 
 async fn get_system_proxy_support() -> Response<BoxBody> {
@@ -766,6 +788,8 @@ mod tests {
             port: 6152,
             bypass: String::new(),
             managed_by_bifrost: false,
+            configured_enabled: false,
+            configured_bypass: String::new(),
         };
 
         assert!(matches_expected_system_proxy(
@@ -785,6 +809,8 @@ mod tests {
             port: 8800,
             bypass: String::new(),
             managed_by_bifrost: true,
+            configured_enabled: true,
+            configured_bypass: String::new(),
         };
 
         assert!(!matches_expected_system_proxy(

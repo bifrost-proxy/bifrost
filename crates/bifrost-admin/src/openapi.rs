@@ -1060,7 +1060,7 @@ fn generate_paths() -> serde_json::Value {
         "/api/proxy/system": {
             "get": {
                 "tags": ["Proxy"],
-                "summary": "System proxy status",
+                "summary": "System proxy status, including live OS state and persisted Bifrost preference",
                 "operationId": "getSystemProxy",
                 "responses": {"200": {"description": "System proxy status"}}
             },

@@ -1405,25 +1405,51 @@ fn macos_service_proxy_matches(service: &str, getter: &str, host: &str, port: u1
 
 #[cfg(target_os = "macos")]
 fn macos_any_service_proxy_matches(host: &str, port: u16) -> Result<bool> {
-    for service in list_macos_services()? {
-        if macos_service_proxy_matches(&service, "-getwebproxy", host, port)?
-            || macos_service_proxy_matches(&service, "-getsecurewebproxy", host, port)?
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    Ok(!macos_services_proxy_matches(host, port)?.is_empty())
 }
 
 #[cfg(target_os = "macos")]
 fn macos_services_proxy_matches(host: &str, port: u16) -> Result<Vec<String>> {
+    use std::sync::mpsc;
+    use std::thread;
+
+    let services = list_macos_services()?;
+    let host = host.to_string();
+    let (tx, rx) = mpsc::channel();
+    let mut handles = Vec::with_capacity(services.len());
+
+    for service in services {
+        let tx = tx.clone();
+        let host = host.clone();
+        handles.push(thread::spawn(move || {
+            let matches = macos_service_proxy_matches(&service, "-getwebproxy", &host, port)
+                .and_then(|web_matches| {
+                    if web_matches {
+                        Ok(true)
+                    } else {
+                        macos_service_proxy_matches(&service, "-getsecurewebproxy", &host, port)
+                    }
+                });
+            let _ = tx.send((service, matches));
+        }));
+    }
+    drop(tx);
+
     let mut matching_services = Vec::new();
-    for service in list_macos_services()? {
-        if macos_service_proxy_matches(&service, "-getwebproxy", host, port)?
-            || macos_service_proxy_matches(&service, "-getsecurewebproxy", host, port)?
-        {
-            matching_services.push(service);
+    let mut first_error = None;
+    for (service, result) in rx {
+        match result {
+            Ok(true) => matching_services.push(service),
+            Ok(false) => {}
+            Err(error) if first_error.is_none() => first_error = Some(error),
+            Err(_) => {}
         }
+    }
+    for handle in handles {
+        let _ = handle.join();
+    }
+    if let Some(error) = first_error {
+        return Err(error);
     }
     Ok(matching_services)
 }

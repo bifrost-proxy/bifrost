@@ -103,6 +103,10 @@ test_system_proxy_get_api() {
         log_debug "Response: $response"
         return 1
     fi
+    if ! assert_json_has_field "$response" "configured_enabled" "Response should have configured_enabled field"; then
+        log_debug "Response: $response"
+        return 1
+    fi
 
     return 0
 }
@@ -123,6 +127,14 @@ test_system_proxy_structure() {
 
     if [[ "$enabled" != "true" && "$enabled" != "false" ]]; then
         log_fail "Invalid enabled value: $enabled"
+        return 1
+    fi
+
+    local configured_enabled
+    configured_enabled=$(echo "$response" | jq -r '.configured_enabled')
+
+    if [[ "$configured_enabled" != "true" && "$configured_enabled" != "false" ]]; then
+        log_fail "Invalid configured_enabled value: $configured_enabled"
         return 1
     fi
 
