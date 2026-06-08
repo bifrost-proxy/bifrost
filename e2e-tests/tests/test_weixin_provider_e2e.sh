@@ -12,11 +12,16 @@ TEST_DIR="$(mktemp -d)"
 BIFROST_LOG="$TEST_DIR/bifrost.log"
 BIFROST_BIN="${BIFROST_BIN:-}"
 
-cleanup() {
+stop_bifrost() {
   if [[ -n "${BIFROST_PID:-}" ]]; then
     kill "$BIFROST_PID" >/dev/null 2>&1 || true
     wait "$BIFROST_PID" >/dev/null 2>&1 || true
+    unset BIFROST_PID
   fi
+}
+
+cleanup() {
+  stop_bifrost
   if [[ -n "${MOCK_PID:-}" ]]; then
     kill "$MOCK_PID" >/dev/null 2>&1 || true
     wait "$MOCK_PID" >/dev/null 2>&1 || true
@@ -66,6 +71,7 @@ fi
 MOCK_SERVER="$TEST_DIR/weixin_mock.py"
 MOCK_PORT_FILE="$TEST_DIR/weixin_mock_port"
 MOCK_SEND_LOG="$TEST_DIR/weixin_mock_send.log"
+MOCK_UPDATE_LOG="$TEST_DIR/weixin_mock_updates.log"
 cat >"$MOCK_SERVER" <<'PY'
 import json
 import sys
@@ -73,6 +79,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 port_file = sys.argv[1]
 send_log = sys.argv[2]
+update_log = sys.argv[3]
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
@@ -119,6 +126,8 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("content-length") or 0)
         body = self.rfile.read(length) if length else b"{}"
         if self.path.startswith("/ilink/bot/getupdates"):
+            with open(update_log, "a", encoding="utf-8") as f:
+                f.write((self.headers.get("Authorization") or "") + "\n")
             if self.headers.get("AuthorizationType") != "ilink_bot_token":
                 self._json(401, {"error": "missing AuthorizationType"})
                 return
@@ -179,7 +188,7 @@ with open(port_file, "w", encoding="utf-8") as f:
     f.write(str(server.server_address[1]))
 server.serve_forever()
 PY
-python3 "$MOCK_SERVER" "$MOCK_PORT_FILE" "$MOCK_SEND_LOG" &
+python3 "$MOCK_SERVER" "$MOCK_PORT_FILE" "$MOCK_SEND_LOG" "$MOCK_UPDATE_LOG" &
 MOCK_PID=$!
 MOCK_READY=0
 for _ in $(seq 1 200); do
@@ -200,6 +209,15 @@ if [[ "$MOCK_READY" != "1" ]]; then
 fi
 MOCK_PORT="$(cat "$MOCK_PORT_FILE")"
 MOCK_BASE_URL="http://127.0.0.1:$MOCK_PORT"
+
+count_update_token() {
+  local token="$1"
+  if [[ ! -f "$MOCK_UPDATE_LOG" ]]; then
+    echo 0
+    return
+  fi
+  grep -c -F "$token" "$MOCK_UPDATE_LOG" || true
+}
 
 start_bifrost
 
@@ -320,5 +338,34 @@ if not all(msg.get("message_type") == 2 and msg.get("message_state") == 2 for ms
 if not all(payload.get("base_info", {}).get("channel_version") == "1.0.3" for payload in payloads):
     raise SystemExit(f"sendmessage missing base_info channel_version: {payloads}")
 PY
+
+UPDATES_BEFORE_DELETE="$(count_update_token "Bearer mock-token")"
+curl -fsS --noproxy '*' -X DELETE "$IM_BASE/providers/weixin-mock" >/dev/null
+sleep 7.2
+UPDATES_AFTER_DELETE="$(count_update_token "Bearer mock-token")"
+if (( UPDATES_AFTER_DELETE > UPDATES_BEFORE_DELETE + 1 )); then
+  echo "[weixin-provider] getupdates continued after provider delete: before=$UPDATES_BEFORE_DELETE after=$UPDATES_AFTER_DELETE" >&2
+  echo "[weixin-provider] update log:" >&2
+  cat "$MOCK_UPDATE_LOG" >&2 || true
+  exit 1
+fi
+if curl -fsS --noproxy '*' "$IM_BASE/providers/weixin-mock" >/dev/null 2>&1; then
+  echo "[weixin-provider] deleted provider is still returned by API" >&2
+  exit 1
+fi
+
+curl -fsS --noproxy '*' -X POST "$IM_BASE/providers" \
+  -H 'Content-Type: application/json' \
+  -d "{\"id\":\"weixin-disabled\",\"provider_type\":\"weixin\",\"display_name\":\"Weixin Disabled\",\"enabled\":true,\"base_url\":\"$MOCK_BASE_URL\",\"app_secret\":\"disabled-token\",\"event_connection_enabled\":false,\"event_types\":[\"message.receive\"]}" >/dev/null
+stop_bifrost
+start_bifrost
+sleep 4.2
+DISABLED_UPDATES="$(count_update_token "Bearer disabled-token")"
+if (( DISABLED_UPDATES != 0 )); then
+  echo "[weixin-provider] disabled long-connection provider was auto-polled after restart" >&2
+  echo "[weixin-provider] update log:" >&2
+  cat "$MOCK_UPDATE_LOG" >&2 || true
+  exit 1
+fi
 
 echo "[weixin-provider] passed"
