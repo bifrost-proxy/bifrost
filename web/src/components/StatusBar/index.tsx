@@ -170,7 +170,7 @@ const StatusBar = memo(function StatusBar() {
           <span style={{ fontSize: 12 }}>System Proxy</span>
           <Switch
             size="small"
-            checked={configured}
+            checked={managedByCurrentBifrost}
             loading={proxyLoading}
             onChange={handleToggleSystemProxy}
           />

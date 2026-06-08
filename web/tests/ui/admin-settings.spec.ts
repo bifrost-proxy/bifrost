@@ -220,6 +220,7 @@ test("Settings 代理与证书卡片会反映 system proxy、cli proxy、下载�
   const systemProxy = (await systemProxyRes.json()) as {
     supported: boolean;
     enabled: boolean;
+    managed_by_bifrost?: boolean;
   };
   const cliProxyRes = await request.get(`${apiBase}/proxy/cli`);
   const cliProxy = (await cliProxyRes.json()) as {
@@ -244,7 +245,7 @@ test("Settings 代理与证书卡片会反映 system proxy、cli proxy、下载�
     await expect(page.getByTestId("settings-system-proxy-switch")).toBeVisible();
     await expect(page.getByTestId("settings-system-proxy-switch")).toHaveAttribute(
       "aria-checked",
-      String(systemProxy.enabled),
+      String(systemProxy.enabled && systemProxy.managed_by_bifrost !== false),
     );
   } else {
     await expect(page.locator("body")).toContainText("Not Supported");

@@ -2,25 +2,33 @@
 
 ## 功能模块说明
 
-本文档验证 `--log-output` 参数的默认行为修复（Bug 修复回归测试）：
+本文档验证 `--log-output` 全局参数的默认行为修复（Bug 修复回归测试）：
 
-**修复前的问题**：`--log-output` 默认值为 `console,file`，导致所有命令（stop、status、rule 等）都会向磁盘写入日志文件。
+**修复前的问题**：默认前台启动会把 tracing 标准日志写到 Console Terminal，后续无法在终端区域稳定承载额外交互能力。
 
 **修复后的预期行为**：
 - `start -d`（daemon 模式）：日志仅输出到文件（由 `reinit_logging_for_daemon` 控制）
-- `start`（前台模式）：日志默认仅输出到 console
-- 其他所有命令：日志默认仅输出到 console
-- 用户可通过 `--log-output file` 或 `--log-output console,file` 显式指定输出到文件
+- `start`（前台模式）：日志默认仅输出到文件，stdout/stderr 不出现 tracing 标准日志行
+- 其他所有命令：日志默认仅输出到文件，stdout/stderr 只保留命令协议或用户可见结果
+- 用户可通过全局 `--log-output console` 或 `--log-output console,file` 显式启用 Console Terminal 日志；文件日志仍保留
 
 ## 前置条件
 
 1. 确保项目已编译或可编译
 2. 确保端口 8800 未被占用
-3. 所有测试命令统一使用临时数据目录：
+3. 所有启动类测试必须禁用系统代理并禁用 Sync 自动登录弹窗：
+   ```bash
+   export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1
+   ```
+4. 本文档验证日志输出通道时统一显式设置 `RUST_LOG=info`，避免本机 shell 环境中的 `RUST_LOG=warn` 或更高等级把验证用日志过滤掉：
+   ```bash
+   export RUST_LOG=info
+   ```
+5. 所有测试命令统一使用临时数据目录：
    ```bash
    export BIFROST_DATA_DIR=./.bifrost-test
    ```
-4. 清理旧日志文件：
+6. 清理旧日志文件：
    ```bash
    rm -rf ./.bifrost-test/logs/bifrost*.log
    ```
@@ -29,7 +37,7 @@
 
 ## 测试用例
 
-### TC-LOD-01：status 命令默认不写日志文件
+### TC-LOD-01：status 命令默认写日志文件且不输出 tracing 标准日志
 
 **操作步骤**：
 1. 清理日志目录：
@@ -38,20 +46,22 @@
    ```
 2. 执行 status 命令（不带 --log-output 参数）：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- status 2>&1 || true
+   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- status > /tmp/bifrost-status.stdout 2> /tmp/bifrost-status.stderr || true
    ```
-3. 检查日志目录是否产生了日志文件：
+3. 检查日志目录是否产生了日志文件，且 stdout/stderr 不包含 tracing 标准日志行：
    ```bash
-   ls ./.bifrost-test/logs/bifrost*.log 2>/dev/null && echo "FAIL: log file created" || echo "PASS: no log file"
+   ls ./.bifrost-test/logs/bifrost*.log 2>/dev/null && echo "PASS: log file created" || echo "FAIL: no log file"
+   cat /tmp/bifrost-status.stdout /tmp/bifrost-status.stderr | grep -E '^[0-9T:\.-]+Z[[:space:]]+(TRACE|DEBUG|INFO|WARN|ERROR) ' && echo "FAIL: console tracing log" || echo "PASS: no console tracing log"
    ```
 
 **预期结果**：
-- 日志目录下不存在 `bifrost*.log` 文件
-- 终端输出 `PASS: no log file`
+- 日志目录下存在 `bifrost*.log` 文件
+- 终端输出 `PASS: log file created`
+- 终端输出 `PASS: no console tracing log`
 
 ---
 
-### TC-LOD-02：stop 命令默认不写日志文件
+### TC-LOD-02：stop 命令默认写日志文件且不输出 tracing 标准日志
 
 **操作步骤**：
 1. 清理日志目录：
@@ -60,20 +70,22 @@
    ```
 2. 执行 stop 命令（不带 --log-output 参数）：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- stop 2>&1 || true
+   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- stop > /tmp/bifrost-stop.stdout 2> /tmp/bifrost-stop.stderr || true
    ```
 3. 检查日志目录：
    ```bash
-   ls ./.bifrost-test/logs/bifrost*.log 2>/dev/null && echo "FAIL: log file created" || echo "PASS: no log file"
+   ls ./.bifrost-test/logs/bifrost*.log 2>/dev/null && echo "PASS: log file created" || echo "FAIL: no log file"
+   cat /tmp/bifrost-stop.stdout /tmp/bifrost-stop.stderr | grep -E '^[0-9T:\.-]+Z[[:space:]]+(TRACE|DEBUG|INFO|WARN|ERROR) ' && echo "FAIL: console tracing log" || echo "PASS: no console tracing log"
    ```
 
 **预期结果**：
-- 日志目录下不存在 `bifrost*.log` 文件
-- 终端输出 `PASS: no log file`
+- 日志目录下存在 `bifrost*.log` 文件
+- 终端输出 `PASS: log file created`
+- 终端输出 `PASS: no console tracing log`
 
 ---
 
-### TC-LOD-03：rule list 命令默认不写日志文件
+### TC-LOD-03：rule list 命令默认写日志文件且不输出 tracing 标准日志
 
 **操作步骤**：
 1. 清理日志目录：
@@ -82,60 +94,65 @@
    ```
 2. 执行 rule list 命令：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- rule list 2>&1 || true
+   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- rule list > /tmp/bifrost-rule-list.stdout 2> /tmp/bifrost-rule-list.stderr || true
    ```
 3. 检查日志目录：
    ```bash
-   ls ./.bifrost-test/logs/bifrost*.log 2>/dev/null && echo "FAIL: log file created" || echo "PASS: no log file"
+   ls ./.bifrost-test/logs/bifrost*.log 2>/dev/null && echo "PASS: log file created" || echo "FAIL: no log file"
+   cat /tmp/bifrost-rule-list.stdout /tmp/bifrost-rule-list.stderr | grep -E '^[0-9T:\.-]+Z[[:space:]]+(TRACE|DEBUG|INFO|WARN|ERROR) ' && echo "FAIL: console tracing log" || echo "PASS: no console tracing log"
    ```
 
 **预期结果**：
-- 日志目录下不存在 `bifrost*.log` 文件
+- 日志目录下存在 `bifrost*.log` 文件
+- 终端输出 `PASS: no console tracing log`
 
 ---
 
-### TC-LOD-04：非 start 命令使用 --log-output file 时写日志文件
+### TC-LOD-04：全局 --log-output console 显式启用 Console Terminal 日志且保留文件日志
 
 **操作步骤**：
 1. 清理日志目录：
    ```bash
    rm -rf ./.bifrost-test/logs/bifrost*.log
    ```
-2. 执行 status 命令并显式指定 --log-output file：
+2. 执行 status 命令并显式指定 --log-output console：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- --log-output file status 2>&1 || true
+   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- --log-output console status > /tmp/bifrost-status-console.stdout 2> /tmp/bifrost-status-console.stderr || true
    ```
-3. 检查日志目录：
+3. 检查日志目录和 stdout/stderr：
    ```bash
    ls ./.bifrost-test/logs/bifrost*.log 2>/dev/null && echo "PASS: log file created" || echo "FAIL: no log file"
+   cat /tmp/bifrost-status-console.stdout /tmp/bifrost-status-console.stderr | grep -E '^[0-9T:\.-]+Z[[:space:]]+(TRACE|DEBUG|INFO|WARN|ERROR) ' && echo "PASS: console tracing log enabled" || echo "FAIL: console tracing log missing"
    ```
 
 **预期结果**：
 - 日志目录下存在 `bifrost*.log` 文件
 - 终端输出 `PASS: log file created`
+- 终端输出 `PASS: console tracing log enabled`
 
 ---
 
-### TC-LOD-05：start 前台模式默认不写日志文件（回归验证）
+### TC-LOD-05：start 前台模式默认写文件且不输出 tracing 标准日志（回归验证）
 
 **操作步骤**：
 1. 清理日志目录：
    ```bash
    rm -rf ./.bifrost-test/logs/bifrost*.log
    ```
-2. 启动前台服务（不带 --log-output 参数），等待启动后立即停止：
+2. 启动前台服务（不带 --log-output 参数），必须禁用系统代理，等待启动后立即停止：
    ```bash
-   timeout 5 bash -c 'BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl' 2>&1 || true
+   timeout 8 bash -c 'BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --skip-cert-check --unsafe-ssl --no-system-proxy' > /tmp/bifrost-start.stdout 2> /tmp/bifrost-start.stderr || true
    ```
 3. 检查日志目录：
    ```bash
-   ls ./.bifrost-test/logs/bifrost*.log 2>/dev/null && echo "FAIL: log file created" || echo "PASS: no log file"
+   ls ./.bifrost-test/logs/bifrost*.log 2>/dev/null && echo "PASS: log file created" || echo "FAIL: no log file"
+   cat /tmp/bifrost-start.stdout /tmp/bifrost-start.stderr | grep -E '^[0-9T:\.-]+Z[[:space:]]+(TRACE|DEBUG|INFO|WARN|ERROR) ' && echo "FAIL: console tracing log" || echo "PASS: no console tracing log"
    ```
 
 **预期结果**：
-- 日志目录下不存在 `bifrost*.log` 文件
-- 终端输出 `PASS: no log file`
-- 日志信息仅在终端（console）中可见
+- 日志目录下存在 `bifrost*.log` 文件
+- 终端输出 `PASS: log file created`
+- 终端输出 `PASS: no console tracing log`
 
 ---
 
@@ -197,7 +214,7 @@
    ```
 4. 检查 daemon rolling log 是否包含带时间、级别、文件和行号的 tracing 日志：
    ```bash
-   grep -R -nE '^[0-9T:\.-]+Z (TRACE|DEBUG|INFO|WARN|ERROR) .+\.rs:[0-9]+:' \
+   grep -R -nE '^[0-9T:\.-]+Z[[:space:]]+(TRACE|DEBUG|INFO|WARN|ERROR) .+\.rs:[0-9]+:' \
      /tmp/bifrost-human-daemon-log-level/logs/bifrost*.log \
      && echo "PASS: structured daemon tracing log exists" \
      || echo "FAIL: structured daemon tracing log missing"
@@ -219,22 +236,22 @@
 ### TC-LOD-08：start 默认 info 日志不刷常态连接生命周期噪声（回归验证）
 
 **操作步骤**：
-1. 清理临时数据目录并准备日志文件：
+1. 清理临时数据目录并准备日志目录：
    ```bash
    rm -rf /tmp/bifrost-human-log-noise
-   mkdir -p /tmp/bifrost-human-log-noise
+   mkdir -p /tmp/bifrost-human-log-noise/logs
    ```
 2. 使用临时数据目录和非正式端口以前台模式启动服务，必须加载用户环境变量并禁用系统代理：
    ```bash
    source ~/.zshrc
-   BIFROST_DATA_DIR=/tmp/bifrost-human-log-noise/data CARGO_TARGET_DIR=/tmp/bifrost-human-log-noise/target RUST_LOG=info cargo run --bin bifrost -- start --host 127.0.0.1 -p 18884 --unsafe-ssl --no-system-proxy > /tmp/bifrost-human-log-noise/server.log 2>&1 &
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DATA_DIR=/tmp/bifrost-human-log-noise/data CARGO_TARGET_DIR=/tmp/bifrost-human-log-noise/target RUST_LOG=info cargo run --bin bifrost -- --log-dir /tmp/bifrost-human-log-noise/logs start --host 127.0.0.1 -p 18884 --skip-cert-check --unsafe-ssl --no-system-proxy > /tmp/bifrost-human-log-noise/server.stdout 2> /tmp/bifrost-human-log-noise/server.stderr &
    echo $! > /tmp/bifrost-human-log-noise/server.pid
    ```
-3. 等待代理监听启动完成：
+3. 等待管理端 API ready：
    ```bash
    for i in {1..60}; do
-     grep -q "Unified proxy server listening on 127.0.0.1:18884" /tmp/bifrost-human-log-noise/server.log && break
-     sleep 1
+     curl -fsS http://127.0.0.1:18884/_bifrost/api/proxy/address >/dev/null && break
+     sleep 0.5
    done
    ```
 4. 制造一次短连接提前关闭，模拟浏览器/健康检查类连接生命周期噪声：
@@ -249,7 +266,8 @@ PY
 5. 等待日志 flush 后检查默认 `info` 日志：
    ```bash
    sleep 2
-   grep -E "Noisy connection close|Failed to resolve client process after retries|Async client process resolution completed without a match|Push client registered|Push client unregistered|Client closed connection|WebSocket connection closed|dispatching SSE event.*ping" /tmp/bifrost-human-log-noise/server.log && echo "FAIL: noisy lifecycle logs visible at info" || echo "PASS: noisy lifecycle logs hidden at info"
+   grep -E "Noisy connection close|Failed to resolve client process after retries|Async client process resolution completed without a match|Push client registered|Push client unregistered|Client closed connection|WebSocket connection closed|dispatching SSE event.*ping" /tmp/bifrost-human-log-noise/logs/bifrost*.log && echo "FAIL: noisy lifecycle logs visible at info" || echo "PASS: noisy lifecycle logs hidden at info"
+   cat /tmp/bifrost-human-log-noise/server.stdout /tmp/bifrost-human-log-noise/server.stderr | grep -E '^[0-9T:\.-]+Z[[:space:]]+(TRACE|DEBUG|INFO|WARN|ERROR) ' && echo "FAIL: console tracing log" || echo "PASS: no console tracing log"
    ```
 6. 停止服务：
    ```bash
@@ -260,7 +278,8 @@ PY
 **预期结果**：
 - 服务在 `127.0.0.1:18884` 成功启动，且没有修改系统代理
 - 终端输出 `PASS: noisy lifecycle logs hidden at info`
-- `/tmp/bifrost-human-log-noise/server.log` 中不出现以下默认等级噪声：
+- 终端输出 `PASS: no console tracing log`
+- `/tmp/bifrost-human-log-noise/logs/bifrost*.log` 中不出现以下默认等级噪声：
   - `Noisy connection close`
   - `Failed to resolve client process after retries`
   - `Async client process resolution completed without a match`
@@ -273,10 +292,10 @@ PY
 ### TC-LOD-09：start 默认 info 日志不刷规则命中详情（回归验证）
 
 **操作步骤**：
-1. 清理临时数据目录并准备日志文件：
+1. 清理临时数据目录并准备日志目录：
    ```bash
    rm -rf /tmp/bifrost-human-rule-log-noise
-   mkdir -p /tmp/bifrost-human-rule-log-noise
+   mkdir -p /tmp/bifrost-human-rule-log-noise/info-logs /tmp/bifrost-human-rule-log-noise/debug-logs
    ```
 2. 先基于当前源码编译最新二进制：
    ```bash
@@ -285,14 +304,14 @@ PY
    ```
 3. 使用临时数据目录和非正式端口以前台模式启动服务，必须加载用户环境变量并禁用系统代理：
    ```bash
-   BIFROST_DATA_DIR=/tmp/bifrost-human-rule-log-noise/data RUST_LOG=info /tmp/bifrost-human-rule-log-noise/target/debug/bifrost start --host 127.0.0.1 -p 18885 --unsafe-ssl --no-system-proxy --rules "example.test status://200 resBody://ok" > /tmp/bifrost-human-rule-log-noise/info.log 2>&1 &
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DATA_DIR=/tmp/bifrost-human-rule-log-noise/data RUST_LOG=info /tmp/bifrost-human-rule-log-noise/target/debug/bifrost --log-dir /tmp/bifrost-human-rule-log-noise/info-logs start --host 127.0.0.1 -p 18885 --skip-cert-check --unsafe-ssl --no-system-proxy --rules "example.test status://200 resBody://ok" > /tmp/bifrost-human-rule-log-noise/info.stdout 2> /tmp/bifrost-human-rule-log-noise/info.stderr &
    echo $! > /tmp/bifrost-human-rule-log-noise/info.pid
    ```
-4. 等待代理监听启动完成：
+4. 等待管理端 API ready：
    ```bash
    for i in {1..60}; do
-     grep -q "Unified proxy server listening on 127.0.0.1:18885" /tmp/bifrost-human-rule-log-noise/info.log && break
-     sleep 1
+     curl -fsS http://127.0.0.1:18885/_bifrost/api/proxy/address >/dev/null && break
+     sleep 0.5
    done
    ```
 5. 通过代理请求命中规则：
@@ -302,7 +321,8 @@ PY
 6. 等待日志 flush 后检查默认 `info` 日志：
    ```bash
    sleep 1
-   grep -E "rule MATCHED|rules matched for request|matched rule detail" /tmp/bifrost-human-rule-log-noise/info.log && echo "FAIL: rule match logs visible at info" || echo "PASS: rule match logs hidden at info"
+   grep -E "rule MATCHED|rules matched for request|matched rule detail" /tmp/bifrost-human-rule-log-noise/info-logs/bifrost*.log && echo "FAIL: rule match logs visible at info" || echo "PASS: rule match logs hidden at info"
+   cat /tmp/bifrost-human-rule-log-noise/info.stdout /tmp/bifrost-human-rule-log-noise/info.stderr | grep -E '^[0-9T:\.-]+Z[[:space:]]+(TRACE|DEBUG|INFO|WARN|ERROR) ' && echo "FAIL: console tracing log" || echo "PASS: no console tracing log"
    ```
 7. 停止 info 服务：
    ```bash
@@ -311,18 +331,18 @@ PY
    ```
 8. 再次以前台模式启动服务，但显式打开规则调试日志：
    ```bash
-   BIFROST_DATA_DIR=/tmp/bifrost-human-rule-log-noise/data-debug RUST_LOG='bifrost_core::rules=debug,bifrost_proxy::rules=trace,info' /tmp/bifrost-human-rule-log-noise/target/debug/bifrost start --host 127.0.0.1 -p 18886 --unsafe-ssl --no-system-proxy --rules "example.test status://200 resBody://ok" > /tmp/bifrost-human-rule-log-noise/debug.log 2>&1 &
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DATA_DIR=/tmp/bifrost-human-rule-log-noise/data-debug RUST_LOG='bifrost_core::rules=debug,bifrost_proxy::rules=trace,info' /tmp/bifrost-human-rule-log-noise/target/debug/bifrost --log-dir /tmp/bifrost-human-rule-log-noise/debug-logs start --host 127.0.0.1 -p 18886 --skip-cert-check --unsafe-ssl --no-system-proxy --rules "example.test status://200 resBody://ok" > /tmp/bifrost-human-rule-log-noise/debug.stdout 2> /tmp/bifrost-human-rule-log-noise/debug.stderr &
    echo $! > /tmp/bifrost-human-rule-log-noise/debug.pid
    for i in {1..60}; do
-     grep -q "Unified proxy server listening on 127.0.0.1:18886" /tmp/bifrost-human-rule-log-noise/debug.log && break
-     sleep 1
+     curl -fsS http://127.0.0.1:18886/_bifrost/api/proxy/address >/dev/null && break
+     sleep 0.5
    done
    ```
 9. 通过代理请求命中规则并检查调试日志：
    ```bash
    http_proxy=http://127.0.0.1:18886 https_proxy=http://127.0.0.1:18886 no_proxy= curl -sS --max-time 5 http://example.test/
    sleep 1
-   grep -E "rule MATCHED|rules matched for request|matched rule detail" /tmp/bifrost-human-rule-log-noise/debug.log && echo "PASS: rule match logs visible when explicitly enabled" || echo "FAIL: rule match logs missing when explicitly enabled"
+   grep -E "rule MATCHED|rules matched for request|matched rule detail" /tmp/bifrost-human-rule-log-noise/debug-logs/bifrost*.log && echo "PASS: rule match logs visible when explicitly enabled" || echo "FAIL: rule match logs missing when explicitly enabled"
    ```
 10. 停止 debug 服务：
    ```bash
@@ -334,7 +354,68 @@ PY
 - 服务分别在 `127.0.0.1:18885` 和 `127.0.0.1:18886` 成功启动，且没有修改系统代理
 - 两次代理请求均返回 `ok`
 - 默认 `RUST_LOG=info` 时输出 `PASS: rule match logs hidden at info`
+- 默认启动 stdout/stderr 输出 `PASS: no console tracing log`
 - 显式 `RUST_LOG='bifrost_core::rules=debug,bifrost_proxy::rules=trace,info'` 时输出 `PASS: rule match logs visible when explicitly enabled`
+
+---
+
+### TC-LOD-10：macOS LaunchDaemon cleanup 隐藏命令保留 console 日志（回归验证）
+
+**操作步骤**：
+1. 清理临时数据目录并构建当前 release 二进制：
+   ```bash
+   rm -rf /tmp/bifrost-human-launchd-log
+   mkdir -p /tmp/bifrost-human-launchd-log/data /tmp/bifrost-human-launchd-log/logs
+   source ~/.zshrc
+   cargo build --release --bin bifrost
+   ```
+2. 在 macOS 上运行隐藏的 cleanup daemon 命令，模拟 LaunchDaemon 的 `StandardOutPath` / `StandardErrorPath` 重定向：
+   ```bash
+   BIFROST_DATA_DIR=/tmp/bifrost-human-launchd-log/data \
+   target/release/bifrost --log-dir /tmp/bifrost-human-launchd-log/logs \
+     system-proxy cleanup-daemon \
+     --data-dir /tmp/bifrost-human-launchd-log/data \
+     > /tmp/bifrost-human-launchd-log/stdout.log \
+     2> /tmp/bifrost-human-launchd-log/stderr.log
+   ```
+3. 检查 rolling file 和 stdout/stderr：
+   ```bash
+   ls /tmp/bifrost-human-launchd-log/logs/bifrost*.log 2>/dev/null && echo "PASS: file log created" || echo "FAIL: no file log"
+   cat /tmp/bifrost-human-launchd-log/stdout.log /tmp/bifrost-human-launchd-log/stderr.log | grep -E '^[0-9T:\.-]+Z[[:space:]]+(TRACE|DEBUG|INFO|WARN|ERROR) ' && echo "PASS: launchd console tracing log kept" || echo "FAIL: launchd console tracing log missing"
+   ```
+4. 清理临时目录：
+   ```bash
+   rm -rf /tmp/bifrost-human-launchd-log
+   ```
+
+**预期结果**：
+- rolling file 日志存在
+- stdout/stderr 中出现 cleanup daemon 的 tracing 日志行，证明 LaunchDaemon `StandardOutPath` / `StandardErrorPath` 场景没有被默认 file-only 行为静音
+- 该例外仅适用于 macOS `system-proxy cleanup-daemon` 隐藏命令；普通 `start` 默认仍不输出 Console tracing 日志
+
+---
+
+### TC-LOD-11：日志断言类 E2E 显式启用 Console tracing（CI 回归验证）
+
+**操作步骤**：
+1. 执行 ChatGPT Web startup auth 预检脚本：
+   ```bash
+   SKIP_BUILD=true e2e-tests/tests/test_chatgpt_web_startup_auth_preflight.sh
+   ```
+2. 执行规则匹配日志噪声脚本：
+   ```bash
+   SKIP_BUILD=true e2e-tests/tests/test_rule_match_logging_noise.sh
+   ```
+3. 执行 SOCKS5 TLS routing exceptions 脚本：
+   ```bash
+   SKIP_BUILD=true e2e-tests/tests/test_socks5_tls_routing_exceptions.sh
+   ```
+4. 检查以上脚本中的 Bifrost 启动命令：只有需要读取 tracing stdout 的断言场景才显式传入 `--log-output console,file`。
+
+**预期结果**：
+- 三个脚本均通过。
+- 需要断言 tracing 日志内容的脚本可以在重定向日志文件中读到目标日志。
+- 普通默认 `start` 行为不被放宽，仍按 TC-LOD-05 验证为不输出 Console tracing 日志。
 
 ---
 
@@ -345,4 +426,11 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- stop 2>/dev/null || 
 rm -rf ./.bifrost-test
 rm -rf /tmp/bifrost-human-log-noise
 rm -rf /tmp/bifrost-human-rule-log-noise
+rm -rf /tmp/bifrost-human-launchd-log
 ```
+
+## 执行记录
+
+| 日期 | 用例 | 实际结果 | 结论 |
+| --- | --- | --- | --- |
+| 2026-06-08 | TC-LOD-11 | 已执行 `SKIP_BUILD=true e2e-tests/tests/test_chatgpt_web_startup_auth_preflight.sh`、`SKIP_BUILD=true e2e-tests/tests/test_rule_match_logging_noise.sh`、`SKIP_BUILD=true e2e-tests/tests/test_socks5_tls_routing_exceptions.sh`；三者均通过。CI 失败 artifacts 证实旧脚本在 Linux/macOS 中依赖默认 stdout tracing，修复后这些日志断言脚本改为显式 `--log-output console,file`。 | 通过 |

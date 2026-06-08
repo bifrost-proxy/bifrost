@@ -63,16 +63,20 @@ check_proxy_available() {
 }
 
 check_mock_server_available() {
-    if ! nc -z 127.0.0.1 "$HTTPS_MOCK_PORT" 2>/dev/null; then
-        return 1
-    fi
-    return 0
+    local body
+    body="$(curl -ksS --connect-timeout 1 --max-time 3 "https://127.0.0.1:${HTTPS_MOCK_PORT}/echo" 2>/dev/null || true)"
+    echo "$body" | grep -q '"type": "https_echo_server"'
 }
 
 start_https_mock_server() {
     if check_mock_server_available; then
         log_info "Using existing HTTPS mock server on port $HTTPS_MOCK_PORT"
         return 0
+    fi
+
+    if nc -z 127.0.0.1 "$HTTPS_MOCK_PORT" 2>/dev/null; then
+        HTTPS_MOCK_PORT="$(allocate_free_port)"
+        log_info "Selected alternate HTTPS mock port $HTTPS_MOCK_PORT because requested port was occupied by a non-mock service"
     fi
 
     local mock_log_dir="${SERVER_LOG_DIR:-${BIFROST_DATA_DIR:-/tmp}}"

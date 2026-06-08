@@ -131,7 +131,7 @@ start_downstream_proxy() {
 
     mkdir -p "$DOWNSTREAM_DATA_DIR"
     BIFROST_DATA_DIR="$DOWNSTREAM_DATA_DIR" \
-    RUST_LOG=bifrost_proxy=debug "$BIFROST_BIN" -p "$DOWNSTREAM_PROXY_PORT" start \
+    RUST_LOG=bifrost_proxy=debug "$BIFROST_BIN" -p "$DOWNSTREAM_PROXY_PORT" --log-output console,file start \
         --unsafe-ssl \
         --skip-cert-check \
         --no-intercept \
@@ -152,7 +152,7 @@ start_proxy() {
 
     mkdir -p "$UPSTREAM_DATA_DIR"
     export BIFROST_DATA_DIR="$UPSTREAM_DATA_DIR"
-    RUST_LOG=bifrost_proxy=debug "$BIFROST_BIN" -p "$PROXY_PORT" --socks5-port "$SOCKS5_PORT" start \
+    RUST_LOG=bifrost_proxy=debug "$BIFROST_BIN" -p "$PROXY_PORT" --socks5-port "$SOCKS5_PORT" --log-output console,file start \
         --unsafe-ssl \
         --skip-cert-check \
         --no-intercept \

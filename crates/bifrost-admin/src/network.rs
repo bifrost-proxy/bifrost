@@ -9,6 +9,19 @@ pub struct LocalIpInfo {
 }
 
 pub fn get_local_ips() -> Vec<LocalIpInfo> {
+    let mut results = get_effective_local_ips();
+
+    if results.is_empty() {
+        results.push(LocalIpInfo {
+            ip: "127.0.0.1".to_string(),
+            is_preferred: true,
+        });
+    }
+
+    results
+}
+
+pub fn get_effective_local_ips() -> Vec<LocalIpInfo> {
     let preferred_ip = detect_preferred_ip();
     let mut seen = std::collections::HashSet::<String>::new();
     let mut results = Vec::new();
@@ -28,7 +41,7 @@ pub fn get_local_ips() -> Vec<LocalIpInfo> {
                 } else {
                     continue;
                 };
-                if !is_routable_private_ip(&ip) {
+                if !is_effective_client_ip(&ip) {
                     continue;
                 }
                 let ip_str = ip.to_string();
@@ -53,7 +66,7 @@ pub fn get_local_ips() -> Vec<LocalIpInfo> {
                 if is_virtual_interface_name(&name) {
                     continue;
                 }
-                if !is_routable_private_ip(&ip) {
+                if !is_effective_client_ip(&ip) {
                     continue;
                 }
                 let ip_str = ip.to_string();
@@ -82,13 +95,6 @@ pub fn get_local_ips() -> Vec<LocalIpInfo> {
 
     results.sort_by_key(|b| std::cmp::Reverse(b.is_preferred));
 
-    if results.is_empty() {
-        results.push(LocalIpInfo {
-            ip: "127.0.0.1".to_string(),
-            is_preferred: true,
-        });
-    }
-
     results
 }
 
@@ -100,20 +106,35 @@ fn detect_preferred_ip() -> Option<String> {
     if ip.is_loopback() || ip.is_unspecified() {
         return None;
     }
-    if !is_routable_private_ip(&ip) {
+    if !is_effective_client_ip(&ip) {
         return None;
     }
     Some(ip.to_string())
 }
 
-fn is_routable_private_ip(ip: &IpAddr) -> bool {
+pub fn is_effective_client_ip(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(ipv4) => {
-            if ipv4.is_loopback() || ipv4.is_link_local() || ipv4.is_unspecified() {
+            if ipv4.is_loopback()
+                || ipv4.is_link_local()
+                || ipv4.is_unspecified()
+                || ipv4.is_multicast()
+                || ipv4.is_broadcast()
+                || ipv4.is_documentation()
+            {
                 return false;
             }
             let octets = ipv4.octets();
-            ipv4.is_private() || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+            if octets[0] == 0 || octets[0] >= 224 {
+                return false;
+            }
+            if octets[0] == 169 && octets[1] == 254 {
+                return false;
+            }
+            if octets[0] == 198 && (18..=19).contains(&octets[1]) {
+                return false;
+            }
+            true
         }
         IpAddr::V6(_) => false,
     }
@@ -295,57 +316,63 @@ mod tests {
     }
 
     #[test]
-    fn test_is_routable_private_ip_accepts_private() {
+    fn test_is_effective_client_ip_accepts_private() {
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
-        assert!(is_routable_private_ip(&ip));
+        assert!(is_effective_client_ip(&ip));
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
-        assert!(is_routable_private_ip(&ip));
+        assert!(is_effective_client_ip(&ip));
         let ip: IpAddr = "172.16.0.1".parse().unwrap();
-        assert!(is_routable_private_ip(&ip));
+        assert!(is_effective_client_ip(&ip));
     }
 
     #[test]
-    fn test_is_routable_private_ip_rejects_loopback() {
+    fn test_is_effective_client_ip_rejects_loopback() {
         let ip: IpAddr = "127.0.0.1".parse().unwrap();
-        assert!(!is_routable_private_ip(&ip));
+        assert!(!is_effective_client_ip(&ip));
     }
 
     #[test]
-    fn test_is_routable_private_ip_rejects_link_local() {
+    fn test_is_effective_client_ip_rejects_link_local() {
         let ip: IpAddr = "169.254.1.1".parse().unwrap();
-        assert!(!is_routable_private_ip(&ip));
+        assert!(!is_effective_client_ip(&ip));
     }
 
     #[test]
-    fn test_is_routable_private_ip_accepts_cgn() {
+    fn test_is_effective_client_ip_accepts_cgn() {
         let ip: IpAddr = "100.64.0.1".parse().unwrap();
-        assert!(is_routable_private_ip(&ip));
+        assert!(is_effective_client_ip(&ip));
         let ip: IpAddr = "100.86.178.33".parse().unwrap();
-        assert!(is_routable_private_ip(&ip));
+        assert!(is_effective_client_ip(&ip));
         let ip: IpAddr = "100.127.255.255".parse().unwrap();
-        assert!(is_routable_private_ip(&ip));
+        assert!(is_effective_client_ip(&ip));
     }
 
     #[test]
-    fn test_is_routable_private_ip_rejects_non_cgn_100() {
+    fn test_is_effective_client_ip_accepts_public() {
         let ip: IpAddr = "100.63.255.255".parse().unwrap();
-        assert!(!is_routable_private_ip(&ip));
+        assert!(is_effective_client_ip(&ip));
         let ip: IpAddr = "100.128.0.1".parse().unwrap();
-        assert!(!is_routable_private_ip(&ip));
-    }
-
-    #[test]
-    fn test_is_routable_private_ip_rejects_public() {
+        assert!(is_effective_client_ip(&ip));
         let ip: IpAddr = "8.8.8.8".parse().unwrap();
-        assert!(!is_routable_private_ip(&ip));
+        assert!(is_effective_client_ip(&ip));
     }
 
     #[test]
-    fn test_is_routable_private_ip_rejects_ipv6() {
+    fn test_is_effective_client_ip_rejects_special_public_ranges() {
+        let ip: IpAddr = "192.0.2.1".parse().unwrap();
+        assert!(!is_effective_client_ip(&ip));
+        let ip: IpAddr = "198.18.0.1".parse().unwrap();
+        assert!(!is_effective_client_ip(&ip));
+        let ip: IpAddr = "224.0.0.1".parse().unwrap();
+        assert!(!is_effective_client_ip(&ip));
+    }
+
+    #[test]
+    fn test_is_effective_client_ip_rejects_ipv6() {
         let ip: IpAddr = "::1".parse().unwrap();
-        assert!(!is_routable_private_ip(&ip));
+        assert!(!is_effective_client_ip(&ip));
         let ip: IpAddr = "fe80::1".parse().unwrap();
-        assert!(!is_routable_private_ip(&ip));
+        assert!(!is_effective_client_ip(&ip));
     }
 
     #[test]

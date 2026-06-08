@@ -65,7 +65,7 @@ mkdir -p "$TEST_ROOT"
 
 BIFROST_DATA_DIR="${TEST_ROOT}/data-info" \
     RUST_LOG=info \
-    "$BIFROST_BIN" start \
+    "$BIFROST_BIN" --log-output console,file start \
     --host 127.0.0.1 \
     -p 18887 \
     --unsafe-ssl \
@@ -90,7 +90,7 @@ INFO_PID=""
 
 BIFROST_DATA_DIR="${TEST_ROOT}/data-debug" \
     RUST_LOG="bifrost_core::rules=debug,bifrost_proxy::rules=trace,info" \
-    "$BIFROST_BIN" start \
+    "$BIFROST_BIN" --log-output console,file start \
     --host 127.0.0.1 \
     -p 18888 \
     --unsafe-ssl \

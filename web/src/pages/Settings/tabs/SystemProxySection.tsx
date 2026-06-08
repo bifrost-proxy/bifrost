@@ -97,7 +97,7 @@ export default function SystemProxySection({
               {systemProxy ? (
                 systemProxy.supported ? (
                   <Switch
-                    checked={systemProxyConfiguredEnabled}
+                    checked={systemProxyEnabledByBifrost}
                     loading={systemProxyLoading}
                     onChange={onToggleSystemProxy}
                     data-testid="settings-system-proxy-switch"

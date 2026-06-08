@@ -18,6 +18,7 @@ mod handlers;
 pub mod im_gateway;
 pub mod ip_tls_pending;
 mod metrics;
+pub mod mobile_availability;
 pub mod network;
 pub mod notification_db;
 pub mod openapi;
@@ -143,8 +144,8 @@ pub use ws_payload_store::{
 
 pub use handlers::remote_invoke::SharedRemoteInvokeWorker;
 pub use handlers::trust_probe::{
-    handle_trust_probe_proxy_configured_request, TRUST_PROBE_PROXY_CONFIG_HOST,
-    TRUST_PROBE_PROXY_CONFIG_PATH,
+    handle_trust_probe_proxy_configured_request, is_active_trust_probe_target,
+    TRUST_PROBE_PROXY_CONFIG_HOST, TRUST_PROBE_PROXY_CONFIG_PATH,
 };
 pub use remote_invoke::{
     identity::Identity as RemoteInvokeIdentity, types::RemoteInvokeConfig,
@@ -173,3 +174,4 @@ pub const CERT_PUBLIC_PATH_PREFIX: &str = "/_bifrost/public/cert";
 pub const MOBILE_PUBLIC_PATH_PREFIX: &str = "/_bifrost/public/mobile";
 pub const PROXY_PUBLIC_PATH_PREFIX: &str = "/_bifrost/public/proxy";
 pub const TRUST_PROBE_PUBLIC_PATH_PREFIX: &str = "/_bifrost/public/trust-probe";
+pub const TRUST_PROBE_SHORT_PUBLIC_PATH: &str = "/_bifrost/tp";

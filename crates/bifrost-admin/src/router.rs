@@ -99,7 +99,7 @@ impl AdminRouter {
             handle_mobile_public(req, state, &admin_path).await
         } else if admin_path.starts_with("/public/proxy") {
             handle_proxy_public(req, state, &admin_path).await
-        } else if admin_path.starts_with("/public/trust-probe") {
+        } else if admin_path.starts_with("/public/trust-probe") || admin_path == "/tp" {
             handle_trust_probe_public(req, state, push_manager.clone(), &admin_path).await
         } else if admin_path.starts_with("/public/sync-login") {
             handle_sync_public(req, state, &admin_path).await

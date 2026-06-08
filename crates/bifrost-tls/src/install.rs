@@ -689,7 +689,7 @@ fn run_macos_security_add_trusted_cert_gui(cert_path: &Path) -> Result<()> {
             cert_path.display()
         ))
     })?;
-    run_macos_security_with_authorization(&[
+    let args = [
         "add-trusted-cert",
         "-d",
         "-r",
@@ -697,7 +697,69 @@ fn run_macos_security_add_trusted_cert_gui(cert_path: &Path) -> Result<()> {
         "-k",
         "/Library/Keychains/System.keychain",
         cert_path,
-    ])
+    ];
+    match run_macos_security_with_authorization(&args) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            if is_macos_user_cancelled(&error.to_string()) {
+                return Err(error);
+            }
+            run_macos_security_add_trusted_cert_osascript(cert_path).map_err(|fallback_error| {
+                BifrostError::Tls(format!(
+                    "{error}; AppleScript administrator authorization fallback failed: {fallback_error}"
+                ))
+            })
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn run_macos_security_add_trusted_cert_osascript(cert_path: &str) -> Result<()> {
+    let command = format!(
+        "/usr/bin/security add-trusted-cert -d -r trustRoot -k {} {}",
+        shell_quote("/Library/Keychains/System.keychain"),
+        shell_quote(cert_path)
+    );
+    let script = format!(
+        "do shell script {} with administrator privileges",
+        applescript_string_literal(&command)
+    );
+    let output = Command::new("/usr/bin/osascript")
+        .args(["-e", &script])
+        .output()
+        .map_err(|error| {
+            BifrostError::Tls(format!(
+                "Failed to execute osascript administrator authorization: {error}"
+            ))
+        })?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if is_macos_user_cancelled(&stderr) {
+        return Err(BifrostError::Tls(format!(
+            "UserCancelled: {}",
+            stderr.trim()
+        )));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Err(BifrostError::Tls(format!(
+        "osascript administrator authorization failed: {} {}",
+        stdout.trim(),
+        stderr.trim()
+    )))
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn applescript_string_literal(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 #[cfg(target_os = "macos")]
@@ -1015,6 +1077,18 @@ mod tests {
         assert_eq!(
             parse_security_sha256_fingerprint("sha-256 hash: ab:cd ef"),
             Some("ABCDEF".to_string())
+        );
+    }
+
+    #[test]
+    fn test_macos_authorization_fallback_quoting_helpers() {
+        assert_eq!(
+            shell_quote("/tmp/Bifrost CA's cert.crt"),
+            "'/tmp/Bifrost CA'\\''s cert.crt'"
+        );
+        assert_eq!(
+            applescript_string_literal("/usr/bin/security \"quoted\" \\\\ path"),
+            "\"/usr/bin/security \\\"quoted\\\" \\\\\\\\ path\""
         );
     }
 

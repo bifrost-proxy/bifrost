@@ -69,7 +69,7 @@ bifrost [OPTIONS] [COMMAND]
 | `-H, --host <HOST>` | 监听地址 | `0.0.0.0` |
 | `--socks5-port <PORT>` | SOCKS5 端口 | 无 |
 | `-l, --log-level <LEVEL>` | 日志级别 | `info` |
-| `--log-output <TARGETS>` | 日志输出目标：`console` / `file` / `console,file` | `console` |
+| `--log-output <TARGETS>` | 日志输出目标：`file` / `console` / `console,file`；默认写文件，显式 `console` 会额外输出到终端且仍保留文件日志 | `file` |
 | `--log-dir <DIR>` | 日志目录（默认：`<data_dir>/logs`） | 无 |
 | `--log-retention-days <DAYS>` | 日志保留天数 | `7` |
 | `-h, --help` | 显示帮助 | - |

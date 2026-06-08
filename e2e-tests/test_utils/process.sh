@@ -108,7 +108,43 @@ kill_bifrost_on_port() {
         if [ -n "$pids" ]; then
             echo "$pids" | while IFS= read -r pid; do
                 pid="$(echo "$pid" | tr -d '[:space:]')"
-                [[ -n "$pid" ]] && kill -9 "$pid" 2>/dev/null || true
+                if [[ -n "$pid" ]]; then
+                    kill -INT "$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+                fi
+            done
+
+            local wait_count=0
+            while [[ $wait_count -lt 20 ]]; do
+                local remaining=""
+                if command -v lsof &>/dev/null; then
+                    remaining="$(lsof -ti :"$port" 2>/dev/null || true)"
+                fi
+                if [[ -z "$remaining" ]]; then
+                    break
+                fi
+                sleep 0.25
+                wait_count=$((wait_count + 1))
+            done
+
+            local remaining=""
+            if command -v lsof &>/dev/null; then
+                remaining="$(lsof -ti :"$port" 2>/dev/null || true)"
+            fi
+            if [[ -n "$remaining" ]]; then
+                echo "$remaining" | while IFS= read -r pid; do
+                    pid="$(echo "$pid" | tr -d '[:space:]')"
+                    if [[ -n "$pid" ]]; then
+                        kill -9 "$pid" 2>/dev/null || true
+                        wait "$pid" 2>/dev/null || true
+                    fi
+                done
+            fi
+
+            echo "$pids" | while IFS= read -r pid; do
+                pid="$(echo "$pid" | tr -d '[:space:]')"
+                if [[ -n "$pid" ]]; then
+                    wait "$pid" 2>/dev/null || true
+                fi
             done
         fi
     fi
@@ -393,9 +429,13 @@ safe_cleanup_proxy() {
         return 0
     fi
 
-    kill_pid "$pid"
+    if is_windows; then
+        kill_pid "$pid"
+    else
+        kill -INT "$pid" 2>/dev/null || kill_pid "$pid"
+    fi
 
-    local timeout=5
+    local timeout="${BIFROST_E2E_CLEANUP_TIMEOUT:-10}"
     local elapsed=0
     while kill -0 "$pid" 2>/dev/null; do
         sleep 0.2
@@ -407,7 +447,10 @@ safe_cleanup_proxy() {
 
     if kill -0 "$pid" 2>/dev/null; then
         kill_pid_force "$pid"
+        wait "$pid" 2>/dev/null || true
         sleep 0.5
+    else
+        wait "$pid" 2>/dev/null || true
     fi
 
     if is_windows; then

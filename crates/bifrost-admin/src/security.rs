@@ -4,7 +4,7 @@ use hyper::Request;
 
 use crate::{
     CERT_PUBLIC_PATH_PREFIX, MOBILE_PUBLIC_PATH_PREFIX, PROXY_PUBLIC_PATH_PREFIX,
-    TRUST_PROBE_PUBLIC_PATH_PREFIX,
+    TRUST_PROBE_PUBLIC_PATH_PREFIX, TRUST_PROBE_SHORT_PUBLIC_PATH,
 };
 
 #[derive(Debug, Clone)]
@@ -34,6 +34,7 @@ pub fn is_cert_public_request<T>(req: &Request<T>) -> bool {
         && !path.starts_with(MOBILE_PUBLIC_PATH_PREFIX)
         && !path.starts_with(PROXY_PUBLIC_PATH_PREFIX)
         && !path.starts_with(TRUST_PROBE_PUBLIC_PATH_PREFIX)
+        && path != TRUST_PROBE_SHORT_PUBLIC_PATH
     {
         return false;
     }
@@ -177,6 +178,13 @@ mod tests {
             "http://127.0.0.1:9900/_bifrost/public/trust-probe/00000000-0000-0000-0000-000000000000?t=token",
             Some("127.0.0.1:9900"),
         );
+
+        assert!(is_cert_public_request(&req));
+    }
+
+    #[test]
+    fn test_accept_short_public_trust_probe_request() {
+        let req = create_request("http://127.0.0.1:9900/_bifrost/tp", Some("127.0.0.1:9900"));
 
         assert!(is_cert_public_request(&req));
     }
