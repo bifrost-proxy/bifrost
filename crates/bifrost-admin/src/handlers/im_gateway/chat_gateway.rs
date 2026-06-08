@@ -2174,15 +2174,15 @@ fn record_external_cli_web_turn_result(
     } else {
         "failed"
     };
-    if let Err(error) =
-        recorder.record_run_state(session_key, run_state, Some("web"), Some(runner_id))
-    {
-        tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner final state");
-    }
     if !result.response.trim().is_empty() {
         if let Err(error) = recorder.record_assistant_message(session_key, &result.response) {
             tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner assistant message");
         }
+    }
+    if let Err(error) =
+        recorder.record_run_state(session_key, run_state, Some("web"), Some(runner_id))
+    {
+        tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner final state");
     }
 }
 
@@ -2313,16 +2313,10 @@ pub(super) fn record_external_cli_progress_event_to_timeline(
             }
         }
         EventType::RunFinished => {
-            if let Err(error) = recorder.record_run_state(
-                session_key,
-                "completed",
-                Some(source_channel),
-                Some(runner_id),
-            ) {
-                tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner completed progress state");
-            } else {
-                changed = true;
-            }
+            // stdout progress can contain `turn.completed` before the runner has flushed the
+            // final response into `last_message.md` / result state. Keep the canonical session
+            // running until `record_external_cli_web_turn_result` writes the final assistant
+            // message and terminal run_state together.
         }
         EventType::RunFailed => {
             if let Err(error) = recorder.record_run_state(
@@ -2920,6 +2914,145 @@ mod tests {
                 && event.content.get("result").and_then(|v| v.as_str()) == Some("pwd ok")
                 && event.content.get("success").and_then(|v| v.as_bool()) == Some(true)
         }));
+    }
+
+    #[test]
+    fn external_runner_progress_run_finished_does_not_complete_before_final_response() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
+        let session_key = "external-progress-finished-before-final";
+        let data_dir = bifrost_agent::config::agent_home_dir();
+        let mut recorder =
+            bifrost_agent::persistence::ConversationRecorder::new(&data_dir, session_key);
+        recorder
+            .record_session_start(
+                session_key,
+                serde_json::json!({"source": "admin-api", "adapter": "traex"}),
+            )
+            .expect("record start");
+
+        record_external_cli_progress_event_to_timeline(
+            &mut recorder,
+            session_key,
+            "web",
+            "traex",
+            "traex",
+            &crate::im_gateway::external_cli::ExternalCliProgressEvent {
+                event_type:
+                    crate::im_gateway::external_cli::ExternalCliProgressEventType::RunStarted,
+                content: "turn started".to_string(),
+                title: Some("Codex turn".to_string()),
+                raw: serde_json::json!({"type":"turn.started"}),
+            },
+        );
+        record_external_cli_progress_event_to_timeline(
+            &mut recorder,
+            session_key,
+            "web",
+            "traex",
+            "traex",
+            &crate::im_gateway::external_cli::ExternalCliProgressEvent {
+                event_type:
+                    crate::im_gateway::external_cli::ExternalCliProgressEventType::RunFinished,
+                content: "turn completed".to_string(),
+                title: Some("Codex turn".to_string()),
+                raw: serde_json::json!({"type":"turn.completed"}),
+            },
+        );
+
+        let summary = bifrost_agent::persistence::scan_session_summary(recorder.file_path());
+        assert_eq!(summary.run_state.as_deref(), Some("running"));
+        let events = bifrost_agent::persistence::load_conversation_events(recorder.file_path())
+            .expect("load progress events");
+        assert!(!events.iter().any(|event| {
+            event.event_type == bifrost_agent::persistence::event_types::RUN_STATE_CHANGED
+                && event.content.get("state").and_then(|value| value.as_str()) == Some("completed")
+        }));
+    }
+
+    #[test]
+    fn external_runner_final_result_records_message_before_completed_state() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
+        let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
+            images: Vec::new(),
+            message: "explain the image".to_string(),
+            operation: "chat".to_string(),
+            params: serde_json::Value::Null,
+            provider_id: None,
+            runner_id: Some("traex".to_string()),
+            session_key: Some("traex-final-order-session".to_string()),
+            runtime: "local".to_string(),
+            adapter: "traex".to_string(),
+            work_dir: Some(std::path::PathBuf::from("/tmp/traex-workspace")),
+            instructions: None,
+            adapter_config: Default::default(),
+            allow_work_dirs: Vec::new(),
+            inject_bifrost_tools: false,
+            skill_paths: Vec::new(),
+        };
+        remember_external_cli_started_state(&request, "traex");
+
+        let result = crate::im_gateway::external_cli::ExternalCliRunResult {
+            run_id: "run-traex-final-order".to_string(),
+            session_key: request.session_key.clone(),
+            runtime: request.runtime.clone(),
+            adapter: request.adapter.clone(),
+            status: crate::im_gateway::external_cli::ExternalCliRunStatus::Succeeded,
+            exit_code: Some(0),
+            response: "final Traex answer".to_string(),
+            responses: Vec::new(),
+            started_at: 1_779_700_000_000,
+            finished_at: 1_779_700_002_000,
+            duration_ms: 2_000,
+            artifacts: crate::im_gateway::external_cli::ExternalCliRunArtifacts {
+                run_dir: String::new(),
+                prompt: String::new(),
+                command_snapshot: String::new(),
+                stdout: String::new(),
+                stderr: String::new(),
+                normalized_events: String::new(),
+                last_message: String::new(),
+            },
+            events: Vec::new(),
+            metadata: std::collections::BTreeMap::new(),
+        };
+        remember_external_cli_result_state(&request, "traex", &result);
+
+        let state = crate::im_gateway::session_state::load_session_state(
+            "traex-final-order-session",
+            "traex",
+            Some("traex"),
+        )
+        .expect("finished state");
+        let history_path = state.history_path.expect("history path");
+        let events = bifrost_agent::persistence::load_conversation_events(std::path::Path::new(
+            &history_path,
+        ))
+        .expect("load final events");
+        let assistant_index = events
+            .iter()
+            .position(|event| {
+                event.event_type == bifrost_agent::persistence::event_types::ASSISTANT_MESSAGE
+                    && event
+                        .content
+                        .get("message")
+                        .and_then(|value| value.as_str())
+                        == Some("final Traex answer")
+            })
+            .expect("assistant final event");
+        let completed_index = events
+            .iter()
+            .position(|event| {
+                event.event_type == bifrost_agent::persistence::event_types::RUN_STATE_CHANGED
+                    && event.content.get("state").and_then(|value| value.as_str())
+                        == Some("completed")
+            })
+            .expect("completed state event");
+        assert!(
+            assistant_index < completed_index,
+            "final assistant message must be visible before completed state"
+        );
     }
 
     #[test]
