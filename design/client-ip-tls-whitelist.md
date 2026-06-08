@@ -108,6 +108,17 @@ pub struct TlsConfigUpdate {
 
 在 TLS Config 区域新增 "IP TLS Whitelist" section，展示和管理 `ip_intercept_include` / `ip_intercept_exclude` 列表。
 
+### Traffic 详情空状态入口
+
+- `Network -> 选择 CONNECT 请求 -> Response -> Header/Raw` 在没有响应明文数据时展示 TLS 解包快捷操作。
+- 空状态按钮包含：
+  - `Intercept this domain`：将当前 host 加入 `intercept_include`。
+  - `Intercept this app`：将当前 `client_app` 加入 `app_intercept_include`。
+  - `Intercept this client`：将当前 `client_ip` 加入 `ip_intercept_include`，用于按设备/IP 开启 TLS 解包。
+  - `Allow this client`：当 `client_ip` 不是 loopback 且尚未在访问控制白名单中时，将该 Client IP 加入 `/api/whitelist` 永久白名单。
+- `Allow this client` 只用于代理访问控制白名单，不替代 TLS IP 解包白名单；用户需要远端设备能连上代理时用它，需要远端设备流量可解包时用 `Intercept this client`。
+- 成功加入 TLS 解包白名单后统一展示重连提示：目标应用需要重启并重新打开目标域名，新的 CONNECT 才会按最新白名单建立。
+
 ## 测试方案
 
 ### 单元测试
@@ -124,9 +135,13 @@ pub struct TlsConfigUpdate {
 - 验证 approve API 将 IP 加入 include 列表
 - 验证 skip API 将 IP 加入 exclude 列表
 - 验证配置持久化和重启后恢复
+- 验证 CONNECT Response 空状态中 `Intercept this client` 写入 `ip_intercept_include`
+- 验证 CONNECT Response 空状态中非本机 `Allow this client` 写入访问控制白名单
 
 ### 真实场景测试
 
 - 启动服务，从远端 IP 发起 HTTPS 请求，观察 WebUI 弹窗
 - 点击 Enable TLS 后确认后续请求被解包
 - 点击 Skip 后确认后续请求直通
+- 在 Traffic 详情 Response 空状态中点击 `Intercept this client`，确认 TLS IP 解包白名单持久化
+- 在 Traffic 详情 Response 空状态中点击 `Allow this client`，确认非本机 Client IP 进入访问控制白名单

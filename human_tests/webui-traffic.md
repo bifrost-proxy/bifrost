@@ -856,6 +856,46 @@ wait
 
 ---
 
+### TC-WTR-46：CONNECT Response 空状态按 Client IP 开启设备能力
+
+**前置条件**：
+1. 使用隔离数据目录启动最新 Bifrost，必须禁用系统代理和 Sync 自动登录弹窗：
+   ```bash
+   BIFROST_DATA_DIR="$(mktemp -d /tmp/bifrost-webui-client-ip.XXXXXX)" \
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+   cargo run --bin bifrost -- start --host 127.0.0.1 -p 18892 --unsafe-ssl --no-system-proxy --access-mode allow_all
+   ```
+2. 打开 `http://127.0.0.1:18892/_bifrost/traffic`。
+3. 准备一条 CONNECT Tunnel 流量，详情记录中包含 host、client_app 和 client_ip。
+
+**操作步骤**：
+1. 在 Traffic 表格中点击一条 CONNECT Tunnel 请求。
+2. 在 Response 区域打开 Header 或 Raw Tab。
+3. 确认空状态展示以下按钮：
+   - `Intercept this domain`
+   - `Intercept this app`（当记录包含 client_app）
+   - `Intercept this client`（当记录包含 client_ip）
+   - `Allow this client`（当 client_ip 不是 `127.0.0.0/8` 或 `::1` 等本机 loopback）
+4. 点击 `Intercept this client` 并确认弹窗。
+5. 查询 `GET /_bifrost/api/config/tls`。
+6. 点击 `Allow this client` 并确认弹窗。
+7. 查询 `GET /_bifrost/api/whitelist`。
+
+**预期结果**：
+- `Intercept this client` 成功后，TLS 配置的 `ip_intercept_include` 包含该 `client_ip`。
+- 成功提示包含 `Restart the target app and reopen the target domain to establish a new connection.`。
+- `Allow this client` 只在非本机 Client IP 下出现；成功后访问控制白名单 `whitelist` 包含该 `client_ip` 或等价的单 IP 网段（如 IPv4 `/32`、IPv6 `/128`）。
+- 本机 loopback Client IP 不显示 `Allow this client`，避免把本机设备误当远端设备。
+- 域名、应用两个既有按钮仍可见且行为不变。
+
+**执行记录（2026-06-08）**：
+- 已执行命令：`source ~/.zshrc && pnpm --dir web test:ui traffic-push.spec.ts -g "CONNECT 详情的 Response 面板可按应用和非本机 Client IP 开启"`
+- 第一次执行结果：失败。原因是测试断言只接受裸 IP，但后端访问控制白名单以 `IpNet` 输出单 IP 为 `192.168.50.24/32`；功能调用成功，断言和前端等价判定已修正。
+- 复跑结果：PASS，后续修复提示边界和清理边界后最终复跑 `1 passed (30.9s)`。
+- 实际验证：Playwright 打开真实 Traffic 页面，生成 CONNECT Tunnel 流量，将详情里的 `client_ip` 模拟为非本机 `192.168.50.24`；Response 空状态显示 `Intercept this app`、`Intercept this client`、`Allow this client`；点击 `Intercept this client` 后 `/_bifrost/api/config/tls` 的 `ip_intercept_include` 包含该 IP；点击 `Allow this client` 后 `/_bifrost/api/whitelist` 的 `whitelist` 包含等价单 IP 网段 `192.168.50.24/32`。
+
+---
+
 ### TC-WTR-47：高并发流量下 Traffic、SSE 详情和 appinfo 仍可响应
 
 **背景**：用户反馈管理端经常一直 loading，打开 SSE 请求详情页后结果不出来。日志中大量 CONNECT 请求触发客户端进程解析；该用例验证极限 CONNECT/HTTP 压力下，管理端 Traffic 列表、请求详情和 SSE frames 接口不会被明显阻塞，同时验证高并发短请求不会大量丢失客户端应用识别。客户端进程解析在极端情况下最多等待 2 秒，超过后应按未知客户端降级，不能继续阻塞请求链路；近期解析 miss/timeout 应命中 negative cache 快速跳过，进程解析 blocking 任务也必须受全局并发阀门限制，socket 快照刷新必须 singleflight，普通 HTTP 请求也应在请求开始时执行受限同步解析，`/_bifrost` 管理端接口应完全跳过进程识别。普通 HTTP 响应不得抢占 `ConnectionMonitor` 全局写锁；当 `BodyStore` 忙时允许后台最终一致保存响应体，但不能丢失 Traffic 记录或永久丢失 body。

@@ -48,7 +48,9 @@ export const useWhitelistStore = create<WhitelistState>((set) => ({
         status: state.status
           ? {
               ...state.status,
-              whitelist: [...state.status.whitelist, ipOrCidr],
+              whitelist: state.status.whitelist.includes(ipOrCidr)
+                ? state.status.whitelist
+                : [...state.status.whitelist, ipOrCidr],
             }
           : state.status,
         loading: false,

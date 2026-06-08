@@ -1,15 +1,10 @@
-import { useMemo, useRef, useState, useCallback } from 'react';
-import { theme, Button, message, Modal } from 'antd';
-import { LockOutlined, AppstoreOutlined } from '@ant-design/icons';
+import { useMemo, useRef, useState } from 'react';
+import { theme, Button } from 'antd';
 import type { SessionTargetSearchState } from '../../../../types';
 import { useTextSelection } from '../../hooks/useTextSelection';
 import { useMarkSearch } from '../../hooks/useMarkSearch';
 import { DEFAULT_SHOW_MAX_SIZE } from '../../helper/contentType';
-import { getTlsConfig, updateTlsConfig, disconnectByDomain } from '../../../../api/config';
-import {
-  showTlsWhitelistChangeSuccess,
-  TLS_RECONNECT_NOTICE,
-} from '../../../../utils/tlsInterceptionNotice';
+import { TunnelInterceptActions } from '../../TunnelInterceptActions';
 
 interface RawProps {
   type: 'request' | 'response';
@@ -24,6 +19,7 @@ interface RawProps {
   isTunnel?: boolean;
   host?: string;
   clientApp?: string;
+  clientIp?: string;
 }
 
 const STATUS_CODES: Record<number, string> = {
@@ -65,78 +61,13 @@ export const Raw = ({
   isTunnel,
   host,
   clientApp,
+  clientIp,
 }: RawProps) => {
   const { token } = theme.useToken();
   const [showAll, setShowAll] = useState(false);
   const wrapperRef = useTextSelection(true);
   const contentRef = useRef<HTMLDivElement>(null);
 
-  const handleAddToInterceptList = useCallback(() => {
-    if (!host) {
-      message.error('No host found for this request');
-      return;
-    }
-
-    Modal.confirm({
-      title: 'Add to Intercept List',
-      content: `Add "${host}" to TLS intercept list? This will enable HTTPS inspection for this domain and disconnect existing tunnel connections.`,
-      okText: 'Add',
-      cancelText: 'Cancel',
-      onOk: async () => {
-        try {
-          const currentConfig = await getTlsConfig();
-          if (currentConfig.intercept_include.includes(host)) {
-            message.info(`"${host}" is already in the intercept list`);
-            return;
-          }
-
-          const newIncludeList = [...currentConfig.intercept_include, host];
-          await updateTlsConfig({ intercept_include: newIncludeList });
-
-          await disconnectByDomain(host);
-
-          message.success(`Added "${host}" to intercept list and disconnected existing connections`);
-        } catch (error) {
-          message.error('Failed to add domain to intercept list');
-          console.error(error);
-        }
-      },
-    });
-  }, [host]);
-
-  const handleAddAppToInterceptList = useCallback(() => {
-    if (!clientApp) {
-      message.error('No app found for this request');
-      return;
-    }
-
-    Modal.confirm({
-      title: 'Add App to Intercept List',
-      content: `Add "${clientApp}" to app intercept list? This will enable HTTPS inspection for this app.`,
-      okText: 'Add',
-      cancelText: 'Cancel',
-      onOk: async () => {
-        try {
-          const currentConfig = await getTlsConfig();
-          if (currentConfig.app_intercept_include.includes(clientApp)) {
-            message.info(`"${clientApp}" is already in the app intercept list`);
-            return;
-          }
-
-          const newIncludeList = [...currentConfig.app_intercept_include, clientApp];
-          await updateTlsConfig({ app_intercept_include: newIncludeList });
-
-          showTlsWhitelistChangeSuccess(`Added "${clientApp}" to app intercept list`);
-        } catch (error) {
-          message.error('Failed to add app to intercept list');
-          console.error(error);
-        }
-      },
-    });
-  }, [clientApp]);
-
-  const showInterceptButton = type === 'response' && isTunnel && host;
-  const showAppInterceptButton = type === 'response' && isTunnel && clientApp;
   const isTunnelResponse = type === 'response' && isTunnel;
 
   useMarkSearch(
@@ -177,7 +108,6 @@ export const Raw = ({
 
   const hasNoData = (!headers || headers.length === 0) && !body && !status;
   if (isTunnelResponse && hasNoData) {
-    const hasAnyButton = showInterceptButton || showAppInterceptButton;
     return (
       <div
         ref={wrapperRef}
@@ -192,46 +122,12 @@ export const Raw = ({
           borderRadius: 4,
         }}
       >
-        {hasAnyButton ? (
-          <>
-            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', justifyContent: 'center' }}>
-              {showInterceptButton && (
-                <Button
-                  type="primary"
-                  icon={<LockOutlined />}
-                  onClick={handleAddToInterceptList}
-                  size="large"
-                >
-                  Intercept this domain
-                </Button>
-              )}
-              {showAppInterceptButton && (
-                <Button
-                  type="primary"
-                  icon={<AppstoreOutlined />}
-                  onClick={handleAddAppToInterceptList}
-                  size="large"
-                >
-                  Intercept this app
-                </Button>
-              )}
-            </div>
-            <div
-              style={{
-                color: token.colorTextSecondary,
-                maxWidth: 520,
-                textAlign: 'center',
-                padding: '0 16px',
-              }}
-            >
-              {TLS_RECONNECT_NOTICE}
-            </div>
-          </>
-        ) : (
-          <div style={{ color: token.colorTextSecondary }}>
-            No response data for tunnel connection
-          </div>
-        )}
+        <TunnelInterceptActions
+          isTunnel={isTunnel}
+          host={host}
+          clientApp={clientApp}
+          clientIp={clientIp}
+        />
       </div>
     );
   }
