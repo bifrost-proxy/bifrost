@@ -699,6 +699,9 @@ mod tests {
             socks5_port: Some(18889),
             host: Some("0.0.0.0".to_string()),
             started_at_ms: None,
+            start_mode: Default::default(),
+            restartable_runtime: false,
+            binary_path: None,
         };
         let system_proxy = SystemProxyStatus {
             supported: true,
@@ -790,6 +793,9 @@ mod tests {
             socks5_port: None,
             host: Some("0.0.0.0".to_string()),
             started_at_ms: None,
+            start_mode: Default::default(),
+            restartable_runtime: false,
+            binary_path: None,
         };
         let addresses = ProxyAddressInfo {
             addresses: vec![

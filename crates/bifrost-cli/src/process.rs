@@ -4,6 +4,22 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::get_bifrost_dir;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeStartMode {
+    Foreground,
+    Daemon,
+    Desktop,
+    #[default]
+    Unknown,
+}
+
+impl RuntimeStartMode {
+    pub fn is_restartable(self) -> bool {
+        matches!(self, Self::Daemon | Self::Desktop)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeInfo {
     pub pid: u32,
@@ -14,6 +30,37 @@ pub struct RuntimeInfo {
     pub host: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub started_at_ms: Option<u64>,
+    #[serde(rename = "runtime_start_mode", alias = "start_mode", default)]
+    pub start_mode: RuntimeStartMode,
+    #[serde(default)]
+    pub restartable_runtime: bool,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub binary_path: Option<PathBuf>,
+}
+
+impl RuntimeInfo {
+    pub fn new(
+        pid: u32,
+        port: u16,
+        socks5_port: Option<u16>,
+        host: Option<String>,
+        start_mode: RuntimeStartMode,
+    ) -> Self {
+        Self {
+            pid,
+            port,
+            socks5_port,
+            host,
+            started_at_ms: bifrost_core::current_process_start_time_ms(),
+            start_mode,
+            restartable_runtime: start_mode.is_restartable(),
+            binary_path: std::env::current_exe().ok(),
+        }
+    }
+
+    pub fn restartable_daemon(&self) -> bool {
+        self.restartable_runtime && self.start_mode.is_restartable()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -357,5 +404,56 @@ mod tests {
             "should not find any process on a freed port {}",
             port
         );
+    }
+
+    #[test]
+    fn runtime_info_defaults_old_json_to_not_restartable() {
+        let json = r#"{
+          "pid": 42,
+          "port": 9900,
+          "host": "127.0.0.1"
+        }"#;
+
+        let info: RuntimeInfo = serde_json::from_str(json).expect("old runtime json parses");
+
+        assert_eq!(info.start_mode, RuntimeStartMode::Unknown);
+        assert!(!info.restartable_runtime);
+        assert!(!info.restartable_daemon());
+    }
+
+    #[test]
+    fn runtime_info_accepts_legacy_start_mode_alias() {
+        let json = r#"{
+          "pid": 42,
+          "port": 9900,
+          "start_mode": "daemon",
+          "restartable_runtime": true,
+          "binary_path": "/tmp/bifrost"
+        }"#;
+
+        let info: RuntimeInfo = serde_json::from_str(json).expect("legacy runtime json parses");
+
+        assert_eq!(info.start_mode, RuntimeStartMode::Daemon);
+        assert!(info.restartable_daemon());
+        assert_eq!(info.binary_path, Some(PathBuf::from("/tmp/bifrost")));
+    }
+
+    #[test]
+    fn runtime_info_new_daemon_is_restartable() {
+        let info = RuntimeInfo::new(
+            42,
+            9900,
+            None,
+            Some("127.0.0.1".to_string()),
+            RuntimeStartMode::Daemon,
+        );
+
+        assert!(info.restartable_runtime);
+        assert!(info.restartable_daemon());
+        assert_eq!(info.start_mode, RuntimeStartMode::Daemon);
+
+        let json = serde_json::to_value(&info).expect("runtime info serializes");
+        assert_eq!(json["runtime_start_mode"], "daemon");
+        assert!(json.get("start_mode").is_none());
     }
 }

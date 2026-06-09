@@ -36,7 +36,7 @@ use crate::help::print_startup_help;
 use crate::parsing::{parse_cli_rules, DynamicRulesResolver, SharedDynamicRulesResolver};
 use crate::process::{
     find_process_on_port, is_process_running, kill_process_by_pid, read_pid, remove_pid,
-    write_runtime_info, RuntimeInfo,
+    write_runtime_info, RuntimeInfo, RuntimeStartMode,
 };
 
 const ASYNC_TRAFFIC_BUFFER_SIZE: usize = 10000;
@@ -1790,13 +1790,13 @@ pub fn run_foreground(
                 access_control.clone(),
             )
             .await?;
-            let runtime_info = RuntimeInfo {
+            let runtime_info = RuntimeInfo::new(
                 pid,
-                port: config.port,
-                socks5_port: config.socks5_port,
-                host: Some(config.host.clone()),
-                started_at_ms: bifrost_core::current_process_start_time_ms(),
-            };
+                config.port,
+                config.socks5_port,
+                Some(config.host.clone()),
+                RuntimeStartMode::Foreground,
+            );
             write_runtime_info(&runtime_info)?;
             #[cfg(target_os = "macos")]
             spawn_system_proxy_launchd_install_task(bifrost_dir.clone(), enable_system_proxy);
@@ -1927,13 +1927,13 @@ pub fn run_foreground(
                         current_port = actual_port;
                         admin_state_arc.set_port(actual_port);
 
-                        let runtime_info = RuntimeInfo {
-                            pid: std::process::id(),
-                            port: actual_port,
-                            socks5_port: base_config.socks5_port,
-                            host: Some(base_config.host.clone()),
-                            started_at_ms: bifrost_core::current_process_start_time_ms(),
-                        };
+                        let runtime_info = RuntimeInfo::new(
+                            std::process::id(),
+                            actual_port,
+                            base_config.socks5_port,
+                            Some(base_config.host.clone()),
+                            RuntimeStartMode::Foreground,
+                        );
                         if let Err(error) = write_runtime_info(&runtime_info) {
                             tracing::warn!("Failed to update runtime info after port rebind: {}", error);
                         }
@@ -2312,13 +2312,13 @@ pub fn run_daemon(
 
             rt.block_on(async {
                 let pid = std::process::id();
-                let runtime_info = RuntimeInfo {
+                let runtime_info = RuntimeInfo::new(
                     pid,
-                    port: config.port,
-                    socks5_port: config.socks5_port,
-                    host: Some(config.host.clone()),
-                    started_at_ms: bifrost_core::current_process_start_time_ms(),
-                };
+                    config.port,
+                    config.socks5_port,
+                    Some(config.host.clone()),
+                    RuntimeStartMode::Daemon,
+                );
                 write_runtime_info(&runtime_info).expect("Failed to write runtime info");
                 #[cfg(target_os = "macos")]
                 spawn_system_proxy_launchd_install_task(bifrost_dir.clone(), enable_system_proxy);

@@ -191,6 +191,35 @@ start_proxy_with_system_proxy() {
     echo "[WARN] Proxy did not become ready within ${max_wait}s"
 }
 
+start_daemon_proxy_with_system_proxy() {
+    export BIFROST_DATA_DIR="${TEST_DATA_DIR}"
+    "$BIFROST_BIN" --port "${PROXY_PORT}" start \
+        --daemon --yes \
+        --skip-cert-check --unsafe-ssl \
+        --rules-file "${TEST_DATA_DIR}/.bifrost/rules/test.txt" \
+        --system-proxy \
+        --proxy-bypass "localhost,127.0.0.1,::1,*.local" \
+        > "${TEST_DATA_DIR}/proxy-daemon-start.log" 2>&1
+    local code=$?
+    if [[ $code -ne 0 ]]; then
+        cat "${TEST_DATA_DIR}/proxy-daemon-start.log" 2>/dev/null || true
+        return "$code"
+    fi
+    local max_wait=30
+    local waited=0
+    while [[ $waited -lt $max_wait ]]; do
+        if curl -s "http://${ADMIN_HOST}:${ADMIN_PORT}${ADMIN_PATH_PREFIX}/api/system" >/dev/null 2>&1; then
+            PROXY_PID="$(read_runtime_pid 2>/dev/null || true)"
+            sleep 2
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    echo "[WARN] Daemon proxy did not become ready within ${max_wait}s"
+    return 1
+}
+
 start_proxy_without_system_proxy() {
     export BIFROST_DATA_DIR="${TEST_DATA_DIR}"
     "$BIFROST_BIN" --port "${PROXY_PORT}" start \
@@ -924,6 +953,63 @@ test_lifecycle_helper_cleans_after_parent_crash() {
     esac
 }
 
+test_lifecycle_helper_restarts_restartable_daemon_after_parent_crash() {
+    stop_proxy
+    unset BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER
+    if [[ "$PLATFORM" == "Darwin" ]] && macos_check_any_proxy_enabled_not_pointing_to "127.0.0.1" "$PROXY_PORT"; then
+        _log_pass "macOS: 检测到外部系统代理 owner，跳过 daemon restart-before-restore 用例"
+        passed=$((passed + 1))
+        return
+    fi
+
+    case "$PLATFORM" in
+        Darwin)
+            if ! start_daemon_proxy_with_system_proxy; then
+                _log_fail "macOS: daemon restart-before-restore 准备失败" "daemon start exit 0 and Admin API ready" "$(cat "${TEST_DATA_DIR}/proxy-daemon-start.log" 2>/dev/null || true)"
+                failed=$((failed + 1))
+                return
+            fi
+            if ! macos_ensure_bifrost_system_proxy_enabled; then
+                _log_fail "macOS: daemon restart-before-restore 准备失败" "系统代理先指向 127.0.0.1:${PROXY_PORT}" "$(macos_proxy_snapshot)"
+                failed=$((failed + 1))
+                return
+            fi
+            local old_pid="${PROXY_PID:-$(read_runtime_pid 2>/dev/null || true)}"
+            if [[ -z "$old_pid" ]]; then
+                _log_fail "macOS: daemon restart-before-restore 准备失败" "runtime.json 包含 daemon pid" "$(cat "${TEST_DATA_DIR}/runtime.json" 2>/dev/null || true)"
+                failed=$((failed + 1))
+                return
+            fi
+            kill_pid_force "$old_pid"
+            wait_pid "$old_pid"
+            PROXY_PID=""
+
+            local waited=0
+            local new_pid=""
+            while [[ $waited -lt 45 ]]; do
+                new_pid="$(read_runtime_pid 2>/dev/null || true)"
+                if [[ -n "$new_pid" && "$new_pid" != "$old_pid" ]] \
+                    && curl -s "http://${ADMIN_HOST}:${ADMIN_PORT}${ADMIN_PATH_PREFIX}/api/system" >/dev/null 2>&1 \
+                    && macos_check_proxy_enabled_for_any_service "127.0.0.1" "$PROXY_PORT"; then
+                    PROXY_PID="$new_pid"
+                    _log_pass "macOS: restartable daemon 崩溃后 lifecycle helper 自动重启主进程并保留系统代理"
+                    passed=$((passed + 1))
+                    return
+                fi
+                sleep 1
+                waited=$((waited + 1))
+            done
+
+            _log_fail "macOS: restartable daemon 崩溃后未自动重启" "新 runtime pid、Admin API ready、系统代理仍指向 127.0.0.1:${PROXY_PORT}" "old_pid=${old_pid}; new_pid=${new_pid}; proxy=$(macos_proxy_snapshot); logs=$(tail -n 160 "${TEST_DATA_DIR}"/logs/bifrost*.log 2>/dev/null || true)"
+            failed=$((failed + 1))
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            _log_pass "Windows: daemon restart-before-restore focused coverage uses unit tests in this phase"
+            passed=$((passed + 1))
+            ;;
+    esac
+}
+
 test_admin_api_enable_starts_lifecycle_helper() {
     stop_proxy
     unset BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER
@@ -1242,6 +1328,7 @@ main() {
     test_crash_recovery
     test_runtime_target_no_state_crash_recovery
     test_lifecycle_helper_cleans_after_parent_crash
+    test_lifecycle_helper_restarts_restartable_daemon_after_parent_crash
     test_admin_api_enable_starts_lifecycle_helper
     test_admin_api_enable_lifecycle_helper_cleans_after_parent_crash
     test_launchd_cleanup_daemon_no_state_exits_quickly

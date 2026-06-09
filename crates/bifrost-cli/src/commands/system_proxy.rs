@@ -4,7 +4,10 @@ use bifrost_storage::{set_data_dir, ConfigManager};
 use crate::cli::SystemProxyLaunchdCommands;
 use crate::cli::{Cli, SystemProxyCommands};
 use crate::config::get_bifrost_dir;
-use crate::process::is_process_running;
+use crate::process::{
+    capture_runtime_system_proxy_snapshot, is_process_running, read_runtime_info,
+    runtime_system_proxy_host, RuntimeInfo, RuntimeSystemProxySnapshot,
+};
 
 pub fn handle_system_proxy_command(
     cli: &Cli,
@@ -337,6 +340,191 @@ fn cleanup_system_proxy_state(data_dir: &std::path::Path) -> bifrost_core::Resul
     Ok(())
 }
 
+fn should_try_managed_runtime_restart(runtime: &RuntimeInfo) -> bool {
+    runtime.restartable_daemon() && runtime.binary_path.is_some()
+}
+
+fn build_managed_runtime_restart_args(
+    runtime: &RuntimeInfo,
+    snapshot: &RuntimeSystemProxySnapshot,
+) -> Vec<String> {
+    let mut args = vec![
+        "start".to_string(),
+        "--daemon".to_string(),
+        "--yes".to_string(),
+        "--port".to_string(),
+        runtime.port.to_string(),
+    ];
+    if let Some(host) = runtime.host.as_deref().filter(|host| !host.is_empty()) {
+        args.push("--host".to_string());
+        args.push(host.to_string());
+    }
+    if let Some(socks5_port) = runtime.socks5_port {
+        args.push("--socks5-port".to_string());
+        args.push(socks5_port.to_string());
+    }
+    args.push("--system-proxy".to_string());
+    args.push("--proxy-bypass".to_string());
+    args.push(snapshot.bypass.clone());
+    args
+}
+
+fn runtime_listener_is_alive(runtime: &RuntimeInfo) -> bool {
+    use std::net::ToSocketAddrs;
+
+    let host = runtime_system_proxy_host(runtime.host.as_deref());
+    let Ok(addrs) = (host, runtime.port).to_socket_addrs() else {
+        return false;
+    };
+    let timeout = std::time::Duration::from_millis(750);
+    for addr in addrs {
+        if std::net::TcpStream::connect_timeout(&addr, timeout).is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
+fn restart_managed_runtime_before_cleanup(data_dir: &std::path::Path) -> bool {
+    let Some(runtime) = read_runtime_info() else {
+        tracing::info!(
+            target: "bifrost_cli::shutdown",
+            data_dir = %data_dir.display(),
+            "runtime_restart_skipped: runtime info missing"
+        );
+        return false;
+    };
+
+    tracing::info!(
+        target: "bifrost_cli::shutdown",
+        pid = runtime.pid,
+        port = runtime.port,
+        start_mode = ?runtime.start_mode,
+        restartable_runtime = runtime.restartable_runtime,
+        "runtime_restart_considered"
+    );
+
+    if runtime_listener_is_alive(&runtime) {
+        tracing::info!(
+            target: "bifrost_cli::shutdown",
+            port = runtime.port,
+            "runtime_restart_skipped: listener is already alive"
+        );
+        return true;
+    }
+
+    if !should_try_managed_runtime_restart(&runtime) {
+        tracing::info!(
+            target: "bifrost_cli::shutdown",
+            port = runtime.port,
+            "runtime_restart_skipped: runtime is not restartable"
+        );
+        return false;
+    }
+
+    let Some(snapshot) = capture_runtime_system_proxy_snapshot(Some(&runtime)) else {
+        tracing::info!(
+            target: "bifrost_cli::shutdown",
+            port = runtime.port,
+            "runtime_restart_skipped: current system proxy is not owned by previous runtime"
+        );
+        return false;
+    };
+
+    let Some(binary_path) = runtime.binary_path.clone() else {
+        tracing::info!(
+            target: "bifrost_cli::shutdown",
+            port = runtime.port,
+            "runtime_restart_skipped: runtime binary path missing"
+        );
+        return false;
+    };
+    if !binary_path.exists() {
+        tracing::warn!(
+            target: "bifrost_cli::shutdown",
+            binary_path = %binary_path.display(),
+            "runtime_restart_failed: runtime binary path does not exist"
+        );
+        return false;
+    }
+
+    let args = build_managed_runtime_restart_args(&runtime, &snapshot);
+    tracing::info!(
+        target: "bifrost_cli::shutdown",
+        binary_path = %binary_path.display(),
+        args = ?args,
+        data_dir = %data_dir.display(),
+        "runtime_restart_started"
+    );
+
+    let mut command = std::process::Command::new(&binary_path);
+    command
+        .args(&args)
+        .env("BIFROST_DATA_DIR", data_dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+    }
+
+    match command.status() {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            tracing::warn!(
+                target: "bifrost_cli::shutdown",
+                status = %status,
+                "runtime_restart_failed: start command exited unsuccessfully"
+            );
+            return false;
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "bifrost_cli::shutdown",
+                error = %error,
+                "runtime_restart_failed: failed to spawn start command"
+            );
+            return false;
+        }
+    }
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if runtime_listener_is_alive(&runtime) {
+            tracing::info!(
+                target: "bifrost_cli::shutdown",
+                port = runtime.port,
+                "runtime_restart_succeeded"
+            );
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+
+    tracing::warn!(
+        target: "bifrost_cli::shutdown",
+        port = runtime.port,
+        "runtime_restart_failed: listener did not become reachable before timeout"
+    );
+    false
+}
+
+fn cleanup_or_restart_managed_runtime(data_dir: &std::path::Path) -> bifrost_core::Result<()> {
+    if restart_managed_runtime_before_cleanup(data_dir) {
+        return Ok(());
+    }
+    cleanup_system_proxy_state(data_dir)
+}
+
 fn pid_reuse_detected(parent_pid: Option<u32>, recorded_started_at_ms: Option<u64>) -> bool {
     let Some(pid) = parent_pid else {
         return false;
@@ -373,7 +561,7 @@ fn run_system_proxy_lifecycle_helper(
             parent_pid = parent_pid.unwrap_or_default(),
             "system proxy lifecycle helper detected pid_reuse_check=mismatch at startup; running guarded cleanup"
         );
-        return cleanup_system_proxy_state(&data_dir);
+        return cleanup_or_restart_managed_runtime(&data_dir);
     }
 
     #[cfg(unix)]
@@ -427,7 +615,7 @@ fn run_system_proxy_lifecycle_helper(
                                 parent_pid = parent_pid.unwrap_or_default(),
                                 "system proxy lifecycle helper detected pid_reuse_check=mismatch during poll; running guarded cleanup"
                             );
-                            return cleanup_system_proxy_state(&data_dir);
+                            return cleanup_or_restart_managed_runtime(&data_dir);
                         }
                         if let Some(pid) = parent_pid {
                             if !is_process_running(pid) {
@@ -445,7 +633,7 @@ fn run_system_proxy_lifecycle_helper(
                                         parent_pid = pid,
                                         "system proxy lifecycle helper confirmed parent exit"
                                     );
-                                    return cleanup_system_proxy_state(&data_dir);
+                                    return cleanup_or_restart_managed_runtime(&data_dir);
                                 }
                             } else {
                                 consecutive_parent_misses = 0;
@@ -468,7 +656,7 @@ fn run_system_proxy_lifecycle_helper(
                     parent_pid = parent_pid.unwrap_or_default(),
                     "system proxy lifecycle helper detected pid_reuse_check=mismatch during poll; running guarded cleanup"
                 );
-                return cleanup_system_proxy_state(&data_dir);
+                return cleanup_or_restart_managed_runtime(&data_dir);
             }
             if let Some(pid) = parent_pid {
                 if !is_process_running(pid) {
@@ -486,7 +674,7 @@ fn run_system_proxy_lifecycle_helper(
                             parent_pid = pid,
                             "system proxy lifecycle helper confirmed parent exit"
                         );
-                        return cleanup_system_proxy_state(&data_dir);
+                        return cleanup_or_restart_managed_runtime(&data_dir);
                     }
                 } else {
                     consecutive_parent_misses = 0;
@@ -545,6 +733,8 @@ fn run_system_proxy_cleanup_daemon(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::process::RuntimeStartMode;
+    use std::path::PathBuf;
 
     #[test]
     fn pid_reuse_detected_when_start_time_mismatches_current_process() {
@@ -552,5 +742,72 @@ mod tests {
             .map(|started_at_ms| started_at_ms.saturating_add(10_000));
 
         assert!(pid_reuse_detected(Some(std::process::id()), recorded));
+    }
+
+    #[test]
+    fn managed_runtime_restart_skips_foreground_runtime() {
+        let runtime = RuntimeInfo {
+            pid: 123,
+            port: 9900,
+            socks5_port: None,
+            host: Some("127.0.0.1".to_string()),
+            started_at_ms: None,
+            start_mode: RuntimeStartMode::Foreground,
+            restartable_runtime: false,
+            binary_path: Some(PathBuf::from("/tmp/bifrost")),
+        };
+
+        assert!(!should_try_managed_runtime_restart(&runtime));
+    }
+
+    #[test]
+    fn managed_runtime_restart_requires_binary_path() {
+        let runtime = RuntimeInfo {
+            pid: 123,
+            port: 9900,
+            socks5_port: None,
+            host: Some("127.0.0.1".to_string()),
+            started_at_ms: None,
+            start_mode: RuntimeStartMode::Daemon,
+            restartable_runtime: true,
+            binary_path: None,
+        };
+
+        assert!(!should_try_managed_runtime_restart(&runtime));
+    }
+
+    #[test]
+    fn managed_runtime_restart_args_preserve_runtime_and_system_proxy() {
+        let runtime = RuntimeInfo {
+            pid: 123,
+            port: 18889,
+            socks5_port: Some(18890),
+            host: Some("0.0.0.0".to_string()),
+            started_at_ms: None,
+            start_mode: RuntimeStartMode::Daemon,
+            restartable_runtime: true,
+            binary_path: Some(PathBuf::from("/tmp/bifrost")),
+        };
+        let snapshot = RuntimeSystemProxySnapshot {
+            bypass: "localhost,127.0.0.1,*.local".to_string(),
+        };
+
+        assert_eq!(
+            build_managed_runtime_restart_args(&runtime, &snapshot),
+            vec![
+                "start",
+                "--daemon",
+                "--yes",
+                "--port",
+                "18889",
+                "--host",
+                "0.0.0.0",
+                "--socks5-port",
+                "18890",
+                "--system-proxy",
+                "--proxy-bypass",
+                "localhost,127.0.0.1,*.local"
+            ]
+        );
     }
 }
