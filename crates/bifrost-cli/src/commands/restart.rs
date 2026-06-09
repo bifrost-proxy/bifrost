@@ -60,7 +60,11 @@
 
 use bifrost_core::Result as BifrostResult;
 
-use crate::process::{is_process_running, read_pid, read_runtime_info};
+#[cfg(unix)]
+use crate::process::{
+    capture_runtime_system_proxy_snapshot, is_process_running, read_pid, read_runtime_info,
+    RuntimeSystemProxySnapshot,
+};
 
 const ORPHAN_STARTUP_GRACE_MS: u64 = 200;
 const PORT_RELEASE_TIMEOUT_SECS: u64 = 10;
@@ -301,6 +305,7 @@ fn run_orphan_work(forwarded: ForwardedRestart) {
     // Snapshot old port.
     let old_pid = read_pid();
     let old_runtime = read_runtime_info();
+    let system_proxy_snapshot = capture_runtime_system_proxy_snapshot(old_runtime.as_ref());
     let old_port = old_runtime
         .as_ref()
         .map(|r| r.port)
@@ -373,6 +378,7 @@ fn run_orphan_work(forwarded: ForwardedRestart) {
         argv.push("--log-level".into());
         argv.push(lvl.into());
     }
+    append_system_proxy_start_args(&mut argv, system_proxy_snapshot.as_ref());
 
     orphan_log(&log, &format!("execvp argv: {:?}", argv));
 
@@ -429,6 +435,18 @@ fn redirect_stdio_to_devnull() {
         let _ = nix::unistd::dup2(fd, 0);
         let _ = nix::unistd::dup2(fd, 1);
         let _ = nix::unistd::dup2(fd, 2);
+    }
+}
+
+#[cfg(unix)]
+fn append_system_proxy_start_args(
+    argv: &mut Vec<std::ffi::OsString>,
+    snapshot: Option<&RuntimeSystemProxySnapshot>,
+) {
+    if let Some(snapshot) = snapshot {
+        argv.push("--system-proxy".into());
+        argv.push("--proxy-bypass".into());
+        argv.push(snapshot.bypass.clone().into());
     }
 }
 
@@ -569,6 +587,33 @@ mod tests {
             elapsed >= std::time::Duration::from_millis(350),
             "probe should use most of the budget; took {:?}",
             elapsed
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn append_system_proxy_start_args_preserves_bypass() {
+        let mut argv = vec![
+            std::ffi::OsString::from("bifrost"),
+            std::ffi::OsString::from("start"),
+            std::ffi::OsString::from("--daemon"),
+        ];
+        let snapshot = RuntimeSystemProxySnapshot {
+            bypass: "localhost,127.0.0.1,*.local".to_string(),
+        };
+
+        append_system_proxy_start_args(&mut argv, Some(&snapshot));
+
+        assert_eq!(
+            argv,
+            vec![
+                std::ffi::OsString::from("bifrost"),
+                std::ffi::OsString::from("start"),
+                std::ffi::OsString::from("--daemon"),
+                std::ffi::OsString::from("--system-proxy"),
+                std::ffi::OsString::from("--proxy-bypass"),
+                std::ffi::OsString::from("localhost,127.0.0.1,*.local"),
+            ]
         );
     }
 
