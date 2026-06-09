@@ -1236,6 +1236,7 @@ fn decide_managed_state_recovery(
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn decide_macos_managed_state_recovery(
     current: &ProxyBackup,
     state: &ManagedProxyState,
@@ -1248,6 +1249,7 @@ fn decide_macos_managed_state_recovery(
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn decide_macos_runtime_target_match(service_match: Result<bool>) -> Result<bool> {
     service_match
 }
