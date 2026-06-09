@@ -302,7 +302,8 @@
 ### TC-CSP-14：崩溃或重启后，下次启动失败前也必须清理 Bifrost 系统代理残留
 
 **前置条件**：
-- macOS 或 Windows 支持系统代理的环境。
+- macOS 支持系统代理的环境；本用例步骤使用 `networksetup` 验证 per-service proxy。
+- Windows 等价 startup recovery 覆盖由 TC-CSP-23 和 TC-CSP-34 验证，不能复用本用例中的 `networksetup` 步骤。
 - 使用临时数据目录，避免污染正式配置：
   ```bash
   TEST_DATA_DIR="$(mktemp -d)"
@@ -918,6 +919,284 @@
 - 第 5 步 Web/Secure Web proxy 最终重新指向 `127.0.0.1:18889`，不会停留在 `Enabled: No`。
 - 第 6 步 `restart.log` 的 fresh start argv 包含 `--system-proxy`，如旧系统代理有 bypass，则包含 `--proxy-bypass <旧 bypass>`。
 - 如果 stop 前系统代理并不指向旧 Bifrost runtime（外部 owner 或已关闭），restart 不应强行追加 `--system-proxy`，也不应抢占外部代理。
+
+---
+
+### TC-CSP-28：系统代理 lifecycle event log 应记录 enable、wake、cleanup 和 helper 状态
+
+**前置条件**：
+- macOS 或 Windows 支持系统代理的环境；Windows 使用 `target\debug\bifrost.exe` 和 PowerShell 等价命令执行。
+- 已构建当前源码 `target/debug/bifrost`。
+- 使用临时数据目录，避免污染正式配置：
+  ```bash
+  source ~/.zshrc && TEST_DATA_DIR="$(mktemp -d)"
+  ```
+
+**操作步骤**：
+1. 启动 Bifrost 并显式启用系统代理：
+   ```bash
+   source ~/.zshrc && BIFROST_DATA_DIR="$TEST_DATA_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 ./target/debug/bifrost -p 18889 start --skip-cert-check --unsafe-ssl --system-proxy > "$TEST_DATA_DIR/proxy.log" 2>&1 &
+   PROXY_PID=$!
+   ```
+2. 等待 Admin API ready：
+   ```bash
+   source ~/.zshrc && until curl -sS "http://127.0.0.1:18889/_bifrost/api/system" >/dev/null 2>&1; do sleep 0.2; done
+   ```
+3. 检查结构化 lifecycle event log：
+   ```bash
+   source ~/.zshrc && jq -r '.event' "$TEST_DATA_DIR/logs/system_proxy_events.jsonl"
+   ```
+4. 停止服务并再次检查 cleanup 相关事件：
+   ```bash
+   source ~/.zshrc && BIFROST_DATA_DIR="$TEST_DATA_DIR" ./target/debug/bifrost stop
+   source ~/.zshrc && jq -r '.event' "$TEST_DATA_DIR/logs/system_proxy_events.jsonl"
+   ```
+
+**预期结果**：
+- event log 为 JSONL，每一行都能被 `jq` 解析。
+- 启动阶段包含 `startup_state_snapshot`、`system_proxy_enable_requested`、`system_proxy_enable_applied`、`helper_start_requested`、`helper_started`。
+- helper 存活期间 `system_proxy_owner_state.json` 的 `helper_last_heartbeat_at` 持续更新，并包含 helper pid、start time 和 runtime id。
+- event log 不按 5 秒频率写入 `helper_heartbeat`；JSONL 只记录 `helper_started`、`helper_heartbeat_stale`、`helper_heartbeat_recovered`、`helper_missing` 等状态跃迁事件。
+- 停止或 cleanup 阶段包含 `cleanup_started` 和 `cleanup_restored`，或在外部代理接管时包含 `cleanup_skipped_external_owner`。
+- 日志不包含 URL path、cookie、authorization header、请求体等流量敏感信息。
+
+---
+
+### TC-CSP-29：`bifrost status` 应展示系统代理残留、helper 缺失和外部代理归属诊断
+
+**前置条件**：
+- macOS 或 Windows 支持系统代理的环境；Windows 使用 `target\debug\bifrost.exe` 和 PowerShell 等价命令执行。
+- 使用临时数据目录和非默认端口。
+- 当前系统代理初始状态已快照，测试后必须恢复。
+
+**操作步骤**：
+1. 启动 Bifrost 并启用系统代理，确认 status 正常：
+   ```bash
+   source ~/.zshrc && BIFROST_DATA_DIR="$TEST_DATA_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 ./target/debug/bifrost -p 18889 start --skip-cert-check --unsafe-ssl --system-proxy > "$TEST_DATA_DIR/proxy.log" 2>&1 &
+   source ~/.zshrc && until curl -sS "http://127.0.0.1:18889/_bifrost/api/system" >/dev/null 2>&1; do sleep 0.2; done
+   source ~/.zshrc && BIFROST_DATA_DIR="$TEST_DATA_DIR" ./target/debug/bifrost status
+   ```
+2. 模拟 helper 缺失或 heartbeat 超时，然后再次执行 status。
+3. 模拟 listener dead 但系统代理仍指向 `127.0.0.1:18889`，再次执行 status。
+4. 将系统代理改为外部端口，例如 `127.0.0.1:6152`，再次执行 status。
+
+**预期结果**：
+- 正常状态输出包含 `System proxy: managed by Bifrost`、listener alive、helper alive、LaunchDaemon installed/loaded/current 信息。
+- helper 缺失或 heartbeat 超时时，输出明确 warning，提示 lifecycle cleanup helper 不可用。
+- listener dead 且系统代理仍指向 Bifrost target 时，输出：
+  ```text
+  System proxy points to Bifrost 127.0.0.1:18889, but listener is not reachable.
+  ```
+  并给出 `bifrost system-proxy restore` 或等价恢复建议。
+- 外部代理占用时，输出 `occupied by another proxy` 或 `managed_by_bifrost=false` 语义，不提示清理外部代理。
+
+---
+
+### TC-CSP-30：`doctor system-proxy` 应生成诊断包并默认脱敏
+
+**前置条件**：
+- macOS 或 Windows 支持系统代理的环境；Windows 使用 `target\debug\bifrost.exe` 和 PowerShell 等价命令执行。
+- 已存在一次启用系统代理、helper heartbeat 和 cleanup/reconcile 的 lifecycle event。
+- 使用临时输出目录：
+  ```bash
+  source ~/.zshrc && DOCTOR_OUT="$(mktemp -d)"
+  ```
+
+**操作步骤**：
+1. 执行诊断命令：
+   ```bash
+   source ~/.zshrc && BIFROST_DATA_DIR="$TEST_DATA_DIR" ./target/debug/bifrost doctor system-proxy --since "2026-06-08 00:00" --bundle "$DOCTOR_OUT/bifrost-system-proxy-diagnostic.zip"
+   ```
+2. 解压诊断包：
+   ```bash
+   source ~/.zshrc && unzip -l "$DOCTOR_OUT/bifrost-system-proxy-diagnostic.zip"
+   source ~/.zshrc && unzip -q "$DOCTOR_OUT/bifrost-system-proxy-diagnostic.zip" -d "$DOCTOR_OUT/unpacked"
+   ```
+3. 查看 summary：
+   ```bash
+   source ~/.zshrc && sed -n '1,160p' "$DOCTOR_OUT/unpacked/summary.txt"
+   ```
+4. 检查脱敏：
+   ```bash
+   source ~/.zshrc && rg -n "Authorization|Cookie|token=|Set-Cookie" "$DOCTOR_OUT/unpacked" || true
+   ```
+
+**预期结果**：
+- zip 中包含 summary、version/status 输出、`scutil --proxy`、`networksetup` snapshot、runtime/proxy/owner state、`system_proxy_events.jsonl`、cleanup daemon 日志。
+- summary 能输出诊断结论，例如 previous runtime clean/unclean、当前系统代理 target、listener alive/dead、helper alive/missing、launchd installed/loaded。
+- 默认不包含 request body、cookie、authorization header、token query 等敏感内容。
+- 若当前系统代理指向外部代理，summary 明确标记 external owner，不建议恢复外部代理。
+- Windows bundle 不包含 `scutil --proxy`、`networksetup`、LaunchDaemon、macOS unified log；对应采集项必须在 `collection_manifest.json` 中标记为 `not_applicable`。
+
+---
+
+### TC-CSP-31：睡眠唤醒后 listener 存活但网络栈未 ready 时，不应误恢复系统代理
+
+**前置条件**：
+- macOS 支持系统代理的环境。
+- 使用临时数据目录启动 Bifrost，并启用系统代理。
+- 准备 fake upstream 或网络故障注入，使代理请求出现 `Network is unreachable`、`Can't assign requested address` 或 DNS lookup failed，但 Bifrost listener 仍可访问。
+
+**操作步骤**：
+1. 启动 Bifrost：
+   ```bash
+   source ~/.zshrc && BIFROST_DATA_DIR="$TEST_DATA_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 ./target/debug/bifrost -p 18889 start --skip-cert-check --unsafe-ssl --system-proxy > "$TEST_DATA_DIR/proxy.log" 2>&1 &
+   ```
+2. 等待 Admin API ready，并确认系统代理指向 `127.0.0.1:18889`。
+3. 通过测试 hook、fake networksetup 或手动合盖/唤醒制造 wake-gap。
+4. 在 wake-gap 后立即发起若干上游请求，使 request log 出现网络栈未 ready 类错误，但确认 listener 仍可达：
+   ```bash
+   source ~/.zshrc && curl -sS "http://127.0.0.1:18889/_bifrost/api/system" >/dev/null
+   ```
+5. 检查 lifecycle event：
+   ```bash
+   source ~/.zshrc && jq -r 'select(.event=="network_stack_unready_summary" or .event=="cleanup_restored")' "$TEST_DATA_DIR/logs/system_proxy_events.jsonl"
+   ```
+
+**预期结果**：
+- wake-gap 后 event log 包含 `wake_gap_detected`。
+- listener alive 时，即使出现 `ENETUNREACH` / `EADDRNOTAVAIL` / DNS lookup failed 聚合，也只写 `network_stack_unready_summary`。
+- 不出现 `cleanup_restored` 或 `cleanup_disabled_stale_proxy`，系统代理仍保持指向当前 Bifrost listener。
+- 如果 listener 后续确实不可达，才允许进入 guarded restore。
+
+---
+
+### TC-CSP-32：macOS 原生 wake notification 应触发系统代理检查
+
+**前置条件**：
+- macOS 支持系统代理的环境。
+- 当前实现已在 lifecycle helper 内启用 IOKit power notification watcher。
+- 使用临时数据目录启动 Bifrost，并启用系统代理。
+- 当前系统代理初始状态已快照，测试后必须恢复。
+
+**操作步骤**：
+1. 启动 Bifrost：
+   ```bash
+   source ~/.zshrc && BIFROST_DATA_DIR="$TEST_DATA_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 ./target/debug/bifrost -p 18889 start --skip-cert-check --unsafe-ssl --system-proxy > "$TEST_DATA_DIR/proxy.log" 2>&1 &
+   ```
+2. 等待 Admin API ready，并确认 lifecycle helper 与 watcher 启动：
+   ```bash
+   source ~/.zshrc && until curl -sS "http://127.0.0.1:18889/_bifrost/api/system" >/dev/null 2>&1; do sleep 0.2; done
+   source ~/.zshrc && jq -r '.event' "$TEST_DATA_DIR/logs/system_proxy_events.jsonl" | rg "helper_started"
+   source ~/.zshrc && jq -r '.event' "$TEST_DATA_DIR/logs/system_proxy_events.jsonl" | rg "wake_notification_watcher_started"
+   ```
+3. 让 Mac 进入睡眠：可以手动合盖、点击 Apple 菜单 Sleep，或在可控测试机上执行：
+   ```bash
+   source ~/.zshrc && pmset sleepnow
+   ```
+4. 唤醒 Mac，等待 10 秒。
+5. 检查 lifecycle event：
+   ```bash
+   source ~/.zshrc && jq -r '.event' "$TEST_DATA_DIR/logs/system_proxy_events.jsonl" | rg "system_can_sleep|system_will_sleep|system_will_power_on|system_has_powered_on|wake_notification_reconcile"
+   ```
+6. 检查系统代理和 listener：
+   ```bash
+   source ~/.zshrc && curl -sS "http://127.0.0.1:18889/_bifrost/api/system" >/dev/null
+   source ~/.zshrc && networksetup -getwebproxy "Wi-Fi"
+   source ~/.zshrc && networksetup -getsecurewebproxy "Wi-Fi"
+   ```
+
+**预期结果**：
+- event log 包含 `wake_notification_watcher_started`。
+- `wake_notification_watcher_started` 事件来自 lifecycle helper，而不是主进程；事件中应包含 helper pid 或 helper runtime identity。
+- 睡眠前包含 `system_will_sleep`；如果本次是 idle sleep，也应包含 `system_can_sleep` 且应用未阻止系统睡眠。
+- 唤醒过程中包含 `system_will_power_on` 和 `system_has_powered_on`；如果部分机型不稳定提供 early wake 事件，至少必须记录 `system_has_powered_on` 或明确的 watcher warning。
+- `system_has_powered_on` 后触发 `wake_notification_reconcile_started` 和 `wake_notification_reconcile_completed`。
+- listener 仍可达时，不误执行 `cleanup_restored` / `cleanup_disabled_stale_proxy`。
+- listener 不可达且系统代理仍指向 Bifrost target 时，进入 guarded restore 并写出对应 cleanup event。
+- 如果 watcher 初始化失败，必须写 `wake_notification_watcher_failed`，helper parent-death cleanup 仍保留，且现有 scheduler wake-gap reconcile 仍能兜底。
+
+---
+
+### TC-CSP-33：Windows 系统代理诊断不应启用 macOS-only wake watcher
+
+**前置条件**：
+- Windows 环境。
+- 已构建当前源码 `target\debug\bifrost.exe`。
+- 使用临时数据目录，避免污染正式配置：
+  ```powershell
+  $env:BIFROST_DATA_DIR = Join-Path $env:TEMP ("bifrost-csp33-" + [guid]::NewGuid())
+  New-Item -ItemType Directory -Force $env:BIFROST_DATA_DIR | Out-Null
+  ```
+
+**操作步骤**：
+1. 启动 Bifrost 并启用系统代理：
+   ```powershell
+   Start-Process -FilePath ".\target\debug\bifrost.exe" -ArgumentList "-p","18889","start","--skip-cert-check","--unsafe-ssl","--system-proxy" -PassThru
+   ```
+2. 等待服务 ready：
+   ```powershell
+   for ($i = 0; $i -lt 60; $i++) {
+     try {
+       Invoke-WebRequest "http://127.0.0.1:18889/_bifrost/api/system" -UseBasicParsing | Out-Null
+       break
+     } catch { Start-Sleep -Milliseconds 500 }
+   }
+   ```
+3. 检查 owner state：
+   ```powershell
+   Get-Content (Join-Path $env:BIFROST_DATA_DIR "system_proxy_owner_state.json") | ConvertFrom-Json
+   ```
+4. 执行 status：
+   ```powershell
+   .\target\debug\bifrost.exe status
+   ```
+5. 执行 doctor：
+   ```powershell
+   .\target\debug\bifrost.exe doctor system-proxy --bundle (Join-Path $env:BIFROST_DATA_DIR "doctor.zip")
+   ```
+
+**预期结果**：
+- owner state 中 `wake_watcher_status` 为 `unsupported`。
+- event log 不包含 `wake_notification_watcher_started`、`system_can_sleep`、`system_will_sleep`、`system_has_powered_on`。
+- status 展示 wake watcher 为 not applicable / unsupported，不显示 warning，不触发 helper restart。
+- doctor bundle 的 `collection_manifest.json` 中 macOS-only 项（`networksetup`、`scutil --proxy`、LaunchDaemon、macOS unified log、`/var/log/bifrost-system-proxy-cleanup.*`）标记为 `not_applicable`。
+- Windows 系统代理仍可由 helper parent-death cleanup 保护；不因 wake watcher unsupported 影响 cleanup。
+
+---
+
+### TC-CSP-34：托管运行时 listener dead 且系统代理残留时应优先自动重启主进程
+
+**前置条件**：
+- macOS daemon/desktop 托管模式必须执行；Windows 只执行 parent-death 或 startup recovery 触发分支，不执行 sleep/wake 分支。
+- 使用临时数据目录和非默认端口。
+- 当前系统代理初始状态已快照，测试后必须恢复。
+- 测试实现需提供可控 hook 或 fixture，使 `runtime_start_mode=daemon|desktop`、`restartable_runtime=true`，并能模拟 listener dead 但系统代理仍指向 Bifrost target。
+
+**macOS 操作步骤**：
+1. 以 daemon 或 desktop 托管模式启动 Bifrost，并显式启用系统代理：
+   ```bash
+   source ~/.zshrc && BIFROST_DATA_DIR="$TEST_DATA_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 ./target/debug/bifrost -p 18889 start --daemon --skip-cert-check --unsafe-ssl --system-proxy -y
+   ```
+2. 确认 owner state 记录可托管运行时：
+   ```bash
+   source ~/.zshrc && jq '.runtime_start_mode, .restartable_runtime' "$TEST_DATA_DIR/system_proxy_owner_state.json"
+   ```
+3. 强制结束主进程，使 listener 不可达，但保留系统代理指向 `127.0.0.1:18889`。
+4. 通过测试 hook 触发 wake reconcile，或在可控测试机上 sleep/wake。
+5. 检查 lifecycle event：
+   ```bash
+   source ~/.zshrc && jq -r '.event' "$TEST_DATA_DIR/logs/system_proxy_events.jsonl" | rg "runtime_restart_considered|runtime_restart_started|runtime_restart_succeeded|wake_notification_reconcile_restarted_runtime"
+   ```
+6. 检查 listener 与系统代理：
+   ```bash
+   source ~/.zshrc && curl -sS "http://127.0.0.1:18889/_bifrost/api/system" >/dev/null
+   source ~/.zshrc && networksetup -getwebproxy "Wi-Fi"
+   source ~/.zshrc && networksetup -getsecurewebproxy "Wi-Fi"
+   ```
+
+**Windows 操作步骤**：
+1. 使用临时数据目录以可托管模式启动 Bifrost 并启用系统代理。
+2. 强制结束主进程，使 helper parent-death 或下一次 startup recovery 触发判断。
+3. 检查 event log 包含 `runtime_restart_considered`、`runtime_restart_started`、`runtime_restart_succeeded`。
+4. 确认 `wake_watcher_status=unsupported`，且未出现 macOS wake notification event。
+
+**预期结果**：
+- listener dead 且当前系统代理仍匹配 Bifrost target 时，先写 `runtime_restart_considered`，再尝试自动重启托管主进程。
+- 重启成功时写 `runtime_restart_succeeded` 和 `wake_notification_reconcile_restarted_runtime` 或 parent-death 等价 completed event，系统代理继续指向 Bifrost，新 listener 可达。
+- 前台 `bifrost start`、用户 clean stop、外部代理抢占、runtime identity 不可信、binary path/data dir 不可信时，不自动重启，写 `runtime_restart_skipped` 并进入 guarded restore/disable。
+- 重启失败或超时时写 `runtime_restart_failed`，随后 restore original 或 disable stale Bifrost target，避免用户网络继续指向死端口。
+- Windows 不出现 IOKit/wake notification 事件；Windows 分支只验证托管 runtime restart-before-restore 和 fallback restore，不要求 `networksetup`、`pmset` 或 LaunchDaemon。
 
 ---
 

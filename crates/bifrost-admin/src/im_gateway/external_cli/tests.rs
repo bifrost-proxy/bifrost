@@ -697,6 +697,44 @@ fn codex_adapter_builds_current_cli_config_flags() {
 }
 
 #[test]
+fn codex_adapter_respects_configured_service_tier_override() {
+    let request = ExternalCliRunRequest {
+        images: Vec::new(),
+        message: "hello".to_string(),
+        operation: default_operation(),
+        params: serde_json::Value::Null,
+        provider_id: Some("provider-a".to_string()),
+        runner_id: None,
+        session_key: Some("schedule:one".to_string()),
+        runtime: DEFAULT_RUNTIME.to_string(),
+        adapter: DEFAULT_ADAPTER.to_string(),
+        work_dir: None,
+        instructions: None,
+        adapter_config: ExternalCliAdapterConfig {
+            executable: Some("codex".to_string()),
+            config_overrides: vec!["service_tier=\"flex\"".to_string()],
+            ..Default::default()
+        },
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    };
+
+    let spec = build_command_spec(&request, Path::new("/tmp/last.md")).unwrap();
+
+    assert!(has_arg_pair(
+        &spec.args,
+        "--config",
+        "service_tier=\"flex\""
+    ));
+    assert!(!has_arg_pair(
+        &spec.args,
+        "--config",
+        "service_tier=\"fast\""
+    ));
+}
+
+#[test]
 fn codex_adapter_maps_legacy_search_to_web_search_feature() {
     let request = ExternalCliRunRequest {
         images: Vec::new(),
@@ -1166,6 +1204,86 @@ async fn external_cli_runtime_marks_stopped_run_before_late_stdout() {
     assert_eq!(
         result.events[0].event_type,
         ExternalCliProgressEventType::RunFailed
+    );
+}
+
+#[tokio::test]
+async fn read_run_detail_prefers_persisted_result_response_over_stdout() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let runs_root = temp_dir.path().to_path_buf();
+    let run_id = "detail-response-run";
+    let run_dir = runs_root.join(run_id);
+    tokio::fs::create_dir_all(&run_dir).await.unwrap();
+    tokio::fs::write(run_dir.join("runtime_snapshot.json"), "{}")
+        .await
+        .unwrap();
+    tokio::fs::write(
+        run_dir.join("normalized_events.jsonl"),
+        r#"{"eventType":"run_failed","content":"External CLI run was stopped by request.","title":"Stopped","raw":{"type":"run_stopped"}}"#,
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(run_dir.join("cli.stdout.log"), "raw streaming stdout\n")
+        .await
+        .unwrap();
+    tokio::fs::write(
+        run_dir.join("cli.stderr.log"),
+        "external cli stopped by request\n",
+    )
+    .await
+    .unwrap();
+    let result = ExternalCliRunResult {
+        run_id: run_id.to_string(),
+        session_key: Some("detail-response-session".to_string()),
+        runtime: DEFAULT_RUNTIME.to_string(),
+        adapter: "traex".to_string(),
+        status: ExternalCliRunStatus::Stopped,
+        exit_code: None,
+        response: "External CLI run was stopped by request.".to_string(),
+        responses: vec!["External CLI run was stopped by request.".to_string()],
+        started_at: 1,
+        finished_at: 2,
+        duration_ms: 1,
+        artifacts: ExternalCliRunArtifacts {
+            run_dir: run_dir.display().to_string(),
+            prompt: run_dir.join("prompt.md").display().to_string(),
+            command_snapshot: run_dir.join("runtime_snapshot.json").display().to_string(),
+            stdout: run_dir.join("cli.stdout.log").display().to_string(),
+            stderr: run_dir.join("cli.stderr.log").display().to_string(),
+            normalized_events: run_dir
+                .join("normalized_events.jsonl")
+                .display()
+                .to_string(),
+            last_message: run_dir.join("last_message.md").display().to_string(),
+        },
+        events: Vec::new(),
+        metadata: std::collections::BTreeMap::new(),
+    };
+    tokio::fs::write(
+        run_dir.join("result.json"),
+        serde_json::to_vec_pretty(&result).unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let detail = read_run_detail(&runs_root, run_id).await.unwrap();
+
+    assert_eq!(detail.response, "External CLI run was stopped by request.");
+}
+
+#[test]
+fn visible_terminal_response_uses_stderr_for_empty_failed_result() {
+    let response = visible_terminal_response(
+        ExternalCliRunStatus::Failed,
+        String::new(),
+        "",
+        "Error loading config.toml: unknown variant `default`, expected `fast` or `flex`\n",
+        &[],
+    );
+
+    assert_eq!(
+        response,
+        "Error loading config.toml: unknown variant `default`, expected `fast` or `flex`"
     );
 }
 

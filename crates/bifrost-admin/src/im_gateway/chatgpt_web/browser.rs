@@ -294,6 +294,21 @@ pub(super) struct BrowserSession {
 }
 
 impl BrowserSession {
+    pub(super) async fn kill_for_profile(config: &RuntimeConfig) {
+        let profile = config.profile_dir.clone();
+        if let Some((_, pid)) = browser_pids().remove(&profile) {
+            info!(
+                pid,
+                profile_dir = %profile.display(),
+                "chatgpt_web browser: killing managed browser for stopped run"
+            );
+            kill_process(pid);
+            sleep(Duration::from_millis(500)).await;
+        }
+        browser_ports().remove(&profile);
+        clear_conversation_tabs_for_profile(&profile);
+    }
+
     pub(super) async fn kill_headless_for_profile(config: &RuntimeConfig) {
         let profile = config.profile_dir.clone();
         let mut killed_any = false;

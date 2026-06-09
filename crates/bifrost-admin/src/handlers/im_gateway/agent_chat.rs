@@ -1413,22 +1413,16 @@ pub(super) async fn process_agent_chat(
     session.mark_bifrost_agent_runtime();
     session.guide_channel = guide_channel.clone();
 
-    let target_open_id = agent_reply_target_id(provider, event).unwrap_or_default();
     let mut progress_enabled = false;
     let mut progress_tx_for_finish = None;
     let mut progress_task = None;
-    if !target_open_id.is_empty() {
-        let progress_target = crate::im_gateway::types::ImTarget {
-            id: "__agent_progress__".to_string(),
-            provider_id: provider.id.clone(),
-            display_name: "Agent Progress".to_string(),
-            enabled: true,
-            receive_id_type: "open_id".to_string(),
-            receive_id: target_open_id.to_string(),
-            default_msg_type: "interactive".to_string(),
-            created_at: 0,
-            updated_at: 0,
-        };
+    if let Some(progress_target) = build_agent_reply_target(
+        provider,
+        event,
+        "__agent_progress__",
+        "Agent Progress",
+        "interactive",
+    ) {
         if let Some(feishu) = client.feishu() {
             let progress_result = if progress_registry
                 .rollover_existing(session_key, &user_message)
@@ -1491,12 +1485,13 @@ pub(super) async fn process_agent_chat(
         session.plan_sender = Some(plan_tx);
         let feishu = client.feishu().expect("checked above");
         let provider = provider.clone();
-        let target_open_id = provider
-            .owner_open_id
-            .as_deref()
-            .or(event.source.user_id.as_deref())
-            .unwrap_or("")
-            .to_string();
+        let plan_target = build_agent_reply_target(
+            &provider,
+            event,
+            "__plan_card__",
+            "Plan Card",
+            "interactive",
+        );
         tokio::spawn(async move {
             let mut plan_card_msg_id: Option<String> = None;
             while let Some((steps, title)) = plan_rx.recv().await {
@@ -1506,23 +1501,11 @@ pub(super) async fn process_agent_chat(
                     if let Err(e) = feishu.patch_card(&provider, msg_id, card).await {
                         tracing::warn!(error = %e, "failed to patch plan card");
                     }
-                } else if !target_open_id.is_empty() {
-                    // Send new card
-                    let target = crate::im_gateway::types::ImTarget {
-                        id: "__plan_card__".to_string(),
-                        provider_id: provider.id.clone(),
-                        display_name: "Plan Card".to_string(),
-                        enabled: true,
-                        receive_id_type: "open_id".to_string(),
-                        receive_id: target_open_id.clone(),
-                        default_msg_type: "interactive".to_string(),
-                        created_at: 0,
-                        updated_at: 0,
-                    };
+                } else if let Some(target) = plan_target.as_ref() {
                     match feishu
                         .send_card(
                             &provider,
-                            &target,
+                            target,
                             card,
                             crate::im_gateway::types::SendOptions::default(),
                         )
@@ -1826,7 +1809,7 @@ pub(super) async fn process_agent_chat(
         "Agent Reply",
         "interactive",
     ) else {
-        error!("no target open_id to send agent reply");
+        error!("no reply target to send agent reply");
         return;
     };
 

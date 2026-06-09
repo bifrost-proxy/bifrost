@@ -655,7 +655,13 @@ pub async fn run_adapter(
         json!({"operation": operation}),
     )];
 
-    let auth = match ensure_authenticated(&config, true).await {
+    let auth = match tokio::select! {
+        auth = ensure_authenticated(&config, true) => auth,
+        _ = wait_for_stop_marker(stop_marker_path.clone()) => {
+            BrowserSession::kill_for_profile(&config).await;
+            Err(stopped_error())
+        },
+    } {
         Ok(auth) => auth,
         Err(error) => {
             write_run_failure_manifest(run_dir, operation, None, &error, Vec::new()).await;
@@ -741,6 +747,15 @@ pub async fn run_adapter(
         events,
         metadata,
     })
+}
+
+async fn wait_for_stop_marker(path: PathBuf) {
+    loop {
+        if stop_requested(&path).await {
+            return;
+        }
+        sleep(Duration::from_millis(200)).await;
+    }
 }
 
 #[cfg(debug_assertions)]

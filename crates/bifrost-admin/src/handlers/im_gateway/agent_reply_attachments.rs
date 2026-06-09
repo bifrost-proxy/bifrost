@@ -539,6 +539,6 @@ pub(super) async fn send_agent_reply_images_for_event(
         )
         .await;
     } else {
-        error!("no target open_id to send agent reply attachments");
+        error!("no reply target to send agent reply attachments");
     }
 }

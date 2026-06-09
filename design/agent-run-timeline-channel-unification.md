@@ -612,3 +612,59 @@ Runner artifact      -> Timeline attachment/artifact reference
 4. `session_state.json` 是否长期保留 messages？建议只保留轻量 metadata，过程数据和运行状态以 canonical timeline 为准。
 5. 飞书 card 被删除或更新失败时，是否自动重建新 card？建议按 provider 配置决定，但 binding 必须记录失败原因。
 6. 同一个 conversation 绑定多个 IM chat/open_id 时，是否全部 fan-out？建议默认只 fan-out enabled binding，并提供用户可见的绑定管理。
+
+## 2026-06-09 Web Runner Call 失败状态投影
+
+### 问题
+
+真实 Codex runner call 通过 WebUI slash runner 入口触发后，底层 `chat_runs/<run_id>/result.json` 已写入 `status=failed`，但 WebUI 仍把父消息和 assistant runner-call chip 标成 `success`，assistant 正文停留在 `Runner is running...`。这会让 Web 端误以为 runner 有效完成，而 IM/底层 run 记录显示失败，造成跨通道状态语义不一致。
+
+### 实现逻辑
+
+- `runRunnerCallStream` 继续消费 `/api/im-gateway/chat/runner-calls/stream` 的 NDJSON 事件。
+- 当收到 `runner_call_finished` 且 `status` 不属于 `completed/success/succeeded` 时，前端抛出明确错误。
+- `useRunnerCallHandler` 现有 catch 分支将 user/assistant 两侧 runner-call chip 标成 `failed`，并把 assistant 正文替换成错误文本。
+- 成功路径保持不变，仍在 `runner_call_finished` 时使用 `response` 替换 assistant 正文并标记 `success`。
+
+### 测试方案
+
+- WebUI E2E：`AI Agent Chat marks runner-call finished failures as failed` mock 返回 `runner_call_finished/status=failed`，断言消息区显示 failed 和错误文本，不再显示 `Runner is running...`。
+- 真实场景测试：更新 `human_tests/im-gateway-agent.md`，覆盖真实 runner 配置异常时 WebUI 不误报 success。
+
+### 校验要求
+
+```bash
+cd web && pnpm test:ui tests/ui/agent-chat.spec.ts -g "marks runner-call finished failures as failed"
+```
+
+## 2026-06-09 External Runner SSE 停止与结果一致性
+
+### 问题
+
+真实 `/api/im-gateway/chat/stream` 验证发现，external-runner-worker 场景下 `POST /chat/runs/{runId}/stop` 只会写入 `stop_requested` marker。实际 CLI worker 内部等待子进程时不轮询该 marker，因此 `traex` 会继续运行，session 投影停留在 running。`chatgpt_web` 在登录等待阶段也不会被 run stop marker 打断，导致 stream 只返回 `run_started`，stop 后仍残留临时 Edge 进程。另外 `/chat/runs/{runId}` detail 重新从 stdout 推断 response，在 stopped run 中可能返回原始 NDJSON 而不是 `result.json` 的 stopped 文案。进一步真实 Codex review run 发现，CLI 因本机 `service_tier=default` 配置失败时，stderr 写入 artifact，但 `result.json.response` 为空，WebUI 只能显示 `Runner: codex / Error`，正文没有失败原因。
+
+### 实现逻辑
+
+- external CLI `run_command` 在等待子进程退出时同时监听 `stop_requested` marker。
+- 发现 stop marker 后终止进程组，写入 `ExternalCliRunStatus::Stopped`、stopped stderr、stopped run event 和 result。
+- `chatgpt_web::run_adapter` 在认证等待阶段用 `tokio::select!` 同时监听 `stop_requested`。
+- ChatGPT Web 被 stop 打断时，按 profile 清理 managed browser，避免临时 Edge 进程残留。
+- `read_run_detail` 优先使用 `result.json` 中的 `response`，只有无 result response 时才回退到 stdout/events 推断。
+- external CLI terminal 状态非 succeeded 且 final response 为空时，按 `run_failed event -> stderr -> stdout -> 默认错误文案` 提升为可见 response。这样 API、session detail、WebUI 和 IM card 共享同一失败原因。
+- WebUI 主 Agent Chat stream 收到 `run_finished`/`turn_finished` 且 `status` 为非成功值时，按失败处理：正文展示 response/error，顶部状态进入 Error，线程列表停止显示 running。该逻辑与 runner-call failure path 保持一致，避免外部 Runner failed/stopped/timed_out 被 UI 当作成功完成。
+- Codex adapter 默认追加 `--config service_tier="fast"`，避免用户全局 Codex 配置中的旧值 `service_tier=default` 让 CLI 在读取配置阶段直接失败；如果 runner 显式配置了 `service_tier=...`，保留用户 override，不重复注入默认值。
+
+### 真实接口验证
+
+- `codex`: `POST /_bifrost/api/im-gateway/chat/stream` 返回 `run_started -> run_finished(status=failed)`；session projection 为 `run_state=failed`；失败原因来自真实本机 Codex 配置 `service_tier=default`。
+- `traex`: 启动 stream 后调用 `POST /_bifrost/api/im-gateway/chat/runs/{runId}/stop`，stream 返回 `run_started -> status -> run_finished(status=stopped)`；run detail response 为 `External CLI run was stopped by request.`；session projection 结束为 failed；无对应 run 进程残留。
+- `abc/chatgpt_web`: 启动 stream 后调用 stop，stream 返回 `run_started -> run_failed -> run_finished(status=stopped)`；run detail response 为 `ChatGPT Web run was stopped by request.`；session projection 结束为 failed；无临时 browser profile 进程残留。
+
+### 测试方案
+
+- Rust focused test 覆盖 `request_run_stop` 后 stopped result 不被 late stdout 覆盖。
+- Rust focused test 覆盖 `/chat/runs/{runId}` detail 优先使用 persisted `result.response`。
+- Rust focused test 覆盖 failed run response 为空时使用 stderr 作为用户可见失败摘要。
+- Playwright focused test 覆盖主 external runner `/chat/stream` terminal failed 状态：失败原因可见、状态 tag 为 Error、线程列表不保留 running。
+- Rust focused test 覆盖 Codex 默认命令注入 `service_tier="fast"`，且显式 `service_tier` override 不被覆盖；真实 API 验证覆盖 `configOverrides: []` 下 Codex stream 成功返回 `OK`。
+- human_tests 覆盖真实 `codex`、`traex`、`abc/chatgpt_web` 三类 runner 的 SSE/API 链路。
