@@ -968,6 +968,71 @@ EOF
     fi
 }
 
+test_cleanup_daemon_retries_until_macos_network_services_are_ready() {
+    if [[ "$PLATFORM" != "Darwin" ]]; then
+        _log_pass "非 macOS: networksetup readiness retry 路径跳过"
+        passed=$((passed + 1))
+        return
+    fi
+
+    rm -f "${TEST_DATA_DIR}/proxy_backup.json" "${TEST_DATA_DIR}/proxy_state.json" \
+        "${TEST_DATA_DIR}/bifrost.pid" "${TEST_DATA_DIR}/runtime.json" 2>/dev/null || true
+    cat > "${TEST_DATA_DIR}/proxy_state.json" <<EOF
+{
+  "original": {"enable": false, "host": "", "port": 0, "bypass": ""},
+  "target": {"enable": true, "host": "127.0.0.1", "port": ${PROXY_PORT}, "bypass": ""},
+  "applied": true
+}
+EOF
+    cat > "${TEST_DATA_DIR}/proxy_backup.json" <<EOF
+{"enable": false, "host": "", "port": 0, "bypass": ""}
+EOF
+
+    local fake_bin="${TEST_DATA_DIR}/fake-bin"
+    local counter_file="${TEST_DATA_DIR}/networksetup-call-count"
+    mkdir -p "$fake_bin"
+    cat > "${fake_bin}/networksetup" <<'SH'
+#!/bin/bash
+set -euo pipefail
+counter_file="${BIFROST_FAKE_NETWORKSETUP_COUNTER:?}"
+if [[ "${1:-}" == "-listallnetworkservices" ]]; then
+    count=0
+    if [[ -f "$counter_file" ]]; then
+        count="$(cat "$counter_file")"
+    fi
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$counter_file"
+    if [[ "$count" -lt 3 ]]; then
+        printf '%s\n' "An asterisk (*) denotes that a network service is disabled."
+        exit 0
+    fi
+fi
+exec /usr/sbin/networksetup "$@"
+SH
+    chmod +x "${fake_bin}/networksetup"
+
+    local output
+    output=$(PATH="${fake_bin}:$PATH" \
+        BIFROST_FAKE_NETWORKSETUP_COUNTER="$counter_file" \
+        "$BIFROST_BIN" system-proxy cleanup-daemon \
+            --data-dir "$TEST_DATA_DIR" \
+            --installed-version "0.0.1-test" 2>&1)
+    local code=$?
+    local calls=0
+    if [[ -f "$counter_file" ]]; then
+        calls="$(cat "$counter_file")"
+    fi
+
+    if [[ "$code" -eq 0 && "$calls" -ge 3 && ! -e "${TEST_DATA_DIR}/proxy_state.json" ]] \
+        && echo "$output" | grep -q "retryable error; retrying"; then
+        _log_pass "macOS: cleanup-daemon 等待 network services ready 后才完成恢复判定"
+        passed=$((passed + 1))
+    else
+        _log_fail "macOS: cleanup-daemon 未等待 network services ready" "code=0、networksetup 调用>=3、state 被清理且日志包含 retry" "code=${code}; calls=${calls}; state_exists=$([[ -e "${TEST_DATA_DIR}/proxy_state.json" ]] && echo yes || echo no); output=${output}"
+        failed=$((failed + 1))
+    fi
+}
+
 test_crash_recovery_runs_before_start_failure() {
     stop_proxy
     export BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER=1
@@ -1072,6 +1137,7 @@ main() {
     test_admin_api_enable_starts_lifecycle_helper
     test_admin_api_enable_lifecycle_helper_cleans_after_parent_crash
     test_launchd_cleanup_daemon_no_state_exits_quickly
+    test_cleanup_daemon_retries_until_macos_network_services_are_ready
     test_crash_recovery_runs_before_start_failure
 
     print_test_summary || exit 1
