@@ -3,6 +3,8 @@
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
 : "${BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL:=1}"
 export BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL
+: "${RUST_LOG:=info}"
+export RUST_LOG
 
 set -uo pipefail
 
@@ -964,6 +966,35 @@ test_lifecycle_helper_cleans_after_parent_crash() {
     esac
 }
 
+test_lifecycle_helper_starts_power_watcher_directly() {
+    stop_proxy
+    case "$PLATFORM" in
+        Darwin)
+            local helper_log="${TEST_DATA_DIR}/lifecycle-helper-power-watcher.log"
+            RUST_LOG=info BIFROST_DATA_DIR="${TEST_DATA_DIR}" "$BIFROST_BIN" system-proxy lifecycle-helper \
+                --data-dir "${TEST_DATA_DIR}" \
+                --parent-pid 1 \
+                --poll-secs 60 \
+                > "$helper_log" 2>&1 &
+            local helper_pid=$!
+            sleep 3
+            if grep -q "system proxy lifecycle helper power watcher started" "${TEST_DATA_DIR}"/logs/bifrost*.log 2>/dev/null; then
+                _log_pass "macOS: lifecycle helper 可独立注册 IOKit power watcher"
+                passed=$((passed + 1))
+            else
+                _log_fail "macOS: lifecycle helper 未注册 IOKit power watcher" "日志包含 system proxy lifecycle helper power watcher started" "$(cat "$helper_log" "${TEST_DATA_DIR}"/logs/bifrost*.log 2>/dev/null || true)"
+                failed=$((failed + 1))
+            fi
+            kill_pid "$helper_pid"
+            wait_pid "$helper_pid"
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            _log_pass "Windows: IOKit power watcher 为 macOS-only，跳过"
+            passed=$((passed + 1))
+            ;;
+    esac
+}
+
 test_lifecycle_helper_restarts_restartable_daemon_after_parent_crash() {
     stop_proxy
     unset BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER
@@ -1043,11 +1074,18 @@ test_admin_api_enable_starts_lifecycle_helper() {
                 failed=$((failed + 1))
                 return
             fi
-            if wait_for_condition 15 1 grep -q "system proxy lifecycle helper started after Admin API enable" "${TEST_DATA_DIR}/proxy.log"; then
+            if wait_for_condition 15 1 grep -q "system proxy lifecycle helper started after Admin API enable" "${TEST_DATA_DIR}"/logs/bifrost*.log; then
                 _log_pass "macOS: Admin API 运行时启用系统代理后已启动 lifecycle helper"
                 passed=$((passed + 1))
             else
-                _log_fail "macOS: Admin API 运行时启用系统代理后未启动 lifecycle helper" "日志包含 lifecycle helper started after Admin API enable" "$(tail -n 120 "${TEST_DATA_DIR}/proxy.log" 2>/dev/null || true)"
+                _log_fail "macOS: Admin API 运行时启用系统代理后未启动 lifecycle helper" "日志包含 lifecycle helper started after Admin API enable" "$(tail -n 120 "${TEST_DATA_DIR}/proxy.log" "${TEST_DATA_DIR}"/logs/bifrost*.log 2>/dev/null || true)"
+                failed=$((failed + 1))
+            fi
+            if wait_for_condition 15 1 grep -q "system proxy lifecycle helper power watcher started" "${TEST_DATA_DIR}"/logs/bifrost*.log; then
+                _log_pass "macOS: lifecycle helper 已注册 IOKit power watcher"
+                passed=$((passed + 1))
+            else
+                _log_fail "macOS: lifecycle helper 未注册 IOKit power watcher" "日志包含 system proxy lifecycle helper power watcher started" "$(tail -n 160 "${TEST_DATA_DIR}/proxy.log" "${TEST_DATA_DIR}"/logs/bifrost*.log 2>/dev/null || true)"
                 failed=$((failed + 1))
             fi
             stop_proxy
@@ -1102,7 +1140,7 @@ test_admin_api_enable_lifecycle_helper_cleans_after_parent_crash() {
                 macos_restore_proxy_snapshot_file "$previous_snapshot" || true
                 return
             fi
-            if ! wait_for_condition 15 1 grep -q "system proxy lifecycle helper started after Admin API enable" "${TEST_DATA_DIR}/proxy.log"; then
+            if ! wait_for_condition 15 1 grep -q "system proxy lifecycle helper started after Admin API enable" "${TEST_DATA_DIR}"/logs/bifrost*.log; then
                 echo "[WARN] Admin API lifecycle helper start log not observed; continuing with crash cleanup assertion"
             fi
             if [[ -n "$PROXY_PID" ]]; then
@@ -1460,6 +1498,7 @@ main() {
     test_restart_preserves_system_proxy
     test_crash_recovery
     test_runtime_target_no_state_crash_recovery
+    test_lifecycle_helper_starts_power_watcher_directly
     test_lifecycle_helper_cleans_after_parent_crash
     test_lifecycle_helper_restarts_restartable_daemon_after_parent_crash
     test_admin_api_enable_starts_lifecycle_helper

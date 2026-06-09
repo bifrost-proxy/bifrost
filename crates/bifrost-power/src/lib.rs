@@ -16,12 +16,14 @@
 
 pub mod manager;
 pub mod mode;
+pub mod power_notifications;
 
 mod platform;
 
 pub use manager::{KeepAwakeManager, ModePersister, NoopPersister, SharedKeepAwakeManager};
 pub use mode::{Mode, ParseModeError};
 pub use platform::{is_on_battery, PlatformSupport};
+pub use power_notifications::{PowerEvent, PowerNotificationWatcher};
 
 use serde::Serialize;
 use thiserror::Error;

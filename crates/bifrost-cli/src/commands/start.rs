@@ -4,7 +4,7 @@ use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use bifrost_admin::push::{
     SETTINGS_SCOPE_CERT_INFO, SETTINGS_SCOPE_CLI_PROXY, SETTINGS_SCOPE_PENDING_AUTHORIZATIONS,
@@ -491,22 +491,32 @@ fn spawn_system_proxy_wake_reconcile_task(config: SystemProxyReconcileConfig) {
     let _ = std::thread::Builder::new()
         .name("bifrost-system-proxy-wake-reconcile".to_string())
         .spawn(move || {
-            let mut last_check = Instant::now();
+            let mut last_monotonic_check = Instant::now();
+            let mut last_wall_check = SystemTime::now();
             while !stop_flag.load(Ordering::Acquire) {
                 std::thread::sleep(SYSTEM_PROXY_WAKE_CHECK_INTERVAL);
                 if stop_flag.load(Ordering::Acquire) {
                     return;
                 }
 
-                let gap = last_check.elapsed();
-                last_check = Instant::now();
-                if gap < SYSTEM_PROXY_WAKE_GAP_THRESHOLD {
+                let monotonic_gap = last_monotonic_check.elapsed();
+                let wall_now = SystemTime::now();
+                let wall_gap = wall_now
+                    .duration_since(last_wall_check)
+                    .unwrap_or_else(|_| Duration::from_secs(0));
+                last_monotonic_check = Instant::now();
+                last_wall_check = wall_now;
+                if monotonic_gap < SYSTEM_PROXY_WAKE_GAP_THRESHOLD
+                    && wall_gap < SYSTEM_PROXY_WAKE_GAP_THRESHOLD
+                {
                     continue;
                 }
 
                 tracing::info!(
                     target: "bifrost_cli::startup",
-                    elapsed_since_last_check_ms = gap.as_millis() as u64,
+                    trigger = "scheduler_wall_gap",
+                    monotonic_gap_ms = monotonic_gap.as_millis() as u64,
+                    wall_gap_ms = wall_gap.as_millis() as u64,
                     "system proxy scheduler or wake gap detected; reconciling immediately"
                 );
                 let should_enable = desired_enabled.load(Ordering::Acquire);

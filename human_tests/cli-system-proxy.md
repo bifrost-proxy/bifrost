@@ -1077,17 +1077,17 @@
 2. 等待 Admin API ready，并确认 lifecycle helper 与 watcher 启动：
    ```bash
    source ~/.zshrc && until curl -sS "http://127.0.0.1:18889/_bifrost/api/system" >/dev/null 2>&1; do sleep 0.2; done
-   source ~/.zshrc && jq -r '.event' "$TEST_DATA_DIR/logs/system_proxy_events.jsonl" | rg "helper_started"
-   source ~/.zshrc && jq -r '.event' "$TEST_DATA_DIR/logs/system_proxy_events.jsonl" | rg "wake_notification_watcher_started"
+   source ~/.zshrc && grep -E "system proxy lifecycle cleanup helper started|system proxy lifecycle helper started after Admin API enable" "$TEST_DATA_DIR/proxy.log" "$TEST_DATA_DIR"/logs/bifrost*.log
+   source ~/.zshrc && grep -E "macOS power notification watcher started|system proxy lifecycle helper power watcher started" "$TEST_DATA_DIR/proxy.log" "$TEST_DATA_DIR"/logs/bifrost*.log
    ```
 3. 让 Mac 进入睡眠：可以手动合盖、点击 Apple 菜单 Sleep，或在可控测试机上执行：
    ```bash
    source ~/.zshrc && pmset sleepnow
    ```
 4. 唤醒 Mac，等待 10 秒。
-5. 检查 lifecycle event：
+5. 检查 lifecycle helper 日志：
    ```bash
-   source ~/.zshrc && jq -r '.event' "$TEST_DATA_DIR/logs/system_proxy_events.jsonl" | rg "system_can_sleep|system_will_sleep|system_will_power_on|system_has_powered_on|wake_notification_reconcile"
+   source ~/.zshrc && grep -E "SystemWillSleep|SystemWillPowerOn|SystemHasPoweredOn|system proxy lifecycle helper received power notification|system proxy wake reconcile starting|system proxy wake reconcile reapplied proxy for live runtime|runtime_restart_started|runtime_restart_succeeded" "$TEST_DATA_DIR/proxy.log" "$TEST_DATA_DIR"/logs/bifrost*.log
    ```
 6. 检查系统代理和 listener：
    ```bash
@@ -1097,14 +1097,14 @@
    ```
 
 **预期结果**：
-- event log 包含 `wake_notification_watcher_started`。
-- `wake_notification_watcher_started` 事件来自 lifecycle helper，而不是主进程；事件中应包含 helper pid 或 helper runtime identity。
-- 睡眠前包含 `system_will_sleep`；如果本次是 idle sleep，也应包含 `system_can_sleep` 且应用未阻止系统睡眠。
-- 唤醒过程中包含 `system_will_power_on` 和 `system_has_powered_on`；如果部分机型不稳定提供 early wake 事件，至少必须记录 `system_has_powered_on` 或明确的 watcher warning。
-- `system_has_powered_on` 后触发 `wake_notification_reconcile_started` 和 `wake_notification_reconcile_completed`。
+- 日志包含 `macOS power notification watcher started` 和 `system proxy lifecycle helper power watcher started`。
+- watcher 启动日志来自 lifecycle helper，而不是主进程；helper 启动日志中应包含 helper pid、parent pid、data dir 和 helper program。
+- 睡眠前包含 `SystemWillSleep`；如果本次是 idle sleep，也应包含 `CanSystemSleep` 且应用未阻止系统睡眠。
+- 唤醒过程中包含 `SystemWillPowerOn` 和 `SystemHasPoweredOn`；如果部分机型不稳定提供 early wake 事件，至少必须记录 `SystemHasPoweredOn` 或明确的 watcher warning。
+- `SystemHasPoweredOn` 后触发 `system proxy wake reconcile starting`，并写出 `system proxy wake reconcile reapplied proxy for live runtime`、`runtime_restart_started`/`runtime_restart_succeeded` 或 guarded cleanup 之一。
 - listener 仍可达时，不误执行 `cleanup_restored` / `cleanup_disabled_stale_proxy`。
 - listener 不可达且系统代理仍指向 Bifrost target 时，进入 guarded restore 并写出对应 cleanup event。
-- 如果 watcher 初始化失败，必须写 `wake_notification_watcher_failed`，helper parent-death cleanup 仍保留，且现有 scheduler wake-gap reconcile 仍能兜底。
+- 如果 watcher 初始化失败，必须写 `system proxy lifecycle helper power watcher failed to start`，helper parent-death cleanup 仍保留，且现有 scheduler wake-gap reconcile 仍能兜底。
 
 ---
 

@@ -8,6 +8,9 @@ use crate::process::{
     capture_runtime_system_proxy_snapshot, is_process_running, read_runtime_info,
     runtime_system_proxy_host, RuntimeInfo, RuntimeSystemProxySnapshot,
 };
+use bifrost_power::PowerEvent;
+#[cfg(target_os = "macos")]
+use bifrost_power::PowerNotificationWatcher;
 
 pub fn handle_system_proxy_command(
     cli: &Cli,
@@ -728,6 +731,130 @@ fn cleanup_or_restart_managed_runtime(data_dir: &std::path::Path) -> bifrost_cor
     cleanup_system_proxy_state(data_dir)
 }
 
+fn stored_system_proxy_desired_state(data_dir: &std::path::Path) -> (bool, String) {
+    match ConfigManager::new(data_dir.to_path_buf()) {
+        Ok(config_manager) => {
+            let config = futures::executor::block_on(config_manager.config());
+            (
+                config.system_proxy.enabled,
+                config.system_proxy.bypass.clone(),
+            )
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "bifrost_cli::shutdown",
+                data_dir = %data_dir.display(),
+                error = %error,
+                "system proxy wake reconcile could not read stored desired state"
+            );
+            (false, String::new())
+        }
+    }
+}
+
+fn reapply_system_proxy_for_live_runtime(
+    data_dir: &std::path::Path,
+    runtime: &RuntimeInfo,
+    bypass: &str,
+    trigger: &str,
+) -> bifrost_core::Result<()> {
+    let target_host = runtime_system_proxy_host(runtime.host.as_deref());
+    let target_port = runtime.port;
+    let current = bifrost_core::SystemProxyManager::get_current()?;
+    if current.enable && !current.target_matches(target_host, target_port) {
+        tracing::info!(
+            target: "bifrost_cli::shutdown",
+            trigger,
+            current_host = %current.host,
+            current_port = current.port,
+            target_host,
+            target_port,
+            "system proxy wake reconcile detected external owner; leaving it unchanged"
+        );
+        return Ok(());
+    }
+
+    let mut manager = bifrost_core::SystemProxyManager::new(data_dir.to_path_buf());
+    manager.enable(target_host, target_port, Some(bypass))?;
+    manager.detach();
+    tracing::info!(
+        target: "bifrost_cli::shutdown",
+        trigger,
+        target_host,
+        target_port,
+        "system proxy wake reconcile reapplied proxy for live runtime"
+    );
+    Ok(())
+}
+
+fn reconcile_system_proxy_after_power_wake(
+    data_dir: &std::path::Path,
+    parent_pid: Option<u32>,
+    parent_started_at_ms: Option<u64>,
+) -> bifrost_core::Result<()> {
+    const TRIGGER: &str = "power_notification";
+    tracing::info!(
+        target: "bifrost_cli::shutdown",
+        trigger = TRIGGER,
+        data_dir = %data_dir.display(),
+        "system proxy wake reconcile starting"
+    );
+
+    if pid_reuse_detected(parent_pid, parent_started_at_ms) {
+        tracing::warn!(
+            target: "bifrost_cli::shutdown",
+            trigger = TRIGGER,
+            parent_pid = parent_pid.unwrap_or_default(),
+            "system proxy wake reconcile detected pid_reuse_check=mismatch; entering restart-before-cleanup"
+        );
+        return cleanup_or_restart_managed_runtime(data_dir);
+    }
+
+    if let Some(runtime) = read_runtime_info() {
+        if !runtime_identity_is_current(&runtime) {
+            tracing::warn!(
+                target: "bifrost_cli::shutdown",
+                trigger = TRIGGER,
+                pid = runtime.pid,
+                port = runtime.port,
+                "system proxy wake reconcile found stale runtime identity; entering restart-before-cleanup"
+            );
+            return cleanup_or_restart_managed_runtime(data_dir);
+        }
+
+        if runtime_listener_is_alive(&runtime) {
+            let (desired_enabled, bypass) = stored_system_proxy_desired_state(data_dir);
+            if !desired_enabled {
+                tracing::info!(
+                    target: "bifrost_cli::shutdown",
+                    trigger = TRIGGER,
+                    pid = runtime.pid,
+                    port = runtime.port,
+                    "system proxy wake reconcile skipped because stored desired state is disabled and runtime is alive"
+                );
+                return Ok(());
+            }
+            return reapply_system_proxy_for_live_runtime(data_dir, &runtime, &bypass, TRIGGER);
+        }
+
+        tracing::warn!(
+            target: "bifrost_cli::shutdown",
+            trigger = TRIGGER,
+            pid = runtime.pid,
+            port = runtime.port,
+            "system proxy wake reconcile found runtime without live listener; entering restart-before-cleanup"
+        );
+        return cleanup_or_restart_managed_runtime(data_dir);
+    }
+
+    tracing::warn!(
+        target: "bifrost_cli::shutdown",
+        trigger = TRIGGER,
+        "system proxy wake reconcile found no runtime info; entering guarded cleanup"
+    );
+    cleanup_or_restart_managed_runtime(data_dir)
+}
+
 fn pid_reuse_detected(parent_pid: Option<u32>, recorded_started_at_ms: Option<u64>) -> bool {
     let Some(pid) = parent_pid else {
         return false;
@@ -767,6 +894,33 @@ fn run_system_proxy_lifecycle_helper(
         return cleanup_or_restart_managed_runtime(&data_dir);
     }
 
+    let (power_tx, power_rx) = std::sync::mpsc::channel();
+    #[cfg(target_os = "macos")]
+    let _power_watcher = {
+        match PowerNotificationWatcher::start(power_tx) {
+            Ok(watcher) => {
+                tracing::info!(
+                    target: "bifrost_cli::shutdown",
+                    "system proxy lifecycle helper power watcher started"
+                );
+                Some(watcher)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "bifrost_cli::shutdown",
+                    error = %error,
+                    "system proxy lifecycle helper power watcher failed to start"
+                );
+                None
+            }
+        }
+    };
+    #[cfg(not(target_os = "macos"))]
+    let _power_watcher = {
+        drop(power_tx);
+        None::<()>
+    };
+
     #[cfg(unix)]
     {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -797,21 +951,47 @@ fn run_system_proxy_lifecycle_helper(
             })?;
 
             let mut consecutive_parent_misses = 0_u32;
+            let mut parent_poll = tokio::time::interval(poll_interval);
+            parent_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut power_poll = tokio::time::interval(std::time::Duration::from_millis(250));
+            power_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tokio::select! {
                     _ = sigterm.recv() => {
                         tracing::info!(target: "bifrost_cli::shutdown", "system proxy lifecycle helper received SIGTERM");
                         return cleanup_system_proxy_state(&data_dir);
-                    }
+                    },
                     _ = sigint.recv() => {
                         tracing::info!(target: "bifrost_cli::shutdown", "system proxy lifecycle helper received SIGINT");
                         return cleanup_system_proxy_state(&data_dir);
-                    }
+                    },
                     _ = sighup.recv() => {
                         tracing::info!(target: "bifrost_cli::shutdown", "system proxy lifecycle helper received SIGHUP");
                         return cleanup_system_proxy_state(&data_dir);
-                    }
-                    _ = tokio::time::sleep(poll_interval) => {
+                    },
+                    _ = power_poll.tick() => {
+                        while let Ok(event) = power_rx.try_recv() {
+                            tracing::info!(
+                                target: "bifrost_cli::shutdown",
+                                event = ?event,
+                                "system proxy lifecycle helper received power notification"
+                            );
+                            if event == PowerEvent::SystemHasPoweredOn {
+                                if let Err(error) = reconcile_system_proxy_after_power_wake(
+                                    &data_dir,
+                                    parent_pid,
+                                    parent_started_at_ms,
+                                ) {
+                                    tracing::warn!(
+                                        target: "bifrost_cli::shutdown",
+                                        error = %error,
+                                        "system proxy wake reconcile failed after power notification"
+                                    );
+                                }
+                            }
+                        }
+                    },
+                    _ = parent_poll.tick() => {
                         if pid_reuse_detected(parent_pid, parent_started_at_ms) {
                             tracing::warn!(
                                 target: "bifrost_cli::shutdown",
@@ -842,7 +1022,7 @@ fn run_system_proxy_lifecycle_helper(
                                 consecutive_parent_misses = 0;
                             }
                         }
-                    }
+                    },
                 }
             }
         })
