@@ -64,11 +64,16 @@ pub fn handle_system_proxy_command(
             }
             match bifrost_core::SystemProxyManager::get_current() {
                 Ok(status) => {
-                    let runtime_target = read_runtime_system_proxy_target();
+                    let runtime_target = read_valid_runtime_system_proxy_target();
                     let managed_by_bifrost = manager.is_current_managed(&status)
-                        || runtime_target
-                            .as_ref()
-                            .is_some_and(|target| status.target_matches(&target.host, target.port));
+                        || runtime_target.as_ref().is_some_and(|target| {
+                            status.target_matches(&target.host, target.port)
+                                || bifrost_core::SystemProxyManager::any_service_proxy_matches(
+                                    &target.host,
+                                    target.port,
+                                )
+                                .unwrap_or(false)
+                        });
                     println!("Supported: true");
                     println!("Enabled:             {}", status.enable);
                     println!("Host:                {}", status.host);
@@ -270,13 +275,33 @@ fn runtime_info_system_proxy_target(runtime: &RuntimeInfo) -> RuntimeSystemProxy
     }
 }
 
-fn read_runtime_system_proxy_target() -> Option<RuntimeSystemProxyTarget> {
-    read_runtime_info().map(|runtime| runtime_info_system_proxy_target(&runtime))
+fn runtime_identity_is_current(runtime: &RuntimeInfo) -> bool {
+    if !is_process_running(runtime.pid) {
+        return false;
+    }
+
+    let observed_started_at_ms = bifrost_core::get_process_start_time_ms(runtime.pid);
+    match bifrost_core::start_times_match(runtime.started_at_ms, observed_started_at_ms) {
+        bifrost_core::StartTimeMatch::Mismatch { recorded, observed } => {
+            tracing::debug!(
+                pid = runtime.pid,
+                recorded_started_at_ms = recorded,
+                observed_started_at_ms = observed,
+                "ignoring stale runtime system proxy target because process start time mismatched"
+            );
+            false
+        }
+        bifrost_core::StartTimeMatch::Match | bifrost_core::StartTimeMatch::Unknown => true,
+    }
+}
+
+fn read_valid_runtime_system_proxy_target() -> Option<RuntimeSystemProxyTarget> {
+    running_runtime_info().map(|runtime| runtime_info_system_proxy_target(&runtime))
 }
 
 fn running_runtime_info() -> Option<RuntimeInfo> {
     let runtime = read_runtime_info()?;
-    if is_process_running(runtime.pid) {
+    if runtime_identity_is_current(&runtime) {
         Some(runtime)
     } else {
         None
@@ -354,7 +379,7 @@ fn disable_system_proxy_explicit(
     manager: &mut bifrost_core::SystemProxyManager,
 ) -> bifrost_core::Result<bifrost_core::SystemProxyDisableOutcome> {
     let outcome = manager.disable_managed_explicit()?;
-    let runtime_target = read_runtime_system_proxy_target();
+    let runtime_target = read_valid_runtime_system_proxy_target();
     if should_retry_disable_with_runtime_target(outcome, runtime_target.as_ref()) {
         if let Some(target) = runtime_target {
             return manager.disable_if_matches_explicit(&target.host, target.port);
@@ -369,7 +394,7 @@ fn disable_system_proxy_explicit_with_privilege(
     manager: &mut bifrost_core::SystemProxyManager,
 ) -> bifrost_core::Result<bifrost_core::SystemProxyDisableOutcome> {
     let outcome = manager.disable_managed_explicit_with_privilege()?;
-    let runtime_target = read_runtime_system_proxy_target();
+    let runtime_target = read_valid_runtime_system_proxy_target();
     if should_retry_disable_with_runtime_target(outcome, runtime_target.as_ref()) {
         if let Some(target) = runtime_target {
             return manager.disable_if_matches_explicit_with_privilege(&target.host, target.port);
@@ -920,6 +945,23 @@ mod tests {
             .map(|started_at_ms| started_at_ms.saturating_add(10_000));
 
         assert!(pid_reuse_detected(Some(std::process::id()), recorded));
+    }
+
+    #[test]
+    fn runtime_identity_rejects_start_time_mismatch() {
+        let runtime = RuntimeInfo {
+            pid: std::process::id(),
+            port: 18889,
+            socks5_port: None,
+            host: Some("127.0.0.1".to_string()),
+            started_at_ms: bifrost_core::current_process_start_time_ms()
+                .map(|started_at_ms| started_at_ms.saturating_add(10_000)),
+            start_mode: RuntimeStartMode::Foreground,
+            restartable_runtime: false,
+            binary_path: None,
+        };
+
+        assert!(!runtime_identity_is_current(&runtime));
     }
 
     #[test]

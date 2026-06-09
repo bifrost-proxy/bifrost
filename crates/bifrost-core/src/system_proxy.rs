@@ -2153,16 +2153,25 @@ impl SystemProxyManager {
                 bypass: String::new(),
             });
 
-        if original.enable
-            && !(explicit_disable
-                && backup_restores_managed_target(&original, Some(&managed_target)))
-        {
+        let dirty_backup_restores_managed_target =
+            explicit_disable && backup_restores_managed_target(&original, Some(&managed_target));
+
+        if original.enable && !dirty_backup_restores_managed_target {
             set_macos_all_services_proxy_with_sudo(
                 &original.host,
                 original.port,
                 &original.bypass,
             )?;
         } else if explicit_disable {
+            if dirty_backup_restores_managed_target {
+                tracing::info!(
+                    original_host = %original.host,
+                    original_port = original.port,
+                    target_host = %managed_target.host,
+                    target_port = managed_target.port,
+                    "explicit system proxy disable ignored saved backup because it points back to the managed Bifrost target"
+                );
+            }
             disable_macos_matching_services_proxy_with_sudo(&managed_target)?;
         } else {
             disable_macos_all_services_proxy_with_sudo()?;
@@ -2356,16 +2365,25 @@ impl SystemProxyManager {
                 bypass: String::new(),
             });
 
-        if original.enable
-            && !(explicit_disable
-                && backup_restores_managed_target(&original, Some(&managed_target)))
-        {
+        let dirty_backup_restores_managed_target =
+            explicit_disable && backup_restores_managed_target(&original, Some(&managed_target));
+
+        if original.enable && !dirty_backup_restores_managed_target {
             set_macos_all_services_proxy_with_gui_auth(
                 &original.host,
                 original.port,
                 &original.bypass,
             )?;
         } else if explicit_disable {
+            if dirty_backup_restores_managed_target {
+                tracing::info!(
+                    original_host = %original.host,
+                    original_port = original.port,
+                    target_host = %managed_target.host,
+                    target_port = managed_target.port,
+                    "explicit system proxy disable ignored saved backup because it points back to the managed Bifrost target"
+                );
+            }
             disable_macos_matching_services_proxy_with_gui_auth(&managed_target)?;
         } else {
             disable_macos_all_services_proxy_with_gui_auth()?;
