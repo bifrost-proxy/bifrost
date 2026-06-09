@@ -153,6 +153,22 @@ stop_proxy() {
     sleep 2
 }
 
+read_runtime_pid() {
+    local runtime_file="${TEST_DATA_DIR}/runtime.json"
+    [[ -f "$runtime_file" ]] || return 1
+    python3 - "$runtime_file" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    data = json.load(f)
+pid = data.get("pid")
+if pid is None:
+    sys.exit(1)
+print(pid)
+PY
+}
+
 start_proxy_with_system_proxy() {
     export BIFROST_DATA_DIR="${TEST_DATA_DIR}"
     "$BIFROST_BIN" --port "${PROXY_PORT}" start \
@@ -664,11 +680,97 @@ test_sleep_wake_style_reconcile() {
     esac
 }
 
+test_restart_preserves_system_proxy() {
+    stop_proxy
+    local previous_snapshot="${TEST_DATA_DIR}/macos-proxy-before-restart-preserve.txt"
+    case "$PLATFORM" in
+        Darwin)
+            macos_save_proxy_snapshot_file "$previous_snapshot" || true
+            if macos_check_any_proxy_enabled_not_pointing_to "127.0.0.1" "$PROXY_PORT"; then
+                _log_pass "macOS: 检测到外部系统代理 owner，跳过非隔离的 restart 系统代理保持用例"
+                passed=$((passed + 1))
+                return
+            fi
+            if ! macos_clear_web_and_secure_proxy; then
+                _log_fail "macOS: restart 系统代理保持用例准备失败" "临时清空当前 Web/Secure Web 代理" "$(macos_proxy_snapshot)"
+                failed=$((failed + 1))
+                macos_restore_proxy_snapshot_file "$previous_snapshot" || true
+                return
+            fi
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            _log_pass "Windows: bifrost restart 暂不支持，跳过系统代理保持用例"
+            passed=$((passed + 1))
+            return
+            ;;
+    esac
+
+    start_proxy_with_system_proxy
+    if ! macos_ensure_bifrost_system_proxy_enabled; then
+        _log_fail "macOS: restart 系统代理保持用例准备失败" "系统代理先指向 127.0.0.1:${PROXY_PORT}" "$(macos_proxy_snapshot)"
+        failed=$((failed + 1))
+        stop_proxy
+        macos_restore_proxy_snapshot_file "$previous_snapshot" || true
+        return
+    fi
+
+    local old_pid="$PROXY_PID"
+    export BIFROST_DATA_DIR="${TEST_DATA_DIR}"
+    local output
+    output=$("$BIFROST_BIN" restart 2>&1)
+    local code=$?
+    if [[ "$code" -ne 0 ]]; then
+        _log_fail "macOS: bifrost restart 调用失败" "restart exit 0" "code=${code}; output=${output}"
+        failed=$((failed + 1))
+        stop_proxy
+        macos_restore_proxy_snapshot_file "$previous_snapshot" || true
+        return
+    fi
+
+    local waited=0
+    local new_pid=""
+    while [[ "$waited" -lt 90 ]]; do
+        new_pid="$(read_runtime_pid 2>/dev/null || true)"
+        if [[ -n "$new_pid" && "$new_pid" != "$old_pid" ]] \
+            && kill -0 "$new_pid" 2>/dev/null \
+            && admin_api_ready; then
+            PROXY_PID="$new_pid"
+            break
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    if [[ "$PROXY_PID" == "$old_pid" ]]; then
+        _log_fail "macOS: restart 后新 daemon 未就绪" "runtime pid 更新且 Admin API ready" "output=${output}; restart_log=$(tail -n 120 "${TEST_DATA_DIR}/logs/restart.log" 2>/dev/null || true)"
+        failed=$((failed + 1))
+        stop_proxy
+        macos_restore_proxy_snapshot_file "$previous_snapshot" || true
+        return
+    fi
+
+    if macos_wait_proxy_enabled "127.0.0.1" "$PROXY_PORT" 75; then
+        _log_pass "macOS: bifrost restart 后系统代理重新指向 Bifrost"
+        passed=$((passed + 1))
+    else
+        _log_fail "macOS: bifrost restart 后系统代理未恢复" "127.0.0.1:${PROXY_PORT}" "output=${output}; snapshot=$(macos_proxy_snapshot); restart_log=$(tail -n 120 "${TEST_DATA_DIR}/logs/restart.log" 2>/dev/null || true)"
+        failed=$((failed + 1))
+    fi
+
+    stop_proxy
+    macos_restore_proxy_snapshot_file "$previous_snapshot" || true
+}
+
 test_crash_recovery() {
     stop_proxy
     local previous_snapshot="${TEST_DATA_DIR}/macos-proxy-before-crash-recovery.txt"
     if [[ "$PLATFORM" == "Darwin" ]]; then
         macos_save_proxy_snapshot_file "$previous_snapshot" || true
+        if macos_check_any_proxy_enabled_not_pointing_to "127.0.0.1" "$PROXY_PORT"; then
+            _log_pass "macOS: 检测到外部系统代理 owner，跳过非隔离的崩溃后保持启用用例"
+            passed=$((passed + 1))
+            return
+        fi
         if ! macos_clear_web_and_secure_proxy; then
             _log_fail "macOS: 崩溃恢复准备失败" "临时清空当前 Web/Secure Web 代理" "$(macos_proxy_snapshot)"
             failed=$((failed + 1))
@@ -1035,6 +1137,11 @@ SH
 
 test_crash_recovery_runs_before_start_failure() {
     stop_proxy
+    if [[ "$PLATFORM" == "Darwin" ]] && macos_check_any_proxy_enabled_not_pointing_to "127.0.0.1" "$PROXY_PORT"; then
+        _log_pass "macOS: 检测到外部系统代理 owner，跳过非隔离的启动失败前恢复用例"
+        passed=$((passed + 1))
+        return
+    fi
     export BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER=1
     start_proxy_with_system_proxy
     unset BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER
@@ -1131,6 +1238,7 @@ main() {
     test_external_proxy_not_disabled_without_bifrost_ownership
     test_restore_on_exit
     test_sleep_wake_style_reconcile
+    test_restart_preserves_system_proxy
     test_crash_recovery
     test_runtime_target_no_state_crash_recovery
     test_lifecycle_helper_cleans_after_parent_crash

@@ -16,6 +16,39 @@ pub struct RuntimeInfo {
     pub started_at_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeSystemProxySnapshot {
+    pub bypass: String,
+}
+
+pub fn runtime_system_proxy_host(runtime_host: Option<&str>) -> &str {
+    match runtime_host {
+        Some("0.0.0.0") | Some("[::]") | Some("::") | None | Some("") => "127.0.0.1",
+        Some(host) => host,
+    }
+}
+
+pub fn capture_runtime_system_proxy_snapshot(
+    runtime_info: Option<&RuntimeInfo>,
+) -> Option<RuntimeSystemProxySnapshot> {
+    let runtime_info = runtime_info?;
+    if !bifrost_core::SystemProxyManager::is_supported() {
+        return None;
+    }
+
+    let current = bifrost_core::SystemProxyManager::get_current().ok()?;
+    if !current.target_matches(
+        runtime_system_proxy_host(runtime_info.host.as_deref()),
+        runtime_info.port,
+    ) {
+        return None;
+    }
+
+    Some(RuntimeSystemProxySnapshot {
+        bypass: current.bypass,
+    })
+}
+
 pub fn get_pid_file() -> bifrost_core::Result<PathBuf> {
     Ok(get_bifrost_dir()?.join("bifrost.pid"))
 }
@@ -279,6 +312,19 @@ pub fn kill_process_by_pid(_pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_system_proxy_host_maps_wildcard_listeners_to_loopback() {
+        assert_eq!(runtime_system_proxy_host(Some("0.0.0.0")), "127.0.0.1");
+        assert_eq!(runtime_system_proxy_host(Some("[::]")), "127.0.0.1");
+        assert_eq!(runtime_system_proxy_host(Some("::")), "127.0.0.1");
+        assert_eq!(runtime_system_proxy_host(Some("")), "127.0.0.1");
+        assert_eq!(runtime_system_proxy_host(None), "127.0.0.1");
+        assert_eq!(
+            runtime_system_proxy_host(Some("192.168.1.20")),
+            "192.168.1.20"
+        );
+    }
 
     #[test]
     fn test_find_process_on_port_returns_some_for_listening_port() {

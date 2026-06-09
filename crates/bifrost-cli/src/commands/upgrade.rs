@@ -10,7 +10,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::update_check::{get_latest_version, get_latest_version_fresh_with_diagnostics};
-use crate::process::{is_process_running, read_pid, read_runtime_info};
+use crate::process::{
+    capture_runtime_system_proxy_snapshot, is_process_running, read_pid, read_runtime_info,
+    RuntimeSystemProxySnapshot,
+};
 use bifrost_core::version_check::{
     is_newer_version, make_release_tag, VersionCache, GITHUB_RELEASE_URL,
 };
@@ -1125,13 +1128,14 @@ fn maybe_restart_running_proxy(auto_restart: bool) -> Result<(), BifrostError> {
     }
 
     let runtime_info = read_runtime_info();
+    let system_proxy_snapshot = capture_runtime_system_proxy_snapshot(runtime_info.as_ref());
 
     println!("{}", "  Stopping current proxy...".bright_cyan());
     super::stop::run_stop()
         .map_err(|e| BifrostError::Config(format!("Failed to stop running proxy: {}", e)))?;
 
     let exe_path = env::current_exe().map_err(BifrostError::Io)?;
-    let args = build_restart_args(runtime_info.as_ref());
+    let args = build_restart_args(runtime_info.as_ref(), system_proxy_snapshot.as_ref());
 
     println!(
         "{} {} {}",
@@ -1162,7 +1166,10 @@ fn maybe_restart_running_proxy(auto_restart: bool) -> Result<(), BifrostError> {
     Ok(())
 }
 
-fn build_restart_args(runtime_info: Option<&crate::process::RuntimeInfo>) -> Vec<String> {
+fn build_restart_args(
+    runtime_info: Option<&crate::process::RuntimeInfo>,
+    system_proxy_snapshot: Option<&RuntimeSystemProxySnapshot>,
+) -> Vec<String> {
     let mut args = vec!["start".to_string(), "-d".to_string(), "-y".to_string()];
 
     if let Some(info) = runtime_info {
@@ -1180,6 +1187,12 @@ fn build_restart_args(runtime_info: Option<&crate::process::RuntimeInfo>) -> Vec
             args.push("--socks5-port".to_string());
             args.push(socks5_port.to_string());
         }
+    }
+
+    if let Some(snapshot) = system_proxy_snapshot {
+        args.push("--system-proxy".to_string());
+        args.push("--proxy-bypass".to_string());
+        args.push(snapshot.bypass.clone());
     }
 
     args
@@ -1290,7 +1303,7 @@ mod tests {
             started_at_ms: None,
         };
 
-        let args = build_restart_args(Some(&info));
+        let args = build_restart_args(Some(&info), None);
         assert_eq!(
             args,
             vec![
@@ -1317,13 +1330,13 @@ mod tests {
             started_at_ms: None,
         };
 
-        let args = build_restart_args(Some(&info));
+        let args = build_restart_args(Some(&info), None);
         assert_eq!(args, vec!["start", "-d", "-y", "-p", "9900"]);
     }
 
     #[test]
     fn test_build_restart_args_no_runtime_info() {
-        let args = build_restart_args(None);
+        let args = build_restart_args(None, None);
         assert_eq!(args, vec!["start", "-d", "-y"]);
     }
 
@@ -1337,8 +1350,38 @@ mod tests {
             started_at_ms: None,
         };
 
-        let args = build_restart_args(Some(&info));
+        let args = build_restart_args(Some(&info), None);
         assert_eq!(args, vec!["start", "-d", "-y", "-p", "8800"]);
+    }
+
+    #[test]
+    fn test_build_restart_args_preserves_system_proxy_snapshot() {
+        let info = crate::process::RuntimeInfo {
+            pid: 12345,
+            port: 9900,
+            socks5_port: None,
+            host: Some("127.0.0.1".to_string()),
+            started_at_ms: None,
+        };
+        let snapshot = RuntimeSystemProxySnapshot {
+            bypass: "localhost,127.0.0.1,*.local".to_string(),
+        };
+
+        let args = build_restart_args(Some(&info), Some(&snapshot));
+
+        assert_eq!(
+            args,
+            vec![
+                "start",
+                "-d",
+                "-y",
+                "-p",
+                "9900",
+                "--system-proxy",
+                "--proxy-bypass",
+                "localhost,127.0.0.1,*.local"
+            ]
+        );
     }
 
     #[test]
