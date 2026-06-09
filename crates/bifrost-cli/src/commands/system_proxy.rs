@@ -99,15 +99,15 @@ pub fn handle_system_proxy_command(
             let proxy_host = host.unwrap_or_else(|| "127.0.0.1".to_string());
             let proxy_port = port.unwrap_or(cli.port);
             let bypass_str = bypass.unwrap_or_else(|| stored_config.system_proxy.bypass.clone());
-            if runtime_target_matches_request(&proxy_host, proxy_port) {
-                if try_admin_api_set_system_proxy(true, Some(&bypass_str)) {
-                    println!(
-                        "✓ System proxy enabled via running Bifrost: {}:{} (bypass: {})",
-                        proxy_host, proxy_port, bypass_str
-                    );
-                    manager.detach();
-                    return Ok(());
-                }
+            if runtime_target_matches_request(&proxy_host, proxy_port)
+                && try_admin_api_set_system_proxy(true, Some(&bypass_str))
+            {
+                println!(
+                    "✓ System proxy enabled via running Bifrost: {}:{} (bypass: {})",
+                    proxy_host, proxy_port, bypass_str
+                );
+                manager.detach();
+                return Ok(());
             }
             if let Err(e) = manager.enable(&proxy_host, proxy_port, Some(&bypass_str)) {
                 let msg = e.to_string();

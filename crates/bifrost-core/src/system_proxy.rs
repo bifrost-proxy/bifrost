@@ -1984,8 +1984,8 @@ fn disable_macos_matching_services_proxy_with_sudo(target: &ProxyBackup) -> Resu
 #[cfg(target_os = "macos")]
 fn disable_macos_services_proxy_with_sudo(services: &[String]) -> Result<()> {
     for svc in services {
-        run_networksetup_with_sudo(&["-setwebproxystate", &svc, "off"])?;
-        run_networksetup_with_sudo(&["-setsecurewebproxystate", &svc, "off"])?;
+        run_networksetup_with_sudo(&["-setwebproxystate", svc, "off"])?;
+        run_networksetup_with_sudo(&["-setsecurewebproxystate", svc, "off"])?;
     }
     Ok(())
 }
