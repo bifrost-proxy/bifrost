@@ -2818,3 +2818,22 @@ rm -rf ./.bifrost-test
 - **清理步骤**:
   - 关闭测试页面和临时服务。
 - **执行记录（2026-06-09）**: PASS — Playwright focused test `AI Agent Chat marks external runner finished failures as failed` 先复现失败：消息区显示 `Codex exploded`，但顶部/线程状态仍残留 running/processed 语义；修复后复跑通过，确认失败原因可见、`agent-chat-state-tag` 为 `Error`、线程列表不再包含 `running`。
+
+### TC-IMA-149: Codex Runner 默认 service_tier 注入避免用户全局旧配置导致启动失败
+
+- **前置条件**:
+  - 当前机器 `~/.codex/config.toml` 可能包含旧值 `service_tier = "default"`。
+  - 使用临时数据目录启动当前源码 Bifrost：`BIFROST_DATA_DIR=/tmp/bifrost-codex-default-fast-test BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 cargo run --bin bifrost -- start -p 9918 --unsafe-ssl --skip-cert-check --no-system-proxy`。
+  - `/_bifrost/api/im-gateway/chat/config` 中 `codex` runner 已启用，且 `adapterConfig.configOverrides` 为空数组。
+- **操作步骤**:
+  1. 调用 `POST /_bifrost/api/im-gateway/chat/stream`，请求体指定 `runnerId: "codex"`、`adapter: "codex"`、`workDir: "/Users/eden/work/github/bifrost"`，消息为 `Reply exactly OK.`。
+  2. 观察 NDJSON stream 事件。
+  3. 调用 `GET /_bifrost/api/im-gateway/chat/runs/{runId}` 查看 runtime snapshot。
+- **预期结果**:
+  - stream 返回 `run_started`、Codex turn 过程事件、`assistant_final`，并以 `run_finished status=succeeded response=OK` 结束。
+  - 不再返回 `Error loading config.toml: unknown variant default, expected fast or flex in service_tier`。
+  - runtime snapshot 的 args 包含 `--config` 和 `service_tier="fast"`。
+  - 如果 runner 显式配置 `service_tier="flex"`，命令使用显式值且不额外注入 `service_tier="fast"`。
+- **清理步骤**:
+  - 停止 9918 临时服务，删除 `/tmp/bifrost-codex-default-fast-test*` 临时目录。
+- **执行记录（2026-06-09）**: PASS — 先用 `configOverrides: []` 真实触发 Codex stream 复现失败，run `1780987185025-b3234ecd-b421-4627-8f19-0e4dd16f6404` 的 runtime args 不含 `service_tier` 且 stderr 为 `unknown variant default`；修复后重启当前源码复跑，同样不手工配置 service_tier，stream 返回 `assistant_final OK` 与 `run_finished status=succeeded response=OK`，run `1780987600372-0b0c0588-98a3-46bb-9f7c-f528dd843129` 的 runtime args 含 `--config service_tier="fast"`。

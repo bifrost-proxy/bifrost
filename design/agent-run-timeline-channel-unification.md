@@ -652,6 +652,7 @@ cd web && pnpm test:ui tests/ui/agent-chat.spec.ts -g "marks runner-call finishe
 - `read_run_detail` 优先使用 `result.json` 中的 `response`，只有无 result response 时才回退到 stdout/events 推断。
 - external CLI terminal 状态非 succeeded 且 final response 为空时，按 `run_failed event -> stderr -> stdout -> 默认错误文案` 提升为可见 response。这样 API、session detail、WebUI 和 IM card 共享同一失败原因。
 - WebUI 主 Agent Chat stream 收到 `run_finished`/`turn_finished` 且 `status` 为非成功值时，按失败处理：正文展示 response/error，顶部状态进入 Error，线程列表停止显示 running。该逻辑与 runner-call failure path 保持一致，避免外部 Runner failed/stopped/timed_out 被 UI 当作成功完成。
+- Codex adapter 默认追加 `--config service_tier="fast"`，避免用户全局 Codex 配置中的旧值 `service_tier=default` 让 CLI 在读取配置阶段直接失败；如果 runner 显式配置了 `service_tier=...`，保留用户 override，不重复注入默认值。
 
 ### 真实接口验证
 
@@ -665,4 +666,5 @@ cd web && pnpm test:ui tests/ui/agent-chat.spec.ts -g "marks runner-call finishe
 - Rust focused test 覆盖 `/chat/runs/{runId}` detail 优先使用 persisted `result.response`。
 - Rust focused test 覆盖 failed run response 为空时使用 stderr 作为用户可见失败摘要。
 - Playwright focused test 覆盖主 external runner `/chat/stream` terminal failed 状态：失败原因可见、状态 tag 为 Error、线程列表不保留 running。
+- Rust focused test 覆盖 Codex 默认命令注入 `service_tier="fast"`，且显式 `service_tier` override 不被覆盖；真实 API 验证覆盖 `configOverrides: []` 下 Codex stream 成功返回 `OK`。
 - human_tests 覆盖真实 `codex`、`traex`、`abc/chatgpt_web` 三类 runner 的 SSE/API 链路。

@@ -697,6 +697,44 @@ fn codex_adapter_builds_current_cli_config_flags() {
 }
 
 #[test]
+fn codex_adapter_respects_configured_service_tier_override() {
+    let request = ExternalCliRunRequest {
+        images: Vec::new(),
+        message: "hello".to_string(),
+        operation: default_operation(),
+        params: serde_json::Value::Null,
+        provider_id: Some("provider-a".to_string()),
+        runner_id: None,
+        session_key: Some("schedule:one".to_string()),
+        runtime: DEFAULT_RUNTIME.to_string(),
+        adapter: DEFAULT_ADAPTER.to_string(),
+        work_dir: None,
+        instructions: None,
+        adapter_config: ExternalCliAdapterConfig {
+            executable: Some("codex".to_string()),
+            config_overrides: vec!["service_tier=\"flex\"".to_string()],
+            ..Default::default()
+        },
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    };
+
+    let spec = build_command_spec(&request, Path::new("/tmp/last.md")).unwrap();
+
+    assert!(has_arg_pair(
+        &spec.args,
+        "--config",
+        "service_tier=\"flex\""
+    ));
+    assert!(!has_arg_pair(
+        &spec.args,
+        "--config",
+        "service_tier=\"fast\""
+    ));
+}
+
+#[test]
 fn codex_adapter_maps_legacy_search_to_web_search_feature() {
     let request = ExternalCliRunRequest {
         images: Vec::new(),

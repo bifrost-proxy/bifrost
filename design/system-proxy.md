@@ -1,5 +1,7 @@
 # System Proxy Ownership
 
+> 后续可靠性、结构化 lifecycle event、helper heartbeat/watchdog、`bifrost doctor system-proxy` 诊断包等增量方案见 [System Proxy Reliability and Diagnostics](./system-proxy-reliability-diagnostics.md)。
+
 ## 功能模块说明
 
 Bifrost 的 System Proxy 只应管理自己写入的系统代理配置。用户同时运行 Surge、Clash、系统级 VPN/代理等外部代理时，Bifrost 可以展示真实系统代理状态，但不能把外部代理误判为自身代理，也不能在 `system-proxy disable`、Admin UI 关闭开关或 `bifrost stop` 时清除外部代理。
