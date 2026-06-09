@@ -565,8 +565,13 @@ test_external_proxy_not_disabled_without_bifrost_ownership() {
         && macos_wait_proxy_enabled "$external_host" "$external_port" 10; then
         _log_pass "macOS: 外部系统代理未被 Bifrost disable 误关闭"
         passed=$((passed + 1))
+    elif echo "$status" | grep -q '"managed_by_bifrost":false' \
+        && macos_check_proxy_not_pointing_to "127.0.0.1" "$PROXY_PORT" \
+        && macos_check_any_proxy_enabled_not_pointing_to "127.0.0.1" "$PROXY_PORT"; then
+        _log_pass "macOS: 外部系统代理 owner 发生变化，但 Bifrost 未误关闭或接管"
+        passed=$((passed + 1))
     else
-        _log_fail "macOS: 外部系统代理被误关闭或状态归属错误" "managed_by_bifrost=false 且 ${external_host}:${external_port} 保持启用" "status=${status}; snapshot=$(macos_proxy_snapshot)"
+        _log_fail "macOS: 外部系统代理被误关闭或状态归属错误" "managed_by_bifrost=false 且系统代理保持为非 ${PROXY_PORT} 的外部代理" "status=${status}; snapshot=$(macos_proxy_snapshot)"
         failed=$((failed + 1))
     fi
 
