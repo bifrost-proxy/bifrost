@@ -2,11 +2,10 @@
 //!
 //! Both the macOS LaunchDaemon (Layer 2) and the per-process lifecycle helper
 //! (Layer 1) wrap [`crate::SystemProxyManager::recover_from_crash`] with the
-//! same bounded retry: certain failures (`networksetup` not yet up, no enabled
-//! network services enumerated, `launchctl` transiently unavailable) are
-//! retryable during early boot and short of a window we keep retrying with a
-//! fixed interval. This module owns the policy so both layers stay in lock
-//! step.
+//! same retry policy: most transient failures are bounded by a short window,
+//! while macOS network service enumeration returning empty means the system
+//! network stack is not ready yet and must be polled until it becomes readable.
+//! This module owns the policy so both layers stay in lock step.
 
 use std::time::{Duration, Instant};
 
@@ -26,8 +25,19 @@ pub fn is_retryable_recovery_error(error: &BifrostError) -> bool {
         || message.contains("Failed to execute launchctl")
 }
 
+/// Returns `true` when macOS network services are still unavailable during
+/// boot/shutdown. The cleanup process must keep polling this case instead of
+/// exiting and waiting for launchd to wake it again.
+pub fn is_network_services_not_ready_error(error: &BifrostError) -> bool {
+    error
+        .to_string()
+        .contains("No enabled macOS network services")
+}
+
 /// Run `op` with retries while it returns retryable errors and we are still
-/// inside the retry window. Non-retryable errors are returned immediately.
+/// inside the retry window. When macOS network services are not ready yet,
+/// continue polling past the retry window until the service list is readable.
+/// Non-retryable errors are returned immediately.
 ///
 /// `attempt` starts at 1 and is incremented before every retry; callers can
 /// use it to log the retry counter.
@@ -45,16 +55,25 @@ where
         match op(attempt) {
             Ok(value) => return Ok(value),
             Err(error) => {
-                if !is_retryable_recovery_error(&error) || started_at.elapsed() >= retry_window {
+                if !is_retryable_recovery_error(&error) {
                     return Err(error);
                 }
-                let delay = recovery_retry_delay(started_at, retry_window, retry_interval);
+                let keep_waiting_for_network_services = is_network_services_not_ready_error(&error);
+                if !keep_waiting_for_network_services && started_at.elapsed() >= retry_window {
+                    return Err(error);
+                }
+                let delay = if keep_waiting_for_network_services {
+                    retry_interval
+                } else {
+                    recovery_retry_delay(started_at, retry_window, retry_interval)
+                };
                 tracing::warn!(
                     target: "bifrost_core::system_proxy_recovery",
                     attempt,
                     retry_delay_ms = delay.as_millis() as u64,
                     retry_window_ms = retry_window.as_millis() as u64,
                     error = %error,
+                    keep_waiting_for_network_services,
                     "system proxy recovery hit a retryable error; retrying"
                 );
                 std::thread::sleep(delay);
@@ -96,6 +115,17 @@ mod tests {
     }
 
     #[test]
+    fn network_services_not_ready_is_unbounded_readiness_error() {
+        let err = BifrostError::Config(
+            "No enabled macOS network services were returned by networksetup".to_string(),
+        );
+        assert!(is_network_services_not_ready_error(&err));
+
+        let other_retryable = BifrostError::Config("networksetup transient".to_string());
+        assert!(!is_network_services_not_ready_error(&other_retryable));
+    }
+
+    #[test]
     fn non_retryable_error_returns_immediately() {
         let started = Instant::now();
         let result: Result<(), _> = retry_with_policy(
@@ -125,6 +155,29 @@ mod tests {
             "expected to spend most of the window retrying, got {:?}",
             elapsed
         );
+    }
+
+    #[test]
+    fn network_services_not_ready_retries_past_window_until_success() {
+        let mut counter = 0u32;
+        let result: Result<u32, _> = retry_with_policy(
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+            |attempt| {
+                counter = attempt;
+                if attempt < 3 {
+                    Err(BifrostError::Config(
+                        "No enabled macOS network services were returned by networksetup"
+                            .to_string(),
+                    ))
+                } else {
+                    Ok(attempt)
+                }
+            },
+        );
+
+        assert_eq!(result.unwrap(), 3);
+        assert_eq!(counter, 3);
     }
 
     #[test]

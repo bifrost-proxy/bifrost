@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::system_proxy_recovery::{
-    is_retryable_recovery_error, recovery_retry_delay, RECOVERY_RETRY_INTERVAL,
-    RECOVERY_RETRY_WINDOW,
+    is_network_services_not_ready_error, is_retryable_recovery_error, recovery_retry_delay,
+    RECOVERY_RETRY_INTERVAL, RECOVERY_RETRY_WINDOW,
 };
 use crate::{BifrostError, Result, StartTimeMatch, SystemProxyManager};
 
@@ -378,11 +378,19 @@ fn recover_if_no_live_runtime_with_policy(
             Ok(true) => return Ok(SystemProxyLaunchdRecoveryOutcome::Recovered),
             Ok(false) => return Ok(SystemProxyLaunchdRecoveryOutcome::Skipped),
             Err(error) => {
-                if !is_retryable_recovery_error(&error) || started_at.elapsed() >= retry_window {
+                if !is_retryable_recovery_error(&error) {
+                    return Err(error);
+                }
+                let keep_waiting_for_network_services = is_network_services_not_ready_error(&error);
+                if !keep_waiting_for_network_services && started_at.elapsed() >= retry_window {
                     return Err(error);
                 }
 
-                let delay = recovery_retry_delay(started_at, retry_window, retry_interval);
+                let delay = if keep_waiting_for_network_services {
+                    retry_interval
+                } else {
+                    recovery_retry_delay(started_at, retry_window, retry_interval)
+                };
                 tracing::warn!(
                     target: "bifrost_core::system_proxy_launchd",
                     data_dir = %data_dir.display(),
@@ -390,6 +398,7 @@ fn recover_if_no_live_runtime_with_policy(
                     retry_delay_ms = delay.as_millis() as u64,
                     retry_window_ms = retry_window.as_millis() as u64,
                     error = %error,
+                    keep_waiting_for_network_services,
                     "system proxy cleanup daemon startup recovery failed with a retryable error; retrying"
                 );
                 std::thread::sleep(delay);

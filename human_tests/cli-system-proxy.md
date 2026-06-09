@@ -824,8 +824,54 @@
 
 ---
 
+### TC-CSP-26：cleanup-daemon 遇到 macOS network services 未 ready 时应持续定时重试
+
+**前置条件**：
+- macOS 机器。
+- 已构建当前源码 `target/debug/bifrost`。
+- 使用临时 `TEST_DATA_DIR`，避免污染默认 `~/.bifrost`。
+
+**操作步骤**：
+1. 确认普通 macOS 设备可通过真实命令列出网络服务；注意这不是 `network service list` 命令：
+   ```bash
+   networksetup -listallnetworkservices
+   ```
+2. 在临时目录写入 Bifrost managed state，模拟关机前系统代理由 Bifrost 管理：
+   ```bash
+   cat > "$TEST_DATA_DIR/proxy_state.json" <<'EOF'
+   {
+     "original": {"enable": false, "host": "", "port": 0, "bypass": ""},
+     "target": {"enable": true, "host": "127.0.0.1", "port": 18889, "bypass": ""},
+     "applied": true
+   }
+   EOF
+   cat > "$TEST_DATA_DIR/proxy_backup.json" <<'EOF'
+   {"enable": false, "host": "", "port": 0, "bypass": ""}
+   EOF
+   ```
+3. 使用测试脚本中的 fake `networksetup` 场景执行回归：
+   ```bash
+   BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true \
+     BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+     BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 \
+     bash e2e-tests/tests/test_system_proxy_e2e.sh
+   ```
+4. 检查输出中包含：
+   ```text
+   macOS: cleanup-daemon 等待 network services ready 后才完成恢复判定
+   ```
+
+**预期结果**：
+- 普通 macOS 设备不需要启用额外功能；如果用户直接执行 `network service list`，shell 报 `command not found` 是因为该字符串不是 macOS 命令，真实命令是 `networksetup -listallnetworkservices`。
+- fake `networksetup -listallnetworkservices` 前两次只返回 header、无 enabled service 时，cleanup-daemon 不应退回 `scutil --proxy` 聚合状态并删除 `proxy_state.json`。
+- cleanup-daemon 应保持 one-shot 进程存活并按固定间隔重试；直到第三次能读取真实 service list 后，才继续执行恢复判断。
+- 日志包含 `retryable error; retrying`，并且 `keep_waiting_for_network_services=true`。
+
+---
+
 ## 执行记录
 
+- 2026-06-09：针对重启后系统代理残留且 cleanup-daemon 在 `networksetup -listallnetworkservices` 暂时返回空 service list 时提前退出的问题，补充 TC-CSP-26。真实现场取证：`launchctl print system/com.bifrost.system-proxy-cleanup` 显示 one-shot daemon 已运行且 exit code 为 0；`/var/log/bifrost-system-proxy-cleanup.log` 显示 `System proxy crash recovery check completed without managed state`；`~/.bifrost/logs/bifrost.2026-06-09.log` 显示关机路径出现 `No enabled macOS network services were returned by networksetup`，并且原 state 被 helper 清理后导致开机 cleanup 无恢复依据。修复后执行记录待补充。
 - 2026-06-08：针对 Settings -> Proxy 在外部代理占用时误把 `configured_enabled=true` 显示为开关已打开的回归补充验证。当前 18890 测试服务的 `/api/proxy/system` 返回 live 代理指向 `127.0.0.1:9900` 且 `managed_by_bifrost=false`，Settings -> Proxy 展示 `System proxy is occupied by another proxy`，`Enable System Proxy` 开关显示关闭并保留可点击接管入口；最小 Playwright 脚本读取 `settings-system-proxy-switch` 的 `aria-checked=false`。执行 `pnpm -C web exec eslint src/pages/Settings/tabs/SystemProxySection.tsx src/pages/Traffic/index.tsx src/components/StatusBar/index.tsx tests/ui/admin-settings.spec.ts` 通过；执行 `pnpm -C web test:unit -- --run useProxyStore` 通过，确认 stored preference 与 live Bifrost ownership 分离。
 - 2026-06-08：针对强制宕机后 one-shot cleanup 观察到的日志优化点和 configured/live 状态混用回归补充验证。执行 `cargo test -p bifrost-core system_proxy_launchd -- --nocapture`，结果 15/15 PASS，验证 missing pid 不再 shell out、stale runtime 文件可清理；执行 `cargo test -p bifrost-core system_proxy -- --nocapture`，结果 37/37 PASS，覆盖 system proxy ownership、LaunchDaemon 与 retry 相关单测；执行 `cargo test -p bifrost-admin proxy::tests -- --nocapture`，结果 4/4 PASS；执行 `pnpm --dir web test:unit -- --run useProxyStore`，结果 18 个 test files / 62 tests PASS，覆盖 configured preference 与 live switch 状态拆分；执行 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 bash e2e-tests/tests/test_system_proxy_e2e.sh`，第一轮发现 no-state cleanup 功能正确但耗时 12 秒，修复为并发读取 macOS network service 代理状态后第二轮 14/14 PASS，验证 cleanup-daemon 快速退出、无 `No such process` stderr，并删除 stale `runtime.json` / `bifrost.pid`；执行 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 bash e2e-tests/tests/test_proxy_admin_api.sh`，结果 6/6 PASS，验证 `/api/proxy/system` 返回 `enabled` 和 `configured_enabled`；执行 TC-CSP-25 focused 自动化验证，临时 data dir 中 `[system_proxy].enabled = true`，Admin API 返回 `configured_enabled=true`，cleanup-daemon 后 config 仍为 `true` 且 stale `runtime.json` / `bifrost.pid` 已删除。
 - 2026-06-07：使用当前修复后的独立 target 二进制真实执行系统代理 shell E2E。命令：`BIFROST_BIN="$PWD/.bifrost-verify-target/debug/bifrost" SKIP_BUILD=true BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 bash e2e-tests/tests/test_system_proxy_e2e.sh`。结果 14/14 PASS，覆盖 LaunchDaemon plist one-shot dry-run、外部代理不抢占、外部代理 disable 不误关、正常退出恢复、崩溃后再次启动恢复、无 backup/state 但 runtime target 匹配时清理残留、Admin API 运行中启用后主进程崩溃由 helper 清理、cleanup-daemon 无状态快速退出、启动失败前同步清理残留。脚本中 `Killed: 9` / `Terminated: 15` 为用例主动强杀或清理进程的预期动作；检测到本机存在外部系统代理 owner 时，两个非隔离 helper 用例按脚本规则跳过以避免误动正式代理。

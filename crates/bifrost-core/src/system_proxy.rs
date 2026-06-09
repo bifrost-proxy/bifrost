@@ -1074,17 +1074,20 @@ impl SystemProxyManager {
             let decision = {
                 #[cfg(target_os = "macos")]
                 {
-                    match macos_any_service_proxy_matches(&state.target.host, state.target.port) {
-                        Ok(true) => CrashRecoveryDecision::RestoreOriginal,
-                        Ok(false) => decide_managed_state_recovery(&current, &state),
+                    match decide_macos_managed_state_recovery(
+                        &current,
+                        &state,
+                        macos_any_service_proxy_matches(&state.target.host, state.target.port),
+                    ) {
+                        Ok(decision) => decision,
                         Err(error) => {
                             tracing::warn!(
                                 error = %error,
                                 target_host = %state.target.host,
                                 target_port = state.target.port,
-                                "Failed to inspect all macOS network services during crash recovery"
+                                "Failed to inspect all macOS network services during crash recovery; preserving managed state for retry"
                             );
-                            decide_managed_state_recovery(&current, &state)
+                            return Err(error);
                         }
                     }
                 }
@@ -1135,19 +1138,19 @@ impl SystemProxyManager {
                 let current_matches_runtime = {
                     #[cfg(target_os = "macos")]
                     {
-                        match macos_any_service_proxy_matches(
+                        match decide_macos_runtime_target_match(macos_any_service_proxy_matches(
                             &runtime_target.host,
                             runtime_target.port,
-                        ) {
+                        )) {
                             Ok(matches) => matches,
                             Err(error) => {
                                 tracing::debug!(
                                     error = %error,
                                     target_host = %runtime_target.host,
                                     target_port = runtime_target.port,
-                                    "Failed to inspect macOS network services for last runtime target during crash recovery"
+                                    "Failed to inspect macOS network services for last runtime target during crash recovery; preserving runtime state for retry"
                                 );
-                                current_proxy_matches_target(&current, &runtime_target)
+                                return Err(error);
                             }
                         }
                     }
@@ -1231,6 +1234,22 @@ fn decide_managed_state_recovery(
     } else {
         CrashRecoveryDecision::PreserveExternal
     }
+}
+
+fn decide_macos_managed_state_recovery(
+    current: &ProxyBackup,
+    state: &ManagedProxyState,
+    service_match: Result<bool>,
+) -> Result<CrashRecoveryDecision> {
+    match service_match {
+        Ok(true) => Ok(CrashRecoveryDecision::RestoreOriginal),
+        Ok(false) => Ok(decide_managed_state_recovery(current, state)),
+        Err(error) => Err(error),
+    }
+}
+
+fn decide_macos_runtime_target_match(service_match: Result<bool>) -> Result<bool> {
+    service_match
 }
 
 fn current_proxy_matches_target(current: &ProxyBackup, target: &ProxyBackup) -> bool {
@@ -2325,6 +2344,57 @@ mod tests {
             decide_managed_state_recovery(&current, &state),
             CrashRecoveryDecision::RestoreOriginal
         );
+    }
+
+    #[test]
+    fn macos_recovery_keeps_managed_state_when_services_are_not_ready() {
+        let state = ManagedProxyState {
+            original: ProxyBackup {
+                enable: false,
+                host: String::new(),
+                port: 0,
+                bypass: String::new(),
+            },
+            target: ProxyBackup {
+                enable: true,
+                host: "127.0.0.1".to_string(),
+                port: 9900,
+                bypass: String::new(),
+            },
+            applied: true,
+        };
+        let current = ProxyBackup {
+            enable: false,
+            host: String::new(),
+            port: 0,
+            bypass: String::new(),
+        };
+        let error = BifrostError::Config(
+            "No enabled macOS network services were returned by networksetup".to_string(),
+        );
+
+        let result = decide_macos_managed_state_recovery(&current, &state, Err(error));
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("No enabled macOS network services"));
+    }
+
+    #[test]
+    fn macos_runtime_recovery_keeps_runtime_state_when_services_are_not_ready() {
+        let error = BifrostError::Config(
+            "No enabled macOS network services were returned by networksetup".to_string(),
+        );
+
+        let result = decide_macos_runtime_target_match(Err(error));
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("No enabled macOS network services"));
     }
 
     #[cfg(target_os = "macos")]
