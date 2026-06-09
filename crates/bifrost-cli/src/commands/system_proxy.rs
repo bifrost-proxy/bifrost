@@ -8,6 +8,7 @@ use crate::process::{
     capture_runtime_system_proxy_snapshot, is_process_running, read_runtime_info,
     runtime_system_proxy_host, RuntimeInfo, RuntimeSystemProxySnapshot,
 };
+#[cfg(unix)]
 use bifrost_power::PowerEvent;
 #[cfg(target_os = "macos")]
 use bifrost_power::PowerNotificationWatcher;
@@ -894,35 +895,35 @@ fn run_system_proxy_lifecycle_helper(
         return cleanup_or_restart_managed_runtime(&data_dir);
     }
 
-    let (power_tx, power_rx) = std::sync::mpsc::channel();
-    #[cfg(target_os = "macos")]
-    let _power_watcher = {
-        match PowerNotificationWatcher::start(power_tx) {
-            Ok(watcher) => {
-                tracing::info!(
-                    target: "bifrost_cli::shutdown",
-                    "system proxy lifecycle helper power watcher started"
-                );
-                Some(watcher)
-            }
-            Err(error) => {
-                tracing::warn!(
-                    target: "bifrost_cli::shutdown",
-                    error = %error,
-                    "system proxy lifecycle helper power watcher failed to start"
-                );
-                None
-            }
-        }
-    };
-    #[cfg(not(target_os = "macos"))]
-    let _power_watcher = {
-        drop(power_tx);
-        None::<()>
-    };
-
     #[cfg(unix)]
     {
+        let (power_tx, power_rx) = std::sync::mpsc::channel::<PowerEvent>();
+        #[cfg(target_os = "macos")]
+        let _power_watcher = {
+            match PowerNotificationWatcher::start(power_tx) {
+                Ok(watcher) => {
+                    tracing::info!(
+                        target: "bifrost_cli::shutdown",
+                        "system proxy lifecycle helper power watcher started"
+                    );
+                    Some(watcher)
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target: "bifrost_cli::shutdown",
+                        error = %error,
+                        "system proxy lifecycle helper power watcher failed to start"
+                    );
+                    None
+                }
+            }
+        };
+        #[cfg(not(target_os = "macos"))]
+        let _power_watcher = {
+            drop(power_tx);
+            None::<()>
+        };
+
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
