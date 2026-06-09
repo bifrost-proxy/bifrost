@@ -1,11 +1,33 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { Badge, Button, Card, Space, Tag, Typography, theme } from "antd";
 import { BellOutlined, CloseOutlined, MobileOutlined, RightOutlined } from "@ant-design/icons";
 import type { TrustProbeDevice, TrustProbeSession } from "../../api/cert";
 import { pushService, type SettingsScope } from "../../services/pushService";
+import {
+  NOTIFICATION_BUBBLE_DEFAULT_TOP,
+  NOTIFICATION_BUBBLE_MARGIN,
+  NOTIFICATION_BUBBLE_SIZE,
+  NOTIFICATION_PANEL_WIDTH,
+  clampNotificationBubblePosition,
+  clampNotificationPanelPosition,
+  defaultNotificationBubblePosition,
+  type FloatingPosition,
+} from "./position";
+import "./index.css";
 
 const { Text } = Typography;
+const DRAG_CLICK_SUPPRESSION_DISTANCE = 4;
+
+interface DragState {
+  pointerId: number;
+  offsetX: number;
+  offsetY: number;
+  startX: number;
+  startY: number;
+  captured: boolean;
+  hasMoved: boolean;
+}
 
 function deviceLabel(device: TrustProbeDevice) {
   return device.platformHint || device.clientIp || device.deviceId;
@@ -49,9 +71,14 @@ function trustProbeSessionsFromPushData(data: unknown): TrustProbeSession[] {
 export default function AvailabilityCheckNotificationCenter() {
   const { token } = theme.useToken();
   const navigate = useNavigate();
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const dragStateRef = useRef<DragState | null>(null);
+  const suppressNextClickRef = useRef(false);
+  const suppressClickTimerRef = useRef<number | null>(null);
   const [sessions, setSessions] = useState<TrustProbeSession[]>([]);
   const [expanded, setExpanded] = useState(false);
   const [dismissedSignature, setDismissedSignature] = useState<string | null>(null);
+  const [draggedPosition, setDraggedPosition] = useState<FloatingPosition | null>(null);
 
   useEffect(() => {
     pushService.connect({
@@ -71,6 +98,15 @@ export default function AvailabilityCheckNotificationCenter() {
       pushService.disconnectIfIdle();
     };
   }, []);
+
+  useEffect(
+    () => () => {
+      if (suppressClickTimerRef.current) {
+        window.clearTimeout(suppressClickTimerRef.current);
+      }
+    },
+    [],
+  );
 
   const devices = useMemo(
     () =>
@@ -101,19 +137,150 @@ export default function AvailabilityCheckNotificationCenter() {
     setDismissedSignature(signature);
   }, [signature]);
 
+  useEffect(() => {
+    if (!draggedPosition) {
+      return;
+    }
+    const handleResize = () => {
+      setDraggedPosition((current) =>
+        current
+          ? clampNotificationBubblePosition(current, {
+              width: window.innerWidth,
+              height: window.innerHeight,
+            })
+          : null,
+      );
+    };
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, [draggedPosition]);
+
+  const handlePointerDown = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || expanded) {
+      return;
+    }
+    const root = rootRef.current;
+    if (!root) {
+      return;
+    }
+    const rect = root.getBoundingClientRect();
+    dragStateRef.current = {
+      pointerId: event.pointerId,
+      offsetX: event.clientX - rect.left,
+      offsetY: event.clientY - rect.top,
+      startX: event.clientX,
+      startY: event.clientY,
+      captured: false,
+      hasMoved: false,
+    };
+  }, [expanded]);
+
+  const handlePointerMove = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    const dragState = dragStateRef.current;
+    if (!dragState || dragState.pointerId !== event.pointerId) {
+      return;
+    }
+    const deltaX = event.clientX - dragState.startX;
+    const deltaY = event.clientY - dragState.startY;
+    if (Math.hypot(deltaX, deltaY) > DRAG_CLICK_SUPPRESSION_DISTANCE) {
+      dragState.hasMoved = true;
+    }
+    if (!dragState.hasMoved) {
+      return;
+    }
+    if (!dragState.captured) {
+      rootRef.current?.setPointerCapture(event.pointerId);
+      dragState.captured = true;
+    }
+    setDraggedPosition(
+      clampNotificationBubblePosition(
+        {
+          left: event.clientX - dragState.offsetX,
+          top: event.clientY - dragState.offsetY,
+        },
+        {
+          width: window.innerWidth,
+          height: window.innerHeight,
+        },
+      ),
+    );
+  }, []);
+
+  const finishDrag = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    const dragState = dragStateRef.current;
+    if (!dragState || dragState.pointerId !== event.pointerId) {
+      return;
+    }
+    if (dragState.hasMoved) {
+      suppressNextClickRef.current = true;
+      if (suppressClickTimerRef.current) {
+        window.clearTimeout(suppressClickTimerRef.current);
+      }
+      suppressClickTimerRef.current = window.setTimeout(() => {
+        suppressNextClickRef.current = false;
+        suppressClickTimerRef.current = null;
+      }, 0);
+    }
+    dragStateRef.current = null;
+    const root = rootRef.current;
+    if (dragState.captured && root?.hasPointerCapture(event.pointerId)) {
+      root.releasePointerCapture(event.pointerId);
+    }
+  }, []);
+
+  const handleBubbleClick = useCallback(() => {
+    if (suppressNextClickRef.current) {
+      suppressNextClickRef.current = false;
+      return;
+    }
+    setExpanded(true);
+  }, []);
+
   if (!visible) {
     return null;
   }
 
+  const activePosition =
+    draggedPosition ??
+    (typeof window === "undefined"
+      ? {
+          left:
+            NOTIFICATION_PANEL_WIDTH - NOTIFICATION_BUBBLE_SIZE - NOTIFICATION_BUBBLE_MARGIN,
+          top: NOTIFICATION_BUBBLE_DEFAULT_TOP,
+        }
+      : defaultNotificationBubblePosition({
+          width: window.innerWidth,
+          height: window.innerHeight,
+        }));
+  const panelPosition =
+    typeof window === "undefined"
+      ? activePosition
+      : clampNotificationPanelPosition(activePosition, {
+          width: window.innerWidth,
+          height: window.innerHeight,
+        });
+
   return (
     <div
+      ref={rootRef}
       data-testid="availability-check-notification-center"
+      className={[
+        "availability-check-notification-center",
+        !expanded ? "availability-check-notification-center--collapsed" : "",
+        !expanded && devices.length > 0 ? "availability-check-notification-center--alerting" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={finishDrag}
+      onPointerCancel={finishDrag}
       style={{
         position: "fixed",
-        top: 14,
-        right: 18,
+        top: expanded ? panelPosition.top : activePosition.top,
+        left: expanded ? panelPosition.left : activePosition.left,
         zIndex: 980,
-        maxWidth: 360,
+        maxWidth: NOTIFICATION_PANEL_WIDTH,
       }}
     >
       {expanded ? (
@@ -196,11 +363,13 @@ export default function AvailabilityCheckNotificationCenter() {
             shape="circle"
             type="primary"
             icon={<BellOutlined />}
-            onClick={() => setExpanded(true)}
+            onClick={handleBubbleClick}
             data-testid="availability-check-notification-bubble"
+            className="availability-check-notification-bubble"
+            aria-label={`${devices.length} availability check notification${devices.length === 1 ? "" : "s"}`}
             style={{
-              width: 42,
-              height: 42,
+              width: NOTIFICATION_BUBBLE_SIZE,
+              height: NOTIFICATION_BUBBLE_SIZE,
               boxShadow: token.boxShadowSecondary,
             }}
           />

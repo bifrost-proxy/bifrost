@@ -2,13 +2,13 @@
 
 ## 功能模块说明
 
-验证管理端 `Notifications` 页面三个通知表的顶部状态筛选与固定分页行为：
+验证管理端 `Notifications` 页面三个通知表的顶部状态筛选、固定分页行为，以及全局可用性检查通知气泡交互：
 
 1. `All Notifications`
 2. `TLS Trust`
 3. `Authorization`
 
-每个表都应提供 `All / Read / Unread` 顶部筛选，并在首次进入该表时默认显示未读消息；表格分页固定为每页 `10` 条，只允许默认翻页，不允许切换 page size。
+每个表都应提供 `All / Read / Unread` 顶部筛选，并在首次进入该表时默认显示未读消息；表格分页固定为每页 `10` 条，只允许默认翻页，不允许切换 page size。存在可用性检查通知时，右上角通知气泡应下移到 Toolbar 下方，显示轻微动画提示，并支持拖拽后继续点击展开。
 
 ## 前置条件
 
@@ -28,10 +28,11 @@ cd web
 BACKEND_PORT=8800 pnpm exec vite --host 127.0.0.1 --port 4017
 ```
 
-- 用例执行前向 `./.bifrost-human-notifications/notifications.db` 写入以下测试数据：
+- 用例执行前向 `./.bifrost-human-notifications/admin/notifications.db` 写入以下测试数据：
   - `tls_trust_change`：至少 1 条 `unread`、1 条 `read`
   - `pending_authorization`：至少 1 条 `unread`、1 条 `read`
   - 额外补充 20+ 条未读通知，用于确认分页仍可使用但没有 page size 切换器
+- 可用性检查气泡用例执行前通过 `POST /_bifrost/api/trust-probe/sessions` 创建 session，并向 `/_bifrost/public/trust-probe/{sessionId}/report` 上报 `page_opened` 事件。
 
 ## 测试用例
 
@@ -75,6 +76,34 @@ BACKEND_PORT=8800 pnpm exec vite --host 127.0.0.1 --port 4017
 - 切换到 `Read` 后只显示已读通知
 - 底部分页控件仍可正常翻页
 - 分页区域不显示 `10 / page`、`20 / page` 之类的 page size 下拉选择器
+
+### TC-WN-04：可用性检查通知气泡下移并显示动画提示
+
+**步骤**：
+1. 打开 `http://127.0.0.1:8800/_bifrost/traffic`
+2. 创建可用性检查 session，并模拟设备上报 `page_opened`
+3. 观察右上角通知气泡的位置、徽标和动画状态
+
+**预期结果**：
+- 通知气泡显示在 Toolbar 下方，不遮挡 `Breakpoint`、`System Proxy` 等顶部控件
+- 气泡展示未读数量徽标
+- 气泡存在轻微跳动或外圈脉冲动画，用于提示这里有通知信息
+- 亮色和暗色主题下气泡、徽标和图标都清晰可见
+
+### TC-WN-05：可用性检查通知气泡支持拖拽且拖拽后仍可展开
+
+**步骤**：
+1. 在 `http://127.0.0.1:8800/_bifrost/traffic` 等待可用性检查通知气泡出现
+2. 使用鼠标按住气泡并拖拽到页面中部偏右位置
+3. 松开鼠标后再次点击气泡
+4. 在展开卡片中点击 `Open Availability Check`
+
+**预期结果**：
+- 气泡随鼠标拖拽移动，且不会被拖出视口边界
+- 拖拽结束时不会误触开展开卡片
+- 拖拽后再次点击气泡可展开 `Availability Check` 卡片
+- 展开卡片展示设备标签、客户端 IP 和检查状态
+- 点击 `Open Availability Check` 后进入 Settings Certificate 的可用性检查区域
 
 ## 清理步骤
 
