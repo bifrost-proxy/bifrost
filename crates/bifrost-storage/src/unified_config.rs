@@ -191,6 +191,17 @@ pub struct SocksAuthConfig {
     pub password: Option<String>,
 }
 
+pub const DEFAULT_APP_INTERCEPT_INCLUDE: &[&str] = &[
+    "Google Chrome*",
+    "Microsoft Edge*",
+    "*Safari*",
+    "*Firefox*",
+    "*Opera*",
+    "*Brave*",
+    "*Arc*",
+    "*Vivaldi*",
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TlsConfig {
@@ -212,16 +223,10 @@ impl Default for TlsConfig {
             intercept_exclude: Vec::new(),
             intercept_include: Vec::new(),
             app_intercept_exclude: Vec::new(),
-            app_intercept_include: vec![
-                "Google Chrome*".to_string(),
-                "Microsoft Edge*".to_string(),
-                "*Safari*".to_string(),
-                "*Firefox*".to_string(),
-                "*Opera*".to_string(),
-                "*Brave*".to_string(),
-                "*Arc*".to_string(),
-                "*Vivaldi*".to_string(),
-            ],
+            app_intercept_include: DEFAULT_APP_INTERCEPT_INCLUDE
+                .iter()
+                .map(|app| (*app).to_string())
+                .collect(),
             ip_intercept_exclude: Vec::new(),
             ip_intercept_include: Vec::new(),
             unsafe_ssl: false,
@@ -540,6 +545,11 @@ mod tests {
         assert!(!config.enable_interception);
         assert!(!config.unsafe_ssl);
         assert!(config.disconnect_on_change);
+        assert_eq!(config.app_intercept_include, DEFAULT_APP_INTERCEPT_INCLUDE);
+        assert!(!config
+            .app_intercept_include
+            .iter()
+            .any(|app| app.to_ascii_lowercase().contains("codex")));
     }
 
     #[test]
