@@ -4,7 +4,9 @@ use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+#[cfg(target_os = "macos")]
+use std::time::SystemTime;
+use std::time::{Duration, Instant};
 
 use bifrost_admin::push::{
     SETTINGS_SCOPE_CERT_INFO, SETTINGS_SCOPE_CLI_PROXY, SETTINGS_SCOPE_PENDING_AUTHORIZATIONS,
