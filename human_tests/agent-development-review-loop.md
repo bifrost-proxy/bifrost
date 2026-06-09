@@ -38,23 +38,28 @@
 - `AGENTS.md` 的收尾门禁和测试完备性检查清单都包含两轮闭环要求。
 - `design/agent-development-review-loop.md` 描述该流程的设计、依赖、测试方案和校验要求。
 
-### TC-ADRL-02：human_tests 索引与用例总数同步
+### TC-ADRL-02：human_tests 索引同步且不维护全局总计
 
 **操作步骤：**
 
 1. 执行：
    ```bash
-   rg -n "agent-development-review-loop|Agent Development Review Loop|总计：91 个测试文件，1597 个测试用例" human_tests/readme.md
+   rg -n "agent-development-review-loop|Agent Development Review Loop" human_tests/readme.md
    ```
 2. 检查输出是否包含 `human_tests/agent-development-review-loop.md` 的索引行。
-3. 检查索引行的测试用例数是否为 `7`。
-4. 检查总计是否为 `91 个测试文件，1597 个测试用例`。
+3. 检查索引行的测试用例数是否为 `8`。
+4. 执行：
+   ```bash
+   ! rg -n "^\\*\\*总计：|总计：[0-9]+ 个测试文件" human_tests/readme.md
+   ```
+5. 检查命令是否没有命中全局测试文件数或测试用例数汇总。
 
 **预期结果：**
 
 - `human_tests/readme.md` 包含 `agent-development-review-loop.md` 索引。
 - 索引行描述该模块用于验证 Agent 开发任务的两轮 Review/Fix/Test 闭环。
-- 测试文件总数和测试用例总数已同步更新。
+- `human_tests/readme.md` 不包含“总计：N 个测试文件，M 个测试用例”这类全局汇总数字。
+- 索引维护只更新相关模块行，不要求维护全局总计。
 
 ### TC-ADRL-03：AGENTS.md 包含持续改进引导语
 
@@ -141,6 +146,28 @@
 - `AGENTS.md` 的开发流程第 1 步是 `任务启动检查`。
 - `design/agent-development-review-loop.md` 同步说明并行开发和 CI 复现应优先使用独立 worktree。
 - `human_tests/agent-development-review-loop.md` 包含本用例，避免后续流程文档遗漏该门禁。
+
+### TC-ADRL-08：AGENTS.md 禁止 human_tests/readme.md 全局汇总数字
+
+**操作步骤：**
+
+1. 执行：
+   ```bash
+   rg -n "索引冲突约束|只维护测试文档索引|禁止新增或更新.*总计|只调整相关模块的索引行" AGENTS.md human_tests/readme.md
+   ```
+2. 执行：
+   ```bash
+   ! rg -n "^\\*\\*总计：|总计：[0-9]+ 个测试文件" human_tests/readme.md
+   ```
+3. 检查输出是否说明 `human_tests/readme.md` 只维护索引，不维护全局测试文件数或测试用例数。
+
+**预期结果：**
+
+- `AGENTS.md` 明确禁止在 `human_tests/readme.md` 新增或更新全局汇总数字。
+- `human_tests/readme.md` 的维护约束明确不维护全局汇总数字。
+- `human_tests/readme.md` 当前不包含全局总计行，避免并行开发反复冲突。
+
+**执行记录（2026-06-09）**：PASS — 已执行索引检索、全局总计反向检索和 AGENTS/readme 约束检索；`human_tests/readme.md` 包含 `agent-development-review-loop.md` 索引行且用例数为 8，未命中 `总计：N 个测试文件` 类全局汇总行，AGENTS 与 readme 均明确禁止维护全局总计数字。
 
 ## 清理步骤
 

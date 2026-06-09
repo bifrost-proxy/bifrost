@@ -2438,6 +2438,45 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 
 ---
 
+### TC-PRA-63：回归 - 路径级 host 规则不被域名级 https 兜底覆盖
+
+**背景**：
+- 用户规则中，`qianchuan.jinritemai.com/ad qianchuan.jinritemai.com/ad` 这类路径级保留原站规则会解析为 `Host` 路由。
+- 同一规则组末尾的 `qianchuan.jinritemai.com https://10.37.102.138:8080` 会解析为 `Https` 域名级兜底。
+- 修复前两条规则同时命中时，转换层会用后命中的 `Https` 兜底覆盖优先级更高的路径级 `Host` upstream，导致路径排除规则失效。
+
+**前置条件**：
+- 在仓库根目录执行。
+- 不使用 9900 端口，不修改系统代理。
+- 测试使用本地 mock server 与临时端口模拟 `qianchuan` 规则形态，不依赖真实千川域名或内网 IP。
+
+**操作步骤**：
+1. 执行规则转换单元回归：
+   ```bash
+   cargo test -p bifrost-cli test_merge_keeps_ -- --nocapture
+   ```
+2. 执行 E2E 回归，验证路径级 `host` 规则命中后不会再走域名级 `https` 兜底：
+   ```bash
+   cargo run -p bifrost-e2e -- --test routing_path_host_vs_domain_https
+   ```
+3. 复跑既有 `xhost` 优先级回归，确认修复没有破坏 `xhost` 覆盖 `host` 的语义：
+   ```bash
+   cargo test -p bifrost-e2e tests::routing::tests::test_xhost_priority -- --nocapture
+   cargo test -p bifrost-e2e tests::rule_priority::tests::test_xhost_over_host -- --nocapture
+   ```
+
+**预期结果**：
+- 单元测试 `test_merge_keeps_first_route_target_across_protocols` 通过，断言最终 `host` 为路径级 `qianchuan.jinritemai.com/ad`，同时诊断命中列表仍保留 2 条规则。
+- 单元测试 `test_merge_keeps_domain_fallback_route_when_path_rule_misses` 通过，断言路径未命中时 `https://10.37.102.138:8080` 兜底仍生效。
+- 单元测试 `test_merge_keeps_xhost_priority_over_host` 通过，断言 `xhost` 仍能覆盖同 pattern 的 `host`。
+- E2E 返回体包含 `path_host_wins`，且 mock server 记录到请求路径 `/ad/api/v1/account/user/info`。
+- 如果路径级规则被域名级 `https` 兜底覆盖，E2E 会尝试访问不可用的兜底端口并失败。
+- 既有 `xhost` E2E 返回体仍包含 `xhost_server`，不会回退到 `host_server`。
+
+**执行记录（2026-06-09）**：PASS — 已执行 `cargo test -p bifrost-cli test_merge_keeps_ -- --nocapture`，3 个定向单元回归在 `lib.rs` 和 `main.rs` 测试目标中均通过；已执行 `cargo run -p bifrost-e2e -- --test routing_path_host_vs_domain_https`，E2E runner 运行 1 个用例并通过，返回体命中 `path_host_wins`，路径级 `host` 规则未被域名级 `https` 兜底覆盖；已执行 `cargo test -p bifrost-e2e tests::routing::tests::test_xhost_priority -- --nocapture` 与 `cargo test -p bifrost-e2e tests::rule_priority::tests::test_xhost_over_host -- --nocapture`，两个既有 `xhost` 优先级回归均通过。
+
+---
+
 ## 清理
 
 测试完成后清理临时数据：

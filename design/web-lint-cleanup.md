@@ -43,4 +43,4 @@
 ## 文档更新要求
 
 - 更新 `human_tests/web-lint-cleanup.md`。
-- 更新 `human_tests/readme.md` 索引表与总计。
+- 更新 `human_tests/readme.md` 对应索引行；禁止维护全局测试文件数或测试用例数总计。
