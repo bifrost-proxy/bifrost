@@ -255,7 +255,7 @@ fn log_startup_phase(phase: &'static str, started_at: Instant) {
 struct SystemProxyReconcileConfig {
     bifrost_dir: PathBuf,
     system_proxy_manager: Arc<tokio::sync::RwLock<bifrost_core::SystemProxyManager>>,
-    should_enable: bool,
+    desired_enabled: Arc<AtomicBool>,
     proxy_host: String,
     proxy_port: u16,
     system_proxy_bypass: String,
@@ -295,7 +295,7 @@ fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
     let SystemProxyReconcileConfig {
         bifrost_dir,
         system_proxy_manager,
-        should_enable,
+        desired_enabled,
         proxy_host,
         proxy_port,
         system_proxy_bypass,
@@ -320,6 +320,7 @@ fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
             let mut startup_external_owner_logged = false;
             let mut idle_logged = false;
             while !stop_flag.load(Ordering::Acquire) {
+                let should_enable = desired_enabled.load(Ordering::Acquire);
                 match inspect_system_proxy_ownership(&proxy_host, proxy_port) {
                     SystemProxyOwnership::Other => {
                         if applied_by_this_runtime || enabled_flag.load(Ordering::Acquire) {
@@ -373,6 +374,27 @@ fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
                             continue;
                         }
                     }
+                }
+
+                if !should_enable {
+                    if applied_by_this_runtime || enabled_flag.load(Ordering::Acquire) {
+                        tracing::info!(
+                            target: "bifrost_cli::startup",
+                            host = %proxy_host,
+                            port = proxy_port,
+                            "system proxy reconcile skipped because runtime desired state is disabled"
+                        );
+                    }
+                    applied_by_this_runtime = false;
+                    enabled_flag.store(false, Ordering::Release);
+                    let sleep_until = Instant::now() + SYSTEM_PROXY_RECONCILE_INTERVAL;
+                    while Instant::now() < sleep_until {
+                        if stop_flag.load(Ordering::Acquire) {
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_secs(1));
+                    }
+                    continue;
                 }
 
                 let mut manager = system_proxy_manager.blocking_write();
@@ -457,7 +479,7 @@ fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
 fn spawn_system_proxy_wake_reconcile_task(config: SystemProxyReconcileConfig) {
     let SystemProxyReconcileConfig {
         system_proxy_manager,
-        should_enable,
+        desired_enabled,
         proxy_host,
         proxy_port,
         system_proxy_bypass,
@@ -465,10 +487,6 @@ fn spawn_system_proxy_wake_reconcile_task(config: SystemProxyReconcileConfig) {
         stop_flag,
         ..
     } = config;
-
-    if !should_enable {
-        return;
-    }
 
     let _ = std::thread::Builder::new()
         .name("bifrost-system-proxy-wake-reconcile".to_string())
@@ -491,6 +509,17 @@ fn spawn_system_proxy_wake_reconcile_task(config: SystemProxyReconcileConfig) {
                     elapsed_since_last_check_ms = gap.as_millis() as u64,
                     "system proxy scheduler or wake gap detected; reconciling immediately"
                 );
+                let should_enable = desired_enabled.load(Ordering::Acquire);
+                if !should_enable {
+                    enabled_flag.store(false, Ordering::Release);
+                    tracing::info!(
+                        target: "bifrost_cli::startup",
+                        host = %proxy_host,
+                        port = proxy_port,
+                        "system proxy wake reconcile skipped because runtime desired state is disabled"
+                    );
+                    continue;
+                }
                 match inspect_system_proxy_ownership(&proxy_host, proxy_port) {
                     SystemProxyOwnership::ThisBifrost => {
                         enabled_flag.store(true, Ordering::Release);
@@ -1261,6 +1290,7 @@ pub fn run_foreground(
     }
 
     let system_proxy_enabled = Arc::new(AtomicBool::new(false));
+    let system_proxy_desired_enabled = Arc::new(AtomicBool::new(enable_system_proxy));
     let system_proxy_reconcile_stop = Arc::new(AtomicBool::new(false));
     let _system_proxy_restore_guard = SystemProxyRestoreGuard::new(
         system_proxy_manager.clone(),
@@ -1610,6 +1640,10 @@ pub fn run_foreground(
                 .with_system_proxy_manager_shared(system_proxy_manager.clone())
                 .with_config_manager_shared(shared_config_manager.clone())
                 .with_system_proxy_lifecycle_helper_shared(system_proxy_lifecycle_helper_state.clone())
+                .with_system_proxy_runtime_flags_shared(
+                    system_proxy_desired_enabled.clone(),
+                    system_proxy_enabled.clone(),
+                )
                 .ensure_keepawake_manager_installed()
                 .with_max_body_buffer_size(stored_config.traffic.max_body_buffer_size)
                 .with_max_body_probe_size(stored_config.traffic.max_body_probe_size)
@@ -1825,7 +1859,7 @@ pub fn run_foreground(
             spawn_system_proxy_wake_reconcile_task(SystemProxyReconcileConfig {
                 bifrost_dir: bifrost_dir.clone(),
                 system_proxy_manager: system_proxy_manager.clone(),
-                should_enable: enable_system_proxy,
+                desired_enabled: system_proxy_desired_enabled.clone(),
                 proxy_host: system_proxy_host.clone(),
                 proxy_port: current_port,
                 system_proxy_bypass: system_proxy_bypass.clone(),
@@ -1837,7 +1871,7 @@ pub fn run_foreground(
             spawn_system_proxy_reconcile_task(SystemProxyReconcileConfig {
                 bifrost_dir: bifrost_dir.clone(),
                 system_proxy_manager: system_proxy_manager.clone(),
-                should_enable: enable_system_proxy,
+                desired_enabled: system_proxy_desired_enabled.clone(),
                 proxy_host: system_proxy_host,
                 proxy_port: current_port,
                 system_proxy_bypass: system_proxy_bypass.clone(),
@@ -2283,6 +2317,7 @@ pub fn run_daemon(
                 tracing::warn!("Failed to recover CLI proxy from previous crash: {}", e);
             }
             let system_proxy_enabled = Arc::new(AtomicBool::new(false));
+            let system_proxy_desired_enabled = Arc::new(AtomicBool::new(enable_system_proxy));
             let system_proxy_reconcile_stop = Arc::new(AtomicBool::new(false));
 
             let mut cli_proxy_enabled = false;
@@ -2482,6 +2517,10 @@ pub fn run_daemon(
                         .with_system_proxy_lifecycle_helper_shared(
                             system_proxy_lifecycle_helper_state.clone(),
                         )
+                        .with_system_proxy_runtime_flags_shared(
+                            system_proxy_desired_enabled.clone(),
+                            system_proxy_enabled.clone(),
+                        )
                         .ensure_keepawake_manager_installed()
                         .with_max_body_buffer_size(stored_config.traffic.max_body_buffer_size)
                         .with_max_body_probe_size(stored_config.traffic.max_body_probe_size)
@@ -2663,7 +2702,7 @@ pub fn run_daemon(
                     spawn_system_proxy_wake_reconcile_task(SystemProxyReconcileConfig {
                         bifrost_dir: bifrost_dir.clone(),
                         system_proxy_manager: system_proxy_manager.clone(),
-                        should_enable: enable_system_proxy,
+                        desired_enabled: system_proxy_desired_enabled.clone(),
                         proxy_host: system_proxy_host.clone(),
                         proxy_port: system_proxy_port,
                         system_proxy_bypass: system_proxy_bypass.clone(),
@@ -2675,7 +2714,7 @@ pub fn run_daemon(
                     spawn_system_proxy_reconcile_task(SystemProxyReconcileConfig {
                         bifrost_dir: bifrost_dir.clone(),
                         system_proxy_manager: system_proxy_manager.clone(),
-                        should_enable: enable_system_proxy,
+                        desired_enabled: system_proxy_desired_enabled.clone(),
                         proxy_host: system_proxy_host,
                         proxy_port: system_proxy_port,
                         system_proxy_bypass: system_proxy_bypass.clone(),

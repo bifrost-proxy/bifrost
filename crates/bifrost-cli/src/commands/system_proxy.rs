@@ -1,4 +1,4 @@
-use bifrost_storage::{set_data_dir, ConfigManager};
+use bifrost_storage::{set_data_dir, ConfigManager, SystemProxyConfigUpdate};
 
 #[cfg(target_os = "macos")]
 use crate::cli::SystemProxyLaunchdCommands;
@@ -64,11 +64,27 @@ pub fn handle_system_proxy_command(
             }
             match bifrost_core::SystemProxyManager::get_current() {
                 Ok(status) => {
+                    let runtime_target = read_runtime_system_proxy_target();
+                    let managed_by_bifrost = manager.is_current_managed(&status)
+                        || runtime_target
+                            .as_ref()
+                            .is_some_and(|target| status.target_matches(&target.host, target.port));
                     println!("Supported: true");
-                    println!("Enabled:  {}", status.enable);
-                    println!("Host:     {}", status.host);
-                    println!("Port:     {}", status.port);
-                    println!("Bypass:   {}", status.bypass);
+                    println!("Enabled:             {}", status.enable);
+                    println!("Host:                {}", status.host);
+                    println!("Port:                {}", status.port);
+                    println!("Bypass:              {}", status.bypass);
+                    println!("Managed by Bifrost:  {}", managed_by_bifrost);
+                    println!(
+                        "Configured enabled:  {}",
+                        stored_config.system_proxy.enabled
+                    );
+                    println!("Configured bypass:   {}", stored_config.system_proxy.bypass);
+                    if status.enable && !managed_by_bifrost {
+                        println!(
+                            "System proxy is enabled by another application; Bifrost will leave it unchanged."
+                        );
+                    }
                 }
                 Err(e) => {
                     eprintln!("Failed to get system proxy: {}", e);
@@ -83,6 +99,16 @@ pub fn handle_system_proxy_command(
             let proxy_host = host.unwrap_or_else(|| "127.0.0.1".to_string());
             let proxy_port = port.unwrap_or(cli.port);
             let bypass_str = bypass.unwrap_or_else(|| stored_config.system_proxy.bypass.clone());
+            if runtime_target_matches_request(&proxy_host, proxy_port) {
+                if try_admin_api_set_system_proxy(true, Some(&bypass_str)) {
+                    println!(
+                        "✓ System proxy enabled via running Bifrost: {}:{} (bypass: {})",
+                        proxy_host, proxy_port, bypass_str
+                    );
+                    manager.detach();
+                    return Ok(());
+                }
+            }
             if let Err(e) = manager.enable(&proxy_host, proxy_port, Some(&bypass_str)) {
                 let msg = e.to_string();
                 if msg.contains("RequiresAdmin") {
@@ -102,6 +128,11 @@ pub fn handle_system_proxy_command(
                                 ) {
                                     eprintln!("Failed to enable with sudo: {}", se);
                                 } else {
+                                    persist_system_proxy_config(
+                                        &config_manager,
+                                        true,
+                                        Some(bypass_str.clone()),
+                                    )?;
                                     println!("✓ System proxy enabled via sudo");
                                 }
                             }
@@ -118,6 +149,7 @@ pub fn handle_system_proxy_command(
                     eprintln!("Failed to enable system proxy: {}", e);
                 }
             } else {
+                persist_system_proxy_config(&config_manager, true, Some(bypass_str.clone()))?;
                 println!(
                     "✓ System proxy enabled: {}:{} (bypass: {})",
                     proxy_host, proxy_port, bypass_str
@@ -129,14 +161,22 @@ pub fn handle_system_proxy_command(
                 println!("System proxy not supported on this platform");
                 return Ok(());
             }
-            match manager.disable_managed() {
+            if try_admin_api_set_system_proxy(false, None) {
+                println!("✓ System proxy disabled via running Bifrost");
+                manager.detach();
+                return Ok(());
+            }
+            match disable_system_proxy_explicit(&mut manager) {
                 Ok(bifrost_core::SystemProxyDisableOutcome::Disabled) => {
+                    persist_system_proxy_config(&config_manager, false, None)?;
                     println!("✓ System proxy disabled");
                 }
                 Ok(bifrost_core::SystemProxyDisableOutcome::NotEnabled) => {
+                    persist_system_proxy_config(&config_manager, false, None)?;
                     println!("✓ System proxy already disabled");
                 }
                 Ok(bifrost_core::SystemProxyDisableOutcome::OwnedByOther) => {
+                    persist_system_proxy_config(&config_manager, false, None)?;
                     println!("System proxy is enabled by another application; left unchanged.");
                 }
                 Err(e) => {
@@ -151,16 +191,32 @@ pub fn handle_system_proxy_command(
                             Ok(true) => {
                                 #[cfg(target_os = "macos")]
                                 {
-                                    match manager.disable_managed_with_privilege() {
+                                    match disable_system_proxy_explicit_with_privilege(&mut manager)
+                                    {
                                         Ok(bifrost_core::SystemProxyDisableOutcome::Disabled) => {
+                                            persist_system_proxy_config(
+                                                &config_manager,
+                                                false,
+                                                None,
+                                            )?;
                                             println!("✓ System proxy disabled via sudo");
                                         }
                                         Ok(bifrost_core::SystemProxyDisableOutcome::NotEnabled) => {
+                                            persist_system_proxy_config(
+                                                &config_manager,
+                                                false,
+                                                None,
+                                            )?;
                                             println!("✓ System proxy already disabled");
                                         }
                                         Ok(
                                             bifrost_core::SystemProxyDisableOutcome::OwnedByOther,
                                         ) => {
+                                            persist_system_proxy_config(
+                                                &config_manager,
+                                                false,
+                                                None,
+                                            )?;
                                             println!("System proxy is enabled by another application; left unchanged.");
                                         }
                                         Err(se) => eprintln!("Failed to disable with sudo: {}", se),
@@ -199,6 +255,128 @@ pub fn handle_system_proxy_command(
     }
     manager.detach();
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeSystemProxyTarget {
+    host: String,
+    port: u16,
+}
+
+fn runtime_info_system_proxy_target(runtime: &RuntimeInfo) -> RuntimeSystemProxyTarget {
+    RuntimeSystemProxyTarget {
+        host: runtime_system_proxy_host(runtime.host.as_deref()).to_string(),
+        port: runtime.port,
+    }
+}
+
+fn read_runtime_system_proxy_target() -> Option<RuntimeSystemProxyTarget> {
+    read_runtime_info().map(|runtime| runtime_info_system_proxy_target(&runtime))
+}
+
+fn running_runtime_info() -> Option<RuntimeInfo> {
+    let runtime = read_runtime_info()?;
+    if is_process_running(runtime.pid) {
+        Some(runtime)
+    } else {
+        None
+    }
+}
+
+fn running_runtime_admin_port() -> Option<u16> {
+    running_runtime_info().map(|runtime| runtime.port)
+}
+
+fn runtime_target_matches_request(host: &str, port: u16) -> bool {
+    running_runtime_info()
+        .map(|runtime| runtime_info_system_proxy_target(&runtime))
+        .is_some_and(|target| {
+            bifrost_core::ProxyBackup {
+                enable: true,
+                host: target.host,
+                port: target.port,
+                bypass: String::new(),
+            }
+            .target_matches(host, port)
+        })
+}
+
+fn try_admin_api_set_system_proxy(enabled: bool, bypass: Option<&str>) -> bool {
+    let Some(port) = running_runtime_admin_port() else {
+        return false;
+    };
+    let url = format!("http://127.0.0.1:{port}/_bifrost/api/proxy/system");
+    let mut body = serde_json::json!({ "enabled": enabled });
+    if let Some(bypass) = bypass {
+        body["bypass"] = serde_json::Value::String(bypass.to_string());
+    }
+
+    bifrost_core::direct_ureq_agent_builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .put(&url)
+        .set("Content-Type", "application/json")
+        .send_string(&body.to_string())
+        .map(|response| response.status() < 400)
+        .unwrap_or(false)
+}
+
+fn persist_system_proxy_config(
+    config_manager: &ConfigManager,
+    enabled: bool,
+    bypass: Option<String>,
+) -> bifrost_core::Result<()> {
+    futures::executor::block_on(config_manager.update_system_proxy_config(
+        SystemProxyConfigUpdate {
+            enabled: Some(enabled),
+            bypass,
+            auto_enable: None,
+        },
+    ))
+    .map_err(|error| {
+        bifrost_core::BifrostError::Config(format!(
+            "Failed to persist system proxy config: {error}"
+        ))
+    })
+}
+
+fn should_retry_disable_with_runtime_target(
+    outcome: bifrost_core::SystemProxyDisableOutcome,
+    runtime_target: Option<&RuntimeSystemProxyTarget>,
+) -> bool {
+    matches!(
+        outcome,
+        bifrost_core::SystemProxyDisableOutcome::OwnedByOther
+    ) && runtime_target.is_some()
+}
+
+fn disable_system_proxy_explicit(
+    manager: &mut bifrost_core::SystemProxyManager,
+) -> bifrost_core::Result<bifrost_core::SystemProxyDisableOutcome> {
+    let outcome = manager.disable_managed_explicit()?;
+    let runtime_target = read_runtime_system_proxy_target();
+    if should_retry_disable_with_runtime_target(outcome, runtime_target.as_ref()) {
+        if let Some(target) = runtime_target {
+            return manager.disable_if_matches_explicit(&target.host, target.port);
+        }
+    }
+
+    Ok(outcome)
+}
+
+#[cfg(target_os = "macos")]
+fn disable_system_proxy_explicit_with_privilege(
+    manager: &mut bifrost_core::SystemProxyManager,
+) -> bifrost_core::Result<bifrost_core::SystemProxyDisableOutcome> {
+    let outcome = manager.disable_managed_explicit_with_privilege()?;
+    let runtime_target = read_runtime_system_proxy_target();
+    if should_retry_disable_with_runtime_target(outcome, runtime_target.as_ref()) {
+        if let Some(target) = runtime_target {
+            return manager.disable_if_matches_explicit_with_privilege(&target.host, target.port);
+        }
+    }
+
+    Ok(outcome)
 }
 
 #[cfg(target_os = "macos")]
@@ -809,5 +987,48 @@ mod tests {
                 "localhost,127.0.0.1,*.local"
             ]
         );
+    }
+
+    #[test]
+    fn runtime_info_system_proxy_target_maps_wildcard_to_loopback() {
+        let runtime = RuntimeInfo {
+            pid: 123,
+            port: 18889,
+            socks5_port: None,
+            host: Some("0.0.0.0".to_string()),
+            started_at_ms: None,
+            start_mode: RuntimeStartMode::Foreground,
+            restartable_runtime: false,
+            binary_path: None,
+        };
+
+        assert_eq!(
+            runtime_info_system_proxy_target(&runtime),
+            RuntimeSystemProxyTarget {
+                host: "127.0.0.1".to_string(),
+                port: 18889
+            }
+        );
+    }
+
+    #[test]
+    fn cli_disable_retries_with_runtime_target_only_for_owned_by_other() {
+        let target = RuntimeSystemProxyTarget {
+            host: "127.0.0.1".to_string(),
+            port: 18889,
+        };
+
+        assert!(should_retry_disable_with_runtime_target(
+            bifrost_core::SystemProxyDisableOutcome::OwnedByOther,
+            Some(&target)
+        ));
+        assert!(!should_retry_disable_with_runtime_target(
+            bifrost_core::SystemProxyDisableOutcome::Disabled,
+            Some(&target)
+        ));
+        assert!(!should_retry_disable_with_runtime_target(
+            bifrost_core::SystemProxyDisableOutcome::OwnedByOther,
+            None
+        ));
     }
 }

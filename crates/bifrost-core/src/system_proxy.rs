@@ -38,6 +38,13 @@ pub enum SystemProxyDisableOutcome {
     OwnedByOther,
 }
 
+fn backup_restores_managed_target(
+    backup: &ProxyBackup,
+    managed_target: Option<&ProxyBackup>,
+) -> bool {
+    managed_target.is_some_and(|target| backup.target_matches(&target.host, target.port))
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct ManagedProxyState {
     original: ProxyBackup,
@@ -470,12 +477,35 @@ impl SystemProxyManager {
         expected_host: &str,
         expected_port: u16,
     ) -> Result<SystemProxyDisableOutcome> {
+        self.disable_if_matches_inner(expected_host, expected_port, false)
+    }
+
+    pub fn disable_if_matches_explicit(
+        &mut self,
+        expected_host: &str,
+        expected_port: u16,
+    ) -> Result<SystemProxyDisableOutcome> {
+        self.disable_if_matches_inner(expected_host, expected_port, true)
+    }
+
+    fn disable_if_matches_inner(
+        &mut self,
+        expected_host: &str,
+        expected_port: u16,
+        explicit_disable: bool,
+    ) -> Result<SystemProxyDisableOutcome> {
         if !Self::is_supported() {
             return Ok(SystemProxyDisableOutcome::NotEnabled);
         }
         #[cfg(target_os = "macos")]
-        let _system_proxy_file_lock =
-            acquire_system_proxy_file_lock(&self.data_dir, "disable_if_matches")?;
+        let _system_proxy_file_lock = acquire_system_proxy_file_lock(
+            &self.data_dir,
+            if explicit_disable {
+                "disable_if_matches_explicit"
+            } else {
+                "disable_if_matches"
+            },
+        )?;
 
         let current = Self::get_current()?;
 
@@ -522,7 +552,17 @@ impl SystemProxyManager {
             return Ok(SystemProxyDisableOutcome::OwnedByOther);
         }
 
-        self.restore_or_disable_current()?;
+        if explicit_disable {
+            let expected_target = ProxyBackup {
+                enable: true,
+                host: expected_host.to_string(),
+                port: expected_port,
+                bypass: String::new(),
+            };
+            self.restore_or_disable_current_for_explicit_disable(&expected_target)?;
+        } else {
+            self.restore_or_disable_current()?;
+        }
         Ok(SystemProxyDisableOutcome::Disabled)
     }
 
@@ -538,10 +578,50 @@ impl SystemProxyManager {
         self.disable_if_matches(&state.target.host, state.target.port)
     }
 
+    pub fn disable_managed_explicit(&mut self) -> Result<SystemProxyDisableOutcome> {
+        if !Self::is_supported() {
+            return Ok(SystemProxyDisableOutcome::NotEnabled);
+        }
+
+        let Some(state) = self.load_managed_state().ok() else {
+            return Ok(SystemProxyDisableOutcome::OwnedByOther);
+        };
+
+        self.disable_if_matches_explicit(&state.target.host, state.target.port)
+    }
+
     pub fn is_current_managed(&self, current: &ProxyBackup) -> bool {
-        self.load_managed_state()
-            .ok()
-            .is_some_and(|state| current.target_matches(&state.target.host, state.target.port))
+        let Some(state) = self.load_managed_state().ok() else {
+            return false;
+        };
+
+        if current.target_matches(&state.target.host, state.target.port) {
+            return true;
+        }
+
+        Self::any_service_proxy_matches(&state.target.host, state.target.port).unwrap_or_else(
+            |error| {
+                tracing::warn!(
+                    error = %error,
+                    target_host = %state.target.host,
+                    target_port = state.target.port,
+                    "Failed to inspect all services for managed system proxy ownership"
+                );
+                false
+            },
+        )
+    }
+
+    pub fn any_service_proxy_matches(host: &str, port: u16) -> Result<bool> {
+        #[cfg(target_os = "macos")]
+        {
+            macos_any_service_proxy_matches(host, port)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (host, port);
+            Ok(false)
+        }
     }
 
     pub fn managed_target_has_live_listener(data_dir: &std::path::Path) -> bool {
@@ -982,16 +1062,7 @@ impl SystemProxyManager {
     fn restore_or_disable_current(&mut self) -> Result<()> {
         let managed_state = self.load_managed_state().ok();
         let managed_target = managed_state.as_ref().map(|state| state.target.clone());
-        let original = self
-            .original_proxy
-            .take()
-            .map(|proxy| ProxyBackup::from(&proxy))
-            .or_else(|| managed_state.map(|state| state.original))
-            .or_else(|| {
-                self.load_backup()
-                    .ok()
-                    .map(|proxy| ProxyBackup::from(&proxy))
-            });
+        let original = self.load_original_proxy_backup(managed_state);
 
         if let Some(original) = original {
             self.apply_proxy_backup_for_target(&original, managed_target.as_ref())?;
@@ -1003,6 +1074,61 @@ impl SystemProxyManager {
         self.remove_state_files();
         self.is_set = false;
         Ok(())
+    }
+
+    fn restore_or_disable_current_for_explicit_disable(
+        &mut self,
+        expected_target: &ProxyBackup,
+    ) -> Result<()> {
+        let managed_state = self.load_managed_state().ok();
+        let managed_target = managed_state
+            .as_ref()
+            .map(|state| state.target.clone())
+            .unwrap_or_else(|| expected_target.clone());
+        let original = self.load_original_proxy_backup(managed_state);
+
+        if let Some(original) = original {
+            if !backup_restores_managed_target(&original, Some(&managed_target)) {
+                self.apply_proxy_backup_for_target(&original, Some(&managed_target))?;
+                self.remove_state_files();
+                self.is_set = false;
+                return Ok(());
+            }
+
+            tracing::info!(
+                original_host = %original.host,
+                original_port = original.port,
+                target_host = %managed_target.host,
+                target_port = managed_target.port,
+                "explicit system proxy disable ignored saved backup because it points back to the managed Bifrost target"
+            );
+        }
+
+        let disabled = ProxyBackup {
+            enable: false,
+            host: String::new(),
+            port: 0,
+            bypass: String::new(),
+        };
+        self.apply_proxy_backup_for_target(&disabled, Some(&managed_target))?;
+        self.remove_state_files();
+        self.is_set = false;
+        Ok(())
+    }
+
+    fn load_original_proxy_backup(
+        &mut self,
+        managed_state: Option<ManagedProxyState>,
+    ) -> Option<ProxyBackup> {
+        self.original_proxy
+            .take()
+            .map(|proxy| ProxyBackup::from(&proxy))
+            .or_else(|| managed_state.map(|state| state.original))
+            .or_else(|| {
+                self.load_backup()
+                    .ok()
+                    .map(|proxy| ProxyBackup::from(&proxy))
+            })
     }
 
     fn apply_proxy_backup(&self, proxy: &ProxyBackup) -> Result<()> {
@@ -1812,6 +1938,12 @@ pub fn disable_macos_all_services_proxy_with_gui_auth() -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
+fn disable_macos_matching_services_proxy_with_gui_auth(target: &ProxyBackup) -> Result<()> {
+    let services = macos_services_proxy_matches(&target.host, target.port)?;
+    disable_macos_services_proxy_with_gui_auth(&services)
+}
+
+#[cfg(target_os = "macos")]
 pub fn set_macos_all_services_proxy_with_sudo(host: &str, port: u16, bypass: &str) -> Result<()> {
     let services = list_macos_services()?;
     let bypass_domains: Vec<String> = bypass
@@ -1840,6 +1972,17 @@ pub fn set_macos_all_services_proxy_with_sudo(host: &str, port: u16, bypass: &st
 #[cfg(target_os = "macos")]
 pub fn disable_macos_all_services_proxy_with_sudo() -> Result<()> {
     let services = list_macos_services()?;
+    disable_macos_services_proxy_with_sudo(&services)
+}
+
+#[cfg(target_os = "macos")]
+fn disable_macos_matching_services_proxy_with_sudo(target: &ProxyBackup) -> Result<()> {
+    let services = macos_services_proxy_matches(&target.host, target.port)?;
+    disable_macos_services_proxy_with_sudo(&services)
+}
+
+#[cfg(target_os = "macos")]
+fn disable_macos_services_proxy_with_sudo(services: &[String]) -> Result<()> {
     for svc in services {
         run_networksetup_with_sudo(&["-setwebproxystate", &svc, "off"])?;
         run_networksetup_with_sudo(&["-setsecurewebproxystate", &svc, "off"])?;
@@ -1922,38 +2065,87 @@ impl SystemProxyManager {
         self.disable_if_matches_with_privilege(&state.target.host, state.target.port)
     }
 
+    pub fn disable_managed_explicit_with_privilege(&mut self) -> Result<SystemProxyDisableOutcome> {
+        let Some(state) = self.load_managed_state().ok() else {
+            return Ok(SystemProxyDisableOutcome::OwnedByOther);
+        };
+
+        self.disable_if_matches_explicit_with_privilege(&state.target.host, state.target.port)
+    }
+
     pub fn disable_if_matches_with_privilege(
         &mut self,
         expected_host: &str,
         expected_port: u16,
     ) -> Result<SystemProxyDisableOutcome> {
+        self.disable_if_matches_with_privilege_inner(expected_host, expected_port, false)
+    }
+
+    pub fn disable_if_matches_explicit_with_privilege(
+        &mut self,
+        expected_host: &str,
+        expected_port: u16,
+    ) -> Result<SystemProxyDisableOutcome> {
+        self.disable_if_matches_with_privilege_inner(expected_host, expected_port, true)
+    }
+
+    fn disable_if_matches_with_privilege_inner(
+        &mut self,
+        expected_host: &str,
+        expected_port: u16,
+        explicit_disable: bool,
+    ) -> Result<SystemProxyDisableOutcome> {
         #[cfg(target_os = "macos")]
-        let _system_proxy_file_lock =
-            acquire_system_proxy_file_lock(&self.data_dir, "disable_if_matches_with_privilege")?;
+        let _system_proxy_file_lock = acquire_system_proxy_file_lock(
+            &self.data_dir,
+            if explicit_disable {
+                "disable_if_matches_explicit_with_privilege"
+            } else {
+                "disable_if_matches_with_privilege"
+            },
+        )?;
 
         let current = Self::get_current()?;
-        if !current.enable {
+
+        let any_macos_service_matches =
+            macos_any_service_proxy_matches(expected_host, expected_port).unwrap_or_else(|error| {
+                tracing::warn!(
+                    error = %error,
+                    expected_host = %expected_host,
+                    expected_port,
+                    "Failed to inspect all macOS network services before privileged system proxy disable"
+                );
+                false
+            });
+
+        if !current.enable && !any_macos_service_matches {
             self.remove_state_files();
             self.is_set = false;
             return Ok(SystemProxyDisableOutcome::NotEnabled);
         }
 
-        if !current.target_matches(expected_host, expected_port) {
+        let matches_expected =
+            any_macos_service_matches || current.target_matches(expected_host, expected_port);
+
+        if !matches_expected {
             self.remove_state_files();
             self.is_set = false;
             return Ok(SystemProxyDisableOutcome::OwnedByOther);
         }
 
+        let managed_state = self.load_managed_state().ok();
+        let expected_target = ProxyBackup {
+            enable: true,
+            host: expected_host.to_string(),
+            port: expected_port,
+            bypass: String::new(),
+        };
+        let managed_target = managed_state
+            .as_ref()
+            .map(|state| state.target.clone())
+            .unwrap_or(expected_target);
         let original = self
-            .original_proxy
-            .take()
-            .map(|proxy| ProxyBackup::from(&proxy))
-            .or_else(|| self.load_managed_state().ok().map(|state| state.original))
-            .or_else(|| {
-                self.load_backup()
-                    .ok()
-                    .map(|proxy| ProxyBackup::from(&proxy))
-            })
+            .load_original_proxy_backup(managed_state)
             .unwrap_or(ProxyBackup {
                 enable: false,
                 host: String::new(),
@@ -1961,12 +2153,17 @@ impl SystemProxyManager {
                 bypass: String::new(),
             });
 
-        if original.enable {
+        if original.enable
+            && !(explicit_disable
+                && backup_restores_managed_target(&original, Some(&managed_target)))
+        {
             set_macos_all_services_proxy_with_sudo(
                 &original.host,
                 original.port,
                 &original.bypass,
             )?;
+        } else if explicit_disable {
+            disable_macos_matching_services_proxy_with_sudo(&managed_target)?;
         } else {
             disable_macos_all_services_proxy_with_sudo()?;
         }
@@ -2081,33 +2278,77 @@ impl SystemProxyManager {
         expected_host: &str,
         expected_port: u16,
     ) -> Result<SystemProxyDisableOutcome> {
+        self.disable_if_matches_with_gui_auth_inner(expected_host, expected_port, false)
+    }
+
+    pub fn disable_if_matches_explicit_with_gui_auth(
+        &mut self,
+        expected_host: &str,
+        expected_port: u16,
+    ) -> Result<SystemProxyDisableOutcome> {
+        self.disable_if_matches_with_gui_auth_inner(expected_host, expected_port, true)
+    }
+
+    fn disable_if_matches_with_gui_auth_inner(
+        &mut self,
+        expected_host: &str,
+        expected_port: u16,
+        explicit_disable: bool,
+    ) -> Result<SystemProxyDisableOutcome> {
         #[cfg(target_os = "macos")]
-        let _system_proxy_file_lock =
-            acquire_system_proxy_file_lock(&self.data_dir, "disable_if_matches_with_gui_auth")?;
+        let _system_proxy_file_lock = acquire_system_proxy_file_lock(
+            &self.data_dir,
+            if explicit_disable {
+                "disable_if_matches_explicit_with_gui_auth"
+            } else {
+                "disable_if_matches_with_gui_auth"
+            },
+        )?;
 
         let current = Self::get_current()?;
-        if !current.enable {
+
+        let any_macos_service_matches = macos_any_service_proxy_matches(
+            expected_host,
+            expected_port,
+        )
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                error = %error,
+                expected_host = %expected_host,
+                expected_port,
+                "Failed to inspect all macOS network services before GUI-auth system proxy disable"
+            );
+            false
+        });
+
+        if !current.enable && !any_macos_service_matches {
             self.remove_state_files();
             self.is_set = false;
             return Ok(SystemProxyDisableOutcome::NotEnabled);
         }
 
-        if !current.target_matches(expected_host, expected_port) {
+        let matches_expected =
+            any_macos_service_matches || current.target_matches(expected_host, expected_port);
+
+        if !matches_expected {
             self.remove_state_files();
             self.is_set = false;
             return Ok(SystemProxyDisableOutcome::OwnedByOther);
         }
 
+        let managed_state = self.load_managed_state().ok();
+        let expected_target = ProxyBackup {
+            enable: true,
+            host: expected_host.to_string(),
+            port: expected_port,
+            bypass: String::new(),
+        };
+        let managed_target = managed_state
+            .as_ref()
+            .map(|state| state.target.clone())
+            .unwrap_or(expected_target);
         let original = self
-            .original_proxy
-            .take()
-            .map(|proxy| ProxyBackup::from(&proxy))
-            .or_else(|| self.load_managed_state().ok().map(|state| state.original))
-            .or_else(|| {
-                self.load_backup()
-                    .ok()
-                    .map(|proxy| ProxyBackup::from(&proxy))
-            })
+            .load_original_proxy_backup(managed_state)
             .unwrap_or(ProxyBackup {
                 enable: false,
                 host: String::new(),
@@ -2115,12 +2356,17 @@ impl SystemProxyManager {
                 bypass: String::new(),
             });
 
-        if original.enable {
+        if original.enable
+            && !(explicit_disable
+                && backup_restores_managed_target(&original, Some(&managed_target)))
+        {
             set_macos_all_services_proxy_with_gui_auth(
                 &original.host,
                 original.port,
                 &original.bypass,
             )?;
+        } else if explicit_disable {
+            disable_macos_matching_services_proxy_with_gui_auth(&managed_target)?;
         } else {
             disable_macos_all_services_proxy_with_gui_auth()?;
         }
@@ -2212,6 +2458,42 @@ mod tests {
         };
 
         assert!(!backup.target_matches("127.0.0.1", 8800));
+    }
+
+    #[test]
+    fn explicit_disable_detects_backup_that_restores_managed_target() {
+        let backup = ProxyBackup {
+            enable: true,
+            host: "localhost".to_string(),
+            port: 9900,
+            bypass: "different.example".to_string(),
+        };
+        let target = ProxyBackup {
+            enable: true,
+            host: "127.0.0.1".to_string(),
+            port: 9900,
+            bypass: "localhost,127.0.0.1".to_string(),
+        };
+
+        assert!(backup_restores_managed_target(&backup, Some(&target)));
+    }
+
+    #[test]
+    fn explicit_disable_preserves_backup_for_external_proxy() {
+        let backup = ProxyBackup {
+            enable: true,
+            host: "127.0.0.1".to_string(),
+            port: 6152,
+            bypass: String::new(),
+        };
+        let target = ProxyBackup {
+            enable: true,
+            host: "127.0.0.1".to_string(),
+            port: 9900,
+            bypass: String::new(),
+        };
+
+        assert!(!backup_restores_managed_target(&backup, Some(&target)));
     }
 
     #[test]

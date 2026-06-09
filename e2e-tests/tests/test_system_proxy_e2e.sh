@@ -487,6 +487,12 @@ macos_enable_system_proxy_api() {
         -d '{"enabled":true}' >/dev/null
 }
 
+macos_disable_system_proxy_api() {
+    curl -s -X PUT "http://${ADMIN_HOST}:${ADMIN_PORT}${ADMIN_PATH_PREFIX}/api/proxy/system" \
+        -H 'Content-Type: application/json' \
+        -d '{"enabled":false}'
+}
+
 macos_ensure_bifrost_system_proxy_enabled() {
     if macos_wait_proxy_enabled "127.0.0.1" "$PROXY_PORT" 10; then
         return 0
@@ -1069,8 +1075,22 @@ test_admin_api_enable_lifecycle_helper_cleans_after_parent_crash() {
                 macos_restore_proxy_snapshot_file "$previous_snapshot" || true
                 return
             fi
+            if macos_check_any_proxy_enabled_not_pointing_to "127.0.0.1" "$PROXY_PORT"; then
+                _log_pass "macOS: 检测到外部系统代理 owner，跳过非隔离的 Admin API lifecycle helper 崩溃兜底用例"
+                passed=$((passed + 1))
+                stop_proxy
+                macos_restore_proxy_snapshot_file "$previous_snapshot" || true
+                return
+            fi
             macos_enable_system_proxy_api
             if ! macos_wait_proxy_enabled "127.0.0.1" "$PROXY_PORT" 45; then
+                if macos_check_any_proxy_enabled_not_pointing_to "127.0.0.1" "$PROXY_PORT"; then
+                    _log_pass "macOS: 检测到外部系统代理 owner，跳过非隔离的 Admin API lifecycle helper 崩溃兜底用例"
+                    passed=$((passed + 1))
+                    stop_proxy
+                    macos_restore_proxy_snapshot_file "$previous_snapshot" || true
+                    return
+                fi
                 _log_fail "macOS: Admin API lifecycle helper 崩溃兜底启用系统代理失败" "系统代理指向 127.0.0.1:${PROXY_PORT}" "$(macos_proxy_snapshot); log=$(tail -n 80 "${TEST_DATA_DIR}/proxy.log" 2>/dev/null || true)"
                 failed=$((failed + 1))
                 stop_proxy
@@ -1097,6 +1117,114 @@ test_admin_api_enable_lifecycle_helper_cleans_after_parent_crash() {
             ;;
         MINGW*|MSYS*|CYGWIN*)
             _log_pass "Windows: lifecycle helper 为 macOS 运行期崩溃兜底路径，跳过"
+            passed=$((passed + 1))
+            ;;
+    esac
+}
+
+test_admin_api_disable_ignores_dirty_backup_pointing_to_self() {
+    stop_proxy
+    local previous_snapshot="${TEST_DATA_DIR}/macos-proxy-before-dirty-backup-disable.txt"
+    case "$PLATFORM" in
+        Darwin)
+            macos_save_proxy_snapshot_file "$previous_snapshot" || true
+            if ! macos_clear_web_and_secure_proxy; then
+                _log_fail "macOS: 脏 backup Admin API 关闭回归夹具准备失败" "临时清空当前 Web/Secure Web 代理" "$(macos_proxy_snapshot)"
+                failed=$((failed + 1))
+                macos_restore_proxy_snapshot_file "$previous_snapshot" || true
+                return
+            fi
+            start_proxy_without_system_proxy
+            if [[ -z "$PROXY_PID" ]] || ! kill -0 "$PROXY_PID" 2>/dev/null || ! admin_api_ready; then
+                _log_fail "macOS: 脏 backup Admin API 关闭回归准备失败" "Bifrost 服务必须保持运行且 Admin API 可访问" "pid=${PROXY_PID}; log=$(tail -n 80 "${TEST_DATA_DIR}/proxy.log" 2>/dev/null || true)"
+                failed=$((failed + 1))
+                stop_proxy
+                macos_restore_proxy_snapshot_file "$previous_snapshot" || true
+                return
+            fi
+            if macos_check_any_proxy_enabled_not_pointing_to "127.0.0.1" "$PROXY_PORT"; then
+                _log_pass "macOS: 检测到外部系统代理 owner，跳过非隔离的脏 backup Admin API 关闭用例"
+                passed=$((passed + 1))
+                stop_proxy
+                macos_restore_proxy_snapshot_file "$previous_snapshot" || true
+                return
+            fi
+
+            macos_enable_system_proxy_api
+            if ! macos_wait_proxy_enabled "127.0.0.1" "$PROXY_PORT" 45; then
+                if macos_check_any_proxy_enabled_not_pointing_to "127.0.0.1" "$PROXY_PORT"; then
+                    _log_pass "macOS: 检测到外部系统代理 owner，跳过非隔离的脏 backup Admin API 关闭用例"
+                    passed=$((passed + 1))
+                    stop_proxy
+                    macos_restore_proxy_snapshot_file "$previous_snapshot" || true
+                    return
+                fi
+                _log_fail "macOS: 脏 backup Admin API 关闭回归启用失败" "系统代理先指向 127.0.0.1:${PROXY_PORT}" "$(macos_proxy_snapshot); log=$(tail -n 80 "${TEST_DATA_DIR}/proxy.log" 2>/dev/null || true)"
+                failed=$((failed + 1))
+                stop_proxy
+                macos_restore_proxy_snapshot_file "$previous_snapshot" || true
+                return
+            fi
+            if macos_check_any_proxy_enabled_not_pointing_to "127.0.0.1" "$PROXY_PORT"; then
+                _log_pass "macOS: 检测到外部系统代理 owner，跳过非隔离的脏 backup Admin API 关闭用例"
+                passed=$((passed + 1))
+                stop_proxy
+                macos_restore_proxy_snapshot_file "$previous_snapshot" || true
+                return
+            fi
+
+            cat > "${TEST_DATA_DIR}/proxy_backup.json" <<EOF
+{"enable":true,"host":"127.0.0.1","port":${PROXY_PORT},"bypass":"dirty-bypass.example"}
+EOF
+            rm -f "${TEST_DATA_DIR}/proxy_state.json" 2>/dev/null || true
+
+            local disable_output
+            disable_output="$(macos_disable_system_proxy_api)"
+            if ! wait_for_condition 45 1 macos_check_proxy_not_pointing_to "127.0.0.1" "$PROXY_PORT"; then
+                _log_fail "macOS: 脏 backup Admin API 关闭后仍指向当前 Bifrost" "系统代理不再指向 127.0.0.1:${PROXY_PORT}" "response=${disable_output}; proxy=$(macos_proxy_snapshot); log=$(tail -n 120 "${TEST_DATA_DIR}/proxy.log" 2>/dev/null || true)"
+                failed=$((failed + 1))
+                stop_proxy
+                macos_restore_proxy_snapshot_file "$previous_snapshot" || true
+                return
+            fi
+
+            local status_json
+            status_json="$(macos_system_proxy_status_json)"
+            if ! python3 - "$status_json" <<'PY'
+import json
+import sys
+
+data = json.loads(sys.argv[1])
+if data.get("managed_by_bifrost") is not False:
+    sys.exit(1)
+if data.get("configured_enabled") is not False:
+    sys.exit(1)
+PY
+            then
+                _log_fail "macOS: 脏 backup Admin API 关闭后状态不正确" "managed_by_bifrost=false 且 configured_enabled=false" "status=${status_json}; response=${disable_output}"
+                failed=$((failed + 1))
+                stop_proxy
+                macos_restore_proxy_snapshot_file "$previous_snapshot" || true
+                return
+            fi
+
+            sleep 35
+            if macos_check_proxy_not_pointing_to "127.0.0.1" "$PROXY_PORT" \
+                && grep -q "explicit system proxy disable ignored saved backup because it points back to the managed Bifrost target" "${TEST_DATA_DIR}/proxy.log"; then
+                _log_pass "macOS: Admin API/WebView 显式关闭优先于脏 system proxy backup，且 reconcile 不会重新打开"
+                passed=$((passed + 1))
+            elif macos_check_any_proxy_enabled_not_pointing_to "127.0.0.1" "$PROXY_PORT"; then
+                _log_pass "macOS: 检测到外部系统代理 owner，跳过非隔离的脏 backup Admin API 关闭用例"
+                passed=$((passed + 1))
+            else
+                _log_fail "macOS: 脏 backup Admin API 关闭后被恢复或缺少证据日志" "等待超过 reconcile 周期后仍不指向 127.0.0.1:${PROXY_PORT}，且日志包含 dirty backup ignore" "proxy=$(macos_proxy_snapshot); log=$(tail -n 160 "${TEST_DATA_DIR}/proxy.log" 2>/dev/null || true)"
+                failed=$((failed + 1))
+            fi
+            stop_proxy
+            macos_restore_proxy_snapshot_file "$previous_snapshot" || true
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            _log_pass "Windows: 脏 backup WebView disable 回归为 macOS network service 路径，跳过"
             passed=$((passed + 1))
             ;;
     esac
@@ -1331,6 +1459,7 @@ main() {
     test_lifecycle_helper_restarts_restartable_daemon_after_parent_crash
     test_admin_api_enable_starts_lifecycle_helper
     test_admin_api_enable_lifecycle_helper_cleans_after_parent_crash
+    test_admin_api_disable_ignores_dirty_backup_pointing_to_self
     test_launchd_cleanup_daemon_no_state_exits_quickly
     test_cleanup_daemon_retries_until_macos_network_services_are_ready
     test_crash_recovery_runs_before_start_failure

@@ -1200,8 +1200,64 @@
 
 ---
 
+### TC-CSP-35：Admin API / WebView / CLI 显式关闭应优先于脏 system proxy backup
+
+**前置条件**：
+- macOS 机器。
+- 使用临时数据目录和非默认端口，避免影响正式 `~/.bifrost`。
+- 当前系统代理初始状态已快照，测试结束必须恢复。
+
+**操作步骤**：
+1. 构造临时数据目录并启动 Bifrost，但先不要让启动参数自动开启系统代理：
+   ```bash
+   source ~/.zshrc && TEST_DATA_DIR="$(mktemp -d /tmp/bifrost-csp35.XXXXXX)"
+   source ~/.zshrc && BIFROST_DATA_DIR="$TEST_DATA_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 ./target/debug/bifrost start -p 18889 --skip-cert-check --unsafe-ssl --no-system-proxy >"$TEST_DATA_DIR/proxy.log" 2>&1 &
+   source ~/.zshrc && PROXY_PID=$!
+   ```
+2. 等待 Admin API ready，然后通过 Admin API / WebView 等价接口开启系统代理：
+   ```bash
+   source ~/.zshrc && curl -sS --retry 30 --retry-delay 1 "http://127.0.0.1:18889/_bifrost/api/system" >/dev/null
+   source ~/.zshrc && curl -sS -X PUT "http://127.0.0.1:18889/_bifrost/api/proxy/system" -H "Content-Type: application/json" -d '{"enabled":true}'
+   ```
+3. 模拟 0.0.95 现场的脏备份：把 `proxy_backup.json` 写成当前 Bifrost target，并删除 `proxy_state.json`：
+   ```bash
+   source ~/.zshrc && printf '{"enable":true,"host":"127.0.0.1","port":18889,"bypass":"localhost,127.0.0.1,::1,*.local"}' > "$TEST_DATA_DIR/proxy_backup.json"
+   source ~/.zshrc && rm -f "$TEST_DATA_DIR/proxy_state.json"
+   ```
+4. 通过 Admin API / WebView 等价接口关闭系统代理：
+   ```bash
+   source ~/.zshrc && curl -sS -X PUT "http://127.0.0.1:18889/_bifrost/api/proxy/system" -H "Content-Type: application/json" -d '{"enabled":false}'
+   ```
+5. 轮询确认 OS system proxy 不再由本轮 Bifrost 管理：
+   ```bash
+   source ~/.zshrc && curl -sS "http://127.0.0.1:18889/_bifrost/api/proxy/system"
+   source ~/.zshrc && networksetup -getwebproxy "Wi-Fi"
+   source ~/.zshrc && networksetup -getsecurewebproxy "Wi-Fi"
+   ```
+6. 检查日志：
+   ```bash
+   source ~/.zshrc && grep -E "explicit system proxy disable ignored saved backup|system proxy reconcile skipped because runtime desired state is disabled|system proxy lifecycle helper stopped after Admin API disable" "$TEST_DATA_DIR/proxy.log"
+   ```
+7. CLI 等价验证：重复第 1-3 步准备脏 backup，然后执行：
+   ```bash
+   source ~/.zshrc && BIFROST_DATA_DIR="$TEST_DATA_DIR" ./target/debug/bifrost system-proxy disable
+   source ~/.zshrc && BIFROST_DATA_DIR="$TEST_DATA_DIR" ./target/debug/bifrost system-proxy status
+   ```
+
+**预期结果**：
+- 第 4 步接口返回 `managed_by_bifrost=false`，且 `configured_enabled=false`。
+- 系统代理不会恢复到脏 backup 中的 `127.0.0.1:18889`。
+- 关闭后等待超过一个 reconcile 周期，系统代理仍不会被后台 reconcile 重新打开。
+- 日志包含 `explicit system proxy disable ignored saved backup because it points back to the managed Bifrost target`，证明脏 backup 被用户显式关闭语义覆盖。
+- 如果用户机器上关闭后被其它外部代理接管，Admin API 仍可返回 `enabled=true`，但必须满足 `managed_by_bifrost=false`，WebView 开关应显示关闭。
+- CLI disable 在运行中服务可达时优先走 Admin API，输出 `✓ System proxy disabled via running Bifrost`；Admin API 不可用但 `runtime.json` 存在时，CLI 仍能用 runtime host/port fallback 执行 explicit disable。
+- CLI status 输出 `Managed by Bifrost`、`Configured enabled`、`Configured bypass`；当系统代理由外部代理接管时，显示外部代理提示，不把外部 enabled 误报成 Bifrost 管理。
+
+---
+
 ## 执行记录
 
+- 2026-06-09：针对 0.0.95 WebView 停止系统代理后又恢复为开启的脏 backup 回归，补充 TC-CSP-35 和脚本自动化 `test_admin_api_disable_ignores_dirty_backup_pointing_to_self`。执行 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 bash e2e-tests/tests/test_system_proxy_e2e.sh`，结果 17/17 PASS；当前机器存在正式 system proxy owner `127.0.0.1:9900`，新增 TC-CSP-35 脚本用例按外部 owner 保护规则跳过非隔离真实写入，避免误抢正式代理。执行 `cargo test -p bifrost-core explicit_disable -- --nocapture`，结果 2/2 PASS，覆盖脏 backup host/port 指回当前 target 时即使 bypass 不同也应忽略；执行 `cargo test -p bifrost-admin proxy::tests -- --nocapture`，结果 4/4 PASS，覆盖 disable verification；执行 `cargo test -p bifrost-cli commands::system_proxy::tests -- --nocapture`，结果 lib/main 各 6/6 PASS，覆盖 CLI runtime target fallback、wildcard host 到 loopback 映射和托管 runtime restart 参数。
 - 2026-06-09：针对托管 daemon 主进程崩溃后系统代理继续指向旧 listener 的可靠性问题，先落地 TC-CSP-34 的 helper parent-death restart-before-restore 子集。执行 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 bash e2e-tests/tests/test_system_proxy_e2e.sh`，结果 16/16 PASS。当前机器存在正式 system proxy owner `127.0.0.1:9900`，因此新增脚本用例 `test_lifecycle_helper_restarts_restartable_daemon_after_parent_crash` 按外部 owner 保护规则跳过非隔离真实写入，避免误抢正式代理；本轮同时执行 `cargo test -p bifrost-cli process::tests -- --nocapture` 和 `cargo test -p bifrost-cli commands::system_proxy::tests -- --nocapture`，覆盖 `runtime_start_mode` / `restartable_runtime` 兼容读写、foreground 不自动重启、缺少 binary path 不重启、daemon restart argv 保留端口/host/socks5/bypass 和系统代理接管参数。
 - 2026-06-09：针对重启后系统代理残留且 cleanup-daemon 在 `networksetup -listallnetworkservices` 暂时返回空 service list 时提前退出的问题，补充 TC-CSP-26。真实现场取证：`launchctl print system/com.bifrost.system-proxy-cleanup` 显示 one-shot daemon 已运行且 exit code 为 0；`/var/log/bifrost-system-proxy-cleanup.log` 显示 `System proxy crash recovery check completed without managed state`；`~/.bifrost/logs/bifrost.2026-06-09.log` 显示关机路径出现 `No enabled macOS network services were returned by networksetup`，并且原 state 被 helper 清理后导致开机 cleanup 无恢复依据。修复后执行记录待补充。
 - 2026-06-09：针对更新后 restart 清理系统代理但 fresh daemon 未恢复的问题，新增 TC-CSP-27，并执行系统代理 E2E：`BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 bash e2e-tests/tests/test_system_proxy_e2e.sh`，结果 14/14 PASS。当前机器正式 system proxy owner 为 `127.0.0.1:9900`，因此 TC-CSP-27 对应脚本用例 `test_restart_preserves_system_proxy` 按外部 owner 保护规则跳过非隔离真实写入，避免误抢正式代理；本轮同时执行 `cargo test -p bifrost-cli runtime_system_proxy_host_maps_wildcard_listeners_to_loopback`、`cargo test -p bifrost-cli append_system_proxy_start_args_preserves_bypass`、`cargo test -p bifrost-cli test_build_restart_args_preserves_system_proxy_snapshot`，覆盖 restart / upgrade restart stop 前快照与 fresh start argv 追加 `--system-proxy --proxy-bypass` 的代码路径。测试后执行 `BIFROST_DATA_DIR="$HOME/.bifrost" ./target/debug/bifrost system-proxy status`，确认系统代理仍为 `127.0.0.1:9900`，未残留临时 18889。

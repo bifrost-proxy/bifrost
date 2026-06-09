@@ -235,7 +235,17 @@ fn read_system_proxy_status(
     let proxy = SystemProxyManager::get_current()
         .map_err(|e| format!("Failed to get system proxy: {}", e))?;
 
-    let managed_by_bifrost = proxy.target_matches(expected_host, expected_port);
+    let managed_by_bifrost = proxy.target_matches(expected_host, expected_port)
+        || SystemProxyManager::any_service_proxy_matches(expected_host, expected_port)
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    error = %error,
+                    expected_host = %expected_host,
+                    expected_port,
+                    "Failed to inspect all services for Admin system proxy status"
+                );
+                false
+            });
     Ok(SystemProxyStatus::from_proxy(proxy, managed_by_bifrost))
 }
 
@@ -305,6 +315,8 @@ async fn set_system_proxy(req: Request<Incoming>, state: SharedAdminState) -> Re
     if let Some(ref manager) = state.system_proxy_manager {
         let host = "127.0.0.1";
         let target_port = state.port();
+        let previous_desired_enabled =
+            state.set_system_proxy_runtime_desired_enabled(request.enabled);
 
         let final_result = {
             let mut manager = manager.write().await;
@@ -312,7 +324,9 @@ async fn set_system_proxy(req: Request<Incoming>, state: SharedAdminState) -> Re
             let result = if request.enabled {
                 manager.enable(host, state.port(), Some(&bypass))
             } else {
-                manager.disable_managed().map(|_| ())
+                manager
+                    .disable_if_matches_explicit(host, state.port())
+                    .map(|_| ())
             };
 
             match &result {
@@ -327,7 +341,7 @@ async fn set_system_proxy(req: Request<Incoming>, state: SharedAdminState) -> Re
                                 manager.enable_with_gui_auth(host, state.port(), Some(&bypass))
                             } else {
                                 manager
-                                    .disable_if_matches_with_gui_auth(host, state.port())
+                                    .disable_if_matches_explicit_with_gui_auth(host, state.port())
                                     .map(|_| ())
                             }
                         }
@@ -369,20 +383,25 @@ async fn set_system_proxy(req: Request<Incoming>, state: SharedAdminState) -> Re
                     if let Err(e) = config_manager.update_system_proxy_config(update).await {
                         tracing::error!("Failed to persist system proxy config: {}", e);
                     } else {
-                        tracing::info!("System proxy config persisted: enabled={}", status.enabled);
+                        tracing::info!(
+                            requested_enabled = request.enabled,
+                            verified_enabled = status.enabled,
+                            managed_by_bifrost = status.managed_by_bifrost,
+                            persisted_enabled = enabled_by_bifrost,
+                            "System proxy config persisted"
+                        );
                     }
 
                     let config = config_manager.config().await;
                     status.apply_config(&config.system_proxy);
+                    state.store_system_proxy_runtime_managed(enabled_by_bifrost);
 
                     if enabled_by_bifrost {
                         start_system_proxy_lifecycle_helper_after_runtime_enable(&state);
                         spawn_system_proxy_launchd_install_task_from_config(config_manager);
-                    } else if !request.enabled && !status.enabled {
-                        // Only stop the helper when the user explicitly disabled and the
-                        // verified status confirms the proxy is off. Otherwise (e.g. enable
-                        // failed or external owner took over), keep the helper alive so an
-                        // abnormal Bifrost exit can still trigger cleanup.
+                    } else if !request.enabled {
+                        // The user disabled Bifrost system proxy ownership. A different
+                        // external proxy may still be live, but this runtime no longer owns it.
                         stop_system_proxy_lifecycle_helper_after_runtime_disable(&state);
                     } else {
                         tracing::warn!(
@@ -398,6 +417,9 @@ async fn set_system_proxy(req: Request<Incoming>, state: SharedAdminState) -> Re
                 json_response(&status)
             }
             Err(e) => {
+                if let Some(previous) = previous_desired_enabled {
+                    state.store_system_proxy_runtime_desired_enabled(previous);
+                }
                 let msg = e.to_string();
                 if msg.contains("UserCancelled") {
                     #[derive(Serialize)]
