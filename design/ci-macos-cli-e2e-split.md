@@ -56,7 +56,7 @@ macOS CI 的 rules/shell E2E 只依赖 `bifrost` CLI release binary，不依赖 
 
 ## 文档更新要求
 
-- 更新 `human_tests/readme.md` 的 CI/DevOps 索引与总计。
+- 更新 `human_tests/readme.md` 的 CI/DevOps 对应索引行；禁止维护全局测试文件数或测试用例数总计。
 
 ## 2026-06-08 sherpa-onnx 预编译归档缓存
 

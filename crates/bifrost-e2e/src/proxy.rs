@@ -50,6 +50,21 @@ fn parse_redirect_target(value: &str) -> (Option<u16>, String) {
     (None, value.to_string())
 }
 
+fn should_update_route_target(result: &ProxyResolvedRules, protocol: Protocol) -> bool {
+    if result.ignored.host {
+        return false;
+    }
+
+    if result.host.is_none() {
+        return true;
+    }
+
+    matches!(
+        (result.host_protocol, protocol),
+        (Some(Protocol::Host), Protocol::XHost)
+    )
+}
+
 fn parse_devtools_rule(value: &str) -> DevtoolsRule {
     let mut rule = DevtoolsRule {
         raw_value: value.to_string(),
@@ -278,8 +293,9 @@ impl ProxyRulesResolverTrait for RulesResolverAdapter {
             });
 
             match protocol {
-                Protocol::Host if !result.ignored.host => {
+                Protocol::Host if should_update_route_target(&result, protocol) => {
                     result.host = Some(value.to_string());
+                    result.host_protocol = Some(Protocol::Host);
                 }
                 Protocol::ReqHeaders => {
                     if let Some(headers) = parse_header_value(value) {
@@ -472,22 +488,23 @@ impl ProxyRulesResolverTrait for RulesResolverAdapter {
                 Protocol::Dns => {
                     result.dns_servers.push(value.to_string());
                 }
-                Protocol::XHost if !result.ignored.host => {
+                Protocol::XHost if should_update_route_target(&result, protocol) => {
                     result.host = Some(value.to_string());
+                    result.host_protocol = Some(Protocol::XHost);
                 }
-                Protocol::Http if !result.ignored.host => {
+                Protocol::Http if should_update_route_target(&result, protocol) => {
                     result.host = Some(value.to_string());
                     result.host_protocol = Some(Protocol::Http);
                 }
-                Protocol::Https if !result.ignored.host => {
+                Protocol::Https if should_update_route_target(&result, protocol) => {
                     result.host = Some(value.to_string());
                     result.host_protocol = Some(Protocol::Https);
                 }
-                Protocol::Ws if !result.ignored.host => {
+                Protocol::Ws if should_update_route_target(&result, protocol) => {
                     result.host = Some(value.to_string());
                     result.host_protocol = Some(Protocol::Ws);
                 }
-                Protocol::Wss if !result.ignored.host => {
+                Protocol::Wss if should_update_route_target(&result, protocol) => {
                     result.host = Some(value.to_string());
                     result.host_protocol = Some(Protocol::Wss);
                 }

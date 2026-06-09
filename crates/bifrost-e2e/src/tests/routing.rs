@@ -88,6 +88,12 @@ pub fn get_all_tests() -> Vec<TestCase> {
             test_routing_host_vs_proxy,
         ),
         TestCase::standalone(
+            "routing_path_host_vs_domain_https",
+            "Route priority: path host beats domain https fallback",
+            "routing",
+            test_routing_path_host_vs_domain_https,
+        ),
+        TestCase::standalone(
             "routing_proxy_chain_with_auth",
             "Proxy protocol: chain to another bifrost proxy with auth",
             "routing",
@@ -447,6 +453,36 @@ async fn test_routing_host_vs_proxy() -> Result<(), String> {
     Ok(())
 }
 
+async fn test_routing_path_host_vs_domain_https() -> Result<(), String> {
+    let mock = EnhancedMockServer::start().await;
+    mock.set_response(200, "path_host_wins");
+
+    let unreachable_https_port = portpicker::pick_unused_port().unwrap();
+    let (port, _proxy) = start_proxy_with_rules!(
+        format!("qianchuan.test/ad host://127.0.0.1:{}", mock.port),
+        format!(
+            "qianchuan.test https://127.0.0.1:{}",
+            unreachable_https_port
+        ),
+    )?;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let result = CurlCommand::with_proxy(
+        &format!("http://127.0.0.1:{}", port),
+        "http://qianchuan.test/ad/api/v1/account/user/info?gfversion=unknown",
+    )
+    .execute()
+    .await
+    .map_err(|e| format!("curl failed: {}", e))?;
+
+    result.assert_success()?;
+    result.assert_body_contains("path_host_wins")?;
+    mock.assert_path("/ad/api/v1/account/user/info")?;
+
+    Ok(())
+}
+
 async fn test_routing_proxy_chain_with_auth() -> Result<(), String> {
     let proxy_echo = ProxyEchoServer::start().await;
     proxy_echo.set_response(200, "proxy_chain_ok");
@@ -719,6 +755,12 @@ mod tests {
     #[tokio::test]
     async fn test_multiple_host_order() {
         let result = test_routing_multiple_host_order().await;
+        assert!(result.is_ok(), "Test failed: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn test_path_host_vs_domain_https() {
+        let result = test_routing_path_host_vs_domain_https().await;
         assert!(result.is_ok(), "Test failed: {:?}", result.err());
     }
 

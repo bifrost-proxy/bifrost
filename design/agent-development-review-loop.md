@@ -147,4 +147,4 @@ AGENTS.md 应把开发手册组织成一个可执行状态机，而不只是规�
 
 - 更新 `AGENTS.md`，将双轮闭环加入开发需求标准流程、测试完备性检查清单和收尾门禁。
 - 新增 `human_tests/agent-development-review-loop.md`。
-- 更新 `human_tests/readme.md` 索引和总计。
+- 更新 `human_tests/readme.md` 对应索引行；禁止维护全局测试文件数或测试用例数总计。

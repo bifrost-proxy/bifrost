@@ -4,6 +4,12 @@
 
 **核心定位**：`human_tests/` 是 Agent 驱动真实场景测试的标准载体。每次需求开发结束后，必须先在此目录创建或更新测试用例文档，再由 Agent 按文档逐条自主执行测试。
 
+## 维护约束
+
+- 本文件只维护测试文档索引，不维护全局汇总数字。
+- 禁止新增或更新“总计：N 个测试文件，M 个测试用例”这类全局总数；这类数字在并行开发中必然冲突，且不作为验收依据。
+- 新增或更新测试用例时，只调整相关模块的索引行和说明，避免改动无关行。
+
 ## 目录结构
 
 ### CLI 命令测试
@@ -117,7 +123,7 @@
 | [status-code-direct-response.md](./status-code-direct-response.md) | statusCode 直接响应 | 3 | `statusCode://code` 命中后直接返回且不请求 upstream，`replaceStatus://code` 保持请求 upstream 后替换状态码语义，`statusCode` 不短路同条规则中的请求/响应改写流水线 |
 | [proxy-socks5.md](./proxy-socks5.md) | SOCKS5 代理 | 5 | SOCKS5 基本代理、DNS 解析、HTTPS 透传、UDP ASSOCIATE 启动就绪回归、统一代理 UDP relay 端口 fallback 与 Windows ARM runner 并发回归 |
 | [proxy-websocket-sse.md](./proxy-websocket-sse.md) | WebSocket/SSE 代理 | 9 | WebSocket/SSE 代理转发、帧/事件捕获、UI 消息面板、Replay WebSocket E2E 启动隔离与诊断、Frames API SSE 前置流量回归、WebSocket 升级握手头部规则回归 |
-| [proxy-rules-advanced.md](./proxy-rules-advanced.md) | 规则协议全量测试 | 77 | 40+ 规则操作协议：请求/响应修改、内容注入、控制、路由、脚本、高级特性（Values 引用、模板字符串、正则捕获），含 html/js/css 内容注入协议矩阵、htmlPrepend 插入 `<html>` 后、htmlAppend 插入 `</html>` 前，以及 HTTPS 转发到 HTTP 上游、gzip HTML 响应编码一致性、gzip JSON reqMerge/resMerge 合并回归、HTTPS 解包 gzip JSON reqMerge/resMerge 合并回归、脚本与 mock 路径压缩 Body 修改回归、HTTPS 解包链路 `reqScript`/`resScript`/`decode`/`bp decode` 回归、mock immediate response `resScript` 回归、多值 `Set-Cookie` 保留回归、mock 生成资源、通配域名根路径 htmlAppend 匹配、culture.shtml HTTPS MITM 背景图白屏、上游 HTTP/2 body 断流 fallback、无规则命中时已知长度响应头透明转发真实回归、reqHeaders Markdown value 中 `#` 注释行回归 |
+| [proxy-rules-advanced.md](./proxy-rules-advanced.md) | 规则协议全量测试 | 78 | 40+ 规则操作协议：请求/响应修改、内容注入、控制、路由、脚本、高级特性（Values 引用、模板字符串、正则捕获），含 html/js/css 内容注入协议矩阵、htmlPrepend 插入 `<html>` 后、htmlAppend 插入 `</html>` 前，以及 HTTPS 转发到 HTTP 上游、gzip HTML 响应编码一致性、gzip JSON reqMerge/resMerge 合并回归、HTTPS 解包 gzip JSON reqMerge/resMerge 合并回归、脚本与 mock 路径压缩 Body 修改回归、HTTPS 解包链路 `reqScript`/`resScript`/`decode`/`bp decode` 回归、mock immediate response `resScript` 回归、多值 `Set-Cookie` 保留回归、mock 生成资源、通配域名根路径 htmlAppend 匹配、culture.shtml HTTPS MITM 背景图白屏、上游 HTTP/2 body 断流 fallback、无规则命中时已知长度响应头透明转发真实回归、reqHeaders Markdown value 中 `#` 注释行回归、路径级 host 不被域名级 https 兜底覆盖回归 |
 | [bp-protocol-parser.md](./bp-protocol-parser.md) | BP 协议脚本解析 | 17 | `bp://<script>` + `decode://bp` 本地/远程 parser 解析，远程脚本下载缓存，远程下载超时/超大响应失败且不污染缓存，Traffic 详情 decoded body 展示，Body 面板 raw/decoded 切换且 raw 精确展示解码前二进制，`bifrost search` 与 Search SSE 搜索解析后内容，本地 parser 名称路径穿越拒绝，内置 `build_in_bp` 自动释放覆盖与规则编辑智能提示/hover 说明，`decode://bp` 内置校验、`bp://` parser 脚本列表补全、本地 parser 跳转到 Scripts 页面、query 高亮不污染后续协议、远端 URL 和绝对路径兼容，`build_in_bp.js` 对 next_agent PSM 的 BAM metadata/Thrift 双向二进制解包路径验证、默认 Bifrost sync token 换取 server `bam_token`，以及参考脚本/相关文档不暴露明文默认域名 |
 | [proxy-auth-brute-force.md](./proxy-auth-brute-force.md) | 代理认证暴力破解防护 | 10 | HTTP/SOCKS5 代理认证 rate limiting：失败计数、10 次封禁（429/连接拒绝）、计数重置、IP 独立追踪 |
 | [rule-merge-headers.md](./rule-merge-headers.md) | 规则合并 Header 覆盖 | 6 | reqHeaders/resHeaders 同名覆盖、路径深度优先级、真实代理场景验证、转发类无回归、两条同名 key 规则覆盖+客户端同名 header、HTTPS passthrough/tunnel 客户端同名 header 去重覆盖 |
@@ -174,7 +180,7 @@
 | [utf8-safe-preview.md](./utf8-safe-preview.md) | UTF-8 安全 Preview 截断 | 3 | Agent compaction tool arguments、IM Gateway 任务输出、CLI/API/E2E 错误 preview 在中文/emoji 多字节边界截断时不触发 char boundary panic |
 | [web-lint-cleanup.md](./web-lint-cleanup.md) | Web ESLint 清理 | 2 | web 全量 ESLint 零错误零警告与 TypeScript/Vite build 未退化 |
 | [storage-e2e-safety.md](./storage-e2e-safety.md) | Storage and E2E Safety | 3 | temp-env 作用域编译回归、core size guard 单元回归、storage rules size guard 编译回归 |
-| [agent-development-review-loop.md](./agent-development-review-loop.md) | Agent Development Review Loop | 7 | Agent 开发任务至少两轮目标复核、代码 review、修复问题、测试运行、结果复盘闭环，持续改进引导语、任务模式判定、任务启动工作区检查、并行开发优先 worktree 隔离、证据台账、完成定义、用户目标验证清单、git diff/status 复核、测试失败归因、最终交付验证矩阵，以及 AGENTS/design/human_tests 索引同步 |
+| [agent-development-review-loop.md](./agent-development-review-loop.md) | Agent Development Review Loop | 8 | Agent 开发任务至少两轮目标复核、代码 review、修复问题、测试运行、结果复盘闭环，持续改进引导语、任务模式判定、任务启动工作区检查、并行开发优先 worktree 隔离、证据台账、完成定义、用户目标验证清单、git diff/status 复核、测试失败归因、最终交付验证矩阵、AGENTS/design/human_tests 索引同步，以及 `human_tests/readme.md` 禁止全局总计数字 |
 | [agent-codex-alignment.md](./agent-codex-alignment.md) | Agent Codex Alignment | 8 | 默认 prompt 不泄露兼容实现说明、MCP resource canonical 工具名、shell_command/local_shell 历史 alias 已移除、真实 Bifrost 服务 `/agent/chat` 覆盖 MCP resource / update_plan / set_title / tool_search / 并发工具批、turn events、FuturesOrdered 并发工具批与 history 顺序回填、CI 预构建 release binary 回归、P1 工具链回归 |
 | [agent-codex-parity.md](./agent-codex-parity.md) | Agent Codex Parity | 5 | 保留 Bifrost IM Agent 边界，引入开放授权 ToolOrchestrator、Responses streaming client、OpenAI provider wire api、session 职责拆分合约与绝对目录输入切换工作路径回归 |
 | [agent-long-task-suspension.md](./agent-long-task-suspension.md) | Cooperative Long Task Loop | 22 | `exec_command` 长任务进入 `waiting_on_session`，runtime monitor 低成本等待新输出/退出/超时/用户消息，runtime notify 等待、动态退避、输出游标、状态摘要去重、IM/WebUI 进度卡等待态、用户取消与恢复摘要、Codex 可媲美性门禁、Phase 1 runtime watcher 与 Phase 1.5 notify 等待实现验收、命令关键字/正则分类器移除、自适应运行事实识别、Cooperative Long Task Loop 三权分离、append-only transcript、model-visible monitor contract、`exec_monitor` 策略控制、manual poll 非破坏性读取、终极形态交付边界、即时/短异步/分钟级/半小时级/数小时级真实时长场景、duration class / response strategy、安全控制面、runtime 权威校验、抗幻觉静态验收、watchdog 卡死兜底、30 秒级低成本 probe、SilentRunning/StallSuspected/MonitorDegraded、no-progress cooldown、scheduled polling 与 event monitor 协同、未知时长 discovery polling、N 次退避后提升 monitor ownership、poll deadline checkpoint 与 monitor notify 抢占、合并状态机和 5 分钟退避上限、Codex-style short grace、按调用面分等待预算、资源治理防 silent prune / silent kill、资源压力防 Token 黑洞、长任务识别、输出唤醒策略、真实 Bifrost 服务 `/api/im-gateway/agent/chat` 长任务协作循环验收、Linux CI shell shard 资源敏感 E2E 串行隔离回归、Traffic DB E2E mock server 端口 fallback 回归、长任务等待期用户追加消息抢占并继续跟进原任务、交互式 TTY prompt 卡住恢复模型并允许 `write_stdin` 输入确认、最终空 poll 不重复发起交互命令、命令执行入口漏识别审查与 external CLI/MCP 边界 |
@@ -216,15 +222,13 @@
 
 ---
 
-**总计：152 个测试文件，2633 个测试用例**
-
 ## 工作流程
 
 ### 1. 编写测试用例文档（开发完成后）
 
 - 在本目录下创建 `功能模块名.md`
 - 文档必须包含：前置条件、测试用例列表（编号 + 步骤 + 预期结果）、清理步骤
-- 同步更新本文件（`readme.md`）的索引表
+- 同步更新本文件（`readme.md`）中对应模块的索引行；禁止维护全局总计数字
 
 ### 2. Agent 按用例自主执行测试
 

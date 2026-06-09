@@ -439,7 +439,7 @@ fn convert_core_result_to_proxy(core_result: &bifrost_core::ResolvedRules) -> Pr
             | Protocol::Https
             | Protocol::Ws
             | Protocol::Wss
-                if !result.ignored.host =>
+                if should_update_route_target(&result, protocol) =>
             {
                 result.host = Some(value.to_string());
                 result.host_protocol = Some(protocol);
@@ -733,6 +733,21 @@ fn convert_core_result_to_proxy(core_result: &bifrost_core::ResolvedRules) -> Pr
     }
 
     result
+}
+
+fn should_update_route_target(result: &ProxyResolvedRules, protocol: Protocol) -> bool {
+    if result.ignored.host {
+        return false;
+    }
+
+    if result.host.is_none() {
+        return true;
+    }
+
+    matches!(
+        (result.host_protocol, protocol),
+        (Some(Protocol::Host), Protocol::XHost)
+    )
 }
 
 fn parse_rule_bool(value: &str, default_when_empty: bool) -> bool {
@@ -1103,6 +1118,75 @@ wss://app.example.test/ ws://localhost:8000/
         );
         assert_eq!(resolved.host.as_deref(), Some("target1:8080"));
         assert_eq!(resolved.host_protocol, Some(Protocol::Tunnel));
+    }
+
+    #[test]
+    fn test_merge_keeps_first_route_target_across_protocols() {
+        let parser = bifrost_core::RuleParser::new();
+        let rules = parser
+            .parse_rules(
+                "qianchuan.jinritemai.com/ad qianchuan.jinritemai.com/ad\n\
+                 qianchuan.jinritemai.com https://10.37.102.138:8080",
+            )
+            .unwrap();
+        let resolver = CoreRulesResolver::new(rules);
+        let resolved = resolve_rules_impl(
+            &resolver,
+            "https://qianchuan.jinritemai.com/ad/api/v1/account/user/info?gfversion=unknown",
+            "GET",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        assert_eq!(
+            resolved.host.as_deref(),
+            Some("qianchuan.jinritemai.com/ad")
+        );
+        assert_eq!(resolved.host_protocol, Some(Protocol::Host));
+        assert_eq!(resolved.rules.len(), 2);
+    }
+
+    #[test]
+    fn test_merge_keeps_domain_fallback_route_when_path_rule_misses() {
+        let parser = bifrost_core::RuleParser::new();
+        let rules = parser
+            .parse_rules(
+                "qianchuan.jinritemai.com/ad qianchuan.jinritemai.com/ad\n\
+                 qianchuan.jinritemai.com https://10.37.102.138:8080",
+            )
+            .unwrap();
+        let resolver = CoreRulesResolver::new(rules);
+        let resolved = resolve_rules_impl(
+            &resolver,
+            "https://qianchuan.jinritemai.com/other/api",
+            "GET",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        assert_eq!(resolved.host.as_deref(), Some("10.37.102.138:8080"));
+        assert_eq!(resolved.host_protocol, Some(Protocol::Https));
+        assert_eq!(resolved.rules.len(), 1);
+    }
+
+    #[test]
+    fn test_merge_keeps_xhost_priority_over_host() {
+        let parser = bifrost_core::RuleParser::new();
+        let rules = parser
+            .parse_rules("example.com host://host-target\nexample.com xhost://xhost-target")
+            .unwrap();
+        let resolver = CoreRulesResolver::new(rules);
+        let resolved = resolve_rules_impl(
+            &resolver,
+            "http://example.com/api",
+            "GET",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        assert_eq!(resolved.host.as_deref(), Some("xhost-target"));
+        assert_eq!(resolved.host_protocol, Some(Protocol::XHost));
+        assert_eq!(resolved.rules.len(), 2);
     }
 
     #[test]
