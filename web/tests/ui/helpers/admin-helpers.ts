@@ -114,7 +114,7 @@ import sys
 import time
 
 data_dir = pathlib.Path(sys.argv[1])
-db_path = data_dir / "notifications.db"
+db_path = data_dir / "admin" / "notifications.db"
 db_path.parent.mkdir(parents=True, exist_ok=True)
 conn = sqlite3.connect(db_path)
 conn.executescript("""

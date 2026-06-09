@@ -979,6 +979,34 @@
 - 代表性用例断言全部通过，退出码为 0。
 - EXIT trap 清理 Bifrost 后台进程时优先 graceful stop 并 wait，不再输出 `Killed ...`，避免 Linux shell shard 把已通过用例误判为失败。
 
+### TC-CS-41: large body shell 用例按资源敏感路径串行调度
+
+**操作步骤**：
+1. 执行脚本语法检查：
+   ```bash
+   bash -n scripts/run_all_e2e.sh e2e-tests/tests/test_large_body_protection.sh
+   ```
+2. 静态检查 large body 用例被登记为 resource-heavy 串行用例，且用例数据目录复用调度器注入的 `BIFROST_DATA_DIR`：
+   ```bash
+   rg -n 'RESOURCE_HEAVY_TESTS|test_large_body_protection\.sh|is_resource_heavy|BIFROST_DATA_DIR:-\$PROJECT_DIR/\.bifrost-test-large-body' scripts/run_all_e2e.sh e2e-tests/tests/test_large_body_protection.sh
+   ```
+3. 使用隔离端口、隔离数据目录和预构建 release binary 执行 large body 用例：
+   ```bash
+   TEST_ROOT="$(mktemp -d /tmp/bifrost-large-body-human.XXXXXX)"
+   PROXY_PORT=19214 ECHO_HTTP_PORT=19215 \
+     BIFROST_DATA_DIR="$TEST_ROOT/data" \
+     SKIP_BUILD=true BIFROST_BIN=target/release/bifrost \
+     TIMEOUT=90 BIFROST_E2E_HTTP_RETRIES=2 \
+     bash e2e-tests/tests/test_large_body_protection.sh
+   ```
+
+**预期结果**：
+- 语法检查退出码为 0。
+- 第 2 步能定位到 `RESOURCE_HEAVY_TESTS`、`test_large_body_protection.sh`、`is_resource_heavy` 和 `BIFROST_DATA_DIR` fallback。
+- `test_large_body_protection.sh` 不再固定写入仓库根目录 `.bifrost-test-large-body`，在 CI shell 调度器中会使用每个 suite 的 sandbox 数据目录。
+- large body 用例作为资源敏感测试进入串行队列，不与其他 shell 用例并发竞争 macOS hosted runner 内存和代理连接资源。
+- 真实用例输出所有 HTTP large body case 通过，退出码为 0。
+
 ## 本轮执行记录
 
 测试日期：2026-05-09
@@ -1016,7 +1044,9 @@
 | TC-CS-37 | 通过 | 2026-06-04 本轮执行：`bash -n scripts/run_all_e2e.sh scripts/ci/run-e2e-shell.sh` 通过；`bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests \| rg -n 'test_asr_\|test_qwen3_asr_\|test_voice_input_runtime\.sh\|test_voice_wake_actions\.sh'` 无输出且退出码为 1，确认 CI 模式不收集 ASR/voice runtime shell E2E；`bash scripts/run_all_e2e.sh --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests \| rg -n 'test_asr_diarization_cli\.sh\|test_qwen3_asr_local_server\.sh\|test_voice_input_runtime\.sh\|test_asr_voiceprint_enroll_cli\.sh'` 输出代表性脚本，确认本地 full-shell 仍可验证。列表命令不启动 Bifrost、不下载模型、不访问外部模型源、不使用 9900、不修改系统代理。 |
 | TC-CS-39 | 通过 | 2026-06-08 本轮执行：`SKIP_BUILD=true e2e-tests/tests/test_temporary_port_bindings.sh` 通过，输出 `Passed: 55`、`Failed: 0`；验证成功 listener 绑定在端口竞态时可重试，且 temporary port 绑定顺序、rule-file、inline rule、update、Traffic API/CLI listener port 等断言保持通过。 |
 | TC-CS-40 | 通过 | 2026-06-08 本轮执行：`bash -n e2e-tests/test_utils/process.sh e2e-tests/tests/test_metrics_hosts_apps_admin_api.sh e2e-tests/tests/test_rule_semantics_regressions.sh e2e-tests/tests/test_proxy_chain_auth_e2e.sh e2e-tests/tests/test_host_rule_path_rewrite.sh e2e-tests/tests/test_multiline_rule_filter_e2e.sh` 通过；随后使用预构建 `target/release/bifrost` 分别执行 `test_metrics_hosts_apps_admin_api.sh`、`test_multiline_rule_filter_e2e.sh`、`test_rule_semantics_regressions.sh`、`test_host_rule_path_rewrite.sh`、`test_proxy_chain_auth_e2e.sh`，五个脚本均退出码 0，输出中不再出现清理阶段 `Killed ...`。 |
+| TC-CS-41 | 通过 | 2026-06-09 本轮执行：`bash -n scripts/run_all_e2e.sh e2e-tests/tests/test_large_body_protection.sh` 通过；`rg -n 'RESOURCE_HEAVY_TESTS\|test_large_body_protection\\.sh\|is_resource_heavy\|BIFROST_DATA_DIR:-\\$PROJECT_DIR/\\.bifrost-test-large-body' scripts/run_all_e2e.sh e2e-tests/tests/test_large_body_protection.sh` 定位到 resource-heavy 串行队列、调度判断和 `BIFROST_DATA_DIR` fallback；使用 `SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost` 构建 release binary 后，以临时目录 `/tmp/bifrost-large-body-human.*`、端口 `19214/19215`、`SKIP_BUILD=true BIFROST_BIN=target/release/bifrost` 真实执行 `test_large_body_protection.sh`，输出 5 个 large body HTTP 用例通过、0 失败，且清理阶段停止代理和 mock 服务。 |
 
 ## 清理步骤
 
-- 无特殊清理需求，测试使用临时数据目录
+- 删除测试中创建的临时目录（如 `/tmp/bifrost-large-body-human.*`）。
+- 真实运行 shard 用例后确认临时 Bifrost 进程已退出：`pgrep -fl "bifrost.*start"`。

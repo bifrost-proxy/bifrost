@@ -1,0 +1,71 @@
+.availability-check-notification-center--collapsed {
+  cursor: grab;
+  touch-action: none;
+}
+
+.availability-check-notification-center--collapsed:active {
+  cursor: grabbing;
+}
+
+.availability-check-notification-bubble {
+  position: relative;
+}
+
+.availability-check-notification-center--alerting .availability-check-notification-bubble {
+  animation: availability-check-bubble-bounce 2.6s ease-in-out infinite;
+}
+
+.availability-check-notification-center--alerting .availability-check-notification-bubble::after {
+  position: absolute;
+  inset: -6px;
+  border: 2px solid currentColor;
+  border-radius: 999px;
+  content: "";
+  opacity: 0;
+  pointer-events: none;
+  animation: availability-check-bubble-pulse 2.6s ease-out infinite;
+}
+
+@keyframes availability-check-bubble-bounce {
+  0%,
+  72%,
+  100% {
+    transform: translateY(0);
+  }
+
+  78% {
+    transform: translateY(-6px);
+  }
+
+  84% {
+    transform: translateY(0);
+  }
+
+  90% {
+    transform: translateY(-3px);
+  }
+}
+
+@keyframes availability-check-bubble-pulse {
+  0%,
+  68% {
+    opacity: 0;
+    transform: scale(0.84);
+  }
+
+  76% {
+    opacity: 0.2;
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(1.22);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .availability-check-notification-center--alerting .availability-check-notification-bubble,
+  .availability-check-notification-center--alerting .availability-check-notification-bubble::after {
+    animation: none;
+  }
+}
