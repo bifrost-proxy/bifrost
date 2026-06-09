@@ -734,6 +734,13 @@ run_shell_tests_parallel() {
     "test_memory_pressure_e2e.sh"
   )
 
+  # These tests transfer very large payloads and can produce 100MB+ responses.
+  # Keep them out of the parallel shell batch so hosted runners do not drop the
+  # proxy mid-suite under resource pressure.
+  local RESOURCE_HEAVY_TESTS=(
+    "test_large_body_protection.sh"
+  )
+
   # PR-G-CI-FIX: isolated-after tests
   # These tests spawn long-lived bifrost/python children that escape the
   # per-test subshell trap. Run serially and call kill_all_bifrost after each
@@ -789,6 +796,14 @@ run_shell_tests_parallel() {
       fi
     done
 
+    local is_resource_heavy=0
+    for rt in "${RESOURCE_HEAVY_TESTS[@]}"; do
+      if [[ "$script_name" == "$rt" ]]; then
+        is_resource_heavy=1
+        break
+      fi
+    done
+
     # PR-G-CI-FIX: isolated-after tests
     local is_isolated_after=0
     for it in "${ISOLATED_AFTER_TESTS[@]}"; do
@@ -806,7 +821,7 @@ run_shell_tests_parallel() {
       fi
     done
 
-    if [[ "$is_mock_managing" -eq 1 || "$is_isolated_after" -eq 1 || "$is_cargo_heavy" -eq 1 ]]; then
+    if [[ "$is_mock_managing" -eq 1 || "$is_resource_heavy" -eq 1 || "$is_isolated_after" -eq 1 || "$is_cargo_heavy" -eq 1 ]]; then
       serial_tests+=("$script_name")
     else
       parallel_tests+=("$script_name")

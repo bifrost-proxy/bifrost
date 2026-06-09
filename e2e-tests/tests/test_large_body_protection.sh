@@ -57,7 +57,7 @@ passed=0
 failed=0
 skipped=0
 
-TEST_DATA_DIR="$PROJECT_DIR/.bifrost-test-large-body"
+TEST_DATA_DIR="${BIFROST_DATA_DIR:-$PROJECT_DIR/.bifrost-test-large-body}"
 PROXY_LOG_FILE="$TEST_DATA_DIR/proxy.log"
 MOCK_LOG_FILE="$TEST_DATA_DIR/mock.log"
 PROXY_PID=""
