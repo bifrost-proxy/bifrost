@@ -1077,17 +1077,17 @@
 2. 等待 Admin API ready，并确认 lifecycle helper 与 watcher 启动：
    ```bash
    source ~/.zshrc && until curl -sS "http://127.0.0.1:18889/_bifrost/api/system" >/dev/null 2>&1; do sleep 0.2; done
-   source ~/.zshrc && jq -r '.event' "$TEST_DATA_DIR/logs/system_proxy_events.jsonl" | rg "helper_started"
-   source ~/.zshrc && jq -r '.event' "$TEST_DATA_DIR/logs/system_proxy_events.jsonl" | rg "wake_notification_watcher_started"
+   source ~/.zshrc && grep -E "system proxy lifecycle cleanup helper started|system proxy lifecycle helper started after Admin API enable" "$TEST_DATA_DIR/proxy.log" "$TEST_DATA_DIR"/logs/bifrost*.log
+   source ~/.zshrc && grep -E "macOS power notification watcher started|system proxy lifecycle helper power watcher started" "$TEST_DATA_DIR/proxy.log" "$TEST_DATA_DIR"/logs/bifrost*.log
    ```
 3. 让 Mac 进入睡眠：可以手动合盖、点击 Apple 菜单 Sleep，或在可控测试机上执行：
    ```bash
    source ~/.zshrc && pmset sleepnow
    ```
 4. 唤醒 Mac，等待 10 秒。
-5. 检查 lifecycle event：
+5. 检查 lifecycle helper 日志：
    ```bash
-   source ~/.zshrc && jq -r '.event' "$TEST_DATA_DIR/logs/system_proxy_events.jsonl" | rg "system_can_sleep|system_will_sleep|system_will_power_on|system_has_powered_on|wake_notification_reconcile"
+   source ~/.zshrc && grep -E "SystemWillSleep|SystemWillPowerOn|SystemHasPoweredOn|system proxy lifecycle helper received power notification|system proxy wake reconcile starting|system proxy wake reconcile reapplied proxy for live runtime|runtime_restart_started|runtime_restart_succeeded" "$TEST_DATA_DIR/proxy.log" "$TEST_DATA_DIR"/logs/bifrost*.log
    ```
 6. 检查系统代理和 listener：
    ```bash
@@ -1097,14 +1097,14 @@
    ```
 
 **预期结果**：
-- event log 包含 `wake_notification_watcher_started`。
-- `wake_notification_watcher_started` 事件来自 lifecycle helper，而不是主进程；事件中应包含 helper pid 或 helper runtime identity。
-- 睡眠前包含 `system_will_sleep`；如果本次是 idle sleep，也应包含 `system_can_sleep` 且应用未阻止系统睡眠。
-- 唤醒过程中包含 `system_will_power_on` 和 `system_has_powered_on`；如果部分机型不稳定提供 early wake 事件，至少必须记录 `system_has_powered_on` 或明确的 watcher warning。
-- `system_has_powered_on` 后触发 `wake_notification_reconcile_started` 和 `wake_notification_reconcile_completed`。
+- 日志包含 `macOS power notification watcher started` 和 `system proxy lifecycle helper power watcher started`。
+- watcher 启动日志来自 lifecycle helper，而不是主进程；helper 启动日志中应包含 helper pid、parent pid、data dir 和 helper program。
+- 睡眠前包含 `SystemWillSleep`；如果本次是 idle sleep，也应包含 `CanSystemSleep` 且应用未阻止系统睡眠。
+- 唤醒过程中包含 `SystemWillPowerOn` 和 `SystemHasPoweredOn`；如果部分机型不稳定提供 early wake 事件，至少必须记录 `SystemHasPoweredOn` 或明确的 watcher warning。
+- `SystemHasPoweredOn` 后触发 `system proxy wake reconcile starting`，并写出 `system proxy wake reconcile reapplied proxy for live runtime`、`runtime_restart_started`/`runtime_restart_succeeded` 或 guarded cleanup 之一。
 - listener 仍可达时，不误执行 `cleanup_restored` / `cleanup_disabled_stale_proxy`。
 - listener 不可达且系统代理仍指向 Bifrost target 时，进入 guarded restore 并写出对应 cleanup event。
-- 如果 watcher 初始化失败，必须写 `wake_notification_watcher_failed`，helper parent-death cleanup 仍保留，且现有 scheduler wake-gap reconcile 仍能兜底。
+- 如果 watcher 初始化失败，必须写 `system proxy lifecycle helper power watcher failed to start`，helper parent-death cleanup 仍保留，且现有 scheduler wake-gap reconcile 仍能兜底。
 
 ---
 
@@ -1200,8 +1200,66 @@
 
 ---
 
+### TC-CSP-35：Admin API / WebView / CLI 显式关闭应优先于脏 system proxy backup
+
+**前置条件**：
+- macOS 机器。
+- 使用临时数据目录和非默认端口，避免影响正式 `~/.bifrost`。
+- 当前系统代理初始状态已快照，测试结束必须恢复。
+
+**操作步骤**：
+1. 构造临时数据目录并启动 Bifrost，但先不要让启动参数自动开启系统代理：
+   ```bash
+   source ~/.zshrc && TEST_DATA_DIR="$(mktemp -d /tmp/bifrost-csp35.XXXXXX)"
+   source ~/.zshrc && BIFROST_DATA_DIR="$TEST_DATA_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 ./target/debug/bifrost start -p 18889 --skip-cert-check --unsafe-ssl --no-system-proxy >"$TEST_DATA_DIR/proxy.log" 2>&1 &
+   source ~/.zshrc && PROXY_PID=$!
+   ```
+2. 等待 Admin API ready，然后通过 Admin API / WebView 等价接口开启系统代理：
+   ```bash
+   source ~/.zshrc && curl -sS --retry 30 --retry-delay 1 "http://127.0.0.1:18889/_bifrost/api/system" >/dev/null
+   source ~/.zshrc && curl -sS -X PUT "http://127.0.0.1:18889/_bifrost/api/proxy/system" -H "Content-Type: application/json" -d '{"enabled":true}'
+   ```
+3. 模拟 0.0.95 现场的脏备份：把 `proxy_backup.json` 写成当前 Bifrost target，并删除 `proxy_state.json`：
+   ```bash
+   source ~/.zshrc && printf '{"enable":true,"host":"127.0.0.1","port":18889,"bypass":"localhost,127.0.0.1,::1,*.local"}' > "$TEST_DATA_DIR/proxy_backup.json"
+   source ~/.zshrc && rm -f "$TEST_DATA_DIR/proxy_state.json"
+   ```
+4. 通过 Admin API / WebView 等价接口关闭系统代理：
+   ```bash
+   source ~/.zshrc && curl -sS -X PUT "http://127.0.0.1:18889/_bifrost/api/proxy/system" -H "Content-Type: application/json" -d '{"enabled":false}'
+   ```
+5. 轮询确认 OS system proxy 不再由本轮 Bifrost 管理：
+   ```bash
+   source ~/.zshrc && curl -sS "http://127.0.0.1:18889/_bifrost/api/proxy/system"
+   source ~/.zshrc && networksetup -getwebproxy "Wi-Fi"
+   source ~/.zshrc && networksetup -getsecurewebproxy "Wi-Fi"
+   ```
+6. 检查日志：
+   ```bash
+   source ~/.zshrc && grep -E "explicit system proxy disable ignored saved backup|system proxy reconcile skipped because runtime desired state is disabled|system proxy lifecycle helper stopped after Admin API disable" "$TEST_DATA_DIR/proxy.log"
+   ```
+7. CLI 等价验证：重复第 1-3 步准备脏 backup，然后执行：
+   ```bash
+   source ~/.zshrc && BIFROST_DATA_DIR="$TEST_DATA_DIR" ./target/debug/bifrost system-proxy disable
+   source ~/.zshrc && BIFROST_DATA_DIR="$TEST_DATA_DIR" ./target/debug/bifrost system-proxy status
+   ```
+
+**预期结果**：
+- 第 4 步接口返回 `managed_by_bifrost=false`，且 `configured_enabled=false`。
+- 系统代理不会恢复到脏 backup 中的 `127.0.0.1:18889`。
+- 关闭后等待超过一个 reconcile 周期，系统代理仍不会被后台 reconcile 重新打开。
+- 日志包含 `explicit system proxy disable ignored saved backup because it points back to the managed Bifrost target`，证明脏 backup 被用户显式关闭语义覆盖。
+- 如果用户机器上关闭后被其它外部代理接管，Admin API 仍可返回 `enabled=true`，但必须满足 `managed_by_bifrost=false`，WebView 开关应显示关闭。
+- CLI disable 在运行中服务可达时优先走 Admin API，输出 `✓ System proxy disabled via running Bifrost`；Admin API 不可用但 `runtime.json` 存在时，CLI 仍能用 runtime host/port fallback 执行 explicit disable。
+- CLI status 输出 `Managed by Bifrost`、`Configured enabled`、`Configured bypass`；当系统代理由外部代理接管时，显示外部代理提示，不把外部 enabled 误报成 Bifrost 管理。
+
+---
+
 ## 执行记录
 
+- 2026-06-09：针对 macOS 合盖睡眠后主进程 scheduler 未感知 wake gap、lifecycle helper 尚未注册原生 wake notification 的问题，补充并执行 TC-CSP-32 相关自动化子集。第一轮执行 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 bash e2e-tests/tests/test_system_proxy_e2e.sh` 发现 `IORegisterForSystemPower` FFI 签名错误导致 hidden `system-proxy lifecycle-helper` 以 exit code 139 退出，Admin API 运行中启用后的 crash cleanup 也因此未清理 18889 系统代理残留；修复 FFI 后直接执行 hidden helper，确认 helper 3 秒后仍存活，`$TEST_DATA_DIR/logs/bifrost.2026-06-09.log` 包含 `macOS power notification watcher started` 和 `system proxy lifecycle helper power watcher started`。最终重跑系统代理 E2E，结果 18/18 PASS，覆盖 direct lifecycle helper 注册 IOKit power watcher、无 backup/state runtime target 清理、Admin API crash cleanup 等路径；本机正式 system proxy owner 为 `127.0.0.1:9900`，脚本按外部 owner 保护规则跳过非隔离睡眠漂移、restart 保持、daemon restart-before-restore、脏 backup disable 和启动失败前恢复用例，避免误抢正式代理。
+- 2026-06-09：针对 0.0.95 WebView 停止系统代理后又恢复为开启的脏 backup 回归，补充 TC-CSP-35 和脚本自动化 `test_admin_api_disable_ignores_dirty_backup_pointing_to_self`。执行 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 bash e2e-tests/tests/test_system_proxy_e2e.sh`，结果 17/17 PASS；当前机器存在正式 system proxy owner `127.0.0.1:9900`，新增 TC-CSP-35 脚本用例按外部 owner 保护规则跳过非隔离真实写入，避免误抢正式代理。执行 `cargo test -p bifrost-core explicit_disable -- --nocapture`，结果 2/2 PASS，覆盖脏 backup host/port 指回当前 target 时即使 bypass 不同也应忽略；执行 `cargo test -p bifrost-admin proxy::tests -- --nocapture`，结果 4/4 PASS，覆盖 disable verification；执行 `cargo test -p bifrost-cli commands::system_proxy::tests -- --nocapture`，结果 lib/main 各 6/6 PASS，覆盖 CLI runtime target fallback、wildcard host 到 loopback 映射和托管 runtime restart 参数。
+- 2026-06-09：针对托管 daemon 主进程崩溃后系统代理继续指向旧 listener 的可靠性问题，先落地 TC-CSP-34 的 helper parent-death restart-before-restore 子集。执行 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 bash e2e-tests/tests/test_system_proxy_e2e.sh`，结果 16/16 PASS。当前机器存在正式 system proxy owner `127.0.0.1:9900`，因此新增脚本用例 `test_lifecycle_helper_restarts_restartable_daemon_after_parent_crash` 按外部 owner 保护规则跳过非隔离真实写入，避免误抢正式代理；本轮同时执行 `cargo test -p bifrost-cli process::tests -- --nocapture` 和 `cargo test -p bifrost-cli commands::system_proxy::tests -- --nocapture`，覆盖 `runtime_start_mode` / `restartable_runtime` 兼容读写、foreground 不自动重启、缺少 binary path 不重启、daemon restart argv 保留端口/host/socks5/bypass 和系统代理接管参数。
 - 2026-06-09：针对重启后系统代理残留且 cleanup-daemon 在 `networksetup -listallnetworkservices` 暂时返回空 service list 时提前退出的问题，补充 TC-CSP-26。真实现场取证：`launchctl print system/com.bifrost.system-proxy-cleanup` 显示 one-shot daemon 已运行且 exit code 为 0；`/var/log/bifrost-system-proxy-cleanup.log` 显示 `System proxy crash recovery check completed without managed state`；`~/.bifrost/logs/bifrost.2026-06-09.log` 显示关机路径出现 `No enabled macOS network services were returned by networksetup`，并且原 state 被 helper 清理后导致开机 cleanup 无恢复依据。修复后执行记录待补充。
 - 2026-06-09：针对更新后 restart 清理系统代理但 fresh daemon 未恢复的问题，新增 TC-CSP-27，并执行系统代理 E2E：`BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 bash e2e-tests/tests/test_system_proxy_e2e.sh`，结果 14/14 PASS。当前机器正式 system proxy owner 为 `127.0.0.1:9900`，因此 TC-CSP-27 对应脚本用例 `test_restart_preserves_system_proxy` 按外部 owner 保护规则跳过非隔离真实写入，避免误抢正式代理；本轮同时执行 `cargo test -p bifrost-cli runtime_system_proxy_host_maps_wildcard_listeners_to_loopback`、`cargo test -p bifrost-cli append_system_proxy_start_args_preserves_bypass`、`cargo test -p bifrost-cli test_build_restart_args_preserves_system_proxy_snapshot`，覆盖 restart / upgrade restart stop 前快照与 fresh start argv 追加 `--system-proxy --proxy-bypass` 的代码路径。测试后执行 `BIFROST_DATA_DIR="$HOME/.bifrost" ./target/debug/bifrost system-proxy status`，确认系统代理仍为 `127.0.0.1:9900`，未残留临时 18889。
 - 2026-06-08：针对 Settings -> Proxy 在外部代理占用时误把 `configured_enabled=true` 显示为开关已打开的回归补充验证。当前 18890 测试服务的 `/api/proxy/system` 返回 live 代理指向 `127.0.0.1:9900` 且 `managed_by_bifrost=false`，Settings -> Proxy 展示 `System proxy is occupied by another proxy`，`Enable System Proxy` 开关显示关闭并保留可点击接管入口；最小 Playwright 脚本读取 `settings-system-proxy-switch` 的 `aria-checked=false`。执行 `pnpm -C web exec eslint src/pages/Settings/tabs/SystemProxySection.tsx src/pages/Traffic/index.tsx src/components/StatusBar/index.tsx tests/ui/admin-settings.spec.ts` 通过；执行 `pnpm -C web test:unit -- --run useProxyStore` 通过，确认 stored preference 与 live Bifrost ownership 分离。

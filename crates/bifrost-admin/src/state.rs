@@ -49,6 +49,7 @@ pub type SharedClientTrustTracker = Arc<ClientTlsTrustTracker>;
 pub type SharedAccessControl = Arc<RwLock<ClientAccessControl>>;
 pub type SharedValuesStorage = Arc<ParkingRwLock<ValuesStorage>>;
 pub type SharedSystemProxyManager = Arc<RwLock<SystemProxyManager>>;
+pub type SharedSystemProxyRuntimeFlag = Arc<AtomicBool>;
 pub type SharedRuntimeConfig = Arc<RwLock<RuntimeConfig>>;
 
 const SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER_ENV: &str =
@@ -397,6 +398,8 @@ pub struct AdminState {
     pub connection_registry: SharedConnectionRegistry,
     pub config_manager: Option<SharedConfigManager>,
     pub system_proxy_lifecycle_helper: Option<SharedSystemProxyLifecycleHelperState>,
+    system_proxy_desired_enabled: Option<SharedSystemProxyRuntimeFlag>,
+    system_proxy_enabled_flag: Option<SharedSystemProxyRuntimeFlag>,
     pub max_body_buffer_size: AtomicUsize,
     pub max_body_probe_size: AtomicUsize,
     pub binary_traffic_performance_mode: AtomicBool,
@@ -458,6 +461,8 @@ impl AdminState {
             connection_registry: Arc::new(ConnectionRegistry::default()),
             config_manager: None,
             system_proxy_lifecycle_helper: None,
+            system_proxy_desired_enabled: None,
+            system_proxy_enabled_flag: None,
             max_body_buffer_size: AtomicUsize::new(DEFAULT_MAX_BODY_BUFFER_SIZE),
             max_body_probe_size: AtomicUsize::new(DEFAULT_MAX_BODY_PROBE_SIZE),
             binary_traffic_performance_mode: AtomicBool::new(true),
@@ -1077,6 +1082,34 @@ impl AdminState {
     ) -> Self {
         self.system_proxy_lifecycle_helper = Some(helper);
         self
+    }
+
+    pub fn with_system_proxy_runtime_flags_shared(
+        mut self,
+        desired_enabled: SharedSystemProxyRuntimeFlag,
+        enabled_flag: SharedSystemProxyRuntimeFlag,
+    ) -> Self {
+        self.system_proxy_desired_enabled = Some(desired_enabled);
+        self.system_proxy_enabled_flag = Some(enabled_flag);
+        self
+    }
+
+    pub fn set_system_proxy_runtime_desired_enabled(&self, enabled: bool) -> Option<bool> {
+        self.system_proxy_desired_enabled
+            .as_ref()
+            .map(|flag| flag.swap(enabled, Ordering::AcqRel))
+    }
+
+    pub fn store_system_proxy_runtime_desired_enabled(&self, enabled: bool) {
+        if let Some(flag) = &self.system_proxy_desired_enabled {
+            flag.store(enabled, Ordering::Release);
+        }
+    }
+
+    pub fn store_system_proxy_runtime_managed(&self, managed: bool) {
+        if let Some(flag) = &self.system_proxy_enabled_flag {
+            flag.store(managed, Ordering::Release);
+        }
     }
 
     pub fn with_max_body_buffer_size(self, size: usize) -> Self {

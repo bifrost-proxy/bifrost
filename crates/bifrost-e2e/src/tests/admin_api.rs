@@ -600,11 +600,9 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     .map_err(|e| format!("GET proxied trust probe netcheck failed: {}", e))?;
                 assert_status(&proxied_netcheck_response, 409)?;
 
-                let netcheck_response = client
-                    .get(&netcheck_url)
-                    .send()
-                    .await
-                    .map_err(|e| format!("GET trust probe netcheck failed: {}", e))?;
+                let netcheck_response =
+                    get_probe_with_retry(&client, &netcheck_url, "GET trust probe netcheck")
+                        .await?;
                 assert_status(&netcheck_response, 200)?;
 
                 let ca_response = client
@@ -644,11 +642,12 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     .map_err(|e| format!("GET proxied trust probe HTTPS check failed: {}", e))?;
                 assert_status(&proxied_tls_response, 200)?;
 
-                let tls_response = trusted_client
-                    .get(&tls_check_url)
-                    .send()
-                    .await
-                    .map_err(|e| format!("GET trust probe HTTPS check failed: {}", e))?;
+                let tls_response = get_probe_with_retry(
+                    &trusted_client,
+                    &tls_check_url,
+                    "GET trust probe HTTPS check",
+                )
+                .await?;
                 assert_status(&tls_response, 200)?;
 
                 let second_device_report = client
@@ -1156,4 +1155,27 @@ fn pick_unused_port() -> Result<u16, String> {
         .local_addr()
         .map(|addr| addr.port())
         .map_err(|e| format!("Failed to read ephemeral port: {}", e))
+}
+
+async fn get_probe_with_retry(
+    client: &reqwest::Client,
+    url: &str,
+    label: &str,
+) -> Result<reqwest::Response, String> {
+    let mut last_error = None;
+    for attempt in 1..=8 {
+        match client.get(url).send().await {
+            Ok(response) => return Ok(response),
+            Err(error) => {
+                last_error = Some(error.to_string());
+                if attempt < 8 {
+                    tokio::time::sleep(std::time::Duration::from_millis(100 * attempt)).await;
+                }
+            }
+        }
+    }
+    Err(format!(
+        "{label} failed after retries: {}",
+        last_error.unwrap_or_else(|| "unknown error".to_string())
+    ))
 }
