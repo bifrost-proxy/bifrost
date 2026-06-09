@@ -782,10 +782,15 @@ export async function runAgentStream(params: {
     ) {
       finalResponse = event.content;
     } else if (
-      (event.eventType === "run_finished" || event.eventType === "turn_finished") &&
-      typeof (event.response || event.content) === "string"
+      event.eventType === "run_finished" ||
+      event.eventType === "turn_finished"
     ) {
-      finalResponse = String(event.response || event.content);
+      if (terminalStatusFailure(event)) {
+        throw new Error(terminalFailureMessage(event, "Agent run failed"));
+      }
+      if (typeof (event.response || event.content) === "string") {
+        finalResponse = String(event.response || event.content);
+      }
     } else if (event.eventType === "run_busy") {
       throw new Error(String(event.message || "Agent session is busy"));
     } else if (event.eventType === "run_failed" || event.eventType === "turn_failed") {
@@ -869,6 +874,16 @@ export async function runRunnerCallStream(params: {
     ) {
       finalResponse = event.response;
     }
+    if (event.eventType === "runner_call_finished") {
+      const status = typeof event.status === "string" ? event.status : "";
+      if (status && !["completed", "success", "succeeded"].includes(status)) {
+        const response =
+          typeof event.response === "string" && event.response.trim()
+            ? event.response
+            : `Runner call failed with status: ${status}`;
+        throw new Error(response);
+      }
+    }
     if (event.eventType === "runner_call_failed") {
       throw new Error(String(event.error || "Runner call failed"));
     }
@@ -940,6 +955,16 @@ export function reduceTelemetry(
     return finishTool(telemetry, event.log, numberFrom(event.durationMs));
   }
   if (eventType === "run_finished" || eventType === "turn_finished") {
+    if (terminalStatusFailure(event)) {
+      return {
+        ...telemetry,
+        phase: "failed",
+        errors: appendError(
+          telemetry.errors,
+          terminalFailureMessage(event, "Agent run failed"),
+        ),
+      };
+    }
     const finalPlan =
       Array.isArray(event.planSteps) && event.planSteps.length > 0
         ? parsePlanSteps(event.planSteps)
@@ -1073,6 +1098,28 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 
 export function stringFrom(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+export function terminalStatusFailure(event: Record<string, unknown>) {
+  const status = stringFrom(event.status)?.trim().toLowerCase();
+  if (!status || ["completed", "success", "succeeded"].includes(status)) {
+    return undefined;
+  }
+  return status;
+}
+
+export function terminalFailureMessage(
+  event: Record<string, unknown>,
+  fallback: string,
+) {
+  return (
+    stringFrom(event.response)?.trim() ||
+    stringFrom(event.content)?.trim() ||
+    stringFrom(event.error)?.trim() ||
+    (terminalStatusFailure(event)
+      ? `${fallback} with status: ${terminalStatusFailure(event)}`
+      : fallback)
+  );
 }
 
 export function numberFrom(value: unknown): number | undefined {
@@ -1631,10 +1678,13 @@ export function ProcessStepsBlock({
   const runningCount = isRunning
     ? visibleSteps.filter((s) => s.status === "running").length
     : 0;
+  const failedCount = visibleSteps.filter((step) => step.status === "failed").length;
   const commandCount = visibleSteps.filter((step) => step.type === "tool").length;
   const summaryCount = commandCount || visibleSteps.length;
   const durationLabel = formatProcessStepsDuration(visibleSteps, nowSeconds);
-  const summaryText = `${isRunning ? "正在运行" : "已运行"} ${summaryCount} 条命令${
+  const summaryPrefix =
+    failedCount > 0 && !isRunning ? "失败" : isRunning ? "正在运行" : "已运行";
+  const summaryText = `${summaryPrefix} ${summaryCount} 条命令${
     runningCount > 0 ? ` · ${runningCount} 条执行中` : ""
   }${durationLabel ? ` · ${durationLabel}` : ""}`;
 

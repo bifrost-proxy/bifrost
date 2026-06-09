@@ -317,9 +317,10 @@ pub(super) fn agent_reply_target_uses_weixin_sender_instead_of_owner() {
         raw_digest: None,
     };
 
+    let target = agent_reply_target_ref(&provider, &event).expect("reply target");
     assert_eq!(
-        agent_reply_target_id(&provider, &event).as_deref(),
-        Some("sender@im.wechat")
+        (target.receive_id_type.as_str(), target.receive_id.as_str()),
+        ("open_id", "sender@im.wechat")
     );
 }
 
@@ -676,7 +677,7 @@ pub(super) fn agent_reply_collects_remote_file_attachments_from_explicit_links()
 }
 
 #[test]
-pub(super) fn agent_reply_target_keeps_feishu_owner_boundary() {
+pub(super) fn agent_reply_target_uses_feishu_chat_id_for_event_channel() {
     let mut provider = test_provider();
     provider.owner_open_id = Some("owner-ou".to_string());
     let event = ImEvent {
@@ -694,9 +695,58 @@ pub(super) fn agent_reply_target_keeps_feishu_owner_boundary() {
         raw_digest: None,
     };
 
+    let target = agent_reply_target_ref(&provider, &event).expect("reply target");
     assert_eq!(
-        agent_reply_target_id(&provider, &event).as_deref(),
-        Some("owner-ou")
+        (target.receive_id_type.as_str(), target.receive_id.as_str()),
+        ("chat_id", "chat-1")
+    );
+
+    let progress_target = build_agent_reply_target(
+        &provider,
+        &event,
+        "__agent_progress__",
+        "Agent Progress",
+        "interactive",
+    )
+    .expect("progress target");
+    assert_eq!(progress_target.receive_id_type, "chat_id");
+    assert_eq!(progress_target.receive_id, "chat-1");
+
+    let plan_target = build_agent_reply_target(
+        &provider,
+        &event,
+        "__plan_card__",
+        "Plan Card",
+        "interactive",
+    )
+    .expect("plan target");
+    assert_eq!(plan_target.receive_id_type, "chat_id");
+    assert_eq!(plan_target.receive_id, "chat-1");
+}
+
+#[test]
+pub(super) fn agent_reply_target_uses_feishu_open_id_without_chat_id() {
+    let mut provider = test_provider();
+    provider.owner_open_id = Some("owner-ou".to_string());
+    let event = ImEvent {
+        event_id: "evt-1".to_string(),
+        provider_id: provider.id.clone(),
+        provider_type: ImProviderType::Feishu,
+        event_type: "message.receive".to_string(),
+        source: crate::im_gateway::types::ImEventSource {
+            chat_id: None,
+            user_id: Some("sender-ou".to_string()),
+            message_id: Some("msg-1".to_string()),
+        },
+        message: None,
+        received_at: 0,
+        raw_digest: None,
+    };
+
+    let target = agent_reply_target_ref(&provider, &event).expect("reply target");
+    assert_eq!(
+        (target.receive_id_type.as_str(), target.receive_id.as_str()),
+        ("open_id", "sender-ou")
     );
 }
 

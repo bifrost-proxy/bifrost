@@ -1082,3 +1082,33 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   - 停止临时 Bifrost 进程和 mock iLink 进程。
   - 删除临时 `BIFROST_DATA_DIR`。
 - **执行记录（2026-06-08）**: PASS — 执行 `SKIP_FRONTEND_BUILD=1 e2e-tests/tests/test_weixin_provider_e2e.sh`，脚本使用 mock iLink 和临时数据目录完成微信扫码登录、连接、收发消息；删除 `weixin-mock` 后等待 7.2 秒，`Bearer mock-token` 的 `getupdates` 计数未持续增长，且 provider API 已返回 404；随后创建 `event_connection_enabled=false` 的 `weixin-disabled` 并重启同一数据目录，等待 4.2 秒后 mock 日志中 `Bearer disabled-token` 计数为 0。
+
+### TC-IMG-67: Feishu Agent 进度卡发送到来源 Chat
+
+- **前置条件**:
+  - 工作目录为项目根目录。
+  - 不启动或重启本机默认 `9900` 服务，不修改系统代理。
+  - 本机可执行 Rust 单元测试。
+  - 准备一个 Feishu Provider 配置，`owner_open_id=owner-ou`；模拟收到 owner 在会话 `chat-1` 中发送的文本消息，事件来源包含 `chat_id=chat-1`、`user_id=sender-ou`、`message_id=msg-1`。
+- **操作步骤**:
+  1. 执行 Feishu / Weixin 回复目标回归测试：
+     ```bash
+     cargo test -p bifrost-admin agent_reply_target_ --lib -- --nocapture
+     ```
+  2. 执行外部 Runner Feishu 默认进度卡 delivery mode 回归测试：
+     ```bash
+     cargo test -p bifrost-admin feishu_codex_like_external_runner_defaults_to_progress_card_without_channel_override --lib -- --nocapture
+     ```
+  3. 检查实现中内置 Agent progress target / plan target 和外部 CLI Runner progress target 都通过 `build_agent_reply_target` 构造：
+     ```bash
+     rg -n "build_agent_reply_target\\(|__agent_progress__|__plan_card__|receive_id_type" crates/bifrost-admin/src/handlers/im_gateway
+     ```
+- **预期结果**:
+  - 第 1 步 `agent_reply_target_uses_feishu_chat_id_for_event_channel` 通过，断言 Feishu 进度卡目标为 `receive_id_type=chat_id`、`receive_id=chat-1`。
+  - 第 1 步 `agent_reply_target_uses_feishu_open_id_without_chat_id` 通过，断言缺少 `chat_id` 时仍回退到 `open_id`。
+  - 第 1 步 `agent_reply_target_uses_weixin_sender_instead_of_owner` 通过，确认非 Feishu 回复目标不漂移到 owner。
+  - 第 2 步通过，确认 Feishu + Codex/Trae 类外部 Runner 仍默认启用 progress card，而不是等待最终输出后才回复。
+  - 第 3 步能看到内置 Agent 与外部 CLI Runner 的 `__agent_progress__` 以及内置 Agent 的 `__plan_card__` 都复用 `build_agent_reply_target`，不存在 hardcoded owner open_id 的实时卡片路径。
+- **清理步骤**:
+  - 无需清理；测试不启动服务、不创建临时数据目录、不发送真实 IM 消息。
+- **执行记录（2026-06-09）**: PASS — 执行 `cargo test -p bifrost-admin agent_reply_target_ --lib -- --nocapture`，3 个回复目标用例通过，覆盖 Feishu `chat_id` 优先、Feishu `open_id` 回退和 Weixin 来源目标保持；执行 `cargo test -p bifrost-admin feishu_codex_like_external_runner_defaults_to_progress_card_without_channel_override --lib -- --nocapture`，1 个 delivery mode 用例通过；执行 `rg -n "build_agent_reply_target\\(|__agent_progress__|__plan_card__|receive_id_type" crates/bifrost-admin/src/handlers/im_gateway`，确认内置 Agent 与外部 CLI Runner 的进度卡目标以及内置 Agent plan card 目标均通过统一 helper 构造。

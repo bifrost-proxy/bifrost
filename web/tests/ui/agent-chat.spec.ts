@@ -894,6 +894,137 @@ test("AI Agent Chat slash runner call selects a runner and renders the result", 
   );
 });
 
+test("AI Agent Chat marks runner-call finished failures as failed", async ({
+  page,
+}) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ sessions: [] }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "bifrost_agent",
+        runners: {
+          codex: { enabled: true, adapter: "codex" },
+        },
+        channels: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        content: "",
+        work_dir: "/tmp/default-agent-workspace",
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/chat/runner-calls/stream", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/x-ndjson",
+      body:
+        '{"eventType":"runner_call_started","callId":"call-failed","childSessionKey":"runner-call:admin-chat:test:codex","targetRunnerId":"codex","targetAdapter":"codex"}\n' +
+        '{"eventType":"runner_call_finished","callId":"call-failed","status":"failed","response":"","targetRunnerId":"codex","targetAdapter":"codex"}\n',
+    });
+  });
+
+  await openPage(page, "ai?aiSection=agent-chat&agentSection=chat");
+  await page.getByTestId("agent-chat-input").fill("/");
+  await page
+    .getByTestId("agent-chat-slash-runner-option")
+    .filter({ hasText: "codex" })
+    .click();
+  await page.getByTestId("agent-chat-input").fill("Run failing codex");
+  await page.getByTestId("agent-chat-send").click();
+
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Runner call failed with status: failed",
+  );
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(/failed|失败/);
+  await expect(page.getByTestId("agent-chat-messages")).not.toContainText(
+    "Runner is running...",
+  );
+});
+
+test("AI Agent Chat marks external runner finished failures as failed", async ({
+  page,
+}) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ sessions: [] }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        content: "",
+        work_dir: "/tmp/default-agent-workspace",
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "bifrost_agent",
+        runners: {
+          codex: { enabled: true, adapter: "codex" },
+        },
+        channels: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/chat/stream", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/x-ndjson",
+      body:
+        '{"eventType":"run_started","content":"started"}\n' +
+        '{"eventType":"assistant_delta","content":"partial output"}\n' +
+        '{"eventType":"run_finished","status":"failed","error":"Codex exploded"}\n',
+    });
+  });
+
+  await openPage(page, "ai?aiSection=agent-chat&agentSection=chat");
+  await page.getByTestId("agent-chat-new").click();
+  await page.getByTestId("agent-chat-new-runner").click();
+  await page
+    .locator(".ant-select-dropdown .ant-select-item-option-content")
+    .filter({ hasText: "codex" })
+    .last()
+    .click();
+  await page.getByRole("button", { name: "Create" }).click();
+  await expect(page.getByTestId("agent-chat-runner-tag")).toContainText("codex");
+
+  await page.getByTestId("agent-chat-input").fill("Run failing codex");
+  await page.getByTestId("agent-chat-send").click();
+
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Codex exploded",
+  );
+  await expect(page.getByTestId("agent-chat-state-tag")).toContainText("Error");
+  await expect(page.getByTestId("agent-chat-thread-list")).not.toContainText("running");
+  await expect(page.getByTestId("agent-chat-messages")).not.toContainText(
+    "Codex should not finish",
+  );
+});
+
 test("AI Agent Chat keeps plan content compact and scrolls after five steps", async ({
   page,
 }) => {

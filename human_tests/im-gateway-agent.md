@@ -2727,3 +2727,94 @@ rm -rf ./.bifrost-test
 - **清理步骤**:
   - 停止临时 Bifrost 服务；删除临时数据目录。
 - **执行记录（2026-06-08）**: PASS — 创建用例后立即执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin im_runner_command --lib -- --nocapture`，覆盖 `/runner` 解析、列表输出、未知 Runner、切换外部 Runner、切回内置 Runner、Provider runner 持久化和 idle session 重置；执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin im_help_includes_im_only_commands_without_dropping_builtins --lib -- --nocapture`，验证 IM `/help` 同步展示 `/runner [Runner]`。
+
+### TC-IMA-145: WebUI Slash Runner Call 失败状态不误报成功
+
+- **前置条件**:
+  - 使用当前源码启动 WebUI，或使用 Playwright mock `/_bifrost/api/im-gateway/chat/runner-calls/stream`。
+  - Agent Chat runner 配置中存在 `codex` 外部 runner。
+  - 当前会话未运行任务，输入框可用。
+- **操作步骤**:
+  1. 打开 `/_bifrost/ai?aiSection=agent-chat&agentSection=chat`。
+  2. 在输入框输入 `/`，从 Slash Runner 面板选择 `codex`。
+  3. 输入任意只读任务并点击 Send。
+  4. 让 runner-call stream 返回：
+     ```json
+     {"eventType":"runner_call_finished","status":"failed","response":""}
+     ```
+  5. 观察 user 侧 `Run with codex` chip、assistant 侧 `Runner codex` chip 和 assistant 正文。
+- **预期结果**:
+  - user 侧和 assistant 侧 runner-call chip 都显示 `failed`，不得显示 `success`。
+  - assistant 正文替换为明确错误文本，例如 `Runner call failed with status: failed`。
+  - 页面不再保留 `Runner is running...` 作为最终正文。
+  - 输入框恢复可用，后续仍可继续发起消息。
+- **清理步骤**:
+  - 删除 Playwright 临时 test-results；如启动了临时 Bifrost，停止对应进程并删除临时数据目录。
+- **执行记录（2026-06-09）**: PASS — 执行 `cd web && BIFROST_UI_TEST_RUN_ID=manual-9913 BIFROST_UI_TEST_PORT=9913 BACKEND_PORT=9913 WEB_PORT=5179 PROXY_URL=http://127.0.0.1:9913 ADMIN_STATUS_URL=http://127.0.0.1:9913/_bifrost/api/proxy/address ADMIN_API_BASE=http://127.0.0.1:9913/_bifrost/api BIFROST_DATA_DIR=/tmp/bifrost-agent-webui-YLXpWz BIFROST_UI_TEST_REPO_ROOT=/Users/eden/work/github/bifrost BIFROST_UI_TEST_RUNTIME_DIR=/tmp/bifrost-ui-manual-9913 BIFROST_UI_TEST_TARGET_DIR=/tmp/bifrost-ui-unused-target BIFROST_UI_TEST_PID_FILE=/tmp/bifrost-ui-manual-9913/backend.pid BIFROST_UI_TEST_TRAFFIC_PID_FILE=/tmp/bifrost-ui-manual-9913/traffic.pid BIFROST_UI_TEST_LOG_FILE=/tmp/bifrost-ui-manual-9913/backend.log pnpm test:ui tests/ui/agent-chat.spec.ts -g "marks runner-call finished failures as failed"`，1 个 Playwright 用例通过。测试复用当前 9913 后端避免重新 cargo build，mock runner-call stream 返回 `status=failed`，断言页面展示 failed 与错误文本且不再展示 `Runner is running...`。
+
+### TC-IMA-146: External Runner 底层 SSE 停止与结果一致性
+
+- **前置条件**:
+  - 使用当前源码和临时数据目录启动 Bifrost，例如 `BIFROST_DATA_DIR=$(mktemp -d /tmp/bifrost-sse-api-final-XXXXXX) BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 SKIP_FRONTEND_BUILD=1 cargo run --bin bifrost -- start -p 9914 --unsafe-ssl --skip-cert-check --no-system-proxy`。
+  - 通过 `PATCH /_bifrost/api/im-gateway/chat/config` 加载真实 external runner 配置，至少包含 `codex`、`traex`、`abc/chatgpt_web` 三个 enabled runner。
+  - 不使用 mock runner，不打开 WebUI，所有判断来自底层 API、run detail、session projection 和进程检查。
+- **操作步骤**:
+  1. 对 `codex` 调用 `POST /_bifrost/api/im-gateway/chat/stream`，body 包含 `runnerId=codex`、唯一 `sessionKey`、`workDir=/Users/eden/work/github/bifrost` 和简单只读 prompt。
+  2. 读取 NDJSON 事件、`GET /_bifrost/api/im-gateway/chat/runs/{runId}` 和 `GET /_bifrost/api/im-gateway/agent/sessions/all`。
+  3. 对 `traex` 调用同一个 stream 接口，等待 run 目录出现后调用 `POST /_bifrost/api/im-gateway/chat/runs/{runId}/stop`。
+  4. 检查 stream terminal event、run detail response、session projection 和对应 run 进程。
+  5. 对 `abc/chatgpt_web` 调用同一个 stream 接口，等待 browser/run 目录出现后调用 stop。
+  6. 检查 stream terminal event、run detail response、session projection 和临时 browser profile 进程。
+- **预期结果**:
+  - `codex` 真实配置异常时，stream 至少返回 `run_started` 和 `run_finished(status=failed)`，session projection 为 `run_state=failed`，不得停留 running。
+  - `traex` 被 stop 后，stream 返回 `run_finished(status=stopped)`，response 为 `External CLI run was stopped by request.`，run detail response 与 stream 一致，session projection 结束且 `run_state=failed`，对应 run 进程无残留。
+  - `abc/chatgpt_web` 被 stop 后，stream 返回 `run_failed` 和 `run_finished(status=stopped)`，response 为 `ChatGPT Web run was stopped by request.`，run detail response 与 stream 一致，session projection 结束且 `run_state=failed`，临时 browser profile 无残留进程。
+  - 所有判断在接口层完成，UI 层只消费这些状态，不应承担修正底层状态的职责。
+- **清理步骤**:
+  - 停止临时 Bifrost 服务。
+  - 删除 `/tmp/bifrost-sse-api-*` 临时数据目录。
+  - 确认没有指向临时数据目录的 `traex` 或 Edge 进程残留。
+- **执行记录（2026-06-09）**: PASS — 使用 9914 隔离服务和真实 runner 配置执行。`codex` 返回 `run_started -> run_finished(status=failed)`，run detail stderr 显示 `service_tier=default` 配置错误，session projection 为 failed。`traex` 在 stop 后返回 `run_started -> status -> run_finished(status=stopped)`，run detail response 为 `External CLI run was stopped by request.`，session projection ended/failed，进程检查无对应 run 进程。`abc/chatgpt_web` 在 stop 后返回 `run_started -> run_failed -> run_finished(status=stopped)`，run detail response 为 `ChatGPT Web run was stopped by request.`，session projection ended/failed，临时 browser profile 进程检查无残留。
+
+### TC-IMA-147: External Runner 失败 stderr 必须进入可见结果
+
+- **前置条件**:
+  - 使用当前源码和临时数据目录启动 Bifrost，例如 `BIFROST_DATA_DIR=$(mktemp -d /tmp/bifrost-full-runner-XXXXXX) BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 SKIP_FRONTEND_BUILD=1 cargo run --bin bifrost -- start -p 9915 --unsafe-ssl --skip-cert-check --no-system-proxy`。
+  - 通过 `PATCH /_bifrost/api/im-gateway/chat/config` 加载真实 external runner 配置，至少包含 `codex`。
+  - 本机 Codex CLI 存在一个真实失败场景，例如 `~/.codex/config.toml` 中 `service_tier=default` 会被当前 Codex CLI 解析为非法值。
+- **操作步骤**:
+  1. 对 `codex` 调用 `POST /_bifrost/api/im-gateway/chat/stream`，body 包含 `runnerId=codex`、唯一 `sessionKey`、`workDir=/Users/eden/work/github/bifrost` 和只读 review prompt。
+  2. 读取 stream terminal event，并记录 run id。
+  3. 调用 `GET /_bifrost/api/im-gateway/chat/runs/{runId}`。
+  4. 调用 `GET /_bifrost/api/im-gateway/agent/sessions/{sessionKey}` 并打开 `/_bifrost/ai?aiSection=agent-chat&agentSection=chat` 查看对应 Codex 线程。
+- **预期结果**:
+  - `result.json.response` 不为空，包含 stderr 中的失败摘要，例如 `Error loading config.toml: unknown variant`。
+  - run detail `response` 与 `result.json.response` 一致，不回退为空 stdout。
+  - session detail 中除用户消息外，还能看到失败原因或等价错误摘要。
+  - WebUI Codex 线程显示 `Runner: codex` 和 `Error`，正文区域展示同一失败原因，而不是只有用户消息、Tokens 0 或空白结果。
+- **清理步骤**:
+  - 停止临时 Bifrost 服务。
+  - 删除 `/tmp/bifrost-full-runner-*` 临时数据目录。
+  - 确认没有指向临时数据目录的 Codex/Traex 进程残留。
+- **执行记录（2026-06-09）**: PASS — 初次真实验证在 9915 隔离服务发现 Codex 线程只显示 `Runner: codex / Error`，session detail 只有用户消息，run `result.json.response` 为空而 `cli.stderr.log` 含 `Error loading config.toml: unknown variant default`。修复后重启当前源码临时服务并复跑真实 `codex` stream：`run_finished(status=failed)` 的 `response`、run detail response、`result.json.response` 和 session detail assistant 消息均包含 `Error loading config.toml: unknown variant default, expected fast or flex in service_tier`；Playwright 打开 `/_bifrost/ai?aiSection=agent-chat&agentSection=chat` 验证 WebUI 显示 `Runner: codex / Error` 和同一失败原因，console error 为空，截图保存到 `/tmp/bifrost-fixed-codex-ui.png`。
+
+### TC-IMA-148: Web 主 External Runner terminal failed 状态不得显示为 running/success
+
+- **前置条件**:
+  - 使用当前源码启动 Bifrost 或 Playwright 管理端测试环境。
+  - WebUI `Agent Chat` 可选择 external runner，例如 `codex`。
+- **操作步骤**:
+  1. 在 WebUI 创建一个 `codex` external runner 新会话。
+  2. 触发 `POST /_bifrost/api/im-gateway/chat/stream`，使 stream 返回 NDJSON：
+     - `{"eventType":"run_started","content":"started"}`
+     - `{"eventType":"assistant_delta","content":"partial output"}`
+     - `{"eventType":"run_finished","status":"failed","error":"Codex exploded"}`
+  3. 观察消息区、顶部状态 tag 和右侧线程列表。
+- **预期结果**:
+  - 消息区展示失败原因 `Codex exploded`。
+  - 顶部状态 tag 显示 `Error`。
+  - 右侧线程列表不再显示 `running`，也没有绿色运行态残留。
+  - 不把该 terminal failed event 当作成功 `onFinal` 完成。
+- **清理步骤**:
+  - 关闭测试页面和临时服务。
+- **执行记录（2026-06-09）**: PASS — Playwright focused test `AI Agent Chat marks external runner finished failures as failed` 先复现失败：消息区显示 `Codex exploded`，但顶部/线程状态仍残留 running/processed 语义；修复后复跑通过，确认失败原因可见、`agent-chat-state-tag` 为 `Error`、线程列表不再包含 `running`。

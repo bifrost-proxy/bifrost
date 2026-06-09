@@ -1866,6 +1866,50 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 - `human_tests/im-gateway.md`
 - `human_tests/readme.md`
 
+## 2026-06-09 Feishu Agent 回复目标跟随来源 Chat
+
+### 问题
+
+Feishu 通道消息触发 Agent 时，事件处理链路会先对原消息添加 OK reaction；这一步使用原始 `message_id`，所以用户能在当前会话看到 OK。随后 Agent 进度卡和最终回复通过 `ImTarget` 发送，旧逻辑优先使用 Provider 的 `owner_open_id` 并固定 `receive_id_type=open_id`。当消息来自群聊或具体会话且事件里带有 `chat_id` 时，卡片可能被发到 owner 私聊或使用错误目标类型，当前会话就只剩 OK，不显示实时进度卡。
+
+### 实现逻辑
+
+- 新增 `AgentReplyTargetRef`，统一解析 Agent 回复、诊断图片、进度卡和 plan card 目标。
+- Feishu Provider 优先使用事件来源 `chat_id`，并设置 `receive_id_type=chat_id`，确保进度卡和最终回复回到触发消息所在会话。
+- Feishu 事件缺少 `chat_id` 时回退到事件 `user_id`，再回退到 Provider `owner_open_id`，保留私聊和旧数据兼容。
+- Weixin / WeChat / Webhook 保持既有发送语义，仍按来源会话、来源用户、owner 的顺序解析，目标类型保持 `open_id`。
+- 内置 Bifrost Agent 的进度卡、plan card 与外部 CLI Runner 的进度卡都改为复用 `build_agent_reply_target`，避免一条路径修复而另一条路径仍硬编码 owner open_id。
+- 只调整回复目标选择，不改变 Feishu owner 安全过滤：非 owner 的 Feishu 消息仍会在进入 Agent 执行前被拒绝。
+
+### 测试方案
+
+- 单元测试：`agent_reply_target_uses_feishu_chat_id_for_event_channel` 断言 Feishu 事件带 `chat_id` 时进度卡目标为 `receive_id_type=chat_id` 和来源 `chat_id`。
+- 单元测试：`agent_reply_target_uses_feishu_open_id_without_chat_id` 断言缺少 `chat_id` 时仍可通过 `open_id` 回复。
+- 单元测试：`agent_reply_target_uses_weixin_sender_instead_of_owner` 兜底非 Feishu 目标解析不回退 owner。
+- 单元测试：`feishu_codex_like_external_runner_defaults_to_progress_card_without_channel_override` 继续覆盖 Codex / Trae 默认使用 Feishu progress card delivery mode。
+- 真实场景测试：新增并执行 `human_tests/im-gateway.md` 的 `TC-IMG-67`，覆盖 Feishu Agent 进度卡跟随来源 `chat_id`。
+
+### Review/Fix/Test 闭环方案
+
+- 第 1 轮：复核线上现象与代码路径，检查 OK reaction、进度卡启动和最终回复三条路径的目标来源；运行 focused unit，修复 match 覆盖和格式化问题。
+- 第 2 轮：复查最新 diff、human_tests 索引和非 Feishu 回归边界；复跑 focused unit、delivery-mode 测试、fmt/clippy 和 workspace all-features 测试。
+
+### 校验要求
+
+```bash
+cargo test -p bifrost-admin agent_reply_target_ --lib -- --nocapture
+cargo test -p bifrost-admin feishu_codex_like_external_runner_defaults_to_progress_card_without_channel_override --lib -- --nocapture
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+```
+
+### 文档更新
+
+- `design/im-gateway.md`
+- `human_tests/im-gateway.md`
+- `human_tests/readme.md`
+
 ## 2026-06-08 Provider 删除/禁用停止长连接轮询
 
 ### 问题

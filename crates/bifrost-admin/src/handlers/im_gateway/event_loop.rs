@@ -979,7 +979,6 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
         .as_ref()
         .map(crate::im_gateway::session_state::metadata_from_state)
         .unwrap_or_default();
-    let target_open_id = agent_reply_target_id(ctx.provider, ctx.event).unwrap_or_default();
 
     loop {
         if let Some(command) = parse_im_cwd_command(&current_message) {
@@ -1073,20 +1072,17 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
         if matches!(
             delivery_mode,
             crate::im_gateway::external_cli::ExternalCliDeliveryMode::ProgressCard
-        ) && !target_open_id.is_empty()
-        {
-            let progress_target = crate::im_gateway::types::ImTarget {
-                id: "__agent_progress__".to_string(),
-                provider_id: ctx.provider.id.clone(),
-                display_name: "Agent Progress".to_string(),
-                enabled: true,
-                receive_id_type: "open_id".to_string(),
-                receive_id: target_open_id.to_string(),
-                default_msg_type: "interactive".to_string(),
-                created_at: 0,
-                updated_at: 0,
-            };
-            if let Some(feishu) = ctx.client.feishu() {
+        ) {
+            if let (Some(progress_target), Some(feishu)) = (
+                build_agent_reply_target(
+                    ctx.provider,
+                    ctx.event,
+                    "__agent_progress__",
+                    "Agent Progress",
+                    "interactive",
+                ),
+                ctx.client.feishu(),
+            ) {
                 let progress_result = if ctx
                     .progress_registry
                     .rollover_existing(&input.session_key, &current_message)

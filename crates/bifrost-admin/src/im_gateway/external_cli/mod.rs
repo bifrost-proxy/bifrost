@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::timeout;
+use tokio::time::sleep;
 
 const DEFAULT_RUNTIME: &str = "external_cli";
 const DEFAULT_ADAPTER: &str = "codex";
@@ -983,6 +983,7 @@ impl ExternalCliRuntime {
                 session_key_for_stop.as_deref(),
                 spec,
                 prompt,
+                stop_marker_path.clone(),
                 progress_tx,
             )
             .await?;
@@ -1010,12 +1011,21 @@ impl ExternalCliRuntime {
             } else {
                 final_response(&last_message_path, &stdout_text, &events).await?
             };
+            let status = if was_stopped {
+                ExternalCliRunStatus::Stopped
+            } else {
+                command_output.status
+            };
+            let stderr_text = String::from_utf8_lossy(&command_output.stderr).to_string();
+            let response = visible_terminal_response(
+                status.clone(),
+                response,
+                &stdout_text,
+                &stderr_text,
+                &events,
+            );
             AdapterRunOutput {
-                status: if was_stopped {
-                    ExternalCliRunStatus::Stopped
-                } else {
-                    command_output.status
-                },
+                status,
                 exit_code: if was_stopped {
                     None
                 } else {
@@ -1163,13 +1173,16 @@ pub async fn read_run_detail(
     let events = read_events_jsonl(&events_path).await?;
     let stdout = read_text_or_default(&stdout_path).await?;
     let stderr = read_text_or_default(&stderr_path).await?;
-    let response = final_response(&last_message_path, &stdout, &events).await?;
-    let metadata = match read_json(&result_path).await {
-        Ok(value) => serde_json::from_value::<ExternalCliRunResult>(value)
-            .map(|result| result.metadata)
-            .unwrap_or_default(),
-        Err(_) => BTreeMap::new(),
+    let result = match read_json(&result_path).await {
+        Ok(value) => serde_json::from_value::<ExternalCliRunResult>(value).ok(),
+        Err(_) => None,
     };
+    let response = result
+        .as_ref()
+        .map(|result| result.response.clone())
+        .filter(|response| !response.trim().is_empty())
+        .unwrap_or(final_response(&last_message_path, &stdout, &events).await?);
+    let metadata = result.map(|result| result.metadata).unwrap_or_default();
 
     Ok(ExternalCliRunDetail {
         run_id: run_id.to_string(),
@@ -1595,6 +1608,7 @@ async fn run_command(
     session_key: Option<&str>,
     spec: CommandSpec,
     prompt: String,
+    stop_marker_path: PathBuf,
     progress_tx: Option<mpsc::UnboundedSender<ExternalCliProgressEvent>>,
 ) -> Result<CommandOutput, String> {
     let mut command = Command::new(&spec.executable);
@@ -1641,14 +1655,24 @@ async fn run_command(
     let stdout_task = tokio::spawn(read_stdout_events(stdout, progress_tx));
     let stderr_task = tokio::spawn(read_stderr_lines(stderr));
 
-    let wait_result = if let Some(timeout_secs) = spec.timeout_secs {
-        timeout(Duration::from_secs(timeout_secs), child.wait()).await
-    } else {
-        Ok(child.wait().await)
+    let wait_result = {
+        let mut wait_future = std::pin::pin!(child.wait());
+        if let Some(timeout_secs) = spec.timeout_secs {
+            tokio::select! {
+                result = &mut wait_future => CommandWaitOutcome::Exited(result),
+                _ = sleep(Duration::from_secs(timeout_secs)) => CommandWaitOutcome::TimedOut,
+                _ = wait_for_stop_marker(stop_marker_path.clone()) => CommandWaitOutcome::Stopped,
+            }
+        } else {
+            tokio::select! {
+                result = &mut wait_future => CommandWaitOutcome::Exited(result),
+                _ = wait_for_stop_marker(stop_marker_path.clone()) => CommandWaitOutcome::Stopped,
+            }
+        }
     };
 
     match wait_result {
-        Ok(Ok(exit_status)) => {
+        CommandWaitOutcome::Exited(Ok(exit_status)) => {
             let (stdout, events) = stdout_task
                 .await
                 .map_err(|error| format!("join external cli stdout task failed: {error}"))??;
@@ -1670,42 +1694,96 @@ async fn run_command(
                 events,
             })
         }
-        Ok(Err(error)) => {
+        CommandWaitOutcome::Exited(Err(error)) => {
             ACTIVE_RUNS.remove(run_id);
             remove_active_sessions_for_run(run_id);
             Err(format!("wait external cli failed: {error}"))
         }
-        Err(_) => {
-            // Timeout: kill the entire process group
-            if pid != 0 {
-                if let Err(error) = terminate_process(pid) {
-                    tracing::warn!(pid, error = %error, "failed to terminate timed-out process group");
-                }
-            }
-            let _ = child.kill().await;
-            let (stdout, events) = stdout_task
-                .await
-                .map_err(|error| format!("join external cli stdout task failed: {error}"))??;
-            let mut stderr = stderr_task
-                .await
-                .map_err(|error| format!("join external cli stderr task failed: {error}"))??;
-            stderr.extend_from_slice(
+        CommandWaitOutcome::TimedOut => {
+            collect_interrupted_command_output(
+                run_id,
+                pid,
+                child,
+                stdout_task,
+                stderr_task,
+                ExternalCliRunStatus::TimedOut,
                 format!(
                     "external cli timed out after {} seconds\n",
                     spec.timeout_secs.unwrap_or_default()
-                )
-                .as_bytes(),
-            );
-            ACTIVE_RUNS.remove(run_id);
-            remove_active_sessions_for_run(run_id);
-            Ok(CommandOutput {
-                status: ExternalCliRunStatus::TimedOut,
-                exit_code: None,
-                stdout,
-                stderr,
-                events,
-            })
+                ),
+            )
+            .await
         }
+        CommandWaitOutcome::Stopped => {
+            collect_interrupted_command_output(
+                run_id,
+                pid,
+                child,
+                stdout_task,
+                stderr_task,
+                ExternalCliRunStatus::Stopped,
+                "external cli stopped by request\n".to_string(),
+            )
+            .await
+        }
+    }
+}
+
+async fn collect_interrupted_command_output(
+    run_id: &str,
+    pid: u32,
+    mut child: tokio::process::Child,
+    stdout_task: ExternalCliStdoutTask,
+    stderr_task: ExternalCliStderrTask,
+    status: ExternalCliRunStatus,
+    terminal_message: String,
+) -> Result<CommandOutput, String> {
+    let stopped = matches!(status, ExternalCliRunStatus::Stopped);
+    if pid != 0 {
+        if let Err(error) = terminate_process(pid) {
+            tracing::warn!(
+                pid,
+                stopped,
+                error = %error,
+                "failed to terminate external cli process group"
+            );
+        }
+    }
+    let _ = child.kill().await;
+    let (stdout, events) = stdout_task
+        .await
+        .map_err(|error| format!("join external cli stdout task failed: {error}"))??;
+    let mut stderr = stderr_task
+        .await
+        .map_err(|error| format!("join external cli stderr task failed: {error}"))??;
+    stderr.extend_from_slice(terminal_message.as_bytes());
+    ACTIVE_RUNS.remove(run_id);
+    remove_active_sessions_for_run(run_id);
+    Ok(CommandOutput {
+        status,
+        exit_code: None,
+        stdout,
+        stderr,
+        events,
+    })
+}
+
+enum CommandWaitOutcome {
+    Exited(std::io::Result<std::process::ExitStatus>),
+    TimedOut,
+    Stopped,
+}
+
+type ExternalCliStdoutTask =
+    tokio::task::JoinHandle<Result<(Vec<u8>, Vec<ExternalCliProgressEvent>), String>>;
+type ExternalCliStderrTask = tokio::task::JoinHandle<Result<Vec<u8>, String>>;
+
+async fn wait_for_stop_marker(path: PathBuf) {
+    loop {
+        if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            return;
+        }
+        sleep(Duration::from_millis(200)).await;
     }
 }
 
@@ -2284,6 +2362,38 @@ async fn final_response(
         return Ok(event.content.trim().to_string());
     }
     Ok(stdout_text.trim().to_string())
+}
+
+fn visible_terminal_response(
+    status: ExternalCliRunStatus,
+    response: String,
+    stdout_text: &str,
+    stderr_text: &str,
+    events: &[ExternalCliProgressEvent],
+) -> String {
+    if status == ExternalCliRunStatus::Succeeded || !response.trim().is_empty() {
+        return response;
+    }
+    if let Some(event) = events.iter().rev().find(|event| {
+        event.event_type == ExternalCliProgressEventType::RunFailed
+            && !event.content.trim().is_empty()
+    }) {
+        return event.content.trim().to_string();
+    }
+    let stderr = stderr_text.trim();
+    if !stderr.is_empty() {
+        return stderr.to_string();
+    }
+    let stdout = stdout_text.trim();
+    if !stdout.is_empty() {
+        return stdout.to_string();
+    }
+    match status {
+        ExternalCliRunStatus::Failed => "External CLI run failed.".to_string(),
+        ExternalCliRunStatus::Stopped => "External CLI run was stopped by request.".to_string(),
+        ExternalCliRunStatus::TimedOut => "External CLI run timed out.".to_string(),
+        ExternalCliRunStatus::Succeeded => response,
+    }
 }
 
 async fn read_text_or_default(path: &Path) -> Result<String, String> {

@@ -1692,13 +1692,13 @@ export default function AgentChatSection() {
         ...prev.filter((thread) => thread.session_key !== sessionKey),
       ]);
     });
+    let assistantSegmentId = assistantId;
+    let assistantSegmentIndex = 0;
+    let assistantSegmentHasText = false;
+    let assistantSegmentHasSteps = silentCommand;
+    let assistantSegmentHasProposedPlan = false;
+    let nextAssistantDeltaStartsSegment = false;
     try {
-      let assistantSegmentId = assistantId;
-      let assistantSegmentIndex = 0;
-      let assistantSegmentHasText = false;
-      let assistantSegmentHasSteps = silentCommand;
-      let assistantSegmentHasProposedPlan = false;
-      let nextAssistantDeltaStartsSegment = false;
 
       const appendAssistantSegment = (initialContent = "") => {
         const previousSegmentId = assistantSegmentId;
@@ -2107,7 +2107,7 @@ export default function AgentChatSection() {
       }));
       setMessages((prev) =>
         prev.map((message) =>
-          message.id === assistantId
+          message.id === assistantSegmentId
             ? silentCommand
               ? {
                   ...message,
@@ -2125,8 +2125,34 @@ export default function AgentChatSection() {
                     },
                   ],
                 }
-              : { ...message, content: text }
+              : {
+                  ...message,
+                  content: text,
+                  processSteps: [
+                    ...(message.processSteps || []),
+                    {
+                      type: "status",
+                      summary: "Agent run failed",
+                      status: "failed",
+                      result: text,
+                    },
+                  ],
+                }
             : message,
+        ),
+      );
+      setThreads((prev) =>
+        prev.map((thread) =>
+          thread.session_key === sessionKey
+            ? {
+                ...thread,
+                status: "ended",
+                running: false,
+                state: "failed",
+                run_state: "failed",
+                last_active_time: Math.floor(Date.now() / 1000),
+              }
+            : thread,
         ),
       );
       antdMessage.error(text);
