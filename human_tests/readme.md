@@ -10,6 +10,7 @@
 
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
+| [default-tls-app-whitelist.md](./default-tls-app-whitelist.md) | 默认 TLS 应用白名单 | 3 | 持久化配置默认值、代理运行时默认值和真实临时服务 Admin API 返回值均只包含常见浏览器模式，默认不包含 Codex |
 | [cli-start-stop-status.md](./cli-start-stop-status.md) | CLI 服务管理 | 30 | start/stop/status 命令，含守护进程、自定义端口、TLS 选项、规则加载、SOCKS5、LAN 访问、代理认证、status 顶部代理能力/TLS 边界概览、默认端口规则摘要分区、status 活跃规则摘要，以及 listener 失败退出、daemon readiness、daemon CA 检查和 daemon stop zombie 状态回归 |
 | [cli-start-advanced.md](./cli-start-advanced.md) | CLI Start 高级参数 | 33 | 顶层 help 短链化、按场景组织的 CLI 快速开始、同一 Bifrost 服务服务多个应用/开发任务、Agent 协作开发业务 Skill 场景、完整 CLI 详细文档入口、全局 Values 推荐边界、TLS 拦截域名/应用排除与白名单、系统代理（默认启用、--no-system-proxy 禁用、异步收敛轮询、互斥校验）、CLI 代理环境变量、访问控制模式、Badge 注入、证书检查跳过、日志配置 |
 | [cli-rule-management.md](./cli-rule-management.md) | CLI 规则管理 | 45 | rule 子命令全覆盖：list/add/show/get/update/enable/disable/delete/rename/reorder/active/sync，含过滤器和 lineProps |

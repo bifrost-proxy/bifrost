@@ -196,6 +196,17 @@ pub struct ProxyConfig {
     pub enable_socks: bool,
 }
 
+pub const DEFAULT_APP_INTERCEPT_INCLUDE: &[&str] = &[
+    "Google Chrome*",
+    "Microsoft Edge*",
+    "*Safari*",
+    "*Firefox*",
+    "*Opera*",
+    "*Brave*",
+    "*Arc*",
+    "*Vivaldi*",
+];
+
 impl Default for ProxyConfig {
     fn default() -> Self {
         Self {
@@ -205,16 +216,10 @@ impl Default for ProxyConfig {
             intercept_exclude: Vec::new(),
             intercept_include: Vec::new(),
             app_intercept_exclude: Vec::new(),
-            app_intercept_include: vec![
-                "Google Chrome*".to_string(),
-                "Microsoft Edge*".to_string(),
-                "*Safari*".to_string(),
-                "*Firefox*".to_string(),
-                "*Opera*".to_string(),
-                "*Brave*".to_string(),
-                "*Arc*".to_string(),
-                "*Vivaldi*".to_string(),
-            ],
+            app_intercept_include: DEFAULT_APP_INTERCEPT_INCLUDE
+                .iter()
+                .map(|app| (*app).to_string())
+                .collect(),
             ip_intercept_exclude: Vec::new(),
             ip_intercept_include: Vec::new(),
             timeout_secs: 30,
@@ -2192,6 +2197,16 @@ mod tests {
         let server = ProxyServer::new(config.clone());
         assert_eq!(server.config().port, config.port);
         assert_eq!(server.config().host, config.host);
+    }
+
+    #[test]
+    fn test_proxy_config_default_app_intercept_include_excludes_codex() {
+        let config = ProxyConfig::default();
+        assert_eq!(config.app_intercept_include, DEFAULT_APP_INTERCEPT_INCLUDE);
+        assert!(!config
+            .app_intercept_include
+            .iter()
+            .any(|app| app.to_ascii_lowercase().contains("codex")));
     }
 
     #[test]
