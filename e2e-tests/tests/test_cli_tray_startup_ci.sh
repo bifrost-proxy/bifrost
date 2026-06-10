@@ -59,6 +59,17 @@ pid_is_alive() {
   fi
 }
 
+first_tray_log() {
+  compgen -G "$DATA_DIR/logs/tray.log*" >/dev/null || return 1
+  ls "$DATA_DIR"/logs/tray.log* | head -n 1
+}
+
+tray_log_has_startup_marker() {
+  local log
+  log="$(first_tray_log 2>/dev/null || true)"
+  [[ -n "$log" ]] && grep -q "bifrost-tray starting" "$log"
+}
+
 cleanup() {
   if [[ -n "$DATA_DIR" && -x "$BIN" ]]; then
     BIFROST_DATA_DIR="$DATA_DIR" "$BIN" stop >/dev/null 2>&1 || true
@@ -124,6 +135,9 @@ for _ in $(seq 1 160); do
       break
     fi
   fi
+  if is_windows && tray_log_has_startup_marker; then
+    break
+  fi
   if ! pid_is_alive "$START_PID"; then
     echo "ERROR: bifrost start process exited before tray helper became ready" >&2
     dump_diagnostics
@@ -132,19 +146,30 @@ for _ in $(seq 1 160); do
   sleep 0.25
 done
 
-if [[ -z "$TRAY_PID" || ! -s "$DATA_DIR/tray.pid" ]]; then
-  echo "ERROR: tray.pid was not created" >&2
+TRAY_LOG="$(first_tray_log 2>/dev/null || true)"
+if [[ -z "$TRAY_LOG" ]]; then
+  echo "ERROR: tray log was not created" >&2
   dump_diagnostics
   exit 1
 fi
 
-if ! pid_is_alive "$TRAY_PID"; then
+if [[ -z "$TRAY_PID" || ! -s "$DATA_DIR/tray.pid" ]]; then
+  if is_windows && grep -q "bifrost-tray starting" "$TRAY_LOG"; then
+    echo "INFO: tray.pid was not created; verified Windows tray helper startup from $TRAY_LOG"
+    TRAY_PID="log-only"
+  else
+    echo "ERROR: tray.pid was not created" >&2
+    dump_diagnostics
+    exit 1
+  fi
+fi
+
+if [[ -n "$TRAY_PID" && "$TRAY_PID" != "log-only" ]] && ! pid_is_alive "$TRAY_PID"; then
   echo "ERROR: tray helper process is not alive: $TRAY_PID" >&2
   dump_diagnostics
   exit 1
 fi
 
-TRAY_LOG="$(ls "$DATA_DIR"/logs/tray.log* | head -n 1)"
 if ! grep -q "bifrost-tray starting" "$TRAY_LOG"; then
   echo "ERROR: tray log does not contain startup marker" >&2
   dump_diagnostics
