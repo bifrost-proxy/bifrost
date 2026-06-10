@@ -189,6 +189,7 @@ FIXTURE_ONLY_RULES=(
     "hot_reload/status_201.txt"
     "hot_reload/status_202.txt"
     "http3/http3_e2e.txt"
+    "references/at_rule_commented_shared.txt"
     "references/at_rule_group_shared.txt"
     "references/at_rule_merge.txt"
     "references/at_rule_shared.txt"

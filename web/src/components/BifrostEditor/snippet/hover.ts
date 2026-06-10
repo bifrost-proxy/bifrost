@@ -2,6 +2,7 @@ import { languages, editor, Position } from 'monaco-editor';
 import type { IRange } from 'monaco-editor';
 import { getDynamicData, type ReferenceLocation, type ReferenceType } from './dynamic';
 import { getProtocolDoc, formatProtocolHover } from './protocol-docs';
+import { findRuleReferenceAtColumn } from './ruleReference';
 
 export interface ReferenceMatch {
   name: string;
@@ -18,8 +19,6 @@ const VALUE_REF_PATTERN = /\{([\w-]+)\}/g;
 const REQ_SCRIPT_PATTERN = /reqScript:\/\/([\w\-.]+)/g;
 const RES_SCRIPT_PATTERN = /resScript:\/\/([\w\-.]+)/g;
 const BP_SCRIPT_PATTERN = /bp:\/\/([^\s]+)/g;
-const RULE_REF_PATTERN = /(^|\s)@([^\s#]+)/g;
-
 export function localBpParserScriptName(rawValue: string): string | null {
   const localName = rawValue.split(/[?#]/, 1)[0];
   if (
@@ -42,28 +41,37 @@ function findReferenceAtPosition(
 ): ReferenceMatch | null {
   const lineContent = model.getLineContent(position.lineNumber);
   const column = position.column;
+  const ruleReference = findRuleReferenceAtColumn(lineContent, column);
+  if (ruleReference) {
+    return {
+      name: ruleReference.name,
+      type: 'rule',
+      range: {
+        startLineNumber: position.lineNumber,
+        endLineNumber: position.lineNumber,
+        startColumn: ruleReference.startColumn,
+        endColumn: ruleReference.endColumn,
+      },
+    };
+  }
 
   const patterns: { pattern: RegExp; type: ReferenceType }[] = [
     { pattern: VALUE_REF_PATTERN, type: 'value' },
     { pattern: REQ_SCRIPT_PATTERN, type: 'requestScript' },
     { pattern: RES_SCRIPT_PATTERN, type: 'responseScript' },
     { pattern: BP_SCRIPT_PATTERN, type: 'parserScript' },
-    { pattern: RULE_REF_PATTERN, type: 'rule' },
   ];
 
   for (const { pattern, type } of patterns) {
     pattern.lastIndex = 0;
     let match;
     while ((match = pattern.exec(lineContent)) !== null) {
-      const prefixLength = type === 'rule' ? match[1].length : 0;
-      const startCol = match.index + prefixLength + 1;
+      const startCol = match.index + 1;
       const endCol = match.index + match[0].length + 1;
 
       if (column >= startCol && column <= endCol) {
         const name =
-          type === 'rule'
-            ? match[2]
-            : type === 'parserScript'
+          type === 'parserScript'
               ? localBpParserScriptName(match[1])
               : match[1];
         if (!name) {

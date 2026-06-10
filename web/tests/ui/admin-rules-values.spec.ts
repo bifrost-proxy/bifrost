@@ -212,6 +212,7 @@ test("Rules 支持 @规则引用解析，并可在编辑器中点击展开详情
   request,
 }) => {
   const sharedRuleName = uniqueName("at-shared");
+  const commentedRuleName = uniqueName("commented-shared");
   const entryRuleName = uniqueName("at-entry");
   const missingRuleName = uniqueName("at-missing");
   const missingReferenceName = uniqueName("at-unknown");
@@ -219,8 +220,16 @@ test("Rules 支持 @规则引用解析，并可在编辑器中点击展开详情
   const groupRuleName = uniqueName("at-group-shared");
   const groupRuleReference = `${groupName}/${groupRuleName}`;
   const sharedContent = "at-shared.test reqHeaders://X-At-Rule=ok";
+  const commentedContent = "commented-ui.test statusCode://209";
   const groupSharedContent = "at-shared.test reqHeaders://X-Group-At-Rule=ok";
-  const entryContent = `@${sharedRuleName}\n@${groupRuleReference}\nat-entry.test statusCode://204`;
+  const commentReferenceName = uniqueName("at-comment-only");
+  const entryContent = [
+    `@${sharedRuleName}\t# tab comment should still resolve`,
+    `@${commentedRuleName}`,
+    `@${groupRuleReference}`,
+    `# @${commentReferenceName} should stay a comment`,
+    "at-entry.test statusCode://204",
+  ].join("\n");
   const missingRuleContent = `@${missingReferenceName}\nmissing-ui.test statusCode://204`;
 
   await writeGroupRuleFile(groupName, groupRuleName, groupSharedContent);
@@ -234,6 +243,17 @@ test("Rules 支持 @规则引用解析，并可在编辑器中点击展开详情
   });
   if (!createSharedRes.ok()) {
     throw new Error(await createSharedRes.text());
+  }
+
+  const createCommentedRes = await request.post(`${apiBase}/rules`, {
+    data: {
+      name: commentedRuleName,
+      content: commentedContent,
+      enabled: false,
+    },
+  });
+  if (!createCommentedRes.ok()) {
+    throw new Error(await createCommentedRes.text());
   }
 
   const createEntryRes = await request.post(`${apiBase}/rules`, {
@@ -271,7 +291,7 @@ test("Rules 支持 @规则引用解析，并可在编辑器中点击展开详情
     errors: Array<{ message: string; code?: string }>;
   };
   expect(validPayload.valid).toBeTruthy();
-  expect(validPayload.rule_count).toBe(3);
+  expect(validPayload.rule_count).toBe(4);
   expect(validPayload.errors).toHaveLength(0);
 
   const candidatesRes = await request.get(`${apiBase}/rules/reference-candidates`);
@@ -282,6 +302,7 @@ test("Rules 支持 @规则引用解析，并可在编辑器中点击展开详情
     group_name?: string | null;
   }>;
   expect(candidatesPayload.some((candidate) => candidate.name === sharedRuleName)).toBeTruthy();
+  expect(candidatesPayload.some((candidate) => candidate.name === commentedRuleName)).toBeTruthy();
   expect(
     candidatesPayload.some(
       (candidate) =>
@@ -313,6 +334,27 @@ test("Rules 支持 @规则引用解析，并可在编辑器中点击展开详情
   await expect(editorBox).toBeVisible();
   const referenceLine = page.locator(".view-line").filter({ hasText: `@${sharedRuleName}` }).first();
   await expect(referenceLine).toBeVisible();
+  const commentReferenceLine = page
+    .locator(".view-line")
+    .filter({ hasText: `# @${commentReferenceName}` })
+    .first();
+  await expect(commentReferenceLine).toBeVisible();
+  await expect
+    .poll(async () =>
+      commentReferenceLine.evaluate((element) => {
+        const nodes = [element, ...Array.from(element.querySelectorAll("*"))];
+        return nodes.some((node) =>
+          node.className.toString().includes("ruleReferenceDecoration"),
+        );
+      }),
+    )
+    .toBeFalsy();
+  const commentBox = await commentReferenceLine.boundingBox();
+  if (!commentBox) {
+    throw new Error("Comment reference line is not visible");
+  }
+  await page.mouse.click(commentBox.x + 28, commentBox.y + commentBox.height / 2);
+  await expect(page.getByTestId("rule-reference-zone")).toBeHidden();
 
   const box = await referenceLine.boundingBox();
   if (!box) {

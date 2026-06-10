@@ -789,12 +789,15 @@
 
 **前置条件**：
 1. 使用临时数据目录启动 Bifrost，必须设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1` 并携带 `--no-system-proxy`。
-2. 准备两个个人私有规则：
+2. 准备三个个人私有规则：
    - `at-ref-shared-human`：内容为 `at-rule-e2e.test reqHeaders://X-At-Rule=ok`，状态为 disabled。
+   - `commented-at-ref-shared-human`：内容为 `at-rule-e2e.test reqHeaders://X-Commented-At-Rule=ok`，状态为 disabled。
    - `at-ref-entry-human`：内容为：
      ```text
-     @at-ref-shared-human
-     @at-ref-team-human/at-ref-group-shared-human
+     @at-ref-shared-human	# tab comment should still resolve
+     @commented-at-ref-shared-human
+     @at-ref-team-human/at-ref-group-shared-human	# tab comment should still resolve
+     # @at-ref-comment-only-human should stay a comment
      at-rule-e2e.test host://127.0.0.1:{MOCK_PORT}
      ```
      状态为 enabled。
@@ -805,7 +808,7 @@
      ```
      状态为 enabled。
 3. 准备一个本地缓存组 `at-ref-team-human`，其中规则 `at-ref-group-shared-human` 内容为 `at-rule-e2e.test reqHeaders://X-Group-At-Rule=ok`，状态为 disabled。
-4. 准备一个本地 HTTP mock 服务，返回请求头 `X-At-Rule` 与 `X-Group-At-Rule` 的值。
+4. 准备一个本地 HTTP mock 服务，返回请求头 `X-At-Rule`、`X-Commented-At-Rule` 与 `X-Group-At-Rule` 的值。
 
 **操作步骤**：
 1. 请求 `POST /_bifrost/api/rules/validate`，body 中传入 `current_rule_name=at-ref-entry-human` 和 entry 规则内容。
@@ -820,11 +823,12 @@
 10. 请求 `POST /_bifrost/api/rules/validate`，body 中传入 `content="@missing-rule"`。
 11. 通过 Bifrost 代理访问 `http://at-rule-missing-e2e.test/check`。
 12. 在 Rules 页面选中包含 `@missing-rule` 的规则，鼠标悬浮缺失引用 token。
+13. 检查 entry 规则中的 `# @at-ref-comment-only-human` 注释行。
 
 **预期结果**：
-- validate API 对 entry 规则返回 `valid=true`，`rule_count=3`。
-- 代理请求到达 mock 服务，mock 服务看到 `X-At-Rule: ok` 和 `X-Group-At-Rule: ok`，说明 disabled 本地 shared 与 disabled 组 shared 规则都只通过 entry 的 `@` 引用生效。
-- reference candidates API 返回个人规则短名 `at-ref-shared-human`，并返回组规则 qualified name `at-ref-team-human/at-ref-group-shared-human`。
+- validate API 对 entry 规则返回 `valid=true`，`rule_count=4`。
+- 代理请求到达 mock 服务，mock 服务看到 `X-At-Rule: ok`、`X-Commented-At-Rule: ok` 和 `X-Group-At-Rule: ok`，说明 disabled 本地 shared、`commented-*` shared 与 disabled 组 shared 规则都只通过 entry 的 `@` 引用生效。
+- reference candidates API 返回个人规则短名 `at-ref-shared-human`、`commented-at-ref-shared-human`，并返回组规则 qualified name `at-ref-team-human/at-ref-group-shared-human`。
 - 亮色主题下，`@at-ref-shared-human` 有可点击样式；点击后在当前行下方展开只读详情，详情内容包含 shared 规则文本。
 - 再次点击同一 `@` 引用后，展开详情收起。
 - 暗色主题下，展开详情的文字、背景、边框和关闭按钮均清晰可读，不与编辑器内容重叠。
@@ -833,12 +837,13 @@
 - 缺失引用返回 `valid=false`，错误 code 为 `E020`，错误信息包含 `missing-rule`。
 - 运行时解析包含缺失引用的 enabled 规则时跳过缺失引用行，后续 `at-rule-missing-e2e.test host://127.0.0.1:{MOCK_PORT}` 仍生效，代理请求到达 mock 服务并返回 `/check`。
 - Rules 编辑器中缺失引用 token 使用错误色标红；鼠标悬浮时出现错误提示，包含缺失引用名称和 `was not found`。
+- `# @at-ref-comment-only-human` 保持普通注释，不被标记为规则引用，不出现红色错误 decoration，也不会触发规则引用展开。
 
-**回归目的**：覆盖规则引用语义、disabled shared 规则复用、组规则 qualified 引用、候选自动检索、模糊补全、编辑器原位展开详情、亮暗主题可读性、运行时缺失引用跳过和 UI 缺失引用诊断，防止运行时解析和 WebUI 编辑体验不一致。
+**回归目的**：覆盖规则引用语义、disabled shared 规则复用、`commented-*` 规则名、tab 行内注释、注释内 `@` 不误报、组规则 qualified 引用、候选自动检索、模糊补全、编辑器原位展开详情、亮暗主题可读性、运行时缺失引用跳过和 UI 缺失引用诊断，防止运行时解析和 WebUI 编辑体验不一致。
 
 **执行结果（2026-06-10，本地开发分支）**：
-- ✅ PASS：执行 `bash e2e-tests/tests/test_rule_references.sh`，脚本先编译当前分支 debug 二进制，预置 disabled 组 shared 规则，再通过真实 Admin API 创建 disabled 私有 shared 规则、enabled entry 规则和包含缺失引用的 enabled 规则；validate API 对 entry 返回 `valid=true` / `rule_count=3`，对缺失引用返回 `E020`，真实代理请求确认 mock 服务收到 `X-At-Rule: ok` 与 `X-Group-At-Rule: ok`，并确认运行时缺失引用行被跳过后 `at-rule-missing-e2e.test` 仍代理到 mock 服务。
-- ✅ PASS：执行 `npm --prefix web run test:ui -- web/tests/ui/admin-rules-values.spec.ts -g "@规则引用"`，验证缺失引用返回 `E020`，缺失引用 token 标红并 hover 出现错误提示，reference candidates 返回私有短名与组 qualified name，Rules 编辑器在亮色主题下点击 `@规则` 展开/收起详情，在暗色主题下详情内容仍可读，点击 `@组名/规则名` 展开组规则详情，并验证 Monaco fuzzy 补全提示完整组规则引用。
+- ✅ PASS：执行 `bash e2e-tests/tests/test_rule_references.sh`，脚本先编译当前分支 debug 二进制，预置 disabled 组 shared 规则，再通过真实 Admin API 创建 disabled 私有 shared、`commented-*` shared、enabled entry 和包含缺失引用的 enabled 规则；validate API 对 entry 返回 `valid=true` / `rule_count=4`，对缺失引用返回 `E020`，真实代理请求确认 mock 服务收到 `X-At-Rule: ok`、`X-Commented-At-Rule: ok` 与 `X-Group-At-Rule: ok`，并确认 tab 行内注释可解析、注释内 `@` 不作为缺失引用、运行时缺失引用行被跳过后 `at-rule-missing-e2e.test` 仍代理到 mock 服务。
+- ✅ PASS：执行 `npm --prefix web run test:ui -- web/tests/ui/admin-rules-values.spec.ts -g "@规则引用"`，验证缺失引用返回 `E020`，缺失引用 token 标红并 hover 出现错误提示，reference candidates 返回私有短名、`commented-*` 私有短名与组 qualified name，Rules 编辑器在亮色主题下点击 `@规则` 展开/收起详情，在暗色主题下详情内容仍可读，点击 `@组名/规则名` 展开组规则详情，验证 Monaco fuzzy 补全提示完整组规则引用，并确认注释行 `# @...` 不带任何规则引用 decoration 且点击不会展开详情区。
 
 ---
 

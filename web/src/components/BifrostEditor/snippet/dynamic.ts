@@ -1,5 +1,6 @@
 import { languages, editor, Position } from 'monaco-editor';
 import type { IRange } from 'monaco-editor';
+import { getRuleReferenceCompletionContext } from './ruleReference';
 
 export type ReferenceType = 'value' | 'requestScript' | 'responseScript' | 'parserScript' | 'rule';
 export type NavigationType = 'page' | 'editor';
@@ -135,13 +136,16 @@ export const dynamicProvider: languages.CompletionItemProvider = {
 
     const reqScriptMatch = textBeforeCursor.match(/reqScript:\/\/([^\s]*)$/);
     const resScriptMatch = textBeforeCursor.match(/resScript:\/\/([^\s]*)$/);
-    const ruleReferenceMatch = textBeforeCursor.match(/(^|\s)@([^\s#]*)$/);
+    const ruleReferenceContext = getRuleReferenceCompletionContext(
+      textBeforeCursor,
+      position.column,
+    );
 
-    if (ruleReferenceMatch) {
-      const typedText = ruleReferenceMatch[2];
+    if (ruleReferenceContext) {
+      const typedText = ruleReferenceContext.typedText;
       const ruleRange: IRange = {
         ...range,
-        startColumn: position.column - typedText.length,
+        startColumn: ruleReferenceContext.startColumn,
       };
       const filteredRules = dynamicData.rules.filter((name) => fuzzyMatch(typedText, name));
       return {

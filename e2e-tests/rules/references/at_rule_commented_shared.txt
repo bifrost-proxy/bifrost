@@ -1,0 +1,2 @@
+# 被 @commented-* 引用的 shared 规则。验证 @comment 精确特例不会误伤 comment 前缀规则名。
+at-rule-e2e.test reqHeaders://X-Commented-At-Rule=ok

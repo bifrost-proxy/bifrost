@@ -18,6 +18,8 @@ fi
 MOCK_PORT="$(allocate_free_port)"
 MOCK_PID=""
 SHARED_RULE_NAME="at-ref-shared-$$"
+COMMENTED_RULE_NAME="commented-at-ref-shared-$$"
+COMMENT_ONLY_RULE_NAME="at-ref-comment-only-$$"
 ENTRY_RULE_NAME="at-ref-entry-$$"
 MISSING_ENTRY_RULE_NAME="at-ref-missing-entry-$$"
 GROUP_NAME="at-ref-team-$$"
@@ -32,6 +34,7 @@ fi
 cleanup() {
   delete_rule "$MISSING_ENTRY_RULE_NAME" >/dev/null 2>&1 || true
   delete_rule "$ENTRY_RULE_NAME" >/dev/null 2>&1 || true
+  delete_rule "$COMMENTED_RULE_NAME" >/dev/null 2>&1 || true
   delete_rule "$SHARED_RULE_NAME" >/dev/null 2>&1 || true
   if [[ -n "$MOCK_PID" ]] && kill -0 "$MOCK_PID" 2>/dev/null; then
     kill "$MOCK_PID" 2>/dev/null || true
@@ -61,6 +64,7 @@ class Handler(BaseHTTPRequestHandler):
         body = json.dumps({
             "path": self.path,
             "x_at_rule": self.headers.get("X-At-Rule", ""),
+            "x_commented_at_rule": self.headers.get("X-Commented-At-Rule", ""),
             "x_group_at_rule": self.headers.get("X-Group-At-Rule", ""),
         }).encode("utf-8")
         self.send_response(200)
@@ -132,10 +136,13 @@ EOF_RULE
 }
 
 shared_content="$(rule_fixture_content "$E2E_DIR/rules/references/at_rule_shared.txt")"
+commented_content="$(rule_fixture_content "$E2E_DIR/rules/references/at_rule_commented_shared.txt")"
 group_shared_content="$(rule_fixture_content "$E2E_DIR/rules/references/at_rule_group_shared.txt")"
 entry_content="$(rule_fixture_content \
   "$E2E_DIR/rules/references/at_rule_merge.txt" \
   "SHARED_RULE=${SHARED_RULE_NAME}" \
+  "COMMENTED_RULE=${COMMENTED_RULE_NAME}" \
+  "COMMENT_ONLY_RULE=${COMMENT_ONLY_RULE_NAME}" \
   "GROUP_RULE_REF=${GROUP_RULE_REF}" \
   "MOCK_PORT=${MOCK_PORT}")"
 
@@ -147,6 +154,9 @@ start_mock_server
 log "creating disabled shared rule ${SHARED_RULE_NAME}"
 create_rule "$SHARED_RULE_NAME" "$shared_content" "false" >/dev/null
 
+log "creating disabled comment-prefixed shared rule ${COMMENTED_RULE_NAME}"
+create_rule "$COMMENTED_RULE_NAME" "$commented_content" "false" >/dev/null
+
 log "creating enabled entry rule ${ENTRY_RULE_NAME}"
 create_rule "$ENTRY_RULE_NAME" "$entry_content" "true" >/dev/null
 
@@ -156,7 +166,7 @@ validate_payload="$(jq -cn \
   '{current_rule_name:$name, content:$content}')"
 validate_response="$(admin_post "/api/rules/validate" "$validate_payload")"
 assert_json_field "$validate_response" ".valid" "true"
-assert_json_field "$validate_response" ".rule_count" "3"
+assert_json_field "$validate_response" ".rule_count" "4"
 
 missing_payload="$(jq -cn \
   --arg name "$ENTRY_RULE_NAME" \
@@ -172,6 +182,7 @@ for _ in {1..40}; do
     -x "http://127.0.0.1:${ADMIN_PORT}" \
     "http://at-rule-e2e.test/check" 2>/dev/null || true)"
   if [[ "$(jq -r '.x_at_rule // empty' <<<"$response" 2>/dev/null || true)" == "ok" \
+    && "$(jq -r '.x_commented_at_rule // empty' <<<"$response" 2>/dev/null || true)" == "ok" \
     && "$(jq -r '.x_group_at_rule // empty' <<<"$response" 2>/dev/null || true)" == "ok" ]]; then
     reference_matched=1
     break

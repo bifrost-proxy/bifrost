@@ -56,22 +56,48 @@ impl std::error::Error for RuleReferenceError {}
 
 pub fn rule_reference_name(line: &str) -> Option<&str> {
     let trimmed = line.trim();
-    if !trimmed.starts_with('@') || trimmed.starts_with("@comment") {
+    if !trimmed.starts_with('@') || is_comment_directive(trimmed) {
         return None;
     }
     let rest = trimmed.strip_prefix('@')?.trim();
     if rest.is_empty() {
         return None;
     }
-    let name = rest
-        .split_once(" #")
-        .map(|(name, _)| name)
-        .unwrap_or(rest)
-        .trim();
+    let name = strip_inline_comment(rest).trim();
     if name.is_empty() {
         None
     } else {
         Some(name)
+    }
+}
+
+fn is_comment_directive(trimmed: &str) -> bool {
+    let Some(rest) = trimmed.strip_prefix("@comment") else {
+        return false;
+    };
+
+    rest.is_empty()
+        || rest
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_whitespace() || ch == '#')
+}
+
+fn strip_inline_comment(value: &str) -> &str {
+    let comment_start = value.char_indices().find_map(|(idx, ch)| {
+        if ch != '#' {
+            return None;
+        }
+        if idx == 0 || value[..idx].chars().last().is_some_and(char::is_whitespace) {
+            Some(idx)
+        } else {
+            None
+        }
+    });
+
+    match comment_start {
+        Some(idx) => &value[..idx],
+        None => value,
     }
 }
 
@@ -185,7 +211,22 @@ mod tests {
             rule_reference_name("  @folder/shared  # reuse"),
             Some("folder/shared")
         );
+        assert_eq!(
+            rule_reference_name("  @folder/shared\t# reuse"),
+            Some("folder/shared")
+        );
         assert_eq!(rule_reference_name("@comment not a reference"), None);
+        assert_eq!(rule_reference_name("@comment"), None);
+        assert_eq!(rule_reference_name("@comment# hidden"), None);
+        assert_eq!(
+            rule_reference_name("@commented-shared"),
+            Some("commented-shared")
+        );
+        assert_eq!(
+            rule_reference_name("@comment/group-shared"),
+            Some("comment/group-shared")
+        );
+        assert_eq!(rule_reference_name("# @shared"), None);
         assert_eq!(rule_reference_name("example.com host://127.0.0.1"), None);
     }
 

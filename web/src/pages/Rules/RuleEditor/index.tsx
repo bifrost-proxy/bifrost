@@ -28,6 +28,10 @@ import { useRulesStore } from "../../../stores/useRulesStore";
 import { useThemeStore } from "../../../stores/useThemeStore";
 import { useValuesStore } from "../../../stores/useValuesStore";
 import type { RuleSyncInfo } from "../../../types";
+import {
+  findRuleReferenceAtColumn,
+  parseRuleReferenceLine,
+} from "../../../components/BifrostEditor/snippet/ruleReference";
 import styles from "./index.module.css";
 
 function formatRuleTime(value?: string | null): string {
@@ -52,52 +56,39 @@ interface RuleReferenceMatch {
   range: IRange;
 }
 
-const RULE_REFERENCE_PATTERN = /(^|\s)@([^\s#]+)/g;
-
 function findRuleReferenceAtPosition(
   model: MonacoEditor.ITextModel,
   position: Position,
 ): RuleReferenceMatch | null {
   const lineContent = model.getLineContent(position.lineNumber);
-  RULE_REFERENCE_PATTERN.lastIndex = 0;
-  let match: RegExpExecArray | null;
-  while ((match = RULE_REFERENCE_PATTERN.exec(lineContent)) !== null) {
-    const startColumn = match.index + match[1].length + 1;
-    const endColumn = match.index + match[0].length + 1;
-    if (position.column >= startColumn && position.column <= endColumn) {
-      return {
-        name: match[2],
-        range: {
-          startLineNumber: position.lineNumber,
-          endLineNumber: position.lineNumber,
-          startColumn,
-          endColumn,
-        },
-      };
-    }
-  }
-  return null;
+  const reference = findRuleReferenceAtColumn(lineContent, position.column);
+  if (!reference) return null;
+  return {
+    name: reference.name,
+    range: {
+      startLineNumber: position.lineNumber,
+      endLineNumber: position.lineNumber,
+      startColumn: reference.startColumn,
+      endColumn: reference.endColumn,
+    },
+  };
 }
 
 function findRuleReferences(model: MonacoEditor.ITextModel): RuleReferenceMatch[] {
   const matches: RuleReferenceMatch[] = [];
   for (let lineNumber = 1; lineNumber <= model.getLineCount(); lineNumber += 1) {
     const lineContent = model.getLineContent(lineNumber);
-    RULE_REFERENCE_PATTERN.lastIndex = 0;
-    let match: RegExpExecArray | null;
-    while ((match = RULE_REFERENCE_PATTERN.exec(lineContent)) !== null) {
-      const startColumn = match.index + match[1].length + 1;
-      const endColumn = match.index + match[0].length + 1;
-      matches.push({
-        name: match[2],
-        range: {
-          startLineNumber: lineNumber,
-          endLineNumber: lineNumber,
-          startColumn,
-          endColumn,
-        },
-      });
-    }
+    const reference = parseRuleReferenceLine(lineContent);
+    if (!reference) continue;
+    matches.push({
+      name: reference.name,
+      range: {
+        startLineNumber: lineNumber,
+        endLineNumber: lineNumber,
+        startColumn: reference.startColumn,
+        endColumn: reference.endColumn,
+      },
+    });
   }
   return matches;
 }
