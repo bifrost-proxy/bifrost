@@ -8,9 +8,12 @@ BIN="${BIFROST_BIN:-$ROOT_DIR/target/release/bifrost}"
 if [[ ! -x "$BIN" ]]; then
   echo "Building release bifrost binary..."
   SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost
+  BIN="$ROOT_DIR/target/release/bifrost"
 fi
 
-PORT="$(python3 - <<'PY'
+PORT="${BIFROST_CTRL_C_TEST_PORT:-${ADMIN_PORT:-0}}"
+if [[ -z "$PORT" || "$PORT" == "0" ]]; then
+  PORT="$(python3 - <<'PY'
 import socket
 s = socket.socket()
 s.bind(("127.0.0.1", 0))
@@ -18,11 +21,13 @@ print(s.getsockname()[1])
 s.close()
 PY
 )"
+fi
 
 export BIFROST_CTRL_C_TEST_BIN="$BIN"
 export BIFROST_CTRL_C_TEST_PORT="$PORT"
 
 python3 <<'PY'
+import errno
 import os
 import pty
 import select
@@ -67,19 +72,31 @@ def poll_child():
         return None
     return os.waitstatus_to_exitcode(status)
 
+
+def read_master():
+    try:
+        return os.read(master_fd, 8192).decode("utf-8", errors="replace")
+    except OSError as exc:
+        if exc.errno == errno.EIO:
+            return None
+        raise
+
+
 buffer = ""
 deadline = time.time() + 45
 try:
     while time.time() < deadline:
-        ready, _, _ = select.select([master_fd], [], [], 0.2)
-        if ready:
-            chunk = os.read(master_fd, 8192).decode("utf-8", errors="replace")
-            buffer += chunk
-            if "MOBILE AVAILABILITY CHECK" in buffer:
-                break
         code = poll_child()
         if code is not None:
             raise RuntimeError(f"bifrost exited before ready with code {code}\n{buffer[-4000:]}")
+        ready, _, _ = select.select([master_fd], [], [], 0.2)
+        if ready:
+            chunk = read_master()
+            if chunk is None:
+                continue
+            buffer += chunk
+            if "MOBILE AVAILABILITY CHECK" in buffer:
+                break
     else:
         raise RuntimeError(f"timed out waiting for foreground startup\n{buffer[-4000:]}")
 
@@ -88,10 +105,9 @@ try:
     while time.time() < exit_deadline:
         ready, _, _ = select.select([master_fd], [], [], 0.2)
         if ready:
-            try:
-                buffer += os.read(master_fd, 8192).decode("utf-8", errors="replace")
-            except OSError:
-                pass
+            chunk = read_master()
+            if chunk:
+                buffer += chunk
         code = poll_child()
         if code is not None:
             if code != 0:
