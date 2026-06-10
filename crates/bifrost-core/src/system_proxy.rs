@@ -45,6 +45,38 @@ fn backup_restores_managed_target(
     managed_target.is_some_and(|target| backup.target_matches(&target.host, target.port))
 }
 
+/// Decide whether `enable` should preserve the original proxy recorded in the
+/// existing on-disk managed state instead of backing up the current OS proxy.
+///
+/// This guards the restart / re-adoption handoff: a brand-new
+/// [`SystemProxyManager`] (`is_set == false`) is asked to enable the very same
+/// target that on-disk managed state already tracks, while the OS system proxy
+/// still points at that target (e.g. `bifrost restart` deliberately keeps the
+/// system proxy pointing at Bifrost across the daemon swap). If we backed up the
+/// *current* proxy in that situation we would overwrite the genuine pre-Bifrost
+/// original with Bifrost's own `host:port`, and a later crash recovery /
+/// restore would "restore" the system proxy to a dead Bifrost endpoint. In that
+/// case we keep the recorded original instead.
+fn restart_handoff_preserved_original(
+    is_set: bool,
+    existing_state: Option<&ManagedProxyState>,
+    current_points_at_target: bool,
+    host: &str,
+    port: u16,
+) -> Option<ProxyBackup> {
+    if is_set {
+        return None;
+    }
+    let state = existing_state?;
+    if !state.target.target_matches(host, port) {
+        return None;
+    }
+    if !current_points_at_target {
+        return None;
+    }
+    Some(state.original.clone())
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct ManagedProxyState {
     original: ProxyBackup,
@@ -254,7 +286,15 @@ impl SystemProxyManager {
     }
 
     pub fn is_supported() -> bool {
-        Sysproxy::is_support()
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            Sysproxy::is_support()
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            false
+        }
     }
 
     pub fn enable(&mut self, host: &str, port: u16, bypass: Option<&str>) -> Result<()> {
@@ -315,6 +355,51 @@ impl SystemProxyManager {
                             .map(|state| state.original.into())
                     })
                     .or_else(|| Some(actual.into()));
+            }
+        } else if let Ok(existing_state) = self.load_managed_state() {
+            // Restart / re-adoption handoff: a fresh manager is asked to enable
+            // the same target that on-disk state already tracks while the OS
+            // proxy still points at it. Preserve the recorded original so we do
+            // not clobber the user's genuine pre-Bifrost proxy with Bifrost's
+            // own host:port (otherwise a later crash recovery would "restore"
+            // the system proxy to a dead Bifrost endpoint).
+            let current_points_at_target = {
+                #[cfg(target_os = "macos")]
+                {
+                    macos_any_service_proxy_matches(host, port).unwrap_or_else(|error| {
+                        tracing::warn!(
+                            error = %error,
+                            expected_host = %host,
+                            expected_port = port,
+                            "Failed to inspect macOS network services during restart handoff backup check"
+                        );
+                        false
+                    })
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    Self::get_current()
+                        .map(|actual| actual.target_matches(host, port))
+                        .unwrap_or(false)
+                }
+            };
+
+            if let Some(original) = restart_handoff_preserved_original(
+                self.is_set,
+                Some(&existing_state),
+                current_points_at_target,
+                host,
+                port,
+            ) {
+                tracing::info!(
+                    expected_host = %host,
+                    expected_port = port,
+                    original_enabled = original.enable,
+                    original_host = %original.host,
+                    original_port = original.port,
+                    "Preserving recorded original system proxy during restart handoff re-enable"
+                );
+                preserved_original = Some(original.into());
             }
         }
 
@@ -978,6 +1063,11 @@ impl SystemProxyManager {
         self.original_proxy = None;
     }
 
+    pub fn detach_in_place(&mut self) {
+        self.is_set = false;
+        self.original_proxy = None;
+    }
+
     fn backup_file_path(&self) -> PathBuf {
         self.data_dir.join(BACKUP_FILE_NAME)
     }
@@ -1475,6 +1565,18 @@ fn normalize_proxy_host(host: &str) -> String {
 impl Drop for SystemProxyManager {
     fn drop(&mut self) {
         if self.is_set {
+            if matches!(
+                crate::read_system_proxy_shutdown_mode(&self.data_dir),
+                Some(crate::SystemProxyShutdownMode::ForegroundCleanup)
+                    | Some(crate::SystemProxyShutdownMode::PreserveForRestart)
+            ) {
+                tracing::info!(
+                    data_dir = %self.data_dir.display(),
+                    "system proxy manager drop restore skipped because shutdown marker owns cleanup"
+                );
+                self.detach_in_place();
+                return;
+            }
             if let Err(e) = self.restore() {
                 tracing::error!("Failed to restore system proxy on drop: {}", e);
             }
@@ -1619,6 +1721,77 @@ fn macos_all_services_proxy_match(host: &str, port: u16) -> Result<bool> {
 }
 
 #[cfg(target_os = "macos")]
+const MACOS_NETWORKSETUP_MAX_PARALLEL_SERVICES: usize = 4;
+
+#[cfg(target_os = "macos")]
+fn run_macos_services_parallel<F>(
+    services: &[String],
+    operation: &'static str,
+    run_service: F,
+) -> Result<()>
+where
+    F: Fn(&str) -> Result<()> + Send + Sync,
+{
+    let parallelism = MACOS_NETWORKSETUP_MAX_PARALLEL_SERVICES
+        .max(1)
+        .min(services.len().max(1));
+    let mut first_error = None;
+
+    for chunk in services.chunks(parallelism) {
+        let run_service = &run_service;
+        let results = std::thread::scope(|scope| {
+            let handles = chunk
+                .iter()
+                .map(|service| {
+                    scope.spawn(move || {
+                        let service_started_at = Instant::now();
+                        let result = run_service(service);
+                        match &result {
+                            Ok(()) => tracing::info!(
+                                service = %service,
+                                operation,
+                                elapsed_ms = service_started_at.elapsed().as_millis(),
+                                "macOS network service proxy operation completed"
+                            ),
+                            Err(error) => tracing::warn!(
+                                service = %service,
+                                operation,
+                                error = %error,
+                                elapsed_ms = service_started_at.elapsed().as_millis(),
+                                "macOS network service proxy operation failed"
+                            ),
+                        }
+                        result
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle.join().unwrap_or_else(|_| {
+                        Err(BifrostError::Config(format!(
+                            "macOS networksetup {operation} worker panicked"
+                        )))
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
+
+        for result in results {
+            if let Err(error) = result {
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn set_macos_all_services_proxy(host: &str, port: u16, bypass: &str) -> Result<()> {
     let services = list_macos_services()?;
     set_macos_services_proxy(&services, host, port, bypass)
@@ -1643,39 +1816,29 @@ fn set_macos_services_proxy(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
-    for svc in services {
-        let service_started_at = Instant::now();
+    run_macos_services_parallel(services, "set", |svc| {
         tracing::info!(
             service = %svc,
             requested_host = %host,
             requested_port = port,
             "Setting macOS network service proxy to requested target"
         );
+        let port = port.to_string();
         // HTTP
-        run_networksetup(
-            "networksetup",
-            &["-setwebproxy", svc, host, &port.to_string()],
-        )?;
+        run_networksetup("networksetup", &["-setwebproxy", svc, host, &port])?;
         run_networksetup("networksetup", &["-setwebproxystate", svc, "on"])?;
         // HTTPS
-        run_networksetup(
-            "networksetup",
-            &["-setsecurewebproxy", svc, host, &port.to_string()],
-        )?;
+        run_networksetup("networksetup", &["-setsecurewebproxy", svc, host, &port])?;
         run_networksetup("networksetup", &["-setsecurewebproxystate", svc, "on"])?;
         // Bypass
         if !bypass_domains.is_empty() {
-            let mut args = vec!["-setproxybypassdomains".to_string(), svc.clone()];
+            let mut args = vec!["-setproxybypassdomains".to_string(), svc.to_string()];
             args.extend(bypass_domains.iter().cloned());
             let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
             run_networksetup("networksetup", &str_args)?;
         }
-        tracing::info!(
-            service = %svc,
-            elapsed_ms = service_started_at.elapsed().as_millis(),
-            "macOS network service proxy set completed"
-        );
-    }
+        Ok(())
+    })?;
     tracing::info!(
         service_count = services.len(),
         elapsed_ms = started_at.elapsed().as_millis(),
@@ -1697,20 +1860,15 @@ fn disable_macos_services_proxy(services: &[String]) -> Result<()> {
         service_count = services.len(),
         "Disabling macOS web proxies for selected network services"
     );
-    for svc in services {
-        let service_started_at = Instant::now();
+    run_macos_services_parallel(services, "disable", |svc| {
         tracing::info!(
             service = %svc,
             "Disabling macOS network service web proxies"
         );
         run_networksetup("networksetup", &["-setwebproxystate", svc, "off"])?;
         run_networksetup("networksetup", &["-setsecurewebproxystate", svc, "off"])?;
-        tracing::info!(
-            service = %svc,
-            elapsed_ms = service_started_at.elapsed().as_millis(),
-            "macOS network service proxy disable completed"
-        );
-    }
+        Ok(())
+    })?;
     tracing::info!(
         service_count = services.len(),
         elapsed_ms = started_at.elapsed().as_millis(),
@@ -1946,26 +2104,40 @@ fn disable_macos_matching_services_proxy_with_gui_auth(target: &ProxyBackup) -> 
 #[cfg(target_os = "macos")]
 pub fn set_macos_all_services_proxy_with_sudo(host: &str, port: u16, bypass: &str) -> Result<()> {
     let services = list_macos_services()?;
+    let started_at = Instant::now();
+    tracing::info!(
+        service_count = services.len(),
+        requested_host = %host,
+        requested_port = port,
+        "Setting macOS web proxies with sudo for selected network services"
+    );
     let bypass_domains: Vec<String> = bypass
         .split(',')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
-    for svc in services {
+    run_macos_services_parallel(&services, "sudo_set", |svc| {
+        let port = port.to_string();
         // HTTP
-        run_networksetup_with_sudo(&["-setwebproxy", &svc, host, &port.to_string()])?;
-        run_networksetup_with_sudo(&["-setwebproxystate", &svc, "on"])?;
+        run_networksetup_with_sudo(&["-setwebproxy", svc, host, &port])?;
+        run_networksetup_with_sudo(&["-setwebproxystate", svc, "on"])?;
         // HTTPS
-        run_networksetup_with_sudo(&["-setsecurewebproxy", &svc, host, &port.to_string()])?;
-        run_networksetup_with_sudo(&["-setsecurewebproxystate", &svc, "on"])?;
+        run_networksetup_with_sudo(&["-setsecurewebproxy", svc, host, &port])?;
+        run_networksetup_with_sudo(&["-setsecurewebproxystate", svc, "on"])?;
         // Bypass
         if !bypass_domains.is_empty() {
-            let mut args = vec!["-setproxybypassdomains".to_string(), svc.clone()];
+            let mut args = vec!["-setproxybypassdomains".to_string(), svc.to_string()];
             args.extend(bypass_domains.iter().cloned());
             let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
             run_networksetup_with_sudo(&str_args)?;
         }
-    }
+        Ok(())
+    })?;
+    tracing::info!(
+        service_count = services.len(),
+        elapsed_ms = started_at.elapsed().as_millis(),
+        "macOS selected network service sudo proxy set completed"
+    );
     Ok(())
 }
 
@@ -1983,10 +2155,17 @@ fn disable_macos_matching_services_proxy_with_sudo(target: &ProxyBackup) -> Resu
 
 #[cfg(target_os = "macos")]
 fn disable_macos_services_proxy_with_sudo(services: &[String]) -> Result<()> {
-    for svc in services {
+    let started_at = Instant::now();
+    run_macos_services_parallel(services, "sudo_disable", |svc| {
         run_networksetup_with_sudo(&["-setwebproxystate", svc, "off"])?;
         run_networksetup_with_sudo(&["-setsecurewebproxystate", svc, "off"])?;
-    }
+        Ok(())
+    })?;
+    tracing::info!(
+        service_count = services.len(),
+        elapsed_ms = started_at.elapsed().as_millis(),
+        "macOS selected network service sudo proxy disable completed"
+    );
     Ok(())
 }
 
@@ -2432,6 +2611,10 @@ mod tests {
     fn test_is_supported() {
         let supported = SystemProxyManager::is_supported();
         println!("System proxy supported: {}", supported);
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        assert_eq!(supported, Sysproxy::is_support());
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        assert!(!supported);
     }
 
     #[test]
@@ -2450,6 +2633,32 @@ mod tests {
         assert_eq!(backup.host, restored.host);
         assert_eq!(backup.port, restored.port);
         assert_eq!(backup.bypass, restored.bypass);
+    }
+
+    #[test]
+    fn drop_skips_restore_when_restart_shutdown_marker_owns_cleanup() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        crate::write_system_proxy_shutdown_mode(
+            temp_dir.path(),
+            crate::SystemProxyShutdownMode::PreserveForRestart,
+        )
+        .unwrap();
+
+        let mut manager = SystemProxyManager::new(temp_dir.path().to_path_buf());
+        manager.original_proxy = Some(Sysproxy {
+            enable: false,
+            host: String::new(),
+            port: 0,
+            bypass: String::new(),
+        });
+        manager.is_set = true;
+
+        drop(manager);
+
+        assert!(matches!(
+            crate::read_system_proxy_shutdown_mode(temp_dir.path()),
+            Some(crate::SystemProxyShutdownMode::PreserveForRestart)
+        ));
     }
 
     #[test]
@@ -2512,6 +2721,118 @@ mod tests {
         };
 
         assert!(!backup_restores_managed_target(&backup, Some(&target)));
+    }
+
+    #[test]
+    fn restart_handoff_preserves_recorded_original_when_all_conditions_met() {
+        let state = ManagedProxyState {
+            original: ProxyBackup {
+                enable: true,
+                host: "10.0.0.1".to_string(),
+                port: 7070,
+                bypass: "corp.example".to_string(),
+            },
+            target: ProxyBackup {
+                enable: true,
+                host: "127.0.0.1".to_string(),
+                port: 9900,
+                bypass: String::new(),
+            },
+            applied: true,
+        };
+
+        let preserved =
+            restart_handoff_preserved_original(false, Some(&state), true, "127.0.0.1", 9900)
+                .expect("should preserve recorded original");
+
+        assert!(preserved.enable);
+        assert_eq!(preserved.host, "10.0.0.1");
+        assert_eq!(preserved.port, 7070);
+        assert_eq!(preserved.bypass, "corp.example");
+    }
+
+    #[test]
+    fn restart_handoff_does_not_preserve_when_manager_already_set() {
+        let state = ManagedProxyState {
+            original: ProxyBackup {
+                enable: true,
+                host: "10.0.0.1".to_string(),
+                port: 7070,
+                bypass: String::new(),
+            },
+            target: ProxyBackup {
+                enable: true,
+                host: "127.0.0.1".to_string(),
+                port: 9900,
+                bypass: String::new(),
+            },
+            applied: true,
+        };
+
+        // is_set == true means the live manager owns its own original; the
+        // existing in-process backup path handles preservation instead.
+        assert!(
+            restart_handoff_preserved_original(true, Some(&state), true, "127.0.0.1", 9900)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn restart_handoff_does_not_preserve_without_existing_state() {
+        assert!(restart_handoff_preserved_original(false, None, true, "127.0.0.1", 9900).is_none());
+    }
+
+    #[test]
+    fn restart_handoff_does_not_preserve_when_target_mismatches() {
+        let state = ManagedProxyState {
+            original: ProxyBackup {
+                enable: true,
+                host: "10.0.0.1".to_string(),
+                port: 7070,
+                bypass: String::new(),
+            },
+            target: ProxyBackup {
+                enable: true,
+                host: "127.0.0.1".to_string(),
+                port: 9900,
+                bypass: String::new(),
+            },
+            applied: true,
+        };
+
+        // The requested host:port does not match the on-disk managed target, so
+        // this is a genuine fresh enable and the current proxy must be backed up.
+        assert!(
+            restart_handoff_preserved_original(false, Some(&state), true, "127.0.0.1", 6152)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn restart_handoff_does_not_preserve_when_current_not_pointing_at_target() {
+        let state = ManagedProxyState {
+            original: ProxyBackup {
+                enable: true,
+                host: "10.0.0.1".to_string(),
+                port: 7070,
+                bypass: String::new(),
+            },
+            target: ProxyBackup {
+                enable: true,
+                host: "127.0.0.1".to_string(),
+                port: 9900,
+                bypass: String::new(),
+            },
+            applied: true,
+        };
+
+        // The OS proxy no longer points at the managed target, so we cannot
+        // assume this is a restart handoff; fall back to backing up the current
+        // proxy rather than blindly trusting stale recorded state.
+        assert!(
+            restart_handoff_preserved_original(false, Some(&state), false, "127.0.0.1", 9900)
+                .is_none()
+        );
     }
 
     #[test]

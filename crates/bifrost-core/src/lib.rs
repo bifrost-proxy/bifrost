@@ -64,11 +64,12 @@ pub use system_proxy::{
     SystemProxyManager,
 };
 pub use system_proxy_launchd::{
-    consume_stop_restore_suppression, install_launchd_cleanup,
+    consume_stop_restore_suppression, consume_system_proxy_shutdown_mode, install_launchd_cleanup,
     install_launchd_cleanup_with_gui_auth, launchd_status, launchd_status_for_config,
-    render_launchd_plist, uninstall_launchd_cleanup, uninstall_launchd_cleanup_with_gui_auth,
+    read_system_proxy_shutdown_mode, render_launchd_plist, uninstall_launchd_cleanup,
+    uninstall_launchd_cleanup_with_gui_auth, write_system_proxy_shutdown_mode,
     SystemProxyLaunchdConfig, SystemProxyLaunchdMode, SystemProxyLaunchdRecoveryOutcome,
-    SystemProxyLaunchdStatus,
+    SystemProxyLaunchdStatus, SystemProxyShutdownMode,
 };
 pub use system_proxy_recovery::{
     is_retryable_recovery_error, retry_with_policy, RECOVERY_RETRY_INTERVAL, RECOVERY_RETRY_WINDOW,

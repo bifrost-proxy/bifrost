@@ -107,11 +107,8 @@ test_download_uses_selected_source_first() {
     tmpdir=$(mktemp -d)
     trap 'rm -rf "$tmpdir"' RETURN
 
-    probe_github_url() {
-        case "$1" in
-            https://ghfast.top/*) return 0 ;;
-            *) return 1 ;;
-        esac
+    build_mirror_url_list() {
+        echo "https://ghfast.top/https://github.com"
     }
 
     download_file() {
@@ -132,11 +129,8 @@ test_download_falls_back_to_full_race_after_selected_failure() {
     tmpdir=$(mktemp -d)
     trap 'rm -rf "$tmpdir"' RETURN
 
-    probe_github_url() {
-        case "$1" in
-            https://ghfast.top/*) return 0 ;;
-            *) return 1 ;;
-        esac
+    build_mirror_url_list() {
+        echo "https://ghfast.top/https://github.com"
     }
 
     download_file() {
