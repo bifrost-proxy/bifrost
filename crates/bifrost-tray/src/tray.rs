@@ -48,12 +48,18 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     let state = determine_state(runtime.as_ref(), args.parent_pid);
     let custom_config = load_custom_config_safe(&args.data_dir);
     let data_dir_str = args.data_dir.to_string_lossy().to_string();
+    let bin_available = args
+        .bifrost_bin
+        .as_ref()
+        .map(|p| p.exists())
+        .unwrap_or(false);
 
     let menu_items = menu::build_menu(
         runtime.as_ref(),
         state,
         custom_config.as_ref(),
         &data_dir_str,
+        bin_available,
     );
 
     let (tray_menu, mut action_map) = build_native_menu(&menu_items);
@@ -78,6 +84,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
         .map_err(|e| format!("failed to create tray icon: {e}"))?;
 
     let should_quit = Arc::new(AtomicBool::new(false));
+    let should_reload = Arc::new(AtomicBool::new(false));
     let current_state = Arc::new(AtomicU8::new(match state {
         ServiceState::Running => STATE_RUNNING,
         ServiceState::Stopped => STATE_STOPPED,
@@ -105,31 +112,37 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
 
         // Check state change: update icon + rebuild menu
         let new_state = current_state.load(Ordering::Relaxed);
-        if new_state != last_rendered_state {
+        let state_changed = new_state != last_rendered_state;
+        // ReloadMenu action sets this flag to request a menu rebuild from tray.json
+        let reload_requested = should_reload.swap(false, Ordering::Relaxed);
+
+        if state_changed || reload_requested {
             last_rendered_state = new_state;
 
-            // Update icon with template flag preserved
-            let new_icon = if new_state == STATE_RUNNING {
-                &icon_running
-            } else {
-                &icon_stopped
-            };
-            #[cfg(target_os = "macos")]
-            {
-                let _ = tray_icon.set_icon_with_as_template(Some(new_icon.clone()), true);
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                let _ = tray_icon.set_icon(Some(new_icon.clone()));
-            }
+            if state_changed {
+                // Update icon with template flag preserved
+                let new_icon = if new_state == STATE_RUNNING {
+                    &icon_running
+                } else {
+                    &icon_stopped
+                };
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = tray_icon.set_icon_with_as_template(Some(new_icon.clone()), true);
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let _ = tray_icon.set_icon(Some(new_icon.clone()));
+                }
 
-            // Update tooltip
-            let tooltip = match new_state {
-                STATE_RUNNING => "Bifrost - Running",
-                STATE_STOPPED => "Bifrost - Stopped",
-                _ => "Bifrost - Disconnected",
-            };
-            let _ = tray_icon.set_tooltip(Some(tooltip));
+                // Update tooltip
+                let tooltip = match new_state {
+                    STATE_RUNNING => "Bifrost - Running",
+                    STATE_STOPPED => "Bifrost - Stopped",
+                    _ => "Bifrost - Disconnected",
+                };
+                let _ = tray_icon.set_tooltip(Some(tooltip));
+            }
 
             // Rebuild menu to reflect new state (enabled/disabled items + status text)
             let svc_state = match new_state {
@@ -144,19 +157,24 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
                 svc_state,
                 new_custom_config.as_ref(),
                 &data_dir_str,
+                bin_available,
             );
             let (new_menu, new_action_map) = build_native_menu(&new_menu_items);
             tray_icon.set_menu(Some(Box::new(new_menu)));
             action_map = new_action_map;
 
-            tracing::info!(state = new_state, "tray icon and menu updated");
+            tracing::info!(
+                state = new_state,
+                reloaded = reload_requested,
+                "tray icon and menu updated"
+            );
         }
 
         if let Event::NewEvents(_) = event {
             while let Ok(event) = menu_receiver.try_recv() {
                 if let Some(action) = action_map.get(&event.id) {
                     tracing::info!("menu action triggered");
-                    execute_action(action, &args, &data_dir_str, &should_quit);
+                    execute_action(action, &args, &data_dir_str, &should_quit, &should_reload);
                 }
             }
         }
@@ -255,6 +273,7 @@ fn execute_action(
     args: &TrayArgs,
     _data_dir_str: &str,
     quit_flag: &AtomicBool,
+    reload_flag: &AtomicBool,
 ) {
     match action {
         MenuItemAction::OpenUrl(url) => {
@@ -288,51 +307,41 @@ fn execute_action(
             });
         }
         MenuItemAction::StartService => {
-            let bin = find_bifrost_binary();
-            if let Some(bin) = bin {
-                let data_dir = args.data_dir.to_string_lossy().to_string();
-                let port = args.port;
-                let extra_args = args.start_args.clone();
-                thread::spawn(move || {
-                    let mut cmd = std::process::Command::new(&bin);
-                    cmd.env("BIFROST_DATA_DIR", &data_dir)
-                        .env("BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT", "1")
-                        .arg("start")
-                        .arg("--no-tray")
-                        .arg("--no-system-proxy");
-                    if let Some(p) = port {
-                        cmd.arg("-p").arg(p.to_string());
-                    }
-                    for a in &extra_args {
-                        cmd.arg(a);
-                    }
-                    match cmd.spawn() {
-                        Ok(child) => {
-                            tracing::info!(pid = child.id(), "bifrost service started");
-                        }
-                        Err(e) => {
-                            tracing::error!(error = %e, "failed to start bifrost service");
-                        }
-                    }
-                });
-            } else {
-                tracing::error!("cannot find bifrost binary to start service");
-            }
+            let Some(bin) = resolve_bifrost_binary(args) else {
+                tracing::error!("cannot find trusted bifrost binary to start service");
+                return;
+            };
+            let data_dir = args.data_dir.to_string_lossy().to_string();
+            let port = args.port;
+            let extra_args = args.start_args.clone();
+            thread::spawn(move || {
+                spawn_start(&bin, &data_dir, port, &extra_args);
+            });
         }
         MenuItemAction::StopService => {
-            let runtime = runtime::read_runtime(&args.runtime_file);
-            if let Some(rt) = runtime {
-                if let Some(bin) = &rt.binary_path {
-                    let data_dir = args.data_dir.to_string_lossy().to_string();
-                    let bin = bin.clone();
-                    thread::spawn(move || {
-                        let _ = std::process::Command::new(&bin)
-                            .env("BIFROST_DATA_DIR", &data_dir)
-                            .arg("stop")
-                            .spawn();
-                    });
-                }
-            }
+            let Some(bin) = resolve_bifrost_binary(args) else {
+                tracing::error!("cannot find trusted bifrost binary to stop service");
+                return;
+            };
+            let data_dir = args.data_dir.to_string_lossy().to_string();
+            thread::spawn(move || {
+                spawn_stop(&bin, &data_dir);
+            });
+        }
+        MenuItemAction::RestartService => {
+            let Some(bin) = resolve_bifrost_binary(args) else {
+                tracing::error!("cannot find trusted bifrost binary to restart service");
+                return;
+            };
+            let data_dir = args.data_dir.to_string_lossy().to_string();
+            let port = args.port;
+            let extra_args = args.start_args.clone();
+            thread::spawn(move || {
+                spawn_stop(&bin, &data_dir);
+                // Give the old process a moment to release the port/lock.
+                thread::sleep(Duration::from_millis(1500));
+                spawn_start(&bin, &data_dir, port, &extra_args);
+            });
         }
         MenuItemAction::OpenDirectory(path) => {
             if let Err(e) = open::that(path) {
@@ -340,7 +349,8 @@ fn execute_action(
             }
         }
         MenuItemAction::ReloadMenu => {
-            tracing::info!("menu reload requested (requires restart)");
+            tracing::info!("menu reload requested");
+            reload_flag.store(true, Ordering::Relaxed);
         }
         MenuItemAction::QuitTray => {
             tracing::info!("quit tray requested");
@@ -348,6 +358,60 @@ fn execute_action(
         }
         MenuItemAction::None => {}
     }
+}
+
+fn spawn_start(bin: &Path, data_dir: &str, port: Option<u16>, extra_args: &[String]) {
+    let mut cmd = std::process::Command::new(bin);
+    cmd.env("BIFROST_DATA_DIR", data_dir)
+        .env("BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT", "1")
+        .arg("start")
+        .arg("--no-tray")
+        .arg("--no-system-proxy");
+    if let Some(p) = port {
+        cmd.arg("-p").arg(p.to_string());
+    }
+    for a in extra_args {
+        cmd.arg(a);
+    }
+    match cmd.spawn() {
+        Ok(child) => {
+            tracing::info!(pid = child.id(), "bifrost service started");
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "failed to start bifrost service");
+        }
+    }
+}
+
+fn spawn_stop(bin: &Path, data_dir: &str) {
+    match std::process::Command::new(bin)
+        .env("BIFROST_DATA_DIR", data_dir)
+        .arg("stop")
+        .spawn()
+    {
+        Ok(child) => {
+            tracing::info!(pid = child.id(), "bifrost stop invoked");
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "failed to stop bifrost service");
+        }
+    }
+}
+
+/// Resolve the bifrost binary to use for service control.
+///
+/// Only trusted sources are honored: the explicit `--bifrost-bin` passed by the
+/// launching CLI, falling back to a sibling binary next to this tray helper.
+/// The `binary_path` recorded in runtime.json is intentionally NOT trusted, as
+/// it is attacker-influenceable if the data dir is writable.
+fn resolve_bifrost_binary(args: &TrayArgs) -> Option<std::path::PathBuf> {
+    if let Some(bin) = &args.bifrost_bin {
+        if bin.exists() {
+            return Some(bin.clone());
+        }
+        tracing::warn!(path = %bin.display(), "--bifrost-bin set but file not found");
+    }
+    find_bifrost_binary()
 }
 
 fn find_bifrost_binary() -> Option<std::path::PathBuf> {

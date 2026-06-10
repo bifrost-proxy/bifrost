@@ -22,6 +22,12 @@ pub struct TrayArgs {
 
     #[arg(
         long,
+        help = "Trusted path to the bifrost binary, used for start/stop/restart actions"
+    )]
+    pub bifrost_bin: Option<PathBuf>,
+
+    #[arg(
+        long,
         allow_hyphen_values = true,
         help = "Extra args to pass when restarting bifrost"
     )]

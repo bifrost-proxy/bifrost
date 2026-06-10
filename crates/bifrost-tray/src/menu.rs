@@ -17,6 +17,7 @@ pub enum MenuItemAction {
     AdminApi { method: String, url: String },
     StartService,
     StopService,
+    RestartService,
     OpenDirectory(String),
     ReloadMenu,
     QuitTray,
@@ -28,6 +29,7 @@ pub fn build_menu(
     state: ServiceState,
     custom_config: Option<&TrayConfig>,
     data_dir: &str,
+    bin_available: bool,
 ) -> Vec<MenuItemDef> {
     let mut items = Vec::new();
     let is_running = state == ServiceState::Running;
@@ -120,14 +122,20 @@ pub fn build_menu(
         items.push(MenuItemDef {
             id: "toggle_service".to_string(),
             label: "Stop Bifrost".to_string(),
-            enabled: true,
+            enabled: bin_available,
             action: MenuItemAction::StopService,
+        });
+        items.push(MenuItemDef {
+            id: "restart_service".to_string(),
+            label: "Restart Bifrost".to_string(),
+            enabled: bin_available,
+            action: MenuItemAction::RestartService,
         });
     } else {
         items.push(MenuItemDef {
             id: "toggle_service".to_string(),
             label: "Start Bifrost".to_string(),
-            enabled: true,
+            enabled: bin_available,
             action: MenuItemAction::StartService,
         });
     }
@@ -231,16 +239,31 @@ mod tests {
     #[test]
     fn test_menu_running_state() {
         let rt = sample_runtime();
-        let menu = build_menu(Some(&rt), ServiceState::Running, None, "/tmp/.bifrost");
+        let menu = build_menu(
+            Some(&rt),
+            ServiceState::Running,
+            None,
+            "/tmp/.bifrost",
+            true,
+        );
         assert!(menu[0].label.contains("Running on 127.0.0.1:8800"));
         let open_admin = menu.iter().find(|m| m.id == "open_admin_ui").unwrap();
         assert!(open_admin.enabled);
+        // Restart is offered when running
+        let restart = menu.iter().find(|m| m.id == "restart_service").unwrap();
+        assert!(restart.enabled);
     }
 
     #[test]
     fn test_menu_stopped_state() {
         let rt = sample_runtime();
-        let menu = build_menu(Some(&rt), ServiceState::Stopped, None, "/tmp/.bifrost");
+        let menu = build_menu(
+            Some(&rt),
+            ServiceState::Stopped,
+            None,
+            "/tmp/.bifrost",
+            true,
+        );
         assert!(menu[0].label.contains("Stopped"));
         let open_admin = menu.iter().find(|m| m.id == "open_admin_ui").unwrap();
         assert!(!open_admin.enabled);
@@ -249,12 +272,34 @@ mod tests {
     }
 
     #[test]
+    fn test_service_controls_disabled_without_bin() {
+        let rt = sample_runtime();
+        let menu = build_menu(
+            Some(&rt),
+            ServiceState::Running,
+            None,
+            "/tmp/.bifrost",
+            false,
+        );
+        let stop = menu.iter().find(|m| m.id == "toggle_service").unwrap();
+        assert!(!stop.enabled);
+        let restart = menu.iter().find(|m| m.id == "restart_service").unwrap();
+        assert!(!restart.enabled);
+    }
+
+    #[test]
     fn test_menu_no_socks5_disabled() {
         let rt = RuntimeInfo {
             socks5_port: None,
             ..sample_runtime()
         };
-        let menu = build_menu(Some(&rt), ServiceState::Running, None, "/tmp/.bifrost");
+        let menu = build_menu(
+            Some(&rt),
+            ServiceState::Running,
+            None,
+            "/tmp/.bifrost",
+            true,
+        );
         let socks5 = menu.iter().find(|m| m.id == "copy_socks5_proxy").unwrap();
         assert!(!socks5.enabled);
     }
@@ -277,6 +322,7 @@ mod tests {
             ServiceState::Running,
             Some(&config),
             "/tmp/.bifrost",
+            true,
         );
         let custom = menu.iter().find(|m| m.id == "custom1").unwrap();
         assert_eq!(custom.label, "My Item");

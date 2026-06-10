@@ -1874,6 +1874,8 @@ pub fn run_foreground(
                         extra
                     };
 
+                    let bifrost_self_bin = std::env::current_exe().ok();
+
                     super::tray_launcher::launch_tray_helper(
                         &tray_bin,
                         &bifrost_dir,
@@ -1881,6 +1883,7 @@ pub fn run_foreground(
                         pid,
                         Some(&admin_url),
                         Some(config.port),
+                        bifrost_self_bin.as_deref(),
                         &tray_start_args,
                     );
                 } else {

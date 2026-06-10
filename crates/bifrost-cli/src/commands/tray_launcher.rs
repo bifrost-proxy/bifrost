@@ -40,6 +40,7 @@ pub fn find_tray_binary() -> Option<PathBuf> {
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn launch_tray_helper(
     tray_bin: &Path,
     data_dir: &Path,
@@ -47,6 +48,7 @@ pub fn launch_tray_helper(
     pid: u32,
     admin_url: Option<&str>,
     port: Option<u16>,
+    bifrost_bin: Option<&Path>,
     start_args: &[String],
 ) {
     let mut cmd = Command::new(tray_bin);
@@ -63,6 +65,10 @@ pub fn launch_tray_helper(
 
     if let Some(p) = port {
         cmd.arg("--port").arg(p.to_string());
+    }
+
+    if let Some(bin) = bifrost_bin {
+        cmd.arg("--bifrost-bin").arg(bin);
     }
 
     for a in start_args {

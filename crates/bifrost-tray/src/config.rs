@@ -75,9 +75,19 @@ pub fn load_custom_config(data_dir: &Path) -> Result<Option<TrayConfig>, ConfigE
     Ok(Some(config))
 }
 
+fn has_control_chars(s: &str) -> bool {
+    s.chars().any(|c| c.is_control())
+}
+
 fn validate_action(id: &str, action: &MenuAction) -> Result<(), ConfigError> {
     match action {
         MenuAction::OpenAdminRoute { route } => {
+            if has_control_chars(route) {
+                return Err(ConfigError::Action {
+                    id: id.to_string(),
+                    reason: "route must not contain control characters".to_string(),
+                });
+            }
             if route.contains("://") {
                 return Err(ConfigError::Action {
                     id: id.to_string(),
@@ -93,6 +103,12 @@ fn validate_action(id: &str, action: &MenuAction) -> Result<(), ConfigError> {
             }
         }
         MenuAction::OpenUrl { url } => {
+            if has_control_chars(url) {
+                return Err(ConfigError::Action {
+                    id: id.to_string(),
+                    reason: "url must not contain control characters".to_string(),
+                });
+            }
             if !url.starts_with("http://") && !url.starts_with("https://") {
                 return Err(ConfigError::Action {
                     id: id.to_string(),
@@ -101,7 +117,13 @@ fn validate_action(id: &str, action: &MenuAction) -> Result<(), ConfigError> {
             }
         }
         MenuAction::CopyText { .. } => {}
-        MenuAction::AdminApi { path, .. } => {
+        MenuAction::AdminApi { method, path } => {
+            if has_control_chars(path) || has_control_chars(method) {
+                return Err(ConfigError::Action {
+                    id: id.to_string(),
+                    reason: "admin_api method/path must not contain control characters".to_string(),
+                });
+            }
             if !ADMIN_API_PATH_ALLOWLIST.contains(&path.as_str()) {
                 return Err(ConfigError::Action {
                     id: id.to_string(),
@@ -180,6 +202,24 @@ mod tests {
     fn test_open_url_rejects_non_http() {
         let action = MenuAction::OpenUrl {
             url: "file:///etc/passwd".to_string(),
+        };
+        let result = validate_action("test", &action);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_open_admin_route_rejects_control_chars() {
+        let action = MenuAction::OpenAdminRoute {
+            route: "/settings\r\nHost: evil".to_string(),
+        };
+        let result = validate_action("test", &action);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_open_url_rejects_control_chars() {
+        let action = MenuAction::OpenUrl {
+            url: "https://example.com/\nX".to_string(),
         };
         let result = validate_action("test", &action);
         assert!(result.is_err());
