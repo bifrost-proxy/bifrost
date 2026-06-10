@@ -1,0 +1,2 @@
+# 被 @at_rule_merge 引用的 shared 规则。保持为单独文件，测试时会保存为禁用规则，避免 standalone 生效。
+at-rule-e2e.test reqHeaders://X-At-Rule=ok

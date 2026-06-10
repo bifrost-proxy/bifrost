@@ -54,14 +54,21 @@ function severityToMarkerSeverity(severity: ParseError['severity']): MarkerSever
 
 export async function validateRules(
   content: string,
-  globalValues?: Record<string, string>
+  globalValues?: Record<string, string>,
+  currentRuleName?: string | null,
+  currentGroupName?: string | null
 ): Promise<ValidationResult> {
   const response = await apiFetch('/_bifrost/api/rules/validate', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ content, global_values: globalValues || {} }),
+    body: JSON.stringify({
+      content,
+      global_values: globalValues || {},
+      current_rule_name: currentRuleName || undefined,
+      current_group_name: currentGroupName || undefined,
+    }),
   });
 
   if (!response.ok) {
@@ -123,7 +130,9 @@ export interface DebouncedValidator {
 
 export function createDebouncedValidator(
   delayMs = 500,
-  getGlobalValues?: GlobalValuesGetter
+  getGlobalValues?: GlobalValuesGetter,
+  getCurrentRuleName?: () => string | null | undefined,
+  getCurrentGroupName?: () => string | null | undefined
 ): DebouncedValidator {
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
   let abortController: AbortController | null = null;
@@ -155,7 +164,12 @@ export function createDebouncedValidator(
       const globalValues = getGlobalValues?.() || {};
 
       try {
-        const result = await validateRules(content, globalValues);
+        const result = await validateRules(
+          content,
+          globalValues,
+          getCurrentRuleName?.(),
+          getCurrentGroupName?.()
+        );
         if (model.isDisposed()) return;
 
         setValidationMarkers(model, result);

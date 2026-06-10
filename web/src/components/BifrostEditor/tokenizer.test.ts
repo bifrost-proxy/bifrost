@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import tokenizer from './tokenizer';
+import {
+  getRuleReferenceCompletionContext,
+  parseRuleReferenceLine,
+} from './snippet/ruleReference';
 
 function rootTokenClasses(line: string): string[] {
   const root = tokenizer.language.tokenizer.root;
@@ -40,5 +44,35 @@ describe('Bifrost tokenizer', () => {
 
     expect(classes).toContain('string');
     expect(classes).not.toContain('attribute.value');
+  });
+
+  it('marks at-rule references as clickable references', () => {
+    const classes = rootTokenClasses('@shared-rule');
+
+    expect(classes).toContain('reference.user');
+  });
+
+  it('matches rule references only on standalone at-rule lines', () => {
+    expect(parseRuleReferenceLine('@shared-rule')?.name).toBe('shared-rule');
+    expect(parseRuleReferenceLine('  @team/shared\t# reuse')?.name).toBe('team/shared');
+    expect(parseRuleReferenceLine('@commented-shared')?.name).toBe('commented-shared');
+    expect(parseRuleReferenceLine('@comment not a reference')).toBeNull();
+    expect(parseRuleReferenceLine('# @shared-rule')).toBeNull();
+    expect(parseRuleReferenceLine('example.com @shared-rule')).toBeNull();
+    expect(parseRuleReferenceLine('@#hash-prefixed')?.name).toBe('#hash-prefixed');
+  });
+
+  it('only offers rule reference completion on standalone at-rule lines', () => {
+    expect(getRuleReferenceCompletionContext('@sh', 4)).toMatchObject({
+      typedText: 'sh',
+      startColumn: 2,
+    });
+    expect(getRuleReferenceCompletionContext('  @te', 6)).toMatchObject({
+      typedText: 'te',
+      startColumn: 4,
+    });
+    expect(getRuleReferenceCompletionContext('# @sh', 6)).toBeNull();
+    expect(getRuleReferenceCompletionContext('example.com @sh', 16)).toBeNull();
+    expect(getRuleReferenceCompletionContext('@shared # comment', 18)).toBeNull();
   });
 });

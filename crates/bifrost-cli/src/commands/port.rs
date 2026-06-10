@@ -8,7 +8,7 @@ use bifrost_admin::{
     TemporaryPortError, TemporaryPortManager, TemporaryPortRuleItem, TemporaryPortStatus,
     TemporaryPortUpdateRequest,
 };
-use bifrost_core::{Rule, RuleParser, ValueStore};
+use bifrost_core::{expand_rule_references, Rule, RuleParser, ValueStore};
 use bifrost_proxy::{ProxyConfig, TlsConfig};
 use bifrost_storage::{RuleFile, RulesStorage};
 use parking_lot::RwLock;
@@ -118,13 +118,33 @@ impl CliTemporaryPortManager {
         let mut all_rules = Vec::new();
         let mut inline_values = HashMap::new();
         let mut missing = Vec::new();
+        let all_rule_files = self
+            .rules_storage
+            .load_all_with_subdirs()
+            .unwrap_or_default();
+        let mut reference_catalog = bifrost_storage::build_rule_reference_catalog(&all_rule_files);
 
         for rule_ref in refs {
             match self.load_rule_file(rule_ref) {
                 Ok((rule_file, _group_id, _group_name)) => {
+                    let source_name = bifrost_storage::rule_reference_key(&rule_file);
+                    reference_catalog
+                        .entry(source_name.clone())
+                        .or_insert_with(|| rule_file.content.clone());
+                    let expanded_content = expand_rule_references(
+                        &source_name,
+                        &rule_file.content,
+                        &reference_catalog,
+                    )
+                    .map_err(|error| {
+                        TemporaryPortError::bad_request(format!(
+                            "Failed to expand rule '{}': {}",
+                            rule_file.name, error
+                        ))
+                    })?;
                     let parser = RuleParser::new();
                     let (result, file_inline_values) =
-                        parser.parse_rules_tolerant_with_inline_values(&rule_file.content);
+                        parser.parse_rules_tolerant_with_inline_values(&expanded_content);
                     if !result.errors.is_empty() {
                         let first = &result.errors[0];
                         return Err(TemporaryPortError::bad_request(format!(

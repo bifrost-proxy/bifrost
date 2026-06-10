@@ -1,0 +1,2 @@
+# 被 @组名/规则名 引用的组 shared 规则。保持为禁用规则，测试时只通过 entry 引用生效。
+at-rule-e2e.test reqHeaders://X-Group-At-Rule=ok

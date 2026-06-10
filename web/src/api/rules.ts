@@ -26,8 +26,19 @@ export interface ActiveSummaryResponse {
   merged_content: string;
 }
 
+export interface RuleReferenceCandidate {
+  name: string;
+  rule_name: string;
+  group_name: string | null;
+  group_id: string | null;
+}
+
 export async function getActiveSummary(): Promise<ActiveSummaryResponse> {
   return get<ActiveSummaryResponse>('/rules/active-summary');
+}
+
+export async function getRuleReferenceCandidates(): Promise<RuleReferenceCandidate[]> {
+  return get<RuleReferenceCandidate[]>('/rules/reference-candidates');
 }
 
 export async function getRules(): Promise<RuleFile[]> {

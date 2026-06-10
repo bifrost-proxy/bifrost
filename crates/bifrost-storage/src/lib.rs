@@ -12,7 +12,8 @@ pub use config_manager::{ConfigChangeEvent, ConfigManager, SharedConfigManager};
 pub use data_dir::{data_dir, set_data_dir};
 pub use remote_shell::{RemoteShellPolicy, RemoteShellProfile, RemoteShellSet, RemoteShellStore};
 pub use rules::{
-    content_hash, RuleFile, RuleSummary, RuleSyncMetadata, RuleSyncStatus, RulesStorage,
+    build_rule_reference_catalog, content_hash, rule_reference_key, RuleFile, RuleSummary,
+    RuleSyncMetadata, RuleSyncStatus, RulesStorage,
 };
 pub use state::{RuntimeState, StateManager};
 pub use unified_config::{

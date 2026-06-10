@@ -2,6 +2,7 @@ import { languages, editor, Position } from 'monaco-editor';
 import type { IRange } from 'monaco-editor';
 import { getDynamicData, type ReferenceLocation, type ReferenceType } from './dynamic';
 import { getProtocolDoc, formatProtocolHover } from './protocol-docs';
+import { findRuleReferenceAtColumn } from './ruleReference';
 
 export interface ReferenceMatch {
   name: string;
@@ -41,6 +42,19 @@ function findReferenceAtPosition(
 ): ReferenceMatch | null {
   const lineContent = model.getLineContent(position.lineNumber);
   const column = position.column;
+  const ruleReference = findRuleReferenceAtColumn(lineContent, column);
+  if (ruleReference) {
+    return {
+      name: ruleReference.name,
+      type: 'rule',
+      range: {
+        startLineNumber: position.lineNumber,
+        endLineNumber: position.lineNumber,
+        startColumn: ruleReference.startColumn,
+        endColumn: ruleReference.endColumn,
+      },
+    };
+  }
 
   const patterns: { pattern: RegExp; type: ReferenceType }[] = [
     { pattern: VALUE_REF_PATTERN, type: 'value' },
@@ -162,6 +176,24 @@ export function getReferenceLocation(
         navigationType: 'page',
         uri: `/scripts?type=parser&name=${encodeURIComponent(name)}`,
       };
+    case 'rule':
+      if (name.includes('/')) {
+        const separator = name.indexOf('/');
+        const groupName = name.slice(0, separator);
+        const ruleName = name.slice(separator + 1);
+        return {
+          name,
+          type: 'rule',
+          navigationType: 'page',
+          uri: `/rules?group=${encodeURIComponent(groupName)}&rule=${encodeURIComponent(ruleName)}`,
+        };
+      }
+      return {
+        name,
+        type: 'rule',
+        navigationType: 'page',
+        uri: `/rules?rule=${encodeURIComponent(name)}`,
+      };
   }
 
   return undefined;
@@ -177,6 +209,8 @@ function getTypeLabel(type: ReferenceType): string {
       return 'Response Script';
     case 'parserScript':
       return 'Parser Script';
+    case 'rule':
+      return 'Rule Reference';
   }
 }
 
@@ -196,12 +230,17 @@ export interface LocalVariableDefinition {
 }
 
 let localVariables: LocalVariableDefinition[] = [];
+let ruleReferenceErrorsByLine = new Map<number, string>();
 
 export const setLocalVariables = (variables: LocalVariableDefinition[]) => {
   localVariables = variables;
 };
 
 export const getLocalVariables = (): LocalVariableDefinition[] => localVariables;
+
+export const setRuleReferenceErrors = (errors: Array<{ line: number; message: string }>) => {
+  ruleReferenceErrorsByLine = new Map(errors.map((error) => [error.line, error.message]));
+};
 
 function findLocalVariableDefinition(name: string): LocalVariableDefinition | undefined {
   return localVariables.find((v) => v.name === name);
@@ -228,22 +267,49 @@ export const hoverProvider: languages.HoverProvider = {
     const reference = findReferenceAtPosition(model, position);
     if (!reference) return null;
 
+    if (reference.type === 'rule') {
+      const errorMessage = ruleReferenceErrorsByLine.get(reference.range.startLineNumber);
+      if (errorMessage) {
+        return {
+          range: reference.range,
+          contents: [
+            {
+              value: `**Rule reference error**: \`@${reference.name}\`\n\n${errorMessage}`,
+            },
+          ],
+        };
+      }
+
+      if (!getDynamicData().rules.includes(reference.name)) {
+        return {
+          range: reference.range,
+          contents: [
+            {
+              value: `**Rule reference error**: \`@${reference.name}\`\n\nRule reference '@${reference.name}' was not found.`,
+            },
+          ],
+        };
+      }
+    }
+
     const location = getReferenceLocation(reference.name, reference.type);
     if (!location) return null;
 
     const typeLabel = getTypeLabel(reference.type);
     const actionText =
-      location.navigationType === "page"
+      reference.type === 'rule'
+        ? "Click to expand inline, F12 to open"
+        : location.navigationType === "page"
         ? "Go to definition"
         : "Jump to definition";
 
     const displayTypeLabel = reference.type === 'value' && location.navigationType === 'editor'
       ? 'Local Variable'
       : typeLabel;
-    const hintText = '(F12 or Cmd+Click)';
+    const hintText = reference.type === 'rule' ? '' : '(F12 or Cmd+Click)';
     const contents = [
       {
-        value: `**${displayTypeLabel}**: \`${reference.name}\`\n\n${actionText} ${hintText}`,
+        value: `**${displayTypeLabel}**: \`${reference.name}\`\n\n${actionText} ${hintText}`.trim(),
       },
     ];
 

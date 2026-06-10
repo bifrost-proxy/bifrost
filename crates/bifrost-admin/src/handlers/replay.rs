@@ -2522,6 +2522,10 @@ fn resolve_from_storage(
             return (bifrost_core::ResolvedRules::default(), vec![], values);
         }
     };
+    let catalog_rule_files = rules_storage
+        .load_all_with_subdirs()
+        .unwrap_or_else(|_| rule_files.clone());
+    let reference_catalog = bifrost_storage::build_rule_reference_catalog(&catalog_rule_files);
 
     for rule_file in rule_files {
         if !rule_file.enabled {
@@ -2535,8 +2539,24 @@ fn resolve_from_storage(
         }
 
         let parser = RuleParser::with_values(values.clone());
+        let source_name = bifrost_storage::rule_reference_key(&rule_file);
+        let expanded_content = match bifrost_core::expand_rule_references(
+            &source_name,
+            &rule_file.content,
+            &reference_catalog,
+        ) {
+            Ok(content) => content,
+            Err(error) => {
+                warn!(
+                    rule_name = %rule_file.name,
+                    error = %error,
+                    "[REPLAY] Failed to expand rule references"
+                );
+                continue;
+            }
+        };
         if let Ok((parsed, inline_values)) =
-            parser.parse_rules_with_inline_values(&rule_file.content)
+            parser.parse_rules_with_inline_values(&expanded_content)
         {
             for (key, value) in inline_values {
                 values.entry(key).or_insert(value);

@@ -16,6 +16,7 @@ import {
   setNavigateCallback,
   getNavigateCallback,
   setLocalVariables,
+  setRuleReferenceErrors,
   executePendingNavigation,
   type NavigateCallback,
   type LocalVariableDefinition,
@@ -49,7 +50,7 @@ import {
 } from './protocol-docs';
 
 export { updateDynamicData, getDynamicData, dynamicProvider, setLocalVariablesGetter };
-export { hoverProvider, definitionProvider, setNavigateCallback, getNavigateCallback, setLocalVariables, executePendingNavigation };
+export { hoverProvider, definitionProvider, setNavigateCallback, getNavigateCallback, setLocalVariables, setRuleReferenceErrors, executePendingNavigation };
 export { validateRules, setValidationMarkers, clearValidationMarkers, createDebouncedValidator };
 export { codeActionProvider, setFixesForMarker, clearFixesCache };
 export { signatureHelpProvider };

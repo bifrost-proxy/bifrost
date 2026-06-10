@@ -43,6 +43,7 @@ interface RulesState {
   saving: boolean;
   error: string | null;
   activeGroupId: string | null;
+  activeGroupName: string | null;
   isGroupMode: boolean;
   groupWritable: boolean;
   setActiveGroupId: (groupId: string | null) => void;
@@ -73,12 +74,14 @@ export const useRulesStore = create<RulesState>((set, get) => ({
   saving: false,
   error: null,
   activeGroupId: null,
+  activeGroupName: null,
   isGroupMode: false,
   groupWritable: false,
 
   setActiveGroupId: (groupId: string | null) => {
     set({
       activeGroupId: groupId,
+      activeGroupName: null,
       isGroupMode: groupId !== null,
       groupWritable: false,
       rules: [],
@@ -96,7 +99,7 @@ export const useRulesStore = create<RulesState>((set, get) => ({
     if (!activeGroupId) {
       try {
         const rules = await api.getRules();
-        set({ rules: sortRulesByManualOrder(rules), loading: false, isGroupMode: false, groupWritable: false });
+        set({ rules: sortRulesByManualOrder(rules), loading: false, isGroupMode: false, activeGroupName: null, groupWritable: false });
       } catch (e) {
         set({ error: isConnectionIssueError(e) ? null : (e as Error).message, loading: false });
       }
@@ -110,6 +113,7 @@ export const useRulesStore = create<RulesState>((set, get) => ({
         rules: ruleFiles,
         loading: false,
         isGroupMode: true,
+        activeGroupName: resp.group_name,
         groupWritable: resp.writable,
       });
     } catch (e) {
@@ -445,7 +449,7 @@ export const useRulesStore = create<RulesState>((set, get) => ({
           await disableGroupRule(activeGroupId, name);
         }
         const resp = await fetchGroupRules(activeGroupId);
-        set({ rules: resp.rules.map(groupRuleToRuleFile) });
+        set({ rules: resp.rules.map(groupRuleToRuleFile), activeGroupName: resp.group_name });
         if (get().currentRule?.name === name) {
           const detail = await getGroupRule(activeGroupId, name);
           set({

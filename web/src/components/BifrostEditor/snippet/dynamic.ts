@@ -1,7 +1,8 @@
 import { languages, editor, Position } from 'monaco-editor';
 import type { IRange } from 'monaco-editor';
+import { getRuleReferenceCompletionContext } from './ruleReference';
 
-export type ReferenceType = 'value' | 'requestScript' | 'responseScript' | 'parserScript';
+export type ReferenceType = 'value' | 'requestScript' | 'responseScript' | 'parserScript' | 'rule';
 export type NavigationType = 'page' | 'editor';
 
 export interface ReferenceLocation {
@@ -14,6 +15,7 @@ export interface ReferenceLocation {
 
 export interface DynamicCompletionData {
   values: string[];
+  rules: string[];
   requestScripts: string[];
   responseScripts: string[];
   referenceLocations: Map<string, ReferenceLocation>;
@@ -21,6 +23,7 @@ export interface DynamicCompletionData {
 
 let dynamicData: DynamicCompletionData = {
   values: [],
+  rules: [],
   requestScripts: [],
   responseScripts: [],
   referenceLocations: new Map(),
@@ -83,8 +86,33 @@ const createScriptSuggestions = (
   }));
 };
 
+const fuzzyMatch = (query: string, candidate: string): boolean => {
+  if (!query) return true;
+  const normalizedQuery = query.toLowerCase();
+  const normalizedCandidate = candidate.toLowerCase();
+  if (normalizedCandidate.includes(normalizedQuery)) return true;
+
+  let queryIndex = 0;
+  for (const char of normalizedCandidate) {
+    if (char === normalizedQuery[queryIndex]) {
+      queryIndex += 1;
+      if (queryIndex === normalizedQuery.length) return true;
+    }
+  }
+  return false;
+};
+
+const ruleSuggestionRank = (query: string, candidate: string): string => {
+  const normalizedQuery = query.toLowerCase();
+  const normalizedCandidate = candidate.toLowerCase();
+  if (!normalizedQuery) return `2_${candidate}`;
+  if (normalizedCandidate.startsWith(normalizedQuery)) return `0_${candidate}`;
+  if (normalizedCandidate.includes(normalizedQuery)) return `1_${candidate}`;
+  return `2_${candidate}`;
+};
+
 export const dynamicProvider: languages.CompletionItemProvider = {
-  triggerCharacters: ['{', '/', ':'],
+  triggerCharacters: ['{', '/', ':', '@'],
   provideCompletionItems: (
     model: editor.ITextModel,
     position: Position
@@ -98,10 +126,6 @@ export const dynamicProvider: languages.CompletionItemProvider = {
     const lineContent = model.getLineContent(position.lineNumber);
     const textBeforeCursor = lineContent.substring(0, position.column - 1);
 
-    if (textBeforeCursor.trim().startsWith('@')) {
-      return { suggestions };
-    }
-
     const word = model.getWordUntilPosition(position);
     const range: IRange = {
       startLineNumber: position.lineNumber,
@@ -112,6 +136,30 @@ export const dynamicProvider: languages.CompletionItemProvider = {
 
     const reqScriptMatch = textBeforeCursor.match(/reqScript:\/\/([^\s]*)$/);
     const resScriptMatch = textBeforeCursor.match(/resScript:\/\/([^\s]*)$/);
+    const ruleReferenceContext = getRuleReferenceCompletionContext(
+      textBeforeCursor,
+      position.column,
+    );
+
+    if (ruleReferenceContext) {
+      const typedText = ruleReferenceContext.typedText;
+      const ruleRange: IRange = {
+        ...range,
+        startColumn: ruleReferenceContext.startColumn,
+      };
+      const filteredRules = dynamicData.rules.filter((name) => fuzzyMatch(typedText, name));
+      return {
+        suggestions: filteredRules.map((name) => ({
+          label: `@${name}`,
+          kind: languages.CompletionItemKind.Reference,
+          detail: `Rule Reference: ${name}`,
+          documentation: `Inline-expand rule "${name}" at this position`,
+          insertText: name,
+          range: ruleRange,
+          sortText: ruleSuggestionRank(typedText, name),
+        })),
+      };
+    }
 
     if (reqScriptMatch) {
       const typedText = reqScriptMatch[1];
