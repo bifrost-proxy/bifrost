@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -59,7 +59,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
 
     let icon_running = load_icon(false);
     let icon_stopped = load_icon(true);
-    let runtime = runtime::read_runtime(&args.runtime_file);
+    let runtime = runtime_for_menu(&args);
     let state = determine_state(runtime.as_ref(), args.parent_pid);
     let custom_config = load_custom_config_safe(&args.data_dir);
     let data_dir_str = args.data_dir.to_string_lossy().to_string();
@@ -172,7 +172,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
             reload_requested,
         ) {
             last_rules_probe = Instant::now();
-            let rt = runtime::read_runtime(&args.runtime_file);
+            let rt = runtime_for_menu(&args);
             let current_rules = load_rules_for_menu(rt.as_ref(), svc_state);
             if current_rules != last_rendered_rules {
                 Some(current_rules)
@@ -215,7 +215,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
             }
 
             // Rebuild menu to reflect new state (enabled/disabled items + status text)
-            let rt = runtime::read_runtime(&args.runtime_file);
+            let rt = runtime_for_menu(&args);
             let new_custom_config = load_custom_config_safe(&args.data_dir);
             let rules = probed_rules.unwrap_or_else(|| load_rules_for_menu(rt.as_ref(), svc_state));
             last_rendered_rules = rules.clone();
@@ -396,6 +396,70 @@ fn determine_state(runtime: Option<&RuntimeInfo>, parent_pid: u32) -> ServiceSta
     }
 }
 
+fn runtime_for_menu(args: &TrayArgs) -> Option<RuntimeInfo> {
+    runtime::read_runtime(&args.runtime_file).or_else(|| {
+        if runtime::is_process_running(args.parent_pid) {
+            fallback_runtime_from_args(args)
+        } else {
+            None
+        }
+    })
+}
+
+fn fallback_runtime_from_args(args: &TrayArgs) -> Option<RuntimeInfo> {
+    let port = args.port.or_else(|| {
+        args.admin_url
+            .as_deref()
+            .and_then(parse_port_from_admin_url)
+    })?;
+    Some(RuntimeInfo {
+        pid: args.parent_pid,
+        port,
+        socks5_port: None,
+        host: args
+            .admin_url
+            .as_deref()
+            .and_then(parse_host_from_admin_url),
+        started_at_ms: None,
+        binary_path: args.bifrost_bin.clone(),
+    })
+}
+
+fn parse_host_from_admin_url(admin_url: &str) -> Option<String> {
+    parse_authority_from_admin_url(admin_url).and_then(|authority| {
+        if authority.starts_with('[') {
+            let end = authority.find(']')?;
+            Some(authority[..=end].to_string())
+        } else {
+            authority
+                .split(':')
+                .next()
+                .filter(|host| !host.is_empty())
+                .map(str::to_string)
+        }
+    })
+}
+
+fn parse_port_from_admin_url(admin_url: &str) -> Option<u16> {
+    let authority = parse_authority_from_admin_url(admin_url)?;
+    let port = if authority.starts_with('[') {
+        let end = authority.find(']')?;
+        authority.get(end + 2..)?
+    } else {
+        authority.rsplit_once(':')?.1
+    };
+    port.parse::<u16>().ok()
+}
+
+fn parse_authority_from_admin_url(admin_url: &str) -> Option<&str> {
+    let rest = admin_url
+        .strip_prefix("http://")
+        .or_else(|| admin_url.strip_prefix("https://"))?;
+    rest.split('/')
+        .next()
+        .filter(|authority| !authority.is_empty())
+}
+
 fn load_custom_config_safe(data_dir: &Path) -> Option<TrayConfig> {
     match config::load_custom_config(data_dir) {
         Ok(cfg) => cfg,
@@ -411,6 +475,12 @@ struct RuleReferenceCandidate {
     rule_name: String,
     group_name: Option<String>,
     group_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ManagedGroupForTray {
+    id: String,
+    name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -429,6 +499,19 @@ struct SystemProxyStatusResponse {
     supported: bool,
     enabled: bool,
     managed_by_bifrost: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GroupRulesResponseForTray {
+    group_name: String,
+    rules: Vec<GroupRuleInfoForTray>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GroupRuleInfoForTray {
+    name: String,
+    enabled: bool,
+    sort_order: i32,
 }
 
 fn load_rules_for_menu(runtime: Option<&RuntimeInfo>, state: ServiceState) -> Vec<menu::TrayRule> {
@@ -490,29 +573,122 @@ fn load_rules_from_admin(admin_url: &str) -> Vec<menu::TrayRule> {
         .collect::<Vec<_>>();
 
     let mut rules = candidates
-        .into_iter()
-        .map(|candidate| {
-            let managed_group = candidate_is_managed_group(&candidate, managed_groups.as_ref());
-            let target = match candidate.group_name {
-                Some(group_name) => menu::RuleTarget::Group {
-                    group_name,
-                    name: candidate.rule_name,
-                },
-                None => menu::RuleTarget::Personal {
-                    name: candidate.rule_name,
-                },
+        .iter()
+        .filter_map(|candidate| {
+            if candidate.group_name.is_some() {
+                return None;
+            }
+            let target = menu::RuleTarget::Personal {
+                name: candidate.rule_name.clone(),
             };
             let enabled = active_targets.contains(&target);
-            menu::TrayRule {
+            Some(menu::TrayRule {
                 target,
                 enabled,
                 sort_order: 0,
-                managed_group,
-            }
+                managed_group: false,
+            })
         })
         .collect::<Vec<_>>();
 
+    match managed_groups {
+        Some(managed_groups) => {
+            rules.extend(
+                candidates
+                    .into_iter()
+                    .filter(|candidate| hidden_group_candidate(candidate, &managed_groups))
+                    .map(|candidate| {
+                        let target = menu::RuleTarget::Group {
+                            group_name: candidate.group_name.unwrap_or_default(),
+                            name: candidate.rule_name,
+                        };
+                        let enabled = active_targets.contains(&target);
+                        menu::TrayRule {
+                            target,
+                            enabled,
+                            sort_order: 0,
+                            managed_group: false,
+                        }
+                    }),
+            );
+            rules.extend(load_group_rules_from_managed_groups(
+                &agent,
+                base,
+                &managed_groups,
+            ));
+        }
+        None => {
+            tracing::warn!(
+                "failed to load remote group permissions for tray menu; group rules hidden"
+            );
+        }
+    }
+
     menu::sort_tray_rules(&mut rules);
+    rules
+}
+
+fn hidden_group_candidate(
+    candidate: &RuleReferenceCandidate,
+    managed_groups: &[ManagedGroupForTray],
+) -> bool {
+    let Some(group_name) = candidate.group_name.as_deref() else {
+        return false;
+    };
+    !managed_groups.iter().any(|group| {
+        candidate
+            .group_id
+            .as_deref()
+            .is_some_and(|id| id == group.id)
+            || group.name == group_name
+    })
+}
+
+fn load_group_rules_from_managed_groups(
+    agent: &ureq::Agent,
+    base: &str,
+    groups: &[ManagedGroupForTray],
+) -> Vec<menu::TrayRule> {
+    let mut rules = Vec::new();
+    for group in groups {
+        let url = format!("{base}/api/group-rules/{}", urlencoding::encode(&group.id));
+        match agent.get(&url).call() {
+            Ok(resp) => match resp.into_json::<GroupRulesResponseForTray>() {
+                Ok(group_rules) => {
+                    let group_name = if group_rules.group_name.is_empty() {
+                        group.name.clone()
+                    } else {
+                        group_rules.group_name
+                    };
+                    rules.extend(group_rules.rules.into_iter().map(|rule| menu::TrayRule {
+                        target: menu::RuleTarget::Group {
+                            group_name: group_name.clone(),
+                            name: rule.name,
+                        },
+                        enabled: rule.enabled,
+                        sort_order: rule.sort_order,
+                        managed_group: true,
+                    }));
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        group_id = %group.id,
+                        group_name = %group.name,
+                        error = %error,
+                        "failed to decode group rules for tray menu"
+                    );
+                }
+            },
+            Err(error) => {
+                tracing::warn!(
+                    group_id = %group.id,
+                    group_name = %group.name,
+                    error = %error,
+                    "failed to load group rules for tray menu"
+                );
+            }
+        }
+    }
     rules
 }
 
@@ -541,9 +717,8 @@ fn load_system_proxy_state(admin_url: &str) -> Option<menu::SystemProxyMenuState
 fn load_managed_groups_from_admin(
     agent: &ureq::Agent,
     groups_url: &str,
-) -> Option<(HashSet<String>, HashSet<String>)> {
-    let mut ids = HashSet::new();
-    let mut names = HashSet::new();
+) -> Option<Vec<ManagedGroupForTray>> {
+    let mut managed_groups = Vec::new();
 
     let value = match agent.get(groups_url).call() {
         Ok(resp) => match resp.into_json::<serde_json::Value>() {
@@ -573,44 +748,28 @@ fn load_managed_groups_from_admin(
             if !is_managed {
                 continue;
             }
-            if let Some(id) = group
+            let Some(id) = group
                 .pointer("/id")
                 .or_else(|| group.pointer("/group_id"))
                 .and_then(|v| v.as_str())
-            {
-                ids.insert(id.to_string());
-            }
-            if let Some(name) = group
+            else {
+                continue;
+            };
+            let Some(name) = group
                 .pointer("/name")
                 .or_else(|| group.pointer("/group_name"))
                 .and_then(|v| v.as_str())
-            {
-                names.insert(name.to_string());
-            }
+            else {
+                continue;
+            };
+            managed_groups.push(ManagedGroupForTray {
+                id: id.to_string(),
+                name: name.to_string(),
+            });
         }
     }
 
-    Some((ids, names))
-}
-
-fn candidate_is_managed_group(
-    candidate: &RuleReferenceCandidate,
-    managed_groups: Option<&(HashSet<String>, HashSet<String>)>,
-) -> bool {
-    if candidate.group_name.is_none() {
-        return false;
-    }
-    let Some((managed_group_ids, managed_group_names)) = managed_groups else {
-        return true;
-    };
-    candidate
-        .group_id
-        .as_ref()
-        .is_some_and(|id| managed_group_ids.contains(id))
-        || candidate
-            .group_name
-            .as_ref()
-            .is_some_and(|name| managed_group_names.contains(name))
+    Some(managed_groups)
 }
 
 fn http_agent() -> ureq::Agent {
@@ -836,7 +995,7 @@ fn execute_action(
             target,
             all_targets,
         } => {
-            let rt = runtime::read_runtime(&args.runtime_file);
+            let rt = runtime_for_menu(args);
             let Some(rt) = rt else {
                 tracing::error!("cannot select rule without runtime");
                 return;
@@ -1160,6 +1319,46 @@ mod tests {
     }
 
     #[test]
+    fn test_missing_runtime_file_uses_parent_process_fallback_for_menu() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "bifrost-tray-runtime-fallback-{}",
+            std::process::id()
+        ));
+        let args = TrayArgs {
+            data_dir: data_dir.clone(),
+            runtime_file: data_dir.join("missing-runtime.json"),
+            parent_pid: std::process::id(),
+            admin_url: Some("http://127.0.0.1:9900/_bifrost/".to_string()),
+            port: Some(9900),
+            bifrost_bin: Some(PathBuf::from("/tmp/bifrost")),
+            start_args: Vec::new(),
+        };
+
+        let runtime = runtime_for_menu(&args).expect("parent process fallback runtime");
+        assert_eq!(runtime.pid, std::process::id());
+        assert_eq!(runtime.admin_url(), "http://127.0.0.1:9900/_bifrost/");
+
+        let state = determine_state(Some(&runtime), args.parent_pid);
+        assert_eq!(state, ServiceState::Running);
+        let menu = menu::build_menu(
+            Some(&runtime),
+            state,
+            None,
+            false,
+            None,
+            data_dir.to_string_lossy().as_ref(),
+            true,
+            &[],
+            None,
+        );
+        let status = match &menu[0] {
+            menu::MenuEntry::Item(item) => item.label.as_str(),
+            menu::MenuEntry::Submenu(_) => panic!("expected status item"),
+        };
+        assert_eq!(status, "Bifrost: Running on 127.0.0.1:9900");
+    }
+
+    #[test]
     fn test_pure_tray_icon_event_does_not_rebuild_native_menu() {
         assert!(!should_probe_rules_for_menu_update(
             Duration::from_millis(200),
@@ -1228,17 +1427,24 @@ mod tests {
                 "HTTP/1.1 200 OK",
                 r#"[
                     {"name":"alpha","rule_name":"alpha","group_name":null,"group_id":null},
-                    {"name":"Team A/shared","rule_name":"shared","group_name":"Team A","group_id":"grp-a"},
-                    {"name":"Public/shared","rule_name":"public-shared","group_name":"Public","group_id":"grp-public"}
+                    {"name":"stale/group","rule_name":"stale","group_name":"Stale Local","group_id":"grp-stale"}
                 ]"#,
             ),
             (
                 "HTTP/1.1 200 OK",
-                r#"{"code":0,"data":{"list":[{"id":"grp-a","name":"Team A","visibility":0,"level":2},{"id":"grp-public","name":"Public","visibility":1,"level":null}]}}"#,
+                r#"{"code":0,"data":{"list":[{"id":"grp-a","name":"Team A","visibility":0,"level":2},{"id":"grp-master","name":"next-agent","visibility":0,"level":1},{"id":"grp-public","name":"Public","visibility":1,"level":null}]}}"#,
             ),
             (
                 "HTTP/1.1 200 OK",
                 r#"{"total":1,"rules":[{"name":"shared","rule_count":1,"group_id":"grp-a","group_name":"Team A"}],"variable_conflicts":[],"merged_content":""}"#,
+            ),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"group_id":"grp-a","group_name":"Team A","writable":true,"rules":[{"name":"shared","enabled":true,"sort_order":2,"rule_count":1,"created_at":"","updated_at":"","remote_env_id":null,"remote_user_id":null}]}"#,
+            ),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"group_id":"grp-master","group_name":"next-agent","writable":true,"rules":[{"name":"NextOncall双前端本地开发","enabled":false,"sort_order":1,"rule_count":1,"created_at":"","updated_at":"","remote_env_id":null,"remote_user_id":null}]}"#,
             ),
         ]);
 
@@ -1251,6 +1457,8 @@ mod tests {
                 "GET /_bifrost/api/rules/reference-candidates HTTP/1.1",
                 "GET /_bifrost/api/group HTTP/1.1",
                 "GET /_bifrost/api/rules/active-summary HTTP/1.1",
+                "GET /_bifrost/api/group-rules/grp-a HTTP/1.1",
+                "GET /_bifrost/api/group-rules/grp-master HTTP/1.1",
             ]
         );
         assert_eq!(rules.len(), 3);
@@ -1277,18 +1485,26 @@ mod tests {
         assert!(group.enabled);
         assert!(group.managed_group);
 
-        let unmanaged_group = rules
+        let master_group = rules
             .iter()
             .find(|rule| {
                 rule.target
                     == RuleTarget::Group {
-                        group_name: "Public".to_string(),
-                        name: "public-shared".to_string(),
+                        group_name: "next-agent".to_string(),
+                        name: "NextOncall双前端本地开发".to_string(),
                     }
             })
             .unwrap();
-        assert!(!unmanaged_group.enabled);
-        assert!(!unmanaged_group.managed_group);
+        assert!(!master_group.enabled);
+        assert!(master_group.managed_group);
+
+        assert!(!rules.iter().any(|rule| {
+            rule.target
+                == RuleTarget::Group {
+                    group_name: "Stale Local".to_string(),
+                    name: "stale".to_string(),
+                }
+        }));
     }
 
     #[test]

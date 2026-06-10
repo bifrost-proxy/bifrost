@@ -64,6 +64,21 @@ cargo run --bin bifrost -- start -p 8801 --unsafe-ssl --no-system-proxy --skip-c
 - 鼠标移动到 "Open Admin UI" 时该菜单项保持可见且可高亮
 - 点击图标本身不会立即产生 `tray icon and menu updated` 日志；菜单重建只应由状态变化、菜单动作、显式 reload 或规则轮询变化触发
 
+### TC-TH-02-REG-02: runtime 缺失但父进程存活时不显示 Unknown
+
+**操作步骤：**
+1. 使用启动命令模板启动 Bifrost 服务，并确认托盘图标已出现
+2. 记录主服务 PID 与托盘 helper PID：`pgrep -af 'bifrost.*__tray|target/debug/bifrost'`
+3. 临时移动 runtime 文件：`mv ./.bifrost-tray-test/runtime.json ./.bifrost-tray-test/runtime.json.bak`
+4. 等待 2 秒后展开托盘菜单
+5. 测试结束后恢复 runtime 文件：`mv ./.bifrost-tray-test/runtime.json.bak ./.bifrost-tray-test/runtime.json`
+
+**预期结果：**
+- 主服务 PID 仍存活时，菜单顶部显示 `Bifrost: Running on 127.0.0.1:8801`
+- 菜单不显示 `Bifrost: Unknown`
+- Open Admin UI、Copy HTTP Proxy、Rules、System Proxy 等依赖 Admin URL 的菜单项仍使用启动参数中的 `127.0.0.1:8801`
+- 恢复 runtime 文件后菜单状态保持 Running，不出现 Stop/Start 与状态标题不一致
+
 ### TC-TH-03: Open Admin UI 打开浏览器管理端
 
 **操作步骤：**

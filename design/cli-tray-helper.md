@@ -130,11 +130,11 @@ helper 启动后：
 
 1. 初始化文件日志到 `<data_dir>/logs/tray.log`，启动时清理超过 30 天的 `tray.log*` 历史文件。
 2. 获取 `<data_dir>/tray.lock`，写入 `<data_dir>/tray.pid`。
-3. 读取 runtime，构造初始 `TrayState`。
+3. 读取 runtime，构造初始 `TrayState`；如果 `runtime.json` 暂时缺失但 tray 的父 Bifrost 进程仍存活，则使用启动参数中的 `parent_pid`、`admin_url`、`port` 合成运行态 runtime，避免菜单显示 `Bifrost: Unknown`。
 4. 初始化平台托盘图标和菜单。
 5. 启动状态刷新定时器：
    - 读取 runtime；
-   - 校验主进程 PID；
+   - 校验主进程 PID；当 runtime 文件缺失但父进程仍存活时，状态保持 Running，并使用启动参数提供的 Admin URL 与端口渲染菜单；
    - 探测 Admin API；
    - 重新渲染菜单启用状态。
 6. 进入平台原生事件循环。
