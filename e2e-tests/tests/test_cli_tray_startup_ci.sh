@@ -17,9 +17,9 @@ case "$(uname -s)" in
 esac
 
 if is_windows; then
-  DEFAULT_BIN="$ROOT_DIR/target/debug/bifrost.exe"
+  DEFAULT_BIN="$ROOT_DIR/target/release/bifrost.exe"
 else
-  DEFAULT_BIN="$ROOT_DIR/target/debug/bifrost"
+  DEFAULT_BIN="$ROOT_DIR/target/release/bifrost"
 fi
 
 BIN="${BIFROST_BIN:-$DEFAULT_BIN}"
@@ -80,7 +80,7 @@ trap cleanup EXIT
 
 if [[ "${BIFROST_TRAY_STARTUP_SKIP_BUILD:-0}" != "1" || ! -x "$BIN" ]]; then
   echo "Building bifrost binary for tray startup smoke..."
-  cargo build --bin bifrost
+  SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost
 fi
 
 if [[ ! -x "$BIN" ]]; then

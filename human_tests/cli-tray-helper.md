@@ -393,7 +393,7 @@ bash e2e-tests/tests/test_cli_tray_startup_ci.sh
 2. 查看脚本输出和临时数据目录中的 `start.out`、`start.err`、`logs/tray.log*`
 
 **预期结果：**
-- 脚本自行构建 `bifrost` debug binary
+- 脚本自行构建 `bifrost` release binary
 - 主服务 Admin API `/_bifrost/api/proxy/address` 在临时端口 ready，响应包含本次端口
 - `runtime.json` 存在，且其中的 `port` 等于本次临时端口、`pid` 为有效进程 ID
 - 数据目录生成 `tray.pid`，且对应 helper 进程存活
