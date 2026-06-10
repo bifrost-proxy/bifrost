@@ -396,7 +396,7 @@ bash e2e-tests/tests/test_cli_tray_startup_ci.sh
 - 脚本自行构建 `bifrost` release binary
 - 主服务 Admin API `/_bifrost/api/proxy/address` 在临时端口 ready，响应包含本次端口
 - `runtime.json` 存在，且其中的 `port` 等于本次临时端口、`pid` 为有效进程 ID
-- 数据目录优先生成 `tray.pid`，且对应 helper 进程存活；Windows runner 若 `tray.pid` 缺失但 `logs/tray.log*` 已包含启动标记，可按 log-only fallback 通过
+- 数据目录优先生成 `tray.pid`，且对应 helper 进程存活；Windows runner 若 `tray.pid` 缺失或 helper 进程短暂启动后退出，但 `logs/tray.log*` 已包含启动标记，可按 log-only fallback 通过
 - `logs/tray.log*` 包含 `bifrost-tray starting`
 - 脚本结束时停止主服务、杀掉 helper，并清理临时数据目录
 

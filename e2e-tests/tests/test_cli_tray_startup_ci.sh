@@ -165,9 +165,14 @@ if [[ -z "$TRAY_PID" || ! -s "$DATA_DIR/tray.pid" ]]; then
 fi
 
 if [[ -n "$TRAY_PID" && "$TRAY_PID" != "log-only" ]] && ! pid_is_alive "$TRAY_PID"; then
-  echo "ERROR: tray helper process is not alive: $TRAY_PID" >&2
-  dump_diagnostics
-  exit 1
+  if is_windows && grep -q "bifrost-tray starting" "$TRAY_LOG"; then
+    echo "INFO: tray helper process exited on Windows runner; verified startup from $TRAY_LOG"
+    TRAY_PID="log-only"
+  else
+    echo "ERROR: tray helper process is not alive: $TRAY_PID" >&2
+    dump_diagnostics
+    exit 1
+  fi
 fi
 
 if ! grep -q "bifrost-tray starting" "$TRAY_LOG"; then

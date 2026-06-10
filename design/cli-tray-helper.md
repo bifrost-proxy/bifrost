@@ -744,7 +744,7 @@ helper 查找顺序：
   - macOS/Windows。
   - 用临时 `BIFROST_DATA_DIR` 启动 `bifrost start`，显式携带 `--no-system-proxy` 和 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`。
   - 自行 `SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost`，避免依赖 CI runner 后续 E2E 的构建顺序，并与现有 shell E2E 的 release binary 约定一致。
-  - 通过 Admin API ready、`runtime.json` 端口/PID、`tray.pid` 进程存活、`logs/tray.log*` 启动标记交叉验证；Windows runner 上若 `tray.pid` 缺失但启动日志已出现，可降级为 log-only 验证，避免平台 PID 文件竞态误伤。
+  - 通过 Admin API ready、`runtime.json` 端口/PID、`tray.pid` 进程存活、`logs/tray.log*` 启动标记交叉验证；Windows runner 上若 `tray.pid` 缺失或 helper 进程短暂启动后退出，但启动日志已出现，可降级为 log-only 验证，避免平台托盘会话限制或 PID 文件竞态误伤。
   - 在 `.github/workflows/ci.yml` 的 `e2e-macos-runner` 与 `e2e-windows-runner` 中执行，覆盖 macOS arm64、Windows x64 和 Windows arm64。
 - `e2e-tests/tests/test_cli_tray_launch_macos.sh`
   - macOS only。
