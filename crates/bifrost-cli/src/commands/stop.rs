@@ -22,6 +22,10 @@ impl StopSystemProxyMode {
     fn should_cleanup_in_stop_process(self) -> bool {
         matches!(self, Self::ForegroundCleanupBeforeStop)
     }
+
+    fn marker_write_must_succeed(self) -> bool {
+        matches!(self, Self::PreserveForRestart)
+    }
 }
 
 fn host_matches_system_proxy(proxy_host: &str, runtime_host: &str) -> bool {
@@ -72,6 +76,33 @@ fn cleanup_proxy_state(bifrost_dir: &std::path::Path) -> bool {
     let mut shell_manager = bifrost_core::ShellProxyManager::new(bifrost_dir.to_path_buf());
     let _ = shell_manager.disable_persistent();
     success
+}
+
+fn write_shutdown_marker_for_stop(
+    bifrost_dir: &std::path::Path,
+    mode: StopSystemProxyMode,
+) -> bifrost_core::Result<()> {
+    if !bifrost_core::SystemProxyManager::is_supported() {
+        return Ok(());
+    }
+
+    let marker_result =
+        bifrost_core::write_system_proxy_shutdown_mode(bifrost_dir, mode.shutdown_mode());
+    if marker_result.is_ok() || mode.marker_write_must_succeed() {
+        return marker_result;
+    }
+
+    if let Err(error) = marker_result {
+        eprintln!(
+            "Warning: failed to write system proxy shutdown marker; continuing stop after foreground cleanup: {error}"
+        );
+        tracing::warn!(
+            target: "bifrost_cli::stop",
+            error = %error,
+            "failed to write best-effort foreground cleanup marker"
+        );
+    }
+    Ok(())
 }
 
 fn ensure_system_proxy_disabled(bifrost_dir: &std::path::Path) -> bool {
@@ -150,10 +181,7 @@ fn run_stop_with_system_proxy_mode(
         return Ok(());
     }
 
-    bifrost_core::write_system_proxy_shutdown_mode(
-        &bifrost_dir,
-        system_proxy_mode.shutdown_mode(),
-    )?;
+    write_shutdown_marker_for_stop(&bifrost_dir, system_proxy_mode)?;
 
     if system_proxy_mode.should_cleanup_in_stop_process() {
         println!("Cleaning system proxy before stopping Bifrost proxy...");

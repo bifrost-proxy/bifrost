@@ -387,7 +387,15 @@ fn run_orphan_work(forwarded: ForwardedRestart) {
             &log,
             "restart handoff preserving existing system proxy; reapplying before fresh daemon exec",
         );
-        reapply_system_proxy_for_restart_handoff(&log, runtime, snapshot);
+        if !reapply_system_proxy_for_restart_handoff(&log, runtime, snapshot) && !forwarded.force {
+            abort_restart_handoff(
+                &log,
+                "system proxy reapply failed before restart handoff",
+                old_pid,
+                true,
+            );
+            return;
+        }
     }
 
     // Build argv for `bifrost start --daemon --yes`.
@@ -505,7 +513,7 @@ fn reapply_system_proxy_for_restart_handoff(
     log: &std::path::Path,
     runtime: &crate::process::RuntimeInfo,
     snapshot: &RuntimeSystemProxySnapshot,
-) {
+) -> bool {
     let target_host = runtime_system_proxy_host(runtime.host.as_deref());
     let target_port = runtime.port;
     let mut manager =
@@ -517,11 +525,15 @@ fn reapply_system_proxy_for_restart_handoff(
                 log,
                 &format!("restart handoff system proxy reapplied to {target_host}:{target_port}"),
             );
+            true
         }
-        Err(error) => orphan_log(
-            log,
-            &format!("restart handoff system proxy reapply failed: {error}"),
-        ),
+        Err(error) => {
+            orphan_log(
+                log,
+                &format!("restart handoff system proxy reapply failed: {error}"),
+            );
+            false
+        }
     }
 }
 

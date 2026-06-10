@@ -310,6 +310,75 @@ test_restart_handoff_with_fake_system_proxy() {
     "${BIFROST_BIN}" stop >/dev/null 2>&1 || true
 }
 
+test_restart_without_system_proxy_cross_platform() {
+    if [[ -n "${TEST_DATA_DIR}" && -d "${TEST_DATA_DIR}" ]]; then
+        BIFROST_DATA_DIR="${TEST_DATA_DIR}" "${BIFROST_BIN}" stop >/dev/null 2>&1 || true
+        rm -rf "${TEST_DATA_DIR}"
+    fi
+    TEST_DATA_DIR="$(mktemp -d)"
+    PROXY_PORT="$(free_port)"
+    export BIFROST_DATA_DIR="${TEST_DATA_DIR}"
+
+    "${BIFROST_BIN}" start \
+        -p "${PROXY_PORT}" \
+        -H 127.0.0.1 \
+        --daemon \
+        --skip-cert-check \
+        --no-system-proxy \
+        --no-intercept \
+        >"${TEST_DATA_DIR}/restart-no-proxy-start.log" 2>&1
+
+    wait_until_ready
+    local old_pid
+    old_pid="$(read_runtime_pid)"
+    if [[ -n "${old_pid}" ]]; then
+        _log_pass "cross-platform restart fixture ready without system proxy"
+    else
+        _log_fail "cross-platform restart fixture ready without system proxy" "runtime pid" "pid=${old_pid}"
+        return
+    fi
+
+    local restart_output
+    restart_output="$("${BIFROST_BIN}" restart 2>&1)"
+    local restart_code=$?
+    if [[ "${restart_code}" -ne 0 ]]; then
+        _log_fail "bifrost restart without system proxy exits successfully" "exit 0" "code=${restart_code}; output=${restart_output}"
+        return
+    fi
+
+    local new_pid=""
+    for _ in $(seq 1 250); do
+        new_pid="$(read_runtime_pid)"
+        if [[ -n "${new_pid}" && "${new_pid}" != "${old_pid}" ]] \
+            && kill -0 "${new_pid}" 2>/dev/null \
+            && curl -fsS "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/proxy/address" >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.2
+    done
+
+    if [[ -n "${new_pid}" && "${new_pid}" != "${old_pid}" ]]; then
+        _log_pass "bifrost restart without system proxy starts a fresh daemon"
+    else
+        _log_fail "bifrost restart without system proxy starts a fresh daemon" "new runtime pid and ready Admin API" "old_pid=${old_pid}; new_pid=${new_pid}; output=${restart_output}; restart_log=$(tail -n 160 "${TEST_DATA_DIR}/logs/restart.log" 2>/dev/null || true)"
+        return
+    fi
+
+    if grep -q -- "--system-proxy" "${TEST_DATA_DIR}/logs/restart.log" 2>/dev/null; then
+        _log_fail "bifrost restart without system proxy keeps start argv platform-neutral" "no --system-proxy restart arg" "$(tail -n 160 "${TEST_DATA_DIR}/logs/restart.log" 2>/dev/null || true)"
+    else
+        _log_pass "bifrost restart without system proxy keeps start argv platform-neutral"
+    fi
+
+    if [[ ! -e "${TEST_DATA_DIR}/.system_proxy_shutdown_mode" ]]; then
+        _log_pass "bifrost restart without system proxy leaves no shutdown marker"
+    else
+        _log_fail "bifrost restart without system proxy leaves no shutdown marker" "marker absent" "$(cat "${TEST_DATA_DIR}/.system_proxy_shutdown_mode" 2>/dev/null || true)"
+    fi
+
+    "${BIFROST_BIN}" stop >/dev/null 2>&1 || true
+}
+
 main() {
     build_bifrost
 
@@ -357,6 +426,7 @@ main() {
     status_output="$("${BIFROST_BIN}" status 2>&1)"
     assert_body_contains "Status: Stopped" "${status_output}" "status should report stopped after stop"
 
+    test_restart_without_system_proxy_cross_platform
     test_restart_handoff_with_fake_system_proxy
 
     print_test_summary || exit 1

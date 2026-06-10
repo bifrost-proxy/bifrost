@@ -254,7 +254,15 @@ impl SystemProxyManager {
     }
 
     pub fn is_supported() -> bool {
-        Sysproxy::is_support()
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            Sysproxy::is_support()
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            false
+        }
     }
 
     pub fn enable(&mut self, host: &str, port: u16, bypass: Option<&str>) -> Result<()> {
@@ -2514,6 +2522,10 @@ mod tests {
     fn test_is_supported() {
         let supported = SystemProxyManager::is_supported();
         println!("System proxy supported: {}", supported);
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        assert_eq!(supported, Sysproxy::is_support());
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        assert!(!supported);
     }
 
     #[test]
