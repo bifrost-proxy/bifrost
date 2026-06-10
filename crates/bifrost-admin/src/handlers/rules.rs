@@ -637,21 +637,30 @@ async fn validate_rule(req: Request<Incoming>, state: SharedAdminState) -> Respo
     let content = match expand_rule_references_strict(&source_name, &content, &reference_catalog) {
         Ok(expanded) => expanded,
         Err(error) => {
-            let reference_error = ParseError::with_range(
-                error.line(),
-                1,
-                request
+            // `error.line()` is relative to the rule where the error occurred
+            // (`error.source()`), which may be a nested referenced rule rather
+            // than the rule currently open in the editor. Only map the line/column
+            // back onto the editor content when the error is in the top-level
+            // rule; otherwise anchor it to line 1 to avoid mis-highlighting or
+            // indexing past the editor content. The error message itself already
+            // names the offending source rule and line.
+            let (error_line, error_end_column) = if error.source() == source_name {
+                let end_column = request
                     .content
                     .lines()
                     .nth(error.line().saturating_sub(1))
                     .map(|line| line.len().max(1))
-                    .unwrap_or(1),
-                error.to_string(),
-            )
-            .with_code("E020")
-            .with_suggestion(
-                "Create the referenced rule or remove the cycle before enabling this rule.",
-            );
+                    .unwrap_or(1);
+                (error.line(), end_column)
+            } else {
+                (1, 1)
+            };
+            let reference_error =
+                ParseError::with_range(error_line, 1, error_end_column, error.to_string())
+                    .with_code("E020")
+                    .with_suggestion(
+                        "Create the referenced rule or remove the cycle before enabling this rule.",
+                    );
             let resp = ValidateRuleResponse {
                 valid: false,
                 rule_count: 0,

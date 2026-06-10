@@ -70,7 +70,7 @@ const language: languages.IMonarchLanguage = {
         ['', 'reference.user', 'reference.env', 'comment'],
       ],
       [
-        /(^|\s)(@[^#\s]+)(\s*|@comment)$/,
+        /(^|\s)(@(?!comment(?:\s|#|$))[^#\s]+)(\s*|@comment)$/,
         ['', 'reference.user', 'comment'],
       ],
 

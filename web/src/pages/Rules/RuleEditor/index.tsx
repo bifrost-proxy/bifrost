@@ -74,6 +74,21 @@ function findRuleReferenceAtPosition(
   };
 }
 
+const RULE_REFERENCE_ZONE_LINE_HEIGHT = 18;
+const RULE_REFERENCE_ZONE_CHROME = 52;
+const RULE_REFERENCE_ZONE_MIN_HEIGHT = 96;
+const RULE_REFERENCE_ZONE_MAX_HEIGHT = 320;
+
+function ruleReferenceZoneHeight(content: string): number {
+  const lineCount = content.length === 0 ? 1 : content.split("\n").length;
+  const estimated =
+    RULE_REFERENCE_ZONE_CHROME + lineCount * RULE_REFERENCE_ZONE_LINE_HEIGHT;
+  return Math.min(
+    RULE_REFERENCE_ZONE_MAX_HEIGHT,
+    Math.max(RULE_REFERENCE_ZONE_MIN_HEIGHT, estimated),
+  );
+}
+
 function findRuleReferences(model: MonacoEditor.ITextModel): RuleReferenceMatch[] {
   const matches: RuleReferenceMatch[] = [];
   for (let lineNumber = 1; lineNumber <= model.getLineCount(); lineNumber += 1) {
@@ -382,20 +397,31 @@ export default function RuleEditor() {
 
       const domNode = document.createElement("div");
       renderRuleReferenceZone(domNode, reference.name, "loading");
+      const zone: MonacoEditor.IViewZone = {
+        afterLineNumber: reference.range.endLineNumber,
+        heightInPx: ruleReferenceZoneHeight(""),
+        domNode,
+      };
       let zoneId = "";
       editor.changeViewZones((accessor) => {
-        zoneId = accessor.addZone({
-          afterLineNumber: reference.range.endLineNumber,
-          heightInPx: 160,
-          domNode,
-        });
+        zoneId = accessor.addZone(zone);
       });
       expandedRuleReferenceRef.current = { key, zoneId, domNode };
+
+      const relayoutZone = (content: string) => {
+        const currentEditor = editorRef.current;
+        if (!currentEditor || expandedRuleReferenceRef.current?.key !== key) return;
+        zone.heightInPx = ruleReferenceZoneHeight(content);
+        currentEditor.changeViewZones((accessor) => {
+          accessor.layoutZone(zoneId);
+        });
+      };
 
       try {
         const content = await loadRuleReferenceContent(reference.name);
         if (expandedRuleReferenceRef.current?.key !== key) return;
         renderRuleReferenceZone(domNode, reference.name, "loaded", content);
+        relayoutZone(content);
       } catch (error) {
         if (expandedRuleReferenceRef.current?.key !== key) return;
         renderRuleReferenceZone(

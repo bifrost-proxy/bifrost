@@ -88,7 +88,9 @@
 
 .ruleReferenceZone {
   box-sizing: border-box;
-  height: 154px;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
   margin: 3px 12px 3px 0;
   border: 1px solid var(--vscode-editorWidget-border, #d9d9d9);
   border-radius: 6px;
@@ -100,6 +102,7 @@
 
 .ruleReferenceZoneHeader {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
   height: 30px;
@@ -137,7 +140,8 @@
 }
 
 .ruleReferenceZoneBody {
-  height: 122px;
+  flex: 1 1 auto;
+  min-height: 0;
   margin: 0;
   padding: 8px 10px;
   overflow: auto;

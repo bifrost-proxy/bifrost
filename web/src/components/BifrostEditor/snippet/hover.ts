@@ -19,6 +19,7 @@ const VALUE_REF_PATTERN = /\{([\w-]+)\}/g;
 const REQ_SCRIPT_PATTERN = /reqScript:\/\/([\w\-.]+)/g;
 const RES_SCRIPT_PATTERN = /resScript:\/\/([\w\-.]+)/g;
 const BP_SCRIPT_PATTERN = /bp:\/\/([^\s]+)/g;
+
 export function localBpParserScriptName(rawValue: string): string | null {
   const localName = rawValue.split(/[?#]/, 1)[0];
   if (
@@ -72,8 +73,8 @@ function findReferenceAtPosition(
       if (column >= startCol && column <= endCol) {
         const name =
           type === 'parserScript'
-              ? localBpParserScriptName(match[1])
-              : match[1];
+            ? localBpParserScriptName(match[1])
+            : match[1];
         if (!name) {
           continue;
         }
