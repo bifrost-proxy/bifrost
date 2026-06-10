@@ -134,6 +134,8 @@ SYNC_SERVER_EXEC="$(sync_server_exec "$SYNC_SERVER_DIR")"
     eval "$SYNC_SERVER_EXEC" \
         -p "$SYNC_PORT" \
         -H 127.0.0.1 \
+        --rate-limit-per-ip 1000 \
+        --auth-rate-limit-per-ip 1000 \
         -d "$SYNC_DATA_DIR" \
 ) > "${SYNC_DATA_DIR}/sync-server.log" 2>&1 &
 SYNC_SERVER_PID=$!

@@ -85,6 +85,8 @@ export interface ServerConfig {
   port: number;
   host: string;
   trust_forwarded_for?: boolean;
+  rate_limit_per_ip?: number;
+  auth_rate_limit_per_ip?: number;
 }
 
 export interface SyncServerConfig {
