@@ -283,6 +283,31 @@ impl RulesResolver {
         result
     }
 
+    /// Resolve without consulting or populating the candidate cache. Used for
+    /// response-phase re-resolution after the upstream response has been attached to the
+    /// context. Response data is evaluated by the filter gate below.
+    pub fn resolve_uncached(&self, ctx: &RequestContext) -> ResolvedRules {
+        tracing::trace!(
+            target: "bifrost_core::rules",
+            total_rules = self.rules.len(),
+            url = %ctx.url,
+            method = %ctx.method,
+            "starting uncached rule resolution"
+        );
+
+        let candidates = self.collect_matcher_candidates(ctx);
+        let result = self.apply_filter_gate(&candidates, ctx);
+
+        tracing::debug!(
+            target: "bifrost_core::rules",
+            url = %ctx.url,
+            matched_count = result.rules.len(),
+            "uncached rule resolution completed"
+        );
+
+        result
+    }
+
     fn get_matcher_candidates(&self, ctx: &RequestContext) -> Vec<CandidateMatch> {
         // The candidate cache intentionally excludes method and headers: those are
         // request-scoped filter inputs and must be evaluated in Phase B.
@@ -300,6 +325,16 @@ impl RulesResolver {
             }
         }
 
+        let candidates = self.collect_matcher_candidates(ctx);
+
+        if self.cache_enabled {
+            self.cache.write().insert(cache_key, candidates.clone());
+        }
+
+        candidates
+    }
+
+    fn collect_matcher_candidates(&self, ctx: &RequestContext) -> Vec<CandidateMatch> {
         let mut candidates = Vec::new();
 
         for (rule_index, rule) in self.rules.iter().enumerate() {
@@ -334,10 +369,6 @@ impl RulesResolver {
                     is_negated: false,
                 });
             }
-        }
-
-        if self.cache_enabled {
-            self.cache.write().insert(cache_key, candidates.clone());
         }
 
         candidates
@@ -436,12 +467,33 @@ impl RulesResolver {
         result
     }
 
+    /// Response-dependent filters (status code and response headers) cannot be evaluated
+    /// before the upstream response exists. They are skipped during request-phase
+    /// resolution so routing/request operations on the same rule can still run, then
+    /// evaluated during response-phase re-resolution once `set_response` has populated
+    /// the context.
+    fn filter_is_evaluable(filter: &Filter, ctx: &RequestContext) -> bool {
+        match filter {
+            Filter::StatusCode(_) => ctx.status_code.is_some(),
+            Filter::HeaderMatch {
+                is_request: false, ..
+            } => ctx.res_headers.is_some(),
+            _ => true,
+        }
+    }
+
     fn matches_all_filters(filters: &[Filter], ctx: &RequestContext) -> bool {
-        filters.iter().all(|f| Self::matches_filter(f, ctx))
+        filters
+            .iter()
+            .filter(|f| Self::filter_is_evaluable(f, ctx))
+            .all(|f| Self::matches_filter(f, ctx))
     }
 
     fn matches_any_filter(filters: &[Filter], ctx: &RequestContext) -> bool {
-        filters.iter().any(|f| Self::matches_filter(f, ctx))
+        filters
+            .iter()
+            .filter(|f| Self::filter_is_evaluable(f, ctx))
+            .any(|f| Self::matches_filter(f, ctx))
     }
 
     fn matches_filter(filter: &Filter, ctx: &RequestContext) -> bool {

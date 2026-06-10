@@ -748,6 +748,26 @@ pub fn needs_response_override(rules: &ResolvedRules) -> bool {
     rules.res_body.is_some() || rules.status_code.is_some() || rules.replace_status.is_some()
 }
 
+/// Whether any response-modification operation is present that would be applied from the
+/// resolved rules at response time. Used to gate the response-phase re-resolve (which
+/// evaluates response-dependent filters); pure routing/request rules need no re-resolve.
+pub fn needs_response_phase_resolve(rules: &ResolvedRules) -> bool {
+    needs_response_override(rules)
+        || needs_body_processing(rules)
+        || !rules.res_headers.is_empty()
+        || !rules.res_cookies.is_empty()
+        || !rules.res_del_cookies.is_empty()
+        || !rules.delete_res_headers.is_empty()
+        || !rules.header_replace.is_empty()
+        || !rules.trailers.is_empty()
+        || rules.res_type.is_some()
+        || rules.res_charset.is_some()
+        || rules.cache.is_some()
+        || rules.attachment.is_some()
+        || rules.response_for.is_some()
+        || rules.res_cors.is_enabled()
+}
+
 pub(in crate::proxy::http) async fn apply_immediate_response_body_rules(
     response: Response<BoxBody>,
     rules: &ResolvedRules,
@@ -2909,9 +2929,30 @@ pub async fn handle_http_request(
     let res_content_encoding = response_content_encoding(&res_parts);
 
     let res_ctx = ctx.with_response_data(res_parts.status.as_u16(), &res_parts.headers);
+    // Re-resolve with the upstream response available so response-dependent filters
+    // (includeFilter://s:NNN, includeFilter://resH:...) are evaluated against the real
+    // response. Response-modification operations are applied from this set; routing and
+    // request-phase decisions continue to use the request-phase `resolved_rules`.
+    let response_resolved = if needs_response_phase_resolve(&resolved_rules) {
+        let res_header_map: HashMap<String, String> = res_parts
+            .headers
+            .iter()
+            .filter_map(|(k, v)| v.to_str().ok().map(|s| (k.as_str().to_string(), s.to_string())))
+            .collect();
+        rules.resolve_with_response_context(
+            rule_match_url,
+            &method,
+            &incoming_headers,
+            &incoming_cookies,
+            res_parts.status.as_u16(),
+            &res_header_map,
+        )
+    } else {
+        resolved_rules.clone()
+    };
     apply_res_rules(
         &mut res_parts,
-        &resolved_rules,
+        &response_resolved,
         verbose_logging,
         &res_ctx,
         request_origin.as_deref(),
@@ -3323,7 +3364,7 @@ pub async fn handle_http_request(
         .to_string();
 
     let original_res_body_len = res_content_length.unwrap_or(res_body_bytes.len());
-    let mut final_res_body = if let Some(ref new_body) = resolved_rules.res_body {
+    let mut final_res_body = if let Some(ref new_body) = response_resolved.res_body {
         if verbose_logging {
             info!(
                 "[{}] [RES_BODY] replaced: {} bytes -> {} bytes",
@@ -3334,7 +3375,7 @@ pub async fn handle_http_request(
         }
         let body_processed = apply_body_rules_preserving_encoding(
             new_body.clone(),
-            &resolved_rules,
+            &response_resolved,
             Phase::Response,
             Some(&content_type),
             ContentInjectionEncoding {
@@ -3364,10 +3405,10 @@ pub async fn handle_http_request(
         injection_result.body
     } else {
         let (body_for_injection, injection_source_encoding, injection_output_encoding) =
-            if has_response_body_rules(&resolved_rules) {
+            if has_response_body_rules(&response_resolved) {
                 let body_processed = apply_body_rules_preserving_encoding(
                     res_body_bytes.clone(),
-                    &resolved_rules,
+                    &response_resolved,
                     Phase::Response,
                     Some(&content_type),
                     ContentInjectionEncoding {
