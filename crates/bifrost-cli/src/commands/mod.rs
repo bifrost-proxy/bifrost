@@ -30,7 +30,7 @@ mod system_proxy;
 mod traffic;
 pub mod tray;
 pub(crate) mod tray_launcher;
-pub(crate) mod tray_launcher;
+mod upgrade;
 mod update_check;
 mod value;
 mod voice;
