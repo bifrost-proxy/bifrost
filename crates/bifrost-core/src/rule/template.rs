@@ -113,6 +113,14 @@ impl TemplateEngine {
                     return cap.get(0).unwrap().as_str().to_string();
                 }
 
+                // Response-phase variables are resolved against data that does not exist
+                // during request-phase resolution (status code, response headers/cookies).
+                // When that data is absent, leave the token literal so a later response-phase
+                // pass can fill it in, instead of collapsing it to an empty string.
+                if Self::is_deferred_response_var(var_name, ctx) {
+                    return cap.get(0).unwrap().as_str().to_string();
+                }
+
                 let (actual_key, replace_pattern) = Self::parse_property_key(property_key);
 
                 let mut value =
@@ -191,6 +199,17 @@ impl TemplateEngine {
         }
 
         value.replace(pattern, replacement)
+    }
+
+    /// Whether `name` is a response-phase variable whose backing data is not yet
+    /// populated on `ctx`. Such tokens must be left literal at request phase so the
+    /// proxy can expand them once the upstream response is available.
+    fn is_deferred_response_var(name: &str, ctx: &RequestContext) -> bool {
+        match name.to_ascii_lowercase().as_str() {
+            "status" | "statuscode" => ctx.status_code.is_none(),
+            "resh" | "resheader" | "resheaders" => ctx.res_headers.is_none(),
+            _ => false,
+        }
     }
 
     fn resolve_builtin_var(
@@ -772,6 +791,42 @@ mod tests {
         let result =
             TemplateEngine::expand_with_context("${statusCode}", &ctx, None, &HashMap::new());
         assert_eq!(result, "200");
+    }
+
+    #[test]
+    fn test_response_vars_passthrough_when_absent() {
+        // Request phase: no response data yet. Response variables must survive as
+        // literal tokens so the proxy can expand them once the response arrives,
+        // rather than collapsing to empty strings.
+        let ctx = RequestContext::builder()
+            .url("http://example.com/test")
+            .build();
+        let result = TemplateEngine::expand_with_context(
+            "s=${statusCode} st=${status} h=${resHeaders.x-up}",
+            &ctx,
+            None,
+            &HashMap::new(),
+        );
+        assert_eq!(result, "s=${statusCode} st=${status} h=${resHeaders.x-up}");
+    }
+
+    #[test]
+    fn test_response_vars_expand_when_present() {
+        // Response phase: status/headers populated -> tokens expand for real.
+        let mut headers = HashMap::new();
+        headers.insert("x-up".to_string(), "mock".to_string());
+        let mut ctx = RequestContext::builder()
+            .url("http://example.com/test")
+            .build();
+        ctx.set_response(503, headers);
+
+        let result = TemplateEngine::expand_with_context(
+            "s=${statusCode} st=${status} h=${resHeaders.x-up}",
+            &ctx,
+            None,
+            &HashMap::new(),
+        );
+        assert_eq!(result, "s=503 st=503 h=mock");
     }
 
     #[test]

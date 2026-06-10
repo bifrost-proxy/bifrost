@@ -62,16 +62,28 @@ pub fn apply_body_rules(
     };
 
     if let Some(override_body) = body_override {
+        let mut replacement = override_body.clone();
+        // Expand response-phase template variables (e.g. ${statusCode}, ${resHeaders.x})
+        // left literal by the core engine at request phase. Only for a response-phase
+        // body override whose ctx carries real response data, and only for UTF-8 text.
+        if phase == Phase::Response && ctx.res_status.is_some() {
+            if let Ok(text) = std::str::from_utf8(&replacement) {
+                if text.contains("${") {
+                    let expanded = crate::transform::response::expand_response_vars(text, ctx);
+                    replacement = Bytes::from(expanded);
+                }
+            }
+        }
         if verbose_logging {
             debug!(
                 "[{}] [{:?}_BODY] replaced: {} bytes -> {} bytes",
                 ctx.id_str(),
                 phase,
                 result.len(),
-                override_body.len()
+                replacement.len()
             );
         }
-        result = override_body.clone();
+        result = replacement;
     }
 
     if let Some(prepend_data) = prepend {

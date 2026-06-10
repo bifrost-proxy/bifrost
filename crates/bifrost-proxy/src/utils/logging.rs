@@ -40,6 +40,11 @@ pub struct RequestContext {
     pub client_pid: Option<u32>,
     pub client_path: Option<String>,
     pub port: u16,
+    /// Upstream response status, populated only for response-phase rule processing.
+    pub res_status: Option<u16>,
+    /// Upstream response headers (lowercased names), populated only for response-phase
+    /// rule processing. Used to expand response-phase template variables.
+    pub res_headers: HashMap<String, String>,
 }
 
 impl RequestContext {
@@ -63,6 +68,8 @@ impl RequestContext {
             client_pid: None,
             client_path: None,
             port: 0,
+            res_status: None,
+            res_headers: HashMap::new(),
         }
     }
 
@@ -127,6 +134,24 @@ impl RequestContext {
     pub fn with_port(mut self, port: u16) -> Self {
         self.port = port;
         self
+    }
+
+    /// Clone this context enriched with upstream response data, for response-phase
+    /// rule processing (status / response-header template variables). Header names are
+    /// lowercased so `${resHeaders.x}` lookups are case-insensitive.
+    pub fn with_response_data(&self, status: u16, headers: &hyper::HeaderMap) -> Self {
+        let mut res_headers = HashMap::new();
+        for (name, value) in headers.iter() {
+            if let Ok(v) = value.to_str() {
+                res_headers
+                    .entry(name.as_str().to_ascii_lowercase())
+                    .or_insert_with(|| v.to_string());
+            }
+        }
+        let mut cloned = self.clone();
+        cloned.res_status = Some(status);
+        cloned.res_headers = res_headers;
+        cloned
     }
 }
 

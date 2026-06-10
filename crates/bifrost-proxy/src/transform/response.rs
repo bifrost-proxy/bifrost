@@ -145,6 +145,44 @@ fn apply_res_headers(
     }
 }
 
+/// Expand response-phase template variables against the actual upstream response.
+///
+/// The core template engine leaves these tokens literal at request-phase resolution
+/// (when no response exists yet); this fills them in once the response is available.
+/// It deliberately touches ONLY response variables — every other `${...}` token was
+/// already expanded by the core engine at request phase, so re-running a full template
+/// pass here would risk corrupting literal `${...}` content in the body.
+/// Accepts the same spellings the core engine accepts.
+pub(crate) fn expand_response_vars(value: &str, ctx: &RequestContext) -> String {
+    use regex::Regex;
+    use std::sync::LazyLock;
+
+    static RE_RES_HEADERS: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?i)\$\{resH(?:eaders?)?\.([^}]+)\}").unwrap());
+
+    if !value.contains("${") {
+        return value.to_string();
+    }
+
+    let mut result = RE_RES_HEADERS
+        .replace_all(value, |caps: &regex::Captures| {
+            ctx.res_headers
+                .get(&caps[1].to_ascii_lowercase())
+                .cloned()
+                .unwrap_or_default()
+        })
+        .to_string();
+
+    if let Some(status) = ctx.res_status {
+        let res_status_str = status.to_string();
+        result = result
+            .replace("${statusCode}", &res_status_str)
+            .replace("${status}", &res_status_str);
+    }
+
+    result
+}
+
 fn process_template_value(value: &str, ctx: &RequestContext) -> String {
     use regex::Regex;
     use std::sync::LazyLock;
@@ -159,7 +197,7 @@ fn process_template_value(value: &str, ctx: &RequestContext) -> String {
         LazyLock::new(|| Regex::new(r"\$\{randomInt\((\d+)(?:-(\d+))?\)\}").unwrap());
     static RE_ENV: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\$\{env\.([^}]+)\}").unwrap());
 
-    let mut result = value.to_string();
+    let mut result = expand_response_vars(value, ctx);
 
     result = result.replace("$${", "\x00ESCAPED_DOLLAR\x00");
 
@@ -772,6 +810,48 @@ mod tests {
             parts.headers.get("Content-Type").unwrap().to_str().unwrap(),
             "application/json"
         );
+    }
+
+    #[test]
+    fn test_expand_response_vars_with_data() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert("X-Upstream", HeaderValue::from_static("mock"));
+        let ctx = RequestContext::new().with_response_data(503, &headers);
+        assert_eq!(
+            expand_response_vars("s=${statusCode} st=${status} h=${resHeaders.x-upstream}", &ctx),
+            "s=503 st=503 h=mock"
+        );
+    }
+
+    #[test]
+    fn test_expand_response_vars_without_data() {
+        // No response data: status tokens stay literal (a later pass may fill them),
+        // missing response headers resolve to empty.
+        let ctx = RequestContext::new();
+        assert_eq!(
+            expand_response_vars("s=${statusCode} h=${resHeaders.x-missing}", &ctx),
+            "s=${statusCode} h="
+        );
+    }
+
+    #[test]
+    fn test_apply_res_headers_expands_status_from_ctx() {
+        let mut parts = create_test_parts();
+        let mut rules = ResolvedRules::default();
+        let mut up = hyper::HeaderMap::new();
+        up.insert("X-Upstream", HeaderValue::from_static("origin"));
+        let ctx = RequestContext::new().with_response_data(429, &up);
+        rules
+            .res_headers
+            .push(("X-Status".to_string(), "${statusCode}".to_string()));
+        rules
+            .res_headers
+            .push(("X-Echo".to_string(), "${resHeaders.x-upstream}".to_string()));
+
+        apply_res_rules(&mut parts, &rules, false, &ctx, None);
+
+        assert_eq!(parts.headers.get("X-Status").unwrap().to_str().unwrap(), "429");
+        assert_eq!(parts.headers.get("X-Echo").unwrap().to_str().unwrap(), "origin");
     }
 
     #[test]
