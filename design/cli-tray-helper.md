@@ -740,6 +740,12 @@ helper 查找顺序：
 
 新增脚本建议：
 
+- `e2e-tests/tests/test_cli_tray_startup_ci.sh`
+  - macOS/Windows。
+  - 用临时 `BIFROST_DATA_DIR` 启动 `bifrost start`，显式携带 `--no-system-proxy` 和 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`。
+  - 自行 `cargo build --bin bifrost`，避免依赖 CI runner 后续 E2E 的构建顺序。
+  - 通过 Admin API ready、`runtime.json` 端口/PID、`tray.pid` 进程存活、`logs/tray.log*` 启动标记交叉验证。
+  - 在 `.github/workflows/ci.yml` 的 `e2e-macos-runner` 与 `e2e-windows-runner` 中执行，覆盖 macOS arm64、Windows x64 和 Windows arm64。
 - `e2e-tests/tests/test_cli_tray_launch_macos.sh`
   - macOS only。
   - 使用临时 `BIFROST_DATA_DIR`。
@@ -759,8 +765,8 @@ helper 查找顺序：
 
 Windows E2E：
 
-- 在 Windows runner 上执行 `bifrost.exe __tray ...` 的平台 smoke 验证。
-- 验证 ready file。
+- 在 Windows runner 上执行 `test_cli_tray_startup_ci.sh` 的平台 smoke 验证。
+- 验证 Admin API ready、`runtime.json`、`tray.pid` 和 `tray.log`。
 - 验证 `bifrost start` 不依赖 daemon mode。
 - 验证 helper 不弹出 console window。
 

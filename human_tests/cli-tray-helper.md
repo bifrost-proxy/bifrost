@@ -381,6 +381,25 @@ curl -sS -X POST http://127.0.0.1:8801/_bifrost/api/rules \
 - 启动失败或超时后状态行显示 `Bifrost: Start failed - open logs`
 - 失败后 "Start Bifrost" 恢复可点击，用户可以重试；Open Logs 始终可点击
 
+### TC-TH-21: CI 跨平台 Tray 启动烟测
+
+**操作步骤：**
+1. 在 macOS 或 Windows 环境执行：
+
+```bash
+bash e2e-tests/tests/test_cli_tray_startup_ci.sh
+```
+
+2. 查看脚本输出和临时数据目录中的 `start.out`、`start.err`、`logs/tray.log*`
+
+**预期结果：**
+- 脚本自行构建 `bifrost` debug binary
+- 主服务 Admin API `/_bifrost/api/proxy/address` 在临时端口 ready，响应包含本次端口
+- `runtime.json` 存在，且其中的 `port` 等于本次临时端口、`pid` 为有效进程 ID
+- 数据目录生成 `tray.pid`，且对应 helper 进程存活
+- `logs/tray.log*` 包含 `bifrost-tray starting`
+- 脚本结束时停止主服务、杀掉 helper，并清理临时数据目录
+
 ## 清理步骤
 
 ```bash

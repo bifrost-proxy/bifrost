@@ -783,6 +783,9 @@ jobs:
       - name: Prepare sherpa-onnx archive
         shell: bash
         run: bash scripts/ci/prepare-sherpa-onnx-archive.sh aarch64-apple-darwin
+      - name: Tray startup smoke test
+        shell: bash
+        run: bash e2e-tests/tests/test_cli_tray_startup_ci.sh
       - name: E2E runner tests
         shell: bash
         run: bash scripts/ci/run-e2e-runner.sh
@@ -1181,6 +1184,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: e2e-${{ matrix.target }}
+      - name: Tray startup smoke test
+        shell: bash
+        run: bash e2e-tests/tests/test_cli_tray_startup_ci.sh
       - name: E2E runner tests
         shell: bash
         run: bash scripts/ci/run-e2e-runner.sh
