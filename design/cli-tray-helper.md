@@ -5,7 +5,7 @@
 
 ## 结论
 
-CLI 托盘能力采用独立轻量二进制 `bifrost-tray` 实现，明确不引入 Tauri、Wry、WebView 等内嵌浏览器内核的重型桌面框架；可以使用 `tray-icon`、`muda`、`tao` 等体积可控的轻量托盘/菜单库。判定标准是“体积与资源开销”，不是“是否第三方”。
+CLI 托盘能力采用 `bifrost` 二进制内置的隐藏 `__tray` 子命令实现：`bifrost start` 在服务 ready 后以独立子进程重入当前二进制运行托盘 helper。实现明确不引入 Tauri、Wry、WebView 等内嵌浏览器内核的重型桌面框架；可以使用 `tray-icon`、`muda`、`tao` 等体积可控的轻量托盘/菜单库。判定标准是“体积与资源开销”，不是“是否第三方”。
 
 v1 通过轻量托盘库（`tray-icon` / `muda` / `tao`）封装操作系统原生能力：
 
@@ -27,7 +27,7 @@ Bifrost 目前有两类启动形态：
 
 - Windows 和 macOS 支持 CLI 启动后的托盘图标。
 - Linux v1 不支持：不打包 helper、不自动启动、不在 Linux CLI help 暴露托盘开关。
-- 托盘 helper 是独立进程，由 `bifrost start` 在服务就绪后拉起。
+- 托盘 helper 是独立进程，由 `bifrost start` 在服务就绪后通过 `bifrost __tray` 拉起；不再分发第二个独立 helper 二进制。
 - helper 崩溃、缺失或启动失败时，不影响 Bifrost 主服务运行。
 - 默认菜单提供管理端入口、代理地址复制、系统代理切换、重启、停止、打开日志/数据目录等能力。
 - 支持 `<data_dir>/tray.json` 受控自定义菜单。
@@ -40,7 +40,7 @@ Bifrost 目前有两类启动形态：
 - 不支持任意 shell 菜单项。
 - 不补齐 Windows `--daemon`。Windows 脚本启动仍可以是前台服务进程 + 独立 tray helper。
 - 不要求 Desktop 复用此 helper。Desktop 托盘体验可以后续单独设计。
-- 不在 v1 提供 `Start Bifrost` 菜单项，避免 helper 必须持久化完整 `start` 参数。
+- 不提供公开 `bifrost tray` 子命令；托盘入口是内部 `bifrost __tray`，用户入口仍是 `bifrost start`。
 
 ## 现状依据
 
@@ -73,7 +73,7 @@ bifrost start
       | 3. Admin API / 监听端口 ready
       | 4. 平台和配置允许托盘
       v
-spawn bifrost-tray
+spawn bifrost __tray
       |
       | data-dir / runtime.json / tray.lock / tray.log
       v
@@ -113,8 +113,9 @@ Windows/macOS 上，`bifrost start` 在服务 ready 后尝试启动 helper：
    - 未设置 `--no-tray`；
    - 未设置 `BIFROST_DISABLE_TRAY=1`；
    - 当前 data dir 未存在健康 helper；
-   - 能找到 `bifrost-tray` 二进制。
+   - 能找到当前 `bifrost` 二进制，或 `BIFROST_TRAY_BIN` 指向的兼容 `bifrost __tray` 二进制。
 5. 以 detached child process 启动 helper：
+   - `__tray`
    - `--data-dir <path>`
    - `--runtime-file <path>`
    - `--parent-pid <pid>`
@@ -123,7 +124,7 @@ Windows/macOS 上，`bifrost start` 在服务 ready 后尝试启动 helper：
 
 启动失败只打 warning，不让 `bifrost start` 失败。
 
-### `bifrost-tray` 侧
+### `bifrost __tray` 侧
 
 helper 启动后：
 
@@ -170,42 +171,17 @@ Windows/macOS：
 - `bifrost start` 默认尝试启动托盘。
 - `bifrost start --no-tray` 禁用本次托盘。
 - `BIFROST_DISABLE_TRAY=1 bifrost start` 禁用托盘，便于 CI、E2E、无头环境。
-- `BIFROST_TRAY_BIN=<path>` 指定 helper 路径，便于开发测试。
+- `BIFROST_TRAY_BIN=<path>` 指定兼容 `bifrost __tray` 的二进制路径，便于开发测试。
 
 Linux：
 
 - 不在 help 中暴露 `--no-tray`。
 - 不自动启动 helper。
-- 安装脚本不分发 `bifrost-tray`。
+- 安装脚本不分发第二个托盘 helper artifact。
 
-不提供公开 `bifrost tray` 子命令。`bifrost-tray` 是内部 companion binary，不是用户主入口。
+不提供公开 `bifrost tray` 子命令。`__tray` 是内部 companion 模式，不是用户主入口。
 
 ## 工程结构
-
-新增 crate：
-
-```text
-crates/bifrost-tray/
-  Cargo.toml
-  src/
-    main.rs
-    cli.rs
-    app.rs
-    state.rs
-    runtime.rs
-    menu_model.rs
-    config.rs
-    actions.rs
-    local_admin.rs
-    launcher_contract.rs
-    lock.rs
-    logging.rs
-    platform/
-      mod.rs
-      macos.rs
-      windows.rs
-      unsupported.rs
-```
 
 CLI 集成：
 
@@ -213,20 +189,17 @@ CLI 集成：
 crates/bifrost-cli/src/
   commands/start.rs          # start ready 后调用 tray_launcher
   tray_launcher.rs           # 平台 gating、helper 查找、spawn、错误降级
+  commands/tray/             # 内置 __tray helper：cli/runtime/menu/config/lock/tray
 ```
 
-安装脚本和构建：
+设计与验证：
 
 ```text
-scripts/
-  install-binary.sh          # macOS 分发 bifrost-tray
-  install-binary.ps1         # Windows 分发 bifrost-tray.exe
-
 design/
   cli-tray-helper.md
 
 human_tests/
-  cli-tray-helper.md         # 实现阶段新增
+  cli-tray-helper.md
 ```
 
 ## 依赖策略
@@ -293,7 +266,7 @@ trait NativeShell {
 
 ### macOS
 
-实现文件：`crates/bifrost-tray/src/platform/macos.rs`
+实现文件：`crates/bifrost-cli/src/commands/tray/tray.rs` 与 `crates/bifrost-cli/src/commands/tray/menu.rs`
 
 核心 API：
 
@@ -320,7 +293,7 @@ trait NativeShell {
 
 macOS 最小验收：
 
-- 直接运行 bare executable `bifrost-tray` 能创建 menu bar status item。
+- 直接运行 `bifrost __tray ...` 能创建 menu bar status item。
 - 无 Dock 图标。
 - 点击图标展示菜单。
 - 退出 helper 后图标消失。
@@ -331,7 +304,7 @@ macOS 最小验收：
 
 ### Windows
 
-实现文件：`crates/bifrost-tray/src/platform/windows.rs`
+实现文件：`crates/bifrost-cli/src/commands/tray/tray.rs` 与 `crates/bifrost-cli/src/commands/tray/menu.rs`
 
 核心 API：
 
@@ -363,14 +336,14 @@ macOS 最小验收：
 
 Windows 最小验收：
 
-- 直接运行 `bifrost-tray.exe` 后 notification area 出现图标。
+- 直接运行 `bifrost.exe __tray ...` 后 notification area 出现图标。
 - 点击图标展示原生菜单。
 - Explorer 重启后图标能恢复。
 - 退出 helper 后图标消失。
 
 ### Linux
 
-实现文件：`crates/bifrost-tray/src/platform/unsupported.rs`
+实现文件：`crates/bifrost-cli/src/commands/tray/mod.rs`
 
 语义：
 
@@ -616,11 +589,11 @@ v1 action：
 
 ## 包体积与内存门禁
 
-实现阶段必须实测并记录：
+实现阶段必须实测并记录单二进制引入托盘能力后的增量影响：
 
 ```bash
-cargo build --release -p bifrost-tray
-ls -lh target/release/bifrost-tray*
+cargo build --release --bin bifrost
+ls -lh target/release/bifrost*
 ```
 
 macOS：
@@ -639,8 +612,8 @@ Windows：
 
 | 指标 | 目标 |
 | --- | --- |
-| macOS stripped binary | <= 5 MB，超过需分析依赖来源 |
-| Windows release exe | <= 5 MB，超过需分析依赖来源 |
+| macOS release binary 增量 | 超过需分析依赖来源 |
+| Windows release exe 增量 | 超过需分析依赖来源 |
 | macOS idle memory | <= 30 MB，超过需分析 AppKit/依赖开销 |
 | Windows idle memory | <= 20 MB，超过需分析 Win32/event loop 开销 |
 | 冷启动到图标可见 | <= 1 秒 |
@@ -654,15 +627,14 @@ Windows：
 
 构建产物：
 
-- macOS: `bifrost-tray`
-- Windows: `bifrost-tray.exe`
+- macOS: `bifrost`
+- Windows: `bifrost.exe`
 
 安装布局：
 
 ```text
 <install_dir>/
   bifrost
-  bifrost-tray
 ```
 
 Windows：
@@ -670,14 +642,12 @@ Windows：
 ```text
 <install_dir>/
   bifrost.exe
-  bifrost-tray.exe
 ```
 
 helper 查找顺序：
 
-1. `BIFROST_TRAY_BIN`
-2. `bifrost` 同目录下的 `bifrost-tray` / `bifrost-tray.exe`
-3. 安装脚本记录的 companion path
+1. `BIFROST_TRAY_BIN` 指向的兼容 `bifrost __tray` 二进制
+2. 当前 `bifrost` 可执行文件
 
 找不到 helper：
 
@@ -689,7 +659,7 @@ helper 查找顺序：
 
 | 场景 | 预期行为 | 测试方式 |
 | --- | --- | --- |
-| helper binary 缺失 | start warning，服务继续运行 | E2E 删除/改名 helper |
+| helper binary 缺失 | start warning，服务继续运行 | E2E 将 `BIFROST_TRAY_BIN` 指向缺失路径 |
 | helper 启动失败 | start warning，服务继续运行 | `BIFROST_TRAY_BIN` 指向失败脚本 |
 | runtime.json 不存在 | helper 显示 Disconnected | helper self-test |
 | 主服务退出 | helper 菜单进入 Stopped/Disconnected | human_tests + E2E |
@@ -703,7 +673,7 @@ helper 查找顺序：
 
 ### 单元测试
 
-`crates/bifrost-tray`：
+`crates/bifrost-cli/src/commands/tray`：
 
 - `runtime.rs`
   - runtime 正常解析。
@@ -787,7 +757,7 @@ helper 查找顺序：
 
 Windows E2E：
 
-- 在 Windows runner 上执行 `bifrost-tray.exe --self-test platform`。
+- 在 Windows runner 上执行 `bifrost.exe __tray ...` 的平台 smoke 验证。
 - 验证 ready file。
 - 验证 `bifrost start` 不依赖 daemon mode。
 - 验证 helper 不弹出 console window。
@@ -825,22 +795,22 @@ Linux 用例：
 | --- | --- | --- |
 | fmt | `cargo fmt --all -- --check` | 无 diff |
 | clippy | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | 无 warning |
-| unit | `cargo test -p bifrost-tray` | 全部通过 |
+| unit | `cargo test -p bifrost-cli tray` | 全部通过 |
 | CLI focused | `cargo test -p bifrost-cli tray_launcher` | 全部通过 |
-| 依赖红线 | `cargo tree -p bifrost-tray` 后搜索禁用依赖 | 不包含 Tauri/Wry/WebView 等浏览器内核或重型 GUI 运行时；轻量托盘库（tray-icon/muda/tao 等）允许 |
-| macOS self-test | `cargo run -p bifrost-tray -- --self-test platform ...` | ready file 写入且退出 0 |
-| Windows self-test | `bifrost-tray.exe --self-test platform ...` | ready file 写入且退出 0 |
+| 依赖红线 | `cargo tree -p bifrost-cli` 后搜索禁用依赖 | 不包含 Tauri/Wry/WebView 等浏览器内核或重型 GUI 运行时；轻量托盘库（tray-icon/muda/tao 等）允许 |
+| macOS smoke | `target/debug/bifrost __tray ...` | 菜单栏图标出现且菜单可操作 |
+| Windows smoke | `bifrost.exe __tray ...` | notification area 图标出现且菜单可操作 |
 | E2E | 新增 tray e2e 脚本 | 全部通过 |
 | human_tests | `human_tests/cli-tray-helper.md` | 每条用例真实执行通过 |
 | workspace | `cargo test --workspace --all-features` | 全部通过 |
-| 包体积 | `ls -lh target/release/bifrost-tray*` | 符合门禁或有分析 |
+| 包体积 | `ls -lh target/release/bifrost*` | 符合门禁或有分析 |
 | 内存 | macOS/Windows 原生工具 | 符合门禁或有分析 |
 
 ## 实施拆解
 
 ### Phase 1：纯逻辑核心
 
-- 新增 `crates/bifrost-tray`。
+- 在 `crates/bifrost-cli/src/commands/tray` 内实现托盘纯逻辑核心。
 - 实现 `runtime`、`config`、`menu_model`、`actions`、`local_admin`、`lock`。
 - 不接 OS tray，先通过 `--self-test menu-model` 输出菜单 JSON。
 - 完成单元测试。

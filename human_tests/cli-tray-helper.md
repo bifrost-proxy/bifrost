@@ -2,13 +2,13 @@
 
 ## 功能模块说明
 
-验证 `bifrost-tray` 托盘 helper 在 macOS/Windows 上的完整生命周期：CLI 自动拉起、托盘图标显示、默认菜单操作、Rules 快速切换、自定义菜单加载、单实例保护、服务停止后状态变化、状态轮询刷新、可靠性回归，以及 `--no-tray` / `BIFROST_DISABLE_TRAY=1` 的禁用行为。
+验证 `bifrost` 内置 `__tray` 托盘 helper 在 macOS/Windows 上的完整生命周期：CLI 自动拉起、托盘图标显示、默认菜单操作、Rules 快速切换、自定义菜单加载、单实例保护、服务停止后状态变化、状态轮询刷新、可靠性回归，以及 `--no-tray` / `BIFROST_DISABLE_TRAY=1` 的禁用行为。
 
 ## 前置条件
 
 - macOS 或 Windows 系统
-- 已编译 `bifrost` 和 `bifrost-tray` 二进制（`cargo build --bin bifrost --bin bifrost-tray`）
-- `bifrost-tray` 位于 `bifrost` 同目录下，或设置 `BIFROST_TRAY_BIN` 环境变量指向编译产物
+- 已编译 `bifrost` 二进制（`cargo build --bin bifrost`）
+- 托盘 helper 通过当前 `bifrost` 二进制的隐藏 `__tray` 子命令重入启动；如需开发覆盖，可设置 `BIFROST_TRAY_BIN` 指向兼容 `bifrost __tray` 的二进制
 - 使用临时数据目录避免影响现有服务
 - 规则切换验证必须通过管理端 HTTP API 准备/验证规则状态，禁止直接编辑 `rules/` 或 `state.json`
 - Windows 回归项需在 Windows 交互用户 session 下执行，不能在 Session 0/service 环境中替代
@@ -18,7 +18,6 @@
 ```bash
 BIFROST_DATA_DIR=./.bifrost-tray-test \
 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
-BIFROST_TRAY_BIN=./target/debug/bifrost-tray \
 cargo run --bin bifrost -- start -p 8801 --unsafe-ssl --no-system-proxy --skip-cert-check
 ```
 
@@ -95,7 +94,6 @@ cargo run --bin bifrost -- start -p 8801 --unsafe-ssl --no-system-proxy --skip-c
 ```bash
 BIFROST_DATA_DIR=./.bifrost-tray-test \
 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
-BIFROST_TRAY_BIN=./target/debug/bifrost-tray \
 cargo run --bin bifrost -- start -p 8801 --unsafe-ssl --no-system-proxy --no-tray
 ```
 
@@ -112,7 +110,6 @@ cargo run --bin bifrost -- start -p 8801 --unsafe-ssl --no-system-proxy --no-tra
 BIFROST_DATA_DIR=./.bifrost-tray-test \
 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
 BIFROST_DISABLE_TRAY=1 \
-BIFROST_TRAY_BIN=./target/debug/bifrost-tray \
 cargo run --bin bifrost -- start -p 8801 --unsafe-ssl --no-system-proxy
 ```
 
@@ -126,11 +123,11 @@ cargo run --bin bifrost -- start -p 8801 --unsafe-ssl --no-system-proxy
 1. 启动 Bifrost 服务（自动拉起 tray helper）
 2. 手动尝试再次启动 tray helper：
 ```bash
-./target/debug/bifrost-tray --data-dir ./.bifrost-tray-test --runtime-file ./.bifrost-tray-test/runtime.json --parent-pid 1
+./target/debug/bifrost __tray --data-dir ./.bifrost-tray-test --runtime-file ./.bifrost-tray-test/runtime.json --parent-pid 1
 ```
 
 **预期结果：**
-- 第二个 tray helper 立即退出
+- 第二个 `bifrost __tray` helper 立即退出
 - 退出信息包含 "another tray helper is already running"
 - 原有的 tray 图标继续正常工作
 
@@ -261,12 +258,12 @@ curl -sS -X POST http://127.0.0.1:8801/_bifrost/api/rules \
 ### TC-TH-17: Windows sibling bifrost.exe 回退与无控制台闪窗
 
 **操作步骤：**
-1. 在 Windows 上把 `bifrost.exe` 与 `bifrost-tray.exe` 放在同一目录
-2. 不传 `--bifrost-bin`，直接启动 `bifrost-tray.exe --data-dir .\.bifrost-tray-test --runtime-file .\.bifrost-tray-test\runtime.json --parent-pid <pid>`
+1. 在 Windows 上准备 `bifrost.exe`
+2. 不传 `--bifrost-bin`，直接启动 `bifrost.exe __tray --data-dir .\.bifrost-tray-test --runtime-file .\.bifrost-tray-test\runtime.json --parent-pid <pid>`
 3. 展开菜单点击 Stop Bifrost，再重新启动并观察托盘 10 秒
 
 **预期结果：**
-- Stop Bifrost 可通过 sibling `bifrost.exe` 正常执行
+- Stop Bifrost 可通过当前 `bifrost.exe` 或 trusted `--bifrost-bin` 正常执行
 - 轮询服务状态期间没有每秒弹出 `tasklist` 或其它控制台黑窗
 - `tray.log` 不出现找不到 trusted bifrost binary 的错误
 

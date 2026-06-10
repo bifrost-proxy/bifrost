@@ -60,6 +60,7 @@ pub struct TrayRule {
     pub sort_order: i32,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_menu(
     runtime: Option<&RuntimeInfo>,
     state: ServiceState,
