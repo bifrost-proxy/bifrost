@@ -99,7 +99,7 @@ pattern resBody://(/User/xxx/yyy.txt)      # 将路径字符串作为响应内�
 pattern resBody://{mockResponse.json}      # 引用本规则文件内嵌的 mockResponse.json 值块
 ````
 
-> ⚠️ **重要**：经实测（bifrost 0.0.96，通过 `bifrost port bind` 临时端口验证），全局 Values 模块中存储的内容**不会**被 `{key}` 解析——`resBody://PRE_{freshval.json}_POST` 会原样输出 `PRE_{freshval.json}_POST`，`file://{freshval.json}` 会报 `File not found`。只有规则文件中的内嵌值块能被 `{key}` 解析。另外 `file://`/`tpl://` 会把 `{key}` 当作磁盘文件名而非值引用，因此承载值引用要用 `resBody://{key}` 这类协议，不要用 `file://{key}`。需要长期共享的大段内容，请直接写入本地文件并用绝对路径（`resBody:///abs/path`），或把内容内嵌进引用它的规则文件。
+> ℹ️ 经实测（bifrost 0.0.96，真实 `bifrost start` 路径）：通过 `bifrost value add` 存储的全局 Values 会被规则里的 `{key}` 正常解析（例如 `bifrost value add myval ...` 后，`resBody://{myval}` 输出该 value 内容）；规则文件中定义的内嵌值块同样用 `{key}` 引用。注意 `file://`/`tpl://` 的 value 会被当作文件路径处理，所以要把某个 value 作为响应内容回放时，用 `resBody://{key}` 这类内容承载协议，而不是 `file://{key}`。
 
 ### Values 存储机制
 

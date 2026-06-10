@@ -39,7 +39,7 @@ X-Injected: from-value
 pattern host://127.0.0.1:3000 resHeaders://{customHeaders}
 ````
 
-> ⚠️ 0.0.96 限制：规则里的 `{名称}` 只展开**同一规则文件内的内嵌值块**，不会展开通过 `bifrost value add` 存到 `~/.bifrost/values/` 的全局 Values。直接写 `file://{key}`、`resHeaders://{key}` 引用全局 Value 时，`{key}` 会被当成字面量（`file://` 报 `File not found`，`resHeaders://{key}` 不注入任何头）。需要在规则里复用全局 Value 时，请把内容写成内嵌值块。`file://` 协议本身只解析文件路径，不能用来回放值内容；要回放固定响应体请改用 `resBody://`。
+> ℹ️ 经实测（bifrost 0.0.96，真实 `bifrost start` 路径）：规则里的 `{名称}` 既能引用**同一规则文件内的内嵌值块**，也能引用通过 `bifrost value add` 存到 `~/.bifrost/values/` 的全局 Values（例如 `resBody://{myval}` 会输出该全局 value 的内容）。注意 `file://` 协议的 value 会被当作文件路径处理，不能用来回放 value 内容；要把某个 value 作为固定响应体回放，请用 `resBody://{key}`。
 
 更多规则侧细节见：
 
@@ -70,6 +70,6 @@ if (token) {
 }
 ```
 
-> ⚠️ 0.0.96 限制：`ctx.values` 当前是一个**空对象** —— 全局 Values 并没有被注入进脚本上下文，`ctx.values["API_TOKEN"]` 返回 `undefined`，`Object.keys(ctx.values)` 为空。脚本沙箱里也没有 `ctx.getValue()` / `ctx.value()` 等其它读取入口（`ctx` 仅含 `requestId / scriptName / scriptType / phase / values / matchedRules`）。因此上面这段示例在当前版本里不会真正设置 `Authorization` 头，仅作为待修复后的目标用法保留。脚本里需要用到的 token / 配置，目前请直接写进脚本内容，或在规则侧用内嵌值块。
+> ℹ️ 经实测（bifrost 0.0.96，真实 `bifrost start` 路径）：脚本沙箱的 `ctx.values` 会被全局 Values 填充——`bifrost value add API_TOKEN ...` 后，脚本里 `ctx.values["API_TOKEN"]` 能取到该值，`Object.keys(ctx.values)` 包含它。上面这段示例可正常工作。（`ctx` 字段：`requestId / scriptName / scriptType / phase / values / matchedRules`。）
 
 Scripts 侧细节见：[scripts.md](./scripts.md)。

@@ -2,14 +2,14 @@
 
 # Operation Reference
 
-Operations define what Bifrost does after a pattern matches. Values can be inline, parenthesized, or referenced from an embedded value block defined in the same rule file. (Global Values created with `bifrost value add` are NOT resolved by `{key}` in rules in 0.0.96 — verified; use an embedded block instead.)
+Operations define what Bifrost does after a pattern matches. Values can be inline, parenthesized, referenced from an embedded value block defined in the same rule file, or referenced from a global Value created with `bifrost value add` (both forms resolve via `{key}` — verified on the real `bifrost start` path). Note that `file://`/`tpl://` treat their value as a file path, so to emit a value as content use a content op like `resBody://{key}`, not `file://{key}`.
 
 ## Value Forms
 
 ```txt
 pattern reqHeaders://X-Debug=1
 pattern resBody://(inline body with spaces)
-pattern resBody://{mock-response.json}    # {key} = an embedded block in this rule file (not a global Value, not a disk file)
+pattern resBody://{mock-response.json}    # {key} = an embedded block in this rule file or a global Value
 pattern urlParams://t=${now}&id=${randomUUID}
 ```
 
