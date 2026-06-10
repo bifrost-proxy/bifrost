@@ -978,6 +978,11 @@ impl SystemProxyManager {
         self.original_proxy = None;
     }
 
+    pub fn detach_in_place(&mut self) {
+        self.is_set = false;
+        self.original_proxy = None;
+    }
+
     fn backup_file_path(&self) -> PathBuf {
         self.data_dir.join(BACKUP_FILE_NAME)
     }

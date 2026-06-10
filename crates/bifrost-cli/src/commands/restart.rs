@@ -383,6 +383,10 @@ fn run_orphan_work(forwarded: ForwardedRestart) {
     }
     if let (Some(runtime), Some(snapshot)) = (old_runtime.as_ref(), system_proxy_snapshot.as_ref())
     {
+        orphan_log(
+            &log,
+            "restart handoff preserving existing system proxy; reapplying before fresh daemon exec",
+        );
         reapply_system_proxy_for_restart_handoff(&log, runtime, snapshot);
     }
 
@@ -504,47 +508,19 @@ fn reapply_system_proxy_for_restart_handoff(
 ) {
     let target_host = runtime_system_proxy_host(runtime.host.as_deref());
     let target_port = runtime.port;
-    match bifrost_core::SystemProxyManager::get_current() {
-        Ok(current)
-            if current.enable
-                && !current.target_matches(target_host, target_port)
-                && !bifrost_core::SystemProxyManager::any_service_proxy_matches(
-                    target_host,
-                    target_port,
-                )
-                .unwrap_or(false) =>
-        {
+    let mut manager =
+        bifrost_core::SystemProxyManager::new(crate::config::get_bifrost_dir().unwrap_or_default());
+    match manager.enable(target_host, target_port, Some(&snapshot.bypass)) {
+        Ok(()) => {
+            manager.detach();
             orphan_log(
                 log,
-                &format!(
-                    "restart handoff system proxy reapply skipped because current proxy is owned by another target: {}:{}",
-                    current.host, current.port
-                ),
+                &format!("restart handoff system proxy reapplied to {target_host}:{target_port}"),
             );
-        }
-        Ok(_) => {
-            let mut manager = bifrost_core::SystemProxyManager::new(
-                crate::config::get_bifrost_dir().unwrap_or_default(),
-            );
-            match manager.enable(target_host, target_port, Some(&snapshot.bypass)) {
-                Ok(()) => {
-                    manager.detach();
-                    orphan_log(
-                        log,
-                        &format!(
-                            "restart handoff system proxy reapplied to {target_host}:{target_port}"
-                        ),
-                    );
-                }
-                Err(error) => orphan_log(
-                    log,
-                    &format!("restart handoff system proxy reapply failed: {error}"),
-                ),
-            }
         }
         Err(error) => orphan_log(
             log,
-            &format!("restart handoff system proxy reapply skipped; inspect failed: {error}"),
+            &format!("restart handoff system proxy reapply failed: {error}"),
         ),
     }
 }
