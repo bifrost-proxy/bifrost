@@ -89,7 +89,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [[ "${BIFROST_TRAY_STARTUP_SKIP_BUILD:-0}" != "1" || ! -x "$BIN" ]]; then
+if [[ "${SKIP_BUILD:-false}" == "true" ]]; then
+  echo "Skipping build for tray startup smoke, using $BIN"
+elif [[ "${BIFROST_TRAY_STARTUP_SKIP_BUILD:-0}" != "1" || ! -x "$BIN" ]]; then
   echo "Building bifrost binary for tray startup smoke..."
   SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost
 fi

@@ -393,7 +393,7 @@ bash e2e-tests/tests/test_cli_tray_startup_ci.sh
 2. 查看脚本输出和临时数据目录中的 `start.out`、`start.err`、`logs/tray.log*`
 
 **预期结果：**
-- 脚本自行构建 `bifrost` release binary
+- 默认脚本自行构建 `bifrost` release binary；CI shell shard 设置 `SKIP_BUILD=true` 时复用已下载的 release binary，不重复冷编译
 - 主服务 Admin API `/_bifrost/api/proxy/address` 在临时端口 ready，响应包含本次端口
 - `runtime.json` 存在，且其中的 `port` 等于本次临时端口、`pid` 为有效进程 ID
 - 数据目录优先生成 `tray.pid`，且对应 helper 进程存活；Windows runner 若 `tray.pid` 缺失或 helper 进程短暂启动后退出，但 `logs/tray.log*` 已包含启动标记，可按 log-only fallback 通过
@@ -405,6 +405,7 @@ bash e2e-tests/tests/test_cli_tray_startup_ci.sh
 | 日期 | 用例 | 执行方式 | 结果 |
 | --- | --- | --- | --- |
 | 2026-06-11 | TC-TH-02-REG-01 / TC-TH-21 | 针对 PR CI run `27305425195` 的 macOS shell shard 1 超时补充验证：失败 artifact 显示 `test_cli_foreground_ctrlc_no_enter.sh` 已输出 `PASS: foreground Ctrl-C stops without an extra Enter`，`test_cli_tray_menu_click_regression.sh` 卡在 shard 内自行 `cargo test -p bifrost-cli pure_tray_icon_event_does_not_rebuild_native_menu` 的冷编译/下载阶段。修复后脚本在 `SKIP_BUILD=true` 时跳过该 unit guard，并复用 `BIFROST_BIN` 或 `target/release/bifrost`，保留真实 macOS tray helper 启动、`tray.pid`、`tray.log` 和纯图标点击不重建菜单的日志断言。 | 本地执行 `SKIP_BUILD=true BIFROST_BIN=/Users/eden/work/github/bifrost-tray-helper-design/target/debug/bifrost bash e2e-tests/tests/test_cli_tray_menu_click_regression.sh` 通过，输出 `PASS: tray helper launched and pure icon interaction rebuild guard is active`；CI 待重跑确认 |
+| 2026-06-11 | TC-TH-21 | 针对 PR CI run `27308760100` 的 macOS shell shard 2 失败补充验证：失败 artifact 显示 `test_cli_tray_startup_ci.sh` 在 full shell shard 中重复 `cargo build --release --bin bifrost`，未复用 workflow 已下载的 release binary。修复后脚本在 `SKIP_BUILD=true` 时直接使用 `BIFROST_BIN` 或 `target/release/bifrost`，仍保留 Admin API、`runtime.json`、`tray.pid`、`logs/tray.log*` 交叉验证。 | 本地执行 `SKIP_BUILD=true BIFROST_BIN=/Users/eden/work/github/bifrost-tray-helper-design/target/debug/bifrost bash e2e-tests/tests/test_cli_tray_startup_ci.sh` 通过，输出 `PASS: tray helper started on Darwin`；CI 待重跑确认 |
 
 ## 清理步骤
 
