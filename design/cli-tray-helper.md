@@ -153,9 +153,9 @@ helper 启动后：
 v1 语义：
 
 - `Stop Bifrost` 停止主服务，但不退出 helper。
-- `Start Bifrost`、`Stop Bifrost`、`Restart Bifrost` 必须有用户可见的进行中状态：
-  - 点击后下一次展开菜单立即显示 `Bifrost: Starting...` / `Stopping...` / `Restarting...`。
-  - 进行中时禁用 Start/Stop/Restart，避免重复点击造成并发操作。
+- `Start Bifrost`、`Stop Bifrost` 必须有用户可见的进行中状态：
+  - 点击后下一次展开菜单立即显示 `Bifrost: Starting...` / `Stopping...`。
+  - 进行中时禁用 Start/Stop，避免重复点击造成并发操作。
   - 成功后回到 Running/Stopped 状态。
   - 失败或超时后显示 `Bifrost: Start failed - open logs` 等错误状态，并允许用户重试或打开日志。
 - helper 进入 `Stopped/Disconnected` 状态：
@@ -398,6 +398,7 @@ struct TrayState {
 
 - 每 1 秒读取 runtime 并校验 PID，后台轮询是 v1 的状态新鲜度来源。
 - `tray-icon 0.19` 在 macOS/Windows 上会在原生点击回调中同步弹出菜单，没有暴露“菜单展示前”钩子；因此不再承诺点击图标时能刷新本次已弹出的菜单。
+- 纯托盘图标点击事件只能被 drain，不能触发 `set_menu` 重建；否则 macOS 原生菜单会在刚弹出时被替换，表现为菜单闪烁后立即消失。
 - 菜单动作完成后立即刷新；规则切换动作完成后通过内部刷新标记触发下一轮菜单重建。
 - 连续失败时保留最近一次可用 runtime，用 disabled menu 表达不可用状态。
 
@@ -421,14 +422,12 @@ Bifrost: Running on 127.0.0.1:8800
 Open Admin UI
 Open Traffic
 Open Rules
-Rules: <当前启用规则>
 Copy Admin URL
 Copy HTTP Proxy
 Copy SOCKS5 Proxy
-System Proxy: On/Off
-Restart Bifrost
+Rules: <当前启用规则>
 Stop Bifrost
-Open Data Directory
+System Proxy
 Open Logs
 Quit Tray
 ```
@@ -446,9 +445,8 @@ Quit Tray
 - `Copy HTTP Proxy`
 - `Copy SOCKS5 Proxy`
 - `System Proxy`
-  - `Restart Bifrost`
-  - `Stop Bifrost`
-- `Open Data Directory`、`Open Logs`、`Quit Tray` 始终可用。
+- `Stop Bifrost`
+- `Open Logs`、`Quit Tray` 始终可用。
 
 动作规则：
 
@@ -458,12 +456,10 @@ Quit Tray
 - `Copy Admin URL`：复制 `admin_url`。
 - `Copy HTTP Proxy`：复制 `http://<host>:<port>`。
 - `Copy SOCKS5 Proxy`：复制 `socks5://<host>:<socks5_port>`；统一代理模式下没有独立 `socks5_port` 时 fallback 到主代理端口，只在服务未运行或 SOCKS 未启用时置灰。
-- `System Proxy: On/Off`：调用 Admin API 或 CLI 复用逻辑，刷新后更新文案。
+- `System Proxy`：原生 check item，读取 `GET /_bifrost/api/proxy/system`；点击后调用 `PUT /_bifrost/api/proxy/system` 写入 `{ "enabled": <next> }`，刷新后更新勾选状态。未运行或平台不支持时置灰。
 - `Rules: <当前启用规则>`：原生子菜单，完全通过主服务 Admin API 读取与切换规则，不直接读写 `rules/` 或状态文件。
-- `Restart Bifrost`：调用可信 `bifrost stop`，等待旧 runtime PID 退出后再用 `bifrost start --no-tray --no-system-proxy` 拉起。
 - `Stop Bifrost`：调用可信 `bifrost stop` 并等待子进程退出，避免 Unix zombie。
 - `Start Bifrost`：调用可信 `bifrost start --no-tray --no-system-proxy`，并保留原启动必要参数（例如 `--host`、`--socks5-port`、`--log-level`、`--skip-cert-check`、`--unsafe-ssl`、`--yes`），监控 runtime PID ready；若子进程提前退出或 15 秒内未 ready，状态行显示失败并引导打开日志。
-- `Open Data Directory`：打开 data dir。
 - `Open Logs`：打开 `<data_dir>/logs`。
 - `Quit Tray`：退出 helper，不停止服务。
 
@@ -482,7 +478,9 @@ Quit Tray
 展示层级：
 
 - 只有个人规则时：`Rules: <当前启用规则>` 作为第一级，悬浮展开后第二级直接展示个人规则列表。
-- 存在组规则时：第一级仍是 `Rules: <当前启用规则>`；第二级展示 `My Rules` 与各组名；第三级展示对应规则列表。
+- 存在组规则时：第一级仍是 `Rules: <当前启用规则>`；第二级展示 `My Rules` 与 Web UI `Groups` 页 `Managed` 区域一致的组名；第三级展示对应规则列表。
+- 组权限判断来自 `GET /_bifrost/api/group`，与 Web UI 保持同一语义：`level >= 1`（Owner/Master）才属于 `Managed`。本地 `rules/` 目录存在但不在 Managed 列表里的组、普通 Member 组（`level=0`）以及 Discover/Public 组（`level=null`）都不直接展开到 tray。
+- 若存在未展示的组规则，Rules 子菜单底部展示 `More...`，点击后打开 Admin Rules 页面，由管理端承载完整组规则浏览与测试。
 - 当前启用规则显示原生 check mark；无启用规则时顶层显示 `Rules: None`；多条规则同时启用时顶层显示 `Rules: Multiple`，点击任意规则后收敛为单选。
 
 ## 自定义菜单
@@ -583,7 +581,7 @@ v1 action：
 - `tray.json` 读取上限为 1 MiB，超限时 fail closed 并保留默认菜单。
 - Admin API action 只允许 localhost。
 - helper 使用 `--bifrost-bin` 参数调用 stop/restart，不盲目信任可被篡改的 runtime `binary_path`。
-- 如果 `--bifrost-bin` 不存在或不是文件，Stop/Restart 菜单置灰。
+- 如果 `--bifrost-bin` 不存在或不是文件，Start/Stop 菜单置灰。
 - helper 不提升权限，不请求管理员权限。
 - helper 不修改系统代理底层实现，只调用现有 API/CLI。
 - data dir 权限异常时 fail closed：不加载自定义菜单，不执行危险动作。
@@ -701,7 +699,7 @@ helper 查找顺序：
   - action id 到 platform command id 映射稳定。
 - `actions.rs`
   - Copy 模板展开。
-  - Stop/Restart 参数构造。
+  - Start/Stop 参数构造。
   - Admin API action 只允许 localhost。
 - `local_admin.rs`
   - HTTP 请求拼接。
@@ -771,6 +769,7 @@ macOS 用例：
 
 - `TC-TRAY-MAC-01`：CLI 启动后 menu bar 出现 Bifrost 图标。
 - `TC-TRAY-MAC-02`：点击 `Open Admin UI` 打开管理端。
+- `TC-TRAY-MAC-02A`：点击 menu bar 图标后默认菜单保持展开，不闪烁消失。
 - `TC-TRAY-MAC-03`：`Copy HTTP Proxy` 后剪贴板内容正确。
 - `TC-TRAY-MAC-04`：`Quit Tray` 不停止主服务。
 - `TC-TRAY-MAC-05`：`Stop Bifrost` 停止主服务，helper 进入 stopped 状态。
@@ -868,7 +867,7 @@ Linux 用例：
 - 没有引入 Tauri/Wry/WebView 等浏览器内核或重型 GUI 运行时。
 - helper 缺失或失败不影响主服务。
 - 默认菜单和自定义菜单安全可控。
-- Stop/Restart/Quit Tray 语义清晰且通过验证。
+- Start/Stop/Quit Tray 语义清晰且通过验证。
 - 包体积和内存有真实测量数据。
 - 单元测试、E2E、human_tests、workspace tests 完成并记录。
 

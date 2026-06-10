@@ -35,9 +35,12 @@ pub enum MenuItemAction {
         method: String,
         url: String,
     },
+    SetSystemProxy {
+        url: String,
+        enabled: bool,
+    },
     StartService,
     StopService,
-    RestartService,
     OpenDirectory(String),
     SelectRule {
         target: RuleTarget,
@@ -58,6 +61,13 @@ pub struct TrayRule {
     pub target: RuleTarget,
     pub enabled: bool,
     pub sort_order: i32,
+    pub managed_group: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemProxyMenuState {
+    pub supported: bool,
+    pub enabled: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -70,6 +80,7 @@ pub fn build_menu(
     data_dir: &str,
     bin_available: bool,
     rules: &[TrayRule],
+    system_proxy: Option<&SystemProxyMenuState>,
 ) -> Vec<MenuEntry> {
     let mut items = Vec::new();
     let is_running = state == ServiceState::Running;
@@ -146,7 +157,8 @@ pub fn build_menu(
         }));
     }
 
-    if let Some(rules_menu) = build_rules_menu(rules, is_running) {
+    let admin_rules_url = runtime.map(|rt| format!("{}rules", rt.admin_url()));
+    if let Some(rules_menu) = build_rules_menu(rules, is_running, admin_rules_url.as_deref()) {
         items.push(MenuEntry::Submenu(rules_menu));
     }
 
@@ -171,13 +183,6 @@ pub fn build_menu(
             checked: false,
             action: MenuItemAction::StopService,
         }));
-        items.push(item(MenuItemDef {
-            id: "restart_service".to_string(),
-            label: "Restart Bifrost".to_string(),
-            enabled: bin_available && !service_action_busy,
-            checked: false,
-            action: MenuItemAction::RestartService,
-        }));
     } else {
         items.push(item(MenuItemDef {
             id: "toggle_service".to_string(),
@@ -188,13 +193,19 @@ pub fn build_menu(
         }));
     }
 
-    items.push(item(MenuItemDef {
-        id: "open_data_dir".to_string(),
-        label: "Open Data Directory".to_string(),
-        enabled: true,
-        checked: false,
-        action: MenuItemAction::OpenDirectory(data_dir.to_string()),
-    }));
+    if let (Some(rt), Some(system_proxy)) = (runtime, system_proxy) {
+        let admin_url = rt.admin_url();
+        items.push(item(MenuItemDef {
+            id: "toggle_system_proxy".to_string(),
+            label: "System Proxy".to_string(),
+            enabled: is_running && system_proxy.supported && !service_action_busy,
+            checked: system_proxy.enabled,
+            action: MenuItemAction::SetSystemProxy {
+                url: format!("{}api/proxy/system", admin_url),
+                enabled: !system_proxy.enabled,
+            },
+        }));
+    }
 
     items.push(item(MenuItemDef {
         id: "open_logs".to_string(),
@@ -231,7 +242,11 @@ fn separator(id: &str) -> MenuEntry {
     })
 }
 
-fn build_rules_menu(rules: &[TrayRule], is_running: bool) -> Option<SubmenuDef> {
+fn build_rules_menu(
+    rules: &[TrayRule],
+    is_running: bool,
+    admin_rules_url: Option<&str>,
+) -> Option<SubmenuDef> {
     if rules.is_empty() {
         if !is_running {
             return None;
@@ -264,7 +279,7 @@ fn build_rules_menu(rules: &[TrayRule], is_running: bool) -> Option<SubmenuDef> 
     };
 
     let children = if has_group_rules {
-        build_grouped_rule_entries(rules, &all_targets, is_running)
+        build_grouped_rule_entries(rules, &all_targets, is_running, admin_rules_url)
     } else {
         rules
             .iter()
@@ -295,6 +310,7 @@ fn build_grouped_rule_entries(
     rules: &[TrayRule],
     all_targets: &[RuleTarget],
     is_running: bool,
+    admin_rules_url: Option<&str>,
 ) -> Vec<MenuEntry> {
     let mut children = Vec::new();
     let personal_rules = rules
@@ -318,8 +334,9 @@ fn build_grouped_rule_entries(
     let mut group_names = rules
         .iter()
         .filter_map(|rule| match &rule.target {
-            RuleTarget::Group { group_name, .. } => Some(group_name.clone()),
+            RuleTarget::Group { group_name, .. } if rule.managed_group => Some(group_name.clone()),
             RuleTarget::Personal { .. } => None,
+            RuleTarget::Group { .. } => None,
         })
         .collect::<Vec<_>>();
     group_names.sort();
@@ -332,7 +349,7 @@ fn build_grouped_rule_entries(
             .filter(|(_, rule)| match &rule.target {
                 RuleTarget::Group {
                     group_name: name, ..
-                } => name == &group_name,
+                } => name == &group_name && rule.managed_group,
                 RuleTarget::Personal { .. } => false,
             })
             .map(|(index, rule)| rule_entry(rule, index, all_targets, is_running))
@@ -342,6 +359,24 @@ fn build_grouped_rule_entries(
             label: group_name,
             enabled: true,
             children: group_children,
+        }));
+    }
+
+    if rules
+        .iter()
+        .any(|rule| !rule.managed_group && matches!(rule.target, RuleTarget::Group { .. }))
+    {
+        if !children.is_empty() {
+            children.push(separator("rules_more_separator"));
+        }
+        children.push(item(MenuItemDef {
+            id: "rules_more".to_string(),
+            label: "More...".to_string(),
+            enabled: is_running && admin_rules_url.is_some(),
+            checked: false,
+            action: admin_rules_url
+                .map(|url| MenuItemAction::OpenUrl(url.to_string()))
+                .unwrap_or(MenuItemAction::None),
         }));
     }
 
@@ -409,7 +444,11 @@ fn rule_sort_key(target: &RuleTarget) -> (u8, String, String) {
 
 #[cfg(test)]
 pub fn build_rules_menu_for_test(rules: &[TrayRule], is_running: bool) -> Option<SubmenuDef> {
-    build_rules_menu(rules, is_running)
+    build_rules_menu(
+        rules,
+        is_running,
+        Some("http://127.0.0.1:8800/_bifrost/rules"),
+    )
 }
 
 fn custom_item_to_def(
@@ -492,10 +531,20 @@ mod tests {
             },
             enabled,
             sort_order: 0,
+            managed_group: false,
         }
     }
 
     fn group_rule(group_name: &str, name: &str, enabled: bool) -> TrayRule {
+        group_rule_with_managed(group_name, name, enabled, true)
+    }
+
+    fn group_rule_with_managed(
+        group_name: &str,
+        name: &str,
+        enabled: bool,
+        managed_group: bool,
+    ) -> TrayRule {
         TrayRule {
             target: RuleTarget::Group {
                 group_name: group_name.to_string(),
@@ -503,6 +552,7 @@ mod tests {
             },
             enabled,
             sort_order: 0,
+            managed_group,
         }
     }
 
@@ -529,14 +579,60 @@ mod tests {
             "/tmp/.bifrost",
             true,
             &[],
+            None,
         );
         let status = find_item(&menu, "_status").unwrap();
         assert!(status.label.contains("Running on 127.0.0.1:8800"));
         let open_admin = find_item(&menu, "open_admin_ui").unwrap();
         assert!(open_admin.enabled);
-        // Restart is offered when running
-        let restart = find_item(&menu, "restart_service").unwrap();
-        assert!(restart.enabled);
+        assert!(find_item(&menu, "restart_service").is_none());
+        assert!(find_item(&menu, "open_data_dir").is_none());
+    }
+
+    #[test]
+    fn test_system_proxy_toggle_is_below_stop_without_restart_or_data_dir() {
+        let rt = sample_runtime();
+        let system_proxy = SystemProxyMenuState {
+            supported: true,
+            enabled: true,
+        };
+        let menu = build_menu(
+            Some(&rt),
+            ServiceState::Running,
+            None,
+            false,
+            None,
+            "/tmp/.bifrost",
+            true,
+            &[],
+            Some(&system_proxy),
+        );
+
+        let labels = menu
+            .iter()
+            .filter_map(|entry| match entry {
+                MenuEntry::Item(item) => Some(item.label.as_str()),
+                MenuEntry::Submenu(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let stop_index = labels
+            .iter()
+            .position(|label| *label == "Stop Bifrost")
+            .unwrap();
+        assert_eq!(labels.get(stop_index + 1), Some(&"System Proxy"));
+        assert!(!labels.contains(&"Restart Bifrost"));
+        assert!(!labels.contains(&"Open Data Directory"));
+
+        let toggle = find_item(&menu, "toggle_system_proxy").unwrap();
+        assert!(toggle.enabled);
+        assert!(toggle.checked);
+        match &toggle.action {
+            MenuItemAction::SetSystemProxy { url, enabled } => {
+                assert_eq!(url, "http://127.0.0.1:8800/_bifrost/api/proxy/system");
+                assert!(!enabled);
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
     }
 
     #[test]
@@ -551,6 +647,7 @@ mod tests {
             "/tmp/.bifrost",
             true,
             &[],
+            None,
         );
         let status = find_item(&menu, "_status").unwrap();
         assert!(status.label.contains("Stopped"));
@@ -572,6 +669,7 @@ mod tests {
             "/tmp/.bifrost",
             true,
             &[],
+            None,
         );
         let status = find_item(&menu, "_status").unwrap();
         assert_eq!(status.label, "Bifrost: Starting...");
@@ -592,6 +690,7 @@ mod tests {
             "/tmp/.bifrost",
             true,
             &[],
+            None,
         );
         let status = find_item(&menu, "_status").unwrap();
         assert_eq!(status.label, "Bifrost: Start failed - open logs");
@@ -611,11 +710,11 @@ mod tests {
             "/tmp/.bifrost",
             false,
             &[],
+            None,
         );
         let stop = find_item(&menu, "toggle_service").unwrap();
         assert!(!stop.enabled);
-        let restart = find_item(&menu, "restart_service").unwrap();
-        assert!(!restart.enabled);
+        assert!(find_item(&menu, "restart_service").is_none());
     }
 
     #[test]
@@ -633,6 +732,7 @@ mod tests {
             "/tmp/.bifrost",
             true,
             &[],
+            None,
         );
         let socks5 = find_item(&menu, "copy_socks5_proxy").unwrap();
         assert!(socks5.enabled);
@@ -681,6 +781,7 @@ mod tests {
             "/tmp/.bifrost",
             true,
             &[],
+            None,
         );
         let custom = find_item(&menu, "custom1").unwrap();
         assert_eq!(custom.label, "My Item");
@@ -710,6 +811,7 @@ mod tests {
             "/tmp/.bifrost",
             true,
             &[],
+            None,
         );
         let custom = find_item(&menu, "refresh").unwrap();
         match &custom.action {
@@ -754,5 +856,30 @@ mod tests {
         assert_eq!(personal.label, "My Rules");
         assert_eq!(group.label, "Team A");
         assert!(find_item(&group.children, "select_rule_1").unwrap().checked);
+    }
+
+    #[test]
+    fn test_rules_menu_hides_unmanaged_groups_behind_more() {
+        let rules = vec![
+            personal_rule("personal", false),
+            group_rule("Private Team", "private-shared", false),
+            group_rule_with_managed("Discover Team", "discover-shared", true, false),
+        ];
+
+        let menu = build_rules_menu_for_test(&rules, true).unwrap();
+        assert_eq!(menu.label, "Rules: Discover Team/discover-shared");
+        assert!(find_submenu(&menu.children, "rules_my_rules").is_some());
+        assert!(find_submenu(&menu.children, "rules_group_Private_Team").is_some());
+        assert!(find_submenu(&menu.children, "rules_group_Discover_Team").is_none());
+
+        let more = find_item(&menu.children, "rules_more").unwrap();
+        assert_eq!(more.label, "More...");
+        assert!(more.enabled);
+        match &more.action {
+            MenuItemAction::OpenUrl(url) => {
+                assert_eq!(url, "http://127.0.0.1:8800/_bifrost/rules");
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
     }
 }

@@ -45,9 +45,24 @@ cargo run --bin bifrost -- start -p 8801 --unsafe-ssl --no-system-proxy --skip-c
 - 包含以下菜单项：Open Admin UI、Open Traffic、Open Rules、Copy Admin URL、Copy HTTP Proxy、Copy SOCKS5 Proxy
 - 统一代理模式下 Copy SOCKS5 Proxy 可点击，复制值为 `socks5://127.0.0.1:8801`；如果启动时显式传入 `--socks5-port <port>`，则复制独立 SOCKS5 端口
 - 没有规则时仍显示 `Rules: None` 子菜单，子菜单中显示置灰的 `No rules available`
+- Stop Bifrost 下方显示 `System Proxy` 原生勾选菜单项
 - 包含分隔线
-- 包含：Restart Bifrost、Stop Bifrost、Open Data Directory、Open Logs
+- 包含：Stop Bifrost、System Proxy、Open Logs
+- 不包含：Restart Bifrost、Open Data Directory
 - 最底部：Quit Tray
+
+### TC-TH-02-REG-01: 点击托盘图标后菜单保持展开
+
+**操作步骤：**
+1. 在 TC-TH-01 基础上，连续点击托盘图标 3 次
+2. 每次点击后观察菜单是否保持展开至少 2 秒
+3. 每次菜单展开后移动鼠标到 "Open Admin UI" 菜单项但不点击
+4. 查看 `.bifrost-tray-test/logs/tray.log*`
+
+**预期结果：**
+- 每次点击后菜单都保持展开，不出现闪烁一下立即消失
+- 鼠标移动到 "Open Admin UI" 时该菜单项保持可见且可高亮
+- 点击图标本身不会立即产生 `tray icon and menu updated` 日志；菜单重建只应由状态变化、菜单动作、显式 reload 或规则轮询变化触发
 
 ### TC-TH-03: Open Admin UI 打开浏览器管理端
 
@@ -228,6 +243,38 @@ curl -sS -X POST http://127.0.0.1:8801/_bifrost/api/rules \
 - 点击组规则后，顶层文案更新为 `Rules: <组名>/tray-group-rule-a`
 - `active-summary` 只包含被点击的组规则，不包含 `tray-personal-c`
 - 无 Sync session 时，`active-summary` 仍以本地目录名作为 group fallback 展示已启用组规则，不把菜单顶层错误刷新成 `Rules: None`
+
+### TC-TH-14-REG-01: 非 Managed 组规则收起到 More
+
+**操作步骤：**
+1. 使用带 Sync session 的真实数据目录启动 Bifrost 服务，或使用已有包含组规则缓存的本机数据目录
+2. 调用 `curl -sS http://127.0.0.1:8801/_bifrost/api/group`，确认 Web UI `Managed` 区域对应的组满足 `level >= 1`
+3. 调用 `curl -sS http://127.0.0.1:8801/_bifrost/api/rules/reference-candidates`，确认至少存在一个不在 `level >= 1` Managed 列表中的组规则候选，例如本地 `rules/` 目录残留但 `/api/group` 不返回的组、`level=0` 组或 `level=null` Discover/Public 组
+4. 展开托盘菜单并悬浮 `Rules: <当前启用规则>`
+5. 观察 Rules 子菜单的第二级分组，并点击底部 `More...`
+
+**预期结果：**
+- 第二级只展示 `My Rules` 和 Web UI `Managed` 区域中的组，不直接列出非 Managed 组名
+- 如果存在非 Managed 组规则候选，Rules 子菜单底部显示 `More...`
+- 点击 `More...` 后打开 `http://127.0.0.1:8801/_bifrost/rules`
+- 非 Managed 组规则仍可在 Admin Rules 页面继续浏览和测试
+
+### TC-TH-14-REG-02: 系统代理开关位于 Stop Bifrost 下方
+
+**操作步骤：**
+1. 使用启动命令模板启动 Bifrost 服务
+2. 展开托盘菜单
+3. 观察动作区菜单项顺序
+4. 点击 `System Proxy`，等待最多 3 秒后再次展开托盘菜单
+5. 通过 `curl -sS http://127.0.0.1:8801/_bifrost/api/proxy/system` 验证系统代理状态
+6. 如果第 4 步已启用系统代理，再次点击 `System Proxy` 关闭并复查状态
+
+**预期结果：**
+- 动作区顺序为 `Stop Bifrost`、`System Proxy`、`Open Logs`
+- 菜单中不存在 `Restart Bifrost`
+- 菜单中不存在 `Open Data Directory`
+- `System Proxy` 是原生勾选菜单项，勾选状态与 `managed_by_bifrost=true` 的系统代理状态一致
+- 点击后通过 Admin API 切换系统代理到当前 Bifrost 端口；再次点击可关闭，关闭后不残留 Bifrost 管理的系统代理
 - 切换动作使用 Admin API 的个人规则 enable/disable 与组规则 enable/disable 接口
 
 ### TC-TH-15: 服务停止后 1 秒轮询刷新菜单状态

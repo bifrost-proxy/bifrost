@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -27,15 +27,12 @@ const STATE_DISCONNECTED: u8 = 2;
 const OP_IDLE: u8 = 0;
 const OP_STARTING: u8 = 1;
 const OP_STOPPING: u8 = 2;
-const OP_RESTARTING: u8 = 3;
 const OP_START_FAILED: u8 = 4;
 const OP_STOP_FAILED: u8 = 5;
-const OP_RESTART_FAILED: u8 = 6;
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(3);
 const START_READY_TIMEOUT: Duration = Duration::from_secs(15);
-const RESTART_STOP_TIMEOUT: Duration = Duration::from_secs(8);
 const LOG_RETENTION_DAYS: u64 = 30;
 
 pub fn run(args: TrayArgs) -> Result<(), String> {
@@ -69,6 +66,9 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     let bin_available = trusted_bifrost_binary_available(&args);
 
     let rules = load_rules_for_menu(runtime.as_ref(), state);
+    let system_proxy = runtime
+        .as_ref()
+        .and_then(|rt| load_system_proxy_state(&rt.admin_url()));
     let menu_items = menu::build_menu(
         runtime.as_ref(),
         state,
@@ -78,6 +78,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
         &data_dir_str,
         bin_available,
         &rules,
+        system_proxy.as_ref(),
     );
 
     let (tray_menu, mut action_map) = build_native_menu(&menu_items);
@@ -134,11 +135,8 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
         }
 
         let mut action_triggered = false;
-        let mut icon_interacted = false;
         if let Event::NewEvents(_) = event {
-            while tray_receiver.try_recv().is_ok() {
-                icon_interacted = true;
-            }
+            while tray_receiver.try_recv().is_ok() {}
 
             while let Ok(event) = menu_receiver.try_recv() {
                 if let Some(action) = action_map.get(&event.id) {
@@ -168,11 +166,11 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
             STATE_STOPPED => ServiceState::Stopped,
             _ => ServiceState::Disconnected,
         };
-        let probed_rules = if last_rules_probe.elapsed() >= POLL_INTERVAL
-            || icon_interacted
-            || action_triggered
-            || reload_requested
-        {
+        let probed_rules = if should_probe_rules_for_menu_update(
+            last_rules_probe.elapsed(),
+            action_triggered,
+            reload_requested,
+        ) {
             last_rules_probe = Instant::now();
             let rt = runtime::read_runtime(&args.runtime_file);
             let current_rules = load_rules_for_menu(rt.as_ref(), svc_state);
@@ -186,13 +184,13 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
         };
         let rules_changed = probed_rules.is_some();
 
-        if state_changed
-            || operation_changed
-            || reload_requested
-            || icon_interacted
-            || action_triggered
-            || rules_changed
-        {
+        if should_rebuild_native_menu(
+            state_changed,
+            operation_changed,
+            reload_requested,
+            action_triggered,
+            rules_changed,
+        ) {
             last_rendered_state = new_state;
             last_rendered_operation = new_operation;
 
@@ -222,6 +220,9 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
             let rules = probed_rules.unwrap_or_else(|| load_rules_for_menu(rt.as_ref(), svc_state));
             last_rendered_rules = rules.clone();
             let bin_available = trusted_bifrost_binary_available(&args);
+            let system_proxy = rt
+                .as_ref()
+                .and_then(|runtime| load_system_proxy_state(&runtime.admin_url()));
             let new_menu_items = menu::build_menu(
                 rt.as_ref(),
                 svc_state,
@@ -231,6 +232,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
                 &data_dir_str,
                 bin_available,
                 &rules,
+                system_proxy.as_ref(),
             );
             let (new_menu, new_action_map) = build_native_menu(&new_menu_items);
             tray_icon.set_menu(Some(Box::new(new_menu)));
@@ -239,7 +241,6 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
             tracing::info!(
                 state = new_state,
                 operation = new_operation,
-                icon_interacted = icon_interacted,
                 rules_changed = rules_changed,
                 reloaded = reload_requested,
                 "tray icon and menu updated"
@@ -315,29 +316,42 @@ fn operation_status_label(operation: u8) -> Option<&'static str> {
     match operation {
         OP_STARTING => Some("Bifrost: Starting..."),
         OP_STOPPING => Some("Bifrost: Stopping..."),
-        OP_RESTARTING => Some("Bifrost: Restarting..."),
         OP_START_FAILED => Some("Bifrost: Start failed - open logs"),
         OP_STOP_FAILED => Some("Bifrost: Stop failed - open logs"),
-        OP_RESTART_FAILED => Some("Bifrost: Restart failed - open logs"),
         _ => None,
     }
 }
 
 fn operation_busy(operation: u8) -> bool {
-    matches!(operation, OP_STARTING | OP_STOPPING | OP_RESTARTING)
+    matches!(operation, OP_STARTING | OP_STOPPING)
 }
 
 fn clear_completed_operation(operation: &AtomicU8, state: u8) {
     let current = operation.load(Ordering::Relaxed);
-    let completed = (matches!(
-        current,
-        OP_STARTING | OP_RESTARTING | OP_START_FAILED | OP_RESTART_FAILED
-    ) && state == STATE_RUNNING)
+    let completed = (matches!(current, OP_STARTING | OP_START_FAILED) && state == STATE_RUNNING)
         || (matches!(current, OP_STOPPING | OP_STOP_FAILED)
             && matches!(state, STATE_STOPPED | STATE_DISCONNECTED));
     if completed {
         operation.store(OP_IDLE, Ordering::Relaxed);
     }
+}
+
+fn should_probe_rules_for_menu_update(
+    rules_probe_elapsed: Duration,
+    action_triggered: bool,
+    reload_requested: bool,
+) -> bool {
+    rules_probe_elapsed >= POLL_INTERVAL || action_triggered || reload_requested
+}
+
+fn should_rebuild_native_menu(
+    state_changed: bool,
+    operation_changed: bool,
+    reload_requested: bool,
+    action_triggered: bool,
+    rules_changed: bool,
+) -> bool {
+    state_changed || operation_changed || reload_requested || action_triggered || rules_changed
 }
 
 fn load_icon(dimmed: bool) -> tray_icon::Icon {
@@ -396,6 +410,7 @@ fn load_custom_config_safe(data_dir: &Path) -> Option<TrayConfig> {
 struct RuleReferenceCandidate {
     rule_name: String,
     group_name: Option<String>,
+    group_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -407,6 +422,13 @@ struct ActiveSummaryResponse {
 struct ActiveRuleItem {
     name: String,
     group_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SystemProxyStatusResponse {
+    supported: bool,
+    enabled: bool,
+    managed_by_bifrost: Option<bool>,
 }
 
 fn load_rules_for_menu(runtime: Option<&RuntimeInfo>, state: ServiceState) -> Vec<menu::TrayRule> {
@@ -422,6 +444,7 @@ fn load_rules_for_menu(runtime: Option<&RuntimeInfo>, state: ServiceState) -> Ve
 fn load_rules_from_admin(admin_url: &str) -> Vec<menu::TrayRule> {
     let base = admin_url.trim_end_matches('/');
     let candidates_url = format!("{base}/api/rules/reference-candidates");
+    let groups_url = format!("{base}/api/group");
     let active_url = format!("{base}/api/rules/active-summary");
     let agent = http_agent();
 
@@ -438,6 +461,8 @@ fn load_rules_from_admin(admin_url: &str) -> Vec<menu::TrayRule> {
             return Vec::new();
         }
     };
+
+    let managed_groups = load_managed_groups_from_admin(&agent, &groups_url);
 
     let active = match agent.get(&active_url).call() {
         Ok(resp) => match resp.into_json::<ActiveSummaryResponse>() {
@@ -467,6 +492,7 @@ fn load_rules_from_admin(admin_url: &str) -> Vec<menu::TrayRule> {
     let mut rules = candidates
         .into_iter()
         .map(|candidate| {
+            let managed_group = candidate_is_managed_group(&candidate, managed_groups.as_ref());
             let target = match candidate.group_name {
                 Some(group_name) => menu::RuleTarget::Group {
                     group_name,
@@ -481,12 +507,110 @@ fn load_rules_from_admin(admin_url: &str) -> Vec<menu::TrayRule> {
                 target,
                 enabled,
                 sort_order: 0,
+                managed_group,
             }
         })
         .collect::<Vec<_>>();
 
     menu::sort_tray_rules(&mut rules);
     rules
+}
+
+fn load_system_proxy_state(admin_url: &str) -> Option<menu::SystemProxyMenuState> {
+    let base = admin_url.trim_end_matches('/');
+    let url = format!("{base}/api/proxy/system");
+    let agent = http_agent();
+    match agent.get(&url).call() {
+        Ok(resp) => match resp.into_json::<SystemProxyStatusResponse>() {
+            Ok(status) => Some(menu::SystemProxyMenuState {
+                supported: status.supported,
+                enabled: status.enabled && status.managed_by_bifrost.unwrap_or(true),
+            }),
+            Err(error) => {
+                tracing::warn!(error = %error, "failed to decode system proxy status for tray menu");
+                None
+            }
+        },
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to load system proxy status for tray menu");
+            None
+        }
+    }
+}
+
+fn load_managed_groups_from_admin(
+    agent: &ureq::Agent,
+    groups_url: &str,
+) -> Option<(HashSet<String>, HashSet<String>)> {
+    let mut ids = HashSet::new();
+    let mut names = HashSet::new();
+
+    let value = match agent.get(groups_url).call() {
+        Ok(resp) => match resp.into_json::<serde_json::Value>() {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(error = %error, "failed to decode group list for tray menu");
+                return None;
+            }
+        },
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to load group list for tray menu");
+            return None;
+        }
+    };
+
+    let groups = value
+        .pointer("/data/list")
+        .or_else(|| value.pointer("/data"))
+        .and_then(|data| data.as_array());
+
+    if let Some(groups) = groups {
+        for group in groups {
+            let is_managed = group
+                .pointer("/level")
+                .and_then(|v| v.as_i64())
+                .is_some_and(|level| level >= 1);
+            if !is_managed {
+                continue;
+            }
+            if let Some(id) = group
+                .pointer("/id")
+                .or_else(|| group.pointer("/group_id"))
+                .and_then(|v| v.as_str())
+            {
+                ids.insert(id.to_string());
+            }
+            if let Some(name) = group
+                .pointer("/name")
+                .or_else(|| group.pointer("/group_name"))
+                .and_then(|v| v.as_str())
+            {
+                names.insert(name.to_string());
+            }
+        }
+    }
+
+    Some((ids, names))
+}
+
+fn candidate_is_managed_group(
+    candidate: &RuleReferenceCandidate,
+    managed_groups: Option<&(HashSet<String>, HashSet<String>)>,
+) -> bool {
+    if candidate.group_name.is_none() {
+        return false;
+    }
+    let Some((managed_group_ids, managed_group_names)) = managed_groups else {
+        return true;
+    };
+    candidate
+        .group_id
+        .as_ref()
+        .is_some_and(|id| managed_group_ids.contains(id))
+        || candidate
+            .group_name
+            .as_ref()
+            .is_some_and(|name| managed_group_names.contains(name))
 }
 
 fn http_agent() -> ureq::Agent {
@@ -544,7 +668,12 @@ fn append_menu_item(
         return;
     }
 
-    if item.checked || matches!(item.action, MenuItemAction::SelectRule { .. }) {
+    if item.checked
+        || matches!(
+            item.action,
+            MenuItemAction::SelectRule { .. } | MenuItemAction::SetSystemProxy { .. }
+        )
+    {
         let menu_item = CheckMenuItem::new(&item.label, item.enabled, item.checked, None);
         map.insert(menu_item.id().clone(), item.action.clone());
         menu.append_item(&menu_item);
@@ -611,6 +740,33 @@ fn execute_action(
                 }
             });
         }
+        MenuItemAction::SetSystemProxy { url, enabled } => {
+            let url = url.clone();
+            let enabled = *enabled;
+            let reload_flag = reload_flag.clone();
+            thread::spawn(move || {
+                let agent = http_agent();
+                let body = format!(r#"{{"enabled":{enabled}}}"#);
+                match agent
+                    .put(&url)
+                    .set("Content-Type", "application/json")
+                    .send_string(&body)
+                {
+                    Ok(resp) => {
+                        tracing::info!(
+                            status = resp.status(),
+                            enabled = enabled,
+                            url = %url,
+                            "system proxy toggle called"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::error!(enabled = enabled, url = %url, error = %error, "system proxy toggle failed");
+                    }
+                }
+                reload_flag.store(true, Ordering::Relaxed);
+            });
+        }
         MenuItemAction::StartService => {
             if operation_busy(operation.load(Ordering::Relaxed)) {
                 tracing::warn!("service action ignored while another action is running");
@@ -669,53 +825,6 @@ fn execute_action(
                     operation.store(OP_STOP_FAILED, Ordering::Relaxed);
                 }
                 reload_flag.store(true, Ordering::Relaxed);
-            });
-        }
-        MenuItemAction::RestartService => {
-            if operation_busy(operation.load(Ordering::Relaxed)) {
-                tracing::warn!("service action ignored while another action is running");
-                return;
-            }
-            let Some(bin) = resolve_bifrost_binary(args) else {
-                tracing::error!("cannot find trusted bifrost binary to restart service");
-                operation.store(OP_RESTART_FAILED, Ordering::Relaxed);
-                reload_flag.store(true, Ordering::Relaxed);
-                return;
-            };
-            let data_dir = args.data_dir.to_string_lossy().to_string();
-            let runtime_file = args.runtime_file.clone();
-            let port = args.port;
-            let extra_args = args.start_args.clone();
-            let operation = operation.clone();
-            let reload_flag = reload_flag.clone();
-            operation.store(OP_RESTARTING, Ordering::Relaxed);
-            reload_flag.store(true, Ordering::Relaxed);
-            thread::spawn(move || {
-                let old_pid = runtime::read_runtime(&runtime_file).map(|rt| rt.pid);
-                if !spawn_stop(&bin, &data_dir) {
-                    operation.store(OP_RESTART_FAILED, Ordering::Relaxed);
-                    reload_flag.store(true, Ordering::Relaxed);
-                    return;
-                }
-                if !wait_for_runtime_pid_exit(old_pid, RESTART_STOP_TIMEOUT) {
-                    tracing::error!("timed out waiting for bifrost service to stop before restart");
-                    operation.store(OP_RESTART_FAILED, Ordering::Relaxed);
-                    reload_flag.store(true, Ordering::Relaxed);
-                    return;
-                }
-                match spawn_start(&bin, &data_dir, port, &extra_args) {
-                    Some(child) => monitor_start_child(
-                        child,
-                        runtime_file,
-                        operation,
-                        reload_flag,
-                        OP_RESTART_FAILED,
-                    ),
-                    None => {
-                        operation.store(OP_RESTART_FAILED, Ordering::Relaxed);
-                        reload_flag.store(true, Ordering::Relaxed);
-                    }
-                }
             });
         }
         MenuItemAction::OpenDirectory(path) => {
@@ -941,20 +1050,6 @@ fn configure_service_command(cmd: &mut Command) {
     }
 }
 
-fn wait_for_runtime_pid_exit(pid: Option<u32>, timeout: Duration) -> bool {
-    let Some(pid) = pid else {
-        return true;
-    };
-    let start = std::time::Instant::now();
-    while start.elapsed() < timeout {
-        if !runtime::is_process_running(pid) {
-            return true;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    !runtime::is_process_running(pid)
-}
-
 /// Resolve the bifrost binary to use for service control.
 ///
 /// Only trusted sources are honored: the explicit `--bifrost-bin` passed by the
@@ -1065,6 +1160,43 @@ mod tests {
     }
 
     #[test]
+    fn test_pure_tray_icon_event_does_not_rebuild_native_menu() {
+        assert!(!should_probe_rules_for_menu_update(
+            Duration::from_millis(200),
+            false,
+            false
+        ));
+        assert!(!should_rebuild_native_menu(
+            false, false, false, false, false
+        ));
+    }
+
+    #[test]
+    fn test_menu_update_still_runs_for_real_state_and_rule_triggers() {
+        assert!(should_probe_rules_for_menu_update(
+            POLL_INTERVAL,
+            false,
+            false
+        ));
+        assert!(should_probe_rules_for_menu_update(
+            Duration::from_millis(200),
+            true,
+            false
+        ));
+        assert!(should_probe_rules_for_menu_update(
+            Duration::from_millis(200),
+            false,
+            true
+        ));
+
+        assert!(should_rebuild_native_menu(true, false, false, false, false));
+        assert!(should_rebuild_native_menu(false, true, false, false, false));
+        assert!(should_rebuild_native_menu(false, false, true, false, false));
+        assert!(should_rebuild_native_menu(false, false, false, true, false));
+        assert!(should_rebuild_native_menu(false, false, false, false, true));
+    }
+
+    #[test]
     fn test_rule_toggle_url_for_personal_rule() {
         let target = RuleTarget::Personal {
             name: "qa rule".to_string(),
@@ -1096,8 +1228,13 @@ mod tests {
                 "HTTP/1.1 200 OK",
                 r#"[
                     {"name":"alpha","rule_name":"alpha","group_name":null,"group_id":null},
-                    {"name":"Team A/shared","rule_name":"shared","group_name":"Team A","group_id":"grp-a"}
+                    {"name":"Team A/shared","rule_name":"shared","group_name":"Team A","group_id":"grp-a"},
+                    {"name":"Public/shared","rule_name":"public-shared","group_name":"Public","group_id":"grp-public"}
                 ]"#,
+            ),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"code":0,"data":{"list":[{"id":"grp-a","name":"Team A","visibility":0,"level":2},{"id":"grp-public","name":"Public","visibility":1,"level":null}]}}"#,
             ),
             (
                 "HTTP/1.1 200 OK",
@@ -1112,10 +1249,11 @@ mod tests {
             *seen.lock().unwrap(),
             vec![
                 "GET /_bifrost/api/rules/reference-candidates HTTP/1.1",
+                "GET /_bifrost/api/group HTTP/1.1",
                 "GET /_bifrost/api/rules/active-summary HTTP/1.1",
             ]
         );
-        assert_eq!(rules.len(), 2);
+        assert_eq!(rules.len(), 3);
         let personal = rules
             .iter()
             .find(|rule| {
@@ -1137,6 +1275,20 @@ mod tests {
             })
             .unwrap();
         assert!(group.enabled);
+        assert!(group.managed_group);
+
+        let unmanaged_group = rules
+            .iter()
+            .find(|rule| {
+                rule.target
+                    == RuleTarget::Group {
+                        group_name: "Public".to_string(),
+                        name: "public-shared".to_string(),
+                    }
+            })
+            .unwrap();
+        assert!(!unmanaged_group.enabled);
+        assert!(!unmanaged_group.managed_group);
     }
 
     #[test]
