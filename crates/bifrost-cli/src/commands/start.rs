@@ -1459,6 +1459,9 @@ pub fn run_start(
             disconnect_on_config_change,
             config_manager,
             no_tray,
+            log_level,
+            skip_cert_check,
+            yes,
         );
         if foreground_result.is_ok() {
             if let Some(guard) = restart_handoff_guard.as_mut() {
@@ -1483,6 +1486,9 @@ pub fn run_foreground(
     disconnect_on_config_change: bool,
     config_manager: ConfigManager,
     no_tray: bool,
+    log_level: &str,
+    skip_cert_check: bool,
+    yes: bool,
 ) -> bifrost_core::Result<()> {
     let pid = std::process::id();
 
@@ -2069,13 +2075,8 @@ pub fn run_foreground(
                         if config.host == "0.0.0.0" { "127.0.0.1" } else { &config.host },
                         config.port,
                     );
-                    let tray_start_args = {
-                        let mut extra = Vec::new();
-                        if unsafe_ssl {
-                            extra.push("--unsafe-ssl".to_string());
-                        }
-                        extra
-                    };
+                    let tray_start_args =
+                        build_tray_start_args(&config, log_level, skip_cert_check, yes);
 
                     let bifrost_self_bin = std::env::current_exe().ok();
 
@@ -2317,6 +2318,39 @@ pub fn run_foreground(
     runtime_result?;
 
     Ok(())
+}
+
+fn build_tray_start_args(
+    config: &ProxyConfig,
+    log_level: &str,
+    skip_cert_check: bool,
+    yes: bool,
+) -> Vec<String> {
+    let mut args = Vec::new();
+
+    if config.host != "0.0.0.0" {
+        args.push("--host".to_string());
+        args.push(config.host.clone());
+    }
+    if let Some(socks5_port) = config.socks5_port {
+        args.push("--socks5-port".to_string());
+        args.push(socks5_port.to_string());
+    }
+    if log_level != "info" {
+        args.push("--log-level".to_string());
+        args.push(log_level.to_string());
+    }
+    if skip_cert_check {
+        args.push("--skip-cert-check".to_string());
+    }
+    if config.unsafe_ssl {
+        args.push("--unsafe-ssl".to_string());
+    }
+    if yes {
+        args.push("--yes".to_string());
+    }
+
+    args
 }
 
 fn parse_proxy_users(proxy_users: &[String]) -> bifrost_core::Result<Vec<UserPassAccountConfig>> {
@@ -3842,6 +3876,33 @@ mod tests {
             temp_dir.path(),
             false,
         ));
+    }
+
+    #[test]
+    fn tray_start_args_preserve_start_options_needed_for_menu_restart() {
+        let config = ProxyConfig {
+            host: "127.0.0.1".to_string(),
+            socks5_port: Some(19081),
+            unsafe_ssl: true,
+            ..Default::default()
+        };
+
+        let args = build_tray_start_args(&config, "debug", true, true);
+
+        assert_eq!(
+            args,
+            vec![
+                "--host",
+                "127.0.0.1",
+                "--socks5-port",
+                "19081",
+                "--log-level",
+                "debug",
+                "--skip-cert-check",
+                "--unsafe-ssl",
+                "--yes",
+            ]
+        );
     }
 
     #[test]

@@ -457,12 +457,12 @@ Quit Tray
 - `Open Rules`：打开 `admin_url + rules`。
 - `Copy Admin URL`：复制 `admin_url`。
 - `Copy HTTP Proxy`：复制 `http://<host>:<port>`。
-- `Copy SOCKS5 Proxy`：复制 `socks5://<host>:<socks5_port>`，没有 SOCKS5 时置灰。
+- `Copy SOCKS5 Proxy`：复制 `socks5://<host>:<socks5_port>`；统一代理模式下没有独立 `socks5_port` 时 fallback 到主代理端口，只在服务未运行或 SOCKS 未启用时置灰。
 - `System Proxy: On/Off`：调用 Admin API 或 CLI 复用逻辑，刷新后更新文案。
 - `Rules: <当前启用规则>`：原生子菜单，完全通过主服务 Admin API 读取与切换规则，不直接读写 `rules/` 或状态文件。
 - `Restart Bifrost`：调用可信 `bifrost stop`，等待旧 runtime PID 退出后再用 `bifrost start --no-tray --no-system-proxy` 拉起。
 - `Stop Bifrost`：调用可信 `bifrost stop` 并等待子进程退出，避免 Unix zombie。
-- `Start Bifrost`：调用可信 `bifrost start --no-tray --no-system-proxy`，监控 runtime PID ready；若子进程提前退出或 15 秒内未 ready，状态行显示失败并引导打开日志。
+- `Start Bifrost`：调用可信 `bifrost start --no-tray --no-system-proxy`，并保留原启动必要参数（例如 `--host`、`--socks5-port`、`--log-level`、`--skip-cert-check`、`--unsafe-ssl`、`--yes`），监控 runtime PID ready；若子进程提前退出或 15 秒内未 ready，状态行显示失败并引导打开日志。
 - `Open Data Directory`：打开 data dir。
 - `Open Logs`：打开 `<data_dir>/logs`。
 - `Quit Tray`：退出 helper，不停止服务。
@@ -475,6 +475,7 @@ Quit Tray
 
 - 规则候选：`GET /_bifrost/api/rules/reference-candidates`，用于获取个人规则和已加载组规则列表。
 - 当前启用规则：`GET /_bifrost/api/rules/active-summary`，用于标记勾选状态和顶层 `Rules: <当前启用规则>` 文案。
+- `active-summary` 必须在没有 Sync session 或远端 group cache 解析失败时保留本地组规则 fallback；否则 tray 点击本地组规则后会把顶层错误刷新成 `Rules: None`。
 - 个人规则切换：`PUT /_bifrost/api/rules/{rule_name}/enable|disable`。
 - 组规则切换：`PUT /_bifrost/api/group-rules/{group_name_or_id}/{rule_name}/enable|disable`。
 

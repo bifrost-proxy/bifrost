@@ -83,7 +83,7 @@ struct RenameRuleRequest {
     new_name: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ActiveRuleItem {
     name: String,
     rule_count: usize,
@@ -91,7 +91,7 @@ struct ActiveRuleItem {
     group_name: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ActiveSummaryResponse {
     total: usize,
     rules: Vec<ActiveRuleItem>,
@@ -99,13 +99,13 @@ struct ActiveSummaryResponse {
     merged_content: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct VariableConflict {
     variable_name: String,
     definitions: Vec<VariableDefinition>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct VariableDefinition {
     rule_name: String,
     group_id: Option<String>,
@@ -372,12 +372,6 @@ async fn active_summary(state: SharedAdminState) -> Response<BoxBody> {
     }
 
     let base_dir = state.rules_storage.base_dir();
-    let has_group_session = state
-        .sync_manager
-        .as_ref()
-        .map(|sm| sm.has_session())
-        .unwrap_or(false);
-
     let group_dirs: Vec<(String, std::path::PathBuf)> = std::fs::read_dir(base_dir)
         .into_iter()
         .flatten()
@@ -388,23 +382,6 @@ async fn active_summary(state: SharedAdminState) -> Response<BoxBody> {
             (dir_name, e.path())
         })
         .collect();
-
-    if !has_group_session && !group_dirs.is_empty() {
-        tracing::info!(
-            target: "bifrost_admin::rules",
-            count = group_dirs.len(),
-            "active summary skipped group rules without active sync session"
-        );
-        let variable_conflicts = build_variable_conflicts(var_map);
-        let merged_content = content_parts.join("\n");
-        let resp = ActiveSummaryResponse {
-            total: all_rules.len(),
-            rules: all_rules,
-            variable_conflicts,
-            merged_content,
-        };
-        return json_response(&resp);
-    }
 
     let reverse_cache = reverse_group_cache_for_dirs(&state, &group_dirs);
 
@@ -1163,6 +1140,40 @@ mod tests {
 
         let conflicts = build_variable_conflicts(var_map);
         assert!(conflicts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn active_summary_includes_local_group_rules_without_sync_session() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = RulesStorage::with_dir(temp_dir.path().join("rules")).unwrap();
+        storage
+            .save(
+                &RuleFile::new("personal", "personal.example.com statusCode://201")
+                    .with_enabled(false),
+            )
+            .unwrap();
+
+        let group_storage = RulesStorage::with_dir(storage.base_dir().join("Tray Team")).unwrap();
+        group_storage
+            .save(&RuleFile::new(
+                "group-rule",
+                "group.example.com statusCode://203",
+            ))
+            .unwrap();
+
+        let state =
+            std::sync::Arc::new(crate::state::AdminState::new(0).with_rules_storage(storage));
+        let response = active_summary(state).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let summary: ActiveSummaryResponse = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(summary.total, 1);
+        assert_eq!(summary.rules[0].name, "group-rule");
+        assert_eq!(summary.rules[0].group_id.as_deref(), Some("Tray Team"));
+        assert_eq!(summary.rules[0].group_name.as_deref(), Some("Tray Team"));
+        assert_eq!(summary.merged_content, "group.example.com statusCode://203");
     }
 
     #[test]

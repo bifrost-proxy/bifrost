@@ -43,7 +43,7 @@ cargo run --bin bifrost -- start -p 8801 --unsafe-ssl --no-system-proxy --skip-c
 **预期结果：**
 - 顶部显示 "Bifrost: Running on 127.0.0.1:8801"（灰色不可点击）
 - 包含以下菜单项：Open Admin UI、Open Traffic、Open Rules、Copy Admin URL、Copy HTTP Proxy、Copy SOCKS5 Proxy
-- 统一代理模式下 Copy SOCKS5 Proxy 可点击，复制值为 `socks5://127.0.0.1:8801`
+- 统一代理模式下 Copy SOCKS5 Proxy 可点击，复制值为 `socks5://127.0.0.1:8801`；如果启动时显式传入 `--socks5-port <port>`，则复制独立 SOCKS5 端口
 - 没有规则时仍显示 `Rules: None` 子菜单，子菜单中显示置灰的 `No rules available`
 - 包含分隔线
 - 包含：Restart Bifrost、Stop Bifrost、Open Data Directory、Open Logs
@@ -212,13 +212,14 @@ curl -sS -X POST http://127.0.0.1:8801/_bifrost/api/rules \
 
 **操作步骤：**
 1. 使用启动命令模板启动 Bifrost 服务
-2. 确保 Sync/Group 已登录并已有一个可访问组；若无真实组会话，本用例标记为环境阻塞，不可假设通过
+2. 确保已有一个可访问组；若无真实组会话，可在临时数据目录下准备本地组规则目录作为 fallback 回归数据
 3. 通过 Admin API 创建或确认一条个人规则 `tray-personal-c`
 4. 通过 Admin API 创建或确认一条组规则 `tray-group-rule-a`
 5. 通过 `PUT /_bifrost/api/rules/tray-personal-c/enable` 启用个人规则，并通过组规则 disable API 禁用组规则
 6. 点击托盘图标展开菜单，把鼠标悬浮到 `Rules: tray-personal-c`
 7. 观察第二级菜单，再悬浮到组名，点击 `tray-group-rule-a`
 8. 再次展开托盘菜单，并调用 `curl -sS http://127.0.0.1:8801/_bifrost/api/rules/active-summary`
+9. 在没有 Sync session 或远端 group/peer 接口不可用的本地环境中，准备本地组目录并重复第 6-8 步
 
 **预期结果：**
 - 顶层菜单存在 `Rules: tray-personal-c`
@@ -226,6 +227,7 @@ curl -sS -X POST http://127.0.0.1:8801/_bifrost/api/rules \
 - `My Rules` 的下一级展示个人规则；组名的下一级展示组规则
 - 点击组规则后，顶层文案更新为 `Rules: <组名>/tray-group-rule-a`
 - `active-summary` 只包含被点击的组规则，不包含 `tray-personal-c`
+- 无 Sync session 时，`active-summary` 仍以本地目录名作为 group fallback 展示已启用组规则，不把菜单顶层错误刷新成 `Rules: None`
 - 切换动作使用 Admin API 的个人规则 enable/disable 与组规则 enable/disable 接口
 
 ### TC-TH-15: 服务停止后 1 秒轮询刷新菜单状态
@@ -310,6 +312,7 @@ curl -sS -X POST http://127.0.0.1:8801/_bifrost/api/rules \
 - 第 3 步状态行显示 `Bifrost: Starting...`
 - 启动进行中时 "Start Bifrost" 置灰，不能重复触发并发 start
 - 启动成功后状态行变为 `Bifrost: Running on 127.0.0.1:<port>`
+- 托盘触发的 Start 会继承原服务启动所需参数；例如原服务使用 `--skip-cert-check --unsafe-ssl` 时，点击 Start 后不应因为 CA 检查失败而立即退出
 - 启动失败或超时后状态行显示 `Bifrost: Start failed - open logs`
 - 失败后 "Start Bifrost" 恢复可点击，用户可以重试；Open Logs 始终可点击
 
