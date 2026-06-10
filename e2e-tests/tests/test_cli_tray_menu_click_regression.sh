@@ -9,13 +9,26 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 0
 fi
 
-echo "Running tray menu click regression unit guard..."
-cargo test -p bifrost-cli pure_tray_icon_event_does_not_rebuild_native_menu -- --nocapture
+if [[ "${SKIP_BUILD:-false}" == "true" || "${BIFROST_TRAY_MENU_SKIP_UNIT_GUARD:-}" == "1" ]]; then
+  echo "Skipping tray menu click regression unit guard (SKIP_BUILD=${SKIP_BUILD:-false})"
+else
+  echo "Running tray menu click regression unit guard..."
+  cargo test -p bifrost-cli pure_tray_icon_event_does_not_rebuild_native_menu -- --nocapture
+fi
 
-echo "Building bifrost binary..."
-cargo build --bin bifrost
-
-BIN="$ROOT_DIR/target/debug/bifrost"
+if [[ -n "${BIFROST_BIN:-}" ]]; then
+  BIN="$BIFROST_BIN"
+elif [[ "${SKIP_BUILD:-false}" == "true" ]]; then
+  BIN="$ROOT_DIR/target/release/bifrost"
+else
+  echo "Building bifrost binary..."
+  cargo build --bin bifrost
+  BIN="$ROOT_DIR/target/debug/bifrost"
+fi
+if [[ ! -x "$BIN" ]]; then
+  echo "FAIL: bifrost binary is not executable: $BIN" >&2
+  exit 1
+fi
 DATA_DIR="$(mktemp -d "$ROOT_DIR/.bifrost-e2e-tray.XXXXXX")"
 PORT="$(python3 - <<'PY'
 import socket
