@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证 `bifrost-tray` 托盘 helper 在 macOS/Windows 上的完整生命周期：CLI 自动拉起、托盘图标显示、默认菜单操作、Rules 快速切换、自定义菜单加载、单实例保护、服务停止后状态变化，以及 `--no-tray` / `BIFROST_DISABLE_TRAY=1` 的禁用行为。
+验证 `bifrost-tray` 托盘 helper 在 macOS/Windows 上的完整生命周期：CLI 自动拉起、托盘图标显示、默认菜单操作、Rules 快速切换、自定义菜单加载、单实例保护、服务停止后状态变化、状态轮询刷新、可靠性回归，以及 `--no-tray` / `BIFROST_DISABLE_TRAY=1` 的禁用行为。
 
 ## 前置条件
 
@@ -11,6 +11,7 @@
 - `bifrost-tray` 位于 `bifrost` 同目录下，或设置 `BIFROST_TRAY_BIN` 环境变量指向编译产物
 - 使用临时数据目录避免影响现有服务
 - 规则切换验证必须通过管理端 HTTP API 准备/验证规则状态，禁止直接编辑 `rules/` 或 `state.json`
+- Windows 回归项需在 Windows 交互用户 session 下执行，不能在 Session 0/service 环境中替代
 
 ## 启动命令模板
 
@@ -44,7 +45,7 @@ cargo run --bin bifrost -- start -p 8801 --unsafe-ssl --no-system-proxy --skip-c
 - 顶部显示 "Bifrost: Running on 127.0.0.1:8801"（灰色不可点击）
 - 包含以下菜单项：Open Admin UI、Open Traffic、Open Rules、Copy Admin URL、Copy HTTP Proxy、Copy SOCKS5 Proxy（置灰，因为没有独立 SOCKS5 端口）
 - 包含分隔线
-- 包含：Restart Bifrost、Stop Bifrost、Open Data Directory、Open Logs、Reload Tray Menu
+- 包含：Restart Bifrost、Stop Bifrost、Open Data Directory、Open Logs
 - 最底部：Quit Tray
 
 ### TC-TH-03: Open Admin UI 打开浏览器管理端
@@ -148,7 +149,7 @@ cat > ./.bifrost-tray-test/tray.json << 'EOF'
 }
 EOF
 ```
-2. 启动 Bifrost 服务（或点击 "Reload Tray Menu"）
+2. 启动 Bifrost 服务
 3. 展开托盘菜单
 
 **预期结果：**
@@ -223,6 +224,76 @@ curl -sS -X POST http://127.0.0.1:8801/_bifrost/api/rules \
 - 点击组规则后，顶层文案更新为 `Rules: <组名>/tray-group-rule-a`
 - `active-summary` 只包含被点击的组规则，不包含 `tray-personal-c`
 - 切换动作使用 Admin API 的个人规则 enable/disable 与组规则 enable/disable 接口
+
+### TC-TH-15: 服务停止后 1 秒轮询刷新菜单状态
+
+**操作步骤：**
+1. 使用启动命令模板启动 Bifrost 服务和托盘
+2. 在终端执行 `BIFROST_DATA_DIR=./.bifrost-tray-test cargo run --bin bifrost -- stop`
+3. 等待 2 秒后点击托盘图标展开菜单
+
+**预期结果：**
+- 菜单状态行显示 "Bifrost: Stopped" 或 "Bifrost: Disconnected"
+- Open Admin UI、Open Traffic、Open Rules、Copy Admin URL、Copy HTTP Proxy 等依赖服务的菜单项置灰
+- 没有依赖再次点击图标预热下一次菜单才能看到新状态
+
+### TC-TH-16: 自定义 admin_api 只允许 GET/POST 且使用管理端基准路径
+
+**操作步骤：**
+1. 在数据目录创建 `tray.json`，包含：
+```json
+{
+  "version": 1,
+  "items": [
+    {"id": "refresh", "label": "Refresh System Proxy", "action": {"type": "admin_api", "method": "POST", "path": "/api/proxy/system/refresh"}}
+  ]
+}
+```
+2. 启动 Bifrost 服务并展开托盘菜单，点击 "Refresh System Proxy"
+3. 查看 `.bifrost-tray-test/logs/tray.log`
+4. 将 `method` 改为 `DELETE`，重启服务和托盘
+
+**预期结果：**
+- 第 2 步调用的是 `http://127.0.0.1:8801/_bifrost/api/proxy/system/refresh`
+- 合法 POST 动作不会被静默改成其它 method
+- 改成 DELETE 后托盘保留默认菜单，`tray.log` 记录 `admin_api method must be GET or POST`
+
+### TC-TH-17: Windows sibling bifrost.exe 回退与无控制台闪窗
+
+**操作步骤：**
+1. 在 Windows 上把 `bifrost.exe` 与 `bifrost-tray.exe` 放在同一目录
+2. 不传 `--bifrost-bin`，直接启动 `bifrost-tray.exe --data-dir .\.bifrost-tray-test --runtime-file .\.bifrost-tray-test\runtime.json --parent-pid <pid>`
+3. 展开菜单点击 Stop Bifrost，再重新启动并观察托盘 10 秒
+
+**预期结果：**
+- Stop Bifrost 可通过 sibling `bifrost.exe` 正常执行
+- 轮询服务状态期间没有每秒弹出 `tasklist` 或其它控制台黑窗
+- `tray.log` 不出现找不到 trusted bifrost binary 的错误
+
+### TC-TH-18: IPv6 host URL 使用方括号
+
+**操作步骤：**
+1. 准备 runtime 文件，host 为 `::1`，port 为 `8801`
+2. 启动 tray helper 并展开菜单
+3. 点击 Copy Admin URL 和 Copy HTTP Proxy 后分别粘贴到文本编辑器
+
+**预期结果：**
+- Admin URL 为 `http://[::1]:8801/_bifrost/`
+- HTTP Proxy 为 `http://[::1]:8801`
+- Open Admin UI 使用同样带方括号的 URL
+
+### TC-TH-19: 超大 tray.json fail closed 且日志保留不无限增长
+
+**操作步骤：**
+1. 在数据目录写入大于 1 MiB 的 `tray.json`
+2. 在 `.bifrost-tray-test/logs/` 下创建一个修改时间超过 30 天、文件名以 `tray.log` 开头的旧日志
+3. 启动 Bifrost 服务和托盘
+4. 展开托盘菜单并查看 `logs` 目录
+
+**预期结果：**
+- 托盘显示默认菜单，不加载超大配置里的自定义项
+- `tray.log` 记录 `tray.json is too large`
+- 超过 30 天的 `tray.log*` 旧文件被清理
 
 ## 清理步骤
 

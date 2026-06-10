@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -32,10 +33,12 @@ const ADMIN_API_PATH_ALLOWLIST: &[&str] = &[
     "/api/proxy/restart",
     "/api/proxy/stop",
 ];
+const MAX_TRAY_CONFIG_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug)]
 pub enum ConfigError {
     Json(String),
+    TooLarge(u64),
     Version(u32),
     Action { id: String, reason: String },
 }
@@ -44,6 +47,10 @@ impl std::fmt::Display for ConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Json(e) => write!(f, "invalid tray.json: {e}"),
+            Self::TooLarge(size) => write!(
+                f,
+                "tray.json is too large: {size} bytes, max {MAX_TRAY_CONFIG_BYTES} bytes"
+            ),
             Self::Version(v) => write!(f, "unsupported tray.json version: {v}"),
             Self::Action { id, reason } => {
                 write!(f, "invalid action for item '{id}': {reason}")
@@ -58,8 +65,16 @@ pub fn load_custom_config(data_dir: &Path) -> Result<Option<TrayConfig>, ConfigE
         return Ok(None);
     }
 
-    let content =
-        std::fs::read_to_string(&config_path).map_err(|e| ConfigError::Json(e.to_string()))?;
+    let mut file =
+        std::fs::File::open(&config_path).map_err(|e| ConfigError::Json(e.to_string()))?;
+    let mut content = String::new();
+    file.by_ref()
+        .take(MAX_TRAY_CONFIG_BYTES + 1)
+        .read_to_string(&mut content)
+        .map_err(|e| ConfigError::Json(e.to_string()))?;
+    if content.len() as u64 > MAX_TRAY_CONFIG_BYTES {
+        return Err(ConfigError::TooLarge(content.len() as u64));
+    }
 
     let config: TrayConfig =
         serde_json::from_str(&content).map_err(|e| ConfigError::Json(e.to_string()))?;
@@ -122,6 +137,13 @@ fn validate_action(id: &str, action: &MenuAction) -> Result<(), ConfigError> {
                 return Err(ConfigError::Action {
                     id: id.to_string(),
                     reason: "admin_api method/path must not contain control characters".to_string(),
+                });
+            }
+            let method_upper = method.to_ascii_uppercase();
+            if method_upper != "GET" && method_upper != "POST" {
+                return Err(ConfigError::Action {
+                    id: id.to_string(),
+                    reason: "admin_api method must be GET or POST".to_string(),
                 });
             }
             if !ADMIN_API_PATH_ALLOWLIST.contains(&path.as_str()) {
@@ -236,6 +258,16 @@ mod tests {
     }
 
     #[test]
+    fn test_admin_api_rejects_unknown_method() {
+        let action = MenuAction::AdminApi {
+            method: "DELETE".to_string(),
+            path: "/api/proxy/system/refresh".to_string(),
+        };
+        let result = validate_action("test", &action);
+        assert!(matches!(result, Err(ConfigError::Action { .. })));
+    }
+
+    #[test]
     fn test_template_expansion() {
         let result = expand_template(
             "Proxy: {http_proxy}, Admin: {admin_url}, SOCKS: {socks5_proxy}",
@@ -262,5 +294,17 @@ mod tests {
         std::fs::write(dir.path().join("tray.json"), "not json").unwrap();
         let result = load_custom_config(dir.path());
         assert!(matches!(result, Err(ConfigError::Json(_))));
+    }
+
+    #[test]
+    fn test_oversized_config_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = format!(
+            r#"{{"version":1,"items":[],"padding":"{}"}}"#,
+            "x".repeat(MAX_TRAY_CONFIG_BYTES as usize)
+        );
+        std::fs::write(dir.path().join("tray.json"), content).unwrap();
+        let result = load_custom_config(dir.path());
+        assert!(matches!(result, Err(ConfigError::TooLarge(_))));
     }
 }

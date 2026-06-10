@@ -1,9 +1,11 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use serde::Deserialize;
 use tao::event::Event;
@@ -11,7 +13,7 @@ use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tray_icon::menu::{
     CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
 };
-use tray_icon::{TrayIconBuilder, TrayIconEvent};
+use tray_icon::TrayIconBuilder;
 
 use crate::cli::TrayArgs;
 use crate::config::{self, TrayConfig};
@@ -22,6 +24,11 @@ use crate::runtime::{self, RuntimeInfo, ServiceState};
 const STATE_RUNNING: u8 = 0;
 const STATE_STOPPED: u8 = 1;
 const STATE_DISCONNECTED: u8 = 2;
+const POLL_INTERVAL: Duration = Duration::from_secs(1);
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
+const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(3);
+const RESTART_STOP_TIMEOUT: Duration = Duration::from_secs(8);
+const LOG_RETENTION_DAYS: u64 = 30;
 
 pub fn run(args: TrayArgs) -> Result<(), String> {
     init_logging(&args.data_dir);
@@ -51,11 +58,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     let state = determine_state(runtime.as_ref(), args.parent_pid);
     let custom_config = load_custom_config_safe(&args.data_dir);
     let data_dir_str = args.data_dir.to_string_lossy().to_string();
-    let bin_available = args
-        .bifrost_bin
-        .as_ref()
-        .map(|p| p.exists())
-        .unwrap_or(false);
+    let bin_available = trusted_bifrost_binary_available(&args);
 
     let rules = load_rules_for_menu(runtime.as_ref(), state);
     let menu_items = menu::build_menu(
@@ -76,7 +79,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
 
     let mut builder = TrayIconBuilder::new()
         .with_menu(Box::new(tray_menu))
-        .with_tooltip("Bifrost")
+        .with_tooltip(state_tooltip(state))
         .with_icon(initial_icon.clone());
 
     #[cfg(target_os = "macos")]
@@ -104,7 +107,6 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     });
 
     let menu_receiver = MenuEvent::receiver().clone();
-    let tray_receiver = TrayIconEvent::receiver().clone();
     let mut last_rendered_state = current_state.load(Ordering::Relaxed);
 
     event_loop.run(move |event, _, control_flow| {
@@ -116,32 +118,12 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
             return;
         }
 
-        // When the user interacts with the tray icon (click/right-click to open
-        // the menu), proactively recompute the service state once so the menu
-        // that is about to be shown reflects the latest status without waiting
-        // for the 3s background poll.
-        let mut icon_interacted = false;
-        while let Ok(tray_event) = tray_receiver.try_recv() {
-            if matches!(
-                tray_event,
-                TrayIconEvent::Click { .. } | TrayIconEvent::DoubleClick { .. }
-            ) {
-                icon_interacted = true;
-            }
-        }
-        if icon_interacted {
-            let fresh = compute_service_state(&args);
-            current_state.store(fresh, Ordering::Relaxed);
-        }
-
         // Check state change: update icon + rebuild menu
         let new_state = current_state.load(Ordering::Relaxed);
         let state_changed = new_state != last_rendered_state;
         let reload_requested = should_reload.swap(false, Ordering::Relaxed);
 
-        // Rebuild on state change, or whenever the icon was interacted with so
-        // custom config / runtime details are refreshed alongside state.
-        if state_changed || icon_interacted || reload_requested {
+        if state_changed || reload_requested {
             last_rendered_state = new_state;
 
             if state_changed {
@@ -161,12 +143,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
                 }
 
                 // Update tooltip
-                let tooltip = match new_state {
-                    STATE_RUNNING => "Bifrost - Running",
-                    STATE_STOPPED => "Bifrost - Stopped",
-                    _ => "Bifrost - Disconnected",
-                };
-                let _ = tray_icon.set_tooltip(Some(tooltip));
+                let _ = tray_icon.set_tooltip(Some(state_code_tooltip(new_state)));
             }
 
             // Rebuild menu to reflect new state (enabled/disabled items + status text)
@@ -178,6 +155,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
             let rt = runtime::read_runtime(&args.runtime_file);
             let new_custom_config = load_custom_config_safe(&args.data_dir);
             let rules = load_rules_for_menu(rt.as_ref(), svc_state);
+            let bin_available = trusted_bifrost_binary_available(&args);
             let new_menu_items = menu::build_menu(
                 rt.as_ref(),
                 svc_state,
@@ -192,7 +170,6 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
 
             tracing::info!(
                 state = new_state,
-                icon_interacted = icon_interacted,
                 reloaded = reload_requested,
                 "tray icon and menu updated"
             );
@@ -212,6 +189,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
 fn init_logging(data_dir: &Path) {
     let log_dir = data_dir.join("logs");
     let _ = std::fs::create_dir_all(&log_dir);
+    cleanup_old_logs(&log_dir);
 
     let file_appender = tracing_appender::rolling::daily(&log_dir, "tray.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
@@ -224,6 +202,51 @@ fn init_logging(data_dir: &Path) {
         .with_ansi(false)
         .with_target(false)
         .init();
+}
+
+fn cleanup_old_logs(log_dir: &Path) {
+    let cutoff = Duration::from_secs(LOG_RETENTION_DAYS * 24 * 60 * 60);
+    let now = SystemTime::now();
+    let Ok(entries) = fs::read_dir(log_dir) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !name.starts_with("tray.log") {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        if now.duration_since(modified).is_ok_and(|age| age > cutoff) {
+            if let Err(error) = fs::remove_file(&path) {
+                tracing::warn!(path = %path.display(), error = %error, "failed to remove old tray log");
+            }
+        }
+    }
+}
+
+fn state_tooltip(state: ServiceState) -> &'static str {
+    match state {
+        ServiceState::Running => "Bifrost - Running",
+        ServiceState::Stopped => "Bifrost - Stopped",
+        ServiceState::Disconnected => "Bifrost - Disconnected",
+    }
+}
+
+fn state_code_tooltip(state: u8) -> &'static str {
+    match state {
+        STATE_RUNNING => "Bifrost - Running",
+        STATE_STOPPED => "Bifrost - Stopped",
+        _ => "Bifrost - Disconnected",
+    }
 }
 
 fn load_icon(dimmed: bool) -> tray_icon::Icon {
@@ -309,8 +332,9 @@ fn load_rules_from_admin(admin_url: &str) -> Vec<menu::TrayRule> {
     let base = admin_url.trim_end_matches('/');
     let candidates_url = format!("{base}/api/rules/reference-candidates");
     let active_url = format!("{base}/api/rules/active-summary");
+    let agent = http_agent();
 
-    let candidates = match ureq::get(&candidates_url).call() {
+    let candidates = match agent.get(&candidates_url).call() {
         Ok(resp) => match resp.into_json::<Vec<RuleReferenceCandidate>>() {
             Ok(candidates) => candidates,
             Err(error) => {
@@ -324,7 +348,7 @@ fn load_rules_from_admin(admin_url: &str) -> Vec<menu::TrayRule> {
         }
     };
 
-    let active = match ureq::get(&active_url).call() {
+    let active = match agent.get(&active_url).call() {
         Ok(resp) => match resp.into_json::<ActiveSummaryResponse>() {
             Ok(active) => active.rules,
             Err(error) => {
@@ -372,6 +396,13 @@ fn load_rules_from_admin(admin_url: &str) -> Vec<menu::TrayRule> {
 
     menu::sort_tray_rules(&mut rules);
     rules
+}
+
+fn http_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(HTTP_CONNECT_TIMEOUT)
+        .timeout_read(HTTP_READ_TIMEOUT)
+        .build()
 }
 
 fn build_native_menu(items: &[MenuEntry]) -> (Menu, HashMap<MenuId, MenuItemAction>) {
@@ -469,9 +500,14 @@ fn execute_action(
             let method = method.clone();
             let url = url.clone();
             thread::spawn(move || {
+                let agent = http_agent();
                 let result = match method.to_uppercase().as_str() {
-                    "GET" => ureq::get(&url).call(),
-                    _ => ureq::post(&url).call(),
+                    "GET" => agent.get(&url).call(),
+                    "POST" => agent.post(&url).call(),
+                    unsupported => {
+                        tracing::error!(method = unsupported, url = %url, "unsupported admin API method");
+                        return;
+                    }
                 };
                 match result {
                     Ok(resp) => {
@@ -511,12 +547,18 @@ fn execute_action(
                 return;
             };
             let data_dir = args.data_dir.to_string_lossy().to_string();
+            let runtime_file = args.runtime_file.clone();
             let port = args.port;
             let extra_args = args.start_args.clone();
             thread::spawn(move || {
-                spawn_stop(&bin, &data_dir);
-                // Give the old process a moment to release the port/lock.
-                thread::sleep(Duration::from_millis(1500));
+                let old_pid = runtime::read_runtime(&runtime_file).map(|rt| rt.pid);
+                if !spawn_stop(&bin, &data_dir) {
+                    return;
+                }
+                if !wait_for_runtime_pid_exit(old_pid, RESTART_STOP_TIMEOUT) {
+                    tracing::error!("timed out waiting for bifrost service to stop before restart");
+                    return;
+                }
                 spawn_start(&bin, &data_dir, port, &extra_args);
             });
         }
@@ -553,24 +595,30 @@ fn execute_action(
 }
 
 fn select_single_rule(admin_url: &str, target: &RuleTarget, all_targets: &[RuleTarget]) -> bool {
+    let agent = http_agent();
     let mut success = true;
     for candidate in all_targets {
         if candidate == target {
             continue;
         }
-        if !call_rule_toggle(admin_url, candidate, false) {
+        if !call_rule_toggle(&agent, admin_url, candidate, false) {
             success = false;
         }
     }
-    if !call_rule_toggle(admin_url, target, true) {
+    if !call_rule_toggle(&agent, admin_url, target, true) {
         success = false;
     }
     success
 }
 
-fn call_rule_toggle(admin_url: &str, target: &RuleTarget, enabled: bool) -> bool {
+fn call_rule_toggle(
+    agent: &ureq::Agent,
+    admin_url: &str,
+    target: &RuleTarget,
+    enabled: bool,
+) -> bool {
     let url = rule_toggle_url(admin_url, target, enabled);
-    match ureq::put(&url).call() {
+    match agent.put(&url).call() {
         Ok(resp) => {
             let status = resp.status();
             if (200..300).contains(&status) {
@@ -605,7 +653,7 @@ fn rule_toggle_url(admin_url: &str, target: &RuleTarget, enabled: bool) -> Strin
 }
 
 fn spawn_start(bin: &Path, data_dir: &str, port: Option<u16>, extra_args: &[String]) {
-    let mut cmd = std::process::Command::new(bin);
+    let mut cmd = Command::new(bin);
     cmd.env("BIFROST_DATA_DIR", data_dir)
         .env("BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT", "1")
         .arg("start")
@@ -617,6 +665,7 @@ fn spawn_start(bin: &Path, data_dir: &str, port: Option<u16>, extra_args: &[Stri
     for a in extra_args {
         cmd.arg(a);
     }
+    configure_service_command(&mut cmd);
     match cmd.spawn() {
         Ok(child) => {
             tracing::info!(pid = child.id(), "bifrost service started");
@@ -627,19 +676,66 @@ fn spawn_start(bin: &Path, data_dir: &str, port: Option<u16>, extra_args: &[Stri
     }
 }
 
-fn spawn_stop(bin: &Path, data_dir: &str) {
-    match std::process::Command::new(bin)
-        .env("BIFROST_DATA_DIR", data_dir)
-        .arg("stop")
-        .spawn()
-    {
+fn spawn_stop(bin: &Path, data_dir: &str) -> bool {
+    let mut cmd = Command::new(bin);
+    cmd.env("BIFROST_DATA_DIR", data_dir).arg("stop");
+    configure_service_command(&mut cmd);
+
+    match cmd.spawn() {
         Ok(child) => {
             tracing::info!(pid = child.id(), "bifrost stop invoked");
+            wait_for_child(child, "bifrost stop")
         }
         Err(e) => {
             tracing::error!(error = %e, "failed to stop bifrost service");
+            false
         }
     }
+}
+
+fn wait_for_child(mut child: Child, label: &str) -> bool {
+    match child.wait() {
+        Ok(status) => {
+            if status.success() {
+                tracing::info!(%label, "child process exited successfully");
+                true
+            } else {
+                tracing::error!(%label, status = %status, "child process exited with failure");
+                false
+            }
+        }
+        Err(error) => {
+            tracing::error!(%label, error = %error, "failed to wait for child process");
+            false
+        }
+    }
+}
+
+fn configure_service_command(cmd: &mut Command) {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
+fn wait_for_runtime_pid_exit(pid: Option<u32>, timeout: Duration) -> bool {
+    let Some(pid) = pid else {
+        return true;
+    };
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if !runtime::is_process_running(pid) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    !runtime::is_process_running(pid)
 }
 
 /// Resolve the bifrost binary to use for service control.
@@ -658,14 +754,26 @@ fn resolve_bifrost_binary(args: &TrayArgs) -> Option<std::path::PathBuf> {
     find_bifrost_binary()
 }
 
-fn find_bifrost_binary() -> Option<std::path::PathBuf> {
+fn trusted_bifrost_binary_available(args: &TrayArgs) -> bool {
+    args.bifrost_bin.as_ref().is_some_and(|bin| bin.exists()) || find_bifrost_binary().is_some()
+}
+
+fn find_bifrost_binary() -> Option<PathBuf> {
     let current_exe = std::env::current_exe().ok()?;
     let dir = current_exe.parent()?;
-    let sibling = dir.join("bifrost");
+    let sibling = dir.join(bifrost_binary_name());
     if sibling.exists() {
         return Some(sibling);
     }
     None
+}
+
+fn bifrost_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "bifrost.exe"
+    } else {
+        "bifrost"
+    }
 }
 
 fn poll_service_state(quit_flag: &AtomicBool, state: &AtomicU8, args: &TrayArgs) {
@@ -673,7 +781,7 @@ fn poll_service_state(quit_flag: &AtomicBool, state: &AtomicU8, args: &TrayArgs)
         if quit_flag.load(Ordering::Relaxed) {
             break;
         }
-        thread::sleep(Duration::from_secs(3));
+        thread::sleep(POLL_INTERVAL);
 
         let new_state = compute_service_state(args);
         let old = state.swap(new_state, Ordering::Relaxed);

@@ -18,18 +18,18 @@ pub struct RuntimeInfo {
 
 impl RuntimeInfo {
     pub fn admin_url(&self) -> String {
-        let host = self.effective_host();
+        let host = self.url_host();
         format!("http://{}:{}/_bifrost/", host, self.port)
     }
 
     pub fn http_proxy_url(&self) -> String {
-        let host = self.effective_host();
+        let host = self.url_host();
         format!("http://{}:{}", host, self.port)
     }
 
     pub fn socks5_proxy_url(&self) -> Option<String> {
         self.socks5_port.map(|p| {
-            let host = self.effective_host();
+            let host = self.url_host();
             format!("socks5://{}:{}", host, p)
         })
     }
@@ -38,6 +38,15 @@ impl RuntimeInfo {
         match self.host.as_deref() {
             Some("0.0.0.0") | Some("[::]") | Some("::") | None | Some("") => "127.0.0.1",
             Some(h) => h,
+        }
+    }
+
+    pub fn url_host(&self) -> String {
+        let host = self.effective_host();
+        if host.contains(':') && !(host.starts_with('[') && host.ends_with(']')) {
+            format!("[{host}]")
+        } else {
+            host.to_string()
         }
     }
 }
@@ -61,15 +70,23 @@ pub fn is_process_running(pid: u32) -> bool {
 
 #[cfg(windows)]
 pub fn is_process_running(pid: u32) -> bool {
-    use std::process::Command;
-    Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {}", pid), "/NH"])
-        .output()
-        .map(|o| {
-            let out = String::from_utf8_lossy(&o.stdout);
-            out.contains(&pid.to_string())
-        })
-        .unwrap_or(false)
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return false;
+    }
+
+    let mut exit_code = 0_u32;
+    let ok = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
+    unsafe {
+        CloseHandle(handle);
+    }
+
+    ok != 0 && exit_code == STILL_ACTIVE as u32
 }
 
 #[cfg(test)]
@@ -120,5 +137,26 @@ mod tests {
         let json = r#"{"pid": 1, "port": 8080, "host": "192.168.1.100"}"#;
         let info: RuntimeInfo = serde_json::from_str(json).unwrap();
         assert_eq!(info.effective_host(), "192.168.1.100");
+    }
+
+    #[test]
+    fn test_ipv6_host_is_bracketed_for_urls() {
+        let json = r#"{"pid": 1, "port": 8080, "socks5_port": 1080, "host": "::1"}"#;
+        let info: RuntimeInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.effective_host(), "::1");
+        assert_eq!(info.url_host(), "[::1]");
+        assert_eq!(info.admin_url(), "http://[::1]:8080/_bifrost/");
+        assert_eq!(info.http_proxy_url(), "http://[::1]:8080");
+        assert_eq!(
+            info.socks5_proxy_url(),
+            Some("socks5://[::1]:1080".to_string())
+        );
+    }
+
+    #[test]
+    fn test_bracketed_ipv6_host_is_not_double_bracketed() {
+        let json = r#"{"pid": 1, "port": 8080, "host": "[::1]"}"#;
+        let info: RuntimeInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.admin_url(), "http://[::1]:8080/_bifrost/");
     }
 }

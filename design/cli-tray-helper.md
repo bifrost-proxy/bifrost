@@ -127,7 +127,7 @@ Windows/macOS 上，`bifrost start` 在服务 ready 后尝试启动 helper：
 
 helper 启动后：
 
-1. 初始化文件日志到 `<data_dir>/logs/tray.log`。
+1. 初始化文件日志到 `<data_dir>/logs/tray.log`，启动时清理超过 30 天的 `tray.log*` 历史文件。
 2. 获取 `<data_dir>/tray.lock`，写入 `<data_dir>/tray.pid`。
 3. 读取 runtime，构造初始 `TrayState`。
 4. 初始化平台托盘图标和菜单。
@@ -418,9 +418,8 @@ struct TrayState {
 
 刷新规则：
 
-- 每 2 秒读取 runtime 并校验 PID。
-- 每 5 秒探测 Admin API。
-- 点击托盘图标打开菜单前会重新读取 runtime、探测进程并通过 Admin API 刷新菜单模型，避免等待后台轮询。
+- 每 1 秒读取 runtime 并校验 PID，后台轮询是 v1 的状态新鲜度来源。
+- `tray-icon 0.19` 在 macOS/Windows 上会在原生点击回调中同步弹出菜单，没有暴露“菜单展示前”钩子；因此不再承诺点击图标时能刷新本次已弹出的菜单。
 - 菜单动作完成后立即刷新；规则切换动作完成后通过内部刷新标记触发下一轮菜单重建。
 - 连续失败时保留最近一次可用 runtime，用 disabled menu 表达不可用状态。
 
@@ -429,6 +428,11 @@ PID 校验：
 - macOS 使用与 CLI 一致的进程检测逻辑，避免 zombie 误判。
 - Windows 使用 Win32 `OpenProcess` / `GetExitCodeProcess`，不用 `tasklist`。
 - 需要尽量复用或下沉 `bifrost-cli` 现有 process state 逻辑，避免 status/stop/tray 判断漂移。
+
+URL 拼接：
+
+- `RuntimeInfo` 对 `0.0.0.0`、`::`、空 host 统一映射到 `127.0.0.1`。
+- 真实 IPv6 字面量必须在 URL authority 中自动加方括号，例如 `http://[::1]:8800/_bifrost/`。
 
 ## 默认菜单
 
@@ -478,8 +482,8 @@ Quit Tray
 - `Copy SOCKS5 Proxy`：复制 `socks5://<host>:<socks5_port>`，没有 SOCKS5 时置灰。
 - `System Proxy: On/Off`：调用 Admin API 或 CLI 复用逻辑，刷新后更新文案。
 - `Rules: <当前启用规则>`：原生子菜单，完全通过主服务 Admin API 读取与切换规则，不直接读写 `rules/` 或状态文件。
-- `Restart Bifrost`：调用传入的 `--bifrost-bin restart --data-dir <path>`。
-- `Stop Bifrost`：调用传入的 `--bifrost-bin stop --data-dir <path>`。
+- `Restart Bifrost`：调用可信 `bifrost stop`，等待旧 runtime PID 退出后再用 `bifrost start --no-tray --no-system-proxy` 拉起。
+- `Stop Bifrost`：调用可信 `bifrost stop` 并等待子进程退出，避免 Unix zombie。
 - `Open Data Directory`：打开 data dir。
 - `Open Logs`：打开 `<data_dir>/logs`。
 - `Quit Tray`：退出 helper，不停止服务。
@@ -576,7 +580,7 @@ v1 action：
 
 - 只允许 `127.0.0.1`、`localhost`、`[::1]`。
 - 只支持 `http://`，不支持 TLS。
-- 只支持固定路径、固定 method、短超时。
+- 只支持固定路径、固定 method（`GET` / `POST`），连接超时 1 秒、读取超时 3 秒。
 - 响应体限制大小，例如 1 MiB。
 - JSON 解析只解析需要字段。
 
@@ -596,6 +600,7 @@ v1 action：
 
 - helper 不执行用户自定义 shell。
 - `tray.json` 只允许受控 action。
+- `tray.json` 读取上限为 1 MiB，超限时 fail closed 并保留默认菜单。
 - Admin API action 只允许 localhost。
 - helper 使用 `--bifrost-bin` 参数调用 stop/restart，不盲目信任可被篡改的 runtime `binary_path`。
 - 如果 `--bifrost-bin` 不存在或不是文件，Stop/Restart 菜单置灰。
@@ -697,6 +702,7 @@ helper 查找顺序：
 - `runtime.rs`
   - runtime 正常解析。
   - `0.0.0.0` / `::` 归一化为 loopback admin URL。
+  - IPv6 host URL 自动加方括号。
   - 缺少 socks5 时菜单变量为空。
 - `config.rs`
   - 合法 `tray.json`。
@@ -705,6 +711,8 @@ helper 查找顺序：
   - `open_admin_route` 拒绝绝对 URL。
   - `open_url` 拒绝 `file://`。
   - `admin_api` 拒绝非 allowlist path。
+  - `admin_api` 拒绝非 `GET` / `POST` method。
+  - 超大 `tray.json` 被拒绝。
   - 重复 id 拒绝。
 - `menu_model.rs`
   - Running 菜单启用状态。
@@ -722,6 +730,7 @@ helper 查找顺序：
   - HTTP 请求拼接。
   - 响应大小限制。
   - 超时和错误归类。
+  - 自定义 `admin_api` 基于 `/_bifrost/` admin base 拼接 URL。
 - `lock.rs`
   - 单实例 lock。
   - drop 后释放。

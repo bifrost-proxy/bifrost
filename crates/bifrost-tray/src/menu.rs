@@ -374,7 +374,18 @@ fn sanitize_menu_id(input: &str) -> String {
 }
 
 pub fn sort_tray_rules(rules: &mut [TrayRule]) {
-    rules.sort_by_key(|rule| rule_label(&rule.target));
+    rules.sort_by_key(|rule| rule_sort_key(&rule.target));
+}
+
+fn rule_sort_key(target: &RuleTarget) -> (u8, String, String) {
+    match target {
+        RuleTarget::Personal { name } => (0, name.to_ascii_lowercase(), String::new()),
+        RuleTarget::Group { group_name, name } => (
+            1,
+            group_name.to_ascii_lowercase(),
+            name.to_ascii_lowercase(),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -404,12 +415,8 @@ fn custom_item_to_def(
             MenuItemAction::CopyText(expanded)
         }
         MenuAction::AdminApi { method, path } => {
-            let url = format!(
-                "http://{}:{}{}",
-                runtime.map(|r| r.effective_host()).unwrap_or("127.0.0.1"),
-                runtime.map(|r| r.port).unwrap_or(9900),
-                path
-            );
+            let base = admin_url.trim_end_matches('/');
+            let url = format!("{base}{path}");
             MenuItemAction::AdminApi {
                 method: method.clone(),
                 url,
@@ -589,6 +596,41 @@ mod tests {
         let custom = find_item(&menu, "custom1").unwrap();
         assert_eq!(custom.label, "My Item");
         assert!(custom.enabled);
+    }
+
+    #[test]
+    fn test_admin_api_custom_item_uses_admin_base_url() {
+        let rt = sample_runtime();
+        let config = TrayConfig {
+            version: 1,
+            items: vec![CustomMenuItem {
+                id: "refresh".to_string(),
+                label: "Refresh".to_string(),
+                action: MenuAction::AdminApi {
+                    method: "POST".to_string(),
+                    path: "/api/proxy/system/refresh".to_string(),
+                },
+            }],
+        };
+        let menu = build_menu(
+            Some(&rt),
+            ServiceState::Running,
+            Some(&config),
+            "/tmp/.bifrost",
+            true,
+            &[],
+        );
+        let custom = find_item(&menu, "refresh").unwrap();
+        match &custom.action {
+            MenuItemAction::AdminApi { method, url } => {
+                assert_eq!(method, "POST");
+                assert_eq!(
+                    url,
+                    "http://127.0.0.1:8800/_bifrost/api/proxy/system/refresh"
+                );
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
     }
 
     #[test]
