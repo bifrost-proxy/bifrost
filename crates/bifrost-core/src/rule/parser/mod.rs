@@ -1371,11 +1371,15 @@ fn split_rule_parts(line: &str) -> Vec<String> {
                 in_backtick = !in_backtick;
                 current.push(c);
             }
+            // A leading `//` is the protocol-relative scheme prefix ("match all
+            // protocols", e.g. `//*.example.com`), NOT an (empty) regex. Only treat
+            // a leading `/` as the start of a `/regex/` token when it is not `//`.
             '/' if !in_regex
                 && !in_backtick
                 && current.is_empty()
                 && brace_depth == 0
-                && paren_depth == 0 =>
+                && paren_depth == 0
+                && chars.peek() != Some(&'/') =>
             {
                 in_regex = true;
                 current.push(c);
@@ -3514,4 +3518,36 @@ x-custom: value
         let vars = extract_inline_variables(text);
         assert!(vars.is_empty());
     }
+
+
+
+    #[test]
+    fn test_protocol_relative_scheme_prefix_not_split_as_regex() {
+        // `//host` is the protocol-relative ("match all protocols") prefix and must
+        // stay a single pattern token rather than being split into `//` + `host`.
+        let parts = split_rule_parts("//*.example.com host://127.0.0.1:3000");
+        assert_eq!(parts[0], "//*.example.com", "leading // must not be split off");
+
+        let rules = parse_rules("//*.example.com host://127.0.0.1:3000").unwrap();
+        assert_eq!(rules.len(), 1, "one rule, not split into a `//` catch-all + wildcard");
+        assert_eq!(rules[0].pattern, "//*.example.com");
+        // single-level subdomain matches, unrelated host must NOT (no catch-all)
+        assert!(rules[0]
+            .matcher
+            .matches("http://www.example.com/", "www.example.com", "/")
+            .matched);
+        assert!(!rules[0]
+            .matcher
+            .matches("http://unrelated.invalid/", "unrelated.invalid", "/")
+            .matched);
+
+        // bare `//domain` also stays one token
+        let parts2 = split_rule_parts("//example.com host://127.0.0.1:3000");
+        assert_eq!(parts2[0], "//example.com");
+
+        // a genuine /regex/ token is still tokenized as regex
+        let parts3 = split_rule_parts("/foo/ host://127.0.0.1:3000");
+        assert_eq!(parts3[0], "/foo/");
+    }
+
 }
