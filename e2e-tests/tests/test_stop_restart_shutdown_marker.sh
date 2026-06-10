@@ -214,6 +214,16 @@ fake_proxy_points_to_bifrost() {
         && [[ "${SECURE_PORT:-0}" == "${PROXY_PORT}" ]]
 }
 
+wait_fake_proxy_points_to_bifrost() {
+    for _ in $(seq 1 100); do
+        if fake_proxy_points_to_bifrost; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    return 1
+}
+
 test_restart_handoff_with_fake_system_proxy() {
     if [[ "$(uname -s)" != "Darwin" ]]; then
         _log_pass "non-macOS: restart handoff system proxy E2E skipped"
@@ -244,7 +254,7 @@ test_restart_handoff_with_fake_system_proxy() {
     wait_until_ready
     local old_pid
     old_pid="$(read_runtime_pid)"
-    if [[ -n "${old_pid}" ]] && fake_proxy_points_to_bifrost; then
+    if [[ -n "${old_pid}" ]] && wait_fake_proxy_points_to_bifrost; then
         _log_pass "restart handoff fixture ready with fake system proxy"
     else
         _log_fail "restart handoff fixture ready with fake system proxy" "runtime pid and fake proxy target" "pid=${old_pid}; state=$(cat "${FAKE_PROXY_STATE}")"
@@ -261,10 +271,17 @@ test_restart_handoff_with_fake_system_proxy() {
         return
     fi
 
+    restart_debug() {
+        printf 'marker=%s\n' "$(cat "${TEST_DATA_DIR}/.system_proxy_shutdown_mode" 2>/dev/null || echo '<missing>')"
+        printf 'state=%s\n' "$(cat "${FAKE_PROXY_STATE}" 2>/dev/null || true)"
+        printf 'restart_log=%s\n' "$(tail -n 160 "${TEST_DATA_DIR}/logs/restart.log" 2>/dev/null || true)"
+        printf 'daemon_log=%s\n' "$(tail -n 220 "${TEST_DATA_DIR}"/logs/bifrost*.log "${TEST_DATA_DIR}/bifrost.log" 2>/dev/null || true)"
+    }
+
     local new_pid=""
     for _ in $(seq 1 450); do
         if ! fake_proxy_points_to_bifrost; then
-            _log_fail "restart handoff keeps fake system proxy continuously enabled" "127.0.0.1:${PROXY_PORT}" "state=$(cat "${FAKE_PROXY_STATE}"); output=${restart_output}; log=$(tail -n 120 "${TEST_DATA_DIR}/logs/restart.log" 2>/dev/null || true)"
+            _log_fail "restart handoff keeps fake system proxy continuously enabled" "127.0.0.1:${PROXY_PORT}" "output=${restart_output}; $(restart_debug)"
             return
         fi
         new_pid="$(read_runtime_pid)"
@@ -277,7 +294,7 @@ test_restart_handoff_with_fake_system_proxy() {
     done
 
     if [[ -z "${new_pid}" || "${new_pid}" == "${old_pid}" ]]; then
-        _log_fail "restart handoff starts a fresh daemon" "new runtime pid and ready Admin API" "old_pid=${old_pid}; new_pid=${new_pid}; output=${restart_output}; log=$(tail -n 160 "${TEST_DATA_DIR}/logs/restart.log" 2>/dev/null || true)"
+        _log_fail "restart handoff starts a fresh daemon" "new runtime pid and ready Admin API" "old_pid=${old_pid}; new_pid=${new_pid}; output=${restart_output}; $(restart_debug)"
         return
     fi
 
@@ -285,7 +302,7 @@ test_restart_handoff_with_fake_system_proxy() {
         && fake_proxy_points_to_bifrost; then
         _log_pass "bifrost restart preserves system proxy handoff without cleanup gap"
     else
-        _log_fail "bifrost restart preserves system proxy handoff without cleanup gap" "restart argv contains --system-proxy and fake proxy still points to Bifrost" "state=$(cat "${FAKE_PROXY_STATE}"); log=$(tail -n 160 "${TEST_DATA_DIR}/logs/restart.log" 2>/dev/null || true)"
+        _log_fail "bifrost restart preserves system proxy handoff without cleanup gap" "restart argv contains --system-proxy and fake proxy still points to Bifrost" "$(restart_debug)"
     fi
 
     PATH="${FAKE_PROXY_BIN}:$PATH" \

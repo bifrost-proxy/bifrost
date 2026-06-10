@@ -150,12 +150,10 @@ fn run_stop_with_system_proxy_mode(
         return Ok(());
     }
 
-    if bifrost_core::SystemProxyManager::is_supported() {
-        bifrost_core::write_system_proxy_shutdown_mode(
-            &bifrost_dir,
-            system_proxy_mode.shutdown_mode(),
-        )?;
-    }
+    bifrost_core::write_system_proxy_shutdown_mode(
+        &bifrost_dir,
+        system_proxy_mode.shutdown_mode(),
+    )?;
 
     if system_proxy_mode.should_cleanup_in_stop_process() {
         println!("Cleaning system proxy before stopping Bifrost proxy...");

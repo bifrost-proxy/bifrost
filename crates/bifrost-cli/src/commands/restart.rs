@@ -63,7 +63,7 @@ use bifrost_core::Result as BifrostResult;
 #[cfg(unix)]
 use crate::process::{
     capture_runtime_system_proxy_snapshot, is_process_running, read_pid, read_runtime_info,
-    RuntimeSystemProxySnapshot,
+    runtime_system_proxy_host, write_runtime_info, RuntimeSystemProxySnapshot,
 };
 
 const ORPHAN_STARTUP_GRACE_MS: u64 = 200;
@@ -373,6 +373,19 @@ fn run_orphan_work(forwarded: ForwardedRestart) {
         return;
     }
 
+    if let Some(runtime) = old_runtime.as_ref() {
+        if let Err(error) = write_runtime_info(runtime) {
+            orphan_log(
+                &log,
+                &format!("failed to preserve old runtime info before fresh start: {error}"),
+            );
+        }
+    }
+    if let (Some(runtime), Some(snapshot)) = (old_runtime.as_ref(), system_proxy_snapshot.as_ref())
+    {
+        reapply_system_proxy_for_restart_handoff(&log, runtime, snapshot);
+    }
+
     // Build argv for `bifrost start --daemon --yes`.
     //
     // Port resolution order: explicit --port from caller > runtime-file old
@@ -384,12 +397,22 @@ fn run_orphan_work(forwarded: ForwardedRestart) {
         std::ffi::OsString::from("start"),
         std::ffi::OsString::from("--daemon"),
         std::ffi::OsString::from("--yes"),
+        std::ffi::OsString::from("--skip-cert-check"),
         std::ffi::OsString::from("--port"),
         resolved_port.to_string().into(),
     ];
-    if let Some(h) = forwarded.host.as_deref() {
+    let resolved_host = forwarded.host.as_deref().or_else(|| {
+        old_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.host.as_deref())
+    });
+    if let Some(h) = resolved_host {
         argv.push("--host".into());
         argv.push(h.into());
+    }
+    if let Some(socks5_port) = old_runtime.as_ref().and_then(|runtime| runtime.socks5_port) {
+        argv.push("--socks5-port".into());
+        argv.push(socks5_port.to_string().into());
     }
     if let Some(lvl) = forwarded.log_level.as_deref() {
         argv.push("--log-level".into());
@@ -470,6 +493,59 @@ fn append_system_proxy_start_args(
         argv.push("--system-proxy".into());
         argv.push("--proxy-bypass".into());
         argv.push(snapshot.bypass.clone().into());
+    }
+}
+
+#[cfg(unix)]
+fn reapply_system_proxy_for_restart_handoff(
+    log: &std::path::Path,
+    runtime: &crate::process::RuntimeInfo,
+    snapshot: &RuntimeSystemProxySnapshot,
+) {
+    let target_host = runtime_system_proxy_host(runtime.host.as_deref());
+    let target_port = runtime.port;
+    match bifrost_core::SystemProxyManager::get_current() {
+        Ok(current)
+            if current.enable
+                && !current.target_matches(target_host, target_port)
+                && !bifrost_core::SystemProxyManager::any_service_proxy_matches(
+                    target_host,
+                    target_port,
+                )
+                .unwrap_or(false) =>
+        {
+            orphan_log(
+                log,
+                &format!(
+                    "restart handoff system proxy reapply skipped because current proxy is owned by another target: {}:{}",
+                    current.host, current.port
+                ),
+            );
+        }
+        Ok(_) => {
+            let mut manager = bifrost_core::SystemProxyManager::new(
+                crate::config::get_bifrost_dir().unwrap_or_default(),
+            );
+            match manager.enable(target_host, target_port, Some(&snapshot.bypass)) {
+                Ok(()) => {
+                    manager.detach();
+                    orphan_log(
+                        log,
+                        &format!(
+                            "restart handoff system proxy reapplied to {target_host}:{target_port}"
+                        ),
+                    );
+                }
+                Err(error) => orphan_log(
+                    log,
+                    &format!("restart handoff system proxy reapply failed: {error}"),
+                ),
+            }
+        }
+        Err(error) => orphan_log(
+            log,
+            &format!("restart handoff system proxy reapply skipped; inspect failed: {error}"),
+        ),
     }
 }
 

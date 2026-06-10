@@ -733,8 +733,9 @@ fn cleanup_or_restart_managed_runtime(data_dir: &std::path::Path) -> bifrost_cor
 }
 
 fn cleanup_after_parent_exit(data_dir: &std::path::Path) -> bifrost_core::Result<()> {
-    match bifrost_core::consume_system_proxy_shutdown_mode(data_dir) {
+    match bifrost_core::read_system_proxy_shutdown_mode(data_dir) {
         Some(bifrost_core::SystemProxyShutdownMode::BackgroundCleanup) => {
+            let _ = bifrost_core::consume_system_proxy_shutdown_mode(data_dir);
             tracing::info!(
                 target: "bifrost_cli::shutdown",
                 data_dir = %data_dir.display(),
