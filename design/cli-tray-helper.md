@@ -5,12 +5,12 @@
 
 ## 结论
 
-CLI 托盘能力采用独立轻量二进制 `bifrost-tray` 实现，明确不使用 Tauri、Wry、WebView、Tao、`tray-icon`、`muda` 等桌面框架或跨平台托盘运行时。
+CLI 托盘能力采用独立轻量二进制 `bifrost-tray` 实现，明确不引入 Tauri、Wry、WebView 等内嵌浏览器内核的重型桌面框架；可以使用 `tray-icon`、`muda`、`tao` 等体积可控的轻量托盘/菜单库。判定标准是“体积与资源开销”，不是“是否第三方”。
 
-v1 直接使用操作系统原生 API：
+v1 通过轻量托盘库（`tray-icon` / `muda` / `tao`）封装操作系统原生能力：
 
-- macOS：AppKit `NSApplication`、`NSStatusItem`、`NSMenu`、`NSWorkspace`、`NSPasteboard`。
-- Windows：Win32 `Shell_NotifyIconW`、`NOTIFYICONDATAW`、隐藏消息窗口、`TrackPopupMenu`、`ShellExecuteW`、Win32 Clipboard API。
+- macOS：AppKit `NSStatusItem`、`NSMenu` 体系，菜单栏图标 + 原生菜单，底层仍是 `NSWorkspace` / `NSPasteboard`。
+- Windows：Win32 `Shell_NotifyIconW` 体系，notification area 图标 + 原生 popup 菜单，底层仍是 `ShellExecuteW` / Win32 Clipboard。
 
 这样可以把托盘 helper 控制在“CLI companion”形态：包体积小、依赖少、启动快、空闲资源低，并且不把 GUI 事件循环塞进 Bifrost 代理主进程。
 
@@ -35,7 +35,7 @@ Bifrost 目前有两类启动形态：
 
 ## 非目标
 
-- 不使用 Tauri、Wry、WebView、Tao、`tray-icon`、`muda`。
+- 不引入 Tauri、Wry、WebView 等内嵌浏览器内核的重型桌面框架。允许使用 `tray-icon`、`muda`、`tao` 等体积可控的轻量托盘/菜单库。
 - 不实现 Linux AppIndicator / StatusNotifierItem。
 - 不支持任意 shell 菜单项。
 - 不补齐 Windows `--daemon`。Windows 脚本启动仍可以是前台服务进程 + 独立 tray helper。
@@ -226,7 +226,7 @@ human_tests/
 
 ## 依赖策略
 
-目标是 helper 依赖少、可审计、可裁剪。
+目标是 helper 体积小、资源开销低、可审计、可裁剪。判定红线是“是否引入内嵌浏览器内核 / 重型 GUI 运行时”，而不是“是否第三方依赖”。体积可控、用途单一的轻量库可以使用。
 
 允许的公共依赖：
 
@@ -234,47 +234,27 @@ human_tests/
 - `clap`：解析 helper 内部参数；也可后续改为手写解析进一步瘦身。
 - `tracing`、`tracing-subscriber`、`tracing-appender`：沿用项目日志体系。
 - `fs2`：跨平台文件锁。
+- `tray-icon`、`muda`、`tao`：轻量托盘图标 / 菜单 / 事件循环封装，避免直接手写大量 AppKit / Win32 unsafe 代码。
+- `image`：图标 PNG/ICO 解码，体积可控。
+- `open`：跨平台打开 URL / 目录。
+- `arboard`：跨平台剪贴板。
+- `ureq`：极简同步 HTTP client，调用 localhost Admin API（不引入 `reqwest` 这类重型异步栈）。
 
-Windows target 依赖：
-
-- 优先 `windows-sys`，只开启必要 feature：
-  - `Win32_Foundation`
-  - `Win32_UI_Shell`
-  - `Win32_UI_WindowsAndMessaging`
-  - `Win32_Graphics_Gdi`
-  - `Win32_System_LibraryLoader`
-  - `Win32_System_Memory`
-  - `Win32_System_DataExchange`
-
-macOS target 依赖：
-
-- `objc2`
-- `objc2-foundation`
-- `objc2-app-kit`
+平台原生 API 仍可按需直接调用（如 macOS 模板图标、Windows PID 检测等），轻量库与原生 API 可以混用，以体积和可维护性取最优解。
 
 明确禁止引入：
 
 - `tauri`
 - `wry`
-- `tao`
-- `tray-icon`
-- `muda`
-- `open`
-- `arboard`
-- `reqwest`
-- `image`
-- `url`
-- 任意 WebView 或 GUI 框架依赖
+- 任意 WebView / 内嵌浏览器内核依赖
+- 任意带完整 GUI 运行时的重型桌面框架
 
 说明：
 
-- 打开 URL/目录使用 OS API，不用 `open` crate。
-- 剪贴板使用 OS API，不用 `arboard`。
-- localhost Admin API 使用 `std::net::TcpStream` 实现最小 HTTP/1.1 client，不用 `reqwest`。
-- 图标优先走平台资源或 OS 原生图片加载，不用 `image` 解码库。
-- URL 校验采用受控前缀、host allowlist 和控制字符过滤，不引入 `url` crate。
-
-如果已有 `bifrost-tray` 原型使用了 `tray-icon`、`muda`、`tao`、`open`、`arboard`、`image` 或 `url`，实现阶段必须替换为本方案定义的原生 API 路线。
+- 红线是包体积与运行时开销，凡是会拉入浏览器内核（Wry/WebView）或大型 GUI 运行时（Tauri）的依赖一律禁止。
+- 上述允许的轻量库（`tray-icon` / `muda` / `tao` / `image` / `open` / `arboard` / `ureq`）经过体积与传递依赖核对，符合“CLI companion”形态要求，可以使用。
+- 若后续某个依赖在升级后显著膨胀传递依赖或拉入 WebView/GUI 运行时，需重新评估并替换。
+- URL 校验采用受控前缀、host allowlist 和控制字符过滤。
 
 ## 平台抽象接口
 
@@ -407,7 +387,7 @@ Windows：
 - `build.rs` 只在 Windows target 编译资源。
 - 运行时通过 `LoadIconW` 或 `LoadImageW` 从资源加载 `HICON`。
 
-不使用 `image` crate 做 PNG/ICO 解码。
+图标解码使用轻量 `image` crate（PNG/ICO），体积可控；macOS 模板图标可在解码后做像素处理以适配深浅色菜单栏。
 
 ## 状态模型
 
@@ -571,11 +551,10 @@ v1 action：
 
 ## Local Admin Client
 
-不引入 `reqwest`。
+使用极简同步 HTTP client（`ureq`），不引入 `reqwest` 这类重型异步栈。
 
-实现一个最小 localhost HTTP client：
+约束：
 
-- 使用 `std::net::TcpStream`。
 - 只允许 `127.0.0.1`、`localhost`、`[::1]`。
 - 只支持 `http://`，不支持 TLS。
 - 只支持固定路径、固定 method、短超时。
@@ -811,7 +790,7 @@ Linux 用例：
 | clippy | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | 无 warning |
 | unit | `cargo test -p bifrost-tray` | 全部通过 |
 | CLI focused | `cargo test -p bifrost-cli tray_launcher` | 全部通过 |
-| 依赖禁用 | `cargo tree -p bifrost-tray` 后搜索禁用依赖 | 不包含 Tauri/Wry/WebView/Tao/tray-icon/muda/open/arboard/reqwest/image/url |
+| 依赖红线 | `cargo tree -p bifrost-tray` 后搜索禁用依赖 | 不包含 Tauri/Wry/WebView 等浏览器内核或重型 GUI 运行时；轻量托盘库（tray-icon/muda/tao 等）允许 |
 | macOS self-test | `cargo run -p bifrost-tray -- --self-test platform ...` | ready file 写入且退出 0 |
 | Windows self-test | `bifrost-tray.exe --self-test platform ...` | ready file 写入且退出 0 |
 | E2E | 新增 tray e2e 脚本 | 全部通过 |
@@ -878,7 +857,7 @@ Linux 用例：
 
 - Windows/macOS CLI start 能自动拉起原生托盘 helper。
 - Linux 不暴露、不启动、不打包。
-- 没有引入 Tauri/Wry/WebView/Tao/`tray-icon`/`muda`。
+- 没有引入 Tauri/Wry/WebView 等浏览器内核或重型 GUI 运行时。
 - helper 缺失或失败不影响主服务。
 - 默认菜单和自定义菜单安全可控。
 - Stop/Restart/Quit Tray 语义清晰且通过验证。
