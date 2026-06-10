@@ -221,12 +221,17 @@ export interface LocalVariableDefinition {
 }
 
 let localVariables: LocalVariableDefinition[] = [];
+let ruleReferenceErrorsByLine = new Map<number, string>();
 
 export const setLocalVariables = (variables: LocalVariableDefinition[]) => {
   localVariables = variables;
 };
 
 export const getLocalVariables = (): LocalVariableDefinition[] => localVariables;
+
+export const setRuleReferenceErrors = (errors: Array<{ line: number; message: string }>) => {
+  ruleReferenceErrorsByLine = new Map(errors.map((error) => [error.line, error.message]));
+};
 
 function findLocalVariableDefinition(name: string): LocalVariableDefinition | undefined {
   return localVariables.find((v) => v.name === name);
@@ -252,6 +257,31 @@ export const hoverProvider: languages.HoverProvider = {
 
     const reference = findReferenceAtPosition(model, position);
     if (!reference) return null;
+
+    if (reference.type === 'rule') {
+      const errorMessage = ruleReferenceErrorsByLine.get(reference.range.startLineNumber);
+      if (errorMessage) {
+        return {
+          range: reference.range,
+          contents: [
+            {
+              value: `**Rule reference error**: \`@${reference.name}\`\n\n${errorMessage}`,
+            },
+          ],
+        };
+      }
+
+      if (!getDynamicData().rules.includes(reference.name)) {
+        return {
+          range: reference.range,
+          contents: [
+            {
+              value: `**Rule reference error**: \`@${reference.name}\`\n\nRule reference '@${reference.name}' was not found.`,
+            },
+          ],
+        };
+      }
+    }
 
     const location = getReferenceLocation(reference.name, reference.type);
     if (!location) return null;

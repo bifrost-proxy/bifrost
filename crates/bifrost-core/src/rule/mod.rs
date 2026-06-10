@@ -18,8 +18,8 @@ pub use parser::{
     ScriptReference, ValidationResult, VariableInfo,
 };
 pub use references::{
-    expand_rule_references, expand_rule_references_to_result, rule_reference_name,
-    RuleReferenceError,
+    expand_rule_references, expand_rule_references_strict, expand_rule_references_to_result,
+    rule_reference_name, RuleReferenceError,
 };
 pub use resolver::{ResolvedRule, ResolvedRules, RulesResolver};
 pub use template::TemplateEngine;

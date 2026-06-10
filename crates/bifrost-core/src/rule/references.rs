@@ -80,8 +80,25 @@ pub fn expand_rule_references(
     content: &str,
     catalog: &HashMap<String, String>,
 ) -> std::result::Result<String, RuleReferenceError> {
+    expand_rule_references_with_missing_behavior(source_name, content, catalog, false)
+}
+
+pub fn expand_rule_references_strict(
+    source_name: &str,
+    content: &str,
+    catalog: &HashMap<String, String>,
+) -> std::result::Result<String, RuleReferenceError> {
+    expand_rule_references_with_missing_behavior(source_name, content, catalog, true)
+}
+
+fn expand_rule_references_with_missing_behavior(
+    source_name: &str,
+    content: &str,
+    catalog: &HashMap<String, String>,
+    error_on_missing: bool,
+) -> std::result::Result<String, RuleReferenceError> {
     let mut stack = vec![source_name.to_string()];
-    expand_rule_references_inner(source_name, content, catalog, &mut stack)
+    expand_rule_references_inner(source_name, content, catalog, &mut stack, error_on_missing)
 }
 
 pub fn expand_rule_references_to_result(
@@ -98,6 +115,7 @@ fn expand_rule_references_inner(
     content: &str,
     catalog: &HashMap<String, String>,
     stack: &mut Vec<String>,
+    error_on_missing: bool,
 ) -> std::result::Result<String, RuleReferenceError> {
     let mut expanded = String::new();
 
@@ -119,18 +137,25 @@ fn expand_rule_references_inner(
             });
         }
 
-        let referenced_content =
-            catalog
-                .get(reference_name)
-                .ok_or_else(|| RuleReferenceError::Missing {
+        let Some(referenced_content) = catalog.get(reference_name) else {
+            if error_on_missing {
+                return Err(RuleReferenceError::Missing {
                     source: source_name.to_string(),
                     line: line_number,
                     name: reference_name.to_string(),
-                })?;
+                });
+            }
+            continue;
+        };
 
         stack.push(reference_name.to_string());
-        let nested =
-            expand_rule_references_inner(reference_name, referenced_content, catalog, stack)?;
+        let nested = expand_rule_references_inner(
+            reference_name,
+            referenced_content,
+            catalog,
+            stack,
+            error_on_missing,
+        )?;
         stack.pop();
 
         expanded.push_str(&nested);
@@ -200,10 +225,19 @@ mod tests {
     }
 
     #[test]
-    fn reports_missing_reference() {
+    fn ignores_missing_reference_by_default() {
+        let catalog = catalog(&[("outer", "@missing\nouter.test statusCode://204")]);
+        let expanded =
+            expand_rule_references("outer", catalog.get("outer").unwrap(), &catalog).unwrap();
+
+        assert_eq!(expanded, "outer.test statusCode://204\n");
+    }
+
+    #[test]
+    fn strict_reports_missing_reference() {
         let catalog = catalog(&[("outer", "@missing")]);
-        let error =
-            expand_rule_references("outer", catalog.get("outer").unwrap(), &catalog).unwrap_err();
+        let error = expand_rule_references_strict("outer", catalog.get("outer").unwrap(), &catalog)
+            .unwrap_err();
 
         assert_eq!(
             error,

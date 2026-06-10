@@ -19,6 +19,7 @@ MOCK_PORT="$(allocate_free_port)"
 MOCK_PID=""
 SHARED_RULE_NAME="at-ref-shared-$$"
 ENTRY_RULE_NAME="at-ref-entry-$$"
+MISSING_ENTRY_RULE_NAME="at-ref-missing-entry-$$"
 GROUP_NAME="at-ref-team-$$"
 GROUP_ID="gid-at-ref-team-$$"
 GROUP_SHARED_RULE_NAME="at-ref-group-shared-$$"
@@ -29,6 +30,7 @@ if [[ -z "${BIFROST_DATA_DIR:-}" ]]; then
 fi
 
 cleanup() {
+  delete_rule "$MISSING_ENTRY_RULE_NAME" >/dev/null 2>&1 || true
   delete_rule "$ENTRY_RULE_NAME" >/dev/null 2>&1 || true
   delete_rule "$SHARED_RULE_NAME" >/dev/null 2>&1 || true
   if [[ -n "$MOCK_PID" ]] && kill -0 "$MOCK_PID" 2>/dev/null; then
@@ -164,17 +166,49 @@ assert_json_field "$missing_response" ".valid" "false"
 assert_json_field "$missing_response" ".errors[0].code" "E020"
 
 log "requesting through proxy and waiting for referenced request header"
+reference_matched=0
 for _ in {1..40}; do
   response="$(env NO_PROXY="" no_proxy="" curl -sS --noproxy "" \
     -x "http://127.0.0.1:${ADMIN_PORT}" \
     "http://at-rule-e2e.test/check" 2>/dev/null || true)"
   if [[ "$(jq -r '.x_at_rule // empty' <<<"$response" 2>/dev/null || true)" == "ok" \
     && "$(jq -r '.x_group_at_rule // empty' <<<"$response" 2>/dev/null || true)" == "ok" ]]; then
-    log "pass"
-    exit 0
+    reference_matched=1
+    break
   fi
   sleep 0.25
 done
 
-echo "referenced rule header was not applied. last response=${response:-}" >&2
-exit 1
+if [[ "$reference_matched" != "1" ]]; then
+  echo "referenced rule header was not applied. last response=${response:-}" >&2
+  exit 1
+fi
+
+missing_runtime_content="$(cat <<EOF_RUNTIME
+@missing-runtime-reference
+at-rule-missing-e2e.test host://127.0.0.1:${MOCK_PORT}
+EOF_RUNTIME
+)"
+
+log "creating enabled rule with missing reference ${MISSING_ENTRY_RULE_NAME}"
+create_rule "$MISSING_ENTRY_RULE_NAME" "$missing_runtime_content" "true" >/dev/null
+
+log "requesting through proxy and waiting for runtime missing reference to be ignored"
+missing_runtime_matched=0
+for _ in {1..40}; do
+  missing_response="$(env NO_PROXY="" no_proxy="" curl -sS --noproxy "" \
+    -x "http://127.0.0.1:${ADMIN_PORT}" \
+    "http://at-rule-missing-e2e.test/check" 2>/dev/null || true)"
+  if [[ "$(jq -r '.path // empty' <<<"$missing_response" 2>/dev/null || true)" == "/check" ]]; then
+    missing_runtime_matched=1
+    break
+  fi
+  sleep 0.25
+done
+
+if [[ "$missing_runtime_matched" != "1" ]]; then
+  echo "runtime missing reference was not ignored. last response=${missing_response:-}" >&2
+  exit 1
+fi
+
+log "pass"

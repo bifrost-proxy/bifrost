@@ -1,6 +1,6 @@
 use bifrost_core::{
-    expand_rule_references, extract_inline_variables, validate_rules_with_context, ParseError,
-    ParseErrorSeverity, ScriptReference, VariableInfo,
+    expand_rule_references_strict, extract_inline_variables, validate_rules_with_context,
+    ParseError, ParseErrorSeverity, ScriptReference, VariableInfo,
 };
 use bifrost_storage::{ConfigChangeEvent, RuleFile, RuleSummary, RulesStorage};
 use http_body_util::BodyExt;
@@ -634,7 +634,7 @@ async fn validate_rule(req: Request<Incoming>, state: SharedAdminState) -> Respo
     let mut reference_catalog = bifrost_storage::build_rule_reference_catalog(&rule_files);
     reference_catalog.insert(source_name.clone(), content.clone());
 
-    let content = match expand_rule_references(&source_name, &content, &reference_catalog) {
+    let content = match expand_rule_references_strict(&source_name, &content, &reference_catalog) {
         Ok(expanded) => expanded,
         Err(error) => {
             let reference_error = ParseError::with_range(

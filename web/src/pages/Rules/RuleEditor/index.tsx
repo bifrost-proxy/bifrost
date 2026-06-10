@@ -18,9 +18,11 @@ import BifrostEditor, {
   setNavigateCallback,
   setLocalVariables,
   setLocalVariablesGetter,
+  setRuleReferenceErrors,
   updateDynamicData,
   type DebouncedValidator,
   type ReferenceLocation,
+  type ValidationResult,
 } from "../../../components/BifrostEditor";
 import { useRulesStore } from "../../../stores/useRulesStore";
 import { useThemeStore } from "../../../stores/useThemeStore";
@@ -129,6 +131,8 @@ export default function RuleEditor() {
   const valuesRef = useRef(values);
   const localVariablesRef = useRef<Array<{ name: string; line: number }>>([]);
   const ruleReferenceDecorationIdsRef = useRef<string[]>([]);
+  const ruleReferenceValidationErrorsRef = useRef<Map<number, string>>(new Map());
+  const refreshRuleReferenceDecorationsRef = useRef<() => void>(() => {});
   const ruleReferenceCandidatesRef = useRef<Map<string, RuleReferenceCandidate>>(new Map());
   const expandedRuleReferenceRef = useRef<{
     key: string;
@@ -148,12 +152,24 @@ export default function RuleEditor() {
     useState<HTMLDivElement | null>(null);
 
   const handleValidationComplete = useCallback(
-    (result: { defined_variables?: { name: string; defined_at?: number | null }[] }) => {
+    (result: ValidationResult) => {
       const localVars = (result.defined_variables || [])
         .filter((v) => v.defined_at != null)
         .map((v) => ({ name: v.name, line: v.defined_at! }));
       setLocalVariables(localVars);
       localVariablesRef.current = localVars;
+
+      const referenceErrors = new Map<number, string>();
+      for (const error of result.errors || []) {
+        if (error.code === "E020") {
+          referenceErrors.set(error.line, error.message);
+        }
+      }
+      ruleReferenceValidationErrorsRef.current = referenceErrors;
+      setRuleReferenceErrors(
+        Array.from(referenceErrors.entries()).map(([line, message]) => ({ line, message })),
+      );
+      refreshRuleReferenceDecorationsRef.current();
     },
     []
   );
@@ -203,6 +219,7 @@ export default function RuleEditor() {
       localCandidates.map((candidate) => [candidate.name, candidate]),
     );
     updateDynamicData({ rules: localCandidates.map((candidate) => candidate.name) });
+    refreshRuleReferenceDecorationsRef.current();
 
     let cancelled = false;
     getRuleReferenceCandidates()
@@ -217,10 +234,12 @@ export default function RuleEditor() {
         }
         ruleReferenceCandidatesRef.current = merged;
         updateDynamicData({ rules: Array.from(merged.keys()) });
+        refreshRuleReferenceDecorationsRef.current();
       })
       .catch(() => {
         if (!cancelled) {
           updateDynamicData({ rules: localCandidates.map((candidate) => candidate.name) });
+          refreshRuleReferenceDecorationsRef.current();
         }
       });
 
@@ -291,21 +310,39 @@ export default function RuleEditor() {
     const model = modelRef.current;
     if (!editor || !model || model.isDisposed()) return;
 
-    const decorations = findRuleReferences(model).map((reference) => ({
-      range: reference.range,
-      options: {
-        inlineClassName: styles.ruleReferenceDecoration,
-        hoverMessage: {
-          value: `Rule reference \`@${reference.name}\`. Click to expand inline.`,
+    const decorations = findRuleReferences(model).map((reference) => {
+      const errorMessage = ruleReferenceValidationErrorsRef.current.get(
+        reference.range.startLineNumber,
+      ) ?? (
+        ruleReferenceCandidatesRef.current.has(reference.name)
+          ? null
+          : `Rule reference '@${reference.name}' was not found.`
+      );
+
+      return {
+        range: reference.range,
+        options: {
+          inlineClassName: errorMessage
+            ? `${styles.ruleReferenceDecoration} ${styles.ruleReferenceErrorDecoration}`
+            : styles.ruleReferenceDecoration,
+          hoverMessage: {
+            value: errorMessage
+              ? `Rule reference error: \`@${reference.name}\`\n\n${errorMessage}`
+              : `Rule reference \`@${reference.name}\`. Click to expand inline.`,
+          },
         },
-      },
-    }));
+      };
+    });
 
     ruleReferenceDecorationIdsRef.current = editor.deltaDecorations(
       ruleReferenceDecorationIdsRef.current,
       decorations,
     );
   }, []);
+
+  useEffect(() => {
+    refreshRuleReferenceDecorationsRef.current = refreshRuleReferenceDecorations;
+  }, [refreshRuleReferenceDecorations]);
 
   const loadRuleReferenceContent = useCallback(async (name: string): Promise<string> => {
     const cached = ruleDetailCacheRef.current.get(name);
@@ -528,6 +565,8 @@ export default function RuleEditor() {
       validatorRef.current = null;
       clearValidationMarkers(model);
       setLocalVariables([]);
+      setRuleReferenceErrors([]);
+      ruleReferenceValidationErrorsRef.current.clear();
       ed.deltaDecorations(ruleReferenceDecorationIdsRef.current, []);
       ruleReferenceDecorationIdsRef.current = [];
       mouseDownDisposable.dispose();
@@ -574,6 +613,8 @@ export default function RuleEditor() {
       isSettingValueRef.current = true;
       modelRef.current.setValue("");
       isSettingValueRef.current = false;
+      setRuleReferenceErrors([]);
+      ruleReferenceValidationErrorsRef.current.clear();
       refreshRuleReferenceDecorations();
       return;
     }
@@ -588,6 +629,8 @@ export default function RuleEditor() {
       isSettingValueRef.current = true;
       modelRef.current.setValue(content);
       isSettingValueRef.current = false;
+      setRuleReferenceErrors([]);
+      ruleReferenceValidationErrorsRef.current.clear();
       editorRef.current.setScrollTop(0);
       editorRef.current.setScrollLeft(0);
       refreshRuleReferenceDecorations();

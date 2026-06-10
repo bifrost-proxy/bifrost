@@ -13,6 +13,7 @@ import snippet, {
   clearValidationMarkers,
   createDebouncedValidator,
   setLocalVariables,
+  setRuleReferenceErrors,
   executePendingNavigation,
   setLocalVariablesGetter,
 } from "./snippet";
@@ -98,7 +99,7 @@ editor.createModel = (
 export const THEME_DARK = theme.dark.name;
 export const THEME_LIGHT = theme.light.name;
 
-export { updateDynamicData, getDynamicData, setNavigateCallback, setLocalVariables, setLocalVariablesGetter };
+export { updateDynamicData, getDynamicData, setNavigateCallback, setLocalVariables, setRuleReferenceErrors, setLocalVariablesGetter };
 export { validateRules, setValidationMarkers, clearValidationMarkers, createDebouncedValidator };
 export type { DynamicCompletionData, ReferenceLocation, NavigateCallback, LocalVariableDefinition };
 export type { ParseError, ValidationResult, DebouncedValidator, GlobalValuesGetter };

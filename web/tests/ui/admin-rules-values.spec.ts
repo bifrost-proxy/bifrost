@@ -213,12 +213,15 @@ test("Rules 支持 @规则引用解析，并可在编辑器中点击展开详情
 }) => {
   const sharedRuleName = uniqueName("at-shared");
   const entryRuleName = uniqueName("at-entry");
+  const missingRuleName = uniqueName("at-missing");
+  const missingReferenceName = uniqueName("at-unknown");
   const groupName = uniqueName("at-team");
   const groupRuleName = uniqueName("at-group-shared");
   const groupRuleReference = `${groupName}/${groupRuleName}`;
   const sharedContent = "at-shared.test reqHeaders://X-At-Rule=ok";
   const groupSharedContent = "at-shared.test reqHeaders://X-Group-At-Rule=ok";
   const entryContent = `@${sharedRuleName}\n@${groupRuleReference}\nat-entry.test statusCode://204`;
+  const missingRuleContent = `@${missingReferenceName}\nmissing-ui.test statusCode://204`;
 
   await writeGroupRuleFile(groupName, groupRuleName, groupSharedContent);
 
@@ -242,6 +245,17 @@ test("Rules 支持 @规则引用解析，并可在编辑器中点击展开详情
   });
   if (!createEntryRes.ok()) {
     throw new Error(await createEntryRes.text());
+  }
+
+  const createMissingRes = await request.post(`${apiBase}/rules`, {
+    data: {
+      name: missingRuleName,
+      content: missingRuleContent,
+      enabled: false,
+    },
+  });
+  if (!createMissingRes.ok()) {
+    throw new Error(await createMissingRes.text());
   }
 
   const validRes = await request.post(`${apiBase}/rules/validate`, {
@@ -340,6 +354,45 @@ test("Rules 支持 @规则引用解析，并可在编辑器中点击展开详情
   await expect(zone).toBeVisible();
   await expect(zone).toHaveAttribute("data-rule-reference-name", groupRuleReference);
   await expect(zone).toContainText(groupSharedContent);
+
+  await page.getByTestId("rule-item").filter({ hasText: missingRuleName }).first().click();
+  const missingReferenceLine = page
+    .locator(".view-line")
+    .filter({ hasText: `@${missingReferenceName}` })
+    .first();
+  await expect(missingReferenceLine).toBeVisible();
+  await expect
+    .poll(async () =>
+      missingReferenceLine.evaluate((element) => {
+        const nodes = [element, ...Array.from(element.querySelectorAll("*"))];
+        return nodes.some((node) => {
+          if (node.className.toString().includes("ruleReferenceErrorDecoration")) {
+            return true;
+          }
+          const style = window.getComputedStyle(node);
+          const colors = [style.color, style.textDecorationColor];
+          return colors.some((color) => {
+            const match = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+            if (!match) return false;
+            const [, red, green, blue] = match.map(Number);
+            return red >= 200 && green <= 120 && blue <= 140;
+          });
+        });
+      }),
+    )
+    .toBeTruthy();
+  const missingBox = await missingReferenceLine.boundingBox();
+  if (!missingBox) {
+    throw new Error("Missing rule reference line is not visible");
+  }
+  await page.mouse.move(missingBox.x + 28, missingBox.y + missingBox.height / 2);
+  const hover = page.locator(".monaco-hover").filter({ hasText: missingReferenceName }).first();
+  await expect(hover).toBeVisible();
+  await expect(hover).toContainText("Rule reference error");
+  await expect(hover).toContainText("was not found");
+
+  await page.getByTestId("rule-item").filter({ hasText: entryRuleName }).first().click();
+  await expect(page.locator(".view-line").filter({ hasText: `@${sharedRuleName}` }).first()).toBeVisible();
 
   const editorInput = page
     .getByTestId("rule-editor-container")

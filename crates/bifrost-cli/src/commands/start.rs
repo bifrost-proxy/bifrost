@@ -3596,17 +3596,22 @@ mod tests {
     }
 
     #[test]
-    fn load_stored_rules_skips_entry_with_missing_reference() {
+    fn load_stored_rules_ignores_missing_reference_line() {
         let temp_dir = tempfile::tempdir().unwrap();
         let rules_storage =
             bifrost_storage::RulesStorage::with_dir(temp_dir.path().join("rules")).unwrap();
         rules_storage
-            .save(&bifrost_storage::RuleFile::new("entry", "@missing-rule"))
+            .save(&bifrost_storage::RuleFile::new(
+                "entry",
+                "@missing-rule\nentry.test statusCode://204",
+            ))
             .unwrap();
 
         let (rules, _) = load_stored_rules(&rules_storage, None);
 
-        assert!(rules.is_empty());
+        let raws = rules.into_iter().map(|rule| rule.raw).collect::<Vec<_>>();
+        assert!(raws.iter().any(|raw| raw.contains("entry.test")));
+        assert!(!raws.iter().any(|raw| raw.contains("missing-rule")));
     }
 
     #[test]
