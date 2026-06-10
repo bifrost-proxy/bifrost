@@ -42,7 +42,9 @@ cargo run --bin bifrost -- start -p 8801 --unsafe-ssl --no-system-proxy --skip-c
 
 **预期结果：**
 - 顶部显示 "Bifrost: Running on 127.0.0.1:8801"（灰色不可点击）
-- 包含以下菜单项：Open Admin UI、Open Traffic、Open Rules、Copy Admin URL、Copy HTTP Proxy、Copy SOCKS5 Proxy（置灰，因为没有独立 SOCKS5 端口）
+- 包含以下菜单项：Open Admin UI、Open Traffic、Open Rules、Copy Admin URL、Copy HTTP Proxy、Copy SOCKS5 Proxy
+- 统一代理模式下 Copy SOCKS5 Proxy 可点击，复制值为 `socks5://127.0.0.1:8801`
+- 没有规则时仍显示 `Rules: None` 子菜单，子菜单中显示置灰的 `No rules available`
 - 包含分隔线
 - 包含：Restart Bifrost、Stop Bifrost、Open Data Directory、Open Logs
 - 最底部：Quit Tray
@@ -181,7 +183,8 @@ echo "not valid json" > ./.bifrost-tray-test/tray.json
 
 **操作步骤：**
 1. 使用启动命令模板启动 Bifrost 服务
-2. 通过 Admin API 创建两条个人规则：
+2. 在没有规则时展开托盘菜单，确认存在 `Rules: None` 与置灰的 `No rules available`
+3. 通过 Admin API 创建两条个人规则：
 ```bash
 curl -sS -X POST http://127.0.0.1:8801/_bifrost/api/rules \
   -H 'Content-Type: application/json' \
@@ -190,16 +193,19 @@ curl -sS -X POST http://127.0.0.1:8801/_bifrost/api/rules \
   -H 'Content-Type: application/json' \
   -d '{"name":"tray-personal-b","content":"example.org statusCode://202","enabled":false}'
 ```
-3. 点击托盘图标展开菜单，把鼠标悬浮到 `Rules: tray-personal-a`
-4. 观察 Rules 下级菜单，然后点击 `tray-personal-b`
-5. 再次展开托盘菜单，并调用 `curl -sS http://127.0.0.1:8801/_bifrost/api/rules/active-summary`
+4. 等待最多 2 秒后点击托盘图标展开菜单，把鼠标悬浮到 `Rules: tray-personal-a`
+5. 观察 Rules 下级菜单，然后点击 `tray-personal-b`
+6. 再次展开托盘菜单，并调用 `curl -sS http://127.0.0.1:8801/_bifrost/api/rules/active-summary`
+7. 通过 Admin API 删除 `tray-personal-a`，等待最多 2 秒后再次展开 Rules 子菜单
 
 **预期结果：**
+- 无规则时 Rules 入口不会消失，而是显示 `Rules: None` + `No rules available`
 - 顶层菜单存在 `Rules: tray-personal-a`
 - 只有个人规则时，Rules 下一级直接展示 `tray-personal-a` 和 `tray-personal-b`，不出现 `My Rules` 或组名层级
 - `tray-personal-a` 初始带原生勾选标记，`tray-personal-b` 初始不勾选
 - 点击 `tray-personal-b` 后，顶层文案更新为 `Rules: tray-personal-b`
 - `active-summary` 只包含 `tray-personal-b`，不包含 `tray-personal-a`
+- 删除 `tray-personal-a` 后，Rules 子菜单不再包含 `tray-personal-a`，仍包含 `tray-personal-b`
 - 准备、读取和切换均通过 Admin API 完成，没有直接编辑规则文件
 
 ### TC-TH-14: Rules 菜单存在组规则时展示三级并支持跨组单选

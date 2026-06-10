@@ -5,7 +5,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde::Deserialize;
 use tao::event::Event;
@@ -121,6 +121,8 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     let tray_receiver = TrayIconEvent::receiver().clone();
     let mut last_rendered_state = current_state.load(Ordering::Relaxed);
     let mut last_rendered_operation = current_operation.load(Ordering::Relaxed);
+    let mut last_rendered_rules = rules;
+    let mut last_rules_probe = Instant::now();
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow =
@@ -161,12 +163,35 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
         let state_changed = new_state != last_rendered_state;
         let operation_changed = new_operation != last_rendered_operation;
         let reload_requested = should_reload.swap(false, Ordering::Relaxed);
+        let svc_state = match new_state {
+            STATE_RUNNING => ServiceState::Running,
+            STATE_STOPPED => ServiceState::Stopped,
+            _ => ServiceState::Disconnected,
+        };
+        let probed_rules = if last_rules_probe.elapsed() >= POLL_INTERVAL
+            || icon_interacted
+            || action_triggered
+            || reload_requested
+        {
+            last_rules_probe = Instant::now();
+            let rt = runtime::read_runtime(&args.runtime_file);
+            let current_rules = load_rules_for_menu(rt.as_ref(), svc_state);
+            if current_rules != last_rendered_rules {
+                Some(current_rules)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let rules_changed = probed_rules.is_some();
 
         if state_changed
             || operation_changed
             || reload_requested
             || icon_interacted
             || action_triggered
+            || rules_changed
         {
             last_rendered_state = new_state;
             last_rendered_operation = new_operation;
@@ -192,14 +217,10 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
             }
 
             // Rebuild menu to reflect new state (enabled/disabled items + status text)
-            let svc_state = match new_state {
-                STATE_RUNNING => ServiceState::Running,
-                STATE_STOPPED => ServiceState::Stopped,
-                _ => ServiceState::Disconnected,
-            };
             let rt = runtime::read_runtime(&args.runtime_file);
             let new_custom_config = load_custom_config_safe(&args.data_dir);
-            let rules = load_rules_for_menu(rt.as_ref(), svc_state);
+            let rules = probed_rules.unwrap_or_else(|| load_rules_for_menu(rt.as_ref(), svc_state));
+            last_rendered_rules = rules.clone();
             let bin_available = trusted_bifrost_binary_available(&args);
             let new_menu_items = menu::build_menu(
                 rt.as_ref(),
@@ -219,6 +240,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
                 state = new_state,
                 operation = new_operation,
                 icon_interacted = icon_interacted,
+                rules_changed = rules_changed,
                 reloaded = reload_requested,
                 "tray icon and menu updated"
             );
