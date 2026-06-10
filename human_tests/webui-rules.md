@@ -785,6 +785,53 @@
 
 ---
 
+### TC-WRU-45：`@规则名称` / `@组名称/规则名称` 引用解析、补全与编辑器原位展开
+
+**前置条件**：
+1. 使用临时数据目录启动 Bifrost，必须设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1` 并携带 `--no-system-proxy`。
+2. 准备两个个人私有规则：
+   - `at-ref-shared-human`：内容为 `at-rule-e2e.test reqHeaders://X-At-Rule=ok`，状态为 disabled。
+   - `at-ref-entry-human`：内容为：
+     ```text
+     @at-ref-shared-human
+     @at-ref-team-human/at-ref-group-shared-human
+     at-rule-e2e.test host://127.0.0.1:{MOCK_PORT}
+     ```
+     状态为 enabled。
+3. 准备一个本地缓存组 `at-ref-team-human`，其中规则 `at-ref-group-shared-human` 内容为 `at-rule-e2e.test reqHeaders://X-Group-At-Rule=ok`，状态为 disabled。
+4. 准备一个本地 HTTP mock 服务，返回请求头 `X-At-Rule` 与 `X-Group-At-Rule` 的值。
+
+**操作步骤**：
+1. 请求 `POST /_bifrost/api/rules/validate`，body 中传入 `current_rule_name=at-ref-entry-human` 和 entry 规则内容。
+2. 通过 Bifrost 代理访问 `http://at-rule-e2e.test/check`。
+3. 在浏览器打开 `http://127.0.0.1:{PORT}/_bifrost/rules`，选中 `at-ref-entry-human`。
+4. 请求 `GET /_bifrost/api/rules/reference-candidates`。
+5. 在亮色主题下点击编辑器第一行的 `@at-ref-shared-human`。
+6. 再次点击同一 `@at-ref-shared-human`。
+7. 切换到暗色主题，重复第 5 步。
+8. 点击第二行 `@at-ref-team-human/at-ref-group-shared-human`。
+9. 在编辑器中输入 `@` 加组名/规则名的部分字符，触发 Monaco 补全。
+10. 请求 `POST /_bifrost/api/rules/validate`，body 中传入 `content="@missing-rule"`。
+
+**预期结果**：
+- validate API 对 entry 规则返回 `valid=true`，`rule_count=3`。
+- 代理请求到达 mock 服务，mock 服务看到 `X-At-Rule: ok` 和 `X-Group-At-Rule: ok`，说明 disabled 本地 shared 与 disabled 组 shared 规则都只通过 entry 的 `@` 引用生效。
+- reference candidates API 返回个人规则短名 `at-ref-shared-human`，并返回组规则 qualified name `at-ref-team-human/at-ref-group-shared-human`。
+- 亮色主题下，`@at-ref-shared-human` 有可点击样式；点击后在当前行下方展开只读详情，详情内容包含 shared 规则文本。
+- 再次点击同一 `@` 引用后，展开详情收起。
+- 暗色主题下，展开详情的文字、背景、边框和关闭按钮均清晰可读，不与编辑器内容重叠。
+- 点击组规则引用后，当前行下方展开组规则详情，详情内容包含 `X-Group-At-Rule=ok`。
+- Monaco 补全基于自动检索候选做 fuzzy 搜索，输入部分字符也能提示完整 `@at-ref-team-human/at-ref-group-shared-human`。
+- 缺失引用返回 `valid=false`，错误 code 为 `E020`，错误信息包含 `missing-rule`。
+
+**回归目的**：覆盖规则引用语义、disabled shared 规则复用、组规则 qualified 引用、候选自动检索、模糊补全、编辑器原位展开详情、亮暗主题可读性和缺失引用诊断，防止运行时解析和 WebUI 编辑体验不一致。
+
+**执行结果（2026-06-10，本地开发分支）**：
+- ✅ PASS：执行 `bash e2e-tests/tests/test_rule_references.sh`，脚本先编译当前分支 debug 二进制，预置 disabled 组 shared 规则，再通过真实 Admin API 创建 disabled 私有 shared 规则和 enabled entry 规则；validate API 返回 `valid=true` / `rule_count=3`，真实代理请求确认 mock 服务收到 `X-At-Rule: ok` 与 `X-Group-At-Rule: ok`。
+- ✅ PASS：执行 `npm --prefix web run test:ui -- web/tests/ui/admin-rules-values.spec.ts -g "@规则引用"`，验证缺失引用返回 `E020`，reference candidates 返回私有短名与组 qualified name，Rules 编辑器在亮色主题下点击 `@规则` 展开/收起详情，在暗色主题下详情内容仍可读，点击 `@组名/规则名` 展开组规则详情，并验证 Monaco fuzzy 补全提示完整组规则引用。
+
+---
+
 ## 清理
 
 测试完成后清理临时数据：

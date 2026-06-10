@@ -1,6 +1,6 @@
 use bifrost_core::{
-    extract_inline_variables, validate_rules_with_context, ParseError, ParseErrorSeverity,
-    ScriptReference, VariableInfo,
+    expand_rule_references, extract_inline_variables, validate_rules_with_context, ParseError,
+    ParseErrorSeverity, ScriptReference, VariableInfo,
 };
 use bifrost_storage::{ConfigChangeEvent, RuleFile, RuleSummary, RulesStorage};
 use http_body_util::BodyExt;
@@ -21,6 +21,14 @@ struct RuleFileInfo {
     rule_count: usize,
     created_at: String,
     updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RuleReferenceCandidate {
+    name: String,
+    rule_name: String,
+    group_name: Option<String>,
+    group_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -109,6 +117,10 @@ struct ValidateRuleRequest {
     content: String,
     #[serde(default)]
     global_values: HashMap<String, String>,
+    #[serde(default)]
+    current_rule_name: Option<String>,
+    #[serde(default)]
+    current_group_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -144,6 +156,11 @@ pub async fn handle_rules(
     } else if path == "/api/rules/active-summary" {
         match method {
             Method::GET => active_summary(state).await,
+            _ => method_not_allowed(),
+        }
+    } else if path == "/api/rules/reference-candidates" {
+        match method {
+            Method::GET => list_reference_candidates(state).await,
             _ => method_not_allowed(),
         }
     } else if path == "/api/rules/validate" {
@@ -204,6 +221,46 @@ async fn list_rules(state: SharedAdminState) -> Response<BoxBody> {
             &format!("Failed to list rules: {}", e),
         ),
     }
+}
+
+async fn list_reference_candidates(state: SharedAdminState) -> Response<BoxBody> {
+    let reverse_cache = {
+        let cache = state.group_name_cache();
+        cache
+            .entries()
+            .into_iter()
+            .map(|(group_id, group_name)| (group_name, group_id))
+            .collect::<HashMap<_, _>>()
+    };
+
+    let rule_files = match state.rules_storage.load_all_with_subdirs() {
+        Ok(rules) => rules,
+        Err(e) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Failed to list rule references: {}", e),
+            )
+        }
+    };
+
+    let mut candidates = rule_files
+        .into_iter()
+        .map(|rule| {
+            let group_name = rule.group.clone();
+            let group_id = group_name
+                .as_deref()
+                .and_then(|name| reverse_cache.get(name).cloned());
+            RuleReferenceCandidate {
+                name: bifrost_storage::rule_reference_key(&rule),
+                rule_name: rule.name,
+                group_name,
+                group_id,
+            }
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| left.name.cmp(&right.name));
+
+    json_response(&candidates)
 }
 
 struct InlineVarEntry {
@@ -556,8 +613,56 @@ async fn validate_rule(req: Request<Incoming>, state: SharedAdminState) -> Respo
         Err(e) => return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e)),
     };
 
+    let current_rule_name = request
+        .current_rule_name
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("__current__");
+    let current_group_name = request
+        .current_group_name
+        .as_deref()
+        .filter(|name| !name.trim().is_empty());
+    let source_name = current_group_name
+        .map(|group| format!("{}/{}", group.trim(), current_rule_name))
+        .unwrap_or_else(|| current_rule_name.to_string());
     let content = request.content.clone();
     let global_values = request.global_values.clone();
+    let rule_files = state
+        .rules_storage
+        .load_all_with_subdirs()
+        .unwrap_or_default();
+    let mut reference_catalog = bifrost_storage::build_rule_reference_catalog(&rule_files);
+    reference_catalog.insert(source_name.clone(), content.clone());
+
+    let content = match expand_rule_references(&source_name, &content, &reference_catalog) {
+        Ok(expanded) => expanded,
+        Err(error) => {
+            let reference_error = ParseError::with_range(
+                error.line(),
+                1,
+                request
+                    .content
+                    .lines()
+                    .nth(error.line().saturating_sub(1))
+                    .map(|line| line.len().max(1))
+                    .unwrap_or(1),
+                error.to_string(),
+            )
+            .with_code("E020")
+            .with_suggestion(
+                "Create the referenced rule or remove the cycle before enabling this rule.",
+            );
+            let resp = ValidateRuleResponse {
+                valid: false,
+                rule_count: 0,
+                errors: vec![reference_error],
+                warnings: Vec::new(),
+                defined_variables: Vec::new(),
+                script_references: Vec::new(),
+            };
+            return json_response(&resp);
+        }
+    };
 
     let validation_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         validate_rules_with_context(&content, &global_values)

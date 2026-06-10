@@ -41,4 +41,10 @@ describe('Bifrost tokenizer', () => {
     expect(classes).toContain('string');
     expect(classes).not.toContain('attribute.value');
   });
+
+  it('marks at-rule references as clickable references', () => {
+    const classes = rootTokenClasses('@shared-rule');
+
+    expect(classes).toContain('reference.user');
+  });
 });

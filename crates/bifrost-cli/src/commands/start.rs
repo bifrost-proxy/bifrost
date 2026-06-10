@@ -19,7 +19,7 @@ use bifrost_admin::{
     AsyncTrafficWriter, BodyStore, PortRebindManager, PortRebindRequest, PushManager,
     ReplayDbStore, RuntimeConfig, WsPayloadStore,
 };
-use bifrost_core::{Rule, UserPassAccountConfig, UserPassAuthConfig};
+use bifrost_core::{expand_rule_references, Rule, UserPassAccountConfig, UserPassAuthConfig};
 use bifrost_proxy::{AccessMode, ProxyConfig, ProxyServer};
 use bifrost_storage::{
     set_data_dir, ConfigChangeEvent, ConfigManager, TrafficConfigUpdate, DEFAULT_REMOTE_BASE_URL,
@@ -2863,13 +2863,32 @@ fn load_stored_rules(
         base_dir = %rules_storage.base_dir().display(),
         "loading rules from storage"
     );
-    match rules_storage.load_enabled_with_subdirs_filtered(valid_subdirs) {
+    match rules_storage.load_all_with_subdirs_filtered(valid_subdirs) {
         Ok(rule_files) => {
-            let stored_count = rule_files.len();
-            for rule_file in rule_files {
+            let stored_count = rule_files.iter().filter(|rule| rule.enabled).count();
+            let catalog_rule_files = rules_storage
+                .load_all_with_subdirs()
+                .unwrap_or_else(|_| rule_files.clone());
+            let catalog = bifrost_storage::build_rule_reference_catalog(&catalog_rule_files);
+            for rule_file in rule_files.into_iter().filter(|rule| rule.enabled) {
                 let parser = bifrost_core::RuleParser::new();
+                let source_name = bifrost_storage::rule_reference_key(&rule_file);
+                let expanded_content =
+                    match expand_rule_references(&source_name, &rule_file.content, &catalog) {
+                        Ok(content) => content,
+                        Err(error) => {
+                            tracing::warn!(
+                                target: "bifrost_cli::rules",
+                                file = %rule_file.name,
+                                line = error.line(),
+                                error = %error,
+                                "rule reference error (skipped)"
+                            );
+                            continue;
+                        }
+                    };
                 let (result, file_inline_values) =
-                    parser.parse_rules_tolerant_with_inline_values(&rule_file.content);
+                    parser.parse_rules_tolerant_with_inline_values(&expanded_content);
 
                 if !result.errors.is_empty() {
                     for error in &result.errors {
@@ -3487,6 +3506,107 @@ mod tests {
         let dirs = resolve_valid_group_dirs(&admin_state);
 
         assert!(dirs.is_empty());
+    }
+
+    #[test]
+    fn load_stored_rules_expands_disabled_rule_references() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let rules_storage =
+            bifrost_storage::RulesStorage::with_dir(temp_dir.path().join("rules")).unwrap();
+        rules_storage
+            .save(&bifrost_storage::RuleFile::new(
+                "entry",
+                "@shared\nentry.test statusCode://203",
+            ))
+            .unwrap();
+        rules_storage
+            .save(
+                &bifrost_storage::RuleFile::new("shared", "shared.test reqHeaders://X-Shared=1")
+                    .with_enabled(false),
+            )
+            .unwrap();
+
+        let (rules, _) = load_stored_rules(&rules_storage, None);
+
+        let raws = rules.into_iter().map(|rule| rule.raw).collect::<Vec<_>>();
+        assert!(raws.iter().any(|raw| raw.contains("shared.test")));
+        assert!(raws.iter().any(|raw| raw.contains("entry.test")));
+    }
+
+    #[test]
+    fn load_stored_rules_expands_group_rule_references() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let rules_storage =
+            bifrost_storage::RulesStorage::with_dir(temp_dir.path().join("rules")).unwrap();
+        rules_storage
+            .save(&bifrost_storage::RuleFile::new(
+                "entry",
+                "@team-alpha/shared\nentry.test statusCode://203",
+            ))
+            .unwrap();
+
+        let group_storage =
+            bifrost_storage::RulesStorage::with_dir(temp_dir.path().join("rules/team-alpha"))
+                .unwrap();
+        group_storage
+            .save(
+                &bifrost_storage::RuleFile::new(
+                    "shared",
+                    "shared.test reqHeaders://X-Group-Shared=1",
+                )
+                .with_enabled(false),
+            )
+            .unwrap();
+
+        let (rules, _) = load_stored_rules(&rules_storage, None);
+
+        let raws = rules.into_iter().map(|rule| rule.raw).collect::<Vec<_>>();
+        assert!(raws.iter().any(|raw| raw.contains("shared.test")));
+        assert!(raws.iter().any(|raw| raw.contains("entry.test")));
+    }
+
+    #[test]
+    fn load_stored_rules_allows_group_references_when_group_roots_are_filtered() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let rules_storage =
+            bifrost_storage::RulesStorage::with_dir(temp_dir.path().join("rules")).unwrap();
+        rules_storage
+            .save(&bifrost_storage::RuleFile::new(
+                "entry",
+                "@team-alpha/shared\nentry.test statusCode://203",
+            ))
+            .unwrap();
+
+        let group_storage =
+            bifrost_storage::RulesStorage::with_dir(temp_dir.path().join("rules/team-alpha"))
+                .unwrap();
+        group_storage
+            .save(&bifrost_storage::RuleFile::new(
+                "shared",
+                "shared.test reqHeaders://X-Group-Shared=1",
+            ))
+            .unwrap();
+
+        let valid_subdirs = std::collections::HashSet::new();
+        let (rules, _) = load_stored_rules(&rules_storage, Some(&valid_subdirs));
+
+        let raws = rules.into_iter().map(|rule| rule.raw).collect::<Vec<_>>();
+        assert!(raws.iter().any(|raw| raw.contains("shared.test")));
+        assert!(raws.iter().any(|raw| raw.contains("entry.test")));
+    }
+
+    #[test]
+    fn load_stored_rules_skips_entry_with_missing_reference() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let rules_storage =
+            bifrost_storage::RulesStorage::with_dir(temp_dir.path().join("rules")).unwrap();
+        rules_storage
+            .save(&bifrost_storage::RuleFile::new("entry", "@missing-rule"))
+            .unwrap();
+
+        let (rules, _) = load_stored_rules(&rules_storage, None);
+
+        assert!(rules.is_empty());
     }
 
     #[test]

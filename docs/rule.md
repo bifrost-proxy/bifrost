@@ -136,6 +136,20 @@ example.com resBody://{mockBody}
 
 `${varName}` 格式为模板变量，不会被预处理展开。
 
+### 8. 规则引用
+
+在独立行写 `@规则名称` 可以引用个人私有规则；写 `@组名称/规则名称` 可以引用本机已缓存的组规则。Bifrost 会在解析前把被引用规则的内容原位展开：
+
+```txt
+@shared-headers
+@team-alpha/shared-headers
+example.com host://127.0.0.1:3000
+```
+
+常见用法是把 `shared-headers` 设为 disabled，避免它 standalone 全局生效，再由启用的入口规则通过 `@shared-headers` 或 `@team-alpha/shared-headers` 复用。
+
+个人私有规则不需要带组名称。组规则必须使用 `组名称/规则名称`，避免和同名私有规则冲突。规则引用支持嵌套；缺失引用或循环引用会让入口规则解析失败并在 Rules 编辑器中提示错误。
+
 ## 注意事项
 
 ### 规则优先级

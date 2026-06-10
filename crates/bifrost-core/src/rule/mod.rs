@@ -2,6 +2,7 @@ mod context;
 pub mod filter;
 mod group;
 mod parser;
+mod references;
 mod resolver;
 mod template;
 mod types;
@@ -15,6 +16,10 @@ pub use parser::{
     extract_inline_variables, parse_line, parse_rules, parse_rules_tolerant, validate_rules,
     validate_rules_with_context, CodeFix, ParseError, ParseErrorSeverity, ParseResult, RuleParser,
     ScriptReference, ValidationResult, VariableInfo,
+};
+pub use references::{
+    expand_rule_references, expand_rule_references_to_result, rule_reference_name,
+    RuleReferenceError,
 };
 pub use resolver::{ResolvedRule, ResolvedRules, RulesResolver};
 pub use template::TemplateEngine;

@@ -1,4 +1,6 @@
 import fs from "node:fs/promises";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { test, expect } from "@playwright/test";
 import {
   apiBase,
@@ -19,6 +21,48 @@ test.describe.configure({ mode: "serial" });
 async function changeSort(page: import("@playwright/test").Page, testId: string, label: string) {
   await page.getByTestId(testId).click();
   await page.locator(".ant-select-dropdown").getByText(label, { exact: true }).click();
+}
+
+async function writeGroupRuleFile(groupName: string, ruleName: string, content: string) {
+  const dataDir = process.env.BIFROST_DATA_DIR;
+  if (!dataDir) {
+    throw new Error("BIFROST_DATA_DIR is required to seed group rule references");
+  }
+  const now = new Date().toISOString();
+  const rulesDir = path.join(dataDir, "rules");
+  const groupDir = path.join(rulesDir, groupName);
+  await fs.mkdir(groupDir, { recursive: true });
+  await fs.writeFile(
+    path.join(groupDir, `${ruleName}.bifrost`),
+    [
+      "01 rules",
+      "",
+      "[meta]",
+      `name = "${ruleName}"`,
+      "enabled = false",
+      "sort_order = 0",
+      'version = "1.0.0"',
+      `created_at = "${now}"`,
+      `updated_at = "${now}"`,
+      `group = "${groupName}"`,
+      "",
+      "[meta.sync]",
+      `rule_id = "${randomUUID()}"`,
+      'status = "local_only"',
+      "",
+      "[options]",
+      "rule_count = 1",
+      "",
+      "---",
+      content,
+    ].join("\n"),
+    "utf8",
+  );
+  await fs.writeFile(
+    path.join(rulesDir, ".group_cache.json"),
+    JSON.stringify({ [`gid-${groupName}`]: groupName }),
+    "utf8",
+  );
 }
 
 test.beforeEach(async ({ request }) => {
@@ -161,6 +205,155 @@ test("Rules 编辑器 bp 补全使用 parser scripts，decode bp 校验不报缺
   });
   await expect(page).toHaveURL(/\/_bifrost\/scripts/);
   await expect(page.getByTestId("scripts-editor-panel")).toContainText("build_in_bp");
+});
+
+test("Rules 支持 @规则引用解析，并可在编辑器中点击展开详情", async ({
+  page,
+  request,
+}) => {
+  const sharedRuleName = uniqueName("at-shared");
+  const entryRuleName = uniqueName("at-entry");
+  const groupName = uniqueName("at-team");
+  const groupRuleName = uniqueName("at-group-shared");
+  const groupRuleReference = `${groupName}/${groupRuleName}`;
+  const sharedContent = "at-shared.test reqHeaders://X-At-Rule=ok";
+  const groupSharedContent = "at-shared.test reqHeaders://X-Group-At-Rule=ok";
+  const entryContent = `@${sharedRuleName}\n@${groupRuleReference}\nat-entry.test statusCode://204`;
+
+  await writeGroupRuleFile(groupName, groupRuleName, groupSharedContent);
+
+  const createSharedRes = await request.post(`${apiBase}/rules`, {
+    data: {
+      name: sharedRuleName,
+      content: sharedContent,
+      enabled: false,
+    },
+  });
+  if (!createSharedRes.ok()) {
+    throw new Error(await createSharedRes.text());
+  }
+
+  const createEntryRes = await request.post(`${apiBase}/rules`, {
+    data: {
+      name: entryRuleName,
+      content: entryContent,
+      enabled: true,
+    },
+  });
+  if (!createEntryRes.ok()) {
+    throw new Error(await createEntryRes.text());
+  }
+
+  const validRes = await request.post(`${apiBase}/rules/validate`, {
+    data: {
+      current_rule_name: entryRuleName,
+      content: entryContent,
+    },
+  });
+  expect(validRes.ok()).toBeTruthy();
+  const validPayload = (await validRes.json()) as {
+    valid: boolean;
+    rule_count: number;
+    errors: Array<{ message: string; code?: string }>;
+  };
+  expect(validPayload.valid).toBeTruthy();
+  expect(validPayload.rule_count).toBe(3);
+  expect(validPayload.errors).toHaveLength(0);
+
+  const candidatesRes = await request.get(`${apiBase}/rules/reference-candidates`);
+  expect(candidatesRes.ok()).toBeTruthy();
+  const candidatesPayload = (await candidatesRes.json()) as Array<{
+    name: string;
+    rule_name: string;
+    group_name?: string | null;
+  }>;
+  expect(candidatesPayload.some((candidate) => candidate.name === sharedRuleName)).toBeTruthy();
+  expect(
+    candidatesPayload.some(
+      (candidate) =>
+        candidate.name === groupRuleReference &&
+        candidate.rule_name === groupRuleName &&
+        candidate.group_name === groupName,
+    ),
+  ).toBeTruthy();
+
+  const missingRes = await request.post(`${apiBase}/rules/validate`, {
+    data: {
+      current_rule_name: entryRuleName,
+      content: "@missing-rule",
+    },
+  });
+  expect(missingRes.ok()).toBeTruthy();
+  const missingPayload = (await missingRes.json()) as {
+    valid: boolean;
+    errors: Array<{ message: string; code?: string }>;
+  };
+  expect(missingPayload.valid).toBeFalsy();
+  expect(missingPayload.errors[0]?.code).toBe("E020");
+  expect(missingPayload.errors[0]?.message).toContain("missing-rule");
+
+  await openPage(page, "rules");
+  await page.getByTestId("rule-item").filter({ hasText: entryRuleName }).first().click();
+  await expect(page.getByTestId("rule-editor")).toBeVisible();
+  const editorBox = page.getByTestId("rule-editor-container").locator(".monaco-editor").first();
+  await expect(editorBox).toBeVisible();
+  const referenceLine = page.locator(".view-line").filter({ hasText: `@${sharedRuleName}` }).first();
+  await expect(referenceLine).toBeVisible();
+
+  const box = await referenceLine.boundingBox();
+  if (!box) {
+    throw new Error("Rule reference line is not visible");
+  }
+  await page.mouse.click(box.x + 24, box.y + box.height / 2);
+
+  const zone = page.getByTestId("rule-reference-zone");
+  await expect(zone).toBeVisible();
+  await expect(zone).toHaveAttribute("data-rule-reference-name", sharedRuleName);
+  await expect(zone).toContainText(sharedContent);
+
+  await page.mouse.click(box.x + 24, box.y + box.height / 2);
+  await expect(zone).toBeHidden();
+
+  await page.getByTestId("theme-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await page.mouse.click(box.x + 24, box.y + box.height / 2);
+  await expect(zone).toBeVisible();
+  await expect(zone).toContainText(sharedContent);
+  const darkZoneColors = await zone.evaluate((element) => {
+    const style = window.getComputedStyle(element);
+    return {
+      background: style.backgroundColor,
+      color: style.color,
+      border: style.borderColor,
+    };
+  });
+  expect(darkZoneColors.background).not.toBe(darkZoneColors.color);
+  expect(darkZoneColors.border).not.toBe("rgba(0, 0, 0, 0)");
+
+  const groupReferenceLine = page.locator(".view-line").filter({ hasText: `@${groupRuleReference}` }).first();
+  await expect(groupReferenceLine).toBeVisible();
+  const groupBox = await groupReferenceLine.boundingBox();
+  if (!groupBox) {
+    throw new Error("Group rule reference line is not visible");
+  }
+  await page.mouse.click(groupBox.x + 24, groupBox.y + groupBox.height / 2);
+  await expect(zone).toBeVisible();
+  await expect(zone).toHaveAttribute("data-rule-reference-name", groupRuleReference);
+  await expect(zone).toContainText(groupSharedContent);
+
+  const editorInput = page
+    .getByTestId("rule-editor-container")
+    .getByRole("textbox", { name: "Editor content" });
+  await editorInput.click({ force: true });
+  await page.keyboard.press(process.platform === "darwin" ? "Meta+ArrowRight" : "End");
+  await page.keyboard.press("Enter");
+  await page.keyboard.type(`@${groupName.slice(0, 2)}${groupRuleName.slice(-2)}`);
+  await page.keyboard.press("Control+Space");
+  await expect(
+    page.locator(".suggest-widget .monaco-list-row").filter({
+      hasText: `@${groupRuleReference}`,
+    }).first(),
+  ).toBeVisible();
 });
 
 test("Values 页面完成 CRUD、支持多种排序，并通过 push 自动同步外部写入", async ({

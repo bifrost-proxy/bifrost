@@ -49,6 +49,7 @@ export function syncDynamicData() {
 export function resetEditorCompletion() {
   updateDynamicData({
     values: [],
+    rules: [],
     requestScripts: [],
     responseScripts: [],
   });

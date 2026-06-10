@@ -1,0 +1,4 @@
+# 验证 @规则引用会在当前位置原位合并解析：entry 规则引用本地 shared 与组 shared 后，同时应用两个请求头修改和 entry 的 host 转发。
+@__SHARED_RULE__
+@__GROUP_RULE_REF__
+at-rule-e2e.test host://127.0.0.1:__MOCK_PORT__

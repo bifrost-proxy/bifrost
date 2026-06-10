@@ -137,6 +137,11 @@ impl RuleFile {
         self
     }
 
+    pub fn with_group(mut self, group: Option<String>) -> Self {
+        self.group = group;
+        self
+    }
+
     pub fn touch(&mut self) {
         self.updated_at = chrono::Utc::now().to_rfc3339();
     }
@@ -221,6 +226,26 @@ impl RuleFile {
             },
         }
     }
+}
+
+pub fn rule_reference_key(rule: &RuleFile) -> String {
+    match rule
+        .group
+        .as_deref()
+        .filter(|group| !group.trim().is_empty())
+    {
+        Some(group) => format!("{}/{}", group.trim(), rule.name),
+        None => rule.name.clone(),
+    }
+}
+
+pub fn build_rule_reference_catalog<'a>(
+    rules: impl IntoIterator<Item = &'a RuleFile>,
+) -> std::collections::HashMap<String, String> {
+    rules
+        .into_iter()
+        .map(|rule| (rule_reference_key(rule), rule.content.clone()))
+        .collect()
 }
 
 fn generate_rule_id() -> String {
@@ -498,15 +523,15 @@ impl RulesStorage {
         Ok(rules.into_iter().filter(|r| r.enabled).collect())
     }
 
-    pub fn load_enabled_with_subdirs(&self) -> Result<Vec<RuleFile>> {
-        self.load_enabled_with_subdirs_filtered(None)
+    pub fn load_all_with_subdirs(&self) -> Result<Vec<RuleFile>> {
+        self.load_all_with_subdirs_filtered(None)
     }
 
-    pub fn load_enabled_with_subdirs_filtered(
+    pub fn load_all_with_subdirs_filtered(
         &self,
         valid_subdirs: Option<&std::collections::HashSet<String>>,
     ) -> Result<Vec<RuleFile>> {
-        let mut all_enabled = self.load_enabled()?;
+        let mut all_rules = self.load_all()?;
 
         if let Ok(entries) = fs::read_dir(&self.base_dir) {
             for entry in entries.flatten() {
@@ -529,17 +554,22 @@ impl RulesStorage {
                     }
 
                     if let Ok(sub_storage) = RulesStorage::with_dir(path.clone()) {
-                        match sub_storage.load_enabled() {
-                            Ok(sub_enabled) => {
-                                if !sub_enabled.is_empty() {
+                        match sub_storage.load_all() {
+                            Ok(mut sub_rules) => {
+                                for rule in &mut sub_rules {
+                                    if rule.group.as_deref().unwrap_or_default().trim().is_empty() {
+                                        rule.group = Some(dir_name.to_string());
+                                    }
+                                }
+                                if !sub_rules.is_empty() {
                                     tracing::info!(
                                         target: "bifrost_storage::rules",
                                         subdir = %dir_name,
-                                        count = sub_enabled.len(),
-                                        "loaded enabled rules from subdirectory"
+                                        count = sub_rules.len(),
+                                        "loaded rules from subdirectory"
                                     );
                                 }
-                                all_enabled.extend(sub_enabled);
+                                all_rules.extend(sub_rules);
                             }
                             Err(e) => {
                                 tracing::warn!(
@@ -555,8 +585,23 @@ impl RulesStorage {
             }
         }
 
-        all_enabled.sort_by_key(|r| r.sort_order);
-        Ok(all_enabled)
+        all_rules.sort_by_key(|r| r.sort_order);
+        Ok(all_rules)
+    }
+
+    pub fn load_enabled_with_subdirs(&self) -> Result<Vec<RuleFile>> {
+        self.load_enabled_with_subdirs_filtered(None)
+    }
+
+    pub fn load_enabled_with_subdirs_filtered(
+        &self,
+        valid_subdirs: Option<&std::collections::HashSet<String>>,
+    ) -> Result<Vec<RuleFile>> {
+        Ok(self
+            .load_all_with_subdirs_filtered(valid_subdirs)?
+            .into_iter()
+            .filter(|r| r.enabled)
+            .collect())
     }
 
     pub fn set_enabled(&self, name: &str, enabled: bool) -> Result<()> {
@@ -961,6 +1006,50 @@ mod tests {
         assert_eq!(enabled.len(), 2);
         assert_eq!(enabled[0].name, "local");
         assert_eq!(enabled[1].name, "group");
+    }
+
+    #[test]
+    fn test_load_all_with_subdirs_keeps_disabled_reference_rules() {
+        let (temp_dir, storage) = setup();
+        storage
+            .save(&RuleFile::new("enabled", "@disabled-ref"))
+            .unwrap();
+        storage
+            .save(
+                &RuleFile::new("disabled-ref", "ref.example.com statusCode://204")
+                    .with_enabled(false),
+            )
+            .unwrap();
+
+        let group_dir = temp_dir.path().join("my-group");
+        let group_storage = RulesStorage::with_dir(group_dir).unwrap();
+        group_storage
+            .save(
+                &RuleFile::new("group-disabled", "group.example.com statusCode://205")
+                    .with_enabled(false),
+            )
+            .unwrap();
+
+        let all_rules = storage.load_all_with_subdirs().unwrap();
+        let mut names = all_rules
+            .iter()
+            .map(|rule| rule.name.clone())
+            .collect::<Vec<_>>();
+        names.sort();
+        let mut reference_names = all_rules
+            .into_iter()
+            .map(|rule| rule_reference_key(&rule))
+            .collect::<Vec<_>>();
+        reference_names.sort();
+        assert_eq!(names, vec!["disabled-ref", "enabled", "group-disabled"]);
+        assert_eq!(
+            reference_names,
+            vec!["disabled-ref", "enabled", "my-group/group-disabled"]
+        );
+
+        let enabled = storage.load_enabled_with_subdirs().unwrap();
+        assert_eq!(enabled.len(), 1);
+        assert_eq!(enabled[0].name, "enabled");
     }
 
     #[test]

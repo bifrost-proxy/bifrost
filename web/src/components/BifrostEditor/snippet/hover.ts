@@ -18,6 +18,7 @@ const VALUE_REF_PATTERN = /\{([\w-]+)\}/g;
 const REQ_SCRIPT_PATTERN = /reqScript:\/\/([\w\-.]+)/g;
 const RES_SCRIPT_PATTERN = /resScript:\/\/([\w\-.]+)/g;
 const BP_SCRIPT_PATTERN = /bp:\/\/([^\s]+)/g;
+const RULE_REF_PATTERN = /(^|\s)@([^\s#]+)/g;
 
 export function localBpParserScriptName(rawValue: string): string | null {
   const localName = rawValue.split(/[?#]/, 1)[0];
@@ -47,20 +48,24 @@ function findReferenceAtPosition(
     { pattern: REQ_SCRIPT_PATTERN, type: 'requestScript' },
     { pattern: RES_SCRIPT_PATTERN, type: 'responseScript' },
     { pattern: BP_SCRIPT_PATTERN, type: 'parserScript' },
+    { pattern: RULE_REF_PATTERN, type: 'rule' },
   ];
 
   for (const { pattern, type } of patterns) {
     pattern.lastIndex = 0;
     let match;
     while ((match = pattern.exec(lineContent)) !== null) {
-      const startCol = match.index + 1;
+      const prefixLength = type === 'rule' ? match[1].length : 0;
+      const startCol = match.index + prefixLength + 1;
       const endCol = match.index + match[0].length + 1;
 
       if (column >= startCol && column <= endCol) {
         const name =
-          type === 'parserScript'
-            ? localBpParserScriptName(match[1])
-            : match[1];
+          type === 'rule'
+            ? match[2]
+            : type === 'parserScript'
+              ? localBpParserScriptName(match[1])
+              : match[1];
         if (!name) {
           continue;
         }
@@ -162,6 +167,24 @@ export function getReferenceLocation(
         navigationType: 'page',
         uri: `/scripts?type=parser&name=${encodeURIComponent(name)}`,
       };
+    case 'rule':
+      if (name.includes('/')) {
+        const separator = name.indexOf('/');
+        const groupName = name.slice(0, separator);
+        const ruleName = name.slice(separator + 1);
+        return {
+          name,
+          type: 'rule',
+          navigationType: 'page',
+          uri: `/rules?group=${encodeURIComponent(groupName)}&rule=${encodeURIComponent(ruleName)}`,
+        };
+      }
+      return {
+        name,
+        type: 'rule',
+        navigationType: 'page',
+        uri: `/rules?rule=${encodeURIComponent(name)}`,
+      };
   }
 
   return undefined;
@@ -177,6 +200,8 @@ function getTypeLabel(type: ReferenceType): string {
       return 'Response Script';
     case 'parserScript':
       return 'Parser Script';
+    case 'rule':
+      return 'Rule Reference';
   }
 }
 
@@ -233,17 +258,19 @@ export const hoverProvider: languages.HoverProvider = {
 
     const typeLabel = getTypeLabel(reference.type);
     const actionText =
-      location.navigationType === "page"
+      reference.type === 'rule'
+        ? "Click to expand inline, F12 to open"
+        : location.navigationType === "page"
         ? "Go to definition"
         : "Jump to definition";
 
     const displayTypeLabel = reference.type === 'value' && location.navigationType === 'editor'
       ? 'Local Variable'
       : typeLabel;
-    const hintText = '(F12 or Cmd+Click)';
+    const hintText = reference.type === 'rule' ? '' : '(F12 or Cmd+Click)';
     const contents = [
       {
-        value: `**${displayTypeLabel}**: \`${reference.name}\`\n\n${actionText} ${hintText}`,
+        value: `**${displayTypeLabel}**: \`${reference.name}\`\n\n${actionText} ${hintText}`.trim(),
       },
     ];
 

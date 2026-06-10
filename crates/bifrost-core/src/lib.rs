@@ -45,11 +45,13 @@ pub use process_start_time::{
 };
 pub use protocol::*;
 pub use rule::{
-    create_shared_store, extract_inline_variables, parse_line, parse_rules, parse_rules_tolerant,
+    create_shared_store, expand_rule_references, expand_rule_references_to_result,
+    extract_inline_variables, parse_line, parse_rules, parse_rules_tolerant, rule_reference_name,
     validate_rules, validate_rules_with_context, CodeFix, CompositeValueStore, MemoryValueStore,
     ParseError, ParseErrorSeverity, ParseResult, RequestContext, RequestContextBuilder,
-    ResolvedRule, ResolvedRules, Rule, RuleGroup, RuleGroupManager, RuleParser, RulesResolver,
-    ScriptReference, SharedValueStore, TemplateEngine, ValidationResult, ValueStore, VariableInfo,
+    ResolvedRule, ResolvedRules, Rule, RuleGroup, RuleGroupManager, RuleParser, RuleReferenceError,
+    RulesResolver, ScriptReference, SharedValueStore, TemplateEngine, ValidationResult, ValueStore,
+    VariableInfo,
 };
 pub use shell_proxy::{ShellProxyManager, ShellProxyStatus, ShellType};
 pub use syntax::{
