@@ -13,7 +13,7 @@ use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tray_icon::menu::{
     CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
 };
-use tray_icon::TrayIconBuilder;
+use tray_icon::{TrayIconBuilder, TrayIconEvent};
 
 use super::cli::TrayArgs;
 use super::config::{self, TrayConfig};
@@ -118,6 +118,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     });
 
     let menu_receiver = MenuEvent::receiver().clone();
+    let tray_receiver = TrayIconEvent::receiver().clone();
     let mut last_rendered_state = current_state.load(Ordering::Relaxed);
     let mut last_rendered_operation = current_operation.load(Ordering::Relaxed);
 
@@ -131,7 +132,12 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
         }
 
         let mut action_triggered = false;
+        let mut icon_interacted = false;
         if let Event::NewEvents(_) = event {
+            while tray_receiver.try_recv().is_ok() {
+                icon_interacted = true;
+            }
+
             while let Ok(event) = menu_receiver.try_recv() {
                 if let Some(action) = action_map.get(&event.id) {
                     tracing::info!("menu action triggered");
@@ -156,7 +162,12 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
         let operation_changed = new_operation != last_rendered_operation;
         let reload_requested = should_reload.swap(false, Ordering::Relaxed);
 
-        if state_changed || operation_changed || reload_requested || action_triggered {
+        if state_changed
+            || operation_changed
+            || reload_requested
+            || icon_interacted
+            || action_triggered
+        {
             last_rendered_state = new_state;
             last_rendered_operation = new_operation;
 
@@ -207,6 +218,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
             tracing::info!(
                 state = new_state,
                 operation = new_operation,
+                icon_interacted = icon_interacted,
                 reloaded = reload_requested,
                 "tray icon and menu updated"
             );

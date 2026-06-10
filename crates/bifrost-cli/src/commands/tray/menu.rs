@@ -137,11 +137,10 @@ pub fn build_menu(
             action: MenuItemAction::CopyText(rt.http_proxy_url()),
         }));
 
-        let has_socks5 = rt.socks5_port.is_some();
         items.push(item(MenuItemDef {
             id: "copy_socks5_proxy".to_string(),
             label: "Copy SOCKS5 Proxy".to_string(),
-            enabled: is_running && has_socks5,
+            enabled: is_running,
             checked: false,
             action: MenuItemAction::CopyText(rt.socks5_proxy_url().unwrap_or_default()),
         }));
@@ -234,7 +233,21 @@ fn separator(id: &str) -> MenuEntry {
 
 fn build_rules_menu(rules: &[TrayRule], is_running: bool) -> Option<SubmenuDef> {
     if rules.is_empty() {
-        return None;
+        if !is_running {
+            return None;
+        }
+        return Some(SubmenuDef {
+            id: "rules_switcher".to_string(),
+            label: "Rules: None".to_string(),
+            enabled: true,
+            children: vec![item(MenuItemDef {
+                id: "rules_empty".to_string(),
+                label: "No rules available".to_string(),
+                enabled: false,
+                checked: false,
+                action: MenuItemAction::None,
+            })],
+        });
     }
 
     let all_targets = rules
@@ -606,7 +619,7 @@ mod tests {
     }
 
     #[test]
-    fn test_menu_no_socks5_disabled() {
+    fn test_menu_unified_proxy_socks5_uses_main_port() {
         let rt = RuntimeInfo {
             socks5_port: None,
             ..sample_runtime()
@@ -622,7 +635,28 @@ mod tests {
             &[],
         );
         let socks5 = find_item(&menu, "copy_socks5_proxy").unwrap();
-        assert!(!socks5.enabled);
+        assert!(socks5.enabled);
+        match &socks5.action {
+            MenuItemAction::CopyText(text) => {
+                assert_eq!(text, "socks5://127.0.0.1:8800");
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_rules_menu_empty_running_state_keeps_visible_placeholder() {
+        let menu = build_rules_menu_for_test(&[], true).unwrap();
+        assert_eq!(menu.label, "Rules: None");
+        assert!(menu.enabled);
+        let empty = find_item(&menu.children, "rules_empty").unwrap();
+        assert_eq!(empty.label, "No rules available");
+        assert!(!empty.enabled);
+    }
+
+    #[test]
+    fn test_rules_menu_empty_stopped_state_hidden() {
+        assert!(build_rules_menu_for_test(&[], false).is_none());
     }
 
     #[test]

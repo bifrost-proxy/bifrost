@@ -28,10 +28,12 @@ impl RuntimeInfo {
     }
 
     pub fn socks5_proxy_url(&self) -> Option<String> {
-        self.socks5_port.map(|p| {
-            let host = self.url_host();
-            format!("socks5://{}:{}", host, p)
-        })
+        let host = self.url_host();
+        Some(format!(
+            "socks5://{}:{}",
+            host,
+            self.socks5_port.unwrap_or(self.port)
+        ))
     }
 
     pub fn effective_host(&self) -> &str {
@@ -120,7 +122,10 @@ mod tests {
         let json = r#"{"pid": 100, "port": 9900}"#;
         let info: RuntimeInfo = serde_json::from_str(json).unwrap();
         assert_eq!(info.socks5_port, None);
-        assert_eq!(info.socks5_proxy_url(), None);
+        assert_eq!(
+            info.socks5_proxy_url(),
+            Some("socks5://127.0.0.1:9900".to_string())
+        );
         assert_eq!(info.effective_host(), "127.0.0.1");
     }
 
