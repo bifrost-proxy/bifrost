@@ -118,8 +118,8 @@ Android CLI 会在安装前后输出 `Android CA status`。普通设备通常只
   - `trust_probe` 在创建 session、公开 landing/qrcode 复用或创建 session、公开 report、proxy-access、管理端 Wi-Fi 名称更新后广播。全局右上角通知中心订阅该 scope；当有设备打开可用性检查页时显示可关闭/可展开的气泡，点击后跳转 Certificate 页顶部 Availability Check 卡片。
   - `mobile_devices` 在存在订阅者时由服务端周期性探测并推送，替代各 Web UI 组件自行轮询 `/api/mobile-devices/refresh`。
 - 双协议 probe server：
-  - 创建 session / 生成二维码时只分配计划 `probePort`，不立即监听额外端口；当设备实际打开公开 Availability Check landing page 时，才按需启动对应 host/CA 的 probe listener。
-  - listener 默认尝试监听 `admin_port + 2`，端口冲突时自动选择空闲端口，并在 landing page 渲染前把 session 的 `probePort` 更新为实际监听端口。
+  - 创建或复用 Availability Check session 时必须先确保对应 host/CA 的 probe listener 已经绑定，并在 API 返回前把 session 的 `probePort` 写为实际监听端口；调用方不能拿到只按 `admin_port + 2` 计算、但尚未确认可用的计划端口。
+  - listener 默认尝试监听 `admin_port + 2`，端口冲突时自动选择空闲端口，并把同一 host/admin port/CA 下的 active session `probePort` 统一更新为实际监听端口；公开 landing page 渲染和 session 轮询继续复用该端口，旧 listener 停止时再自愈重建。
   - probe listener 按 host/CA key 管理；`127.0.0.1` 本机预览和 `10.x.x.x` 手机检查可以同时存在，不能互相关闭对方的 probe listener。已有 listener 健康时必须复用同一端口；如果旧 listener 已停止，下一次 landing page 或 session 轮询会自愈重建。listener 在 60 秒没有新的公开页、session 轮询、report、proxy-access、netcheck 或 HTTPS check 流量后自动停止，等下一次设备访问再启动，避免多设备并发或页面刷新反复占用新端口。
   - 同一端口通过 TCP `peek` 首字节区分 HTTP 与 TLS。HTTP 路径提供 `/_bifrost/trust-probe/netcheck`，HTTPS 路径提供 `/_bifrost/trust-probe/check`。
   - HTTPS 证书由当前 Bifrost CA 给所选 IP 动态签发，IP 写入 SAN。设备浏览器直连 `fetch(https://ip:probePort/...)` 成功时，Bifrost 将 session 标记为 `tls_trusted`；如果该 absolute-form 探测请求经由 Bifrost HTTP proxy 进入，代理入口必须返回失败，避免把代理路径误判为直连证书信任。
@@ -187,7 +187,7 @@ Android CLI 会在安装前后输出 `Android CA status`。普通设备通常只
 - `LAN public mobile profile`：真实场景用 LAN 地址验证 profile endpoint 不触发交互式授权，返回 `application/x-apple-aspen-config` 且 plist 有效。
 - `admin_api_mobile_install_requires_explicit_confirmation`：验证 Android install 操作必须显式确认。
 - `admin_api_local_ca_install_requires_explicit_confirmation`：验证本机 CA install 操作必须显式确认，自动测试不误触系统证书安装。
-- `admin_trust_probe_verifies_https_trust_with_current_ca`：创建 Availability Check 会话，打开 public landing/qrcode，访问 public proxy QR、proxy-access；使用配置了 Bifrost HTTP proxy 的客户端访问 `bifrost-proxy-check.invalid` 专用探针，断言 `proxyConfigured=true`；再访问 HTTP netcheck，并用当前 Bifrost CA 作为 root CA 直连 HTTPS check，最后断言 session 状态为 `tls_trusted`；同时验证公开页对代理接管 direct probe 的 409 响应展示明确 bypass 提示。
+- `admin_trust_probe_verifies_https_trust_with_current_ca`：创建 Availability Check 会话，断言返回的 `probePort` 已是实际绑定端口；打开 public landing/qrcode，访问 public proxy QR、proxy-access；使用配置了 Bifrost HTTP proxy 的客户端访问 `bifrost-proxy-check.invalid` 专用探针，断言 `proxyConfigured=true`；再访问 HTTP netcheck，并用当前 Bifrost CA 作为 root CA 直连 HTTPS check，最后断言 session 状态为 `tls_trusted`；同时验证公开页对代理接管 direct probe 的 409 响应展示明确 bypass 提示。
 - `proxy_rejects_proxy_routed_active_trust_probe_target`：验证 active trust-probe 的 netcheck/check absolute-form 请求如果经 Bifrost HTTP proxy 进入，会被拒绝且不会把 session 推进为通过态。
 - `trust_probe` 单元测试：验证 User-Agent 平台推断覆盖 Edge、Chrome、iOS Safari、Android WebView/浏览器和常见应用容器，probe listener 健康复用、stale 自愈、60 秒 idle 停止且不会关闭已替换 listener。
 - `bifrost-device` 单元测试：验证 Android user CA store PEM 指纹匹配和不匹配路径。

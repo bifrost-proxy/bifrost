@@ -441,9 +441,9 @@ impl TrustProbeManager {
             return Err("CA private key is not configured, so the trust probe cannot sign its HTTPS certificate.".to_string());
         }
         let ca_fingerprint_sha256 = certificate_sha256_fingerprint(&ca_cert_path);
-        {
+        if let Some(session_id) = {
             let sessions = self.sessions.lock();
-            if let Some(session) = sessions
+            sessions
                 .values()
                 .filter(|session| {
                     !session.is_expired()
@@ -452,11 +452,30 @@ impl TrustProbeManager {
                         && session.ca_fingerprint_sha256 == ca_fingerprint_sha256
                 })
                 .max_by_key(|session| session.created_at)
-            {
+                .map(|session| session.id)
+        } {
+            self.ensure_probe_server_for_group(
+                &host,
+                admin_port,
+                &ca_cert_path,
+                &ca_key_path,
+                ca_fingerprint_sha256.clone(),
+            )
+            .await?;
+            let sessions = self.sessions.lock();
+            if let Some(session) = sessions.get(&session_id) {
                 return Ok(session.to_view(""));
             }
         }
-        let probe_port = admin_port.saturating_add(2);
+        let probe_port = self
+            .ensure_probe_server_for_group(
+                &host,
+                admin_port,
+                &ca_cert_path,
+                &ca_key_path,
+                ca_fingerprint_sha256.clone(),
+            )
+            .await?;
 
         let id = Uuid::new_v4();
         let token = format!("{}{}", Uuid::new_v4(), Uuid::new_v4());
@@ -520,13 +539,47 @@ impl TrustProbeManager {
     ) -> Result<TrustProbeSessionView, String> {
         self.cleanup_expired_sessions();
         let host = validate_probe_host(host)?;
-        {
+        let admin_port = state.port();
+        let ca_cert_path = state
+            .ca_cert_path
+            .as_ref()
+            .filter(|path| path.exists())
+            .cloned()
+            .ok_or_else(|| "CA certificate is not configured.".to_string())?;
+        let ca_key_path = ca_key_path_from_cert_path(&ca_cert_path);
+        if !ca_key_path.exists() {
+            return Err("CA private key is not configured, so the trust probe cannot sign its HTTPS certificate.".to_string());
+        }
+        let ca_fingerprint_sha256 = certificate_sha256_fingerprint(&ca_cert_path);
+        if let Some((session_id, admin_port, ca_fingerprint_sha256)) = {
             let sessions = self.sessions.lock();
-            if let Some(session) = sessions
+            sessions
                 .values()
-                .filter(|session| !session.is_expired() && session.host == host)
+                .filter(|session| {
+                    !session.is_expired()
+                        && session.host == host
+                        && session.admin_port == admin_port
+                        && session.ca_fingerprint_sha256 == ca_fingerprint_sha256
+                })
                 .max_by_key(|session| session.created_at)
-            {
+                .map(|session| {
+                    (
+                        session.id,
+                        session.admin_port,
+                        session.ca_fingerprint_sha256.clone(),
+                    )
+                })
+        } {
+            self.ensure_probe_server_for_group(
+                &host,
+                admin_port,
+                &ca_cert_path,
+                &ca_key_path,
+                ca_fingerprint_sha256,
+            )
+            .await?;
+            let sessions = self.sessions.lock();
+            if let Some(session) = sessions.get(&session_id) {
                 return Ok(session.to_view(""));
             }
         }
@@ -645,25 +698,15 @@ impl TrustProbeManager {
         if !ca_key_path.exists() {
             return Err("CA private key is not configured, so the trust probe cannot sign its HTTPS certificate.".to_string());
         }
-        let probe_port = self
-            .ensure_probe_server(
-                &host,
-                admin_port.saturating_add(2),
-                &ca_cert_path,
-                &ca_key_path,
-                ca_fingerprint_sha256.clone(),
-            )
-            .await?;
-
-        let mut sessions = self.sessions.lock();
-        for session in sessions.values_mut().filter(|session| {
-            !session.is_expired()
-                && session.host == host
-                && session.admin_port == admin_port
-                && session.ca_fingerprint_sha256 == ca_fingerprint_sha256
-        }) {
-            session.probe_port = probe_port;
-        }
+        self.ensure_probe_server_for_group(
+            &host,
+            admin_port,
+            &ca_cert_path,
+            &ca_key_path,
+            ca_fingerprint_sha256,
+        )
+        .await?;
+        let sessions = self.sessions.lock();
         sessions
             .get(&session_id)
             .map(|session| session.to_view(token))
@@ -763,6 +806,45 @@ impl TrustProbeManager {
         };
         self.touch_probe_server_activity(&key);
         true
+    }
+
+    async fn ensure_probe_server_for_group(
+        &self,
+        host: &str,
+        admin_port: u16,
+        ca_cert_path: &Path,
+        ca_key_path: &Path,
+        ca_fingerprint_sha256: Option<String>,
+    ) -> Result<u16, String> {
+        let probe_port = self
+            .ensure_probe_server(
+                host,
+                admin_port.saturating_add(2),
+                ca_cert_path,
+                ca_key_path,
+                ca_fingerprint_sha256.clone(),
+            )
+            .await?;
+        self.update_probe_port_for_group(host, admin_port, &ca_fingerprint_sha256, probe_port);
+        Ok(probe_port)
+    }
+
+    fn update_probe_port_for_group(
+        &self,
+        host: &str,
+        admin_port: u16,
+        ca_fingerprint_sha256: &Option<String>,
+        probe_port: u16,
+    ) {
+        let mut sessions = self.sessions.lock();
+        for session in sessions.values_mut().filter(|session| {
+            !session.is_expired()
+                && session.host == host
+                && session.admin_port == admin_port
+                && &session.ca_fingerprint_sha256 == ca_fingerprint_sha256
+        }) {
+            session.probe_port = probe_port;
+        }
     }
 
     async fn ensure_probe_server(
@@ -3007,6 +3089,57 @@ mod tests {
             host: "10.0.0.8".to_string(),
             ca_fingerprint_sha256: None,
         }));
+    }
+
+    #[test]
+    fn update_probe_port_for_group_updates_only_matching_active_sessions() {
+        let manager = TrustProbeManager::new();
+        let now = Utc::now();
+        let mut matching = test_session(Uuid::new_v4(), "matching", now);
+        matching.admin_port = 8800;
+        matching.probe_port = 8802;
+        matching.ca_fingerprint_sha256 = Some("current-ca".to_string());
+
+        let mut same_group = test_session(Uuid::new_v4(), "same-group", now);
+        same_group.admin_port = 8800;
+        same_group.probe_port = 8802;
+        same_group.ca_fingerprint_sha256 = Some("current-ca".to_string());
+
+        let mut different_ca = test_session(Uuid::new_v4(), "different-ca", now);
+        different_ca.admin_port = 8800;
+        different_ca.probe_port = 8802;
+        different_ca.ca_fingerprint_sha256 = Some("old-ca".to_string());
+
+        let mut expired = test_session(Uuid::new_v4(), "expired", now);
+        expired.admin_port = 8800;
+        expired.probe_port = 8802;
+        expired.ca_fingerprint_sha256 = Some("current-ca".to_string());
+        expired.expires_at = now - chrono::Duration::seconds(1);
+
+        let matching_id = matching.id;
+        let same_group_id = same_group.id;
+        let different_ca_id = different_ca.id;
+        let expired_id = expired.id;
+        manager.sessions.lock().insert(matching_id, matching);
+        manager.sessions.lock().insert(same_group_id, same_group);
+        manager
+            .sessions
+            .lock()
+            .insert(different_ca_id, different_ca);
+        manager.sessions.lock().insert(expired_id, expired);
+
+        manager.update_probe_port_for_group(
+            "127.0.0.1",
+            8800,
+            &Some("current-ca".to_string()),
+            49152,
+        );
+
+        let sessions = manager.sessions.lock();
+        assert_eq!(sessions.get(&matching_id).unwrap().probe_port, 49152);
+        assert_eq!(sessions.get(&same_group_id).unwrap().probe_port, 49152);
+        assert_eq!(sessions.get(&different_ca_id).unwrap().probe_port, 8802);
+        assert_eq!(sessions.get(&expired_id).unwrap().probe_port, 8802);
     }
 
     #[tokio::test]
