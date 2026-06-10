@@ -759,6 +759,38 @@ PY
 
 ---
 
+### TC-CSS-31：stop 前置清理系统代理，restart 保留系统代理（回归）
+
+**前置条件**：服务未运行，测试使用临时数据目录和动态端口。
+
+**操作步骤**：
+1. 执行 focused 单测验证 shutdown marker、foreground cleanup marker 与 restart stop 模式：
+   ```bash
+   cargo test -p bifrost-core system_proxy_shutdown_mode_marker_is_read_and_consumed -- --nocapture
+   cargo test -p bifrost-cli --test daemon_shutdown stop_triggers_graceful_shutdown_in_daemon_mode -- --nocapture
+   ```
+2. 使用临时数据目录启动不修改系统代理的 daemon：
+   ```bash
+   BIFROST_DATA_DIR="$TEST_DATA_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 cargo run --bin bifrost -- start -p "$PORT" -H 127.0.0.1 --daemon --skip-cert-check --no-system-proxy --no-intercept
+   ```
+3. 执行 stop，并记录命令耗时：
+   ```bash
+   BIFROST_DATA_DIR="$TEST_DATA_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 cargo run --bin bifrost -- stop
+   ```
+4. 再次执行 status，并检查代理端口不再监听。
+
+**预期结果**：
+- `stop` 写入 `foreground_cleanup` marker，先在前台清理系统代理/CLI proxy，再发送 SIGTERM；无系统代理场景也不应输出 `Sending SIGKILL`。
+- `stop` 输出 `Cleaning system proxy before stopping Bifrost proxy...`，且不输出 `System proxy cleanup continues in background if needed.`。
+- restart 专用 stop 使用 preserve marker，旧 daemon 和旧 lifecycle helper 不清理系统代理，fresh daemon 继续接管同一 host/port。
+- `stop` 返回后 status 显示服务未运行，端口不再监听，临时数据目录可删除。
+- 测试命令统一带 `--no-system-proxy`，不修改本机系统代理；涉及真实系统代理的耗时回归由 `cli-system-proxy.md` 的系统代理用例覆盖。
+
+**执行记录**：
+- 2026-06-10 执行 focused 单测、E2E 与真实 CLI 验证通过。`source ~/.zshrc && cargo test -p bifrost-core system_proxy_shutdown_mode_marker_is_read_and_consumed -- --nocapture` 通过，确认 `preserve_for_restart`、`background_cleanup`、`foreground_cleanup` marker 均可 read 且 consume 只消费一次；`source ~/.zshrc && cargo test -p bifrost-cli --test daemon_shutdown stop_triggers_graceful_shutdown_in_daemon_mode -- --nocapture` 通过，确认 daemon stop 未升级到 SIGKILL；`source ~/.zshrc && cargo build --bin bifrost && SKIP_BUILD=true e2e-tests/tests/test_stop_restart_shutdown_marker.sh` 结果 8/8 PASS，覆盖 startup 清理 stale restart marker、stop 先输出 `Cleaning system proxy before stopping Bifrost proxy...` 再输出 `Stopping Bifrost proxy`、不输出后台 cleanup 提示、stop 实测 `525ms`、status stopped。真实 CLI 使用临时数据目录和动态端口，启动参数带 `--no-system-proxy`，本用例未修改系统代理；status 中已有外部/既有系统代理时，应保持外部代理不被本测试接管。
+
+---
+
 
 ## 清理
 

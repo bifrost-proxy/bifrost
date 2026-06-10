@@ -1619,6 +1619,77 @@ fn macos_all_services_proxy_match(host: &str, port: u16) -> Result<bool> {
 }
 
 #[cfg(target_os = "macos")]
+const MACOS_NETWORKSETUP_MAX_PARALLEL_SERVICES: usize = 4;
+
+#[cfg(target_os = "macos")]
+fn run_macos_services_parallel<F>(
+    services: &[String],
+    operation: &'static str,
+    run_service: F,
+) -> Result<()>
+where
+    F: Fn(&str) -> Result<()> + Send + Sync,
+{
+    let parallelism = MACOS_NETWORKSETUP_MAX_PARALLEL_SERVICES
+        .max(1)
+        .min(services.len().max(1));
+    let mut first_error = None;
+
+    for chunk in services.chunks(parallelism) {
+        let run_service = &run_service;
+        let results = std::thread::scope(|scope| {
+            let handles = chunk
+                .iter()
+                .map(|service| {
+                    scope.spawn(move || {
+                        let service_started_at = Instant::now();
+                        let result = run_service(service);
+                        match &result {
+                            Ok(()) => tracing::info!(
+                                service = %service,
+                                operation,
+                                elapsed_ms = service_started_at.elapsed().as_millis(),
+                                "macOS network service proxy operation completed"
+                            ),
+                            Err(error) => tracing::warn!(
+                                service = %service,
+                                operation,
+                                error = %error,
+                                elapsed_ms = service_started_at.elapsed().as_millis(),
+                                "macOS network service proxy operation failed"
+                            ),
+                        }
+                        result
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle.join().unwrap_or_else(|_| {
+                        Err(BifrostError::Config(format!(
+                            "macOS networksetup {operation} worker panicked"
+                        )))
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
+
+        for result in results {
+            if let Err(error) = result {
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn set_macos_all_services_proxy(host: &str, port: u16, bypass: &str) -> Result<()> {
     let services = list_macos_services()?;
     set_macos_services_proxy(&services, host, port, bypass)
@@ -1643,39 +1714,29 @@ fn set_macos_services_proxy(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
-    for svc in services {
-        let service_started_at = Instant::now();
+    run_macos_services_parallel(services, "set", |svc| {
         tracing::info!(
             service = %svc,
             requested_host = %host,
             requested_port = port,
             "Setting macOS network service proxy to requested target"
         );
+        let port = port.to_string();
         // HTTP
-        run_networksetup(
-            "networksetup",
-            &["-setwebproxy", svc, host, &port.to_string()],
-        )?;
+        run_networksetup("networksetup", &["-setwebproxy", svc, host, &port])?;
         run_networksetup("networksetup", &["-setwebproxystate", svc, "on"])?;
         // HTTPS
-        run_networksetup(
-            "networksetup",
-            &["-setsecurewebproxy", svc, host, &port.to_string()],
-        )?;
+        run_networksetup("networksetup", &["-setsecurewebproxy", svc, host, &port])?;
         run_networksetup("networksetup", &["-setsecurewebproxystate", svc, "on"])?;
         // Bypass
         if !bypass_domains.is_empty() {
-            let mut args = vec!["-setproxybypassdomains".to_string(), svc.clone()];
+            let mut args = vec!["-setproxybypassdomains".to_string(), svc.to_string()];
             args.extend(bypass_domains.iter().cloned());
             let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
             run_networksetup("networksetup", &str_args)?;
         }
-        tracing::info!(
-            service = %svc,
-            elapsed_ms = service_started_at.elapsed().as_millis(),
-            "macOS network service proxy set completed"
-        );
-    }
+        Ok(())
+    })?;
     tracing::info!(
         service_count = services.len(),
         elapsed_ms = started_at.elapsed().as_millis(),
@@ -1697,20 +1758,15 @@ fn disable_macos_services_proxy(services: &[String]) -> Result<()> {
         service_count = services.len(),
         "Disabling macOS web proxies for selected network services"
     );
-    for svc in services {
-        let service_started_at = Instant::now();
+    run_macos_services_parallel(services, "disable", |svc| {
         tracing::info!(
             service = %svc,
             "Disabling macOS network service web proxies"
         );
         run_networksetup("networksetup", &["-setwebproxystate", svc, "off"])?;
         run_networksetup("networksetup", &["-setsecurewebproxystate", svc, "off"])?;
-        tracing::info!(
-            service = %svc,
-            elapsed_ms = service_started_at.elapsed().as_millis(),
-            "macOS network service proxy disable completed"
-        );
-    }
+        Ok(())
+    })?;
     tracing::info!(
         service_count = services.len(),
         elapsed_ms = started_at.elapsed().as_millis(),
@@ -1946,26 +2002,40 @@ fn disable_macos_matching_services_proxy_with_gui_auth(target: &ProxyBackup) -> 
 #[cfg(target_os = "macos")]
 pub fn set_macos_all_services_proxy_with_sudo(host: &str, port: u16, bypass: &str) -> Result<()> {
     let services = list_macos_services()?;
+    let started_at = Instant::now();
+    tracing::info!(
+        service_count = services.len(),
+        requested_host = %host,
+        requested_port = port,
+        "Setting macOS web proxies with sudo for selected network services"
+    );
     let bypass_domains: Vec<String> = bypass
         .split(',')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
-    for svc in services {
+    run_macos_services_parallel(&services, "sudo_set", |svc| {
+        let port = port.to_string();
         // HTTP
-        run_networksetup_with_sudo(&["-setwebproxy", &svc, host, &port.to_string()])?;
-        run_networksetup_with_sudo(&["-setwebproxystate", &svc, "on"])?;
+        run_networksetup_with_sudo(&["-setwebproxy", svc, host, &port])?;
+        run_networksetup_with_sudo(&["-setwebproxystate", svc, "on"])?;
         // HTTPS
-        run_networksetup_with_sudo(&["-setsecurewebproxy", &svc, host, &port.to_string()])?;
-        run_networksetup_with_sudo(&["-setsecurewebproxystate", &svc, "on"])?;
+        run_networksetup_with_sudo(&["-setsecurewebproxy", svc, host, &port])?;
+        run_networksetup_with_sudo(&["-setsecurewebproxystate", svc, "on"])?;
         // Bypass
         if !bypass_domains.is_empty() {
-            let mut args = vec!["-setproxybypassdomains".to_string(), svc.clone()];
+            let mut args = vec!["-setproxybypassdomains".to_string(), svc.to_string()];
             args.extend(bypass_domains.iter().cloned());
             let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
             run_networksetup_with_sudo(&str_args)?;
         }
-    }
+        Ok(())
+    })?;
+    tracing::info!(
+        service_count = services.len(),
+        elapsed_ms = started_at.elapsed().as_millis(),
+        "macOS selected network service sudo proxy set completed"
+    );
     Ok(())
 }
 
@@ -1983,10 +2053,17 @@ fn disable_macos_matching_services_proxy_with_sudo(target: &ProxyBackup) -> Resu
 
 #[cfg(target_os = "macos")]
 fn disable_macos_services_proxy_with_sudo(services: &[String]) -> Result<()> {
-    for svc in services {
+    let started_at = Instant::now();
+    run_macos_services_parallel(services, "sudo_disable", |svc| {
         run_networksetup_with_sudo(&["-setwebproxystate", svc, "off"])?;
         run_networksetup_with_sudo(&["-setsecurewebproxystate", svc, "off"])?;
-    }
+        Ok(())
+    })?;
+    tracing::info!(
+        service_count = services.len(),
+        elapsed_ms = started_at.elapsed().as_millis(),
+        "macOS selected network service sudo proxy disable completed"
+    );
     Ok(())
 }
 

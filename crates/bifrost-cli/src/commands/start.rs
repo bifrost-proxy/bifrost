@@ -37,8 +37,9 @@ use crate::config::get_bifrost_dir;
 use crate::help::print_startup_help;
 use crate::parsing::{parse_cli_rules, DynamicRulesResolver, SharedDynamicRulesResolver};
 use crate::process::{
-    find_process_on_port, is_process_running, kill_process_by_pid, read_pid, remove_pid,
-    write_runtime_info, RuntimeInfo, RuntimeStartMode,
+    capture_runtime_system_proxy_snapshot, find_process_on_port, is_process_running,
+    kill_process_by_pid, read_pid, read_runtime_info, remove_pid, write_runtime_info, RuntimeInfo,
+    RuntimeStartMode,
 };
 
 const ASYNC_TRAFFIC_BUFFER_SIZE: usize = 10000;
@@ -322,6 +323,10 @@ fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
             let mut startup_external_owner_logged = false;
             let mut idle_logged = false;
             while !stop_flag.load(Ordering::Acquire) {
+                if should_stop_system_proxy_reconcile_for_shutdown(&bifrost_dir) {
+                    stop_flag.store(true, Ordering::Release);
+                    return;
+                }
                 let should_enable = desired_enabled.load(Ordering::Acquire);
                 match inspect_system_proxy_ownership(&proxy_host, proxy_port) {
                     SystemProxyOwnership::Other => {
@@ -345,7 +350,10 @@ fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
                         }
                         let sleep_until = Instant::now() + SYSTEM_PROXY_RECONCILE_INTERVAL;
                         while Instant::now() < sleep_until {
-                            if stop_flag.load(Ordering::Acquire) {
+                            if stop_flag.load(Ordering::Acquire)
+                                || should_stop_system_proxy_reconcile_for_shutdown(&bifrost_dir)
+                            {
+                                stop_flag.store(true, Ordering::Release);
                                 return;
                             }
                             std::thread::sleep(Duration::from_secs(1));
@@ -368,7 +376,10 @@ fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
                             }
                             let sleep_until = Instant::now() + SYSTEM_PROXY_RECONCILE_INTERVAL;
                             while Instant::now() < sleep_until {
-                                if stop_flag.load(Ordering::Acquire) {
+                                if stop_flag.load(Ordering::Acquire)
+                                    || should_stop_system_proxy_reconcile_for_shutdown(&bifrost_dir)
+                                {
+                                    stop_flag.store(true, Ordering::Release);
                                     return;
                                 }
                                 std::thread::sleep(Duration::from_secs(1));
@@ -391,7 +402,10 @@ fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
                     enabled_flag.store(false, Ordering::Release);
                     let sleep_until = Instant::now() + SYSTEM_PROXY_RECONCILE_INTERVAL;
                     while Instant::now() < sleep_until {
-                        if stop_flag.load(Ordering::Acquire) {
+                        if stop_flag.load(Ordering::Acquire)
+                            || should_stop_system_proxy_reconcile_for_shutdown(&bifrost_dir)
+                        {
+                            stop_flag.store(true, Ordering::Release);
                             return;
                         }
                         std::thread::sleep(Duration::from_secs(1));
@@ -468,7 +482,10 @@ fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
                 drop(manager);
                 let sleep_until = Instant::now() + SYSTEM_PROXY_RECONCILE_INTERVAL;
                 while Instant::now() < sleep_until {
-                    if stop_flag.load(Ordering::Acquire) {
+                    if stop_flag.load(Ordering::Acquire)
+                        || should_stop_system_proxy_reconcile_for_shutdown(&bifrost_dir)
+                    {
+                        stop_flag.store(true, Ordering::Release);
                         return;
                     }
                     std::thread::sleep(Duration::from_secs(1));
@@ -480,6 +497,7 @@ fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
 #[cfg(target_os = "macos")]
 fn spawn_system_proxy_wake_reconcile_task(config: SystemProxyReconcileConfig) {
     let SystemProxyReconcileConfig {
+        bifrost_dir,
         system_proxy_manager,
         desired_enabled,
         proxy_host,
@@ -497,7 +515,10 @@ fn spawn_system_proxy_wake_reconcile_task(config: SystemProxyReconcileConfig) {
             let mut last_wall_check = SystemTime::now();
             while !stop_flag.load(Ordering::Acquire) {
                 std::thread::sleep(SYSTEM_PROXY_WAKE_CHECK_INTERVAL);
-                if stop_flag.load(Ordering::Acquire) {
+                if stop_flag.load(Ordering::Acquire)
+                    || should_stop_system_proxy_reconcile_for_shutdown(&bifrost_dir)
+                {
+                    stop_flag.store(true, Ordering::Release);
                     return;
                 }
 
@@ -823,6 +844,98 @@ fn recover_proxy_state_before_start(bifrost_dir: &std::path::Path) {
     }
 }
 
+struct RestartHandoffStartupGuard {
+    bifrost_dir: PathBuf,
+    active: bool,
+}
+
+impl RestartHandoffStartupGuard {
+    fn new(bifrost_dir: PathBuf) -> Self {
+        Self {
+            bifrost_dir,
+            active: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for RestartHandoffStartupGuard {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        tracing::warn!(
+            target: "bifrost_cli::startup",
+            data_dir = %self.bifrost_dir.display(),
+            "restart handoff startup aborted before runtime adoption; running system proxy recovery"
+        );
+        if let Err(error) = bifrost_core::SystemProxyManager::recover_from_crash(&self.bifrost_dir)
+        {
+            eprintln!("Failed to recover system proxy after aborted restart handoff: {error}");
+            tracing::warn!(
+                target: "bifrost_cli::startup",
+                error = %error,
+                data_dir = %self.bifrost_dir.display(),
+                "restart handoff startup recovery failed"
+            );
+        }
+        let _ = bifrost_core::consume_system_proxy_shutdown_mode(&self.bifrost_dir);
+    }
+}
+
+fn should_defer_startup_proxy_recovery_for_restart_handoff(
+    bifrost_dir: &std::path::Path,
+    enable_system_proxy: bool,
+) -> bool {
+    if !matches!(
+        bifrost_core::read_system_proxy_shutdown_mode(bifrost_dir),
+        Some(bifrost_core::SystemProxyShutdownMode::PreserveForRestart)
+    ) {
+        return false;
+    }
+
+    if !enable_system_proxy {
+        tracing::info!(
+            target: "bifrost_cli::startup",
+            data_dir = %bifrost_dir.display(),
+            "restart handoff marker found but startup does not request system proxy; running normal recovery"
+        );
+        return false;
+    }
+
+    let Some(runtime) = read_runtime_info() else {
+        tracing::info!(
+            target: "bifrost_cli::startup",
+            data_dir = %bifrost_dir.display(),
+            "restart handoff marker found without runtime info; running normal recovery"
+        );
+        return false;
+    };
+
+    if capture_runtime_system_proxy_snapshot(Some(&runtime)).is_none() {
+        tracing::info!(
+            target: "bifrost_cli::startup",
+            data_dir = %bifrost_dir.display(),
+            runtime_host = %runtime.host.as_deref().unwrap_or(""),
+            runtime_port = runtime.port,
+            "restart handoff marker found but system proxy no longer points to old runtime; running normal recovery"
+        );
+        return false;
+    }
+
+    tracing::info!(
+        target: "bifrost_cli::startup",
+        data_dir = %bifrost_dir.display(),
+        runtime_host = %runtime.host.as_deref().unwrap_or(""),
+        runtime_port = runtime.port,
+        "restart handoff marker validated; deferring startup system proxy recovery until new runtime adopts proxy"
+    );
+    true
+}
+
 async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
     {
@@ -848,16 +961,19 @@ async fn wait_for_shutdown_signal() {
 }
 
 struct SystemProxyRestoreGuard {
+    bifrost_dir: PathBuf,
     system_proxy_manager: Arc<tokio::sync::RwLock<bifrost_core::SystemProxyManager>>,
     stop_flag: Arc<AtomicBool>,
 }
 
 impl SystemProxyRestoreGuard {
     fn new(
+        bifrost_dir: PathBuf,
         system_proxy_manager: Arc<tokio::sync::RwLock<bifrost_core::SystemProxyManager>>,
         stop_flag: Arc<AtomicBool>,
     ) -> Self {
         Self {
+            bifrost_dir,
             system_proxy_manager,
             stop_flag,
         }
@@ -866,6 +982,10 @@ impl SystemProxyRestoreGuard {
 
 impl Drop for SystemProxyRestoreGuard {
     fn drop(&mut self) {
+        if should_skip_system_proxy_restore(&self.bifrost_dir, "restore guard") {
+            self.stop_flag.store(true, Ordering::Release);
+            return;
+        }
         tracing::info!(
             target: "bifrost_cli::shutdown",
             "system proxy restore guard triggered; stopping reconcile before restore"
@@ -898,12 +1018,54 @@ impl Drop for SystemProxyRestoreGuard {
     }
 }
 
+fn should_skip_system_proxy_restore(bifrost_dir: &Path, context: &'static str) -> bool {
+    match bifrost_core::read_system_proxy_shutdown_mode(bifrost_dir) {
+        Some(bifrost_core::SystemProxyShutdownMode::BackgroundCleanup) => {
+            tracing::info!(
+                target: "bifrost_cli::shutdown",
+                context,
+                "system proxy foreground restore skipped; cleanup will continue in background"
+            );
+            true
+        }
+        Some(bifrost_core::SystemProxyShutdownMode::ForegroundCleanup) => {
+            tracing::info!(
+                target: "bifrost_cli::shutdown",
+                context,
+                "system proxy foreground restore skipped because stop already cleaned proxy before SIGTERM"
+            );
+            true
+        }
+        Some(bifrost_core::SystemProxyShutdownMode::PreserveForRestart) => {
+            tracing::info!(
+                target: "bifrost_cli::shutdown",
+                context,
+                "system proxy foreground restore skipped for restart"
+            );
+            true
+        }
+        None => false,
+    }
+}
+
+fn should_stop_system_proxy_reconcile_for_shutdown(bifrost_dir: &Path) -> bool {
+    matches!(
+        bifrost_core::read_system_proxy_shutdown_mode(bifrost_dir),
+        Some(bifrost_core::SystemProxyShutdownMode::ForegroundCleanup)
+    )
+}
+
 async fn restore_system_proxy_on_shutdown(
+    bifrost_dir: &Path,
     system_proxy_manager: &Arc<tokio::sync::RwLock<bifrost_core::SystemProxyManager>>,
     enabled_flag: &Arc<AtomicBool>,
     stop_flag: &Arc<AtomicBool>,
     context: &'static str,
 ) {
+    if should_skip_system_proxy_restore(bifrost_dir, context) {
+        stop_flag.store(true, Ordering::Release);
+        return;
+    }
     let started_at = Instant::now();
     tracing::info!(
         target: "bifrost_cli::shutdown",
@@ -1002,7 +1164,6 @@ pub fn run_start(
 
     let bifrost_dir = get_bifrost_dir()?;
     set_data_dir(bifrost_dir.clone());
-    recover_proxy_state_before_start(&bifrost_dir);
 
     if !skip_cert_check {
         check_and_install_certificate(CertificateCheckOptions {
@@ -1222,6 +1383,15 @@ pub fn run_start(
         }
     }
 
+    let mut restart_handoff_guard = if should_defer_startup_proxy_recovery_for_restart_handoff(
+        &bifrost_dir,
+        enable_system_proxy,
+    ) {
+        Some(RestartHandoffStartupGuard::new(bifrost_dir.clone()))
+    } else {
+        recover_proxy_state_before_start(&bifrost_dir);
+        None
+    };
     let disconnect_on_config_change = if no_disconnect_on_config_change {
         false
     } else {
@@ -1231,7 +1401,7 @@ pub fn run_start(
     if daemon {
         #[cfg(unix)]
         {
-            run_daemon(
+            let daemon_result = run_daemon(
                 proxy_config,
                 parsed_rules,
                 all_values.clone(),
@@ -1243,7 +1413,13 @@ pub fn run_start(
                 log_dir.clone(),
                 log_retention_days,
                 log_level,
-            )?;
+            );
+            if daemon_result.is_ok() {
+                if let Some(guard) = restart_handoff_guard.as_mut() {
+                    guard.disarm();
+                }
+            }
+            daemon_result?;
         }
         #[cfg(not(unix))]
         {
@@ -1252,7 +1428,7 @@ pub fn run_start(
             ));
         }
     } else {
-        run_foreground(
+        let foreground_result = run_foreground(
             proxy_config,
             parsed_rules,
             all_values,
@@ -1262,7 +1438,13 @@ pub fn run_start(
             cli_proxy_no_proxy,
             disconnect_on_config_change,
             config_manager,
-        )?;
+        );
+        if foreground_result.is_ok() {
+            if let Some(guard) = restart_handoff_guard.as_mut() {
+                guard.disarm();
+            }
+        }
+        foreground_result?;
     }
 
     Ok(())
@@ -1305,6 +1487,7 @@ pub fn run_foreground(
     let system_proxy_desired_enabled = Arc::new(AtomicBool::new(enable_system_proxy));
     let system_proxy_reconcile_stop = Arc::new(AtomicBool::new(false));
     let _system_proxy_restore_guard = SystemProxyRestoreGuard::new(
+        bifrost_dir.clone(),
         system_proxy_manager.clone(),
         system_proxy_reconcile_stop.clone(),
     );
@@ -1844,6 +2027,7 @@ pub fn run_foreground(
                 RuntimeStartMode::Foreground,
             );
             write_runtime_info(&runtime_info)?;
+            let _ = bifrost_core::consume_system_proxy_shutdown_mode(&bifrost_dir);
             #[cfg(target_os = "macos")]
             spawn_system_proxy_launchd_install_task(bifrost_dir.clone(), enable_system_proxy);
             log_startup_phase("proxy_listener.bind", phase_started_at);
@@ -1899,6 +2083,7 @@ pub fn run_foreground(
                     listener_result = &mut listener_task => {
                         if enable_system_proxy || system_proxy_enabled.load(Ordering::Acquire) {
                             restore_system_proxy_on_shutdown(
+                                &bifrost_dir,
                                 &system_proxy_manager,
                                 &system_proxy_enabled,
                                 &system_proxy_reconcile_stop,
@@ -1913,6 +2098,7 @@ pub fn run_foreground(
                         println!("\nShutting down...");
                         if enable_system_proxy || system_proxy_enabled.load(Ordering::Acquire) {
                             restore_system_proxy_on_shutdown(
+                                &bifrost_dir,
                                 &system_proxy_manager,
                                 &system_proxy_enabled,
                                 &system_proxy_reconcile_stop,
@@ -2379,6 +2565,7 @@ pub fn run_daemon(
                         println!("Received shutdown signal");
                         if enable_system_proxy || system_proxy_enabled.load(Ordering::Acquire) {
                             restore_system_proxy_on_shutdown(
+                                &bifrost_dir,
                                 &system_proxy_manager,
                                 &system_proxy_enabled,
                                 &system_proxy_reconcile_stop,
@@ -2754,10 +2941,12 @@ pub fn run_daemon(
                         ))
                     })?;
                     drop(ready_tx);
+                    let _ = bifrost_core::consume_system_proxy_shutdown_mode(&bifrost_dir);
 
                     let listener_result = (&mut listener_task).await;
                     if enable_system_proxy || system_proxy_enabled.load(Ordering::Acquire) {
                         restore_system_proxy_on_shutdown(
+                            &bifrost_dir,
                             &system_proxy_manager,
                             &system_proxy_enabled,
                             &system_proxy_reconcile_stop,
@@ -2793,21 +2982,23 @@ pub fn run_daemon(
                 }
             }
             system_proxy_reconcile_stop.store(true, Ordering::Release);
-            let lock_started_at = Instant::now();
-            tracing::info!(
-                target: "bifrost_cli::shutdown",
-                context = "daemon fork fallback",
-                "waiting_for_system_proxy_lock"
-            );
-            let mut manager = system_proxy_manager.blocking_write();
-            tracing::info!(
-                target: "bifrost_cli::shutdown",
-                context = "daemon fork fallback",
-                wait_elapsed_ms = lock_started_at.elapsed().as_millis() as u64,
-                "acquired_system_proxy_lock"
-            );
-            if let Err(e) = manager.restore() {
-                eprintln!("Failed to restore system proxy: {}", e);
+            if !should_skip_system_proxy_restore(&bifrost_dir, "daemon fork fallback") {
+                let lock_started_at = Instant::now();
+                tracing::info!(
+                    target: "bifrost_cli::shutdown",
+                    context = "daemon fork fallback",
+                    "waiting_for_system_proxy_lock"
+                );
+                let mut manager = system_proxy_manager.blocking_write();
+                tracing::info!(
+                    target: "bifrost_cli::shutdown",
+                    context = "daemon fork fallback",
+                    wait_elapsed_ms = lock_started_at.elapsed().as_millis() as u64,
+                    "acquired_system_proxy_lock"
+                );
+                if let Err(e) = manager.restore() {
+                    eprintln!("Failed to restore system proxy: {}", e);
+                }
             }
 
             remove_pid()?;
@@ -3455,6 +3646,38 @@ mod tests {
         let port = allocate_loopback_port();
 
         assert!(!is_port_in_use("127.0.0.1", port));
+    }
+
+    #[test]
+    fn restart_handoff_recovery_is_not_deferred_when_system_proxy_is_not_requested() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        set_data_dir(temp_dir.path().to_path_buf());
+        bifrost_core::write_system_proxy_shutdown_mode(
+            temp_dir.path(),
+            bifrost_core::SystemProxyShutdownMode::PreserveForRestart,
+        )
+        .expect("write marker");
+
+        assert!(!should_defer_startup_proxy_recovery_for_restart_handoff(
+            temp_dir.path(),
+            false,
+        ));
+    }
+
+    #[test]
+    fn restart_handoff_recovery_is_not_deferred_without_runtime_info() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        set_data_dir(temp_dir.path().to_path_buf());
+        bifrost_core::write_system_proxy_shutdown_mode(
+            temp_dir.path(),
+            bifrost_core::SystemProxyShutdownMode::PreserveForRestart,
+        )
+        .expect("write marker");
+
+        assert!(!should_defer_startup_proxy_recovery_for_restart_handoff(
+            temp_dir.path(),
+            true,
+        ));
     }
 
     #[test]

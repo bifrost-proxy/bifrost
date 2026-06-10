@@ -84,10 +84,17 @@ pub fn capture_runtime_system_proxy_snapshot(
     }
 
     let current = bifrost_core::SystemProxyManager::get_current().ok()?;
-    if !current.target_matches(
-        runtime_system_proxy_host(runtime_info.host.as_deref()),
-        runtime_info.port,
-    ) {
+    let runtime_host = runtime_system_proxy_host(runtime_info.host.as_deref());
+    let runtime_port = runtime_info.port;
+    let current_matches_runtime = current.target_matches(runtime_host, runtime_port);
+    let any_service_matches_runtime = if current_matches_runtime {
+        true
+    } else {
+        bifrost_core::SystemProxyManager::any_service_proxy_matches(runtime_host, runtime_port)
+            .unwrap_or(false)
+    };
+
+    if !any_service_matches_runtime {
         return None;
     }
 

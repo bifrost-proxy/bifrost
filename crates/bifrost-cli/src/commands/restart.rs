@@ -319,12 +319,23 @@ fn run_orphan_work(forwarded: ForwardedRestart) {
 
     // Stop.
     match old_pid {
-        Some(pid) if is_process_running(pid) => match super::stop::run_stop() {
+        Some(pid) if is_process_running(pid) => match super::stop::run_stop_for_restart() {
             Ok(()) => orphan_log(&log, "run_stop ok"),
             Err(e) => {
                 orphan_log(&log, &format!("run_stop failed: {}", e));
-                // Continue anyway; we will still try to start, but it may
-                // fail with EADDRINUSE below.
+                if !forwarded.force {
+                    abort_restart_handoff(
+                        &log,
+                        "stop failed before restart handoff",
+                        old_pid,
+                        system_proxy_snapshot.is_some(),
+                    );
+                    return;
+                }
+                orphan_log(
+                    &log,
+                    "run_stop failed but --force was requested; continuing with restart handoff",
+                );
             }
         },
         _ => orphan_log(&log, "no live old daemon; skipping stop"),
@@ -352,6 +363,12 @@ fn run_orphan_work(forwarded: ForwardedRestart) {
                 "CRITICAL: port {} still occupied after {}s; aborting restart                  to avoid an EADDRINUSE crash. Re-run `bifrost restart --force`                  if you want to try anyway.",
                 old_port, PORT_RELEASE_TIMEOUT_SECS
             ),
+        );
+        abort_restart_handoff(
+            &log,
+            "port did not release before restart handoff",
+            old_pid,
+            system_proxy_snapshot.is_some(),
         );
         return;
     }
@@ -396,6 +413,12 @@ fn run_orphan_work(forwarded: ForwardedRestart) {
     // execvp — if it returns, it failed.
     let _ = nix::unistd::execvp(argv_ref[0], &argv_ref);
     orphan_log(&log, "execvp returned (failed)");
+    abort_restart_handoff(
+        &log,
+        "execvp failed after restart handoff",
+        old_pid,
+        system_proxy_snapshot.is_some(),
+    );
 }
 
 #[cfg(unix)]
@@ -447,6 +470,36 @@ fn append_system_proxy_start_args(
         argv.push("--system-proxy".into());
         argv.push("--proxy-bypass".into());
         argv.push(snapshot.bypass.clone().into());
+    }
+}
+
+#[cfg(unix)]
+fn abort_restart_handoff(
+    log: &std::path::Path,
+    reason: &str,
+    old_pid: Option<u32>,
+    preserved_system_proxy: bool,
+) {
+    orphan_log(log, &format!("aborting restart handoff: {reason}"));
+    if let Ok(data_dir) = crate::config::get_bifrost_dir() {
+        let _ = bifrost_core::consume_system_proxy_shutdown_mode(&data_dir);
+        let old_runtime_still_alive = old_pid.is_some_and(is_process_running);
+        if preserved_system_proxy && !old_runtime_still_alive {
+            match bifrost_core::SystemProxyManager::recover_from_crash(&data_dir) {
+                Ok(()) => orphan_log(log, "system proxy recovered after aborted restart handoff"),
+                Err(error) => orphan_log(
+                    log,
+                    &format!("system proxy recovery failed after aborted restart handoff: {error}"),
+                ),
+            }
+        } else {
+            orphan_log(
+                log,
+                &format!(
+                    "system proxy recovery skipped after aborted restart handoff: preserved_system_proxy={preserved_system_proxy} old_runtime_still_alive={old_runtime_still_alive}"
+                ),
+            );
+        }
     }
 }
 

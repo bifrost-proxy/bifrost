@@ -1131,7 +1131,7 @@ fn maybe_restart_running_proxy(auto_restart: bool) -> Result<(), BifrostError> {
     let system_proxy_snapshot = capture_runtime_system_proxy_snapshot(runtime_info.as_ref());
 
     println!("{}", "  Stopping current proxy...".bright_cyan());
-    super::stop::run_stop()
+    super::stop::run_stop_for_restart()
         .map_err(|e| BifrostError::Config(format!("Failed to stop running proxy: {}", e)))?;
 
     let exe_path = env::current_exe().map_err(BifrostError::Io)?;
