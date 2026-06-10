@@ -88,7 +88,7 @@ fn strip_inline_comment(value: &str) -> &str {
         if ch != '#' {
             return None;
         }
-        if idx == 0 || value[..idx].chars().last().is_some_and(char::is_whitespace) {
+        if idx > 0 && value[..idx].chars().last().is_some_and(char::is_whitespace) {
             Some(idx)
         } else {
             None
@@ -225,6 +225,10 @@ mod tests {
         assert_eq!(
             rule_reference_name("@comment/group-shared"),
             Some("comment/group-shared")
+        );
+        assert_eq!(
+            rule_reference_name("@#hash-prefixed"),
+            Some("#hash-prefixed")
         );
         assert_eq!(rule_reference_name("# @shared"), None);
         assert_eq!(rule_reference_name("example.com host://127.0.0.1"), None);

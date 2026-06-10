@@ -59,6 +59,7 @@ describe('Bifrost tokenizer', () => {
     expect(parseRuleReferenceLine('@comment not a reference')).toBeNull();
     expect(parseRuleReferenceLine('# @shared-rule')).toBeNull();
     expect(parseRuleReferenceLine('example.com @shared-rule')).toBeNull();
+    expect(parseRuleReferenceLine('@#hash-prefixed')?.name).toBe('#hash-prefixed');
   });
 
   it('only offers rule reference completion on standalone at-rule lines', () => {

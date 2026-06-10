@@ -18,7 +18,7 @@ function isCommentDirective(trimmed: string): boolean {
 function inlineCommentIndex(value: string): number {
   for (let index = 0; index < value.length; index += 1) {
     if (value[index] !== "#") continue;
-    if (index === 0 || /\s/.test(value[index - 1])) {
+    if (index > 0 && /\s/.test(value[index - 1])) {
       return index;
     }
   }
