@@ -42,6 +42,7 @@ data_dir = tempfile.mkdtemp(prefix="bifrost-ctrlc-e2e.")
 env = os.environ.copy()
 env["BIFROST_DATA_DIR"] = data_dir
 env["BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT"] = "1"
+env["BIFROST_DISABLE_TRAY"] = "1"
 bin_path = env["BIFROST_CTRL_C_TEST_BIN"]
 port = env["BIFROST_CTRL_C_TEST_PORT"]
 
@@ -56,7 +57,6 @@ if pid == 0:
             "-p",
             port,
             "--no-system-proxy",
-            "--no-tray",
             "--skip-cert-check",
         ],
         env,
