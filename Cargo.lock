@@ -445,6 +445,7 @@ dependencies = [
 name = "bifrost-cli"
 version = "0.0.96"
 dependencies = [
+ "arboard",
  "async-trait",
  "base64 0.22.1",
  "bcrypt",
@@ -467,11 +468,15 @@ dependencies = [
  "crossterm",
  "dialoguer",
  "dirs 5.0.1",
+ "fs2",
  "futures",
+ "image",
  "ipnet",
  "libc",
+ "muda",
  "nix 0.28.0",
  "notify",
+ "open",
  "parking_lot",
  "ratatui",
  "regex 1.12.3",
@@ -479,12 +484,16 @@ dependencies = [
  "ring",
  "serde",
  "serde_json",
+ "tao",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "tray-icon",
  "ureq",
  "urlencoding",
  "uuid",
@@ -746,30 +755,6 @@ dependencies = [
  "webpki-roots 1.0.6",
  "windows 0.58.0",
  "x509-parser",
-]
-
-[[package]]
-name = "bifrost-tray"
-version = "0.0.96"
-dependencies = [
- "arboard",
- "clap",
- "fs2",
- "image",
- "libc",
- "muda",
- "open",
- "serde",
- "serde_json",
- "tao",
- "tempfile",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "tray-icon",
- "ureq",
- "urlencoding",
- "windows-sys 0.59.0",
 ]
 
 [[package]]

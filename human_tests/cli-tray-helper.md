@@ -295,6 +295,21 @@ curl -sS -X POST http://127.0.0.1:8801/_bifrost/api/rules \
 - `tray.log` 记录 `tray.json is too large`
 - 超过 30 天的 `tray.log*` 旧文件被清理
 
+### TC-TH-20: Start Bifrost 有明确启动进展与失败反馈
+
+**操作步骤：**
+1. 让托盘处于 `Bifrost: Disconnected` 或 `Bifrost: Stopped` 状态
+2. 点击 "Start Bifrost"
+3. 立即再次展开托盘菜单
+4. 等待启动成功或故意制造端口占用/无效参数后再次展开菜单
+
+**预期结果：**
+- 第 3 步状态行显示 `Bifrost: Starting...`
+- 启动进行中时 "Start Bifrost" 置灰，不能重复触发并发 start
+- 启动成功后状态行变为 `Bifrost: Running on 127.0.0.1:<port>`
+- 启动失败或超时后状态行显示 `Bifrost: Start failed - open logs`
+- 失败后 "Start Bifrost" 恢复可点击，用户可以重试；Open Logs 始终可点击
+
 ## 清理步骤
 
 ```bash

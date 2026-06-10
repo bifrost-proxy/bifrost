@@ -137,6 +137,11 @@ fn effective_log_outputs(cli: &Cli) -> Vec<LogOutput> {
 }
 
 fn main() {
+    // If invoked as the hidden tray subcommand (`bifrost __tray ...`), run the
+    // tray helper in this process and never return. Must run before clap
+    // parsing and logging init (the tray installs its own tracing subscriber).
+    commands::tray::run_if_tray_process();
+
     install_panic_hook();
     init_crypto_provider();
 

@@ -1,5 +1,5 @@
-use crate::config::{self, CustomMenuItem, MenuAction, TrayConfig};
-use crate::runtime::{RuntimeInfo, ServiceState};
+use super::config::{self, CustomMenuItem, MenuAction, TrayConfig};
+use super::runtime::{RuntimeInfo, ServiceState};
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -63,6 +63,8 @@ pub struct TrayRule {
 pub fn build_menu(
     runtime: Option<&RuntimeInfo>,
     state: ServiceState,
+    status_override: Option<&str>,
+    service_action_busy: bool,
     custom_config: Option<&TrayConfig>,
     data_dir: &str,
     bin_available: bool,
@@ -71,14 +73,17 @@ pub fn build_menu(
     let mut items = Vec::new();
     let is_running = state == ServiceState::Running;
 
-    let status_label = match (state, runtime) {
-        (ServiceState::Running, Some(rt)) => {
-            format!("Bifrost: Running on {}:{}", rt.effective_host(), rt.port)
-        }
-        (ServiceState::Stopped, _) => "Bifrost: Stopped".to_string(),
-        (ServiceState::Disconnected, _) => "Bifrost: Disconnected".to_string(),
-        _ => "Bifrost: Unknown".to_string(),
-    };
+    let status_label =
+        status_override
+            .map(str::to_string)
+            .unwrap_or_else(|| match (state, runtime) {
+                (ServiceState::Running, Some(rt)) => {
+                    format!("Bifrost: Running on {}:{}", rt.effective_host(), rt.port)
+                }
+                (ServiceState::Stopped, _) => "Bifrost: Stopped".to_string(),
+                (ServiceState::Disconnected, _) => "Bifrost: Disconnected".to_string(),
+                _ => "Bifrost: Unknown".to_string(),
+            });
 
     items.push(item(MenuItemDef {
         id: "_status".to_string(),
@@ -162,14 +167,14 @@ pub fn build_menu(
         items.push(item(MenuItemDef {
             id: "toggle_service".to_string(),
             label: "Stop Bifrost".to_string(),
-            enabled: bin_available,
+            enabled: bin_available && !service_action_busy,
             checked: false,
             action: MenuItemAction::StopService,
         }));
         items.push(item(MenuItemDef {
             id: "restart_service".to_string(),
             label: "Restart Bifrost".to_string(),
-            enabled: bin_available,
+            enabled: bin_available && !service_action_busy,
             checked: false,
             action: MenuItemAction::RestartService,
         }));
@@ -177,7 +182,7 @@ pub fn build_menu(
         items.push(item(MenuItemDef {
             id: "toggle_service".to_string(),
             label: "Start Bifrost".to_string(),
-            enabled: bin_available,
+            enabled: bin_available && !service_action_busy,
             checked: false,
             action: MenuItemAction::StartService,
         }));
@@ -505,6 +510,8 @@ mod tests {
             Some(&rt),
             ServiceState::Running,
             None,
+            false,
+            None,
             "/tmp/.bifrost",
             true,
             &[],
@@ -525,6 +532,8 @@ mod tests {
             Some(&rt),
             ServiceState::Stopped,
             None,
+            false,
+            None,
             "/tmp/.bifrost",
             true,
             &[],
@@ -538,11 +547,52 @@ mod tests {
     }
 
     #[test]
+    fn test_service_action_busy_overrides_status_and_disables_start() {
+        let rt = sample_runtime();
+        let menu = build_menu(
+            Some(&rt),
+            ServiceState::Stopped,
+            Some("Bifrost: Starting..."),
+            true,
+            None,
+            "/tmp/.bifrost",
+            true,
+            &[],
+        );
+        let status = find_item(&menu, "_status").unwrap();
+        assert_eq!(status.label, "Bifrost: Starting...");
+        let start = find_item(&menu, "toggle_service").unwrap();
+        assert_eq!(start.label, "Start Bifrost");
+        assert!(!start.enabled);
+    }
+
+    #[test]
+    fn test_service_action_failure_status_allows_retry() {
+        let rt = sample_runtime();
+        let menu = build_menu(
+            Some(&rt),
+            ServiceState::Disconnected,
+            Some("Bifrost: Start failed - open logs"),
+            false,
+            None,
+            "/tmp/.bifrost",
+            true,
+            &[],
+        );
+        let status = find_item(&menu, "_status").unwrap();
+        assert_eq!(status.label, "Bifrost: Start failed - open logs");
+        let start = find_item(&menu, "toggle_service").unwrap();
+        assert!(start.enabled);
+    }
+
+    #[test]
     fn test_service_controls_disabled_without_bin() {
         let rt = sample_runtime();
         let menu = build_menu(
             Some(&rt),
             ServiceState::Running,
+            None,
+            false,
             None,
             "/tmp/.bifrost",
             false,
@@ -563,6 +613,8 @@ mod tests {
         let menu = build_menu(
             Some(&rt),
             ServiceState::Running,
+            None,
+            false,
             None,
             "/tmp/.bifrost",
             true,
@@ -588,6 +640,8 @@ mod tests {
         let menu = build_menu(
             Some(&rt),
             ServiceState::Running,
+            None,
+            false,
             Some(&config),
             "/tmp/.bifrost",
             true,
@@ -615,6 +669,8 @@ mod tests {
         let menu = build_menu(
             Some(&rt),
             ServiceState::Running,
+            None,
+            false,
             Some(&config),
             "/tmp/.bifrost",
             true,

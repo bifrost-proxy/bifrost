@@ -15,18 +15,26 @@ use tray_icon::menu::{
 };
 use tray_icon::TrayIconBuilder;
 
-use crate::cli::TrayArgs;
-use crate::config::{self, TrayConfig};
-use crate::lock::TrayLock;
-use crate::menu::{self, MenuEntry, MenuItemAction, MenuItemDef, RuleTarget, SubmenuDef};
-use crate::runtime::{self, RuntimeInfo, ServiceState};
+use super::cli::TrayArgs;
+use super::config::{self, TrayConfig};
+use super::lock::TrayLock;
+use super::menu::{self, MenuEntry, MenuItemAction, MenuItemDef, RuleTarget, SubmenuDef};
+use super::runtime::{self, RuntimeInfo, ServiceState};
 
 const STATE_RUNNING: u8 = 0;
 const STATE_STOPPED: u8 = 1;
 const STATE_DISCONNECTED: u8 = 2;
+const OP_IDLE: u8 = 0;
+const OP_STARTING: u8 = 1;
+const OP_STOPPING: u8 = 2;
+const OP_RESTARTING: u8 = 3;
+const OP_START_FAILED: u8 = 4;
+const OP_STOP_FAILED: u8 = 5;
+const OP_RESTART_FAILED: u8 = 6;
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(3);
+const START_READY_TIMEOUT: Duration = Duration::from_secs(15);
 const RESTART_STOP_TIMEOUT: Duration = Duration::from_secs(8);
 const LOG_RETENTION_DAYS: u64 = 30;
 
@@ -64,6 +72,8 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     let menu_items = menu::build_menu(
         runtime.as_ref(),
         state,
+        None,
+        false,
         custom_config.as_ref(),
         &data_dir_str,
         bin_available,
@@ -93,6 +103,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
 
     let should_quit = Arc::new(AtomicBool::new(false));
     let should_reload = Arc::new(AtomicBool::new(false));
+    let current_operation = Arc::new(AtomicU8::new(OP_IDLE));
     let current_state = Arc::new(AtomicU8::new(match state {
         ServiceState::Running => STATE_RUNNING,
         ServiceState::Stopped => STATE_STOPPED,
@@ -108,6 +119,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
 
     let menu_receiver = MenuEvent::receiver().clone();
     let mut last_rendered_state = current_state.load(Ordering::Relaxed);
+    let mut last_rendered_operation = current_operation.load(Ordering::Relaxed);
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow =
@@ -118,13 +130,35 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
             return;
         }
 
+        let mut action_triggered = false;
+        if let Event::NewEvents(_) = event {
+            while let Ok(event) = menu_receiver.try_recv() {
+                if let Some(action) = action_map.get(&event.id) {
+                    tracing::info!("menu action triggered");
+                    execute_action(
+                        action,
+                        &args,
+                        &data_dir_str,
+                        &should_quit,
+                        &should_reload,
+                        &current_operation,
+                    );
+                    action_triggered = true;
+                }
+            }
+        }
+
         // Check state change: update icon + rebuild menu
         let new_state = current_state.load(Ordering::Relaxed);
+        clear_completed_operation(&current_operation, new_state);
+        let new_operation = current_operation.load(Ordering::Relaxed);
         let state_changed = new_state != last_rendered_state;
+        let operation_changed = new_operation != last_rendered_operation;
         let reload_requested = should_reload.swap(false, Ordering::Relaxed);
 
-        if state_changed || reload_requested {
+        if state_changed || operation_changed || reload_requested || action_triggered {
             last_rendered_state = new_state;
+            last_rendered_operation = new_operation;
 
             if state_changed {
                 // Update icon with template flag preserved
@@ -159,6 +193,8 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
             let new_menu_items = menu::build_menu(
                 rt.as_ref(),
                 svc_state,
+                operation_status_label(new_operation),
+                operation_busy(new_operation),
                 new_custom_config.as_ref(),
                 &data_dir_str,
                 bin_available,
@@ -170,18 +206,10 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
 
             tracing::info!(
                 state = new_state,
+                operation = new_operation,
                 reloaded = reload_requested,
                 "tray icon and menu updated"
             );
-        }
-
-        if let Event::NewEvents(_) = event {
-            while let Ok(event) = menu_receiver.try_recv() {
-                if let Some(action) = action_map.get(&event.id) {
-                    tracing::info!("menu action triggered");
-                    execute_action(action, &args, &data_dir_str, &should_quit, &should_reload);
-                }
-            }
         }
     });
 }
@@ -246,6 +274,35 @@ fn state_code_tooltip(state: u8) -> &'static str {
         STATE_RUNNING => "Bifrost - Running",
         STATE_STOPPED => "Bifrost - Stopped",
         _ => "Bifrost - Disconnected",
+    }
+}
+
+fn operation_status_label(operation: u8) -> Option<&'static str> {
+    match operation {
+        OP_STARTING => Some("Bifrost: Starting..."),
+        OP_STOPPING => Some("Bifrost: Stopping..."),
+        OP_RESTARTING => Some("Bifrost: Restarting..."),
+        OP_START_FAILED => Some("Bifrost: Start failed - open logs"),
+        OP_STOP_FAILED => Some("Bifrost: Stop failed - open logs"),
+        OP_RESTART_FAILED => Some("Bifrost: Restart failed - open logs"),
+        _ => None,
+    }
+}
+
+fn operation_busy(operation: u8) -> bool {
+    matches!(operation, OP_STARTING | OP_STOPPING | OP_RESTARTING)
+}
+
+fn clear_completed_operation(operation: &AtomicU8, state: u8) {
+    let current = operation.load(Ordering::Relaxed);
+    let completed = (matches!(
+        current,
+        OP_STARTING | OP_RESTARTING | OP_START_FAILED | OP_RESTART_FAILED
+    ) && state == STATE_RUNNING)
+        || (matches!(current, OP_STOPPING | OP_STOP_FAILED)
+            && matches!(state, STATE_STOPPED | STATE_DISCONNECTED));
+    if completed {
+        operation.store(OP_IDLE, Ordering::Relaxed);
     }
 }
 
@@ -482,6 +539,7 @@ fn execute_action(
     _data_dir_str: &str,
     quit_flag: &AtomicBool,
     reload_flag: &Arc<AtomicBool>,
+    operation: &Arc<AtomicU8>,
 ) {
     match action {
         MenuItemAction::OpenUrl(url) => {
@@ -520,46 +578,110 @@ fn execute_action(
             });
         }
         MenuItemAction::StartService => {
+            if operation_busy(operation.load(Ordering::Relaxed)) {
+                tracing::warn!("service action ignored while another action is running");
+                return;
+            }
             let Some(bin) = resolve_bifrost_binary(args) else {
                 tracing::error!("cannot find trusted bifrost binary to start service");
-                return;
-            };
-            let data_dir = args.data_dir.to_string_lossy().to_string();
-            let port = args.port;
-            let extra_args = args.start_args.clone();
-            thread::spawn(move || {
-                spawn_start(&bin, &data_dir, port, &extra_args);
-            });
-        }
-        MenuItemAction::StopService => {
-            let Some(bin) = resolve_bifrost_binary(args) else {
-                tracing::error!("cannot find trusted bifrost binary to stop service");
-                return;
-            };
-            let data_dir = args.data_dir.to_string_lossy().to_string();
-            thread::spawn(move || {
-                spawn_stop(&bin, &data_dir);
-            });
-        }
-        MenuItemAction::RestartService => {
-            let Some(bin) = resolve_bifrost_binary(args) else {
-                tracing::error!("cannot find trusted bifrost binary to restart service");
+                operation.store(OP_START_FAILED, Ordering::Relaxed);
+                reload_flag.store(true, Ordering::Relaxed);
                 return;
             };
             let data_dir = args.data_dir.to_string_lossy().to_string();
             let runtime_file = args.runtime_file.clone();
             let port = args.port;
             let extra_args = args.start_args.clone();
+            let operation = operation.clone();
+            let reload_flag = reload_flag.clone();
+            operation.store(OP_STARTING, Ordering::Relaxed);
+            reload_flag.store(true, Ordering::Relaxed);
+            thread::spawn(
+                move || match spawn_start(&bin, &data_dir, port, &extra_args) {
+                    Some(child) => monitor_start_child(
+                        child,
+                        runtime_file,
+                        operation,
+                        reload_flag,
+                        OP_START_FAILED,
+                    ),
+                    None => {
+                        operation.store(OP_START_FAILED, Ordering::Relaxed);
+                        reload_flag.store(true, Ordering::Relaxed);
+                    }
+                },
+            );
+        }
+        MenuItemAction::StopService => {
+            if operation_busy(operation.load(Ordering::Relaxed)) {
+                tracing::warn!("service action ignored while another action is running");
+                return;
+            }
+            let Some(bin) = resolve_bifrost_binary(args) else {
+                tracing::error!("cannot find trusted bifrost binary to stop service");
+                operation.store(OP_STOP_FAILED, Ordering::Relaxed);
+                reload_flag.store(true, Ordering::Relaxed);
+                return;
+            };
+            let data_dir = args.data_dir.to_string_lossy().to_string();
+            let operation = operation.clone();
+            let reload_flag = reload_flag.clone();
+            operation.store(OP_STOPPING, Ordering::Relaxed);
+            reload_flag.store(true, Ordering::Relaxed);
+            thread::spawn(move || {
+                if spawn_stop(&bin, &data_dir) {
+                    operation.store(OP_IDLE, Ordering::Relaxed);
+                } else {
+                    operation.store(OP_STOP_FAILED, Ordering::Relaxed);
+                }
+                reload_flag.store(true, Ordering::Relaxed);
+            });
+        }
+        MenuItemAction::RestartService => {
+            if operation_busy(operation.load(Ordering::Relaxed)) {
+                tracing::warn!("service action ignored while another action is running");
+                return;
+            }
+            let Some(bin) = resolve_bifrost_binary(args) else {
+                tracing::error!("cannot find trusted bifrost binary to restart service");
+                operation.store(OP_RESTART_FAILED, Ordering::Relaxed);
+                reload_flag.store(true, Ordering::Relaxed);
+                return;
+            };
+            let data_dir = args.data_dir.to_string_lossy().to_string();
+            let runtime_file = args.runtime_file.clone();
+            let port = args.port;
+            let extra_args = args.start_args.clone();
+            let operation = operation.clone();
+            let reload_flag = reload_flag.clone();
+            operation.store(OP_RESTARTING, Ordering::Relaxed);
+            reload_flag.store(true, Ordering::Relaxed);
             thread::spawn(move || {
                 let old_pid = runtime::read_runtime(&runtime_file).map(|rt| rt.pid);
                 if !spawn_stop(&bin, &data_dir) {
+                    operation.store(OP_RESTART_FAILED, Ordering::Relaxed);
+                    reload_flag.store(true, Ordering::Relaxed);
                     return;
                 }
                 if !wait_for_runtime_pid_exit(old_pid, RESTART_STOP_TIMEOUT) {
                     tracing::error!("timed out waiting for bifrost service to stop before restart");
+                    operation.store(OP_RESTART_FAILED, Ordering::Relaxed);
+                    reload_flag.store(true, Ordering::Relaxed);
                     return;
                 }
-                spawn_start(&bin, &data_dir, port, &extra_args);
+                match spawn_start(&bin, &data_dir, port, &extra_args) {
+                    Some(child) => monitor_start_child(
+                        child,
+                        runtime_file,
+                        operation,
+                        reload_flag,
+                        OP_RESTART_FAILED,
+                    ),
+                    None => {
+                        operation.store(OP_RESTART_FAILED, Ordering::Relaxed);
+                        reload_flag.store(true, Ordering::Relaxed);
+                    }
+                }
             });
         }
         MenuItemAction::OpenDirectory(path) => {
@@ -652,7 +774,12 @@ fn rule_toggle_url(admin_url: &str, target: &RuleTarget, enabled: bool) -> Strin
     }
 }
 
-fn spawn_start(bin: &Path, data_dir: &str, port: Option<u16>, extra_args: &[String]) {
+fn spawn_start(
+    bin: &Path,
+    data_dir: &str,
+    port: Option<u16>,
+    extra_args: &[String],
+) -> Option<Child> {
     let mut cmd = Command::new(bin);
     cmd.env("BIFROST_DATA_DIR", data_dir)
         .env("BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT", "1")
@@ -669,11 +796,67 @@ fn spawn_start(bin: &Path, data_dir: &str, port: Option<u16>, extra_args: &[Stri
     match cmd.spawn() {
         Ok(child) => {
             tracing::info!(pid = child.id(), "bifrost service started");
+            Some(child)
         }
         Err(e) => {
             tracing::error!(error = %e, "failed to start bifrost service");
+            None
         }
     }
+}
+
+fn monitor_start_child(
+    mut child: Child,
+    runtime_file: PathBuf,
+    operation: Arc<AtomicU8>,
+    reload_flag: Arc<AtomicBool>,
+    failure_operation: u8,
+) {
+    let start = std::time::Instant::now();
+    let mut ready = false;
+    while start.elapsed() < START_READY_TIMEOUT {
+        if runtime_file_points_to_running_service(&runtime_file) {
+            ready = true;
+            break;
+        }
+
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                tracing::error!(status = %status, "bifrost start exited before service became ready");
+                operation.store(failure_operation, Ordering::Relaxed);
+                reload_flag.store(true, Ordering::Relaxed);
+                return;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::error!(error = %error, "failed to poll bifrost start child");
+                operation.store(failure_operation, Ordering::Relaxed);
+                reload_flag.store(true, Ordering::Relaxed);
+                return;
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    if ready {
+        operation.store(OP_IDLE, Ordering::Relaxed);
+        reload_flag.store(true, Ordering::Relaxed);
+    } else {
+        tracing::error!("timed out waiting for bifrost service to become ready");
+        operation.store(failure_operation, Ordering::Relaxed);
+        reload_flag.store(true, Ordering::Relaxed);
+    }
+
+    if let Err(error) = child.wait() {
+        tracing::warn!(error = %error, "failed to reap bifrost start child");
+    }
+    reload_flag.store(true, Ordering::Relaxed);
+}
+
+fn runtime_file_points_to_running_service(runtime_file: &Path) -> bool {
+    runtime::read_runtime(runtime_file)
+        .map(|rt| runtime::is_process_running(rt.pid))
+        .unwrap_or(false)
 }
 
 fn spawn_stop(bin: &Path, data_dir: &str) -> bool {

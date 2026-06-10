@@ -17,7 +17,6 @@ members = [
   "crates/bifrost-tests",
   "crates/bifrost-e2e",
   "crates/bifrost-script",
-  "crates/bifrost-tray",
 ]
 
 [workspace.package]

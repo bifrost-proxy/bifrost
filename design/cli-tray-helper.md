@@ -152,6 +152,11 @@ helper 启动后：
 v1 语义：
 
 - `Stop Bifrost` 停止主服务，但不退出 helper。
+- `Start Bifrost`、`Stop Bifrost`、`Restart Bifrost` 必须有用户可见的进行中状态：
+  - 点击后下一次展开菜单立即显示 `Bifrost: Starting...` / `Stopping...` / `Restarting...`。
+  - 进行中时禁用 Start/Stop/Restart，避免重复点击造成并发操作。
+  - 成功后回到 Running/Stopped 状态。
+  - 失败或超时后显示 `Bifrost: Start failed - open logs` 等错误状态，并允许用户重试或打开日志。
 - helper 进入 `Stopped/Disconnected` 状态：
   - 管理端、代理地址、系统代理切换置灰；
   - `Quit Tray` 可用；
@@ -484,6 +489,7 @@ Quit Tray
 - `Rules: <当前启用规则>`：原生子菜单，完全通过主服务 Admin API 读取与切换规则，不直接读写 `rules/` 或状态文件。
 - `Restart Bifrost`：调用可信 `bifrost stop`，等待旧 runtime PID 退出后再用 `bifrost start --no-tray --no-system-proxy` 拉起。
 - `Stop Bifrost`：调用可信 `bifrost stop` 并等待子进程退出，避免 Unix zombie。
+- `Start Bifrost`：调用可信 `bifrost start --no-tray --no-system-proxy`，监控 runtime PID ready；若子进程提前退出或 15 秒内未 ready，状态行显示失败并引导打开日志。
 - `Open Data Directory`：打开 data dir。
 - `Open Logs`：打开 `<data_dir>/logs`。
 - `Quit Tray`：退出 helper，不停止服务。

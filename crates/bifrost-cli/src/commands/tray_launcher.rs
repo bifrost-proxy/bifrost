@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use super::tray::TRAY_SUBCOMMAND;
+
 pub fn should_launch_tray(no_tray: bool) -> bool {
     if cfg!(target_os = "linux") {
         return false;
@@ -15,6 +17,8 @@ pub fn should_launch_tray(no_tray: bool) -> bool {
 }
 
 pub fn find_tray_binary() -> Option<PathBuf> {
+    // Escape hatch: allow overriding the tray binary explicitly. It must be a
+    // bifrost-compatible binary that understands the hidden `__tray` subcommand.
     if let Ok(path) = std::env::var("BIFROST_TRAY_BIN") {
         let p = PathBuf::from(&path);
         if p.exists() {
@@ -23,21 +27,15 @@ pub fn find_tray_binary() -> Option<PathBuf> {
         tracing::warn!(path = %path, "BIFROST_TRAY_BIN set but file not found");
     }
 
-    if let Ok(current_exe) = std::env::current_exe() {
-        if let Some(dir) = current_exe.parent() {
-            let tray_name = if cfg!(windows) {
-                "bifrost-tray.exe"
-            } else {
-                "bifrost-tray"
-            };
-            let candidate = dir.join(tray_name);
-            if candidate.exists() {
-                return Some(candidate);
-            }
+    // Busybox-style multi-call: re-exec the current `bifrost` binary as the tray
+    // process via the hidden `__tray` subcommand. No separate artifact needed.
+    match std::env::current_exe() {
+        Ok(exe) => Some(exe),
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to resolve current_exe for tray");
+            None
         }
     }
-
-    None
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -52,6 +50,7 @@ pub fn launch_tray_helper(
     start_args: &[String],
 ) {
     let mut cmd = Command::new(tray_bin);
+    cmd.arg(TRAY_SUBCOMMAND);
     cmd.arg("--data-dir")
         .arg(data_dir)
         .arg("--runtime-file")
