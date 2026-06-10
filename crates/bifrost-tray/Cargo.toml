@@ -21,6 +21,7 @@ fs2 = "0.4"
 open = "5"
 arboard = "3"
 ureq.workspace = true
+urlencoding.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

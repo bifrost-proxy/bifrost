@@ -420,7 +420,8 @@ struct TrayState {
 
 - 每 2 秒读取 runtime 并校验 PID。
 - 每 5 秒探测 Admin API。
-- 菜单动作完成后立即刷新。
+- 点击托盘图标打开菜单前会重新读取 runtime、探测进程并通过 Admin API 刷新菜单模型，避免等待后台轮询。
+- 菜单动作完成后立即刷新；规则切换动作完成后通过内部刷新标记触发下一轮菜单重建。
 - 连续失败时保留最近一次可用 runtime，用 disabled menu 表达不可用状态。
 
 PID 校验：
@@ -438,6 +439,7 @@ Bifrost: Running on 127.0.0.1:8800
 Open Admin UI
 Open Traffic
 Open Rules
+Rules: <当前启用规则>
 Copy Admin URL
 Copy HTTP Proxy
 Copy SOCKS5 Proxy
@@ -446,7 +448,6 @@ Restart Bifrost
 Stop Bifrost
 Open Data Directory
 Open Logs
-Reload Tray Menu
 Quit Tray
 ```
 
@@ -458,13 +459,14 @@ Quit Tray
 - `Open Admin UI`
 - `Open Traffic`
 - `Open Rules`
+- `Rules: ...`
 - `Copy Admin URL`
 - `Copy HTTP Proxy`
 - `Copy SOCKS5 Proxy`
 - `System Proxy`
   - `Restart Bifrost`
   - `Stop Bifrost`
-- `Open Data Directory`、`Open Logs`、`Reload Tray Menu`、`Quit Tray` 始终可用。
+- `Open Data Directory`、`Open Logs`、`Quit Tray` 始终可用。
 
 动作规则：
 
@@ -475,12 +477,29 @@ Quit Tray
 - `Copy HTTP Proxy`：复制 `http://<host>:<port>`。
 - `Copy SOCKS5 Proxy`：复制 `socks5://<host>:<socks5_port>`，没有 SOCKS5 时置灰。
 - `System Proxy: On/Off`：调用 Admin API 或 CLI 复用逻辑，刷新后更新文案。
+- `Rules: <当前启用规则>`：原生子菜单，完全通过主服务 Admin API 读取与切换规则，不直接读写 `rules/` 或状态文件。
 - `Restart Bifrost`：调用传入的 `--bifrost-bin restart --data-dir <path>`。
 - `Stop Bifrost`：调用传入的 `--bifrost-bin stop --data-dir <path>`。
 - `Open Data Directory`：打开 data dir。
 - `Open Logs`：打开 `<data_dir>/logs`。
-- `Reload Tray Menu`：重新读取 `tray.json` 并 rebuild menu。
 - `Quit Tray`：退出 helper，不停止服务。
+
+### Rules 快速切换菜单
+
+第一版只支持单选语义：用户点击某一条规则后，tray 先通过 Admin API 禁用菜单中已知的其他规则，再启用目标规则。这样代理运行态、WebUI、Badge、规则热更新和同步缓存仍由主服务统一处理。
+
+数据来源：
+
+- 规则候选：`GET /_bifrost/api/rules/reference-candidates`，用于获取个人规则和已加载组规则列表。
+- 当前启用规则：`GET /_bifrost/api/rules/active-summary`，用于标记勾选状态和顶层 `Rules: <当前启用规则>` 文案。
+- 个人规则切换：`PUT /_bifrost/api/rules/{rule_name}/enable|disable`。
+- 组规则切换：`PUT /_bifrost/api/group-rules/{group_name_or_id}/{rule_name}/enable|disable`。
+
+展示层级：
+
+- 只有个人规则时：`Rules: <当前启用规则>` 作为第一级，悬浮展开后第二级直接展示个人规则列表。
+- 存在组规则时：第一级仍是 `Rules: <当前启用规则>`；第二级展示 `My Rules` 与各组名；第三级展示对应规则列表。
+- 当前启用规则显示原生 check mark；无启用规则时顶层显示 `Rules: None`；多条规则同时启用时顶层显示 `Rules: Multiple`，点击任意规则后收敛为单选。
 
 ## 自定义菜单
 
@@ -691,6 +710,9 @@ helper 查找顺序：
   - Running 菜单启用状态。
   - Stopped 菜单置灰状态。
   - 自定义菜单插入顺序。
+  - 只有个人规则时 Rules 菜单为两级。
+  - 存在组规则时 Rules 菜单为三级，`My Rules` 与组名平级。
+  - 当前启用规则显示在顶层 `Rules: ...` 且对应子项勾选。
   - action id 到 platform command id 映射稳定。
 - `actions.rs`
   - Copy 模板展开。

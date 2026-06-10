@@ -5,15 +5,18 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use serde::Deserialize;
 use tao::event::Event;
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
-use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{
+    CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
+};
 use tray_icon::{TrayIconBuilder, TrayIconEvent};
 
 use crate::cli::TrayArgs;
 use crate::config::{self, TrayConfig};
 use crate::lock::TrayLock;
-use crate::menu::{self, MenuItemAction, MenuItemDef};
+use crate::menu::{self, MenuEntry, MenuItemAction, MenuItemDef, RuleTarget, SubmenuDef};
 use crate::runtime::{self, RuntimeInfo, ServiceState};
 
 const STATE_RUNNING: u8 = 0;
@@ -54,12 +57,14 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
         .map(|p| p.exists())
         .unwrap_or(false);
 
+    let rules = load_rules_for_menu(runtime.as_ref(), state);
     let menu_items = menu::build_menu(
         runtime.as_ref(),
         state,
         custom_config.as_ref(),
         &data_dir_str,
         bin_available,
+        &rules,
     );
 
     let (tray_menu, mut action_map) = build_native_menu(&menu_items);
@@ -84,6 +89,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
         .map_err(|e| format!("failed to create tray icon: {e}"))?;
 
     let should_quit = Arc::new(AtomicBool::new(false));
+    let should_reload = Arc::new(AtomicBool::new(false));
     let current_state = Arc::new(AtomicU8::new(match state {
         ServiceState::Running => STATE_RUNNING,
         ServiceState::Stopped => STATE_STOPPED,
@@ -131,10 +137,11 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
         // Check state change: update icon + rebuild menu
         let new_state = current_state.load(Ordering::Relaxed);
         let state_changed = new_state != last_rendered_state;
+        let reload_requested = should_reload.swap(false, Ordering::Relaxed);
 
         // Rebuild on state change, or whenever the icon was interacted with so
         // custom config / runtime details are refreshed alongside state.
-        if state_changed || icon_interacted {
+        if state_changed || icon_interacted || reload_requested {
             last_rendered_state = new_state;
 
             if state_changed {
@@ -170,12 +177,14 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
             };
             let rt = runtime::read_runtime(&args.runtime_file);
             let new_custom_config = load_custom_config_safe(&args.data_dir);
+            let rules = load_rules_for_menu(rt.as_ref(), svc_state);
             let new_menu_items = menu::build_menu(
                 rt.as_ref(),
                 svc_state,
                 new_custom_config.as_ref(),
                 &data_dir_str,
                 bin_available,
+                &rules,
             );
             let (new_menu, new_action_map) = build_native_menu(&new_menu_items);
             tray_icon.set_menu(Some(Box::new(new_menu)));
@@ -184,6 +193,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
             tracing::info!(
                 state = new_state,
                 icon_interacted = icon_interacted,
+                reloaded = reload_requested,
                 "tray icon and menu updated"
             );
         }
@@ -192,7 +202,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
             while let Ok(event) = menu_receiver.try_recv() {
                 if let Some(action) = action_map.get(&event.id) {
                     tracing::info!("menu action triggered");
-                    execute_action(action, &args, &data_dir_str, &should_quit);
+                    execute_action(action, &args, &data_dir_str, &should_quit, &should_reload);
                 }
             }
         }
@@ -268,22 +278,171 @@ fn load_custom_config_safe(data_dir: &Path) -> Option<TrayConfig> {
     }
 }
 
-fn build_native_menu(items: &[MenuItemDef]) -> (Menu, HashMap<MenuId, MenuItemAction>) {
+#[derive(Debug, Deserialize)]
+struct RuleReferenceCandidate {
+    rule_name: String,
+    group_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ActiveSummaryResponse {
+    rules: Vec<ActiveRuleItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ActiveRuleItem {
+    name: String,
+    group_name: Option<String>,
+}
+
+fn load_rules_for_menu(runtime: Option<&RuntimeInfo>, state: ServiceState) -> Vec<menu::TrayRule> {
+    if state != ServiceState::Running {
+        return Vec::new();
+    }
+    let Some(runtime) = runtime else {
+        return Vec::new();
+    };
+    load_rules_from_admin(&runtime.admin_url())
+}
+
+fn load_rules_from_admin(admin_url: &str) -> Vec<menu::TrayRule> {
+    let base = admin_url.trim_end_matches('/');
+    let candidates_url = format!("{base}/api/rules/reference-candidates");
+    let active_url = format!("{base}/api/rules/active-summary");
+
+    let candidates = match ureq::get(&candidates_url).call() {
+        Ok(resp) => match resp.into_json::<Vec<RuleReferenceCandidate>>() {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                tracing::warn!(error = %error, "failed to decode rule candidates for tray menu");
+                return Vec::new();
+            }
+        },
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to load rule candidates for tray menu");
+            return Vec::new();
+        }
+    };
+
+    let active = match ureq::get(&active_url).call() {
+        Ok(resp) => match resp.into_json::<ActiveSummaryResponse>() {
+            Ok(active) => active.rules,
+            Err(error) => {
+                tracing::warn!(error = %error, "failed to decode active rules for tray menu");
+                Vec::new()
+            }
+        },
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to load active rules for tray menu");
+            Vec::new()
+        }
+    };
+
+    let active_targets = active
+        .into_iter()
+        .map(|rule| match rule.group_name {
+            Some(group_name) => menu::RuleTarget::Group {
+                group_name,
+                name: rule.name,
+            },
+            None => menu::RuleTarget::Personal { name: rule.name },
+        })
+        .collect::<Vec<_>>();
+
+    let mut rules = candidates
+        .into_iter()
+        .map(|candidate| {
+            let target = match candidate.group_name {
+                Some(group_name) => menu::RuleTarget::Group {
+                    group_name,
+                    name: candidate.rule_name,
+                },
+                None => menu::RuleTarget::Personal {
+                    name: candidate.rule_name,
+                },
+            };
+            let enabled = active_targets.contains(&target);
+            menu::TrayRule {
+                target,
+                enabled,
+                sort_order: 0,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    menu::sort_tray_rules(&mut rules);
+    rules
+}
+
+fn build_native_menu(items: &[MenuEntry]) -> (Menu, HashMap<MenuId, MenuItemAction>) {
     let menu = Menu::new();
     let mut map = HashMap::new();
 
-    for item in items {
-        if item.label == "-" {
-            let _ = menu.append(&PredefinedMenuItem::separator());
-            continue;
-        }
-
-        let menu_item = MenuItem::new(&item.label, item.enabled, None);
-        map.insert(menu_item.id().clone(), item.action.clone());
-        let _ = menu.append(&menu_item);
+    for entry in items {
+        append_menu_entry(&menu, entry, &mut map);
     }
 
     (menu, map)
+}
+
+fn append_menu_entry(
+    menu: &dyn MenuAppend,
+    entry: &MenuEntry,
+    map: &mut HashMap<MenuId, MenuItemAction>,
+) {
+    match entry {
+        MenuEntry::Item(item) => append_menu_item(menu, item, map),
+        MenuEntry::Submenu(submenu) => append_submenu(menu, submenu, map),
+    }
+}
+
+trait MenuAppend {
+    fn append_item(&self, item: &dyn IsMenuItem);
+}
+
+impl MenuAppend for Menu {
+    fn append_item(&self, item: &dyn IsMenuItem) {
+        let _ = self.append(item);
+    }
+}
+
+impl MenuAppend for Submenu {
+    fn append_item(&self, item: &dyn IsMenuItem) {
+        let _ = self.append(item);
+    }
+}
+
+fn append_menu_item(
+    menu: &dyn MenuAppend,
+    item: &MenuItemDef,
+    map: &mut HashMap<MenuId, MenuItemAction>,
+) {
+    if item.label == "-" {
+        menu.append_item(&PredefinedMenuItem::separator());
+        return;
+    }
+
+    if item.checked || matches!(item.action, MenuItemAction::SelectRule { .. }) {
+        let menu_item = CheckMenuItem::new(&item.label, item.enabled, item.checked, None);
+        map.insert(menu_item.id().clone(), item.action.clone());
+        menu.append_item(&menu_item);
+    } else {
+        let menu_item = MenuItem::new(&item.label, item.enabled, None);
+        map.insert(menu_item.id().clone(), item.action.clone());
+        menu.append_item(&menu_item);
+    }
+}
+
+fn append_submenu(
+    menu: &dyn MenuAppend,
+    submenu: &SubmenuDef,
+    map: &mut HashMap<MenuId, MenuItemAction>,
+) {
+    let native = Submenu::new(&submenu.label, submenu.enabled);
+    for child in &submenu.children {
+        append_menu_entry(&native, child, map);
+    }
+    menu.append_item(&native);
 }
 
 fn execute_action(
@@ -291,6 +450,7 @@ fn execute_action(
     args: &TrayArgs,
     _data_dir_str: &str,
     quit_flag: &AtomicBool,
+    reload_flag: &Arc<AtomicBool>,
 ) {
     match action {
         MenuItemAction::OpenUrl(url) => {
@@ -365,11 +525,82 @@ fn execute_action(
                 tracing::error!(path = %path, error = %e, "failed to open directory");
             }
         }
+        MenuItemAction::SelectRule {
+            target,
+            all_targets,
+        } => {
+            let rt = runtime::read_runtime(&args.runtime_file);
+            let Some(rt) = rt else {
+                tracing::error!("cannot select rule without runtime");
+                return;
+            };
+            let admin_url = rt.admin_url();
+            let target = target.clone();
+            let all_targets = all_targets.clone();
+            let reload_flag = reload_flag.clone();
+            thread::spawn(move || {
+                if select_single_rule(&admin_url, &target, &all_targets) {
+                    reload_flag.store(true, Ordering::Relaxed);
+                }
+            });
+        }
         MenuItemAction::QuitTray => {
             tracing::info!("quit tray requested");
             quit_flag.store(true, Ordering::Relaxed);
         }
         MenuItemAction::None => {}
+    }
+}
+
+fn select_single_rule(admin_url: &str, target: &RuleTarget, all_targets: &[RuleTarget]) -> bool {
+    let mut success = true;
+    for candidate in all_targets {
+        if candidate == target {
+            continue;
+        }
+        if !call_rule_toggle(admin_url, candidate, false) {
+            success = false;
+        }
+    }
+    if !call_rule_toggle(admin_url, target, true) {
+        success = false;
+    }
+    success
+}
+
+fn call_rule_toggle(admin_url: &str, target: &RuleTarget, enabled: bool) -> bool {
+    let url = rule_toggle_url(admin_url, target, enabled);
+    match ureq::put(&url).call() {
+        Ok(resp) => {
+            let status = resp.status();
+            if (200..300).contains(&status) {
+                tracing::info!(url = %url, status = status, "rule toggle API called");
+                true
+            } else {
+                tracing::error!(url = %url, status = status, "rule toggle API returned error");
+                false
+            }
+        }
+        Err(error) => {
+            tracing::error!(url = %url, error = %error, "rule toggle API failed");
+            false
+        }
+    }
+}
+
+fn rule_toggle_url(admin_url: &str, target: &RuleTarget, enabled: bool) -> String {
+    let base = admin_url.trim_end_matches('/');
+    let action = if enabled { "enable" } else { "disable" };
+    match target {
+        RuleTarget::Personal { name } => {
+            format!("{base}/api/rules/{}/{action}", urlencoding::encode(name))
+        }
+        RuleTarget::Group { group_name, name } => format!(
+            "{base}/api/group-rules/{}/{}/{}",
+            urlencoding::encode(group_name),
+            urlencoding::encode(name),
+            action
+        ),
     }
 }
 
@@ -472,5 +703,142 @@ fn compute_service_state(args: &TrayArgs) -> u8 {
         STATE_STOPPED
     } else {
         STATE_DISCONNECTED
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+
+    fn spawn_test_http_server(
+        responses: Vec<(&'static str, &'static str)>,
+    ) -> (String, Arc<Mutex<Vec<String>>>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_for_thread = Arc::clone(&seen);
+        let handle = thread::spawn(move || {
+            for (status_line, body) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buffer = [0_u8; 2048];
+                let n = stream.read(&mut buffer).unwrap();
+                let request = String::from_utf8_lossy(&buffer[..n]);
+                if let Some(first_line) = request.lines().next() {
+                    seen_for_thread.lock().unwrap().push(first_line.to_string());
+                }
+                let response = format!(
+                    "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        (format!("http://{addr}/_bifrost/"), seen, handle)
+    }
+
+    #[test]
+    fn test_rule_toggle_url_for_personal_rule() {
+        let target = RuleTarget::Personal {
+            name: "qa rule".to_string(),
+        };
+        let url = rule_toggle_url("http://127.0.0.1:8800/_bifrost/", &target, true);
+        assert_eq!(
+            url,
+            "http://127.0.0.1:8800/_bifrost/api/rules/qa%20rule/enable"
+        );
+    }
+
+    #[test]
+    fn test_rule_toggle_url_for_group_rule() {
+        let target = RuleTarget::Group {
+            group_name: "Team A".to_string(),
+            name: "shared/rule".to_string(),
+        };
+        let url = rule_toggle_url("http://127.0.0.1:8800/_bifrost/", &target, false);
+        assert_eq!(
+            url,
+            "http://127.0.0.1:8800/_bifrost/api/group-rules/Team%20A/shared%2Frule/disable"
+        );
+    }
+
+    #[test]
+    fn test_load_rules_from_admin_marks_active_personal_and_group_rules() {
+        let (admin_url, seen, handle) = spawn_test_http_server(vec![
+            (
+                "HTTP/1.1 200 OK",
+                r#"[
+                    {"name":"alpha","rule_name":"alpha","group_name":null,"group_id":null},
+                    {"name":"Team A/shared","rule_name":"shared","group_name":"Team A","group_id":"grp-a"}
+                ]"#,
+            ),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"total":1,"rules":[{"name":"shared","rule_count":1,"group_id":"grp-a","group_name":"Team A"}],"variable_conflicts":[],"merged_content":""}"#,
+            ),
+        ]);
+
+        let rules = load_rules_from_admin(&admin_url);
+        handle.join().unwrap();
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                "GET /_bifrost/api/rules/reference-candidates HTTP/1.1",
+                "GET /_bifrost/api/rules/active-summary HTTP/1.1",
+            ]
+        );
+        assert_eq!(rules.len(), 2);
+        let personal = rules
+            .iter()
+            .find(|rule| {
+                rule.target
+                    == RuleTarget::Personal {
+                        name: "alpha".to_string(),
+                    }
+            })
+            .unwrap();
+        assert!(!personal.enabled);
+        let group = rules
+            .iter()
+            .find(|rule| {
+                rule.target
+                    == RuleTarget::Group {
+                        group_name: "Team A".to_string(),
+                        name: "shared".to_string(),
+                    }
+            })
+            .unwrap();
+        assert!(group.enabled);
+    }
+
+    #[test]
+    fn test_select_single_rule_calls_admin_api_for_disable_then_enable() {
+        let (admin_url, seen, handle) = spawn_test_http_server(vec![
+            ("HTTP/1.1 200 OK", r#"{"success":true}"#),
+            ("HTTP/1.1 200 OK", r#"{"success":true}"#),
+        ]);
+        let target = RuleTarget::Personal {
+            name: "beta".to_string(),
+        };
+        let all_targets = vec![
+            RuleTarget::Personal {
+                name: "alpha".to_string(),
+            },
+            target.clone(),
+        ];
+
+        assert!(select_single_rule(&admin_url, &target, &all_targets));
+        handle.join().unwrap();
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                "PUT /_bifrost/api/rules/alpha/disable HTTP/1.1",
+                "PUT /_bifrost/api/rules/beta/enable HTTP/1.1",
+            ]
+        );
     }
 }

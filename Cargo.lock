@@ -768,6 +768,7 @@ dependencies = [
  "tracing-subscriber",
  "tray-icon",
  "ureq",
+ "urlencoding",
 ]
 
 [[package]]

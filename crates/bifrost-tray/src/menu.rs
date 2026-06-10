@@ -3,10 +3,27 @@ use crate::runtime::{RuntimeInfo, ServiceState};
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
+pub enum MenuEntry {
+    Item(MenuItemDef),
+    Submenu(SubmenuDef),
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct SubmenuDef {
+    pub id: String,
+    pub label: String,
+    pub enabled: bool,
+    pub children: Vec<MenuEntry>,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct MenuItemDef {
     pub id: String,
     pub label: String,
     pub enabled: bool,
+    pub checked: bool,
     pub action: MenuItemAction,
 }
 
@@ -14,13 +31,33 @@ pub struct MenuItemDef {
 pub enum MenuItemAction {
     OpenUrl(String),
     CopyText(String),
-    AdminApi { method: String, url: String },
+    AdminApi {
+        method: String,
+        url: String,
+    },
     StartService,
     StopService,
     RestartService,
     OpenDirectory(String),
+    SelectRule {
+        target: RuleTarget,
+        all_targets: Vec<RuleTarget>,
+    },
     QuitTray,
     None,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuleTarget {
+    Personal { name: String },
+    Group { group_name: String, name: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrayRule {
+    pub target: RuleTarget,
+    pub enabled: bool,
+    pub sort_order: i32,
 }
 
 pub fn build_menu(
@@ -29,7 +66,8 @@ pub fn build_menu(
     custom_config: Option<&TrayConfig>,
     data_dir: &str,
     bin_available: bool,
-) -> Vec<MenuItemDef> {
+    rules: &[TrayRule],
+) -> Vec<MenuEntry> {
     let mut items = Vec::new();
     let is_running = state == ServiceState::Running;
 
@@ -42,132 +80,306 @@ pub fn build_menu(
         _ => "Bifrost: Unknown".to_string(),
     };
 
-    items.push(MenuItemDef {
+    items.push(item(MenuItemDef {
         id: "_status".to_string(),
         label: status_label,
         enabled: false,
+        checked: false,
         action: MenuItemAction::None,
-    });
+    }));
 
     if let Some(rt) = runtime {
         let admin_url = rt.admin_url();
 
-        items.push(MenuItemDef {
+        items.push(item(MenuItemDef {
             id: "open_admin_ui".to_string(),
             label: "Open Admin UI".to_string(),
             enabled: is_running,
+            checked: false,
             action: MenuItemAction::OpenUrl(admin_url.clone()),
-        });
+        }));
 
-        items.push(MenuItemDef {
+        items.push(item(MenuItemDef {
             id: "open_traffic".to_string(),
             label: "Open Traffic".to_string(),
             enabled: is_running,
+            checked: false,
             action: MenuItemAction::OpenUrl(format!("{}traffic", admin_url)),
-        });
+        }));
 
-        items.push(MenuItemDef {
+        items.push(item(MenuItemDef {
             id: "open_rules".to_string(),
             label: "Open Rules".to_string(),
             enabled: is_running,
+            checked: false,
             action: MenuItemAction::OpenUrl(format!("{}rules", admin_url)),
-        });
+        }));
 
-        items.push(MenuItemDef {
+        items.push(item(MenuItemDef {
             id: "copy_admin_url".to_string(),
             label: "Copy Admin URL".to_string(),
             enabled: is_running,
+            checked: false,
             action: MenuItemAction::CopyText(admin_url.clone()),
-        });
+        }));
 
-        items.push(MenuItemDef {
+        items.push(item(MenuItemDef {
             id: "copy_http_proxy".to_string(),
             label: "Copy HTTP Proxy".to_string(),
             enabled: is_running,
+            checked: false,
             action: MenuItemAction::CopyText(rt.http_proxy_url()),
-        });
+        }));
 
         let has_socks5 = rt.socks5_port.is_some();
-        items.push(MenuItemDef {
+        items.push(item(MenuItemDef {
             id: "copy_socks5_proxy".to_string(),
             label: "Copy SOCKS5 Proxy".to_string(),
             enabled: is_running && has_socks5,
+            checked: false,
             action: MenuItemAction::CopyText(rt.socks5_proxy_url().unwrap_or_default()),
-        });
+        }));
+    }
+
+    if let Some(rules_menu) = build_rules_menu(rules, is_running) {
+        items.push(MenuEntry::Submenu(rules_menu));
     }
 
     if let Some(cfg) = custom_config {
         if !cfg.items.is_empty() {
-            items.push(MenuItemDef {
-                id: "_sep_custom".to_string(),
-                label: "-".to_string(),
-                enabled: false,
-                action: MenuItemAction::None,
-            });
+            items.push(separator("_sep_custom"));
             for item in &cfg.items {
-                items.push(custom_item_to_def(item, runtime, is_running));
+                items.push(MenuEntry::Item(custom_item_to_def(
+                    item, runtime, is_running,
+                )));
             }
         }
     }
 
-    items.push(MenuItemDef {
-        id: "_sep_actions".to_string(),
-        label: "-".to_string(),
-        enabled: false,
-        action: MenuItemAction::None,
-    });
+    items.push(separator("_sep_actions"));
 
     if is_running {
-        items.push(MenuItemDef {
+        items.push(item(MenuItemDef {
             id: "toggle_service".to_string(),
             label: "Stop Bifrost".to_string(),
             enabled: bin_available,
+            checked: false,
             action: MenuItemAction::StopService,
-        });
-        items.push(MenuItemDef {
+        }));
+        items.push(item(MenuItemDef {
             id: "restart_service".to_string(),
             label: "Restart Bifrost".to_string(),
             enabled: bin_available,
+            checked: false,
             action: MenuItemAction::RestartService,
-        });
+        }));
     } else {
-        items.push(MenuItemDef {
+        items.push(item(MenuItemDef {
             id: "toggle_service".to_string(),
             label: "Start Bifrost".to_string(),
             enabled: bin_available,
+            checked: false,
             action: MenuItemAction::StartService,
-        });
+        }));
     }
 
-    items.push(MenuItemDef {
+    items.push(item(MenuItemDef {
         id: "open_data_dir".to_string(),
         label: "Open Data Directory".to_string(),
         enabled: true,
+        checked: false,
         action: MenuItemAction::OpenDirectory(data_dir.to_string()),
-    });
+    }));
 
-    items.push(MenuItemDef {
+    items.push(item(MenuItemDef {
         id: "open_logs".to_string(),
         label: "Open Logs".to_string(),
         enabled: true,
+        checked: false,
         action: MenuItemAction::OpenDirectory(format!("{}/logs", data_dir)),
-    });
+    }));
 
-    items.push(MenuItemDef {
-        id: "_sep_quit".to_string(),
-        label: "-".to_string(),
-        enabled: false,
-        action: MenuItemAction::None,
-    });
+    items.push(separator("_sep_quit"));
 
-    items.push(MenuItemDef {
+    items.push(item(MenuItemDef {
         id: "quit_tray".to_string(),
         label: "Quit Tray".to_string(),
         enabled: true,
+        checked: false,
         action: MenuItemAction::QuitTray,
-    });
+    }));
 
     items
+}
+
+fn item(def: MenuItemDef) -> MenuEntry {
+    MenuEntry::Item(def)
+}
+
+fn separator(id: &str) -> MenuEntry {
+    item(MenuItemDef {
+        id: id.to_string(),
+        label: "-".to_string(),
+        enabled: false,
+        checked: false,
+        action: MenuItemAction::None,
+    })
+}
+
+fn build_rules_menu(rules: &[TrayRule], is_running: bool) -> Option<SubmenuDef> {
+    if rules.is_empty() {
+        return None;
+    }
+
+    let all_targets = rules
+        .iter()
+        .map(|rule| rule.target.clone())
+        .collect::<Vec<_>>();
+    let active_label = active_rule_label(rules);
+    let has_group_rules = rules
+        .iter()
+        .any(|rule| matches!(rule.target, RuleTarget::Group { .. }));
+    let label = match active_label {
+        Some(name) => format!("Rules: {name}"),
+        None => "Rules: None".to_string(),
+    };
+
+    let children = if has_group_rules {
+        build_grouped_rule_entries(rules, &all_targets, is_running)
+    } else {
+        rules
+            .iter()
+            .enumerate()
+            .map(|(index, rule)| rule_entry(rule, index, &all_targets, is_running))
+            .collect()
+    };
+
+    Some(SubmenuDef {
+        id: "rules_switcher".to_string(),
+        label,
+        enabled: true,
+        children,
+    })
+}
+
+fn active_rule_label(rules: &[TrayRule]) -> Option<String> {
+    let mut active = rules.iter().filter(|rule| rule.enabled);
+    let first = active.next()?;
+    if active.next().is_some() {
+        Some("Multiple".to_string())
+    } else {
+        Some(rule_label(&first.target))
+    }
+}
+
+fn build_grouped_rule_entries(
+    rules: &[TrayRule],
+    all_targets: &[RuleTarget],
+    is_running: bool,
+) -> Vec<MenuEntry> {
+    let mut children = Vec::new();
+    let personal_rules = rules
+        .iter()
+        .enumerate()
+        .filter(|(_, rule)| matches!(rule.target, RuleTarget::Personal { .. }))
+        .collect::<Vec<_>>();
+    if !personal_rules.is_empty() {
+        let personal_children = personal_rules
+            .into_iter()
+            .map(|(index, rule)| rule_entry(rule, index, all_targets, is_running))
+            .collect();
+        children.push(MenuEntry::Submenu(SubmenuDef {
+            id: "rules_my_rules".to_string(),
+            label: "My Rules".to_string(),
+            enabled: true,
+            children: personal_children,
+        }));
+    }
+
+    let mut group_names = rules
+        .iter()
+        .filter_map(|rule| match &rule.target {
+            RuleTarget::Group { group_name, .. } => Some(group_name.clone()),
+            RuleTarget::Personal { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    group_names.sort();
+    group_names.dedup();
+
+    for group_name in group_names {
+        let group_children = rules
+            .iter()
+            .enumerate()
+            .filter(|(_, rule)| match &rule.target {
+                RuleTarget::Group {
+                    group_name: name, ..
+                } => name == &group_name,
+                RuleTarget::Personal { .. } => false,
+            })
+            .map(|(index, rule)| rule_entry(rule, index, all_targets, is_running))
+            .collect();
+        children.push(MenuEntry::Submenu(SubmenuDef {
+            id: format!("rules_group_{}", sanitize_menu_id(&group_name)),
+            label: group_name,
+            enabled: true,
+            children: group_children,
+        }));
+    }
+
+    children
+}
+
+fn rule_entry(
+    rule: &TrayRule,
+    index: usize,
+    all_targets: &[RuleTarget],
+    is_running: bool,
+) -> MenuEntry {
+    item(MenuItemDef {
+        id: format!("select_rule_{index}"),
+        label: short_rule_label(&rule.target),
+        enabled: is_running,
+        checked: rule.enabled,
+        action: MenuItemAction::SelectRule {
+            target: rule.target.clone(),
+            all_targets: all_targets.to_vec(),
+        },
+    })
+}
+
+fn rule_label(target: &RuleTarget) -> String {
+    match target {
+        RuleTarget::Personal { name } => name.clone(),
+        RuleTarget::Group { group_name, name } => format!("{group_name}/{name}"),
+    }
+}
+
+fn short_rule_label(target: &RuleTarget) -> String {
+    match target {
+        RuleTarget::Personal { name } | RuleTarget::Group { name, .. } => name.clone(),
+    }
+}
+
+fn sanitize_menu_id(input: &str) -> String {
+    input
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+pub fn sort_tray_rules(rules: &mut [TrayRule]) {
+    rules.sort_by_key(|rule| rule_label(&rule.target));
+}
+
+#[cfg(test)]
+pub fn build_rules_menu_for_test(rules: &[TrayRule], is_running: bool) -> Option<SubmenuDef> {
+    build_rules_menu(rules, is_running)
 }
 
 fn custom_item_to_def(
@@ -209,6 +421,7 @@ fn custom_item_to_def(
         id: item.id.clone(),
         label: item.label.clone(),
         enabled: is_running,
+        checked: false,
         action,
     }
 }
@@ -216,6 +429,56 @@ fn custom_item_to_def(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn find_item<'a>(entries: &'a [MenuEntry], id: &str) -> Option<&'a MenuItemDef> {
+        for entry in entries {
+            match entry {
+                MenuEntry::Item(item) if item.id == id => return Some(item),
+                MenuEntry::Submenu(submenu) => {
+                    if let Some(item) = find_item(&submenu.children, id) {
+                        return Some(item);
+                    }
+                }
+                MenuEntry::Item(_) => {}
+            }
+        }
+        None
+    }
+
+    fn find_submenu<'a>(entries: &'a [MenuEntry], id: &str) -> Option<&'a SubmenuDef> {
+        for entry in entries {
+            if let MenuEntry::Submenu(submenu) = entry {
+                if submenu.id == id {
+                    return Some(submenu);
+                }
+                if let Some(found) = find_submenu(&submenu.children, id) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+
+    fn personal_rule(name: &str, enabled: bool) -> TrayRule {
+        TrayRule {
+            target: RuleTarget::Personal {
+                name: name.to_string(),
+            },
+            enabled,
+            sort_order: 0,
+        }
+    }
+
+    fn group_rule(group_name: &str, name: &str, enabled: bool) -> TrayRule {
+        TrayRule {
+            target: RuleTarget::Group {
+                group_name: group_name.to_string(),
+                name: name.to_string(),
+            },
+            enabled,
+            sort_order: 0,
+        }
+    }
 
     fn sample_runtime() -> RuntimeInfo {
         RuntimeInfo {
@@ -237,12 +500,14 @@ mod tests {
             None,
             "/tmp/.bifrost",
             true,
+            &[],
         );
-        assert!(menu[0].label.contains("Running on 127.0.0.1:8800"));
-        let open_admin = menu.iter().find(|m| m.id == "open_admin_ui").unwrap();
+        let status = find_item(&menu, "_status").unwrap();
+        assert!(status.label.contains("Running on 127.0.0.1:8800"));
+        let open_admin = find_item(&menu, "open_admin_ui").unwrap();
         assert!(open_admin.enabled);
         // Restart is offered when running
-        let restart = menu.iter().find(|m| m.id == "restart_service").unwrap();
+        let restart = find_item(&menu, "restart_service").unwrap();
         assert!(restart.enabled);
     }
 
@@ -255,11 +520,13 @@ mod tests {
             None,
             "/tmp/.bifrost",
             true,
+            &[],
         );
-        assert!(menu[0].label.contains("Stopped"));
-        let open_admin = menu.iter().find(|m| m.id == "open_admin_ui").unwrap();
+        let status = find_item(&menu, "_status").unwrap();
+        assert!(status.label.contains("Stopped"));
+        let open_admin = find_item(&menu, "open_admin_ui").unwrap();
         assert!(!open_admin.enabled);
-        let quit = menu.iter().find(|m| m.id == "quit_tray").unwrap();
+        let quit = find_item(&menu, "quit_tray").unwrap();
         assert!(quit.enabled);
     }
 
@@ -272,10 +539,11 @@ mod tests {
             None,
             "/tmp/.bifrost",
             false,
+            &[],
         );
-        let stop = menu.iter().find(|m| m.id == "toggle_service").unwrap();
+        let stop = find_item(&menu, "toggle_service").unwrap();
         assert!(!stop.enabled);
-        let restart = menu.iter().find(|m| m.id == "restart_service").unwrap();
+        let restart = find_item(&menu, "restart_service").unwrap();
         assert!(!restart.enabled);
     }
 
@@ -291,8 +559,9 @@ mod tests {
             None,
             "/tmp/.bifrost",
             true,
+            &[],
         );
-        let socks5 = menu.iter().find(|m| m.id == "copy_socks5_proxy").unwrap();
+        let socks5 = find_item(&menu, "copy_socks5_proxy").unwrap();
         assert!(!socks5.enabled);
     }
 
@@ -315,9 +584,42 @@ mod tests {
             Some(&config),
             "/tmp/.bifrost",
             true,
+            &[],
         );
-        let custom = menu.iter().find(|m| m.id == "custom1").unwrap();
+        let custom = find_item(&menu, "custom1").unwrap();
         assert_eq!(custom.label, "My Item");
         assert!(custom.enabled);
+    }
+
+    #[test]
+    fn test_rules_menu_two_levels_without_groups() {
+        let rules = vec![personal_rule("alpha", true), personal_rule("beta", false)];
+
+        let menu = build_rules_menu_for_test(&rules, true).unwrap();
+        assert_eq!(menu.label, "Rules: alpha");
+        assert_eq!(menu.children.len(), 2);
+        assert!(find_submenu(&menu.children, "rules_my_rules").is_none());
+        let alpha = find_item(&menu.children, "select_rule_0").unwrap();
+        let beta = find_item(&menu.children, "select_rule_1").unwrap();
+        assert_eq!(alpha.label, "alpha");
+        assert!(alpha.checked);
+        assert_eq!(beta.label, "beta");
+        assert!(!beta.checked);
+    }
+
+    #[test]
+    fn test_rules_menu_three_levels_with_groups() {
+        let rules = vec![
+            personal_rule("personal", false),
+            group_rule("Team A", "shared", true),
+        ];
+
+        let menu = build_rules_menu_for_test(&rules, true).unwrap();
+        assert_eq!(menu.label, "Rules: Team A/shared");
+        let personal = find_submenu(&menu.children, "rules_my_rules").unwrap();
+        let group = find_submenu(&menu.children, "rules_group_Team_A").unwrap();
+        assert_eq!(personal.label, "My Rules");
+        assert_eq!(group.label, "Team A");
+        assert!(find_item(&group.children, "select_rule_1").unwrap().checked);
     }
 }

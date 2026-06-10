@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证 `bifrost-tray` 托盘 helper 在 macOS/Windows 上的完整生命周期：CLI 自动拉起、托盘图标显示、默认菜单操作、自定义菜单加载、单实例保护、服务停止后状态变化，以及 `--no-tray` / `BIFROST_DISABLE_TRAY=1` 的禁用行为。
+验证 `bifrost-tray` 托盘 helper 在 macOS/Windows 上的完整生命周期：CLI 自动拉起、托盘图标显示、默认菜单操作、Rules 快速切换、自定义菜单加载、单实例保护、服务停止后状态变化，以及 `--no-tray` / `BIFROST_DISABLE_TRAY=1` 的禁用行为。
 
 ## 前置条件
 
@@ -10,6 +10,7 @@
 - 已编译 `bifrost` 和 `bifrost-tray` 二进制（`cargo build --bin bifrost --bin bifrost-tray`）
 - `bifrost-tray` 位于 `bifrost` 同目录下，或设置 `BIFROST_TRAY_BIN` 环境变量指向编译产物
 - 使用临时数据目录避免影响现有服务
+- 规则切换验证必须通过管理端 HTTP API 准备/验证规则状态，禁止直接编辑 `rules/` 或 `state.json`
 
 ## 启动命令模板
 
@@ -177,6 +178,51 @@ echo "not valid json" > ./.bifrost-tray-test/tray.json
 - 服务正常启动
 - 不产生 `tray.pid` 或 `tray.lock`
 - CLI help 中不显示 `--no-tray` 参数
+
+### TC-TH-13: Rules 菜单仅个人规则时展示两级并支持单选
+
+**操作步骤：**
+1. 使用启动命令模板启动 Bifrost 服务
+2. 通过 Admin API 创建两条个人规则：
+```bash
+curl -sS -X POST http://127.0.0.1:8801/_bifrost/api/rules \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"tray-personal-a","content":"example.com statusCode://201","enabled":true}'
+curl -sS -X POST http://127.0.0.1:8801/_bifrost/api/rules \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"tray-personal-b","content":"example.org statusCode://202","enabled":false}'
+```
+3. 点击托盘图标展开菜单，把鼠标悬浮到 `Rules: tray-personal-a`
+4. 观察 Rules 下级菜单，然后点击 `tray-personal-b`
+5. 再次展开托盘菜单，并调用 `curl -sS http://127.0.0.1:8801/_bifrost/api/rules/active-summary`
+
+**预期结果：**
+- 顶层菜单存在 `Rules: tray-personal-a`
+- 只有个人规则时，Rules 下一级直接展示 `tray-personal-a` 和 `tray-personal-b`，不出现 `My Rules` 或组名层级
+- `tray-personal-a` 初始带原生勾选标记，`tray-personal-b` 初始不勾选
+- 点击 `tray-personal-b` 后，顶层文案更新为 `Rules: tray-personal-b`
+- `active-summary` 只包含 `tray-personal-b`，不包含 `tray-personal-a`
+- 准备、读取和切换均通过 Admin API 完成，没有直接编辑规则文件
+
+### TC-TH-14: Rules 菜单存在组规则时展示三级并支持跨组单选
+
+**操作步骤：**
+1. 使用启动命令模板启动 Bifrost 服务
+2. 确保 Sync/Group 已登录并已有一个可访问组；若无真实组会话，本用例标记为环境阻塞，不可假设通过
+3. 通过 Admin API 创建或确认一条个人规则 `tray-personal-c`
+4. 通过 Admin API 创建或确认一条组规则 `tray-group-rule-a`
+5. 通过 `PUT /_bifrost/api/rules/tray-personal-c/enable` 启用个人规则，并通过组规则 disable API 禁用组规则
+6. 点击托盘图标展开菜单，把鼠标悬浮到 `Rules: tray-personal-c`
+7. 观察第二级菜单，再悬浮到组名，点击 `tray-group-rule-a`
+8. 再次展开托盘菜单，并调用 `curl -sS http://127.0.0.1:8801/_bifrost/api/rules/active-summary`
+
+**预期结果：**
+- 顶层菜单存在 `Rules: tray-personal-c`
+- 存在组规则时，Rules 第二级展示 `My Rules` 与组名，二者平级
+- `My Rules` 的下一级展示个人规则；组名的下一级展示组规则
+- 点击组规则后，顶层文案更新为 `Rules: <组名>/tray-group-rule-a`
+- `active-summary` 只包含被点击的组规则，不包含 `tray-personal-c`
+- 切换动作使用 Admin API 的个人规则 enable/disable 与组规则 enable/disable 接口
 
 ## 清理步骤
 
