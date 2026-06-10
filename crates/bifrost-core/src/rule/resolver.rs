@@ -143,6 +143,27 @@ pub struct RulesResolver {
     values: HashMap<String, String>,
     cache: Arc<RwLock<LruCache>>,
     cache_enabled: bool,
+    /// Whether any rule has a filter whose match depends on per-request data that
+    /// is NOT part of the base cache key (request headers/cookies, client IP).
+    /// When true, the resolution cache key must also incorporate that data,
+    /// otherwise two requests that differ only in those fields would share a
+    /// cached result and header/cookie/IP filters would return stale matches.
+    cache_key_needs_request_ctx: bool,
+}
+
+/// A filter matches against per-request data (request header/cookie/client IP)
+/// that is not encoded in the base cache key. Resolutions for rule sets that use
+/// such filters must key the cache on that data too.
+fn rule_filter_needs_request_ctx(rule: &Rule) -> bool {
+    rule.include_filters
+        .iter()
+        .chain(rule.exclude_filters.iter())
+        .any(|f| {
+            matches!(
+                f,
+                Filter::HeaderExists(_) | Filter::HeaderMatch { .. } | Filter::ClientIp(_)
+            )
+        })
 }
 
 impl RulesResolver {
@@ -150,11 +171,15 @@ impl RulesResolver {
         let mut sorted_rules = rules;
         sorted_rules.sort_by_key(|b| std::cmp::Reverse(b.priority()));
 
+        let cache_key_needs_request_ctx =
+            sorted_rules.iter().any(rule_filter_needs_request_ctx);
+
         Self {
             rules: sorted_rules,
             values: HashMap::new(),
             cache: Arc::new(RwLock::new(LruCache::new(DEFAULT_CACHE_CAPACITY))),
             cache_enabled: true,
+            cache_key_needs_request_ctx,
         }
     }
 
@@ -196,6 +221,9 @@ impl RulesResolver {
 
     pub fn add_rule(&mut self, rule: Rule) {
         let priority = rule.priority();
+        if rule_filter_needs_request_ctx(&rule) {
+            self.cache_key_needs_request_ctx = true;
+        }
         let pos = self
             .rules
             .binary_search_by(|r| priority.cmp(&r.priority()))
@@ -255,7 +283,30 @@ impl RulesResolver {
     }
 
     pub fn resolve(&self, ctx: &RequestContext) -> ResolvedRules {
-        let cache_key = format!("{}|{}|{}|{}", ctx.url, ctx.host, ctx.path, ctx.method);
+        let cache_key = if self.cache_key_needs_request_ctx {
+            // Some rule filters depend on request headers/cookies/client IP, which
+            // are not in the base key. Mix a stable hash of them in so requests
+            // that differ only in those fields don't collide on a stale result.
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            let mut headers: Vec<(&String, &String)> = ctx.req_headers.iter().collect();
+            headers.sort();
+            headers.hash(&mut hasher);
+            let mut cookies: Vec<(&String, &String)> = ctx.req_cookies.iter().collect();
+            cookies.sort();
+            cookies.hash(&mut hasher);
+            ctx.client_ip.hash(&mut hasher);
+            format!(
+                "{}|{}|{}|{}|{:x}",
+                ctx.url,
+                ctx.host,
+                ctx.path,
+                ctx.method,
+                hasher.finish()
+            )
+        } else {
+            format!("{}|{}|{}|{}", ctx.url, ctx.host, ctx.path, ctx.method)
+        };
 
         tracing::trace!(
             target: "bifrost_core::rules",
@@ -1797,4 +1848,53 @@ mod tests {
         assert_eq!(host_rules.len(), 1);
         assert_eq!(host_rules[0].resolved_value, "localhost:8080");
     }
+
+
+
+    #[test]
+    fn test_header_filter_not_stale_across_requests() {
+        // Regression: the cache key must account for request headers when a rule
+        // filters on them, so two requests differing only by header value resolve
+        // independently instead of sharing a stale cached result.
+        let rules = crate::rule::parser::parse_rules(
+            "hc.test host://127.0.0.1:9 includeFilter://h:x-tag=match",
+        )
+        .unwrap();
+        let resolver = RulesResolver::new(rules);
+
+        let mut ctx_match = RequestContext::from_url("http://hc.test/");
+        ctx_match.method = "GET".to_string();
+        ctx_match
+            .req_headers
+            .insert("x-tag".to_string(), "match".to_string());
+        assert_eq!(
+            resolver.resolve(&ctx_match).rules.len(),
+            1,
+            "header value matches the filter -> rule applies"
+        );
+
+        // Same url|host|path|method, different header value -> filter must NOT match.
+        let mut ctx_nomatch = RequestContext::from_url("http://hc.test/");
+        ctx_nomatch.method = "GET".to_string();
+        ctx_nomatch
+            .req_headers
+            .insert("x-tag".to_string(), "nope".to_string());
+        assert_eq!(
+            resolver.resolve(&ctx_nomatch).rules.len(),
+            0,
+            "different header value must not reuse the cached match"
+        );
+
+        // And the original matching request still resolves correctly afterwards.
+        assert_eq!(resolver.resolve(&ctx_match).rules.len(), 1);
+    }
+
+    #[test]
+    fn test_cache_key_fast_path_when_no_header_filters() {
+        // Rule sets without header/cookie/IP filters keep the cheap cache key.
+        let rules = crate::rule::parser::parse_rules("ex.test host://127.0.0.1:9").unwrap();
+        let resolver = RulesResolver::new(rules);
+        assert!(!resolver.cache_key_needs_request_ctx);
+    }
+
 }
