@@ -89,11 +89,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [[ "${SKIP_BUILD:-false}" == "true" ]]; then
-  echo "Skipping build for tray startup smoke, using $BIN"
-elif [[ "${BIFROST_TRAY_STARTUP_SKIP_BUILD:-0}" != "1" || ! -x "$BIN" ]]; then
+if [[ -n "${BIFROST_BIN:-}" || "${SKIP_BUILD:-false}" == "true" || "${BIFROST_TRAY_STARTUP_SKIP_BUILD:-0}" == "1" ]]; then
+  echo "Reusing existing bifrost binary for tray startup smoke: $BIN"
+elif [[ ! -x "$BIN" ]]; then
   echo "Building bifrost binary for tray startup smoke..."
   SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost
+else
+  echo "Using existing release bifrost binary for tray startup smoke: $BIN"
 fi
 
 if [[ ! -x "$BIN" ]]; then
