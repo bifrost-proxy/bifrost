@@ -308,9 +308,9 @@ fn clear_completed_operation(operation: &AtomicU8, state: u8) {
 
 fn load_icon(dimmed: bool) -> tray_icon::Icon {
     #[cfg(target_os = "macos")]
-    let icon_bytes: &[u8] = include_bytes!("../../../assets/trayTemplate@2x.png");
+    let icon_bytes: &[u8] = include_bytes!("../../../../../assets/trayTemplate@2x.png");
     #[cfg(target_os = "windows")]
-    let icon_bytes: &[u8] = include_bytes!("../../../assets/bifrost.ico");
+    let icon_bytes: &[u8] = include_bytes!("../../../../../assets/bifrost.ico");
 
     let img = image::load_from_memory(icon_bytes).expect("failed to load icon");
     let mut rgba = img.to_rgba8();

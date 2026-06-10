@@ -118,6 +118,20 @@
 - 第 1、2 次失败后按 `attempt * 20` 秒递增等待，第 3 次仍失败才让 job 失败。
 - 如果 `static.rust-lang.org` 或 rustup 下载出现短暂网络抖动，macOS CLI build 有机会自动恢复；远端 `Build macOS CLI (aarch64-apple-darwin)` 与 `Build macOS CLI (x86_64-apple-darwin)` 最终进入 success。
 
+### TC-CMCE-08: x86_64 macOS CLI 构建 timeout 覆盖冷缓存耗时
+
+**操作步骤**：
+1. 检查 PR CI x86_64 macOS CLI 构建 job 的 timeout：
+   ```bash
+   ruby -ryaml -e 'job = YAML.load_file(".github/workflows/ci.yml")["jobs"]["build-cli-macos-x86_64"]; raise job.inspect unless job["runs-on"] == "macos-15-intel" && job["timeout-minutes"] >= 90'
+   ```
+2. 推送当前分支并观察 GitHub Actions `CI` workflow。
+
+**预期结果**：
+- `build-cli-macos-x86_64` 的 timeout 不低于 90 分钟。
+- 冷缓存或低速 Intel macOS runner 编译 `bifrost-cli` 时不会在 60 分钟处被 CI 取消。
+- 远端 `Build macOS CLI (x86_64-apple-darwin)` 最终进入 success。
+
 ## 清理步骤
 
 - 无清理需求；本测试不创建临时服务实例、不写入数据目录、不修改系统代理。
@@ -127,3 +141,4 @@
 - 2026-05-15：通过。执行 `rg -n 'Verify Rust tool paths|rustup which cargo|rustup which rustc' .github/workflows/ci.yml` 与 `rg -n 'Build macOS desktop bundle|export CARGO="\\$\\(rustup which cargo\\)"|export RUSTC="\\$\\(rustup which rustc\\)"|pnpm exec tauri build' .github/workflows/ci.yml`，确认 macOS desktop bundle 在 Tauri 构建前校验真实工具链，并在同一 shell step 中导出 `CARGO/RUSTC`；远端 TC-CMCE-05 由后续 GitHub Actions `CI` run 验证。
 - 2026-05-28：通过。执行 `rg -n 'Install Rust toolchain with retry|command -v rustup|https://sh\\.rustup\\.rs|rustup toolchain install stable --target "\\$\\{target\\}" --profile minimal --no-self-update|attempt \\* 20|Failed to install stable Rust toolchain' .github/workflows/ci.yml`，确认 PR CI macOS desktop bundle toolchain 安装保留 rustup bootstrap 且具备 3 次重试；执行 `rg -n 'Install Rust toolchain with retry|runner\\.os == '\''macOS'\''|command -v rustup|https://sh\\.rustup\\.rs|rustup toolchain install stable --target "\\$\\{target\\}" --profile minimal --no-self-update|attempt \\* 20|Failed to install stable Rust toolchain' .github/workflows/release.yml`，确认 release macOS desktop bundle 同步具备重试且非 macOS 仍走 `dtolnay/rust-toolchain@stable`。远端 TC-CMCE-06 由推送后的 GitHub Actions `CI` run 验证。
 - 2026-06-04：通过。执行 `rg -n 'build-cli-macos-aarch64:|build-cli-macos-x86_64:|Install Rust toolchain with retry|target="aarch64-apple-darwin"|target="x86_64-apple-darwin"|command -v rustup|https://sh\\.rustup\\.rs|rustup toolchain install stable --target "\\$\\{target\\}" --profile minimal --no-self-update|attempt \\* 20|Failed to install stable Rust toolchain' .github/workflows/ci.yml`，确认两个 macOS CLI 构建 job 都具备 rustup bootstrap 和 3 次 toolchain 安装重试；远端 TC-CMCE-07 由推送后的 GitHub Actions `CI` run 验证。
+- 2026-06-10：通过。执行 `ruby -ryaml -e 'job = YAML.load_file(".github/workflows/ci.yml")["jobs"]["build-cli-macos-x86_64"]; raise job.inspect unless job["runs-on"] == "macos-15-intel" && job["timeout-minutes"] >= 90'` 解析 `.github/workflows/ci.yml`，确认 `build-cli-macos-x86_64` 运行在 `macos-15-intel` 且 `timeout-minutes >= 90`；远端 TC-CMCE-08 由推送后的 GitHub Actions `CI` run 验证。

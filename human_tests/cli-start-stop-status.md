@@ -759,6 +759,43 @@ PY
 
 ---
 
+### TC-CSS-31：stop 前置清理系统代理，restart 保留系统代理（回归）
+
+**前置条件**：服务未运行，测试使用临时数据目录和动态端口。
+
+**操作步骤**：
+1. 执行 focused 单测验证 shutdown marker、foreground cleanup marker 与 restart stop 模式：
+   ```bash
+   cargo test -p bifrost-core system_proxy_shutdown_mode_marker_is_read_and_consumed -- --nocapture
+   cargo test -p bifrost-cli --test daemon_shutdown stop_triggers_graceful_shutdown_in_daemon_mode -- --nocapture
+   ```
+2. 使用临时数据目录启动不修改系统代理的 daemon：
+   ```bash
+   BIFROST_DATA_DIR="$TEST_DATA_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 cargo run --bin bifrost -- start -p "$PORT" -H 127.0.0.1 --daemon --skip-cert-check --no-system-proxy --no-intercept
+   ```
+3. 执行 stop，并记录命令耗时：
+   ```bash
+   BIFROST_DATA_DIR="$TEST_DATA_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 cargo run --bin bifrost -- stop
+   ```
+4. 再次执行 status，并检查代理端口不再监听。
+5. 使用新的临时数据目录启动不修改系统代理的 daemon，执行真实 `bifrost restart`，验证旧 PID 被替换、新 daemon ready，且 restart log 不包含 `--system-proxy`。
+
+**预期结果**：
+- `stop` 写入 `foreground_cleanup` marker，先在前台清理系统代理/CLI proxy，再发送 SIGTERM；无系统代理场景也不应输出 `Sending SIGKILL`。
+- `stop` 输出 `Cleaning system proxy before stopping Bifrost proxy...`，且不输出 `System proxy cleanup continues in background if needed.`。
+- restart 专用 stop 使用 preserve marker，旧 daemon 和旧 lifecycle helper 不清理系统代理，fresh daemon 继续接管同一 host/port。
+- 无系统代理 restart 是跨平台一致能力：Linux/macOS CI 均应完成 daemon handoff，fresh start argv 不应包含 `--system-proxy`，并且不残留 `.system_proxy_shutdown_mode`。
+- `stop` 返回后 status 显示服务未运行，端口不再监听，临时数据目录可删除。
+- 测试命令统一带 `--no-system-proxy`，不修改本机系统代理；涉及真实系统代理的耗时回归由 `cli-system-proxy.md` 的系统代理用例覆盖。
+
+**执行记录**：
+- 2026-06-10 执行 focused 单测、E2E 与真实 CLI 验证通过。`source ~/.zshrc && cargo test -p bifrost-core system_proxy_shutdown_mode_marker_is_read_and_consumed -- --nocapture` 通过，确认 `preserve_for_restart`、`background_cleanup`、`foreground_cleanup` marker 均可 read 且 consume 只消费一次；`source ~/.zshrc && cargo test -p bifrost-cli --test daemon_shutdown stop_triggers_graceful_shutdown_in_daemon_mode -- --nocapture` 通过，确认 daemon stop 未升级到 SIGKILL；`source ~/.zshrc && cargo build --bin bifrost && SKIP_BUILD=true e2e-tests/tests/test_stop_restart_shutdown_marker.sh` 结果 10/10 PASS，覆盖 startup 清理 stale restart marker、stop 先输出 `Cleaning system proxy before stopping Bifrost proxy...` 再输出 `Stopping Bifrost proxy`、不输出后台 cleanup 提示、stop 实测 `508ms`、status stopped；同一脚本通过 fake `scutil` / `networksetup` 隔离执行真实 `bifrost restart`，确认 restart argv 带 `--system-proxy`，fake 系统代理在旧 daemon 停止、端口释放、fresh daemon ready 期间持续指向同一 `127.0.0.1:$PORT`，未出现 disable gap。真实 CLI 使用临时数据目录和动态端口；普通 stop 用例启动参数带 `--no-system-proxy`，不修改本机系统代理；restart handoff 用例使用 fake 系统命令，不触碰本机真实系统代理。
+- 2026-06-10 跨平台补强：针对 review 指出的 Linux 不支持完整系统代理配置但其他 restart 能力应对齐，`test_stop_restart_shutdown_marker.sh` 新增无系统代理 restart 子用例。执行真实 `bifrost restart` 后确认 fresh daemon ready、runtime PID 已变化、restart argv 不含 `--system-proxy`、`.system_proxy_shutdown_mode` 不残留；该子用例不依赖 macOS fake `networksetup`，会在 Linux/macOS shell CI 中执行。
+- 2026-06-10 本轮复测：`source ~/.zshrc && cargo fmt --all -- --check && cargo test -p bifrost-core test_is_supported -- --nocapture && cargo test -p bifrost-cli restart_handoff_recovery -- --nocapture && cargo build --bin bifrost && SKIP_BUILD=true e2e-tests/tests/test_stop_restart_shutdown_marker.sh` 通过。脚本结果 14/14 PASS，新增无系统代理 restart 子用例通过，macOS fake system proxy handoff 仍保持无 cleanup gap。
+- 2026-06-10 CI shell 覆盖确认：执行 `source ~/.zshrc && for shard in 1 2 3; do BIFROST_E2E_SHARD_INDEX="$shard" BIFROST_E2E_SHARD_TOTAL=3 bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests | rg 'test_stop_restart_shutdown_marker|test_system_proxy_e2e' || true; done`，确认 `test_stop_restart_shutdown_marker.sh` 被 Linux/macOS shell CI 的 shard 1/3 收集，且未被 CI skip 列表过滤；`test_system_proxy_e2e.sh` 仍按既有策略跳过 Linux，避免在 Linux 写半成品系统代理。
+
+---
+
 
 ## 清理
 

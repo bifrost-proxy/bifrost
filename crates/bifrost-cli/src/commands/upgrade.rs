@@ -1131,7 +1131,7 @@ fn maybe_restart_running_proxy(auto_restart: bool) -> Result<(), BifrostError> {
     let system_proxy_snapshot = capture_runtime_system_proxy_snapshot(runtime_info.as_ref());
 
     println!("{}", "  Stopping current proxy...".bright_cyan());
-    super::stop::run_stop()
+    super::stop::run_stop_for_restart()
         .map_err(|e| BifrostError::Config(format!("Failed to stop running proxy: {}", e)))?;
 
     let exe_path = env::current_exe().map_err(BifrostError::Io)?;
@@ -1170,7 +1170,12 @@ fn build_restart_args(
     runtime_info: Option<&crate::process::RuntimeInfo>,
     system_proxy_snapshot: Option<&RuntimeSystemProxySnapshot>,
 ) -> Vec<String> {
-    let mut args = vec!["start".to_string(), "-d".to_string(), "-y".to_string()];
+    let mut args = vec![
+        "start".to_string(),
+        "-d".to_string(),
+        "-y".to_string(),
+        "--skip-cert-check".to_string(),
+    ];
 
     if let Some(info) = runtime_info {
         args.push("-p".to_string());
@@ -1313,6 +1318,7 @@ mod tests {
                 "start",
                 "-d",
                 "-y",
+                "--skip-cert-check",
                 "-p",
                 "8080",
                 "--host",
@@ -1337,13 +1343,16 @@ mod tests {
         };
 
         let args = build_restart_args(Some(&info), None);
-        assert_eq!(args, vec!["start", "-d", "-y", "-p", "9900"]);
+        assert_eq!(
+            args,
+            vec!["start", "-d", "-y", "--skip-cert-check", "-p", "9900"]
+        );
     }
 
     #[test]
     fn test_build_restart_args_no_runtime_info() {
         let args = build_restart_args(None, None);
-        assert_eq!(args, vec!["start", "-d", "-y"]);
+        assert_eq!(args, vec!["start", "-d", "-y", "--skip-cert-check"]);
     }
 
     #[test]
@@ -1360,7 +1369,10 @@ mod tests {
         };
 
         let args = build_restart_args(Some(&info), None);
-        assert_eq!(args, vec!["start", "-d", "-y", "-p", "8800"]);
+        assert_eq!(
+            args,
+            vec!["start", "-d", "-y", "--skip-cert-check", "-p", "8800"]
+        );
     }
 
     #[test]
@@ -1387,6 +1399,7 @@ mod tests {
                 "start",
                 "-d",
                 "-y",
+                "--skip-cert-check",
                 "-p",
                 "9900",
                 "--system-proxy",

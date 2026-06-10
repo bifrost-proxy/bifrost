@@ -1255,8 +1255,53 @@
 
 ---
 
+### TC-CSP-36：stop 前置清理系统代理，macOS 多 network service 写入有界并行
+
+**前置条件**：
+- macOS 机器。
+- 使用临时数据目录和非默认端口，避免影响正式 `~/.bifrost`。
+- 当前系统代理初始状态已快照，测试结束必须恢复。
+
+**操作步骤**：
+1. 执行 focused 单测，验证 `foreground_cleanup` marker 与系统代理模块编译/单元逻辑：
+   ```bash
+   source ~/.zshrc && cargo test -p bifrost-core system_proxy_shutdown_mode_marker_is_read_and_consumed -- --nocapture
+   source ~/.zshrc && cargo test -p bifrost-core system_proxy -- --nocapture
+   ```
+2. 执行 stop/restart shutdown marker E2E：
+   ```bash
+   source ~/.zshrc && cargo build --bin bifrost
+   source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_stop_restart_shutdown_marker.sh
+   ```
+3. 执行系统代理真实场景 E2E：
+   ```bash
+   source ~/.zshrc && BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 bash e2e-tests/tests/test_system_proxy_e2e.sh
+   ```
+4. 检查代码路径：
+   ```bash
+   source ~/.zshrc && rg -n "run_macos_services_parallel|MACOS_NETWORKSETUP_MAX_PARALLEL_SERVICES|ForegroundCleanup" crates/bifrost-core/src/system_proxy.rs crates/bifrost-core/src/system_proxy_launchd.rs crates/bifrost-cli/src/commands
+   ```
+
+**预期结果**：
+- `bifrost stop` 输出 `Cleaning system proxy before stopping Bifrost proxy...`，且不输出 `System proxy cleanup continues in background if needed.`。
+- stop 在系统代理 cleanup 成功后才停止主服务；如果 cleanup 失败，应返回错误并保持主服务运行，避免 OS proxy 指向 dead listener。
+- restart / upgrade restart 使用 `preserve_for_restart` marker，旧 daemon 和 lifecycle helper 不清理系统代理，fresh daemon 继续接管同一 host/port。
+- fresh `start --system-proxy` 在 marker 与旧 runtime 同时存在时跳过启动前 crash recovery；无 runtime 或不启用系统代理时必须执行普通 recovery。进入新 runtime 前失败时由 startup guard 兜底 recovery。
+- restart handoff 在进入新 runtime 前失败时，启动期 guard 会执行 crash recovery，避免 system proxy 挂在已停旧 listener。
+- restart handoff 在 exec fresh daemon 前不重复 re-apply 系统代理；旧 daemon 和 helper 已通过 `preserve_for_restart` 保持当前 host/port，orphan 必须尽快 exec fresh daemon，避免 `networksetup` 写入阻塞新 listener 接管。fresh daemon 启动前 recovery 与 system proxy reconcile 线程的初始 recovery 都要识别并跳过同一 handoff 窗口；core `SystemProxyManager::Drop` 也要在 `preserve_for_restart` / `foreground_cleanup` marker 下跳过 restore，之后再按 `--system-proxy` reconcile。
+- Linux 暂不支持 Bifrost 托管系统代理写入，`SystemProxyManager::is_supported()` 必须返回 false；Linux CI 只验证无系统代理 restart/stop 等平台一致路径，不启动 lifecycle helper，也不写 shutdown marker。
+- macOS 普通 `networksetup` 与 sudo 写入/恢复/disable 路径按 network service 有界并行；单个 service 内 HTTP/HTTPS/bypass 配置顺序保持不变；GUI 授权路径不并行弹窗。
+- `.system_proxy.lock` 仍然覆盖并行写入外层，跨进程不会同时修改同一批系统代理配置。
+
+---
+
 ## 执行记录
 
+- 2026-06-10：针对 stop/restart 系统代理顺序与 macOS 多 network service 写入加速，新增并执行 TC-CSP-36 自动化子集。执行 `source ~/.zshrc && cargo test -p bifrost-core system_proxy_shutdown_mode_marker_is_read_and_consumed -- --nocapture`，结果 1/1 PASS，覆盖 `preserve_for_restart`、`background_cleanup`、`foreground_cleanup` marker read/consume；执行 `source ~/.zshrc && cargo test -p bifrost-cli restart -- --nocapture`，结果 lib/main 各 18/18 PASS，覆盖 restart argv 保留 `--system-proxy`、`--skip-cert-check`、旧 runtime host/socks5、stop 失败 abort 与启动侧 handoff guard 相关路径；执行 `source ~/.zshrc && cargo test -p bifrost-core system_proxy -- --nocapture`，结果 44/44 PASS，覆盖系统代理恢复/锁/launchd/retry 相关单测；执行 `source ~/.zshrc && cargo build --bin bifrost && SKIP_BUILD=true e2e-tests/tests/test_stop_restart_shutdown_marker.sh`，结果 10/10 PASS，stop 输出 `Cleaning system proxy before stopping Bifrost proxy...` 后才输出 `Stopping Bifrost proxy`，且未输出后台 cleanup 提示、未升级 SIGKILL；同一脚本通过 fake `scutil` / `networksetup` 隔离执行真实 `bifrost restart`，确认 fake 系统代理在旧 daemon 停止、端口释放、fresh daemon ready 期间持续指向同一 Bifrost host/port，补齐外部 system proxy owner 场景下原非隔离 restart 用例会跳过的覆盖缺口。执行 `source ~/.zshrc && BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 bash e2e-tests/tests/test_system_proxy_e2e.sh`，结果 18/18 PASS。当前机器存在外部/正式 system proxy owner，suite 按保护规则跳过非隔离 restart、crash、Admin API helper、脏 backup、启动失败前恢复等真实写入用例，未抢占正式代理；无 backup/state runtime target 清理、LaunchDaemon one-shot、network services readiness retry 等可隔离路径均通过。
+- 2026-06-10 CI 复核：PR CI 的 `E2E Shell (aarch64-apple-darwin, shard 1/3)` 首轮发现 `test_stop_restart_shutdown_marker.sh` 在 restart handoff 里未看到 fresh daemon ready，随后本地复现到旧 daemon shutdown marker skip 后底层 `SystemProxyManager::Drop` 仍可能二次 restore，导致 fake system proxy 从 `Yes` 回到 `No`。修复为 marker-skip 分支显式 `detach_in_place()` manager。后续 CI 又发现 restart orphan 在 exec fresh daemon 前 re-apply 旧 runtime target 可能阻塞在 macOS system proxy 写入路径，导致新 daemon 未启动；修复为 orphan 不再重复 re-apply，直接保留现有 system proxy target 并尽快 exec fresh daemon。进一步本地复现到 fresh daemon 的 system proxy reconcile 线程初始 `recover_from_crash` 会在 listener 接管前恢复旧 managed target；修复为 reconcile 初始 recovery 同样识别 `preserve_for_restart` handoff 并跳过，随后按 `--system-proxy` reconcile。复跑 `source ~/.zshrc && cargo fmt --all -- --check && cargo test -p bifrost-cli restart -- --nocapture && cargo build --bin bifrost && SKIP_BUILD=true e2e-tests/tests/test_stop_restart_shutdown_marker.sh`，结果 CLI restart lib/main 各 20/20 PASS、cli_commands 3/3 PASS，E2E 14/14 PASS；复跑 `source ~/.zshrc && cargo test -p bifrost-core system_proxy -- --nocapture`，结果 core 45/45 PASS。
+- 2026-06-10 跨平台 review 补强：确认普通 stop 的 shutdown marker 仅在托管系统代理平台写入，且普通 stop marker 写入失败时降级为 warning 后继续前台 cleanup；restart 的 `preserve_for_restart` marker 在托管系统代理平台仍要求写入成功。`SystemProxyManager::is_supported()` 收敛为 macOS/Windows，Linux 固定 false，避免 Linux CI 暴露半成品系统代理写入路径。`test_stop_restart_shutdown_marker.sh` 新增无系统代理 restart 子用例，验证 Linux/macOS 都能完成 fresh daemon handoff、restart argv 不含 `--system-proxy` 且不残留 shutdown marker。
+- 2026-06-10 本轮复测：执行 `source ~/.zshrc && cargo test -p bifrost-core system_proxy -- --nocapture`，结果 44/44 PASS，其中 `test_is_supported` 现在按平台断言 Linux 固定 false、macOS/Windows 对齐底层 `sysproxy`；执行 `source ~/.zshrc && cargo test -p bifrost-cli restart -- --nocapture`，结果 lib/main 各 19/19 PASS、cli_commands 3/3 PASS；执行 `source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_stop_restart_shutdown_marker.sh`，结果 14/14 PASS，覆盖无系统代理 restart 跨平台子用例与 macOS fake 系统代理 handoff。
+- 2026-06-10 CI shell 覆盖确认：执行 `source ~/.zshrc && BIFROST_E2E_SHARD_INDEX=1 BIFROST_E2E_SHARD_TOTAL=3 bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests`，输出包含 `test_stop_restart_shutdown_marker.sh`；shard 2/3 与 3/3 不包含该脚本，说明该跨平台用例会在 Linux/macOS shell CI shard 1 中真实执行，而不是仅本地人工验证。
 - 2026-06-09：针对 macOS 合盖睡眠后主进程 scheduler 未感知 wake gap、lifecycle helper 尚未注册原生 wake notification 的问题，补充并执行 TC-CSP-32 相关自动化子集。第一轮执行 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 bash e2e-tests/tests/test_system_proxy_e2e.sh` 发现 `IORegisterForSystemPower` FFI 签名错误导致 hidden `system-proxy lifecycle-helper` 以 exit code 139 退出，Admin API 运行中启用后的 crash cleanup 也因此未清理 18889 系统代理残留；修复 FFI 后直接执行 hidden helper，确认 helper 3 秒后仍存活，`$TEST_DATA_DIR/logs/bifrost.2026-06-09.log` 包含 `macOS power notification watcher started` 和 `system proxy lifecycle helper power watcher started`。最终重跑系统代理 E2E，结果 18/18 PASS，覆盖 direct lifecycle helper 注册 IOKit power watcher、无 backup/state runtime target 清理、Admin API crash cleanup 等路径；本机正式 system proxy owner 为 `127.0.0.1:9900`，脚本按外部 owner 保护规则跳过非隔离睡眠漂移、restart 保持、daemon restart-before-restore、脏 backup disable 和启动失败前恢复用例，避免误抢正式代理。
 - 2026-06-09：针对 0.0.95 WebView 停止系统代理后又恢复为开启的脏 backup 回归，补充 TC-CSP-35 和脚本自动化 `test_admin_api_disable_ignores_dirty_backup_pointing_to_self`。执行 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 bash e2e-tests/tests/test_system_proxy_e2e.sh`，结果 17/17 PASS；当前机器存在正式 system proxy owner `127.0.0.1:9900`，新增 TC-CSP-35 脚本用例按外部 owner 保护规则跳过非隔离真实写入，避免误抢正式代理。执行 `cargo test -p bifrost-core explicit_disable -- --nocapture`，结果 2/2 PASS，覆盖脏 backup host/port 指回当前 target 时即使 bypass 不同也应忽略；执行 `cargo test -p bifrost-admin proxy::tests -- --nocapture`，结果 4/4 PASS，覆盖 disable verification；执行 `cargo test -p bifrost-cli commands::system_proxy::tests -- --nocapture`，结果 lib/main 各 6/6 PASS，覆盖 CLI runtime target fallback、wildcard host 到 loopback 映射和托管 runtime restart 参数。
 - 2026-06-09：针对托管 daemon 主进程崩溃后系统代理继续指向旧 listener 的可靠性问题，先落地 TC-CSP-34 的 helper parent-death restart-before-restore 子集。执行 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 bash e2e-tests/tests/test_system_proxy_e2e.sh`，结果 16/16 PASS。当前机器存在正式 system proxy owner `127.0.0.1:9900`，因此新增脚本用例 `test_lifecycle_helper_restarts_restartable_daemon_after_parent_crash` 按外部 owner 保护规则跳过非隔离真实写入，避免误抢正式代理；本轮同时执行 `cargo test -p bifrost-cli process::tests -- --nocapture` 和 `cargo test -p bifrost-cli commands::system_proxy::tests -- --nocapture`，覆盖 `runtime_start_mode` / `restartable_runtime` 兼容读写、foreground 不自动重启、缺少 binary path 不重启、daemon restart argv 保留端口/host/socks5/bypass 和系统代理接管参数。

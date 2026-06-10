@@ -732,6 +732,38 @@ fn cleanup_or_restart_managed_runtime(data_dir: &std::path::Path) -> bifrost_cor
     cleanup_system_proxy_state(data_dir)
 }
 
+fn cleanup_after_parent_exit(data_dir: &std::path::Path) -> bifrost_core::Result<()> {
+    match bifrost_core::read_system_proxy_shutdown_mode(data_dir) {
+        Some(bifrost_core::SystemProxyShutdownMode::BackgroundCleanup) => {
+            let _ = bifrost_core::consume_system_proxy_shutdown_mode(data_dir);
+            tracing::info!(
+                target: "bifrost_cli::shutdown",
+                data_dir = %data_dir.display(),
+                "system proxy lifecycle helper running stop-requested background cleanup"
+            );
+            cleanup_system_proxy_state(data_dir)
+        }
+        Some(bifrost_core::SystemProxyShutdownMode::ForegroundCleanup) => {
+            tracing::info!(
+                target: "bifrost_cli::shutdown",
+                data_dir = %data_dir.display(),
+                "system proxy lifecycle helper exiting because stop cleaned proxy before parent exit"
+            );
+            Ok(())
+        }
+        Some(bifrost_core::SystemProxyShutdownMode::PreserveForRestart) => {
+            tracing::info!(
+                target: "bifrost_cli::shutdown",
+                data_dir = %data_dir.display(),
+                "system proxy lifecycle helper skipping cleanup for restart"
+            );
+            Ok(())
+        }
+        None => cleanup_or_restart_managed_runtime(data_dir),
+    }
+}
+
+#[cfg(unix)]
 fn stored_system_proxy_desired_state(data_dir: &std::path::Path) -> (bool, String) {
     match ConfigManager::new(data_dir.to_path_buf()) {
         Ok(config_manager) => {
@@ -753,6 +785,7 @@ fn stored_system_proxy_desired_state(data_dir: &std::path::Path) -> (bool, Strin
     }
 }
 
+#[cfg(unix)]
 fn reapply_system_proxy_for_live_runtime(
     data_dir: &std::path::Path,
     runtime: &RuntimeInfo,
@@ -788,6 +821,7 @@ fn reapply_system_proxy_for_live_runtime(
     Ok(())
 }
 
+#[cfg(unix)]
 fn reconcile_system_proxy_after_power_wake(
     data_dir: &std::path::Path,
     parent_pid: Option<u32>,
@@ -892,7 +926,7 @@ fn run_system_proxy_lifecycle_helper(
             parent_pid = parent_pid.unwrap_or_default(),
             "system proxy lifecycle helper detected pid_reuse_check=mismatch at startup; running guarded cleanup"
         );
-        return cleanup_or_restart_managed_runtime(&data_dir);
+        return cleanup_after_parent_exit(&data_dir);
     }
 
     #[cfg(unix)]
@@ -960,15 +994,15 @@ fn run_system_proxy_lifecycle_helper(
                 tokio::select! {
                     _ = sigterm.recv() => {
                         tracing::info!(target: "bifrost_cli::shutdown", "system proxy lifecycle helper received SIGTERM");
-                        return cleanup_system_proxy_state(&data_dir);
+                        return cleanup_after_parent_exit(&data_dir);
                     },
                     _ = sigint.recv() => {
                         tracing::info!(target: "bifrost_cli::shutdown", "system proxy lifecycle helper received SIGINT");
-                        return cleanup_system_proxy_state(&data_dir);
+                        return cleanup_after_parent_exit(&data_dir);
                     },
                     _ = sighup.recv() => {
                         tracing::info!(target: "bifrost_cli::shutdown", "system proxy lifecycle helper received SIGHUP");
-                        return cleanup_system_proxy_state(&data_dir);
+                        return cleanup_after_parent_exit(&data_dir);
                     },
                     _ = power_poll.tick() => {
                         while let Ok(event) = power_rx.try_recv() {
@@ -999,7 +1033,7 @@ fn run_system_proxy_lifecycle_helper(
                                 parent_pid = parent_pid.unwrap_or_default(),
                                 "system proxy lifecycle helper detected pid_reuse_check=mismatch during poll; running guarded cleanup"
                             );
-                            return cleanup_or_restart_managed_runtime(&data_dir);
+                            return cleanup_after_parent_exit(&data_dir);
                         }
                         if let Some(pid) = parent_pid {
                             if !is_process_running(pid) {
@@ -1017,7 +1051,7 @@ fn run_system_proxy_lifecycle_helper(
                                         parent_pid = pid,
                                         "system proxy lifecycle helper confirmed parent exit"
                                     );
-                                    return cleanup_or_restart_managed_runtime(&data_dir);
+                                    return cleanup_after_parent_exit(&data_dir);
                                 }
                             } else {
                                 consecutive_parent_misses = 0;
@@ -1040,7 +1074,7 @@ fn run_system_proxy_lifecycle_helper(
                     parent_pid = parent_pid.unwrap_or_default(),
                     "system proxy lifecycle helper detected pid_reuse_check=mismatch during poll; running guarded cleanup"
                 );
-                return cleanup_or_restart_managed_runtime(&data_dir);
+                return cleanup_after_parent_exit(&data_dir);
             }
             if let Some(pid) = parent_pid {
                 if !is_process_running(pid) {
@@ -1058,7 +1092,7 @@ fn run_system_proxy_lifecycle_helper(
                             parent_pid = pid,
                             "system proxy lifecycle helper confirmed parent exit"
                         );
-                        return cleanup_or_restart_managed_runtime(&data_dir);
+                        return cleanup_after_parent_exit(&data_dir);
                     }
                 } else {
                     consecutive_parent_misses = 0;

@@ -63,12 +63,15 @@ use bifrost_core::Result as BifrostResult;
 #[cfg(unix)]
 use crate::process::{
     capture_runtime_system_proxy_snapshot, is_process_running, read_pid, read_runtime_info,
-    RuntimeSystemProxySnapshot,
+    runtime_system_proxy_host, write_runtime_info, RuntimeSystemProxySnapshot,
 };
 
 const ORPHAN_STARTUP_GRACE_MS: u64 = 200;
+#[cfg(unix)]
 const PORT_RELEASE_TIMEOUT_SECS: u64 = 10;
+#[cfg(unix)]
 const PARENT_SYNC_READ_TIMEOUT_MS: u64 = 500;
+#[cfg(unix)]
 const DEFAULT_PORT_FALLBACK: u16 = 9900;
 
 #[derive(Debug, Default, Clone)]
@@ -319,12 +322,23 @@ fn run_orphan_work(forwarded: ForwardedRestart) {
 
     // Stop.
     match old_pid {
-        Some(pid) if is_process_running(pid) => match super::stop::run_stop() {
+        Some(pid) if is_process_running(pid) => match super::stop::run_stop_for_restart() {
             Ok(()) => orphan_log(&log, "run_stop ok"),
             Err(e) => {
                 orphan_log(&log, &format!("run_stop failed: {}", e));
-                // Continue anyway; we will still try to start, but it may
-                // fail with EADDRINUSE below.
+                if !forwarded.force {
+                    abort_restart_handoff(
+                        &log,
+                        "stop failed before restart handoff",
+                        old_pid,
+                        system_proxy_snapshot.is_some(),
+                    );
+                    return;
+                }
+                orphan_log(
+                    &log,
+                    "run_stop failed but --force was requested; continuing with restart handoff",
+                );
             }
         },
         _ => orphan_log(&log, "no live old daemon; skipping stop"),
@@ -353,7 +367,33 @@ fn run_orphan_work(forwarded: ForwardedRestart) {
                 old_port, PORT_RELEASE_TIMEOUT_SECS
             ),
         );
+        abort_restart_handoff(
+            &log,
+            "port did not release before restart handoff",
+            old_pid,
+            system_proxy_snapshot.is_some(),
+        );
         return;
+    }
+
+    if let Some(runtime) = old_runtime.as_ref() {
+        if let Err(error) = write_runtime_info(runtime) {
+            orphan_log(
+                &log,
+                &format!("failed to preserve old runtime info before fresh start: {error}"),
+            );
+        }
+    }
+    if let (Some(runtime), Some(snapshot)) = (old_runtime.as_ref(), system_proxy_snapshot.as_ref())
+    {
+        let target_host = runtime_system_proxy_host(runtime.host.as_deref());
+        orphan_log(
+            &log,
+            &format!(
+                "restart handoff preserving existing system proxy for {target_host}:{}; fresh daemon will reconcile after exec (bypass={})",
+                runtime.port, snapshot.bypass
+            ),
+        );
     }
 
     // Build argv for `bifrost start --daemon --yes`.
@@ -367,12 +407,22 @@ fn run_orphan_work(forwarded: ForwardedRestart) {
         std::ffi::OsString::from("start"),
         std::ffi::OsString::from("--daemon"),
         std::ffi::OsString::from("--yes"),
+        std::ffi::OsString::from("--skip-cert-check"),
         std::ffi::OsString::from("--port"),
         resolved_port.to_string().into(),
     ];
-    if let Some(h) = forwarded.host.as_deref() {
+    let resolved_host = forwarded.host.as_deref().or_else(|| {
+        old_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.host.as_deref())
+    });
+    if let Some(h) = resolved_host {
         argv.push("--host".into());
         argv.push(h.into());
+    }
+    if let Some(socks5_port) = old_runtime.as_ref().and_then(|runtime| runtime.socks5_port) {
+        argv.push("--socks5-port".into());
+        argv.push(socks5_port.to_string().into());
     }
     if let Some(lvl) = forwarded.log_level.as_deref() {
         argv.push("--log-level".into());
@@ -396,6 +446,12 @@ fn run_orphan_work(forwarded: ForwardedRestart) {
     // execvp — if it returns, it failed.
     let _ = nix::unistd::execvp(argv_ref[0], &argv_ref);
     orphan_log(&log, "execvp returned (failed)");
+    abort_restart_handoff(
+        &log,
+        "execvp failed after restart handoff",
+        old_pid,
+        system_proxy_snapshot.is_some(),
+    );
 }
 
 #[cfg(unix)]
@@ -447,6 +503,36 @@ fn append_system_proxy_start_args(
         argv.push("--system-proxy".into());
         argv.push("--proxy-bypass".into());
         argv.push(snapshot.bypass.clone().into());
+    }
+}
+
+#[cfg(unix)]
+fn abort_restart_handoff(
+    log: &std::path::Path,
+    reason: &str,
+    old_pid: Option<u32>,
+    preserved_system_proxy: bool,
+) {
+    orphan_log(log, &format!("aborting restart handoff: {reason}"));
+    if let Ok(data_dir) = crate::config::get_bifrost_dir() {
+        let _ = bifrost_core::consume_system_proxy_shutdown_mode(&data_dir);
+        let old_runtime_still_alive = old_pid.is_some_and(is_process_running);
+        if preserved_system_proxy && !old_runtime_still_alive {
+            match bifrost_core::SystemProxyManager::recover_from_crash(&data_dir) {
+                Ok(()) => orphan_log(log, "system proxy recovered after aborted restart handoff"),
+                Err(error) => orphan_log(
+                    log,
+                    &format!("system proxy recovery failed after aborted restart handoff: {error}"),
+                ),
+            }
+        } else {
+            orphan_log(
+                log,
+                &format!(
+                    "system proxy recovery skipped after aborted restart handoff: preserved_system_proxy={preserved_system_proxy} old_runtime_still_alive={old_runtime_still_alive}"
+                ),
+            );
+        }
     }
 }
 

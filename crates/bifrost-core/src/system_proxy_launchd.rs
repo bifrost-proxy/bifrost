@@ -13,6 +13,8 @@ pub const CLEANUP_DAEMON_STARTUP_RETRY_WINDOW: Duration = RECOVERY_RETRY_WINDOW;
 pub const CLEANUP_DAEMON_STARTUP_RETRY_INTERVAL: Duration = RECOVERY_RETRY_INTERVAL;
 const STOP_SUPPRESSION_FILE_NAME: &str = ".system_proxy_launchd_stop_suppressed";
 const STOP_SUPPRESSION_TTL_SECS: u64 = 300;
+const SHUTDOWN_MODE_FILE_NAME: &str = ".system_proxy_shutdown_mode";
+const SHUTDOWN_MODE_TTL_SECS: u64 = 300;
 const RUNTIME_FILE_NAME: &str = "runtime.json";
 const PID_FILE_NAME: &str = "bifrost.pid";
 
@@ -56,6 +58,32 @@ pub enum SystemProxyLaunchdMode {
 pub enum SystemProxyLaunchdRecoveryOutcome {
     Recovered,
     Skipped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemProxyShutdownMode {
+    BackgroundCleanup,
+    ForegroundCleanup,
+    PreserveForRestart,
+}
+
+impl SystemProxyShutdownMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::BackgroundCleanup => "background_cleanup",
+            Self::ForegroundCleanup => "foreground_cleanup",
+            Self::PreserveForRestart => "preserve_for_restart",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value.trim() {
+            "background_cleanup" => Some(Self::BackgroundCleanup),
+            "foreground_cleanup" => Some(Self::ForegroundCleanup),
+            "preserve_for_restart" => Some(Self::PreserveForRestart),
+            _ => None,
+        }
+    }
 }
 
 impl SystemProxyLaunchdConfig {
@@ -420,6 +448,48 @@ pub fn consume_stop_restore_suppression(data_dir: &Path) -> bool {
         .is_some_and(|elapsed| elapsed.as_secs() <= STOP_SUPPRESSION_TTL_SECS);
     let _ = std::fs::remove_file(&marker);
     is_recent
+}
+
+pub fn write_system_proxy_shutdown_mode(
+    data_dir: &Path,
+    mode: SystemProxyShutdownMode,
+) -> Result<()> {
+    std::fs::create_dir_all(data_dir)?;
+    std::fs::write(data_dir.join(SHUTDOWN_MODE_FILE_NAME), mode.as_str())?;
+    Ok(())
+}
+
+pub fn read_system_proxy_shutdown_mode(data_dir: &Path) -> Option<SystemProxyShutdownMode> {
+    read_system_proxy_shutdown_mode_inner(data_dir, false)
+}
+
+pub fn consume_system_proxy_shutdown_mode(data_dir: &Path) -> Option<SystemProxyShutdownMode> {
+    read_system_proxy_shutdown_mode_inner(data_dir, true)
+}
+
+fn read_system_proxy_shutdown_mode_inner(
+    data_dir: &Path,
+    consume: bool,
+) -> Option<SystemProxyShutdownMode> {
+    let marker = data_dir.join(SHUTDOWN_MODE_FILE_NAME);
+    let metadata = std::fs::metadata(&marker).ok()?;
+    let is_recent = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|elapsed| elapsed.as_secs() <= SHUTDOWN_MODE_TTL_SECS);
+    if !is_recent {
+        let _ = std::fs::remove_file(&marker);
+        return None;
+    }
+
+    let mode = std::fs::read_to_string(&marker)
+        .ok()
+        .and_then(|value| SystemProxyShutdownMode::from_str(&value));
+    if consume {
+        let _ = std::fs::remove_file(&marker);
+    }
+    mode
 }
 
 fn runtime_pid_is_alive(data_dir: &Path) -> bool {
@@ -1041,6 +1111,47 @@ mod tests {
         assert!(!consume_stop_restore_suppression(&data_dir));
 
         let _ = std::fs::remove_file(plist_path);
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn system_proxy_shutdown_mode_marker_is_read_and_consumed() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let data_dir = std::env::temp_dir().join(format!("bifrost-shutdown-mode-test-{unique}"));
+
+        write_system_proxy_shutdown_mode(&data_dir, SystemProxyShutdownMode::PreserveForRestart)
+            .expect("write marker");
+        assert_eq!(
+            read_system_proxy_shutdown_mode(&data_dir),
+            Some(SystemProxyShutdownMode::PreserveForRestart)
+        );
+        assert_eq!(
+            read_system_proxy_shutdown_mode(&data_dir),
+            Some(SystemProxyShutdownMode::PreserveForRestart)
+        );
+        assert_eq!(
+            consume_system_proxy_shutdown_mode(&data_dir),
+            Some(SystemProxyShutdownMode::PreserveForRestart)
+        );
+        assert_eq!(consume_system_proxy_shutdown_mode(&data_dir), None);
+
+        write_system_proxy_shutdown_mode(&data_dir, SystemProxyShutdownMode::BackgroundCleanup)
+            .expect("write marker");
+        assert_eq!(
+            consume_system_proxy_shutdown_mode(&data_dir),
+            Some(SystemProxyShutdownMode::BackgroundCleanup)
+        );
+
+        write_system_proxy_shutdown_mode(&data_dir, SystemProxyShutdownMode::ForegroundCleanup)
+            .expect("write marker");
+        assert_eq!(
+            consume_system_proxy_shutdown_mode(&data_dir),
+            Some(SystemProxyShutdownMode::ForegroundCleanup)
+        );
+
         let _ = std::fs::remove_dir_all(data_dir);
     }
 
