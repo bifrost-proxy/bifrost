@@ -383,19 +383,14 @@ fn run_orphan_work(forwarded: ForwardedRestart) {
     }
     if let (Some(runtime), Some(snapshot)) = (old_runtime.as_ref(), system_proxy_snapshot.as_ref())
     {
+        let target_host = runtime_system_proxy_host(runtime.host.as_deref());
         orphan_log(
             &log,
-            "restart handoff preserving existing system proxy; reapplying before fresh daemon exec",
+            &format!(
+                "restart handoff preserving existing system proxy for {target_host}:{}; fresh daemon will reconcile after exec (bypass={})",
+                runtime.port, snapshot.bypass
+            ),
         );
-        if !reapply_system_proxy_for_restart_handoff(&log, runtime, snapshot) && !forwarded.force {
-            abort_restart_handoff(
-                &log,
-                "system proxy reapply failed before restart handoff",
-                old_pid,
-                true,
-            );
-            return;
-        }
     }
 
     // Build argv for `bifrost start --daemon --yes`.
@@ -505,35 +500,6 @@ fn append_system_proxy_start_args(
         argv.push("--system-proxy".into());
         argv.push("--proxy-bypass".into());
         argv.push(snapshot.bypass.clone().into());
-    }
-}
-
-#[cfg(unix)]
-fn reapply_system_proxy_for_restart_handoff(
-    log: &std::path::Path,
-    runtime: &crate::process::RuntimeInfo,
-    snapshot: &RuntimeSystemProxySnapshot,
-) -> bool {
-    let target_host = runtime_system_proxy_host(runtime.host.as_deref());
-    let target_port = runtime.port;
-    let mut manager =
-        bifrost_core::SystemProxyManager::new(crate::config::get_bifrost_dir().unwrap_or_default());
-    match manager.enable(target_host, target_port, Some(&snapshot.bypass)) {
-        Ok(()) => {
-            manager.detach();
-            orphan_log(
-                log,
-                &format!("restart handoff system proxy reapplied to {target_host}:{target_port}"),
-            );
-            true
-        }
-        Err(error) => {
-            orphan_log(
-                log,
-                &format!("restart handoff system proxy reapply failed: {error}"),
-            );
-            false
-        }
     }
 }
 

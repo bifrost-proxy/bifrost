@@ -311,7 +311,18 @@ fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
         .spawn(move || {
             let started_at = Instant::now();
 
-            if let Err(error) = bifrost_core::SystemProxyManager::recover_from_crash(&bifrost_dir) {
+            if !should_run_system_proxy_startup_recovery(
+                &bifrost_dir,
+                desired_enabled.load(Ordering::Acquire),
+            ) {
+                tracing::info!(
+                    target: "bifrost_cli::startup",
+                    data_dir = %bifrost_dir.display(),
+                    "system proxy reconcile startup recovery skipped for restart handoff"
+                );
+            } else if let Err(error) =
+                bifrost_core::SystemProxyManager::recover_from_crash(&bifrost_dir)
+            {
                 tracing::warn!(
                     error = %error,
                     "[SYSTEM_PROXY] Failed to recover system proxy from previous crash"
@@ -924,6 +935,13 @@ fn should_defer_startup_proxy_recovery_for_restart_handoff(
     true
 }
 
+fn should_run_system_proxy_startup_recovery(
+    bifrost_dir: &std::path::Path,
+    enable_system_proxy: bool,
+) -> bool {
+    !should_defer_startup_proxy_recovery_for_restart_handoff(bifrost_dir, enable_system_proxy)
+}
+
 async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
     {
@@ -1133,6 +1151,13 @@ pub fn run_start(
     cli_proxy_no_proxy: Option<String>,
     yes: bool,
 ) -> bifrost_core::Result<()> {
+    let bifrost_dir = get_bifrost_dir()?;
+    set_data_dir(bifrost_dir.clone());
+    let preserve_restart_runtime = matches!(
+        bifrost_core::read_system_proxy_shutdown_mode(&bifrost_dir),
+        Some(bifrost_core::SystemProxyShutdownMode::PreserveForRestart)
+    );
+
     if let Some(pid) = read_pid() {
         if is_process_running(pid) {
             let should_restart = if yes {
@@ -1147,13 +1172,17 @@ pub fn run_start(
                 println!("Start cancelled.");
                 return Ok(());
             }
+        } else if preserve_restart_runtime {
+            tracing::info!(
+                target: "bifrost_cli::startup",
+                pid,
+                data_dir = %bifrost_dir.display(),
+                "preserving stopped runtime info for restart handoff startup"
+            );
         } else {
             remove_pid()?;
         }
     }
-
-    let bifrost_dir = get_bifrost_dir()?;
-    set_data_dir(bifrost_dir.clone());
 
     if !skip_cert_check {
         check_and_install_certificate(CertificateCheckOptions {
@@ -3704,6 +3733,56 @@ mod tests {
         assert!(should_defer_startup_proxy_recovery_for_restart_handoff(
             temp_dir.path(),
             true,
+        ));
+    }
+
+    #[test]
+    fn system_proxy_reconcile_startup_recovery_is_skipped_for_restart_handoff() {
+        let _guard = data_dir_test_lock();
+        let temp_dir = tempfile::tempdir().unwrap();
+        set_data_dir(temp_dir.path().to_path_buf());
+        bifrost_core::write_system_proxy_shutdown_mode(
+            temp_dir.path(),
+            bifrost_core::SystemProxyShutdownMode::PreserveForRestart,
+        )
+        .expect("write marker");
+        write_runtime_info(&RuntimeInfo::new(
+            12345,
+            18080,
+            None,
+            Some("127.0.0.1".to_string()),
+            RuntimeStartMode::Daemon,
+        ))
+        .expect("write runtime info");
+
+        assert!(!should_run_system_proxy_startup_recovery(
+            temp_dir.path(),
+            true,
+        ));
+    }
+
+    #[test]
+    fn system_proxy_reconcile_startup_recovery_runs_without_system_proxy_request() {
+        let _guard = data_dir_test_lock();
+        let temp_dir = tempfile::tempdir().unwrap();
+        set_data_dir(temp_dir.path().to_path_buf());
+        bifrost_core::write_system_proxy_shutdown_mode(
+            temp_dir.path(),
+            bifrost_core::SystemProxyShutdownMode::PreserveForRestart,
+        )
+        .expect("write marker");
+        write_runtime_info(&RuntimeInfo::new(
+            12345,
+            18080,
+            None,
+            Some("127.0.0.1".to_string()),
+            RuntimeStartMode::Daemon,
+        ))
+        .expect("write runtime info");
+
+        assert!(should_run_system_proxy_startup_recovery(
+            temp_dir.path(),
+            false,
         ));
     }
 

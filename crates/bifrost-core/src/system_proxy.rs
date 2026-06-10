@@ -1488,6 +1488,18 @@ fn normalize_proxy_host(host: &str) -> String {
 impl Drop for SystemProxyManager {
     fn drop(&mut self) {
         if self.is_set {
+            if matches!(
+                crate::read_system_proxy_shutdown_mode(&self.data_dir),
+                Some(crate::SystemProxyShutdownMode::ForegroundCleanup)
+                    | Some(crate::SystemProxyShutdownMode::PreserveForRestart)
+            ) {
+                tracing::info!(
+                    data_dir = %self.data_dir.display(),
+                    "system proxy manager drop restore skipped because shutdown marker owns cleanup"
+                );
+                self.detach_in_place();
+                return;
+            }
             if let Err(e) = self.restore() {
                 tracing::error!("Failed to restore system proxy on drop: {}", e);
             }
@@ -2544,6 +2556,32 @@ mod tests {
         assert_eq!(backup.host, restored.host);
         assert_eq!(backup.port, restored.port);
         assert_eq!(backup.bypass, restored.bypass);
+    }
+
+    #[test]
+    fn drop_skips_restore_when_restart_shutdown_marker_owns_cleanup() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        crate::write_system_proxy_shutdown_mode(
+            temp_dir.path(),
+            crate::SystemProxyShutdownMode::PreserveForRestart,
+        )
+        .unwrap();
+
+        let mut manager = SystemProxyManager::new(temp_dir.path().to_path_buf());
+        manager.original_proxy = Some(Sysproxy {
+            enable: false,
+            host: String::new(),
+            port: 0,
+            bypass: String::new(),
+        });
+        manager.is_set = true;
+
+        drop(manager);
+
+        assert!(matches!(
+            crate::read_system_proxy_shutdown_mode(temp_dir.path()),
+            Some(crate::SystemProxyShutdownMode::PreserveForRestart)
+        ));
     }
 
     #[test]

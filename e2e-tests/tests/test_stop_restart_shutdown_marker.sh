@@ -16,6 +16,7 @@ TEST_DATA_DIR=""
 PROXY_PORT=""
 FAKE_PROXY_BIN=""
 FAKE_PROXY_STATE=""
+FAKE_PROXY_COMMAND_LOG=""
 
 cleanup() {
     if [[ -n "${TEST_DATA_DIR}" && -d "${TEST_DATA_DIR}" ]]; then
@@ -77,6 +78,7 @@ PY
 setup_fake_macos_system_proxy() {
     FAKE_PROXY_BIN="${TEST_DATA_DIR}/fake-bin"
     FAKE_PROXY_STATE="${TEST_DATA_DIR}/fake-system-proxy.env"
+    FAKE_PROXY_COMMAND_LOG="${TEST_DATA_DIR}/fake-system-proxy-commands.log"
     mkdir -p "${FAKE_PROXY_BIN}"
     cat > "${FAKE_PROXY_STATE}" <<'EOF'
 WEB_ENABLED=No
@@ -92,6 +94,10 @@ EOF
 #!/bin/bash
 set -euo pipefail
 state_file="${BIFROST_FAKE_SYSTEM_PROXY_STATE:?}"
+command_log="${BIFROST_FAKE_SYSTEM_PROXY_COMMAND_LOG:-}"
+if [[ -n "$command_log" ]]; then
+    printf '%s pid=%s ppid=%s networksetup %s\n' "$(date +%s.%N)" "$$" "$PPID" "$*" >>"$command_log"
+fi
 read_state() {
     # shellcheck disable=SC1090
     source "$state_file"
@@ -172,6 +178,10 @@ if [[ "${1:-}" != "--proxy" ]]; then
     exit 2
 fi
 state_file="${BIFROST_FAKE_SYSTEM_PROXY_STATE:?}"
+command_log="${BIFROST_FAKE_SYSTEM_PROXY_COMMAND_LOG:-}"
+if [[ -n "$command_log" ]]; then
+    printf '%s pid=%s ppid=%s scutil %s\n' "$(date +%s.%N)" "$$" "$PPID" "$*" >>"$command_log"
+fi
 # shellcheck disable=SC1090
 source "$state_file"
 web_enable=0
@@ -241,6 +251,7 @@ test_restart_handoff_with_fake_system_proxy() {
 
     PATH="${FAKE_PROXY_BIN}:$PATH" \
     BIFROST_FAKE_SYSTEM_PROXY_STATE="${FAKE_PROXY_STATE}" \
+    BIFROST_FAKE_SYSTEM_PROXY_COMMAND_LOG="${FAKE_PROXY_COMMAND_LOG}" \
     "${BIFROST_BIN}" start \
         -p "${PROXY_PORT}" \
         -H 127.0.0.1 \
@@ -264,6 +275,7 @@ test_restart_handoff_with_fake_system_proxy() {
     local restart_output
     restart_output=$(PATH="${FAKE_PROXY_BIN}:$PATH" \
         BIFROST_FAKE_SYSTEM_PROXY_STATE="${FAKE_PROXY_STATE}" \
+        BIFROST_FAKE_SYSTEM_PROXY_COMMAND_LOG="${FAKE_PROXY_COMMAND_LOG}" \
         "${BIFROST_BIN}" restart 2>&1)
     local restart_code=$?
     if [[ "${restart_code}" -ne 0 ]]; then
@@ -274,6 +286,7 @@ test_restart_handoff_with_fake_system_proxy() {
     restart_debug() {
         printf 'marker=%s\n' "$(cat "${TEST_DATA_DIR}/.system_proxy_shutdown_mode" 2>/dev/null || echo '<missing>')"
         printf 'state=%s\n' "$(cat "${FAKE_PROXY_STATE}" 2>/dev/null || true)"
+        printf 'fake_commands=%s\n' "$(cat "${FAKE_PROXY_COMMAND_LOG}" 2>/dev/null || true)"
         printf 'restart_log=%s\n' "$(tail -n 160 "${TEST_DATA_DIR}/logs/restart.log" 2>/dev/null || true)"
         printf 'daemon_log=%s\n' "$(tail -n 220 "${TEST_DATA_DIR}"/logs/bifrost*.log "${TEST_DATA_DIR}/bifrost.log" 2>/dev/null || true)"
     }
@@ -307,6 +320,7 @@ test_restart_handoff_with_fake_system_proxy() {
 
     PATH="${FAKE_PROXY_BIN}:$PATH" \
     BIFROST_FAKE_SYSTEM_PROXY_STATE="${FAKE_PROXY_STATE}" \
+    BIFROST_FAKE_SYSTEM_PROXY_COMMAND_LOG="${FAKE_PROXY_COMMAND_LOG}" \
     "${BIFROST_BIN}" stop >/dev/null 2>&1 || true
 }
 
