@@ -567,28 +567,21 @@ ws*://www.example.com host://ws-backend.local
 
 ### 排除匹配
 
-使用 `!` 前缀对匹配结果取反：
+> ⚠️ **实测（bifrost 0.0.96）**：`!` 前缀的 pattern 在运行时**不会命中任何请求**，无法作为独立的路由/匹配器使用。代码层面 `!X` 形式的 `matches_host()` 始终返回 `false`（既不命中 X，也不命中非 X，且不产生捕获组），实测一条 `!keep.test statusCode://249` 规则对 `keep.test` 和 `other.test` 都不命中（两者都拿不到 249，而同写法的非取反规则 `pos.test statusCode://248` 能正常返回 248）。因此下面这类「用 `!` 排除某域名、命中其余」的写法**不生效**：
 
 ```bash
-# 排除特定域名（匹配所有非 www.example.com 的请求）
+# 反例（不生效）：单独的 ! 规则不会命中任何 host，不会转发任何请求
 !www.example.com host://127.0.0.1
-
-# 排除特定通配
 !*.example.com host://127.0.0.1
-
-# 排除路径通配
-!^example.com/api/* host://127.0.0.1
-
-# 排除特定 IP 段
 !192.168.0.0/16 host://127.0.0.1
-
-# 排除正则匹配
-!/\.css$/ host://127.0.0.1
 ```
 
-> `!` 可与所有匹配类型组合使用：域名、通配符、路径通配 `^`、正则、IP/CIDR 等。
+要从一个已命中集合中排除子集，请改用 `excludeFilter://`（见 [filters.md](./filters.md)，请求阶段的方法/路径/请求头排除实测可用）：
 
-> 注意：排除匹配的 `matches_host()` 始终返回 `false`，且不产生捕获组。
+```bash
+# svc.test 整体转发到本地，但 /account 路径排除（实测：/account 走真实后端，其余转发）
+svc.test host://127.0.0.1 excludeFilter:///account
+```
 
 ---
 
@@ -672,5 +665,5 @@ Bifrost 按以下顺序判定匹配模式的类型：
 | `^` 多段 | `^test.com/api/**` | `http://test.com/api/a/b` | 匹配 |
 | `^` 全匹配 | `^test.com/api/***` | `http://test.com/api/a?q=1` | 匹配 |
 | 域名通配 `$` | `$test.com` | `http://test.com/any/path` | 匹配 |
-| 排除匹配 | `!test.com` | `http://other.com/` | 匹配 |
+| 排除匹配（单独使用不命中） | `!test.com` | `http://other.com/` | 不匹配 |
 | 全局匹配 | `*` | 任何 URL | 匹配 |

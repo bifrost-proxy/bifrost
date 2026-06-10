@@ -134,16 +134,18 @@ Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0
 pattern referer://referer_url
 ```
 
-> ⚠️ **重要**：以 `http://` / `https://` 开头的值会被当作远程抓取来源（RemoteUrl），而不是字面字符串，此时 Referer 头部根本不会被设置。要把 Referer 设为某个 URL，请把完整 URL 放进块变量后用 `referer://{ref-url}` 引用，或改用 `reqHeaders://Referer=<url>`。
+> ⚠️ **重要**：以 `http://` / `https://` 开头的值会被当作远程抓取来源（RemoteUrl），而不是字面字符串，此时 Referer 头部根本不会被设置。把完整 URL 放进块变量再用 `referer://{ref-url}` 引用**同样无效**——块变量并不会绕过 RemoteUrl 判定，Referer 依旧不会被设置。`referer://` 只能设置**不以 `http://` / `https://` 开头**的值（例如 `referer://example.org/page`）。
+>
+> 要把 Referer 设为某个 URL，不要用 `referer://`，也不要用内联的 `reqHeaders://Referer=<url>`（`=` 形式中以 `http://` / `https://` 开头的值会被丢弃，头部不会被设置）。请改用下面两种已验证可行的写法之一：小括号格式 `reqHeaders://(Referer: <url>)`，或把 `Referer: <url>` 写进块变量再用 `reqHeaders://{ref-hdr}` 引用。
 >
 > `referer://`（空值）不会删除 Referer 头部，而是把它置为空字符串。要真正删除头部，请使用删除头部的规则。
 
 ```bash
-# 设置来源页面（用块变量，避免被当作 RemoteUrl）
-www.example.com referer://{ref-url}
+# 设置 URL 形式的 Referer（小括号格式，已验证可行）
+www.example.com reqHeaders://(Referer: https://www.google.com/)
 
-# 或直接用 reqHeaders 设置
-www.example.com reqHeaders://Referer=https://www.google.com/
+# 或把 Referer 行写进块变量再引用（已验证可行）
+www.example.com reqHeaders://{ref-hdr}
 
 # 把 Referer 置为空字符串（注意：头部仍存在，值为空）
 www.example.com referer://
@@ -151,8 +153,8 @@ www.example.com referer://
 
 块变量定义示例：
 ```
-``` ref-url
-https://www.google.com/
+``` ref-hdr
+Referer: https://www.google.com/
 ```
 ```
 
@@ -160,7 +162,9 @@ https://www.google.com/
 
 | 测试场景 | 规则 | 预期 |
 |---------|------|------|
-| 设置 Referer | `test.com referer://{ref-url}` | Referer 为块变量定义的 URL |
+| 设置非 URL Referer | `test.com referer://example.org/page` | Referer 为 `example.org/page` |
+| URL 值不生效 | `test.com referer://{ref-url}`（块变量为 `https://www.google.com/`） | Referer 头部**不会被设置**（URL 被当作 RemoteUrl，块变量也不绕过） |
+| 设置 URL Referer | `test.com reqHeaders://(Referer: https://www.google.com/)` | Referer 为 `https://www.google.com/` |
 | 置空 Referer | `test.com referer://` | Referer 头部被置为空字符串 |
 
 ---
@@ -459,8 +463,8 @@ www.example.com headerReplace://req.accept:text/html=application/json
 请求修改规则可以组合使用：
 
 ```bash
-# 同时修改多个属性
-www.example.com reqHeaders://X-Token=abc ua://MyApp/1.0 reqHeaders://Referer=https://google.com/
+# 同时修改多个属性（URL 形式的 Referer 要用小括号格式，内联 = 形式会丢弃 http(s):// 值）
+www.example.com reqHeaders://X-Token=abc ua://MyApp/1.0 reqHeaders://(Referer: https://google.com/)
 
 # 配合路由规则（使用内嵌值处理含空格头部值）
 www.example.com host://backend.local reqHeaders://{forwarded-headers}

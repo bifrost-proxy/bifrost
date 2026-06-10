@@ -90,12 +90,16 @@ pattern resBody://(/User/xxx/yyy.txt)      # 将路径字符串作为响应内�
 
 ## Values 引用
 
-通过 `{key}` 格式引用 Bifrost Values 模块中存储的内容：
+通过 `{key}` 格式引用值内容。`{key}` 实际解析的是**当前规则文件中定义的内嵌值块**（见下文“内嵌值”），并且要用产生响应内容的协议（如 `resBody`）承载：
 
-```txt
-pattern file://{mockResponse}              # 引用名为 mockResponse 的值
-pattern resHeaders://{customHeaders}       # 引用名为 customHeaders 的值
+````txt
+``` mockResponse.json
+{"code":0}
 ```
+pattern resBody://{mockResponse.json}      # 引用本规则文件内嵌的 mockResponse.json 值块
+````
+
+> ⚠️ **重要**：经实测（bifrost 0.0.96，通过 `bifrost port bind` 临时端口验证），全局 Values 模块中存储的内容**不会**被 `{key}` 解析——`resBody://PRE_{freshval.json}_POST` 会原样输出 `PRE_{freshval.json}_POST`，`file://{freshval.json}` 会报 `File not found`。只有规则文件中的内嵌值块能被 `{key}` 解析。另外 `file://`/`tpl://` 会把 `{key}` 当作磁盘文件名而非值引用，因此承载值引用要用 `resBody://{key}` 这类协议，不要用 `file://{key}`。需要长期共享的大段内容，请直接写入本地文件并用绝对路径（`resBody:///abs/path`），或把内容内嵌进引用它的规则文件。
 
 ### Values 存储机制
 
@@ -182,7 +186,9 @@ pattern protocol://`...${variable}...`
 | `${serverPort}`               | 服务端端口 |
 | `${remoteAddress}`            | 远程地址   |
 | `${remotePort}`               | 远程端口   |
-| `${statusCode}` / `${status}` | 响应状态码 |
+| `${statusCode}` / `${status}` | 响应状态码（见下方限制说明） |
+
+> ⚠️ **实测限制（bifrost 0.0.96）**：`${statusCode}` / `${status}` 在所有响应阶段协议中都展开为**空字符串**——`resBody://PRE_${statusCode}_POST` 输出 `PRE__POST`，`resReplace`、`resHeaders://x-probe=${statusCode}` 注入也都为空。该变量当前在规则模板上下文中拿不到响应状态码，请勿在规则模板里依赖它。
 
 #### Headers 和 Cookies
 
@@ -194,6 +200,8 @@ pattern protocol://`...${variable}...`
 | `${resCookies.xxx}` / `${resCookie.xxx}`                     | 响应 cookie xxx 的值 |
 
 > 不带 `.xxx` 属性时返回所有 headers/cookies 的完整字符串。
+
+> ⚠️ **实测限制（bifrost 0.0.96）**：只有**请求阶段**的 `${reqHeaders.xxx}` / `${reqCookies.xxx}` 能在规则模板里取到值（如 `resReplace://echo=UA[${reqHeaders.user-agent}]` 输出 `UA[curl/8.7.1]`）。**响应阶段**的 `${resHeaders.xxx}` / `${resCookies.xxx}` 当前展开为**空字符串**——即使响应头/Cookie 确实在链路上存在：上游返回 `X-Upstream: mock-18181` 时 `${resHeaders.x-upstream}` 仍为空（`RH[]`）；规则自己 `resCookies://mycookie=COOKVAL` 设置了 `Set-Cookie` 后 `${resCookies.mycookie}` 仍为空（`RC[]`）。请勿在规则模板里依赖响应头/响应 Cookie 变量。
 
 #### 客户端标识
 
@@ -207,9 +215,11 @@ pattern protocol://`...${variable}...`
 | 变量          | 说明                  |
 | ------------- | --------------------- |
 | `${env.xxx}`  | 环境变量 xxx 的值     |
-| `${realHost}` | Bifrost 监听的网卡 IP |
-| `${realPort}` | Bifrost 端口号        |
-| `${realUrl}`  | 实际请求 URL          |
+| `${realHost}` | Bifrost 监听的网卡 IP（见下方限制说明） |
+| `${realPort}` | Bifrost 端口号（见下方限制说明）        |
+| `${realUrl}`  | 实际请求 URL（见下方限制说明）          |
+
+> ⚠️ **实测限制（bifrost 0.0.96）**：`${realHost}` / `${realPort}` / `${realUrl}` 在规则模板上下文中都展开为**空字符串**——`resBody://PRE_${realHost}_POST` / `…${realPort}…` / `…${realUrl}…` 均输出 `PRE__POST`，`resHeaders` 注入同样为空。作为对照，同上下文的 `${host}` 正常输出（`PRE_vars.test_POST`）。这三个变量当前拿不到 Bifrost 监听信息，请勿在规则模板里依赖它们。
 
 ### 高级用法
 
@@ -255,14 +265,16 @@ ${hostname.replace(/ABC/i,xyz)}
 ``` response.json
 {"host":"${hostname}","path":"${path}","time":${now}}
 ```
-pattern file://`{response.json}`
+www.test.com resBody://{response.json}
 ````
 
-访问 `https://www.test.com/api/users` 时返回：
+访问 `http://www.test.com/api/users` 时返回（已实测渲染，bifrost 0.0.96）：
 
 ```json
-{ "host": "www.test.com", "path": "/api/users", "time": 1752301623295 }
+{"host":"www.test.com","path":"/api/users","time":1781093526662}
 ```
+
+> ⚠️ 注意：此处必须用 `resBody://{response.json}` 承载内嵌值块；`file://`{response.json}`` 与 `tpl://{response.json}` 都会把 `{response.json}` 当作磁盘文件名查找，分别报 `File not found` / `Template file not found`，无法渲染内嵌值块。
 
 ### 捕获变量
 
@@ -282,6 +294,8 @@ pattern file://`{response.json}`
 ## 数据对象格式
 
 部分协议的 value 需要是键值对数据，Bifrost 支持以下格式：
+
+> ⚠️ **重要**：JSON 对象格式只适用于按原生 JSON 处理的 **body 类协议**（如 `resMerge`），不适用于 header/cookie 类协议。经实测（bifrost 0.0.96）：`resMerge://({"merged":"YES","extra":"field"})` 能把字段合并进 JSON 响应体；但 `resHeaders://({"x-a":"1","x-b":"2"})`、`reqHeaders://({"x-req-a":"1"})` 都设置**零个** header，内嵌 JSON 对象块（`resHeaders://{h.json}`，块内为 `{"x-a":"1","x-b":"2"}`）同样设置零个 header。要设置 header/cookie（`reqHeaders`/`resHeaders`/`reqCookies`/`resCookies`），请用下文的**行格式**（单值时也可用内联值/内联参数）；实测 `resHeaders://{h.txt}`（块内为 `x-a: 1` / `x-b: 2` 两行）能正确设置 `X-A: 1`、`X-B: 2`。
 
 ### JSON 格式
 
@@ -349,8 +363,10 @@ key1=value1&key2=value2&keyN=valueN
 | `breakpoint` | 为命中流量授权 Breakpoint request/response 暂停阶段 |
 | `passthrough` | 直连透传，不做任何修改 |
 | `tunnel` | 重定向 CONNECT 隧道目标 |
-| `delete` | 删除/阻断请求 |
+| `delete` | 删除/阻断请求（见下方实测限制） |
 | `skip` | 跳过已匹配的规则，继续后续匹配 |
+
+> ⚠️ **实测限制（bifrost 0.0.96）**：未能复现 `delete://` 真正阻断/删除请求的行为。`example.com delete://`、`example.com delete://true` 都返回 **HTTP 200** 并带完整上游响应（与对照的 `example.com passthrough://` 一致，均为 200），请求并未被阻断；`m.test delete://`（host 不可解析）返回 502，但与同样 502 的 `m.test passthrough://` 无法区分，仅是 DNS 失败而非阻断。当前无法给出可工作的阻断示例。如需稳定返回固定状态码/直接短路响应，请改用 `statusCode://`（实测 `example.com statusCode://403` 返回 403）。
 
 ### 请求修改类
 

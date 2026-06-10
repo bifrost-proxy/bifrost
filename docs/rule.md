@@ -30,7 +30,7 @@ Pattern 根据格式自动识别类型，优先级影响匹配顺序：
 
 Domain 优先级以 100 为基准，显式协议（`http(s)://`）+5、显式端口 +10，因此带协议带端口的 Domain pattern 可达 100-115。CIDR 优先级为 `70 + prefix_len/4`（约 70-78），低于 Regex（80），因此一条宽泛的 CIDR（如 `/16`）可能排在 Regex 之后；只有精确 IP 才是 95。
 
-取反匹配：所有类型均支持 `!` 前缀，如 `!*.example.com`。完整的类型检测顺序、优先级与协议前缀注意事项见 [pattern.md](./pattern.md)。
+取反匹配：所有类型的 pattern 都接受 `!` 前缀（如 `!*.example.com`），且能正常解析、规则状态为 Running；但实测在当前版本（0.0.96）取反匹配在运行时**不产生效果**——非匹配的请求并不会因取反而命中规则（无论是 `resHeaders://` 注入还是 `host://` 改目标，均未触发），因此暂不要依赖 `!` 前缀。完整的类型检测顺序、优先级与协议前缀注意事项见 [pattern.md](./pattern.md)。
 
 ## 高级配置
 
@@ -104,16 +104,22 @@ example.com host://127.0.0.1 includeFilter://m:GET excludeFilter:///admin/
 | 前缀      | 说明       | 示例                                |
 | :-------- | :--------- | :---------------------------------- |
 | `m:`      | HTTP 方法  | `m:GET` `m:GET,POST,PUT`            |
-| `s:`      | 状态码     | `s:200` `s:200-299` `s:200,404,500` |
-| `h:`      | 请求头存在或匹配 | `h:X-Custom-Header` `h:Content-Type=json` |
-| `reqH:`   | 请求头匹配 | `reqH:Content-Type=/json/`          |
-| `resH:`   | 响应头匹配 | `resH:Content-Type=/json/`          |
+| `s:`      | 状态码（当前运行时未生效，见下方说明） | `s:200` `s:200-299` `s:200,404,500` |
+| `h:`      | 请求头存在或匹配（仅 `User-Agent`/`Accept`/`Host` 等标准头，见下方说明） | `h:User-Agent=curl` `h:Accept` |
+| `reqH:`   | 请求头正则匹配（仅标准头，见下方说明） | `reqH:User-Agent=/curl/`            |
+| `resH:`   | 响应头匹配（当前运行时未生效，见下方说明） | `resH:Content-Type=/json/`          |
 | `i:`      | 客户端 IP  | `i:192.168.1.1` `i:192.168.0.0/16`  |
 | `/path`   | 路径包含   | `/api`                              |
 | `/regex/` | 路径正则   | `/^\/api\/v\d+/`                    |
 | `domain.com/path` | URL host/path | `api.example.com/v1` |
 
-> `b:` / `B:` body 过滤器当前只被 parser 接受，运行时 resolver 尚未读取 body 做过滤，其匹配结果恒为「不命中」：写在 `includeFilter://b:...` 里会让规则**永远不命中**，写在 `excludeFilter://b:...` 里则**永远不排除**（即等于无效）。请用 `bifrost search --req-body/--res-body` 做内容筛选，不要把 body 过滤写成生产规则依赖。
+> `b:` / `B:` body 过滤器当前只被 parser 接受，运行时 resolver 不读取 body 做过滤，**实测行为随写法不同**：文档使用的 `b:/regex/` 形式（如 `b:/error/`）写在 `includeFilter://b:/.../`  里会让规则**永远不命中**（fail-closed，实测无论有无 body 都返回 502），写在 `excludeFilter://b:/.../`  里则**永远不排除**（规则照常生效）；而不带斜杠的裸值形式（如 `b:foo`）会被直接丢弃忽略，规则照常命中。两种写法都无法真正按 body 内容过滤。请用 `bifrost search --req-body/--res-body` 做内容筛选，不要把 body 过滤写成生产规则依赖。
+
+> `s:` 状态码过滤器当前只被 parser 接受，运行时 resolver 不会拿真实响应状态码去判定，因此**完全不生效**：写在 `includeFilter://s:200` 里永远不命中（即使响应确实是 200 也不会注入受控操作），写在 `excludeFilter://s:404` 里永远不排除（响应为 200 或 404 都不排除）。`s:200-299`、`s:200,404,500` 等区间/列表写法同样无效。需要按状态码筛选请改用 `bifrost search`，不要把状态码过滤写成生产规则依赖。
+
+> `h:` / `reqH:` 请求头过滤器只对**标准请求头**生效，例如 `User-Agent`、`Accept`、`Host`。实测可用形式：`h:User-Agent=curl`（值为大小写敏感的子串匹配）、`h:Accept`（存在性匹配）、`reqH:User-Agent=/curl/`（值正则匹配）。`Content-Type` 与自定义头（如 `X-Custom-Header`、`X-Tag`）**不会**被这两个过滤器读取——即使请求确实带了该头、值也确实匹配，规则仍判定为不命中（命中 `host://` 类规则时表现为请求落空、返回 502）。这些头会照常转发到上游，只是不参与过滤判定。如需按 `Content-Type` 或自定义头筛选，请改用 `bifrost search`。
+
+> `resH:` 响应头过滤器当前只被 parser 接受，运行时 resolver 不会读取真实响应头去判定，因此**完全不生效**：值正则形式 `resH:Content-Type=/json/`（乃至 `resH:Content-Type=/.*/`）永远不命中，存在性形式 `resH:Content-Type` 则被静默忽略、无论该头是否真实存在都按命中处理——两种写法都不反映真实响应头。需要按响应头筛选请改用 `bifrost search`，不要把响应头过滤写成生产规则依赖。
 
 ### 6. 规则属性
 

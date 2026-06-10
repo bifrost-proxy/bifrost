@@ -20,6 +20,7 @@ pattern resHeaders://{varName}              # 引用内嵌值/Values（推荐）
 >
 > 1. `{name}` 是引用内嵌值的语法，不是直接定义 JSON！
 > 2. 小括号内容会作为一个整体解析，可以包含空格；多行或多个头部建议使用块变量
+> 3. 头部值中的逗号会被截断：当前解析器（内联、小括号、内嵌值三种形式一致）只保留第一个逗号之前的内容，例如 `Cache-Control: max-age=3600, public, must-revalidate` 实际只会设置 `max-age=3600`。需要携带逗号的头部值暂无可用写法。
 
 ### 基础示例
 
@@ -49,7 +50,7 @@ X-Server: bifrost
 # 添加安全头部
 www.example.com resHeaders://(X-Frame-Options: DENY)
 
-# 设置缓存控制（使用内嵌值处理逗号和空格）
+# 设置缓存控制（使用内嵌值处理空格）
 www.example.com resHeaders://{cache-headers}
 
 # 添加调试信息
@@ -141,6 +142,8 @@ www.example.com resCors://*
 www.example.com resCors://https://app.example.com
 ```
 
+> ⚠️ **关于 `resCors://<origin>` 指定字面来源**：当前实现对可解析（真实存在）的来源主机名存在异常——并不总是原样回显该字符串，可能返回 `*`、空值，甚至抓取真实站点内容作为头部值（这是一个待修复的缺陷）。在能可靠回显字面来源之前，文档与测试请使用不可解析的来源（如 `https://app.test`、`https://app.example.com`）来验证回显行为。
+
 > ⚠️ **关于 `resCors://*`**：当请求带有 `Origin` 头时，bifrost 会**回显该请求的 Origin**（而非字面 `*`），以便与凭证一起使用；只有在请求不带 `Origin` 头时才返回字面 `*`。此时 `Access-Control-Allow-Credentials` 默认即为 `true`。
 
 ### 高级选项
@@ -166,7 +169,7 @@ expose: X-Trace-Id
 说明：
 
 - 支持 JSON 值，也支持上面的多行 `key: value` 格式
-- `origin` 为空时默认回退为 `*`
+- 未配置（省略）`origin` 选项时默认回退为 `*`；显式将 `origin` 设为空值会原样输出空的 `Access-Control-Allow-Origin` 头，不会回退为 `*`
 - `credentials` 默认即为 `true`：未显式配置时也会返回 `Access-Control-Allow-Credentials: true`，需要关闭时显式设置 `credentials: false`
 - 未配置时，`methods` 默认为 `GET, POST, PUT, DELETE, OPTIONS, PATCH`，`headers` 与 `expose` 默认为 `*`
 
@@ -186,7 +189,7 @@ expose: X-Trace-Id
 | 测试场景     | 规则                                 | 预期                                         |
 | ------------ | ------------------------------------ | -------------------------------------------- |
 | 允许所有来源 | `test.com resCors://*`               | Access-Control-Allow-Origin: \*              |
-| 特定来源     | `test.com resCors://https://app.com` | Access-Control-Allow-Origin: https://app.com |
+| 特定来源     | `test.com resCors://https://app.test` | Access-Control-Allow-Origin: https://app.test |
 | 详细配置     | `test.com resCors://{cors-config}`   | 返回 methods / headers / max-age 等完整 CORS 头 |
 
 ---

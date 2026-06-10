@@ -22,8 +22,9 @@ example.com/api
 - Prefer precise domain and path patterns for debugging.
 - Use wildcard patterns for families of subdomains.
 - Use regex only when the simpler forms are not expressive enough.
-- Negated patterns help exclude sensitive or unrelated domains.
 - HTTPS path matching usually requires TLS interception because CONNECT tunnels do not expose inner paths.
+
+> ⚠️ **Negated (`!`) patterns do not work at runtime (verified, 0.0.96).** A `!X` pattern parses, but `matches_host()` always returns `false`, so a standalone `!`-prefixed pattern matches nothing — neither `X` nor non-`X` (verified: `!keep.test statusCode://249` returns no `249` for either `keep.test` or `other.test`, while the non-negated `pos.test statusCode://248` works). Don't use `!` as a router. To exclude a subset, use `excludeFilter://` instead (request-phase method/path/standard-header excludes work).
 
 ## Caveat: do not prefix wildcard patterns with a scheme
 

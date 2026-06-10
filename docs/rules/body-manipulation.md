@@ -13,12 +13,13 @@
 ```
 pattern file://file_path
 pattern file://(inline_content)
-pattern file://{embedded_name}
 ```
+
+> ⚠️ **注意**：`file` 不支持 `file://{varName}` 块变量引用——`{varName}` 会被当成字面文件名处理（命中时返回 404 `File not found`）。多行/含空格内容请改用内联小括号 `file://(...)`，或用支持块变量的 `resBody://{varName}`（见下文 `resBody` 一节）。
 
 ### 基础示例
 
-> ⚠️ **注意**：小括号内容会作为一个整体解析，可以包含空格；多行 JSON/HTML 或大段内容建议使用块变量。
+> ⚠️ **注意**：小括号内容会作为一个整体解析，可以包含空格；多行 JSON/HTML 或大段内容建议使用本地文件或内联小括号（`file` 不支持 `{varName}` 块变量，见上方注意）。
 
 ```bash
 # 返回本地文件
@@ -30,17 +31,9 @@ www.example.com/api/status file://({"status": "ok"})
 # 返回远程文件
 www.example.com/mock file://http://mock-server.com/data.json
 
-# 多行内容使用块变量
-www.example.com/api/health file://{health-response}
+# 多行/含空格内容使用内联小括号（直接返回，无需后端）
+www.example.com/api/health file://({"healthy": true, "version": "1.0"})
 ```
-
-块变量定义：
-
-````
-``` health-response
-{"healthy": true, "version": "1.0"}
-```
-````
 
 ### 使用场景
 
@@ -92,8 +85,9 @@ www.example.com/raw rawfile:///path/to/data.bin
 ```
 pattern tpl://template_content
 pattern tpl://(inline_template)
-pattern tpl://{embedded_template}
 ```
+
+> ⚠️ **注意**：`tpl` 不支持 `tpl://{varName}` 块变量引用——`{varName}` 会被当成字面模板文件路径处理（命中时返回 404 `Template file not found`）。多行/含变量的模板请改用内联反引号小括号形式 `tpl://`(...)``。
 
 ### 模板变量
 
@@ -114,7 +108,7 @@ pattern tpl://{embedded_template}
 > ⚠️ **注意**：
 >
 > 1. 规则值中直接写模板变量时，需要使用反引号避免解析器提前处理特殊字符。
-> 2. 小括号内容可以包含空格；多行模板建议使用块变量。
+> 2. 小括号内容可以包含空格；多行模板请用内联反引号小括号形式（`tpl` 不支持 `{varName}` 块变量，见上方注意）。
 
 ```bash
 # 动态 JSON 响应
@@ -123,17 +117,9 @@ www.example.com tpl://`({"time": ${now}, "id": "${randomUUID}"})`
 # JSONP 回调
 www.example.com tpl://`(${query.callback}({"data":"test"}))`
 
-# 回显请求信息（使用块变量）
-www.example.com tpl://{echo-tpl}
+# 回显请求信息（使用内联反引号小括号）
+www.example.com tpl://`({"method": "${method}", "path": "${path}"})`
 ```
-
-块变量定义：
-
-````
-``` echo-tpl
-{"method": "${method}", "path": "${path}"}
-```
-````
 
 ### 测试用例
 
@@ -464,8 +450,8 @@ www.example.com resPrepend://{res-prepend}
 Body 操作规则可以与其他规则组合：
 
 ```bash
-# Mock + 状态码（使用块变量处理含空格 JSON）
-www.example.com file://{error-response} statusCode://404
+# Mock + 状态码（使用块变量处理含空格 JSON；块变量引用用支持它的 resBody，file 不支持 {varName}）
+www.example.com resBody://{error-response} statusCode://404
 
 # Mock + 响应头
 www.example.com resBody://{mock-data} resHeaders://Content-Type=application/json
@@ -560,7 +546,7 @@ www.example.com htmlPrepend://(<style>body{border:2px solid red;}</style>)
 
 ### htmlBody
 
-替换 HTML 类型的响应内容。
+替换 HTML 类型响应的 `<body>` 内部内容。保留原始的 `<html>`/`<head>`/`<body>` 外层结构，只替换 `<body>` 标签之间的内容，并非替换整份 HTML 文档（若内容本身是完整 `<html>` 文档，会被原样嵌入 `<body>` 内，造成嵌套）。
 
 #### 语法
 
@@ -573,7 +559,7 @@ pattern htmlBody:///path/to/file.html
 #### 示例
 
 ```bash
-# 替换整个 HTML 页面
+# 替换 <body> 内部内容（外层 <html>/<head>/<body> 结构保留）
 www.example.com htmlBody://{maintenance-page}
 ```
 

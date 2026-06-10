@@ -185,12 +185,14 @@ www.example.com statusCode://404 resBody://{not-found} resHeaders://(X-Error: tr
 # 直接响应 + 请求/响应规则流水线
 www.example.com statusCode://451 reqHeaders://X-Debug=1 reqBody://(rewritten) resHeaders://X-Mock=1 resBody://(base) resAppend://(-tail)
 
-# 重定向 + CORS
-www.example.com redirect://https://new.com/ resCors://*
+# CORS：resCors 只对真实上游响应注入 CORS 头部
+www.example.com resCors://*
 
 # 替换状态码 + 修改头部
 www.example.com replaceStatus://200 resHeaders://(X-Fixed: true)
 ```
+
+> ⚠️ **注意**：`resCors` 等响应改写能力**不能**与 `redirect`、`statusCode` 这类合成响应组合使用。按下方注意事项 #3，`redirect` 会立即返回重定向响应、后续规则不执行，因此 `www.example.com redirect://https://new.com/ resCors://*` 只会返回 302 + `Location`，CORS 头部会被静默丢弃。`resCors` 只会把 CORS 头部注入到真实上游返回的响应上。
 
 块变量定义：
 

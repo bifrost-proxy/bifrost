@@ -186,8 +186,10 @@ example.*/api/* file:///mock/$1/$2   # $1 = TLD, $2 = 路径
 ### Regex 传值
 
 ```txt
-/api\/v(\d+)\/users\/(\d+)/ reqHeaders://X-Version=$1&X-ID=$2
+/api\/v(\d+)\/users\/(\d+)/ reqHeaders://X-Version=$1 reqHeaders://X-ID=$2
 ```
+
+> `reqHeaders://` 不以 `&` 拆分多个 header：写成 `reqHeaders://X-Version=$1&X-ID=$2` 只会设置单个请求头 `X-Version: <值>&X-ID=<值>`（`&X-ID=...` 成为值的一部分）。要设置多个 header，请用多个独立的 `reqHeaders://` 操作（如上例），详见 operation.md。
 
 ## 优先级
 
