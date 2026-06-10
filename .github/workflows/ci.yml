@@ -552,7 +552,7 @@ jobs:
   build-cli-macos-x86_64:
     name: Build macOS CLI (x86_64-apple-darwin)
     runs-on: macos-15-intel
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain with retry
