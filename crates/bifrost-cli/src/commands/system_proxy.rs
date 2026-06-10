@@ -763,6 +763,7 @@ fn cleanup_after_parent_exit(data_dir: &std::path::Path) -> bifrost_core::Result
     }
 }
 
+#[cfg(target_os = "macos")]
 fn stored_system_proxy_desired_state(data_dir: &std::path::Path) -> (bool, String) {
     match ConfigManager::new(data_dir.to_path_buf()) {
         Ok(config_manager) => {
@@ -784,6 +785,7 @@ fn stored_system_proxy_desired_state(data_dir: &std::path::Path) -> (bool, Strin
     }
 }
 
+#[cfg(target_os = "macos")]
 fn reapply_system_proxy_for_live_runtime(
     data_dir: &std::path::Path,
     runtime: &RuntimeInfo,
@@ -819,6 +821,7 @@ fn reapply_system_proxy_for_live_runtime(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn reconcile_system_proxy_after_power_wake(
     data_dir: &std::path::Path,
     parent_pid: Option<u32>,

@@ -67,8 +67,11 @@ use crate::process::{
 };
 
 const ORPHAN_STARTUP_GRACE_MS: u64 = 200;
+#[cfg(unix)]
 const PORT_RELEASE_TIMEOUT_SECS: u64 = 10;
+#[cfg(unix)]
 const PARENT_SYNC_READ_TIMEOUT_MS: u64 = 500;
+#[cfg(unix)]
 const DEFAULT_PORT_FALLBACK: u16 = 9900;
 
 #[derive(Debug, Default, Clone)]
