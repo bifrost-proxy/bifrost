@@ -1,0 +1,226 @@
+use std::path::Path;
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrayConfig {
+    pub version: u32,
+    #[serde(default)]
+    pub items: Vec<CustomMenuItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomMenuItem {
+    pub id: String,
+    pub label: String,
+    pub action: MenuAction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MenuAction {
+    OpenAdminRoute { route: String },
+    OpenUrl { url: String },
+    CopyText { text: String },
+    AdminApi { method: String, path: String },
+}
+
+const ADMIN_API_PATH_ALLOWLIST: &[&str] = &[
+    "/api/proxy/system/refresh",
+    "/api/proxy/system/enable",
+    "/api/proxy/system/disable",
+    "/api/proxy/restart",
+    "/api/proxy/stop",
+];
+
+#[derive(Debug)]
+pub enum ConfigError {
+    Json(String),
+    Version(u32),
+    Action { id: String, reason: String },
+}
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Json(e) => write!(f, "invalid tray.json: {e}"),
+            Self::Version(v) => write!(f, "unsupported tray.json version: {v}"),
+            Self::Action { id, reason } => {
+                write!(f, "invalid action for item '{id}': {reason}")
+            }
+        }
+    }
+}
+
+pub fn load_custom_config(data_dir: &Path) -> Result<Option<TrayConfig>, ConfigError> {
+    let config_path = data_dir.join("tray.json");
+    if !config_path.exists() {
+        return Ok(None);
+    }
+
+    let content =
+        std::fs::read_to_string(&config_path).map_err(|e| ConfigError::Json(e.to_string()))?;
+
+    let config: TrayConfig =
+        serde_json::from_str(&content).map_err(|e| ConfigError::Json(e.to_string()))?;
+
+    if config.version != 1 {
+        return Err(ConfigError::Version(config.version));
+    }
+
+    for item in &config.items {
+        validate_action(&item.id, &item.action)?;
+    }
+
+    Ok(Some(config))
+}
+
+fn validate_action(id: &str, action: &MenuAction) -> Result<(), ConfigError> {
+    match action {
+        MenuAction::OpenAdminRoute { route } => {
+            if route.contains("://") {
+                return Err(ConfigError::Action {
+                    id: id.to_string(),
+                    reason: "open_admin_route must be a relative path, not an absolute URL"
+                        .to_string(),
+                });
+            }
+            if !route.starts_with('/') {
+                return Err(ConfigError::Action {
+                    id: id.to_string(),
+                    reason: "route must start with '/'".to_string(),
+                });
+            }
+        }
+        MenuAction::OpenUrl { url } => {
+            if !url.starts_with("http://") && !url.starts_with("https://") {
+                return Err(ConfigError::Action {
+                    id: id.to_string(),
+                    reason: "only http:// and https:// URLs are allowed".to_string(),
+                });
+            }
+        }
+        MenuAction::CopyText { .. } => {}
+        MenuAction::AdminApi { path, .. } => {
+            if !ADMIN_API_PATH_ALLOWLIST.contains(&path.as_str()) {
+                return Err(ConfigError::Action {
+                    id: id.to_string(),
+                    reason: format!("admin_api path '{path}' is not in the allowlist"),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn expand_template(
+    text: &str,
+    admin_url: &str,
+    http_proxy: &str,
+    socks5_proxy: &str,
+) -> String {
+    text.replace("{admin_url}", admin_url)
+        .replace("{http_proxy}", http_proxy)
+        .replace("{socks5_proxy}", socks5_proxy)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_valid_config() {
+        let json = r#"{
+            "version": 1,
+            "items": [
+                {"id": "settings", "label": "Settings", "action": {"type": "open_admin_route", "route": "/settings"}},
+                {"id": "docs", "label": "Docs", "action": {"type": "open_url", "url": "https://example.com"}},
+                {"id": "copy", "label": "Copy", "action": {"type": "copy_text", "text": "{admin_url}"}},
+                {"id": "refresh", "label": "Refresh", "action": {"type": "admin_api", "method": "POST", "path": "/api/proxy/system/refresh"}}
+            ]
+        }"#;
+        let config: TrayConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.items.len(), 4);
+        for item in &config.items {
+            assert!(validate_action(&item.id, &item.action).is_ok());
+        }
+    }
+
+    #[test]
+    fn test_invalid_version() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("tray.json"),
+            r#"{"version": 99, "items": []}"#,
+        )
+        .unwrap();
+        let result = load_custom_config(dir.path());
+        assert!(matches!(result, Err(ConfigError::Version(99))));
+    }
+
+    #[test]
+    fn test_open_admin_route_rejects_absolute_url() {
+        let action = MenuAction::OpenAdminRoute {
+            route: "http://evil.com/hack".to_string(),
+        };
+        let result = validate_action("test", &action);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_open_admin_route_rejects_no_leading_slash() {
+        let action = MenuAction::OpenAdminRoute {
+            route: "settings".to_string(),
+        };
+        let result = validate_action("test", &action);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_open_url_rejects_non_http() {
+        let action = MenuAction::OpenUrl {
+            url: "file:///etc/passwd".to_string(),
+        };
+        let result = validate_action("test", &action);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_admin_api_rejects_unknown_path() {
+        let action = MenuAction::AdminApi {
+            method: "POST".to_string(),
+            path: "/api/secret/admin".to_string(),
+        };
+        let result = validate_action("test", &action);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_template_expansion() {
+        let result = expand_template(
+            "Proxy: {http_proxy}, Admin: {admin_url}, SOCKS: {socks5_proxy}",
+            "http://127.0.0.1:8800/_bifrost/",
+            "http://127.0.0.1:8800",
+            "socks5://127.0.0.1:1080",
+        );
+        assert_eq!(
+            result,
+            "Proxy: http://127.0.0.1:8800, Admin: http://127.0.0.1:8800/_bifrost/, SOCKS: socks5://127.0.0.1:1080"
+        );
+    }
+
+    #[test]
+    fn test_missing_config_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = load_custom_config(dir.path()).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_invalid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tray.json"), "not json").unwrap();
+        let result = load_custom_config(dir.path());
+        assert!(matches!(result, Err(ConfigError::Json(_))));
+    }
+}

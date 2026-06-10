@@ -1,0 +1,893 @@
+# CLI 原生托盘 Helper 方案
+
+> 状态：可实施方案，待 Review
+> 更新时间：2026-06-10
+
+## 结论
+
+CLI 托盘能力采用独立轻量二进制 `bifrost-tray` 实现，明确不使用 Tauri、Wry、WebView、Tao、`tray-icon`、`muda` 等桌面框架或跨平台托盘运行时。
+
+v1 直接使用操作系统原生 API：
+
+- macOS：AppKit `NSApplication`、`NSStatusItem`、`NSMenu`、`NSWorkspace`、`NSPasteboard`。
+- Windows：Win32 `Shell_NotifyIconW`、`NOTIFYICONDATAW`、隐藏消息窗口、`TrackPopupMenu`、`ShellExecuteW`、Win32 Clipboard API。
+
+这样可以把托盘 helper 控制在“CLI companion”形态：包体积小、依赖少、启动快、空闲资源低，并且不把 GUI 事件循环塞进 Bifrost 代理主进程。
+
+## 背景
+
+Bifrost 目前有两类启动形态：
+
+- Desktop：桌面壳负责拉起内嵌 `bifrost` 后端，并承载窗口生命周期。
+- CLI/脚本：用户直接通过 `bifrost start` 或脚本启动服务，当前没有系统托盘/菜单栏入口。
+
+本方案解决 CLI/脚本场景：用户不启动 Desktop，只通过 CLI 启动服务时，也能在 Windows notification area 或 macOS menu bar 看到 Bifrost 图标，并通过菜单完成常用操作。
+
+## 目标
+
+- Windows 和 macOS 支持 CLI 启动后的托盘图标。
+- Linux v1 不支持：不打包 helper、不自动启动、不在 Linux CLI help 暴露托盘开关。
+- 托盘 helper 是独立进程，由 `bifrost start` 在服务就绪后拉起。
+- helper 崩溃、缺失或启动失败时，不影响 Bifrost 主服务运行。
+- 默认菜单提供管理端入口、代理地址复制、系统代理切换、重启、停止、打开日志/数据目录等能力。
+- 支持 `<data_dir>/tray.json` 受控自定义菜单。
+- 全链路可测试：核心逻辑单元测试、CLI 启动 E2E、macOS/Windows 真实托盘 human_tests、包体积和内存实测。
+
+## 非目标
+
+- 不使用 Tauri、Wry、WebView、Tao、`tray-icon`、`muda`。
+- 不实现 Linux AppIndicator / StatusNotifierItem。
+- 不支持任意 shell 菜单项。
+- 不补齐 Windows `--daemon`。Windows 脚本启动仍可以是前台服务进程 + 独立 tray helper。
+- 不要求 Desktop 复用此 helper。Desktop 托盘体验可以后续单独设计。
+- 不在 v1 提供 `Start Bifrost` 菜单项，避免 helper 必须持久化完整 `start` 参数。
+
+## 现状依据
+
+- CLI 运行态已写入 `<data_dir>/runtime.json`，包含 `pid`、`port`、`socks5_port`、`host`、`started_at_ms`、`start_mode`、`binary_path` 等字段。
+- `bifrost status`、`stop`、`restart` 已共享运行态与进程检测逻辑。
+- Admin API system overview 已返回 `server.admin_url`，默认管理端地址形如 `http://127.0.0.1:<port>/_bifrost/`。
+- Web 管理端已有稳定路由：`/traffic`、`/rules`、`/values`、`/scripts`、`/settings` 等。
+- 现有资产包含 `assets/bifrost.ico`、`assets/bifrost.icns`、`assets/bifrost.png`、`assets/trayTemplate.png`、`assets/trayTemplate@2x.png`。
+- Windows service / Session 0 不适合承载可交互托盘 UI，托盘必须运行在当前交互用户 session。
+
+参考资料：
+
+- Windows `Shell_NotifyIcon`: https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-shell_notifyicona
+- Windows `NOTIFYICONDATA`: https://learn.microsoft.com/en-us/windows/win32/api/shellapi/ns-shellapi-notifyicondataa
+- Rust for Windows/windows crate: https://learn.microsoft.com/en-us/windows/dev-environment/rust/rust-for-windows
+- macOS `NSStatusItem`: https://developer.apple.com/documentation/AppKit/NSStatusItem
+- macOS `NSStatusBar`: https://developer.apple.com/documentation/appkit/nsstatusbar
+- Windows Session 0 Isolation: https://techcommunity.microsoft.com/blog/askperf/application-compatibility---session-0-isolation/372361
+
+## 总体架构
+
+```text
+用户脚本 / Shell
+      |
+      v
+bifrost start
+      |
+      | 1. 启动代理主服务
+      | 2. 写入 runtime.json
+      | 3. Admin API / 监听端口 ready
+      | 4. 平台和配置允许托盘
+      v
+spawn bifrost-tray
+      |
+      | data-dir / runtime.json / tray.lock / tray.log
+      v
+轻量原生托盘 helper
+      |
+      +-- macOS: AppKit NSStatusItem + NSMenu
+      |
+      +-- Windows: Shell_NotifyIconW + hidden HWND + popup menu
+      |
+      v
+菜单动作
+      |
+      +-- 打开 URL / 目录
+      +-- 复制代理地址
+      +-- localhost Admin API
+      +-- bifrost stop / restart
+```
+
+原则：
+
+- 主服务是控制面真相源，helper 只是 user-session UI adapter。
+- helper 不持有代理监听 socket，不参与流量转发。
+- helper 不嵌入 WebView，不启动浏览器内核。
+- helper 优先通过 `runtime.json`、localhost Admin API、当前 CLI binary 完成操作。
+
+## 进程模型
+
+### `bifrost start` 侧
+
+Windows/macOS 上，`bifrost start` 在服务 ready 后尝试启动 helper：
+
+1. 完成现有 start 流程。
+2. 写入 `runtime.json`。
+3. 确认 Admin API 可访问，或至少确认代理监听端口 ready。
+4. 计算 tray launch plan：
+   - 平台是 Windows 或 macOS；
+   - 未设置 `--no-tray`；
+   - 未设置 `BIFROST_DISABLE_TRAY=1`；
+   - 当前 data dir 未存在健康 helper；
+   - 能找到 `bifrost-tray` 二进制。
+5. 以 detached child process 启动 helper：
+   - `--data-dir <path>`
+   - `--runtime-file <path>`
+   - `--parent-pid <pid>`
+   - `--bifrost-bin <path>`
+   - `--admin-url <url>`，可选
+
+启动失败只打 warning，不让 `bifrost start` 失败。
+
+### `bifrost-tray` 侧
+
+helper 启动后：
+
+1. 初始化文件日志到 `<data_dir>/logs/tray.log`。
+2. 获取 `<data_dir>/tray.lock`，写入 `<data_dir>/tray.pid`。
+3. 读取 runtime，构造初始 `TrayState`。
+4. 初始化平台托盘图标和菜单。
+5. 启动状态刷新定时器：
+   - 读取 runtime；
+   - 校验主进程 PID；
+   - 探测 Admin API；
+   - 重新渲染菜单启用状态。
+6. 进入平台原生事件循环。
+7. 退出时删除 tray icon、释放 lock、删除 `tray.pid`。
+
+### 单实例
+
+同一个 `data_dir` 只允许一个 helper：
+
+- 使用 `<data_dir>/tray.lock` 文件锁。
+- 获取锁失败时，新 helper 直接退出 0，并记录已有实例。
+- stale `tray.pid` 不作为唯一判断，文件锁才是真正单实例依据。
+
+### 服务停止后
+
+v1 语义：
+
+- `Stop Bifrost` 停止主服务，但不退出 helper。
+- helper 进入 `Stopped/Disconnected` 状态：
+  - 管理端、代理地址、系统代理切换置灰；
+  - `Quit Tray` 可用；
+  - `Status` 显示最近一次停止或断连原因。
+- `Quit Tray` 只退出 helper，不停止主服务。
+
+## CLI 交互面
+
+Windows/macOS：
+
+- `bifrost start` 默认尝试启动托盘。
+- `bifrost start --no-tray` 禁用本次托盘。
+- `BIFROST_DISABLE_TRAY=1 bifrost start` 禁用托盘，便于 CI、E2E、无头环境。
+- `BIFROST_TRAY_BIN=<path>` 指定 helper 路径，便于开发测试。
+
+Linux：
+
+- 不在 help 中暴露 `--no-tray`。
+- 不自动启动 helper。
+- 安装脚本不分发 `bifrost-tray`。
+
+不提供公开 `bifrost tray` 子命令。`bifrost-tray` 是内部 companion binary，不是用户主入口。
+
+## 工程结构
+
+新增 crate：
+
+```text
+crates/bifrost-tray/
+  Cargo.toml
+  src/
+    main.rs
+    cli.rs
+    app.rs
+    state.rs
+    runtime.rs
+    menu_model.rs
+    config.rs
+    actions.rs
+    local_admin.rs
+    launcher_contract.rs
+    lock.rs
+    logging.rs
+    platform/
+      mod.rs
+      macos.rs
+      windows.rs
+      unsupported.rs
+```
+
+CLI 集成：
+
+```text
+crates/bifrost-cli/src/
+  commands/start.rs          # start ready 后调用 tray_launcher
+  tray_launcher.rs           # 平台 gating、helper 查找、spawn、错误降级
+```
+
+安装脚本和构建：
+
+```text
+scripts/
+  install-binary.sh          # macOS 分发 bifrost-tray
+  install-binary.ps1         # Windows 分发 bifrost-tray.exe
+
+design/
+  cli-tray-helper.md
+
+human_tests/
+  cli-tray-helper.md         # 实现阶段新增
+```
+
+## 依赖策略
+
+目标是 helper 依赖少、可审计、可裁剪。
+
+允许的公共依赖：
+
+- `serde`、`serde_json`：解析 runtime 和 `tray.json`。
+- `clap`：解析 helper 内部参数；也可后续改为手写解析进一步瘦身。
+- `tracing`、`tracing-subscriber`、`tracing-appender`：沿用项目日志体系。
+- `fs2`：跨平台文件锁。
+
+Windows target 依赖：
+
+- 优先 `windows-sys`，只开启必要 feature：
+  - `Win32_Foundation`
+  - `Win32_UI_Shell`
+  - `Win32_UI_WindowsAndMessaging`
+  - `Win32_Graphics_Gdi`
+  - `Win32_System_LibraryLoader`
+  - `Win32_System_Memory`
+  - `Win32_System_DataExchange`
+
+macOS target 依赖：
+
+- `objc2`
+- `objc2-foundation`
+- `objc2-app-kit`
+
+明确禁止引入：
+
+- `tauri`
+- `wry`
+- `tao`
+- `tray-icon`
+- `muda`
+- `open`
+- `arboard`
+- `reqwest`
+- `image`
+- `url`
+- 任意 WebView 或 GUI 框架依赖
+
+说明：
+
+- 打开 URL/目录使用 OS API，不用 `open` crate。
+- 剪贴板使用 OS API，不用 `arboard`。
+- localhost Admin API 使用 `std::net::TcpStream` 实现最小 HTTP/1.1 client，不用 `reqwest`。
+- 图标优先走平台资源或 OS 原生图片加载，不用 `image` 解码库。
+- URL 校验采用受控前缀、host allowlist 和控制字符过滤，不引入 `url` crate。
+
+如果已有 `bifrost-tray` 原型使用了 `tray-icon`、`muda`、`tao`、`open`、`arboard`、`image` 或 `url`，实现阶段必须替换为本方案定义的原生 API 路线。
+
+## 平台抽象接口
+
+核心逻辑不直接调用 AppKit 或 Win32，而是通过内部 trait 隔离：
+
+```rust
+trait NativeTray {
+    fn run(self, initial: TrayState, dispatcher: ActionDispatcher) -> Result<(), TrayError>;
+}
+
+trait NativeMenu {
+    fn rebuild(&mut self, model: MenuModel) -> Result<(), TrayError>;
+    fn set_tooltip(&mut self, text: &str) -> Result<(), TrayError>;
+}
+
+trait NativeShell {
+    fn open_url(&self, url: &str) -> Result<(), ActionError>;
+    fn open_dir(&self, path: &Path) -> Result<(), ActionError>;
+    fn copy_text(&self, text: &str) -> Result<(), ActionError>;
+}
+```
+
+分层：
+
+- `menu_model` 只产出平台无关菜单树。
+- `actions` 只处理 action 语义和安全校验。
+- `platform/macos.rs` 和 `platform/windows.rs` 只负责原生 UI、事件循环、OS shell/clipboard。
+- 测试中可用 `FakeNativeShell` 和 `FakeNativeMenu` 覆盖 action 与菜单状态，不需要真实托盘。
+
+## 平台实现
+
+### macOS
+
+实现文件：`crates/bifrost-tray/src/platform/macos.rs`
+
+核心 API：
+
+- `NSApplication::sharedApplication`
+- `setActivationPolicy(NSApplicationActivationPolicyAccessory)`
+- `NSStatusBar::systemStatusBar`
+- `statusItemWithLength(NSVariableStatusItemLength)`
+- `NSMenu`
+- `NSMenuItem`
+- `NSImage`
+- `NSWorkspace`
+- `NSPasteboard`
+
+实现要点：
+
+- AppKit 必须在主线程初始化并运行事件循环。
+- helper 不显示 Dock 图标，不创建窗口。
+- 使用 `assets/trayTemplate.png` / `assets/trayTemplate@2x.png`，通过 `NSImage` 设置 template image，适配深浅色菜单栏。
+- 菜单点击通过 Objective-C target/action 分发到 Rust action dispatcher。
+- 状态刷新通过 AppKit timer 或后台线程向主线程投递刷新事件，所有 UI 更新在主线程执行。
+- 打开 URL 使用 `NSWorkspace`。
+- 打开目录使用 `NSWorkspace`。
+- 复制文本使用 `NSPasteboard`。
+
+macOS 最小验收：
+
+- 直接运行 bare executable `bifrost-tray` 能创建 menu bar status item。
+- 无 Dock 图标。
+- 点击图标展示菜单。
+- 退出 helper 后图标消失。
+
+风险：
+
+- 如果 bare executable 在某些 macOS 版本上无法稳定隐藏 Dock 或加载资源，再评估最小 `.app` wrapper。但 v1 目标仍是普通 helper binary。
+
+### Windows
+
+实现文件：`crates/bifrost-tray/src/platform/windows.rs`
+
+核心 API：
+
+- `RegisterClassW`
+- `CreateWindowExW`
+- `DefWindowProcW`
+- `Shell_NotifyIconW`
+- `NOTIFYICONDATAW`
+- `RegisterWindowMessageW("TaskbarCreated")`
+- `CreatePopupMenu`
+- `AppendMenuW`
+- `TrackPopupMenu`
+- `DestroyMenu`
+- `ShellExecuteW`
+- `OpenClipboard` / `EmptyClipboard` / `SetClipboardData`
+
+实现要点：
+
+- 创建隐藏窗口承接 tray callback message。
+- `Shell_NotifyIconW(NIM_ADD)` 添加托盘图标。
+- 添加后调用 `NIM_SETVERSION`，使用 `NOTIFYICON_VERSION_4`。
+- 处理左键和右键点击，弹出原生菜单。
+- 菜单 command id 映射到内部 action id。
+- 处理 Explorer 重启：收到 `TaskbarCreated` 广播后重新 `NIM_ADD`。
+- 退出时 `NIM_DELETE` 删除图标。
+- Windows helper 使用 `#![cfg_attr(windows, windows_subsystem = "windows")]`，避免弹出控制台窗口。
+- 打开 URL/目录使用 `ShellExecuteW`。
+- 复制文本使用 Win32 Clipboard API。
+
+Windows 最小验收：
+
+- 直接运行 `bifrost-tray.exe` 后 notification area 出现图标。
+- 点击图标展示原生菜单。
+- Explorer 重启后图标能恢复。
+- 退出 helper 后图标消失。
+
+### Linux
+
+实现文件：`crates/bifrost-tray/src/platform/unsupported.rs`
+
+语义：
+
+- Linux 不打包、不自动启动。
+- 为了 workspace test 友好，可以保留 no-op/unsupported module，使 crate 在 Linux 上能跑纯逻辑单元测试。
+- 如果开发者手动运行 helper，返回明确错误：`tray is not supported on Linux yet`。
+
+## 图标资源
+
+macOS：
+
+- 编译时嵌入 `assets/trayTemplate.png` 和 `assets/trayTemplate@2x.png`。
+- 通过 `NSImage::initWithData` 加载。
+- 设置 `setTemplate(true)`。
+
+Windows：
+
+- 通过 Windows resource 嵌入 `assets/bifrost.ico`。
+- `build.rs` 只在 Windows target 编译资源。
+- 运行时通过 `LoadIconW` 或 `LoadImageW` 从资源加载 `HICON`。
+
+不使用 `image` crate 做 PNG/ICO 解码。
+
+## 状态模型
+
+核心状态：
+
+```rust
+enum ServiceState {
+    Starting,
+    Running,
+    Stopped,
+    Disconnected,
+    Error(String),
+}
+
+struct TrayState {
+    data_dir: PathBuf,
+    runtime_file: PathBuf,
+    bifrost_bin: PathBuf,
+    runtime: Option<RuntimeInfo>,
+    service_state: ServiceState,
+    admin_url: Option<String>,
+    http_proxy_url: Option<String>,
+    socks5_proxy_url: Option<String>,
+    system_proxy_state: Option<SystemProxyState>,
+    last_error: Option<String>,
+}
+```
+
+刷新规则：
+
+- 每 2 秒读取 runtime 并校验 PID。
+- 每 5 秒探测 Admin API。
+- 菜单动作完成后立即刷新。
+- 连续失败时保留最近一次可用 runtime，用 disabled menu 表达不可用状态。
+
+PID 校验：
+
+- macOS 使用与 CLI 一致的进程检测逻辑，避免 zombie 误判。
+- Windows 使用 Win32 `OpenProcess` / `GetExitCodeProcess`，不用 `tasklist`。
+- 需要尽量复用或下沉 `bifrost-cli` 现有 process state 逻辑，避免 status/stop/tray 判断漂移。
+
+## 默认菜单
+
+默认菜单：
+
+```text
+Bifrost: Running on 127.0.0.1:8800
+Open Admin UI
+Open Traffic
+Open Rules
+Copy Admin URL
+Copy HTTP Proxy
+Copy SOCKS5 Proxy
+System Proxy: On/Off
+Restart Bifrost
+Stop Bifrost
+Open Data Directory
+Open Logs
+Reload Tray Menu
+Quit Tray
+```
+
+状态规则：
+
+- `Bifrost: ...` 是 disabled title item。
+- Running 时启用依赖服务的菜单项。
+- Stopped/Disconnected 时置灰：
+- `Open Admin UI`
+- `Open Traffic`
+- `Open Rules`
+- `Copy Admin URL`
+- `Copy HTTP Proxy`
+- `Copy SOCKS5 Proxy`
+- `System Proxy`
+  - `Restart Bifrost`
+  - `Stop Bifrost`
+- `Open Data Directory`、`Open Logs`、`Reload Tray Menu`、`Quit Tray` 始终可用。
+
+动作规则：
+
+- `Open Admin UI`：打开 `admin_url`。
+- `Open Traffic`：打开 `admin_url + traffic`。
+- `Open Rules`：打开 `admin_url + rules`。
+- `Copy Admin URL`：复制 `admin_url`。
+- `Copy HTTP Proxy`：复制 `http://<host>:<port>`。
+- `Copy SOCKS5 Proxy`：复制 `socks5://<host>:<socks5_port>`，没有 SOCKS5 时置灰。
+- `System Proxy: On/Off`：调用 Admin API 或 CLI 复用逻辑，刷新后更新文案。
+- `Restart Bifrost`：调用传入的 `--bifrost-bin restart --data-dir <path>`。
+- `Stop Bifrost`：调用传入的 `--bifrost-bin stop --data-dir <path>`。
+- `Open Data Directory`：打开 data dir。
+- `Open Logs`：打开 `<data_dir>/logs`。
+- `Reload Tray Menu`：重新读取 `tray.json` 并 rebuild menu。
+- `Quit Tray`：退出 helper，不停止服务。
+
+## 自定义菜单
+
+配置文件：`<data_dir>/tray.json`
+
+```json
+{
+  "version": 1,
+  "items": [
+    {
+      "id": "settings",
+      "label": "Open Settings",
+      "action": {
+        "type": "open_admin_route",
+        "route": "/settings"
+      }
+    },
+    {
+      "id": "docs",
+      "label": "Open Bifrost Docs",
+      "action": {
+        "type": "open_url",
+        "url": "https://github.com/bytedance/bifrost"
+      }
+    },
+    {
+      "id": "copy-admin",
+      "label": "Copy Admin URL",
+      "action": {
+        "type": "copy_text",
+        "text": "{admin_url}"
+      }
+    }
+  ]
+}
+```
+
+v1 action：
+
+- `open_admin_route`
+  - 只允许 `/` 开头的相对路径。
+  - 禁止 `http://`、`https://`、`file://`。
+- `open_url`
+  - 只允许 `http://` 和 `https://`。
+  - 可选支持企业 allowlist。
+- `copy_text`
+  - 支持模板变量 `{admin_url}`、`{http_proxy}`、`{socks5_proxy}`、`{data_dir}`。
+- `admin_api`
+  - 只允许 localhost Admin API。
+  - 只允许 allowlist path。
+  - 只允许 `GET` 或 `POST`。
+
+禁止：
+
+- `shell`
+- `exec`
+- `powershell`
+- `osascript`
+- 任意外部二进制执行
+- 任意文件读取
+- 非 localhost API
+
+配置加载失败：
+
+- 保留默认菜单。
+- 记录 `tray.log`。
+- 菜单中可选显示 disabled item：`Custom menu failed to load`。
+
+## Local Admin Client
+
+不引入 `reqwest`。
+
+实现一个最小 localhost HTTP client：
+
+- 使用 `std::net::TcpStream`。
+- 只允许 `127.0.0.1`、`localhost`、`[::1]`。
+- 只支持 `http://`，不支持 TLS。
+- 只支持固定路径、固定 method、短超时。
+- 响应体限制大小，例如 1 MiB。
+- JSON 解析只解析需要字段。
+
+用途：
+
+- 获取 system overview。
+- 查询系统代理状态。
+- 执行 allowlist 内的系统代理开关或 refresh。
+
+如果 Admin API 不可达：
+
+- 不阻塞事件循环。
+- 菜单置灰并记录最近错误。
+- 下个刷新周期重试。
+
+## 安全边界
+
+- helper 不执行用户自定义 shell。
+- `tray.json` 只允许受控 action。
+- Admin API action 只允许 localhost。
+- helper 使用 `--bifrost-bin` 参数调用 stop/restart，不盲目信任可被篡改的 runtime `binary_path`。
+- 如果 `--bifrost-bin` 不存在或不是文件，Stop/Restart 菜单置灰。
+- helper 不提升权限，不请求管理员权限。
+- helper 不修改系统代理底层实现，只调用现有 API/CLI。
+- data dir 权限异常时 fail closed：不加载自定义菜单，不执行危险动作。
+
+## 包体积与内存门禁
+
+实现阶段必须实测并记录：
+
+```bash
+cargo build --release -p bifrost-tray
+ls -lh target/release/bifrost-tray*
+```
+
+macOS：
+
+- 记录 release binary size。
+- 记录 `strip` 后 size。
+- 启动 helper 后记录 idle RSS/private memory。
+
+Windows：
+
+- 记录 release exe size。
+- 记录 symbols 分离后的 exe size。
+- 启动 helper 后记录 working set/private bytes。
+
+初始目标：
+
+| 指标 | 目标 |
+| --- | --- |
+| macOS stripped binary | <= 5 MB，超过需分析依赖来源 |
+| Windows release exe | <= 5 MB，超过需分析依赖来源 |
+| macOS idle memory | <= 30 MB，超过需分析 AppKit/依赖开销 |
+| Windows idle memory | <= 20 MB，超过需分析 Win32/event loop 开销 |
+| 冷启动到图标可见 | <= 1 秒 |
+
+如果指标不达标：
+
+- 优先去掉 `clap`、重型日志 appender、非必要 JSON/URL 依赖。
+- 保持不用 Tauri/WebView 的原则不变。
+
+## 打包与安装
+
+构建产物：
+
+- macOS: `bifrost-tray`
+- Windows: `bifrost-tray.exe`
+
+安装布局：
+
+```text
+<install_dir>/
+  bifrost
+  bifrost-tray
+```
+
+Windows：
+
+```text
+<install_dir>/
+  bifrost.exe
+  bifrost-tray.exe
+```
+
+helper 查找顺序：
+
+1. `BIFROST_TRAY_BIN`
+2. `bifrost` 同目录下的 `bifrost-tray` / `bifrost-tray.exe`
+3. 安装脚本记录的 companion path
+
+找不到 helper：
+
+- `bifrost start` 打 warning。
+- 服务继续运行。
+- `status` 可选显示：`tray: unavailable (helper not found)`。
+
+## 失败模式
+
+| 场景 | 预期行为 | 测试方式 |
+| --- | --- | --- |
+| helper binary 缺失 | start warning，服务继续运行 | E2E 删除/改名 helper |
+| helper 启动失败 | start warning，服务继续运行 | `BIFROST_TRAY_BIN` 指向失败脚本 |
+| runtime.json 不存在 | helper 显示 Disconnected | helper self-test |
+| 主服务退出 | helper 菜单进入 Stopped/Disconnected | human_tests + E2E |
+| Admin API 不可达 | API 菜单置灰，周期重试 | fake runtime + closed port |
+| `tray.json` 非法 | 默认菜单保留，日志记录 | unit + human_tests |
+| 重复启动 helper | 后启动者退出 0 | lock unit + E2E |
+| Windows Explorer 重启 | tray icon 恢复 | Windows human_tests |
+| macOS 无 GUI session | helper 启动失败且主服务不受影响 | CI/headless E2E |
+
+## 测试设计
+
+### 单元测试
+
+`crates/bifrost-tray`：
+
+- `runtime.rs`
+  - runtime 正常解析。
+  - `0.0.0.0` / `::` 归一化为 loopback admin URL。
+  - 缺少 socks5 时菜单变量为空。
+- `config.rs`
+  - 合法 `tray.json`。
+  - 非法 JSON。
+  - 不支持 version。
+  - `open_admin_route` 拒绝绝对 URL。
+  - `open_url` 拒绝 `file://`。
+  - `admin_api` 拒绝非 allowlist path。
+  - 重复 id 拒绝。
+- `menu_model.rs`
+  - Running 菜单启用状态。
+  - Stopped 菜单置灰状态。
+  - 自定义菜单插入顺序。
+  - action id 到 platform command id 映射稳定。
+- `actions.rs`
+  - Copy 模板展开。
+  - Stop/Restart 参数构造。
+  - Admin API action 只允许 localhost。
+- `local_admin.rs`
+  - HTTP 请求拼接。
+  - 响应大小限制。
+  - 超时和错误归类。
+- `lock.rs`
+  - 单实例 lock。
+  - drop 后释放。
+- `tray_launcher.rs`
+  - macOS/Windows 构造 launch plan。
+  - Linux 不构造 launch plan。
+  - `--no-tray` 禁用。
+  - `BIFROST_DISABLE_TRAY=1` 禁用。
+  - helper 缺失返回 non-fatal warning。
+
+### 平台适配测试钩子
+
+为了让原生 UI 可测，helper 增加内部测试参数：
+
+- `--self-test platform`
+  - 初始化平台 tray。
+  - 成功添加图标后写 ready file。
+  - 2 秒后删除图标退出。
+- `--self-test menu-model`
+  - 根据 fake runtime 输出菜单 JSON，不进入事件循环。
+- `--test-ready-file <path>`
+  - 托盘图标添加成功后写入该文件。
+- `--test-command-log <path>`
+  - 菜单 action 分发时写入 action id，便于自动化断言。
+
+这些参数只用于测试，不在用户文档中主推。
+
+### E2E 测试
+
+新增脚本建议：
+
+- `e2e-tests/tests/test_cli_tray_launch_macos.sh`
+  - macOS only。
+  - 使用临时 `BIFROST_DATA_DIR`。
+  - 设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`。
+  - `cargo run --bin bifrost -- start --no-system-proxy`。
+  - 验证 helper ready file、`tray.pid`、`tray.log`。
+  - 验证 `bifrost stop` 后 helper 进入 stopped 状态。
+- `e2e-tests/tests/test_cli_tray_disable.sh`
+  - macOS/Windows。
+  - `--no-tray` 不启动 helper。
+  - `BIFROST_DISABLE_TRAY=1` 不启动 helper。
+- `e2e-tests/tests/test_cli_tray_missing_helper.sh`
+  - helper 不存在时 start 成功但 warning。
+- `e2e-tests/tests/test_cli_tray_custom_menu.sh`
+  - 写入合法和非法 `tray.json`。
+  - 使用 `--self-test menu-model` 断言菜单模型。
+
+Windows E2E：
+
+- 在 Windows runner 上执行 `bifrost-tray.exe --self-test platform`。
+- 验证 ready file。
+- 验证 `bifrost start` 不依赖 daemon mode。
+- 验证 helper 不弹出 console window。
+
+### 真实场景测试
+
+实现阶段必须新增 `human_tests/cli-tray-helper.md` 并执行。
+
+macOS 用例：
+
+- `TC-TRAY-MAC-01`：CLI 启动后 menu bar 出现 Bifrost 图标。
+- `TC-TRAY-MAC-02`：点击 `Open Admin UI` 打开管理端。
+- `TC-TRAY-MAC-03`：`Copy HTTP Proxy` 后剪贴板内容正确。
+- `TC-TRAY-MAC-04`：`Quit Tray` 不停止主服务。
+- `TC-TRAY-MAC-05`：`Stop Bifrost` 停止主服务，helper 进入 stopped 状态。
+- `TC-TRAY-MAC-06`：非法 `tray.json` 不破坏默认菜单。
+
+Windows 用例：
+
+- `TC-TRAY-WIN-01`：CLI 启动后 notification area 出现 Bifrost 图标。
+- `TC-TRAY-WIN-02`：点击托盘图标展示菜单。
+- `TC-TRAY-WIN-03`：`Open Admin UI` 打开管理端。
+- `TC-TRAY-WIN-04`：`--no-tray` 不出现托盘图标。
+- `TC-TRAY-WIN-05`：Explorer 重启后图标恢复。
+- `TC-TRAY-WIN-06`：helper 不弹出 console window。
+
+Linux 用例：
+
+- `TC-TRAY-LINUX-01`：Linux `bifrost start --help` 不出现 tray 相关参数。
+- `TC-TRAY-LINUX-02`：Linux `bifrost start` 不尝试启动 helper。
+
+## 验证矩阵
+
+| 类型 | 命令/方式 | 通过标准 |
+| --- | --- | --- |
+| fmt | `cargo fmt --all -- --check` | 无 diff |
+| clippy | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | 无 warning |
+| unit | `cargo test -p bifrost-tray` | 全部通过 |
+| CLI focused | `cargo test -p bifrost-cli tray_launcher` | 全部通过 |
+| 依赖禁用 | `cargo tree -p bifrost-tray` 后搜索禁用依赖 | 不包含 Tauri/Wry/WebView/Tao/tray-icon/muda/open/arboard/reqwest/image/url |
+| macOS self-test | `cargo run -p bifrost-tray -- --self-test platform ...` | ready file 写入且退出 0 |
+| Windows self-test | `bifrost-tray.exe --self-test platform ...` | ready file 写入且退出 0 |
+| E2E | 新增 tray e2e 脚本 | 全部通过 |
+| human_tests | `human_tests/cli-tray-helper.md` | 每条用例真实执行通过 |
+| workspace | `cargo test --workspace --all-features` | 全部通过 |
+| 包体积 | `ls -lh target/release/bifrost-tray*` | 符合门禁或有分析 |
+| 内存 | macOS/Windows 原生工具 | 符合门禁或有分析 |
+
+## 实施拆解
+
+### Phase 1：纯逻辑核心
+
+- 新增 `crates/bifrost-tray`。
+- 实现 `runtime`、`config`、`menu_model`、`actions`、`local_admin`、`lock`。
+- 不接 OS tray，先通过 `--self-test menu-model` 输出菜单 JSON。
+- 完成单元测试。
+
+### Phase 2：macOS 原生托盘
+
+- 实现 `platform/macos.rs`。
+- 接入 AppKit status item。
+- 接入菜单、打开 URL/目录、剪贴板。
+- 完成 macOS self-test 和 human_tests。
+
+### Phase 3：Windows 原生托盘
+
+- 实现 `platform/windows.rs`。
+- 接入 hidden HWND、`Shell_NotifyIconW`、popup menu。
+- 处理 Explorer 重启。
+- 接入 `ShellExecuteW` 和 Clipboard。
+- 完成 Windows self-test 和 human_tests。
+
+### Phase 4：CLI 启动集成
+
+- 新增 `tray_launcher.rs`。
+- `start` ready 后 spawn helper。
+- 添加 Windows/macOS `--no-tray`。
+- 添加 env gate：`BIFROST_DISABLE_TRAY=1`、`BIFROST_TRAY_BIN`。
+- Linux 不暴露参数、不启动 helper。
+- helper 缺失时 non-fatal warning。
+
+### Phase 5：安装与文档
+
+- 更新 macOS/Windows 安装脚本，分发 helper。
+- 更新 README CLI 托盘说明。
+- 新增 `human_tests/cli-tray-helper.md` 并更新索引。
+- 记录包体积和内存实测结果。
+
+### Phase 6：Review/Fix/Test 闭环
+
+- 第 1 轮：
+  - 复核目标、依赖禁用清单、平台实现、菜单 action 安全边界。
+  - 运行 unit + focused CLI tests + macOS self-test。
+  - 修复发现问题。
+- 第 2 轮：
+  - 复查 diff、安装脚本、README、human_tests、包体积和内存数据。
+  - 运行 E2E + workspace all-features。
+  - 执行 macOS/Windows human_tests。
+- 若第 2 轮仍发现功能缺口、测试失败或依赖超标，继续追加第 3 轮。
+
+## 交付定义
+
+实现完成必须满足：
+
+- Windows/macOS CLI start 能自动拉起原生托盘 helper。
+- Linux 不暴露、不启动、不打包。
+- 没有引入 Tauri/Wry/WebView/Tao/`tray-icon`/`muda`。
+- helper 缺失或失败不影响主服务。
+- 默认菜单和自定义菜单安全可控。
+- Stop/Restart/Quit Tray 语义清晰且通过验证。
+- 包体积和内存有真实测量数据。
+- 单元测试、E2E、human_tests、workspace tests 完成并记录。
+
+## 开放问题
+
+1. Windows/macOS 是否默认启动托盘？本方案建议默认启动，提供 `--no-tray` 和 `BIFROST_DISABLE_TRAY=1`。
+2. v1 是否要允许企业策略禁用 `open_url` 或限制域名？本方案预留 allowlist，但可后续实现。
+3. Stop 后 helper 是一直保留 stopped 状态，还是延迟自动退出？本方案建议保留。
+4. macOS bare executable 如果在某些版本出现 Dock/activation policy 差异，是否接受最小 `.app` wrapper fallback？本方案先以普通二进制为目标，实测后再决策。

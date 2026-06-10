@@ -28,6 +28,7 @@ mod stop;
 mod sync_cmd;
 mod system_proxy;
 mod traffic;
+pub(crate) mod tray_launcher;
 mod update_check;
 mod upgrade;
 mod value;

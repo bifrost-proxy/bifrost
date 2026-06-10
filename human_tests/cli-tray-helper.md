@@ -1,0 +1,186 @@
+# CLI 托盘 Helper 真实场景测试
+
+## 功能模块说明
+
+验证 `bifrost-tray` 托盘 helper 在 macOS/Windows 上的完整生命周期：CLI 自动拉起、托盘图标显示、默认菜单操作、自定义菜单加载、单实例保护、服务停止后状态变化，以及 `--no-tray` / `BIFROST_DISABLE_TRAY=1` 的禁用行为。
+
+## 前置条件
+
+- macOS 或 Windows 系统
+- 已编译 `bifrost` 和 `bifrost-tray` 二进制（`cargo build --bin bifrost --bin bifrost-tray`）
+- `bifrost-tray` 位于 `bifrost` 同目录下，或设置 `BIFROST_TRAY_BIN` 环境变量指向编译产物
+- 使用临时数据目录避免影响现有服务
+
+## 启动命令模板
+
+```bash
+BIFROST_DATA_DIR=./.bifrost-tray-test \
+BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+BIFROST_TRAY_BIN=./target/debug/bifrost-tray \
+cargo run --bin bifrost -- start -p 8801 --unsafe-ssl --no-system-proxy --skip-cert-check
+```
+
+## 测试用例
+
+### TC-TH-01: macOS/Windows CLI 启动后自动拉起托盘图标
+
+**操作步骤：**
+1. 使用启动命令模板启动 Bifrost 服务
+2. 观察 macOS 菜单栏（或 Windows notification area）
+
+**预期结果：**
+- 系统托盘/菜单栏出现 Bifrost 图标
+- `.bifrost-tray-test/tray.pid` 文件存在且内容为有效 PID
+- `.bifrost-tray-test/tray.lock` 文件存在
+- `.bifrost-tray-test/logs/tray.log` 文件存在且包含启动日志
+
+### TC-TH-02: 默认菜单包含所有预期项
+
+**操作步骤：**
+1. 在 TC-TH-01 基础上，点击托盘图标展开菜单
+
+**预期结果：**
+- 顶部显示 "Bifrost: Running on 127.0.0.1:8801"（灰色不可点击）
+- 包含以下菜单项：Open Admin UI、Open Traffic、Open Rules、Copy Admin URL、Copy HTTP Proxy、Copy SOCKS5 Proxy（置灰，因为没有独立 SOCKS5 端口）
+- 包含分隔线
+- 包含：Restart Bifrost、Stop Bifrost、Open Data Directory、Open Logs、Reload Tray Menu
+- 最底部：Quit Tray
+
+### TC-TH-03: Open Admin UI 打开浏览器管理端
+
+**操作步骤：**
+1. 点击 "Open Admin UI" 菜单项
+
+**预期结果：**
+- 默认浏览器打开 `http://127.0.0.1:8801/_bifrost/`
+- 管理端页面正常加载
+
+### TC-TH-04: Copy HTTP Proxy 复制到剪贴板
+
+**操作步骤：**
+1. 点击 "Copy HTTP Proxy" 菜单项
+2. 打开任意文本编辑器粘贴
+
+**预期结果：**
+- 剪贴板内容为 `http://127.0.0.1:8801`
+
+### TC-TH-05: Quit Tray 不停止 Bifrost 服务
+
+**操作步骤：**
+1. 点击 "Quit Tray" 菜单项
+2. 验证服务状态
+
+**预期结果：**
+- 托盘图标消失
+- `.bifrost-tray-test/tray.pid` 文件被清理
+- Bifrost 主服务仍然运行（`curl http://127.0.0.1:8801/_bifrost/api/status` 返回 200）
+
+### TC-TH-06: Stop Bifrost 停止服务
+
+**操作步骤：**
+1. 重新启动服务和托盘（参考 TC-TH-01）
+2. 点击 "Stop Bifrost" 菜单项
+
+**预期结果：**
+- Bifrost 主服务停止（端口 8801 不再监听）
+- 托盘图标仍存在但菜单进入 stopped 状态（状态行显示 "Bifrost: Stopped" 或 "Bifrost: Disconnected"）
+- 依赖服务的菜单项（Open Admin UI 等）置灰
+
+### TC-TH-07: --no-tray 禁用托盘
+
+**操作步骤：**
+1. 使用以下命令启动：
+```bash
+BIFROST_DATA_DIR=./.bifrost-tray-test \
+BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+BIFROST_TRAY_BIN=./target/debug/bifrost-tray \
+cargo run --bin bifrost -- start -p 8801 --unsafe-ssl --no-system-proxy --no-tray
+```
+
+**预期结果：**
+- Bifrost 服务正常启动
+- 系统托盘/菜单栏没有 Bifrost 图标
+- `.bifrost-tray-test/tray.pid` 文件不存在
+
+### TC-TH-08: BIFROST_DISABLE_TRAY=1 禁用托盘
+
+**操作步骤：**
+1. 使用以下命令启动：
+```bash
+BIFROST_DATA_DIR=./.bifrost-tray-test \
+BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+BIFROST_DISABLE_TRAY=1 \
+BIFROST_TRAY_BIN=./target/debug/bifrost-tray \
+cargo run --bin bifrost -- start -p 8801 --unsafe-ssl --no-system-proxy
+```
+
+**预期结果：**
+- Bifrost 服务正常启动
+- 系统托盘/菜单栏没有 Bifrost 图标
+
+### TC-TH-09: 单实例保护——重复启动被拒绝
+
+**操作步骤：**
+1. 启动 Bifrost 服务（自动拉起 tray helper）
+2. 手动尝试再次启动 tray helper：
+```bash
+./target/debug/bifrost-tray --data-dir ./.bifrost-tray-test --runtime-file ./.bifrost-tray-test/runtime.json --parent-pid 1
+```
+
+**预期结果：**
+- 第二个 tray helper 立即退出
+- 退出信息包含 "another tray helper is already running"
+- 原有的 tray 图标继续正常工作
+
+### TC-TH-10: 自定义菜单加载
+
+**操作步骤：**
+1. 在数据目录创建 `tray.json`：
+```bash
+cat > ./.bifrost-tray-test/tray.json << 'EOF'
+{
+  "version": 1,
+  "items": [
+    {"id": "settings", "label": "Open Settings", "action": {"type": "open_admin_route", "route": "/settings"}},
+    {"id": "docs", "label": "Bifrost Docs", "action": {"type": "open_url", "url": "https://github.com/bifrost-proxy/bifrost"}}
+  ]
+}
+EOF
+```
+2. 启动 Bifrost 服务（或点击 "Reload Tray Menu"）
+3. 展开托盘菜单
+
+**预期结果：**
+- 默认菜单项后（分隔线之后）出现 "Open Settings" 和 "Bifrost Docs" 自定义项
+- 点击 "Open Settings" 打开 `http://127.0.0.1:8801/_bifrost/settings`
+- 点击 "Bifrost Docs" 打开 GitHub 页面
+
+### TC-TH-11: 非法 tray.json 降级为默认菜单
+
+**操作步骤：**
+1. 创建非法 JSON：
+```bash
+echo "not valid json" > ./.bifrost-tray-test/tray.json
+```
+2. 启动 Bifrost 服务
+
+**预期结果：**
+- 托盘正常启动，显示默认菜单（无自定义项）
+- `tray.log` 中记录配置解析错误
+
+### TC-TH-12: Linux 不启动托盘
+
+**操作步骤：**
+1. 在 Linux 系统上执行 `bifrost start`
+
+**预期结果：**
+- 服务正常启动
+- 不产生 `tray.pid` 或 `tray.lock`
+- CLI help 中不显示 `--no-tray` 参数
+
+## 清理步骤
+
+```bash
+cargo run --bin bifrost -- stop
+rm -rf ./.bifrost-tray-test
+```

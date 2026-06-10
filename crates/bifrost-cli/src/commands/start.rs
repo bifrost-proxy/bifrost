@@ -980,6 +980,7 @@ pub fn run_start(
     cli_proxy: bool,
     cli_proxy_no_proxy: Option<String>,
     yes: bool,
+    no_tray: bool,
 ) -> bifrost_core::Result<()> {
     if let Some(pid) = read_pid() {
         if is_process_running(pid) {
@@ -1262,6 +1263,7 @@ pub fn run_start(
             cli_proxy_no_proxy,
             disconnect_on_config_change,
             config_manager,
+            no_tray,
         )?;
     }
 
@@ -1279,6 +1281,7 @@ pub fn run_foreground(
     cli_proxy_no_proxy: Option<String>,
     disconnect_on_config_change: bool,
     config_manager: ConfigManager,
+    no_tray: bool,
 ) -> bifrost_core::Result<()> {
     let pid = std::process::id();
 
@@ -1852,6 +1855,39 @@ pub fn run_foreground(
                 total_elapsed_ms = startup_started_at.elapsed().as_millis() as u64,
                 "foreground runtime initialization completed"
             );
+
+            // Launch tray helper if enabled
+            if super::tray_launcher::should_launch_tray(no_tray) {
+                if let Some(tray_bin) = super::tray_launcher::find_tray_binary() {
+                    let runtime_file = crate::process::get_runtime_file()
+                        .unwrap_or_else(|_| bifrost_dir.join("runtime.json"));
+                    let admin_url = format!(
+                        "http://{}:{}/_bifrost/",
+                        if config.host == "0.0.0.0" { "127.0.0.1" } else { &config.host },
+                        config.port,
+                    );
+                    let tray_start_args = {
+                        let mut extra = Vec::new();
+                        if unsafe_ssl {
+                            extra.push("--unsafe-ssl".to_string());
+                        }
+                        extra
+                    };
+
+                    super::tray_launcher::launch_tray_helper(
+                        &tray_bin,
+                        &bifrost_dir,
+                        &runtime_file,
+                        pid,
+                        Some(&admin_url),
+                        Some(config.port),
+                        &tray_start_args,
+                    );
+                } else {
+                    tracing::debug!("tray helper binary not found, skipping tray launch");
+                }
+            }
+
             let mobile_availability_tasks =
                 bifrost_admin::mobile_availability::spawn_terminal_panel(
                     admin_state_arc.clone(),

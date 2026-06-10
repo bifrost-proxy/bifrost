@@ -1,0 +1,41 @@
+[package]
+name = "bifrost-tray"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "System tray helper for Bifrost CLI"
+
+[[bin]]
+name = "bifrost-tray"
+path = "src/main.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tracing-appender.workspace = true
+clap.workspace = true
+fs2 = "0.4"
+open = "5"
+arboard = "3"
+ureq.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+tray-icon = "0.19"
+muda = "0.15"
+tao = { version = "0.31", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+tray-icon = "0.19"
+muda = "0.15"
+tao = { version = "0.31", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png", "ico"] }
