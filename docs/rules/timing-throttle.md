@@ -8,6 +8,8 @@
 
 在发送请求之前添加延迟。
 
+> **重要：reqDelay 仅对 TLS 拦截（HTTPS）流量生效。** 它只在拦截路径上被应用，对普通 HTTP 请求当前是空操作（会被静默忽略）。依赖 reqDelay 时，请使用启用了 `tlsIntercept` 的 HTTPS 域名；若只需在普通 HTTP 上模拟请求侧变慢，请改用 `reqSpeed`（上传限速，对普通 HTTP 有效）。`resDelay`/`reqSpeed`/`resSpeed` 在普通 HTTP 上均可正常工作。
+
 ### 语法
 
 ```
@@ -216,7 +218,7 @@ www.example.com reqDelay://500 resDelay://1000
 # 延迟 + 限速
 www.example.com resDelay://500 resSpeed://10
 
-# 完整慢速网络模拟
+# 完整慢速网络模拟（reqDelay 仅在 HTTPS + tlsIntercept 下生效，普通 HTTP 会忽略该段）
 www.example.com reqDelay://200 resDelay://500 reqSpeed://10 resSpeed://20
 
 # 配合路由规则
@@ -229,6 +231,8 @@ www.example.com resDelay://2000 includeFilter://m:POST
 ---
 
 ## 网络条件模拟
+
+> **注意：** 以下示例均包含 `reqDelay`，而 `reqDelay` 仅对 TLS 拦截（HTTPS）流量生效。若目标是普通 HTTP 域名，请改用启用 `tlsIntercept` 的 HTTPS 域名，否则其中的 `reqDelay` 段会被静默忽略，请求侧延迟不会生效（响应侧 `resDelay`/限速仍正常）。
 
 ### 2G 网络模拟
 

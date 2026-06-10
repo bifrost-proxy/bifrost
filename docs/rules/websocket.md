@@ -44,28 +44,13 @@ wss://www.example.com/path2 ws://www.abc.com/path3/yyy
 | `wss://www.example.com/path2`             | `ws://www.abc.com/path3/yyy`             |
 | `wss://www.example.com/path2/a/b/c?query` | `ws://www.abc.com/path3/yyy/a/b/c?query` |
 
-#### 2. 禁用路径拼接
-
-使用 `< >` 或 `( )` 包裹路径可禁用自动拼接：
-
-```bash
-www.example.com/path1 ws://<www.test.com/path/xxx>
-# 或
-www.example.com/path1 ws://(www.test.com/path/xxx)
-```
-
-| 原始请求                                 | 转换结果                     |
-| ---------------------------------------- | ---------------------------- |
-| `ws://www.example.com/path/x/y/z`        | `ws://www.test.com/path/xxx` |
-| `wss://www.example.com/path/a/b/c?query` | `ws://www.test.com/path/xxx` |
-
 ### 非 WebSocket 请求的处理
 
 | 请求类型           | 匹配 `ws` 规则的结果 |
 | ------------------ | -------------------- |
 | WebSocket 请求     | 正常转发             |
-| 隧道代理请求       | 忽略匹配             |
-| 普通 HTTP/HTTPS    | 返回 `502`           |
+| 隧道代理请求       | 非拦截（passthrough）隧道忽略匹配；TLS 拦截隧道内的 WebSocket 升级仍会被匹配并改写 |
+| 普通 HTTP/HTTPS    | `ws://` 作为目标时按普通 HTTP 请求转发（不会返回 502）；`ws://` 作为 pattern 时不匹配普通 HTTP |
 
 ### 测试用例
 
@@ -74,8 +59,7 @@ www.example.com/path1 ws://(www.test.com/path/xxx)
 | ws 转发          | `ws://test.com ws://target.com`                | 转发到 `ws://target.com`                 |
 | wss 降级为 ws    | `wss://test.com ws://target.com`               | 转发到 `ws://target.com`                 |
 | 路径自动拼接     | `ws://test.com/api ws://target.com/v2`         | `/api/xxx` → `/v2/xxx`                   |
-| 禁用路径拼接     | `ws://test.com/api ws://<target.com/fixed>`    | 任意路径都转发到 `/fixed`                |
-| HTTP 请求        | `http://test.com ws://target.com`              | 返回 502                                 |
+| HTTP 请求        | `http://test.com ws://target.com`              | 作为普通 HTTP 请求转发，返回 200         |
 
 ---
 
@@ -121,21 +105,13 @@ wss://www.example.com/path2 wss://www.abc.com/path3/yyy
 | `wss://www.example.com/path2`               | `wss://www.abc.com/path3/yyy`                 |
 | `wss://www.example.com/path2/a/b/c?query`   | `wss://www.abc.com/path3/yyy/a/b/c?query`     |
 
-#### 2. 禁用路径拼接
-
-```bash
-www.example.com/path1 wss://<www.test.com/path/xxx>
-# 或
-www.example.com/path1 wss://(www.test.com/path/xxx)
-```
-
 ### 非 WebSocket 请求的处理
 
 | 请求类型           | 匹配 `wss` 规则的结果 |
 | ------------------ | --------------------- |
 | WebSocket 请求     | 正常转发              |
-| 隧道代理请求       | 忽略匹配              |
-| 普通 HTTP/HTTPS    | 返回 `502`            |
+| 隧道代理请求       | 非拦截（passthrough）隧道忽略匹配；TLS 拦截隧道内的 WebSocket 升级仍会被匹配并改写 |
+| 普通 HTTP/HTTPS    | `wss://` 作为目标时按普通 HTTP 请求转发（向非 TLS 上游 TLS 握手失败时才返回 502）；`wss://` 作为 pattern 时不匹配普通 HTTP |
 
 ### 测试用例
 
@@ -144,8 +120,7 @@ www.example.com/path1 wss://(www.test.com/path/xxx)
 | ws 升级为 wss    | `ws://test.com wss://target.com`               | 转发到 `wss://target.com`                  |
 | wss 转发         | `wss://test.com wss://target.com`              | 转发到 `wss://target.com`                  |
 | 路径自动拼接     | `wss://test.com/api wss://target.com/v2`       | `/api/xxx` → `/v2/xxx`                     |
-| 禁用路径拼接     | `wss://test.com/api wss://<target.com/fixed>`  | 任意路径都转发到 `/fixed`                  |
-| HTTP 请求        | `http://test.com wss://target.com`             | 返回 502                                   |
+| HTTP 请求        | `http://test.com wss://target.com`             | 作为普通 HTTP 请求转发（TLS 握手失败时返回 502） |
 
 ---
 
@@ -204,7 +179,8 @@ ws://api.example.com/realtime wss://secure-api.example.com/realtime
 # WebSocket 转发 + 请求头修改
 wss://api.example.com/ws wss://internal-ws.example.com/ws reqHeaders://(X-Forwarded-For:client-ip)
 
-# WebSocket 转发 + 延迟
+# WebSocket 转发 + 延迟（注意：reqDelay 等请求时序变换作用于 HTTP 请求/响应阶段，
+# 不会作用于 WebSocket 握手/升级，握手会立即完成）
 ws://api.example.com/socket ws://test-server.example.com/socket reqDelay://1000
 ```
 
@@ -212,11 +188,11 @@ ws://api.example.com/socket ws://test-server.example.com/socket reqDelay://1000
 
 ## 注意事项
 
-1. **仅支持 WebSocket**：`ws` 和 `wss` 规则仅对 WebSocket 协议生效，HTTP/HTTPS 请求会返回 502
+1. **仅支持 WebSocket**：`ws` 和 `wss` 规则的路径拼接等转换仅对 WebSocket 升级请求生效；普通 HTTP/HTTPS 请求若匹配到目标为 `ws://` 的规则，会按普通 HTTP 请求转发（目标为 `wss://` 时仅在向非 TLS 上游 TLS 握手失败时返回 502），而非刻意拒绝
 2. **协议转换**：可以在 `ws` 和 `wss` 之间相互转换
-3. **路径处理**：默认会自动拼接剩余路径，使用 `<>` 或 `()` 可禁用
+3. **路径处理**：默认会自动拼接剩余路径
 4. **查询参数**：自动保留原始请求的查询参数
-5. **隧道代理**：隧道代理请求会忽略这些规则
+5. **隧道代理**：只有非拦截（passthrough）的 CONNECT 隧道会忽略这些规则；隧道一旦被 TLS 拦截，其内部的 WebSocket 升级仍会被匹配并改写
 
 ---
 

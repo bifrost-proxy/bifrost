@@ -12,7 +12,7 @@ Bifrost 支持五种 Pattern 类型，系统会按以下顺序自动检测：
 | PathWildcard | 以 `^` 开头                                 | 60-70      |
 | IP           | 符合 IPv4/IPv6/CIDR 格式                    | 70-95      |
 | Wildcard     | 包含 `*`、`?` 或以 `$` 开头                 | 40-60      |
-| Domain       | 默认类型                                    | 100-130    |
+| Domain       | 默认类型                                    | 100-133+   |
 
 所有类型均支持 `!` 前缀表示否定匹配。
 
@@ -63,6 +63,8 @@ example.com/api              # 匹配 /api、/api/users、/api?q=1
 example.com/api/*            # 匹配 /api/ 开头的所有路径
 https://example.com:8443/api # 完整匹配
 ```
+
+> ℹ️ 含 `*` 的 `example.com/api/*` 在类型检测时会被归类为 **Wildcard**（优先级约 60），而非 Domain。只有裸 `/path` 前缀形式（如 `example.com/api`）才保持为 Domain 模式。这里仅描述其运行时匹配行为（命中 `/api/users`、`/api/`，但不命中裸 `/api`）。
 
 ## IP 匹配
 
@@ -193,7 +195,7 @@ example.*/api/* file:///mock/$1/$2   # $1 = TLD, $2 = 路径
 
 | 类型           | 优先级 | 说明                   |
 | -------------- | ------ | ---------------------- |
-| Domain（完整） | 130    | 协议 + 端口 + 精确路径 |
+| Domain（完整） | ≥130   | 100 基础 +5 协议 +10 端口 +（15+路径段数）精确路径 |
 | Domain（基础） | 100    | 仅域名                 |
 | IP（精确）     | 95     | 单个 IP                |
 | Regex          | 80     | 正则表达式             |

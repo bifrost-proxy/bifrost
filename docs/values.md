@@ -40,9 +40,9 @@ pattern ua://{ua.txt}
 ```bash
 bifrost value list
 bifrost value show <name>
-bifrost value get <name>
+bifrost value get <name>            # show 的别名
 bifrost value add <name> <value>
-bifrost value set <name> <value>
+bifrost value set <name> <value>    # add 的别名
 bifrost value update <name> <value>
 bifrost value delete <name>
 bifrost value import <file>

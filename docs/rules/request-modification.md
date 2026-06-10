@@ -96,17 +96,14 @@ pattern ua://user_agent_string
 
 ### 示例
 
-> ⚠️ **注意**：操作符后面不支持空格，包含空格的值需要使用块变量或 URI 编码
+> ⚠️ **注意**：操作符后面不支持空格，且 `ua://` 的值不会做 URI 解码（`%20` 会原样写入 User-Agent）。包含空格的 UA 必须使用块变量。
 
 ```bash
 # 设置简单标识（无空格）
 www.example.com ua://MyApp/1.0
 
-# 使用块变量处理含空格的 UA
+# 使用块变量处理含空格的 UA（唯一可行方式）
 www.example.com ua://{chrome-ua}
-
-# 使用 URI 编码处理含空格的 UA
-www.example.com ua://Mozilla/5.0%20(Windows%20NT%2010.0)%20Chrome/120.0.0.0
 ```
 
 块变量定义示例：
@@ -116,25 +113,14 @@ Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0
 ```
 ```
 
-### 预定义 UA
-
-```bash
-# iOS Safari
-www.example.com ua://iphone
-
-# Android Chrome
-www.example.com ua://android
-
-# 桌面 Chrome
-www.example.com ua://chrome
-```
+> ⚠️ **注意**：bifrost 没有内置的预定义 UA 别名。`ua://iphone`、`ua://chrome` 等会把 User-Agent 原样设为字面字符串 `iphone`、`chrome`，不会展开为对应浏览器的完整 UA。需要完整 UA 时，请在块变量里写出完整字符串再用 `ua://{chrome-ua}` 引用。
 
 ### 测试用例
 
 | 测试场景 | 规则 | 预期 |
 |---------|------|------|
 | 自定义 UA | `test.com ua://CustomAgent/1.0` | User-Agent 为 `CustomAgent/1.0` |
-| 预定义 UA | `test.com ua://iphone` | User-Agent 包含 iPhone 标识 |
+| 块变量 UA | `test.com ua://{chrome-ua}` | User-Agent 为块变量定义的完整 UA |
 
 ---
 
@@ -148,25 +134,34 @@ www.example.com ua://chrome
 pattern referer://referer_url
 ```
 
-### 示例
+> ⚠️ **重要**：以 `http://` / `https://` 开头的值会被当作远程抓取来源（RemoteUrl），而不是字面字符串，此时 Referer 头部根本不会被设置。要把 Referer 设为某个 URL，请把完整 URL 放进块变量后用 `referer://{ref-url}` 引用，或改用 `reqHeaders://Referer=<url>`。
+>
+> `referer://`（空值）不会删除 Referer 头部，而是把它置为空字符串。要真正删除头部，请使用删除头部的规则。
 
 ```bash
-# 设置来源页面
-www.example.com referer://https://www.google.com/
+# 设置来源页面（用块变量，避免被当作 RemoteUrl）
+www.example.com referer://{ref-url}
 
-# 清除 Referer
+# 或直接用 reqHeaders 设置
+www.example.com reqHeaders://Referer=https://www.google.com/
+
+# 把 Referer 置为空字符串（注意：头部仍存在，值为空）
 www.example.com referer://
+```
 
-# 设置为同域名
-www.example.com/api referer://https://www.example.com/
+块变量定义示例：
+```
+``` ref-url
+https://www.google.com/
+```
 ```
 
 ### 测试用例
 
 | 测试场景 | 规则 | 预期 |
 |---------|------|------|
-| 设置 Referer | `test.com referer://https://google.com/` | Referer 为指定 URL |
-| 清除 Referer | `test.com referer://` | 无 Referer 头部 |
+| 设置 Referer | `test.com referer://{ref-url}` | Referer 为块变量定义的 URL |
+| 置空 Referer | `test.com referer://` | Referer 头部被置为空字符串 |
 
 ---
 
@@ -440,28 +435,22 @@ www.example.com reqCharset://gbk
 
 ```
 pattern headerReplace://req.header_name:old_value=new_value
-pattern headerReplace://req.header_name:/regex/=replacement
 ```
+
+> ⚠️ **重要**：请求侧的 headerReplace 只做字面子串替换（plain `String::replace`），**不支持正则**。`/regex/` 会被当作字面字符串匹配（永不命中），`[^;]+` 之类也会被当作普通字符，不会删除任何内容。替换是无锚点的子串替换，可能命中预期之外的子串。
 
 ### 示例
 
 ```bash
-# 替换 Accept 中的内容
+# 替换 Accept 中的内容（字面子串替换）
 www.example.com headerReplace://req.accept:text/html=application/json
-
-# 使用正则替换
-www.example.com headerReplace://req.user-agent:/Chrome\/\d+/=Chrome/999
-
-# 删除部分内容
-www.example.com headerReplace://req.cookie:session=[^;]+=
 ```
 
 ### 测试用例
 
 | 测试场景 | 规则 | 预期 |
 |---------|------|------|
-| 简单替换 | `test.com headerReplace://req.accept:html=json` | Accept 中 html 被替换为 json |
-| 正则替换 | `test.com headerReplace://req.ua:/v\d+/=v999` | 版本号被替换 |
+| 简单替换 | `test.com headerReplace://req.accept:html=json` | 入站 `Accept: text/html` 时，子串 `html` 被替换，得到 `Accept: text/json` |
 
 ---
 
@@ -471,7 +460,7 @@ www.example.com headerReplace://req.cookie:session=[^;]+=
 
 ```bash
 # 同时修改多个属性
-www.example.com reqHeaders://X-Token=abc ua://MyApp/1.0 referer://https://google.com/
+www.example.com reqHeaders://X-Token=abc ua://MyApp/1.0 reqHeaders://Referer=https://google.com/
 
 # 配合路由规则（使用内嵌值处理含空格头部值）
 www.example.com host://backend.local reqHeaders://{forwarded-headers}

@@ -33,10 +33,13 @@ pattern ua://{ua.txt}
 ```bash
 bifrost value list
 bifrost value show <name>
-bifrost value set <name> <value>
+bifrost value add <name> <value>     # `set` is a hidden alias of `add`
+bifrost value update <name> <value>
 bifrost value delete <name>
 bifrost value import <file>
 ```
+
+The canonical subcommands are `list`, `show`, `add`, `update`, `delete`, and `import`. `get` (alias of `show`) and `set` (alias of `add`) work but are not shown by `bifrost value --help`.
 
 ## Script Access
 

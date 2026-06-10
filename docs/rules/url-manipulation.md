@@ -49,7 +49,7 @@ lang: zh
 # API 版本控制
 www.example.com/api urlParams://api_version=v2
 
-# 添加认证参数（使用模板变量需要反引号 + 引用内嵌值）
+# 添加认证参数（引用内嵌值，无需反引号；值含空格时才需反引号）
 www.example.com urlParams://`{auth-params}`
 
 # 调试模式
@@ -62,7 +62,7 @@ www.example.com urlParams://experiment=variant_b
 ### 模板变量
 
 ````bash
-# 动态参数（使用模板变量需要反引号）
+# 动态参数（值含空格时需用反引号包裹以防被空白切分；模板变量本身无需反引号）
 www.example.com urlParams://`t=${now}&id=${randomUUID}`
 
 # 或者使用内嵌值（推荐）

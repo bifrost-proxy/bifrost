@@ -177,7 +177,7 @@ fn get_protocol_value_type(protocol: Protocol) -> &'static str {
         Protocol::ReqReplace
         | Protocol::ResReplace
         | Protocol::UrlReplace
-        | Protocol::HeaderReplace => "old/new/",
+        | Protocol::HeaderReplace => "old=new",
         Protocol::Method => "method_name",
         Protocol::Auth => "user:password",
         Protocol::Ua | Protocol::Referer => "string",

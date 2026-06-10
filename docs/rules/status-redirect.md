@@ -103,18 +103,16 @@ www.example.com replaceStatus://200
 
 # 将任何状态码替换为 404
 www.example.com replaceStatus://404
-
-# 配合过滤器，只替换特定状态码
-www.example.com replaceStatus://200 includeFilter://s:500
 ```
+
+> ⚠️ **注意**：`includeFilter://s:<code>` 状态码过滤器**不能**用于按后端状态码限定 `replaceStatus`。规则在请求阶段解析，此时响应状态码尚未知，携带 `s:` 过滤器的规则会被静默丢弃、替换不会生效。目前唯一可用的形式是无条件的 `replaceStatus://<code>`。
 
 ### 测试用例
 
 | 测试场景   | 规则                                                 | 后端返回 | 预期            |
 | ---------- | ---------------------------------------------------- | -------- | --------------- |
 | 替换为 200 | `test.com replaceStatus://200`                       | 500      | HTTP 200        |
-| 条件替换   | `test.com replaceStatus://200 includeFilter://s:404` | 404      | HTTP 200        |
-| 条件替换   | `test.com replaceStatus://200 includeFilter://s:404` | 200      | HTTP 200 (不变) |
+| 替换为 404 | `test.com replaceStatus://404`                       | 200      | HTTP 404        |
 
 ---
 
@@ -138,6 +136,8 @@ pattern redirect://status_code:target_url
 | `303`  | See Other          | 常用于 POST 后重定向   |
 | `307`  | Temporary Redirect | 保持请求方法           |
 | `308`  | Permanent Redirect | 永久重定向，保持方法   |
+
+> 状态码前缀可以是任意 3xx（300–399）状态码，上表仅列出常用的几个。若前缀不在 3xx 范围（如 `redirect://200:url`），则会被当作目标 URL 的一部分而非状态码。
 
 ### 基础示例
 
@@ -190,9 +190,6 @@ www.example.com redirect://https://new.com/ resCors://*
 
 # 替换状态码 + 修改头部
 www.example.com replaceStatus://200 resHeaders://(X-Fixed: true)
-
-# 条件状态码修改
-www.example.com replaceStatus://200 includeFilter://s:500 includeFilter://s:502
 ```
 
 块变量定义：
@@ -210,6 +207,6 @@ Not Found
 1. **statusCode 不请求后端**：使用 `statusCode` 时，请求不会发送到后端服务器
 2. **replaceStatus 请求后端**：使用 `replaceStatus` 时，请求会正常发送，只修改返回的状态码
 3. **redirect 优先级**：`redirect` 会立即返回重定向响应，后续规则不会执行
-4. **状态码与 Body**：使用 `statusCode` 时，默认 Body 为空，需要配合 `resBody` 设置
+4. **状态码与 Body**：使用 `statusCode` 时，默认 Body 为该状态码的标准原因短语（如 404 → `Not Found`，500 → `Internal Server Error`；204 等无标准短语的状态码 Body 为空）。如需自定义内容，配合 `resBody` 覆盖
 5. **规则流水线**：`statusCode` 的直接响应仍会执行同一命中规则里的请求头/请求体改写、响应头/响应体改写和脚本规则，但不会建立上游连接
 6. **缓存影响**：301 重定向会被浏览器缓存，调试时建议使用 302

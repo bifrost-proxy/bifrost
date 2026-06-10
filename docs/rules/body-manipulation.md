@@ -66,7 +66,7 @@ www.example.com/api/health file://({"healthy": true, "version": "1.0"})
 
 ## rawfile
 
-与 `file` 类似，但不会自动添加响应头。
+与 `file` 类似，但不会注入 Bifrost 标识或默认 Body 包装。文件路径形式仍会根据扩展名设置推断的 `Content-Type`；内联形式（`rawfile://(...)`）则不设置 `Content-Type`，除非内容本身包含 HTTP 头部块。
 
 ### 语法
 
@@ -315,8 +315,8 @@ pattern reqMerge://{varName}            # 兼容旧别名
 ### 示例
 
 ```bash
-# 小括号格式添加字段
-www.example.com params://(version: "2.0")
+# 小括号格式添加字段（值原样作为字符串，写的引号会被原样包含）
+www.example.com params://(version: 2.0)
 
 # 使用模板变量（需要反引号）
 www.example.com params://`(timestamp:${now})`
@@ -338,8 +338,10 @@ meta.source: proxy
 
 | 测试场景 | 规则 | 原始 Body | 预期 Body |
 | --- | --- | --- | --- |
-| 添加字段 | `test.com params://(b: 2)` | `{"a": 1}` | `{"a": 1, "b": 2}` |
-| 覆盖字段 | `test.com params://(a: 99)` | `{"a": 1}` | `{"a": 99}` |
+| 添加字段 | `test.com params://(b: 2)` | `{"a": 1}` | `{"a": 1, "b": "2"}` |
+| 覆盖字段 | `test.com params://(a: 99)` | `{"a": 1}` | `{"a": "99"}` |
+
+> ⚠️ **注意**：`params`/`resMerge` 注入的值始终以 JSON 字符串形式合并，不会做数字/布尔类型转换（例如 `2` 合并后是 `"2"`，`99` 合并后是 `"99"`）。
 
 ---
 
@@ -371,7 +373,7 @@ www.example.com resMerge://{res-merge}
 
 | 测试场景 | 规则                            | 原始 Body      | 预期 Body                  |
 | -------- | ------------------------------- | -------------- | -------------------------- |
-| 添加字段 | `test.com resMerge://(extra: 1)` | `{"data": []}` | `{"data": [], "extra": 1}` |
+| 添加字段 | `test.com resMerge://(extra: 1)` | `{"data": []}` | `{"data": [], "extra": "1"}` |
 
 ---
 
@@ -485,7 +487,7 @@ www.example.com resAppend://{tracking} includeFilter://resH:content-type=text/ht
 ## 注意事项
 
 1. **编码**：内联内容会自动进行适当的编码处理
-2. **JSON 合并**：`params`（兼容别名 `reqMerge`）/`resMerge` 只对 JSON 格式的 Body 有效
+2. **合并**：`params`（兼容别名 `reqMerge`）/`resMerge` 对 JSON 对象 Body 和 `application/x-www-form-urlencoded` 表单 Body 都生效；纯文本或空 Body 保持不变
 3. **替换顺序**：多个替换规则按定义顺序执行
 4. **文件路径**：本地文件路径建议使用绝对路径（以 `/` 开头）；相对路径的行为会受运行目录影响
 5. **CORS**：使用 `file` 协议时，可能需要配合 `resCors` 处理跨域

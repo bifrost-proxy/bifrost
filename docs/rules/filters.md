@@ -208,13 +208,11 @@ pattern delete://target.name
 
 ### 目标类型
 
-| 目标        | 语法              | 说明                |
-| ----------- | ----------------- | ------------------- |
-| 请求头      | `reqHeaders.name` | 删除请求头          |
-| 响应头      | `resHeaders.name` | 删除响应头          |
-| 请求 Cookie | `reqCookies.name` | 删除请求 Cookie     |
-| 响应 Cookie | `resCookies.name` | 删除响应 Set-Cookie |
-| URL 参数    | `urlParams.name`  | 删除 URL 参数       |
+| 目标     | 语法              | 说明          |
+| -------- | ----------------- | ------------- |
+| 请求头   | `reqHeaders.name` | 删除请求头    |
+| 响应头   | `resHeaders.name` | 删除响应头    |
+| URL 参数 | `urlParams.name`  | 删除 URL 参数 |
 
 ### 示例
 
@@ -224,12 +222,6 @@ www.example.com delete://reqHeaders.X-Custom
 
 # 删除响应头
 www.example.com delete://resHeaders.X-Powered-By
-
-# 删除请求 Cookie
-www.example.com delete://reqCookies.session
-
-# 删除响应 Cookie
-www.example.com delete://resCookies.tracking
 
 # 删除 URL 参数
 www.example.com delete://urlParams.debug
@@ -241,18 +233,17 @@ www.example.com delete://urlParams.debug
 # 删除多个头部
 www.example.com delete://reqHeaders.X-A delete://reqHeaders.X-B
 
-# 删除多个 Cookie
-www.example.com delete://reqCookies.a delete://reqCookies.b
+# 删除多个 URL 参数
+www.example.com delete://urlParams.a delete://urlParams.b
 ```
 
 ### 测试用例
 
-| 测试场景    | 规则                                    | 预期                |
-| ----------- | --------------------------------------- | ------------------- |
-| 删除请求头  | `test.com delete://reqHeaders.X-Custom` | 请求不含 X-Custom   |
-| 删除响应头  | `test.com delete://resHeaders.Server`   | 响应不含 Server     |
-| 删除 Cookie | `test.com delete://reqCookies.session`  | Cookie 不含 session |
-| 删除参数    | `test.com delete://urlParams.debug`     | URL 不含 debug 参数 |
+| 测试场景   | 规则                                    | 预期                |
+| ---------- | --------------------------------------- | ------------------- |
+| 删除请求头 | `test.com delete://reqHeaders.X-Custom` | 请求不含 X-Custom   |
+| 删除响应头 | `test.com delete://resHeaders.Server`   | 响应不含 Server     |
+| 删除参数   | `test.com delete://urlParams.debug`     | URL 不含 debug 参数 |
 
 ---
 

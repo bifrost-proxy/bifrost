@@ -43,14 +43,14 @@ Bifrost 规则的执行遵循两个核心原则：
 
 | 协议         | 说明        | 合并行为     |
 | ------------ | ----------- | ------------ |
-| `reqHeaders` | 请求头      | 后面覆盖前面 |
-| `resHeaders` | 响应头      | 后面覆盖前面 |
+| `reqHeaders` | 请求头      | 前面覆盖后面（第一个生效） |
+| `resHeaders` | 响应头      | 前面覆盖后面（第一个生效） |
 | `reqCookies` | 请求 Cookie | 后面覆盖前面 |
 | `resCookies` | 响应 Cookie | 后面覆盖前面 |
 | `urlParams`  | URL 参数    | 后面覆盖前面 |
 | `reqBody`    | 请求 Body   | 最后一个生效 |
 | `resBody`    | 响应 Body   | 最后一个生效 |
-| `statusCode` | 状态码      | 最后一个生效 |
+| `statusCode` | 状态码      | 第一个生效（互斥/单匹配） |
 
 ---
 
@@ -84,7 +84,7 @@ www.example.com host://server.local
 www.example.com proxy://proxy.local:8080
 ```
 
-**结果**：请求转发到 `server.local`（host 先匹配）
+**结果**：请求转发到 `server.local`。host 优先于 proxy 是因为在转发目标选择中 host 系（host/xhost/http/https/ws/wss）优先于 proxy，与文件顺序无关——即使把 proxy 写在 host 前面，仍然转发到 host。
 
 ### 测试用例
 
@@ -92,7 +92,7 @@ www.example.com proxy://proxy.local:8080
 | --- | --- | --- |
 | host 顺序 | `test.com host://s1` + `test.com host://s2` | 转发到 s1 |
 | xhost 优先 | `test.com host://s1` + `test.com xhost://s2` | 转发到 s2 |
-| host 先于 proxy | `test.com host://s1` + `test.com proxy://p1:8080` | 转发到 s1 |
+| host 优先于 proxy | `test.com host://s1` + `test.com proxy://p1:8080` | 转发到 s1（host 系优先，与顺序无关） |
 
 ---
 
@@ -101,12 +101,12 @@ www.example.com proxy://proxy.local:8080
 ### 相同头部字段覆盖
 
 ```bash
-# 同一字段，后面覆盖前面
+# 同一字段，第一个生效（先定义的优先），后续同名头部被忽略
 www.example.com reqHeaders://(X-Custom:value1)
 www.example.com reqHeaders://(X-Custom:value2)
 ```
 
-**结果**：请求头 `X-Custom` 的值为 `value2`
+**结果**：请求头 `X-Custom` 的值为 `value1`（reqHeaders/resHeaders 相同字段以第一个为准，与 Cookie/urlParams 的「后定义覆盖」相反）
 
 ### 不同头部字段合并
 
@@ -138,7 +138,7 @@ www.example.com urlParams://(y:2)
 www.example.com urlParams://(x:99)
 ```
 
-**结果**：URL 参数 `?x=99&y=2`
+**结果**：URL 参数中 `x=99`、`y=2` 都存在，相同参数取后定义的值（`x=99`）。参数输出顺序为 `?y=2&x=99`，并不保证按首次定义顺序排列。
 
 ### Body 替换
 
@@ -154,12 +154,12 @@ www.example.com resBody://(body2)
 
 | 测试场景      | 规则                                        | 预期结果   |
 | ------------- | ------------------------------------------- | ---------- |
-| 头部覆盖      | `reqHeaders://(X:1)` + `reqHeaders://(X:2)` | X: 2       |
+| 头部覆盖      | `reqHeaders://(X:1)` + `reqHeaders://(X:2)` | X: 1       |
 | 头部合并      | `reqHeaders://(A:1)` + `reqHeaders://(B:2)` | A: 1, B: 2 |
 | Cookie 覆盖   | `reqCookies://(a:1)` + `reqCookies://(a:2)` | a=2        |
 | Cookie 合并   | `reqCookies://(a:1)` + `reqCookies://(b:2)` | a=1; b=2   |
 | 参数覆盖      | `urlParams://(x:1)` + `urlParams://(x:2)`   | x=2        |
-| 参数合并      | `urlParams://(x:1)` + `urlParams://(y:2)`   | x=1&y=2    |
+| 参数合并      | `urlParams://(x:1)` + `urlParams://(y:2)`   | x=1、y=2 都存在（输出顺序不保证） |
 | Body 最后生效 | `resBody://(a)` + `resBody://(b)`           | b          |
 
 ---
@@ -219,9 +219,12 @@ www.example.com resHeaders://(X-B:2)
 
 ### 修改类规则合并顺序
 
-1. 相同字段/参数：**后定义的覆盖前面的**
+1. 相同字段/参数：
+   - reqHeaders/resHeaders：**第一个生效（先定义的优先）**，后续同名头部被忽略
+   - reqCookies/resCookies/urlParams：**后定义的覆盖前面的**
 2. 不同字段/参数：**全部合并**
-3. Body/StatusCode：**最后定义的生效**
+3. Body（reqBody/resBody）：**最后定义的生效**
+4. StatusCode：**第一个生效（互斥/单匹配）**，后续同协议 statusCode 规则被忽略
 
 ---
 

@@ -21,11 +21,14 @@ Pattern 根据格式自动识别类型，优先级影响匹配顺序：
 
 | 类型         | 格式示例                                    | 优先级 |
 | :----------- | :------------------------------------------ | :----- |
-| Domain       | `example.com` `example.com/api`             | 100    |
-| IP/CIDR      | `192.168.1.1` `192.168.0.0/16`              | 95     |
+| Domain       | `example.com` `example.com/api`             | 100+   |
+| IP（精确）   | `192.168.1.1`                               | 95     |
+| CIDR         | `192.168.0.0/16`                            | 70-78  |
 | Regex        | `/pattern/` `/pattern/i`                    | 80     |
 | PathWildcard | `^example.com/api/*` `^example.com/api/**`  | 60-70  |
 | Wildcard     | `*.example.com` `$example.com` `example?.com` | 40-60  |
+
+Domain 优先级以 100 为基准，显式协议（`http(s)://`）+5、显式端口 +10，因此带协议带端口的 Domain pattern 可达 100-115。CIDR 优先级为 `70 + prefix_len/4`（约 70-78），低于 Regex（80），因此一条宽泛的 CIDR（如 `/16`）可能排在 Regex 之后；只有精确 IP 才是 95。
 
 取反匹配：所有类型均支持 `!` 前缀，如 `!*.example.com`。完整的类型检测顺序、优先级与协议前缀注意事项见 [pattern.md](./pattern.md)。
 
@@ -142,8 +145,8 @@ example.com resBody://{mockBody}
 ### 规则优先级
 
 1. `lineProps://important` 规则优先匹配
-2. 相同优先级按 Pattern 类型：Domain > IP > Regex > Wildcard
-3. 同类型规则按从上到下顺序匹配
+2. 规则按数值优先级 `priority()` 排序：Domain（100+）> 精确 IP（95）> Regex（80）> PathWildcard（60-70）> Wildcard（40-60）；CIDR 为 70-78，因此宽泛 CIDR 可能排在 Regex 之后。不同 Pattern 类型的优先级互不相同，不存在「相同优先级按类型」的二级比较。
+3. 仅当优先级相同（即同类型）时，规则才按从上到下的文件顺序匹配
 
 ### 调试技巧
 
