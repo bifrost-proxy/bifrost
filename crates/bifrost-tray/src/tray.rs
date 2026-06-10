@@ -8,7 +8,7 @@ use std::time::Duration;
 use tao::event::Event;
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
-use tray_icon::TrayIconBuilder;
+use tray_icon::{TrayIconBuilder, TrayIconEvent};
 
 use crate::cli::TrayArgs;
 use crate::config::{self, TrayConfig};
@@ -84,7 +84,6 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
         .map_err(|e| format!("failed to create tray icon: {e}"))?;
 
     let should_quit = Arc::new(AtomicBool::new(false));
-    let should_reload = Arc::new(AtomicBool::new(false));
     let current_state = Arc::new(AtomicU8::new(match state {
         ServiceState::Running => STATE_RUNNING,
         ServiceState::Stopped => STATE_STOPPED,
@@ -99,6 +98,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     });
 
     let menu_receiver = MenuEvent::receiver().clone();
+    let tray_receiver = TrayIconEvent::receiver().clone();
     let mut last_rendered_state = current_state.load(Ordering::Relaxed);
 
     event_loop.run(move |event, _, control_flow| {
@@ -110,13 +110,31 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
             return;
         }
 
+        // When the user interacts with the tray icon (click/right-click to open
+        // the menu), proactively recompute the service state once so the menu
+        // that is about to be shown reflects the latest status without waiting
+        // for the 3s background poll.
+        let mut icon_interacted = false;
+        while let Ok(tray_event) = tray_receiver.try_recv() {
+            if matches!(
+                tray_event,
+                TrayIconEvent::Click { .. } | TrayIconEvent::DoubleClick { .. }
+            ) {
+                icon_interacted = true;
+            }
+        }
+        if icon_interacted {
+            let fresh = compute_service_state(&args);
+            current_state.store(fresh, Ordering::Relaxed);
+        }
+
         // Check state change: update icon + rebuild menu
         let new_state = current_state.load(Ordering::Relaxed);
         let state_changed = new_state != last_rendered_state;
-        // ReloadMenu action sets this flag to request a menu rebuild from tray.json
-        let reload_requested = should_reload.swap(false, Ordering::Relaxed);
 
-        if state_changed || reload_requested {
+        // Rebuild on state change, or whenever the icon was interacted with so
+        // custom config / runtime details are refreshed alongside state.
+        if state_changed || icon_interacted {
             last_rendered_state = new_state;
 
             if state_changed {
@@ -165,7 +183,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
 
             tracing::info!(
                 state = new_state,
-                reloaded = reload_requested,
+                icon_interacted = icon_interacted,
                 "tray icon and menu updated"
             );
         }
@@ -174,7 +192,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
             while let Ok(event) = menu_receiver.try_recv() {
                 if let Some(action) = action_map.get(&event.id) {
                     tracing::info!("menu action triggered");
-                    execute_action(action, &args, &data_dir_str, &should_quit, &should_reload);
+                    execute_action(action, &args, &data_dir_str, &should_quit);
                 }
             }
         }
@@ -273,7 +291,6 @@ fn execute_action(
     args: &TrayArgs,
     _data_dir_str: &str,
     quit_flag: &AtomicBool,
-    reload_flag: &AtomicBool,
 ) {
     match action {
         MenuItemAction::OpenUrl(url) => {
@@ -347,10 +364,6 @@ fn execute_action(
             if let Err(e) = open::that(path) {
                 tracing::error!(path = %path, error = %e, "failed to open directory");
             }
-        }
-        MenuItemAction::ReloadMenu => {
-            tracing::info!("menu reload requested");
-            reload_flag.store(true, Ordering::Relaxed);
         }
         MenuItemAction::QuitTray => {
             tracing::info!("quit tray requested");
@@ -431,21 +444,7 @@ fn poll_service_state(quit_flag: &AtomicBool, state: &AtomicU8, args: &TrayArgs)
         }
         thread::sleep(Duration::from_secs(3));
 
-        let parent_alive = runtime::is_process_running(args.parent_pid);
-        let runtime = runtime::read_runtime(&args.runtime_file);
-        let service_alive = runtime
-            .as_ref()
-            .map(|rt| runtime::is_process_running(rt.pid))
-            .unwrap_or(false);
-
-        let new_state = if parent_alive || service_alive {
-            STATE_RUNNING
-        } else if runtime.is_some() {
-            STATE_STOPPED
-        } else {
-            STATE_DISCONNECTED
-        };
-
+        let new_state = compute_service_state(args);
         let old = state.swap(new_state, Ordering::Relaxed);
         if old != new_state {
             tracing::info!(
@@ -454,5 +453,24 @@ fn poll_service_state(quit_flag: &AtomicBool, state: &AtomicU8, args: &TrayArgs)
                 "service state transition detected"
             );
         }
+    }
+}
+
+/// Compute the current service state code (running/stopped/disconnected) by
+/// re-reading runtime.json and probing the relevant processes.
+fn compute_service_state(args: &TrayArgs) -> u8 {
+    let parent_alive = runtime::is_process_running(args.parent_pid);
+    let runtime = runtime::read_runtime(&args.runtime_file);
+    let service_alive = runtime
+        .as_ref()
+        .map(|rt| runtime::is_process_running(rt.pid))
+        .unwrap_or(false);
+
+    if parent_alive || service_alive {
+        STATE_RUNNING
+    } else if runtime.is_some() {
+        STATE_STOPPED
+    } else {
+        STATE_DISCONNECTED
     }
 }

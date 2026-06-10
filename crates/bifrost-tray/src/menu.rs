@@ -19,7 +19,6 @@ pub enum MenuItemAction {
     StopService,
     RestartService,
     OpenDirectory(String),
-    ReloadMenu,
     QuitTray,
     None,
 }
@@ -152,13 +151,6 @@ pub fn build_menu(
         label: "Open Logs".to_string(),
         enabled: true,
         action: MenuItemAction::OpenDirectory(format!("{}/logs", data_dir)),
-    });
-
-    items.push(MenuItemDef {
-        id: "reload_menu".to_string(),
-        label: "Reload Tray Menu".to_string(),
-        enabled: true,
-        action: MenuItemAction::ReloadMenu,
     });
 
     items.push(MenuItemDef {
