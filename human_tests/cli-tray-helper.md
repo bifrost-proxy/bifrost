@@ -11,6 +11,7 @@
 - 托盘 helper 通过当前 `bifrost` 二进制的隐藏 `__tray` 子命令重入启动；如需开发覆盖，可设置 `BIFROST_TRAY_BIN` 指向兼容 `bifrost __tray` 的二进制
 - 使用临时数据目录避免影响现有服务
 - 规则切换验证必须通过管理端 HTTP API 准备/验证规则状态，禁止直接编辑 `rules/` 或 `state.json`
+- macOS 托盘菜单交互必须使用 AppleScript/System Events 操作 CLI 启动出的菜单栏图标，例如通过 `osascript` 点击对应进程的 menu bar item；若 `osascript` 返回 `-1719` 辅助访问权限错误，记录为环境阻塞，不能用截图观察替代
 - Windows 回归项需在 Windows 交互用户 session 下执行，不能在 Session 0/service 环境中替代
 
 ## 启动命令模板
