@@ -61,8 +61,7 @@ www.example.com/path1 ws://(www.test.com/path/xxx)
 
 ### 非 WebSocket 请求的处理
 
-| 请求类型 |
- 匹配 `ws` 规则的结果 |
+| 请求类型           | 匹配 `ws` 规则的结果 |
 | ------------------ | -------------------- |
 | WebSocket 请求     | 正常转发             |
 | 隧道代理请求       | 忽略匹配             |

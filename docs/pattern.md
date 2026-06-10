@@ -98,6 +98,17 @@ $*.example.com               # 域名通配符，匹配单级子域名的所有�
 $**.example.com              # 域名通配符，匹配多级子域名的所有路径
 ```
 
+> ⚠️ **不要在 Wildcard 模式前加协议前缀**。协议前缀（`http://`、`https://`、`http*://`、`ws*://`、`//`）只对 Domain 和 PathWildcard（`^` 前缀）模式可靠；与 Wildcard 模式组合会出现以下错误行为：
+>
+> | 写法 | 实际行为 |
+> | ---- | -------- |
+> | `*.example.com`（裸写，推荐） | 正确匹配单级子域名（HTTP + HTTPS） |
+> | `http://*.example.com` / `https://*.example.com` | 能匹配，但单星 `*` 会跨越 `.`，等价于 `**`（丢失单级限制） |
+> | `http*://*.example.com` / `ws*://*.example.com` | **永不匹配**（静默失效） |
+> | `//*.example.com` | **匹配所有 host**（过度匹配，等价于无差别命中，存在误伤风险） |
+>
+> 需要按协议限定时：裸 Wildcard 已覆盖 HTTP/HTTPS；要限定单一协议或匹配 WS/WSS，请改用 Domain 模式（如 `http*://api.example.com`）或 PathWildcard（如 `^http*://example.com/api/*`）。
+
 ## PathWildcard 匹配（`^` 前缀）
 
 路径通配符匹配，以 `^` 开头显式声明。支持三种级别的通配符：
@@ -197,8 +208,10 @@ example.*/api/* file:///mock/$1/$2   # $1 = TLD, $2 = 路径
 ```txt
 example.com proxy://127.0.0.1:8080
 http*://api.example.com cache://3600
-//example.com:8*/api/* file:///mock
+example.com:8*/api/* file:///mock
 ```
+
+> 上例第三行的 `example.com:8*/api/*` 是裸 Wildcard，不要写成 `//example.com:8*/api/*`：`//` 前缀与 Wildcard 组合会匹配所有 host（见上文 Wildcard 协议前缀说明）。
 
 ### IP 匹配
 

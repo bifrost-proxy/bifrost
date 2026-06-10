@@ -19,14 +19,15 @@ pattern operation [operations...] [filters...] [lineProps://...]
 
 Pattern 根据格式自动识别类型，优先级影响匹配顺序：
 
-| 类型     | 格式示例                        | 优先级 |
-| :------- | :------------------------------ | :----- |
-| Domain   | `example.com` `example.com/api` | 100    |
-| IP/CIDR  | `192.168.1.1` `192.168.0.0/16`  | 95     |
-| Regex    | `/pattern/` `/pattern/i`        | 80     |
-| Wildcard | `*.example.com` `$host` `api?`  | 55     |
+| 类型         | 格式示例                                    | 优先级 |
+| :----------- | :------------------------------------------ | :----- |
+| Domain       | `example.com` `example.com/api`             | 100    |
+| IP/CIDR      | `192.168.1.1` `192.168.0.0/16`              | 95     |
+| Regex        | `/pattern/` `/pattern/i`                    | 80     |
+| PathWildcard | `^example.com/api/*` `^example.com/api/**`  | 60-70  |
+| Wildcard     | `*.example.com` `$example.com` `example?.com` | 40-60  |
 
-取反匹配：所有类型均支持 `!` 前缀，如 `!*.example.com`
+取反匹配：所有类型均支持 `!` 前缀，如 `!*.example.com`。完整的类型检测顺序、优先级与协议前缀注意事项见 [pattern.md](./pattern.md)。
 
 ## 高级配置
 
@@ -109,7 +110,7 @@ example.com host://127.0.0.1 includeFilter://m:GET excludeFilter:///admin/
 | `/regex/` | 路径正则   | `/^\/api\/v\d+/`                    |
 | `domain.com/path` | URL host/path | `api.example.com/v1` |
 
-> `b:` / `B:` body 过滤器当前只被 parser 接受，运行时 resolver 尚未读取 body 做过滤，匹配结果不会生效。请用 `bifrost search --req-body/--res-body` 做内容筛选，不要把 body 过滤写成生产规则依赖。
+> `b:` / `B:` body 过滤器当前只被 parser 接受，运行时 resolver 尚未读取 body 做过滤，其匹配结果恒为「不命中」：写在 `includeFilter://b:...` 里会让规则**永远不命中**，写在 `excludeFilter://b:...` 里则**永远不排除**（即等于无效）。请用 `bifrost search --req-body/--res-body` 做内容筛选，不要把 body 过滤写成生产规则依赖。
 
 ### 6. 规则属性
 
