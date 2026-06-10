@@ -469,7 +469,9 @@ Quit Tray
 
 数据来源：
 
-- 规则候选：`GET /_bifrost/api/rules/reference-candidates`，用于获取个人规则和已加载组规则列表。
+- 个人规则候选：`GET /_bifrost/api/rules/reference-candidates`，只取 `group_name=null` 的本地个人规则；个人规则必须以本机数据为准。
+- 组权限列表：`GET /_bifrost/api/group`，以远端返回的用户权限为准，`level >= 1`（Owner/Master）才进入 tray 组菜单。
+- 组规则列表：对每个可展示组调用 `GET /_bifrost/api/group-rules/{group_id}`，以远端接口同步后的组规则为准；本地组目录不能作为组权限或组列表来源。
 - 当前启用规则：`GET /_bifrost/api/rules/active-summary`，用于标记勾选状态和顶层 `Rules: <当前启用规则>` 文案。
 - `active-summary` 必须在没有 Sync session 或远端 group cache 解析失败时保留本地组规则 fallback；否则 tray 点击本地组规则后会把顶层错误刷新成 `Rules: None`。
 - 个人规则切换：`PUT /_bifrost/api/rules/{rule_name}/enable|disable`。
@@ -480,6 +482,7 @@ Quit Tray
 - 只有个人规则时：`Rules: <当前启用规则>` 作为第一级，悬浮展开后第二级直接展示个人规则列表。
 - 存在组规则时：第一级仍是 `Rules: <当前启用规则>`；第二级展示 `My Rules` 与 Web UI `Groups` 页 `Managed` 区域一致的组名；第三级展示对应规则列表。
 - 组权限判断来自 `GET /_bifrost/api/group`，与 Web UI 保持同一语义：`level >= 1`（Owner/Master）才属于 `Managed`。本地 `rules/` 目录存在但不在 Managed 列表里的组、普通 Member 组（`level=0`）以及 Discover/Public 组（`level=null`）都不直接展开到 tray。
+- 本地旧组候选若存在，只作为 `More...` 的触发 marker，不作为可展开组名；例如远端返回 `next-agent` Master 时必须展示 `next-agent`，而不是本地残留目录 `nextoncall`。
 - 若存在未展示的组规则，Rules 子菜单底部展示 `More...`，点击后打开 Admin Rules 页面，由管理端承载完整组规则浏览与测试。
 - 当前启用规则显示原生 check mark；无启用规则时顶层显示 `Rules: None`；多条规则同时启用时顶层显示 `Rules: Multiple`，点击任意规则后收敛为单选。
 

@@ -1461,7 +1461,7 @@ mod tests {
                 "GET /_bifrost/api/group-rules/grp-master HTTP/1.1",
             ]
         );
-        assert_eq!(rules.len(), 3);
+        assert_eq!(rules.len(), 4);
         let personal = rules
             .iter()
             .find(|rule| {
@@ -1498,11 +1498,57 @@ mod tests {
         assert!(!master_group.enabled);
         assert!(master_group.managed_group);
 
+        let hidden_local_group = rules
+            .iter()
+            .find(|rule| {
+                rule.target
+                    == RuleTarget::Group {
+                        group_name: "Stale Local".to_string(),
+                        name: "stale".to_string(),
+                    }
+            })
+            .unwrap();
+        assert!(!hidden_local_group.enabled);
+        assert!(!hidden_local_group.managed_group);
+
+        let runtime = RuntimeInfo {
+            pid: 1234,
+            port: 8800,
+            socks5_port: None,
+            host: Some("127.0.0.1".to_string()),
+            started_at_ms: None,
+            binary_path: None,
+        };
+        let menu = menu::build_menu(
+            Some(&runtime),
+            ServiceState::Running,
+            None,
+            false,
+            None,
+            "/tmp/.bifrost",
+            true,
+            &rules,
+            None,
+        );
+        let rules_menu = menu.iter().find_map(|entry| match entry {
+            menu::MenuEntry::Submenu(submenu) if submenu.id == "rules_switcher" => Some(submenu),
+            _ => None,
+        });
+        let rules_menu = rules_menu.unwrap();
+        assert!(rules_menu.children.iter().any(|entry| matches!(
+            entry,
+            menu::MenuEntry::Item(item) if item.id == "rules_more"
+        )));
+        assert!(!rules_menu.children.iter().any(|entry| matches!(
+            entry,
+            menu::MenuEntry::Submenu(submenu) if submenu.label == "Stale Local"
+        )));
+
         assert!(!rules.iter().any(|rule| {
             rule.target
                 == RuleTarget::Group {
-                    group_name: "Stale Local".to_string(),
-                    name: "stale".to_string(),
+                    group_name: "Public".to_string(),
+                    name: "public-shared".to_string(),
                 }
         }));
     }

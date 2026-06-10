@@ -242,34 +242,36 @@ curl -sS -X POST http://127.0.0.1:8801/_bifrost/api/rules \
 
 **操作步骤：**
 1. 使用启动命令模板启动 Bifrost 服务
-2. 确保已有一个可访问组；若无真实组会话，可在临时数据目录下准备本地组规则目录作为 fallback 回归数据
+2. 确保远端 `/api/group` 返回至少一个 `level >= 1` 的可管理组；Owner 与 Master 都必须纳入验证
 3. 通过 Admin API 创建或确认一条个人规则 `tray-personal-c`
 4. 通过 Admin API 创建或确认一条组规则 `tray-group-rule-a`
 5. 通过 `PUT /_bifrost/api/rules/tray-personal-c/enable` 启用个人规则，并通过组规则 disable API 禁用组规则
 6. 点击托盘图标展开菜单，把鼠标悬浮到 `Rules: tray-personal-c`
 7. 观察第二级菜单，再悬浮到组名，点击 `tray-group-rule-a`
 8. 再次展开托盘菜单，并调用 `curl -sS http://127.0.0.1:8801/_bifrost/api/rules/active-summary`
-9. 在没有 Sync session 或远端 group/peer 接口不可用的本地环境中，准备本地组目录并重复第 6-8 步
+9. 调用 `curl -sS http://127.0.0.1:8801/_bifrost/api/group-rules/<group_id>`，确认托盘展示的组规则来自远端接口返回的组名和规则名
 
 **预期结果：**
 - 顶层菜单存在 `Rules: tray-personal-c`
-- 存在组规则时，Rules 第二级展示 `My Rules` 与组名，二者平级
+- 存在组规则时，Rules 第二级展示 `My Rules` 与远端 `level >= 1` 组名，二者平级
 - `My Rules` 的下一级展示个人规则；组名的下一级展示组规则
 - 点击组规则后，顶层文案更新为 `Rules: <组名>/tray-group-rule-a`
 - `active-summary` 只包含被点击的组规则，不包含 `tray-personal-c`
-- 无 Sync session 时，`active-summary` 仍以本地目录名作为 group fallback 展示已启用组规则，不把菜单顶层错误刷新成 `Rules: None`
+- 本地个人规则以 `reference-candidates` 中的个人规则为准；组规则不以本地 `rules/` 目录为准
 
 ### TC-TH-14-REG-01: 非 Managed 组规则收起到 More
 
 **操作步骤：**
 1. 使用带 Sync session 的真实数据目录启动 Bifrost 服务，或使用已有包含组规则缓存的本机数据目录
-2. 调用 `curl -sS http://127.0.0.1:8801/_bifrost/api/group`，确认 Web UI `Managed` 区域对应的组满足 `level >= 1`
+2. 调用 `curl -sS http://127.0.0.1:8801/_bifrost/api/group`，确认 Web UI `Managed` 区域对应的组满足 `level >= 1`，包含 Owner 与 Master 时都应记录
 3. 调用 `curl -sS http://127.0.0.1:8801/_bifrost/api/rules/reference-candidates`，确认至少存在一个不在 `level >= 1` Managed 列表中的组规则候选，例如本地 `rules/` 目录残留但 `/api/group` 不返回的组、`level=0` 组或 `level=null` Discover/Public 组
-4. 展开托盘菜单并悬浮 `Rules: <当前启用规则>`
-5. 观察 Rules 子菜单的第二级分组，并点击底部 `More...`
+4. 对 `level >= 1` 的组调用 `curl -sS http://127.0.0.1:8801/_bifrost/api/group-rules/<group_id>`，确认 Owner/Master 组规则可从远端接口返回
+5. 展开托盘菜单并悬浮 `Rules: <当前启用规则>`
+6. 观察 Rules 子菜单的第二级分组，并点击底部 `More...`
 
 **预期结果：**
-- 第二级只展示 `My Rules` 和 Web UI `Managed` 区域中的组，不直接列出非 Managed 组名
+- 第二级只展示 `My Rules` 和 Web UI `Managed` 区域中的 Owner/Master 组，不直接列出非 Managed 组名
+- Master 组（例如 `next-agent`）与 Owner 组一样展示为二级组菜单
 - 如果存在非 Managed 组规则候选，Rules 子菜单底部显示 `More...`
 - 点击 `More...` 后打开 `http://127.0.0.1:8801/_bifrost/rules`
 - 非 Managed 组规则仍可在 Admin Rules 页面继续浏览和测试
