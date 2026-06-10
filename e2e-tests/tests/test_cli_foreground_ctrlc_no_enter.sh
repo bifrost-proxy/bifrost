@@ -84,6 +84,8 @@ def read_master():
 
 buffer = ""
 deadline = time.time() + 45
+
+
 try:
     while time.time() < deadline:
         code = poll_child()
