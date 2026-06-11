@@ -177,6 +177,19 @@ prlctl exec "Windows 11" --current-user cmd.exe /c "call \"C:\Program Files\Micr
 - 被 `#[cfg_attr(windows, ignore = ...)]` 标记的测试函数体仍必须通过 Windows 编译；测试 helper 不得只在 `cfg(not(windows))` 下定义却被 Windows 测试体引用。
 - 本地验证必须优先使用 rustup shim 的 `cargo/rustc`，并显式配置 `lld-link`，避免 Windows ARM VM 中多套 Rust/VS 工具链路径混用造成假失败。
 
+### TC-CWUT-10 ASR Daily summary 路径分隔符 Windows 回归
+
+操作步骤：
+
+```bash
+source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-asr daily_summary --lib -- --nocapture
+```
+
+预期结果：
+- Daily summary 的二级标题对嵌套 timeline 使用稳定的 `/` 分隔符，例如 `## sub/meeting_b`。
+- Windows runner 上 `Path::to_str()` 产生的 `sub\meeting_b.timeline.json` 会先归一化为 `sub/meeting_b`，不再因为平台路径分隔符导致断言或用户可见 Markdown 输出不一致。
+- 该用例只验证 ASR core metadata/artifact 文本逻辑，不要求 Windows/Linux 准备 sherpa/qwen native runtime。
+
 ## 清理步骤
 
 本测试只运行单元测试和静态扫描；cargo 产物由常规构建缓存管理，无额外临时服务需要停止。
@@ -198,3 +211,4 @@ prlctl exec "Windows 11" --current-user cmd.exe /c "call \"C:\Program Files\Micr
 | 2026-06-11 | TC-CWUT-07 | 跟进 GitHub Actions run `27355528937` 与 `27356956085` 的 `Windows Unit Tests (x86_64)`，定位 `p1_tools_e2e::exec_command_tool_works_end_to_end` 仍要求 Windows TTY 初始输出包含 `True True` 且必须返回 running `session_id`；本地执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-agent --test p1_tools_e2e exec_command_tool_works_end_to_end -- --nocapture`。 | 通过。非 Windows 合并初始输出与后续 `write_stdin` poll 输出后断言 `isatty`/`exec-ready`/回显；Windows 跳过 ConPTY interactive 分支，继续覆盖同一用例里的非 TTY exec、long session 与 write_stdin 路径 |
 | 2026-06-11 | TC-CWUT-08 | 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin state::tests::request_tray_launch_invokes_registered_callback --lib -- --nocapture` 与 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin state::tests::reconcile_socket_summary --lib -- --nocapture`。 | 通过，托盘 callback 与 4 个 reconcile socket summary 单测均使用显式临时 `RulesStorage` 后稳定通过 |
 | 2026-06-11 | TC-CWUT-09 | 在 Parallels `Windows 11` VM 的 `C:\Users\eden\github\bifrost` 同步本次修复后，使用 rustup shim 优先的 PATH、VS LLVM ARM64 `lld-link` 与 `SKIP_FRONTEND_BUILD=1` 执行 `cargo test -p bifrost-agent --locked --target x86_64-pc-windows-msvc --no-run`。 | 通过，生成 `bifrost_agent` lib test、`p1_tools_e2e` 和 `session_skills_integration` 三个 Windows x86_64 测试二进制；覆盖 GitHub Actions E0425 `tty_probe_expected_output` 编译回归 |
+| 2026-06-11 | TC-CWUT-10 | 跟进 GitHub Actions run `27358341485` 的 `Windows Unit Tests (x86_64)`，定位 `bifrost-asr::timeline::tests::generates_daily_summary_grouped_by_date` 在 Windows 上输出 `sub\meeting_b` 后断言 `sub/meeting_b` 失败；本地执行 ASR filtered tests。 | 通过，Daily summary source label 对 `\` 统一归一为 `/`，Windows/Linux 不需要 native ASR runtime 即可覆盖 core artifact 文本逻辑 |
