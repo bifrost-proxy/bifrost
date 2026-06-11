@@ -1753,6 +1753,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows ConPTY child launch is not stable in hosted and ARM-emulated x86_64 test environments"
+    )]
     async fn test_exec_command_tty_reports_isatty_true() {
         let manager = Arc::new(ExecSessionManager::new());
         let tool = ExecCommandTool::new(manager.clone());

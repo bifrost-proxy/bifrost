@@ -1315,6 +1315,10 @@ fn long_task_profile_intervals_are_bounded_by_profile_caps() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "Windows child-process timing can keep the test process alive past the Tokio timeout"
+)]
 async fn exec_command_long_task_stall_detection_returns_control_to_model() {
     // Use a command that produces initial output then goes silent, with a very
     // low stall threshold (3 heartbeats) to trigger stall detection quickly.
@@ -1390,6 +1394,10 @@ async fn exec_command_long_task_stall_detection_returns_control_to_model() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "Windows ConPTY child launch is not stable in hosted and ARM-emulated x86_64 test environments"
+)]
 async fn exec_command_tty_prompt_stall_returns_control_to_model_for_stdin_decision() {
     let exec_args = serde_json::json!({
         "cmd": tty_confirm_command(),
