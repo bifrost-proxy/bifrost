@@ -2937,7 +2937,11 @@ pub async fn handle_http_request(
         let res_header_map: HashMap<String, String> = res_parts
             .headers
             .iter()
-            .filter_map(|(k, v)| v.to_str().ok().map(|s| (k.as_str().to_string(), s.to_string())))
+            .filter_map(|(k, v)| {
+                v.to_str()
+                    .ok()
+                    .map(|s| (k.as_str().to_string(), s.to_string()))
+            })
             .collect();
         rules.resolve_with_response_context(
             rule_match_url,

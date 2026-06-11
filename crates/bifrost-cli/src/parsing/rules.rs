@@ -368,7 +368,13 @@ impl ProxyRulesResolverTrait for DynamicRulesResolver {
     ) -> ProxyResolvedRules {
         let inner = self.inner.read();
         resolve_rules_with_response_impl(
-            &inner, url, method, req_headers, req_cookies, res_status, res_headers,
+            &inner,
+            url,
+            method,
+            req_headers,
+            req_cookies,
+            res_status,
+            res_headers,
         )
     }
 
