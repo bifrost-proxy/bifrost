@@ -50,6 +50,51 @@ impl Drop for EnvVarGuard {
     }
 }
 
+pub(super) fn fake_external_runner_sleep_command() -> (String, Vec<String>) {
+    if cfg!(windows) {
+        (
+            "powershell.exe".to_string(),
+            vec![
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-Command".to_string(),
+                "Start-Sleep -Seconds 30; [Console]::Out.WriteLine('{\"type\":\"assistant_final\",\"content\":\"too late\"}')".to_string(),
+            ],
+        )
+    } else {
+        (
+            "sh".to_string(),
+            vec![
+                "-c".to_string(),
+                "sleep 30; printf '%s\n' '{\"type\":\"assistant_final\",\"content\":\"too late\"}'"
+                    .to_string(),
+            ],
+        )
+    }
+}
+
+pub(super) fn fake_external_runner_workdir_command() -> (String, Vec<String>) {
+    if cfg!(windows) {
+        (
+            "powershell.exe".to_string(),
+            vec![
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-Command".to_string(),
+                "if (Test-Path -LiteralPath '.\\expected.marker') { [Console]::Out.WriteLine('{\"type\":\"assistant_final\",\"content\":\"WORKDIR_OK\"}') } else { [Console]::Out.WriteLine('{\"type\":\"assistant_final\",\"content\":\"WORKDIR_MISMATCH\"}') }".to_string(),
+            ],
+        )
+    } else {
+        (
+            "sh".to_string(),
+            vec![
+                "-c".to_string(),
+                "if [ -f ./expected.marker ]; then printf '%s\n' '{\"type\":\"assistant_final\",\"content\":\"WORKDIR_OK\"}'; else printf '%s\n' '{\"type\":\"assistant_final\",\"content\":\"WORKDIR_MISMATCH\"}'; fi".to_string(),
+            ],
+        )
+    }
+}
+
 #[test]
 pub(super) fn chatgpt_web_startup_auth_runners_include_all_web_runners() {
     let temp_dir = tempfile::TempDir::new().unwrap();

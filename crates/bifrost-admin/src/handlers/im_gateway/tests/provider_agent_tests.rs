@@ -516,6 +516,7 @@ pub(super) async fn request_agent_stop_stops_external_runner_by_session_key() {
     let manager = bifrost_agent::AgentSessionManager::new(3600);
     let runtime = crate::im_gateway::external_cli::ExternalCliRuntime::new(&runs_root);
     let session_key = "external-stop-status-deadlock";
+    let (executable, args) = fake_external_runner_sleep_command();
     let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
         images: Vec::new(),
         message: "stop by shared helper".to_string(),
@@ -529,12 +530,8 @@ pub(super) async fn request_agent_stop_stops_external_runner_by_session_key() {
         work_dir: None,
         instructions: None,
         adapter_config: crate::im_gateway::external_cli::ExternalCliAdapterConfig {
-            executable: Some("sh".to_string()),
-            args: vec![
-                "-c".to_string(),
-                "sleep 2; printf '%s\n' '{\"type\":\"assistant_final\",\"content\":\"too late\"}'"
-                    .to_string(),
-            ],
+            executable: Some(executable),
+            args,
             timeout_secs: Some(10),
             ..Default::default()
         },
@@ -544,19 +541,8 @@ pub(super) async fn request_agent_stop_stops_external_runner_by_session_key() {
     };
 
     let handle = tokio::spawn(async move { runtime.run(request).await.unwrap() });
-    for _ in 0..50 {
-        if std::fs::read_dir(&runs_root)
-            .expect("read runs root")
-            .next()
-            .is_some()
-        {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-
     let mut stop_requested = false;
-    for _ in 0..50 {
+    for _ in 0..250 {
         if request_agent_stop_with_runs_root(&manager, session_key, &runs_root).await {
             stop_requested = true;
             break;

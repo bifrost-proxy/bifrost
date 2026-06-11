@@ -1,4 +1,4 @@
-use super::{super::*, test_provider, EnvGuard};
+use super::{super::*, fake_external_runner_workdir_command, test_provider, EnvGuard};
 
 #[test]
 pub(super) fn schedule_chatgpt_web_initial_prompt_is_sent_as_first_message_only() {
@@ -398,6 +398,7 @@ pub(super) async fn schedule_external_runner_executes_from_configured_work_dir()
 
     let mut external_cli_config =
         crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+    let (executable, args) = fake_external_runner_workdir_command();
     external_cli_config.runners.insert(
         "codex-workdir-test".to_string(),
         crate::im_gateway::external_cli::ExternalCliAgentSettings {
@@ -405,23 +406,8 @@ pub(super) async fn schedule_external_runner_executes_from_configured_work_dir()
             adapter: "mock".to_string(),
             instructions: None,
             adapter_config: crate::im_gateway::external_cli::ExternalCliAdapterConfig {
-                executable: Some(if cfg!(windows) {
-                    "powershell.exe".to_string()
-                } else {
-                    "sh".to_string()
-                }),
-                args: if cfg!(windows) {
-                    vec![
-                        "-NoProfile".to_string(),
-                        "-Command".to_string(),
-                        "$input | Out-Null; if (Test-Path -LiteralPath '.\\expected.marker') { [Console]::Out.WriteLine('{\"type\":\"assistant_final\",\"content\":\"WORKDIR_OK\"}') } else { [Console]::Out.WriteLine('{\"type\":\"assistant_final\",\"content\":\"WORKDIR_MISMATCH\"}') }".to_string(),
-                    ]
-                } else {
-                    vec![
-                        "-c".to_string(),
-                        "cat >/dev/null; if [ -f ./expected.marker ]; then printf '%s\n' '{\"type\":\"assistant_final\",\"content\":\"WORKDIR_OK\"}'; else printf '%s\n' '{\"type\":\"assistant_final\",\"content\":\"WORKDIR_MISMATCH\"}'; fi".to_string(),
-                    ]
-                },
+                executable: Some(executable),
+                args,
                 env: Default::default(),
                 ..Default::default()
             },

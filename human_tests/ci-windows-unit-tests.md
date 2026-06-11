@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证 GitHub Actions `Windows Unit Tests (x86_64)` 中暴露的跨平台单元测试问题不会回归。重点覆盖 Windows 路径分隔符、Windows 缺失可执行文件错误文本、PowerShell/cmd 与 Unix shell 差异、TOML 中 Windows 路径转义、以及 ASR native runtime 在 Windows/Linux 不可用时的测试 gating。
+验证 GitHub Actions `Windows Unit Tests (x86_64)` 中暴露的跨平台单元测试问题不会回归。重点覆盖 Windows 路径分隔符、Windows 缺失可执行文件错误文本、PowerShell/cmd 与 Unix shell 差异、外部 runner 的 stdin/工作目录/停止语义、TOML 中 Windows 路径转义、以及 ASR native runtime 在 Windows/Linux 不可用时的测试 gating。
 
 ## 前置条件
 
@@ -68,7 +68,26 @@ done
 - shell-only policy 拒绝 argv_exec 时错误不双重包裹。
 - target grant policy 选择逻辑不依赖 Unix-only executable fixture。
 
-### TC-CWUT-04 Remote file roots Windows TOML 路径转义回归
+### TC-CWUT-04 IM Gateway external runner Windows shell/stdin 回归
+
+操作步骤：
+
+```bash
+source ~/.zshrc && for filter in \
+  request_agent_stop_stops_external_runner_by_session_key \
+  schedule_external_runner_executes_from_configured_work_dir
+do
+  SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin "$filter" --lib -- --nocapture
+done
+```
+
+预期结果：
+- fake external runner 使用平台化命令；Windows 下使用 PowerShell `-NoProfile -NonInteractive -Command`，Unix 下使用 `sh -c`。
+- stop 用例等待 active session 真正注册后发起停止请求，不依赖 run 目录出现这一早于进程注册的中间态。
+- workdir 用例不依赖 stdin pipeline 消费；Windows 下不会因为 `$input`/stdin 行为差异卡到 timeout。
+- 两个用例均返回预期状态：stop 用例为 `Stopped`，workdir 用例为 `Success` 且最终回复 `WORKDIR_OK`。
+
+### TC-CWUT-05 Remote file roots Windows TOML 路径转义回归
 
 操作步骤：
 
@@ -81,7 +100,7 @@ source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin remote_invo
 - Windows `\\?\C:\...` 或普通 `C:\...` 路径不会因为反斜杠 escape 导致 TOML parse error。
 - add parent/child、duplicate add、list roots 等行为仍真实验证。
 
-### TC-CWUT-05 Windows Unit Tests 失败列表横向扫描
+### TC-CWUT-06 Windows Unit Tests 失败列表横向扫描
 
 操作步骤：
 
@@ -105,5 +124,6 @@ source ~/.zshrc && rg -n '/bin/(pwd|echo)|TEST_DATA_DIR_LOCK\.lock\(\)\.unwrap\(
 | 2026-06-11 | TC-CWUT-01 | 执行 `rg -n 'cfg\(all\(target_os = "macos", target_arch = "aarch64"\)\)' crates/bifrost-admin/src/handlers/asr_cli_invoke.rs crates/bifrost-admin/src/handlers/asr_jobs/tests.rs`，命中 ASR CLI child 与 3 个 native voiceprint identity/enrollment 测试；执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin asr_platform_support_matrix_is_apple_silicon_macos_only --lib -- --nocapture`。 | 通过 |
 | 2026-06-11 | TC-CWUT-02 | 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin` 过滤 `chatgpt_web_startup_auth_dry_run_reports_login_prompt`、`im_cwd_command_rejects_invalid_paths`、`spawn_process_fallback_to_in_process_on_missing_executable`、`spawn_or_fallback_fails_closed_when_forced_worker_cannot_start`。 | 通过，4 个过滤用例均通过 |
 | 2026-06-11 | TC-CWUT-03 | 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin` 过滤 `test_legacy_full_access_argv_exec_actually_runs`、`test_legacy_full_access_without_allowed_exec_modes_permits_argv`、`test_select_policy_single_rejection_has_no_double_error_prefix`、`test_resolve_shell_command_policy_for_grant`。 | 通过，前 3 个 executor 用例与 3 个 worker policy 用例均通过 |
-| 2026-06-11 | TC-CWUT-04 | 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin remote_invoke::file_access_roots::tests --lib -- --nocapture`。 | 通过，16 个 file_access_roots 用例均通过 |
-| 2026-06-11 | TC-CWUT-05 | 执行 `rg -n '/bin/(pwd\|echo)\|TEST_DATA_DIR_LOCK\.lock\(\)\.unwrap\(\)\|chatgpt_web/auth_state\.json\|ends_with\(".*\.daily/.+"\)' crates/bifrost-admin/src -g '*.rs'`。 | 通过，仅剩 `/bin/pwd` 与 `/bin/echo` 在平台分支 helper 的 Unix 分支中命中，无裸锁 unwrap、ChatGPT Web slash path 或 `.daily/...` slash suffix 断言残留 |
+| 2026-06-11 | TC-CWUT-04 | 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin` 过滤 `request_agent_stop_stops_external_runner_by_session_key`、`schedule_external_runner_executes_from_configured_work_dir`。 | 通过，2 个 IM Gateway external runner Windows shell/stdin 回归用例均通过 |
+| 2026-06-11 | TC-CWUT-05 | 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin remote_invoke::file_access_roots::tests --lib -- --nocapture`。 | 通过，16 个 file_access_roots 用例均通过 |
+| 2026-06-11 | TC-CWUT-06 | 执行 `rg -n '/bin/(pwd\|echo)\|TEST_DATA_DIR_LOCK\.lock\(\)\.unwrap\(\)\|chatgpt_web/auth_state\.json\|ends_with\(".*\.daily/.+"\)' crates/bifrost-admin/src -g '*.rs'`。 | 通过，仅剩 `/bin/pwd` 与 `/bin/echo` 在平台分支 helper 的 Unix 分支中命中，无裸锁 unwrap、ChatGPT Web slash path 或 `.daily/...` slash suffix 断言残留 |
