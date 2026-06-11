@@ -241,6 +241,18 @@ source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-core system_proxy
 - 测试断言 `parse_installed_plist()` 能解析 render 后的 program/data-dir，并与 `SystemProxyLaunchdConfig::new()` 归一化后的路径一致。
 - Windows runner 不会因为 `/tmp/...` 测试输入被归一到当前盘符下而失败。
 
+### TC-CWUT-15 Skill registry watcher 删除事件路径跨平台归一化
+
+操作步骤：
+
+```bash
+source ~/.zshrc && cargo test -p skills registry::tests::watcher_reloads_one_slug_and_removes_deleted_slug --lib -- --nocapture
+```
+
+预期结果：
+- watcher 能在 skill 文件修改后只刷新目标 slug。
+- watcher 能在 skill 目录删除后移除目标 slug；Windows runner 不会因为删除事件路径无法 canonicalize 或 raw/canonical root 前缀不一致导致等待超时。
+
 ## 清理步骤
 
 本测试只运行单元测试和静态扫描；cargo 产物由常规构建缓存管理，无额外临时服务需要停止。
@@ -268,3 +280,4 @@ source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-core system_proxy
 | 2026-06-11 | TC-CWUT-12 | 跟进 GitHub Actions run `27364370904` 与 `27365788851` 的 `Windows Unit Tests (x86_64)`，定位 `bifrost-cli --test cli_commands` 中 help/completion/alias 子进程输出断言批量失败，以及真实 `install-skill` 子进程在 Windows 下栈溢出；本地执行完整 `cli_commands` 测试。 | 通过，help/completion/alias schema 测试改为 clap 内存渲染，install-skill 落盘验证改为 in-process 调用 `handle_install_skill()` |
 | 2026-06-11 | TC-CWUT-13 | 跟进 GitHub Actions run `27367354517` 的 `Windows Unit Tests (x86_64)`，定位 `bifrost-cli --test cli_help` 中 8 个 help 文案断言仍通过真实 `bifrost.exe --help` 子进程取 stdout/stderr；本地执行完整 `cli_help` 测试。 | 通过，root/port/start/search/traffic help 文案测试改为 clap 内存渲染，避免 Windows 子进程 stdout/stderr 和栈行为差异 |
 | 2026-06-11 | TC-CWUT-14 | 跟进 GitHub Actions run `27368683603` 的 `Windows Unit Tests (x86_64)`，定位 `system_proxy_launchd::tests::parse_installed_plist_detects_program_data_dir_and_version` 把归一化后的 Windows 当前盘符路径与 Unix 字面 `/tmp/...` 比较。 | 通过，plist parse 断言改为与 `SystemProxyLaunchdConfig` 归一化后的 program/data-dir 比较 |
+| 2026-06-11 | TC-CWUT-15 | 跟进 GitHub Actions run `27369929153` 的 `Windows Unit Tests (x86_64)`，定位 `skills::registry::tests::watcher_reloads_one_slug_and_removes_deleted_slug` 删除目录后 watcher 事件路径与 canonical root 形态不一致，导致提不出 slug 并等待超时。 | 通过，watcher roots 和事件路径都使用 raw/canonical 双候选提取 slug |
