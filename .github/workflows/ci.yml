@@ -379,7 +379,17 @@ jobs:
           SKIP_FRONTEND_BUILD: "1"
           CARGO_TARGET_DIR: target/cross-aarch64
           CROSS_CONTAINER_ENGINE_NO_BUILDKIT: "1"
-        run: cross build -p bifrost-cli --release --target aarch64-unknown-linux-gnu
+        run: |
+          for attempt in 1 2 3; do
+            echo "cross build attempt ${attempt}/3"
+            if cross build -p bifrost-cli --release --target aarch64-unknown-linux-gnu; then
+              exit 0
+            fi
+            if [ "$attempt" = "3" ]; then
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
 
   build-linux-armv7:
     name: Linux Build (armv7)
@@ -401,7 +411,17 @@ jobs:
           SKIP_FRONTEND_BUILD: "1"
           CARGO_TARGET_DIR: target/cross-armv7
           CROSS_CONTAINER_ENGINE_NO_BUILDKIT: "1"
-        run: cross build -p bifrost-cli --release --target armv7-unknown-linux-gnueabihf
+        run: |
+          for attempt in 1 2 3; do
+            echo "cross build attempt ${attempt}/3"
+            if cross build -p bifrost-cli --release --target armv7-unknown-linux-gnueabihf; then
+              exit 0
+            fi
+            if [ "$attempt" = "3" ]; then
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
 
   build-linux-musl-x86:
     name: Linux Build (x86_64-musl)
@@ -423,7 +443,17 @@ jobs:
           SKIP_FRONTEND_BUILD: "1"
           CARGO_TARGET_DIR: target/cross-musl-x86_64
           CROSS_CONTAINER_ENGINE_NO_BUILDKIT: "1"
-        run: cross build -p bifrost-cli --release --target x86_64-unknown-linux-musl
+        run: |
+          for attempt in 1 2 3; do
+            echo "cross build attempt ${attempt}/3"
+            if cross build -p bifrost-cli --release --target x86_64-unknown-linux-musl; then
+              exit 0
+            fi
+            if [ "$attempt" = "3" ]; then
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
 
   build-linux-musl-aarch64:
     name: Linux Build (aarch64-musl)
