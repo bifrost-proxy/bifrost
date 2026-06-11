@@ -223,11 +223,94 @@ fn read_tray_pid(data_dir: &Path) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::{Child, Stdio};
     use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    struct LockHolderChild {
+        child: Child,
+    }
+
+    impl LockHolderChild {
+        fn id(&self) -> u32 {
+            self.child.id()
+        }
+    }
+
+    impl Drop for LockHolderChild {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    fn spawn_lock_holder(data_dir: &Path, write_pid: bool) -> LockHolderChild {
+        let test_exe = std::env::current_exe().unwrap();
+        let ready_path = data_dir.join("tray-lock-child-ready");
+        let mut child = Command::new(test_exe)
+            .arg("--exact")
+            .arg("commands::tray_launcher::tests::tray_lock_child_process")
+            .arg("--nocapture")
+            .env("BIFROST_TRAY_LOCK_CHILD_DIR", data_dir)
+            .env("BIFROST_TRAY_LOCK_CHILD_READY", &ready_path)
+            .env(
+                "BIFROST_TRAY_LOCK_CHILD_WRITE_PID",
+                if write_pid { "1" } else { "0" },
+            )
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if ready_path.exists() {
+                return LockHolderChild { child };
+            }
+            if let Some(status) = child.try_wait().unwrap() {
+                panic!("tray lock child exited before ready: {status}");
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("timed out waiting for tray lock child");
+    }
+
+    #[test]
+    fn tray_lock_child_process() {
+        let Ok(data_dir) = std::env::var("BIFROST_TRAY_LOCK_CHILD_DIR") else {
+            return;
+        };
+        let data_dir = PathBuf::from(data_dir);
+        let ready_path = PathBuf::from(std::env::var("BIFROST_TRAY_LOCK_CHILD_READY").unwrap());
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(data_dir.join("tray.lock"))
+            .unwrap();
+        lock.try_lock_exclusive().unwrap();
+
+        if std::env::var("BIFROST_TRAY_LOCK_CHILD_WRITE_PID").as_deref() == Ok("1") {
+            std::fs::write(data_dir.join("tray.pid"), std::process::id().to_string()).unwrap();
+        } else {
+            let _ = std::fs::remove_file(data_dir.join("tray.pid"));
+        }
+
+        std::fs::write(ready_path, "ready").unwrap();
+        std::thread::sleep(Duration::from_secs(30));
+        let _ = lock.unlock();
     }
 
     #[test]
@@ -315,32 +398,14 @@ mod tests {
         std::fs::write(dir.path().join("tray.pid"), "12345").unwrap();
         assert_eq!(existing_tray_helper_pid(dir.path()), None);
 
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(dir.path().join("tray.lock"))
-            .unwrap();
-        lock.try_lock_exclusive().unwrap();
-
-        assert_eq!(existing_tray_helper_pid(dir.path()), Some(12345));
-        lock.unlock().unwrap();
+        let child = spawn_lock_holder(dir.path(), true);
+        assert_eq!(existing_tray_helper_pid(dir.path()), Some(child.id()));
     }
 
     #[test]
     fn test_existing_tray_helper_pid_skips_when_lock_held_without_pid() {
         let dir = tempfile::tempdir().unwrap();
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(dir.path().join("tray.lock"))
-            .unwrap();
-        lock.try_lock_exclusive().unwrap();
-
+        let _child = spawn_lock_holder(dir.path(), false);
         assert_eq!(existing_tray_helper_pid(dir.path()), Some(0));
-        lock.unlock().unwrap();
     }
 }
