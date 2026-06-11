@@ -1992,20 +1992,37 @@ fn schedule_process_group_force_kill(pid: u32) {
 
 #[cfg(windows)]
 fn terminate_process_impl(pid: u32) -> Result<(), String> {
-    let status = StdCommand::new("taskkill")
+    let output = StdCommand::new("taskkill")
         .arg("/PID")
         .arg(pid.to_string())
         .arg("/T")
         .arg("/F")
-        .status()
+        .output()
         .map_err(|error| format!("failed to invoke taskkill for pid {pid}: {error}"))?;
-    if status.success() {
+    if output.status.success()
+        || taskkill_message_indicates_missing_process(&output.stdout, &output.stderr)
+    {
         Ok(())
     } else {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
         Err(format!(
-            "taskkill /PID {pid} /T /F exited with status {status}"
+            "taskkill /PID {pid} /T /F exited with status {}; stdout: {}; stderr: {}",
+            output.status,
+            stdout.trim(),
+            stderr.trim()
         ))
     }
+}
+
+#[cfg(any(windows, test))]
+fn taskkill_message_indicates_missing_process(stdout: &[u8], stderr: &[u8]) -> bool {
+    let stdout = String::from_utf8_lossy(stdout);
+    let stderr = String::from_utf8_lossy(stderr);
+    let message = format!("{stdout}\n{stderr}").to_ascii_lowercase();
+    message.contains("not found")
+        || message.contains("no running instance of the task")
+        || message.contains("cannot find the process")
 }
 
 pub fn parse_progress_events(stdout: &str) -> Vec<ExternalCliProgressEvent> {
