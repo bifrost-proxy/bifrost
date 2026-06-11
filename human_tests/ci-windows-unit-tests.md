@@ -145,6 +145,7 @@ done
 - 长任务、后台 watcher、stdin、Ctrl-C、非零退出码和 TTY 探针均使用平台化命令，不依赖 `/bin/sh`、Unix `sleep/printf` 或 `python3`；Windows 非零退出允许先返回 running session 后再轮询并累积输出，短命 TTY 探针重点验证 PTY 启动和 exit code。
 - Agent session 层通过模型工具调用间接触发的长任务、用户插话、stall detection、TTY prompt 测试同样使用平台化命令；Windows 非交互长任务显式走 `cmd.exe`，TTY prompt 使用 `cmd set /p`，避免 PowerShell/PTY `ReadLine()` 时序和回车语义差异导致 CI 抖动。Windows 上 ConPTY child launch / TTY prompt / stall timing 的平台不稳定用例必须显式 ignored 并写明原因，不能伪装成通过。
 - Windows cfg 分支不能引用只在非 Windows 分支定义的 TTY marker helper；短命 TTY 探针的轮询退出条件必须按平台拆分。
+- `p1_tools_e2e::exec_command_tool_works_end_to_end` 的 long-running 命令必须按平台选择 shell 语法，并把初始 exec 输出与后续 `write_stdin` poll 输出一起累计，避免 Windows PowerShell 启动/输出 flush 时序导致 `long-end` 假阴性。
 - PowerShell/cmd 的 shell 参数映射有单元断言覆盖，Unix shell 继续保持 `-c` / `-lc` 行为。
 - Goal prompt 断言先归一化 CRLF/LF，Windows checkout 不会因为换行风格导致失败。
 
@@ -226,3 +227,4 @@ source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli upgrade_archi
 | 2026-06-11 | TC-CWUT-09 | 在 Parallels `Windows 11` VM 的 `C:\Users\eden\github\bifrost` 同步本次修复后，使用 rustup shim 优先的 PATH、VS LLVM ARM64 `lld-link` 与 `SKIP_FRONTEND_BUILD=1` 执行 `cargo test -p bifrost-agent --locked --target x86_64-pc-windows-msvc --no-run`。 | 通过，生成 `bifrost_agent` lib test、`p1_tools_e2e` 和 `session_skills_integration` 三个 Windows x86_64 测试二进制；覆盖 GitHub Actions E0425 `tty_probe_expected_output` 编译回归 |
 | 2026-06-11 | TC-CWUT-10 | 跟进 GitHub Actions run `27358341485` 的 `Windows Unit Tests (x86_64)`，定位 `bifrost-asr::timeline::tests::generates_daily_summary_grouped_by_date` 在 Windows 上输出 `sub\meeting_b` 后断言 `sub/meeting_b` 失败；本地执行 ASR filtered tests。 | 通过，Daily summary source label 对 `\` 统一归一为 `/`，Windows/Linux 不需要 native ASR runtime 即可覆盖 core artifact 文本逻辑 |
 | 2026-06-11 | TC-CWUT-11 | 跟进 GitHub Actions run `27361916126` 的 `Windows Unit Tests (x86_64)`，定位 `commands::upgrade::tests::upgrade_archive_validation_rejects_invalid_tar_xz_before_extract` 因 Windows 早退跳过非 zip 预检而失败；本地执行目标过滤用例。 | 通过，`validate_downloaded_archive()` 仅对 zip 早退，坏 tar.xz 在所有平台都必须预检失败 |
+| 2026-06-11 | TC-CWUT-07 | 跟进 GitHub Actions run `27363268897` 的 `Windows Unit Tests (x86_64)`，定位 `p1_tools_e2e::exec_command_tool_works_end_to_end` long-running 分支单次/短窗口 poll 没拿到 `long-end`；本地执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-agent --test p1_tools_e2e exec_command_tool_works_end_to_end -- --nocapture`。 | 通过，long-running 命令改为平台化 PowerShell/Unix shell，初始输出与后续 poll 输出合并，bounded poll 最多 40 次直到 exit code 和 `long-end` 都出现 |
