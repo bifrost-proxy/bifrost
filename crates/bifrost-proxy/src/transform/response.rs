@@ -818,7 +818,10 @@ mod tests {
         headers.insert("X-Upstream", HeaderValue::from_static("mock"));
         let ctx = RequestContext::new().with_response_data(503, &headers);
         assert_eq!(
-            expand_response_vars("s=${statusCode} st=${status} h=${resHeaders.x-upstream}", &ctx),
+            expand_response_vars(
+                "s=${statusCode} st=${status} h=${resHeaders.x-upstream}",
+                &ctx
+            ),
             "s=503 st=503 h=mock"
         );
     }
@@ -850,8 +853,14 @@ mod tests {
 
         apply_res_rules(&mut parts, &rules, false, &ctx, None);
 
-        assert_eq!(parts.headers.get("X-Status").unwrap().to_str().unwrap(), "429");
-        assert_eq!(parts.headers.get("X-Echo").unwrap().to_str().unwrap(), "origin");
+        assert_eq!(
+            parts.headers.get("X-Status").unwrap().to_str().unwrap(),
+            "429"
+        );
+        assert_eq!(
+            parts.headers.get("X-Echo").unwrap().to_str().unwrap(),
+            "origin"
+        );
     }
 
     #[test]
