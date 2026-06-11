@@ -171,8 +171,7 @@ impl RulesResolver {
         let mut sorted_rules = rules;
         sorted_rules.sort_by_key(|b| std::cmp::Reverse(b.priority()));
 
-        let cache_key_needs_request_ctx =
-            sorted_rules.iter().any(rule_filter_needs_request_ctx);
+        let cache_key_needs_request_ctx = sorted_rules.iter().any(rule_filter_needs_request_ctx);
 
         Self {
             rules: sorted_rules,
@@ -1849,8 +1848,6 @@ mod tests {
         assert_eq!(host_rules[0].resolved_value, "localhost:8080");
     }
 
-
-
     #[test]
     fn test_header_filter_not_stale_across_requests() {
         // Regression: the cache key must account for request headers when a rule
@@ -1896,5 +1893,4 @@ mod tests {
         let resolver = RulesResolver::new(rules);
         assert!(!resolver.cache_key_needs_request_ctx);
     }
-
 }
