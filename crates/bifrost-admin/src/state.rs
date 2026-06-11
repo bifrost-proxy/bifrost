@@ -51,6 +51,7 @@ pub type SharedValuesStorage = Arc<ParkingRwLock<ValuesStorage>>;
 pub type SharedSystemProxyManager = Arc<RwLock<SystemProxyManager>>;
 pub type SharedSystemProxyRuntimeFlag = Arc<AtomicBool>;
 pub type SharedRuntimeConfig = Arc<RwLock<RuntimeConfig>>;
+pub type SharedTrayLaunchCallback = Arc<dyn Fn() + Send + Sync + 'static>;
 
 const SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER_ENV: &str =
     "BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER";
@@ -398,6 +399,7 @@ pub struct AdminState {
     pub connection_registry: SharedConnectionRegistry,
     pub config_manager: Option<SharedConfigManager>,
     pub system_proxy_lifecycle_helper: Option<SharedSystemProxyLifecycleHelperState>,
+    tray_launch_callback: Option<SharedTrayLaunchCallback>,
     system_proxy_desired_enabled: Option<SharedSystemProxyRuntimeFlag>,
     system_proxy_enabled_flag: Option<SharedSystemProxyRuntimeFlag>,
     pub max_body_buffer_size: AtomicUsize,
@@ -461,6 +463,7 @@ impl AdminState {
             connection_registry: Arc::new(ConnectionRegistry::default()),
             config_manager: None,
             system_proxy_lifecycle_helper: None,
+            tray_launch_callback: None,
             system_proxy_desired_enabled: None,
             system_proxy_enabled_flag: None,
             max_body_buffer_size: AtomicUsize::new(DEFAULT_MAX_BODY_BUFFER_SIZE),
@@ -1084,6 +1087,20 @@ impl AdminState {
         self
     }
 
+    pub fn with_tray_launch_callback(mut self, callback: SharedTrayLaunchCallback) -> Self {
+        self.tray_launch_callback = Some(callback);
+        self
+    }
+
+    pub fn request_tray_launch(&self) -> bool {
+        if let Some(callback) = &self.tray_launch_callback {
+            callback();
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn with_system_proxy_runtime_flags_shared(
         mut self,
         desired_enabled: SharedSystemProxyRuntimeFlag,
@@ -1582,7 +1599,7 @@ mod tests {
     use super::*;
     use std::env;
     use std::fs;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -1603,6 +1620,21 @@ mod tests {
 
     fn cleanup_test_dir(dir: &PathBuf) {
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn request_tray_launch_invokes_registered_callback() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let callback_calls = calls.clone();
+        let state = AdminState::new(9900).with_tray_launch_callback(Arc::new(move || {
+            callback_calls.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        assert!(state.request_tray_launch());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let state_without_callback = AdminState::new(9900);
+        assert!(!state_without_callback.request_tray_launch());
     }
 
     #[test]

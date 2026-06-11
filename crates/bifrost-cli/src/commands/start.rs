@@ -1842,6 +1842,15 @@ pub fn run_foreground(
                     std::process::id(),
                 ),
             );
+            let tray_launch_callback = build_tray_launch_callback(
+                no_tray,
+                bifrost_dir.clone(),
+                pid,
+                &config,
+                log_level,
+                skip_cert_check,
+                yes,
+            );
 
             let phase_started_at = Instant::now();
             let mut admin_state = AdminState::new(config.port)
@@ -1863,6 +1872,7 @@ pub fn run_foreground(
                 .with_system_proxy_manager_shared(system_proxy_manager.clone())
                 .with_config_manager_shared(shared_config_manager.clone())
                 .with_system_proxy_lifecycle_helper_shared(system_proxy_lifecycle_helper_state.clone())
+                .with_tray_launch_callback(tray_launch_callback.clone())
                 .with_system_proxy_runtime_flags_shared(
                     system_proxy_desired_enabled.clone(),
                     system_proxy_enabled.clone(),
@@ -2066,34 +2076,7 @@ pub fn run_foreground(
             );
 
             // Launch tray helper if enabled
-            if super::tray_launcher::should_launch_tray(no_tray, &bifrost_dir) {
-                if let Some(tray_bin) = super::tray_launcher::find_tray_binary() {
-                    let runtime_file = crate::process::get_runtime_file()
-                        .unwrap_or_else(|_| bifrost_dir.join("runtime.json"));
-                    let admin_url = format!(
-                        "http://{}:{}/_bifrost/",
-                        if config.host == "0.0.0.0" { "127.0.0.1" } else { &config.host },
-                        config.port,
-                    );
-                    let tray_start_args =
-                        build_tray_start_args(&config, log_level, skip_cert_check, yes);
-
-                    let bifrost_self_bin = std::env::current_exe().ok();
-
-                    super::tray_launcher::launch_tray_helper(
-                        &tray_bin,
-                        &bifrost_dir,
-                        &runtime_file,
-                        pid,
-                        Some(&admin_url),
-                        Some(config.port),
-                        bifrost_self_bin.as_deref(),
-                        &tray_start_args,
-                    );
-                } else {
-                    tracing::debug!("tray helper binary not found, skipping tray launch");
-                }
-            }
+            tray_launch_callback();
 
             let mobile_availability_tasks =
                 bifrost_admin::mobile_availability::spawn_terminal_panel(
@@ -2351,6 +2334,95 @@ fn build_tray_start_args(
     }
 
     args
+}
+
+fn build_tray_launch_callback(
+    no_tray: bool,
+    data_dir: PathBuf,
+    pid: u32,
+    config: &ProxyConfig,
+    log_level: &str,
+    skip_cert_check: bool,
+    yes: bool,
+) -> bifrost_admin::SharedTrayLaunchCallback {
+    let runtime_file =
+        crate::process::get_runtime_file().unwrap_or_else(|_| data_dir.join("runtime.json"));
+    let admin_url = format!(
+        "http://{}:{}/_bifrost/",
+        if config.host == "0.0.0.0" {
+            "127.0.0.1"
+        } else {
+            &config.host
+        },
+        config.port,
+    );
+    let port = config.port;
+    let tray_start_args = build_tray_start_args(config, log_level, skip_cert_check, yes);
+    let bifrost_self_bin = std::env::current_exe().ok();
+
+    Arc::new(move || {
+        let data_dir = data_dir.clone();
+        let runtime_file = runtime_file.clone();
+        let admin_url = admin_url.clone();
+        let bifrost_self_bin = bifrost_self_bin.clone();
+        let tray_start_args = tray_start_args.clone();
+        std::thread::spawn(move || {
+            for attempt in 0..10 {
+                if !super::tray_launcher::should_launch_tray(no_tray, &data_dir) {
+                    return;
+                }
+                launch_tray_helper_if_enabled(
+                    no_tray,
+                    &data_dir,
+                    &runtime_file,
+                    pid,
+                    &admin_url,
+                    port,
+                    bifrost_self_bin.as_deref(),
+                    &tray_start_args,
+                );
+                if data_dir.join("tray.pid").exists() {
+                    return;
+                }
+                if attempt < 9 {
+                    std::thread::sleep(Duration::from_millis(300));
+                }
+            }
+            tracing::debug!(
+                data_dir = %data_dir.display(),
+                "tray launch request finished without observing tray.pid"
+            );
+        });
+    })
+}
+
+fn launch_tray_helper_if_enabled(
+    no_tray: bool,
+    data_dir: &Path,
+    runtime_file: &Path,
+    pid: u32,
+    admin_url: &str,
+    port: u16,
+    bifrost_bin: Option<&Path>,
+    start_args: &[String],
+) {
+    if !super::tray_launcher::should_launch_tray(no_tray, data_dir) {
+        return;
+    }
+    if let Some(tray_bin) = super::tray_launcher::find_tray_binary() {
+        super::tray_launcher::launch_tray_helper(
+            &tray_bin,
+            data_dir,
+            runtime_file,
+            pid,
+            Some(admin_url),
+            Some(port),
+            bifrost_bin,
+            start_args,
+        );
+    } else {
+        tracing::debug!("tray helper binary not found, skipping tray launch");
+    }
 }
 
 fn parse_proxy_users(proxy_users: &[String]) -> bifrost_core::Result<Vec<UserPassAccountConfig>> {
@@ -2783,6 +2855,15 @@ pub fn run_daemon(
                     std::process::id(),
                 ),
             );
+                    let tray_launch_callback = build_tray_launch_callback(
+                        false,
+                        bifrost_dir.clone(),
+                        std::process::id(),
+                        &config,
+                        log_level,
+                        false,
+                        false,
+                    );
 
                     let access_control =
                         ProxyServer::new(config.clone()).access_control().clone();
@@ -2808,6 +2889,7 @@ pub fn run_daemon(
                         .with_system_proxy_lifecycle_helper_shared(
                             system_proxy_lifecycle_helper_state.clone(),
                         )
+                        .with_tray_launch_callback(tray_launch_callback)
                         .with_system_proxy_runtime_flags_shared(
                             system_proxy_desired_enabled.clone(),
                             system_proxy_enabled.clone(),

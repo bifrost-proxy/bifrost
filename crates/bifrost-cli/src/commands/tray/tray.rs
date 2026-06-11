@@ -5,7 +5,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde::Deserialize;
 use tao::event::Event;
@@ -34,12 +34,16 @@ const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(3);
 const START_READY_TIMEOUT: Duration = Duration::from_secs(15);
 const LOG_RETENTION_DAYS: u64 = 30;
+const MENU_REBUILD_SUPPRESSION_AFTER_CLICK: Duration = Duration::from_secs(3);
+const RECENT_RULES_FILE: &str = "tray_recent_rules.json";
+const RECENT_RULE_LIMIT: usize = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MenuDataSnapshot {
     runtime: Option<RuntimeInfo>,
     custom_config: Option<TrayConfig>,
     rules: Vec<menu::TrayRule>,
+    recent_rule_targets: Vec<RuleTarget>,
     system_proxy: Option<menu::SystemProxyMenuState>,
     bin_available: bool,
 }
@@ -81,7 +85,8 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     let menu_items =
         build_menu_from_snapshot(&initial_menu_data, state, None, false, &data_dir_str);
 
-    let (tray_menu, mut action_map) = build_native_menu(&menu_items);
+    let mut native_menu = NativeMenuState::new(&menu_items);
+    let mut action_map = native_menu.action_map.clone();
 
     let initial_icon = match state {
         ServiceState::Running => &icon_running,
@@ -89,7 +94,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     };
 
     let mut builder = TrayIconBuilder::new()
-        .with_menu(Box::new(tray_menu))
+        .with_menu(Box::new(native_menu.menu.clone()))
         .with_tooltip(state_tooltip(state))
         .with_icon(initial_icon.clone());
 
@@ -140,6 +145,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     let mut last_rendered_state = current_state.load(Ordering::Relaxed);
     let mut last_rendered_operation = current_operation.load(Ordering::Relaxed);
     let mut last_rendered_data_generation = menu_data_generation.load(Ordering::Relaxed);
+    let mut last_tray_interaction_at: Option<Instant> = None;
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow =
@@ -152,7 +158,11 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
 
         let mut action_triggered = false;
         if let Event::NewEvents(_) = event {
-            while tray_receiver.try_recv().is_ok() {}
+            while let Ok(event) = tray_receiver.try_recv() {
+                if tray_event_may_open_menu(&event) {
+                    last_tray_interaction_at = Some(Instant::now());
+                }
+            }
 
             while let Ok(event) = menu_receiver.try_recv() {
                 if let Some(action) = action_map.get(&event.id) {
@@ -179,43 +189,49 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
         let reload_requested = should_reload.swap(false, Ordering::Relaxed);
         let data_generation = menu_data_generation.load(Ordering::Relaxed);
         let data_changed = data_generation != last_rendered_data_generation;
+        let menu_recently_interacted = last_tray_interaction_at
+            .is_some_and(|instant| instant.elapsed() < MENU_REBUILD_SUPPRESSION_AFTER_CLICK);
         let svc_state = match new_state {
             STATE_RUNNING => ServiceState::Running,
             STATE_STOPPED => ServiceState::Stopped,
             _ => ServiceState::Disconnected,
         };
 
-        if should_rebuild_native_menu(
+        if state_changed {
+            last_rendered_state = new_state;
+
+            // Do not replace the native menu from background polling. Replacing
+            // the menu object closes the currently open system menu on
+            // macOS/Windows, which makes the tray feel impossible to open while
+            // data is refreshing. State polling only updates non-menu
+            // affordances; explicit reloads/actions rebuild the menu below.
+            let new_icon = if new_state == STATE_RUNNING {
+                &icon_running
+            } else {
+                &icon_stopped
+            };
+            #[cfg(target_os = "macos")]
+            {
+                let _ = tray_icon.set_icon_with_as_template(Some(new_icon.clone()), true);
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = tray_icon.set_icon(Some(new_icon.clone()));
+            }
+
+            let _ = tray_icon.set_tooltip(Some(state_code_tooltip(new_state)));
+            tracing::info!(state = new_state, "tray icon state updated");
+        }
+
+        let should_refresh_menu = should_refresh_native_menu(
             state_changed,
             operation_changed,
             reload_requested,
             action_triggered,
             data_changed,
-        ) {
-            last_rendered_state = new_state;
-            last_rendered_operation = new_operation;
-            last_rendered_data_generation = data_generation;
+        );
 
-            if state_changed {
-                // Update icon with template flag preserved
-                let new_icon = if new_state == STATE_RUNNING {
-                    &icon_running
-                } else {
-                    &icon_stopped
-                };
-                #[cfg(target_os = "macos")]
-                {
-                    let _ = tray_icon.set_icon_with_as_template(Some(new_icon.clone()), true);
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    let _ = tray_icon.set_icon(Some(new_icon.clone()));
-                }
-
-                // Update tooltip
-                let _ = tray_icon.set_tooltip(Some(state_code_tooltip(new_state)));
-            }
-
+        if should_refresh_menu {
             let snapshot = clone_menu_data_snapshot(&menu_data);
             let new_menu_items = build_menu_from_snapshot(
                 &snapshot,
@@ -224,17 +240,46 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
                 operation_busy(new_operation),
                 &data_dir_str,
             );
-            let (new_menu, new_action_map) = build_native_menu(&new_menu_items);
-            tray_icon.set_menu(Some(Box::new(new_menu)));
-            action_map = new_action_map;
 
-            tracing::info!(
-                state = new_state,
-                operation = new_operation,
-                data_changed = data_changed,
-                reloaded = reload_requested,
-                "tray icon and menu updated"
-            );
+            if native_menu.refresh_in_place(&new_menu_items) {
+                last_rendered_state = new_state;
+                last_rendered_operation = new_operation;
+                last_rendered_data_generation = data_generation;
+                action_map = native_menu.action_map.clone();
+                tracing::info!(
+                    state = new_state,
+                    operation = new_operation,
+                    data_changed = data_changed,
+                    reloaded = reload_requested,
+                    "tray menu refreshed in place"
+                );
+            } else if should_replace_native_menu(
+                reload_requested,
+                action_triggered,
+                menu_recently_interacted,
+            ) {
+                last_rendered_state = new_state;
+                last_rendered_operation = new_operation;
+                last_rendered_data_generation = data_generation;
+                native_menu = NativeMenuState::new(&new_menu_items);
+                tray_icon.set_menu(Some(Box::new(native_menu.menu.clone())));
+                action_map = native_menu.action_map.clone();
+
+                tracing::info!(
+                    state = new_state,
+                    operation = new_operation,
+                    data_changed = data_changed,
+                    reloaded = reload_requested,
+                    "tray menu rebuilt"
+                );
+            } else {
+                tracing::debug!(
+                    state = new_state,
+                    operation = new_operation,
+                    data_changed = data_changed,
+                    "tray menu structure changed while recently interacted; delaying rebuild"
+                );
+            }
         }
     });
 }
@@ -326,7 +371,7 @@ fn clear_completed_operation(operation: &AtomicU8, state: u8) {
     }
 }
 
-fn should_rebuild_native_menu(
+fn should_refresh_native_menu(
     state_changed: bool,
     operation_changed: bool,
     reload_requested: bool,
@@ -334,6 +379,21 @@ fn should_rebuild_native_menu(
     data_changed: bool,
 ) -> bool {
     state_changed || operation_changed || reload_requested || action_triggered || data_changed
+}
+
+fn should_replace_native_menu(
+    reload_requested: bool,
+    action_triggered: bool,
+    menu_recently_interacted: bool,
+) -> bool {
+    reload_requested || action_triggered || !menu_recently_interacted
+}
+
+fn tray_event_may_open_menu(event: &TrayIconEvent) -> bool {
+    matches!(
+        event,
+        TrayIconEvent::Click { .. } | TrayIconEvent::DoubleClick { .. }
+    )
 }
 
 fn load_icon(dimmed: bool) -> tray_icon::Icon {
@@ -452,6 +512,76 @@ fn load_custom_config_safe(data_dir: &Path) -> Option<TrayConfig> {
     }
 }
 
+fn load_recent_rule_targets(data_dir: &Path) -> Vec<RuleTarget> {
+    let path = data_dir.join(RECENT_RULES_FILE);
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "failed to read recent tray rules"
+            );
+            return Vec::new();
+        }
+    };
+    match serde_json::from_str::<Vec<RuleTarget>>(&content) {
+        Ok(mut targets) => {
+            targets.dedup();
+            targets.truncate(RECENT_RULE_LIMIT);
+            targets
+        }
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "failed to parse recent tray rules"
+            );
+            Vec::new()
+        }
+    }
+}
+
+fn save_recent_rule_targets(data_dir: &Path, targets: &[RuleTarget]) {
+    let path = data_dir.join(RECENT_RULES_FILE);
+    if let Some(parent) = path.parent() {
+        if let Err(error) = fs::create_dir_all(parent) {
+            tracing::warn!(
+                path = %parent.display(),
+                error = %error,
+                "failed to create data dir before saving recent tray rules"
+            );
+            return;
+        }
+    }
+    match serde_json::to_string_pretty(targets) {
+        Ok(content) => {
+            if let Err(error) = fs::write(&path, content) {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "failed to save recent tray rules"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "failed to encode recent tray rules"
+            );
+        }
+    }
+}
+
+fn record_recent_rule_target(data_dir: &Path, target: &RuleTarget) {
+    let mut targets = load_recent_rule_targets(data_dir);
+    targets.retain(|candidate| candidate != target);
+    targets.insert(0, target.clone());
+    targets.truncate(RECENT_RULE_LIMIT);
+    save_recent_rule_targets(data_dir, &targets);
+}
+
 fn load_menu_data_snapshot(
     args: &TrayArgs,
     state: ServiceState,
@@ -460,6 +590,7 @@ fn load_menu_data_snapshot(
     let runtime = runtime_for_menu(args);
     let custom_config = load_custom_config_safe(&args.data_dir);
     let bin_available = trusted_bifrost_binary_available(args);
+    let recent_rule_targets = load_recent_rule_targets(&args.data_dir);
     let (rules, system_proxy) = if include_remote {
         (
             load_rules_for_menu(runtime.as_ref(), state),
@@ -473,6 +604,7 @@ fn load_menu_data_snapshot(
         runtime,
         custom_config,
         rules,
+        recent_rule_targets,
         system_proxy,
         bin_available,
     }
@@ -514,6 +646,7 @@ fn build_menu_from_snapshot(
         data_dir,
         snapshot.bin_available,
         &snapshot.rules,
+        &snapshot.recent_rule_targets,
         snapshot.system_proxy.as_ref(),
     )
 }
@@ -827,25 +960,63 @@ fn http_agent() -> ureq::Agent {
         .build()
 }
 
-fn build_native_menu(items: &[MenuEntry]) -> (Menu, HashMap<MenuId, MenuItemAction>) {
-    let menu = Menu::new();
-    let mut map = HashMap::new();
+struct NativeMenuState {
+    menu: Menu,
+    action_map: HashMap<MenuId, MenuItemAction>,
+    handles: Vec<NativeMenuHandle>,
+    shape: Vec<NativeMenuShape>,
+}
 
-    for entry in items {
-        append_menu_entry(&menu, entry, &mut map);
+impl NativeMenuState {
+    fn new(items: &[MenuEntry]) -> Self {
+        let menu = Menu::new();
+        let mut action_map = HashMap::new();
+        let mut handles = Vec::new();
+        let mut shape = Vec::new();
+
+        for entry in items {
+            append_menu_entry(&menu, entry, &mut action_map, &mut handles, &mut shape);
+        }
+
+        Self {
+            menu,
+            action_map,
+            handles,
+            shape,
+        }
     }
 
-    (menu, map)
+    fn refresh_in_place(&mut self, items: &[MenuEntry]) -> bool {
+        let updates = menu_updates(items);
+        let next_shape = menu_shape_from_updates(&updates);
+        if next_shape != self.shape || updates.len() != self.handles.len() {
+            return false;
+        }
+
+        let mut next_action_map = HashMap::new();
+        for (handle, update) in self.handles.iter().zip(updates) {
+            handle.apply(&update);
+            if let Some(action) = update.action {
+                if let Some(id) = handle.menu_id() {
+                    next_action_map.insert(id, action);
+                }
+            }
+        }
+        self.action_map = next_action_map;
+        true
+    }
 }
 
 fn append_menu_entry(
     menu: &dyn MenuAppend,
     entry: &MenuEntry,
     map: &mut HashMap<MenuId, MenuItemAction>,
+    handles: &mut Vec<NativeMenuHandle>,
+    shape: &mut Vec<NativeMenuShape>,
 ) {
     match entry {
-        MenuEntry::Item(item) => append_menu_item(menu, item, map),
-        MenuEntry::Submenu(submenu) => append_submenu(menu, submenu, map),
+        MenuEntry::Item(item) => append_menu_item(menu, item, map, handles, shape),
+        MenuEntry::Submenu(submenu) => append_submenu(menu, submenu, map, handles, shape),
     }
 }
 
@@ -869,9 +1040,13 @@ fn append_menu_item(
     menu: &dyn MenuAppend,
     item: &MenuItemDef,
     map: &mut HashMap<MenuId, MenuItemAction>,
+    handles: &mut Vec<NativeMenuHandle>,
+    shape: &mut Vec<NativeMenuShape>,
 ) {
     if item.label == "-" {
         menu.append_item(&PredefinedMenuItem::separator());
+        handles.push(NativeMenuHandle::Separator);
+        shape.push(menu_item_shape(item));
         return;
     }
 
@@ -884,23 +1059,161 @@ fn append_menu_item(
         let menu_item = CheckMenuItem::new(&item.label, item.enabled, item.checked, None);
         map.insert(menu_item.id().clone(), item.action.clone());
         menu.append_item(&menu_item);
+        handles.push(NativeMenuHandle::Check(menu_item));
     } else {
         let menu_item = MenuItem::new(&item.label, item.enabled, None);
         map.insert(menu_item.id().clone(), item.action.clone());
         menu.append_item(&menu_item);
+        handles.push(NativeMenuHandle::Item(menu_item));
     }
+    shape.push(menu_item_shape(item));
 }
 
 fn append_submenu(
     menu: &dyn MenuAppend,
     submenu: &SubmenuDef,
     map: &mut HashMap<MenuId, MenuItemAction>,
+    handles: &mut Vec<NativeMenuHandle>,
+    shape: &mut Vec<NativeMenuShape>,
 ) {
     let native = Submenu::new(&submenu.label, submenu.enabled);
+    handles.push(NativeMenuHandle::Submenu(native.clone()));
+    shape.push(NativeMenuShape {
+        id: submenu.id.clone(),
+        kind: NativeMenuShapeKind::Submenu,
+    });
     for child in &submenu.children {
-        append_menu_entry(&native, child, map);
+        append_menu_entry(&native, child, map, handles, shape);
     }
     menu.append_item(&native);
+}
+
+#[derive(Debug, Clone)]
+struct NativeMenuUpdate {
+    shape: NativeMenuShape,
+    label: String,
+    enabled: bool,
+    checked: bool,
+    action: Option<MenuItemAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeMenuShape {
+    id: String,
+    kind: NativeMenuShapeKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NativeMenuShapeKind {
+    Item,
+    Check,
+    Submenu,
+    Separator,
+}
+
+enum NativeMenuHandle {
+    Item(MenuItem),
+    Check(CheckMenuItem),
+    Submenu(Submenu),
+    Separator,
+}
+
+impl NativeMenuHandle {
+    fn apply(&self, update: &NativeMenuUpdate) {
+        match self {
+            Self::Item(item) => {
+                item.set_text(&update.label);
+                item.set_enabled(update.enabled);
+            }
+            Self::Check(item) => {
+                item.set_text(&update.label);
+                item.set_enabled(update.enabled);
+                item.set_checked(update.checked);
+            }
+            Self::Submenu(submenu) => {
+                submenu.set_text(&update.label);
+                submenu.set_enabled(update.enabled);
+            }
+            Self::Separator => {}
+        }
+    }
+
+    fn menu_id(&self) -> Option<MenuId> {
+        match self {
+            Self::Item(item) => Some(item.id().clone()),
+            Self::Check(item) => Some(item.id().clone()),
+            Self::Submenu(_) | Self::Separator => None,
+        }
+    }
+}
+
+fn menu_updates(items: &[MenuEntry]) -> Vec<NativeMenuUpdate> {
+    let mut updates = Vec::new();
+    for entry in items {
+        collect_menu_update(entry, &mut updates);
+    }
+    updates
+}
+
+#[cfg(test)]
+fn menu_shape(items: &[MenuEntry]) -> Vec<NativeMenuShape> {
+    menu_shape_from_updates(&menu_updates(items))
+}
+
+fn menu_shape_from_updates(updates: &[NativeMenuUpdate]) -> Vec<NativeMenuShape> {
+    updates
+        .iter()
+        .map(|update| update.shape.clone())
+        .collect::<Vec<_>>()
+}
+
+fn collect_menu_update(entry: &MenuEntry, updates: &mut Vec<NativeMenuUpdate>) {
+    match entry {
+        MenuEntry::Item(item) => {
+            let is_separator = item.label == "-";
+            updates.push(NativeMenuUpdate {
+                shape: menu_item_shape(item),
+                label: item.label.clone(),
+                enabled: item.enabled,
+                checked: item.checked,
+                action: (!is_separator).then(|| item.action.clone()),
+            });
+        }
+        MenuEntry::Submenu(submenu) => {
+            updates.push(NativeMenuUpdate {
+                shape: NativeMenuShape {
+                    id: submenu.id.clone(),
+                    kind: NativeMenuShapeKind::Submenu,
+                },
+                label: submenu.label.clone(),
+                enabled: submenu.enabled,
+                checked: false,
+                action: None,
+            });
+            for child in &submenu.children {
+                collect_menu_update(child, updates);
+            }
+        }
+    }
+}
+
+fn menu_item_shape(item: &MenuItemDef) -> NativeMenuShape {
+    let kind = if item.label == "-" {
+        NativeMenuShapeKind::Separator
+    } else if item.checked
+        || matches!(
+            item.action,
+            MenuItemAction::SelectRule { .. } | MenuItemAction::SetSystemProxy { .. }
+        )
+    {
+        NativeMenuShapeKind::Check
+    } else {
+        NativeMenuShapeKind::Item
+    };
+    NativeMenuShape {
+        id: item.id.clone(),
+        kind,
+    }
 }
 
 fn execute_action(
@@ -1042,6 +1355,7 @@ fn execute_action(
         MenuItemAction::SelectRule {
             target,
             all_targets,
+            currently_enabled,
         } => {
             let rt = runtime_for_menu(args);
             let Some(rt) = rt else {
@@ -1051,9 +1365,14 @@ fn execute_action(
             let admin_url = rt.admin_url();
             let target = target.clone();
             let all_targets = all_targets.clone();
+            let currently_enabled = *currently_enabled;
+            let data_dir = args.data_dir.clone();
             let reload_flag = reload_flag.clone();
             thread::spawn(move || {
-                if select_single_rule(&admin_url, &target, &all_targets) {
+                if toggle_single_rule(&admin_url, &target, &all_targets, currently_enabled) {
+                    if !currently_enabled {
+                        record_recent_rule_target(&data_dir, &target);
+                    }
                     reload_flag.store(true, Ordering::Relaxed);
                 }
             });
@@ -1067,9 +1386,18 @@ fn execute_action(
     }
 }
 
-fn select_single_rule(admin_url: &str, target: &RuleTarget, all_targets: &[RuleTarget]) -> bool {
+fn toggle_single_rule(
+    admin_url: &str,
+    target: &RuleTarget,
+    all_targets: &[RuleTarget],
+    currently_enabled: bool,
+) -> bool {
     let agent = http_agent();
     let mut success = true;
+    if currently_enabled {
+        return call_rule_toggle(&agent, admin_url, target, false);
+    }
+
     for candidate in all_targets {
         if candidate == target {
             continue;

@@ -468,7 +468,7 @@ Quit Tray
 
 ### Rules 快速切换菜单
 
-第一版只支持单选语义：用户点击某一条规则后，tray 先通过 Admin API 禁用菜单中已知的其他规则，再启用目标规则。这样代理运行态、WebUI、Badge、规则热更新和同步缓存仍由主服务统一处理。
+第一版支持单选与取消语义：用户点击未启用规则后，tray 先通过 Admin API 禁用菜单中已知的其他规则，再启用目标规则；用户再次点击当前已启用规则时，tray 只调用该规则的 disable API，将规则状态清理为无启用规则。这样代理运行态、WebUI、Badge、规则热更新和同步缓存仍由主服务统一处理。
 
 数据来源：
 
@@ -479,6 +479,7 @@ Quit Tray
 - `active-summary` 必须在没有 Sync session 或远端 group cache 解析失败时保留本地组规则 fallback；否则 tray 点击本地组规则后会把顶层错误刷新成 `Rules: None`。
 - 个人规则切换：`PUT /_bifrost/api/rules/{rule_name}/enable|disable`。
 - 组规则切换：`PUT /_bifrost/api/group-rules/{group_name_or_id}/{rule_name}/enable|disable`。
+- 最近规则快捷区：helper 在数据目录维护 `tray_recent_rules.json`，只记录最近成功切换到的规则目标，去重后最多保留 5 个。渲染时 Rules 子菜单顶部先展示这些快捷项；个人规则显示规则名，组规则显示 `组名/规则名`，保证同名规则有区分度。已删除或当前菜单不可见的规则不展示。
 
 展示层级：
 
@@ -487,7 +488,7 @@ Quit Tray
 - 组权限判断来自 `GET /_bifrost/api/group`，与 Web UI 保持同一语义：`level >= 1`（Owner/Master）才属于 `Managed`。本地 `rules/` 目录存在但不在 Managed 列表里的组、普通 Member 组（`level=0`）以及 Discover/Public 组（`level=null`）都不直接展开到 tray。
 - 本地旧组候选若存在，只作为 `More...` 的触发 marker，不作为可展开组名；例如远端返回 `next-agent` Master 时必须展示 `next-agent`，而不是本地残留目录 `nextoncall`。
 - 若存在未展示的组规则，Rules 子菜单底部展示 `More...`，点击后打开 Admin Rules 页面，由管理端承载完整组规则浏览与测试。
-- 当前启用规则显示原生 check mark；无启用规则时顶层显示 `Rules: None`；多条规则同时启用时顶层显示 `Rules: Multiple`，点击任意规则后收敛为单选。
+- 当前启用规则显示原生 check mark；无启用规则时顶层显示 `Rules: None`；多条规则同时启用时顶层显示 `Rules: Multiple`，点击未启用规则后收敛为单选并刷新最近规则快捷区；再次点击当前已启用规则后取消选中并回到 `Rules: None`。
 
 ## 自定义菜单
 
@@ -701,7 +702,9 @@ helper 查找顺序：
   - 自定义菜单插入顺序。
   - 只有个人规则时 Rules 菜单为两级。
   - 存在组规则时 Rules 菜单为三级，`My Rules` 与组名平级。
+  - Rules 子菜单顶部展示最近 5 次成功切换到的规则快捷项，个人规则不带组名前缀，组规则显示 `组名/规则名`。
   - 当前启用规则显示在顶层 `Rules: ...` 且对应子项勾选。
+  - 再次点击当前已启用规则会取消选中，顶层回到 `Rules: None`。
   - action id 到 platform command id 映射稳定。
 - `actions.rs`
   - Copy 模板展开。
@@ -805,6 +808,7 @@ Windows E2E：
 - `PUT /_bifrost/api/config/tray` 持久化 `enabled`，Settings > Proxy 的 Tray Icon 开关使用该接口。
 - `bifrost start` 在 spawn helper 前读取 `config.toml`，若 `tray.enabled = false` 则不创建托盘。
 - `bifrost __tray` 启动后和后台快照轮询中都检查配置，发现禁用时退出，保证 WebUI 关闭开关会收敛已有托盘。
+- `PUT /_bifrost/api/config/tray` 将 `enabled` 改回 `true` 后，Admin API 必须调用 CLI 注入的 tray launch 回调，复用 `bifrost start` 的启动路径重新创建 helper；该路径继续遵守 Linux 不支持、`--no-tray`、`BIFROST_DISABLE_TRAY=1` 和单实例锁。
 
 ### 真实场景测试
 
@@ -817,7 +821,7 @@ macOS 用例：
 - `TC-TRAY-MAC-02A`：点击 menu bar 图标后默认菜单保持展开，不闪烁消失。
 - `TC-TRAY-MAC-02B`：主进程 Admin API 繁忙或无响应时，托盘菜单仍从缓存快速展开。
 - `TC-TRAY-MAC-02C`：CLI 重启时，同一数据目录已有 tray helper 则不再创建第二个托盘进程。
-- `TC-TRAY-MAC-02D`：Settings > Proxy 关闭 Tray Icon 后，配置持久化且已有托盘退出；重新 `bifrost start` 不再创建托盘。
+- `TC-TRAY-MAC-02D`：Settings > Proxy 关闭 Tray Icon 后，配置持久化且已有托盘退出；重新打开开关后不重启服务也能重新创建托盘；再次关闭后重新 `bifrost start` 不再创建托盘。
 - `TC-TRAY-MAC-03`：`Copy HTTP Proxy` 后剪贴板内容正确。
 - `TC-TRAY-MAC-04`：`Quit Tray` 不停止主服务。
 - `TC-TRAY-MAC-05`：`Stop Bifrost` 停止主服务，helper 进入 stopped 状态。
@@ -829,7 +833,7 @@ Windows 用例：
 - `TC-TRAY-WIN-02`：点击托盘图标展示菜单。
 - `TC-TRAY-WIN-02B`：主进程 Admin API 繁忙或无响应时，notification area 菜单仍从缓存快速展开。
 - `TC-TRAY-WIN-02C`：CLI 重启时，同一数据目录已有 tray helper 则不再创建第二个 notification area helper。
-- `TC-TRAY-WIN-02D`：Settings > Proxy 关闭 Tray Icon 后，配置持久化且已有 notification area helper 退出；重新 `bifrost start` 不再创建托盘。
+- `TC-TRAY-WIN-02D`：Settings > Proxy 关闭 Tray Icon 后，配置持久化且已有 notification area helper 退出；重新打开开关后不重启服务也能重新创建托盘；再次关闭后重新 `bifrost start` 不再创建托盘。
 - `TC-TRAY-WIN-03`：`Open Admin UI` 打开管理端。
 - `TC-TRAY-WIN-04`：`--no-tray` 不出现托盘图标。
 - `TC-TRAY-WIN-05`：Explorer 重启后图标恢复。

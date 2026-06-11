@@ -1,5 +1,6 @@
 use super::config::{self, CustomMenuItem, MenuAction, TrayConfig};
 use super::runtime::{RuntimeInfo, ServiceState};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -45,12 +46,13 @@ pub enum MenuItemAction {
     SelectRule {
         target: RuleTarget,
         all_targets: Vec<RuleTarget>,
+        currently_enabled: bool,
     },
     QuitTray,
     None,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RuleTarget {
     Personal { name: String },
     Group { group_name: String, name: String },
@@ -80,6 +82,7 @@ pub fn build_menu(
     data_dir: &str,
     bin_available: bool,
     rules: &[TrayRule],
+    recent_rule_targets: &[RuleTarget],
     system_proxy: Option<&SystemProxyMenuState>,
 ) -> Vec<MenuEntry> {
     let mut items = Vec::new();
@@ -158,7 +161,12 @@ pub fn build_menu(
     }
 
     let admin_rules_url = runtime.map(|rt| format!("{}rules", rt.admin_url()));
-    if let Some(rules_menu) = build_rules_menu(rules, is_running, admin_rules_url.as_deref()) {
+    if let Some(rules_menu) = build_rules_menu(
+        rules,
+        recent_rule_targets,
+        is_running,
+        admin_rules_url.as_deref(),
+    ) {
         items.push(MenuEntry::Submenu(rules_menu));
     }
 
@@ -244,6 +252,7 @@ fn separator(id: &str) -> MenuEntry {
 
 fn build_rules_menu(
     rules: &[TrayRule],
+    recent_rule_targets: &[RuleTarget],
     is_running: bool,
     admin_rules_url: Option<&str>,
 ) -> Option<SubmenuDef> {
@@ -278,7 +287,9 @@ fn build_rules_menu(
         None => "Rules: None".to_string(),
     };
 
-    let children = if has_group_rules {
+    let mut children =
+        build_recent_rule_entries(rules, recent_rule_targets, &all_targets, is_running);
+    let grouped_children = if has_group_rules {
         build_grouped_rule_entries(rules, &all_targets, is_running, admin_rules_url)
     } else {
         rules
@@ -287,6 +298,10 @@ fn build_rules_menu(
             .map(|(index, rule)| rule_entry(rule, index, &all_targets, is_running))
             .collect()
     };
+    if !children.is_empty() && !grouped_children.is_empty() {
+        children.push(separator("rules_recent_separator"));
+    }
+    children.extend(grouped_children);
 
     Some(SubmenuDef {
         id: "rules_switcher".to_string(),
@@ -294,6 +309,40 @@ fn build_rules_menu(
         enabled: true,
         children,
     })
+}
+
+fn build_recent_rule_entries(
+    rules: &[TrayRule],
+    recent_rule_targets: &[RuleTarget],
+    all_targets: &[RuleTarget],
+    is_running: bool,
+) -> Vec<MenuEntry> {
+    let mut children = Vec::new();
+    let mut seen = Vec::<RuleTarget>::new();
+    for target in recent_rule_targets {
+        if seen.contains(target) {
+            continue;
+        }
+        let Some(rule) = rules.iter().find(|rule| &rule.target == target) else {
+            continue;
+        };
+        seen.push(target.clone());
+        children.push(item(MenuItemDef {
+            id: format!("recent_rule_{}", children.len()),
+            label: rule_label(&rule.target),
+            enabled: is_running,
+            checked: rule.enabled,
+            action: MenuItemAction::SelectRule {
+                target: rule.target.clone(),
+                all_targets: all_targets.to_vec(),
+                currently_enabled: rule.enabled,
+            },
+        }));
+        if children.len() >= 5 {
+            break;
+        }
+    }
+    children
 }
 
 fn active_rule_label(rules: &[TrayRule]) -> Option<String> {
@@ -397,6 +446,7 @@ fn rule_entry(
         action: MenuItemAction::SelectRule {
             target: rule.target.clone(),
             all_targets: all_targets.to_vec(),
+            currently_enabled: rule.enabled,
         },
     })
 }
@@ -446,6 +496,21 @@ fn rule_sort_key(target: &RuleTarget) -> (u8, String, String) {
 pub fn build_rules_menu_for_test(rules: &[TrayRule], is_running: bool) -> Option<SubmenuDef> {
     build_rules_menu(
         rules,
+        &[],
+        is_running,
+        Some("http://127.0.0.1:8800/_bifrost/rules"),
+    )
+}
+
+#[cfg(test)]
+pub fn build_rules_menu_for_test_with_recent(
+    rules: &[TrayRule],
+    recent_rule_targets: &[RuleTarget],
+    is_running: bool,
+) -> Option<SubmenuDef> {
+    build_rules_menu(
+        rules,
+        recent_rule_targets,
         is_running,
         Some("http://127.0.0.1:8800/_bifrost/rules"),
     )
@@ -579,6 +644,7 @@ mod tests {
             "/tmp/.bifrost",
             true,
             &[],
+            &[],
             None,
         );
         let status = find_item(&menu, "_status").unwrap();
@@ -604,6 +670,7 @@ mod tests {
             None,
             "/tmp/.bifrost",
             true,
+            &[],
             &[],
             Some(&system_proxy),
         );
@@ -647,6 +714,7 @@ mod tests {
             "/tmp/.bifrost",
             true,
             &[],
+            &[],
             None,
         );
         let status = find_item(&menu, "_status").unwrap();
@@ -669,6 +737,7 @@ mod tests {
             "/tmp/.bifrost",
             true,
             &[],
+            &[],
             None,
         );
         let status = find_item(&menu, "_status").unwrap();
@@ -690,6 +759,7 @@ mod tests {
             "/tmp/.bifrost",
             true,
             &[],
+            &[],
             None,
         );
         let status = find_item(&menu, "_status").unwrap();
@@ -709,6 +779,7 @@ mod tests {
             None,
             "/tmp/.bifrost",
             false,
+            &[],
             &[],
             None,
         );
@@ -731,6 +802,7 @@ mod tests {
             None,
             "/tmp/.bifrost",
             true,
+            &[],
             &[],
             None,
         );
@@ -781,6 +853,7 @@ mod tests {
             "/tmp/.bifrost",
             true,
             &[],
+            &[],
             None,
         );
         let custom = find_item(&menu, "custom1").unwrap();
@@ -811,6 +884,7 @@ mod tests {
             "/tmp/.bifrost",
             true,
             &[],
+            &[],
             None,
         );
         let custom = find_item(&menu, "refresh").unwrap();
@@ -838,8 +912,100 @@ mod tests {
         let beta = find_item(&menu.children, "select_rule_1").unwrap();
         assert_eq!(alpha.label, "alpha");
         assert!(alpha.checked);
+        match &alpha.action {
+            MenuItemAction::SelectRule {
+                currently_enabled, ..
+            } => assert!(*currently_enabled),
+            other => panic!("unexpected action: {other:?}"),
+        }
         assert_eq!(beta.label, "beta");
         assert!(!beta.checked);
+        match &beta.action {
+            MenuItemAction::SelectRule {
+                currently_enabled, ..
+            } => assert!(!*currently_enabled),
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_rules_menu_recent_rules_are_shown_first_with_group_labels() {
+        let rules = vec![
+            personal_rule("alpha", false),
+            personal_rule("beta", true),
+            group_rule("Team A", "shared", false),
+            group_rule("Team B", "deploy", false),
+            group_rule("Team C", "debug", false),
+            group_rule("Team D", "ops", false),
+            group_rule("Team E", "fallback", false),
+            group_rule("Team F", "overflow", false),
+        ];
+        let recent = vec![
+            RuleTarget::Group {
+                group_name: "Team A".to_string(),
+                name: "shared".to_string(),
+            },
+            RuleTarget::Personal {
+                name: "beta".to_string(),
+            },
+            RuleTarget::Group {
+                group_name: "Missing".to_string(),
+                name: "deleted".to_string(),
+            },
+            RuleTarget::Group {
+                group_name: "Team B".to_string(),
+                name: "deploy".to_string(),
+            },
+            RuleTarget::Group {
+                group_name: "Team C".to_string(),
+                name: "debug".to_string(),
+            },
+            RuleTarget::Group {
+                group_name: "Team D".to_string(),
+                name: "ops".to_string(),
+            },
+            RuleTarget::Group {
+                group_name: "Team E".to_string(),
+                name: "fallback".to_string(),
+            },
+            RuleTarget::Group {
+                group_name: "Team F".to_string(),
+                name: "overflow".to_string(),
+            },
+        ];
+
+        let menu = build_rules_menu_for_test_with_recent(&rules, &recent, true).unwrap();
+        let labels = menu
+            .children
+            .iter()
+            .take(6)
+            .map(|entry| match entry {
+                MenuEntry::Item(item) => item.label.as_str(),
+                MenuEntry::Submenu(submenu) => submenu.label.as_str(),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            labels,
+            vec![
+                "Team A/shared",
+                "beta",
+                "Team B/deploy",
+                "Team C/debug",
+                "Team D/ops",
+                "-"
+            ]
+        );
+        let beta = find_item(&menu.children, "recent_rule_1").unwrap();
+        assert!(beta.checked);
+        match &beta.action {
+            MenuItemAction::SelectRule {
+                currently_enabled, ..
+            } => assert!(*currently_enabled),
+            other => panic!("unexpected action: {other:?}"),
+        }
+        assert!(find_item(&menu.children, "recent_rule_5").is_none());
+        assert!(find_submenu(&menu.children, "rules_my_rules").is_some());
     }
 
     #[test]

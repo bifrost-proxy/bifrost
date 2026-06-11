@@ -30,6 +30,17 @@
         (format!("http://{addr}/_bifrost/"), seen, handle)
     }
 
+    fn sample_runtime() -> RuntimeInfo {
+        RuntimeInfo {
+            pid: 1234,
+            port: 8800,
+            socks5_port: Some(1080),
+            host: Some("127.0.0.1".to_string()),
+            started_at_ms: None,
+            binary_path: None,
+        }
+    }
+
     #[test]
     fn test_missing_runtime_file_uses_parent_process_fallback_for_menu() {
         let data_dir = std::env::temp_dir().join(format!(
@@ -61,6 +72,7 @@
             data_dir.to_string_lossy().as_ref(),
             true,
             &[],
+            &[],
             None,
         );
         let status = match &menu[0] {
@@ -71,19 +83,99 @@
     }
 
     #[test]
-    fn test_pure_tray_icon_event_does_not_rebuild_native_menu() {
-        assert!(!should_rebuild_native_menu(
+    fn test_pure_tray_icon_event_does_not_refresh_native_menu() {
+        assert!(!should_refresh_native_menu(
             false, false, false, false, false
         ));
     }
 
     #[test]
-    fn test_menu_update_still_runs_for_real_state_and_rule_triggers() {
-        assert!(should_rebuild_native_menu(true, false, false, false, false));
-        assert!(should_rebuild_native_menu(false, true, false, false, false));
-        assert!(should_rebuild_native_menu(false, false, true, false, false));
-        assert!(should_rebuild_native_menu(false, false, false, true, false));
-        assert!(should_rebuild_native_menu(false, false, false, false, true));
+    fn test_background_changes_request_native_menu_refresh() {
+        assert!(should_refresh_native_menu(true, false, false, false, false));
+        assert!(should_refresh_native_menu(false, true, false, false, false));
+        assert!(should_refresh_native_menu(false, false, false, false, true));
+    }
+
+    #[test]
+    fn test_recent_tray_interaction_defers_structural_replacement() {
+        assert!(!should_replace_native_menu(false, false, true));
+        assert!(should_replace_native_menu(false, false, false));
+    }
+
+    #[test]
+    fn test_explicit_reload_and_user_action_replace_native_menu() {
+        assert!(should_replace_native_menu(true, false, true));
+        assert!(should_replace_native_menu(false, true, true));
+    }
+
+    #[test]
+    fn test_same_shape_native_menu_can_refresh_items_in_place() {
+        let rt = sample_runtime();
+        let initial = menu::build_menu(
+            Some(&rt),
+            ServiceState::Running,
+            None,
+            false,
+            None,
+            "/tmp/.bifrost",
+            true,
+            &[],
+            &[],
+            None,
+        );
+
+        let busy = menu::build_menu(
+            Some(&rt),
+            ServiceState::Running,
+            Some("Bifrost: Starting..."),
+            true,
+            None,
+            "/tmp/.bifrost",
+            true,
+            &[],
+            &[],
+            None,
+        );
+
+        assert_eq!(menu_shape(&initial), menu_shape(&busy));
+    }
+
+    #[test]
+    fn test_changed_shape_native_menu_requires_replacement() {
+        let rt = sample_runtime();
+        let initial = menu::build_menu(
+            Some(&rt),
+            ServiceState::Running,
+            None,
+            false,
+            None,
+            "/tmp/.bifrost",
+            true,
+            &[],
+            &[],
+            None,
+        );
+        let next = menu::build_menu(
+            Some(&rt),
+            ServiceState::Running,
+            None,
+            false,
+            None,
+            "/tmp/.bifrost",
+            true,
+            &[menu::TrayRule {
+                target: RuleTarget::Personal {
+                    name: "alpha".to_string(),
+                },
+                enabled: true,
+                sort_order: 0,
+                managed_group: false,
+            }],
+            &[],
+            None,
+        );
+
+        assert_ne!(menu_shape(&initial), menu_shape(&next));
     }
 
     #[test]
@@ -263,6 +355,7 @@
             "/tmp/.bifrost",
             true,
             &rules,
+            &[],
             None,
         );
         let rules_menu = menu.iter().find_map(|entry| match entry {
@@ -289,7 +382,7 @@
     }
 
     #[test]
-    fn test_select_single_rule_calls_admin_api_for_disable_then_enable() {
+    fn test_toggle_single_rule_calls_admin_api_for_disable_then_enable() {
         let (admin_url, seen, handle) = spawn_test_http_server(vec![
             ("HTTP/1.1 200 OK", r#"{"success":true}"#),
             ("HTTP/1.1 200 OK", r#"{"success":true}"#),
@@ -304,7 +397,7 @@
             target.clone(),
         ];
 
-        assert!(select_single_rule(&admin_url, &target, &all_targets));
+        assert!(toggle_single_rule(&admin_url, &target, &all_targets, false));
         handle.join().unwrap();
 
         assert_eq!(
@@ -312,6 +405,71 @@
             vec![
                 "PUT /_bifrost/api/rules/alpha/disable HTTP/1.1",
                 "PUT /_bifrost/api/rules/beta/enable HTTP/1.1",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_toggle_enabled_rule_calls_admin_api_for_disable_only() {
+        let (admin_url, seen, handle) =
+            spawn_test_http_server(vec![("HTTP/1.1 200 OK", r#"{"success":true}"#)]);
+        let target = RuleTarget::Personal {
+            name: "beta".to_string(),
+        };
+        let all_targets = vec![
+            RuleTarget::Personal {
+                name: "alpha".to_string(),
+            },
+            target.clone(),
+        ];
+
+        assert!(toggle_single_rule(&admin_url, &target, &all_targets, true));
+        handle.join().unwrap();
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["PUT /_bifrost/api/rules/beta/disable HTTP/1.1"]
+        );
+    }
+
+    #[test]
+    fn test_record_recent_rule_target_persists_mru_limited_to_five() {
+        let dir = tempfile::tempdir().unwrap();
+        let targets = [
+            RuleTarget::Personal {
+                name: "one".to_string(),
+            },
+            RuleTarget::Personal {
+                name: "two".to_string(),
+            },
+            RuleTarget::Group {
+                group_name: "Team".to_string(),
+                name: "three".to_string(),
+            },
+            RuleTarget::Personal {
+                name: "four".to_string(),
+            },
+            RuleTarget::Personal {
+                name: "five".to_string(),
+            },
+            RuleTarget::Personal {
+                name: "six".to_string(),
+            },
+        ];
+
+        for target in &targets {
+            record_recent_rule_target(dir.path(), target);
+        }
+        record_recent_rule_target(dir.path(), &targets[2]);
+
+        assert_eq!(
+            load_recent_rule_targets(dir.path()),
+            vec![
+                targets[2].clone(),
+                targets[5].clone(),
+                targets[4].clone(),
+                targets[3].clone(),
+                targets[1].clone(),
             ]
         );
     }

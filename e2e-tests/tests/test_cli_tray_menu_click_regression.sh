@@ -13,7 +13,7 @@ if [[ "${SKIP_BUILD:-false}" == "true" || "${BIFROST_TRAY_MENU_SKIP_UNIT_GUARD:-
   echo "Skipping tray menu click regression unit guard (SKIP_BUILD=${SKIP_BUILD:-false})"
 else
   echo "Running tray menu click regression unit guard..."
-  cargo test -p bifrost-cli pure_tray_icon_event_does_not_rebuild_native_menu -- --nocapture
+  cargo test -p bifrost-cli native_menu -- --nocapture
 fi
 
 if [[ -n "${BIFROST_BIN:-}" ]]; then
@@ -84,4 +84,4 @@ if grep -q "icon_interacted=true" "$TRAY_LOG"; then
   exit 1
 fi
 
-echo "PASS: tray helper launched and pure icon interaction rebuild guard is active"
+echo "PASS: tray helper launched and native menu refresh guard is active"

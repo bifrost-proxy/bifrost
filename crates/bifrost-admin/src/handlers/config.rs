@@ -534,6 +534,13 @@ async fn update_tray_config(req: Request<Incoming>, state: SharedAdminState) -> 
                 enabled = config.enabled,
                 "Tray config updated and persisted"
             );
+            if should_request_tray_launch_after_config_update(config.enabled) {
+                if state.request_tray_launch() {
+                    tracing::info!("Tray launch requested after config enable");
+                } else {
+                    tracing::debug!("Tray config enabled but no launch callback is registered");
+                }
+            }
             json_response(&TrayConfig {
                 enabled: config.enabled,
                 supported: tray_supported(),
@@ -547,6 +554,10 @@ async fn update_tray_config(req: Request<Incoming>, state: SharedAdminState) -> 
             )
         }
     }
+}
+
+fn should_request_tray_launch_after_config_update(enabled: bool) -> bool {
+    enabled && tray_supported()
 }
 
 fn tray_supported() -> bool {
@@ -1831,4 +1842,18 @@ async fn clear_ip_tls_pending(
 
     tracing::info!("Cleared all pending IP TLS decisions via API");
     success_response("Cleared all pending IP TLS decisions")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tray_launch_is_requested_only_for_enable_on_supported_platforms() {
+        assert_eq!(
+            should_request_tray_launch_after_config_update(true),
+            !cfg!(target_os = "linux")
+        );
+        assert!(!should_request_tray_launch_after_config_update(false));
+    }
 }
