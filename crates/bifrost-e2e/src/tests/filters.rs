@@ -37,6 +37,18 @@ pub fn get_all_tests() -> Vec<TestCase> {
             test_includefilter_header_route_split_cache_regression,
         ),
         TestCase::standalone(
+            "filters_includeFilter_header_modify_cache_regression",
+            "includeFilter 请求头修改缓存回归",
+            "filters",
+            test_includefilter_header_modify_cache_regression,
+        ),
+        TestCase::standalone(
+            "filters_includeFilter_header_redirect_cache_regression",
+            "includeFilter 请求头重定向缓存回归",
+            "filters",
+            test_includefilter_header_redirect_cache_regression,
+        ),
+        TestCase::standalone(
             "filters_excludeFilter_method_get",
             "excludeFilter 排除 GET 请求",
             "filters",
@@ -252,6 +264,106 @@ async fn test_includefilter_header_route_split_cache_regression() -> Result<(), 
 
     mobile_result.assert_success()?;
     mobile_result.assert_body_contains("feature_mobile_server")?;
+
+    Ok(())
+}
+
+async fn test_includefilter_header_modify_cache_regression() -> Result<(), String> {
+    let mock = EnhancedMockServer::start().await;
+    mock.set_response(200, "modify_server");
+
+    let port = portpicker::pick_unused_port().unwrap();
+    let _proxy = ProxyInstance::start(
+        port,
+        vec![
+            &format!("multi-modify.local host://127.0.0.1:{}", mock.port),
+            "multi-modify.local reqHeaders://X-Selected-Env=web includeFilter://h:x-tt-env-fe=featA-web",
+            "multi-modify.local reqHeaders://X-Selected-Env=mobile includeFilter://h:x-tt-env-fe=featA-mobile",
+            "multi-modify.local resHeaders://X-Selected-Env=web includeFilter://h:x-tt-env-fe=featA-web",
+            "multi-modify.local resHeaders://X-Selected-Env=mobile includeFilter://h:x-tt-env-fe=featA-mobile",
+            "multi-modify.local replaceStatus://201 includeFilter://h:x-tt-env-fe=featA-web",
+            "multi-modify.local replaceStatus://202 includeFilter://h:x-tt-env-fe=featA-mobile",
+        ],
+    )
+    .await
+    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+
+    let proxy_url = format!("http://127.0.0.1:{}", port);
+    let target_url = "http://multi-modify.local/api";
+
+    let web_result = CurlCommand::with_proxy(&proxy_url, target_url)
+        .header("x-tt-env-fe", "featA-web")
+        .execute()
+        .await
+        .map_err(|e| format!("curl failed: {}", e))?;
+
+    web_result.assert_status(201)?;
+    web_result.assert_header("x-selected-env", "web")?;
+    mock.assert_header_received("x-selected-env", "web")?;
+
+    let mobile_result = CurlCommand::with_proxy(&proxy_url, target_url)
+        .header("x-tt-env-fe", "featA-mobile")
+        .execute()
+        .await
+        .map_err(|e| format!("curl failed: {}", e))?;
+
+    mobile_result.assert_status(202)?;
+    mobile_result.assert_header("x-selected-env", "mobile")?;
+    mock.assert_header_received("x-selected-env", "mobile")?;
+
+    Ok(())
+}
+
+async fn test_includefilter_header_redirect_cache_regression() -> Result<(), String> {
+    let port = portpicker::pick_unused_port().unwrap();
+    let _proxy = ProxyInstance::start(
+        port,
+        vec![
+            "multi-direct.local redirect://302:https://web.example.test/landing includeFilter://h:x-tt-env-fe=featA-web",
+            "multi-direct.local redirect://302:https://mobile.example.test/landing includeFilter://h:x-tt-env-fe=featA-mobile",
+            "multi-status.local statusCode://201 includeFilter://h:x-tt-env-fe=featA-web",
+            "multi-status.local statusCode://202 includeFilter://h:x-tt-env-fe=featA-mobile",
+        ],
+    )
+    .await
+    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+
+    let proxy_url = format!("http://127.0.0.1:{}", port);
+    let target_url = "http://multi-direct.local/api";
+
+    let web_result = CurlCommand::with_proxy(&proxy_url, target_url)
+        .header("x-tt-env-fe", "featA-web")
+        .execute()
+        .await
+        .map_err(|e| format!("curl failed: {}", e))?;
+
+    web_result.assert_status(302)?;
+    web_result.assert_header("location", "https://web.example.test/landing")?;
+
+    let mobile_result = CurlCommand::with_proxy(&proxy_url, target_url)
+        .header("x-tt-env-fe", "featA-mobile")
+        .execute()
+        .await
+        .map_err(|e| format!("curl failed: {}", e))?;
+
+    mobile_result.assert_status(302)?;
+    mobile_result.assert_header("location", "https://mobile.example.test/landing")?;
+
+    let web_status = CurlCommand::with_proxy(&proxy_url, "http://multi-status.local/api")
+        .header("x-tt-env-fe", "featA-web")
+        .execute()
+        .await
+        .map_err(|e| format!("curl failed: {}", e))?;
+
+    web_status.assert_status(201)?;
+
+    let mobile_status = CurlCommand::with_proxy(&proxy_url, "http://multi-status.local/api")
+        .header("x-tt-env-fe", "featA-mobile")
+        .execute()
+        .await
+        .map_err(|e| format!("curl failed: {}", e))?;
+
+    mobile_status.assert_status(202)?;
 
     Ok(())
 }
