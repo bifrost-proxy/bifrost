@@ -217,6 +217,18 @@ source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --test cli_co
 - completion 测试使用 `clap_complete::generate()` 内存生成 bash/zsh/fish completion，仍覆盖同一 CLI schema、alias 和 value parser。
 - `install_skill_installs_remote_skill_from_embedded_bundle` 直接调用 `handle_install_skill()` 真实写入临时目录，保留文件落盘和内置 skill bundle 验证，同时避免 Windows 子进程栈溢出。
 
+### TC-CWUT-13 CLI help 专项测试不依赖 Windows 子进程 stdout
+
+操作步骤：
+
+```bash
+source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --test cli_help -- --nocapture
+```
+
+预期结果：
+- `cli_help` 的 8 个帮助文本断言全部通过，Windows runner 不会因为真实子进程 stdout/stderr 或栈行为差异产生假阴性。
+- 测试仍覆盖同一 CLI schema 的 root、port、start、search、traffic help 文案。
+
 ## 清理步骤
 
 本测试只运行单元测试和静态扫描；cargo 产物由常规构建缓存管理，无额外临时服务需要停止。
@@ -242,3 +254,4 @@ source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --test cli_co
 | 2026-06-11 | TC-CWUT-11 | 跟进 GitHub Actions run `27361916126` 的 `Windows Unit Tests (x86_64)`，定位 `commands::upgrade::tests::upgrade_archive_validation_rejects_invalid_tar_xz_before_extract` 因 Windows 早退跳过非 zip 预检而失败；本地执行目标过滤用例。 | 通过，`validate_downloaded_archive()` 仅对 zip 早退，坏 tar.xz 在所有平台都必须预检失败 |
 | 2026-06-11 | TC-CWUT-07 | 跟进 GitHub Actions run `27363268897` 的 `Windows Unit Tests (x86_64)`，定位 `p1_tools_e2e::exec_command_tool_works_end_to_end` long-running 分支单次/短窗口 poll 没拿到 `long-end`；本地执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-agent --test p1_tools_e2e exec_command_tool_works_end_to_end -- --nocapture`。 | 通过，long-running 命令改为平台化 PowerShell/Unix shell，初始输出与后续 poll 输出合并，bounded poll 最多 40 次直到 exit code 和 `long-end` 都出现 |
 | 2026-06-11 | TC-CWUT-12 | 跟进 GitHub Actions run `27364370904` 与 `27365788851` 的 `Windows Unit Tests (x86_64)`，定位 `bifrost-cli --test cli_commands` 中 help/completion/alias 子进程输出断言批量失败，以及真实 `install-skill` 子进程在 Windows 下栈溢出；本地执行完整 `cli_commands` 测试。 | 通过，help/completion/alias schema 测试改为 clap 内存渲染，install-skill 落盘验证改为 in-process 调用 `handle_install_skill()` |
+| 2026-06-11 | TC-CWUT-13 | 跟进 GitHub Actions run `27367354517` 的 `Windows Unit Tests (x86_64)`，定位 `bifrost-cli --test cli_help` 中 8 个 help 文案断言仍通过真实 `bifrost.exe --help` 子进程取 stdout/stderr；本地执行完整 `cli_help` 测试。 | 通过，root/port/start/search/traffic help 文案测试改为 clap 内存渲染，避免 Windows 子进程 stdout/stderr 和栈行为差异 |
