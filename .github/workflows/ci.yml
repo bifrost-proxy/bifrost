@@ -400,9 +400,7 @@ jobs:
         with:
           targets: armv7-unknown-linux-gnueabihf
       - name: Install cross
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
       - uses: Swatinem/rust-cache@v2
         with:
           key: linux-armv7
