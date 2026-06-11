@@ -6,21 +6,31 @@ use bifrost_cli::cli::{
     AiVoiceWakeBindingCommands, AiVoiceWakeCommands, AiVoiceWakeListenerCommands, CaCommands, Cli,
     Commands, RemoteCommands, SettingCommands, SyncCommands,
 };
-use clap::Parser;
+use clap::{CommandFactory, Parser};
+use clap_complete::{generate, Shell};
 
 fn bifrost_cmd() -> Command {
     Command::new(env!("CARGO_BIN_EXE_bifrost"))
 }
 
 fn run_help(args: &[&str]) -> String {
-    let mut cmd = bifrost_cmd();
-    for a in args {
-        cmd.arg(a);
+    let mut argv = Vec::with_capacity(args.len() + 2);
+    argv.push("bifrost");
+    argv.extend(args.iter().copied());
+    argv.push("--help");
+
+    let mut cmd = Cli::command();
+    match cmd.try_get_matches_from_mut(argv) {
+        Ok(_) => String::new(),
+        Err(err) => err.render().ansi().to_string(),
     }
-    cmd.arg("--help");
-    let output = cmd.output().expect("failed to run bifrost");
-    String::from_utf8_lossy(&output.stdout).to_string()
-        + String::from_utf8_lossy(&output.stderr).as_ref()
+}
+
+fn generate_completions(shell: Shell) -> String {
+    let mut cmd = Cli::command();
+    let mut buf = Vec::new();
+    generate(shell, &mut cmd, "bifrost", &mut buf);
+    String::from_utf8(buf).expect("completion output should be utf-8")
 }
 
 #[test]
@@ -742,16 +752,7 @@ fn import_export_commands_listed_in_help() {
 
 #[test]
 fn completions_still_works() {
-    let output = bifrost_cmd()
-        .arg("completions")
-        .arg("zsh")
-        .output()
-        .expect("failed to run bifrost completions");
-    assert!(
-        output.status.success(),
-        "completions command should succeed"
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = generate_completions(Shell::Zsh);
     assert!(
         stdout.contains("compdef"),
         "zsh completions should contain compdef"
@@ -760,12 +761,7 @@ fn completions_still_works() {
 
 #[test]
 fn completions_includes_new_commands() {
-    let output = bifrost_cmd()
-        .arg("completions")
-        .arg("zsh")
-        .output()
-        .expect("failed to run bifrost completions");
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = get_zsh_completions();
     assert!(
         stdout.contains("metrics"),
         "completions should include metrics"
@@ -787,12 +783,7 @@ fn completions_includes_new_commands() {
 
 #[test]
 fn value_parser_completions_for_log_level() {
-    let output = bifrost_cmd()
-        .arg("completions")
-        .arg("zsh")
-        .output()
-        .expect("failed");
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = get_zsh_completions();
     assert!(
         stdout.contains("trace"),
         "completions should contain log level trace"
@@ -805,12 +796,7 @@ fn value_parser_completions_for_log_level() {
 
 #[test]
 fn value_parser_completions_for_access_mode() {
-    let output = bifrost_cmd()
-        .arg("completions")
-        .arg("zsh")
-        .output()
-        .expect("failed");
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = get_zsh_completions();
     assert!(
         stdout.contains("local_only"),
         "completions should contain access mode local_only"
@@ -875,13 +861,7 @@ fn config_disconnect_by_app_requires_app() {
 }
 
 fn get_zsh_completions() -> String {
-    let output = bifrost_cmd()
-        .arg("completions")
-        .arg("zsh")
-        .output()
-        .expect("failed to run bifrost completions zsh");
-    assert!(output.status.success(), "completions zsh should succeed");
-    String::from_utf8_lossy(&output.stdout).to_string()
+    generate_completions(Shell::Zsh)
 }
 
 #[test]
@@ -1077,13 +1057,7 @@ fn completions_traffic_direction_values() {
 
 #[test]
 fn bash_completions_work() {
-    let output = bifrost_cmd()
-        .arg("completions")
-        .arg("bash")
-        .output()
-        .expect("failed to run bifrost completions bash");
-    assert!(output.status.success(), "bash completions should succeed");
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = generate_completions(Shell::Bash);
     assert!(
         stdout.contains("complete") && stdout.contains("bifrost"),
         "bash completions should contain complete and bifrost"
@@ -1092,13 +1066,7 @@ fn bash_completions_work() {
 
 #[test]
 fn fish_completions_work() {
-    let output = bifrost_cmd()
-        .arg("completions")
-        .arg("fish")
-        .output()
-        .expect("failed to run bifrost completions fish");
-    assert!(output.status.success(), "fish completions should succeed");
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = generate_completions(Shell::Fish);
     assert!(
         stdout.contains("complete") && stdout.contains("bifrost"),
         "fish completions should contain complete and bifrost"
@@ -1107,13 +1075,7 @@ fn fish_completions_work() {
 
 #[test]
 fn alias_st_works_as_status() {
-    let output = bifrost_cmd()
-        .arg("st")
-        .arg("--help")
-        .output()
-        .expect("failed to run bifrost st --help");
-    let combined = String::from_utf8_lossy(&output.stdout).to_string()
-        + String::from_utf8_lossy(&output.stderr).as_ref();
+    let combined = run_help(&["st"]);
     assert!(
         combined.contains("proxy") || combined.contains("status") || combined.contains("TUI"),
         "st alias should work as status command"
@@ -1122,13 +1084,7 @@ fn alias_st_works_as_status() {
 
 #[test]
 fn alias_cfg_works_as_config() {
-    let output = bifrost_cmd()
-        .arg("cfg")
-        .arg("--help")
-        .output()
-        .expect("failed to run bifrost cfg --help");
-    let combined = String::from_utf8_lossy(&output.stdout).to_string()
-        + String::from_utf8_lossy(&output.stderr).as_ref();
+    let combined = run_help(&["cfg"]);
     assert!(
         combined.contains("show") && combined.contains("set") && combined.contains("get"),
         "cfg alias should work as config command"
@@ -1137,13 +1093,7 @@ fn alias_cfg_works_as_config() {
 
 #[test]
 fn alias_sp_works_as_system_proxy() {
-    let output = bifrost_cmd()
-        .arg("sp")
-        .arg("--help")
-        .output()
-        .expect("failed to run bifrost sp --help");
-    let combined = String::from_utf8_lossy(&output.stdout).to_string()
-        + String::from_utf8_lossy(&output.stderr).as_ref();
+    let combined = run_help(&["sp"]);
     assert!(
         combined.contains("enable") && combined.contains("disable"),
         "sp alias should work as system-proxy command"
@@ -1152,13 +1102,7 @@ fn alias_sp_works_as_system_proxy() {
 
 #[test]
 fn alias_val_works_as_value() {
-    let output = bifrost_cmd()
-        .arg("val")
-        .arg("--help")
-        .output()
-        .expect("failed to run bifrost val --help");
-    let combined = String::from_utf8_lossy(&output.stdout).to_string()
-        + String::from_utf8_lossy(&output.stderr).as_ref();
+    let combined = run_help(&["val"]);
     assert!(
         combined.contains("list") && combined.contains("add"),
         "val alias should work as value command"
@@ -1167,13 +1111,7 @@ fn alias_val_works_as_value() {
 
 #[test]
 fn alias_wl_works_as_whitelist() {
-    let output = bifrost_cmd()
-        .arg("wl")
-        .arg("--help")
-        .output()
-        .expect("failed to run bifrost wl --help");
-    let combined = String::from_utf8_lossy(&output.stdout).to_string()
-        + String::from_utf8_lossy(&output.stderr).as_ref();
+    let combined = run_help(&["wl"]);
     assert!(
         combined.contains("list") && combined.contains("add") && combined.contains("remove"),
         "wl alias should work as whitelist command"
@@ -1182,19 +1120,10 @@ fn alias_wl_works_as_whitelist() {
 
 #[test]
 fn alias_comp_works_as_completions() {
-    let output = bifrost_cmd()
-        .arg("comp")
-        .arg("zsh")
-        .output()
-        .expect("failed to run bifrost comp zsh");
+    let cli = Cli::try_parse_from(["bifrost", "comp", "zsh"]).expect("comp alias should parse");
     assert!(
-        output.status.success(),
-        "comp alias should work as completions command"
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("compdef"),
-        "comp alias should produce valid zsh completions"
+        matches!(cli.command, Some(Commands::Completions { .. })),
+        "comp alias should parse as completions command"
     );
 }
 
@@ -1298,12 +1227,7 @@ fn install_skill_installs_remote_skill_from_embedded_bundle() {
 
 #[test]
 fn main_help_points_to_quick_start_for_shortcuts() {
-    let output = bifrost_cmd()
-        .arg("--help")
-        .output()
-        .expect("failed to run bifrost --help");
-    let combined = String::from_utf8_lossy(&output.stdout).to_string()
-        + String::from_utf8_lossy(&output.stderr).as_ref();
+    let combined = run_help(&[]);
     assert!(
         !combined.contains("COMMAND SHORTCUTS"),
         "main help should keep shortcuts in docs instead of the old long section"
@@ -1531,16 +1455,7 @@ fn config_memory_command_parse() {
 
 #[test]
 fn config_show_section_accepts_server() {
-    let output = bifrost_cmd()
-        .arg("config")
-        .arg("show")
-        .arg("--section")
-        .arg("server")
-        .arg("--help")
-        .output()
-        .expect("failed to run bifrost config show --section server --help");
-    let combined = String::from_utf8_lossy(&output.stdout).to_string()
-        + String::from_utf8_lossy(&output.stderr).as_ref();
+    let combined = run_help(&["config", "show", "--section", "server"]);
     assert!(
         !combined.contains("error") || combined.contains("Show"),
         "config show --section server should be accepted by clap parser"

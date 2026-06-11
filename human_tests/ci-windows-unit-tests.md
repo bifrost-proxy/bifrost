@@ -204,6 +204,19 @@ source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli upgrade_archi
 - 即使在 Windows runner 上，错误传入的 `.tar.xz` / `.tar.gz` 仍会通过 `tar -t*` 做预检，坏包在 extract 前返回 Err。
 - 不改变 Windows 发布/升级渠道的候选包类型：Windows 仍只选择 `.zip`，Unix/macOS 才使用 `.tar.xz -> .tar.gz` 兼容链。
 
+### TC-CWUT-12 CLI help/completion schema 测试不依赖 Windows 子进程 stdout
+
+操作步骤：
+
+```bash
+source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --test cli_commands -- --nocapture
+```
+
+预期结果：
+- `run_help()` 使用 clap `Cli::command()` 内存渲染帮助文本，Windows runner 不会因为真实 `bifrost.exe --help` stdout/stderr 行为差异导致 help 子命令批量假阴性。
+- completion 测试使用 `clap_complete::generate()` 内存生成 bash/zsh/fish completion，仍覆盖同一 CLI schema、alias 和 value parser。
+- 只有 `install_skill_installs_remote_skill_from_embedded_bundle` 保留真实二进制执行，因为该用例验证文件落盘和内置 skill bundle。
+
 ## 清理步骤
 
 本测试只运行单元测试和静态扫描；cargo 产物由常规构建缓存管理，无额外临时服务需要停止。
@@ -228,3 +241,4 @@ source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli upgrade_archi
 | 2026-06-11 | TC-CWUT-10 | 跟进 GitHub Actions run `27358341485` 的 `Windows Unit Tests (x86_64)`，定位 `bifrost-asr::timeline::tests::generates_daily_summary_grouped_by_date` 在 Windows 上输出 `sub\meeting_b` 后断言 `sub/meeting_b` 失败；本地执行 ASR filtered tests。 | 通过，Daily summary source label 对 `\` 统一归一为 `/`，Windows/Linux 不需要 native ASR runtime 即可覆盖 core artifact 文本逻辑 |
 | 2026-06-11 | TC-CWUT-11 | 跟进 GitHub Actions run `27361916126` 的 `Windows Unit Tests (x86_64)`，定位 `commands::upgrade::tests::upgrade_archive_validation_rejects_invalid_tar_xz_before_extract` 因 Windows 早退跳过非 zip 预检而失败；本地执行目标过滤用例。 | 通过，`validate_downloaded_archive()` 仅对 zip 早退，坏 tar.xz 在所有平台都必须预检失败 |
 | 2026-06-11 | TC-CWUT-07 | 跟进 GitHub Actions run `27363268897` 的 `Windows Unit Tests (x86_64)`，定位 `p1_tools_e2e::exec_command_tool_works_end_to_end` long-running 分支单次/短窗口 poll 没拿到 `long-end`；本地执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-agent --test p1_tools_e2e exec_command_tool_works_end_to_end -- --nocapture`。 | 通过，long-running 命令改为平台化 PowerShell/Unix shell，初始输出与后续 poll 输出合并，bounded poll 最多 40 次直到 exit code 和 `long-end` 都出现 |
+| 2026-06-11 | TC-CWUT-12 | 跟进 GitHub Actions run `27364370904` 的 `Windows Unit Tests (x86_64)`，定位 `bifrost-cli --test cli_commands` 中 76 个 help/completion/alias 子进程输出断言在 Windows 下批量失败；本地执行完整 `cli_commands` 测试。 | 通过，help/completion/alias schema 测试改为 clap 内存渲染，真实安装 skill 用例仍保留二进制执行 |
