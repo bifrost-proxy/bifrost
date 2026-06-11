@@ -31,6 +31,12 @@ pub fn get_all_tests() -> Vec<TestCase> {
             test_includefilter_header,
         ),
         TestCase::standalone(
+            "filters_includeFilter_header_route_split_cache_regression",
+            "includeFilter 请求头分流缓存回归",
+            "filters",
+            test_includefilter_header_route_split_cache_regression,
+        ),
+        TestCase::standalone(
             "filters_excludeFilter_method_get",
             "excludeFilter 排除 GET 请求",
             "filters",
@@ -199,6 +205,53 @@ async fn test_includefilter_header() -> Result<(), String> {
 
     result_without_header.assert_success()?;
     result_without_header.assert_body_contains("normal_server")?;
+
+    Ok(())
+}
+
+async fn test_includefilter_header_route_split_cache_regression() -> Result<(), String> {
+    let web_mock = EnhancedMockServer::start().await;
+    web_mock.set_response(200, "feature_web_server");
+    let mobile_mock = EnhancedMockServer::start().await;
+    mobile_mock.set_response(200, "feature_mobile_server");
+
+    let port = portpicker::pick_unused_port().unwrap();
+    let _proxy = ProxyInstance::start(
+        port,
+        vec![
+            &format!(
+                "multi-demand.local host://127.0.0.1:{} includeFilter://h:x-tt-env-fe=featA-web",
+                web_mock.port
+            ),
+            &format!(
+                "multi-demand.local host://127.0.0.1:{} includeFilter://h:x-tt-env-fe=featA-mobile",
+                mobile_mock.port
+            ),
+        ],
+    )
+    .await
+    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+
+    let proxy_url = format!("http://127.0.0.1:{}", port);
+    let target_url = "http://multi-demand.local/api";
+
+    let web_result = CurlCommand::with_proxy(&proxy_url, target_url)
+        .header("x-tt-env-fe", "featA-web")
+        .execute()
+        .await
+        .map_err(|e| format!("curl failed: {}", e))?;
+
+    web_result.assert_success()?;
+    web_result.assert_body_contains("feature_web_server")?;
+
+    let mobile_result = CurlCommand::with_proxy(&proxy_url, target_url)
+        .header("x-tt-env-fe", "featA-mobile")
+        .execute()
+        .await
+        .map_err(|e| format!("curl failed: {}", e))?;
+
+    mobile_result.assert_success()?;
+    mobile_result.assert_body_contains("feature_mobile_server")?;
 
     Ok(())
 }

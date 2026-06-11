@@ -107,8 +107,15 @@ impl ResolvedRules {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CandidateMatch {
+    rule_index: usize,
+    captures: Option<Vec<String>>,
+    is_negated: bool,
+}
+
 struct LruCache {
-    cache: LruCacheImpl<String, ResolvedRules>,
+    cache: LruCacheImpl<String, Vec<CandidateMatch>>,
 }
 
 impl LruCache {
@@ -120,16 +127,16 @@ impl LruCache {
         }
     }
 
-    fn peek(&self, key: &str) -> Option<ResolvedRules> {
+    fn peek(&self, key: &str) -> Option<Vec<CandidateMatch>> {
         self.cache.peek(key).cloned()
     }
 
     #[cfg(test)]
-    fn get(&mut self, key: &str) -> Option<ResolvedRules> {
+    fn get(&mut self, key: &str) -> Option<Vec<CandidateMatch>> {
         self.cache.get(key).cloned()
     }
 
-    fn insert(&mut self, key: String, value: ResolvedRules) {
+    fn insert(&mut self, key: String, value: Vec<CandidateMatch>) {
         self.cache.put(key, value);
     }
 
@@ -255,8 +262,6 @@ impl RulesResolver {
     }
 
     pub fn resolve(&self, ctx: &RequestContext) -> ResolvedRules {
-        let cache_key = format!("{}|{}|{}|{}", ctx.url, ctx.host, ctx.path, ctx.method);
-
         tracing::trace!(
             target: "bifrost_core::rules",
             total_rules = self.rules.len(),
@@ -265,43 +270,38 @@ impl RulesResolver {
             "starting rule resolution"
         );
 
+        let candidates = self.get_matcher_candidates(ctx);
+        let result = self.apply_filter_gate(&candidates, ctx);
+
+        tracing::debug!(
+            target: "bifrost_core::rules",
+            url = %ctx.url,
+            matched_count = result.rules.len(),
+            "rule resolution completed"
+        );
+
+        result
+    }
+
+    fn get_matcher_candidates(&self, ctx: &RequestContext) -> Vec<CandidateMatch> {
+        let cache_key = format!("{}|{}|{}", ctx.url, ctx.host, ctx.path);
+
         if self.cache_enabled {
             if let Some(cached) = self.cache.read().peek(&cache_key) {
                 tracing::trace!(
                     target: "bifrost_core::rules",
                     url = %ctx.url,
-                    cached_rules = cached.rules.len(),
-                    "returning cached result"
+                    cached_candidates = cached.len(),
+                    "returning cached matcher candidates"
                 );
                 return cached;
             }
         }
-        let mut result = ResolvedRules::new();
-        let mut matched_protocols: HashMap<Protocol, bool> = HashMap::new();
-        let active_skips = self.collect_active_skips(ctx);
 
-        for rule in &self.rules {
+        let mut candidates = Vec::new();
+
+        for (rule_index, rule) in self.rules.iter().enumerate() {
             if rule.is_disabled() {
-                continue;
-            }
-
-            if rule.is_negated() {
-                // 对于否定规则，我们需要检查原始匹配结果（不取反）
-                // 如果原始 pattern 匹配成功，则标记该协议已被匹配，阻止后续同协议规则
-                //
-                // 注意：rule.matcher.matches() 对于否定规则返回的是取反后的结果
-                // 所以这里需要再次取反来获得原始匹配结果
-                let match_result = rule.matcher.matches(&ctx.url, &ctx.host, &ctx.path);
-                // 对于否定规则，matched=true 意味着原始 pattern 不匹配（因为被取反了）
-                // 我们需要的是原始匹配结果，所以再次取反
-                let original_matched = !match_result.matched;
-                if original_matched {
-                    matched_protocols.insert(rule.protocol, true);
-                }
-                continue;
-            }
-
-            if !rule.protocol.is_multi_match() && matched_protocols.contains_key(&rule.protocol) {
                 continue;
             }
 
@@ -315,11 +315,59 @@ impl RulesResolver {
                 path = %ctx.path,
                 file = rule.file.as_deref().unwrap_or("<unknown>"),
                 line = rule.line.unwrap_or(0),
-                "rule match attempt"
+                "rule matcher attempt"
             );
-            if !match_result.matched {
+
+            if rule.is_negated() {
+                if !match_result.matched {
+                    candidates.push(CandidateMatch {
+                        rule_index,
+                        captures: None,
+                        is_negated: true,
+                    });
+                }
                 continue;
             }
+
+            if match_result.matched {
+                candidates.push(CandidateMatch {
+                    rule_index,
+                    captures: match_result.captures,
+                    is_negated: false,
+                });
+            }
+        }
+
+        if self.cache_enabled {
+            self.cache.write().insert(cache_key, candidates.clone());
+        }
+
+        candidates
+    }
+
+    fn apply_filter_gate(
+        &self,
+        candidates: &[CandidateMatch],
+        ctx: &RequestContext,
+    ) -> ResolvedRules {
+        let mut result = ResolvedRules::new();
+        let mut matched_protocols: HashMap<Protocol, bool> = HashMap::new();
+        let active_skips = self.collect_active_skips_from(candidates, ctx);
+
+        for candidate in candidates {
+            let Some(rule) = self.rules.get(candidate.rule_index) else {
+                continue;
+            };
+
+            if candidate.is_negated {
+                matched_protocols.insert(rule.protocol, true);
+                continue;
+            }
+
+            if !rule.protocol.is_multi_match() && matched_protocols.contains_key(&rule.protocol) {
+                continue;
+            }
+
             tracing::debug!(
                 target: "bifrost_core::rules",
                 pattern = %rule.pattern,
@@ -364,24 +412,13 @@ impl RulesResolver {
             }
 
             let resolved =
-                ResolvedRule::new(rule.clone(), match_result.captures, ctx, &self.values);
+                ResolvedRule::new(rule.clone(), candidate.captures.clone(), ctx, &self.values);
             result.add(resolved);
 
             if !rule.protocol.is_multi_match() {
                 matched_protocols.insert(rule.protocol, true);
             }
         }
-
-        if self.cache_enabled {
-            self.cache.write().insert(cache_key, result.clone());
-        }
-
-        tracing::debug!(
-            target: "bifrost_core::rules",
-            url = %ctx.url,
-            matched_count = result.rules.len(),
-            "rule resolution completed"
-        );
 
         result
     }
@@ -449,16 +486,23 @@ impl RulesResolver {
             .any(|skip| skip.matches(rule, &resolved_value))
     }
 
-    fn collect_active_skips(&self, ctx: &RequestContext) -> Vec<SkipRule> {
+    fn collect_active_skips_from(
+        &self,
+        candidates: &[CandidateMatch],
+        ctx: &RequestContext,
+    ) -> Vec<SkipRule> {
         let mut active_skips = Vec::new();
 
-        for rule in &self.rules {
-            if rule.protocol != Protocol::Skip || rule.is_disabled() || rule.is_negated() {
+        for candidate in candidates {
+            if candidate.is_negated {
                 continue;
             }
 
-            let match_result = rule.matcher.matches(&ctx.url, &ctx.host, &ctx.path);
-            if !match_result.matched {
+            let Some(rule) = self.rules.get(candidate.rule_index) else {
+                continue;
+            };
+
+            if rule.protocol != Protocol::Skip {
                 continue;
             }
 
@@ -554,1247 +598,4 @@ fn normalize_skip_operation(operation: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::matcher::WildcardMatcher;
-    use crate::rule::filter::{parse_filter, LineProps};
-    use std::sync::Arc;
-
-    fn create_test_rule(pattern: &str, protocol: Protocol, value: &str) -> Rule {
-        let matcher = Arc::new(WildcardMatcher::new(pattern).unwrap());
-        Rule::new(
-            pattern.to_string(),
-            matcher,
-            protocol,
-            value.to_string(),
-            format!("{} {}://{}", pattern, protocol.to_str(), value),
-        )
-    }
-
-    fn parse_test_rule(line: &str) -> Vec<Rule> {
-        crate::rule::parser::RuleParser::new()
-            .parse_line(line)
-            .unwrap_or_else(|err| panic!("failed to parse test rule `{}`: {}", line, err))
-    }
-
-    fn create_test_rule_with_filters(
-        pattern: &str,
-        protocol: Protocol,
-        value: &str,
-        include_filters: Vec<Filter>,
-        exclude_filters: Vec<Filter>,
-    ) -> Rule {
-        let matcher = Arc::new(WildcardMatcher::new(pattern).unwrap());
-        Rule::new(
-            pattern.to_string(),
-            matcher,
-            protocol,
-            value.to_string(),
-            format!("{} {}://{}", pattern, protocol.to_str(), value),
-        )
-        .with_include_filters(include_filters)
-        .with_exclude_filters(exclude_filters)
-    }
-
-    fn create_test_context(url: &str, host: &str, path: &str) -> RequestContext {
-        RequestContext::builder()
-            .url(url)
-            .host(host)
-            .hostname(host)
-            .path(path)
-            .pathname(path)
-            .build()
-    }
-
-    #[test]
-    fn test_request_context_new() {
-        let ctx = create_test_context("http://example.com/path", "example.com", "/path");
-        assert_eq!(ctx.url, "http://example.com/path");
-        assert_eq!(ctx.host, "example.com");
-        assert_eq!(ctx.path, "/path");
-    }
-
-    #[test]
-    fn test_resolved_rules_new() {
-        let result = ResolvedRules::new();
-        assert!(result.is_empty());
-        assert_eq!(result.len(), 0);
-    }
-
-    #[test]
-    fn test_resolved_rules_add() {
-        let mut result = ResolvedRules::new();
-        let rule = create_test_rule("*.example.com", Protocol::Host, "127.0.0.1");
-        let resolved = ResolvedRule::new_simple(rule, None, &HashMap::new());
-        result.add(resolved);
-
-        assert!(!result.is_empty());
-        assert_eq!(result.len(), 1);
-    }
-
-    #[test]
-    fn test_resolved_rules_get_by_protocol() {
-        let mut result = ResolvedRules::new();
-
-        let rule1 = create_test_rule("*.example.com", Protocol::Host, "127.0.0.1");
-        let rule2 = create_test_rule("*.api.com", Protocol::Proxy, "proxy:8080");
-
-        result.add(ResolvedRule::new_simple(rule1, None, &HashMap::new()));
-        result.add(ResolvedRule::new_simple(rule2, None, &HashMap::new()));
-
-        let host_rules = result.get_by_protocol(Protocol::Host);
-        assert_eq!(host_rules.len(), 1);
-
-        let proxy_rules = result.get_by_protocol(Protocol::Proxy);
-        assert_eq!(proxy_rules.len(), 1);
-    }
-
-    #[test]
-    fn test_resolved_rules_has_protocol() {
-        let mut result = ResolvedRules::new();
-        let rule = create_test_rule("*.example.com", Protocol::Host, "127.0.0.1");
-        result.add(ResolvedRule::new_simple(rule, None, &HashMap::new()));
-
-        assert!(result.has_protocol(Protocol::Host));
-        assert!(!result.has_protocol(Protocol::Proxy));
-    }
-
-    #[test]
-    fn test_rules_resolver_new() {
-        let rules = vec![
-            create_test_rule("*.example.com", Protocol::Host, "127.0.0.1"),
-            create_test_rule("example.com", Protocol::Host, "127.0.0.2"),
-        ];
-        let resolver = RulesResolver::new(rules);
-        assert_eq!(resolver.rule_count(), 2);
-    }
-
-    #[test]
-    fn test_rules_resolver_priority_sorting() {
-        let rules = vec![
-            create_test_rule("*.example.com", Protocol::Host, "127.0.0.1"),
-            create_test_rule("example.com", Protocol::Host, "127.0.0.2"),
-        ];
-        let resolver = RulesResolver::new(rules);
-        assert!(resolver.rules()[0].priority() >= resolver.rules()[1].priority());
-    }
-
-    #[test]
-    fn test_rules_resolver_resolve() {
-        let rules = vec![create_test_rule(
-            "*.example.com",
-            Protocol::Host,
-            "127.0.0.1",
-        )];
-        let resolver = RulesResolver::new(rules);
-
-        let ctx = create_test_context("http://www.example.com/path", "www.example.com", "/path");
-
-        let result = resolver.resolve(&ctx);
-        assert_eq!(result.len(), 1);
-        assert!(result.has_protocol(Protocol::Host));
-    }
-
-    #[test]
-    fn test_rules_resolver_no_match() {
-        let rules = vec![create_test_rule(
-            "*.example.com",
-            Protocol::Host,
-            "127.0.0.1",
-        )];
-        let resolver = RulesResolver::new(rules);
-
-        let ctx = create_test_context("http://www.other.com/path", "www.other.com", "/path");
-
-        let result = resolver.resolve(&ctx);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_rules_resolver_with_values() {
-        let rules = vec![create_test_rule(
-            "*.example.com",
-            Protocol::Host,
-            "${target}",
-        )];
-
-        let mut values = HashMap::new();
-        values.insert("target".to_string(), "127.0.0.1".to_string());
-
-        let resolver = RulesResolver::new(rules).with_values(values);
-
-        let ctx = create_test_context("http://www.example.com/path", "www.example.com", "/path");
-
-        let result = resolver.resolve(&ctx);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result.rules[0].resolved_value, "127.0.0.1");
-    }
-
-    #[test]
-    fn test_rules_resolver_with_value_ref() {
-        let rules = vec![create_test_rule(
-            "*.example.com",
-            Protocol::ReqHeaders,
-            "{authHeaders}",
-        )];
-
-        let mut values = HashMap::new();
-        values.insert(
-            "authHeaders".to_string(),
-            "X-Auth-Token: secret-12345".to_string(),
-        );
-
-        let resolver = RulesResolver::new(rules).with_values(values);
-
-        let ctx = create_test_context("http://www.example.com/path", "www.example.com", "/path");
-
-        let result = resolver.resolve(&ctx);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result.rules[0].resolved_value, "X-Auth-Token: secret-12345");
-    }
-
-    #[test]
-    fn test_value_ref_with_parsed_rules() {
-        use crate::parse_rules;
-
-        let rules = parse_rules("test.local reqHeaders://{customHeaders}").unwrap();
-        assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0].value, "{customHeaders}");
-
-        let mut values = HashMap::new();
-        values.insert(
-            "customHeaders".to_string(),
-            "X-Custom-Token: secret-12345".to_string(),
-        );
-
-        let resolver = RulesResolver::new(rules).with_values(values);
-
-        let ctx = RequestContext::from_url("http://test.local/api");
-
-        let result = resolver.resolve(&ctx);
-        assert_eq!(result.len(), 1);
-        assert_eq!(
-            result.rules[0].resolved_value,
-            "X-Custom-Token: secret-12345"
-        );
-    }
-
-    #[test]
-    fn test_bp_remote_url_is_preserved_as_script_reference() {
-        let rule = create_test_rule(
-            "bp.example.com",
-            Protocol::Bp,
-            "http://127.0.0.1:18080/parser.js?sha256=abc",
-        );
-        let resolver = RulesResolver::new(vec![rule]);
-        let ctx = RequestContext::from_url("http://bp.example.com/api");
-
-        let result = resolver.resolve(&ctx);
-
-        assert_eq!(
-            result.rules[0].resolved_value,
-            "http://127.0.0.1:18080/parser.js?sha256=abc"
-        );
-    }
-
-    #[test]
-    fn test_bp_value_ref_expands_profile_without_remote_fetch() {
-        let rule = create_test_rule("bp.example.com", Protocol::Bp, "{order_bp}");
-        let mut values = HashMap::new();
-        values.insert(
-            "order_bp".to_string(),
-            "build_in_bp?psm=foo.bar.order&idlSource=bam".to_string(),
-        );
-        let resolver = RulesResolver::new(vec![rule]).with_values(values);
-        let ctx = RequestContext::from_url("http://bp.example.com/api");
-
-        let result = resolver.resolve(&ctx);
-
-        assert_eq!(
-            result.rules[0].resolved_value,
-            "build_in_bp?psm=foo.bar.order&idlSource=bam"
-        );
-    }
-
-    #[test]
-    fn test_rules_resolver_add_rule() {
-        let mut resolver = RulesResolver::new(vec![]);
-        assert_eq!(resolver.rule_count(), 0);
-
-        resolver.add_rule(create_test_rule(
-            "*.example.com",
-            Protocol::Host,
-            "127.0.0.1",
-        ));
-        assert_eq!(resolver.rule_count(), 1);
-    }
-
-    #[test]
-    fn test_rules_resolver_set_value() {
-        let mut resolver = RulesResolver::new(vec![]);
-        resolver.set_value("key".to_string(), "value".to_string());
-        assert_eq!(resolver.values.get("key"), Some(&"value".to_string()));
-    }
-
-    #[test]
-    fn test_rules_resolver_cache() {
-        let rules = vec![create_test_rule(
-            "*.example.com",
-            Protocol::Host,
-            "127.0.0.1",
-        )];
-        let resolver = RulesResolver::new(rules);
-
-        let ctx = create_test_context("http://www.example.com/path", "www.example.com", "/path");
-
-        let result1 = resolver.resolve(&ctx);
-        let result2 = resolver.resolve(&ctx);
-
-        assert_eq!(result1.len(), result2.len());
-    }
-
-    #[test]
-    fn test_rules_resolver_disable_cache() {
-        let rules = vec![create_test_rule(
-            "*.example.com",
-            Protocol::Host,
-            "127.0.0.1",
-        )];
-        let resolver = RulesResolver::new(rules).disable_cache();
-
-        let ctx = create_test_context("http://www.example.com/path", "www.example.com", "/path");
-
-        let result = resolver.resolve(&ctx);
-        assert_eq!(result.len(), 1);
-    }
-
-    #[test]
-    fn test_rules_resolver_clear_cache() {
-        let rules = vec![create_test_rule(
-            "*.example.com",
-            Protocol::Host,
-            "127.0.0.1",
-        )];
-        let resolver = RulesResolver::new(rules);
-
-        let ctx = create_test_context("http://www.example.com/path", "www.example.com", "/path");
-
-        let _ = resolver.resolve(&ctx);
-        resolver.clear_cache();
-
-        let result = resolver.resolve(&ctx);
-        assert_eq!(result.len(), 1);
-    }
-
-    #[test]
-    fn test_lru_cache_eviction() {
-        let mut cache = LruCache::new(2);
-        cache.insert("key1".to_string(), ResolvedRules::new());
-        cache.insert("key2".to_string(), ResolvedRules::new());
-        let _ = cache.get("key1");
-        cache.insert("key3".to_string(), ResolvedRules::new());
-
-        assert!(cache.get("key1").is_some());
-        assert!(cache.get("key2").is_none());
-        assert!(cache.get("key3").is_some());
-    }
-
-    #[test]
-    fn test_multi_match_protocol() {
-        let rules = vec![
-            create_test_rule("*.example.com", Protocol::ReqHeaders, "header1=value1"),
-            create_test_rule("*.example.com", Protocol::ReqHeaders, "header2=value2"),
-        ];
-        let resolver = RulesResolver::new(rules);
-
-        let ctx = create_test_context("http://www.example.com/path", "www.example.com", "/path");
-
-        let result = resolver.resolve(&ctx);
-        assert_eq!(result.len(), 2);
-    }
-
-    #[test]
-    fn test_single_match_protocol() {
-        let rules = vec![
-            create_test_rule("*.example.com", Protocol::Host, "127.0.0.1"),
-            create_test_rule("*.example.com", Protocol::Host, "127.0.0.2"),
-        ];
-        let resolver = RulesResolver::new(rules);
-
-        let ctx = create_test_context("http://www.example.com/path", "www.example.com", "/path");
-
-        let result = resolver.resolve(&ctx);
-        assert_eq!(result.len(), 1);
-    }
-
-    #[test]
-    fn test_builtin_variable_expansion() {
-        let rules = vec![create_test_rule(
-            "*.example.com",
-            Protocol::Host,
-            "host-${hostname}",
-        )];
-        let resolver = RulesResolver::new(rules);
-
-        let ctx = create_test_context("http://www.example.com/path", "www.example.com", "/path");
-
-        let result = resolver.resolve(&ctx);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result.rules[0].resolved_value, "host-www.example.com");
-    }
-
-    #[test]
-    fn test_url_variable_expansion() {
-        let rules = vec![create_test_rule(
-            "*.example.com",
-            Protocol::ResBody,
-            "${url}",
-        )];
-        let resolver = RulesResolver::new(rules);
-
-        let ctx = create_test_context(
-            "http://www.example.com/api/test",
-            "www.example.com",
-            "/api/test",
-        );
-
-        let result = resolver.resolve(&ctx);
-        assert_eq!(result.len(), 1);
-        assert_eq!(
-            result.rules[0].resolved_value,
-            "http://www.example.com/api/test"
-        );
-    }
-
-    #[test]
-    fn test_path_variable_expansion() {
-        let rules = vec![create_test_rule(
-            "*.example.com",
-            Protocol::ResBody,
-            "path=${path}",
-        )];
-        let resolver = RulesResolver::new(rules);
-
-        let ctx = create_test_context(
-            "http://www.example.com/api/test?foo=bar",
-            "www.example.com",
-            "/api/test?foo=bar",
-        );
-
-        let result = resolver.resolve(&ctx);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result.rules[0].resolved_value, "path=/api/test?foo=bar");
-    }
-
-    #[test]
-    fn test_method_variable_expansion() {
-        let rules = vec![create_test_rule(
-            "*.example.com",
-            Protocol::ResBody,
-            "method=${method}",
-        )];
-        let resolver = RulesResolver::new(rules);
-
-        let ctx = RequestContext::builder()
-            .url("http://www.example.com/api")
-            .host("www.example.com")
-            .hostname("www.example.com")
-            .path("/api")
-            .pathname("/api")
-            .method("POST")
-            .build();
-
-        let result = resolver.resolve(&ctx);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result.rules[0].resolved_value, "method=POST");
-    }
-
-    #[test]
-    fn test_client_ip_variable_expansion() {
-        let rules = vec![create_test_rule(
-            "*.example.com",
-            Protocol::ResBody,
-            "client=${clientIp}",
-        )];
-        let resolver = RulesResolver::new(rules);
-
-        let ctx = RequestContext::builder()
-            .url("http://www.example.com/api")
-            .host("www.example.com")
-            .hostname("www.example.com")
-            .path("/api")
-            .pathname("/api")
-            .client_ip("192.168.1.100")
-            .build();
-
-        let result = resolver.resolve(&ctx);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result.rules[0].resolved_value, "client=192.168.1.100");
-    }
-
-    #[test]
-    fn test_header_variable_expansion() {
-        let rules = vec![create_test_rule(
-            "*.example.com",
-            Protocol::ResBody,
-            "auth=${reqHeaders.authorization}",
-        )];
-        let resolver = RulesResolver::new(rules);
-
-        let mut headers = HashMap::new();
-        headers.insert("authorization".to_string(), "Bearer token123".to_string());
-
-        let ctx = RequestContext::builder()
-            .url("http://www.example.com/api")
-            .host("www.example.com")
-            .hostname("www.example.com")
-            .path("/api")
-            .pathname("/api")
-            .req_headers(headers)
-            .build();
-
-        let result = resolver.resolve(&ctx);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result.rules[0].resolved_value, "auth=Bearer token123");
-    }
-
-    #[test]
-    fn test_cookie_variable_expansion() {
-        let rules = vec![create_test_rule(
-            "*.example.com",
-            Protocol::ResBody,
-            "session=${reqCookies.session_id}",
-        )];
-        let resolver = RulesResolver::new(rules);
-
-        let mut cookies = HashMap::new();
-        cookies.insert("session_id".to_string(), "abc123".to_string());
-
-        let ctx = RequestContext::builder()
-            .url("http://www.example.com/api")
-            .host("www.example.com")
-            .hostname("www.example.com")
-            .path("/api")
-            .pathname("/api")
-            .req_cookies(cookies)
-            .build();
-
-        let result = resolver.resolve(&ctx);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result.rules[0].resolved_value, "session=abc123");
-    }
-
-    #[test]
-    fn test_include_filter_method() {
-        let include_filters = vec![parse_filter("m:GET").unwrap()];
-        let rules = vec![create_test_rule_with_filters(
-            "*.example.com",
-            Protocol::Host,
-            "127.0.0.1",
-            include_filters,
-            vec![],
-        )];
-        let resolver = RulesResolver::new(rules);
-
-        let ctx_get = RequestContext::builder()
-            .url("http://www.example.com/api")
-            .host("www.example.com")
-            .hostname("www.example.com")
-            .path("/api")
-            .pathname("/api")
-            .method("GET")
-            .build();
-
-        let result = resolver.resolve(&ctx_get);
-        assert_eq!(result.len(), 1);
-
-        let ctx_post = RequestContext::builder()
-            .url("http://www.example.com/api")
-            .host("www.example.com")
-            .hostname("www.example.com")
-            .path("/api")
-            .pathname("/api")
-            .method("POST")
-            .build();
-
-        let result = resolver.resolve(&ctx_post);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_exclude_filter_path() {
-        let exclude_filters = vec![parse_filter("/admin/").unwrap()];
-        let rules = vec![create_test_rule_with_filters(
-            "*.example.com",
-            Protocol::Host,
-            "127.0.0.1",
-            vec![],
-            exclude_filters,
-        )];
-        let resolver = RulesResolver::new(rules);
-
-        let ctx_api = RequestContext::builder()
-            .url("http://www.example.com/api")
-            .host("www.example.com")
-            .hostname("www.example.com")
-            .path("/api")
-            .pathname("/api")
-            .build();
-
-        let result = resolver.resolve(&ctx_api);
-        assert_eq!(result.len(), 1);
-
-        let ctx_admin = RequestContext::builder()
-            .url("http://www.example.com/admin/users")
-            .host("www.example.com")
-            .hostname("www.example.com")
-            .path("/admin/users")
-            .pathname("/admin/users")
-            .build();
-
-        let result = resolver.resolve(&ctx_admin);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_exclude_filter_whistle_style_wildcard_url() {
-        let exclude_filters = vec![parse_filter("*/alice/*").unwrap()];
-        let rules = vec![create_test_rule_with_filters(
-            "*.doubao.com",
-            Protocol::Http,
-            "localhost:8080",
-            vec![],
-            exclude_filters,
-        )];
-        let resolver = RulesResolver::new(rules);
-
-        let excluded = resolver.resolve(&RequestContext::from_url(
-            "https://www.doubao.com/alice/commerce/sale/subscription/entry/config/?from=test",
-        ));
-        assert!(excluded.is_empty());
-
-        let allowed = resolver.resolve(&RequestContext::from_url(
-            "https://www.doubao.com/bob/commerce/sale/subscription/entry/config/?from=test",
-        ));
-        assert_eq!(allowed.len(), 1);
-        assert_eq!(allowed.rules[0].resolved_value, "localhost:8080");
-    }
-
-    #[test]
-    fn test_exclude_filter_whistle_style_wildcard_path_prefix() {
-        let exclude_filters = vec![parse_filter("*/api").unwrap()];
-        let rules = vec![create_test_rule_with_filters(
-            "www.example.com",
-            Protocol::Http,
-            "localhost:5173",
-            vec![],
-            exclude_filters,
-        )];
-        let resolver = RulesResolver::new(rules);
-
-        assert!(resolver
-            .resolve(&RequestContext::from_url(
-                "https://www.example.com/api/users"
-            ))
-            .is_empty());
-        assert!(resolver
-            .resolve(&RequestContext::from_url(
-                "https://www.example.com/api?debug=1"
-            ))
-            .is_empty());
-
-        let allowed = resolver.resolve(&RequestContext::from_url(
-            "https://www.example.com/apiary/users",
-        ));
-        assert_eq!(allowed.len(), 1);
-    }
-
-    #[test]
-    fn test_long_exclude_filter_chain_uses_regular_prefix_matching() {
-        let excludes = [
-            "/account/page/cooperate/qianchuan",
-            "/garrmodlistv3",
-            "/vmok-modules",
-            "/qc_main_mono",
-            "/qcServiceWorker",
-            "/promotion-v2",
-            "/product",
-            "/nbs",
-            "/finance",
-            "/creative_config",
-            "/check_login",
-            "/brand_main",
-            "/brand",
-            "/aweme",
-            "/apps",
-            "/api",
-            "/ad",
-            "/account",
-            "/_AMapService",
-            "/zhitui",
-            "/uni-prom",
-            "/trident_v2",
-            "/star",
-            "/promotion",
-            "/notify",
-            "/mp",
-            "/magic",
-            "/home",
-            "/doris/ad_v2",
-            "/doris-report",
-            "/docs",
-            "/dataV2",
-            "/creative-preview-apps",
-            "/creation",
-            "/createV2",
-            "/copilot",
-            "/cg_trade",
-            "/cf/ml",
-            "/brand_shop_window",
-            "/brand_pre_sales",
-            "/brand_pre_review",
-            "/brand_inquiry_tool",
-            "/bp",
-            "/arcosite-api",
-            "/alpha_sw",
-            "/ttwid",
-            "/webcast",
-            "/uni-creation",
-            "/support",
-            "/sta_statement",
-            "/sta_invoice",
-            "/sta_deposit",
-            "/sso",
-            "/site",
-            "/selfcreative",
-            "/rule",
-            "/risk-control",
-            "/refund",
-            "/passport",
-            "/openapi",
-            "/ocic",
-            "/mobile",
-            "/marketing",
-            "/jarvis",
-            "/im-linkchat",
-            "/help",
-            "/growth",
-            "/fund_report",
-            "/fund_refund",
-            "/fund_recharge",
-            "/ecp",
-            "/e_adv",
-            "/draft",
-            "/doushop",
-            "/credit",
-            "/community_security",
-            "/cognition",
-            "/cip_invoice",
-            "/cg_project/backend/open",
-            "/cg_detain",
-            "/cg_deposit/backend",
-            "/cg_cont",
-            "/cg_charge",
-            "/cg_cert_center/back_end",
-            "/cg_cert",
-            "/cc-external",
-            "/brand_node",
-            "/brand_fe",
-            "/board-next",
-            "/board",
-            "/app",
-            "/advocacy",
-            "/adstyle",
-            "/account_security",
-            "/account_info_help",
-            "/login",
-            "/tools",
-            "/creative",
-            "/star-pages",
-        ];
-        let filter_chain = excludes
-            .iter()
-            .map(|path| format!("excludeFilter://{}", path))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let rule_text = format!("qianchuan.jinritemai.com 10.37.102.138:8080 {filter_chain}");
-        let rules = crate::parse_rules(&rule_text).unwrap();
-        assert_eq!(rules[0].exclude_filters.len(), excludes.len());
-        let resolver = RulesResolver::new(rules);
-
-        for (idx, path) in excludes.iter().enumerate() {
-            let url = format!("https://qianchuan.jinritemai.com{}-suffix?case={idx}", path);
-            let result = resolver.resolve(&RequestContext::from_url(&url));
-            assert!(
-                result.is_empty(),
-                "excludeFilter://{path} should exclude prefix URL {url}"
-            );
-        }
-
-        let result = resolver.resolve(&RequestContext::from_url(
-            "https://qianchuan.jinritemai.com/not-listed/path?case=allowed",
-        ));
-        assert_eq!(result.len(), 1);
-        assert_eq!(result.rules[0].resolved_value, "10.37.102.138:8080");
-    }
-
-    #[test]
-    fn test_combined_include_exclude_filters() {
-        let include_filters = vec![parse_filter("m:GET,POST").unwrap()];
-        let exclude_filters = vec![parse_filter("/health/").unwrap()];
-        let rules = vec![create_test_rule_with_filters(
-            "*.example.com",
-            Protocol::Host,
-            "127.0.0.1",
-            include_filters,
-            exclude_filters,
-        )];
-        let resolver = RulesResolver::new(rules);
-
-        let ctx = RequestContext::builder()
-            .url("http://www.example.com/api")
-            .host("www.example.com")
-            .hostname("www.example.com")
-            .path("/api")
-            .pathname("/api")
-            .method("GET")
-            .build();
-
-        let result = resolver.resolve(&ctx);
-        assert_eq!(result.len(), 1);
-
-        let ctx_health = RequestContext::builder()
-            .url("http://www.example.com/health/")
-            .host("www.example.com")
-            .hostname("www.example.com")
-            .path("/health/")
-            .pathname("/health/")
-            .method("GET")
-            .build();
-
-        let result = resolver.resolve(&ctx_health);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_include_filter_header_exists() {
-        let include_filters = vec![parse_filter("h:X-Custom-Header").unwrap()];
-        let rules = vec![create_test_rule_with_filters(
-            "*.example.com",
-            Protocol::Host,
-            "127.0.0.1",
-            include_filters,
-            vec![],
-        )];
-        let resolver = RulesResolver::new(rules).disable_cache();
-
-        let ctx_with_header = RequestContext::builder()
-            .url("http://www.example.com/api")
-            .host("www.example.com")
-            .hostname("www.example.com")
-            .path("/api")
-            .pathname("/api")
-            .header("X-Custom-Header", "value")
-            .build();
-
-        let result = resolver.resolve(&ctx_with_header);
-        assert_eq!(result.len(), 1);
-
-        let ctx_without_header = RequestContext::builder()
-            .url("http://www.example.com/api")
-            .host("www.example.com")
-            .hostname("www.example.com")
-            .path("/api")
-            .pathname("/api")
-            .build();
-
-        let result = resolver.resolve(&ctx_without_header);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_include_filter_client_ip() {
-        let include_filters = vec![parse_filter("i:192.168.0.0/16").unwrap()];
-        let rules = vec![create_test_rule_with_filters(
-            "*.example.com",
-            Protocol::Host,
-            "127.0.0.1",
-            include_filters,
-            vec![],
-        )];
-        let resolver = RulesResolver::new(rules).disable_cache();
-
-        let ctx_match = RequestContext::builder()
-            .url("http://www.example.com/api")
-            .host("www.example.com")
-            .hostname("www.example.com")
-            .path("/api")
-            .pathname("/api")
-            .client_ip("192.168.1.100")
-            .build();
-
-        let result = resolver.resolve(&ctx_match);
-        assert_eq!(result.len(), 1);
-
-        let ctx_no_match = RequestContext::builder()
-            .url("http://www.example.com/api")
-            .host("www.example.com")
-            .hostname("www.example.com")
-            .path("/api")
-            .pathname("/api")
-            .client_ip("10.0.0.1")
-            .build();
-
-        let result = resolver.resolve(&ctx_no_match);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_disabled_rule() {
-        let matcher = Arc::new(WildcardMatcher::new("*.example.com").unwrap());
-        let rule = Rule::new(
-            "*.example.com".to_string(),
-            matcher,
-            Protocol::Host,
-            "127.0.0.1".to_string(),
-            "*.example.com host://127.0.0.1".to_string(),
-        )
-        .with_line_props(LineProps {
-            important: false,
-            disabled: true,
-        });
-
-        let resolver = RulesResolver::new(vec![rule]);
-
-        let ctx = create_test_context("http://www.example.com/path", "www.example.com", "/path");
-
-        let result = resolver.resolve(&ctx);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_has_response_rules_for_host_allows_explicit_domain_and_ip_scope() {
-        let mut rules = Vec::new();
-        rules.extend(parse_test_rule(
-            "tls-auto-domain.local resHeaders://X-Auto-Tls=domain",
-        ));
-        rules.extend(parse_test_rule("127.0.0.1 resHeaders://X-Auto-Tls=ip"));
-
-        let resolver = RulesResolver::new(rules);
-
-        assert!(resolver.has_response_rules_for_host("tls-auto-domain.local"));
-        assert!(resolver.has_response_rules_for_host("127.0.0.1"));
-        assert!(!resolver.has_response_rules_for_host("other.local"));
-    }
-
-    #[test]
-    fn test_has_response_rules_for_host_allows_host_scoped_wildcards() {
-        let mut rules = Vec::new();
-        rules.extend(parse_test_rule(
-            "*.tls-auto.local resHeaders://X-Auto-Tls=wildcard",
-        ));
-        rules.extend(parse_test_rule(
-            "^path.tls-auto.local/api/* resHeaders://X-Auto-Tls=path",
-        ));
-
-        let resolver = RulesResolver::new(rules);
-
-        assert!(resolver.has_response_rules_for_host("api.tls-auto.local"));
-        assert!(resolver.has_response_rules_for_host("path.tls-auto.local"));
-        assert!(!resolver.has_response_rules_for_host("tls-auto.local"));
-    }
-
-    #[test]
-    fn test_has_response_rules_for_host_rejects_pure_regex_and_wildcards() {
-        let mut rules = Vec::new();
-        rules.extend(parse_test_rule("* resHeaders://X-Auto-Tls=wildcard"));
-        rules.extend(parse_test_rule(
-            "*/api/* resHeaders://X-Auto-Tls=path-wildcard",
-        ));
-        rules.extend(parse_test_rule(
-            "/regex-auto\\.local/ resHeaders://X-Auto-Tls=regex",
-        ));
-
-        let resolver = RulesResolver::new(rules);
-
-        assert!(!resolver.has_response_rules_for_host("regex-auto.local"));
-        assert!(!resolver.has_response_rules_for_host("wildcard-auto.local"));
-    }
-
-    #[test]
-    fn test_important_priority_ordering() {
-        let matcher1 = Arc::new(WildcardMatcher::new("*.example.com").unwrap());
-        let rule1 = Rule::new(
-            "*.example.com".to_string(),
-            matcher1,
-            Protocol::Host,
-            "127.0.0.1".to_string(),
-            "*.example.com host://127.0.0.1".to_string(),
-        );
-
-        let matcher2 = Arc::new(WildcardMatcher::new("*.example.com").unwrap());
-        let rule2 = Rule::new(
-            "*.example.com".to_string(),
-            matcher2,
-            Protocol::Host,
-            "127.0.0.2".to_string(),
-            "*.example.com host://127.0.0.2".to_string(),
-        )
-        .with_line_props(LineProps {
-            important: true,
-            disabled: false,
-        });
-
-        let resolver = RulesResolver::new(vec![rule1, rule2]);
-
-        assert!(resolver.rules()[0].line_props.important);
-        assert!(resolver.rules()[0].priority() > resolver.rules()[1].priority());
-    }
-
-    #[test]
-    fn test_path_wildcard_double_star_matching() {
-        use crate::matcher::PathWildcardMatcher;
-
-        let pattern = "^path-double.local/api/**";
-        let matcher = Arc::new(PathWildcardMatcher::new(pattern).unwrap());
-
-        let rule = Rule::new(
-            pattern.to_string(),
-            matcher,
-            Protocol::Host,
-            "127.0.0.1:3000".to_string(),
-            format!("{} host://127.0.0.1:3000", pattern),
-        );
-
-        let resolver = RulesResolver::new(vec![rule]);
-        let ctx = RequestContext::from_url("http://path-double.local/api/users");
-        let result = resolver.resolve(&ctx);
-
-        assert_eq!(result.len(), 1, "Should match the path wildcard rule");
-        assert_eq!(result.rules[0].resolved_value, "127.0.0.1:3000");
-    }
-
-    #[test]
-    fn test_path_wildcard_via_rule_parser() {
-        use crate::rule::parser::RuleParser;
-
-        let rule_text = "^path-double.local/api/** http://127.0.0.1:3000";
-        let parser = RuleParser::new();
-        let rules = parser.parse_line(rule_text).expect("Failed to parse rule");
-
-        assert_eq!(rules.len(), 1, "Should parse one rule");
-
-        let resolver = RulesResolver::new(rules);
-        let ctx = RequestContext::from_url("http://path-double.local/api/users");
-        let result = resolver.resolve(&ctx);
-
-        assert_eq!(result.len(), 1, "Should match the path wildcard rule");
-    }
-
-    #[test]
-    fn test_host_rule_matches_request_with_explicit_port() {
-        use crate::rule::parser::RuleParser;
-
-        let parser = RuleParser::new();
-        let rules = parser
-            .parse_line("127.0.0.1 reqHeaders://X-UI-Rule=alpha")
-            .expect("Failed to parse rule");
-
-        let resolver = RulesResolver::new(rules);
-        let ctx = RequestContext::from_url("http://127.0.0.1:18084/rules-check");
-        let result = resolver.resolve(&ctx);
-
-        assert_eq!(
-            result.len(),
-            1,
-            "Host-only rule should match requests with an explicit port"
-        );
-        assert_eq!(result.rules[0].resolved_value, "X-UI-Rule=alpha");
-    }
-
-    #[test]
-    fn test_negated_rule_does_not_block_other_patterns() {
-        use crate::rule::parser::RuleParser;
-
-        // 否定规则不应该阻止不匹配的其他规则
-        let parser = RuleParser::new();
-        let mut rules = parser
-            .parse_line("!^path-negate.local/api/* http://127.0.0.1:3000")
-            .unwrap();
-        rules.extend(
-            parser
-                .parse_line("^path-double.local/api/** http://127.0.0.1:3000")
-                .unwrap(),
-        );
-
-        let resolver = RulesResolver::new(rules);
-
-        // 请求 path-double.local，不应该被 path-negate 的否定规则影响
-        let ctx = RequestContext::from_url("http://path-double.local/api/users");
-        let result = resolver.resolve(&ctx);
-
-        assert_eq!(result.len(), 1, "Should match path-double rule");
-        assert_eq!(
-            result.rules[0].rule.pattern, "^path-double.local/api/**",
-            "Should match the correct rule"
-        );
-    }
-
-    #[test]
-    fn test_negated_rule_blocks_matching_pattern() {
-        use crate::rule::parser::RuleParser;
-
-        // 否定规则应该阻止匹配的同协议规则
-        let parser = RuleParser::new();
-        let mut rules = parser
-            .parse_line("!^path-negate.local/api/* http://127.0.0.1:3000")
-            .unwrap();
-        rules.extend(
-            parser
-                .parse_line("^path-negate.local/api/** http://127.0.0.1:3000")
-                .unwrap(),
-        );
-
-        let resolver = RulesResolver::new(rules);
-
-        // 请求 path-negate.local，应该被否定规则阻止
-        let ctx = RequestContext::from_url("http://path-negate.local/api/users");
-        let result = resolver.resolve(&ctx);
-
-        assert_eq!(result.len(), 0, "Should be blocked by the negated rule");
-    }
-
-    #[test]
-    fn test_multiple_different_protocols_all_match() {
-        use crate::rule::parser::RuleParser;
-
-        let parser = RuleParser::new();
-        let rules = parser
-            .parse_line("test.local http://127.0.0.1:3000 resBody://{test-body}")
-            .unwrap();
-
-        assert_eq!(
-            rules.len(),
-            2,
-            "Should create 2 rules for different protocols"
-        );
-        assert_eq!(rules[0].protocol, Protocol::Http);
-        assert_eq!(rules[1].protocol, Protocol::ResBody);
-
-        let resolver = RulesResolver::new(rules);
-        let ctx = RequestContext::from_url("http://test.local/path");
-        let result = resolver.resolve(&ctx);
-
-        assert_eq!(result.len(), 2, "Both Http and ResBody rules should match");
-        assert!(result.has_protocol(Protocol::Http));
-        assert!(result.has_protocol(Protocol::ResBody));
-    }
-
-    #[test]
-    fn test_rules_resolver_skip_by_operation_allows_fallback_rule() {
-        use crate::rule::parser::RuleParser;
-
-        let parser = RuleParser::new();
-        let rules = parser
-            .parse_line(
-                "skip-operation.local http://127.0.0.1:3000 resHeaders://`X-Skip-Op:first` resHeaders://`X-Skip-Op:second` skip://operation=resHeaders://`X-Skip-Op:first`",
-            )
-            .unwrap();
-        let resolver = RulesResolver::new(rules);
-
-        let ctx = RequestContext::from_url("http://skip-operation.local/test");
-        let result = resolver.resolve(&ctx);
-        let header_rules = result.get_by_protocol(Protocol::ResHeaders);
-
-        assert_eq!(header_rules.len(), 1);
-        assert_eq!(header_rules[0].resolved_value, "X-Skip-Op:second");
-    }
-
-    #[test]
-    fn test_rules_resolver_skip_by_pattern_allows_fallback_rule() {
-        use crate::rule::parser::RuleParser;
-
-        let parser = RuleParser::new();
-        let mut rules = parser
-            .parse_line("skip-pattern.local/api/blocked http://127.0.0.1:3000 resHeaders://`X-Skip-Pattern:blocked`")
-            .unwrap();
-        rules.extend(
-            parser
-                .parse_line("skip-pattern.local/api http://127.0.0.1:3000 resHeaders://`X-Skip-Pattern:fallback`")
-                .unwrap(),
-        );
-        rules.extend(
-            parser
-                .parse_line(
-                    "skip-pattern.local/api/blocked skip://pattern=skip-pattern.local/api/blocked",
-                )
-                .unwrap(),
-        );
-        let resolver = RulesResolver::new(rules);
-
-        let ctx = RequestContext::from_url("http://skip-pattern.local/api/blocked");
-        let result = resolver.resolve(&ctx);
-        let header_rules = result.get_by_protocol(Protocol::ResHeaders);
-
-        assert_eq!(header_rules.len(), 1);
-        assert_eq!(header_rules[0].resolved_value, "X-Skip-Pattern:fallback");
-    }
-
-    #[test]
-    fn test_path_specific_rule_takes_priority_over_domain_only_rule() {
-        use crate::rule::parser::RuleParser;
-
-        let parser = RuleParser::new();
-
-        let mut rules = parser
-            .parse_line("qianchuan.jinritemai.com/ad/api/ qianchuan.jinritemai.com/ad/")
-            .unwrap();
-        rules.extend(
-            parser
-                .parse_line("qianchuan.jinritemai.com localhost:8080")
-                .unwrap(),
-        );
-
-        assert!(!rules.is_empty());
-
-        let resolver = RulesResolver::new(rules);
-
-        // With full path: more specific rule should win
-        let ctx = RequestContext::from_url("https://qianchuan.jinritemai.com/ad/api/test");
-        let result = resolver.resolve(&ctx);
-
-        let host_rules = result.get_by_protocol(Protocol::Host);
-        assert_eq!(host_rules.len(), 1);
-        assert_eq!(host_rules[0].resolved_value, "qianchuan.jinritemai.com/ad/");
-        assert_eq!(
-            host_rules[0].rule.pattern,
-            "qianchuan.jinritemai.com/ad/api/"
-        );
-    }
-
-    #[test]
-    fn test_domain_only_rule_matches_connect_without_path() {
-        use crate::rule::parser::RuleParser;
-
-        let parser = RuleParser::new();
-
-        let mut rules = parser
-            .parse_line("qianchuan.jinritemai.com/ad/api/ qianchuan.jinritemai.com/ad/")
-            .unwrap();
-        rules.extend(
-            parser
-                .parse_line("qianchuan.jinritemai.com localhost:8080")
-                .unwrap(),
-        );
-
-        let resolver = RulesResolver::new(rules);
-
-        // CONNECT phase: URL has no path — only domain-only rules match
-        let ctx = RequestContext::from_url("https://qianchuan.jinritemai.com:443");
-        let result = resolver.resolve(&ctx);
-
-        let host_rules = result.get_by_protocol(Protocol::Host);
-        assert_eq!(host_rules.len(), 1);
-        assert_eq!(host_rules[0].resolved_value, "localhost:8080");
-    }
-}
+mod tests;
