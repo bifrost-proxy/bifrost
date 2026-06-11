@@ -284,6 +284,8 @@ impl RulesResolver {
     }
 
     fn get_matcher_candidates(&self, ctx: &RequestContext) -> Vec<CandidateMatch> {
+        // The candidate cache intentionally excludes method and headers: those are
+        // request-scoped filter inputs and must be evaluated in Phase B.
         let cache_key = format!("{}|{}|{}", ctx.url, ctx.host, ctx.path);
 
         if self.cache_enabled {
@@ -301,10 +303,6 @@ impl RulesResolver {
         let mut candidates = Vec::new();
 
         for (rule_index, rule) in self.rules.iter().enumerate() {
-            if rule.is_disabled() {
-                continue;
-            }
-
             let match_result = rule.matcher.matches(&ctx.url, &ctx.host, &ctx.path);
             tracing::trace!(
                 target: "bifrost_core::rules",
@@ -359,6 +357,10 @@ impl RulesResolver {
                 continue;
             };
 
+            if rule.is_disabled() {
+                continue;
+            }
+
             if candidate.is_negated {
                 matched_protocols.insert(rule.protocol, true);
                 continue;
@@ -376,7 +378,7 @@ impl RulesResolver {
                 raw = %rule.raw,
                 file = rule.file.as_deref().unwrap_or("<unknown>"),
                 line = rule.line.unwrap_or(0),
-                "rule MATCHED"
+                "rule matcher candidate matched"
             );
 
             if !rule.include_filters.is_empty()
@@ -414,6 +416,17 @@ impl RulesResolver {
             let resolved =
                 ResolvedRule::new(rule.clone(), candidate.captures.clone(), ctx, &self.values);
             result.add(resolved);
+
+            tracing::debug!(
+                target: "bifrost_core::rules",
+                pattern = %rule.pattern,
+                protocol = %rule.protocol.to_str(),
+                value = %rule.value,
+                raw = %rule.raw,
+                file = rule.file.as_deref().unwrap_or("<unknown>"),
+                line = rule.line.unwrap_or(0),
+                "rule selected"
+            );
 
             if !rule.protocol.is_multi_match() {
                 matched_protocols.insert(rule.protocol, true);
@@ -501,6 +514,10 @@ impl RulesResolver {
             let Some(rule) = self.rules.get(candidate.rule_index) else {
                 continue;
             };
+
+            if rule.is_disabled() {
+                continue;
+            }
 
             if rule.protocol != Protocol::Skip {
                 continue;

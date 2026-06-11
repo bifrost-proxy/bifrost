@@ -46,7 +46,7 @@
 | [ci-sherpa-onnx-prebuilt.md](./ci-sherpa-onnx-prebuilt.md) | CI sherpa-onnx 预编译归档缓存 | 2 | macOS arm64 CI/Release 构建前预下载并缓存 sherpa-onnx-sys 官方归档，避免 Cargo build script 直接下载 GitHub Release asset 时被间歇性 504 阻塞 |
 | [e2e-script-startup.md](./e2e-script-startup.md) | E2E Script Startup | 2 | E2E 脚本启动 Bifrost 测试服务时默认禁用 Sync 自动登录弹窗，公共 helper 与直接启动脚本均受静态守卫覆盖；Sync 登录预检专用脚本在父环境默认禁用时仍只通过 dry-run 文件验证弹窗行为 |
 | [rule-filter-routing-diagnostics.md](./rule-filter-routing-diagnostics.md) | 规则过滤与网络包诊断 | 8 | `includeFilter:///account` 按普通前缀匹配 `/account-center`，长 `excludeFilter` 链全部按前缀生效，Whistle 风格 `excludeFilter://*/api` / `excludeFilter://*/alice/*` URL 通配符过滤可跳过当前规则，`upstreamUnsafeSsl://true` 按规则放行不安全 HTTPS 上游，Traffic 详情与 network `.bifrost` 导出保留 `actual_url`、`actual_host`、`listener_port`、`has_rule_hit` 等实际转发诊断字段，专用回归 fixture 不被通用规则 runner 误收集 |
-| [multi-demand-resolver.md](./multi-demand-resolver.md) | 多需求 Resolver 两相缓存 | 4 | 同 URL 多条 `x-tt-env-fe` header 分流规则在 resolver 候选缓存命中后仍按当前请求重新评估 filter gate，覆盖转发、请求/响应修改、状态替换和 redirect 直接代理决策 |
+| [multi-demand-resolver.md](./multi-demand-resolver.md) | 多需求 Resolver 两相缓存 | 6 | 同 URL 多条 `x-feature-env` header 分流规则在 resolver 候选缓存命中后仍按当前请求重新评估 filter gate，覆盖转发、请求/响应修改、状态替换、redirect/statusCode 直接代理决策、excludeFilter 和 skip filter |
 | [rule-tls-intercept-routing-exceptions.md](./rule-tls-intercept-routing-exceptions.md) | 规则 TLS 解包路由例外 | 7 | HTTP CONNECT 与 SOCKS5 TLS 流量中 `host://` 纯路由和 `proxy://` 纯下游代理规则不自动开启 TLS 解包，`proxy://` 会真实转发到下游代理；纯 regex / 纯 wildcard 响应规则不作为自动解包理由；明确域名内容改写类规则仍会在全局解包关闭时自动开启 TLS 解包并应用响应头，并确认 `routing_exceptions.txt` 由专项脚本覆盖、并行通用 rules runner 不误套混合规则断言 |
 
 ### Web UI 测试
