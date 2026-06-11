@@ -274,14 +274,16 @@ example.com/api/* redirect://`https://new.example.com/v2/$1`
 
 ### 协议与通配符组合
 
-通配符模式可与协议前缀组合使用：
+> ⚠️ **不要在 Wildcard 模式前加协议前缀**。协议前缀（`http://`、`https://`、`http*://`、`ws*://`、`//`）只对 Domain 和 PathWildcard（`^` 前缀）模式可靠；与 Wildcard 模式组合会出现错误行为：`http://*.example.com` / `https://*.example.com` 能匹配，但单星 `*` 会跨越 `.`，等价于 `**`（丢失单级限制）；`http*://*.example.com` / `ws*://*.example.com` **永不匹配**（静默失效）；`//*.example.com` **匹配所有 host**（过度匹配）。完整说明见 [pattern.md](../pattern.md) 的「不要在 Wildcard 模式前加协议前缀」表。
+
+需要按协议限定时：裸 Wildcard（如 `*.example.com`）已覆盖 HTTP/HTTPS；要限定单一协议或匹配 WS/WSS，请改用 Domain 模式（如 `http*://api.example.com`）或 PathWildcard（如 `^http*://example.com/api/*`）。
 
 ```bash
-# 仅匹配 HTTP 协议的通配符
-http://*.example.com host://backend.local
+# 推荐：裸 Wildcard 即覆盖 HTTP + HTTPS 的单级子域名
+*.example.com host://backend.local
 
-# 仅匹配 HTTPS 协议的通配符
-https://*.example.com host://backend.local
+# 需要协议限定时改用 Domain 模式（精确域名，非通配）
+http*://api.example.com host://backend.local
 ```
 
 ### 测试用例
@@ -309,8 +311,8 @@ https://*.example.com host://backend.local
 | 域名通配 | `$**.example.com` | `http://a.b.example.com/path` | ✅ |
 | 路径通配 | `example.com/api/*` | `http://example.com/api/users` | ✅ |
 | 嵌套路径通配 | `example.com/api/*/details` | `http://example.com/api/users/details` | ✅ |
-| 协议+通配 | `http://*.example.com` | `http://www.example.com/` | ✅ |
-| 协议+通配 | `https://*.example.com` | `https://api.example.com/` | ✅ |
+| 协议+通配（过度匹配） | `http://*.example.com` | `http://www.example.com/` | ✅（但 `*` 跨越 `.`，等价 `**`，会误命中 `http://a.b.example.com/`，不推荐写协议前缀） |
+| 协议+通配（过度匹配） | `https://*.example.com` | `https://api.example.com/` | ✅（同上，单星跨级，建议改用裸 `*.example.com`） |
 | 捕获-前缀 | `*.example.com` | `http://www.example.com/` | ✅ (captures: `www`) |
 | 捕获-后缀 | `example.*` | `http://example.com/` | ✅ (captures: `com`) |
 | 捕获-多级 | `**.example.com` | `http://a.b.c.example.com/` | ✅ (captures: `a.b.c`) |
@@ -565,28 +567,21 @@ ws*://www.example.com host://ws-backend.local
 
 ### 排除匹配
 
-使用 `!` 前缀对匹配结果取反：
+> ⚠️ **实测（bifrost 0.0.96）**：`!` 前缀的 pattern 在运行时**不会命中任何请求**，无法作为独立的路由/匹配器使用。代码层面 `!X` 形式的 `matches_host()` 始终返回 `false`（既不命中 X，也不命中非 X，且不产生捕获组），实测一条 `!keep.test statusCode://249` 规则对 `keep.test` 和 `other.test` 都不命中（两者都拿不到 249，而同写法的非取反规则 `pos.test statusCode://248` 能正常返回 248）。因此下面这类「用 `!` 排除某域名、命中其余」的写法**不生效**：
 
 ```bash
-# 排除特定域名（匹配所有非 www.example.com 的请求）
+# 反例（不生效）：单独的 ! 规则不会命中任何 host，不会转发任何请求
 !www.example.com host://127.0.0.1
-
-# 排除特定通配
 !*.example.com host://127.0.0.1
-
-# 排除路径通配
-!^example.com/api/* host://127.0.0.1
-
-# 排除特定 IP 段
 !192.168.0.0/16 host://127.0.0.1
-
-# 排除正则匹配
-!/\.css$/ host://127.0.0.1
 ```
 
-> `!` 可与所有匹配类型组合使用：域名、通配符、路径通配 `^`、正则、IP/CIDR 等。
+要从一个已命中集合中排除子集，请改用 `excludeFilter://`（见 [filters.md](./filters.md)，请求阶段的方法/路径/请求头排除实测可用）：
 
-> 注意：排除匹配的 `matches_host()` 始终返回 `false`，且不产生捕获组。
+```bash
+# svc.test 整体转发到本地，但 /account 路径排除（实测：/account 走真实后端，其余转发）
+svc.test host://127.0.0.1 excludeFilter:///account
+```
 
 ---
 
@@ -596,13 +591,13 @@ ws*://www.example.com host://ws-backend.local
 
 | 匹配类型 | 优先级 | 说明 |
 |---------|-------|------|
-| 域名 + 协议 + 端口 + 路径 | 130 | 最高优先级（如 `https://example.com:8443/api/users`） |
-| 域名 + 端口 + 路径 | 125 | |
+| 域名 + 协议 + 端口 + 路径 | 130+ | 最高优先级，随路径段数递增（如 `https://example.com:8443/api/users` 为 132） |
+| 域名 + 端口 + 路径 | 125+ | 随路径段数递增 |
 | 域名 + 协议 + 路径 | 120 | |
-| 域名 + 路径（精确匹配） | 115 | 如 `example.com/api/users` |
+| 域名 + 路径（精确匹配） | 115+ | 根路径为 115，随路径段数递增（如 `example.com/api/users` 为 117） |
 | 域名 + 协议 + 端口 | 115 | |
 | 域名 + 端口 | 110 | 如 `example.com:8080` |
-| 域名 + 路径（前缀通配） | 110 | 如 `example.com/api/*` |
+| 域名 + 路径（前缀通配） | 110+ | 根路径为 110，随路径段数递增（如 `example.com/api/*` 为 111） |
 | 域名 + 协议 | 105 | 如 `https://example.com` |
 | 精确域名 | 100 | 如 `example.com` |
 | IP 精确匹配 | 95 | 如 `192.168.1.1` |
@@ -623,7 +618,7 @@ ws*://www.example.com host://ws-backend.local
 *example*       host://catch-all.local         # 优先级 40
 *.example.com   host://general-backend.local   # 优先级 55
 www.example.com host://www-backend.local       # 优先级 100
-www.example.com/api host://api-backend.local   # 优先级 115
+www.example.com/api host://api-backend.local   # 优先级 116
 
 # 请求 www.example.com/api/users 会匹配到 api-backend.local（优先级最高）
 ```
@@ -670,5 +665,5 @@ Bifrost 按以下顺序判定匹配模式的类型：
 | `^` 多段 | `^test.com/api/**` | `http://test.com/api/a/b` | 匹配 |
 | `^` 全匹配 | `^test.com/api/***` | `http://test.com/api/a?q=1` | 匹配 |
 | 域名通配 `$` | `$test.com` | `http://test.com/any/path` | 匹配 |
-| 排除匹配 | `!test.com` | `http://other.com/` | 匹配 |
+| 排除匹配（单独使用不命中） | `!test.com` | `http://other.com/` | 不匹配 |
 | 全局匹配 | `*` | 任何 URL | 匹配 |

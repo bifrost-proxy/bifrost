@@ -257,40 +257,28 @@ example.com proxy://user:pass@proxy.com:8080
 
 ## pac
 
-使用 PAC (Proxy Auto-Config) 脚本决定路由。
+> ⚠️ **未实现**：完整的 PAC (Proxy Auto-Config) 支持尚未实现。代理**不会**拉取远程 `.pac` 文件，也**不会**执行任何 JavaScript PAC 脚本。
+
+当前 `pac://` 仅识别规则值中字面量的 `PROXY host:port`（或 `DIRECT`）字符串，并从中提取 `host:port` 作为上游；远程 `.pac` URL 和内联 JS PAC 脚本不会被拉取或执行。
 
 ### 语法
 
 ```
-pattern pac://pac_script_url
-pattern pac://{pac-script}
+pattern pac://PROXY host:port
 ```
 
 ### 示例
 
-> ⚠️ **注意**：小括号内容可以包含空格，但 PAC 脚本通常是多行 JavaScript，必须使用块变量或远程 PAC 文件。
-
 ```bash
-# 远程 PAC 文件
-* pac://http://proxy.company.com/proxy.pac
-
-# 内联 PAC 脚本（使用块变量）
-* pac://{proxy-pac}
+# 仅支持字面量 PROXY host:port，从中提取上游
+* pac://PROXY 127.0.0.1:8080
 ```
-
-块变量定义：
-
-````
-``` proxy-pac
-function FindProxyForURL(url, host) { return "PROXY proxy.com:8080"; }
-```
-````
 
 ---
 
 ## tunnel
 
-`tunnel://` 用于重定向 CONNECT 隧道目标，适合只想改隧道上游地址、不解密 HTTPS 内容的场景。若需要按 HTTPS path 匹配或改写明文内容，应使用 `tlsIntercept://` 让代理看到解密后的 HTTP 请求。
+`tunnel://` 用于重定向 CONNECT 隧道目标，适合只想改隧道上游地址、不解密 HTTPS 内容的场景。CONNECT 隧道只是其主要用途：`tunnel://` 规则同样会为匹配的明文（非 CONNECT）HTTP 请求改写上游地址，对这类请求的行为与 `host://` 相同。若需要按 HTTPS path 匹配或改写明文内容，应使用 `tlsIntercept://` 让代理看到解密后的 HTTP 请求。
 
 ### 语法
 
@@ -326,7 +314,7 @@ www.example.com host://backend.local resCors://*
 
 ## 注意事项
 
-1. **端口保留**：使用 `host` 时，原始请求的路径和查询参数会保留
+1. **路径保留**：使用 `host` 时，原始请求的路径和查询参数会保留
 2. **上游协议**：裸 `host:port` 会按 `host://` 路由，非 443/8443 端口默认使用明文 HTTP；如果目标服务在非标准端口上提供 HTTPS，必须显式写 `https://host:port`
 3. **Host 头部**：默认情况下，`Host` 头部会更新为目标主机
 4. **HTTPS 处理**：对于 HTTPS 请求，需要安装/信任 Bifrost CA 证书才能进行内容修改

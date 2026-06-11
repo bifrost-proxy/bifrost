@@ -12,7 +12,7 @@ Bifrost 支持五种 Pattern 类型，系统会按以下顺序自动检测：
 | PathWildcard | 以 `^` 开头                                 | 60-70      |
 | IP           | 符合 IPv4/IPv6/CIDR 格式                    | 70-95      |
 | Wildcard     | 包含 `*`、`?` 或以 `$` 开头                 | 40-60      |
-| Domain       | 默认类型                                    | 100-130    |
+| Domain       | 默认类型                                    | 100-133+   |
 
 所有类型均支持 `!` 前缀表示否定匹配。
 
@@ -64,6 +64,8 @@ example.com/api/*            # 匹配 /api/ 开头的所有路径
 https://example.com:8443/api # 完整匹配
 ```
 
+> ℹ️ 含 `*` 的 `example.com/api/*` 在类型检测时会被归类为 **Wildcard**（优先级约 60），而非 Domain。只有裸 `/path` 前缀形式（如 `example.com/api`）才保持为 Domain 模式。这里仅描述其运行时匹配行为（命中 `/api/users`、`/api/`，但不命中裸 `/api`）。
+
 ## IP 匹配
 
 匹配 IP 地址或 CIDR 网段。
@@ -97,6 +99,17 @@ example.*/api/*              # 域名后缀 + 路径
 $*.example.com               # 域名通配符，匹配单级子域名的所有路径
 $**.example.com              # 域名通配符，匹配多级子域名的所有路径
 ```
+
+> ⚠️ **不要在 Wildcard 模式前加协议前缀**。协议前缀（`http://`、`https://`、`http*://`、`ws*://`、`//`）只对 Domain 和 PathWildcard（`^` 前缀）模式可靠；与 Wildcard 模式组合会出现以下错误行为：
+>
+> | 写法 | 实际行为 |
+> | ---- | -------- |
+> | `*.example.com`（裸写，推荐） | 正确匹配单级子域名（HTTP + HTTPS） |
+> | `http://*.example.com` / `https://*.example.com` | 能匹配，但单星 `*` 会跨越 `.`，等价于 `**`（丢失单级限制） |
+> | `http*://*.example.com` / `ws*://*.example.com` | **永不匹配**（静默失效） |
+> | `//*.example.com` | **匹配所有 host**（过度匹配，等价于无差别命中，存在误伤风险） |
+>
+> 需要按协议限定时：裸 Wildcard 已覆盖 HTTP/HTTPS；要限定单一协议或匹配 WS/WSS，请改用 Domain 模式（如 `http*://api.example.com`）或 PathWildcard（如 `^http*://example.com/api/*`）。
 
 ## PathWildcard 匹配（`^` 前缀）
 
@@ -173,8 +186,10 @@ example.*/api/* file:///mock/$1/$2   # $1 = TLD, $2 = 路径
 ### Regex 传值
 
 ```txt
-/api\/v(\d+)\/users\/(\d+)/ reqHeaders://X-Version=$1&X-ID=$2
+/api\/v(\d+)\/users\/(\d+)/ reqHeaders://X-Version=$1 reqHeaders://X-ID=$2
 ```
+
+> `reqHeaders://` 不以 `&` 拆分多个 header：写成 `reqHeaders://X-Version=$1&X-ID=$2` 只会设置单个请求头 `X-Version: <值>&X-ID=<值>`（`&X-ID=...` 成为值的一部分）。要设置多个 header，请用多个独立的 `reqHeaders://` 操作（如上例），详见 operation.md。
 
 ## 优先级
 
@@ -182,7 +197,7 @@ example.*/api/* file:///mock/$1/$2   # $1 = TLD, $2 = 路径
 
 | 类型           | 优先级 | 说明                   |
 | -------------- | ------ | ---------------------- |
-| Domain（完整） | 130    | 协议 + 端口 + 精确路径 |
+| Domain（完整） | ≥130   | 100 基础 +5 协议 +10 端口 +（15+路径段数）精确路径 |
 | Domain（基础） | 100    | 仅域名                 |
 | IP（精确）     | 95     | 单个 IP                |
 | Regex          | 80     | 正则表达式             |
@@ -197,8 +212,10 @@ example.*/api/* file:///mock/$1/$2   # $1 = TLD, $2 = 路径
 ```txt
 example.com proxy://127.0.0.1:8080
 http*://api.example.com cache://3600
-//example.com:8*/api/* file:///mock
+example.com:8*/api/* file:///mock
 ```
+
+> 上例第三行的 `example.com:8*/api/*` 是裸 Wildcard，不要写成 `//example.com:8*/api/*`：`//` 前缀与 Wildcard 组合会匹配所有 host（见上文 Wildcard 协议前缀说明）。
 
 ### IP 匹配
 

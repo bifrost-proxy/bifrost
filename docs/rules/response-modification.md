@@ -20,6 +20,7 @@ pattern resHeaders://{varName}              # 引用内嵌值/Values（推荐）
 >
 > 1. `{name}` 是引用内嵌值的语法，不是直接定义 JSON！
 > 2. 小括号内容会作为一个整体解析，可以包含空格；多行或多个头部建议使用块变量
+> 3. 头部值中的逗号会被截断：当前解析器（内联、小括号、内嵌值三种形式一致）只保留第一个逗号之前的内容，例如 `Cache-Control: max-age=3600, public, must-revalidate` 实际只会设置 `max-age=3600`。需要携带逗号的头部值暂无可用写法。
 
 ### 基础示例
 
@@ -49,7 +50,7 @@ X-Server: bifrost
 # 添加安全头部
 www.example.com resHeaders://(X-Frame-Options: DENY)
 
-# 设置缓存控制（使用内嵌值处理逗号和空格）
+# 设置缓存控制（使用内嵌值处理空格）
 www.example.com resHeaders://{cache-headers}
 
 # 添加调试信息
@@ -96,7 +97,7 @@ www.example.com resCookies://{my-cookies}
 ### 高级选项
 
 ```bash
-# 带属性的 Cookie（使用内嵌值处理复杂内容）
+# 带属性的 Cookie（属性必须用 JSON 对象形式）
 www.example.com resCookies://{auth-cookie}
 ```
 
@@ -104,9 +105,11 @@ www.example.com resCookies://{auth-cookie}
 
 ````
 ``` auth-cookie
-auth: token123; path=/; httpOnly; secure
+{"auth": {"value": "token123", "path": "/", "httpOnly": true, "secure": true}}
 ```
 ````
+
+> ⚠️ **注意**：Cookie 属性必须使用上面的 JSON 对象形式。`name: value; attr; attr` 这种裸形式只会把整段当作 Cookie 值，其中的分号会被百分号转义为 `%3B`（例如 `auth=token123%3B path=/%3B httpOnly%3B secure`），无法生成带属性的 Cookie。
 
 ### 测试用例
 
@@ -124,11 +127,9 @@ auth: token123; path=/; httpOnly; secure
 ### 语法
 
 ```
-
-pattern resCors://\*
+pattern resCors://*
 pattern resCors://https://app.example.com
 pattern resCors://{options}
-
 ```
 
 ### 基础示例
@@ -139,10 +140,11 @@ www.example.com resCors://*
 
 # 允许特定来源
 www.example.com resCors://https://app.example.com
-
-# 允许特定来源
-www.example.com resCors://https://app.example.com
 ```
+
+> ⚠️ **关于 `resCors://<origin>` 指定字面来源**：当前实现对可解析（真实存在）的来源主机名存在异常——并不总是原样回显该字符串，可能返回 `*`、空值，甚至抓取真实站点内容作为头部值（这是一个待修复的缺陷）。在能可靠回显字面来源之前，文档与测试请使用不可解析的来源（如 `https://app.test`、`https://app.example.com`）来验证回显行为。
+
+> ⚠️ **关于 `resCors://*`**：当请求带有 `Origin` 头时，bifrost 会**回显该请求的 Origin**（而非字面 `*`），以便与凭证一起使用；只有在请求不带 `Origin` 头时才返回字面 `*`。此时 `Access-Control-Allow-Credentials` 默认即为 `true`。
 
 ### 高级选项
 
@@ -167,8 +169,9 @@ expose: X-Trace-Id
 说明：
 
 - 支持 JSON 值，也支持上面的多行 `key: value` 格式
-- `origin` 为空时默认回退为 `*`
-- `credentials` 为 `true` 时会返回 `Access-Control-Allow-Credentials: true`
+- 未配置（省略）`origin` 选项时默认回退为 `*`；显式将 `origin` 设为空值会原样输出空的 `Access-Control-Allow-Origin` 头，不会回退为 `*`
+- `credentials` 默认即为 `true`：未显式配置时也会返回 `Access-Control-Allow-Credentials: true`，需要关闭时显式设置 `credentials: false`
+- 未配置时，`methods` 默认为 `GET, POST, PUT, DELETE, OPTIONS, PATCH`，`headers` 与 `expose` 默认为 `*`
 
 ### CORS 头部映射
 
@@ -186,7 +189,7 @@ expose: X-Trace-Id
 | 测试场景     | 规则                                 | 预期                                         |
 | ------------ | ------------------------------------ | -------------------------------------------- |
 | 允许所有来源 | `test.com resCors://*`               | Access-Control-Allow-Origin: \*              |
-| 特定来源     | `test.com resCors://https://app.com` | Access-Control-Allow-Origin: https://app.com |
+| 特定来源     | `test.com resCors://https://app.test` | Access-Control-Allow-Origin: https://app.test |
 | 详细配置     | `test.com resCors://{cors-config}`   | 返回 methods / headers / max-age 等完整 CORS 头 |
 
 ---
@@ -305,9 +308,10 @@ X-Debug: true
 ### 语法
 
 ```
-pattern headerReplace://res.header_name:old_value=new_value
-pattern headerReplace://res.header_name:/regex/=replacement
+pattern headerReplace://res.header_name:old_substring=new_substring
 ```
+
+> ⚠️ **注意**：headerReplace 执行的是**字面子串替换**（str::replace），不支持正则。`pattern` 与 `replacement` 以第一个 `=` 分隔，因此 pattern 中不能包含 `=`。
 
 ### 示例
 
@@ -315,19 +319,18 @@ pattern headerReplace://res.header_name:/regex/=replacement
 # 替换 Content-Type
 www.example.com headerReplace://res.content-type:text/plain=application/json
 
-# 使用正则替换
-www.example.com headerReplace://res.server:/nginx\/\d+/=nginx/custom
-
-# 修改 Cache-Control
-www.example.com headerReplace://res.cache-control:max-age=\d+=max-age=0
+# 替换字面子串
+www.example.com headerReplace://res.server:nginx=custom-server
 ```
+
+> 若要覆盖 Cache-Control，请使用 `cache://0` / `cache://N`，而不是 headerReplace（pattern 中不能含 `=`，且不支持正则）。
 
 ### 测试用例
 
 | 测试场景 | 规则                                                      | 预期                   |
 | -------- | --------------------------------------------------------- | ---------------------- |
 | 简单替换 | `test.com headerReplace://res.server:nginx=custom`        | Server 中 nginx 被替换 |
-| 正则替换 | `test.com headerReplace://res.content-type:/\/\w+/=/json` | MIME 类型被修改        |
+| 子串替换 | `test.com headerReplace://res.content-type:json=text`     | `application/json` 变为 `application/text` |
 
 ---
 
@@ -380,8 +383,8 @@ pattern attachment://filename
 # 设置下载文件名
 www.example.com/api/export attachment://data.csv
 
-# 动态文件名（使用模板变量需要反引号）
-www.example.com/report attachment://`report_${now}.pdf`
+# 动态文件名（模板变量 ${now} 会被替换，反引号可选）
+www.example.com/report attachment://report_${now}.pdf
 ```
 
 ### 测试用例
@@ -415,6 +418,6 @@ www.example.com resCors://* includeFilter://m:OPTIONS
 ## 注意事项
 
 1. **头部覆盖**：设置已存在的头部会覆盖原值
-2. **CORS 预检**：`resCors` 会自动处理 OPTIONS 预检请求
+2. **CORS 预检**：`resCors` 只会在响应上**追加** CORS 响应头（Allow-Origin / Methods / Headers / Credentials / Expose，配置了 maxAge 时再加 Max-Age）；它**不会**自动应答 OPTIONS 预检请求——OPTIONS 仍会被转发到上游
 3. **Cookie 安全**：生产环境建议使用 `httpOnly` 和 `secure` 属性
 4. **缓存控制**：`cache://0` 会同时设置 `no-cache`, `no-store`, `must-revalidate`
