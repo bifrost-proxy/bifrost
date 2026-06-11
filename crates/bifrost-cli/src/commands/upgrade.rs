@@ -592,7 +592,7 @@ fn release_archive_ext_candidates() -> Vec<&'static str> {
 }
 
 fn validate_downloaded_archive(path: &Path, archive_ext: &str) -> Result<(), BifrostError> {
-    if cfg!(windows) || archive_ext == "zip" {
+    if archive_ext == "zip" {
         return Ok(());
     }
 
