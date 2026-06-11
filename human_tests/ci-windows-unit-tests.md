@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证 GitHub Actions `Windows Unit Tests (x86_64)` 中暴露的跨平台单元测试问题不会回归。重点覆盖 Windows 路径分隔符、Windows 缺失可执行文件错误文本、PowerShell/cmd 与 Unix shell 差异、外部 runner 的 stdin/工作目录/停止语义、TOML 中 Windows 路径转义、以及 ASR native runtime 在 Windows/Linux 不可用时的测试 gating。
+验证 GitHub Actions `Windows Unit Tests (x86_64)` 中暴露的跨平台单元测试问题不会回归。重点覆盖 Windows 路径分隔符、Windows 缺失可执行文件错误文本、PowerShell/cmd 与 Unix shell 差异、外部 runner 的 stdin/工作目录/停止语义、Agent exec_command 的默认 shell/stdin/TTY 夹具、Agent session 间接调用 exec_command 的长任务/交互夹具、Goal prompt 换行断言、AdminState 托盘 callback 单测隔离、TOML 中 Windows 路径转义、以及 ASR native runtime 在 Windows/Linux 不可用时的测试 gating。
 
 ## 前置条件
 
@@ -113,6 +113,55 @@ source ~/.zshrc && rg -n '/bin/(pwd|echo)|TEST_DATA_DIR_LOCK\.lock\(\)\.unwrap\(
 - 不再存在裸 `TEST_DATA_DIR_LOCK.lock().unwrap()`。
 - 不再存在 Windows 单测会执行到的硬编码 `/` 路径后缀断言。
 
+### TC-CWUT-07 Agent exec_command 与 Goal prompt Windows 回归
+
+操作步骤：
+
+```bash
+source ~/.zshrc && for filter in \
+  exec_command_returns_completed_output \
+  exec_command_yields_session_and_write_stdin_polls_to_exit \
+  runtime_poll_exec_session_reports_unchanged_without_model_tool_call \
+  runtime_poll_exec_session_wakes_on_output_before_deadline \
+  exec_command_background_watcher_observes_exit_before_next_poll \
+  exec_command_write_stdin_drives_pipe_process \
+  exec_command_ctrl_c_terminates_running_process \
+  exec_command_nonzero_exit_is_successful_tool_result \
+  exec_command_login_false_uses_non_login_shell_flag \
+  test_exec_command_tty_reports_isatty_true \
+  exec_command_long_task_waits_in_runtime_without_model_polling \
+  exec_command_long_task_user_message_interrupts_runtime_wait_then_continues \
+  exec_command_long_task_stall_detection_returns_control_to_model \
+  exec_command_tty_prompt_stall_returns_control_to_model_for_stdin_decision \
+  budget_limit_prompt_contains_objective_and_budget \
+  continuation_prompt_contains_remaining_tokens
+do
+  SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-agent "$filter" --lib -- --nocapture
+done
+```
+
+预期结果：
+- Windows 下 `exec_command` 默认 shell 为 PowerShell，不再回退到 CI runner 不保证存在的 `bash`。
+- 长任务、后台 watcher、stdin、Ctrl-C、非零退出码和 TTY 探针均使用平台化命令，不依赖 `/bin/sh`、Unix `sleep/printf` 或 `python3`；Windows 非零退出允许先返回 running session 后再轮询并累积输出，短命 TTY 探针重点验证 PTY 启动和 exit code。
+- Agent session 层通过模型工具调用间接触发的长任务、用户插话、stall detection、TTY prompt 测试同样使用平台化命令；Windows 非交互长任务显式走 `cmd.exe`，TTY prompt 使用 `cmd set /p`，避免 PowerShell/PTY `ReadLine()` 时序和回车语义差异导致 CI 抖动。
+- PowerShell/cmd 的 shell 参数映射有单元断言覆盖，Unix shell 继续保持 `-c` / `-lc` 行为。
+- Goal prompt 断言先归一化 CRLF/LF，Windows checkout 不会因为换行风格导致失败。
+
+### TC-CWUT-08 AdminState 托盘 callback 单测不依赖全局数据目录
+
+操作步骤：
+
+```bash
+source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin state::tests::request_tray_launch_invokes_registered_callback --lib -- --nocapture
+source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin state::tests::reconcile_socket_summary --lib -- --nocapture
+```
+
+预期结果：
+- 用例显式创建临时 `RulesStorage`，不通过 `RulesStorage::default()` 读取全局 `BIFROST_DATA_DIR`。
+- workspace 并发测试中其他用例临时设置或恢复 `BIFROST_DATA_DIR` 时，本用例仍稳定通过。
+- `request_tray_launch()` 有 callback 时返回 `true` 并调用一次，无 callback 时返回 `false`。
+- `reconcile_socket_summary_*` 用例只依赖隔离的 traffic/rules 临时目录，不受其他测试修改全局数据目录影响。
+
 ## 清理步骤
 
 本测试只运行单元测试和静态扫描；cargo 产物由常规构建缓存管理，无额外临时服务需要停止。
@@ -127,3 +176,5 @@ source ~/.zshrc && rg -n '/bin/(pwd|echo)|TEST_DATA_DIR_LOCK\.lock\(\)\.unwrap\(
 | 2026-06-11 | TC-CWUT-04 | 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin` 过滤 `request_agent_stop_stops_external_runner_by_session_key`、`schedule_external_runner_executes_from_configured_work_dir`。 | 通过，2 个 IM Gateway external runner Windows shell/stdin 回归用例均通过 |
 | 2026-06-11 | TC-CWUT-05 | 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin remote_invoke::file_access_roots::tests --lib -- --nocapture`。 | 通过，16 个 file_access_roots 用例均通过 |
 | 2026-06-11 | TC-CWUT-06 | 执行 `rg -n '/bin/(pwd\|echo)\|TEST_DATA_DIR_LOCK\.lock\(\)\.unwrap\(\)\|chatgpt_web/auth_state\.json\|ends_with\(".*\.daily/.+"\)' crates/bifrost-admin/src -g '*.rs'`。 | 通过，仅剩 `/bin/pwd` 与 `/bin/echo` 在平台分支 helper 的 Unix 分支中命中，无裸锁 unwrap、ChatGPT Web slash path 或 `.daily/...` slash suffix 断言残留 |
+| 2026-06-11 | TC-CWUT-07 | 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-agent` 过滤 `exec_command_returns_completed_output`、`exec_command_yields_session_and_write_stdin_polls_to_exit`、`runtime_poll_exec_session_reports_unchanged_without_model_tool_call`、`runtime_poll_exec_session_wakes_on_output_before_deadline`、`exec_command_background_watcher_observes_exit_before_next_poll`、`exec_command_write_stdin_drives_pipe_process`、`exec_command_ctrl_c_terminates_running_process`、`exec_command_nonzero_exit_is_successful_tool_result`、`exec_command_login_false_uses_non_login_shell_flag`、`test_exec_command_tty_reports_isatty_true`、`budget_limit_prompt_contains_objective_and_budget`、`continuation_prompt_contains_remaining_tokens`、`exec_command_long_task_waits_in_runtime_without_model_polling`、`exec_command_long_task_user_message_interrupts_runtime_wait_then_continues`、`exec_command_long_task_stall_detection_returns_control_to_model`、`exec_command_tty_prompt_stall_returns_control_to_model_for_stdin_decision`；Windows CI 失败后复跑其中 `exec_command_nonzero_exit_is_successful_tool_result`、`test_exec_command_tty_reports_isatty_true`、`exec_command_long_task_user_message_interrupts_runtime_wait_then_continues`、`exec_command_long_task_stall_detection_returns_control_to_model`、`exec_command_tty_prompt_stall_returns_control_to_model_for_stdin_decision`。 | 通过，16 个 tools/session/goal 过滤用例均通过；补充验证 PowerShell flush、非零退出轮询输出累积、Windows TTY 启动/退出码、`cmd.exe` 长任务与 `cmd /V:ON set /p` prompt 输入 |
+| 2026-06-11 | TC-CWUT-08 | 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin state::tests::request_tray_launch_invokes_registered_callback --lib -- --nocapture` 与 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin state::tests::reconcile_socket_summary --lib -- --nocapture`。 | 通过，托盘 callback 与 4 个 reconcile socket summary 单测均使用显式临时 `RulesStorage` 后稳定通过 |

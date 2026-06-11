@@ -22,6 +22,87 @@ fn count_messages_with_content(messages: &[ChatMessage], content: &str) -> usize
         .count()
 }
 
+#[cfg(not(windows))]
+fn sh_string(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(windows)]
+fn session_exec_shell() -> serde_json::Value {
+    serde_json::Value::String("cmd.exe".to_string())
+}
+
+#[cfg(not(windows))]
+fn session_exec_shell() -> serde_json::Value {
+    serde_json::Value::Null
+}
+
+#[cfg(windows)]
+fn cmd_delay(delay_ms: u64) -> String {
+    let seconds = delay_ms.saturating_add(999) / 1000;
+    let ping_count = seconds.max(1).saturating_add(1);
+    format!("ping -n {ping_count} 127.0.0.1 >NUL")
+}
+
+#[cfg(windows)]
+fn delayed_print_command(first: &str, delay_ms: u64, second: &str) -> String {
+    format!("echo {first}& {} & echo {second}", cmd_delay(delay_ms))
+}
+
+#[cfg(not(windows))]
+fn delayed_print_command(first: &str, delay_ms: u64, second: &str) -> String {
+    format!(
+        "printf %s {}; sleep {:.3}; printf %s {}",
+        sh_string(first),
+        delay_ms as f64 / 1000.0,
+        sh_string(second)
+    )
+}
+
+#[cfg(windows)]
+fn delayed_print_only_command(delay_ms: u64, output: &str) -> String {
+    format!("{} & echo {output}", cmd_delay(delay_ms))
+}
+
+#[cfg(not(windows))]
+fn delayed_print_only_command(delay_ms: u64, output: &str) -> String {
+    format!(
+        "sleep {:.3}; printf %s {}",
+        delay_ms as f64 / 1000.0,
+        sh_string(output)
+    )
+}
+
+#[cfg(windows)]
+fn print_then_long_sleep_command(output: &str) -> String {
+    format!("echo {output}& ping -n 11 127.0.0.1 >NUL")
+}
+
+#[cfg(not(windows))]
+fn print_then_long_sleep_command(output: &str) -> String {
+    format!("printf %s {}; sleep 30", sh_string(output))
+}
+
+#[cfg(windows)]
+fn tty_confirm_command() -> String {
+    r#"cmd /V:ON /C "set /P line=CONFIRM? & echo ANSWER=!line!""#.to_string()
+}
+
+#[cfg(windows)]
+fn tty_confirm_response() -> &'static str {
+    "yes\r\n"
+}
+
+#[cfg(not(windows))]
+fn tty_confirm_command() -> String {
+    "printf '%s\\n' 'CONFIRM?'; IFS= read -r line; printf 'ANSWER=%s\\n' \"$line\"".to_string()
+}
+
+#[cfg(not(windows))]
+fn tty_confirm_response() -> &'static str {
+    "yes\n"
+}
+
 #[test]
 fn test_combine_guide_messages_preserves_order() {
     let combined = combine_guide_messages(vec![
@@ -985,7 +1066,7 @@ async fn codex_parallel_tool_batch_preserves_history_order() {
     let mut session = AgentSession::new("parallel-tools");
 
     let result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(30),
         run_turn(
             &client,
             &config,
@@ -1029,10 +1110,16 @@ async fn codex_parallel_tool_batch_preserves_history_order() {
 
 #[tokio::test]
 async fn exec_command_long_task_waits_in_runtime_without_model_polling() {
+    let exec_args = serde_json::json!({
+        "cmd": delayed_print_command("start", 400, "done"),
+        "shell": session_exec_shell(),
+        "yield_time_ms": 250
+    })
+    .to_string();
     let tool_calls = vec![ToolCallMessage::function_call(
         "call-exec".to_string(),
         "exec_command".to_string(),
-        r#"{"cmd":"printf start; sleep 0.4; printf done","yield_time_ms":250}"#.to_string(),
+        exec_args,
     )];
     let (url, request_count) = counted_chat_response_url(vec![
         chat_tool_calls_response(tool_calls, 22),
@@ -1096,10 +1183,16 @@ async fn exec_command_long_task_waits_in_runtime_without_model_polling() {
 
 #[tokio::test]
 async fn exec_command_long_task_user_message_interrupts_runtime_wait_then_continues() {
+    let exec_args = serde_json::json!({
+        "cmd": delayed_print_only_command(1_500, "done"),
+        "shell": session_exec_shell(),
+        "yield_time_ms": 50
+    })
+    .to_string();
     let exec_calls = vec![ToolCallMessage::function_call(
         "call-exec".to_string(),
         "exec_command".to_string(),
-        r#"{"cmd":"sleep 0.8; printf done","yield_time_ms":50}"#.to_string(),
+        exec_args,
     )];
     let follow_up_calls = vec![ToolCallMessage::function_call(
         "call-follow-up".to_string(),
@@ -1140,7 +1233,7 @@ async fn exec_command_long_task_user_message_interrupts_runtime_wait_then_contin
 
     let request_wait_started = std::time::Instant::now();
     while request_count.load(Ordering::SeqCst) < 2
-        && request_wait_started.elapsed() < std::time::Duration::from_millis(350)
+        && request_wait_started.elapsed() < std::time::Duration::from_secs(2)
     {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
@@ -1149,7 +1242,7 @@ async fn exec_command_long_task_user_message_interrupts_runtime_wait_then_contin
         "guide message should resume the model before the long task exits"
     );
 
-    let (result, session) = tokio::time::timeout(std::time::Duration::from_secs(5), turn)
+    let (result, session) = tokio::time::timeout(std::time::Duration::from_secs(60), turn)
         .await
         .expect("turn should finish")
         .expect("turn task should not panic");
@@ -1225,10 +1318,16 @@ fn long_task_profile_intervals_are_bounded_by_profile_caps() {
 async fn exec_command_long_task_stall_detection_returns_control_to_model() {
     // Use a command that produces initial output then goes silent, with a very
     // low stall threshold (3 heartbeats) to trigger stall detection quickly.
+    let exec_args = serde_json::json!({
+        "cmd": print_then_long_sleep_command("start"),
+        "shell": session_exec_shell(),
+        "yield_time_ms": 50
+    })
+    .to_string();
     let tool_calls = vec![ToolCallMessage::function_call(
         "call-stall".to_string(),
         "exec_command".to_string(),
-        r#"{"cmd":"printf start; sleep 30","yield_time_ms":50}"#.to_string(),
+        exec_args,
     )];
     let (url, request_count) = counted_chat_response_url(vec![
         chat_tool_calls_response(tool_calls, 22),
@@ -1245,7 +1344,7 @@ async fn exec_command_long_task_stall_detection_returns_control_to_model() {
     let mut session = AgentSession::new("long-task-stall-detection");
 
     let result = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
+        std::time::Duration::from_secs(60),
         run_turn(
             &client,
             &config,
@@ -1292,15 +1391,27 @@ async fn exec_command_long_task_stall_detection_returns_control_to_model() {
 
 #[tokio::test]
 async fn exec_command_tty_prompt_stall_returns_control_to_model_for_stdin_decision() {
+    let exec_args = serde_json::json!({
+        "cmd": tty_confirm_command(),
+        "shell": session_exec_shell(),
+        "tty": true,
+        "yield_time_ms": 50
+    })
+    .to_string();
     let tool_calls = vec![ToolCallMessage::function_call(
         "call-tty".to_string(),
         "exec_command".to_string(),
-        r#"{"cmd":"python3 -u -c 'import sys; print(\"CONFIRM?\", flush=True); line=sys.stdin.readline(); print(\"ANSWER=\" + line.strip(), flush=True)'","tty":true,"yield_time_ms":50}"#.to_string(),
+        exec_args,
     )];
     let follow_up_calls = vec![ToolCallMessage::function_call(
         "call-write-stdin".to_string(),
         "write_stdin".to_string(),
-        r#"{"session_id":1,"chars":"yes\n","yield_time_ms":1000}"#.to_string(),
+        serde_json::json!({
+            "session_id": 1,
+            "chars": tty_confirm_response(),
+            "yield_time_ms": 1000
+        })
+        .to_string(),
     )];
     let final_poll_calls = vec![ToolCallMessage::function_call(
         "call-final-poll".to_string(),
@@ -1322,7 +1433,7 @@ async fn exec_command_tty_prompt_stall_returns_control_to_model_for_stdin_decisi
     let mut session = AgentSession::new("tty-prompt-stall");
 
     let result = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
+        std::time::Duration::from_secs(60),
         run_turn(
             &client,
             &config,
