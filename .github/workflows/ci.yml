@@ -1215,3 +1215,31 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
           include-hidden-files: true
+
+  test-windows-tray:
+    name: Windows Tray Tests (x86_64)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            web/pnpm-lock.yaml
+      - name: Install root dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: web
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test-windows-tray
+      - name: Run tray icon tests
+        run: cargo test -p bifrost-cli --target x86_64-pc-windows-msvc commands::tray
