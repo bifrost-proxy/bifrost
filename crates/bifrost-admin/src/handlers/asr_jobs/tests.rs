@@ -1,10 +1,16 @@
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex as StdMutex;
+    use std::sync::{Mutex as StdMutex, MutexGuard};
     use tempfile::TempDir;
 
     static TEST_DATA_DIR_LOCK: StdMutex<()> = StdMutex::new(());
+
+    fn test_data_dir_lock() -> MutexGuard<'static, ()> {
+        TEST_DATA_DIR_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     struct EnvGuard {
         previous: PathBuf,
@@ -87,7 +93,7 @@ mod tests {
 
     #[test]
     fn diarization_profile_ready_requires_real_model_files() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = test_data_dir_lock();
         let temp = tempfile::tempdir().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         let profile_dir = bifrost_storage::data_dir()
@@ -104,7 +110,7 @@ mod tests {
 
     #[test]
     fn voiceprint_enrollment_auto_prepares_default_diarization_profile() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = test_data_dir_lock();
         let temp = tempfile::tempdir().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
 
@@ -116,7 +122,7 @@ mod tests {
 
     #[test]
     fn diarization_overlap_mapping_uses_model_segments() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = test_data_dir_lock();
         let temp = tempfile::tempdir().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         let audio_dir = temp.path().join("audio");
@@ -214,9 +220,10 @@ mod tests {
         assert!(diarization_manifest_path(&task.id, &source_path, &audio_dir).is_file());
     }
 
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
     fn live_voiceprint_enrollment_writes_named_profile() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = test_data_dir_lock();
         let temp = tempfile::tempdir().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         let session = SpeakerEnrollmentSession {
@@ -254,7 +261,7 @@ mod tests {
 
     #[test]
     fn voiceprint_mapping_replaces_generated_display_name() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = test_data_dir_lock();
         let temp = tempfile::tempdir().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         std::fs::create_dir_all(voiceprint_dir()).unwrap();
@@ -307,7 +314,7 @@ mod tests {
 
     #[test]
     fn voiceprint_mapping_records_below_threshold_candidate() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = test_data_dir_lock();
         let temp = tempfile::tempdir().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         std::fs::create_dir_all(voiceprint_dir()).unwrap();
@@ -358,7 +365,7 @@ mod tests {
 
     #[test]
     fn voiceprint_mapping_uses_single_registered_self_priority() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = test_data_dir_lock();
         let temp = tempfile::tempdir().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         std::fs::create_dir_all(voiceprint_dir()).unwrap();
@@ -479,9 +486,10 @@ mod tests {
         assert!((averaged[0] - averaged[1]).abs() < 0.0001);
     }
 
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
     fn voiceprint_identity_matches_and_delete_removes_profile() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = test_data_dir_lock();
         let temp = tempfile::tempdir().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         std::fs::create_dir_all(voiceprint_dir()).unwrap();
@@ -555,9 +563,10 @@ mod tests {
         assert_eq!(response.confidence, 0.0);
     }
 
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
     fn voiceprint_identity_trims_edge_silence_before_matching() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = test_data_dir_lock();
         let temp = tempfile::tempdir().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         std::fs::create_dir_all(voiceprint_dir()).unwrap();
@@ -611,7 +620,7 @@ mod tests {
 
     #[test]
     fn voiceprint_identity_uses_sixty_percent_threshold_and_keeps_candidate_name() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = test_data_dir_lock();
         let temp = tempfile::tempdir().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         std::fs::create_dir_all(voiceprint_dir()).unwrap();
@@ -646,7 +655,7 @@ mod tests {
 
     #[test]
     fn voiceprint_identity_keeps_candidate_name_even_below_match_threshold() {
-        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _lock = test_data_dir_lock();
         let temp = tempfile::tempdir().unwrap();
         let _guard = EnvGuard::set_data_dir(temp.path());
         std::fs::create_dir_all(voiceprint_dir()).unwrap();
@@ -740,7 +749,7 @@ mod tests {
 
     #[test]
     fn task_watch_snapshot_prefers_run_progress_for_current_work() {
-        let _guard = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _guard = test_data_dir_lock();
         let temp = TempDir::new().unwrap();
         let _env = EnvGuard::set_data_dir(temp.path());
         let audio_dir = temp.path().join("audio");
@@ -833,7 +842,7 @@ mod tests {
 
     #[test]
     fn task_watch_snapshot_marks_eta_confidence_without_duration() {
-        let _guard = TEST_DATA_DIR_LOCK.lock().unwrap();
+        let _guard = test_data_dir_lock();
         let temp = TempDir::new().unwrap();
         let _env = EnvGuard::set_data_dir(temp.path());
         let task = test_directory_task("watch-empty", temp.path().to_path_buf());
@@ -1220,8 +1229,18 @@ mod tests {
 
     #[tokio::test]
     async fn abortable_command_stops_on_pause_request() {
-        let mut command = Command::new("/bin/sh");
-        command.arg("-c").arg("sleep 10");
+        let command = if cfg!(windows) {
+            let mut command = Command::new("powershell.exe");
+            command
+                .arg("-NoProfile")
+                .arg("-Command")
+                .arg("Start-Sleep -Seconds 10");
+            command
+        } else {
+            let mut command = Command::new("/bin/sh");
+            command.arg("-c").arg("sleep 10");
+            command
+        };
         let result = run_abortable_command(
             command,
             "test sleep",

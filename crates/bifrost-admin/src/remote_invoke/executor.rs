@@ -3468,6 +3468,19 @@ mod tests {
         }
     }
 
+    fn current_dir_argv() -> Vec<String> {
+        if cfg!(target_os = "windows") {
+            vec![
+                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe".to_string(),
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                "Get-Location".to_string(),
+            ]
+        } else {
+            vec!["/bin/pwd".to_string()]
+        }
+    }
+
     fn repeated_pattern_command(repetitions: usize) -> String {
         let pattern = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         if cfg!(target_os = "windows") {
@@ -4311,14 +4324,14 @@ mod tests {
             kind: super::super::types::CommandKind::ShellExec,
             policy_id: Some("full-access".to_string()),
             exec_mode: Some(ShellExecMode::ArgvExec),
-            argv: Some(vec!["/bin/pwd".to_string()]),
+            argv: Some(current_dir_argv()),
             ..Default::default()
         };
 
         let runtime = tokio::runtime::Runtime::new().expect("runtime");
         let resp = runtime
             .block_on(executor.execute(&cmd))
-            .expect("old-format full-access should execute argv_exec /bin/pwd");
+            .expect("old-format full-access should execute argv_exec");
         assert_eq!(resp.exit_code, 0, "exit_code should be 0");
         assert!(
             !resp.stdout.as_deref().unwrap_or("").trim().is_empty(),
@@ -4362,7 +4375,7 @@ mod tests {
         let argv_command = RemoteCommand {
             kind: super::super::types::CommandKind::ShellExec,
             exec_mode: Some(ShellExecMode::ArgvExec),
-            argv: Some(vec!["/bin/pwd".to_string()]),
+            argv: Some(current_dir_argv()),
             ..Default::default()
         };
         let result = executor
@@ -4503,7 +4516,7 @@ mod tests {
         let command = RemoteCommand {
             kind: super::super::types::CommandKind::ShellExec,
             exec_mode: Some(ShellExecMode::ArgvExec),
-            argv: Some(vec!["/bin/pwd".to_string()]),
+            argv: Some(current_dir_argv()),
             ..Default::default()
         };
 

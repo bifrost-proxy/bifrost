@@ -1051,6 +1051,21 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    fn missing_worker_executable() -> &'static str {
+        if cfg!(windows) {
+            r"C:\definitely\missing\bifrost-agent-worker.exe"
+        } else {
+            "/definitely/missing/bifrost-agent-worker"
+        }
+    }
+
+    fn is_missing_executable_error(error: &str) -> bool {
+        error.contains("No such file")
+            || error.contains("not found")
+            || error.contains("cannot find the path")
+            || error.contains("The system cannot find")
+    }
+
     #[test]
     fn build_run_request_uses_protocol_version_and_session() {
         let config = bifrost_agent::AgentConfig::default();
@@ -1280,7 +1295,7 @@ mod tests {
         // Force external worker mode by setting the env var
         let _guard = EnvVarGuard::set("BIFROST_FORCE_AGENT_WORKER", "1");
         // Use a non-existent executable to trigger the fallback
-        let client = AgentWorkerClient::with_executable("/nonexistent/bifrost-test-binary");
+        let client = AgentWorkerClient::with_executable(missing_worker_executable());
         let request = build_run_request(
             "test-fallback",
             "hello",
@@ -1297,7 +1312,7 @@ mod tests {
             Ok(_) => panic!("expected spawn_process to fail with missing executable"),
         };
         assert!(
-            error.contains("No such file") || error.contains("not found"),
+            is_missing_executable_error(&error),
             "expected ENOENT error, got: {error}"
         );
     }
@@ -1329,7 +1344,7 @@ mod tests {
     async fn spawn_or_fallback_fails_closed_when_forced_worker_cannot_start() {
         let _lock = crate::test_env::agent_worker_env_lock().lock().await;
         let _guard = EnvVarGuard::set("BIFROST_FORCE_AGENT_WORKER", "1");
-        let client = AgentWorkerClient::with_executable("/definitely/missing/bifrost-agent-worker");
+        let client = AgentWorkerClient::with_executable(missing_worker_executable());
         let request = build_run_request(
             "test-fail-closed",
             "hello",
@@ -1344,8 +1359,7 @@ mod tests {
             Ok(_) => panic!("missing worker executable should fail"),
         };
         assert!(
-            error.contains("agent worker process failed")
-                && (error.contains("No such file") || error.contains("not found")),
+            error.contains("agent worker process failed") && is_missing_executable_error(&error),
             "{error}"
         );
     }

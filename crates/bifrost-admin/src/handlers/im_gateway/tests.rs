@@ -124,7 +124,8 @@ pub(super) async fn chatgpt_web_startup_auth_dry_run_reports_login_prompt() {
     assert!(!status.logged_in);
     assert!(!status.opened_login);
     assert!(status.dry_run);
-    assert!(status.state_path.contains("chatgpt_web/auth_state.json"));
+    assert!(std::path::Path::new(&status.state_path)
+        .ends_with(std::path::Path::new("chatgpt_web").join("auth_state.json")));
     assert!(status
         .message
         .as_deref()

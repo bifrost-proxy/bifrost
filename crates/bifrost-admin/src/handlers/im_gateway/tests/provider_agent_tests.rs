@@ -227,8 +227,10 @@ pub(super) fn im_cwd_command_rejects_invalid_paths() {
         .expect("cwd command")
         .expect_err("relative path")
         .contains("请使用绝对路径"));
+    let missing_dir = std::env::temp_dir().join("definitely-not-exist-bifrost-cwd-test");
+    let _ = std::fs::remove_dir_all(&missing_dir);
     assert!(
-        parse_im_cwd_command("/cwd /definitely/not/exist/bifrost-cwd-test")
+        parse_im_cwd_command(&format!("/cwd \"{}\"", missing_dir.display()))
             .expect("cwd command")
             .expect_err("missing path")
             .contains("路径不存在")

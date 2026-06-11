@@ -1,0 +1,109 @@
+# CI Windows Unit Tests 真实场景测试
+
+## 功能模块说明
+
+验证 GitHub Actions `Windows Unit Tests (x86_64)` 中暴露的跨平台单元测试问题不会回归。重点覆盖 Windows 路径分隔符、Windows 缺失可执行文件错误文本、PowerShell/cmd 与 Unix shell 差异、TOML 中 Windows 路径转义、以及 ASR native runtime 在 Windows/Linux 不可用时的测试 gating。
+
+## 前置条件
+
+1. 仓库位于当前分支工作区。
+2. 每条命令前执行 `source ~/.zshrc`。
+3. 本地 macOS 只能执行跨平台和静态回归；Windows 专属运行结果以 GitHub Actions `Windows Unit Tests (x86_64)` 为最终补验。
+4. 本测试不启动 Bifrost 服务，不使用 9900，不修改系统代理。
+
+## 测试用例列表
+
+### TC-CWUT-01 ASR native runtime 测试在 Windows/Linux 不误跑
+
+操作步骤：
+
+```bash
+source ~/.zshrc && rg -n 'cfg\(all\(target_os = "macos", target_arch = "aarch64"\)\)' crates/bifrost-admin/src/handlers/asr_cli_invoke.rs crates/bifrost-admin/src/handlers/asr_jobs/tests.rs
+source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin asr_platform_support_matrix_is_apple_silicon_macos_only --lib -- --nocapture
+```
+
+预期结果：
+- 真实 ASR CLI child、live voiceprint enrollment、native speaker embedding identity 等用例只在 macOS aarch64 编译运行。
+- ASR 平台矩阵仍明确 Windows/Linux 为 unsupported。
+- 纯业务逻辑测试不被整体跳过。
+
+### TC-CWUT-02 IM Gateway Windows 路径和缺失 worker 可执行文件回归
+
+操作步骤：
+
+```bash
+source ~/.zshrc && for filter in \
+  chatgpt_web_startup_auth_dry_run_reports_login_prompt \
+  im_cwd_command_rejects_invalid_paths \
+  spawn_process_fallback_to_in_process_on_missing_executable \
+  spawn_or_fallback_fails_closed_when_forced_worker_cannot_start
+do
+  SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin "$filter" --lib -- --nocapture
+done
+```
+
+预期结果：
+- ChatGPT Web auth state path 使用 `Path::ends_with` 校验，不依赖 `/`。
+- `/cwd` 缺失路径用当前平台的绝对临时路径构造。
+- worker 缺失可执行文件断言同时接受 Unix `No such file` 和 Windows `The system cannot find...`。
+
+### TC-CWUT-03 Remote shell argv_exec Windows 可执行文件回归
+
+操作步骤：
+
+```bash
+source ~/.zshrc && for filter in \
+  test_legacy_full_access_argv_exec_actually_runs \
+  test_legacy_full_access_without_allowed_exec_modes_permits_argv \
+  test_select_policy_single_rejection_has_no_double_error_prefix \
+  test_resolve_shell_command_policy_for_grant
+do
+  SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin "$filter" --lib -- --nocapture
+done
+```
+
+预期结果：
+- Windows 下 argv_exec 测试使用 PowerShell 绝对路径，Unix 下继续使用 `/bin/pwd` 或 `/bin/echo`。
+- Full Access legacy argv_exec 真实执行用例在当前平台返回非空 stdout。
+- shell-only policy 拒绝 argv_exec 时错误不双重包裹。
+- target grant policy 选择逻辑不依赖 Unix-only executable fixture。
+
+### TC-CWUT-04 Remote file roots Windows TOML 路径转义回归
+
+操作步骤：
+
+```bash
+source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin remote_invoke::file_access_roots::tests --lib -- --nocapture
+```
+
+预期结果：
+- 测试写入 `file-access.toml` 时使用 TOML string value 生成路径字符串。
+- Windows `\\?\C:\...` 或普通 `C:\...` 路径不会因为反斜杠 escape 导致 TOML parse error。
+- add parent/child、duplicate add、list roots 等行为仍真实验证。
+
+### TC-CWUT-05 Windows Unit Tests 失败列表横向扫描
+
+操作步骤：
+
+```bash
+source ~/.zshrc && rg -n '/bin/(pwd|echo)|TEST_DATA_DIR_LOCK\.lock\(\)\.unwrap\(\)|chatgpt_web/auth_state\.json|ends_with\(".*\.daily/.+"\)' crates/bifrost-admin/src -g '*.rs'
+```
+
+预期结果：
+- 命中仅允许出现在平台分支 helper 或非 Windows 业务文本中。
+- 不再存在裸 `TEST_DATA_DIR_LOCK.lock().unwrap()`。
+- 不再存在 Windows 单测会执行到的硬编码 `/` 路径后缀断言。
+
+## 清理步骤
+
+本测试只运行单元测试和静态扫描；cargo 产物由常规构建缓存管理，无额外临时服务需要停止。
+
+## 本次执行记录
+
+| 日期 | 用例 | 执行方式 | 结果 |
+| --- | --- | --- | --- |
+| 2026-06-11 | TC-CWUT-01 | 执行 `rg -n 'cfg\(all\(target_os = "macos", target_arch = "aarch64"\)\)' crates/bifrost-admin/src/handlers/asr_cli_invoke.rs crates/bifrost-admin/src/handlers/asr_jobs/tests.rs`，命中 ASR CLI child 与 3 个 native voiceprint identity/enrollment 测试；执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin asr_platform_support_matrix_is_apple_silicon_macos_only --lib -- --nocapture`。 | 通过 |
+| 2026-06-11 | TC-CWUT-02 | 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin` 过滤 `chatgpt_web_startup_auth_dry_run_reports_login_prompt`、`im_cwd_command_rejects_invalid_paths`、`spawn_process_fallback_to_in_process_on_missing_executable`、`spawn_or_fallback_fails_closed_when_forced_worker_cannot_start`。 | 通过，4 个过滤用例均通过 |
+| 2026-06-11 | TC-CWUT-03 | 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin` 过滤 `test_legacy_full_access_argv_exec_actually_runs`、`test_legacy_full_access_without_allowed_exec_modes_permits_argv`、`test_select_policy_single_rejection_has_no_double_error_prefix`、`test_resolve_shell_command_policy_for_grant`。 | 通过，前 3 个 executor 用例与 3 个 worker policy 用例均通过 |
+| 2026-06-11 | TC-CWUT-04 | 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin remote_invoke::file_access_roots::tests --lib -- --nocapture`。 | 通过，16 个 file_access_roots 用例均通过 |
+| 2026-06-11 | TC-CWUT-05 | 执行 `rg -n '/bin/(pwd\|echo)\|TEST_DATA_DIR_LOCK\.lock\(\)\.unwrap\(\)\|chatgpt_web/auth_state\.json\|ends_with\(".*\.daily/.+"\)' crates/bifrost-admin/src -g '*.rs'`。 | 通过，仅剩 `/bin/pwd` 与 `/bin/echo` 在平台分支 helper 的 Unix 分支中命中，无裸锁 unwrap、ChatGPT Web slash path 或 `.daily/...` slash suffix 断言残留 |
