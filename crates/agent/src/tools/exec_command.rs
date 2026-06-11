@@ -1775,7 +1775,12 @@ mod tests {
         let session_id = value["session_id"].as_i64().map(|id| id.to_string());
         if let Some(session_id) = session_id {
             for _ in 0..20 {
-                if output.contains(tty_probe_expected_output()) && !value["exit_code"].is_null() {
+                #[cfg(not(windows))]
+                let probe_complete =
+                    output.contains(tty_probe_expected_output()) && !value["exit_code"].is_null();
+                #[cfg(windows)]
+                let probe_complete = !value["exit_code"].is_null();
+                if probe_complete {
                     break;
                 }
                 if !value["exit_code"].is_null() {
