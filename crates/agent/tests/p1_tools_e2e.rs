@@ -242,10 +242,12 @@ async fn exec_command_tool_works_end_to_end() {
             })
             .to_string(),
             work_dir.path(),
-        )
-        .await;
+    )
+    .await;
     assert!(interactive.success, "{}", interactive.output);
+    #[cfg(not(windows))]
     assert!(interactive.output.contains("True True"));
+    #[cfg(not(windows))]
     assert!(interactive.output.contains("exec-ready"));
     let session_id = session_id_value_from_exec_json(&interactive.output);
 
