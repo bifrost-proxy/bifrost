@@ -689,11 +689,11 @@ Windows：
 
 - 根 `Cargo.toml` 设置 `[profile.release] strip = "symbols"`，让本地 release 构建和 CI release 构建默认去除符号，降低原始 artifact 与压缩输入体积。
 - Release workflow 在 Unix/macOS package 阶段继续 best-effort 执行 `strip`，作为旧 toolchain 或 profile 未生效时的兜底。
-- Unix/macOS CLI 发布包同时产出 `.tar.xz` 与 `.tar.gz`；安装脚本在本机 `tar` 支持 xz 时优先下载 `.tar.xz`，失败或不支持时自动回退 `.tar.gz`。Windows 继续使用 `.zip`。
+- Unix/macOS CLI 发布包同时产出 `.tar.xz` 与 `.tar.gz`；安装脚本在本机 `tar` 支持 xz 时优先尝试 `.tar.xz`，但把它视为可选优化包：只有快速探测确认资产存在时才下载，缺失时立即回退 `.tar.gz`。Windows 继续使用 `.zip`。
 - 内置 `bifrost upgrade` 使用相同候选策略：Unix/macOS 优先 `.tar.xz`，下载失败、镜像不可用或本机禁用 xz 时回退 `.tar.gz`；Windows 仍只使用 `.zip`。
 - npm 发布链路继续优先读取 `.tar.gz` 生成平台 npm 包，同时支持 `.tar.xz` 作为 artifact 兜底来源；release job 在发布 npm 前强制校验 Unix/macOS 同时存在 `.tar.gz` 和 `.tar.xz`，Windows 存在 `.zip`。
 - 校验文件覆盖 `.tar.gz`、`.tar.xz` 和 `.zip`，不改变既有 Homebrew/npm 仍依赖 `.tar.gz` 的兼容路径。
-- 合入主干后 `install-binary.sh` 会立即从 main 生效，但 latest release 可能仍是旧包集合；因此 `.tar.xz` 缺失必须被视为正常兼容场景，脚本必须自动回退旧 `.tar.gz`，并继续使用旧 checksum 校验，不能让线上用户在新 release 发布前无法安装或更新。
+- 合入主干后 `install-binary.sh` 会立即从 main 生效，但 latest release 可能仍是旧包集合；因此 `.tar.xz` 缺失必须被视为正常兼容场景，脚本必须快速回退旧 `.tar.gz`，并继续使用旧 checksum 校验，不能让线上用户在新 release 发布前无法安装或更新。
 - 安装脚本的镜像探测和全镜像下载竞速必须有超时兜底，并且只等待自身启动的下载子进程；否则 `.tar.xz` 缺失或坏包这类优化路径失败，可能卡住而无法进入 `.tar.gz` 稳定路径。
 
 已评估但不默认启用的 Rust 高阶优化：

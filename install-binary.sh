@@ -889,6 +889,33 @@ download_github_file() {
     download_github_file_race "$github_path" "$output"
 }
 
+download_github_optional_file() {
+    local github_path="$1"
+    local output="$2"
+    local selected_base=""
+    local selected_label=""
+    local selected_url=""
+
+    selected_base=$(select_fastest_github_base "$github_path" 2>/dev/null || true)
+
+    if [[ -z "$selected_base" ]]; then
+        print_warning "Optional archive not available: $(basename "$github_path")"
+        return 1
+    fi
+
+    selected_label=$(mirror_display_name "$selected_base")
+    selected_url="${selected_base%/}/${github_path}"
+    print_step "Selected fastest available source: $selected_label"
+
+    if download_file "$selected_url" "$output"; then
+        print_success "Downloaded via $selected_label"
+        return 0
+    fi
+
+    print_warning "Optional archive download failed: $(basename "$github_path")"
+    return 1
+}
+
 verify_checksum() {
     local file="$1"
     local expected="$2"
@@ -1288,7 +1315,13 @@ install_binary_for_target() {
         [[ -n "$ext" ]] || continue
         local candidate_archive="bifrost-${version}-${target}.${ext}"
         local candidate_path="${REPO}/releases/download/${version}/${candidate_archive}"
-        if download_github_file "$candidate_path" "$tmpdir/$candidate_archive"; then
+        local download_ok=1
+        if [[ "$ext" != "tar.gz" && "$ext" != "zip" ]]; then
+            download_github_optional_file "$candidate_path" "$tmpdir/$candidate_archive" && download_ok=0
+        else
+            download_github_file "$candidate_path" "$tmpdir/$candidate_archive" && download_ok=0
+        fi
+        if [[ "$download_ok" == "0" ]]; then
             cli_archive="$candidate_archive"
             break
         fi

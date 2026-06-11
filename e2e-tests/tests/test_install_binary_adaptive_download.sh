@@ -210,6 +210,35 @@ test_race_download_suppresses_candidate_progress() {
         "race candidate downloads keep progress quiet"
 }
 
+test_optional_archive_skips_full_race_when_probe_fails() {
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    trap 'rm -rf "$tmpdir"' RETURN
+
+    select_fastest_github_base() {
+        return 1
+    }
+
+    download_github_file_race() {
+        touch "$tmpdir/race-called"
+        return 0
+    }
+
+    if download_github_optional_file "${REPO}/releases/download/v1.0.0/missing.tar.xz" "$tmpdir/out" >"$tmpdir/stdout" 2>"$tmpdir/stderr"; then
+        fail "optional archive fast-fails when probe fails" "optional archive unexpectedly downloaded"
+    fi
+
+    if [[ -f "$tmpdir/race-called" ]]; then
+        fail "optional archive skips full mirror race" "full mirror race should not run for an unavailable optional archive"
+    fi
+
+    if ! grep -q "Optional archive not available" "$tmpdir/stderr"; then
+        fail "optional archive reports fast fallback" "stderr: $(cat "$tmpdir/stderr")"
+    fi
+
+    pass "optional archive skips full mirror race"
+}
+
 run_case "preferred mirror ordering" test_preferred_mirror_is_first_without_duplicates
 run_case "fastest mirror probe selection" test_select_fastest_github_base_skips_unavailable_default
 run_case "latest version redirect race" test_latest_version_uses_raced_redirect_result
@@ -217,6 +246,7 @@ run_case "selected source full download" test_download_uses_selected_source_firs
 run_case "fallback full mirror race" test_download_falls_back_to_full_race_after_selected_failure
 run_case "visible curl progress" test_download_file_enables_visible_progress_by_default
 run_case "quiet race candidate progress" test_race_download_suppresses_candidate_progress
+run_case "optional archive fast fallback" test_optional_archive_skips_full_race_when_probe_fails
 
 help_output=$(bash "$PROJECT_DIR/install-binary.sh" --help)
 if [[ "$help_output" != *"BIFROST_MIRROR_PROBE_TIMEOUT"* ]]; then
