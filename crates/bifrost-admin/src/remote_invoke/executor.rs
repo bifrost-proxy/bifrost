@@ -3763,7 +3763,12 @@ mod tests {
             })
             .expect("shell exec response");
         assert_eq!(resp.exit_code, 0);
-        assert_eq!(resp.stdout.as_deref(), Some("hello remote stdin\n"));
+        assert_eq!(
+            resp.stdout
+                .as_deref()
+                .map(|stdout| stdout.replace("\r\n", "\n")),
+            Some("hello remote stdin\n".to_string())
+        );
     }
 
     #[cfg(unix)]
@@ -3875,7 +3880,7 @@ mod tests {
                         "exec_mode": "shell_text",
                         "allowed_shell_patterns": ["^(?s:.*)$"],
                         "shell": streaming_shell_program(),
-                        "max_timeout_ms": 5000
+                        "max_timeout_ms": 15000
                     }),
                 }],
                 profiles: vec![],

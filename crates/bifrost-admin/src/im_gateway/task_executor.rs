@@ -221,7 +221,7 @@ impl ImTaskExecutor {
             let mut command = TokioCommand::new("cmd");
             command
                 .arg("/C")
-                .arg(format!("call \"{}\"", script_path.replace('"', "\"\"")));
+                .arg(format!("\"{}\"", script_path.replace('"', "\"\"")));
             command
         } else {
             let mut command = TokioCommand::new("sh");
