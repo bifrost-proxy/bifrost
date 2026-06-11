@@ -3388,6 +3388,14 @@ mod tests {
         std::fs::create_dir_all(&data_dir).expect("create data dir");
         bifrost_storage::set_data_dir(data_dir);
         let store = RemoteShellStore::new().expect("remote shell store");
+        let mut metadata = serde_json::json!({
+            "exec_mode": "shell_text",
+            "allowed_shell_patterns": ["^(?s:.*)$"],
+            "max_timeout_ms": 5000
+        });
+        if let Some(shell) = simple_shell_program() {
+            metadata["shell"] = serde_json::json!(shell);
+        }
         store
             .save(&RemoteShellSet {
                 schema_version: 1,
@@ -3398,11 +3406,7 @@ mod tests {
                     description: None,
                     enabled: true,
                     profile_id: None,
-                    metadata: serde_json::json!({
-                        "exec_mode": "shell_text",
-                        "allowed_shell_patterns": ["^printf hello$"],
-                        "max_timeout_ms": 5000
-                    }),
+                    metadata,
                 }],
                 profiles: vec![],
             })
@@ -3410,10 +3414,34 @@ mod tests {
         (guard, dir)
     }
 
+    fn simple_shell_command() -> (&'static str, &'static str) {
+        if cfg!(target_os = "windows") {
+            ("[Console]::Write('hello')", "hello")
+        } else {
+            ("printf hello", "hello")
+        }
+    }
+
+    fn simple_shell_program() -> Option<&'static str> {
+        if cfg!(target_os = "windows") {
+            Some(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
+        } else {
+            None
+        }
+    }
+
+    fn stdin_shell_command() -> &'static str {
+        if cfg!(target_os = "windows") {
+            "[Console]::Out.WriteLine([Console]::In.ReadLine())"
+        } else {
+            "python3 -u -c 'import sys; print(sys.stdin.readline().strip())'"
+        }
+    }
+
     fn streaming_shell_command() -> (String, [&'static str; 2]) {
         if cfg!(target_os = "windows") {
             (
-                "[Console]::Write('first'); Start-Sleep -Milliseconds 350; [Console]::Write('second')".to_string(),
+                "[Console]::Out.Write('first'); [Console]::Out.Flush(); Start-Sleep -Milliseconds 350; [Console]::Out.Write('second'); [Console]::Out.Flush()".to_string(),
                 ["first", "second"],
             )
         } else {
@@ -3421,6 +3449,31 @@ mod tests {
                 "printf first; sleep 0.35; printf second".to_string(),
                 ["first", "second"],
             )
+        }
+    }
+
+    fn idle_sleep_command() -> &'static str {
+        if cfg!(target_os = "windows") {
+            "Start-Sleep -Seconds 5"
+        } else {
+            "sleep 5"
+        }
+    }
+
+    fn wall_clock_output_command() -> &'static str {
+        if cfg!(target_os = "windows") {
+            "for ($i = 0; $i -lt 200; $i++) { [Console]::Write('.'); Start-Sleep -Milliseconds 50 }"
+        } else {
+            "i=0; while [ $i -lt 200 ]; do printf .; sleep 0.05; i=$((i+1)); done"
+        }
+    }
+
+    fn repeated_pattern_command(repetitions: usize) -> String {
+        let pattern = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        if cfg!(target_os = "windows") {
+            format!("for ($i = 0; $i -lt {repetitions}; $i++) {{ [Console]::Write('{pattern}') }}")
+        } else {
+            format!("i=0; while [ $i -lt {repetitions} ]; do printf '{pattern}'; i=$((i+1)); done")
         }
     }
 
@@ -3639,7 +3692,7 @@ mod tests {
             kind: super::super::types::CommandKind::ShellExec,
             policy_id: Some("test-shell".to_string()),
             exec_mode: Some(ShellExecMode::ShellText),
-            command_text: Some("printf hello".to_string()),
+            command_text: Some(simple_shell_command().0.to_string()),
             ..Default::default()
         };
 
@@ -3648,7 +3701,7 @@ mod tests {
             .block_on(executor.execute(&cmd))
             .expect("shell exec response");
         assert_eq!(resp.exit_code, 0);
-        assert_eq!(resp.stdout.as_deref(), Some("hello"));
+        assert_eq!(resp.stdout.as_deref(), Some(simple_shell_command().1));
     }
 
     #[test]
@@ -3658,6 +3711,15 @@ mod tests {
         let data_dir = dir.path().join("bifrost-data");
         std::fs::create_dir_all(&data_dir).expect("create data dir");
         bifrost_storage::set_data_dir(data_dir);
+        let mut metadata = serde_json::json!({
+            "exec_mode": "shell_text",
+            "allowed_shell_patterns": ["^(?s:.*)$"],
+            "stdin_allowed": true,
+            "max_timeout_ms": 15000
+        });
+        if let Some(shell) = simple_shell_program() {
+            metadata["shell"] = serde_json::json!(shell);
+        }
         RemoteShellStore::new()
             .expect("store")
             .save(&RemoteShellSet {
@@ -3669,12 +3731,7 @@ mod tests {
                     description: None,
                     enabled: true,
                     profile_id: None,
-                    metadata: serde_json::json!({
-                        "exec_mode": "shell_text",
-                        "allowed_shell_patterns": ["^(?s:.*)$"],
-                        "stdin_allowed": true,
-                        "max_timeout_ms": 15000
-                    }),
+                    metadata,
                 }],
                 profiles: vec![],
             })
@@ -3685,9 +3742,7 @@ mod tests {
             kind: super::super::types::CommandKind::ShellExec,
             policy_id: Some("stdin-shell".to_string()),
             exec_mode: Some(ShellExecMode::ShellText),
-            command_text: Some(
-                "python3 -u -c 'import sys; print(sys.stdin.readline().strip())'".to_string(),
-            ),
+            command_text: Some(stdin_shell_command().to_string()),
             stdin_mode: Some(super::super::types::StdinMode::Stream),
             ..Default::default()
         };
@@ -4502,7 +4557,7 @@ mod tests {
             policy_id: Some("idle-test".to_string()),
             exec_mode: Some(ShellExecMode::ShellText),
             // Sleep ~5s without printing anything. Idle timeout 300ms must kill.
-            command_text: Some("sleep 5".to_string()),
+            command_text: Some(idle_sleep_command().to_string()),
             ..Default::default()
         };
 
@@ -4563,9 +4618,7 @@ mod tests {
             policy_id: Some("wall-test".to_string()),
             exec_mode: Some(ShellExecMode::ShellText),
             // Print a dot every 50ms forever -> never idle; wall-clock must trip.
-            command_text: Some(
-                "i=0; while [ $i -lt 200 ]; do printf .; sleep 0.05; i=$((i+1)); done".to_string(),
-            ),
+            command_text: Some(wall_clock_output_command().to_string()),
             timeout_ms: Some(400),
             ..Default::default()
         };
@@ -4639,10 +4692,8 @@ mod tests {
             kind: super::super::types::CommandKind::ShellExec,
             policy_id: Some("stream3b".to_string()),
             exec_mode: Some(ShellExecMode::ShellText),
-            command_text: Some(
-                // printf a 64-byte pattern 3200 times => 204_800 bytes
-                "i=0; while [ $i -lt 3200 ]; do                     printf '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';                     i=$((i+1));                 done".to_string(),
-            ),
+            // Emit a 64-byte pattern 3200 times => 204_800 bytes.
+            command_text: Some(repeated_pattern_command(3200)),
             ..Default::default()
         };
 
@@ -4761,9 +4812,7 @@ mod tests {
             kind: super::super::types::CommandKind::ShellExec,
             policy_id: Some("bp-test".to_string()),
             exec_mode: Some(ShellExecMode::ShellText),
-            command_text: Some(
-                "i=0; while [ $i -lt 64 ]; do                     printf '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';                     i=$((i+1));                 done".to_string(),
-            ),
+            command_text: Some(repeated_pattern_command(64)),
             ..Default::default()
         });
 

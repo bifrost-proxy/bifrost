@@ -530,6 +530,8 @@ jobs:
           key: cli-build-aarch64-apple-darwin
           save-if: always()
       - name: Cache sherpa-onnx archive
+        # ASR native runtime assets are supported only on Apple Silicon macOS.
+        # Windows/Linux CI must not fetch or bundle sherpa/qwen ASR artifacts.
         uses: actions/cache@v4
         with:
           path: .ci-cache/sherpa-onnx
@@ -538,6 +540,7 @@ jobs:
             sherpa-onnx-${{ hashFiles('Cargo.lock') }}-
             sherpa-onnx-
       - name: Prepare sherpa-onnx archive
+        # Keep ASR runtime preparation target-gated to aarch64-apple-darwin.
         shell: bash
         run: bash scripts/ci/prepare-sherpa-onnx-archive.sh aarch64-apple-darwin
       - name: Build CLI
@@ -773,6 +776,8 @@ jobs:
         with:
           key: e2e-aarch64-apple-darwin
       - name: Cache sherpa-onnx archive
+        # Tray smoke tests on macOS arm64 can coexist with ASR assets, but the
+        # ASR runtime remains unsupported and unprepared on Windows/Linux jobs.
         uses: actions/cache@v4
         with:
           path: .ci-cache/sherpa-onnx
@@ -781,6 +786,7 @@ jobs:
             sherpa-onnx-${{ hashFiles('Cargo.lock') }}-
             sherpa-onnx-
       - name: Prepare sherpa-onnx archive
+        # Keep ASR runtime preparation target-gated to aarch64-apple-darwin.
         shell: bash
         run: bash scripts/ci/prepare-sherpa-onnx-archive.sh aarch64-apple-darwin
       - name: Tray startup smoke test
@@ -1242,4 +1248,7 @@ jobs:
         with:
           key: test-windows
       - name: Run Windows unit tests
+        # This intentionally verifies Windows can compile/test the workspace
+        # without ASR native runtime assets; bifrost-asr full local engines are
+        # target-gated to macOS aarch64 and must stay unavailable here.
         run: cargo test --workspace --all-features --target x86_64-pc-windows-msvc
