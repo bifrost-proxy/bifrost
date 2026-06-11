@@ -770,6 +770,7 @@ pub(in crate::proxy::http) async fn apply_immediate_response_body_rules(
         .await
         .map_err(|e| BifrostError::Network(format!("Failed to read immediate response: {}", e)))?
         .to_bytes();
+    let res_ctx = ctx.with_response_data(parts.status.as_u16(), &parts.headers);
     let body_processed = apply_body_rules_preserving_encoding(
         body_bytes,
         rules,
@@ -781,7 +782,7 @@ pub(in crate::proxy::http) async fn apply_immediate_response_body_rules(
             max_decompress_output_bytes,
         },
         verbose_logging,
-        ctx,
+        &res_ctx,
     );
     let injection_result = apply_content_injection_preserving_encoding(
         body_processed.body,
@@ -2907,11 +2908,12 @@ pub async fn handle_http_request(
         .map(|_| headers_to_pairs(&res_parts.headers));
     let res_content_encoding = response_content_encoding(&res_parts);
 
+    let res_ctx = ctx.with_response_data(res_parts.status.as_u16(), &res_parts.headers);
     apply_res_rules(
         &mut res_parts,
         &resolved_rules,
         verbose_logging,
-        ctx,
+        &res_ctx,
         request_origin.as_deref(),
     );
     let output_res_content_encoding = response_content_encoding(&res_parts);
@@ -3341,7 +3343,7 @@ pub async fn handle_http_request(
                 max_decompress_output_bytes,
             },
             verbose_logging,
-            ctx,
+            &res_ctx,
         );
         let injection_result = apply_content_injection_preserving_encoding(
             body_processed.body,
@@ -3374,7 +3376,7 @@ pub async fn handle_http_request(
                         max_decompress_output_bytes,
                     },
                     verbose_logging,
-                    ctx,
+                    &res_ctx,
                 );
                 (
                     body_processed.body,
