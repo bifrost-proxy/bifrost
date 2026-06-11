@@ -57,6 +57,7 @@ tokio-tungstenite = "0.26"
 base64 = "0.22"
 ring = "0.17"
 uuid.workspace = true
+fs2 = "0.4"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.28", features = ["signal", "process", "fs"] }
@@ -70,7 +71,6 @@ windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_Fou
 
 # --- System tray helper (in-process via `bifrost __tray`) ---
 [target.'cfg(not(target_os = "linux"))'.dependencies]
-fs2 = "0.4"
 open = "5"
 arboard = "3"
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
