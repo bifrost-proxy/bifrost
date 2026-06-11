@@ -429,8 +429,13 @@ mod tests {
         // Second cancel should be no-op.
         assert!(!token.cancel());
 
-        // After grace timeout, should escalate to abort.
-        tokio::time::sleep(Duration::from_millis(60)).await;
+        // After the grace timeout the background task escalates to abort.
+        // Wait deterministically on the abort signal instead of sleeping a
+        // fixed amount, which is flaky on loaded/low-resolution-timer hosts
+        // (e.g. Windows CI runners).
+        tokio::time::timeout(Duration::from_secs(5), token.aborted())
+            .await
+            .expect("token should abort within timeout");
         assert!(token.is_aborted());
     }
 

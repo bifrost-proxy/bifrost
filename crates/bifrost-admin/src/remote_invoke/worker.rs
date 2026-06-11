@@ -4391,6 +4391,35 @@ mod tests {
         (guard, dir)
     }
 
+    fn pwd_argv_program() -> &'static str {
+        if cfg!(target_os = "windows") {
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        } else {
+            "/bin/pwd"
+        }
+    }
+
+    fn echo_argv() -> Vec<String> {
+        if cfg!(target_os = "windows") {
+            vec![
+                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe".to_string(),
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                "[Console]::Write('hello')".to_string(),
+            ]
+        } else {
+            vec!["/bin/echo".to_string(), "hello".to_string()]
+        }
+    }
+
+    fn echo_argv_program() -> &'static str {
+        if cfg!(target_os = "windows") {
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        } else {
+            "/bin/echo"
+        }
+    }
+
     #[test]
     fn remove_grant_policy_removes_exact_file_access_policy_but_keeps_fingerprint_policy() {
         let _guard = crate::remote_invoke::remote_shell_test_guard();
@@ -4831,7 +4860,7 @@ mod tests {
         let mut command = RemoteCommand {
             kind: CommandKind::ShellExec,
             exec_mode: Some(ShellExecMode::ArgvExec),
-            argv: Some(vec!["/bin/echo".to_string(), "hello".to_string()]),
+            argv: Some(echo_argv()),
             ..Default::default()
         };
         let executor = Arc::new(RemoteInvokeExecutor::new("127.0.0.1", 18080));
@@ -4855,7 +4884,7 @@ mod tests {
             kind: CommandKind::ShellExec,
             policy_id: Some("echo-argv".to_string()),
             exec_mode: Some(ShellExecMode::ArgvExec),
-            argv: Some(vec!["/bin/echo".to_string(), "hello".to_string()]),
+            argv: Some(echo_argv()),
             ..Default::default()
         };
         let executor = Arc::new(RemoteInvokeExecutor::new("127.0.0.1", 18080));
@@ -4884,7 +4913,7 @@ mod tests {
                         profile_id: None,
                         metadata: serde_json::json!({
                             "exec_mode": "argv_exec",
-                            "allowed_executables": ["/bin/echo"]
+                            "allowed_executables": [echo_argv_program()]
                         }),
                     },
                     RemoteShellPolicy {
@@ -4895,7 +4924,7 @@ mod tests {
                         profile_id: None,
                         metadata: serde_json::json!({
                             "exec_mode": "argv_exec",
-                            "allowed_executables": ["/bin/pwd"]
+                            "allowed_executables": [pwd_argv_program()]
                         }),
                     },
                 ],
@@ -4916,7 +4945,7 @@ mod tests {
         let mut command = RemoteCommand {
             kind: CommandKind::ShellExec,
             exec_mode: Some(ShellExecMode::ArgvExec),
-            argv: Some(vec!["/bin/pwd".to_string()]),
+            argv: Some(vec![pwd_argv_program().to_string()]),
             ..Default::default()
         };
         let executor = Arc::new(RemoteInvokeExecutor::new("127.0.0.1", 18080));

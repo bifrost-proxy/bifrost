@@ -147,11 +147,15 @@ impl SkillRegistry {
         }
         let inner = Arc::clone(&self.inner);
         let store = Arc::clone(&self.store);
-        let roots: Vec<PathBuf> = store
-            .roots()
-            .iter()
-            .map(|root| std::fs::canonicalize(&root.path).unwrap_or_else(|_| root.path.clone()))
-            .collect();
+        let mut roots = Vec::new();
+        for root in store.roots() {
+            roots.push(root.path.clone());
+            if let Ok(canonical) = std::fs::canonicalize(&root.path) {
+                if !roots.contains(&canonical) {
+                    roots.push(canonical);
+                }
+            }
+        }
         std::thread::Builder::new()
             .name("skill-registry-watch".to_string())
             .spawn(move || {
@@ -224,13 +228,20 @@ impl SkillRegistry {
 fn slugs_from_event_paths(roots: &[PathBuf], paths: &[PathBuf]) -> HashSet<String> {
     let mut slugs = HashSet::new();
     for path in paths {
-        let normalized_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+        let mut path_candidates = vec![path.clone()];
+        if let Ok(canonical) = std::fs::canonicalize(path) {
+            if !path_candidates.contains(&canonical) {
+                path_candidates.push(canonical);
+            }
+        }
         for root in roots {
-            if let Ok(rel) = normalized_path.strip_prefix(root) {
-                if let Some(first) = rel.components().next() {
-                    if let Some(slug) = first.as_os_str().to_str() {
-                        if !slug.is_empty() && slug != ".history" {
-                            slugs.insert(slug.to_string());
+            for candidate in &path_candidates {
+                if let Ok(rel) = candidate.strip_prefix(root) {
+                    if let Some(first) = rel.components().next() {
+                        if let Some(slug) = first.as_os_str().to_str() {
+                            if !slug.is_empty() && slug != ".history" {
+                                slugs.insert(slug.to_string());
+                            }
                         }
                     }
                 }

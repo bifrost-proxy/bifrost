@@ -68,6 +68,8 @@ node dist/cli.js -c config.yaml
 | `--port` | `-p` | `8686` | 监听端口（覆盖配置文件） |
 | `--host` | `-H` | `0.0.0.0` | 绑定地址（覆盖配置文件） |
 | `--data-dir` | `-d` | `./bifrost-sync-data` | SQLite 数据目录（覆盖配置文件） |
+| `--rate-limit-per-ip` | — | `200` | 每个 IP 每分钟全局请求数上限（覆盖配置文件） |
+| `--auth-rate-limit-per-ip` | — | `20` | 每个 IP 每分钟登录/注册请求数上限（覆盖配置文件） |
 | `--help` | `-h` | — | 显示帮助信息 |
 
 CLI 参数优先级高于配置文件，方便在不修改配置文件的情况下临时调整。
@@ -89,6 +91,8 @@ cp config.example.yaml config.yaml
 server:
   port: 8686
   host: 0.0.0.0
+  rate_limit_per_ip: 200         # 每个 IP 每分钟全局请求数上限
+  auth_rate_limit_per_ip: 20     # 每个 IP 每分钟登录/注册请求数上限
 
 # ─── Storage ────────────────────────────────────────────────
 storage:

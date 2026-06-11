@@ -952,8 +952,8 @@ mod tests {
         .expect("config");
         let parsed = parse_installed_plist(&render_launchd_plist(&config));
 
-        assert_eq!(parsed.program, Some(PathBuf::from("/tmp/bifrost")));
-        assert_eq!(parsed.data_dir, Some(PathBuf::from("/tmp/bifrost-data")));
+        assert_eq!(parsed.program, Some(config.program.clone()));
+        assert_eq!(parsed.data_dir, Some(config.data_dir.clone()));
         assert_eq!(parsed.installed_version.as_deref(), Some(CURRENT_VERSION));
         assert_eq!(parsed.run_at_load, Some(true));
         assert_eq!(parsed.keep_alive, None);

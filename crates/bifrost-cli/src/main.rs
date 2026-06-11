@@ -137,6 +137,11 @@ fn effective_log_outputs(cli: &Cli) -> Vec<LogOutput> {
 }
 
 fn main() {
+    // If invoked as the hidden tray subcommand (`bifrost __tray ...`), run the
+    // tray helper in this process and never return. Must run before clap
+    // parsing and logging init (the tray installs its own tracing subscriber).
+    commands::tray::run_if_tray_process();
+
     install_panic_hook();
     init_crypto_provider();
 
@@ -215,10 +220,16 @@ fn main() {
             cli_proxy,
             ref cli_proxy_no_proxy,
             yes,
+            #[cfg(not(target_os = "linux"))]
+            no_tray,
         }) => {
             let effective_port = port.unwrap_or(cli.port);
             let effective_host = host.clone().unwrap_or_else(|| cli.host.clone());
             let effective_socks5_port = socks5_port.or(cli.socks5_port);
+            #[cfg(not(target_os = "linux"))]
+            let no_tray_flag = no_tray;
+            #[cfg(target_os = "linux")]
+            let no_tray_flag = true;
             run_start(
                 effective_port,
                 effective_host,
@@ -252,6 +263,7 @@ fn main() {
                 cli_proxy,
                 cli_proxy_no_proxy.clone(),
                 yes,
+                no_tray_flag,
             )
         }
         Some(Commands::Stop) => run_stop(),
@@ -563,6 +575,7 @@ fn main() {
             None,
             false,
             None,
+            false,
             false,
         ),
     };

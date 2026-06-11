@@ -219,6 +219,10 @@ pub enum Commands {
 
         #[arg(short = 'y', long, help = "Automatically answer yes to prompts")]
         yes: bool,
+
+        #[cfg(not(target_os = "linux"))]
+        #[arg(long, help = "Disable tray icon helper")]
+        no_tray: bool,
     },
     #[command(about = "Stop the proxy server")]
     Stop,

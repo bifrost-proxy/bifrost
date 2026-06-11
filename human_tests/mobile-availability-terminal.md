@@ -251,6 +251,21 @@
 - WeChat、Alipay、DingTalk、Lark、QQBrowser、Samsung/Huawei/MIUI/UC/Quark/Baidu/Sogou 等常见应用或浏览器容器能展示对应 app/browser 名称。
 - 只有 UA 为空或完全无法识别时才退回 device id 或通用 `browser`，不应在有可解析 UA 时显示 `unknown`。
 
+### TC-MAT-16：前台 Ctrl-C 停止不需要额外回车
+
+**操作步骤**：
+1. 使用真实 PTY 前台启动 Bifrost；脚本会通过 `--no-system-proxy` 禁用系统代理，并通过 `BIFROST_DISABLE_TRAY=1` 禁用托盘：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" ADMIN_PORT=0 e2e-tests/tests/test_cli_foreground_ctrlc_no_enter.sh
+   ```
+2. 等待输出出现 `MOBILE AVAILABILITY CHECK`。
+3. 向前台进程发送 `Ctrl-C`，但不再向 stdin 写入回车或其它字符。
+
+**预期结果**：
+- Bifrost 在 8 秒内优雅退出，脚本输出 `PASS: foreground Ctrl-C exits without an extra Enter` 或 `PASS: foreground Ctrl-C stops without an extra Enter`。
+- 退出输出包含 `Bifrost proxy stopped.`。
+- 测试脚本在 CI 中复用外层预构建的 `BIFROST_BIN`，不重新编译 debug binary，也不使用固定端口。
+
 ## 清理步骤
 
 1. 在启动终端按 `Ctrl+C` 停止服务。
@@ -272,3 +287,7 @@
 | 2026-06-08 | TC-MAT-13 Windows CI 回归 | 针对 Windows CI 中 `admin_trust_probe_verifies_https_trust_with_current_ca` 失败补充验证：当 preferred probe port 不可用并 fallback 后，代理客户端访问 stale absolute-form direct probe URL 不应转发成 502，而应直接返回 409 `trust_probe_must_bypass_proxy`。执行 `cargo test -p bifrost-proxy test_proxy_request_to_trust_probe_direct_target_rejects_stale_probe_ports --lib` 通过；执行 `cargo run -p bifrost-e2e -- --test admin_trust_probe_verifies_https_trust_with_current_ca --test-timeout 180` 通过，日志显示 `Rejected proxy-routed availability probe`，用例 1/1 PASS | 通过 |
 | 2026-06-08 | TC-MAT-14 | 执行 `cargo test -p bifrost-admin infer_device_platform_hint_covers_common_os_browser_and_apps --lib` 和 `cargo test -p bifrost-admin recent_device_label_infers_platform_from_user_agent_when_hint_is_unknown --lib`，覆盖 macOS Edge、Windows Chrome、iOS Safari、Android WeChat、Android Samsung Browser、未知自定义 UA fallback，以及终端 label 从 `platformHint=unknown` 回退到 UA 推断 | 通过 |
 | 2026-06-10 | TC-MAT-15 create session 返回实际 probePort 回归 | 针对 main CI Windows ARM 中 `admin_trust_probe_verifies_https_trust_with_current_ca` 失败补充验证：当 `admin_port + 2` 与测试客户端本地源端口或其它 listener 冲突时，创建/复用 Availability Check session 必须先确保 probe listener 实际绑定，并把同一 host/admin port/CA 下的 active session `probePort` 写回真实端口。执行 `cargo test -p bifrost-admin update_probe_port_for_group_updates_only_matching_active_sessions --lib` 通过；执行 `cargo test -p bifrost-admin trust_probe --lib` 通过 21 个相关测试；执行 `cargo run -p bifrost-e2e -- --test admin_trust_probe_verifies_https_trust_with_current_ca --test-timeout 180` 通过，日志显示代理 absolute-form direct probe 仍返回 `trust_probe_must_bypass_proxy`，且直连 netcheck/HTTPS check 成功 | 通过 |
+| 2026-06-11 | TC-MAT-16 前台 Ctrl-C 不需要额外回车 | 针对 PR CI run `27299005413`、`27301482558` 与 `27303611971` 的 Linux shard 1 失败补充验证：失败日志显示 `test_cli_foreground_ctrlc_no_enter.sh` 在重新构建 debug binary 后耗尽 240s per-test budget、在 PTY master 读取时以 Linux EOF 语义 `OSError: [Errno 5] Input/output error` 退出，或因合并后 CLI 不再接受 `--no-tray` 而以 code 2 退出。修复脚本后执行 `BIFROST_BIN=/Users/eden/work/github/bifrost-tray-helper-design/target/debug/bifrost e2e-tests/tests/test_cli_foreground_ctrlc_no_enter.sh`，复用已有 binary、动态端口和临时数据目录，输出 `PASS: foreground Ctrl-C stops without an extra Enter` | 通过 |
+| 2026-06-11 | TC-MAT-13 probe listener 端口探测并发稳定性 | 本地 `cargo test --workspace --all-features` 首次并发执行时暴露 `probe_server_port_listening_probe_tracks_local_tcp_listener` 的负路径端口复用竞态；将负路径改为不可监听的 TCP 端口 `0` 后执行 `cargo test -p bifrost-admin handlers::trust_probe::tests::probe_server_port_listening_probe_tracks_local_tcp_listener -- --nocapture`，目标单测通过 | 通过 |
+| 2026-06-11 | TC-MAT-16 Linux CI 分片端口与 PTY EOF 回归 | 针对 PR CI run `27301482558` 的 Linux shard 1 失败补充验证：失败日志显示 `test_cli_foreground_ctrlc_no_enter.sh` 在并发 shell suite 中 1 秒内以 `OSError: [Errno 5] Input/output error` 退出，脚本当时未使用 harness 分配的 `ADMIN_PORT=18063`。修复后执行 `ADMIN_PORT=18063 SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" e2e-tests/tests/test_cli_foreground_ctrlc_no_enter.sh`，脚本复用 harness 端口并将 Linux PTY `EIO` 视为 EOF，输出 `PASS: foreground Ctrl-C stops without an extra Enter` | 通过 |
+| 2026-06-11 | TC-MAT-16 Linux CI release 参数兼容回归 | 针对 PR CI run `27303611971` 的 Linux shard 1 失败补充验证：失败日志显示预构建 release binary 对 `bifrost start --no-tray` 返回 `unexpected argument '--no-tray' found`。修复后移除 CLI flag，改用环境变量 `BIFROST_DISABLE_TRAY=1` 禁用 tray；执行 `ADMIN_PORT=18063 SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" e2e-tests/tests/test_cli_foreground_ctrlc_no_enter.sh`，输出 `PASS: foreground Ctrl-C stops without an extra Enter` | 通过 |

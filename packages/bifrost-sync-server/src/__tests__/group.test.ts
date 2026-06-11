@@ -49,7 +49,7 @@ function req(
 
 async function registerUser(userId: string, password: string): Promise<string> {
   const res = await req('POST', '/v4/sso/register', { user_id: userId, password });
-  expect(res.data.code).toBe(0);
+  expect(res.data.code, JSON.stringify(res.data)).toBe(0);
   return (res.data.data as { token: string }).token;
 }
 
@@ -60,7 +60,12 @@ beforeAll(async () => {
   fs.mkdirSync(TEST_DATA_DIR, { recursive: true });
 
   const config: SyncServerConfig = {
-    server: { port: TEST_PORT, host: '127.0.0.1' },
+    server: {
+      port: TEST_PORT,
+      host: '127.0.0.1',
+      rate_limit_per_ip: 1000,
+      auth_rate_limit_per_ip: 1000,
+    },
     storage: { type: 'sqlite', sqlite: { data_dir: TEST_DATA_DIR } },
     auth: { mode: 'password' },
   };

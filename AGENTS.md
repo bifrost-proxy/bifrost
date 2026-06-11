@@ -8,10 +8,19 @@
 
 ### 任务模式判定
 
-1. **开发模式（默认）**：用户要求实现、修复、优化、改造、补齐、提交、推送，或要求 Agent 自主完成时，必须执行本文完整开发流程。
+1. **开发模式（默认）**：用户要求实现、修复、优化、改造、补齐、提交、推送，或要求 Agent 自主完成时，必须执行本文完整开发流程；除非用户明确说“不要提交 / 不要推送 / 不用建 MR / 不用盯 CI”，否则开发完成后必须默认提交、推送、创建或更新 MR/PR，并跟进远端 CI 到全绿或给出明确阻塞归因。
 2. **检查模式（只读）**：用户明确说“仅检查 / 不要修改代码 / 只 review / 先分析”时，只能读取、运行安全检查并给出 findings；未经用户明确同意不得编辑文件、提交或推送。
-3. **CI 闭环模式**：用户要求分析 CI、修到 CI 绿、推送后盯 CI 或进入 fix-push-watch 时，必须加载 `.agents/skills/github-actions-pat/`，并按 GitHub Actions CI 分析与 fix-push-watch 闭环执行。
+3. **CI 闭环模式**：用户要求分析 CI、修到 CI 绿、推送后盯 CI、进入 fix-push-watch，或任一开发任务完成后已 push 需要默认远端 CI 看护时，必须加载 `.agents/skills/github-actions-pat/`，并按 GitHub Actions CI 分析与 fix-push-watch 闭环执行。
 4. **文档/流程变更模式**：仅修改文档、流程或测试说明时，也必须更新或创建对应 `human_tests/` 用例并真实执行；Rust 单元测试、E2E、workspace all-features 和 local-ci 可标记为“不适用”，但最终交付必须说明原因。
+
+### 默认提交、MR 与 CI 看护策略
+
+所有会修改仓库文件的开发任务都默认包含“本地验证 → 提交 → 推送 → 创建/更新 MR/PR → 远端 CI 看护”交付闭环，Agent 不得等待用户二次提醒后才执行。仅当用户明确要求只做本地修改、不要提交、不要推送、不要创建 MR/PR、不要跟进 CI，或当前任务被判定为检查模式时，才允许跳过对应动作；跳过原因必须进入最终交付。
+
+- **提交与推送**：在适用的本地关键验证通过后，必须提交本次改动并推送当前任务分支。若本地完整验证耗时很长，可先完成格式、clippy 或相关最小测试后提前推送，让远端 CI 与剩余本地验证并行；最终完成前仍必须补齐本地验证结果或明确阻塞。
+- **MR/PR 创建或更新**：如果当前分支尚无 MR/PR，必须创建 draft MR/PR 并填写目标、验证和风险；如果已有 MR/PR，必须推送到同一分支并在最终交付中给出链接。除非用户明确要求，否则不得把可交付开发停留在“本地已改好”状态。
+- **远端 CI 看护**：推送后必须获取对应 run id，并使用 `.agents/skills/github-actions-pat/` 的 fail-fast 看护流程跟进到全绿。若 CI 失败，必须按日志归因后进入 fix → push → watch 循环；只有确认失败与本次改动无关、外部依赖阻塞、权限/token 不足或用户明确叫停时，才可带证据停止。
+- **最终交付要求**：最终回复必须包含分支名、commit、MR/PR 链接、远端 CI run id 与状态；若未能完成全绿，必须列出最后一次失败 job、根因判断、已做修复和剩余阻塞。
 
 ### 任务启动与工作区隔离
 
@@ -30,6 +39,7 @@
 - **变更证据**：任务启动时的 `git status --short --branch`、worktree 使用或豁免原因、`git status --short`、`git diff`、必要的 `git diff --cached`、新增文件清单和未触碰的用户既有改动。
 - **测试证据**：单元测试、E2E、human_tests、`cargo test --workspace --all-features`、local-ci、远端 CI 的命令和结果。
 - **review 证据**：至少两轮 Review/Fix/Test 的发现、修复、复测结果。
+- **交付证据**：提交 hash、推送分支、MR/PR 链接、远端 CI run id、CI 看护结果和失败归因。
 - **边界证据**：不适用项原因、未执行项风险、临时目录清理和残余风险。
 
 ### 完成定义（Definition of Done）
@@ -41,7 +51,8 @@
 - 至少两轮 Review/Fix/Test 闭环完成；如发现问题，已继续追加轮次直到无阻塞问题。
 - 所有适用测试已真实执行并通过；不适用或未执行项有明确原因。
 - `human_tests/` 对应用例已创建或更新，并已逐条真实执行。
-- 最终交付摘要包含目标对齐、闭环记录、验证矩阵、变更范围和残余风险。
+- 除非用户明确豁免，仓库修改已提交并推送，MR/PR 已创建或更新，远端 CI 已全绿；若未全绿，必须有可核验的外部阻塞、无关失败或用户叫停证据。
+- 最终交付摘要包含目标对齐、闭环记录、验证矩阵、提交/MR/CI 状态、变更范围和残余风险。
 
 ## ⛔ 绝对禁令：human_tests 强制执行
 
@@ -83,7 +94,8 @@
    - **真实场景测试（human_tests）【必填·不可跳过】**：列出需要在 `human_tests/` 中创建或更新的测试用例文档名称及核心验证点
    - **Review/Fix/Test 第 1 轮【必填·不可跳过】**：列出本轮要复核的用户目标、修改文件、风险点、需要运行的验证命令
    - **Review/Fix/Test 第 2 轮【必填·不可跳过】**：列出修复后复查范围、覆盖缺口检查、需要复跑的测试命令
-   - **最终交付自检【必填·不可跳过】**：列出最终需要汇报的目标对齐、两轮 review、验证矩阵、未执行项及原因
+   - **提交/MR/CI 看护【必填·默认执行】**：列出计划提交的变更范围、推送分支、MR/PR 创建或更新动作、远端 CI 看护方式；若用户明确豁免，列出豁免原文和风险
+   - **最终交付自检【必填·不可跳过】**：列出最终需要汇报的目标对齐、两轮 review、验证矩阵、提交/MR/CI 状态、未执行项及原因
 
 > **强制要求**：TodoWrite 中的验证任务必须具体到可执行层面，禁止出现"编写测试"这类模糊描述。正确示例：
 > - ✅ `任务启动检查：执行 git status --short --branch，发现当前工作区已有并行修改，创建 ../bifrost-remote-status-fix worktree 后继续`
@@ -94,14 +106,15 @@
 > - ✅ `真实场景测试：在 human_tests/proxy-auth.md 中新增 TC-PA-05 用例，验证修复后的密码哈希比对逻辑`
 > - ✅ `Review/Fix/Test 第 1 轮：复读用户目标，执行 git status --short 与 git diff，review crates/bifrost-cli/src/start.rs 与新增测试，修复遗漏后运行 cargo test -p bifrost-cli port_in_use`
 > - ✅ `Review/Fix/Test 第 2 轮：复查第 1 轮修复后的 git diff、human_tests 索引和 CLI 真实输出，再复跑 cargo test -p bifrost-cli port_in_use`
-> - ✅ `最终交付自检：按目标对齐、Review/Fix/Test 两轮结果、验证矩阵、未执行项原因汇总 final`
+> - ✅ `提交/MR/CI 看护：本地关键验证通过后提交并推送 codex/xxx，创建或更新 PR，使用 github-actions-pat fail-fast 看护远端 CI 到全绿`
+> - ✅ `最终交付自检：按目标对齐、Review/Fix/Test 两轮结果、验证矩阵、提交/MR/CI 状态、未执行项原因汇总 final`
 > - ❌ `编写单元测试`
 > - ❌ `测试新功能`
 > - ❌ `执行真实场景测试`（未指明 human_tests 用例文档）
 > - ❌ `最终 review 一下`
 > - ❌ `跑一下测试`
 
-> **规划阶段自检**：如果 TodoWrite 中没有出现 `任务启动检查`、`用户目标验证清单`、`human_tests/` 相关的具体 todo 条目、两条独立的 `Review/Fix/Test 第 1 轮` / `Review/Fix/Test 第 2 轮` 任务，或没有 `最终交付自检` 条目，则规划不合格，必须补充后才能进入实现阶段。
+> **规划阶段自检**：如果 TodoWrite 中没有出现 `任务启动检查`、`用户目标验证清单`、`human_tests/` 相关的具体 todo 条目、两条独立的 `Review/Fix/Test 第 1 轮` / `Review/Fix/Test 第 2 轮` 任务、`提交/MR/CI 看护` 任务，或没有 `最终交付自检` 条目，则规划不合格，必须补充后才能进入实现阶段。
 
 ### 第二阶段：实现
 
@@ -157,25 +170,29 @@
 14. **更新文档**：如涉及新功能 / API / 配置变更，同步更新相关文档（见"文档更新要求"）
 15. **项目校验**：提交前必须执行 rust-project-validate，并至少执行一次 `cargo test --workspace --all-features`。仅文档/流程变更且未修改 Rust、WebUI、脚本、配置、协议或运行行为时，可标记为不适用，但必须在最终验证矩阵中说明原因。
 16. **本地 CI 验证（按需执行）**：提交前根据修改范围选择性执行 `scripts/ci/local-ci.sh`（详见"本地 CI 验证要求"），成本非常高昂，必须最后所有测试都完成后才能执行。仅文档/流程变更可标记为不适用，但必须说明原因。
-17. **收尾清理**：清理临时数据目录，避免资源膨胀
-18. **检查 TodoWrite**：确认所有验证任务均已标记为 completed，无遗漏
-19. **检查用户目标验证清单（强制门禁）**：逐项确认所有 `必须实现`、`必须不破坏`、`必须真实验证`、`必须交付` 条目均已完成或明确阻塞原因。
-20. **检查 Review/Fix/Test 闭环（强制门禁）**：逐项确认以下所有条件，任一不满足则任务不得标记为完成：
+17. **提交并推送（默认交付门禁）**：除非用户明确豁免，必须在本地关键验证通过后执行 `git commit` 和 `git push`，并记录提交 hash 与推送分支。若完整本地验证耗时较长，可先完成最小关键验证后提前推送，让远端 CI 并行运行；最终完成前必须补齐剩余本地验证或说明阻塞。
+18. **创建或更新 MR/PR（默认交付门禁）**：除非用户明确豁免，必须确认当前分支有对应 MR/PR；没有则创建 draft MR/PR，已有则更新同一 MR/PR，并在证据台账记录链接。
+19. **远端 CI 看护（默认交付门禁）**：推送后必须加载 `.agents/skills/github-actions-pat/`，获取对应 CI run id，执行 fail-fast 看护；失败时进入 fix → push → watch 循环，直到 CI 全绿、确认失败无关/外部阻塞，或用户明确叫停。
+20. **收尾清理**：清理临时数据目录，避免资源膨胀
+21. **检查 TodoWrite**：确认所有验证任务均已标记为 completed，无遗漏
+22. **检查用户目标验证清单（强制门禁）**：逐项确认所有 `必须实现`、`必须不破坏`、`必须真实验证`、`必须交付` 条目均已完成或明确阻塞原因。
+23. **检查 Review/Fix/Test 闭环（强制门禁）**：逐项确认以下所有条件，任一不满足则任务不得标记为完成：
     - [ ] 已完成第 1 轮目标复核、代码 review、问题修复、测试运行、结果复盘
     - [ ] 已完成第 2 轮目标复核、代码 review、问题修复、测试运行、结果复盘
     - [ ] 两轮都已执行 `git status --short`、`git diff` 和必要的 `git diff --cached`
     - [ ] 两轮中发现的所有阻塞问题均已修复，相关测试均已复跑通过
     - [ ] 如果第 2 轮仍发现问题，已追加第 3 轮或更多轮次直到无阻塞问题
-21. **检查 human_tests（强制门禁）**：逐项确认以下所有条件，任一不满足则任务不得标记为完成：
+24. **检查 human_tests（强制门禁）**：逐项确认以下所有条件，任一不满足则任务不得标记为完成：
     - [ ] `human_tests/` 下对应功能的测试用例文档已创建或更新
     - [ ] 文档中每个用例都已真实执行（不是跳过、不是假设通过）
     - [ ] 每个用例的实际结果与预期结果一致
     - [ ] `human_tests/readme.md` 索引表已同步更新
     - [ ] 如果是 Bug 修复/漏洞修复，文档中包含专门的回归验证用例
-22. **最终交付自检模板（强制门禁）**：最终回复前必须按以下结构准备交付摘要；未执行项必须写明原因和风险，禁止笼统写“测试通过”：
+25. **最终交付自检模板（强制门禁）**：最终回复前必须按以下结构准备交付摘要；未执行项必须写明原因和风险，禁止笼统写“测试通过”：
     - **目标对齐**：逐条列出用户目标验证清单的完成状态。
     - **Review/Fix/Test 闭环**：列出第 1 轮、第 2 轮和追加轮次的发现、修复、复测结果。
     - **验证矩阵**：按单元测试、E2E、human_tests、`cargo test --workspace --all-features`、`scripts/ci/local-ci.sh`、远端 CI 分别写明 `已执行 / 未执行 / 不适用`、命令、结果、未执行原因。
+    - **提交/MR/CI 状态**：列出分支、commit、MR/PR 链接、CI run id、CI 当前状态或全绿证据；若豁免或阻塞，列出原因、风险和用户原文。
     - **变更范围**：列出修改文件、未触碰的用户既有改动、临时文件清理状态。
     - **残余风险**：列出仍未覆盖或需用户决策的事项；没有则明确写“未发现阻塞残余风险”。
 
@@ -277,8 +294,11 @@
 - [ ] **如果第 2 轮仍发现问题，已继续追加第 3 轮或更多轮次，直到无阻塞问题**
 - [ ] `cargo test --workspace --all-features` 全部通过
 - [ ] **本地 CI 验证已按修改范围执行对应检查项并通过（详见"本地 CI 验证要求"）**
+- [ ] **除非用户明确豁免，修改已提交并推送到任务分支**
+- [ ] **除非用户明确豁免，MR/PR 已创建或更新，并已记录链接**
+- [ ] **除非用户明确豁免，远端 CI 已看护到全绿；失败时已完成 fix-push-watch 或记录可核验证据说明外部阻塞/无关失败/用户叫停**
 
-> **最终门禁**：如果以上 human_tests 相关的三项或 Review/Fix/Test 闭环相关的两项（加粗项）任一未完成，整个任务不得标记为 completed，不得进入收尾阶段。
+> **最终门禁**：如果以上 human_tests、Review/Fix/Test 闭环、提交/MR/CI 看护相关的加粗项任一未完成且没有用户明确豁免或可核验阻塞，整个任务不得标记为 completed，不得进入收尾阶段。
 
 ## 技术方案（design 目录）
 
@@ -496,7 +516,7 @@ let verbose_logging = matches!(log_level.as_str(), "debug" | "trace");
 | `platform` | `scripts/ci/run-e2e-platform.sh` | 平台集成、跨端能力 |
 
 
-## GitHub Actions CI 分析与 fix-push-watch 闭环
+## GitHub Actions CI 分析与默认远端闭环
 
 **唯一入口：`.agents/skills/github-actions-pat/`**。所有"读 CI 运行状态 / 拉 failed job 日志 / 归因失败 / 轮询 run / 做 PR review / 推完代码后自动盯 CI"的工作必须走本 skill，不得直接手写 curl、不得走 cookie / gh CLI login / OAuth device flow。
 
@@ -505,7 +525,7 @@ let verbose_logging = matches!(log_level.as_str(), "debug" | "trace");
 触发 **任一** 条件即必须加载：
 
 1. 用户说"看看 CI / 查一下 workflow / 为什么失败了 / CI 怎么样了"等意图分析 GitHub Actions 的话
-2. 推完代码（`git push`）后需要等 CI 走完并验证绿灯
+2. 任一开发任务完成后执行了 `git push`，需要默认等 CI 走完并验证绿灯
 3. 需要对已 push 的 PR 做 code review（拉 diff + 分层建议，必要时 `--post`）
 4. 进入 fix → push → watch → iterate 的自动化闭环
 5. 需要与上一次绿跑做 regression 对比，定位是哪次提交引入的失败
@@ -544,9 +564,9 @@ python3 .agents/skills/github-actions-pat/scripts/gh_ci.py run <run_id>
 
 更多细节与坑点清单见 `.agents/skills/github-actions-pat/SKILL.md` 与 `references/pitfalls.md`。
 
-### fix-push-watch 闭环（用户让 Agent 自主跑 CI 到绿时必走）
+### fix-push-watch 闭环（默认跑 CI 到绿时必走）
 
-用户明确要求"修到 CI 绿 / 不要反复确认 / 自动推上去盯 CI / 遇到异常就开始修复"时，Agent 必须按以下 **fail-fast** 循环执行，不得在每轮中断找用户确认：
+用户明确要求"修到 CI 绿 / 不要反复确认 / 自动推上去盯 CI / 遇到异常就开始修复"，或开发任务已进入默认提交/MR/CI 看护阶段时，Agent 必须按以下 **fail-fast** 循环执行，不得在每轮中断找用户确认：
 
 1. 用本 skill 按当前 run_id / branch 定位失败
 2. 按归因与日志片段修代码
@@ -561,7 +581,7 @@ python3 .agents/skills/github-actions-pat/scripts/gh_ci.py run <run_id>
 
 ### 边界与禁止事项
 
-- **只做"拉数据 + 归因 + 驱动闭环"**：不替代 AGENTS.md 里强制的本地 `cargo fmt` / `cargo clippy -D warnings` / human_tests / `cargo test --workspace --all-features` / `scripts/ci/local-ci.sh`。push 之前必须先本地绿。
+- **只做"拉数据 + 归因 + 驱动闭环"**：不替代 AGENTS.md 里强制的本地 `cargo fmt` / `cargo clippy -D warnings` / human_tests / `cargo test --workspace --all-features` / `scripts/ci/local-ci.sh`。默认要求 push 之前先完成本地关键验证；若为缩短等待提前 push，最终完成前必须补齐剩余本地验证或给出阻塞证据。
 - **Token 纪律**：不 `echo $GITHUB_TOKEN`、不写日志、不塞 URL、不提交到 git、不贴进任何输出。
 - **`--post` 加锁**：`gh_review.py --post` 只有在用户消息里出现明确同意（"发出去 / post it / go ahead"）时才允许执行。
 - **不回显完整 workflow 日志**：只输出失败 job/step + 根因桶 + 关键日志片段 + URL。

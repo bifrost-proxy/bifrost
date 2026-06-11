@@ -9,6 +9,8 @@ const DEFAULT_CONFIG: SyncServerConfig = {
     host: '0.0.0.0',
     // DANGEROUS: only enable when deployed behind a trusted reverse proxy.
     trust_forwarded_for: false,
+    rate_limit_per_ip: 200,
+    auth_rate_limit_per_ip: 20,
   },
   storage: {
     type: 'sqlite',

@@ -15,6 +15,14 @@ fn session_id_value_from_exec_json(output: &str) -> serde_json::Value {
     value["session_id"].clone()
 }
 
+fn long_running_exec_command() -> &'static str {
+    if cfg!(windows) {
+        "Write-Output long-start; Start-Sleep -Milliseconds 1000; Write-Output long-end"
+    } else {
+        "printf long-start; sleep 1; printf long-end"
+    }
+}
+
 #[tokio::test]
 async fn goal_tools_work_end_to_end() {
     let mut session = AgentSession::new("goal-e2e");
@@ -193,7 +201,7 @@ async fn exec_command_tool_works_end_to_end() {
         .execute(
             "exec_command",
             &serde_json::json!({
-                "cmd": "printf long-start; sleep 0.3; printf long-end",
+                "cmd": long_running_exec_command(),
                 "yield_time_ms": 50,
                 "max_output_tokens": 1000,
             })
@@ -205,65 +213,90 @@ async fn exec_command_tool_works_end_to_end() {
     let long_running_json: serde_json::Value =
         serde_json::from_str(&long_running.output).expect("long-running exec json");
     let long_session_id = long_running_json["session_id"].clone();
+    let mut combined_poll_output = long_running_json["output"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
 
     let mut final_poll_json = serde_json::Value::Null;
-    let mut combined_poll_output = String::new();
-    for _ in 0..20 {
-        let poll = registry
+    if long_session_id.is_null() {
+        final_poll_json = long_running_json;
+    } else {
+        for _ in 0..40 {
+            let poll = registry
+                .execute(
+                    "write_stdin",
+                    &serde_json::json!({
+                        "session_id": long_session_id,
+                        "chars": "",
+                        "yield_time_ms": 250,
+                        "max_output_tokens": 1000,
+                    })
+                    .to_string(),
+                    work_dir.path(),
+                )
+                .await;
+            assert!(poll.success, "{}", poll.output);
+            final_poll_json = serde_json::from_str(&poll.output).expect("long poll json");
+            combined_poll_output.push_str(final_poll_json["output"].as_str().unwrap_or(""));
+            if !final_poll_json["exit_code"].is_null() && combined_poll_output.contains("long-end")
+            {
+                break;
+            }
+        }
+    }
+    assert_eq!(final_poll_json["exit_code"], 0);
+    assert!(
+        combined_poll_output.contains("long-end"),
+        "{combined_poll_output}"
+    );
+
+    #[cfg(not(windows))]
+    {
+        let interactive = registry
+            .execute(
+                "exec_command",
+                &serde_json::json!({
+                    "cmd": "python3 -u -c 'import os,sys; print(os.isatty(0), os.isatty(1)); print(\"exec-ready\"); print(sys.stdin.readline().strip())'",
+                    "tty": true,
+                    "yield_time_ms": 5000,
+                })
+                .to_string(),
+                work_dir.path(),
+            )
+            .await;
+        assert!(interactive.success, "{}", interactive.output);
+        let mut interactive_output = interactive.output.clone();
+        let session_id = session_id_value_from_exec_json(&interactive.output);
+
+        let stdin_result = registry
             .execute(
                 "write_stdin",
                 &serde_json::json!({
-                    "session_id": long_session_id,
-                    "chars": "",
-                    "yield_time_ms": 100,
+                    "session_id": session_id,
+                    "chars": "hello exec\n",
+                    "yield_time_ms": 1000,
                     "max_output_tokens": 1000,
                 })
                 .to_string(),
                 work_dir.path(),
             )
             .await;
-        assert!(poll.success, "{}", poll.output);
-        final_poll_json = serde_json::from_str(&poll.output).expect("long poll json");
-        combined_poll_output.push_str(final_poll_json["output"].as_str().unwrap_or(""));
-        if !final_poll_json["exit_code"].is_null() {
-            break;
-        }
+        assert!(stdin_result.success, "{}", stdin_result.output);
+        interactive_output.push_str(&stdin_result.output);
+        assert!(
+            interactive_output.contains("True True"),
+            "{interactive_output}"
+        );
+        assert!(
+            interactive_output.contains("exec-ready"),
+            "{interactive_output}"
+        );
+        assert!(
+            interactive_output.contains("hello exec"),
+            "{interactive_output}"
+        );
     }
-    assert_eq!(final_poll_json["exit_code"], 0);
-    assert!(combined_poll_output.contains("long-end"));
-
-    let interactive = registry
-        .execute(
-            "exec_command",
-            &serde_json::json!({
-                "cmd": "python3 -u -c 'import os,sys; print(os.isatty(0), os.isatty(1)); print(\"exec-ready\"); print(sys.stdin.readline().strip())'",
-                "tty": true,
-                "yield_time_ms": 5000,
-            })
-            .to_string(),
-            work_dir.path(),
-        )
-        .await;
-    assert!(interactive.success, "{}", interactive.output);
-    assert!(interactive.output.contains("True True"));
-    assert!(interactive.output.contains("exec-ready"));
-    let session_id = session_id_value_from_exec_json(&interactive.output);
-
-    let stdin_result = registry
-        .execute(
-            "write_stdin",
-            &serde_json::json!({
-                "session_id": session_id,
-                "chars": "hello exec\n",
-                "yield_time_ms": 1000,
-                "max_output_tokens": 1000,
-            })
-            .to_string(),
-            work_dir.path(),
-        )
-        .await;
-    assert!(stdin_result.success, "{}", stdin_result.output);
-    assert!(stdin_result.output.contains("hello exec"));
 }
 
 #[tokio::test]

@@ -611,8 +611,14 @@ export interface TlsConfig {
 
 export interface ProxySettings {
   tls: TlsConfig;
+  tray: TrayConfig;
   port: number;
   host: string;
+}
+
+export interface TrayConfig {
+  enabled: boolean;
+  supported: boolean;
 }
 
 export interface CertInfo {

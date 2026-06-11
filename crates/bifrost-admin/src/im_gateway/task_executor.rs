@@ -145,11 +145,12 @@ impl ImTaskExecutor {
     /// Prepare script for execution. Returns the path to the script file.
     fn prepare_script(script: &TaskScript) -> Result<String, String> {
         if let Some(ref text) = script.script_text {
-            // Write script_text to a temp file in /tmp
-            let tmp_path = format!(
-                "/tmp/bifrost-im-script-{}.sh",
-                uuid::Uuid::new_v4().as_simple()
-            );
+            let extension = if cfg!(windows) { "cmd" } else { "sh" };
+            let tmp_path = std::env::temp_dir().join(format!(
+                "bifrost-im-script-{}.{}",
+                uuid::Uuid::new_v4().as_simple(),
+                extension
+            ));
             let mut file = std::fs::File::create(&tmp_path)
                 .map_err(|e| format!("failed to create temp script file: {e}"))?;
             file.write_all(text.as_bytes())
@@ -164,7 +165,7 @@ impl ImTaskExecutor {
                 let _ = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o755));
             }
 
-            Ok(tmp_path)
+            Ok(tmp_path.to_string_lossy().into_owned())
         } else if let Some(ref file) = script.script_file {
             // Validate the script file exists
             if !std::path::Path::new(file).exists() {
@@ -216,11 +217,15 @@ impl ImTaskExecutor {
         env: &BTreeMap<String, String>,
         max_output_bytes: usize,
     ) -> Result<(i32, String, String), String> {
-        let shell = if cfg!(windows) { "cmd" } else { "sh" };
-        let shell_arg = if cfg!(windows) { "/C" } else { "-c" };
-
-        let mut command = TokioCommand::new(shell);
-        command.arg(shell_arg).arg(script_path);
+        let mut command = if cfg!(windows) {
+            let mut command = TokioCommand::new("cmd");
+            command.arg("/C").arg(script_path);
+            command
+        } else {
+            let mut command = TokioCommand::new("sh");
+            command.arg("-c").arg(script_path);
+            command
+        };
 
         if let Some(ref dir) = cwd {
             command.current_dir(dir);
@@ -350,6 +355,22 @@ fn trigger_source_str(source: TriggerSource) -> &'static str {
 mod tests {
     use super::*;
 
+    fn success_script_text() -> &'static str {
+        "echo hello_from_test"
+    }
+
+    fn failure_script_text() -> &'static str {
+        "exit 42"
+    }
+
+    fn long_running_script_text() -> &'static str {
+        if cfg!(windows) {
+            "ping -n 60 127.0.0.1 > nul"
+        } else {
+            "sleep 60"
+        }
+    }
+
     #[test]
     fn test_sha1_hex_known_value() {
         assert_eq!(
@@ -439,7 +460,7 @@ mod tests {
             policy_id: None,
             script_policy_binding: None,
             script: TaskScript {
-                script_text: Some("echo hello_from_test".to_string()),
+                script_text: Some(success_script_text().to_string()),
                 script_file: None,
                 cwd: None,
                 env: BTreeMap::new(),
@@ -477,7 +498,7 @@ mod tests {
             policy_id: None,
             script_policy_binding: None,
             script: TaskScript {
-                script_text: Some("exit 42".to_string()),
+                script_text: Some(failure_script_text().to_string()),
                 script_file: None,
                 cwd: None,
                 env: BTreeMap::new(),
@@ -507,7 +528,7 @@ mod tests {
             policy_id: None,
             script_policy_binding: None,
             script: TaskScript {
-                script_text: Some("sleep 60".to_string()),
+                script_text: Some(long_running_script_text().to_string()),
                 script_file: None,
                 cwd: None,
                 env: BTreeMap::new(),

@@ -42,3 +42,4 @@ npm/bifrost/README.md
 bifrost-server-v4/
 bifrost-remote.zip
 .codex-review/
+*.log

@@ -912,7 +912,7 @@ TXT：
 [00:00:01.200 - 00:00:05.860] 用户A: 你好，我想咨询一下订单。
 ```
 
-这些 artifacts 是后续 daily markdown 与 Daily Agent 的输入事实源。Directory Task 的每日合并逻辑必须从 `TranscriptTimeline` 渲染 speaker-aware Daily Docs，再按既有 Daily Agent contract 做增量变更规划、Runner 投递和 report 生成。
+这些 artifacts 是后续 daily markdown 与 Daily Agent 的输入事实源。Directory Task 的每日合并逻辑必须从 `TranscriptTimeline` 渲染 speaker-aware Daily Docs，再按既有 Daily Agent contract 做增量变更规划、Runner 投递和 report 生成。Daily Docs 中按源文件分组的 Markdown 标题必须使用稳定的 `/` 路径分隔符，避免 Windows `\` 分隔符进入报告内容并造成跨平台输出差异。
 
 ## 分阶段落地计划
 

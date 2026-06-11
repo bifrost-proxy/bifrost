@@ -1,18 +1,17 @@
-use std::process::Command;
-
-fn bifrost_cmd() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_bifrost"))
-}
+use bifrost_cli::cli::Cli;
+use clap::CommandFactory;
 
 fn run_help(args: &[&str]) -> String {
-    let mut cmd = bifrost_cmd();
-    for arg in args {
-        cmd.arg(arg);
-    }
-    cmd.arg("--help");
-    let output = cmd.output().expect("failed to run bifrost");
-    String::from_utf8_lossy(&output.stdout).to_string()
-        + String::from_utf8_lossy(&output.stderr).as_ref()
+    let mut argv = Vec::with_capacity(args.len() + 2);
+    argv.push("bifrost");
+    argv.extend(args.iter().copied());
+    argv.push("--help");
+
+    let mut cmd = Cli::command();
+    let err = cmd
+        .try_get_matches_from_mut(argv)
+        .expect_err("--help should short-circuit with rendered help");
+    err.render().ansi().to_string()
 }
 
 #[test]

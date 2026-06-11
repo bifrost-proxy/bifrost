@@ -1112,3 +1112,28 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 - **清理步骤**:
   - 无需清理；测试不启动服务、不创建临时数据目录、不发送真实 IM 消息。
 - **执行记录（2026-06-09）**: PASS — 执行 `cargo test -p bifrost-admin agent_reply_target_ --lib -- --nocapture`，3 个回复目标用例通过，覆盖 Feishu `chat_id` 优先、Feishu `open_id` 回退和 Weixin 来源目标保持；执行 `cargo test -p bifrost-admin feishu_codex_like_external_runner_defaults_to_progress_card_without_channel_override --lib -- --nocapture`，1 个 delivery mode 用例通过；执行 `rg -n "build_agent_reply_target\\(|__agent_progress__|__plan_card__|receive_id_type" crates/bifrost-admin/src/handlers/im_gateway`，确认内置 Agent 与外部 CLI Runner 的进度卡目标以及内置 Agent plan card 目标均通过统一 helper 构造。
+
+### TC-IMG-68: Windows 外部 Runner 工作目录与 script_text 退出码回归
+
+- **前置条件**:
+  - 工作目录为项目根目录。
+  - 不启动或重启本机默认 `9900` 服务，不修改系统代理。
+  - 本机可执行 Rust 单元测试；Windows 专属行为最终以 Windows CI 补验。
+- **操作步骤**:
+  1. 执行 IM Gateway 外部 Runner 工作目录回归：
+     ```bash
+     source ~/.zshrc
+     SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin schedule_external_runner_executes_from_configured_work_dir --lib -- --nocapture
+     ```
+  2. 执行 IM Task Executor 脚本文本成功/失败回归：
+     ```bash
+     source ~/.zshrc
+     SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin im_gateway::task_executor::tests::test_execute_script_text --lib -- --nocapture
+     ```
+- **预期结果**:
+  - 外部 Runner 在配置的 `work_dir` 内执行，测试通过目录内 marker 文件确认当前目录，不依赖 Unix `pwd -P` 输出或 Windows 路径格式。
+  - Windows 下 `script_text` 临时脚本通过 `cmd /C <script_path>` 执行，路径交给 `Command` 做 argv quoting，不再把带引号脚本路径当作普通字符串导致 `.cmd` 未执行。
+  - `exit 42` 在 Windows `.cmd` 与 Unix shell 中都能收敛为 exit code 42；成功、失败、超时三类 TaskExecutor 语义不变。
+- **清理步骤**:
+  - 无需清理；测试使用临时目录。
+- **执行记录（2026-06-11）**: PASS — 本地 macOS 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin schedule_external_runner_executes_from_configured_work_dir --lib -- --nocapture` 通过，验证 marker-file 工作目录断言不依赖平台路径格式；执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin im_gateway::task_executor::tests::test_execute_script_text --lib -- --nocapture`，2 个脚本文本用例通过。Windows `.cmd` quoting 和 `exit 42` 路径由当前分支 Windows CI 继续补验。

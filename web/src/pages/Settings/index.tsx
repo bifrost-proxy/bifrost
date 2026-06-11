@@ -26,6 +26,7 @@ import {
 } from "../../api/proxy";
 import {
   updateTlsConfig,
+  updateTrayConfig,
   getProxySettings,
   getTlsConfig,
   getPerformanceConfig,
@@ -176,6 +177,7 @@ export default function Settings() {
   const [proxyAddressInfo, setProxyAddressInfo] =
     useState<ProxyAddressInfo | null>(null);
   const [proxySettings, setProxySettings] = useState<ProxySettings | null>(null);
+  const [trayLoading, setTrayLoading] = useState(false);
   const [desktopExpectedProxyPort, setDesktopExpectedProxyPort] = useState<number | null>(
     isDesktopShell() ? getExpectedDesktopProxyPort() : null,
   );
@@ -351,6 +353,20 @@ export default function Settings() {
     } else {
       const proxyError = useProxyStore.getState().error;
       message.error(proxyError || "Failed to update cleanup fallback");
+    }
+  };
+
+  const handleTrayToggle = async (enabled: boolean) => {
+    setTrayLoading(true);
+    try {
+      const tray = await updateTrayConfig({ enabled });
+      setProxySettings((prev) => (prev ? { ...prev, tray } : prev));
+      message.success(enabled ? "Tray icon enabled" : "Tray icon disabled");
+    } catch {
+      message.error("Failed to update tray setting");
+      void fetchProxySettings();
+    } finally {
+      setTrayLoading(false);
     }
   };
 
@@ -1098,6 +1114,9 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
                 cliProxy={cliProxy}
                 systemProxyLoading={systemProxyLoading}
                 systemProxyLaunchdLoading={systemProxyLaunchdLoading}
+                trayConfig={proxySettings?.tray ?? null}
+                trayLoading={trayLoading}
+                onToggleTray={handleTrayToggle}
                 onToggleSystemProxy={handleSystemProxyToggle}
                 onToggleSystemProxyLaunchd={handleSystemProxyLaunchdToggle}
                 copyProxyConfig={copyProxyConfig}

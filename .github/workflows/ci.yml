@@ -364,20 +364,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "pnpm"
-          cache-dependency-path: web/pnpm-lock.yaml
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
-        working-directory: web
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-unknown-linux-gnu
       - name: Install cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
       - uses: Swatinem/rust-cache@v2
         with:
           key: linux-aarch64
@@ -386,22 +379,23 @@ jobs:
           SKIP_FRONTEND_BUILD: "1"
           CARGO_TARGET_DIR: target/cross-aarch64
           CROSS_CONTAINER_ENGINE_NO_BUILDKIT: "1"
-        run: cross build -p bifrost-cli --release --target aarch64-unknown-linux-gnu
+        run: |
+          for attempt in 1 2 3; do
+            echo "cross build attempt ${attempt}/3"
+            if cross build -p bifrost-cli --release --target aarch64-unknown-linux-gnu; then
+              exit 0
+            fi
+            if [ "$attempt" = "3" ]; then
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
 
   build-linux-armv7:
     name: Linux Build (armv7)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "pnpm"
-          cache-dependency-path: web/pnpm-lock.yaml
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
-        working-directory: web
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: armv7-unknown-linux-gnueabihf
@@ -415,27 +409,30 @@ jobs:
           SKIP_FRONTEND_BUILD: "1"
           CARGO_TARGET_DIR: target/cross-armv7
           CROSS_CONTAINER_ENGINE_NO_BUILDKIT: "1"
-        run: cross build -p bifrost-cli --release --target armv7-unknown-linux-gnueabihf
+        run: |
+          for attempt in 1 2 3; do
+            echo "cross build attempt ${attempt}/3"
+            if cross build -p bifrost-cli --release --target armv7-unknown-linux-gnueabihf; then
+              exit 0
+            fi
+            if [ "$attempt" = "3" ]; then
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
 
   build-linux-musl-x86:
     name: Linux Build (x86_64-musl)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "pnpm"
-          cache-dependency-path: web/pnpm-lock.yaml
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
-        working-directory: web
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl
       - name: Install cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
       - uses: Swatinem/rust-cache@v2
         with:
           key: linux-musl-x86_64
@@ -444,27 +441,30 @@ jobs:
           SKIP_FRONTEND_BUILD: "1"
           CARGO_TARGET_DIR: target/cross-musl-x86_64
           CROSS_CONTAINER_ENGINE_NO_BUILDKIT: "1"
-        run: cross build -p bifrost-cli --release --target x86_64-unknown-linux-musl
+        run: |
+          for attempt in 1 2 3; do
+            echo "cross build attempt ${attempt}/3"
+            if cross build -p bifrost-cli --release --target x86_64-unknown-linux-musl; then
+              exit 0
+            fi
+            if [ "$attempt" = "3" ]; then
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
 
   build-linux-musl-aarch64:
     name: Linux Build (aarch64-musl)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "pnpm"
-          cache-dependency-path: web/pnpm-lock.yaml
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
-        working-directory: web
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-unknown-linux-musl
       - name: Install cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
       - uses: Swatinem/rust-cache@v2
         with:
           key: linux-musl-aarch64
@@ -530,6 +530,8 @@ jobs:
           key: cli-build-aarch64-apple-darwin
           save-if: always()
       - name: Cache sherpa-onnx archive
+        # ASR native runtime assets are supported only on Apple Silicon macOS.
+        # Windows/Linux CI must not fetch or bundle sherpa/qwen ASR artifacts.
         uses: actions/cache@v4
         with:
           path: .ci-cache/sherpa-onnx
@@ -538,6 +540,7 @@ jobs:
             sherpa-onnx-${{ hashFiles('Cargo.lock') }}-
             sherpa-onnx-
       - name: Prepare sherpa-onnx archive
+        # Keep ASR runtime preparation target-gated to aarch64-apple-darwin.
         shell: bash
         run: bash scripts/ci/prepare-sherpa-onnx-archive.sh aarch64-apple-darwin
       - name: Build CLI
@@ -551,7 +554,7 @@ jobs:
 
   build-cli-macos-x86_64:
     name: Build macOS CLI (x86_64-apple-darwin)
-    runs-on: macos-15-intel
+    runs-on: macos-15
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -773,6 +776,8 @@ jobs:
         with:
           key: e2e-aarch64-apple-darwin
       - name: Cache sherpa-onnx archive
+        # Tray smoke tests on macOS arm64 can coexist with ASR assets, but the
+        # ASR runtime remains unsupported and unprepared on Windows/Linux jobs.
         uses: actions/cache@v4
         with:
           path: .ci-cache/sherpa-onnx
@@ -781,8 +786,12 @@ jobs:
             sherpa-onnx-${{ hashFiles('Cargo.lock') }}-
             sherpa-onnx-
       - name: Prepare sherpa-onnx archive
+        # Keep ASR runtime preparation target-gated to aarch64-apple-darwin.
         shell: bash
         run: bash scripts/ci/prepare-sherpa-onnx-archive.sh aarch64-apple-darwin
+      - name: Tray startup smoke test
+        shell: bash
+        run: bash e2e-tests/tests/test_cli_tray_startup_ci.sh
       - name: E2E runner tests
         shell: bash
         run: bash scripts/ci/run-e2e-runner.sh
@@ -821,7 +830,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-15-intel
+          - os: macos-15
             target: x86_64-apple-darwin
           - os: macos-15
             target: aarch64-apple-darwin
@@ -1181,6 +1190,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: e2e-${{ matrix.target }}
+      - name: Tray startup smoke test
+        shell: bash
+        run: bash e2e-tests/tests/test_cli_tray_startup_ci.sh
       - name: E2E runner tests
         shell: bash
         run: bash scripts/ci/run-e2e-runner.sh
@@ -1209,3 +1221,34 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
           include-hidden-files: true
+
+  test-windows-tray:
+    name: Windows Unit Tests (x86_64)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            web/pnpm-lock.yaml
+      - name: Install root dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: web
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test-windows
+      - name: Run Windows unit tests
+        # This intentionally verifies Windows can compile/test the workspace
+        # without ASR native runtime assets; bifrost-asr full local engines are
+        # target-gated to macOS aarch64 and must stay unavailable here.
+        run: cargo test --workspace --all-features --target x86_64-pc-windows-msvc

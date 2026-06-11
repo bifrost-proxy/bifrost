@@ -126,6 +126,21 @@ fn generate_components() -> serde_json::Value {
                     }
                 }
             },
+            "TrayConfig": {
+                "type": "object",
+                "description": "System tray helper setting shown in Settings > Proxy.",
+                "properties": {
+                    "enabled": {"type": "boolean", "description": "Whether Bifrost should launch and keep the tray helper running"},
+                    "supported": {"type": "boolean", "description": "Whether the current platform supports the native tray helper"}
+                }
+            },
+            "UpdateTrayConfigRequest": {
+                "type": "object",
+                "required": ["enabled"],
+                "properties": {
+                    "enabled": {"type": "boolean"}
+                }
+            },
             "BreakpointEdit": {
                 "type": "object",
                 "properties": {
@@ -884,6 +899,34 @@ fn generate_paths() -> serde_json::Value {
                 "responses": {"200": {"description": "Updated"}}
             }
         },
+        "/api/config/tray": {
+            "get": {
+                "tags": ["Config"],
+                "summary": "Get tray helper configuration",
+                "operationId": "getTrayConfig",
+                "responses": {
+                    "200": {
+                        "description": "Tray configuration",
+                        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TrayConfig"}}}
+                    }
+                }
+            },
+            "put": {
+                "tags": ["Config"],
+                "summary": "Update tray helper configuration",
+                "operationId": "updateTrayConfig",
+                "requestBody": {
+                    "required": true,
+                    "content": {"application/json": {"schema": {"$ref": "#/components/schemas/UpdateTrayConfigRequest"}}}
+                },
+                "responses": {
+                    "200": {
+                        "description": "Updated tray configuration",
+                        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TrayConfig"}}}
+                    }
+                }
+            }
+        },
         "/api/config/server": {
             "get": {
                 "tags": ["Config"],
@@ -1348,6 +1391,7 @@ mod tests {
         assert!(spec.paths.get("/api/breakpoint/settings").is_some());
         assert!(spec.paths.get("/api/breakpoint/resume").is_some());
         assert!(spec.paths.get("/api/rules").is_some());
+        assert!(spec.paths.get("/api/config/tray").is_some());
         assert!(spec.paths.get("/api/config/performance").is_some());
 
         let settings = &schema(&spec, "BreakpointSettings")["properties"];
@@ -1361,6 +1405,10 @@ mod tests {
         assert!(performance.get("timeout_ms").is_some());
         assert!(performance.get("timeout_min_ms").is_some());
         assert!(performance.get("timeout_max_ms").is_some());
+
+        let tray = &schema(&spec, "TrayConfig")["properties"];
+        assert!(tray.get("enabled").is_some());
+        assert!(tray.get("supported").is_some());
     }
 
     #[test]

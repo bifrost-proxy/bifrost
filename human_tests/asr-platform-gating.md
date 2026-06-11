@@ -4,6 +4,8 @@
 
 验证新增 ASR 能力只在 macOS Apple Silicon 暴露和编译：支持平台显示 Qwen3-ASR、本地转写、Speech Workbench、Directory Tasks、Speaker Diarization、Voiceprint、Voice Wake ASR；非支持平台隐藏入口，并且只通过独立 `bifrost-asr` crate 管理 `qwen3-asr`、`sherpa-onnx`、native speaker 相关依赖路径和从 admin 迁出的 ASR 纯业务逻辑。
 
+平台执行约束：Windows 和 Linux 不是 ASR V1 支持平台，不允许在这些平台运行真实 Qwen3-ASR、sherpa-onnx、speaker diarization、voiceprint 或 voice wake runtime 用例；CI 在 Windows/Linux 上只能执行平台 gating、CLI/WebUI 隐藏、core 数据结构和非 native 纯逻辑测试。发布打包也不得为 Windows/Linux 准备或携带 ASR native runtime 资源。
+
 ## 前置条件
 
 1. 在仓库根目录执行所有命令。
@@ -148,6 +150,23 @@
 - AI 导航不会在非支持平台展示 ASR 工具入口。
 - 直接访问 ASR 页面时，非支持平台不会展示 Qwen3-ASR、本地转写、Speech Workbench、Directory Task ASR 模型选择、Speaker Diarization、Voiceprint、Voice Wake ASR 相关入口。
 
+### TC-ASR-PG-09 CI 与发布打包不在 Windows/Linux 准备 ASR runtime
+
+操作步骤：
+
+1. 执行：
+   ```bash
+   source ~/.zshrc && rg -n 'Prepare sherpa-onnx archive|Cache sherpa-onnx archive|target-gated to macOS aarch64|Windows/Linux.*ASR|matrix.target == .aarch64-apple-darwin.' .github/workflows/ci.yml .github/workflows/release.yml
+   ```
+2. 检查 Windows 单测 job 只验证 workspace 可编译/可测试，不准备 ASR runtime 资源。
+3. 检查 release workflow 中 `Cache sherpa-onnx archive` 和 `Prepare sherpa-onnx archive` 均带有 `matrix.target == 'aarch64-apple-darwin'` gating。
+
+预期结果：
+
+- Windows/Linux CI 不下载、不缓存、不准备 `sherpa-onnx` 或 `qwen3-asr` runtime 资源。
+- Windows/Linux 发布包不携带 ASR native runtime 资源。
+- 只有 `aarch64-apple-darwin` 发布目标会准备 ASR native runtime 依赖；不支持平台只保留 `bifrost-asr/core` 平台能力元数据和隐藏入口逻辑。
+
 ## 清理步骤
 
 1. 删除测试产生的临时目录；`test_asr_platform_gating.sh` 已通过 `trap` 自动清理。
@@ -166,3 +185,4 @@
 | TC-ASR-PG-06 | 通过 | 2026-05-28 执行 `source ~/.zshrc && rg -n 'bifrost-asr\|full-local-asr\|qwen3-asr\|sherpa-onnx' Cargo.toml crates/bifrost-admin/Cargo.toml crates/bifrost-asr/Cargo.toml crates/bifrost-asr/src crates/bifrost-admin/src/handlers/asr.rs crates/bifrost-admin/src/handlers/voice_stateful.rs crates/bifrost-admin/src/handlers/asr_jobs/diarization.rs`，确认 workspace 成员包含 `crates/bifrost-asr`，admin core/full-local-asr feature 边界存在，native crate 只在 `bifrost-asr` 配置，admin native 调用通过 `bifrost_asr::native::*`。 |
 | TC-ASR-PG-07 | 通过 | 2026-05-28 执行 `source ~/.zshrc && rg -n 'pub mod (artifacts\|offline\|planner\|platform\|profiles\|runtime\|subtitle\|timeline)\|TranscriptTimeline\|AsrDiarizationConfig\|AsrAudioUnit\|plan_asr_units\|write_offline_subtitle_artifacts\|render_srt\|render_vtt\|output_paths_in\|AsrServiceState\|ASR_TASK_SEGMENT_MAX_MS' crates/bifrost-asr/src crates/bifrost-admin/src/asr_runtime.rs crates/bifrost-admin/src/handlers/asr_jobs_timeline.rs crates/bifrost-admin/src/handlers/asr_jobs.rs crates/bifrost-admin/src/handlers/asr_jobs/state.rs crates/bifrost-admin/src/handlers/asr_jobs/store.rs crates/bifrost-admin/src/handlers/asr_jobs/runner.rs crates/bifrost-admin/src/handlers/asr_jobs/diarization.rs`，确认 ASR runtime/timeline/artifact/profile/platform/planner/subtitle/offline artifact 纯业务边界迁入 `bifrost-asr`，admin 只 re-export 或调用。 |
 | TC-ASR-PG-08 | 通过 | 2026-05-28 执行 `source ~/.zshrc && rg -n 'GET, _.*artifacts\|get_task_file_artifacts_response\|record_artifact_paths\|artifact_content_type\|write_offline_subtitle_artifacts\|subtitle_path_from_timeline\|render_srt\|render_vtt' crates/bifrost-admin/src/handlers/asr_jobs/api.rs crates/bifrost-admin/src/handlers/asr_jobs/runner.rs crates/bifrost-asr/src/offline.rs crates/bifrost-asr/src/artifacts.rs crates/bifrost-asr/src/subtitle.rs`，确认 Directory Task 文件级 artifact API 存在，SRT/VTT writer 与 artifact path/write 规则归属 `bifrost-asr`。 |
+| TC-ASR-PG-09 | 通过 | 2026-06-11 执行 `source ~/.zshrc && rg -n 'Prepare sherpa-onnx archive\|Cache sherpa-onnx archive\|target-gated to macOS aarch64\|Windows/Linux.*ASR\|matrix.target == .aarch64-apple-darwin.' .github/workflows/ci.yml .github/workflows/release.yml`，确认 Windows/Linux CI 注释为不准备 ASR runtime，release 仅在 `aarch64-apple-darwin` cache/prepare sherpa；执行 `source ~/.zshrc && bash e2e-tests/tests/test_asr_platform_gating.sh` 输出 `[asr-platform-gating] PASS`。 |

@@ -641,6 +641,7 @@ mod tests {
         std::env::remove_var(ASR_PHYSICAL_SAMPLE_INTERVAL_SECS_ENV);
     }
 
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
     fn abort_check_kills_running_cli_child() {
         let temp = tempfile::tempdir().unwrap();

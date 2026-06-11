@@ -17,7 +17,18 @@ AGENTS.md 应把开发手册组织成一个可执行状态机，而不只是规�
 - **任务模式判定**：开发模式、检查模式、CI 闭环模式、文档/流程变更模式。
 - **任务启动与工作区隔离**：每个任务先检查 `git status --short --branch`；若已有修改或存在并行开发，默认优先使用独立 `git worktree`。
 - **证据台账**：目标证据、工作区隔离证据、变更证据、测试证据、review 证据、边界证据。
-- **完成定义**：目标、代码、测试、文档、human_tests、review 闭环和最终交付全部有证据。
+- **默认交付闭环**：除非用户明确豁免，开发任务完成后必须提交、推送、创建或更新 MR/PR，并跟进远端 CI 到全绿。
+- **完成定义**：目标、代码、测试、文档、human_tests、review 闭环、提交/MR/CI 看护和最终交付全部有证据。
+
+### 默认提交、MR 与 CI 看护
+
+Agent 对任何修改仓库文件的开发任务都应默认执行完整交付闭环，不需要用户在实现后再次提醒：
+
+- 本地关键验证通过后提交并推送当前任务分支。若完整验证耗时长，可先完成格式、clippy 或相关最小测试后提前推送，让远端 CI 与剩余本地验证并行。
+- 确认当前分支有对应 MR/PR：无则创建 draft MR/PR，有则更新同一 MR/PR。
+- 推送后加载 `.agents/skills/github-actions-pat/`，获取 run id 并使用 fail-fast 看护远端 CI。
+- CI 失败时按日志归因后进入 fix → push → watch 循环，直到全绿；只有外部阻塞、无关失败、权限/token 不足或用户明确叫停时，才可停止并带证据交付。
+- 最终回复必须包含分支、commit、MR/PR 链接、CI run id 和状态。
 
 ### 并行开发与 worktree 隔离
 
@@ -76,7 +87,8 @@ AGENTS.md 应把开发手册组织成一个可执行状态机，而不只是规�
 - `Review/Fix/Test 第 1 轮：目标复核 + 修改文件 review + 问题修复 + 相关测试运行`
 - `Review/Fix/Test 第 2 轮：修复后复查 + 覆盖缺口检查 + 复跑相关测试`
 - 如果继续循环，追加 `Review/Fix/Test 第 N 轮：...`
-- `最终交付自检：目标对齐 + 两轮闭环 + 验证矩阵 + 残余风险`
+- `提交/MR/CI 看护：提交并推送任务分支 + 创建或更新 MR/PR + fail-fast 看护远端 CI`
+- `最终交付自检：目标对齐 + 两轮闭环 + 验证矩阵 + 提交/MR/CI 状态 + 残余风险`
 
 禁止把两轮闭环合并成一句“最终 review”或“跑测试”。
 
@@ -96,6 +108,7 @@ AGENTS.md 应把开发手册组织成一个可执行状态机，而不只是规�
 - **目标对齐**：逐条列出用户目标验证清单完成状态。
 - **Review/Fix/Test 闭环**：列出第 1 轮、第 2 轮和追加轮次的发现、修复、复测结果。
 - **验证矩阵**：单元测试、E2E、human_tests、`cargo test --workspace --all-features`、`scripts/ci/local-ci.sh`、远端 CI 的执行状态、命令、结果和未执行原因。
+- **提交/MR/CI 状态**：列出分支、commit、MR/PR 链接、CI run id、CI 当前状态或全绿证据。
 - **变更范围**：修改文件、未触碰的用户既有改动、临时文件清理状态。
 - **残余风险**：未覆盖项、阻塞项或需用户决策事项。
 
@@ -126,7 +139,7 @@ AGENTS.md 应把开发手册组织成一个可执行状态机，而不只是规�
 
 ### 真实场景测试
 
-新增 `human_tests/agent-development-review-loop.md`，覆盖：
+更新 `human_tests/agent-development-review-loop.md`，覆盖：
 
 - `TC-ADRL-01`：确认 `AGENTS.md` 的标准流程、规划要求、验证阶段、收尾门禁均包含两轮闭环。
 - `TC-ADRL-02`：确认 `human_tests/readme.md` 索引包含该用例文档，并且测试总数同步更新。
@@ -135,16 +148,19 @@ AGENTS.md 应把开发手册组织成一个可执行状态机，而不只是规�
 - `TC-ADRL-05`：确认 `AGENTS.md` 包含用户目标验证清单、git diff/status 复核、测试失败归因和最终交付模板。
 - `TC-ADRL-06`：确认开发流程阶段编号连续，无重复编号。
 - `TC-ADRL-07`：确认 `AGENTS.md` 和设计文档包含任务启动时 `git status --short --branch` 检查，以及并行开发优先使用独立 worktree 的规则。
+- `TC-ADRL-08`：确认 `AGENTS.md` 禁止 `human_tests/readme.md` 维护全局汇总数字。
+- `TC-ADRL-09`：确认默认开发流程包含提交、推送、MR/PR 创建或更新、远端 CI fail-fast 看护和最终交付状态汇报。
 
 ## 校验要求
 
 - 执行 `rg` 验证 `AGENTS.md`、`design/agent-development-review-loop.md`、`human_tests/agent-development-review-loop.md`、`human_tests/readme.md` 中的闭环关键词和索引存在。
+- 执行 `rg` 验证默认提交、MR/PR、远端 CI 看护、fix-push-watch 和最终交付状态汇报关键词存在。
 - 执行 `git diff --check` 确认文档无尾随空白。
 - 按 `human_tests/agent-development-review-loop.md` 逐条执行并记录结果。
 - 本次未修改 Rust 代码，可不执行 `cargo test --workspace --all-features`；如后续任务包含代码变更，必须按 `AGENTS.md` 执行完整校验。
 
 ## 文档更新要求
 
-- 更新 `AGENTS.md`，将双轮闭环加入开发需求标准流程、测试完备性检查清单和收尾门禁。
-- 新增 `human_tests/agent-development-review-loop.md`。
+- 更新 `AGENTS.md`，将双轮闭环和默认提交/MR/CI 看护加入开发需求标准流程、测试完备性检查清单和收尾门禁。
+- 更新 `human_tests/agent-development-review-loop.md`。
 - 更新 `human_tests/readme.md` 对应索引行；禁止维护全局测试文件数或测试用例数总计。

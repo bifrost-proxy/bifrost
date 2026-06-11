@@ -288,6 +288,42 @@
 
 ---
 
+### TC-CGR-16：Group Sync E2E 不被本地 sync-server 全局限流误伤
+
+**背景**：完整 Group Sync E2E 会在一分钟内覆盖 sync-server 直连 API、Bifrost Admin 代理、规则转发效果和 CLI Group 操作。修复前，macOS CI shard 在 Step 12 之后触发本地 mock sync-server 的 `429 too many requests`，导致后续 group rules 与 CLI 断言连锁失败。
+
+**操作步骤**：
+1. 执行 sync-server 类型检查：
+   ```bash
+   pnpm --dir packages/bifrost-sync-server lint
+   ```
+2. 执行全局限流配置单测：
+   ```bash
+   pnpm --dir packages/bifrost-sync-server test src/__tests__/rate-limit.test.ts
+   ```
+3. 执行 sync-server 全量单元测试：
+   ```bash
+   pnpm --dir packages/bifrost-sync-server test
+   ```
+4. 使用独立端口执行完整 Group Sync E2E：
+   ```bash
+   ADMIN_PORT=18123 SYNC_PORT=18131 ECHO_PORT=18132 e2e-tests/tests/test_group_sync_e2e.sh
+   ```
+
+**预期结果**：
+- sync-server 类型检查通过。
+- `rate-limit.test.ts` 验证 `server.rate_limit_per_ip` 会控制非 Remote Invoke 路径的全局 IP 限流，`server.auth_rate_limit_per_ip` 会控制登录/注册路径的独立限流。
+- sync-server 全量单元测试通过，完整 Group API 单测不会被本地测试配额误伤。
+- `test_group_sync_e2e.sh` 启动本地 sync-server 时使用 `--rate-limit-per-ip 1000 --auth-rate-limit-per-ip 1000`，完整执行 93 个断言，`Failed: 0`，日志中不再出现因本地测试配额导致的 `too many requests` 连锁失败。
+
+**执行记录（2026-06-11）**：
+- `pnpm --dir packages/bifrost-sync-server lint`：PASS。
+- `pnpm --dir packages/bifrost-sync-server test src/__tests__/rate-limit.test.ts`：PASS，2 个测试通过。
+- `pnpm --dir packages/bifrost-sync-server test`：PASS，9 个 test file / 160 个测试通过。
+- `ADMIN_PORT=18123 SYNC_PORT=18131 ECHO_PORT=18132 e2e-tests/tests/test_group_sync_e2e.sh`：PASS，`Total: 93 / Passed: 93 / Failed: 0`。
+
+---
+
 ## 清理
 
 测试完成后清理临时数据和测试文件：

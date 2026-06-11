@@ -755,8 +755,8 @@ pub fn get_all_tests() -> Vec<TestCase> {
             },
         ),
         TestCase::standalone(
-            "group_rules_active_summary_skips_group_rules_without_login",
-            "Active summary does not consume enabled group rules without an active sync session",
+            "group_rules_active_summary_uses_local_group_fallback_without_login",
+            "Active summary exposes enabled local group rules without an active sync session by using the local directory name as the group fallback",
             "group_rules",
             || async move {
                 let port = pick_unused_port()?;
@@ -796,15 +796,22 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     .get("rules")
                     .and_then(|v| v.as_array())
                     .ok_or("Missing 'rules' array")?;
-                if rules
+                if !rules
                     .iter()
                     .any(|r| r.get("name").and_then(|n| n.as_str()) == Some("uncached-group-rule"))
                 {
                     return Err(format!(
-                        "Group rule should not appear in active summary without login, got {:?}",
+                        "Group rule should appear in active summary with local fallback without login, got {:?}",
                         rules
                     ));
                 }
+                assert_active_rule_present(
+                    &json,
+                    "uncached-group-rule",
+                    Some(group_name),
+                    Some(group_name),
+                    Some("uncached-active.example.com host://127.0.0.1:5100"),
+                )?;
 
                 cleanup_group_storage(&admin_state, group_name);
                 Ok(())
@@ -1221,7 +1228,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
         ),
         TestCase::standalone(
             "group_rules_logout_keeps_group_id_navigation_cache",
-            "Logout keeps persisted group id/name mapping so Dynamic Island and injected Badge links keep using the real group id after re-login",
+            "Logout keeps local group rules visible in active-summary and preserves persisted group id/name mapping so injected Badge links keep using the real group id after re-login",
             "group_rules",
             || async move {
                 let port = pick_unused_port()?;
@@ -1275,9 +1282,13 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 assert_status(&logout_resp, 200)?;
 
                 let after_logout = fetch_active_summary(&client, port).await?;
-                if active_summary_has_rule(&after_logout, "logout-relogin-rule")? {
-                    return Err("Logged-out active summary must not consume group rules".to_string());
-                }
+                assert_active_rule_present(
+                    &after_logout,
+                    "logout-relogin-rule",
+                    Some(group_id),
+                    Some(group_name),
+                    Some("status://221"),
+                )?;
                 let after_logout_badge: serde_json::Value =
                     serde_json::from_str(&admin_state.badge_rules_json())
                         .map_err(|e| format!("Failed to parse logged-out badge JSON: {}", e))?;
