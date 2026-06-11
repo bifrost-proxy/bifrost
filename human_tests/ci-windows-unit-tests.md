@@ -163,6 +163,20 @@ source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin state::test
 - `request_tray_launch()` 有 callback 时返回 `true` 并调用一次，无 callback 时返回 `false`。
 - `reconcile_socket_summary_*` 用例只依赖隔离的 traffic/rules 临时目录，不受其他测试修改全局数据目录影响。
 
+### TC-CWUT-09 Windows lib-test 编译覆盖 ignored 测试体
+
+操作步骤：
+
+```bash
+source ~/.zshrc
+prlctl exec "Windows 11" --current-user cmd.exe /c "call \"C:\Program Files\Microsoft Visual Studio\18\Insiders\VC\Auxiliary\Build\vcvars64.bat\" >nul && set \"PATH=C:\Users\eden\.cargo\bin;C:\Program Files\Microsoft Visual Studio\18\Insiders\VC\Tools\Llvm\ARM64\bin;%PATH%\" && set \"CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=lld-link\" && set \"SKIP_FRONTEND_BUILD=1\" && cd /d C:\Users\eden\github\bifrost && cargo test -p bifrost-agent --locked --target x86_64-pc-windows-msvc --no-run"
+```
+
+预期结果：
+- Windows x86_64 `bifrost-agent` lib test、`p1_tools_e2e` 和 `session_skills_integration` 测试二进制均能完成编译。
+- 被 `#[cfg_attr(windows, ignore = ...)]` 标记的测试函数体仍必须通过 Windows 编译；测试 helper 不得只在 `cfg(not(windows))` 下定义却被 Windows 测试体引用。
+- 本地验证必须优先使用 rustup shim 的 `cargo/rustc`，并显式配置 `lld-link`，避免 Windows ARM VM 中多套 Rust/VS 工具链路径混用造成假失败。
+
 ## 清理步骤
 
 本测试只运行单元测试和静态扫描；cargo 产物由常规构建缓存管理，无额外临时服务需要停止。
@@ -181,3 +195,4 @@ source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin state::test
 | 2026-06-11 | TC-CWUT-07 | 在 Parallels `Windows 11` VM 的 `C:\Users\eden\github\bifrost` 切到 `codex/tray-helper-design`，初始化 VS `vcvarsarm64_amd64` 后执行 x86_64 target 复现：`cargo test -p bifrost-agent test_exec_command_tty_reports_isatty_true --locked --target x86_64-pc-windows-msvc -- --nocapture`、`exec_command_tty_prompt_stall_returns_control_to_model_for_stdin_decision`、`exec_command_long_task_stall_detection_returns_control_to_model`、`exec_command_long_task_user_message_interrupts_runtime_wait_then_continues`。 | 通过。真实复现到 Windows x86_64 PTY child `exit_code=-1073741502` 和 child-process timing hang；修复后前三个 Windows-hostile 用例显式 ignored，`exec_command_long_task_user_message_interrupts_runtime_wait_then_continues` 通过 |
 | 2026-06-11 | TC-CWUT-07 | 跟进 GitHub Actions run `27353589451` 的 `Windows Unit Tests (x86_64)`，定位到 `crates\agent\src\tools\exec_command.rs:1778` 在 Windows cfg 下引用非 Windows helper `tty_probe_expected_output()`；本地执行 `cargo test -p bifrost-agent test_exec_command_tty_reports_isatty_true --lib -- --nocapture` 与 `cargo fmt --all -- --check`。 | 通过。本地非 Windows 仍验证 marker，Windows 轮询退出条件改为只等待 exit code，避免 Windows cfg 编译失败 |
 | 2026-06-11 | TC-CWUT-08 | 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin state::tests::request_tray_launch_invokes_registered_callback --lib -- --nocapture` 与 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin state::tests::reconcile_socket_summary --lib -- --nocapture`。 | 通过，托盘 callback 与 4 个 reconcile socket summary 单测均使用显式临时 `RulesStorage` 后稳定通过 |
+| 2026-06-11 | TC-CWUT-09 | 在 Parallels `Windows 11` VM 的 `C:\Users\eden\github\bifrost` 同步本次修复后，使用 rustup shim 优先的 PATH、VS LLVM ARM64 `lld-link` 与 `SKIP_FRONTEND_BUILD=1` 执行 `cargo test -p bifrost-agent --locked --target x86_64-pc-windows-msvc --no-run`。 | 通过，生成 `bifrost_agent` lib test、`p1_tools_e2e` 和 `session_skills_integration` 三个 Windows x86_64 测试二进制；覆盖 GitHub Actions E0425 `tty_probe_expected_output` 编译回归 |
