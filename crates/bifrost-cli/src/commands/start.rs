@@ -2371,16 +2371,16 @@ fn build_tray_launch_callback(
                 if !super::tray_launcher::should_launch_tray(no_tray, &data_dir) {
                     return;
                 }
-                launch_tray_helper_if_enabled(
+                launch_tray_helper_if_enabled(TrayLaunchHelperRequest {
                     no_tray,
-                    &data_dir,
-                    &runtime_file,
+                    data_dir: &data_dir,
+                    runtime_file: &runtime_file,
                     pid,
-                    &admin_url,
+                    admin_url: &admin_url,
                     port,
-                    bifrost_self_bin.as_deref(),
-                    &tray_start_args,
-                );
+                    bifrost_bin: bifrost_self_bin.as_deref(),
+                    start_args: &tray_start_args,
+                });
                 if data_dir.join("tray.pid").exists() {
                     return;
                 }
@@ -2396,29 +2396,31 @@ fn build_tray_launch_callback(
     })
 }
 
-fn launch_tray_helper_if_enabled(
+struct TrayLaunchHelperRequest<'a> {
     no_tray: bool,
-    data_dir: &Path,
-    runtime_file: &Path,
+    data_dir: &'a Path,
+    runtime_file: &'a Path,
     pid: u32,
-    admin_url: &str,
+    admin_url: &'a str,
     port: u16,
-    bifrost_bin: Option<&Path>,
-    start_args: &[String],
-) {
-    if !super::tray_launcher::should_launch_tray(no_tray, data_dir) {
+    bifrost_bin: Option<&'a Path>,
+    start_args: &'a [String],
+}
+
+fn launch_tray_helper_if_enabled(request: TrayLaunchHelperRequest<'_>) {
+    if !super::tray_launcher::should_launch_tray(request.no_tray, request.data_dir) {
         return;
     }
     if let Some(tray_bin) = super::tray_launcher::find_tray_binary() {
         super::tray_launcher::launch_tray_helper(
             &tray_bin,
-            data_dir,
-            runtime_file,
-            pid,
-            Some(admin_url),
-            Some(port),
-            bifrost_bin,
-            start_args,
+            request.data_dir,
+            request.runtime_file,
+            request.pid,
+            Some(request.admin_url),
+            Some(request.port),
+            request.bifrost_bin,
+            request.start_args,
         );
     } else {
         tracing::debug!("tray helper binary not found, skipping tray launch");
