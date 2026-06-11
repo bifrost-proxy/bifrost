@@ -79,11 +79,14 @@ fn test_cached_candidates_recheck_method_filters_per_request() {
 fn test_cached_candidates_recheck_disabled_state_per_request() {
     let mut disabled_rule = create_test_rule("state-cache.local", Protocol::Host, "127.0.0.1");
     disabled_rule.line_props.disabled = true;
-    let mut resolver = RulesResolver::new(vec![disabled_rule]);
+    let fallback_rule = create_test_rule("state-cache.local", Protocol::Host, "127.0.0.2");
+    let mut resolver = RulesResolver::new(vec![disabled_rule, fallback_rule]);
 
     let ctx = RequestContext::from_url("http://state-cache.local/api");
-    assert!(resolver.resolve(&ctx).is_empty());
-    assert_cached_candidate_count(&resolver, &ctx, 1);
+    let fallback_result = resolver.resolve(&ctx);
+    assert_eq!(fallback_result.len(), 1);
+    assert_eq!(fallback_result.rules[0].resolved_value, "127.0.0.2");
+    assert_cached_candidate_count(&resolver, &ctx, 2);
 
     resolver.rules[0].line_props.disabled = false;
     let enabled_result = resolver.resolve(&ctx);
@@ -91,7 +94,9 @@ fn test_cached_candidates_recheck_disabled_state_per_request() {
     assert_eq!(enabled_result.rules[0].resolved_value, "127.0.0.1");
 
     resolver.rules[0].line_props.disabled = true;
-    assert!(resolver.resolve(&ctx).is_empty());
+    let disabled_result = resolver.resolve(&ctx);
+    assert_eq!(disabled_result.len(), 1);
+    assert_eq!(disabled_result.rules[0].resolved_value, "127.0.0.2");
 }
 
 #[test]

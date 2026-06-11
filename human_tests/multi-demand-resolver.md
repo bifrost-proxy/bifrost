@@ -33,7 +33,7 @@
 预期结果：
 - `test_cached_candidates_recheck_header_filters_per_request`：`x-feature-env=feature-web` 命中 `127.0.0.1:3000`，同 URL 的 `x-feature-env=feature-mobile` 命中 `127.0.0.1:3001`，未知 header fallthrough 到 `127.0.0.1:3999`。
 - `test_cached_candidates_recheck_method_filters_per_request`：POST 请求命中规则，随后同 URL GET 请求不命中 POST-only 规则。
-- `test_cached_candidates_recheck_disabled_state_per_request`：候选缓存存在时，rule disabled 状态仍按当前规则状态重新判断。
+- `test_cached_candidates_recheck_disabled_state_per_request`：候选缓存存在时，rule disabled 状态仍按当前规则状态重新判断；前序 host 规则被禁用后应 fallthrough 到 fallback host。
 - `test_cached_candidates_recheck_exclude_filters_per_request_both_orders`：同 URL 下带 `x-block: true` 的请求被前序 `excludeFilter` 排除并 fallthrough 到后续 host，不带 header 的请求命中前序 host，两个请求顺序都不污染缓存。
 - `test_cached_candidates_recheck_request_modify_filters_per_request`：同 URL 不同 header 只产生对应 `reqHeaders://` 修改规则。
 - `test_cached_candidates_recheck_response_modify_filters_per_request`：同 URL 不同 header 只产生对应 `resHeaders://` 与 `replaceStatus://` 修改规则。
@@ -133,6 +133,7 @@
 - 2026-06-11：TC-MDR-05 执行 `cargo run -p bifrost-e2e -- --test filters_excludeFilter_header_cache_regression --test-timeout 120`，结果 1 passed。
 - 2026-06-11：TC-MDR-06 执行 `cargo run -p bifrost-e2e -- --test filters_skip_header_cache_regression --test-timeout 120`，结果 1 passed。
 - 2026-06-11：二次 CR 补充 fallback host 与 excludeFilter host fallthrough 覆盖后，复跑 TC-MDR-01、TC-MDR-02、TC-MDR-05 和 `cargo run -p bifrost-e2e -- --test cache_regression --test-timeout 120`，结果分别为 8 passed、1 passed、1 passed、5 passed。
+- 2026-06-12：CR 追问 disabled 缓存证明力后，将 `test_cached_candidates_recheck_disabled_state_per_request` 增强为禁用前序 host 后 fallthrough 到 fallback host，并执行 `cargo test -p bifrost-core rule::resolver::tests::multi_demand::test_cached_candidates_recheck_disabled_state_per_request -- --nocapture`，结果 1 passed。
 
 ## 清理步骤
 
