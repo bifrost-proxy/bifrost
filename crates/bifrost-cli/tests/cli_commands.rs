@@ -1,17 +1,13 @@
 use std::fs;
-use std::process::Command;
 
 use bifrost_cli::cli::{
     AiAsrCommands, AiAsrTaskCommands, AiAsrTaskDailyCommands, AiCommands, AiVoiceCommands,
     AiVoiceWakeBindingCommands, AiVoiceWakeCommands, AiVoiceWakeListenerCommands, CaCommands, Cli,
     Commands, RemoteCommands, SettingCommands, SyncCommands,
 };
+use bifrost_cli::commands::handle_install_skill;
 use clap::{CommandFactory, Parser};
 use clap_complete::{generate, Shell};
-
-fn bifrost_cmd() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_bifrost"))
-}
 
 fn run_help(args: &[&str]) -> String {
     let mut argv = Vec::with_capacity(args.len() + 2);
@@ -1170,23 +1166,15 @@ fn install_skill_installs_remote_skill_from_embedded_bundle() {
     let temp = tempfile::tempdir().expect("temp dir");
     let target_dir = temp.path().join("skills").join("bifrost");
 
-    let output = bifrost_cmd()
-        .env("BIFROST_INSTALL_SKILL_SOURCE", "embedded")
-        .arg("install-skill")
-        .arg("--tool")
-        .arg("codex")
-        .arg("--dir")
-        .arg(&target_dir)
-        .arg("-y")
-        .output()
-        .expect("failed to run install-skill");
-
-    assert!(
-        output.status.success(),
-        "install-skill should succeed: stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    std::env::set_var("BIFROST_INSTALL_SKILL_SOURCE", "embedded");
+    handle_install_skill(
+        Some("codex".to_string()),
+        Some(target_dir.clone()),
+        false,
+        true,
+    )
+    .expect("install-skill should succeed");
+    std::env::remove_var("BIFROST_INSTALL_SKILL_SOURCE");
 
     let primary_skill = target_dir.join("SKILL.md");
     let remote_skill = target_dir

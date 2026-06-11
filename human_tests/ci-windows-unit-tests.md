@@ -215,7 +215,7 @@ source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --test cli_co
 预期结果：
 - `run_help()` 使用 clap `Cli::command()` 内存渲染帮助文本，Windows runner 不会因为真实 `bifrost.exe --help` stdout/stderr 行为差异导致 help 子命令批量假阴性。
 - completion 测试使用 `clap_complete::generate()` 内存生成 bash/zsh/fish completion，仍覆盖同一 CLI schema、alias 和 value parser。
-- 只有 `install_skill_installs_remote_skill_from_embedded_bundle` 保留真实二进制执行，因为该用例验证文件落盘和内置 skill bundle。
+- `install_skill_installs_remote_skill_from_embedded_bundle` 直接调用 `handle_install_skill()` 真实写入临时目录，保留文件落盘和内置 skill bundle 验证，同时避免 Windows 子进程栈溢出。
 
 ## 清理步骤
 
@@ -241,4 +241,4 @@ source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --test cli_co
 | 2026-06-11 | TC-CWUT-10 | 跟进 GitHub Actions run `27358341485` 的 `Windows Unit Tests (x86_64)`，定位 `bifrost-asr::timeline::tests::generates_daily_summary_grouped_by_date` 在 Windows 上输出 `sub\meeting_b` 后断言 `sub/meeting_b` 失败；本地执行 ASR filtered tests。 | 通过，Daily summary source label 对 `\` 统一归一为 `/`，Windows/Linux 不需要 native ASR runtime 即可覆盖 core artifact 文本逻辑 |
 | 2026-06-11 | TC-CWUT-11 | 跟进 GitHub Actions run `27361916126` 的 `Windows Unit Tests (x86_64)`，定位 `commands::upgrade::tests::upgrade_archive_validation_rejects_invalid_tar_xz_before_extract` 因 Windows 早退跳过非 zip 预检而失败；本地执行目标过滤用例。 | 通过，`validate_downloaded_archive()` 仅对 zip 早退，坏 tar.xz 在所有平台都必须预检失败 |
 | 2026-06-11 | TC-CWUT-07 | 跟进 GitHub Actions run `27363268897` 的 `Windows Unit Tests (x86_64)`，定位 `p1_tools_e2e::exec_command_tool_works_end_to_end` long-running 分支单次/短窗口 poll 没拿到 `long-end`；本地执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-agent --test p1_tools_e2e exec_command_tool_works_end_to_end -- --nocapture`。 | 通过，long-running 命令改为平台化 PowerShell/Unix shell，初始输出与后续 poll 输出合并，bounded poll 最多 40 次直到 exit code 和 `long-end` 都出现 |
-| 2026-06-11 | TC-CWUT-12 | 跟进 GitHub Actions run `27364370904` 的 `Windows Unit Tests (x86_64)`，定位 `bifrost-cli --test cli_commands` 中 76 个 help/completion/alias 子进程输出断言在 Windows 下批量失败；本地执行完整 `cli_commands` 测试。 | 通过，help/completion/alias schema 测试改为 clap 内存渲染，真实安装 skill 用例仍保留二进制执行 |
+| 2026-06-11 | TC-CWUT-12 | 跟进 GitHub Actions run `27364370904` 与 `27365788851` 的 `Windows Unit Tests (x86_64)`，定位 `bifrost-cli --test cli_commands` 中 help/completion/alias 子进程输出断言批量失败，以及真实 `install-skill` 子进程在 Windows 下栈溢出；本地执行完整 `cli_commands` 测试。 | 通过，help/completion/alias schema 测试改为 clap 内存渲染，install-skill 落盘验证改为 in-process 调用 `handle_install_skill()` |
