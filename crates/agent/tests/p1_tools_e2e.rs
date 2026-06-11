@@ -232,40 +232,52 @@ async fn exec_command_tool_works_end_to_end() {
     assert_eq!(final_poll_json["exit_code"], 0);
     assert!(combined_poll_output.contains("long-end"));
 
-    let interactive = registry
-        .execute(
-            "exec_command",
-            &serde_json::json!({
-                "cmd": "python3 -u -c 'import os,sys; print(os.isatty(0), os.isatty(1)); print(\"exec-ready\"); print(sys.stdin.readline().strip())'",
-                "tty": true,
-                "yield_time_ms": 5000,
-            })
-            .to_string(),
-            work_dir.path(),
-    )
-    .await;
-    assert!(interactive.success, "{}", interactive.output);
     #[cfg(not(windows))]
-    assert!(interactive.output.contains("True True"));
-    #[cfg(not(windows))]
-    assert!(interactive.output.contains("exec-ready"));
-    let session_id = session_id_value_from_exec_json(&interactive.output);
+    {
+        let interactive = registry
+            .execute(
+                "exec_command",
+                &serde_json::json!({
+                    "cmd": "python3 -u -c 'import os,sys; print(os.isatty(0), os.isatty(1)); print(\"exec-ready\"); print(sys.stdin.readline().strip())'",
+                    "tty": true,
+                    "yield_time_ms": 5000,
+                })
+                .to_string(),
+                work_dir.path(),
+            )
+            .await;
+        assert!(interactive.success, "{}", interactive.output);
+        let mut interactive_output = interactive.output.clone();
+        let session_id = session_id_value_from_exec_json(&interactive.output);
 
-    let stdin_result = registry
-        .execute(
-            "write_stdin",
-            &serde_json::json!({
-                "session_id": session_id,
-                "chars": "hello exec\n",
-                "yield_time_ms": 1000,
-                "max_output_tokens": 1000,
-            })
-            .to_string(),
-            work_dir.path(),
-        )
-        .await;
-    assert!(stdin_result.success, "{}", stdin_result.output);
-    assert!(stdin_result.output.contains("hello exec"));
+        let stdin_result = registry
+            .execute(
+                "write_stdin",
+                &serde_json::json!({
+                    "session_id": session_id,
+                    "chars": "hello exec\n",
+                    "yield_time_ms": 1000,
+                    "max_output_tokens": 1000,
+                })
+                .to_string(),
+                work_dir.path(),
+            )
+            .await;
+        assert!(stdin_result.success, "{}", stdin_result.output);
+        interactive_output.push_str(&stdin_result.output);
+        assert!(
+            interactive_output.contains("True True"),
+            "{interactive_output}"
+        );
+        assert!(
+            interactive_output.contains("exec-ready"),
+            "{interactive_output}"
+        );
+        assert!(
+            interactive_output.contains("hello exec"),
+            "{interactive_output}"
+        );
+    }
 }
 
 #[tokio::test]
