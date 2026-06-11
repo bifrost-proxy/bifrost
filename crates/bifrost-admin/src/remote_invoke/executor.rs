@@ -3857,6 +3857,7 @@ mod tests {
         assert!(!windows_shell_uses_login_flag("cmd.exe"));
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn test_execute_shell_exec_streams_stdout_before_exit() {
         let _guard = crate::remote_invoke::remote_shell_test_guard();

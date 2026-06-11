@@ -374,10 +374,7 @@ pub(super) async fn schedule_external_runner_executes_from_configured_work_dir()
     let service = ImGatewayService::new(temp_dir.path());
     let work_dir = temp_dir.path().join("runner-workdir");
     std::fs::create_dir_all(&work_dir).expect("create runner workdir");
-    let expected_pwd = std::fs::canonicalize(&work_dir)
-        .expect("canonical workdir")
-        .display()
-        .to_string();
+    std::fs::write(work_dir.join("expected.marker"), b"ok").expect("write marker");
 
     let provider = test_provider();
     service
@@ -408,15 +405,24 @@ pub(super) async fn schedule_external_runner_executes_from_configured_work_dir()
             adapter: "mock".to_string(),
             instructions: None,
             adapter_config: crate::im_gateway::external_cli::ExternalCliAdapterConfig {
-                executable: Some("sh".to_string()),
-                args: vec![
-                    "-c".to_string(),
-                    "cat >/dev/null; if [ \"$(pwd -P)\" = \"$EXPECTED_PWD\" ]; then printf '%s\n' '{\"type\":\"assistant_final\",\"content\":\"WORKDIR_OK\"}'; else printf '%s\n' '{\"type\":\"assistant_final\",\"content\":\"WORKDIR_MISMATCH\"}'; fi".to_string(),
-                ],
-                env: std::collections::BTreeMap::from([(
-                    "EXPECTED_PWD".to_string(),
-                    expected_pwd,
-                )]),
+                executable: Some(if cfg!(windows) {
+                    "powershell.exe".to_string()
+                } else {
+                    "sh".to_string()
+                }),
+                args: if cfg!(windows) {
+                    vec![
+                        "-NoProfile".to_string(),
+                        "-Command".to_string(),
+                        "$input | Out-Null; if (Test-Path -LiteralPath '.\\expected.marker') { [Console]::Out.WriteLine('{\"type\":\"assistant_final\",\"content\":\"WORKDIR_OK\"}') } else { [Console]::Out.WriteLine('{\"type\":\"assistant_final\",\"content\":\"WORKDIR_MISMATCH\"}') }".to_string(),
+                    ]
+                } else {
+                    vec![
+                        "-c".to_string(),
+                        "cat >/dev/null; if [ -f ./expected.marker ]; then printf '%s\n' '{\"type\":\"assistant_final\",\"content\":\"WORKDIR_OK\"}'; else printf '%s\n' '{\"type\":\"assistant_final\",\"content\":\"WORKDIR_MISMATCH\"}'; fi".to_string(),
+                    ]
+                },
+                env: Default::default(),
                 ..Default::default()
             },
             inject_bifrost_tools: false,

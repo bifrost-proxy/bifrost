@@ -219,9 +219,7 @@ impl ImTaskExecutor {
     ) -> Result<(i32, String, String), String> {
         let mut command = if cfg!(windows) {
             let mut command = TokioCommand::new("cmd");
-            command
-                .arg("/C")
-                .arg(format!("\"{}\"", script_path.replace('"', "\"\"")));
+            command.arg("/C").arg(script_path);
             command
         } else {
             let mut command = TokioCommand::new("sh");
@@ -362,11 +360,7 @@ mod tests {
     }
 
     fn failure_script_text() -> &'static str {
-        if cfg!(windows) {
-            "exit /B 42"
-        } else {
-            "exit 42"
-        }
+        "exit 42"
     }
 
     fn long_running_script_text() -> &'static str {
