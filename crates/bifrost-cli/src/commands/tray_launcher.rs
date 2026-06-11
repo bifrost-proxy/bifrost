@@ -1,9 +1,12 @@
+use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use fs2::FileExt;
+
 use super::tray::TRAY_SUBCOMMAND;
 
-pub fn should_launch_tray(no_tray: bool) -> bool {
+pub fn should_launch_tray(no_tray: bool, data_dir: &Path) -> bool {
     if cfg!(target_os = "linux") {
         return false;
     }
@@ -13,7 +16,35 @@ pub fn should_launch_tray(no_tray: bool) -> bool {
     if std::env::var("BIFROST_DISABLE_TRAY").as_deref() == Ok("1") {
         return false;
     }
-    true
+    tray_enabled_by_config(data_dir)
+}
+
+pub(crate) fn tray_enabled_by_config(data_dir: &Path) -> bool {
+    let path = data_dir.join("config.toml");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return true,
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "failed to read tray config; keeping tray enabled"
+            );
+            return true;
+        }
+    };
+
+    match toml::from_str::<bifrost_storage::UnifiedConfig>(&content) {
+        Ok(config) => config.tray.enabled,
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "failed to parse tray config; keeping tray enabled"
+            );
+            true
+        }
+    }
 }
 
 pub fn find_tray_binary() -> Option<PathBuf> {
@@ -49,6 +80,15 @@ pub fn launch_tray_helper(
     bifrost_bin: Option<&Path>,
     start_args: &[String],
 ) {
+    if let Some(existing_pid) = existing_tray_helper_pid(data_dir) {
+        tracing::info!(
+            tray_pid = existing_pid,
+            data_dir = %data_dir.display(),
+            "tray helper already running; skipping launch"
+        );
+        return;
+    }
+
     let mut cmd = Command::new(tray_bin);
     cmd.arg(TRAY_SUBCOMMAND);
     cmd.arg("--data-dir")
@@ -118,24 +158,99 @@ pub fn launch_tray_helper(
     }
 }
 
+fn existing_tray_helper_pid(data_dir: &Path) -> Option<u32> {
+    if !tray_lock_is_held(data_dir) {
+        return None;
+    }
+    Some(read_tray_pid(data_dir).unwrap_or(0))
+}
+
+fn tray_lock_is_held(data_dir: &Path) -> bool {
+    let lock_path = data_dir.join("tray.lock");
+    if let Some(parent) = lock_path.parent() {
+        if let Err(error) = fs::create_dir_all(parent) {
+            tracing::warn!(
+                path = %parent.display(),
+                error = %error,
+                "failed to create tray data dir before checking existing helper"
+            );
+            return false;
+        }
+    }
+
+    let file = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+    {
+        Ok(file) => file,
+        Err(error) => {
+            tracing::warn!(
+                path = %lock_path.display(),
+                error = %error,
+                "failed to open tray lock before launching helper"
+            );
+            return false;
+        }
+    };
+
+    match file.try_lock_exclusive() {
+        Ok(()) => {
+            let _ = file.unlock();
+            false
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => true,
+        Err(error) => {
+            tracing::warn!(
+                path = %lock_path.display(),
+                error = %error,
+                "failed to probe tray lock before launching helper"
+            );
+            false
+        }
+    }
+}
+
+fn read_tray_pid(data_dir: &Path) -> Option<u32> {
+    let pid_path = data_dir.join("tray.pid");
+    std::fs::read_to_string(pid_path)
+        .ok()
+        .and_then(|pid| pid.trim().parse::<u32>().ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
 
     #[test]
     fn test_should_launch_tray_disabled_by_flag() {
-        assert!(!should_launch_tray(true));
+        let _guard = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!should_launch_tray(true, dir.path()));
     }
 
     #[test]
     fn test_should_launch_tray_enabled_on_non_linux() {
+        let _guard = env_lock();
         if cfg!(target_os = "linux") {
-            assert!(!should_launch_tray(false));
+            assert!(!should_launch_tray(
+                false,
+                tempfile::tempdir().unwrap().path()
+            ));
         } else {
             // Only true if BIFROST_DISABLE_TRAY is not set
             let prev = std::env::var("BIFROST_DISABLE_TRAY").ok();
             std::env::remove_var("BIFROST_DISABLE_TRAY");
-            assert!(should_launch_tray(false));
+            let dir = tempfile::tempdir().unwrap();
+            assert!(should_launch_tray(false, dir.path()));
             if let Some(v) = prev {
                 std::env::set_var("BIFROST_DISABLE_TRAY", v);
             }
@@ -144,9 +259,11 @@ mod tests {
 
     #[test]
     fn test_should_launch_tray_disabled_by_env() {
+        let _guard = env_lock();
         let prev = std::env::var("BIFROST_DISABLE_TRAY").ok();
         std::env::set_var("BIFROST_DISABLE_TRAY", "1");
-        assert!(!should_launch_tray(false));
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!should_launch_tray(false, dir.path()));
         match prev {
             Some(v) => std::env::set_var("BIFROST_DISABLE_TRAY", v),
             None => std::env::remove_var("BIFROST_DISABLE_TRAY"),
@@ -154,23 +271,76 @@ mod tests {
     }
 
     #[test]
+    fn test_should_launch_tray_disabled_by_config() {
+        let _guard = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "[tray]\nenabled = false\n").unwrap();
+        assert!(!should_launch_tray(false, dir.path()));
+    }
+
+    #[test]
     fn test_find_tray_binary_from_env() {
+        let _guard = env_lock();
+        let prev = std::env::var("BIFROST_TRAY_BIN").ok();
         let dir = tempfile::tempdir().unwrap();
         let bin_path = dir.path().join("bifrost-tray");
         std::fs::write(&bin_path, "").unwrap();
         std::env::set_var("BIFROST_TRAY_BIN", bin_path.to_str().unwrap());
         let result = find_tray_binary();
         assert_eq!(result, Some(bin_path));
-        std::env::remove_var("BIFROST_TRAY_BIN");
+        match prev {
+            Some(v) => std::env::set_var("BIFROST_TRAY_BIN", v),
+            None => std::env::remove_var("BIFROST_TRAY_BIN"),
+        }
     }
 
     #[test]
     fn test_find_tray_binary_env_missing_file() {
+        let _guard = env_lock();
+        let prev = std::env::var("BIFROST_TRAY_BIN").ok();
         std::env::set_var("BIFROST_TRAY_BIN", "/nonexistent/path/bifrost-tray");
         let result = find_tray_binary();
         // Falls through to sibling check
-        std::env::remove_var("BIFROST_TRAY_BIN");
+        match prev {
+            Some(v) => std::env::set_var("BIFROST_TRAY_BIN", v),
+            None => std::env::remove_var("BIFROST_TRAY_BIN"),
+        }
         // Result depends on whether current exe has a sibling - just verify no panic
         let _ = result;
+    }
+
+    #[test]
+    fn test_existing_tray_helper_pid_requires_active_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tray.pid"), "12345").unwrap();
+        assert_eq!(existing_tray_helper_pid(dir.path()), None);
+
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(dir.path().join("tray.lock"))
+            .unwrap();
+        lock.try_lock_exclusive().unwrap();
+
+        assert_eq!(existing_tray_helper_pid(dir.path()), Some(12345));
+        lock.unlock().unwrap();
+    }
+
+    #[test]
+    fn test_existing_tray_helper_pid_skips_when_lock_held_without_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(dir.path().join("tray.lock"))
+            .unwrap();
+        lock.try_lock_exclusive().unwrap();
+
+        assert_eq!(existing_tray_helper_pid(dir.path()), Some(0));
+        lock.unlock().unwrap();
     }
 }

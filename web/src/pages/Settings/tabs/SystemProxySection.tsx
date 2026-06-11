@@ -6,6 +6,7 @@ import type {
   SystemProxyLaunchdStatus,
   SystemProxyStatus,
 } from "../../../api/proxy";
+import type { TrayConfig } from "../../../api/config";
 import {
   isSystemProxyConfiguredEnabled,
   isSystemProxyLiveEnabledByBifrost,
@@ -17,10 +18,13 @@ interface SystemProxySectionProps {
   systemProxy: SystemProxyStatus | null;
   systemProxyLaunchd: SystemProxyLaunchdStatus | null;
   cliProxy: CliProxyStatus | null;
+  trayConfig: TrayConfig | null;
   systemProxyLoading: boolean;
   systemProxyLaunchdLoading: boolean;
+  trayLoading: boolean;
   injectBifrostBadge: boolean | null;
   injectBifrostBadgeLoading: boolean;
+  onToggleTray: (enabled: boolean) => void;
   onToggleSystemProxy: (enabled: boolean) => void;
   onToggleSystemProxyLaunchd: (enabled: boolean) => void;
   onToggleInjectBifrostBadge: (enabled: boolean) => void;
@@ -30,10 +34,13 @@ export default function SystemProxySection({
   systemProxy,
   systemProxyLaunchd,
   cliProxy,
+  trayConfig,
   systemProxyLoading,
   systemProxyLaunchdLoading,
+  trayLoading,
   injectBifrostBadge,
   injectBifrostBadgeLoading,
+  onToggleTray,
   onToggleSystemProxy,
   onToggleSystemProxyLaunchd,
   onToggleInjectBifrostBadge,
@@ -89,6 +96,35 @@ export default function SystemProxySection({
         size="small"
       >
         <Space direction="vertical" style={{ width: "100%" }}>
+          <Row justify="space-between" align="middle">
+            <Col>
+              <Text>Tray Icon</Text>
+            </Col>
+            <Col>
+              {trayConfig ? (
+                trayConfig.supported ? (
+                  <Switch
+                    checked={trayConfig.enabled}
+                    loading={trayLoading}
+                    onChange={onToggleTray}
+                    data-testid="settings-tray-switch"
+                  />
+                ) : (
+                  <Tooltip title="Tray icon is not supported on this platform">
+                    <Text type="secondary">Not Supported</Text>
+                  </Tooltip>
+                )
+              ) : (
+                <Text type="secondary">Loading...</Text>
+              )}
+            </Col>
+          </Row>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            Show the menu bar/status area controller for quick proxy and rules access.
+          </Text>
+
+          <Divider style={{ margin: "12px 0" }} />
+
           <Row justify="space-between" align="middle">
             <Col>
               <Text>Enable System Proxy</Text>

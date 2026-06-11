@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证 `bifrost` 内置 `__tray` 托盘 helper 在 macOS/Windows 上的完整生命周期：CLI 自动拉起、托盘图标显示、默认菜单操作、Rules 快速切换、自定义菜单加载、单实例保护、服务停止后状态变化、状态轮询刷新、可靠性回归，以及 `--no-tray` / `BIFROST_DISABLE_TRAY=1` 的禁用行为。
+验证 `bifrost` 内置 `__tray` 托盘 helper 在 macOS/Windows 上的完整生命周期：CLI 自动拉起、托盘图标显示、默认菜单操作、Rules 快速切换、自定义菜单加载、单实例保护、配置化启停、服务停止后状态变化、状态轮询刷新、主进程繁忙时菜单仍可响应的可靠性回归，以及 `--no-tray` / `BIFROST_DISABLE_TRAY=1` 的禁用行为。
 
 ## 前置条件
 
@@ -80,6 +80,45 @@ cargo run --bin bifrost -- start -p 8801 --unsafe-ssl --no-system-proxy --skip-c
 - Open Admin UI、Copy HTTP Proxy、Rules、System Proxy 等依赖 Admin URL 的菜单项仍使用启动参数中的 `127.0.0.1:8801`
 - 恢复 runtime 文件后菜单状态保持 Running，不出现 Stop/Start 与状态标题不一致
 
+### TC-TH-02-REG-03: 主进程 Admin API 繁忙时菜单仍快速响应
+
+**操作步骤：**
+1. 执行单元回归，模拟一个只监听但不响应的 Admin API 端口：
+```bash
+cargo test -p bifrost-cli quick_menu_snapshot -- --nocapture
+```
+2. 使用启动命令模板启动 Bifrost 服务和托盘
+3. 制造主进程短时高负载，例如并发触发规则/组/Admin API 刷新，或在开发环境中用 CPU profiler/压力脚本压高主进程 CPU
+4. 连续点击托盘图标 3 次，每次观察菜单是否能快速展开并保持可交互
+5. 查看 `.bifrost-tray-test/logs/tray.log*`
+
+**预期结果：**
+- 第 1 步单元回归通过，快速菜单快照在慢 Admin API 下不会等待 HTTP read timeout
+- 托盘菜单使用最近一次后台快照渲染，点击图标不会因为规则、组、active-summary 或 system proxy Admin API 慢而卡住
+- 主进程繁忙时，Rules/System Proxy 可以短暂显示旧状态或稍后更新，但菜单本身必须可展开、可移动高亮、可点击 Quit Tray/Open Logs 等本地动作
+- `tray.log*` 中不应出现由纯菜单展开导致的同步 Admin API 长耗时阻塞；菜单数据刷新应由后台快照线程完成
+
+### TC-TH-02-REG-04: CLI 重启不创建第二个托盘进程
+
+**操作步骤：**
+1. 执行单元回归，验证 `tray.lock` 被已有 helper 持有时 launcher 会跳过 spawn，stale `tray.pid` 不会误挡启动：
+```bash
+cargo test -p bifrost-cli existing_tray_helper_pid -- --nocapture
+```
+2. 使用启动命令模板启动 Bifrost 服务和托盘
+3. 记录当前 helper PID：
+```bash
+cat ./.bifrost-tray-test/tray.pid
+```
+4. 在不退出托盘的情况下，再次用同一 `BIFROST_DATA_DIR` 执行启动命令模板
+5. 再次读取 `tray.pid`，并检查 `pgrep -af 'bifrost.*__tray'` 中同一数据目录对应的 helper 数量
+
+**预期结果：**
+- 第 1 步单元回归通过
+- 第二次 CLI 启动不会创建新的托盘 helper；`tray.pid` 保持为第一次启动的 PID
+- 日志记录已有 helper 被复用或跳过启动，而不是短暂创建第二个 helper 后由内部 lock 退出
+- 同一 `BIFROST_DATA_DIR` 下始终只有一个活动 tray helper
+
 ### TC-TH-03: Open Admin UI 打开浏览器管理端
 
 **操作步骤：**
@@ -149,6 +188,31 @@ cargo run --bin bifrost -- start -p 8801 --unsafe-ssl --no-system-proxy
 **预期结果：**
 - Bifrost 服务正常启动
 - 系统托盘/菜单栏没有 Bifrost 图标
+
+### TC-TH-08B: 配置文件与 Settings 开关禁用托盘
+
+**操作步骤：**
+1. 执行单元回归，验证配置文件禁用会阻止 CLI launcher 创建托盘：
+```bash
+cargo test -p bifrost-cli should_launch_tray_disabled_by_config -- --nocapture
+```
+2. 使用启动命令模板启动 Bifrost 服务和托盘
+3. 打开 `http://127.0.0.1:8801/_bifrost/settings?tab=proxy`
+4. 确认 Proxy 页中 Tray Icon 开关位于 System Proxy 配置前方
+5. 关闭 Tray Icon 开关，并通过 API 验证：
+```bash
+curl -sS http://127.0.0.1:8801/_bifrost/api/config/tray
+```
+6. 等待最多 3 秒，检查 `.bifrost-tray-test/tray.pid` 是否被清理，并检查系统托盘/菜单栏图标是否消失
+7. 停止服务后，使用同一个 `BIFROST_DATA_DIR` 重新执行启动命令模板
+
+**预期结果：**
+- 第 1 步单元回归通过
+- Settings > Proxy 中 Tray Icon 开关显示在 System Proxy 开关之前
+- `PUT /_bifrost/api/config/tray` 后 `config.toml` 持久化 `[tray] enabled = false`
+- 运行中的托盘 helper 轮询到禁用配置后退出，`tray.pid` 被清理
+- 重新启动 CLI 时不会创建新的托盘 helper，系统托盘/菜单栏没有 Bifrost 图标
+- 再次打开 API 时返回 `{"enabled":false,"supported":true}`（Linux 上 supported 可为 false）
 
 ### TC-TH-09: 单实例保护——重复启动被拒绝
 
@@ -407,6 +471,9 @@ bash e2e-tests/tests/test_cli_tray_startup_ci.sh
 | --- | --- | --- | --- |
 | 2026-06-11 | TC-TH-02-REG-01 / TC-TH-21 | 针对 PR CI run `27305425195` 的 macOS shell shard 1 超时补充验证：失败 artifact 显示 `test_cli_foreground_ctrlc_no_enter.sh` 已输出 `PASS: foreground Ctrl-C stops without an extra Enter`，`test_cli_tray_menu_click_regression.sh` 卡在 shard 内自行 `cargo test -p bifrost-cli pure_tray_icon_event_does_not_rebuild_native_menu` 的冷编译/下载阶段。修复后脚本在 `SKIP_BUILD=true` 时跳过该 unit guard，并复用 `BIFROST_BIN` 或 `target/release/bifrost`，保留真实 macOS tray helper 启动、`tray.pid`、`tray.log` 和纯图标点击不重建菜单的日志断言。 | 本地执行 `SKIP_BUILD=true BIFROST_BIN=/Users/eden/work/github/bifrost-tray-helper-design/target/debug/bifrost bash e2e-tests/tests/test_cli_tray_menu_click_regression.sh` 通过，输出 `PASS: tray helper launched and pure icon interaction rebuild guard is active`；CI 待重跑确认 |
 | 2026-06-11 | TC-TH-21 | 针对 PR CI run `27308760100` 的 macOS shell shard 2 超时补充验证：失败 artifact 显示 `test_cli_tray_startup_ci.sh` 在 shard 内自行 `cargo build --release --bin bifrost`，900 秒预算内停在编译 `bifrost-proxy` 后被 shell runner 杀掉。修复后 startup smoke 在 `BIFROST_BIN`、`SKIP_BUILD=true` 或 `BIFROST_TRAY_STARTUP_SKIP_BUILD=1` 时复用现有 binary，只在普通本地运行且未要求 skip-build 时构建。 | 本地执行 `SKIP_BUILD=true BIFROST_BIN=$PWD/target/release/bifrost bash e2e-tests/tests/test_cli_tray_startup_ci.sh` 验证 skip-build 路径；CI 待重跑确认 |
+| 2026-06-11 | TC-TH-02-REG-03 | 针对主进程 CPU 高或 Admin API 慢时托盘菜单卡住的回归补充验证：实现上将规则、组、active-summary 与 system proxy 获取移动到后台快照线程，UI event loop 只读取最近一次快照。 | 本地执行 `cargo test -p bifrost-cli quick_menu_snapshot -- --nocapture` 通过，慢 Admin API 快速快照回归通过；本地执行 `SKIP_BUILD=true BIFROST_BIN=$PWD/target/debug/bifrost bash e2e-tests/tests/test_cli_tray_startup_ci.sh` 通过，输出 `PASS: tray helper started on Darwin` |
+| 2026-06-11 | TC-TH-02-REG-04 | 针对 CLI 重启时同一数据目录不能创建第二个 tray helper 的回归补充验证：launcher 在 spawn 前检查 `tray.lock`，已有 helper 持锁时直接跳过创建，helper 内部 lock 继续作为竞态兜底；lock 持有但 `tray.pid` 暂缺时也跳过 spawn，避免退出窗口期短暂重复创建。 | 本地执行 `cargo test -p bifrost-cli existing_tray_helper_pid -- --nocapture` 通过，包含 active lock + stale pid 与 lock held/no pid 两种路径 |
+| 2026-06-11 | TC-TH-08B | 针对配置文件和 Settings 开关禁用托盘的新增验证：`[tray] enabled = false` 阻止 CLI 启动 helper；运行中通过 Admin API 关闭 Tray Icon 后，helper 轮询到配置禁用并主动清理 `tray.pid` 退出。 | 本地执行 `cargo test -p bifrost-cli should_launch_tray_disabled_by_config -- --nocapture` 通过；本地真实启动当前 `target/debug/bifrost` 后执行 `PUT /_bifrost/api/config/tray {\"enabled\":false}` 通过，输出 `PASS: tray config API disabled running helper`；预置 `config.toml` 后重启通过，输出 `PASS: tray config disabled before start skipped helper` |
 
 ## 清理步骤
 

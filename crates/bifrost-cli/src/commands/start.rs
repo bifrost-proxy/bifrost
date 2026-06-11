@@ -2066,7 +2066,7 @@ pub fn run_foreground(
             );
 
             // Launch tray helper if enabled
-            if super::tray_launcher::should_launch_tray(no_tray) {
+            if super::tray_launcher::should_launch_tray(no_tray, &bifrost_dir) {
                 if let Some(tray_bin) = super::tray_launcher::find_tray_binary() {
                     let runtime_file = crate::process::get_runtime_file()
                         .unwrap_or_else(|_| bifrost_dir.join("runtime.json"));
@@ -3673,6 +3673,11 @@ fn spawn_admin_push_watcher_task(
                             .await;
                         push_manager
                             .broadcast_settings_scope(SETTINGS_SCOPE_CLI_PROXY)
+                            .await;
+                    }
+                    ConfigChangeEvent::TrayConfigChanged => {
+                        push_manager
+                            .broadcast_settings_scope(SETTINGS_SCOPE_PROXY_SETTINGS)
                             .await;
                     }
                     ConfigChangeEvent::AccessConfigChanged => {

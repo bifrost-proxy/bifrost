@@ -20,6 +20,7 @@ pub struct UnifiedConfig {
     pub tls: TlsConfig,
     pub access: AccessConfig,
     pub proxy: ProxySettings,
+    pub tray: TrayConfig,
     pub system_proxy: SystemProxyConfig,
     pub sync: SyncConfig,
     pub traffic: TrafficConfig,
@@ -37,6 +38,7 @@ impl UnifiedConfig {
             tls: TlsConfig::default(),
             access: AccessConfig::default(),
             proxy: ProxySettings::default(),
+            tray: TrayConfig::default(),
             system_proxy: SystemProxyConfig::default(),
             sync: SyncConfig::default(),
             traffic: TrafficConfig::default_for_data_dir(data_dir),
@@ -259,6 +261,23 @@ impl Default for AccessConfig {
 pub struct ProxySettings {
     pub upstream_proxy: Option<String>,
     pub no_proxy: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TrayConfig {
+    pub enabled: bool,
+}
+
+impl Default for TrayConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TrayConfigUpdate {
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

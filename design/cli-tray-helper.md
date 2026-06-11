@@ -112,6 +112,7 @@ Windows/macOS 上，`bifrost start` 在服务 ready 后尝试启动 helper：
    - 平台是 Windows 或 macOS；
    - 未设置 `--no-tray`；
    - 未设置 `BIFROST_DISABLE_TRAY=1`；
+   - `<data_dir>/config.toml` 中 `tray.enabled` 未被设置为 `false`；
    - 当前 data dir 未存在健康 helper；
    - 能找到当前 `bifrost` 二进制，或 `BIFROST_TRAY_BIN` 指向的兼容 `bifrost __tray` 二进制。
 5. 以 detached child process 启动 helper：
@@ -171,6 +172,8 @@ Windows/macOS：
 - `bifrost start` 默认尝试启动托盘。
 - `bifrost start --no-tray` 禁用本次托盘。
 - `BIFROST_DISABLE_TRAY=1 bifrost start` 禁用托盘，便于 CI、E2E、无头环境。
+- `config.toml` 的 `[tray] enabled = false` 持久禁用托盘，CLI start 必须跳过启动；运行中的 tray helper 轮询到该配置后必须主动退出。
+- WebUI Settings > Proxy 在 System Proxy 配置前提供 Tray Icon 开关，写入同一份 `[tray]` 配置。
 - `BIFROST_TRAY_BIN=<path>` 指定兼容 `bifrost __tray` 的二进制路径，便于开发测试。
 
 Linux：
@@ -770,6 +773,39 @@ Windows E2E：
 - 验证 `bifrost start` 不依赖 daemon mode。
 - 验证 helper 不弹出 console window。
 
+### 菜单响应性隔离
+
+托盘 helper 虽然是独立进程，但菜单渲染线程不能同步等待主进程 Admin API。主进程在高 CPU、规则热重载、Sync 请求或系统代理检查期间可能暂时无法及时响应；如果 helper 在 UI event loop 中同步请求 `/_bifrost/api/*`，用户点击托盘图标时会出现菜单卡住、转圈或长时间无响应。
+
+实现约束：
+
+- 原生 UI event loop 只读取最近一次 `MenuDataSnapshot`，不得直接调用规则、组、active-summary 或 system proxy Admin API。
+- `MenuDataSnapshot` 由后台线程刷新，包含 runtime、custom tray config、规则菜单、system proxy 状态和服务控制 binary 可用性。
+- 首次创建 tray icon 时使用本地快速快照：读取 runtime/启动参数、tray.json 和 binary 状态，不等待远端规则/组/system proxy API。
+- 后台刷新慢或失败时保留旧快照；菜单可以暂时显示旧规则状态或缺省状态，但必须保持可展开、可点击。
+- 菜单 action 的网络操作继续放在后台线程，完成后通过下一次快照刷新更新勾选状态。
+- 回归测试必须模拟一个只监听但不响应的 Admin API 端口，断言快速菜单快照和菜单构建不会等待 HTTP read timeout。
+
+### 单实例启动保护
+
+同一个 `BIFROST_DATA_DIR` 只能有一个 tray helper。helper 进程内部继续使用 `tray.lock` 做最终互斥；CLI `start` 在 spawn helper 之前也必须先探测同一数据目录下的 `tray.lock` 是否已被持有：
+
+- 如果 `tray.lock` 已被持有，说明已有 helper 正在运行，CLI 直接跳过 helper spawn，并记录 `tray helper already running; skipping launch`。
+- `tray.pid` 只作为日志与诊断信息，不能单独作为是否已有 helper 的权威依据，避免 crash 后 stale pid 或 PID 复用误挡启动。
+- 如果 `tray.lock` 可获取，说明没有活动 helper；CLI 释放探测锁后正常 spawn helper。
+- helper 内部 `TrayLock::acquire` 仍保留，覆盖并发启动竞态。
+- 回归测试必须覆盖：仅有 stale `tray.pid` 时不跳过；`tray.lock` 被持有且 `tray.pid` 存在时返回已有 pid 并跳过 spawn。
+
+### 配置化启停
+
+托盘启停必须由统一配置驱动，不能只依赖启动参数：
+
+- `UnifiedConfig` 增加 `[tray] enabled = true`，默认保持现有自动启动体验。
+- `GET /_bifrost/api/config` 与 `GET /_bifrost/api/config/tray` 返回 `{ enabled, supported }`。
+- `PUT /_bifrost/api/config/tray` 持久化 `enabled`，Settings > Proxy 的 Tray Icon 开关使用该接口。
+- `bifrost start` 在 spawn helper 前读取 `config.toml`，若 `tray.enabled = false` 则不创建托盘。
+- `bifrost __tray` 启动后和后台快照轮询中都检查配置，发现禁用时退出，保证 WebUI 关闭开关会收敛已有托盘。
+
 ### 真实场景测试
 
 实现阶段必须新增 `human_tests/cli-tray-helper.md` 并执行。
@@ -779,6 +815,9 @@ macOS 用例：
 - `TC-TRAY-MAC-01`：CLI 启动后 menu bar 出现 Bifrost 图标。
 - `TC-TRAY-MAC-02`：点击 `Open Admin UI` 打开管理端。
 - `TC-TRAY-MAC-02A`：点击 menu bar 图标后默认菜单保持展开，不闪烁消失。
+- `TC-TRAY-MAC-02B`：主进程 Admin API 繁忙或无响应时，托盘菜单仍从缓存快速展开。
+- `TC-TRAY-MAC-02C`：CLI 重启时，同一数据目录已有 tray helper 则不再创建第二个托盘进程。
+- `TC-TRAY-MAC-02D`：Settings > Proxy 关闭 Tray Icon 后，配置持久化且已有托盘退出；重新 `bifrost start` 不再创建托盘。
 - `TC-TRAY-MAC-03`：`Copy HTTP Proxy` 后剪贴板内容正确。
 - `TC-TRAY-MAC-04`：`Quit Tray` 不停止主服务。
 - `TC-TRAY-MAC-05`：`Stop Bifrost` 停止主服务，helper 进入 stopped 状态。
@@ -788,6 +827,9 @@ Windows 用例：
 
 - `TC-TRAY-WIN-01`：CLI 启动后 notification area 出现 Bifrost 图标。
 - `TC-TRAY-WIN-02`：点击托盘图标展示菜单。
+- `TC-TRAY-WIN-02B`：主进程 Admin API 繁忙或无响应时，notification area 菜单仍从缓存快速展开。
+- `TC-TRAY-WIN-02C`：CLI 重启时，同一数据目录已有 tray helper 则不再创建第二个 notification area helper。
+- `TC-TRAY-WIN-02D`：Settings > Proxy 关闭 Tray Icon 后，配置持久化且已有 notification area helper 退出；重新 `bifrost start` 不再创建托盘。
 - `TC-TRAY-WIN-03`：`Open Admin UI` 打开管理端。
 - `TC-TRAY-WIN-04`：`--no-tray` 不出现托盘图标。
 - `TC-TRAY-WIN-05`：Explorer 重启后图标恢复。
@@ -805,6 +847,9 @@ Linux 用例：
 | fmt | `cargo fmt --all -- --check` | 无 diff |
 | clippy | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | 无 warning |
 | unit | `cargo test -p bifrost-cli tray` | 全部通过 |
+| tray 响应性 | `cargo test -p bifrost-cli quick_menu_snapshot -- --nocapture` | 慢 Admin API 不阻塞快速菜单快照 |
+| tray 单实例 | `cargo test -p bifrost-cli existing_tray_helper_pid -- --nocapture` | lock 被持有才跳过 helper spawn，stale pid 不误判 |
+| tray 配置化启停 | `cargo test -p bifrost-cli should_launch_tray_disabled_by_config -- --nocapture` + `curl /_bifrost/api/config/tray` | 配置禁用阻止 CLI spawn，WebUI/API 可持久切换 |
 | CLI focused | `cargo test -p bifrost-cli tray_launcher` | 全部通过 |
 | 依赖红线 | `cargo tree -p bifrost-cli` 后搜索禁用依赖 | 不包含 Tauri/Wry/WebView 等浏览器内核或重型 GUI 运行时；轻量托盘库（tray-icon/muda/tao 等）允许 |
 | macOS smoke | `target/debug/bifrost __tray ...` | 菜单栏图标出现且菜单可操作 |

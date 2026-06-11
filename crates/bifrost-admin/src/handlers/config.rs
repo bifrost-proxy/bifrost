@@ -1,9 +1,9 @@
 use bifrost_storage::{
     CollapsedSections, FilterPanelConfig, PinnedFilter, PinnedFilterType, SandboxConfigUpdate,
     SandboxFileConfigUpdate, SandboxLimitsConfigUpdate, SandboxNetConfigUpdate, ServerConfigUpdate,
-    TlsConfigUpdate, TrafficConfigUpdate, UiConfigUpdate, DEFAULT_BREAKPOINT_TIMEOUT_MS,
-    DEFAULT_TRAFFIC_MAX_RECORDS, MAX_BREAKPOINT_TIMEOUT_MS, MAX_TRAFFIC_MAX_RECORDS,
-    MIN_BREAKPOINT_TIMEOUT_MS, MIN_TRAFFIC_MAX_RECORDS,
+    TlsConfigUpdate, TrafficConfigUpdate, TrayConfigUpdate, UiConfigUpdate,
+    DEFAULT_BREAKPOINT_TIMEOUT_MS, DEFAULT_TRAFFIC_MAX_RECORDS, MAX_BREAKPOINT_TIMEOUT_MS,
+    MAX_TRAFFIC_MAX_RECORDS, MIN_BREAKPOINT_TIMEOUT_MS, MIN_TRAFFIC_MAX_RECORDS,
 };
 use bytes::Bytes;
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
@@ -39,8 +39,15 @@ pub struct TlsConfig {
 pub struct ProxySettingsResponse {
     pub server: ServerConfig,
     pub tls: TlsConfig,
+    pub tray: TrayConfig,
     pub port: u16,
     pub host: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrayConfig {
+    pub enabled: bool,
+    pub supported: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +84,11 @@ pub struct UpdateTlsConfigRequest {
     pub ip_intercept_include: Option<Vec<String>>,
     pub unsafe_ssl: Option<bool>,
     pub disconnect_on_config_change: Option<bool>,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateTrayConfigRequest {
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,6 +159,11 @@ pub async fn handle_config(
         "/api/config/tls" | "/api/config/tls/" => match method {
             Method::GET => get_tls_config(state).await,
             Method::PUT => update_tls_config(req, state).await,
+            _ => method_not_allowed(),
+        },
+        "/api/config/tray" | "/api/config/tray/" => match method {
+            Method::GET => get_tray_config(state).await,
+            Method::PUT => update_tray_config(req, state).await,
             _ => method_not_allowed(),
         },
         "/api/config/server" | "/api/config/server/" => match method {
@@ -410,21 +427,35 @@ async fn update_sandbox_config(
 
 async fn get_proxy_settings(state: SharedAdminState) -> Response<BoxBody> {
     let runtime_config = state.runtime_config.read().await;
-    let server_config = if let Some(ref config_manager) = state.config_manager {
+    let (server_config, tray_config) = if let Some(ref config_manager) = state.config_manager {
         let config = config_manager.config().await;
-        ServerConfig {
-            timeout_secs: config.server.timeout_secs,
-            http1_max_header_size: config.server.http1_max_header_size,
-            http2_max_header_list_size: config.server.http2_max_header_list_size,
-            websocket_handshake_max_header_size: config.server.websocket_handshake_max_header_size,
-        }
+        (
+            ServerConfig {
+                timeout_secs: config.server.timeout_secs,
+                http1_max_header_size: config.server.http1_max_header_size,
+                http2_max_header_list_size: config.server.http2_max_header_list_size,
+                websocket_handshake_max_header_size: config
+                    .server
+                    .websocket_handshake_max_header_size,
+            },
+            TrayConfig {
+                enabled: config.tray.enabled,
+                supported: tray_supported(),
+            },
+        )
     } else {
-        ServerConfig {
-            timeout_secs: 30,
-            http1_max_header_size: 64 * 1024,
-            http2_max_header_list_size: 256 * 1024,
-            websocket_handshake_max_header_size: 64 * 1024,
-        }
+        (
+            ServerConfig {
+                timeout_secs: 30,
+                http1_max_header_size: 64 * 1024,
+                http2_max_header_list_size: 256 * 1024,
+                websocket_handshake_max_header_size: 64 * 1024,
+            },
+            TrayConfig {
+                enabled: tray_supported(),
+                supported: tray_supported(),
+            },
+        )
     };
 
     let response = ProxySettingsResponse {
@@ -440,11 +471,86 @@ async fn get_proxy_settings(state: SharedAdminState) -> Response<BoxBody> {
             unsafe_ssl: runtime_config.unsafe_ssl,
             disconnect_on_config_change: runtime_config.disconnect_on_config_change,
         },
+        tray: tray_config,
         port: state.port(),
         host: "127.0.0.1".to_string(),
     };
 
     json_response(&response)
+}
+
+async fn get_tray_config(state: SharedAdminState) -> Response<BoxBody> {
+    let Some(ref config_manager) = state.config_manager else {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Config manager not available",
+        );
+    };
+
+    let config = config_manager.config().await;
+    json_response(&TrayConfig {
+        enabled: config.tray.enabled,
+        supported: tray_supported(),
+    })
+}
+
+async fn update_tray_config(req: Request<Incoming>, state: SharedAdminState) -> Response<BoxBody> {
+    use http_body_util::BodyExt;
+
+    let body = match req.collect().await {
+        Ok(b) => b.to_bytes(),
+        Err(e) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Failed to read body: {}", e),
+            )
+        }
+    };
+
+    let request: UpdateTrayConfigRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e)),
+    };
+
+    if request.enabled.is_none() {
+        return error_response(StatusCode::BAD_REQUEST, "enabled is required");
+    }
+
+    let Some(ref config_manager) = state.config_manager else {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Config manager not available",
+        );
+    };
+
+    match config_manager
+        .update_tray_config(TrayConfigUpdate {
+            enabled: request.enabled,
+        })
+        .await
+    {
+        Ok(config) => {
+            tracing::info!(
+                enabled = config.enabled,
+                "Tray config updated and persisted"
+            );
+            json_response(&TrayConfig {
+                enabled: config.enabled,
+                supported: tray_supported(),
+            })
+        }
+        Err(e) => {
+            tracing::error!("Failed to persist tray config: {}", e);
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Failed to save config: {}", e),
+            )
+        }
+    }
+}
+
+fn tray_supported() -> bool {
+    !cfg!(target_os = "linux")
 }
 
 async fn get_server_config(state: SharedAdminState) -> Response<BoxBody> {

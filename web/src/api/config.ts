@@ -14,8 +14,14 @@ export interface TlsConfig {
 
 export interface ProxySettings {
   tls: TlsConfig;
+  tray: TrayConfig;
   port: number;
   host: string;
+}
+
+export interface TrayConfig {
+  enabled: boolean;
+  supported: boolean;
 }
 
 export interface UpdateTlsConfigRequest {
@@ -40,6 +46,10 @@ export async function getTlsConfig(): Promise<TlsConfig> {
 
 export async function updateTlsConfig(config: UpdateTlsConfigRequest): Promise<TlsConfig> {
   return put<TlsConfig>('/config/tls', config);
+}
+
+export async function updateTrayConfig(config: { enabled: boolean }): Promise<TrayConfig> {
+  return put<TrayConfig>('/config/tray', config);
 }
 
 export interface TrafficConfig {
