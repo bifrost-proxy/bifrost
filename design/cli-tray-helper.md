@@ -1,7 +1,7 @@
 # CLI 原生托盘 Helper 方案
 
 > 状态：可实施方案，待 Review
-> 更新时间：2026-06-10
+> 更新时间：2026-06-11
 
 ## 结论
 
@@ -646,6 +646,19 @@ Windows：
 - `otool -L target/release/bifrost` 显示当前二进制链接 AppKit、Foundation、ApplicationServices、CoreGraphics、Carbon、QuartzCore、Metal、CoreData、CoreText、CoreImage、CloudKit、Security、SystemConfiguration 等系统库。
 - `cargo tree -p bifrost-cli` 显示通用 CLI 二进制仍包含 `bifrost-admin`、`bifrost-asr`、`reqwest`/`tokio`、`clap`、`tao`/`muda`/`tray-icon` 等大依赖；虽然 `__tray` 入口在 clap、全局日志和 crypto provider 前短路，但同一大二进制的代码和系统 framework 映射仍会进入 RSS 口径。
 
+代码级定位：
+
+| 位置 | 当前行为 | 内存影响判断 | 可实施动作 |
+| --- | --- | --- | --- |
+| `crates/bifrost-cli/src/main.rs` | `commands::tray::run_if_tray_process()` 已在 panic hook、crypto provider、clap parse、主日志初始化前执行 | 启动初始化路径已经足够早，继续挪入口收益很小 | 保持早返回；后续瘦身不应回退这个入口顺序 |
+| `crates/bifrost-cli/Cargo.toml` | `bifrost-cli` 同时直接链接 `bifrost-admin`、`bifrost-proxy`、`bifrost-sync`、`bifrost-asr`、`reqwest`、`tokio`、TUI 等主 CLI 依赖 | 即使 `__tray` 不执行这些代码，单二进制仍带来较大的代码段、链接段和系统库映射 | 若目标是降低 `ps RSS`，需要专用 helper binary 或 feature-gated slim binary，不再让 tray 复用完整 `bifrost-cli` |
+| `crates/bifrost-cli/src/commands/tray/tray.rs` | Tray 直接使用 `tao` 事件循环、`tray-icon` 图标、`muda` 菜单、`image` 解码、`open` 打开 URL/目录、`arboard` 剪贴板、`ureq` Admin API | `tao`/`tray-icon`/`muda` 是原生 UI 常驻开销；`image`/`open`/`arboard` 是可替换的小中型依赖；`ureq` 是合适的轻量 HTTP client | 先拆二进制；再把 `open` 替换成 macOS `open`/Windows `ShellExecuteW`，把 `arboard` 替换成 `pbcopy` 或 Win32 Clipboard，把图标加载改成平台资源以压缩依赖 |
+| `crates/bifrost-cli/src/commands/tray/menu.rs` | 只构造平台无关菜单模型和 action | 逻辑轻，适合抽出到共享 tray core crate | 直接迁移到 `bifrost-tray-core`，保持现有单元测试 |
+| `crates/bifrost-cli/src/commands/tray/config.rs` 与 `runtime.rs` | 只依赖 `serde`/`serde_json` 和少量平台 PID 检测 | 逻辑轻，适合复用；不应引入主配置管理器 | 直接迁移到 `bifrost-tray-core` |
+| `crates/bifrost-cli/src/commands/tray_launcher.rs` | `tray_enabled_by_config` 通过 `toml::from_str::<bifrost_storage::UnifiedConfig>` 读取 `[tray].enabled` | 如果被 slim helper 复用，会把 `bifrost-storage` 和配置大模型带入 helper | slim helper 内必须改成只解析 `[tray].enabled` 的小结构或 `toml::Value` |
+| `crates/bifrost-cli/src/commands/tray/tray.rs::http_agent` | 仅为直连 localhost Admin API 使用 `bifrost_core::direct_ureq_agent_builder()` | 为一个 HTTP builder 依赖 `bifrost-core` 不适合 slim helper | 将 direct `ureq::AgentBuilder` 封装下沉到 tiny shared utility，或在 helper 内本地实现 `try_proxy_from_env(false)` |
+| `assets/trayTemplate@2x.png` / `assets/bifrost.ico` | 运行时用 `image::load_from_memory` 解码为 RGBA，再交给 `tray-icon::Icon` | `image` 在 macOS 当前还被 `arboard` 和 `bifrost-admin/qrcode` 共同牵引；拆 helper 后仍可进一步裁剪 | slim helper 阶段保留 PNG/ICO 解码；native helper 阶段改用 `NSImage`/Windows resource 加载 |
+
 不损害功能前提下的优化分层：
 
 1. **已落地的运行时瘦身**：复用 `ureq::Agent`，缩小 tray 日志 non-blocking 队列，常驻/动作线程使用 512 KiB 小栈，远端 group 接口失败后 5 秒退避。这些改动降低长期分配和异常场景日志压力，但不能把 macOS `ps RSS` 从 55 MB 降到 30 MB 以下。
@@ -658,6 +671,28 @@ Windows：
 
 - v1 保留现有轻量库方案，使用 `Physical footprint` 作为 macOS 内存硬门禁，`ps RSS` 作为诊断指标。
 - 新开独立 spike 对比两条原型：`slim helper binary + tray-icon/muda/tao` 与 `native AppKit/Win32 helper`。每个原型只实现图标、默认菜单、Open Admin、Rules label mock、Quit，先测 `ps RSS`、`Physical footprint`、启动时间和二进制体积，再决定是否迁移完整功能。
+
+可落地路线：
+
+1. **Phase A：抽 tray core，不改变运行行为**
+   - 新增 `crates/bifrost-tray-core`，迁移 `commands/tray/{menu,config,runtime,lock}.rs` 和与 Admin API payload 相关的纯逻辑。
+   - `bifrost __tray` 继续存在，先从 core crate 调用同一套逻辑，保证现有 `cargo test -p bifrost-cli native_menu/recent_rule/toggle_single_rule` 仍通过。
+   - 验收重点是行为零回归，不以 RSS 降低为目标。
+2. **Phase B：新增瘦 helper binary**
+   - 新增 `crates/bifrost-tray-helper`，只依赖 `bifrost-tray-core`、`serde`、`serde_json`、`toml`、`fs2`、`tracing`、`tracing-appender`、`ureq`、`tao`、`tray-icon`、`muda`、`image`，避免链接 `bifrost-admin`、`bifrost-proxy`、`bifrost-sync`、`bifrost-asr`、`reqwest`、`tokio`、TUI。
+   - `bifrost start` 查找顺序调整为 `BIFROST_TRAY_BIN`、安装目录 sibling `bifrost-tray-helper`、当前 `bifrost __tray` fallback；这样可以逐步迁移，不破坏现有安装。
+   - `--bifrost-bin` 继续指向主 `bifrost`，Start/Stop 仍通过主 CLI 完成，helper 不需要链接主服务逻辑。
+   - 验收指标：macOS/Windows release helper 体积、启动时间、`ps RSS`、macOS `Physical footprint`、Windows private bytes；如果 `ps RSS` 仍高于 30 MB，则说明主要成本来自原生 UI 栈而不是主 CLI 链接体积。
+3. **Phase C：替换可裁剪依赖**
+   - 用平台 shell/API 替换 `open`：macOS 调 `/usr/bin/open` 或 AppKit `NSWorkspace`，Windows 用 `ShellExecuteW`。
+   - 用平台剪贴板替换 `arboard`：macOS 可先用 `/usr/bin/pbcopy`，Windows 用 `OpenClipboard`/`SetClipboardData`；替换后确认 `image` 不再被 clipboard 传递依赖放大。
+   - 用最小 `[tray].enabled` 解析替换 `bifrost_storage::UnifiedConfig`，避免瘦 helper 引入主配置模型。
+   - 验收指标：比较 Phase B 与 Phase C 的二进制体积、依赖树、`ps RSS` 和 private/footprint。
+4. **Phase D：原生 AppKit/Win32 helper**
+   - 只有 Phase B/C 仍无法满足“用户可见 RSS < 30 MB”时进入。
+   - macOS 直接用 `NSStatusItem`、`NSMenu`、`NSWorkspace`、`NSPasteboard`；Windows 直接用 `Shell_NotifyIconW`、hidden HWND、popup menu、`ShellExecuteW`、Win32 Clipboard。
+   - 移除 `tao`、`tray-icon`、`muda`，保留 `bifrost-tray-core` 菜单模型和 action 分发。
+   - 验收除内存外必须覆盖菜单展开不闪退、后台刷新不关闭菜单、Explorer 重启图标恢复、Settings 开关重新拉起 helper、Rules 单选/取消与最近 5 条快捷项。
 
 ## 打包与安装
 

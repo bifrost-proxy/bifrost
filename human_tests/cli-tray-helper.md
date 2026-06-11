@@ -541,6 +541,21 @@ BIFROST_DATA_DIR="$TMP_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
 - helper 空闲运行时不会因为远端 group 接口失败而每秒重复请求和写 warning；失败后按短退避周期重试
 - 测试结束后停止服务、杀掉 helper 并删除临时数据目录
 
+### TC-TH-23: Tray Helper 内存优化代码归因与瘦身方案验收
+
+**操作步骤：**
+1. 检查 `crates/bifrost-cli/src/main.rs` 中 `commands::tray::run_if_tray_process()` 是否仍在 panic hook、crypto provider、clap parse、主日志初始化之前执行
+2. 检查 `crates/bifrost-cli/Cargo.toml`，确认当前同二进制 `bifrost __tray` 仍会随 `bifrost-cli` 链接主服务/主 CLI 大依赖
+3. 检查 `crates/bifrost-cli/src/commands/tray/` 的 import 和 `cargo tree -p bifrost-cli --target aarch64-apple-darwin -i <crate>` 输出，确认 tray 自身直接依赖与同二进制继承依赖的边界
+4. 检查 `design/cli-tray-helper.md` 是否记录代码级归因、可落地分阶段方案和每阶段验收指标
+5. 如后续实现瘦 helper 或 native helper，分别按 Phase B/C/D 的指标记录 release helper 体积、macOS `ps RSS`、`Physical footprint`、Windows private bytes，并复跑 TC-TH-01 至 TC-TH-22 中受影响的真实场景
+
+**预期结果：**
+- `__tray` 早返回入口顺序保持不变，说明继续挪入口不是主要降 RSS 方向
+- 当前 RSS 高值被归因为“完整 `bifrost-cli` 同二进制链接 + AppKit/菜单栈共享 framework resident 页”，而不是规则缓存、Admin API 或日志符号段
+- 文档明确区分已落地的小优化、低风险 dirty heap 优化、瘦 helper binary、替换 `open`/`arboard`/`image` 依赖、原生 AppKit/Win32 helper 的收益与风险
+- 后续若目标是 `Physical footprint < 30 MB`，当前方案可沿用；若目标是用户可见 `ps RSS < 30 MB`，必须通过 Phase B/C/D 实测闭环确认，不能只靠现有同二进制微调承诺达标
+
 ## 本次执行记录
 
 | 日期 | 用例 | 执行方式 | 结果 |
@@ -553,6 +568,7 @@ BIFROST_DATA_DIR="$TMP_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
 | 2026-06-11 | TC-TH-13 | 针对 Rules 菜单只支持选中、不支持再次点击取消的回归补充验证：菜单 action 带上当前 checked 状态；点击未启用规则时继续执行单选收敛，点击当前已启用规则时只调用该规则 disable API，不再 enable 回去。 | 本地执行 `cargo test -p bifrost-cli toggle_single_rule -- --nocapture` 通过未选中选择路径；执行 `cargo test -p bifrost-cli enabled_rule_calls_admin_api_for_disable_only -- --nocapture` 通过已选中取消路径，断言只发 `PUT /_bifrost/api/rules/beta/disable`；执行 `cargo test -p bifrost-cli test_rules_menu_two_levels_without_groups -- --nocapture` 通过，断言 action 的 `currently_enabled` 与原生勾选状态一致 |
 | 2026-06-11 | TC-TH-13-REG-01 | 针对 Rules 点击一次但状态仍停留在旧规则的回归补充验证：旧实现把菜单中所有候选规则放进 action，日志中出现一次点击触发大量 `group rule disabled` 的现象；修复后 action 只携带当前已启用的其他规则，切换成功后立即刷新菜单快照并提升 generation。 | 本地执行 `cargo test -p bifrost-cli test_rules_menu_two_levels_without_groups -- --nocapture` 通过，断言未启用 `beta` 的 action 只携带已启用的 `alpha`；执行 `cargo test -p bifrost-cli recent_rule -- --nocapture` 通过，断言最近快捷项也不会携带全量候选；执行 `cargo test -p bifrost-cli toggle_single_rule -- --nocapture` 通过，断言切换路径只调用待禁用目标与新目标 |
 | 2026-06-11 | TC-TH-22 | 针对 tray helper RSS 超过 50 MB 的内存口径与运行时瘦身验证：复用 HTTP agent、缩小 tray 日志队列、常驻/动作线程使用小栈，并对远端 group 失败做短退避；同时区分 `ps RSS` 与 macOS `Physical footprint`。 | 本地执行 release 真实 helper 测量：`ps RSS` 启动后约 38 MB，12 秒后约 56 MB；`vmmap -summary` 显示 `Physical footprint: 17.8M`、dirty heap 约 11.9M，满足 30 MB 独占内存目标；`strip` 将二进制从 110M 降至 92M 但 RSS 不变，说明 RSS 主要来自共享 framework 映射而非符号段；远端 group 失败日志退避后 12 秒内 warning 约 3 次，不再每秒刷 |
+| 2026-06-11 | TC-TH-23 | 针对 tray helper 内存优化做代码级归因：检查 `main.rs` 早返回入口、`Cargo.toml` 主 CLI 依赖、tray 模块 import、`tray_launcher.rs` 配置读取依赖，以及 `arboard`/`open`/`image`/`tao`/`tray-icon`/`muda`/`bifrost-core` 的依赖树。 | 本地执行 `rg -n "run_if_tray|install_panic_hook|init_crypto_provider|Cli::parse|init_logging" crates/bifrost-cli/src/main.rs`，确认 `run_if_tray_process` 在主初始化前；执行 `cargo tree -p bifrost-cli --target aarch64-apple-darwin -i arboard/open/image/tao/tray-icon/muda/bifrost-core`，确认 tray 直接依赖与完整 CLI 继承依赖边界；已在 `design/cli-tray-helper.md` 记录 Phase A/B/C/D 瘦身方案与验收指标 |
 
 ## 清理步骤
 
