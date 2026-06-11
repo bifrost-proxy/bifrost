@@ -364,20 +364,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "pnpm"
-          cache-dependency-path: web/pnpm-lock.yaml
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
-        working-directory: web
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-unknown-linux-gnu
       - name: Install cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
       - uses: Swatinem/rust-cache@v2
         with:
           key: linux-aarch64
@@ -393,20 +386,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "pnpm"
-          cache-dependency-path: web/pnpm-lock.yaml
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
-        working-directory: web
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: armv7-unknown-linux-gnueabihf
       - name: Install cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
       - uses: Swatinem/rust-cache@v2
         with:
           key: linux-armv7
@@ -422,20 +408,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "pnpm"
-          cache-dependency-path: web/pnpm-lock.yaml
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
-        working-directory: web
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl
       - name: Install cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
       - uses: Swatinem/rust-cache@v2
         with:
           key: linux-musl-x86_64
@@ -451,20 +430,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "pnpm"
-          cache-dependency-path: web/pnpm-lock.yaml
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
-        working-directory: web
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-unknown-linux-musl
       - name: Install cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
       - uses: Swatinem/rust-cache@v2
         with:
           key: linux-musl-aarch64
@@ -551,7 +523,7 @@ jobs:
 
   build-cli-macos-x86_64:
     name: Build macOS CLI (x86_64-apple-darwin)
-    runs-on: macos-15-intel
+    runs-on: macos-15
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -824,7 +796,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-15-intel
+          - os: macos-15
             target: x86_64-apple-darwin
           - os: macos-15
             target: aarch64-apple-darwin
