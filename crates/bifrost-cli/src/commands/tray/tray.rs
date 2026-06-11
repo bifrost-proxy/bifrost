@@ -174,6 +174,8 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
                         &should_quit,
                         &should_reload,
                         &current_operation,
+                        &menu_data,
+                        &menu_data_generation,
                     );
                     action_triggered = true;
                 }
@@ -1223,6 +1225,8 @@ fn execute_action(
     quit_flag: &AtomicBool,
     reload_flag: &Arc<AtomicBool>,
     operation: &Arc<AtomicU8>,
+    menu_data: &Arc<Mutex<MenuDataSnapshot>>,
+    menu_data_generation: &Arc<AtomicU64>,
 ) {
     match action {
         MenuItemAction::OpenUrl(url) => {
@@ -1354,7 +1358,7 @@ fn execute_action(
         }
         MenuItemAction::SelectRule {
             target,
-            all_targets,
+            enabled_targets,
             currently_enabled,
         } => {
             let rt = runtime_for_menu(args);
@@ -1364,15 +1368,24 @@ fn execute_action(
             };
             let admin_url = rt.admin_url();
             let target = target.clone();
-            let all_targets = all_targets.clone();
+            let enabled_targets = enabled_targets.clone();
             let currently_enabled = *currently_enabled;
             let data_dir = args.data_dir.clone();
+            let args = args.clone();
             let reload_flag = reload_flag.clone();
+            let menu_data = menu_data.clone();
+            let menu_data_generation = menu_data_generation.clone();
             thread::spawn(move || {
-                if toggle_single_rule(&admin_url, &target, &all_targets, currently_enabled) {
+                if toggle_single_rule(&admin_url, &target, &enabled_targets, currently_enabled) {
                     if !currently_enabled {
                         record_recent_rule_target(&data_dir, &target);
                     }
+                    refresh_menu_data_snapshot(
+                        &args,
+                        ServiceState::Running,
+                        &menu_data,
+                        &menu_data_generation,
+                    );
                     reload_flag.store(true, Ordering::Relaxed);
                 }
             });
@@ -1389,7 +1402,7 @@ fn execute_action(
 fn toggle_single_rule(
     admin_url: &str,
     target: &RuleTarget,
-    all_targets: &[RuleTarget],
+    enabled_targets: &[RuleTarget],
     currently_enabled: bool,
 ) -> bool {
     let agent = http_agent();
@@ -1398,7 +1411,7 @@ fn toggle_single_rule(
         return call_rule_toggle(&agent, admin_url, target, false);
     }
 
-    for candidate in all_targets {
+    for candidate in enabled_targets {
         if candidate == target {
             continue;
         }
@@ -1666,28 +1679,38 @@ fn poll_menu_data(
             STATE_STOPPED => ServiceState::Stopped,
             _ => ServiceState::Disconnected,
         };
-        let next = load_menu_data_snapshot(args, svc_state, true);
-        let changed = match menu_data.lock() {
-            Ok(mut current) => {
-                if *current != next {
-                    *current = next;
-                    true
-                } else {
-                    false
-                }
-            }
-            Err(poisoned) => {
-                tracing::warn!("tray menu data snapshot lock was poisoned; replacing snapshot");
-                *poisoned.into_inner() = next;
-                true
-            }
-        };
-        if changed {
-            generation.fetch_add(1, Ordering::Relaxed);
-        }
+        refresh_menu_data_snapshot(args, svc_state, menu_data, generation);
 
         sleep_until_next_menu_data_poll(quit_flag);
     }
+}
+
+fn refresh_menu_data_snapshot(
+    args: &TrayArgs,
+    state: ServiceState,
+    menu_data: &Arc<Mutex<MenuDataSnapshot>>,
+    generation: &AtomicU64,
+) -> bool {
+    let next = load_menu_data_snapshot(args, state, true);
+    let changed = match menu_data.lock() {
+        Ok(mut current) => {
+            if *current != next {
+                *current = next;
+                true
+            } else {
+                false
+            }
+        }
+        Err(poisoned) => {
+            tracing::warn!("tray menu data snapshot lock was poisoned; replacing snapshot");
+            *poisoned.into_inner() = next;
+            true
+        }
+    };
+    if changed {
+        generation.fetch_add(1, Ordering::Relaxed);
+    }
+    changed
 }
 
 fn remove_own_tray_pid(data_dir: &Path) {

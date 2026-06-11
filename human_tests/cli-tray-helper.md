@@ -332,12 +332,28 @@ curl -sS -X POST http://127.0.0.1:8801/_bifrost/api/rules \
 - 顶层菜单存在 `Rules: tray-personal-a`
 - 只有个人规则时，Rules 下一级直接展示 `tray-personal-a` 和 `tray-personal-b`，不出现 `My Rules` 或组名层级
 - `tray-personal-a` 初始带原生勾选标记，`tray-personal-b` 初始不勾选
-- 点击 `tray-personal-b` 后，顶层文案更新为 `Rules: tray-personal-b`
+- 点击 `tray-personal-b` 后，托盘只需要禁用当前已启用的 `tray-personal-a` 并启用 `tray-personal-b`，不能对所有菜单候选规则批量调用 disable API
+- 点击 `tray-personal-b` 后，顶层文案更新为 `Rules: tray-personal-b`；菜单关闭后立即再次展开时，不能仍显示切换前的 `Rules: tray-personal-a`
 - `active-summary` 只包含 `tray-personal-b`，不包含 `tray-personal-a`
 - 再次点击已勾选的 `tray-personal-b` 后，托盘调用 `tray-personal-b` disable API，不重新 enable；顶层文案更新为 `Rules: None`，`active-summary` 不再包含 `tray-personal-b`
 - Rules 子菜单顶部展示最近 5 个成功切换过的规则快捷项；个人规则显示规则名，组规则显示 `组名/规则名`；超过 5 个时最旧项被淘汰
 - 删除 `tray-personal-a` 后，Rules 子菜单不再包含 `tray-personal-a`，仍包含 `tray-personal-b`
 - 准备、读取和切换均通过 Admin API 完成，没有直接编辑规则文件
+
+### TC-TH-13-REG-01: Rules 切换不会全量禁用候选规则且立即刷新快照
+
+**操作步骤：**
+1. 使用启动命令模板启动 Bifrost 服务
+2. 通过 Admin API 准备至少 1 条已启用规则和 3 条以上未启用规则，未启用规则需同时覆盖个人规则和可管理组规则
+3. 展开托盘菜单，点击其中一条未启用规则
+4. 立即再次展开托盘菜单，并调用 `curl -sS http://127.0.0.1:8801/_bifrost/api/rules/active-summary`
+5. 查看 `logs/tray.log*` 与主服务规则日志，确认本次点击对应的 enable/disable 请求数量
+
+**预期结果：**
+- 本次点击只对切换前已启用的规则调用 disable API，然后对目标规则调用 enable API；未启用的其他候选规则不会被逐个 disable
+- 如果点击前只有 1 条规则启用，则本次切换最多产生 1 次 disable 和 1 次 enable；不会因为菜单中存在多个个人/组候选规则而出现批量 `group rule disabled`
+- 点击成功后 helper 立即刷新菜单数据快照；再次打开菜单时顶层 `Rules: ...`、原生勾选状态和 `active-summary` 均指向新规则
+- 若 Admin API 返回失败，菜单可以保留旧状态，但必须在日志中记录失败请求；不能静默关闭菜单并让用户误以为已切换成功
 
 ### TC-TH-14: Rules 菜单存在组规则时展示三级并支持跨组单选
 
@@ -511,6 +527,7 @@ bash e2e-tests/tests/test_cli_tray_startup_ci.sh
 | 2026-06-11 | TC-TH-02-REG-04 | 针对 CLI 重启时同一数据目录不能创建第二个 tray helper 的回归补充验证：launcher 在 spawn 前检查 `tray.lock`，已有 helper 持锁时直接跳过创建，helper 内部 lock 继续作为竞态兜底；lock 持有但 `tray.pid` 暂缺时也跳过 spawn，避免退出窗口期短暂重复创建。 | 本地执行 `cargo test -p bifrost-cli existing_tray_helper_pid -- --nocapture` 通过，包含 active lock + stale pid 与 lock held/no pid 两种路径 |
 | 2026-06-11 | TC-TH-08B | 针对配置文件和 Settings 开关禁用/重新启用托盘的新增验证：`[tray] enabled = false` 阻止 CLI 启动 helper；运行中通过 Admin API 关闭 Tray Icon 后，helper 轮询到配置禁用并主动清理 `tray.pid` 退出；重新启用时 Admin API 通过 CLI 注入的 launcher 回调重新创建 helper，并对旧 helper 退出锁释放窗口做短重试。 | 本地执行 `cargo test -p bifrost-cli should_launch_tray_disabled_by_config -- --nocapture` 通过；本地真实启动当前 `target/debug/bifrost` 后执行 `PUT /_bifrost/api/config/tray {\"enabled\":false}` 通过，输出 `PASS: tray config API disabled running helper`；预置 `config.toml` 后重启通过，输出 `PASS: tray config disabled before start skipped helper`；本次补充执行 `SKIP_BUILD=true BIFROST_BIN=$PWD/target/debug/bifrost bash e2e-tests/tests/test_cli_tray_config_reenable.sh` 通过，输出 `PASS: tray helper relaunched after config enable (before=76710 after=77231)` |
 | 2026-06-11 | TC-TH-13 | 针对 Rules 菜单只支持选中、不支持再次点击取消的回归补充验证：菜单 action 带上当前 checked 状态；点击未启用规则时继续执行单选收敛，点击当前已启用规则时只调用该规则 disable API，不再 enable 回去。 | 本地执行 `cargo test -p bifrost-cli toggle_single_rule -- --nocapture` 通过未选中选择路径；执行 `cargo test -p bifrost-cli enabled_rule_calls_admin_api_for_disable_only -- --nocapture` 通过已选中取消路径，断言只发 `PUT /_bifrost/api/rules/beta/disable`；执行 `cargo test -p bifrost-cli test_rules_menu_two_levels_without_groups -- --nocapture` 通过，断言 action 的 `currently_enabled` 与原生勾选状态一致 |
+| 2026-06-11 | TC-TH-13-REG-01 | 针对 Rules 点击一次但状态仍停留在旧规则的回归补充验证：旧实现把菜单中所有候选规则放进 action，日志中出现一次点击触发大量 `group rule disabled` 的现象；修复后 action 只携带当前已启用的其他规则，切换成功后立即刷新菜单快照并提升 generation。 | 本地执行 `cargo test -p bifrost-cli test_rules_menu_two_levels_without_groups -- --nocapture` 通过，断言未启用 `beta` 的 action 只携带已启用的 `alpha`；执行 `cargo test -p bifrost-cli recent_rule -- --nocapture` 通过，断言最近快捷项也不会携带全量候选；执行 `cargo test -p bifrost-cli toggle_single_rule -- --nocapture` 通过，断言切换路径只调用待禁用目标与新目标 |
 
 ## 清理步骤
 

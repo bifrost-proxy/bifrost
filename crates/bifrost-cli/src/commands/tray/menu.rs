@@ -45,7 +45,7 @@ pub enum MenuItemAction {
     OpenDirectory(String),
     SelectRule {
         target: RuleTarget,
-        all_targets: Vec<RuleTarget>,
+        enabled_targets: Vec<RuleTarget>,
         currently_enabled: bool,
     },
     QuitTray,
@@ -274,8 +274,9 @@ fn build_rules_menu(
         });
     }
 
-    let all_targets = rules
+    let enabled_targets = rules
         .iter()
+        .filter(|rule| rule.enabled)
         .map(|rule| rule.target.clone())
         .collect::<Vec<_>>();
     let active_label = active_rule_label(rules);
@@ -288,14 +289,14 @@ fn build_rules_menu(
     };
 
     let mut children =
-        build_recent_rule_entries(rules, recent_rule_targets, &all_targets, is_running);
+        build_recent_rule_entries(rules, recent_rule_targets, &enabled_targets, is_running);
     let grouped_children = if has_group_rules {
-        build_grouped_rule_entries(rules, &all_targets, is_running, admin_rules_url)
+        build_grouped_rule_entries(rules, &enabled_targets, is_running, admin_rules_url)
     } else {
         rules
             .iter()
             .enumerate()
-            .map(|(index, rule)| rule_entry(rule, index, &all_targets, is_running))
+            .map(|(index, rule)| rule_entry(rule, index, &enabled_targets, is_running))
             .collect()
     };
     if !children.is_empty() && !grouped_children.is_empty() {
@@ -314,7 +315,7 @@ fn build_rules_menu(
 fn build_recent_rule_entries(
     rules: &[TrayRule],
     recent_rule_targets: &[RuleTarget],
-    all_targets: &[RuleTarget],
+    enabled_targets: &[RuleTarget],
     is_running: bool,
 ) -> Vec<MenuEntry> {
     let mut children = Vec::new();
@@ -334,7 +335,7 @@ fn build_recent_rule_entries(
             checked: rule.enabled,
             action: MenuItemAction::SelectRule {
                 target: rule.target.clone(),
-                all_targets: all_targets.to_vec(),
+                enabled_targets: other_enabled_targets(enabled_targets, &rule.target),
                 currently_enabled: rule.enabled,
             },
         }));
@@ -357,7 +358,7 @@ fn active_rule_label(rules: &[TrayRule]) -> Option<String> {
 
 fn build_grouped_rule_entries(
     rules: &[TrayRule],
-    all_targets: &[RuleTarget],
+    enabled_targets: &[RuleTarget],
     is_running: bool,
     admin_rules_url: Option<&str>,
 ) -> Vec<MenuEntry> {
@@ -370,7 +371,7 @@ fn build_grouped_rule_entries(
     if !personal_rules.is_empty() {
         let personal_children = personal_rules
             .into_iter()
-            .map(|(index, rule)| rule_entry(rule, index, all_targets, is_running))
+            .map(|(index, rule)| rule_entry(rule, index, enabled_targets, is_running))
             .collect();
         children.push(MenuEntry::Submenu(SubmenuDef {
             id: "rules_my_rules".to_string(),
@@ -401,7 +402,7 @@ fn build_grouped_rule_entries(
                 } => name == &group_name && rule.managed_group,
                 RuleTarget::Personal { .. } => false,
             })
-            .map(|(index, rule)| rule_entry(rule, index, all_targets, is_running))
+            .map(|(index, rule)| rule_entry(rule, index, enabled_targets, is_running))
             .collect();
         children.push(MenuEntry::Submenu(SubmenuDef {
             id: format!("rules_group_{}", sanitize_menu_id(&group_name)),
@@ -435,7 +436,7 @@ fn build_grouped_rule_entries(
 fn rule_entry(
     rule: &TrayRule,
     index: usize,
-    all_targets: &[RuleTarget],
+    enabled_targets: &[RuleTarget],
     is_running: bool,
 ) -> MenuEntry {
     item(MenuItemDef {
@@ -445,10 +446,18 @@ fn rule_entry(
         checked: rule.enabled,
         action: MenuItemAction::SelectRule {
             target: rule.target.clone(),
-            all_targets: all_targets.to_vec(),
+            enabled_targets: other_enabled_targets(enabled_targets, &rule.target),
             currently_enabled: rule.enabled,
         },
     })
+}
+
+fn other_enabled_targets(enabled_targets: &[RuleTarget], target: &RuleTarget) -> Vec<RuleTarget> {
+    enabled_targets
+        .iter()
+        .filter(|enabled_target| *enabled_target != target)
+        .cloned()
+        .collect()
 }
 
 fn rule_label(target: &RuleTarget) -> String {
@@ -914,16 +923,31 @@ mod tests {
         assert!(alpha.checked);
         match &alpha.action {
             MenuItemAction::SelectRule {
-                currently_enabled, ..
-            } => assert!(*currently_enabled),
+                currently_enabled,
+                enabled_targets,
+                ..
+            } => {
+                assert!(*currently_enabled);
+                assert!(enabled_targets.is_empty());
+            }
             other => panic!("unexpected action: {other:?}"),
         }
         assert_eq!(beta.label, "beta");
         assert!(!beta.checked);
         match &beta.action {
             MenuItemAction::SelectRule {
-                currently_enabled, ..
-            } => assert!(!*currently_enabled),
+                currently_enabled,
+                enabled_targets,
+                ..
+            } => {
+                assert!(!*currently_enabled);
+                assert_eq!(
+                    enabled_targets,
+                    &vec![RuleTarget::Personal {
+                        name: "alpha".to_string()
+                    }]
+                );
+            }
             other => panic!("unexpected action: {other:?}"),
         }
     }
@@ -1000,8 +1024,13 @@ mod tests {
         assert!(beta.checked);
         match &beta.action {
             MenuItemAction::SelectRule {
-                currently_enabled, ..
-            } => assert!(*currently_enabled),
+                currently_enabled,
+                enabled_targets,
+                ..
+            } => {
+                assert!(*currently_enabled);
+                assert!(enabled_targets.is_empty());
+            }
             other => panic!("unexpected action: {other:?}"),
         }
         assert!(find_item(&menu.children, "recent_rule_5").is_none());

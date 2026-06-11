@@ -390,14 +390,18 @@
         let target = RuleTarget::Personal {
             name: "beta".to_string(),
         };
-        let all_targets = vec![
+        let enabled_targets = vec![
             RuleTarget::Personal {
                 name: "alpha".to_string(),
             },
-            target.clone(),
         ];
 
-        assert!(toggle_single_rule(&admin_url, &target, &all_targets, false));
+        assert!(toggle_single_rule(
+            &admin_url,
+            &target,
+            &enabled_targets,
+            false
+        ));
         handle.join().unwrap();
 
         assert_eq!(
@@ -416,14 +420,19 @@
         let target = RuleTarget::Personal {
             name: "beta".to_string(),
         };
-        let all_targets = vec![
+        let enabled_targets = vec![
             RuleTarget::Personal {
                 name: "alpha".to_string(),
             },
             target.clone(),
         ];
 
-        assert!(toggle_single_rule(&admin_url, &target, &all_targets, true));
+        assert!(toggle_single_rule(
+            &admin_url,
+            &target,
+            &enabled_targets,
+            true
+        ));
         handle.join().unwrap();
 
         assert_eq!(
