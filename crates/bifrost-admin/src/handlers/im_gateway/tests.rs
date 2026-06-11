@@ -81,7 +81,7 @@ pub(super) fn fake_external_runner_workdir_command() -> (String, Vec<String>) {
                 "-NoProfile".to_string(),
                 "-NonInteractive".to_string(),
                 "-Command".to_string(),
-                "if (Test-Path -LiteralPath '.\\expected.marker') { [Console]::Out.WriteLine('{\"type\":\"assistant_final\",\"content\":\"WORKDIR_OK\"}') } else { [Console]::Out.WriteLine('{\"type\":\"assistant_final\",\"content\":\"WORKDIR_MISMATCH\"}') }".to_string(),
+                "$null = [Console]::In.ReadToEnd(); if (Test-Path -LiteralPath '.\\expected.marker') { [Console]::Out.WriteLine('{\"type\":\"assistant_final\",\"content\":\"WORKDIR_OK\"}') } else { [Console]::Out.WriteLine('{\"type\":\"assistant_final\",\"content\":\"WORKDIR_MISMATCH\"}') }".to_string(),
             ],
         )
     } else {
@@ -89,7 +89,7 @@ pub(super) fn fake_external_runner_workdir_command() -> (String, Vec<String>) {
             "sh".to_string(),
             vec![
                 "-c".to_string(),
-                "if [ -f ./expected.marker ]; then printf '%s\n' '{\"type\":\"assistant_final\",\"content\":\"WORKDIR_OK\"}'; else printf '%s\n' '{\"type\":\"assistant_final\",\"content\":\"WORKDIR_MISMATCH\"}'; fi".to_string(),
+                "cat >/dev/null; if [ -f ./expected.marker ]; then printf '%s\n' '{\"type\":\"assistant_final\",\"content\":\"WORKDIR_OK\"}'; else printf '%s\n' '{\"type\":\"assistant_final\",\"content\":\"WORKDIR_MISMATCH\"}'; fi".to_string(),
             ],
         )
     }

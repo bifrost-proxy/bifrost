@@ -240,7 +240,14 @@ pub(super) async fn schedule_agent_can_run_selected_external_runner_with_initial
     )
     .await;
 
-    assert_eq!(run.status, crate::im_gateway::types::TaskRunStatus::Success);
+    assert_eq!(
+        run.status,
+        crate::im_gateway::types::TaskRunStatus::Success,
+        "error={:?}, stdout={:?}, final_response={:?}",
+        run.error,
+        run.stdout_preview,
+        run.agent_final_response
+    );
     assert_eq!(run.runner_id.as_deref(), Some("chatgpt-test"));
     assert_eq!(run.provider_id.as_deref(), Some("feishu-main"));
     assert_eq!(run.target_id.as_deref(), Some("target-main"));
@@ -363,7 +370,14 @@ pub(super) async fn schedule_agent_adapter_config_overrides_runner_without_dropp
     )
     .await;
 
-    assert_eq!(run.status, crate::im_gateway::types::TaskRunStatus::Success);
+    assert_eq!(
+        run.status,
+        crate::im_gateway::types::TaskRunStatus::Success,
+        "error={:?}, stdout={:?}, final_response={:?}",
+        run.error,
+        run.stdout_preview,
+        run.agent_final_response
+    );
     assert_eq!(run.agent_final_response.as_deref(), Some("OVERRIDE_OK"));
 }
 
@@ -461,7 +475,14 @@ pub(super) async fn schedule_external_runner_executes_from_configured_work_dir()
     )
     .await;
 
-    assert_eq!(run.status, crate::im_gateway::types::TaskRunStatus::Success);
+    assert_eq!(
+        run.status,
+        crate::im_gateway::types::TaskRunStatus::Success,
+        "error={:?}, stdout={:?}, final_response={:?}",
+        run.error,
+        run.stdout_preview,
+        run.agent_final_response
+    );
     assert_eq!(run.agent_final_response.as_deref(), Some("WORKDIR_OK"));
 }
 
