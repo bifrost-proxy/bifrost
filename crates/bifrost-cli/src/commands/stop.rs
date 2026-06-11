@@ -203,16 +203,38 @@ fn run_stop_with_system_proxy_mode(
             bifrost_core::BifrostError::Config(format!("Failed to send SIGTERM: {}", e))
         })?;
 
-        for i in 0..300 {
-            std::thread::sleep(std::time::Duration::from_millis(100));
+        // Poll for the process to exit. The graceful shutdown usually completes
+        // within tens of milliseconds, so probe with a fine 5ms granularity for
+        // the first ~200ms to make the command "notice" the exit promptly, then
+        // degrade to a coarse 100ms interval to keep the overall ~30s budget
+        // (with SIGKILL escalation near the 25s mark) without busy-spinning.
+        const FAST_PROBE_INTERVAL_MS: u64 = 5;
+        const FAST_PROBE_COUNT: u64 = 40; // 40 * 5ms = first ~200ms covered finely
+        const SLOW_PROBE_INTERVAL_MS: u64 = 100;
+        const SIGKILL_DEADLINE_MS: u64 = 25_000;
+        const TOTAL_BUDGET_MS: u64 = 30_000;
+
+        let mut elapsed_ms: u64 = 0;
+        let mut sigkill_sent = false;
+        while elapsed_ms < TOTAL_BUDGET_MS {
+            let interval_ms = if elapsed_ms < FAST_PROBE_COUNT * FAST_PROBE_INTERVAL_MS {
+                FAST_PROBE_INTERVAL_MS
+            } else {
+                SLOW_PROBE_INTERVAL_MS
+            };
+            std::thread::sleep(std::time::Duration::from_millis(interval_ms));
+            elapsed_ms += interval_ms;
+
             if !is_process_running(pid) {
                 remove_pid()?;
                 println!("Bifrost proxy stopped.");
                 return Ok(());
             }
-            if i == 250 {
+
+            if !sigkill_sent && elapsed_ms >= SIGKILL_DEADLINE_MS {
                 println!("Sending SIGKILL...");
                 let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
+                sigkill_sent = true;
             }
         }
 
