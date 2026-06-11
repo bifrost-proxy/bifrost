@@ -677,6 +677,46 @@ Windows：
 - 不建议继续为了 `ps RSS < 30 MB` 在当前方案上做小修小补；实测已经证明外围依赖替换和独立 helper 都不能达成该目标。
 - macOS 验收口径建议使用 `Physical footprint < 30 MB`，`ps RSS` 只作为诊断指标；如果产品仍坚持用户可见 RSS 口径，需要先接受 AppKit 原生基线约 40 MB 的现实约束。
 
+### 发布包体积与 Rust 编译优化评估
+
+当前需要同时区分三个口径：
+
+1. **本地/CI 原始 release 二进制**：未压缩的 `target/release/bifrost`。开启 `[profile.release] strip = "symbols"` 后，本地 macOS arm64 实测约 95.8 MB；开启前约 110 MB。
+2. **打包前二进制**：release profile 已默认 strip，该口径影响 artifact 上传和后续压缩输入。
+3. **用户最终下载包**：本地 macOS arm64 release 复测 `.tar.gz` 约 42.7 MB，`.tar.xz` 约 27.5 MB；用户感知下载体积应优先看这个口径。
+
+已采用的低风险优化：
+
+- 根 `Cargo.toml` 设置 `[profile.release] strip = "symbols"`，让本地 release 构建和 CI release 构建默认去除符号，降低原始 artifact 与压缩输入体积。
+- Release workflow 在 Unix/macOS package 阶段继续 best-effort 执行 `strip`，作为旧 toolchain 或 profile 未生效时的兜底。
+- Unix/macOS CLI 发布包同时产出 `.tar.xz` 与 `.tar.gz`；安装脚本在本机 `tar` 支持 xz 时优先下载 `.tar.xz`，失败或不支持时自动回退 `.tar.gz`。Windows 继续使用 `.zip`。
+- 内置 `bifrost upgrade` 使用相同候选策略：Unix/macOS 优先 `.tar.xz`，下载失败、镜像不可用或本机禁用 xz 时回退 `.tar.gz`；Windows 仍只使用 `.zip`。
+- npm 发布链路继续优先读取 `.tar.gz` 生成平台 npm 包，同时支持 `.tar.xz` 作为 artifact 兜底来源；release job 在发布 npm 前强制校验 Unix/macOS 同时存在 `.tar.gz` 和 `.tar.xz`，Windows 存在 `.zip`。
+- 校验文件覆盖 `.tar.gz`、`.tar.xz` 和 `.zip`，不改变既有 Homebrew/npm 仍依赖 `.tar.gz` 的兼容路径。
+- 合入主干后 `install-binary.sh` 会立即从 main 生效，但 latest release 可能仍是旧包集合；因此 `.tar.xz` 缺失必须被视为正常兼容场景，脚本必须自动回退旧 `.tar.gz`，并继续使用旧 checksum 校验，不能让线上用户在新 release 发布前无法安装或更新。
+- 安装脚本的镜像探测和全镜像下载竞速必须有超时兜底，并且只等待自身启动的下载子进程；否则 `.tar.xz` 缺失或坏包这类优化路径失败，可能卡住而无法进入 `.tar.gz` 稳定路径。
+
+已评估但不默认启用的 Rust 高阶优化：
+
+| 手段 | 预期收益 | 本轮结论 | 后续门槛 |
+| --- | --- | --- | --- |
+| `lto = "thin"` + `codegen-units = 1` | 可能降低少量代码段体积，并改善跨 crate 优化 | 本地实验编译到 `bifrost-proxy` / `bifrost-admin` 时生成大量 `.rcgu.bc`，在仅剩约 3.7 GiB 可用空间的工作区触发 `No space left on device`；临时磁盘成本明显高于普通 release | 需要在专用 CI runner 或更大磁盘环境单独做 A/B，并同时记录构建耗时、峰值磁盘和最终包体积 |
+| `panic = "abort"` | 通常可减少 unwind 相关代码 | 会改变 panic 语义和析构路径，Bifrost 有终端 raw mode、后台任务、日志 flush、测试 panic 断言等路径，不能在未做全量验证前默认开启 | 需要全 workspace 测试、E2E、human_tests 和异常路径验证后再评估 |
+| `opt-level = "z"` / `"s"` | 可能进一步缩小二进制 | 可能牺牲代理热路径、脚本执行、ASR/ML 栈性能；当前用户体验更依赖代理吞吐和启动稳定性 | 需要压测代理吞吐、启动耗时、ASR 性能，并比较 `.tar.xz` 最终收益 |
+| `split-debuginfo` / 符号分离 | 对 macOS 调试符号管理有价值 | 当前最直接收益已由 `strip = "symbols"` 覆盖；发布包没有携带独立 dSYM/符号包需求 | 如后续需要 crash symbolication，可单独发布符号包而不是放入用户安装包 |
+
+更大体积来源判断：
+
+- macOS arm64 `bifrost-cli` 目前会编译 ASR full-local 能力，`qwen3-asr`、`sherpa-onnx`、`candle-*`、`tokenizers` 等 ML/ASR 依赖是显著体积来源。
+- Windows/Linux 已通过 target-gated dependency 和 CI/release workflow 注释约束，不准备也不打包 ASR native runtime。
+- 如果未来必须继续显著压缩 macOS arm64 包体积，真正有效的方向不是拆 tray 二进制，而是产品层面决定 ASR/ML 能力是否继续内置在同一个 CLI release 中，或是否改为首次使用时下载/安装本地 ASR runtime。该方向会影响功能可用性，不能作为本次无损优化默认落地。
+
+当前发布策略：
+
+- 保持单 `bifrost` 二进制分发，不拆托盘 helper。
+- 默认打开 release symbol strip，并发布 `.tar.xz` 优先下载路径；同时保留 `.tar.gz` 作为 Homebrew、npm、旧安装器和人工下载的兼容包。
+- Thin LTO、`panic=abort`、`opt-level=z/s` 暂作为实验项，不进入默认 release profile，避免用构建稳定性和运行时语义换取未经量化的体积收益。
+
 可落地路线：
 
 1. **保持现状：单二进制 + 跨平台 tray 基础库**

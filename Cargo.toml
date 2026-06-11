@@ -25,6 +25,11 @@ edition = "2021"
 authors = ["EdenLiu <hxfdarling@icloud.com>"]
 license = "MIT"
 
+[profile.release]
+# Keep locally built release artifacts close to the packaged binary size. The
+# release workflow also runs platform strip as a best-effort compatibility guard.
+strip = "symbols"
+
 [workspace.dependencies]
 thiserror = "2.0"
 tracing = "0.1"

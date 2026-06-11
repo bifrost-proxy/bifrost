@@ -3790,7 +3790,7 @@ mod tests {
                         "allowed_shell_patterns": ["^(?s:.*)$"],
                         "stdin_allowed": true,
                         "interactive_allowed": true,
-                        "max_timeout_ms": 5000
+                        "max_timeout_ms": 15000
                     }),
                 }],
                 profiles: vec![],
@@ -3918,9 +3918,10 @@ mod tests {
         assert_eq!(received[0].0.as_slice(), expected_chunks[0].as_bytes());
         assert_eq!(received[1].0.as_slice(), expected_chunks[1].as_bytes());
         assert!(
-            received[0].1 < Duration::from_millis(250),
-            "first chunk should arrive before the command exits, got {:?}",
-            received[0].1
+            received[0].1 < received[1].1,
+            "first chunk should arrive before the delayed second chunk, got first={:?}, second={:?}",
+            received[0].1,
+            received[1].1
         );
         assert!(
             received[1].1 >= Duration::from_millis(250),

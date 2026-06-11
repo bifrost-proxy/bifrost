@@ -297,6 +297,102 @@
 - CI 和 Release workflow 都为 Cargo 网络层开启 10 次重试、关闭 HTTP/2 multiplexing，并将 HTTP timeout 设置为 120 秒。
 - GitHub Actions macOS CLI build 遇到 crates.io sparse index HTTP/2 framing 抖动时不再因一次 `curl failed [16]` 直接失败。
 
+### TC-IBOC-13 Unix/macOS 安装脚本优先使用更小的 tar.xz 发布包
+
+操作步骤：
+
+1. 执行：
+   ```bash
+   source ~/.zshrc
+   BIFROST_INSTALL_BINARY_SKIP_MAIN=1 source ./install-binary.sh
+   get_archive_ext_candidates darwin
+   ```
+2. 在支持 xz 的环境下，检查输出第一行为 `tar.xz`，第二行为 `tar.gz`。
+3. 准备本地 mock release 目录，同时放置 `bifrost-vTEST-x86_64-apple-darwin.tar.xz` 与 `.tar.gz`，stub `download_github_file` 后调用 `install_binary_for_target x86_64-apple-darwin vTEST darwin <tmp-install> <tmp-work>`。
+4. 检查安装后的 `<tmp-install>/bifrost --version` 可执行，且实际下载文件优先命中 `.tar.xz`。
+5. 将 stub 调整为 `.tar.xz` 下载失败、`.tar.gz` 下载成功，再次调用安装函数。
+
+预期结果：
+
+- Unix/macOS 用户默认下载更小的 `.tar.xz` 包。
+- 当本机 `tar` 不支持 xz、或 `.tar.xz` 资产不存在/下载失败时，安装脚本自动回退 `.tar.gz`。
+- Windows PowerShell installer 仍使用 `.zip`，不受本用例影响。
+
+### TC-IBOC-14 Release profile 与 Unix/macOS 发布包体积优化配置检查
+
+操作步骤：
+
+1. 执行：
+   ```bash
+   source ~/.zshrc
+   grep -q '^\[profile.release\]' Cargo.toml
+   grep -q '^strip = "symbols"' Cargo.toml
+   grep -q 'tar -cJvf "\${ARCHIVE_NAME}.tar.xz"' .github/workflows/release.yml
+   grep -q 'dist/\*.tar.xz' .github/workflows/release.yml
+   grep -q 'get_archive_ext_candidates' install-binary.sh
+   grep -q 'release_archive_ext_candidates' crates/bifrost-cli/src/commands/upgrade.rs
+   grep -q 'archive.type === "tar.gz" || archive.type === "tar.xz"' scripts/npm-publish.mjs
+   ```
+2. 检查所有命令退出码为 0。
+
+预期结果：
+
+- 本地和 CI release 构建默认去除符号，降低打包输入体积。
+- Release workflow 额外产出 Unix/macOS `.tar.xz` 包，并上传对应 checksum。
+- Bash installer 使用 archive candidates 机制优先选择 `.tar.xz`，保留 `.tar.gz` 兼容回退。
+- 内置 `bifrost upgrade` 使用同类 archive candidates 机制，避免仍只下载 `.tar.gz`。
+- npm publish 脚本仍优先兼容 `.tar.gz`，但可以从 `.tar.xz` artifact 提取平台二进制，避免 npm 渠道被包类型扩展打断。
+
+### TC-IBOC-15 发布前必须覆盖脚本、NPM、Homebrew 与内置 upgrade 的包类型兼容
+
+操作步骤：
+
+1. 执行：
+   ```bash
+   source ~/.zshrc
+   grep -q 'Missing compatible tar.gz for Homebrew/npm/legacy installers' .github/workflows/release.yml
+   grep -q 'Missing smaller tar.xz for install script and bifrost upgrade' .github/workflows/release.yml
+   grep -q 'Missing npm-compatible Windows zip' .github/workflows/release.yml
+   grep -q 'x86_64-apple-darwin.tar.gz' .github/workflows/release.yml
+   grep -q 'aarch64-apple-darwin.tar.gz' .github/workflows/release.yml
+   ```
+2. 检查所有命令退出码为 0。
+
+预期结果：
+
+- Release job 在 npm publish 前校验所有 CLI artifact 目录存在。
+- Unix/macOS artifact 必须同时包含 `.tar.gz` 与 `.tar.xz`：`.tar.gz` 继续服务 Homebrew、npm、旧脚本和人工下载，`.tar.xz` 服务更小下载路径。
+- Windows artifact 必须包含 `.zip`，PowerShell installer、npm Windows 平台包和 Windows upgrade 不受 Unix 包类型变化影响。
+- Homebrew formula 仍读取 macOS `.tar.gz` checksum，不被新增 `.tar.xz` 影响。
+
+### TC-IBOC-16 优化下载路径失败时必须回退到线上稳定包类型
+
+操作步骤：
+
+1. 执行：
+   ```bash
+   source ~/.zshrc
+   BIFROST_INSTALL_BINARY_SKIP_MAIN=1 source ./install-binary.sh
+   BIFROST_DISABLE_XZ_ARCHIVE=1 get_archive_ext_candidates darwin
+   ```
+2. 检查输出只包含 `tar.gz`，证明 Bash installer 可通过环境变量禁用 `.tar.xz` 并回到旧稳定包。
+3. 执行：
+   ```bash
+   source ~/.zshrc
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli upgrade_archive_candidates_prefer_xz_then_keep_gz_compatibility --lib -- --nocapture
+   ```
+4. 准备本地 HTTP mock 旧 release，按 `bifrost-proxy/bifrost/releases/download/vOLD/` 目录只放 `.tar.gz` 与旧 checksum，不放 `.tar.xz`；将 `BIFROST_GITHUB_MIRROR` 与 `DEFAULT_GITHUB_MIRROR_URLS` 收窄到本地源后真实调用 `install_binary_for_target x86_64-apple-darwin vOLD darwin <tmp-install> <tmp-work>`。
+5. 准备本地 mock npm artifact，分别只放 `.tar.xz` 和同时放 `.tar.gz/.tar.xz`，执行 Node tar 提取校验。
+
+预期结果：
+
+- Bash installer 在 xz 被禁用或不可用时回退 `.tar.gz`。
+- main 分支新安装脚本在新 release 发布前面对旧 latest release 时，即使 `.tar.xz` 不存在，也会回退已有 `.tar.gz` 并按旧 checksum 校验。
+- `.tar.xz` 下载失败后，全镜像下载竞速必须能结束并继续下一候选包；不得因后台子进程 wait 范围过大而卡住。
+- 内置 `bifrost upgrade` 候选顺序为 `.tar.xz -> .tar.gz`，禁用 xz 时只使用 `.tar.gz`，Windows 只使用 `.zip`。
+- npm publish 仍优先使用 `.tar.gz` 生成平台包，同时能从 `.tar.xz` artifact 兜底提取二进制。
+- 任何新增下载优化失败都不会删除或绕过 `.tar.gz` / `.zip` 这条线上稳定路径。
+
 ## 清理步骤
 
 - 本用例只 source shell 函数和执行 dry-run，不产生持久化测试数据。
@@ -325,3 +421,7 @@
 | 2026-06-03 | TC-IBOC-11 | `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli upgrade_ --lib` | PASS：9 个 upgrade 相关测试通过，覆盖进度格式、镜像 URL 拼接、镜像展示名、下载 env 参数解析和 script install 输出继承终端 |
 | 2026-06-03 | TC-IBOC-12 | `grep -q 'CARGO_HTTP_MULTIPLEXING: "false"' .github/workflows/ci.yml && grep -q 'CARGO_NET_RETRY: "10"' .github/workflows/ci.yml && grep -q 'CARGO_HTTP_TIMEOUT: "120"' .github/workflows/ci.yml && grep -q 'CARGO_HTTP_MULTIPLEXING: "false"' .github/workflows/release.yml && grep -q 'CARGO_NET_RETRY: "10"' .github/workflows/release.yml && grep -q 'CARGO_HTTP_TIMEOUT: "120"' .github/workflows/release.yml` | PASS：CI 和 Release workflow 均保留 Cargo HTTP/2 multiplexing 关闭、10 次重试、120 秒 timeout |
 | 2026-06-10 | TC-IBOC-06 / TC-IBOC-07 | `bash e2e-tests/tests/test_install_binary_adaptive_download.sh` | PASS：8 个顶层用例通过；selected source 与 fallback race 用例改为单镜像离线 stub，避免 fake release asset 在 CI macOS shell shard 中触发真实 mirror HEAD 探测 |
+| 2026-06-11 | TC-IBOC-13 | `BIFROST_INSTALL_BINARY_SKIP_MAIN=1 source ./install-binary.sh` + 本地 fake release `.tar.xz`/`.tar.gz` stub 安装 | PASS：`get_archive_ext_candidates darwin` 输出 `tar.xz` 后跟 `tar.gz`；首次安装优先命中 `.tar.xz`，模拟 `.tar.xz` 下载失败后自动回退 `.tar.gz` |
+| 2026-06-11 | TC-IBOC-14 | `grep -q ... Cargo.toml .github/workflows/release.yml install-binary.sh crates/bifrost-cli/src/commands/upgrade.rs scripts/npm-publish.mjs` | PASS：release profile 设置 `strip = "symbols"`；Release workflow 产出并上传 `.tar.xz`；installer、内置 upgrade 和 npm publish 均有候选/兼容机制 |
+| 2026-06-11 | TC-IBOC-15 | `grep -q ... .github/workflows/release.yml` | PASS：release job 在 npm publish 前检查 Unix/macOS `.tar.gz` + `.tar.xz`、Windows `.zip`；Homebrew 仍读取 macOS `.tar.gz` checksum |
+| 2026-06-11 | TC-IBOC-16 | `BIFROST_DISABLE_XZ_ARCHIVE=1 get_archive_ext_candidates darwin`、旧 release 仅 `.tar.gz` 本地 HTTP mock 调用 `install_binary_for_target`、`cargo test -p bifrost-cli upgrade_archive --lib -- --nocapture`、本地 Node tar mock | PASS：Bash installer 禁用 xz 后只返回 `.tar.gz`；旧 release 只有 `.tar.gz` 时新脚本先尝试 `.tar.xz` 失败，全镜像 race 正常结束，再回退 `.tar.gz`，checksum verified，解压后的 mock `bifrost` 可执行；内置 upgrade 单测覆盖 `.tar.xz -> .tar.gz`、坏 `.tar.xz` 校验失败、禁用 xz、Windows zip；npm artifact mock 验证 `.tar.gz` 与 `.tar.xz` 都可提取二进制 |

@@ -550,6 +550,74 @@ fn ordered_download_bases(github_path: &str, tuning: DownloadTuning) -> Vec<Stri
     ordered
 }
 
+fn archive_ext_candidates_for_os(
+    os: &str,
+    tar_xz_supported: bool,
+    xz_disabled: bool,
+) -> Vec<&'static str> {
+    match os {
+        "windows" => vec!["zip"],
+        _ => {
+            let mut candidates = Vec::new();
+            if tar_xz_supported && !xz_disabled {
+                candidates.push("tar.xz");
+            }
+            candidates.push("tar.gz");
+            candidates
+        }
+    }
+}
+
+fn tar_supports_xz() -> bool {
+    if env::var("BIFROST_DISABLE_XZ_ARCHIVE").ok().as_deref() == Some("1") {
+        return false;
+    }
+
+    let output = Command::new("tar").arg("--help").output();
+    let Ok(output) = output else {
+        return false;
+    };
+    let help = String::from_utf8_lossy(&output.stdout).to_string()
+        + &String::from_utf8_lossy(&output.stderr);
+    help.contains("-J") || help.to_ascii_lowercase().contains("xz")
+}
+
+fn release_archive_ext_candidates() -> Vec<&'static str> {
+    let os = if cfg!(windows) { "windows" } else { "unix" };
+    archive_ext_candidates_for_os(
+        os,
+        tar_supports_xz(),
+        env::var("BIFROST_DISABLE_XZ_ARCHIVE").ok().as_deref() == Some("1"),
+    )
+}
+
+fn validate_downloaded_archive(path: &Path, archive_ext: &str) -> Result<(), BifrostError> {
+    if cfg!(windows) || archive_ext == "zip" {
+        return Ok(());
+    }
+
+    let tar_flag = if archive_ext == "tar.xz" {
+        "-tJf"
+    } else {
+        "-tzf"
+    };
+    let output = Command::new("tar")
+        .arg(tar_flag)
+        .arg(path)
+        .output()
+        .map_err(BifrostError::Io)?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(BifrostError::Parse(format!(
+            "Downloaded archive is invalid — {}",
+            stderr.trim()
+        )))
+    }
+}
+
 fn print_update_info(current: &str, cache: &VersionCache) {
     let separator = "─".repeat(64);
     let release_url = format!("{}/v{}", GITHUB_RELEASE_URL, cache.latest_version);
@@ -723,63 +791,94 @@ fn download_and_install(
     temp_dir: &tempfile::TempDir,
 ) -> Result<(), BifrostError> {
     let tuning = DownloadTuning::from_env();
-    let archive_ext = if cfg!(windows) { "zip" } else { "tar.gz" };
-    let archive_name = format!("bifrost-v{}-{}.{}", version, target, archive_ext);
-    let archive_github_path = format!(
-        "bifrost-proxy/bifrost/releases/download/{}/{}",
-        make_release_tag(version),
-        archive_name
-    );
-    let archive_path = temp_dir.path().join(&archive_name);
+    let release_tag = make_release_tag(version);
     let mut last_error = None;
+    let mut selected_archive_path = None;
+    let mut selected_archive_ext = None;
 
-    for (attempt, base) in ordered_download_bases(&archive_github_path, tuning)
-        .into_iter()
-        .enumerate()
-    {
-        let download_url = github_path_url(&base, &archive_github_path);
-        if attempt == 0 {
-            println!(
-                "{} {}",
-                "Selected fastest available source:".bright_cyan(),
-                mirror_display_name(&base).bright_white()
-            );
-        } else {
-            println!(
-                "{} {}",
-                "Retrying with source:".bright_yellow(),
-                mirror_display_name(&base).bright_white()
-            );
-        }
-        println!("{} {}", "Downloading:".bright_cyan(), download_url.dimmed());
+    for archive_ext in release_archive_ext_candidates() {
+        let archive_name = format!("bifrost-v{}-{}.{}", version, target, archive_ext);
+        let archive_github_path = format!(
+            "bifrost-proxy/bifrost/releases/download/{}/{}",
+            release_tag, archive_name
+        );
+        let archive_path = temp_dir.path().join(&archive_name);
 
-        match download_file_with_progress(&download_url, &archive_path, tuning) {
-            Ok(()) => {
-                if attempt > 0 {
-                    println!(
-                        "{} {}",
-                        "Downloaded via fallback source:".bright_green(),
-                        mirror_display_name(&base).bright_white()
-                    );
-                }
-                last_error = None;
-                break;
-            }
-            Err(error) => {
-                let _ = fs::remove_file(&archive_path);
+        for (attempt, base) in ordered_download_bases(&archive_github_path, tuning)
+            .into_iter()
+            .enumerate()
+        {
+            let download_url = github_path_url(&base, &archive_github_path);
+            if attempt == 0 {
                 println!(
                     "{} {}",
-                    "Download source failed:".bright_yellow(),
-                    error.to_string().dimmed()
+                    "Selected fastest available source:".bright_cyan(),
+                    mirror_display_name(&base).bright_white()
                 );
-                last_error = Some(error);
+            } else {
+                println!(
+                    "{} {}",
+                    "Retrying with source:".bright_yellow(),
+                    mirror_display_name(&base).bright_white()
+                );
             }
+            println!("{} {}", "Downloading:".bright_cyan(), download_url.dimmed());
+
+            match download_file_with_progress(&download_url, &archive_path, tuning) {
+                Ok(()) => {
+                    if let Err(error) = validate_downloaded_archive(&archive_path, archive_ext) {
+                        let _ = fs::remove_file(&archive_path);
+                        println!(
+                            "{} {}",
+                            "Downloaded archive failed validation:".bright_yellow(),
+                            error.to_string().dimmed()
+                        );
+                        last_error = Some(error);
+                        continue;
+                    }
+                    if attempt > 0 {
+                        println!(
+                            "{} {}",
+                            "Downloaded via fallback source:".bright_green(),
+                            mirror_display_name(&base).bright_white()
+                        );
+                    }
+                    selected_archive_path = Some(archive_path);
+                    selected_archive_ext = Some(archive_ext);
+                    last_error = None;
+                    break;
+                }
+                Err(error) => {
+                    let _ = fs::remove_file(&archive_path);
+                    println!(
+                        "{} {}",
+                        "Download source failed:".bright_yellow(),
+                        error.to_string().dimmed()
+                    );
+                    last_error = Some(error);
+                }
+            }
+        }
+
+        if selected_archive_path.is_some() {
+            break;
+        }
+        if archive_ext != "tar.gz" && archive_ext != "zip" {
+            println!(
+                "{} {}",
+                "Archive download failed, falling back to:".bright_yellow(),
+                "tar.gz".bright_white()
+            );
         }
     }
 
-    if let Some(error) = last_error {
-        return Err(error);
-    }
+    let archive_path = selected_archive_path.ok_or_else(|| {
+        last_error.unwrap_or_else(|| {
+            BifrostError::Network("Failed to download release archive".to_string())
+        })
+    })?;
+    let archive_ext = selected_archive_ext
+        .ok_or_else(|| BifrostError::Network("Failed to download release archive".to_string()))?;
 
     println!("{}", "Extracting archive...".bright_cyan());
 
@@ -807,9 +906,14 @@ fn download_and_install(
             )));
         }
     } else {
+        let tar_flag = if archive_ext == "tar.xz" {
+            "-xJf"
+        } else {
+            "-xzf"
+        };
         let output = Command::new("tar")
             .args([
-                "-xzf",
+                tar_flag,
                 archive_path.to_str().unwrap(),
                 "-C",
                 extract_dir.to_str().unwrap(),
@@ -1436,6 +1540,31 @@ mod tests {
             mirror_display_name("https://ghfast.top/https://github.com"),
             "ghfast.top"
         );
+    }
+
+    #[test]
+    fn upgrade_archive_candidates_prefer_xz_then_keep_gz_compatibility() {
+        assert_eq!(
+            archive_ext_candidates_for_os("macos", true, false),
+            vec!["tar.xz", "tar.gz"]
+        );
+        assert_eq!(
+            archive_ext_candidates_for_os("linux", true, true),
+            vec!["tar.gz"]
+        );
+        assert_eq!(
+            archive_ext_candidates_for_os("windows", true, false),
+            vec!["zip"]
+        );
+    }
+
+    #[test]
+    fn upgrade_archive_validation_rejects_invalid_tar_xz_before_extract() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let archive = dir.path().join("broken.tar.xz");
+        std::fs::write(&archive, b"not an xz archive").expect("write archive");
+
+        assert!(validate_downloaded_archive(&archive, "tar.xz").is_err());
     }
 
     #[test]

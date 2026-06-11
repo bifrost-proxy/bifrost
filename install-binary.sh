@@ -224,11 +224,28 @@ get_target() {
     esac
 }
 
-get_archive_ext() {
+tar_supports_xz() {
+    if ! has_command tar; then
+        return 1
+    fi
+    if [[ "${BIFROST_DISABLE_XZ_ARCHIVE:-0}" == "1" ]]; then
+        return 1
+    fi
+    tar --help 2>/dev/null | grep -q -- '-J'
+}
+
+get_archive_ext_candidates() {
     local os="$1"
     case "$os" in
-        windows) echo "zip" ;;
-        *)       echo "tar.gz" ;;
+        windows)
+            echo "zip"
+            ;;
+        *)
+            if tar_supports_xz; then
+                echo "tar.xz"
+            fi
+            echo "tar.gz"
+            ;;
     esac
 }
 
@@ -321,6 +338,7 @@ select_fastest_github_base() {
     done
 
     local winner_index=""
+    local probe_deadline=$(( $(date +%s) + ${BIFROST_MIRROR_PROBE_TIMEOUT:-5} + ${BIFROST_DOWNLOAD_CONNECT_TIMEOUT:-5} + 2 ))
     while true; do
         for ((i = 0; i < index; i++)); do
             if [[ -f "${probe_dir}/${i}.ok" ]]; then
@@ -345,14 +363,17 @@ select_fastest_github_base() {
             done
             break
         fi
+        if [[ $(date +%s) -ge $probe_deadline ]]; then
+            break
+        fi
 
         sleep 0.2
     done
 
     for pid in "${pids[@]}"; do
         kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
     done
-    wait 2>/dev/null || true
 
     if [[ -n "$winner_index" ]]; then
         cat "${probe_dir}/${winner_index}.ok"
@@ -485,6 +506,12 @@ validate_downloaded_file() {
     fi
 
     case "$file" in
+        *.tar.xz)
+            if ! tar -tJf "$file" >/dev/null 2>&1; then
+                print_warning "Downloaded tar.xz archive is invalid: $file"
+                return 1
+            fi
+            ;;
         *.tar.gz)
             if ! tar -tzf "$file" >/dev/null 2>&1; then
                 print_warning "Downloaded tar.gz archive is invalid: $file"
@@ -585,6 +612,7 @@ get_latest_version_via_redirect_race() {
     done
 
     local winner_index=""
+    local version_deadline=$(( $(date +%s) + ${BIFROST_MIRROR_PROBE_TIMEOUT:-5} + ${BIFROST_DOWNLOAD_CONNECT_TIMEOUT:-5} + 2 ))
     while true; do
         for ((i = 0; i < index; i++)); do
             if [[ -f "${race_dir}/${i}.ok" ]]; then
@@ -609,14 +637,17 @@ get_latest_version_via_redirect_race() {
             done
             break
         fi
+        if [[ $(date +%s) -ge $version_deadline ]]; then
+            break
+        fi
 
         sleep 0.2
     done
 
     for pid in "${pids[@]}"; do
         kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
     done
-    wait 2>/dev/null || true
 
     if [[ -n "$winner_index" ]]; then
         cat "${race_dir}/${winner_index}.version"
@@ -782,6 +813,7 @@ download_github_file_race() {
     done
 
     local winner_index=""
+    local download_deadline=$(( $(date +%s) + ${BIFROST_DOWNLOAD_TIMEOUT:-120} + ${BIFROST_DOWNLOAD_CONNECT_TIMEOUT:-10} + 5 ))
     while true; do
         for ((i = 0; i < index; i++)); do
             if [[ -f "${race_dir}/${i}.ok" ]]; then
@@ -806,14 +838,17 @@ download_github_file_race() {
             done
             break
         fi
+        if [[ $(date +%s) -ge $download_deadline ]]; then
+            break
+        fi
 
         sleep 1
     done
 
     for pid in "${pids[@]}"; do
         kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
     done
-    wait 2>/dev/null || true
 
     if [[ -n "$winner_index" ]]; then
         mv "${race_dir}/${winner_index}.data" "$output"
@@ -901,11 +936,21 @@ extract_archive() {
             ;;
         *)
             if [[ "$os" == "linux" ]]; then
-                if ! tar --no-same-owner -xzf "$archive" -C "$dest" 2>/dev/null; then
-                    tar -xzf "$archive" -C "$dest"
+                if [[ "$archive" == *.tar.xz ]]; then
+                    if ! tar --no-same-owner -xJf "$archive" -C "$dest" 2>/dev/null; then
+                        tar -xJf "$archive" -C "$dest"
+                    fi
+                else
+                    if ! tar --no-same-owner -xzf "$archive" -C "$dest" 2>/dev/null; then
+                        tar -xzf "$archive" -C "$dest"
+                    fi
                 fi
             else
-                tar -xzf "$archive" -C "$dest"
+                if [[ "$archive" == *.tar.xz ]]; then
+                    tar -xJf "$archive" -C "$dest"
+                else
+                    tar -xzf "$archive" -C "$dest"
+                fi
             fi
             ;;
     esac
@@ -1235,14 +1280,26 @@ install_binary_for_target() {
     local install_dir="$4"
     local tmpdir="$5"
 
+    local cli_archive=""
     local ext
-    ext=$(get_archive_ext "$os")
-
-    local cli_archive="bifrost-${version}-${target}.${ext}"
-    local cli_path="${REPO}/releases/download/${version}/${cli_archive}"
     local checksums_path="${REPO}/releases/download/${version}/bifrost-${version}-checksums.txt"
 
-    download_github_file "$cli_path" "$tmpdir/$cli_archive" || return 1
+    while IFS= read -r ext; do
+        [[ -n "$ext" ]] || continue
+        local candidate_archive="bifrost-${version}-${target}.${ext}"
+        local candidate_path="${REPO}/releases/download/${version}/${candidate_archive}"
+        if download_github_file "$candidate_path" "$tmpdir/$candidate_archive"; then
+            cli_archive="$candidate_archive"
+            break
+        fi
+        if [[ "$ext" != "tar.gz" && "$ext" != "zip" ]]; then
+            print_warning "Could not download ${candidate_archive}, falling back to the compatible archive"
+        fi
+    done < <(get_archive_ext_candidates "$os")
+
+    if [[ -z "$cli_archive" ]]; then
+        return 1
+    fi
 
     if [[ ! -f "$tmpdir/checksums.txt" ]]; then
         download_github_file "$checksums_path" "$tmpdir/checksums.txt" || print_warning "Could not download checksums file, skipping verification"
