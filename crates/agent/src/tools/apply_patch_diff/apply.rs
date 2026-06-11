@@ -710,8 +710,15 @@ mod tests {
     #[test]
     fn test_apply_rejects_absolute_path() {
         let dir = TempDir::new().unwrap();
+        // Use a path that is absolute on the host platform: drive-qualified
+        // on Windows, root-anchored elsewhere.
+        let abs_path = if cfg!(windows) {
+            "C:\\tmp\\absolute.txt"
+        } else {
+            "/tmp/absolute.txt"
+        };
         let hunks = vec![Hunk::AddFile {
-            path: PathBuf::from("/tmp/absolute.txt"),
+            path: PathBuf::from(abs_path),
             contents: "hello\n".to_string(),
         }];
         let err = apply_patch(dir.path(), &hunks).unwrap_err();
