@@ -201,7 +201,7 @@ fn tray_lock_is_held(data_dir: &Path) -> bool {
             let _ = file.unlock();
             false
         }
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => true,
+        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => true,
         Err(error) => {
             tracing::warn!(
                 path = %lock_path.display(),
