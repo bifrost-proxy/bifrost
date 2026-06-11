@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -35,8 +35,11 @@ const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(3);
 const START_READY_TIMEOUT: Duration = Duration::from_secs(15);
 const LOG_RETENTION_DAYS: u64 = 30;
 const MENU_REBUILD_SUPPRESSION_AFTER_CLICK: Duration = Duration::from_secs(3);
+const REMOTE_GROUP_FAILURE_BACKOFF: Duration = Duration::from_secs(5);
 const RECENT_RULES_FILE: &str = "tray_recent_rules.json";
 const RECENT_RULE_LIMIT: usize = 5;
+const TRAY_THREAD_STACK_SIZE: usize = 512 * 1024;
+const TRAY_LOG_BUFFERED_LINES_LIMIT: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MenuDataSnapshot {
@@ -121,16 +124,17 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     let poll_quit = should_quit.clone();
     let poll_state = current_state.clone();
     let poll_args = args.clone();
-    thread::spawn(move || {
+    spawn_tray_thread("bifrost-tray-state-poll", move || {
         poll_service_state(&poll_quit, &poll_state, &poll_args);
-    });
+    })
+    .map_err(|error| format!("failed to spawn tray state poll thread: {error}"))?;
 
     let data_quit = should_quit.clone();
     let data_state = current_state.clone();
     let data_args = args.clone();
     let data_snapshot = menu_data.clone();
     let data_generation = menu_data_generation.clone();
-    thread::spawn(move || {
+    spawn_tray_thread("bifrost-tray-menu-poll", move || {
         poll_menu_data(
             &data_quit,
             &data_state,
@@ -138,7 +142,8 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
             &data_snapshot,
             &data_generation,
         );
-    });
+    })
+    .map_err(|error| format!("failed to spawn tray menu poll thread: {error}"))?;
 
     let menu_receiver = MenuEvent::receiver().clone();
     let tray_receiver = TrayIconEvent::receiver().clone();
@@ -170,7 +175,6 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
                     execute_action(
                         action,
                         &args,
-                        &data_dir_str,
                         &should_quit,
                         &should_reload,
                         &current_operation,
@@ -292,7 +296,9 @@ fn init_logging(data_dir: &Path) {
     cleanup_old_logs(&log_dir);
 
     let file_appender = tracing_appender::rolling::daily(&log_dir, "tray.log");
-    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+    let (non_blocking, _guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
+        .buffered_lines_limit(TRAY_LOG_BUFFERED_LINES_LIMIT)
+        .finish(file_appender);
 
     // Leak the guard so logging persists for the process lifetime
     Box::leak(Box::new(_guard));
@@ -901,17 +907,24 @@ fn load_managed_groups_from_admin(
     agent: &ureq::Agent,
     groups_url: &str,
 ) -> Option<Vec<ManagedGroupForTray>> {
+    if remote_group_failure_backoff_active() {
+        tracing::debug!("skipping tray remote group refresh during failure backoff");
+        return Some(Vec::new());
+    }
+
     let mut managed_groups = Vec::new();
 
     let value = match agent.get(groups_url).call() {
         Ok(resp) => match resp.into_json::<serde_json::Value>() {
             Ok(value) => value,
             Err(error) => {
+                record_remote_group_failure();
                 tracing::warn!(error = %error, "failed to decode group list for tray menu");
                 return None;
             }
         },
         Err(error) => {
+            record_remote_group_failure();
             tracing::warn!(error = %error, "failed to load group list for tray menu");
             return None;
         }
@@ -952,14 +965,73 @@ fn load_managed_groups_from_admin(
         }
     }
 
+    clear_remote_group_failure();
     Some(managed_groups)
 }
 
+fn remote_group_failure_backoff() -> &'static Mutex<Option<Instant>> {
+    static BACKOFF: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+    BACKOFF.get_or_init(|| Mutex::new(None))
+}
+
+fn remote_group_failure_backoff_active() -> bool {
+    match remote_group_failure_backoff().lock() {
+        Ok(guard) => {
+            guard.is_some_and(|failed_at| failed_at.elapsed() < REMOTE_GROUP_FAILURE_BACKOFF)
+        }
+        Err(poisoned) => poisoned
+            .into_inner()
+            .is_some_and(|failed_at| failed_at.elapsed() < REMOTE_GROUP_FAILURE_BACKOFF),
+    }
+}
+
+fn record_remote_group_failure() {
+    match remote_group_failure_backoff().lock() {
+        Ok(mut guard) => *guard = Some(Instant::now()),
+        Err(poisoned) => *poisoned.into_inner() = Some(Instant::now()),
+    }
+}
+
+fn clear_remote_group_failure() {
+    match remote_group_failure_backoff().lock() {
+        Ok(mut guard) => *guard = None,
+        Err(poisoned) => *poisoned.into_inner() = None,
+    }
+}
+
 fn http_agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout_connect(HTTP_CONNECT_TIMEOUT)
-        .timeout_read(HTTP_READ_TIMEOUT)
-        .build()
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT
+        .get_or_init(|| {
+            bifrost_core::direct_ureq_agent_builder()
+                .timeout_connect(HTTP_CONNECT_TIMEOUT)
+                .timeout_read(HTTP_READ_TIMEOUT)
+                .build()
+        })
+        .clone()
+}
+
+fn spawn_tray_thread<F>(name: &'static str, task: F) -> std::io::Result<thread::JoinHandle<()>>
+where
+    F: FnOnce() + Send + 'static,
+{
+    thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(TRAY_THREAD_STACK_SIZE)
+        .spawn(task)
+}
+
+fn spawn_tray_task<F>(name: &'static str, task: F)
+where
+    F: FnOnce() + Send + 'static,
+{
+    if let Err(error) = spawn_tray_thread(name, task) {
+        tracing::error!(
+            thread = name,
+            error = %error,
+            "failed to spawn tray task"
+        );
+    }
 }
 
 struct NativeMenuState {
@@ -1221,7 +1293,6 @@ fn menu_item_shape(item: &MenuItemDef) -> NativeMenuShape {
 fn execute_action(
     action: &MenuItemAction,
     args: &TrayArgs,
-    _data_dir_str: &str,
     quit_flag: &AtomicBool,
     reload_flag: &Arc<AtomicBool>,
     operation: &Arc<AtomicU8>,
@@ -1244,7 +1315,7 @@ fn execute_action(
         MenuItemAction::AdminApi { method, url } => {
             let method = method.clone();
             let url = url.clone();
-            thread::spawn(move || {
+            spawn_tray_task("bifrost-tray-admin-api", move || {
                 let agent = http_agent();
                 let result = match method.to_uppercase().as_str() {
                     "GET" => agent.get(&url).call(),
@@ -1268,7 +1339,7 @@ fn execute_action(
             let url = url.clone();
             let enabled = *enabled;
             let reload_flag = reload_flag.clone();
-            thread::spawn(move || {
+            spawn_tray_task("bifrost-tray-system-proxy", move || {
                 let agent = http_agent();
                 let body = format!(r#"{{"enabled":{enabled}}}"#);
                 match agent
@@ -1310,8 +1381,8 @@ fn execute_action(
             let reload_flag = reload_flag.clone();
             operation.store(OP_STARTING, Ordering::Relaxed);
             reload_flag.store(true, Ordering::Relaxed);
-            thread::spawn(
-                move || match spawn_start(&bin, &data_dir, port, &extra_args) {
+            spawn_tray_task("bifrost-tray-start-service", move || {
+                match spawn_start(&bin, &data_dir, port, &extra_args) {
                     Some(child) => monitor_start_child(
                         child,
                         runtime_file,
@@ -1323,8 +1394,8 @@ fn execute_action(
                         operation.store(OP_START_FAILED, Ordering::Relaxed);
                         reload_flag.store(true, Ordering::Relaxed);
                     }
-                },
-            );
+                }
+            });
         }
         MenuItemAction::StopService => {
             if operation_busy(operation.load(Ordering::Relaxed)) {
@@ -1342,7 +1413,7 @@ fn execute_action(
             let reload_flag = reload_flag.clone();
             operation.store(OP_STOPPING, Ordering::Relaxed);
             reload_flag.store(true, Ordering::Relaxed);
-            thread::spawn(move || {
+            spawn_tray_task("bifrost-tray-stop-service", move || {
                 if spawn_stop(&bin, &data_dir) {
                     operation.store(OP_IDLE, Ordering::Relaxed);
                 } else {
@@ -1375,7 +1446,7 @@ fn execute_action(
             let reload_flag = reload_flag.clone();
             let menu_data = menu_data.clone();
             let menu_data_generation = menu_data_generation.clone();
-            thread::spawn(move || {
+            spawn_tray_task("bifrost-tray-select-rule", move || {
                 if toggle_single_rule(&admin_url, &target, &enabled_targets, currently_enabled) {
                     if !currently_enabled {
                         record_recent_rule_target(&data_dir, &target);

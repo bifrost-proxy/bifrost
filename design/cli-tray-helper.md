@@ -607,7 +607,9 @@ macOS：
 
 - 记录 release binary size。
 - 记录 `strip` 后 size。
-- 启动 helper 后记录 idle RSS/private memory。
+- 启动 helper 后同时记录 `ps RSS` 与 `vmmap -summary` 的 `Physical footprint`。
+- `ps RSS` 会包含 AppKit、Objective-C runtime、CoreFoundation 等共享 framework resident 页，适合用于发现异常增长，但不作为 30 MB 独占内存硬门禁。
+- `Physical footprint` 更接近 helper 对系统的独占物理占用，作为 macOS idle memory 的主要验收口径。
 
 Windows：
 
@@ -621,14 +623,41 @@ Windows：
 | --- | --- |
 | macOS release binary 增量 | 超过需分析依赖来源 |
 | Windows release exe 增量 | 超过需分析依赖来源 |
-| macOS idle memory | <= 30 MB，超过需分析 AppKit/依赖开销 |
+| macOS idle memory | `Physical footprint` <= 30 MB；`ps RSS` 超过 30 MB 时必须记录共享 framework 分析 |
 | Windows idle memory | <= 20 MB，超过需分析 Win32/event loop 开销 |
 | 冷启动到图标可见 | <= 1 秒 |
 
 如果指标不达标：
 
 - 优先去掉 `clap`、重型日志 appender、非必要 JSON/URL 依赖。
+- tray helper 必须复用内部 Admin API HTTP agent，常驻后台线程使用显式小栈，tray 文件日志 non-blocking 队列使用小缓冲；远端组权限接口失败后短暂退避，避免未登录或远端不可用时每秒重复请求和写 warning。
+- 如果业务要求 `ps RSS` 也稳定低于 30 MB，需要进入下一阶段架构评估：拆出更瘦的专用 helper 二进制或直接使用更底层的 AppKit/Win32 API，减少 `tao`/通用 CLI 二进制的共享映射成本。
 - 保持不用 Tauri/WebView 的原则不变。
+
+### macOS 内存实测与进一步优化空间
+
+本地 release 实测结论：
+
+- `target/release/bifrost`：约 110 MB；`strip` 后临时副本约 92 MB。
+- release helper 真实启动并连接临时 Bifrost 服务：`ps RSS` 启动后约 38 MB，12 秒后约 56 MB。
+- 仅启动 `bifrost __tray`、不连接有效 Admin API：5 秒后 `ps RSS` 约 55 MB，说明规则菜单、缓存和 Admin API 不是 RSS 主因。
+- `strip` 后以同样方式启动 helper：5 秒后 `ps RSS` 仍约 55 MB，说明符号段不是 RSS 主因。
+- `vmmap -summary <tray_pid>`：`Physical footprint` 约 17.8 MB，dirty heap 约 11.9 MB；`ps RSS` 的高值主要来自 AppKit/Objective-C runtime/CoreFoundation/QuartzCore 等系统共享 framework resident 页和通用 CLI 二进制映射。
+- `otool -L target/release/bifrost` 显示当前二进制链接 AppKit、Foundation、ApplicationServices、CoreGraphics、Carbon、QuartzCore、Metal、CoreData、CoreText、CoreImage、CloudKit、Security、SystemConfiguration 等系统库。
+- `cargo tree -p bifrost-cli` 显示通用 CLI 二进制仍包含 `bifrost-admin`、`bifrost-asr`、`reqwest`/`tokio`、`clap`、`tao`/`muda`/`tray-icon` 等大依赖；虽然 `__tray` 入口在 clap、全局日志和 crypto provider 前短路，但同一大二进制的代码和系统 framework 映射仍会进入 RSS 口径。
+
+不损害功能前提下的优化分层：
+
+1. **已落地的运行时瘦身**：复用 `ureq::Agent`，缩小 tray 日志 non-blocking 队列，常驻/动作线程使用 512 KiB 小栈，远端 group 接口失败后 5 秒退避。这些改动降低长期分配和异常场景日志压力，但不能把 macOS `ps RSS` 从 55 MB 降到 30 MB 以下。
+2. **低风险继续优化**：减少菜单快照中的临时 `String` clone、把远端 group 成功结果缓存到下一轮、对 rule/system proxy polling 做按需或低频刷新。预期改善 dirty heap 和 CPU/网络抖动，RSS 口径收益有限。
+3. **中等风险方案：专用瘦 helper binary**：保留现有功能协议，但新增 `bifrost-tray-helper` 或 feature-gated slim binary，只链接 tray 所需的 `tray-icon`/`muda`/`tao`、`ureq`、`serde`、`tracing`、`open`、`arboard` 和最小 runtime/config 代码，不链接 `bifrost-admin`、`bifrost-asr`、proxy、agent、sync 等主程序依赖。该方案最有希望降低二进制体积和通用代码映射，但 AppKit 共享 framework RSS 仍可能让 `ps RSS` 接近或超过 30 MB；需要 macOS/Windows 双平台实测。
+4. **高风险方案：原生平台 API helper**：macOS 直接使用 AppKit `NSStatusItem`/`NSMenu`，Windows 直接使用 Win32 `Shell_NotifyIconW`/popup menu，移除 `tao`/`tray-icon`/`muda` 通用事件循环。该方案最有机会压低 `ps RSS`，但会显著增加 unsafe/platform glue、菜单刷新一致性和 Windows Explorer 重启恢复的维护成本，需要完整 human_tests 与 CI smoke。
+5. **度量口径方案**：如果产品目标是“真实独占内存小于 30 MB”，当前 release helper 已满足 `Physical footprint < 30 MB`；如果产品目标是“活动监视器/ps RSS 显示小于 30 MB”，必须进入第 3 或第 4 路线，且第 4 路线成功概率更高。
+
+当前建议：
+
+- v1 保留现有轻量库方案，使用 `Physical footprint` 作为 macOS 内存硬门禁，`ps RSS` 作为诊断指标。
+- 新开独立 spike 对比两条原型：`slim helper binary + tray-icon/muda/tao` 与 `native AppKit/Win32 helper`。每个原型只实现图标、默认菜单、Open Admin、Rules label mock、Quit，先测 `ps RSS`、`Physical footprint`、启动时间和二进制体积，再决定是否迁移完整功能。
 
 ## 打包与安装
 

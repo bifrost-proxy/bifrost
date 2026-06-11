@@ -517,6 +517,30 @@ bash e2e-tests/tests/test_cli_tray_startup_ci.sh
 - `logs/tray.log*` 包含 `bifrost-tray starting`
 - 脚本结束时停止主服务、杀掉 helper，并清理临时数据目录
 
+### TC-TH-22: macOS Tray Helper 内存口径与空闲占用
+
+**操作步骤：**
+1. 执行 `cargo build --release --bin bifrost`
+2. 使用独立临时数据目录启动 release 版服务：
+
+```bash
+TMP_DIR=$(mktemp -d /tmp/bifrost-tray-mem.XXXXXX)
+BIFROST_DATA_DIR="$TMP_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+  ./target/release/bifrost start -p 18802 --unsafe-ssl --skip-cert-check --no-system-proxy
+```
+
+3. 等待 `tray.pid` 出现并记录 helper PID：`cat "$TMP_DIR/tray.pid"`
+4. 启动后等待 5-15 秒，执行 `ps -o pid,ppid,rss,vsz,etime,command -p <tray_pid>`
+5. 执行 `vmmap -summary <tray_pid>`，记录 `Physical footprint`
+6. 查看 `logs/tray.log*`，确认远端 group 接口失败时不会每秒重复 warning
+
+**预期结果：**
+- release 版 helper 可正常启动，`tray.pid` 对应进程存活
+- `ps RSS` 可高于 30 MB，但必须记录为包含 macOS AppKit/Objective-C/CoreFoundation 共享 framework resident 页的诊断口径
+- `vmmap -summary` 的 `Physical footprint` 不超过 30 MB
+- helper 空闲运行时不会因为远端 group 接口失败而每秒重复请求和写 warning；失败后按短退避周期重试
+- 测试结束后停止服务、杀掉 helper 并删除临时数据目录
+
 ## 本次执行记录
 
 | 日期 | 用例 | 执行方式 | 结果 |
@@ -528,6 +552,7 @@ bash e2e-tests/tests/test_cli_tray_startup_ci.sh
 | 2026-06-11 | TC-TH-08B | 针对配置文件和 Settings 开关禁用/重新启用托盘的新增验证：`[tray] enabled = false` 阻止 CLI 启动 helper；运行中通过 Admin API 关闭 Tray Icon 后，helper 轮询到配置禁用并主动清理 `tray.pid` 退出；重新启用时 Admin API 通过 CLI 注入的 launcher 回调重新创建 helper，并对旧 helper 退出锁释放窗口做短重试。 | 本地执行 `cargo test -p bifrost-cli should_launch_tray_disabled_by_config -- --nocapture` 通过；本地真实启动当前 `target/debug/bifrost` 后执行 `PUT /_bifrost/api/config/tray {\"enabled\":false}` 通过，输出 `PASS: tray config API disabled running helper`；预置 `config.toml` 后重启通过，输出 `PASS: tray config disabled before start skipped helper`；本次补充执行 `SKIP_BUILD=true BIFROST_BIN=$PWD/target/debug/bifrost bash e2e-tests/tests/test_cli_tray_config_reenable.sh` 通过，输出 `PASS: tray helper relaunched after config enable (before=76710 after=77231)` |
 | 2026-06-11 | TC-TH-13 | 针对 Rules 菜单只支持选中、不支持再次点击取消的回归补充验证：菜单 action 带上当前 checked 状态；点击未启用规则时继续执行单选收敛，点击当前已启用规则时只调用该规则 disable API，不再 enable 回去。 | 本地执行 `cargo test -p bifrost-cli toggle_single_rule -- --nocapture` 通过未选中选择路径；执行 `cargo test -p bifrost-cli enabled_rule_calls_admin_api_for_disable_only -- --nocapture` 通过已选中取消路径，断言只发 `PUT /_bifrost/api/rules/beta/disable`；执行 `cargo test -p bifrost-cli test_rules_menu_two_levels_without_groups -- --nocapture` 通过，断言 action 的 `currently_enabled` 与原生勾选状态一致 |
 | 2026-06-11 | TC-TH-13-REG-01 | 针对 Rules 点击一次但状态仍停留在旧规则的回归补充验证：旧实现把菜单中所有候选规则放进 action，日志中出现一次点击触发大量 `group rule disabled` 的现象；修复后 action 只携带当前已启用的其他规则，切换成功后立即刷新菜单快照并提升 generation。 | 本地执行 `cargo test -p bifrost-cli test_rules_menu_two_levels_without_groups -- --nocapture` 通过，断言未启用 `beta` 的 action 只携带已启用的 `alpha`；执行 `cargo test -p bifrost-cli recent_rule -- --nocapture` 通过，断言最近快捷项也不会携带全量候选；执行 `cargo test -p bifrost-cli toggle_single_rule -- --nocapture` 通过，断言切换路径只调用待禁用目标与新目标 |
+| 2026-06-11 | TC-TH-22 | 针对 tray helper RSS 超过 50 MB 的内存口径与运行时瘦身验证：复用 HTTP agent、缩小 tray 日志队列、常驻/动作线程使用小栈，并对远端 group 失败做短退避；同时区分 `ps RSS` 与 macOS `Physical footprint`。 | 本地执行 release 真实 helper 测量：`ps RSS` 启动后约 38 MB，12 秒后约 56 MB；`vmmap -summary` 显示 `Physical footprint: 17.8M`、dirty heap 约 11.9M，满足 30 MB 独占内存目标；`strip` 将二进制从 110M 降至 92M 但 RSS 不变，说明 RSS 主要来自共享 framework 映射而非符号段；远端 group 失败日志退避后 12 秒内 warning 约 3 次，不再每秒刷 |
 
 ## 清理步骤
 

@@ -482,3 +482,15 @@
             ]
         );
     }
+
+    #[test]
+    fn test_remote_group_failure_backoff_suppresses_immediate_retry() {
+        clear_remote_group_failure();
+        assert!(!remote_group_failure_backoff_active());
+
+        record_remote_group_failure();
+        assert!(remote_group_failure_backoff_active());
+
+        clear_remote_group_failure();
+        assert!(!remote_group_failure_backoff_active());
+    }
