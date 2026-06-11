@@ -450,17 +450,23 @@ mod tests {
     #[test]
     fn test_explicit_scheme_keeps_single_level() {
         let matcher = WildcardMatcher::new("http://*.example.com").unwrap();
-        assert!(matcher
-            .matches("http://www.example.com", "www.example.com", "/")
-            .matched);
+        assert!(
+            matcher
+                .matches("http://www.example.com", "www.example.com", "/")
+                .matched
+        );
         // http only
-        assert!(!matcher
-            .matches("https://www.example.com", "www.example.com", "/")
-            .matched);
+        assert!(
+            !matcher
+                .matches("https://www.example.com", "www.example.com", "/")
+                .matched
+        );
         // single level: must NOT match a multi-level subdomain
-        assert!(!matcher
-            .matches("http://a.b.example.com", "a.b.example.com", "/")
-            .matched);
+        assert!(
+            !matcher
+                .matches("http://a.b.example.com", "a.b.example.com", "/")
+                .matched
+        );
     }
 
     // Regression: `http*://` (and `ws*://`) scheme wildcards must work with a
@@ -469,34 +475,48 @@ mod tests {
     #[test]
     fn test_scheme_wildcard_http_star() {
         let matcher = WildcardMatcher::new("http*://*.example.com").unwrap();
-        assert!(matcher
-            .matches("http://www.example.com", "www.example.com", "/")
-            .matched);
-        assert!(matcher
-            .matches("https://api.example.com", "api.example.com", "/")
-            .matched);
+        assert!(
+            matcher
+                .matches("http://www.example.com", "www.example.com", "/")
+                .matched
+        );
+        assert!(
+            matcher
+                .matches("https://api.example.com", "api.example.com", "/")
+                .matched
+        );
         // single-level only
-        assert!(!matcher
-            .matches("http://a.b.example.com", "a.b.example.com", "/")
-            .matched);
+        assert!(
+            !matcher
+                .matches("http://a.b.example.com", "a.b.example.com", "/")
+                .matched
+        );
         // not ws
-        assert!(!matcher
-            .matches("ws://www.example.com", "www.example.com", "/")
-            .matched);
+        assert!(
+            !matcher
+                .matches("ws://www.example.com", "www.example.com", "/")
+                .matched
+        );
     }
 
     #[test]
     fn test_scheme_wildcard_ws_star() {
         let matcher = WildcardMatcher::new("ws*://*.example.com").unwrap();
-        assert!(matcher
-            .matches("ws://chat.example.com", "chat.example.com", "/")
-            .matched);
-        assert!(matcher
-            .matches("wss://chat.example.com", "chat.example.com", "/")
-            .matched);
-        assert!(!matcher
-            .matches("http://chat.example.com", "chat.example.com", "/")
-            .matched);
+        assert!(
+            matcher
+                .matches("ws://chat.example.com", "chat.example.com", "/")
+                .matched
+        );
+        assert!(
+            matcher
+                .matches("wss://chat.example.com", "chat.example.com", "/")
+                .matched
+        );
+        assert!(
+            !matcher
+                .matches("http://chat.example.com", "chat.example.com", "/")
+                .matched
+        );
     }
 
     // Regression: `//` (any scheme) + wildcard host must stay scoped to the host,
@@ -504,38 +524,58 @@ mod tests {
     #[test]
     fn test_scheme_any_does_not_overmatch() {
         let matcher = WildcardMatcher::new("//*.example.com").unwrap();
-        assert!(matcher
-            .matches("http://www.example.com", "www.example.com", "/")
-            .matched);
-        assert!(matcher
-            .matches("ws://www.example.com", "www.example.com", "/")
-            .matched);
+        assert!(
+            matcher
+                .matches("http://www.example.com", "www.example.com", "/")
+                .matched
+        );
+        assert!(
+            matcher
+                .matches("ws://www.example.com", "www.example.com", "/")
+                .matched
+        );
         // must NOT hijack unrelated hosts
-        assert!(!matcher
-            .matches("http://totally.unrelated.test", "totally.unrelated.test", "/")
-            .matched);
+        assert!(
+            !matcher
+                .matches(
+                    "http://totally.unrelated.test",
+                    "totally.unrelated.test",
+                    "/"
+                )
+                .matched
+        );
         // single level
-        assert!(!matcher
-            .matches("http://a.b.example.com", "a.b.example.com", "/")
-            .matched);
+        assert!(
+            !matcher
+                .matches("http://a.b.example.com", "a.b.example.com", "/")
+                .matched
+        );
     }
 
     // Bare wildcard host (no scheme) keeps matching http+https, single level.
     #[test]
     fn test_bare_wildcard_unchanged() {
         let matcher = WildcardMatcher::new("*.example.com").unwrap();
-        assert!(matcher
-            .matches("http://www.example.com", "www.example.com", "/")
-            .matched);
-        assert!(matcher
-            .matches("https://www.example.com", "www.example.com", "/")
-            .matched);
-        assert!(!matcher
-            .matches("http://a.b.example.com", "a.b.example.com", "/")
-            .matched);
-        assert!(!matcher
-            .matches("http://example.com", "example.com", "/")
-            .matched);
+        assert!(
+            matcher
+                .matches("http://www.example.com", "www.example.com", "/")
+                .matched
+        );
+        assert!(
+            matcher
+                .matches("https://www.example.com", "www.example.com", "/")
+                .matched
+        );
+        assert!(
+            !matcher
+                .matches("http://a.b.example.com", "a.b.example.com", "/")
+                .matched
+        );
+        assert!(
+            !matcher
+                .matches("http://example.com", "example.com", "/")
+                .matched
+        );
     }
 
     #[test]
