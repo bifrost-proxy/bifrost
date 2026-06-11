@@ -23,14 +23,9 @@ pub struct WildcardMatcher {
 impl WildcardMatcher {
     pub fn new(pattern: &str) -> Result<Self, regex::Error> {
         let (negated, clean_pattern) = Self::parse_negation(pattern);
-        let (has_protocol, pattern_without_protocol) = Self::strip_protocol(clean_pattern);
-        let wildcard_type = Self::detect_type(pattern_without_protocol);
-        let (regex_pattern, capture_groups) = Self::to_regex(
-            clean_pattern,
-            pattern_without_protocol,
-            &wildcard_type,
-            has_protocol,
-        );
+        let (scheme_regex, body) = Self::split_scheme(clean_pattern);
+        let wildcard_type = Self::detect_type(body);
+        let (regex_pattern, capture_groups) = Self::to_regex(body, &wildcard_type, scheme_regex);
         let compiled = Regex::new(&regex_pattern)?;
 
         Ok(Self {
@@ -50,15 +45,36 @@ impl WildcardMatcher {
         }
     }
 
-    fn strip_protocol(pattern: &str) -> (bool, &str) {
-        if let Some(stripped) = pattern.strip_prefix("http://") {
-            (true, stripped)
-        } else if let Some(stripped) = pattern.strip_prefix("https://") {
-            (true, stripped)
-        } else if pattern.starts_with('$') {
-            (true, pattern)
+    /// Splits an optional URL-scheme prefix off the pattern.
+    ///
+    /// Returns `(scheme_regex, body)` where `scheme_regex` is a regex fragment that
+    /// matches the scheme + `://`, and `body` is the host/path portion the wildcard
+    /// machinery operates on. Stripping the scheme here (rather than leaving it in
+    /// `body`) keeps the wildcard regex correct: it stops the `/` inside `://` from
+    /// being treated as a path separator (which corrupted `*` semantics) and lets
+    /// scheme wildcards like `http*://` / `ws*://` / `//` work with wildcard hosts.
+    ///
+    /// A leading `$` is the domain-wildcard marker, not a scheme, so it stays in
+    /// `body` and the default scheme regex is used.
+    fn split_scheme(pattern: &str) -> (&'static str, &str) {
+        if let Some(rest) = pattern.strip_prefix("http*://") {
+            ("https?://", rest)
+        } else if let Some(rest) = pattern.strip_prefix("https://") {
+            ("https://", rest)
+        } else if let Some(rest) = pattern.strip_prefix("http://") {
+            ("http://", rest)
+        } else if let Some(rest) = pattern.strip_prefix("ws*://") {
+            ("wss?://", rest)
+        } else if let Some(rest) = pattern.strip_prefix("wss://") {
+            ("wss://", rest)
+        } else if let Some(rest) = pattern.strip_prefix("ws://") {
+            ("ws://", rest)
+        } else if let Some(rest) = pattern.strip_prefix("//") {
+            (r"[a-zA-Z][a-zA-Z0-9+.\-]*://", rest)
         } else {
-            (false, pattern)
+            // No scheme prefix (including the `$` domain-wildcard marker): match
+            // http/https by default, mirroring the historical behavior.
+            ("https?://", pattern)
         }
     }
 
@@ -91,54 +107,35 @@ impl WildcardMatcher {
         }
     }
 
-    fn to_regex(
-        pattern: &str,
-        pattern_without_protocol: &str,
-        wildcard_type: &WildcardType,
-        has_protocol: bool,
-    ) -> (String, usize) {
-        let (escaped, capture_groups) = Self::pattern_to_regex(pattern, wildcard_type);
-        let has_explicit_path = pattern_without_protocol.contains('/');
-        let is_root_path = pattern_without_protocol
+    fn to_regex(body: &str, wildcard_type: &WildcardType, scheme: &str) -> (String, usize) {
+        let (escaped, capture_groups) = Self::pattern_to_regex(body, wildcard_type);
+        let has_explicit_path = body.contains('/');
+        let is_root_path = body
             .split_once('/')
             .is_some_and(|(_, path)| path.is_empty());
 
         let host_wildcard_regex = |escaped: &str| {
             if is_root_path {
                 let host = escaped.trim_end_matches('/');
-                if has_protocol {
-                    format!("^{}(?:/.*)?$", host)
-                } else {
-                    format!("^https?://{}(?:/.*)?$", host)
-                }
+                format!("^{}{}(?:/.*)?$", scheme, host)
             } else if has_explicit_path && escaped.ends_with('/') {
-                if has_protocol {
-                    format!("^{}.*$", escaped)
-                } else {
-                    format!("^https?://{}.*$", escaped)
-                }
-            } else if has_protocol {
-                format!("^{}(/.*)?$", escaped)
+                format!("^{}{}.*$", scheme, escaped)
             } else {
-                format!("^https?://{}(/.*)?$", escaped)
+                format!("^{}{}(/.*)?$", scheme, escaped)
             }
         };
 
         let regex = match wildcard_type {
             WildcardType::DomainWildcard => {
                 let domain_pattern = escaped.replace("__DOLLAR__", "");
-                format!("^https?://{}(/.*)?$", domain_pattern)
+                format!("^{}{}(/.*)?$", scheme, domain_pattern)
             }
-            WildcardType::Prefix => host_wildcard_regex(&escaped),
-            WildcardType::Suffix | WildcardType::Contains | WildcardType::Mixed => {
-                host_wildcard_regex(&escaped)
-            }
+            WildcardType::Prefix
+            | WildcardType::Suffix
+            | WildcardType::Contains
+            | WildcardType::Mixed => host_wildcard_regex(&escaped),
             WildcardType::PathWildcard => {
-                if has_protocol {
-                    format!("^{}$", escaped)
-                } else {
-                    format!("^https?://{}$", escaped)
-                }
+                format!("^{}{}$", scheme, escaped)
             }
         };
 
@@ -446,6 +443,139 @@ mod tests {
 
         let result = matcher.matches("https://api.example.com", "api.example.com", "/");
         assert!(result.matched);
+    }
+
+    // Regression: an explicit scheme prefix on a wildcard host must keep the
+    // single-level `*` semantics (it previously spanned `.` like `**`).
+    #[test]
+    fn test_explicit_scheme_keeps_single_level() {
+        let matcher = WildcardMatcher::new("http://*.example.com").unwrap();
+        assert!(
+            matcher
+                .matches("http://www.example.com", "www.example.com", "/")
+                .matched
+        );
+        // http only
+        assert!(
+            !matcher
+                .matches("https://www.example.com", "www.example.com", "/")
+                .matched
+        );
+        // single level: must NOT match a multi-level subdomain
+        assert!(
+            !matcher
+                .matches("http://a.b.example.com", "a.b.example.com", "/")
+                .matched
+        );
+    }
+
+    // Regression: `http*://` (and `ws*://`) scheme wildcards must work with a
+    // wildcard host. Previously the `*/` inside `http*:/` was misdetected as a
+    // path wildcard and the rule never matched anything.
+    #[test]
+    fn test_scheme_wildcard_http_star() {
+        let matcher = WildcardMatcher::new("http*://*.example.com").unwrap();
+        assert!(
+            matcher
+                .matches("http://www.example.com", "www.example.com", "/")
+                .matched
+        );
+        assert!(
+            matcher
+                .matches("https://api.example.com", "api.example.com", "/")
+                .matched
+        );
+        // single-level only
+        assert!(
+            !matcher
+                .matches("http://a.b.example.com", "a.b.example.com", "/")
+                .matched
+        );
+        // not ws
+        assert!(
+            !matcher
+                .matches("ws://www.example.com", "www.example.com", "/")
+                .matched
+        );
+    }
+
+    #[test]
+    fn test_scheme_wildcard_ws_star() {
+        let matcher = WildcardMatcher::new("ws*://*.example.com").unwrap();
+        assert!(
+            matcher
+                .matches("ws://chat.example.com", "chat.example.com", "/")
+                .matched
+        );
+        assert!(
+            matcher
+                .matches("wss://chat.example.com", "chat.example.com", "/")
+                .matched
+        );
+        assert!(
+            !matcher
+                .matches("http://chat.example.com", "chat.example.com", "/")
+                .matched
+        );
+    }
+
+    // Regression: `//` (any scheme) + wildcard host must stay scoped to the host,
+    // not over-match every host as it did before.
+    #[test]
+    fn test_scheme_any_does_not_overmatch() {
+        let matcher = WildcardMatcher::new("//*.example.com").unwrap();
+        assert!(
+            matcher
+                .matches("http://www.example.com", "www.example.com", "/")
+                .matched
+        );
+        assert!(
+            matcher
+                .matches("ws://www.example.com", "www.example.com", "/")
+                .matched
+        );
+        // must NOT hijack unrelated hosts
+        assert!(
+            !matcher
+                .matches(
+                    "http://totally.unrelated.test",
+                    "totally.unrelated.test",
+                    "/"
+                )
+                .matched
+        );
+        // single level
+        assert!(
+            !matcher
+                .matches("http://a.b.example.com", "a.b.example.com", "/")
+                .matched
+        );
+    }
+
+    // Bare wildcard host (no scheme) keeps matching http+https, single level.
+    #[test]
+    fn test_bare_wildcard_unchanged() {
+        let matcher = WildcardMatcher::new("*.example.com").unwrap();
+        assert!(
+            matcher
+                .matches("http://www.example.com", "www.example.com", "/")
+                .matched
+        );
+        assert!(
+            matcher
+                .matches("https://www.example.com", "www.example.com", "/")
+                .matched
+        );
+        assert!(
+            !matcher
+                .matches("http://a.b.example.com", "a.b.example.com", "/")
+                .matched
+        );
+        assert!(
+            !matcher
+                .matches("http://example.com", "example.com", "/")
+                .matched
+        );
     }
 
     #[test]
