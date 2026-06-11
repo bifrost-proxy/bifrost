@@ -1217,7 +1217,7 @@ jobs:
           include-hidden-files: true
 
   test-windows-tray:
-    name: Windows Tray Tests (x86_64)
+    name: Windows Unit Tests (x86_64)
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
@@ -1240,6 +1240,6 @@ jobs:
           targets: x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
         with:
-          key: test-windows-tray
-      - name: Run tray icon tests
-        run: cargo test -p bifrost-cli --target x86_64-pc-windows-msvc commands::tray
+          key: test-windows
+      - name: Run Windows unit tests
+        run: cargo test --workspace --all-features --target x86_64-pc-windows-msvc
