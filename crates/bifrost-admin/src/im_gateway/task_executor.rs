@@ -358,11 +358,7 @@ mod tests {
     use super::*;
 
     fn success_script_text() -> &'static str {
-        if cfg!(windows) {
-            "echo hello_from_test"
-        } else {
-            "echo hello_from_test"
-        }
+        "echo hello_from_test"
     }
 
     fn failure_script_text() -> &'static str {
