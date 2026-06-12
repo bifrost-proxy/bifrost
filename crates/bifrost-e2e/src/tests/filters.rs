@@ -31,6 +31,36 @@ pub fn get_all_tests() -> Vec<TestCase> {
             test_includefilter_header,
         ),
         TestCase::standalone(
+            "filters_includeFilter_header_route_split_cache_regression",
+            "includeFilter 请求头分流缓存回归",
+            "filters",
+            test_includefilter_header_route_split_cache_regression,
+        ),
+        TestCase::standalone(
+            "filters_includeFilter_header_modify_cache_regression",
+            "includeFilter 请求头修改缓存回归",
+            "filters",
+            test_includefilter_header_modify_cache_regression,
+        ),
+        TestCase::standalone(
+            "filters_includeFilter_header_redirect_cache_regression",
+            "includeFilter 请求头重定向缓存回归",
+            "filters",
+            test_includefilter_header_redirect_cache_regression,
+        ),
+        TestCase::standalone(
+            "filters_excludeFilter_header_cache_regression",
+            "excludeFilter 请求头缓存回归",
+            "filters",
+            test_excludefilter_header_cache_regression,
+        ),
+        TestCase::standalone(
+            "filters_skip_header_cache_regression",
+            "skip 请求头缓存回归",
+            "filters",
+            test_skip_header_cache_regression,
+        ),
+        TestCase::standalone(
             "filters_excludeFilter_method_get",
             "excludeFilter 排除 GET 请求",
             "filters",
@@ -199,6 +229,298 @@ async fn test_includefilter_header() -> Result<(), String> {
 
     result_without_header.assert_success()?;
     result_without_header.assert_body_contains("normal_server")?;
+
+    Ok(())
+}
+
+async fn test_includefilter_header_route_split_cache_regression() -> Result<(), String> {
+    let web_mock = EnhancedMockServer::start().await;
+    web_mock.set_response(200, "feature_web_server");
+    let mobile_mock = EnhancedMockServer::start().await;
+    mobile_mock.set_response(200, "feature_mobile_server");
+    let fallback_mock = EnhancedMockServer::start().await;
+    fallback_mock.set_response(200, "feature_fallback_server");
+
+    let port = portpicker::pick_unused_port().unwrap();
+    let _proxy = ProxyInstance::start(
+        port,
+        vec![
+            &format!(
+                "multi-demand.local host://127.0.0.1:{} includeFilter://h:x-feature-env=feature-web",
+                web_mock.port
+            ),
+            &format!(
+                "multi-demand.local host://127.0.0.1:{} includeFilter://h:x-feature-env=feature-mobile",
+                mobile_mock.port
+            ),
+            &format!("multi-demand.local host://127.0.0.1:{}", fallback_mock.port),
+        ],
+    )
+    .await
+    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+
+    let proxy_url = format!("http://127.0.0.1:{}", port);
+    let target_url = "http://multi-demand.local/api";
+
+    let mobile_result = CurlCommand::with_proxy(&proxy_url, target_url)
+        .header("x-feature-env", "feature-mobile")
+        .execute()
+        .await
+        .map_err(|e| format!("curl failed: {}", e))?;
+
+    mobile_result.assert_success()?;
+    mobile_result.assert_body_contains("feature_mobile_server")?;
+
+    let fallback_result = CurlCommand::with_proxy(&proxy_url, target_url)
+        .header("x-feature-env", "feature-unknown")
+        .execute()
+        .await
+        .map_err(|e| format!("curl failed: {}", e))?;
+
+    fallback_result.assert_success()?;
+    fallback_result.assert_body_contains("feature_fallback_server")?;
+
+    let web_result = CurlCommand::with_proxy(&proxy_url, target_url)
+        .header("x-feature-env", "feature-web")
+        .execute()
+        .await
+        .map_err(|e| format!("curl failed: {}", e))?;
+
+    web_result.assert_success()?;
+    web_result.assert_body_contains("feature_web_server")?;
+
+    let mobile_again = CurlCommand::with_proxy(&proxy_url, target_url)
+        .header("x-feature-env", "feature-mobile")
+        .execute()
+        .await
+        .map_err(|e| format!("curl failed: {}", e))?;
+
+    mobile_again.assert_success()?;
+    mobile_again.assert_body_contains("feature_mobile_server")?;
+
+    Ok(())
+}
+
+async fn test_includefilter_header_modify_cache_regression() -> Result<(), String> {
+    let mock = EnhancedMockServer::start().await;
+    mock.set_response(200, "modify_server");
+
+    let port = portpicker::pick_unused_port().unwrap();
+    let _proxy = ProxyInstance::start(
+        port,
+        vec![
+            &format!("multi-modify.local host://127.0.0.1:{}", mock.port),
+            "multi-modify.local reqHeaders://X-Selected-Env=web includeFilter://h:x-feature-env=feature-web",
+            "multi-modify.local reqHeaders://X-Selected-Env=mobile includeFilter://h:x-feature-env=feature-mobile",
+            "multi-modify.local resHeaders://X-Selected-Env=web includeFilter://h:x-feature-env=feature-web",
+            "multi-modify.local resHeaders://X-Selected-Env=mobile includeFilter://h:x-feature-env=feature-mobile",
+            "multi-modify.local replaceStatus://201 includeFilter://h:x-feature-env=feature-web",
+            "multi-modify.local replaceStatus://202 includeFilter://h:x-feature-env=feature-mobile",
+        ],
+    )
+    .await
+    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+
+    let proxy_url = format!("http://127.0.0.1:{}", port);
+    let target_url = "http://multi-modify.local/api";
+
+    let mobile_result = CurlCommand::with_proxy(&proxy_url, target_url)
+        .header("x-feature-env", "feature-mobile")
+        .execute()
+        .await
+        .map_err(|e| format!("curl failed: {}", e))?;
+
+    mobile_result.assert_status(202)?;
+    mobile_result.assert_header("x-selected-env", "mobile")?;
+    mock.assert_header_received("x-selected-env", "mobile")?;
+
+    let web_result = CurlCommand::with_proxy(&proxy_url, target_url)
+        .header("x-feature-env", "feature-web")
+        .execute()
+        .await
+        .map_err(|e| format!("curl failed: {}", e))?;
+
+    web_result.assert_status(201)?;
+    web_result.assert_header("x-selected-env", "web")?;
+    mock.assert_header_received("x-selected-env", "web")?;
+
+    let mobile_again = CurlCommand::with_proxy(&proxy_url, target_url)
+        .header("x-feature-env", "feature-mobile")
+        .execute()
+        .await
+        .map_err(|e| format!("curl failed: {}", e))?;
+
+    mobile_again.assert_status(202)?;
+    mobile_again.assert_header("x-selected-env", "mobile")?;
+    mock.assert_header_received("x-selected-env", "mobile")?;
+
+    Ok(())
+}
+
+async fn test_includefilter_header_redirect_cache_regression() -> Result<(), String> {
+    let port = portpicker::pick_unused_port().unwrap();
+    let _proxy = ProxyInstance::start(
+        port,
+        vec![
+            "multi-direct.local redirect://302:https://web.example.test/landing includeFilter://h:x-feature-env=feature-web",
+            "multi-direct.local redirect://302:https://mobile.example.test/landing includeFilter://h:x-feature-env=feature-mobile",
+            "multi-status.local statusCode://201 includeFilter://h:x-feature-env=feature-web",
+            "multi-status.local statusCode://202 includeFilter://h:x-feature-env=feature-mobile",
+        ],
+    )
+    .await
+    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+
+    let proxy_url = format!("http://127.0.0.1:{}", port);
+    let target_url = "http://multi-direct.local/api";
+
+    let mobile_result = CurlCommand::with_proxy(&proxy_url, target_url)
+        .header("x-feature-env", "feature-mobile")
+        .execute()
+        .await
+        .map_err(|e| format!("curl failed: {}", e))?;
+
+    mobile_result.assert_status(302)?;
+    mobile_result.assert_header("location", "https://mobile.example.test/landing")?;
+
+    let web_result = CurlCommand::with_proxy(&proxy_url, target_url)
+        .header("x-feature-env", "feature-web")
+        .execute()
+        .await
+        .map_err(|e| format!("curl failed: {}", e))?;
+
+    web_result.assert_status(302)?;
+    web_result.assert_header("location", "https://web.example.test/landing")?;
+
+    let mobile_again = CurlCommand::with_proxy(&proxy_url, target_url)
+        .header("x-feature-env", "feature-mobile")
+        .execute()
+        .await
+        .map_err(|e| format!("curl failed: {}", e))?;
+
+    mobile_again.assert_status(302)?;
+    mobile_again.assert_header("location", "https://mobile.example.test/landing")?;
+
+    let mobile_status = CurlCommand::with_proxy(&proxy_url, "http://multi-status.local/api")
+        .header("x-feature-env", "feature-mobile")
+        .execute()
+        .await
+        .map_err(|e| format!("curl failed: {}", e))?;
+
+    mobile_status.assert_status(202)?;
+
+    let web_status = CurlCommand::with_proxy(&proxy_url, "http://multi-status.local/api")
+        .header("x-feature-env", "feature-web")
+        .execute()
+        .await
+        .map_err(|e| format!("curl failed: {}", e))?;
+
+    web_status.assert_status(201)?;
+
+    let mobile_status_again = CurlCommand::with_proxy(&proxy_url, "http://multi-status.local/api")
+        .header("x-feature-env", "feature-mobile")
+        .execute()
+        .await
+        .map_err(|e| format!("curl failed: {}", e))?;
+
+    mobile_status_again.assert_status(202)?;
+
+    Ok(())
+}
+
+async fn test_excludefilter_header_cache_regression() -> Result<(), String> {
+    let primary_mock = EnhancedMockServer::start().await;
+    primary_mock.set_response(200, "exclude_primary_server");
+    let fallback_mock = EnhancedMockServer::start().await;
+    fallback_mock.set_response(200, "exclude_fallback_server");
+
+    let port = portpicker::pick_unused_port().unwrap();
+    let _proxy = ProxyInstance::start(
+        port,
+        vec![
+            &format!(
+                "exclude-cache.local host://127.0.0.1:{} excludeFilter://h:x-block=true",
+                primary_mock.port
+            ),
+            &format!(
+                "exclude-cache.local host://127.0.0.1:{}",
+                fallback_mock.port
+            ),
+        ],
+    )
+    .await
+    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+
+    let proxy_url = format!("http://127.0.0.1:{}", port);
+    let target_url = "http://exclude-cache.local/api";
+
+    let blocked = CurlCommand::with_proxy(&proxy_url, target_url)
+        .header("x-block", "true")
+        .execute()
+        .await
+        .map_err(|e| format!("curl failed: {}", e))?;
+    blocked.assert_success()?;
+    blocked.assert_body_contains("exclude_fallback_server")?;
+
+    let allowed = CurlCommand::with_proxy(&proxy_url, target_url)
+        .execute()
+        .await
+        .map_err(|e| format!("curl failed: {}", e))?;
+    allowed.assert_success()?;
+    allowed.assert_body_contains("exclude_primary_server")?;
+
+    let blocked_again = CurlCommand::with_proxy(&proxy_url, target_url)
+        .header("x-block", "true")
+        .execute()
+        .await
+        .map_err(|e| format!("curl failed: {}", e))?;
+    blocked_again.assert_success()?;
+    blocked_again.assert_body_contains("exclude_fallback_server")?;
+
+    Ok(())
+}
+
+async fn test_skip_header_cache_regression() -> Result<(), String> {
+    let mock = EnhancedMockServer::start().await;
+    mock.set_response(200, "skip_server");
+
+    let port = portpicker::pick_unused_port().unwrap();
+    let _proxy = ProxyInstance::start(
+        port,
+        vec![
+            &format!("skip-cache.local host://127.0.0.1:{}", mock.port),
+            "skip-cache.local resHeaders://X-Skip-Target=selected",
+            "skip-cache.local skip://operation=resHeaders://X-Skip-Target=selected includeFilter://h:x-skip=true",
+        ],
+    )
+    .await
+    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+
+    let proxy_url = format!("http://127.0.0.1:{}", port);
+    let target_url = "http://skip-cache.local/api";
+
+    let skipped = CurlCommand::with_proxy(&proxy_url, target_url)
+        .header("x-skip", "true")
+        .execute()
+        .await
+        .map_err(|e| format!("curl failed: {}", e))?;
+    skipped.assert_success()?;
+    skipped.assert_header_missing("x-skip-target")?;
+
+    let selected = CurlCommand::with_proxy(&proxy_url, target_url)
+        .execute()
+        .await
+        .map_err(|e| format!("curl failed: {}", e))?;
+    selected.assert_success()?;
+    selected.assert_header("x-skip-target", "selected")?;
+
+    let skipped_again = CurlCommand::with_proxy(&proxy_url, target_url)
+        .header("x-skip", "true")
+        .execute()
+        .await
+        .map_err(|e| format!("curl failed: {}", e))?;
+    skipped_again.assert_success()?;
+    skipped_again.assert_header_missing("x-skip-target")?;
 
     Ok(())
 }
