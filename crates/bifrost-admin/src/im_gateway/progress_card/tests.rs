@@ -149,10 +149,52 @@ fn noisy_runner_statuses_are_hidden_from_process_timeline() {
         "019ea1ba-28b8-7670-befe-a979605ce0bf"
     ));
     assert!(!is_human_readable_progress_status("turn started"));
+    assert!(!is_human_readable_progress_status("tool_calls"));
+    assert!(!is_human_readable_progress_status("waiting_on_session"));
+    assert!(!is_human_readable_progress_status("model_request"));
+    assert!(!is_human_readable_progress_status("model_response"));
+    assert!(!is_human_readable_progress_status("custom_machine_state"));
     assert!(!is_human_readable_progress_status(
         "model rerouted: Test-O-New-Thinking -> claude_46_opus"
     ));
     assert!(is_human_readable_progress_status("正在读取当前分支差异"));
+}
+
+#[test]
+fn machine_status_events_do_not_flood_process_card() {
+    let mut snapshot = ImAgentProgressSnapshot::new("s1", "run task");
+    for state in [
+        "tool_calls",
+        "waiting_on_session",
+        "model_request",
+        "model_response",
+        "custom_machine_state",
+    ] {
+        let mut status = active_status(0);
+        status.state = state.to_string();
+        snapshot.apply_event(AgentTurnProgressEvent::Status(Box::new(status)));
+    }
+    snapshot.apply_event(AgentTurnProgressEvent::AssistantDelta {
+        content: "我会先检查失败用例。".to_string(),
+    });
+    snapshot.apply_event(AgentTurnProgressEvent::ToolStarted {
+        tool_name: "exec_command".to_string(),
+        arguments: "cargo test -p bifrost-admin progress_card".to_string(),
+    });
+
+    assert_eq!(snapshot.timeline.len(), 2);
+    assert_eq!(snapshot.timeline[0].kind, ProgressTimelineKind::Thinking);
+    assert_eq!(snapshot.timeline[1].kind, ProgressTimelineKind::Tool);
+
+    let card = build_feishu_progress_card(&snapshot, true);
+    let serialized = serde_json::to_string(&card).unwrap();
+    assert!(serialized.contains("我会先检查失败用例"));
+    assert!(serialized.contains("正在运行：exec_command"));
+    assert!(!serialized.contains("状态：tool_calls"));
+    assert!(!serialized.contains("状态：waiting_on_session"));
+    assert!(!serialized.contains("状态：model_request"));
+    assert!(!serialized.contains("状态：model_response"));
+    assert!(!serialized.contains("custom_machine_state"));
 }
 
 #[test]
@@ -347,6 +389,30 @@ fn external_runner_status_footer_uses_runner_metadata_instead_of_agent_metrics()
     assert!(!footer.contains("压缩"));
     assert!(!footer.contains("工作路径：`N/A`"));
     assert!(!footer.contains("外部会话：N/A"));
+}
+
+#[test]
+fn external_runner_footer_hides_machine_status_line() {
+    let mut snapshot = ImAgentProgressSnapshot::new("s1", "codex task");
+    snapshot.runner = Some(ProgressRunnerSummary {
+        runner_id: "codex".to_string(),
+        adapter: "codex".to_string(),
+        model: None,
+        model_source: None,
+        token_usage: None,
+        work_dir: Some("/tmp/bifrost-codex".to_string()),
+        external_thread_id: None,
+        external_conversation_id: None,
+    });
+    let mut machine_status = active_status(0);
+    machine_status.state = "model_request".to_string();
+    snapshot.status = Some(machine_status);
+
+    assert_eq!(external_runner_state_line(&snapshot), None);
+
+    let footer = format_footer_markdown(&snapshot);
+    assert!(footer.contains("Runner：`codex` · Adapter：`codex`"));
+    assert!(!footer.contains("当前状态：model_request"));
 }
 
 fn active_status(compaction_count: u32) -> ActiveTurnStatus {

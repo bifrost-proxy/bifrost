@@ -310,15 +310,32 @@ fn is_human_readable_progress_status(status: &str) -> bool {
     let lower = status.to_ascii_lowercase();
     if matches!(
         lower.as_str(),
-        "turn started" | "turn completed" | "run started" | "run completed"
+        "turn started"
+            | "turn completed"
+            | "run started"
+            | "run completed"
+            | "tool_calls"
+            | "waiting_on_session"
+            | "model_request"
+            | "model_response"
     ) || lower.starts_with("model rerouted:")
     {
+        return false;
+    }
+    if is_machine_state_label(status) {
         return false;
     }
     if looks_like_uuid(status) {
         return false;
     }
     true
+}
+
+fn is_machine_state_label(value: &str) -> bool {
+    value.contains('_')
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 fn looks_like_uuid(value: &str) -> bool {
@@ -1866,7 +1883,7 @@ fn external_runner_state_line(snapshot: &ImAgentProgressSnapshot) -> Option<Stri
         .status
         .as_ref()
         .map(|status| status.state.trim())
-        .filter(|value| !value.is_empty() && *value != "running")?;
+        .filter(|value| is_human_readable_progress_status(value))?;
     Some(format!("当前状态：{}", truncate_one_line(state, 48)))
 }
 
