@@ -241,20 +241,20 @@ jobs:
           include-hidden-files: true
 
   e2e-shell:
-    name: E2E Shell (Linux, shard ${{ matrix.shard }}/3)
+    name: E2E Shell (Linux, shard ${{ matrix.shard }}/4)
     needs: [build-e2e]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4]
     env:
       BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
       BIFROST_E2E_REPORT_DIR: ${{ github.workspace }}/.e2e-reports
       BIFROST_E2E_SHELL_JOBS: "4"
       BIFROST_E2E_SHARD_INDEX: ${{ matrix.shard }}
-      BIFROST_E2E_SHARD_TOTAL: "3"
+      BIFROST_E2E_SHARD_TOTAL: "4"
       BIFROST_E2E_RETRY_FAILED_ONCE: "1"
       BIFROST_E2E_HTTP_RETRIES: "2"
       TIMEOUT: "90"
@@ -705,20 +705,20 @@ jobs:
           include-hidden-files: true
 
   e2e-macos-shell:
-    name: E2E Shell (aarch64-apple-darwin, shard ${{ matrix.shard }}/3)
+    name: E2E Shell (aarch64-apple-darwin, shard ${{ matrix.shard }}/4)
     needs: [build-cli-macos-aarch64]
     runs-on: macos-15
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4]
     env:
       BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
       BIFROST_E2E_REPORT_DIR: ${{ github.workspace }}/.e2e-reports
       BIFROST_E2E_SHELL_JOBS: "2"
       BIFROST_E2E_SHARD_INDEX: ${{ matrix.shard }}
-      BIFROST_E2E_SHARD_TOTAL: "3"
+      BIFROST_E2E_SHARD_TOTAL: "4"
       BIFROST_E2E_RETRY_FAILED_ONCE: "1"
       BIFROST_E2E_HTTP_RETRIES: "2"
       TIMEOUT: "90"
