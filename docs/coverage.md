@@ -1,113 +1,106 @@
-# Test Coverage Mechanism
+# 测试覆盖率机制
 
-This document describes how Bifrost measures and enforces test coverage across
-the **whole test pyramid** — unit tests, integration tests, and end-to-end
-(E2E) tests — and the workflow for driving every crate to the **90% line
-coverage** goal.
+本文档说明 Bifrost 如何在**完整测试金字塔**（单元测试、集成测试、端到端
+（E2E）测试）范围内度量并强制约束测试覆盖率，以及推动每个 crate 达到
+**90% 行覆盖率**目标的工作流。
 
 ## TL;DR
 
 ```bash
-# 1. Measure everything (unit + integration), merge, emit JSON, enforce floors,
-#    and print exactly where to add tests:
+# 1. 度量全部（单元 + 集成），合并、输出 JSON、强制下限，
+#    并精确打印需要补测的位置：
 bash scripts/ci/coverage-all.sh --json --gate --gaps
 
-# 2. Include E2E suites in the merged number:
+# 2. 将 E2E 套件纳入合并后的覆盖率：
 bash scripts/ci/coverage-all.sh --with-e2e --json --gate
 
-# 3. Iterate on a single crate (fast):
+# 3. 针对单个 crate 快速迭代：
 bash scripts/ci/coverage-all.sh -p bifrost-core --json --gaps
 
-# 4. Open an HTML report locally:
+# 4. 在本地打开 HTML 报告：
 bash scripts/ci/coverage-all.sh -p bifrost-core --html
 open target/coverage/html/index.html
 ```
 
-## What gets measured
+## 度量哪些内容
 
-| Layer | Source | How it is captured |
+| 层级 | 来源 | 如何采集 |
 |---|---|---|
-| **Unit tests** | `#[cfg(test)]` modules inside each crate | `cargo llvm-cov` instruments the crate and runs `cargo test` |
-| **Integration tests** | `crates/bifrost-tests` → repo-root `tests/*.rs` | same `cargo llvm-cov` run (they are normal test targets) |
-| **E2E tests** | `scripts/ci/run-e2e-*.sh` driving the `bifrost` + `bifrost-e2e` binaries | binaries are built **instrumented**; their `.profraw` is merged in (`--with-e2e`) |
+| **单元测试** | 各 crate 内部的 `#[cfg(test)]` 模块 | `cargo llvm-cov` 对 crate 插桩并运行 `cargo test` |
+| **集成测试** | `crates/bifrost-tests` → 仓库根目录 `tests/*.rs` | 同一次 `cargo llvm-cov` 运行（它们是普通的 test target） |
+| **E2E 测试** | `scripts/ci/run-e2e-*.sh` 驱动 `bifrost` + `bifrost-e2e` 二进制 | 二进制以**插桩**方式构建，其 `.profraw` 被合并进来（`--with-e2e`） |
 
-All layers write LLVM profile data into the **same** target directory, then a
-single `cargo llvm-cov report` merges them. **A line counts as covered if *any*
-layer exercises it** — so the merged number reflects the real reach of the
-whole test suite, which is what the 90% goal is measured against.
+所有层级都将 LLVM 性能剖析数据写入**同一个** target 目录，然后由一次
+`cargo llvm-cov report` 合并。**只要*任一*层级覆盖到某一行，该行即记为已覆盖**
+——因此合并后的数值反映了整个测试套件的真实覆盖范围，这正是 90% 目标的
+度量基准。
 
-## The mechanism — files
+## 机制——相关文件
 
-| File | Role |
+| 文件 | 作用 |
 |---|---|
-| `scripts/ci/coverage-all.sh` | **Entry point.** Collects unit + integration (+ optional E2E) coverage, merges, emits text/JSON/LCOV/HTML, optionally runs the gate. |
-| `scripts/ci/coverage-gate.py` | **Gate & gap analysis.** Reads the merged JSON, maps files → crates, enforces per-crate + workspace floors, and prints prioritized gaps. |
-| `scripts/ci/coverage-thresholds.toml` | **The contract.** Per-crate line-coverage *floors* (a ratchet) + the workspace goal. CI fails if coverage drops below a floor. |
-| `scripts/ci/coverage.sh` | Legacy unit-only helper (still works). |
-| `scripts/ci/coverage-e2e.sh` | Legacy E2E-only helper (still works). |
+| `scripts/ci/coverage-all.sh` | **入口。** 采集单元 + 集成（+ 可选 E2E）覆盖率，合并，输出 text/JSON/LCOV/HTML，可选执行门禁。 |
+| `scripts/ci/coverage-gate.py` | **门禁与缺口分析。** 读取合并后的 JSON，将文件映射到 crate，强制每个 crate 与整个 workspace 的下限，并打印按优先级排序的缺口。 |
+| `scripts/ci/coverage-thresholds.toml` | **契约。** 每个 crate 的行覆盖率*下限*（棘轮）+ workspace 目标。若覆盖率低于下限，CI 失败。 |
+| `scripts/ci/coverage.sh` | 旧版仅单元测试的辅助脚本（仍可用）。 |
+| `scripts/ci/coverage-e2e.sh` | 旧版仅 E2E 的辅助脚本（仍可用）。 |
 
-> Prerequisites: `rustup component add llvm-tools-preview` and
-> `cargo install cargo-llvm-cov` (the scripts auto-install if missing). On
-> many-core machines the instrumented linker can crash if it spawns one thread
-> per CPU against a small `max locked memory` ulimit — the scripts therefore
-> constrain build/link parallelism via `--jobs` (default 4). Override with
-> `--jobs N` or the `COVERAGE_JOBS` env var.
+> 前置条件：`rustup component add llvm-tools-preview` 与
+> `cargo install cargo-llvm-cov`（脚本会在缺失时自动安装）。在多核机器上，
+> 若插桩链接器针对较小的 `max locked memory` ulimit 为每个 CPU 各生成一个
+> 线程，可能会崩溃——因此脚本通过 `--jobs`（默认 4）约束构建/链接并行度。
+> 可用 `--jobs N` 或环境变量 `COVERAGE_JOBS` 覆盖。
 
-## The 90% gate & ratchet
+## 90% 门禁与棘轮
 
-`coverage-thresholds.toml` declares:
+`coverage-thresholds.toml` 声明：
 
-* `settings.default` — the project goal (**90%**), used for any crate without
-  an explicit floor and for the gap report's target line.
-* `settings.workspace_min` — an aggregate floor across the whole workspace.
-* `[crates.<name>].min` — a per-crate **floor**. The gate fails if the crate
-  falls below it.
+* `settings.default`——项目目标（**90%**），用于任何没有显式下限的 crate
+  以及缺口报告的目标行。
+* `settings.workspace_min`——整个 workspace 的聚合下限。
+* `[crates.<name>].min`——每个 crate 的**下限**。若该 crate 低于此值，门禁失败。
 
-The floors act as a **ratchet**: they are seeded at the current baseline so CI
-goes green today, and are raised as tests are added. A floor must never be
-lowered without explicit justification — that is how the workspace converges on
-90% without regressing.
+这些下限充当**棘轮**：它们以当前基线为初始值，使 CI 今天即可通过，并随着
+测试的补充而调高。下限在没有明确理由的情况下绝不能下调——这正是 workspace
+在不发生回退的前提下收敛到 90% 的方式。
 
-## Workflow: driving a crate to 90%
+## 工作流：将某个 crate 推到 90%
 
-1. **Find the gaps.**
+1. **找出缺口。**
    ```bash
    bash scripts/ci/coverage-all.sh -p <crate> --json --gaps
    ```
-   The gap report lists the files furthest below target, sorted by
-   uncovered-line count (biggest wins first), plus a per-crate "investment
-   priority" total.
+   缺口报告会列出距目标最远的文件，按未覆盖行数排序（缺口最大者优先），
+   并给出每个 crate 的“投入优先级”总分。
 
-2. **See which lines are red.** Generate HTML and open the file:
+2. **看清哪些行是红色。** 生成 HTML 并打开对应文件：
    ```bash
    bash scripts/ci/coverage-all.sh -p <crate> --html
    open target/coverage/html/index.html
    ```
 
-3. **Add targeted tests** for the uncovered branches/functions. Prefer
-   behavior-driven tests over line-chasing; the merged report rewards real
-   integration/E2E coverage too.
+3. **针对未覆盖的分支/函数补测。** 优先编写行为驱动的测试，而非单纯追行；
+   合并后的报告同样会奖励真实的集成/E2E 覆盖。
 
-4. **Re-measure and bump the floor.**
+4. **重新度量并调高下限。**
    ```bash
    bash scripts/ci/coverage-all.sh -p <crate> --json --gate
    ```
-   Once the crate is ≥ 90%, set its `[crates.<crate>].min = 90.0` in
-   `coverage-thresholds.toml` so it can never regress.
+   一旦该 crate ≥ 90%，在 `coverage-thresholds.toml` 中设置
+   `[crates.<crate>].min = 90.0`，使其永不回退。
 
-5. **Repeat** until every crate's floor is 90 — at which point the floors equal
-   the goal and the workspace is at 90% by construction.
+5. **重复**，直到每个 crate 的下限都为 90——此时下限等于目标，workspace
+   也就自然达到了 90%。
 
-## CI integration
+## CI 集成
 
-The `coverage` job in `.github/workflows/ci.yml`:
+`.github/workflows/ci.yml` 中的 `coverage` job：
 
-1. installs `llvm-tools-preview` + `cargo-llvm-cov`,
-2. runs `scripts/ci/coverage-all.sh --json --lcov --gate --gaps`,
-3. writes a Markdown summary to the GitHub job summary, and
-4. uploads `coverage.json` + `lcov.info` as artifacts (consumable by Codecov,
-   Coveralls, or local inspection).
+1. 安装 `llvm-tools-preview` + `cargo-llvm-cov`，
+2. 运行 `scripts/ci/coverage-all.sh --json --lcov --gate --gaps`，
+3. 将 Markdown 摘要写入 GitHub job summary，并
+4. 上传 `coverage.json` + `lcov.info` 作为 artifact（可供 Codecov、
+   Coveralls 或本地查看使用）。
 
-The job **fails the build** if any crate or the workspace aggregate drops below
-its configured floor. To raise the bar, add tests and bump the floors — never
-weaken the gate to make it pass.
+若任何 crate 或 workspace 聚合值低于其配置的下限，该 job 会**使构建失败**。
+要提高标准，请补测并调高下限——绝不要为了让它通过而削弱门禁。
