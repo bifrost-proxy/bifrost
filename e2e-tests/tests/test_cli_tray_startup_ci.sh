@@ -69,6 +69,12 @@ tray_log_has_startup_marker() {
   log="$(first_tray_log 2>/dev/null || true)"
   [[ -n "$log" ]] && grep -q "bifrost-tray starting" "$log"
 }
+read_tray_pid_file() {
+  local content
+  content="$(cat "$DATA_DIR/tray.pid" 2>/dev/null || true)"
+  printf '%s' "$content" | tr -d '[:space:]'
+}
+
 
 cleanup() {
   if [[ -n "$DATA_DIR" && -x "$BIN" ]]; then
@@ -77,8 +83,8 @@ cleanup() {
   if [[ -n "$START_PID" ]]; then
     kill_process_tree "$START_PID"
   fi
-  if [[ -n "$DATA_DIR" && -f "$DATA_DIR/tray.pid" ]]; then
-    kill_pid_force "$(cat "$DATA_DIR/tray.pid" 2>/dev/null || true)"
+  if [[ -n "$DATA_DIR" ]]; then
+    kill_pid_force "$(read_tray_pid_file)"
   fi
   if [[ -n "$PORT" ]]; then
     kill_bifrost_on_port "$PORT"
@@ -133,8 +139,8 @@ fi
 
 TRAY_PID=""
 for _ in $(seq 1 160); do
-  if [[ -s "$DATA_DIR/tray.pid" ]]; then
-    TRAY_PID="$(cat "$DATA_DIR/tray.pid" | tr -d '[:space:]')"
+  TRAY_PID="$(read_tray_pid_file)"
+  if [[ -n "$TRAY_PID" ]]; then
     if pid_is_alive "$TRAY_PID" && compgen -G "$DATA_DIR/logs/tray.log*" >/dev/null; then
       break
     fi
