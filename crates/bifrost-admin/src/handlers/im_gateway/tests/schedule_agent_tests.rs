@@ -1,4 +1,4 @@
-use super::{super::*, test_provider, EnvGuard};
+use super::{super::*, fake_external_runner_workdir_command, test_provider, EnvGuard};
 
 #[test]
 pub(super) fn schedule_chatgpt_web_initial_prompt_is_sent_as_first_message_only() {
@@ -240,7 +240,14 @@ pub(super) async fn schedule_agent_can_run_selected_external_runner_with_initial
     )
     .await;
 
-    assert_eq!(run.status, crate::im_gateway::types::TaskRunStatus::Success);
+    assert_eq!(
+        run.status,
+        crate::im_gateway::types::TaskRunStatus::Success,
+        "error={:?}, stdout={:?}, final_response={:?}",
+        run.error,
+        run.stdout_preview,
+        run.agent_final_response
+    );
     assert_eq!(run.runner_id.as_deref(), Some("chatgpt-test"));
     assert_eq!(run.provider_id.as_deref(), Some("feishu-main"));
     assert_eq!(run.target_id.as_deref(), Some("target-main"));
@@ -363,7 +370,14 @@ pub(super) async fn schedule_agent_adapter_config_overrides_runner_without_dropp
     )
     .await;
 
-    assert_eq!(run.status, crate::im_gateway::types::TaskRunStatus::Success);
+    assert_eq!(
+        run.status,
+        crate::im_gateway::types::TaskRunStatus::Success,
+        "error={:?}, stdout={:?}, final_response={:?}",
+        run.error,
+        run.stdout_preview,
+        run.agent_final_response
+    );
     assert_eq!(run.agent_final_response.as_deref(), Some("OVERRIDE_OK"));
 }
 
@@ -374,10 +388,7 @@ pub(super) async fn schedule_external_runner_executes_from_configured_work_dir()
     let service = ImGatewayService::new(temp_dir.path());
     let work_dir = temp_dir.path().join("runner-workdir");
     std::fs::create_dir_all(&work_dir).expect("create runner workdir");
-    let expected_pwd = std::fs::canonicalize(&work_dir)
-        .expect("canonical workdir")
-        .display()
-        .to_string();
+    std::fs::write(work_dir.join("expected.marker"), b"ok").expect("write marker");
 
     let provider = test_provider();
     service
@@ -401,6 +412,7 @@ pub(super) async fn schedule_external_runner_executes_from_configured_work_dir()
 
     let mut external_cli_config =
         crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+    let (executable, args) = fake_external_runner_workdir_command();
     external_cli_config.runners.insert(
         "codex-workdir-test".to_string(),
         crate::im_gateway::external_cli::ExternalCliAgentSettings {
@@ -408,15 +420,9 @@ pub(super) async fn schedule_external_runner_executes_from_configured_work_dir()
             adapter: "mock".to_string(),
             instructions: None,
             adapter_config: crate::im_gateway::external_cli::ExternalCliAdapterConfig {
-                executable: Some("sh".to_string()),
-                args: vec![
-                    "-c".to_string(),
-                    "cat >/dev/null; if [ \"$(pwd -P)\" = \"$EXPECTED_PWD\" ]; then printf '%s\n' '{\"type\":\"assistant_final\",\"content\":\"WORKDIR_OK\"}'; else printf '%s\n' '{\"type\":\"assistant_final\",\"content\":\"WORKDIR_MISMATCH\"}'; fi".to_string(),
-                ],
-                env: std::collections::BTreeMap::from([(
-                    "EXPECTED_PWD".to_string(),
-                    expected_pwd,
-                )]),
+                executable: Some(executable),
+                args,
+                env: Default::default(),
                 ..Default::default()
             },
             inject_bifrost_tools: false,
@@ -469,7 +475,14 @@ pub(super) async fn schedule_external_runner_executes_from_configured_work_dir()
     )
     .await;
 
-    assert_eq!(run.status, crate::im_gateway::types::TaskRunStatus::Success);
+    assert_eq!(
+        run.status,
+        crate::im_gateway::types::TaskRunStatus::Success,
+        "error={:?}, stdout={:?}, final_response={:?}",
+        run.error,
+        run.stdout_preview,
+        run.agent_final_response
+    );
     assert_eq!(run.agent_final_response.as_deref(), Some("WORKDIR_OK"));
 }
 

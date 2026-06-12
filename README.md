@@ -33,7 +33,7 @@ Bash 与 PowerShell 安装脚本都会自动探测 GitHub 直连和内置镜像�
 安装指定版本
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash -s -- --version v0.0.48-beta
+curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash -s -- --version v0.0.96
 ```
 
 方法二：使用 npm 安装

@@ -55,8 +55,12 @@ impl Phase2LockGuard {
                 }))
             }
             Err(error) => {
-                // contention: another process holds the lock
-                if error.kind() == std::io::ErrorKind::WouldBlock {
+                // contention: another process holds the lock.
+                // On Unix this surfaces as WouldBlock; on Windows the OS
+                // reports ERROR_LOCK_VIOLATION (raw os error 33).
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.raw_os_error() == Some(33)
+                {
                     return Ok(None);
                 }
                 Err(format!("lock {}: {error}", path.display()))

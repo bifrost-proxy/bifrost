@@ -223,6 +223,9 @@ jobs:
           key: cli-${{ matrix.target }}
 
       - name: Cache sherpa-onnx archive
+        # Local ASR native assets are distributed only for the supported
+        # Apple Silicon macOS CLI target. Windows/Linux release packages must
+        # not fetch or bundle sherpa/qwen ASR runtime artifacts.
         if: matrix.target == 'aarch64-apple-darwin'
         uses: actions/cache@v4
         with:
@@ -233,6 +236,8 @@ jobs:
             sherpa-onnx-
 
       - name: Prepare sherpa-onnx archive
+        # Keep ASR packaging gated to macOS aarch64. Unsupported targets expose
+        # only bifrost-asr core metadata/capability code.
         if: matrix.target == 'aarch64-apple-darwin'
         shell: bash
         run: bash scripts/ci/prepare-sherpa-onnx-archive.sh ${{ matrix.target }}
@@ -260,10 +265,11 @@ jobs:
           ARCHIVE_NAME="bifrost-v${VERSION}-${{ matrix.target }}"
           mkdir -p "dist/${ARCHIVE_NAME}"
           cp "target/${{ matrix.target }}/release/bifrost" "dist/${ARCHIVE_NAME}/"
+          strip "dist/${ARCHIVE_NAME}/bifrost" 2>/dev/null || true
           cp README.md "dist/${ARCHIVE_NAME}/" 2>/dev/null || true
           cd dist
           tar -czvf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
-          echo "ASSET=${ARCHIVE_NAME}.tar.gz" >> $GITHUB_ENV
+          tar -cJvf "${ARCHIVE_NAME}.tar.xz" "${ARCHIVE_NAME}"
 
       - name: Package (Windows)
         if: matrix.archive == 'zip'
@@ -275,25 +281,29 @@ jobs:
           Copy-Item "target/${{ matrix.target }}/release/bifrost.exe" "dist/${ARCHIVE_NAME}/"
           Copy-Item "README.md" "dist/${ARCHIVE_NAME}/" -ErrorAction SilentlyContinue
           Compress-Archive -Path "dist/${ARCHIVE_NAME}" -DestinationPath "dist/${ARCHIVE_NAME}.zip"
-          echo "ASSET=${ARCHIVE_NAME}.zip" >> $env:GITHUB_ENV
 
       - name: Generate checksum
         shell: bash
         run: |
           cd dist
-          if [ "${{ runner.os }}" = "macOS" ]; then
-            shasum -a 256 "${{ env.ASSET }}" > "${{ env.ASSET }}.sha256"
-          else
-            sha256sum "${{ env.ASSET }}" > "${{ env.ASSET }}.sha256"
-          fi
+          for asset in *.tar.gz *.tar.xz *.zip; do
+            [ -e "$asset" ] || continue
+            if [ "${{ runner.os }}" = "macOS" ]; then
+              shasum -a 256 "$asset" > "$asset.sha256"
+            else
+              sha256sum "$asset" > "$asset.sha256"
+            fi
+          done
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: cli-${{ matrix.target }}
           path: |
-            dist/${{ env.ASSET }}
-            dist/${{ env.ASSET }}.sha256
+            dist/*.tar.gz
+            dist/*.tar.xz
+            dist/*.zip
+            dist/*.sha256
 
   build-desktop:
     name: Build Desktop (${{ matrix.target }})
@@ -570,7 +580,7 @@ jobs:
       - name: Collect release assets
         run: |
           mkdir -p release
-          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.dmg" -o -name "*.msi" -o -name "*.sha256" \) -exec cp {} release/ \;
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.tar.xz" -o -name "*.zip" -o -name "*.dmg" -o -name "*.msi" -o -name "*.sha256" \) -exec cp {} release/ \;
 
       - name: Create combined checksums
         run: |
@@ -622,6 +632,8 @@ jobs:
             ```
 
             ### Manual Download
+
+            Unix/macOS CLI assets are published as both `.tar.xz` (smaller download) and `.tar.gz` (maximum compatibility). The quick installer prefers `.tar.xz` when the local `tar` supports it and falls back to `.tar.gz`.
 
             CLI:
             | Platform | Architecture | Download |
@@ -841,6 +853,24 @@ jobs:
             else
               echo "✅ Found: cli-${target}"
             fi
+            case "$target" in
+              *-pc-windows-msvc)
+                if [ ! -f "artifacts/cli-${target}/bifrost-${{ needs.prepare.outputs.tag }}-${target}.zip" ]; then
+                  echo "❌ Missing npm-compatible Windows zip for ${target}"
+                  MISSING=$((MISSING + 1))
+                fi
+                ;;
+              *)
+                if [ ! -f "artifacts/cli-${target}/bifrost-${{ needs.prepare.outputs.tag }}-${target}.tar.gz" ]; then
+                  echo "❌ Missing compatible tar.gz for Homebrew/npm/legacy installers: ${target}"
+                  MISSING=$((MISSING + 1))
+                fi
+                if [ ! -f "artifacts/cli-${target}/bifrost-${{ needs.prepare.outputs.tag }}-${target}.tar.xz" ]; then
+                  echo "❌ Missing smaller tar.xz for install script and bifrost upgrade: ${target}"
+                  MISSING=$((MISSING + 1))
+                fi
+                ;;
+            esac
           done
           if [ "$MISSING" -gt 0 ]; then
             echo ""

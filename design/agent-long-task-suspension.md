@@ -1885,6 +1885,7 @@ Cooperative Long Task Loop 的最终交付标准不是“先有一个 in-turn wa
 - 已实现 `chunk_id` / `next_output_cursor.chunk_id` / `new_output_bytes` / `output_lossy` / `lost_chunk_count` / `truncated_bytes` 元数据，为后续完整 stdout/stderr byte cursor 留出协议空间。
 - 已实现 turn loop 内部 runtime watcher：`exec_command` 返回仍在运行的 session 后，由 runtime poll 等待输出/退出，不再让模型反复调用 `write_stdin`。
 - 已实现交互式 TTY running session 的 `interactive` profile：runtime 观察 PTY 输出但不自动写 stdin；连续短暂无输出后以 `resume_reason=stalled` 恢复模型，让模型根据 prompt/回显决定是否 `write_stdin` 输入确认、继续 poll、Ctrl-C 或改用非交互命令。
+- Windows CI/Parallels x86_64 场景不把 ConPTY child launch 或 PTY prompt/stall timing 作为单元测试门禁：这些路径会在宿主/模拟层返回 `0xC0000142` 或拖住 child process。Windows 单测保留非 TTY exec_command 长任务/用户插话覆盖，PTY/stall timing 用例必须显式 ignored 并说明平台原因；非 Windows 继续覆盖 TTY prompt/stall 行为。
 - 已移除命令内容分类器：当前实现不再通过关键字、正则、GitHub Actions 脚本路径、构建命令名或工程专属路径推断 profile。短命令在 initial yield 内完成时仍 inline 返回；未完成的非 TTY session 统一使用 `adaptive`，未完成的 TTY session 使用 `interactive`。
 - 已完成命令执行入口复核：Bifrost Agent 本地可见 terminal 能力只有 `exec_command` / `write_stdin`，旧 `shell`、`shell_pty`、`shell_command`、`local_shell` 均不注册并有拒绝测试；MCP tool 有 `tool_timeout_sec` per-request timeout，不具备 Bifrost runtime 可写 stdin 的 terminal session 语义；IM external CLI runner 属于外部 agent 进程边界，Bifrost 只能传入初始 prompt 并按 runner timeout 收敛，无法代替外部 runner 处理其内部工具确认。
 - 已实现 `LongTaskStatus` progress event、`TurnSuspended`、`LongTaskWatchStarted`、`LongTaskHeartbeat`、`LongTaskOutputAvailable`、`LongTaskExited` 和 `TurnResumed` 事件。

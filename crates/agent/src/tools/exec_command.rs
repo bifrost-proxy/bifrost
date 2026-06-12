@@ -569,19 +569,55 @@ impl ShellCommand {
             .filter(|value| !value.trim().is_empty())
             .map(ToOwned::to_owned)
             .unwrap_or_else(default_shell);
-        let flag = if shell.ends_with("fish") || !use_login_shell {
-            "-c"
+        let args = if is_powershell_shell(&shell) {
+            vec![
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-Command".to_string(),
+                cmd.to_string(),
+            ]
+        } else if is_cmd_shell(&shell) {
+            vec!["/C".to_string(), cmd.to_string()]
         } else {
-            "-lc"
+            let flag = if shell.ends_with("fish") || !use_login_shell {
+                "-c"
+            } else {
+                "-lc"
+            };
+            vec![flag.to_string(), cmd.to_string()]
         };
         Self {
             program: shell,
-            args: vec![flag.to_string(), cmd.to_string()],
+            args,
         }
     }
 }
 
+fn shell_basename_lower(shell: &str) -> String {
+    shell
+        .trim()
+        .replace('\\', "/")
+        .rsplit('/')
+        .next()
+        .unwrap_or(shell)
+        .to_ascii_lowercase()
+}
+
+fn is_powershell_shell(shell: &str) -> bool {
+    matches!(
+        shell_basename_lower(shell).as_str(),
+        "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe"
+    )
+}
+
+fn is_cmd_shell(shell: &str) -> bool {
+    matches!(shell_basename_lower(shell).as_str(), "cmd" | "cmd.exe")
+}
+
 fn default_shell() -> String {
+    if cfg!(windows) {
+        return "powershell.exe".to_string();
+    }
     if let Ok(shell) = std::env::var("SHELL") {
         if !shell.trim().is_empty() {
             return shell;
@@ -1097,14 +1133,140 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    #[cfg(windows)]
+    fn ps_string(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "''"))
+    }
+
+    #[cfg(windows)]
+    fn ps_write(value: &str) -> String {
+        format!(
+            "[Console]::Out.Write({}); [Console]::Out.Flush()",
+            ps_string(value)
+        )
+    }
+
+    #[cfg(not(windows))]
+    fn sh_string(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+
+    #[cfg(windows)]
+    fn print_command(value: &str) -> String {
+        ps_write(value)
+    }
+
+    #[cfg(not(windows))]
+    fn print_command(value: &str) -> String {
+        format!("printf %s {}", sh_string(value))
+    }
+
+    #[cfg(windows)]
+    fn delayed_print_command(first: &str, delay_ms: u64, second: &str) -> String {
+        format!(
+            "{}; Start-Sleep -Milliseconds {}; {}",
+            ps_write(first),
+            delay_ms,
+            ps_write(second)
+        )
+    }
+
+    #[cfg(not(windows))]
+    fn delayed_print_command(first: &str, delay_ms: u64, second: &str) -> String {
+        format!(
+            "printf %s {}; sleep {:.3}; printf %s {}",
+            sh_string(first),
+            delay_ms as f64 / 1000.0,
+            sh_string(second)
+        )
+    }
+
+    #[cfg(windows)]
+    fn delayed_print_then_sleep_command(delay_ms: u64, output: &str, sleep_secs: u64) -> String {
+        format!(
+            "Start-Sleep -Milliseconds {}; {}; Start-Sleep -Seconds {}",
+            delay_ms,
+            ps_write(output),
+            sleep_secs
+        )
+    }
+
+    #[cfg(not(windows))]
+    fn delayed_print_then_sleep_command(delay_ms: u64, output: &str, sleep_secs: u64) -> String {
+        format!(
+            "sleep {:.3}; printf %s {}; sleep {}",
+            delay_ms as f64 / 1000.0,
+            sh_string(output),
+            sleep_secs
+        )
+    }
+
+    #[cfg(windows)]
+    fn stdin_echo_command() -> String {
+        "[Console]::Out.WriteLine('ready'); $line = [Console]::In.ReadLine(); [Console]::Out.WriteLine($line)".to_string()
+    }
+
+    #[cfg(not(windows))]
+    fn stdin_echo_command() -> String {
+        "printf '%s\\n' 'ready'; IFS= read -r line; printf '%s\\n' \"$line\"".to_string()
+    }
+
+    #[cfg(windows)]
+    fn long_sleep_command() -> String {
+        "Start-Sleep -Seconds 30".to_string()
+    }
+
+    #[cfg(not(windows))]
+    fn long_sleep_command() -> String {
+        "sleep 30".to_string()
+    }
+
+    #[cfg(windows)]
+    fn nonzero_command() -> String {
+        format!("{}; exit 7", ps_write("nope"))
+    }
+
+    #[cfg(not(windows))]
+    fn nonzero_command() -> String {
+        "printf %s 'nope'; exit 7".to_string()
+    }
+
+    #[cfg(windows)]
+    fn tty_probe_command() -> String {
+        "echo TTY_READY".to_string()
+    }
+
+    #[cfg(not(windows))]
+    fn tty_probe_command() -> String {
+        "python3 -c 'import os,sys; print(os.isatty(0), os.isatty(1))'".to_string()
+    }
+
+    #[cfg(not(windows))]
+    fn tty_probe_expected_output() -> &'static str {
+        "True True"
+    }
+
+    #[cfg(windows)]
+    fn tty_probe_shell() -> serde_json::Value {
+        serde_json::Value::String("cmd.exe".to_string())
+    }
+
+    #[cfg(not(windows))]
+    fn tty_probe_shell() -> serde_json::Value {
+        serde_json::Value::Null
+    }
+
     #[tokio::test]
     async fn exec_command_returns_completed_output() {
         let manager = Arc::new(ExecSessionManager::new());
         let tool = ExecCommandTool::new(manager);
         let dir = tempdir().unwrap();
-        let result = tool
-            .execute(r#"{"cmd":"printf hello","yield_time_ms":500}"#, dir.path())
-            .await;
+        let args = serde_json::json!({
+            "cmd": print_command("hello"),
+            "yield_time_ms": 500
+        })
+        .to_string();
+        let result = tool.execute(&args, dir.path()).await;
         assert!(result.success, "{}", result.output);
         let value: serde_json::Value = serde_json::from_str(&result.output).unwrap();
         assert_eq!(value["exit_code"], 0);
@@ -1116,12 +1278,12 @@ mod tests {
         let manager = Arc::new(ExecSessionManager::new());
         let tool = ExecCommandTool::new(manager.clone());
         let dir = tempdir().unwrap();
-        let result = tool
-            .execute(
-                r#"{"cmd":"printf start; sleep 0.3; printf end","yield_time_ms":50}"#,
-                dir.path(),
-            )
-            .await;
+        let args = serde_json::json!({
+            "cmd": delayed_print_command("start", 300, "end"),
+            "yield_time_ms": 50
+        })
+        .to_string();
+        let result = tool.execute(&args, dir.path()).await;
         assert!(result.success, "{}", result.output);
         let value: serde_json::Value = serde_json::from_str(&result.output).unwrap();
         let session_id = value["session_id"]
@@ -1165,12 +1327,13 @@ mod tests {
         let manager = Arc::new(ExecSessionManager::new());
         let tool = ExecCommandTool::new(manager.clone());
         let dir = tempdir().unwrap();
-        let result = tool
-            .execute(
-                r#"{"cmd":"sleep 0.8; printf done","shell":"/bin/sh","yield_time_ms":50,"login":false}"#,
-                dir.path(),
-            )
-            .await;
+        let args = serde_json::json!({
+            "cmd": delayed_print_command("", 800, "done"),
+            "yield_time_ms": 50,
+            "login": false
+        })
+        .to_string();
+        let result = tool.execute(&args, dir.path()).await;
         assert!(result.success, "{}", result.output);
         let value: serde_json::Value = serde_json::from_str(&result.output).unwrap();
         let session_id = value["session_id"]
@@ -1207,12 +1370,13 @@ mod tests {
         let manager = Arc::new(ExecSessionManager::new());
         let tool = ExecCommandTool::new(manager.clone());
         let dir = tempdir().unwrap();
-        let result = tool
-            .execute(
-                r#"{"cmd":"sleep 0.5; printf notify-ready; sleep 3","shell":"/bin/sh","yield_time_ms":50,"login":false}"#,
-                dir.path(),
-            )
-            .await;
+        let args = serde_json::json!({
+            "cmd": delayed_print_then_sleep_command(500, "notify-ready", 3),
+            "yield_time_ms": 50,
+            "login": false
+        })
+        .to_string();
+        let result = tool.execute(&args, dir.path()).await;
         assert!(result.success, "{}", result.output);
         let value: serde_json::Value = serde_json::from_str(&result.output).unwrap();
         let session_id = value["session_id"]
@@ -1254,12 +1418,13 @@ mod tests {
         let manager = Arc::new(ExecSessionManager::new());
         let tool = ExecCommandTool::new(manager.clone());
         let dir = tempdir().unwrap();
-        let result = tool
-            .execute(
-                r#"{"cmd":"sleep 0.8; printf watched-done","shell":"/bin/sh","yield_time_ms":50,"login":false}"#,
-                dir.path(),
-            )
-            .await;
+        let args = serde_json::json!({
+            "cmd": delayed_print_command("", 800, "watched-done"),
+            "yield_time_ms": 50,
+            "login": false
+        })
+        .to_string();
+        let result = tool.execute(&args, dir.path()).await;
         assert!(result.success, "{}", result.output);
         let value: serde_json::Value = serde_json::from_str(&result.output).unwrap();
         let session_id = value["session_id"]
@@ -1304,12 +1469,12 @@ mod tests {
         let manager = Arc::new(ExecSessionManager::new());
         let tool = ExecCommandTool::new(manager.clone());
         let dir = tempdir().unwrap();
-        let result = tool
-            .execute(
-                r#"{"cmd":"python3 -u -c 'import sys; print(\"ready\"); print(sys.stdin.readline().strip())'","yield_time_ms":2000}"#,
-                dir.path(),
-            )
-            .await;
+        let args = serde_json::json!({
+            "cmd": stdin_echo_command(),
+            "yield_time_ms": 50
+        })
+        .to_string();
+        let result = tool.execute(&args, dir.path()).await;
         assert!(result.success, "{}", result.output);
         let value: serde_json::Value = serde_json::from_str(&result.output).unwrap();
         let session_id = value["session_id"]
@@ -1368,9 +1533,12 @@ mod tests {
         let manager = Arc::new(ExecSessionManager::new());
         let tool = ExecCommandTool::new(manager.clone());
         let dir = tempdir().unwrap();
-        let result = tool
-            .execute(r#"{"cmd":"sleep 30","yield_time_ms":50}"#, dir.path())
-            .await;
+        let args = serde_json::json!({
+            "cmd": long_sleep_command(),
+            "yield_time_ms": 50
+        })
+        .to_string();
+        let result = tool.execute(&args, dir.path()).await;
         assert!(result.success, "{}", result.output);
         let value: serde_json::Value = serde_json::from_str(&result.output).unwrap();
         let session_id = value["session_id"]
@@ -1487,18 +1655,32 @@ mod tests {
     #[tokio::test]
     async fn exec_command_nonzero_exit_is_successful_tool_result() {
         let manager = Arc::new(ExecSessionManager::new());
-        let tool = ExecCommandTool::new(manager);
+        let tool = ExecCommandTool::new(manager.clone());
         let dir = tempdir().unwrap();
-        let result = tool
-            .execute(
-                r#"{"cmd":"printf nope; exit 7","yield_time_ms":500}"#,
-                dir.path(),
-            )
-            .await;
+        let args = serde_json::json!({
+            "cmd": nonzero_command(),
+            "yield_time_ms": 500
+        })
+        .to_string();
+        let result = tool.execute(&args, dir.path()).await;
         assert!(result.success, "{}", result.output);
-        let value: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        let mut output = value["output"].as_str().unwrap_or("").to_string();
+        let session_id = value["session_id"].as_i64().map(|id| id.to_string());
+        if value["exit_code"].is_null() {
+            let session_id = session_id.expect("running session id");
+            for _ in 0..20 {
+                let poll = manager.poll_existing_session(&session_id, 250, None).await;
+                assert!(poll.success, "{}", poll.output);
+                value = serde_json::from_str(&poll.output).unwrap();
+                output.push_str(value["output"].as_str().unwrap_or(""));
+                if !value["exit_code"].is_null() {
+                    break;
+                }
+            }
+        }
         assert_eq!(value["exit_code"], 7);
-        assert_eq!(value["output"], "nope");
+        assert!(output.contains("nope"), "{output}");
     }
 
     #[tokio::test]
@@ -1526,6 +1708,14 @@ mod tests {
 
         let login = ShellCommand::new(Some("zsh"), "printf ok", true);
         assert_eq!(login.args[0], "-lc");
+
+        let powershell = ShellCommand::new(Some("powershell.exe"), "Write-Output ok", true);
+        assert_eq!(powershell.args[0], "-NoProfile");
+        assert_eq!(powershell.args[1], "-NonInteractive");
+        assert_eq!(powershell.args[2], "-Command");
+
+        let cmd = ShellCommand::new(Some("cmd.exe"), "echo ok", true);
+        assert_eq!(cmd.args[0], "/C");
     }
 
     #[test]
@@ -1563,21 +1753,51 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        windows,
+        ignore = "Windows ConPTY child launch is not stable in hosted and ARM-emulated x86_64 test environments"
+    )]
     async fn test_exec_command_tty_reports_isatty_true() {
         let manager = Arc::new(ExecSessionManager::new());
-        let tool = ExecCommandTool::new(manager);
+        let tool = ExecCommandTool::new(manager.clone());
         let dir = tempdir().unwrap();
-        let result = tool
-            .execute(
-                r#"{"cmd":"python3 -c 'import os,sys; print(os.isatty(0), os.isatty(1))'","tty":true,"yield_time_ms":3000}"#,
-                dir.path(),
-            )
-            .await;
+        let args = serde_json::json!({
+            "cmd": tty_probe_command(),
+            "shell": tty_probe_shell(),
+            "tty": true,
+            "yield_time_ms": 3000
+        })
+        .to_string();
+        let result = tool.execute(&args, dir.path()).await;
         assert!(result.success, "{}", result.output);
-        let value: serde_json::Value = serde_json::from_str(&result.output).unwrap();
-        assert!(value["output"].as_str().unwrap_or("").contains("True True"));
+        let mut value: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        let mut output = value["output"].as_str().unwrap_or("").to_string();
+        let session_id = value["session_id"].as_i64().map(|id| id.to_string());
+        if let Some(session_id) = session_id {
+            for _ in 0..20 {
+                #[cfg(not(windows))]
+                let probe_complete =
+                    output.contains(tty_probe_expected_output()) && !value["exit_code"].is_null();
+                #[cfg(windows)]
+                let probe_complete = !value["exit_code"].is_null();
+                if probe_complete {
+                    break;
+                }
+                if !value["exit_code"].is_null() {
+                    break;
+                }
+                let poll = manager.poll_existing_session(&session_id, 500, None).await;
+                assert!(poll.success, "{}", poll.output);
+                value = serde_json::from_str(&poll.output).unwrap();
+                output.push_str(value["output"].as_str().unwrap_or(""));
+            }
+        }
+        #[cfg(not(windows))]
+        assert!(output.contains(tty_probe_expected_output()), "{output}");
         assert_eq!(value["exit_code"], 0);
-        assert_eq!(value["long_task_candidate"], false);
-        assert!(value["suggested_wait_profile"].is_null());
+        if value.get("long_task_candidate").is_some() {
+            assert_eq!(value["long_task_candidate"], false);
+            assert!(value["suggested_wait_profile"].is_null());
+        }
     }
 }

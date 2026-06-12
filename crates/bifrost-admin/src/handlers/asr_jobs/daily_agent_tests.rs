@@ -1,4 +1,14 @@
 
+fn assert_path_ends_with(path: impl AsRef<std::path::Path>, components: &[&str]) {
+    let expected = components.iter().collect::<std::path::PathBuf>();
+    assert!(
+        path.as_ref().ends_with(&expected),
+        "expected path `{}` to end with `{}`",
+        path.as_ref().display(),
+        expected.display()
+    );
+}
+
 #[test]
 fn daily_agent_default_config_has_report_and_tomorrow_todo_agents() {
     let config = AsrDailyAgentConfig::default();
@@ -513,9 +523,18 @@ fn daily_agent_change_plan_filters_to_requested_date() {
     assert!(!plan.skipped);
     assert_eq!(plan.entries.len(), 1);
     assert_eq!(plan.entries[0].date, "2026-05-19");
-    assert!(plan.entries[0]
-        .report_target
-        .ends_with("daily-agent-date-filter-task/.daily/agents/daily_report/output/report/2026-05-19-report.md"));
+    assert_path_ends_with(
+        &plan.entries[0].report_target,
+        &[
+            "daily-agent-date-filter-task",
+            ".daily",
+            "agents",
+            "daily_report",
+            "output",
+            "report",
+            "2026-05-19-report.md",
+        ],
+    );
 }
 
 #[tokio::test]
@@ -754,7 +773,15 @@ fn daily_agent_report_detail_path_is_date_scoped() {
 
     let report_path =
         daily_agent_report_path_for_date("daily-agent-report-task", "2026-05-14").unwrap();
-    assert!(report_path.ends_with("daily-agent-report-task/.daily/report/2026-05-14-report.md"));
+    assert_path_ends_with(
+        &report_path,
+        &[
+            "daily-agent-report-task",
+            ".daily",
+            "report",
+            "2026-05-14-report.md",
+        ],
+    );
     assert!(daily_agent_report_path_for_date("daily-agent-report-task", "../secret").is_err());
     assert!(daily_agent_report_path_for_date("daily-agent-report-task", "2026-02-31").is_err());
 }
@@ -813,14 +840,16 @@ fn daily_agent_records_include_existing_report_directory_without_processed_state
     assert_eq!(records[0].runner, "filesystem");
     assert_eq!(records[0].last_run_id, "filesystem-scan");
     assert!(records[0].source_len_bytes > 0);
-    assert!(records[0]
-        .report_path
-        .as_deref()
-        .unwrap()
-        .ends_with(".daily/Report/2026-05-14-report.md"));
+    assert_path_ends_with(
+        records[0].report_path.as_deref().unwrap(),
+        &[".daily", "Report", "2026-05-14-report.md"],
+    );
 
     let detail_path = daily_agent_report_path_for_date(task_id, "2026-05-14").unwrap();
-    assert!(detail_path.ends_with(".daily/Report/2026-05-14-report.md"));
+    assert_path_ends_with(
+        &detail_path,
+        &[".daily", "Report", "2026-05-14-report.md"],
+    );
 }
 
 #[test]
@@ -1290,11 +1319,10 @@ fn daily_agent_records_preserve_processed_metadata_and_repair_missing_report_pat
     assert_eq!(records[0].last_run_id, "run-1");
     assert_eq!(records[0].processed_at_ms, 100);
     assert_eq!(records[0].source_sha256, "abc123");
-    assert!(records[0]
-        .report_path
-        .as_deref()
-        .unwrap()
-        .ends_with(".daily/report/2026-05-15-report.md"));
+    assert_path_ends_with(
+        records[0].report_path.as_deref().unwrap(),
+        &[".daily", "report", "2026-05-15-report.md"],
+    );
 }
 
 #[test]

@@ -1079,8 +1079,9 @@ mod tests {
             updated_at: 2,
         };
         let prompt = super::budget_limit_prompt(&goal);
+        let prompt_lf = prompt.replace("\r\n", "\n");
         assert!(prompt.contains("finish the stack"));
-        assert!(prompt.contains("<objective>\nfinish the stack\n</objective>"));
+        assert!(prompt_lf.contains("<objective>\nfinish the stack\n</objective>"));
         assert!(prompt.contains("Token budget: 10000"));
         assert!(prompt.contains("Tokens used: 10100"));
         assert!(prompt.to_lowercase().contains("wrap up this turn soon"));
@@ -1100,8 +1101,9 @@ mod tests {
             updated_at: 2,
         };
         let prompt = super::continuation_prompt(&goal);
+        let prompt_lf = prompt.replace("\r\n", "\n");
         assert!(prompt.contains("implement feature Y"));
-        assert!(prompt.contains("<objective>\nimplement feature Y\n</objective>"));
+        assert!(prompt_lf.contains("<objective>\nimplement feature Y\n</objective>"));
         assert!(prompt.contains("Token budget: 10000"));
         assert!(prompt.contains("Tokens remaining: 8766"));
         assert!(prompt.contains("call update_goal with status \"complete\""));

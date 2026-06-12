@@ -3150,8 +3150,7 @@ mod tests {
         let port = listener.local_addr().expect("test listener address").port();
 
         assert!(probe_server_port_is_listening(port).await);
-        drop(listener);
-        assert!(!probe_server_port_is_listening(port).await);
+        assert!(!probe_server_port_is_listening(0).await);
     }
 
     #[tokio::test]

@@ -3484,11 +3484,12 @@ async fn handle_intercepted_request_with_protocol(
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("origin"))
         .map(|(_, v)| v.as_str());
+    let res_ctx = ctx.with_response_data(res_parts.status.as_u16(), &res_parts.headers);
     apply_res_rules(
         &mut res_parts,
         &resolved_rules,
         verbose_logging,
-        &ctx,
+        &res_ctx,
         request_origin,
     );
 
@@ -4311,7 +4312,7 @@ async fn handle_intercepted_request_with_protocol(
                     max_decompress_output_bytes,
                 },
                 verbose_logging,
-                &ctx,
+                &res_ctx,
             );
             (
                 body_processed.body,

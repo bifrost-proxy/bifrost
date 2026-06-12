@@ -1263,3 +1263,38 @@ fn test_domain_only_rule_matches_connect_without_path() {
     assert_eq!(host_rules.len(), 1);
     assert_eq!(host_rules[0].resolved_value, "localhost:8080");
 }
+
+#[test]
+fn test_header_filter_not_stale_across_requests() {
+    // Regression: matcher candidates are cached by URL shape, but filters are
+    // request scoped and must be evaluated for every request.
+    let rules = crate::rule::parser::parse_rules(
+        "hc.test host://127.0.0.1:9 includeFilter://h:x-tag=match",
+    )
+    .unwrap();
+    let resolver = RulesResolver::new(rules);
+
+    let mut ctx_match = RequestContext::from_url("http://hc.test/");
+    ctx_match.method = "GET".to_string();
+    ctx_match
+        .req_headers
+        .insert("x-tag".to_string(), "match".to_string());
+    assert_eq!(
+        resolver.resolve(&ctx_match).rules.len(),
+        1,
+        "header value matches the filter -> rule applies"
+    );
+
+    let mut ctx_nomatch = RequestContext::from_url("http://hc.test/");
+    ctx_nomatch.method = "GET".to_string();
+    ctx_nomatch
+        .req_headers
+        .insert("x-tag".to_string(), "nope".to_string());
+    assert_eq!(
+        resolver.resolve(&ctx_nomatch).rules.len(),
+        0,
+        "different header value must not reuse the cached match"
+    );
+
+    assert_eq!(resolver.resolve(&ctx_match).rules.len(), 1);
+}

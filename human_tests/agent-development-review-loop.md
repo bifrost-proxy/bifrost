@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证 `AGENTS.md` 中新增的开发任务强制闭环规则：Agent 必须在实现后、收尾前至少执行两轮 `目标复核 -> 代码 review -> 修复问题 -> 测试运行 -> 结果复盘`，并且相关设计文档与 `human_tests` 索引同步。
+验证 `AGENTS.md` 中新增的开发任务强制闭环规则：Agent 必须在实现后、收尾前至少执行两轮 `目标复核 -> 代码 review -> 修复问题 -> 测试运行 -> 结果复盘`，并且默认完成提交、推送、MR/PR 创建或更新、远端 CI 看护；相关设计文档与 `human_tests` 索引必须同步。
 
 ## 前置条件
 
@@ -47,7 +47,7 @@
    rg -n "agent-development-review-loop|Agent Development Review Loop" human_tests/readme.md
    ```
 2. 检查输出是否包含 `human_tests/agent-development-review-loop.md` 的索引行。
-3. 检查索引行的测试用例数是否为 `8`。
+3. 检查索引行的测试用例数是否为 `9`。
 4. 执行：
    ```bash
    ! rg -n "^\\*\\*总计：|总计：[0-9]+ 个测试文件" human_tests/readme.md
@@ -168,6 +168,31 @@
 - `human_tests/readme.md` 当前不包含全局总计行，避免并行开发反复冲突。
 
 **执行记录（2026-06-09）**：PASS — 已执行索引检索、全局总计反向检索和 AGENTS/readme 约束检索；`human_tests/readme.md` 包含 `agent-development-review-loop.md` 索引行且用例数为 8，未命中 `总计：N 个测试文件` 类全局汇总行，AGENTS 与 readme 均明确禁止维护全局总计数字。
+
+### TC-ADRL-09：开发任务默认提交、MR/PR 与远端 CI 看护
+
+**操作步骤：**
+
+1. 执行：
+   ```bash
+   rg -n "默认提交、MR 与 CI 看护策略|提交/MR/CI 看护|git commit|git push|MR/PR|远端 CI|fail-fast|fix → push → watch|run id|全绿" AGENTS.md design/agent-development-review-loop.md human_tests/agent-development-review-loop.md
+   ```
+2. 检查输出是否同时命中 `AGENTS.md`、`design/agent-development-review-loop.md` 和 `human_tests/agent-development-review-loop.md`。
+3. 执行：
+   ```bash
+   rg -n "不要提交|不要推送|不用建 MR|不用盯 CI|用户明确豁免|提交 hash|推送分支|CI run id|提交/MR/CI 状态" AGENTS.md design/agent-development-review-loop.md
+   ```
+4. 检查输出是否覆盖默认执行、明确豁免、证据台账、完成定义、规划任务、收尾门禁和最终交付模板。
+
+**预期结果：**
+
+- `AGENTS.md` 明确开发模式默认包含提交、推送、创建或更新 MR/PR、远端 CI 看护。
+- `AGENTS.md` 明确只有用户说不要提交、不要推送、不用建 MR 或不用盯 CI 时，才能跳过对应动作并记录风险。
+- `AGENTS.md` 的规划阶段、收尾门禁、测试完备性检查清单和最终交付模板都包含 `提交/MR/CI` 状态。
+- GitHub Actions CI 章节明确推送后默认加载 `github-actions-pat` 并使用 fail-fast 的 fix → push → watch 闭环。
+- `design/agent-development-review-loop.md` 同步记录默认提交、MR/PR 与 CI 看护设计。
+
+**执行记录（2026-06-11）**：PASS — 已执行 TC-ADRL-01 到 TC-ADRL-09 的文档检索与编号检查；`AGENTS.md`、`design/agent-development-review-loop.md`、`human_tests/agent-development-review-loop.md` 均命中默认提交/MR/CI 看护、明确豁免、run id、fail-fast、fix → push → watch、最终交付状态等关键约束；`human_tests/readme.md` 索引行用例数已更新为 9，仍未命中全局总计行；开发流程编号从 1 连续到 25。
 
 ## 清理步骤
 

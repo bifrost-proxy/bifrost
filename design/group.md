@@ -75,6 +75,8 @@ interface GroupSetting {
 
 Group 数据存储在 bifrost-sync-server 端，bifrost-admin 作为代理将请求转发到同步服务。
 
+bifrost-sync-server 对非 Remote Invoke 路径保留全局 IP 限流，默认 `server.rate_limit_per_ip = 200`（每分钟），登录/注册路径还有独立的 `server.auth_rate_limit_per_ip = 20`。完整 Group E2E 这类本地 mock 链路会在一分钟内覆盖 CRUD、成员、规则、代理转发和 CLI 操作，测试脚本可以通过 `--rate-limit-per-ip 1000 --auth-rate-limit-per-ip 1000` 临时放宽测试服务配额；生产默认值不变。
+
 ### 本地规则存储
 
 ```

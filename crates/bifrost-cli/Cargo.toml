@@ -57,6 +57,7 @@ tokio-tungstenite = "0.26"
 base64 = "0.22"
 ring = "0.17"
 uuid.workspace = true
+fs2 = "0.4"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.28", features = ["signal", "process", "fs"] }
@@ -67,3 +68,22 @@ bifrost-asr = { path = "../bifrost-asr", default-features = false, features = ["
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_Foundation", "Win32_System_Threading"] }
+
+# --- System tray helper (in-process via `bifrost __tray`) ---
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+open = "5"
+arboard = "3"
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tracing-appender.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+tray-icon = "0.19"
+muda = "0.15"
+tao = { version = "0.31", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+tray-icon = "0.19"
+muda = "0.15"
+tao = { version = "0.31", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png", "ico"] }

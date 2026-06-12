@@ -10,7 +10,8 @@ use crate::state::StateManager;
 use crate::unified_config::{
     AccessConfigUpdate, SandboxConfig, SandboxConfigUpdate, ServerConfig, ServerConfigUpdate,
     SyncConfig, SyncConfigUpdate, SystemProxyConfigUpdate, TlsConfig, TlsConfigUpdate,
-    TrafficConfig, TrafficConfigUpdate, UiConfig, UiConfigUpdate, UnifiedConfig,
+    TrafficConfig, TrafficConfigUpdate, TrayConfig, TrayConfigUpdate, UiConfig, UiConfigUpdate,
+    UnifiedConfig,
 };
 use crate::values::ValuesStorage;
 use crate::{
@@ -26,6 +27,7 @@ pub enum ConfigChangeEvent {
     TlsConfigChanged(TlsConfig),
     AccessConfigChanged,
     SystemProxyConfigChanged,
+    TrayConfigChanged,
     SandboxConfigChanged,
     ServerConfigChanged,
     TrafficConfigChanged,
@@ -193,6 +195,22 @@ impl ConfigManager {
             .send(ConfigChangeEvent::SystemProxyConfigChanged);
 
         Ok(())
+    }
+
+    pub async fn update_tray_config(&self, update: TrayConfigUpdate) -> Result<TrayConfig> {
+        let mut config = self.config.write().await;
+
+        if let Some(enabled) = update.enabled {
+            config.tray.enabled = enabled;
+        }
+
+        self.save_config(&config)?;
+        let tray_config = config.tray.clone();
+        let _ = self
+            .change_notifier
+            .send(ConfigChangeEvent::TrayConfigChanged);
+
+        Ok(tray_config)
     }
 
     pub async fn update_server_config(&self, update: ServerConfigUpdate) -> Result<ServerConfig> {
@@ -679,6 +697,7 @@ impl ConfigManager {
                 userpass: None,
             },
             proxy: ProxySettings::default(),
+            tray: TrayConfig::default(),
             system_proxy: SystemProxyConfig {
                 enabled: legacy.system_proxy.enabled,
                 bypass: legacy.system_proxy.bypass.clone(),

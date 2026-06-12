@@ -109,6 +109,11 @@ function findBinaryInArtifacts(rustTarget, binaryName) {
     return { type: "tar.gz", path: tarGz };
   }
 
+  const tarXz = join(artifactDir, `bifrost-v${VERSION}-${rustTarget}.tar.xz`);
+  if (existsSync(tarXz)) {
+    return { type: "tar.xz", path: tarXz };
+  }
+
   const zip = join(artifactDir, `bifrost-v${VERSION}-${rustTarget}.zip`);
   if (existsSync(zip)) {
     return { type: "zip", path: zip };
@@ -127,12 +132,13 @@ function extractBinary(archive, destDir, binaryName) {
 
   if (archive.type === "binary") {
     copyFileSync(archive.path, join(destDir, binaryName));
-  } else if (archive.type === "tar.gz") {
-    execSync(`tar -xzf "${archive.path}" -C "${destDir}" --strip-components=1`, {
+  } else if (archive.type === "tar.gz" || archive.type === "tar.xz") {
+    const tarFlag = archive.type === "tar.xz" ? "-xJf" : "-xzf";
+    execSync(`tar ${tarFlag} "${archive.path}" -C "${destDir}" --strip-components=1`, {
       stdio: "inherit",
     });
     if (!existsSync(join(destDir, binaryName))) {
-      execSync(`tar -xzf "${archive.path}" -C "${destDir}"`, { stdio: "inherit" });
+      execSync(`tar ${tarFlag} "${archive.path}" -C "${destDir}"`, { stdio: "inherit" });
       const extracted = execSync(`find "${destDir}" -name "${binaryName}" -type f | head -1`)
         .toString()
         .trim();
@@ -312,9 +318,10 @@ async function publishCI() {
 
   console.log("\n  📂 Artifact directory structure:");
   try {
-    const output = execSync(`find "${ARTIFACTS_DIR}" -type f -name "*.tar.gz" -o -name "*.zip" | sort`, {
-      encoding: "utf8",
-    });
+    const output = execSync(
+      `find "${ARTIFACTS_DIR}" -type f \\( -name "*.tar.gz" -o -name "*.tar.xz" -o -name "*.zip" \\) | sort`,
+      { encoding: "utf8" }
+    );
     console.log(output || "  (empty)");
   } catch {
     console.log("  (could not list artifacts)");

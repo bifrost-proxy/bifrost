@@ -82,8 +82,10 @@ fn memory_read_instructions_use_agent_memory_root() {
     )
     .expect("write summary");
     let prompt = build_memory_read_instructions().expect("prompt");
-    assert!(prompt.contains("/memory/memory_summary.md"));
-    assert!(prompt.contains("/memory/MEMORY.md"));
+    // Normalize path separators so the assertion holds on Windows too.
+    let prompt_norm = prompt.replace(char::from(92), "/");
+    assert!(prompt_norm.contains("/memory/memory_summary.md"));
+    assert!(prompt_norm.contains("/memory/MEMORY.md"));
     assert!(prompt.contains("Bifrost prefers on-demand memory loading."));
     assert!(prompt.contains("<oai-mem-citation>"));
 }

@@ -26,6 +26,15 @@ function hasFlag(name: string): boolean {
   return args.includes(name);
 }
 
+function parsePositiveIntArg(name: string, raw: string): number {
+  const value = Number.parseInt(raw, 10);
+  if (!Number.isFinite(value) || value <= 0) {
+    console.error(`[bifrost-sync-server] ${name} must be a positive integer`);
+    process.exit(1);
+  }
+  return value;
+}
+
 if (hasFlag('--help') || hasFlag('-h')) {
   console.log(`
 bifrost-sync-server - Standalone Bifrost rule sync server
@@ -38,6 +47,9 @@ Options:
   -p, --port <port>              Port to listen on (default: 8686)
   -H, --host <host>              Host to bind to (default: 0.0.0.0)
   -d, --data-dir <dir>           Data directory for SQLite (default: ./bifrost-sync-data)
+  --rate-limit-per-ip <count>    Global requests per IP per minute (default: 200)
+  --auth-rate-limit-per-ip <count>
+                                  Login/register requests per IP per minute (default: 20)
   --trust-forwarded-for          Trust X-Forwarded-For / X-Real-IP headers (DANGEROUS)
   -h, --help                     Show this help message
 
@@ -87,6 +99,16 @@ async function main() {
     config.storage.sqlite = { data_dir: path.resolve(dataDirOverride) };
   }
 
+  const rateLimitOverride = getArgOptional('--rate-limit-per-ip');
+  if (rateLimitOverride) {
+    config.server.rate_limit_per_ip = parsePositiveIntArg('--rate-limit-per-ip', rateLimitOverride);
+  }
+
+  const authRateLimitOverride = getArgOptional('--auth-rate-limit-per-ip');
+  if (authRateLimitOverride) {
+    config.server.auth_rate_limit_per_ip = parsePositiveIntArg('--auth-rate-limit-per-ip', authRateLimitOverride);
+  }
+
   if (hasFlag('--trust-forwarded-for')) {
     config.server.trust_forwarded_for = true;
   }
@@ -112,6 +134,8 @@ async function main() {
   console.log(`  host:     ${config.server.host}`);
   console.log(`  storage:  ${config.storage.type}`);
   console.log(`  auth:     ${config.auth.mode}`);
+  console.log(`  rate-limit/ip/min: ${config.server.rate_limit_per_ip ?? 200}`);
+  console.log(`  auth-rate-limit/ip/min: ${config.server.auth_rate_limit_per_ip ?? 20}`);
   console.log(`  remote-invoke: ${config.remote_invoke?.enabled ? 'enabled' : 'disabled'}`);
   if (config.server.trust_forwarded_for) {
     console.warn(`\x1b[33m  ⚠ trust-forwarded-for: ENABLED (DANGEROUS — only use behind a trusted reverse proxy)\x1b[0m`);

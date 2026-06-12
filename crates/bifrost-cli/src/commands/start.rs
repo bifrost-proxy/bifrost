@@ -1150,6 +1150,7 @@ pub fn run_start(
     cli_proxy: bool,
     cli_proxy_no_proxy: Option<String>,
     yes: bool,
+    no_tray: bool,
 ) -> bifrost_core::Result<()> {
     let bifrost_dir = get_bifrost_dir()?;
     set_data_dir(bifrost_dir.clone());
@@ -1457,6 +1458,10 @@ pub fn run_start(
             cli_proxy_no_proxy,
             disconnect_on_config_change,
             config_manager,
+            no_tray,
+            log_level,
+            skip_cert_check,
+            yes,
         );
         if foreground_result.is_ok() {
             if let Some(guard) = restart_handoff_guard.as_mut() {
@@ -1480,6 +1485,10 @@ pub fn run_foreground(
     cli_proxy_no_proxy: Option<String>,
     disconnect_on_config_change: bool,
     config_manager: ConfigManager,
+    no_tray: bool,
+    log_level: &str,
+    skip_cert_check: bool,
+    yes: bool,
 ) -> bifrost_core::Result<()> {
     let pid = std::process::id();
 
@@ -1833,6 +1842,15 @@ pub fn run_foreground(
                     std::process::id(),
                 ),
             );
+            let tray_launch_callback = build_tray_launch_callback(
+                no_tray,
+                bifrost_dir.clone(),
+                pid,
+                &config,
+                log_level,
+                skip_cert_check,
+                yes,
+            );
 
             let phase_started_at = Instant::now();
             let mut admin_state = AdminState::new(config.port)
@@ -1854,6 +1872,7 @@ pub fn run_foreground(
                 .with_system_proxy_manager_shared(system_proxy_manager.clone())
                 .with_config_manager_shared(shared_config_manager.clone())
                 .with_system_proxy_lifecycle_helper_shared(system_proxy_lifecycle_helper_state.clone())
+                .with_tray_launch_callback(tray_launch_callback.clone())
                 .with_system_proxy_runtime_flags_shared(
                     system_proxy_desired_enabled.clone(),
                     system_proxy_enabled.clone(),
@@ -2055,6 +2074,10 @@ pub fn run_foreground(
                 total_elapsed_ms = startup_started_at.elapsed().as_millis() as u64,
                 "foreground runtime initialization completed"
             );
+
+            // Launch tray helper if enabled
+            tray_launch_callback();
+
             let mobile_availability_tasks =
                 bifrost_admin::mobile_availability::spawn_terminal_panel(
                     admin_state_arc.clone(),
@@ -2278,6 +2301,130 @@ pub fn run_foreground(
     runtime_result?;
 
     Ok(())
+}
+
+fn build_tray_start_args(
+    config: &ProxyConfig,
+    log_level: &str,
+    skip_cert_check: bool,
+    yes: bool,
+) -> Vec<String> {
+    let mut args = Vec::new();
+
+    if config.host != "0.0.0.0" {
+        args.push("--host".to_string());
+        args.push(config.host.clone());
+    }
+    if let Some(socks5_port) = config.socks5_port {
+        args.push("--socks5-port".to_string());
+        args.push(socks5_port.to_string());
+    }
+    if log_level != "info" {
+        args.push("--log-level".to_string());
+        args.push(log_level.to_string());
+    }
+    if skip_cert_check {
+        args.push("--skip-cert-check".to_string());
+    }
+    if config.unsafe_ssl {
+        args.push("--unsafe-ssl".to_string());
+    }
+    if yes {
+        args.push("--yes".to_string());
+    }
+
+    args
+}
+
+fn build_tray_launch_callback(
+    no_tray: bool,
+    data_dir: PathBuf,
+    pid: u32,
+    config: &ProxyConfig,
+    log_level: &str,
+    skip_cert_check: bool,
+    yes: bool,
+) -> bifrost_admin::SharedTrayLaunchCallback {
+    let runtime_file =
+        crate::process::get_runtime_file().unwrap_or_else(|_| data_dir.join("runtime.json"));
+    let admin_url = format!(
+        "http://{}:{}/_bifrost/",
+        if config.host == "0.0.0.0" {
+            "127.0.0.1"
+        } else {
+            &config.host
+        },
+        config.port,
+    );
+    let port = config.port;
+    let tray_start_args = build_tray_start_args(config, log_level, skip_cert_check, yes);
+    let bifrost_self_bin = std::env::current_exe().ok();
+
+    Arc::new(move || {
+        let data_dir = data_dir.clone();
+        let runtime_file = runtime_file.clone();
+        let admin_url = admin_url.clone();
+        let bifrost_self_bin = bifrost_self_bin.clone();
+        let tray_start_args = tray_start_args.clone();
+        std::thread::spawn(move || {
+            for attempt in 0..10 {
+                if !super::tray_launcher::should_launch_tray(no_tray, &data_dir) {
+                    return;
+                }
+                launch_tray_helper_if_enabled(TrayLaunchHelperRequest {
+                    no_tray,
+                    data_dir: &data_dir,
+                    runtime_file: &runtime_file,
+                    pid,
+                    admin_url: &admin_url,
+                    port,
+                    bifrost_bin: bifrost_self_bin.as_deref(),
+                    start_args: &tray_start_args,
+                });
+                if data_dir.join("tray.pid").exists() {
+                    return;
+                }
+                if attempt < 9 {
+                    std::thread::sleep(Duration::from_millis(300));
+                }
+            }
+            tracing::debug!(
+                data_dir = %data_dir.display(),
+                "tray launch request finished without observing tray.pid"
+            );
+        });
+    })
+}
+
+struct TrayLaunchHelperRequest<'a> {
+    no_tray: bool,
+    data_dir: &'a Path,
+    runtime_file: &'a Path,
+    pid: u32,
+    admin_url: &'a str,
+    port: u16,
+    bifrost_bin: Option<&'a Path>,
+    start_args: &'a [String],
+}
+
+fn launch_tray_helper_if_enabled(request: TrayLaunchHelperRequest<'_>) {
+    if !super::tray_launcher::should_launch_tray(request.no_tray, request.data_dir) {
+        return;
+    }
+    if let Some(tray_bin) = super::tray_launcher::find_tray_binary() {
+        super::tray_launcher::launch_tray_helper(
+            &tray_bin,
+            request.data_dir,
+            request.runtime_file,
+            request.pid,
+            Some(request.admin_url),
+            Some(request.port),
+            request.bifrost_bin,
+            request.start_args,
+        );
+    } else {
+        tracing::debug!("tray helper binary not found, skipping tray launch");
+    }
 }
 
 fn parse_proxy_users(proxy_users: &[String]) -> bifrost_core::Result<Vec<UserPassAccountConfig>> {
@@ -2710,6 +2857,15 @@ pub fn run_daemon(
                     std::process::id(),
                 ),
             );
+                    let tray_launch_callback = build_tray_launch_callback(
+                        false,
+                        bifrost_dir.clone(),
+                        std::process::id(),
+                        &config,
+                        log_level,
+                        false,
+                        false,
+                    );
 
                     let access_control =
                         ProxyServer::new(config.clone()).access_control().clone();
@@ -2735,6 +2891,7 @@ pub fn run_daemon(
                         .with_system_proxy_lifecycle_helper_shared(
                             system_proxy_lifecycle_helper_state.clone(),
                         )
+                        .with_tray_launch_callback(tray_launch_callback)
                         .with_system_proxy_runtime_flags_shared(
                             system_proxy_desired_enabled.clone(),
                             system_proxy_enabled.clone(),
@@ -3602,6 +3759,11 @@ fn spawn_admin_push_watcher_task(
                             .broadcast_settings_scope(SETTINGS_SCOPE_CLI_PROXY)
                             .await;
                     }
+                    ConfigChangeEvent::TrayConfigChanged => {
+                        push_manager
+                            .broadcast_settings_scope(SETTINGS_SCOPE_PROXY_SETTINGS)
+                            .await;
+                    }
                     ConfigChangeEvent::AccessConfigChanged => {
                         push_manager
                             .broadcast_settings_scope(SETTINGS_SCOPE_WHITELIST_STATUS)
@@ -3803,6 +3965,33 @@ mod tests {
             temp_dir.path(),
             false,
         ));
+    }
+
+    #[test]
+    fn tray_start_args_preserve_start_options_needed_for_menu_restart() {
+        let config = ProxyConfig {
+            host: "127.0.0.1".to_string(),
+            socks5_port: Some(19081),
+            unsafe_ssl: true,
+            ..Default::default()
+        };
+
+        let args = build_tray_start_args(&config, "debug", true, true);
+
+        assert_eq!(
+            args,
+            vec![
+                "--host",
+                "127.0.0.1",
+                "--socks5-port",
+                "19081",
+                "--log-level",
+                "debug",
+                "--skip-cert-check",
+                "--unsafe-ssl",
+                "--yes",
+            ]
+        );
     }
 
     #[test]

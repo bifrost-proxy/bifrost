@@ -30,7 +30,7 @@ The installer can also install and trust the CA certificate, install Bifrost AI 
 Install a specific version:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash -s -- --version v0.0.48-beta
+curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash -s -- --version v0.0.96
 ```
 
 Install with npm:

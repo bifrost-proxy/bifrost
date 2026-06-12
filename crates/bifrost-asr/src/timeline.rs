@@ -375,16 +375,12 @@ pub fn generate_daily_summaries(
             .strip_prefix(task_output_dir)
             .ok()
             .and_then(|rel| rel.to_str())
-            .map(|s| {
-                s.trim_end_matches(".timeline.json")
-                    .trim_end_matches('.')
-                    .to_string()
-            })
+            .map(normalize_timeline_source_label)
             .or_else(|| {
                 timeline
                     .source_path
                     .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
+                    .map(|n| normalize_timeline_source_label(&n.to_string_lossy()))
             })
             .unwrap_or_default();
         for seg in &timeline.segments {
@@ -482,6 +478,13 @@ pub fn generate_daily_summaries(
     }
 
     Ok(written)
+}
+
+fn normalize_timeline_source_label(value: &str) -> String {
+    value
+        .trim_end_matches(".timeline.json")
+        .trim_end_matches('.')
+        .replace('\\', "/")
 }
 
 fn collect_timeline_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -707,5 +710,17 @@ mod tests {
         let pos_morning = content.find("上午会议内容").unwrap();
         let pos_afternoon = content.find("下午讨论内容").unwrap();
         assert!(pos_morning < pos_afternoon);
+    }
+
+    #[test]
+    fn normalizes_daily_summary_source_label_path_separator() {
+        assert_eq!(
+            normalize_timeline_source_label(r"sub\meeting_b.timeline.json"),
+            "sub/meeting_b"
+        );
+        assert_eq!(
+            normalize_timeline_source_label("sub/meeting_b.timeline.json"),
+            "sub/meeting_b"
+        );
     }
 }

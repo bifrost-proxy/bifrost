@@ -334,6 +334,10 @@ mod tests {
         std::fs::write(cfg, body).unwrap();
     }
 
+    fn toml_string(path: &Path) -> String {
+        Value::from(path.to_string_lossy().as_ref()).to_string()
+    }
+
     #[test]
     fn add_root_basic() {
         with_tempdir(|_dir, cfg| {
@@ -367,16 +371,15 @@ ops = ["read"]
             seed(
                 cfg,
                 &format!(
-                    "[[grant]]\nmatch.grant_id = \"g1\"\nroots = [\"{}\"]\nops = [\"read\"]\n",
-                    child_c.display()
+                    "[[grant]]\nmatch.grant_id = \"g1\"\nroots = [{}]\nops = [\"read\"]\n",
+                    toml_string(&child_c)
                 ),
             );
             let out = add_root_at(cfg, "g1", &parent).unwrap();
             assert_eq!(out.canonical, parent_c);
             assert_eq!(out.replaced_children.len(), 1);
-            let body = std::fs::read_to_string(cfg).unwrap();
-            assert!(!body.contains(&child_c.to_string_lossy().to_string()));
-            assert!(body.contains(&parent_c.to_string_lossy().to_string()));
+            let listed = list_roots_at(cfg, "g1").unwrap();
+            assert_eq!(listed, vec![parent_c.to_string_lossy().to_string()]);
         });
     }
 
@@ -391,8 +394,8 @@ ops = ["read"]
             seed(
                 cfg,
                 &format!(
-                    "[[grant]]\nmatch.grant_id = \"g1\"\nroots = [\"{}\"]\nops = [\"read\"]\n",
-                    parent_c.display()
+                    "[[grant]]\nmatch.grant_id = \"g1\"\nroots = [{}]\nops = [\"read\"]\n",
+                    toml_string(&parent_c)
                 ),
             );
             let out = add_root_at(cfg, "g1", &child).unwrap();
@@ -494,9 +497,9 @@ ops = ["read"]
             seed(
                 cfg,
                 &format!(
-                    "[[grant]]\nmatch.grant_id = \"g1\"\nroots = [\"{}\", \"{}\"]\nops = [\"read\"]\n",
-                    ac.display(),
-                    bc.display()
+                    "[[grant]]\nmatch.grant_id = \"g1\"\nroots = [{}, {}]\nops = [\"read\"]\n",
+                    toml_string(&ac),
+                    toml_string(&bc)
                 ),
             );
             let listed = list_roots_at(cfg, "g1").unwrap();
@@ -546,19 +549,16 @@ ops = ["read"]
             seed(
                 cfg,
                 &format!(
-                    "[[grant]]\nmatch.grant_id = \"g1\"\nroots = [\"{}\"]\nops = [\"read\"]\n",
-                    canonical.display()
+                    "[[grant]]\nmatch.grant_id = \"g1\"\nroots = [{}]\nops = [\"read\"]\n",
+                    toml_string(&canonical)
                 ),
             );
             let out = add_root_at(cfg, "g1", &sub).unwrap();
             assert!(out.already_present);
             assert_eq!(out.replaced_children.len(), 0);
             // File should remain byte-stable: one entry, not duplicated.
-            let after = std::fs::read_to_string(cfg).unwrap();
-            let count = after
-                .matches(&canonical.to_string_lossy().to_string())
-                .count();
-            assert_eq!(count, 1);
+            let listed = list_roots_at(cfg, "g1").unwrap();
+            assert_eq!(listed, vec![canonical.to_string_lossy().to_string()]);
         });
     }
 

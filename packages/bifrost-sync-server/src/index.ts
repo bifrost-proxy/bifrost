@@ -34,9 +34,17 @@ export function createSyncServer(config: SyncServerConfig): SyncServerInstance {
   const authMode = config.auth.mode;
   const oauth2Config = config.auth.oauth2;
   const trustForwardedFor = config.server.trust_forwarded_for ?? false;
+  const rateLimitPerIp = Number.isFinite(config.server.rate_limit_per_ip)
+    && (config.server.rate_limit_per_ip ?? 0) > 0
+    ? Math.floor(config.server.rate_limit_per_ip!)
+    : 200;
+  const authRateLimitPerIp = Number.isFinite(config.server.auth_rate_limit_per_ip)
+    && (config.server.auth_rate_limit_per_ip ?? 0) > 0
+    ? Math.floor(config.server.auth_rate_limit_per_ip!)
+    : 20;
 
-  const globalLimiter = new RateLimiter(200, 60_000);
-  const authLimiter = new RateLimiter(20, 60_000);
+  const globalLimiter = new RateLimiter(rateLimitPerIp, 60_000);
+  const authLimiter = new RateLimiter(authRateLimitPerIp, 60_000);
   const accountLock = new AccountLockManager(5, 15 * 60_000, 30 * 60_000);
 
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {

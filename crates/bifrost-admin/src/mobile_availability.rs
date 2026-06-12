@@ -1,12 +1,11 @@
 use std::collections::{HashMap, HashSet};
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::net::IpAddr;
 use std::time::Duration;
 
 use chrono::Utc;
 use qrcode::render::unicode::Dense1x2;
 use qrcode::QrCode;
-use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::handlers::trust_probe::{
     get_or_create_terminal_probe_session, infer_device_platform_hint, list_active_sessions,
@@ -193,12 +192,13 @@ async fn handle_access_control_input_loop(
     push_manager: SharedPushManager,
     render_state: std::sync::Arc<tokio::sync::Mutex<TerminalRenderState>>,
 ) {
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
+    let Some(mut lines) = spawn_terminal_stdin_line_reader() else {
+        return;
+    };
     loop {
         let line = match lines.next_line().await {
-            Ok(Some(line)) => line,
-            Ok(None) => break,
-            Err(_) => break,
+            Some(line) => line,
+            None => break,
         };
         let message = match parse_access_control_command(&line) {
             Ok(Some(command)) => {
@@ -212,6 +212,40 @@ async fn handle_access_control_input_loop(
         let _ = io::stdout().flush();
         render_state.rendered_line_count = 0;
         render_state.force_render = true;
+    }
+}
+
+struct TerminalStdinLines {
+    receiver: tokio::sync::mpsc::UnboundedReceiver<String>,
+}
+
+impl TerminalStdinLines {
+    async fn next_line(&mut self) -> Option<String> {
+        self.receiver.recv().await
+    }
+}
+
+fn spawn_terminal_stdin_line_reader() -> Option<TerminalStdinLines> {
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let thread = std::thread::Builder::new()
+        .name("bifrost-mobile-terminal-stdin".to_string())
+        .spawn(move || {
+            let stdin = io::stdin();
+            for line in stdin.lock().lines() {
+                let Ok(line) = line else {
+                    break;
+                };
+                if sender.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+    match thread {
+        Ok(_handle) => Some(TerminalStdinLines { receiver }),
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to start mobile terminal stdin reader");
+            None
+        }
     }
 }
 
