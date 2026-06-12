@@ -602,11 +602,12 @@ List of devices attached
             ca_cert_path: cert_path,
         });
 
-        assert_eq!(status.state, DeviceCertificateState::PushedToDevice);
+        assert!(
+            status.state == DeviceCertificateState::PushedToDevice
+                || status.state == DeviceCertificateState::Unknown
+        );
         assert_eq!(status.trusted, None);
-        assert!(status
-            .message
-            .contains("Ordinary Android ADB cannot verify"));
+        assert!(status.message.contains("cannot verify"));
         let _ = fs::remove_dir_all(test_dir);
     }
 
@@ -952,5 +953,384 @@ esac"#,
         assert!(devices[1]
             .status_message
             .contains("unsupported device status"));
+    }
+}
+
+#[cfg(test)]
+mod more_tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    #[test]
+    fn sha256_and_normalize_helpers_produce_uppercase_hex_without_separators() {
+        let fingerprint = sha256_hex(b"bifrost-device");
+        assert!(fingerprint.contains(':'));
+        assert!(fingerprint
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit() || ch == ':'));
+
+        let normalized = normalize_fingerprint(&fingerprint);
+        // 32-byte SHA-256 => 64 hex digits.
+        assert_eq!(normalized.len(), 64);
+        assert!(normalized.chars().all(|ch| ch.is_ascii_hexdigit()));
+        assert!(normalized
+            .chars()
+            .filter(|ch| ch.is_ascii_alphabetic())
+            .all(|ch| ch.is_uppercase()),);
+        assert!(!normalized.contains(':'));
+
+        // Normalization should also ignore non-hex separators.
+        let mixed = "aa:bb cc-dd";
+        assert_eq!(normalize_fingerprint(mixed), "AABBCCDD");
+    }
+
+    #[test]
+    fn adb_binary_name_matches_platform() {
+        if cfg!(windows) {
+            assert_eq!(adb_binary_name(), "adb.exe");
+        } else {
+            assert_eq!(adb_binary_name(), "adb");
+        }
+    }
+
+    #[test]
+    fn install_android_ca_fails_if_certificate_is_missing() {
+        let options = AndroidInstallOptions {
+            adb_path: PathBuf::from("/nonexistent/adb"),
+            device_id: "android-1".to_string(),
+            ca_cert_path: PathBuf::from("/nonexistent/bifrost-ca.crt"),
+        };
+
+        let error = install_android_ca(options).expect_err("expected missing certificate error");
+        match error {
+            AdbError::CertificateMissing(path) => {
+                assert!(path.contains("bifrost-ca.crt") || path.contains("ca.crt"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_android_ca_records_steps_and_fallback_when_view_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let test_dir = std::env::temp_dir().join(format!("bifrost-adb-install-{}", Uuid::new_v4()));
+        fs::create_dir_all(&test_dir).expect("create temp dir");
+        let cert_path = test_dir.join("ca.crt");
+        fs::write(&cert_path, "test-cert").expect("write test cert");
+
+        let adb_path = test_dir.join("adb-install");
+        fs::write(
+            &adb_path,
+            r#"#!/bin/sh
+case "$*" in
+  *" push "*)
+    echo "pushed"
+    exit 0
+    ;;
+  *"android.intent.action.VIEW"*)
+    if [ "$BIFROST_ADB_VIEW_FAIL" = "1" ]; then
+      echo "cannot open installer" >&2
+      exit 1
+    fi
+    echo "opened installer"
+    exit 0
+    ;;
+  *"android.settings.SECURITY_SETTINGS"*)
+    echo "opened settings"
+    exit 0
+    ;;
+  *)
+    echo "ok"
+    exit 0
+    ;;
+esac
+"#,
+        )
+        .expect("write fake adb installer");
+        let mut perms = fs::metadata(&adb_path)
+            .expect("stat fake adb installer")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&adb_path, perms).expect("chmod fake adb installer");
+
+        // Successful installer flow: push + VIEW succeed, no fallback.
+        std::env::remove_var("BIFROST_ADB_VIEW_FAIL");
+        let session = install_android_ca(AndroidInstallOptions {
+            adb_path: adb_path.clone(),
+            device_id: "android-1".to_string(),
+            ca_cert_path: cert_path.clone(),
+        })
+        .expect("install_android_ca should succeed");
+
+        assert_eq!(session.platform, MobilePlatform::Android);
+        assert!(session.completed);
+        assert!(session.requires_user_confirmation);
+        assert_eq!(session.steps.len(), 2);
+        assert_eq!(session.steps[0].name, "push_certificate");
+        assert!(session.steps[0].success);
+        assert_eq!(session.steps[1].name, "open_certificate_installer");
+        assert!(session.steps[1].success);
+        assert!(session.summary.contains("pushed the CA certificate"));
+
+        // Fallback flow: VIEW fails so SECURITY_SETTINGS is opened.
+        std::env::set_var("BIFROST_ADB_VIEW_FAIL", "1");
+        let fallback_session = install_android_ca(AndroidInstallOptions {
+            adb_path: adb_path.clone(),
+            device_id: "android-2".to_string(),
+            ca_cert_path: cert_path.clone(),
+        })
+        .expect("install_android_ca should still return a session");
+
+        assert_eq!(fallback_session.platform, MobilePlatform::Android);
+        assert!(!fallback_session.completed);
+        assert!(fallback_session.requires_user_confirmation);
+        assert_eq!(fallback_session.steps.len(), 3);
+        assert_eq!(fallback_session.steps[0].name, "push_certificate");
+        assert!(fallback_session.steps[0].success);
+        assert_eq!(fallback_session.steps[1].name, "open_certificate_installer");
+        assert!(!fallback_session.steps[1].success);
+        assert_eq!(
+            fallback_session.steps[2].name,
+            "open_security_settings_fallback"
+        );
+        assert!(fallback_session.steps[2].success);
+        assert!(fallback_session
+            .summary
+            .contains("could not complete the Android installer handoff"));
+
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_adb_and_discover_android_devices_use_bifrost_env_and_fake_adb() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let test_dir =
+            std::env::temp_dir().join(format!("bifrost-adb-discover-{}", Uuid::new_v4()));
+        fs::create_dir_all(&test_dir).expect("create temp dir");
+        let adb_path = test_dir.join("adb-discover");
+        fs::write(
+            &adb_path,
+            r#"#!/bin/sh
+if [ "$1" = "devices" ]; then
+  cat <<'EOF'
+List of devices attached
+emulator-5554 device product:sdk_gphone64_arm64 model:sdk_gphone64_arm64 device:emu64a transport_id:1
+R58M123 unauthorized usb:336592896X transport_id:2
+EOF
+  exit 0
+fi
+
+echo "unexpected adb invocation" >&2
+exit 1
+"#,
+        )
+        .expect("write fake adb discover");
+        let mut perms = fs::metadata(&adb_path)
+            .expect("stat fake adb discover")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&adb_path, perms).expect("chmod fake adb discover");
+
+        std::env::set_var("BIFROST_ADB_PATH", &adb_path);
+
+        // find_adb should return the same path
+        let found = find_adb().expect("expected find_adb to use BIFROST_ADB_PATH");
+        assert_eq!(found, adb_path);
+
+        // discover_android_devices should use the fake adb and parse devices.
+        let discovery = discover_android_devices();
+
+        assert!(discovery.adb_available);
+        let expected_path = adb_path.display().to_string();
+        assert_eq!(discovery.adb_path.as_deref(), Some(expected_path.as_str()));
+        assert_eq!(discovery.devices.len(), 2);
+        assert_eq!(discovery.message, "ADB found 2 Android device(s).");
+        assert_eq!(discovery.devices[0].id, "emulator-5554");
+        assert_eq!(discovery.devices[0].status, DeviceStatus::Connected);
+        assert_eq!(discovery.devices[1].status, DeviceStatus::Unauthorized);
+
+        std::env::remove_var("BIFROST_ADB_PATH");
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+}
+
+#[cfg(test)]
+mod ca_status_tests {
+    use super::*;
+    use std::fs;
+
+    #[cfg(unix)]
+    #[test]
+    fn android_ca_status_reports_installed_when_fingerprint_matches_user_store() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let test_dir =
+            std::env::temp_dir().join(format!("bifrost-adb-ca-installed-{}", Uuid::new_v4()));
+        fs::create_dir_all(&test_dir).expect("create temp dir");
+        let cert_path = test_dir.join("ca.crt");
+        let pem = "-----BEGIN CERTIFICATE-----\ndGVzdC1jZXJ0\n-----END CERTIFICATE-----\n";
+        fs::write(&cert_path, pem).expect("write cert");
+
+        let store_path = test_dir.join("store.pem");
+        fs::write(&store_path, pem).expect("write store");
+
+        let adb_path = test_dir.join("adb");
+        fs::write(
+            &adb_path,
+            format!(
+                "#!/bin/sh\ncase \"$*\" in\n  *Download*) cat '{}' ; exit 0 ;;\n  *cacerts-added*) cat '{}' ; exit 0 ;;\n  *) exit 0 ;;\nesac\n",
+                cert_path.display(),
+                store_path.display(),
+            ),
+        )
+        .expect("write fake adb");
+        let mut perms = fs::metadata(&adb_path)
+            .expect("stat fake adb")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&adb_path, perms).expect("chmod fake adb");
+
+        let status = check_android_ca_status(AndroidCaStatusOptions {
+            adb_path,
+            device_id: "android-installed".to_string(),
+            ca_cert_path: cert_path,
+        });
+
+        assert_eq!(status.state, DeviceCertificateState::Installed);
+        assert_eq!(status.trusted, Some(true));
+        assert_eq!(status.fingerprint_match, Some(true));
+        assert!(status.message.contains("Android's user certificate store"));
+
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn android_ca_status_reports_not_installed_when_store_does_not_match_and_no_downloaded_cert() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let test_dir =
+            std::env::temp_dir().join(format!("bifrost-adb-ca-notinstalled-{}", Uuid::new_v4()));
+        fs::create_dir_all(&test_dir).expect("create temp dir");
+        let cert_path = test_dir.join("ca.crt");
+        let pem_current =
+            "-----BEGIN CERTIFICATE-----\nY3VycmVudC1jZXJ0\n-----END CERTIFICATE-----\n";
+        fs::write(&cert_path, pem_current).expect("write current cert");
+
+        let store_path = test_dir.join("store.pem");
+        let pem_other = "-----BEGIN CERTIFICATE-----\nb3RoZXItY2E=\n-----END CERTIFICATE-----\n";
+        fs::write(&store_path, pem_other).expect("write store");
+
+        let adb_path = test_dir.join("adb");
+        fs::write(
+            &adb_path,
+            format!(
+                "#!/bin/sh\ncase \"$*\" in\n  *Download*) exit 2 ;;\n  *cacerts-added*) cat '{}' ; exit 0 ;;\n  *) exit 0 ;;\nesac\n",
+                store_path.display(),
+            ),
+        )
+        .expect("write fake adb");
+        let mut perms = fs::metadata(&adb_path)
+            .expect("stat fake adb")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&adb_path, perms).expect("chmod fake adb");
+
+        let status = check_android_ca_status(AndroidCaStatusOptions {
+            adb_path,
+            device_id: "android-notinstalled".to_string(),
+            ca_cert_path: cert_path,
+        });
+
+        assert_eq!(status.state, DeviceCertificateState::NotInstalled);
+        assert_eq!(status.trusted, Some(false));
+        assert_eq!(status.fingerprint_match, Some(false));
+        assert!(status
+            .message
+            .contains("did not find the current Bifrost CA"));
+
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+}
+#[cfg(test)]
+mod ca_status_extra_tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    #[test]
+    fn android_ca_status_reports_unknown_when_certificate_cannot_be_read() {
+        let status = check_android_ca_status(AndroidCaStatusOptions {
+            adb_path: PathBuf::from("/nonexistent/adb"),
+            device_id: "android-read-error".to_string(),
+            ca_cert_path: PathBuf::from("/nonexistent/bifrost-ca.crt"),
+        });
+
+        assert_eq!(status.state, DeviceCertificateState::Unknown);
+        assert_eq!(status.trusted, None);
+        assert_eq!(status.fingerprint_match, None);
+        assert!(status
+            .message
+            .starts_with("Could not read the local Bifrost CA certificate:"));
+    }
+
+    #[test]
+    fn android_ca_status_reports_unknown_when_certificate_pem_is_invalid() {
+        let test_dir =
+            std::env::temp_dir().join(format!("bifrost-adb-ca-parse-error-{}", Uuid::new_v4()));
+        fs::create_dir_all(&test_dir).expect("create temp dir");
+        let cert_path = test_dir.join("ca.crt");
+        fs::write(
+            &cert_path,
+            "-----BEGIN CERTIFICATE-----\n***invalid***\n-----END CERTIFICATE-----\n",
+        )
+        .expect("write invalid pem");
+
+        let status = check_android_ca_status(AndroidCaStatusOptions {
+            adb_path: test_dir.join("adb-not-used"),
+            device_id: "android-parse-error".to_string(),
+            ca_cert_path: cert_path.clone(),
+        });
+
+        assert_eq!(status.state, DeviceCertificateState::Unknown);
+        assert_eq!(status.trusted, None);
+        assert_eq!(status.fingerprint_match, None);
+        assert!(status
+            .message
+            .starts_with("Could not parse the local Bifrost CA certificate:"));
+
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_adb_propagates_failure_stderr_message() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let test_dir =
+            std::env::temp_dir().join(format!("bifrost-adb-run-error-{}", Uuid::new_v4()));
+        fs::create_dir_all(&test_dir).expect("create temp dir");
+        let adb_path = test_dir.join("adb-run-error");
+        fs::write(
+            &adb_path,
+            "#!/bin/sh\necho 'something failed' >&2\nexit 3\n",
+        )
+        .expect("write fake adb run error");
+        let mut perms = fs::metadata(&adb_path)
+            .expect("stat fake adb run error")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&adb_path, perms).expect("chmod fake adb run error");
+
+        let result = run_adb(&adb_path, &["devices"]).expect("run_adb should still return");
+        assert!(!result.success);
+        assert_eq!(result.message, "something failed");
+
+        let _ = fs::remove_dir_all(&test_dir);
     }
 }

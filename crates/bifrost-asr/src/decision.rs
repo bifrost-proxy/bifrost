@@ -318,4 +318,124 @@ mod tests {
         assert_eq!(decision.pipeline_profile, OFFLINE_PLAIN_ASR_PROFILE);
         assert!(decision.diarization.is_none());
     }
+
+    #[test]
+    fn default_profile_for_directory_task_uses_scheduled_speaker_profile_when_scheduled_or_speaker_aware(
+    ) {
+        let scheduled = SpeechRequest {
+            scheduled: true,
+            ..SpeechRequest::default()
+        };
+        assert_eq!(
+            default_profile_for(SpeechMode::DirectoryTask, &scheduled),
+            SCHEDULED_SPEAKER_SUBTITLE_PROFILE
+        );
+
+        let speaker_aware = SpeechRequest {
+            speaker_aware: true,
+            ..SpeechRequest::default()
+        };
+        assert_eq!(
+            default_profile_for(SpeechMode::DirectoryTask, &speaker_aware),
+            SCHEDULED_SPEAKER_SUBTITLE_PROFILE
+        );
+    }
+
+    #[test]
+    fn resolve_engine_decision_falls_back_to_default_profile_for_unknown_id() {
+        let decision = resolve_engine_decision(
+            SpeechMode::OfflineFile,
+            SpeechRequest {
+                pipeline_profile: Some("nonexistent-profile".to_string()),
+                ..SpeechRequest::default()
+            },
+            env(),
+        );
+
+        assert_ne!(decision.pipeline_profile, "nonexistent-profile");
+        assert!(decision
+            .reasons
+            .iter()
+            .any(|reason| reason.code == "unknown_profile_fallback"));
+    }
+
+    #[test]
+    fn resolve_engine_decision_marks_unsupported_platform_and_resource_unavailable() {
+        let env = SpeechRuntimeEnv {
+            platform_supported: false,
+            asr_ready: false,
+            diarization_ready: false,
+            realtime_voice_active: false,
+            offline_asr_active: false,
+        };
+        let decision =
+            resolve_engine_decision(SpeechMode::OfflineFile, SpeechRequest::default(), env);
+
+        assert!(!decision.asr.ready);
+        assert!(!decision.resource.available);
+        assert!(decision
+            .reasons
+            .iter()
+            .any(|reason| reason.code == "unsupported_platform"));
+        assert!(decision
+            .reasons
+            .iter()
+            .any(|reason| reason.code == "resource_unavailable"));
+        assert!(decision.resource.reason.is_some());
+    }
+
+    #[test]
+    fn resolve_engine_decision_conflicts_with_offline_asr_for_realtime() {
+        let mut env = env();
+        env.offline_asr_active = true;
+        let decision =
+            resolve_engine_decision(SpeechMode::RealtimeDictation, SpeechRequest::default(), env);
+
+        assert!(!decision.resource.available);
+        let reason = decision.resource.reason.as_deref().unwrap_or_default();
+        assert!(
+            reason.contains("offline ASR is currently using the local model resource"),
+            "unexpected resource reason: {reason}"
+        );
+    }
+
+    #[test]
+    fn resolve_engine_decision_conflicts_with_realtime_voice_for_offline_file() {
+        let mut env = env();
+        env.realtime_voice_active = true;
+        let decision =
+            resolve_engine_decision(SpeechMode::OfflineFile, SpeechRequest::default(), env);
+
+        assert!(!decision.resource.available);
+        let reason = decision.resource.reason.as_deref().unwrap_or_default();
+        assert!(
+            reason.contains("realtime voice input is active"),
+            "unexpected resource reason: {reason}"
+        );
+    }
+
+    #[test]
+    fn request_model_overrides_offline_profile_default() {
+        let decision = resolve_engine_decision(
+            SpeechMode::OfflineFile,
+            SpeechRequest {
+                model: Some("Custom-Model".to_string()),
+                ..SpeechRequest::default()
+            },
+            env(),
+        );
+
+        assert_eq!(decision.asr.model, "Custom-Model");
+    }
+
+    #[test]
+    fn resolve_realtime_wake_uses_wake_provider_and_is_ready_without_asr_assets() {
+        let mut env = env();
+        env.asr_ready = false;
+        let decision =
+            resolve_engine_decision(SpeechMode::RealtimeWake, SpeechRequest::default(), env);
+
+        assert_eq!(decision.asr.provider, "lightweight_kws_listener");
+        assert!(decision.asr.ready);
+    }
 }

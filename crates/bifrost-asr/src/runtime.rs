@@ -135,3 +135,136 @@ pub fn stop_pid(pid: u32) -> Result<(), String> {
         Err(format!("taskkill exited with {status}"))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    #[test]
+    fn service_state_round_trip_read_write_and_clear() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+
+        let state = AsrServiceState {
+            host: "127.0.0.1".to_string(),
+            port: 12345,
+            model: DEFAULT_ASR_MODEL.to_string(),
+            language: DEFAULT_ASR_LANGUAGE.to_string(),
+            home: PathBuf::from("/tmp/asr_home"),
+            pid: Some(42),
+            managed_by: "cli".to_string(),
+            owner_module: Some("bifrost_cli".to_string()),
+            owner_id: Some("task-1".to_string()),
+            started_at_ms: 1,
+        };
+
+        write_service_state(data_dir, &state).expect("write state");
+        let path = service_state_path(data_dir);
+        assert!(path.is_file());
+
+        let loaded = read_service_state(data_dir).expect("state should be readable");
+        assert_eq!(loaded, state);
+
+        clear_service_state(data_dir).expect("clear state");
+        assert!(!path.exists());
+        assert!(read_service_state(data_dir).is_none());
+    }
+
+    #[test]
+    fn lease_owner_module_prefers_owner_module_and_maps_webui() {
+        fn make_state(managed_by: &str, owner_module: Option<&str>) -> AsrServiceState {
+            AsrServiceState {
+                host: "127.0.0.1".to_string(),
+                port: 80,
+                model: DEFAULT_ASR_MODEL.to_string(),
+                language: DEFAULT_ASR_LANGUAGE.to_string(),
+                home: PathBuf::from("/tmp/asr_home"),
+                pid: None,
+                managed_by: managed_by.to_string(),
+                owner_module: owner_module.map(|s| s.to_string()),
+                owner_id: None,
+                started_at_ms: 0,
+            }
+        }
+
+        let legacy = make_state("webui", None);
+        assert_eq!(legacy.lease_owner_module(), "speech_workbench");
+
+        let cli = make_state("cli", None);
+        assert_eq!(cli.lease_owner_module(), "cli");
+
+        let owned = make_state("webui", Some("override"));
+        assert_eq!(owned.lease_owner_module(), "override");
+    }
+
+    #[test]
+    fn path_helpers_use_expected_layout() {
+        let home = Path::new("/home/user");
+        let install = install_dir(home);
+        assert!(install.ends_with(ASR_INSTALL_NAME));
+
+        let model = model_dir(home, "Qwen3-ASR-0.6B");
+        assert_eq!(model.parent().unwrap(), &install);
+
+        let data_dir = Path::new("/data");
+        let asr_dir = asr_data_dir(data_dir);
+        assert_eq!(asr_dir, PathBuf::from("/data/asr"));
+        assert_eq!(service_state_path(data_dir), asr_dir.join("service.json"));
+        assert_eq!(text_output_dir(data_dir), asr_dir.join("data/text"));
+    }
+
+    #[test]
+    fn fixed_asr_home_has_asr_suffix() {
+        let home = fixed_asr_home();
+        assert_eq!(home.file_name().unwrap(), "asr");
+    }
+
+    #[test]
+    fn now_ms_returns_positive_timestamp() {
+        let now = now_ms();
+        assert!(now > 0);
+    }
+
+    #[test]
+    fn probe_health_blocking_succeeds_against_local_http_server() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0_u8; 1024];
+                let _ = stream.read(&mut buf);
+                let response = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+                let _ = stream.write_all(response);
+            }
+        });
+
+        probe_health_blocking("127.0.0.1", port, Duration::from_secs(5)).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_pid_terminates_child_process() {
+        use std::process::{Command, Stdio};
+
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 60")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+
+        stop_pid(pid).expect("stop child");
+
+        let status = child.wait().expect("wait child");
+        assert!(!status.success());
+    }
+}

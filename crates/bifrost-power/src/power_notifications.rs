@@ -318,7 +318,6 @@ mod macos {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc;
 
     #[test]
     fn power_event_derives() {
@@ -334,7 +333,7 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn start_is_unsupported_off_macos() {
-        let (tx, _rx) = mpsc::channel::<PowerEvent>();
+        let (tx, _rx) = std::sync::mpsc::channel::<PowerEvent>();
         match PowerNotificationWatcher::start(tx) {
             Ok(_) => panic!("expected Unsupported error off macOS, got Ok"),
             Err(crate::PowerError::Unsupported(_)) => {}

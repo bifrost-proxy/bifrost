@@ -723,4 +723,114 @@ mod tests {
             "sub/meeting_b"
         );
     }
+
+    #[test]
+    fn parse_ffprobe_created_at_prefers_rfc3339_creation_time() {
+        let created =
+            parse_ffprobe_created_at_ms(Some("2026-05-14"), Some("2026-05-14T11:44:33Z")).unwrap();
+        let expected = DateTime::parse_from_rfc3339("2026-05-14T11:44:33Z")
+            .unwrap()
+            .timestamp_millis() as u64;
+        assert_eq!(created, expected);
+    }
+
+    #[test]
+    fn parse_ffprobe_created_at_uses_date_and_time_when_rfc3339_invalid() {
+        let created = parse_ffprobe_created_at_ms(Some("2026-05-14"), Some("11:44:33")).unwrap();
+        let expected = Local
+            .with_ymd_and_hms(2026, 5, 14, 11, 44, 33)
+            .earliest()
+            .unwrap()
+            .timestamp_millis() as u64;
+        assert_eq!(created, expected);
+    }
+
+    #[test]
+    fn parse_ffprobe_created_at_returns_none_on_invalid_hms() {
+        assert!(parse_ffprobe_created_at_ms(Some("2026-05-14"), Some("invalid")).is_none());
+    }
+
+    #[test]
+    fn render_timeline_text_uses_fallback_when_no_segments() {
+        let timeline = TranscriptTimeline {
+            task_id: "task".to_string(),
+            task_name: "Task".to_string(),
+            source_path: PathBuf::from("/tmp/audio.wav"),
+            source_size: None,
+            source_modified_ms: None,
+            source_created_at_ms: None,
+            source_created_at_source: None,
+            media_duration_ms: None,
+            model: "Qwen3-ASR-1.7B".to_string(),
+            language: "chinese".to_string(),
+            diarization_profile: None,
+            speakers: Vec::new(),
+            processed_at_ms: 0,
+            segments: Vec::new(),
+        };
+
+        let rendered = render_timeline_text(&timeline, " fallback text ");
+        assert_eq!(rendered, "fallback text");
+    }
+
+    #[test]
+    fn render_timeline_text_formats_relative_time_ranges_when_no_absolute_time() {
+        let timeline = TranscriptTimeline {
+            task_id: "task".to_string(),
+            task_name: "Task".to_string(),
+            source_path: PathBuf::from("/tmp/audio.wav"),
+            source_size: None,
+            source_modified_ms: None,
+            source_created_at_ms: None,
+            source_created_at_source: None,
+            media_duration_ms: Some(1_500),
+            model: "Qwen3-ASR-1.7B".to_string(),
+            language: "chinese".to_string(),
+            diarization_profile: None,
+            speakers: Vec::new(),
+            processed_at_ms: 0,
+            segments: vec![TimelineSegment {
+                index: 0,
+                audio_start_ms: 0,
+                audio_end_ms: 1_500,
+                absolute_start_ms: None,
+                absolute_end_ms: None,
+                speaker: Some("speaker_00".to_string()),
+                speaker_display_name: Some("用户A".to_string()),
+                overlap: false,
+                text: "你好".to_string(),
+            }],
+        };
+
+        let rendered = render_timeline_text(&timeline, "ignored");
+        assert!(rendered.starts_with("[00:00:00.000 - 00:00:01.500] 用户A: 你好"));
+    }
+
+    #[test]
+    fn inspect_source_audio_prefers_filename_timestamp_when_ffprobe_unavailable() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("TX02_MIC001_20260514_114433_orig.wav");
+        std::fs::write(&path, b"audio").unwrap();
+
+        let info = inspect_source_audio(&path);
+        assert_eq!(info.source_size, Some(5));
+        assert!(info.source_modified_ms.is_some());
+        assert_eq!(
+            info.source_created_at_source.as_deref(),
+            Some("filename_timestamp")
+        );
+        assert!(info.source_created_at_ms.is_some());
+    }
+
+    #[test]
+    fn source_size_and_modified_ms_are_read_from_filesystem() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("sample.wav");
+        std::fs::write(&path, b"12345").unwrap();
+
+        assert_eq!(source_size(&path), Some(5));
+        assert!(source_modified_ms(&path).is_some());
+        // filesystem_created_ms may or may not be available; just ensure it does not panic.
+        let _ = filesystem_created_ms(&path);
+    }
 }

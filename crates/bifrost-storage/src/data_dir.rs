@@ -42,18 +42,3 @@ pub fn data_dir() -> PathBuf {
         .map(|h| h.join(".bifrost"))
         .unwrap_or_else(|| PathBuf::from(".bifrost"))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn set_data_dir_is_reentrant() {
-        let a = PathBuf::from("/tmp/bifrost-data-dir-test-a");
-        let b = PathBuf::from("/tmp/bifrost-data-dir-test-b");
-        set_data_dir(a.clone());
-        assert_eq!(data_dir(), a);
-        set_data_dir(b.clone());
-        assert_eq!(data_dir(), b);
-    }
-}

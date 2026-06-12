@@ -1059,6 +1059,53 @@ mod tests {
     }
 
     #[test]
+    fn test_load_all_with_subdirs_filtered_respects_valid_subdirs() {
+        use std::collections::HashSet;
+
+        let (temp_dir, storage) = setup();
+
+        storage
+            .save(&RuleFile::new(
+                "local",
+                "local.example.com host://127.0.0.1:3000",
+            ))
+            .unwrap();
+
+        let group_a_dir = temp_dir.path().join("group-a");
+        let group_a_storage = RulesStorage::with_dir(group_a_dir).unwrap();
+        group_a_storage
+            .save(&RuleFile::new(
+                "group-a-rule",
+                "group-a.example.com host://127.0.0.1:4000",
+            ))
+            .unwrap();
+
+        let group_b_dir = temp_dir.path().join("group-b");
+        let group_b_storage = RulesStorage::with_dir(group_b_dir).unwrap();
+        group_b_storage
+            .save(&RuleFile::new(
+                "group-b-rule",
+                "group-b.example.com host://127.0.0.1:5000",
+            ))
+            .unwrap();
+
+        let mut valid = HashSet::new();
+        valid.insert("group-a".to_string());
+
+        let all = storage
+            .load_all_with_subdirs_filtered(Some(&valid))
+            .unwrap();
+
+        let names: Vec<_> = all.iter().map(|r| r.name.as_str()).collect();
+        assert!(names.contains(&"local"));
+        assert!(names.contains(&"group-a-rule"));
+        assert!(!names.contains(&"group-b-rule"));
+
+        let group_a_rule = all.iter().find(|r| r.name == "group-a-rule").unwrap();
+        assert_eq!(group_a_rule.group.as_deref(), Some("group-a"));
+    }
+
+    #[test]
     fn test_synced_rule_becomes_modified_after_local_change() {
         let (_temp_dir, storage) = setup();
         let mut rule = RuleFile::new("demo", "example.com host://127.0.0.1:3000");

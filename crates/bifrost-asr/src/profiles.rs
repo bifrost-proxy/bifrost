@@ -287,4 +287,48 @@ mod tests {
             assert!(diarization.voiceprint_matching);
         }
     }
+
+    #[test]
+    fn speech_mode_parse_roundtrips_with_as_str() {
+        for mode in [
+            SpeechMode::RealtimeDictation,
+            SpeechMode::RealtimeWake,
+            SpeechMode::OfflineFile,
+            SpeechMode::DirectoryTask,
+        ] {
+            let text = mode.as_str();
+            assert_eq!(SpeechMode::parse(text), Some(mode));
+        }
+    }
+
+    #[test]
+    fn speech_mode_parse_supports_aliases() {
+        assert_eq!(
+            SpeechMode::parse("realtime"),
+            Some(SpeechMode::RealtimeDictation)
+        );
+        assert_eq!(SpeechMode::parse("wake"), Some(SpeechMode::RealtimeWake));
+        assert_eq!(SpeechMode::parse("offline"), Some(SpeechMode::OfflineFile));
+        assert_eq!(
+            SpeechMode::parse("scheduled"),
+            Some(SpeechMode::DirectoryTask)
+        );
+        assert_eq!(SpeechMode::parse("unknown"), None);
+    }
+
+    #[test]
+    fn builtin_profiles_include_all_expected_ids() {
+        let profiles = builtin_speech_pipeline_profiles();
+        let ids: Vec<_> = profiles.iter().map(|p| p.id.as_str()).collect();
+
+        assert!(ids.contains(&REALTIME_DICTATION_PROFILE));
+        assert!(ids.contains(&REALTIME_WAKE_PROFILE));
+        assert!(ids.contains(&OFFLINE_PLAIN_ASR_PROFILE));
+        assert!(ids.contains(&OFFLINE_SPEAKER_SUBTITLE_PROFILE));
+        assert!(ids.contains(&SCHEDULED_SPEAKER_SUBTITLE_PROFILE));
+
+        let realtime = builtin_profile(REALTIME_DICTATION_PROFILE).expect("realtime profile");
+        assert!(realtime.realtime.is_some());
+        assert!(realtime.offline.is_none());
+    }
 }

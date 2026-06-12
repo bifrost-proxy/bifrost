@@ -1049,3 +1049,40 @@ created_at = "2026-01-01T00:00:00Z"
         assert!(try_repair_json("][}{").is_none());
     }
 }
+
+#[cfg(test)]
+mod extra_tests {
+    use super::*;
+
+    #[test]
+    fn parse_rules_meta_tolerant_handles_invalid_toml_with_error_warning() {
+        let mut warnings = Vec::new();
+        let meta = BifrostFileParser::parse_rules_meta_tolerant("not-toml", &mut warnings);
+        assert_eq!(meta.name, "unnamed");
+        assert!(meta.enabled);
+        assert!(meta.version.starts_with('1'));
+        assert!(warnings
+            .iter()
+            .any(|w| matches!(w.level, WarningLevel::Error)));
+    }
+
+    #[test]
+    fn parse_json_tolerant_repairs_trailing_commas() {
+        let json = "[1,2,3,]";
+        let result: ParseResultWithWarnings<Vec<u32>> =
+            BifrostFileParser::parse_json_tolerant(json);
+        assert!(result.has_warnings());
+        assert!(!result.has_errors());
+        assert_eq!(result.data, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn parse_json_tolerant_returns_default_and_error_on_unrepairable_input() {
+        let json = "this is not json";
+        let result: ParseResultWithWarnings<serde_json::Value> =
+            BifrostFileParser::parse_json_tolerant(json);
+        assert!(result.has_errors());
+        // default for serde_json::Value is Null
+        assert!(result.data.is_null());
+    }
+}

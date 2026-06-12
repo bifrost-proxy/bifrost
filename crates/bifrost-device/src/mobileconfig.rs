@@ -304,3 +304,74 @@ mod tests {
         assert_eq!(der, vec![1, 2, 3, 4]);
     }
 }
+
+#[cfg(test)]
+mod more_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn read_certificate_der_from_bytes_returns_raw_der_when_not_pem() {
+        let data = vec![1u8, 2, 3, 4];
+        let result = read_certificate_der_from_bytes(&data).expect("der should succeed");
+        assert_eq!(result, data);
+    }
+
+    #[test]
+    fn read_certificate_der_from_file_decodes_pem() {
+        let temp_dir = std::env::temp_dir();
+        let path = temp_dir.join("bifrost-mobileconfig-test.pem");
+        fs::write(
+            &path,
+            "-----BEGIN CERTIFICATE-----\nAQIDBA==\n-----END CERTIFICATE-----\n",
+        )
+        .expect("write pem");
+
+        let der = read_certificate_der_from_file(&path).expect("read der from file");
+        assert_eq!(der, vec![1, 2, 3, 4]);
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn ios_wifi_proxy_profile_options_new_sets_default_labels() {
+        let opts = IosWifiProxyProfileOptions::new(
+            "Office & Lab".to_string(),
+            "proxy.example.local".to_string(),
+            8080,
+        );
+
+        assert_eq!(opts.organization, "Bifrost Proxy");
+        assert_eq!(opts.display_name, "Bifrost Wi-Fi Proxy");
+        assert_eq!(opts.identifier, "dev.bifrost.mobile-ios-wifi-proxy");
+        assert_eq!(opts.ssid, "Office & Lab");
+        assert_eq!(opts.proxy_host, "proxy.example.local");
+        assert_eq!(opts.proxy_port, 8080);
+    }
+
+    #[test]
+    fn xml_escape_escapes_special_characters() {
+        let escaped = xml_escape(r#"5 < 10 & "quotes" 'apos'"#);
+        assert_eq!(
+            escaped,
+            "5 &lt; 10 &amp; &quot;quotes&quot; &apos;apos&apos;",
+        );
+    }
+
+    #[test]
+    fn wrap_base64_inserts_indentation_and_newlines() {
+        let long = "A".repeat(120);
+        let wrapped = wrap_base64(&long);
+
+        for line in wrapped.lines() {
+            assert!(line.starts_with("        "));
+            assert!(!line.trim().is_empty());
+        }
+        // Combined content without indentation should equal original string.
+        let joined: String = wrapped
+            .lines()
+            .map(|line| line.trim_start())
+            .collect::<String>();
+        assert_eq!(joined, long);
+    }
+}

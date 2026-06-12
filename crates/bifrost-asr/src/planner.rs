@@ -358,4 +358,46 @@ mod tests {
         assert_eq!(units[0].source_start_ms, 4_000);
         assert_eq!(units[0].source_end_ms, 4_800);
     }
+
+    #[test]
+    fn speakers_from_diarization_segments_collects_unique_speakers_with_metadata() {
+        let mut segments = vec![
+            segment("speaker_00", 0, 1_000),
+            segment("speaker_00", 2_000, 3_000),
+            segment("speaker_01", 4_000, 5_000),
+        ];
+        segments[0].mapped_profile_id = Some("profile_a".to_string());
+        segments[0].confidence = Some(0.9);
+        segments[0].candidate_profile_id = Some("cand".to_string());
+        segments[0].candidate_display_name = Some("Candidate".to_string());
+        segments[0].candidate_confidence = Some(0.8);
+
+        let speakers = speakers_from_diarization_segments(&segments);
+        assert_eq!(speakers.len(), 2);
+        let first = speakers.iter().find(|s| s.id == "speaker_00").unwrap();
+        assert_eq!(first.display_name, "speaker_00");
+        assert_eq!(first.mapped_profile_id.as_deref(), Some("profile_a"));
+        assert_eq!(first.candidate_profile_id.as_deref(), Some("cand"));
+        assert_eq!(first.candidate_display_name.as_deref(), Some("Candidate"));
+    }
+
+    #[test]
+    fn speaker_display_name_uses_letters_then_indices() {
+        assert_eq!(speaker_display_name(0), "用户A");
+        assert_eq!(speaker_display_name(25), "用户Z");
+        assert_eq!(speaker_display_name(26), "用户27");
+    }
+
+    #[test]
+    fn seconds_to_ms_clamps_negative_input() {
+        assert_eq!(seconds_to_ms(-1.0), 0);
+        assert_eq!(seconds_to_ms(1.234), 1_234);
+    }
+
+    #[test]
+    fn interval_overlap_ms_computes_overlap_only_when_ranges_intersect() {
+        assert_eq!(interval_overlap_ms(0, 10, 5, 15), 5);
+        assert_eq!(interval_overlap_ms(0, 10, 10, 20), 0);
+        assert_eq!(interval_overlap_ms(10, 20, 0, 5), 0);
+    }
 }

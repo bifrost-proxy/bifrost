@@ -499,3 +499,114 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod more_tests {
+    use super::*;
+    use parking_lot::Mutex as PlMutex;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    #[derive(Default)]
+    struct FailingPersister {
+        history: PlMutex<Vec<Mode>>,
+    }
+
+    impl ModePersister for FailingPersister {
+        fn persist(&self, mode: Mode) -> std::result::Result<(), String> {
+            self.history.lock().push(mode);
+            Err("persist failed".to_string())
+        }
+    }
+
+    fn make_mgr_with_persister<P: ModePersister>(
+        initial: Mode,
+        persister: Arc<P>,
+    ) -> SharedKeepAwakeManager {
+        KeepAwakeManager::new(initial, persister)
+    }
+
+    #[test]
+    fn platform_accessor_exposes_current_platform() {
+        let p = Arc::new(NoopPersister);
+        let mgr = KeepAwakeManager::new(Mode::Off, p);
+        assert_eq!(mgr.platform(), PlatformSupport::current());
+    }
+
+    #[test]
+    fn status_reports_elapsed_time_when_activated_at_is_set() {
+        let p = Arc::new(NoopPersister);
+        let mgr = KeepAwakeManager::new(Mode::Off, p);
+
+        {
+            let mut inner = mgr.inner.lock();
+            inner.activated_at = Some(Instant::now() - Duration::from_secs(1));
+        }
+
+        let status = mgr.status();
+        assert!(status.active_since_secs.is_some());
+    }
+
+    #[test]
+    fn persist_best_effort_swallows_persister_errors() {
+        let p = Arc::new(FailingPersister::default());
+        let mgr = make_mgr_with_persister(Mode::Off, p.clone());
+
+        // Even if persistence fails, the in-memory mode must still update and
+        // the call must succeed.
+        let prev = mgr.set_mode(Mode::Auto).unwrap();
+        assert_eq!(prev, Mode::Off);
+        assert_eq!(mgr.mode(), Mode::Auto);
+
+        let history = p.history.lock();
+        assert_eq!(history.as_slice(), &[Mode::Auto]);
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn force_on_transition_attempts_acquire_even_on_stub_platform() {
+        let p = Arc::new(NoopPersister);
+        let mut mgr = KeepAwakeManager::new(Mode::Off, p);
+
+        // Pretend we are on a supported platform so that the ForceOn arm is
+        // exercised. The actual platform implementation is still the stub, so
+        // the acquire will fail internally but must not propagate.
+        let mgr_mut = Arc::get_mut(&mut mgr).expect("unique Arc");
+        mgr_mut.platform = PlatformSupport::MacOs;
+
+        let prev = mgr.set_mode(Mode::ForceOn).unwrap();
+        assert_eq!(prev, Mode::Off);
+        assert_eq!(mgr.mode(), Mode::ForceOn);
+        // On the stub platform the acquire fails, so we stay inactive.
+        assert!(!mgr.is_active());
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn auto_mode_remote_call_handles_acquire_failures_gracefully() {
+        let p = Arc::new(NoopPersister);
+        let mut mgr = KeepAwakeManager::new(Mode::Auto, p);
+
+        let mgr_mut = Arc::get_mut(&mut mgr).expect("unique Arc");
+        mgr_mut.platform = PlatformSupport::MacOs;
+
+        mgr.on_remote_call();
+        // The stub acquire fails so we should still be inactive.
+        assert!(!mgr.is_active());
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn acquire_locked_is_unsupported_when_platform_is_not_supported() {
+        let p = Arc::new(NoopPersister);
+        let mgr = KeepAwakeManager::new(Mode::Off, p);
+
+        let err = mgr.acquire_locked().unwrap_err();
+        match err {
+            PowerError::Unsupported(label) => {
+                assert_eq!(label, PlatformSupport::current().label());
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+}

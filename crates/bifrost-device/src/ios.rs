@@ -80,16 +80,12 @@ pub enum IosConfiguratorError {
 }
 
 pub fn discover_ios_devices() -> IosDiscovery {
-    let configurator = discover_configurator();
-    if !cfg!(target_os = "macos") {
-        return IosDiscovery {
-            supported: false,
-            devices: Vec::new(),
-            configurator,
-            message: "iOS USB detection is currently supported on macOS only.".to_string(),
-        };
-    }
+    discover_ios_devices_impl()
+}
 
+#[cfg(target_os = "macos")]
+fn discover_ios_devices_impl() -> IosDiscovery {
+    let configurator = discover_configurator();
     match Command::new("ioreg")
         .args(["-p", "IOUSB", "-l", "-w0"])
         .output()
@@ -128,16 +124,23 @@ pub fn discover_ios_devices() -> IosDiscovery {
     }
 }
 
-pub fn discover_configurator() -> ConfiguratorDiscovery {
-    if !cfg!(target_os = "macos") {
-        return ConfiguratorDiscovery {
-            supported: false,
-            cfgutil_available: false,
-            cfgutil_path: None,
-            message: "Apple Configurator installation is supported on macOS only.".to_string(),
-        };
+#[cfg(not(target_os = "macos"))]
+fn discover_ios_devices_impl() -> IosDiscovery {
+    let configurator = discover_configurator();
+    IosDiscovery {
+        supported: false,
+        devices: Vec::new(),
+        configurator,
+        message: "iOS USB detection is currently supported on macOS only.".to_string(),
     }
+}
 
+pub fn discover_configurator() -> ConfiguratorDiscovery {
+    discover_configurator_impl()
+}
+
+#[cfg(target_os = "macos")]
+fn discover_configurator_impl() -> ConfiguratorDiscovery {
     match find_cfgutil() {
         Some(path) => ConfiguratorDiscovery {
             supported: true,
@@ -155,6 +158,16 @@ pub fn discover_configurator() -> ConfiguratorDiscovery {
                 "Apple Configurator cfgutil was not found. Install Apple Configurator from the Mac App Store to enable computer-side iPhone profile installation."
                     .to_string(),
         },
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn discover_configurator_impl() -> ConfiguratorDiscovery {
+    ConfiguratorDiscovery {
+        supported: false,
+        cfgutil_available: false,
+        cfgutil_path: None,
+        message: "Apple Configurator installation is supported on macOS only.".to_string(),
     }
 }
 
@@ -293,6 +306,7 @@ fn parse_ioreg_device_block(block: &str) -> Option<MobileDevice> {
     })
 }
 
+#[cfg(target_os = "macos")]
 fn merge_cfgutil_devices(devices: &mut Vec<MobileDevice>, configurator: &ConfiguratorDiscovery) {
     let Some(cfgutil_path) = configurator
         .cfgutil_path
@@ -394,6 +408,7 @@ fn device_name_from_ioreg_header(line: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+#[cfg(target_os = "macos")]
 fn find_cfgutil() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("BIFROST_CFGUTIL_PATH") {
         let path = PathBuf::from(path);
@@ -414,6 +429,7 @@ fn find_cfgutil() -> Option<PathBuf> {
         .find(|path| is_executable_file(path))
 }
 
+#[cfg(target_os = "macos")]
 fn is_executable_file(path: &Path) -> bool {
     path.is_file()
 }
@@ -540,6 +556,20 @@ mod tests {
             vec![
                 "-e".to_string(),
                 "0x1A75D23A2B803A".to_string(),
+                "install-profile".to_string(),
+                "/tmp/bifrost-ca.mobileconfig".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn cfgutil_install_profile_args_ignore_blank_ecid() {
+        let args =
+            cfgutil_install_profile_args(Path::new("/tmp/bifrost-ca.mobileconfig"), Some("   "));
+
+        assert_eq!(
+            args,
+            vec![
                 "install-profile".to_string(),
                 "/tmp/bifrost-ca.mobileconfig".to_string()
             ]
@@ -768,6 +798,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn is_executable_file_detects_regular_file() {
         let dir = std::env::temp_dir().join(format!("bifrost-ios-file-{}", Uuid::new_v4()));
@@ -781,7 +812,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[test]
     fn merge_cfgutil_adds_and_updates_devices() {
         let _guard = CFGUTIL_LOCK.lock().unwrap();
@@ -828,7 +859,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[test]
     fn merge_cfgutil_appends_new_device() {
         let _guard = CFGUTIL_LOCK.lock().unwrap();
@@ -851,6 +882,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn merge_cfgutil_noop_when_unavailable() {
         // No cfgutil_path / not available -> early return, devices untouched.
@@ -865,7 +897,7 @@ mod tests {
         assert!(devices.is_empty());
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[test]
     fn merge_cfgutil_noop_on_nonzero_exit() {
         let _guard = CFGUTIL_LOCK.lock().unwrap();
@@ -884,7 +916,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[test]
     fn find_cfgutil_honors_env_override() {
         let _guard = CFGUTIL_LOCK.lock().unwrap();
@@ -926,4 +958,389 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+#[cfg(test)]
+mod more_tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    #[test]
+    fn ios_discovery_reports_unsupported_on_non_macos() {
+        if cfg!(target_os = "macos") {
+            // macOS 上的 USB 检测与 Configurator 流程由平台特定 E2E 覆盖；
+            // 这里仅验证非 macOS 平台的默认回退行为。
+            return;
+        }
+
+        let discovery = discover_ios_devices();
+
+        assert!(!discovery.supported);
+        assert!(discovery.devices.is_empty());
+        assert!(!discovery.message.is_empty());
+
+        assert!(!discovery.configurator.supported);
+        assert!(!discovery.configurator.cfgutil_available);
+        assert!(discovery.configurator.cfgutil_path.is_none());
+    }
+
+    #[test]
+    fn discover_configurator_reports_not_supported_on_non_macos() {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+
+        let configurator = discover_configurator();
+
+        assert!(!configurator.supported);
+        assert!(!configurator.cfgutil_available);
+        assert!(configurator.cfgutil_path.is_none());
+        assert!(configurator.message.contains("macOS only"));
+    }
+
+    #[test]
+    fn install_ios_profile_with_configurator_errors_when_cfgutil_missing() {
+        let options = IosConfiguratorInstallOptions {
+            cfgutil_path: PathBuf::from("/nonexistent/cfgutil"),
+            device_id: "ios-1".to_string(),
+            cfgutil_target: None,
+            profile_path: PathBuf::from("/nonexistent/profile.mobileconfig"),
+        };
+
+        let error = install_ios_profile_with_configurator(options)
+            .expect_err("cfgutil should be reported as not available");
+        assert!(matches!(error, IosConfiguratorError::NotAvailable));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_ios_profile_with_configurator_errors_when_profile_missing() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let test_dir =
+            std::env::temp_dir().join(format!("bifrost-ios-missing-profile-{}", Uuid::new_v4()));
+        fs::create_dir_all(&test_dir).expect("create temp dir");
+        let cfgutil_path = test_dir.join("cfgutil");
+        fs::write(&cfgutil_path, "#!/bin/sh\nexit 0\n").expect("write fake cfgutil");
+        let mut perms = fs::metadata(&cfgutil_path)
+            .expect("stat fake cfgutil")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&cfgutil_path, perms).expect("chmod fake cfgutil");
+
+        let options = IosConfiguratorInstallOptions {
+            cfgutil_path: cfgutil_path.clone(),
+            device_id: "ios-1".to_string(),
+            cfgutil_target: None,
+            profile_path: test_dir.join("missing.mobileconfig"),
+        };
+
+        let error = install_ios_profile_with_configurator(options)
+            .expect_err("profile should be reported as missing");
+        match error {
+            IosConfiguratorError::ProfileMissing(path) => {
+                assert!(path.ends_with("missing.mobileconfig"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_ios_profile_with_configurator_builds_sessions_for_success_and_user_interaction() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let test_dir = std::env::temp_dir().join(format!("bifrost-ios-install-{}", Uuid::new_v4()));
+        fs::create_dir_all(&test_dir).expect("create temp dir");
+        let profile_path = test_dir.join("bifrost.mobileconfig");
+        fs::write(&profile_path, "test-profile").expect("write profile");
+
+        let cfgutil_path = test_dir.join("cfgutil");
+        fs::write(
+            &cfgutil_path,
+            r#"#!/bin/sh
+if [ "$CFGUTIL_SHOULD_FAIL" = "1" ]; then
+  echo "cfgutil: error: 安装此描述文件需要用户在设备上交互。 (Domain: ConfigurationUtilityKit.error Code: 625)" >&2
+  exit 1
+fi
+echo "install-profile succeeded"
+exit 0
+"#,
+        )
+        .expect("write fake cfgutil");
+        let mut perms = fs::metadata(&cfgutil_path)
+            .expect("stat fake cfgutil")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&cfgutil_path, perms).expect("chmod fake cfgutil");
+
+        // Successful non-interactive install.
+        std::env::remove_var("CFGUTIL_SHOULD_FAIL");
+        let session = install_ios_profile_with_configurator(IosConfiguratorInstallOptions {
+            cfgutil_path: cfgutil_path.clone(),
+            device_id: "ios-device-1".to_string(),
+            cfgutil_target: Some("0xECIDTARGET".to_string()),
+            profile_path: profile_path.clone(),
+        })
+        .expect("cfgutil install should succeed");
+
+        assert_eq!(session.device_id, "ios-device-1");
+        assert_eq!(session.platform, MobilePlatform::Ios);
+        assert_eq!(session.mode, InstallMode::ManagedAutoTrust);
+        assert_eq!(session.capability, DeviceTrustCapability::ManagedAutoTrust);
+        assert!(session.completed);
+        assert!(!session.requires_user_confirmation);
+        assert_eq!(session.steps.len(), 1);
+        assert_eq!(session.steps[0].name, "cfgutil_install_profile");
+        assert!(session.steps[0].success);
+        assert!(session.summary.contains("installed the Bifrost profile"));
+
+        // Interactive flow where cfgutil reports Code 625.
+        std::env::set_var("CFGUTIL_SHOULD_FAIL", "1");
+        let interactive_session =
+            install_ios_profile_with_configurator(IosConfiguratorInstallOptions {
+                cfgutil_path: cfgutil_path.clone(),
+                device_id: "ios-device-2".to_string(),
+                cfgutil_target: None,
+                profile_path: profile_path.clone(),
+            })
+            .expect("cfgutil should still produce a session");
+
+        assert_eq!(interactive_session.device_id, "ios-device-2");
+        assert!(interactive_session.completed);
+        assert!(interactive_session.requires_user_confirmation);
+        assert_eq!(interactive_session.steps.len(), 1);
+        assert!(!interactive_session.steps[0].success);
+        assert!(interactive_session
+            .summary
+            .contains("opened the Bifrost profile install flow"));
+
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn merge_cfgutil_devices_enriches_and_adds_devices() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let test_dir =
+            std::env::temp_dir().join(format!("bifrost-ios-merge-cfgutil-{}", Uuid::new_v4()));
+        fs::create_dir_all(&test_dir).expect("create temp dir");
+        let cfgutil_path = test_dir.join("cfgutil");
+        fs::write(
+            &cfgutil_path,
+            r#"#!/bin/sh
+cat <<'EOF'
+{"Command":"list","Output":{"0x1A75D23A2B803A":{"locationID":1048576,"UDID":"00008130-001A75D23A2B803A","ECID":"0x1A75D23A2B803A","name":"From Configurator","deviceType":"iPhone16,2"},"0xNEW":{"locationID":0,"UDID":"00000000-0000000000000001","ECID":"0xNEW","name":"New Device","deviceType":"iPhone1,1"}},"Type":"CommandOutput","Devices":["0x1A75D23A2B803A","0xNEW"]}
+EOF
+exit 0
+"#,
+        )
+        .expect("write fake cfgutil list");
+        let mut perms = fs::metadata(&cfgutil_path)
+            .expect("stat fake cfgutil list")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&cfgutil_path, perms).expect("chmod fake cfgutil list");
+
+        let configurator = ConfiguratorDiscovery {
+            supported: true,
+            cfgutil_available: true,
+            cfgutil_path: Some(cfgutil_path.display().to_string()),
+            message: "test".to_string(),
+        };
+
+        let mut devices = vec![MobileDevice {
+            id: "00008130001A75D23A2B803A".to_string(),
+            name: Some("iPhone from ioreg".to_string()),
+            managed_install_target: None,
+            platform: MobilePlatform::Ios,
+            status: DeviceStatus::Connected,
+            capability: DeviceTrustCapability::GuideOnly,
+            certificate_status: None,
+            status_message: "Detected from ioreg".to_string(),
+        }];
+
+        let expected_new_id = normalize_ios_udid("00000000-0000000000000001");
+
+        merge_cfgutil_devices(&mut devices, &configurator);
+
+        assert_eq!(devices.len(), 2);
+
+        let from_cfgutil = devices
+            .iter()
+            .find(|device| device.id == "00008130001A75D23A2B803A")
+            .expect("existing device should be present");
+        assert_eq!(
+            from_cfgutil.managed_install_target.as_deref(),
+            Some("0x1A75D23A2B803A")
+        );
+        assert_eq!(
+            from_cfgutil.name.as_deref(),
+            Some("From Configurator (iPhone16,2)")
+        );
+        assert_eq!(
+            from_cfgutil.capability,
+            DeviceTrustCapability::ManagedAutoTrust
+        );
+
+        let new_device = devices
+            .iter()
+            .find(|device| device.id == expected_new_id)
+            .expect("new device should be added");
+        assert_eq!(new_device.managed_install_target.as_deref(), Some("0xNEW"));
+        assert_eq!(
+            new_device.capability,
+            DeviceTrustCapability::ManagedAutoTrust
+        );
+
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn find_cfgutil_prefers_bifrost_env_when_executable_is_present() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    let test_dir =
+        std::env::temp_dir().join(format!("bifrost-ios-find-cfgutil-{}", Uuid::new_v4()));
+    fs::create_dir_all(&test_dir).expect("create temp dir");
+    let cfgutil_path = test_dir.join("cfgutil-env");
+    fs::write(&cfgutil_path, "#!/bin/sh\nexit 0\n").expect("write fake cfgutil env");
+    let mut perms = fs::metadata(&cfgutil_path)
+        .expect("stat fake cfgutil env")
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&cfgutil_path, perms).expect("chmod fake cfgutil env");
+
+    std::env::set_var("BIFROST_CFGUTIL_PATH", &cfgutil_path);
+
+    let found = find_cfgutil().expect("expected find_cfgutil to use BIFROST_CFGUTIL_PATH");
+    assert_eq!(found, cfgutil_path);
+
+    std::env::remove_var("BIFROST_CFGUTIL_PATH");
+    let _ = fs::remove_dir_all(&test_dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn install_ios_profile_with_configurator_reports_failure_without_user_interaction_hint() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    let test_dir =
+        std::env::temp_dir().join(format!("bifrost-ios-install-error-{}", Uuid::new_v4()));
+    fs::create_dir_all(&test_dir).expect("create temp dir");
+    let profile_path = test_dir.join("bifrost-error.mobileconfig");
+    fs::write(&profile_path, "test-profile").expect("write profile");
+
+    let cfgutil_path = test_dir.join("cfgutil-error");
+    fs::write(
+        &cfgutil_path,
+        "#!/bin/sh\necho 'cfgutil: fatal: device not connected' >&2\nexit 42\n",
+    )
+    .expect("write fake cfgutil error");
+    let mut perms = fs::metadata(&cfgutil_path)
+        .expect("stat fake cfgutil error")
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&cfgutil_path, perms).expect("chmod fake cfgutil error");
+
+    let result = install_ios_profile_with_configurator(IosConfiguratorInstallOptions {
+        cfgutil_path: cfgutil_path.clone(),
+        device_id: "ios-device-error".to_string(),
+        cfgutil_target: None,
+        profile_path: profile_path.clone(),
+    });
+
+    match result {
+        Ok(session) => {
+            assert_eq!(session.device_id, "ios-device-error");
+            assert_eq!(session.platform, MobilePlatform::Ios);
+            assert_eq!(session.mode, InstallMode::ManagedAutoTrust);
+            assert_eq!(session.capability, DeviceTrustCapability::ManagedAutoTrust);
+            assert!(!session.completed);
+            assert!(!session.requires_user_confirmation);
+            assert_eq!(session.steps.len(), 1);
+            assert!(!session.steps[0].success);
+            assert_eq!(
+                session.steps[0].message,
+                "cfgutil: fatal: device not connected"
+            );
+            assert!(session
+                .summary
+                .contains("Apple Configurator could not install the Bifrost profile"));
+        }
+        Err(IosConfiguratorError::Io(_)) => {
+            // 在某些环境（例如带覆盖率插桩的运行时）下，执行临时脚本可能
+            // 会因为 ETXTBUSY 等 IO 错误失败；这种情况下只验证错误类型，
+            // 避免测试对底层文件系统行为过于敏感。
+        }
+        Err(other) => panic!("unexpected error: {other}"),
+    }
+
+    let _ = fs::remove_dir_all(&test_dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn install_ios_profile_with_configurator_uses_default_message_when_stdout_is_empty() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    let test_dir =
+        std::env::temp_dir().join(format!("bifrost-ios-install-empty-{}", Uuid::new_v4()));
+    fs::create_dir_all(&test_dir).expect("create temp dir");
+    let profile_path = test_dir.join("bifrost-empty.mobileconfig");
+    fs::write(&profile_path, "test-profile").expect("write profile");
+
+    let cfgutil_path = test_dir.join("cfgutil-empty");
+    fs::write(&cfgutil_path, "#!/bin/sh\nexit 0\n").expect("write fake cfgutil empty");
+    let mut perms = fs::metadata(&cfgutil_path)
+        .expect("stat fake cfgutil empty")
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&cfgutil_path, perms).expect("chmod fake cfgutil empty");
+
+    let session = install_ios_profile_with_configurator(IosConfiguratorInstallOptions {
+        cfgutil_path: cfgutil_path.clone(),
+        device_id: "ios-device-empty".to_string(),
+        cfgutil_target: None,
+        profile_path: profile_path.clone(),
+    })
+    .expect("cfgutil empty output should still produce a session");
+
+    assert_eq!(session.device_id, "ios-device-empty");
+    assert_eq!(session.platform, MobilePlatform::Ios);
+    assert_eq!(session.mode, InstallMode::ManagedAutoTrust);
+    assert_eq!(session.capability, DeviceTrustCapability::ManagedAutoTrust);
+    assert!(session.completed);
+    assert!(!session.requires_user_confirmation);
+    assert_eq!(session.steps.len(), 1);
+    assert!(session.steps[0].success);
+    assert_eq!(
+        session.steps[0].message,
+        "cfgutil completed install-profile."
+    );
+    assert!(session.summary.contains("installed the Bifrost profile"));
+
+    let _ = fs::remove_dir_all(&test_dir);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn is_executable_file_returns_false_for_directories() {
+    use std::fs;
+
+    let test_dir = std::env::temp_dir().join(format!("bifrost-ios-exec-dir-{}", Uuid::new_v4()));
+    fs::create_dir_all(&test_dir).expect("create temp dir");
+
+    assert!(!is_executable_file(&test_dir));
+
+    let _ = fs::remove_dir_all(&test_dir);
 }

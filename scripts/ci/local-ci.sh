@@ -17,6 +17,8 @@ SKIP_DEPS_AUDIT=0
 E2E_ONLY=""
 RUN_COVERAGE=0
 COVERAGE_FORMAT="text"
+COVERAGE_GATE=0
+COVERAGE_FAIL_UNDER=90
 SHARD_SPEC=""
 
 usage() {
@@ -34,6 +36,7 @@ Options:
   --shard N/M         Run only shard N of M for shell E2E (e.g. --shard 1/3)
   --coverage          Run unit-test coverage report after tests
   --coverage-html     Run unit-test coverage and open HTML report
+  --coverage-gate     Run unified unit+integration coverage gate (fails below 90% line coverage)
   -h, --help          Show this help
 
 Examples:
@@ -42,6 +45,7 @@ Examples:
   scripts/ci/local-ci.sh --e2e-only rules   # Only E2E rules suite
   scripts/ci/local-ci.sh --coverage         # Run everything + coverage report
   scripts/ci/local-ci.sh --coverage-html    # Run everything + HTML coverage
+  scripts/ci/local-ci.sh --coverage-gate    # Enforce 90% line-coverage gate
 EOF
 }
 
@@ -58,6 +62,7 @@ while [[ $# -gt 0 ]]; do
       SHARD_SPEC="$2"; shift 2 ;;
     --coverage)     RUN_COVERAGE=1; COVERAGE_FORMAT="text"; shift ;;
     --coverage-html) RUN_COVERAGE=1; COVERAGE_FORMAT="html"; shift ;;
+    --coverage-gate) RUN_COVERAGE=1; COVERAGE_GATE=1; shift ;;
     -h|--help)      usage; exit 0 ;;
     *)              echo "Unknown option: $1" >&2; usage; exit 1 ;;
   esac
@@ -201,11 +206,17 @@ else
 fi
 
 if [[ "$RUN_COVERAGE" -eq 1 ]]; then
-  COV_ARGS=()
-  if [[ "$COVERAGE_FORMAT" == "html" ]]; then
-    COV_ARGS+=(--open)
+  if [[ "$COVERAGE_GATE" -eq 1 ]]; then
+    run_step "Coverage gate (unit+integration, ≥${COVERAGE_FAIL_UNDER}%)" \
+      bash scripts/ci/coverage-all.sh --text --fail-under "$COVERAGE_FAIL_UNDER" \
+      || HAD_FAILURE=1
+  else
+    COV_ARGS=()
+    if [[ "$COVERAGE_FORMAT" == "html" ]]; then
+      COV_ARGS+=(--open)
+    fi
+    run_step "Unit-test coverage" bash scripts/ci/coverage.sh "--$COVERAGE_FORMAT" "${COV_ARGS[@]}" || HAD_FAILURE=1
   fi
-  run_step "Unit-test coverage" bash scripts/ci/coverage.sh "--$COVERAGE_FORMAT" "${COV_ARGS[@]}" || HAD_FAILURE=1
 else
   register_result "Unit-test coverage" "SKIP"
 fi

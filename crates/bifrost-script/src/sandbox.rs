@@ -1582,17 +1582,24 @@ mod tests {
         let mut values = HashMap::new();
         values.insert("API_TOKEN".to_string(), "secret-token".to_string());
 
+        let matched_rules = vec![MatchedRuleInfo {
+            pattern: "/api/*".to_string(),
+            protocol: "https".to_string(),
+            value: "backend".to_string(),
+        }];
+
         let ctx = ScriptContext {
             request_id: "test-123".to_string(),
             script_name: "test".to_string(),
             script_type: ScriptType::Request,
             values,
-            matched_rules: vec![],
+            matched_rules,
         };
 
         let script = r#"
             var token = ctx.values.API_TOKEN;
-            log.info("Token: " + token);
+            var rule = ctx.matchedRules[0];
+            log.info("Token: " + token + ", rule=" + rule.pattern + "/" + rule.protocol + "/" + rule.value);
         "#;
 
         let result = sandbox.execute_request_script(script, &request, &ctx);
@@ -1600,7 +1607,9 @@ mod tests {
 
         let (_, logs) = result.unwrap();
         assert_eq!(logs.len(), 1);
-        assert!(logs[0].message.contains("secret-token"));
+        let msg = &logs[0].message;
+        assert!(msg.contains("secret-token"));
+        assert!(msg.contains("rule=/api/*"));
     }
 
     #[test]
@@ -2719,5 +2728,767 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(err, ScriptError::ExecutionFailed(_)));
+    }
+}
+
+#[cfg(test)]
+mod more_tests {
+    use super::*;
+
+    #[test]
+    fn test_bytes_to_hex_limited_basic_and_truncated() {
+        let (hex, truncated) = bytes_to_hex_limited(&[0x00, 0x01, 0xff], 10);
+        assert_eq!(hex, "0001ff");
+        assert!(!truncated);
+
+        let (hex2, truncated2) = bytes_to_hex_limited(b"abcdef", 2);
+        assert_eq!(hex2, "6162");
+        assert!(truncated2);
+    }
+
+    #[test]
+    fn test_resolve_file_path_basic_and_errors() {
+        // 空路径
+        let err = resolve_file_path(None, &[], "", false).unwrap_err();
+        assert!(err.to_string().contains("路径不能为空"));
+
+        // file API 未启用
+        let err = resolve_file_path(None, &[], "a.txt", false).unwrap_err();
+        assert!(err.to_string().contains("file API 未启用"));
+
+        // 相对路径在 primary_dir 下正常解析
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), "ok").unwrap();
+        let p = resolve_file_path(Some(tmp.path()), &[], "a.txt", false).unwrap();
+        assert_eq!(p.file_name().unwrap().to_string_lossy(), "a.txt");
+
+        // 绝对路径不在允许目录下时被拒绝
+        let allowed = tempfile::TempDir::new().unwrap();
+        let other = tempfile::TempDir::new().unwrap();
+        let err = resolve_file_path(
+            Some(allowed.path()),
+            &[],
+            other.path().join("evil.txt").to_string_lossy().as_ref(),
+            false,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("路径超出允许目录范围"));
+
+        // for_write=true 且父目录链上没有任何已存在目录时返回专用错误
+        let roots = vec![PathBuf::from("nonexistent-root")];
+        let err =
+            resolve_under_roots(Path::new("nonexistent-root/child.txt"), &roots, true).unwrap_err();
+        assert!(err.to_string().contains("目标路径父目录不存在"));
+
+        // 只读场景下则允许返回原始路径
+        let path =
+            resolve_under_roots(Path::new("nonexistent-root/child.txt"), &roots, false).unwrap();
+        assert_eq!(path, PathBuf::from("nonexistent-root/child.txt"));
+    }
+
+    #[test]
+    fn test_net_fetch_disabled() {
+        let mut sandbox = Sandbox::new(SandboxConfig::default()).unwrap();
+
+        let request = RequestData {
+            url: "https://example.com/api".to_string(),
+            method: "GET".to_string(),
+            host: "example.com".to_string(),
+            path: "/api".to_string(),
+            protocol: "https".to_string(),
+            client_ip: "127.0.0.1".to_string(),
+            client_app: None,
+            headers: HashMap::new(),
+            body: None,
+        };
+        let ctx = ScriptContext {
+            request_id: "net-disabled".to_string(),
+            script_name: "net-disabled".to_string(),
+            script_type: ScriptType::Request,
+            values: HashMap::new(),
+            matched_rules: vec![],
+        };
+
+        let script = r#"
+            net.fetch("http://127.0.0.1/", null);
+        "#;
+
+        let result = sandbox.execute_request_script(script, &request, &ctx);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("net API 未启用"));
+    }
+
+    #[test]
+    fn test_net_fetch_invalid_scheme() {
+        let mut sandbox = Sandbox::new(SandboxConfig {
+            allow_network: true,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let request = RequestData {
+            url: "https://example.com/api".to_string(),
+            method: "GET".to_string(),
+            host: "example.com".to_string(),
+            path: "/api".to_string(),
+            protocol: "https".to_string(),
+            client_ip: "127.0.0.1".to_string(),
+            client_app: None,
+            headers: HashMap::new(),
+            body: None,
+        };
+        let ctx = ScriptContext {
+            request_id: "net-invalid-scheme".to_string(),
+            script_name: "net-invalid-scheme".to_string(),
+            script_type: ScriptType::Request,
+            values: HashMap::new(),
+            matched_rules: vec![],
+        };
+
+        let script = r#"
+            net.fetch("ftp://example.com/resource", null);
+        "#;
+
+        let result = sandbox.execute_request_script(script, &request, &ctx);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("仅允许 http/https"));
+    }
+
+    #[test]
+    fn test_net_fetch_request_body_too_large() {
+        let mut sandbox = Sandbox::new(SandboxConfig {
+            allow_network: true,
+            max_net_request_bytes: 8,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let request = RequestData {
+            url: "https://example.com/api".to_string(),
+            method: "GET".to_string(),
+            host: "example.com".to_string(),
+            path: "/api".to_string(),
+            protocol: "https".to_string(),
+            client_ip: "127.0.0.1".to_string(),
+            client_app: None,
+            headers: HashMap::new(),
+            body: None,
+        };
+        let ctx = ScriptContext {
+            request_id: "net-body-too-large".to_string(),
+            script_name: "net-body-too-large".to_string(),
+            script_type: ScriptType::Request,
+            values: HashMap::new(),
+            matched_rules: vec![],
+        };
+
+        let script = r#"
+            var opt = { method: "POST", body: "0123456789" };
+            net.fetch("http://127.0.0.1/", JSON.stringify(opt));
+        "#;
+
+        let result = sandbox.execute_request_script(script, &request, &ctx);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("请求体过大"));
+    }
+
+    #[test]
+    fn test_net_fetch_body_null_and_object_request_too_large() {
+        let mut sandbox = Sandbox::new(SandboxConfig {
+            allow_network: true,
+            max_net_request_bytes: 8,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let request = RequestData {
+            url: "https://example.com/api".to_string(),
+            method: "GET".to_string(),
+            host: "example.com".to_string(),
+            path: "/api".to_string(),
+            protocol: "https".to_string(),
+            client_ip: "127.0.0.1".to_string(),
+            client_app: None,
+            headers: HashMap::new(),
+            body: None,
+        };
+        let ctx = ScriptContext {
+            request_id: "net-body-variants".to_string(),
+            script_name: "net-body-variants".to_string(),
+            script_type: ScriptType::Request,
+            values: HashMap::new(),
+            matched_rules: vec![],
+        };
+
+        let big_b64 = base64::engine::general_purpose::STANDARD.encode(b"0123456789");
+
+        let script = format!(
+            r#"
+            try {{
+                var opt1 = {{ method: "POST", body: null, bodyBase64: "{big_b64}" }};
+                net.fetch("http://127.0.0.1/", JSON.stringify(opt1));
+            }} catch (e) {{
+                log.error("nullBody:" + e.message);
+            }}
+            try {{
+                var opt2 = {{ method: "POST", body: {{ nested: "0123456789" }} }};
+                net.fetch("http://127.0.0.1/", JSON.stringify(opt2));
+            }} catch (e) {{
+                log.error("objBody:" + e.message);
+            }}
+            "#
+        );
+
+        let result = sandbox.execute_request_script(&script, &request, &ctx);
+        assert!(result.is_ok());
+        let (_, logs) = result.unwrap();
+        let msgs: Vec<&str> = logs.iter().map(|l| l.message.as_str()).collect();
+        assert!(msgs.iter().any(|m| m.contains("nullBody:")));
+        assert!(msgs.iter().any(|m| m.contains("objBody:")));
+        for msg in msgs {
+            assert!(msg.contains("请求体过大"));
+        }
+    }
+
+    #[test]
+    fn test_net_fetch_response_body_too_large() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let body = "A".repeat(64);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+
+        let mut sandbox = Sandbox::new(SandboxConfig {
+            allow_network: true,
+            max_net_response_bytes: 16,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let request = RequestData {
+            url: "https://example.com/api".to_string(),
+            method: "GET".to_string(),
+            host: "example.com".to_string(),
+            path: "/api".to_string(),
+            protocol: "https".to_string(),
+            client_ip: "127.0.0.1".to_string(),
+            client_app: None,
+            headers: HashMap::new(),
+            body: None,
+        };
+        let ctx = ScriptContext {
+            request_id: "net-resp-too-large".to_string(),
+            script_name: "net-resp-too-large".to_string(),
+            script_type: ScriptType::Request,
+            values: HashMap::new(),
+            matched_rules: vec![],
+        };
+
+        let script = format!(
+            r#"
+            net.fetch("http://{addr}/big", null);
+            "#
+        );
+
+        let result = sandbox.execute_request_script(&script, &request, &ctx);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("响应体过大"));
+    }
+
+    #[test]
+    fn test_file_append_exists_remove_and_list_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut sandbox = Sandbox::new(SandboxConfig {
+            file_root: Some(tmp.path().to_path_buf()),
+            file_allowed_dirs: vec![],
+            ..Default::default()
+        })
+        .unwrap();
+
+        let request = RequestData {
+            url: "https://example.com/api".to_string(),
+            method: "GET".to_string(),
+            host: "example.com".to_string(),
+            path: "/api".to_string(),
+            protocol: "https".to_string(),
+            client_ip: "127.0.0.1".to_string(),
+            client_app: Some("test".to_string()),
+            headers: HashMap::new(),
+            body: None,
+        };
+        let ctx = ScriptContext {
+            request_id: "file-append".to_string(),
+            script_name: "file-append".to_string(),
+            script_type: ScriptType::Request,
+            values: HashMap::new(),
+            matched_rules: vec![],
+        };
+
+        let script = r#"
+            if (!file.enabled) {
+                throw new Error("file.disabled");
+            }
+            file.writeText("state/log.txt", "hello");
+            file.appendText("state/log.txt", "-world");
+            var names = file.listDir("state");
+            log.info("names:" + names.join(","));
+            var exists_before = file.exists("state/log.txt");
+            log.info("exists_before:" + exists_before);
+            file.remove("state/log.txt");
+            var exists_after = file.exists("state/log.txt");
+            log.info("exists_after:" + exists_after);
+        "#;
+
+        let result = sandbox.execute_request_script(script, &request, &ctx);
+        assert!(result.is_ok());
+        let (_, logs) = result.unwrap();
+        let msgs: Vec<&str> = logs.iter().map(|l| l.message.as_str()).collect();
+        assert!(msgs.iter().any(|m| m.contains("names:log.txt")));
+        assert!(msgs.iter().any(|m| m.contains("exists_before:true")));
+        assert!(msgs.iter().any(|m| m.contains("exists_after:false")));
+        assert!(!tmp.path().join("state/log.txt").exists());
+    }
+
+    #[test]
+    fn test_decode_script_error_cases() {
+        let mut sandbox = Sandbox::new(SandboxConfig::default()).unwrap();
+
+        let request = RequestData {
+            url: "https://example.com/api".to_string(),
+            method: "GET".to_string(),
+            host: "example.com".to_string(),
+            path: "/api".to_string(),
+            protocol: "https".to_string(),
+            client_ip: "127.0.0.1".to_string(),
+            client_app: None,
+            headers: HashMap::new(),
+            body: None,
+        };
+        let response = ResponseData::default();
+        let ctx = ScriptContext {
+            request_id: "decode-errors".to_string(),
+            script_name: "decode-errors".to_string(),
+            script_type: ScriptType::Decode,
+            values: HashMap::new(),
+            matched_rules: vec![],
+        };
+
+        // 未输出任何结果
+        let script_no_output = "";
+        let result = sandbox.execute_decode_script(
+            script_no_output,
+            "request",
+            &request,
+            b"body",
+            &response,
+            b"",
+            &ctx,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("未输出结果"));
+
+        // 输出不是合法 JSON
+        let script_invalid_json = r#"ctx.output = "not-json";"#;
+        let result = sandbox.execute_decode_script(
+            script_invalid_json,
+            "request",
+            &request,
+            b"body",
+            &response,
+            b"",
+            &ctx,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("decode 输出不是有效 JSON"));
+
+        // 缺少 code 字段
+        let script_missing_code = r#"ctx.output = { data: "x", msg: "y" };"#;
+        let result = sandbox.execute_decode_script(
+            script_missing_code,
+            "request",
+            &request,
+            b"body",
+            &response,
+            b"",
+            &ctx,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("decode 输出缺少字符串字段 code"));
+    }
+
+    #[test]
+    fn test_execute_response_script_js_exception_produces_error() {
+        let mut sandbox = Sandbox::new(SandboxConfig::default()).unwrap();
+
+        let response = ResponseData {
+            status: 200,
+            status_text: "OK".to_string(),
+            headers: HashMap::new(),
+            body: Some("body".to_string()),
+            request: RequestData::default(),
+        };
+        let ctx = ScriptContext {
+            request_id: "resp-js-exc".to_string(),
+            script_name: "resp-js-exc".to_string(),
+            script_type: ScriptType::Response,
+            values: HashMap::new(),
+            matched_rules: vec![],
+        };
+
+        let script = r#"
+            function boom() { throw new Error("response boom"); }
+            boom();
+        "#;
+
+        let result = sandbox.execute_response_script(script, &response, &ctx);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("response boom"));
+    }
+
+    #[test]
+    fn test_execute_decode_script_js_exception_produces_error() {
+        let mut sandbox = Sandbox::new(SandboxConfig::default()).unwrap();
+
+        let request = RequestData::default();
+        let response = ResponseData::default();
+        let ctx = ScriptContext {
+            request_id: "decode-js-exc".to_string(),
+            script_name: "decode-js-exc".to_string(),
+            script_type: ScriptType::Decode,
+            values: HashMap::new(),
+            matched_rules: vec![],
+        };
+
+        let script = r#"
+            function broken() { throw new Error("decode boom"); }
+            broken();
+        "#;
+
+        let result =
+            sandbox.execute_decode_script(script, "request", &request, b"", &response, b"", &ctx);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("decode boom"));
+    }
+
+    #[test]
+    fn test_decode_script_non_object_json_error() {
+        let mut sandbox = Sandbox::new(SandboxConfig::default()).unwrap();
+
+        let request = RequestData::default();
+        let response = ResponseData::default();
+        let ctx = ScriptContext {
+            request_id: "decode-non-object".to_string(),
+            script_name: "decode-non-object".to_string(),
+            script_type: ScriptType::Decode,
+            values: HashMap::new(),
+            matched_rules: vec![],
+        };
+
+        let script = r#"ctx.output = "123";"#;
+
+        let result =
+            sandbox.execute_decode_script(script, "request", &request, b"", &response, b"", &ctx);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("decode 输出必须是 JSON object"));
+    }
+
+    #[test]
+    fn test_decode_script_uses_global_output_variable() {
+        let mut sandbox = Sandbox::new(SandboxConfig::default()).unwrap();
+
+        let request = RequestData::default();
+        let response = ResponseData::default();
+        let ctx = ScriptContext {
+            request_id: "decode-global-output".to_string(),
+            script_name: "decode-global-output".to_string(),
+            script_type: ScriptType::Decode,
+            values: HashMap::new(),
+            matched_rules: vec![],
+        };
+
+        let script = r#"
+            var output = { code: "0", data: "from-global", msg: "ok" };
+        "#;
+
+        let (out, _logs) = sandbox
+            .execute_decode_script(script, "request", &request, b"", &response, b"", &ctx)
+            .unwrap();
+
+        assert_eq!(out.code, "0");
+        assert_eq!(out.data, "from-global");
+        assert_eq!(out.msg, "ok");
+    }
+}
+
+#[cfg(test)]
+mod more_tests_trunc_and_limits {
+    use super::*;
+
+    #[test]
+    fn test_file_read_text_respects_max_file_bytes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut sandbox = Sandbox::new(SandboxConfig {
+            file_root: Some(tmp.path().to_path_buf()),
+            max_file_bytes: 8,
+            ..Default::default()
+        })
+        .unwrap();
+
+        std::fs::write(tmp.path().join("big.txt"), "0123456789").unwrap();
+
+        let request = RequestData {
+            url: "https://example.com/api".to_string(),
+            method: "GET".to_string(),
+            host: "example.com".to_string(),
+            path: "/api".to_string(),
+            protocol: "https".to_string(),
+            client_ip: "127.0.0.1".to_string(),
+            client_app: None,
+            headers: HashMap::new(),
+            body: None,
+        };
+        let ctx = ScriptContext {
+            request_id: "file-read-too-large".to_string(),
+            script_name: "file-read-too-large".to_string(),
+            script_type: ScriptType::Request,
+            values: HashMap::new(),
+            matched_rules: vec![],
+        };
+
+        let script = r#"
+            file.readText("big.txt");
+        "#;
+
+        let result = sandbox.execute_request_script(script, &request, &ctx);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("文件过大"));
+    }
+
+    #[test]
+    fn test_file_write_and_append_respects_max_file_bytes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut sandbox = Sandbox::new(SandboxConfig {
+            file_root: Some(tmp.path().to_path_buf()),
+            max_file_bytes: 8,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let request = RequestData {
+            url: "https://example.com/api".to_string(),
+            method: "GET".to_string(),
+            host: "example.com".to_string(),
+            path: "/api".to_string(),
+            protocol: "https".to_string(),
+            client_ip: "127.0.0.1".to_string(),
+            client_app: Some("test".to_string()),
+            headers: HashMap::new(),
+            body: None,
+        };
+        let ctx = ScriptContext {
+            request_id: "file-write-append".to_string(),
+            script_name: "file-write-append".to_string(),
+            script_type: ScriptType::Request,
+            values: HashMap::new(),
+            matched_rules: vec![],
+        };
+
+        let script = r#"
+            try {
+                file.writeText("big.txt", "0123456789");
+            } catch (e) {
+                log.error("writeError:" + e.message);
+            }
+            try {
+                file.appendText("ok.txt", "0123456789");
+            } catch (e) {
+                log.error("appendError:" + e.message);
+            }
+        "#;
+
+        let result = sandbox.execute_request_script(script, &request, &ctx);
+        assert!(result.is_ok());
+        let (_, logs) = result.unwrap();
+        let msgs: Vec<&str> = logs.iter().map(|l| l.message.as_str()).collect();
+        assert!(msgs.iter().any(|m| m.contains("writeError")));
+        assert!(msgs.iter().any(|m| m.contains("写入内容过大")));
+        assert!(msgs.iter().any(|m| m.contains("appendError")));
+        assert!(msgs.iter().any(|m| m.contains("追加内容过大")));
+    }
+
+    #[test]
+    fn test_file_remove_directory() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("dir");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub").join("a.txt"), "ok").unwrap();
+
+        let mut sandbox = Sandbox::new(SandboxConfig {
+            file_root: Some(tmp.path().to_path_buf()),
+            file_allowed_dirs: vec![],
+            ..Default::default()
+        })
+        .unwrap();
+
+        let request = RequestData {
+            url: "https://example.com/api".to_string(),
+            method: "GET".to_string(),
+            host: "example.com".to_string(),
+            path: "/api".to_string(),
+            protocol: "https".to_string(),
+            client_ip: "127.0.0.1".to_string(),
+            client_app: None,
+            headers: HashMap::new(),
+            body: None,
+        };
+        let ctx = ScriptContext {
+            request_id: "file-remove-dir".to_string(),
+            script_name: "file-remove-dir".to_string(),
+            script_type: ScriptType::Request,
+            values: HashMap::new(),
+            matched_rules: vec![],
+        };
+
+        assert!(dir.exists());
+
+        let script = r#"
+            file.remove("dir");
+        "#;
+        let result = sandbox.execute_request_script(script, &request, &ctx);
+        assert!(result.is_ok());
+        assert!(!tmp.path().join("dir").exists());
+    }
+
+    #[test]
+    fn test_decode_request_body_truncation_flags() {
+        let mut sandbox = Sandbox::new(SandboxConfig::default()).unwrap();
+
+        let request = RequestData {
+            url: "https://example.com/api".to_string(),
+            method: "GET".to_string(),
+            host: "example.com".to_string(),
+            path: "/api".to_string(),
+            protocol: "https".to_string(),
+            client_ip: "127.0.0.1".to_string(),
+            client_app: None,
+            headers: HashMap::new(),
+            body: None,
+        };
+        let response = ResponseData::default();
+        let ctx = ScriptContext {
+            request_id: "decode-trunc-req".to_string(),
+            script_name: "decode-trunc-req".to_string(),
+            script_type: ScriptType::Decode,
+            values: HashMap::new(),
+            matched_rules: vec![],
+        };
+
+        let script = r#"
+            ctx.output = {
+              code: "0",
+              data: JSON.stringify({
+                bodySize: request.bodySize,
+                hexTruncated: request.bodyHexTruncated,
+                textTruncated: request.bodyTextTruncated
+              }),
+              msg: ""
+            };
+        "#;
+
+        let big_body = vec![b'A'; 300 * 1024];
+        let (out, _) = sandbox
+            .execute_decode_script(script, "request", &request, &big_body, &response, &[], &ctx)
+            .unwrap();
+
+        let data: serde_json::Value = serde_json::from_str(&out.data).unwrap();
+        assert_eq!(data["bodySize"].as_u64().unwrap(), big_body.len() as u64);
+        assert!(data["hexTruncated"].as_bool().unwrap());
+        assert!(data["textTruncated"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_decode_response_body_truncation_flags() {
+        let mut sandbox = Sandbox::new(SandboxConfig::default()).unwrap();
+
+        let mut req_headers = HashMap::new();
+        req_headers.insert("X-Req".to_string(), "1".to_string());
+        let request = RequestData {
+            headers: req_headers.clone(),
+            ..Default::default()
+        };
+        let mut resp_headers = HashMap::new();
+        resp_headers.insert("X-Resp".to_string(), "2".to_string());
+        let response = ResponseData {
+            status: 200,
+            status_text: "OK".to_string(),
+            headers: resp_headers,
+            body: None,
+            request: RequestData {
+                headers: req_headers,
+                ..Default::default()
+            },
+        };
+        let ctx = ScriptContext {
+            request_id: "decode-trunc-resp".to_string(),
+            script_name: "decode-trunc-resp".to_string(),
+            script_type: ScriptType::Decode,
+            values: HashMap::new(),
+            matched_rules: vec![],
+        };
+
+        let script = r#"
+            ctx.output = {
+              code: "0",
+              data: JSON.stringify({
+                bodySize: response.bodySize,
+                hexTruncated: response.bodyHexTruncated,
+                textTruncated: response.bodyTextTruncated
+              }),
+              msg: ""
+            };
+        "#;
+
+        let big_body = vec![b'B'; 300 * 1024];
+        let (out, _) = sandbox
+            .execute_decode_script(
+                script,
+                "response",
+                &request,
+                &[],
+                &response,
+                &big_body,
+                &ctx,
+            )
+            .unwrap();
+
+        let data: serde_json::Value = serde_json::from_str(&out.data).unwrap();
+        assert_eq!(data["bodySize"].as_u64().unwrap(), big_body.len() as u64);
+        assert!(data["hexTruncated"].as_bool().unwrap());
+        assert!(data["textTruncated"].as_bool().unwrap());
     }
 }

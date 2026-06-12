@@ -1368,6 +1368,8 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::sync::Mutex as TokioMutex;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn env_lock() -> &'static TokioMutex<()> {
         static LOCK: OnceLock<TokioMutex<()>> = OnceLock::new();
@@ -2513,5 +2515,856 @@ mod tests {
         assert_eq!(hits.load(Ordering::SeqCst), 0);
         assert!(read_dry_run_urls(&dry_run_file).is_empty());
         assert!(manager.state.lock().startup_login_prompt.is_none());
+    }
+
+    #[test]
+    fn session_helpers_expose_state_from_mutex() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_manager = Arc::new(ConfigManager::new(temp_dir.path().to_path_buf()).unwrap());
+        let manager = SyncManager::new(config_manager, 9900).unwrap();
+
+        assert!(!manager.has_session());
+        assert_eq!(manager.session_token(), None);
+        assert_eq!(manager.current_user_id(), None);
+
+        {
+            let mut state = manager.state.lock();
+            state.token = Some("session-token".to_string());
+            state.user = Some(RemoteUser {
+                user_id: "user-1".to_string(),
+                nickname: "nick".to_string(),
+                avatar: String::new(),
+                email: "user-1@example.test".to_string(),
+            });
+        }
+
+        assert!(manager.has_session());
+        assert_eq!(manager.session_token().as_deref(), Some("session-token"));
+        assert_eq!(manager.current_user_id().as_deref(), Some("user-1"));
+    }
+
+    #[tokio::test]
+    async fn status_reflects_runtime_and_state() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_manager = Arc::new(ConfigManager::new(temp_dir.path().to_path_buf()).unwrap());
+        config_manager
+            .update_sync_config(SyncConfigUpdate {
+                enabled: Some(true),
+                auto_sync: Some(false),
+                remote_base_url: Some("https://status.example.test".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let manager = SyncManager::new(config_manager.clone(), 9900).unwrap();
+
+        {
+            let mut state = manager.state.lock();
+            state.token = Some("status-token".to_string());
+            state.user = Some(RemoteUser {
+                user_id: "user-42".to_string(),
+                nickname: "status-nick".to_string(),
+                avatar: String::new(),
+                email: "user-42@example.test".to_string(),
+            });
+            state.last_sync_at = Some("2026-06-12T00:00:00Z".to_string());
+            state.last_sync_action = Some(SyncAction::RemotePulled);
+        }
+
+        {
+            let mut runtime = manager.runtime.write().await;
+            runtime.reachable = true;
+            runtime.authorized = true;
+            runtime.syncing = false;
+            runtime.reason = SyncReason::Ready;
+            runtime.last_error = Some("previous error".to_string());
+        }
+
+        let status = manager.status().await;
+        assert!(status.enabled);
+        assert!(!status.auto_sync);
+        assert_eq!(status.remote_base_url, "https://status.example.test");
+        assert!(status.has_session);
+        assert!(status.reachable);
+        assert!(status.authorized);
+        assert!(!status.syncing);
+        assert_eq!(status.reason, SyncReason::Ready);
+        assert_eq!(status.last_sync_at.as_deref(), Some("2026-06-12T00:00:00Z"));
+        assert_eq!(status.last_sync_action, Some(SyncAction::RemotePulled));
+        assert_eq!(status.last_error.as_deref(), Some("previous error"));
+        assert_eq!(status.user.unwrap().user_id, "user-42");
+    }
+
+    #[tokio::test]
+    async fn record_and_clear_deleted_rules_manage_tombstones() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_manager = Arc::new(ConfigManager::new(temp_dir.path().to_path_buf()).unwrap());
+        let manager = SyncManager::new(config_manager, 9900).unwrap();
+
+        let mut rule = RuleFile::new("demo", "rule-content");
+        rule.mark_synced(
+            "remote-id-1",
+            "remote-user-1",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T01:00:00Z",
+        );
+
+        manager.record_deleted_rule(&rule).await.unwrap();
+
+        {
+            let state = manager.state.lock();
+            assert_eq!(state.deleted_rules.len(), 1);
+            let tombstone = state.deleted_rules.values().next().unwrap();
+            assert_eq!(tombstone.rule_id, rule.sync.rule_id);
+            assert_eq!(tombstone.rule_name, "demo");
+            assert_eq!(tombstone.remote_id, "remote-id-1");
+            assert_eq!(tombstone.remote_user_id, "remote-user-1");
+        }
+
+        manager.clear_deleted_rule("demo").await.unwrap();
+        assert!(manager.state.lock().deleted_rules.is_empty());
+
+        // A rule without remote_id should be ignored.
+        let local_only = RuleFile::new("local-only", "content");
+        manager.record_deleted_rule(&local_only).await.unwrap();
+        assert!(manager.state.lock().deleted_rules.is_empty());
+    }
+
+    #[tokio::test]
+    async fn sync_once_returns_disabled_when_sync_disabled() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_manager = Arc::new(ConfigManager::new(temp_dir.path().to_path_buf()).unwrap());
+        config_manager
+            .update_sync_config(SyncConfigUpdate {
+                enabled: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let manager = SyncManager::new(config_manager, 9900).unwrap();
+
+        let result = manager.sync_once().await.unwrap();
+        assert!(!result.success);
+        assert!(result.action.is_none());
+        assert!(result.user.is_none());
+        assert_eq!(result.local_rules, 0);
+        assert_eq!(result.remote_rules, 0);
+        assert_eq!(result.message, "Sync is disabled in configuration");
+    }
+
+    #[tokio::test]
+    async fn sync_once_reports_unreachable_remote() {
+        let server = MockServer::start().await;
+        let (_temp_dir, _config_manager, manager) = sync_manager_for_remote(&server.uri()).await;
+
+        // No mock for /v4/sso/check -> 404 -> unreachable.
+        let result = manager.sync_once().await.unwrap();
+        assert!(!result.success);
+        assert!(
+            result.message.starts_with("Remote server unreachable: "),
+            "unexpected message: {}",
+            result.message
+        );
+        assert!(result.user.is_none());
+    }
+
+    #[tokio::test]
+    async fn sync_once_reports_missing_token_when_remote_reachable() {
+        let server = MockServer::start().await;
+        let (_temp_dir, _config_manager, manager) = sync_manager_for_remote(&server.uri()).await;
+
+        Mock::given(method("GET"))
+            .and(path("/v4/sso/check"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let result = manager.sync_once().await.unwrap();
+        assert!(!result.success);
+        assert_eq!(
+            result.message,
+            "No sync session token. Please login first via the admin UI."
+        );
+        assert!(result.user.is_none());
+    }
+
+    #[tokio::test]
+    async fn sync_once_reports_invalid_token_when_user_info_missing() {
+        let server = MockServer::start().await;
+        let (_temp_dir, _config_manager, manager) = sync_manager_for_remote(&server.uri()).await;
+
+        {
+            let mut state = manager.state.lock();
+            state.token = Some("expired-token".to_string());
+        }
+
+        Mock::given(method("GET"))
+            .and(path("/v4/sso/check"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/v4/sso/info"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        let result = manager.sync_once().await.unwrap();
+        assert!(!result.success);
+        assert_eq!(
+            result.message,
+            "Token expired or invalid. Please re-login via the admin UI."
+        );
+        assert!(result.user.is_none());
+    }
+
+    #[tokio::test]
+    async fn sync_once_performs_successful_sync_with_local_rule() {
+        let server = MockServer::start().await;
+        let (_temp_dir, config_manager, manager) = sync_manager_for_remote(&server.uri()).await;
+
+        // Prepare one local rule.
+        let rules_storage = config_manager.rules_storage().await;
+        let rule = RuleFile::new("demo", "example.com proxy://localhost:3000");
+        rules_storage.save(&rule).unwrap();
+
+        // Session token.
+        {
+            let mut state = manager.state.lock();
+            state.token = Some("session-token".to_string());
+        }
+
+        // Remote is reachable.
+        Mock::given(method("GET"))
+            .and(path("/v4/sso/check"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        // User info.
+        let user_body = serde_json::json!({
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "user_id": "user-1",
+                "nickname": "nick",
+                "avatar": "",
+                "email": "user-1@example.test"
+            }
+        });
+
+        Mock::given(method("GET"))
+            .and(path("/v4/sso/info"))
+            .and(header("x-bifrost-token", "session-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(user_body))
+            .mount(&server)
+            .await;
+
+        // Empty remote env list.
+        let list_body = serde_json::json!({
+            "code": 0,
+            "message": "ok",
+            "data": { "list": [] }
+        });
+
+        Mock::given(method("GET"))
+            .and(path("/v4/env"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(list_body))
+            .mount(&server)
+            .await;
+
+        // Create remote env.
+        let created_body = serde_json::json!({
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "id": 100,
+                "user_id": "user-1",
+                "name": "demo",
+                "rule": "example.com proxy://localhost:3000",
+                "create_time": "2026-01-01T00:00:00Z",
+                "update_time": "2026-01-01T00:00:00Z"
+            }
+        });
+
+        Mock::given(method("POST"))
+            .and(path("/v4/env"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(created_body))
+            .mount(&server)
+            .await;
+
+        let result = manager.sync_once().await.unwrap();
+        assert!(result.success);
+        assert_eq!(result.message, "Sync completed successfully");
+        assert_eq!(result.local_rules, 1);
+        assert_eq!(result.remote_rules, 1);
+        assert_eq!(result.action, Some(SyncAction::LocalPushed));
+        assert_eq!(result.user.unwrap().user_id, "user-1");
+    }
+
+    #[tokio::test]
+    async fn tick_sets_reason_disabled_when_sync_disabled() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_manager = Arc::new(ConfigManager::new(temp_dir.path().to_path_buf()).unwrap());
+        config_manager
+            .update_sync_config(SyncConfigUpdate {
+                enabled: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let manager = SyncManager::new(config_manager, 9900).unwrap();
+
+        manager.tick().await.unwrap();
+
+        let runtime = manager.runtime.read().await;
+        assert!(!runtime.reachable);
+        assert!(!runtime.authorized);
+        assert!(!runtime.syncing);
+        assert_eq!(runtime.reason, SyncReason::Disabled);
+        assert!(runtime.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn tick_sets_reason_unauthorized_when_missing_token() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_manager = Arc::new(ConfigManager::new(temp_dir.path().to_path_buf()).unwrap());
+        let manager = SyncManager::new(config_manager, 9900).unwrap();
+
+        manager.tick().await.unwrap();
+
+        let runtime = manager.runtime.read().await;
+        assert_eq!(runtime.reason, SyncReason::Unauthorized);
+        assert!(!runtime.authorized);
+        assert!(!runtime.syncing);
+        assert!(runtime.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn tick_sets_reason_unreachable_when_remote_unreachable() {
+        let server = MockServer::start().await;
+        let (_temp_dir, _config_manager, manager) = sync_manager_for_remote(&server.uri()).await;
+
+        {
+            let mut state = manager.state.lock();
+            state.token = Some("token".to_string());
+        }
+
+        Mock::given(method("GET"))
+            .and(path("/v4/sso/check"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+
+        manager.tick().await.unwrap();
+
+        let runtime = manager.runtime.read().await;
+        assert_eq!(runtime.reason, SyncReason::Unreachable);
+        assert!(!runtime.authorized);
+        assert!(!runtime.syncing);
+        assert!(runtime.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn tick_clears_session_when_user_info_returns_none() {
+        let server = MockServer::start().await;
+        let (_temp_dir, _config_manager, manager) = sync_manager_for_remote(&server.uri()).await;
+
+        {
+            let mut state = manager.state.lock();
+            state.token = Some("token".to_string());
+            state.user = Some(RemoteUser {
+                user_id: "user-1".to_string(),
+                nickname: String::new(),
+                avatar: String::new(),
+                email: String::new(),
+            });
+        }
+
+        {
+            let mut runtime = manager.runtime.write().await;
+            runtime.authorized = true;
+        }
+
+        Mock::given(method("GET"))
+            .and(path("/v4/sso/check"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/v4/sso/info"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        manager.tick().await.unwrap();
+
+        {
+            let state = manager.state.lock();
+            assert!(state.token.is_none());
+            assert!(state.user.is_none());
+        }
+
+        let runtime = manager.runtime.read().await;
+        assert!(runtime.reachable);
+        assert!(!runtime.authorized);
+        assert!(!runtime.syncing);
+        assert_eq!(runtime.reason, SyncReason::Unauthorized);
+        assert!(runtime.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn sync_rules_updates_local_when_remote_changed() {
+        let server = MockServer::start().await;
+        let (_temp_dir, config_manager, manager) = sync_manager_for_remote(&server.uri()).await;
+
+        // Local rule is already synced to a remote env.
+        let rules_storage = config_manager.rules_storage().await;
+        let mut local_rule = RuleFile::new("sync-me", "old.example.test proxy://localhost:3000");
+        local_rule.mark_synced(
+            "env-1",
+            "user-1",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+        );
+        rules_storage.save(&local_rule).unwrap();
+
+        let user = RemoteUser {
+            user_id: "user-1".to_string(),
+            ..Default::default()
+        };
+        let token = "token-sync";
+
+        let config = config_manager.config().await;
+        let sync_config = config.sync.clone();
+        let client = SyncHttpClient::new(&sync_config).unwrap();
+
+        // Remote env has a newer update_time and different rule content.
+        let env_body = serde_json::json!({
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "list": [
+                    {
+                        "id": "env-1",
+                        "user_id": "user-1",
+                        "name": "sync-me",
+                        "rule": "new.example.test proxy://localhost:3100",
+                        "create_time": "2026-01-01T00:00:00Z",
+                        "update_time": "2026-01-02T00:00:00Z"
+                    }
+                ]
+            }
+        });
+
+        Mock::given(method("GET"))
+            .and(path("/v4/env"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(env_body))
+            .mount(&server)
+            .await;
+
+        manager
+            .sync_rules(&client, &sync_config, token, &user)
+            .await
+            .unwrap();
+
+        let updated_rules = rules_storage.load_all().unwrap();
+        assert_eq!(updated_rules.len(), 1);
+        let updated = &updated_rules[0];
+        assert_eq!(updated.name, "sync-me");
+        assert!(updated.content.contains("new.example.test"));
+
+        let state = manager.state.lock();
+        assert_eq!(state.last_sync_action, Some(SyncAction::RemotePulled));
+    }
+
+    #[tokio::test]
+    async fn sync_rules_enforces_and_clears_tombstones() {
+        let server = MockServer::start().await;
+        let (_temp_dir, config_manager, manager) = sync_manager_for_remote(&server.uri()).await;
+
+        let rules_storage = config_manager.rules_storage().await;
+        let mut rule = RuleFile::new("tombstoned", "example.com proxy://localhost:3000");
+        rule.mark_synced(
+            "env-2",
+            "user-1",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+        );
+        rules_storage.save(&rule).unwrap();
+
+        {
+            let mut state = manager.state.lock();
+            state.deleted_rules.insert(
+                "rule-id-1".to_string(),
+                DeletedRuleTombstone {
+                    rule_id: "rule-id-1".to_string(),
+                    rule_name: "tombstoned".to_string(),
+                    remote_id: "env-2".to_string(),
+                    remote_user_id: "user-1".to_string(),
+                    base_remote_updated_at: Some("2026-01-01T00:00:00Z".to_string()),
+                    base_content_hash: None,
+                    deleted_at: "2000-01-01T00:00:00Z".to_string(),
+                },
+            );
+        }
+
+        let user = RemoteUser {
+            user_id: "user-1".to_string(),
+            ..Default::default()
+        };
+        let token = "token-tombstone";
+
+        let config = config_manager.config().await;
+        let sync_config = config.sync.clone();
+        let client = SyncHttpClient::new(&sync_config).unwrap();
+
+        let env_body = serde_json::json!({
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "list": [
+                    {
+                        "id": "env-2",
+                        "user_id": "user-1",
+                        "name": "tombstoned",
+                        "rule": "remote-content",
+                        "create_time": "2026-01-01T00:00:00Z",
+                        "update_time": "2026-01-01T00:00:00Z"
+                    }
+                ]
+            }
+        });
+
+        Mock::given(method("GET"))
+            .and(path("/v4/env"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(env_body))
+            .mount(&server)
+            .await;
+
+        let delete_body = serde_json::json!({
+            "code": 0,
+            "message": "ok",
+            "data": {}
+        });
+
+        Mock::given(method("DELETE"))
+            .and(path("/v4/env/env-2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(delete_body))
+            .mount(&server)
+            .await;
+
+        manager
+            .sync_rules(&client, &sync_config, token, &user)
+            .await
+            .unwrap();
+
+        assert!(rules_storage.load_all().unwrap().is_empty());
+        let state = manager.state.lock();
+        assert!(state.deleted_rules.is_empty());
+        assert_eq!(state.last_sync_action, Some(SyncAction::LocalPushed));
+    }
+
+    #[tokio::test]
+    async fn remote_sample_returns_error_when_session_token_missing() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_manager = Arc::new(ConfigManager::new(temp_dir.path().to_path_buf()).unwrap());
+        let manager = SyncManager::new(config_manager, 9900).unwrap();
+
+        let err = manager.remote_sample(10).await.unwrap_err();
+        match err {
+            BifrostError::Config(msg) => {
+                assert!(msg.contains("sync session token missing"));
+            }
+            other => panic!("expected config error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_sample_returns_error_when_user_missing() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_manager = Arc::new(ConfigManager::new(temp_dir.path().to_path_buf()).unwrap());
+        let manager = SyncManager::new(config_manager, 9900).unwrap();
+
+        {
+            let mut state = manager.state.lock();
+            state.token = Some("token".to_string());
+        }
+
+        let err = manager.remote_sample(10).await.unwrap_err();
+        match err {
+            BifrostError::Config(msg) => {
+                assert!(msg.contains("sync user missing"));
+            }
+            other => panic!("expected config error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_sample_sorts_and_truncates_envs() {
+        let server = MockServer::start().await;
+        let (_temp_dir, _config_manager, manager) = sync_manager_for_remote(&server.uri()).await;
+
+        {
+            let mut state = manager.state.lock();
+            state.token = Some("session-token".to_string());
+            state.user = Some(RemoteUser {
+                user_id: "user-1".to_string(),
+                ..Default::default()
+            });
+        }
+
+        let body = serde_json::json!({
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "list": [
+                    {
+                        "id": "env-old",
+                        "user_id": "user-1",
+                        "name": "old",
+                        "rule": "rule-old",
+                        "create_time": "2026-01-01T00:00:00Z",
+                        "update_time": "2026-01-01T00:00:00Z"
+                    },
+                    {
+                        "id": "env-new",
+                        "user_id": "user-1",
+                        "name": "new",
+                        "rule": "rule-new",
+                        "create_time": "2026-01-01T00:00:00Z",
+                        "update_time": "2026-01-02T00:00:00Z"
+                    }
+                ]
+            }
+        });
+
+        Mock::given(method("GET"))
+            .and(path("/v4/env"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let envs = manager.remote_sample(0).await.unwrap();
+        assert_eq!(envs.len(), 1);
+        assert_eq!(envs[0].id, "env-new");
+    }
+
+    #[tokio::test]
+    async fn proxy_forward_returns_error_when_session_token_missing() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_manager = Arc::new(ConfigManager::new(temp_dir.path().to_path_buf()).unwrap());
+        let manager = SyncManager::new(config_manager, 9900).unwrap();
+
+        let err = manager
+            .proxy_forward(reqwest::Method::GET, "/proxy/test", None, None)
+            .await
+            .unwrap_err();
+        match err {
+            BifrostError::Config(msg) => {
+                assert!(msg.contains("sync session token missing"));
+            }
+            other => panic!("expected config error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_forward_forwards_requests_using_session_token() {
+        let server = MockServer::start().await;
+        let (_temp_dir, _config_manager, manager) = sync_manager_for_remote(&server.uri()).await;
+
+        {
+            let mut state = manager.state.lock();
+            state.token = Some("proxy-token".to_string());
+        }
+
+        Mock::given(method("POST"))
+            .and(path("/proxy/through"))
+            .and(header("x-bifrost-token", "proxy-token"))
+            .respond_with(ResponseTemplate::new(202).set_body_raw("proxied-body", "text/plain"))
+            .mount(&server)
+            .await;
+
+        let (status, content_type, body) = manager
+            .proxy_forward(
+                reqwest::Method::POST,
+                "/proxy/through",
+                Some("q=1"),
+                Some(b"body".to_vec()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(status, 202);
+        assert_eq!(content_type, "text/plain");
+        assert_eq!(body, b"proxied-body");
+    }
+
+    #[tokio::test]
+    async fn logout_clears_state_and_marks_runtime_unauthorized() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_manager = Arc::new(ConfigManager::new(temp_dir.path().to_path_buf()).unwrap());
+        let manager = SyncManager::new(config_manager, 9900).unwrap();
+
+        {
+            let mut state = manager.state.lock();
+            state.token = None;
+            state.user = Some(RemoteUser {
+                user_id: "user-1".to_string(),
+                ..Default::default()
+            });
+        }
+        manager.login_prompt.lock().last_opened_at = Some(Utc::now());
+        {
+            let mut runtime = manager.runtime.write().await;
+            runtime.reachable = true;
+            runtime.authorized = true;
+            runtime.reason = SyncReason::Ready;
+            runtime.last_error = Some("some error".to_string());
+        }
+
+        manager.logout().await.unwrap();
+
+        {
+            let state = manager.state.lock();
+            assert!(state.token.is_none());
+            assert!(state.user.is_none());
+        }
+        assert!(manager.login_prompt.lock().last_opened_at.is_none());
+        let runtime = manager.runtime.read().await;
+        assert!(!runtime.authorized);
+        assert_eq!(runtime.reason, SyncReason::Unauthorized);
+        assert!(runtime.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn logout_sends_remote_logout_when_token_exists() {
+        let server = MockServer::start().await;
+        let (_temp_dir, _config_manager, manager) = sync_manager_for_remote(&server.uri()).await;
+
+        {
+            let mut state = manager.state.lock();
+            state.token = Some("logout-token".to_string());
+            state.user = Some(RemoteUser {
+                user_id: "user-logout".to_string(),
+                ..Default::default()
+            });
+        }
+
+        Mock::given(method("GET"))
+            .and(path("/v4/sso/logout"))
+            .and(header("x-bifrost-token", "logout-token"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        manager.logout().await.unwrap();
+
+        let state = manager.state.lock();
+        assert!(state.token.is_none());
+        assert!(state.user.is_none());
+    }
+
+    #[tokio::test]
+    async fn login_url_uses_sync_config_remote_base_url() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_manager = Arc::new(ConfigManager::new(temp_dir.path().to_path_buf()).unwrap());
+        config_manager
+            .update_sync_config(SyncConfigUpdate {
+                enabled: Some(true),
+                remote_base_url: Some("https://login.example.test/".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let manager = SyncManager::new(config_manager, 9900).unwrap();
+
+        let callback = "http://127.0.0.1:9900/callback";
+        let url = manager.login_url(callback).await.unwrap();
+        assert!(url.starts_with("https://login.example.test/v4/sso/login?next="));
+        assert!(url.contains("callback"));
+    }
+
+    #[tokio::test]
+    async fn request_login_opens_browser_even_if_prompt_already_opened() {
+        let _env_lock = env_lock().lock().await;
+        let temp_dir = TempDir::new().unwrap();
+        let config_manager = Arc::new(ConfigManager::new(temp_dir.path().to_path_buf()).unwrap());
+        config_manager
+            .update_sync_config(SyncConfigUpdate {
+                enabled: Some(true),
+                remote_base_url: Some("https://login.example.test".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let manager = SyncManager::new(config_manager, 9900).unwrap();
+        let dry_run_file = temp_dir.path().join("request-login-urls.txt");
+        let _dry_run_guard = EnvVarGuard::set(
+            LOGIN_BROWSER_DRY_RUN_FILE_ENV,
+            dry_run_file.to_str().unwrap(),
+        );
+
+        manager.login_prompt.lock().last_opened_at = Some(Utc::now());
+
+        manager.request_login().await.unwrap();
+
+        let opened = read_dry_run_urls(&dry_run_file);
+        assert_eq!(opened.len(), 1);
+        assert!(opened[0].contains("/v4/sso/logout?next="));
+    }
+
+    #[tokio::test]
+    async fn sync_manager_handle_delegates_to_inner_methods() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_manager = Arc::new(ConfigManager::new(temp_dir.path().to_path_buf()).unwrap());
+        config_manager
+            .update_sync_config(SyncConfigUpdate {
+                enabled: Some(true),
+                remote_base_url: Some("https://handle.example.test".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let manager = Arc::new(SyncManager::new(config_manager.clone(), 9900).unwrap());
+        let handle = SyncManagerHandle::new(manager.clone());
+
+        let status = handle.status().await;
+        assert!(!status.has_session);
+
+        handle.save_token("handle-token".to_string()).await.unwrap();
+        let status = handle.status().await;
+        assert!(status.has_session);
+        assert_eq!(handle.session_token().as_deref(), Some("handle-token"));
+
+        let status_after_logout = handle.logout().await.unwrap();
+        assert!(!status_after_logout.has_session);
+        assert!(!handle.status().await.has_session);
+
+        let err = handle.remote_sample(5).await.unwrap_err();
+        match err {
+            BifrostError::Config(_) => {}
+            other => panic!("expected config error, got {other:?}"),
+        }
+
+        let rule = RuleFile::new("handle-demo", "example.com proxy://localhost:3000");
+        handle.record_deleted_rule(&rule).await.unwrap();
+        handle.clear_deleted_rule("handle-demo").await.unwrap();
+
+        let err = handle
+            .proxy_forward(reqwest::Method::GET, "/proxy/test", None, None)
+            .await
+            .unwrap_err();
+        match err {
+            BifrostError::Config(_) => {}
+            other => panic!("expected config error, got {other:?}"),
+        }
+
+        handle.trigger_sync();
+
+        let url = handle.login_url("http://127.0.0.1:9900/cb").await.unwrap();
+        assert!(url.contains("/v4/sso/login"));
     }
 }
