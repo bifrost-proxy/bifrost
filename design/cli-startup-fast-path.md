@@ -80,7 +80,7 @@
 ### 2.5 规则命中日志降噪
 
 - 规则 resolver 的逐条命中日志属于高频调试信息，默认 `info` 下不再输出。
-- `bifrost_core::rules` 的 `rule MATCHED` 降级到 `debug`，用于定位某条规则是否参与匹配。
+- `bifrost_core::rules` 的 `rule matcher candidate matched` 与 `rule selected` 降级到 `debug`，用于分别定位某条规则是否进入候选以及是否通过 filter/skip 后最终生效。
 - `bifrost_proxy::rules` 的请求级 `rules matched for request` 降级到 `debug`，逐条 `matched rule detail` 降级到 `trace`。
 - 需要排查规则命中细节时，可显式使用：
   - `RUST_LOG=bifrost_core::rules=debug,bifrost_proxy::rules=trace,info`

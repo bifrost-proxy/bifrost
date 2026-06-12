@@ -321,7 +321,7 @@ PY
 6. 等待日志 flush 后检查默认 `info` 日志：
    ```bash
    sleep 1
-   grep -E "rule MATCHED|rules matched for request|matched rule detail" /tmp/bifrost-human-rule-log-noise/info-logs/bifrost*.log && echo "FAIL: rule match logs visible at info" || echo "PASS: rule match logs hidden at info"
+   grep -E "rule matcher candidate matched|rule selected|rules matched for request|matched rule detail" /tmp/bifrost-human-rule-log-noise/info-logs/bifrost*.log && echo "FAIL: rule match logs visible at info" || echo "PASS: rule match logs hidden at info"
    cat /tmp/bifrost-human-rule-log-noise/info.stdout /tmp/bifrost-human-rule-log-noise/info.stderr | grep -E '^[0-9T:\.-]+Z[[:space:]]+(TRACE|DEBUG|INFO|WARN|ERROR) ' && echo "FAIL: console tracing log" || echo "PASS: no console tracing log"
    ```
 7. 停止 info 服务：
@@ -342,7 +342,7 @@ PY
    ```bash
    http_proxy=http://127.0.0.1:18886 https_proxy=http://127.0.0.1:18886 no_proxy= curl -sS --max-time 5 http://example.test/
    sleep 1
-   grep -E "rule MATCHED|rules matched for request|matched rule detail" /tmp/bifrost-human-rule-log-noise/debug-logs/bifrost*.log && echo "PASS: rule match logs visible when explicitly enabled" || echo "FAIL: rule match logs missing when explicitly enabled"
+   grep -E "rule matcher candidate matched|rule selected|rules matched for request|matched rule detail" /tmp/bifrost-human-rule-log-noise/debug-logs/bifrost*.log && echo "PASS: rule match logs visible when explicitly enabled" || echo "FAIL: rule match logs missing when explicitly enabled"
    ```
 10. 停止 debug 服务：
    ```bash
@@ -434,3 +434,4 @@ rm -rf /tmp/bifrost-human-launchd-log
 | 日期 | 用例 | 实际结果 | 结论 |
 | --- | --- | --- | --- |
 | 2026-06-08 | TC-LOD-11 | 已执行 `SKIP_BUILD=true e2e-tests/tests/test_chatgpt_web_startup_auth_preflight.sh`、`SKIP_BUILD=true e2e-tests/tests/test_rule_match_logging_noise.sh`、`SKIP_BUILD=true e2e-tests/tests/test_socks5_tls_routing_exceptions.sh`；三者均通过。CI 失败 artifacts 证实旧脚本在 Linux/macOS 中依赖默认 stdout tracing，修复后这些日志断言脚本改为显式 `--log-output console,file`。 | 通过 |
+| 2026-06-12 | TC-LOD-11 | PR #225 CI 中 Linux/macOS `E2E Shell shard 3/3` 均失败于 `test_rule_match_logging_noise.sh`。已将脚本断言从旧 `rule MATCHED` 更新为 `rule matcher candidate matched` 与 `rule selected`，并执行 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 e2e-tests/tests/test_rule_match_logging_noise.sh`，结果通过。 | 通过 |

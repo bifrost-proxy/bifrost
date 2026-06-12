@@ -79,7 +79,7 @@ wait_for_proxy "$INFO_PID" 18887 "${TEST_ROOT}/info.log"
 INFO_BODY="$(request_via_proxy 18887)"
 test "$INFO_BODY" = "ok"
 sleep 1
-if grep -E "rule MATCHED|rules matched for request|matched rule detail" "${TEST_ROOT}/info.log"; then
+if grep -E "rule matcher candidate matched|rule selected|rules matched for request|matched rule detail" "${TEST_ROOT}/info.log"; then
     echo "FAIL: rule match logs visible at info" >&2
     exit 1
 fi
@@ -104,7 +104,8 @@ wait_for_proxy "$DEBUG_PID" 18888 "${TEST_ROOT}/debug.log"
 DEBUG_BODY="$(request_via_proxy 18888)"
 test "$DEBUG_BODY" = "ok"
 sleep 1
-grep -q "rule MATCHED" "${TEST_ROOT}/debug.log"
+grep -q "rule matcher candidate matched" "${TEST_ROOT}/debug.log"
+grep -q "rule selected" "${TEST_ROOT}/debug.log"
 grep -q "rules matched for request" "${TEST_ROOT}/debug.log"
 grep -q "matched rule detail" "${TEST_ROOT}/debug.log"
 
