@@ -147,6 +147,21 @@ http://127.0.0.1:9900/_bifrost/
 - 管理端默认仅允许通过 `127.0.0.1` 或 `localhost` 访问
 - SSE 增量订阅接口为 `/_bifrost/api/traffic/{id}/sse/stream?from=begin`
 
+### 设备可用性检查
+
+当手机、平板、另一台电脑或电视浏览器配置 Bifrost 后仍然无法抓包时，优先使用 `Settings -> Certificate -> Availability Check`，不要先猜是证书问题还是代理授权问题。
+
+使用步骤：
+
+1. 在 Certificate 页面顶部的 `Availability Check` 中选择当前电脑的局域网 IP。
+2. 点击 `Generate Availability Check`，把页面展示的链接发给目标设备，或让目标设备扫码。
+3. 目标设备打开检测页后会自动检查代理访问授权、探针端口可达性，以及 Bifrost CA 的 HTTPS 信任状态。
+4. 如果代理访问显示待批准，回到 Bifrost 管理端批准该设备，或调整访问控制/局域网访问配置。
+5. 如果 HTTPS 信任失败，先安装 Bifrost CA；iOS 还必须进入 `设置 > 通用 > 关于本机 > 证书信任设置`，打开 Bifrost CA 的完全信任。
+6. 检查成功后，点击页面上的代理地址复制 `<局域网 IP>:<端口>`，或打开代理二维码继续配置。
+
+这个检查验证的是“当前设备当前浏览器能否真实完成 Bifrost CA 签发证书的 HTTPS 握手”。它不能保证所有 App 都能被解密，因为个别 App 可能使用证书固定、自定义 TLS 栈，Android App 也可能默认不信任用户安装的 CA。
+
 ## 环境变量
 
 | 环境变量 | 说明 | 默认值 |

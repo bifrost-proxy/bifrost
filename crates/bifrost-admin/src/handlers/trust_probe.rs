@@ -2268,6 +2268,7 @@ fn render_landing_page(session: &TrustProbeSession, token: &str) -> String {
         "iosWifiProxyProfileUrl": ios_wifi_proxy_profile_url,
         "proxyQrCodeUrl": view.proxy_qr_code_url,
         "proxyConfiguredUrl": proxy_configured_url,
+        "proxyConfigured": view.proxy_configured,
         "netcheckUrl": netcheck_url,
         "tlsCheckUrl": tls_check_url,
         "proxyAccessUrl": proxy_access_url,
@@ -2293,6 +2294,10 @@ fn render_landing_page(session: &TrustProbeSession, token: &str) -> String {
     .warn {{ color: #9a6500; }}
     .bad {{ color: #c7352f; }}
     .warning-box {{ border: 1px solid #d6a100; border-radius: 8px; padding: 10px 12px; background: color-mix(in srgb, #ffd666 18%, Canvas); margin: 10px 0; }}
+    .proxy-target {{ border: 1px solid #1677ff; border-radius: 10px; padding: 14px; margin: 16px 0; background: color-mix(in srgb, #1677ff 12%, Canvas); }}
+    .proxy-target strong {{ display: block; margin-bottom: 6px; }}
+    .proxy-target code {{ display: inline-block; font-size: 20px; font-weight: 700; padding: 4px 6px; border-radius: 6px; background: color-mix(in srgb, #1677ff 18%, Canvas); }}
+    .hidden {{ display: none !important; }}
     code {{ word-break: break-all; }}
     a, button {{ font: inherit; }}
     button, .button {{ display: inline-block; margin: 6px 8px 6px 0; padding: 10px 12px; border-radius: 6px; border: 1px solid currentColor; background: transparent; color: inherit; text-decoration: none; }}
@@ -2307,6 +2312,10 @@ fn render_landing_page(session: &TrustProbeSession, token: &str) -> String {
 <main>
   <h1>Bifrost Availability Check</h1>
   <p>This page checks proxy access, direct probe reachability, and whether this browser can complete the Bifrost HTTPS probe. It does not prove every Android app trusts the CA.</p>
+  <section class="proxy-target" id="target-proxy-service">
+    <strong>Target proxy service</strong>
+    <code id="target-proxy-address"></code>
+  </section>
   <p>CA SHA-256 fingerprint:<br><code>{}</code></p>
   <section class="status" id="proxy-access">Checking proxy access authorization...</section>
   <section class="status" id="result">Preparing trust check...</section>
@@ -2388,6 +2397,45 @@ function show(html) {{ setHtmlIfChanged("result", html); }}
 function showNext(html) {{ setHtmlIfChanged("next", html); }}
 function showProxyAccess(html) {{ setHtmlIfChanged("proxy-access", html); }}
 function showProxyConfiguration(html) {{ setHtmlIfChanged("proxy-configuration", html); }}
+function currentPageHost() {{
+  try {{
+    return window.location && window.location.hostname ? window.location.hostname : "";
+  }} catch (_) {{
+    return "";
+  }}
+}}
+function currentPageOrigin() {{
+  try {{
+    if (window.location && window.location.origin) return window.location.origin;
+  }} catch (_) {{}}
+  const cfg = window.__BIFROST_TRUST_PROBE__;
+  return "http://" + effectiveProxyHost() + ":" + cfg.adminPort;
+}}
+function effectiveProxyHost() {{
+  const host = currentPageHost();
+  return host || window.__BIFROST_TRUST_PROBE__.host;
+}}
+function targetProxyAddress() {{
+  const cfg = window.__BIFROST_TRUST_PROBE__;
+  return effectiveProxyHost() + ":" + cfg.adminPort;
+}}
+function renderTargetProxyAddress() {{
+  const target = document.getElementById("target-proxy-address");
+  if (target) target.textContent = targetProxyAddress();
+}}
+function isIosDevice() {{
+  return detectPlatformOs(navigator.userAgent || "") === "ios";
+}}
+function setIosProxySetupVisible(visible) {{
+  const target = document.getElementById("ios-wifi-proxy-tools");
+  if (!target) return;
+  target.hidden = !visible;
+  target.classList.toggle("hidden", !visible);
+  if (!visible) target.innerHTML = "";
+}}
+function shouldShowIosProxySetup() {{
+  return isIosDevice() && !window.__BIFROST_TRUST_PROBE__.proxyConfigured;
+}}
 let probeLoopRunning = false;
 let probeHasRun = false;
 async function postReport(type, extra) {{
@@ -2419,6 +2467,7 @@ async function syncProbeConfig() {{
     const data = await response.json();
     cfg.suggestedWifiSsid = data.suggestedWifiSsid || "";
     cfg.suggestedWifiSsidMessage = data.suggestedWifiSsidMessage || "";
+    if (typeof data.proxyConfigured === "boolean") cfg.proxyConfigured = data.proxyConfigured;
     renderIosWifiProxyTools();
   }} catch (_) {{}}
 }}
@@ -2449,23 +2498,24 @@ async function checkCertificateTrust() {{
       cache: "no-store",
       mode: "cors"
     }});
+    let netcheckRoutedThroughProxy = false;
     if (!net.ok) {{
       const bypassRequired = await isTrustProbeProxyBypassRequired(net);
-      await postReport("network_failed", {{
-        status: net.status,
-        message: bypassRequired ? "Direct probe request went through the configured proxy." : undefined
-      }});
       if (bypassRequired) {{
-        show('<span class="warn">Direct probe request went through the configured proxy.</span>');
-        showNext("<p>The probe port is running, but this browser sent the direct reachability check through the proxy. Add this computer IP to the proxy bypass list, or open this page without proxying this host, then retry.</p><button onclick='runProbeLoop()'>Retry</button>");
+        netcheckRoutedThroughProxy = true;
+        show('<span class="ok">Proxy path detected.</span> Checking browser HTTPS probe...');
       }} else {{
+        await postReport("network_failed", {{ status: net.status }});
         show('<span class="bad">Probe port is not reachable.</span>');
         showNext("<p>Check that this phone and computer are on the same network, the selected IP is correct, and firewall rules allow the probe port.</p><button onclick='runProbeLoop()'>Retry</button>");
+        return false;
       }}
-      return false;
+    }} else {{
+      await postReport("netcheck_ok");
     }}
-    await postReport("netcheck_ok");
-    if (!cfg.tlsFailed && !cfg.tlsTrusted) {{
+    if (netcheckRoutedThroughProxy) {{
+      showNext("<p>This browser routed the HTTP reachability check through the configured proxy. Bifrost will still validate CA trust with the HTTPS probe.</p>");
+    }} else if (!cfg.tlsFailed && !cfg.tlsTrusted) {{
       show('<span class="ok">Network check passed.</span> Checking browser HTTPS probe...');
     }}
   }} catch (error) {{
@@ -2542,28 +2592,37 @@ async function checkProxyConfiguration() {{
     }});
     if (response.ok) {{
       const data = await response.json().catch(function() {{ return {{}}; }});
+      cfg.proxyConfigured = true;
       showProxyConfiguration('<span class="ok">Proxy is configured.</span><br><small>' + escapeText(data.message || "This browser reached Bifrost through the configured proxy.") + '</small>');
+      renderIosWifiProxyTools();
       return;
     }}
     await postReport("proxy_config_failed", {{ status: response.status }});
+    cfg.proxyConfigured = false;
     showProxyConfigurationMissing("Proxy check returned HTTP " + response.status + ".");
   }} catch (error) {{
     await postReport("proxy_config_failed", {{ message: String(error) }});
+    cfg.proxyConfigured = false;
     showProxyConfigurationMissing("This browser did not reach Bifrost through the proxy.");
   }}
 }}
 function showProxyConfigurationMissing(message) {{
   const cfg = window.__BIFROST_TRUST_PROBE__;
+  const proxyAddress = targetProxyAddress();
+  const iosSteps = isIosDevice()
+    ? '<li>Recommended for iPhone: configure it manually in Settings &gt; Wi-Fi &gt; current network &gt; Configure Proxy &gt; Manual.</li>' +
+      '<li>Use the experimental Wi-Fi profile only if you accept that uninstalling it may remove the managed Wi-Fi network entry.</li>'
+    : '<li>Configure this device or browser to use the target HTTP proxy service.</li>';
   showProxyConfiguration(
     '<span class="bad">Proxy is not configured yet.</span><br>' +
     '<small>' + escapeText(message || "") + '</small>' +
     '<ol>' +
-    '<li>Recommended for iPhone: configure it manually in Settings &gt; Wi-Fi &gt; current network &gt; Configure Proxy &gt; Manual.</li>' +
-    '<li>Set Server to <code>' + escapeText(cfg.host) + '</code> and Port to <code>' + escapeText(String(cfg.adminPort)) + '</code>, then rerun this check.</li>' +
-    '<li>Use the experimental Wi-Fi profile only if you accept that uninstalling it may remove the managed Wi-Fi network entry.</li>' +
+    iosSteps +
+    '<li>Set the proxy target to <code>' + escapeText(proxyAddress) + '</code>, then rerun this check.</li>' +
     '</ol>' +
-    '<button onclick="focusIosWifiSsid()">Show experimental profile option</button>'
+    (isIosDevice() ? '<button onclick="focusIosWifiSsid()">Show experimental profile option</button>' : '')
   );
+  renderIosWifiProxyTools();
 }}
 function escapeText(value) {{
   return String(value || "").replace(/[&<>"']/g, function(ch) {{
@@ -2574,9 +2633,9 @@ function buildIosWifiProxyProfileUrl() {{
   const cfg = window.__BIFROST_TRUST_PROBE__;
   const ssid = String(cfg.suggestedWifiSsid || "").trim();
   if (!ssid) return "";
-  return cfg.iosWifiProxyProfileUrl +
+  return currentPageOrigin() + "/_bifrost/public/mobile/ios-wifi-proxy.mobileconfig" +
     "?ssid=" + encodeURIComponent(ssid) +
-    "&ip=" + encodeURIComponent(cfg.host) +
+    "&ip=" + encodeURIComponent(effectiveProxyHost()) +
     "&port=" + encodeURIComponent(String(cfg.adminPort));
 }}
 function updateIosWifiProxyProfileLink() {{
@@ -2601,24 +2660,31 @@ function updateIosWifiProxyProfileLink() {{
   }}
   link.href = url;
   link.classList.remove("button-disabled");
-  hint.textContent = "This profile configures Wi-Fi proxy " + window.__BIFROST_TRUST_PROBE__.host + ":" + window.__BIFROST_TRUST_PROBE__.adminPort + " for Wi-Fi \"" + window.__BIFROST_TRUST_PROBE__.suggestedWifiSsid + "\".";
+  hint.textContent = "This profile configures Wi-Fi proxy " + targetProxyAddress() + " for Wi-Fi \"" + window.__BIFROST_TRUST_PROBE__.suggestedWifiSsid + "\".";
 }}
 function renderIosWifiProxyTools() {{
   const cfg = window.__BIFROST_TRUST_PROBE__;
   const target = document.getElementById("ios-wifi-proxy-tools");
   if (!target) return;
+  if (!shouldShowIosProxySetup()) {{
+    setIosProxySetupVisible(false);
+    return;
+  }}
+  setIosProxySetupVisible(true);
   const ssid = String(cfg.suggestedWifiSsid || "").trim();
   const riskChecked = cfg.managedWifiRiskAccepted ? " checked" : "";
   const ssidHtml = ssid ? "<p>Wi-Fi name for this check: <code>" + escapeText(ssid) + "</code></p>" : "<p><span class='warn'>" + escapeText(cfg.suggestedWifiSsidMessage || "Bifrost could not detect this Mac's current Wi-Fi SSID.") + "</span></p>";
+  const proxyHost = effectiveProxyHost();
+  const proxyAddress = targetProxyAddress();
   target.innerHTML =
     "<h2>iOS Proxy Setup</h2>" +
     "<p><strong>Recommended:</strong> set the proxy manually in Settings &gt; Wi-Fi &gt; current network &gt; Configure Proxy &gt; Manual. Set Server to <code>" +
-    escapeText(cfg.host) +
+    escapeText(proxyHost) +
     "</code> and Port to <code>" +
     escapeText(String(cfg.adminPort)) +
     "</code>. Turn it back to Off when finished.</p>" +
     "<p><strong>Experimental profile:</strong> Bifrost can generate a managed Wi-Fi profile that sets the current Wi-Fi network proxy to <strong>" +
-    escapeText(cfg.host + ":" + cfg.adminPort) +
+    escapeText(proxyAddress) +
     "</strong>. It does not contain or ask for the Wi-Fi password, but iOS may remove the managed Wi-Fi network entry when you uninstall this profile.</p>" +
     ssidHtml +
     "<label for='ios-wifi-ssid-input'>Wi-Fi name</label>" +
@@ -2652,8 +2718,7 @@ function focusIosWifiSsid() {{
   }}
 }}
 async function copyProxyAddress() {{
-  const cfg = window.__BIFROST_TRUST_PROBE__;
-  const value = cfg.host + ":" + cfg.adminPort;
+  const value = targetProxyAddress();
   try {{
     await navigator.clipboard.writeText(value);
     document.getElementById("copy-status").textContent = "Copied";
@@ -2662,9 +2727,9 @@ async function copyProxyAddress() {{
   }}
 }}
 function showProxyConfig() {{
-  const cfg = window.__BIFROST_TRUST_PROBE__;
-  const proxyAddress = cfg.host + ":" + cfg.adminPort;
-  showNext("<p>Next configure this device proxy to:</p><button onclick='copyProxyAddress()'><strong>" + proxyAddress + "</strong></button><span id='copy-status'></span><p><a class='button' href='" + cfg.proxyQrCodeUrl + "'>Open proxy QR code</a></p>");
+  const proxyAddress = targetProxyAddress();
+  const proxyQrCodeUrl = currentPageOrigin() + "/_bifrost/public/proxy/qrcode?ip=" + encodeURIComponent(effectiveProxyHost());
+  showNext("<p>Next configure this device proxy to:</p><button onclick='copyProxyAddress()'><strong>" + proxyAddress + "</strong></button><span id='copy-status'></span><p><a class='button' href='" + proxyQrCodeUrl + "'>Open proxy QR code</a></p>");
 }}
 function showTlsFailed() {{
   window.__BIFROST_TRUST_PROBE__.tlsFailed = true;
@@ -2680,6 +2745,7 @@ function showTlsFailed() {{
   }}
   showNext(steps + "<button onclick='runProbeLoop()'>Retry</button>");
 }}
+renderTargetProxyAddress();
 renderIosWifiProxyTools();
 window.__BIFROST_TRUST_PROBE__.deviceId = getDeviceId();
 setInterval(syncProbeConfig, 1000);
@@ -3037,6 +3103,52 @@ mod tests {
         assert!(html.contains("lower.includes(\"edg/\")"));
         assert!(html.contains("lower.includes(\"chrome/\")"));
         assert!(!html.contains("\\\\/"));
+    }
+
+    #[test]
+    fn landing_page_highlights_proxy_target_and_gates_ios_proxy_setup() {
+        let session = test_session(Uuid::new_v4(), "token", Utc::now());
+        let html = render_landing_page(&session, "token");
+
+        assert!(html.contains("Target proxy service"));
+        assert!(html.contains("id=\"target-proxy-address\""));
+        assert!(html.contains("function currentPageHost()"));
+        assert!(html.contains("function currentPageOrigin()"));
+        assert!(html.contains("function effectiveProxyHost()"));
+        assert!(html.contains("function targetProxyAddress()"));
+        assert!(html.contains("return effectiveProxyHost() + \":\" + cfg.adminPort;"));
+        assert!(html.contains("function renderTargetProxyAddress()"));
+        assert!(html.contains("function shouldShowIosProxySetup()"));
+        assert!(html
+            .contains("return isIosDevice() && !window.__BIFROST_TRUST_PROBE__.proxyConfigured;"));
+        assert!(html.contains("setIosProxySetupVisible(false);"));
+        assert!(html.contains("cfg.proxyConfigured = true;"));
+        assert!(html.contains("cfg.proxyConfigured = false;"));
+        assert!(html.contains(
+            "if (typeof data.proxyConfigured === \"boolean\") cfg.proxyConfigured = data.proxyConfigured;"
+        ));
+        assert!(html.contains("Set the proxy target to <code>"));
+        assert!(html.contains("let netcheckRoutedThroughProxy = false;"));
+        assert!(html.contains("Proxy path detected."));
+        assert!(html.contains("Bifrost will still validate CA trust with the HTTPS probe."));
+        assert!(html.contains(
+            "currentPageOrigin() + \"/_bifrost/public/mobile/ios-wifi-proxy.mobileconfig\""
+        ));
+        assert!(html.contains("\"&ip=\" + encodeURIComponent(effectiveProxyHost())"));
+        assert!(html.contains(
+            "currentPageOrigin() + \"/_bifrost/public/proxy/qrcode?ip=\" + encodeURIComponent(effectiveProxyHost())"
+        ));
+        assert!(!html.contains("Direct probe request went through the configured proxy."));
+    }
+
+    #[test]
+    fn landing_page_preserves_initial_proxy_configured_state() {
+        let mut session = test_session(Uuid::new_v4(), "token", Utc::now());
+        session.proxy_configured = true;
+
+        let html = render_landing_page(&session, "token");
+
+        assert!(html.contains("\"proxyConfigured\":true"));
     }
 
     #[test]

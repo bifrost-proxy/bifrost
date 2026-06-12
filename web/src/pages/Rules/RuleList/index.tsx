@@ -21,6 +21,8 @@ import {
   DeleteOutlined,
   PoweroffOutlined,
   ExportOutlined,
+  ShareAltOutlined,
+  CopyOutlined,
   HolderOutlined,
   SwapOutlined,
   CaretDownOutlined,
@@ -34,7 +36,9 @@ import { useExportBifrost } from '../../../hooks/useExportBifrost';
 import { useSyncStore } from '../../../stores/useSyncStore';
 import { searchGroups, type Group } from '../../../api/group';
 import { getUiConfig, updateUiConfig } from '../../../api/ui';
+import { createRuleShareLink as createRuleShareLinkApi } from '../../../api/rules';
 import { isConnectionIssueError } from '../../../api/client';
+import { copyToClipboard } from '../../../utils/clipboard';
 import styles from './index.module.css';
 import {
   buildRuleTree,
@@ -90,6 +94,11 @@ export default function RuleList() {
   const [renameModalVisible, setRenameModalVisible] = useState(false);
   const [renameTarget, setRenameTarget] = useState<string | null>(null);
   const [newName, setNewName] = useState('');
+  const [shareModalVisible, setShareModalVisible] = useState(false);
+  const [shareTarget, setShareTarget] = useState<string | null>(null);
+  const [shareTargetUrl, setShareTargetUrl] = useState('');
+  const [shareLink, setShareLink] = useState('');
+  const [shareLoading, setShareLoading] = useState(false);
   const [selectedRules, setSelectedRules] = useState<string[]>([]);
   const lastClickedIndexRef = useRef<number | null>(null);
   const [sortMode, setSortMode] = useState<RuleSortMode>('manual');
@@ -432,6 +441,46 @@ export default function RuleList() {
     fetchRules();
   }, [fetchRules]);
 
+  const openShareModal = useCallback((name: string) => {
+    setShareTarget(name);
+    setShareTargetUrl('');
+    setShareLink('');
+    setShareModalVisible(true);
+  }, []);
+
+  const handleCreateShareLink = useCallback(async () => {
+    if (!shareTarget) return;
+    const targetUrl = shareTargetUrl.trim();
+    if (!targetUrl) {
+      message.error('Target URL is required');
+      return;
+    }
+
+    setShareLoading(true);
+    try {
+      const response = await createRuleShareLinkApi(shareTarget, targetUrl);
+      setShareLink(response.url);
+      message.success('Share link created');
+    } catch (err) {
+      if (!isConnectionIssueError(err)) {
+        console.error('Failed to create rule share link:', err);
+      }
+      message.error(err instanceof Error ? err.message : 'Failed to create share link');
+    } finally {
+      setShareLoading(false);
+    }
+  }, [shareTarget, shareTargetUrl]);
+
+  const handleCopyShareLink = useCallback(async () => {
+    if (!shareLink) return;
+    const copied = await copyToClipboard(shareLink);
+    if (copied) {
+      message.success('Copied');
+    } else {
+      message.error('Copy failed');
+    }
+  }, [shareLink]);
+
   const handleSelect = useCallback(
     (name: string, e: React.MouseEvent) => {
       const isCtrl = e.ctrlKey || e.metaKey;
@@ -543,6 +592,12 @@ export default function RuleList() {
         icon: <ExportOutlined />,
         label: `Export${bulkNames.length > 1 ? ` (${bulkNames.length})` : ''}`,
         onClick: () => handleExport(bulkNames),
+      },
+      {
+        key: 'share',
+        icon: <ShareAltOutlined />,
+        label: 'Share',
+        onClick: () => openShareModal(name),
       },
       {
         type: 'divider',
@@ -1034,6 +1089,45 @@ export default function RuleList() {
           onPressEnter={handleRename}
           autoFocus
         />
+      </Modal>
+
+      <Modal
+        title="Share Rule"
+        open={shareModalVisible}
+        onCancel={() => {
+          setShareModalVisible(false);
+          setShareTarget(null);
+          setShareTargetUrl('');
+          setShareLink('');
+        }}
+        onOk={handleCreateShareLink}
+        okText="Create Link"
+        cancelText="Cancel"
+        confirmLoading={shareLoading}
+      >
+        <Input
+          placeholder="https://example.com/path"
+          value={shareTargetUrl}
+          onChange={(e) => setShareTargetUrl(e.target.value)}
+          onPressEnter={handleCreateShareLink}
+          autoFocus
+        />
+        {shareLink && (
+          <div style={{ marginTop: 12 }}>
+            <Input.TextArea
+              value={shareLink}
+              readOnly
+              autoSize={{ minRows: 3, maxRows: 5 }}
+            />
+            <Button
+              icon={<CopyOutlined />}
+              onClick={handleCopyShareLink}
+              style={{ marginTop: 8 }}
+            >
+              Copy
+            </Button>
+          </div>
+        )}
       </Modal>
     </div>
   );

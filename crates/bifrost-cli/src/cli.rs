@@ -1522,6 +1522,23 @@ pub enum RuleCommands {
         #[arg(help = "Rule name")]
         name: String,
     },
+    #[command(about = "Create a share URL for a rule")]
+    Share {
+        #[arg(help = "Rule name")]
+        name: String,
+        #[arg(help = "Target website URL that will carry the Bifrost rule query")]
+        target_url: String,
+        #[arg(
+            short,
+            long,
+            help = "Rule content; when omitted, an existing local rule is loaded"
+        )]
+        content: Option<String>,
+        #[arg(short, long, value_hint = ValueHint::FilePath, help = "Rule file path; overrides loading an existing local rule")]
+        file: Option<PathBuf>,
+        #[arg(long, default_value = "my_rules", value_parser = ["my_rules"], help = "Exclusive enable scope for the imported rule")]
+        exclusive_scope: String,
+    },
     #[command(about = "Sync rules with remote server")]
     Sync,
     #[command(about = "Rename a rule")]

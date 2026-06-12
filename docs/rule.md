@@ -160,6 +160,23 @@ example.com host://127.0.0.1:3000
 
 个人私有规则不需要带组名称。组规则必须使用 `组名称/规则名称`，避免和同名私有规则冲突。规则引用只在独立 `@` 行生效；普通 `#` 注释里的 `@规则名称` 不会被当作引用。`@comment` 保持为注释指令，`commented-*` 这类真实规则名仍可正常引用。规则引用支持嵌套；运行时解析遇到缺失引用会跳过该引用行并继续解析后续规则，避免因为删除或尚未同步的引用规则导致整条入口规则失效。循环引用仍会让入口规则解析失败。Rules 编辑器的语法校验会对缺失引用返回 `E020`，并把对应 `@规则` 标红显示悬浮错误提示，便于用户及时修正。
 
+### 9. 规则分享链接
+
+Bifrost 支持把一条个人规则编码到任意 HTTP/HTTPS URL 的特殊 query 中，用于把规则分享给其他本机 Bifrost 用户或自动化 Agent。协议 query 名固定为 `__bifrost_rule`，内容是 URL-safe base64 编码的 JSON payload，包含规则名称、规则内容、版本号、内容 hash、导入模式和独占启用范围。
+
+第一版导入行为固定为 `mode=enable_exclusive`、`exclusive_scope=my_rules`：当 Bifrost 代理劫持到带 `__bifrost_rule` 的请求时，会把 payload 导入到个人规则列表，启用该规则，并禁用其他个人规则；不会创建、修改或禁用 Group 规则。`GET` / `HEAD` 请求导入后会重定向到移除私有 query 的 clean URL，避免目标页面 JavaScript 读取到规则内容；其他方法会在代理内部清理 query 后继续转发。
+
+生成分享链接时，目标网站支持完整 `http://` / `https://` 地址，也支持 `a.com`、`example.com/path`、`localhost:3000` 这类裸域名输入；裸域名会默认规范成 `http://...`，确保普通 HTTP 代理请求能在不依赖 TLS 拦截的情况下看到并导入分享 query。显式输入 `https://...` 时会保持 HTTPS；显式非 HTTP(S) scheme 会被拒绝。
+
+导入规则统一落在 `share/` 命名空间，避免覆盖用户已有的普通个人规则。例如 payload 名称为 `local-dev` 时，本地规则名为 `share/local-dev`。Bifrost 会在导入规则的描述中记录原始分享名和内容 hash：重复打开同一个分享链接会复用并覆盖同一条 `share/...` 规则，不会持续创建新规则；同名但内容不同的分享链接会创建 `share/规则名 2`、`share/规则名 3` 这类递增后缀的新规则。对已导入的 `share/...` 规则再次分享时，协议 payload 会自动剥掉 `share/` 前缀并优先使用描述中的原始分享名，避免把本地命名空间传播出去。
+
+CLI 生成示例：
+
+```bash
+bifrost rule share local-dev https://example.com/app
+bifrost rule share adhoc-debug https://example.com/app --content "api.example.com bp://127.0.0.1:3000"
+```
+
 ## 注意事项
 
 ### 规则优先级

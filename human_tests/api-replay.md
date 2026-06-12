@@ -546,6 +546,50 @@ Replay Admin API 提供请求重放功能的管理接口，支持创建和管理
 
 ---
 
+### TC-ARP-23：Replay SSE timeout 边界与 CI 早断重试回归
+
+**前置条件**：
+1. 已从当前源码构建 `bifrost` release 二进制：
+   ```bash
+   cargo build --release --bin bifrost
+   ```
+2. 使用临时 `BIFROST_DATA_DIR`，并设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1` 和 `BIFROST_DISABLE_TRAY=1`。
+
+**操作步骤**：
+1. 执行 Replay 规则 Shell E2E：
+   ```bash
+   TEST_DATA_DIR="$(mktemp -d /tmp/bifrost-replay-sse-human-XXXXXX)"
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+   BIFROST_DISABLE_TRAY=1 \
+   BIFROST_BIN="$PWD/target/release/bifrost" \
+   PROXY_PORT=19159 \
+   MOCK_HTTP_PORT=19160 \
+   MOCK_SSE_PORT=19164 \
+   MOCK_WS_PORT=19162 \
+   BIFROST_DATA_DIR="$TEST_DATA_DIR" \
+   bash e2e-tests/tests/test_replay_rules.sh
+   rc=$?
+   rm -rf "$TEST_DATA_DIR"
+   exit "$rc"
+   ```
+2. 重点确认输出中包含：
+   - `SSE Replay: connection event received and stream kept alive beyond timeout_ms`
+   - 或在首次 CI 早断后包含 `SSE Replay: connection event received and stream kept alive beyond timeout_ms after retry`
+   - `Failed: 0`
+
+**预期结果**：
+- 脚本退出码为 `0`
+- SSE replay 至少收到 `connection`、`applied_rules` 和 `id>=12` 的事件，证明流在 `timeout_ms=5000` 之后仍然继续传输
+- 若 CI runner 出现单次连接早断，脚本会立即重试一次；只有两次都收不到 post-timeout 事件才判定失败
+- 失败诊断会包含 curl stdout/stderr 和 Bifrost `UNIFIED_REPLAY` / `SSE` 日志片段，并把 Bifrost 日志复制到 artifact 目录
+
+**实际执行记录（2026-06-12）**：
+- 基于 CI run `27400115124` 的 `E2E Shell (Linux, shard 1/3)` 失败 artifact，确认新增 `test_rule_share_query.sh` 已通过，唯一失败为 `test_replay_rules.sh` 中 SSE replay 在首次连接只收到 id 3 到 id 8 后提前结束。
+- 本地使用 debug 二进制执行 `BIFROST_DISABLE_TRAY=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_BIN=target/debug/bifrost PROXY_PORT=18959 MOCK_HTTP_PORT=18960 MOCK_SSE_PORT=18964 MOCK_WS_PORT=18962 e2e-tests/tests/test_replay_rules.sh`，输出 `Passed: 31`、`Failed: 0`。
+- 本地使用 release 二进制执行 `BIFROST_DISABLE_TRAY=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_BIN=target/release/bifrost PROXY_PORT=19159 MOCK_HTTP_PORT=19160 MOCK_SSE_PORT=19164 MOCK_WS_PORT=19162 e2e-tests/tests/test_replay_rules.sh`，输出 `Passed: 31`、`Failed: 0`，SSE 子用例首轮即通过。
+
+---
+
 ## 清理
 
 测试完成后清理临时数据：

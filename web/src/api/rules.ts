@@ -33,6 +33,14 @@ export interface RuleReferenceCandidate {
   group_id: string | null;
 }
 
+export interface RuleShareLinkResponse {
+  url: string;
+  query_param: string;
+  payload_version: number;
+  rule_name: string;
+  content_hash: string;
+}
+
 export async function getActiveSummary(): Promise<ActiveSummaryResponse> {
   return get<ActiveSummaryResponse>('/rules/active-summary');
 }
@@ -75,4 +83,15 @@ export async function disableRule(name: string): Promise<ApiResponse> {
 
 export async function renameRule(oldName: string, newName: string): Promise<ApiResponse> {
   return put<ApiResponse>(`/rules/${encodeURIComponent(oldName)}/rename`, { new_name: newName });
+}
+
+export async function createRuleShareLink(
+  name: string,
+  targetUrl: string,
+): Promise<RuleShareLinkResponse> {
+  return post<RuleShareLinkResponse>('/rules/share-link', {
+    name,
+    target_url: targetUrl,
+    exclusive_scope: 'my_rules',
+  });
 }

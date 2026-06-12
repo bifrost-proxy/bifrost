@@ -11,6 +11,7 @@ pub mod process_alias;
 pub mod process_start_time;
 pub mod protocol;
 pub mod rule;
+pub mod rule_share;
 pub mod shell_proxy;
 pub mod syntax;
 pub mod system_proxy;

@@ -2,6 +2,9 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 
+use bifrost_core::rule_share::{
+    append_rule_share_query, new_rule_share_payload, share_payload_name_from_rule,
+};
 use bifrost_storage::{ConfigManager, RuleFile, RulesStorage};
 use bifrost_sync::{SyncAction, SyncManager};
 
@@ -74,6 +77,26 @@ fn handle_rule_local(action: RuleCommands) -> bifrost_core::Result<()> {
             );
             println!("Content:");
             println!("{}", rule.content);
+        }
+        RuleCommands::Share {
+            name,
+            target_url,
+            content,
+            file,
+            exclusive_scope: _,
+        } => {
+            let rule_content = match (content, file) {
+                (Some(content), file) => load_rule_content(Some(content), file)?,
+                (None, Some(file)) => load_rule_content(None, Some(file))?,
+                (None, None) => storage.load(&name)?.content,
+            };
+            let source_name = storage
+                .load(&name)
+                .map(|rule| share_payload_name_from_rule(&rule.name, rule.description.as_deref()))
+                .unwrap_or_else(|_| share_payload_name_from_rule(&name, None));
+            let payload = new_rule_share_payload(source_name, rule_content)?;
+            let share_url = append_rule_share_query(&target_url, &payload)?;
+            println!("{}", share_url);
         }
         RuleCommands::Sync
         | RuleCommands::Rename { .. }
