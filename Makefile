@@ -59,7 +59,8 @@ lint:
 	cd web && npm run lint 2>/dev/null || true
 
 # Coverage targets ----------------------------------------------------------
-# Unified unit + integration coverage gate. Fails when below 90%.
+# Unified unit + integration coverage gate. Fails when any crate drops below
+# its ratcheted floor (goal: 90%) or the workspace aggregate floor.
 coverage: coverage-gate
 
 # Unit + integration coverage only (no E2E binaries built).
@@ -70,9 +71,10 @@ coverage-unit:
 coverage-e2e:
 	bash scripts/ci/coverage-e2e.sh
 
-# Workspace-wide unified report (text), enforcing the 90% line-coverage gate.
+# Workspace-wide unified report, enforcing the per-crate ratcheted floors
+# (scripts/ci/coverage-thresholds.toml; goal: 90%) plus the workspace floor.
 coverage-gate:
-	bash scripts/ci/coverage-all.sh --text --fail-under 90
+	bash scripts/ci/coverage-all.sh --json --gate --gaps
 
 # HTML report (output: target/coverage/html/index.html). Skips the gate
 # so a low-coverage report is still browsable.

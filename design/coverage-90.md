@@ -5,7 +5,7 @@
 1. 统一 `crates/*` 工作区的 **单元测试 + 集成测试** 覆盖率统计入口；
 2. 把 E2E 套件运行时通过插桩 `bifrost` / `bifrost-e2e` 二进制采集到的
    覆盖率数据合并进同一份报告；
-3. 用 `--fail-under 90` 在 CI / 本地校验阶段把 90% 行覆盖率作为强制门禁；
+3. 用 `--gate`（基于 `coverage-thresholds.toml` 的 per-crate 棘轮下限 + 工作区聚合下限，目标 90%）在 CI / 本地校验阶段作为强制门禁；
 4. 提供按 crate 单独度量的快速反馈通道，方便迭代式补测过程使用。
 
 ## 现有机制（修改前）
@@ -23,17 +23,17 @@
 scripts/ci/
 ├── coverage.sh           # 既有：unit + integration（保留）
 ├── coverage-e2e.sh       # 既有：E2E instrumented（保留）
-├── coverage-all.sh       # 新增：unit + integration，--with-e2e 时合并 E2E，默认 90% 门禁
+├── coverage-all.sh       # 新增：unit + integration，--with-e2e 时合并 E2E，--gate 走棘轮门禁
 └── coverage-crate.sh     # 新增：按 crate 度量，迭代用
 
 Makefile
 ├── coverage              # = coverage-gate
 ├── coverage-unit         # = coverage.sh
 ├── coverage-e2e          # = coverage-e2e.sh
-├── coverage-gate         # = coverage-all.sh --text --fail-under 90
+├── coverage-gate         # = coverage-all.sh --json --gate
 ├── coverage-html         # = coverage-all.sh --html
 ├── coverage-json         # = coverage-all.sh --json
-└── coverage-crate CRATE= # = coverage-crate.sh <CRATE> --fail-under 90
+└── coverage-crate CRATE= # = coverage-all.sh -p <CRATE> --json --gaps
 
 human_tests/
 └── coverage-mechanism.md # 新增：机制本身的真实场景验证用例
@@ -106,8 +106,8 @@ design/
    反馈；
 3. 提交前：执行 `make coverage`（或 CI 等价命令）确认 ≥ 90%；
 4. CI：在 `local-ci.sh` / GitHub Actions workflow 里把
-   `bash scripts/ci/coverage-all.sh --text --fail-under 90` 作为必跑步骤，未达
-   90% 直接阻断合入；需要合并 E2E 覆盖率时显式追加 `--with-e2e`。
+   `bash scripts/ci/coverage-all.sh --json --gate` 作为必跑步骤，任一 crate 跌破
+   其棘轮下限即阻断合入；需要合并 E2E 覆盖率时显式追加 `--with-e2e`。
 
 ## 冻结表（最近一次基线）
 
