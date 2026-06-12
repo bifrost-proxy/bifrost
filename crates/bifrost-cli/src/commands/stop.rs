@@ -252,7 +252,7 @@ fn run_stop_with_system_proxy_mode(
 
         println!("Stopping Bifrost proxy (PID: {})...", pid);
 
-        let handle = unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, 0, pid as u32) };
+        let handle = unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, 0, pid) };
 
         if handle.is_null() {
             eprintln!(

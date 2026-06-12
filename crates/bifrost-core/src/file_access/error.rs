@@ -68,3 +68,88 @@ impl FileAccessError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn code_matches_each_variant() {
+        let p = || PathBuf::from("/tmp/x");
+        assert_eq!(
+            FileAccessError::OutOfScope { path: p() }.code(),
+            "file.out_of_scope"
+        );
+        assert_eq!(
+            FileAccessError::DenyPattern {
+                path: p(),
+                pattern: "*.env".to_string()
+            }
+            .code(),
+            "file.permission_denied"
+        );
+        assert_eq!(
+            FileAccessError::PermissionDenied { reason: "ro" }.code(),
+            "file.permission_denied"
+        );
+        assert_eq!(
+            FileAccessError::SymlinkEscape {
+                path: p(),
+                target: p()
+            }
+            .code(),
+            "file.symlink_escape"
+        );
+        assert_eq!(
+            FileAccessError::IgnoredByGitignore { path: p() }.code(),
+            "file.ignored_by_gitignore"
+        );
+        assert_eq!(
+            FileAccessError::BinaryNotAllowed { path: p() }.code(),
+            "file.binary_not_allowed"
+        );
+        assert_eq!(
+            FileAccessError::NotFound { path: p() }.code(),
+            "file.not_found"
+        );
+        assert_eq!(
+            FileAccessError::OpNotPermitted { op: "write" }.code(),
+            "file.op_not_permitted"
+        );
+        assert_eq!(
+            FileAccessError::Io {
+                path: p(),
+                source: std::io::Error::other("boom")
+            }
+            .code(),
+            "file.io_error"
+        );
+        assert_eq!(
+            FileAccessError::InvalidGlob {
+                pattern: "[".to_string(),
+                reason: "bad".to_string()
+            }
+            .code(),
+            "file.invalid_glob"
+        );
+    }
+
+    #[test]
+    fn display_includes_details() {
+        let e = FileAccessError::OutOfScope {
+            path: PathBuf::from("/etc/passwd"),
+        };
+        assert!(e.to_string().contains("/etc/passwd"));
+
+        let e = FileAccessError::DenyPattern {
+            path: PathBuf::from("/a/.env"),
+            pattern: "*.env".to_string(),
+        };
+        let s = e.to_string();
+        assert!(s.contains("*.env"));
+        assert!(s.contains("/a/.env"));
+
+        let e = FileAccessError::OpNotPermitted { op: "write" };
+        assert!(e.to_string().contains("write"));
+    }
+}

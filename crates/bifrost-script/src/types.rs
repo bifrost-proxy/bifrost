@@ -168,3 +168,42 @@ pub struct ScriptDetail {
     pub info: ScriptInfo,
     pub content: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn script_type_display_and_serde() {
+        let cases = [
+            (ScriptType::Request, "request"),
+            (ScriptType::Response, "response"),
+            (ScriptType::Decode, "decode"),
+            (ScriptType::Parser, "parser"),
+        ];
+        for (ty, expected) in cases {
+            assert_eq!(ty.to_string(), expected);
+            let json = serde_json::to_string(&ty).unwrap();
+            assert_eq!(json.trim_matches('"'), expected);
+            let de: ScriptType = serde_json::from_str(&json).unwrap();
+            assert_eq!(de, ty);
+        }
+    }
+
+    #[test]
+    fn script_log_level_display_and_serde() {
+        let cases = [
+            (ScriptLogLevel::Debug, "DEBUG", "debug"),
+            (ScriptLogLevel::Info, "INFO", "info"),
+            (ScriptLogLevel::Warn, "WARN", "warn"),
+            (ScriptLogLevel::Error, "ERROR", "error"),
+        ];
+        for (level, display, json_value) in cases {
+            assert_eq!(level.to_string(), display);
+            let json = serde_json::to_string(&level).unwrap();
+            assert_eq!(json.trim_matches('"'), json_value);
+            let de: ScriptLogLevel = serde_json::from_str(&json).unwrap();
+            assert_eq!(de, level);
+        }
+    }
+}

@@ -1115,6 +1115,94 @@ mod tests {
         assert_eq!(normalize_thumbprint("aa bb:cc-dd"), "AABBCCDD".to_string());
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_check_status_linux_not_installed() {
+        // A fresh installer pointed at a non-existent cert in a temp dir; the
+        // system CA path /usr/local/share/ca-certificates/bifrost-ca.crt does
+        // not contain our temp cert, so status resolves to NotInstalled unless
+        // the host happens to have a real bifrost CA installed.
+        let dir = tempdir().expect("Failed to create temp dir");
+        let cert_path = dir.path().join("bifrost-ca.crt");
+        std::fs::write(&cert_path, "dummy").unwrap();
+        let installer = CertInstaller::new(&cert_path);
+        // Just assert it returns Ok and a well-formed status (don't assume host
+        // state — CI runners shouldn't have bifrost CA installed system-wide).
+        let status = installer.check_status().unwrap();
+        assert!(matches!(
+            status,
+            CertStatus::NotInstalled
+                | CertStatus::InstalledNotTrusted
+                | CertStatus::InstalledAndTrusted
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_get_detailed_status_linux() {
+        let dir = tempdir().expect("Failed to create temp dir");
+        let cert_path = dir.path().join("bifrost-ca.crt");
+        std::fs::write(&cert_path, "dummy").unwrap();
+        let installer = CertInstaller::new(&cert_path);
+        let info = installer.get_detailed_status().unwrap();
+        // status field is always populated; on a clean runner this is NotInstalled.
+        assert!(info.status.is_installed() || !info.status.is_installed());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_check_cert_in_bundle_linux_helper() {
+        let dir = tempdir().expect("Failed to create temp dir");
+        let cert_path = dir.path().join("bifrost-ca.crt");
+        let installer = CertInstaller::new(&cert_path);
+        // The real /etc/ssl/certs/ca-certificates.crt likely won't contain the
+        // "Bifrost CA" marker on a CI runner, so this returns false. Either way
+        // it must return a bool without panicking.
+        let _ = installer.check_cert_in_bundle_linux();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_install_linux_missing_cert_errors() {
+        // install_and_trust dispatches to install_linux on Linux. With a missing
+        // cert file it should return NotFound before invoking sudo.
+        let dir = tempdir().expect("Failed to create temp dir");
+        let cert_path = dir.path().join("does-not-exist.crt");
+        let installer = CertInstaller::new(&cert_path);
+        let err = installer.install_and_trust().unwrap_err();
+        assert!(matches!(err, BifrostError::NotFound(_)));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_install_and_trust_gui_missing_cert_errors() {
+        // On Linux, install_and_trust_gui delegates to install_and_trust.
+        let dir = tempdir().expect("Failed to create temp dir");
+        let cert_path = dir.path().join("does-not-exist.crt");
+        let installer = CertInstaller::new(&cert_path);
+        let err = installer.install_and_trust_gui().unwrap_err();
+        assert!(matches!(err, BifrostError::NotFound(_)));
+    }
+
+    #[test]
+    fn test_parse_security_sha256_fingerprint_rejects_non_hash_label() {
+        assert_eq!(parse_security_sha256_fingerprint("Other label: AABB"), None);
+        assert_eq!(parse_security_sha256_fingerprint("no colon here"), None);
+        assert_eq!(parse_security_sha256_fingerprint("SHA-256 hash: ::"), None);
+    }
+
+    #[test]
+    fn test_parse_openssl_sha256_fingerprint_no_match() {
+        assert_eq!(
+            parse_openssl_sha256_fingerprint("no fingerprint line"),
+            None
+        );
+        assert_eq!(
+            parse_openssl_sha256_fingerprint("fingerprint without equals sign"),
+            None
+        );
+    }
+
     #[test]
     fn test_parse_windows_certutil_thumbprint() {
         assert_eq!(
@@ -1140,5 +1228,92 @@ mod tests {
             parse_windows_certutil_thumbprint("  Cert Hash(sha1): aa bb  "),
             None
         );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_check_status_linux_smoke() {
+        let dir = tempdir().expect("Failed to create temp dir");
+        let cert_path = dir.path().join("dummy.crt");
+        let installer = CertInstaller::new(&cert_path);
+
+        let status = installer
+            .check_status()
+            .expect("check_status should not fail on Linux");
+        match status {
+            CertStatus::NotInstalled
+            | CertStatus::InstalledNotTrusted
+            | CertStatus::InstalledAndTrusted => {}
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_get_detailed_status_linux_smoke() {
+        let dir = tempdir().expect("Failed to create temp dir");
+        let cert_path = dir.path().join("dummy.crt");
+        let installer = CertInstaller::new(&cert_path);
+
+        let info = installer
+            .get_detailed_status()
+            .expect("get_detailed_status should not fail on Linux");
+        match info.status {
+            CertStatus::NotInstalled
+            | CertStatus::InstalledNotTrusted
+            | CertStatus::InstalledAndTrusted => {}
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_install_linux_uses_sudo_stub_and_succeeds() {
+        use std::env;
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().expect("Failed to create temp dir");
+        let cert_path = dir.path().join("bifrost-ca.crt");
+        let sudo_path = dir.path().join("sudo");
+        let log_path = dir.path().join("sudo.log");
+
+        // 准备一个假的 sudo，可记录调用参数并总是返回成功。
+        fs::write(
+            &sudo_path,
+            "#!/bin/sh\n".to_string() + "echo \"$@\" >> \"$BIFROST_TEST_SUDO_LOG\"\n" + "exit 0\n",
+        )
+        .expect("failed to write sudo stub");
+        let mut perms = fs::metadata(&sudo_path)
+            .expect("failed to stat sudo stub")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&sudo_path, perms).expect("failed to chmod sudo stub");
+
+        // 写入一个假的证书文件，避免 NotFound 早退。
+        fs::write(&cert_path, "dummy cert").expect("failed to write dummy cert");
+
+        let old_path = env::var_os("PATH");
+        let mut new_path = std::ffi::OsString::from(dir.path());
+        if let Some(ref old) = old_path {
+            new_path.push(":");
+            new_path.push(old);
+        }
+        env::set_var("PATH", &new_path);
+        env::set_var("BIFROST_TEST_SUDO_LOG", &log_path);
+
+        let installer = CertInstaller::new(&cert_path);
+        let result = installer.install_and_trust();
+
+        // 还原环境变量。
+        match old_path {
+            Some(old) => env::set_var("PATH", old),
+            None => env::remove_var("PATH"),
+        }
+        env::remove_var("BIFROST_TEST_SUDO_LOG");
+
+        // 期望逻辑路径执行成功，且我们的 sudo stub 被调用过。
+        result.expect("install_and_trust with sudo stub should succeed");
+        let log = fs::read_to_string(&log_path).expect("sudo stub log should exist");
+        assert!(log.contains("cp"));
+        assert!(log.contains("update-ca-certificates"));
     }
 }

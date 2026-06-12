@@ -1433,4 +1433,262 @@ mod tests {
         assert!(limiter.is_banned(&ip1));
         assert!(!limiter.is_banned(&ip2));
     }
+
+    #[test]
+    fn access_mode_serde_roundtrip() {
+        for mode in [
+            AccessMode::AllowAll,
+            AccessMode::LocalOnly,
+            AccessMode::Whitelist,
+            AccessMode::Interactive,
+        ] {
+            let json = serde_json::to_string(&mode).unwrap();
+            let back: AccessMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(mode, back);
+        }
+        // Deserialize from alternate spellings + invalid.
+        assert_eq!(
+            serde_json::from_str::<AccessMode>("\"all\"").unwrap(),
+            AccessMode::AllowAll
+        );
+        assert_eq!(
+            serde_json::from_str::<AccessMode>("\"wl\"").unwrap(),
+            AccessMode::Whitelist
+        );
+        assert_eq!(
+            serde_json::from_str::<AccessMode>("\"prompt\"").unwrap(),
+            AccessMode::Interactive
+        );
+        assert!(serde_json::from_str::<AccessMode>("\"bogus\"").is_err());
+        // Default impl.
+        assert_eq!(AccessMode::default(), AccessMode::Interactive);
+    }
+
+    #[test]
+    fn ipv6_private_and_public_ranges() {
+        // Unique local fc00::/7.
+        let ula: IpAddr = "fc00::1".parse().unwrap();
+        assert!(ClientAccessControl::is_private_range(&ula));
+        // Link-local fe80::.
+        let ll: IpAddr = "fe80::1".parse().unwrap();
+        assert!(ClientAccessControl::is_private_range(&ll));
+        // Public IPv6.
+        let pub6: IpAddr = "2001:4860:4860::8888".parse().unwrap();
+        assert!(!ClientAccessControl::is_private_range(&pub6));
+    }
+
+    #[test]
+    fn parse_ip_or_cidr_errors_on_invalid() {
+        let mut ac = ClientAccessControl::with_mode(AccessMode::Whitelist);
+        assert!(ac.add_to_whitelist("not-an-ip").is_err());
+        assert!(ac.add_to_whitelist("999.999.999.999/8").is_err());
+        // IPv6 single address converts to /128 and is accepted.
+        ac.add_to_whitelist("::1").unwrap();
+        assert!(ac.is_in_whitelist(&"::1".parse::<IpAddr>().unwrap()));
+    }
+
+    #[test]
+    fn new_skips_invalid_whitelist_entries() {
+        let config = AccessControlConfig {
+            mode: AccessMode::Whitelist,
+            whitelist: vec!["10.0.0.0/8".to_string(), "garbage".to_string()],
+            allow_lan: false,
+            userpass: None,
+        };
+        let ac = ClientAccessControl::new(config);
+        // Only the valid entry is retained.
+        assert_eq!(ac.whitelist_entries().len(), 1);
+    }
+
+    #[test]
+    fn generation_increments_on_mutations() {
+        let mut ac = ClientAccessControl::with_mode(AccessMode::Whitelist);
+        let g0 = ac.generation();
+        ac.add_to_whitelist("10.0.0.1").unwrap();
+        let g1 = ac.generation();
+        assert!(g1 > g0);
+        ac.set_mode(AccessMode::AllowAll);
+        assert!(ac.generation() > g1);
+        let g2 = ac.generation();
+        ac.set_allow_lan(true);
+        assert!(ac.generation() > g2);
+        assert!(ac.allow_lan());
+        assert_eq!(ac.mode(), AccessMode::AllowAll);
+    }
+
+    #[test]
+    fn remove_from_whitelist_returns_false_when_absent() {
+        let mut ac = ClientAccessControl::with_mode(AccessMode::Whitelist);
+        assert!(!ac.remove_from_whitelist("10.0.0.1").unwrap());
+        assert!(ac.remove_from_whitelist("bad-ip").is_err());
+    }
+
+    #[test]
+    fn temporary_and_session_entries_accessors() {
+        let ac = ClientAccessControl::with_mode(AccessMode::Interactive);
+        let ip: IpAddr = "192.0.2.5".parse().unwrap();
+
+        ac.add_temporary(ip);
+        assert!(ac.temporary_whitelist_entries().contains(&ip));
+        assert!(ac.is_in_temporary_whitelist(&ip));
+        assert!(!ac.remove_temporary(&"192.0.2.99".parse().unwrap()));
+        assert!(ac.remove_temporary(&ip));
+
+        ac.deny_session(ip);
+        assert!(ac.is_session_denied(&ip));
+        assert!(ac.session_denied_entries().contains(&ip));
+        assert!(!ac.remove_session_denied(&"192.0.2.99".parse().unwrap()));
+        assert!(ac.remove_session_denied(&ip));
+        assert!(!ac.is_session_denied(&ip));
+    }
+
+    #[test]
+    fn pending_authorization_lifecycle() {
+        let ac = ClientAccessControl::with_mode(AccessMode::Interactive);
+        let mut rx = ac.subscribe();
+        let ip: IpAddr = "203.0.113.7".parse().unwrap();
+
+        ac.add_pending_authorization(ip);
+        assert_eq!(ac.pending_authorization_count(), 1);
+        // Second call for the same IP increments attempt_count, not a new entry.
+        ac.add_pending_authorization(ip);
+        assert_eq!(ac.pending_authorization_count(), 1);
+        let pendings = ac.get_pending_authorizations();
+        assert_eq!(pendings.len(), 1);
+        assert_eq!(pendings[0].attempt_count, 2);
+        assert_eq!(pendings[0].ip, ip.to_string());
+
+        // The "new" event was broadcast once.
+        let evt = rx.try_recv().expect("new event");
+        assert_eq!(evt.event_type, "new");
+        assert_eq!(evt.total_pending, 1);
+
+        // Approve -> moved to temporary whitelist + "approved" event.
+        assert!(ac.approve_pending(&ip));
+        assert_eq!(ac.pending_authorization_count(), 0);
+        assert!(ac.is_in_temporary_whitelist(&ip));
+        let evt = rx.try_recv().expect("approved event");
+        assert_eq!(evt.event_type, "approved");
+
+        // Approving a non-pending IP returns false.
+        assert!(!ac.approve_pending(&"203.0.113.8".parse().unwrap()));
+    }
+
+    #[test]
+    fn reject_pending_denies_session() {
+        let ac = ClientAccessControl::with_mode(AccessMode::Interactive);
+        let ip: IpAddr = "203.0.113.9".parse().unwrap();
+        ac.add_pending_authorization(ip);
+        assert!(ac.reject_pending(&ip));
+        assert!(ac.is_session_denied(&ip));
+        assert_eq!(ac.pending_authorization_count(), 0);
+        assert!(!ac.reject_pending(&ip));
+    }
+
+    #[test]
+    fn clear_pending_authorizations_empties() {
+        let ac = ClientAccessControl::with_mode(AccessMode::Interactive);
+        ac.add_pending_authorization("203.0.113.1".parse().unwrap());
+        ac.add_pending_authorization("203.0.113.2".parse().unwrap());
+        assert_eq!(ac.pending_authorization_count(), 2);
+        ac.clear_pending_authorizations();
+        assert_eq!(ac.pending_authorization_count(), 0);
+    }
+
+    #[test]
+    fn userpass_config_get_set_and_status() {
+        let ac = ClientAccessControl::with_mode(AccessMode::LocalOnly);
+        assert!(ac.userpass_config().is_none());
+        // Default status when no config.
+        assert_eq!(ac.userpass_status(), UserPassAuthStatus::default());
+
+        let cfg = UserPassAuthConfig {
+            enabled: true,
+            accounts: vec![
+                UserPassAccountConfig {
+                    username: "alice".to_string(),
+                    password: Some("pw".to_string()),
+                    enabled: true,
+                },
+                UserPassAccountConfig {
+                    username: "bob".to_string(),
+                    password: None,
+                    enabled: false,
+                },
+            ],
+            loopback_requires_auth: true,
+        };
+        ac.set_userpass_config(Some(cfg));
+        assert!(ac.userpass_config().is_some());
+
+        // Record a connection and verify status reflects it + has_password.
+        ac.record_userpass_success("alice", 1234);
+        let status = ac.userpass_status();
+        assert!(status.enabled);
+        assert!(status.loopback_requires_auth);
+        assert_eq!(status.accounts.len(), 2);
+        let alice = status
+            .accounts
+            .iter()
+            .find(|a| a.username == "alice")
+            .unwrap();
+        assert!(alice.has_password);
+        assert_eq!(alice.last_connected_at, Some(1234));
+        let bob = status
+            .accounts
+            .iter()
+            .find(|a| a.username == "bob")
+            .unwrap();
+        assert!(!bob.has_password);
+        assert!(!bob.enabled);
+    }
+
+    #[test]
+    fn set_userpass_last_connected_at_retains_only_known_users() {
+        let ac = ClientAccessControl::with_mode(AccessMode::LocalOnly);
+        ac.set_userpass_config(Some(UserPassAuthConfig {
+            enabled: true,
+            accounts: vec![UserPassAccountConfig {
+                username: "alice".to_string(),
+                password: Some("pw".to_string()),
+                enabled: true,
+            }],
+            loopback_requires_auth: false,
+        }));
+
+        let mut map = HashMap::new();
+        map.insert("alice".to_string(), 100u64);
+        map.insert("ghost".to_string(), 200u64); // not a configured account
+        ac.set_userpass_last_connected_at(map);
+
+        let retained = ac.userpass_last_connected_at();
+        assert_eq!(retained.get("alice"), Some(&100));
+        assert!(!retained.contains_key("ghost"));
+    }
+
+    #[test]
+    fn verify_userpass_none_when_disabled_config() {
+        let ac = ClientAccessControl::with_mode(AccessMode::LocalOnly);
+        ac.set_userpass_config(Some(UserPassAuthConfig {
+            enabled: false,
+            accounts: vec![UserPassAccountConfig {
+                username: "alice".to_string(),
+                password: Some("pw".to_string()),
+                enabled: true,
+            }],
+            loopback_requires_auth: false,
+        }));
+        assert_eq!(ac.verify_userpass("alice", "pw"), None);
+        // No userpass at all -> None.
+        let ac2 = ClientAccessControl::with_mode(AccessMode::LocalOnly);
+        assert_eq!(ac2.verify_userpass("x", "y"), None);
+    }
+
+    #[test]
+    fn rate_limiter_default_and_failure_count_unknown() {
+        let limiter = ProxyAuthRateLimiter::default();
+        let ip: IpAddr = "198.51.100.7".parse().unwrap();
+        assert_eq!(limiter.failure_count(&ip), 0);
+        assert!(!limiter.is_banned(&ip));
+    }
 }

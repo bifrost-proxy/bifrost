@@ -1,4 +1,6 @@
-.PHONY: all build build-release clean test lint fmt install-deps dev help setup build-cli
+.PHONY: all build build-release clean test lint fmt install-deps dev help setup build-cli \
+        coverage coverage-unit coverage-e2e coverage-html coverage-json coverage-crate \
+        coverage-gate
 
 # Default target
 all: build
@@ -56,6 +58,40 @@ lint:
 	cargo clippy --workspace -- -D warnings
 	cd web && npm run lint 2>/dev/null || true
 
+# Coverage targets ----------------------------------------------------------
+# Unified unit + integration coverage gate. Fails when any crate drops below
+# its ratcheted floor (goal: 90%) or the workspace aggregate floor.
+coverage: coverage-gate
+
+# Unit + integration coverage only (no E2E binaries built).
+coverage-unit:
+	bash scripts/ci/coverage.sh
+
+# Coverage for the E2E suites (instrumented `bifrost` + `bifrost-e2e` binaries).
+coverage-e2e:
+	bash scripts/ci/coverage-e2e.sh
+
+# Workspace-wide unified report, enforcing the per-crate ratcheted floors
+# (scripts/ci/coverage-thresholds.toml; goal: 90%) plus the workspace floor.
+coverage-gate:
+	bash scripts/ci/coverage-all.sh --json --gate --gaps
+
+# HTML report (output: target/coverage/html/index.html). Skips the gate
+# so a low-coverage report is still browsable.
+coverage-html:
+	bash scripts/ci/coverage-all.sh --html --fail-under 0
+
+# JSON summary printed to stdout (used by CI to ingest coverage metrics).
+coverage-json:
+	bash scripts/ci/coverage-all.sh --json --fail-under 0
+
+# Per-crate coverage helper. Usage: `make coverage-crate CRATE=bifrost-command`.
+coverage-crate:
+	@if [ -z "$(CRATE)" ]; then \
+	  echo "Usage: make coverage-crate CRATE=<crate-name>" >&2; exit 2; \
+	fi
+	bash scripts/ci/coverage-crate.sh $(CRATE) --text --fail-under 90
+
 # Format code
 fmt:
 	cargo fmt --all
@@ -109,6 +145,12 @@ help:
 	@echo "  clean          Clean all build artifacts"
 	@echo "  test           Run all tests"
 	@echo "  test-verbose   Run tests with verbose output"
+	@echo "  coverage       Run unified unit + integration coverage gate (90% line gate)"
+	@echo "  coverage-unit  Unit + integration coverage only"
+	@echo "  coverage-e2e   E2E coverage (instrumented bifrost + bifrost-e2e)"
+	@echo "  coverage-html  Generate HTML coverage report"
+	@echo "  coverage-json  Generate JSON coverage summary"
+	@echo "  coverage-crate Coverage for a single crate (CRATE=<name>)"
 	@echo "  lint           Run linter on all code"
 	@echo "  fmt            Format all code"
 	@echo "  fmt-check      Check code formatting"

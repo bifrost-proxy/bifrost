@@ -154,4 +154,64 @@ mod tests {
         std::fs::remove_file(&file).ok();
         std::fs::remove_dir_all(&roots[0]).ok();
     }
+
+    #[test]
+    fn canonical_path_accessors_and_from_parent() {
+        let cp =
+            CanonicalPath::from_parent(PathBuf::from("/root/sub/file"), 2, "sub/file".to_string());
+        assert_eq!(cp.as_path(), Path::new("/root/sub/file"));
+        assert_eq!(cp.root_index, 2);
+        assert_eq!(cp.rel_posix, "sub/file");
+        assert_eq!(cp.into_path_buf(), PathBuf::from("/root/sub/file"));
+    }
+
+    #[test]
+    fn relative_input_resolves_against_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::write(root.join("rel.txt"), b"x").unwrap();
+        let roots = vec![root.clone()];
+        let res = canonicalize_within_roots(Path::new("rel.txt"), &root, &roots).unwrap();
+        assert_eq!(res.root_index, 0);
+        assert_eq!(res.rel_posix, "rel.txt");
+    }
+
+    #[test]
+    fn missing_path_returns_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let roots = vec![root.clone()];
+        let err =
+            canonicalize_within_roots(&root.join("does-not-exist"), &root, &roots).unwrap_err();
+        assert!(matches!(err, FileAccessError::NotFound { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_escaping_root_is_detected() {
+        let outside = tempfile::tempdir().unwrap();
+        let outside_file = std::fs::canonicalize(outside.path())
+            .unwrap()
+            .join("target");
+        std::fs::write(&outside_file, b"secret").unwrap();
+
+        let root_dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(root_dir.path()).unwrap();
+        let link = root.join("link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside_file, &link).unwrap();
+
+        #[cfg(unix)]
+        {
+            let roots = vec![root.clone()];
+            let err = canonicalize_within_roots(&link, &root, &roots).unwrap_err();
+            assert!(matches!(err, FileAccessError::SymlinkEscape { .. }));
+        }
+    }
+
+    #[test]
+    fn parent_traversal_detection() {
+        assert!(has_parent_traversal(Path::new("/a/../b")));
+        assert!(!has_parent_traversal(Path::new("/a/b/c")));
+    }
 }

@@ -744,6 +744,8 @@ fn set_secure_plist_permissions(path: &Path) -> Result<()> {
         let permissions = std::fs::Permissions::from_mode(0o644);
         std::fs::set_permissions(path, permissions)?;
     }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 

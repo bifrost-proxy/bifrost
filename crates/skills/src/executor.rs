@@ -246,6 +246,13 @@ fn apply_skill_env(command: &mut Command, manifest_env: &BTreeMap<String, String
 mod tests {
     use super::*;
     use crate::model::{SkillManifest, SkillScope};
+    use std::path::PathBuf;
+
+    // Serializes the exec-heavy tests that write a script file and then spawn
+    // it, to avoid ETXTBSY ("Text file busy") races under parallel test runs.
+    // Uses a tokio mutex so the guard can be safely held across the test's
+    // await points (clippy::await_holding_lock).
+    static HARNESS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[tokio::test]
     async fn inline_executor_returns_prompt_payload() {
@@ -292,5 +299,183 @@ mod tests {
         let lines: Vec<_> = stdout.lines().collect();
         assert!(lines.first().is_some_and(|value| !value.is_empty()));
         assert!(lines.get(1).is_some_and(|value| !value.is_empty()));
+    }
+
+    // --- run_process integration via real shell scripts ---------------------
+
+    fn shell_record(dir: &Path, script_name: &str, env: BTreeMap<String, String>) -> SkillRecord {
+        let mut manifest = SkillManifest::minimal_inline("sh-skill", "sh", SkillScope::Repo);
+        manifest.entrypoint = Entrypoint::Shell {
+            script: PathBuf::from(script_name),
+            shell: ShellKind::Sh,
+        };
+        manifest.env = env;
+        SkillRecord {
+            name: manifest.name.clone(),
+            version: manifest.version.clone(),
+            description: manifest.description.clone(),
+            scope: SkillScope::Repo,
+            effective_scope: SkillScope::Repo,
+            shadow_scopes: Vec::new(),
+            enabled: true,
+            path: dir.to_path_buf(),
+            skill_md_path: dir.join("SKILL.md"),
+            checksum: String::new(),
+            manifest,
+        }
+    }
+
+    fn write_script(dir: &Path, name: &str, body: &str) {
+        use std::io::Write;
+        let mut f = std::fs::File::create(dir.join(name)).unwrap();
+        f.write_all(body.as_bytes()).unwrap();
+        f.sync_all().unwrap();
+    }
+
+    #[tokio::test]
+    async fn shell_executor_captures_stdout_and_tool_calls() {
+        let _guard = HARNESS_LOCK.lock().await;
+        let dir = std::env::temp_dir().join(format!("skill-exec-{}", uuid_like()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // The script reads the JSON payload on stdin, echoes a tool_call event
+        // and a plain log line, and exits 0.
+        write_script(
+            &dir,
+            "run.sh",
+            "read line\n\
+             echo '{\"type\":\"tool_call\",\"id\":\"t1\",\"name\":\"search\",\"arguments\":{\"q\":\"x\"}}'\n\
+             echo 'plain line'\n",
+        );
+        let record = shell_record(&dir, "run.sh", BTreeMap::new());
+        let report = SkillExecutor::default()
+            .execute(
+                &record,
+                SkillInvocation {
+                    input: serde_json::json!({"k":"v"}),
+                    timeout_ms: Some(10_000),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(report.exit_code, Some(0));
+        assert!(report.stdout.contains("plain line"));
+        assert_eq!(report.tool_calls.len(), 1);
+        assert_eq!(report.tool_calls[0]["name"], "search");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn shell_executor_captures_stderr_and_exit_code() {
+        let _guard = HARNESS_LOCK.lock().await;
+        let dir = std::env::temp_dir().join(format!("skill-exec-{}", uuid_like()));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_script(&dir, "fail.sh", "read line\necho 'boom' 1>&2\nexit 3\n");
+        let record = shell_record(&dir, "fail.sh", BTreeMap::new());
+        let report = SkillExecutor::default()
+            .execute(
+                &record,
+                SkillInvocation {
+                    input: serde_json::Value::Null,
+                    timeout_ms: Some(10_000),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(report.exit_code, Some(3));
+        assert!(report.stderr.contains("boom"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn shell_executor_passes_manifest_env() {
+        let _guard = HARNESS_LOCK.lock().await;
+        let dir = std::env::temp_dir().join(format!("skill-exec-{}", uuid_like()));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_script(&dir, "env.sh", "read line\necho \"$SKILL_GREETING\"\n");
+        let mut env = BTreeMap::new();
+        env.insert("SKILL_GREETING".to_string(), "hello-skill".to_string());
+        let record = shell_record(&dir, "env.sh", env);
+        let report = SkillExecutor::new(10_000)
+            .execute(
+                &record,
+                SkillInvocation {
+                    input: serde_json::Value::Null,
+                    timeout_ms: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(report.exit_code, Some(0));
+        assert!(report.stdout.contains("hello-skill"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn shell_executor_times_out_on_slow_script() {
+        let _guard = HARNESS_LOCK.lock().await;
+        let dir = std::env::temp_dir().join(format!("skill-exec-{}", uuid_like()));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_script(&dir, "slow.sh", "read line\nsleep 5\n");
+        let record = shell_record(&dir, "slow.sh", BTreeMap::new());
+        let err = SkillExecutor::default()
+            .execute(
+                &record,
+                SkillInvocation {
+                    input: serde_json::Value::Null,
+                    timeout_ms: Some(100),
+                },
+            )
+            .await
+            .expect_err("should time out");
+        assert!(err.contains("timed out"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn process_executor_errors_when_command_missing() {
+        let _guard = HARNESS_LOCK.lock().await;
+        let dir = std::env::temp_dir().join(format!("skill-exec-{}", uuid_like()));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_script(&dir, "noop.sh", "read line\n");
+        let mut record = shell_record(&dir, "noop.sh", BTreeMap::new());
+        // Force a non-existent interpreter via the Node entrypoint pointing at
+        // a binary that does not exist on PATH.
+        record.manifest.entrypoint = Entrypoint::Python {
+            script: PathBuf::from("noop.sh"),
+            python: Some("definitely-not-a-real-interpreter-xyz".to_string()),
+        };
+        let err = SkillExecutor::default()
+            .execute(
+                &record,
+                SkillInvocation {
+                    input: serde_json::Value::Null,
+                    timeout_ms: Some(5_000),
+                },
+            )
+            .await
+            .expect_err("missing interpreter should error");
+        assert!(err.contains("spawn skill entrypoint"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn shell_command_maps_all_kinds() {
+        assert_eq!(shell_command(&ShellKind::Bash), "bash");
+        assert_eq!(shell_command(&ShellKind::Sh), "sh");
+        assert_eq!(shell_command(&ShellKind::Zsh), "zsh");
+        assert_eq!(shell_command(&ShellKind::PowerShell), "powershell");
+    }
+
+    // Lightweight unique suffix without pulling in the uuid crate here.
+    fn uuid_like() -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("{nanos}-{:?}", std::thread::current().id()).replace(['(', ')', ' '], "")
     }
 }

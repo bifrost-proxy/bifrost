@@ -297,6 +297,7 @@ mod tests {
     use crate::model::{ScopeRoot, SkillManifest, SkillScope, TriggerRule};
     use crate::store::{SkillDraft, SkillStore};
     use std::fs;
+    use std::path::PathBuf;
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
 
@@ -367,6 +368,101 @@ mod tests {
             .unwrap();
     }
 
+    #[test]
+    fn reload_all_detects_slash_conflict_between_skills() {
+        let dir = tempdir().unwrap();
+        let root = ScopeRoot::new(SkillScope::Repo, dir.path());
+        // two skills with same slash command in filesystem, bypassing validator
+        for name in ["first", "second"] {
+            let skill_dir = dir.path().join(name);
+            fs::create_dir_all(&skill_dir).unwrap();
+            fs::write(
+                skill_dir.join("SKILL.md"),
+                format!("---\nname: {name}\nslash_command: /dup\n---\n# {name}\n",),
+            )
+            .unwrap();
+        }
+        let store = Arc::new(SkillStore::new(vec![root]));
+        let err = SkillRegistry::without_watcher(store).unwrap_err();
+        assert!(matches!(err, RegistryError::SlashConflict(msg) if msg.contains("/dup")));
+    }
+
+    #[test]
+    fn slugs_from_event_paths_extracts_slug_and_ignores_history() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        // normal skill file
+        let skill_dir = root.join("skill-one");
+        fs::create_dir_all(&skill_dir).unwrap();
+        let skill_file = skill_dir.join("SKILL.md");
+        fs::write(&skill_file, "# Skill").unwrap();
+
+        let slugs = slugs_from_event_paths(
+            std::slice::from_ref(&root),
+            std::slice::from_ref(&skill_file),
+        );
+        assert!(slugs.contains("skill-one"));
+
+        // .history should be ignored
+        let history_dir = root.join(".history");
+        fs::create_dir_all(&history_dir).unwrap();
+        let history_file = history_dir.join("old-skill");
+        fs::write(&history_file, "old").unwrap();
+        let slugs = slugs_from_event_paths(&[root], &[history_file]);
+        assert!(slugs.is_empty());
+    }
+
+    #[test]
+    fn list_slash_commands_returns_sorted_commands() {
+        let dir = tempdir().unwrap();
+        let store = Arc::new(SkillStore::new(vec![ScopeRoot::new(
+            SkillScope::Repo,
+            dir.path(),
+        )]));
+        let mut manifest1 = SkillManifest::minimal_inline("a-skill", "aaa", SkillScope::Repo);
+        manifest1.slash_command = Some("/b".into());
+        manifest1.triggers = vec![TriggerRule::SlashCommand];
+        store
+            .commit(SkillDraft {
+                manifest: manifest1,
+                skill_md: "---\nname: a-skill\nslash_command: /b\n---\n# A".into(),
+                draft_dir: None,
+                assets: Vec::new(),
+            })
+            .unwrap();
+        let mut manifest2 = SkillManifest::minimal_inline("z-skill", "zzz", SkillScope::Repo);
+        manifest2.slash_command = Some("/a".into());
+        manifest2.triggers = vec![TriggerRule::SlashCommand];
+        store
+            .commit(SkillDraft {
+                manifest: manifest2,
+                skill_md: "---\nname: z-skill\nslash_command: /a\n---\n# Z".into(),
+                draft_dir: None,
+                assets: Vec::new(),
+            })
+            .unwrap();
+        let registry = SkillRegistry::without_watcher(store).unwrap();
+        let cmds = registry.list_slash_commands();
+        let cmds_only: Vec<_> = cmds.iter().map(|(cmd, _)| cmd.as_str()).collect();
+        assert_eq!(cmds_only, vec!["/a", "/b"]);
+    }
+
+    #[test]
+    fn default_roots_and_system_skills_cache_dir_build_expected_paths() {
+        let user_home = PathBuf::from("/home/testuser");
+        let work_dir = PathBuf::from("/repo/workdir");
+        let roots = default_roots(user_home.clone(), work_dir.clone());
+        assert_eq!(roots.len(), 4);
+        assert_eq!(roots[0].scope, SkillScope::System);
+        assert_eq!(roots[0].path, system_skills_cache_dir(&user_home));
+        assert_eq!(roots[1].scope, SkillScope::Global);
+        assert!(roots[1].path.ends_with(".agents/skills"));
+        assert_eq!(roots[2].scope, SkillScope::User);
+        assert!(roots[2].path.ends_with(".bifrost/agent/skills"));
+        assert_eq!(roots[3].scope, SkillScope::Repo);
+        assert!(roots[3].path.starts_with(&work_dir));
+    }
+
     fn wait_for(timeout: Duration, mut predicate: impl FnMut() -> bool) {
         let started = Instant::now();
         while started.elapsed() < timeout {
@@ -376,5 +472,139 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert!(predicate());
+    }
+
+    fn make_store(dir: &Path) -> Arc<SkillStore> {
+        Arc::new(SkillStore::new(vec![ScopeRoot::new(SkillScope::Repo, dir)]))
+    }
+
+    #[test]
+    fn list_get_and_store_accessor() {
+        let dir = tempdir().unwrap();
+        let store = make_store(dir.path());
+        commit_skill(&store, "alpha", "alpha desc");
+        commit_skill(&store, "beta", "beta desc");
+        let registry = SkillRegistry::without_watcher(Arc::clone(&store)).unwrap();
+        assert_eq!(registry.list().len(), 2);
+        assert_eq!(registry.get("alpha").unwrap().description, "alpha desc");
+        assert!(registry.get("missing").is_none());
+        // store() returns a clone of the underlying Arc.
+        assert_eq!(registry.store().roots().len(), 1);
+    }
+
+    #[test]
+    fn list_slash_commands_sorted() {
+        let dir = tempdir().unwrap();
+        let store = make_store(dir.path());
+        for (n, s) in [("zeta", "/zeta"), ("alpha", "/alpha")] {
+            let mut m = SkillManifest::minimal_inline(n, n, SkillScope::Repo);
+            m.slash_command = Some(s.to_string());
+            m.triggers = vec![TriggerRule::SlashCommand];
+            store
+                .commit(SkillDraft {
+                    manifest: m,
+                    skill_md: format!("---\nname: {n}\nslash_command: {s}\n---\n# {n}"),
+                    draft_dir: None,
+                    assets: Vec::new(),
+                })
+                .unwrap();
+        }
+        let registry = SkillRegistry::without_watcher(store).unwrap();
+        let cmds = registry.list_slash_commands();
+        assert_eq!(cmds.len(), 2);
+        assert_eq!(cmds[0].0, "/alpha");
+        assert_eq!(cmds[1].0, "/zeta");
+        assert!(cmds[0].1.is_some());
+    }
+
+    #[test]
+    fn reload_one_picks_up_new_and_removes_deleted() {
+        let dir = tempdir().unwrap();
+        let store = make_store(dir.path());
+        commit_skill(&store, "gamma", "gamma");
+        let registry = SkillRegistry::without_watcher(Arc::clone(&store)).unwrap();
+        assert!(registry.get("gamma").is_some());
+
+        // Add a new skill directly, then reload just that slug.
+        commit_skill(&store, "delta", "delta");
+        registry.reload_one("delta").unwrap();
+        assert!(registry.get("delta").is_some());
+
+        // Remove gamma's directory and reload it -> dropped from registry.
+        fs::remove_dir_all(dir.path().join("gamma")).unwrap();
+        registry.reload_one("gamma").unwrap();
+        assert!(registry.get("gamma").is_none());
+    }
+
+    #[test]
+    fn reload_all_detects_slash_conflict() {
+        let dir = tempdir().unwrap();
+        let store = make_store(dir.path());
+        // Write two skills directly to disk that both declare the same slash
+        // command. commit() would reject the second one, so we bypass it and
+        // let reload_all() surface the conflict.
+        for n in ["one", "two"] {
+            let skill_dir = dir.path().join(n);
+            fs::create_dir_all(&skill_dir).unwrap();
+            fs::write(
+                skill_dir.join("SKILL.md"),
+                format!("---\nname: {n}\nslash_command: /dup\n---\n# {n}"),
+            )
+            .unwrap();
+        }
+        let err = SkillRegistry::without_watcher(store).unwrap_err();
+        assert!(matches!(err, RegistryError::SlashConflict(_)));
+    }
+
+    #[test]
+    fn debug_impl_reports_skill_count() {
+        let dir = tempdir().unwrap();
+        let store = make_store(dir.path());
+        commit_skill(&store, "solo", "solo");
+        let registry = SkillRegistry::without_watcher(store).unwrap();
+        let dbg = format!("{registry:?}");
+        assert!(dbg.contains("SkillRegistry"));
+        assert!(dbg.contains("skills: 1"));
+    }
+
+    #[test]
+    fn slugs_from_event_paths_extracts_and_filters() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let skill_dir = root.join("myskill");
+        fs::create_dir_all(&skill_dir).unwrap();
+        let file = skill_dir.join("SKILL.md");
+        fs::write(&file, "x").unwrap();
+        let roots = vec![std::fs::canonicalize(&root).unwrap()];
+
+        let slugs = slugs_from_event_paths(&roots, &[file]);
+        assert!(slugs.contains("myskill"));
+
+        // .history paths are filtered out.
+        let hist = skill_dir.join(".history");
+        fs::create_dir_all(&hist).unwrap();
+        let hist_file = hist.join("old.tar.zst");
+        fs::write(&hist_file, "x").unwrap();
+        let slugs2 = slugs_from_event_paths(&roots, &[hist_file]);
+        assert!(slugs2.contains("myskill"));
+
+        // A path outside any root yields nothing.
+        let outside = slugs_from_event_paths(&roots, &[PathBuf::from("/tmp/elsewhere/x")]);
+        assert!(outside.is_empty());
+    }
+
+    #[test]
+    fn default_roots_and_system_cache_layout() {
+        let home = PathBuf::from("/home/u");
+        let work = PathBuf::from("/work/repo");
+        let roots = default_roots(home.clone(), work.clone());
+        assert_eq!(roots.len(), 4);
+        assert_eq!(roots[0].scope, SkillScope::System);
+        assert_eq!(roots[3].scope, SkillScope::Repo);
+        assert_eq!(roots[3].path, work.join(".agents/skills"));
+        assert_eq!(
+            system_skills_cache_dir(&home),
+            home.join(".bifrost/agent/skills/.system")
+        );
     }
 }

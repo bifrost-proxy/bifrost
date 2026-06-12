@@ -1022,3 +1022,697 @@ async fn test_script_timeout_in_engine() {
         elapsed
     );
 }
+
+// ---------------------------------------------------------------------------
+// Additional coverage tests for the engine lifecycle, execute_* variants,
+// test_script branches, cache invalidation, and the remote-ref URL helpers.
+// ---------------------------------------------------------------------------
+
+fn mk_ctx(name: &str, ty: ScriptType) -> ScriptContext {
+    ScriptContext {
+        request_id: "req".to_string(),
+        script_name: name.to_string(),
+        script_type: ty,
+        values: HashMap::new(),
+        matched_rules: vec![],
+    }
+}
+
+fn mk_engine(dir: &std::path::Path) -> ScriptEngine {
+    ScriptEngine::new(ScriptEngineConfig {
+        scripts_dir: dir.to_path_buf(),
+        timeout_ms: 2000,
+        max_memory: 16 * 1024 * 1024,
+    })
+}
+
+#[tokio::test]
+async fn test_scripts_dir_accessor() {
+    let temp_dir = TempDir::new().unwrap();
+    let engine = mk_engine(temp_dir.path());
+    assert_eq!(engine.scripts_dir(), &temp_dir.path().to_path_buf());
+}
+
+#[tokio::test]
+async fn test_delete_script_then_missing() {
+    let temp_dir = TempDir::new().unwrap();
+    let engine = mk_engine(temp_dir.path());
+    engine.init().await.unwrap();
+
+    engine
+        .save_script(ScriptType::Request, "to-delete", "// x")
+        .await
+        .unwrap();
+    engine
+        .delete_script(ScriptType::Request, "to-delete")
+        .await
+        .unwrap();
+
+    // Deleting again must error NotFound.
+    let err = engine
+        .delete_script(ScriptType::Request, "to-delete")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ScriptError::NotFound(_)));
+}
+
+#[tokio::test]
+async fn test_rename_script_moves_content_and_cleans_dirs() {
+    let temp_dir = TempDir::new().unwrap();
+    let engine = mk_engine(temp_dir.path());
+    engine.init().await.unwrap();
+
+    engine
+        .save_script(ScriptType::Response, "nested/old", "// payload")
+        .await
+        .unwrap();
+    // Prime the cache so the rename takes the cache-move branch.
+    let _ = engine.load_script(ScriptType::Response, "nested/old").await;
+
+    engine
+        .rename_script(ScriptType::Response, "nested/old", "fresh")
+        .await
+        .unwrap();
+
+    let moved = engine
+        .load_script(ScriptType::Response, "fresh")
+        .await
+        .unwrap();
+    assert_eq!(moved, "// payload");
+    // The now-empty nested dir should have been pruned.
+    assert!(!temp_dir.path().join("response/nested").exists());
+}
+
+#[tokio::test]
+async fn test_rename_script_errors() {
+    let temp_dir = TempDir::new().unwrap();
+    let engine = mk_engine(temp_dir.path());
+    engine.init().await.unwrap();
+
+    // Source missing -> NotFound.
+    let err = engine
+        .rename_script(ScriptType::Request, "ghost", "x")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ScriptError::NotFound(_)));
+
+    // Destination already exists -> InvalidName.
+    engine
+        .save_script(ScriptType::Request, "a", "// a")
+        .await
+        .unwrap();
+    engine
+        .save_script(ScriptType::Request, "b", "// b")
+        .await
+        .unwrap();
+    let err = engine
+        .rename_script(ScriptType::Request, "a", "b")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ScriptError::InvalidName(_)));
+}
+
+#[tokio::test]
+async fn test_load_script_not_found_and_invalid_name() {
+    let temp_dir = TempDir::new().unwrap();
+    let engine = mk_engine(temp_dir.path());
+    engine.init().await.unwrap();
+
+    let err = engine
+        .load_script(ScriptType::Request, "missing")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ScriptError::NotFound(_)));
+
+    for bad in ["", "/lead", "trail/", "a..b", "a//b", "weird*name"] {
+        let err = engine
+            .load_script(ScriptType::Request, bad)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ScriptError::InvalidName(_)), "name={bad}");
+    }
+
+    // Over-long name (>128 chars).
+    let long = "a".repeat(129);
+    let err = engine
+        .load_script(ScriptType::Request, &long)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ScriptError::InvalidName(_)));
+}
+
+#[tokio::test]
+async fn test_list_scripts_empty_dir_and_nested() {
+    let temp_dir = TempDir::new().unwrap();
+    let engine = mk_engine(temp_dir.path());
+
+    // Before init the decode dir doesn't exist -> empty vec.
+    let empty = engine.list_scripts(ScriptType::Decode).await.unwrap();
+    assert!(empty.is_empty());
+
+    engine.init().await.unwrap();
+    engine
+        .save_script(ScriptType::Decode, "top", "// 1")
+        .await
+        .unwrap();
+    engine
+        .save_script(ScriptType::Decode, "deep/inner", "// 2")
+        .await
+        .unwrap();
+    let scripts = engine.list_scripts(ScriptType::Decode).await.unwrap();
+    let names: Vec<_> = scripts.iter().map(|s| s.name.clone()).collect();
+    assert!(names.contains(&"top".to_string()));
+    assert!(names.contains(&"deep/inner".to_string()));
+}
+
+#[tokio::test]
+async fn test_execute_request_script_success_modifies_request() {
+    let temp_dir = TempDir::new().unwrap();
+    let engine = mk_engine(temp_dir.path());
+    engine.init().await.unwrap();
+
+    let script = r#"request.method = "PUT"; request.body = "modified";"#;
+    engine
+        .save_script(ScriptType::Request, "mod", script)
+        .await
+        .unwrap();
+
+    let mut request = RequestData {
+        method: "GET".to_string(),
+        ..Default::default()
+    };
+    let ctx = mk_ctx("mod", ScriptType::Request);
+    let result = engine
+        .execute_request_script("mod", &mut request, &ctx)
+        .await;
+    assert!(result.success, "error: {:?}", result.error);
+    assert_eq!(request.method, "PUT");
+    assert_eq!(request.body.as_deref(), Some("modified"));
+}
+
+#[tokio::test]
+async fn test_execute_request_script_missing_returns_failure() {
+    let temp_dir = TempDir::new().unwrap();
+    let engine = mk_engine(temp_dir.path());
+    engine.init().await.unwrap();
+
+    let mut request = RequestData::default();
+    let ctx = mk_ctx("ghost", ScriptType::Request);
+    let result = engine
+        .execute_request_script("ghost", &mut request, &ctx)
+        .await;
+    assert!(!result.success);
+    assert!(result.error.is_some());
+}
+
+#[tokio::test]
+async fn test_execute_request_script_runtime_error() {
+    let temp_dir = TempDir::new().unwrap();
+    let engine = mk_engine(temp_dir.path());
+    engine.init().await.unwrap();
+
+    engine
+        .save_script(ScriptType::Request, "boom", "throw new Error('boom');")
+        .await
+        .unwrap();
+    let mut request = RequestData::default();
+    let ctx = mk_ctx("boom", ScriptType::Request);
+    let result = engine
+        .execute_request_script("boom", &mut request, &ctx)
+        .await;
+    assert!(!result.success);
+    assert!(result.error.unwrap().to_lowercase().contains("boom"));
+}
+
+#[tokio::test]
+async fn test_execute_response_script_success_modifies_response() {
+    let temp_dir = TempDir::new().unwrap();
+    let engine = mk_engine(temp_dir.path());
+    engine.init().await.unwrap();
+
+    let script = r#"response.status = 503; response.body = "down";"#;
+    engine
+        .save_script(ScriptType::Response, "rmod", script)
+        .await
+        .unwrap();
+
+    let mut response = ResponseData {
+        status: 200,
+        ..Default::default()
+    };
+    let ctx = mk_ctx("rmod", ScriptType::Response);
+    let result = engine
+        .execute_response_script("rmod", &mut response, &ctx)
+        .await;
+    assert!(result.success, "error: {:?}", result.error);
+    assert_eq!(response.status, 503);
+    assert_eq!(response.body.as_deref(), Some("down"));
+}
+
+#[tokio::test]
+async fn test_execute_response_script_missing_returns_failure() {
+    let temp_dir = TempDir::new().unwrap();
+    let engine = mk_engine(temp_dir.path());
+    engine.init().await.unwrap();
+
+    let mut response = ResponseData::default();
+    let ctx = mk_ctx("ghost", ScriptType::Response);
+    let result = engine
+        .execute_response_script("ghost", &mut response, &ctx)
+        .await;
+    assert!(!result.success);
+}
+
+#[tokio::test]
+async fn test_execute_with_config_paths() {
+    let temp_dir = TempDir::new().unwrap();
+    let engine = mk_engine(temp_dir.path());
+    engine.init().await.unwrap();
+
+    engine
+        .save_script(
+            ScriptType::Request,
+            "cfgreq",
+            r#"request.method = "DELETE";"#,
+        )
+        .await
+        .unwrap();
+    engine
+        .save_script(ScriptType::Response, "cfgres", r#"response.status = 418;"#)
+        .await
+        .unwrap();
+
+    let cfg = UnifiedConfig::default();
+
+    let mut request = RequestData::default();
+    let ctx = mk_ctx("cfgreq", ScriptType::Request);
+    let r = engine
+        .execute_request_script_with_config("cfgreq", &mut request, &ctx, &cfg)
+        .await;
+    assert!(r.success, "error: {:?}", r.error);
+    assert_eq!(request.method, "DELETE");
+
+    let mut response = ResponseData::default();
+    let ctx = mk_ctx("cfgres", ScriptType::Response);
+    let r = engine
+        .execute_response_script_with_config("cfgres", &mut response, &ctx, &cfg)
+        .await;
+    assert!(r.success, "error: {:?}", r.error);
+    assert_eq!(response.status, 418);
+}
+
+#[tokio::test]
+async fn test_execute_decode_with_config_and_missing() {
+    let temp_dir = TempDir::new().unwrap();
+    let engine = mk_engine(temp_dir.path());
+    engine.init().await.unwrap();
+
+    let script = r#"ctx.output = { code: "0", data: "decoded", msg: "" };"#;
+    engine
+        .save_script(ScriptType::Decode, "dcfg", script)
+        .await
+        .unwrap();
+
+    let cfg = UnifiedConfig::default();
+    let ctx = mk_ctx("dcfg", ScriptType::Decode);
+    let (out, _logs) = engine
+        .execute_decode_script_with_config(
+            "dcfg",
+            "request",
+            &RequestData::default(),
+            b"",
+            &ResponseData::default(),
+            b"",
+            &ctx,
+            &cfg,
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.data, "decoded");
+
+    // Missing decode script -> Err.
+    let err = engine
+        .execute_decode_script(
+            "missing",
+            "request",
+            &RequestData::default(),
+            b"",
+            &ResponseData::default(),
+            b"",
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ScriptError::NotFound(_)));
+}
+
+#[tokio::test]
+async fn test_execute_parser_with_config_local() {
+    let temp_dir = TempDir::new().unwrap();
+    let engine = mk_engine(temp_dir.path());
+    engine.init().await.unwrap();
+
+    let script = r#"ctx.output = { code: "0", data: ctx.phase, msg: "" };"#;
+    engine
+        .save_script(ScriptType::Parser, "pcfg", script)
+        .await
+        .unwrap();
+
+    let cfg = UnifiedConfig::default();
+    let ctx = mk_ctx("pcfg", ScriptType::Parser);
+    let (out, _) = engine
+        .execute_parser_script_with_config(
+            "pcfg",
+            "response",
+            &RequestData::default(),
+            b"",
+            &ResponseData::default(),
+            b"body",
+            &ctx,
+            &cfg,
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.data, "response");
+}
+
+#[tokio::test]
+async fn test_test_script_request_with_modifications() {
+    let temp_dir = TempDir::new().unwrap();
+    let engine = mk_engine(temp_dir.path());
+    engine.init().await.unwrap();
+
+    let ctx = mk_ctx("test", ScriptType::Request);
+    let result = engine
+        .test_script(
+            ScriptType::Request,
+            r#"request.method = "PATCH"; request.body = "b";"#,
+            Some(&RequestData::default()),
+            None,
+            &ctx,
+        )
+        .await;
+    assert!(result.success, "error: {:?}", result.error);
+    let mods = result.request_modifications.expect("should have mods");
+    assert_eq!(mods.method.as_deref(), Some("PATCH"));
+    assert_eq!(mods.body.as_deref(), Some("b"));
+}
+
+#[tokio::test]
+async fn test_test_script_request_no_modifications() {
+    let temp_dir = TempDir::new().unwrap();
+    let engine = mk_engine(temp_dir.path());
+    engine.init().await.unwrap();
+
+    let ctx = mk_ctx("test", ScriptType::Request);
+    let result = engine
+        .test_script(
+            ScriptType::Request,
+            r#"log.info("no change");"#,
+            None,
+            None,
+            &ctx,
+        )
+        .await;
+    assert!(result.success, "error: {:?}", result.error);
+    assert!(result.request_modifications.is_none());
+}
+
+#[tokio::test]
+async fn test_test_script_request_error() {
+    let temp_dir = TempDir::new().unwrap();
+    let engine = mk_engine(temp_dir.path());
+    engine.init().await.unwrap();
+
+    let ctx = mk_ctx("test", ScriptType::Request);
+    let result = engine
+        .test_script(
+            ScriptType::Request,
+            "throw new Error('bad');",
+            None,
+            None,
+            &ctx,
+        )
+        .await;
+    assert!(!result.success);
+    assert!(result.error.is_some());
+}
+
+#[tokio::test]
+async fn test_test_script_response_with_modifications() {
+    let temp_dir = TempDir::new().unwrap();
+    let engine = mk_engine(temp_dir.path());
+    engine.init().await.unwrap();
+
+    let ctx = mk_ctx("test", ScriptType::Response);
+    let result = engine
+        .test_script(
+            ScriptType::Response,
+            r#"response.status = 201; response.body = "ok";"#,
+            None,
+            Some(&ResponseData::default()),
+            &ctx,
+        )
+        .await;
+    assert!(result.success, "error: {:?}", result.error);
+    let mods = result.response_modifications.expect("should have mods");
+    assert_eq!(mods.status, Some(201));
+    assert_eq!(mods.body.as_deref(), Some("ok"));
+}
+
+#[tokio::test]
+async fn test_test_script_decode_branch_with_response_phase() {
+    let temp_dir = TempDir::new().unwrap();
+    let engine = mk_engine(temp_dir.path());
+    engine.init().await.unwrap();
+
+    let ctx = mk_ctx("test", ScriptType::Decode);
+    let response = ResponseData {
+        body: Some("rbody".to_string()),
+        ..Default::default()
+    };
+    let result = engine
+        .test_script(
+            ScriptType::Decode,
+            r#"ctx.output = { code: "0", data: ctx.phase, msg: "" };"#,
+            None,
+            Some(&response),
+            &ctx,
+        )
+        .await;
+    assert!(result.success, "error: {:?}", result.error);
+    let out = result.decode_output.expect("decode output");
+    assert_eq!(out.data, "response");
+}
+
+#[tokio::test]
+async fn test_test_script_decode_error_branch() {
+    let temp_dir = TempDir::new().unwrap();
+    let engine = mk_engine(temp_dir.path());
+    engine.init().await.unwrap();
+
+    let ctx = mk_ctx("test", ScriptType::Decode);
+    let result = engine
+        .test_script(
+            ScriptType::Decode,
+            "throw new Error('decode fail');",
+            Some(&RequestData::default()),
+            None,
+            &ctx,
+        )
+        .await;
+    assert!(!result.success);
+}
+
+#[tokio::test]
+async fn test_test_script_with_config_uses_unified() {
+    let temp_dir = TempDir::new().unwrap();
+    let engine = mk_engine(temp_dir.path());
+    engine.init().await.unwrap();
+
+    let cfg = UnifiedConfig::default();
+    let ctx = mk_ctx("test", ScriptType::Request);
+    let result = engine
+        .test_script_with_config(
+            ScriptType::Request,
+            r#"log.info("hi");"#,
+            None,
+            None,
+            &ctx,
+            &cfg,
+        )
+        .await;
+    assert!(result.success, "error: {:?}", result.error);
+}
+
+#[tokio::test]
+async fn test_invalidate_cache_and_single_entry() {
+    let temp_dir = TempDir::new().unwrap();
+    let engine = mk_engine(temp_dir.path());
+    engine.init().await.unwrap();
+
+    engine
+        .save_script(ScriptType::Request, "c1", "// v1")
+        .await
+        .unwrap();
+    let _ = engine.load_script(ScriptType::Request, "c1").await.unwrap();
+
+    // Overwrite file on disk, bypassing save (so cache is stale).
+    std::fs::write(temp_dir.path().join("request/c1.js"), "// v2").unwrap();
+
+    // Single-entry invalidation forces a re-read.
+    engine
+        .invalidate_script_cache(ScriptType::Request, "c1")
+        .await;
+    let v = engine.load_script(ScriptType::Request, "c1").await.unwrap();
+    assert_eq!(v, "// v2");
+
+    // Full invalidation is a no-op smoke check.
+    engine.invalidate_cache().await;
+}
+
+#[tokio::test]
+async fn test_parser_remote_ref_requires_sha() {
+    let temp_dir = TempDir::new().unwrap();
+    let engine = mk_engine(temp_dir.path());
+    engine.init().await.unwrap();
+
+    let ctx = mk_ctx("https://example.com/p.js", ScriptType::Parser);
+    // Remote ref without sha256 must error before any network call.
+    let err = engine
+        .execute_parser_script(
+            "https://example.com/p.js",
+            "response",
+            &RequestData::default(),
+            b"",
+            &ResponseData::default(),
+            b"",
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("sha256"), "err: {err}");
+}
+
+#[tokio::test]
+async fn test_parser_remote_ref_rejects_http_non_localhost() {
+    let temp_dir = TempDir::new().unwrap();
+    let engine = mk_engine(temp_dir.path());
+    engine.init().await.unwrap();
+
+    let sha = "a".repeat(64);
+    let url = format!("http://evil.example.com/p.js?sha256={sha}");
+    let ctx = mk_ctx(&url, ScriptType::Parser);
+    let err = engine
+        .execute_parser_script(
+            &url,
+            "response",
+            &RequestData::default(),
+            b"",
+            &ResponseData::default(),
+            b"",
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("localhost"), "err: {err}");
+}
+
+#[tokio::test]
+async fn test_parser_remote_ref_rejects_bad_sha_length() {
+    let temp_dir = TempDir::new().unwrap();
+    let engine = mk_engine(temp_dir.path());
+    engine.init().await.unwrap();
+
+    // Valid https + sha present but wrong length triggers the 64-hex check.
+    let url = "https://example.com/p.js?sha256=deadbeef";
+    let ctx = mk_ctx(url, ScriptType::Parser);
+    let err = engine
+        .execute_parser_script(
+            url,
+            "response",
+            &RequestData::default(),
+            b"",
+            &ResponseData::default(),
+            b"",
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("64-character hex"), "err: {err}");
+}
+
+#[tokio::test]
+async fn test_execute_request_script_applies_header_modifications() {
+    let temp_dir = TempDir::new().unwrap();
+    let engine = mk_engine(temp_dir.path());
+    engine.init().await.unwrap();
+
+    let script = r#"request.headers["X-Added"] = "yes";"#;
+    engine
+        .save_script(ScriptType::Request, "hmod", script)
+        .await
+        .unwrap();
+
+    let mut request = RequestData {
+        method: "GET".to_string(),
+        ..Default::default()
+    };
+    let ctx = mk_ctx("hmod", ScriptType::Request);
+    let result = engine
+        .execute_request_script("hmod", &mut request, &ctx)
+        .await;
+    assert!(result.success, "error: {:?}", result.error);
+    assert_eq!(
+        request.headers.get("X-Added").map(|s| s.as_str()),
+        Some("yes")
+    );
+}
+
+#[tokio::test]
+async fn test_execute_response_script_applies_status_text_and_headers() {
+    let temp_dir = TempDir::new().unwrap();
+    let engine = mk_engine(temp_dir.path());
+    engine.init().await.unwrap();
+
+    let script = r#"
+        response.statusText = "Service Unavailable";
+        response.headers["X-R"] = "1";
+    "#;
+    engine
+        .save_script(ScriptType::Response, "rhmod", script)
+        .await
+        .unwrap();
+
+    let mut response = ResponseData {
+        status: 200,
+        status_text: "OK".to_string(),
+        ..Default::default()
+    };
+    let ctx = mk_ctx("rhmod", ScriptType::Response);
+    let result = engine
+        .execute_response_script("rhmod", &mut response, &ctx)
+        .await;
+    assert!(result.success, "error: {:?}", result.error);
+    assert_eq!(response.status_text, "Service Unavailable");
+    assert_eq!(response.headers.get("X-R").map(|s| s.as_str()), Some("1"));
+}
+
+#[tokio::test]
+async fn test_execute_response_script_runtime_error() {
+    let temp_dir = TempDir::new().unwrap();
+    let engine = mk_engine(temp_dir.path());
+    engine.init().await.unwrap();
+
+    engine
+        .save_script(ScriptType::Response, "rboom", "throw new Error('rboom');")
+        .await
+        .unwrap();
+    let mut response = ResponseData::default();
+    let ctx = mk_ctx("rboom", ScriptType::Response);
+    let result = engine
+        .execute_response_script("rboom", &mut response, &ctx)
+        .await;
+    assert!(!result.success);
+    assert!(result.error.unwrap().to_lowercase().contains("rboom"));
+}

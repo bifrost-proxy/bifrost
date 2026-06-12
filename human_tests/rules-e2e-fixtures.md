@@ -433,6 +433,25 @@
 - focused runner 回归通过，说明 `start_with_admin` 仍使用固定 `bifrost_e2e_test_<port>` 目录并保持现有 payload persistence 测试可观察路径。
 - Windows ARM E2E Runner 不再因为上一用例释放时序导致 stale 数据目录清理失败；如出现其他用例失败，应按新日志继续归因，不能再把 `os error 32` 目录清理失败视为未修复。
 
+### TC-REF-15：response trailers buffered body header normalization 回归
+
+**操作步骤**：
+1. 执行响应 trailer header normalization 的 focused 单元测试：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-proxy test_buffered_res_body_mode_removes_content_length_for_trailers --all-features -j1
+   ```
+2. 执行 `bifrost-proxy` 全包测试，覆盖普通 HTTP handler、HTTPS tunnel/MITM 和协议 E2E：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-proxy --all-features -j1
+   ```
+3. 推送后检查 GitHub Actions `CI` run 的 `E2E Rules (Linux)` job，确认 `response_modify/trailers.txt` 不再出现 `Trailer 头不匹配 Expected: X-Trace Actual: 空`。
+
+**预期结果**：
+- focused 单元测试通过，证明 buffered 响应命中 `trailers://` 时使用 `StreamWithTrailers`，不会重新写回 `Content-Length`。
+- `bifrost-proxy` 全包测试通过，普通 HTTP 与 HTTPS tunnel 分支共享同一 trailer body mode 选择。
+- Linux Rules E2E 的 `response_modify/trailers.txt` fixture 请求 `https://test-trailers.local/test` 后，响应头包含 `Trailer: X-Trace`，测试总结失败数为 `0`。
+- 测试不使用正式 `9900` 端口，不修改系统代理。
+
 ## 清理步骤
 
 1. 删除本测试创建的临时数据目录：
@@ -446,6 +465,8 @@
    ```
 
 ## 执行记录
+
+- 2026-06-12：通过。补充并执行 TC-REF-15 的本地 Windows 验证；先执行 `cargo +stable test -p bifrost-proxy test_buffered_res_body_mode_removes_content_length_for_trailers --all-features -j1`，1/1 通过，确认 buffered 响应命中 `trailers://` 时不会保留 `Content-Length` 且 `Trailer: X-Trace` 声明不被 normalize 删除；随后执行 `cargo +stable test -p bifrost-proxy --all-features -j1`，486/486 通过、1 ignored，`protocol_e2e` 18/18 通过，`upstream_http3_e2e` 2/2 通过。Linux `response_modify/trailers.txt` 完整 fixture 由推送后的 GitHub Actions `CI` run 验证。
 
 - 2026-05-01：通过。补充并执行 TC-REF-03，本地先执行 `bash -n e2e-tests/run_all_tests_parallel.sh`，随后执行 `BIFROST_E2E_RULE_JOBS=2 BIFROST_E2E_RULE_JOBS_CAP=2 BIFROST_E2E_RETRY_FAILED_ONCE=1 BIFROST_E2E_MAX_RETRY_SUITES=6 BIFROST_E2E_RETRY_BUDGET_SECS=180 bash e2e-tests/run_all_tests_parallel.sh -c advanced --no-build --retry-failed-once`。runner 使用动态端口启动共享 mock servers（HTTP 49368、HTTPS 49369、WS 49371、WSS 49372、SSE 49373、Proxy 49374），选择代理起始端口 11402，未使用 9900；7 个 advanced 规则套件全部通过，总断言 54/54，结束时正常停止全部 mock servers。Windows 串行 cap 和共享 mock outage 全量重试继续由 GitHub Actions Windows rules job 验证。
 - 2026-05-01：通过。补充并执行 TC-REF-04，本地执行 `bash -n e2e-tests/run_all_tests_parallel.sh` 通过；执行 `rg -n 'log_\$\{idx\}\.txt|test_\$\{idx\}\.log|result_failure_mentions_mock_outage' e2e-tests/run_all_tests_parallel.sh` 确认 outage 识别优先读取 `log_${idx}.txt`，并保留 `test_${idx}.log` fallback；随后执行 `BIFROST_E2E_RULE_JOBS=2 BIFROST_E2E_RULE_JOBS_CAP=2 BIFROST_E2E_RETRY_FAILED_ONCE=1 BIFROST_E2E_MAX_RETRY_SUITES=6 BIFROST_E2E_RETRY_BUDGET_SECS=180 bash e2e-tests/run_all_tests_parallel.sh -c advanced --no-build --retry-failed-once`。runner 使用动态端口启动共享 mock servers（HTTP 60377、HTTPS 60378、WS 60379、WSS 60380、SSE 60381、Proxy 60382），选择代理起始端口 11362，未使用 9900；7 个 advanced 规则套件全部通过，总断言 54/54，结束时正常停止全部 mock servers。Windows 全量 mock outage 失败计数由后续 GitHub Actions Windows rules job 验证。

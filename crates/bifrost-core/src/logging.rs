@@ -462,4 +462,283 @@ mod tests {
         );
         assert_eq!(extract_date_from_filename("bifrost.log", "bifrost"), None);
     }
+
+    #[test]
+    fn log_output_parse_empty_and_unknown() {
+        // Unknown / empty tokens yield no File and no Console.
+        assert!(LogOutput::parse("").is_empty());
+        assert!(LogOutput::parse("garbage").is_empty());
+        // Whitespace + case-insensitivity around "FILE".
+        let outputs = LogOutput::parse("  FILE  ");
+        assert!(outputs.contains(&LogOutput::File));
+        assert!(!outputs.contains(&LogOutput::Console));
+    }
+
+    #[test]
+    fn log_output_eq_clone_hash() {
+        // Exercise derives (PartialEq/Eq/Clone/Hash/Debug).
+        let a = LogOutput::File;
+        let b = a.clone();
+        assert_eq!(a, b);
+        assert_ne!(LogOutput::File, LogOutput::Console);
+        let mut set = std::collections::HashSet::new();
+        set.insert(LogOutput::File);
+        set.insert(LogOutput::File);
+        assert_eq!(set.len(), 1);
+        assert!(format!("{:?}", LogOutput::Console).contains("Console"));
+    }
+
+    #[test]
+    fn extract_date_from_suffix_variants() {
+        assert_eq!(
+            extract_date_from_suffix("bifrost.err.2026-02-22", "bifrost.err"),
+            Some("2026-02-22".to_string())
+        );
+        assert_eq!(extract_date_from_suffix("bifrost.err", "bifrost.err"), None);
+        assert_eq!(
+            extract_date_from_suffix("other.2026-02-22", "bifrost.err"),
+            None
+        );
+    }
+
+    #[test]
+    fn log_config_default_and_builders() {
+        let def = LogConfig::default();
+        assert_eq!(def.level, "info");
+        assert_eq!(def.retention_days, 7);
+        assert_eq!(def.file_prefix, "bifrost");
+        assert_eq!(def.outputs, vec![LogOutput::File]);
+
+        let cfg = LogConfig::new("debug".to_string(), PathBuf::from("/tmp/x"))
+            .with_outputs(vec![LogOutput::Console])
+            .with_retention_days(3);
+        assert_eq!(cfg.level, "debug");
+        assert_eq!(cfg.log_dir, PathBuf::from("/tmp/x"));
+        assert_eq!(cfg.outputs, vec![LogOutput::Console]);
+        assert_eq!(cfg.retention_days, 3);
+        // Debug derive.
+        assert!(format!("{cfg:?}").contains("debug"));
+    }
+
+    #[test]
+    fn build_env_filter_valid_and_invalid() {
+        // Ensure RUST_LOG is unset so we exercise the try_new branch.
+        let saved = std::env::var("RUST_LOG").ok();
+        std::env::remove_var("RUST_LOG");
+
+        assert!(build_env_filter("info").is_ok());
+        assert!(build_env_filter("debug").is_ok());
+        // A target directive with an invalid level name is rejected by EnvFilter.
+        let err = build_env_filter("foo=notalevel");
+        assert!(err.is_err());
+
+        // RUST_LOG set -> uses from_default_env, always Ok regardless of level arg.
+        std::env::set_var("RUST_LOG", "warn");
+        assert!(build_env_filter("anything").is_ok());
+
+        match saved {
+            Some(v) => std::env::set_var("RUST_LOG", v),
+            None => std::env::remove_var("RUST_LOG"),
+        }
+    }
+
+    #[test]
+    fn cleanup_old_logs_removes_old_keeps_new() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        // Old file (way past retention).
+        let old = p.join("bifrost.2000-01-01.log");
+        std::fs::write(&old, b"old").unwrap();
+        // Recent file (today) should be kept.
+        let today = chrono::Utc::now().date_naive().format("%Y-%m-%d");
+        let recent = p.join(format!("bifrost.{today}.log"));
+        std::fs::write(&recent, b"recent").unwrap();
+        // Non-matching prefix should be ignored.
+        let other = p.join("other.2000-01-01.log");
+        std::fs::write(&other, b"other").unwrap();
+
+        cleanup_old_logs(p, "bifrost", 7).unwrap();
+
+        assert!(!old.exists(), "old log should be removed");
+        assert!(recent.exists(), "recent log should be kept");
+        assert!(other.exists(), "non-matching file should be untouched");
+    }
+
+    #[test]
+    fn cleanup_old_logs_missing_dir_is_ok() {
+        let missing = PathBuf::from("/nonexistent/bifrost/logs/path");
+        assert!(cleanup_old_logs(&missing, "bifrost", 7).is_ok());
+    }
+
+    #[test]
+    fn cleanup_old_logs_removes_old_keeps_recent() {
+        let dir = tempfile::tempdir().unwrap();
+        // Old dated .log file (well before any retention window).
+        let old = dir.path().join("bifrost.2000-01-01.log");
+        std::fs::write(&old, b"old").unwrap();
+        // Recent dated .log file (today).
+        let today = chrono::Utc::now().date_naive().format("%Y-%m-%d");
+        let recent = dir.path().join(format!("bifrost.{today}.log"));
+        std::fs::write(&recent, b"new").unwrap();
+        // Unrelated file that must be ignored (wrong prefix/suffix).
+        let other = dir.path().join("unrelated.txt");
+        std::fs::write(&other, b"keep").unwrap();
+        // File with prefix but non-date middle part -> extract returns Some but
+        // parse fails, so it is not removed.
+        let baddate = dir.path().join("bifrost.notadate.log");
+        std::fs::write(&baddate, b"keep").unwrap();
+
+        cleanup_old_logs(dir.path(), "bifrost", 7).unwrap();
+
+        assert!(!old.exists(), "old dated log should be removed");
+        assert!(recent.exists(), "recent dated log should remain");
+        assert!(other.exists(), "unrelated file should remain");
+        assert!(baddate.exists(), "non-date file should remain");
+    }
+
+    #[test]
+    fn extract_date_from_filename_none_paths() {
+        // Wrong prefix.
+        assert!(extract_date_from_filename("other.2020-01-01.log", "bifrost").is_none());
+        // Missing dot separator after prefix.
+        assert!(extract_date_from_filename("bifrost2020.log", "bifrost").is_none());
+        // Missing .log suffix.
+        assert!(extract_date_from_filename("bifrost.2020-01-01.txt", "bifrost").is_none());
+        // Happy path still works.
+        assert_eq!(
+            extract_date_from_filename("bifrost.2020-01-01.log", "bifrost"),
+            Some("2020-01-01".to_string())
+        );
+    }
+
+    #[test]
+    fn cleanup_rotated_files_retention_zero_early_return() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("bifrost.err.2000-01-01");
+        std::fs::write(&f, b"x").unwrap();
+        cleanup_rotated_files(dir.path(), "bifrost.err", 0).unwrap();
+        // Early return -> nothing removed.
+        assert!(f.exists());
+    }
+
+    #[test]
+    fn cleanup_rotated_files_removes_old() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("bifrost.err.2000-01-01");
+        std::fs::write(&old, b"x").unwrap();
+        let today = chrono::Utc::now().date_naive().format("%Y-%m-%d");
+        let recent = dir.path().join(format!("bifrost.err.{today}"));
+        std::fs::write(&recent, b"y").unwrap();
+
+        cleanup_rotated_files(dir.path(), "bifrost.err", 7).unwrap();
+
+        assert!(!old.exists());
+        assert!(recent.exists());
+    }
+
+    #[test]
+    fn cleanup_rotated_files_missing_dir_is_ok() {
+        let missing = PathBuf::from("/nonexistent/bifrost/rotated/path");
+        assert!(cleanup_rotated_files(&missing, "bifrost.err", 7).is_ok());
+    }
+
+    #[test]
+    fn rotate_file_if_day_changed_no_file_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let today = chrono::Utc::now().date_naive();
+        // No current file -> early return, no panic, nothing created.
+        rotate_file_if_day_changed(dir.path(), "bifrost.err", today);
+        assert!(!dir.path().join("bifrost.err").exists());
+    }
+
+    #[test]
+    fn rotate_file_if_day_changed_same_day_keeps_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let current = dir.path().join("bifrost.err");
+        std::fs::write(&current, b"data").unwrap();
+        // Today's date matches the freshly-written file's mtime -> not rotated.
+        let today = chrono::Utc::now().date_naive();
+        rotate_file_if_day_changed(dir.path(), "bifrost.err", today);
+        assert!(current.exists());
+    }
+
+    #[test]
+    fn rotate_file_if_day_changed_rotates_when_day_differs() {
+        let dir = tempfile::tempdir().unwrap();
+        let current = dir.path().join("bifrost.err");
+        std::fs::write(&current, b"data").unwrap();
+        // Pass a future date so the file's mtime (today) != `today` arg -> rotate.
+        let future = chrono::Utc::now().date_naive() + chrono::Duration::days(1);
+        rotate_file_if_day_changed(dir.path(), "bifrost.err", future);
+        // Original moved away.
+        assert!(!current.exists());
+        // A rotated file with the file's modified date now exists.
+        let rotated_count = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .map(|n| n.starts_with("bifrost.err."))
+                    .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(rotated_count, 1);
+    }
+
+    #[test]
+    fn rotate_daemon_err_log_creates_dir_and_runs() {
+        let base = tempfile::tempdir().unwrap();
+        let log_dir = base.path().join("nested").join("logs");
+        // Directory does not exist yet -> create_dir_all path.
+        assert!(!log_dir.exists());
+        rotate_daemon_err_log(&log_dir, 7).unwrap();
+        assert!(log_dir.exists());
+
+        // With an existing err log + retention 0 (skips cleanup) still succeeds.
+        std::fs::write(log_dir.join("bifrost.err"), b"x").unwrap();
+        rotate_daemon_err_log(&log_dir, 0).unwrap();
+        assert!(log_dir.exists());
+    }
+
+    #[test]
+    fn start_log_cleanup_thread_retention_zero_returns() {
+        // retention_days == 0 -> early return, no thread spawned, no panic.
+        start_log_cleanup_thread(PathBuf::from("/tmp"), "bifrost".to_string(), 0);
+    }
+
+    #[test]
+    fn init_logging_with_config_no_outputs_errors() {
+        let cfg = LogConfig {
+            level: "info".to_string(),
+            outputs: vec![],
+            log_dir: PathBuf::from("."),
+            retention_days: 7,
+            file_prefix: "bifrost".to_string(),
+        };
+        let err = init_logging_with_config(&cfg);
+        assert!(err.is_err());
+        let msg = format!("{}", err.err().unwrap());
+        assert!(msg.contains("At least one log output"));
+    }
+
+    #[test]
+    fn init_logging_with_config_invalid_level_errors() {
+        let saved = std::env::var("RUST_LOG").ok();
+        std::env::remove_var("RUST_LOG");
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = LogConfig {
+            level: "foo=notalevel".to_string(),
+            outputs: vec![LogOutput::File],
+            log_dir: dir.path().to_path_buf(),
+            retention_days: 7,
+            file_prefix: "bifrost".to_string(),
+        };
+        // Invalid level fails before any subscriber init.
+        assert!(init_logging_with_config(&cfg).is_err());
+        match saved {
+            Some(v) => std::env::set_var("RUST_LOG", v),
+            None => std::env::remove_var("RUST_LOG"),
+        }
+    }
 }

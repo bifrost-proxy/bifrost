@@ -2310,6 +2310,10 @@ async fn mark_asr_binaries_executable(install_dir: &Path) -> Result<(), String> 
                 .map_err(|error| format!("chmod ASR binary {}: {error}", path.display()))?;
         }
     }
+    #[cfg(not(unix))]
+    {
+        let _ = install_dir;
+    }
     Ok(())
 }
 

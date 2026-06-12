@@ -48,4 +48,28 @@ mod tests {
         assert!(!asr_platform_supported_for("linux", "x86_64"));
         assert!(!asr_platform_supported_for("windows", "x86_64"));
     }
+
+    #[test]
+    fn asr_platform_supported_matches_current_target() {
+        assert_eq!(
+            asr_platform_supported(),
+            asr_platform_supported_for(std::env::consts::OS, std::env::consts::ARCH)
+        );
+    }
+
+    #[test]
+    fn current_platform_reports_consistent_fields() {
+        let platform = current_platform();
+        assert_eq!(
+            platform.supported,
+            asr_platform_supported_for(&platform.os, &platform.arch)
+        );
+        assert_eq!(platform.supported_target, SUPPORTED_ASR_TARGET);
+        if platform.supported {
+            assert!(platform.unsupported_reason.is_none());
+        } else {
+            let reason = platform.unsupported_reason.as_deref().unwrap_or_default();
+            assert!(reason.contains("Apple Silicon macOS"));
+        }
+    }
 }

@@ -5,9 +5,13 @@ export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+source "${PROJECT_DIR}/e2e-tests/test_utils/process.sh"
+
 RULES_FILE="${PROJECT_DIR}/e2e-tests/rules/logging/rule_match_noise.txt"
 TEST_ROOT="${TEST_ROOT:-/tmp/bifrost-e2e-rule-match-logging}"
 BIFROST_BIN="${BIFROST_BIN:-${PROJECT_DIR}/target/debug/bifrost}"
+INFO_PORT="${INFO_PORT:-$(allocate_free_port)}"
+DEBUG_PORT="${DEBUG_PORT:-$(allocate_free_port)}"
 
 INFO_PID=""
 DEBUG_PID=""
@@ -67,7 +71,7 @@ BIFROST_DATA_DIR="${TEST_ROOT}/data-info" \
     RUST_LOG=info \
     "$BIFROST_BIN" --log-output console,file start \
     --host 127.0.0.1 \
-    -p 18887 \
+    -p "$INFO_PORT" \
     --unsafe-ssl \
     --skip-cert-check \
     --no-system-proxy \
@@ -75,8 +79,8 @@ BIFROST_DATA_DIR="${TEST_ROOT}/data-info" \
     >"${TEST_ROOT}/info.log" 2>&1 &
 INFO_PID=$!
 
-wait_for_proxy "$INFO_PID" 18887 "${TEST_ROOT}/info.log"
-INFO_BODY="$(request_via_proxy 18887)"
+wait_for_proxy "$INFO_PID" "$INFO_PORT" "${TEST_ROOT}/info.log"
+INFO_BODY="$(request_via_proxy "$INFO_PORT")"
 test "$INFO_BODY" = "ok"
 sleep 1
 if grep -E "rule matcher candidate matched|rule selected|rules matched for request|matched rule detail" "${TEST_ROOT}/info.log"; then
@@ -92,7 +96,7 @@ BIFROST_DATA_DIR="${TEST_ROOT}/data-debug" \
     RUST_LOG="bifrost_core::rules=debug,bifrost_proxy::rules=trace,info" \
     "$BIFROST_BIN" --log-output console,file start \
     --host 127.0.0.1 \
-    -p 18888 \
+    -p "$DEBUG_PORT" \
     --unsafe-ssl \
     --skip-cert-check \
     --no-system-proxy \
@@ -100,8 +104,8 @@ BIFROST_DATA_DIR="${TEST_ROOT}/data-debug" \
     >"${TEST_ROOT}/debug.log" 2>&1 &
 DEBUG_PID=$!
 
-wait_for_proxy "$DEBUG_PID" 18888 "${TEST_ROOT}/debug.log"
-DEBUG_BODY="$(request_via_proxy 18888)"
+wait_for_proxy "$DEBUG_PID" "$DEBUG_PORT" "${TEST_ROOT}/debug.log"
+DEBUG_BODY="$(request_via_proxy "$DEBUG_PORT")"
 test "$DEBUG_BODY" = "ok"
 sleep 1
 grep -q "rule matcher candidate matched" "${TEST_ROOT}/debug.log"

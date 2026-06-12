@@ -62,4 +62,29 @@ mod tests {
 
         assert!(error.contains("path separator"), "{error}");
     }
+
+    #[test]
+    fn process_alias_executable_rejects_empty_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("bifrost");
+        let error = process_alias_executable(&executable, temp.path(), "").unwrap_err();
+        assert!(error.contains("empty"), "{error}");
+    }
+
+    #[test]
+    fn process_alias_executable_rejects_too_long_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("bifrost");
+        let long = "a".repeat(65);
+        let error = process_alias_executable(&executable, temp.path(), &long).unwrap_err();
+        assert!(error.contains("too long"), "{error}");
+    }
+
+    #[test]
+    fn process_alias_executable_rejects_backslash_and_colon() {
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("bifrost");
+        assert!(process_alias_executable(&executable, temp.path(), "a\\b").is_err());
+        assert!(process_alias_executable(&executable, temp.path(), "a:b").is_err());
+    }
 }

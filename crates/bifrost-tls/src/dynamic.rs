@@ -218,6 +218,41 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_for_domain_invalid_dns_name_errors() {
+        init_crypto_provider();
+        let ca = Arc::new(generate_root_ca().expect("Failed to generate CA"));
+        let generator = DynamicCertGenerator::new(ca);
+
+        // A name with non-ASCII bytes is not a valid IA5String DNS SAN and is
+        // not parseable as an IP, so the DnsName conversion path returns a Tls
+        // error.
+        let err = generator
+            .generate_for_domain("exämple.com")
+            .expect_err("invalid DNS name should error");
+        assert!(matches!(err, BifrostError::Tls(_)));
+    }
+
+    #[test]
+    fn test_generate_for_domain_uses_issuer_fallback_path() {
+        init_crypto_provider();
+        let ca = Arc::new(generate_root_ca().expect("Failed to generate CA"));
+        // Construct a generator manually with the cached issuer and reusable
+        // leaf key disabled so generate_for_domain exercises BOTH fallback
+        // branches (fresh keypair + per-call Issuer construction).
+        let generator = DynamicCertGenerator {
+            ca,
+            ca_issuer: None,
+            leaf_keypair_pkcs8_der: None,
+            leaf_signing_key: None,
+        };
+
+        let cert_key = generator
+            .generate_for_domain("fallback.example.com")
+            .expect("fallback path should still produce a cert");
+        assert_eq!(cert_key.cert.len(), 2);
+    }
+
+    #[test]
     fn test_generate_for_domain_with_rsa_ca() {
         init_crypto_provider();
         let dir = tempdir().expect("Failed to create temp dir");
@@ -247,5 +282,48 @@ mod tests {
 
         leaf.verify_signature(Some(issuer.public_key()))
             .expect("leaf certificate should verify against RSA issuer");
+    }
+
+    #[test]
+    fn test_generate_for_unusual_dns_like_input_still_succeeds() {
+        init_crypto_provider();
+        let ca = Arc::new(generate_root_ca().expect("Failed to generate CA"));
+        let generator = DynamicCertGenerator::new(ca);
+
+        let cert_key = generator
+            .generate_for_domain("not a valid domain name")
+            .expect("generator should be robust to unusual hostnames");
+        assert_eq!(cert_key.cert.len(), 2);
+    }
+
+    #[test]
+    fn test_generate_for_domain_uses_fallback_leaf_keypair_when_cache_missing() {
+        init_crypto_provider();
+        let ca = Arc::new(generate_root_ca().expect("Failed to generate CA"));
+        let mut generator = DynamicCertGenerator::new(ca);
+
+        // Force slow path that generates a fresh keypair for each certificate.
+        generator.leaf_keypair_pkcs8_der = None;
+        generator.leaf_signing_key = None;
+
+        let cert_key = generator
+            .generate_for_domain("fallback.example.com")
+            .expect("Failed to generate certificate with fallback keypair");
+        assert_eq!(cert_key.cert.len(), 2);
+    }
+
+    #[test]
+    fn test_generate_for_domain_without_cached_issuer_falls_back_to_der_path() {
+        init_crypto_provider();
+        let ca = Arc::new(generate_root_ca().expect("Failed to generate CA"));
+        let mut generator = DynamicCertGenerator::new(ca);
+
+        // Force fallback path that reconstructs Issuer from CA DER each time.
+        generator.ca_issuer = None;
+
+        let cert_key = generator
+            .generate_for_domain("no-issuer.example.com")
+            .expect("Failed to generate certificate without cached issuer");
+        assert_eq!(cert_key.cert.len(), 2);
     }
 }

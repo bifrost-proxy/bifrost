@@ -24,6 +24,17 @@ pub(in crate::proxy::http) fn streaming_res_body_mode(
     }
 }
 
+pub(in crate::proxy::http) fn buffered_res_body_mode(
+    content_length: usize,
+    has_trailers: bool,
+) -> BodyMode {
+    if has_trailers {
+        BodyMode::StreamWithTrailers
+    } else {
+        BodyMode::Known(content_length)
+    }
+}
+
 pub(in crate::proxy::http) fn is_no_body_response(status: StatusCode, method: &str) -> bool {
     status.is_informational()
         || status == StatusCode::NO_CONTENT

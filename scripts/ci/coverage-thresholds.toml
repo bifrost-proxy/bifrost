@@ -1,0 +1,117 @@
+# Bifrost coverage thresholds (line coverage %).
+#
+# This file is the contract enforced by `scripts/ci/coverage-gate.py`.
+#
+# How it works
+# ------------
+#   * `default` is the target every crate is expected to reach (the project
+#     goal is 90%).
+#   * Each `[crates.<name>]` entry is a *floor* (ratchet) for that crate. The
+#     gate fails if a crate drops below its floor, which prevents regressions
+#     while crates are being driven up toward `default`.
+#   * To raise the bar for a crate, add tests, re-run coverage, then bump its
+#     `min` here. Never lower a floor without explicit justification.
+#
+# Workflow to reach 90%
+# ---------------------
+#   1. Run:   bash scripts/ci/coverage-all.sh --json --output-dir target/coverage
+#   2. Run:   python3 scripts/ci/coverage-gate.py target/coverage/coverage.json --gaps
+#      -> prints the crates/files furthest below target, with uncovered line
+#         counts, so you know exactly where to add tests.
+#   3. Add tests for the listed files, re-run, bump the crate's `min` here.
+#   4. Repeat until every crate's `min` >= 90, then the floors == the goal.
+
+[settings]
+# Project-wide goal. The gate also enforces an aggregate workspace floor.
+default = 90.0
+# Aggregate (workspace-wide) line coverage floor.
+workspace_min = 55.0
+# When true, the gate fails if measured coverage exceeds a crate floor by more
+# than `ratchet_slack` without the floor being updated (keeps floors honest).
+# Disabled by default to avoid noisy failures.
+enforce_ratchet_up = false
+ratchet_slack = 5.0
+
+# ---------------------------------------------------------------------------
+# Per-crate floors.
+#
+# These are seeded conservatively from the current baseline so CI goes green
+# immediately, then ratcheted up as tests are added. Crates already at/above
+# 90 are pinned at 90.
+# ---------------------------------------------------------------------------
+[crates.bifrost-command]
+min = 90.0   # measured 98.3% after tests added
+
+[crates.bifrost-tls]
+# Reached 91.5% on Linux CI. ca.rs/config.rs/dynamic.rs/cache.rs/sni.rs all
+# exercised via rcgen-generated CA + leaf certs, fallback issuer/keypair paths,
+# and bad-CA error closures. Residual gap is install.rs macOS/Windows-only
+# keychain/certutil bodies (#[cfg(target_os=...)] skeletons counted on Linux)
+# plus the two NoVerifier tls12/tls13 one-liners (DigitallySignedStruct::new is
+# crate-private, so they can't be invoked directly).
+min = 90.0
+
+[crates.bifrost-core]
+# Reached 89.4% on Linux CI; reachable (testable) code is at 95.9%. The residual
+# ~1400 uncovered lines live entirely in four files that cannot be exercised in a
+# Linux in-process harness:
+#   * system_proxy.rs / system_proxy_launchd.rs — #[cfg(target_os = "macos")]
+#     bodies (stripped on Linux but still counted as coverable; covered on macOS).
+#   * version_check.rs — *_sync/*_async GitHub network fetchers (need live net).
+#   * logging.rs — tracing_subscriber global init + file-appender setup (the
+#     global subscriber can only initialize once per process).
+# Floor pinned just below the achieved value to ratchet against regressions.
+min = 89.0
+
+[crates.bifrost-proxy]
+min = 0.0
+
+[crates.bifrost-admin]
+min = 0.0
+
+[crates.agent]
+min = 0.0
+
+[crates.bifrost-cli]
+min = 0.0
+
+[crates.bifrost-storage]
+# Reached 94.5% on Linux CI. config_manager/values/rules/config/state/
+# unified_config all exercised via tempdir-backed round-trips, serde default
+# fallbacks, and full update_* + migration paths. Residual gap is the macOS
+# rename-fallback branch in remote_shell.rs (EINVAL recovery, never hit on
+# Linux) plus the env/home_dir fallback in data_dir.rs (global RwLock state).
+min = 90.0
+
+[crates.bifrost-sync]
+# Reached 94.0% on Linux CI. types/client/manager/normalize all >=90%: HTTP
+# client decode + status branches driven by loopback canned-response fixtures,
+# and sync_once/tick end-to-end flows driven by a FakeApi routing server.
+min = 90.0
+
+[crates.bifrost-power]
+# Linux CI baseline 84.5%. The remaining uncovered lines are macOS-only IOKit
+# acquire paths (#[cfg(target_os = "macos")]) plus test-internal panic arms
+# that never fire on Linux; they are covered on macOS CI.
+min = 84.0
+
+[crates.bifrost-device]
+# Reached 92.4% on Linux CI via fake-adb / fake-cfgutil shell harnesses. The
+# residual gap is macOS-only ioreg discovery + Apple Configurator detection,
+# which is gated behind cfg!(target_os = "macos") runtime checks.
+min = 90.0
+
+[crates.bifrost-asr]
+min = 0.0
+
+[crates.bifrost-script]
+min = 0.0
+
+[crates.skills]
+# Reached 95.4% on Linux CI. All modules (executor/validator/store/registry/
+# authoring/packager/tool_bridge) exercised via real shell-script harnesses,
+# tempdir-backed store round-trips, and full authoring state-machine paths.
+min = 90.0
+[crates.bifrost-e2e]
+# Linux CI baseline is 50.68%; ratchet upward as e2e harness coverage grows.
+min = 50.0

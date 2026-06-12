@@ -66,6 +66,7 @@ use crate::process::{
     runtime_system_proxy_host, write_runtime_info, RuntimeSystemProxySnapshot,
 };
 
+#[cfg(unix)]
 const ORPHAN_STARTUP_GRACE_MS: u64 = 200;
 #[cfg(unix)]
 const PORT_RELEASE_TIMEOUT_SECS: u64 = 10;
@@ -85,12 +86,18 @@ pub struct RestartOptions {
 pub fn run_restart(opts: RestartOptions) -> BifrostResult<()> {
     #[cfg(not(unix))]
     {
-        let _ = opts;
-        return Err(bifrost_core::BifrostError::Config(
+        let RestartOptions {
+            port,
+            host,
+            log_level,
+            force,
+        } = opts;
+        let _ = (port, host, log_level, force);
+        Err(bifrost_core::BifrostError::Config(
             "bifrost restart is not supported on this platform yet. \
              Please run `bifrost stop` followed by `bifrost start --daemon` manually."
                 .to_string(),
-        ));
+        ))
     }
 
     #[cfg(unix)]

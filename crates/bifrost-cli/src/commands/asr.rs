@@ -3017,6 +3017,10 @@ fn mark_cli_binaries_executable(install: &Path) -> Result<()> {
             })?;
         }
     }
+    #[cfg(not(unix))]
+    {
+        let _ = install;
+    }
     Ok(())
 }
 

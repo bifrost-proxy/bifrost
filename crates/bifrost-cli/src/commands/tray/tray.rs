@@ -97,15 +97,13 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
         _ => &icon_stopped,
     };
 
-    let mut builder = TrayIconBuilder::new()
+    let builder = TrayIconBuilder::new()
         .with_menu(Box::new(native_menu.menu.clone()))
         .with_tooltip(state_tooltip(state))
         .with_icon(initial_icon.clone());
 
     #[cfg(target_os = "macos")]
-    {
-        builder = builder.with_icon_as_template(true);
-    }
+    let builder = builder.with_icon_as_template(true);
 
     let tray_icon = builder
         .build()

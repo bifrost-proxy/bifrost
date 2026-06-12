@@ -10,6 +10,7 @@ use bifrost_agent::types::ToolDefinition;
 use bifrost_agent::{AgentSession, ToolRegistry};
 use std::fs;
 
+#[cfg(not(windows))]
 fn session_id_value_from_exec_json(output: &str) -> serde_json::Value {
     let value: serde_json::Value = serde_json::from_str(output).expect("exec json output");
     value["session_id"].clone()
@@ -191,10 +192,35 @@ async fn exec_command_tool_works_end_to_end() {
         )
         .await;
     assert!(completed.success, "{}", completed.output);
-    let completed_json: serde_json::Value =
+    let mut completed_json: serde_json::Value =
         serde_json::from_str(&completed.output).expect("completed exec json");
+    let mut completed_output = completed_json["output"].as_str().unwrap_or("").to_string();
+    if completed_json["exit_code"].is_null() {
+        let completed_session_id = completed_json["session_id"].clone();
+        for _ in 0..20 {
+            let poll = registry
+                .execute(
+                    "write_stdin",
+                    &serde_json::json!({
+                        "session_id": completed_session_id,
+                        "chars": "",
+                        "yield_time_ms": 100,
+                        "max_output_tokens": 1000,
+                    })
+                    .to_string(),
+                    work_dir.path(),
+                )
+                .await;
+            assert!(poll.success, "{}", poll.output);
+            completed_json = serde_json::from_str(&poll.output).expect("completed poll json");
+            completed_output.push_str(completed_json["output"].as_str().unwrap_or(""));
+            if !completed_json["exit_code"].is_null() {
+                break;
+            }
+        }
+    }
     assert_eq!(completed_json["exit_code"], 0);
-    assert_eq!(completed_json["output"], "exec-ok");
+    assert_eq!(completed_output, "exec-ok");
     assert!(completed_json["session_id"].is_null());
 
     let long_running = registry

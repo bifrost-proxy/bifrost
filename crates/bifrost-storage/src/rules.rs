@@ -1059,6 +1059,53 @@ mod tests {
     }
 
     #[test]
+    fn test_load_all_with_subdirs_filtered_respects_valid_subdirs() {
+        use std::collections::HashSet;
+
+        let (temp_dir, storage) = setup();
+
+        storage
+            .save(&RuleFile::new(
+                "local",
+                "local.example.com host://127.0.0.1:3000",
+            ))
+            .unwrap();
+
+        let group_a_dir = temp_dir.path().join("group-a");
+        let group_a_storage = RulesStorage::with_dir(group_a_dir).unwrap();
+        group_a_storage
+            .save(&RuleFile::new(
+                "group-a-rule",
+                "group-a.example.com host://127.0.0.1:4000",
+            ))
+            .unwrap();
+
+        let group_b_dir = temp_dir.path().join("group-b");
+        let group_b_storage = RulesStorage::with_dir(group_b_dir).unwrap();
+        group_b_storage
+            .save(&RuleFile::new(
+                "group-b-rule",
+                "group-b.example.com host://127.0.0.1:5000",
+            ))
+            .unwrap();
+
+        let mut valid = HashSet::new();
+        valid.insert("group-a".to_string());
+
+        let all = storage
+            .load_all_with_subdirs_filtered(Some(&valid))
+            .unwrap();
+
+        let names: Vec<_> = all.iter().map(|r| r.name.as_str()).collect();
+        assert!(names.contains(&"local"));
+        assert!(names.contains(&"group-a-rule"));
+        assert!(!names.contains(&"group-b-rule"));
+
+        let group_a_rule = all.iter().find(|r| r.name == "group-a-rule").unwrap();
+        assert_eq!(group_a_rule.group.as_deref(), Some("group-a"));
+    }
+
+    #[test]
     fn test_synced_rule_becomes_modified_after_local_change() {
         let (_temp_dir, storage) = setup();
         let mut rule = RuleFile::new("demo", "example.com host://127.0.0.1:3000");
@@ -1121,5 +1168,138 @@ mod tests {
         let enabled_after = storage.load_enabled().unwrap();
         assert_eq!(enabled_after.len(), 1);
         assert_eq!(enabled_after[0].name, "other-rule");
+    }
+
+    #[test]
+    fn test_rule_file_builders_and_touch() {
+        let mut rule = RuleFile::new("r", "c")
+            .with_enabled(false)
+            .with_sort_order(7)
+            .with_description(Some("desc".to_string()))
+            .with_group(Some("grp".to_string()));
+        assert!(!rule.enabled);
+        assert_eq!(rule.sort_order, 7);
+        assert_eq!(rule.description, Some("desc".to_string()));
+        assert_eq!(rule.group, Some("grp".to_string()));
+
+        let before = rule.updated_at.clone();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        rule.touch();
+        assert_ne!(rule.updated_at, before);
+    }
+
+    #[test]
+    fn test_touch_local_change_resets_when_not_remote() {
+        let mut rule = RuleFile::new("r", "c");
+        // Pretend it had been marked synced previously but with no remote_id.
+        rule.sync.status = RuleSyncStatus::Synced;
+        rule.sync.last_synced_at = Some("x".to_string());
+        rule.touch_local_change();
+        assert_eq!(rule.sync.status, RuleSyncStatus::LocalOnly);
+        assert!(rule.sync.last_synced_at.is_none());
+    }
+
+    #[test]
+    fn test_touch_local_change_marks_modified_when_remote() {
+        let mut rule = RuleFile::new("r", "c");
+        rule.mark_synced("rid", "uid", "ca", "ua");
+        rule.touch_local_change();
+        assert_eq!(rule.sync.status, RuleSyncStatus::Modified);
+        // remote_id is preserved.
+        assert_eq!(rule.sync.remote_id, Some("rid".to_string()));
+    }
+
+    #[test]
+    fn test_sync_status_conversions_roundtrip() {
+        use bifrost_core::bifrost_file::RuleSyncStatus as B;
+        for status in [
+            RuleSyncStatus::LocalOnly,
+            RuleSyncStatus::Synced,
+            RuleSyncStatus::Modified,
+        ] {
+            let to_b: B = status.into();
+            let back: RuleSyncStatus = to_b.into();
+            assert_eq!(status, back);
+        }
+    }
+
+    #[test]
+    fn test_content_hash_and_reference_key() {
+        let h = content_hash("hello");
+        assert!(h.starts_with("sha256:"));
+
+        let plain = RuleFile::new("name", "c");
+        assert_eq!(rule_reference_key(&plain), "name");
+
+        let grouped = RuleFile::new("name", "c").with_group(Some(" grp ".to_string()));
+        assert_eq!(rule_reference_key(&grouped), "grp/name");
+
+        let blank_group = RuleFile::new("name", "c").with_group(Some("   ".to_string()));
+        assert_eq!(rule_reference_key(&blank_group), "name");
+    }
+
+    #[test]
+    fn test_build_rule_reference_catalog() {
+        let rules = [
+            RuleFile::new("a", "ca"),
+            RuleFile::new("b", "cb").with_group(Some("g".to_string())),
+        ];
+        let catalog = build_rule_reference_catalog(rules.iter());
+        assert_eq!(catalog.get("a"), Some(&"ca".to_string()));
+        assert_eq!(catalog.get("g/b"), Some(&"cb".to_string()));
+    }
+
+    #[test]
+    fn test_set_sort_order_and_update_content() {
+        let (_temp_dir, storage) = setup();
+        storage.save(&RuleFile::new("r", "old")).unwrap();
+
+        storage.set_sort_order("r", 42).unwrap();
+        assert_eq!(storage.load("r").unwrap().sort_order, 42);
+
+        storage
+            .update_content("r", "new content".to_string())
+            .unwrap();
+        assert_eq!(storage.load("r").unwrap().content, "new content");
+    }
+
+    #[test]
+    fn test_load_legacy_json_migrates_to_bifrost() {
+        let (temp_dir, storage) = setup();
+        // Write a legacy raw .json (unencoded name) directly.
+        fs::write(
+            temp_dir.path().join("legacyrule.json"),
+            r#"{"name":"legacyrule","content":"legacy.example.com host://127.0.0.1","enabled":false}"#,
+        )
+        .unwrap();
+
+        let rule = storage.load("legacyrule").unwrap();
+        assert_eq!(rule.name, "legacyrule");
+        assert!(!rule.enabled);
+        // After migration, the .bifrost file exists and the .json is removed.
+        assert!(temp_dir.path().join("legacyrule.bifrost").exists());
+        assert!(!temp_dir.path().join("legacyrule.json").exists());
+    }
+
+    #[test]
+    fn test_default_rules_storage_smoke() {
+        // Exercise the From<&RuleFile> for RuleSummary conversion directly.
+        let rule = RuleFile::new("s", "line1\n\n# comment\nline2")
+            .with_sort_order(3)
+            .with_description(Some("d".to_string()));
+        let summary = RuleSummary::from(&rule);
+        assert_eq!(summary.name, "s");
+        assert_eq!(summary.rule_count, 2);
+        assert_eq!(summary.sort_order, 3);
+        assert_eq!(summary.description, Some("d".to_string()));
+    }
+
+    #[test]
+    fn test_ensure_sync_metadata_fills_empty_rule_id() {
+        let mut rule = RuleFile::new("r", "c");
+        rule.sync.rule_id = "".to_string();
+        let changed = ensure_sync_metadata(&mut rule);
+        assert!(changed);
+        assert!(rule.sync.rule_id.starts_with("rl_"));
     }
 }

@@ -131,3 +131,103 @@ pub struct ValidationResult {
     #[serde(default)]
     pub script_references: Vec<ScriptReference>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_error_new_sets_columns_from_content_len() {
+        let err = ParseError::new(3, "hello", "boom");
+        assert_eq!(err.line, 3);
+        assert_eq!(err.start_column, 1);
+        assert_eq!(err.end_column, 5);
+        assert_eq!(err.message, "boom");
+        assert_eq!(err.severity, ParseErrorSeverity::Error);
+        assert!(err.suggestion.is_none());
+        assert!(err.code.is_none());
+        assert!(err.related_info.is_none());
+        assert!(err.fixes.is_empty());
+    }
+
+    #[test]
+    fn parse_error_new_empty_content_floors_to_one() {
+        let err = ParseError::new(1, "", "msg");
+        assert_eq!(err.end_column, 1);
+    }
+
+    #[test]
+    fn parse_error_with_range_sets_explicit_columns() {
+        let err = ParseError::with_range(7, 2, 9, "ranged");
+        assert_eq!(err.line, 7);
+        assert_eq!(err.start_column, 2);
+        assert_eq!(err.end_column, 9);
+        assert_eq!(err.message, "ranged");
+    }
+
+    #[test]
+    fn parse_error_builder_chain_sets_all_fields() {
+        let info = VariableInfo {
+            name: "v".into(),
+            source: "src".into(),
+            defined_at: Some(4),
+        };
+        let fix = CodeFix {
+            title: "fix it".into(),
+            range: Some((1, 2)),
+            new_text: "replacement".into(),
+        };
+        let err = ParseError::new(1, "x", "m")
+            .with_severity(ParseErrorSeverity::Warning)
+            .with_suggestion("try this")
+            .with_code("E001")
+            .with_related_info(info.clone())
+            .with_fix(fix.clone());
+
+        assert_eq!(err.severity, ParseErrorSeverity::Warning);
+        assert_eq!(err.suggestion.as_deref(), Some("try this"));
+        assert_eq!(err.code.as_deref(), Some("E001"));
+        assert_eq!(err.related_info.as_ref().unwrap().name, "v");
+        assert_eq!(err.fixes.len(), 1);
+        assert_eq!(err.fixes[0].title, "fix it");
+    }
+
+    #[test]
+    fn parse_error_with_fixes_replaces_vec() {
+        let fixes = vec![
+            CodeFix {
+                title: "a".into(),
+                range: None,
+                new_text: "x".into(),
+            },
+            CodeFix {
+                title: "b".into(),
+                range: None,
+                new_text: "y".into(),
+            },
+        ];
+        let err = ParseError::new(1, "x", "m").with_fixes(fixes);
+        assert_eq!(err.fixes.len(), 2);
+        assert_eq!(err.fixes[1].title, "b");
+    }
+
+    #[test]
+    fn parse_result_and_validation_result_defaults() {
+        let pr = ParseResult::default();
+        assert!(pr.rules.is_empty());
+        assert!(pr.errors.is_empty());
+
+        let vr = ValidationResult::default();
+        assert!(!vr.valid);
+        assert_eq!(vr.rule_count, 0);
+        assert!(vr.script_references.is_empty());
+    }
+
+    #[test]
+    fn severity_serializes_lowercase() {
+        let json = serde_json::to_string(&ParseErrorSeverity::Hint).unwrap();
+        assert_eq!(json, "\"hint\"");
+        let back: ParseErrorSeverity = serde_json::from_str("\"info\"").unwrap();
+        assert_eq!(back, ParseErrorSeverity::Info);
+    }
+}

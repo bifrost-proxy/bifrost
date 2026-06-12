@@ -221,4 +221,85 @@ mod tests {
         assert_eq!(map.get("key1"), Some(&"value1".to_string()));
         assert_eq!(map.get("key2"), Some(&"value2".to_string()));
     }
+
+    #[test]
+    fn test_memory_store_from_iter() {
+        let store = MemoryValueStore::from_iter([("a", "1"), ("b", "2")]);
+        assert_eq!(store.get("a"), Some("1".to_string()));
+        assert_eq!(store.get("b"), Some("2".to_string()));
+        assert_eq!(store.len(), 2);
+    }
+
+    #[test]
+    fn test_memory_store_default_is_empty() {
+        let store = MemoryValueStore::default();
+        assert!(store.is_empty());
+        assert_eq!(store.len(), 0);
+        assert!(store.list().is_empty());
+    }
+
+    #[test]
+    fn test_composite_default_and_empty() {
+        let composite = CompositeValueStore::default();
+        assert!(composite.is_empty());
+        assert_eq!(composite.len(), 0);
+        assert_eq!(composite.get("x"), None);
+        assert!(composite.list().is_empty());
+        assert!(composite.as_hashmap().is_empty());
+    }
+
+    #[test]
+    fn test_composite_add_and_prepend_layer() {
+        let mut base = MemoryValueStore::new();
+        base.set("shared", "base".to_string());
+        base.set("base_only", "b".to_string());
+
+        let mut top = MemoryValueStore::new();
+        top.set("shared", "top".to_string());
+
+        let mut composite = CompositeValueStore::new();
+        composite.add_layer(create_shared_store(base));
+        // prepend pushes the higher-priority layer to the front
+        composite.prepend_layer(create_shared_store(top));
+
+        assert_eq!(composite.get("shared"), Some("top".to_string()));
+        assert_eq!(composite.get("base_only"), Some("b".to_string()));
+        assert!(composite.contains("shared"));
+        assert!(!composite.contains("missing"));
+    }
+
+    #[test]
+    fn test_composite_set_remove_and_list() {
+        let first = create_shared_store(MemoryValueStore::new());
+        let second = create_shared_store(MemoryValueStore::from_iter([("only_second", "s")]));
+
+        let mut composite = CompositeValueStore::new()
+            .with_layer(first)
+            .with_layer(second);
+
+        // set writes to the first layer
+        composite.set("k", "v".to_string());
+        assert_eq!(composite.get("k"), Some("v".to_string()));
+
+        // list merges all layers
+        let map = composite.as_hashmap();
+        assert_eq!(map.get("k"), Some(&"v".to_string()));
+        assert_eq!(map.get("only_second"), Some(&"s".to_string()));
+        assert_eq!(composite.len(), 2);
+
+        // remove operates on the first layer
+        assert_eq!(composite.remove("k"), Some("v".to_string()));
+        assert_eq!(composite.get("k"), None);
+        // removing a key that only lives in a non-first layer returns None
+        assert_eq!(composite.remove("only_second"), None);
+    }
+
+    #[test]
+    fn test_composite_empty_set_remove_noop() {
+        let mut composite = CompositeValueStore::new();
+        // no layers: set is a no-op, remove returns None
+        composite.set("k", "v".to_string());
+        assert_eq!(composite.get("k"), None);
+        assert_eq!(composite.remove("k"), None);
+    }
 }

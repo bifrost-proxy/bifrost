@@ -121,4 +121,98 @@ mod tests {
         assert!(!result.matched);
         assert!(result.captures.is_none());
     }
+
+    #[test]
+    fn pattern_has_concrete_host_scope_plain_host() {
+        assert!(pattern_has_concrete_host_scope("example.com"));
+        assert!(pattern_has_concrete_host_scope("example.com/api/v1"));
+    }
+
+    #[test]
+    fn pattern_has_concrete_host_scope_path_only_is_false() {
+        assert!(!pattern_has_concrete_host_scope("/api/v1"));
+        assert!(!pattern_has_concrete_host_scope("/"));
+    }
+
+    #[test]
+    fn pattern_has_concrete_host_scope_strips_schemes() {
+        assert!(pattern_has_concrete_host_scope("http://example.com/x"));
+        assert!(pattern_has_concrete_host_scope("https://example.com/x"));
+        assert!(pattern_has_concrete_host_scope("http*://example.com"));
+        assert!(pattern_has_concrete_host_scope("ws://example.com"));
+        assert!(pattern_has_concrete_host_scope("wss://example.com"));
+        assert!(pattern_has_concrete_host_scope("ws*://example.com"));
+        assert!(pattern_has_concrete_host_scope("tunnel://example.com"));
+        assert!(pattern_has_concrete_host_scope("//example.com/path"));
+    }
+
+    #[test]
+    fn pattern_has_concrete_host_scope_strips_negation_and_anchor() {
+        assert!(pattern_has_concrete_host_scope("!example.com"));
+        assert!(pattern_has_concrete_host_scope("^example.com"));
+        assert!(pattern_has_concrete_host_scope("!^https://example.com"));
+        // negation/anchor in front of a path-only pattern still resolves false
+        assert!(!pattern_has_concrete_host_scope("!/api"));
+    }
+
+    #[test]
+    fn pattern_has_concrete_host_scope_handles_ports() {
+        // numeric port stripped, host remains concrete
+        assert!(pattern_has_concrete_host_scope("example.com:8080"));
+        // wildcard port stripped
+        assert!(pattern_has_concrete_host_scope("example.com:*"));
+        // non-numeric "port" keeps full host string, still concrete
+        assert!(pattern_has_concrete_host_scope("example.com:abc"));
+    }
+
+    #[test]
+    fn pattern_has_concrete_host_scope_handles_ipv6() {
+        assert!(pattern_has_concrete_host_scope("[::1]:8080"));
+        assert!(pattern_has_concrete_host_scope("[2001:db8::1]"));
+    }
+
+    #[test]
+    fn pattern_has_concrete_host_scope_var_prefix_and_empty() {
+        // leading '$' is stripped; remaining host is concrete
+        assert!(pattern_has_concrete_host_scope("$example.com"));
+        // empty after stripping → false
+        assert!(!pattern_has_concrete_host_scope(""));
+        assert!(!pattern_has_concrete_host_scope("$"));
+        // host with no alphanumeric chars → false
+        assert!(!pattern_has_concrete_host_scope("$:*"));
+    }
+
+    struct DummyMatcher {
+        result: bool,
+    }
+
+    impl Matcher for DummyMatcher {
+        fn matches(&self, _url: &str, _host: &str, _path: &str) -> MatchResult {
+            if self.result {
+                MatchResult::matched()
+            } else {
+                MatchResult::not_matched()
+            }
+        }
+        fn is_negated(&self) -> bool {
+            false
+        }
+        fn priority(&self) -> i32 {
+            0
+        }
+    }
+
+    #[test]
+    fn matcher_default_matches_host_delegates_to_matches() {
+        let m = DummyMatcher { result: true };
+        assert!(m.matches_host("http://x/", "x"));
+        let m = DummyMatcher { result: false };
+        assert!(!m.matches_host("http://x/", "x"));
+    }
+
+    #[test]
+    fn matcher_default_can_trigger_tls_auto_intercept_is_false() {
+        let m = DummyMatcher { result: true };
+        assert!(!m.can_trigger_tls_auto_intercept());
+    }
 }

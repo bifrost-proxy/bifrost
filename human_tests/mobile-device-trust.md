@@ -560,6 +560,22 @@
 - 手机确认安装代理 profile 后，重新打开 Availability Check，应优先观察 `Proxy config detected` 是否出现；如果仍为 missing，按页面提示断开/重连 Wi-Fi 或改用手动 Wi-Fi proxy 配置。
 - 如果普通 iPhone 不接受“同 SSID、无 Wi-Fi 密码、只写代理配置”的 profile、安装后不接管现有 Wi-Fi 代理，或卸载后移除 Wi-Fi 网络条目，记录为 POC 边界；默认推荐路径保持为手动 Wi-Fi proxy 设置。
 
+
+### TC-MDT-19：fake cfgutil 脚本关闭文件句柄后再执行
+
+**操作步骤**：
+
+```bash
+source ~/.zshrc
+NO_PROXY=api.github.com,github.com,*.blob.core.windows.net HTTPS_PROXY= HTTP_PROXY= ALL_PROXY= gh pr checks 227 --repo bifrost-proxy/bifrost --watch=false
+```
+
+**预期结果**：
+
+- `crates/bifrost-device/src/ios.rs` 的 fake `cfgutil` 测试夹具写完脚本后先 `sync` 并关闭文件句柄，再设置可执行权限。
+- Linux coverage job 中 `ios::tests::install_message_defaults_when_stdout_empty`、`install_profile_*` 和 `merge_cfgutil_*` 不再因 `Text file busy` 首个 panic 造成后续 `CFGUTIL_LOCK` poisoned。
+- iOS Configurator 安装、用户交互 Code 625、generic error、missing profile、cfgutil list merge 等测试仍按原断言执行。
+
 ## 清理步骤
 
 ```bash

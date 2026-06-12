@@ -2608,6 +2608,245 @@ mod tests {
     use super::*;
 
     #[test]
+    fn normalize_proxy_host_trims_brackets_and_lowercases() {
+        assert_eq!(normalize_proxy_host("  [::1] "), "::1");
+        assert_eq!(normalize_proxy_host("LOCALHOST"), "localhost");
+        assert_eq!(normalize_proxy_host("127.0.0.1"), "127.0.0.1");
+        assert_eq!(normalize_proxy_host(""), "");
+    }
+
+    #[test]
+    fn proxy_hosts_match_loopback_aliases() {
+        assert!(proxy_hosts_match("localhost", "127.0.0.1"));
+        assert!(proxy_hosts_match("127.0.0.1", "localhost"));
+        assert!(proxy_hosts_match("::1", "127.0.0.1"));
+        assert!(proxy_hosts_match("127.0.0.1", "::1"));
+        assert!(proxy_hosts_match("::1", "localhost"));
+        assert!(proxy_hosts_match("localhost", "::1"));
+        // Exact normalized match.
+        assert!(proxy_hosts_match("[::1]", "::1"));
+        assert!(proxy_hosts_match("EXAMPLE.com", "example.com"));
+        // Non-matching distinct hosts.
+        assert!(!proxy_hosts_match("10.0.0.1", "10.0.0.2"));
+    }
+
+    #[test]
+    fn runtime_host_to_system_proxy_host_maps_wildcards() {
+        assert_eq!(runtime_host_to_system_proxy_host("0.0.0.0"), "127.0.0.1");
+        assert_eq!(runtime_host_to_system_proxy_host("::"), "127.0.0.1");
+        assert_eq!(runtime_host_to_system_proxy_host(""), "127.0.0.1");
+        assert_eq!(runtime_host_to_system_proxy_host("10.1.2.3"), "10.1.2.3");
+        assert_eq!(runtime_host_to_system_proxy_host("[::1]"), "::1");
+    }
+
+    #[test]
+    fn current_proxy_matches_target_delegates_to_target_matches() {
+        let current = ProxyBackup {
+            enable: true,
+            host: "127.0.0.1".to_string(),
+            port: 9900,
+            bypass: String::new(),
+        };
+        let target = ProxyBackup {
+            enable: true,
+            host: "localhost".to_string(),
+            port: 9900,
+            bypass: String::new(),
+        };
+        assert!(current_proxy_matches_target(&current, &target));
+
+        let other = ProxyBackup {
+            enable: true,
+            host: "127.0.0.1".to_string(),
+            port: 1111,
+            bypass: String::new(),
+        };
+        assert!(!current_proxy_matches_target(&current, &other));
+    }
+
+    fn make_state(applied: bool, target_port: u16) -> ManagedProxyState {
+        ManagedProxyState {
+            original: ProxyBackup {
+                enable: false,
+                host: String::new(),
+                port: 0,
+                bypass: String::new(),
+            },
+            target: ProxyBackup {
+                enable: true,
+                host: "127.0.0.1".to_string(),
+                port: target_port,
+                bypass: String::new(),
+            },
+            applied,
+        }
+    }
+
+    #[test]
+    fn decide_managed_state_recovery_branches() {
+        let matching_current = ProxyBackup {
+            enable: true,
+            host: "127.0.0.1".to_string(),
+            port: 9900,
+            bypass: String::new(),
+        };
+        let mismatching_current = ProxyBackup {
+            enable: true,
+            host: "127.0.0.1".to_string(),
+            port: 6152,
+            bypass: String::new(),
+        };
+
+        // applied + current matches target -> restore.
+        assert_eq!(
+            decide_managed_state_recovery(&matching_current, &make_state(true, 9900)),
+            CrashRecoveryDecision::RestoreOriginal
+        );
+        // applied + current does NOT match -> preserve external.
+        assert_eq!(
+            decide_managed_state_recovery(&mismatching_current, &make_state(true, 9900)),
+            CrashRecoveryDecision::PreserveExternal
+        );
+        // not applied + current does NOT match -> discard pending apply.
+        assert_eq!(
+            decide_managed_state_recovery(&mismatching_current, &make_state(false, 9900)),
+            CrashRecoveryDecision::DiscardPendingApply
+        );
+        // not applied + current matches -> restore.
+        assert_eq!(
+            decide_managed_state_recovery(&matching_current, &make_state(false, 9900)),
+            CrashRecoveryDecision::RestoreOriginal
+        );
+    }
+
+    #[test]
+    fn decide_macos_managed_state_recovery_uses_service_match() {
+        let current = ProxyBackup {
+            enable: true,
+            host: "127.0.0.1".to_string(),
+            port: 9900,
+            bypass: String::new(),
+        };
+        let state = make_state(true, 9900);
+
+        assert_eq!(
+            decide_macos_managed_state_recovery(&current, &state, Ok(true)).unwrap(),
+            CrashRecoveryDecision::RestoreOriginal
+        );
+        // service_match false -> delegate to decide_managed_state_recovery.
+        assert_eq!(
+            decide_macos_managed_state_recovery(&current, &state, Ok(false)).unwrap(),
+            CrashRecoveryDecision::RestoreOriginal
+        );
+        // Err propagates.
+        assert!(decide_macos_managed_state_recovery(
+            &current,
+            &state,
+            Err(BifrostError::Config("boom".to_string()))
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn decide_macos_runtime_target_match_passthrough() {
+        assert!(decide_macos_runtime_target_match(Ok(true)).unwrap());
+        assert!(!decide_macos_runtime_target_match(Ok(false)).unwrap());
+        assert!(
+            decide_macos_runtime_target_match(Err(BifrostError::Config("x".to_string()))).is_err()
+        );
+    }
+
+    #[test]
+    fn restart_handoff_preserved_original_default_applied_field() {
+        // ManagedProxyState deserialized without `applied` defaults to true.
+        let json = r#"{
+            "original": {"enable": false, "host": "", "port": 0, "bypass": ""},
+            "target": {"enable": true, "host": "127.0.0.1", "port": 9900, "bypass": ""}
+        }"#;
+        let state: ManagedProxyState = serde_json::from_str(json).unwrap();
+        assert!(state.applied);
+    }
+
+    #[test]
+    fn load_last_runtime_proxy_target_reads_runtime_json() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(RUNTIME_FILE_NAME),
+            r#"{"host": "0.0.0.0", "port": 9911}"#,
+        )
+        .unwrap();
+        let target = load_last_runtime_proxy_target(dir.path()).unwrap();
+        assert_eq!(target.port, 9911);
+        // 0.0.0.0 wildcard mapped to loopback.
+        assert_eq!(target.host, "127.0.0.1");
+        assert!(target.enable);
+    }
+
+    #[test]
+    fn load_last_runtime_proxy_target_missing_or_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        // No file at all.
+        assert!(load_last_runtime_proxy_target(dir.path()).is_none());
+        // Port out of range / zero -> None.
+        std::fs::write(
+            dir.path().join(RUNTIME_FILE_NAME),
+            r#"{"host": "127.0.0.1", "port": 0}"#,
+        )
+        .unwrap();
+        assert!(load_last_runtime_proxy_target(dir.path()).is_none());
+        // Missing host -> defaults to 127.0.0.1.
+        std::fs::write(dir.path().join(RUNTIME_FILE_NAME), r#"{"port": 8080}"#).unwrap();
+        let t = load_last_runtime_proxy_target(dir.path()).unwrap();
+        assert_eq!(t.host, "127.0.0.1");
+        assert_eq!(t.port, 8080);
+    }
+
+    #[test]
+    fn managed_target_listener_is_alive_false_when_disabled_or_no_listener() {
+        // Disabled target -> false immediately.
+        let disabled = ProxyBackup {
+            enable: false,
+            host: "127.0.0.1".to_string(),
+            port: 9900,
+            bypass: String::new(),
+        };
+        assert!(!managed_target_listener_is_alive(&disabled));
+
+        // Port 0 -> false.
+        let zero_port = ProxyBackup {
+            enable: true,
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            bypass: String::new(),
+        };
+        assert!(!managed_target_listener_is_alive(&zero_port));
+    }
+
+    #[test]
+    fn system_proxy_disable_outcome_eq() {
+        assert_eq!(
+            SystemProxyDisableOutcome::Disabled,
+            SystemProxyDisableOutcome::Disabled
+        );
+        assert_ne!(
+            SystemProxyDisableOutcome::Disabled,
+            SystemProxyDisableOutcome::OwnedByOther
+        );
+        assert!(format!("{:?}", SystemProxyDisableOutcome::NotEnabled).contains("NotEnabled"));
+    }
+
+    #[test]
+    fn enable_disable_unsupported_on_non_macos_windows() {
+        // On Linux is_supported() is false, so enable returns a Config error.
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let mut manager = SystemProxyManager::new(dir.path().to_path_buf());
+            assert!(manager.enable("127.0.0.1", 9900, None).is_err());
+        }
+    }
+
+    #[test]
     fn test_is_supported() {
         let supported = SystemProxyManager::is_supported();
         println!("System proxy supported: {}", supported);

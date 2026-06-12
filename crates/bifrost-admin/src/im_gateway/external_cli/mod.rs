@@ -20,6 +20,7 @@ const CONFIG_FILENAME: &str = "im_gateway_external_cli_agent.json";
 const CONFIG_VERSION: u32 = 1;
 const MAX_EXTERNAL_RUNNER_IMAGES_PER_MESSAGE: usize = 6;
 const WORKER_STOP_GRACE_MS: u64 = 1500;
+#[cfg(unix)]
 const PROCESS_KILL_GRACE_MS: u64 = 250;
 
 static ACTIVE_RUNS: once_cell::sync::Lazy<dashmap::DashMap<String, u32>> =
@@ -2001,6 +2002,7 @@ fn terminate_process_impl(pid: u32) -> Result<(), String> {
         .map_err(|error| format!("failed to invoke taskkill for pid {pid}: {error}"))?;
     if output.status.success()
         || taskkill_message_indicates_missing_process(&output.stdout, &output.stderr)
+        || !windows_process_exists(pid)
     {
         Ok(())
     } else {
@@ -2023,6 +2025,25 @@ fn taskkill_message_indicates_missing_process(stdout: &[u8], stderr: &[u8]) -> b
     message.contains("not found")
         || message.contains("no running instance of the task")
         || message.contains("cannot find the process")
+}
+
+#[cfg(windows)]
+fn windows_process_exists(pid: u32) -> bool {
+    let Ok(output) = StdCommand::new("tasklist")
+        .arg("/FI")
+        .arg(format!("PID eq {pid}"))
+        .arg("/FO")
+        .arg("CSV")
+        .arg("/NH")
+        .output()
+    else {
+        return true;
+    };
+    if !output.status.success() {
+        return true;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout.contains(&format!("\"{pid}\""))
 }
 
 pub fn parse_progress_events(stdout: &str) -> Vec<ExternalCliProgressEvent> {

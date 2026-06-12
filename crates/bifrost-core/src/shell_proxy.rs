@@ -419,3 +419,286 @@ unset HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY"#.to_string(),
         let _ = std::fs::remove_file(self.backup_file_path());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// Build a manager with explicit shell type and config paths, bypassing the
+    /// environment-dependent `detect_shell` / `get_config_paths` so the
+    /// file-mutation logic can be tested deterministically.
+    fn manager_with(
+        data_dir: PathBuf,
+        shell_type: ShellType,
+        config_paths: Vec<PathBuf>,
+    ) -> ShellProxyManager {
+        ShellProxyManager {
+            data_dir,
+            shell_type,
+            config_paths,
+        }
+    }
+
+    #[test]
+    fn shell_type_as_str_covers_all_variants() {
+        assert_eq!(ShellType::Bash.as_str(), "bash");
+        assert_eq!(ShellType::Zsh.as_str(), "zsh");
+        assert_eq!(ShellType::Fish.as_str(), "fish");
+        assert_eq!(ShellType::PowerShell.as_str(), "powershell");
+        assert_eq!(ShellType::Cmd.as_str(), "cmd");
+        assert_eq!(ShellType::Unknown.as_str(), "unknown");
+    }
+
+    #[test]
+    fn get_config_paths_maps_each_shell() {
+        // Note: get_config_paths relies on HOME; assert structure, not exact path.
+        let bash = ShellProxyManager::get_config_paths(ShellType::Bash);
+        if !bash.is_empty() {
+            assert!(bash.iter().any(|p| p.ends_with(".bashrc")));
+        }
+        let zsh = ShellProxyManager::get_config_paths(ShellType::Zsh);
+        if !zsh.is_empty() {
+            assert!(zsh.iter().any(|p| p.ends_with(".zshrc")));
+        }
+        let fish = ShellProxyManager::get_config_paths(ShellType::Fish);
+        if !fish.is_empty() {
+            assert!(fish.iter().any(|p| p.ends_with("config.fish")));
+        }
+        assert!(ShellProxyManager::get_config_paths(ShellType::PowerShell).is_empty());
+        assert!(ShellProxyManager::get_config_paths(ShellType::Cmd).is_empty());
+        assert!(ShellProxyManager::get_config_paths(ShellType::Unknown).is_empty());
+    }
+
+    #[test]
+    fn detect_shell_returns_a_variant() {
+        // Whatever the environment, it returns a defined variant without panicking.
+        let _ = ShellProxyManager::detect_shell();
+    }
+
+    #[test]
+    fn enable_temporary_renders_for_current_shell() {
+        let out = ShellProxyManager::enable_temporary("127.0.0.1", 7890, "localhost");
+        // Every rendering mentions the proxy host:port and bypass somewhere.
+        assert!(out.contains("127.0.0.1:7890"));
+        assert!(out.contains("localhost"));
+    }
+
+    #[test]
+    fn disable_temporary_is_nonempty() {
+        let out = ShellProxyManager::disable_temporary();
+        assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn new_builds_manager() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = ShellProxyManager::new(tmp.path().to_path_buf());
+        // Accessors work.
+        let _ = mgr.shell_type();
+        let _ = mgr.config_paths();
+    }
+
+    #[test]
+    fn accessors_reflect_construction() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = tmp.path().join(".bashrc");
+        let mgr = manager_with(tmp.path().to_path_buf(), ShellType::Bash, vec![cfg.clone()]);
+        assert_eq!(mgr.shell_type(), ShellType::Bash);
+        assert_eq!(mgr.config_paths(), &[cfg]);
+    }
+
+    #[test]
+    fn enable_persistent_errors_without_config_paths() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = manager_with(tmp.path().to_path_buf(), ShellType::Unknown, Vec::new());
+        let err = mgr
+            .enable_persistent("127.0.0.1", 7890, "localhost")
+            .unwrap_err();
+        assert!(matches!(err, BifrostError::Config(_)));
+    }
+
+    #[test]
+    fn enable_then_disable_persistent_round_trip() {
+        let tmp = TempDir::new().unwrap();
+        let rc = tmp.path().join(".zshrc");
+        std::fs::write(&rc, "# existing user config\nalias ll='ls -la'\n").unwrap();
+        let mut mgr = manager_with(tmp.path().to_path_buf(), ShellType::Zsh, vec![rc.clone()]);
+
+        mgr.enable_persistent("127.0.0.1", 7890, "localhost")
+            .unwrap();
+        let after_enable = std::fs::read_to_string(&rc).unwrap();
+        assert!(after_enable.contains(START_MARKER));
+        assert!(after_enable.contains(END_MARKER));
+        assert!(after_enable.contains("HTTP_PROXY=http://127.0.0.1:7890"));
+        // Existing user content is preserved.
+        assert!(after_enable.contains("alias ll='ls -la'"));
+        // Backup file was written.
+        assert!(tmp.path().join(BACKUP_FILE_NAME).exists());
+
+        mgr.disable_persistent().unwrap();
+        let after_disable = std::fs::read_to_string(&rc).unwrap();
+        assert!(!after_disable.contains(START_MARKER));
+        assert!(after_disable.contains("alias ll='ls -la'"));
+    }
+
+    #[test]
+    fn enable_persistent_replaces_existing_block() {
+        let tmp = TempDir::new().unwrap();
+        let rc = tmp.path().join(".bashrc");
+        let mut mgr = manager_with(tmp.path().to_path_buf(), ShellType::Bash, vec![rc.clone()]);
+
+        mgr.enable_persistent("127.0.0.1", 1111, "localhost")
+            .unwrap();
+        mgr.enable_persistent("127.0.0.1", 2222, "localhost")
+            .unwrap();
+        let content = std::fs::read_to_string(&rc).unwrap();
+        // Only the latest block remains; no duplicate markers.
+        assert_eq!(content.matches(START_MARKER).count(), 1);
+        assert!(content.contains(":2222"));
+        assert!(!content.contains(":1111"));
+    }
+
+    #[test]
+    fn disable_persistent_is_noop_without_config_paths() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = manager_with(tmp.path().to_path_buf(), ShellType::Unknown, Vec::new());
+        mgr.disable_persistent().unwrap();
+    }
+
+    #[test]
+    fn status_detects_persistent_config_and_env() {
+        let tmp = TempDir::new().unwrap();
+        let rc = tmp.path().join(".bashrc");
+        let mut mgr = manager_with(tmp.path().to_path_buf(), ShellType::Bash, vec![rc.clone()]);
+        // Before enable: no persistent config.
+        let before = mgr.status();
+        assert!(!before.has_persistent_config);
+        assert_eq!(before.shell_type, ShellType::Bash);
+
+        mgr.enable_persistent("127.0.0.1", 7890, "localhost")
+            .unwrap();
+        let after = mgr.status();
+        assert!(after.has_persistent_config);
+        assert_eq!(after.config_paths, vec![rc]);
+    }
+
+    #[test]
+    fn restore_writes_back_original_content() {
+        let tmp = TempDir::new().unwrap();
+        let rc = tmp.path().join(".zshrc");
+        std::fs::write(&rc, "ORIGINAL\n").unwrap();
+        let mut mgr = manager_with(tmp.path().to_path_buf(), ShellType::Zsh, vec![rc.clone()]);
+
+        mgr.enable_persistent("127.0.0.1", 7890, "localhost")
+            .unwrap();
+        assert_ne!(std::fs::read_to_string(&rc).unwrap(), "ORIGINAL\n");
+
+        mgr.restore().unwrap();
+        assert_eq!(std::fs::read_to_string(&rc).unwrap(), "ORIGINAL\n");
+        // Backup file removed after restore.
+        assert!(!tmp.path().join(BACKUP_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn restore_removes_file_when_no_original_content() {
+        let tmp = TempDir::new().unwrap();
+        let rc = tmp.path().join(".bashrc"); // does not exist yet
+        let mut mgr = manager_with(tmp.path().to_path_buf(), ShellType::Bash, vec![rc.clone()]);
+
+        // Enable creates the file (original_content = None recorded in backup).
+        mgr.enable_persistent("127.0.0.1", 7890, "localhost")
+            .unwrap();
+        assert!(rc.exists());
+
+        mgr.restore().unwrap();
+        // Since there was no original content, the file is removed.
+        assert!(!rc.exists());
+    }
+
+    #[test]
+    fn recover_from_crash_restores_when_backup_present() {
+        let tmp = TempDir::new().unwrap();
+        let rc = tmp.path().join(".zshrc");
+        std::fs::write(&rc, "BEFORE\n").unwrap();
+        let mut mgr = manager_with(tmp.path().to_path_buf(), ShellType::Zsh, vec![rc.clone()]);
+        mgr.enable_persistent("127.0.0.1", 7890, "localhost")
+            .unwrap();
+
+        // recover_from_crash builds its own manager via env detection, so the
+        // restored config_paths may differ; what we assert is that it does not
+        // error and clears the backup file in the data dir.
+        ShellProxyManager::recover_from_crash(tmp.path()).unwrap();
+        assert!(!tmp.path().join(BACKUP_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn recover_from_crash_noop_without_backup() {
+        let tmp = TempDir::new().unwrap();
+        // No backup file present.
+        ShellProxyManager::recover_from_crash(tmp.path()).unwrap();
+    }
+
+    #[test]
+    fn generate_config_block_empty_for_non_posix_shells() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = manager_with(tmp.path().to_path_buf(), ShellType::PowerShell, Vec::new());
+        assert!(mgr.generate_config_block("http://x", "y").is_empty());
+    }
+
+    #[test]
+    fn replace_or_add_handles_empty_and_appended() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = manager_with(tmp.path().to_path_buf(), ShellType::Bash, Vec::new());
+        // Empty content -> returns block as-is.
+        assert_eq!(mgr.replace_or_add_config_block("", "BLOCK"), "BLOCK");
+        // Non-empty content with no markers -> appended after a blank line.
+        let out = mgr.replace_or_add_config_block("line1\n", "BLOCK");
+        assert_eq!(out, "line1\n\nBLOCK");
+    }
+
+    #[test]
+    fn remove_config_block_no_markers_is_identity() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = manager_with(tmp.path().to_path_buf(), ShellType::Bash, Vec::new());
+        assert_eq!(mgr.remove_config_block("nothing here"), "nothing here");
+    }
+
+    #[test]
+    fn normalize_backup_migrates_legacy_single_file_fields() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = manager_with(tmp.path().to_path_buf(), ShellType::Bash, Vec::new());
+        let legacy = ShellProxyBackup {
+            shell_type: "bash".to_string(),
+            files: Vec::new(),
+            config_path: Some("/home/u/.bashrc".to_string()),
+            original_content: Some("OLD".to_string()),
+        };
+        let normalized = mgr.normalize_backup(legacy);
+        assert_eq!(normalized.files.len(), 1);
+        assert_eq!(normalized.files[0].path, "/home/u/.bashrc");
+        assert_eq!(normalized.files[0].original_content.as_deref(), Some("OLD"));
+    }
+
+    #[test]
+    fn load_backup_errors_when_missing() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = manager_with(tmp.path().to_path_buf(), ShellType::Bash, Vec::new());
+        assert!(mgr.load_backup().is_err());
+    }
+
+    #[test]
+    fn save_and_load_backup_round_trip() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = manager_with(tmp.path().to_path_buf(), ShellType::Zsh, Vec::new());
+        let files = vec![ShellProxyBackupFile {
+            path: "/p/.zshrc".to_string(),
+            original_content: Some("X".to_string()),
+        }];
+        mgr.save_backup(files).unwrap();
+        let loaded = mgr.load_backup().unwrap();
+        assert_eq!(loaded.shell_type, "zsh");
+        assert_eq!(loaded.files.len(), 1);
+        assert_eq!(loaded.files[0].path, "/p/.zshrc");
+    }
+}

@@ -514,4 +514,159 @@ mod tests {
             "unexpected error: {err}"
         );
     }
+
+    #[test]
+    fn test_private_key_der_and_key_pair_accessors() {
+        let ca = generate_root_ca().expect("Failed to generate root CA");
+        let der = ca.private_key_der();
+        assert!(!der.secret_der().is_empty());
+        // key_pair() returns the same public key info as the stored pair.
+        assert_eq!(
+            ca.key_pair().subject_public_key_info(),
+            ca.key_pair.subject_public_key_info()
+        );
+    }
+
+    #[test]
+    fn test_debug_impl_redacts_certificate() {
+        let ca = generate_root_ca().expect("Failed to generate root CA");
+        let dbg = format!("{ca:?}");
+        assert!(dbg.contains("CertificateAuthority"));
+        assert!(dbg.contains("<Certificate>"));
+    }
+
+    #[test]
+    fn test_parse_cert_info_ecdsa_p256() {
+        let dir = tempdir().expect("Failed to create temp dir");
+        let cert_path = dir.path().join("ca.crt");
+        let key_path = dir.path().join("ca.key");
+        let ca = generate_root_ca().expect("Failed to generate root CA");
+        save_root_ca(&cert_path, &key_path, &ca).expect("Failed to save root CA");
+
+        let info = parse_cert_info(&cert_path).expect("Failed to parse cert info");
+        assert!(info.subject.contains("Bifrost CA"));
+        assert!(info.issuer.contains("Bifrost CA"));
+        assert!(!info.serial_number.is_empty());
+        assert_eq!(info.key_type, "ECDSA EC");
+        assert!(info.key_size.is_none());
+        assert!(info.is_ca);
+        assert_eq!(info.signature_algorithm, "ECDSA with SHA-256");
+        assert!(info.fingerprint_sha256.contains(':'));
+        // Root CA has KeyCertSign / CrlSign / DigitalSignature usages.
+        assert!(info.key_usages.contains(&"Certificate Sign".to_string()));
+        assert!(info.key_usages.contains(&"CRL Sign".to_string()));
+        assert!(info.key_usages.contains(&"Digital Signature".to_string()));
+        // EKU: Server Auth + Client Auth.
+        assert!(info
+            .extended_key_usages
+            .contains(&"Server Auth".to_string()));
+        assert!(info
+            .extended_key_usages
+            .contains(&"Client Auth".to_string()));
+    }
+
+    #[test]
+    fn test_parse_cert_info_rsa() {
+        let dir = tempdir().expect("Failed to create temp dir");
+        let cert_path = dir.path().join("ca.crt");
+        fs::write(&cert_path, include_str!("../testdata/test-rsa-ca.crt"))
+            .expect("Failed to write RSA cert");
+
+        let info = parse_cert_info(&cert_path).expect("Failed to parse RSA cert info");
+        assert_eq!(info.key_type, "RSA");
+        assert!(info.key_size.is_some());
+    }
+
+    #[test]
+    fn test_cert_info_validity_helpers() {
+        let dir = tempdir().expect("Failed to create temp dir");
+        let cert_path = dir.path().join("ca.crt");
+        let key_path = dir.path().join("ca.key");
+        let ca = generate_root_ca().expect("Failed to generate root CA");
+        save_root_ca(&cert_path, &key_path, &ca).expect("Failed to save root CA");
+
+        let info = parse_cert_info(&cert_path).expect("Failed to parse cert info");
+        // Freshly generated CA: not expired, currently valid, days remaining > 0.
+        assert!(!info.is_expired());
+        assert!(!info.is_not_yet_valid());
+        assert!(info.days_remaining() > 0);
+    }
+
+    #[test]
+    fn test_validate_ca_files_missing_files() {
+        let dir = tempdir().expect("Failed to create temp dir");
+        let cert_path = dir.path().join("missing.crt");
+        let key_path = dir.path().join("missing.key");
+
+        let err = validate_ca_files(&cert_path, &key_path).expect_err("should fail");
+        assert!(format!("{err}").contains("not found"));
+    }
+
+    #[test]
+    fn test_validate_ca_files_rejects_non_ca_cert() {
+        // A self-signed leaf (not a CA) should be rejected.
+        let dir = tempdir().expect("Failed to create temp dir");
+        let cert_path = dir.path().join("leaf.crt");
+        let key_path = dir.path().join("leaf.key");
+
+        let mut params = CertificateParams::default();
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "leaf.example.com");
+        params.is_ca = IsCa::ExplicitNoCa;
+        let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+        let cert = params.self_signed(&key_pair).unwrap();
+        fs::write(&cert_path, cert.pem()).unwrap();
+        fs::write(&key_path, key_pair.serialize_pem()).unwrap();
+
+        let err = validate_ca_files(&cert_path, &key_path).expect_err("non-CA should be rejected");
+        assert!(format!("{err}").contains("not a CA"));
+    }
+
+    #[test]
+    fn test_ensure_valid_ca_missing_returns_false() {
+        let dir = tempdir().expect("Failed to create temp dir");
+        let cert_path = dir.path().join("missing.crt");
+        let key_path = dir.path().join("missing.key");
+        assert!(!ensure_valid_ca(&cert_path, &key_path).unwrap());
+    }
+
+    #[test]
+    fn test_ensure_valid_ca_valid_returns_true() {
+        let dir = tempdir().expect("Failed to create temp dir");
+        let cert_path = dir.path().join("ca.crt");
+        let key_path = dir.path().join("ca.key");
+        let ca = generate_root_ca().expect("Failed to generate root CA");
+        save_root_ca(&cert_path, &key_path, &ca).expect("Failed to save root CA");
+
+        assert!(ensure_valid_ca(&cert_path, &key_path).unwrap());
+    }
+
+    #[test]
+    fn test_ensure_valid_ca_invalid_removes_files() {
+        let dir = tempdir().expect("Failed to create temp dir");
+        let cert_path = dir.path().join("ca.crt");
+        let key_path = dir.path().join("ca.key");
+
+        // Mismatched cert/key pair => invalid; ensure_valid_ca should delete them.
+        let cert_ca = generate_root_ca().unwrap();
+        let key_ca = generate_root_ca().unwrap();
+        fs::write(&cert_path, cert_ca.certificate_pem()).unwrap();
+        fs::write(&key_path, key_ca.key_pair.serialize_pem()).unwrap();
+
+        assert!(!ensure_valid_ca(&cert_path, &key_path).unwrap());
+        assert!(!cert_path.exists());
+        assert!(!key_path.exists());
+    }
+
+    #[test]
+    fn test_load_root_ca_invalid_pem_errors() {
+        let dir = tempdir().expect("Failed to create temp dir");
+        let cert_path = dir.path().join("bad.crt");
+        let key_path = dir.path().join("bad.key");
+        fs::write(&cert_path, "not a pem").unwrap();
+        fs::write(&key_path, "not a key").unwrap();
+
+        assert!(load_root_ca(&cert_path, &key_path).is_err());
+    }
 }

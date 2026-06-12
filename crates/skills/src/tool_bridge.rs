@@ -277,4 +277,94 @@ mod tests {
             .any(|entry| entry.content.contains("Skill memory")));
         assert!(!temp.path().join("memories.sqlite").exists());
     }
+
+    #[test]
+    fn read_denied_without_permission() {
+        let temp = tempfile::tempdir().unwrap();
+        let bridge = SkillToolBridge::new(temp.path());
+        let record = record_with_tools(vec![ToolBinding::Memory {
+            op: MemoryOp::Write,
+        }]);
+        let err = bridge
+            .handle_memory(
+                &record,
+                MemoryToolRequest::Read {
+                    query: "x".into(),
+                    limit: None,
+                },
+            )
+            .unwrap_err();
+        assert!(err.contains("not allowed to read"));
+    }
+
+    #[test]
+    fn write_denied_without_permission() {
+        let temp = tempfile::tempdir().unwrap();
+        let bridge = SkillToolBridge::new(temp.path());
+        let record = record_with_tools(vec![ToolBinding::Memory { op: MemoryOp::Read }]);
+        let err = bridge
+            .handle_memory(
+                &record,
+                MemoryToolRequest::Write {
+                    content: "c".into(),
+                    kind: MemoryKind::Rule,
+                    scope: MemoryScope::User("u".into()),
+                    tags: Some(vec!["t1".into(), "t2".into()]),
+                },
+            )
+            .unwrap_err();
+        assert!(err.contains("not allowed to write"));
+    }
+
+    #[test]
+    fn both_op_grants_read_and_write() {
+        let record = record_with_tools(vec![ToolBinding::Memory { op: MemoryOp::Both }]);
+        assert!(SkillToolBridge::memory_allowed(&record, MemoryOp::Read));
+        assert!(SkillToolBridge::memory_allowed(&record, MemoryOp::Write));
+        // No memory binding at all -> denied.
+        let none = record_with_tools(vec![]);
+        assert!(!SkillToolBridge::memory_allowed(&none, MemoryOp::Read));
+    }
+
+    #[test]
+    fn write_with_tags_and_search_raw() {
+        let temp = tempfile::tempdir().unwrap();
+        let bridge = SkillToolBridge::new(temp.path());
+        let record = record_with_tools(vec![ToolBinding::Memory { op: MemoryOp::Both }]);
+        bridge
+            .handle_memory(
+                &record,
+                MemoryToolRequest::Write {
+                    content: "Tagged note about widgets".into(),
+                    kind: MemoryKind::Preference,
+                    scope: MemoryScope::Project("p".into()),
+                    tags: Some(vec!["a".into(), "b".into()]),
+                },
+            )
+            .unwrap();
+        // search_raw queries the same store directly.
+        let hits = bridge.search_raw("widgets", 5).unwrap();
+        assert!(hits.iter().any(|e| e.content.contains("widgets")));
+        // Empty query returns all non-empty/non-heading lines (up to limit).
+        let all = bridge.search_raw("", 1).unwrap();
+        assert_eq!(all.len(), 1);
+    }
+
+    #[test]
+    fn ensure_layout_is_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        ensure_layout(temp.path()).unwrap();
+        // Second call hits the "file exists" early-return in ensure_file.
+        ensure_layout(temp.path()).unwrap();
+        assert!(temp.path().join("MEMORY.md").exists());
+        assert!(temp.path().join("skills").is_dir());
+    }
+
+    #[test]
+    fn memory_kind_and_scope_round_trip() {
+        let v = serde_json::to_value(MemoryKind::TaskContext).unwrap();
+        assert_eq!(v, serde_json::json!("task_context"));
+        let s = serde_json::to_value(MemoryScope::Session("s".into())).unwrap();
+        assert_eq!(s, serde_json::json!({"type":"session","value":"s"}));
+    }
 }

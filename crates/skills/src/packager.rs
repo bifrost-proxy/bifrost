@@ -156,4 +156,74 @@ mod tests {
         assert_eq!(imported.name, "pkg-skill");
         assert!(target.path().join("pkg-skill/assets/example.txt").is_file());
     }
+
+    fn zip_archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write;
+        let cursor = Cursor::new(Vec::new());
+        let mut zip = zip::ZipWriter::new(cursor);
+        let opts = SimpleFileOptions::default();
+        for (name, bytes) in entries {
+            zip.start_file(*name, opts).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn package_unknown_skill_errors() {
+        let dir = tempdir().unwrap();
+        let store = SkillStore::new(vec![ScopeRoot::new(SkillScope::Repo, dir.path())]);
+        let err = SkillPackager::package(&store, SkillScope::Repo, "nope").unwrap_err();
+        assert!(matches!(err, StoreError::Io(_)));
+    }
+
+    #[test]
+    fn import_missing_manifest_errors() {
+        let dir = tempdir().unwrap();
+        let store = SkillStore::new(vec![ScopeRoot::new(SkillScope::Repo, dir.path())]);
+        let archive = zip_archive(&[(SKILL_MD, b"---\nname: x\n---\n# X")]);
+        let err = SkillPackager::import(&store, SkillScope::Repo, &archive).unwrap_err();
+        assert!(matches!(err, StoreError::NotFound(m) if m == MANIFEST_JSON));
+    }
+
+    #[test]
+    fn import_missing_skill_md_errors() {
+        let dir = tempdir().unwrap();
+        let store = SkillStore::new(vec![ScopeRoot::new(SkillScope::Repo, dir.path())]);
+        let manifest = SkillManifest::minimal_inline("only-manifest", "d", SkillScope::Repo);
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        let archive = zip_archive(&[(MANIFEST_JSON, &bytes)]);
+        let err = SkillPackager::import(&store, SkillScope::Repo, &archive).unwrap_err();
+        assert!(matches!(err, StoreError::NotFound(m) if m == SKILL_MD));
+    }
+
+    #[test]
+    fn import_injects_default_scope_when_missing() {
+        let dir = tempdir().unwrap();
+        let store = SkillStore::new(vec![ScopeRoot::new(SkillScope::User, dir.path())]);
+        // Manifest JSON object lacking a valid scope field.
+        let manifest = SkillManifest::minimal_inline("scopeless", "d", SkillScope::Repo);
+        let mut value = serde_json::to_value(&manifest).unwrap();
+        value.as_object_mut().unwrap().remove("scope");
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let archive = zip_archive(&[
+            (MANIFEST_JSON, &bytes),
+            (SKILL_MD, b"---\nname: scopeless\n---\n# S"),
+        ]);
+        let imported = SkillPackager::import(&store, SkillScope::User, &archive).unwrap();
+        assert_eq!(imported.manifest.scope, SkillScope::User);
+    }
+
+    #[test]
+    fn parse_manifest_rejects_non_object_json() {
+        let err = parse_manifest_with_scope_default(b"[1,2,3]", &SkillScope::Repo).unwrap_err();
+        assert!(matches!(err, StoreError::Io(_)));
+    }
+
+    #[test]
+    fn io_error_wraps_display() {
+        let err = io_error("boom");
+        assert!(matches!(err, StoreError::Io(_)));
+        assert!(err.to_string().contains("boom"));
+    }
 }

@@ -81,8 +81,9 @@ use self::decode::{
     apply_decode_scripts_for_storage, get_values_from_state, DecodeForStorageResult,
 };
 use super::body_metadata::{
-    header_content_encoding, is_no_body_response, normalize_req_headers, normalize_res_headers,
-    response_content_encoding, set_content_encoding_header, streaming_res_body_mode, BodyMode,
+    buffered_res_body_mode, header_content_encoding, is_no_body_response, normalize_req_headers,
+    normalize_res_headers, response_content_encoding, set_content_encoding_header,
+    streaming_res_body_mode, BodyMode,
 };
 use super::devtools::{
     attach_devtools_client_req_id, devtools_bridge_requested, is_devtools_client_req_id_header,
@@ -825,7 +826,11 @@ pub(in crate::proxy::http) async fn apply_immediate_response_body_rules(
         injection_result.content_encoding.as_deref(),
     );
     let final_body = injection_result.body;
-    normalize_res_headers(&mut parts, BodyMode::Known(final_body.len()), method);
+    normalize_res_headers(
+        &mut parts,
+        buffered_res_body_mode(final_body.len(), !rules.trailers.is_empty()),
+        method,
+    );
 
     Ok((
         Response::from_parts(parts, full_body(final_body.clone())),
@@ -1557,7 +1562,7 @@ pub async fn handle_http_request(
 
             normalize_res_headers(
                 &mut res_parts,
-                BodyMode::Known(final_body.len()),
+                buffered_res_body_mode(final_body.len(), !resolved_rules.trailers.is_empty()),
                 &request_snapshot.method,
             );
             mock_response = Response::from_parts(res_parts, full_body(final_body.clone()));
@@ -1680,7 +1685,11 @@ pub async fn handle_http_request(
                 }
             }
 
-            normalize_res_headers(&mut res_parts, BodyMode::Known(final_body.len()), &method);
+            normalize_res_headers(
+                &mut res_parts,
+                buffered_res_body_mode(final_body.len(), !resolved_rules.trailers.is_empty()),
+                &method,
+            );
             mock_response = Response::from_parts(res_parts, full_body(final_body.clone()));
             transformed_mock_body = Some(final_body);
             res_script_results = results;
@@ -3653,7 +3662,7 @@ pub async fn handle_http_request(
 
     normalize_res_headers(
         &mut res_parts,
-        BodyMode::Known(final_res_body.len()),
+        buffered_res_body_mode(final_res_body.len(), !resolved_rules.trailers.is_empty()),
         &method,
     );
 
@@ -3756,7 +3765,7 @@ pub async fn handle_http_request(
         if outcome.body_replaced {
             normalize_res_headers(
                 &mut res_parts,
-                BodyMode::Known(final_res_body.len()),
+                buffered_res_body_mode(final_res_body.len(), !resolved_rules.trailers.is_empty()),
                 &method,
             );
         }
@@ -5181,6 +5190,34 @@ mod tests {
             streaming_res_body_mode(Some(168), true),
             BodyMode::StreamWithTrailers
         ));
+    }
+
+    #[test]
+    fn test_buffered_res_body_mode_removes_content_length_for_trailers() {
+        assert!(matches!(
+            buffered_res_body_mode(168, false),
+            BodyMode::Known(168)
+        ));
+        assert!(matches!(
+            buffered_res_body_mode(168, true),
+            BodyMode::StreamWithTrailers
+        ));
+
+        let (mut parts, _) = Response::builder()
+            .status(StatusCode::OK)
+            .header(hyper::header::CONTENT_LENGTH, "168")
+            .header(hyper::header::TRAILER, "X-Trace")
+            .body(empty_body())
+            .unwrap()
+            .into_parts();
+
+        normalize_res_headers(&mut parts, buffered_res_body_mode(168, true), "GET");
+
+        assert!(!parts.headers.contains_key(hyper::header::CONTENT_LENGTH));
+        assert_eq!(
+            parts.headers.get(hyper::header::TRAILER).unwrap(),
+            "X-Trace"
+        );
     }
 
     #[test]

@@ -710,4 +710,379 @@ count = 1
         assert_eq!(file.content[0].listener_port, None);
         assert!(file.content[0].active_rules.is_none());
     }
+
+    #[test]
+    fn parse_error_display_covers_all_variants() {
+        let cases = [
+            ParseError::EmptyFile,
+            ParseError::InvalidHeader("h".into()),
+            ParseError::InvalidVersion("v".into()),
+            ParseError::InvalidType("t".into()),
+            ParseError::MissingSeparator,
+            ParseError::InvalidMeta("m".into()),
+            ParseError::InvalidContent("c".into()),
+            ParseError::TypeMismatch {
+                expected: BifrostFileType::Rules,
+                actual: BifrostFileType::Network,
+            },
+        ];
+        for err in cases {
+            assert!(!err.to_string().is_empty());
+        }
+    }
+
+    #[test]
+    fn parse_header_rejects_malformed() {
+        assert!(matches!(
+            BifrostFileParser::parse_header("only-one"),
+            Err(ParseError::InvalidHeader(_))
+        ));
+        assert!(matches!(
+            BifrostFileParser::parse_header("xx rules"),
+            Err(ParseError::InvalidVersion(_))
+        ));
+        assert!(matches!(
+            BifrostFileParser::parse_header("01 bogus"),
+            Err(ParseError::InvalidType(_))
+        ));
+    }
+
+    #[test]
+    fn parse_raw_errors_on_empty_and_missing_separator() {
+        assert!(matches!(
+            BifrostFileParser::parse_raw(""),
+            Err(ParseError::EmptyFile)
+        ));
+        assert!(matches!(
+            BifrostFileParser::parse_raw("01 rules\n\n[meta]\nname=\"x\"\n"),
+            Err(ParseError::MissingSeparator)
+        ));
+    }
+
+    #[test]
+    fn parse_raw_handles_separator_without_trailing_newline() {
+        // "\n---" at end of input (no trailing newline) goes through the second branch.
+        let raw = BifrostFileParser::parse_raw("01 rules\n\nname=\"x\"\n---").unwrap();
+        assert_eq!(raw.header.file_type, BifrostFileType::Rules);
+        assert_eq!(raw.content_raw, "");
+    }
+
+    #[test]
+    fn parse_rules_detects_type_mismatch() {
+        let content = "01 network\n\n[meta]\nname=\"x\"\n\n---\nexample.com proxy://x\n";
+        assert!(matches!(
+            BifrostFileParser::parse_rules(content),
+            Err(ParseError::TypeMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_rules_errors_on_invalid_toml_meta() {
+        let content = "01 rules\n\nnot valid toml = = =\n---\nbody\n";
+        assert!(matches!(
+            BifrostFileParser::parse_rules(content),
+            Err(ParseError::InvalidMeta(_))
+        ));
+    }
+
+    #[test]
+    fn parse_script_round_trip_and_errors() {
+        let content = r#"01 script
+
+[meta]
+name = "s"
+version = "1.0.0"
+created_at = "2026-01-01T00:00:00Z"
+
+---
+[{"name":"hello","script_type":"request","content":"print(1)"}]
+"#;
+        let file = BifrostFileParser::parse_script(content).unwrap();
+        assert_eq!(file.content.len(), 1);
+        assert_eq!(file.content[0].name, "hello");
+
+        // Type mismatch.
+        let mismatch = content.replacen("01 script", "01 rules", 1);
+        assert!(matches!(
+            BifrostFileParser::parse_script(&mismatch),
+            Err(ParseError::TypeMismatch { .. })
+        ));
+
+        // Invalid content JSON.
+        let bad = "01 script\n\n[meta]\nname=\"s\"\ncreated_at=\"t\"\n---\nnot-json\n";
+        assert!(matches!(
+            BifrostFileParser::parse_script(bad),
+            Err(ParseError::InvalidContent(_))
+        ));
+    }
+
+    #[test]
+    fn parse_values_round_trip_and_mismatch() {
+        let content = r#"01 values
+
+[meta]
+name = "v"
+created_at = "2026-01-01T00:00:00Z"
+
+---
+{"KEY":"VAL"}
+"#;
+        let file = BifrostFileParser::parse_values(content).unwrap();
+        assert_eq!(file.content.get("KEY").map(String::as_str), Some("VAL"));
+
+        let mismatch = content.replacen("01 values", "01 rules", 1);
+        assert!(matches!(
+            BifrostFileParser::parse_values(&mismatch),
+            Err(ParseError::TypeMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_template_round_trip_and_mismatch() {
+        let content = r#"01 template
+
+[meta]
+name = "t"
+created_at = "2026-01-01T00:00:00Z"
+
+---
+{"requests":[]}
+"#;
+        let file = BifrostFileParser::parse_template(content).unwrap();
+        assert!(file.content.requests.is_empty());
+
+        let mismatch = content.replacen("01 template", "01 network", 1);
+        assert!(matches!(
+            BifrostFileParser::parse_template(&mismatch),
+            Err(ParseError::TypeMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_network_errors_on_invalid_content() {
+        let bad = "01 network\n\n[meta]\nname=\"n\"\ncreated_at=\"t\"\n---\nnot-json\n";
+        assert!(matches!(
+            BifrostFileParser::parse_network(bad),
+            Err(ParseError::InvalidContent(_))
+        ));
+    }
+
+    #[test]
+    fn parse_export_meta_errors_on_invalid_toml() {
+        // network parse routes through parse_export_meta; invalid TOML meta errors.
+        let bad = "01 network\n\n= = bad\n---\n[]\n";
+        assert!(matches!(
+            BifrostFileParser::parse_network(bad),
+            Err(ParseError::InvalidMeta(_))
+        ));
+    }
+
+    #[test]
+    fn detect_type_errors_on_empty() {
+        assert!(matches!(
+            BifrostFileParser::detect_type(""),
+            Err(ParseError::EmptyFile)
+        ));
+    }
+
+    #[test]
+    fn parse_header_tolerant_infers_defaults() {
+        // No valid header line -> defaults version 1 and inferred type, with warnings.
+        let (header, warnings) =
+            BifrostFileParser::parse_header_tolerant("garbage line\n\nfoo.com proxy://x\n");
+        assert_eq!(header.version, 1);
+        assert!(!warnings.is_empty());
+    }
+
+    #[test]
+    fn infer_type_from_content_defaults_to_rules() {
+        let inferred = BifrostFileParser::infer_type_from_content("xx\n\nexample.com proxy://x\n");
+        assert_eq!(inferred, BifrostFileType::Rules);
+    }
+
+    #[test]
+    fn split_meta_content_tolerant_handles_separator_no_newline() {
+        let header = BifrostFileHeader {
+            version: 1,
+            file_type: BifrostFileType::Rules,
+        };
+        let (meta, body, warnings) = BifrostFileParser::split_meta_content_tolerant(
+            "01 rules\nname=\"x\"\n---body-here",
+            &header,
+        );
+        assert!(meta.contains("name"));
+        assert_eq!(body, "body-here");
+        assert!(warnings.iter().any(|w| w.level == WarningLevel::Info));
+    }
+
+    #[test]
+    fn split_rules_content_separates_meta_and_rules() {
+        let mut warnings = Vec::new();
+        let (meta, body) = BifrostFileParser::split_rules_content(
+            "[meta]\nname = \"x\"\nexample.com proxy://localhost:3000\n",
+            &mut warnings,
+        );
+        assert!(meta.contains("[meta]"));
+        assert!(body.contains("example.com proxy://localhost:3000"));
+    }
+
+    #[test]
+    fn split_rules_content_treats_all_as_rules_without_meta() {
+        let mut warnings = Vec::new();
+        let (meta, body) =
+            BifrostFileParser::split_rules_content("# just a comment\n# another\n", &mut warnings);
+        assert!(meta.is_empty());
+        assert!(body.contains("just a comment"));
+        assert!(warnings.iter().any(|w| w.level == WarningLevel::Warning));
+    }
+
+    #[test]
+    fn split_json_content_finds_array_start() {
+        let mut warnings = Vec::new();
+        let (meta, body) =
+            BifrostFileParser::split_json_content("name = \"x\"\n[\n  1\n]\n", &mut warnings);
+        assert!(meta.contains("name"));
+        assert!(body.trim_start().starts_with('['));
+    }
+
+    #[test]
+    fn split_json_content_treats_all_as_json_when_leading_bracket() {
+        let mut warnings = Vec::new();
+        let (meta, body) = BifrostFileParser::split_json_content("[1, 2, 3]", &mut warnings);
+        // The first line itself starts with '[', so it is detected via the loop
+        // branch: meta is empty and the whole input is the body.
+        assert!(meta.is_empty());
+        assert!(body.contains("[1, 2, 3]"));
+    }
+
+    #[test]
+    fn split_json_content_no_json_returns_all_as_meta() {
+        let mut warnings = Vec::new();
+        let (meta, body) = BifrostFileParser::split_json_content("name = \"x\"\n", &mut warnings);
+        assert!(meta.contains("name"));
+        assert!(body.is_empty());
+    }
+
+    #[test]
+    fn parse_rules_tolerant_uses_defaults_when_meta_missing() {
+        let result = BifrostFileParser::parse_rules_tolerant("01 rules\n\nexample.com proxy://x\n");
+        // With no meta section, an empty meta yields the default RuleFileMeta
+        // (empty name) and emits a warning about the missing meta.
+        assert!(result.data.meta.name.is_empty());
+        assert!(result.has_warnings());
+    }
+
+    #[test]
+    fn parse_rules_meta_tolerant_handles_empty_invalid_and_valid() {
+        let mut warnings = Vec::new();
+        // Empty meta -> default RuleFileMeta (empty name) + warning.
+        let meta = BifrostFileParser::parse_rules_meta_tolerant("", &mut warnings);
+        assert!(meta.name.is_empty());
+        assert!(!warnings.is_empty());
+
+        // Invalid TOML -> error warning + defaults.
+        let mut warnings2 = Vec::new();
+        let meta2 = BifrostFileParser::parse_rules_meta_tolerant("= = =", &mut warnings2);
+        assert_eq!(meta2.name, "unnamed");
+        assert!(warnings2.iter().any(|w| w.level == WarningLevel::Error));
+
+        // Valid meta with a name -> fields are applied. The tolerant partial
+        // schema requires a `sync` table to be present, so include it.
+        let mut warnings3 = Vec::new();
+        let meta3 = BifrostFileParser::parse_rules_meta_tolerant(
+            "[meta]\nname = \"real\"\nenabled = false\nsort_order = 5\n[meta.sync]\nrule_id = \"r1\"\n",
+            &mut warnings3,
+        );
+        assert_eq!(meta3.name, "real");
+        assert!(!meta3.enabled);
+        assert_eq!(meta3.sort_order, 5);
+    }
+
+    #[test]
+    fn parse_json_tolerant_ok_repair_and_failure() {
+        // Valid JSON.
+        let ok: ParseResultWithWarnings<Vec<i32>> =
+            BifrostFileParser::parse_json_tolerant("[1,2,3]");
+        assert_eq!(ok.data, vec![1, 2, 3]);
+        assert!(!ok.has_warnings());
+
+        // Repairable (trailing comma + missing bracket).
+        let repaired: ParseResultWithWarnings<Vec<i32>> =
+            BifrostFileParser::parse_json_tolerant("[1,2,3,]");
+        assert_eq!(repaired.data, vec![1, 2, 3]);
+        assert!(repaired.has_warnings());
+
+        // Unrepairable -> default + error warning.
+        let failed: ParseResultWithWarnings<Vec<i32>> =
+            BifrostFileParser::parse_json_tolerant("totally not json {[");
+        assert!(failed.data.is_empty());
+        assert!(failed.has_errors());
+    }
+
+    #[test]
+    fn toml_to_json_converts_all_value_kinds() {
+        let toml_val: toml::Value =
+            toml::from_str("s = \"x\"\ni = 3\nf = 1.5\nb = true\narr = [1, 2]\n[tbl]\nk = \"v\"\n")
+                .unwrap();
+        let json = toml_to_json(toml_val);
+        assert_eq!(json["s"], serde_json::json!("x"));
+        assert_eq!(json["i"], serde_json::json!(3));
+        assert_eq!(json["b"], serde_json::json!(true));
+        assert_eq!(json["arr"], serde_json::json!([1, 2]));
+        assert_eq!(json["tbl"]["k"], serde_json::json!("v"));
+    }
+
+    #[test]
+    fn toml_to_json_handles_datetime() {
+        let toml_val: toml::Value = toml::from_str("dt = 2026-01-01T00:00:00Z\n").unwrap();
+        let json = toml_to_json(toml_val);
+        assert!(json["dt"].is_string());
+    }
+
+    #[test]
+    fn try_repair_json_closes_brackets_and_braces() {
+        assert_eq!(try_repair_json("[1, 2,]").as_deref(), Some("[1, 2]"));
+        assert_eq!(try_repair_json("{\"a\":1,}").as_deref(), Some("{\"a\":1}"));
+        assert!(try_repair_json("[1, 2").is_some());
+        assert!(try_repair_json("{\"a\": 1").is_some());
+        // Hopelessly broken -> None.
+        assert!(try_repair_json("][}{").is_none());
+    }
+}
+
+#[cfg(test)]
+mod extra_tests {
+    use super::*;
+
+    #[test]
+    fn parse_rules_meta_tolerant_handles_invalid_toml_with_error_warning() {
+        let mut warnings = Vec::new();
+        let meta = BifrostFileParser::parse_rules_meta_tolerant("not-toml", &mut warnings);
+        assert_eq!(meta.name, "unnamed");
+        assert!(meta.enabled);
+        assert!(meta.version.starts_with('1'));
+        assert!(warnings
+            .iter()
+            .any(|w| matches!(w.level, WarningLevel::Error)));
+    }
+
+    #[test]
+    fn parse_json_tolerant_repairs_trailing_commas() {
+        let json = "[1,2,3,]";
+        let result: ParseResultWithWarnings<Vec<u32>> =
+            BifrostFileParser::parse_json_tolerant(json);
+        assert!(result.has_warnings());
+        assert!(!result.has_errors());
+        assert_eq!(result.data, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn parse_json_tolerant_returns_default_and_error_on_unrepairable_input() {
+        let json = "this is not json";
+        let result: ParseResultWithWarnings<serde_json::Value> =
+            BifrostFileParser::parse_json_tolerant(json);
+        assert!(result.has_errors());
+        // default for serde_json::Value is Null
+        assert!(result.data.is_null());
+    }
 }

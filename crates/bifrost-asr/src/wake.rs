@@ -451,4 +451,83 @@ mod tests {
                 >= 2
         );
     }
+
+    #[test]
+    fn sherpa_kws_model_pack_reports_paths_and_missing_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let pack = SherpaKwsModelPack::for_root(temp.path());
+
+        assert!(pack.archive_path().ends_with(DEFAULT_WAKE_KWS_ARCHIVE_NAME));
+        assert!(!pack.is_ready());
+
+        let missing = pack.missing_files();
+        assert_eq!(missing.len(), pack.required_files().len());
+        for path in missing {
+            assert!(path.starts_with(&pack.model_dir));
+        }
+    }
+
+    #[test]
+    fn sherpa_kws_model_pack_is_ready_when_all_required_files_exist() {
+        let temp = tempfile::tempdir().unwrap();
+        let pack = SherpaKwsModelPack::for_root(temp.path());
+        std::fs::create_dir_all(&pack.model_dir).unwrap();
+        for path in pack.required_files() {
+            std::fs::write(&path, b"data").unwrap();
+        }
+
+        assert!(pack.is_ready());
+        assert!(pack.missing_files().is_empty());
+    }
+
+    #[cfg(feature = "wake-sherpa")]
+    #[test]
+    fn keywords_buf_from_phrases_deduplicates_and_requires_valid_phrases() {
+        let phrases = vec![
+            "哈喽".to_string(),
+            "哈喽".to_string(),
+            "你好冰霜".to_string(),
+        ];
+        let buf = keywords_buf_from_phrases(&phrases).expect("keywords buf");
+        let lines: Vec<_> = buf.lines().collect();
+
+        // two unique phrases
+        assert_eq!(lines.len(), 2);
+        assert!(lines.iter().all(|line| line.contains('@')));
+    }
+
+    #[cfg(feature = "wake-sherpa")]
+    #[test]
+    fn keywords_buf_from_phrases_errors_when_all_phrases_invalid() {
+        let phrases = vec!["!".to_string()];
+        let result = keywords_buf_from_phrases(&phrases);
+        assert!(result.is_err());
+    }
+
+    #[cfg(not(all(feature = "wake-sherpa", target_os = "macos", target_arch = "aarch64")))]
+    #[test]
+    fn streaming_detector_stub_is_noop_on_unsupported_platform() {
+        let temp = tempfile::tempdir().unwrap();
+        let pack = SherpaKwsModelPack::for_root(temp.path());
+
+        let result = StreamingWakeKwsDetector::new(&pack, "哈喽", 1.0, 0.5);
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(err.contains("wake_sherpa_unsupported_platform"));
+
+        let mut detector = StreamingWakeKwsDetector;
+        assert!(detector.accept_pcm16le(&[], 16_000).is_none());
+        assert!(detector.accept_pcm16le(&[0, 0, 1, 0], 16_000).is_none());
+    }
+
+    #[cfg(not(all(feature = "wake-sherpa", target_os = "macos", target_arch = "aarch64")))]
+    #[test]
+    fn detect_sherpa_kws_in_wav_returns_platform_error_on_unsupported_platform() {
+        let temp = tempfile::tempdir().unwrap();
+        let pack = SherpaKwsModelPack::for_root(temp.path());
+        let result =
+            detect_sherpa_kws_in_wav(&pack, std::path::Path::new("dummy.wav"), "哈喽", 1.0, 0.5);
+        let err = result.unwrap_err();
+        assert!(err.contains("wake_sherpa_unsupported_platform"));
+    }
 }

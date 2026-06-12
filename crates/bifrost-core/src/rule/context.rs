@@ -549,4 +549,96 @@ mod tests {
         assert_eq!(ctx.get_header("x-custom"), Some(&"value".to_string()));
         assert_eq!(ctx.get_cookie("token"), Some(&"secret".to_string()));
     }
+
+    #[test]
+    fn test_builder_all_setters() {
+        let mut req_headers = HashMap::new();
+        req_headers.insert("X-Req".to_string(), "r".to_string());
+        let mut req_cookies = HashMap::new();
+        req_cookies.insert("c".to_string(), "1".to_string());
+
+        let ctx = RequestContext::builder()
+            .host("h.example.com:9")
+            .hostname("h.example.com")
+            .port(9)
+            .path("/p?x=1")
+            .pathname("/p")
+            .query("x=1")
+            .search("?x=1")
+            .method("DELETE")
+            .status_code(204)
+            .client_ip("1.2.3.4")
+            .client_port(5555)
+            .header("Direct", "d")
+            .req_headers(req_headers)
+            .cookie("k", "v")
+            .req_cookies(req_cookies)
+            .client_id("cid")
+            .local_client_id("lcid")
+            .real_url("https://real.example.com")
+            .real_host("real.example.com")
+            .real_port(443)
+            .build();
+
+        assert_eq!(ctx.host, "h.example.com:9");
+        assert_eq!(ctx.hostname, "h.example.com");
+        assert_eq!(ctx.port, 9);
+        assert_eq!(ctx.path, "/p?x=1");
+        assert_eq!(ctx.pathname, "/p");
+        assert_eq!(ctx.query, Some("x=1".to_string()));
+        assert_eq!(ctx.search, Some("?x=1".to_string()));
+        assert_eq!(ctx.method, "DELETE");
+        assert_eq!(ctx.status_code, Some(204));
+        assert_eq!(ctx.client_ip, "1.2.3.4");
+        assert_eq!(ctx.remote_address, "1.2.3.4");
+        assert_eq!(ctx.client_port, 5555);
+        assert_eq!(ctx.remote_port, 5555);
+        assert_eq!(ctx.get_header("direct"), Some(&"d".to_string()));
+        assert_eq!(ctx.get_header("x-req"), Some(&"r".to_string()));
+        assert_eq!(ctx.get_cookie("k"), Some(&"v".to_string()));
+        assert_eq!(ctx.get_cookie("c"), Some(&"1".to_string()));
+        assert_eq!(ctx.client_id, Some("cid".to_string()));
+        assert_eq!(ctx.local_client_id, Some("lcid".to_string()));
+        assert_eq!(ctx.real_url, Some("https://real.example.com".to_string()));
+        assert_eq!(ctx.real_host, Some("real.example.com".to_string()));
+        assert_eq!(ctx.real_port, Some(443));
+    }
+
+    #[test]
+    fn test_get_res_cookie_and_header_none_paths() {
+        let ctx = RequestContext::new();
+        // no res_headers / res_cookies yet
+        assert!(ctx.get_res_header("any").is_none());
+        assert!(ctx.get_res_cookie("any").is_none());
+
+        let mut ctx2 = RequestContext::new();
+        let mut cookies = HashMap::new();
+        cookies.insert("sid".to_string(), "v".to_string());
+        ctx2.res_cookies = Some(cookies);
+        assert_eq!(ctx2.get_res_cookie("sid"), Some(&"v".to_string()));
+        assert!(ctx2.get_res_cookie("missing").is_none());
+    }
+
+    #[test]
+    fn test_from_url_non_http_scheme_uses_parsed_fallback() {
+        // ftp:// is not in the fast-path scheme list → falls back to url crate
+        let ctx = RequestContext::from_url("ftp://files.example.com/dir/file");
+        assert_eq!(ctx.hostname, "files.example.com");
+        assert_eq!(ctx.pathname, "/dir/file");
+    }
+
+    #[test]
+    fn test_from_url_ipv6_without_port() {
+        let ctx = RequestContext::from_url("http://[::1]/api");
+        assert_eq!(ctx.hostname, "[::1]");
+        assert_eq!(ctx.port, 80);
+        assert_eq!(ctx.pathname, "/api");
+    }
+
+    #[test]
+    fn test_from_url_no_path_defaults_to_slash() {
+        let ctx = RequestContext::from_url("https://example.com");
+        assert_eq!(ctx.pathname, "/");
+        assert_eq!(ctx.query, None);
+    }
 }

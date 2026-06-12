@@ -614,4 +614,243 @@ mod tests {
         assert_eq!(records[0].effective_scope, SkillScope::Repo);
         assert_eq!(records[0].shadow_scopes, vec![SkillScope::User]);
     }
+
+    fn write_skill_md(dir: &Path, name: &str, body: &str) {
+        let skill_dir = dir.join(name);
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(skill_dir.join(SKILL_MD), body).unwrap();
+    }
+
+    #[test]
+    fn read_all_discovers_skill_and_skips_hidden() {
+        let dir = tempdir().unwrap();
+        write_skill_md(
+            dir.path(),
+            "alpha",
+            "---\nname: alpha\ndescription: An alpha skill\n---\n# Alpha",
+        );
+        // Hidden directory must be ignored.
+        let hidden = dir.path().join(".drafts").join("ghost");
+        fs::create_dir_all(&hidden).unwrap();
+        fs::write(hidden.join(SKILL_MD), "---\nname: ghost\n---\n").unwrap();
+
+        let store = SkillStore::new(vec![ScopeRoot::new(SkillScope::Repo, dir.path())]);
+        let records = store.read_all().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].name, "alpha");
+        assert_eq!(records[0].description, "An alpha skill");
+        assert!(records[0].enabled);
+    }
+
+    #[test]
+    fn read_all_skips_missing_root() {
+        let store = SkillStore::new(vec![ScopeRoot::new(
+            SkillScope::Repo,
+            "/nonexistent/path/xyz",
+        )]);
+        assert!(store.read_all().unwrap().is_empty());
+    }
+
+    #[test]
+    fn read_one_returns_record_and_not_found() {
+        let dir = tempdir().unwrap();
+        write_skill_md(dir.path(), "beta", "---\nname: beta\n---\n# Beta");
+        let store = SkillStore::new(vec![ScopeRoot::new(SkillScope::Repo, dir.path())]);
+        let rec = store.read_one(SkillScope::Repo, "beta").unwrap();
+        assert_eq!(rec.name, "beta");
+        // Reading a directory without SKILL.md errors.
+        let err = store.read_one(SkillScope::Repo, "missing").unwrap_err();
+        assert!(matches!(err, StoreError::Io(_)));
+    }
+
+    #[test]
+    fn root_for_missing_scope_errors() {
+        let dir = tempdir().unwrap();
+        let store = SkillStore::new(vec![ScopeRoot::new(SkillScope::Repo, dir.path())]);
+        let err = store.read_one(SkillScope::User, "x").unwrap_err();
+        assert!(matches!(err, StoreError::MissingRoot(SkillScope::User)));
+    }
+
+    #[test]
+    fn enable_and_disable_toggles_marker() {
+        let dir = tempdir().unwrap();
+        write_skill_md(dir.path(), "gamma", "---\nname: gamma\n---\n# Gamma");
+        let store = SkillStore::new(vec![ScopeRoot::new(SkillScope::Repo, dir.path())]);
+
+        store.enable(SkillScope::Repo, "gamma", false).unwrap();
+        let marker = dir.path().join("gamma").join(".disabled");
+        assert!(marker.exists());
+        let rec = store.read_one(SkillScope::Repo, "gamma").unwrap();
+        assert!(!rec.enabled);
+
+        store.enable(SkillScope::Repo, "gamma", true).unwrap();
+        assert!(!marker.exists());
+        // Enabling again when already enabled is a no-op.
+        store.enable(SkillScope::Repo, "gamma", true).unwrap();
+    }
+
+    #[test]
+    fn delete_archives_then_removes() {
+        let dir = tempdir().unwrap();
+        write_skill_md(dir.path(), "delta", "---\nname: delta\n---\n# Delta");
+        let store = SkillStore::new(vec![ScopeRoot::new(SkillScope::Repo, dir.path())]);
+        store.delete(SkillScope::Repo, "delta").unwrap();
+        assert!(!dir.path().join("delta").exists());
+        // Deleting again returns NotFound.
+        let err = store.delete(SkillScope::Repo, "delta").unwrap_err();
+        assert!(matches!(err, StoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn skill_md_reads_content_and_rejects_oversized() {
+        let dir = tempdir().unwrap();
+        write_skill_md(
+            dir.path(),
+            "epsilon",
+            "---\nname: epsilon\n---\n# Epsilon body",
+        );
+        let store = SkillStore::new(vec![ScopeRoot::new(SkillScope::Repo, dir.path())]);
+        let md = store.skill_md(SkillScope::Repo, "epsilon").unwrap();
+        assert!(md.contains("Epsilon body"));
+    }
+
+    #[test]
+    fn read_records_for_name_collects_across_roots() {
+        let repo_dir = tempdir().unwrap();
+        let user_dir = tempdir().unwrap();
+        write_skill_md(repo_dir.path(), "shared", "---\nname: shared\n---\n# R");
+        write_skill_md(user_dir.path(), "shared", "---\nname: shared\n---\n# U");
+        let store = SkillStore::new(vec![
+            ScopeRoot::new(SkillScope::Repo, repo_dir.path()),
+            ScopeRoot::new(SkillScope::User, user_dir.path()),
+        ]);
+        let records = store.read_records_for_name("shared").unwrap();
+        assert_eq!(
+            records.len(),
+            1,
+            "effective scoping collapses to one winner"
+        );
+        assert_eq!(records[0].effective_scope, SkillScope::Repo);
+    }
+
+    #[test]
+    fn commit_writes_assets_and_rejects_escape() {
+        let dir = tempdir().unwrap();
+        let store = SkillStore::new(vec![ScopeRoot::new(SkillScope::Repo, dir.path())]);
+        let manifest = SkillManifest::minimal_inline("asset-skill", "assets", SkillScope::Repo);
+        let rec = store
+            .commit(SkillDraft {
+                manifest: manifest.clone(),
+                skill_md: "---\nname: asset-skill\n---\n# A".to_string(),
+                draft_dir: None,
+                assets: vec![(PathBuf::from("data/x.txt"), b"hi".to_vec())],
+            })
+            .unwrap();
+        assert!(rec.path.join("data/x.txt").is_file());
+
+        // Asset that escapes the skill dir is rejected.
+        let err = store
+            .commit(SkillDraft {
+                manifest,
+                skill_md: "---\nname: asset-skill\n---\n# A".to_string(),
+                draft_dir: None,
+                assets: vec![(PathBuf::from("../escape.txt"), b"no".to_vec())],
+            })
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Io(_)));
+    }
+
+    #[test]
+    fn update_frontmatter_preserves_body_and_sets_fields() {
+        let manifest = SkillManifest::minimal_inline("front", "front desc", SkillScope::Repo);
+        let out = SkillStore::update_frontmatter("# Body only, no frontmatter", &manifest);
+        assert!(out.starts_with("---\n"));
+        assert!(out.contains("name: front"));
+        assert!(out.contains("# Body only, no frontmatter"));
+
+        let with_fm = "---\nname: old\nversion: 9.9.9\n---\n# Existing";
+        let out2 = SkillStore::update_frontmatter(with_fm, &manifest);
+        assert!(out2.contains("name: front"));
+        assert!(out2.contains("# Existing"));
+    }
+
+    #[test]
+    fn parse_frontmatter_handles_missing_and_invalid() {
+        assert!(parse_frontmatter("no frontmatter here").is_none());
+        assert!(parse_frontmatter("---\nname: ok\n---\nbody").is_some());
+        // Invalid YAML inside frontmatter -> None (warning logged).
+        assert!(parse_frontmatter("---\n: : bad yaml :\n---\nbody").is_none());
+    }
+
+    #[test]
+    fn sanitize_single_line_collapses_whitespace() {
+        assert_eq!(sanitize_single_line("a\n\t  b   c"), "a b c");
+    }
+
+    #[test]
+    fn manifest_from_skill_md_defaults_name_from_dir() {
+        let dir = tempdir().unwrap();
+        let skill_dir = dir.path().join("auto-named");
+        fs::create_dir_all(&skill_dir).unwrap();
+        // Frontmatter without a name -> falls back to directory name.
+        fs::write(
+            skill_dir.join(SKILL_MD),
+            "---\ndescription: desc\n---\n# Body",
+        )
+        .unwrap();
+        let m = manifest_from_skill_md(&skill_dir, &SkillScope::Repo).unwrap();
+        assert_eq!(m.name, "auto-named");
+        assert_eq!(m.version, "0.1.0");
+    }
+
+    #[test]
+    fn manifest_from_skill_md_adds_slash_trigger() {
+        let dir = tempdir().unwrap();
+        let skill_dir = dir.path().join("slashy");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join(SKILL_MD),
+            "---\nname: slashy\nslash_command: /slashy\n---\n# Body",
+        )
+        .unwrap();
+        let m = manifest_from_skill_md(&skill_dir, &SkillScope::Repo).unwrap();
+        assert_eq!(m.slash_command.as_deref(), Some("/slashy"));
+        assert!(m
+            .triggers
+            .iter()
+            .any(|t| matches!(t, crate::model::TriggerRule::SlashCommand)));
+    }
+
+    #[test]
+    fn manifest_from_skill_md_rejects_missing_frontmatter() {
+        let dir = tempdir().unwrap();
+        let skill_dir = dir.path().join("no-fm");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(skill_dir.join(SKILL_MD), "# just a heading").unwrap();
+        let err = manifest_from_skill_md(&skill_dir, &SkillScope::Repo).unwrap_err();
+        assert!(matches!(err, StoreError::Io(_)));
+    }
+
+    #[test]
+    fn ensure_relative_accepts_normal_and_rejects_escape() {
+        assert!(ensure_relative(Path::new("a/b.txt")).is_ok());
+        assert!(ensure_relative(Path::new("../x")).is_err());
+        // Use a platform-appropriate absolute path: `/abs` is NOT absolute on
+        // Windows (it needs a drive prefix), so the rejection would not fire.
+        #[cfg(windows)]
+        let abs = Path::new("C:\\abs");
+        #[cfg(not(windows))]
+        let abs = Path::new("/abs");
+        assert!(ensure_relative(abs).is_err());
+    }
+
+    #[test]
+    fn store_with_validator_and_roots_accessor() {
+        let dir = tempdir().unwrap();
+        let store = SkillStore::with_validator(
+            vec![ScopeRoot::new(SkillScope::Repo, dir.path())],
+            SkillValidator::new(),
+        );
+        assert_eq!(store.roots().len(), 1);
+    }
 }

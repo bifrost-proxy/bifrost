@@ -133,6 +133,7 @@ impl Default for StateManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use tempfile::TempDir;
 
     fn setup() -> (TempDir, StateManager) {
@@ -271,5 +272,29 @@ mod tests {
         let state = manager.state();
         assert!(state.enabled_groups.contains("test_group"));
         assert!(state.disabled_rules.contains("test_rule"));
+    }
+
+    #[test]
+    fn test_userpass_last_connected_at_crud() {
+        let (_temp_dir, mut manager) = setup();
+
+        assert!(manager.userpass_last_connected_at().is_empty());
+
+        manager.set_userpass_last_connected_at("alice", 10);
+        manager.set_userpass_last_connected_at("bob", 20);
+
+        let timestamps = manager.userpass_last_connected_at();
+        assert_eq!(timestamps.get("alice"), Some(&10));
+        assert_eq!(timestamps.get("bob"), Some(&20));
+
+        let mut replacement = HashMap::new();
+        replacement.insert("carol".to_string(), 30);
+        manager.replace_userpass_last_connected_at(replacement.clone());
+
+        let after_replace = manager.userpass_last_connected_at();
+        assert_eq!(after_replace, &replacement);
+
+        manager.remove_userpass_last_connected_at("carol");
+        assert!(manager.userpass_last_connected_at().is_empty());
     }
 }

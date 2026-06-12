@@ -189,4 +189,68 @@ mod tests {
         let config = TlsConfig::build_client_config_with_custom_ca(vec![ca_cert]);
         assert!(config.is_ok());
     }
+
+    #[test]
+    fn test_build_server_config_with_client_auth() {
+        setup_crypto_provider();
+        let cert_key = create_test_cert_key();
+        let ca = generate_root_ca().expect("Failed to generate CA");
+        let ca_cert = ca.certificate_der().expect("Failed to get cert der");
+        let config =
+            TlsConfig::build_server_config_with_client_auth(&cert_key, vec![ca_cert]).unwrap();
+        // Builds a usable server config with a client verifier installed.
+        assert!(Arc::strong_count(&config) >= 1);
+    }
+
+    #[test]
+    fn test_single_cert_resolver_resolves() {
+        setup_crypto_provider();
+        let cert_key = create_test_cert_key();
+        let resolver = SingleCertResolver {
+            cert_key: cert_key.clone(),
+        };
+        // build_server_config installs this resolver; build it to confirm the
+        // resolver is wired in (resolve itself is invoked during handshake).
+        let server = TlsConfig::build_server_config(&cert_key).unwrap();
+        assert!(Arc::strong_count(&server) >= 1);
+        // Smoke-check the resolver holds a cert chain.
+        assert!(!resolver.cert_key.cert.is_empty());
+    }
+
+    #[test]
+    fn test_no_verifier_accepts_everything() {
+        use rustls::client::danger::ServerCertVerifier;
+        use rustls::pki_types::{ServerName, UnixTime};
+        setup_crypto_provider();
+
+        let ca = generate_root_ca().expect("Failed to generate CA");
+        let cert = ca.certificate_der().expect("Failed to get cert der");
+        let verifier = NoVerifier;
+
+        let server_name = ServerName::try_from("example.com").unwrap();
+        let result = verifier.verify_server_cert(&cert, &[], &server_name, &[], UnixTime::now());
+        assert!(result.is_ok());
+
+        // supported_verify_schemes is non-empty.
+        assert!(!verifier.supported_verify_schemes().is_empty());
+    }
+
+    #[test]
+    fn test_build_server_config_with_client_auth_rejects_bad_ca() {
+        setup_crypto_provider();
+        let cert_key = create_test_cert_key();
+        // A non-certificate DER blob makes RootCertStore::add fail, hitting the
+        // error-mapping closure.
+        let bogus = CertificateDer::from(vec![0u8, 1, 2, 3]);
+        let result = TlsConfig::build_server_config_with_client_auth(&cert_key, vec![bogus]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_client_config_with_custom_ca_rejects_bad_ca() {
+        setup_crypto_provider();
+        let bogus = CertificateDer::from(vec![0u8, 1, 2, 3]);
+        let result = TlsConfig::build_client_config_with_custom_ca(vec![bogus]);
+        assert!(result.is_err());
+    }
 }

@@ -479,7 +479,7 @@ mod tests {
             let guard = MOCK_SERVER_LOCK
                 .get_or_init(|| Mutex::new(()))
                 .lock()
-                .expect("group command mock server lock poisoned");
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let port = listener.local_addr().unwrap().port();
             let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
@@ -516,6 +516,9 @@ mod tests {
                             let request = String::from_utf8_lossy(&buf[..n]).to_string();
 
                             let first_line = request.lines().next().unwrap_or("").to_string();
+                            if first_line.is_empty() {
+                                continue;
+                            }
                             request_log.push(first_line);
 
                             let (status_code, body) = if resp_idx < owned_responses.len() {
@@ -569,10 +572,7 @@ mod tests {
         fn stop(mut self) -> Vec<String> {
             let _ = self.shutdown_tx.send(());
             if let Some(h) = self.handle.take() {
-                let _ = agent()
-                    .get(&format!("http://127.0.0.1:{}/shutdown", self.port))
-                    .call();
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                std::thread::sleep(std::time::Duration::from_millis(20));
                 h.join().unwrap_or_default()
             } else {
                 vec![]

@@ -4893,6 +4893,10 @@ fn warn_if_ssh_key_permissions_are_too_open(path: &Path) {
             }
         }
     }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
 }
 
 fn parse_call_terminal_status(payload: &Value) -> Option<&str> {

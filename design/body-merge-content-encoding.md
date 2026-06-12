@@ -14,6 +14,7 @@
   - 解压失败时保持原始 Body 与原编码，避免生成损坏响应。
 - HTTP 请求侧在 `apply_req_rules` 后读取最终请求 `Content-Encoding`，让 `delete://reqHeaders.Content-Encoding` 或 `reqHeaders://(Content-Encoding: gzip)` 与 Body 实际编码保持一致。
 - HTTP 响应侧在 `apply_res_rules` 后读取最终响应 `Content-Encoding`，先执行 Body 规则保编码，再执行 HTML/JS/CSS 内容注入保编码。
+- 响应命中 `trailers://` 时，普通 HTTP handler、HTTPS tunnel/MITM、mock 与 immediate response 的 buffered body 分支都必须按 trailer stream 规范化响应头：保留 `Trailer` 声明、移除 `Content-Length`，避免最终 body 附带 trailers 但固定长度头被重新写回。
 - HTTPS tunnel/MITM 链路同样使用上述保编码 Body 规则处理，避免仅普通 HTTP 代理路径生效。
 - HTTPS path 级 Body 规则只能在 TLS 解包后看到路径和响应体；CONNECT 阶段没有 path，所以 relay / 远端代理验证时必须同时配置目标 host 的 `tlsIntercept://`，或通过启动配置把目标 host 纳入 TLS 拦截范围。
 - `reqScript` / `resScript` 进入脚本前按当前 `Content-Encoding` 解码为文本；脚本写回 Body 后，再按脚本最终 Header 重新编码或输出 identity。
@@ -41,6 +42,7 @@
   - Replay 响应 JSON 经过 `resMerge` 后，`data.body` 里的 JSON 包含新增字段并覆盖相同 key。
   - Replay request 侧 `reqMerge`、URL 参数删除、请求头替换、Content-Type/charset、CORS 预检头与 forwarded-for 都体现在发给上游的请求中。
   - Replay response 侧响应头、状态码、cookie、CORS、Content-Type/charset、缓存、附件、responseFor、trailers、响应头替换、内容注入与 Body 修改都体现在 Admin API 的返回数据中。
+  - buffered 响应命中 `trailers://` 后，最终 header normalization 不会重新写回 `Content-Length`，并保留 `Trailer` 声明头。
   - Replay `reqScript` / `resScript` 修改后的请求与响应会真实生效，Traffic detail 会记录 `req_script_results` / `res_script_results`。
   - Replay `decode://bp` 会执行绑定的 `bp://` parser，并在 Traffic detail/body 中记录 request/response phase 的 parser 输出。
 - E2E 测试：
