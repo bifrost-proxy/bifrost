@@ -809,8 +809,34 @@
 3. 最终 assistant 内容仍是真实最终回复，不被过程占位文案替代。
 4. 非 external runner 的普通 assistant delta 仍作为普通 assistant 内容展示，不被误收进过程块。
 
+### TC-IEC-41: Windows stop marker 与 taskkill missing pid 幂等回归
+
+操作步骤：
+1. 执行 Windows CI 失败用例对应的本地窄测：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+     external_cli_runtime_marks_stopped_run_before_late_stdout --lib -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+     external_cli_runtime_stops_active_run_by_session_key --lib -- --nocapture
+   ```
+2. 执行新增的 missing active pid 与 `taskkill` 文案分类回归：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+     request_run_stop_treats_missing_active_pid_as_stopped --lib -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+     taskkill_missing_process_messages_are_idempotent --lib -- --nocapture
+   ```
+3. 推送后检查 GitHub Actions Windows Unit Tests，确认 `im_gateway::external_cli::tests::external_cli_runtime_marks_stopped_run_before_late_stdout` 和 `im_gateway::external_cli::tests::external_cli_runtime_stops_active_run_by_session_key` 不再因 `taskkill /PID ... /T /F exited with status exit code: 255` 失败。
+
+预期结果：
+1. stop marker 已写入但 active pid 已由另一路径终止或已退出时，停止请求仍返回成功并清理 active run 表。
+2. Windows `taskkill` 输出进程不存在或 `no running instance of the task` 时按幂等停止处理。
+3. `Access is denied` 等非 missing-process 错误不会被误判为成功。
+4. 两个原 CI 失败用例最终仍收敛为 `status:"stopped"`，`response:"External CLI run was stopped by request."`。
+
 ## 最近执行记录
 
+- 2026-06-12：执行 TC-IEC-41 的本地回归步骤，命令 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin external_cli_runtime_marks_stopped_run_before_late_stdout --lib -- --nocapture`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin external_cli_runtime_stops_active_run_by_session_key --lib -- --nocapture`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin request_run_stop_treats_missing_active_pid_as_stopped --lib -- --nocapture`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin taskkill_missing_process_messages_are_idempotent --lib -- --nocapture` 均通过。Windows Unit Tests 的真实 `taskkill` missing pid 路径待 PR GitHub Actions 验证。
 - 2026-06-08：执行 TC-IEC-39/40 的本轮回归验证。命令 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin feishu_codex_like_external_runner_defaults_to_progress_card_without_channel_override --lib -- --nocapture` 通过，确认 Feishu + Trae/Codex external runner 在没有 channel delivery override 时解析为 `ProgressCard`，且显式 channel/input override 与非 Feishu Provider 行为不变。命令 `pnpm --dir web exec vitest run src/pages/AI/AgentChatSection.timeline.test.ts` 通过，1 个测试文件 10 个用例全部通过，确认 external runner 的 thinking/tool `processSteps` 挂在最终 assistant message 上，不再生成额外 `Agent is running...` 占位消息。
 - 2026-05-13：执行 TC-IEC-01/02/03/04/08/09/10/11/12/13，临时服务端口 `18880`，`BIFROST_DATA_DIR=/tmp/bifrost-im-external-cli-test`，均通过；TC-IEC-12 使用 `sleep 23` 慢进程验证 active run 可停止，run 收敛为 `status:"stopped"`，`response:"External CLI run was stopped by request."`，且未残留 `sleep 23` 测试进程。
 - 2026-05-13：执行 TC-IEC-05/06 及 stop 迟到输出回归单测，`cargo test -p bifrost-admin external_cli -- --nocapture`，5 个测试通过。

@@ -1340,6 +1340,45 @@ fn terminate_process_rejects_pid_zero() {
     assert_eq!(error, "refusing to terminate pid 0");
 }
 
+#[tokio::test]
+async fn request_run_stop_treats_missing_active_pid_as_stopped() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let runs_root = temp_dir.path().to_path_buf();
+    let run_id = "missing-active-pid-stop";
+    tokio::fs::create_dir_all(runs_root.join(run_id))
+        .await
+        .unwrap();
+    ACTIVE_RUNS.insert(run_id.to_string(), 999_999_999);
+
+    request_run_stop(&runs_root, run_id).await.unwrap();
+
+    assert!(
+        tokio::fs::try_exists(runs_root.join(run_id).join("stop_requested"))
+            .await
+            .unwrap()
+    );
+    assert!(
+        ACTIVE_RUNS.get(run_id).is_none(),
+        "missing active pid should still be removed after a stop request"
+    );
+}
+
+#[test]
+fn taskkill_missing_process_messages_are_idempotent() {
+    assert!(taskkill_message_indicates_missing_process(
+        b"ERROR: The process \"999999999\" not found.",
+        b""
+    ));
+    assert!(taskkill_message_indicates_missing_process(
+        b"",
+        b"ERROR: The process with PID 999999999 could not be terminated.\r\nReason: There is no running instance of the task.\r\n"
+    ));
+    assert!(!taskkill_message_indicates_missing_process(
+        b"",
+        b"ERROR: The process with PID 999999999 could not be terminated.\r\nReason: Access is denied.\r\n"
+    ));
+}
+
 #[test]
 fn effective_config_marks_channel_overrides() {
     let mut config = ExternalCliGatewayConfig::default();

@@ -900,6 +900,8 @@ Runs 页面用于排查 Chat Gateway 和真实 IM Agent 执行。列表字段：
 - `chat_gateway_real_im_requires_permission`：验证默认不会发送到真实 IM。
 - `agent_effective_config_marks_inherited_and_overridden_fields`：验证全局默认和通道覆盖合并后能标记字段来源。
 - `agent_effective_config_rejects_channel_work_dir_expansion`：验证通道配置不能扩大到全局未允许目录。
+- `request_run_stop_treats_missing_active_pid_as_stopped`：验证 stop marker 已写入但 active pid 已消失时，停止请求仍按幂等成功收敛。
+- `taskkill_missing_process_messages_are_idempotent`：验证 Windows `taskkill` 返回进程不存在/无运行实例时按 Unix `ESRCH` 同等处理，权限拒绝等其它错误仍保留为失败。
 
 ### E2E 测试
 
@@ -1016,6 +1018,7 @@ $BIFROST_DATA_DIR/agent/im_gateway/session_state.json
 - 新增 Chat Gateway 配置 API：`GET/PATCH /chat/config` 保存完整 runner registry，`/chat/config/channels/:provider_id` 只保存 IM 通道的 `runnerId/enabled/deliveryMode` 覆盖。Chat Gateway 的 `/chat` 和 `/chat/stream` 会始终合并默认 runner；带 providerId 时再叠加 provider/channel 语义。
 - 新增 `POST /api/im-gateway/chat/stream` NDJSON 测试入口，用于 WebUI 测试抽屉和接口级测试。
 - 新增 `POST /api/im-gateway/chat/runs/:run_id/stop`，写 stop marker，并对 active CLI process 发送终止信号；Unix 下只在确认子进程拥有独立 process group 时才终止同组进程，避免 pid 0 或父进程组误伤；run 收敛阶段会优先识别 stop marker，即使 shell 迟到输出也固定返回 `status:"stopped"`。
+- 2026-06-12：修复 Windows CI 中 stop marker 与运行时收敛同时终止同一 active pid 的竞态。Windows `taskkill` 现在把明确的 `process not found` / `no running instance of the task` 视为幂等成功，保持与 Unix `ESRCH` 一致；其它 `taskkill` 失败继续返回 stdout/stderr 便于诊断。
 - 新增 `ExternalCliAgentChat` route action，真实 IM 入站命中 route 后可走 External CLI runtime，并按 delivery mode 发送开始/最终回复。
 - WebUI 新增 AI -> Agent -> Runners section，支持 runner 列表、新建/编辑弹窗、通道 runner 覆盖、effective preview 和测试运行。Runners 属于 Agent 能力，不放在 IM Gateway 子导航中。
 - Agent 全局配置新增 `runner`，用于选择 IM 默认消息进入内置 Bifrost Agent 还是某个自定义 runner；IM Provider 的 `agent_config.runner` 可覆盖全局默认。Provider 选择自定义 runner 后，即使没有显式 `ExternalCliAgentChat` route，默认 Agent/AgentChat 入站消息也会调度到对应 runner runtime。
