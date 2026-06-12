@@ -503,7 +503,8 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     || !landing_html.contains("Manual Wi-Fi proxy setup is the safe cleanup path")
                     || !landing_html.contains("isTrustProbeProxyBypassRequired")
                     || !landing_html.contains("trust_probe_must_bypass_proxy")
-                    || !landing_html.contains("Direct probe request went through the configured proxy")
+                    || !landing_html.contains("Proxy path detected.")
+                    || !landing_html.contains("Bifrost will still validate CA trust with the HTTPS probe.")
                 {
                     return Err(format!("Unexpected trust probe landing page: {landing_html}"));
                 }

@@ -452,11 +452,13 @@
 - 管理端生成二维码后不再展示 session 聚合状态条；扫码后的检测结果集中在 `Connected devices` 列表中按设备展示 `Page`、`Network`、`Browser HTTPS`、`Access`、`Proxy` 状态。
 - Certificate 页 Availability Check 卡片顶部直接展示当前已连接、需要做可用性检查的移动设备；每台设备显示自定义名称或 ID、iOS/Android 平台、连接状态和 CA 状态。这个目标设备列表不需要等手机扫码后才出现。
 - 手机页标题为 `Bifrost Availability Check`，并显示代理访问授权检查结果。
+- 手机页顶部始终高亮展示当前目标代理服务 `<host>:<adminPort>`，该值与管理端 Availability Check 选择的局域网 IP 和 Bifrost 代理端口一致。
 - 手机页显示代理配置检查结果：已配置代理时显示 `Proxy is configured`；未配置代理时显示 `Proxy is not configured yet`。
 - 手机页每秒自动重跑代理授权、probe 端口、浏览器 HTTPS probe 和代理配置检测；完成浏览器 CA 信任、管理端授权或 Wi-Fi 代理配置后，手机页和管理端状态应自动更新，不需要手动刷新页面。
 - 手机页代理未配置时优先提示手动进入 iPhone `Settings > Wi-Fi > current network > Configure Proxy > Manual`，填写 Bifrost `host:port` 后重试；实验 profile 入口放在手动步骤之后。
 - 手机页和管理端说明 Wi-Fi Proxy Profile 不包含 Wi-Fi 密码或入网凭据，但它是 managed Wi-Fi 配置，卸载 profile 可能移除对应 Wi-Fi 网络条目；安装过程中不应该要求用户输入 Wi-Fi 密码。
-- 手机页包含 `iOS Wi-Fi Proxy Profile` 工具区，优先显示 Bifrost 服务端下发的 Wi-Fi 名称；若服务端未检测到 Wi-Fi 名称，页面展示 Wi-Fi 名称输入框，用户输入当前 iPhone Wi-Fi 名并点击 `Use this Wi-Fi name` 后，下载按钮变为可用。
+- 只有 iOS 设备且代理尚未配置时，手机页才展示 `iOS Wi-Fi Proxy Profile` 工具区；该工具区优先显示 Bifrost 服务端下发的 Wi-Fi 名称，若服务端未检测到 Wi-Fi 名称，页面展示 Wi-Fi 名称输入框，用户输入当前 iPhone Wi-Fi 名并点击 `Use this Wi-Fi name` 后，下载按钮变为可用。
+- 当手机页检测到代理已经配置完成后，`iOS Wi-Fi Proxy Profile` 工具区隐藏；非 iOS 设备打开同一个公开 Availability Check 页面时也不展示该 iOS 专用工具区。
 - 手机页下载实验 Wi-Fi proxy profile 前必须勾选“removing this profile may remove this Wi-Fi entry”风险确认；未勾选时下载链接保持禁用。
 - 管理端 Availability Check 卡片包含 `Wi-Fi name for iOS proxy profile` 输入框；输入 Wi-Fi 名并点击 `Send Wi-Fi Name` 后，管理端通过 `trust_probe` push 更新当前 session，手机公开页在下一次公开页自检循环中同步更新 Wi-Fi 名和下载链接。
 - 管理端顶部 Availability Check、Certificate 页 iOS 区块、手机公开检测页的 Wi-Fi 名称配置区域下方，都直接展示 `Experimental managed Wi-Fi profile` 风险说明；说明必须写清 profile 不包含 Wi-Fi 密码，但卸载 profile 可能移除 iOS managed Wi-Fi 网络条目。
@@ -473,11 +475,11 @@
 - 手机页成功后展示的代理地址是可点击复制的按钮，点击后显示 `Copied` 或清晰提示手动复制。
 - 如果 netcheck 成功但浏览器 HTTPS probe 失败，管理端显示 `Browser HTTPS failed`，手机页提示安装 CA、iOS 开启完全信任或 Android App 信任边界，并明确提示安装/信任后仍失败时需要完整重启浏览器再重试。
 - 如果 CA 尚未安装或尚未被浏览器信任，手机页证书信任区域保持稳定的失败引导；每秒自动检测不应让该区域在 `Checking browser HTTPS probe` 和失败步骤之间反复闪烁。
-- 如果 active trust-probe 的 `netcheck` 或 `check` URL 被配置了 Bifrost HTTP proxy 的客户端以 absolute-form 请求送进代理入口，Bifrost 必须拒绝该请求并保持对应设备的网络/浏览器 HTTPS probe 为失败或 pending；只有 `bifrost-proxy-check.invalid` 专用探针允许经代理进入并标记 `Proxy config detected`。
+- 如果 active trust-probe 的 HTTP `netcheck` URL 被配置了 Bifrost HTTP proxy 的客户端以 absolute-form 请求送进代理入口，手机页不能直接把证书检查判定为失败；页面应提示已检测到代理路径并继续执行 HTTPS probe。若 HTTPS probe 在配置代理的浏览器中通过 CONNECT 或等效真实 TLS 路径完成，且当前 CA 已被浏览器信任，则手机页和管理端都应显示 Browser HTTPS passed / `tls_trusted`。只有 `bifrost-proxy-check.invalid` 专用探针允许经代理进入并标记 `Proxy config detected`。
 - 如果 landing page 能打开但 probe 端口不可达，管理端显示 `Probe unreachable`，并提示检查防火墙、局域网隔离和 IP 选择。
 - 成功文案不承诺所有 App 都能被解密，只说明当前设备浏览器 TLS 链路已完成 Bifrost HTTPS probe。
 - 自动化 E2E 使用当前 Bifrost CA 作为 root CA 直连 HTTPS check，并断言 session 最终为 `tls_trusted`。
-- 自动化 E2E 使用配置了 Bifrost HTTP proxy 的客户端访问 `bifrost-proxy-check.invalid` 专用探针，并断言 session 最终包含 `proxyConfigured=true`。
+- 自动化 E2E 使用配置了 Bifrost HTTP proxy 的客户端访问 `bifrost-proxy-check.invalid` 专用探针，并断言 session 最终包含 `proxyConfigured=true`；同一代理客户端携带当前 Bifrost CA 后访问 HTTPS trust probe 应返回 200，证明代理配置完成后仍能把证书检查推进为绿色。
 - 自动化 E2E 使用两个不同 `deviceId` 模拟两台移动设备：第一台完成 netcheck、浏览器 HTTPS probe 和 proxy configured；第二台只上报页面打开和代理授权检查；最终断言 `GET /api/trust-probe/sessions/{id}` 返回至少两个 `devices[]` 条目，且两台设备状态互不覆盖。
 
 ### TC-MDT-16：Availability Check 公开入口和代理授权检查不被访问控制误拦截
