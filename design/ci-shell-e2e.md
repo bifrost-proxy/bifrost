@@ -121,3 +121,7 @@ CI shell E2E 通过 `scripts/ci/run-e2e-shell.sh` 调用 `scripts/run_all_e2e.sh
 
 - 更新 `human_tests/ci-shell-e2e-sharding.md`
 - 更新 `human_tests/readme.md`
+
+## CI shell dynamic ports
+
+- `test_rule_match_logging_noise.sh` must not hard-code `18887` / `18888`. In Linux/macOS shell shards it runs alongside other shell tests on the same hosted runner, so the info/debug Bifrost instances use `allocate_free_port` from `e2e-tests/test_utils/process.sh` and still allow `INFO_PORT` / `DEBUG_PORT` overrides for local reproduction.
