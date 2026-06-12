@@ -153,7 +153,8 @@ helper 启动后：
 
 v1 语义：
 
-- `Stop Bifrost` 停止主服务，但不退出 helper。
+- `Stop Bifrost` 停止主服务后，helper 会进入空转宽限期；如果 10 分钟内没有新的服务启动并恢复 Running，helper 自动退出并清理 `tray.pid`，避免菜单栏长期残留失效图标。
+- 如果宽限期内用户点击 `Start Bifrost`，helper 不会在启动中途退出；服务恢复 Running 后计时清零。如果启动失败，空转计时从失败后的 Stopped 状态重新开始。
 - `Start Bifrost`、`Stop Bifrost` 必须有用户可见的进行中状态：
   - 点击后下一次展开菜单立即显示 `Bifrost: Starting...` / `Stopping...`。
   - 进行中时禁用 Start/Stop，避免重复点击造成并发操作。

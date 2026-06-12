@@ -97,6 +97,63 @@
     }
 
     #[test]
+    fn test_service_idle_auto_exit_after_timeout_without_restart() {
+        let start = Instant::now();
+        let mut idle_since = None;
+
+        assert!(!should_auto_exit_for_service_idle(
+            &mut idle_since,
+            STATE_STOPPED,
+            OP_IDLE,
+            start
+        ));
+        assert_eq!(idle_since, Some(start));
+        assert!(!should_auto_exit_for_service_idle(
+            &mut idle_since,
+            STATE_STOPPED,
+            OP_IDLE,
+            start + SERVICE_IDLE_EXIT_TIMEOUT - Duration::from_secs(1)
+        ));
+        assert!(should_auto_exit_for_service_idle(
+            &mut idle_since,
+            STATE_STOPPED,
+            OP_IDLE,
+            start + SERVICE_IDLE_EXIT_TIMEOUT
+        ));
+    }
+
+    #[test]
+    fn test_service_idle_auto_exit_resets_after_running_or_starting() {
+        let start = Instant::now();
+        let mut idle_since = Some(start);
+
+        assert!(!should_auto_exit_for_service_idle(
+            &mut idle_since,
+            STATE_RUNNING,
+            OP_IDLE,
+            start + Duration::from_secs(20)
+        ));
+        assert_eq!(idle_since, None);
+
+        assert!(!should_auto_exit_for_service_idle(
+            &mut idle_since,
+            STATE_STOPPED,
+            OP_STARTING,
+            start + SERVICE_IDLE_EXIT_TIMEOUT + Duration::from_secs(1)
+        ));
+        assert_eq!(idle_since, None);
+
+        let after_failed_start = start + SERVICE_IDLE_EXIT_TIMEOUT + Duration::from_secs(2);
+        assert!(!should_auto_exit_for_service_idle(
+            &mut idle_since,
+            STATE_STOPPED,
+            OP_START_FAILED,
+            after_failed_start
+        ));
+        assert_eq!(idle_since, Some(after_failed_start));
+    }
+
+    #[test]
     fn test_recent_tray_interaction_defers_structural_replacement() {
         assert!(!should_replace_native_menu(false, false, true));
         assert!(should_replace_native_menu(false, false, false));

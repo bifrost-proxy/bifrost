@@ -423,6 +423,22 @@ curl -sS -X POST http://127.0.0.1:8801/_bifrost/api/rules \
 - Open Admin UI、Open Traffic、Open Rules、Copy Admin URL、Copy HTTP Proxy 等依赖服务的菜单项置灰
 - 没有依赖再次点击图标预热下一次菜单才能看到新状态
 
+### TC-TH-15B: 主服务退出后托盘空转 10 分钟自动退出
+
+**操作步骤：**
+1. 使用启动命令模板启动 Bifrost 服务和托盘
+2. 记录 `.bifrost-tray-test/tray.pid` 中的 helper PID
+3. 在终端执行 `BIFROST_DATA_DIR=./.bifrost-tray-test cargo run --bin bifrost -- stop`
+4. 确认托盘状态进入 Stopped 或 Disconnected
+5. 等待 10 分钟以上，期间不要通过托盘或 CLI 启动服务
+6. 检查 helper PID 是否退出，并检查 `.bifrost-tray-test/tray.pid` 是否被清理
+7. 回归保护：执行 `cargo test -p bifrost-cli service_idle_auto_exit -- --nocapture`
+
+**预期结果：**
+- 主服务停止后的 10 分钟内，如果没有新的服务启动，托盘 helper 自动退出
+- helper 退出前记录空转超时日志，并清理自己的 `tray.pid`
+- 如果服务重新变为 Running，空转计时清零；如果用户点击 Start 正在启动，helper 不会在启动中途退出
+
 ### TC-TH-16: 自定义 admin_api 只允许 GET/POST 且使用管理端基准路径
 
 **操作步骤：**
@@ -567,6 +583,7 @@ BIFROST_DATA_DIR="$TMP_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
 | 2026-06-11 | TC-TH-08B | 针对配置文件和 Settings 开关禁用/重新启用托盘的新增验证：`[tray] enabled = false` 阻止 CLI 启动 helper；运行中通过 Admin API 关闭 Tray Icon 后，helper 轮询到配置禁用并主动清理 `tray.pid` 退出；重新启用时 Admin API 通过 CLI 注入的 launcher 回调重新创建 helper，并对旧 helper 退出锁释放窗口做短重试。 | 本地执行 `cargo test -p bifrost-cli should_launch_tray_disabled_by_config -- --nocapture` 通过；本地真实启动当前 `target/debug/bifrost` 后执行 `PUT /_bifrost/api/config/tray {\"enabled\":false}` 通过，输出 `PASS: tray config API disabled running helper`；预置 `config.toml` 后重启通过，输出 `PASS: tray config disabled before start skipped helper`；本次补充执行 `SKIP_BUILD=true BIFROST_BIN=$PWD/target/debug/bifrost bash e2e-tests/tests/test_cli_tray_config_reenable.sh` 通过，输出 `PASS: tray helper relaunched after config enable (before=76710 after=77231)` |
 | 2026-06-11 | TC-TH-13 | 针对 Rules 菜单只支持选中、不支持再次点击取消的回归补充验证：菜单 action 带上当前 checked 状态；点击未启用规则时继续执行单选收敛，点击当前已启用规则时只调用该规则 disable API，不再 enable 回去。 | 本地执行 `cargo test -p bifrost-cli toggle_single_rule -- --nocapture` 通过未选中选择路径；执行 `cargo test -p bifrost-cli enabled_rule_calls_admin_api_for_disable_only -- --nocapture` 通过已选中取消路径，断言只发 `PUT /_bifrost/api/rules/beta/disable`；执行 `cargo test -p bifrost-cli test_rules_menu_two_levels_without_groups -- --nocapture` 通过，断言 action 的 `currently_enabled` 与原生勾选状态一致 |
 | 2026-06-11 | TC-TH-13-REG-01 | 针对 Rules 点击一次但状态仍停留在旧规则的回归补充验证：旧实现把菜单中所有候选规则放进 action，日志中出现一次点击触发大量 `group rule disabled` 的现象；修复后 action 只携带当前已启用的其他规则，切换成功后立即刷新菜单快照并提升 generation。 | 本地执行 `cargo test -p bifrost-cli test_rules_menu_two_levels_without_groups -- --nocapture` 通过，断言未启用 `beta` 的 action 只携带已启用的 `alpha`；执行 `cargo test -p bifrost-cli recent_rule -- --nocapture` 通过，断言最近快捷项也不会携带全量候选；执行 `cargo test -p bifrost-cli toggle_single_rule -- --nocapture` 通过，断言切换路径只调用待禁用目标与新目标 |
+| 2026-06-12 | TC-TH-15B | 针对主服务退出后托盘 helper 不应长期残留的新增验证：状态轮询线程在服务进入 Stopped/Disconnected 后开始 10 分钟空转计时，Running 或 Starting 会重置计时；超过 10 分钟仍未恢复服务时设置 quit flag 并清理 `tray.pid`。 | 本地执行 `cargo test -p bifrost-cli service_idle_auto_exit -- --nocapture` 通过，覆盖停止未超时不退出、达到 10 分钟退出、Running 重置、Starting 不退出并重新计时 |
 | 2026-06-11 | TC-TH-22 | 针对 tray helper RSS 超过 50 MB 的内存口径与运行时瘦身验证：复用 HTTP agent、缩小 tray 日志队列、常驻/动作线程使用小栈，并对远端 group 失败做短退避；同时区分 `ps RSS` 与 macOS `Physical footprint`。 | 本地执行 release 真实 helper 测量：`ps RSS` 启动后约 38 MB，12 秒后约 56 MB；`vmmap -summary` 显示 `Physical footprint: 17.8M`、dirty heap 约 11.9M，满足 30 MB 独占内存目标；`strip` 将二进制从 110M 降至 92M 但 RSS 不变，说明 RSS 主要来自共享 framework 映射而非符号段；远端 group 失败日志退避后 12 秒内 warning 约 3 次，不再每秒刷 |
 | 2026-06-11 | TC-TH-23 | 针对 tray helper 内存优化做代码级归因与收尾：检查 `main.rs` 早返回入口、`Cargo.toml` 主 CLI 依赖、tray 模块 import、`tray_launcher.rs` 配置读取依赖，以及 `arboard`/`open`/`image`/`tao`/`tray-icon`/`muda`/`bifrost-core` 的依赖树；同时清理不采用的独立 helper 与手写平台 open/clipboard 方案。 | 本地执行 `rg -n "run_if_tray|install_panic_hook|init_crypto_provider|Cli::parse|init_logging" crates/bifrost-cli/src/main.rs`，确认 `run_if_tray_process` 在主初始化前；执行 `cargo tree -p bifrost-cli --target aarch64-apple-darwin -i arboard` 与 `cargo tree -p bifrost-cli --target aarch64-apple-darwin -i open`，确认继续复用跨平台 `arboard`/`open`；执行残留扫描 `rg -n "bifrost-tray-helper|find_sibling_tray_helper|tray_helper_binary|/usr/bin/pbcopy|fn copy_text_to_clipboard|fn open_location"` 无命中；已在 `design/cli-tray-helper.md` 记录独立 helper、替换 `open`/`arboard` 和原生 AppKit/Win32 的实测结论与不采用原因 |
 

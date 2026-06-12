@@ -36,6 +36,7 @@ const START_READY_TIMEOUT: Duration = Duration::from_secs(15);
 const LOG_RETENTION_DAYS: u64 = 30;
 const MENU_REBUILD_SUPPRESSION_AFTER_CLICK: Duration = Duration::from_secs(3);
 const REMOTE_GROUP_FAILURE_BACKOFF: Duration = Duration::from_secs(5);
+const SERVICE_IDLE_EXIT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const RECENT_RULES_FILE: &str = "tray_recent_rules.json";
 const RECENT_RULE_LIMIT: usize = 5;
 const TRAY_THREAD_STACK_SIZE: usize = 512 * 1024;
@@ -123,9 +124,10 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
 
     let poll_quit = should_quit.clone();
     let poll_state = current_state.clone();
+    let poll_operation = current_operation.clone();
     let poll_args = args.clone();
     spawn_tray_thread("bifrost-tray-state-poll", move || {
-        poll_service_state(&poll_quit, &poll_state, &poll_args);
+        poll_service_state(&poll_quit, &poll_state, &poll_operation, &poll_args);
     })
     .map_err(|error| format!("failed to spawn tray state poll thread: {error}"))?;
 
@@ -1708,7 +1710,17 @@ fn bifrost_binary_name() -> &'static str {
     }
 }
 
-fn poll_service_state(quit_flag: &AtomicBool, state: &AtomicU8, args: &TrayArgs) {
+fn poll_service_state(
+    quit_flag: &AtomicBool,
+    state: &AtomicU8,
+    operation: &AtomicU8,
+    args: &TrayArgs,
+) {
+    let mut service_idle_since = match state.load(Ordering::Relaxed) {
+        STATE_RUNNING => None,
+        _ => Some(Instant::now()),
+    };
+
     loop {
         if quit_flag.load(Ordering::Relaxed) {
             break;
@@ -1724,7 +1736,43 @@ fn poll_service_state(quit_flag: &AtomicBool, state: &AtomicU8, args: &TrayArgs)
                 "service state transition detected"
             );
         }
+
+        let current_operation = operation.load(Ordering::Relaxed);
+        if should_auto_exit_for_service_idle(
+            &mut service_idle_since,
+            new_state,
+            current_operation,
+            Instant::now(),
+        ) {
+            tracing::info!(
+                timeout_secs = SERVICE_IDLE_EXIT_TIMEOUT.as_secs(),
+                "service has been stopped without restart; exiting tray helper"
+            );
+            remove_own_tray_pid(&args.data_dir);
+            quit_flag.store(true, Ordering::Relaxed);
+            break;
+        }
     }
+}
+
+fn should_auto_exit_for_service_idle(
+    service_idle_since: &mut Option<Instant>,
+    service_state: u8,
+    operation: u8,
+    now: Instant,
+) -> bool {
+    if service_state == STATE_RUNNING {
+        *service_idle_since = None;
+        return false;
+    }
+
+    if operation == OP_STARTING {
+        *service_idle_since = None;
+        return false;
+    }
+
+    let since = service_idle_since.get_or_insert(now);
+    now.duration_since(*since) >= SERVICE_IDLE_EXIT_TIMEOUT
 }
 
 fn poll_menu_data(
