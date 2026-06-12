@@ -79,7 +79,7 @@ bifrost [OPTIONS] [COMMAND]
 | `-H, --host <HOST>` | 监听地址 | `0.0.0.0` |
 | `--socks5-port <PORT>` | SOCKS5 端口 | 无 |
 | `-l, --log-level <LEVEL>` | 日志级别 | `info` |
-| `--log-output <TARGETS>` | 日志输出目标：`console` / `file` / `console,file` | `console` |
+| `--log-output <TARGETS>` | 日志输出目标：`file` / `console` / `console,file`；默认写文件，显式 `console` 会额外输出到终端且仍保留文件日志 | `file` |
 | `--log-dir <DIR>` | 日志目录（默认：`<data_dir>/logs`） | 无 |
 | `--log-retention-days <DAYS>` | 日志保留天数 | `7` |
 | `-h, --help` | 显示帮助 | - |
@@ -380,12 +380,17 @@ bifrost rule disable <name>
 bifrost rule delete <name>
 bifrost rule show <name>
 bifrost rule get <name>
+bifrost rule share <name> https://example.com/path
+bifrost rule share <name> https://example.com/path --content "example.com bp://127.0.0.1:3000"
+bifrost rule share <name> https://example.com/path --file rules.txt
 bifrost rule sync
 bifrost rule rename <name> <new_name>
 bifrost rule reorder <name1> <name2> ...
 ```
 
 - `rule active` 需要代理服务运行中（通过管理接口获取运行时已启用规则摘要）
+- `rule share` 会生成带 `__bifrost_rule` query 的分享链接。目标 URL 支持完整 `http://` / `https://` 地址，也支持 `a.com`、`example.com/path`、`localhost:3000` 这类裸域名输入；裸域名会默认规范成 `https://...`。未传 `--content` 或 `--file` 时读取同名本地规则；传入 `--content` 或 `--file` 时只生成链接，不把规则写入本地规则目录。
+- 分享链接被 Bifrost 代理劫持后会导入到 `share/<规则名>` 命名空间并启用它，同时禁用其他个人规则。第一版固定 `exclusive_scope=my_rules`，不会修改 Group 规则。对已导入的 `share/...` 规则再次执行 `rule share` 时，协议 payload 会自动剥掉 `share/` 前缀，继续使用原始分享名。
 
 ### Group 管理
 

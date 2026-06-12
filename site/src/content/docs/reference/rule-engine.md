@@ -29,14 +29,18 @@ pattern operation [operations...] [filters...] [lineProps://...]
 
 Pattern 根据格式自动识别类型，优先级影响匹配顺序：
 
-| 类型     | 格式示例                        | 优先级 |
-| :------- | :------------------------------ | :----- |
-| Domain   | `example.com` `example.com/api` | 100    |
-| IP/CIDR  | `192.168.1.1` `192.168.0.0/16`  | 95     |
-| Regex    | `/pattern/` `/pattern/i`        | 80     |
-| Wildcard | `*.example.com` `$host` `api?`  | 55     |
+| 类型         | 格式示例                                    | 优先级 |
+| :----------- | :------------------------------------------ | :----- |
+| Domain       | `example.com` `example.com/api`             | 100+   |
+| IP（精确）   | `192.168.1.1`                               | 95     |
+| CIDR         | `192.168.0.0/16`                            | 70-78  |
+| Regex        | `/pattern/` `/pattern/i`                    | 80     |
+| PathWildcard | `^example.com/api/*` `^example.com/api/**`  | 60-70  |
+| Wildcard     | `*.example.com` `$example.com` `example?.com` | 40-60  |
 
-取反匹配：所有类型均支持 `!` 前缀，如 `!*.example.com`
+Domain 优先级以 100 为基准，显式协议（`http(s)://`）+5、显式端口 +10，因此带协议带端口的 Domain pattern 可达 100-115。CIDR 优先级为 `70 + prefix_len/4`（约 70-78），低于 Regex（80），因此一条宽泛的 CIDR（如 `/16`）可能排在 Regex 之后；只有精确 IP 才是 95。
+
+取反匹配：所有类型的 pattern 都接受 `!` 前缀（如 `!*.example.com`），且能正常解析、规则状态为 Running；但实测在当前版本（0.0.96）取反匹配在运行时**不产生效果**——非匹配的请求并不会因取反而命中规则（无论是 `resHeaders://` 注入还是 `host://` 改目标，均未触发），因此暂不要依赖 `!` 前缀。完整的类型检测顺序、优先级与协议前缀注意事项见 [pattern.md](../patterns/)。
 
 ## 高级配置
 
@@ -110,16 +114,22 @@ example.com host://127.0.0.1 includeFilter://m:GET excludeFilter:///admin/
 | 前缀      | 说明       | 示例                                |
 | :-------- | :--------- | :---------------------------------- |
 | `m:`      | HTTP 方法  | `m:GET` `m:GET,POST,PUT`            |
-| `s:`      | 状态码     | `s:200` `s:200-299` `s:200,404,500` |
-| `h:`      | 请求头存在或匹配 | `h:X-Custom-Header` `h:Content-Type=json` |
-| `reqH:`   | 请求头匹配 | `reqH:Content-Type=/json/`          |
-| `resH:`   | 响应头匹配 | `resH:Content-Type=/json/`          |
+| `s:`      | 状态码（当前运行时未生效，见下方说明） | `s:200` `s:200-299` `s:200,404,500` |
+| `h:`      | 请求头存在或匹配（仅 `User-Agent`/`Accept`/`Host` 等标准头，见下方说明） | `h:User-Agent=curl` `h:Accept` |
+| `reqH:`   | 请求头正则匹配（仅标准头，见下方说明） | `reqH:User-Agent=/curl/`            |
+| `resH:`   | 响应头匹配（当前运行时未生效，见下方说明） | `resH:Content-Type=/json/`          |
 | `i:`      | 客户端 IP  | `i:192.168.1.1` `i:192.168.0.0/16`  |
 | `/path`   | 路径包含   | `/api`                              |
 | `/regex/` | 路径正则   | `/^\/api\/v\d+/`                    |
 | `domain.com/path` | URL host/path | `api.example.com/v1` |
 
-> `b:` / `B:` body 过滤器当前只被 parser 接受，运行时 resolver 尚未读取 body 做过滤，匹配结果不会生效。请用 `bifrost search --req-body/--res-body` 做内容筛选，不要把 body 过滤写成生产规则依赖。
+> `b:` / `B:` body 过滤器当前只被 parser 接受，运行时 resolver 不读取 body 做过滤，**实测行为随写法不同**：文档使用的 `b:/regex/` 形式（如 `b:/error/`）写在 `includeFilter://b:/.../`  里会让规则**永远不命中**（fail-closed，实测无论有无 body 都返回 502），写在 `excludeFilter://b:/.../`  里则**永远不排除**（规则照常生效）；而不带斜杠的裸值形式（如 `b:foo`）会被直接丢弃忽略，规则照常命中。两种写法都无法真正按 body 内容过滤。请用 `bifrost search --req-body/--res-body` 做内容筛选，不要把 body 过滤写成生产规则依赖。
+
+> `s:` 状态码过滤器当前只被 parser 接受，运行时 resolver 不会拿真实响应状态码去判定，因此**完全不生效**：写在 `includeFilter://s:200` 里永远不命中（即使响应确实是 200 也不会注入受控操作），写在 `excludeFilter://s:404` 里永远不排除（响应为 200 或 404 都不排除）。`s:200-299`、`s:200,404,500` 等区间/列表写法同样无效。需要按状态码筛选请改用 `bifrost search`，不要把状态码过滤写成生产规则依赖。
+
+> `h:` / `reqH:` 请求头过滤器只对**标准请求头**生效，例如 `User-Agent`、`Accept`、`Host`。实测可用形式：`h:User-Agent=curl`（值为大小写敏感的子串匹配）、`h:Accept`（存在性匹配）、`reqH:User-Agent=/curl/`（值正则匹配）。`Content-Type` 与自定义头（如 `X-Custom-Header`、`X-Tag`）**不会**被这两个过滤器读取——即使请求确实带了该头、值也确实匹配，规则仍判定为不命中（命中 `host://` 类规则时表现为请求落空、返回 502）。这些头会照常转发到上游，只是不参与过滤判定。如需按 `Content-Type` 或自定义头筛选，请改用 `bifrost search`。
+
+> `resH:` 响应头过滤器当前只被 parser 接受，运行时 resolver 不会读取真实响应头去判定，因此**完全不生效**：值正则形式 `resH:Content-Type=/json/`（乃至 `resH:Content-Type=/.*/`）永远不命中，存在性形式 `resH:Content-Type` 则被静默忽略、无论该头是否真实存在都按命中处理——两种写法都不反映真实响应头。需要按响应头筛选请改用 `bifrost search`，不要把响应头过滤写成生产规则依赖。
 
 ### 6. 规则属性
 
@@ -146,13 +156,44 @@ example.com resBody://{mockBody}
 
 `${varName}` 格式为模板变量，不会被预处理展开。
 
+### 8. 规则引用
+
+在独立行写 `@规则名称` 可以引用个人私有规则；写 `@组名称/规则名称` 可以引用本机已缓存的组规则。Bifrost 会在解析前把被引用规则的内容原位展开：
+
+```txt
+@shared-headers # 行内说明
+@team-alpha/shared-headers	# tab 后的行内说明也会被忽略
+example.com host://127.0.0.1:3000
+```
+
+常见用法是把 `shared-headers` 设为 disabled，避免它 standalone 全局生效，再由启用的入口规则通过 `@shared-headers` 或 `@team-alpha/shared-headers` 复用。
+
+个人私有规则不需要带组名称。组规则必须使用 `组名称/规则名称`，避免和同名私有规则冲突。规则引用只在独立 `@` 行生效；普通 `#` 注释里的 `@规则名称` 不会被当作引用。`@comment` 保持为注释指令，`commented-*` 这类真实规则名仍可正常引用。规则引用支持嵌套；运行时解析遇到缺失引用会跳过该引用行并继续解析后续规则，避免因为删除或尚未同步的引用规则导致整条入口规则失效。循环引用仍会让入口规则解析失败。Rules 编辑器的语法校验会对缺失引用返回 `E020`，并把对应 `@规则` 标红显示悬浮错误提示，便于用户及时修正。
+
+### 9. 规则分享链接
+
+Bifrost 支持把一条个人规则编码到任意 HTTP/HTTPS URL 的特殊 query 中，用于把规则分享给其他本机 Bifrost 用户或自动化 Agent。协议 query 名固定为 `__bifrost_rule`，内容是 URL-safe base64 编码的 JSON payload，包含规则名称、规则内容、版本号、内容 hash、导入模式和独占启用范围。
+
+第一版导入行为固定为 `mode=enable_exclusive`、`exclusive_scope=my_rules`：当 Bifrost 代理劫持到带 `__bifrost_rule` 的请求时，会把 payload 导入到个人规则列表，启用该规则，并禁用其他个人规则；不会创建、修改或禁用 Group 规则。`GET` / `HEAD` 请求导入后会重定向到移除私有 query 的 clean URL，避免目标页面 JavaScript 读取到规则内容；其他方法会在代理内部清理 query 后继续转发。
+
+生成分享链接时，目标网站支持完整 `http://` / `https://` 地址，也支持 `a.com`、`example.com/path`、`localhost:3000` 这类裸域名输入；裸域名会默认规范成 `https://...`。显式非 HTTP(S) scheme 会被拒绝。
+
+导入规则统一落在 `share/` 命名空间，避免覆盖用户已有的普通个人规则。例如 payload 名称为 `local-dev` 时，本地规则名为 `share/local-dev`。Bifrost 会在导入规则的描述中记录原始分享名和内容 hash：重复打开同一个分享链接会复用并覆盖同一条 `share/...` 规则，不会持续创建新规则；同名但内容不同的分享链接会创建 `share/规则名 2`、`share/规则名 3` 这类递增后缀的新规则。对已导入的 `share/...` 规则再次分享时，协议 payload 会自动剥掉 `share/` 前缀并优先使用描述中的原始分享名，避免把本地命名空间传播出去。
+
+CLI 生成示例：
+
+```bash
+bifrost rule share local-dev https://example.com/app
+bifrost rule share adhoc-debug https://example.com/app --content "api.example.com bp://127.0.0.1:3000"
+```
+
 ## 注意事项
 
 ### 规则优先级
 
 1. `lineProps://important` 规则优先匹配
-2. 相同优先级按 Pattern 类型：Domain > IP > Regex > Wildcard
-3. 同类型规则按从上到下顺序匹配
+2. 规则按数值优先级 `priority()` 排序：Domain（100+）> 精确 IP（95）> Regex（80）> PathWildcard（60-70）> Wildcard（40-60）；CIDR 为 70-78，因此宽泛 CIDR 可能排在 Regex 之后。不同 Pattern 类型的优先级互不相同，不存在「相同优先级按类型」的二级比较。
+3. 仅当优先级相同（即同类型）时，规则才按从上到下的文件顺序匹配
 
 ### 调试技巧
 

@@ -26,10 +26,10 @@ Bifrost 会根据 value 的格式自动识别其类型，支持以下 6 种：
 | 类型        | 格式            | 示例                            | 说明                     |
 | ----------- | --------------- | ------------------------------- | ------------------------ |
 | 内联值      | 普通字符串      | `127.0.0.1:8080`                | 直接作为操作内容         |
-| 内联参数    | `key=value&...` | `x-proxy=Bifrost&x-test=1`      | 自动解析为键值对         |
+| 内联参数    | `key=value&...` | `q=keyword&page=1`              | 解析为键值对（仅 `urlParams`/`params` 按 `&` 拆分） |
 | 小括号内容  | `(content)`     | `({"ec": 0})`                   | 括号内容直接作为操作内容 |
 | Values 引用 | `{key}`         | `{config.json}`                 | 引用 Values 中的内容     |
-| 本地文件    | `/path/to/file` | `<USER_HOME>/mock.json`         | 从本地文件加载内容       |
+| 本地文件    | `/path/to/file` | `/Users/you/mock.json`          | 从本地文件加载内容（必须以 `/` 开头的绝对路径） |
 | 远程资源    | `http(s)://url` | `https://example.com/data.json` | 从远程 URL 加载内容      |
 
 > ⚠️ **重要**：普通内联值和内联参数仍然不能直接包含空格，因为规则解析器使用空格分隔多个操作符。小括号内容会作为一个整体解析，可以包含空格。多行内容优先使用规则文件内嵌值；只有特别大的 JSON/HTML/JS/CSS、PAC 脚本，或需要被很多规则长期共享的内容，才建议使用全局 **Values 引用**、**本地文件** 或 **远程资源**。
@@ -59,11 +59,11 @@ pattern host://127.0.0.1:8080              # 转发到指定地址
 
 ## 内联参数
 
-当 value 符合 `key=value&key2=value2` 格式时，会自动解析为键值对：
+当 value 符合 `key=value&key2=value2` 格式时，会解析为键值对：
 
 ```txt
-pattern reqHeaders://X-Custom=test&X-Another=value
-pattern reqCookies://session=abc123&user=test
+pattern urlParams://q=keyword&page=1
+pattern params://foo=1&bar=2
 ```
 
 解析规则：
@@ -72,6 +72,16 @@ pattern reqCookies://session=abc123&user=test
 - 以 `=` 分隔键和值
 - 键为空时忽略该对
 - 值可以为空（如 `flag=`）
+
+> ⚠️ **重要**：`&` 拆分仅对 `urlParams`、`params` 这类查询参数协议生效。对 `reqHeaders`、`reqCookies`、`resCookies` 而言，`&` **不是分隔符**：`reqHeaders://X-Custom=test&X-Another=value` 会设置单个请求头 `x-custom: test&X-Another=value`，`reqCookies://session=abc123&user=test` 会设置单个 cookie 值 `session=abc123&user=test`。要设置多个 header/cookie，请使用行格式（每行一个 `Header: value`，例如通过内嵌值块引用）或 JSON 对象，它们才会按行拆分：
+
+````txt
+``` headers.txt
+X-Custom: test
+X-Another: value
+```
+pattern reqHeaders://{headers.txt}
+````
 
 > ⚠️ **值不能包含空格**，空格会被解析器识别为操作符分隔符，导致规则解析错误。
 
@@ -90,12 +100,16 @@ pattern resBody://(/User/xxx/yyy.txt)      # 将路径字符串作为响应内�
 
 ## Values 引用
 
-通过 `{key}` 格式引用 Bifrost Values 模块中存储的内容：
+通过 `{key}` 格式引用值内容。`{key}` 实际解析的是**当前规则文件中定义的内嵌值块**（见下文“内嵌值”），并且要用产生响应内容的协议（如 `resBody`）承载：
 
-```txt
-pattern file://{mockResponse}              # 引用名为 mockResponse 的值
-pattern resHeaders://{customHeaders}       # 引用名为 customHeaders 的值
+````txt
+``` mockResponse.json
+{"code":0}
 ```
+pattern resBody://{mockResponse.json}      # 引用本规则文件内嵌的 mockResponse.json 值块
+````
+
+> ℹ️ 经实测（bifrost 0.0.96，真实 `bifrost start` 路径）：通过 `bifrost value add` 存储的全局 Values 会被规则里的 `{key}` 正常解析（例如 `bifrost value add myval ...` 后，`resBody://{myval}` 输出该 value 内容）；规则文件中定义的内嵌值块同样用 `{key}` 引用。注意 `file://`/`tpl://` 的 value 会被当作文件路径处理，所以要把某个 value 作为响应内容回放时，用 `resBody://{key}` 这类内容承载协议，而不是 `file://{key}`。
 
 ### Values 存储机制
 
@@ -126,7 +140,7 @@ pattern ua://{ua.txt}
 从本地文件或远程 URL 加载操作内容：
 
 ```txt
-pattern reqHeaders://<USER_HOME>/headers.txt          # 从本地文件加载
+pattern reqHeaders:///Users/you/headers.txt           # 从本地文件加载（绝对路径，以 / 开头）
 pattern resHeaders://https://example.com/config.json  # 从远程 URL 加载
 ```
 
@@ -134,7 +148,7 @@ pattern resHeaders://https://example.com/config.json  # 从远程 URL 加载
 
 ## 模板字符串
 
-Bifrost 支持类似 ES6 的模板字符串功能，在 value 中动态引用请求信息。使用反引号 `` ` `` 包裹的内容会启用模板解析。
+Bifrost 支持类似 ES6 的模板字符串功能，在 value 中动态引用请求信息。`${var}` 会在任意 value 中无条件展开，不需要、也不依赖反引号 `` ` `` 触发；反引号不是特殊语法，会原样保留在输出中（如 `resReplace://echo=`${hostname}`` 的输出仍带反引号 `` `tp2.test` ``）。下文示例中的反引号仅用于视觉包裹，可省略。
 
 ### 基本语法
 
@@ -182,7 +196,9 @@ pattern protocol://`...${variable}...`
 | `${serverPort}`               | 服务端端口 |
 | `${remoteAddress}`            | 远程地址   |
 | `${remotePort}`               | 远程端口   |
-| `${statusCode}` / `${status}` | 响应状态码 |
+| `${statusCode}` / `${status}` | 响应状态码（见下方限制说明） |
+
+> ⚠️ **实测限制（bifrost 0.0.96）**：`${statusCode}` / `${status}` 在所有响应阶段协议中都展开为**空字符串**——`resBody://PRE_${statusCode}_POST` 输出 `PRE__POST`，`resReplace`、`resHeaders://x-probe=${statusCode}` 注入也都为空。该变量当前在规则模板上下文中拿不到响应状态码，请勿在规则模板里依赖它。
 
 #### Headers 和 Cookies
 
@@ -194,6 +210,8 @@ pattern protocol://`...${variable}...`
 | `${resCookies.xxx}` / `${resCookie.xxx}`                     | 响应 cookie xxx 的值 |
 
 > 不带 `.xxx` 属性时返回所有 headers/cookies 的完整字符串。
+
+> ⚠️ **实测限制（bifrost 0.0.96）**：只有**请求阶段**的 `${reqHeaders.xxx}` / `${reqCookies.xxx}` 能在规则模板里取到值（如 `resReplace://echo=UA[${reqHeaders.user-agent}]` 输出 `UA[curl/8.7.1]`）。**响应阶段**的 `${resHeaders.xxx}` / `${resCookies.xxx}` 当前展开为**空字符串**——即使响应头/Cookie 确实在链路上存在：上游返回 `X-Upstream: mock-18181` 时 `${resHeaders.x-upstream}` 仍为空（`RH[]`）；规则自己 `resCookies://mycookie=COOKVAL` 设置了 `Set-Cookie` 后 `${resCookies.mycookie}` 仍为空（`RC[]`）。请勿在规则模板里依赖响应头/响应 Cookie 变量。
 
 #### 客户端标识
 
@@ -207,9 +225,11 @@ pattern protocol://`...${variable}...`
 | 变量          | 说明                  |
 | ------------- | --------------------- |
 | `${env.xxx}`  | 环境变量 xxx 的值     |
-| `${realHost}` | Bifrost 监听的网卡 IP |
-| `${realPort}` | Bifrost 端口号        |
-| `${realUrl}`  | 实际请求 URL          |
+| `${realHost}` | Bifrost 监听的网卡 IP（见下方限制说明） |
+| `${realPort}` | Bifrost 端口号（见下方限制说明）        |
+| `${realUrl}`  | 实际请求 URL（见下方限制说明）          |
+
+> ⚠️ **实测限制（bifrost 0.0.96）**：`${realHost}` / `${realPort}` / `${realUrl}` 在规则模板上下文中都展开为**空字符串**——`resBody://PRE_${realHost}_POST` / `…${realPort}…` / `…${realUrl}…` 均输出 `PRE__POST`，`resHeaders` 注入同样为空。作为对照，同上下文的 `${host}` 正常输出（`PRE_vars.test_POST`）。这三个变量当前拿不到 Bifrost 监听信息，请勿在规则模板里依赖它们。
 
 ### 高级用法
 
@@ -223,10 +243,10 @@ pattern redirect://`https://example.com?url=${{url}}`
 
 #### 转义
 
-使用 `$${}` 阻止变量展开：
+使用 `$${}` 阻止变量展开（注意要用产生响应内容的协议演示，`file://` 会把 value 当作文件路径加载，得到 404 而非字面量响应体）：
 
 ```txt
-pattern file://`$${host}`   # 输出字面量 ${host}
+pattern resBody://`$${host}`   # 响应体为字面量 ${host}
 ```
 
 #### 字符串替换
@@ -255,14 +275,16 @@ ${hostname.replace(/ABC/i,xyz)}
 ``` response.json
 {"host":"${hostname}","path":"${path}","time":${now}}
 ```
-pattern file://`{response.json}`
+www.test.com resBody://{response.json}
 ````
 
-访问 `https://www.test.com/api/users` 时返回：
+访问 `http://www.test.com/api/users` 时返回（已实测渲染，bifrost 0.0.96）：
 
 ```json
-{ "host": "www.test.com", "path": "/api/users", "time": 1752301623295 }
+{"host":"www.test.com","path":"/api/users","time":1781093526662}
 ```
+
+> ⚠️ 注意：此处必须用 `resBody://{response.json}` 承载内嵌值块；`file://`{response.json}`` 与 `tpl://{response.json}` 都会把 `{response.json}` 当作磁盘文件名查找，分别报 `File not found` / `Template file not found`，无法渲染内嵌值块。
 
 ### 捕获变量
 
@@ -282,6 +304,8 @@ pattern file://`{response.json}`
 ## 数据对象格式
 
 部分协议的 value 需要是键值对数据，Bifrost 支持以下格式：
+
+> ⚠️ **重要**：JSON 对象格式只适用于按原生 JSON 处理的 **body 类协议**（如 `resMerge`），不适用于 header/cookie 类协议。经实测（bifrost 0.0.96）：`resMerge://({"merged":"YES","extra":"field"})` 能把字段合并进 JSON 响应体；但 `resHeaders://({"x-a":"1","x-b":"2"})`、`reqHeaders://({"x-req-a":"1"})` 都设置**零个** header，内嵌 JSON 对象块（`resHeaders://{h.json}`，块内为 `{"x-a":"1","x-b":"2"}`）同样设置零个 header。要设置 header/cookie（`reqHeaders`/`resHeaders`/`reqCookies`/`resCookies`），请用下文的**行格式**（单值时也可用内联值/内联参数）；实测 `resHeaders://{h.txt}`（块内为 `x-a: 1` / `x-b: 2` 两行）能正确设置 `X-A: 1`、`X-B: 2`。
 
 ### JSON 格式
 
@@ -349,8 +373,10 @@ key1=value1&key2=value2&keyN=valueN
 | `breakpoint` | 为命中流量授权 Breakpoint request/response 暂停阶段 |
 | `passthrough` | 直连透传，不做任何修改 |
 | `tunnel` | 重定向 CONNECT 隧道目标 |
-| `delete` | 删除/阻断请求 |
+| `delete` | 删除/阻断请求（见下方实测限制） |
 | `skip` | 跳过已匹配的规则，继续后续匹配 |
+
+> ⚠️ **实测限制（bifrost 0.0.96）**：未能复现 `delete://` 真正阻断/删除请求的行为。`example.com delete://`、`example.com delete://true` 都返回 **HTTP 200** 并带完整上游响应（与对照的 `example.com passthrough://` 一致，均为 200），请求并未被阻断；`m.test delete://`（host 不可解析）返回 502，但与同样 502 的 `m.test passthrough://` 无法区分，仅是 DNS 失败而非阻断。当前无法给出可工作的阻断示例。如需稳定返回固定状态码/直接短路响应，请改用 `statusCode://`（实测 `example.com statusCode://403` 返回 403）。
 
 ### 请求修改类
 
@@ -400,7 +426,7 @@ key1=value1&key2=value2&keyN=valueN
 | `responseFor` | 设置 x-bifrost-response-for 响应头 |
 | `trailers` | 设置响应 trailers |
 | `resMerge` | 合并 JSON 到响应体 |
-| `headerReplace` | 替换 header 内容 |
+| `headerReplace` | 替换 header 内容（请求/响应均可，用 `req.`/`res.` 前缀选边，如 `headerReplace://req.header-name:old=new`） |
 | `resScript` | 执行响应脚本 |
 
 ### 路由类
@@ -414,7 +440,7 @@ key1=value1&key2=value2&keyN=valueN
 | `ws` | WebSocket 转发 |
 | `wss` | 安全 WebSocket 转发 |
 | `proxy` | HTTP 代理转发 |
-| `pac` | PAC 脚本路由 |
+| `pac` | PAC 脚本路由（尚未实现 / not yet implemented） |
 | `redirect` | URL 重定向（301/302） |
 | `file` | 返回文件内容作为响应 |
 | `tpl` | 模板响应（支持变量替换） |

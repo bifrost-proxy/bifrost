@@ -22,3 +22,5 @@ example.com resSpeed://100
 ```
 
 `reqDelay` delays before sending a request upstream. `resDelay` delays before returning a response to the client. `reqSpeed` and `resSpeed` limit upload or download throughput in KB/s.
+
+Caveat: `reqDelay` only takes effect on TLS-intercepted (HTTPS) traffic; for plain HTTP requests it is currently a no-op. `resDelay`, `reqSpeed`, and `resSpeed` work on plain HTTP. Use HTTPS hosts (with TLS interception enabled) when relying on `reqDelay`.

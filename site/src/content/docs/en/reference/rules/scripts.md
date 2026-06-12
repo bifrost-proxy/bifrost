@@ -21,4 +21,4 @@ example.com decode://utf8
 example.com bp://my-parser decode://bp
 ```
 
-Scripts are stored under `~/.bifrost/scripts/{type}/`. Request scripts can mutate `request`, response scripts can mutate `response`, and decode/parser scripts affect stored and displayed traffic.
+Scripts are stored under `~/.bifrost/scripts/<dir>/<name>.js`, where the on-disk directory is `request`, `response`, `decode`, or `parser` — not the protocol prefix. The mapping is `reqScript://` → `scripts/request/`, `resScript://` → `scripts/response/`, `decode://` → `scripts/decode/`, and `bp://` (parser) → `scripts/parser/`. Request scripts can mutate `request`, response scripts can mutate `response`, and decode/parser scripts affect stored and displayed traffic.
