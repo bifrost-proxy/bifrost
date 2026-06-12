@@ -357,7 +357,7 @@ fn resolve_final_name(storage: &RulesStorage, source_name: &str, content_hash: &
 - 完整 `http://` / `https://` URL。
 - 裸域名或 host:port，例如 `a.com`、`example.com/path`、`localhost:3000`。
 
-裸域名输入统一规范成 `https://...` 后再附加 `__bifrost_rule`。显式非 HTTP(S) scheme，例如 `ftp://...`，必须返回错误。
+裸域名输入统一规范成 `http://...` 后再附加 `__bifrost_rule`，确保默认分享链接在普通 HTTP 代理路径中可被 Bifrost 看到并导入；显式输入 `https://...` 时保持 HTTPS，由调用方自行确保目标域名已走 TLS 拦截。显式非 HTTP(S) scheme，例如 `ftp://...`，必须返回错误。
 
 ### 5.3 Exclusive My Rules
 
@@ -430,6 +430,7 @@ if parts.payload exists:
 实现要求：
 
 - 处理发生在 `rules.resolve_with_context(...)` 前。
+- 需要同时覆盖普通 HTTP absolute-form 请求路径和 HTTPS TLS 解包后的 intercepted request 路径；HTTPS 场景中必须先基于 `https://<original_host><path_and_query>` 还原完整 URL，再提取 `__bifrost_rule`，避免分享 query 被后续普通规则命中并消费。
 - 成功导入后的 `GET` / `HEAD` 不继续转发原请求，固定返回 302 到 clean URL，保持浏览器普通导航行为。
 - 非 `GET` / `HEAD` 不重定向，避免改变请求方法和 body 语义。
 - 非 `GET` / `HEAD` 必须剥离上游请求中的 `__bifrost_rule`。

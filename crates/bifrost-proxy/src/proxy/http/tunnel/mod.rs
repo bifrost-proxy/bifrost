@@ -8,10 +8,13 @@ use crate::ensure_crypto_provider;
 use crate::http3::Http3Client;
 use crate::protocol::{ProtocolDetector, TransportProtocol};
 use bifrost_admin::{
-    AdminRouter, AdminState, ConnectionInfo, RequestTiming, SharedPushManager, TrafficRecord,
-    TrafficType, ADMIN_PATH_PREFIX,
+    rule_share_import::import_rule_share_payload, AdminRouter, AdminState, ConnectionInfo,
+    RequestTiming, SharedPushManager, TrafficRecord, TrafficType, ADMIN_PATH_PREFIX,
 };
-use bifrost_core::{BifrostError, Protocol, Result};
+use bifrost_core::{
+    rule_share::{extract_rule_share_query, RULE_SHARE_QUERY_PARAM},
+    BifrostError, Protocol, Result,
+};
 use bifrost_script::{RequestData, ResponseData};
 use bytes::{Bytes, BytesMut};
 use http_body_util::BodyExt;
@@ -1940,11 +1943,37 @@ async fn handle_intercepted_request_with_protocol(
     let start_time = Instant::now();
     let method = req.method().clone();
     let method_str = method.to_string();
-    let uri = req.uri().clone();
-    let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
-    let query_string = uri.query().map(|q| format!("?{}", q)).unwrap_or_default();
+    let mut uri = req.uri().clone();
+    let mut path = uri
+        .path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .unwrap_or_else(|| "/".to_string());
+    let mut query_string = uri.query().map(|q| format!("?{}", q)).unwrap_or_default();
 
-    let original_uri = format!("https://{}{}", original_host, path);
+    let mut original_uri = format!("https://{}{}", original_host, path);
+    match handle_intercepted_rule_share_query(
+        &mut req,
+        &original_uri,
+        req_id,
+        admin_state.as_ref(),
+        push_manager.as_ref(),
+    )
+    .await
+    {
+        InterceptedRuleShareAction::None => {}
+        InterceptedRuleShareAction::Redirect(clean_url) => {
+            return Ok(build_redirect_response(302, &clean_url));
+        }
+        InterceptedRuleShareAction::Cleaned(clean_url) => {
+            uri = req.uri().clone();
+            path = uri
+                .path_and_query()
+                .map(|pq| pq.as_str().to_string())
+                .unwrap_or_else(|| "/".to_string());
+            query_string = uri.query().map(|q| format!("?{}", q)).unwrap_or_default();
+            original_uri = clean_url;
+        }
+    }
 
     let incoming_headers: std::collections::HashMap<String, String> = req
         .headers()
@@ -2015,7 +2044,7 @@ async fn handle_intercepted_request_with_protocol(
                 original_host.to_string(),
                 original_port,
                 false,
-                path.to_string(),
+                path.clone(),
             )
         } else if let Some(ref host_rule) = resolved_rules.host {
             let (h, parsed_port, parsed_path) = match parse_host_rule(host_rule) {
@@ -2048,13 +2077,13 @@ async fn handle_intercepted_request_with_protocol(
                         host_rule,
                     );
                     crate::utils::url::rewrite_path_with_prefix(
-                        path,
+                        &path,
                         source_path.as_deref(),
                         rule_path,
                     )
                 }
             } else {
-                path.to_string()
+                path.clone()
             };
             debug!(
                 "[{}] Host rule applied: original={}:{} -> target={}:{}, host_protocol={:?}, use_http={}",
@@ -2066,7 +2095,7 @@ async fn handle_intercepted_request_with_protocol(
                 original_host.to_string(),
                 original_port,
                 false,
-                path.to_string(),
+                path.clone(),
             )
         };
 
@@ -2093,7 +2122,7 @@ async fn handle_intercepted_request_with_protocol(
             original_uri.clone(),
             method_str.clone(),
             actual_target_host.clone(),
-            path.to_string(),
+            path.clone(),
             query_string.clone(),
             client_ip.clone(),
         )
@@ -5415,6 +5444,109 @@ struct UpstreamWebSocketHandshake {
     sec_accept: Option<String>,
     protocol: Option<String>,
     extensions: Vec<String>,
+}
+
+enum InterceptedRuleShareAction {
+    None,
+    Cleaned(String),
+    Redirect(String),
+}
+
+async fn handle_intercepted_rule_share_query(
+    req: &mut Request<Incoming>,
+    request_url: &str,
+    req_id: &str,
+    admin_state: Option<&Arc<AdminState>>,
+    push_manager: Option<&SharedPushManager>,
+) -> InterceptedRuleShareAction {
+    if !request_url.contains(RULE_SHARE_QUERY_PARAM) {
+        return InterceptedRuleShareAction::None;
+    }
+
+    let parts = match extract_rule_share_query(request_url) {
+        Ok(parts) => parts,
+        Err(error) => {
+            warn!(
+                target: "bifrost_proxy::rule_share",
+                req_id,
+                error = %error,
+                url = %request_url,
+                "failed to decode intercepted rule share query"
+            );
+            return InterceptedRuleShareAction::None;
+        }
+    };
+
+    let Some(payload) = parts.payload else {
+        return InterceptedRuleShareAction::None;
+    };
+
+    if let Some(state) = admin_state {
+        match import_rule_share_payload((*state).clone(), push_manager, payload).await {
+            Ok(outcome) => {
+                info!(
+                    target: "bifrost_proxy::rule_share",
+                    req_id,
+                    action = ?outcome.action,
+                    rule_name = %outcome.rule_name,
+                    "imported intercepted rule share query"
+                );
+            }
+            Err(error) => {
+                warn!(
+                    target: "bifrost_proxy::rule_share",
+                    req_id,
+                    error = %error,
+                    "failed to import intercepted rule share query"
+                );
+            }
+        }
+    } else {
+        warn!(
+            target: "bifrost_proxy::rule_share",
+            req_id,
+            "intercepted rule share query was present but admin state is unavailable"
+        );
+    }
+
+    if *req.method() == hyper::Method::GET || *req.method() == hyper::Method::HEAD {
+        return InterceptedRuleShareAction::Redirect(parts.clean_url);
+    }
+
+    match apply_clean_url_to_intercepted_request(req, &parts.clean_url) {
+        Ok(()) => InterceptedRuleShareAction::Cleaned(parts.clean_url),
+        Err(error) => {
+            warn!(
+                target: "bifrost_proxy::rule_share",
+                req_id,
+                error = %error,
+                clean_url = %parts.clean_url,
+                "failed to apply clean intercepted rule share URL"
+            );
+            InterceptedRuleShareAction::None
+        }
+    }
+}
+
+fn apply_clean_url_to_intercepted_request(
+    req: &mut Request<Incoming>,
+    clean_url: &str,
+) -> Result<()> {
+    let clean = url::Url::parse(clean_url)
+        .map_err(|error| BifrostError::Proxy(format!("invalid clean rule share URL: {error}")))?;
+    let mut path_and_query = clean.path().to_string();
+    if path_and_query.is_empty() {
+        path_and_query.push('/');
+    }
+    if let Some(query) = clean.query() {
+        path_and_query.push('?');
+        path_and_query.push_str(query);
+    }
+    let uri = path_and_query
+        .parse::<hyper::Uri>()
+        .map_err(|error| BifrostError::Proxy(format!("invalid clean rule share path: {error}")))?;
+    *req.uri_mut() = uri;
+    Ok(())
 }
 
 fn build_redirect_response(status_code: u16, location: &str) -> Response<BoxBody> {

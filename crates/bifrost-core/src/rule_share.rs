@@ -228,10 +228,11 @@ fn parse_http_url(input_url: &str) -> Result<url::Url> {
     let input_url = input_url.trim();
     let url = match url::Url::parse(input_url) {
         Ok(url) if matches!(url.scheme(), SUPPORTED_SCHEME_HTTP | SUPPORTED_SCHEME_HTTPS) => url,
-        Ok(_) if !input_url.contains("://") => url::Url::parse(&format!(
-            "{SUPPORTED_SCHEME_HTTPS}://{input_url}"
-        ))
-        .map_err(|error| BifrostError::Config(format!("invalid rule share target URL: {error}")))?,
+        Ok(_) if !input_url.contains("://") => {
+            url::Url::parse(&format!("{SUPPORTED_SCHEME_HTTP}://{input_url}")).map_err(|error| {
+                BifrostError::Config(format!("invalid rule share target URL: {error}"))
+            })?
+        }
         Ok(url) => {
             return Err(BifrostError::Config(format!(
                 "unsupported rule share URL scheme: {}",
@@ -239,7 +240,7 @@ fn parse_http_url(input_url: &str) -> Result<url::Url> {
             )))
         }
         Err(error) if !input_url.contains("://") => {
-            url::Url::parse(&format!("{SUPPORTED_SCHEME_HTTPS}://{input_url}")).map_err(|_| {
+            url::Url::parse(&format!("{SUPPORTED_SCHEME_HTTP}://{input_url}")).map_err(|_| {
                 BifrostError::Config(format!("invalid rule share target URL: {error}"))
             })?
         }
@@ -333,7 +334,7 @@ mod tests {
     fn append_accepts_schemeless_domain_targets() {
         let payload = sample_payload();
         let shared = append_rule_share_query("a.com/path?site=1", &payload).unwrap();
-        assert!(shared.starts_with("https://a.com/path?site=1&"));
+        assert!(shared.starts_with("http://a.com/path?site=1&"));
         assert!(shared.contains(RULE_SHARE_QUERY_PARAM));
     }
 
@@ -341,7 +342,7 @@ mod tests {
     fn append_accepts_schemeless_localhost_port_targets() {
         let payload = sample_payload();
         let shared = append_rule_share_query("localhost:3000/hello", &payload).unwrap();
-        assert!(shared.starts_with("https://localhost:3000/hello?"));
+        assert!(shared.starts_with("http://localhost:3000/hello?"));
         assert!(shared.contains(RULE_SHARE_QUERY_PARAM));
     }
 

@@ -2,7 +2,9 @@ use bifrost_core::rule_share::{
     content_sha256, imported_rule_content_hash, imported_rule_description, imported_rule_name,
     imported_rule_source_name, RuleShareExclusiveScope, RuleShareMode, RuleSharePayload,
 };
-use bifrost_core::{normalize_rule_content, validate_rules, BifrostError, Result};
+use bifrost_core::{
+    normalize_rule_content, rule_reference_name, validate_rules, BifrostError, Result,
+};
 use bifrost_storage::RuleFile;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -107,7 +109,8 @@ fn validate_import_payload(payload: &RuleSharePayload) -> Result<()> {
         ));
     }
 
-    let errors = validate_rules(&payload.content);
+    let validation_content = strip_rule_reference_lines_for_validation(&payload.content);
+    let errors = validate_rules(&validation_content);
     if !errors.is_empty() {
         let message = errors
             .first()
@@ -118,6 +121,20 @@ fn validate_import_payload(payload: &RuleSharePayload) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+fn strip_rule_reference_lines_for_validation(content: &str) -> String {
+    content
+        .lines()
+        .map(|line| {
+            if rule_reference_name(line).is_some() {
+                ""
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn unique_rule_name(base_name: &str, rules: &[RuleFile]) -> String {
@@ -351,6 +368,30 @@ mod tests {
         );
         assert!(!state.rules_storage.load("shared").unwrap().enabled);
         assert!(state.rules_storage.load("share/shared").unwrap().enabled);
+    }
+
+    #[tokio::test]
+    async fn import_accepts_rule_reference_lines() {
+        let state = temp_rules_state();
+        state
+            .rules_storage
+            .save(&RuleFile::new("a", "a.com status://200"))
+            .unwrap();
+
+        let payload = bifrost_core::rule_share::new_rule_share_payload(
+            "shared",
+            "@a\nexample.com bp://127.0.0.1:3000",
+        )
+        .unwrap();
+        let outcome = import_rule_share_payload(state.clone(), None, payload)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.rule_name, "share/shared");
+        let imported = state.rules_storage.load("share/shared").unwrap();
+        assert!(imported.content.contains("@a"));
+        assert!(imported.enabled);
+        assert!(!state.rules_storage.load("a").unwrap().enabled);
     }
 
     #[tokio::test]
