@@ -1131,6 +1131,46 @@ fn test_negated_rule_blocks_matching_pattern() {
 }
 
 #[test]
+fn test_response_filter_deferred_to_response_phase() {
+    use crate::rule::parser::RuleParser;
+
+    let parser = RuleParser::new();
+    let rules = parser
+        .parse_line("a.test host://127.0.0.1:18181 replaceStatus://217 includeFilter://s:500")
+        .unwrap();
+    let resolver = RulesResolver::new(rules);
+
+    let ctx = RequestContext::from_url("http://a.test/");
+    let req = resolver.resolve(&ctx);
+    assert!(
+        req.rules.iter().any(|r| r.rule.protocol == Protocol::Host),
+        "host routing rule must be included at request phase"
+    );
+
+    let mut ctx500 = RequestContext::from_url("http://a.test/");
+    ctx500.set_response(500, HashMap::new());
+    let res500 = resolver.resolve_uncached(&ctx500);
+    assert!(
+        res500
+            .rules
+            .iter()
+            .any(|r| r.rule.protocol == Protocol::ReplaceStatus),
+        "replaceStatus must apply when the response status matches s:500"
+    );
+
+    let mut ctx200 = RequestContext::from_url("http://a.test/");
+    ctx200.set_response(200, HashMap::new());
+    let res200 = resolver.resolve_uncached(&ctx200);
+    assert!(
+        !res200
+            .rules
+            .iter()
+            .any(|r| r.rule.protocol == Protocol::ReplaceStatus),
+        "replaceStatus must not apply when the response status does not match s:500"
+    );
+}
+
+#[test]
 fn test_multiple_different_protocols_all_match() {
     use crate::rule::parser::RuleParser;
 

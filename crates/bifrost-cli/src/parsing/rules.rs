@@ -357,10 +357,60 @@ impl ProxyRulesResolverTrait for DynamicRulesResolver {
         resolve_rules_impl(&inner, url, method, req_headers, req_cookies)
     }
 
+    fn resolve_with_response_context(
+        &self,
+        url: &str,
+        method: &str,
+        req_headers: &std::collections::HashMap<String, String>,
+        req_cookies: &std::collections::HashMap<String, String>,
+        res_status: u16,
+        res_headers: &std::collections::HashMap<String, String>,
+    ) -> ProxyResolvedRules {
+        let inner = self.inner.read();
+        resolve_rules_with_response_impl(
+            &inner,
+            url,
+            method,
+            req_headers,
+            req_cookies,
+            res_status,
+            res_headers,
+        )
+    }
+
     fn has_response_rules_for_host(&self, host: &str) -> bool {
         let inner = self.inner.read();
         inner.has_response_rules_for_host(host)
     }
+}
+
+/// Response-phase re-resolution: rebuilds the request context, attaches the upstream
+/// response (status + lowercased headers) and resolves WITHOUT the cache, so
+/// response-dependent filters (`s:`/`resH:`) are evaluated against the real response.
+fn resolve_rules_with_response_impl(
+    resolver: &CoreRulesResolver,
+    url: &str,
+    method: &str,
+    req_headers: &std::collections::HashMap<String, String>,
+    req_cookies: &std::collections::HashMap<String, String>,
+    res_status: u16,
+    res_headers: &std::collections::HashMap<String, String>,
+) -> ProxyResolvedRules {
+    let mut ctx = RequestContext::from_url(url);
+    ctx.method = method.to_string();
+    ctx.client_ip = "127.0.0.1".to_string();
+    ctx.req_headers = req_headers.clone();
+    ctx.req_cookies = req_cookies.clone();
+    let res_headers_lower: std::collections::HashMap<String, String> = res_headers
+        .iter()
+        .map(|(k, v)| (k.to_lowercase(), v.clone()))
+        .collect();
+    ctx.set_response(res_status, res_headers_lower);
+
+    let core_result = resolver.resolve_uncached(&ctx);
+    let mut result = convert_core_result_to_proxy(&core_result);
+    result.values = resolver.values().clone();
+    result
 }
 
 fn resolve_rules_impl(

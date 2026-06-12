@@ -562,6 +562,22 @@ pub trait RulesResolver: Send + Sync {
         req_cookies: &std::collections::HashMap<String, String>,
     ) -> ResolvedRules;
 
+    /// Re-resolve once the upstream response is available, so response-dependent
+    /// filters (`includeFilter://s:NNN`, `includeFilter://resH:...`) can be evaluated
+    /// against the real response. The default implementation ignores the response data
+    /// and falls back to request-phase resolution.
+    fn resolve_with_response_context(
+        &self,
+        url: &str,
+        method: &str,
+        req_headers: &std::collections::HashMap<String, String>,
+        req_cookies: &std::collections::HashMap<String, String>,
+        _res_status: u16,
+        _res_headers: &std::collections::HashMap<String, String>,
+    ) -> ResolvedRules {
+        self.resolve_with_context(url, method, req_headers, req_cookies)
+    }
+
     fn has_response_rules_for_host(&self, _host: &str) -> bool {
         false
     }

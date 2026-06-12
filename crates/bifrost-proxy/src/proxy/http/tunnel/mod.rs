@@ -59,7 +59,8 @@ use super::handler::{
     apply_websocket_response_header_rules, build_connection_error_response, build_error_body,
     build_overridden_error_response, connect_via_upstream_http_proxy_tunnel,
     merge_websocket_header_rule_candidates, needs_body_processing, needs_request_body_processing,
-    needs_response_override, parse_and_record_sse_events, ConnectionErrorInfo,
+    needs_response_override, needs_response_phase_resolve, parse_and_record_sse_events,
+    ConnectionErrorInfo,
 };
 use super::scripts::{
     apply_script_headers_to_header_map, body_to_script_string, execute_request_scripts,
@@ -3443,20 +3444,11 @@ async fn handle_intercepted_request_with_protocol(
         }
     }
 
-    let target_status = resolved_rules.replace_status.or(resolved_rules.status_code);
-    if let Some(status_code) = target_status {
-        if let Ok(status) = hyper::StatusCode::from_u16(status_code) {
-            if verbose_logging {
-                info!(
-                    "[{}] [RES_STATUS] {} -> {}",
-                    req_id,
-                    res_parts.status.as_u16(),
-                    status_code
-                );
-            }
-            res_parts.status = status;
-        }
-    }
+    // NOTE: the response status override (replace_status / status_code) is applied below
+    // by `apply_res_rules`, using the response-phase-resolved rules so that
+    // response-dependent filters gate it. Applying it here from the request-phase
+    // `resolved_rules` would be both ungated and would corrupt the status that the
+    // response-phase re-resolve reads, so it is intentionally not done here.
 
     let original_res_headers: Vec<(String, String)> = res_parts
         .headers
@@ -3485,9 +3477,33 @@ async fn handle_intercepted_request_with_protocol(
         .find(|(k, _)| k.eq_ignore_ascii_case("origin"))
         .map(|(_, v)| v.as_str());
     let res_ctx = ctx.with_response_data(res_parts.status.as_u16(), &res_parts.headers);
+    // Re-resolve with the upstream response available so response-dependent filters
+    // (s:/resH:) are evaluated against the real response; response-modification ops are
+    // applied from this set. See the HTTP path in handler.rs for the rationale.
+    let response_resolved = if needs_response_phase_resolve(&resolved_rules) {
+        let res_header_map: std::collections::HashMap<String, String> = res_parts
+            .headers
+            .iter()
+            .filter_map(|(k, v)| {
+                v.to_str()
+                    .ok()
+                    .map(|s| (k.as_str().to_string(), s.to_string()))
+            })
+            .collect();
+        rules.resolve_with_response_context(
+            &original_uri,
+            &method_str,
+            &incoming_headers,
+            &incoming_cookies,
+            res_parts.status.as_u16(),
+            &res_header_map,
+        )
+    } else {
+        resolved_rules.clone()
+    };
     apply_res_rules(
         &mut res_parts,
-        &resolved_rules,
+        &response_resolved,
         verbose_logging,
         &res_ctx,
         request_origin,
@@ -3572,7 +3588,7 @@ async fn handle_intercepted_request_with_protocol(
         || force_body_processing_for_badge
         || force_body_processing_for_devtools
         || response_breakpoint_can_buffer_body;
-    let has_res_body_override = resolved_rules.res_body.is_some();
+    let has_res_body_override = response_resolved.res_body.is_some();
     let needs_res_body_read = needs_processing && !has_res_body_override;
 
     let mut res_body_too_large = false;
@@ -4292,18 +4308,18 @@ async fn handle_intercepted_request_with_protocol(
         .and_then(|v| v.to_str().ok());
     let res_content_type = res_content_type.unwrap_or("").to_string();
     let (body_for_injection, injection_source_encoding, injection_output_encoding) =
-        if has_response_body_rules(&resolved_rules) {
-            let body_rule_input = resolved_rules
+        if has_response_body_rules(&response_resolved) {
+            let body_rule_input = response_resolved
                 .res_body
                 .clone()
                 .unwrap_or_else(|| Bytes::from(res_body_bytes.clone()));
             let body_processed = apply_body_rules_preserving_encoding(
                 body_rule_input,
-                &resolved_rules,
+                &response_resolved,
                 Phase::Response,
                 Some(&res_content_type),
                 ContentInjectionEncoding {
-                    source: if resolved_rules.res_body.is_some() {
+                    source: if response_resolved.res_body.is_some() {
                         None
                     } else {
                         res_content_encoding.as_deref()
