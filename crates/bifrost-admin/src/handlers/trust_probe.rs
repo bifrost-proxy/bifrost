@@ -2397,9 +2397,27 @@ function show(html) {{ setHtmlIfChanged("result", html); }}
 function showNext(html) {{ setHtmlIfChanged("next", html); }}
 function showProxyAccess(html) {{ setHtmlIfChanged("proxy-access", html); }}
 function showProxyConfiguration(html) {{ setHtmlIfChanged("proxy-configuration", html); }}
+function currentPageHost() {{
+  try {{
+    return window.location && window.location.hostname ? window.location.hostname : "";
+  }} catch (_) {{
+    return "";
+  }}
+}}
+function currentPageOrigin() {{
+  try {{
+    if (window.location && window.location.origin) return window.location.origin;
+  }} catch (_) {{}}
+  const cfg = window.__BIFROST_TRUST_PROBE__;
+  return "http://" + effectiveProxyHost() + ":" + cfg.adminPort;
+}}
+function effectiveProxyHost() {{
+  const host = currentPageHost();
+  return host || window.__BIFROST_TRUST_PROBE__.host;
+}}
 function targetProxyAddress() {{
   const cfg = window.__BIFROST_TRUST_PROBE__;
-  return cfg.host + ":" + cfg.adminPort;
+  return effectiveProxyHost() + ":" + cfg.adminPort;
 }}
 function renderTargetProxyAddress() {{
   const target = document.getElementById("target-proxy-address");
@@ -2615,9 +2633,9 @@ function buildIosWifiProxyProfileUrl() {{
   const cfg = window.__BIFROST_TRUST_PROBE__;
   const ssid = String(cfg.suggestedWifiSsid || "").trim();
   if (!ssid) return "";
-  return cfg.iosWifiProxyProfileUrl +
+  return currentPageOrigin() + "/_bifrost/public/mobile/ios-wifi-proxy.mobileconfig" +
     "?ssid=" + encodeURIComponent(ssid) +
-    "&ip=" + encodeURIComponent(cfg.host) +
+    "&ip=" + encodeURIComponent(effectiveProxyHost()) +
     "&port=" + encodeURIComponent(String(cfg.adminPort));
 }}
 function updateIosWifiProxyProfileLink() {{
@@ -2642,7 +2660,7 @@ function updateIosWifiProxyProfileLink() {{
   }}
   link.href = url;
   link.classList.remove("button-disabled");
-  hint.textContent = "This profile configures Wi-Fi proxy " + window.__BIFROST_TRUST_PROBE__.host + ":" + window.__BIFROST_TRUST_PROBE__.adminPort + " for Wi-Fi \"" + window.__BIFROST_TRUST_PROBE__.suggestedWifiSsid + "\".";
+  hint.textContent = "This profile configures Wi-Fi proxy " + targetProxyAddress() + " for Wi-Fi \"" + window.__BIFROST_TRUST_PROBE__.suggestedWifiSsid + "\".";
 }}
 function renderIosWifiProxyTools() {{
   const cfg = window.__BIFROST_TRUST_PROBE__;
@@ -2656,15 +2674,17 @@ function renderIosWifiProxyTools() {{
   const ssid = String(cfg.suggestedWifiSsid || "").trim();
   const riskChecked = cfg.managedWifiRiskAccepted ? " checked" : "";
   const ssidHtml = ssid ? "<p>Wi-Fi name for this check: <code>" + escapeText(ssid) + "</code></p>" : "<p><span class='warn'>" + escapeText(cfg.suggestedWifiSsidMessage || "Bifrost could not detect this Mac's current Wi-Fi SSID.") + "</span></p>";
+  const proxyHost = effectiveProxyHost();
+  const proxyAddress = targetProxyAddress();
   target.innerHTML =
     "<h2>iOS Proxy Setup</h2>" +
     "<p><strong>Recommended:</strong> set the proxy manually in Settings &gt; Wi-Fi &gt; current network &gt; Configure Proxy &gt; Manual. Set Server to <code>" +
-    escapeText(cfg.host) +
+    escapeText(proxyHost) +
     "</code> and Port to <code>" +
     escapeText(String(cfg.adminPort)) +
     "</code>. Turn it back to Off when finished.</p>" +
     "<p><strong>Experimental profile:</strong> Bifrost can generate a managed Wi-Fi profile that sets the current Wi-Fi network proxy to <strong>" +
-    escapeText(cfg.host + ":" + cfg.adminPort) +
+    escapeText(proxyAddress) +
     "</strong>. It does not contain or ask for the Wi-Fi password, but iOS may remove the managed Wi-Fi network entry when you uninstall this profile.</p>" +
     ssidHtml +
     "<label for='ios-wifi-ssid-input'>Wi-Fi name</label>" +
@@ -2698,8 +2718,7 @@ function focusIosWifiSsid() {{
   }}
 }}
 async function copyProxyAddress() {{
-  const cfg = window.__BIFROST_TRUST_PROBE__;
-  const value = cfg.host + ":" + cfg.adminPort;
+  const value = targetProxyAddress();
   try {{
     await navigator.clipboard.writeText(value);
     document.getElementById("copy-status").textContent = "Copied";
@@ -2708,9 +2727,9 @@ async function copyProxyAddress() {{
   }}
 }}
 function showProxyConfig() {{
-  const cfg = window.__BIFROST_TRUST_PROBE__;
-  const proxyAddress = cfg.host + ":" + cfg.adminPort;
-  showNext("<p>Next configure this device proxy to:</p><button onclick='copyProxyAddress()'><strong>" + proxyAddress + "</strong></button><span id='copy-status'></span><p><a class='button' href='" + cfg.proxyQrCodeUrl + "'>Open proxy QR code</a></p>");
+  const proxyAddress = targetProxyAddress();
+  const proxyQrCodeUrl = currentPageOrigin() + "/_bifrost/public/proxy/qrcode?ip=" + encodeURIComponent(effectiveProxyHost());
+  showNext("<p>Next configure this device proxy to:</p><button onclick='copyProxyAddress()'><strong>" + proxyAddress + "</strong></button><span id='copy-status'></span><p><a class='button' href='" + proxyQrCodeUrl + "'>Open proxy QR code</a></p>");
 }}
 function showTlsFailed() {{
   window.__BIFROST_TRUST_PROBE__.tlsFailed = true;
@@ -3093,7 +3112,11 @@ mod tests {
 
         assert!(html.contains("Target proxy service"));
         assert!(html.contains("id=\"target-proxy-address\""));
+        assert!(html.contains("function currentPageHost()"));
+        assert!(html.contains("function currentPageOrigin()"));
+        assert!(html.contains("function effectiveProxyHost()"));
         assert!(html.contains("function targetProxyAddress()"));
+        assert!(html.contains("return effectiveProxyHost() + \":\" + cfg.adminPort;"));
         assert!(html.contains("function renderTargetProxyAddress()"));
         assert!(html.contains("function shouldShowIosProxySetup()"));
         assert!(html
@@ -3108,6 +3131,13 @@ mod tests {
         assert!(html.contains("let netcheckRoutedThroughProxy = false;"));
         assert!(html.contains("Proxy path detected."));
         assert!(html.contains("Bifrost will still validate CA trust with the HTTPS probe."));
+        assert!(html.contains(
+            "currentPageOrigin() + \"/_bifrost/public/mobile/ios-wifi-proxy.mobileconfig\""
+        ));
+        assert!(html.contains("\"&ip=\" + encodeURIComponent(effectiveProxyHost())"));
+        assert!(html.contains(
+            "currentPageOrigin() + \"/_bifrost/public/proxy/qrcode?ip=\" + encodeURIComponent(effectiveProxyHost())"
+        ));
         assert!(!html.contains("Direct probe request went through the configured proxy."));
     }
 

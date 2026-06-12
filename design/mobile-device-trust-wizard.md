@@ -106,7 +106,7 @@ Android CLI 会在安装前后输出 `Android CA status`。普通设备通常只
   - `GET /_bifrost/public/trust-probe` 返回固定的自包含 HTML 检测页，不依赖登录和主 Web UI bundle，也不在 URL 中携带 token。服务端按请求 Host 复用同一个未过期 Availability Check session；如果没有活跃 session，则为该 Host 创建一个短期 session。
   - `GET /_bifrost/public/trust-probe/qrcode?host=<local-ip>` 返回固定 landing URL 的扫码二维码。二维码内容是 `http://<local-ip>:<adminPort>/_bifrost/public/trust-probe`，避免旧 token 过期或遗漏导致 `Missing trust probe token`。
   - 手机公开页首次打开时在浏览器 `localStorage` 写入 `bifrostAvailabilityDeviceId`，后续刷新继续使用同一个 device id；所有 `session`、`report`、`proxy-access`、netcheck、HTTPS check 和 proxy configured 请求都会附带 `deviceId`。该 id 只用于管理端状态聚合，不作为权限凭据。
-  - 手机公开页顶部始终高亮展示当前目标代理服务 `<host>:<adminPort>`，让用户不需要回到管理端即可核对 Wi-Fi HTTP Proxy 的 Server/Port。iOS Wi-Fi Proxy Setup 只在 User-Agent 判定为 iOS 且 `proxyConfigured=false` 时展示；一旦 proxy configured 检测通过，或访问设备不是 iOS，该模块必须隐藏，避免已配置完成后继续误导用户下载实验 profile。
+  - 手机公开页顶部始终高亮展示当前目标代理服务 `<host>:<adminPort>`，让用户不需要回到管理端即可核对 Wi-Fi HTTP Proxy 的 Server/Port。多 IP / 多网卡环境下，服务端 `preferred` IP 只能作为初始二维码和候选列表的启发式默认值；手机页已经被目标设备打开时，页面顶部高亮的目标代理服务、复制按钮、公开 proxy QR 和 iOS Wi-Fi proxy profile 的 `ip` 参数必须优先使用当前页面 URL 的 `hostname`。这个 host 已被目标设备实际连通，比本机通过默认路由、网卡排序或虚拟网卡过滤推断出的 IP 更可靠。iOS Wi-Fi Proxy Setup 只在 User-Agent 判定为 iOS 且 `proxyConfigured=false` 时展示；一旦 proxy configured 检测通过，或访问设备不是 iOS，该模块必须隐藏，避免已配置完成后继续误导用户下载实验 profile。
   - `GET /_bifrost/public/trust-probe/{session_id}/session?deviceId=<id>` 返回该公开页面可用的最小 session 配置，包括 `suggestedWifiSsid`、SSID 提示和代理配置检测结果。手机页每秒轮询该接口；用户也可以直接在手机页输入 Wi-Fi 名称并通过 `report` 回写，后端会把该 SSID 同步到所有未过期的 active Availability Check session。
   - `POST /_bifrost/public/trust-probe/{session_id}/report?deviceId=<id>` 接收手机页面通过 HTTP 回报的 `page_opened`、`network_failed`、`tls_failed` 等事件。
   - `GET /_bifrost/public/trust-probe/{session_id}/proxy-access?deviceId=<id>` 使用访问控制模块检查当前客户端 IP 是否已被允许使用代理；待授权时会写入 pending authorization，让管理端能继续审批。
@@ -214,7 +214,7 @@ Android CLI 会在安装前后输出 `Android CA status`。普通设备通常只
 - TC-MDT-12：Apple Configurator 返回需要手机端交互时，页面显示待用户确认而非失败。
 - TC-MDT-13：Settings iPhone/iPad 在送达方式之后展示 `ios_1` 到 `ios_7` 共享图文步骤，明确 Configurator 和扫码/文件安装只差在送达 profile，后续 profile 安装与 Certificate Trust Settings 完全信任是同一条流程。
 - TC-MDT-14：Android 设备卡片展示当前 CA 状态；普通 ADB 不承诺能验证 user CA store，root/emulator 可通过 `/data/misc/user/0/cacerts-added` 指纹匹配显示已安装。
-- TC-MDT-15：Availability Check 使用局域网 IP 生成二维码，并在 Certificate 页卡片顶部直接展示当前已连接、需要检查的移动设备；扫码设备依次检查代理访问授权、页面已打开、probe 端口可达、HTTPS 信任检查通过/失败，再检查代理是否已经配置；成功后展示可点击复制的代理配置和公开 proxy QR，失败时展示 iOS/Android 下一步安装和信任指引；代理未配置时明确提示下载按服务端检测或用户输入 Wi-Fi 名称生成的 iOS Wi-Fi Proxy Profile，或手动配置当前 Wi-Fi 的 HTTP Proxy。
+- TC-MDT-15：Availability Check 使用局域网 IP 生成二维码，并在 Certificate 页卡片顶部直接展示当前已连接、需要检查的移动设备；扫码设备依次检查代理访问授权、页面已打开、probe 端口可达、HTTPS 信任检查通过/失败，再检查代理是否已经配置；成功后展示可点击复制的代理配置和公开 proxy QR，失败时展示 iOS/Android 下一步安装和信任指引；代理未配置时明确提示下载按服务端检测或用户输入 Wi-Fi 名称生成的 iOS Wi-Fi Proxy Profile，或手动配置当前 Wi-Fi 的 HTTP Proxy。多 IP 环境下，如果用户用不同于管理端默认 preferred IP 的 LAN IP 成功打开手机公开页，手机页必须推荐该页面 URL 中的 IP 作为代理 IP。
 - TC-MDT-16：公开 landing、Availability Check QR、公开 proxy QR 和 proxy-access endpoint 不受交互式访问控制误拦截；未授权局域网设备会被记录到 pending authorization。
 - TC-MDT-17：代理交互式授权弹窗保持简洁，只展示 pending 请求列表和 Allow/Deny/Clear All 操作，不嵌入 Availability Check 二维码、链接或 Wi-Fi profile 风险说明；可用性检查入口保留在 Certificate 页顶部。
 - TC-MDT-18：iOS Wi-Fi Proxy Profile POC。验证扫码下载路径返回 `CA + Wi-Fi proxy` profile，iOS 设备列表的 `Proxy Config` 按钮能通过 Apple Configurator 定向下发到所选 iPhone；手机确认安装后，使用 Availability Check 验证代理配置、代理授权、probe 端口和 HTTPS 信任状态是否改善，并记录是否需要断开重连 Wi-Fi。

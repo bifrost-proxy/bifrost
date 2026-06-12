@@ -439,7 +439,7 @@
 1. 打开 Certificate Tab 顶部的 `Availability Check` 章节。
 2. 在 `Local network address` 中选择当前电脑的局域网 IP。
 3. 确认页面自动展示固定 Availability Check 二维码和分享链接，不需要点击额外的生成或刷新按钮。
-4. 使用目标手机扫码打开 HTTP landing page。
+4. 使用目标手机扫码打开 HTTP landing page；如果当前电脑存在多个局域网 IP 且默认二维码 IP 无法连接，手动把 URL host 换成另一个同网段 IP 再打开同一路径。
 5. 在手机页面等待检测完成；如失败，按手机页面的 iOS/Android 下一步提示安装并信任 CA 后点击 Retry。
 6. 在电脑管理端观察 Availability Check 实时状态。
 7. 自动化验证可执行：
@@ -452,7 +452,7 @@
 - 管理端生成二维码后不再展示 session 聚合状态条；扫码后的检测结果集中在 `Connected devices` 列表中按设备展示 `Page`、`Network`、`Browser HTTPS`、`Access`、`Proxy` 状态。
 - Certificate 页 Availability Check 卡片顶部直接展示当前已连接、需要做可用性检查的移动设备；每台设备显示自定义名称或 ID、iOS/Android 平台、连接状态和 CA 状态。这个目标设备列表不需要等手机扫码后才出现。
 - 手机页标题为 `Bifrost Availability Check`，并显示代理访问授权检查结果。
-- 手机页顶部始终高亮展示当前目标代理服务 `<host>:<adminPort>`，该值与管理端 Availability Check 选择的局域网 IP 和 Bifrost 代理端口一致。
+- 手机页顶部始终高亮展示当前目标代理服务 `<host>:<adminPort>`。默认情况下该值与管理端 Availability Check 选择的局域网 IP 和 Bifrost 代理端口一致；如果目标手机实际是用另一个可连通 LAN IP 打开同一个可用性页面，则手机页顶部、复制按钮、公开 proxy QR 和 iOS Wi-Fi proxy profile 下载链接都必须推荐当前页面 URL 中的 IP。
 - 手机页显示代理配置检查结果：已配置代理时显示 `Proxy is configured`；未配置代理时显示 `Proxy is not configured yet`。
 - 手机页每秒自动重跑代理授权、probe 端口、浏览器 HTTPS probe 和代理配置检测；完成浏览器 CA 信任、管理端授权或 Wi-Fi 代理配置后，手机页和管理端状态应自动更新，不需要手动刷新页面。
 - 手机页代理未配置时优先提示手动进入 iPhone `Settings > Wi-Fi > current network > Configure Proxy > Manual`，填写 Bifrost `host:port` 后重试；实验 profile 入口放在手动步骤之后。
