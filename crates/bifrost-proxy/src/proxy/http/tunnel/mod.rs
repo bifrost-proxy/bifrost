@@ -502,18 +502,6 @@ fn h2_body_recovery_action(
     }
 }
 
-fn http1_fallback_body_buffer_limit(headers: &HeaderMap, max_body_buffer_size: usize) -> usize {
-    const HTTP1_FALLBACK_BODY_BUFFER_CAP: usize = 1024 * 1024;
-
-    let cap = max_body_buffer_size.max(HTTP1_FALLBACK_BODY_BUFFER_CAP);
-    headers
-        .get(hyper::header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<usize>().ok())
-        .map(|len| len.min(cap))
-        .unwrap_or(max_body_buffer_size)
-}
-
 fn build_upstream_pool_partition(
     original_host: &str,
     target_host: &str,
@@ -3154,7 +3142,6 @@ async fn handle_intercepted_request_with_protocol(
         (parts, None, None, wait_ms, Some(body))
     } else {
         let send_start = Instant::now();
-        let mut recovered_via_http1_fallback = false;
         let response = match send_pooled_request(
             upstream_req,
             upstream_unsafe_ssl,
@@ -3201,10 +3188,7 @@ async fn handle_intercepted_request_with_protocol(
                     )
                     .await
                     {
-                        Ok(response) => {
-                            recovered_via_http1_fallback = true;
-                            response
-                        }
+                        Ok(response) => response,
                         Err(retry_err) => {
                             let classified = classify_request_error(&retry_err);
                             error!(
@@ -3240,34 +3224,12 @@ async fn handle_intercepted_request_with_protocol(
         };
         let wait_ms = send_start.elapsed().as_millis() as u64;
         let (parts, body) = response.into_parts();
-        if recovered_via_http1_fallback {
-            let fallback_body_buffer_limit =
-                http1_fallback_body_buffer_limit(&parts.headers, max_body_buffer_size);
-            match read_body_bounded(body, fallback_body_buffer_limit).await {
-                Ok(BoundedBody::Complete(bytes)) => (parts, None, None, wait_ms, Some(bytes)),
-                Ok(BoundedBody::Exceeded(replay_body)) => {
-                    (parts, Some(replay_body.boxed()), None, wait_ms, None)
-                }
-                Err(e) => {
-                    error!(
-                        "[{}] Failed to read HTTP/1.1 fallback response body: {}",
-                        req_id, e
-                    );
-                    return Ok(Response::builder()
-                        .status(502)
-                        .body(full_body(b"Bad Gateway".to_vec()))
-                        .unwrap());
-                }
-            }
-        } else {
-            (parts, Some(body), None, wait_ms, None)
-        }
+        (parts, Some(body), None, wait_ms, None)
     };
 
     #[cfg(not(feature = "http3"))]
     let upstream_result = {
         let send_start = Instant::now();
-        let mut recovered_via_http1_fallback = false;
         let response = match send_pooled_request(
             upstream_req,
             upstream_unsafe_ssl,
@@ -3314,10 +3276,7 @@ async fn handle_intercepted_request_with_protocol(
                     )
                     .await
                     {
-                        Ok(response) => {
-                            recovered_via_http1_fallback = true;
-                            response
-                        }
+                        Ok(response) => response,
                         Err(retry_err) => {
                             let classified = classify_request_error(&retry_err);
                             error!(
@@ -3353,28 +3312,7 @@ async fn handle_intercepted_request_with_protocol(
         };
         let wait_ms = send_start.elapsed().as_millis() as u64;
         let (parts, body) = response.into_parts();
-        if recovered_via_http1_fallback {
-            let fallback_body_buffer_limit =
-                http1_fallback_body_buffer_limit(&parts.headers, max_body_buffer_size);
-            match read_body_bounded(body, fallback_body_buffer_limit).await {
-                Ok(BoundedBody::Complete(bytes)) => (parts, None, None, wait_ms, Some(bytes)),
-                Ok(BoundedBody::Exceeded(replay_body)) => {
-                    (parts, Some(replay_body.boxed()), None, wait_ms, None)
-                }
-                Err(e) => {
-                    error!(
-                        "[{}] Failed to read HTTP/1.1 fallback response body: {}",
-                        req_id, e
-                    );
-                    return Ok(Response::builder()
-                        .status(502)
-                        .body(full_body(b"Bad Gateway".to_vec()))
-                        .unwrap());
-                }
-            }
-        } else {
-            (parts, Some(body), None, wait_ms, None)
-        }
+        (parts, Some(body), None, wait_ms, None)
     };
 
     let (mut res_parts, mut res_body, tls_ms, mut wait_ms, mut h3_buffered_body) = upstream_result;
@@ -3453,30 +3391,7 @@ async fn handle_intercepted_request_with_protocol(
                             wait_ms = retry_start.elapsed().as_millis() as u64;
                             let (parts, body) = response.into_parts();
                             res_parts = parts;
-                            let fallback_body_buffer_limit = http1_fallback_body_buffer_limit(
-                                &res_parts.headers,
-                                max_body_buffer_size,
-                            );
-                            match read_body_bounded(body, fallback_body_buffer_limit).await {
-                                Ok(BoundedBody::Complete(bytes)) => {
-                                    h3_buffered_body = Some(bytes);
-                                    res_body = None;
-                                }
-                                Ok(BoundedBody::Exceeded(replay_body)) => {
-                                    h3_buffered_body = None;
-                                    res_body = Some(replay_body.boxed());
-                                }
-                                Err(e) => {
-                                    error!(
-                                        "[{}] Failed to read HTTP/1.1 fallback response body: {}",
-                                        req_id, e
-                                    );
-                                    return Ok(Response::builder()
-                                        .status(502)
-                                        .body(full_body(b"Bad Gateway".to_vec()))
-                                        .unwrap());
-                                }
-                            }
+                            res_body = Some(body);
                         }
                         Err(err) => {
                             let classified = classify_request_error(&err);
@@ -3537,28 +3452,7 @@ async fn handle_intercepted_request_with_protocol(
                     wait_ms = retry_start.elapsed().as_millis() as u64;
                     let (parts, body) = response.into_parts();
                     res_parts = parts;
-                    let fallback_body_buffer_limit =
-                        http1_fallback_body_buffer_limit(&res_parts.headers, max_body_buffer_size);
-                    match read_body_bounded(body, fallback_body_buffer_limit).await {
-                        Ok(BoundedBody::Complete(bytes)) => {
-                            h3_buffered_body = Some(bytes);
-                            res_body = None;
-                        }
-                        Ok(BoundedBody::Exceeded(replay_body)) => {
-                            h3_buffered_body = None;
-                            res_body = Some(replay_body.boxed());
-                        }
-                        Err(e) => {
-                            error!(
-                                "[{}] Failed to read HTTP/1.1 fallback response body: {}",
-                                req_id, e
-                            );
-                            return Ok(Response::builder()
-                                .status(502)
-                                .body(full_body(b"Bad Gateway".to_vec()))
-                                .unwrap());
-                        }
-                    }
+                    res_body = Some(body);
                 }
                 Err(err) => {
                     let classified = classify_request_error(&err);
