@@ -1,5 +1,6 @@
 use bifrost_core::rule_share::{
-    content_sha256, RuleShareExclusiveScope, RuleShareMode, RuleSharePayload,
+    content_sha256, imported_rule_content_hash, imported_rule_description, imported_rule_name,
+    imported_rule_source_name, RuleShareExclusiveScope, RuleShareMode, RuleSharePayload,
 };
 use bifrost_core::{normalize_rule_content, validate_rules, BifrostError, Result};
 use bifrost_storage::RuleFile;
@@ -38,11 +39,24 @@ pub async fn import_rule_share_payload(
     let normalized_content = normalize_rule_content(&payload.content);
     let requested_name = payload.name.trim().to_string();
     let content_hash = content_sha256(&normalized_content);
+    let rule_name_base = imported_rule_name(&requested_name);
+    let description = imported_rule_description(&requested_name, &content_hash);
     let existing_rules = state.rules_storage.load_all()?;
 
-    if let Some(existing) =
-        find_reusable_rule(&requested_name, &existing_rules, &normalized_content)
-    {
+    if let Some(existing) = find_reusable_rule(
+        &requested_name,
+        &rule_name_base,
+        &content_hash,
+        &existing_rules,
+    ) {
+        let mut rule = existing.clone();
+        rule.content = normalized_content;
+        rule.enabled = true;
+        rule.description = Some(description);
+        rule.touch_local_change();
+        state.rules_storage.save(&rule)?;
+        clear_deleted_rule_intent(&state, &rule.name).await;
+
         let disabled_rules = apply_exclusive_enable(&state, &existing.name).await?;
         notify_after_import(&state, push_manager, &existing.name, false).await;
         return Ok(RuleShareImportOutcome {
@@ -54,7 +68,7 @@ pub async fn import_rule_share_payload(
         });
     }
 
-    let rule_name = unique_rule_name(&requested_name, &existing_rules);
+    let rule_name = unique_rule_name(&rule_name_base, &existing_rules);
     let sort_order = existing_rules
         .iter()
         .map(|rule| rule.sort_order)
@@ -64,20 +78,11 @@ pub async fn import_rule_share_payload(
     let mut rule = RuleFile::new(&rule_name, &normalized_content)
         .with_enabled(true)
         .with_sort_order(sort_order)
-        .with_description(Some("Imported from a Bifrost rule share link".to_string()));
+        .with_description(Some(description));
     rule.touch_local_change();
     state.rules_storage.save(&rule)?;
 
-    if let Some(sync_manager) = state.sync_manager.clone() {
-        if let Err(error) = sync_manager.clear_deleted_rule(&rule_name).await {
-            warn!(
-                target: "bifrost_admin::rule_share",
-                rule_name = %rule_name,
-                error = %error,
-                "failed to clear deleted sync intent for imported rule"
-            );
-        }
-    }
+    clear_deleted_rule_intent(&state, &rule_name).await;
 
     let disabled_rules = apply_exclusive_enable(&state, &rule_name).await?;
     notify_after_import(&state, push_manager, &rule_name, true).await;
@@ -115,13 +120,13 @@ fn validate_import_payload(payload: &RuleSharePayload) -> Result<()> {
     Ok(())
 }
 
-fn unique_rule_name(requested_name: &str, rules: &[RuleFile]) -> String {
-    if !rules.iter().any(|rule| rule.name == requested_name) {
-        return requested_name.to_string();
+fn unique_rule_name(base_name: &str, rules: &[RuleFile]) -> String {
+    if !rules.iter().any(|rule| rule.name == base_name) {
+        return base_name.to_string();
     }
 
     for index in 2.. {
-        let candidate = format!("{requested_name} {index}");
+        let candidate = format!("{base_name} {index}");
         if !rules.iter().any(|rule| rule.name == candidate) {
             return candidate;
         }
@@ -131,12 +136,16 @@ fn unique_rule_name(requested_name: &str, rules: &[RuleFile]) -> String {
 
 fn find_reusable_rule<'a>(
     requested_name: &str,
+    base_name: &str,
+    content_hash: &str,
     rules: &'a [RuleFile],
-    content: &str,
 ) -> Option<&'a RuleFile> {
     rules.iter().find(|rule| {
-        (rule.name == requested_name || is_generated_suffix_name(requested_name, &rule.name))
-            && normalize_rule_content(&rule.content) == content
+        (rule.name == base_name || is_generated_suffix_name(base_name, &rule.name))
+            && imported_rule_source_name(rule.description.as_deref()).as_deref()
+                == Some(requested_name)
+            && imported_rule_content_hash(rule.description.as_deref()).as_deref()
+                == Some(content_hash)
     })
 }
 
@@ -151,6 +160,19 @@ fn is_generated_suffix_name(base_name: &str, candidate: &str) -> bool {
         .parse::<usize>()
         .map(|value| value >= 2)
         .unwrap_or(false)
+}
+
+async fn clear_deleted_rule_intent(state: &SharedAdminState, rule_name: &str) {
+    if let Some(sync_manager) = state.sync_manager.clone() {
+        if let Err(error) = sync_manager.clear_deleted_rule(rule_name).await {
+            warn!(
+                target: "bifrost_admin::rule_share",
+                rule_name = %rule_name,
+                error = %error,
+                "failed to clear deleted sync intent for imported rule"
+            );
+        }
+    }
 }
 
 async fn apply_exclusive_enable(
@@ -265,7 +287,7 @@ mod tests {
         assert_eq!(second.action, RuleShareImportAction::Reused);
         assert_eq!(
             state.rules_storage.list().unwrap(),
-            vec!["shared".to_string()]
+            vec!["share/shared".to_string()]
         );
     }
 
@@ -289,9 +311,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(second.rule_name, "shared 2");
-        assert!(!state.rules_storage.load("shared").unwrap().enabled);
-        assert!(state.rules_storage.load("shared 2").unwrap().enabled);
+        assert_eq!(second.rule_name, "share/shared 2");
+        assert!(!state.rules_storage.load("share/shared").unwrap().enabled);
+        assert!(state.rules_storage.load("share/shared 2").unwrap().enabled);
 
         let third_payload = bifrost_core::rule_share::new_rule_share_payload(
             "shared",
@@ -303,7 +325,61 @@ mod tests {
             .unwrap();
 
         assert_eq!(third.action, RuleShareImportAction::Reused);
-        assert_eq!(third.rule_name, "shared 2");
+        assert_eq!(third.rule_name, "share/shared 2");
         assert_eq!(state.rules_storage.list().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn import_does_not_overwrite_user_rule_with_original_name() {
+        let state = temp_rules_state();
+        let user_rule = RuleFile::new("shared", "user.test direct").with_enabled(true);
+        state.rules_storage.save(&user_rule).unwrap();
+
+        let payload = bifrost_core::rule_share::new_rule_share_payload(
+            "shared",
+            "example.com bp://127.0.0.1:3000",
+        )
+        .unwrap();
+        let outcome = import_rule_share_payload(state.clone(), None, payload)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.rule_name, "share/shared");
+        assert_eq!(
+            state.rules_storage.load("shared").unwrap().content,
+            "user.test direct"
+        );
+        assert!(!state.rules_storage.load("shared").unwrap().enabled);
+        assert!(state.rules_storage.load("share/shared").unwrap().enabled);
+    }
+
+    #[tokio::test]
+    async fn import_reopens_same_link_over_existing_share_rule() {
+        let state = temp_rules_state();
+        let payload = bifrost_core::rule_share::new_rule_share_payload(
+            "shared",
+            "example.com bp://127.0.0.1:3000",
+        )
+        .unwrap();
+        import_rule_share_payload(state.clone(), None, payload.clone())
+            .await
+            .unwrap();
+
+        let mut edited = state.rules_storage.load("share/shared").unwrap();
+        edited.content = "edited.test direct".to_string();
+        edited.enabled = false;
+        edited.touch_local_change();
+        state.rules_storage.save(&edited).unwrap();
+
+        let outcome = import_rule_share_payload(state.clone(), None, payload)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.action, RuleShareImportAction::Reused);
+        assert_eq!(outcome.rule_name, "share/shared");
+        let imported = state.rules_storage.load("share/shared").unwrap();
+        assert_eq!(imported.content, "example.com bp://127.0.0.1:3000");
+        assert!(imported.enabled);
+        assert_eq!(state.rules_storage.list().unwrap().len(), 1);
     }
 }

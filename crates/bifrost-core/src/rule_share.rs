@@ -8,6 +8,10 @@ use crate::{BifrostError, Result};
 pub const RULE_SHARE_QUERY_PARAM: &str = "__bifrost_rule";
 pub const RULE_SHARE_PROTOCOL_VERSION: u8 = 1;
 pub const RULE_SHARE_CONTENT_HASH_ALGORITHM: &str = "sha256";
+pub const RULE_SHARE_IMPORTED_RULE_PREFIX: &str = "share/";
+pub const RULE_SHARE_IMPORTED_DESCRIPTION_TITLE: &str = "Imported from a Bifrost rule share link";
+pub const RULE_SHARE_IMPORTED_NAME_MARKER: &str = "bifrost-rule-share-name=";
+pub const RULE_SHARE_IMPORTED_HASH_MARKER: &str = "bifrost-rule-share-sha256=";
 
 const MAX_RULE_SHARE_BYTES: usize = MAX_RULE_FILE_BYTES as usize;
 const MAX_ENCODED_PAYLOAD_BYTES: usize = MAX_RULE_SHARE_BYTES * 2;
@@ -51,6 +55,55 @@ pub fn content_sha256(content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+pub fn imported_rule_name(source_name: &str) -> String {
+    format!("{RULE_SHARE_IMPORTED_RULE_PREFIX}{}", source_name.trim())
+}
+
+pub fn imported_rule_description(source_name: &str, content_hash: &str) -> String {
+    format!(
+        "{RULE_SHARE_IMPORTED_DESCRIPTION_TITLE}\n{RULE_SHARE_IMPORTED_NAME_MARKER}{}\n{RULE_SHARE_IMPORTED_HASH_MARKER}{content_hash}",
+        urlencoding::encode(source_name.trim())
+    )
+}
+
+pub fn imported_rule_source_name(description: Option<&str>) -> Option<String> {
+    description.and_then(|description| {
+        marker_value(description, RULE_SHARE_IMPORTED_NAME_MARKER).and_then(|value| {
+            urlencoding::decode(value)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+    })
+}
+
+pub fn imported_rule_content_hash(description: Option<&str>) -> Option<String> {
+    description.and_then(|description| {
+        marker_value(description, RULE_SHARE_IMPORTED_HASH_MARKER)
+            .map(str::trim)
+            .map(ToString::to_string)
+            .filter(|value| !value.is_empty())
+    })
+}
+
+pub fn share_payload_name_from_rule(name: &str, description: Option<&str>) -> String {
+    let trimmed_name = name.trim();
+    if !trimmed_name.starts_with(RULE_SHARE_IMPORTED_RULE_PREFIX) {
+        return trimmed_name.to_string();
+    }
+
+    if let Some(source_name) = imported_rule_source_name(description) {
+        return source_name;
+    }
+
+    trimmed_name
+        .strip_prefix(RULE_SHARE_IMPORTED_RULE_PREFIX)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(trimmed_name)
+        .to_string()
 }
 
 pub fn new_rule_share_payload(
@@ -172,8 +225,30 @@ pub fn validate_payload(payload: &RuleSharePayload) -> Result<()> {
 }
 
 fn parse_http_url(input_url: &str) -> Result<url::Url> {
-    let url = url::Url::parse(input_url)
-        .map_err(|error| BifrostError::Config(format!("invalid rule share target URL: {error}")))?;
+    let input_url = input_url.trim();
+    let url = match url::Url::parse(input_url) {
+        Ok(url) if matches!(url.scheme(), SUPPORTED_SCHEME_HTTP | SUPPORTED_SCHEME_HTTPS) => url,
+        Ok(_) if !input_url.contains("://") => url::Url::parse(&format!(
+            "{SUPPORTED_SCHEME_HTTPS}://{input_url}"
+        ))
+        .map_err(|error| BifrostError::Config(format!("invalid rule share target URL: {error}")))?,
+        Ok(url) => {
+            return Err(BifrostError::Config(format!(
+                "unsupported rule share URL scheme: {}",
+                url.scheme()
+            )))
+        }
+        Err(error) if !input_url.contains("://") => {
+            url::Url::parse(&format!("{SUPPORTED_SCHEME_HTTPS}://{input_url}")).map_err(|_| {
+                BifrostError::Config(format!("invalid rule share target URL: {error}"))
+            })?
+        }
+        Err(error) => {
+            return Err(BifrostError::Config(format!(
+                "invalid rule share target URL: {error}"
+            )))
+        }
+    };
     match url.scheme() {
         SUPPORTED_SCHEME_HTTP | SUPPORTED_SCHEME_HTTPS => Ok(url),
         scheme => Err(BifrostError::Config(format!(
@@ -195,6 +270,12 @@ fn remove_rule_share_query(url: &mut url::Url) {
     }
 
     url.query_pairs_mut().clear().extend_pairs(pairs);
+}
+
+fn marker_value<'a>(description: &'a str, marker: &str) -> Option<&'a str> {
+    description
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(marker))
 }
 
 #[cfg(test)]
@@ -246,6 +327,52 @@ mod tests {
             extract_rule_share_query(&replaced).unwrap().payload,
             Some(second)
         );
+    }
+
+    #[test]
+    fn append_accepts_schemeless_domain_targets() {
+        let payload = sample_payload();
+        let shared = append_rule_share_query("a.com/path?site=1", &payload).unwrap();
+        assert!(shared.starts_with("https://a.com/path?site=1&"));
+        assert!(shared.contains(RULE_SHARE_QUERY_PARAM));
+    }
+
+    #[test]
+    fn append_accepts_schemeless_localhost_port_targets() {
+        let payload = sample_payload();
+        let shared = append_rule_share_query("localhost:3000/hello", &payload).unwrap();
+        assert!(shared.starts_with("https://localhost:3000/hello?"));
+        assert!(shared.contains(RULE_SHARE_QUERY_PARAM));
+    }
+
+    #[test]
+    fn append_rejects_explicit_non_http_scheme() {
+        let payload = sample_payload();
+        assert!(append_rule_share_query("ftp://example.com/file", &payload).is_err());
+    }
+
+    #[test]
+    fn imported_rule_description_round_trips_source_name() {
+        let description = imported_rule_description("local debug", "abc123");
+        assert_eq!(
+            imported_rule_source_name(Some(&description)).as_deref(),
+            Some("local debug")
+        );
+        assert_eq!(
+            imported_rule_content_hash(Some(&description)).as_deref(),
+            Some("abc123")
+        );
+    }
+
+    #[test]
+    fn share_payload_name_strips_import_namespace_and_prefers_source_metadata() {
+        let description = imported_rule_description("origin", "abc123");
+        assert_eq!(
+            share_payload_name_from_rule("share/origin 2", Some(&description)),
+            "origin"
+        );
+        assert_eq!(share_payload_name_from_rule("share/manual", None), "manual");
+        assert_eq!(share_payload_name_from_rule("local", None), "local");
     }
 
     #[test]

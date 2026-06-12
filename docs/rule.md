@@ -166,7 +166,9 @@ Bifrost 支持把一条个人规则编码到任意 HTTP/HTTPS URL 的特殊 quer
 
 第一版导入行为固定为 `mode=enable_exclusive`、`exclusive_scope=my_rules`：当 Bifrost 代理劫持到带 `__bifrost_rule` 的请求时，会把 payload 导入到个人规则列表，启用该规则，并禁用其他个人规则；不会创建、修改或禁用 Group 规则。`GET` / `HEAD` 请求导入后会重定向到移除私有 query 的 clean URL，避免目标页面 JavaScript 读取到规则内容；其他方法会在代理内部清理 query 后继续转发。
 
-重名规则按内容处理：如果已有同名个人规则且规则内容一致，Bifrost 直接复用并启用已有规则，不会重复创建；如果同名但内容不一致，会创建 `规则名 2`、`规则名 3` 这类递增后缀的新规则。
+生成分享链接时，目标网站支持完整 `http://` / `https://` 地址，也支持 `a.com`、`example.com/path`、`localhost:3000` 这类裸域名输入；裸域名会默认规范成 `https://...`。显式非 HTTP(S) scheme 会被拒绝。
+
+导入规则统一落在 `share/` 命名空间，避免覆盖用户已有的普通个人规则。例如 payload 名称为 `local-dev` 时，本地规则名为 `share/local-dev`。Bifrost 会在导入规则的描述中记录原始分享名和内容 hash：重复打开同一个分享链接会复用并覆盖同一条 `share/...` 规则，不会持续创建新规则；同名但内容不同的分享链接会创建 `share/规则名 2`、`share/规则名 3` 这类递增后缀的新规则。对已导入的 `share/...` 规则再次分享时，协议 payload 会自动剥掉 `share/` 前缀并优先使用描述中的原始分享名，避免把本地命名空间传播出去。
 
 CLI 生成示例：
 

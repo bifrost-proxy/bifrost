@@ -1,8 +1,8 @@
 use bifrost_core::{
     expand_rule_references_strict, extract_inline_variables,
     rule_share::{
-        append_rule_share_query, new_rule_share_payload, RuleShareExclusiveScope,
-        RULE_SHARE_PROTOCOL_VERSION, RULE_SHARE_QUERY_PARAM,
+        append_rule_share_query, new_rule_share_payload, share_payload_name_from_rule,
+        RuleShareExclusiveScope, RULE_SHARE_PROTOCOL_VERSION, RULE_SHARE_QUERY_PARAM,
     },
     validate_rules_with_context, ParseError, ParseErrorSeverity, ScriptReference, VariableInfo,
 };
@@ -796,7 +796,8 @@ async fn create_rule_share_link(
         }
     };
 
-    let payload = match new_rule_share_payload(&rule.name, &rule.content) {
+    let payload_name = share_payload_name_from_rule(&rule.name, rule.description.as_deref());
+    let payload = match new_rule_share_payload(&payload_name, &rule.content) {
         Ok(payload) => payload,
         Err(error) => {
             return error_response(
@@ -819,7 +820,7 @@ async fn create_rule_share_link(
         url,
         query_param: RULE_SHARE_QUERY_PARAM,
         payload_version: RULE_SHARE_PROTOCOL_VERSION,
-        rule_name: rule.name,
+        rule_name: payload.name,
         content_hash: payload.content_hash,
     })
 }

@@ -308,15 +308,16 @@ pub async fn import_rule_share(
 伪代码：
 
 ```rust
-fn resolve_final_name(storage: &RulesStorage, desired_name: &str, content: &str) -> Result<NameDecision> {
-    let wanted = normalize_rule_content(content);
+fn resolve_final_name(storage: &RulesStorage, source_name: &str, content_hash: &str) -> Result<NameDecision> {
+    let base_name = format!("share/{source_name}");
     let mut index = 1;
 
+    // 先通过导入元数据查找同一条分享链接，即使用户后来编辑过 share 规则内容，也要覆盖回同一条规则。
     loop {
         let candidate = if index == 1 {
-            desired_name.to_string()
+            base_name.to_string()
         } else {
-            format!("{desired_name} {index}")
+            format!("{base_name} {index}")
         };
 
         if !storage.exists(&candidate) {
@@ -324,7 +325,9 @@ fn resolve_final_name(storage: &RulesStorage, desired_name: &str, content: &str)
         }
 
         let existing = storage.load(&candidate)?;
-        if normalize_rule_content(&existing.content) == wanted {
+        if existing.description_has("bifrost-rule-share-name", source_name)
+            && existing.description_has("bifrost-rule-share-sha256", content_hash)
+        {
             return Ok(NameDecision::Reuse(candidate));
         }
 
@@ -338,12 +341,25 @@ fn resolve_final_name(storage: &RulesStorage, desired_name: &str, content: &str)
 
 注意：
 
-- `index == 1` 使用原名。
-- 第一个冲突新名称是 `name 2`。
-- 如果 `name 2` 已存在且内容一致，复用 `name 2`。
+- 导入本地规则名固定落到 `share/` 命名空间，普通用户规则 `name` 不会被覆盖。
+- `index == 1` 使用 `share/name`。
+- 第一个冲突新名称是 `share/name 2`。
+- 每条导入规则的 description 必须记录原始分享名和内容 hash：`bifrost-rule-share-name=<urlencoded name>`、`bifrost-rule-share-sha256=<hash>`。
+- 同一分享链接重复打开时，通过元数据复用并覆盖同一条 `share/...` 规则，避免用户编辑该 share 规则后下次打开又产生新规则。
+- 同名但不同内容的分享链接不能覆盖既有 `share/...` 规则，必须创建递增后缀。
+- CLI / Web UI / Admin API 再次分享 `share/...` 规则时，payload 名称必须剥掉 `share/` 前缀，并优先使用 description 中的原始分享名。
 - 上限 1000 是防御性限制，避免异常目录导致无限循环。
 
-### 5.2 Exclusive My Rules
+### 5.2 目标 URL 规范化
+
+生成分享链接的目标网站支持：
+
+- 完整 `http://` / `https://` URL。
+- 裸域名或 host:port，例如 `a.com`、`example.com/path`、`localhost:3000`。
+
+裸域名输入统一规范成 `https://...` 后再附加 `__bifrost_rule`。显式非 HTTP(S) scheme，例如 `ftp://...`，必须返回错误。
+
+### 5.3 Exclusive My Rules
 
 伪代码：
 
@@ -572,8 +588,12 @@ Reused and enabled rule "local-api". Disabled 3 other My Rules.
 - `decode_rejects_hash_mismatch`
 - `append_share_query_preserves_existing_query_and_fragment`
 - `append_share_query_replaces_existing_share_query`
+- `append_share_query_accepts_schemeless_domain`
+- `append_share_query_accepts_schemeless_host_port`
+- `append_share_query_rejects_explicit_non_http_scheme`
 - `extract_share_query_returns_payload_and_clean_url`
 - `extract_share_query_preserves_business_query`
+- `share_payload_name_strips_import_namespace_and_prefers_source_metadata`
 
 `crates/bifrost-admin/src/rule_share_import.rs`：
 
@@ -581,6 +601,8 @@ Reused and enabled rule "local-api". Disabled 3 other My Rules.
 - `import_reuses_same_name_when_content_matches`
 - `import_creates_numbered_name_when_same_name_differs`
 - `import_reuses_numbered_name_when_content_matches`
+- `import_does_not_overwrite_user_rule_with_original_name`
+- `import_reopens_same_link_over_existing_share_rule`
 - `import_exclusive_disables_other_my_rules_only`
 - `import_rejects_invalid_rule_content`
 
