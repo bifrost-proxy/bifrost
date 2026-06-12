@@ -160,6 +160,21 @@ example.com host://127.0.0.1:3000
 
 个人私有规则不需要带组名称。组规则必须使用 `组名称/规则名称`，避免和同名私有规则冲突。规则引用只在独立 `@` 行生效；普通 `#` 注释里的 `@规则名称` 不会被当作引用。`@comment` 保持为注释指令，`commented-*` 这类真实规则名仍可正常引用。规则引用支持嵌套；运行时解析遇到缺失引用会跳过该引用行并继续解析后续规则，避免因为删除或尚未同步的引用规则导致整条入口规则失效。循环引用仍会让入口规则解析失败。Rules 编辑器的语法校验会对缺失引用返回 `E020`，并把对应 `@规则` 标红显示悬浮错误提示，便于用户及时修正。
 
+### 9. 规则分享链接
+
+Bifrost 支持把一条个人规则编码到任意 HTTP/HTTPS URL 的特殊 query 中，用于把规则分享给其他本机 Bifrost 用户或自动化 Agent。协议 query 名固定为 `__bifrost_rule`，内容是 URL-safe base64 编码的 JSON payload，包含规则名称、规则内容、版本号、内容 hash、导入模式和独占启用范围。
+
+第一版导入行为固定为 `mode=enable_exclusive`、`exclusive_scope=my_rules`：当 Bifrost 代理劫持到带 `__bifrost_rule` 的请求时，会把 payload 导入到个人规则列表，启用该规则，并禁用其他个人规则；不会创建、修改或禁用 Group 规则。`GET` / `HEAD` 请求导入后会重定向到移除私有 query 的 clean URL，避免目标页面 JavaScript 读取到规则内容；其他方法会在代理内部清理 query 后继续转发。
+
+重名规则按内容处理：如果已有同名个人规则且规则内容一致，Bifrost 直接复用并启用已有规则，不会重复创建；如果同名但内容不一致，会创建 `规则名 2`、`规则名 3` 这类递增后缀的新规则。
+
+CLI 生成示例：
+
+```bash
+bifrost rule share local-dev https://example.com/app
+bifrost rule share adhoc-debug https://example.com/app --content "api.example.com bp://127.0.0.1:3000"
+```
+
 ## 注意事项
 
 ### 规则优先级

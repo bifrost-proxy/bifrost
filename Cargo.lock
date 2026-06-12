@@ -513,6 +513,7 @@ dependencies = [
 name = "bifrost-core"
 version = "0.0.97"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "dirs 5.0.1",
  "ipnet",
@@ -526,6 +527,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "sysproxy",
  "tempfile",
  "thiserror 2.0.18",

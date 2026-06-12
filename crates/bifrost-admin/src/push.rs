@@ -1383,6 +1383,19 @@ impl PushManager {
         }
     }
 
+    pub async fn broadcast_notification(&self, data: NotificationPushData) {
+        let mut clients_to_remove = Vec::new();
+        for client_ref in self.clients.iter() {
+            let client = client_ref.value();
+            if !client.send(PushMessage::Notification(data.clone())) {
+                clients_to_remove.push(client.id);
+            }
+        }
+        for client_id in clients_to_remove {
+            self.unregister_client(client_id);
+        }
+    }
+
     pub async fn send_settings_scope_to_client(&self, client: &Arc<PushClient>, scope: &str) {
         let Some(data) = self.build_settings_update(scope).await else {
             return;

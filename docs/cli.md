@@ -370,12 +370,17 @@ bifrost rule disable <name>
 bifrost rule delete <name>
 bifrost rule show <name>
 bifrost rule get <name>
+bifrost rule share <name> https://example.com/path
+bifrost rule share <name> https://example.com/path --content "example.com bp://127.0.0.1:3000"
+bifrost rule share <name> https://example.com/path --file rules.txt
 bifrost rule sync
 bifrost rule rename <name> <new_name>
 bifrost rule reorder <name1> <name2> ...
 ```
 
 - `rule active` 需要代理服务运行中（通过管理接口获取运行时已启用规则摘要）
+- `rule share` 会生成带 `__bifrost_rule` query 的分享链接。未传 `--content` 或 `--file` 时读取同名本地规则；传入 `--content` 或 `--file` 时只生成链接，不把规则写入本地规则目录。
+- 分享链接被 Bifrost 代理劫持后会导入为个人规则并启用它，同时禁用其他个人规则。第一版固定 `exclusive_scope=my_rules`，不会修改 Group 规则。
 
 ### Group 管理
 

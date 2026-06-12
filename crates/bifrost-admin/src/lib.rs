@@ -35,6 +35,7 @@ pub mod request_rules;
 mod resource_alerts;
 pub mod resource_download;
 mod router;
+pub mod rule_share_import;
 pub mod search;
 mod security;
 mod sse;

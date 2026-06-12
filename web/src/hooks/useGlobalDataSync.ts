@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import { message } from 'antd';
 import { useProxyStore } from '../stores/useProxyStore';
 import { useFilterPanelStore } from '../stores/useFilterPanelStore';
 import { useMetricsStore } from '../stores/useMetricsStore';
@@ -157,6 +158,11 @@ export function useGlobalDataSync({ trafficEnabled = true }: { trafficEnabled?: 
     window.addEventListener('pagehide', onPageHide);
     window.addEventListener('pageshow', onPageShow);
     const unsubscribeForceRefresh = pushService.onForceRefresh(onForceRefresh);
+    const unsubscribeNotification = pushService.onNotification((data) => {
+      if (data.notification_type === 'rule_share_imported') {
+        message.success(data.message || data.title);
+      }
+    });
     const unsubscribePushConnection = pushService.onConnectionChange(({ connected }) => {
       if (!connected || globalState.visibilityPaused || globalState.forceRefresh) {
         return;
@@ -175,6 +181,7 @@ export function useGlobalDataSync({ trafficEnabled = true }: { trafficEnabled?: 
       window.removeEventListener('pagehide', onPageHide);
       window.removeEventListener('pageshow', onPageShow);
       unsubscribeForceRefresh();
+      unsubscribeNotification();
       unsubscribePushConnection();
 
       stopAllPolling();

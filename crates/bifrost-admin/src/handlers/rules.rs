@@ -1,6 +1,10 @@
 use bifrost_core::{
-    expand_rule_references_strict, extract_inline_variables, validate_rules_with_context,
-    ParseError, ParseErrorSeverity, ScriptReference, VariableInfo,
+    expand_rule_references_strict, extract_inline_variables,
+    rule_share::{
+        append_rule_share_query, new_rule_share_payload, RuleShareExclusiveScope,
+        RULE_SHARE_PROTOCOL_VERSION, RULE_SHARE_QUERY_PARAM,
+    },
+    validate_rules_with_context, ParseError, ParseErrorSeverity, ScriptReference, VariableInfo,
 };
 use bifrost_storage::{ConfigChangeEvent, RuleFile, RuleSummary, RulesStorage};
 use http_body_util::BodyExt;
@@ -83,6 +87,23 @@ struct RenameRuleRequest {
     new_name: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct CreateRuleShareLinkRequest {
+    name: String,
+    target_url: String,
+    #[serde(default)]
+    exclusive_scope: Option<RuleShareExclusiveScope>,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateRuleShareLinkResponse {
+    url: String,
+    query_param: &'static str,
+    payload_version: u8,
+    rule_name: String,
+    content_hash: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct ActiveRuleItem {
     name: String,
@@ -151,6 +172,11 @@ pub async fn handle_rules(
     } else if path == "/api/rules/reorder" {
         match method {
             Method::PUT => reorder_rules(req, state, push_manager).await,
+            _ => method_not_allowed(),
+        }
+    } else if path == "/api/rules/share-link" {
+        match method {
+            Method::POST => create_rule_share_link(req, state).await,
             _ => method_not_allowed(),
         }
     } else if path == "/api/rules/active-summary" {
@@ -729,6 +755,73 @@ async fn validate_rule(req: Request<Incoming>, state: SharedAdminState) -> Respo
     };
 
     json_response(&response)
+}
+
+async fn create_rule_share_link(
+    req: Request<Incoming>,
+    state: SharedAdminState,
+) -> Response<BoxBody> {
+    let body = match req.collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(e) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Failed to read body: {}", e),
+            )
+        }
+    };
+
+    let request: CreateRuleShareLinkRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e)),
+    };
+    if request.name.trim().is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "Rule name is required");
+    }
+    if request.target_url.trim().is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "Target URL is required");
+    }
+    let _exclusive_scope = request.exclusive_scope.unwrap_or_default();
+
+    let rule = match state.rules_storage.load(&request.name) {
+        Ok(rule) => rule,
+        Err(bifrost_core::BifrostError::NotFound(_)) => {
+            return error_response(StatusCode::NOT_FOUND, "Rule not found")
+        }
+        Err(error) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Failed to load rule: {}", error),
+            )
+        }
+    };
+
+    let payload = match new_rule_share_payload(&rule.name, &rule.content) {
+        Ok(payload) => payload,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Failed to create rule share payload: {}", error),
+            )
+        }
+    };
+    let url = match append_rule_share_query(&request.target_url, &payload) {
+        Ok(url) => url,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Failed to create rule share URL: {}", error),
+            )
+        }
+    };
+
+    json_response(&CreateRuleShareLinkResponse {
+        url,
+        query_param: RULE_SHARE_QUERY_PARAM,
+        payload_version: RULE_SHARE_PROTOCOL_VERSION,
+        rule_name: rule.name,
+        content_hash: payload.content_hash,
+    })
 }
 
 async fn create_rule(

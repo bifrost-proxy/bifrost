@@ -134,6 +134,14 @@ export interface DisconnectData {
   reason: string;
 }
 
+export interface NotificationPushData {
+  notification_type: string;
+  title: string;
+  message: string;
+  metadata?: unknown;
+  unread_count: number;
+}
+
 export interface ReplayRequestUpdatedData {
   action: string;
   request_id?: string;
@@ -183,6 +191,7 @@ export type PushMessageType =
   | 'connected'
   | 'error'
   | 'disconnect'
+  | 'notification'
   | 'replay_request_updated'
   | 'replay_history_updated'
   | 'breakpoint_paused'
@@ -206,6 +215,7 @@ export interface PushMessage {
   | ConnectedData
   | ErrorData
   | DisconnectData
+  | NotificationPushData
   | ReplayRequestUpdatedData
   | ReplayHistoryUpdatedData
   | BreakpointPausedPushData
@@ -291,6 +301,7 @@ class PushService {
   private replayGroupsHandlers: Set<MessageHandler<ReplayGroupsData>> = new Set();
   private connectionHandlers: Set<MessageHandler<{ connected: boolean; clientId?: number }>> = new Set();
   private forceRefreshHandlers: Set<MessageHandler<DisconnectData>> = new Set();
+  private notificationHandlers: Set<MessageHandler<NotificationPushData>> = new Set();
   private replayRequestHandlers: Set<MessageHandler<ReplayRequestUpdatedData>> = new Set();
   private replayHistoryHandlers: Set<MessageHandler<ReplayHistoryUpdatedData>> = new Set();
   private breakpointPausedHandlers: Set<MessageHandler<BreakpointPausedPushData>> = new Set();
@@ -526,6 +537,11 @@ class PushService {
         console.error('[PushService] Server error:', data.message);
         break;
       }
+      case 'notification': {
+        const data = message.data as NotificationPushData;
+        this.notificationHandlers.forEach((handler) => handler(data));
+        break;
+      }
       case 'replay_request_updated': {
         const data = message.data as ReplayRequestUpdatedData;
         this.replayRequestHandlers.forEach((handler) => handler(data));
@@ -611,6 +627,7 @@ class PushService {
       this.settingsHandlers.size > 0 ||
       this.replaySavedRequestsHandlers.size > 0 ||
       this.replayGroupsHandlers.size > 0 ||
+      this.notificationHandlers.size > 0 ||
       this.replayRequestHandlers.size > 0 ||
       this.replayHistoryHandlers.size > 0 ||
       this.breakpointPausedHandlers.size > 0 ||
@@ -713,6 +730,11 @@ class PushService {
   onForceRefresh(handler: MessageHandler<DisconnectData>): () => void {
     this.forceRefreshHandlers.add(handler);
     return () => this.forceRefreshHandlers.delete(handler);
+  }
+
+  onNotification(handler: MessageHandler<NotificationPushData>): () => void {
+    this.notificationHandlers.add(handler);
+    return () => this.notificationHandlers.delete(handler);
   }
 
   onReplayRequestUpdated(handler: MessageHandler<ReplayRequestUpdatedData>): () => void {
