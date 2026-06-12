@@ -378,3 +378,102 @@ impl<T> ParseResultWithWarnings<T> {
         self.warnings.push(warning);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn bifrost_file_type_display_and_fromstr_roundtrip() {
+        for (ty, s) in [
+            (BifrostFileType::Rules, "rules"),
+            (BifrostFileType::Network, "network"),
+            (BifrostFileType::Script, "script"),
+            (BifrostFileType::Values, "values"),
+            (BifrostFileType::Template, "template"),
+        ] {
+            assert_eq!(ty.to_string(), s);
+            assert_eq!(BifrostFileType::from_str(s).unwrap(), ty);
+            // case-insensitive
+            assert_eq!(BifrostFileType::from_str(&s.to_uppercase()).unwrap(), ty);
+        }
+    }
+
+    #[test]
+    fn bifrost_file_type_fromstr_unknown_errors() {
+        let err = BifrostFileType::from_str("bogus").unwrap_err();
+        assert!(err.contains("Unknown file type"));
+    }
+
+    #[test]
+    fn rule_file_meta_new_and_touch() {
+        let mut meta = RuleFileMeta::new("name".to_string());
+        assert_eq!(meta.name, "name");
+        assert!(meta.enabled);
+        assert_eq!(meta.version, "1.0.0");
+        assert!(meta.description.is_none());
+        let before = meta.updated_at.clone();
+        meta.touch();
+        // touch only changes updated_at; created_at stays
+        assert!(!meta.created_at.is_empty());
+        // updated_at is a valid rfc3339 string (non-empty)
+        assert!(!meta.updated_at.is_empty());
+        let _ = before;
+    }
+
+    #[test]
+    fn rule_sync_status_default_is_local_only() {
+        assert_eq!(RuleSyncStatus::default(), RuleSyncStatus::LocalOnly);
+    }
+
+    #[test]
+    fn export_meta_new() {
+        let meta = ExportMeta::new("e".to_string());
+        assert_eq!(meta.name, "e");
+        assert_eq!(meta.version, "1.0.0");
+        assert!(meta.description.is_none());
+        assert!(!meta.created_at.is_empty());
+    }
+
+    #[test]
+    fn warning_level_display() {
+        assert_eq!(WarningLevel::Info.to_string(), "INFO");
+        assert_eq!(WarningLevel::Warning.to_string(), "WARNING");
+        assert_eq!(WarningLevel::Error.to_string(), "ERROR");
+    }
+
+    #[test]
+    fn parse_result_ok_and_warning_helpers() {
+        let r = ParseResultWithWarnings::ok(42);
+        assert_eq!(r.data, 42);
+        assert!(!r.has_warnings());
+        assert!(!r.has_errors());
+
+        let warn = ParseWarning {
+            level: WarningLevel::Warning,
+            message: "w".to_string(),
+            field: Some("f".to_string()),
+        };
+        let r2 = ParseResultWithWarnings::with_warning(1, warn);
+        assert!(r2.has_warnings());
+        assert!(!r2.has_errors());
+
+        let mut r3 = ParseResultWithWarnings::ok(0);
+        r3.add_warning(ParseWarning {
+            level: WarningLevel::Error,
+            message: "boom".to_string(),
+            field: None,
+        });
+        assert!(r3.has_warnings());
+        assert!(r3.has_errors());
+    }
+
+    #[test]
+    fn bifrost_file_type_serde_lowercase() {
+        let json = serde_json::to_string(&BifrostFileType::Network).unwrap();
+        assert_eq!(json, "\"network\"");
+        let back: BifrostFileType = serde_json::from_str("\"template\"").unwrap();
+        assert_eq!(back, BifrostFileType::Template);
+    }
+}

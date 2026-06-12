@@ -286,4 +286,42 @@ mod tests {
 
         assert_eq!(set, RemoteShellSet::default());
     }
+
+    #[test]
+    fn test_file_path_accessor() {
+        let (temp_dir, store) = setup_store();
+        assert_eq!(
+            store.file_path(),
+            temp_dir.path().join(REMOTE_SHELL_FILENAME)
+        );
+    }
+
+    #[test]
+    fn test_set_find_methods_miss_return_none() {
+        let set = sample_set();
+        assert!(set.find_policy("missing").is_none());
+        assert!(set.find_profile("missing").is_none());
+        assert!(set.find_policy("deploy-api").is_some());
+        assert!(set.find_profile("locked-down").is_some());
+    }
+
+    #[test]
+    fn test_store_find_methods_miss_return_none() {
+        let (_temp_dir, store) = setup_store();
+        store.save(&sample_set()).unwrap();
+        assert!(store.find_policy("nope").unwrap().is_none());
+        assert!(store.find_profile("nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_save_overwrites_existing_file() {
+        let (_temp_dir, store) = setup_store();
+        store.save(&sample_set()).unwrap();
+
+        let mut updated = sample_set();
+        updated.version = 100;
+        store.save(&updated).unwrap();
+
+        assert_eq!(store.current_version().unwrap(), 100);
+    }
 }

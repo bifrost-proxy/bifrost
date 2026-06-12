@@ -349,7 +349,27 @@ fn run_adb(adb_path: &Path, args: &[&str]) -> Result<CommandResult, AdbError> {
 }
 
 fn run_adb_output(adb_path: &Path, args: &[&str]) -> Result<Output, AdbError> {
-    Ok(Command::new(adb_path).args(args).output()?)
+    // Spawning a freshly-written executable can intermittently fail with
+    // ETXTBSY ("Text file busy", os error 26) on Linux: when other threads in
+    // the process fork+exec concurrently, the child briefly inherits writable
+    // file descriptors, and the kernel refuses to exec a file that any process
+    // still holds open for writing. This is inherent to multi-threaded
+    // fork/exec and cannot be eliminated by file-handle hygiene alone, so we
+    // retry a few times with a short backoff before giving up.
+    const MAX_ATTEMPTS: u32 = 8;
+    let mut attempt = 0;
+    loop {
+        match Command::new(adb_path).args(args).output() {
+            Ok(output) => return Ok(output),
+            Err(err)
+                if err.raw_os_error() == Some(26 /* ETXTBSY */) && attempt + 1 < MAX_ATTEMPTS =>
+            {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(5 * u64::from(attempt)));
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
 }
 
 fn remote_downloaded_certificate_matches(
@@ -588,5 +608,349 @@ List of devices attached
             .message
             .contains("Ordinary Android ADB cannot verify"));
         let _ = fs::remove_dir_all(test_dir);
+    }
+
+    // --- Fake-adb harness ---------------------------------------------------
+    //
+    // Most of adb.rs shells out to the `adb` binary. We exercise those paths
+    // by writing a small POSIX `sh` script that masquerades as `adb` and
+    // returns scripted output per argument pattern. All harness tests are
+    // unix-only (they rely on chmod +x and a shebang).
+    //
+    // The harness writes an executable script and immediately runs it. On some
+    // filesystems exec'ing a file that another thread is still writing yields
+    // ETXTBSY ("Text file busy"). We avoid that — and the cross-thread races of
+    // `find_adb`'s env-var probing — by serializing every harness/env test
+    // behind a single global lock.
+
+    #[cfg(unix)]
+    static HARNESS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(unix)]
+    struct FakeAdb {
+        dir: PathBuf,
+        adb_path: PathBuf,
+        cert_path: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl FakeAdb {
+        fn new(script_body: &str) -> Self {
+            use std::io::Write;
+            use std::os::unix::fs::PermissionsExt;
+            let dir = std::env::temp_dir().join(format!("bifrost-adb-h-{}", Uuid::new_v4()));
+            fs::create_dir_all(&dir).expect("create temp dir");
+            let cert_path = dir.join("ca.crt");
+            fs::write(
+                &cert_path,
+                "-----BEGIN CERTIFICATE-----\ndGVzdC1jZXJ0\n-----END CERTIFICATE-----\n",
+            )
+            .expect("write cert");
+            let adb_path = dir.join("adb");
+            {
+                // Write the script, fsync, and FULLY CLOSE the writable handle
+                // BEFORE marking it executable. Setting the exec bit (or running
+                // the script) while a writable FD is still open triggers ETXTBSY
+                // ("Text file busy") on Linux. Closing first avoids that race.
+                let mut f = fs::File::create(&adb_path).expect("create fake adb");
+                f.write_all(format!("#!/bin/sh\n{script_body}\n").as_bytes())
+                    .expect("write fake adb");
+                f.sync_all().expect("sync fake adb");
+                // `f` is dropped (closed) here at the end of the block.
+            }
+            // Now that no writable handle is open, set the executable bit via the
+            // path so the file can be exec'd without ETXTBSY.
+            fs::set_permissions(&adb_path, fs::Permissions::from_mode(0o755))
+                .expect("chmod fake adb");
+            Self {
+                dir,
+                adb_path,
+                cert_path,
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for FakeAdb {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_with_ca_lists_devices_and_checks_status() {
+        let _guard = HARNESS_LOCK.lock().unwrap();
+        // adb devices -l returns one connected device; the CA-status probe then
+        // populates certificate_status (exact value is irrelevant here).
+        let fake = FakeAdb::new(
+            r#"case "$*" in
+  *"devices -l"*) printf 'List of devices attached\nemulator-5554 device model:Pixel_7\n'; exit 0 ;;
+  *Download*) exit 2 ;;
+  *cacerts-added*) exit 2 ;;
+  *) exit 0 ;;
+esac"#,
+        );
+
+        std::env::set_var("BIFROST_ADB_PATH", &fake.adb_path);
+        let discovery = discover_android_devices_with_ca(Some(&fake.cert_path));
+        std::env::remove_var("BIFROST_ADB_PATH");
+
+        assert!(discovery.adb_available);
+        assert_eq!(discovery.devices.len(), 1);
+        assert_eq!(discovery.devices[0].id, "emulator-5554");
+        assert!(discovery.message.contains("found 1"));
+        assert!(discovery.devices[0].certificate_status.is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_reports_empty_when_no_devices() {
+        let _guard = HARNESS_LOCK.lock().unwrap();
+        let fake = FakeAdb::new(
+            r#"case "$*" in
+  *"devices -l"*) printf 'List of devices attached\n'; exit 0 ;;
+  *) exit 0 ;;
+esac"#,
+        );
+        std::env::set_var("BIFROST_ADB_PATH", &fake.adb_path);
+        let discovery = discover_android_devices_with_ca(None);
+        std::env::remove_var("BIFROST_ADB_PATH");
+
+        assert!(discovery.adb_available);
+        assert!(discovery.devices.is_empty());
+        assert!(discovery.message.contains("no Android USB devices"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_reports_failure_on_nonzero_exit() {
+        let _guard = HARNESS_LOCK.lock().unwrap();
+        let fake = FakeAdb::new(
+            r#"case "$*" in
+  *"devices -l"*) echo "adb: connection refused" 1>&2; exit 1 ;;
+  *) exit 0 ;;
+esac"#,
+        );
+        std::env::set_var("BIFROST_ADB_PATH", &fake.adb_path);
+        let discovery = discover_android_devices_with_ca(None);
+        std::env::remove_var("BIFROST_ADB_PATH");
+
+        assert!(discovery.adb_available);
+        assert!(discovery.devices.is_empty());
+        assert!(discovery.message.contains("failed to list devices"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_unavailable_when_adb_missing() {
+        let _guard = HARNESS_LOCK.lock().unwrap();
+        // Point BIFROST_ADB_PATH at a nonexistent file and clear PATH so no
+        // real adb is found.
+        let missing = std::env::temp_dir().join(format!("no-adb-{}", Uuid::new_v4()));
+        std::env::set_var("BIFROST_ADB_PATH", &missing);
+        let saved_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", "");
+        let discovery = discover_android_devices();
+        if let Some(p) = saved_path {
+            std::env::set_var("PATH", p);
+        }
+        std::env::remove_var("BIFROST_ADB_PATH");
+
+        assert!(!discovery.adb_available);
+        assert!(discovery.adb_path.is_none());
+        assert!(discovery.message.contains("ADB is not available"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_android_ca_pushes_and_opens_installer() {
+        let _guard = HARNESS_LOCK.lock().unwrap();
+        let fake = FakeAdb::new(
+            r#"case "$*" in
+  *push*) echo "1 file pushed"; exit 0 ;;
+  *VIEW*) echo "Starting: Intent"; exit 0 ;;
+  *) exit 0 ;;
+esac"#,
+        );
+        let session = install_android_ca(AndroidInstallOptions {
+            adb_path: fake.adb_path.clone(),
+            device_id: "dev-1".to_string(),
+            ca_cert_path: fake.cert_path.clone(),
+        })
+        .expect("install should succeed");
+
+        assert!(session.completed);
+        assert_eq!(session.device_id, "dev-1");
+        assert_eq!(session.steps.len(), 2);
+        assert_eq!(session.steps[0].name, "push_certificate");
+        assert_eq!(session.steps[1].name, "open_certificate_installer");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_android_ca_falls_back_to_settings_when_view_fails() {
+        let _guard = HARNESS_LOCK.lock().unwrap();
+        let fake = FakeAdb::new(
+            r#"case "$*" in
+  *push*) echo "1 file pushed"; exit 0 ;;
+  *VIEW*) echo "no activity" 1>&2; exit 1 ;;
+  *SECURITY_SETTINGS*) echo "Starting settings"; exit 0 ;;
+  *) exit 0 ;;
+esac"#,
+        );
+        let session = install_android_ca(AndroidInstallOptions {
+            adb_path: fake.adb_path.clone(),
+            device_id: "dev-2".to_string(),
+            ca_cert_path: fake.cert_path.clone(),
+        })
+        .expect("install returns Ok even when a step fails");
+
+        assert!(!session.completed);
+        assert_eq!(session.steps.len(), 3);
+        assert_eq!(session.steps[2].name, "open_security_settings_fallback");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_android_ca_stops_when_push_fails() {
+        let _guard = HARNESS_LOCK.lock().unwrap();
+        let fake = FakeAdb::new(
+            r#"case "$*" in
+  *push*) echo "adb: error: failed to push" 1>&2; exit 1 ;;
+  *) exit 0 ;;
+esac"#,
+        );
+        let session = install_android_ca(AndroidInstallOptions {
+            adb_path: fake.adb_path.clone(),
+            device_id: "dev-3".to_string(),
+            ca_cert_path: fake.cert_path.clone(),
+        })
+        .expect("returns Ok with a single failed step");
+
+        assert!(!session.completed);
+        assert_eq!(session.steps.len(), 1);
+        assert!(!session.steps[0].success);
+    }
+
+    #[test]
+    fn install_android_ca_errors_when_cert_missing() {
+        let err = install_android_ca(AndroidInstallOptions {
+            adb_path: PathBuf::from("/bin/true"),
+            device_id: "dev".to_string(),
+            ca_cert_path: PathBuf::from("/nonexistent/ca.crt"),
+        })
+        .expect_err("missing cert should error");
+        assert!(matches!(err, AdbError::CertificateMissing(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_status_reports_installed_when_store_contains_ca() {
+        let _guard = HARNESS_LOCK.lock().unwrap();
+        // Build a store whose PEM contains the same cert bytes as the local CA.
+        let fake = FakeAdb::new(
+            r#"case "$*" in
+  *cacerts-added*) printf -- '-----BEGIN CERTIFICATE-----\ndGVzdC1jZXJ0\n-----END CERTIFICATE-----\n'; exit 0 ;;
+  *Download*) exit 2 ;;
+  *) exit 0 ;;
+esac"#,
+        );
+        let status = check_android_ca_status(AndroidCaStatusOptions {
+            adb_path: fake.adb_path.clone(),
+            device_id: "dev".to_string(),
+            ca_cert_path: fake.cert_path.clone(),
+        });
+        assert_eq!(status.state, DeviceCertificateState::Installed);
+        assert_eq!(status.trusted, Some(true));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_status_reports_not_installed_when_store_lacks_ca() {
+        let _guard = HARNESS_LOCK.lock().unwrap();
+        let fake = FakeAdb::new(
+            r#"case "$*" in
+  *cacerts-added*) printf -- '-----BEGIN CERTIFICATE-----\nb3RoZXItY2E=\n-----END CERTIFICATE-----\n'; exit 0 ;;
+  *Download*) exit 2 ;;
+  *) exit 0 ;;
+esac"#,
+        );
+        let status = check_android_ca_status(AndroidCaStatusOptions {
+            adb_path: fake.adb_path.clone(),
+            device_id: "dev".to_string(),
+            ca_cert_path: fake.cert_path.clone(),
+        });
+        assert_eq!(status.state, DeviceCertificateState::NotInstalled);
+        assert_eq!(status.trusted, Some(false));
+    }
+
+    #[test]
+    fn check_status_unknown_when_local_cert_unreadable() {
+        let status = check_android_ca_status(AndroidCaStatusOptions {
+            adb_path: PathBuf::from("/bin/true"),
+            device_id: "dev".to_string(),
+            ca_cert_path: PathBuf::from("/nonexistent/ca.crt"),
+        });
+        assert_eq!(status.state, DeviceCertificateState::Unknown);
+        assert!(status.message.contains("Could not read"));
+    }
+
+    #[test]
+    fn sha256_hex_is_uppercase_colon_separated() {
+        let hex = sha256_hex(b"abc");
+        assert!(hex.contains(':'));
+        assert_eq!(hex, hex.to_uppercase());
+        // 32 bytes -> 32 hex pairs joined by 31 colons.
+        assert_eq!(hex.split(':').count(), 32);
+    }
+
+    #[test]
+    fn normalize_fingerprint_strips_non_hex_and_uppercases() {
+        assert_eq!(normalize_fingerprint("ab:cd ef"), "ABCDEF");
+        assert_eq!(normalize_fingerprint("XY12zz"), "12"); // only hex digits kept
+    }
+
+    #[test]
+    fn pem_certificate_blocks_extracts_multiple() {
+        let pem = "-----BEGIN CERTIFICATE-----\ndGVzdC1jZXJ0\n-----END CERTIFICATE-----\n\
+                   -----BEGIN CERTIFICATE-----\nb3RoZXItY2E=\n-----END CERTIFICATE-----\n";
+        let blocks = pem_certificate_blocks(pem);
+        assert_eq!(blocks.len(), 2);
+    }
+
+    #[test]
+    fn pem_certificate_blocks_ignores_unterminated() {
+        let pem = "-----BEGIN CERTIFICATE-----\ndGVzdC1jZXJ0\n"; // no END
+        assert!(pem_certificate_blocks(pem).is_empty());
+    }
+
+    #[test]
+    fn adb_binary_name_matches_platform() {
+        let name = adb_binary_name();
+        if cfg!(windows) {
+            assert_eq!(name, "adb.exe");
+        } else {
+            assert_eq!(name, "adb");
+        }
+    }
+
+    #[test]
+    fn path_str_handles_valid_and_returns_str() {
+        assert_eq!(path_str(Path::new("/tmp/x")), "/tmp/x");
+    }
+
+    #[test]
+    fn parses_offline_and_unsupported_status() {
+        let output = "List of devices attached\n\
+                      dev-off offline transport_id:1\n\
+                      dev-weird sideload transport_id:2\n";
+        let devices = parse_adb_devices(output);
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].status, DeviceStatus::Offline);
+        assert_eq!(devices[1].status, DeviceStatus::Unsupported);
+        assert!(devices[1]
+            .status_message
+            .contains("unsupported device status"));
     }
 }

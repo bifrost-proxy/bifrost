@@ -1,6 +1,8 @@
 use std::collections::{hash_map::DefaultHasher, BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
-use std::io::{self, IsTerminal, Read, Write};
+#[cfg(unix)]
+use std::io::Read;
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

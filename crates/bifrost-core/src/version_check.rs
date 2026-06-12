@@ -1120,6 +1120,31 @@ without proper structure
     }
 
     #[test]
+    fn parse_release_highlights_caps_highlights_section_at_max() {
+        // Build a "## Highlights" section with > MAX_RELEASE_HIGHLIGHTS bullets to
+        // hit the early-return cap inside the highlights branch.
+        let mut body = String::from("## Highlights\n");
+        for i in 0..60 {
+            body.push_str(&format!("- item {i}\n"));
+        }
+        let out = parse_release_highlights(Some(&body));
+        assert_eq!(out.len(), 50);
+        assert_eq!(out[0], "item 0");
+    }
+
+    #[test]
+    fn parse_release_highlights_caps_features_section_at_max() {
+        // No highlights section, but a "### Features" section with > MAX bullets
+        // each carrying a commit message, to hit the features-branch cap.
+        let mut body = String::from("### Features\n");
+        for i in 0..60 {
+            body.push_str(&format!("- feat: add thing {i}\n"));
+        }
+        let out = parse_release_highlights(Some(&body));
+        assert_eq!(out.len(), 50);
+    }
+
+    #[test]
     fn test_extract_highlights_from_html_real_structure() {
         let html = r#"<div data-pjax="true" data-test-selector="body-content" class="markdown-body"><h2>What's Changed</h2>
 <h3>📝 Other Changes</h3>
@@ -1180,5 +1205,194 @@ without proper structure
             release_page_url("1.0.0"),
             "https://github.com/bifrost-proxy/bifrost/releases/tag/v1.0.0"
         );
+    }
+
+    #[test]
+    fn fetch_error_display() {
+        assert_eq!(
+            format!("{}", FetchError::Network("boom".to_string())),
+            "boom"
+        );
+        assert_eq!(format!("{}", FetchError::Parse("bad".to_string())), "bad");
+    }
+
+    #[test]
+    fn classify_ureq_error_transport_invalid_url_and_scheme() {
+        let agent = crate::http_client::direct_ureq_agent();
+        // Unknown scheme → UnknownScheme/InvalidUrl transport error.
+        let err = agent.get("ftp://example.invalid/x").call().unwrap_err();
+        let reason = classify_ureq_error(&err);
+        assert_eq!(reason, "invalid URL");
+
+        // Malformed URL → InvalidUrl transport error.
+        let err = agent.get("http://").call().unwrap_err();
+        let reason = classify_ureq_error(&err);
+        // Either invalid URL or a network error depending on parsing; both are
+        // non-empty static strings from the transport arm.
+        assert!(!reason.is_empty());
+    }
+
+    #[test]
+    fn classify_ureq_error_dns_failure() {
+        let agent = crate::http_client::direct_ureq_agent_builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build();
+        // A host that cannot resolve exercises the DNS / connection-failed arm.
+        let err = agent
+            .get("http://nonexistent.invalid.localdomain.example/x")
+            .call()
+            .unwrap_err();
+        let reason = classify_ureq_error(&err);
+        assert!(!reason.is_empty());
+    }
+
+    #[test]
+    fn extract_version_from_redirect_url_edge_cases() {
+        // Trailing slash trimmed.
+        assert_eq!(
+            extract_version_from_redirect_url(
+                "https://github.com/bifrost-proxy/bifrost/releases/tag/v2.3.4/"
+            )
+            .unwrap(),
+            "2.3.4"
+        );
+        // No v-prefix preserved as-is.
+        assert_eq!(
+            extract_version_from_redirect_url(
+                "https://github.com/bifrost-proxy/bifrost/releases/tag/2.3.4"
+            )
+            .unwrap(),
+            "2.3.4"
+        );
+        // Empty tag -> Parse error.
+        assert!(extract_version_from_redirect_url(
+            "https://github.com/bifrost-proxy/bifrost/releases/tag/"
+        )
+        .is_err());
+        // No /tag/ segment -> Parse error.
+        assert!(extract_version_from_redirect_url("https://example.com/foo").is_err());
+    }
+
+    #[test]
+    fn make_release_tag_branches() {
+        // Starts with digit -> prefixed.
+        assert_eq!(make_release_tag("2.0.0"), "v2.0.0");
+        // Contains '-' -> prefixed.
+        assert_eq!(make_release_tag("nightly-2020"), "vnightly-2020");
+        // Non-digit, no dash -> left as-is.
+        assert_eq!(make_release_tag("stable"), "stable");
+        // Empty string -> next() is None -> is_none_or -> prefixed.
+        assert_eq!(make_release_tag(""), "v");
+    }
+
+    #[test]
+    fn release_api_url_and_strip_prefix() {
+        assert_eq!(
+            release_api_url_for_tag("v1.2.3"),
+            "https://api.github.com/repos/bifrost-proxy/bifrost/releases/tags/v1.2.3"
+        );
+        assert_eq!(strip_tag_prefix("v1.2.3"), "1.2.3");
+        assert_eq!(strip_tag_prefix("1.2.3"), "1.2.3");
+    }
+
+    #[test]
+    fn pick_latest_tag_variants() {
+        let tags = vec![
+            GitHubTag {
+                name: "v0.1.0".to_string(),
+            },
+            GitHubTag {
+                name: "v0.2.0".to_string(),
+            },
+            GitHubTag {
+                name: "v0.1.5".to_string(),
+            },
+            GitHubTag {
+                name: "not-a-version".to_string(), // no 'v' prefix -> filtered out
+            },
+        ];
+        assert_eq!(pick_latest_tag(tags), Some("0.2.0".to_string()));
+
+        // No valid v-prefixed tags -> None.
+        let none_tags = vec![GitHubTag {
+            name: "main".to_string(),
+        }];
+        assert_eq!(pick_latest_tag(none_tags), None);
+
+        // Empty input -> None.
+        assert_eq!(pick_latest_tag(vec![]), None);
+    }
+
+    #[test]
+    fn compare_versions_handles_missing_and_nonnumeric_parts() {
+        use std::cmp::Ordering;
+        // Missing patch defaults to 0.
+        assert_eq!(compare_versions("1.2", "1.2.0"), Ordering::Equal);
+        // Single number.
+        assert_eq!(compare_versions("2", "1.9.9"), Ordering::Greater);
+        // Non-numeric component is filtered out, shifting later numbers left:
+        // "1.x.3" -> [1, 3] -> (1, 3, 0) which is > (1, 0, 3).
+        assert_eq!(compare_versions("1.x.3", "1.0.3"), Ordering::Greater);
+    }
+
+    #[test]
+    fn fallback_extract_lines_skips_noise() {
+        let body = "\
+# Title heading
+**Full Changelog**: https://x
+---
+| table | row |
+```code```
+- valid item one
+- short
+- another good entry here (abc1234)
+";
+        let lines = fallback_extract_lines(body);
+        // "short" (len<=5) skipped; heading/changelog/table/code/--- skipped.
+        assert!(lines.iter().any(|l| l == "valid item one"));
+        assert!(lines.iter().any(|l| l == "another good entry here"));
+        assert!(!lines.iter().any(|l| l == "short"));
+    }
+
+    #[test]
+    fn extract_commit_message_strips_trailing_hash() {
+        // The trailing " (abc)" is removed; remaining "feat:" is left intact
+        // because the "feat: " prefix (with trailing space) no longer matches.
+        assert_eq!(
+            extract_commit_message("feat:  (abc)"),
+            Some("feat:".to_string())
+        );
+        // A scoped feat with content extracts the message after ")".
+        assert_eq!(
+            extract_commit_message("feat(scope): real msg (deadbee)"),
+            Some("real msg".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_any_commit_message_scoped_and_plain() {
+        assert_eq!(
+            extract_any_commit_message("refactor(core): tidy up (deadbee)"),
+            Some("tidy up".to_string())
+        );
+        assert_eq!(
+            extract_any_commit_message("perf: speed (1234567)"),
+            Some("speed".to_string())
+        );
+        // Empty result -> None.
+        assert_eq!(extract_any_commit_message("fix: "), None);
+    }
+
+    #[test]
+    fn version_cache_serde_roundtrip() {
+        let cache = VersionCache {
+            latest_version: "1.2.3".to_string(),
+            release_highlights: vec!["a".to_string(), "b".to_string()],
+            checked_at: chrono::Utc::now(),
+        };
+        let json = serde_json::to_string(&cache).unwrap();
+        let back: VersionCache = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.latest_version, "1.2.3");
+        assert_eq!(back.release_highlights.len(), 2);
     }
 }

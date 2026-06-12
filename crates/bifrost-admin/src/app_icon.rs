@@ -362,23 +362,21 @@ fn extract_app_icon_windows(app_path: &str) -> Option<Vec<u8>> {
 
     let resources = pe_file.resources().ok()?;
 
-    for result in resources.icons() {
-        if let Ok((_name, group)) = result {
-            for entry in group.entries() {
-                if let Ok(image_data) = group.image(entry.nId) {
-                    if image_data.starts_with(b"\x89PNG") {
-                        debug!(size = image_data.len(), "Found PNG icon in PE resources");
-                        return Some(image_data.to_vec());
-                    }
+    for (_name, group) in resources.icons().flatten() {
+        for entry in group.entries() {
+            if let Ok(image_data) = group.image(entry.nId) {
+                if image_data.starts_with(b"\x89PNG") {
+                    debug!(size = image_data.len(), "Found PNG icon in PE resources");
+                    return Some(image_data.to_vec());
+                }
 
-                    if let Some(png_data) = convert_ico_to_png(image_data) {
-                        debug!(
-                            original_size = image_data.len(),
-                            png_size = png_data.len(),
-                            "Converted ICO to PNG"
-                        );
-                        return Some(png_data);
-                    }
+                if let Some(png_data) = convert_ico_to_png(image_data) {
+                    debug!(
+                        original_size = image_data.len(),
+                        png_size = png_data.len(),
+                        "Converted ICO to PNG"
+                    );
+                    return Some(png_data);
                 }
             }
         }

@@ -164,4 +164,51 @@ mod tests {
         assert!(m.match_raw("a/.git/hooks/pre-commit").is_some());
         assert!(m.match_raw("src/main.rs").is_none());
     }
+
+    #[test]
+    fn glob_matcher_is_match_and_patterns() {
+        let m = GlobMatcher::new(&["src/*.rs".into(), "docs/**".into()]).unwrap();
+        assert!(m.is_match("src/main.rs"));
+        assert!(!m.is_match("src/sub/main.rs")); // * does not cross slash
+        assert!(m.is_match("docs/a/b.md"));
+        let raw: Vec<&str> = m.patterns().collect();
+        assert_eq!(raw, vec!["src/*.rs", "docs/**"]);
+    }
+
+    #[test]
+    fn question_mark_matches_single_non_slash() {
+        let m = GlobMatcher::new(&["file?.txt".into()]).unwrap();
+        assert!(m.is_match("file1.txt"));
+        assert!(!m.is_match("file.txt"));
+        assert!(!m.is_match("file12.txt"));
+    }
+
+    #[test]
+    fn special_regex_chars_are_escaped_literally() {
+        // dots and plus must be matched literally, not as regex metachars
+        let m = GlobMatcher::new(&["a.b+c.txt".into()]).unwrap();
+        assert!(m.is_match("a.b+c.txt"));
+        assert!(!m.is_match("aXbXc.txt"));
+    }
+
+    #[test]
+    fn trailing_double_star_matches_rest() {
+        // ** not followed by '/' → matches anything including slashes
+        let m = GlobMatcher::new(&["logs/**".into()]).unwrap();
+        assert!(m.is_match("logs/x/y/z.log"));
+        assert!(m.is_match("logs/"));
+    }
+
+    #[test]
+    fn invalid_glob_returns_error() {
+        // an unterminated character class produces an invalid regex
+        let err = GlobMatcher::new(&["[".into()]).unwrap_err();
+        assert!(matches!(err, FileAccessError::InvalidGlob { .. }));
+        assert_eq!(err.code(), "file.invalid_glob");
+    }
+
+    #[test]
+    fn to_posix_normalizes_backslashes() {
+        assert_eq!(to_posix(Path::new("a\\b\\c")), "a/b/c");
+    }
 }

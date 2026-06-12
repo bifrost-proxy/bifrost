@@ -868,4 +868,379 @@ mod tests {
         let result3 = TemplateEngine::expand("{unknownValue}", None, &values);
         assert_eq!(result3, "{unknownValue}");
     }
+
+    #[test]
+    fn test_capture_out_of_range_left_intact() {
+        // $3 with only two captures → left as-is; $0 → left as-is
+        let captures = vec!["a".to_string(), "b".to_string()];
+        let result = TemplateEngine::expand("$1-$3-$0", Some(&captures), &HashMap::new());
+        assert_eq!(result, "a-$3-$0");
+    }
+
+    #[test]
+    fn test_url_encode_mismatched_markers_pass_through() {
+        // Opening url-encode brace without closing one → original text returned.
+        let ctx = ctx_with_url("http://example.com/test");
+        let result = TemplateEngine::expand_with_context("${{host}", &ctx, None, &HashMap::new());
+        assert_eq!(result, "${{host}");
+    }
+
+    #[test]
+    fn test_url_encode_end_without_start_appends_brace() {
+        // Closing marker present but not opening: value followed by literal '}'.
+        let ctx = RequestContext::builder()
+            .url("http://example.com/test")
+            .host("example.com")
+            .hostname("example.com")
+            .path("/test")
+            .pathname("/test")
+            .method("GET")
+            .build();
+        let result = TemplateEngine::expand_with_context("${method}}", &ctx, None, &HashMap::new());
+        assert_eq!(result, "GET}");
+    }
+
+    #[test]
+    fn test_querystring_defaults_to_question_mark() {
+        let ctx = ctx_with_url("http://example.com/test");
+        let result =
+            TemplateEngine::expand_with_context("${queryString}", &ctx, None, &HashMap::new());
+        assert_eq!(result, "?");
+        let result =
+            TemplateEngine::expand_with_context("${searchString}", &ctx, None, &HashMap::new());
+        assert_eq!(result, "?");
+    }
+
+    #[test]
+    fn test_search_present_and_default_empty() {
+        let ctx = RequestContext::builder()
+            .url("http://example.com/api?x=1")
+            .host("example.com")
+            .hostname("example.com")
+            .path("/api?x=1")
+            .pathname("/api")
+            .search("?x=1")
+            .build();
+        let result = TemplateEngine::expand_with_context("${search}", &ctx, None, &HashMap::new());
+        assert_eq!(result, "?x=1");
+
+        let empty = ctx_with_url("http://example.com/test");
+        let result =
+            TemplateEngine::expand_with_context("${search}", &empty, None, &HashMap::new());
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_random_int_single_and_range() {
+        let ctx = ctx_with_url("http://example.com/test");
+        // single bound: result in [0, 5]
+        let r = TemplateEngine::expand_with_context("${randomInt(5)}", &ctx, None, &HashMap::new());
+        let n: i64 = r.parse().unwrap();
+        assert!((0..=5).contains(&n), "got {n}");
+
+        // range bound: result in [10, 20]
+        let r =
+            TemplateEngine::expand_with_context("${randomInt(10-20)}", &ctx, None, &HashMap::new());
+        let n: i64 = r.parse().unwrap();
+        assert!((10..=20).contains(&n), "got {n}");
+
+        // reversed range still normalized: [3, 8]
+        let r =
+            TemplateEngine::expand_with_context("${randomInt(8-3)}", &ctx, None, &HashMap::new());
+        let n: i64 = r.parse().unwrap();
+        assert!((3..=8).contains(&n), "got {n}");
+    }
+
+    #[test]
+    fn test_real_url_host_port() {
+        let ctx = RequestContext::builder()
+            .url("http://example.com/test")
+            .host("example.com")
+            .hostname("example.com")
+            .path("/test")
+            .pathname("/test")
+            .real_url("http://backend.internal/real")
+            .real_host("backend.internal")
+            .real_port(9000)
+            .build();
+        assert_eq!(
+            TemplateEngine::expand_with_context("${realUrl}", &ctx, None, &HashMap::new()),
+            "http://backend.internal/real"
+        );
+        assert_eq!(
+            TemplateEngine::expand_with_context("${realHost}", &ctx, None, &HashMap::new()),
+            "backend.internal"
+        );
+        assert_eq!(
+            TemplateEngine::expand_with_context("${realPort}", &ctx, None, &HashMap::new()),
+            "9000"
+        );
+    }
+
+    #[test]
+    fn test_remote_and_client_port_and_address() {
+        let mut ctx = RequestContext::builder()
+            .url("http://example.com/test")
+            .host("example.com")
+            .hostname("example.com")
+            .path("/test")
+            .pathname("/test")
+            .client_ip("10.0.0.1")
+            .client_port(54321)
+            .build();
+        // client_ip/client_port set remote_* to the same values; override remote
+        // fields directly to exercise their distinct resolution paths.
+        ctx.remote_address = "10.0.0.2".to_string();
+        ctx.remote_port = 443;
+        assert_eq!(
+            TemplateEngine::expand_with_context("${clientPort}", &ctx, None, &HashMap::new()),
+            "54321"
+        );
+        assert_eq!(
+            TemplateEngine::expand_with_context("${remoteAddress}", &ctx, None, &HashMap::new()),
+            "10.0.0.2"
+        );
+        assert_eq!(
+            TemplateEngine::expand_with_context("${remotePort}", &ctx, None, &HashMap::new()),
+            "443"
+        );
+    }
+
+    #[test]
+    fn test_server_ip_port_defaults() {
+        let ctx = ctx_with_url("http://example.com/test");
+        // serverIp defaults to 127.0.0.1 when unset
+        assert_eq!(
+            TemplateEngine::expand_with_context("${serverIp}", &ctx, None, &HashMap::new()),
+            "127.0.0.1"
+        );
+        // serverPort defaults to empty when unset
+        assert_eq!(
+            TemplateEngine::expand_with_context("${serverPort}", &ctx, None, &HashMap::new()),
+            ""
+        );
+    }
+
+    #[test]
+    fn test_client_id_and_local_client_id() {
+        let ctx = RequestContext::builder()
+            .url("http://example.com/test")
+            .host("example.com")
+            .hostname("example.com")
+            .path("/test")
+            .pathname("/test")
+            .client_id("client-42")
+            .local_client_id("local-7")
+            .build();
+        assert_eq!(
+            TemplateEngine::expand_with_context("${clientId}", &ctx, None, &HashMap::new()),
+            "client-42"
+        );
+        assert_eq!(
+            TemplateEngine::expand_with_context("${localClientId}", &ctx, None, &HashMap::new()),
+            "local-7"
+        );
+    }
+
+    #[test]
+    fn test_id_req_id() {
+        let ctx = ctx_with_url("http://example.com/test");
+        let id = TemplateEngine::expand_with_context("${id}", &ctx, None, &HashMap::new());
+        let req_id = TemplateEngine::expand_with_context("${reqId}", &ctx, None, &HashMap::new());
+        assert_eq!(id, req_id);
+    }
+
+    #[test]
+    fn test_req_headers_no_key_joins_all() {
+        let mut headers = HashMap::new();
+        headers.insert("x-test".to_string(), "v1".to_string());
+        let ctx = RequestContext::builder()
+            .url("http://example.com/test")
+            .host("example.com")
+            .hostname("example.com")
+            .path("/test")
+            .pathname("/test")
+            .req_headers(headers)
+            .build();
+        let result =
+            TemplateEngine::expand_with_context("${reqHeaders}", &ctx, None, &HashMap::new());
+        assert_eq!(result, "x-test: v1");
+    }
+
+    #[test]
+    fn test_req_cookies_no_key_joins_all() {
+        let mut cookies = HashMap::new();
+        cookies.insert("session".to_string(), "abc".to_string());
+        let ctx = RequestContext::builder()
+            .url("http://example.com/test")
+            .host("example.com")
+            .hostname("example.com")
+            .path("/test")
+            .pathname("/test")
+            .req_cookies(cookies)
+            .build();
+        let result =
+            TemplateEngine::expand_with_context("${reqCookies}", &ctx, None, &HashMap::new());
+        assert_eq!(result, "session=abc");
+    }
+
+    #[test]
+    fn test_res_headers_with_and_without_key() {
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "text/html".to_string());
+        let mut ctx = RequestContext::builder()
+            .url("http://example.com/test")
+            .host("example.com")
+            .hostname("example.com")
+            .path("/test")
+            .pathname("/test")
+            .build();
+        ctx.res_headers = Some(headers);
+        // keyed (lowercased lookup)
+        let result = TemplateEngine::expand_with_context(
+            "${resHeaders.Content-Type}",
+            &ctx,
+            None,
+            &HashMap::new(),
+        );
+        assert_eq!(result, "text/html");
+        // no key joins all
+        let result =
+            TemplateEngine::expand_with_context("${resHeaders}", &ctx, None, &HashMap::new());
+        assert_eq!(result, "content-type: text/html");
+    }
+
+    #[test]
+    fn test_res_cookies_with_and_without_key() {
+        let mut cookies = HashMap::new();
+        cookies.insert("token".to_string(), "xyz".to_string());
+        let mut ctx = RequestContext::builder()
+            .url("http://example.com/test")
+            .host("example.com")
+            .hostname("example.com")
+            .path("/test")
+            .pathname("/test")
+            .build();
+        ctx.res_cookies = Some(cookies);
+        let result =
+            TemplateEngine::expand_with_context("${resCookies.token}", &ctx, None, &HashMap::new());
+        assert_eq!(result, "xyz");
+        let result =
+            TemplateEngine::expand_with_context("${resCookies}", &ctx, None, &HashMap::new());
+        assert_eq!(result, "token=xyz");
+    }
+
+    #[test]
+    fn test_res_headers_deferred_and_res_cookies_unset_are_empty() {
+        let ctx = ctx_with_url("http://example.com/test");
+        // Response-phase header tokens are deferred at request phase (res_headers
+        // is None) and must be left literal so the proxy can expand them once the
+        // upstream response is available.
+        assert_eq!(
+            TemplateEngine::expand_with_context("${resHeaders}", &ctx, None, &HashMap::new()),
+            "${resHeaders}"
+        );
+        assert_eq!(
+            TemplateEngine::expand_with_context("${resHeaders.x}", &ctx, None, &HashMap::new()),
+            "${resHeaders.x}"
+        );
+        // resCookies is not a deferred response var, so an unset value resolves to
+        // the empty string.
+        assert_eq!(
+            TemplateEngine::expand_with_context("${resCookies}", &ctx, None, &HashMap::new()),
+            ""
+        );
+        assert_eq!(
+            TemplateEngine::expand_with_context("${resCookies.x}", &ctx, None, &HashMap::new()),
+            ""
+        );
+    }
+
+    #[test]
+    fn test_env_no_key_and_alias_fallback() {
+        let ctx = ctx_with_url("http://example.com/test");
+        // ${env} with no key → empty string
+        assert_eq!(
+            TemplateEngine::expand_with_context("${env}", &ctx, None, &HashMap::new()),
+            ""
+        );
+
+        // Alias fallback: set USER, read it directly (primary path); and exercise
+        // the fallback chain by querying USERNAME which maps back to USER.
+        std::env::set_var("USER", "tester");
+        std::env::remove_var("USERNAME");
+        assert_eq!(
+            TemplateEngine::expand_with_context("${env.USER}", &ctx, None, &HashMap::new()),
+            "tester"
+        );
+        assert_eq!(
+            TemplateEngine::expand_with_context("${env.USERNAME}", &ctx, None, &HashMap::new()),
+            "tester"
+        );
+        // Unknown var with no alias → empty
+        std::env::remove_var("DEFINITELY_UNSET_VAR_XYZ");
+        assert_eq!(
+            TemplateEngine::expand_with_context(
+                "${env.DEFINITELY_UNSET_VAR_XYZ}",
+                &ctx,
+                None,
+                &HashMap::new()
+            ),
+            ""
+        );
+    }
+
+    #[test]
+    fn test_env_home_userprofile_alias() {
+        let ctx = ctx_with_url("http://example.com/test");
+        std::env::set_var("HOME", "/home/tester");
+        std::env::remove_var("USERPROFILE");
+        // USERPROFILE not set → falls back to HOME
+        assert_eq!(
+            TemplateEngine::expand_with_context("${env.USERPROFILE}", &ctx, None, &HashMap::new()),
+            "/home/tester"
+        );
+    }
+
+    #[test]
+    fn test_url_with_key_lookup_and_fallback() {
+        let mut values = HashMap::new();
+        values.insert("alt".to_string(), "http://alt.example/x".to_string());
+        let ctx = ctx_with_url("http://example.com/test");
+        // key present in values
+        assert_eq!(
+            TemplateEngine::expand_with_context("${url.alt}", &ctx, None, &values),
+            "http://alt.example/x"
+        );
+        // key absent → falls back to ctx.url
+        assert_eq!(
+            TemplateEngine::expand_with_context("${url.missing}", &ctx, None, &values),
+            "http://example.com/test"
+        );
+    }
+
+    #[test]
+    fn test_replace_unmatched_pattern_returns_value() {
+        let ctx = RequestContext::builder()
+            .url("http://example.com/test")
+            .host("example.com")
+            .hostname("example.com")
+            .path("/test")
+            .pathname("/test")
+            .build();
+        // pattern not found → plain replace is a no-op, value unchanged
+        let result = TemplateEngine::expand_with_context(
+            "${hostname.replace(zzz,qqq)}",
+            &ctx,
+            None,
+            &HashMap::new(),
+        );
+        assert_eq!(result, "example.com");
+    }
+
+    #[test]
+    fn test_inline_file_unknown_left_intact() {
+        let result = TemplateEngine::expand("{missing.json}", None, &HashMap::new());
+        assert_eq!(result, "{missing.json}");
+    }
 }

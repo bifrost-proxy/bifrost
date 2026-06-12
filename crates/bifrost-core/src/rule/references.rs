@@ -308,4 +308,63 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn error_accessors_and_display() {
+        let missing = RuleReferenceError::Missing {
+            source: "src".to_string(),
+            line: 7,
+            name: "ref".to_string(),
+        };
+        assert_eq!(missing.source(), "src");
+        assert_eq!(missing.line(), 7);
+        let msg = missing.to_string();
+        assert!(msg.contains("@ref"));
+        assert!(msg.contains("src"));
+        assert!(msg.contains("line 7"));
+
+        let cycle = RuleReferenceError::Cycle {
+            source: "s2".to_string(),
+            line: 3,
+            chain: vec!["a".to_string(), "b".to_string(), "a".to_string()],
+        };
+        assert_eq!(cycle.source(), "s2");
+        assert_eq!(cycle.line(), 3);
+        let cmsg = cycle.to_string();
+        assert!(cmsg.contains("cyclic"));
+        assert!(cmsg.contains("a -> b -> a"));
+    }
+
+    #[test]
+    fn empty_reference_names_are_ignored() {
+        // "@" alone and "@   " yield no reference name
+        assert_eq!(rule_reference_name("@"), None);
+        assert_eq!(rule_reference_name("@   "), None);
+        // A '#' immediately after '@' (no preceding whitespace) is NOT treated
+        // as an inline comment, so it becomes part of the reference name.
+        assert_eq!(
+            rule_reference_name("@ # only comment"),
+            Some("# only comment")
+        );
+    }
+
+    #[test]
+    fn expand_to_result_maps_error_into_bifrost_rule() {
+        let catalog = catalog(&[("a", "@b"), ("b", "@a")]);
+        let err =
+            expand_rule_references_to_result("a", catalog.get("a").unwrap(), &catalog).unwrap_err();
+        match err {
+            BifrostError::Rule(msg) => assert!(msg.contains("cyclic")),
+            other => panic!("expected Rule error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expand_to_result_ok_passthrough() {
+        let catalog = catalog(&[("a", "line1\nline2")]);
+        let out =
+            expand_rule_references_to_result("a", catalog.get("a").unwrap(), &catalog).unwrap();
+        assert!(out.contains("line1"));
+        assert!(out.contains("line2"));
+    }
 }

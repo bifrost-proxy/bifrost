@@ -1768,6 +1768,726 @@ mod tests {
         );
     }
 
+    // ----------------------------------------------------------------------
+    // A small routing fixture server that mimics the real sync API surface so
+    // sync_once / sync_rules / tick can be exercised end-to-end against a
+    // loopback ephemeral listener (same pattern as spawn_sso_check_server).
+    // ----------------------------------------------------------------------
+    #[derive(Clone, Default)]
+    struct FakeApi {
+        // List returned by GET /v4/env.
+        envs: Vec<RemoteEnv>,
+        // user_id returned by GET /v4/sso/info (None => 401-style empty data).
+        user_id: Option<String>,
+    }
+
+    async fn spawn_api_server(api: FakeApi) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_for_task = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let api = api.clone();
+                let hits = hits_for_task.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0_u8; 8192];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let first = req.lines().next().unwrap_or("");
+                    let mut parts = first.split_whitespace();
+                    let method = parts.next().unwrap_or("");
+                    let path = parts.next().unwrap_or("");
+
+                    let json_body: String = if path.starts_with("/v4/sso/check") {
+                        String::new()
+                    } else if path.starts_with("/v4/sso/info") {
+                        match &api.user_id {
+                            Some(uid) => format!(
+                                r#"{{"code":0,"message":"ok","data":{{"user_id":"{uid}","nickname":"N","avatar":"","email":""}}}}"#
+                            ),
+                            None => r#"{"code":0,"message":"ok","data":null}"#.to_string(),
+                        }
+                    } else if path.starts_with("/v4/env") && method == "GET" {
+                        let list = api
+                            .envs
+                            .iter()
+                            .map(|e| {
+                                format!(
+                                    r#"{{"id":"{}","user_id":"{}","name":"{}","rule":"{}","create_time":"{}","update_time":"{}"}}"#,
+                                    e.id, e.user_id, e.name, e.rule, e.create_time, e.update_time
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        format!(r#"{{"code":0,"message":"ok","data":{{"list":[{list}]}}}}"#)
+                    } else if path.starts_with("/v4/env") && method == "POST" {
+                        // create_env returns a fresh env.
+                        r#"{"code":0,"message":"ok","data":{"id":"new-remote","user_id":"user-1","name":"created","rule":"r","create_time":"2026-01-01T00:00:00Z","update_time":"2026-01-01T00:00:00Z"}}"#.to_string()
+                    } else if path.starts_with("/v4/env") && method == "PATCH" {
+                        r#"{"code":0,"message":"ok","data":{"id":"upd-remote","user_id":"user-1","name":"updated","rule":"r","create_time":"2026-01-01T00:00:00Z","update_time":"2026-01-02T00:00:00Z"}}"#.to_string()
+                    } else {
+                        // DELETE and everything else: empty envelope.
+                        r#"{"code":0,"message":"ok","data":null}"#.to_string()
+                    };
+
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        json_body.len(),
+                        json_body
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        (format!("http://{addr}"), hits)
+    }
+
+    fn re(id: &str, name: &str, rule: &str, update: &str) -> RemoteEnv {
+        RemoteEnv {
+            id: id.into(),
+            user_id: "user-1".into(),
+            name: name.into(),
+            rule: rule.into(),
+            create_time: "2026-01-01T00:00:00Z".into(),
+            update_time: update.into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_delegates_to_inner_manager() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_manager = Arc::new(ConfigManager::new(temp_dir.path().to_path_buf()).unwrap());
+        config_manager
+            .update_sync_config(SyncConfigUpdate {
+                enabled: Some(true),
+                remote_base_url: Some("https://example.test".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let manager = Arc::new(SyncManager::new(config_manager, 9900).unwrap());
+        let handle = SyncManagerHandle::new(manager.clone());
+
+        // status / session accessors flow through the handle.
+        let status = handle.status().await;
+        assert!(status.enabled);
+        assert!(!status.has_session);
+        assert!(handle.session_token().is_none());
+
+        // login_url goes through the handle to the client builder.
+        let url = handle.login_url("http://cb").await.unwrap();
+        assert!(url.contains("/v4/sso/login?next="));
+
+        // save_token returns updated status with a session.
+        let after = handle.save_token("tok".to_string()).await.unwrap();
+        assert!(after.has_session);
+        assert_eq!(handle.session_token().as_deref(), Some("tok"));
+
+        // trigger_sync just notifies; should not panic.
+        handle.trigger_sync();
+
+        // logout clears the session.
+        let after_logout = handle.logout().await.unwrap();
+        assert!(!after_logout.has_session);
+    }
+
+    #[tokio::test]
+    async fn accessors_reflect_state() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_manager = Arc::new(ConfigManager::new(temp_dir.path().to_path_buf()).unwrap());
+        let manager = SyncManager::new(config_manager, 9900).unwrap();
+
+        assert!(!manager.has_session());
+        assert!(manager.current_user_id().is_none());
+        assert!(manager.session_token().is_none());
+
+        {
+            let mut state = manager.state.lock();
+            state.token = Some("tk".to_string());
+            state.user = Some(RemoteUser {
+                user_id: "u-9".to_string(),
+                ..RemoteUser::default()
+            });
+            manager.persist_state(&state).unwrap();
+        }
+        assert!(manager.has_session());
+        assert_eq!(manager.current_user_id().as_deref(), Some("u-9"));
+        assert_eq!(manager.session_token().as_deref(), Some("tk"));
+    }
+
+    #[tokio::test]
+    async fn record_and_clear_deleted_rule_tombstones() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_manager = Arc::new(ConfigManager::new(temp_dir.path().to_path_buf()).unwrap());
+        let manager = SyncManager::new(config_manager, 9900).unwrap();
+
+        // A rule with no remote_id is a no-op (returns Ok, records nothing).
+        let unsynced = RuleFile::new("local-only", "a.example.com host://127.0.0.1:3000");
+        manager.record_deleted_rule(&unsynced).await.unwrap();
+        assert!(manager.state.lock().deleted_rules.is_empty());
+
+        // A synced rule records a tombstone.
+        let mut synced = RuleFile::new("demo", "a.example.com host://127.0.0.1:3000");
+        synced.mark_synced(
+            "remote-1",
+            "user-1",
+            "2026-01-01T00:00:00Z",
+            "2026-01-02T00:00:00Z",
+        );
+        manager.record_deleted_rule(&synced).await.unwrap();
+        assert_eq!(manager.state.lock().deleted_rules.len(), 1);
+
+        // Clearing by a non-matching name keeps the tombstone.
+        manager.clear_deleted_rule("nope").await.unwrap();
+        assert_eq!(manager.state.lock().deleted_rules.len(), 1);
+        // Clearing by the rule name removes it.
+        manager.clear_deleted_rule("demo").await.unwrap();
+        assert!(manager.state.lock().deleted_rules.is_empty());
+    }
+
+    #[tokio::test]
+    async fn record_deleted_rule_requires_remote_user_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_manager = Arc::new(ConfigManager::new(temp_dir.path().to_path_buf()).unwrap());
+        let manager = SyncManager::new(config_manager, 9900).unwrap();
+
+        let mut rule = RuleFile::new("demo", "a.example.com host://127.0.0.1:3000");
+        // Set remote_id but leave remote_user_id None -> error.
+        rule.sync.remote_id = Some("remote-1".to_string());
+        rule.sync.remote_user_id = None;
+        let err = manager.record_deleted_rule(&rule).await.unwrap_err();
+        assert!(matches!(err, BifrostError::Config(_)));
+    }
+
+    #[tokio::test]
+    async fn remote_sample_requires_token_and_user() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_manager = Arc::new(ConfigManager::new(temp_dir.path().to_path_buf()).unwrap());
+        let manager = SyncManager::new(config_manager, 9900).unwrap();
+        // No token -> Config error.
+        assert!(matches!(
+            manager.remote_sample(5).await.unwrap_err(),
+            BifrostError::Config(_)
+        ));
+        // Token but no user -> Config error.
+        manager.state.lock().token = Some("tk".to_string());
+        assert!(matches!(
+            manager.remote_sample(5).await.unwrap_err(),
+            BifrostError::Config(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn remote_sample_returns_sorted_truncated_envs() {
+        let api = FakeApi {
+            envs: vec![
+                re("e1", "alpha", "r1", "2026-01-01T00:00:00Z"),
+                re("e2", "beta", "r2", "2026-03-01T00:00:00Z"),
+                re("e3", "gamma", "r3", "2026-02-01T00:00:00Z"),
+            ],
+            user_id: Some("user-1".to_string()),
+        };
+        let (base, _hits) = spawn_api_server(api).await;
+        let (_temp, _cm, manager) = sync_manager_for_remote(&base).await;
+        manager.state.lock().token = Some("tk".to_string());
+        manager.state.lock().user = Some(RemoteUser {
+            user_id: "user-1".to_string(),
+            ..RemoteUser::default()
+        });
+
+        let sample = manager.remote_sample(2).await.unwrap();
+        assert_eq!(sample.len(), 2);
+        // Newest update_time first.
+        assert_eq!(sample[0].id, "e2");
+        assert_eq!(sample[1].id, "e3");
+    }
+
+    #[tokio::test]
+    async fn proxy_forward_requires_token() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_manager = Arc::new(ConfigManager::new(temp_dir.path().to_path_buf()).unwrap());
+        let manager = SyncManager::new(config_manager, 9900).unwrap();
+        let err = manager
+            .proxy_forward(reqwest::Method::GET, "/v4/env", None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, BifrostError::Config(_)));
+    }
+
+    #[tokio::test]
+    async fn proxy_forward_passes_through_to_remote() {
+        let (base, _hits) = spawn_api_server(FakeApi::default()).await;
+        let (_temp, _cm, manager) = sync_manager_for_remote(&base).await;
+        manager.state.lock().token = Some("tk".to_string());
+        let (status, content_type, body) = manager
+            .proxy_forward(reqwest::Method::GET, "/v4/env", Some("a=1"), None)
+            .await
+            .unwrap();
+        assert_eq!(status, 200);
+        assert!(content_type.contains("application/json"));
+        assert!(!body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn logout_clears_session_and_runtime() {
+        let (base, _hits) = spawn_api_server(FakeApi::default()).await;
+        let (_temp, _cm, manager) = sync_manager_for_remote(&base).await;
+        manager.state.lock().token = Some("tk".to_string());
+        manager.state.lock().user = Some(RemoteUser::default());
+        {
+            let mut rt = manager.runtime.write().await;
+            rt.authorized = true;
+        }
+        manager.logout().await.unwrap();
+        assert!(manager.state.lock().token.is_none());
+        assert!(manager.state.lock().user.is_none());
+        let rt = manager.runtime.read().await;
+        assert!(!rt.authorized);
+        assert_eq!(rt.reason, SyncReason::Unauthorized);
+    }
+
+    #[tokio::test]
+    async fn sync_once_returns_disabled_when_sync_off() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_manager = Arc::new(ConfigManager::new(temp_dir.path().to_path_buf()).unwrap());
+        // Explicitly disable sync (it defaults to enabled).
+        config_manager
+            .update_sync_config(SyncConfigUpdate {
+                enabled: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let manager = SyncManager::new(config_manager, 9900).unwrap();
+        let result = manager.sync_once().await.unwrap();
+        assert!(!result.success);
+        assert!(result.message.contains("disabled"));
+    }
+
+    #[tokio::test]
+    async fn sync_once_returns_unreachable_when_remote_down() {
+        let (_temp, _cm, manager) = sync_manager_for_remote("http://192.0.2.1:9").await;
+        let result = manager.sync_once().await.unwrap();
+        assert!(!result.success);
+        assert!(result.message.contains("unreachable"));
+    }
+
+    #[tokio::test]
+    async fn sync_once_requires_session_token() {
+        let (base, _hits) = spawn_api_server(FakeApi {
+            user_id: Some("user-1".to_string()),
+            ..FakeApi::default()
+        })
+        .await;
+        let (_temp, _cm, manager) = sync_manager_for_remote(&base).await;
+        // Reachable but no token.
+        let result = manager.sync_once().await.unwrap();
+        assert!(!result.success);
+        assert!(result.message.contains("token"));
+    }
+
+    #[tokio::test]
+    async fn sync_once_reports_expired_token() {
+        // Server reachable; /v4/sso/info returns null data => token invalid.
+        let (base, _hits) = spawn_api_server(FakeApi {
+            user_id: None,
+            ..FakeApi::default()
+        })
+        .await;
+        let (_temp, _cm, manager) = sync_manager_for_remote(&base).await;
+        manager.state.lock().token = Some("expired".to_string());
+        let result = manager.sync_once().await.unwrap();
+        assert!(!result.success);
+        assert!(result.message.contains("expired") || result.message.contains("invalid"));
+    }
+
+    #[tokio::test]
+    async fn sync_once_pulls_remote_rule_into_local_storage() {
+        let api = FakeApi {
+            envs: vec![re(
+                "remote-x",
+                "pulled-rule",
+                "remote.example.com host://127.0.0.1:3000",
+                "2026-04-01T00:00:00Z",
+            )],
+            user_id: Some("user-1".to_string()),
+        };
+        let (base, _hits) = spawn_api_server(api).await;
+        let (_temp, config_manager, manager) = sync_manager_for_remote(&base).await;
+        manager.state.lock().token = Some("good-token".to_string());
+
+        let result = manager.sync_once().await.unwrap();
+        assert!(result.success, "message: {}", result.message);
+        assert_eq!(result.action, Some(SyncAction::RemotePulled));
+
+        // The remote rule should now exist locally.
+        let storage = config_manager.rules_storage().await;
+        assert!(storage.exists("pulled-rule"));
+    }
+
+    #[tokio::test]
+    async fn sync_once_creates_remote_for_local_only_rule() {
+        let api = FakeApi {
+            envs: vec![],
+            user_id: Some("user-1".to_string()),
+        };
+        let (base, _hits) = spawn_api_server(api).await;
+        let (_temp, config_manager, manager) = sync_manager_for_remote(&base).await;
+        manager.state.lock().token = Some("good-token".to_string());
+
+        // Seed a purely local rule.
+        let storage = config_manager.rules_storage().await;
+        storage
+            .save(&RuleFile::new(
+                "local-rule",
+                "a.example.com host://127.0.0.1:3000",
+            ))
+            .unwrap();
+
+        let result = manager.sync_once().await.unwrap();
+        assert!(result.success, "message: {}", result.message);
+        assert_eq!(result.action, Some(SyncAction::LocalPushed));
+
+        // After push, the local rule is marked synced (remote_id populated).
+        let saved = storage.load_all().unwrap();
+        let rule = saved.iter().find(|r| r.name == "local-rule").unwrap();
+        assert!(rule.sync.remote_id.is_some());
+    }
+
+    #[tokio::test]
+    async fn sync_once_updates_remote_for_modified_local_rule() {
+        // Remote has a matching env; local rule is Modified -> UpdateRemote.
+        let api = FakeApi {
+            envs: vec![re(
+                "remote-x",
+                "shared",
+                "old.example.com host://127.0.0.1:3000",
+                "2026-01-01T00:00:00Z",
+            )],
+            user_id: Some("user-1".to_string()),
+        };
+        let (base, _hits) = spawn_api_server(api).await;
+        let (_temp, config_manager, manager) = sync_manager_for_remote(&base).await;
+        manager.state.lock().token = Some("good-token".to_string());
+
+        let storage = config_manager.rules_storage().await;
+        let mut rule = RuleFile::new("shared", "new.example.com host://127.0.0.1:3000");
+        rule.mark_synced(
+            "remote-x",
+            "user-1",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+        );
+        rule.touch_local_change(); // -> Modified
+        storage.save(&rule).unwrap();
+
+        let result = manager.sync_once().await.unwrap();
+        assert!(result.success, "message: {}", result.message);
+        assert_eq!(result.action, Some(SyncAction::LocalPushed));
+        // After update the rule is synced again with the returned remote id.
+        let saved = storage.load_all().unwrap();
+        let updated = saved.iter().find(|r| r.name == "shared").unwrap();
+        assert_eq!(updated.sync.status, RuleSyncStatus::Synced);
+    }
+
+    #[tokio::test]
+    async fn sync_once_updates_local_when_remote_changed() {
+        // Local is Synced but the remote update_time/content differ -> UpdateLocal.
+        let api = FakeApi {
+            envs: vec![re(
+                "remote-x",
+                "shared",
+                "remote-fresh.example.com host://127.0.0.1:3000",
+                "2026-09-09T00:00:00Z",
+            )],
+            user_id: Some("user-1".to_string()),
+        };
+        let (base, _hits) = spawn_api_server(api).await;
+        let (_temp, config_manager, manager) = sync_manager_for_remote(&base).await;
+        manager.state.lock().token = Some("good-token".to_string());
+
+        let storage = config_manager.rules_storage().await;
+        let mut rule = RuleFile::new("shared", "stale.example.com host://127.0.0.1:3000");
+        // Mark synced with an OLD remote update time so remote_changed == true.
+        rule.mark_synced(
+            "remote-x",
+            "user-1",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+        );
+        storage.save(&rule).unwrap();
+
+        let result = manager.sync_once().await.unwrap();
+        assert!(result.success, "message: {}", result.message);
+        assert_eq!(result.action, Some(SyncAction::RemotePulled));
+        let saved = storage.load_all().unwrap();
+        let updated = saved.iter().find(|r| r.name == "shared").unwrap();
+        assert!(updated.content.contains("remote-fresh.example.com"));
+    }
+
+    #[tokio::test]
+    async fn sync_once_deletes_local_when_synced_rule_vanishes_from_remote() {
+        // Local rule is Synced with a remote_id, but remote returns no envs ->
+        // the local copy is deleted directly inside sync_rules.
+        let api = FakeApi {
+            envs: vec![],
+            user_id: Some("user-1".to_string()),
+        };
+        let (base, _hits) = spawn_api_server(api).await;
+        let (_temp, config_manager, manager) = sync_manager_for_remote(&base).await;
+        manager.state.lock().token = Some("good-token".to_string());
+
+        let storage = config_manager.rules_storage().await;
+        let mut rule = RuleFile::new("ghost", "a.example.com host://127.0.0.1:3000");
+        rule.mark_synced(
+            "gone-remote",
+            "user-1",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+        );
+        storage.save(&rule).unwrap();
+
+        let result = manager.sync_once().await.unwrap();
+        assert!(result.success, "message: {}", result.message);
+        assert!(!storage.exists("ghost"));
+    }
+
+    #[tokio::test]
+    async fn sync_once_enforces_tombstone_delete_remote_and_local() {
+        // A tombstone for a rule that still exists locally and remotely ->
+        // DeleteLocal + DeleteRemote plan steps both execute.
+        let api = FakeApi {
+            envs: vec![re(
+                "tomb-remote",
+                "to-delete",
+                "x.example.com host://127.0.0.1:3000",
+                "2026-01-01T00:00:00Z",
+            )],
+            user_id: Some("user-1".to_string()),
+        };
+        let (base, _hits) = spawn_api_server(api).await;
+        let (_temp, config_manager, manager) = sync_manager_for_remote(&base).await;
+        manager.state.lock().token = Some("good-token".to_string());
+
+        let storage = config_manager.rules_storage().await;
+        let mut rule = RuleFile::new("to-delete", "x.example.com host://127.0.0.1:3000");
+        rule.mark_synced(
+            "tomb-remote",
+            "user-1",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+        );
+        storage.save(&rule).unwrap();
+
+        // Record a tombstone for it.
+        manager.record_deleted_rule(&rule).await.unwrap();
+        assert_eq!(manager.state.lock().deleted_rules.len(), 1);
+
+        let result = manager.sync_once().await.unwrap();
+        assert!(result.success, "message: {}", result.message);
+        // Local copy removed via DeleteLocal.
+        assert!(!storage.exists("to-delete"));
+        assert_eq!(result.action, Some(SyncAction::LocalPushed));
+    }
+
+    #[tokio::test]
+    async fn tick_marks_disabled_when_sync_off() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_manager = Arc::new(ConfigManager::new(temp_dir.path().to_path_buf()).unwrap());
+        config_manager
+            .update_sync_config(SyncConfigUpdate {
+                enabled: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let manager = SyncManager::new(config_manager, 9900).unwrap();
+
+        manager.tick().await.unwrap();
+
+        let runtime = manager.runtime.read().await;
+        assert_eq!(runtime.reason, SyncReason::Disabled);
+        assert!(!runtime.reachable);
+        assert!(!runtime.authorized);
+        assert!(!runtime.syncing);
+    }
+
+    #[tokio::test]
+    async fn tick_marks_unauthorized_when_token_missing() {
+        let (base, _hits) = spawn_api_server(FakeApi {
+            envs: vec![],
+            user_id: Some("user-1".to_string()),
+        })
+        .await;
+        let (_temp, _config_manager, manager) = sync_manager_for_remote(&base).await;
+        // No token set.
+        manager.tick().await.unwrap();
+
+        let runtime = manager.runtime.read().await;
+        assert_eq!(runtime.reason, SyncReason::Unauthorized);
+        assert!(!runtime.authorized);
+    }
+
+    #[tokio::test]
+    async fn tick_marks_unreachable_when_remote_down() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_manager = Arc::new(ConfigManager::new(temp_dir.path().to_path_buf()).unwrap());
+        config_manager
+            .update_sync_config(SyncConfigUpdate {
+                enabled: Some(true),
+                remote_base_url: Some("http://192.0.2.1:9".to_string()),
+                connect_timeout_ms: Some(500),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let manager = SyncManager::new(config_manager, 9900).unwrap();
+        manager.state.lock().token = Some("tk".to_string());
+
+        manager.tick().await.unwrap();
+
+        let runtime = manager.runtime.read().await;
+        assert_eq!(runtime.reason, SyncReason::Unreachable);
+        assert!(!runtime.reachable);
+    }
+
+    #[tokio::test]
+    async fn tick_clears_session_when_user_info_expired() {
+        // Server is reachable but /v4/sso/info returns null data → session expired.
+        let (base, _hits) = spawn_api_server(FakeApi {
+            envs: vec![],
+            user_id: None,
+        })
+        .await;
+        let (_temp, _config_manager, manager) = sync_manager_for_remote(&base).await;
+        {
+            let mut state = manager.state.lock();
+            state.token = Some("stale".to_string());
+            state.user = Some(RemoteUser {
+                user_id: "user-1".to_string(),
+                ..RemoteUser::default()
+            });
+            manager.persist_state(&state).unwrap();
+        }
+
+        manager.tick().await.unwrap();
+
+        let runtime = manager.runtime.read().await;
+        assert_eq!(runtime.reason, SyncReason::Unauthorized);
+        assert!(runtime.reachable);
+        assert!(!runtime.authorized);
+        // Session is cleared.
+        assert!(manager.state.lock().token.is_none());
+        assert!(manager.state.lock().user.is_none());
+    }
+
+    #[tokio::test]
+    async fn tick_marks_ready_without_sync_when_auto_sync_off() {
+        let (base, _hits) = spawn_api_server(FakeApi {
+            envs: vec![],
+            user_id: Some("user-1".to_string()),
+        })
+        .await;
+        let temp_dir = TempDir::new().unwrap();
+        let config_manager = Arc::new(ConfigManager::new(temp_dir.path().to_path_buf()).unwrap());
+        config_manager
+            .update_sync_config(SyncConfigUpdate {
+                enabled: Some(true),
+                auto_sync: Some(false),
+                remote_base_url: Some(base.clone()),
+                connect_timeout_ms: Some(500),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let manager = SyncManager::new(config_manager, 9900).unwrap();
+        manager.state.lock().token = Some("good".to_string());
+
+        manager.tick().await.unwrap();
+
+        let runtime = manager.runtime.read().await;
+        assert_eq!(runtime.reason, SyncReason::Ready);
+        assert!(runtime.reachable);
+        assert!(runtime.authorized);
+        assert!(!runtime.syncing);
+    }
+
+    #[tokio::test]
+    async fn tick_runs_full_sync_and_marks_ready() {
+        let (base, _hits) = spawn_api_server(FakeApi {
+            envs: vec![re(
+                "remote-y",
+                "ticked-rule",
+                "ticked.example.com host://127.0.0.1:3000",
+                "2026-04-01T00:00:00Z",
+            )],
+            user_id: Some("user-1".to_string()),
+        })
+        .await;
+        let (_temp, config_manager, manager) = sync_manager_for_remote(&base).await;
+        manager.state.lock().token = Some("good".to_string());
+
+        manager.tick().await.unwrap();
+
+        let runtime = manager.runtime.read().await;
+        assert_eq!(runtime.reason, SyncReason::Ready);
+        assert!(runtime.authorized);
+        assert!(!runtime.syncing);
+        assert!(runtime.last_error.is_none());
+        drop(runtime);
+
+        // The remote rule was pulled during the sync.
+        let storage = config_manager.rules_storage().await;
+        assert!(storage.exists("ticked-rule"));
+    }
+
+    #[test]
+    fn startup_login_preflight_retry_delay_reads_env() {
+        let _guard = EnvVarGuard::set(STARTUP_LOGIN_PREFLIGHT_RETRY_DELAY_MS_ENV, "250");
+        assert_eq!(
+            startup_login_preflight_retry_delay(),
+            Duration::from_millis(250)
+        );
+        let _guard2 = EnvVarGuard::unset(STARTUP_LOGIN_PREFLIGHT_RETRY_DELAY_MS_ENV);
+        assert_eq!(
+            startup_login_preflight_retry_delay(),
+            Duration::from_secs(STARTUP_LOGIN_PREFLIGHT_RETRY_DELAY_SECS)
+        );
+    }
+
+    #[test]
+    fn open_url_in_browser_dry_run_appends_to_file() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("urls.txt");
+        let _guard = EnvVarGuard::set(LOGIN_BROWSER_DRY_RUN_FILE_ENV, path.to_str().unwrap());
+        open_url_in_browser("http://example.test/login").unwrap();
+        open_url_in_browser("http://example.test/again").unwrap();
+        let urls = read_dry_run_urls(&path);
+        assert_eq!(urls.len(), 2);
+        assert_eq!(urls[0], "http://example.test/login");
+    }
+
+    #[tokio::test]
+    async fn new_loads_existing_state_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_manager = Arc::new(ConfigManager::new(temp_dir.path().to_path_buf()).unwrap());
+        // First manager writes a state file with a token.
+        let m1 = SyncManager::new(config_manager.clone(), 9900).unwrap();
+        m1.state.lock().token = Some("persisted".to_string());
+        {
+            let state = m1.state.lock().clone();
+            m1.persist_state(&state).unwrap();
+        }
+        // Second manager loads it back from disk.
+        let m2 = SyncManager::new(config_manager, 9900).unwrap();
+        assert_eq!(m2.session_token().as_deref(), Some("persisted"));
+    }
+
     #[tokio::test]
     async fn startup_login_preflight_skips_when_session_token_exists() {
         let _env_lock = env_lock().lock().await;

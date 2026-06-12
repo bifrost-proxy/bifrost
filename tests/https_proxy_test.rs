@@ -210,6 +210,7 @@ async fn start_flaky_h2_fallback_tls_server(
                     );
                     let _ = stream.write_all(headers.as_bytes()).await;
                     let _ = stream.write_all(&body).await;
+                    let _ = stream.shutdown().await;
                 }
             });
         }
@@ -733,8 +734,8 @@ async fn test_https_interception_retries_h2_body_failure_with_http1() {
     add_test_rule(
         &proxy,
         "intercepted.example.com",
-        Protocol::Host,
-        &format!("127.0.0.1:{}", upstream.port),
+        Protocol::Https,
+        &format!("https://127.0.0.1:{}", upstream.port),
     );
 
     let client = create_proxy_client(&proxy);

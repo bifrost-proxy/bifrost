@@ -29,6 +29,8 @@ use commands::{
 use process::read_runtime_port;
 
 const DEFAULT_PORT: u16 = 9900;
+#[cfg(windows)]
+const WINDOWS_CLI_MAIN_STACK_SIZE: usize = 8 * 1024 * 1024;
 
 fn get_effective_port(cli_port: u16) -> u16 {
     if cli_port != DEFAULT_PORT {
@@ -136,7 +138,25 @@ fn effective_log_outputs(cli: &Cli) -> Vec<LogOutput> {
     }
 }
 
+#[cfg(windows)]
 fn main() {
+    let handle = std::thread::Builder::new()
+        .name("bifrost-cli-main".to_string())
+        .stack_size(WINDOWS_CLI_MAIN_STACK_SIZE)
+        .spawn(run_cli_main)
+        .expect("failed to start bifrost cli main thread");
+
+    if let Err(payload) = handle.join() {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+#[cfg(not(windows))]
+fn main() {
+    run_cli_main();
+}
+
+fn run_cli_main() {
     // If invoked as the hidden tray subcommand (`bifrost __tray ...`), run the
     // tray helper in this process and never return. Must run before clap
     // parsing and logging init (the tray installs its own tracing subscriber).

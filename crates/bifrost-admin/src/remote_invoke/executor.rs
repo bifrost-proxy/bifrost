@@ -3438,6 +3438,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(windows))]
     fn streaming_shell_command() -> (String, [&'static str; 2]) {
         if cfg!(target_os = "windows") {
             (

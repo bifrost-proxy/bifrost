@@ -1,5 +1,32 @@
 use super::*;
 
+fn delayed_final_command(content: &str) -> (String, Vec<String>) {
+    #[cfg(windows)]
+    {
+        (
+            "cmd.exe".to_string(),
+            vec![
+                "/C".to_string(),
+                format!(
+                    "ping -n 3 127.0.0.1 >nul & echo {{\"type\":\"assistant_final\",\"content\":\"{content}\"}}"
+                ),
+            ],
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        (
+            "sh".to_string(),
+            vec![
+                "-c".to_string(),
+                format!(
+                    "sleep 2; printf '%s\\n' '{{\"type\":\"assistant_final\",\"content\":\"{content}\"}}'"
+                ),
+            ],
+        )
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn terminate_process_group_force_kills_sigterm_ignoring_process() {
@@ -1163,6 +1190,7 @@ async fn external_cli_runtime_marks_stopped_run_before_late_stdout() {
     let temp_dir = tempfile::tempdir().unwrap();
     let runs_root = temp_dir.path().to_path_buf();
     let runtime = ExternalCliRuntime::new(&runs_root);
+    let (executable, args) = delayed_final_command("too late");
     let request = ExternalCliRunRequest {
         images: Vec::new(),
         message: "stop me".to_string(),
@@ -1176,12 +1204,8 @@ async fn external_cli_runtime_marks_stopped_run_before_late_stdout() {
         work_dir: None,
         instructions: None,
         adapter_config: ExternalCliAdapterConfig {
-            executable: Some("sh".to_string()),
-            args: vec![
-                "-c".to_string(),
-                "sleep 2; printf '%s\n' '{\"type\":\"assistant_final\",\"content\":\"too late\"}'"
-                    .to_string(),
-            ],
+            executable: Some(executable),
+            args,
             timeout_secs: Some(10),
             ..Default::default()
         },
@@ -1292,6 +1316,7 @@ async fn external_cli_runtime_stops_active_run_by_session_key() {
     let temp_dir = tempfile::tempdir().unwrap();
     let runs_root = temp_dir.path().to_path_buf();
     let runtime = ExternalCliRuntime::new(&runs_root);
+    let (executable, args) = delayed_final_command("too late");
     let request = ExternalCliRunRequest {
         images: Vec::new(),
         message: "stop by session".to_string(),
@@ -1305,12 +1330,8 @@ async fn external_cli_runtime_stops_active_run_by_session_key() {
         work_dir: None,
         instructions: None,
         adapter_config: ExternalCliAdapterConfig {
-            executable: Some("sh".to_string()),
-            args: vec![
-                "-c".to_string(),
-                "sleep 2; printf '%s\n' '{\"type\":\"assistant_final\",\"content\":\"too late\"}'"
-                    .to_string(),
-            ],
+            executable: Some(executable),
+            args,
             timeout_secs: Some(10),
             ..Default::default()
         },

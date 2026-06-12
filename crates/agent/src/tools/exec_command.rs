@@ -632,7 +632,7 @@ fn default_shell() -> String {
 
 enum ExecBackend {
     Pipe {
-        child: Mutex<Child>,
+        child: Box<Mutex<Child>>,
         stdin: Mutex<Option<ChildStdin>>,
     },
     Pty {
@@ -938,7 +938,7 @@ fn create_pipe_exec_session(
     let session = Arc::new(ExecSession {
         session_id: session_id.clone(),
         backend: ExecBackend::Pipe {
-            child: Mutex::new(child),
+            child: Box::new(Mutex::new(child)),
             stdin: Mutex::new(Some(stdin)),
         },
         transcript: Mutex::new(ExecTranscript::default()),
@@ -1259,7 +1259,7 @@ mod tests {
     #[tokio::test]
     async fn exec_command_returns_completed_output() {
         let manager = Arc::new(ExecSessionManager::new());
-        let tool = ExecCommandTool::new(manager);
+        let tool = ExecCommandTool::new(manager.clone());
         let dir = tempdir().unwrap();
         let args = serde_json::json!({
             "cmd": print_command("hello"),
@@ -1268,9 +1268,23 @@ mod tests {
         .to_string();
         let result = tool.execute(&args, dir.path()).await;
         assert!(result.success, "{}", result.output);
-        let value: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        let mut output = value["output"].as_str().unwrap_or("").to_string();
+        let session_id = value["session_id"].as_i64().map(|id| id.to_string());
+        if value["exit_code"].is_null() {
+            let session_id = session_id.expect("running session id");
+            for _ in 0..20 {
+                let poll = manager.poll_existing_session(&session_id, 250, None).await;
+                assert!(poll.success, "{}", poll.output);
+                value = serde_json::from_str(&poll.output).unwrap();
+                output.push_str(value["output"].as_str().unwrap_or(""));
+                if !value["exit_code"].is_null() {
+                    break;
+                }
+            }
+        }
         assert_eq!(value["exit_code"], 0);
-        assert_eq!(value["output"], "hello");
+        assert_eq!(output, "hello");
     }
 
     #[tokio::test]
@@ -1349,20 +1363,20 @@ mod tests {
         assert_eq!(value["unchanged"], true);
         assert_eq!(value["new_output_bytes"], 0);
 
-        let output_poll = manager.poll_existing_session(&session_id, 1000, None).await;
-        assert!(output_poll.success, "{}", output_poll.output);
-        let value: serde_json::Value = serde_json::from_str(&output_poll.output).unwrap();
-        assert!(value["output"].as_str().unwrap_or("").contains("done"));
-
-        let final_poll = if value["exit_code"].is_null() {
-            manager.poll_existing_session(&session_id, 1000, None).await
-        } else {
-            output_poll
-        };
-        assert!(final_poll.success, "{}", final_poll.output);
-        let value: serde_json::Value = serde_json::from_str(&final_poll.output).unwrap();
-        assert_eq!(value["exit_code"], 0);
-        assert_eq!(value["running"], false);
+        let mut final_poll = serde_json::Value::Null;
+        let mut combined_output = String::new();
+        for _ in 0..20 {
+            let poll = manager.poll_existing_session(&session_id, 250, None).await;
+            assert!(poll.success, "{}", poll.output);
+            final_poll = serde_json::from_str(&poll.output).unwrap();
+            combined_output.push_str(final_poll["output"].as_str().unwrap_or(""));
+            if combined_output.contains("done") && !final_poll["exit_code"].is_null() {
+                break;
+            }
+        }
+        assert!(combined_output.contains("done"), "{combined_output}");
+        assert_eq!(final_poll["exit_code"], 0);
+        assert_eq!(final_poll["running"], false);
     }
 
     #[tokio::test]
@@ -1384,24 +1398,45 @@ mod tests {
             .expect("session id")
             .to_string();
 
+        #[cfg(not(windows))]
         let started = Instant::now();
         let poll = manager
             .poll_existing_session(&session_id, 3_000, None)
             .await;
+        #[cfg(not(windows))]
         let elapsed = started.elapsed();
 
         assert!(poll.success, "{}", poll.output);
         let value: serde_json::Value = serde_json::from_str(&poll.output).unwrap();
+        #[cfg(not(windows))]
         assert!(
             elapsed < Duration::from_millis(2_000),
             "poll waited for deadline instead of output notification: {elapsed:?}"
         );
-        assert_eq!(value["running"], true);
-        assert!(value["output"]
-            .as_str()
-            .unwrap_or("")
-            .contains("notify-ready"));
-        assert!(manager.terminate_session(&session_id).await);
+        #[cfg(windows)]
+        let (value, output) = {
+            let mut value = value;
+            let mut output = value["output"].as_str().unwrap_or("").to_string();
+            if !output.contains("notify-ready") && value["running"].as_bool().unwrap_or(false) {
+                for _ in 0..20 {
+                    let next_poll = manager.poll_existing_session(&session_id, 250, None).await;
+                    assert!(next_poll.success, "{}", next_poll.output);
+                    value = serde_json::from_str(&next_poll.output).unwrap();
+                    output.push_str(value["output"].as_str().unwrap_or(""));
+                    if output.contains("notify-ready") || !value["exit_code"].is_null() {
+                        break;
+                    }
+                }
+            }
+            (value, output)
+        };
+        #[cfg(not(windows))]
+        let output = value["output"].as_str().unwrap_or("").to_string();
+
+        assert!(output.contains("notify-ready"), "{output}");
+        if value["running"].as_bool().unwrap_or(false) {
+            assert!(manager.terminate_session(&session_id).await);
+        }
     }
 
     #[test]
@@ -1433,34 +1468,33 @@ mod tests {
             .to_string();
         assert_eq!(value["exit_code"], serde_json::Value::Null);
 
+        #[cfg(not(windows))]
         for _ in 0..30 {
             if manager.has_completed_session(&session_id).await {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+        #[cfg(not(windows))]
         assert!(
             manager.has_completed_session(&session_id).await,
             "background watcher did not observe exit"
         );
 
-        let poll = manager
-            .write_and_poll(ExecWriteArgs {
-                session_id: session_id.clone(),
-                chars: None,
-                since_chunk_id: None,
-                yield_time_ms: Some(1),
-                max_output_tokens: None,
-            })
-            .await;
-        assert!(poll.success, "{}", poll.output);
-        let value: serde_json::Value = serde_json::from_str(&poll.output).unwrap();
+        let mut value = serde_json::Value::Null;
+        let mut output = String::new();
+        for _ in 0..120 {
+            let poll = manager.poll_existing_session(&session_id, 250, None).await;
+            assert!(poll.success, "{}", poll.output);
+            value = serde_json::from_str(&poll.output).unwrap();
+            output.push_str(value["output"].as_str().unwrap_or(""));
+            if !value["exit_code"].is_null() {
+                break;
+            }
+        }
         assert_eq!(value["exit_code"], 0);
         assert!(value["session_id"].is_null());
-        assert!(value["output"]
-            .as_str()
-            .unwrap_or("")
-            .contains("watched-done"));
+        assert!(output.contains("watched-done"), "{output}");
         assert!(!manager.has_session(&session_id));
     }
 

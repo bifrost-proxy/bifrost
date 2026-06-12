@@ -85,3 +85,52 @@ impl Status {
         }
     }
 }
+
+#[cfg(test)]
+mod lib_tests {
+    use super::*;
+
+    #[test]
+    fn status_unsupported_is_inert() {
+        let s = Status::unsupported("linux", Mode::Auto);
+        assert!(!s.supported);
+        assert_eq!(s.platform, "linux");
+        assert_eq!(s.mode, Mode::Auto);
+        assert!(!s.active);
+        assert!(s.active_since_secs.is_none());
+        assert!(!s.on_battery);
+        assert!(s.battery_warning.is_none());
+    }
+
+    #[test]
+    fn status_is_serializable_to_json() {
+        // Status is a wire format; make sure serde round-trips the fields.
+        let s = Status::unsupported("windows", Mode::Off);
+        let json = serde_json::to_string(&s).expect("serialize Status");
+        assert!(json.contains("\"supported\":false"));
+        assert!(json.contains("\"platform\":\"windows\""));
+    }
+
+    #[test]
+    fn power_error_display_messages() {
+        // Exercise every `#[error(...)]` Display arm.
+        let unsupported = PowerError::Unsupported("linux");
+        assert!(format!("{unsupported}").contains("not supported"));
+        assert!(format!("{unsupported}").contains("linux"));
+
+        let platform = PowerError::Platform("io failure".to_string());
+        assert!(format!("{platform}").contains("platform call failed"));
+        assert!(format!("{platform}").contains("io failure"));
+
+        let invalid = PowerError::InvalidState("bad".to_string());
+        assert!(format!("{invalid}").contains("invalid keep-awake state"));
+        assert!(format!("{invalid}").contains("bad"));
+    }
+
+    #[test]
+    fn power_error_is_debug() {
+        // Debug derive should render the variant name.
+        let dbg = format!("{:?}", PowerError::Unsupported("linux"));
+        assert!(dbg.contains("Unsupported"));
+    }
+}

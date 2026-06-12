@@ -99,4 +99,38 @@ mod tests {
         install_panic_hook();
         assert!(PANIC_HOOK_INSTALLED.load(Ordering::SeqCst));
     }
+
+    #[test]
+    fn panic_hook_closure_runs_on_str_and_string_payloads() {
+        // Ensure the hook is installed so our custom closure body executes.
+        install_panic_hook();
+
+        // &str payload branch
+        let caught = std::panic::catch_unwind(|| {
+            panic!("string-slice panic payload");
+        });
+        assert!(caught.is_err());
+
+        // String payload branch
+        let caught = std::panic::catch_unwind(|| {
+            panic!("{}", String::from("owned-string panic payload"));
+        });
+        assert!(caught.is_err());
+    }
+
+    #[tokio::test]
+    async fn spawn_with_panic_guard_handles_normal_completion() {
+        let handle = spawn_with_panic_guard("normal-task", async { 42 }).await;
+        // The guard task should complete without error.
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn spawn_with_panic_guard_catches_panicking_task() {
+        install_panic_hook();
+        let handle =
+            spawn_with_panic_guard("panicky-task", async { panic!("boom inside task") }).await;
+        // The outer guard task swallows the inner panic and completes cleanly.
+        handle.await.unwrap();
+    }
 }

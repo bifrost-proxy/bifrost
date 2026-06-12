@@ -263,4 +263,134 @@ mod tests {
         let decoded: CanonicalQueryCommand = serde_json::from_str(&encoded).expect("decode");
         assert_eq!(decoded, command);
     }
+
+    #[test]
+    fn test_search_scope_default_enables_all() {
+        // Exercises `default_true` and the manual `Default` impl.
+        let scope = SearchScope::default();
+        assert!(scope.all);
+        assert!(!scope.request_body);
+        assert!(!scope.response_body);
+        assert!(!scope.request_headers);
+        assert!(!scope.response_headers);
+        assert!(!scope.url);
+        assert!(!scope.websocket_messages);
+        assert!(!scope.sse_events);
+    }
+
+    #[test]
+    fn test_search_filters_constraints() {
+        // Empty filters have no constraints.
+        let empty = SearchFilters::default();
+        assert!(!empty.has_constraints());
+
+        // Each constraint-bearing field independently flips `has_constraints`.
+        let with_protocols = SearchFilters {
+            protocols: vec!["http".to_string()],
+            ..SearchFilters::default()
+        };
+        assert!(with_protocols.has_constraints());
+
+        let with_status = SearchFilters {
+            status_ranges: vec!["2xx".to_string()],
+            ..SearchFilters::default()
+        };
+        assert!(with_status.has_constraints());
+
+        let with_content_type = SearchFilters {
+            content_types: vec!["application/json".to_string()],
+            ..SearchFilters::default()
+        };
+        assert!(with_content_type.has_constraints());
+
+        let with_rule_hit = SearchFilters {
+            has_rule_hit: Some(true),
+            ..SearchFilters::default()
+        };
+        assert!(with_rule_hit.has_constraints());
+
+        let with_conditions = SearchFilters {
+            conditions: vec![FilterCondition {
+                field: "host".to_string(),
+                operator: "eq".to_string(),
+                value: "example.com".to_string(),
+            }],
+            ..SearchFilters::default()
+        };
+        assert!(with_conditions.has_constraints());
+
+        let with_client_ips = SearchFilters {
+            client_ips: vec!["127.0.0.1".to_string()],
+            ..SearchFilters::default()
+        };
+        assert!(with_client_ips.has_constraints());
+
+        let with_client_apps = SearchFilters {
+            client_apps: vec!["curl".to_string()],
+            ..SearchFilters::default()
+        };
+        assert!(with_client_apps.has_constraints());
+
+        let with_domains = SearchFilters {
+            domains: vec!["example.com".to_string()],
+            ..SearchFilters::default()
+        };
+        assert!(with_domains.has_constraints());
+    }
+
+    #[test]
+    fn test_command_id_for_all_variants() {
+        assert_eq!(
+            CanonicalQueryCommand::Search(SearchArgs::default()).command_id(),
+            "search.stream"
+        );
+        assert_eq!(
+            CanonicalQueryCommand::TrafficList(TrafficListArgs::default()).command_id(),
+            "traffic.list"
+        );
+        assert_eq!(
+            CanonicalQueryCommand::TrafficGet(TrafficGetArgs::default()).command_id(),
+            "traffic.get"
+        );
+        assert_eq!(
+            CanonicalQueryCommand::TrafficClear(TrafficClearArgs::default()).command_id(),
+            "traffic.clear"
+        );
+    }
+
+    #[test]
+    fn test_capability_for_all_variants() {
+        // Readonly variants.
+        assert_eq!(
+            CanonicalQueryCommand::Search(SearchArgs::default()).capability(),
+            CommandCapability::Readonly
+        );
+        assert_eq!(
+            CanonicalQueryCommand::TrafficList(TrafficListArgs::default()).capability(),
+            CommandCapability::Readonly
+        );
+
+        // TrafficGet without bodies is Readonly (the `else` branch).
+        assert_eq!(
+            CanonicalQueryCommand::TrafficGet(TrafficGetArgs::default()).capability(),
+            CommandCapability::Readonly
+        );
+
+        // TrafficGet with response body is SensitiveBody.
+        assert_eq!(
+            CanonicalQueryCommand::TrafficGet(TrafficGetArgs {
+                id: "REQ-2".to_string(),
+                request_body: false,
+                response_body: true,
+            })
+            .capability(),
+            CommandCapability::SensitiveBody
+        );
+
+        // TrafficClear is Mutating.
+        assert_eq!(
+            CanonicalQueryCommand::TrafficClear(TrafficClearArgs::default()).capability(),
+            CommandCapability::Mutating
+        );
+    }
 }

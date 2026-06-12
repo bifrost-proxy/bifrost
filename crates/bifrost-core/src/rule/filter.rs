@@ -648,4 +648,119 @@ mod tests {
             panic!("Expected Url wildcard filter");
         }
     }
+
+    #[test]
+    fn test_parse_header_match_via_h_prefix() {
+        let filter = parse_filter("h:Accept=/json/").unwrap();
+        if let Filter::HeaderMatch {
+            name,
+            pattern,
+            is_request,
+        } = filter
+        {
+            assert_eq!(name, "Accept");
+            assert!(pattern.is_match("application/json"));
+            assert!(is_request);
+        } else {
+            panic!("Expected HeaderMatch filter");
+        }
+    }
+
+    #[test]
+    fn test_parse_response_header_match() {
+        let filter = parse_filter("resH:Content-Type=/html/").unwrap();
+        if let Filter::HeaderMatch {
+            is_request, name, ..
+        } = filter
+        {
+            assert!(!is_request);
+            assert_eq!(name, "Content-Type");
+        } else {
+            panic!("Expected response HeaderMatch filter");
+        }
+    }
+
+    #[test]
+    fn test_header_match_literal_fallback_escapes() {
+        // No surrounding slashes → falls back to escaped literal match.
+        let filter = parse_filter("reqH:X-Token=abc.def").unwrap();
+        if let Filter::HeaderMatch { pattern, .. } = filter {
+            assert!(pattern.is_match("abc.def"));
+            // '.' is escaped, so it must NOT match an arbitrary char in that slot
+            assert!(!pattern.is_match("abcXdef"));
+        } else {
+            panic!("Expected HeaderMatch filter");
+        }
+    }
+
+    #[test]
+    fn test_status_code_range_invalid_returns_none() {
+        // Unparseable status → parse_filter falls through; "s:" is not a URL pattern
+        assert!(parse_filter("s:notanumber").is_none());
+    }
+
+    #[test]
+    fn test_ipv6_cidr_and_exact_matching() {
+        let filter = parse_filter("i:fe80::/10").unwrap();
+        if let Filter::ClientIp(matcher) = filter {
+            assert!(matcher.matches("fe80::1"));
+            assert!(!matcher.matches("2001:db8::1"));
+            // an invalid ip string never matches
+            assert!(!matcher.matches("not-an-ip"));
+            // mismatched family (v4 target vs v6 cidr) → false
+            assert!(!matcher.matches("127.0.0.1"));
+        } else {
+            panic!("Expected ClientIp filter");
+        }
+
+        let exact = parse_filter("i:::1").unwrap();
+        if let Filter::ClientIp(matcher) = exact {
+            assert!(matcher.matches("::1"));
+            assert!(!matcher.matches("::2"));
+        } else {
+            panic!("Expected ClientIp filter");
+        }
+    }
+
+    #[test]
+    fn test_cidr_prefix_len_zero_matches_all() {
+        let matcher = IpMatcher::Cidr {
+            addr: "0.0.0.0".parse().unwrap(),
+            prefix_len: 0,
+        };
+        assert!(matcher.matches("8.8.8.8"));
+        assert!(matcher.matches("192.168.1.1"));
+
+        let v6 = IpMatcher::Cidr {
+            addr: "::".parse().unwrap(),
+            prefix_len: 0,
+        };
+        assert!(v6.matches("2001:db8::1"));
+    }
+
+    #[test]
+    fn test_path_matcher_exact_and_contains() {
+        assert!(PathMatcher::Exact("/x".to_string()).matches("/x"));
+        assert!(!PathMatcher::Exact("/x".to_string()).matches("/xy"));
+        assert!(PathMatcher::Contains("mid".to_string()).matches("/a/mid/b"));
+        assert!(!PathMatcher::Contains("mid".to_string()).matches("/a/b"));
+    }
+
+    #[test]
+    fn test_url_matcher_contains_variant() {
+        let m = UrlMatcher::Contains("example".to_string());
+        assert!(m.matches("https://example.com/x", "example.com", "/x"));
+        assert!(!m.matches("https://other.com/x", "other.com", "/x"));
+    }
+
+    #[test]
+    fn test_parse_url_filter_empty_returns_none() {
+        assert!(parse_url_filter("   ").is_none());
+    }
+
+    #[test]
+    fn test_parse_filter_unrecognized_returns_none() {
+        // No prefix, no dot, no slash, no wildcard → None
+        assert!(parse_filter("plainword").is_none());
+    }
 }

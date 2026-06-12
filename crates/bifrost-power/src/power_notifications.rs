@@ -314,3 +314,31 @@ mod macos {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    #[test]
+    fn power_event_derives() {
+        // Copy + Eq + Debug used across the codebase.
+        let a = PowerEvent::SystemWillSleep;
+        let b = a; // Copy
+        assert_eq!(a, b);
+        assert_ne!(PowerEvent::CanSystemSleep, PowerEvent::SystemWillSleep);
+        assert_eq!(PowerEvent::Unknown(7), PowerEvent::Unknown(7));
+        assert!(format!("{a:?}").contains("SystemWillSleep"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn start_is_unsupported_off_macos() {
+        let (tx, _rx) = mpsc::channel::<PowerEvent>();
+        match PowerNotificationWatcher::start(tx) {
+            Ok(_) => panic!("expected Unsupported error off macOS, got Ok"),
+            Err(crate::PowerError::Unsupported(_)) => {}
+            Err(other) => panic!("expected Unsupported error, got {other:?}"),
+        }
+    }
+}

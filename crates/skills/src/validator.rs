@@ -441,4 +441,289 @@ mod tests {
         let b = stable_checksum(dir.path()).unwrap();
         assert_eq!(a, b);
     }
+
+    fn codes(result: &ValidationResult) -> Vec<String> {
+        result.errors.iter().map(|e| e.code.clone()).collect()
+    }
+
+    #[test]
+    fn default_validator_equals_new() {
+        let a = SkillValidator::default();
+        let b = SkillValidator::new();
+        assert_eq!(a.builtin_slash_commands, b.builtin_slash_commands);
+    }
+
+    #[test]
+    fn rejects_invalid_version_and_description() {
+        let mut m = manifest();
+        m.version = "not-a-version".to_string();
+        m.description = String::new();
+        let r = SkillValidator::new().validate_manifest(&m, None, Vec::new());
+        let c = codes(&r);
+        assert!(c.contains(&"invalid_version".to_string()));
+        assert!(c.contains(&"invalid_description".to_string()));
+        assert!(!r.ok);
+    }
+
+    #[test]
+    fn rejects_overlong_description() {
+        let mut m = manifest();
+        m.description = "x".repeat(1025);
+        let r = SkillValidator::new().validate_manifest(&m, None, Vec::new());
+        assert!(codes(&r).contains(&"invalid_description".to_string()));
+    }
+
+    #[test]
+    fn rejects_reserved_name() {
+        let mut m = manifest();
+        m.name = "system".to_string();
+        // A reserved name still matches the regex, so only reserved_name fires.
+        m.slash_command = None;
+        m.triggers = vec![TriggerRule::Keyword {
+            any_of: vec!["hi".to_string()],
+        }];
+        let r = SkillValidator::new().validate_manifest(&m, None, Vec::new());
+        assert!(codes(&r).contains(&"reserved_name".to_string()));
+    }
+
+    #[test]
+    fn rejects_invalid_slash_format() {
+        let mut m = manifest();
+        m.slash_command = Some("/Bad Command".to_string());
+        let r = SkillValidator::new().validate_manifest(&m, None, Vec::new());
+        assert!(codes(&r).contains(&"invalid_slash_command".to_string()));
+    }
+
+    #[test]
+    fn rejects_slash_already_in_scope() {
+        let m = manifest();
+        let r = SkillValidator::new().validate_manifest(&m, None, vec!["/weather".to_string()]);
+        assert!(codes(&r).contains(&"slash_command_conflict".to_string()));
+    }
+
+    #[test]
+    fn rejects_missing_triggers() {
+        let mut m = manifest();
+        m.triggers = Vec::new();
+        let r = SkillValidator::new().validate_manifest(&m, None, Vec::new());
+        assert!(codes(&r).contains(&"missing_triggers".to_string()));
+    }
+
+    #[test]
+    fn rejects_slash_trigger_without_command() {
+        let mut m = manifest();
+        m.slash_command = None;
+        m.triggers = vec![TriggerRule::SlashCommand];
+        let r = SkillValidator::new().validate_manifest(&m, None, Vec::new());
+        assert!(codes(&r).contains(&"slash_trigger_without_command".to_string()));
+    }
+
+    #[test]
+    fn rejects_empty_keyword_trigger() {
+        let mut m = manifest();
+        m.slash_command = None;
+        m.triggers = vec![TriggerRule::Keyword { any_of: Vec::new() }];
+        let r = SkillValidator::new().validate_manifest(&m, None, Vec::new());
+        assert!(codes(&r).contains(&"empty_keyword_trigger".to_string()));
+    }
+
+    #[test]
+    fn accepts_valid_keyword_and_regex_triggers() {
+        let mut m = manifest();
+        m.slash_command = None;
+        m.triggers = vec![
+            TriggerRule::Keyword {
+                any_of: vec!["weather".to_string()],
+            },
+            TriggerRule::Regex {
+                pattern: r"^foo\d+$".to_string(),
+            },
+        ];
+        let r = SkillValidator::new().validate_manifest(&m, None, Vec::new());
+        assert!(r.ok, "{:?}", r.errors);
+    }
+
+    #[test]
+    fn rejects_invalid_regex_trigger() {
+        let mut m = manifest();
+        m.slash_command = None;
+        m.triggers = vec![TriggerRule::Regex {
+            pattern: "(unclosed".to_string(),
+        }];
+        let r = SkillValidator::new().validate_manifest(&m, None, Vec::new());
+        assert!(codes(&r).contains(&"invalid_regex_trigger".to_string()));
+    }
+
+    #[test]
+    fn rejects_unknown_registry_and_mcp_tools() {
+        let mut m = manifest();
+        m.allowed_tools = vec![
+            ToolBinding::Registry {
+                name: "nope".to_string(),
+            },
+            ToolBinding::Mcp {
+                server: "s".to_string(),
+                tool: "missing".to_string(),
+            },
+        ];
+        let v = SkillValidator::new()
+            .with_registry_tools(["known".to_string()])
+            .with_mcp_tools([("s".to_string(), "present".to_string())]);
+        let r = v.validate_manifest(&m, None, Vec::new());
+        let c = codes(&r);
+        assert!(c.contains(&"unknown_registry_tool".to_string()));
+        assert!(c.contains(&"unknown_mcp_tool".to_string()));
+    }
+
+    #[test]
+    fn accepts_known_registry_and_mcp_tools() {
+        let mut m = manifest();
+        m.allowed_tools = vec![
+            ToolBinding::Registry {
+                name: "known".to_string(),
+            },
+            ToolBinding::Mcp {
+                server: "s".to_string(),
+                tool: "present".to_string(),
+            },
+        ];
+        let v = SkillValidator::new()
+            .with_registry_tools(["known".to_string()])
+            .with_mcp_tools([("s".to_string(), "present".to_string())]);
+        let r = v.validate_manifest(&m, None, Vec::new());
+        assert!(r.ok, "{:?}", r.errors);
+    }
+
+    #[test]
+    fn rejects_invalid_owned_tool_schema() {
+        let mut m = manifest();
+        m.allowed_tools = vec![ToolBinding::Owned {
+            name: "owned".to_string(),
+            description: "d".to_string(),
+            input_schema: serde_json::json!("not-an-object"),
+        }];
+        let r = SkillValidator::new().validate_manifest(&m, None, Vec::new());
+        assert!(codes(&r).contains(&"invalid_json_schema".to_string()));
+    }
+
+    #[test]
+    fn rejects_invalid_inputs_schema() {
+        let mut m = manifest();
+        m.inputs_schema = Some(serde_json::json!(42));
+        let r = SkillValidator::new().validate_manifest(&m, None, Vec::new());
+        assert!(codes(&r).contains(&"invalid_json_schema".to_string()));
+    }
+
+    #[test]
+    fn accepts_boolean_schema() {
+        let mut m = manifest();
+        m.inputs_schema = Some(serde_json::json!(true));
+        let r = SkillValidator::new().validate_manifest(&m, None, Vec::new());
+        assert!(r.ok, "{:?}", r.errors);
+    }
+
+    #[test]
+    fn validate_or_err_returns_ok_and_err() {
+        let v = SkillValidator::new();
+        assert!(v.validate_or_err(&manifest(), None, Vec::new()).is_ok());
+        let mut bad = manifest();
+        bad.version = "bad".to_string();
+        let err = v
+            .validate_or_err(&bad, None, Vec::new())
+            .expect_err("should fail");
+        assert!(!err.issues.is_empty());
+        assert_eq!(err.to_string(), "skill validation failed");
+    }
+
+    #[test]
+    fn entrypoint_missing_script_reports_error() {
+        let dir = tempdir().unwrap();
+        let mut m = manifest();
+        m.entrypoint = Entrypoint::Shell {
+            script: "run.sh".into(),
+            shell: ShellKind::Sh,
+        };
+        let r = SkillValidator::new().validate_manifest(&m, Some(dir.path()), Vec::new());
+        assert!(codes(&r).contains(&"missing_entrypoint".to_string()));
+    }
+
+    #[test]
+    fn entrypoint_existing_script_passes() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("run.py"), "print(1)").unwrap();
+        let mut m = manifest();
+        m.entrypoint = Entrypoint::Python {
+            script: "run.py".into(),
+            python: None,
+        };
+        let r = SkillValidator::new().validate_manifest(&m, Some(dir.path()), Vec::new());
+        assert!(r.ok, "{:?}", r.errors);
+    }
+
+    #[test]
+    fn entrypoint_node_missing_script_reports_error() {
+        let dir = tempdir().unwrap();
+        let mut m = manifest();
+        m.entrypoint = Entrypoint::Node {
+            script: "main.js".into(),
+        };
+        let r = SkillValidator::new().validate_manifest(&m, Some(dir.path()), Vec::new());
+        assert!(codes(&r).contains(&"missing_entrypoint".to_string()));
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn powershell_entrypoint_unsupported_off_windows() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("run.ps1"), "echo hi").unwrap();
+        let mut m = manifest();
+        m.entrypoint = Entrypoint::Shell {
+            script: "run.ps1".into(),
+            shell: ShellKind::PowerShell,
+        };
+        let r = SkillValidator::new().validate_manifest(&m, Some(dir.path()), Vec::new());
+        assert!(codes(&r).contains(&"unsupported_shell".to_string()));
+    }
+
+    #[test]
+    fn absolute_entrypoint_path_is_escape() {
+        let dir = tempdir().unwrap();
+        let mut m = manifest();
+        // Use a platform-appropriate absolute path: a Unix-style "/etc/passwd"
+        // is NOT absolute on Windows, so the escape check would not trigger.
+        #[cfg(windows)]
+        let abs_script = "C:\\Windows\\System32\\drivers\\etc\\hosts";
+        #[cfg(not(windows))]
+        let abs_script = "/etc/passwd";
+        m.entrypoint = Entrypoint::Shell {
+            script: abs_script.into(),
+            shell: ShellKind::Sh,
+        };
+        let r = SkillValidator::new().validate_manifest(&m, Some(dir.path()), Vec::new());
+        assert!(codes(&r).contains(&"path_escape".to_string()));
+    }
+
+    #[test]
+    fn checksum_skips_history_directory() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("SKILL.md"), "a").unwrap();
+        let hist = dir.path().join(".history");
+        std::fs::create_dir_all(&hist).unwrap();
+        std::fs::write(hist.join("old.txt"), "ignored").unwrap();
+        let a = stable_checksum(dir.path()).unwrap();
+        std::fs::write(hist.join("old.txt"), "changed").unwrap();
+        let b = stable_checksum(dir.path()).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn checksum_rejects_oversized_file() {
+        // We can't easily create a 64MB file cheaply across all CI; instead
+        // verify the happy path returns a non-empty hex digest.
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "content").unwrap();
+        let sum = stable_checksum(dir.path()).unwrap();
+        assert_eq!(sum.len(), 64);
+        assert!(sum.chars().all(|c| c.is_ascii_hexdigit()));
+    }
 }

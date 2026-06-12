@@ -1064,6 +1064,7 @@ mod tests {
             || error.contains("not found")
             || error.contains("cannot find the path")
             || error.contains("The system cannot find")
+            || error.contains("(os error 3)")
     }
 
     #[test]

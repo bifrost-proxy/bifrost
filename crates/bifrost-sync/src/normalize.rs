@@ -452,4 +452,103 @@ wss://app.example.test/ ws://localhost:8000/
         let actual = normalize_remote_rule(&env, std::slice::from_ref(&env));
         assert_eq!(actual, rule);
     }
+
+    #[test]
+    fn handles_line_block_markers_during_legacy_normalization() {
+        // A `line\`` block is preserved verbatim, while a legacy assignment
+        // outside it triggers normalization. The closing backtick line ends it.
+        let rule = "port=9000\nline`\n raw ${not_expanded} content\n`\nexample.com http://localhost:${port}\n";
+        let env = remote_env("with-line-block", rule);
+        let actual = normalize_remote_rule(&env, std::slice::from_ref(&env));
+        // The line-block content is preserved (not template-expanded).
+        assert!(actual.contains("line`"));
+        assert!(actual.contains("raw ${not_expanded} content"));
+        // The legacy var outside the block is expanded.
+        assert!(actual.contains("example.com http://localhost:9000"));
+    }
+
+    #[test]
+    fn unresolved_import_is_annotated() {
+        // An @import that resolves to nothing is annotated as unresolved.
+        let env = remote_env(
+            "syntax/test",
+            "@someuser/missing-rule\nexample.com host://127.0.0.1\n",
+        );
+        let actual = normalize_remote_rule(&env, std::slice::from_ref(&env));
+        assert!(actual.contains("# unresolved import @someuser/missing-rule"));
+    }
+
+    #[test]
+    fn cyclic_import_is_broken() {
+        // Two rules that import each other must not recurse infinitely.
+        let a = RemoteEnv {
+            id: "id-a".into(),
+            user_id: "u".into(),
+            name: "a".into(),
+            rule: "@u/b\nport=1 # legacy marker\n".into(),
+            create_time: "t".into(),
+            update_time: "t".into(),
+        };
+        let b = RemoteEnv {
+            id: "id-b".into(),
+            user_id: "u".into(),
+            name: "b".into(),
+            rule: "@u/a\nb.example.com ignore://*\n".into(),
+            create_time: "t".into(),
+            update_time: "t".into(),
+        };
+        // Should terminate and produce a string (cycle guard returns empty for
+        // the re-entered node). b expands to a non-empty body so a's import of
+        // b is emitted.
+        let actual = normalize_remote_rule(&a, &[a.clone(), b.clone()]);
+        assert!(actual.contains("# import @u/b"));
+        assert!(actual.contains("b.example.com passthrough://"));
+    }
+
+    #[test]
+    fn unterminated_template_is_left_intact() {
+        // A `${` with no closing `}` is passed through unchanged.
+        let mut values = HashMap::new();
+        values.insert("known".to_string(), "X".to_string());
+        let out = expand_legacy_templates("a ${known} b ${unterminated", &values);
+        assert_eq!(out, "a X b ${unterminated");
+    }
+
+    #[test]
+    fn legacy_value_assignment_parsing_edge_cases() {
+        // `=` form with a valid legacy key.
+        assert_eq!(
+            parse_legacy_value_assignment("port = 8080"),
+            Some(("port".to_string(), "8080".to_string()))
+        );
+        // `:` followed by `/` is a URL, not an assignment.
+        assert_eq!(parse_legacy_value_assignment("scheme://x"), None);
+        // `:` immediately followed by non-space is rejected.
+        assert_eq!(parse_legacy_value_assignment("key:value"), None);
+        // `:` followed by space with a legacy key is accepted.
+        assert_eq!(
+            parse_legacy_value_assignment("key: value"),
+            Some(("key".to_string(), "value".to_string()))
+        );
+        // Invalid key (contains space) is rejected.
+        assert_eq!(parse_legacy_value_assignment("bad key = v"), None);
+    }
+
+    #[test]
+    fn is_legacy_key_rejects_empty_and_overlong() {
+        assert!(!is_legacy_key(""));
+        assert!(!is_legacy_key(&"x".repeat(65)));
+        assert!(is_legacy_key("valid.key-1_2"));
+        assert!(!is_legacy_key("has space"));
+    }
+
+    #[test]
+    fn parse_legacy_import_rejects_malformed() {
+        assert_eq!(parse_legacy_import("no-at-prefix"), None);
+        assert_eq!(parse_legacy_import("@noslash"), None);
+        assert_eq!(parse_legacy_import("@u/"), None);
+        assert_eq!(parse_legacy_import("@/name"), None);
+        assert_eq!(parse_legacy_import("@u/name with space"), None);
+        assert_eq!(parse_legacy_import("@u/name"), Some("u/name".to_string()));
+    }
 }

@@ -58,7 +58,9 @@ impl EventDedup {
     }
 
     pub(super) fn evict_expired(&mut self) {
-        let cutoff = Instant::now() - self.ttl;
+        let Some(cutoff) = Instant::now().checked_sub(self.ttl) else {
+            return;
+        };
         while let Some((_, ts)) = self.window.front() {
             if *ts < cutoff {
                 self.window.pop_front();
@@ -1916,6 +1918,19 @@ async fn maybe_stop_external_cli_for_event(event: &ImEvent, active_session_key: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn event_dedup_evict_expired_handles_large_ttl() {
+        let mut dedup = EventDedup::new();
+        dedup.ttl = std::time::Duration::MAX;
+
+        dedup
+            .window
+            .push_back(("event-1".to_string(), Instant::now()));
+        dedup.evict_expired();
+
+        assert_eq!(dedup.window.len(), 1);
+    }
 
     fn external_cli_result_with_status(
         status: crate::im_gateway::external_cli::ExternalCliRunStatus,

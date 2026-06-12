@@ -259,4 +259,57 @@ mod tests {
         assert!(cache.get("example.com", &h2).is_some());
         assert!(cache.get("example.com", &http1).is_none());
     }
+
+    #[test]
+    fn test_cert_cache_default() {
+        // Exercises `impl Default for CertCache`.
+        let cache = CertCache::default();
+        assert!(cache.is_empty());
+        assert_eq!(cache.capacity(), DEFAULT_CACHE_SIZE);
+    }
+
+    #[test]
+    fn test_cert_cache_with_capacity_zero_falls_back_to_default() {
+        // capacity(0) must fall back to DEFAULT_CACHE_SIZE (NonZeroUsize guard).
+        let cache = CertCache::with_capacity(0);
+        assert_eq!(cache.capacity(), DEFAULT_CACHE_SIZE);
+    }
+
+    #[test]
+    fn test_server_config_cache_default_and_capacity() {
+        // Exercises `impl Default for ServerConfigCache`, `with_capacity`,
+        // `capacity`, `is_empty`, `len`, and `clear`.
+        let cache = ServerConfigCache::default();
+        assert_eq!(cache.capacity(), DEFAULT_CACHE_SIZE);
+        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
+
+        let alpn = vec![b"h2".to_vec()];
+        cache.insert(
+            "example.com",
+            &alpn,
+            create_test_server_config("example.com"),
+        );
+        assert!(!cache.is_empty());
+        assert_eq!(cache.len(), 1);
+
+        cache.clear();
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn test_server_config_cache_with_capacity_zero_falls_back_to_default() {
+        let cache = ServerConfigCache::with_capacity(0);
+        assert_eq!(cache.capacity(), DEFAULT_CACHE_SIZE);
+    }
+
+    #[test]
+    fn test_server_config_cache_debug_impl() {
+        // Exercises the custom `impl Debug for ServerConfigCache`.
+        let cache = ServerConfigCache::with_capacity(7);
+        let rendered = format!("{cache:?}");
+        assert!(rendered.contains("ServerConfigCache"));
+        assert!(rendered.contains("len"));
+        assert!(rendered.contains("capacity"));
+    }
 }

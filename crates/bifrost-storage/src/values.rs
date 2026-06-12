@@ -428,4 +428,124 @@ mod tests {
         assert!(storage.exists("path/to/key"));
         assert_eq!(storage.get_value("path/to/key"), Some("value".to_string()));
     }
+
+    #[test]
+    fn test_get_entry_present_and_absent() {
+        let (_temp_dir, mut storage) = setup();
+        storage.set_value("k", "v").unwrap();
+
+        let entry = storage.get_entry("k").expect("entry should exist");
+        assert_eq!(entry.name, "k");
+        assert_eq!(entry.value, "v");
+        // created_at / updated_at are rfc3339 strings containing a date separator.
+        assert!(entry.created_at.contains('T'));
+        assert!(entry.updated_at.contains('T'));
+
+        assert!(storage.get_entry("missing").is_none());
+    }
+
+    #[test]
+    fn test_base_dir_accessor() {
+        let (temp_dir, storage) = setup();
+        assert_eq!(storage.base_dir(), &temp_dir.path().to_path_buf());
+    }
+
+    #[test]
+    fn test_create_already_exists() {
+        let (_temp_dir, mut storage) = setup();
+        storage.create("dup", "v1").unwrap();
+        let result = storage.create("dup", "v2");
+        assert!(matches!(result, Err(BifrostError::AlreadyExists(_))));
+    }
+
+    #[test]
+    fn test_load_from_file_json() {
+        let (temp_dir, mut storage) = setup();
+        let file = temp_dir.path().join("import.json");
+        fs::write(&file, r#"{"a":"1","b":"2"}"#).unwrap();
+
+        let count = storage.load_from_file(&file).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(storage.get_value("a"), Some("1".to_string()));
+        assert_eq!(storage.get_value("b"), Some("2".to_string()));
+    }
+
+    #[test]
+    fn test_load_from_file_json_invalid() {
+        let (temp_dir, mut storage) = setup();
+        let file = temp_dir.path().join("bad.json");
+        fs::write(&file, "{not valid json}").unwrap();
+
+        let result = storage.load_from_file(&file);
+        assert!(matches!(result, Err(BifrostError::Parse(_))));
+    }
+
+    #[test]
+    fn test_load_from_file_kv_and_env() {
+        let (temp_dir, mut storage) = setup();
+        let file = temp_dir.path().join("import.kv");
+        fs::write(
+            &file,
+            "# a comment\n\nKEY1 = val1\nKEY2=val2\nnoequals\n=novalue\n",
+        )
+        .unwrap();
+
+        let count = storage.load_from_file(&file).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(storage.get_value("KEY1"), Some("val1".to_string()));
+        assert_eq!(storage.get_value("KEY2"), Some("val2".to_string()));
+        assert_eq!(storage.get_value("noequals"), None);
+
+        let env_file = temp_dir.path().join("import.env");
+        fs::write(&env_file, "FOO=bar\n").unwrap();
+        let env_count = storage.load_from_file(&env_file).unwrap();
+        assert_eq!(env_count, 1);
+        assert_eq!(storage.get_value("FOO"), Some("bar".to_string()));
+    }
+
+    #[test]
+    fn test_load_from_file_plain_text_fallback() {
+        let (temp_dir, mut storage) = setup();
+        let file = temp_dir.path().join("token.txt");
+        fs::write(&file, "  secret-token  \n").unwrap();
+
+        let count = storage.load_from_file(&file).unwrap();
+        assert_eq!(count, 1);
+        // Plain-text branch uses file_stem as key and trims the content.
+        assert_eq!(storage.get_value("token"), Some("secret-token".to_string()));
+    }
+
+    #[test]
+    fn test_value_store_trait_impl() {
+        let (_temp_dir, mut storage) = setup();
+
+        // set + get + contains + len
+        ValueStore::set(&mut storage, "k1", "v1".to_string());
+        ValueStore::set(&mut storage, "k2", "v2".to_string());
+        assert_eq!(ValueStore::get(&storage, "k1"), Some("v1".to_string()));
+        assert!(ValueStore::contains(&storage, "k2"));
+        assert!(!ValueStore::contains(&storage, "absent"));
+        assert_eq!(ValueStore::len(&storage), 2);
+
+        // list + as_hashmap
+        let mut listed = ValueStore::list(&storage);
+        listed.sort();
+        assert_eq!(
+            listed,
+            vec![
+                ("k1".to_string(), "v1".to_string()),
+                ("k2".to_string(), "v2".to_string())
+            ]
+        );
+        let map = ValueStore::as_hashmap(&storage);
+        assert_eq!(map.get("k1"), Some(&"v1".to_string()));
+
+        // remove returns previous value, then None
+        assert_eq!(
+            ValueStore::remove(&mut storage, "k1"),
+            Some("v1".to_string())
+        );
+        assert_eq!(ValueStore::remove(&mut storage, "k1"), None);
+        assert_eq!(ValueStore::len(&storage), 1);
+    }
 }

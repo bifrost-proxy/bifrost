@@ -33,4 +33,20 @@ mod tests {
 
         assert!(error.to_string().contains("file too large"));
     }
+
+    #[test]
+    fn ensure_file_size_within_limit_accepts_small_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rule.bifrost");
+        std::fs::write(&path, b"abcd").unwrap();
+        assert!(ensure_file_size_within_limit(&path, 1024).is_ok());
+    }
+
+    #[test]
+    fn ensure_file_size_within_limit_ok_when_path_missing() {
+        // metadata() fails -> the function treats it as within limit (Ok).
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist.bifrost");
+        assert!(ensure_file_size_within_limit(&missing, 1).is_ok());
+    }
 }

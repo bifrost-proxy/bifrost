@@ -199,4 +199,48 @@ mod tests {
         );
         assert!(result.is_err());
     }
+
+    #[test]
+    fn truncate_bytes_floors_to_boundary() {
+        assert_eq!(truncate_bytes("abcdef", 3), "abc");
+        // multibyte: cut inside '前' floors back to "ab"
+        assert_eq!(truncate_bytes("ab前cd", 3), "ab");
+        // budget >= len returns whole string
+        assert_eq!(truncate_bytes("abc", 100), "abc");
+    }
+
+    #[test]
+    fn truncate_bytes_with_suffix_returns_original_when_short() {
+        assert_eq!(truncate_bytes_with_suffix("abc", 10, "..."), "abc");
+    }
+
+    #[test]
+    fn truncate_chars_takes_n_scalars() {
+        assert_eq!(truncate_chars("ab前🙂cd", 3), "ab前");
+        assert_eq!(truncate_chars("abc", 10), "abc");
+    }
+
+    #[test]
+    fn truncate_chars_with_ellipsis_appends_dots() {
+        assert_eq!(truncate_chars_with_ellipsis("abcdef", 3), "abc...");
+        // short input unchanged
+        assert_eq!(truncate_chars_with_ellipsis("ab", 5), "ab");
+    }
+
+    #[test]
+    fn truncate_middle_bytes_zero_budget_empty_string() {
+        // empty string with zero budget returns empty (no "chars truncated")
+        assert_eq!(truncate_middle_bytes("", 0), "");
+    }
+
+    #[test]
+    fn check_file_size_ok_and_oversized() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, b"abcd").unwrap();
+        assert_eq!(check_file_size(&path, 1024).unwrap(), 4);
+
+        let err = check_file_size(&path, 2).unwrap_err();
+        assert!(err.contains("too large"));
+    }
 }

@@ -3558,4 +3558,141 @@ x-custom: value
         let parts3 = split_rule_parts("/foo/ host://127.0.0.1:3000");
         assert_eq!(parts3[0], "/foo/");
     }
+
+    // ---- Direct unit tests for protocol-value validators ----
+
+    #[test]
+    fn test_validate_status_code_branches() {
+        // valid 100..600 → None
+        assert!(validate_status_code("200", 1, 1, 4).is_none());
+        // out of range high → Error E010
+        let e = validate_status_code("700", 1, 1, 4).unwrap();
+        assert_eq!(e.severity, ParseErrorSeverity::Error);
+        assert_eq!(e.code.as_deref(), Some("E010"));
+        assert!(e.message.contains("Invalid HTTP status code"));
+        assert_eq!(e.fixes.len(), 3);
+        // non-numeric → Error E010, different message
+        let e = validate_status_code("abc", 1, 1, 4).unwrap();
+        assert!(e.message.contains("Expected a number"));
+        assert_eq!(e.fixes.len(), 2);
+    }
+
+    #[test]
+    fn test_validate_cache_value_branches() {
+        // keyword → None
+        assert!(validate_cache_value("no", 1, 1, 3).is_none());
+        assert!(validate_cache_value("NO-CACHE", 1, 1, 8).is_none());
+        // positive number → None
+        assert!(validate_cache_value("3600", 1, 1, 5).is_none());
+        // zero → Warning E011
+        let w = validate_cache_value("0", 1, 1, 2).unwrap();
+        assert_eq!(w.severity, ParseErrorSeverity::Warning);
+        assert_eq!(w.code.as_deref(), Some("E011"));
+        // invalid → Error E011
+        let e = validate_cache_value("soon", 1, 1, 5).unwrap();
+        assert_eq!(e.severity, ParseErrorSeverity::Error);
+        assert!(e.message.contains("Invalid cache value"));
+    }
+
+    #[test]
+    fn test_validate_delay_value_branches() {
+        assert!(validate_delay_value("1000", 1, 1, 5).is_none());
+        let e = validate_delay_value("-5", 1, 1, 3).unwrap();
+        assert_eq!(e.code.as_deref(), Some("E012"));
+        assert!(e.message.contains("cannot be negative"));
+        let e = validate_delay_value("fast", 1, 1, 5).unwrap();
+        assert!(e.message.contains("Invalid delay value"));
+    }
+
+    #[test]
+    fn test_validate_speed_value_branches() {
+        assert!(validate_speed_value("1024", 1, 1, 5).is_none());
+        let e = validate_speed_value("0", 1, 1, 2).unwrap();
+        assert_eq!(e.code.as_deref(), Some("E013"));
+        assert!(e.message.contains("cannot be 0"));
+        let e = validate_speed_value("turbo", 1, 1, 6).unwrap();
+        assert!(e.message.contains("Invalid speed value"));
+    }
+
+    #[test]
+    fn test_validate_http_method_branches() {
+        assert!(validate_http_method("get", 1, 1, 4).is_none());
+        assert!(validate_http_method("POST", 1, 1, 5).is_none());
+        let w = validate_http_method("FETCH", 1, 1, 6).unwrap();
+        assert_eq!(w.severity, ParseErrorSeverity::Warning);
+        assert_eq!(w.code.as_deref(), Some("E015"));
+        assert!(w.message.contains("Unknown HTTP method"));
+    }
+
+    #[test]
+    fn test_validate_ip_address_branches() {
+        assert!(validate_ip_address("192.168.1.1", 1, 1, 12).is_none());
+        assert!(validate_ip_address("::1", 1, 1, 4).is_none());
+        let e = validate_ip_address("not-an-ip", 1, 1, 10).unwrap();
+        assert_eq!(e.code.as_deref(), Some("E016"));
+        assert!(e.message.contains("Invalid IP address"));
+    }
+
+    #[test]
+    fn test_validate_host_port_branches() {
+        // no colon → None
+        assert!(validate_host_port("example.com", 1, 1, 12).is_none());
+        // valid port → None
+        assert!(validate_host_port("example.com:8080", 1, 1, 17).is_none());
+        // empty port after colon → None (no parse)
+        assert!(validate_host_port("example.com:", 1, 1, 13).is_none());
+        // non-numeric port → None (parse fails, falls through)
+        assert!(validate_host_port("example.com:abc", 1, 1, 16).is_none());
+        // out of range → Error E017
+        let e = validate_host_port("example.com:99999", 1, 1, 18).unwrap();
+        assert_eq!(e.code.as_deref(), Some("E017"));
+        assert!(e.message.contains("out of range"));
+    }
+
+    #[test]
+    fn test_validate_single_protocol_value_dispatch() {
+        // template placeholder value → None
+        assert!(validate_single_protocol_value("statusCode", "{var}", 1, 0, 5).is_none());
+        // wrapped in parens/backticks then valid → None
+        assert!(validate_single_protocol_value("statusCode", "(200)", 1, 0, 5).is_none());
+        // statusCode dispatch (replaceStatus alias)
+        assert!(validate_single_protocol_value("replaceStatus", "999", 1, 0, 3).is_some());
+        // cache / reqDelay / resSpeed / method / dns / host / xHost dispatch
+        assert!(validate_single_protocol_value("cache", "bad", 1, 0, 3).is_some());
+        assert!(validate_single_protocol_value("reqDelay", "-1", 1, 0, 2).is_some());
+        assert!(validate_single_protocol_value("resSpeed", "0", 1, 0, 1).is_some());
+        assert!(validate_single_protocol_value("method", "WAT", 1, 0, 3).is_some());
+        assert!(validate_single_protocol_value("dns", "bad", 1, 0, 3).is_some());
+        assert!(validate_single_protocol_value("xHost", "h:99999", 1, 0, 7).is_some());
+        // unknown protocol → None
+        assert!(validate_single_protocol_value("custom", "anything", 1, 0, 8).is_none());
+    }
+
+    #[test]
+    fn test_validate_protocol_values_integration_collects_errors() {
+        let content = "example.com statusCode://700 method://FETCH";
+        let result = validate_rules_with_context(content, &HashMap::new());
+        // status code error is an Error; method is a Warning
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.code.as_deref() == Some("E010")));
+        assert!(result
+            .warnings
+            .iter()
+            .any(|w| w.code.as_deref() == Some("E015")));
+    }
+
+    #[test]
+    fn test_validate_protocol_values_dedupes_same_span() {
+        // Same value at same span should not be pushed twice.
+        let content = "example.com cache://0";
+        let result = validate_rules_with_context(content, &HashMap::new());
+        let e011: Vec<_> = result
+            .warnings
+            .iter()
+            .filter(|w| w.code.as_deref() == Some("E011"))
+            .collect();
+        assert_eq!(e011.len(), 1);
+    }
 }

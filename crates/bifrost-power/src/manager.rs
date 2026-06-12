@@ -290,6 +290,63 @@ mod tests {
         (mgr, p)
     }
 
+    /// Persister that always fails — used to exercise the best-effort error
+    /// branch in `persist_best_effort` (in-memory state must still update).
+    struct FailingPersister;
+    impl ModePersister for FailingPersister {
+        fn persist(&self, _mode: Mode) -> std::result::Result<(), String> {
+            Err("simulated persist failure".to_string())
+        }
+    }
+
+    #[test]
+    fn noop_persister_persist_is_ok() {
+        // Exercises `impl ModePersister for NoopPersister`.
+        assert!(NoopPersister.persist(Mode::Auto).is_ok());
+        assert!(NoopPersister.persist(Mode::Off).is_ok());
+    }
+
+    #[test]
+    fn platform_accessor_matches_current() {
+        // Exercises the `platform()` accessor.
+        let (m, _) = make_mgr(Mode::Off);
+        assert_eq!(m.platform(), PlatformSupport::current());
+    }
+
+    #[test]
+    fn set_mode_updates_state_even_when_persist_fails() {
+        // Persist failure must be swallowed (best-effort): the in-memory mode
+        // still changes and set_mode returns Ok.
+        let mgr = KeepAwakeManager::new(Mode::Off, Arc::new(FailingPersister));
+        let old = mgr.set_mode(Mode::Auto).expect("set_mode should succeed");
+        assert_eq!(old, Mode::Off);
+        assert_eq!(mgr.mode(), Mode::Auto);
+
+        // Idempotent same-mode set also goes through persist_best_effort.
+        let again = mgr.set_mode(Mode::Auto).expect("idempotent set_mode ok");
+        assert_eq!(again, Mode::Auto);
+    }
+
+    #[test]
+    fn status_reports_inactive_fields_when_idle() {
+        // active_since_secs is None and battery_warning is None while idle.
+        let (m, _) = make_mgr(Mode::Off);
+        let s = m.status();
+        assert!(s.active_since_secs.is_none());
+        assert!(s.battery_warning.is_none());
+        assert!(!s.active);
+    }
+
+    #[test]
+    fn set_mode_off_to_auto_keeps_inactive() {
+        // The (Off, Auto) transition arm: no assertion side effect.
+        let (m, _) = make_mgr(Mode::Off);
+        let old = m.set_mode(Mode::Auto).unwrap();
+        assert_eq!(old, Mode::Off);
+        assert_eq!(m.mode(), Mode::Auto);
+        assert!(!m.is_active());
+    }
+
     #[test]
     fn default_mode_off_is_inactive() {
         let (m, _) = make_mgr(Mode::Off);

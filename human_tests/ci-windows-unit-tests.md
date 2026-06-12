@@ -253,6 +253,21 @@ source ~/.zshrc && cargo test -p skills registry::tests::watcher_reloads_one_slu
 - watcher 能在 skill 文件修改后只刷新目标 slug。
 - watcher 能在 skill 目录删除后移除目标 slug；Windows runner 不会因为删除事件路径无法 canonicalize 或 raw/canonical root 前缀不一致导致等待超时。
 
+### TC-CWUT-16 Windows VM 主干同步后 workspace all-features 全量回归
+
+操作步骤：
+
+```bash
+source ~/.zshrc
+prlctl exec "Windows 11" cmd /c "cd /d C:\Users\eden\github\bifrost && call \"C:\Program Files\Microsoft Visual Studio\18\Insiders\VC\Auxiliary\Build\vcvarsarm64.bat\" >nul && set \"PATH=C:\Users\eden\.cargo\bin;C:\Program Files\Microsoft Visual Studio\18\Insiders\VC\Tools\Llvm\ARM64\bin;%PATH%\" && set \"LIBCLANG_PATH=C:\Program Files\Microsoft Visual Studio\18\Insiders\VC\Tools\Llvm\ARM64\bin\" && set \"CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_LINKER=lld-link\" && set \"SKIP_FRONTEND_BUILD=1\" && cargo +stable test --workspace --all-features -j1"
+```
+
+预期结果：
+- Windows VM 中的当前任务分支必须先同步最新 `origin/main`，再在 `C:\Users\eden\github\bifrost` 运行完整 workspace all-features 测试。
+- IM Gateway external CLI 停止逻辑在 Windows 本地化 `taskkill` 输出、进程已消失和部分成功场景下都必须幂等收敛为 stopped。
+- `p1_tools_e2e::exec_command_tool_works_end_to_end` 必须兼容 Windows 上 exec 初始响应先返回 running/null exit code 的时序，并通过后续 `write_stdin` poll 累积最终输出。
+- `bifrost-admin`、`bifrost-agent`、`bifrost-asr`、`bifrost-cli`、`bifrost-core`、`bifrost-proxy`、`skills` 以及 workspace integration tests/doc-tests 全部通过。
+
 ## 清理步骤
 
 本测试只运行单元测试和静态扫描；cargo 产物由常规构建缓存管理，无额外临时服务需要停止。
@@ -281,3 +296,4 @@ source ~/.zshrc && cargo test -p skills registry::tests::watcher_reloads_one_slu
 | 2026-06-11 | TC-CWUT-13 | 跟进 GitHub Actions run `27367354517` 的 `Windows Unit Tests (x86_64)`，定位 `bifrost-cli --test cli_help` 中 8 个 help 文案断言仍通过真实 `bifrost.exe --help` 子进程取 stdout/stderr；本地执行完整 `cli_help` 测试。 | 通过，root/port/start/search/traffic help 文案测试改为 clap 内存渲染，避免 Windows 子进程 stdout/stderr 和栈行为差异 |
 | 2026-06-11 | TC-CWUT-14 | 跟进 GitHub Actions run `27368683603` 的 `Windows Unit Tests (x86_64)`，定位 `system_proxy_launchd::tests::parse_installed_plist_detects_program_data_dir_and_version` 把归一化后的 Windows 当前盘符路径与 Unix 字面 `/tmp/...` 比较。 | 通过，plist parse 断言改为与 `SystemProxyLaunchdConfig` 归一化后的 program/data-dir 比较 |
 | 2026-06-11 | TC-CWUT-15 | 跟进 GitHub Actions run `27369929153` 的 `Windows Unit Tests (x86_64)`，定位 `skills::registry::tests::watcher_reloads_one_slug_and_removes_deleted_slug` 删除目录后 watcher 事件路径与 canonical root 形态不一致，导致提不出 slug 并等待超时。 | 通过，watcher roots 和事件路径都使用 raw/canonical 双候选提取 slug |
+| 2026-06-12 | TC-CWUT-16 | 在 Parallels `Windows 11` VM 的 `C:\Users\eden\github\bifrost` 同步最新 `origin/main` 后，执行 `cargo +stable test --workspace --all-features -j1`。首轮暴露 `im_gateway::external_cli` Windows 本地化 `taskkill`/missing PID 幂等问题，修复后目标过滤 `35 passed`；次轮暴露 `p1_tools_e2e::exec_command_tool_works_end_to_end` 初始 running/null exit code 时序问题，修复后 `8 passed; 1 ignored`。最终再次执行完整 workspace all-features。 | 通过，完整 workspace all-features、integration tests 与 doc-tests 全部通过 |

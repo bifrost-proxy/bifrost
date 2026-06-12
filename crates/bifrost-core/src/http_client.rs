@@ -49,8 +49,8 @@ pub fn direct_ureq_agent() -> ureq::Agent {
 #[cfg(test)]
 mod tests {
     use super::{
-        direct_blocking_reqwest_client_builder, direct_reqwest_client_builder,
-        direct_ureq_agent_builder,
+        direct_blocking_reqwest_client_builder, direct_reqwest_client_builder, direct_ureq_agent,
+        direct_ureq_agent_builder, load_reqwest_certificate, proxied_reqwest_client_builder,
     };
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -157,5 +157,53 @@ mod tests {
                 .unwrap();
             assert_eq!(response, "ok");
         });
+    }
+
+    #[test]
+    fn direct_ureq_agent_builds() {
+        // Just ensure construction succeeds and returns a usable agent.
+        let _agent = direct_ureq_agent();
+    }
+
+    #[test]
+    fn load_certificate_errors_on_missing_file() {
+        let err =
+            load_reqwest_certificate(std::path::Path::new("/nonexistent/ca.pem")).unwrap_err();
+        assert!(err.contains("read CA certificate"));
+    }
+
+    #[test]
+    fn load_certificate_ok_branch_with_empty_bundle() {
+        // reqwest accepts a PEM file with no certificate blocks, exercising the
+        // Ok arm of load_reqwest_certificate without needing a real cert.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.pem");
+        std::fs::write(&path, b"# no certificates here\n").unwrap();
+        assert!(load_reqwest_certificate(&path).is_ok());
+    }
+
+    #[test]
+    fn proxied_builder_rejects_invalid_proxy_url() {
+        let err = proxied_reqwest_client_builder("not a url", None).unwrap_err();
+        assert!(err.contains("invalid proxy URL"));
+    }
+
+    #[test]
+    fn proxied_builder_ok_without_ca() {
+        let builder = proxied_reqwest_client_builder("http://127.0.0.1:8080", None);
+        assert!(builder.is_ok());
+        // builds into a client
+        assert!(builder.unwrap().build().is_ok());
+    }
+
+    #[test]
+    fn proxied_builder_with_ca_path_succeeds() {
+        // Provide a CA path so the Some(path) branch runs; the loaded (empty)
+        // bundle is accepted and the client still builds.
+        let dir = tempfile::tempdir().unwrap();
+        let ca = dir.path().join("ca.pem");
+        std::fs::write(&ca, b"# empty bundle\n").unwrap();
+        let builder = proxied_reqwest_client_builder("http://127.0.0.1:8080", Some(&ca)).unwrap();
+        assert!(builder.build().is_ok());
     }
 }

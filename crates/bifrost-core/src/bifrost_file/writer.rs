@@ -290,4 +290,100 @@ mod tests {
         assert_eq!(escape_toml_string("hello\"world"), "hello\\\"world");
         assert_eq!(escape_toml_string("hello\nworld"), "hello\\nworld");
     }
+
+    #[test]
+    fn test_escape_toml_string_all_specials() {
+        assert_eq!(escape_toml_string("a\\b"), "a\\\\b");
+        assert_eq!(escape_toml_string("a\rb"), "a\\rb");
+        assert_eq!(escape_toml_string("a\tb"), "a\\tb");
+    }
+
+    #[test]
+    fn test_sync_status_to_str_all_variants() {
+        assert_eq!(sync_status_to_str(RuleSyncStatus::LocalOnly), "local_only");
+        assert_eq!(sync_status_to_str(RuleSyncStatus::Synced), "synced");
+        assert_eq!(sync_status_to_str(RuleSyncStatus::Modified), "modified");
+    }
+
+    #[test]
+    fn test_write_rules_with_all_optional_fields() {
+        let mut meta = RuleFileMeta::new("full".to_string());
+        meta.description = Some("a desc".to_string());
+        meta.group = Some("grp".to_string());
+        meta.sync.status = RuleSyncStatus::Synced;
+        meta.sync.rule_id = "rid-1".to_string();
+        meta.sync.last_synced_at = Some("2026-01-01T00:00:00Z".to_string());
+        meta.sync.last_synced_content_hash = Some("hash123".to_string());
+        meta.sync.remote_id = Some("remote-1".to_string());
+        meta.sync.remote_user_id = Some("user-1".to_string());
+        meta.sync.remote_created_at = Some("2026-01-02T00:00:00Z".to_string());
+        meta.sync.remote_updated_at = Some("2026-01-03T00:00:00Z".to_string());
+
+        // include a comment line and a blank line to exercise rule_count filtering
+        let content = "# comment\n\nexample.com proxy://localhost:3000\nfoo.com block";
+        let output = BifrostFileWriter::write_rules(&meta, content);
+
+        assert!(output.contains("description = \"a desc\""));
+        assert!(output.contains("group = \"grp\""));
+        assert!(output.contains("status = \"synced\""));
+        assert!(output.contains("rule_id = \"rid-1\""));
+        assert!(output.contains("last_synced_at = \"2026-01-01T00:00:00Z\""));
+        assert!(output.contains("last_synced_content_hash = \"hash123\""));
+        assert!(output.contains("remote_id = \"remote-1\""));
+        assert!(output.contains("remote_user_id = \"user-1\""));
+        assert!(output.contains("remote_created_at = \"2026-01-02T00:00:00Z\""));
+        assert!(output.contains("remote_updated_at = \"2026-01-03T00:00:00Z\""));
+        // 2 non-comment non-empty lines
+        assert!(output.contains("rule_count = 2"));
+    }
+
+    #[test]
+    fn test_write_script() {
+        let scripts = vec![ScriptItem {
+            name: "s1".to_string(),
+            script_type: "request".to_string(),
+            description: Some("d".to_string()),
+            content: "console.log(1)".to_string(),
+        }];
+        let output = BifrostFileWriter::write_script("scr", Some("a script"), &scripts).unwrap();
+        assert!(output.starts_with("01 script"));
+        assert!(output.contains("name = \"scr\""));
+        assert!(output.contains("description = \"a script\""));
+        assert!(output.contains("count = 1"));
+        assert!(output.contains("\"name\": \"s1\""));
+    }
+
+    #[test]
+    fn test_write_template() {
+        let template = TemplateContent {
+            groups: vec![ReplayGroupExport {
+                id: "g1".to_string(),
+                name: "group".to_string(),
+                parent_id: None,
+                sort_order: 0,
+                created_at: 1,
+                updated_at: 2,
+            }],
+            requests: vec![ReplayRequestExport {
+                id: "r1".to_string(),
+                group_id: Some("g1".to_string()),
+                name: Some("req".to_string()),
+                request_type: "http".to_string(),
+                method: "GET".to_string(),
+                url: "https://example.com".to_string(),
+                headers: vec![],
+                body: None,
+                is_saved: true,
+                sort_order: 0,
+                created_at: 1,
+                updated_at: 2,
+            }],
+        };
+        let output =
+            BifrostFileWriter::write_template("tpl", Some("a template"), &template).unwrap();
+        assert!(output.starts_with("01 template"));
+        assert!(output.contains("request_count = 1"));
+        assert!(output.contains("group_count = 1"));
+        assert!(output.contains("description = \"a template\""));
+    }
 }

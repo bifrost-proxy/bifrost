@@ -234,4 +234,162 @@ mod tests {
             .expect_err("unvalidated session must fail");
         assert!(matches!(error, AuthoringError::InvalidState { .. }));
     }
+
+    fn store_for(dir: &std::path::Path) -> Arc<SkillStore> {
+        Arc::new(SkillStore::new(vec![ScopeRoot::new(SkillScope::Repo, dir)]))
+    }
+
+    fn inline_record(dir: &std::path::Path) -> (SkillRecord, SkillManifest) {
+        let manifest = SkillManifest::minimal_inline("weather", "weather", SkillScope::Repo);
+        let record = SkillRecord {
+            name: manifest.name.clone(),
+            version: manifest.version.clone(),
+            description: manifest.description.clone(),
+            scope: SkillScope::Repo,
+            effective_scope: SkillScope::Repo,
+            shadow_scopes: Vec::new(),
+            enabled: true,
+            path: dir.to_path_buf(),
+            skill_md_path: dir.join("SKILL.md"),
+            checksum: String::new(),
+            manifest: manifest.clone(),
+        };
+        (record, manifest)
+    }
+
+    #[test]
+    fn session_id_is_stable_across_transitions() {
+        let dir = tempdir().unwrap();
+        let mut session = SkillAuthoringSession::start(store_for(dir.path()), "brief");
+        let id = session.session_id().to_string();
+        session.interview(serde_json::json!({}));
+        assert_eq!(session.session_id(), id);
+        session.draft(dir.path().to_path_buf(), "md".into());
+        assert_eq!(session.session_id(), id);
+        session.cancel();
+        assert_eq!(session.session_id(), id);
+    }
+
+    #[test]
+    fn validate_moves_to_validated_and_rejects_invalid() {
+        let dir = tempdir().unwrap();
+        let mut session = SkillAuthoringSession::start(store_for(dir.path()), "brief");
+        let (_rec, manifest) = inline_record(dir.path());
+        session
+            .validate(manifest, dir.path().to_path_buf())
+            .expect("valid manifest");
+        assert!(matches!(session.state, AuthoringState::Validated { .. }));
+
+        // An invalid manifest (bad name) is rejected with a formatted error.
+        let mut bad = SkillManifest::minimal_inline("weather", "weather", SkillScope::Repo);
+        bad.name = "Bad Name".to_string();
+        let err = session
+            .validate(bad, dir.path().to_path_buf())
+            .expect_err("invalid manifest must fail");
+        assert!(err.contains("invalid_name"));
+    }
+
+    #[tokio::test]
+    async fn full_happy_path_draft_validate_test_commit() {
+        let dir = tempdir().unwrap();
+        let store = store_for(dir.path());
+        let mut session = SkillAuthoringSession::start(Arc::clone(&store), "brief");
+        let (record, manifest) = inline_record(dir.path());
+
+        session.draft(
+            dir.path().to_path_buf(),
+            "---\nname: weather\n---\n# W".into(),
+        );
+        assert!(matches!(session.state, AuthoringState::Drafted { .. }));
+
+        session
+            .validate(manifest.clone(), dir.path().to_path_buf())
+            .unwrap();
+
+        // test() on an inline skill executes and transitions to Tested.
+        session
+            .test(&record, serde_json::json!({"city": "Paris"}))
+            .await
+            .expect("inline test should succeed");
+        match &session.state {
+            AuthoringState::Tested { test_report, .. } => {
+                assert_eq!(test_report.exit_code, Some(0));
+            }
+            other => panic!("expected Tested, got {:?}", other.kind()),
+        }
+
+        // A second test() from Tested state is allowed (idempotent transition).
+        session
+            .test(&record, serde_json::json!({}))
+            .await
+            .expect("re-test from tested ok");
+
+        // commit() persists and transitions to Committed.
+        let committed = session
+            .commit(SkillDraft {
+                manifest,
+                skill_md: "---\nname: weather\n---\n# W".into(),
+                draft_dir: None,
+                assets: Vec::new(),
+            })
+            .expect("commit should succeed");
+        assert_eq!(committed.name, "weather");
+        assert!(matches!(session.state, AuthoringState::Committed { .. }));
+    }
+
+    #[test]
+    fn commit_surfaces_store_errors() {
+        // A store with no matching root makes commit() fail.
+        let dir = tempdir().unwrap();
+        let store = Arc::new(SkillStore::new(vec![ScopeRoot::new(
+            SkillScope::User,
+            dir.path(),
+        )]));
+        let mut session = SkillAuthoringSession::start(store, "brief");
+        let manifest = SkillManifest::minimal_inline("weather", "weather", SkillScope::Repo);
+        let err = session
+            .commit(SkillDraft {
+                manifest,
+                skill_md: "---\nname: weather\n---\n# W".into(),
+                draft_dir: None,
+                assets: Vec::new(),
+            })
+            .expect_err("missing root should fail commit");
+        assert!(err.contains("commit skill"));
+    }
+
+    #[test]
+    fn authoring_error_display_messages() {
+        let e = AuthoringError::InvalidState {
+            expected: "validated".into(),
+            actual: "started".into(),
+        };
+        assert!(e.to_string().contains("expected validated"));
+        let e2 = AuthoringError::Execute("boom".into());
+        assert!(e2.to_string().contains("boom"));
+    }
+
+    #[test]
+    fn state_kind_covers_all_variants() {
+        let sid = "s".to_string();
+        assert_eq!(
+            AuthoringState::Started {
+                session_id: sid.clone()
+            }
+            .kind(),
+            "started"
+        );
+        assert_eq!(
+            AuthoringState::CapturedIntent {
+                session_id: sid.clone(),
+                brief: "b".into()
+            }
+            .kind(),
+            "captured_intent"
+        );
+        assert_eq!(
+            AuthoringState::Cancelled { session_id: sid }.kind(),
+            "cancelled"
+        );
+    }
 }

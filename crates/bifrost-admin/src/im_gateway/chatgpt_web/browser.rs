@@ -1001,6 +1001,10 @@ fn kill_process(pid: u32) {
             .stderr(Stdio::null())
             .status();
     }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+    }
 }
 
 /// Kill all browser processes managed by this service.

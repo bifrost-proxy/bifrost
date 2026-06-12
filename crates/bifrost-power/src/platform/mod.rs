@@ -73,3 +73,47 @@ pub(crate) fn check_supported() -> Result<()> {
         PlatformSupport::Unsupported(label) => Err(PowerError::Unsupported(label)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn label_matches_support_flag() {
+        let p = PlatformSupport::current();
+        // is_supported() is true iff we are on macOS.
+        assert_eq!(p.is_supported(), matches!(p, PlatformSupport::MacOs));
+        // label() is always non-empty and stable.
+        assert!(!p.label().is_empty());
+    }
+
+    #[test]
+    fn unsupported_variant_round_trips_label() {
+        let p = PlatformSupport::Unsupported("linux");
+        assert_eq!(p.label(), "linux");
+        assert!(!p.is_supported());
+
+        let mac = PlatformSupport::MacOs;
+        assert_eq!(mac.label(), "macos");
+        assert!(mac.is_supported());
+    }
+
+    #[test]
+    fn check_supported_matches_current_platform() {
+        let result = check_supported();
+        if PlatformSupport::current().is_supported() {
+            assert!(result.is_ok());
+        } else {
+            assert!(matches!(result, Err(PowerError::Unsupported(_))));
+        }
+    }
+
+    #[test]
+    fn is_on_battery_is_callable() {
+        // On the stub platform this is always false; on macOS it reflects the
+        // real state. Either way the call must not panic.
+        let _ = is_on_battery();
+        #[cfg(not(target_os = "macos"))]
+        assert!(!is_on_battery());
+    }
+}

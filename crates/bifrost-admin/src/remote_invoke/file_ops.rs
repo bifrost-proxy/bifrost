@@ -288,12 +288,12 @@ fn normalize_symlink_target(p: std::path::PathBuf) -> String {
     {
         let s = p.to_string_lossy().to_string();
         if let Some(rest) = s.strip_prefix("\\\\?\\UNC\\") {
-            return format!("\\\\{}", rest);
+            format!("\\\\{}", rest)
+        } else if let Some(rest) = s.strip_prefix("\\\\?\\") {
+            rest.to_string()
+        } else {
+            s
         }
-        if let Some(rest) = s.strip_prefix("\\\\?\\") {
-            return rest.to_string();
-        }
-        return s;
     }
     #[cfg(not(windows))]
     {

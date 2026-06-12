@@ -109,6 +109,48 @@ jobs:
       - name: Unit and integration tests
         run: cargo test --workspace --all-features
 
+  coverage:
+    name: Coverage (Unit + Integration) & 90% Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: web
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: always()
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Collect unit + integration coverage and enforce gate
+        # Per-crate floors + workspace floor live in
+        # scripts/ci/coverage-thresholds.toml. The gate fails the job if any
+        # crate drops below its ratcheted floor (goal: 90%).
+        run: bash scripts/ci/coverage-all.sh --json --lcov --gate --gaps
+      - name: Coverage summary (job summary)
+        if: always()
+        run: |
+          python3 scripts/ci/coverage-gate.py target/coverage/coverage.json \
+            --markdown --no-gate >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Upload coverage reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report-linux
+          path: |
+            target/coverage/coverage.json
+            target/coverage/lcov.info
+          retention-days: 7
+
   build-e2e:
     name: Build E2E Binary
     runs-on: ubuntu-latest

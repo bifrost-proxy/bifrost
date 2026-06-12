@@ -1825,4 +1825,899 @@ mod tests {
         let (_, logs) = result.unwrap();
         assert!(logs.iter().any(|l| l.message.contains("ok")));
     }
+
+    // ---------------------------------------------------------------------
+    // Shared helpers for the expanded sandbox coverage tests below.
+    // ---------------------------------------------------------------------
+    fn req(method: &str) -> RequestData {
+        RequestData {
+            url: "https://example.com/api".to_string(),
+            method: method.to_string(),
+            host: "example.com".to_string(),
+            path: "/api".to_string(),
+            protocol: "https".to_string(),
+            client_ip: "127.0.0.1".to_string(),
+            client_app: Some("test".to_string()),
+            headers: HashMap::new(),
+            body: None,
+        }
+    }
+
+    fn resp(status: u16) -> ResponseData {
+        ResponseData {
+            status,
+            status_text: "OK".to_string(),
+            headers: HashMap::new(),
+            body: Some("original".to_string()),
+            request: req("GET"),
+        }
+    }
+
+    fn ctx(ty: ScriptType) -> ScriptContext {
+        ScriptContext {
+            request_id: "rid".to_string(),
+            script_name: "s".to_string(),
+            script_type: ty,
+            values: HashMap::new(),
+            matched_rules: vec![],
+        }
+    }
+
+    // ----- request script mutations -----
+    #[test]
+    fn test_request_script_mutates_method_body_headers() {
+        let mut sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let r = req("GET");
+        let script = r#"
+            request.method = "POST";
+            request.body = "hello";
+            request.headers["X-Test"] = "1";
+        "#;
+        let (mods, _logs) = sb
+            .execute_request_script(script, &r, &ctx(ScriptType::Request))
+            .unwrap();
+        assert_eq!(mods.method.as_deref(), Some("POST"));
+        assert_eq!(mods.body.as_deref(), Some("hello"));
+        assert_eq!(
+            mods.headers
+                .as_ref()
+                .and_then(|h| h.get("X-Test"))
+                .map(|s| s.as_str()),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn test_request_script_clears_body() {
+        let mut sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let mut r = req("POST");
+        r.body = Some("had body".to_string());
+        let script = r#"request.body = null;"#;
+        let (mods, _logs) = sb
+            .execute_request_script(script, &r, &ctx(ScriptType::Request))
+            .unwrap();
+        assert_eq!(mods.body, None);
+    }
+
+    #[test]
+    fn test_request_script_runtime_error_is_reported() {
+        let mut sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let r = req("GET");
+        let script = r#"throw new Error("boom");"#;
+        let err = sb
+            .execute_request_script(script, &r, &ctx(ScriptType::Request))
+            .unwrap_err();
+        assert!(matches!(err, ScriptError::ExecutionFailed(_)));
+        assert!(err.to_string().contains("boom"));
+    }
+
+    #[test]
+    fn test_log_levels_and_console_alias() {
+        let mut sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let r = req("GET");
+        let script = r#"
+            log.debug("d");
+            log.warn("w");
+            log.error("e");
+            console.info("c");
+        "#;
+        let (_mods, logs) = sb
+            .execute_request_script(script, &r, &ctx(ScriptType::Request))
+            .unwrap();
+        assert_eq!(logs.len(), 4);
+        assert!(logs
+            .iter()
+            .any(|l| matches!(l.level, ScriptLogLevel::Debug)));
+        assert!(logs.iter().any(|l| matches!(l.level, ScriptLogLevel::Warn)));
+        assert!(logs
+            .iter()
+            .any(|l| matches!(l.level, ScriptLogLevel::Error)));
+        assert!(logs.iter().any(|l| l.message == "c"));
+    }
+
+    #[test]
+    fn test_ctx_matched_rules_visible_in_js() {
+        let mut sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let r = req("GET");
+        let mut c = ctx(ScriptType::Request);
+        c.matched_rules = vec![MatchedRuleInfo {
+            pattern: "*.example.com".to_string(),
+            protocol: "https".to_string(),
+            value: "v1".to_string(),
+        }];
+        let script = r#"
+            log.info("rule:" + ctx.matchedRules[0].pattern + ctx.matchedRules[0].value);
+            log.info("phase:" + ctx.phase + " type:" + ctx.scriptType);
+        "#;
+        let (_mods, logs) = sb.execute_request_script(script, &r, &c).unwrap();
+        assert!(logs.iter().any(|l| l.message.contains("*.example.com")));
+        assert!(logs.iter().any(|l| l.message.contains("phase:request")));
+    }
+
+    // ----- response script mutations -----
+    #[test]
+    fn test_response_script_mutates_status_and_body() {
+        let mut sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let r = resp(200);
+        let script = r#"
+            response.status = 503;
+            response.statusText = "Down";
+            response.body = "new body";
+            response.headers["X-Mod"] = "yes";
+        "#;
+        let (mods, _logs) = sb
+            .execute_response_script(script, &r, &ctx(ScriptType::Response))
+            .unwrap();
+        assert_eq!(mods.status, Some(503));
+        assert_eq!(mods.status_text.as_deref(), Some("Down"));
+        assert_eq!(mods.body.as_deref(), Some("new body"));
+        assert_eq!(
+            mods.headers
+                .as_ref()
+                .and_then(|h| h.get("X-Mod"))
+                .map(|s| s.as_str()),
+            Some("yes")
+        );
+    }
+
+    #[test]
+    fn test_response_script_no_change_yields_empty_mods() {
+        let mut sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let r = resp(200);
+        let script = r#"log.info("status=" + response.status + " " + response.request.method);"#;
+        let (mods, logs) = sb
+            .execute_response_script(script, &r, &ctx(ScriptType::Response))
+            .unwrap();
+        assert_eq!(mods.status, None);
+        assert_eq!(mods.body, None);
+        assert_eq!(mods.headers, None);
+        assert!(logs.iter().any(|l| l.message.contains("status=200")));
+    }
+
+    #[test]
+    fn test_response_script_clears_body() {
+        let mut sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let r = resp(200);
+        let script = r#"response.body = null;"#;
+        let (mods, _logs) = sb
+            .execute_response_script(script, &r, &ctx(ScriptType::Response))
+            .unwrap();
+        assert_eq!(mods.body, None);
+    }
+
+    #[test]
+    fn test_response_script_runtime_error() {
+        let mut sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let r = resp(200);
+        let err = sb
+            .execute_response_script(
+                r#"throw new Error("rerr");"#,
+                &r,
+                &ctx(ScriptType::Response),
+            )
+            .unwrap_err();
+        assert!(matches!(err, ScriptError::ExecutionFailed(_)));
+        assert!(err.to_string().contains("rerr"));
+    }
+
+    // ----- decode scripts (request phase) -----
+    #[test]
+    fn test_decode_request_phase_reads_body_bytes_and_returns_output() {
+        let mut sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let r = req("POST");
+        let resp_empty = ResponseData::default();
+        let body = b"abc";
+        let script = r#"
+            log.info("size=" + request.bodySize + " hex=" + request.bodyHex);
+            ({ code: "0", data: request.bodyHex, msg: "ok" });
+        "#;
+        let (out, logs) = sb
+            .execute_decode_script(
+                script,
+                "request",
+                &r,
+                body,
+                &resp_empty,
+                &[],
+                &ctx(ScriptType::Decode),
+            )
+            .unwrap();
+        assert_eq!(out.code, "0");
+        assert_eq!(out.data, "616263"); // hex of "abc"
+        assert!(logs.iter().any(|l| l.message.contains("size=3")));
+    }
+
+    #[test]
+    fn test_decode_request_phase_response_is_null() {
+        let mut sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let r = req("GET");
+        let resp_empty = ResponseData::default();
+        let script =
+            r#"({ code: "0", data: (response === null) ? "isnull" : "notnull", msg: "" });"#;
+        let (out, _logs) = sb
+            .execute_decode_script(
+                script,
+                "request",
+                &r,
+                b"",
+                &resp_empty,
+                &[],
+                &ctx(ScriptType::Decode),
+            )
+            .unwrap();
+        assert_eq!(out.data, "isnull");
+    }
+
+    // ----- decode scripts (response phase) -----
+    #[test]
+    fn test_decode_response_phase_reads_response_and_request_snapshot() {
+        let mut sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let r = req("GET");
+        let mut response = resp(201);
+        response.request = req("PUT");
+        let body = b"hello";
+        let script = r#"
+            ({ code: "0", data: response.bodyBase64 + "|" + request.method, msg: "" });
+        "#;
+        let (out, _logs) = sb
+            .execute_decode_script(
+                script,
+                "response",
+                &r,
+                &[],
+                &response,
+                body,
+                &ctx(ScriptType::Decode),
+            )
+            .unwrap();
+        // base64("hello") = aGVsbG8=, request snapshot method is PUT
+        assert!(out.data.starts_with("aGVsbG8="));
+        assert!(out.data.ends_with("|PUT"));
+    }
+
+    #[test]
+    fn test_decode_via_ctx_output_global() {
+        let mut sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let r = req("GET");
+        let resp_empty = ResponseData::default();
+        let script = r#"ctx.output = { code: "0", data: "viactx", msg: "" };"#;
+        let (out, _logs) = sb
+            .execute_decode_script(
+                script,
+                "request",
+                &r,
+                b"",
+                &resp_empty,
+                &[],
+                &ctx(ScriptType::Decode),
+            )
+            .unwrap();
+        assert_eq!(out.data, "viactx");
+    }
+
+    #[test]
+    fn test_decode_via_output_global() {
+        let mut sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let r = req("GET");
+        let resp_empty = ResponseData::default();
+        let script = r#"var output = { code: "7", data: "viaglobal", msg: "m" };"#;
+        let (out, _logs) = sb
+            .execute_decode_script(
+                script,
+                "request",
+                &r,
+                b"",
+                &resp_empty,
+                &[],
+                &ctx(ScriptType::Decode),
+            )
+            .unwrap();
+        assert_eq!(out.code, "7");
+        assert_eq!(out.data, "viaglobal");
+        assert_eq!(out.msg, "m");
+    }
+
+    #[test]
+    fn test_decode_returns_json_string() {
+        let mut sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let r = req("GET");
+        let resp_empty = ResponseData::default();
+        let script = r#"JSON.stringify({ code: "0", data: "fromstr", msg: "" });"#;
+        let (out, _logs) = sb
+            .execute_decode_script(
+                script,
+                "request",
+                &r,
+                b"",
+                &resp_empty,
+                &[],
+                &ctx(ScriptType::Decode),
+            )
+            .unwrap();
+        assert_eq!(out.data, "fromstr");
+    }
+
+    #[test]
+    fn test_decode_missing_output_errors() {
+        let mut sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let r = req("GET");
+        let resp_empty = ResponseData::default();
+        let script = r#"log.info("no output");"#;
+        let err = sb
+            .execute_decode_script(
+                script,
+                "request",
+                &r,
+                b"",
+                &resp_empty,
+                &[],
+                &ctx(ScriptType::Decode),
+            )
+            .unwrap_err();
+        assert!(matches!(err, ScriptError::ExecutionFailed(_)));
+    }
+
+    #[test]
+    fn test_decode_output_missing_code_errors() {
+        let mut sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let r = req("GET");
+        let resp_empty = ResponseData::default();
+        let script = r#"({ data: "x", msg: "y" });"#;
+        let err = sb
+            .execute_decode_script(
+                script,
+                "request",
+                &r,
+                b"",
+                &resp_empty,
+                &[],
+                &ctx(ScriptType::Decode),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("code"));
+    }
+
+    #[test]
+    fn test_decode_output_not_object_errors() {
+        let mut sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let r = req("GET");
+        let resp_empty = ResponseData::default();
+        let script = r#""[1,2,3]";"#;
+        let err = sb
+            .execute_decode_script(
+                script,
+                "request",
+                &r,
+                b"",
+                &resp_empty,
+                &[],
+                &ctx(ScriptType::Decode),
+            )
+            .unwrap_err();
+        assert!(matches!(err, ScriptError::ExecutionFailed(_)));
+    }
+
+    #[test]
+    fn test_decode_runtime_error() {
+        let mut sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let r = req("GET");
+        let resp_empty = ResponseData::default();
+        let err = sb
+            .execute_decode_script(
+                r#"throw new Error("derr");"#,
+                "request",
+                &r,
+                b"",
+                &resp_empty,
+                &[],
+                &ctx(ScriptType::Decode),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("derr"));
+    }
+
+    // ----- file API extended -----
+    #[test]
+    fn test_file_append_exists_listdir_remove() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut sb = Sandbox::new(SandboxConfig {
+            file_root: Some(tmp.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+        let r = req("GET");
+        let script = r#"
+            file.appendText("log.txt", "a");
+            file.appendText("log.txt", "b");
+            log.info("exists=" + file.exists("log.txt"));
+            log.info("content=" + file.readText("log.txt"));
+            file.writeText("other.txt", "x");
+            var entries = file.listDir(".");
+            log.info("list=" + entries.join(","));
+            file.remove("other.txt");
+            log.info("after=" + file.exists("other.txt"));
+        "#;
+        let (_m, logs) = sb
+            .execute_request_script(script, &r, &ctx(ScriptType::Request))
+            .unwrap();
+        let joined: String = logs
+            .iter()
+            .map(|l| l.message.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("exists=true"));
+        assert!(joined.contains("content=ab"));
+        assert!(joined.contains("log.txt"));
+        assert!(joined.contains("other.txt"));
+        assert!(joined.contains("after=false"));
+    }
+
+    #[test]
+    fn test_file_remove_directory() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut sb = Sandbox::new(SandboxConfig {
+            file_root: Some(tmp.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+        let r = req("GET");
+        let script = r#"
+            file.writeText("d/inside.txt", "x");
+            file.remove("d");
+            log.info("dir_exists=" + file.exists("d"));
+        "#;
+        let (_m, logs) = sb
+            .execute_request_script(script, &r, &ctx(ScriptType::Request))
+            .unwrap();
+        assert!(logs.iter().any(|l| l.message.contains("dir_exists=false")));
+    }
+
+    #[test]
+    fn test_file_write_too_large_errors() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut sb = Sandbox::new(SandboxConfig {
+            file_root: Some(tmp.path().to_path_buf()),
+            max_file_bytes: 4,
+            ..Default::default()
+        })
+        .unwrap();
+        let r = req("GET");
+        let script = r#"file.writeText("big.txt", "abcdefgh");"#;
+        let err = sb
+            .execute_request_script(script, &r, &ctx(ScriptType::Request))
+            .unwrap_err();
+        assert!(matches!(err, ScriptError::ExecutionFailed(_)));
+    }
+
+    #[test]
+    fn test_file_read_too_large_errors() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("big.txt"), "abcdefghij").unwrap();
+        let mut sb = Sandbox::new(SandboxConfig {
+            file_root: Some(tmp.path().to_path_buf()),
+            max_file_bytes: 4,
+            ..Default::default()
+        })
+        .unwrap();
+        let r = req("GET");
+        let err = sb
+            .execute_request_script(
+                r#"file.readText("big.txt");"#,
+                &r,
+                &ctx(ScriptType::Request),
+            )
+            .unwrap_err();
+        assert!(matches!(err, ScriptError::ExecutionFailed(_)));
+    }
+
+    #[test]
+    fn test_file_disabled_reports_not_enabled() {
+        let mut sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let r = req("GET");
+        let script = r#"log.info("file_enabled=" + file.enabled);"#;
+        let (_m, logs) = sb
+            .execute_request_script(script, &r, &ctx(ScriptType::Request))
+            .unwrap();
+        assert!(logs
+            .iter()
+            .any(|l| l.message.contains("file_enabled=false")));
+    }
+
+    #[test]
+    fn test_file_read_missing_errors() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut sb = Sandbox::new(SandboxConfig {
+            file_root: Some(tmp.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+        let r = req("GET");
+        let err = sb
+            .execute_request_script(
+                r#"file.readText("nope.txt");"#,
+                &r,
+                &ctx(ScriptType::Request),
+            )
+            .unwrap_err();
+        assert!(matches!(err, ScriptError::ExecutionFailed(_)));
+    }
+
+    // ----- net API -----
+    #[test]
+    fn test_net_disabled_by_default() {
+        let mut sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let r = req("GET");
+        let script = r#"log.info("net_enabled=" + net.enabled);"#;
+        let (_m, logs) = sb
+            .execute_request_script(script, &r, &ctx(ScriptType::Request))
+            .unwrap();
+        assert!(logs.iter().any(|l| l.message.contains("net_enabled=false")));
+    }
+
+    #[test]
+    fn test_net_fetch_disabled_errors() {
+        let mut sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let r = req("GET");
+        let err = sb
+            .execute_request_script(
+                r#"net.fetch("https://x.test/");"#,
+                &r,
+                &ctx(ScriptType::Request),
+            )
+            .unwrap_err();
+        assert!(matches!(err, ScriptError::ExecutionFailed(_)));
+    }
+
+    #[test]
+    fn test_net_fetch_rejects_non_http_scheme() {
+        let mut sb = Sandbox::new(SandboxConfig {
+            allow_network: true,
+            ..Default::default()
+        })
+        .unwrap();
+        let r = req("GET");
+        let err = sb
+            .execute_request_script(
+                r#"net.fetch("ftp://x.test/");"#,
+                &r,
+                &ctx(ScriptType::Request),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("http") || matches!(err, ScriptError::ExecutionFailed(_)));
+    }
+
+    #[test]
+    fn test_net_fetch_rejects_invalid_url() {
+        let mut sb = Sandbox::new(SandboxConfig {
+            allow_network: true,
+            ..Default::default()
+        })
+        .unwrap();
+        let r = req("GET");
+        let err = sb
+            .execute_request_script(r#"net.fetch("not a url");"#, &r, &ctx(ScriptType::Request))
+            .unwrap_err();
+        assert!(matches!(err, ScriptError::ExecutionFailed(_)));
+    }
+
+    #[test]
+    fn test_net_fetch_request_body_too_large() {
+        let mut sb = Sandbox::new(SandboxConfig {
+            allow_network: true,
+            max_net_request_bytes: 2,
+            ..Default::default()
+        })
+        .unwrap();
+        let r = req("GET");
+        let script =
+            r#"net.fetch("https://x.test/", JSON.stringify({ method: "POST", body: "toolong" }));"#;
+        let err = sb
+            .execute_request_script(script, &r, &ctx(ScriptType::Request))
+            .unwrap_err();
+        assert!(matches!(err, ScriptError::ExecutionFailed(_)));
+    }
+
+    #[test]
+    fn test_net_request_is_alias_for_fetch() {
+        let mut sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let r = req("GET");
+        // net.request exists and, being disabled, errors the same way as fetch.
+        let err = sb
+            .execute_request_script(
+                r#"net.request("https://x.test/");"#,
+                &r,
+                &ctx(ScriptType::Request),
+            )
+            .unwrap_err();
+        assert!(matches!(err, ScriptError::ExecutionFailed(_)));
+    }
+
+    // ----- dangerous globals removed -----
+    #[test]
+    fn test_dangerous_globals_removed() {
+        let mut sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let r = req("GET");
+        let script = r#"log.info("eval=" + (typeof eval) + " Function=" + (typeof Function));"#;
+        let (_m, logs) = sb
+            .execute_request_script(script, &r, &ctx(ScriptType::Request))
+            .unwrap();
+        assert!(logs
+            .iter()
+            .any(|l| l.message.contains("eval=undefined")
+                && l.message.contains("Function=undefined")));
+    }
+
+    // ----- absolute path outside allowed dirs denied -----
+    #[test]
+    fn test_file_absolute_path_outside_allowed_denied() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "s").unwrap();
+        let mut sb = Sandbox::new(SandboxConfig {
+            file_root: Some(tmp.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+        let r = req("GET");
+        let abs = outside
+            .path()
+            .join("secret.txt")
+            .to_string_lossy()
+            .replace('\\', "\\\\");
+        let script = format!(r#"file.readText("{}");"#, abs);
+        let err = sb
+            .execute_request_script(&script, &r, &ctx(ScriptType::Request))
+            .unwrap_err();
+        assert!(matches!(err, ScriptError::ExecutionFailed(_)));
+    }
+
+    // ----- decode with default request (covers ResponseData/RequestData defaults) -----
+    #[test]
+    fn test_decode_request_phase_with_empty_body() {
+        let mut sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let r = req("GET");
+        let resp_empty = ResponseData::default();
+        let script = r#"({ code: "0", data: "size=" + request.bodySize, msg: "" });"#;
+        let (out, _logs) = sb
+            .execute_decode_script(
+                script,
+                "request",
+                &r,
+                &[],
+                &resp_empty,
+                &[],
+                &ctx(ScriptType::Decode),
+            )
+            .unwrap();
+        assert_eq!(out.data, "size=0");
+    }
+
+    // One-shot loopback HTTP fixture (same pattern used in engine/tests.rs) to
+    // drive net.fetch's full request/response path: header injection, body
+    // upload, status + headers + body readback, and JSON result shaping.
+    #[test]
+    fn test_net_fetch_success_round_trip() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 1024];
+                loop {
+                    let n = stream.read(&mut tmp).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&tmp[..n]);
+                    if let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&buf[..header_end + 4]);
+                        let content_length = headers
+                            .lines()
+                            .find_map(|line| {
+                                line.strip_prefix("Content-Length:")
+                                    .or_else(|| line.strip_prefix("content-length:"))
+                                    .and_then(|v| v.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        let body_start = header_end + 4;
+                        if buf.len() >= body_start + content_length {
+                            break;
+                        }
+                    }
+                }
+                let payload = "{\"ok\":true}";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    payload.len(),
+                    payload
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+
+        let mut sb = Sandbox::new(SandboxConfig {
+            allow_network: true,
+            ..Default::default()
+        })
+        .unwrap();
+        let r = req("GET");
+        let script = format!(
+            r#"
+            var resp = JSON.parse(net.fetch("http://{addr}/x", JSON.stringify({{
+                method: "POST",
+                headers: {{ "X-Probe": "1" }},
+                body: "payload"
+            }})));
+            log.info("status=" + resp.status + " ok=" + resp.ok + " body=" + resp.body);
+            "#
+        );
+        let (_m, logs) = sb
+            .execute_request_script(&script, &r, &ctx(ScriptType::Request))
+            .unwrap();
+        let _ = handle.join();
+        assert!(logs
+            .iter()
+            .any(|l| l.message.contains("status=200") && l.message.contains("ok=true")));
+        assert!(logs
+            .iter()
+            .any(|l| l.message.contains("\\\"ok\\\":true") || l.message.contains("ok\":true")));
+    }
+
+    // Populated headers exercise every "for (k, v) in &headers" injection loop
+    // across request/response/decode setup, plus the snapshot header rebuild.
+    #[test]
+    fn test_request_script_with_existing_headers_round_trip() {
+        let mut sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let mut r = req("POST");
+        r.headers.insert("X-In".to_string(), "v".to_string());
+        r.body = Some("b".to_string());
+        let script = r#"
+            log.info("in=" + request.headers["X-In"]);
+            request.headers["X-Added"] = "2";
+        "#;
+        let (mods, logs) = sb
+            .execute_request_script(script, &r, &ctx(ScriptType::Request))
+            .unwrap();
+        assert!(logs.iter().any(|l| l.message.contains("in=v")));
+        let h = mods.headers.expect("headers changed");
+        assert_eq!(h.get("X-Added").map(|s| s.as_str()), Some("2"));
+        assert_eq!(h.get("X-In").map(|s| s.as_str()), Some("v"));
+    }
+
+    #[test]
+    fn test_response_script_with_existing_headers() {
+        let mut sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let mut r = resp(200);
+        r.headers
+            .insert("Server".to_string(), "bifrost".to_string());
+        r.request
+            .headers
+            .insert("X-Req".to_string(), "rq".to_string());
+        let script = r#"
+            log.info("srv=" + response.headers["Server"] + " req=" + response.request.headers["X-Req"]);
+        "#;
+        let (_mods, logs) = sb
+            .execute_response_script(script, &r, &ctx(ScriptType::Response))
+            .unwrap();
+        assert!(logs
+            .iter()
+            .any(|l| l.message.contains("srv=bifrost") && l.message.contains("req=rq")));
+    }
+
+    #[test]
+    fn test_decode_request_phase_with_headers() {
+        let mut sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let mut r = req("POST");
+        r.headers
+            .insert("Content-Type".to_string(), "app/x".to_string());
+        let resp_empty = ResponseData::default();
+        let script = r#"({ code: "0", data: request.headers["Content-Type"], msg: "" });"#;
+        let (out, _logs) = sb
+            .execute_decode_script(
+                script,
+                "request",
+                &r,
+                b"x",
+                &resp_empty,
+                &[],
+                &ctx(ScriptType::Decode),
+            )
+            .unwrap();
+        assert_eq!(out.data, "app/x");
+    }
+
+    #[test]
+    fn test_decode_response_phase_with_headers_and_no_client_app() {
+        let mut sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let r = req("GET");
+        let mut response = resp(200);
+        response.headers.insert("X-R".to_string(), "rv".to_string());
+        response.request = req("GET");
+        response.request.client_app = None;
+        response
+            .request
+            .headers
+            .insert("X-RR".to_string(), "rrv".to_string());
+        let script = r#"
+            ({ code: "0", data: response.headers["X-R"] + "|" + response.request.headers["X-RR"], msg: "" });
+        "#;
+        let (out, _logs) = sb
+            .execute_decode_script(
+                script,
+                "response",
+                &r,
+                &[],
+                &response,
+                b"body",
+                &ctx(ScriptType::Decode),
+            )
+            .unwrap();
+        assert_eq!(out.data, "rv|rrv");
+    }
+
+    // Throwing a non-Error value drives the string/fallback exception-detail
+    // extraction branches (else-if `into_string`).
+    #[test]
+    fn test_request_script_throws_string_value() {
+        let mut sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let r = req("GET");
+        let err = sb
+            .execute_request_script(
+                r#"throw "plain string error";"#,
+                &r,
+                &ctx(ScriptType::Request),
+            )
+            .unwrap_err();
+        assert!(matches!(err, ScriptError::ExecutionFailed(_)));
+    }
+
+    #[test]
+    fn test_response_script_throws_string_value() {
+        let mut sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let r = resp(200);
+        let err = sb
+            .execute_response_script(r#"throw "rstr";"#, &r, &ctx(ScriptType::Response))
+            .unwrap_err();
+        assert!(matches!(err, ScriptError::ExecutionFailed(_)));
+    }
+
+    #[test]
+    fn test_decode_script_throws_string_value() {
+        let mut sb = Sandbox::new(SandboxConfig::default()).unwrap();
+        let r = req("GET");
+        let resp_empty = ResponseData::default();
+        let err = sb
+            .execute_decode_script(
+                r#"throw "dstr";"#,
+                "request",
+                &r,
+                b"",
+                &resp_empty,
+                &[],
+                &ctx(ScriptType::Decode),
+            )
+            .unwrap_err();
+        assert!(matches!(err, ScriptError::ExecutionFailed(_)));
+    }
 }
