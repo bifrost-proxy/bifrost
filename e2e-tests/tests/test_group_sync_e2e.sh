@@ -298,7 +298,7 @@ echo "=== Step 5: Group Env Permissions ==="
 echo "--- Owner creates env for group ---"
 CREATE_ENV=$(api -X POST -H "Content-Type: application/json" \
     -H "x-bifrost-token: ${TEST_TOKEN}" \
-    -d "{\"user_id\":\"${GROUP_NAME}\",\"name\":\"production\",\"rule\":\"example.com 127.0.0.1\"}" \
+    -d "{\"user_id\":\"${GROUP_NAME}\",\"name\":\"production\",\"rule\":\"example.com host://127.0.0.1:8080\"}" \
     "${SYNC_URL}/v4/env")
 assert_body_contains '"code":0' "$CREATE_ENV" "Owner creates group env"
 ENV_ID=$(echo "$CREATE_ENV" | jq -r '.data.id')
@@ -307,7 +307,7 @@ assert_not_empty "$ENV_ID" "Env ID not empty"
 echo "--- Master creates env ---"
 CREATE_ENV2=$(api -X POST -H "Content-Type: application/json" \
     -H "x-bifrost-token: ${MEMBER_TOKEN}" \
-    -d "{\"user_id\":\"${GROUP_NAME}\",\"name\":\"staging\",\"rule\":\"staging.com 10.0.0.1\"}" \
+    -d "{\"user_id\":\"${GROUP_NAME}\",\"name\":\"staging\",\"rule\":\"staging.com host://10.0.0.1:8080\"}" \
     "${SYNC_URL}/v4/env")
 assert_body_contains '"code":0' "$CREATE_ENV2" "Master creates group env"
 ENV_ID2=$(echo "$CREATE_ENV2" | jq -r '.data.id')
@@ -315,7 +315,7 @@ ENV_ID2=$(echo "$CREATE_ENV2" | jq -r '.data.id')
 echo "--- Outsider CANNOT create ---"
 CREATE_ENV_FAIL=$(api_status -X POST -H "Content-Type: application/json" \
     -H "x-bifrost-token: ${OUTSIDER_TOKEN}" \
-    -d "{\"user_id\":\"${GROUP_NAME}\",\"name\":\"hack\",\"rule\":\"evil.com 1.2.3.4\"}" \
+    -d "{\"user_id\":\"${GROUP_NAME}\",\"name\":\"hack\",\"rule\":\"evil.com host://1.2.3.4:8080\"}" \
     "${SYNC_URL}/v4/env")
 assert_status "403" "$CREATE_ENV_FAIL" "Outsider denied on create"
 
@@ -550,7 +550,7 @@ FIRST_RULE=$(echo "$RULES_LIST" | jq -r '.rules[0].name')
 assert_equals "production" "$FIRST_RULE" "First rule=production"
 
 echo "--- Create group rule ---"
-CREATE_RULE=$(admin_post "/api/group-rules/${GROUP_ID}" '{"name":"e2e-rule","content":"test.local 127.0.0.1\napi.local 127.0.0.2"}')
+CREATE_RULE=$(admin_post "/api/group-rules/${GROUP_ID}" '{"name":"e2e-rule","content":"test.local host://127.0.0.1:8080\napi.local host://127.0.0.2:8080"}')
 echo "Create rule: $CREATE_RULE"
 assert_body_contains '"name":"e2e-rule"' "$CREATE_RULE" "Created rule name"
 
@@ -566,7 +566,7 @@ assert_body_contains '"name":"e2e-rule"' "$RULE_DETAIL" "Rule name in detail"
 assert_body_contains '"status":"synced"' "$RULE_DETAIL" "Rule synced status"
 
 echo "--- Update group rule ---"
-UPDATE_RULE_RESP=$(admin_put "/api/group-rules/${GROUP_ID}/e2e-rule" '{"content":"updated.local 10.0.0.1"}')
+UPDATE_RULE_RESP=$(admin_put "/api/group-rules/${GROUP_ID}/e2e-rule" '{"content":"updated.local host://10.0.0.1:8080"}')
 echo "Update rule: $UPDATE_RULE_RESP"
 assert_body_contains '"name":"e2e-rule"' "$UPDATE_RULE_RESP" "Updated rule name"
 assert_body_contains 'updated.local' "$UPDATE_RULE_RESP" "Updated content"
@@ -725,7 +725,7 @@ if [[ -n "$BIFROST_BIN" ]]; then
     assert_body_contains "production" "$CLI_RULE_LIST" "CLI: rule list shows production"
 
     echo "--- CLI: group rule add ---"
-    CLI_RULE_ADD=$(BIFROST_DATA_DIR="$BIFROST_DATA_DIR_E2E" "$BIFROST_BIN" -p "$BIFROST_PORT" group rule add "$GROUP_ID" cli-rule --content "cli.test 127.0.0.1" 2>&1) || true
+    CLI_RULE_ADD=$(BIFROST_DATA_DIR="$BIFROST_DATA_DIR_E2E" "$BIFROST_BIN" -p "$BIFROST_PORT" group rule add "$GROUP_ID" cli-rule --content "cli.test host://127.0.0.1:8080" 2>&1) || true
     echo "$CLI_RULE_ADD"
     assert_body_contains "added" "$CLI_RULE_ADD" "CLI: rule added"
 
@@ -736,7 +736,7 @@ if [[ -n "$BIFROST_BIN" ]]; then
     assert_body_contains "cli.test" "$CLI_RULE_SHOW" "CLI: rule show content"
 
     echo "--- CLI: group rule update ---"
-    CLI_RULE_UPD=$(BIFROST_DATA_DIR="$BIFROST_DATA_DIR_E2E" "$BIFROST_BIN" -p "$BIFROST_PORT" group rule update "$GROUP_ID" cli-rule --content "updated.cli 10.0.0.1" 2>&1) || true
+    CLI_RULE_UPD=$(BIFROST_DATA_DIR="$BIFROST_DATA_DIR_E2E" "$BIFROST_BIN" -p "$BIFROST_PORT" group rule update "$GROUP_ID" cli-rule --content "updated.cli host://10.0.0.1:8080" 2>&1) || true
     echo "$CLI_RULE_UPD"
     assert_body_contains "updated" "$CLI_RULE_UPD" "CLI: rule updated"
 
