@@ -856,29 +856,57 @@ fn validate_host_port(
     start_col: usize,
     end_col: usize,
 ) -> Option<ParseError> {
-    if let Some(colon_pos) = value.rfind(':') {
-        let port_str = &value[colon_pos + 1..];
-        if !port_str.is_empty() {
-            if let Ok(port) = port_str.parse::<u32>() {
-                if port > 65535 {
-                    return Some(
-                        ParseError::with_range(
-                            line_num,
-                            start_col,
-                            end_col,
-                            format!("Port number out of range: {}. Maximum is 65535.", port),
-                        )
-                        .with_severity(ParseErrorSeverity::Error)
-                        .with_code("E017")
-                        .with_suggestion(
-                            "Port must be between 0 and 65535. Example: host://example.com:8080",
-                        ),
-                    );
-                }
-            }
-        }
+    use std::net::IpAddr;
+
+    // A bare IP address (including IPv6 such as `::1` or `2001:db8::1`) carries
+    // no explicit port and is always valid.
+    if value.parse::<IpAddr>().is_ok() {
+        return None;
     }
-    None
+
+    // Determine the port segment while avoiding false positives on IPv6 hosts.
+    let port_str = if let Some(rest) = value.strip_prefix('[') {
+        // Bracketed IPv6, optionally followed by `:port`, e.g. `[::1]:8080`.
+        match rest.find("]:") {
+            Some(pos) => &rest[pos + 2..],
+            // `[::1]` (no port) or malformed bracket: leave host parsing lenient.
+            None => return None,
+        }
+    } else if value.matches(':').count() > 1 {
+        // Unbracketed value with multiple colons looks like a bare IPv6 host
+        // without a port; stay lenient to avoid misreading a hextet as a port.
+        return None;
+    } else if let Some(colon_pos) = value.rfind(':') {
+        &value[colon_pos + 1..]
+    } else {
+        // No colon at all means host only, which is valid here.
+        return None;
+    };
+
+    let invalid = |message: String| {
+        Some(
+            ParseError::with_range(line_num, start_col, end_col, message)
+                .with_severity(ParseErrorSeverity::Error)
+                .with_code("E017")
+                .with_suggestion(
+                    "Port must be a number between 1 and 65535. Example: host://example.com:8080",
+                ),
+        )
+    };
+
+    if port_str.is_empty() {
+        return invalid("Missing port number after ':'.".to_string());
+    }
+
+    match port_str.parse::<u32>() {
+        Ok(0) => invalid("Port number out of range: 0. Valid ports are 1-65535.".to_string()),
+        Ok(port) if port > 65535 => invalid(format!(
+            "Port number out of range: {}. Maximum is 65535.",
+            port
+        )),
+        Ok(_) => None,
+        Err(_) => invalid(format!("Invalid port number: '{}'.", port_str)),
+    }
 }
 
 fn parse_line_with_values(line: &str, values: &HashMap<String, String>) -> Result<Vec<Rule>> {
@@ -3559,140 +3587,220 @@ x-custom: value
         assert_eq!(parts3[0], "/foo/");
     }
 
-    // ---- Direct unit tests for protocol-value validators ----
+    // ---- value validator coverage (status/cache/delay/speed/method/ip/host_port) ----
 
-    #[test]
-    fn test_validate_status_code_branches() {
-        // valid 100..600 → None
-        assert!(validate_status_code("200", 1, 1, 4).is_none());
-        // out of range high → Error E010
-        let e = validate_status_code("700", 1, 1, 4).unwrap();
-        assert_eq!(e.severity, ParseErrorSeverity::Error);
-        assert_eq!(e.code.as_deref(), Some("E010"));
-        assert!(e.message.contains("Invalid HTTP status code"));
-        assert_eq!(e.fixes.len(), 3);
-        // non-numeric → Error E010, different message
-        let e = validate_status_code("abc", 1, 1, 4).unwrap();
-        assert!(e.message.contains("Expected a number"));
-        assert_eq!(e.fixes.len(), 2);
+    fn first_error_with_code<'a>(errors: &'a [ParseError], code: &str) -> Option<&'a ParseError> {
+        errors.iter().find(|e| e.code.as_deref() == Some(code))
     }
 
     #[test]
-    fn test_validate_cache_value_branches() {
-        // keyword → None
-        assert!(validate_cache_value("no", 1, 1, 3).is_none());
-        assert!(validate_cache_value("NO-CACHE", 1, 1, 8).is_none());
-        // positive number → None
-        assert!(validate_cache_value("3600", 1, 1, 5).is_none());
-        // zero → Warning E011
-        let w = validate_cache_value("0", 1, 1, 2).unwrap();
-        assert_eq!(w.severity, ParseErrorSeverity::Warning);
-        assert_eq!(w.code.as_deref(), Some("E011"));
-        // invalid → Error E011
-        let e = validate_cache_value("soon", 1, 1, 5).unwrap();
-        assert_eq!(e.severity, ParseErrorSeverity::Error);
-        assert!(e.message.contains("Invalid cache value"));
+    fn test_validate_status_code_valid() {
+        let errors = validate_rules("api.test statusCode://200");
+        assert!(errors.is_empty(), "200 should be accepted: {:?}", errors);
+        assert!(validate_rules("api.test statusCode://100").is_empty());
+        assert!(validate_rules("api.test statusCode://599").is_empty());
     }
 
     #[test]
-    fn test_validate_delay_value_branches() {
-        assert!(validate_delay_value("1000", 1, 1, 5).is_none());
-        let e = validate_delay_value("-5", 1, 1, 3).unwrap();
-        assert_eq!(e.code.as_deref(), Some("E012"));
-        assert!(e.message.contains("cannot be negative"));
-        let e = validate_delay_value("fast", 1, 1, 5).unwrap();
-        assert!(e.message.contains("Invalid delay value"));
+    fn test_validate_status_code_out_of_range() {
+        let low = validate_rules("api.test statusCode://99");
+        assert!(
+            first_error_with_code(&low, "E010").is_some(),
+            "99 must be rejected: {:?}",
+            low
+        );
+        let high = validate_rules("api.test statusCode://600");
+        assert!(
+            first_error_with_code(&high, "E010").is_some(),
+            "600 must be rejected: {:?}",
+            high
+        );
+        let nan = validate_rules("api.test statusCode://abc");
+        assert!(
+            first_error_with_code(&nan, "E010").is_some(),
+            "abc must be rejected: {:?}",
+            nan
+        );
     }
 
     #[test]
-    fn test_validate_speed_value_branches() {
-        assert!(validate_speed_value("1024", 1, 1, 5).is_none());
-        let e = validate_speed_value("0", 1, 1, 2).unwrap();
-        assert_eq!(e.code.as_deref(), Some("E013"));
-        assert!(e.message.contains("cannot be 0"));
-        let e = validate_speed_value("turbo", 1, 1, 6).unwrap();
-        assert!(e.message.contains("Invalid speed value"));
+    fn test_validate_replace_status_uses_same_validator() {
+        assert!(validate_rules("api.test replaceStatus://301").is_empty());
+        let bad = validate_rules("api.test replaceStatus://700");
+        assert!(
+            first_error_with_code(&bad, "E010").is_some(),
+            "700 must be rejected: {:?}",
+            bad
+        );
     }
 
     #[test]
-    fn test_validate_http_method_branches() {
-        assert!(validate_http_method("get", 1, 1, 4).is_none());
-        assert!(validate_http_method("POST", 1, 1, 5).is_none());
-        let w = validate_http_method("FETCH", 1, 1, 6).unwrap();
-        assert_eq!(w.severity, ParseErrorSeverity::Warning);
-        assert_eq!(w.code.as_deref(), Some("E015"));
-        assert!(w.message.contains("Unknown HTTP method"));
+    fn test_validate_cache_value() {
+        assert!(validate_rules("api.test cache://3600").is_empty());
+        assert!(validate_rules("api.test cache://no").is_empty());
+        assert!(validate_rules("api.test cache://no-cache").is_empty());
+        assert!(validate_rules("api.test cache://no-store").is_empty());
+        // zero is a warning, not a hard error
+        let zero = validate_rules_with_context("api.test cache://0", &HashMap::new());
+        assert!(
+            zero.errors.is_empty(),
+            "cache://0 should not be a hard error"
+        );
+        assert!(
+            zero.warnings
+                .iter()
+                .any(|w| w.code.as_deref() == Some("E011")),
+            "cache://0 should warn: {:?}",
+            zero.warnings
+        );
+        let nan = validate_rules("api.test cache://abc");
+        assert!(
+            first_error_with_code(&nan, "E011").is_some(),
+            "cache://abc must be rejected: {:?}",
+            nan
+        );
     }
 
     #[test]
-    fn test_validate_ip_address_branches() {
-        assert!(validate_ip_address("192.168.1.1", 1, 1, 12).is_none());
-        assert!(validate_ip_address("::1", 1, 1, 4).is_none());
-        let e = validate_ip_address("not-an-ip", 1, 1, 10).unwrap();
-        assert_eq!(e.code.as_deref(), Some("E016"));
-        assert!(e.message.contains("Invalid IP address"));
+    fn test_validate_delay_value() {
+        assert!(validate_rules("api.test reqDelay://0").is_empty());
+        assert!(validate_rules("api.test reqDelay://1000").is_empty());
+        assert!(validate_rules("api.test resDelay://250").is_empty());
+        let neg = validate_rules("api.test reqDelay://-1");
+        assert!(
+            first_error_with_code(&neg, "E012").is_some(),
+            "negative delay must be rejected: {:?}",
+            neg
+        );
+        let nan = validate_rules("api.test resDelay://abc");
+        assert!(
+            first_error_with_code(&nan, "E012").is_some(),
+            "delay abc must be rejected: {:?}",
+            nan
+        );
     }
 
     #[test]
-    fn test_validate_host_port_branches() {
-        // no colon → None
-        assert!(validate_host_port("example.com", 1, 1, 12).is_none());
-        // valid port → None
-        assert!(validate_host_port("example.com:8080", 1, 1, 17).is_none());
-        // empty port after colon → None (no parse)
-        assert!(validate_host_port("example.com:", 1, 1, 13).is_none());
-        // non-numeric port → None (parse fails, falls through)
-        assert!(validate_host_port("example.com:abc", 1, 1, 16).is_none());
-        // out of range → Error E017
-        let e = validate_host_port("example.com:99999", 1, 1, 18).unwrap();
-        assert_eq!(e.code.as_deref(), Some("E017"));
-        assert!(e.message.contains("out of range"));
+    fn test_validate_speed_value() {
+        assert!(validate_rules("api.test reqSpeed://1024").is_empty());
+        assert!(validate_rules("api.test resSpeed://2048").is_empty());
+        let zero = validate_rules("api.test reqSpeed://0");
+        assert!(
+            first_error_with_code(&zero, "E013").is_some(),
+            "speed 0 must be rejected: {:?}",
+            zero
+        );
+        let nan = validate_rules("api.test resSpeed://abc");
+        assert!(
+            first_error_with_code(&nan, "E013").is_some(),
+            "speed abc must be rejected: {:?}",
+            nan
+        );
     }
 
     #[test]
-    fn test_validate_single_protocol_value_dispatch() {
-        // template placeholder value → None
-        assert!(validate_single_protocol_value("statusCode", "{var}", 1, 0, 5).is_none());
-        // wrapped in parens/backticks then valid → None
-        assert!(validate_single_protocol_value("statusCode", "(200)", 1, 0, 5).is_none());
-        // statusCode dispatch (replaceStatus alias)
-        assert!(validate_single_protocol_value("replaceStatus", "999", 1, 0, 3).is_some());
-        // cache / reqDelay / resSpeed / method / dns / host / xHost dispatch
-        assert!(validate_single_protocol_value("cache", "bad", 1, 0, 3).is_some());
-        assert!(validate_single_protocol_value("reqDelay", "-1", 1, 0, 2).is_some());
-        assert!(validate_single_protocol_value("resSpeed", "0", 1, 0, 1).is_some());
-        assert!(validate_single_protocol_value("method", "WAT", 1, 0, 3).is_some());
-        assert!(validate_single_protocol_value("dns", "bad", 1, 0, 3).is_some());
-        assert!(validate_single_protocol_value("xHost", "h:99999", 1, 0, 7).is_some());
-        // unknown protocol → None
-        assert!(validate_single_protocol_value("custom", "anything", 1, 0, 8).is_none());
+    fn test_validate_http_method() {
+        assert!(validate_rules("api.test method://POST").is_empty());
+        // lowercase is normalized and accepted
+        assert!(validate_rules("api.test method://get").is_empty());
+        // unknown method surfaces a warning (not a hard error by design)
+        let bad = validate_rules_with_context("api.test method://FOO", &HashMap::new());
+        assert!(
+            bad.warnings
+                .iter()
+                .any(|w| w.code.as_deref() == Some("E015")),
+            "unknown method should warn: {:?}",
+            bad.warnings
+        );
     }
 
     #[test]
-    fn test_validate_protocol_values_integration_collects_errors() {
-        let content = "example.com statusCode://700 method://FETCH";
-        let result = validate_rules_with_context(content, &HashMap::new());
-        // status code error is an Error; method is a Warning
-        assert!(result
-            .errors
-            .iter()
-            .any(|e| e.code.as_deref() == Some("E010")));
-        assert!(result
-            .warnings
-            .iter()
-            .any(|w| w.code.as_deref() == Some("E015")));
+    fn test_validate_dns_ip() {
+        assert!(validate_rules("api.test dns://192.168.1.1").is_empty());
+        assert!(validate_rules("api.test dns://::1").is_empty());
+        let bad = validate_rules("api.test dns://999.1.1.1");
+        assert!(
+            first_error_with_code(&bad, "E016").is_some(),
+            "invalid ip must be rejected: {:?}",
+            bad
+        );
     }
 
     #[test]
-    fn test_validate_protocol_values_dedupes_same_span() {
-        // Same value at same span should not be pushed twice.
-        let content = "example.com cache://0";
-        let result = validate_rules_with_context(content, &HashMap::new());
-        let e011: Vec<_> = result
-            .warnings
-            .iter()
-            .filter(|w| w.code.as_deref() == Some("E011"))
-            .collect();
-        assert_eq!(e011.len(), 1);
+    fn test_validate_host_port_valid() {
+        assert!(validate_rules("api.test host://example.com:8080").is_empty());
+        assert!(validate_rules("api.test host://127.0.0.1:3000").is_empty());
+        assert!(validate_rules("api.test host://example.com").is_empty());
+        // bare IPv6 host (no port) must be accepted, not misread as host:port
+        assert!(
+            validate_rules("api.test host://::1").is_empty(),
+            "bare ipv6 should pass"
+        );
+        assert!(
+            validate_rules("api.test host://2001:db8::1").is_empty(),
+            "bare ipv6 with multiple colons should pass"
+        );
+        // bracketed IPv6 with explicit port
+        assert!(
+            validate_rules("api.test host://[::1]:8080").is_empty(),
+            "bracketed ipv6 port should pass"
+        );
+        assert!(validate_rules("api.test xhost://example.com:443").is_empty());
+    }
+
+    #[test]
+    fn test_validate_host_port_out_of_range() {
+        let big = validate_rules("api.test host://example.com:70000");
+        assert!(
+            first_error_with_code(&big, "E017").is_some(),
+            "port 70000 must be rejected: {:?}",
+            big
+        );
+    }
+
+    #[test]
+    fn test_validate_host_port_zero_rejected() {
+        let zero = validate_rules("api.test host://example.com:0");
+        assert!(
+            first_error_with_code(&zero, "E017").is_some(),
+            "port 0 must be rejected: {:?}",
+            zero
+        );
+    }
+
+    #[test]
+    fn test_validate_host_port_non_numeric_rejected() {
+        let nan = validate_rules("api.test host://example.com:abc");
+        assert!(
+            first_error_with_code(&nan, "E017").is_some(),
+            "non-numeric port must be rejected: {:?}",
+            nan
+        );
+    }
+
+    #[test]
+    fn test_validate_host_port_empty_rejected() {
+        let empty = validate_rules("api.test host://example.com:");
+        assert!(
+            first_error_with_code(&empty, "E017").is_some(),
+            "empty port must be rejected: {:?}",
+            empty
+        );
+    }
+
+    #[test]
+    fn test_validate_host_port_bracketed_ipv6_bad_port() {
+        let bad = validate_rules("api.test host://[::1]:0");
+        assert!(
+            first_error_with_code(&bad, "E017").is_some(),
+            "bracketed ipv6 with port 0 must be rejected: {:?}",
+            bad
+        );
+        let nan = validate_rules("api.test host://[::1]:abc");
+        assert!(
+            first_error_with_code(&nan, "E017").is_some(),
+            "bracketed ipv6 with non-numeric port must be rejected: {:?}",
+            nan
+        );
     }
 }

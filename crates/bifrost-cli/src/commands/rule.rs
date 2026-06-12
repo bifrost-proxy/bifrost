@@ -325,6 +325,108 @@ mod tests {
     }
 
     #[test]
+    fn validate_local_rule_syntax_rejects_invalid_port() {
+        // Exercises the CLI add/update validation path against the host:port
+        // validator. A non-numeric / zero / out-of-range port must be rejected
+        // so the CLI exits non-zero instead of saving a broken rule.
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RulesStorage::with_dir(dir.path().join("rules")).unwrap();
+
+        let report = validate_local_rule_syntax_with_values(
+            &storage,
+            "bad-port",
+            "example.com host://example.com:0",
+            &HashMap::new(),
+        );
+
+        assert!(!report.valid, "port 0 must be rejected by CLI validation");
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code.as_deref() == Some("E017")),
+            "expected E017 port error, got {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn validate_local_rule_syntax_rejects_invalid_status_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RulesStorage::with_dir(dir.path().join("rules")).unwrap();
+
+        let report = validate_local_rule_syntax_with_values(
+            &storage,
+            "bad-status",
+            "example.com statusCode://999",
+            &HashMap::new(),
+        );
+
+        assert!(
+            !report.valid,
+            "status 999 must be rejected by CLI validation"
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code.as_deref() == Some("E010")),
+            "expected E010 status error, got {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn validate_local_rule_syntax_allows_warning_only_rules() {
+        // A warning (unknown HTTP method, E015) must not block the save: the
+        // report stays valid while still surfacing the warning for the user.
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RulesStorage::with_dir(dir.path().join("rules")).unwrap();
+
+        let report = validate_local_rule_syntax_with_values(
+            &storage,
+            "warn-only",
+            "example.com method://FOOBAR",
+            &HashMap::new(),
+        );
+
+        assert!(report.valid, "warning-only rule should remain savable");
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.code.as_deref() == Some("E015")),
+            "expected E015 method warning, got {:?}",
+            report.warnings
+        );
+    }
+
+    #[test]
+    fn rule_mutation_cli_response_serializes_syntax_report() {
+        // The JSON feedback emitted by `rule add --json` / `rule update --json`
+        // must carry the saved flag and the full syntax report.
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RulesStorage::with_dir(dir.path().join("rules")).unwrap();
+        let syntax = validate_local_rule_syntax_with_values(
+            &storage,
+            "json-rule",
+            "example.com host://127.0.0.1:3000",
+            &HashMap::new(),
+        );
+
+        let response = RuleMutationCliResponse {
+            success: true,
+            message: "Rule 'json-rule' added successfully.".to_string(),
+            saved: true,
+            syntax: &syntax,
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"saved\":true"));
+        assert!(json.contains("\"success\":true"));
+        assert!(json.contains("json-rule"));
+    }
+
+    #[test]
     fn validate_local_rule_syntax_expands_existing_references() {
         let dir = tempfile::tempdir().unwrap();
         let storage = RulesStorage::with_dir(dir.path().join("rules")).unwrap();
