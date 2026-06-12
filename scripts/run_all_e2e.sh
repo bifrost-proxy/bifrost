@@ -236,11 +236,47 @@ register_suite() {
   local reason="$4"
   local duration="$5"
 
+  # During the shell retry pass, re-runs should overwrite the first-attempt
+  # result instead of appending a duplicate entry, so a flaky suite that passes
+  # on retry stops counting as a failure.
+  if [[ "${_SHELL_RETRY_MODE:-0}" == "1" ]] && update_suite_result "$name" "$status" "$log_file" "$reason" "$duration"; then
+    return 0
+  fi
+
   SUITE_NAMES+=("$name")
   SUITE_STATUSES+=("$status")
   SUITE_LOGS+=("$log_file")
   SUITE_REASONS+=("$reason")
   SUITE_DURATIONS+=("$duration")
+}
+
+# Update the most recent registration of a suite in place. Used by the shell
+# retry pass so that a flaky suite that passes on retry no longer counts as a
+# failure in the final report / exit code.
+update_suite_result() {
+  local name="$1"
+  local status="$2"
+  local log_file="$3"
+  local reason="$4"
+  local duration="$5"
+  local i
+  for (( i=${#SUITE_NAMES[@]}-1; i>=0; i-- )); do
+    if [[ "${SUITE_NAMES[$i]}" == "$name" ]]; then
+      SUITE_STATUSES[$i]="$status"
+      SUITE_LOGS[$i]="$log_file"
+      SUITE_REASONS[$i]="$reason"
+      SUITE_DURATIONS[$i]="$duration"
+      return 0
+    fi
+  done
+  return 1
+}
+
+truthy() {
+  case "${1:-}" in
+    1|true|TRUE|True|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 trim_line() {
@@ -859,6 +895,57 @@ run_shell_tests_parallel() {
   return 0
 }
 
+# Retry shell suites that failed on their first attempt, once, serially.
+#
+# CI sets BIFROST_E2E_RETRY_FAILED_ONCE=1 for the e2e-shell job, but until now
+# only the rules path (run_all_tests_parallel.sh --retry-failed-once) honored
+# it; the shell path ignored the flag entirely. A single flaky shell suite
+# (port races, mock hiccups, transient network) therefore failed the whole
+# shard even though every assertion passed on a re-run. This mirrors the rules
+# path: collect first-attempt failures, re-run them one at a time, and flip the
+# suite result to passed when the retry succeeds.
+retry_failed_shell_suites_once() {
+  if ! truthy "${BIFROST_E2E_RETRY_FAILED_ONCE:-0}"; then
+    return 0
+  fi
+
+  local failed_names=()
+  local i
+  for i in "${!SUITE_NAMES[@]}"; do
+    [[ "${SUITE_STATUSES[$i]}" == "failed" ]] || continue
+    case "${SUITE_NAMES[$i]}" in
+      shell:*) failed_names+=("${SUITE_NAMES[$i]#shell:}") ;;
+    esac
+  done
+
+  if [[ ${#failed_names[@]} -eq 0 ]]; then
+    return 0
+  fi
+
+  local max_retry="${BIFROST_E2E_MAX_RETRY_SUITES:-10}"
+  if [[ ${#failed_names[@]} -gt $max_retry ]]; then
+    log_warn "Too many failed shell suites (${#failed_names[@]} > ${max_retry}); skipping retry pass to avoid masking a systemic failure"
+    return 0
+  fi
+
+  header "Retrying ${#failed_names[@]} failed shell suite(s) once (serial)"
+
+  # Clear residual processes/ports before re-running.
+  kill_all_bifrost 2>/dev/null || true
+  sleep 2
+
+  local script_name
+  _SHELL_RETRY_MODE=1
+  for script_name in "${failed_names[@]}"; do
+    log_info "Retrying shell test: $script_name"
+    run_shell_test_isolated "$script_name"
+    kill_all_bifrost 2>/dev/null || true
+  done
+  _SHELL_RETRY_MODE=0
+
+  return 0
+}
+
 run_shell_test_isolated() {
   local script_name="$1"
 
@@ -1235,6 +1322,8 @@ if [[ "$RUN_SHELL" -eq 1 ]]; then
         run_shell_test_isolated "$script_name"
       done
     fi
+
+    retry_failed_shell_suites_once
   else
     for script_name in "${shell_tests[@]}"; do
       log_info "Skip shell test without execution: $script_name"
