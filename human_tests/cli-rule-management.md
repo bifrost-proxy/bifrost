@@ -647,6 +647,92 @@
 
 ---
 
+### TC-CRM-46：有效规则新增返回 JSON 语法检查报告
+
+**操作步骤**：
+1. 执行：
+   ```bash
+   bifrost rule add syntax-valid-cli --json -c "example.com host://127.0.0.1:3000"
+   ```
+
+**预期结果**：
+- 命令退出码为 0
+- 输出 JSON 包含 `"success": true`
+- 输出 JSON 包含 `"saved": true`
+- 输出 JSON 包含 `"syntax.valid": true`
+- 输出 JSON 包含 `"syntax.rule_count": 1`
+
+---
+
+### TC-CRM-47：缺失引用规则新增失败且不落盘
+
+**操作步骤**：
+1. 执行：
+   ```bash
+   bifrost rule add syntax-invalid-cli --json -c "@missing-shared-rule"
+   ```
+2. 执行：
+   ```bash
+   bifrost rule show syntax-invalid-cli
+   ```
+
+**预期结果**：
+- 第 1 步命令退出码为 2
+- 第 1 步输出 JSON 包含 `"success": false`
+- 第 1 步输出 JSON 包含 `"saved": false`
+- 第 1 步输出 JSON 包含 `"syntax.valid": false`
+- 第 1 步输出 JSON 包含 `"syntax.errors[0].code": "E020"`
+- 第 2 步返回规则不存在错误，说明无效规则没有落盘
+
+---
+
+### TC-CRM-48：缺失引用规则更新失败且保留旧内容
+
+**前置条件**：已添加规则 `syntax-preserve-cli`，内容为 `preserve.example.com host://127.0.0.1:3001`
+
+**操作步骤**：
+1. 执行：
+   ```bash
+   bifrost rule update syntax-preserve-cli --json -c "@missing-update-reference"
+   ```
+2. 执行：
+   ```bash
+   bifrost rule show syntax-preserve-cli
+   ```
+
+**预期结果**：
+- 第 1 步命令退出码为 2
+- 第 1 步输出 JSON 包含 `"saved": false`
+- 第 1 步输出 JSON 包含 `"syntax.errors[0].code": "E020"`
+- 第 2 步仍显示 `preserve.example.com host://127.0.0.1:3001`
+
+---
+
+### TC-CRM-49：allow-invalid 显式保存无效规则并返回语法错误
+
+**操作步骤**：
+1. 执行：
+   ```bash
+   bifrost rule add syntax-allowed-cli --json --allow-invalid -c "@missing-allowed-reference"
+   ```
+2. 执行：
+   ```bash
+   bifrost rule show syntax-allowed-cli
+   ```
+
+**预期结果**：
+- 第 1 步命令退出码为 0
+- 第 1 步输出 JSON 包含 `"success": true`
+- 第 1 步输出 JSON 包含 `"saved": true`
+- 第 1 步输出 JSON 包含 `"syntax.valid": false`
+- 第 1 步输出 JSON 包含 `"syntax.errors[0].code": "E020"`
+- 第 2 步显示 `@missing-allowed-reference`
+
+**执行结果（2026-06-12，本地开发分支）**：
+- ✅ PASS：执行 `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_rule_syntax_cli.sh`。脚本使用临时 `BIFROST_DATA_DIR` 和当前分支 debug 二进制，验证有效新增返回 JSON `saved=true` / `syntax.valid=true`，缺失 `@` 引用新增退出码为 2 且不落盘，缺失引用更新退出码为 2 且旧内容保持不变，`--allow-invalid` 可保存无效规则但返回 `syntax.valid=false` / `E020`。
+
+---
+
 ## 清理
 
 测试完成后清理临时数据和临时文件：

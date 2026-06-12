@@ -1,11 +1,15 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-use bifrost_core::rule_share::{
-    append_rule_share_query, new_rule_share_payload, share_payload_name_from_rule,
+use bifrost_core::{
+    rule_share::{append_rule_share_query, new_rule_share_payload, share_payload_name_from_rule},
+    RuleSyntaxReport, ValueStore,
 };
-use bifrost_storage::{ConfigManager, RuleFile, RulesStorage};
+use bifrost_storage::{
+    build_rule_reference_catalog, ConfigManager, RuleFile, RulesStorage, ValuesStorage,
+};
 use bifrost_sync::{SyncAction, SyncManager};
 
 use crate::cli::RuleCommands;
@@ -40,21 +44,35 @@ fn handle_rule_local(action: RuleCommands) -> bifrost_core::Result<()> {
             name,
             content,
             file,
+            allow_invalid,
+            json,
         } => {
             let rule_content = load_rule_content(content, file)?;
+            let syntax = validate_local_rule_syntax(&storage, &name, &rule_content)?;
+            if !syntax.valid && !allow_invalid {
+                print_rule_syntax_rejection(&name, &syntax, json)?;
+                std::process::exit(2);
+            }
 
             let rule = RuleFile::new(&name, rule_content);
             storage.save(&rule)?;
-            println!("Rule '{}' added successfully.", name);
+            print_rule_mutation_success(&name, "added", &syntax, json)?;
         }
         RuleCommands::Update {
             name,
             content,
             file,
+            allow_invalid,
+            json,
         } => {
             let rule_content = load_rule_content(content, file)?;
+            let syntax = validate_local_rule_syntax(&storage, &name, &rule_content)?;
+            if !syntax.valid && !allow_invalid {
+                print_rule_syntax_rejection(&name, &syntax, json)?;
+                std::process::exit(2);
+            }
             storage.update_content(&name, rule_content)?;
-            println!("Rule '{}' updated successfully.", name);
+            print_rule_mutation_success(&name, "updated", &syntax, json)?;
         }
         RuleCommands::Delete { name } => {
             storage.delete(&name)?;
@@ -106,6 +124,109 @@ fn handle_rule_local(action: RuleCommands) -> bifrost_core::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct RuleMutationCliResponse<'a> {
+    success: bool,
+    message: String,
+    saved: bool,
+    syntax: &'a RuleSyntaxReport,
+}
+
+fn validate_local_rule_syntax(
+    storage: &RulesStorage,
+    name: &str,
+    content: &str,
+) -> bifrost_core::Result<RuleSyntaxReport> {
+    let global_values = ValuesStorage::new()
+        .ok()
+        .map(|storage| storage.as_hashmap())
+        .unwrap_or_default();
+    Ok(validate_local_rule_syntax_with_values(
+        storage,
+        name,
+        content,
+        &global_values,
+    ))
+}
+
+fn validate_local_rule_syntax_with_values(
+    storage: &RulesStorage,
+    name: &str,
+    content: &str,
+    global_values: &HashMap<String, String>,
+) -> RuleSyntaxReport {
+    let rule_files = storage.load_all_with_subdirs().unwrap_or_default();
+    let mut reference_catalog = build_rule_reference_catalog(&rule_files);
+    reference_catalog.insert(name.to_string(), content.to_string());
+    bifrost_core::validate_rule_syntax_report(name, content, &reference_catalog, global_values)
+}
+
+fn print_rule_syntax_rejection(
+    name: &str,
+    syntax: &RuleSyntaxReport,
+    json: bool,
+) -> bifrost_core::Result<()> {
+    let message = format!("Rule '{name}' was not saved because syntax validation failed");
+    if json {
+        print_rule_mutation_json(false, message, false, syntax)?;
+        return Ok(());
+    }
+
+    eprintln!("Rule '{name}' was not saved: {}", syntax.guidance.summary);
+    for error in &syntax.errors {
+        let code = error.code.as_deref().unwrap_or("syntax");
+        eprintln!(
+            "{code} line {}:{}-{}: {}",
+            error.line, error.start_column, error.end_column, error.message
+        );
+        if let Some(suggestion) = &error.suggestion {
+            eprintln!("Suggestion: {suggestion}");
+        }
+    }
+    for action in &syntax.guidance.next_actions {
+        eprintln!("Next: {action}");
+    }
+    Ok(())
+}
+
+fn print_rule_mutation_success(
+    name: &str,
+    action: &str,
+    syntax: &RuleSyntaxReport,
+    json: bool,
+) -> bifrost_core::Result<()> {
+    let message = format!("Rule '{name}' {action} successfully.");
+    if json {
+        print_rule_mutation_json(true, message, true, syntax)?;
+    } else {
+        println!("{message}");
+        for warning in &syntax.warnings {
+            let code = warning.code.as_deref().unwrap_or("warning");
+            println!("{code} line {}: {}", warning.line, warning.message);
+            if let Some(suggestion) = &warning.suggestion {
+                println!("Suggestion: {suggestion}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_rule_mutation_json(
+    success: bool,
+    message: String,
+    saved: bool,
+    syntax: &RuleSyntaxReport,
+) -> bifrost_core::Result<()> {
+    let response = RuleMutationCliResponse {
+        success,
+        message,
+        saved,
+        syntax,
+    };
+    println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
 }
 
@@ -165,6 +286,64 @@ mod tests {
         assert!(resp.rules[0].group_name.is_none());
         assert!(resp.variable_conflicts.is_empty());
         assert!(resp.merged_content.is_empty());
+    }
+
+    #[test]
+    fn validate_local_rule_syntax_reports_valid_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RulesStorage::with_dir(dir.path().join("rules")).unwrap();
+
+        let report = validate_local_rule_syntax_with_values(
+            &storage,
+            "valid",
+            "example.com host://127.0.0.1:3000",
+            &HashMap::new(),
+        );
+
+        assert!(report.valid);
+        assert_eq!(report.rule_count, 1);
+        assert!(report.errors.is_empty());
+        assert_eq!(report.guidance.summary, "Rule syntax is valid.");
+    }
+
+    #[test]
+    fn validate_local_rule_syntax_reports_missing_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RulesStorage::with_dir(dir.path().join("rules")).unwrap();
+
+        let report = validate_local_rule_syntax_with_values(
+            &storage,
+            "entry",
+            "@missing-shared",
+            &HashMap::new(),
+        );
+
+        assert!(!report.valid);
+        assert_eq!(report.errors.len(), 1);
+        assert_eq!(report.errors[0].code.as_deref(), Some("E020"));
+        assert!(!report.guidance.next_actions.is_empty());
+    }
+
+    #[test]
+    fn validate_local_rule_syntax_expands_existing_references() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RulesStorage::with_dir(dir.path().join("rules")).unwrap();
+        storage
+            .save(&RuleFile::new(
+                "shared",
+                "api.example.com reqHeaders://X-Shared=ok",
+            ))
+            .unwrap();
+
+        let report = validate_local_rule_syntax_with_values(
+            &storage,
+            "entry",
+            "@shared\nexample.com host://127.0.0.1:3000",
+            &HashMap::new(),
+        );
+
+        assert!(report.valid);
+        assert_eq!(report.rule_count, 2);
     }
 }
 

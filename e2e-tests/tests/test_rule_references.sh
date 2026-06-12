@@ -202,7 +202,14 @@ EOF_RUNTIME
 )"
 
 log "creating enabled rule with missing reference ${MISSING_ENTRY_RULE_NAME}"
-create_rule "$MISSING_ENTRY_RULE_NAME" "$missing_runtime_content" "true" >/dev/null
+missing_runtime_payload="$(jq -cn \
+  --arg name "$MISSING_ENTRY_RULE_NAME" \
+  --arg content "$missing_runtime_content" \
+  '{name:$name, content:$content, enabled:true, allow_invalid:true}')"
+missing_runtime_create_response="$(admin_post "/api/rules" "$missing_runtime_payload")"
+assert_json_field "$missing_runtime_create_response" ".saved" "true"
+assert_json_field "$missing_runtime_create_response" ".syntax.valid" "false"
+assert_json_field "$missing_runtime_create_response" ".syntax.errors[0].code" "E020"
 
 log "requesting through proxy and waiting for runtime missing reference to be ignored"
 missing_runtime_matched=0

@@ -160,7 +160,26 @@ example.com host://127.0.0.1:3000
 
 个人私有规则不需要带组名称。组规则必须使用 `组名称/规则名称`，避免和同名私有规则冲突。规则引用只在独立 `@` 行生效；普通 `#` 注释里的 `@规则名称` 不会被当作引用。`@comment` 保持为注释指令，`commented-*` 这类真实规则名仍可正常引用。规则引用支持嵌套；运行时解析遇到缺失引用会跳过该引用行并继续解析后续规则，避免因为删除或尚未同步的引用规则导致整条入口规则失效。循环引用仍会让入口规则解析失败。Rules 编辑器的语法校验会对缺失引用返回 `E020`，并把对应 `@规则` 标红显示悬浮错误提示，便于用户及时修正。
 
-### 9. 规则分享链接
+### 9. 保存时语法检查
+
+通过 Admin API、Group Rule API 或 CLI 新增/更新规则时，Bifrost 会在落盘前运行同一套语法检查服务：
+
+- 规则有效时正常保存，并在响应中返回 `syntax.valid=true`、`rule_count`、`warnings` 和 `guidance`。
+- 规则无效时默认拒绝保存；Admin API 返回 HTTP 422 且 `saved=false`，CLI 返回退出码 2。
+- 响应中的 `syntax.errors[]` 会包含 `line`、`start_column`、`end_column`、`code`、`message` 和 `suggestion`，Agent 调用方应优先按第一条 error 修复后重试。
+- 如果确实需要保存临时无效规则，可以显式传 `allow_invalid=true` 或 CLI `--allow-invalid`；此时会保存，但 `syntax.valid` 仍为 `false`，调用方不能把它当作已通过校验。
+
+CLI 示例：
+
+```bash
+bifrost rule add bad --json --content "@missing-shared"
+# exit code: 2，JSON 中 saved=false、syntax.errors[0].code=E020
+
+bifrost rule add draft --json --allow-invalid --content "@missing-shared"
+# exit code: 0，JSON 中 saved=true、syntax.valid=false
+```
+
+### 10. 规则分享链接
 
 Bifrost 支持把一条个人规则编码到任意 HTTP/HTTPS URL 的特殊 query 中，用于把规则分享给其他本机 Bifrost 用户或自动化 Agent。协议 query 名固定为 `__bifrost_rule`，内容是 URL-safe base64 编码的 JSON payload，包含规则名称、规则内容、版本号、内容 hash、导入模式和独占启用范围。
 

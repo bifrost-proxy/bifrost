@@ -363,8 +363,12 @@ bifrost rule list
 bifrost rule active
 bifrost rule add <name> --content "rule"
 bifrost rule add <name> --file rules.txt
+bifrost rule add <name> --json --content "rule"
+bifrost rule add <name> --allow-invalid --content "draft rule"
 bifrost rule update <name> --content "new rule"
 bifrost rule update <name> --file rules.txt
+bifrost rule update <name> --json --content "new rule"
+bifrost rule update <name> --allow-invalid --content "draft rule"
 bifrost rule enable <name>
 bifrost rule disable <name>
 bifrost rule delete <name>
@@ -381,6 +385,8 @@ bifrost rule reorder <name1> <name2> ...
 - `rule active` 需要代理服务运行中（通过管理接口获取运行时已启用规则摘要）
 - `rule share` 会生成带 `__bifrost_rule` query 的分享链接。目标 URL 支持完整 `http://` / `https://` 地址，也支持 `a.com`、`example.com/path`、`localhost:3000` 这类裸域名输入；裸域名会默认规范成 `http://...`，确保普通 HTTP 代理请求能在不依赖 TLS 拦截的情况下看到并导入分享 query。显式输入 `https://...` 时会保持 HTTPS。未传 `--content` 或 `--file` 时读取同名本地规则；传入 `--content` 或 `--file` 时只生成链接，不把规则写入本地规则目录。
 - 分享链接被 Bifrost 代理劫持后会导入到 `share/<规则名>` 命名空间并启用它，同时禁用其他个人规则。第一版固定 `exclusive_scope=my_rules`，不会修改 Group 规则。对已导入的 `share/...` 规则再次执行 `rule share` 时，协议 payload 会自动剥掉 `share/` 前缀，继续使用原始分享名。
+- `rule add` / `rule update` 默认会在保存前执行语法检查。规则无效时命令退出码为 2，不写入规则文件；加 `--json` 可获得 `saved=false`、`syntax.errors[]` 和 `syntax.guidance` 结构化反馈，便于 Agent 按建议修复后重试。
+- `--allow-invalid` 只用于显式保存临时草稿；命令仍会返回语法报告，且无效规则的 `syntax.valid` 保持为 `false`。
 
 ### Group 管理
 
@@ -401,10 +407,12 @@ bifrost group rule show <group_id> <rule_name>
 # 添加 group 规则
 bifrost group rule add <group_id> <name> --content "example.com host://127.0.0.1:3000"
 bifrost group rule add <group_id> <name> --file rules.txt
+bifrost group rule add <group_id> <name> --allow-invalid --content "@draft-shared"
 
 # 更新 group 规则
 bifrost group rule update <group_id> <name> --content "new rule"
 bifrost group rule update <group_id> <name> --file rules.txt
+bifrost group rule update <group_id> <name> --allow-invalid --content "@draft-shared"
 
 # 启用/禁用 group 规则
 bifrost group rule enable <group_id> <name>
@@ -417,6 +425,7 @@ bifrost group rule delete <group_id> <name>
 - `group` 命令需要代理服务运行中（通过 admin API 通信）
 - `group list` 支持 `--keyword` 模糊搜索和 `--limit` 限制结果数
 - `group rule add/update` 通过 `--content` 或 `--file` 提供规则内容
+- `group rule add/update` 调用管理接口保存，因此同样会触发保存前语法检查；后端拒绝保存时 CLI 会显示 HTTP 422、第一条语法错误和修复建议。`--allow-invalid` 会显式透传给后端，允许保存临时无效草稿。
 
 ### 白名单管理
 

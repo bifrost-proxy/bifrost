@@ -19,7 +19,7 @@
 | [default-tls-app-whitelist.md](./default-tls-app-whitelist.md) | 默认 TLS 应用白名单 | 3 | 持久化配置默认值、代理运行时默认值和真实临时服务 Admin API 返回值均只包含常见浏览器模式，默认不包含 Codex |
 | [cli-start-stop-status.md](./cli-start-stop-status.md) | CLI 服务管理 | 32 | start/stop/status 命令，含守护进程、自定义端口、TLS 选项、规则加载、SOCKS5、LAN 访问、代理认证、status 顶部代理能力/TLS 边界概览、默认端口规则摘要分区、status 活跃规则摘要，以及 listener 失败退出、daemon readiness、daemon CA 检查、daemon stop zombie 状态回归、stop 前置清理系统代理与 restart 保留系统代理回归、Remote Invoke 历史 JSONL 按需分页且不阻塞代理监听回归 |
 | [cli-start-advanced.md](./cli-start-advanced.md) | CLI Start 高级参数 | 33 | 顶层 help 短链化、按场景组织的 CLI 快速开始、同一 Bifrost 服务服务多个应用/开发任务、Agent 协作开发业务 Skill 场景、完整 CLI 详细文档入口、全局 Values 推荐边界、TLS 拦截域名/应用排除与白名单、系统代理（默认启用、--no-system-proxy 禁用、异步收敛轮询、互斥校验）、CLI 代理环境变量、访问控制模式、Badge 注入、证书检查跳过、日志配置 |
-| [cli-rule-management.md](./cli-rule-management.md) | CLI 规则管理 | 45 | rule 子命令全覆盖：list/add/show/get/update/enable/disable/delete/rename/reorder/active/sync，含过滤器和 lineProps |
+| [cli-rule-management.md](./cli-rule-management.md) | CLI 规则管理 | 49 | rule 子命令全覆盖：list/add/show/get/update/enable/disable/delete/rename/reorder/active/sync，含过滤器、lineProps，以及保存前语法检查 JSON 报告、失败不落盘和 allow-invalid 草稿保存 |
 | [rule-share-query.md](./rule-share-query.md) | Rule Share Query | 8 | CLI/Web UI/Admin API 生成分享链接、裸域名目标 URL 默认补 HTTP 并经代理真实导入、HTTPS TLS 解包路径导入含 `@规则引用` 的分享链接、代理 GET 导入后重定向 clean URL、`share/` 命名空间复用、同名不同内容后缀创建并独占启用个人规则 |
 | [rules-filesystem-hot-reload.md](./rules-filesystem-hot-reload.md) | 规则文件系统热更新 | 5 | CLI 本地规则新增/更新/删除、直接 `.bifrost` 文件编辑和直接删除后，运行中代理与 Rules active summary 自动刷新，Group 规则无变化同步不重复写盘 |
 | [cli-rule-list-legacy-skip.md](./cli-rule-list-legacy-skip.md) | CLI `rule list` `.bifrost` 文件过滤 | 2 | 非 `.bifrost` 文件自动忽略，且 group 子目录规则仍可正常读取 |
@@ -60,7 +60,7 @@
 | [remote-access-brute-force-protection.md](./remote-access-brute-force-protection.md) | 远程访问暴力破解防护 | 13 | 登录失败计数、自动锁定、密码强度校验、本机恢复、前端锁定提示 |
 | [webui-traffic.md](./webui-traffic.md) | Web UI Traffic 页面 | 51 | 流量表格、详情面板、Tab 切换、Body 视图、筛选过滤（含主筛选器按代理端口过滤与临时停用单条条件）、右键菜单、CONNECT Response 空状态按 Client IP 开启 TLS 解包和访问白名单、Network .bifrost 导入导出空包防误报、WebSocket/SSE、搜索、高并发 CONNECT 压力 |
 | [network-export.md](./network-export.md) | Network 导出生效规则快照 | 4 | 默认端口与自定义端口 Network `.bifrost` 导出携带对应端口生效规则快照，保持空选择防护和旧文件导入兼容 |
-| [webui-rules.md](./webui-rules.md) | Web UI Rules 页面 | 45 | 规则列表、创建/编辑/删除、排序方式 UI 配置持久化、语法高亮、自动补全、树形视图、`@规则名称` 与 `@组名称/规则名称` 引用解析、候选检索、模糊补全、编辑器原位展开、缺失引用标红和 hover 错误提示、`commented-*` 规则名与注释内 `@` 边界、Dynamic Island、Merged Rules 一键复制、Group active summary 与代理运行时本地 fallback、远端失败和快速本地变更稳定性、Group name 深链不返回 502、退出/重新登录后 Group ID 跳转保持、导入导出、桌面端编辑器快捷键回归、Undo 后保存清理黄点、编辑器内容恢复原文后 Save 按钮禁用回归 |
+| [webui-rules.md](./webui-rules.md) | Web UI Rules 页面 | 46 | 规则列表、创建/编辑/删除、排序方式 UI 配置持久化、语法高亮、自动补全、树形视图、`@规则名称` 与 `@组名称/规则名称` 引用解析、候选检索、模糊补全、编辑器原位展开、缺失引用标红和 hover 错误提示、保存时后端语法错误反馈且不落盘、`commented-*` 规则名与注释内 `@` 边界、Dynamic Island、Merged Rules 一键复制、Group active summary 与代理运行时本地 fallback、远端失败和快速本地变更稳定性、Group name 深链不返回 502、退出/重新登录后 Group ID 跳转保持、导入导出、桌面端编辑器快捷键回归、Undo 后保存清理黄点、编辑器内容恢复原文后 Save 按钮禁用回归 |
 | [webui-scripts.md](./webui-scripts.md) | Web UI Scripts 页面 | 25 | 脚本创建（Req/Res/Dec/Parser）、顶部 + 创建菜单、... 更多操作菜单、真实 Import 文件选择器、编辑、保存、测试运行、日志查看、名称校验、树形目录、Parser/Decode 运行时上下文字段补全、桌面端编辑器快捷键回归、Undo 后保存清理黄点 |
 | [webui-values.md](./webui-values.md) | Web UI Values 页面 | 20 | Value 列表、创建/编辑/删除、编辑器、规则引用、导入导出、桌面端编辑器快捷键回归、Undo 后保存清理黄点 |
 | [webui-replay.md](./webui-replay.md) | Web UI Replay 页面 | 24 | HTTP 请求重放、集合管理、SSE/WebSocket 重放、Replay WebSocket 规则头回归、curl 导入、多种 Body 类型、localhost 转发与 passthrough 优先级回归 |
@@ -98,7 +98,7 @@
 
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
-| [api-rules.md](./api-rules.md) | Rules API | 13 | 规则 CRUD、启用/禁用、特殊字符名称、重复创建、rule_count 验证 |
+| [api-rules.md](./api-rules.md) | Rules API | 17 | 规则 CRUD、启用/禁用、特殊字符名称、重复创建、rule_count 验证，以及保存前语法检查报告、422 不落盘、更新失败保留旧内容和 allow_invalid 显式保存 |
 | [api-traffic.md](./api-traffic.md) | Traffic API | 23 | 流量列表/详情/Body、增量更新、多维度过滤、WebSocket 帧、SSE 流 |
 | [api-values.md](./api-values.md) | Values API | 15 | Values CRUD、列表查询、边界条件、错误处理 |
 | [api-whitelist.md](./api-whitelist.md) | Whitelist API | 27 | 白名单增删、模式切换、allow-lan、临时白名单、待授权管理、SSE 事件流 |

@@ -32,6 +32,34 @@ function groupRuleToRuleFile(info: GroupRuleInfo): RuleFile {
   };
 }
 
+function formatRuleMutationError(error: unknown, fallback: string): string {
+  const base = normalizeApiErrorMessage(error, fallback);
+  const data = (error as { response?: { data?: unknown } })?.response?.data;
+  if (!data || typeof data !== 'object' || !('syntax' in data)) {
+    return base;
+  }
+  const syntax = (data as {
+    syntax?: {
+      errors?: Array<{
+        line?: number;
+        start_column?: number;
+        code?: string;
+        message?: string;
+        suggestion?: string;
+      }>;
+      guidance?: { summary?: string };
+    };
+  }).syntax;
+  const first = syntax?.errors?.[0];
+  if (!first) {
+    return syntax?.guidance?.summary ? `${base}: ${syntax.guidance.summary}` : base;
+  }
+  const code = first.code ? `${first.code} ` : '';
+  const line = first.line ? `line ${first.line}${first.start_column ? `:${first.start_column}` : ''}` : 'rule';
+  const suggestion = first.suggestion ? ` Suggestion: ${first.suggestion}` : '';
+  return `${base}: ${code}${line}: ${first.message || 'syntax validation failed'}.${suggestion}`;
+}
+
 interface RulesState {
   rules: RuleFile[];
   currentRule: RuleFileDetail | null;
@@ -250,7 +278,10 @@ export const useRulesStore = create<RulesState>((set, get) => ({
         await get().selectRule(detail.name);
         return true;
       } catch (e) {
-        set({ error: isConnectionIssueError(e) ? null : (e as Error).message, loading: false });
+        set({
+          error: isConnectionIssueError(e) ? null : formatRuleMutationError(e, 'Failed to create rule'),
+          loading: false,
+        });
         return false;
       }
     }
@@ -263,7 +294,10 @@ export const useRulesStore = create<RulesState>((set, get) => ({
       await get().selectRule(name);
       return true;
     } catch (e) {
-      set({ error: isConnectionIssueError(e) ? null : (e as Error).message, loading: false });
+      set({
+        error: isConnectionIssueError(e) ? null : formatRuleMutationError(e, 'Failed to create rule'),
+        loading: false,
+      });
       return false;
     }
   },
@@ -278,7 +312,10 @@ export const useRulesStore = create<RulesState>((set, get) => ({
       }
       return true;
     } catch (e) {
-      set({ error: isConnectionIssueError(e) ? null : (e as Error).message, loading: false });
+      set({
+        error: isConnectionIssueError(e) ? null : formatRuleMutationError(e, 'Failed to update rule'),
+        loading: false,
+      });
       return false;
     }
   },
@@ -329,7 +366,10 @@ export const useRulesStore = create<RulesState>((set, get) => ({
         await get().fetchRules();
         return true;
       } catch (e) {
-        set({ error: isConnectionIssueError(e) ? null : (e as Error).message, saving: false });
+        set({
+          error: isConnectionIssueError(e) ? null : formatRuleMutationError(e, 'Failed to save rule'),
+          saving: false,
+        });
         return false;
       }
     }
@@ -364,7 +404,10 @@ export const useRulesStore = create<RulesState>((set, get) => ({
       }
       return true;
     } catch (e) {
-      set({ error: isConnectionIssueError(e) ? null : (e as Error).message, saving: false });
+      set({
+        error: isConnectionIssueError(e) ? null : formatRuleMutationError(e, 'Failed to save rule'),
+        saving: false,
+      });
       return false;
     }
   },

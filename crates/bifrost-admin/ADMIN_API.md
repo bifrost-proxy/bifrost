@@ -83,17 +83,78 @@ POST /api/rules
 {
   "name": "my-rules",
   "content": "example.com proxy://127.0.0.1:8080",
-  "enabled": true
+  "enabled": true,
+  "allow_invalid": false
 }
 ```
 
-| 字段    | 类型    | 必填 | 说明                |
-| ------- | ------- | ---- | ------------------- |
-| name    | string  | 是   | 规则文件名称        |
-| content | string  | 是   | 规则内容            |
-| enabled | boolean | 否   | 是否启用，默认 true |
+| 字段          | 类型    | 必填 | 说明                                                |
+| ------------- | ------- | ---- | --------------------------------------------------- |
+| name          | string  | 是   | 规则文件名称                                        |
+| content       | string  | 是   | 规则内容                                            |
+| enabled       | boolean | 否   | 是否启用，默认 true                                 |
+| allow_invalid | boolean | 否   | 是否在语法检查失败时仍保存，默认 false，不建议常用 |
 
-**响应**: 成功响应
+**响应**: 成功响应会同时返回保存结果和语法检查报告。
+
+```json
+{
+  "success": true,
+  "message": "Rule 'my-rules' created successfully",
+  "saved": true,
+  "syntax": {
+    "valid": true,
+    "rule_count": 1,
+    "errors": [],
+    "warnings": [],
+    "defined_variables": [],
+    "script_references": [],
+    "guidance": {
+      "summary": "Rule syntax looks valid.",
+      "retryable": true,
+      "next_actions": [
+        "Save the rule or continue with runtime testing against real traffic."
+      ]
+    }
+  }
+}
+```
+
+如果语法检查失败且 `allow_invalid` 未开启，接口返回 HTTP 422，规则不会保存：
+
+```json
+{
+  "success": false,
+  "message": "Rule 'my-rules' was not saved because syntax validation failed",
+  "saved": false,
+  "syntax": {
+    "valid": false,
+    "rule_count": 0,
+    "errors": [
+      {
+        "line": 1,
+        "start_column": 1,
+        "end_column": 15,
+        "message": "Referenced rule 'missing-shared' was not found",
+        "severity": "error",
+        "code": "E020",
+        "suggestion": "Create the referenced rule first, fix the @ reference name, or remove this reference line."
+      }
+    ],
+    "warnings": [],
+    "defined_variables": [],
+    "script_references": [],
+    "guidance": {
+      "summary": "Rule syntax validation failed with 1 error(s).",
+      "retryable": true,
+      "next_actions": [
+        "Fix the first reported error location, then retry the save or update request.",
+        "If this rule intentionally depends on a missing @ reference, create or sync that referenced rule first."
+      ]
+    }
+  }
+}
+```
 
 **应用场景**: 通过 API 或 Web UI 创建新的规则文件。
 
@@ -134,14 +195,18 @@ PUT /api/rules/{name}
 ```json
 {
   "content": "新的规则内容",
-  "enabled": true
+  "enabled": true,
+  "allow_invalid": false
 }
 ```
 
-| 字段    | 类型    | 必填 | 说明     |
-| ------- | ------- | ---- | -------- |
-| content | string  | 否   | 规则内容 |
-| enabled | boolean | 否   | 是否启用 |
+| 字段          | 类型    | 必填 | 说明                                                |
+| ------------- | ------- | ---- | --------------------------------------------------- |
+| content       | string  | 否   | 规则内容                                            |
+| enabled       | boolean | 否   | 是否启用                                            |
+| allow_invalid | boolean | 否   | 是否在语法检查失败时仍保存，默认 false，不建议常用 |
+
+**响应**: 与创建规则一致，返回 `success`、`saved` 和 `syntax`。当新内容语法检查失败且未开启 `allow_invalid` 时，接口返回 HTTP 422，旧规则内容保持不变。
 
 **应用场景**: 修改规则内容或状态。
 

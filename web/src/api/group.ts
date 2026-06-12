@@ -1,5 +1,6 @@
 import { get, post, del } from './client';
 import client from './client';
+import type { RuleSyntaxReport } from '../types';
 
 export type GroupVisibility = 'public' | 'private';
 
@@ -369,6 +370,7 @@ export interface GroupRuleDetail {
     remote_id?: string;
     remote_updated_at?: string;
   };
+  syntax?: RuleSyntaxReport;
 }
 
 export async function fetchGroupRules(groupId: string): Promise<GroupRulesResponse> {

@@ -1,5 +1,5 @@
 import { get, post, put, del } from './client';
-import type { RuleFile, RuleFileDetail, ApiResponse } from '../types';
+import type { RuleFile, RuleFileDetail, ApiResponse, RuleSyntaxReport } from '../types';
 
 export interface ActiveRuleItem {
   name: string;
@@ -41,6 +41,11 @@ export interface RuleShareLinkResponse {
   content_hash: string;
 }
 
+export interface RuleMutationResponse extends ApiResponse {
+  saved?: boolean;
+  syntax?: RuleSyntaxReport;
+}
+
 export async function getActiveSummary(): Promise<ActiveSummaryResponse> {
   return get<ActiveSummaryResponse>('/rules/active-summary');
 }
@@ -57,12 +62,12 @@ export async function getRule(name: string): Promise<RuleFileDetail> {
   return get<RuleFileDetail>(`/rules/${encodeURIComponent(name)}`);
 }
 
-export async function createRule(name: string, content: string, enabled = true): Promise<ApiResponse> {
-  return post<ApiResponse>('/rules', { name, content, enabled });
+export async function createRule(name: string, content: string, enabled = true): Promise<RuleMutationResponse> {
+  return post<RuleMutationResponse>('/rules', { name, content, enabled });
 }
 
-export async function updateRule(name: string, content?: string, enabled?: boolean): Promise<ApiResponse> {
-  return put<ApiResponse>(`/rules/${encodeURIComponent(name)}`, { content, enabled });
+export async function updateRule(name: string, content?: string, enabled?: boolean): Promise<RuleMutationResponse> {
+  return put<RuleMutationResponse>(`/rules/${encodeURIComponent(name)}`, { content, enabled });
 }
 
 export async function reorderRules(order: string[]): Promise<ApiResponse> {
