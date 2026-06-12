@@ -55,6 +55,78 @@ const SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL_ENV: &str =
 const RULES_FILESYSTEM_FALLBACK_SCAN_INTERVAL: Duration = Duration::from_secs(30);
 const RULES_FILESYSTEM_DEBOUNCE_DELAY: Duration = Duration::from_millis(150);
 
+fn spawn_remote_invoke_worker_startup_task(
+    shared_config_manager: Arc<ConfigManager>,
+    sync_manager: Arc<SyncManager>,
+    admin_state: Arc<AdminState>,
+    admin_host: String,
+    admin_port: u16,
+) {
+    tracing::info!(
+        target: "bifrost_cli::startup",
+        admin_host = %admin_host,
+        admin_port = admin_port,
+        "remote invoke worker initialization scheduled"
+    );
+    tokio::spawn(async move {
+        let started_at = Instant::now();
+        let relay_url = shared_config_manager
+            .try_config()
+            .map(|c| c.sync.remote_base_url.clone())
+            .unwrap_or_else(|| DEFAULT_REMOTE_BASE_URL.to_string());
+        let data_dir_path = shared_config_manager.data_dir().to_path_buf();
+        let admin_state_for_worker = admin_state.clone();
+        let sync_manager_for_worker = sync_manager.clone();
+        let worker_result = tokio::task::spawn_blocking(move || {
+            let identity = bifrost_admin::RemoteInvokeIdentity::load_or_create(&data_dir_path)
+                .map_err(|e| e.to_string())?;
+            let ri_config = bifrost_admin::RemoteInvokeConfig {
+                relay_url,
+                ..Default::default()
+            };
+            Ok::<_, String>(bifrost_admin::RemoteInvokeWorker::new(
+                ri_config,
+                identity,
+                Some(bifrost_sync::SyncManagerHandle::new(
+                    sync_manager_for_worker,
+                )),
+                admin_state_for_worker,
+                &admin_host,
+                admin_port,
+            ))
+        })
+        .await;
+
+        match worker_result {
+            Ok(Ok(worker)) => {
+                admin_state.set_remote_invoke_worker(worker.clone());
+                worker.start();
+                tracing::info!(
+                    target: "bifrost_cli::startup",
+                    elapsed_ms = started_at.elapsed().as_millis() as u64,
+                    "remote invoke worker initialized asynchronously"
+                );
+            }
+            Ok(Err(error)) => {
+                tracing::info!(
+                    target: "bifrost_cli::startup",
+                    error = %error,
+                    elapsed_ms = started_at.elapsed().as_millis() as u64,
+                    "remote invoke identity init failed, feature disabled"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "bifrost_cli::startup",
+                    error = %error,
+                    elapsed_ms = started_at.elapsed().as_millis() as u64,
+                    "remote invoke worker initialization task failed"
+                );
+            }
+        }
+    });
+}
+
 fn parse_yes_no_answer(input: &str) -> Option<bool> {
     match input.trim().to_ascii_lowercase().as_str() {
         "y" | "yes" => Some(true),
@@ -1913,41 +1985,18 @@ pub fn run_foreground(
 
             let admin_state = Arc::new(admin_state);
 
-            {
-                let relay_url = shared_config_manager
-                    .try_config()
-                    .map(|c| c.sync.remote_base_url.clone())
-                    .unwrap_or_else(|| DEFAULT_REMOTE_BASE_URL.to_string());
-
-                let data_dir_path = shared_config_manager.data_dir().to_path_buf();
-                match bifrost_admin::RemoteInvokeIdentity::load_or_create(&data_dir_path) {
-                    Ok(identity) => {
-                        let admin_host = if config.host == "0.0.0.0" {
-                            "127.0.0.1"
-                        } else {
-                            &config.host
-                        };
-                                let ri_config = bifrost_admin::RemoteInvokeConfig {
-                                    relay_url,
-                                    ..Default::default()
-                                };
-                                let worker = bifrost_admin::RemoteInvokeWorker::new(
-                                    ri_config,
-                                    identity,
-                                    Some(bifrost_sync::SyncManagerHandle::new(sync_manager.clone())),
-                                    admin_state.clone(),
-                                    admin_host,
-                                    config.port,
-                                );
-                                admin_state.set_remote_invoke_worker(worker.clone());
-                                worker.start();
-                                info!("remote invoke worker initialized");
-                            }
-                            Err(e) => {
-                                info!(error = %e, "remote invoke identity init failed, feature disabled");
-                            }
-                        }
-            }
+            let remote_invoke_admin_host = if config.host == "0.0.0.0" {
+                "127.0.0.1".to_string()
+            } else {
+                config.host.clone()
+            };
+            spawn_remote_invoke_worker_startup_task(
+                shared_config_manager.clone(),
+                sync_manager.clone(),
+                admin_state.clone(),
+                remote_invoke_admin_host,
+                config.port,
+            );
 
             let db_cleanup_task = bifrost_admin::start_db_cleanup_task(traffic_db_store);
             let connection_cleanup_task =
@@ -2989,41 +3038,13 @@ pub fn run_daemon(
                         .cloned()
                         .expect("admin_state should be set");
 
-                    {
-                        let relay_url = shared_config_manager
-                            .try_config()
-                            .map(|c| c.sync.remote_base_url.clone())
-                            .unwrap_or_else(|| DEFAULT_REMOTE_BASE_URL.to_string());
-
-                        let data_dir_path = shared_config_manager.data_dir().to_path_buf();
-                        match bifrost_admin::RemoteInvokeIdentity::load_or_create(&data_dir_path) {
-                            Ok(identity) => {
-                                let admin_host = if system_proxy_host == "127.0.0.1" {
-                                    "127.0.0.1"
-                                } else {
-                                    &system_proxy_host
-                                };
-                                let ri_config = bifrost_admin::RemoteInvokeConfig {
-                                    relay_url,
-                                    ..Default::default()
-                                };
-                                let worker = bifrost_admin::RemoteInvokeWorker::new(
-                                    ri_config,
-                                    identity,
-                                    Some(bifrost_sync::SyncManagerHandle::new(sync_manager.clone())),
-                                    admin_state_arc.clone(),
-                                    admin_host,
-                                    system_proxy_port,
-                                );
-                                admin_state_arc.set_remote_invoke_worker(worker.clone());
-                                worker.start();
-                                info!("remote invoke worker initialized");
-                            }
-                            Err(e) => {
-                                info!(error = %e, "remote invoke identity init failed, feature disabled");
-                            }
-                        }
-                    }
+                    spawn_remote_invoke_worker_startup_task(
+                        shared_config_manager.clone(),
+                        sync_manager.clone(),
+                        admin_state_arc.clone(),
+                        system_proxy_host.clone(),
+                        system_proxy_port,
+                    );
                     std::mem::drop(bifrost_admin::start_total_disk_cleanup_task(
                         admin_state_arc.clone(),
                     ));

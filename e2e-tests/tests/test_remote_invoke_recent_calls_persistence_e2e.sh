@@ -258,17 +258,26 @@ CALL_ID="$(echo "$HTTP_BODY" | jq -r '
 ')"
 assert_not_empty "$CALL_ID" "重启前 Recent Calls 应包含 status 调用"
 
-STORE_FILE="$BIFROST_DATA_DIR/admin/remote_invoke_call_history.json"
-if [[ ! -s "$STORE_FILE" ]]; then
-    _log_fail "Recent Calls 落盘文件不存在或为空" "$STORE_FILE exists" "missing"
+LEGACY_STORE_FILE="$BIFROST_DATA_DIR/admin/remote_invoke_call_history.json"
+if [[ -e "$LEGACY_STORE_FILE" ]]; then
+    _log_fail "旧 Recent Calls 整文件不应继续存在" "missing" "$LEGACY_STORE_FILE"
     exit 1
 fi
 
-if ! jq -e --arg call_id "$CALL_ID" '.entries[] | select(.call_id == $call_id)' "$STORE_FILE" >/dev/null; then
-    _log_fail "Recent Calls 落盘文件缺少目标 call_id" "$CALL_ID" "$(cat "$STORE_FILE")"
+STORE_DIR="$BIFROST_DATA_DIR/admin/remote_invoke_call_history"
+if [[ ! -d "$STORE_DIR" ]]; then
+    _log_fail "Recent Calls JSONL 目录不存在" "$STORE_DIR exists" "missing"
     exit 1
 fi
-_log_pass "TC-RI-PERSIST-01A: Recent Calls 已写入本地落盘文件"
+
+STORE_MATCH="$(find "$STORE_DIR" -name '*.jsonl' -type f -print0 \
+    | xargs -0 grep -l "\"call_id\":\"$CALL_ID\"" 2>/dev/null \
+    | head -n 1 || true)"
+if [[ -z "$STORE_MATCH" ]]; then
+    _log_fail "Recent Calls JSONL 缺少目标 call_id" "$CALL_ID" "$(find "$STORE_DIR" -maxdepth 1 -type f -print -exec sh -c 'echo --- "$1"; sed -n "1,5p" "$1"' sh {} \; 2>/dev/null)"
+    exit 1
+fi
+_log_pass "TC-RI-PERSIST-01A: Recent Calls 已写入本地 JSONL 文件"
 
 log "Restarting bifrost admin with the same data dir"
 stop_bifrost_preserve_data

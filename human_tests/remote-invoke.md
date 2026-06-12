@@ -4982,6 +4982,50 @@ PY
 
 ---
 
+### TC-RI-回归-148：Recent Calls 使用 JSONL 滚动存储，最终落盘最多 1000 条且按需分页读取
+
+**背景**：旧版 Recent Calls 使用 `admin/remote_invoke_call_history.json` 整文件读写，启动或写入时容易放大 CPU/内存消耗。新版不兼容旧整文件，发现旧文件直接删除；调用历史写入 JSONL，每次追加一行快照，超过 1000 条或发现坏行时 compaction，只保留最新 1000 条有效记录。
+
+**前置条件**：
+- 使用隔离 `BIFROST_DATA_DIR` 和随机端口。
+- 启动 Bifrost 必须带 `--no-system-proxy` 与 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`。
+- 具备 `curl` 和 `jq`。
+
+**操作步骤**：
+1. 在隔离数据目录写入旧格式 `admin/remote_invoke_call_history.json`。
+2. 启动最新 `target/debug/bifrost start -p <随机端口> --skip-cert-check --unsafe-ssl --no-system-proxy --no-intercept`。
+3. 通过 Remote Invoke 测试夹具或 store 单测生成超过 1000 条 Recent Calls JSONL 快照，并追加一行坏 JSON。
+4. 请求第一页：
+   ```bash
+   curl -s "http://127.0.0.1:<PORT>/_bifrost/api/remote-invoke/calls?limit=25" | jq '.calls | length'
+   ```
+5. 使用响应中的 `next_cursor` 请求下一页：
+   ```bash
+   curl -s "http://127.0.0.1:<PORT>/_bifrost/api/remote-invoke/calls?limit=25&before=<NEXT_CURSOR>"
+   ```
+6. 检查数据目录：
+   ```bash
+   test ! -e "$BIFROST_DATA_DIR/admin/remote_invoke_call_history.json"
+   wc -l "$BIFROST_DATA_DIR/admin/remote_invoke_call_history/"*.jsonl
+   ```
+
+**预期结果**：
+- 旧 `remote_invoke_call_history.json` 被直接删除，不迁移、不兼容读取。
+- JSONL 文件只包含有效 JSON 行，坏行在读取或 compaction 后被清理。
+- 最终落盘有效记录最多 1000 条；超过上限时旧记录被删除。
+- `/remote-invoke/calls?limit=25` 最多返回 25 条，并在还有更多记录时返回 `next_cursor`。
+- 第二页不会重复第一页最后一条记录。
+- Remote Invoke worker 不在内存中保存历史列表；只有正在执行的 call 持有临时快照。
+
+### TC-RI-回归-148 执行结果（2026-06-12，Recent Calls JSONL 存储与按需读取）
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-148 | ✅ PASS | 先执行 focused 单测：`cargo test -p bifrost-admin call_history_store -- --nocapture` 通过 7 个用例，覆盖旧 JSON 直接删除、JSONL 坏行 compaction、1000 条硬上限裁剪、旧配置超过 1000 仍只落盘 1000、长字段截断与 clear；`cargo test -p bifrost-admin remote_invoke_worker_reads_call_history_only_on_demand -- --nocapture` 通过，确认 worker 构造不加载历史；`cargo test -p bifrost-admin test_remote_invoke_default_max_records_is_capped_at_1000 -- --nocapture` 通过。随后用 Node 22 环境执行真实链路 `PATH=$HOME/.local/share/mise/installs/node/22.22.0/bin:$PATH bash e2e-tests/tests/test_remote_invoke_recent_calls_persistence_e2e.sh`，本地 relay/target/caller 全链路通过：重启前 Recent Calls API 包含 `status` 调用，`TC-RI-PERSIST-01A` 确认记录已写入本地 JSONL 且旧整文件不存在；保留同一数据目录重启后 Recent Calls API 仍返回同一 `call_id`，`TC-RI-PERSIST-01B` 通过。继续执行 `PATH=$HOME/.local/share/mise/installs/node/22.22.0/bin:$PATH SKIP_BUILD=true bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh`，验证 Recent Calls 参数摘要、长参数 120 字符截断、JSONL 不保存完整长参数、重启恢复和 DELETE 清理全部记录均通过。全流程使用随机端口与隔离数据目录，target 启动包含 `--no-system-proxy`，未修改系统代理。 |
+| TC-RI-回归-148-启动压力 | ✅ PASS | 按用户要求追加构造 1000 条已落盘历史后真实启动验证。临时 `BIFROST_DATA_DIR=/tmp/bifrost-ri-1000-startup.a2WorR` 中预置新版 `admin/remote_invoke_call_history/perf-client.jsonl` 1000 行、约 `696780` bytes，并同时放置旧版 `admin/remote_invoke_call_history.json`。执行 `BIFROST_DATA_DIR="$TEST_DATA_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 target/release/bifrost start -p 60804 --skip-cert-check --unsafe-ssl --no-system-proxy --no-intercept`，端口监听 `312ms` 内打开；启动采样峰值 RSS `40816KB`，CPU 峰值整数部分 `6%`；启动后旧版 JSON 文件已删除，新版 JSONL 仍为 1000 行。该验证确认 1000 条历史不会在启动路径被全量加载，Remote Invoke 历史不影响端口监听。 |
+
+---
+
 ## 清理
 
 测试完成后清理本地临时数据：

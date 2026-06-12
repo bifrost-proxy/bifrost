@@ -638,9 +638,15 @@ async fn handle_calls_list(
 ) -> Response<BoxBody> {
     match *req.method() {
         Method::GET => {
-            let calls = worker.list_calls();
+            let limit = parse_usize_query(req.uri(), "limit")
+                .unwrap_or(100)
+                .clamp(1, 200);
+            let before = parse_u64_query(req.uri(), "before");
+            let page = worker.list_calls_page(limit, before);
             json_response(&serde_json::json!({
-                "calls": calls,
+                "calls": page.calls,
+                "next_cursor": page.next_cursor,
+                "limit": limit,
             }))
         }
         Method::DELETE => {
@@ -652,6 +658,25 @@ async fn handle_calls_list(
         }
         _ => method_not_allowed(),
     }
+}
+
+fn parse_query_param(uri: &hyper::Uri, key: &str) -> Option<String> {
+    let q = uri.query()?;
+    for pair in q.split('&') {
+        let mut parts = pair.splitn(2, '=');
+        if parts.next()? == key {
+            return parts.next().map(|value| value.to_string());
+        }
+    }
+    None
+}
+
+fn parse_usize_query(uri: &hyper::Uri, key: &str) -> Option<usize> {
+    parse_query_param(uri, key)?.parse::<usize>().ok()
+}
+
+fn parse_u64_query(uri: &hyper::Uri, key: &str) -> Option<u64> {
+    parse_query_param(uri, key)?.parse::<u64>().ok()
 }
 
 async fn handle_call_get(

@@ -796,6 +796,44 @@ PY
 
 ---
 
+### TC-CSS-32：Remote Invoke 历史按需分页且不阻塞代理监听（回归）
+
+**前置条件**：服务未运行，测试使用临时数据目录和动态端口。
+
+**操作步骤**：
+1. 构造临时 `BIFROST_DATA_DIR`，并在其中写入旧格式 `admin/remote_invoke_call_history.json`。该文件用于验证旧历史不兼容读取，启动后应被直接删除。
+2. 在临时目录中写入新版 `admin/remote_invoke_call_history/<client-key>.jsonl`，包含超过 1000 条 Remote Invoke 调用快照和一行坏 JSON，模拟新版历史较大的用户现场。
+3. 使用最新源码启动真实 Bifrost 前台服务，必须带 `--no-system-proxy` 和禁用 Sync 自动登录弹窗：
+   ```bash
+   BIFROST_DATA_DIR="$TEST_DATA_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 target/debug/bifrost start -p "$PORT" --skip-cert-check --unsafe-ssl --no-system-proxy --no-intercept
+   ```
+4. 轮询 `http://127.0.0.1:$PORT/_bifrost/api/proxy/address`，记录 Admin API 首次 ready 时间。
+5. 等待日志出现 `remote invoke worker initialized asynchronously`。
+6. 检查日志顺序：
+   - `remote invoke worker initialization scheduled`
+   - `Unified proxy server listening`
+   - `foreground runtime initialization completed`
+   - `remote invoke worker initialized asynchronously`
+7. 请求 `http://127.0.0.1:$PORT/_bifrost/api/remote-invoke/calls?limit=25`，确认响应最多 25 条，并返回 `next_cursor`。
+8. 再请求 `http://127.0.0.1:$PORT/_bifrost/api/remote-invoke/calls?limit=25&before=<next_cursor>`，确认返回下一页且不重复第一页最后一条。
+9. 检查旧 `admin/remote_invoke_call_history.json` 已删除，新版 JSONL compaction 后只保留最新 1000 条有效记录，坏 JSON 行已清理。
+10. 停止服务并删除临时目录。
+
+**预期结果**：
+- Admin API ready 不需要等待 Remote Invoke worker 初始化完成。
+- `foreground runtime initialization completed` 先于 `remote invoke worker initialized asynchronously` 出现。
+- Remote Invoke worker 最终仍会初始化并启动。
+- Remote Invoke worker 内存不保留历史列表；Recent Calls 只在 API 请求时按需读取 JSONL。
+- 旧整文件历史直接删除，不迁移、不兼容读取；新版 JSONL 最终落盘最多 1000 条有效记录。
+- calls API 支持 `limit` / `before` 分页，页面打开不全量加载历史。
+- 启动命令全程使用临时数据目录和 `--no-system-proxy`，不修改用户正式数据和系统代理。
+
+**执行记录**：
+- 2026-06-12 执行真实启动回归通过。使用 `target/debug/bifrost`、临时 `BIFROST_DATA_DIR=/var/folders/.../tmp.d57AtaTou9`、动态端口 `54572`、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`--no-system-proxy --no-intercept` 启动；Admin API ready 成功。日志顺序为 `remote invoke worker initialization scheduled` -> `Unified proxy server listening` -> `foreground runtime initialization completed total_elapsed_ms=41` -> `removed legacy remote invoke call history store` -> `remote invoke worker initialized asynchronously elapsed_ms=6`。旧 `admin/remote_invoke_call_history.json` 被删除，全流程使用临时数据目录且未修改系统代理。
+- 2026-06-12 追加 1000 条历史压力启动验证通过。使用临时 `BIFROST_DATA_DIR=/tmp/bifrost-ri-1000-startup.a2WorR` 预置新版 `admin/remote_invoke_call_history/perf-client.jsonl` 共 1000 行、约 `696780` bytes，并额外写入旧版 `admin/remote_invoke_call_history.json`。执行 `BIFROST_DATA_DIR="$TEST_DATA_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 target/release/bifrost start -p 60804 --skip-cert-check --unsafe-ssl --no-system-proxy --no-intercept`，端口监听实测 `312ms` 内打开；启动采样峰值 RSS `40816KB`，CPU 峰值整数部分 `6%`；启动后旧版 JSON 文件已删除，新版 JSONL 仍为 1000 行。该验证确认 1000 条落盘历史不会被启动路径全量加载，也不会阻塞监听端口。
+
+---
+
 
 ## 清理
 

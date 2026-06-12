@@ -1090,7 +1090,7 @@ export default function RemoteInvokeTab({
 
   const refreshCalls = useCallback(async () => {
     try {
-      const res = await listCalls();
+      const res = await listCalls({ limit: 100 });
       const sorted = (res.calls ?? []).sort((a, b) => (b.started_at ?? 0) - (a.started_at ?? 0));
       setCalls(sorted);
     } catch {

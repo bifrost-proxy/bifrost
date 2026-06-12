@@ -269,7 +269,18 @@ fn sync_envs_to_local(
         rule_file.group = Some(group_name.to_string());
         rule_file.created_at = env.create_time.clone();
         rule_file.updated_at = env.update_time.clone();
+        if let Some(existing_rule) = existing.as_ref() {
+            rule_file.sync.rule_id = existing_rule.sync.rule_id.clone();
+        }
         rule_file.mark_synced(&env.id, &env.user_id, &env.create_time, &env.update_time);
+
+        if existing
+            .as_ref()
+            .map(|existing_rule| synced_group_rule_matches(existing_rule, &rule_file))
+            .unwrap_or(false)
+        {
+            continue;
+        }
 
         rules_storage
             .save(&rule_file)
@@ -291,6 +302,28 @@ fn sync_envs_to_local(
     }
 
     Ok(active_rules_changed)
+}
+
+fn synced_group_rule_matches(
+    existing: &bifrost_storage::RuleFile,
+    desired: &bifrost_storage::RuleFile,
+) -> bool {
+    existing.name == desired.name
+        && existing.content == desired.content
+        && existing.enabled == desired.enabled
+        && existing.sort_order == desired.sort_order
+        && existing.description == desired.description
+        && existing.group == desired.group
+        && existing.version == desired.version
+        && existing.created_at == desired.created_at
+        && existing.updated_at == desired.updated_at
+        && existing.sync.rule_id == desired.sync.rule_id
+        && existing.sync.status == desired.sync.status
+        && existing.sync.last_synced_content_hash == desired.sync.last_synced_content_hash
+        && existing.sync.remote_id == desired.sync.remote_id
+        && existing.sync.remote_user_id == desired.sync.remote_user_id
+        && existing.sync.remote_created_at == desired.sync.remote_created_at
+        && existing.sync.remote_updated_at == desired.sync.remote_updated_at
 }
 
 fn build_rule_info_from_storage(rules_storage: &RulesStorage) -> Vec<GroupRuleInfo> {
@@ -1124,5 +1157,40 @@ mod tests {
         let saved = storage.load("inactive-rule").expect("load synced rule");
         assert!(!saved.enabled);
         assert_eq!(saved.content, "inactive.example.com status://204");
+    }
+
+    #[test]
+    fn sync_envs_to_local_skips_unchanged_remote_rule_write() {
+        let storage = storage();
+        let env = remote_env("stable-rule", "stable.example.com status://200");
+
+        let changed = sync_envs_to_local(&storage, std::slice::from_ref(&env), "cache-group")
+            .expect("initial sync");
+        assert!(!changed);
+
+        let path = storage.base_dir().join("stable-rule.bifrost");
+        let first_content = std::fs::read_to_string(&path).expect("read initial rule");
+        let first_modified = std::fs::metadata(&path)
+            .expect("initial metadata")
+            .modified()
+            .expect("initial modified time");
+        let first_rule = storage.load("stable-rule").expect("load initial rule");
+        let first_synced_at = first_rule.sync.last_synced_at.clone();
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        let changed = sync_envs_to_local(&storage, &[env], "cache-group").expect("repeat sync");
+        assert!(!changed);
+
+        let second_content = std::fs::read_to_string(&path).expect("read repeated rule");
+        let second_modified = std::fs::metadata(&path)
+            .expect("repeated metadata")
+            .modified()
+            .expect("repeated modified time");
+        let second_rule = storage.load("stable-rule").expect("load repeated rule");
+
+        assert_eq!(second_content, first_content);
+        assert_eq!(second_modified, first_modified);
+        assert_eq!(second_rule.sync.last_synced_at, first_synced_at);
     }
 }
