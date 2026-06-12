@@ -3839,7 +3839,15 @@ async fn handle_intercepted_request_with_protocol(
         let res_body_mode =
             streaming_res_body_mode(res_content_length, !resolved_rules.trailers.is_empty());
         normalize_res_headers(&mut res_parts, res_body_mode, &method_str);
+        // `sanitize_upstream_headers` strips the hop-by-hop `Trailer` header,
+        // but when the proxy announces response trailers (via a `trailers://`
+        // rule) the client must keep the `Trailer` header to know which trailing
+        // fields to expect. Preserve and restore it across the sanitize call.
+        let preserved_trailer = res_parts.headers.get(hyper::header::TRAILER).cloned();
         sanitize_upstream_headers(&mut res_parts.headers);
+        if let Some(trailer) = preserved_trailer {
+            res_parts.headers.insert(hyper::header::TRAILER, trailer);
+        }
 
         let total_ms = start_time.elapsed().as_millis() as u64;
         let record_id = req_id.to_string();
