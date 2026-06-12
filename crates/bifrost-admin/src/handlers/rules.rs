@@ -970,35 +970,20 @@ async fn update_rule(
         .clone()
         .unwrap_or_else(|| existing.content.clone());
     let should_validate = content_changed || (!existing.enabled && request.enabled == Some(true));
-    let syntax = if should_validate {
-        let report = match build_rule_syntax_report(
-            &state,
-            name,
-            &next_content,
-            &global_values_from_state(&state),
-        )
-        .await
-        {
-            Ok(report) => report,
-            Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
-        };
-        if !report.valid && !request.allow_invalid {
-            return syntax_rejection_response(name, report);
-        }
-        report
-    } else {
-        match build_rule_syntax_report(
-            &state,
-            name,
-            &next_content,
-            &global_values_from_state(&state),
-        )
-        .await
-        {
-            Ok(report) => report,
-            Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
-        }
+    let syntax = match build_rule_syntax_report(
+        &state,
+        name,
+        &next_content,
+        &global_values_from_state(&state),
+    )
+    .await
+    {
+        Ok(report) => report,
+        Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
     };
+    if should_validate && !syntax.valid && !request.allow_invalid {
+        return syntax_rejection_response(name, syntax);
+    }
 
     let rule = RuleFile {
         name: existing.name,
