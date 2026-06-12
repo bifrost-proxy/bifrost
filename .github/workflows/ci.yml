@@ -1289,6 +1289,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: test-windows
+          save-if: ${{ false }}
       - name: Run Windows unit tests
         # This intentionally verifies Windows can compile/test the workspace
         # without ASR native runtime assets; bifrost-asr full local engines are

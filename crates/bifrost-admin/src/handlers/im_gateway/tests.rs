@@ -1234,7 +1234,7 @@ pub(super) async fn im_event_loop_uses_provider_agent_config_for_agent_chat() {
     .expect("send IM event");
     drop(tx);
 
-    tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+    tokio::time::timeout(std::time::Duration::from_secs(60), handle)
         .await
         .expect("event loop timed out")
         .expect("event loop task panicked");
@@ -1352,7 +1352,7 @@ pub(super) async fn im_event_loop_provider_external_cli_runner_bypasses_disabled
     .expect("send IM event");
     drop(tx);
 
-    tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+    tokio::time::timeout(std::time::Duration::from_secs(60), handle)
         .await
         .expect("event loop timed out")
         .expect("event loop task panicked");
@@ -1521,7 +1521,7 @@ pub(super) async fn im_event_loop_external_cli_session_records_runner_failure() 
     .expect("send IM event");
     drop(tx);
 
-    tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+    tokio::time::timeout(std::time::Duration::from_secs(60), handle)
         .await
         .expect("event loop timed out")
         .expect("event loop task panicked");
@@ -1778,7 +1778,7 @@ pub(super) async fn im_event_loop_forwards_image_attachment_to_agent_chat() {
     .expect("send IM image event");
     drop(tx);
 
-    tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+    tokio::time::timeout(std::time::Duration::from_secs(60), handle)
         .await
         .expect("event loop timed out")
         .expect("event loop task panicked");

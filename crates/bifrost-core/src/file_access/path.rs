@@ -186,6 +186,7 @@ mod tests {
         assert!(matches!(err, FileAccessError::NotFound { .. }));
     }
 
+    #[cfg(unix)]
     #[test]
     fn symlink_escaping_root_is_detected() {
         let outside = tempfile::tempdir().unwrap();

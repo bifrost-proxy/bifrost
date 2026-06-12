@@ -624,10 +624,12 @@ mod tests {
         let mut f = std::fs::File::create(&path).expect("create cfgutil");
         f.write_all(format!("#!/bin/sh\n{script_body}\n").as_bytes())
             .expect("write cfgutil");
-        let mut perms = f.metadata().expect("stat").permissions();
-        perms.set_mode(0o755);
-        f.set_permissions(perms).expect("chmod");
         f.sync_all().expect("sync");
+        drop(f);
+
+        let mut perms = std::fs::metadata(&path).expect("stat").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod");
         path
     }
 

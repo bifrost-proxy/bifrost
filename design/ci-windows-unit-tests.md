@@ -11,6 +11,7 @@
 - HTTPS interception 的 H2 body reset fallback 到 HTTP/1.1 后，先按 Content-Length 有界读取响应体；需要跳过 body processing 时仍规范化响应头，避免客户端把 fallback body 判定为 decode error。
 - Skills registry watcher 同时保存 raw root 与 canonical root。Windows remove event 中已删除路径无法 canonicalize 时，仍可从 raw root 计算 slug 并删除缓存项。
 - 其他 Windows 编译或 clippy 差异通过 `cfg` 缩小到平台相关分支，不改变非 Windows 行为。
+- Windows Unit Tests job 的 `Swatinem/rust-cache` 仅用于 restore，不在该 job 的 post-step 保存 cache，避免测试主体通过后被 Windows tar/zstd cache 打包失败或超时拖红。
 
 ## 依赖项
 
@@ -23,6 +24,7 @@
 - 单元测试：覆盖 `bifrost-agent` exec_command、`bifrost-admin` IM Gateway external CLI、`skills` registry watcher、`bifrost-core` launchd parser、`bifrost-cli` upgrade/main 相关 Windows 编译路径。
 - E2E/集成测试：执行 `bifrost-agent --test p1_tools_e2e` 与 `bifrost-tests --test https_proxy_test`，验证工具链路和 HTTPS H2 body fallback 真实路径。
 - 真实场景测试：更新并执行 `human_tests/ci-windows-unit-tests.md`，记录 Windows VM 中完整 `cargo test --workspace --all-features -j1` 结果。
+- CI 稳定性：通过 PR run 确认 Windows Unit Tests 不再因为 `Post Run Swatinem/rust-cache@v2` 保存缓存失败而在测试主体通过后失败。
 - Workspace 兜底：至少一次完整执行 `cargo test --workspace --all-features -j1`。
 
 ## Review/Fix/Test 闭环方案
