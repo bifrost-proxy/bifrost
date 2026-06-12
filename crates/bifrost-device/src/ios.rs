@@ -11,6 +11,40 @@ use crate::model::{
     MobilePlatform,
 };
 
+use std::process::Output;
+
+/// Run an external command, retrying on `ETXTBSY` ("Text file busy").
+///
+/// Spawning a freshly-written executable can intermittently fail with
+/// ETXTBSY (os error 26) on Linux: when other threads in the process
+/// fork+exec concurrently, the child briefly inherits writable file
+/// descriptors, and the kernel refuses to exec a file that any process still
+/// holds open for writing. This is inherent to multi-threaded fork/exec and
+/// cannot be eliminated by file-handle hygiene alone, so we retry a few times
+/// with a short backoff before giving up. This mirrors the behaviour of
+/// `run_adb_output` in `adb.rs`.
+fn run_command_output<P, I, S>(program: P, args: I) -> std::io::Result<Output>
+where
+    P: AsRef<std::ffi::OsStr>,
+    I: IntoIterator<Item = S> + Clone,
+    S: AsRef<std::ffi::OsStr>,
+{
+    const MAX_ATTEMPTS: u32 = 8;
+    let mut attempt = 0;
+    loop {
+        match Command::new(&program).args(args.clone()).output() {
+            Ok(output) => return Ok(output),
+            Err(err)
+                if err.raw_os_error() == Some(26 /* ETXTBSY */) && attempt + 1 < MAX_ATTEMPTS =>
+            {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(5 * u64::from(attempt)));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IosDiscovery {
     pub supported: bool,
@@ -136,12 +170,10 @@ pub fn install_ios_profile_with_configurator(
         ));
     }
 
-    let output = Command::new(&options.cfgutil_path)
-        .args(cfgutil_install_profile_args(
-            &options.profile_path,
-            options.cfgutil_target.as_deref(),
-        ))
-        .output()?;
+    let output = run_command_output(
+        &options.cfgutil_path,
+        cfgutil_install_profile_args(&options.profile_path, options.cfgutil_target.as_deref()),
+    )?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let message = if output.status.success() {
@@ -270,9 +302,8 @@ fn merge_cfgutil_devices(devices: &mut Vec<MobileDevice>, configurator: &Configu
         return;
     };
 
-    let Ok(output) = Command::new(cfgutil_path)
-        .args(["--timeout", "1", "--format", "JSON", "list"])
-        .output()
+    let Ok(output) =
+        run_command_output(cfgutil_path, ["--timeout", "1", "--format", "JSON", "list"])
     else {
         return;
     };
