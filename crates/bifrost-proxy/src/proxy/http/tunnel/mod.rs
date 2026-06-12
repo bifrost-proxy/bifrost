@@ -48,8 +48,8 @@ use self::host_rule::parse_host_rule;
 use self::io::{BufferedIo, CombinedAsyncRw};
 
 use super::body_metadata::{
-    normalize_req_headers, normalize_res_headers, response_content_encoding,
-    set_content_encoding_header, streaming_res_body_mode, BodyMode,
+    buffered_res_body_mode, normalize_req_headers, normalize_res_headers,
+    response_content_encoding, set_content_encoding_header, streaming_res_body_mode, BodyMode,
 };
 use super::devtools::{
     attach_devtools_client_req_id, devtools_bridge_requested, is_devtools_client_req_id_header,
@@ -4120,7 +4120,10 @@ async fn handle_intercepted_request_with_protocol(
                     if outcome.body_replaced {
                         normalize_res_headers(
                             &mut res_parts,
-                            BodyMode::Known(final_body.len()),
+                            buffered_res_body_mode(
+                                final_body.len(),
+                                !resolved_rules.trailers.is_empty(),
+                            ),
                             &method_str,
                         );
                     }
@@ -4753,7 +4756,7 @@ async fn handle_intercepted_request_with_protocol(
 
     normalize_res_headers(
         &mut res_parts,
-        BodyMode::Known(final_body.len()),
+        buffered_res_body_mode(final_body.len(), !resolved_rules.trailers.is_empty()),
         &method_str,
     );
     if verbose_logging && original_res_body_len != final_body.len() {

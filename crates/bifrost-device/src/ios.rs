@@ -963,6 +963,7 @@ mod tests {
 #[cfg(test)]
 mod more_tests {
     use super::*;
+    #[cfg(unix)]
     use std::fs;
     use std::path::PathBuf;
 

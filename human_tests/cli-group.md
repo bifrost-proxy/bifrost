@@ -281,10 +281,15 @@
 
 **预期结果**：
 - `test_group_rule_add_with_file`、`test_group_rule_update_with_content` 等相邻 add/update 用例在高并发下全部通过。
+- Windows 下 mock server 停止时不会向旧 ephemeral port 发送额外 `GET /shutdown`，避免端口快速复用时迟到请求消耗下一用例的首个 JSON 响应。
+- mock server 会忽略空请求，并在上一用例 panic 后恢复全局 lock，避免一个首因变成整组 `PoisonError` 连锁失败。
 - workspace 聚合测试不再因 group mock HTTP server 时序互相干扰而失败。
 
 **执行记录（2026-05-02）**：
 - `cargo test -p bifrost-cli commands::group::tests:: -- --test-threads=16`：PASS，lib 与 bin 两套 group tests 共 66 个用例通过。
+
+**执行记录（2026-06-12）**：
+- Windows VM 中执行 `cargo +stable test -p bifrost-cli commands::group::tests:: --all-features -j1 -- --test-threads=1 --nocapture`：PASS，lib 与 bin 两套 group tests 共 66 个用例通过。该回归覆盖 `stop()` 不再发迟到 `GET /shutdown`、空请求不消耗 fixture response、mutex poison 可恢复。
 
 ---
 

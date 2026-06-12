@@ -297,6 +297,22 @@ NO_PROXY=api.github.com,github.com,*.blob.core.windows.net HTTPS_PROXY= HTTP_PRO
 - `Windows Unit Tests (x86_64)` 不会在 `cargo test --workspace --all-features --target x86_64-pc-windows-msvc` 已通过后，因为 `Post Run Swatinem/rust-cache@v2` 的 tar/zstd cache 保存失败或超时而变红。
 - PR checks 中 Windows Unit Tests 必须最终显示 `pass`；若测试主体失败，仍按真实测试日志归因，不被 cache post-step 覆盖。
 
+
+### TC-CWUT-19 bifrost-device 平台专用测试 helper 在 Windows all-targets 下不误编译
+
+操作步骤：
+
+```bash
+source ~/.zshrc
+prlctl exec "Windows 11" cmd /c "cd /d C:\Users\eden\github\bifrost && call \"C:\Program Files\Microsoft Visual Studio\18\Insiders\VC\Auxiliary\Build\vcvarsarm64.bat\" >nul && set \"PATH=C:\Users\eden\.cargo\bin;C:\Program Files\Microsoft Visual Studio\18\Insiders\VC\Tools\Llvm\ARM64\bin;%PATH%\" && set \"LIBCLANG_PATH=C:\Program Files\Microsoft Visual Studio\18\Insiders\VC\Tools\Llvm\ARM64\bin\" && set \"CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_LINKER=lld-link\" && set \"SKIP_FRONTEND_BUILD=1\" && cargo +stable clippy -p bifrost-device --all-targets --all-features -j1 -- -D warnings && cargo +stable test -p bifrost-device --all-features -j1"
+```
+
+预期结果：
+- `bifrost-device` 的 iOS cfgutil merge helper 保持 macOS-only；Windows lib-test 编译不会暴露 `merge_cfgutil_devices`、`find_cfgutil` 或 `is_executable_file` dead-code warning。
+- macOS cfgutil 行为仍由 macOS-only tests 覆盖，Windows test build 只覆盖非 macOS unsupported fallback。
+- 仅 Unix 测试使用的 `std::fs` import 和 Android CA status 测试模块不会在 Windows `--all-targets -D warnings` 下产生 unused import。
+- `bifrost-device` 单元测试全部通过，非 macOS 平台仍保持 iOS discovery/configurator unsupported 语义。
+
 ## 清理步骤
 
 本测试只运行单元测试和静态扫描；cargo 产物由常规构建缓存管理，无额外临时服务需要停止。
@@ -328,3 +344,4 @@ NO_PROXY=api.github.com,github.com,*.blob.core.windows.net HTTPS_PROXY= HTTP_PRO
 | 2026-06-12 | TC-CWUT-16 | 在 Parallels `Windows 11` VM 的 `C:\Users\eden\github\bifrost` 同步最新 `origin/main` 后，执行 `cargo +stable test --workspace --all-features -j1`。首轮暴露 `im_gateway::external_cli` Windows 本地化 `taskkill`/missing PID 幂等问题，修复后目标过滤 `35 passed`；次轮暴露 `p1_tools_e2e::exec_command_tool_works_end_to_end` 初始 running/null exit code 时序问题，修复后 `8 passed; 1 ignored`。最终再次执行完整 workspace all-features。 | 通过，完整 workspace all-features、integration tests 与 doc-tests 全部通过 |
 | 2026-06-12 | TC-CWUT-17 | 在 Parallels `Windows 11` VM 的 `C:\Users\eden\github\bifrost` 同步最新 `origin/main` 后，执行 `cargo +stable test -p skills --all-features -j1`、`cargo +stable test --workspace --all-features -j1`、`cargo +stable test -p bifrost-core --all-features -j1`、`cargo +stable clippy --workspace --all-targets --all-features -j1 -- -D warnings`。 | 通过，skills 89 passed，完整 workspace all-features、bifrost-core 897 passed，workspace clippy 通过；Windows-only symlink 测试 warning 已通过 `#[cfg(unix)]` 收敛 |
 | 2026-06-12 | TC-CWUT-18 | 跟进 GitHub Actions run `27404962469`，定位 `Windows Unit Tests (x86_64)` 的测试主体后失败点为 `Post Run Swatinem/rust-cache` 保存 cache；更新 workflow 后重新检查 PR checks。 | 待复验，预期 Windows Unit Tests 不再因 cache post-step 保存失败变红 |
+| 2026-06-12 | TC-CWUT-19 | 在 Parallels `Windows 11` VM 的 `C:\Users\eden\github\bifrost` 同步远端分支并 rebase 到最新 `origin/main` 后，执行 `cargo +stable clippy -p bifrost-device --all-targets --all-features -j1 -- -D warnings` 与 `cargo +stable test -p bifrost-device --all-features -j1`。 | 通过，clippy 无 warning；`bifrost-device` 49 个单元测试与 doc-tests 全部通过，覆盖 iOS cfgutil macOS-only helper 和 Android CA status Unix-only module 的 Windows 编译回归 |

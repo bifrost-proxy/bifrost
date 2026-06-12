@@ -959,6 +959,7 @@ esac"#,
 #[cfg(test)]
 mod more_tests {
     use super::*;
+    #[cfg(unix)]
     use std::fs;
     use std::path::PathBuf;
 
@@ -1159,9 +1160,10 @@ exit 1
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod ca_status_tests {
     use super::*;
+    #[cfg(unix)]
     use std::fs;
 
     #[cfg(unix)]
