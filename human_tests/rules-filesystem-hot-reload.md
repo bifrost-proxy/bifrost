@@ -71,6 +71,33 @@
 - 直接删除文件后代理请求状态码恢复为原始 `200`。
 - active summary 不再包含被删除的规则名。
 
+### TC-RFHR-05 Group 规则无变化同步不得重复写盘（回归）
+
+操作步骤：
+1. 执行 focused 回归测试：
+   ```bash
+   cargo test -p bifrost-admin sync_envs_to_local_skips_unchanged_remote_rule_write -- --nocapture
+   ```
+2. 测试使用临时 `RulesStorage` 创建一个远端 Group env，并执行第一次本地同步。
+3. 测试记录生成的 `stable-rule.bifrost` 文件内容、mtime 和 `last_synced_at`。
+4. 等待短暂时间后，使用完全相同的远端 env 再执行一次同步。
+5. 测试再次读取文件内容、mtime 和 `last_synced_at`。
+6. 补充执行真实热更新脚本，确认无变化写盘修复没有破坏真实文件变化 reload：
+   ```bash
+   BIFROST_BIN=target/debug/bifrost e2e-tests/tests/test_rules_filesystem_hot_reload.sh
+   ```
+
+预期结果：
+- 第二次 Group env 同步返回未改变 active rules。
+- 第二次同步不改写 `.bifrost` 文件内容。
+- 第二次同步不推进 `.bifrost` 文件 mtime。
+- 第二次同步不刷新 `last_synced_at`。
+- 真实 CLI 新增、更新、直接编辑和删除 `.bifrost` 文件仍能触发运行中代理与 active summary 热更新。
+
+执行记录：
+- 2026-06-12 执行 `cargo test -p bifrost-admin sync_envs_to_local_skips_unchanged_remote_rule_write -- --nocapture` 通过，确认第二次相同 Group env 同步不写盘、不推进 mtime、不刷新 `last_synced_at`。
+- 2026-06-12 执行 `BIFROST_BIN=target/release/bifrost e2e-tests/tests/test_rules_filesystem_hot_reload.sh` 通过。真实脚本启动临时 Bifrost 和 HTTP echo server，覆盖 CLI add/update/delete、直接编辑 `.bifrost`、直接删除 `.bifrost`，所有代理状态码与 active summary 断言通过，全流程使用临时数据目录并完成清理。
+
 ## 清理步骤
 
 - 脚本退出时停止 Bifrost 代理进程。

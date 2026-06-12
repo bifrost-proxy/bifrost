@@ -92,6 +92,18 @@ data_dir/
 │           └── ...
 ```
 
+### Group 规则本地同步写盘策略
+
+Group 规则列表接口会从远端拉取 env 并同步到本地 `rules/<group-name>/` 子目录。该同步路径必须避免无变化写盘：
+
+- 如果远端 env 的规则内容、远端 ID、远端创建/更新时间、group 名、本地 enabled 状态和本地 `rule_id` 均未变化，不得更新 `.bifrost` 文件。
+- `last_synced_at` 只表示本地最近一次实际同步写入时间，不能作为每次列表刷新都写盘的理由。
+- 同步已有规则时必须复用本地已有 `rule_id`，避免纯列表刷新制造新的本地规则身份。
+- 只有实际内容或远端 metadata 变化时才保存文件；其中 enabled 规则内容变化需要通知运行时刷新 active rules 与 Badge cache。
+- `RulesStorage::save` 对生成内容与磁盘内容完全一致的保存请求应直接返回，避免无意义修改 mtime 触发文件系统 watcher。
+
+该策略用于切断 `GET /api/group-rules/:group` 或 WebUI 列表刷新触发的 `save -> filesystem watcher -> rules reload -> 再次列表/同步` 热加载循环，同时保留真实远端更新的本地落盘能力。
+
 ## 实现方案
 
 ### 1. bifrost-sync-server 扩展

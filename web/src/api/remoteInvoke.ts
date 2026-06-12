@@ -199,6 +199,8 @@ export interface Call {
 
 export interface CallsListResponse {
   calls: Call[];
+  next_cursor?: number | null;
+  limit?: number;
 }
 
 export interface CallDetailResponse {
@@ -247,8 +249,19 @@ export async function revokeGrant(
   return del<{ success: boolean }>(`/remote-invoke/grants/${grantId}`);
 }
 
-export async function listCalls(): Promise<CallsListResponse> {
-  return get<CallsListResponse>("/remote-invoke/calls");
+export async function listCalls(params?: {
+  limit?: number;
+  before?: number | null;
+}): Promise<CallsListResponse> {
+  const search = new URLSearchParams();
+  if (params?.limit != null) {
+    search.set("limit", String(params.limit));
+  }
+  if (params?.before != null) {
+    search.set("before", String(params.before));
+  }
+  const query = search.toString();
+  return get<CallsListResponse>(`/remote-invoke/calls${query ? `?${query}` : ""}`);
 }
 
 export async function clearCalls(): Promise<{ success: boolean; removed: number }> {

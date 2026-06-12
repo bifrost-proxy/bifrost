@@ -87,6 +87,23 @@
   - 或通过 `--log-level debug` 打开较粗粒度调试日志，再按需使用 `RUST_LOG` 精确过滤。
 - 该调整不改变规则匹配、合并或转发语义，只减少默认日志量和高频字段格式化成本。
 
+### 2.6 Remote Invoke worker 后台初始化
+
+- Remote Invoke worker 构造只读取本地 identity、grant crypto、grant policy 与 grant info；call history 不再参与 worker 构造。
+- 启动路径改为在 `AdminState`、`SyncManager` 与基础运行时状态就绪后，调度后台任务初始化 Remote Invoke worker。
+- 后台任务完成后再调用 `AdminState::set_remote_invoke_worker` 并启动 SSE run loop。
+- 代理 listener bind、runtime info 写入、tray helper 与系统代理启动不再等待 Remote Invoke worker 初始化，更不会等待调用历史读取。
+- Remote Invoke API 在后台初始化完成前可能短暂返回未启用/不可用状态；这是可接受的降级，优先保证代理核心能力先启动。
+- 日志增加 `remote invoke worker initialization scheduled` 与 `remote invoke worker initialized asynchronously`，记录后台初始化耗时。
+
+### 2.7 Remote Invoke 调用历史 JSONL 滚动存储
+
+- Remote Invoke 调用历史不再使用整文件 `admin/remote_invoke_call_history.json`。发现旧文件时直接删除，不做兼容读取或迁移。
+- 新格式写入 `admin/remote_invoke_call_history/<client-key>.jsonl`，每次调用开始、完成、失败或取消时追加一行完整快照，不在写路径先读取全量历史。
+- store 按 `call_id` 取最新快照，最终落盘记录硬上限为 `max_records=1000`；超过上限或发现坏 JSONL 行时触发 compaction，只保留最新 1000 条并清理坏行/旧行。
+- worker 内存不保留历史列表。正在执行的 call 只在 `ActiveCallControl` 中保存临时快照，结束或取消后释放；列表和详情接口按需读取 JSONL。
+- `/api/remote-invoke/calls` 支持 `limit` 与 `before` 游标分页，默认只返回一页，前端 Recent Calls 默认只拉取 100 条。
+
 ### 3. Frame metadata 落入 SQLite 独立表
 
 - `FrameStore metadata` 不再存储/读取 `frames/*.meta.json`
@@ -142,7 +159,8 @@ CREATE INDEX idx_frame_metadata_closed_updated
 6. 真实场景测试：更新并执行 `human_tests/cli-start-stop-status.md` 中的 TC-CSS-26 / TC-CSS-27
 7. 真实场景测试：更新并执行 `human_tests/cli-log-output-default.md` 中的 TC-LOD-07，验证默认 `info` 日志不再反复输出常态连接关闭、进程归因 miss、WebSocket 正常关闭和 SSE ping
 8. 真实场景测试：更新并执行 `human_tests/cli-log-output-default.md` 中的 TC-LOD-08，验证默认 `info` 日志不再输出规则匹配摘要和逐条命中详情，同时 `trace` 下仍可按需看到详细规则命中信息
-9. 执行与启动链路相关的 E2E / 校验命令，确认无回归
+9. 真实场景测试：执行 `human_tests/cli-start-stop-status.md` 中的 TC-CSS-32，构造旧 Remote Invoke JSON 历史和新版 JSONL 历史，确认旧 JSON 被删除、新版历史不在启动期读取，启动日志先出现 proxy listener bind，再异步完成 Remote Invoke worker 初始化，calls API 按页读取
+10. 执行与启动链路相关的 E2E / 校验命令，确认无回归
 
 ## 校验要求（含 rust-project-validate）
 

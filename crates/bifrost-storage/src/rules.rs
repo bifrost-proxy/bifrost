@@ -417,6 +417,12 @@ impl RulesStorage {
         let meta = rule.to_bifrost_meta();
         let normalized_content = normalize_rule_content(&rule.content);
         let content = BifrostFileWriter::write_rules(&meta, &normalized_content);
+        if path.exists() {
+            ensure_file_size_within_limit(&path, MAX_RULE_FILE_BYTES)?;
+            if fs::read_to_string(&path)? == content {
+                return Ok(());
+            }
+        }
         fs::write(&path, content)?;
         Ok(())
     }

@@ -39,15 +39,16 @@ Remote Invoke 的 `openCall` 已升级到密文链路，relay 不再持久化明
 
 文件：`crates/bifrost-admin/src/remote_invoke/worker.rs`
 
-- 在 worker 内维护 `CallHistoryStore`，落盘文件为 `BIFROST_DATA_DIR/admin/remote_invoke_call_history.json`
+- 在 worker 内维护 `CallHistoryStore`，落盘目录为 `BIFROST_DATA_DIR/admin/remote_invoke_call_history/`
 - 存储维度为 `relay_url + client_instance_id + call_id`
-- 收到 `call_open` 并完成本地解密后立即写入记录
-- completed / failed / cancelled 终态更新同一条记录
-- worker 启动和 relay_url 切换时按当前 relay/client 恢复历史
-- 非终态历史在恢复时收敛为 `failed`，避免重启后永久显示 streaming
-- `remote_invoke.retention_days` 默认 7 天；`remote_invoke.max_records` 默认 100000 条
+- 收到 `call_open` 并完成本地解密后 append 一行 `streaming` 快照
+- completed / failed / cancelled 终态再 append 一行同 `call_id` 的最新快照
+- worker 启动和 relay_url 切换时不恢复历史；Recent Calls 列表和详情 API 按需读取 JSONL
+- worker 内存不保留历史列表；正在执行的 call 只保留临时快照，执行结束后释放
+- 旧 `BIFROST_DATA_DIR/admin/remote_invoke_call_history.json` 不兼容读取，发现后直接删除
+- `remote_invoke.retention_days` 默认 90 天；`remote_invoke.max_records` 默认 1000 条
 - `DELETE /_bifrost/api/remote-invoke/calls` 清理当前 relay/client 的全部本地 Recent Calls
-- 写入内存历史和本地落盘前统一执行 120 字符截断：
+- 写入本地 JSONL 前统一执行 120 字符截断：
   - `command_summary.command_preview`
   - `command_summary.masked_args_json`
   - `command.command`
@@ -55,7 +56,7 @@ Remote Invoke 的 `openCall` 已升级到密文链路，relay 不再持久化明
   - `command.query` 中的字符串字段
   - `command.argv`、`command.shell`、`command.command_text`、`command.cwd`、`command.env`
   - `policy_id`
-- 截断逻辑不添加省略号，严格保留原始前 120 个 Unicode 字符；API、Web UI、落盘文件看到同一份截断后的内容。
+- 截断逻辑保留可识别前缀并附带原始长度后缀；API、Web UI、落盘文件看到同一份截断后的内容。
 - 对 `args_json` / `masked_args_json` 这类 JSON 字符串，截断发生在 JSON 内部的字符串值上，序列化后的 JSON 仍保持合法，避免参数预览因为硬截断变成不可解析文本。
 
 ### 1.2 Grants 时间字段稳定性
@@ -101,10 +102,12 @@ Remote Invoke 的 `openCall` 已升级到密文链路，relay 不再持久化明
   - 验证 `command_summary.masked_args_json` 缺失时，会回退到 `command.args_json`
   - 验证已有 `masked_args_json` 时不会被本地 `args_json` 覆盖
   - 验证 `preserve_existing_grant_runtime_state` 保留已有 `first_authorized_at`，且 `last_command_at` / `last_used_at` 单调、不重置一次性授权计数
-  - 验证 call history store 按 7 天保留期和 max_records 裁剪
+  - 验证 call history store 按保留期和 max_records=1000 裁剪
   - 验证 clear_for_client 只清理当前 relay/client
-  - 验证重启恢复时 streaming 记录收敛为 failed
-  - 验证 call history store 写入前会把命令相关字符串截断到 120 字符，原始长片段不会出现在落盘 JSON 中
+  - 验证旧整 JSON 文件直接删除，不迁移
+  - 验证坏 JSONL 行会被 compaction 清理
+  - 验证 worker 构造不加载历史，Recent Calls API 请求时才读取 JSONL
+  - 验证 call history store 写入前会把命令相关字符串截断到 120 字符，原始长片段不会出现在落盘 JSONL 中
 - `web/src/api/remoteInvoke.test.ts`
   - 验证 Recent Calls 参数预览来源优先使用 `masked_args_json`
   - 验证缺失时回退到 `command.args_json`
@@ -118,10 +121,11 @@ Remote Invoke 的 `openCall` 已升级到密文链路，relay 不再持久化明
 - 更新 `e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh`
 - 新增断言：
   - 执行命令前后读取 Grants API，同一 grant 的 `first_connected_at` 必须严格相等，`last_command_at` 必须在执行后出现且不早于 `first_connected_at`
-  - Recent Calls 写入 `remote_invoke_call_history.json`
+  - Recent Calls 写入 `admin/remote_invoke_call_history/*.jsonl`
   - 超长搜索参数在 Recent Calls API 中只返回前 120 字符，且 `masked_args_json` 仍是合法 JSON
-  - `remote_invoke_call_history.json` 不包含完整超长参数原文
+  - 旧 `remote_invoke_call_history.json` 不存在，JSONL 不包含完整超长参数原文
   - 保留同一 `BIFROST_DATA_DIR` 重启 Bifrost 后，同一 `call_id` 仍可从 Recent Calls API 读取
+  - `GET /remote-invoke/calls?limit=25` 最多返回 25 条，并在有更多记录时返回 `next_cursor`
   - DELETE Recent Calls 后 API 返回空列表
 - Web UI 回归验证：
   - 构造包含超长 `shell.exec` 文本的 Recent Calls 记录

@@ -287,7 +287,7 @@ fn default_retention_days() -> u32 {
 }
 
 fn default_max_records() -> u32 {
-    10_000
+    1_000
 }
 
 impl Default for RemoteInvokeConfig {
@@ -1314,6 +1314,11 @@ fn default_auth_method() -> AuthMethod {
 mod tests {
     use super::*;
     use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, CHACHA20_POLY1305};
+
+    #[test]
+    fn test_remote_invoke_default_max_records_is_capped_at_1000() {
+        assert_eq!(RemoteInvokeConfig::default().max_records, 1_000);
+    }
 
     #[test]
     fn test_grant_scope_rejects_legacy_remote_invoke_string() {
