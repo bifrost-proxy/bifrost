@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-对 CI 中 shell E2E 测试进行性能优化，通过测试分片（sharding）将 shell 测试分配到 3 个并行 CI runner 上执行，将总耗时从 ~30 分钟降至 ~3-5 分钟。CI 模式不执行会修改宿主系统代理设置的 `test_system_proxy_e2e.sh`，该用例仅在本地 full-shell 场景验证。
+对 CI 中 shell E2E 测试进行性能优化，通过测试分片（sharding）将 shell 测试分配到多个并行 CI runner 上执行。当前 Linux 与 macOS shell E2E 使用 6 个分片，降低单个 shard 在 GitHub Actions 内部超时预算内触顶的风险。CI 模式不执行会修改宿主系统代理设置的 `test_system_proxy_e2e.sh`，该用例仅在本地 full-shell 场景验证。
 
 ## 前置条件
 
@@ -1007,6 +1007,35 @@
 - large body 用例作为资源敏感测试进入串行队列，不与其他 shell 用例并发竞争 macOS hosted runner 内存和代理连接资源。
 - 真实用例输出所有 HTTP large body case 通过，退出码为 0。
 
+### TC-CS-42: Linux/macOS shell E2E 6 分片预算回归
+
+**背景**：GitHub Actions `CI` run `27429681824` 中 `E2E Shell (Linux, shard 1/4)` 的 35 个子日志均显示 PASS 或预期 SKIP，但 job 在 shell 调度器内部预算附近被判定 timeout。为避免单个 shard 承担过多 shell 用例，Linux/macOS shell E2E 从 4 分片调整为 6 分片。
+
+**操作步骤**：
+1. 解析 workflow YAML，确认 Linux 与 macOS shell E2E 的 matrix 和环境变量均使用 6 分片：
+   ```bash
+   ruby -e 'require "yaml"; y=YAML.load_file(".github/workflows/ci.yml"); linux=y["jobs"]["e2e-shell"]; mac=y["jobs"]["e2e-macos-shell"]; raise "linux shards" unless linux["strategy"]["matrix"]["shard"] == [1,2,3,4,5,6] && linux["env"]["BIFROST_E2E_SHARD_TOTAL"] == "6"; raise "mac shards" unless mac["strategy"]["matrix"]["shard"] == [1,2,3,4,5,6] && mac["env"]["BIFROST_E2E_SHARD_TOTAL"] == "6"; puts "shell shards ok"'
+   ```
+2. 静态列出 CI shell tests 的 6 分片数量，不启动 Bifrost：
+   ```bash
+   for i in 1 2 3 4 5 6; do
+     count=$(bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests --shard "$i/6" | sed '/^$/d' | wc -l | tr -d ' ')
+     echo "$i/6 $count"
+   done
+   ```
+3. 检查旧 4 分片 shard 1 数量仍高于 6 分片单 shard 数量，用于验证本次变更确实降低单 shard 负载：
+   ```bash
+   old_count=$(bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests --shard 1/4 | sed '/^$/d' | wc -l | tr -d ' ')
+   new_count=$(bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests --shard 1/6 | sed '/^$/d' | wc -l | tr -d ' ')
+   test "$old_count" -gt "$new_count"
+   ```
+
+**预期结果**：
+- workflow YAML 解析输出 `shell shards ok`。
+- 6 分片数量为 `23/23/23/23/23/22`，总和等于 137 个 CI shell tests。
+- 旧 `1/4` shard 为 35 个用例，新 `1/6` shard 为 23 个用例，单 shard 负载明显下降。
+- 上述命令仅静态列出测试，不启动 Bifrost，不使用 9900，不修改系统代理。
+
 ## 本轮执行记录
 
 测试日期：2026-05-09
@@ -1045,6 +1074,7 @@
 | TC-CS-39 | 通过 | 2026-06-08 本轮执行：`SKIP_BUILD=true e2e-tests/tests/test_temporary_port_bindings.sh` 通过，输出 `Passed: 55`、`Failed: 0`；验证成功 listener 绑定在端口竞态时可重试，且 temporary port 绑定顺序、rule-file、inline rule、update、Traffic API/CLI listener port 等断言保持通过。 |
 | TC-CS-40 | 通过 | 2026-06-08 本轮执行：`bash -n e2e-tests/test_utils/process.sh e2e-tests/tests/test_metrics_hosts_apps_admin_api.sh e2e-tests/tests/test_rule_semantics_regressions.sh e2e-tests/tests/test_proxy_chain_auth_e2e.sh e2e-tests/tests/test_host_rule_path_rewrite.sh e2e-tests/tests/test_multiline_rule_filter_e2e.sh` 通过；随后使用预构建 `target/release/bifrost` 分别执行 `test_metrics_hosts_apps_admin_api.sh`、`test_multiline_rule_filter_e2e.sh`、`test_rule_semantics_regressions.sh`、`test_host_rule_path_rewrite.sh`、`test_proxy_chain_auth_e2e.sh`，五个脚本均退出码 0，输出中不再出现清理阶段 `Killed ...`。 |
 | TC-CS-41 | 通过 | 2026-06-09 本轮执行：`bash -n scripts/run_all_e2e.sh e2e-tests/tests/test_large_body_protection.sh` 通过；`rg -n 'RESOURCE_HEAVY_TESTS\|test_large_body_protection\\.sh\|is_resource_heavy\|BIFROST_DATA_DIR:-\\$PROJECT_DIR/\\.bifrost-test-large-body' scripts/run_all_e2e.sh e2e-tests/tests/test_large_body_protection.sh` 定位到 resource-heavy 串行队列、调度判断和 `BIFROST_DATA_DIR` fallback；使用 `SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost` 构建 release binary 后，以临时目录 `/tmp/bifrost-large-body-human.*`、端口 `19214/19215`、`SKIP_BUILD=true BIFROST_BIN=target/release/bifrost` 真实执行 `test_large_body_protection.sh`，输出 5 个 large body HTTP 用例通过、0 失败，且清理阶段停止代理和 mock 服务。 |
+| TC-CS-42 | 通过 | 2026-06-12 本轮执行：Ruby YAML 解析 `.github/workflows/ci.yml` 输出 `shell shards ok`；静态执行 `--list-shell-tests --shard N/6` 得到 `1/6 23`、`2/6 23`、`3/6 23`、`4/6 23`、`5/6 23`、`6/6 22`，总计 137 个 CI shell tests；对比 `--shard 1/4` 为 35、`--shard 1/6` 为 23，确认 Linux/macOS shell E2E 单 shard 负载下降。全部命令只列测试或解析 YAML，未启动 Bifrost、未使用 9900、未修改系统代理。 |
 
 ## 清理步骤
 
