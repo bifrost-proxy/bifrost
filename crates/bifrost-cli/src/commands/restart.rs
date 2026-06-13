@@ -63,7 +63,8 @@ use bifrost_core::Result as BifrostResult;
 #[cfg(unix)]
 use crate::process::{
     capture_runtime_system_proxy_snapshot, is_process_running, read_pid, read_runtime_info,
-    runtime_system_proxy_host, write_runtime_info, RuntimeSystemProxySnapshot,
+    runtime_system_proxy_host, wait_for_port_released, write_runtime_info,
+    RuntimeSystemProxySnapshot,
 };
 
 #[cfg(unix)]
@@ -601,28 +602,6 @@ fn orphan_log(path: &std::path::Path, line: &str) {
     }
 }
 
-/// Block until `port` is bindable on both `0.0.0.0` and `127.0.0.1`, or
-/// `budget` elapses. Returns `true` if released within budget.
-#[cfg(unix)]
-fn wait_for_port_released(port: u16, budget: std::time::Duration) -> bool {
-    use std::net::{SocketAddr, TcpListener};
-    use std::time::{Duration, Instant};
-
-    let deadline = Instant::now() + budget;
-    let any: SocketAddr = ([0, 0, 0, 0], port).into();
-    let lo: SocketAddr = ([127, 0, 0, 1], port).into();
-
-    while Instant::now() < deadline {
-        let any_ok = TcpListener::bind(any).is_ok();
-        let lo_ok = TcpListener::bind(lo).is_ok();
-        if any_ok && lo_ok {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -634,53 +613,6 @@ mod tests {
         assert!(o.host.is_none());
         assert!(o.log_level.is_none());
         assert!(!o.force);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn wait_for_port_released_returns_quickly_when_port_is_free() {
-        // The OS can hand the just-released ephemeral port to another
-        // concurrently running test or daemon. Retry a few candidates so this
-        // test checks our wait logic instead of a transient port race.
-        let mut attempts = Vec::new();
-        for _ in 0..10 {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            let port = listener.local_addr().unwrap().port();
-            drop(listener);
-
-            let start = std::time::Instant::now();
-            let freed = wait_for_port_released(port, std::time::Duration::from_secs(2));
-            let elapsed = start.elapsed();
-            attempts.push((port, freed, elapsed));
-            if freed {
-                assert!(
-                    elapsed < std::time::Duration::from_millis(500),
-                    "free port should return almost immediately; took {:?}",
-                    elapsed
-                );
-                return;
-            }
-        }
-        panic!("expected one free ephemeral port to be reported free; attempts={attempts:?}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn wait_for_port_released_times_out_when_port_is_held() {
-        // Hold a listener and probe with a short budget.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-
-        let start = std::time::Instant::now();
-        let freed = wait_for_port_released(port, std::time::Duration::from_millis(400));
-        let elapsed = start.elapsed();
-        drop(listener);
-        assert!(!freed, "held port {} should NOT be reported free", port);
-        assert!(
-            elapsed >= std::time::Duration::from_millis(350),
-            "probe should use most of the budget; took {:?}",
-            elapsed
-        );
     }
 
     #[cfg(unix)]

@@ -12,6 +12,7 @@ export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
 # 2. 有 daemon 运行时 upgrade（版本已最新不触发重启）不报错
 # 3. --restart 参数与 daemon 模式启动的组合
 # 4. 验证 runtime.json 中信息正确性，确保重启时能正确读取
+# 5. 源码门禁验证 upgrade 的真实重启路径在 stop 后等待端口释放，避免 EADDRINUSE 崩溃
 
 set -uo pipefail
 
@@ -256,10 +257,28 @@ test_upgrade_restart_flag_in_help() {
     fi
 }
 
+test_upgrade_restart_port_release_guard_in_source() {
+    _log_info "case: upgrade restart path waits for port release before start"
+
+    local source_file="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade.rs"
+
+    if grep -q "wait_for_restart_port_release(restart_port)" "$source_file" \
+        && grep -q "Proxy port .*still occupied after" "$source_file" \
+        && grep -q "find_process_on_port(port)" "$source_file"; then
+        _log_pass "upgrade restart has port-release guard and listener diagnostics"
+    else
+        _log_fail "upgrade restart port guard" \
+            "wait_for_restart_port_release plus occupied-port diagnostics" \
+            "guard missing from upgrade.rs"
+        return 1
+    fi
+}
+
 main() {
     TEST_DATA_DIR="$(mktemp -d)"
 
     test_upgrade_restart_flag_in_help || true
+    test_upgrade_restart_port_release_guard_in_source || true
     test_upgrade_no_daemon_no_error || true
     test_upgrade_with_daemon_version_current || true
     test_runtime_json_contains_correct_info || true

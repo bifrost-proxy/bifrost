@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use super::update_check::{get_latest_version, get_latest_version_fresh_with_diagnostics};
 use crate::process::{
-    capture_runtime_system_proxy_snapshot, is_process_running, read_pid, read_runtime_info,
-    RuntimeSystemProxySnapshot,
+    capture_runtime_system_proxy_snapshot, find_process_on_port, is_process_running, read_pid,
+    read_runtime_info, RuntimeSystemProxySnapshot,
 };
 use bifrost_core::version_check::{
     is_newer_version, make_release_tag, VersionCache, GITHUB_RELEASE_URL,
@@ -27,6 +27,7 @@ const DOWNLOAD_CONNECT_TIMEOUT_SECS: u64 = 10;
 const DOWNLOAD_TIMEOUT_SECS: u64 = 120;
 const MIRROR_PROBE_TIMEOUT_SECS: u64 = 5;
 const DOWNLOAD_TRIES: usize = 2;
+const UPGRADE_RESTART_PORT_RELEASE_TIMEOUT_SECS: u64 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DownloadTuning {
@@ -1240,6 +1241,9 @@ fn maybe_restart_running_proxy(auto_restart: bool) -> Result<(), BifrostError> {
 
     let exe_path = env::current_exe().map_err(BifrostError::Io)?;
     let args = build_restart_args(runtime_info.as_ref(), system_proxy_snapshot.as_ref());
+    let restart_port = restart_port_from_runtime(runtime_info.as_ref());
+
+    wait_for_restart_port_release(restart_port)?;
 
     println!(
         "{} {} {}",
@@ -1267,6 +1271,45 @@ fn maybe_restart_running_proxy(auto_restart: bool) -> Result<(), BifrostError> {
         ));
     }
 
+    Ok(())
+}
+
+fn restart_port_from_runtime(runtime_info: Option<&crate::process::RuntimeInfo>) -> u16 {
+    runtime_info.map(|info| info.port).unwrap_or(9900)
+}
+
+#[cfg(unix)]
+fn wait_for_restart_port_release(port: u16) -> Result<(), BifrostError> {
+    let budget = Duration::from_secs(UPGRADE_RESTART_PORT_RELEASE_TIMEOUT_SECS);
+    println!(
+        "{}",
+        format!(
+            "  Waiting for proxy port {} to be released before restart...",
+            port
+        )
+        .bright_cyan()
+    );
+
+    if crate::process::wait_for_port_released(port, budget) {
+        return Ok(());
+    }
+
+    if let Ok(data_dir) = crate::config::get_bifrost_dir() {
+        let _ = bifrost_core::consume_system_proxy_shutdown_mode(&data_dir);
+    }
+
+    let holder = find_process_on_port(port)
+        .map(|info| format!(" Current listener: {} (PID {}).", info.name, info.pid))
+        .unwrap_or_else(|| " No listener was visible through lsof when reporting.".to_string());
+
+    Err(BifrostError::Network(format!(
+        "Proxy port {} was still occupied after {}s, so upgrade did not start a replacement daemon to avoid an EADDRINUSE crash.{} Try `lsof -nP -iTCP:{} -sTCP:LISTEN` and then run `bifrost start -d` after the port is free.",
+        port, UPGRADE_RESTART_PORT_RELEASE_TIMEOUT_SECS, holder, port
+    )))
+}
+
+#[cfg(not(unix))]
+fn wait_for_restart_port_release(_port: u16) -> Result<(), BifrostError> {
     Ok(())
 }
 
@@ -1457,6 +1500,27 @@ mod tests {
     fn test_build_restart_args_no_runtime_info() {
         let args = build_restart_args(None, None);
         assert_eq!(args, vec!["start", "-d", "-y", "--skip-cert-check"]);
+    }
+
+    #[test]
+    fn upgrade_restart_port_from_runtime_defaults_to_9900() {
+        assert_eq!(restart_port_from_runtime(None), 9900);
+    }
+
+    #[test]
+    fn upgrade_restart_port_from_runtime_uses_runtime_port() {
+        let info = crate::process::RuntimeInfo {
+            pid: 12345,
+            port: 18891,
+            socks5_port: None,
+            host: Some("0.0.0.0".to_string()),
+            started_at_ms: None,
+            start_mode: Default::default(),
+            restartable_runtime: false,
+            binary_path: None,
+        };
+
+        assert_eq!(restart_port_from_runtime(Some(&info)), 18891);
     }
 
     #[test]
