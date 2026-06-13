@@ -786,6 +786,7 @@ jobs:
 
   e2e-macos-runner:
     name: E2E Runner (aarch64-apple-darwin)
+    needs: [build-cli-macos-aarch64]
     runs-on: macos-15
     timeout-minutes: 60
     env:
@@ -825,8 +826,18 @@ jobs:
         # Keep ASR runtime preparation target-gated to aarch64-apple-darwin.
         shell: bash
         run: bash scripts/ci/prepare-sherpa-onnx-archive.sh aarch64-apple-darwin
+      - name: Download release binary
+        uses: actions/download-artifact@v4
+        with:
+          name: bifrost-release-aarch64-apple-darwin
+          path: target/release
+      - name: Make binary executable
+        run: chmod +x target/release/bifrost
       - name: Tray startup smoke test
         shell: bash
+        env:
+          BIFROST_BIN: ${{ github.workspace }}/target/release/bifrost
+          SKIP_BUILD: "true"
         run: bash e2e-tests/tests/test_cli_tray_startup_ci.sh
       - name: E2E runner tests
         shell: bash
@@ -1189,6 +1200,7 @@ jobs:
 
   e2e-windows-runner:
     name: E2E Runner (${{ matrix.target }})
+    needs: [build-cli-windows]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -1226,8 +1238,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: e2e-${{ matrix.target }}
+      - name: Download release binary
+        uses: actions/download-artifact@v4
+        with:
+          name: bifrost-release-${{ matrix.target }}
+          path: target/release
       - name: Tray startup smoke test
         shell: bash
+        env:
+          BIFROST_BIN: ${{ github.workspace }}/target/release/bifrost.exe
+          SKIP_BUILD: "true"
         run: bash e2e-tests/tests/test_cli_tray_startup_ci.sh
       - name: E2E runner tests
         shell: bash

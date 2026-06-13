@@ -71,6 +71,21 @@
 - 该保护不改变普通规则断言失败的语义：非 mock outage 失败仍保留失败结果。
 - `bash -n` 语法检查通过。
 
+### TC-CWER-05: Windows E2E Runner tray smoke 复用 CLI artifact
+
+**操作步骤**：
+1. 解析 `.github/workflows/ci.yml`。
+2. 检查 `e2e-windows-runner.needs`。
+3. 检查 `e2e-windows-runner.steps` 中存在 `Download release binary`，artifact 名称为 `bifrost-release-${{ matrix.target }}`，下载路径为 `target/release`。
+4. 检查 `Tray startup smoke test` step 设置：
+   - `BIFROST_BIN=${{ github.workspace }}/target/release/bifrost.exe`
+   - `SKIP_BUILD=true`
+
+**预期结果**：
+- Windows E2E Runner 等待并复用 `build-cli-windows` 已构建的 CLI artifact。
+- `test_cli_tray_startup_ci.sh` 不再进入 `SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost` 分支。
+- 该 job 后续如有编译，只应来自 `scripts/run_all_e2e.sh` 中 `cargo run -p bifrost-e2e` 对 runner harness 的编译，不应来自 tray smoke。
+
 ## 清理步骤
 
 - 无本地清理需求；本测试不创建临时服务实例、不写入数据目录、不修改系统代理。
@@ -79,3 +94,4 @@
 
 - 2026-05-19：TC-CWER-01 通过 `ruby -e 'require "yaml"; ...'` 静态检查；TC-CWER-03 通过 `bash -n scripts/run_all_e2e.sh scripts/ci/run-e2e-runner.sh`、`rg -n 'rustup which rustc|Rustc bin|export RUSTC' scripts/run_all_e2e.sh` 和 `bash scripts/run_all_e2e.sh --ci --skip-rules --skip-shell --skip-runner --skip-ui --skip-build` 验证，Runtime Context 输出当前 Cargo/Rustc 真实路径且未启动任何 suite；TC-CWER-02 首次推送已越过 `rust-src` component conflict，但暴露 Cargo 1.95 / Rustc 1.65 混用导致的 `--check-cfg` 失败，最终结果由后续 GitHub Actions `CI` run 观察确认。
 - 2026-06-08：TC-CWER-04 通过。执行 `bash -n e2e-tests/run_all_tests_parallel.sh` 通过；执行 `rg -n 'is_windows && ! ensure_mock_servers_alive|result_failure_mentions_mock_outage|重启 Mock 后补跑一次' e2e-tests/run_all_tests_parallel.sh` 命中 retry loop，确认 Windows rules E2E 会在每个失败 fixture 补跑前确认 mock servers 存活，并在 mock outage 重试失败后重启 mock servers 对同一 fixture 再补跑一次。远端验证由 PR #200 下一次 GitHub Actions `CI` run 的 Windows `E2E Rules (x86_64-pc-windows-msvc, shard 2/4)` 结果确认。
+- 2026-06-13：TC-CWER-05 通过。执行 YAML 静态检查确认 `e2e-windows-runner.needs` 包含 `build-cli-windows`，并且 Windows Runner 在 tray smoke 前下载 `bifrost-release-${{ matrix.target }}` 到 `target/release`，`Tray startup smoke test` 通过 `BIFROST_BIN` 指向 `target/release/bifrost.exe` 且设置 `SKIP_BUILD=true`。
