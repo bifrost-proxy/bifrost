@@ -926,6 +926,18 @@ fn parse_line_with_values(line: &str, values: &HashMap<String, String>) -> Resul
     let (patterns, mut protocol_values, include_filters, exclude_filters, line_props) =
         extract_pattern_and_protocols(&parts)?;
 
+    // An unknown / mistyped `<scheme>://` op must always be surfaced as E002,
+    // even when the same line still carries another valid protocol. Otherwise a
+    // typo such as `host://127.0.0.1:3000 htp://x` would be silently accepted
+    // with the bad op swallowed as a pattern. Detect it up front, before
+    // deciding how to treat lines that ended up with no recognised protocol.
+    if let Some(scheme) = patterns.iter().find_map(|p| unknown_protocol_scheme(p)) {
+        return Err(BifrostError::Parse(format!(
+            "Unknown protocol '{}'",
+            scheme
+        )));
+    }
+
     if protocol_values.is_empty() {
         let has_url_pattern = patterns.iter().any(|p| {
             p.starts_with("http://")
@@ -937,22 +949,30 @@ fn parse_line_with_values(line: &str, values: &HashMap<String, String>) -> Resul
         if has_url_pattern {
             protocol_values.push((Protocol::Passthrough, String::new()));
         } else {
-            // No valid protocol on the line. If one of the tokens is a
-            // `<scheme>://...` op whose scheme is neither a known protocol nor a
-            // recognised alias (and not a real URL scheme), the user most likely
-            // mistyped a protocol. Surface that as E002 "Unknown protocol"
-            // instead of the more generic, misleading E001 "No protocol found".
-            if let Some(scheme) = patterns.iter().find_map(|p| unknown_protocol_scheme(p)) {
-                return Err(BifrostError::Parse(format!(
-                    "Unknown protocol '{}'",
-                    scheme
-                )));
-            }
+            // No valid protocol on the line and no URL-style pattern to imply a
+            // passthrough. The unknown-scheme case is already handled above, so
+            // this is a genuinely missing protocol, surfaced as E001.
             return Err(BifrostError::Parse(format!(
                 "No protocol found in rule: {}",
                 line
             )));
         }
+    }
+
+    // Reject operators that require a value but were given an empty one (e.g.
+    // `reqHeaders://`, `redirect://`, `file://`). An empty value means the op
+    // silently does nothing at runtime, which is equivalent to the rule not
+    // taking effect, so it must not be saved. Switch / control ops that are
+    // meaningful on their own (passthrough, delete, tlsIntercept, ...) are
+    // allow-listed via `protocol_requires_value`.
+    if let Some((protocol, _)) = protocol_values
+        .iter()
+        .find(|(protocol, value)| protocol_requires_value(*protocol) && value.trim().is_empty())
+    {
+        return Err(BifrostError::Parse(format!(
+            "Empty value for protocol '{}'",
+            protocol.to_str()
+        )));
     }
 
     let mut rules = Vec::new();
@@ -1339,6 +1359,32 @@ fn create_detailed_parse_error(
         }
     }
 
+    if error_msg.contains("Empty value for protocol") {
+        // The error carries the offending protocol as `Empty value for protocol
+        // '<name>'`. Point the range at that `<name>://` op so the editor marks
+        // the empty operator rather than the whole line.
+        let proto = error_msg
+            .split('\'')
+            .nth(1)
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        if !proto.is_empty() {
+            let needle = format!("{}://", proto);
+            let proto_start = trimmed.find(&needle).unwrap_or(0);
+            let start_col = leading_spaces + proto_start + 1;
+            let end_col = start_col + proto.len() + 3;
+            return ParseError::with_range(line_num, start_col, end_col, &error_msg)
+                .with_code("E014")
+                .with_suggestion(format!(
+                    "Operator '{proto}://' needs a value; an empty value has no effect. Add a value (e.g. '{proto}://<value>') or remove the operator."
+                ));
+        }
+        return ParseError::new(line_num, trimmed, &error_msg)
+            .with_code("E014")
+            .with_suggestion(
+                "This operator needs a value; an empty value has no effect. Add a value or remove the operator.",
+            );
+    }
     if error_msg.contains("No pattern found") {
         return ParseError::new(line_num, trimmed, &error_msg)
             .with_code("E003")
@@ -1629,6 +1675,29 @@ fn unknown_protocol_scheme(token: &str) -> Option<String> {
         return None;
     }
     Some(scheme.to_string())
+}
+
+/// Whether an operator protocol requires a non-empty value. Most ops are
+/// meaningless without one (e.g. `reqHeaders://`, `redirect://`, `file://`):
+/// an empty value means the op silently does nothing, so we reject it instead
+/// of saving an ineffective rule. The allow-empty set mirrors the protocols
+/// whose `value_type` is "empty" in `crate::syntax` (pure switches / control
+/// directives) plus `referer://`, where an empty value intentionally removes
+/// the Referer header (exercised by the e2e referer-remove fixture).
+fn protocol_requires_value(protocol: Protocol) -> bool {
+    !matches!(
+        protocol,
+        Protocol::Delete
+            | Protocol::Skip
+            | Protocol::ReqCors
+            | Protocol::ResCors
+            | Protocol::Http3
+            | Protocol::TlsIntercept
+            | Protocol::TlsPassthrough
+            | Protocol::Passthrough
+            | Protocol::DevTools
+            | Protocol::Referer
+    )
 }
 
 fn extract_pattern_and_protocols(parts: &[String]) -> Result<ParsedPatternResult> {
@@ -3957,6 +4026,114 @@ x-custom: value
         assert_eq!(rules[0].pattern, "*.local");
         assert_eq!(rules[0].protocol, Protocol::Host);
         assert_eq!(rules[0].value, "127.0.0.1:3000");
+    }
+
+    #[test]
+    fn test_unknown_protocol_with_valid_protocol_still_reports_e002() {
+        // P0 regression: an unknown / mistyped `<scheme>://` op must be surfaced
+        // as E002 even when the SAME line already carries another valid
+        // protocol. Previously the bad op was silently swallowed as a pattern
+        // and the rule was accepted as valid (e.g. `host://... htp://x`).
+        for (input, scheme) in [
+            ("example.com host://127.0.0.1:3000 htp://x", "htp"),
+            (
+                "example.com http://localhost:8000/ unknownProtocol://value",
+                "unknownProtocol",
+            ),
+            (
+                "example.com reqHeaders://(X-A: 1) reqheader://(X-B: 2)",
+                "reqheader",
+            ),
+        ] {
+            let errors = validate_rules(input);
+            let err = first_error_with_code(&errors, "E002")
+                .unwrap_or_else(|| panic!("expected E002 for `{}`, got {:?}", input, errors));
+            assert_eq!(err.severity, ParseErrorSeverity::Error);
+            assert!(
+                err.message.contains("Unknown protocol") && err.message.contains(scheme),
+                "E002 message should name the scheme `{}`: {}",
+                scheme,
+                err.message
+            );
+            // The line must NOT parse into valid rules: the bad op blocks it.
+            assert!(
+                parse_line(input).is_err(),
+                "line with unknown op `{}` must not parse successfully: {}",
+                scheme,
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn test_empty_value_for_require_value_protocol_reports_e014() {
+        // An operator that needs a value but is given an empty one silently does
+        // nothing at runtime, which is equivalent to the rule not taking effect.
+        // Such lines must be rejected with E014 instead of being saved.
+        for (input, proto) in [
+            ("req-headers.test reqHeaders://", "reqHeaders"),
+            ("redir.test redirect://", "redirect"),
+            ("file-rule.test file://", "file"),
+            ("error15-empty.test host://", "host"),
+            ("status.test statusCode://", "statusCode"),
+            ("body.test resBody://", "resBody"),
+        ] {
+            let errors = validate_rules(input);
+            let err = first_error_with_code(&errors, "E014")
+                .unwrap_or_else(|| panic!("expected E014 for `{}`, got {:?}", input, errors));
+            assert_eq!(err.severity, ParseErrorSeverity::Error);
+            assert!(
+                err.message.contains("Empty value for protocol") && err.message.contains(proto),
+                "E014 message should name protocol `{}`: {}",
+                proto,
+                err.message
+            );
+            assert!(
+                err.suggestion
+                    .as_deref()
+                    .map(|s| s.contains(proto))
+                    .unwrap_or(false),
+                "E014 suggestion should name protocol `{}`: {:?}",
+                proto,
+                err.suggestion
+            );
+            assert!(
+                parse_line(input).is_err(),
+                "require-value op `{}` with empty value must not parse: {}",
+                proto,
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn test_empty_value_allowed_for_switch_protocols() {
+        // Pure switch / control ops are meaningful on their own and must keep
+        // accepting an empty value (they mirror the "empty" value_type set in
+        // `crate::syntax`, plus `referer://` whose empty value removes the
+        // header). These must NOT be flagged as E014.
+        for input in [
+            "del.test delete://",
+            "https://passthrough.test/api/ passthrough://",
+            "cors-req.test reqCors://",
+            "cors-res.test resCors://",
+            "tls-i.test tlsIntercept://",
+            "tls-p.test tlsPassthrough://",
+            "referer-remove.local 127.0.0.1:3000 referer://",
+        ] {
+            let errors = validate_rules(input);
+            assert!(
+                first_error_with_code(&errors, "E014").is_none(),
+                "switch op should allow empty value (no E014) for `{}`, got: {:?}",
+                input,
+                errors
+            );
+            assert!(
+                parse_line(input).is_ok(),
+                "switch op with empty value should parse: {}",
+                input
+            );
+        }
     }
 
     #[test]
