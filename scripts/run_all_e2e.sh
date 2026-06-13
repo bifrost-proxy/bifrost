@@ -619,15 +619,60 @@ collect_shell_tests() {
     all_tests=("${STABLE_SHELL_TESTS[@]}")
   fi
 
-  # Apply sharding if configured
+  # Apply sharding if configured.
+  #
+  # Balanced (LPT) sharding: when a per-test weights file and python3 are both
+  # available, assign tests to shards using a greedy longest-processing-time
+  # bin-packing so each shard's total runtime is balanced (minimizes makespan).
+  # This is deterministic across shards (same input -> same assignment), so every
+  # shard agrees on the partition without coordination. Falls back to the legacy
+  # round-robin (i % SHARD_TOTAL) when weights/python3 are unavailable.
   if [[ "$SHARD_TOTAL" -gt 0 && "$SHARD_INDEX" -gt 0 ]]; then
-    local i=0
-    for name in "${all_tests[@]}"; do
-      if [[ $(( (i % SHARD_TOTAL) + 1 )) -eq "$SHARD_INDEX" ]]; then
-        printf '%s\n' "$name"
-      fi
-      i=$((i + 1))
-    done
+    local weights_file="$E2E_DIR/shell_test_weights.tsv"
+    if [[ -f "$weights_file" ]] && command -v python3 >/dev/null 2>&1; then
+      printf '%s\n' "${all_tests[@]}" | python3 -c '
+import sys
+idx = int(sys.argv[1]); total = int(sys.argv[2]); wf = sys.argv[3]
+names = [ln.strip() for ln in sys.stdin if ln.strip()]
+w = {}
+try:
+    with open(wf) as f:
+        for ln in f:
+            ln = ln.rstrip("\n")
+            if "\t" not in ln:
+                continue
+            s, n = ln.split("\t", 1)
+            s = s.strip()
+            if s.isdigit():
+                w[n] = int(s)
+except OSError:
+    pass
+DEFAULT = max(w.values()) if w else 1
+def dur(n):
+    return w.get(n, DEFAULT)
+# Greedy LPT: sort by duration desc (ties by name for determinism),
+# assign each test to the currently-lightest shard.
+load = [0] * total
+shard_of = {}
+order = sorted(names, key=lambda n: (-dur(n), n))
+for n in order:
+    j = min(range(total), key=lambda k: (load[k], k))
+    shard_of[n] = j
+    load[j] += dur(n)
+# Emit tests for this shard, preserving the original (sorted) input order.
+for n in names:
+    if shard_of[n] == idx - 1:
+        print(n)
+' "$SHARD_INDEX" "$SHARD_TOTAL" "$weights_file"
+    else
+      local i=0
+      for name in "${all_tests[@]}"; do
+        if [[ $(( (i % SHARD_TOTAL) + 1 )) -eq "$SHARD_INDEX" ]]; then
+          printf '%s\n' "$name"
+        fi
+        i=$((i + 1))
+      done
+    fi
   else
     printf '%s\n' "${all_tests[@]}"
   fi
