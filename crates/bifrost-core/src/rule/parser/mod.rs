@@ -937,6 +937,17 @@ fn parse_line_with_values(line: &str, values: &HashMap<String, String>) -> Resul
         if has_url_pattern {
             protocol_values.push((Protocol::Passthrough, String::new()));
         } else {
+            // No valid protocol on the line. If one of the tokens is a
+            // `<scheme>://...` op whose scheme is neither a known protocol nor a
+            // recognised alias (and not a real URL scheme), the user most likely
+            // mistyped a protocol. Surface that as E002 "Unknown protocol"
+            // instead of the more generic, misleading E001 "No protocol found".
+            if let Some(scheme) = patterns.iter().find_map(|p| unknown_protocol_scheme(p)) {
+                return Err(BifrostError::Parse(format!(
+                    "Unknown protocol '{}'",
+                    scheme
+                )));
+            }
             return Err(BifrostError::Parse(format!(
                 "No protocol found in rule: {}",
                 line
@@ -1600,6 +1611,26 @@ fn is_bare_host_target_with_path(part: &str) -> bool {
     BARE_HOST_PATH_TARGET_REGEX.is_match(part)
 }
 
+/// If `token` is a `<scheme>://...` op whose scheme is neither a known protocol
+/// nor a recognised alias — and not a real URL scheme that is legitimately used
+/// as a pattern (http/https/ws/wss) — return the offending scheme name. Used to
+/// distinguish a mistyped protocol (E002) from a genuinely missing one (E001).
+fn unknown_protocol_scheme(token: &str) -> Option<String> {
+    let caps = PROTOCOL_REGEX.captures(token)?;
+    let scheme = caps.get(1)?.as_str();
+    // Real URL schemes are valid patterns (e.g. `http://host/path`), never E002.
+    if matches!(scheme, "http" | "https" | "ws" | "wss") {
+        return None;
+    }
+    if Protocol::parse(scheme).is_some() {
+        return None;
+    }
+    if Protocol::parse(Protocol::resolve_alias(scheme)).is_some() {
+        return None;
+    }
+    Some(scheme.to_string())
+}
+
 fn extract_pattern_and_protocols(parts: &[String]) -> Result<ParsedPatternResult> {
     if parts.is_empty() {
         return Err(BifrostError::Parse("Empty rule".to_string()));
@@ -1686,20 +1717,12 @@ fn extract_pattern_and_protocols(parts: &[String]) -> Result<ParsedPatternResult
                 let resolved = Protocol::resolve_alias(proto_name);
                 if let Some(protocol) = Protocol::parse(resolved) {
                     protocol_values.push((protocol, value));
-                } else if !patterns.is_empty() {
-                    // A token shaped like `<scheme>://<value>` whose scheme is
-                    // neither a known protocol nor a recognised alias, appearing
-                    // after a pattern, is an attempted protocol op with an
-                    // unknown / mistyped name. Surface it as E002 instead of
-                    // silently treating it as another pattern (which would later
-                    // mislead the user with an E001 "No protocol found").
-                    return Err(BifrostError::Parse(format!(
-                        "Unknown protocol '{}'",
-                        proto_name
-                    )));
                 } else {
-                    // First token of the line: keep prior behaviour and treat an
-                    // unrecognised `scheme://` as a (URL-like) pattern.
+                    // Unknown / mistyped scheme. Stay tolerant here: keep it as a
+                    // (URL-like) pattern so multi-op rules that still carry a valid
+                    // protocol elsewhere on the line continue to parse. If the line
+                    // ends up with no valid protocol at all, the caller surfaces it
+                    // as E002 "Unknown protocol" instead of a misleading E001.
                     patterns.push(part.clone());
                 }
             }
