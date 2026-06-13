@@ -205,6 +205,16 @@ export ADMIN_PORT
 export ADMIN_BASE_URL="${ADMIN_BASE_URL:-http://127.0.0.1:${ADMIN_PORT}${ADMIN_PATH_PREFIX}}"
 
 BIFROST_DATA_DIR="${BIFROST_DATA_DIR:-$SCRIPT_DIR/../../.bifrost-e2e-remote-invoke-$RANDOM}"
+# Safety guard: this test deletes grant crypto under $BIFROST_DATA_DIR/admin and
+# rm -rf's the whole dir on exit. Never let it point at the real bifrost data dir,
+# or it will destroy the live daemon's relay grant. (regression: real ~/.bifrost wipe)
+_ri_real_data_dir="${BIFROST_REAL_DATA_DIR:-$HOME/.bifrost}"
+_ri_resolved="$(cd "$(dirname "$BIFROST_DATA_DIR")" 2>/dev/null && pwd)/$(basename "$BIFROST_DATA_DIR")"
+_ri_real_resolved="$(cd "$_ri_real_data_dir" 2>/dev/null && pwd || echo "$_ri_real_data_dir")"
+if [[ -n "$_ri_real_resolved" && ( "$_ri_resolved" == "$_ri_real_resolved" || "$_ri_resolved" == "$_ri_real_resolved"/* ) ]]; then
+    echo "FATAL: BIFROST_DATA_DIR ($_ri_resolved) resolves inside the real data dir ($_ri_real_resolved); refusing to run to avoid wiping the live daemon's grant crypto" >&2
+    exit 1
+fi
 export BIFROST_DATA_DIR
 
 CALLER_DATA_DIR="$(mktemp -d)"

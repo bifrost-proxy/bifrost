@@ -3,6 +3,10 @@
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
 : "${BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL:=1}"
 export BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL
+# Shorten the system-proxy reconcile loop so the dirty-backup reconcile case does not
+# force a >30s wait per run. The daemon honours this via system_proxy_reconcile_interval().
+: "${BIFROST_SYSTEM_PROXY_RECONCILE_SECS:=3}"
+export BIFROST_SYSTEM_PROXY_RECONCILE_SECS
 : "${RUST_LOG:=info}"
 export RUST_LOG
 
@@ -1251,7 +1255,10 @@ PY
                 return
             fi
 
-            sleep 35
+            # Wait out one reconcile cycle plus margin. With the shortened reconcile
+            # interval (BIFROST_SYSTEM_PROXY_RECONCILE_SECS) this is a few seconds; falls
+            # back to a safe 35s if the daemon ignores the override (older binary).
+            sleep "$(( ${BIFROST_SYSTEM_PROXY_RECONCILE_SECS:-30} + 5 ))"
             if macos_check_proxy_not_pointing_to "127.0.0.1" "$PROXY_PORT" \
                 && grep -q "explicit system proxy disable ignored saved backup because it points back to the managed Bifrost target" "${TEST_DATA_DIR}/proxy.log"; then
                 _log_pass "macOS: Admin API/WebView 显式关闭优先于脏 system proxy backup，且 reconcile 不会重新打开"

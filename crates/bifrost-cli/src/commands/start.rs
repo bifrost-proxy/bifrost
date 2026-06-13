@@ -46,7 +46,19 @@ use crate::process::{
 const ASYNC_TRAFFIC_BUFFER_SIZE: usize = 10000;
 const MAX_PORT_INCREMENT_ATTEMPTS: u16 = 64;
 const PORT_REBIND_OLD_LISTENER_GRACE_PERIOD: Duration = Duration::from_millis(250);
-const SYSTEM_PROXY_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
+// Reconcile interval for the system-proxy watcher. Defaults to 30s in production;
+// overridable via BIFROST_SYSTEM_PROXY_RECONCILE_SECS so E2E tests can shorten the
+// wait (the dirty-backup reconcile case otherwise forces a >30s sleep per run).
+fn system_proxy_reconcile_interval() -> Duration {
+    match std::env::var("BIFROST_SYSTEM_PROXY_RECONCILE_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|secs| *secs >= 1)
+    {
+        Some(secs) => Duration::from_secs(secs),
+        None => Duration::from_secs(30),
+    }
+}
 #[cfg(target_os = "macos")]
 const SYSTEM_PROXY_WAKE_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 #[cfg(target_os = "macos")]
@@ -432,7 +444,7 @@ fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
                                 "system proxy is already owned by another proxy; startup auto-apply skipped"
                             );
                         }
-                        let sleep_until = Instant::now() + SYSTEM_PROXY_RECONCILE_INTERVAL;
+                        let sleep_until = Instant::now() + system_proxy_reconcile_interval();
                         while Instant::now() < sleep_until {
                             if stop_flag.load(Ordering::Acquire)
                                 || should_stop_system_proxy_reconcile_for_shutdown(&bifrost_dir)
@@ -458,7 +470,7 @@ fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
                                     "system proxy reconcile is idle until system proxy is enabled"
                                 );
                             }
-                            let sleep_until = Instant::now() + SYSTEM_PROXY_RECONCILE_INTERVAL;
+                            let sleep_until = Instant::now() + system_proxy_reconcile_interval();
                             while Instant::now() < sleep_until {
                                 if stop_flag.load(Ordering::Acquire)
                                     || should_stop_system_proxy_reconcile_for_shutdown(&bifrost_dir)
@@ -484,7 +496,7 @@ fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
                     }
                     applied_by_this_runtime = false;
                     enabled_flag.store(false, Ordering::Release);
-                    let sleep_until = Instant::now() + SYSTEM_PROXY_RECONCILE_INTERVAL;
+                    let sleep_until = Instant::now() + system_proxy_reconcile_interval();
                     while Instant::now() < sleep_until {
                         if stop_flag.load(Ordering::Acquire)
                             || should_stop_system_proxy_reconcile_for_shutdown(&bifrost_dir)
@@ -564,7 +576,7 @@ fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
                 }
 
                 drop(manager);
-                let sleep_until = Instant::now() + SYSTEM_PROXY_RECONCILE_INTERVAL;
+                let sleep_until = Instant::now() + system_proxy_reconcile_interval();
                 while Instant::now() < sleep_until {
                     if stop_flag.load(Ordering::Acquire)
                         || should_stop_system_proxy_reconcile_for_shutdown(&bifrost_dir)
