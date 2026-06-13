@@ -140,6 +140,7 @@
 3. 检查该 job 在 `Tray startup smoke test` 前下载 `bifrost-release-aarch64-apple-darwin` 到 `target/release`。
 4. 检查下载后执行 `chmod +x target/release/bifrost`。
 5. 检查 `Tray startup smoke test` step 设置：
+   - `timeout-minutes=10`
    - `BIFROST_BIN=${{ github.workspace }}/target/release/bifrost`
    - `SKIP_BUILD=true`
 
@@ -158,4 +159,4 @@
 - 2026-05-28：通过。执行 `rg -n 'Install Rust toolchain with retry|command -v rustup|https://sh\\.rustup\\.rs|rustup toolchain install stable --target "\\$\\{target\\}" --profile minimal --no-self-update|attempt \\* 20|Failed to install stable Rust toolchain' .github/workflows/ci.yml`，确认 PR CI macOS desktop bundle toolchain 安装保留 rustup bootstrap 且具备 3 次重试；执行 `rg -n 'Install Rust toolchain with retry|runner\\.os == '\''macOS'\''|command -v rustup|https://sh\\.rustup\\.rs|rustup toolchain install stable --target "\\$\\{target\\}" --profile minimal --no-self-update|attempt \\* 20|Failed to install stable Rust toolchain' .github/workflows/release.yml`，确认 release macOS desktop bundle 同步具备重试且非 macOS 仍走 `dtolnay/rust-toolchain@stable`。远端 TC-CMCE-06 由推送后的 GitHub Actions `CI` run 验证。
 - 2026-06-04：通过。执行 `rg -n 'build-cli-macos-aarch64:|build-cli-macos-x86_64:|Install Rust toolchain with retry|target="aarch64-apple-darwin"|target="x86_64-apple-darwin"|command -v rustup|https://sh\\.rustup\\.rs|rustup toolchain install stable --target "\\$\\{target\\}" --profile minimal --no-self-update|attempt \\* 20|Failed to install stable Rust toolchain' .github/workflows/ci.yml`，确认两个 macOS CLI 构建 job 都具备 rustup bootstrap 和 3 次 toolchain 安装重试；远端 TC-CMCE-07 由推送后的 GitHub Actions `CI` run 验证。
 - 2026-06-10：通过。执行 `ruby -ryaml -e 'job = YAML.load_file(".github/workflows/ci.yml")["jobs"]["build-cli-macos-x86_64"]; raise job.inspect unless job["runs-on"] == "macos-15-intel" && job["timeout-minutes"] >= 90'` 解析 `.github/workflows/ci.yml`，确认 `build-cli-macos-x86_64` 运行在 `macos-15-intel` 且 `timeout-minutes >= 90`；远端 TC-CMCE-08 由推送后的 GitHub Actions `CI` run 验证。
-- 2026-06-13：通过。执行 YAML 静态检查确认 `e2e-macos-runner.needs` 为 `build-cli-macos-aarch64`，并且 macOS Runner 在 tray smoke 前下载 `bifrost-release-aarch64-apple-darwin` 到 `target/release`、执行 `chmod +x target/release/bifrost`，`Tray startup smoke test` 通过 `BIFROST_BIN` 指向该 artifact 且设置 `SKIP_BUILD=true`。
+- 2026-06-13：通过。执行 YAML 静态检查确认 `e2e-macos-runner.needs` 为 `build-cli-macos-aarch64`，并且 macOS Runner 在 tray smoke 前下载 `bifrost-release-aarch64-apple-darwin` 到 `target/release`、执行 `chmod +x target/release/bifrost`，`Tray startup smoke test` 通过 `BIFROST_BIN` 指向该 artifact、设置 `SKIP_BUILD=true`，且 step-level timeout 为 10 分钟。

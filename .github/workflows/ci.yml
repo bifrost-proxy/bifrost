@@ -834,6 +834,7 @@ jobs:
       - name: Make binary executable
         run: chmod +x target/release/bifrost
       - name: Tray startup smoke test
+        timeout-minutes: 10
         shell: bash
         env:
           BIFROST_BIN: ${{ github.workspace }}/target/release/bifrost
@@ -1244,6 +1245,7 @@ jobs:
           name: bifrost-release-${{ matrix.target }}
           path: target/release
       - name: Tray startup smoke test
+        timeout-minutes: 10
         shell: bash
         env:
           BIFROST_BIN: ${{ github.workspace }}/target/release/bifrost.exe
