@@ -1,5 +1,5 @@
 use parking_lot::{Mutex, RwLock};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
@@ -12,112 +12,68 @@ use tracing::trace;
 use tracing::{debug, info, warn};
 
 const CACHE_VERSION: u32 = 2;
-const MEMORY_CACHE_MAX_ENTRIES: usize = 256;
-const MEMORY_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
 const MEMORY_CACHE_MAX_SINGLE_ICON_BYTES: usize = 2 * 1024 * 1024;
+const NEGATIVE_CACHE_MAX_ENTRIES: usize = 1024;
 #[cfg(target_os = "macos")]
 const APP_ICON_WORKER_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[derive(Debug, Clone)]
-struct MemoryIconEntry {
-    data: Option<Arc<[u8]>>,
-    bytes: usize,
-}
-
+/// Bounded cache of *negative* lookups only -- app names whose icon extraction
+/// already failed. Positive icons are never held in long-lived heap here: they
+/// are written to the on-disk PNG cache and served straight from the file, so
+/// the OS page cache (reclaimable, not counted against the process footprint)
+/// is the only thing that keeps hot icons resident.
 #[derive(Debug)]
-struct AppIconMemoryCache {
-    entries: HashMap<String, MemoryIconEntry>,
+struct AppIconNegativeCache {
+    entries: HashSet<String>,
     order: VecDeque<String>,
     max_entries: usize,
-    max_bytes: usize,
-    max_single_icon_bytes: usize,
-    current_bytes: usize,
 }
 
-impl AppIconMemoryCache {
+impl AppIconNegativeCache {
     fn new() -> Self {
-        Self::with_limits(
-            MEMORY_CACHE_MAX_ENTRIES,
-            MEMORY_CACHE_MAX_BYTES,
-            MEMORY_CACHE_MAX_SINGLE_ICON_BYTES,
-        )
+        Self::with_capacity(NEGATIVE_CACHE_MAX_ENTRIES)
     }
 
-    fn with_limits(max_entries: usize, max_bytes: usize, max_single_icon_bytes: usize) -> Self {
+    fn with_capacity(max_entries: usize) -> Self {
         Self {
-            entries: HashMap::new(),
+            entries: HashSet::new(),
             order: VecDeque::new(),
             max_entries,
-            max_bytes,
-            max_single_icon_bytes,
-            current_bytes: 0,
         }
     }
 
-    fn get(&mut self, cache_key: &str) -> Option<Option<Arc<[u8]>>> {
-        let data = self
-            .entries
-            .get(cache_key)
-            .map(|entry| entry.data.clone())?;
-        self.touch(cache_key);
-        Some(data)
+    fn contains(&self, cache_key: &str) -> bool {
+        self.entries.contains(cache_key)
     }
 
-    fn insert(&mut self, cache_key: String, data: Option<Vec<u8>>) {
-        self.remove_existing(&cache_key);
-
-        let bytes = data.as_ref().map_or(0, Vec::len);
-        if bytes > self.max_single_icon_bytes {
-            debug!(
-                cache_key = cache_key,
-                bytes = bytes,
-                max_single_icon_bytes = self.max_single_icon_bytes,
-                "Skipping oversized app icon memory cache entry"
-            );
+    fn insert(&mut self, cache_key: String) {
+        if !self.entries.insert(cache_key.clone()) {
             return;
         }
-
-        let data = data.map(|value| Arc::<[u8]>::from(value.into_boxed_slice()));
-        self.current_bytes += bytes;
-        self.entries
-            .insert(cache_key.clone(), MemoryIconEntry { data, bytes });
         self.order.push_back(cache_key);
-        self.evict_if_needed();
+        while self.entries.len() > self.max_entries {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
+    }
+
+    fn remove(&mut self, cache_key: &str) {
+        if self.entries.remove(cache_key) {
+            self.order.retain(|key| key != cache_key);
+        }
     }
 
     fn clear(&mut self) {
         self.entries.clear();
         self.order.clear();
-        self.current_bytes = 0;
-    }
-
-    fn remove_existing(&mut self, cache_key: &str) {
-        if let Some(entry) = self.entries.remove(cache_key) {
-            self.current_bytes = self.current_bytes.saturating_sub(entry.bytes);
-        }
-        self.order.retain(|key| key != cache_key);
-    }
-
-    fn touch(&mut self, cache_key: &str) {
-        self.order.retain(|key| key != cache_key);
-        self.order.push_back(cache_key.to_string());
-    }
-
-    fn evict_if_needed(&mut self) {
-        while self.entries.len() > self.max_entries || self.current_bytes > self.max_bytes {
-            let Some(oldest) = self.order.pop_front() else {
-                break;
-            };
-            if let Some(entry) = self.entries.remove(&oldest) {
-                self.current_bytes = self.current_bytes.saturating_sub(entry.bytes);
-            }
-        }
     }
 }
 
 pub struct AppIconCache {
     cache_dir: PathBuf,
-    memory_cache: RwLock<AppIconMemoryCache>,
+    negative_cache: RwLock<AppIconNegativeCache>,
     extract_lock: Mutex<()>,
 }
 
@@ -130,7 +86,7 @@ impl AppIconCache {
 
         let cache = Self {
             cache_dir,
-            memory_cache: RwLock::new(AppIconMemoryCache::new()),
+            negative_cache: RwLock::new(AppIconNegativeCache::new()),
             extract_lock: Mutex::new(()),
         };
 
@@ -178,48 +134,52 @@ impl AppIconCache {
     pub fn get_icon(&self, app_name: &str, app_path: Option<&str>) -> Option<Vec<u8>> {
         let cache_key = sanitize_app_name(app_name);
 
-        if let Some(cached) = self.get_from_memory(&cache_key) {
-            return cached;
+        // Positive icons live on disk. Serve them straight from the file so the
+        // bytes never become long-lived heap in the main process; the OS page
+        // cache keeps hot icons resident as reclaimable memory instead.
+        if let Some(cached) = self.get_from_disk(&cache_key) {
+            return Some(cached);
         }
 
-        if let Some(cached) = self.get_from_disk(&cache_key) {
-            self.set_memory_cache(&cache_key, Some(cached.clone()));
-            return Some(cached);
+        // Negative cache: avoid re-spawning extraction for apps we already know
+        // have no resolvable icon.
+        if self.is_known_missing(&cache_key) {
+            return None;
         }
 
         if let Some(path) = app_path {
             let _extract_guard = self.extract_lock.lock();
 
-            if let Some(cached) = self.get_from_memory(&cache_key) {
-                return cached;
-            }
-
+            // Another request may have populated the disk cache while we waited
+            // on the extraction lock.
             if let Some(cached) = self.get_from_disk(&cache_key) {
-                self.set_memory_cache(&cache_key, Some(cached.clone()));
                 return Some(cached);
+            }
+            if self.is_known_missing(&cache_key) {
+                return None;
             }
 
             if let Some(icon_data) = extract_app_icon(path) {
                 self.save_to_disk(&cache_key, &icon_data);
-                self.set_memory_cache(&cache_key, Some(icon_data.clone()));
+                self.clear_missing(&cache_key);
                 return Some(icon_data);
             }
         }
 
-        self.set_memory_cache(&cache_key, None);
+        self.mark_missing(&cache_key);
         None
     }
 
-    fn get_from_memory(&self, cache_key: &str) -> Option<Option<Vec<u8>>> {
-        let mut cache = self.memory_cache.write();
-        cache
-            .get(cache_key)
-            .map(|entry| entry.map(|data| data.as_ref().to_vec()))
+    fn is_known_missing(&self, cache_key: &str) -> bool {
+        self.negative_cache.read().contains(cache_key)
     }
 
-    fn set_memory_cache(&self, cache_key: &str, data: Option<Vec<u8>>) {
-        let mut cache = self.memory_cache.write();
-        cache.insert(cache_key.to_string(), data);
+    fn mark_missing(&self, cache_key: &str) {
+        self.negative_cache.write().insert(cache_key.to_string());
+    }
+
+    fn clear_missing(&self, cache_key: &str) {
+        self.negative_cache.write().remove(cache_key);
     }
 
     fn get_from_disk(&self, cache_key: &str) -> Option<Vec<u8>> {
@@ -237,8 +197,7 @@ impl AppIconCache {
     }
 
     pub fn clear_cache(&self) {
-        let mut cache = self.memory_cache.write();
-        cache.clear();
+        self.negative_cache.write().clear();
 
         self.clear_all_disk_cache();
     }
@@ -852,40 +811,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn memory_cache_evicts_by_total_bytes() {
-        let mut cache = AppIconMemoryCache::with_limits(10, 3, 10);
+    fn negative_cache_remembers_missing_keys() {
+        let mut cache = AppIconNegativeCache::with_capacity(10);
 
-        cache.insert("a".to_string(), Some(vec![1]));
-        cache.insert("b".to_string(), Some(vec![2, 2]));
-        cache.insert("c".to_string(), Some(vec![3, 3]));
+        cache.insert("missing".to_string());
 
-        assert!(cache.get("a").is_none());
-        assert!(cache.get("b").is_none());
-        assert_eq!(
-            cache.get("c").and_then(|data| data).map(|data| data.len()),
-            Some(2)
-        );
-        assert_eq!(cache.current_bytes, 2);
+        assert!(cache.contains("missing"));
+        assert!(!cache.contains("present"));
     }
 
     #[test]
-    fn memory_cache_keeps_negative_entries_without_byte_cost() {
-        let mut cache = AppIconMemoryCache::with_limits(10, 1, 10);
+    fn negative_cache_evicts_oldest_when_full() {
+        let mut cache = AppIconNegativeCache::with_capacity(2);
 
-        cache.insert("missing".to_string(), None);
+        cache.insert("a".to_string());
+        cache.insert("b".to_string());
+        cache.insert("c".to_string());
 
-        assert!(matches!(cache.get("missing"), Some(None)));
-        assert_eq!(cache.current_bytes, 0);
+        assert!(!cache.contains("a"));
+        assert!(cache.contains("b"));
+        assert!(cache.contains("c"));
+        assert_eq!(cache.entries.len(), 2);
     }
 
     #[test]
-    fn memory_cache_skips_oversized_single_icon() {
-        let mut cache = AppIconMemoryCache::with_limits(10, 100, 2);
+    fn negative_cache_remove_clears_entry() {
+        let mut cache = AppIconNegativeCache::with_capacity(10);
 
-        cache.insert("big".to_string(), Some(vec![1, 2, 3]));
+        cache.insert("gone".to_string());
+        cache.remove("gone");
 
-        assert!(cache.get("big").is_none());
-        assert_eq!(cache.current_bytes, 0);
+        assert!(!cache.contains("gone"));
     }
 
     #[cfg(target_os = "macos")]
