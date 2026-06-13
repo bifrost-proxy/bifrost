@@ -261,7 +261,13 @@ pub fn find_process_on_port(port: u16) -> Option<PortProcessInfo> {
 
 /// Block until `port` is bindable on both `0.0.0.0` and `127.0.0.1`, or
 /// `budget` elapses. Returns `true` if released within budget.
-#[cfg(unix)]
+///
+/// Used on both Unix and Windows: after a daemon is stopped, the OS does not
+/// release the listening socket instantaneously, so a fresh daemon that binds
+/// immediately can fail (EADDRINUSE on Unix / WSAEADDRINUSE on Windows). The
+/// bind-probe logic is platform-agnostic, so the same implementation serves
+/// both targets.
+#[cfg(any(unix, windows))]
 pub fn wait_for_port_released(port: u16, budget: std::time::Duration) -> bool {
     use std::net::{SocketAddr, TcpListener};
     use std::time::{Duration, Instant};
@@ -435,7 +441,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn wait_for_port_released_returns_quickly_when_port_is_free() {
         let mut attempts = Vec::new();
@@ -460,7 +466,7 @@ mod tests {
         panic!("expected one free ephemeral port to be reported free; attempts={attempts:?}");
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn wait_for_port_released_times_out_when_port_is_held() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

@@ -275,11 +275,39 @@ test_upgrade_restart_port_release_guard_in_source() {
     fi
 }
 
+test_upgrade_restart_port_guard_covers_windows() {
+    _log_info "case: upgrade restart port-release guard is not unix-only"
+
+    local upgrade_src="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade.rs"
+    local process_src="${PROJECT_DIR}/crates/bifrost-cli/src/process.rs"
+
+    # The active guard must compile on both Unix and Windows, and the only
+    # no-op fallback may target neither-unix-nor-windows platforms. The shared
+    # wait helper must likewise be available on Windows, otherwise Windows
+    # upgrades silently fall back to the racy stop-then-start path.
+    # Note: use portable grep only (macOS ships BSD grep without -P/-z).
+    local wait_helper_cfg
+    wait_helper_cfg="$(grep -B1 'pub fn wait_for_port_released' "$process_src" | head -1)"
+
+    if grep -q '#\[cfg(any(unix, windows))\]' "$upgrade_src" \
+        && grep -q '#\[cfg(not(any(unix, windows)))\]' "$upgrade_src" \
+        && ! grep -q '#\[cfg(not(unix))\]' "$upgrade_src" \
+        && printf '%s' "$wait_helper_cfg" | grep -q 'cfg(any(unix, windows))'; then
+        _log_pass "upgrade restart port-release guard and wait helper cover Windows"
+    else
+        _log_fail "upgrade restart windows coverage" \
+            "wait_for_restart_port_release + wait_for_port_released gated for any(unix, windows)" \
+            "guard or wait helper is still unix-only"
+        return 1
+    fi
+}
+
 main() {
     TEST_DATA_DIR="$(mktemp -d)"
 
     test_upgrade_restart_flag_in_help || true
     test_upgrade_restart_port_release_guard_in_source || true
+    test_upgrade_restart_port_guard_covers_windows || true
     test_upgrade_no_daemon_no_error || true
     test_upgrade_with_daemon_version_current || true
     test_runtime_json_contains_correct_info || true

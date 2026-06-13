@@ -1278,7 +1278,7 @@ fn restart_port_from_runtime(runtime_info: Option<&crate::process::RuntimeInfo>)
     runtime_info.map(|info| info.port).unwrap_or(9900)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn wait_for_restart_port_release(port: u16) -> Result<(), BifrostError> {
     let budget = Duration::from_secs(UPGRADE_RESTART_PORT_RELEASE_TIMEOUT_SECS);
     println!(
@@ -1303,15 +1303,26 @@ fn wait_for_restart_port_release(port: u16) -> Result<(), BifrostError> {
 
     let holder = find_process_on_port(port)
         .map(|info| format!(" Current listener: {} (PID {}).", info.name, info.pid))
-        .unwrap_or_else(|| " No listener was visible through lsof when reporting.".to_string());
+        .unwrap_or_else(|| " No listener was visible when reporting.".to_string());
+
+    #[cfg(windows)]
+    let hint = format!(
+        "Run `netstat -ano | findstr :{}` to find the owning PID, then run `bifrost start -d` after the port is free.",
+        port
+    );
+    #[cfg(unix)]
+    let hint = format!(
+        "Try `lsof -nP -iTCP:{} -sTCP:LISTEN` and then run `bifrost start -d` after the port is free.",
+        port
+    );
 
     Err(BifrostError::Network(format!(
-        "Proxy port {} was still occupied after {}s, so upgrade did not start a replacement daemon to avoid an EADDRINUSE crash.{} Try `lsof -nP -iTCP:{} -sTCP:LISTEN` and then run `bifrost start -d` after the port is free.",
-        port, UPGRADE_RESTART_PORT_RELEASE_TIMEOUT_SECS, holder, port
+        "Proxy port {} was still occupied after {}s, so upgrade did not start a replacement daemon to avoid a bind failure.{} {}",
+        port, UPGRADE_RESTART_PORT_RELEASE_TIMEOUT_SECS, holder, hint
     )))
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn wait_for_restart_port_release(_port: u16) -> Result<(), BifrostError> {
     Ok(())
 }
