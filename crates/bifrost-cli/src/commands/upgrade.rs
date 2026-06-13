@@ -1295,6 +1295,9 @@ fn wait_for_restart_port_release(port: u16) -> Result<(), BifrostError> {
     }
 
     if let Ok(data_dir) = crate::config::get_bifrost_dir() {
+        if let Err(error) = bifrost_core::SystemProxyManager::recover_from_crash(&data_dir) {
+            eprintln!("Failed to recover system proxy after aborted upgrade restart: {error}");
+        }
         let _ = bifrost_core::consume_system_proxy_shutdown_mode(&data_dir);
     }
 

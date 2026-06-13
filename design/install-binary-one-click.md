@@ -18,7 +18,7 @@
 - PowerShell installer 使用同一组镜像候选源和短超时探测，latest、archive、checksums 都通过选出的最快可用源下载；如果选中源完整下载失败，则继续按候选源列表回退。
 - PowerShell installer 在下载开始、结束时使用 `Write-Progress` 明确展示下载状态，避免终端完全无反馈。
 - `bifrost upgrade` 的手动安装路径使用与安装脚本一致的 GitHub / mirror 候选列表，先并发探测 release 资产 URL，选择最快可用源，再执行带进度百分比、已下载大小和速度的 streaming 下载；若选中源完整下载失败，继续回退剩余候选源。
-- `bifrost upgrade` 在替换二进制后若检测到运行中的 daemon，会复用 runtime.json 中记录的端口、host、socks5 端口和系统代理快照重启代理。重启路径在 `stop_for_restart` 成功后必须等待旧监听端口完全释放，再执行 `start -d`；如果端口在 10 秒内仍被占用，upgrade 直接返回包含占用进程信息的错误，避免新 daemon 因 `EADDRINUSE` 立即退出并被包装成模糊的 readiness/network error。
+- `bifrost upgrade` 在替换二进制后若检测到运行中的 daemon，会复用 runtime.json 中记录的端口、host、socks5 端口和系统代理快照重启代理。重启路径在 `stop_for_restart` 成功后必须等待旧监听端口完全释放，再执行 `start -d`；如果端口在 10 秒内仍被占用，upgrade 先执行系统代理 crash recovery 并清理 restart shutdown marker，再返回包含占用进程信息的错误，避免新 daemon 因 `EADDRINUSE` 立即退出并被包装成模糊的 readiness/network error，也避免系统代理继续指向不可用的 Bifrost 端口。
 - 最新版本探测不再按 `github.com -> mirror` 串行等待完整超时；Bash 通过并发重定向探测抢最快结果，PowerShell 通过短超时探测先选源再读取 `releases/latest` 重定向，避免默认 GitHub 直连在受限网络中拖到完整下载超时。
 - `BIFROST_GITHUB_MIRROR` 仍作为优先候选源保留，`BIFROST_DOWNLOAD_CONNECT_TIMEOUT`、`BIFROST_DOWNLOAD_TIMEOUT`、`BIFROST_DOWNLOAD_TRIES` 继续控制下载；`BIFROST_MIRROR_PROBE_TIMEOUT` 控制镜像轻量探测超时，默认 5 秒。Bash installer 与 `bifrost upgrade` 均读取这些环境变量。
 - 默认 post-install 顺序固定为：
@@ -88,7 +88,7 @@
   - 验证 `--help` 展示 post-install opt-out 参数和环境变量。
 - 更新 `e2e-tests/tests/test_upgrade_restart_e2e.sh`：
   - 保留无 daemon、有 daemon 但已最新、`--restart` 已最新和 runtime.json 参数回归。
-  - 增加源码门禁，确认 upgrade 的真实重启路径包含 `wait_for_restart_port_release`、端口占用错误文案和 `find_process_on_port` 诊断，避免后续改动绕过端口释放保护。
+  - 增加源码门禁，确认 upgrade 的真实重启路径包含 `wait_for_restart_port_release`、端口占用错误文案、`find_process_on_port` 诊断和系统代理恢复，避免后续改动绕过端口释放保护或失败恢复。
 
 ### 真实场景测试
 
@@ -103,7 +103,7 @@
   - 验证 help 文案可发现。
   - 验证 Bash installer 默认下载进度可见，竞速候选进度被抑制。
   - 验证 `bifrost upgrade` 的最快源选择、进度百分比和 env 超时/重试解析。
-  - 验证 `bifrost upgrade` 重启路径在 stop 后等待端口释放，端口仍被占用时输出明确诊断，不再把 `EADDRINUSE` 包装成模糊 readiness/network error。
+  - 验证 `bifrost upgrade` 重启路径在 stop 后等待端口释放，端口仍被占用时先恢复系统代理、再输出明确诊断，不再把 `EADDRINUSE` 包装成模糊 readiness/network error。
 
 ## Review/Fix/Test 闭环方案
 
@@ -112,7 +112,7 @@
 - 复核用户目标：安装脚本下载进度、`bifrost upgrade` 下载进度、upgrade 最快源并发选择、upgrade restart 端口释放等待、既有 post-install 行为是否全部覆盖。
 - 复核变更范围：`git status --short`、`git diff`，确认未触碰既有 im-gateway 改动。
 - 代码 review：检查 `install-binary.sh` 下载器进度参数、竞速候选安静模式、`PATH` 未刷新、权限失败、CI opt-out、dry-run 下的行为。
-- 代码 review：检查 upgrade 镜像探测不会破坏用户指定 `BIFROST_GITHUB_MIRROR`，被选中源失败后仍能回退旧下载路径；检查 PowerShell env 变量、latest、archive、checksum 下载路径与 Bash installer 保持一致；检查 upgrade restart 不会在端口仍被占用时启动新 daemon。
+- 代码 review：检查 upgrade 镜像探测不会破坏用户指定 `BIFROST_GITHUB_MIRROR`，被选中源失败后仍能回退旧下载路径；检查 PowerShell env 变量、latest、archive、checksum 下载路径与 Bash installer 保持一致；检查 upgrade restart 不会在端口仍被占用时启动新 daemon，且失败时会恢复系统代理。
 - 复测命令：`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib upgrade_`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib wait_for_port_released`、`bash -n install-binary.sh`、`bash e2e-tests/tests/test_install_binary_adaptive_download.sh`、`bash e2e-tests/tests/test_install_binary_post_install.sh`、`bash e2e-tests/tests/test_upgrade_restart_e2e.sh`、`pwsh -NoProfile -File e2e-tests/tests/test_install_binary_windows_adaptive_download.ps1`（若环境可用）。
 
 ### 第 2 轮
