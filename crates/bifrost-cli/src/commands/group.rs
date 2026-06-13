@@ -511,7 +511,7 @@ mod tests {
     use super::*;
     use crate::cli::{GroupCommands, GroupRuleCommands};
     use std::io::{Read, Write};
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
     use std::sync::{mpsc, Mutex, MutexGuard, OnceLock};
 
     static MOCK_SERVER_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -560,9 +560,7 @@ mod tests {
                                 .set_read_timeout(Some(std::time::Duration::from_secs(2)))
                                 .ok();
 
-                            let mut buf = [0u8; 8192];
-                            let n = stream.read(&mut buf).unwrap_or(0);
-                            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                            let request = read_http_request(&mut stream);
 
                             request_log.push(request);
 
@@ -633,6 +631,63 @@ mod tests {
 
     fn mock_port_for_admin(port: u16) -> u16 {
         port
+    }
+
+    fn read_http_request(stream: &mut TcpStream) -> String {
+        let mut data = Vec::new();
+        let mut buf = [0u8; 8192];
+
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    data.extend_from_slice(&buf[..n]);
+                    if http_request_is_complete(&data) {
+                        break;
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+
+        String::from_utf8_lossy(&data).to_string()
+    }
+
+    fn http_request_is_complete(data: &[u8]) -> bool {
+        let Some(header_end) = data.windows(4).position(|window| window == b"\r\n\r\n") else {
+            return false;
+        };
+        let body_start = header_end + 4;
+        let headers = String::from_utf8_lossy(&data[..header_end]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+
+        data.len() >= body_start + content_length
+    }
+
+    #[test]
+    fn mock_http_request_completion_waits_for_declared_body() {
+        let headers = b"POST /group-rules/g1 HTTP/1.1\r\nContent-Length: 22\r\n\r\n";
+        let partial = [headers.as_slice(), br#"{"allow_invalid":"#.as_slice()].concat();
+        let complete = [headers.as_slice(), br#"{"allow_invalid":true}"#.as_slice()].concat();
+
+        assert!(!http_request_is_complete(&partial));
+        assert!(http_request_is_complete(&complete));
     }
 
     #[test]
