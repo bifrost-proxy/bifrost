@@ -1717,6 +1717,12 @@ fn extract_pattern_and_protocols(parts: &[String]) -> Result<ParsedPatternResult
                 let resolved = Protocol::resolve_alias(proto_name);
                 if let Some(protocol) = Protocol::parse(resolved) {
                     protocol_values.push((protocol, value));
+                } else if proto_name == "filter" {
+                    // Legacy Whistle-style `filter://` is a control marker. It
+                    // is not represented as a runtime protocol in bifrost, but
+                    // existing rule fixtures and saved rules may still carry it
+                    // alongside a real operation such as `host://`.
+                    continue;
                 } else {
                     // Unknown / mistyped scheme. Stay tolerant here: keep it as a
                     // (URL-like) pattern so multi-op rules that still carry a valid
@@ -3935,6 +3941,22 @@ x-custom: value
                 errors
             );
         }
+    }
+
+    #[test]
+    fn test_legacy_filter_marker_does_not_report_unknown_protocol() {
+        let errors = validate_rules("*.local 127.0.0.1:3000 filter://");
+        assert!(
+            first_error_with_code(&errors, "E002").is_none(),
+            "legacy filter:// marker should remain compatible, got: {:?}",
+            errors
+        );
+
+        let rules = parse_line("*.local 127.0.0.1:3000 filter://").unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].pattern, "*.local");
+        assert_eq!(rules[0].protocol, Protocol::Host);
+        assert_eq!(rules[0].value, "127.0.0.1:3000");
     }
 
     #[test]

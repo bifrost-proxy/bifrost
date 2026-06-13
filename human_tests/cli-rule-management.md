@@ -733,6 +733,33 @@
 
 ---
 
+### TC-CRM-50：legacy `filter://` 控制标记不被语法检查误判为未知协议
+
+**操作步骤**：
+1. 使用当前分支 release 二进制执行：
+   ```bash
+   BIFROST_DATA_DIR="$TEST_ROOT/data" \
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+   PROXY_PORT=18920 \
+   ECHO_HTTP_PORT=18921 \
+   ECHO_HTTPS_PORT=18922 \
+   ECHO_WS_PORT=18923 \
+   ECHO_WSS_PORT=18924 \
+   ECHO_SSE_PORT=18925 \
+   ECHO_PROXY_PORT=18926 \
+   bash e2e-tests/test_rules.sh --use-binary --no-build -p 18920 -d "$TEST_ROOT/data" rules/control/filter.txt
+   ```
+
+**预期结果**：
+- 规则语法检查通过，`filter://` 不返回 `E002 Unknown protocol`
+- 代理能正常启动，加载 `*.local host://127.0.0.1:<echo-port>` 规则
+- `control/filter.txt` 中的请求断言通过，失败数为 0
+
+**执行结果（2026-06-13，本地开发分支）**：
+- ✅ PASS：先执行 `env SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost` 生成当前分支 release 二进制，再执行上述单 fixture 命令。输出显示规则语法检查 `✓ 通过: 1 个`，代理启动成功，`Filter 规则` 断言通过，汇总为 `Total: 1 / Passed: 1 / Failed: 0`。
+
+---
+
 ## 清理
 
 测试完成后清理临时数据和临时文件：
