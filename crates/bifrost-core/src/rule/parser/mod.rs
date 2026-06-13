@@ -1299,9 +1299,23 @@ fn create_detailed_parse_error(
     }
 
     if error_msg.contains("Unknown protocol") {
-        if let Some(proto_match) = PROTOCOL_REGEX.captures(trimmed) {
-            let proto = proto_match.get(1).map(|m| m.as_str()).unwrap_or("");
-            let proto_start = trimmed.find(&format!("{}://", proto)).unwrap_or(0);
+        // The error carries the offending scheme as `Unknown protocol '<name>'`.
+        // Locate that `<name>://` token in the line so the range points at the
+        // protocol op rather than the (whole-line) start.
+        let proto = error_msg
+            .split('\'')
+            .nth(1)
+            .map(|s| s.to_string())
+            .or_else(|| {
+                PROTOCOL_REGEX
+                    .captures(trimmed)
+                    .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
+            })
+            .unwrap_or_default();
+
+        if !proto.is_empty() {
+            let needle = format!("{}://", proto);
+            let proto_start = trimmed.find(&needle).unwrap_or(0);
             let start_col = leading_spaces + proto_start + 1;
             let end_col = start_col + proto.len() + 3;
 
@@ -1672,7 +1686,20 @@ fn extract_pattern_and_protocols(parts: &[String]) -> Result<ParsedPatternResult
                 let resolved = Protocol::resolve_alias(proto_name);
                 if let Some(protocol) = Protocol::parse(resolved) {
                     protocol_values.push((protocol, value));
+                } else if !patterns.is_empty() {
+                    // A token shaped like `<scheme>://<value>` whose scheme is
+                    // neither a known protocol nor a recognised alias, appearing
+                    // after a pattern, is an attempted protocol op with an
+                    // unknown / mistyped name. Surface it as E002 instead of
+                    // silently treating it as another pattern (which would later
+                    // mislead the user with an E001 "No protocol found").
+                    return Err(BifrostError::Parse(format!(
+                        "Unknown protocol '{}'",
+                        proto_name
+                    )));
                 } else {
+                    // First token of the line: keep prior behaviour and treat an
+                    // unrecognised `scheme://` as a (URL-like) pattern.
                     patterns.push(part.clone());
                 }
             }
@@ -3845,27 +3872,42 @@ x-custom: value
     }
 
     #[test]
-    fn test_unknown_protocol_resolves_to_e001_not_e002() {
-        // Regression guard: an unknown / mistyped protocol is currently treated
-        // as a bare token, so the parser surfaces "No protocol found" (E001),
-        // NOT the (currently unreachable) E002 "Unknown protocol" branch.
-        // This test documents the real behaviour; if E002 is ever wired up,
-        // update this test deliberately rather than by accident.
-        for input in [
-            "error5-unknown.test unknownProtocol://value",
-            "error6-typo.test htpp://localhost:8000/",
-            "error10-similar.test request://body",
+    fn test_unknown_protocol_reports_e002() {
+        // An unknown / mistyped protocol op appearing after a pattern is now
+        // surfaced as E002 "Unknown protocol" (previously this fell through to
+        // a misleading E001 "No protocol found"). The suggestion names the
+        // offending scheme.
+        for (input, scheme) in [
+            (
+                "error5-unknown.test unknownProtocol://value",
+                "unknownProtocol",
+            ),
+            ("error6-typo.test htpp://localhost:8000/", "htpp"),
+            ("error10-similar.test request://body", "request"),
         ] {
             let errors = validate_rules(input);
+            let err = first_error_with_code(&errors, "E002")
+                .unwrap_or_else(|| panic!("expected E002 for `{}`, got {:?}", input, errors));
+            assert_eq!(err.severity, ParseErrorSeverity::Error);
             assert!(
-                first_error_with_code(&errors, "E001").is_some(),
-                "unknown protocol should currently surface E001 for `{}`: {:?}",
-                input,
-                errors
+                err.message.contains("Unknown protocol") && err.message.contains(scheme),
+                "E002 message should name the scheme `{}`: {}",
+                scheme,
+                err.message
             );
             assert!(
-                first_error_with_code(&errors, "E002").is_none(),
-                "E002 is not reachable today; `{}` unexpectedly produced it: {:?}",
+                err.suggestion
+                    .as_deref()
+                    .map(|s| s.contains(scheme))
+                    .unwrap_or(false),
+                "E002 suggestion should name the scheme `{}`: {:?}",
+                scheme,
+                err.suggestion
+            );
+            // The offending op is no longer misreported as a missing protocol.
+            assert!(
+                first_error_with_code(&errors, "E001").is_none(),
+                "E001 should not fire once E002 is produced for `{}`: {:?}",
                 input,
                 errors
             );
