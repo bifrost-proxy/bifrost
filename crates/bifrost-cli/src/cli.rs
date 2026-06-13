@@ -103,6 +103,13 @@ pub enum Commands {
         #[arg(long, value_hint = ValueHint::FilePath)]
         request: PathBuf,
     },
+    #[command(hide = true)]
+    AppIconWorker {
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        path: PathBuf,
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        output: PathBuf,
+    },
     #[command(about = "Start the proxy server (default when no subcommand provided)")]
     Start {
         #[arg(short, long, help = "HTTP proxy port (overrides global -p)")]
