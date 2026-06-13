@@ -716,11 +716,24 @@ struct MockFeishuProgressServer {
 }
 
 async fn spawn_mock_feishu_progress_server() -> MockFeishuProgressServer {
-    spawn_mock_feishu_progress_server_with_send_failure(None).await
+    spawn_mock_feishu_progress_server_with_failures(None, None).await
 }
 
 async fn spawn_mock_feishu_progress_server_with_send_failure(
     fail_message_send_number: Option<usize>,
+) -> MockFeishuProgressServer {
+    spawn_mock_feishu_progress_server_with_failures(fail_message_send_number, None).await
+}
+
+async fn spawn_mock_feishu_progress_server_with_card_update_failure(
+    fail_card_update_number: Option<usize>,
+) -> MockFeishuProgressServer {
+    spawn_mock_feishu_progress_server_with_failures(None, fail_card_update_number).await
+}
+
+async fn spawn_mock_feishu_progress_server_with_failures(
+    fail_message_send_number: Option<usize>,
+    fail_card_update_number: Option<usize>,
 ) -> MockFeishuProgressServer {
     use bytes::Bytes;
     use http_body_util::{BodyExt, Full};
@@ -799,7 +812,17 @@ async fn spawn_mock_feishu_progress_server_with_send_failure(
                             && path.starts_with("/open-apis/cardkit/v1/cards/")
                             && !path.contains("/elements/")
                         {
-                            card_update_counter.fetch_add(1, Ordering::SeqCst);
+                            let idx = card_update_counter.fetch_add(1, Ordering::SeqCst) + 1;
+                            if fail_card_update_number == Some(idx) {
+                                return Ok::<_, hyper::Error>(
+                                    Response::builder()
+                                        .status(StatusCode::OK)
+                                        .body(Full::new(Bytes::from_static(
+                                            br#"{"code":300305,"msg":"ErrMsg: element exceeds the limit"}"#,
+                                        )))
+                                        .unwrap(),
+                                );
+                            }
                             let body: serde_json::Value =
                                 serde_json::from_slice(&body).expect("update card json");
                             let data = body["card"]["data"].as_str().unwrap_or_default();
@@ -996,6 +1019,94 @@ async fn queue_state_update_rolls_over_card_and_freezes_previous_snapshot() {
     assert_eq!(server.message_counter.load(Ordering::SeqCst), 2);
     assert_eq!(server.card_update_counter.load(Ordering::SeqCst), 1);
     assert_eq!(server.settings_update_counter.load(Ordering::SeqCst), 1);
+    assert_eq!(server.recall_counter.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn progress_event_rolls_over_when_feishu_card_entity_exceeds_limit() {
+    use std::sync::atomic::Ordering;
+
+    let server = spawn_mock_feishu_progress_server_with_card_update_failure(Some(1)).await;
+    let registry = ImAgentProgressRegistry::new();
+    let session = registry
+        .start_feishu(
+            "s1",
+            Arc::new(FeishuProvider::new()),
+            mock_feishu_provider(&server.base_url),
+            mock_progress_target(),
+            "first turn",
+        )
+        .await
+        .expect("start progress card");
+
+    registry
+        .apply_event(
+            "s1",
+            AgentTurnProgressEvent::PlanUpdated {
+                title: Some("Investigate".to_string()),
+                steps: vec![PlanStep {
+                    step: "Read logs".to_string(),
+                    status: PlanStepStatus::InProgress,
+                }],
+            },
+        )
+        .await;
+
+    let session = session.lock().await;
+    let message_info = session.message_info().expect("message info");
+    assert_eq!(message_info.card_id, "card_2");
+    assert_eq!(message_info.message_id.as_deref(), Some("om_2"));
+    assert_eq!(session.snapshot().title.as_deref(), Some("Investigate"));
+    assert_eq!(session.snapshot().plan_steps.len(), 1);
+    assert_eq!(server.card_counter.load(Ordering::SeqCst), 2);
+    assert_eq!(server.message_counter.load(Ordering::SeqCst), 2);
+    assert_eq!(server.card_update_counter.load(Ordering::SeqCst), 2);
+    assert_eq!(server.settings_update_counter.load(Ordering::SeqCst), 1);
+    assert_eq!(server.recall_counter.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn finish_rolls_over_when_final_feishu_card_entity_exceeds_limit() {
+    use std::sync::atomic::Ordering;
+
+    let server = spawn_mock_feishu_progress_server_with_card_update_failure(Some(1)).await;
+    let registry = ImAgentProgressRegistry::new();
+    let session = registry
+        .start_feishu(
+            "s1",
+            Arc::new(FeishuProvider::new()),
+            mock_feishu_provider(&server.base_url),
+            mock_progress_target(),
+            "first turn",
+        )
+        .await
+        .expect("start progress card");
+
+    let message_info = registry
+        .finish(
+            "s1",
+            Some("最终结论：继续在新卡片显示。".to_string()),
+            false,
+        )
+        .await
+        .expect("finish message info");
+
+    let session = session.lock().await;
+    assert_eq!(message_info.card_id, "card_2");
+    assert_eq!(message_info.message_id.as_deref(), Some("om_2"));
+    assert_eq!(
+        session
+            .message_info()
+            .expect("session message info")
+            .card_id,
+        "card_2"
+    );
+    assert_eq!(session.snapshot().phase, ImProgressPhase::Finished);
+    assert_eq!(session.snapshot().output, "最终结论：继续在新卡片显示。");
+    assert_eq!(server.card_counter.load(Ordering::SeqCst), 2);
+    assert_eq!(server.message_counter.load(Ordering::SeqCst), 2);
+    assert_eq!(server.card_update_counter.load(Ordering::SeqCst), 2);
+    assert_eq!(server.settings_update_counter.load(Ordering::SeqCst), 2);
     assert_eq!(server.recall_counter.load(Ordering::SeqCst), 0);
 }
 

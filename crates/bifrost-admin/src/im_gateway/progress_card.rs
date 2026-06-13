@@ -499,7 +499,10 @@ impl FeishuProgressCardSession {
 
     pub async fn apply_event(&mut self, event: AgentTurnProgressEvent) -> Result<()> {
         self.snapshot.apply_event(event);
-        self.flush_snapshot().await
+        self.flush_snapshot_with_limit_rollover(
+            "上一张进度卡片已达到飞书大小限制，后续进展见下方新卡片",
+        )
+        .await
     }
 
     pub async fn update_queue_state_and_flush(
@@ -510,7 +513,10 @@ impl FeishuProgressCardSession {
     ) -> Result<()> {
         self.snapshot
             .update_queue_state(queue_items, guide_pending, notice);
-        self.flush_snapshot().await
+        self.flush_snapshot_with_limit_rollover(
+            "上一张进度卡片已达到飞书大小限制，后续进展见下方新卡片",
+        )
+        .await
     }
 
     pub async fn update_runner_summary_and_flush(
@@ -518,7 +524,10 @@ impl FeishuProgressCardSession {
         runner: ProgressRunnerSummary,
     ) -> Result<()> {
         self.snapshot.runner = Some(runner);
-        self.flush_snapshot().await
+        self.flush_snapshot_with_limit_rollover(
+            "上一张进度卡片已达到飞书大小限制，后续进展见下方新卡片",
+        )
+        .await
     }
 
     pub async fn update_queue_state_and_rollover(
@@ -540,7 +549,10 @@ impl FeishuProgressCardSession {
     pub async fn restart_turn(&mut self, initial_message: &str) -> Result<()> {
         let session_key = self.snapshot.session_key.clone();
         self.snapshot = ImAgentProgressSnapshot::new(session_key, initial_message);
-        self.flush_snapshot().await
+        self.flush_snapshot_with_limit_rollover(
+            "上一张进度卡片已达到飞书大小限制，后续进展见下方新卡片",
+        )
+        .await
     }
 
     pub async fn rollover_turn(&mut self, initial_message: &str) -> Result<bool> {
@@ -652,7 +664,11 @@ impl FeishuProgressCardSession {
         } else {
             ImProgressPhase::Finished
         };
-        let flush_result = self.flush_snapshot().await;
+        let flush_result = self
+            .flush_snapshot_with_limit_rollover(
+                "上一张进度卡片已达到飞书大小限制，最终结论见下方新卡片",
+            )
+            .await;
         let close_result = self.close_streaming().await;
         match (flush_result, close_result) {
             (Ok(()), Ok(())) => Ok(()),
@@ -837,6 +853,30 @@ impl FeishuProgressCardSession {
         Ok(())
     }
 
+    async fn flush_snapshot_with_limit_rollover(&mut self, freeze_notice: &str) -> Result<()> {
+        match self.flush_snapshot().await {
+            Ok(()) => Ok(()),
+            Err(error) if is_feishu_card_entity_limit_error(&error) && self.handle.is_some() => {
+                let previous_card_id = self
+                    .handle
+                    .as_ref()
+                    .map(|handle| handle.card_id.as_str())
+                    .unwrap_or("");
+                warn!(
+                    card_id = previous_card_id,
+                    error = %error,
+                    "rolling over Feishu progress card after CardKit entity limit"
+                );
+                self.rollover_snapshot(freeze_notice).await.map_err(|rollover_error| {
+                    BifrostError::Network(format!(
+                        "progress card update hit Feishu entity limit ({error}); rollover failed: {rollover_error}"
+                    ))
+                })
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     async fn close_streaming(&mut self) -> Result<()> {
         let Some(handle) = self.handle.as_mut() else {
             return Ok(());
@@ -894,7 +934,12 @@ impl ImAgentProgressRegistry {
             for event in events {
                 session.snapshot.apply_event(event);
             }
-            if let Err(error) = session.flush_snapshot().await {
+            if let Err(error) = session
+                .flush_snapshot_with_limit_rollover(
+                    "上一张进度卡片已达到飞书大小限制，后续进展见下方新卡片",
+                )
+                .await
+            {
                 warn!(
                     session_key = session_key,
                     error = %error,
@@ -969,7 +1014,6 @@ impl ImAgentProgressRegistry {
         let session = self.sessions.get(session_key)?;
         let session = Arc::clone(session.value());
         let mut session = session.lock().await;
-        let message_info = session.message_info();
         let result = session.finish(output, failed).await;
         if let Err(error) = result {
             warn!(
@@ -978,7 +1022,7 @@ impl ImAgentProgressRegistry {
                 "failed to finish IM progress card"
             );
         }
-        message_info
+        session.message_info()
     }
 
     pub async fn restart_existing(&self, session_key: &str, initial_message: &str) -> bool {
@@ -1161,6 +1205,15 @@ fn stable_hash(value: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     value.hash(&mut hasher);
     hasher.finish()
+}
+
+fn is_feishu_card_entity_limit_error(error: &BifrostError) -> bool {
+    let BifrostError::Network(message) = error else {
+        return false;
+    };
+    message.contains("feishu update card")
+        && message.contains("code=300305")
+        && message.contains("element exceeds the limit")
 }
 
 fn format_output_markdown(snapshot: &ImAgentProgressSnapshot) -> String {

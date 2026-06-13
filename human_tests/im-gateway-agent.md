@@ -2837,3 +2837,25 @@ rm -rf ./.bifrost-test
 - **清理步骤**:
   - 停止 9918 临时服务，删除 `/tmp/bifrost-codex-default-fast-test*` 临时目录。
 - **执行记录（2026-06-09）**: PASS — 先用 `configOverrides: []` 真实触发 Codex stream 复现失败，run `1780987185025-b3234ecd-b421-4627-8f19-0e4dd16f6404` 的 runtime args 不含 `service_tier` 且 stderr 为 `unknown variant default`；修复后重启当前源码复跑，同样不手工配置 service_tier，stream 返回 `assistant_final OK` 与 `run_finished status=succeeded response=OK`，run `1780987600372-0b0c0588-98a3-46bb-9f7c-f528dd843129` 的 runtime args 含 `--config service_tier="fast"`。
+
+### TC-IMA-150: 飞书流式进度卡片 CardKit 大小超限后新发卡片继续回复
+
+- **前置条件**:
+  - 使用当前源码和临时数据目录，不复用用户真实 Bifrost 数据。
+  - 准备 Feishu OpenAPI mock 服务，覆盖 `tenant_access_token`、CardKit card entity 创建/整卡更新/settings 更新和 IM interactive 消息发送。
+  - mock 服务在第 1 次 `PUT /open-apis/cardkit/v1/cards/{card_id}` 整卡更新时返回 `{"code":300305,"msg":"ErrMsg: element exceeds the limit"}`。
+- **操作步骤**:
+  1. 启动同一 `session_key` 的 Feishu progress card session，记录首张卡片 `card_1/om_1`。
+  2. 发送会触发整卡更新的 progress event，例如 `PlanUpdated` 或进入最终 `Finished` phase。
+  3. 检查 registry 当前 `message_info`。
+  4. 检查 Feishu mock 的 card create/send/update/settings 调用次数。
+  5. 继续发送后续 progress event 或执行 final close，确认后续更新使用新的 `card_id`。
+- **预期结果**:
+  - 第 1 次整卡更新失败后，系统不把 Agent loop 标记为异常中断，也不停止 Feishu 回复链路。
+  - 系统立即创建并发送新 CardKit card entity，例如 `card_2/om_2`，后续进展和最终结论继续更新新卡片。
+  - registry `message_info.card_id` 指向新卡片，final outbound log 也应记录新 `card_id`。
+  - 旧卡片冻结和关闭 streaming 只做 best-effort；即使旧卡冻结也触发超限，只记录 warn，不阻断新卡片发送。
+  - Feishu mock 未收到 `DELETE /open-apis/im/v1/messages/{旧 message_id}`。
+- **清理步骤**:
+  - 停止 mock Feishu 服务；删除临时数据目录。
+- **执行记录（2026-06-13）**: PASS — 更新用例后立即执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin progress_card --lib -- --nocapture`，28 个 progress card 相关测试全部通过。新增覆盖 `progress_event_rolls_over_when_feishu_card_entity_exceeds_limit` 和 `finish_rolls_over_when_final_feishu_card_entity_exceeds_limit`：Feishu mock 第 1 次整卡更新返回 `code=300305 element exceeds the limit` 后，registry 新建并切换到 `card_2/om_2`，旧卡 freeze/settings close 为 best-effort，DELETE 调用次数保持 0，final `message_info` 指向新卡。
